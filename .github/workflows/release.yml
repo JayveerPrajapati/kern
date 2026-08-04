@@ -92,12 +92,12 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           tag="${GITHUB_REF#refs/tags/}"
-          cat > /tmp/release-notes.md <<'EOF'
+          cat > /tmp/release-notes.md <<EOF
           See [README](https://github.com/${{ github.repository }}/blob/main/README.md) for install options:
-          - `curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/main/install.sh | sh`
-          - `brew install kern` (homebrew-tap)
-          - `pip install kern-context`
-          - `go install github.com/${{ github.repository }}/cmd/kern@$tag`
+          - \`curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/main/install.sh | sh\`
+          - \`brew install kern\` (homebrew-tap)
+          - \`pip install kern-context\`
+          - \`go install github.com/${{ github.repository }}/cmd/kern@$tag\`
           EOF
           gh release create "$tag" dist/kern-* \
             --title "$tag" \
