@@ -25,7 +25,7 @@ Everything runs on your machine. Nothing is uploaded. Nothing is stored in your 
 | **curl \| sh** | `curl -fsSL https://raw.githubusercontent.com/JayveerPrajapati/kern/main/install.sh \| sh` | Prebuilt binary from GitHub Releases → `~/.local/bin` |
 | **Homebrew** | `brew tap JayveerPrajapati/tap && brew install kern` | Formula in `homebrew/kern.rb` (builds from source) |
 | **pip** | `pip install kern-context` | Thin shim that fetches the prebuilt binary on first use |
-| **go install** | `go install github.com/JayveerPrajapati/kern/cmd/kern@latest` | Also installs `kern-mcp` (`cmd/kern-mcp`) |
+| **go install** | `go install github.com/JayveerPrajapati/kern/cmd/kern@latest && go install github.com/JayveerPrajapati/kern/cmd/kern-mcp@latest` | Both binaries to `$(go env GOPATH)/bin` |
 | **from source** | `make build` → `bin/kern`, `bin/kern-mcp` | Requires Go 1.22+ |
 
 `install.sh` honors `KERN_VERSION` (pin a release), `KERN_INSTALL_DIR` (default `~/.local/bin`) and falls back to `go install` when no prebuilt asset matches your platform. Verify any install with `kern version`.
@@ -36,6 +36,19 @@ Everything runs on your machine. Nothing is uploaded. Nothing is stored in your 
 kern setup        # wire kern into your agents (opencode, Claude, any MCP client)
 kern setup --check
 kern doctor       # health report: wiring, index, Ollama
+```
+
+### Quick start (30 seconds)
+
+```sh
+# compress a noisy log before pasting it into your agent
+tail -n 500 server.log | kern optimize "server log" --attach -
+
+# a project map an agent can read instead of the whole codebase
+kern project . > /tmp/project_map.txt
+
+# see the savings
+kern stats
 ```
 
 ## CLI usage
@@ -75,6 +88,7 @@ kern ast      "func *extract*" --all         # search across every cached projec
 kern graph    Prompt --mermaid               # call graph as Mermaid flowchart
 kern mcp                                     # run MCP server on stdio
 kern path                                    # show cache dir
+kern version                                 # show version
 ```
 
 ## Agent wiring — one command
@@ -168,7 +182,7 @@ Start it: `kern-mcp` (or `kern mcp`). It speaks MCP over stdio and exposes:
 
 ### opencode
 
-**MCP server** (all 9 `kern_*` tools available in the TUI):
+**MCP server** (all 10 `kern_*` tools available in the TUI):
 
 ```jsonc
 // opencode.json
@@ -197,6 +211,16 @@ make hooks              # global MCP config + plugin + AGENTS.md
 
 Then restart opencode so the config and plugin load.
 
+### Claude Code
+
+```sh
+claude mcp add kern -- kern-mcp
+```
+
+### Cursor / other MCP clients
+
+Add a stdio server named `kern` with command `kern-mcp`.
+
 ## Local LLM compression (optional)
 
 Deterministic compression is the default and always works offline. If you run
@@ -208,19 +232,9 @@ prompt to the local server for a smarter rewrite:
 - If Ollama is unreachable, errors, or the response is empty, kern silently
   falls back to the deterministic path — it never blocks a run.
 
-### Claude Code
-
-```sh
-claude mcp add kern -- kern-mcp
-```
-
-### Cursor / other MCP clients
-
-Add a stdio server named `kern` with command `kern-mcp`.
-
 ## Design
 
-- **Local only** — no network calls, no telemetry, no server.
+- **Local only** — the CLI itself never makes network calls, no telemetry, no server. (The installers fetch the binary once; the runtime is offline.)
 - **Free** — pure deterministic rules (regex/AST heuristics). No paid APIs. Optional local-model compression via Ollama is opt-in (`--llm`).
 - **Nothing in your workspace** — all state in `~/.cache/kern/` (honours `XDG_CACHE_HOME`).
 - **Dependency-free** — single static binaries, stdlib only.
@@ -258,55 +272,3 @@ internal/budget     token-budget fitting (dedup + head + important lines)
 internal/doctor     diagnostics report
 internal/hooks      git post-commit hook (diff -> memory)
 ```
-
-## Releasing a new version
-
-1. **Set your repo once** (before the first release):
-   ```sh
-   ./scripts/retarget.sh github.com/yourname/kern   # rewrites module path + <OWNER> placeholders
-   go build ./... && go test ./...
-   ```
-   Then `git init`, add, commit, `git remote add origin git@github.com:yourname/kern.git`, push.
-
-2. **Tag and let CI build** — push a `v*` tag and the workflow
-   `.github/workflows/release.yml` cross-compiles linux/darwin/windows assets
-   and publishes them to GitHub Releases with install notes:
-   ```sh
-   git tag v0.1.0 && git push origin v0.1.0
-   ```
-
-3. **Homebrew tap** — the release workflow does *not* auto-publish to brew.
-   After each release:
-   ```sh
-   ./scripts/brew-release.sh v0.1.0 > kern.rb   # fills in SHA256 from the tag tarball
-   # copy kern.rb to your homebrew-tap repo: git@github.com:yourname/homebrew-tap.git
-   #   Formula/kern.rb, then commit + push
-   ```
-
-4. **PyPI** — to publish the pip shim:
-   ```sh
-   cd python && python -m build && python -m twine upload dist/*   # requires `build` and `twine`
-   ```
-
-`make release VERSION=v0.1.0` also builds the same tarballs locally if you
-prefer to attach them manually.
-
-## Roadmap
-
-- [x] Deterministic compression (logs, prompts, code maps, builds)
-- [x] MCP stdio server with 10 tools
-- [x] Token/cost savings tracking (CLI + MCP)
-- [x] AST index: search, code graph, minimal-context slices
-- [x] `kern watch` — automatic re-indexing on file change
-- [x] Multi-language AST (dependency-free heuristic extractor for Rust, C/C++, TS/JS, Python, Ruby, Java, PHP, shell)
-- [x] opencode plugin adapter (auto-interception of tool output + first-class kern tools)
-- [x] Ollama-backed prompt compression (optional local LLM step, deterministic fallback)
-- [x] Exact BPE tokenizer behind the `tokenize.Counter` interface (`kern tokens --bpe`)
-- [x] Universal agent wiring (`kern setup` — any MCP agent, opencode, Claude Code)
-- [x] Agent buddy (`kern buddy` session briefing) + fine-tuned prompt templates (`kern prompt`)
-- [x] Cross-session project memory (`kern remember`/`kern memory`, injected into buddy)
-- [x] Context budget management (`kern budget` + `kern_context_budget` MCP tool)
-- [x] Diagnostics report (`kern doctor`)
-- [x] Git integration (`kern hook` — post-commit diff -> memory)
-- [x] More agent adapters (continue, windsurf, zed, vscode)
-- [x] Mermaid call graphs (`kern graph --mermaid`) + cross-project AST search (`kern ast --all`)

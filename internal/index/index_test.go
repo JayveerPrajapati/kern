@@ -129,6 +129,7 @@ func TestContextSlices(t *testing.T) {
 }
 
 func TestPersistRoundTrip(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	dir := writeTree(t, map[string]string{"main.go": srcMain})
 	ix, err := Build(dir)
 	if err != nil {

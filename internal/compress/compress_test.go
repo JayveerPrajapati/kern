@@ -37,6 +37,29 @@ func TestCompressLogDedupe(t *testing.T) {
 	}
 }
 
+func TestCompressLogTimeOnlyTimestamps(t *testing.T) {
+	log := strings.Join([]string{
+		"10:00:00.001 INFO starting service",
+		"10:00:01.002 INFO heartbeat ok",
+		"10:00:02.003 ERROR failed to connect: dial tcp 10.0.0.1:8080",
+		"10:00:03.004 ERROR failed to connect: dial tcp 10.0.0.1:8080",
+		"10:00:04.005 INFO done",
+	}, "\n")
+	got := CompressLog(log, Options{MaxLines: 200})
+	if !strings.Contains(got, "ERROR failed to connect") {
+		t.Fatalf("expected error line retained, got:\n%s", got)
+	}
+	if strings.Contains(got, "10:00:00") || strings.Contains(got, "10:00:01") {
+		t.Fatalf("expected time-only timestamps stripped, got:\n%s", got)
+	}
+	if c := strings.Count(got, "ERROR failed to connect"); c != 1 {
+		t.Fatalf("expected dedupe of error line, got %d:\n%s", c, got)
+	}
+	if strings.Contains(got, "heartbeat") {
+		t.Fatalf("expected heartbeat chatter removed, got:\n%s", got)
+	}
+}
+
 func TestCompressLogMaxLines(t *testing.T) {
 	var sb strings.Builder
 	for i := 0; i < 50; i++ {

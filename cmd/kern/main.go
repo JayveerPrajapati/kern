@@ -201,6 +201,12 @@ func main() {
 				fatal("cannot read attach: %v", err)
 			}
 			attach = string(b)
+		} else if f.attach == "-" {
+			b, err := io.ReadAll(os.Stdin)
+			if err != nil {
+				fatal("cannot read stdin: %v", err)
+			}
+			attach = string(b)
 		}
 		if cmd == "preview" {
 			old := optimize.Recorder

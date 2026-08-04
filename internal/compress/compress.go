@@ -8,7 +8,7 @@ import (
 )
 
 var (
-	timestampRe  = regexp.MustCompile(`(?i)(^\s*\[?[\d]{2,4}[-/:][\d]{2}[-/:][\d]{2,4}[ T][\d]{2}:[\d]{2}(:[\d]{2}([\.,]\d+)?)?(Z|[+-][\d:]{2,5})?\]?\s*)`)
+	timestampRe  = regexp.MustCompile(`(?i)(^\s*\[?(([\d]{2,4}[-/:][\d]{2}[-/:][\d]{2,4}[ T])?[\d]{2}:[\d]{2}(:[\d]{2}([\.,]\d+)?)?(Z|[+-][\d:]{2,5})?)\]?\s*)`)
 	infoLevelRe  = regexp.MustCompile(`(?i)(^\s*(INFO|DEBUG|TRACE|VERBOSE|NOTICE)\s*[:=#]?\s*)`)
 	warnLevelRe  = regexp.MustCompile(`(?i)(^\s*(WARN|WARNING|ERROR|ERR|FAIL|FATAL|CRITICAL|SEVERE|PANIC|EXCEPTION|EXCEPTION\b)\s*[:=#]?\s*)`)
 	stackFrameRe = regexp.MustCompile(`^\s*(at |\t|from |\.go:\d+|\.py:\d+|\.java:\d+|\d+\) )`)
