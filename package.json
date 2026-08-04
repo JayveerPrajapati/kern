@@ -1,0 +1,8 @@
+{
+  "name": "kern",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@opencode-ai/plugin": "1.14.48"
+  }
+}

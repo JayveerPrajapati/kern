@@ -1,0 +1,13 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "kern": {
+      "command": [
+        "bin/kern-mcp"
+      ],
+      "cwd": ".",
+      "enabled": true,
+      "type": "local"
+    }
+  }
+}

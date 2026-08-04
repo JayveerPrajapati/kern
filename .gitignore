@@ -1,0 +1,29 @@
+# Build artifacts
+bin/
+dist/
+
+# Node/plugin
+node_modules/
+
+# Local wiring (machine-specific absolute paths)
+.mcp.json
+
+# Go
+*.test
+*.out
+
+# Python
+python/build/
+python/dist/
+python/*.egg-info/
+__pycache__/
+
+# Editor
+.idea/
+.vscode/
+
+# Local test fixtures
+/tmp/
+
+# OS cruft
+.DS_Store

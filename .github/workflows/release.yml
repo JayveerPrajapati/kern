@@ -1,0 +1,103 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: build ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target:
+          - linux/amd64
+          - linux/arm64
+          - darwin/amd64
+          - darwin/arm64
+          - windows/amd64
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Set target variables
+        id: vars
+        shell: bash
+        run: |
+          os="${MATRIX_TARGET%/*}"
+          arch="${MATRIX_TARGET#*/}"
+          tag="${GITHUB_REF#refs/tags/}"
+          echo "os=$os" >> "$GITHUB_OUTPUT"
+          echo "arch=$arch" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "dir=kern-$os-$arch" >> "$GITHUB_OUTPUT"
+        env:
+          MATRIX_TARGET: ${{ matrix.target }}
+
+      - name: Build
+        shell: bash
+        run: |
+          os="${{ steps.vars.outputs.os }}"
+          arch="${{ steps.vars.outputs.arch }}"
+          dir="${{ steps.vars.outputs.dir }}"
+          mkdir -p "$dir"
+          GOOS="$os" GOARCH="$arch" CGO_ENABLED=0 \
+            go build -buildvcs=false -ldflags "-X main.version=${{ steps.vars.outputs.tag }}" \
+            -o "$dir/kern" ./cmd/kern
+          GOOS="$os" GOARCH="$arch" CGO_ENABLED=0 \
+            go build -buildvcs=false -ldflags "-X main.version=${{ steps.vars.outputs.tag }}" \
+            -o "$dir/kern-mcp" ./cmd/kern-mcp
+
+      - name: Package (tar.gz, or zip for windows)
+        shell: bash
+        run: |
+          os="${{ steps.vars.outputs.os }}"
+          arch="${{ steps.vars.outputs.arch }}"
+          dir="${{ steps.vars.outputs.dir }}"
+          if [ "$os" = "windows" ]; then
+            mv "$dir/kern" "$dir/kern.exe"
+            mv "$dir/kern-mcp" "$dir/kern-mcp.exe"
+            zip -q -r "kern-$os-$arch.zip" "$dir"
+          else
+            tar -czf "kern-$os-$arch.tar.gz" "$dir"
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: "kern-${{ steps.vars.outputs.os }}-${{ steps.vars.outputs.arch }}"
+          path: |
+            kern-*.tar.gz
+            kern-*.zip
+
+  release:
+    name: publish release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          tag="${GITHUB_REF#refs/tags/}"
+          gh release create "$tag" dist/kern-* \
+            --title "$tag" \
+            --notes "See [README](https://github.com/${{ github.repository }}/blob/main/README.md) for install options:
+
+- \`curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/main/install.sh | sh\`
+- \`brew install kern\` (homebrew-tap)
+- \`pip install kern-context\`
+- \`go install github.com/${{ github.repository }}/cmd/kern@$tag\`" \
+            --draft=false

@@ -1,0 +1,386 @@
+package index
+
+import (
+	"encoding/json"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"regexp"
+	"sort"
+	"strings"
+	"time"
+
+	"github.com/JayveerPrajapati/kern/internal/cache"
+)
+
+// Index is the in-memory representation of a project's AST index.
+type Index struct {
+	Root        string               `json:"root"`
+	Symbols     []Symbol             `json:"symbols"`
+	Calls       map[string][]string  `json:"calls"`
+	Callers     map[string][]string  `json:"callers"`
+	Pkgs        map[string]*Pkg      `json:"packages"`
+	FileHashes  map[string]string    `json:"file_hashes"`
+	SymbolsByFile map[string][]Symbol `json:"-"`
+	UpdatedAt   time.Time            `json:"updated_at"`
+}
+
+// New returns an empty index rooted at root.
+func New(root string) *Index {
+	return &Index{
+		Root:          root,
+		Calls:         map[string][]string{},
+		Callers:       map[string][]string{},
+		Pkgs:          map[string]*Pkg{},
+		FileHashes:    map[string]string{},
+		SymbolsByFile: map[string][]Symbol{},
+	}
+}
+
+// StorePath returns the on-disk location for the index of root.
+func StorePath(root string) string {
+	abs, err := filepath.Abs(root)
+	if err != nil {
+		abs = root
+	}
+	return cache.Path("index", cache.Hash([]byte(abs))+".json")
+}
+
+// Save persists the index.
+func (ix *Index) Save() error {
+	data, err := json.Marshal(ix)
+	if err != nil {
+		return err
+	}
+	p := StorePath(ix.Root)
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(p, data, 0o600)
+}
+
+// Load reads the index for root. Returns nil if absent.
+func Load(root string) (*Index, error) {
+	abs, err := filepath.Abs(root)
+	if err != nil {
+		abs = root
+	}
+	data, err := os.ReadFile(StorePath(abs))
+	if err != nil {
+		return nil, err
+	}
+	ix := &Index{}
+	if err := json.Unmarshal(data, ix); err != nil {
+		return nil, err
+	}
+	ix.reindexByFile()
+	return ix, nil
+}
+
+// LoadFile reads an index directly from a store path (used for
+// cross-project search across the cache directory).
+func LoadFile(path string) (*Index, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	ix := &Index{}
+	if err := json.Unmarshal(data, ix); err != nil {
+		return nil, err
+	}
+	ix.reindexByFile()
+	return ix, nil
+}
+
+func (ix *Index) reindexByFile() {
+	ix.SymbolsByFile = map[string][]Symbol{}
+	for _, s := range ix.Symbols {
+		ix.SymbolsByFile[s.File] = append(ix.SymbolsByFile[s.File], s)
+	}
+}
+
+// Languages returns the distinct languages present in the index, sorted.
+func (ix *Index) Languages() []string {
+	set := map[string]bool{}
+	for _, s := range ix.Symbols {
+		if s.Lang != "" {
+			set[s.Lang] = true
+		}
+	}
+	var out []string
+	for l := range set {
+		out = append(out, l)
+	}
+	sort.Strings(out)
+	return out
+}
+
+var ignoreDirs = map[string]bool{
+	".git": true, "node_modules": true, "vendor": true, "dist": true,
+	"build": true, "out": true, "target": true, ".next": true,
+	"__pycache__": true, ".venv": true, ".cache": true, ".idea": true,
+	"bin": true, ".mvn": true, "coverage": true, "tmp": true,
+}
+
+// Build walks root, parses every source file and assembles the index.
+func Build(root string) (*Index, error) {
+	abs, err := filepath.Abs(root)
+	if err != nil {
+		return nil, err
+	}
+	ix := New(abs)
+	err = filepath.WalkDir(abs, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if d.IsDir() {
+			if path != abs && ignoreDirs[d.Name()] {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		rel, rerr := filepath.Rel(abs, path)
+		if rerr != nil {
+			return nil
+		}
+		if !quickExt(rel) {
+			return nil
+		}
+		src, serr := os.ReadFile(path)
+		if serr != nil {
+			return nil
+		}
+		if !isIndexable(rel, src) {
+			return nil
+		}
+		ix.addFile(rel, src)
+		return nil
+	})
+	ix.UpdatedAt = time.Now().UTC()
+	ix.computeCallers()
+	return ix, err
+}
+
+func (ix *Index) addFile(rel string, src []byte) {
+	lang := detectLang(rel, src)
+	var syms []Symbol
+	var calls map[string][]string
+	var pkg *Pkg
+	if lang == "go" {
+		var err error
+		syms, calls, pkg, err = extract(rel, src)
+		if err != nil {
+			return
+		}
+	} else {
+		syms, calls, pkg, _ = extractForeign(rel, src, lang)
+	}
+	ix.FileHashes[rel] = cache.Hash(src)
+	ix.Symbols = append(ix.Symbols, syms...)
+	for owner, callees := range calls {
+		ix.Calls[owner] = append(ix.Calls[owner], callees...)
+	}
+	if pkg != nil {
+		ix.Pkgs[pkg.Path] = pkg
+	}
+}
+
+func (ix *Index) computeCallers() {
+	ix.Callers = map[string][]string{}
+	for caller, callees := range ix.Calls {
+		seen := map[string]bool{}
+		for _, c := range callees {
+			simple := c
+			if i := strings.LastIndexByte(c, '.'); i >= 0 {
+				simple = c[i+1:]
+			}
+			if simple == caller {
+				continue
+			}
+			if !seen[c] {
+				seen[c] = true
+				ix.Callers[c] = append(ix.Callers[c], caller)
+			}
+			if simple != c && !seen[simple] {
+				seen[simple] = true
+				ix.Callers[simple] = append(ix.Callers[simple], caller)
+			}
+		}
+	}
+	for k := range ix.Callers {
+		ix.Callers[k] = dedupeSorted(ix.Callers[k])
+	}
+}
+
+func dedupeSorted(in []string) []string {
+	sort.Strings(in)
+	out := in[:0]
+	for i, s := range in {
+		if i == 0 || s != in[i-1] {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+func (ix *Index) symbolsFor(name string) []Symbol {
+	var out []Symbol
+	for _, s := range ix.Symbols {
+		if s.Name == name || s.FullName() == name {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// Search matches symbols by pattern. Patterns support "*" wildcards and the
+// prefixes "func ", "type ", "struct ", "method ", "const ", "var ", "call ".
+func (ix *Index) Search(pattern string, limit int) []Symbol {
+	if limit <= 0 {
+		limit = 50
+	}
+	re, kind := symbolRegex(pattern)
+	var out []Symbol
+	for _, s := range ix.Symbols {
+		if symbolMatches(s, kind, re) {
+			out = append(out, s)
+			if len(out) >= limit {
+				break
+			}
+		}
+	}
+	return out
+}
+
+func symbolRegex(pattern string) (*regexp.Regexp, string) {
+	p := pattern
+	kind := ""
+		if i := strings.IndexByte(p, ' '); i > 0 {
+			prefix := p[:i]
+			switch prefix {
+			case "func", "method", "struct", "interface", "type", "const", "var",
+				"class", "enum", "trait", "module", "union", "impl", "prop":
+				kind = prefix
+				p = p[i+1:]
+			}
+		}
+	expr := "^" + strings.ReplaceAll(regexp.QuoteMeta(p), `\*`, `.*`) + "$"
+	return regexp.MustCompile(expr), kind
+}
+
+func symbolMatches(s Symbol, kind string, re *regexp.Regexp) bool {
+	if kind != "" && s.Kind != kind {
+		return false
+	}
+	return re.MatchString(s.Name) || (s.Receiver != "" && re.MatchString(s.Receiver+"."+s.Name))
+}
+
+// CallersOf returns the functions that call a given symbol name.
+func (ix *Index) CallersOf(symbol string) []string {
+	return ix.Callers[symbol]
+}
+
+// CallSites returns the call edges of a symbol (what it calls).
+func (ix *Index) CallSites(symbol string) []string {
+	return ix.Calls[symbol]
+}
+
+// Graph renders the neighbourhood of a symbol: definition, callers, and what
+// it calls.
+func (ix *Index) Graph(symbol string) string {
+	var b strings.Builder
+	defs := ix.symbolsFor(symbol)
+	if len(defs) == 0 {
+		b.WriteString("no symbol found: " + symbol)
+		return b.String()
+	}
+	for _, d := range defs {
+		b.WriteString("def ")
+		b.WriteString(d.Kind)
+		b.WriteString(" ")
+		b.WriteString(d.FullName())
+		b.WriteString(" ")
+		b.WriteString(d.File)
+		b.WriteString(":")
+		b.WriteString(itoa(d.Line))
+		b.WriteString("\n")
+	}
+	callers := ix.CallersOf(symbol)
+	if len(callers) > 0 {
+		b.WriteString("callers:\n")
+		for _, c := range callers {
+			b.WriteString("  ")
+			b.WriteString(c)
+			b.WriteString("\n")
+		}
+	}
+	callees := ix.Calls[symbol]
+	if len(callees) > 0 {
+		b.WriteString("calls:\n")
+		for _, c := range dedupeSorted(append([]string{}, callees...)) {
+			b.WriteString("  ")
+			b.WriteString(c)
+			b.WriteString("\n")
+		}
+	}
+	return strings.TrimSuffix(b.String(), "\n")
+}
+
+// Context returns the minimal slice of source an agent needs about a symbol:
+// its definition source, its callers, and what it calls.
+func (ix *Index) Context(symbol string, linesAround int) string {
+	if linesAround <= 0 {
+		linesAround = 12
+	}
+	defs := ix.symbolsFor(symbol)
+	if len(defs) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	d := defs[0]
+	src, err := os.ReadFile(filepath.Join(ix.Root, d.File))
+	if err != nil {
+		return ""
+	}
+	all := strings.Split(string(src), "\n")
+	start := d.Line - linesAround
+	if start < 1 {
+		start = 1
+	}
+	end := d.Line + linesAround
+	if end > len(all) {
+		end = len(all)
+	}
+	for i := start; i <= end; i++ {
+		b.WriteString(itoa(i))
+		b.WriteString(": ")
+		b.WriteString(all[i-1])
+		b.WriteString("\n")
+	}
+	callers := ix.CallersOf(symbol)
+	if len(callers) > 0 {
+		b.WriteString("\ncallers: ")
+		b.WriteString(strings.Join(dedupeSorted(callers), ", "))
+		b.WriteString("\n")
+	}
+	if callees := ix.Calls[symbol]; len(callees) > 0 {
+		b.WriteString("calls: ")
+		b.WriteString(strings.Join(dedupeSorted(append([]string{}, callees...)), ", "))
+		b.WriteString("\n")
+	}
+	return strings.TrimSuffix(b.String(), "\n")
+}
+
+func itoa(n int) string {
+	if n == 0 {
+		return "0"
+	}
+	var buf [20]byte
+	i := len(buf)
+	for n > 0 {
+		i--
+		buf[i] = byte('0' + n%10)
+		n /= 10
+	}
+	return string(buf[i:])
+}

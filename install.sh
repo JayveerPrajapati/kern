@@ -1,0 +1,108 @@
+#!/bin/sh
+# kern installer — downloads prebuilt binaries from GitHub Releases.
+#
+#   curl -fsSL https://raw.githubusercontent.com/JayveerPrajapati/kern/main/install.sh | sh
+#
+# Behavior:
+#   * Defaults to the latest release; pin with KERN_VERSION=v1.2.3.
+#   * Installs to ~/.local/bin by default, or $KERN_INSTALL_DIR if set.
+#   * Downloads prebuilt tarballs; falls back to `go install` if a platform
+#     has no prebuilt asset or curl/wget is unavailable but go is present.
+#   * Never runs as root-required system installs; stays in user space.
+#
+# Distribution note: replace JayveerPrajapati below with your GitHub username (or run
+# scripts/retarget.sh which rewrites this file for you).
+
+set -u
+
+OWNER="${KERN_REPO_OWNER:-JayveerPrajapati}"
+REPO="${KERN_REPO:-${OWNER}/kern}"
+VERSION="${KERN_VERSION:-latest}"
+PREFIX="${KERN_INSTALL_DIR:-${HOME}/.local/bin}"
+
+get_version() {
+  if [ "$VERSION" = "latest" ]; then
+    if command -v curl >/dev/null 2>&1; then
+      curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" 2>/dev/null |
+        grep -o '"tag_name"[[:space:]]*:[[:space:]]*"[^"]*"' |
+        sed 's/.*"\([^"]*\)".*/\1/' |
+        head -1
+    else
+      wget -qO- "https://api.github.com/repos/${REPO}/releases/latest" 2>/dev/null |
+        grep -o '"tag_name"[[:space:]]*:[[:space:]]*"[^"]*"' |
+        sed 's/.*"\([^"]*\)".*/\1/' |
+        head -1
+    fi
+  else
+    echo "$VERSION"
+  fi
+}
+
+os_arch() {
+  os=$(uname -s | tr '[:upper:]' '[:lower:]')
+  arch=$(uname -m)
+  case "$arch" in
+    x86_64|amd64) arch="amd64" ;;
+    aarch64|arm64) arch="arm64" ;;
+    *) return 1 ;;
+  esac
+  [ "$os" = "linux" ] || [ "$os" = "darwin" ] || return 1
+  echo "${os}-${arch}"
+}
+
+download() {
+  url="$1"; out="$2"
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsSL "$url" -o "$out"
+  elif command -v wget >/dev/null 2>&1; then
+    wget -qO "$out" "$url"
+  else
+    return 1
+  fi
+}
+
+go_install() {
+  if ! command -v go >/dev/null 2>&1; then
+    echo "kern: prebuilt asset for this platform is unavailable and 'go' is not installed." >&2
+    echo "kern: install Go (https://go.dev/dl/) or download a release from https://github.com/${REPO}/releases" >&2
+    return 1
+  fi
+  echo "kern: falling back to 'go install github.com/${REPO}/cmd/kern@${VERSION}'"
+  [ "$VERSION" = "latest" ] && VERSION="latest"
+  go install "github.com/${REPO}/cmd/kern@${VERSION}"
+  go install "github.com/${REPO}/cmd/kern-mcp@${VERSION}"
+  # go install places both into the go bin dir; report it.
+  echo "kern: installed via go install. Ensure \$(go env GOPATH)/bin is on your PATH."
+}
+
+main() {
+  platform="$(os_arch)" || { echo "kern: unsupported platform $(uname -s)/$(uname -m)"; go_install || exit 1; exit 0; }
+  tag="$(get_version)"
+  [ -z "$tag" ] && { echo "kern: could not resolve release version"; go_install || exit 1; exit 0; }
+
+  file="kern-${platform}.tar.gz"
+  url="https://github.com/${REPO}/releases/download/${tag}/${file}"
+  tmpdir="$(mktemp -d)"
+  trap 'rm -rf "$tmpdir"' EXIT
+
+  echo "kern: downloading ${tag} (${file})"
+  if ! download "$url" "$tmpdir/${file}"; then
+    echo "kern: no prebuilt asset for ${platform} at ${tag}" >&2
+    go_install || exit 1
+    exit 0
+  fi
+
+  mkdir -p "$PREFIX"
+  tar -xzf "$tmpdir/${file}" -C "$tmpdir"
+  cp "$tmpdir/kern-${platform}/kern" "$PREFIX/kern"
+  cp "$tmpdir/kern-${platform}/kern-mcp" "$PREFIX/kern-mcp"
+  chmod +x "$PREFIX/kern" "$PREFIX/kern-mcp"
+
+  echo "installed: $PREFIX/kern ($tag)"
+  case ":$PATH:" in
+    *":$PREFIX:"*) ;;
+    *) echo "note: add $PREFIX to your PATH:  export PATH=\"$PREFIX:\$PATH\"" ;;
+  esac
+}
+
+main
