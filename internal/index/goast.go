@@ -18,8 +18,18 @@ type Symbol struct {
 	Receiver string   `json:"receiver,omitempty"`
 	File     string   `json:"file"`
 	Line     int      `json:"line"`
+	End      int      `json:"end,omitempty"` // inclusive last line (0 if unknown)
 	Params   []string `json:"params,omitempty"`
 	Lang     string   `json:"lang,omitempty"`
+}
+
+// Lines returns the 1-based size of the declaration in source lines, falling
+// back to a single line when the end is unknown.
+func (s Symbol) Lines() int {
+	if s.End > 0 && s.End >= s.Line {
+		return s.End - s.Line + 1
+	}
+	return 1
 }
 
 // FullName returns the qualified name ("Type.Method" for methods).
@@ -67,8 +77,10 @@ func extract(rel string, src []byte) ([]Symbol, map[string][]string, *Pkg, error
 		})
 	}
 
-	ast.Inspect(f, func(n ast.Node) bool {
-		switch d := n.(type) {
+	// Only top-level declarations become symbols; function-local vars and
+	// types are implementation detail and would pollute graph analysis.
+	for _, decl := range f.Decls {
+		switch d := decl.(type) {
 		case *ast.FuncDecl:
 			name := d.Name.Name
 			recv := ""
@@ -82,7 +94,7 @@ func extract(rel string, src []byte) ([]Symbol, map[string][]string, *Pkg, error
 				full = recv + "." + name
 			}
 			params := paramNames(d.Type.Params)
-			syms = append(syms, Symbol{Kind: kind, Name: name, Receiver: recv, File: rel, Line: fset.Position(d.Pos()).Line, Params: params, Lang: "go"})
+			syms = append(syms, Symbol{Kind: kind, Name: name, Receiver: recv, File: rel, Line: fset.Position(d.Pos()).Line, End: fset.Position(d.End()).Line, Params: params, Lang: "go"})
 			addCalls(full, d.Body)
 		case *ast.GenDecl:
 			for _, spec := range d.Specs {
@@ -95,20 +107,19 @@ func extract(rel string, src []byte) ([]Symbol, map[string][]string, *Pkg, error
 					case *ast.InterfaceType:
 						kind = "interface"
 					}
-					syms = append(syms, Symbol{Kind: kind, Name: s.Name.Name, File: rel, Line: fset.Position(s.Pos()).Line, Lang: "go"})
+					syms = append(syms, Symbol{Kind: kind, Name: s.Name.Name, File: rel, Line: fset.Position(s.Pos()).Line, End: fset.Position(s.End()).Line, Lang: "go"})
 				case *ast.ValueSpec:
 					kind := "var"
 					if d.Tok == token.CONST {
 						kind = "const"
 					}
 					for _, name := range s.Names {
-						syms = append(syms, Symbol{Kind: kind, Name: name.Name, File: rel, Line: fset.Position(s.Pos()).Line, Lang: "go"})
+						syms = append(syms, Symbol{Kind: kind, Name: name.Name, File: rel, Line: fset.Position(s.Pos()).Line, End: fset.Position(s.End()).Line, Lang: "go"})
 					}
 				}
 			}
 		}
-		return true
-	})
+	}
 
 	pkg := &Pkg{Name: f.Name.Name, Path: filepath.Dir(rel), Files: []string{rel}, Lang: "go"}
 	for _, imp := range f.Imports {

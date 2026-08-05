@@ -15,6 +15,38 @@ func readFile(path string) ([]byte, error) {
 	return os.ReadFile(path)
 }
 
+// indexableHashes walks root and returns a map of relative file path to
+// content hash for every indexable source file. Used by the watcher to detect
+// changes and by Load/Stale to decide whether a cached index is out of date.
+func indexableHashes(root string) map[string]string {
+	cur := map[string]string{}
+	_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if d.IsDir() {
+			if path != root && ignoreDirs[d.Name()] {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		rel, rerr := filepath.Rel(root, path)
+		if rerr != nil || !quickExt(rel) {
+			return nil
+		}
+		data, derr := readFile(path)
+		if derr != nil {
+			return nil
+		}
+		if !isIndexable(rel, data) {
+			return nil
+		}
+		cur[rel] = cache.Hash(data)
+		return nil
+	})
+	return cur
+}
+
 // ChangeKind describes a file change detected by the watcher.
 type ChangeKind string
 
@@ -44,31 +76,7 @@ func Watch(ctx context.Context, root string, interval time.Duration, onChange fu
 		prev = ix.FileHashes
 	}
 	for {
-		cur := map[string]string{}
-		_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
-			if err != nil {
-				return nil
-			}
-			if d.IsDir() {
-				if path != root && ignoreDirs[d.Name()] {
-					return filepath.SkipDir
-				}
-				return nil
-			}
-			rel, rerr := filepath.Rel(root, path)
-			if rerr != nil || !quickExt(rel) {
-				return nil
-			}
-			data, derr := readFile(path)
-			if derr != nil {
-				return nil
-			}
-			if !isIndexable(rel, data) {
-				return nil
-			}
-			cur[rel] = cache.Hash(data)
-			return nil
-		})
+		cur := indexableHashes(root)
 		changes := diff(prev, cur)
 		if len(changes) > 0 {
 			ix, err := Build(root)

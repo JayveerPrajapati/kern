@@ -8,6 +8,10 @@
 #    Copy this file to homebrew-tap/Formula/kern.rb and update SHA256s via
 #    scripts/brew-release.sh, then push the tap repo.
 #
+#    The release workflow also attaches a ready-to-use `kern.rb` (url + sha256
+#    filled in for the tag) to every GitHub Release — download it from the
+#    release's assets instead of editing by hand.
+#
 # 2. Local brew install from source (no release needed):
 #      brew install --build-from-source ./homebrew/kern.rb
 #
@@ -31,7 +35,7 @@ class Kern < Formula
   end
 
   test do
-    assert_match "kern v", shell_output("#{bin}/kern version")
+    assert_match /kern v?\d+\./, shell_output("#{bin}/kern version")
     assert_predicate bin/"kern-mcp", :exist?
   end
 end

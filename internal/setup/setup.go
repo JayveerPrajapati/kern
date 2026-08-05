@@ -60,6 +60,14 @@ var adapters = []adapter{
 	{name: "windsurf", path: globalConfig(".codeium", "windsurf", "mcp_config.json"), key: "mcpServers", entry: stdioEntry},
 	{name: "zed", path: globalConfig("zed", "settings.json"), key: "context_servers", entry: cmdEntry},
 	{name: "vscode", path: projectConfig(".vscode", "mcp.json"), key: "servers", entry: stdioEntry},
+	{name: "cursor", path: projectConfig(".cursor", "mcp.json"), key: "mcpServers", entry: stdioEntry},
+	{name: "gemini", path: projectConfig(".gemini", "settings.json"), key: "mcpServers", entry: stdioEntry},
+	{name: "antigravity", path: globalConfig(".gemini", "antigravity", "mcp_config.json"), key: "mcpServers", entry: stdioEntry},
+	{name: "qwen", path: homeConfig(".qwen", "settings.json"), key: "mcpServers", entry: stdioEntry},
+	{name: "qoder", path: homeConfig(".qoder", "mcp.json"), key: "mcpServers", entry: stdioEntry},
+	{name: "kiro", path: projectConfig(".kiro", "settings", "mcp.json"), key: "mcpServers", entry: stdioEntry},
+	{name: "copilot", path: projectConfig(".vscode", "mcp.json"), key: "servers", entry: stdioEntry},
+	{name: "copilot-cli", path: globalConfig(".copilot", "mcp-config.json"), key: "mcpServers", entry: stdioEntry},
 }
 
 func stdioEntry(bin string) map[string]any {
@@ -92,6 +100,18 @@ func projectConfig(sub ...string) func(string) string {
 	}
 }
 
+// homeConfig resolves a path directly under the user home dir (used by agents
+// that keep their config at ~/.name rather than under ~/.config).
+func homeConfig(sub ...string) func(string) string {
+	return func(_ string) string {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			home = "."
+		}
+		return filepath.Join(append([]string{home}, sub...)...)
+	}
+}
+
 // Check reports the current wiring state without changing anything.
 func Check(root string) []Status {
 	out := []Status{
@@ -105,6 +125,7 @@ func Check(root string) []Status {
 		out = append(out, fileStatus(a.path(root), a.name))
 	}
 	out = append(out, claudeStatus())
+	out = append(out, codexStatus())
 	return out
 }
 
@@ -134,6 +155,9 @@ func Wire(root string, agents []string) []Status {
 	}
 	if enabled("claude") {
 		out = append(out, wireClaude(bin))
+	}
+	if enabled("codex") {
+		out = append(out, wireCodex(bin))
 	}
 	for _, a := range adapters {
 		if enabled(a.name) {
@@ -243,6 +267,46 @@ func wireClaude(bin string) Status {
 	return Status{Agent: "claude", Installed: true, Path: path, Note: "claude mcp add ok"}
 }
 
+// wireCodex writes the Codex MCP server entry into ~/.codex/config.toml.
+// Codex uses TOML rather than JSON, so it gets a small dedicated writer
+// instead of the JSON adapters.
+func wireCodex(bin string) Status {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return Status{Agent: "codex", Note: err.Error()}
+	}
+	path := filepath.Join(home, ".codex", "config.toml")
+	needle := "[mcp_servers.kern]"
+	if b, err := os.ReadFile(path); err == nil && strings.Contains(string(b), needle) {
+		return Status{Agent: "codex", Installed: true, Path: path, Note: "codex config already registers kern"}
+	}
+	entry := "\n[mcp_servers.kern]\ncommand = \"" + strings.ReplaceAll(bin, `\`, `\\`) + "\"\n"
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return Status{Agent: "codex", Path: path, Note: err.Error()}
+	}
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		return Status{Agent: "codex", Path: path, Note: err.Error()}
+	}
+	defer f.Close()
+	if _, err := f.WriteString(entry); err != nil {
+		return Status{Agent: "codex", Path: path, Note: err.Error()}
+	}
+	return Status{Agent: "codex", Installed: true, Path: path, Note: "codex config updated"}
+}
+
+func codexStatus() Status {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return Status{Agent: "codex", Note: err.Error()}
+	}
+	path := filepath.Join(home, ".codex", "config.toml")
+	if b, err := os.ReadFile(path); err == nil && strings.Contains(string(b), "[mcp_servers.kern]") {
+		return Status{Agent: "codex", Installed: true, Path: path, Note: "kern MCP registered"}
+	}
+	return Status{Agent: "codex", Path: path, Note: "codex config.toml has no kern MCP"}
+}
+
 // mergeJSON reads a JSON file, inserts entry under key unless "kern" already
 // exists there, and writes it back. Missing or empty files are created.
 func mergeJSON(path, key string, entry map[string]any) error {
@@ -269,11 +333,14 @@ func mergeJSON(path, key string, entry map[string]any) error {
 		existing["kern"] = entry
 	}
 	m[key] = existing
-	out, err := json.MarshalIndent(m, "", "  ")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	data, err = json.MarshalIndent(m, "", "  ")
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, append(out, '\n'), 0o644)
+	return os.WriteFile(path, append(data, '\n'), 0o644)
 }
 
 func fileStatus(path, label string) Status {

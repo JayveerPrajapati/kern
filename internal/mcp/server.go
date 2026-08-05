@@ -13,6 +13,8 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/budget"
 	"github.com/JayveerPrajapati/kern/internal/code"
 	"github.com/JayveerPrajapati/kern/internal/index"
+	"github.com/JayveerPrajapati/kern/internal/intel"
+	"github.com/JayveerPrajapati/kern/internal/lock"
 	"github.com/JayveerPrajapati/kern/internal/optimize"
 	"github.com/JayveerPrajapati/kern/internal/stats"
 	"github.com/JayveerPrajapati/kern/internal/tokenize"
@@ -51,10 +53,10 @@ var tools = []Tool{
 		Name:        "kern_optimize_prompt",
 		Description: "Compress and clean a raw prompt before sending it to an LLM. Returns the optimized prompt plus token savings. Use this to reduce context cost for large or noisy prompts.",
 		InputSchema: schema(map[string]any{
-			"prompt":     strProp("The raw prompt text to optimize"),
+			"prompt":       strProp("The raw prompt text to optimize"),
 			"attached_log": strProp("Optional noisy log output to compress and attach"),
-			"session":    strProp("Optional session identifier for stats tracking"),
-			"model":      strProp("Optional model name for cost estimation"),
+			"session":      strProp("Optional session identifier for stats tracking"),
+			"model":        strProp("Optional model name for cost estimation"),
 		}, []string{"prompt"}),
 	},
 	{
@@ -113,6 +115,31 @@ var tools = []Tool{
 		}, []string{"pattern"}),
 	},
 	{
+		Name:        "kern_search",
+		Description: "Ranked free-text symbol search: returns symbols matching a query by name or file, best matches first. Forgiving lookup for humans — e.g. 'load index' or 'login handler'.",
+		InputSchema: schema(map[string]any{
+			"query": strProp("Free-text query (symbol name, path fragment, or partial name)"),
+			"root":  strProp("Project root (defaults to current directory)"),
+			"limit": strProp("Max results (default 20)"),
+		}, []string{"query"}),
+	},
+	{
+		Name:        "kern_repo_search",
+		Description: "Ranked free-text symbol search across every repo in the kern multi-repo registry (kern repos add). Returns matches tagged with their repo name, best hits first.",
+		InputSchema: schema(map[string]any{
+			"query": strProp("Free-text query (symbol name, path fragment, or partial name)"),
+			"limit": strProp("Max results (default 20)"),
+		}, []string{"query"}),
+	},
+	{
+		Name:        "kern_why",
+		Description: "Rationale and doc-reference report for a symbol: its doc comment, who depends on it and why (each caller's own doc line), and its in/out edge counts. Use to answer 'why does this exist and who needs it'.",
+		InputSchema: schema(map[string]any{
+			"symbol": strProp("Symbol name or Receiver.Name"),
+			"root":   strProp("Project root (defaults to current directory)"),
+		}, []string{"symbol"}),
+	},
+	{
 		Name:        "kern_code_graph",
 		Description: "Return the call graph neighbourhood of a symbol: its definition, its callers, and what it calls. Use to understand dependencies without reading whole files.",
 		InputSchema: schema(map[string]any{
@@ -129,19 +156,156 @@ var tools = []Tool{
 			"lines":  strProp("Lines of source context around the definition (default 12)"),
 		}, []string{"symbol"}),
 	},
+	{
+		Name:        "kern_changes",
+		Description: "Change-impact analysis for a diff: maps changed files to symbols, computes blast radius (transitive callers), risk scores, and test gaps. Use to review what a PR could break before reading files.",
+		InputSchema: schema(map[string]any{
+			"root":  strProp("Project root (defaults to current directory)"),
+			"range": strProp("Git range like 'HEAD~2..HEAD'. Empty = working-tree changes"),
+			"file":  strProp("Optional comma-separated explicit file list, overrides git range"),
+		}, nil),
+	},
+	{
+		Name:        "kern_review",
+		Description: "Token-optimised code-review context for changed files: changed symbols, their callers, blast radius, risk and test gaps, sized to fit a token budget. The smallest answer a reviewer needs.",
+		InputSchema: schema(map[string]any{
+			"root":       strProp("Project root (defaults to current directory)"),
+			"range":      strProp("Git range like 'HEAD~2..HEAD'. Empty = working-tree changes"),
+			"file":       strProp("Optional comma-separated explicit file list, overrides git range"),
+			"max_tokens": strProp("Maximum tokens for the review context (default 8000)"),
+		}, nil),
+	},
+	{
+		Name:        "kern_hubs",
+		Description: "Architectural hotspots: the most depended-on symbols (hubs) and cross-package bridges where a change in one subsystem can break another.",
+		InputSchema: schema(map[string]any{
+			"root":  strProp("Project root (defaults to current directory)"),
+			"limit": strProp("Max hubs to return (default 10)"),
+		}, nil),
+	},
+	{
+		Name:        "kern_test_gaps",
+		Description: "Test-coverage analysis from the call graph: what percent of callable symbols are exercised by tests, plus untested hotspots (called by many, covered by none).",
+		InputSchema: schema(map[string]any{
+			"root":  strProp("Project root (defaults to current directory)"),
+			"limit": strProp("Max hotspots to list (default 10)"),
+		}, nil),
+	},
+	{
+		Name:        "kern_path",
+		Description: "Shortest call path between two symbols, following in-project call edges in either direction. Traces how two things connect without reading files.",
+		InputSchema: schema(map[string]any{
+			"root": strProp("Project root (defaults to current directory)"),
+			"from": strProp("Source symbol (simple name or Type.Method)"),
+			"to":   strProp("Target symbol (simple name or Type.Method)"),
+		}, []string{"from", "to"}),
+	},
+	{
+		Name:        "kern_dead",
+		Description: "Dead-code detection: symbols nothing in the project calls. Private names are dead for certain; public names may be external API. Sorted by size so the biggest cleanup wins show first.",
+		InputSchema: schema(map[string]any{
+			"root":  strProp("Project root (defaults to current directory)"),
+			"limit": strProp("Max entries (default all)"),
+		}, nil),
+	},
+	{
+		Name:        "kern_larges",
+		Description: "Find the largest function/method declarations by source lines. Use to locate god functions that beg for refactoring.",
+		InputSchema: schema(map[string]any{
+			"root":      strProp("Project root (defaults to current directory)"),
+			"min_lines": strProp("Size threshold in source lines (default 60)"),
+			"limit":     strProp("Max results (default all)"),
+		}, nil),
+	},
+	{
+		Name:        "kern_arch",
+		Description: "Architecture overview from call-graph communities: subsystems with their hubs/packages, plus coupling warnings ranking the cross-community call bundles that make changes ripple.",
+		InputSchema: schema(map[string]any{
+			"root": strProp("Project root (defaults to current directory)"),
+		}, nil),
+	},
+	{
+		Name:        "kern_churn",
+		Description: "Change-frequency risk: which files were touched by the most commits in a range, whether they are being edited right now, and how risky they are in the call graph.",
+		InputSchema: schema(map[string]any{
+			"root":  strProp("Project root (defaults to current directory)"),
+			"range": strProp("Git range like 'HEAD~10..HEAD' (default last 30 commits)"),
+		}, nil),
+	},
+	{
+		Name:        "kern_near",
+		Description: "Dependency-tree expansion: every symbol within N hops of a symbol, in both directions (callers + callees), budget-capped. The graph-guided traversal primitive that replaces blind grep — e.g. 'everything two degrees from this database model' in one call.",
+		InputSchema: schema(map[string]any{
+			"symbol": strProp("Root symbol (simple name or Type.Method)"),
+			"depth":  strProp("Number of hops to expand (default 2)"),
+			"max":    strProp("Maximum nodes to return (default 100)"),
+			"root":   strProp("Project root (defaults to current directory)"),
+		}, []string{"symbol"}),
+	},
+	{
+		Name:        "kern_probe",
+		Description: "Query-driven micro-context router: given a task (bug report, prompt, error text), extract the symbol names it mentions, resolve them against the index, and return a budget-capped bundle of definitions, callers, callees and tests. The graph is the retrieval index, never the payload.",
+		InputSchema: schema(map[string]any{
+			"task":       strProp("Natural-language task, bug report or error text mentioning symbols"),
+			"root":       strProp("Project root (defaults to current directory)"),
+			"max_tokens": strProp("Token budget for the bundle (default 4000)"),
+		}, []string{"task"}),
+	},
+	{
+		Name:        "kern_trace",
+		Description: "Runtime-impact overlay: parse a pprof -top dump, a crash stack trace, or a plain list of function names and map the hot symbols onto the call graph — file:line, blast radius, test coverage and risk. Use to see what a hot path touches at runtime.",
+		InputSchema: schema(map[string]any{
+			"trace": strProp("The trace text (pprof -top, stack trace, or symbol list)"),
+			"root":  strProp("Project root (defaults to current directory)"),
+			"limit": strProp("Max hot symbols to return (default all)"),
+		}, []string{"trace"}),
+	},
+	{
+		Name:        "kern_lock",
+		Description: "Acquire an advisory workspace lock on a scope (flock-based). Held by this server until kern_unlock. Lets concurrent agents coordinate before touching shared files. Errors when the scope is already held.",
+		InputSchema: schema(map[string]any{
+			"scope": strProp("Lock scope, e.g. 'db-models' or 'checkout'"),
+			"root":  strProp("Project root (defaults to current directory)"),
+		}, []string{"scope"}),
+	},
+	{
+		Name:        "kern_unlock",
+		Description: "Release a workspace lock previously acquired via kern_lock.",
+		InputSchema: schema(map[string]any{
+			"scope": strProp("Lock scope to release"),
+		}, []string{"scope"}),
+	},
+	{
+		Name:        "kern_lock_status",
+		Description: "List workspace locks with whether each is held and by which PID. Use to see what other agents are working on.",
+		InputSchema: schema(map[string]any{
+			"root": strProp("Project root (defaults to current directory)"),
+		}, nil),
+	},
+	{
+		Name:        "kern_guard_check",
+		Description: "Deterministic architectural guardrails: validate changed files against .kern/boundaries.json rules and return every forbidden dependency crossing (e.g. a frontend importing a backend DB model) with file evidence. Rejects a proposal before it touches the filesystem.",
+		InputSchema: schema(map[string]any{
+			"root":  strProp("Project root (defaults to current directory)"),
+			"file":  strProp("Optional comma-separated explicit file list, overrides git range"),
+			"range": strProp("Git range like 'HEAD~2..HEAD'. Empty = working-tree changes"),
+		}, nil),
+	},
 }
 
-// Server handles MCP requests over a stdio stream.
+// Server handles MCP requests over a stdio stream or HTTP.
 type Server struct {
-	in  *bufio.Scanner
-	out io.Writer
+	in        *bufio.Scanner
+	out       io.Writer
+	locks     map[string]*lock.Lock
+	transport string // "stdio" (default) or "http"
 }
 
 // NewServer returns a server wired to the given reader/writer.
 func NewServer(in io.Reader, out io.Writer) *Server {
 	sc := bufio.NewScanner(in)
 	sc.Buffer(make([]byte, 4<<20), 4<<20)
-	return &Server{in: sc, out: out}
+	return &Server{in: sc, out: out, locks: map[string]*lock.Lock{}, transport: "stdio"}
 }
 
 type rpcRequest struct {
@@ -160,17 +324,6 @@ func (s *Server) write(v any) error {
 	return err
 }
 
-func (s *Server) reply(id json.RawMessage, result any) error {
-	return s.write(map[string]any{"jsonrpc": "2.0", "id": id, "result": result})
-}
-
-func (s *Server) replyError(id json.RawMessage, code int, msg string) error {
-	return s.write(map[string]any{
-		"jsonrpc": "2.0", "id": id,
-		"error": map[string]any{"code": code, "message": msg},
-	})
-}
-
 // Serve runs until the stream ends.
 func (s *Server) Serve() error {
 	for s.in.Scan() {
@@ -182,54 +335,118 @@ func (s *Server) Serve() error {
 		if err := json.Unmarshal(line, &req); err != nil {
 			continue
 		}
-		if err := s.handle(req); err != nil && req.ID != nil {
-			_ = s.replyError(req.ID, -32000, err.Error())
+		if resp := s.dispatch(req); resp != nil {
+			if err := s.write(resp); err != nil {
+				return err
+			}
 		}
 	}
 	return s.in.Err()
 }
 
-func (s *Server) handle(req rpcRequest) error {
+// dispatch computes the JSON-RPC response for a request. A nil return means
+// the request needs no response (e.g. a notification). The response is a
+// transport-neutral object so both stdio and HTTP can send it.
+func (s *Server) dispatch(req rpcRequest) any {
 	switch req.Method {
 	case "initialize":
-		return s.reply(req.ID, map[string]any{
-			"protocolVersion": protocolVersion,
-			"capabilities":    map[string]any{"tools": map[string]any{"listChanged": false}},
-			"serverInfo":      map[string]any{"name": serverName, "version": serverVersion},
-		})
+		caps := map[string]any{
+			"tools":   map[string]any{"listChanged": false},
+			"prompts": map[string]any{"listChanged": false},
+		}
+		if s.transport == "http" {
+			caps["streamableHttpCapabilities"] = map[string]any{"sse": false}
+		}
+		return map[string]any{
+			"jsonrpc": "2.0", "id": req.ID,
+			"result": map[string]any{
+				"protocolVersion": protocolVersion,
+				"capabilities":    caps,
+				"serverInfo":      map[string]any{"name": serverName, "version": serverVersion},
+			},
+		}
 	case "notifications/initialized":
 		return nil
 	case "ping":
-		return s.reply(req.ID, map[string]any{})
+		return map[string]any{"jsonrpc": "2.0", "id": req.ID, "result": map[string]any{}}
 	case "tools/list":
-		return s.reply(req.ID, map[string]any{"tools": tools})
+		return map[string]any{"jsonrpc": "2.0", "id": req.ID, "result": map[string]any{"tools": tools}}
 	case "tools/call":
-		return s.handleToolCall(req.ID, req.Params)
+		return s.toolCallResponse(req.ID, req.Params)
+	case "prompts/list":
+		return map[string]any{"jsonrpc": "2.0", "id": req.ID, "result": map[string]any{"prompts": prompts}}
+	case "prompts/get":
+		return s.promptGetResponse(req.ID, req.Params)
 	default:
 		if req.Method == "" {
 			return nil
 		}
-		return s.replyError(req.ID, -32601, "method not found: "+req.Method)
+		return errorResponse(req.ID, -32601, "method not found: "+req.Method)
 	}
 }
 
-func (s *Server) handleToolCall(id json.RawMessage, params json.RawMessage) error {
+func errorResponse(id json.RawMessage, code int, msg string) map[string]any {
+	return map[string]any{
+		"jsonrpc": "2.0", "id": id,
+		"error": map[string]any{"code": code, "message": msg},
+	}
+}
+
+func (s *Server) toolCallResponse(id json.RawMessage, params json.RawMessage) any {
 	var p struct {
 		Name      string         `json:"name"`
 		Arguments map[string]any `json:"arguments"`
 	}
 	if err := json.Unmarshal(params, &p); err != nil {
-		return s.replyError(id, -32602, "invalid params")
+		return errorResponse(id, -32602, "invalid params")
 	}
-	text, err := runTool(p.Name, p.Arguments)
+	text, err := s.runTool(p.Name, p.Arguments)
 	if err != nil {
-		return s.replyError(id, -32000, err.Error())
+		return errorResponse(id, -32000, err.Error())
 	}
 	result := map[string]any{
 		"content": []any{map[string]any{"type": "text", "text": text}},
 		"isError": false,
 	}
-	return s.reply(id, result)
+	return map[string]any{"jsonrpc": "2.0", "id": id, "result": result}
+}
+
+func (s *Server) promptGetResponse(id json.RawMessage, params json.RawMessage) any {
+	var p struct {
+		Name      string         `json:"name"`
+		Arguments map[string]any `json:"arguments"`
+	}
+	if err := json.Unmarshal(params, &p); err != nil {
+		return errorResponse(id, -32602, "invalid params")
+	}
+	var def *Prompt
+	for i := range prompts {
+		if prompts[i].Name == p.Name {
+			def = &prompts[i]
+			break
+		}
+	}
+	if def == nil {
+		return errorResponse(id, -32002, "prompt not found: "+p.Name)
+	}
+	if p.Arguments == nil {
+		p.Arguments = map[string]any{}
+	}
+	return map[string]any{
+		"jsonrpc": "2.0", "id": id,
+		"result": map[string]any{
+			"description": def.Description,
+			"messages": []any{
+				map[string]any{
+					"role": "user",
+					"content": map[string]any{
+						"type": "text",
+						"text": promptText(p.Name, p.Arguments),
+					},
+				},
+			},
+		},
+	}
 }
 
 func argString(args map[string]any, key string) string {
@@ -240,7 +457,7 @@ func argString(args map[string]any, key string) string {
 	return strings.TrimSpace(fmt.Sprintf("%v", v))
 }
 
-func runTool(name string, args map[string]any) (string, error) {
+func (s *Server) runTool(name string, args map[string]any) (string, error) {
 	switch name {
 	case "kern_optimize_prompt":
 		prompt := argString(args, "prompt")
@@ -354,6 +571,66 @@ func runTool(name string, args map[string]any) (string, error) {
 		}
 		return strings.TrimSuffix(b.String(), "\n"), nil
 
+	case "kern_search":
+		query := argString(args, "query")
+		if query == "" {
+			return "", fmt.Errorf("query is required")
+		}
+		ix, err := loadOrBuildIndex(argString(args, "root"))
+		if err != nil {
+			return "", err
+		}
+		limit := 20
+		if v := argString(args, "limit"); v != "" {
+			fmt.Sscanf(v, "%d", &limit)
+		}
+		matches := intel.RankedSearch(ix, query, limit)
+		if len(matches) == 0 {
+			return "no symbols matched: " + query, nil
+		}
+		var b strings.Builder
+		for _, m := range matches {
+			b.WriteString(m.Kind)
+			b.WriteString(" ")
+			b.WriteString(m.FullName())
+			b.WriteString(" ")
+			b.WriteString(m.File)
+			b.WriteString(":")
+			b.WriteString(itoa(m.Line))
+			b.WriteString("\n")
+		}
+		return strings.TrimSuffix(b.String(), "\n"), nil
+
+	case "kern_repo_search":
+		query := argString(args, "query")
+		if query == "" {
+			return "", fmt.Errorf("query is required")
+		}
+		limit := 20
+		if v := argString(args, "limit"); v != "" {
+			fmt.Sscanf(v, "%d", &limit)
+		}
+		hits := intel.SearchRepos(query, limit)
+		if len(hits) == 0 {
+			return "no symbols matched across registered repos: " + query, nil
+		}
+		return intel.FormatRepoHits(hits), nil
+
+	case "kern_why":
+		symbol := argString(args, "symbol")
+		if symbol == "" {
+			return "", fmt.Errorf("symbol is required")
+		}
+		ix, err := loadOrBuildIndex(argString(args, "root"))
+		if err != nil {
+			return "", err
+		}
+		info, ok := intel.Why(ix, symbol)
+		if !ok {
+			return "no symbol found: " + symbol, nil
+		}
+		return intel.FormatWhy(info), nil
+
 	case "kern_code_graph":
 		symbol := argString(args, "symbol")
 		if symbol == "" {
@@ -384,9 +661,313 @@ func runTool(name string, args map[string]any) (string, error) {
 		}
 		return ctx, nil
 
+	case "kern_changes":
+		files, ix, err := changedContext(args)
+		if err != nil {
+			return "", err
+		}
+		return intel.RenderChanges(intel.AnalyzeChanges(ix, files)), nil
+
+	case "kern_review":
+		files, ix, err := changedContext(args)
+		if err != nil {
+			return "", err
+		}
+		maxTokens := 8000
+		if v := argString(args, "max_tokens"); v != "" {
+			fmt.Sscanf(v, "%d", &maxTokens)
+		}
+		return intel.Review(ix, files, maxTokens), nil
+
+	case "kern_hubs":
+		ix, err := loadOrBuildIndex(argString(args, "root"))
+		if err != nil {
+			return "", err
+		}
+		limit := 10
+		if v := argString(args, "limit"); v != "" {
+			fmt.Sscanf(v, "%d", &limit)
+		}
+		var b strings.Builder
+		b.WriteString(intel.RenderHubs(intel.Hubs(ix, limit)))
+		b.WriteString("\n\n")
+		b.WriteString(intel.RenderBridges(intel.Bridges(ix, 15)))
+		return b.String(), nil
+
+	case "kern_test_gaps":
+		ix, err := loadOrBuildIndex(argString(args, "root"))
+		if err != nil {
+			return "", err
+		}
+		limit := 10
+		if v := argString(args, "limit"); v != "" {
+			fmt.Sscanf(v, "%d", &limit)
+		}
+		return intel.AnalyzeCoverage(ix).Render(), nil
+
+	case "kern_path":
+		from := argString(args, "from")
+		to := argString(args, "to")
+		if from == "" || to == "" {
+			return "", fmt.Errorf("from and to are required")
+		}
+		ix, err := loadOrBuildIndex(argString(args, "root"))
+		if err != nil {
+			return "", err
+		}
+		from, okFrom := intel.Resolve(ix, from)
+		to, okTo := intel.Resolve(ix, to)
+		if !okFrom {
+			return "", fmt.Errorf("unknown symbol: %s", from)
+		}
+		if !okTo {
+			return "", fmt.Errorf("unknown symbol: %s", to)
+		}
+		return intel.RenderPath(ix, intel.ShortestPath(ix, from, to)), nil
+
+	case "kern_dead":
+		ix, err := loadOrBuildIndex(argString(args, "root"))
+		if err != nil {
+			return "", err
+		}
+		dead := intel.DeadCode(ix)
+		limit := 0
+		if v := argString(args, "limit"); v != "" {
+			fmt.Sscanf(v, "%d", &limit)
+		}
+		if limit > 0 && len(dead) > limit {
+			dead = dead[:limit]
+		}
+		return intel.RenderDead(dead), nil
+
+	case "kern_larges":
+		ix, err := loadOrBuildIndex(argString(args, "root"))
+		if err != nil {
+			return "", err
+		}
+		minLines := 60
+		if v := argString(args, "min_lines"); v != "" {
+			fmt.Sscanf(v, "%d", &minLines)
+		}
+		large := intel.LargeFunctions(ix, minLines)
+		limit := 0
+		if v := argString(args, "limit"); v != "" {
+			fmt.Sscanf(v, "%d", &limit)
+		}
+		if limit > 0 && len(large) > limit {
+			large = large[:limit]
+		}
+		return intel.RenderLarge(large), nil
+
+	case "kern_arch":
+		ix, err := loadOrBuildIndex(argString(args, "root"))
+		if err != nil {
+			return "", err
+		}
+		return intel.RenderArch(intel.AnalyzeArchitecture(ix)), nil
+
+	case "kern_churn":
+		root := argString(args, "root")
+		if root == "" {
+			cwd, _ := os.Getwd()
+			root = cwd
+		}
+		from, to := "", ""
+		if r := argString(args, "range"); r != "" {
+			if p := strings.SplitN(r, "..", 2); len(p) == 2 {
+				from, to = p[0], p[1]
+			} else {
+				from = r
+			}
+		}
+		report, err := intel.Churn(root, from, to)
+		if err != nil {
+			return "", err
+		}
+		return intel.RenderChurn(report), nil
+
+	case "kern_near":
+		symbol := argString(args, "symbol")
+		if symbol == "" {
+			return "", fmt.Errorf("symbol is required")
+		}
+		ix, err := loadOrBuildIndex(argString(args, "root"))
+		if err != nil {
+			return "", err
+		}
+		depth := 2
+		if v := argString(args, "depth"); v != "" {
+			fmt.Sscanf(v, "%d", &depth)
+		}
+		maxNodes := 100
+		if v := argString(args, "max"); v != "" {
+			fmt.Sscanf(v, "%d", &maxNodes)
+		}
+		nodes, err := intel.Near(ix, symbol, depth, maxNodes)
+		if err != nil {
+			return "", err
+		}
+		return intel.RenderNear(ix, nodes), nil
+
+	case "kern_probe":
+		task := argString(args, "task")
+		if task == "" {
+			return "", fmt.Errorf("task is required")
+		}
+		ix, err := loadOrBuildIndex(argString(args, "root"))
+		if err != nil {
+			return "", err
+		}
+		maxTokens := 4000
+		if v := argString(args, "max_tokens"); v != "" {
+			fmt.Sscanf(v, "%d", &maxTokens)
+		}
+		report := intel.Probe(ix, task, maxTokens)
+		text := intel.RenderProbe(report)
+		if report.Truncated {
+			text = intel.FitProbe(text, maxTokens)
+		}
+		return text, nil
+
+	case "kern_trace":
+		src := argString(args, "trace")
+		if src == "" {
+			return "", fmt.Errorf("trace is required")
+		}
+		ix, err := loadOrBuildIndex(argString(args, "root"))
+		if err != nil {
+			return "", err
+		}
+		limit := 0
+		if v := argString(args, "limit"); v != "" {
+			fmt.Sscanf(v, "%d", &limit)
+		}
+		return intel.RenderTrace(intel.Trace(ix, src, "trace", limit)), nil
+
+	case "kern_lock":
+		scope := argString(args, "scope")
+		if scope == "" {
+			return "", fmt.Errorf("scope is required")
+		}
+		root := argString(args, "root")
+		if root == "" {
+			cwd, _ := os.Getwd()
+			root = cwd
+		}
+		lk, err := lock.Acquire(root, scope)
+		if err != nil {
+			_, pid, _ := lock.Held(root, scope)
+			return "", fmt.Errorf("lock %q is held (pid %d)", scope, pid)
+		}
+		if s.locks == nil {
+			s.locks = map[string]*lock.Lock{}
+		}
+		if prev := s.locks[scope]; prev != nil {
+			_ = prev.Release()
+		}
+		s.locks[scope] = lk
+		return fmt.Sprintf("lock acquired: %s (pid %d)", scope, os.Getpid()), nil
+
+	case "kern_unlock":
+		scope := argString(args, "scope")
+		if scope == "" {
+			return "", fmt.Errorf("scope is required")
+		}
+		if lk := s.locks[scope]; lk != nil {
+			if err := lk.Release(); err != nil {
+				return "", err
+			}
+			delete(s.locks, scope)
+			return "lock released: " + scope, nil
+		}
+		return "", fmt.Errorf("lock %q is not held by this server", scope)
+
+	case "kern_lock_status":
+		root := argString(args, "root")
+		if root == "" {
+			cwd, _ := os.Getwd()
+			root = cwd
+		}
+		sts, err := lock.List(root)
+		if err != nil {
+			return "", err
+		}
+		if len(sts) == 0 {
+			return "no locks in workspace", nil
+		}
+		var b strings.Builder
+		for _, s := range sts {
+			state := "free"
+			if s.Held {
+				state = "HELD"
+			}
+			holder := ""
+			if s.PID > 0 {
+				holder = fmt.Sprintf(" (pid %d)", s.PID)
+			}
+			fmt.Fprintf(&b, "%s %s%s\n", s.Scope, state, holder)
+		}
+		return strings.TrimSuffix(b.String(), "\n"), nil
+
+	case "kern_guard_check":
+		files, ix, err := changedContext(args)
+		if err != nil {
+			return "", err
+		}
+		if len(files) == 0 {
+			return "no changed files (use file= or range=, or make edits)", nil
+		}
+		root := argString(args, "root")
+		if root == "" {
+			cwd, _ := os.Getwd()
+			root = cwd
+		}
+		b, err := intel.LoadBoundaries(root)
+		if err != nil {
+			return "", err
+		}
+		return intel.RenderViolations(intel.CheckBoundaries(ix, b, files)), nil
+
 	default:
 		return "", fmt.Errorf("unknown tool: %s", name)
 	}
+}
+
+// changedContext resolves the changed files for a tool call: an explicit
+// comma-separated file list wins; otherwise the git range (empty = working
+// tree).
+func changedContext(args map[string]any) ([]string, *index.Index, error) {
+	root := argString(args, "root")
+	if root == "" {
+		cwd, _ := os.Getwd()
+		root = cwd
+	}
+	ix, err := loadOrBuildIndex(root)
+	if err != nil {
+		return nil, nil, err
+	}
+	if files := argString(args, "file"); files != "" {
+		var out []string
+		for _, p := range strings.Split(files, ",") {
+			if p = strings.TrimSpace(p); p != "" {
+				out = append(out, p)
+			}
+		}
+		return out, ix, nil
+	}
+	from, to := "", ""
+	if r := argString(args, "range"); r != "" {
+		if p := strings.SplitN(r, "..", 2); len(p) == 2 {
+			from, to = p[0], p[1]
+		} else {
+			from = r
+		}
+	}
+	files, err := intel.FilesForRange(root, from, to)
+	if err != nil {
+		return nil, nil, err
+	}
+	return files, ix, nil
 }
 
 func pct(before, after int) float64 {

@@ -1,0 +1,357 @@
+package index
+
+import (
+	"encoding/json"
+	"fmt"
+	"html"
+	"sort"
+	"strings"
+)
+
+// GraphNode is a single symbol node in a neighbourhood graph.
+type GraphNode struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+	Kind string `json:"kind"`
+	Role string `json:"role,omitempty"` // def, caller, callee
+	File string `json:"file,omitempty"`
+	Line int    `json:"line,omitempty"`
+}
+
+// GraphEdge is a directed edge between two graph nodes. Confidence records how
+// reliably the edge was derived: "high" when both endpoints are defined symbols
+// resolved from real call sites, "low" when the endpoint is a name with no
+// definition in the index (a phantom call or unresolved reference).
+type GraphEdge struct {
+	From       string `json:"from"`
+	To         string `json:"to"`
+	Confidence string `json:"confidence,omitempty"`
+}
+
+// GraphResult is the structured neighbourhood of a symbol.
+type GraphResult struct {
+	Root  string      `json:"root"`
+	Nodes []GraphNode `json:"nodes"`
+	Edges []GraphEdge `json:"edges"`
+}
+
+// Neighborhood returns the definition, callers, and callees of a symbol as a
+// structured graph (used by --json, --graphml and --html exports).
+func (ix *Index) Neighborhood(symbol string) (GraphResult, bool) {
+	g := GraphResult{Root: symbol}
+	defs := ix.symbolsFor(symbol)
+	if len(defs) == 0 {
+		return g, false
+	}
+	byID := map[string]GraphNode{}
+	rootID := defs[0].FullName()
+	for _, d := range defs {
+		byID[d.FullName()] = GraphNode{
+			ID: d.FullName(), Name: d.FullName(), Kind: d.Kind,
+			Role: "def", File: d.File, Line: d.Line,
+		}
+	}
+	for _, c := range ix.CallersOf(symbol) {
+		byID[c] = mergeNode(byID[c], GraphNode{ID: c, Name: c, Role: "caller"})
+		g.Edges = append(g.Edges, GraphEdge{
+			From: c, To: rootID,
+			Confidence: edgeConfidence(ix, c),
+		})
+	}
+	for _, c := range dedupeSorted(append([]string{}, ix.Calls[symbol]...)) {
+		byID[c] = mergeNode(byID[c], GraphNode{ID: c, Name: c, Role: "callee"})
+		g.Edges = append(g.Edges, GraphEdge{
+			From: rootID, To: c,
+			Confidence: edgeConfidence(ix, c),
+		})
+	}
+	// resolve file:line for caller/callee nodes that have a definition
+	for id, n := range byID {
+		if n.File != "" || id == rootID {
+			continue
+		}
+		if d, ok := resolveName(ix, n.Name); ok {
+			n.Kind, n.File, n.Line = d.Kind, d.File, d.Line
+			byID[id] = n
+		}
+	}
+	ids := make([]string, 0, len(byID))
+	for id := range byID {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		g.Nodes = append(g.Nodes, byID[id])
+	}
+	return g, true
+}
+
+// resolveName finds a definition for a call target name. Exact matches win;
+// a package-qualified target like "index.Build" falls back to the bare name
+// ("Build") so call sites still resolve to real definitions.
+func resolveName(ix *Index, name string) (Symbol, bool) {
+	if defs := ix.symbolsFor(name); len(defs) > 0 {
+		return defs[0], true
+	}
+	if i := strings.LastIndex(name, "."); i >= 0 && i+1 < len(name) {
+		if defs := ix.symbolsFor(name[i+1:]); len(defs) > 0 {
+			return defs[0], true
+		}
+	}
+	return Symbol{}, false
+}
+
+// edgeConfidence reports how reliably the edge to a named endpoint was derived:
+// high when the name resolves to a definition in the index, low when it is a
+// phantom call or unresolved reference.
+func edgeConfidence(ix *Index, name string) string {
+	if _, ok := resolveName(ix, name); ok {
+		return "high"
+	}
+	return "low"
+}
+
+func mergeNode(a, b GraphNode) GraphNode {
+	if a.ID == "" {
+		return b
+	}
+	if a.Role == "def" || b.Role == "def" {
+		a.Role = "def"
+	}
+	if a.Role == "caller" && b.Role == "callee" {
+		a.Role = "caller"
+	}
+	return a
+}
+
+// GraphJSON exports the neighbourhood as JSON.
+func (g GraphResult) GraphJSON() string {
+	b, _ := json.MarshalIndent(g, "", "  ")
+	return string(b)
+}
+
+// GraphGraphML exports the neighbourhood as GraphML (XML) for tools like
+// yEd, Gephi and Cytoscape.
+func (g GraphResult) GraphGraphML() string {
+	var b strings.Builder
+	b.WriteString(`<?xml version="1.0" encoding="UTF-8"?>
+<graphml xmlns="http://graphml.graphdrawing.org/xmlns">
+  <key id="kind" for="node" attr.name="kind" attr.type="string"/>
+  <key id="role" for="node" attr.name="role" attr.type="string"/>
+  <key id="file" for="node" attr.name="file" attr.type="string"/>
+  <key id="line" for="node" attr.name="line" attr.type="int"/>
+  <key id="confidence" for="edge" attr.name="confidence" attr.type="string"/>
+  <graph id="kern" edgedefault="directed">
+`)
+	for _, n := range g.Nodes {
+		fmt.Fprintf(&b, "    <node id=%q>\n      <data key=\"kind\">%s</data>\n", n.ID, xmlEsc(n.Kind))
+		if n.Role != "" {
+			fmt.Fprintf(&b, "      <data key=\"role\">%s</data>\n", xmlEsc(n.Role))
+		}
+		if n.File != "" {
+			fmt.Fprintf(&b, "      <data key=\"file\">%s</data>\n", xmlEsc(n.File))
+		}
+		if n.Line > 0 {
+			fmt.Fprintf(&b, "      <data key=\"line\">%d</data>\n", n.Line)
+		}
+		b.WriteString("    </node>\n")
+	}
+	for _, e := range g.Edges {
+		if e.Confidence == "low" {
+			fmt.Fprintf(&b, "    <edge source=%q target=%q>\n      <data key=\"confidence\">low</data>\n    </edge>\n", e.From, e.To)
+		} else {
+			fmt.Fprintf(&b, "    <edge source=%q target=%q/>\n", e.From, e.To)
+		}
+	}
+	b.WriteString("  </graph>\n</graphml>\n")
+	return b.String()
+}
+
+func xmlEsc(s string) string {
+	r := strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;", `"`, "&quot;", "'", "&apos;")
+	return r.Replace(s)
+}
+
+// GraphHTML renders a self-contained interactive HTML/SVG visualisation of the
+// neighbourhood. No external dependencies; the data is embedded as JSON and
+// rendered with inline JavaScript.
+func (g GraphResult) GraphHTML() string {
+	data, _ := json.Marshal(g)
+	data = []byte(strings.ReplaceAll(string(data), "</", "<\\/"))
+	kindColor := map[string]string{
+		"func": "#3b82f6", "method": "#8b5cf6", "struct": "#ec4899",
+		"interface": "#f59e0b", "type": "#14b8a6", "const": "#64748b",
+		"var": "#64748b", "call": "#94a3b8",
+	}
+	var colors strings.Builder
+	for k, v := range kindColor {
+		colors.WriteString(`"`)
+		colors.WriteString(k)
+		colors.WriteString(`":"`)
+		colors.WriteString(v)
+		colors.WriteString(`",`)
+	}
+	var b strings.Builder
+	b.WriteString(`<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>kern graph: `)
+	b.WriteString(html.EscapeString(g.Root))
+	b.WriteString(`</title>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 0; background: #0f172a; color: #e2e8f0; }
+  #top { padding: 10px 16px; border-bottom: 1px solid #334155; display: flex; gap: 16px; align-items: baseline; }
+  #top h1 { font-size: 15px; margin: 0; }
+  #top .sub { color: #94a3b8; font-size: 12px; }
+  #legend { font-size: 11px; color: #94a3b8; }
+  #legend span { margin-right: 10px; }
+.low-edge { stroke: #dc2626; stroke-dasharray: 5,4; }
+  #wrap { display: flex; }
+  svg { flex: 1; height: 600px; }
+  #side { width: 300px; padding: 12px; border-left: 1px solid #334155; font-size: 12px; }
+  #side .title { color: #94a3b8; text-transform: uppercase; font-size: 10px; letter-spacing: 1px; }
+  #side .dim { color: #94a3b8; }
+  svg text { font-family: system-ui, sans-serif; }
+  .node rect { cursor: pointer; transition: opacity .15s; }
+  .node text { pointer-events: none; }
+  .edge { stroke: #475569; stroke-width: 1.5; }
+  .dim { opacity: .12; }
+</style>
+</head>
+<body>
+<div id="top"><h1>kern graph: `)
+	b.WriteString(html.EscapeString(g.Root))
+	b.WriteString(`</h1><span class="sub">hover to trace edges, click for details</span>
+<div id="legend"><span style="color:#64748b">\u2500\u25b6 high confidence</span><span style="color:#dc2626">\u2500\u2500\u25b6 low confidence (unresolved name)</span></div></div>
+<div id="wrap"><svg id="svg" viewBox="0 0 1000 600"></svg><div id="side"></div></div>
+<script>
+const g = `)
+	b.WriteString(string(data))
+	b.WriteString(`;
+const colors = {`)
+	b.WriteString(strings.TrimSuffix(colors.String(), ","))
+	b.WriteString(`};
+const COL = {caller: 120, def: 360, callee: 600};
+const layers = {caller: [], def: [], callee: []};
+const ids = [];
+g.nodes.forEach((n, i) => { n.i = i; n.rx = n.ry = 0; ids.push(n.id); layers[n.role||'callee'].push(n); });
+let nodeById = {};
+g.nodes.forEach(n => nodeById[n.id] = n);
+function slot(n, role) {
+  const col = COL[role];
+  const idx = layers[role].indexOf(n);
+  const nL = layers[role].length;
+  const gap = nL > 1 ? 40 : 0;
+  const start = 300 - ((nL - 1) * gap) / 2;
+  return [col, start + idx * gap];
+}
+const svg = document.getElementById('svg');
+const NS = 'http://www.w3.org/2000/svg';
+const edgesEl = [], nodeEl = new Map(), w = new Map();
+const edgemap = new Map();
+function addEdge(from, to, confidence) {
+  const e = document.createElementNS(NS, 'line');
+  e.setAttribute('class', 'edge');
+  if (confidence === 'low') {
+    e.setAttribute('stroke-dasharray', '5,4');
+    e.setAttribute('stroke', '#dc2626');
+  }
+  const mk = document.createElementNS(NS, 'marker');
+  mk.setAttribute('id', 'arrow' + (edgemap.size));
+  mk.setAttribute('viewBox', '0 0 10 10'); mk.setAttribute('refX', '9'); mk.setAttribute('refY', '5');
+  mk.setAttribute('markerWidth', '6'); mk.setAttribute('markerHeight', '6'); mk.setAttribute('orient', 'auto-start-reverse');
+  const p = document.createElementNS(NS, 'path'); p.setAttribute('d', 'M 0 0 L 10 5 L 0 10 z'); p.setAttribute('fill', '#64748b');
+  mk.appendChild(p); svg.appendChild(mk);
+  e.setAttribute('marker-end', 'url(#arrow' + (edgemap.size) + ')');
+  svg.appendChild(e); edgesEl.push(e);
+  const key = from + '>' + to;
+  if (!edgemap.has(key)) edgemap.set(key, []);
+  edgemap.get(key).push(e);
+}
+function textWidth(s) {
+  if (!w.has(s)) { const t = document.createElementNS(NS, 'text'); t.textContent = s; svg.appendChild(t); w.set(s, t.getComputedTextLength()); t.remove(); }
+  return w.get(s);
+}
+function draw() {
+  g.nodes.forEach(n => {
+    const [cx, cy] = slot(n, n.role || 'callee');
+    const tw = Math.min(textWidth(n.id), 180);
+    const rw = tw + 22, rh = 30;
+    const g2 = document.createElementNS(NS, 'g');
+    g2.setAttribute('class', 'node');
+    const rect = document.createElementNS(NS, 'rect');
+    rect.setAttribute('width', rw); rect.setAttribute('height', rh);
+    rect.setAttribute('rx', 6);
+    rect.setAttribute('fill', (colors[n.kind] || '#64748b') + '33');
+    rect.setAttribute('stroke', colors[n.kind] || '#64748b');
+    const t = document.createElementNS(NS, 'text');
+    t.setAttribute('x', rw / 2); t.setAttribute('y', rh / 2 + 4);
+    t.setAttribute('text-anchor', 'middle'); t.setAttribute('font-size', '11');
+    t.textContent = n.id;
+    g2.appendChild(rect); g2.appendChild(t);
+    g2.setAttribute('transform', 'translate(' + (cx - rw / 2) + ',' + (cy - rh / 2) + ')');
+    g2.addEventListener('mouseenter', () => highlight(n, true));
+    g2.addEventListener('mouseleave', () => highlight(n, false));
+    g2.addEventListener('click', () => detail(n));
+    svg.appendChild(g2);
+    nodeEl.set(n.id, g2);
+    n.rx = cx; n.ry = cy; n.w = rw; n.h = rh;
+  });
+  g.edges.forEach(e => addEdge(e.from, e.to, e.confidence));
+  edgesEl.forEach((el, i) => {});
+  layout();
+}
+function layout() {
+  g.edges.forEach(e => {
+    const a = nodeById[e.from], b = nodeById[e.to];
+    if (!a || !b) return;
+    const lines = edgemap.get(e.from + '>' + e.to) || [];
+    lines.forEach((l, i) => {
+      const bend = (i - (lines.length - 1) / 2) * 12;
+      let x1 = a.rx + (e.from === g.root ? a.w / 2 : -a.w / 2);
+      let y1 = a.ry + bend;
+      let x2 = b.rx + (e.to === g.root ? -b.w / 2 : b.w / 2);
+      let y2 = b.ry + bend;
+      l.setAttribute('x1', x1); l.setAttribute('y1', y1);
+      l.setAttribute('x2', x2); l.setAttribute('y2', y2);
+    });
+  });
+}
+function highlight(n, on) {
+  const connected = new Set();
+  g.edges.forEach(e => {
+    if (e.from === n.id || e.to === n.id) { connected.add(e.from); connected.add(e.to); }
+  });
+  g.nodes.forEach(m => {
+    const el = nodeEl.get(m.id);
+    if (!el) return;
+    if (!on || m.id === n.id || connected.has(m.id)) el.classList.remove('dim');
+    else el.classList.add('dim');
+  });
+  edgesEl.forEach(l => { if (!on || l.__live) l.classList.remove('dim'); else l.classList.add('dim'); });
+  g.edges.forEach(e => {
+    const isConn = e.from === n.id || e.to === n.id;
+    (edgemap.get(e.from + '>' + e.to) || []).forEach(l => l.__live = isConn);
+  });
+}
+const side = document.getElementById('side');
+function detail(n) {
+  side.innerHTML = '<div class="title">' + (n.role || '') + '</div><div style="font-size:15px;margin:4px 0">' + n.id + '</div>' +
+    '<div>kind: <span class="dim">' + (n.kind || '-') + '</span></div>' +
+    '<div>file: <span class="dim">' + (n.file || '-') + '</span></div>' +
+    '<div>line: <span class="dim">' + (n.line || '-') + '</span></div>' +
+    '<div style="margin-top:8px" class="dim">' + n.id + ' has ' + (g.edges.filter(e => e.from === n.id).length) + ' outgoing, ' + (g.edges.filter(e => e.to === n.id).length) + ' incoming edges.</div>';
+}
+function legend() {
+  const seen = {};
+  g.nodes.forEach(n => { if (!seen[n.kind]) { seen[n.kind] = 1; const s = document.createElement('span'); s.innerHTML = '<span style="color:' + (colors[n.kind] || '#64748b') + '">\u25a0</span> ' + n.kind; document.getElementById('legend').appendChild(s); } });
+}
+draw(); legend();
+detail(nodeById[g.root]);
+</script>
+</body>
+</html>
+`)
+	return b.String()
+}
