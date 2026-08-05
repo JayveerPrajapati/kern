@@ -9,8 +9,25 @@ permissions:
   contents: write
 
 jobs:
+  test:
+    name: vet + test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Vet and test
+        run: |
+          go vet ./...
+          go test ./...
+
   build:
     name: build ${{ matrix.target }}
+    needs: test
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -89,6 +106,25 @@ jobs:
           path: dist
           merge-multiple: true
 
+      - name: Generate checksums and brew formula
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF#refs/tags/}"
+          # The source archive Homebrew will build from; its sha256 goes in the formula.
+          curl -fsSL "https://github.com/${{ github.repository }}/archive/refs/tags/${tag}.tar.gz" -o source.tar.gz
+          sha="$(sha256sum source.tar.gz | awk '{print $1}')"
+          echo "source sha256: ${sha}"
+          # One SHA256SUMS for every prebuilt asset (relative names, so
+          # 'sha256sum -c SHA256SUMS' works from a download directory).
+          (cd dist && sha256sum kern-*.tar.gz kern-*.zip) > dist/SHA256SUMS
+          # Ready-to-use Homebrew formula: url + sha256 filled in for this tag.
+          sed -e "s|v0.1.0|${tag}|g" \
+              -e "s|REPLACE_WITH_SOURCE_TARBALL_SHA256|${sha}|" \
+              homebrew/kern.rb > kern.rb
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          echo "sha=${sha}" >> "$GITHUB_OUTPUT"
+
       - name: Create release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -97,11 +133,14 @@ jobs:
           cat > /tmp/release-notes.md <<EOF
           See [README](https://github.com/${{ github.repository }}/blob/main/README.md) for install options:
           - \`curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/main/install.sh | sh\`
-          - \`brew install kern\` (homebrew-tap)
-          - \`pip install kern-context\`
           - \`go install github.com/${{ github.repository }}/cmd/kern@$tag\`
+          - \`brew install kern\` — ready-to-use formula attached as \`kern.rb\`
+          - \`pip install kern-context\`
+
+          Assets include a \`SHA256SUMS\` file (\`install.sh\` verifies against it) and
+          a filled-in Homebrew formula for the tap repo.
           EOF
-          gh release create "$tag" dist/kern-* \
+          gh release create "$tag" dist/kern-* dist/SHA256SUMS kern.rb \
             --title "$tag" \
             --notes-file /tmp/release-notes.md \
             --draft=false

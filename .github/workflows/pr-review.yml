@@ -1,0 +1,65 @@
+name: pr-review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build kern
+        run: go build -buildvcs=false -o kern ./cmd/kern
+
+      - name: Vet and test
+        run: |
+          go vet ./...
+          go test ./...
+
+      - name: Run code-intel review
+        id: review
+        shell: bash
+        run: |
+          base="origin/${{ github.base_ref }}"
+          # limit the blast-radius panel and cap size for a comment
+          ./kern review --range "${base}..HEAD" --max 6000 > /tmp/kern-review.md || true
+          ./kern changes --range "${base}..HEAD" > /tmp/kern-changes.txt || true
+          { cat /tmp/kern-review.md; echo; echo "---"; cat /tmp/kern-changes.txt; } > /tmp/kern-comment.md
+          echo "preview<<'EOF'" >> "$GITHUB_OUTPUT"
+          cat /tmp/kern-comment.md >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+
+      - name: Post review comment
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const body = process.env.REVIEW_BODY || 'No kern review generated for this diff.';
+            const { data } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+            const marker = '<!-- kern-review -->';
+            const existing = data.find(c => c.body && c.body.includes(marker));
+            const payload = { owner: context.repo.owner, repo: context.repo.repo, issue_number: context.issue.number, body: marker + '\n' + body };
+            if (existing) {
+              await github.rest.issues.updateComment({ ...payload, comment_id: existing.id });
+            } else {
+              await github.rest.issues.createComment(payload);
+            }
+        env:
+          REVIEW_BODY: ${{ steps.review.outputs.preview }}

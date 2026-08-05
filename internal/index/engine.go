@@ -2,6 +2,7 @@ package index
 
 import (
 	"encoding/json"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -13,22 +14,28 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/cache"
 )
 
+// indexVersion is bumped whenever the persisted index schema changes, so
+// stale caches are rebuilt automatically instead of serving zero-value fields.
+const indexVersion = 2
+
 // Index is the in-memory representation of a project's AST index.
 type Index struct {
-	Root        string               `json:"root"`
-	Symbols     []Symbol             `json:"symbols"`
-	Calls       map[string][]string  `json:"calls"`
-	Callers     map[string][]string  `json:"callers"`
-	Pkgs        map[string]*Pkg      `json:"packages"`
-	FileHashes  map[string]string    `json:"file_hashes"`
-	SymbolsByFile map[string][]Symbol `json:"-"`
-	UpdatedAt   time.Time            `json:"updated_at"`
+	Root          string               `json:"root"`
+	Version       int                  `json:"version"`
+	Symbols       []Symbol             `json:"symbols"`
+	Calls         map[string][]string  `json:"calls"`
+	Callers       map[string][]string  `json:"callers"`
+	Pkgs          map[string]*Pkg      `json:"packages"`
+	FileHashes    map[string]string    `json:"file_hashes"`
+	SymbolsByFile map[string][]Symbol  `json:"-"`
+	UpdatedAt     time.Time            `json:"updated_at"`
 }
 
 // New returns an empty index rooted at root.
 func New(root string) *Index {
 	return &Index{
 		Root:          root,
+		Version:       indexVersion,
 		Calls:         map[string][]string{},
 		Callers:       map[string][]string{},
 		Pkgs:          map[string]*Pkg{},
@@ -73,8 +80,31 @@ func Load(root string) (*Index, error) {
 	if err := json.Unmarshal(data, ix); err != nil {
 		return nil, err
 	}
+	if ix.Version != indexVersion {
+		return nil, fmt.Errorf("index version %d (want %d): rebuild required", ix.Version, indexVersion)
+	}
 	ix.reindexByFile()
 	return ix, nil
+}
+
+// Stale reports whether the cached index no longer matches the files on disk:
+// a source file was added, removed, or edited since the index was built. The
+// check hashes the current indexable file set against the manifest captured at
+// build time, so intel commands never silently serve out-of-date call graphs.
+func (ix *Index) Stale() bool {
+	if ix == nil || len(ix.FileHashes) == 0 {
+		return true
+	}
+	cur := indexableHashes(ix.Root)
+	if len(cur) != len(ix.FileHashes) {
+		return true
+	}
+	for f, h := range cur {
+		if ph, ok := ix.FileHashes[f]; !ok || ph != h {
+			return true
+		}
+	}
+	return false
 }
 
 // LoadFile reads an index directly from a store path (used for
@@ -87,6 +117,9 @@ func LoadFile(path string) (*Index, error) {
 	ix := &Index{}
 	if err := json.Unmarshal(data, ix); err != nil {
 		return nil, err
+	}
+	if ix.Version != indexVersion {
+		return nil, fmt.Errorf("index version %d (want %d): rebuild required", ix.Version, indexVersion)
 	}
 	ix.reindexByFile()
 	return ix, nil
@@ -158,6 +191,7 @@ func Build(root string) (*Index, error) {
 	})
 	ix.UpdatedAt = time.Now().UTC()
 	ix.computeCallers()
+	ix.reindexByFile()
 	return ix, err
 }
 
@@ -231,6 +265,22 @@ func (ix *Index) symbolsFor(name string) []Symbol {
 		}
 	}
 	return out
+}
+
+// FindSymbol returns the first symbol matching name, exact on Name or
+// FullName ("Type.Method"). ok is false when nothing matches.
+func (ix *Index) FindSymbol(name string) (Symbol, bool) {
+	if defs := ix.symbolsFor(name); len(defs) > 0 {
+		return defs[0], true
+	}
+	return Symbol{}, false
+}
+
+// ResolveName finds a definition for a call target. Exact matches win; a
+// package-qualified target like "index.Build" falls back to the bare name
+// ("Build") so call sites still resolve to real definitions.
+func (ix *Index) ResolveName(name string) (Symbol, bool) {
+	return resolveName(ix, name)
 }
 
 // Search matches symbols by pattern. Patterns support "*" wildcards and the
@@ -311,6 +361,9 @@ func (ix *Index) Graph(symbol string) string {
 		for _, c := range callers {
 			b.WriteString("  ")
 			b.WriteString(c)
+			if _, ok := resolveName(ix, c); !ok {
+				b.WriteString("  (unresolved)")
+			}
 			b.WriteString("\n")
 		}
 	}
@@ -320,6 +373,9 @@ func (ix *Index) Graph(symbol string) string {
 		for _, c := range dedupeSorted(append([]string{}, callees...)) {
 			b.WriteString("  ")
 			b.WriteString(c)
+			if _, ok := resolveName(ix, c); !ok {
+				b.WriteString("  (unresolved)")
+			}
 			b.WriteString("\n")
 		}
 	}

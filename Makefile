@@ -36,16 +36,16 @@ release: clean
 	@set -e; for target in "linux amd64" "linux arm64" "darwin amd64" "darwin arm64"; do \
 		set -- $$target; os=$$1; arch=$$2; \
 		echo "==> building kern-$$os-$$arch"; \
-		GOOS=$$os GOARCH=$$arch go build $(GOFLAGS) -ldflags "-X main.version=$(VERSION)" -o $(BIN)/kern-$$os-$$arch ./cmd/kern; \
-		GOOS=$$os GOARCH=$$arch go build $(GOFLAGS) -ldflags "-X main.version=$(VERSION)" -o $(BIN)/kern-mcp-$$os-$$arch ./cmd/kern-mcp; \
 		mkdir -p $(BIN)/kern-$$os-$$arch; \
-		mv $(BIN)/kern-$$os-$$arch $(BIN)/kern-mcp-$$os-$$arch $(BIN)/kern-$$os-$$arch/; \
+		GOOS=$$os GOARCH=$$arch go build $(GOFLAGS) -ldflags "-X main.version=$(VERSION)" -o $(BIN)/kern-$$os-$$arch/kern ./cmd/kern; \
+		GOOS=$$os GOARCH=$$arch go build $(GOFLAGS) -ldflags "-X main.version=$(VERSION)" -o $(BIN)/kern-$$os-$$arch/kern-mcp ./cmd/kern-mcp; \
 		tar -C $(BIN) -czf $(BIN)/kern-$$os-$$arch.tar.gz kern-$$os-$$arch/; \
 		rm -rf $(BIN)/kern-$$os-$$arch; \
 	done; \
-	GOOS=windows GOARCH=amd64 go build $(GOFLAGS) -ldflags "-X main.version=$(VERSION)" -o $(BIN)/kern-windows-amd64.exe ./cmd/kern; \
-	GOOS=windows GOARCH=amd64 go build $(GOFLAGS) -ldflags "-X main.version=$(VERSION)" -o $(BIN)/kern-mcp-windows-amd64.exe ./cmd/kern-mcp; \
-	cd $(BIN) && zip -q kern-windows-amd64.zip kern-windows-amd64.exe kern-mcp-windows-amd64.exe && rm -f kern-windows-amd64.exe kern-mcp-windows-amd64.exe
+	mkdir -p $(BIN)/kern-windows-amd64; \
+	GOOS=windows GOARCH=amd64 go build $(GOFLAGS) -ldflags "-X main.version=$(VERSION)" -o $(BIN)/kern-windows-amd64/kern.exe ./cmd/kern; \
+	GOOS=windows GOARCH=amd64 go build $(GOFLAGS) -ldflags "-X main.version=$(VERSION)" -o $(BIN)/kern-windows-amd64/kern-mcp.exe ./cmd/kern-mcp; \
+	cd $(BIN) && zip -q -r kern-windows-amd64.zip kern-windows-amd64/ && rm -rf kern-windows-amd64
 	@echo "release assets in $(BIN):"; ls $(BIN)/*.tar.gz $(BIN)/*.zip
 
 dist: release

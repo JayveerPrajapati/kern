@@ -75,6 +75,35 @@ go_install() {
   echo "kern: installed via go install. Ensure \$(go env GOPATH)/bin is on your PATH."
 }
 
+# verify checks the downloaded tarball against the release's SHA256SUMS asset.
+# It is best-effort: older releases without a SHA256SUMS file, entries missing
+# from it, or hosts without a sha256 tool simply skip verification.
+verify() {
+  file="$1"; dir="$2"; tag="$3"
+  sums_url="https://github.com/${REPO}/releases/download/${tag}/SHA256SUMS"
+  if ! download "$sums_url" "$dir/SHA256SUMS"; then
+    return 0
+  fi
+  if command -v sha256sum >/dev/null 2>&1; then
+    sum="sha256sum"
+  elif command -v shasum >/dev/null 2>&1; then
+    sum="shasum -a 256"
+  else
+    return 0
+  fi
+  expected=$(grep -F "  ${file}" "$dir/SHA256SUMS" | awk '{print $1}')
+  if [ -z "$expected" ]; then
+    return 0
+  fi
+  actual=$($sum "$dir/$file" | awk '{print $1}')
+  if [ "$actual" != "$expected" ]; then
+    echo "kern: checksum mismatch for ${file} (expected ${expected}, got ${actual})" >&2
+    return 1
+  fi
+  echo "kern: checksum ok (${actual})"
+  return 0
+}
+
 main() {
   platform="$(os_arch)" || { echo "kern: unsupported platform $(uname -s)/$(uname -m)"; go_install || exit 1; exit 0; }
   tag="$(get_version)"
@@ -90,6 +119,10 @@ main() {
     echo "kern: no prebuilt asset for ${platform} at ${tag}" >&2
     go_install || exit 1
     exit 0
+  fi
+  if ! verify "$file" "$tmpdir" "$tag"; then
+    echo "kern: aborting install (checksum verification failed)" >&2
+    exit 1
   fi
 
   mkdir -p "$PREFIX"

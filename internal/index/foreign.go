@@ -72,14 +72,7 @@ func quickExt(rel string) bool {
 
 // isIndexable reports whether a file should be part of the index.
 func isIndexable(rel string, src []byte) bool {
-	l := detectLang(rel, src)
-	if l == "" {
-		return false
-	}
-	if l == "go" && strings.HasSuffix(rel, "_test.go") {
-		return false
-	}
-	return true
+	return detectLang(rel, src) != ""
 }
 
 type declRule struct {
@@ -422,6 +415,11 @@ func extractForeign(rel string, src []byte, lang string) ([]Symbol, map[string][
 			Lang: lang,
 		}
 		bodyEnd := bodyEndFor(i, f, spec)
+		if bodyEnd > 0 {
+			sym.End = bodyEnd
+		} else {
+			sym.End = i + 1
+		}
 		if rule.recv > 0 {
 			sym.Kind = "method"
 			sym.Receiver = m[rule.recv]
