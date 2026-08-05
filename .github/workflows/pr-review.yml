@@ -20,7 +20,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-          cache: true
+          cache: false
 
       - name: Build kern
         run: go build -buildvcs=false -o kern ./cmd/kern
@@ -38,10 +38,11 @@ jobs:
           # limit the blast-radius panel and cap size for a comment
           ./kern review --range "${base}..HEAD" --max 6000 > /tmp/kern-review.md || true
           ./kern changes --range "${base}..HEAD" > /tmp/kern-changes.txt || true
-          { cat /tmp/kern-review.md; echo; echo "---"; cat /tmp/kern-changes.txt; } > /tmp/kern-comment.md
-          echo "preview<<'EOF'" >> "$GITHUB_OUTPUT"
-          cat /tmp/kern-comment.md >> "$GITHUB_OUTPUT"
-          echo "EOF" >> "$GITHUB_OUTPUT"
+          { cat /tmp/kern-review.md 2>/dev/null; echo; echo "---"; cat /tmp/kern-changes.txt 2>/dev/null; } > /tmp/kern-comment.md || true
+          # GITHUB_OUTPUT multiline: the delimiter is a literal token (no quotes).
+          echo "preview<<KERN_REVIEW_EOF" >> "$GITHUB_OUTPUT"
+          cat /tmp/kern-comment.md 2>/dev/null >> "$GITHUB_OUTPUT"
+          echo "KERN_REVIEW_EOF" >> "$GITHUB_OUTPUT"
 
       - name: Post review comment
         uses: actions/github-script@v7
