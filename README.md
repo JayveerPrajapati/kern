@@ -123,12 +123,13 @@ strips comments/strings, detects the language by extension or shebang, and
 applies per-language declaration rules (methods via `Type::name` / `name(self)`
 / indent-based `def`, types via a brace-depth stack). Supported: Go, Rust,
 C/C++, TypeScript, JavaScript (incl. JSX/TSX), Python, Ruby, Java, PHP, shell,
-CSS (classes, ids, `@keyframes`, custom properties), HTML (`id` anchors), and
-Vue/Svelte single-file components (the `<script>` block is extracted and
+CSS/SCSS/Less (classes, ids, `@keyframes`, custom properties), HTML (`id`
+anchors), Markdown (headings), JSON and YAML (config keys), and Vue/Svelte/Astro
+single-file components (the `<script>`/frontmatter blocks are extracted and
 indexed as JS/TS, incl. `<script lang="ts">`). `kern index`
 prints the language mix; symbols carry a `Lang` field. `kern ast` understands
-kind prefixes `class`, `enum`, `trait`, `module`, `union`, `impl`, `prop`
-alongside the Go ones.
+kind prefixes `class`, `enum`, `trait`, `module`, `union`, `impl`, `prop`,
+`heading` alongside the Go ones.
 
 | Command | Purpose |
 |---|---|

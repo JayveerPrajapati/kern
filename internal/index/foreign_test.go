@@ -426,8 +426,12 @@ func TestRubyExtract(t *testing.T) {
 func TestLanguageDetection(t *testing.T) {
 	extCases := map[string]string{
 		"a.go": "go", "a.py": "python", "a.js": "javascript", "a.tsx": "typescript",
-		"a.vue": "javascript", "a.svelte": "javascript", "a.css": "css", "a.scss": "css",
+		"a.vue": "javascript", "a.svelte": "javascript", "a.astro": "typescript",
+		"a.css": "css", "a.scss": "css", "a.less": "css",
 		"a.html": "html", "a.htm": "html",
+		"a.md": "markdown", "a.mdx": "markdown", "a.markdown": "markdown",
+		"a.json": "json", "a.jsonc": "json",
+		"a.yml": "yaml", "a.yaml": "yaml",
 		"a.rs": "rust", "a.c": "c", "a.cpp": "cpp", "a.cs": "csharp",
 		"a.java": "java", "a.rb": "ruby", "a.php": "php", "a.sh": "shell",
 		"a.txt": "",
@@ -633,6 +637,21 @@ func TestSfcDetection(t *testing.T) {
 	if got := detectLang("a.svelte", []byte(`<script lang="ts">`)); got != "typescript" {
 		t.Fatalf("expected typescript for svelte ts, got %q", got)
 	}
+	if got := detectLang("a.astro", nil); got != "typescript" {
+		t.Fatalf("expected typescript for astro, got %q", got)
+	}
+	if got := detectLang("style.less", nil); got != "css" {
+		t.Fatalf("expected css for less, got %q", got)
+	}
+	if got := detectLang("README.md", nil); got != "markdown" {
+		t.Fatalf("expected markdown, got %q", got)
+	}
+	if got := detectLang("pkg.json", nil); got != "json" {
+		t.Fatalf("expected json, got %q", got)
+	}
+	if got := detectLang("config.yaml", nil); got != "yaml" {
+		t.Fatalf("expected yaml, got %q", got)
+	}
 	if got := detectLang("style.css", nil); got != "css" {
 		t.Fatalf("expected css, got %q", got)
 	}
@@ -641,5 +660,97 @@ func TestSfcDetection(t *testing.T) {
 	}
 	if got := detectLang("notes.txt", nil); got != "" {
 		t.Fatalf("expected unsupported, got %q", got)
+	}
+}
+
+func TestAstroExtract(t *testing.T) {
+	src := `---
+import Layout from "../layouts/Layout.astro";
+interface Props {
+  title: string;
+}
+const title = "Home";
+---
+<Layout>
+  <main id="hero"><h1>{title}</h1></main>
+</Layout>
+<script>
+  document.title = "hi";
+</script>
+`
+	syms, _, _, _ := extractForeign("pages/Index.astro", []byte(src), "typescript")
+	if s := findSym(syms, "Props"); s == nil || s.Kind != "interface" {
+		t.Fatalf("expected interface Props from astro frontmatter, got %v", s)
+	}
+	if s := findSym(syms, "title"); s == nil || s.Kind != "const" {
+		t.Fatalf("expected const title from astro frontmatter, got %v", s)
+	}
+	if findSym(syms, "hero") != nil {
+		t.Fatal("astro markup id must not leak into the index")
+	}
+}
+
+func TestMarkdownExtract(t *testing.T) {
+	src := `# kern
+
+## Install
+
+Quick start with one line:
+
+### CLI reference
+
+## Contributing
+`
+	syms := symsIn("markdown", src)
+	for _, h := range []string{"kern", "Install", "CLI reference", "Contributing"} {
+		if s := findSym(syms, h); s == nil || s.Kind != "heading" {
+			t.Fatalf("expected heading %q, got %v", h, s)
+		}
+	}
+	for _, bad := range []string{"Quick start with one line:"} {
+		if findSym(syms, bad) != nil {
+			t.Fatalf("paragraph %q must not be a heading", bad)
+		}
+	}
+}
+
+func TestJsonExtract(t *testing.T) {
+	src := `{
+  "name": "kern",
+  "scripts": {
+    "build": "go build"
+  },
+  "// comment": {"x": 1}
+}
+`
+	syms := symsIn("json", src)
+	if s := findSym(syms, "name"); s == nil || s.Kind != "prop" {
+		t.Fatalf("expected prop name, got %v", s)
+	}
+	if s := findSym(syms, "scripts"); s == nil || s.Kind != "prop" {
+		t.Fatalf("expected prop scripts, got %v", s)
+	}
+	if findSym(syms, "build") == nil {
+		t.Fatal("expected nested prop build (line-start key)")
+	}
+}
+
+func TestYamlExtract(t *testing.T) {
+	src := `name: kern
+version: 0.1.0
+tasks:
+  build: go build
+  # deploy: rsync (commented out)
+`
+	syms := symsIn("yaml", src)
+	for _, k := range []string{"name", "version", "tasks"} {
+		if s := findSym(syms, k); s == nil || s.Kind != "prop" {
+			t.Fatalf("expected prop %s, got %v", k, s)
+		}
+	}
+	for _, bad := range []string{"build", "deploy", "go build"} {
+		if findSym(syms, bad) != nil {
+			t.Fatalf("nested/comment key %q must not be a top-level symbol", bad)
+		}
 	}
 }
