@@ -1,6 +1,7 @@
 package index
 
 import (
+	"bytes"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -18,6 +19,12 @@ func detectLang(rel string, src []byte) string {
 		return "javascript"
 	case ".ts", ".tsx":
 		return "typescript"
+	case ".vue", ".svelte":
+		return sfcLang(src)
+	case ".css", ".scss":
+		return "css"
+	case ".html", ".htm":
+		return "html"
 	case ".rs":
 		return "rust"
 	case ".c", ".h":
@@ -59,10 +66,63 @@ func firstLine(src []byte) string {
 	return string(src)
 }
 
+// sfcLang reports the script language of a single-file component (.vue/.svelte)
+// from the first <script> tag's attributes: lang="ts" -> typescript, else
+// javascript.
+func sfcLang(src []byte) string {
+	si := bytes.Index(src, []byte("<script"))
+	if si < 0 {
+		return "javascript"
+	}
+	rest := src[si:]
+	end := bytes.IndexByte(rest, '>')
+	if end < 0 {
+		return "javascript"
+	}
+	lower := strings.ToLower(string(rest[:end]))
+	if strings.Contains(lower, `lang="ts"`) || strings.Contains(lower, `lang="tsx"`) {
+		return "typescript"
+	}
+	return "javascript"
+}
+
+// sfcScript returns only the concatenated <script> block bodies of a single-file
+// component, so Vue/Svelte markup (template, style) never confuses the JS/TS
+// extractor. Files that are not SFCs pass through unchanged.
+func sfcScript(rel string, src []byte) []byte {
+	ext := strings.ToLower(filepath.Ext(rel))
+	if ext != ".vue" && ext != ".svelte" {
+		return src
+	}
+	var out []byte
+	rest := src
+	for {
+		start := bytes.Index(rest, []byte("<script"))
+		if start < 0 {
+			break
+		}
+		openEnd := bytes.Index(rest[start:], []byte(">"))
+		if openEnd < 0 {
+			break
+		}
+		openEnd += start + 1
+		close := bytes.Index(rest[openEnd:], []byte("</script>"))
+		if close < 0 {
+			break
+		}
+		close += openEnd
+		out = append(out, rest[openEnd:close]...)
+		out = append(out, '\n')
+		rest = rest[close+len("</script>"):]
+	}
+	return out
+}
+
 // quickExt is a cheap pre-filter before reading a file.
 func quickExt(rel string) bool {
 	switch strings.ToLower(filepath.Ext(rel)) {
 	case ".go", ".py", ".js", ".mjs", ".cjs", ".jsx", ".ts", ".tsx",
+		".vue", ".svelte", ".css", ".scss", ".html", ".htm",
 		".rs", ".c", ".h", ".cc", ".cpp", ".cxx", ".hpp", ".hxx",
 		".cs", ".java", ".rb", ".php", ".sh", ".bash":
 		return true
@@ -86,6 +146,7 @@ type langSpec struct {
 	indent      bool
 	lineComment []string
 	block       string // "/*" style, empty if none
+	blockEnd    string // closes block, default "*/"
 	backtick    bool
 	triple      bool
 	rules       []declRule
@@ -231,6 +292,20 @@ func init() {
 	shKw := kwSet("if", "then", "while", "until", "for", "case", "do", "done", "fi",
 		"esac", "function", "in", "select", "elif", "else", "time")
 
+	css := []declRule{
+		{kind: "class", re: regexp.MustCompile(`^\s*\.([A-Za-z_][\w-]*)`)},
+		{kind: "const", re: regexp.MustCompile(`^\s*#([A-Za-z_][\w-]*)`)},
+		{kind: "func", re: regexp.MustCompile(`^\s*@keyframes\s+([A-Za-z_][\w-]*)`)},
+		{kind: "prop", re: regexp.MustCompile(`(--[A-Za-z_][\w-]*)\s*:`)},
+	}
+	cssKw := kwSet("import", "media", "supports", "font-face", "layer", "container",
+		"scope", "property", "counter-style", "charset", "namespace", "page")
+
+	html := []declRule{
+		{kind: "const", re: regexp.MustCompile(`\bid="([A-Za-z_][\w-]*)"`)},
+	}
+	htmlKw := kwSet()
+
 	specs = map[string]*langSpec{
 		"javascript": {lineComment: []string{"//"}, block: "/*", backtick: true, rules: js, kw: jsKw},
 		"typescript": {lineComment: []string{"//"}, block: "/*", backtick: true, rules: js, kw: jsKw},
@@ -243,6 +318,8 @@ func init() {
 		"ruby":       {indent: true, lineComment: []string{"#"}, rules: ruby, kw: rubyKw},
 		"php":        {lineComment: []string{"//", "#"}, block: "/*", rules: php, kw: phpKw},
 		"shell":      {lineComment: []string{"#"}, rules: shell, kw: shKw},
+		"css":        {lineComment: nil, block: "/*", rules: css, kw: cssKw},
+		"html":       {lineComment: nil, block: "<!--", blockEnd: "-->", rules: html, kw: htmlKw},
 	}
 }
 
@@ -314,18 +391,22 @@ func stripLine(ln string, spec *langSpec, st *stripState) string {
 		}
 	}
 	if spec.block != "" {
+		blockEnd := spec.blockEnd
+		if blockEnd == "" {
+			blockEnd = "*/"
+		}
 		for {
 			start := strings.Index(s, spec.block)
 			if start < 0 {
 				break
 			}
-			end := strings.Index(s[start+len(spec.block):], "*/")
+			end := strings.Index(s[start+len(spec.block):], blockEnd)
 			if end < 0 {
 				s = s[:start]
 				st.inBlock = true
 				break
 			}
-			s = s[:start] + s[start+len(spec.block)+end+2:]
+			s = s[:start] + s[start+len(spec.block)+end+len(blockEnd):]
 		}
 	}
 	if spec.triple {
@@ -390,6 +471,10 @@ type typeDecl struct {
 // extractForeign extracts symbols and call edges from a non-Go source file
 // using per-language lexical rules. It is heuristic, not a full parser.
 func extractForeign(rel string, src []byte, lang string) ([]Symbol, map[string][]string, *Pkg, error) {
+	src = sfcScript(rel, src)
+	if len(bytes.TrimSpace(src)) == 0 {
+		return nil, nil, nil, nil
+	}
 	spec := specs[lang]
 	f := analyze(src, spec)
 	calls := map[string][]string{}
@@ -494,6 +579,9 @@ func bodyEndFor(i int, f *ffile, spec *langSpec) int {
 func enclosingType(line int, types []typeDecl) string {
 	for i := len(types) - 1; i >= 0; i-- {
 		t := types[i]
+		if !typeKinds[t.sym.Kind] {
+			continue
+		}
 		if line >= t.sym.Line && (t.bodyEnd == 0 || line < t.bodyEnd) {
 			return t.sym.Name
 		}
