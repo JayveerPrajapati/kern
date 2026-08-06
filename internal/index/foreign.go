@@ -21,10 +21,18 @@ func detectLang(rel string, src []byte) string {
 		return "typescript"
 	case ".vue", ".svelte":
 		return sfcLang(src)
-	case ".css", ".scss":
+	case ".astro":
+		return astroLang(src)
+	case ".css", ".scss", ".less":
 		return "css"
 	case ".html", ".htm":
 		return "html"
+	case ".md", ".mdx", ".markdown":
+		return "markdown"
+	case ".json", ".jsonc":
+		return "json"
+	case ".yml", ".yaml":
+		return "yaml"
 	case ".rs":
 		return "rust"
 	case ".c", ".h":
@@ -86,14 +94,36 @@ func sfcLang(src []byte) string {
 	return "javascript"
 }
 
-// sfcScript returns only the concatenated <script> block bodies of a single-file
-// component, so Vue/Svelte markup (template, style) never confuses the JS/TS
-// extractor. Files that are not SFCs pass through unchanged.
+// astroLang reports the script language of an .astro file. Astro is TS-first:
+// the --- frontmatter block is always TypeScript, and TS is a superset of JS,
+// so the extractor always runs in TypeScript mode.
+func astroLang(src []byte) string {
+	return "typescript"
+}
+
+// sfcScript returns only the code bodies of a single-file component, so markup
+// (template, style, frontmatter) never confuses the JS/TS extractor. Vue/Svelte
+// keep only <script> blocks; Astro keeps the --- frontmatter plus <script>s.
+// Files that are not SFCs pass through unchanged.
 func sfcScript(rel string, src []byte) []byte {
-	ext := strings.ToLower(filepath.Ext(rel))
-	if ext != ".vue" && ext != ".svelte" {
-		return src
+	switch strings.ToLower(filepath.Ext(rel)) {
+	case ".vue", ".svelte":
+		return scriptBlocks(src)
+	case ".astro":
+		var out []byte
+		if fm := astroFrontmatter(src); len(fm) > 0 {
+			out = append(out, fm...)
+			out = append(out, '\n')
+		}
+		out = append(out, scriptBlocks(src)...)
+		return out
 	}
+	return src
+}
+
+// scriptBlocks returns the concatenated bodies of every <script>...</script>
+// block in src.
+func scriptBlocks(src []byte) []byte {
 	var out []byte
 	rest := src
 	for {
@@ -118,11 +148,31 @@ func sfcScript(rel string, src []byte) []byte {
 	return out
 }
 
+// astroFrontmatter returns the body of an Astro --- frontmatter block, or nil
+// when the file has none at position 0.
+func astroFrontmatter(src []byte) []byte {
+	if !bytes.HasPrefix(src, []byte("---")) {
+		return nil
+	}
+	rest := src[3:]
+	nl := bytes.IndexByte(rest, '\n')
+	if nl < 0 {
+		return nil
+	}
+	rest = rest[nl+1:]
+	idx := bytes.Index(rest, []byte("\n---"))
+	if idx < 0 {
+		return nil
+	}
+	return rest[:idx]
+}
+
 // quickExt is a cheap pre-filter before reading a file.
 func quickExt(rel string) bool {
 	switch strings.ToLower(filepath.Ext(rel)) {
 	case ".go", ".py", ".js", ".mjs", ".cjs", ".jsx", ".ts", ".tsx",
-		".vue", ".svelte", ".css", ".scss", ".html", ".htm",
+		".vue", ".svelte", ".astro", ".css", ".scss", ".less", ".html", ".htm",
+		".md", ".mdx", ".markdown", ".json", ".jsonc", ".yml", ".yaml",
 		".rs", ".c", ".h", ".cc", ".cpp", ".cxx", ".hpp", ".hxx",
 		".cs", ".java", ".rb", ".php", ".sh", ".bash":
 		return true
@@ -306,6 +356,21 @@ func init() {
 	}
 	htmlKw := kwSet()
 
+	markdown := []declRule{
+		{kind: "heading", re: regexp.MustCompile(`^(#{1,6})\s+(.+)$`)},
+	}
+	mdKw := kwSet()
+
+	json := []declRule{
+		{kind: "prop", re: regexp.MustCompile(`"([A-Za-z_$][\w$.-]*)"\s*:`)},
+	}
+	jsonKw := kwSet()
+
+	yaml := []declRule{
+		{kind: "prop", re: regexp.MustCompile(`^([A-Za-z_][\w-]*):`)},
+	}
+	yamlKw := kwSet()
+
 	specs = map[string]*langSpec{
 		"javascript": {lineComment: []string{"//"}, block: "/*", backtick: true, rules: js, kw: jsKw},
 		"typescript": {lineComment: []string{"//"}, block: "/*", backtick: true, rules: js, kw: jsKw},
@@ -320,6 +385,9 @@ func init() {
 		"shell":      {lineComment: []string{"#"}, rules: shell, kw: shKw},
 		"css":        {lineComment: nil, block: "/*", rules: css, kw: cssKw},
 		"html":       {lineComment: nil, block: "<!--", blockEnd: "-->", rules: html, kw: htmlKw},
+		"markdown":   {lineComment: nil, block: "<!--", blockEnd: "-->", rules: markdown, kw: mdKw},
+		"json":       {lineComment: []string{"//"}, block: "/*", rules: json, kw: jsonKw},
+		"yaml":       {lineComment: []string{"#"}, rules: yaml, kw: yamlKw},
 	}
 }
 

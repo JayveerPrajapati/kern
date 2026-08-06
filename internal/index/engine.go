@@ -309,7 +309,7 @@ func symbolRegex(pattern string) (*regexp.Regexp, string) {
 			prefix := p[:i]
 			switch prefix {
 			case "func", "method", "struct", "interface", "type", "const", "var",
-				"class", "enum", "trait", "module", "union", "impl", "prop":
+				"class", "enum", "trait", "module", "union", "impl", "prop", "heading":
 				kind = prefix
 				p = p[i+1:]
 			}
