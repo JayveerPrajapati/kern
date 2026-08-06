@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "kern-context"
-version = "0.1.0"
+version = "0.4.0"
 description = "Local-only context optimizer for AI agents. pip shim: downloads the prebuilt Go binary on first use."
 readme = "README.md"
 requires-python = ">=3.8"

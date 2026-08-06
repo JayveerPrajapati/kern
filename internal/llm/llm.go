@@ -99,3 +99,39 @@ func (c *Client) Compress(prompt string) (string, error) {
 	}
 	return out.Response, nil
 }
+
+// Complete asks the local model to continue a directive prompt (system) plus
+// user context. It is the generic completion used by the self-correction loop
+// (#9) and returns the model's raw text.
+func (c *Client) Complete(system, user string) (string, error) {
+	if !c.Available() {
+		return "", fmt.Errorf("ollama not reachable at %s", c.Base)
+	}
+	payload, err := json.Marshal(map[string]any{
+		"model":  c.Model,
+		"prompt": system + "\n\n" + user,
+		"stream": false,
+	})
+	if err != nil {
+		return "", err
+	}
+	resp, err := c.HTTP.Post(c.Base+"/api/generate", "application/json", bytes.NewReader(payload))
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("ollama status %d", resp.StatusCode)
+	}
+	var out struct {
+		Response string `json:"response"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return "", err
+	}
+	out.Response = strings.TrimSpace(out.Response)
+	if out.Response == "" {
+		return "", errors.New("empty ollama response")
+	}
+	return out.Response, nil
+}

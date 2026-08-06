@@ -3,7 +3,7 @@
 # package only makes it installable via pip for people who prefer that.
 #
 # Distribution note: replace JayveerPrajapati with your GitHub username.
-__version__ = "0.1.0"
+__version__ = "0.4.0"
 
 import os
 import shutil
@@ -36,11 +36,22 @@ def _resolve_version():
     if VERSION != "latest":
         return VERSION
     url = "https://api.github.com/repos/{}/releases/latest".format(REPO)
-    with urllib.request.urlopen(url, timeout=20) as r:
-        data = r.read()
-    import json
+    try:
+        with urllib.request.urlopen(url, timeout=20) as r:
+            data = r.read()
+        import json
 
-    return json.loads(data)["tag_name"]
+        return json.loads(data)["tag_name"]
+    except Exception as exc:
+        # The GitHub releases/latest endpoint is unauthenticated (60 req/hr) and
+        # returns nothing before the first release exists. Fail with an
+        # actionable message instead of a raw traceback.
+        raise SystemExit(
+            "kern: could not resolve the latest release from GitHub ({}); "
+            "this usually means the API is rate-limited or no release exists yet.\n"
+            "Install Go and run:\n"
+            "  go install github.com/{}/cmd/kern@latest".format(exc, REPO)
+        )
 
 
 def _os_arch():

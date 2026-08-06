@@ -200,6 +200,7 @@ type langSpec struct {
 	backtick    bool
 	triple      bool
 	rules       []declRule
+	entries     []entryRule
 	kw          map[string]bool
 }
 
@@ -236,7 +237,7 @@ func init() {
 		{kind: "func", isDef: true, re: regexp.MustCompile(`(?:^|[\s;])(?:export\s+)?(?:const|let|var)\s+(` + identRe + `)\s*=\s*(?:async\s+)?` + identRe + `\s*=>`)},
 		{kind: "func", isDef: true, re: regexp.MustCompile(`(?:^|[\s;])(?:export\s+)?(?:const|let|var)\s+(` + identRe + `)\s*=\s*(?:async\s+)?function`)},
 		{kind: "func", isDef: true, re: regexp.MustCompile(`(?:^|[\s;])(?:export\s+(?:default\s+)?)?(?:async\s+)?function\s*\*?\s*(` + identRe + `)\s*(?:<[^>]*>)?\s*\(`)},
-		{kind: "method", isDef: true, re: regexp.MustCompile(`^\s*(?:(?:get|set|static|async)\s+)*(?:#)?(` + identRe + `)\s*(?:<[^>]*>)?\s*\([^)]*\)\s*(?::[^{}]*)?\{`)},
+		{kind: "method", isDef: true, re: regexp.MustCompile(`^\s*(?:(?:get|set|static|async)\s+)*(?:#)?(` + identRe + `)\s*(?:<[^>]*>)?\s*\(.*\)\s*(?::[^{}]*)?\{`)},
 		{kind: "const", re: regexp.MustCompile(`(?:^|[\s;])(?:export\s+)?(?:const|let|var)\s+(` + identRe + `)\s*=`)},
 	}
 	jsKw := kwSet("if", "for", "while", "switch", "catch", "return", "do", "case", "function",
@@ -372,16 +373,16 @@ func init() {
 	yamlKw := kwSet()
 
 	specs = map[string]*langSpec{
-		"javascript": {lineComment: []string{"//"}, block: "/*", backtick: true, rules: js, kw: jsKw},
-		"typescript": {lineComment: []string{"//"}, block: "/*", backtick: true, rules: js, kw: jsKw},
-		"python":     {indent: true, lineComment: []string{"#"}, triple: true, rules: python, kw: pyKw},
+		"javascript": {lineComment: []string{"//"}, block: "/*", backtick: true, rules: js, entries: entryRules["javascript"], kw: jsKw},
+		"typescript": {lineComment: []string{"//"}, block: "/*", backtick: true, rules: js, entries: entryRules["typescript"], kw: jsKw},
+		"python":     {indent: true, lineComment: []string{"#"}, triple: true, rules: python, entries: entryRules["python"], kw: pyKw},
 		"rust":       {lineComment: []string{"//"}, block: "/*", rules: rust, kw: rsKw},
 		"c":          {lineComment: []string{"//"}, block: "/*", rules: cfam, kw: cfamKw},
 		"cpp":        {lineComment: []string{"//"}, block: "/*", rules: cfam, kw: cfamKw},
-		"java":       {lineComment: []string{"//"}, block: "/*", rules: java, kw: javaKw},
+		"java":       {lineComment: []string{"//"}, block: "/*", rules: java, entries: entryRules["java"], kw: javaKw},
 		"csharp":     {lineComment: []string{"//"}, block: "/*", rules: csharp, kw: csKw},
-		"ruby":       {indent: true, lineComment: []string{"#"}, rules: ruby, kw: rubyKw},
-		"php":        {lineComment: []string{"//", "#"}, block: "/*", rules: php, kw: phpKw},
+		"ruby":       {indent: true, lineComment: []string{"#"}, rules: ruby, entries: entryRules["ruby"], kw: rubyKw},
+		"php":        {lineComment: []string{"//", "#"}, block: "/*", rules: php, entries: entryRules["php"], kw: phpKw},
 		"shell":      {lineComment: []string{"#"}, rules: shell, kw: shKw},
 		"css":        {lineComment: nil, block: "/*", rules: css, kw: cssKw},
 		"html":       {lineComment: nil, block: "<!--", blockEnd: "-->", rules: html, kw: htmlKw},
@@ -596,6 +597,7 @@ func extractForeign(rel string, src []byte, lang string) ([]Symbol, map[string][
 		syms = append(syms, sym)
 	}
 
+	syms = append(syms, extractEntries(f, spec, types, syms, rel, lang)...)
 	dedupeCalls(calls)
 	pkg := &Pkg{
 		Name:    filepath.Base(filepath.Dir(rel)),

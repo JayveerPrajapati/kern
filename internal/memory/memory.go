@@ -81,6 +81,86 @@ func Clear(root string) error {
 	return err
 }
 
+// stopwords are dropped from recall queries so generic lessons about "code",
+// "the", "build" do not dominate scoring.
+var stopwords = map[string]bool{
+	"a": true, "an": true, "the": true, "and": true, "or": true, "of": true,
+	"to": true, "for": true, "in": true, "on": true, "with": true, "is": true,
+	"are": true, "be": true, "it": true, "this": true, "that": true, "i": true,
+	"we": true, "you": true, "should": true, "must": true, "do": true, "not": true,
+	"code": true, "file": true, "files": true, "project": true, "build": true,
+	"kern": true, "use": true, "when": true, "if": true, "as": true, "by": true,
+	"from": true, "at": true, "also": true, "using": true,
+}
+
+// tokens lower-cases and splits a string into non-trivial keyword tokens.
+func tokens(s string) []string {
+	var out []string
+	for _, f := range strings.FieldsFunc(s, func(r rune) bool {
+		return !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '_')
+	}) {
+		w := strings.ToLower(f)
+		if len(w) < 3 || stopwords[w] {
+			continue
+		}
+		out = append(out, w)
+	}
+	return out
+}
+
+// Recall returns the up-to-k most relevant past lessons for prompt, ranked by
+// keyword overlap with the prompt's salient tokens. Deterministic: ties keep
+// recency order.
+func Recall(root, prompt string, k int) []Entry {
+	ptoks := tokens(prompt)
+	if len(ptoks) == 0 {
+		return nil
+	}
+	type scored struct {
+		e Entry
+		s float64
+	}
+	var pool []scored
+	for _, e := range List(root) {
+		etoks := tokens(e.Text)
+		if len(etoks) == 0 {
+			continue
+		}
+		set := map[string]bool{}
+		for _, t := range etoks {
+			set[t] = true
+		}
+		overlap := 0
+		for _, t := range ptoks {
+			if set[t] {
+				overlap++
+			}
+		}
+		// Normalize by query size; add a small coverage bonus for extra
+		// matching terms in the lesson.
+		s := float64(overlap)/float64(len(ptoks)) + float64(overlap)/float64(len(etoks))*0.5
+		if overlap > 0 {
+			pool = append(pool, scored{e, s})
+		}
+	}
+	// Stable sort desc by score keeps recency order on ties.
+	for i := 0; i < len(pool); i++ {
+		for j := i + 1; j < len(pool); j++ {
+			if pool[j].s > pool[i].s {
+				pool[i], pool[j] = pool[j], pool[i]
+			}
+		}
+	}
+	if len(pool) > k {
+		pool = pool[:k]
+	}
+	out := make([]Entry, len(pool))
+	for i, p := range pool {
+		out[i] = p.e
+	}
+	return out
+}
+
 func readJSON(path string, v any) error {
 	b, err := os.ReadFile(path)
 	if err != nil {

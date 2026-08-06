@@ -129,8 +129,46 @@ func indexSection(ix *index.Index) string {
 	if len(entries) > 0 {
 		b.WriteString("Entry points: " + strings.Join(dedupe(entries), ", ") + "\n")
 	}
+
+	fwEntries := frameworkEntries(ix)
+	if len(fwEntries) > 0 {
+		b.WriteString("Framework endpoints (handler → route):\n")
+		for _, e := range fwEntries {
+			fmt.Fprintf(&b, "  %-30s %s %s\n", e.name, e.fw, e.route)
+		}
+	}
 	b.WriteString("\n")
 	return b.String()
+}
+
+type fwEntry struct {
+	name, fw, route string
+}
+
+// frameworkEntries collects enriched entry-point symbols (framework handlers,
+// controllers, route targets) ordered by framework then name.
+func frameworkEntries(ix *index.Index) []fwEntry {
+	var out []fwEntry
+	for _, s := range ix.Symbols {
+		if !s.Entry || s.Framework == "" {
+			continue
+		}
+		name := s.Name
+		if s.Receiver != "" {
+			name = s.Receiver + "." + name
+		}
+		out = append(out, fwEntry{name: name, fw: s.Framework, route: s.Route})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].fw != out[j].fw {
+			return out[i].fw < out[j].fw
+		}
+		return out[i].name < out[j].name
+	})
+	if len(out) > 20 {
+		out = out[:20]
+	}
+	return out
 }
 
 // architectureSection adds the community/coupling overview so the onboarding

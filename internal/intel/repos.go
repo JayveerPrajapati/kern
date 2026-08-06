@@ -53,7 +53,11 @@ func (r *RepoRegistry) Save() error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(reposPath(), append(data, '\n'), 0o644)
+	path := reposPath()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(path, append(data, '\n'), 0o644)
 }
 
 // Add registers a project, replacing any repo with the same name.

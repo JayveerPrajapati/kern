@@ -8,16 +8,30 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"regexp"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/JayveerPrajapati/kern/internal/budget"
 	"github.com/JayveerPrajapati/kern/internal/code"
+	"github.com/JayveerPrajapati/kern/internal/diff"
+	"github.com/JayveerPrajapati/kern/internal/docsearch"
+	"github.com/JayveerPrajapati/kern/internal/fw"
+	"github.com/JayveerPrajapati/kern/internal/heal"
 	"github.com/JayveerPrajapati/kern/internal/index"
 	"github.com/JayveerPrajapati/kern/internal/intel"
 	"github.com/JayveerPrajapati/kern/internal/lock"
 	"github.com/JayveerPrajapati/kern/internal/optimize"
+	"github.com/JayveerPrajapati/kern/internal/pii"
+	"github.com/JayveerPrajapati/kern/internal/precache"
+	"github.com/JayveerPrajapati/kern/internal/sandbox"
+	jsonschema "github.com/JayveerPrajapati/kern/internal/schema"
 	"github.com/JayveerPrajapati/kern/internal/stats"
+	"github.com/JayveerPrajapati/kern/internal/swap"
 	"github.com/JayveerPrajapati/kern/internal/tokenize"
+	"github.com/JayveerPrajapati/kern/internal/validate"
+	"github.com/JayveerPrajapati/kern/internal/verify"
 )
 
 const (
@@ -57,7 +71,106 @@ var tools = []Tool{
 			"attached_log": strProp("Optional noisy log output to compress and attach"),
 			"session":      strProp("Optional session identifier for stats tracking"),
 			"model":        strProp("Optional model name for cost estimation"),
+			"mask":         strProp("If true, strip secrets/PII before processing and restore placeholders in the output (default false)"),
+			"mask_names":   strProp("Comma-separated client/project names to mask as [MASKED_NAME_N]"),
+			"cache":        strProp("If true, serve identical requests from the local response cache (default false)"),
+			"few_shot":     strProp("If true, inject top recalled lessons from project memory as baseline examples (default false)"),
+			"root":         strProp("Project root used for few-shot memory (defaults to current directory)"),
 		}, []string{"prompt"}),
+	},
+	{
+		Name:        "kern_mask_pii",
+		Description: "Locally scan text for secrets and PII (API keys, passwords, tokens, URLs with credentials, IPs, emails) and replace them with safe [MASKED_*] placeholders. Use before sending any text to a remote LLM. Pure local, deterministic, reversible via the returned mapping.",
+		InputSchema: schema(map[string]any{
+			"text":       strProp("The raw text to mask"),
+			"mask_names": strProp("Optional comma-separated client/project names to mask"),
+		}, []string{"text"}),
+	},
+	{
+		Name:        "kern_doc_search",
+		Description: "Local vector search over a project's documents (markdown, text, rst, adoc). Chunks and embeds docs locally with deterministic n-gram hashing (no ML deps) and returns only the most relevant fragments. Use instead of pasting whole documents into context.",
+		InputSchema: schema(map[string]any{
+			"query": strProp("Natural-language or keyword query"),
+			"root":  strProp("Project root (defaults to current directory)"),
+			"k":     strProp("Max fragments to return (default 5)"),
+		}, []string{"query"}),
+	},
+	{
+		Name:        "kern_doc_index",
+		Description: "Pre-index a project's documents for kern_doc_search. Run once after documents change; searches auto-index on first use.",
+		InputSchema: schema(map[string]any{
+			"root": strProp("Project root (defaults to current directory)"),
+		}, nil),
+	},
+	{
+		Name:        "kern_precache",
+		Description: "Speculative pre-caching (#20): scan the project once and fill the code-summary and document-vector caches so later kern calls are instant. Run periodically or after bulk edits.",
+		InputSchema: schema(map[string]any{
+			"root": strProp("Project root (defaults to current directory)"),
+		}, nil),
+	},
+	{
+		Name:        "kern_swap",
+		Description: "Budget swapping (#18): in a context document, replace fenced code blocks tagged `lang:path` with per-file symbolic signatures to fit a token budget, or expand `lang:path:summary` blocks back to full file contents. Returns the budget-fitted document.",
+		InputSchema: schema(map[string]any{
+			"text":       strProp("The context document containing fenced code blocks"),
+			"root":       strProp("Project root used to resolve block paths (defaults to current directory)"),
+			"max_tokens": strProp("Token budget; if the document exceeds it, blocks are swapped to summaries"),
+			"mode":       strProp("force mode: summary, expand, or fit (default)"),
+		}, []string{"text"}),
+	},
+	{
+		Name:        "kern_sandbox",
+		Description: "Run a risky command inside a snapshot of the project (#15): on non-zero exit the tree is rolled back exactly (files restored, new files removed). Success keeps changes. Use before destructive operations, migrations, or agent-applied edits.",
+		InputSchema: schema(map[string]any{
+			"root":    strProp("Project root to snapshot and run in (defaults to current directory)"),
+			"command": strProp("Full command to run, e.g. \"make migrate\" or \"sh -c 'npm test'\" (shell words, not a shell string)"),
+			"timeout": strProp("Timeout in seconds (default 120)"),
+		}, []string{"command"}),
+	},
+	{
+		Name:        "kern_diff_files",
+		Description: "Delta streaming (#13): compute a unified line diff between two files (or two versions of the same file) using pure Go. Returns the full patch, or a note when files are identical. Feed the output back to the model as a compact edit description.",
+		InputSchema: schema(map[string]any{
+			"a": strProp("Path to the old/base file"),
+			"b": strProp("Path to the new/changed file"),
+		}, []string{"a", "b"}),
+	},
+	{
+		Name:        "kern_heal",
+		Description: "Self-correction loop (#9): run validation; on failure ask a local Ollama model to rewrite the failing files, apply the fix inside a throwaway snapshot, re-validate, and report a diff to review. Never edits the user's working tree. Requires Ollama at localhost:11434.",
+		InputSchema: schema(map[string]any{
+			"root":       strProp("Project root (defaults to current directory)"),
+			"task":       strProp("The original task the code is meant to fulfil"),
+			"model":      strProp("Ollama model (default KERN_MODEL or llama3.2)"),
+			"max_rounds": strProp("Correction attempts (default 3)"),
+			"timeout":    strProp("Validation timeout in seconds (default 120)"),
+		}, nil),
+	},
+	{
+		Name:        "kern_validate",
+		Description: "Auto-validation (#7): detect the project's language-appropriate build/test/syntax command and run it. Returns exit status, truncated output and duration. Use after editing code to gate correctness before final answers.",
+		InputSchema: schema(map[string]any{
+			"root":    strProp("Project root (defaults to current directory)"),
+			"command": strProp("Optional override command, e.g. \"go test ./...\" (defaults to auto-detected)"),
+			"timeout": strProp("Timeout in seconds (default 120)"),
+		}, nil),
+	},
+	{
+		Name:        "kern_schema_validate",
+		Description: "Deterministically validate JSON output against a JSON schema (subset: object/array/primitives, required, enum, min/max/length, pattern, additionalProperties). Returns either a conform message or one line per violation.",
+		InputSchema: schema(map[string]any{
+			"data":   strProp("The JSON output to validate"),
+			"schema": strProp("The JSON schema to validate against"),
+		}, []string{"data", "schema"}),
+	},
+	{
+		Name:        "kern_verify_output",
+		Description: "Hallucination check: extract file:line, symbol-name and route references from an agent's output text and confirm each against the real source tree and index. Returns ok/MISS verdicts for every reference.",
+		InputSchema: schema(map[string]any{
+			"text": strProp("The agent output text to verify"),
+			"root": strProp("Project root (defaults to current directory)"),
+		}, []string{"text"}),
 	},
 	{
 		Name:        "kern_compact_file",
@@ -113,6 +226,22 @@ var tools = []Tool{
 			"root":    strProp("Project root (defaults to current directory)"),
 			"limit":   strProp("Max results (default 50)"),
 		}, []string{"pattern"}),
+	},
+	{
+		Name:        "kern_frameworks",
+		Description: "Detect the frameworks and libraries a project uses (Spring, Rails, Django, Express, gin, etc.) by scanning manifests and source markers. Use to know what stack the codebase is on.",
+		InputSchema: schema(map[string]any{
+			"root": strProp("Project root (defaults to current directory)"),
+		}, nil),
+	},
+	{
+		Name:        "kern_entry_points",
+		Description: "List framework entry points found in the index: handlers, controllers and route targets with their framework and route (e.g. spring-mvc UserController.list /api/users). Search for all symbols with the 'entry' kind prefix via kern_ast_search.",
+		InputSchema: schema(map[string]any{
+			"root":    strProp("Project root (defaults to current directory)"),
+			"limit":   strProp("Max results (default 50)"),
+			"pattern": strProp("Optional route/name wildcard filter, e.g. '*admin*'"),
+		}, nil),
 	},
 	{
 		Name:        "kern_search",
@@ -464,14 +593,308 @@ func (s *Server) runTool(name string, args map[string]any) (string, error) {
 		if prompt == "" {
 			return "", fmt.Errorf("prompt is required")
 		}
+		mask := argString(args, "mask") == "true" || argString(args, "mask") == "1"
+		var names []string
+		for _, n := range strings.Split(argString(args, "mask_names"), ",") {
+			if n = strings.TrimSpace(n); n != "" {
+				names = append(names, n)
+			}
+		}
 		res, err := optimize.Prompt(prompt, argString(args, "attached_log"), optimize.Options{
-			Session: argString(args, "session"),
-			Model:   argString(args, "model"),
+			Session:   argString(args, "session"),
+			Model:     argString(args, "model"),
+			Mask:      mask,
+			MaskNames: names,
+			Cache:     argString(args, "cache") == "true" || argString(args, "cache") == "1",
+			FewShot:   argString(args, "few_shot") == "true" || argString(args, "few_shot") == "1",
+			Root:      argString(args, "root"),
 		})
 		if err != nil {
 			return "", err
 		}
-		return renderOptimize("optimized prompt", res), nil
+		out := renderOptimize("optimized prompt", res)
+		if res.FromCache {
+			out += "\n[kern] served from cache\n"
+		}
+		return out, nil
+
+	case "kern_mask_pii":
+		text := argString(args, "text")
+		if text == "" {
+			return "", fmt.Errorf("text is required")
+		}
+		var names []string
+		for _, n := range strings.Split(argString(args, "mask_names"), ",") {
+			if n = strings.TrimSpace(n); n != "" {
+				names = append(names, n)
+			}
+		}
+		res := pii.MaskNames(text, names)
+		var parts []string
+		for k, v := range res.ByLabel {
+			parts = append(parts, fmt.Sprintf("%s %d", k, v))
+		}
+		summary := "masked " + itoa(res.Replaced) + " secrets"
+		if len(parts) > 0 {
+			summary += ": " + strings.Join(parts, ", ")
+		}
+		return res.Text + "\n[kern] " + summary + "\n", nil
+
+	case "kern_doc_search":
+		query := argString(args, "query")
+		if query == "" {
+			return "", fmt.Errorf("query is required")
+		}
+		root := argString(args, "root")
+		ix := docsearch.Load(root)
+		if ix == nil {
+			var err error
+			ix, err = docsearch.IndexDir(root)
+			if err != nil {
+				return "", err
+			}
+			_ = ix.Save()
+		}
+		k := 5
+		if v := argString(args, "k"); v != "" {
+			fmt.Sscanf(v, "%d", &k)
+		}
+		results := ix.Search(query, k)
+		if len(results) == 0 {
+			return "no matching document fragments", nil
+		}
+		var b strings.Builder
+		for i, r := range results {
+			fmt.Fprintf(&b, "#%d sim=%.3f %s:%d\n", i+1, r.Sim, r.Doc.Chunk.File, r.Doc.Chunk.Start)
+			b.WriteString(r.Doc.Chunk.Text)
+			if i < len(results)-1 {
+				b.WriteString("\n\n")
+			}
+		}
+		return b.String(), nil
+
+	case "kern_doc_index":
+		root := argString(args, "root")
+		ix, err := docsearch.IndexDir(root)
+		if err != nil {
+			return "", err
+		}
+		_ = ix.Save()
+		return "indexed " + itoa(len(ix.Docs)) + " chunks from " + root, nil
+
+	case "kern_precache":
+		root := argString(args, "root")
+		if root == "" {
+			root = "."
+		}
+		rep := precache.Warm(root)
+		if rep.SourceMiss {
+			return "no project at " + root, nil
+		}
+		return fmt.Sprintf("pre-cached %d summaries (%d hits), %d doc chunks (docs saved=%v) in %s",
+			rep.Warmed, rep.CacheHits, rep.DocChunks, rep.DocsSaved, rep.Dur.Round(time.Millisecond)), nil
+
+	case "kern_swap":
+		text := argString(args, "text")
+		if text == "" {
+			return "", fmt.Errorf("text is required")
+		}
+		root := argString(args, "root")
+		if root == "" {
+			root = "."
+		}
+		mode := argString(args, "mode")
+		switch mode {
+		case "summary":
+			return swap.SummaryMode(text, root), nil
+		case "expand":
+			return swap.ExpandMode(text, root), nil
+		default:
+			maxTok := 0
+			if s := argString(args, "max_tokens"); s != "" {
+				if n, err := strconv.Atoi(s); err == nil && n > 0 {
+					maxTok = n
+				}
+			}
+			out, fits := swap.Fit(text, root, maxTok)
+			if !fits {
+				out += "\n[kern] warning: still over budget after summarization\n"
+			}
+			return out, nil
+		}
+
+	case "kern_sandbox":
+		root := argString(args, "root")
+		if root == "" {
+			root = "."
+		}
+		cmdLine := argString(args, "command")
+		if cmdLine == "" {
+			return "", fmt.Errorf("command is required")
+		}
+		parts := strings.Fields(cmdLine)
+		timeout := 120 * time.Second
+		if s := argString(args, "timeout"); s != "" {
+			if sec, err := strconv.Atoi(s); err == nil && sec > 0 {
+				timeout = time.Duration(sec) * time.Second
+			}
+		}
+		res := sandbox.Run(root, parts[0], parts[1:], timeout)
+		var b strings.Builder
+		if res.OK {
+			fmt.Fprintf(&b, "status: PASS (%s), changes kept\n", res.Duration.Round(time.Millisecond))
+		} else if res.Restored {
+			fmt.Fprintf(&b, "status: FAIL (exit %d, %s), tree restored to snapshot (%d files)\n", res.ExitCode, res.Duration.Round(time.Millisecond), res.Snapshots)
+		} else {
+			fmt.Fprintf(&b, "status: FAIL (exit %d, %s)\n", res.ExitCode, res.Duration.Round(time.Millisecond))
+		}
+		if res.Err != nil {
+			fmt.Fprintf(&b, "error: %v\n", res.Err)
+		}
+		out := res.Output
+		if len(out) > 4000 {
+			out = out[:4000] + "\n... (truncated)"
+		}
+		if out != "" {
+			fmt.Fprintf(&b, "output:\n%s\n", out)
+		}
+		return b.String(), nil
+
+	case "kern_diff_files":
+		a := argString(args, "a")
+		b := argString(args, "b")
+		if a == "" || b == "" {
+			return "", fmt.Errorf("a and b are required")
+		}
+		ab, err := os.ReadFile(a)
+		if err != nil {
+			return "", fmt.Errorf("read %s: %w", a, err)
+		}
+		bb, err := os.ReadFile(b)
+		if err != nil {
+			return "", fmt.Errorf("read %s: %w", b, err)
+		}
+		u := diff.Unified(a, b, splitLines(string(ab)), splitLines(string(bb)))
+		if u == "" {
+			return "files identical", nil
+		}
+		return u, nil
+
+	case "kern_heal":
+		root := argString(args, "root")
+		if root == "" {
+			root = "."
+		}
+		task := argString(args, "task")
+		if task == "" {
+			task = "Fix the failing build/test/syntax errors in this project."
+		}
+		model := argString(args, "model")
+		rounds := 3
+		if s := argString(args, "max_rounds"); s != "" {
+			if n, err := strconv.Atoi(s); err == nil && n > 0 {
+				rounds = n
+			}
+		}
+		timeout := 120 * time.Second
+		if s := argString(args, "timeout"); s != "" {
+			if sec, err := strconv.Atoi(s); err == nil && sec > 0 {
+				timeout = time.Duration(sec) * time.Second
+			}
+		}
+		res := heal.Run(root, task, model, rounds, timeout)
+		var b strings.Builder
+		if res.Validated {
+			fmt.Fprintf(&b, "status: healed OK after %d round(s)\n", res.Iterations)
+			for _, c := range res.Changes {
+				fmt.Fprintf(&b, "changed: %s\n", c)
+			}
+			if res.Diff != "" {
+				fmt.Fprintf(&b, "diff:\n%s\n", res.Diff)
+			}
+			return b.String(), nil
+		}
+		fmt.Fprintf(&b, "status: still failing after %d round(s)\n", res.Iterations)
+		if res.Err != nil {
+			fmt.Fprintf(&b, "error: %v\n", res.Err)
+		}
+		if res.LastOutput != "" {
+			fmt.Fprintf(&b, "output:\n%s\n", truncateMCP(res.LastOutput, 3000))
+		}
+		return b.String(), nil
+	case "kern_validate":
+		root := argString(args, "root")
+		if root == "" {
+			root = "."
+		}
+		timeout := 120 * time.Second
+		if s := argString(args, "timeout"); s != "" {
+			if sec, err := strconv.Atoi(s); err == nil && sec > 0 {
+				timeout = time.Duration(sec) * time.Second
+			}
+		}
+		var c *validate.Command
+		if cmd := argString(args, "command"); cmd != "" {
+			parts := strings.Fields(cmd)
+			c = &validate.Command{Name: parts[0], Cmd: parts[0], Args: parts[1:]}
+		} else {
+			var err error
+			c, err = validate.Detect(root)
+			if err != nil {
+				return "", err
+			}
+		}
+		res := validate.Run(root, c, timeout)
+		var b strings.Builder
+		fmt.Fprintf(&b, "command: %s %s\n", c.Cmd, strings.Join(c.Args, " "))
+		fmt.Fprintf(&b, "status: %s\n", map[bool]string{true: "PASS", false: "FAIL"}[res.OK])
+		fmt.Fprintf(&b, "exit: %d\n", res.ExitCode)
+		fmt.Fprintf(&b, "duration: %s\n", res.Dur.Round(time.Millisecond))
+		out := res.Output
+		if len(out) > 4000 {
+			out = out[:4000] + "\n... (truncated)"
+		}
+		if out != "" {
+			fmt.Fprintf(&b, "output:\n%s\n", out)
+		}
+		if res.Err != nil {
+			fmt.Fprintf(&b, "error: %v\n", res.Err)
+		}
+		return b.String(), nil
+
+	case "kern_schema_validate":
+		data := argString(args, "data")
+		sc := argString(args, "schema")
+		if data == "" || sc == "" {
+			return "", fmt.Errorf("data and schema are required")
+		}
+		s, err := jsonschema.Parse(sc)
+		if err != nil {
+			return "", err
+		}
+		vs := s.Validate([]byte(data))
+		if len(vs) == 0 {
+			return "schema OK: output conforms", nil
+		}
+		var b strings.Builder
+		fmt.Fprintf(&b, "schema violations (%d):\n", len(vs))
+		for _, v := range vs {
+			fmt.Fprintln(&b, "  - "+v)
+		}
+		return b.String(), nil
+
+	case "kern_verify_output":
+		text := argString(args, "text")
+		if text == "" {
+			return "", fmt.Errorf("text is required")
+		}
+		root := argString(args, "root")
+		ix, err := loadOrBuildIndex(root)
+		if err != nil {
+			ix = nil
+		}
+		rep := verify.Sorted(verify.Verify(ix, root, text))
+		return verify.Render(rep), nil
 
 	case "kern_compact_file":
 		path := argString(args, "path")
@@ -568,6 +991,51 @@ func (s *Server) runTool(name string, args map[string]any) (string, error) {
 			b.WriteString(":")
 			b.WriteString(itoa(m.Line))
 			b.WriteString("\n")
+		}
+		return strings.TrimSuffix(b.String(), "\n"), nil
+
+	case "kern_frameworks":
+		root := argString(args, "root")
+		if root == "" {
+			cwd, _ := os.Getwd()
+			root = cwd
+		}
+		det, err := fw.Detect(root)
+		if err != nil {
+			return "", err
+		}
+		return fw.Render(det), nil
+
+	case "kern_entry_points":
+		root := argString(args, "root")
+		ix, err := loadOrBuildIndex(root)
+		if err != nil {
+			return "", err
+		}
+		limit := 50
+		if v := argString(args, "limit"); v != "" {
+			fmt.Sscanf(v, "%d", &limit)
+		}
+		var b strings.Builder
+		n := 0
+		for _, s := range ix.Symbols {
+			if !s.Entry || s.Framework == "" {
+				continue
+			}
+			if p := argString(args, "pattern"); p != "" {
+				re, _ := regexp.Compile("^" + strings.ReplaceAll(regexp.QuoteMeta(p), `\*`, `.*`) + "$")
+				if !re.MatchString(s.Name) && (s.Route == "" || !re.MatchString(s.Route)) {
+					continue
+				}
+			}
+			fmt.Fprintf(&b, "%s %s %s %s:%d\n", s.Framework, s.FullName(), s.Route, s.File, s.Line)
+			n++
+			if n >= limit {
+				break
+			}
+		}
+		if n == 0 {
+			return "no framework entry points in index (run kern build/index to populate)", nil
 		}
 		return strings.TrimSuffix(b.String(), "\n"), nil
 
@@ -994,6 +1462,17 @@ func itoa(n int) string {
 		n /= 10
 	}
 	return string(buf[i:])
+}
+
+func truncateMCP(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "\n... (truncated)"
+}
+
+func splitLines(s string) []string {
+	return strings.Split(strings.TrimRight(s, "\n"), "\n")
 }
 
 // loadOrBuildIndex loads the persisted index for root, or builds + saves it.

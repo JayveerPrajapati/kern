@@ -21,6 +21,11 @@ type Symbol struct {
 	End      int      `json:"end,omitempty"` // inclusive last line (0 if unknown)
 	Params   []string `json:"params,omitempty"`
 	Lang     string   `json:"lang,omitempty"`
+	// Framework-aware entry-point metadata: a symbol with Entry set is a
+	// framework entry point (HTTP handler, route, controller endpoint, task).
+	Entry     bool   `json:"entry,omitempty"`
+	Framework string `json:"framework,omitempty"` // fw framework id, e.g. "spring-mvc"
+	Route     string `json:"route,omitempty"`     // route/path the entry serves, e.g. "/users"
 }
 
 // Lines returns the 1-based size of the declaration in source lines, falling
@@ -127,6 +132,7 @@ func extract(rel string, src []byte) ([]Symbol, map[string][]string, *Pkg, error
 			pkg.Imports = append(pkg.Imports, strings.Trim(imp.Path.Value, `"`))
 		}
 	}
+	syms = append(syms, extractGoEntries(fset, f, syms, rel)...)
 	return syms, calls, pkg, nil
 }
 

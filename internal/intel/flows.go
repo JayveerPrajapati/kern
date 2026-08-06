@@ -41,7 +41,7 @@ func Flows(ix *index.Index, limit, maxDepth int) []Flow {
 		if len(ix.Callers[name]) > 0 {
 			continue
 		}
-		if len(ix.Calls[name]) > 0 || isEntryPoint(name) {
+		if len(ix.Calls[name]) > 0 || isEntryPoint(name) || s.Entry {
 			roots = append(roots, name)
 		}
 	}

@@ -16,7 +16,7 @@ import (
 
 // indexVersion is bumped whenever the persisted index schema changes, so
 // stale caches are rebuilt automatically instead of serving zero-value fields.
-const indexVersion = 2
+const indexVersion = 3
 
 // Index is the in-memory representation of a project's AST index.
 type Index struct {
@@ -191,6 +191,7 @@ func Build(root string) (*Index, error) {
 	})
 	ix.UpdatedAt = time.Now().UTC()
 	ix.computeCallers()
+	ix.resolveEntries()
 	ix.reindexByFile()
 	return ix, err
 }
@@ -309,7 +310,7 @@ func symbolRegex(pattern string) (*regexp.Regexp, string) {
 			prefix := p[:i]
 			switch prefix {
 			case "func", "method", "struct", "interface", "type", "const", "var",
-				"class", "enum", "trait", "module", "union", "impl", "prop", "heading":
+				"class", "enum", "trait", "module", "union", "impl", "prop", "heading", "entry":
 				kind = prefix
 				p = p[i+1:]
 			}
@@ -319,10 +320,15 @@ func symbolRegex(pattern string) (*regexp.Regexp, string) {
 }
 
 func symbolMatches(s Symbol, kind string, re *regexp.Regexp) bool {
+	if kind == "entry" {
+		return s.Entry && (re.MatchString(s.Name) || (s.Receiver != "" && re.MatchString(s.Receiver+"."+s.Name)) ||
+			(s.Route != "" && re.MatchString(s.Route)))
+	}
 	if kind != "" && s.Kind != kind {
 		return false
 	}
-	return re.MatchString(s.Name) || (s.Receiver != "" && re.MatchString(s.Receiver+"."+s.Name))
+	return re.MatchString(s.Name) || (s.Receiver != "" && re.MatchString(s.Receiver+"."+s.Name)) ||
+		(s.Route != "" && re.MatchString(s.Route))
 }
 
 // CallersOf returns the functions that call a given symbol name.

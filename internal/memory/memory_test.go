@@ -78,3 +78,41 @@ func TestTimestampSet(t *testing.T) {
 		t.Fatal("timestamps should be UTC")
 	}
 }
+
+func TestRecallRanksByOverlap(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	root := t.TempDir()
+	_ = Add(root, "the fastapi session stores the bearer token in a signed cookie")
+	_ = Add(root, "validate the bearer token in a fastapi dependency")
+	_ = Add(root, "use go ast to extract struct fields")
+	got := Recall(root, "how does the fastapi session handle bearer tokens?", 2)
+	if len(got) != 2 {
+		t.Fatalf("expected 2 recalls, got %d: %+v", len(got), got)
+	}
+	if !strings.Contains(got[0].Text, "fastapi") {
+		t.Fatalf("expected fastapi lesson first, got %q", got[0].Text)
+	}
+}
+
+func TestRecallEmpty(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	if got := Recall(t.TempDir(), "anything here", 3); len(got) != 0 {
+		t.Fatalf("expected no recalls, got %+v", got)
+	}
+}
+
+func TestRecallKCap(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	root := t.TempDir()
+	for _, l := range []string{
+		"handle jwt expiry in the api middleware",
+		"jwt refresh lives in the api layer",
+		"jwt rotation must log in the api",
+	} {
+		_ = Add(root, l)
+	}
+	got := Recall(root, "jwt api middleware", 2)
+	if len(got) > 2 {
+		t.Fatalf("expected at most 2, got %d", len(got))
+	}
+}

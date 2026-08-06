@@ -20,7 +20,11 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/budget"
 	"github.com/JayveerPrajapati/kern/internal/cache"
 	"github.com/JayveerPrajapati/kern/internal/code"
+	kdiff "github.com/JayveerPrajapati/kern/internal/diff"
+	"github.com/JayveerPrajapati/kern/internal/docsearch"
 	"github.com/JayveerPrajapati/kern/internal/doctor"
+	"github.com/JayveerPrajapati/kern/internal/fw"
+	"github.com/JayveerPrajapati/kern/internal/heal"
 	"github.com/JayveerPrajapati/kern/internal/hooks"
 	"github.com/JayveerPrajapati/kern/internal/index"
 	"github.com/JayveerPrajapati/kern/internal/intel"
@@ -28,10 +32,17 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/mcp"
 	"github.com/JayveerPrajapati/kern/internal/memory"
 	"github.com/JayveerPrajapati/kern/internal/optimize"
+	"github.com/JayveerPrajapati/kern/internal/pii"
+	"github.com/JayveerPrajapati/kern/internal/precache"
 	"github.com/JayveerPrajapati/kern/internal/prompt"
+	"github.com/JayveerPrajapati/kern/internal/sandbox"
+	"github.com/JayveerPrajapati/kern/internal/schema"
 	"github.com/JayveerPrajapati/kern/internal/setup"
 	"github.com/JayveerPrajapati/kern/internal/stats"
+	"github.com/JayveerPrajapati/kern/internal/swap"
 	"github.com/JayveerPrajapati/kern/internal/tokenize"
+	"github.com/JayveerPrajapati/kern/internal/validate"
+	"github.com/JayveerPrajapati/kern/internal/verify"
 )
 
 // version is stamped at build time via -ldflags "-X main.version=v1.2.3".
@@ -72,6 +83,30 @@ Usage:
   kern memory [--clear]                           show project memory
   kern budget "<text>" --max N                    fit text into a token budget
   kern doctor [root]                              diagnostics report
+  kern mask [file|-] [--names a,b,c]              mask secrets/PII locally with [MASKED_*] placeholders
+  kern docs <query> [root] [--k N]                local vector search over documents (md/txt/rst)
+  kern docs index [root]                          pre-index documents; kern docs clear resets
+  kern verify <file|- for stdin> [root] [--json]  cross-check file:line/symbol/route claims in agent output
+  kern schema <data.json|-> --schema <schema.json>
+                                                deterministically validate JSON output against a JSON schema
+  kern prompt <template> --schema <schema.json>  append strict schema formatting block to a rendered prompt
+  kern validate [root] [--cmd "custom"] [--timeout s]
+                                                auto-detect and run the project's build/test/syntax check
+  kern heal [root] [--llm model] [--task TEXT] [--max N] [--timeout s]
+                                                on failure, have the local LLM fix files in a snapshot,
+                                                re-validate there, and show a diff to review (never edits your tree)
+  kern optimize <prompt> [--fewshot]           inject top recalled lessons from project memory as baselines
+  kern udiff <file-a> <file-b> [--out patch]    unified line diff between two files (pure Go, no deps)
+  kern sandbox [root] -- <command...> [--timeout s]
+                                                run a risky command; on failure the tree is restored to a
+                                                snapshot (success keeps changes)
+  kern swap <file|-> [root] [--max N] [--mode summary|expand]
+                                                swap tagged code blocks (fenced lang:path blocks) for
+                                                per-file signatures to fit a token budget, or expand back
+  kern precache [root] [--interval s] [--once]  watch daemon: pre-warm code-summary and doc-search caches
+  kern optimize ... [--mask] [--names a,b,c]      also strip secrets from the prompt (restored in output)
+  kern optimize ... [--cache]                     serve identical requests from the local response cache
+  kern fw [root] [--catalog [lang]]               detect frameworks (default: --catalog shows the built-in list)
   kern hook install                               install post-commit diff->memory hook
   kern hook diff [range]                          compressed git diff (default HEAD~1..HEAD)
   kern hook store [range]                         store compressed diff in project memory
@@ -101,37 +136,48 @@ Usage:
 }
 
 type flags struct {
-	attach  string
-	session string
-	model   string
-	days    int
-	json    bool
-	dir     string
-	csv     bool
-	llm     string
-	bpe     bool
-	root    string
-	check   bool
-	agents  string
-	file    string
-	task    string
-	mermaid bool
-	all     bool
-	clear   bool
-	max     int
-	limit   int
-	lines   int
-	depth   int
-	range_  string
-	graphml bool
-	html    bool
-	out     string
-	repos   bool
+	attach   string
+	session  string
+	model    string
+	days     int
+	json     bool
+	dir      string
+	csv      bool
+	llm      string
+	bpe      bool
+	root     string
+	check    bool
+	agents   string
+	file     string
+	task     string
+	mermaid  bool
+	all      bool
+	clear    bool
+	max      int
+	limit    int
+	lines    int
+	depth    int
+	range_   string
+	graphml  bool
+	html     bool
+	out      string
+	repos    bool
+	mask     bool
+	names    string
+	cache    bool
+	schema   string
+	cmd      string
+	timeout  int
+	fewshot  bool
+	mode     string
+	once     bool
+	interval int
 }
 
 func parseFlags(args []string) (flags, []string) {
 	var f flags
 	f.days = 7
+	f.timeout = 120
 	var rest []string
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
@@ -197,6 +243,44 @@ func parseFlags(args []string) (flags, []string) {
 			f.mermaid = true
 		case "--repos":
 			f.repos = true
+		case "--mask":
+			f.mask = true
+		case "--names":
+			i++
+			if i < len(args) {
+				f.names = args[i]
+			}
+		case "--schema":
+			i++
+			if i < len(args) {
+				f.schema = args[i]
+			}
+		case "--cmd":
+			i++
+			if i < len(args) {
+				f.cmd = args[i]
+			}
+		case "--timeout":
+			i++
+			if i < len(args) {
+				f.timeout, _ = strconv.Atoi(args[i])
+			}
+		case "--cache":
+			f.cache = true
+		case "--fewshot":
+			f.fewshot = true
+		case "--mode":
+			i++
+			if i < len(args) {
+				f.mode = args[i]
+			}
+		case "--once":
+			f.once = true
+		case "--interval":
+			i++
+			if i < len(args) {
+				f.interval, _ = strconv.Atoi(args[i])
+			}
 		case "--graphml":
 			f.graphml = true
 		case "--html":
@@ -280,11 +364,14 @@ func main() {
 			optimize.Recorder = nil
 			defer func() { optimize.Recorder = old }()
 		}
-		res, err := optimize.Prompt(prompt, attach, optimize.Options{Session: f.session, Model: f.model, Source: "cli", LLM: f.llm})
+		res, err := optimize.Prompt(prompt, attach, optimize.Options{Session: f.session, Model: f.model, Source: "cli", LLM: f.llm, Mask: f.mask, MaskNames: splitNames(f.names), Cache: f.cache, FewShot: f.fewshot})
 		if err != nil {
 			fatal("%v", err)
 		}
 		fmt.Println(res.Output)
+		if res.FromCache {
+			fmt.Fprintf(os.Stderr, "kern: served from cache\n")
+		}
 		fmt.Fprintf(os.Stderr, "kern: %d -> %d tokens (saved %d, %.1f%%)\n", res.BeforeTokens, res.AfterTokens, res.SavedTokens, res.SavedPercent)
 
 	case "compact":
@@ -429,7 +516,241 @@ func main() {
 		if err != nil {
 			fatal("%v", err)
 		}
+		if f.schema != "" {
+			sc, serr := loadSchema(f.schema)
+			if serr != nil {
+				fatal("%v", serr)
+			}
+			fmt.Print(out)
+			fmt.Println()
+			fmt.Print(sc.PromptBlock())
+			return
+		}
 		fmt.Print(out)
+
+	case "validate":
+		f, args := parseFlags(rest)
+		root := "."
+		if len(args) > 0 {
+			root = args[0]
+		}
+		var c *validate.Command
+		if f.cmd != "" {
+			parts := strings.Fields(f.cmd)
+			if len(parts) == 0 {
+				fatal("empty --cmd")
+			}
+			c = &validate.Command{Name: parts[0], Cmd: parts[0], Args: parts[1:]}
+		} else {
+			var err error
+			c, err = validate.Detect(root)
+			if err != nil {
+				fatal("%v", err)
+			}
+		}
+		fmt.Printf("kern: running %s %s\n", c.Cmd, strings.Join(c.Args, " "))
+		res := validate.Run(root, c, time.Duration(f.timeout)*time.Second)
+		if res.Err != nil {
+			fmt.Fprintf(os.Stderr, "kern: validation error: %v\n", res.Err)
+		}
+		fmt.Print(res.Output)
+		if res.OK {
+			fmt.Printf("kern: validation OK (%s, %s)\n", c.Name, res.Dur.Round(time.Millisecond))
+			return
+		}
+		fmt.Printf("kern: validation FAILED (%s, exit %d)\n", c.Name, res.ExitCode)
+		os.Exit(1)
+
+	case "heal":
+		f, args := parseFlags(rest)
+		root := "."
+		if len(args) > 0 {
+			root = args[0]
+		}
+		task := f.task
+		if task == "" {
+			task = "Fix the failing build/test/syntax errors in this project."
+		}
+		iters := f.max
+		if iters == 0 {
+			iters = 3
+		}
+		fmt.Printf("kern: heal %s (cmd=%s, rounds=%d)\n", root, f.llm, iters)
+		res := heal.Run(root, task, f.llm, iters, time.Duration(f.timeout)*time.Second)
+		if res.Err != nil {
+			fatal("%v", res.Err)
+		}
+		if res.Validated {
+			fmt.Printf("kern: validated OK after %d correction round(s)\n", res.Iterations)
+			if len(res.Changes) > 0 {
+				fmt.Printf("kern: changed files (review and apply in your tree):\n")
+				for _, c := range res.Changes {
+					fmt.Printf("  - %s\n", c)
+				}
+			}
+			if res.Diff != "" {
+				fmt.Println(res.Diff)
+			}
+			return
+		}
+		fmt.Printf("kern: still failing after %d round(s)\n", res.Iterations)
+		fmt.Print(res.LastOutput)
+		os.Exit(1)
+
+	case "udiff":
+		f, args := parseFlags(rest)
+		if len(args) < 2 {
+			fatal("usage: kern udiff <file-a> <file-b> [--out out.patch]")
+		}
+		ab, err := os.ReadFile(args[0])
+		if err != nil {
+			fatal("cannot read %s: %v", args[0], err)
+		}
+		bb, err := os.ReadFile(args[1])
+		if err != nil {
+			fatal("cannot read %s: %v", args[1], err)
+		}
+		u := kdiff.Unified(args[0], args[1], splitLines(string(ab)), splitLines(string(bb)))
+		if u == "" {
+			fmt.Println("files identical")
+			return
+		}
+		if f.out != "" {
+			if err := os.WriteFile(f.out, []byte(u), 0o644); err != nil {
+				fatal("%v", err)
+			}
+			fmt.Printf("wrote diff to %s\n", f.out)
+			return
+		}
+		fmt.Print(u)
+
+	case "sandbox":
+		f, args := parseFlags(rest)
+		root := "."
+		cmdParts := args
+		if len(args) > 0 && args[0] != "--" && isDir(args[0]) {
+			root = args[0]
+			cmdParts = args[1:]
+		}
+		if len(cmdParts) == 0 {
+			fatal("usage: kern sandbox [root] -- <command...>")
+		}
+		// Strip a leading -- separator.
+		if cmdParts[0] == "--" {
+			cmdParts = cmdParts[1:]
+		}
+		if len(cmdParts) == 0 {
+			fatal("usage: kern sandbox [root] -- <command...>")
+		}
+		fmt.Printf("kern: sandbox run in %s: %s\n", root, strings.Join(cmdParts, " "))
+		res := sandbox.Run(root, cmdParts[0], cmdParts[1:], time.Duration(f.timeout)*time.Second)
+		fmt.Print(res.Output)
+		if res.OK {
+			fmt.Printf("kern: succeeded (%s); changes kept\n", res.Duration.Round(time.Millisecond))
+			return
+		}
+		if res.Restored {
+			fmt.Printf("kern: FAILED (exit %d, %s); tree restored to snapshot (%d files)\n", res.ExitCode, res.Duration.Round(time.Millisecond), res.Snapshots)
+		} else {
+			fmt.Printf("kern: FAILED (exit %d)\n", res.ExitCode)
+		}
+		if res.Err != nil {
+			fmt.Fprintf(os.Stderr, "kern: %v\n", res.Err)
+		}
+		os.Exit(1)
+
+	case "swap":
+		f, args := parseFlags(rest)
+		root := "."
+		if len(args) > 0 && isDir(args[0]) {
+			root = args[0]
+			args = args[1:]
+		}
+		var b []byte
+		var err error
+		if len(args) > 0 && args[0] == "-" {
+			b, err = io.ReadAll(os.Stdin)
+		} else if len(args) > 0 {
+			b, err = os.ReadFile(args[0])
+		} else {
+			b, err = io.ReadAll(os.Stdin)
+		}
+		if err != nil {
+			fatal("%v", err)
+		}
+		text := string(b)
+		switch f.mode {
+		case "expand":
+			fmt.Print(swap.ExpandMode(text, root))
+		case "summary":
+			fmt.Print(swap.SummaryMode(text, root))
+		default:
+			out, fits := swap.Fit(text, root, f.max)
+			if !fits {
+				fmt.Fprintf(os.Stderr, "kern: warning: still over budget after summarization\n")
+			}
+			fmt.Print(out)
+		}
+
+	case "precache":
+		f, args := parseFlags(rest)
+		root := "."
+		if len(args) > 0 {
+			root = args[0]
+		}
+		if f.once {
+			rep := precache.Warm(root)
+			fmt.Printf("kern: warmed %d summaries (%d cache hits), %d doc chunks, docs saved=%v in %s\n",
+				rep.Warmed, rep.CacheHits, rep.DocChunks, rep.DocsSaved, rep.Dur.Round(time.Millisecond))
+			return
+		}
+		interval := time.Duration(f.interval) * time.Second
+		if interval <= 0 {
+			interval = 60 * time.Second
+		}
+		stop := make(chan struct{})
+		sig := make(chan os.Signal, 1)
+		signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
+		go func() { <-sig; close(stop) }()
+		fmt.Printf("kern: pre-caching %s every %s (Ctrl-C to stop)\n", root, interval)
+		for rep := range precache.Watch(root, interval, stop) {
+			if rep.SourceMiss {
+				fmt.Printf("kern: no project at %s\n", root)
+				return
+			}
+			fmt.Printf("kern: warmed %d (%d hits), %d doc chunks\n", rep.Warmed, rep.CacheHits, rep.DocChunks)
+		}
+
+	case "schema":
+		f, args := parseFlags(rest)
+		if f.schema == "" {
+			fatal("usage: kern schema <data.json|- for stdin> --schema <schema.json>\n  or: kern prompt <template> --schema <schema.json> to inject the schema")
+		}
+		sc, err := loadSchema(f.schema)
+		if err != nil {
+			fatal("%v", err)
+		}
+		var b []byte
+		if len(args) > 0 && args[0] == "-" {
+			b, err = io.ReadAll(os.Stdin)
+		} else if len(args) > 0 {
+			b, err = os.ReadFile(args[0])
+		} else {
+			b, err = io.ReadAll(os.Stdin)
+		}
+		if err != nil {
+			fatal("%v", err)
+		}
+		violations := sc.Validate(b)
+		if len(violations) == 0 {
+			fmt.Println("schema OK: output conforms")
+			return
+		}
+		fmt.Printf("schema violations (%d):\n", len(violations))
+		for _, v := range violations {
+			fmt.Println("  - " + v)
+		}
+		os.Exit(1)
 
 	case "remember":
 		lesson := strings.Join(rest, " ")
@@ -483,6 +804,166 @@ func main() {
 			root = rest[0]
 		}
 		fmt.Println(doctor.Render(root, doctor.Run(root)))
+
+	case "mask":
+		f, args := parseFlags(rest)
+		var in string
+		if len(args) > 0 && args[0] != "" {
+			in = args[0]
+		}
+		var b []byte
+		var err error
+		if in == "" || in == "-" {
+			b, err = io.ReadAll(os.Stdin)
+		} else {
+			b, err = os.ReadFile(in)
+		}
+		if err != nil {
+			fatal("%v", err)
+		}
+		res := pii.MaskNames(string(b), splitNames(f.names))
+		fmt.Print(res.Text)
+		if res.Replaced > 0 {
+			fmt.Fprintf(os.Stderr, "\nkern: masked %d secrets: ", res.Replaced)
+			var parts []string
+			for k, v := range res.ByLabel {
+				parts = append(parts, fmt.Sprintf("%s %d", k, v))
+			}
+			fmt.Fprint(os.Stderr, strings.Join(parts, ", "))
+			fmt.Fprintln(os.Stderr)
+		}
+
+	case "verify":
+		f, args := parseFlags(rest)
+		root := "."
+		in := "-"
+		if len(args) > 0 && args[0] != "" {
+			in = args[0]
+			args = args[1:]
+		}
+		if len(args) > 0 {
+			root = args[0]
+		}
+		var b []byte
+		var err error
+		if in == "-" {
+			b, err = io.ReadAll(os.Stdin)
+		} else {
+			b, err = os.ReadFile(in)
+		}
+		if err != nil {
+			fatal("%v", err)
+		}
+		ix, ierr := loadOrBuild(root)
+		if ierr != nil {
+			ix = nil
+		}
+		rep := verify.Sorted(verify.Verify(ix, root, string(b)))
+		if f.json {
+			printJSON(rep)
+			return
+		}
+		fmt.Println(verify.Render(rep))
+
+	case "docs":
+		f, args := parseFlags(rest)
+		sub := ""
+		if len(args) > 0 && (args[0] == "index" || args[0] == "clear") {
+			sub = args[0]
+			args = args[1:]
+		}
+		root := "."
+		query := ""
+		if sub == "" && len(args) > 0 {
+			query = args[0]
+			args = args[1:]
+		}
+		if len(args) > 0 {
+			root = args[0]
+		}
+		if sub == "index" {
+			ix, err := docsearch.IndexDir(root)
+			if err != nil {
+				fatal("%v", err)
+			}
+			if err := ix.Save(); err != nil {
+				fatal("%v", err)
+			}
+			fmt.Printf("indexed %d chunks from %s\n", len(ix.Docs), root)
+		} else if sub == "clear" {
+			_ = os.RemoveAll(cache.Path("data", "docs"))
+			fmt.Println("cleared document index")
+		} else {
+			if query == "" {
+				fatal("usage: kern docs <query> [root] [--k N] | kern docs index [root] | kern docs clear")
+			}
+			ix := docsearch.Load(root)
+			if ix == nil {
+				var err error
+				ix, err = docsearch.IndexDir(root)
+				if err != nil {
+					fatal("%v", err)
+				}
+				_ = ix.Save()
+			}
+			k := f.limit
+			results := ix.Search(query, k)
+			if len(results) == 0 {
+				fmt.Println("no matching document fragments")
+				return
+			}
+			for i, r := range results {
+				fmt.Printf("#%d sim=%.3f %s:%d\n", i+1, r.Sim, r.Doc.Chunk.File, r.Doc.Chunk.Start)
+				body := strings.ReplaceAll(r.Doc.Chunk.Text, "\n", " ")
+				if len(body) > 300 {
+					body = body[:300] + "…"
+				}
+				fmt.Printf("  %s\n", body)
+			}
+		}
+
+	case "fw":
+		args := rest
+		var filter string
+		if len(args) > 0 && args[0] == "--catalog" {
+			args = args[1:]
+			if len(args) > 0 {
+				filter = args[0]
+				args = args[1:]
+			}
+			langs := fw.Langs()
+			if filter != "" {
+				var fs []fw.Framework
+				for _, fr := range fw.Catalog() {
+					if fr.Lang == filter || strings.Contains(strings.ToLower(fr.Name), strings.ToLower(filter)) {
+						fs = append(fs, fr)
+					}
+				}
+				if len(fs) == 0 {
+					fatal("no frameworks match %q (languages: %s)", filter, strings.Join(langs, ", "))
+				}
+				for _, fr := range fs {
+					fmt.Printf("%-20s %s\n", fr.Name, fr.Summary)
+				}
+				return
+			}
+			for _, lang := range langs {
+				fmt.Printf("%s\n", lang)
+				for _, fr := range fw.ByLang(lang) {
+					fmt.Printf("  %-20s %s\n", fr.Name, fr.Summary)
+				}
+			}
+			return
+		}
+		root := "."
+		if len(args) > 0 && args[0] != "" {
+			root = args[0]
+		}
+		det, err := fw.Detect(root)
+		if err != nil {
+			fatal("%v", err)
+		}
+		fmt.Println(fw.Render(det))
 
 	case "hook":
 		f, args := parseFlags(rest)
@@ -1388,9 +1869,44 @@ func fatal(format string, args ...any) {
 	os.Exit(1)
 }
 
+func splitNames(s string) []string {
+	var out []string
+	for _, n := range strings.Split(s, ",") {
+		if n = strings.TrimSpace(n); n != "" {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
+func loadSchema(spec string) (*schema.Schema, error) {
+	if strings.HasPrefix(spec, "{") {
+		return schema.Parse(spec)
+	}
+	b, err := os.ReadFile(spec)
+	if err != nil {
+		return nil, fmt.Errorf("cannot read schema: %w", err)
+	}
+	return schema.Parse(string(b))
+}
+
 func pct(before, after int) float64 {
 	if before <= 0 {
 		return 0
 	}
 	return float64(before-after) / float64(before) * 100
+}
+
+func splitLines(s string) []string {
+	return strings.Split(strings.TrimRight(s, "\n"), "\n")
+}
+
+func fileExists(p string) bool {
+	info, err := os.Stat(p)
+	return err == nil && !info.IsDir()
+}
+
+func isDir(p string) bool {
+	info, err := os.Stat(p)
+	return err == nil && info.IsDir()
 }
