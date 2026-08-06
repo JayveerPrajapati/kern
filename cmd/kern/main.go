@@ -877,28 +877,28 @@ func main() {
 		if err != nil {
 			fatal("%v", err)
 		}
-		var files []string
+		var changes []intel.FileChange
 		if f.file != "" {
 			for _, p := range strings.Split(f.file, ",") {
 				if p = strings.TrimSpace(p); p != "" {
-					files = append(files, p)
+					changes = append(changes, intel.FileChange{File: p})
 				}
 			}
 		} else {
 			from, to := splitRange(f.range_)
-			files, err = intel.FilesForRange(root, from, to)
+			changes, err = intel.FilesForRangeL(root, from, to)
 			if err != nil {
 				fatal("%v", err)
 			}
 		}
-		if len(files) == 0 {
+		if len(changes) == 0 {
 			fatal("no changed files (use --range a..b, --file f1,f2, or make edits)")
 		}
 		if cmd == "review" {
-			fmt.Println(intel.Review(ix, files, f.max))
+			fmt.Println(intel.ReviewRanged(ix, changes, f.max))
 			return
 		}
-		report := intel.AnalyzeChanges(ix, files)
+		report := intel.AnalyzeChangesRanged(ix, changes)
 		if f.json {
 			printJSON(report)
 			return

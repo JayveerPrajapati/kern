@@ -38,10 +38,34 @@ jobs:
           # limit the blast-radius panel and cap size for a comment
           ./kern review --range "${base}..HEAD" --max 6000 > /tmp/kern-review.md || true
           ./kern changes --range "${base}..HEAD" > /tmp/kern-changes.txt || true
-          { cat /tmp/kern-review.md 2>/dev/null; echo; echo "---"; cat /tmp/kern-changes.txt 2>/dev/null; } > /tmp/kern-comment.md || true
+
+      - name: Boundary guard check
+        id: guard
+        shell: bash
+        run: |
+          base="origin/${{ github.base_ref }}"
+          ./kern guard check --range "${base}..HEAD" > /tmp/kern-guard.txt 2>/dev/null || true
+          # surface violations as annotations (non-blocking)
+          if head -1 /tmp/kern-guard.txt | grep -q "^REJECT:"; then
+            echo "::error file=pr-review.yml::kern boundary violations detected (see review comment)"
+          fi
+
+      - name: Assemble review comment
+        id: assemble
+        shell: bash
+        run: |
+          {
+            cat /tmp/kern-review.md 2>/dev/null
+            echo
+            echo "---"
+            cat /tmp/kern-changes.txt 2>/dev/null
+            echo
+            echo "## Boundary guard"
+            cat /tmp/kern-guard.txt 2>/dev/null
+          } > /tmp/kern-comment.md
           # GITHUB_OUTPUT multiline: the delimiter is a literal token (no quotes).
           echo "preview<<KERN_REVIEW_EOF" >> "$GITHUB_OUTPUT"
-          cat /tmp/kern-comment.md 2>/dev/null >> "$GITHUB_OUTPUT"
+          cat /tmp/kern-comment.md >> "$GITHUB_OUTPUT"
           echo "KERN_REVIEW_EOF" >> "$GITHUB_OUTPUT"
 
       - name: Post review comment
@@ -63,4 +87,4 @@ jobs:
               await github.rest.issues.createComment(payload);
             }
         env:
-          REVIEW_BODY: ${{ steps.review.outputs.preview }}
+          REVIEW_BODY: ${{ steps.assemble.outputs.preview }}
