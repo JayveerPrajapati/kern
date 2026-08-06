@@ -3,7 +3,7 @@
 # package only makes it installable via pip for people who prefer that.
 #
 # Distribution note: replace JayveerPrajapati with your GitHub username.
-__version__ = "0.4.0"
+__version__ = "0.4.1"
 
 import os
 import shutil

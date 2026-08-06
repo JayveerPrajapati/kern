@@ -86,6 +86,12 @@ What it configures:
 | **Codex** | appends `[mcp_servers.kern]` to `~/.codex/config.toml` |
 | **JSON adapters** | `continue`, `windsurf`, `zed`, `vscode`, `cursor`, `gemini`, `antigravity`, `qwen`, `qoder`, `kiro`, `copilot`, `copilot-cli` — writes their MCP config (project- or home-based), creating parent dirs as needed |
 
+When you run `kern setup` inside a project repo it also writes a project-level
+`.mcp.json` so the MCP server picks up the right working directory. For full
+code-intelligence features (change impact, hotspots, call graphs), start the
+background indexer once: `kern index .` (one-shot) or `kern watch .`
+(daemon — re-indexes on any file save). `kern doctor` reports index freshness.
+
 `kern buddy` prints a session briefing — project map, language mix, symbol
 kinds, most-called hub symbols, entry points, an architecture overview
 (communities + coupling warnings) and recent kern savings — a starting context
@@ -102,6 +108,14 @@ pre-filled.
 | Agent re-reading the whole codebase | `kern_project_map` / `kern_compact_file` — symbolic summaries (functions, types, lines), cached by content hash |
 | Huge build/test output flooding context | `kern_run_build` — runs the command, returns only pass/fail + errors |
 | Verbose prompts | `kern_optimize_prompt` — cleans and compresses before sending |
+| Secrets leaked into agent context | `kern_mask` — replaces secrets/PII with `[MASKED_*]` placeholders locally |
+| Need deterministic JSON output | `kern_schema` — validates JSON against a schema; `kern prompt --schema` injects a formatting block |
+| Agent cites wrong file:line | `kern_verify` — cross-checks file:line / symbol / route claims in agent output |
+| Searching docs across projects | `kern_docs` — local vector search over markdown/txt/rst documents |
+| Unknown tech stack | `kern_fw` — detects frameworks from imports/config (catalog listed via `--catalog`) |
+| Flaky failing tests | `kern_heal` — snapshot-based LLM auto-fix, re-validates, shows diff (never edits your tree) |
+| Risky commands in the tree | `kern_sandbox` — runs a command; on failure the tree is restored to a snapshot |
+| Code blocks blowing the budget | `kern_swap` — swap tagged code blocks for per-file signatures, or expand back |
 | "How much did I save?" | `kern_stats` / `kern diff` — before/after tokens, cost saved |
 
 ## Code intelligence
@@ -204,34 +218,68 @@ Additional capabilities for long-running agent sessions:
 - **Cross-project search** — `kern ast "<pattern>" --all` searches every cached
   project index at once (great for "where have I solved this before?"), and
   `kern search "query" --repos` does ranked free-text lookup across repos you
-  register with `kern repos add`.
+  register with `kern repos add`. `kern_docs "<query>"` searches your local
+  markdown/txt/rst documents via vector search.
+- **Secret & PII masking** — pipe any text or file through `kern_mask` and it
+  replaces API keys, tokens, emails, and other sensitive patterns with
+  `[MASKED_*]` placeholders — useful before pasting agent output or logs.
+  `kern optimize --mask` applies the same inline to a prompt.
+- **Schema-guaranteed output** — `kern_schema data.json --schema schema.json`
+  deterministically validates JSON against a JSON schema; `kern prompt
+  <template> --schema schema.json` appends a strict formatting block to a
+  rendered prompt so structured LLM output is machine-checkable.
+- **Output verification** — `kern_verify` checks file:line, symbol, and route
+  claims in agent-generated text against the real codebase, flagging
+  hallucinated references before they're trusted.
+- **Framework detection** — `kern_fw` reads imports and config files to report
+  the frameworks in use; `kern_fw --catalog` lists the built-in detection rules
+  for every supported language.
+- **Self-healing** — `kern_heal` runs a command, and on failure asks a local
+  Ollama model to fix files in a throwaway snapshot, re-validates there, and
+  shows a diff to review. It never edits your working tree directly.
+- **Sandboxed execution** — `kern_sandbox [root] -- <command>` runs a risky
+  command; on failure the tree is automatically restored to a snapshot taken
+  before it ran (successes keep their changes).
 - **Rationale & docs** — `kern why <sym>` shows a symbol's doc comment plus each
   caller with its own doc line ("who depends on it and why"); `kern wiki`
   exports a markdown wiki with one page per package for community reference.
 
 ## MCP server (works with any MCP agent)
 
-Start it: `kern-mcp` (or `kern mcp`). It speaks MCP over stdio and exposes 29
+Start it: `kern-mcp` (or `kern mcp`). It speaks MCP over stdio and exposes 42
 `kern_*` tools plus workflow prompts — any MCP agent can consume it over stdio
 or over HTTP (`kern-mcp --http :8080` speaks the Streamable HTTP transport:
 `POST /mcp` with JSON-RPC bodies, batch requests supported, no SSE streaming,
 advertised via `streamableHttpCapabilities`).
 
 <details>
-<summary>MCP tools — all 29 `kern_*` tools</summary>
+<summary>MCP tools — all 42 `kern_*` tools</summary>
 
 - `kern_optimize_prompt(prompt, attached_log?, session?, model?)`
+- `kern_optimize_log(log)`
+- `kern_mask_pii(text, mask_names?)`
+- `kern_swap(text, root?, max_tokens?, mode?)` — summary/expand/fit tagged code blocks
+- `kern_sandbox(root?, command, timeout?)` — snapshot + rollback on failure
+- `kern_heal(root?, task, model?, max_rounds?, timeout?)` — LLM self-correction loop
+- `kern_validate(root?, command?)` — auto-detect & run build/test/checks
+- `kern_diff_files(a, b)` — unified line diff between two files
+- `kern_schema_validate(data, schema)` — deterministic JSON schema validation
+- `kern_verify_output(text)` — cross-check file:line/symbol/route claims
+- `kern_frameworks(root?)` — detect frameworks from manifests & sources
+- `kern_entry_points(root?, limit?, pattern?)` — handlers/controllers/routes
+- `kern_doc_search(query, root?, k?)` — local vector search over documents
+- `kern_doc_index(root?)` — pre-index a project's documents
+- `kern_precache(root?)` — pre-warm summary & doc-search caches
 - `kern_compact_file(path)`
 - `kern_project_map(root, max_files?)`
 - `kern_run_build(command, dir?)`
-- `kern_optimize_log(log)`
+- `kern_context_budget(text, max_tokens?)`
 - `kern_stats(days?, session?)`
 - `kern_ast_search(pattern, root?, limit?)`
 - `kern_search(query, root?, limit?)`
 - `kern_repo_search(query, limit?)`
 - `kern_code_graph(symbol, root?)`
 - `kern_context(symbol, root?, lines?)`
-- `kern_context_budget(text, max_tokens?)`
 - `kern_why(symbol, root?)`
 - `kern_changes(root?, range?, file?)`
 - `kern_review(root?, range?, file?, max_tokens?)`
@@ -311,6 +359,9 @@ prompt to the local server for a smarter rewrite:
 
 - `--llm` flag on `kern optimize`; env `KERN_MODEL` and `OLLAMA_HOST`
   (default `http://localhost:11434`, model `llama3.2`).
+- `--fewshot` injects top-recall lessons from project memory as baselines.
+- `--mask` strips secrets/PII from the prompt (restored in output).
+- `--cache` serves identical requests from the local response cache.
 - If Ollama is unreachable, errors, or the response is empty, kern silently
   falls back to the deterministic path — it never blocks a run.
 
@@ -347,6 +398,9 @@ core (parse -> compress -> cache -> token-count)
 ```sh
 kern optimize "Fix the login bug, check error handling." --attach build.log
 kern optimize --llm llama3.2 "a very long prompt…"   # local Ollama step (opt-in)
+kern optimize "..." --mask --names api,token          # strip secrets/PII before sending
+kern optimize "..." --cache                           # serve identical requests from cache
+kern optimize "..." --fewshot                         # inject top-recalled lessons as baselines
 kern preview  "..." --attach log.txt        # dry-run, no stats recorded
 kern compact  src/main.go                    # file summary
 kern project  .                              # compact project map
@@ -356,7 +410,9 @@ kern log      server.log
  kern index    .                              # build AST index
  kern watch    .                              # daemon: auto re-index on change
  kern ast      "func *rompt*"                 # AST search (wildcards, kind prefixes)
+ kern ast      "func *extract*" --all         # search across every cached project
  kern search   "load index" [--repos]         # ranked free-text symbol search (--repos: across registered repos)
+ kern repos    (list|add <path> [name]|remove <name>)  # multi-repo registry
  kern graph    Prompt                         # call graph: def + callers + calls
  kern context  symbolRegex                    # minimal source slice for a symbol
  kern why      Prompt                         # rationale: doc comment + who depends on it and why
@@ -380,6 +436,8 @@ kern probe    "<task text>" [root] [--max N]           # task -> budget-capped m
 kern trace    <file|- for stdin> [root] [--limit N]    # overlay pprof/stack trace on the call graph
 kern guard    init [root]                              # write starter .kern/boundaries.json
 kern guard    check [root] [--file f] [--range a..b]   # enforce boundaries; exit 2 on violations
+kern path     <a> <b> [root] [--json]                 # shortest call path between two symbols
+kern path                                    # (no args) show cache directory
 kern lock     <scope> [root]                           # acquire advisory lock, block until interrupt
 kern unlock   <scope> [root]                           # release a held lock
 kern status   [root] [--json]                          # show held locks
@@ -390,30 +448,40 @@ kern tokens   --bpe "fix the login bug."     # token count (exact BPE)
 kern diff     --session abc                  # recent before/after entries
 kern export   --csv                          # full history
 
+# Project tooling
 kern setup    --check                        # show agent wiring status
-kern setup                                   # wire kern into agents (idempotent)
-kern buddy                                   # session onboarding digest for any agent
-kern prompt   fix-bug --file src/x.go --task "crashes on empty input"
+kern setup    [--agents mcp,opencode,claude]   # wire kern into agents (idempotent)
+kern buddy    [root]                         # session onboarding digest for any agent
+kern prompt   <template> [--file PATH] [--task TEXT]  # fine-tuned prompt template
 kern prompt   list                           # list available templates
-kern doctor                                  # diagnostics: binary, wiring, index, ollama
-kern remember "always use tabs here"         # record a lesson in project memory
-kern memory                                  # show cross-session project memory
-kern memory   --clear                        # wipe project memory
+kern doctor   [root]                         # diagnostics: binary, wiring, index, ollama
+kern remember "<lesson>"                     # record a lesson in project memory
+kern memory   [--clear]                      # show / wipe project memory
 kern budget   "$(cat build.log)" --max 4000  # fit text into a token budget
+kern mask     <file|- for stdin> [--names a,b,c]  # mask secrets/PII locally
 kern hook     install                        # post-commit: commit diff -> project memory
 kern hook     diff                           # compressed git diff
 kern hook     store [range]                  # store compressed diff in project memory
- kern ast      "func *extract*" --all         # search across every cached project
- kern graph    Prompt --mermaid               # call graph as Mermaid flowchart
- kern graph    Prompt --html --out g.html     # interactive HTML visualisation
- kern graph    Prompt --graphml --out g.xml   # export to yEd/Gephi/Cytoscape
- kern search   "login" --repos                # cross-repo search (kern repos add <path>)
- kern why      Prompt                         # doc comment + who depends on it and why
- kern wiki     --out docs/wiki                # export a markdown wiki
- kern mcp                                     # run MCP server on stdio
- kern-mcp --http :8080                        # serve MCP over HTTP (Streamable HTTP, POST /mcp)
- kern path                                    # show cache dir
- kern version                                 # show version
+kern validate [root] [--cmd "custom"] [--timeout s]   # auto-detect & run build/test/checks
+kern heal     [root] [--llm model] [--task TEXT] [--max N] [--timeout s]  # LLM self-correction loop
+kern sandbox  [root] -- <command...> [--timeout s]     # run risky cmd; tree restored on failure
+kern swap     <file|-> [root] [--max N] [--mode summary|expand|fit]  # swap/expand tagged code blocks
+kern precache [root] [--interval s] [--once]            # pre-warm code-summary & doc-search caches
+kern schema   <data.json|-> --schema <schema.json>    # deterministic JSON schema validation
+kern verify   <file|- for stdin> [root] [--json]       # cross-check file:line/symbol/route claims
+kern docs     <query> [root] [--k N]                    # local vector search over documents
+kern docs     index [root]                             # pre-index documents; ``clear`` resets
+kern fw       [root] [--catalog [lang]]                # detect frameworks; --catalog lists rules
+kern udiff    <file-a> <file-b> [--out patch]          # unified diff between two files (pure Go)
+kern graph    Prompt --mermaid               # call graph as Mermaid flowchart
+kern graph    Prompt --html --out g.html     # interactive HTML visualisation
+kern graph    Prompt --graphml --out g.xml   # export to yEd/Gepfi/Cytoscape
+kern search   "login" --repos                # cross-repo search (kern repos add <path>)
+kern why      Prompt                         # doc comment + who depends on it and why
+kern wiki     --out docs/wiki                # export a markdown wiki
+kern mcp                                     # run MCP server on stdio
+kern-mcp --http :8080                        # serve MCP over HTTP (Streamable HTTP, POST /mcp)
+kern version                                 # show version
 ```
 
 </details>

@@ -104,7 +104,12 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: dist
-          merge-multiple: true
+
+      - name: Flatten artifact subdirectories
+        shell: bash
+        run: |
+          # download-artifact@v4 places each artifact in its own subdir; flatten.
+          find dist -mindepth 2 -type f -exec mv -t dist/ {} +
 
       - name: Generate checksums and brew formula
         shell: bash
