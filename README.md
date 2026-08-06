@@ -122,7 +122,10 @@ other languages use a built-in extractor (`internal/index/foreign.go`) that
 strips comments/strings, detects the language by extension or shebang, and
 applies per-language declaration rules (methods via `Type::name` / `name(self)`
 / indent-based `def`, types via a brace-depth stack). Supported: Go, Rust,
-C/C++, TypeScript, JavaScript, Python, Ruby, Java, PHP, shell. `kern index`
+C/C++, TypeScript, JavaScript (incl. JSX/TSX), Python, Ruby, Java, PHP, shell,
+CSS (classes, ids, `@keyframes`, custom properties), HTML (`id` anchors), and
+Vue/Svelte single-file components (the `<script>` block is extracted and
+indexed as JS/TS, incl. `<script lang="ts">`). `kern index`
 prints the language mix; symbols carry a `Lang` field. `kern ast` understands
 kind prefixes `class`, `enum`, `trait`, `module`, `union`, `impl`, `prop`
 alongside the Go ones.

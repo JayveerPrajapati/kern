@@ -426,6 +426,8 @@ func TestRubyExtract(t *testing.T) {
 func TestLanguageDetection(t *testing.T) {
 	extCases := map[string]string{
 		"a.go": "go", "a.py": "python", "a.js": "javascript", "a.tsx": "typescript",
+		"a.vue": "javascript", "a.svelte": "javascript", "a.css": "css", "a.scss": "css",
+		"a.html": "html", "a.htm": "html",
 		"a.rs": "rust", "a.c": "c", "a.cpp": "cpp", "a.cs": "csharp",
 		"a.java": "java", "a.rb": "ruby", "a.php": "php", "a.sh": "shell",
 		"a.txt": "",
@@ -504,5 +506,140 @@ func TestSearchKindPrefixes(t *testing.T) {
 	}
 	if len(ix.Search("method *login*", 10)) != 1 {
 		t.Fatal("expected method User.login")
+	}
+}
+
+func TestSfcExtractVue(t *testing.T) {
+	src := `<template>
+  <div class="card" id="main">{{ count }}</div>
+</template>
+
+<script setup lang="ts">
+import { ref } from "vue"
+const count = ref(0)
+export function bump(): number {
+  return count.value + 1
+}
+</script>
+
+<style scoped>
+.card { color: red; }
+</style>
+`
+	syms, _, _, _ := extractForeign("components/Counter.vue", []byte(src), "typescript")
+	if s := findSym(syms, "bump"); s == nil {
+		t.Fatalf("expected func bump from vue script, got %v", syms)
+	}
+	if s := findSym(syms, "count"); s == nil || s.Kind != "const" {
+		t.Fatalf("expected const count from vue script, got %v", s)
+	}
+	for _, bad := range []string{"ref", "card"} {
+		if findSym(syms, bad) != nil {
+			t.Fatalf("template/style symbol %q should not leak into the index", bad)
+		}
+	}
+	if s := findSym(syms, "main"); s != nil {
+		t.Fatalf("html id %q from template must not be indexed as a script symbol", "main")
+	}
+}
+
+func TestSfcExtractSvelte(t *testing.T) {
+	src := `<script>
+  export let name = "world"
+  function greet() {
+    return "hello " + name
+  }
+</script>
+
+<h1 id="title">Hello {name}</h1>
+`
+	syms, _, _, _ := extractForeign("widget.svelte", []byte(src), "javascript")
+	if s := findSym(syms, "greet"); s == nil || s.Kind != "func" {
+		t.Fatalf("expected func greet from svelte script, got %v", s)
+	}
+	if s := findSym(syms, "name"); s == nil {
+		t.Fatalf("expected let name from svelte script, got %v", s)
+	}
+}
+
+func TestCssExtract(t *testing.T) {
+	src := `.card {
+  color: #fff;
+  padding: 1rem;
+}
+
+#app-root {
+  --gap: 1rem;
+}
+
+:root { --gap2: 2rem; }
+
+@keyframes slide-in {
+  from { opacity: 0; }
+}
+`
+	syms := symsIn("css", src)
+	if s := findSym(syms, "card"); s == nil || s.Kind != "class" {
+		t.Fatalf("expected class card, got %v", s)
+	}
+	if s := findSym(syms, "app-root"); s == nil || s.Kind != "const" {
+		t.Fatalf("expected const app-root, got %v", s)
+	}
+	if s := findSym(syms, "slide-in"); s == nil || s.Kind != "func" {
+		t.Fatalf("expected func slide-in (keyframes), got %v", s)
+	}
+	if s := findSym(syms, "--gap"); s == nil || s.Kind != "prop" {
+		t.Fatalf("expected prop --gap, got %v", s)
+	}
+	if s := findSym(syms, "--gap2"); s == nil || s.Kind != "prop" {
+		t.Fatalf("expected inline prop --gap2, got %v", s)
+	}
+	for _, bad := range []string{"fff", "color"} {
+		if findSym(syms, bad) != nil {
+			t.Fatalf("declaration value %q should not be a symbol", bad)
+		}
+	}
+}
+
+func TestHtmlExtract(t *testing.T) {
+	src := `<!doctype html>
+<html>
+<body>
+  <!-- commented out: <div id="hidden"></div> -->
+  <nav id="navbar"><a href="/">home</a></nav>
+  <main id="content"></main>
+</body>
+</html>
+`
+	syms := symsIn("html", src)
+	if s := findSym(syms, "navbar"); s == nil || s.Kind != "const" {
+		t.Fatalf("expected const navbar, got %v", s)
+	}
+	if s := findSym(syms, "content"); s == nil {
+		t.Fatalf("expected const content, got %v", s)
+	}
+	if findSym(syms, "hidden") != nil {
+		t.Fatal("html comment ids must not be indexed")
+	}
+}
+
+func TestSfcDetection(t *testing.T) {
+	if got := detectLang("a.vue", []byte(`<script setup lang="ts">`)); got != "typescript" {
+		t.Fatalf("expected typescript for vue ts, got %q", got)
+	}
+	if got := detectLang("a.vue", []byte(`<script>`)); got != "javascript" {
+		t.Fatalf("expected javascript for plain vue, got %q", got)
+	}
+	if got := detectLang("a.svelte", []byte(`<script lang="ts">`)); got != "typescript" {
+		t.Fatalf("expected typescript for svelte ts, got %q", got)
+	}
+	if got := detectLang("style.css", nil); got != "css" {
+		t.Fatalf("expected css, got %q", got)
+	}
+	if got := detectLang("index.html", nil); got != "html" {
+		t.Fatalf("expected html, got %q", got)
+	}
+	if got := detectLang("notes.txt", nil); got != "" {
+		t.Fatalf("expected unsupported, got %q", got)
 	}
 }
