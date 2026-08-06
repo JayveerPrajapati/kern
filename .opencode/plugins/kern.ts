@@ -117,7 +117,7 @@ export default (async ({ directory, $ }) => {
       }),
       kern_changes: tool({
         description:
-          "Change-impact analysis for a diff: maps changed files to symbols, computes blast radius (transitive callers), risk scores, and test gaps. Use to review what a PR could break before reading files.",
+          "Line-aware change-impact analysis for a diff: scopes each changed file to the symbols its added lines actually touch (from git diff hunks), then computes blast radius (transitive callers), risk scores, and test gaps. Use to review what a PR could break before reading files.",
         args: {
           root: tool.schema.string().optional(),
           range: tool.schema.string().optional(),
@@ -135,7 +135,7 @@ export default (async ({ directory, $ }) => {
       }),
       kern_review: tool({
         description:
-          "Token-optimised code-review context for changed files: changed symbols, their callers, blast radius, risk and test gaps, sized to fit a token budget. The smallest answer a reviewer needs.",
+          "Token-optimised code-review context for changed files: line-scoped changed symbols (with file:line spans), their callers, blast radius, risk and test gaps, sized to fit a token budget. The smallest answer a reviewer needs.",
         args: {
           root: tool.schema.string().optional(),
           range: tool.schema.string().optional(),

@@ -158,7 +158,7 @@ var tools = []Tool{
 	},
 	{
 		Name:        "kern_changes",
-		Description: "Change-impact analysis for a diff: maps changed files to symbols, computes blast radius (transitive callers), risk scores, and test gaps. Use to review what a PR could break before reading files.",
+		Description: "Line-aware change-impact analysis for a diff: scopes each changed file to the symbols its added lines actually touch (from git diff hunks), then computes blast radius (transitive callers), risk scores, and test gaps. Use to review what a PR could break before reading files.",
 		InputSchema: schema(map[string]any{
 			"root":  strProp("Project root (defaults to current directory)"),
 			"range": strProp("Git range like 'HEAD~2..HEAD'. Empty = working-tree changes"),
@@ -167,7 +167,7 @@ var tools = []Tool{
 	},
 	{
 		Name:        "kern_review",
-		Description: "Token-optimised code-review context for changed files: changed symbols, their callers, blast radius, risk and test gaps, sized to fit a token budget. The smallest answer a reviewer needs.",
+		Description: "Token-optimised code-review context for changed files: line-scoped changed symbols (with file:line spans), their callers, blast radius, risk and test gaps, sized to fit a token budget. The smallest answer a reviewer needs.",
 		InputSchema: schema(map[string]any{
 			"root":       strProp("Project root (defaults to current directory)"),
 			"range":      strProp("Git range like 'HEAD~2..HEAD'. Empty = working-tree changes"),
@@ -662,14 +662,14 @@ func (s *Server) runTool(name string, args map[string]any) (string, error) {
 		return ctx, nil
 
 	case "kern_changes":
-		files, ix, err := changedContext(args)
+		changes, ix, err := changedContext(args)
 		if err != nil {
 			return "", err
 		}
-		return intel.RenderChanges(intel.AnalyzeChanges(ix, files)), nil
+		return intel.RenderChanges(intel.AnalyzeChangesRanged(ix, changes)), nil
 
 	case "kern_review":
-		files, ix, err := changedContext(args)
+		changes, ix, err := changedContext(args)
 		if err != nil {
 			return "", err
 		}
@@ -677,7 +677,7 @@ func (s *Server) runTool(name string, args map[string]any) (string, error) {
 		if v := argString(args, "max_tokens"); v != "" {
 			fmt.Sscanf(v, "%d", &maxTokens)
 		}
-		return intel.Review(ix, files, maxTokens), nil
+		return intel.ReviewRanged(ix, changes, maxTokens), nil
 
 	case "kern_hubs":
 		ix, err := loadOrBuildIndex(argString(args, "root"))
@@ -910,12 +910,16 @@ func (s *Server) runTool(name string, args map[string]any) (string, error) {
 		return strings.TrimSuffix(b.String(), "\n"), nil
 
 	case "kern_guard_check":
-		files, ix, err := changedContext(args)
+		changes, ix, err := changedContext(args)
 		if err != nil {
 			return "", err
 		}
-		if len(files) == 0 {
+		if len(changes) == 0 {
 			return "no changed files (use file= or range=, or make edits)", nil
+		}
+		files := make([]string, 0, len(changes))
+		for _, c := range changes {
+			files = append(files, c.File)
 		}
 		root := argString(args, "root")
 		if root == "" {
@@ -935,8 +939,9 @@ func (s *Server) runTool(name string, args map[string]any) (string, error) {
 
 // changedContext resolves the changed files for a tool call: an explicit
 // comma-separated file list wins; otherwise the git range (empty = working
-// tree).
-func changedContext(args map[string]any) ([]string, *index.Index, error) {
+// tree). Returns line-aware FileChanges so blast radius can be scoped to the
+// changed hunks.
+func changedContext(args map[string]any) ([]intel.FileChange, *index.Index, error) {
 	root := argString(args, "root")
 	if root == "" {
 		cwd, _ := os.Getwd()
@@ -947,10 +952,10 @@ func changedContext(args map[string]any) ([]string, *index.Index, error) {
 		return nil, nil, err
 	}
 	if files := argString(args, "file"); files != "" {
-		var out []string
+		var out []intel.FileChange
 		for _, p := range strings.Split(files, ",") {
 			if p = strings.TrimSpace(p); p != "" {
-				out = append(out, p)
+				out = append(out, intel.FileChange{File: p})
 			}
 		}
 		return out, ix, nil
@@ -963,11 +968,11 @@ func changedContext(args map[string]any) ([]string, *index.Index, error) {
 			from = r
 		}
 	}
-	files, err := intel.FilesForRange(root, from, to)
+	changes, err := intel.FilesForRangeL(root, from, to)
 	if err != nil {
 		return nil, nil, err
 	}
-	return files, ix, nil
+	return changes, ix, nil
 }
 
 func pct(before, after int) float64 {

@@ -13,6 +13,7 @@ import (
 
 	"github.com/JayveerPrajapati/kern/internal/code"
 	"github.com/JayveerPrajapati/kern/internal/index"
+	"github.com/JayveerPrajapati/kern/internal/intel"
 	"github.com/JayveerPrajapati/kern/internal/memory"
 	"github.com/JayveerPrajapati/kern/internal/stats"
 )
@@ -41,6 +42,7 @@ func Build(root string) (string, error) {
 	}
 	if err == nil && ix != nil {
 		b.WriteString(indexSection(ix))
+		b.WriteString(architectureSection(ix))
 	}
 
 	statsSection(&b)
@@ -126,6 +128,36 @@ func indexSection(ix *index.Index) string {
 	}
 	if len(entries) > 0 {
 		b.WriteString("Entry points: " + strings.Join(dedupe(entries), ", ") + "\n")
+	}
+	b.WriteString("\n")
+	return b.String()
+}
+
+// architectureSection adds the community/coupling overview so the onboarding
+// digest doubles as architecture discovery.
+func architectureSection(ix *index.Index) string {
+	if len(ix.Calls) == 0 {
+		return ""
+	}
+	arch := intel.AnalyzeArchitecture(ix)
+	if len(arch.Communities) == 0 && len(arch.Coupling) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("## Architecture (communities + coupling)\n")
+	for _, c := range arch.Communities {
+		fmt.Fprintf(&b, "  %-24s size %-4d hub %-24s pkgs %s\n",
+			c.ID, c.Size, c.Hub, strings.Join(c.Packages, ", "))
+	}
+	if len(arch.Coupling) > 0 {
+		b.WriteString("coupling warnings (cross-community call bundles):\n")
+		shown := arch.Coupling
+		if len(shown) > 5 {
+			shown = shown[:5]
+		}
+		for _, e := range shown {
+			fmt.Fprintf(&b, "  %-24s <-> %-24s %4d edges\n", e.From, e.To, e.Count)
+		}
 	}
 	b.WriteString("\n")
 	return b.String()

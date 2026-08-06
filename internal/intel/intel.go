@@ -224,19 +224,6 @@ func BlastRadius(ix *index.Index, roots []string) ([]string, map[string]int) {
 	return out, visited
 }
 
-// symbolsForFile returns the FullName of every symbol defined in rel.
-func symbolsForFile(ix *index.Index, rel string) []string {
-	syms := ix.SymbolsByFile[rel]
-	out := make([]string, 0, len(syms))
-	for _, s := range syms {
-		if !isTestFile(s.File) {
-			out = append(out, s.FullName())
-		}
-	}
-	sort.Strings(out)
-	return out
-}
-
 // AffectedFiles returns the distinct files touched by a set of symbols.
 func AffectedFiles(ix *index.Index, symbols []string) []string {
 	fileMap := buildFileMap(ix)

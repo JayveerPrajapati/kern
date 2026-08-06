@@ -87,8 +87,9 @@ What it configures:
 | **JSON adapters** | `continue`, `windsurf`, `zed`, `vscode`, `cursor`, `gemini`, `antigravity`, `qwen`, `qoder`, `kiro`, `copilot`, `copilot-cli` — writes their MCP config (project- or home-based), creating parent dirs as needed |
 
 `kern buddy` prints a session briefing — project map, language mix, symbol
-kinds, most-called hub symbols, entry points and recent kern savings — a
-starting context you can paste into a fresh agent session. `kern prompt
+kinds, most-called hub symbols, entry points, an architecture overview
+(communities + coupling warnings) and recent kern savings — a starting context
+you can paste into a fresh agent session. `kern prompt
 <template>` emits prompts for the templates `code-review`, `fix-bug`,
 `write-tests`, `explain`, `onboard`, `debug`, with project map and file context
 pre-filled.
@@ -146,13 +147,13 @@ kind prefixes `class`, `enum`, `trait`, `module`, `union`, `impl`, `prop`,
 
 **Code intelligence** — kern turns the same AST index into a dependency-free
 analysis engine (`internal/intel`, pure Go, no databases or servers). All of
-these operate on the persisted index and take `--json` for machine-readable
-output:
+these operate on the persisted index; most take `--json` for machine-readable
+output (notable exception: `kern review` is text-only):
 
 | Command | Purpose | Notes |
 |---|---|---|
-| `kern changes` | change-impact report: changed symbols → blast radius (transitive callers), risk scores, test gaps, cross-package flags | risk = blast radius × churn × untested |
-| `kern review` | token-optimised review context for a diff, sized to a budget | budget via `--max` |
+| `kern changes` | change-impact report: changed symbols → blast radius (transitive callers), risk scores, test gaps, cross-package flags | **line-aware**: `git diff -U0` hunks scope impact to the symbols a diff actually touches; risk adds weight for changes that touch or call hubs |
+| `kern review` | token-optimised review context for a diff, sized to a budget | changed symbols shown with `file:line` spans; budget via `--max` |
 | `kern hubs` / `kern testgaps` | architectural hotspots + bridges; coverage % + untested hotspots | hubs ranked by in-project callers |
 | `kern flows` | execution flows from entry points (depth, reach, longest path) | |
 | `kern communities` | call-graph clustering via label propagation (deterministic, no deps) | |
