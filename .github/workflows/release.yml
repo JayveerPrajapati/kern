@@ -104,12 +104,7 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: dist
-
-      - name: Flatten artifact subdirectories
-        shell: bash
-        run: |
-          # download-artifact@v4 places each artifact in its own subdir; flatten.
-          find dist -mindepth 2 -type f -exec mv -t dist/ {} +
+          merge-multiple: true
 
       - name: Generate checksums and brew formula
         shell: bash
@@ -145,7 +140,7 @@ jobs:
           Assets include a \`SHA256SUMS\` file (\`install.sh\` verifies against it) and
           a filled-in Homebrew formula for the tap repo.
           EOF
-          gh release create "$tag" dist/kern-* dist/SHA256SUMS kern.rb \
+          gh release create "$tag" dist/kern-*.tar.gz dist/kern-*.zip dist/SHA256SUMS kern.rb \
             --title "$tag" \
             --notes-file /tmp/release-notes.md \
             --draft=false
