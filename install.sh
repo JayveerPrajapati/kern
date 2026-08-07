@@ -73,6 +73,7 @@ go_install() {
   go install "github.com/${REPO}/cmd/kern-mcp@${VERSION}"
   # go install places both into the go bin dir; report it.
   echo "kern: installed via go install. Ensure \$(go env GOPATH)/bin is on your PATH."
+  echo "kern: next step: run 'kern setup' in your project to wire kern into your agents."
 }
 
 # verify checks the downloaded tarball against the release's SHA256SUMS asset.
@@ -143,6 +144,9 @@ main() {
     *":$PREFIX:"*) ;;
     *) echo "note: add $PREFIX to your PATH:  export PATH=\"$PREFIX:\$PATH\"" ;;
   esac
+  echo
+  echo "next step: run 'kern setup' in your project to wire kern into your agents."
+  echo "  (run from your project root; 'kern setup --check' shows current wiring)"
 }
 
 main
