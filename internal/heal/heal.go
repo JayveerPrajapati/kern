@@ -5,6 +5,7 @@
 package heal
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -93,13 +94,18 @@ func Apply(root string, reps []Replacement) error {
 // Run runs a heal cycle on a snapshot of root. task is the user's original
 // instruction. model selects the Ollama model ("" = default). maxRounds caps
 // correction attempts. Original tree is untouched; the diff is computed
-// against the live files so the user can review and apply.
-func Run(root, task, model string, maxRounds int, timeout time.Duration) *Result {
+// against the live files so the user can review and apply. ctx cancels the
+// loop (validation runs are aborted) when the caller aborts.
+func Run(ctx context.Context, root, task, model string, maxRounds int, timeout time.Duration) *Result {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	start := time.Now()
-	res := &Result{Duration: timeout}
+	res := &Result{}
 	c, err := validate.Detect(root)
 	if err != nil {
 		res.Err = err
+		res.Duration = time.Since(start)
 		return res
 	}
 	res.Command = c
@@ -107,12 +113,13 @@ func Run(root, task, model string, maxRounds int, timeout time.Duration) *Result
 	snap, err := sandbox.Snapshot(root)
 	if err != nil {
 		res.Err = fmt.Errorf("snapshot: %w", err)
+		res.Duration = time.Since(start)
 		return res
 	}
 	defer snap.Close()
 
 	// Baseline validation in the snapshot (same result as the live tree).
-	base := validate.Run(snap.Tmp(), c, timeout)
+	base := validate.Run(ctx, snap.Tmp(), c, timeout)
 	res.LastOutput = base.Output
 	if base.OK {
 		res.Validated = true
@@ -124,6 +131,12 @@ func Run(root, task, model string, maxRounds int, timeout time.Duration) *Result
 	iter := 0
 	for iter < maxRounds {
 		iter++
+		if ctx.Err() != nil {
+			res.Err = fmt.Errorf("cancelled")
+			res.Iterations = iter - 1
+			res.Duration = time.Since(start)
+			return res
+		}
 		failPaths := failingFiles(base.Output)
 		var b strings.Builder
 		b.WriteString("TASK: " + task + "\n\n")
@@ -161,7 +174,7 @@ func Run(root, task, model string, maxRounds int, timeout time.Duration) *Result
 			return res
 		}
 		// Rerun validation.
-		next := validate.Run(snap.Tmp(), c, timeout)
+		next := validate.Run(ctx, snap.Tmp(), c, timeout)
 		res.LastOutput = next.Output
 		base = next
 		for _, r := range reps {

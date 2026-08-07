@@ -1,6 +1,7 @@
 package heal
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -97,7 +98,7 @@ func TestRunHealLoopEndToEnd(t *testing.T) {
 	// Avoid touching the real XDG cache.
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 
-	res := Run(root, "fix the build", "", 3, 60*time.Second)
+	res := Run(context.Background(), root, "fix the build", "", 3, 60*time.Second)
 	if res.Err != nil {
 		t.Fatalf("expected successful heal, got err: %v", res.Err)
 	}
@@ -118,7 +119,7 @@ func TestRunAlreadyHealthy(t *testing.T) {
 	_ = os.WriteFile(filepath.Join(root, "go.mod"), []byte("module demo\n\ngo 1.22\n"), 0o644)
 	_ = os.WriteFile(filepath.Join(root, "app.go"), []byte("package main\n\nfunc main() {}\n"), 0o644)
 
-	res := Run(root, "task", "", 3, 30*time.Second)
+	res := Run(context.Background(), root, "task", "", 3, 30*time.Second)
 	if res.Err != nil {
 		t.Fatalf("expected no error, got %v", res.Err)
 	}
@@ -133,7 +134,7 @@ func TestRunAlreadyHealthy(t *testing.T) {
 func TestRunDetectFails(t *testing.T) {
 	// No go.mod / no supported files -> Detect returns error.
 	root := t.TempDir()
-	res := Run(root, "task", "", 3, 5*time.Second)
+	res := Run(context.Background(), root, "task", "", 3, 5*time.Second)
 	if res.Err == nil {
 		t.Fatal("expected error when no toolchain detected")
 	}
@@ -147,7 +148,7 @@ func TestRunLLMNoFileBlocks(t *testing.T) {
 	t.Setenv("OLLAMA_HOST", srv.URL)
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 
-	res := Run(root, "task", "", 1, 60*time.Second)
+	res := Run(context.Background(), root, "task", "", 1, 60*time.Second)
 	if res.Err == nil {
 		t.Fatal("expected error from LLM reply without FILE blocks")
 	}
@@ -161,7 +162,7 @@ func TestRunLLMUnreachable(t *testing.T) {
 	t.Setenv("OLLAMA_HOST", "http://127.0.0.1:1")
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 
-	res := Run(root, "task", "", 1, 60*time.Second)
+	res := Run(context.Background(), root, "task", "", 1, 60*time.Second)
 	if res.Err == nil {
 		t.Fatal("expected error when Ollama unreachable")
 	}

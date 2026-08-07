@@ -3,10 +3,14 @@
 package optimize
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"net"
+	"net/url"
 	"os"
 	"os/exec"
+	"runtime"
 	"strings"
 
 	"github.com/JayveerPrajapati/kern/internal/cache"
@@ -128,8 +132,15 @@ func promptUncached(prompt string, attachedLog string, opts Options) (Result, er
 		raw = prompt + "\n\n--- attached log ---\n" + attachedLog
 		prompt = prompt + "\n\n--- attached log (compressed) ---\n" + logPart
 	}
+	// Mask secrets by default when the prompt will be sent to a non-local
+	// LLM host (e.g. OLLAMA_HOST points at a remote server): otherwise the
+	// compression step would ship PII off-box. Explicit mask=false still wins.
+	mask := opts.Mask
+	if !mask && opts.LLM != "" && !isLocalHost(llm.New(opts.LLM).Base) {
+		mask = true
+	}
 	var masked pii.Result
-	if opts.Mask {
+	if mask {
 		masked = pii.MaskNames(prompt, opts.MaskNames)
 		prompt = masked.Text
 	}
@@ -154,7 +165,7 @@ func promptUncached(prompt string, attachedLog string, opts Options) (Result, er
 			out = llmOut
 		}
 	}
-	if opts.Mask {
+	if mask {
 		out = masked.Unmask(out)
 	}
 	res := finish(raw, out, tokenize.KindGeneric)
@@ -173,12 +184,23 @@ func Log(text string, opts Options) (Result, error) {
 	return res, nil
 }
 
-// RunBuild executes a command locally and returns only the compact result.
-func RunBuild(command string, dir string, opts Options) (Result, error) {
+// RunBuild executes a command locally and returns only the compact result. The
+// command runs through the platform shell so `&&`, pipes and quoting work as
+// expected (sh -c on unix, cmd /c on Windows). The context cancels the child
+// process (killing it) when the caller aborts, so a cancelled MCP request never
+// leaks a background build.
+func RunBuild(ctx context.Context, command string, dir string, opts Options) (Result, error) {
 	if strings.TrimSpace(command) == "" {
 		return Result{}, errors.New("empty command")
 	}
-	cmd := exec.Command("sh", "-c", command)
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	shell, flag := "sh", "-c"
+	if runtime.GOOS == "windows" {
+		shell, flag = "cmd", "/c"
+	}
+	cmd := exec.CommandContext(ctx, shell, flag, command)
 	cmd.Dir = dir
 	out, err := cmd.CombinedOutput()
 	outStr := string(out)
@@ -214,4 +236,22 @@ func compactCommandOutput(out string) string {
 		keep = keep[:120]
 	}
 	return strings.Join(keep, "\n")
+}
+
+// isLocalHost reports whether base (an Ollama base URL) points at the local
+// machine. Anything else (LAN IP, remote host, tunnel) is treated as
+// non-local so PII masking can be defaulted on.
+func isLocalHost(base string) bool {
+	host := base
+	if u, err := url.Parse(base); err == nil && u.Host != "" {
+		host = u.Host
+	}
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	switch strings.ToLower(host) {
+	case "localhost", "127.0.0.1", "::1", "0.0.0.0":
+		return true
+	}
+	return false
 }

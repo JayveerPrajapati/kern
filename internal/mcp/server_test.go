@@ -85,6 +85,20 @@ func TestInitialize(t *testing.T) {
 	}
 }
 
+func TestSetServerVersionPropagates(t *testing.T) {
+	SetServerVersion("9.9.9-test")
+	defer SetServerVersion("dev")
+	resp := serveOne(t, writeReq("initialize", 1, `{"capabilities":{}}`))
+	si := resp["result"].(map[string]any)["serverInfo"].(map[string]any)
+	if si["version"] != "9.9.9-test" {
+		t.Fatalf("expected stamped version in initialize, got %v", si["version"])
+	}
+	SetServerVersion("")
+	if serverVersion != "9.9.9-test" {
+		t.Fatalf("SetServerVersion(\"\") must not blank the version, got %q", serverVersion)
+	}
+}
+
 func TestPing(t *testing.T) {
 	resp := serveOne(t, writeReq("ping", 2, ``))
 	if resp["result"] == nil {
@@ -117,7 +131,7 @@ func TestUnknownMethodReturnsError(t *testing.T) {
 	}
 }
 
-func TestInvalidJSONIsIgnored(t *testing.T) {
+func TestInvalidJSONReturnsParseError(t *testing.T) {
 	in := strings.NewReader("not json\r\n" + writeReq("initialize", 6, `{}`) + "\n")
 	out := &bytes.Buffer{}
 	s := NewServer(in, out)
@@ -125,8 +139,17 @@ func TestInvalidJSONIsIgnored(t *testing.T) {
 		t.Fatalf("Serve: %v", err)
 	}
 	lines := strings.Count(strings.TrimRight(out.String(), "\n"), "\n") + 1
-	if lines != 1 {
-		t.Fatalf("expected exactly 1 response (invalid line skipped), got %d", lines)
+	if lines != 2 {
+		t.Fatalf("expected 2 responses (parse error + initialize), got %d", lines)
+	}
+	// First line must be the -32700 parse error, not a silent drop.
+	first := strings.TrimSpace(strings.SplitN(out.String(), "\n", 2)[0])
+	var e map[string]any
+	if err := json.Unmarshal([]byte(first), &e); err != nil {
+		t.Fatalf("bad first response %q: %v", first, err)
+	}
+	if errObj, ok := e["error"].(map[string]any); !ok || int(errObj["code"].(float64)) != -32700 {
+		t.Fatalf("expected -32700 parse error, got %+v", e)
 	}
 }
 
@@ -250,6 +273,34 @@ func TestProjectMapViaMCP(t *testing.T) {
 	}
 }
 
+func TestProjectMapHonorsMaxFiles(t *testing.T) {
+	root := testRoot(t)
+	for i, name := range []string{"a.go", "b.go", "c.go"} {
+		if err := os.WriteFile(filepath.Join(root, name),
+			[]byte("package main\n\nfunc f"+string(rune('a'+i))+"() {}\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	args, _ := json.Marshal(map[string]any{"root": root, "max_files": "1"})
+	resp := serveOne(t, writeReq("tools/call", 13, `{"name":"kern_project_map","arguments":`+string(args)+`}`))
+	out, isErr := toolResultText(t, resp)
+	if isErr {
+		t.Fatalf("unexpected error: %s", out)
+	}
+	if strings.Count(out, "func f") != 1 {
+		t.Fatalf("expected exactly 1 file with max_files=1, got %q", out)
+	}
+	args2, _ := json.Marshal(map[string]any{"root": root, "max_files": "2"})
+	resp2 := serveOne(t, writeReq("tools/call", 13, `{"name":"kern_project_map","arguments":`+string(args2)+`}`))
+	out2, isErr := toolResultText(t, resp2)
+	if isErr {
+		t.Fatalf("unexpected error: %s", out2)
+	}
+	if strings.Count(out2, "func f") != 2 {
+		t.Fatalf("expected exactly 2 files with max_files=2, got %q", out2)
+	}
+}
+
 func TestAstSearchViaMCP(t *testing.T) {
 	root := testRoot(t)
 	if err := os.WriteFile(filepath.Join(root, "main.go"),
@@ -320,15 +371,17 @@ func TestLockUnlockViaMCP(t *testing.T) {
 
 func TestUnknownToolReturnsError(t *testing.T) {
 	resp := serveOne(t, writeReq("tools/call", 19, `{"name":"kern_does_not_exist","arguments":{}}`))
-	if _, ok := resp["error"]; !ok {
-		t.Fatalf("expected error for unknown tool: %+v", resp)
+	out, isErr := toolResultText(t, resp)
+	if !isErr || !strings.Contains(out, "unknown tool") {
+		t.Fatalf("expected isError for unknown tool: %+v", resp)
 	}
 }
 
 func TestMissingPromptArg(t *testing.T) {
 	resp := serveOne(t, writeReq("tools/call", 20, `{"name":"kern_optimize_prompt","arguments":{}}`))
-	if errBody, ok := resp["error"].(map[string]any); !ok || !strings.Contains(errBody["message"].(string), "prompt") {
-		t.Fatalf("expected missing-prompt error: %+v", resp)
+	out, isErr := toolResultText(t, resp)
+	if !isErr || !strings.Contains(out, "prompt") {
+		t.Fatalf("expected missing-prompt isError: %+v", resp)
 	}
 }
 

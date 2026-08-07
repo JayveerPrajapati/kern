@@ -3,10 +3,14 @@
 package doctor
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/JayveerPrajapati/kern/internal/cache"
 	"github.com/JayveerPrajapati/kern/internal/index"
@@ -27,6 +31,7 @@ func Run(root string) []Finding {
 	var out []Finding
 	out = append(out, checkBinary())
 	out = append(out, checkPath())
+	out = append(out, checkExec())
 	out = append(out, checkEnv())
 	out = append(out, checkWiring(root)...)
 	out = append(out, checkIndex(root))
@@ -49,6 +54,31 @@ func checkPath() Finding {
 		return Finding{Check: "kern-mcp", Level: "ok", Detail: bin}
 	}
 	return Finding{Check: "kern-mcp", Level: "warn", Detail: bin + " missing — agents may not find it"}
+}
+
+// checkExec actually runs the binary instead of trusting os.Stat. On macOS an
+// unsigned/ad-hoc-broken binary passes os.Stat but is killed by Gatekeeper
+// with SIGKILL (exit 137); executing it surfaces that immediately. kern-mcp
+// has no subcommands, so -h is used: it prints usage and exits 0 without
+// reading stdin.
+func checkExec() Finding {
+	bin := setup.Bin()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, bin, "-h")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		var ee *exec.ExitError
+		if errors.As(err, &ee) && ee.ExitCode() == 137 {
+			return Finding{Check: "binary-exec", Level: "fail", Detail: bin + " was killed with SIGKILL (exit 137) — on macOS this is Gatekeeper/codesign; re-sign with `codesign --force --sign -` or reinstall"}
+		}
+		return Finding{Check: "binary-exec", Level: "fail", Detail: bin + " failed to run: " + err.Error()}
+	}
+	detail := strings.TrimSpace(strings.Split(string(out), "\n")[0])
+	if detail == "" {
+		detail = "binary responds"
+	}
+	return Finding{Check: "binary-exec", Level: "ok", Detail: bin + " runs (" + detail + ")"}
 }
 
 func checkEnv() Finding {

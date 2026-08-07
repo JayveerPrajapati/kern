@@ -3,7 +3,6 @@
 # package only makes it installable via pip for people who prefer that.
 #
 # Distribution note: replace JayveerPrajapati with your GitHub username.
-__version__ = "0.4.1"
 
 import os
 import shutil
@@ -12,6 +11,21 @@ import sys
 import tarfile
 import tempfile
 import urllib.request
+
+try:  # Python 3.8+
+    from importlib import metadata as importlib_metadata
+except ImportError:
+    importlib_metadata = None
+
+def _package_version():
+    if importlib_metadata is not None:
+        try:
+            return importlib_metadata.version("kern-context")
+        except Exception:
+            pass
+    return "unknown"
+
+__version__ = _package_version()
 
 REPO = os.environ.get("KERN_REPO", "JayveerPrajapati/kern")
 VERSION = os.environ.get("KERN_VERSION", "latest")

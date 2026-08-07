@@ -155,7 +155,9 @@ var ignoreDirs = map[string]bool{
 	"bin": true, ".mvn": true, "coverage": true, "tmp": true,
 }
 
-// Build walks root, parses every source file and assembles the index.
+// Build walks root, parses every source file and assembles the index. On
+// error it returns a nil index so a half-built index is never mistaken for a
+// usable one.
 func Build(root string) (*Index, error) {
 	abs, err := filepath.Abs(root)
 	if err != nil {
@@ -189,11 +191,14 @@ func Build(root string) (*Index, error) {
 		ix.addFile(rel, src)
 		return nil
 	})
+	if err != nil {
+		return nil, err
+	}
 	ix.UpdatedAt = time.Now().UTC()
 	ix.computeCallers()
 	ix.resolveEntries()
 	ix.reindexByFile()
-	return ix, err
+	return ix, nil
 }
 
 func (ix *Index) addFile(rel string, src []byte) {

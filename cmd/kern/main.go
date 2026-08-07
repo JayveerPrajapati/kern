@@ -81,6 +81,7 @@ Usage:
   kern prompt list                                list templates
   kern remember "<lesson>"                        record a lesson in project memory
   kern memory [--clear]                           show project memory
+  kern recall "<prompt>" [root] [--limit N]        recall up-to-N relevant past lessons for a prompt
   kern budget "<text>" --max N                    fit text into a token budget
   kern doctor [root]                              diagnostics report
   kern mask [file|-] [--names a,b,c]              mask secrets/PII locally with [MASKED_*] placeholders
@@ -114,7 +115,8 @@ Usage:
   kern review [root] [--range a..b] [--max N]     token-optimised review context for changed files
   kern hubs [root] [--limit N] [--json]           most depended-on symbols + cross-package bridges
   kern testgaps [root] [--limit N] [--json]       test coverage + untested hotspots
-  kern flows [root] [--limit N] [--json]          execution flows from entry points
+  kern entries [root] [--limit N] [--json]        framework entry points in the index
+  kern flows [root] [--limit N] [--json]          execution flows from entry points (still available)
   kern communities [root] [--json]                call-graph communities (label propagation)
   kern path <from> <to> [root] [--json]           shortest call path between two symbols
   kern dead [root] [--limit N] [--json]           dead code: symbols with no in-project callers
@@ -125,7 +127,7 @@ Usage:
   kern walk <symbol> [root] [--depth N] [--max N]             alias of kern near
   kern probe "<task text>" [root] [--max N] [--json]         task -> budget-capped micro-context bundle
   kern trace <file|- for stdin> [root] [--limit N] [--json]  overlay pprof/stack trace on call graph
-  kern lock <scope> [root]                       acquire a workspace lock (held until interrupted)
+  kern lock <scope> [root] [--hold]               acquire a workspace lock (held until interrupted, or --hold for non-blocking)
   kern unlock <scope> [root]                     remove a stale lock file
   kern status [root] [--json]                    list workspace locks (held/free)
   kern guard init [root]                         scaffold .kern/boundaries.json
@@ -172,6 +174,17 @@ type flags struct {
 	mode     string
 	once     bool
 	interval int
+	http     string
+	hold     bool
+}
+
+// mcpHTTPAddr resolves the address for `kern mcp`: a positional argument wins
+// over the --http flag. An empty result means stdio mode.
+func mcpHTTPAddr(args []string, f flags) string {
+	if len(args) > 0 {
+		return args[0]
+	}
+	return f.http
 }
 
 func parseFlags(args []string) (flags, []string) {
@@ -281,6 +294,13 @@ func parseFlags(args []string) (flags, []string) {
 			if i < len(args) {
 				f.interval, _ = strconv.Atoi(args[i])
 			}
+		case "--http":
+			i++
+			if i < len(args) {
+				f.http = args[i]
+			}
+		case "--hold":
+			f.hold = true
 		case "--graphml":
 			f.graphml = true
 		case "--html":
@@ -403,7 +423,7 @@ func main() {
 			fatal("usage: kern build <command>")
 		}
 		wireRecorder()
-		res, err := optimize.RunBuild(cmdStr, f.dir, optimize.Options{Session: f.session})
+		res, err := optimize.RunBuild(context.Background(), cmdStr, f.dir, optimize.Options{Session: f.session})
 		if err != nil {
 			fatal("%v", err)
 		}
@@ -549,7 +569,7 @@ func main() {
 			}
 		}
 		fmt.Printf("kern: running %s %s\n", c.Cmd, strings.Join(c.Args, " "))
-		res := validate.Run(root, c, time.Duration(f.timeout)*time.Second)
+		res := validate.Run(context.Background(), root, c, time.Duration(f.timeout)*time.Second)
 		if res.Err != nil {
 			fmt.Fprintf(os.Stderr, "kern: validation error: %v\n", res.Err)
 		}
@@ -576,7 +596,7 @@ func main() {
 			iters = 3
 		}
 		fmt.Printf("kern: heal %s (cmd=%s, rounds=%d)\n", root, f.llm, iters)
-		res := heal.Run(root, task, f.llm, iters, time.Duration(f.timeout)*time.Second)
+		res := heal.Run(context.Background(), root, task, f.llm, iters, time.Duration(f.timeout)*time.Second)
 		if res.Err != nil {
 			fatal("%v", res.Err)
 		}
@@ -643,7 +663,7 @@ func main() {
 			fatal("usage: kern sandbox [root] -- <command...>")
 		}
 		fmt.Printf("kern: sandbox run in %s: %s\n", root, strings.Join(cmdParts, " "))
-		res := sandbox.Run(root, cmdParts[0], cmdParts[1:], time.Duration(f.timeout)*time.Second)
+		res := sandbox.Run(context.Background(), root, cmdParts[0], cmdParts[1:], time.Duration(f.timeout)*time.Second)
 		fmt.Print(res.Output)
 		if res.OK {
 			fmt.Printf("kern: succeeded (%s); changes kept\n", res.Duration.Round(time.Millisecond))
@@ -772,6 +792,23 @@ func main() {
 			return
 		}
 		for _, e := range memory.List(".") {
+			fmt.Printf("%s  %s\n", e.Time.UTC().Format("2006-01-02 15:04"), e.Text)
+		}
+
+	case "recall":
+		f, args := parseFlags(rest)
+		if len(args) < 1 || args[0] == "" {
+			fatal("usage: kern recall \"<prompt>\" [root] [--limit N]")
+		}
+		root := "."
+		if len(args) > 1 {
+			root = args[1]
+		}
+		k := f.limit
+		if k <= 0 {
+			k = 5
+		}
+		for _, e := range memory.Recall(root, args[0], k) {
 			fmt.Printf("%s  %s\n", e.Time.UTC().Format("2006-01-02 15:04"), e.Text)
 		}
 
@@ -1060,7 +1097,18 @@ func main() {
 		fmt.Printf("  cost saved   : $%.4f\n", sum.CostSaved)
 
 	case "mcp":
+		f, args := parseFlags(rest)
+		httpAddr := mcpHTTPAddr(args, f)
 		wireRecorder()
+		mcp.SetServerVersion(version)
+		if httpAddr != "" {
+			ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+			defer cancel()
+			if err := mcp.ServeHTTPContext(ctx, httpAddr); err != nil {
+				os.Exit(1)
+			}
+			return
+		}
 		srv := mcp.NewServer(os.Stdin, os.Stdout)
 		if err := srv.Serve(); err != nil {
 			os.Exit(1)
@@ -1448,6 +1496,38 @@ func main() {
 		}
 		fmt.Println(intel.RenderFlows(flows))
 
+	case "entries":
+		f, args := parseFlags(rest)
+		root := "."
+		if len(args) > 0 {
+			root = args[0]
+		}
+		ix, err := intel.ReadIndex(root)
+		if err != nil {
+			fatal("%v", err)
+		}
+		limit := f.limit
+		if limit <= 0 {
+			limit = 50
+		}
+		var b strings.Builder
+		n := 0
+		for _, s := range ix.Symbols {
+			if !s.Entry || s.Framework == "" {
+				continue
+			}
+			fmt.Fprintf(&b, "%s %s %s %s:%d\n", s.Framework, s.FullName(), s.Route, s.File, s.Line)
+			n++
+			if n >= limit {
+				break
+			}
+		}
+		if n == 0 {
+			fmt.Println("no framework entry points in index (run kern index to populate)")
+			return
+		}
+		fmt.Print(b.String())
+
 	case "communities":
 		f, args := parseFlags(rest)
 		root := "."
@@ -1687,6 +1767,14 @@ func main() {
 			fatal("lock %q is held (pid %d): %v", scope, pid, err)
 		}
 		defer lk.Release()
+		if f.hold {
+			// Non-blocking mode for tool/plugin callers: acquire, report, and
+			// return immediately. The OS releases the flock on exit, so the
+			// lock is only held for the duration of this process — use
+			// `kern status` to verify and `kern unlock` to clear the marker.
+			fmt.Printf("lock acquired: %s (pid %d). note: the lock marker persists until `kern unlock`; the flock releases when this process exits.\n", scope, os.Getpid())
+			return
+		}
 		fmt.Printf("lock acquired: %s (pid %d). releasing on interrupt.\n", scope, os.Getpid())
 		ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer cancel()

@@ -1,6 +1,7 @@
 package validate
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -64,7 +65,7 @@ func TestDetectMissingToolchain(t *testing.T) {
 
 func TestRunTrueCommand(t *testing.T) {
 	c := &Command{Name: "true", Cmd: "true", Args: nil}
-	res := Run(t.TempDir(), c, 10*time.Second)
+	res := Run(context.Background(), t.TempDir(), c, 10*time.Second)
 	if !res.OK {
 		t.Fatalf("true should pass: %+v", res)
 	}
@@ -72,7 +73,7 @@ func TestRunTrueCommand(t *testing.T) {
 
 func TestRunFailingCommand(t *testing.T) {
 	c := &Command{Name: "false", Cmd: "false", Args: nil}
-	res := Run(t.TempDir(), c, 10*time.Second)
+	res := Run(context.Background(), t.TempDir(), c, 10*time.Second)
 	if res.OK {
 		t.Fatal("false should fail")
 	}
@@ -83,7 +84,7 @@ func TestRunFailingCommand(t *testing.T) {
 
 func TestRunTimeout(t *testing.T) {
 	c := &Command{Name: "sleep", Cmd: "sleep", Args: []string{"10"}}
-	res := Run(t.TempDir(), c, 200*time.Millisecond)
+	res := Run(context.Background(), t.TempDir(), c, 200*time.Millisecond)
 	if res.OK {
 		t.Fatal("sleep should time out")
 	}
@@ -96,7 +97,7 @@ func TestDetectGoProjectRuns(t *testing.T) {
 	// Exercise a real go vet run from this package directory (no network,
 	// deps are local/cached).
 	c := &Command{Name: "go vet (meta)", Cmd: "go", Args: []string{"vet", "./..."}}
-	res := Run(".", c, 60*time.Second)
+	res := Run(context.Background(), ".", c, 60*time.Second)
 	if !res.OK {
 		t.Fatalf("go vet failed: %s", res.Output)
 	}
