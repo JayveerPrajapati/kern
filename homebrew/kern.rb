@@ -5,8 +5,8 @@
 # 1. Your own tap (recommended):
 #      brew tap JayveerPrajapati/tap  https://github.com/JayveerPrajapati/homebrew-tap
 #      brew install kern
-#    Copy this file to homebrew-tap/Formula/kern.rb and update SHA256s via
-#    scripts/brew-release.sh, then push the tap repo.
+#    Publish the tap with scripts/publish-tap.sh (creates the repo, computes
+#    the sha256 from the GitHub source tarball, pushes Formula/kern.rb).
 #
 #    The release workflow also attaches a ready-to-use `kern.rb` (url + sha256
 #    filled in for the tag) to every GitHub Release — download it from the
@@ -30,6 +30,12 @@ class Kern < Formula
   def install
     system "go", "build", "-buildvcs=false", "-ldflags", "-X main.version=#{version}", "-o", "kern", "./cmd/kern"
     system "go", "build", "-buildvcs=false", "-ldflags", "-X main.version=#{version}", "-o", "kern-mcp", "./cmd/kern-mcp"
+    # macOS Gatekeeper kills unsigned binaries with SIGKILL (exit 137); apply
+    # an ad-hoc signature so the built copies are executable.
+    if OS.mac?
+      system "codesign", "--force", "--sign", "-", "kern"
+      system "codesign", "--force", "--sign", "-", "kern-mcp"
+    end
     bin.install "kern"
     bin.install "kern-mcp"
   end

@@ -410,13 +410,13 @@ export default (async ({ directory, $ }) => {
       }),
       kern_lock: tool({
         description:
-          "Acquire an advisory workspace lock on a scope (flock-based) so concurrent agents coordinate before touching shared files. Held until kern_unlock. Errors when the scope is already held.",
+          "Acquire an advisory workspace lock marker on a scope (flock-based) so concurrent agents coordinate before touching shared files. Errors when the scope is already held. Cleared with kern_unlock. Note: this CLI runs in its own process, so the OS releases the flock when the tool call ends; the lock marker persists until kern_unlock and `kern status` reflects reality.",
         args: {
           scope: tool.schema.string(),
           root: tool.schema.string().optional(),
         },
         async execute(args) {
-          const flags: string[] = ["lock", args.scope]
+          const flags: string[] = ["lock", "--hold", args.scope]
           if (args.root) flags.push(args.root)
           return run(flags)
         },
@@ -458,6 +458,242 @@ export default (async ({ directory, $ }) => {
           if (args.root) flags.push(args.root)
           if (args.file) flags.push("--file", args.file)
           if (args.range) flags.push("--range", args.range)
+          return run(flags)
+        },
+      }),
+      kern_memory_add: tool({
+        description:
+          "Persist a distilled, cross-session lesson for a project (the project 'brain'). Agents record what they learned so future sessions can recall it. Appends to the project memory store (most recent 50 entries kept).",
+        args: {
+          lesson: tool.schema.string(),
+        },
+        async execute(args) {
+          return run(["remember", args.lesson])
+        },
+      }),
+      kern_memory_list: tool({
+        description:
+          "List all stored lessons for a project, most recent first with timestamps.",
+        args: {},
+        async execute(args) {
+          return run(["memory"])
+        },
+      }),
+      kern_memory_recall: tool({
+        description:
+          "Recall the up-to-k most relevant past lessons for a prompt by keyword overlap. Returns only lessons whose tokens match; deterministic and local.",
+        args: {
+          prompt: tool.schema.string(),
+          root: tool.schema.string().optional(),
+          k: tool.schema.number().optional(),
+        },
+        async execute(args) {
+          const flags: string[] = ["recall", args.prompt]
+          if (args.k) flags.push("--limit", String(args.k))
+          if (args.root) flags.push(args.root)
+          return run(flags)
+        },
+      }),
+      kern_mask_pii: tool({
+        description:
+          "Locally scan text for secrets and PII (API keys, passwords, tokens, URLs with credentials, IPs, emails) and replace them with safe [MASKED_*] placeholders. Use before sending any text to a remote LLM. Pure local, deterministic, reversible.",
+        args: {
+          text: tool.schema.string(),
+          mask_names: tool.schema.string().optional(),
+        },
+        async execute(args) {
+          const file = cacheFile("pii.input.txt")
+          await writeFile(file, args.text)
+          const flags: string[] = ["mask", file]
+          if (args.mask_names) flags.push("--names", args.mask_names)
+          const out = await run(flags)
+          await rm(file, { force: true })
+          return out
+        },
+      }),
+      kern_doc_search: tool({
+        description:
+          "Local search over a project's documents (markdown, text, rst, adoc). Chunks docs locally with deterministic n-gram hashing and returns only the most relevant fragments. Use instead of pasting whole documents into context.",
+        args: {
+          query: tool.schema.string(),
+          root: tool.schema.string().optional(),
+          k: tool.schema.number().optional(),
+        },
+        async execute(args) {
+          const flags: string[] = ["docs", args.query]
+          if (args.k) flags.push("--limit", String(args.k))
+          if (args.root) flags.push(args.root)
+          return run(flags)
+        },
+      }),
+      kern_doc_index: tool({
+        description:
+          "Pre-index a project's documents for kern_doc_search. Run once after documents change; searches auto-index on first use.",
+        args: {
+          root: tool.schema.string().optional(),
+        },
+        async execute(args) {
+          const flags: string[] = ["docs", "index"]
+          if (args.root) flags.push(args.root)
+          return run(flags)
+        },
+      }),
+      kern_precache: tool({
+        description:
+          "Speculative pre-caching: scan the project once and fill the code-summary and document-vector caches so later kern calls are instant. Run periodically or after bulk edits.",
+        args: {
+          root: tool.schema.string().optional(),
+        },
+        async execute(args) {
+          const flags: string[] = ["precache", "--once"]
+          if (args.root) flags.push(args.root)
+          return run(flags)
+        },
+      }),
+      kern_swap: tool({
+        description:
+          "Budget swapping: in a context document, replace fenced code blocks tagged `lang:path` with per-file symbolic signatures to fit a token budget, or expand `lang:path:summary` blocks back to full file contents. Returns the budget-fitted document.",
+        args: {
+          text: tool.schema.string(),
+          root: tool.schema.string().optional(),
+          mode: tool.schema.string().optional(),
+          max_tokens: tool.schema.number().optional(),
+        },
+        async execute(args) {
+          const file = cacheFile("swap-input.txt")
+          await writeFile(file, args.text)
+          const flags: string[] = ["swap", file]
+          if (args.mode) flags.push("--mode", args.mode)
+          if (args.max_tokens) flags.push("--max", String(args.max_tokens))
+          if (args.root) flags.push(args.root)
+          const out = await run(flags)
+          await rm(file, { force: true })
+          return out
+        },
+      }),
+      kern_diff_files: tool({
+        description:
+          "Delta streaming: compute a unified line diff between two files (or two versions of the same file) using pure Go. Returns the full patch, or a note when files are identical.",
+        args: {
+          a: tool.schema.string(),
+          b: tool.schema.string(),
+        },
+        async execute(args) {
+          return run(["udiff", args.a, args.b])
+        },
+      }),
+      kern_heal: tool({
+        description:
+          "Self-correction loop: run validation; on failure ask a local Ollama model to rewrite the failing files, apply the fix inside a throwaway snapshot, re-validate, and report a diff to review. Never edits the user's working tree.",
+        args: {
+          root: tool.schema.string().optional(),
+          task: tool.schema.string().optional(),
+          model: tool.schema.string().optional(),
+          max_rounds: tool.schema.number().optional(),
+          timeout: tool.schema.number().optional(),
+        },
+        async execute(args) {
+          const flags: string[] = ["heal"]
+          if (args.task) flags.push("--task", args.task)
+          if (args.model) flags.push("--llm", args.model)
+          if (args.max_rounds) flags.push("--max", String(args.max_rounds))
+          if (args.timeout) flags.push("--timeout", String(args.timeout))
+          if (args.root) flags.push(args.root)
+          return run(flags)
+        },
+      }),
+      kern_validate: tool({
+        description:
+          "Auto-validation: detect the project's language-appropriate build/test/syntax command and run it. Returns exit status, truncated output and duration. Use after editing code to gate correctness before final answers.",
+        args: {
+          root: tool.schema.string().optional(),
+          command: tool.schema.string().optional(),
+          timeout: tool.schema.number().optional(),
+        },
+        async execute(args) {
+          const flags: string[] = ["validate"]
+          if (args.command) flags.push("--cmd", args.command)
+          if (args.timeout) flags.push("--timeout", String(args.timeout))
+          if (args.root) flags.push(args.root)
+          return run(flags)
+        },
+      }),
+      kern_schema_validate: tool({
+        description:
+          "Deterministically validate JSON output against a JSON schema (subset: object/array/primitives, required, enum, min/max/length, pattern, additionalProperties). Returns either a conform message or one line per violation.",
+        args: {
+          data: tool.schema.string(),
+          schema: tool.schema.string(),
+        },
+        async execute(args) {
+          const dataFile = cacheFile("schema-data.json")
+          const schemaFile = cacheFile("schema-def.json")
+          await writeFile(dataFile, args.data)
+          await writeFile(schemaFile, args.schema)
+          const out = await run(["schema", dataFile, "--schema", schemaFile])
+          await rm(dataFile, { force: true })
+          await rm(schemaFile, { force: true })
+          return out
+        },
+      }),
+      kern_verify_output: tool({
+        description:
+          "Hallucination check: extract file:line, symbol-name and route references from an agent's output text and confirm each against the real source tree and index. Returns ok/MISS verdicts for every reference.",
+        args: {
+          text: tool.schema.string(),
+          root: tool.schema.string().optional(),
+        },
+        async execute(args) {
+          const file = cacheFile("verify-input.txt")
+          await writeFile(file, args.text)
+          const flags: string[] = ["verify", file]
+          if (args.root) flags.push(args.root)
+          const out = await run(flags)
+          await rm(file, { force: true })
+          return out
+        },
+      }),
+      kern_entry_points: tool({
+        description:
+          "List framework entry points found in the index: handlers, controllers and route targets. Use to know what endpoints a codebase exposes.",
+        args: {
+          root: tool.schema.string().optional(),
+          limit: tool.schema.number().optional(),
+        },
+        async execute(args) {
+          const flags: string[] = ["entries"]
+          if (args.limit) flags.push("--limit", String(args.limit))
+          if (args.root) flags.push(args.root)
+          return run(flags)
+        },
+      }),
+      kern_frameworks: tool({
+        description:
+          "Detect the frameworks and libraries a project uses (Spring, Rails, Express, gin, etc.) by scanning manifests and source markers. Use to know what stack the codebase is on.",
+        args: {
+          root: tool.schema.string().optional(),
+        },
+        async execute(args) {
+          const flags: string[] = ["fw"]
+          if (args.root) flags.push(args.root)
+          return run(flags)
+        },
+      }),
+      kern_sandbox: tool({
+        description:
+          "Run a risky command inside the project with a filesystem snapshot: if the command fails, the tree is restored to the pre-run snapshot; if it passes, changes are kept. Use for destructive or uncertain operations.",
+        args: {
+          command: tool.schema.string(),
+          root: tool.schema.string().optional(),
+          timeout: tool.schema.number().optional(),
+        },
+        async execute(args) {
+          const parts = args.command.trim().split(/\s+/).filter(Boolean)
+          if (parts.length === 0) return "error: empty command"
+          const flags: string[] = ["sandbox"]
+          if (args.timeout) flags.push("--timeout", String(args.timeout))
+          if (args.root) flags.push(args.root)
+          flags.push("--", ...parts)
           return run(flags)
         },
       }),

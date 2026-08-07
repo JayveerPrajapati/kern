@@ -49,8 +49,9 @@ func TestSchemaValidateViolations(t *testing.T) {
 
 func TestSchemaValidateMissingArgs(t *testing.T) {
 	resp := serveOne(t, toolsCallJSON(t, 33, "kern_schema_validate", map[string]any{}))
-	if e, ok := resp["error"].(map[string]any); !ok || !strings.Contains(e["message"].(string), "required") {
-		t.Fatalf("expected missing-args error, got: %+v", resp)
+	out, isErr := toolResultText(t, resp)
+	if !isErr || !strings.Contains(out, "required") {
+		t.Fatalf("expected missing-args isError, got: %+v", resp)
 	}
 }
 
@@ -64,28 +65,31 @@ func TestDiffFilesIdenticalAndMissing(t *testing.T) {
 	}
 
 	resp = serveOne(t, toolsCallJSON(t, 35, "kern_diff_files", map[string]any{"a": "", "b": ""}))
-	if e, ok := resp["error"].(map[string]any); !ok || !strings.Contains(e["message"].(string), "are required") {
-		t.Fatalf("expected required-args error, got: %+v", resp)
+	out, isErr := toolResultText(t, resp)
+	if !isErr || !strings.Contains(out, "are required") {
+		t.Fatalf("expected required-args isError, got: %+v", resp)
 	}
 }
 
 func TestCompactFileMissingPath(t *testing.T) {
 	resp := serveOne(t, toolsCallJSON(t, 36, "kern_compact_file", map[string]any{}))
-	if e, ok := resp["error"].(map[string]any); !ok || !strings.Contains(e["message"].(string), "path is required") {
-		t.Fatalf("expected missing-path error, got: %+v", resp)
+	out, isErr := toolResultText(t, resp)
+	if !isErr || !strings.Contains(out, "path is required") {
+		t.Fatalf("expected missing-path isError, got: %+v", resp)
 	}
 }
 
 func TestVerifyOutputMissingText(t *testing.T) {
 	resp := serveOne(t, toolsCallJSON(t, 37, "kern_verify_output", map[string]any{}))
-	if e, ok := resp["error"].(map[string]any); !ok || !strings.Contains(e["message"].(string), "text is required") {
-		t.Fatalf("expected missing-text error, got: %+v", resp)
+	out, isErr := toolResultText(t, resp)
+	if !isErr || !strings.Contains(out, "text is required") {
+		t.Fatalf("expected missing-text isError, got: %+v", resp)
 	}
 }
 
 func TestPromptGetNotFound(t *testing.T) {
 	resp := serveOne(t, writeReq("prompts/get", 38, `{"name":"does_not_exist","arguments":{}}`))
-	if e, ok := resp["error"].(map[string]any); !ok || int(e["code"].(float64)) != -32002 {
-		t.Fatalf("expected prompt-not-found (-32002), got: %+v", resp)
+	if e, ok := resp["error"].(map[string]any); !ok || int(e["code"].(float64)) != -32602 {
+		t.Fatalf("expected prompt-not-found (-32602), got: %+v", resp)
 	}
 }

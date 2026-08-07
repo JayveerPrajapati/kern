@@ -134,8 +134,8 @@ jobs:
           See [README](https://github.com/${{ github.repository }}/blob/main/README.md) for install options:
           - \`curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/main/install.sh | sh\`
           - \`go install github.com/${{ github.repository }}/cmd/kern@$tag\`
-          - \`brew install kern\` — ready-to-use formula attached as \`kern.rb\`
-          - \`pip install kern-context\`
+          - \`brew install kern\` — needs the tap repo published; run \`scripts/publish-tap.sh\` (formula also attached as \`kern.rb\`)
+          - \`pip install kern-context\` — published by this workflow (needs \`PYPI_TOKEN\` secret)
 
           Assets include a \`SHA256SUMS\` file (\`install.sh\` verifies against it) and
           a filled-in Homebrew formula for the tap repo.
@@ -144,3 +144,30 @@ jobs:
             --title "$tag" \
             --notes-file /tmp/release-notes.md \
             --draft=false
+
+  publish-pypi:
+    name: publish python package to PyPI
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build sdist + wheel
+        run: |
+          python -m pip install --upgrade pip
+          pip install build twine
+          python -m build python
+
+      - name: Publish to PyPI
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_TOKEN }}
+        run: |
+          twine check python/dist/*
+          twine upload python/dist/*

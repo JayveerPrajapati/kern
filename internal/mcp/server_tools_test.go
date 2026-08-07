@@ -1,6 +1,7 @@
 package mcp
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"os/exec"
@@ -38,18 +39,21 @@ func mcpAssertOK(t *testing.T, name string, args map[string]any) string {
 	if e, ok := resp["error"].(map[string]any); ok {
 		t.Fatalf("tool %s returned error: %+v", name, e)
 	}
-	text, _ := toolResultText(t, resp)
+	text, isErr := toolResultText(t, resp)
+	if isErr {
+		t.Fatalf("tool %s returned isError result: %s", name, text)
+	}
 	return text
 }
 
 func mcpToolError(t *testing.T, name string, args map[string]any) string {
 	t.Helper()
 	resp := mcpCall(t, name, args)
-	e, ok := resp["error"].(map[string]any)
-	if !ok {
-		t.Fatalf("expected error for %s, got: %+v", name, resp)
+	text, isErr := toolResultText(t, resp)
+	if !isErr {
+		t.Fatalf("expected isError for %s, got: %+v", name, resp)
 	}
-	return e["message"].(string)
+	return text
 }
 
 func TestHelpersItoaPctArgStringTruncate(t *testing.T) {
@@ -83,11 +87,12 @@ func TestHelpersItoaPctArgStringTruncate(t *testing.T) {
 
 func TestLoadOrBuildIndexCacheHit(t *testing.T) {
 	root := mcpProject(t)
-	ix1, err := loadOrBuildIndex(root)
+	s := NewServer(strings.NewReader(""), &bytes.Buffer{})
+	ix1, err := s.loadIndex(root)
 	if err != nil {
 		t.Fatal(err)
 	}
-	ix2, err := loadOrBuildIndex(root)
+	ix2, err := s.loadIndex(root)
 	if err != nil || ix2 == nil {
 		t.Fatalf("cache-hit index load failed: %v", err)
 	}
@@ -174,6 +179,7 @@ func TestToolDispatchCoverage(t *testing.T) {
 		t.Fatalf("expected Greet as hub, got %q", out)
 	}
 	_ = mcpAssertOK(t, "kern_near", map[string]any{"root": root, "symbol": "Greet", "depth": "2", "max": "50"})
+	_ = mcpAssertOK(t, "kern_walk", map[string]any{"root": root, "symbol": "Greet", "depth": "1"})
 	_ = mcpAssertOK(t, "kern_code_graph", map[string]any{"root": root, "symbol": "Greet"})
 	_ = mcpAssertOK(t, "kern_context", map[string]any{"root": root, "symbol": "Greet", "lines": "5"})
 	out = mcpAssertOK(t, "kern_why", map[string]any{"root": root, "symbol": "Greet"})
@@ -192,6 +198,22 @@ func TestToolDispatchCoverage(t *testing.T) {
 	_ = mcpAssertOK(t, "kern_lock_status", map[string]any{"root": root})
 	_ = mcpAssertOK(t, "kern_guard_check", map[string]any{"root": root, "file": "app.go"})
 	_ = mcpAssertOK(t, "kern_path", map[string]any{"root": root, "from": "main", "to": "Greet"})
+}
+
+func TestTestGapsHonorsLimit(t *testing.T) {
+	root := mcpProject(t)
+	src := "package main\n\n// A is uncovered but called.\nfunc A() {}\nfunc B() { A() }\nfunc C() { A() }\nfunc D() { A() }\n\nfunc main() { B(); C(); D() }\n"
+	if err := os.WriteFile(filepath.Join(root, "hot.go"), []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	full := mcpAssertOK(t, "kern_test_gaps", map[string]any{"root": root})
+	limited := mcpAssertOK(t, "kern_test_gaps", map[string]any{"root": root, "limit": "1"})
+	if strings.Count(full, "(0 callers)") == 0 && !strings.Contains(full, "A ") {
+		t.Fatalf("expected hotspot A in full output, got %q", full)
+	}
+	if strings.Contains(limited, "B ") || strings.Contains(limited, "C ") {
+		t.Fatalf("limit=1 should only list the top hotspot, got %q", limited)
+	}
 }
 
 func TestPromptGetViaMCP(t *testing.T) {
@@ -221,5 +243,78 @@ func TestMissingRequiredArgs(t *testing.T) {
 	mcpToolError(t, "kern_search", map[string]any{"root": "."})
 	mcpToolError(t, "kern_path", map[string]any{"root": "."})
 	mcpToolError(t, "kern_why", map[string]any{"root": "."})
-	mcpToolError(t, "kern_near", map[string]any{"root": "."})
+}
+
+func runToolCases() []string {
+	src, err := os.ReadFile("server.go")
+	if err != nil {
+		panic(err)
+	}
+	var out []string
+	for _, line := range strings.Split(string(src), "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, `case "kern_`) {
+			continue
+		}
+		for _, name := range strings.Split(strings.TrimSuffix(line[len(`case "`):], `":`), `", "`) {
+			out = append(out, name)
+		}
+	}
+	return out
+}
+
+func TestMemoryToolsViaMCP(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	root := mcpProject(t)
+
+	ok := mcpAssertOK(t, "kern_memory_add", map[string]any{"root": root, "lesson": "deploy tags come from a manual release workflow"})
+	if !strings.Contains(ok, "remembered") {
+		t.Fatalf("expected remembered confirmation, got %q", ok)
+	}
+	full := mcpAssertOK(t, "kern_memory_list", map[string]any{"root": root})
+	if !strings.Contains(full, "deploy tags") {
+		t.Fatalf("expected lesson in list, got %q", full)
+	}
+	hit := mcpAssertOK(t, "kern_memory_recall", map[string]any{"root": root, "prompt": "how are deploy tags released?", "k": "3"})
+	if !strings.Contains(hit, "deploy tags") {
+		t.Fatalf("expected recall hit, got %q", hit)
+	}
+	miss := mcpAssertOK(t, "kern_memory_recall", map[string]any{"root": root, "prompt": "xyzzy plugh unrelated"})
+	if miss != "" {
+		t.Fatalf("expected empty recall for unrelated prompt, got %q", miss)
+	}
+	badK := mcpAssertOK(t, "kern_memory_recall", map[string]any{"root": root, "prompt": "how are deploy tags released?", "k": "bogus"})
+	if !strings.Contains(badK, "deploy tags") {
+		t.Fatalf("expected recall hit with fallback k, got %q", badK)
+	}
+	zeroK := mcpAssertOK(t, "kern_memory_recall", map[string]any{"root": root, "prompt": "how are deploy tags released?", "k": "0"})
+	if !strings.Contains(zeroK, "deploy tags") {
+		t.Fatalf("expected recall hit with clamped k, got %q", zeroK)
+	}
+	mcpToolError(t, "kern_memory_add", nil)
+	mcpToolError(t, "kern_memory_recall", nil)
+}
+
+func TestToolsListMatchesDispatchCases(t *testing.T) {
+	seen := map[string]bool{}
+	for _, c := range runToolCases() {
+		seen[c] = true
+	}
+	for _, tool := range tools {
+		if !seen[tool.Name] {
+			t.Errorf("tool %s has no runTool case", tool.Name)
+		}
+	}
+}
+
+func TestToolsListContainsWalk(t *testing.T) {
+	resp := serveOne(t, writeReq("tools/list", 3, ``))
+	res := resp["result"].(map[string]any)
+	for _, item := range res["tools"].([]any) {
+		name := item.(map[string]any)["name"].(string)
+		if name == "kern_walk" {
+			return
+		}
+	}
+	t.Fatal("kern_walk missing from tools/list")
 }

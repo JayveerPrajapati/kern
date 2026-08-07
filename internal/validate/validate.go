@@ -10,7 +10,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"strings"
 	"time"
 )
 
@@ -27,9 +26,6 @@ type Command struct {
 func Detect(root string) (*Command, error) {
 	candidates := detectCandidates(root)
 	for _, c := range candidates {
-		if strings.Contains(c.Cmd, " ") {
-			c = &Command{Name: c.Name, Cmd: c.Cmd, Args: c.Args}
-		}
 		if _, err := exec.LookPath(c.Cmd); err != nil {
 			if alt := alias(c.Cmd); alt != "" {
 				if _, err2 := exec.LookPath(alt); err2 == nil {
@@ -98,10 +94,18 @@ func detectCandidates(root string) []*Command {
 			&Command{Name: "python py_compile", Cmd: "python", Args: []string{"-m", "compileall", "-q", root}},
 		)
 	case has("Gemfile", "Rakefile"):
+		// `ruby -c` with no file argument reads from stdin and blocks forever,
+		// so only offer the syntax check when a .rb file is present.
+		var rubyArgs []string
+		if rbs, _ := filepath.Glob(filepath.Join(root, "*.rb")); len(rbs) > 0 {
+			rubyArgs = []string{"-c", rbs[0]}
+		}
 		out = append(out,
 			&Command{Name: "rake", Cmd: "bundle", Args: []string{"exec", "rake"}},
-			&Command{Name: "ruby syntax check", Cmd: "ruby", Args: []string{"-c"}},
 		)
+		if len(rubyArgs) > 0 {
+			out = append(out, &Command{Name: "ruby syntax check", Cmd: "ruby", Args: rubyArgs})
+		}
 	case has("composer.json"):
 		out = append(out,
 			&Command{Name: "composer test", Cmd: "composer", Args: []string{"test"}},
@@ -133,14 +137,18 @@ type Result struct {
 }
 
 // Run executes the validation command in root with a timeout. Output is
-// capped at maxOutput bytes (error context is enough for the heal loop).
-func Run(root string, c *Command, timeout time.Duration) *Result {
+// capped at maxOutput bytes (error context is enough for the heal loop). The
+// parent context cancels the command (killing it) when aborted.
+func Run(parent context.Context, root string, c *Command, timeout time.Duration) *Result {
+	if parent == nil {
+		parent = context.Background()
+	}
 	res := &Result{Command: c}
 	if c == nil {
 		res.Err = fmt.Errorf("nil command")
 		return res
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, c.Cmd, c.Args...)
 	cmd.Dir = root
@@ -148,12 +156,16 @@ func Run(root string, c *Command, timeout time.Duration) *Result {
 	out, err := cmd.CombinedOutput()
 	res.Dur = time.Since(start)
 	res.Output = string(out)
-	if ctx.Err() == context.DeadlineExceeded {
+	switch {
+	case ctx.Err() == context.DeadlineExceeded:
 		res.Err = fmt.Errorf("timed out after %s", timeout)
 		res.OK = false
 		return res
-	}
-	if err != nil {
+	case ctx.Err() == context.Canceled:
+		res.Err = fmt.Errorf("cancelled")
+		res.OK = false
+		return res
+	case err != nil:
 		if ee, ok := err.(*exec.ExitError); ok {
 			res.ExitCode = ee.ExitCode()
 		} else {

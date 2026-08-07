@@ -48,8 +48,8 @@ kern stats
 | Method | Command | Notes |
 |---|---|---|
 | **curl \| sh** | `curl -fsSL https://raw.githubusercontent.com/JayveerPrajapati/kern/main/install.sh \| sh` | Prebuilt binary from GitHub Releases → `~/.local/bin` |
-| **Homebrew** | `brew tap JayveerPrajapati/tap && brew install kern` | Formula in `homebrew/kern.rb` (builds from source) |
-| **pip** | `pip install kern-context` | Thin shim that fetches the prebuilt binary on first use |
+| **Homebrew** | `brew tap JayveerPrajapati/tap && brew install kern` | Formula in `homebrew/kern.rb` (builds from source). Requires the tap repo to exist: run `./scripts/publish-tap.sh <tag>` once to publish it |
+| **pip** | `pip install kern-context` | Thin shim that fetches the prebuilt binary on first use. Published automatically on each tag via the release workflow (needs a `PYPI_TOKEN` secret) |
 | **go install** | `go install github.com/JayveerPrajapati/kern/cmd/kern@latest && go install github.com/JayveerPrajapati/kern/cmd/kern-mcp@latest` | Both binaries to `$(go env GOPATH)/bin` |
 | **from source** | `make build` → `bin/kern`, `bin/kern-mcp` | Requires Go 1.22+ |
 
@@ -169,6 +169,7 @@ output (notable exception: `kern review` is text-only):
 | `kern changes` | change-impact report: changed symbols → blast radius (transitive callers), risk scores, test gaps, cross-package flags | **line-aware**: `git diff -U0` hunks scope impact to the symbols a diff actually touches; risk adds weight for changes that touch or call hubs |
 | `kern review` | token-optimised review context for a diff, sized to a budget | changed symbols shown with `file:line` spans; budget via `--max` |
 | `kern hubs` / `kern testgaps` | architectural hotspots + bridges; coverage % + untested hotspots | hubs ranked by in-project callers |
+| `kern entries` | framework entry points in the index (handlers, controllers, routes) | |
 | `kern flows` | execution flows from entry points (depth, reach, longest path) | |
 | `kern communities` | call-graph clustering via label propagation (deterministic, no deps) | |
 | `kern path <a> <b>` | shortest call path between two symbols (bidirectional traversal) | |
@@ -423,6 +424,7 @@ kern changes  [root] [--range a..b] [--file f] [--json]   # change impact: blast
 kern review   [root] [--range a..b] [--max N]             # token-optimised review context for a diff
 kern hubs     [root] [--limit N] [--json]                 # most depended-on symbols + cross-package bridges
 kern testgaps [root] [--limit N] [--json]                 # test coverage % + untested hotspots
+kern entries  [root] [--limit N] [--json]                 # framework entry points in the index
 kern flows    [root] [--limit N] [--json]                 # execution flows from entry points
 kern communities [root] [--json]                          # call-graph communities (label propagation)
 kern arch    [root] [--json]                         # architecture overview: communities + coupling
@@ -438,8 +440,8 @@ kern guard    init [root]                              # write starter .kern/bou
 kern guard    check [root] [--file f] [--range a..b]   # enforce boundaries; exit 2 on violations
 kern path     <a> <b> [root] [--json]                 # shortest call path between two symbols
 kern path                                    # (no args) show cache directory
-kern lock     <scope> [root]                           # acquire advisory lock, block until interrupt
-kern unlock   <scope> [root]                           # release a held lock
+kern lock     <scope> [root] [--hold]                    # acquire advisory lock (block until interrupt; --hold returns immediately)
+kern unlock   <scope> [root]                           # release a held lock / remove stale marker
 kern status   [root] [--json]                          # show held locks
 
 kern stats    --days 7 --json                # savings report

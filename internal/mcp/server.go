@@ -4,13 +4,17 @@ package mcp
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"regexp"
+	"runtime/debug"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/JayveerPrajapati/kern/internal/budget"
@@ -22,9 +26,11 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/index"
 	"github.com/JayveerPrajapati/kern/internal/intel"
 	"github.com/JayveerPrajapati/kern/internal/lock"
+	"github.com/JayveerPrajapati/kern/internal/memory"
 	"github.com/JayveerPrajapati/kern/internal/optimize"
 	"github.com/JayveerPrajapati/kern/internal/pii"
 	"github.com/JayveerPrajapati/kern/internal/precache"
+	"github.com/JayveerPrajapati/kern/internal/project"
 	"github.com/JayveerPrajapati/kern/internal/sandbox"
 	jsonschema "github.com/JayveerPrajapati/kern/internal/schema"
 	"github.com/JayveerPrajapati/kern/internal/stats"
@@ -37,14 +43,37 @@ import (
 const (
 	protocolVersion = "2025-06-18"
 	serverName      = "kern"
-	serverVersion   = "0.1.0"
 )
+
+// serverVersion is stamped at build time via -ldflags "-X main.version=...";
+// the binary entry points forward it through SetServerVersion. Defaults to
+// "dev" when built without ldflags so initialize still reports something sane.
+var serverVersion = "dev"
+
+// SetServerVersion overrides the version reported in the initialize response.
+// The CLI entry points call it with their ldflags-stamped main.version.
+func SetServerVersion(v string) {
+	if v != "" {
+		serverVersion = v
+	}
+}
 
 // Tool is an MCP tool definition.
 type Tool struct {
 	Name        string         `json:"name"`
 	Description string         `json:"description"`
 	InputSchema map[string]any `json:"inputSchema"`
+}
+
+// ToolNames returns every registered MCP tool name. Used by tests to assert
+// catalog parity with downstream surfaces (e.g. the opencode plugin must not
+// drift from the MCP server that all agents actually consume).
+func ToolNames() []string {
+	out := make([]string, len(tools))
+	for i, t := range tools {
+		out[i] = t.Name
+	}
+	return out
 }
 
 func schema(props map[string]any, required []string) map[string]any {
@@ -65,17 +94,41 @@ func strProp(desc string) map[string]any {
 var tools = []Tool{
 	{
 		Name:        "kern_optimize_prompt",
-		Description: "Compress and clean a raw prompt before sending it to an LLM. Returns the optimized prompt plus token savings. Use this to reduce context cost for large or noisy prompts.",
+		Description: "Compress and clean a raw prompt before sending it to an LLM. Returns the optimized prompt plus token savings. Use this to reduce context cost for large or noisy prompts. When OLLAMA_HOST points at a non-local (remote) LLM, secrets/PII are masked automatically before processing and restored in the output (the result may contain [MASKED_*] placeholders).",
 		InputSchema: schema(map[string]any{
 			"prompt":       strProp("The raw prompt text to optimize"),
 			"attached_log": strProp("Optional noisy log output to compress and attach"),
 			"session":      strProp("Optional session identifier for stats tracking"),
 			"model":        strProp("Optional model name for cost estimation"),
-			"mask":         strProp("If true, strip secrets/PII before processing and restore placeholders in the output (default false)"),
+			"mask":         strProp("If true, strip secrets/PII before processing and restore placeholders in the output (default false; also auto-enabled for non-local LLM hosts)"),
 			"mask_names":   strProp("Comma-separated client/project names to mask as [MASKED_NAME_N]"),
 			"cache":        strProp("If true, serve identical requests from the local response cache (default false)"),
 			"few_shot":     strProp("If true, inject top recalled lessons from project memory as baseline examples (default false)"),
 			"root":         strProp("Project root used for few-shot memory (defaults to current directory)"),
+		}, []string{"prompt"}),
+	},
+	{
+		Name:        "kern_memory_add",
+		Description: "Persist a distilled, cross-session lesson for a project (the project 'brain'). Agents record what they learned so future sessions can recall it. Appends to the project memory store (most recent 50 entries kept).",
+		InputSchema: schema(map[string]any{
+			"lesson": strProp("The lesson to remember, e.g. 'deploy tags are pushed from a manual release workflow, not CI'"),
+			"root":   strProp("Project root whose memory store to append (defaults to current directory)"),
+		}, []string{"lesson"}),
+	},
+	{
+		Name:        "kern_memory_list",
+		Description: "List all stored lessons for a project, most recent first with timestamps.",
+		InputSchema: schema(map[string]any{
+			"root": strProp("Project root (defaults to current directory)"),
+		}, nil),
+	},
+	{
+		Name:        "kern_memory_recall",
+		Description: "Recall the up-to-k most relevant past lessons for a prompt by keyword overlap. Returns only lessons whose tokens match; deterministic and local.",
+		InputSchema: schema(map[string]any{
+			"prompt": strProp("Query to match lessons against"),
+			"root":   strProp("Project root (defaults to current directory)"),
+			"k":      strProp("Max lessons to return (default 5)"),
 		}, []string{"prompt"}),
 	},
 	{
@@ -372,6 +425,16 @@ var tools = []Tool{
 		}, []string{"symbol"}),
 	},
 	{
+		Name:        "kern_walk",
+		Description: "Graph-guided walk: the /walk-graph primitive. Returns an indented parent-child dependency tree of every symbol up to N hops away from a symbol, across files, with file:line per node. Alias of kern_near with a tree-oriented description; use instead of grepping or reading whole files to locate code.",
+		InputSchema: schema(map[string]any{
+			"symbol": strProp("Root symbol (simple name or Type.Method)"),
+			"depth":  strProp("Number of hops to expand (default 2)"),
+			"max":    strProp("Maximum nodes to return (default 100)"),
+			"root":   strProp("Project root (defaults to current directory)"),
+		}, []string{"symbol"}),
+	},
+	{
 		Name:        "kern_probe",
 		Description: "Query-driven micro-context router: given a task (bug report, prompt, error text), extract the symbol names it mentions, resolve them against the index, and return a budget-capped bundle of definitions, callers, callees and tests. The graph is the retrieval index, never the payload.",
 		InputSchema: schema(map[string]any{
@@ -426,7 +489,10 @@ var tools = []Tool{
 type Server struct {
 	in        *bufio.Scanner
 	out       io.Writer
+	mu        sync.Mutex
 	locks     map[string]*lock.Lock
+	inflight  map[string]context.CancelFunc
+	sessions  map[string]*project.Session
 	transport string // "stdio" (default) or "http"
 }
 
@@ -434,7 +500,7 @@ type Server struct {
 func NewServer(in io.Reader, out io.Writer) *Server {
 	sc := bufio.NewScanner(in)
 	sc.Buffer(make([]byte, 4<<20), 4<<20)
-	return &Server{in: sc, out: out, locks: map[string]*lock.Lock{}, transport: "stdio"}
+	return &Server{in: sc, out: out, locks: map[string]*lock.Lock{}, inflight: map[string]context.CancelFunc{}, sessions: map[string]*project.Session{}, transport: "stdio"}
 }
 
 type rpcRequest struct {
@@ -444,13 +510,119 @@ type rpcRequest struct {
 	Params  json.RawMessage `json:"params"`
 }
 
+// isNotification reports whether the request is a JSON-RPC notification: it
+// has no id, so the client expects no response.
+func (r rpcRequest) isNotification() bool {
+	return len(r.ID) == 0 || string(r.ID) == "null"
+}
+
 func (s *Server) write(v any) error {
 	data, err := json.Marshal(v)
 	if err != nil {
 		return err
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	_, err = s.out.Write(append(data, '\n'))
 	return err
+}
+
+// progress sends a notifications/progress message for a tool call. Notifications
+// are only pushed on transports that can deliver them (stdio); HTTP answers
+// each request with a single response body and has no push channel (SSE is
+// not supported). ctx guards against emitting progress after the request was
+// cancelled or answered.
+func (s *Server) progress(ctx context.Context, id string, tool string, pct int, msg string) {
+	if s.transport != "stdio" {
+		return
+	}
+	if ctx != nil && ctx.Err() != nil {
+		return
+	}
+	n := map[string]any{
+		"jsonrpc": "2.0",
+		"method":  "notifications/progress",
+		"params": map[string]any{
+			"progressToken": id,
+			"progress":      pct,
+			"total":         100,
+			"message":       msg,
+		},
+	}
+	_ = s.write(n)
+}
+
+// startProgress emits an initial 0% notification for a slow tool and returns a
+// stop func that emits 100% and halts the background ticker. stop blocks until
+// the ticker goroutine has exited, so a stale "still running" emission can
+// never arrive after "finished"; every emission is gated on ctx.Err() and the
+// writer mutex, so a progress message can never arrive after the final
+// response.
+func (s *Server) startProgress(ctx context.Context, id, tool string) func() {
+	done := make(chan struct{})
+	var wg sync.WaitGroup
+	s.progress(ctx, id, tool, 0, tool+" running")
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		t := time.NewTicker(5 * time.Second)
+		defer t.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-t.C:
+				s.progress(ctx, id, tool, -1, tool+" still running")
+			}
+		}
+	}()
+	return func() {
+		close(done)
+		wg.Wait()
+		s.progress(ctx, id, tool, 100, tool+" finished")
+	}
+}
+
+// cancelAll cancels every in-flight tool call and releases every lock held by
+// this server. It is invoked on graceful shutdown (SIGINT/SIGTERM) so slow
+// tools stop promptly and the workspace is left unlocked.
+func (s *Server) cancelAll() {
+	s.mu.Lock()
+	for _, cancel := range s.inflight {
+		cancel()
+	}
+	s.inflight = map[string]context.CancelFunc{}
+	var held []*lock.Lock
+	for _, lk := range s.locks {
+		held = append(held, lk)
+	}
+	s.locks = map[string]*lock.Lock{}
+	s.mu.Unlock()
+	for _, lk := range held {
+		_ = lk.Release()
+	}
+}
+
+// CancelAll aborts in-flight tools and releases held locks. Safe to call from
+// a signal handler or after Serve returns.
+func (s *Server) CancelAll() { s.cancelAll() }
+
+// registerInflight stores the cancel func for a request id so $/cancelRequest
+// and graceful shutdown can abort it.
+func (s *Server) registerInflight(id string, cancel context.CancelFunc) {
+	s.mu.Lock()
+	if s.inflight == nil {
+		s.inflight = map[string]context.CancelFunc{}
+	}
+	s.inflight[id] = cancel
+	s.mu.Unlock()
+}
+
+// unregisterInflight removes the cancel func once the tool call has finished.
+func (s *Server) unregisterInflight(id string) {
+	s.mu.Lock()
+	delete(s.inflight, id)
+	s.mu.Unlock()
 }
 
 // Serve runs until the stream ends.
@@ -462,9 +634,22 @@ func (s *Server) Serve() error {
 		}
 		var req rpcRequest
 		if err := json.Unmarshal(line, &req); err != nil {
+			// A malformed line is a protocol error, not a silent drop (#21).
+			if err := s.write(errorResponse(nil, -32700, "parse error: "+err.Error())); err != nil {
+				return err
+			}
 			continue
 		}
-		if resp := s.dispatch(req); resp != nil {
+		resp := func() (r any) {
+			defer func() {
+				if rec := recover(); rec != nil {
+					r = errorResponse(req.ID, -32603, fmt.Sprintf("internal error: %v", rec))
+					fmt.Fprintf(os.Stderr, "kern-mcp: panic serving %s: %v\n%s\n", req.Method, rec, debug.Stack())
+				}
+			}()
+			return s.dispatch(req)
+		}()
+		if resp != nil {
 			if err := s.write(resp); err != nil {
 				return err
 			}
@@ -477,6 +662,29 @@ func (s *Server) Serve() error {
 // the request needs no response (e.g. a notification). The response is a
 // transport-neutral object so both stdio and HTTP can send it.
 func (s *Server) dispatch(req rpcRequest) any {
+	// $/cancelRequest is a notification per JSON-RPC (no response expected),
+	// but must still be processed: dispatch returns nil for notifications
+	// below, so it is handled here before the short-circuit.
+	if req.Method == "$/cancelRequest" {
+		var p struct {
+			ID json.RawMessage `json:"id"`
+		}
+		_ = json.Unmarshal(req.Params, &p)
+		key := idKey(p.ID)
+		s.mu.Lock()
+		cancel, ok := s.inflight[key]
+		s.mu.Unlock()
+		if ok && cancel != nil {
+			cancel()
+		}
+		if req.isNotification() {
+			return nil
+		}
+		return map[string]any{"jsonrpc": "2.0", "id": req.ID, "result": map[string]any{}}
+	}
+	if req.isNotification() {
+		return nil
+	}
 	switch req.Method {
 	case "initialize":
 		caps := map[string]any{
@@ -507,9 +715,6 @@ func (s *Server) dispatch(req rpcRequest) any {
 	case "prompts/get":
 		return s.promptGetResponse(req.ID, req.Params)
 	default:
-		if req.Method == "" {
-			return nil
-		}
 		return errorResponse(req.ID, -32601, "method not found: "+req.Method)
 	}
 }
@@ -521,6 +726,25 @@ func errorResponse(id json.RawMessage, code int, msg string) map[string]any {
 	}
 }
 
+// idKey canonicalizes a JSON-RPC id into the map key used to track in-flight
+// requests, so tools/call and $/cancelRequest agree on the same key whether
+// the client used a JSON number (77) or string ("77") id. A raw id that does
+// not parse is used verbatim.
+func idKey(id json.RawMessage) string {
+	var v any
+	if err := json.Unmarshal(id, &v); err != nil || v == nil {
+		return string(id)
+	}
+	switch t := v.(type) {
+	case float64:
+		return strconv.FormatFloat(t, 'f', -1, 64)
+	case string:
+		return t
+	default:
+		return fmt.Sprintf("%v", v)
+	}
+}
+
 func (s *Server) toolCallResponse(id json.RawMessage, params json.RawMessage) any {
 	var p struct {
 		Name      string         `json:"name"`
@@ -529,13 +753,30 @@ func (s *Server) toolCallResponse(id json.RawMessage, params json.RawMessage) an
 	if err := json.Unmarshal(params, &p); err != nil {
 		return errorResponse(id, -32602, "invalid params")
 	}
-	text, err := s.runTool(p.Name, p.Arguments)
-	if err != nil {
-		return errorResponse(id, -32000, err.Error())
-	}
+	key := idKey(id)
+	ctx, cancel := context.WithCancel(context.Background())
+	s.registerInflight(key, cancel)
+	defer func() {
+		cancel()
+		s.unregisterInflight(key)
+	}()
+
+	text, err := func() (out string, runErr error) {
+		defer func() {
+			if rec := recover(); rec != nil {
+				runErr = fmt.Errorf("panic in tool %s: %v", p.Name, rec)
+				fmt.Fprintf(os.Stderr, "kern-mcp: panic running %s: %v\n%s\n", p.Name, rec, debug.Stack())
+			}
+		}()
+		return s.runTool(ctx, key, p.Name, p.Arguments)
+	}()
 	result := map[string]any{
 		"content": []any{map[string]any{"type": "text", "text": text}},
 		"isError": false,
+	}
+	if err != nil {
+		result["content"] = []any{map[string]any{"type": "text", "text": err.Error()}}
+		result["isError"] = true
 	}
 	return map[string]any{"jsonrpc": "2.0", "id": id, "result": result}
 }
@@ -556,7 +797,7 @@ func (s *Server) promptGetResponse(id json.RawMessage, params json.RawMessage) a
 		}
 	}
 	if def == nil {
-		return errorResponse(id, -32002, "prompt not found: "+p.Name)
+		return errorResponse(id, -32602, "prompt not found: "+p.Name)
 	}
 	if p.Arguments == nil {
 		p.Arguments = map[string]any{}
@@ -586,7 +827,7 @@ func argString(args map[string]any, key string) string {
 	return strings.TrimSpace(fmt.Sprintf("%v", v))
 }
 
-func (s *Server) runTool(name string, args map[string]any) (string, error) {
+func (s *Server) runTool(ctx context.Context, id string, name string, args map[string]any) (string, error) {
 	switch name {
 	case "kern_optimize_prompt":
 		prompt := argString(args, "prompt")
@@ -617,6 +858,55 @@ func (s *Server) runTool(name string, args map[string]any) (string, error) {
 			out += "\n[kern] served from cache\n"
 		}
 		return out, nil
+
+	case "kern_memory_add":
+		lesson := argString(args, "lesson")
+		if lesson == "" {
+			return "", fmt.Errorf("lesson is required")
+		}
+		root := argString(args, "root")
+		if root == "" {
+			cwd, _ := os.Getwd()
+			root = cwd
+		}
+		if err := memory.Add(root, lesson); err != nil {
+			return "", err
+		}
+		return "remembered.", nil
+
+	case "kern_memory_list":
+		root := argString(args, "root")
+		if root == "" {
+			cwd, _ := os.Getwd()
+			root = cwd
+		}
+		var b strings.Builder
+		for _, e := range memory.List(root) {
+			fmt.Fprintf(&b, "%s  %s\n", e.Time.UTC().Format("2006-01-02 15:04"), e.Text)
+		}
+		return strings.TrimSuffix(b.String(), "\n"), nil
+
+	case "kern_memory_recall":
+		prompt := argString(args, "prompt")
+		if prompt == "" {
+			return "", fmt.Errorf("prompt is required")
+		}
+		root := argString(args, "root")
+		if root == "" {
+			cwd, _ := os.Getwd()
+			root = cwd
+		}
+		k := 5
+		if v := argString(args, "k"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n > 0 {
+				k = n
+			}
+		}
+		var b strings.Builder
+		for _, e := range memory.Recall(root, prompt, k) {
+			fmt.Fprintf(&b, "%s  %s\n", e.Time.UTC().Format("2006-01-02 15:04"), e.Text)
+		}
+		return strings.TrimSuffix(b.String(), "\n"), nil
 
 	case "kern_mask_pii":
 		text := argString(args, "text")
@@ -732,14 +1022,16 @@ func (s *Server) runTool(name string, args map[string]any) (string, error) {
 		if cmdLine == "" {
 			return "", fmt.Errorf("command is required")
 		}
-		parts := strings.Fields(cmdLine)
+		stop := s.startProgress(ctx, id, "kern_sandbox")
+		defer stop()
+		parts := splitShellLine(cmdLine)
 		timeout := 120 * time.Second
 		if s := argString(args, "timeout"); s != "" {
 			if sec, err := strconv.Atoi(s); err == nil && sec > 0 {
 				timeout = time.Duration(sec) * time.Second
 			}
 		}
-		res := sandbox.Run(root, parts[0], parts[1:], timeout)
+		res := sandbox.Run(ctx, root, parts[0], parts[1:], timeout)
 		var b strings.Builder
 		if res.OK {
 			fmt.Fprintf(&b, "status: PASS (%s), changes kept\n", res.Duration.Round(time.Millisecond))
@@ -802,7 +1094,9 @@ func (s *Server) runTool(name string, args map[string]any) (string, error) {
 				timeout = time.Duration(sec) * time.Second
 			}
 		}
-		res := heal.Run(root, task, model, rounds, timeout)
+		stop := s.startProgress(ctx, id, "kern_heal")
+		defer stop()
+		res := heal.Run(ctx, root, task, model, rounds, timeout)
 		var b strings.Builder
 		if res.Validated {
 			fmt.Fprintf(&b, "status: healed OK after %d round(s)\n", res.Iterations)
@@ -844,7 +1138,7 @@ func (s *Server) runTool(name string, args map[string]any) (string, error) {
 				return "", err
 			}
 		}
-		res := validate.Run(root, c, timeout)
+		res := validate.Run(ctx, root, c, timeout)
 		var b strings.Builder
 		fmt.Fprintf(&b, "command: %s %s\n", c.Cmd, strings.Join(c.Args, " "))
 		fmt.Fprintf(&b, "status: %s\n", map[bool]string{true: "PASS", false: "FAIL"}[res.OK])
@@ -889,9 +1183,11 @@ func (s *Server) runTool(name string, args map[string]any) (string, error) {
 			return "", fmt.Errorf("text is required")
 		}
 		root := argString(args, "root")
-		ix, err := loadOrBuildIndex(root)
+		ix, err := s.loadIndex(root)
 		if err != nil {
-			ix = nil
+			// Without a usable index the reference checks cannot run; surface
+			// the error instead of emitting a false-positive MISS report.
+			return "", fmt.Errorf("cannot verify: index unavailable for %q: %w", root, err)
 		}
 		rep := verify.Sorted(verify.Verify(ix, root, text))
 		return verify.Render(rep), nil
@@ -902,9 +1198,9 @@ func (s *Server) runTool(name string, args map[string]any) (string, error) {
 			return "", fmt.Errorf("path is required")
 		}
 		abs := path
-		if !strings.HasPrefix(abs, "/") {
+		if !filepath.IsAbs(abs) {
 			cwd, _ := os.Getwd()
-			abs = cwd + "/" + abs
+			abs = filepath.Join(cwd, abs)
 		}
 		content, err := code.ReadFile(abs)
 		if err != nil {
@@ -919,7 +1215,11 @@ func (s *Server) runTool(name string, args map[string]any) (string, error) {
 			cwd, _ := os.Getwd()
 			root = cwd
 		}
-		p, err := code.BuildProject(root, 500, 200)
+		maxFiles := 500
+		if v := argString(args, "max_files"); v != "" {
+			fmt.Sscanf(v, "%d", &maxFiles)
+		}
+		p, err := code.BuildProject(root, maxFiles, 200)
 		if err != nil {
 			return "", err
 		}
@@ -930,7 +1230,9 @@ func (s *Server) runTool(name string, args map[string]any) (string, error) {
 		if cmd == "" {
 			return "", fmt.Errorf("command is required")
 		}
-		res, err := optimize.RunBuild(cmd, argString(args, "dir"), optimize.Options{})
+		stop := s.startProgress(ctx, id, "kern_run_build")
+		defer stop()
+		res, err := optimize.RunBuild(ctx, cmd, argString(args, "dir"), optimize.Options{})
 		if err != nil {
 			return "", err
 		}
@@ -969,7 +1271,7 @@ func (s *Server) runTool(name string, args map[string]any) (string, error) {
 		if pattern == "" {
 			return "", fmt.Errorf("pattern is required")
 		}
-		ix, err := loadOrBuildIndex(argString(args, "root"))
+		ix, err := s.loadIndex(argString(args, "root"))
 		if err != nil {
 			return "", err
 		}
@@ -1008,7 +1310,7 @@ func (s *Server) runTool(name string, args map[string]any) (string, error) {
 
 	case "kern_entry_points":
 		root := argString(args, "root")
-		ix, err := loadOrBuildIndex(root)
+		ix, err := s.loadIndex(root)
 		if err != nil {
 			return "", err
 		}
@@ -1044,7 +1346,7 @@ func (s *Server) runTool(name string, args map[string]any) (string, error) {
 		if query == "" {
 			return "", fmt.Errorf("query is required")
 		}
-		ix, err := loadOrBuildIndex(argString(args, "root"))
+		ix, err := s.loadIndex(argString(args, "root"))
 		if err != nil {
 			return "", err
 		}
@@ -1089,7 +1391,7 @@ func (s *Server) runTool(name string, args map[string]any) (string, error) {
 		if symbol == "" {
 			return "", fmt.Errorf("symbol is required")
 		}
-		ix, err := loadOrBuildIndex(argString(args, "root"))
+		ix, err := s.loadIndex(argString(args, "root"))
 		if err != nil {
 			return "", err
 		}
@@ -1104,7 +1406,7 @@ func (s *Server) runTool(name string, args map[string]any) (string, error) {
 		if symbol == "" {
 			return "", fmt.Errorf("symbol is required")
 		}
-		ix, err := loadOrBuildIndex(argString(args, "root"))
+		ix, err := s.loadIndex(argString(args, "root"))
 		if err != nil {
 			return "", err
 		}
@@ -1115,7 +1417,7 @@ func (s *Server) runTool(name string, args map[string]any) (string, error) {
 		if symbol == "" {
 			return "", fmt.Errorf("symbol is required")
 		}
-		ix, err := loadOrBuildIndex(argString(args, "root"))
+		ix, err := s.loadIndex(argString(args, "root"))
 		if err != nil {
 			return "", err
 		}
@@ -1130,14 +1432,14 @@ func (s *Server) runTool(name string, args map[string]any) (string, error) {
 		return ctx, nil
 
 	case "kern_changes":
-		changes, ix, err := changedContext(args)
+		changes, ix, err := s.changedContext(args)
 		if err != nil {
 			return "", err
 		}
 		return intel.RenderChanges(intel.AnalyzeChangesRanged(ix, changes)), nil
 
 	case "kern_review":
-		changes, ix, err := changedContext(args)
+		changes, ix, err := s.changedContext(args)
 		if err != nil {
 			return "", err
 		}
@@ -1148,7 +1450,7 @@ func (s *Server) runTool(name string, args map[string]any) (string, error) {
 		return intel.ReviewRanged(ix, changes, maxTokens), nil
 
 	case "kern_hubs":
-		ix, err := loadOrBuildIndex(argString(args, "root"))
+		ix, err := s.loadIndex(argString(args, "root"))
 		if err != nil {
 			return "", err
 		}
@@ -1163,7 +1465,7 @@ func (s *Server) runTool(name string, args map[string]any) (string, error) {
 		return b.String(), nil
 
 	case "kern_test_gaps":
-		ix, err := loadOrBuildIndex(argString(args, "root"))
+		ix, err := s.loadIndex(argString(args, "root"))
 		if err != nil {
 			return "", err
 		}
@@ -1171,7 +1473,9 @@ func (s *Server) runTool(name string, args map[string]any) (string, error) {
 		if v := argString(args, "limit"); v != "" {
 			fmt.Sscanf(v, "%d", &limit)
 		}
-		return intel.AnalyzeCoverage(ix).Render(), nil
+		c := intel.AnalyzeCoverage(ix)
+		c.HotGaps = intel.TestGaps(ix, limit)
+		return c.Render(), nil
 
 	case "kern_path":
 		from := argString(args, "from")
@@ -1179,7 +1483,7 @@ func (s *Server) runTool(name string, args map[string]any) (string, error) {
 		if from == "" || to == "" {
 			return "", fmt.Errorf("from and to are required")
 		}
-		ix, err := loadOrBuildIndex(argString(args, "root"))
+		ix, err := s.loadIndex(argString(args, "root"))
 		if err != nil {
 			return "", err
 		}
@@ -1194,7 +1498,7 @@ func (s *Server) runTool(name string, args map[string]any) (string, error) {
 		return intel.RenderPath(ix, intel.ShortestPath(ix, from, to)), nil
 
 	case "kern_dead":
-		ix, err := loadOrBuildIndex(argString(args, "root"))
+		ix, err := s.loadIndex(argString(args, "root"))
 		if err != nil {
 			return "", err
 		}
@@ -1209,7 +1513,7 @@ func (s *Server) runTool(name string, args map[string]any) (string, error) {
 		return intel.RenderDead(dead), nil
 
 	case "kern_larges":
-		ix, err := loadOrBuildIndex(argString(args, "root"))
+		ix, err := s.loadIndex(argString(args, "root"))
 		if err != nil {
 			return "", err
 		}
@@ -1228,7 +1532,7 @@ func (s *Server) runTool(name string, args map[string]any) (string, error) {
 		return intel.RenderLarge(large), nil
 
 	case "kern_arch":
-		ix, err := loadOrBuildIndex(argString(args, "root"))
+		ix, err := s.loadIndex(argString(args, "root"))
 		if err != nil {
 			return "", err
 		}
@@ -1254,12 +1558,12 @@ func (s *Server) runTool(name string, args map[string]any) (string, error) {
 		}
 		return intel.RenderChurn(report), nil
 
-	case "kern_near":
+	case "kern_near", "kern_walk":
 		symbol := argString(args, "symbol")
 		if symbol == "" {
 			return "", fmt.Errorf("symbol is required")
 		}
-		ix, err := loadOrBuildIndex(argString(args, "root"))
+		ix, err := s.loadIndex(argString(args, "root"))
 		if err != nil {
 			return "", err
 		}
@@ -1282,7 +1586,7 @@ func (s *Server) runTool(name string, args map[string]any) (string, error) {
 		if task == "" {
 			return "", fmt.Errorf("task is required")
 		}
-		ix, err := loadOrBuildIndex(argString(args, "root"))
+		ix, err := s.loadIndex(argString(args, "root"))
 		if err != nil {
 			return "", err
 		}
@@ -1302,7 +1606,7 @@ func (s *Server) runTool(name string, args map[string]any) (string, error) {
 		if src == "" {
 			return "", fmt.Errorf("trace is required")
 		}
-		ix, err := loadOrBuildIndex(argString(args, "root"))
+		ix, err := s.loadIndex(argString(args, "root"))
 		if err != nil {
 			return "", err
 		}
@@ -1327,6 +1631,7 @@ func (s *Server) runTool(name string, args map[string]any) (string, error) {
 			_, pid, _ := lock.Held(root, scope)
 			return "", fmt.Errorf("lock %q is held (pid %d)", scope, pid)
 		}
+		s.mu.Lock()
 		if s.locks == nil {
 			s.locks = map[string]*lock.Lock{}
 		}
@@ -1334,6 +1639,7 @@ func (s *Server) runTool(name string, args map[string]any) (string, error) {
 			_ = prev.Release()
 		}
 		s.locks[scope] = lk
+		s.mu.Unlock()
 		return fmt.Sprintf("lock acquired: %s (pid %d)", scope, os.Getpid()), nil
 
 	case "kern_unlock":
@@ -1341,11 +1647,14 @@ func (s *Server) runTool(name string, args map[string]any) (string, error) {
 		if scope == "" {
 			return "", fmt.Errorf("scope is required")
 		}
-		if lk := s.locks[scope]; lk != nil {
+		s.mu.Lock()
+		lk := s.locks[scope]
+		delete(s.locks, scope)
+		s.mu.Unlock()
+		if lk != nil {
 			if err := lk.Release(); err != nil {
 				return "", err
 			}
-			delete(s.locks, scope)
 			return "lock released: " + scope, nil
 		}
 		return "", fmt.Errorf("lock %q is not held by this server", scope)
@@ -1378,7 +1687,7 @@ func (s *Server) runTool(name string, args map[string]any) (string, error) {
 		return strings.TrimSuffix(b.String(), "\n"), nil
 
 	case "kern_guard_check":
-		changes, ix, err := changedContext(args)
+		changes, ix, err := s.changedContext(args)
 		if err != nil {
 			return "", err
 		}
@@ -1409,13 +1718,13 @@ func (s *Server) runTool(name string, args map[string]any) (string, error) {
 // comma-separated file list wins; otherwise the git range (empty = working
 // tree). Returns line-aware FileChanges so blast radius can be scoped to the
 // changed hunks.
-func changedContext(args map[string]any) ([]intel.FileChange, *index.Index, error) {
+func (s *Server) changedContext(args map[string]any) ([]intel.FileChange, *index.Index, error) {
 	root := argString(args, "root")
 	if root == "" {
 		cwd, _ := os.Getwd()
 		root = cwd
 	}
-	ix, err := loadOrBuildIndex(root)
+	ix, err := s.loadIndex(root)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1475,21 +1784,80 @@ func splitLines(s string) []string {
 	return strings.Split(strings.TrimRight(s, "\n"), "\n")
 }
 
-// loadOrBuildIndex loads the persisted index for root, or builds + saves it.
-func loadOrBuildIndex(root string) (*index.Index, error) {
+// sessionFor returns the project session for root, creating and caching one
+// per root so index state and stats identity are shared across tool calls.
+func (s *Server) sessionFor(root string) *project.Session {
 	if root == "" {
-		cwd, _ := os.Getwd()
-		root = cwd
+		if cwd, err := os.Getwd(); err == nil {
+			root = cwd
+		}
 	}
-	if ix, err := index.Load(root); err == nil && ix != nil {
-		return ix, nil
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.sessions == nil {
+		s.sessions = map[string]*project.Session{}
 	}
-	ix, err := index.Build(root)
-	if err != nil {
-		return nil, err
+	sess, ok := s.sessions[root]
+	if !ok {
+		sess = project.New(root, "")
+		s.sessions[root] = sess
 	}
-	_ = ix.Save()
-	return ix, nil
+	return sess
+}
+
+// loadIndex returns the session's symbol index, reused while fresh and rebuilt
+// when stale or missing (see project.Session.Index).
+func (s *Server) loadIndex(root string) (*index.Index, error) {
+	return s.sessionFor(root).Index()
+}
+
+// splitShellLine tokenizes a command line into argv, honoring single and
+// double quotes so the documented `sh -c 'cmd ...'` (and Windows `cmd /c "..."`)
+// form is preserved as a single argument instead of being split by whitespace.
+func splitShellLine(line string) []string {
+	var (
+		out      []string
+		cur      strings.Builder
+		inSingle bool
+		inDouble bool
+		started  bool
+	)
+	for i := 0; i < len(line); i++ {
+		c := line[i]
+		switch {
+		case inSingle:
+			if c == '\'' {
+				inSingle = false
+			} else {
+				cur.WriteByte(c)
+			}
+		case inDouble:
+			if c == '"' {
+				inDouble = false
+			} else {
+				cur.WriteByte(c)
+			}
+		case c == '\'':
+			inSingle = true
+			started = true
+		case c == '"':
+			inDouble = true
+			started = true
+		case c == ' ' || c == '\t':
+			if started {
+				out = append(out, cur.String())
+				cur.Reset()
+				started = false
+			}
+		default:
+			cur.WriteByte(c)
+			started = true
+		}
+	}
+	if started {
+		out = append(out, cur.String())
+	}
+	return out
 }
 
 func renderOptimize(label string, res optimize.Result) string {

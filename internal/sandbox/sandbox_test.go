@@ -1,6 +1,7 @@
 package sandbox
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -33,7 +34,7 @@ func TestSnapshotRestore(t *testing.T) {
 func TestRunRestoresOnFailure(t *testing.T) {
 	root := t.TempDir()
 	_ = os.WriteFile(filepath.Join(root, "data.txt"), []byte("pristine"), 0o644)
-	res := Run(root, "sh", []string{"-c", "echo changed > data.txt; exit 1"}, 10*time.Second)
+	res := Run(context.Background(), root, "sh", []string{"-c", "echo changed > data.txt; exit 1"}, 10*time.Second)
 	if res.OK {
 		t.Fatal("expected failure")
 	}
@@ -49,7 +50,7 @@ func TestRunRestoresOnFailure(t *testing.T) {
 func TestRunKeepsOnSuccess(t *testing.T) {
 	root := t.TempDir()
 	_ = os.WriteFile(filepath.Join(root, "data.txt"), []byte("pristine"), 0o644)
-	res := Run(root, "sh", []string{"-c", "echo changed > data.txt; exit 0"}, 10*time.Second)
+	res := Run(context.Background(), root, "sh", []string{"-c", "echo changed > data.txt; exit 0"}, 10*time.Second)
 	if !res.OK {
 		t.Fatalf("expected success: %+v", res)
 	}
@@ -63,7 +64,7 @@ func TestRunKeepsOnSuccess(t *testing.T) {
 }
 
 func TestRunMissingCommand(t *testing.T) {
-	res := Run(t.TempDir(), "definitely-not-a-real-binary-xyz", nil, 10*time.Second)
+	res := Run(context.Background(), t.TempDir(), "definitely-not-a-real-binary-xyz", nil, 10*time.Second)
 	if res.OK {
 		t.Fatal("expected failure")
 	}

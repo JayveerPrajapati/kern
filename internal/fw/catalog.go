@@ -8,6 +8,8 @@
 // and by `kern fw`, which answers "what stack is this project running?".
 package fw
 
+import "sort"
+
 // Framework describes one framework and the signals that reveal it in a
 // project. A framework is detected when any of its signals matches.
 type Framework struct {
@@ -61,10 +63,11 @@ func Langs() []string {
 	for _, f := range catalog {
 		set[f.Lang] = true
 	}
-	var out []string
+	out := make([]string, 0, len(set))
 	for l := range set {
 		out = append(out, l)
 	}
+	sort.Strings(out)
 	return out
 }
 

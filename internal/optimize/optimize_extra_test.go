@@ -1,6 +1,7 @@
 package optimize
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -120,14 +121,14 @@ func TestLogCompresses(t *testing.T) {
 }
 
 func TestRunBuildEmpty(t *testing.T) {
-	if _, err := RunBuild(" ", "", Options{}); err == nil {
+	if _, err := RunBuild(context.Background(), " ", "", Options{}); err == nil {
 		t.Fatal("expected error for empty command")
 	}
 }
 
 func TestRunBuildOutput(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
-	res, err := RunBuild("echo hello build", t.TempDir(), Options{})
+	res, err := RunBuild(context.Background(), "echo hello build", t.TempDir(), Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -141,7 +142,7 @@ func TestRunBuildOutput(t *testing.T) {
 
 func TestRunBuildFailure(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
-	res, err := RunBuild("exit 3", t.TempDir(), Options{})
+	res, err := RunBuild(context.Background(), "exit 3", t.TempDir(), Options{})
 	if err == nil {
 		t.Fatal("expected error from failing command")
 	}
@@ -236,7 +237,7 @@ func TestPromptRecordsRunBuildStats(t *testing.T) {
 		t.Fatal(err)
 	}
 	Recorder = r
-	if _, err := RunBuild("true", t.TempDir(), Options{Session: "build-test"}); err != nil {
+	if _, err := RunBuild(context.Background(), "true", t.TempDir(), Options{Session: "build-test"}); err != nil {
 		t.Fatal(err)
 	}
 	sum, err := r.Summarize(7, "build-test")

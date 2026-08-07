@@ -131,6 +131,13 @@ main() {
   cp "$tmpdir/kern-${platform}/kern-mcp" "$PREFIX/kern-mcp"
   chmod +x "$PREFIX/kern" "$PREFIX/kern-mcp"
 
+  # macOS Gatekeeper kills unsigned binaries with SIGKILL (exit 137) even
+  # though os.Stat sees the file; re-sign with an ad-hoc signature so the
+  # copy is executable.
+  if [ "${platform%-*}" = "darwin" ] && command -v codesign >/dev/null 2>&1; then
+    codesign --force --sign - "$PREFIX/kern" "$PREFIX/kern-mcp"
+  fi
+
   echo "installed: $PREFIX/kern ($tag)"
   case ":$PATH:" in
     *":$PREFIX:"*) ;;

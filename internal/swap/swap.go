@@ -7,6 +7,7 @@ package swap
 
 import (
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 
@@ -82,8 +83,8 @@ func Fit(text, root string, maxTokens int) (string, bool) {
 
 func fileAt(root, path string) string {
 	p := path
-	if root != "" && !strings.HasPrefix(path, "/") {
-		p = root + "/" + path
+	if root != "" && !filepath.IsAbs(path) {
+		p = filepath.Join(root, path)
 	}
 	b, err := os.ReadFile(p)
 	if err != nil {

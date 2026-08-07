@@ -21,6 +21,7 @@ func doHTTP(t *testing.T, s *Server, method, ctype, body string, headers map[str
 	t.Helper()
 	req := httptest.NewRequest(method, "/mcp", strings.NewReader(body))
 	req.Header.Set("Content-Type", ctype)
+	req.Header.Set("MCP-Protocol-Version", protocolVersion)
 	for k, v := range headers {
 		req.Header.Set(k, v)
 	}
@@ -85,34 +86,30 @@ func TestHandleHTTPSingleRequest(t *testing.T) {
 	}
 }
 
-func TestHandleHTTPBatchRequest(t *testing.T) {
+func TestHandleHTTPBatchRequestRejected(t *testing.T) {
 	body := `[{"jsonrpc":"2.0","id":1,"method":"ping"},{"jsonrpc":"2.0","id":2,"method":"ping"}]`
 	rr := doHTTP(t, newHTTPServer(), http.MethodPost, "application/json", body, nil)
 	if rr.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d", rr.Code)
+		t.Fatalf("expected 200 (JSON-RPC error in body), got %d", rr.Code)
 	}
-	var resp []any
+	var resp map[string]any
 	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("unmarshal batch: %v", err)
+		t.Fatalf("unmarshal batch error: %v", err)
 	}
-	if len(resp) != 2 {
-		t.Fatalf("expected 2 batch responses, got %d", len(resp))
-	}
-	for i, r := range resp {
-		if r.(map[string]any)["id"].(float64) != float64(i+1) {
-			t.Fatalf("batch order wrong at %d: %+v", i, r)
-		}
+	e := resp["error"].(map[string]any)
+	if int(e["code"].(float64)) != -32700 {
+		t.Fatalf("expected -32700 for batch, got %+v", resp)
 	}
 }
 
-func TestHandleHTTPNotificationNoBody(t *testing.T) {
+func TestHandleHTTPNotificationAcceptedNoBody(t *testing.T) {
 	body := `{"jsonrpc":"2.0","method":"notifications/initialized"}`
 	rr := doHTTP(t, newHTTPServer(), http.MethodPost, "application/json", body, nil)
-	if rr.Code != http.StatusOK {
-		t.Fatalf("expected 200 for notification, got %d", rr.Code)
+	if rr.Code != http.StatusAccepted {
+		t.Fatalf("expected 202 for notification, got %d", rr.Code)
 	}
-	if strings.TrimSpace(rr.Body.String()) != "{}" {
-		t.Fatalf("notification body should be {}, got %q", rr.Body.String())
+	if strings.TrimSpace(rr.Body.String()) != "" {
+		t.Fatalf("notification body should be empty, got %q", rr.Body.String())
 	}
 }
 
@@ -126,6 +123,41 @@ func TestHandleHTTPUnknownMethod(t *testing.T) {
 	e := resp["error"].(map[string]any)
 	if int(e["code"].(float64)) != -32601 {
 		t.Fatalf("expected method-not-found, got %v", e)
+	}
+}
+
+func TestHandleHTTPMissingProtocolVersion(t *testing.T) {
+	body := `{"jsonrpc":"2.0","id":5,"method":"initialize","params":{}}`
+	rr := doHTTP(t, newHTTPServer(), http.MethodPost, "application/json", body, map[string]string{"MCP-Protocol-Version": ""})
+	if rr.Code != http.StatusPreconditionFailed {
+		t.Fatalf("expected 412 for missing protocol version, got %d", rr.Code)
+	}
+	if v := rr.Header().Get("MCP-Protocol-Version"); v != protocolVersion {
+		t.Fatalf("expected MCP-Protocol-Version echoed, got %q", v)
+	}
+}
+
+func TestHandleHTTPBadProtocolVersion(t *testing.T) {
+	body := `{"jsonrpc":"2.0","id":6,"method":"initialize","params":{}}`
+	rr := doHTTP(t, newHTTPServer(), http.MethodPost, "application/json", body, map[string]string{"MCP-Protocol-Version": "2030-01-01"})
+	if rr.Code != http.StatusPreconditionFailed {
+		t.Fatalf("expected 412 for wrong protocol version, got %d", rr.Code)
+	}
+}
+
+func TestHandleHTTPRemoteOriginRejected(t *testing.T) {
+	body := `{"jsonrpc":"2.0","id":7,"method":"initialize","params":{}}`
+	rr := doHTTP(t, newHTTPServer(), http.MethodPost, "application/json", body, map[string]string{"Origin": "https://evil.example"})
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 for remote origin, got %d", rr.Code)
+	}
+}
+
+func TestHandleHTTPSameHostOriginAllowed(t *testing.T) {
+	body := `{"jsonrpc":"2.0","id":8,"method":"ping"}`
+	rr := doHTTP(t, newHTTPServer(), http.MethodPost, "application/json", body, map[string]string{"Origin": "http://127.0.0.1:5173"})
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200 for loopback origin, got %d: %s", rr.Code, rr.Body.String())
 	}
 }
 
