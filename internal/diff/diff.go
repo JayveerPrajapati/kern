@@ -5,6 +5,7 @@ package diff
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
 )
 
@@ -92,8 +93,8 @@ func Unified(aPath, bPath string, a, b []string) string {
 		return ""
 	}
 	var bd strings.Builder
-	bd.WriteString("--- a/" + aPath + "\n")
-	bd.WriteString("+++ b/" + bPath + "\n")
+	bd.WriteString("--- a/" + labelPath(aPath) + "\n")
+	bd.WriteString("+++ b/" + labelPath(bPath) + "\n")
 	const ctx = 3
 	hunks := groupHunks(ops, ctx)
 	for _, h := range hunks {
@@ -101,12 +102,23 @@ func Unified(aPath, bPath string, a, b []string) string {
 		fmt.Fprintf(&bd, "@@ -%d,%d +%d,%d @@\n", aStart, aCount, bStart, bCount)
 		for _, op := range h {
 			bd.WriteByte(op.Kind)
-			bd.WriteByte(' ')
+			if op.Kind == ' ' {
+				bd.WriteByte(' ')
+			}
 			bd.WriteString(op.Text)
 			bd.WriteByte('\n')
 		}
 	}
 	return bd.String()
+}
+
+// labelPath normalizes a path for a unified-diff header so absolute paths do
+// not render as "a//tmp/fa" and "./" prefixes are dropped.
+func labelPath(p string) string {
+	p = filepath.ToSlash(p)
+	p = strings.TrimPrefix(p, "./")
+	p = strings.TrimLeft(p, "/")
+	return p
 }
 
 // groupHunks splits ops into hunks of change-regions padded with context.

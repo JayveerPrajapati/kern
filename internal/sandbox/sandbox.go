@@ -20,7 +20,7 @@ import (
 const maxSnapshotBytes = 100 << 20
 
 // SkipDirs are never copied into a snapshot.
-var SkipDirs = map[string]bool{".git": true, ".hg": true, ".svn": true, "node_modules": true, "vendor": true, "dist": true, "build": true}
+var SkipDirs = map[string]bool{".git": true, ".hg": true, ".svn": true, "node_modules": true, "vendor": true, "dist": true, "build": true, ".kern": true}
 
 // Snap is a point-in-time copy of a tree used for rollback.
 type Snap struct {

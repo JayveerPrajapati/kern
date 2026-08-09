@@ -18,6 +18,7 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/llm"
 	"github.com/JayveerPrajapati/kern/internal/memory"
 	"github.com/JayveerPrajapati/kern/internal/pii"
+	"github.com/JayveerPrajapati/kern/internal/semcache"
 	"github.com/JayveerPrajapati/kern/internal/stats"
 	"github.com/JayveerPrajapati/kern/internal/tokenize"
 )
@@ -32,6 +33,12 @@ type Result struct {
 	// FromCache is set when the result was served from the local response
 	// cache instead of recomputing (or calling the LLM).
 	FromCache bool
+	// SemanticHit is set when the result came from the fuzzy cache: a prior
+	// *similar* (not identical) input produced it. MatchedInput is that input
+	// and Similarity its Jaccard overlap, so callers can show what was matched.
+	SemanticHit  bool
+	MatchedInput string
+	Similarity   float64
 }
 
 // Options for an optimization run.
@@ -115,11 +122,29 @@ func Prompt(prompt string, attachedLog string, opts Options) (Result, error) {
 			cached.FromCache = true
 			return cached, nil
 		}
+		// Semantic cache (#9): a *similar* prior query returns instantly. Only
+		// deterministic results are stored/served (never LLM runs), and the
+		// LLM path is skipped entirely so a fuzzy hit can never ship a wrong
+		// model's answer.
+		if opts.LLM == "" {
+			var sem Result
+			raw := prompt + "\x00" + attachedLog
+			if matched, sim, hit, serr := semcache.Lookup("prompt", raw, &sem, 0); serr == nil && hit {
+				sem.FromCache = true
+				sem.SemanticHit = true
+				sem.MatchedInput = matched
+				sem.Similarity = sim
+				return sem, nil
+			}
+		}
 		res, err := promptUncached(prompt, attachedLog, opts)
 		if err != nil {
 			return res, err
 		}
 		_ = cache.Store(key, res)
+		if opts.LLM == "" {
+			_ = semcache.Store("prompt", prompt+"\x00"+attachedLog, res)
+		}
 		return res, nil
 	}
 	return promptUncached(prompt, attachedLog, opts)
@@ -177,6 +202,27 @@ func promptUncached(prompt string, attachedLog string, opts Options) (Result, er
 func Log(text string, opts Options) (Result, error) {
 	if strings.TrimSpace(text) == "" {
 		return Result{}, errors.New("empty log")
+	}
+	if opts.Cache {
+		key := "logs/" + cache.Hash([]byte(text))
+		var cached Result
+		if err := cache.Load(key, &cached); err == nil && cached.Output != "" {
+			cached.FromCache = true
+			return cached, nil
+		}
+		var sem Result
+		if matched, sim, hit, serr := semcache.Lookup("log", text, &sem, 0); serr == nil && hit {
+			sem.FromCache = true
+			sem.SemanticHit = true
+			sem.MatchedInput = matched
+			sem.Similarity = sim
+			return sem, nil
+		}
+		res := finish(text, compress.CompressLog(text, compress.Options{MaxLines: 200}), tokenize.KindLog)
+		record(stats.OpOptimizeLog, opts, res)
+		_ = cache.Store(key, res)
+		_ = semcache.Store("log", text, res)
+		return res, nil
 	}
 	out := compress.CompressLog(text, compress.Options{MaxLines: 200})
 	res := finish(text, out, tokenize.KindLog)

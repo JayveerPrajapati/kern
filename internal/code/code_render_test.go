@@ -9,26 +9,26 @@ import (
 
 func TestDetectLanguageAll(t *testing.T) {
 	cases := map[string]string{
-		"foo.py":     "python",
-		"bar.py":     "python",
-		"x.js":       "js",
-		"y.ts":       "js",
-		"z.jsx":      "js",
-		"w.tsx":      "js",
-		"a.mjs":      "js",
-		"b.cjs":      "js",
-		"c.java":     "java",
-		"d.c":        "c",
-		"e.h":        "c",
-		"f.cc":       "c",
-		"g.hpp":      "c",
-		"r.rs":       "rust",
-		"r1.rb":      "ruby",
-		"s.sh":       "shell",
-		"s1.bash":    "shell",
-		"main.go":    "go",
-		"noext":      "",
-		"notes.md":   "",
+		"foo.py":   "python",
+		"bar.py":   "python",
+		"x.js":     "js",
+		"y.ts":     "js",
+		"z.jsx":    "js",
+		"w.tsx":    "js",
+		"a.mjs":    "js",
+		"b.cjs":    "js",
+		"c.java":   "java",
+		"d.c":      "c",
+		"e.h":      "c",
+		"f.cc":     "c",
+		"g.hpp":    "c",
+		"r.rs":     "rust",
+		"r1.rb":    "ruby",
+		"s.sh":     "shell",
+		"s1.bash":  "shell",
+		"main.go":  "go",
+		"noext":    "",
+		"notes.md": "",
 	}
 	for path, want := range cases {
 		if got := DetectLanguage(path); got != want {
@@ -140,15 +140,15 @@ func TestSummarizeCachedReadError(t *testing.T) {
 
 func TestShouldIgnore(t *testing.T) {
 	cases := map[string]bool{
-		"go.sum":              true,
-		".DS_Store":           true,
-		"package-lock.json":   true,
-		".env":                true,
-		"main.go":             false,
-		"vendor/x.go":         true,
-		"node_modules/x.js":   true,
-		"src/app.py":          false,
-		"build/output.o":      true,
+		"go.sum":            true,
+		".DS_Store":         true,
+		"package-lock.json": true,
+		".env":              true,
+		"main.go":           false,
+		"vendor/x.go":       true,
+		"node_modules/x.js": true,
+		"src/app.py":        false,
+		"build/output.o":    true,
 	}
 	for rel, want := range cases {
 		if got := shouldIgnore(rel); got != want {

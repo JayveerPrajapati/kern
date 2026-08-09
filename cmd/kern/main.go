@@ -8,9 +8,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -20,26 +23,35 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/budget"
 	"github.com/JayveerPrajapati/kern/internal/cache"
 	"github.com/JayveerPrajapati/kern/internal/code"
+	"github.com/JayveerPrajapati/kern/internal/commitmsg"
 	kdiff "github.com/JayveerPrajapati/kern/internal/diff"
 	"github.com/JayveerPrajapati/kern/internal/docsearch"
 	"github.com/JayveerPrajapati/kern/internal/doctor"
+	"github.com/JayveerPrajapati/kern/internal/fetch"
 	"github.com/JayveerPrajapati/kern/internal/fw"
 	"github.com/JayveerPrajapati/kern/internal/heal"
 	"github.com/JayveerPrajapati/kern/internal/hooks"
 	"github.com/JayveerPrajapati/kern/internal/index"
 	"github.com/JayveerPrajapati/kern/internal/intel"
+	"github.com/JayveerPrajapati/kern/internal/llm"
 	"github.com/JayveerPrajapati/kern/internal/lock"
 	"github.com/JayveerPrajapati/kern/internal/mcp"
 	"github.com/JayveerPrajapati/kern/internal/memory"
 	"github.com/JayveerPrajapati/kern/internal/optimize"
+	"github.com/JayveerPrajapati/kern/internal/pack"
 	"github.com/JayveerPrajapati/kern/internal/pii"
 	"github.com/JayveerPrajapati/kern/internal/precache"
 	"github.com/JayveerPrajapati/kern/internal/prompt"
+	"github.com/JayveerPrajapati/kern/internal/rename"
 	"github.com/JayveerPrajapati/kern/internal/sandbox"
 	"github.com/JayveerPrajapati/kern/internal/schema"
+	"github.com/JayveerPrajapati/kern/internal/script"
+	"github.com/JayveerPrajapati/kern/internal/sec"
+	"github.com/JayveerPrajapati/kern/internal/semcache"
 	"github.com/JayveerPrajapati/kern/internal/setup"
 	"github.com/JayveerPrajapati/kern/internal/stats"
 	"github.com/JayveerPrajapati/kern/internal/swap"
+	"github.com/JayveerPrajapati/kern/internal/terse"
 	"github.com/JayveerPrajapati/kern/internal/tokenize"
 	"github.com/JayveerPrajapati/kern/internal/validate"
 	"github.com/JayveerPrajapati/kern/internal/verify"
@@ -56,6 +68,7 @@ Usage:
   kern preview  <prompt> [--attach FILE]          (dry-run, no stats recorded)
   kern compact <file>                             symbolic summary of a file
   kern project [root]                             compact project map
+  kern pack [root] [--max-tokens N] [--out FILE]  single paste-ready file: tree + instructions + contents
   kern build "<command>" [--dir DIR]              run build, compact output
   kern log <file>                                 compress a log file
   kern index [root]                               build/refresh the AST index
@@ -71,6 +84,7 @@ Usage:
   kern why <symbol> [--json]                      rationale: doc comment + who depends on it and why
   kern wiki [root] [--out DIR]                    export a markdown wiki (one page per package)
   kern stats [--days N] [--session ID] [--json]
+  kern semcache [stats|clear [NS]|list <NS>|sim <A> <B>]   semantic cache inspection (similar query -> instant)
   kern diff [--session ID]                        recent before/after entries
   kern export --csv                               export stats to CSV
   kern tokens [--bpe] "<text>"                    token count (estimator or exact BPE)
@@ -82,11 +96,26 @@ Usage:
   kern remember "<lesson>"                        record a lesson in project memory
   kern memory [--clear]                           show project memory
   kern recall "<prompt>" [root] [--limit N]        recall up-to-N relevant past lessons for a prompt
-  kern budget "<text>" --max N                    fit text into a token budget
+   kern budget "<text>" --max N                    fit text into a token budget
+   kern terse "<text>"|-                            compress an LLM's output: strip filler, keep code
+   kern exec "<code>" [--lang LANG] [--timeout s] [--max bytes] [--stdin file|-]
+                                                 run a script in an isolated local runtime (python3,
+                                                 node, go, bash, ...) and return ONLY stdout; shebang
+                                                 or --lang selects the runtime; --list shows installed
   kern doctor [root]                              diagnostics report
   kern mask [file|-] [--names a,b,c]              mask secrets/PII locally with [MASKED_*] placeholders
-  kern docs <query> [root] [--k N]                local vector search over documents (md/txt/rst)
-  kern docs index [root]                          pre-index documents; kern docs clear resets
+  kern sec [root] [--severity error,warning,info] [--max N] [--json]
+                                                 security scan: hardcoded secrets, dynamic SQL, command
+                                                 injection, weak crypto, unsafe deserialization (exit 1 on errors)
+  kern delete <symbol> [root] [--json]           safe-delete check: callers (prod vs test), exported/entry
+                                                 point, SAFE/NOT SAFE verdict (exit 1 when unsafe)
+  kern rename <old> <new> [root] [--apply] [--json]
+                                                 structural rename (Go, AST-precise): previews every
+                                                 definition/reference first; --apply commits with backups
+                                                 under .kern/rename-backup/ and transactional rollback
+   kern docs <query> [root] [--k N]                local vector search over documents (md/txt/rst)
+   kern docs index [root] [--semantic]             pre-index documents; --semantic adds Ollama embeddings;
+                                                  kern docs clear resets
   kern verify <file|- for stdin> [root] [--json]  cross-check file:line/symbol/route claims in agent output
   kern schema <data.json|-> --schema <schema.json>
                                                 deterministically validate JSON output against a JSON schema
@@ -131,51 +160,65 @@ Usage:
   kern unlock <scope> [root]                     remove a stale lock file
   kern status [root] [--json]                    list workspace locks (held/free)
   kern guard init [root]                         scaffold .kern/boundaries.json
-  kern guard check [root] [--file F] [--range a..b] [--json]  reject boundary violations (exit 2)
+  kern guard check [root] [--file F] [--range a..b] [--json|--sarif] [--threshold N]  reject boundary violations (exit 2 when count > N)
   kern version                                    show version
+  kern guide                                      categorized tool usage guide (performance tiers)
   kern mcp                                        run MCP server on stdio
 `)
 }
 
 type flags struct {
-	attach   string
-	session  string
-	model    string
-	days     int
-	json     bool
-	dir      string
-	csv      bool
-	llm      string
-	bpe      bool
-	root     string
-	check    bool
-	agents   string
-	file     string
-	task     string
-	mermaid  bool
-	all      bool
-	clear    bool
-	max      int
-	limit    int
-	lines    int
-	depth    int
-	range_   string
-	graphml  bool
-	html     bool
-	out      string
-	repos    bool
-	mask     bool
-	names    string
-	cache    bool
-	schema   string
-	cmd      string
-	timeout  int
-	fewshot  bool
-	mode     string
-	once     bool
-	interval int
-	http     string
-	hold     bool
+	attach         string
+	session        string
+	model          string
+	days           int
+	json           bool
+	dir            string
+	csv            bool
+	llm            string
+	bpe            bool
+	root           string
+	check          bool
+	apply          bool
+	agents         string
+	file           string
+	task           string
+	mermaid        bool
+	all            bool
+	clear          bool
+	max            int
+	limit          int
+	lines          int
+	depth          int
+	range_         string
+	graphml        bool
+	html           bool
+	out            string
+	repos          bool
+	mask           bool
+	names          string
+	cache          bool
+	schema         string
+	cmd            string
+	timeout        int
+	fewshot        bool
+	mode           string
+	once           bool
+	interval       int
+	http           string
+	hold           bool
+	sarif          bool
+	threshold      int
+	severity       string
+	semantic       bool
+	lang           string
+	stdin          string
+	noinstructions bool
+	maxTokens      int
+	staged         bool
+	subject        bool
+	message        string
+	dryRun         bool
 }
 
 // mcpHTTPAddr resolves the address for `kern mcp`: a positional argument wins
@@ -191,6 +234,7 @@ func parseFlags(args []string) (flags, []string) {
 	var f flags
 	f.days = 7
 	f.timeout = 120
+	f.depth = -1
 	var rest []string
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
@@ -226,6 +270,13 @@ func parseFlags(args []string) (flags, []string) {
 			}
 		case "--json":
 			f.json = true
+		case "--sarif":
+			f.sarif = true
+		case "--threshold":
+			i++
+			if i < len(args) {
+				fmt.Sscanf(args[i], "%d", &f.threshold)
+			}
 		case "--csv":
 			f.csv = true
 		case "--bpe":
@@ -237,6 +288,8 @@ func parseFlags(args []string) (flags, []string) {
 			}
 		case "--check":
 			f.check = true
+		case "--apply":
+			f.apply = true
 		case "--agents":
 			i++
 			if i < len(args) {
@@ -289,6 +342,8 @@ func parseFlags(args []string) (flags, []string) {
 			}
 		case "--once":
 			f.once = true
+		case "--semantic":
+			f.semantic = true
 		case "--interval":
 			i++
 			if i < len(args) {
@@ -339,6 +394,39 @@ func parseFlags(args []string) (flags, []string) {
 			if i < len(args) {
 				f.depth, _ = strconv.Atoi(args[i])
 			}
+		case "--severity":
+			i++
+			if i < len(args) {
+				f.severity = args[i]
+			}
+		case "--lang":
+			i++
+			if i < len(args) {
+				f.lang = args[i]
+			}
+		case "--stdin":
+			i++
+			if i < len(args) {
+				f.stdin = args[i]
+			}
+		case "--no-instructions":
+			f.noinstructions = true
+		case "--max-tokens":
+			i++
+			if i < len(args) {
+				f.maxTokens, _ = strconv.Atoi(args[i])
+			}
+		case "--staged":
+			f.staged = true
+		case "--subject":
+			f.subject = true
+		case "--message":
+			i++
+			if i < len(args) {
+				f.message = args[i]
+			}
+		case "--dry-run":
+			f.dryRun = true
 		default:
 			rest = append(rest, args[i])
 		}
@@ -357,6 +445,9 @@ func main() {
 	switch cmd {
 	case "version", "--version", "-v":
 		fmt.Printf("kern %s\n", version)
+
+	case "guide":
+		fmt.Println(mcp.Guide())
 
 	case "optimize", "preview":
 		f, args := parseFlags(rest)
@@ -415,6 +506,29 @@ func main() {
 			fatal("%v", err)
 		}
 		fmt.Println(p.Render())
+
+	case "pack":
+		f, args := parseFlags(rest)
+		root := "."
+		if len(args) > 0 {
+			root = args[0]
+		}
+		b, err := pack.Build(root, pack.Options{
+			MaxTokens:        f.maxTokens,
+			SkipInstructions: f.noinstructions,
+		})
+		if err != nil {
+			fatal("%v", err)
+		}
+		out := b.Render()
+		if f.out != "" {
+			if werr := os.WriteFile(f.out, []byte(out), 0o644); werr != nil {
+				fatal("%v", werr)
+			}
+			fmt.Printf("kern: packed %d files (%d tokens) to %s\n", len(b.Files), b.TotalTokens, f.out)
+		} else {
+			fmt.Print(out)
+		}
 
 	case "build":
 		f, args := parseFlags(rest)
@@ -835,6 +949,119 @@ func main() {
 		fmt.Fprintf(os.Stderr, "kern: %d -> %d tokens (saved %d, %.1f%%)\n", before, after, before-after, pct(before, after))
 		fmt.Println(out)
 
+	case "terse":
+		_, args := parseFlags(rest)
+		text := ""
+		if len(args) > 0 {
+			if args[0] == "-" {
+				b, err := io.ReadAll(os.Stdin)
+				if err != nil {
+					fatal("%v", err)
+				}
+				text = string(b)
+			} else if fi, err := os.Stat(args[0]); err == nil && !fi.IsDir() {
+				b, err := os.ReadFile(args[0])
+				if err != nil {
+					fatal("%v", err)
+				}
+				text = string(b)
+			} else {
+				text = strings.Join(args, " ")
+			}
+		}
+		if text == "" {
+			b, err := io.ReadAll(os.Stdin)
+			if err != nil {
+				fatal("%v", err)
+			}
+			text = string(b)
+		}
+		if text == "" {
+			fatal("usage: kern terse \"<text>\" [--max]  (or pipe stdin)")
+		}
+		out, dropped := terse.Compress(text)
+		before := tokenize.Count(text)
+		after := tokenize.Count(out)
+		fmt.Fprintf(os.Stderr, "kern: %d -> %d tokens (saved %d, %.1f%%, %d filler lines dropped)\n", before, after, before-after, pct(before, after), dropped)
+		fmt.Println(out)
+
+	case "exec":
+		f, args := parseFlags(rest)
+		if len(args) > 0 && args[0] == "--list" {
+			fmt.Printf("kern exec: available runtimes: %s\n", strings.Join(script.Available(), ", "))
+			fmt.Printf("  supported languages: %s\n", strings.Join(script.Languages(), ", "))
+			return
+		}
+		// Script source: positional args win. A lone "-" or a piped stdin
+		// reads the script from stdin; a path to an existing file runs that
+		// file (language from extension); anything else is treated as inline
+		// code.
+		var code, path string
+		switch {
+		case len(args) > 0 && args[0] == "-":
+			b, err := io.ReadAll(os.Stdin)
+			if err != nil {
+				fatal("%v", err)
+			}
+			code = string(b)
+		case len(args) > 0:
+			if fi, err := os.Stat(args[0]); err == nil && !fi.IsDir() {
+				path = args[0]
+			} else {
+				code = strings.Join(args, " ")
+			}
+		default:
+			if fi, err := os.Stdin.Stat(); err == nil && fi.Mode()&os.ModeCharDevice == 0 {
+				b, rerr := io.ReadAll(os.Stdin)
+				if rerr != nil {
+					fatal("%v", rerr)
+				}
+				code = string(b)
+			}
+		}
+		if strings.TrimSpace(code) == "" && path == "" {
+			fatal("usage: kern exec \"<code>\" [--lang LANG] [--timeout s] [--max bytes] [--stdin file|-]\n       kern exec script.py | kern exec - | kern exec --list")
+		}
+
+		run := script.Run{Lang: f.lang, Code: code, Path: path}
+		// 15s default so a runaway script can't hang an agent for the shared
+		// --timeout default (120s); an explicit --timeout always wins.
+		if f.timeout != 120 {
+			run.Timeout = time.Duration(f.timeout) * time.Second
+		} else {
+			run.Timeout = 15 * time.Second
+		}
+		run.MaxOut = f.max
+		if f.stdin != "" {
+			if f.stdin == "-" {
+				b, err := io.ReadAll(os.Stdin)
+				if err != nil {
+					fatal("%v", err)
+				}
+				run.Stdin = string(b)
+			} else {
+				b, err := os.ReadFile(f.stdin)
+				if err != nil {
+					fatal("%v", err)
+				}
+				run.Stdin = string(b)
+			}
+		}
+		res := script.RunScript(run)
+		if f.json {
+			printJSON(res)
+			return
+		}
+		fmt.Print(res.Stdout)
+		if !strings.HasSuffix(res.Stdout, "\n") && res.Stdout != "" {
+			fmt.Println()
+		}
+		if res.Err != nil {
+			fmt.Fprintln(os.Stderr, "kern exec: "+res.Err.Error())
+			os.Exit(1)
+		}
+		fmt.Fprintf(os.Stderr, "kern exec: %s ok (%s, %d bytes stdout)\n", res.Runtime, res.Duration.Round(time.Millisecond), len(res.Stdout))
+
 	case "doctor":
 		root := "."
 		if len(rest) > 0 {
@@ -905,7 +1132,7 @@ func main() {
 	case "docs":
 		f, args := parseFlags(rest)
 		sub := ""
-		if len(args) > 0 && (args[0] == "index" || args[0] == "clear") {
+		if len(args) > 0 && (args[0] == "index" || args[0] == "clear" || args[0] == "fetch") {
 			sub = args[0]
 			args = args[1:]
 		}
@@ -918,8 +1145,72 @@ func main() {
 		if len(args) > 0 {
 			root = args[0]
 		}
+		if sub == "fetch" {
+			if len(args) == 0 {
+				fatal("usage: kern docs fetch <url> [name] [root]")
+			}
+			rawURL := args[0]
+			name := ""
+			if len(args) > 1 {
+				name = args[1]
+			}
+			if len(args) > 2 {
+				root = args[2]
+			}
+			res, err := fetch.Fetch(rawURL, 0)
+			if err != nil {
+				fatal("%v", err)
+			}
+			if name == "" {
+				name = slugName(rawURL)
+			}
+			if err := os.MkdirAll(cache.Path("data", "docs-fetch"), 0o755); err != nil {
+				fatal("%v", err)
+			}
+			if err := os.WriteFile(cache.Path("data", "docs-fetch", name+".md"), []byte(res.Text), 0o600); err != nil {
+				fatal("%v", err)
+			}
+			added, err := docsearch.MergeFetched(root, name, res.Text)
+			if err != nil {
+				fatal("%v", err)
+			}
+			if f.semantic {
+				client := llm.New("")
+				if !client.HasEmbeddingModel() {
+					fmt.Printf("note: semantic embeddings skipped (%s not installed; run: ollama pull %s)\n", llm.EmbedModel(), llm.EmbedModel())
+				} else {
+					embedded, eerr := docsearch.ReembedFetch(root, name, client)
+					if eerr != nil {
+						fatal("%v", eerr)
+					}
+					if embedded > 0 {
+						fmt.Printf("semantic embeddings attached to %d fetched chunks (KERN_EMBED_MODEL=%s)\n", embedded, llm.EmbedModel())
+					}
+				}
+			}
+			fmt.Printf("fetched %s -> %s (%d chars, %d chunks indexed into %s doc index)\n", rawURL, name, len(res.Text), added, root)
+			if res.Title != "" {
+				fmt.Printf("# %s\n\n", res.Title)
+			}
+			fmt.Println(clipText(res.Text, 600))
+			return
+		}
 		if sub == "index" {
-			ix, err := docsearch.IndexDir(root)
+			var ix *docsearch.Index
+			var err error
+			if f.semantic {
+				client := llm.New("")
+				if !client.Available() {
+					fatal("ollama not reachable (semantic index requires a local Ollama); run without --semantic for deterministic indexing")
+				}
+				if !client.HasEmbeddingModel() {
+					fatal("embedding model %q not installed (run: ollama pull %s)", llm.EmbedModel(), llm.EmbedModel())
+				}
+				docsearch.SemanticEmbedder = client
+				ix, err = docsearch.IndexDirSemantic(root, client)
+			} else {
+				ix, err = docsearch.IndexDir(root)
+			}
 			if err != nil {
 				fatal("%v", err)
 			}
@@ -932,7 +1223,7 @@ func main() {
 			fmt.Println("cleared document index")
 		} else {
 			if query == "" {
-				fatal("usage: kern docs <query> [root] [--k N] | kern docs index [root] | kern docs clear")
+				fatal("usage: kern docs <query> [root] [--k N] | kern docs index [root] [--semantic] | kern docs clear")
 			}
 			ix := docsearch.Load(root)
 			if ix == nil {
@@ -942,6 +1233,14 @@ func main() {
 					fatal("%v", err)
 				}
 				_ = ix.Save()
+			}
+			// If the persisted index carries dense vectors, re-attach the
+			// local embedder so queries fuse the semantic signal too.
+			if hasSemantic(ix) {
+				client := llm.New("")
+				if client.HasEmbeddingModel() {
+					docsearch.SemanticEmbedder = client
+				}
 			}
 			k := f.limit
 			results := ix.Search(query, k)
@@ -1033,6 +1332,133 @@ func main() {
 			fmt.Println("diff stored in project memory.")
 		default:
 			fatal("usage: kern hook <install|diff|store> [--range a..b]")
+		}
+
+	case "commitmsg":
+		f, _ := parseFlags(rest)
+		var out []byte
+		var err error
+		if f.staged {
+			out, err = gitDiff("diff --cached")
+		} else if f.range_ != "" {
+			out, err = gitDiff("diff --unified=0 " + f.range_)
+		} else {
+			out, err = gitDiff("diff HEAD")
+			if err != nil {
+				out, err = gitDiff("diff")
+			}
+		}
+		if err != nil {
+			fatal("%v", err)
+		}
+		msg := commitmsg.Generate(string(out))
+		if f.subject {
+			fmt.Println(msg.Subject)
+		} else {
+			fmt.Println(msg.String())
+		}
+
+	case "commit":
+		f, _ := parseFlags(rest)
+		if f.all {
+			if _, err := gitOutput("add", "-A"); err != nil {
+				fatal("staging failed: %v", err)
+			}
+		}
+		diffOut, err := gitDiff("diff --cached")
+		if err != nil {
+			fatal("%v", err)
+		}
+		if len(strings.TrimSpace(string(diffOut))) == 0 {
+			fatal("nothing staged to commit (use --all to stage tracked+untracked changes)")
+		}
+		msg := commitmsg.Generate(string(diffOut))
+		subject := f.message
+		if subject == "" {
+			subject = msg.Subject
+		}
+		if f.dryRun {
+			fmt.Println("kern: would commit with:")
+			fmt.Println()
+			fmt.Println(subject)
+			for _, l := range msg.Body {
+				fmt.Println(l)
+			}
+			return
+		}
+		body := strings.Join(msg.Body, "\n")
+		full := subject
+		if body != "" {
+			full += "\n\n" + body
+		}
+		out, err := gitCommit(full)
+		if err != nil {
+			fatal("commit failed: %v\n%s", err, out)
+		}
+		short := shortHash()
+		fmt.Printf("committed %s %s\n", short, subject)
+
+	case "semcache":
+		sub := ""
+		if len(rest) > 0 {
+			sub = rest[0]
+			rest = rest[1:]
+		}
+		_ = rest
+		switch sub {
+		case "clear":
+			ns := ""
+			if len(rest) > 0 {
+				ns = rest[0]
+			}
+			if err := semcache.Clear(ns); err != nil {
+				fatal("%v", err)
+			}
+			if ns == "" {
+				fmt.Println("semcache: cleared all namespaces")
+			} else {
+				fmt.Printf("semcache: cleared %q\n", ns)
+			}
+		case "list":
+			if len(rest) == 0 {
+				fatal("usage: kern semcache list <prompt|log>")
+			}
+			ns := rest[0]
+			entries, err := semcache.Entries(ns)
+			if err != nil {
+				fatal("%v", err)
+			}
+			if len(entries) == 0 {
+				fmt.Printf("semcache %q: empty\n", ns)
+				return
+			}
+			fmt.Printf("semcache %q: %d entries\n", ns, len(entries))
+			for i, in := range entries {
+				fmt.Printf("  %d. %s\n", i+1, in)
+			}
+		case "sim":
+			if len(rest) != 2 {
+				fatal("usage: kern semcache sim <textA> <textB>")
+			}
+			fmt.Printf("similarity: %.3f\n", semcache.Similarity(rest[0], rest[1]))
+		default:
+			st, err := semcache.Stats()
+			if err != nil {
+				fatal("%v", err)
+			}
+			if len(st) == 0 {
+				fmt.Println("semcache: empty")
+				return
+			}
+			fmt.Println("semcache entries by namespace:")
+			names := make([]string, 0, len(st))
+			for ns := range st {
+				names = append(names, ns)
+			}
+			sort.Strings(names)
+			for _, ns := range names {
+				fmt.Printf("  %-8s %d\n", ns, st[ns])
+			}
 		}
 
 	case "stats", "diff", "export":
@@ -1129,6 +1555,98 @@ func main() {
 		fmt.Printf("indexed %d symbols in %d files (%d packages) -> %s\n",
 			len(ix.Symbols), len(ix.FileHashes), len(ix.Pkgs), index.StorePath(root))
 		fmt.Printf("languages: %s\n", strings.Join(ix.Languages(), ", "))
+
+	case "sec":
+		f, args := parseFlags(rest)
+		root := f.root
+		if root == "" {
+			root = "."
+			if len(args) > 0 {
+				root = args[0]
+			}
+		}
+		max := f.max
+		var allow []string
+		if f.severity != "" {
+			allow = strings.Split(f.severity, ",")
+		}
+		findings := sec.FilterBySeverity(sec.Scan(root), allow)
+		if f.json {
+			if err := json.NewEncoder(os.Stdout).Encode(findings); err != nil {
+				fatal("%v", err)
+			}
+			return
+		}
+		fmt.Print(sec.Render(findings, max))
+		counts := sec.Counts(findings)
+		fmt.Fprintf(os.Stderr, "kern sec: %d findings (%d error, %d warning, %d info)\n",
+			len(findings), counts["error"], counts["warning"], counts["info"])
+		if counts["error"] > 0 {
+			os.Exit(1)
+		}
+
+	case "delete":
+		f, args := parseFlags(rest)
+		if len(args) < 1 {
+			fatal("usage: kern delete <symbol> [root] [--json]")
+		}
+		sym := args[0]
+		root := f.root
+		if root == "" {
+			root = "."
+			if len(args) > 1 {
+				root = args[1]
+			}
+		}
+		ix, err := loadOrBuild(root)
+		if err != nil {
+			fatal("%v", err)
+		}
+		r := intel.DeleteCheck(ix, sym)
+		if f.json {
+			printJSON(r)
+			return
+		}
+		fmt.Println(intel.RenderDelete(r))
+		if !r.Safe {
+			os.Exit(1)
+		}
+
+	case "rename":
+		f, args := parseFlags(rest)
+		if len(args) < 2 {
+			fatal("usage: kern rename <old> <new> [root] [--apply] [--json]")
+		}
+		oldName, newName := args[0], args[1]
+		root := f.root
+		if root == "" {
+			root = "."
+			if len(args) > 2 {
+				root = args[2]
+			}
+		}
+		ix, err := loadOrBuild(root)
+		if err != nil {
+			fatal("%v", err)
+		}
+		rep, err := rename.Rename(ix, oldName, newName)
+		if err != nil {
+			fatal("%v", err)
+		}
+		if f.json {
+			printJSON(rep)
+			return
+		}
+		fmt.Println(rename.Render(rep))
+		if f.apply {
+			if _, err := rename.Apply(root, rep); err != nil {
+				fatal("apply failed (files restored): %v", err)
+			}
+			fmt.Printf("kern rename: %d edits applied; index will rebuild automatically\n", len(rep.Edits))
+			if rep.Backup != "" {
+				fmt.Printf("kern rename: backup at %s\n", rep.Backup)
+			}
+		}
 
 	case "watch":
 		root := "."
@@ -1876,19 +2394,19 @@ func main() {
 				}
 			}
 			violations := intel.CheckBoundaries(ix, b, files)
-			if f.json {
+			switch {
+			case f.sarif:
+				fmt.Println(intel.RenderViolationsSARIF(violations, version))
+			case f.json:
 				printJSON(map[string]any{"violations": violations})
-				if len(violations) > 0 {
-					os.Exit(2)
-				}
-				return
+			default:
+				fmt.Println(intel.RenderViolations(violations))
 			}
-			fmt.Println(intel.RenderViolations(violations))
-			if len(violations) > 0 {
+			if len(violations) > f.threshold {
 				os.Exit(2)
 			}
 		default:
-			fatal("usage: kern guard <check|init> [root] [--file f1,f2] [--range a..b]")
+			fatal("usage: kern guard <check|init> [root] [--file f1,f2] [--range a..b] [--json|--sarif] [--threshold N]")
 		}
 
 	default:
@@ -1985,8 +2503,84 @@ func pct(before, after int) float64 {
 	return float64(before-after) / float64(before) * 100
 }
 
+// hasSemantic reports whether any indexed doc carries a dense embedding.
+func hasSemantic(ix *docsearch.Index) bool {
+	for _, d := range ix.Docs {
+		if len(d.Semantic) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
 func splitLines(s string) []string {
 	return strings.Split(strings.TrimRight(s, "\n"), "\n")
+}
+
+// gitDiff runs a git diff subcommand in the current directory and returns its
+// stdout.
+func gitDiff(args string) ([]byte, error) {
+	cmd := exec.Command("git", strings.Split(args, " ")...)
+	return cmd.Output()
+}
+
+// gitOutput runs a git subcommand and returns its combined output.
+func gitOutput(args ...string) ([]byte, error) {
+	return exec.Command("git", args...).CombinedOutput()
+}
+
+// gitCommit creates a commit with the given message fed over stdin, so no
+// message ever appears in a shell argument or the process table.
+func gitCommit(message string) ([]byte, error) {
+	cmd := exec.Command("git", "commit", "-F", "-")
+	cmd.Stdin = strings.NewReader(message)
+	return cmd.CombinedOutput()
+}
+
+// shortHash returns the current HEAD's short hash, or "" if none exists yet.
+func shortHash() string {
+	out, err := gitDiff("rev-parse --short HEAD")
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// slugName derives a filesystem-safe document name from a URL, e.g.
+// https://react.dev/reference/usestate -> react.dev-reference-usestate.
+func slugName(rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return "doc"
+	}
+	name := u.Hostname() + u.Path
+	name = strings.TrimSuffix(name, "/")
+	var b strings.Builder
+	lastDash := false
+	for _, r := range name {
+		if r >= 'a' && r <= 'z' || r >= '0' && r <= '9' {
+			b.WriteRune(r)
+			lastDash = false
+		} else if r >= 'A' && r <= 'Z' {
+			b.WriteRune(r + ('a' - 'A'))
+			lastDash = false
+		} else if !lastDash {
+			b.WriteByte('-')
+			lastDash = true
+		}
+	}
+	out := strings.Trim(b.String(), "-")
+	if out == "" {
+		return "doc"
+	}
+	return out
+}
+
+func clipText(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return strings.TrimSpace(s[:n]) + "…"
 }
 
 func fileExists(p string) bool {

@@ -190,8 +190,60 @@ func TestOptimizePromptAndCache(t *testing.T) {
 	if isErr2 {
 		t.Fatalf("unexpected error on cached call: %s", text2)
 	}
-	if !strings.Contains(text2, "served from cache") {
-		t.Fatalf("expected cache marker, got %q", text2)
+	if !strings.Contains(text2, "served from exact cache") {
+		t.Fatalf("expected exact-cache marker, got %q", text2)
+	}
+}
+
+func TestSemanticCacheViaMCP(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	// First call primes the semantic cache (cache is on by default now).
+	first := mcpAssertOK(t, "kern_optimize_prompt", map[string]any{"prompt": "how do I compress a very large server log file"})
+	if strings.Contains(first, "served from") {
+		t.Fatalf("first call must not be served from cache, got %q", first)
+	}
+	// Reworded near-duplicate request -> semantic cache hit with a marker.
+	second := mcpAssertOK(t, "kern_optimize_prompt", map[string]any{"prompt": "how do I compress a big server log"})
+	if !strings.Contains(second, "served from semantic cache") {
+		t.Fatalf("expected semantic cache marker, got %q", second)
+	}
+	if !strings.Contains(second, "similarity") {
+		t.Fatalf("expected similarity reported, got %q", second)
+	}
+	// Explicit cache=false must bypass both caches.
+	fresh := mcpAssertOK(t, "kern_optimize_prompt", map[string]any{"prompt": "how do I compress a very large server log file", "cache": "false"})
+	if strings.Contains(fresh, "served from") {
+		t.Fatalf("cache=false must bypass the cache, got %q", fresh)
+	}
+}
+
+func TestSemcacheManagementViaMCP(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	mcpAssertOK(t, "kern_optimize_prompt", map[string]any{"prompt": "the database connection failed during migration"})
+	mcpAssertOK(t, "kern_optimize_log", map[string]any{"log": "ERROR disk full\nERROR connection refused\nINFO start"})
+
+	stats := mcpAssertOK(t, "kern_semcache", map[string]any{"action": "stats"})
+	if !strings.Contains(stats, "prompt") || !strings.Contains(stats, "log") {
+		t.Fatalf("stats should list prompt and log namespaces, got %q", stats)
+	}
+
+	list := mcpAssertOK(t, "kern_semcache", map[string]any{"action": "list", "namespace": "prompt"})
+	if !strings.Contains(list, "database connection failed") {
+		t.Fatalf("list should show stored prompt inputs, got %q", list)
+	}
+
+	sim := mcpAssertOK(t, "kern_semcache", map[string]any{"action": "similarity", "a": "fix the login bug", "b": "fix the login bug"})
+	if !strings.Contains(sim, "similarity: 1.000") {
+		t.Fatalf("identical inputs should report similarity 1.000, got %q", sim)
+	}
+
+	cleared := mcpAssertOK(t, "kern_semcache", map[string]any{"action": "clear", "namespace": "prompt"})
+	if !strings.Contains(cleared, "cleared prompt") {
+		t.Fatalf("expected clear confirmation, got %q", cleared)
+	}
+	list2 := mcpAssertOK(t, "kern_semcache", map[string]any{"action": "list", "namespace": "prompt"})
+	if !strings.Contains(list2, "empty") {
+		t.Fatalf("prompt namespace should be empty after clear, got %q", list2)
 	}
 }
 

@@ -8,7 +8,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"runtime/debug"
@@ -18,23 +20,33 @@ import (
 	"time"
 
 	"github.com/JayveerPrajapati/kern/internal/budget"
+	"github.com/JayveerPrajapati/kern/internal/cache"
 	"github.com/JayveerPrajapati/kern/internal/code"
+	"github.com/JayveerPrajapati/kern/internal/commitmsg"
 	"github.com/JayveerPrajapati/kern/internal/diff"
 	"github.com/JayveerPrajapati/kern/internal/docsearch"
+	"github.com/JayveerPrajapati/kern/internal/fetch"
 	"github.com/JayveerPrajapati/kern/internal/fw"
 	"github.com/JayveerPrajapati/kern/internal/heal"
 	"github.com/JayveerPrajapati/kern/internal/index"
 	"github.com/JayveerPrajapati/kern/internal/intel"
+	"github.com/JayveerPrajapati/kern/internal/llm"
 	"github.com/JayveerPrajapati/kern/internal/lock"
 	"github.com/JayveerPrajapati/kern/internal/memory"
 	"github.com/JayveerPrajapati/kern/internal/optimize"
+	"github.com/JayveerPrajapati/kern/internal/pack"
 	"github.com/JayveerPrajapati/kern/internal/pii"
 	"github.com/JayveerPrajapati/kern/internal/precache"
 	"github.com/JayveerPrajapati/kern/internal/project"
+	"github.com/JayveerPrajapati/kern/internal/rename"
 	"github.com/JayveerPrajapati/kern/internal/sandbox"
 	jsonschema "github.com/JayveerPrajapati/kern/internal/schema"
+	"github.com/JayveerPrajapati/kern/internal/script"
+	"github.com/JayveerPrajapati/kern/internal/sec"
+	"github.com/JayveerPrajapati/kern/internal/semcache"
 	"github.com/JayveerPrajapati/kern/internal/stats"
 	"github.com/JayveerPrajapati/kern/internal/swap"
+	"github.com/JayveerPrajapati/kern/internal/terse"
 	"github.com/JayveerPrajapati/kern/internal/tokenize"
 	"github.com/JayveerPrajapati/kern/internal/validate"
 	"github.com/JayveerPrajapati/kern/internal/verify"
@@ -108,6 +120,13 @@ var tools = []Tool{
 		}, []string{"prompt"}),
 	},
 	{
+		Name:        "kern_optimize_output",
+		Description: "Compress an LLM's response (assistant output) by stripping filler, pleasantries and hedge language while preserving code blocks, lists, errors and technical content. Deterministic and local, no LLM involved. Use on verbose model replies before they are stored or echoed back into context.",
+		InputSchema: schema(map[string]any{
+			"text": strProp("The LLM output text to compress"),
+		}, []string{"text"}),
+	},
+	{
 		Name:        "kern_memory_add",
 		Description: "Persist a distilled, cross-session lesson for a project (the project 'brain'). Agents record what they learned so future sessions can recall it. Appends to the project memory store (most recent 50 entries kept).",
 		InputSchema: schema(map[string]any{
@@ -140,6 +159,25 @@ var tools = []Tool{
 		}, []string{"text"}),
 	},
 	{
+		Name:        "kern_security",
+		Description: "Local security scan of a project's source files: hardcoded secrets, dynamic SQL, shell command injection, weak crypto, insecure randomness and unsafe deserialization. Deterministic and line-scoped. Use before reviewing code or shipping changes.",
+		InputSchema: schema(map[string]any{
+			"root":     strProp("Project root to scan (defaults to current directory)"),
+			"severity": strProp("Comma-separated severities to include: error,warning,info (default all)"),
+			"max":      strProp("Max findings to return (default 100; 0 = no cap)"),
+			"format":   strProp("Output format: text or json (default text)"),
+		}, nil),
+	},
+	{
+		Name:        "kern_safe_delete",
+		Description: "Check whether a symbol can be safely deleted: reports in-project callers (production vs test-only), whether it is exported or an entry point, and a conservative SAFE/NOT SAFE verdict. Use before removing dead code.",
+		InputSchema: schema(map[string]any{
+			"symbol": strProp("Symbol name (simple name like 'greet' or qualified like 'User.Login')"),
+			"root":   strProp("Project root (defaults to current directory)"),
+			"format": strProp("Output format: text or json (default text)"),
+		}, []string{"symbol"}),
+	},
+	{
 		Name:        "kern_doc_search",
 		Description: "Local vector search over a project's documents (markdown, text, rst, adoc). Chunks and embeds docs locally with deterministic n-gram hashing (no ML deps) and returns only the most relevant fragments. Use instead of pasting whole documents into context.",
 		InputSchema: schema(map[string]any{
@@ -150,9 +188,29 @@ var tools = []Tool{
 	},
 	{
 		Name:        "kern_doc_index",
-		Description: "Pre-index a project's documents for kern_doc_search. Run once after documents change; searches auto-index on first use.",
+		Description: "Pre-index a project's documents for kern_doc_search. Run once after documents change; searches auto-index on first use. Pass semantic=true to also embed chunks with a local Ollama embedding model (KERN_EMBED_MODEL, default nomic-embed-text); queries then fuse a real-meaning dense signal with the deterministic n-gram vectors and BM25.",
 		InputSchema: schema(map[string]any{
-			"root": strProp("Project root (defaults to current directory)"),
+			"root":     strProp("Project root (defaults to current directory)"),
+			"semantic": strProp("If true, add dense Ollama embeddings to the index (requires a local Ollama with the embedding model pulled)"),
+		}, nil),
+	},
+	{
+		Name:        "kern_doc_fetch",
+		Description: "Fetch a public documentation page and merge it into the project's local doc index so kern_doc_search can find it. This is the ONLY network call in kern and is invoked explicitly by the user; everything else stays local. The page is HTML-stripped, capped, stored under cache/data/docs-fetch and indexed as fetch/<name>.md (re-fetching a name replaces it). Pass semantic=true to also attach dense embeddings via the local Ollama model so the page ranks in semantic search.",
+		InputSchema: schema(map[string]any{
+			"url":      strProp("https URL of the documentation page to fetch"),
+			"root":     strProp("Project root whose doc index receives the page (defaults to current directory)"),
+			"name":     strProp("Optional index name (default derived from the URL host+path)"),
+			"semantic": strProp("If true, attach dense embeddings via the local Ollama model (skipped when the model is unavailable)"),
+		}, []string{"url"}),
+	},
+	{
+		Name:        "kern_commitmsg",
+		Description: "Generate a deterministic conventional-commit message (type, scope, subject, per-file body) from the git diff — rule-based, no LLM, no network; the same diff always yields the same message. Use when a commit needs a starting message the human can tweak.",
+		InputSchema: schema(map[string]any{
+			"root":   strProp("Project root (defaults to current directory)"),
+			"staged": strProp("If true, read the staged diff (git diff --cached) instead of the working tree vs HEAD"),
+			"range":  strProp("Optional commit range like a..b; overrides staged and HEAD defaults"),
 		}, nil),
 	},
 	{
@@ -241,6 +299,16 @@ var tools = []Tool{
 		}, []string{"root"}),
 	},
 	{
+		Name:        "kern_pack",
+		Description: "Pack a whole project into one paste-ready bundle: project instructions, a directory tree with per-file token counts, and file contents, sized to fit max_tokens. Use when an agent needs the full working picture (source to edit against), not just a map.",
+		InputSchema: schema(map[string]any{
+			"root":         strProp("Project root directory"),
+			"max_tokens":   strProp("Token budget for the bundle (default 8000; 0 = unlimited — use with max_output=0 to avoid the output sandbox)"),
+			"format":       strProp("'text' (default) or 'json'"),
+			"instructions": strProp("'true' to include root-level docs as instructions (default), 'false' to skip them"),
+		}, []string{"root"}),
+	},
+	{
 		Name:        "kern_run_build",
 		Description: "Run a build/test command locally and return only the compact result (exit status + errors), not full output. Use for builds, tests, linting to save context.",
 		InputSchema: schema(map[string]any{
@@ -272,6 +340,16 @@ var tools = []Tool{
 		}, nil),
 	},
 	{
+		Name:        "kern_semcache",
+		Description: "Inspect and manage the semantic cache that serves similar (not just identical) prior queries instantly. Actions: 'stats' (default) lists entries per namespace (prompt/log), 'list' shows the stored inputs of a namespace, 'clear' wipes it (or all), 'similarity' reports the Jaccard overlap of two inputs so you can predict whether a near-duplicate will hit. Use to verify or reset the fuzzy layer.",
+		InputSchema: schema(map[string]any{
+			"action":    strProp("'stats' (default), 'list', 'clear', or 'similarity'"),
+			"namespace": strProp("prompt or log (default: all)"),
+			"a":         strProp("First input for similarity"),
+			"b":         strProp("Second input for similarity"),
+		}, []string{"action"}),
+	},
+	{
 		Name:        "kern_ast_search",
 		Description: "AST-level symbol search across a Go project. Supports patterns like 'func greet', 'type *User*', 'method *', '*Handler*'. Returns definitions with file:line.",
 		InputSchema: schema(map[string]any{
@@ -298,7 +376,7 @@ var tools = []Tool{
 	},
 	{
 		Name:        "kern_search",
-		Description: "Ranked free-text symbol search: returns symbols matching a query by name or file, best matches first. Forgiving lookup for humans — e.g. 'load index' or 'login handler'.",
+		Description: "Ranked free-text symbol search: returns symbols matching a query by name or file, best matches first. Forgiving lookup for humans — 'load index' or 'login handler' work, and prose hits camelCase symbols by name segment ('state machine' -> OrderStateMachine), plural-folded ('user services' -> UserService), accent-normalized ('résolution' -> ResolveResolution), or as a camelCase query ('stateMachine').",
 		InputSchema: schema(map[string]any{
 			"query": strProp("Free-text query (symbol name, path fragment, or partial name)"),
 			"root":  strProp("Project root (defaults to current directory)"),
@@ -476,12 +554,41 @@ var tools = []Tool{
 	},
 	{
 		Name:        "kern_guard_check",
-		Description: "Deterministic architectural guardrails: validate changed files against .kern/boundaries.json rules and return every forbidden dependency crossing (e.g. a frontend importing a backend DB model) with file evidence. Rejects a proposal before it touches the filesystem.",
+		Description: "Deterministic architectural guardrails: validate changed files against .kern/boundaries.json rules and return every forbidden dependency crossing (e.g. a frontend importing a backend DB model) with file evidence. Rejects a proposal before it touches the filesystem. Use format=sarif for a SARIF 2.1.0 report (GitHub code scanning / Azure DevOps) and threshold=N to fail (isError) when the violation count exceeds N.",
 		InputSchema: schema(map[string]any{
-			"root":  strProp("Project root (defaults to current directory)"),
-			"file":  strProp("Optional comma-separated explicit file list, overrides git range"),
-			"range": strProp("Git range like 'HEAD~2..HEAD'. Empty = working-tree changes"),
+			"root":      strProp("Project root (defaults to current directory)"),
+			"file":      strProp("Optional comma-separated explicit file list, overrides git range"),
+			"range":     strProp("Git range like 'HEAD~2..HEAD'. Empty = working-tree changes"),
+			"format":    strProp("Output format: text (default) or sarif"),
+			"threshold": strProp("Fail (isError) when the violation count exceeds this number (default 0 = any violation fails)"),
 		}, nil),
+	},
+	{
+		Name:        "kern_rename",
+		Description: "Structural symbol rename on the AST index (P0-5): previews every definition/reference for a Go package-level symbol (types, funcs, vars, consts) with file:line:col edits, then applies them transactionally when apply=true. Edits come from a real go/ast parse, so strings, comments, struct-field names, composite-literal keys, import aliases and the package clause are never touched; cross-package references (pkg.Symbol) are handled for exported symbols. Before applying, every touched file is backed up under <root>/.kern/rename-backup/ and a mid-flight failure restores all files. Method rename and non-Go symbols are refused. Returns the preview (or apply result) as text.",
+		InputSchema: schema(map[string]any{
+			"root":     strProp("Project root (defaults to current directory)"),
+			"symbol":   strProp("Symbol to rename (package-level Go name, e.g. Widget)"),
+			"new_name": strProp("New identifier"),
+			"apply":    strProp("If true, commit the rename (with backups + rollback); otherwise return the preview only"),
+		}, []string{"symbol", "new_name"}),
+	},
+	{
+		Name:        "kern_exec",
+		Description: "Run code in an isolated local runtime and return ONLY stdout — the 'Think in Code' surface. Language is selected by --lang or a shebang line; runtimes are resolved from PATH (python3, node, go, bash, perl, ruby, php, lua, julia, R, bun, deno, rust, ...). The script runs in a fresh temp dir with a hard timeout (default 10s, override timeout=N) and a stdout byte cap (default 16KiB, override max=N); stderr is never mixed into stdout and is only surfaced on failure. Use it to compute things (math, data munging, JSON transforms) without polluting context. V1 does NOT block network egress, so do not feed it untrusted code.",
+		InputSchema: schema(map[string]any{
+			"code":    strProp("The script body (required)"),
+			"lang":    strProp("Language override (e.g. python3, node, bash, go); otherwise detected from the shebang"),
+			"timeout": strProp("Timeout in seconds (default 10)"),
+			"max":     strProp("Max stdout bytes to return (default 16384)"),
+			"stdin":   strProp("Input piped to the script's stdin"),
+			"list":    strProp("If true, return the installed runtimes and supported languages and do nothing else"),
+		}, []string{"code"}),
+	},
+	{
+		Name:        "kern_usage_guide",
+		Description: "Categorized usage guide for every kern MCP tool with performance tiers (fast/moderate/expensive), recommended workflows, and pitfalls. Consult this first when deciding which tool fits a task.",
+		InputSchema: schema(map[string]any{}, nil),
 	},
 }
 
@@ -494,13 +601,19 @@ type Server struct {
 	inflight  map[string]context.CancelFunc
 	sessions  map[string]*project.Session
 	transport string // "stdio" (default) or "http"
+	// lastIndex is the symbol index loaded during the current tool call, used
+	// to stamp provenance (symbols/edges/packages/freshness) onto the response.
+	lastIndex *index.Index
+	// commits caches the short HEAD commit per project root so git is spawned
+	// at most once per root per server lifetime.
+	commits map[string]string
 }
 
 // NewServer returns a server wired to the given reader/writer.
 func NewServer(in io.Reader, out io.Writer) *Server {
 	sc := bufio.NewScanner(in)
 	sc.Buffer(make([]byte, 4<<20), 4<<20)
-	return &Server{in: sc, out: out, locks: map[string]*lock.Lock{}, inflight: map[string]context.CancelFunc{}, sessions: map[string]*project.Session{}, transport: "stdio"}
+	return &Server{in: sc, out: out, locks: map[string]*lock.Lock{}, inflight: map[string]context.CancelFunc{}, sessions: map[string]*project.Session{}, transport: "stdio", commits: map[string]string{}}
 }
 
 type rpcRequest struct {
@@ -760,6 +873,9 @@ func (s *Server) toolCallResponse(id json.RawMessage, params json.RawMessage) an
 		cancel()
 		s.unregisterInflight(key)
 	}()
+	s.mu.Lock()
+	s.lastIndex = nil
+	s.mu.Unlock()
 
 	text, err := func() (out string, runErr error) {
 		defer func() {
@@ -770,6 +886,15 @@ func (s *Server) toolCallResponse(id json.RawMessage, params json.RawMessage) an
 		}()
 		return s.runTool(ctx, key, p.Name, p.Arguments)
 	}()
+	// MCP-layer output sandbox (P1-7): no tool response may exceed the output
+	// budget. This is the chokepoint every tool result flows through, so even a
+	// huge kern_project_map / kern_walk / kern_doc_search can never flood the
+	// agent's context. The budget is per-call overridable with an extra
+	// max_output=N argument (bytes; N=0 disables) and configurable globally via
+	// KERN_MCP_MAX_OUTPUT.
+	if err == nil {
+		text = sandboxOutput(text, callOutputBudget(p.Arguments), p.Name)
+	}
 	result := map[string]any{
 		"content": []any{map[string]any{"type": "text", "text": text}},
 		"isError": false,
@@ -777,8 +902,77 @@ func (s *Server) toolCallResponse(id json.RawMessage, params json.RawMessage) an
 	if err != nil {
 		result["content"] = []any{map[string]any{"type": "text", "text": err.Error()}}
 		result["isError"] = true
+	} else if prov := s.provenance(); prov != "" {
+		result["content"] = []any{map[string]any{"type": "text", "text": text + "\n" + prov}}
 	}
 	return map[string]any{"jsonrpc": "2.0", "id": id, "result": result}
+}
+
+// defaultOutputBudget is the MCP output sandbox cap in bytes, used when the
+// agent does not pass max_output= and KERN_MCP_MAX_OUTPUT is unset. ~6K tokens
+// of safety net for a single tool result.
+const defaultOutputBudget = 24 << 10
+
+// outputBudget resolves the global cap from KERN_MCP_MAX_OUTPUT (bytes).
+func outputBudget() int {
+	if v := os.Getenv("KERN_MCP_MAX_OUTPUT"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return n
+		}
+	}
+	return defaultOutputBudget
+}
+
+// callOutputBudget returns the per-call budget: an explicit max_output=N
+// argument (bytes; 0 disables the sandbox) wins over the global cap.
+func callOutputBudget(args map[string]any) int {
+	if v := argString(args, "max_output"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			if n <= 0 {
+				return 0 // disabled for this call
+			}
+			return n
+		}
+	}
+	return outputBudget()
+}
+
+// sandboxOutput truncates text to budget bytes (when budget > 0) and stamps a
+// marker with before/after token counts and a tool-specific recovery hint. The
+// marker doubles as the anti-context-flood boundary: an agent that needs more
+// can re-call with a larger max_output or a narrower tool.
+func sandboxOutput(text string, budget int, tool string) string {
+	if budget <= 0 || len(text) <= budget {
+		return text
+	}
+	return text[:budget] + fmt.Sprintf("\n\n… [MCP output sandbox: %d → %d chars (%d → %d tokens). %s Pass max_output=N to this tool for more, or narrow the request.]",
+		len(text), budget, tokenize.Count(text), tokenize.Count(text[:budget]), recoveryHint(tool))
+}
+
+// recoveryHint suggests the narrower tool to recover the truncated detail.
+func recoveryHint(tool string) string {
+	switch tool {
+	case "kern_project_map", "kern_compact_file":
+		return "Use kern_context or kern_compact_file for specific symbols instead."
+	case "kern_walk":
+		return "Use a shallower depth= or a different root symbol."
+	case "kern_near":
+		return "Lower max= or depth=."
+	case "kern_context":
+		return "Request fewer lines=."
+	case "kern_review", "kern_context_budget":
+		return "Lower max_tokens=."
+	case "kern_doc_search":
+		return "Narrow the query or lower k=."
+	case "kern_ast_search":
+		return "Tighten the pattern."
+	case "kern_exec":
+		return "Cap the script's own output with max=."
+	case "kern_graph", "kern_arch", "kern_hubs":
+		return "This report is inherently large; prefer kern_search/kern_context for specifics."
+	default:
+		return "Narrow the query."
+	}
 }
 
 func (s *Server) promptGetResponse(id json.RawMessage, params json.RawMessage) any {
@@ -841,12 +1035,16 @@ func (s *Server) runTool(ctx context.Context, id string, name string, args map[s
 				names = append(names, n)
 			}
 		}
+		cacheOn := true
+		if v := argString(args, "cache"); v != "" {
+			cacheOn = v == "true" || v == "1"
+		}
 		res, err := optimize.Prompt(prompt, argString(args, "attached_log"), optimize.Options{
 			Session:   argString(args, "session"),
 			Model:     argString(args, "model"),
 			Mask:      mask,
 			MaskNames: names,
-			Cache:     argString(args, "cache") == "true" || argString(args, "cache") == "1",
+			Cache:     cacheOn,
 			FewShot:   argString(args, "few_shot") == "true" || argString(args, "few_shot") == "1",
 			Root:      argString(args, "root"),
 		})
@@ -855,7 +1053,11 @@ func (s *Server) runTool(ctx context.Context, id string, name string, args map[s
 		}
 		out := renderOptimize("optimized prompt", res)
 		if res.FromCache {
-			out += "\n[kern] served from cache\n"
+			if res.SemanticHit {
+				out += fmt.Sprintf("\n[kern] served from semantic cache (similarity %.2f, matched: %q)\n", res.Similarity, clipForMarker(res.MatchedInput))
+			} else {
+				out += "\n[kern] served from exact cache\n"
+			}
 		}
 		return out, nil
 
@@ -930,6 +1132,51 @@ func (s *Server) runTool(ctx context.Context, id string, name string, args map[s
 		}
 		return res.Text + "\n[kern] " + summary + "\n", nil
 
+	case "kern_security":
+		root := argString(args, "root")
+		if root == "" {
+			cwd, _ := os.Getwd()
+			root = cwd
+		}
+		var allow []string
+		if s := argString(args, "severity"); s != "" {
+			allow = strings.Split(s, ",")
+		}
+		max := 100
+		if v := argString(args, "max"); v != "" {
+			fmt.Sscanf(v, "%d", &max)
+		}
+		findings := sec.FilterBySeverity(sec.Scan(root), allow)
+		if argString(args, "format") == "json" {
+			var b strings.Builder
+			json.NewEncoder(&b).Encode(findings)
+			return b.String(), nil
+		}
+		if len(findings) == 0 {
+			return "no security findings", nil
+		}
+		out := sec.Render(findings, max)
+		counts := sec.Counts(findings)
+		out += fmt.Sprintf("[kern] %d findings: %d error, %d warning, %d info\n",
+			len(findings), counts["error"], counts["warning"], counts["info"])
+		return out, nil
+
+	case "kern_safe_delete":
+		sym := argString(args, "symbol")
+		if sym == "" {
+			return "", fmt.Errorf("symbol is required")
+		}
+		ix, err := s.loadIndex(argString(args, "root"))
+		if err != nil {
+			return "", err
+		}
+		r := intel.DeleteCheck(ix, sym)
+		if argString(args, "format") == "json" {
+			data, _ := json.Marshal(r)
+			return string(data), nil
+		}
+		return intel.RenderDelete(r), nil
+
 	case "kern_doc_search":
 		query := argString(args, "query")
 		if query == "" {
@@ -949,13 +1196,28 @@ func (s *Server) runTool(ctx context.Context, id string, name string, args map[s
 		if v := argString(args, "k"); v != "" {
 			fmt.Sscanf(v, "%d", &k)
 		}
+		// If the persisted index carries dense vectors, re-attach the local
+		// embedder so queries fuse the semantic signal too.
+		hasDense := false
+		for _, d := range ix.Docs {
+			if len(d.Semantic) > 0 {
+				hasDense = true
+				break
+			}
+		}
+		if hasDense {
+			client := llm.New("")
+			if client.HasEmbeddingModel() {
+				docsearch.SemanticEmbedder = client
+			}
+		}
 		results := ix.Search(query, k)
 		if len(results) == 0 {
 			return "no matching document fragments", nil
 		}
 		var b strings.Builder
 		for i, r := range results {
-			fmt.Fprintf(&b, "#%d sim=%.3f %s:%d\n", i+1, r.Sim, r.Doc.Chunk.File, r.Doc.Chunk.Start)
+			fmt.Fprintf(&b, "#%d score=%.3f %s:%d\n", i+1, r.Sim, r.Doc.Chunk.File, r.Doc.Chunk.Start)
 			b.WriteString(r.Doc.Chunk.Text)
 			if i < len(results)-1 {
 				b.WriteString("\n\n")
@@ -965,12 +1227,101 @@ func (s *Server) runTool(ctx context.Context, id string, name string, args map[s
 
 	case "kern_doc_index":
 		root := argString(args, "root")
-		ix, err := docsearch.IndexDir(root)
+		if root == "" {
+			cwd, _ := os.Getwd()
+			root = cwd
+		}
+		var ix *docsearch.Index
+		var err error
+		if argString(args, "semantic") == "true" || argString(args, "semantic") == "1" {
+			client := llm.New("")
+			if !client.Available() {
+				return "", fmt.Errorf("ollama not reachable (semantic index requires a local Ollama); run kern_doc_index without semantic for deterministic indexing")
+			}
+			if !client.HasEmbeddingModel() {
+				return "", fmt.Errorf("embedding model %q not installed (run: ollama pull %s)", llm.EmbedModel(), llm.EmbedModel())
+			}
+			docsearch.SemanticEmbedder = client
+			ix, err = docsearch.IndexDirSemantic(root, client)
+		} else {
+			ix, err = docsearch.IndexDir(root)
+		}
 		if err != nil {
 			return "", err
 		}
 		_ = ix.Save()
 		return "indexed " + itoa(len(ix.Docs)) + " chunks from " + root, nil
+	case "kern_doc_fetch":
+		rawURL := argString(args, "url")
+		if rawURL == "" {
+			return "", fmt.Errorf("url is required")
+		}
+		root := argString(args, "root")
+		if root == "" {
+			root = "."
+		}
+		name := argString(args, "name")
+		res, err := fetch.Fetch(rawURL, 0)
+		if err != nil {
+			return "", err
+		}
+		if name == "" {
+			name = docSearchSlug(rawURL)
+		}
+		if err := os.MkdirAll(cache.Path("data", "docs-fetch"), 0o755); err != nil {
+			return "", err
+		}
+		if err := os.WriteFile(cache.Path("data", "docs-fetch", name+".md"), []byte(res.Text), 0o600); err != nil {
+			return "", err
+		}
+		added, err := docsearch.MergeFetched(root, name, res.Text)
+		if err != nil {
+			return "", err
+		}
+		var b strings.Builder
+		fmt.Fprintf(&b, "fetched %s -> fetch/%s.md (%d chars, %d chunks indexed into %s)\n\n", rawURL, name, len(res.Text), added, root)
+		if res.Title != "" {
+			fmt.Fprintf(&b, "# %s\n\n", res.Title)
+		}
+		if argString(args, "semantic") == "true" {
+			client := llm.New("")
+			if !client.HasEmbeddingModel() {
+				fmt.Fprintf(&b, "note: semantic embeddings skipped (%s not installed)\n\n", llm.EmbedModel())
+			} else {
+				embedded, eerr := docsearch.ReembedFetch(root, name, client)
+				if eerr != nil {
+					return "", eerr
+				}
+				if embedded > 0 {
+					fmt.Fprintf(&b, "semantic embeddings attached to %d fetched chunks\n\n", embedded)
+				}
+			}
+		}
+		b.WriteString(clip(res.Text, 800))
+		return b.String(), nil
+
+	case "kern_commitmsg":
+		root := argString(args, "root")
+		if root == "" {
+			root = "."
+		}
+		var out []byte
+		var err error
+		staged := argString(args, "staged")
+		if staged == "true" || staged == "1" {
+			out, err = exec.Command("git", "-C", root, "diff", "--cached").Output()
+		} else if rng := argString(args, "range"); rng != "" {
+			out, err = exec.Command("git", "-C", root, "diff", "--unified=0", rng).Output()
+		} else {
+			out, err = exec.Command("git", "-C", root, "diff", "HEAD").Output()
+			if err != nil {
+				out, err = exec.Command("git", "-C", root, "diff").Output()
+			}
+		}
+		if err != nil {
+			return "", fmt.Errorf("git diff failed: %w", err)
+		}
+		return commitmsg.Generate(string(out)).String(), nil
 
 	case "kern_precache":
 		root := argString(args, "root")
@@ -1225,6 +1576,30 @@ func (s *Server) runTool(ctx context.Context, id string, name string, args map[s
 		}
 		return p.Render(), nil
 
+	case "kern_pack":
+		root := argString(args, "root")
+		if root == "" {
+			cwd, _ := os.Getwd()
+			root = cwd
+		}
+		opts := pack.Options{}
+		if v := argString(args, "max_tokens"); v != "" {
+			fmt.Sscanf(v, "%d", &opts.MaxTokens)
+		} else {
+			opts.MaxTokens = 8000
+		}
+		if v := argString(args, "instructions"); v != "" {
+			opts.SkipInstructions = v == "false"
+		}
+		b, err := pack.Build(root, opts)
+		if err != nil {
+			return "", err
+		}
+		if argString(args, "format") == "json" {
+			return b.JSON()
+		}
+		return b.Render(), nil
+
 	case "kern_run_build":
 		cmd := argString(args, "command")
 		if cmd == "" {
@@ -1243,14 +1618,88 @@ func (s *Server) runTool(ctx context.Context, id string, name string, args map[s
 		if log == "" {
 			return "", fmt.Errorf("log is required")
 		}
-		res, err := optimize.Log(log, optimize.Options{})
+		cacheOn := true
+		if v := argString(args, "cache"); v != "" {
+			cacheOn = v == "true" || v == "1"
+		}
+		res, err := optimize.Log(log, optimize.Options{Cache: cacheOn})
 		if err != nil {
 			return "", err
 		}
-		return renderOptimize("optimized log", res), nil
+		out := renderOptimize("optimized log", res)
+		if res.FromCache {
+			if res.SemanticHit {
+				out += fmt.Sprintf("\n[kern] served from semantic cache (similarity %.2f, matched: %q)\n", res.Similarity, clipForMarker(res.MatchedInput))
+			} else {
+				out += "\n[kern] served from exact cache\n"
+			}
+		}
+		return out, nil
+
+	case "kern_optimize_output":
+		text := argString(args, "text")
+		if text == "" {
+			return "", fmt.Errorf("text is required")
+		}
+		out, dropped := terse.Compress(text)
+		before := tokenize.Count(text)
+		after := tokenize.Count(out)
+		return fmt.Sprintf("%d -> %d tokens (saved %d, %.1f%%, %d filler lines dropped)\n\n%s",
+			before, after, before-after, pct(before, after), dropped, out), nil
 
 	case "kern_stats":
 		return renderStats(argString(args, "days"), argString(args, "session"))
+
+	case "kern_semcache":
+		switch argString(args, "action") {
+		case "clear":
+			ns := argString(args, "namespace")
+			if err := semcache.Clear(ns); err != nil {
+				return "", err
+			}
+			if ns == "" {
+				return "semcache: cleared all namespaces", nil
+			}
+			return "semcache: cleared " + ns, nil
+		case "list":
+			ns := argString(args, "namespace")
+			if ns == "" {
+				return "", fmt.Errorf("namespace is required for list")
+			}
+			entries, err := semcache.Entries(ns)
+			if err != nil {
+				return "", err
+			}
+			if len(entries) == 0 {
+				return fmt.Sprintf("semcache %q: empty", ns), nil
+			}
+			var b strings.Builder
+			fmt.Fprintf(&b, "semcache %q: %d entries\n", ns, len(entries))
+			for i, in := range entries {
+				fmt.Fprintf(&b, "  %d. %s\n", i+1, truncateMCP(in, 100))
+			}
+			return strings.TrimSuffix(b.String(), "\n"), nil
+		case "similarity":
+			a, b := argString(args, "a"), argString(args, "b")
+			if a == "" || b == "" {
+				return "", fmt.Errorf("a and b are required for similarity")
+			}
+			return fmt.Sprintf("similarity: %.3f", semcache.Similarity(a, b)), nil
+		default: // stats
+			st, err := semcache.Stats()
+			if err != nil {
+				return "", err
+			}
+			if len(st) == 0 {
+				return "semcache: empty", nil
+			}
+			var b strings.Builder
+			b.WriteString("semcache entries by namespace:\n")
+			for ns, n := range st {
+				fmt.Fprintf(&b, "  %-8s %d\n", ns, n)
+			}
+			return strings.TrimSuffix(b.String(), "\n"), nil
+		}
 
 	case "kern_context_budget":
 		text := argString(args, "text")
@@ -1367,6 +1816,9 @@ func (s *Server) runTool(ctx context.Context, id string, name string, args map[s
 			b.WriteString(m.File)
 			b.WriteString(":")
 			b.WriteString(itoa(m.Line))
+			if ix.IsGenerated(m.File) {
+				b.WriteString(" (generated)")
+			}
 			b.WriteString("\n")
 		}
 		return strings.TrimSuffix(b.String(), "\n"), nil
@@ -1686,6 +2138,9 @@ func (s *Server) runTool(ctx context.Context, id string, name string, args map[s
 		}
 		return strings.TrimSuffix(b.String(), "\n"), nil
 
+	case "kern_usage_guide":
+		return Guide(), nil
+
 	case "kern_guard_check":
 		changes, ix, err := s.changedContext(args)
 		if err != nil {
@@ -1698,16 +2153,68 @@ func (s *Server) runTool(ctx context.Context, id string, name string, args map[s
 		for _, c := range changes {
 			files = append(files, c.File)
 		}
-		root := argString(args, "root")
-		if root == "" {
-			cwd, _ := os.Getwd()
-			root = cwd
-		}
+		root := resolveRoot(argString(args, "root"))
 		b, err := intel.LoadBoundaries(root)
 		if err != nil {
 			return "", err
 		}
-		return intel.RenderViolations(intel.CheckBoundaries(ix, b, files)), nil
+		violations := intel.CheckBoundaries(ix, b, files)
+		threshold := 0
+		if v := argString(args, "threshold"); v != "" {
+			fmt.Sscanf(v, "%d", &threshold)
+		}
+		if len(violations) > threshold {
+			return "", fmt.Errorf("REJECT: %d boundary violations exceed threshold %d", len(violations), threshold)
+		}
+		if argString(args, "format") == "sarif" {
+			return intel.RenderViolationsSARIF(violations, serverVersion), nil
+		}
+		return intel.RenderViolations(violations), nil
+
+	case "kern_rename":
+		root := resolveRoot(argString(args, "root"))
+		ix, err := s.loadIndex(root)
+		if err != nil {
+			return "", err
+		}
+		oldName := argString(args, "symbol")
+		newName := argString(args, "new_name")
+		rep, err := rename.Rename(ix, oldName, newName)
+		if err != nil {
+			return "", err
+		}
+		if argString(args, "apply") == "true" || argString(args, "apply") == "1" {
+			if _, err := rename.Apply(root, rep); err != nil {
+				return "", fmt.Errorf("apply failed (files restored): %w", err)
+			}
+		}
+		return rename.Render(rep), nil
+
+	case "kern_exec":
+		if argString(args, "list") == "true" || argString(args, "list") == "1" {
+			return fmt.Sprintf("installed runtimes: %s\nsupported languages: %s",
+				strings.Join(script.Available(), ", "), strings.Join(script.Languages(), ", ")), nil
+		}
+		run := script.Run{
+			Lang:  argString(args, "lang"),
+			Code:  argString(args, "code"),
+			Stdin: argString(args, "stdin"),
+		}
+		if v := argString(args, "timeout"); v != "" {
+			if sec, err := strconv.Atoi(v); err == nil {
+				run.Timeout = time.Duration(sec) * time.Second
+			}
+		}
+		if v := argString(args, "max"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n > 0 {
+				run.MaxOut = n
+			}
+		}
+		res := script.RunScript(run)
+		if res.Err != nil {
+			return "", fmt.Errorf("kern_exec: %s", res.Err)
+		}
+		return res.Stdout, nil
 
 	default:
 		return "", fmt.Errorf("unknown tool: %s", name)
@@ -1719,11 +2226,7 @@ func (s *Server) runTool(ctx context.Context, id string, name string, args map[s
 // tree). Returns line-aware FileChanges so blast radius can be scoped to the
 // changed hunks.
 func (s *Server) changedContext(args map[string]any) ([]intel.FileChange, *index.Index, error) {
-	root := argString(args, "root")
-	if root == "" {
-		cwd, _ := os.Getwd()
-		root = cwd
-	}
+	root := resolveRoot(argString(args, "root"))
 	ix, err := s.loadIndex(root)
 	if err != nil {
 		return nil, nil, err
@@ -1732,7 +2235,15 @@ func (s *Server) changedContext(args map[string]any) ([]intel.FileChange, *index
 		var out []intel.FileChange
 		for _, p := range strings.Split(files, ",") {
 			if p = strings.TrimSpace(p); p != "" {
-				out = append(out, intel.FileChange{File: p})
+				resolved, err := withinRoot(root, p)
+				if err != nil {
+					return nil, nil, err
+				}
+				rel, err := filepath.Rel(root, resolved)
+				if err != nil {
+					return nil, nil, err
+				}
+				out = append(out, intel.FileChange{File: rel})
 			}
 		}
 		return out, ix, nil
@@ -1787,11 +2298,7 @@ func splitLines(s string) []string {
 // sessionFor returns the project session for root, creating and caching one
 // per root so index state and stats identity are shared across tool calls.
 func (s *Server) sessionFor(root string) *project.Session {
-	if root == "" {
-		if cwd, err := os.Getwd(); err == nil {
-			root = cwd
-		}
-	}
+	root = resolveRoot(root)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.sessions == nil {
@@ -1805,10 +2312,96 @@ func (s *Server) sessionFor(root string) *project.Session {
 	return sess
 }
 
+// resolveRoot cleans a tool root argument to an absolute path and requires it
+// to be an existing directory. An empty root falls back to the current working
+// directory. This guards every index-using tool against traversal-style root
+// values and turns confusing downstream index errors into clear ones.
+func resolveRoot(root string) string {
+	if root == "" {
+		if cwd, err := os.Getwd(); err == nil {
+			root = cwd
+		}
+	}
+	if abs, err := filepath.Abs(root); err == nil {
+		root = filepath.Clean(abs)
+	}
+	return root
+}
+
+// withinRoot resolves file against root (absolute paths are used as-is) and
+// requires the result to stay inside root, rejecting `..` escapes and absolute
+// paths that point outside the project boundary. It returns the resolved
+// absolute path.
+func withinRoot(root, file string) (string, error) {
+	var abs string
+	if filepath.IsAbs(file) {
+		abs = filepath.Clean(file)
+	} else {
+		abs = filepath.Join(root, file)
+	}
+	rel, err := filepath.Rel(root, abs)
+	if err != nil {
+		return "", fmt.Errorf("resolve %q: %w", file, err)
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+		return "", fmt.Errorf("path %s escapes project root %s", abs, root)
+	}
+	return abs, nil
+}
+
 // loadIndex returns the session's symbol index, reused while fresh and rebuilt
-// when stale or missing (see project.Session.Index).
+// when stale or missing (see project.Session.Index). The returned index is
+// recorded so the tool response can be stamped with provenance.
 func (s *Server) loadIndex(root string) (*index.Index, error) {
-	return s.sessionFor(root).Index()
+	ix, err := s.sessionFor(root).Index()
+	if err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	s.lastIndex = ix
+	s.mu.Unlock()
+	return ix, nil
+}
+
+// provenance returns a one-line stamp describing the index the current tool
+// call used, or "" when the call did not load an index (e.g. prompt or memory
+// tools). The index is guaranteed fresh by project.Session.Index.
+func (s *Server) provenance() string {
+	s.mu.Lock()
+	ix := s.lastIndex
+	s.mu.Unlock()
+	if ix == nil {
+		return ""
+	}
+	var edges int
+	for _, callees := range ix.Calls {
+		edges += len(callees)
+	}
+	age := time.Since(ix.UpdatedAt)
+	if age < 0 {
+		age = 0
+	}
+	age = age.Round(time.Second)
+	return fmt.Sprintf("[kern] index: %d symbols, %d call edges, %d packages · built %s ago · fresh · commit %s",
+		len(ix.Symbols), edges, len(ix.Pkgs), age, s.commit(ix.Root))
+}
+
+// commit returns the short HEAD commit of root, cached per root. Git is
+// optional: a non-repo root or missing git yields "" (omitted from the stamp).
+func (s *Server) commit(root string) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if c, ok := s.commits[root]; ok {
+		return c
+	}
+	c := ""
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if out, err := exec.CommandContext(ctx, "git", "-C", root, "rev-parse", "--short", "HEAD").Output(); err == nil {
+		c = strings.TrimSpace(string(out))
+	}
+	s.commits[root] = c
+	return c
 }
 
 // splitShellLine tokenizes a command line into argv, honoring single and
@@ -1863,6 +2456,54 @@ func splitShellLine(line string) []string {
 func renderOptimize(label string, res optimize.Result) string {
 	return fmt.Sprintf("%s (tokens: %d -> %d, saved %d (%.1f%%)):\n%s",
 		label, res.BeforeTokens, res.AfterTokens, res.SavedTokens, res.SavedPercent, res.Output)
+}
+
+// clipForMarker shortens a matched-input preview so a multi-megabyte log match
+// never floods the "served from semantic cache" marker.
+func clipForMarker(s string) string {
+	const max = 80
+	if len(s) <= max {
+		return s
+	}
+	return s[:max] + "…"
+}
+
+// clip trims a string to n bytes for a tool summary.
+func clip(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "…"
+}
+
+// docSearchSlug derives a filesystem-safe doc name from a URL, e.g.
+// https://react.dev/reference/usestate -> react.dev-reference-usestate.
+func docSearchSlug(rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return "doc"
+	}
+	name := u.Hostname() + u.Path
+	name = strings.TrimSuffix(name, "/")
+	var b strings.Builder
+	lastDash := false
+	for _, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
+			b.WriteRune(r)
+			lastDash = false
+		case r >= 'A' && r <= 'Z':
+			b.WriteRune(r + ('a' - 'A'))
+			lastDash = false
+		case !lastDash:
+			b.WriteByte('-')
+			lastDash = true
+		}
+	}
+	if out := strings.Trim(b.String(), "-"); out != "" {
+		return out
+	}
+	return "doc"
 }
 
 func renderStats(daysStr, session string) (string, error) {

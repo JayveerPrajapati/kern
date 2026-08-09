@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -63,6 +65,33 @@ func TestToolCallCoverage(t *testing.T) {
 	out = mcpLastOK(t, "kern_heal", map[string]any{"root": root, "max_rounds": "1", "timeout": "60"})
 	if !strings.Contains(out, "healed OK") {
 		t.Fatalf("expected healed OK on healthy project, got %q", out)
+	}
+}
+
+func TestDocFetchMergesIntoLocalIndex(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = w.Write([]byte(`<title>Widgets API</title>
+<h1>Widget API</h1>
+<p>The <code>MakeWidget</code> function creates a widget instance. It takes a name
+and returns a handle. Call <code>widget.Release</code> to free resources.</p>`))
+	}))
+	defer srv.Close()
+
+	root := t.TempDir()
+	out := mcpLastOK(t, "kern_doc_fetch", map[string]any{
+		"url":  srv.URL,
+		"root": root,
+		"name": "widget-api",
+	})
+	if !strings.Contains(out, "widget-api") || !strings.Contains(out, "MakeWidget") {
+		t.Fatalf("fetch summary missing content: %q", out)
+	}
+
+	// The fetched page must now be findable via the local doc index.
+	res := mcpLastOK(t, "kern_doc_search", map[string]any{"root": root, "query": "MakeWidget release", "k": "2"})
+	if !strings.Contains(res, "fetch/widget-api.md") {
+		t.Fatalf("fetched page not searchable, got: %q", res)
 	}
 }
 

@@ -16,31 +16,40 @@ import (
 
 // indexVersion is bumped whenever the persisted index schema changes, so
 // stale caches are rebuilt automatically instead of serving zero-value fields.
-const indexVersion = 3
+const indexVersion = 5
 
 // Index is the in-memory representation of a project's AST index.
 type Index struct {
-	Root          string               `json:"root"`
-	Version       int                  `json:"version"`
-	Symbols       []Symbol             `json:"symbols"`
-	Calls         map[string][]string  `json:"calls"`
-	Callers       map[string][]string  `json:"callers"`
-	Pkgs          map[string]*Pkg      `json:"packages"`
-	FileHashes    map[string]string    `json:"file_hashes"`
-	SymbolsByFile map[string][]Symbol  `json:"-"`
-	UpdatedAt     time.Time            `json:"updated_at"`
+	Root           string              `json:"root"`
+	Version        int                 `json:"version"`
+	Symbols        []Symbol            `json:"symbols"`
+	Calls          map[string][]string `json:"calls"`
+	Callers        map[string][]string `json:"callers"`
+	Pkgs           map[string]*Pkg     `json:"packages"`
+	FileHashes     map[string]string   `json:"file_hashes"`
+	GeneratedFiles map[string]bool     `json:"generated_files,omitempty"`
+	SymbolsByFile  map[string][]Symbol `json:"-"`
+	UpdatedAt      time.Time           `json:"updated_at"`
+	// MaxMtime is the largest file modification time (Unix nanos) across the
+	// indexable files at build time. Stale() uses it as a cheap generation
+	// gate so repeated freshness checks short-circuit without re-hashing
+	// every file; the exact content-hash manifest check only runs when the
+	// gate trips (adopted from code-graph-mcp's generation-counter cache
+	// invalidation).
+	MaxMtime int64 `json:"max_mtime,omitempty"`
 }
 
 // New returns an empty index rooted at root.
 func New(root string) *Index {
 	return &Index{
-		Root:          root,
-		Version:       indexVersion,
-		Calls:         map[string][]string{},
-		Callers:       map[string][]string{},
-		Pkgs:          map[string]*Pkg{},
-		FileHashes:    map[string]string{},
-		SymbolsByFile: map[string][]Symbol{},
+		Root:           root,
+		Version:        indexVersion,
+		Calls:          map[string][]string{},
+		Callers:        map[string][]string{},
+		Pkgs:           map[string]*Pkg{},
+		FileHashes:     map[string]string{},
+		GeneratedFiles: map[string]bool{},
+		SymbolsByFile:  map[string][]Symbol{},
 	}
 }
 
@@ -94,6 +103,17 @@ func Load(root string) (*Index, error) {
 func (ix *Index) Stale() bool {
 	if ix == nil || len(ix.FileHashes) == 0 {
 		return true
+	}
+	// Fast gate: if the indexable file count and newest modification time both
+	// match the build-time manifest, nothing changed, so skip re-hashing. A
+	// gate miss falls through to the exact hash comparison. Old indexes carry
+	// MaxMtime == 0, which never matches a fresh build, so they always take
+	// the exact path. Tradeoff: an edit that preserves mtime (rare, e.g.
+	// deliberately-touched timestamps) evades the gate until the next build.
+	if ix.MaxMtime > 0 {
+		if maxMtime, count := indexableMaxMtime(ix.Root); count == len(ix.FileHashes) && maxMtime == ix.MaxMtime {
+			return false
+		}
 	}
 	cur := indexableHashes(ix.Root)
 	if len(cur) != len(ix.FileHashes) {
@@ -149,11 +169,17 @@ func (ix *Index) Languages() []string {
 }
 
 var ignoreDirs = map[string]bool{
-	".git": true, "node_modules": true, "vendor": true, "dist": true,
-	"build": true, "out": true, "target": true, ".next": true,
-	"__pycache__": true, ".venv": true, ".cache": true, ".idea": true,
-	"bin": true, ".mvn": true, "coverage": true, "tmp": true,
+	".git": true, ".hg": true, ".svn": true, "node_modules": true,
+	"vendor": true, "dist": true, "build": true, "out": true, "target": true,
+	".next": true, "__pycache__": true, ".venv": true, ".cache": true,
+	".idea": true, "bin": true, ".mvn": true, "coverage": true, "tmp": true,
+	".kern": true,
 }
+
+// IgnoredDir reports whether a directory name is skipped during index walks
+// (node_modules, vendor, build artifacts, ...). Exported for downstream
+// scanners that mirror the index's file-selection policy.
+func IgnoredDir(name string) bool { return ignoreDirs[name] }
 
 // Build walks root, parses every source file and assembles the index. On
 // error it returns a nil index so a half-built index is never mistaken for a
@@ -188,6 +214,11 @@ func Build(root string) (*Index, error) {
 		if !isIndexable(rel, src) {
 			return nil
 		}
+		if info, ierr := d.Info(); ierr == nil {
+			if mt := info.ModTime().UnixNano(); mt > ix.MaxMtime {
+				ix.MaxMtime = mt
+			}
+		}
 		ix.addFile(rel, src)
 		return nil
 	})
@@ -216,6 +247,10 @@ func (ix *Index) addFile(rel string, src []byte) {
 		syms, calls, pkg, _ = extractForeign(rel, src, lang)
 	}
 	ix.FileHashes[rel] = cache.Hash(src)
+	if ix.GeneratedFiles == nil {
+		ix.GeneratedFiles = map[string]bool{}
+	}
+	ix.GeneratedFiles[rel] = IsGeneratedPath(rel) || isGeneratedContent(src)
 	ix.Symbols = append(ix.Symbols, syms...)
 	for owner, callees := range calls {
 		ix.Calls[owner] = append(ix.Calls[owner], callees...)
@@ -282,6 +317,13 @@ func (ix *Index) FindSymbol(name string) (Symbol, bool) {
 	return Symbol{}, false
 }
 
+// IsGenerated reports whether the file at root-relative path was marked as
+// tool-generated at index time (path convention or a "Code generated" banner
+// in its head). It is a ranking hint, not a hard claim.
+func (ix *Index) IsGenerated(rel string) bool {
+	return ix.GeneratedFiles != nil && ix.GeneratedFiles[rel]
+}
+
 // ResolveName finds a definition for a call target. Exact matches win; a
 // package-qualified target like "index.Build" falls back to the bare name
 // ("Build") so call sites still resolve to real definitions.
@@ -311,15 +353,15 @@ func (ix *Index) Search(pattern string, limit int) []Symbol {
 func symbolRegex(pattern string) (*regexp.Regexp, string) {
 	p := pattern
 	kind := ""
-		if i := strings.IndexByte(p, ' '); i > 0 {
-			prefix := p[:i]
-			switch prefix {
-			case "func", "method", "struct", "interface", "type", "const", "var",
-				"class", "enum", "trait", "module", "union", "impl", "prop", "heading", "entry":
-				kind = prefix
-				p = p[i+1:]
-			}
+	if i := strings.IndexByte(p, ' '); i > 0 {
+		prefix := p[:i]
+		switch prefix {
+		case "func", "method", "struct", "interface", "type", "const", "var",
+			"class", "enum", "trait", "module", "union", "impl", "prop", "heading", "entry":
+			kind = prefix
+			p = p[i+1:]
 		}
+	}
 	expr := "^" + strings.ReplaceAll(regexp.QuoteMeta(p), `\*`, `.*`) + "$"
 	return regexp.MustCompile(expr), kind
 }
@@ -346,15 +388,48 @@ func (ix *Index) CallSites(symbol string) []string {
 	return ix.Calls[symbol]
 }
 
+// edgeKeys returns the map keys under which a symbol's call edges may be
+// recorded: the bare name and, for methods, the "Type.Method" form.
+func edgeKeys(s Symbol) []string {
+	if fn := s.FullName(); fn != s.Name {
+		return []string{s.Name, fn}
+	}
+	return []string{s.Name}
+}
+
+// CallersFor returns deduplicated callers recorded under any key form of s
+// (bare name or "Type.Method").
+func (ix *Index) CallersFor(s Symbol) []string {
+	var out []string
+	for _, k := range edgeKeys(s) {
+		out = append(out, ix.Callers[k]...)
+	}
+	return dedupeSorted(out)
+}
+
+// CallsFor returns deduplicated callees recorded under any key form of s.
+func (ix *Index) CallsFor(s Symbol) []string {
+	var out []string
+	for _, k := range edgeKeys(s) {
+		out = append(out, ix.Calls[k]...)
+	}
+	return dedupeSorted(out)
+}
+
 // Graph renders the neighbourhood of a symbol: definition, callers, and what
 // it calls.
 func (ix *Index) Graph(symbol string) string {
 	var b strings.Builder
 	defs := ix.symbolsFor(symbol)
 	if len(defs) == 0 {
-		b.WriteString("no symbol found: " + symbol)
-		return b.String()
+		if d, ok := resolveName(ix, symbol); ok {
+			defs = []Symbol{d}
+		} else {
+			b.WriteString("no symbol found: " + symbol)
+			return b.String()
+		}
 	}
+	root := defs[0]
 	for _, d := range defs {
 		b.WriteString("def ")
 		b.WriteString(d.Kind)
@@ -366,7 +441,7 @@ func (ix *Index) Graph(symbol string) string {
 		b.WriteString(itoa(d.Line))
 		b.WriteString("\n")
 	}
-	callers := ix.CallersOf(symbol)
+	callers := ix.CallersFor(root)
 	if len(callers) > 0 {
 		b.WriteString("callers:\n")
 		for _, c := range callers {
@@ -378,10 +453,10 @@ func (ix *Index) Graph(symbol string) string {
 			b.WriteString("\n")
 		}
 	}
-	callees := ix.Calls[symbol]
+	callees := ix.CallsFor(root)
 	if len(callees) > 0 {
 		b.WriteString("calls:\n")
-		for _, c := range dedupeSorted(append([]string{}, callees...)) {
+		for _, c := range callees {
 			b.WriteString("  ")
 			b.WriteString(c)
 			if _, ok := resolveName(ix, c); !ok {
@@ -401,7 +476,11 @@ func (ix *Index) Context(symbol string, linesAround int) string {
 	}
 	defs := ix.symbolsFor(symbol)
 	if len(defs) == 0 {
-		return ""
+		if d, ok := resolveName(ix, symbol); ok {
+			defs = []Symbol{d}
+		} else {
+			return ""
+		}
 	}
 	var b strings.Builder
 	d := defs[0]
@@ -424,15 +503,15 @@ func (ix *Index) Context(symbol string, linesAround int) string {
 		b.WriteString(all[i-1])
 		b.WriteString("\n")
 	}
-	callers := ix.CallersOf(symbol)
+	callers := ix.CallersFor(d)
 	if len(callers) > 0 {
 		b.WriteString("\ncallers: ")
-		b.WriteString(strings.Join(dedupeSorted(callers), ", "))
+		b.WriteString(strings.Join(callers, ", "))
 		b.WriteString("\n")
 	}
-	if callees := ix.Calls[symbol]; len(callees) > 0 {
+	if callees := ix.CallsFor(d); len(callees) > 0 {
 		b.WriteString("calls: ")
-		b.WriteString(strings.Join(dedupeSorted(append([]string{}, callees...)), ", "))
+		b.WriteString(strings.Join(callees, ", "))
 		b.WriteString("\n")
 	}
 	return strings.TrimSuffix(b.String(), "\n")

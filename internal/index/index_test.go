@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func writeTree(t *testing.T, files map[string]string) string {
@@ -54,8 +55,8 @@ func helper() {
 
 func TestBuildAndSearch(t *testing.T) {
 	dir := writeTree(t, map[string]string{
-		"main.go":  srcMain,
-		"user.go":  srcOther,
+		"main.go": srcMain,
+		"user.go": srcOther,
 	})
 	ix, err := Build(dir)
 	if err != nil {
@@ -173,6 +174,126 @@ func TestWatchDetectsChanges(t *testing.T) {
 	changes = diff(prev, map[string]string{"main.go": cacheHash(content)})
 	if len(changes) != 0 {
 		t.Fatalf("expected no changes, got %+v", changes)
+	}
+}
+
+func TestStaleGate(t *testing.T) {
+	dir := writeTree(t, map[string]string{"main.go": srcMain})
+	ix, err := Build(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ix.Stale() {
+		t.Fatal("fresh index reported stale")
+	}
+	if ix.MaxMtime == 0 {
+		t.Fatal("expected MaxMtime captured at build")
+	}
+
+	// The stat gate must match the content manifest count exactly.
+	if maxMtime, count := indexableMaxMtime(dir); count != len(ix.FileHashes) || maxMtime != ix.MaxMtime {
+		t.Fatalf("gate mismatch: count %d vs %d, mtime %d vs %d", count, len(ix.FileHashes), maxMtime, ix.MaxMtime)
+	}
+
+	// Corrupt the manifest hash: the gate must short-circuit before the hash
+	// comparison and still report fresh, proving it is what decides.
+	ix.FileHashes["main.go"] = "bogus"
+	if ix.Stale() {
+		t.Fatal("gate should have short-circuited before hash check")
+	}
+}
+
+func TestStaleEditDetected(t *testing.T) {
+	dir := writeTree(t, map[string]string{"main.go": srcMain})
+	ix, err := Build(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Real-world edits advance mtime; Chtimes simulates that deterministically
+	// even on coarse-granularity filesystems where two back-to-back writes
+	// share a clock tick.
+	p := filepath.Join(dir, "main.go")
+	future := time.Now().Add(2 * time.Second)
+	if err := os.WriteFile(p, []byte(strings.ReplaceAll(srcMain, "hi ", "hey ")), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(p, future, future); err != nil {
+		t.Fatal(err)
+	}
+	if !ix.Stale() {
+		t.Fatal("edited file not reported stale")
+	}
+}
+
+func TestStaleAddDetected(t *testing.T) {
+	dir := writeTree(t, map[string]string{"main.go": srcMain})
+	ix, err := Build(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := filepath.Join(dir, "user.go")
+	if err := os.WriteFile(p, []byte(srcOther), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if !ix.Stale() {
+		t.Fatal("added file not reported stale")
+	}
+}
+
+func TestStaleDeleteDetected(t *testing.T) {
+	dir := writeTree(t, map[string]string{"main.go": srcMain})
+	ix, err := Build(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(dir, "main.go")); err != nil {
+		t.Fatal(err)
+	}
+	if !ix.Stale() {
+		t.Fatal("removed file not reported stale")
+	}
+}
+
+func TestStaleTouchIsFresh(t *testing.T) {
+	dir := writeTree(t, map[string]string{"main.go": srcMain})
+	ix, err := Build(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Touching a file updates mtime but not content: the gate trips and the
+	// hash fallback must confirm the index is still fresh.
+	p := filepath.Join(dir, "main.go")
+	future := time.Now().Add(2 * time.Second)
+	if err := os.Chtimes(p, future, future); err != nil {
+		t.Fatal(err)
+	}
+	if ix.Stale() {
+		t.Fatal("touch with unchanged content reported stale")
+	}
+}
+
+func TestStaleLegacyIndex(t *testing.T) {
+	dir := writeTree(t, map[string]string{"main.go": srcMain})
+	ix, err := Build(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// An index without a MaxMtime gate (MaxMtime == 0) must fall back to the
+	// exact hash comparison: fresh stays fresh, edits are still detected.
+	ix.MaxMtime = 0
+	if ix.Stale() {
+		t.Fatal("legacy index (MaxMtime 0) with unchanged tree reported stale")
+	}
+	p := filepath.Join(dir, "main.go")
+	future := time.Now().Add(2 * time.Second)
+	if err := os.WriteFile(p, []byte(strings.ReplaceAll(srcMain, "hi ", "hey ")), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(p, future, future); err != nil {
+		t.Fatal(err)
+	}
+	if !ix.Stale() {
+		t.Fatal("legacy index (MaxMtime 0) did not detect edit")
 	}
 }
 

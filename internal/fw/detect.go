@@ -34,6 +34,7 @@ var fwIgnoreDirs = map[string]bool{
 	".next": true, "__pycache__": true, ".venv": true, "venv": true,
 	".cache": true, ".idea": true, ".vscode": true, "bin": true,
 	".mvn": true, "coverage": true, "tmp": true, ".terraform": true,
+	".kern": true,
 }
 
 // Detect walks root and reports every catalog framework revealed by file

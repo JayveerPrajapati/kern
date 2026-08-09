@@ -115,3 +115,21 @@ func TestMaskBareIdentifiersUntouched(t *testing.T) {
 		t.Errorf("bare identifiers masked: %q", res.Text)
 	}
 }
+
+func TestMaskUnquotedSecretsWithDigits(t *testing.T) {
+	in := "PASSWORD=hunter2 token=abc12345secretkeylong api_key =  myapi123456789key"
+	res := Mask(in)
+	for _, want := range []string{"[MASKED_PASSWORD_", "[MASKED_TOKEN_", "[MASKED_KEY_"} {
+		if !strings.Contains(res.Text, want) {
+			t.Errorf("expected %s in %q", want, res.Text)
+		}
+	}
+}
+
+func TestMaskGithubPATFormat(t *testing.T) {
+	in := "token github_pat_ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890_abcdefghijklmnopqrstuvwxyz1234567890"
+	res := Mask(in)
+	if !strings.Contains(res.Text, "[MASKED_GITHUB_PAT_1]") {
+		t.Errorf("github_pat token not masked: %q", res.Text)
+	}
+}

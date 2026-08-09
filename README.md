@@ -13,7 +13,9 @@ byte-level BPE), so identical input always produces identical output.
 The selling points, in priority order:
 
 1. **Private & offline by default** — the runtime makes no network calls and
-   reports no telemetry. Optional local Ollama rewriting is opt-in (`--llm`) and
+   reports no telemetry (the one explicit exception: `kern docs fetch` /
+   `kern_doc_fetch`, invoked deliberately to pull a public docs page).
+   Optional local Ollama rewriting is opt-in (`--llm`) and
    silently falls back to the deterministic path when unavailable.
 2. **Deterministic, reproducible output** — identical input always produces
    identical output; token counts are exact (byte-level BPE) or consistently
@@ -106,17 +108,33 @@ pre-filled.
 |---|---|
 | Noisy logs pasted into prompts | `kern_optimize_log` — keeps errors, stack traces, build failures; strips timestamps/chatter/dedupes |
 | Agent re-reading the whole codebase | `kern_project_map` / `kern_compact_file` — symbolic summaries (functions, types, lines), cached by content hash |
+| Agent needs the full source to edit against | `kern_pack` — one paste-ready bundle: tree + instructions + contents, sized to a token budget |
 | Huge build/test output flooding context | `kern_run_build` — runs the command, returns only pass/fail + errors |
 | Verbose prompts | `kern_optimize_prompt` — cleans and compresses before sending |
+| Verbose model replies | `kern_optimize_output` — strips filler/pleasantries/hedging from LLM responses, keeps code & errors |
+| Need an exact computed answer | `kern_exec` — runs code in an isolated runtime (python3/node/go/bash/...), returns only stdout |
 | Secrets leaked into agent context | `kern_mask` — replaces secrets/PII with `[MASKED_*]` placeholders locally |
 | Need deterministic JSON output | `kern_schema` — validates JSON against a schema; `kern prompt --schema` injects a formatting block |
 | Agent cites wrong file:line | `kern_verify` — cross-checks file:line / symbol / route claims in agent output |
-| Searching docs across projects | `kern_docs` — local vector search over markdown/txt/rst documents |
+| Searching docs across projects | `kern_docs` — local vector search over markdown/txt/rst documents; `kern_docs index --semantic` adds Ollama embeddings (real meaning) fused with n-gram + BM25 |
 | Unknown tech stack | `kern_fw` — detects frameworks from imports/config (catalog listed via `--catalog`) |
 | Flaky failing tests | `kern_heal` — snapshot-based LLM auto-fix, re-validates, shows diff (never edits your tree) |
 | Risky commands in the tree | `kern_sandbox` — runs a command; on failure the tree is restored to a snapshot |
 | Code blocks blowing the budget | `kern_swap` — swap tagged code blocks for per-file signatures, or expand back |
 | "How much did I save?" | `kern_stats` / `kern diff` — before/after tokens, cost saved |
+| "Is this a cached repeat?" | `kern_semcache` — inspect/clear the semantic cache (similar query → instant), preview similarity |
+| "How good is kern really?" | `go run ./evaluate/bench` — reproducible token-reduction + retrieval-recall report with hard gates |
+
+## Benchmarks
+
+`go run ./evaluate/bench` (or `make bench`) prints a reproducible report:
+token-reduction for the deterministic optimize-prompt / optimize-log /
+terse-output / budget-fit paths plus a docs retrieval recall@5 test, all on
+fixed inline corpora (no network). Hard gates run inside `go test ./...`
+(`evaluate/bench/main_test.go`) so a compression regression fails CI. kern
+reports token reduction vs the input it is given — never a LOC→LLM-input ratio,
+so numbers are comparable to other tools only when normalized the same way.
+See [`evaluate/README.md`](evaluate/README.md).
 
 ## Code intelligence
 
@@ -247,17 +265,27 @@ Additional capabilities for long-running agent sessions:
 
 ## MCP server (works with any MCP agent)
 
-Start it: `kern-mcp` (or `kern mcp`). It speaks MCP over stdio and exposes 42
+Start it: `kern-mcp` (or `kern mcp`). It speaks MCP over stdio and exposes 53
 `kern_*` tools plus workflow prompts — any MCP agent can consume it over stdio
 or over HTTP (`kern-mcp --http :8080` speaks the Streamable HTTP transport:
 `POST /mcp` with JSON-RPC bodies, batch requests supported, no SSE streaming,
 advertised via `streamableHttpCapabilities`).
 
+Every tool response is passed through an output sandbox: results over 24KiB are
+truncated with a marker naming a narrower tool for the lost detail, so a huge
+`kern_project_map` or `kern_walk` can never flood your context. Raise or lower
+the global cap with the `KERN_MCP_MAX_OUTPUT` env var, or override it per call
+by passing `max_output=N` bytes (0 = no cap) to any tool — e.g.
+`kern_exec(..., max_output=0)` returns full script stdout.
+
 <details>
-<summary>MCP tools — all 42 `kern_*` tools</summary>
+<summary>MCP tools — all 53 `kern_*` tools</summary>
 
 - `kern_optimize_prompt(prompt, attached_log?, session?, model?)`
 - `kern_optimize_log(log)`
+- `kern_optimize_output(text)` — strip filler/pleasantries from LLM replies, keep code & errors
+- `kern_exec(code, lang?, timeout?, max?, stdin?)` — run code in an isolated runtime, return only stdout
+- `kern_pack(root?, max_tokens?, format?, instructions?)` — pack the repo into one paste-ready bundle (tree + instructions + contents)
 - `kern_mask_pii(text, mask_names?)`
 - `kern_swap(text, root?, max_tokens?, mode?)` — summary/expand/fit tagged code blocks
 - `kern_sandbox(root?, command, timeout?)` — snapshot + rollback on failure
@@ -269,13 +297,16 @@ advertised via `streamableHttpCapabilities`).
 - `kern_frameworks(root?)` — detect frameworks from manifests & sources
 - `kern_entry_points(root?, limit?, pattern?)` — handlers/controllers/routes
 - `kern_doc_search(query, root?, k?)` — local vector search over documents
-- `kern_doc_index(root?)` — pre-index a project's documents
+- `kern_doc_index(root?, semantic?)` — pre-index a project's documents; `semantic=true` adds Ollama embeddings (default model `nomic-embed-text`, overridable via `KERN_EMBED_MODEL`)
+- `kern_doc_fetch(url, root?, name?, semantic?)` — the single explicit network opt-in: fetch one public docs page and merge it into the local doc index as `fetch/<name>.md` (re-fetch replaces); `semantic=true` adds Ollama dense embeddings
+- `kern_commitmsg(root?, staged?, range?)` — deterministic conventional-commit message (type/scope/subject/body) from `git diff`, no LLM
 - `kern_precache(root?)` — pre-warm summary & doc-search caches
 - `kern_compact_file(path)`
 - `kern_project_map(root, max_files?)`
 - `kern_run_build(command, dir?)`
 - `kern_context_budget(text, max_tokens?)`
 - `kern_stats(days?, session?)`
+- `kern_semcache(action?, namespace?, a?, b?)` — inspect/clear the semantic cache (stats, list, clear, similarity)
 - `kern_ast_search(pattern, root?, limit?)`
 - `kern_search(query, root?, limit?)`
 - `kern_repo_search(query, limit?)`
@@ -366,6 +397,13 @@ prompt to the local server for a smarter rewrite:
 - If Ollama is unreachable, errors, or the response is empty, kern silently
   falls back to the deterministic path — it never blocks a run.
 
+The same local Ollama instance can power **semantic document search**:
+`kern docs index --semantic` embeds each chunk with an embedding model
+(`KERN_EMBED_MODEL`, default `nomic-embed-text`; `ollama pull nomic-embed-text`
+once). Searches then fuse the dense semantic signal with the deterministic
+n-gram vectors and BM25. Without the model, docs stay fully functional on the
+deterministic path.
+
 ## Design
 
 - **Local only** — the runtime makes no network calls and no telemetry. The
@@ -383,6 +421,76 @@ prompt to the local server for a smarter rewrite:
   default estimator (cheap, consistent before/after) and `BPECounter` — a real
   byte-level BPE (GPT-2 style) that trains a merge table once from a bundled
   corpus, so counts are exact and reproducible offline.
+- **Fast-stale index gate** — `Index.MaxMtime` records the newest indexable
+  file mtime at build; `Stale()` short-circuits on a stat-only walk
+  (count + max mtime) before ever re-hashing contents. Old caches keep
+  `MaxMtime == 0`, so they always fall back to the exact hash manifest. Tradeoff
+  (documented in `engine.go`): an edit that preserves its mtime evades the gate
+  until the next build — harmless in practice since edits land after builds.
+- **Security scanner** (`kern sec` / `kern_security`) — deterministic,
+  line-scoped regex rules (hardcoded secrets via the PII pattern set, dynamic
+  SQL, shell command injection, weak crypto, insecure randomness, unsafe
+  deserialization) over the index's file-selection policy.
+- **Safe-delete check** (`kern delete` / `kern_safe_delete`) — conservative
+  verdict from the call graph: production vs test-only callers, exported and
+  entry-point flags. Never a hard guarantee (dynamic/reflection/external
+  references are invisible to the index).
+- **Structural rename** (`kern rename <old> <new> [root] [--apply]` /
+  `kern_rename`) — AST-scoped symbol rename for Go package-level symbols. Every
+  definition/reference is previewed as `file:line:col` edits before anything
+  is written; `--apply` commits transactionally with backups under
+  `.kern/rename-backup/` and rollback on failure. Because edits come from a
+  real `go/ast` parse, strings, comments, struct-field names,
+  composite-literal keys, import aliases and the package clause are never
+  touched, and cross-package references (`pkg.Symbol`) are renamed for exported
+  symbols. Methods and non-Go symbols are refused rather than guessed.
+- **Script sandbox** (`kern exec "<code>" [--lang LANG] [--timeout s] [--max bytes]` /
+  `kern_exec`) — run code in an isolated local runtime and get *only* stdout
+  back. Language comes from `--lang` or the shebang; runtimes are resolved
+  from PATH (python3, node, go, bash, perl, ruby, php, lua, julia, R, bun,
+  deno, rust — `kern exec --list` shows what's installed). Scripts run in a
+  fresh temp dir with a hard timeout and a stdout byte cap; stderr is only
+  surfaced on failure. V1 does not block network egress. "Think in Code": use
+  it to compute exact answers without polluting context.
+ - **Repo packing** (`kern pack [root] [--max-tokens N] [--no-instructions] [--out FILE]` /
+   `kern_pack`) — one paste-ready file for the whole repository: root instruction
+   docs (AGENTS.md/README.md/...), a directory tree with per-file token counts,
+   and the file contents themselves, so an agent gets the full working picture to
+   edit against. The bundle is budgeted at file granularity (oversize files are
+   dropped, not cut mid-file, and counted in the STATS section); `format=json`
+   returns it machine-readable. Repomix-style, but token-aware instead of dumping
+   everything.
+- **Project ignores** — `kern pack` and `kern project map` honor a root
+  `.gitignore` plus a `.kernignore` (which takes precedence), with git-style
+  patterns: `#` comments, `!` negation, trailing `/` directories, `*`/`**`/`?`,
+  character classes, leading `/` and multi-segment anchoring. Ignore files are
+  read at every directory level with git's subtree semantics (a deeper rule
+  overrides a shallower one). Matching is pure Go — no `git` binary required,
+  same diff yields the same walk.
+- **Pack security report** — packed bundles include a `SECURITY` section: the
+  secrets/injection rules from `kern sec` run over every packed file and the
+  findings (file:line, severity, rule) ship with the bundle so a repository that
+  would leak credentials surfaces them before they reach an agent's context.
+- **Commit messages** (`kern commitmsg [--staged] [--range a..b] [--subject]` /
+  `kern_commitmsg`; `kern commit [--all] [--message] [--dry-run]`) —
+  deterministic conventional-commit message from the git diff: type
+  (fix/feat/refactor/test/docs/chore) chosen by keyword scoring of added lines,
+  scope from the changed files' common directory, one body bullet per file.
+  Rule-based, no LLM, no network — the same diff always produces the same
+  message to edit by hand. `kern commit` stages everything with `--all` and
+  commits the staged diff with the generated message (`--dry-run` previews,
+  `--message` overrides the subject); the message is fed over stdin, never a
+  shell argument.
+
+### Considered and not built
+- **SQLite graph store** — rejected: breaks the zero-dependency guarantee; the
+  persisted JSON index already answers graph queries under 100ms.
+- **Session persistence** — rejected: kern already keeps per-session stats,
+  the response cache, and project memory; a durable session log adds state
+  without a use case.
+- **Tool-pin lockfiles** — rejected: provenance already stamps the commit and
+  index schema version on every cached answer, which pins behavior more
+  cheaply than a separate lockfile.
 
 ```
 core (parse -> compress -> cache -> token-count)
@@ -405,6 +513,7 @@ kern optimize "..." --fewshot                         # inject top-recalled less
 kern preview  "..." --attach log.txt        # dry-run, no stats recorded
 kern compact  src/main.go                    # file summary
 kern project  .                              # compact project map
+kern pack     . --max-tokens 8000            # paste-ready bundle (tree + instructions + contents)
 kern build    "go test ./..."                # compact build output
 kern log      server.log
 
@@ -471,9 +580,12 @@ kern swap     <file|-> [root] [--max N] [--mode summary|expand|fit]  # swap/expa
 kern precache [root] [--interval s] [--once]            # pre-warm code-summary & doc-search caches
 kern schema   <data.json|-> --schema <schema.json>    # deterministic JSON schema validation
 kern verify   <file|- for stdin> [root] [--json]       # cross-check file:line/symbol/route claims
-kern docs     <query> [root] [--k N]                    # local vector search over documents
-kern docs     index [root]                             # pre-index documents; ``clear`` resets
-kern fw       [root] [--catalog [lang]]                # detect frameworks; --catalog lists rules
+ kern docs     <query> [root] [--k N]                    # local vector search over documents
+ kern docs     index [root]                             # pre-index documents; ``clear`` resets
+ kern docs     fetch <url> [name] [root] [--semantic]      # fetch one public docs page into the local index (+dense vectors via Ollama)
+ kern commitmsg [--staged] [--range a..b] [--subject]    # deterministic commit message from git diff
+ kern commit    [--all] [--message S] [--dry-run]        # stage + commit with the generated message
+ kern fw       [root] [--catalog [lang]]                # detect frameworks; --catalog lists rules
 kern udiff    <file-a> <file-b> [--out patch]          # unified diff between two files (pure Go)
 kern graph    Prompt --mermaid               # call graph as Mermaid flowchart
 kern graph    Prompt --html --out g.html     # interactive HTML visualisation

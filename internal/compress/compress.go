@@ -5,6 +5,8 @@ package compress
 import (
 	"regexp"
 	"strings"
+
+	"github.com/JayveerPrajapati/kern/internal/terse"
 )
 
 var (
@@ -120,5 +122,9 @@ func CompressPrompt(text string) string {
 		}
 		final = append(final, lines[i])
 	}
-	return strings.Join(final, "\n")
+	// Strip unambiguous conversational filler (greetings, thanks, hedges).
+	// Conservative by design: only clichés that cannot carry technical payload;
+	// lines with paths, code, "file:line" or braces always survive.
+	cleaned, _ := terse.StripPromptFluff(strings.Join(final, "\n"))
+	return cleaned
 }
