@@ -19,6 +19,8 @@ const (
 	// DefaultModel is used when no model is requested.
 	DefaultModel = "llama3.2"
 	defaultHost  = "http://localhost:11434"
+	// DefaultEmbedModel is used when no embedding model is requested.
+	DefaultEmbedModel = "nomic-embed-text"
 )
 
 // Client talks to a local Ollama server.
@@ -134,4 +136,96 @@ func (c *Client) Complete(system, user string) (string, error) {
 		return "", errors.New("empty ollama response")
 	}
 	return out.Response, nil
+}
+
+// EmbedModel resolves the embedding model: the argument, else KERN_EMBED_MODEL,
+// else DefaultEmbedModel.
+func EmbedModel() string {
+	m := os.Getenv("KERN_EMBED_MODEL")
+	if m == "" {
+		m = DefaultEmbedModel
+	}
+	return m
+}
+
+// HasEmbeddingModel reports whether the embedding model (EmbedModel) is
+// available in the local Ollama instance's /api/tags.
+func (c *Client) HasEmbeddingModel() bool {
+	tags, err := c.tags()
+	if err != nil {
+		return false
+	}
+	want := EmbedModel()
+	for _, t := range tags {
+		if strings.EqualFold(t, want) {
+			return true
+		}
+	}
+	return false
+}
+
+// EmbedText embeds a single text with the local Ollama embedding model
+// (POST /api/embed). It returns a dense vector of float32s. Errors when Ollama
+// is unreachable or the model is missing — callers keep their deterministic
+// fallback in that case.
+func (c *Client) EmbedText(text string) ([]float32, error) {
+	model := EmbedModel()
+	payload, err := json.Marshal(map[string]any{
+		"model": model,
+		"input": text,
+	})
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequest(http.MethodPost, c.Base+"/api/embed", bytes.NewReader(payload))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := c.HTTP.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("ollama embed status %d", resp.StatusCode)
+	}
+	var out struct {
+		Embeddings [][]float32 `json:"embeddings"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, err
+	}
+	if len(out.Embeddings) == 0 {
+		return nil, errors.New("empty ollama embedding")
+	}
+	return out.Embeddings[0], nil
+}
+
+func (c *Client) tags() ([]string, error) {
+	req, err := http.NewRequest(http.MethodGet, c.Base+"/api/tags", nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.HTTP.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("ollama status %d", resp.StatusCode)
+	}
+	var out struct {
+		Models []struct {
+			Name string `json:"name"`
+		} `json:"models"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, err
+	}
+	names := make([]string, 0, len(out.Models))
+	for _, m := range out.Models {
+		names = append(names, m.Name)
+	}
+	return names, nil
 }

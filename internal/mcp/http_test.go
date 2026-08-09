@@ -2,11 +2,15 @@ package mcp
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/JayveerPrajapati/kern/internal/docsearch"
 	"github.com/JayveerPrajapati/kern/internal/lock"
 )
 
@@ -182,5 +186,74 @@ func TestHandleHTTPOversizeBodyRejected(t *testing.T) {
 	rr := doHTTP(t, newHTTPServer(), http.MethodPost, "application/json", big, nil)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("expected 200 for small body, got %d", rr.Code)
+	}
+}
+
+func TestHandleHTTPDocFetchEndToEnd(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	doc := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = io.WriteString(w, "<html><head><title>React Hooks</title></head><body><h1>useState</h1><p>useState manages component state in function components.</p></body></html>")
+	}))
+	defer doc.Close()
+
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "local.md"), []byte("local project notes\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	args, _ := json.Marshal(map[string]any{"url": doc.URL, "root": root, "name": "react"})
+	body := `{"jsonrpc":"2.0","id":99,"method":"tools/call","params":{"name":"kern_doc_fetch","arguments":` + string(args) + `}}`
+	rr := doHTTP(t, newHTTPServer(), http.MethodPost, "application/json", body, map[string]string{"Origin": "http://localhost:5173"})
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	text, isErr := toolResultText(t, resp)
+	if isErr {
+		t.Fatalf("isError result: %s", text)
+	}
+	if !strings.Contains(text, "React Hooks") || !strings.Contains(text, "useState") {
+		t.Fatalf("expected fetched page in result, got: %s", text)
+	}
+	ix := docsearch.Load(root)
+	if ix == nil {
+		t.Fatal("index not persisted after HTTP fetch")
+	}
+	found := false
+	for _, d := range ix.Docs {
+		if d.Chunk.File == "fetch/react.md" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("fetch/react.md missing from persisted index")
+	}
+}
+
+func TestIsLocalhostOrigin(t *testing.T) {
+	cases := []struct {
+		origin string
+		want   bool
+	}{
+		{"", true},
+		{"http://localhost:5173", true},
+		{"http://127.0.0.1:8080", true},
+		{"https://[::1]:9999", true},
+		{"https://evil.example", false},
+		{"not a url", false},
+	}
+	for _, c := range cases {
+		req := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(""))
+		if c.origin != "" {
+			req.Header.Set("Origin", c.origin)
+		}
+		if got := isLocalhostOrigin(req); got != c.want {
+			t.Errorf("isLocalhostOrigin(%q) = %v, want %v", c.origin, got, c.want)
+		}
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"strings"
 	"testing"
 )
 
@@ -67,6 +68,29 @@ func TestResolveName(t *testing.T) {
 	// Package-qualified target falls back to the bare name.
 	if s, ok := resolveName(ix, "lib.Public"); !ok || s.Name != "Public" {
 		t.Errorf("resolveName(\"lib.Public\") = %+v, %v; want Public", s, ok)
+	}
+}
+
+func TestQualifiedNameEntryPoints(t *testing.T) {
+	dir := writeTree(t, map[string]string{
+		"lib/lib.go": helperSrc,
+	})
+	ix, err := Build(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// All entry points must resolve a package-qualified reference to the def.
+	if g := ix.Graph("lib.Public"); !strings.Contains(g, "def ") || strings.Contains(g, "no symbol found") {
+		t.Fatalf("Graph(lib.Public) failed:\n%s", g)
+	}
+	if m := ix.Mermaid("lib.Public"); !strings.Contains(m, "flowchart LR") {
+		t.Fatalf("Mermaid(lib.Public) failed:\n%s", m)
+	}
+	if _, ok := ix.Neighborhood("lib.Public"); !ok {
+		t.Fatal("Neighborhood(lib.Public) not found")
+	}
+	if c := ix.Context("lib.Public", 4); c == "" {
+		t.Fatal("Context(lib.Public) empty")
 	}
 }
 

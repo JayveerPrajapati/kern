@@ -3,7 +3,7 @@ VERSION ?= dev
 LDFLAGS := -X main.version=$(VERSION)
 GOFLAGS := -buildvcs=false
 
-.PHONY: all build test vet install hooks release dist clean
+.PHONY: all build test vet bench install hooks release dist clean
 
 all: build
 
@@ -17,6 +17,10 @@ test:
 
 vet:
 	go vet ./...
+
+bench:
+	go test ./evaluate/bench/
+	go run ./evaluate/bench
 
 install: build
 	cp $(BIN)/kern $(BIN)/kern-mcp $${HOME}/.local/bin/

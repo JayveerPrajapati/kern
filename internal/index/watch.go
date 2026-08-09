@@ -15,6 +15,40 @@ func readFile(path string) ([]byte, error) {
 	return os.ReadFile(path)
 }
 
+// indexableMaxMtime walks root without reading file contents and returns the
+// newest modification time (Unix nanos) among indexable files plus their count.
+// For every extension quickExt admits, detectLang returns a non-empty language,
+// so a stat-only walk is equivalent to the content-checking indexableHashes.
+func indexableMaxMtime(root string) (int64, int) {
+	var maxMtime int64
+	var count int
+	_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if d.IsDir() {
+			if path != root && ignoreDirs[d.Name()] {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		rel, rerr := filepath.Rel(root, path)
+		if rerr != nil || !quickExt(rel) {
+			return nil
+		}
+		info, ierr := d.Info()
+		if ierr != nil {
+			return nil
+		}
+		count++
+		if mt := info.ModTime().UnixNano(); mt > maxMtime {
+			maxMtime = mt
+		}
+		return nil
+	})
+	return maxMtime, count
+}
+
 // indexableHashes walks root and returns a map of relative file path to
 // content hash for every indexable source file. Used by the watcher to detect
 // changes and by Load/Stale to decide whether a cached index is out of date.

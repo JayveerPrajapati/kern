@@ -32,7 +32,7 @@ type WhyInfo struct {
 // a resolvable definition are still listed; their rationale falls back to the
 // call-site context if one is documented.
 func Why(ix *index.Index, symbol string) (WhyInfo, bool) {
-	d, ok := ix.FindSymbol(symbol)
+	d, ok := ix.ResolveName(symbol)
 	if !ok {
 		return WhyInfo{}, false
 	}
@@ -40,7 +40,7 @@ func Why(ix *index.Index, symbol string) (WhyInfo, bool) {
 		Symbol: d,
 		Doc:    docComment(ix.Root, d.File, d.Line),
 	}
-	callers := ix.CallersOf(symbol)
+	callers := ix.CallersFor(d)
 	for _, c := range callers {
 		ref := CallerRef{Name: c}
 		if def, ok := ix.ResolveName(c); ok {
@@ -52,7 +52,7 @@ func Why(ix *index.Index, symbol string) (WhyInfo, bool) {
 		info.Callers = append(info.Callers, ref)
 	}
 	info.InEdges = len(callers)
-	info.Callees = len(uniqueSorted(ix.Calls[symbol]))
+	info.Callees = len(ix.CallsFor(d))
 	return info, true
 }
 

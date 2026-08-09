@@ -41,24 +41,29 @@ func (ix *Index) Neighborhood(symbol string) (GraphResult, bool) {
 	g := GraphResult{Root: symbol}
 	defs := ix.symbolsFor(symbol)
 	if len(defs) == 0 {
-		return g, false
+		if d, ok := resolveName(ix, symbol); ok {
+			defs = []Symbol{d}
+		} else {
+			return g, false
+		}
 	}
+	root := defs[0]
 	byID := map[string]GraphNode{}
-	rootID := defs[0].FullName()
+	rootID := root.FullName()
 	for _, d := range defs {
 		byID[d.FullName()] = GraphNode{
 			ID: d.FullName(), Name: d.FullName(), Kind: d.Kind,
 			Role: "def", File: d.File, Line: d.Line,
 		}
 	}
-	for _, c := range ix.CallersOf(symbol) {
+	for _, c := range ix.CallersFor(root) {
 		byID[c] = mergeNode(byID[c], GraphNode{ID: c, Name: c, Role: "caller"})
 		g.Edges = append(g.Edges, GraphEdge{
 			From: c, To: rootID,
 			Confidence: edgeConfidence(ix, c),
 		})
 	}
-	for _, c := range dedupeSorted(append([]string{}, ix.Calls[symbol]...)) {
+	for _, c := range ix.CallsFor(root) {
 		byID[c] = mergeNode(byID[c], GraphNode{ID: c, Name: c, Role: "callee"})
 		g.Edges = append(g.Edges, GraphEdge{
 			From: rootID, To: c,

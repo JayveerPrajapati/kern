@@ -101,6 +101,42 @@ func TestIndexAndSearch(t *testing.T) {
 	}
 }
 
+func TestSearchHybridBM25RanksExactKeyword(t *testing.T) {
+	root := t.TempDir()
+	// bakery.md contains the phrase "sourdough bread" only in prose; bread.md
+	// contains the exact rare term "proofer" twice.
+	writeDoc(t, root, "bakery.md", "# Bakery\n\nAbout sourdough bread and the proofing process in a bakery context.\n")
+	writeDoc(t, root, "bread.md", "# Proofer\n\nThe proofer is a specialized proofer used by bakers.\n")
+
+	ix, err := IndexDir(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := ix.Search("proofer", 5)
+	if len(got) == 0 {
+		t.Fatal("no results")
+	}
+	if got[0].Doc.Chunk.File != "bread.md" {
+		t.Errorf("BM25 should rank exact rare term first, got %s", got[0].Doc.Chunk.File)
+	}
+}
+
+func TestBM25FuseUnion(t *testing.T) {
+	root := t.TempDir()
+	writeDoc(t, root, "a.md", "alpha widgets and the alpha system with plenty of supporting detail here.\n")
+	writeDoc(t, root, "b.md", "nothing in common with the query terms except the word beta, truly nothing.\n")
+	ix, err := IndexDir(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// "alpha" matches only a.md lexically; cosine alone could pull in b.md on
+	// fuzzy n-grams, but RRF must keep a.md on top.
+	got := ix.Search("alpha", 5)
+	if len(got) == 0 || got[0].Doc.Chunk.File != "a.md" {
+		t.Fatalf("expected a.md on top, got %+v", got)
+	}
+}
+
 func TestIndexIgnoresCodeAndVendor(t *testing.T) {
 	root := t.TempDir()
 	writeDoc(t, root, "readme.md", "just a readme with some words\n")
@@ -133,5 +169,147 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 	}
 	if len(loaded.Docs) != len(ix.Docs) {
 		t.Fatalf("doc count mismatch: %d vs %d", len(loaded.Docs), len(ix.Docs))
+	}
+}
+
+// mockEmbedder produces a deterministic dense vector: tokenize chars and hash
+// into a fixed 64-dim bucket, so similar text yields similar vectors without
+// any external model.
+type mockEmbedder struct{}
+
+func (mockEmbedder) EmbedText(text string) ([]float32, error) {
+	vec := make([]float32, 64)
+	for i := 0; i < len(text); i++ {
+		vec[int(text[i])%64]++
+	}
+	return vec, nil
+}
+
+func TestIndexDirSemanticAndSearchFusion(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, content string) {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("a.md", "The service deploys containers to the cluster with a rolling update.\n")
+	write("b.md", "The banana bread recipe needs three ripe bananas and butter.\n")
+
+	ix, err := IndexDirSemantic(dir, mockEmbedder{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ix.Docs) != 2 {
+		t.Fatalf("expected 2 docs, got %d", len(ix.Docs))
+	}
+	for _, d := range ix.Docs {
+		if len(d.Vec) == 0 {
+			t.Errorf("doc %s missing deterministic Vec", d.ID)
+		}
+		if len(d.Semantic) != 64 {
+			t.Errorf("doc %s missing semantic vector (got %d)", d.ID, len(d.Semantic))
+		}
+	}
+
+	SemanticEmbedder = mockEmbedder{}
+	defer func() { SemanticEmbedder = nil }()
+
+	res := ix.Search("deploy container cluster", 2)
+	if len(res) == 0 {
+		t.Fatal("no results")
+	}
+	if res[0].Doc.Chunk.File != "a.md" {
+		t.Errorf("expected a.md first (deployment topic), got %s", res[0].Doc.Chunk.File)
+	}
+
+	// Without the embedder the dense signal is skipped and search still works.
+	SemanticEmbedder = nil
+	res = ix.Search("deploy container cluster", 2)
+	if len(res) == 0 {
+		t.Fatal("no results without semantic embedder")
+	}
+}
+
+func TestIndexDirRootHiddenDirBug(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "doc.md"), []byte("hello world content for indexing purposes here"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ix, err := IndexDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ix.Docs) != 1 {
+		t.Fatalf("expected 1 doc from non-hidden root, got %d (root-skip regression)", len(ix.Docs))
+	}
+}
+
+func TestMergeFetchedSearchableAndReplaceable(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "local.md"), []byte("local project notes about the deploy pipeline here"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	text := strings.Repeat("The react useState hook lets you manage component state. ", 40)
+	added, err := MergeFetched(dir, "react", text)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if added == 0 {
+		t.Fatal("expected chunks to be added")
+	}
+	ix := Load(dir)
+	if ix == nil {
+		t.Fatal("index not persisted")
+	}
+	if len(ix.Docs) != added+1 {
+		t.Fatalf("expected %d docs (local + fetched), got %d", added+1, len(ix.Docs))
+	}
+
+	res := ix.Search("useState component state", 2)
+	if len(res) == 0 {
+		t.Fatal("fetched doc not searchable")
+	}
+	if res[0].Doc.Chunk.File != "fetch/react.md" {
+		t.Fatalf("expected fetch/react.md to rank first, got %s", res[0].Doc.Chunk.File)
+	}
+
+	// Re-fetching the same name replaces, not appends.
+	added2, err := MergeFetched(dir, "react", text+"extra detail here. ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ix2 := Load(dir)
+	if len(ix2.Docs) != added2+1 {
+		t.Fatalf("re-fetch should replace: got %d docs", len(ix2.Docs))
+	}
+}
+
+func TestReembedFetchAttachesDenseVectors(t *testing.T) {
+	dir := t.TempDir()
+	text := strings.Repeat("The react useState hook manages component state. ", 40)
+	if _, err := MergeFetched(dir, "react", text); err != nil {
+		t.Fatal(err)
+	}
+	n, err := ReembedFetch(dir, "react", mockEmbedder{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ix := Load(dir)
+	var semantic, total int
+	for _, d := range ix.Docs {
+		if d.Chunk.File != "fetch/react.md" {
+			continue
+		}
+		total++
+		if len(d.Semantic) > 0 {
+			semantic++
+		}
+	}
+	if n != semantic || semantic == 0 || semantic != total {
+		t.Fatalf("expected %d/%d fetched chunks embedded, reembedded %d", total, total, n)
+	}
+
+	if nn, err := ReembedFetch(dir, "missing", mockEmbedder{}); err != nil || nn != 0 {
+		t.Fatalf("unknown fetch name should reembed nothing: n=%d err=%v", nn, err)
 	}
 }

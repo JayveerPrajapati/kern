@@ -55,19 +55,84 @@ func TestPromptCacheHit(t *testing.T) {
 	}
 }
 
+func TestPromptSemanticCacheHit(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	first, err := Prompt("how do I compress a very large server log file", "", Options{Cache: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.FromCache {
+		t.Fatal("first call must not be served from cache")
+	}
+
+	// Near-duplicate, reworded request: exact hash misses, semantic cache hits.
+	second, err := Prompt("how do I compress a big server log", "", Options{Cache: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !second.FromCache || !second.SemanticHit {
+		t.Fatalf("expected semantic cache hit, got FromCache=%v SemanticHit=%v", second.FromCache, second.SemanticHit)
+	}
+	if second.Similarity <= 0 || second.MatchedInput == "" {
+		t.Fatalf("expected similarity + matched input, got %+v", second)
+	}
+	if second.Output != first.Output {
+		t.Fatalf("semantic hit must reuse the stored output, got %q != %q", second.Output, first.Output)
+	}
+
+	// Disjoint request must NOT hit the semantic cache.
+	third, err := Prompt("buy cheap luxury apartments in zurich", "", Options{Cache: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if third.FromCache {
+		t.Fatalf("disjoint prompt should miss, got FromCache=%v", third.FromCache)
+	}
+}
+
+func TestLogSemanticCacheHit(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	first, err := Log("INFO starting\nERROR panic in database connection pool\nERROR connection refused\nDEBUG worker 3\n", Options{Cache: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.FromCache {
+		t.Fatal("first call must not be served from cache")
+	}
+
+	// Same recurring error, slightly different context lines: near-duplicate.
+	second, err := Log("INFO starting service\nERROR panic in the database connection pool\nERROR connection refused again\nDEBUG worker 4\n", Options{Cache: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !second.FromCache || !second.SemanticHit {
+		t.Fatalf("expected semantic log hit, got FromCache=%v SemanticHit=%v", second.FromCache, second.SemanticHit)
+	}
+	if second.Output != first.Output {
+		t.Fatalf("semantic log hit must reuse stored output")
+	}
+}
+
 func TestPromptCacheKeyDiffersByModel(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	prompt := "model-scoped cache check"
 
-	if _, err := Prompt(prompt, "", Options{Cache: true, Model: "gpt-4o-mini"}); err != nil {
+	first, err := Prompt(prompt, "", Options{Cache: true, Model: "gpt-4o-mini"})
+	if err != nil {
 		t.Fatal(err)
 	}
 	other, err := Prompt(prompt, "", Options{Cache: true, Model: "gpt-4o"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if other.FromCache {
-		t.Fatal("different model must not reuse the cached entry")
+	// Compression is deterministic and model-independent, so the semantic
+	// cache may serve a different-model request the same output — that is the
+	// point (similar query -> instant). The exact cache stays model-scoped.
+	if !other.FromCache {
+		t.Fatal("semantic cache should serve the identical deterministic result regardless of model name")
+	}
+	if other.Output != first.Output {
+		t.Fatalf("model-independent output mismatch: %q != %q", other.Output, first.Output)
 	}
 }
 

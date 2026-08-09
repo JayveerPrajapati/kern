@@ -20,6 +20,22 @@ function cacheFile(name: string): string {
 
 const DEFAULT_COMPACT_THRESHOLD = 4000
 
+// --- Session event capture (P0-2, borrowed from mksglu/context-mode) ---
+// Record what the session did (file edits, failing commands) into project
+// memory so that after a context compaction — or in a fresh session — the
+// agent can recall its own recent state via kern buddy / kern_memory_list.
+
+const EDIT_TOOLS = new Set(["edit", "write", "patch", "apply_patch", "update_file"])
+const FAIL_RE = /\berror\b|\bfailed\b|\bFAIL\b|cannot\b|not found|panic:/i
+
+function fileArg(args: any): string {
+  if (typeof args !== "object" || args === null) return ""
+  for (const k of ["file_path", "filePath", "path", "file"]) {
+    if (typeof args[k] === "string" && args[k].trim() !== "") return args[k]
+  }
+  return ""
+}
+
 export default (async ({ directory, $ }) => {
   const bin = kernBin(directory)
 
@@ -27,6 +43,18 @@ export default (async ({ directory, $ }) => {
     // Bun's shell escapes each interpolated array element as one argument.
     const out = await $`${bin} ${args}`.quiet()
     return out.stdout.toString()
+  }
+
+  // Best-effort: a memory-log failure must never break the host tool call.
+  async function remember(lesson: string, maxLen = 300): Promise<void> {
+    try {
+      const text = lesson.replace(/\s+/g, " ").trim()
+      if (!text) return
+      const clipped = text.length > maxLen ? text.slice(0, maxLen).trimEnd() + "…" : text
+      await run(["remember", clipped])
+    } catch {
+      /* swallow */
+    }
   }
 
   return {
@@ -74,6 +102,29 @@ export default (async ({ directory, $ }) => {
           return run(["project", root])
         },
       }),
+      kern_pack: tool({
+        description:
+          "Pack a whole project into one paste-ready bundle: project instructions, a directory tree with per-file token counts, and file contents, sized to fit a token budget. Use when an agent needs the full source to edit against, not just a map.",
+        args: {
+          root: tool.schema.string().optional(),
+          max_tokens: tool.schema.number().optional(),
+          no_instructions: tool.schema.boolean().optional(),
+          out: tool.schema.string().optional(),
+        },
+        async execute(args) {
+          const flags: string[] = ["pack"]
+          if (args.max_tokens) flags.push("--max-tokens", String(args.max_tokens))
+          if (args.no_instructions) flags.push("--no-instructions")
+          const root = args.root ?? "."
+          if (args.out) {
+            flags.push("--out", args.out)
+          } else {
+            flags.push("--max-tokens", String(args.max_tokens ?? 8000))
+          }
+          flags.push(root)
+          return run(flags)
+        },
+      }),
       kern_run_build: tool({
         description:
           "Run a build/test command locally and return only the compact result (exit status + errors), not full output. Use for builds, tests, linting to save context.",
@@ -99,6 +150,18 @@ export default (async ({ directory, $ }) => {
           return out
         },
       }),
+      kern_optimize_output: tool({
+        description:
+          "Compress an LLM's response (assistant output) by stripping filler, pleasantries and hedge language while preserving code blocks, lists, errors and technical content. Deterministic and local, no LLM involved. Use on verbose model replies before they are stored or echoed back into context.",
+        args: { text: tool.schema.string() },
+        async execute(args) {
+          const file = cacheFile("output.text")
+          await writeFile(file, args.text)
+          const out = await run(["terse", file])
+          await rm(file, { force: true })
+          return out
+        },
+      }),
       kern_stats: tool({
         description:
           "Return before/after token savings and cost estimates from kern optimizations, optionally filtered to today or a session.",
@@ -112,6 +175,26 @@ export default (async ({ directory, $ }) => {
           if (args.days) flags.push("--days", String(args.days))
           if (args.session) flags.push("--session", args.session)
           if (args.json) flags.push("--json")
+          return run(flags)
+        },
+      }),
+      kern_semcache: tool({
+        description:
+          "Inspect and manage the semantic cache that serves similar (not just identical) prior queries instantly. Actions: stats (default) lists entries per namespace (prompt/log), list shows the stored inputs of a namespace, clear wipes it (or all), similarity reports the Jaccard overlap of two inputs so you can predict whether a near-duplicate will hit.",
+        args: {
+          action: tool.schema.string().optional(),
+          namespace: tool.schema.string().optional(),
+          a: tool.schema.string().optional(),
+          b: tool.schema.string().optional(),
+        },
+        async execute(args) {
+          const flags: string[] = ["semcache"]
+          const action = args.action ?? "stats"
+          flags.push(action)
+          if (args.namespace) flags.push(args.namespace)
+          if (action === "similarity" && args.a && args.b) {
+            flags.push(args.a, args.b)
+          }
           return run(flags)
         },
       }),
@@ -461,6 +544,14 @@ export default (async ({ directory, $ }) => {
           return run(flags)
         },
       }),
+      kern_usage_guide: tool({
+        description:
+          "Categorized usage guide for every kern MCP tool with performance tiers (fast/moderate/expensive), recommended workflows, and pitfalls. Consult this first when deciding which tool fits a task.",
+        args: {},
+        async execute() {
+          return run(["guide"])
+        },
+      }),
       kern_memory_add: tool({
         description:
           "Persist a distilled, cross-session lesson for a project (the project 'brain'). Agents record what they learned so future sessions can recall it. Appends to the project memory store (most recent 50 entries kept).",
@@ -511,10 +602,87 @@ export default (async ({ directory, $ }) => {
           return out
         },
       }),
+      kern_security: tool({
+        description:
+          "Local security scan of a project's source files: hardcoded secrets, dynamic SQL, shell command injection, weak crypto, insecure randomness and unsafe deserialization. Deterministic and line-scoped. Use before reviewing code or shipping changes.",
+        args: {
+          root: tool.schema.string().optional(),
+          severity: tool.schema.string().optional(),
+          max: tool.schema.number().optional(),
+          format: tool.schema.string().optional(),
+        },
+        async execute(args) {
+          const flags: string[] = ["sec"]
+          if (args.root) flags.push(args.root)
+          if (args.severity) flags.push("--severity", args.severity)
+          if (args.max) flags.push("--max", String(args.max))
+          if (args.format === "json") flags.push("--json")
+          return run(flags)
+        },
+      }),
+      kern_safe_delete: tool({
+        description:
+          "Check whether a symbol can be safely deleted: reports in-project callers (production vs test-only), whether it is exported or an entry point, and a conservative SAFE/NOT SAFE verdict. Use before removing dead code.",
+        args: {
+          symbol: tool.schema.string(),
+          root: tool.schema.string().optional(),
+          format: tool.schema.string().optional(),
+        },
+        async execute(args) {
+          const flags: string[] = ["delete", args.symbol]
+          if (args.root) flags.push(args.root)
+          if (args.format === "json") flags.push("--json")
+          return run(flags)
+        },
+      }),
+      kern_rename: tool({
+        description:
+          "Structural symbol rename on the AST index: previews every definition/reference for a Go package-level symbol (types, funcs, vars, consts) with file:line:col edits, then applies them when apply=true. Edits come from a real go/ast parse, so strings, comments, struct-field names, composite-literal keys, import aliases and the package clause are never touched; cross-package references (pkg.Symbol) are handled for exported symbols. apply=true commits transactionally with backups under .kern/rename-backup/ and rollback on failure. Method and non-Go symbols are refused. Preview first, review the edits, then re-run with apply=true.",
+        args: {
+          symbol: tool.schema.string(),
+          new_name: tool.schema.string(),
+          root: tool.schema.string().optional(),
+          apply: tool.schema.boolean().optional(),
+          format: tool.schema.string().optional(),
+        },
+        async execute(args) {
+          const flags: string[] = ["rename", args.symbol, args.new_name]
+          if (args.root) flags.push(args.root)
+          if (args.apply) flags.push("--apply")
+          if (args.format === "json") flags.push("--json")
+          return run(flags)
+        },
+      }),
+      kern_exec: tool({
+        description:
+          "Run code in an isolated local runtime and return ONLY stdout (Think in Code). Language is selected by lang= or a shebang line; runtimes resolve from PATH (python3, node, go, bash, perl, ...). Runs in a fresh temp dir with a hard timeout (default 10s) and a stdout byte cap (default 16KiB); stderr is only surfaced on failure. Use to compute exact answers (math, data munging, JSON transforms) without polluting context. V1 does NOT block network egress — do not feed untrusted code.",
+        args: {
+          code: tool.schema.string(),
+          lang: tool.schema.string().optional(),
+          timeout: tool.schema.number().optional(),
+          max: tool.schema.number().optional(),
+          stdin: tool.schema.string().optional(),
+        },
+        async execute(args) {
+          const file = cacheFile("exec.code")
+          await writeFile(file, args.code)
+          const flags: string[] = ["exec", file, "--lang", args.lang ?? "python3"]
+          if (args.timeout) flags.push("--timeout", String(args.timeout))
+          if (args.max) flags.push("--max", String(args.max))
+          if (args.stdin) {
+            const stdinFile = cacheFile("exec.stdin")
+            await writeFile(stdinFile, args.stdin)
+            flags.push("--stdin", stdinFile)
+          }
+          const out = await run(flags)
+          await rm(file, { force: true })
+          if (args.stdin) await rm(cacheFile("exec.stdin"), { force: true })
+          return out
+        },
+      }),
       kern_doc_search: tool({
         description:
-          "Local search over a project's documents (markdown, text, rst, adoc). Chunks docs locally with deterministic n-gram hashing and returns only the most relevant fragments. Use instead of pasting whole documents into context.",
-        args: {
+          "Local search over a project's documents (markdown, text, rst, adoc). Chunks docs locally with deterministic n-gram hashing and returns only the most relevant fragments. Use instead of pasting whole documents into context.",        args: {
           query: tool.schema.string(),
           root: tool.schema.string().optional(),
           k: tool.schema.number().optional(),
@@ -528,13 +696,47 @@ export default (async ({ directory, $ }) => {
       }),
       kern_doc_index: tool({
         description:
-          "Pre-index a project's documents for kern_doc_search. Run once after documents change; searches auto-index on first use.",
+          "Pre-index a project's documents for kern_doc_search. Run once after documents change; searches auto-index on first use. Pass semantic=true to also embed chunks with a local Ollama embedding model (KERN_EMBED_MODEL, default nomic-embed-text); queries then fuse a real-meaning dense signal with the deterministic n-gram vectors and BM25.",
         args: {
           root: tool.schema.string().optional(),
+          semantic: tool.schema.boolean().optional(),
         },
         async execute(args) {
           const flags: string[] = ["docs", "index"]
           if (args.root) flags.push(args.root)
+          if (args.semantic) flags.push("--semantic")
+          return run(flags)
+        },
+      }),
+      kern_doc_fetch: tool({
+        description:
+          "Fetch a public documentation page and merge it into the project's local doc index so kern_doc_search can find it. This is the ONLY network call in kern and is invoked explicitly by the user; everything else stays local. The page is HTML-stripped, capped, stored under the cache and indexed as fetch/<name>.md (re-fetching a name replaces it). Pass semantic=true to also attach dense embeddings via the local Ollama model.",
+        args: {
+          url: tool.schema.string(),
+          root: tool.schema.string().optional(),
+          name: tool.schema.string().optional(),
+          semantic: tool.schema.boolean().optional(),
+        },
+        async execute(args) {
+          const flags: string[] = ["docs", "fetch", args.url]
+          if (args.name) flags.push(args.name)
+          if (args.root) flags.push(args.root)
+          if (args.semantic) flags.push("--semantic")
+          return run(flags)
+        },
+      }),
+      kern_commitmsg: tool({
+        description:
+          "Generate a deterministic conventional-commit message (type, scope, subject, per-file body) from the git diff — rule-based, no LLM, no network; the same diff always yields the same message. Use when a commit needs a starting message the human can tweak.",
+        args: {
+          root: tool.schema.string().optional(),
+          staged: tool.schema.boolean().optional(),
+          range: tool.schema.string().optional(),
+        },
+        async execute(args) {
+          const flags: string[] = ["commitmsg"]
+          if (args.staged) flags.push("--staged")
+          if (args.range) flags.push("--range", args.range)
           return run(flags)
         },
       }),
@@ -701,10 +903,28 @@ export default (async ({ directory, $ }) => {
 
     // Auto-compress large tool outputs before they enter context.
     "tool.execute.after": async (input, output) => {
+      const text = typeof output?.output === "string" ? output.output : ""
+
+      // Session capture: edits become project-memory lessons so a compacted
+      // or fresh session can recover what was touched.
+      try {
+        if (EDIT_TOOLS.has(input.tool)) {
+          const fp = fileArg(input.args)
+          if (fp) await remember(`Edited ${fp}`)
+        } else if (input.tool === "bash" && text.length < 4000 && text.length > 0) {
+          const first = text.split("\n").find((l) => FAIL_RE.test(l))
+          if (first && first.trim().length > 0) {
+            await remember(`Command failed: ${first.trim()}`)
+          }
+        }
+      } catch {
+        /* swallow */
+      }
+
+      // Compression: only bash/read/grep outputs above the threshold.
       if (input.tool !== "bash" && input.tool !== "read" && input.tool !== "grep") {
         return
       }
-      const text = typeof output?.output === "string" ? output.output : ""
       if (text.length < DEFAULT_COMPACT_THRESHOLD) return
       try {
         const file = cacheFile("tool-output.txt")
@@ -715,6 +935,26 @@ export default (async ({ directory, $ }) => {
         output.output = `[kern] compressed ${text.length} -> ${compressed.length} chars\n${compressed}`
       } catch {
         // Never break tool execution on optimizer failure.
+      }
+    },
+
+    // P0-2: capture user decisions at low volume so the session's direction
+    // survives compaction. Only brief, substantive prompts are recorded.
+    "chat.message": async (_input, output) => {
+      try {
+        const parts: any[] = (output.parts as any[]) ?? []
+        let text = ""
+        for (const p of parts) {
+          if (typeof p.text === "string") text += p.text
+          else if (typeof p.content === "string") text += p.content
+        }
+        text = text.trim()
+        if (!text || text.length > 600) return
+        const lower = text.toLowerCase()
+        if (/\b(remember|forget)\b|^\/(remember|forget)\b/.test(lower)) return
+        await remember(`User: ${text}`, 200)
+      } catch {
+        /* swallow */
       }
     },
   }

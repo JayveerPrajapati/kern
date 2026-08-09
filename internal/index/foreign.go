@@ -180,6 +180,11 @@ func quickExt(rel string) bool {
 	return false
 }
 
+// QuickExt reports whether a root-relative file path has a source extension
+// the index considers indexable. Used by downstream scanners to reuse the
+// index's file-selection policy.
+func QuickExt(rel string) bool { return quickExt(rel) }
+
 // isIndexable reports whether a file should be part of the index.
 func isIndexable(rel string, src []byte) bool {
 	return detectLang(rel, src) != ""
@@ -513,7 +518,8 @@ func stripLine(ln string, spec *langSpec, st *stripState) string {
 	return s
 }
 
-func braceDelta(clean string) (opens, closes int) {	for _, r := range clean {
+func braceDelta(clean string) (opens, closes int) {
+	for _, r := range clean {
 		switch r {
 		case '{':
 			opens++
@@ -600,10 +606,10 @@ func extractForeign(rel string, src []byte, lang string) ([]Symbol, map[string][
 	syms = append(syms, extractEntries(f, spec, types, syms, rel, lang)...)
 	dedupeCalls(calls)
 	pkg := &Pkg{
-		Name:    filepath.Base(filepath.Dir(rel)),
-		Path:    filepath.Dir(rel),
-		Files:   []string{rel},
-		Lang:    lang,
+		Name:  filepath.Base(filepath.Dir(rel)),
+		Path:  filepath.Dir(rel),
+		Files: []string{rel},
+		Lang:  lang,
 	}
 	return syms, calls, pkg, nil
 }

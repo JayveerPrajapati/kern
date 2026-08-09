@@ -31,6 +31,7 @@ type Report struct {
 var ignoreDirs = map[string]bool{
 	".git": true, ".hg": true, ".svn": true, "node_modules": true,
 	"vendor": true, "dist": true, "build": true, ".cache": true,
+	".kern": true,
 }
 
 var sourceExts = map[string]bool{

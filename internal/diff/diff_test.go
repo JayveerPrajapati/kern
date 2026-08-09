@@ -24,7 +24,7 @@ func TestUnifiedDeleteInsert(t *testing.T) {
 		"--- a/old.txt",
 		"+++ b/new.txt",
 		"@@",
-		"+ cruel",
+		"+cruel",
 	}
 	for _, w := range wantContains {
 		if !strings.Contains(got, w) {
@@ -33,6 +33,24 @@ func TestUnifiedDeleteInsert(t *testing.T) {
 	}
 	if strings.Contains(got, "-world") {
 		t.Fatalf("world should remain unchanged:\n%s", got)
+	}
+}
+
+func TestUnifiedLabelPathNormalized(t *testing.T) {
+	a := split("foo")
+	b := split("bar")
+	got := Unified("/tmp/fa", "./fb", a, b)
+	if !strings.Contains(got, "--- a/tmp/fa") || strings.Contains(got, "a//tmp") {
+		t.Fatalf("absolute path label not normalized:\n%s", got)
+	}
+	if !strings.Contains(got, "+++ b/fb") {
+		t.Fatalf("relative path label not normalized:\n%s", got)
+	}
+	if strings.Contains(got, "- foo\n") || !strings.Contains(got, "-foo") {
+		t.Fatalf("removed line should render without a space after '-':\n%s", got)
+	}
+	if !strings.Contains(got, "+bar") || strings.Contains(got, "+ bar") {
+		t.Fatalf("added line should render as '+bar':\n%s", got)
 	}
 }
 

@@ -62,6 +62,21 @@ var prompts = []Prompt{
 			{Name: "root", Description: "Project root (defaults to current directory)", Required: false},
 		},
 	},
+	{
+		Name:        "refactor_symbol",
+		Description: "Safely rename a Go package-level symbol: understand its dependents, expand its neighbourhood, preview every AST-scoped edit, then apply with backups.",
+		Arguments: []PromptArgument{
+			{Name: "symbol", Description: "The Go package-level symbol to rename (e.g. Widget)", Required: true},
+			{Name: "root", Description: "Project root (defaults to current directory)", Required: false},
+		},
+	},
+	{
+		Name:        "compute_quick_answer",
+		Description: "Run a small script (Python/Node/bash/...) in an isolated runtime to compute an exact answer — math, data munging, JSON transforms — and get pure stdout back, keeping the conversation free of build noise.",
+		Arguments: []PromptArgument{
+			{Name: "task", Description: "What to compute (e.g. 'sum of 1..1000', 'parse this JSON')", Required: true},
+		},
+	},
 }
 
 // promptStep formats one numbered tool-call instruction.
@@ -139,6 +154,30 @@ func promptText(name string, args map[string]any) string {
 			n(2, "kern_test_gaps", "Find untested hotspots touched by the change."),
 			n(3, "kern_guard_check", "Enforce boundaries across the changed files."),
 			"Give a go/no-go verdict with reasons and any required follow-ups.",
+		}, "\n")
+	case "refactor_symbol":
+		symbol := argString(args, "symbol")
+		if symbol == "" {
+			return "refactor_symbol requires a `symbol` argument (e.g. 'Widget')."
+		}
+		return strings.Join([]string{
+			fmt.Sprintf("Safely refactor the Go package-level symbol %q.", symbol),
+			n(1, "kern_why", fmt.Sprintf("Understand who depends on %q and why before touching it.", symbol)),
+			n(2, "kern_near", "Expand the neighbourhood of the symbol to find every reference context."),
+			fmt.Sprintf("%d. Call `kern_rename` (symbol=%s) in preview mode, review every file:line:col edit, then re-run with apply=true if the preview is correct.", 3, symbol),
+			"Report what was renamed and confirm the index rebuilt.",
+		}, "\n")
+	case "compute_quick_answer":
+		task := argString(args, "task")
+		if task == "" {
+			return "compute_quick_answer requires a `task` argument."
+		}
+		return strings.Join([]string{
+			fmt.Sprintf("Compute this exactly by running code, not by guessing: %q", task),
+			"1. Write the smallest Python3 (or Node) script that prints exactly the answer to stdout and nothing else.",
+			"2. Call `kern_exec` (code=..., lang=python3 or node). The result is pure stdout.",
+			"3. If it failed, read the stderr in the error, fix the script, and re-run.",
+			"4. Report the computed answer plainly; do not include the script source unless asked.",
 		}, "\n")
 	}
 	return "unknown prompt"

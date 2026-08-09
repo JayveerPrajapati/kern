@@ -460,13 +460,13 @@ func TestLanguageDetection(t *testing.T) {
 
 func TestBuildMixedProject(t *testing.T) {
 	dir := writeTree(t, map[string]string{
-		"main.go":       srcMain,
-		"app.py":        pySrc,
-		"store.js":      jsSrc,
-		"point.rs":      rsSrc,
-		"shape.cpp":     cppSrc,
-		"App.java":      javaSrc,
-		"app.rb":        rbSrc,
+		"main.go":   srcMain,
+		"app.py":    pySrc,
+		"store.js":  jsSrc,
+		"point.rs":  rsSrc,
+		"shape.cpp": cppSrc,
+		"App.java":  javaSrc,
+		"app.rb":    rbSrc,
 	})
 	ix, err := Build(dir)
 	if err != nil {

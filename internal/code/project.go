@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/JayveerPrajapati/kern/internal/cache"
+	"github.com/JayveerPrajapati/kern/internal/ignore"
 )
 
 // Project is a compact representation of a whole repository.
@@ -24,6 +25,7 @@ var ignoreDirs = map[string]bool{
 	".next": true, "__pycache__": true, ".venv": true, "venv": true,
 	".cache": true, ".idea": true, ".vscode": true, "bin": true,
 	".mvn": true, "coverage": true, "tmp": true, ".terraform": true,
+	".kern": true,
 }
 
 var ignoreFiles = map[string]bool{
@@ -43,12 +45,18 @@ func BuildProject(root string, maxFiles, maxSymbolsPerFile int) (*Project, error
 	if err != nil {
 		return nil, err
 	}
+	ig := ignore.Load(root)
 	err = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return nil
 		}
+		rel, rerr := filepath.Rel(root, path)
+		if rerr != nil {
+			return nil
+		}
+		rel = filepath.ToSlash(rel)
 		if d.IsDir() {
-			if path != root && ignoreDirs[d.Name()] {
+			if path != root && (ignoreDirs[d.Name()] || ig.Ignored(rel)) {
 				return filepath.SkipDir
 			}
 			return nil
@@ -56,11 +64,7 @@ func BuildProject(root string, maxFiles, maxSymbolsPerFile int) (*Project, error
 		if len(p.Files) >= maxFiles {
 			return filepath.SkipAll
 		}
-		rel, rerr := filepath.Rel(root, path)
-		if rerr != nil {
-			return nil
-		}
-		if shouldIgnore(rel) {
+		if shouldIgnore(rel) || ig.Ignored(rel) {
 			p.Ignored++
 			return nil
 		}
@@ -115,6 +119,14 @@ func shouldIgnore(rel string) bool {
 	}
 	return false
 }
+
+// ShouldIgnore reports whether a repository-relative path is excluded from
+// project walks (VCS/build dirs, lockfiles, dotfiles, minified assets).
+func ShouldIgnore(rel string) bool { return shouldIgnore(rel) }
+
+// IsIgnoredDir reports whether a directory basename is excluded from project
+// walks (e.g. .git, node_modules, vendor, dist).
+func IsIgnoredDir(name string) bool { return ignoreDirs[name] }
 
 // Render renders the project map as compact text.
 func (p *Project) Render() string {
