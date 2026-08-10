@@ -16,15 +16,20 @@ import (
 
 // indexVersion is bumped whenever the persisted index schema changes, so
 // stale caches are rebuilt automatically instead of serving zero-value fields.
-const indexVersion = 5
+const indexVersion = 6
 
 // Index is the in-memory representation of a project's AST index.
 type Index struct {
-	Root           string              `json:"root"`
-	Version        int                 `json:"version"`
-	Symbols        []Symbol            `json:"symbols"`
-	Calls          map[string][]string `json:"calls"`
-	Callers        map[string][]string `json:"callers"`
+	Root    string              `json:"root"`
+	Version int                 `json:"version"`
+	Symbols []Symbol            `json:"symbols"`
+	Calls   map[string][]string `json:"calls"`
+	Callers map[string][]string `json:"callers"`
+	// Inherits maps a subtype's full name to its bases, each tagged with the
+	// edge kind ("extends:Animal", "implements:Pet", "embeds:Base"). InheritedBy
+	// is the reverse map (base -> subtypes) for find-implementations queries.
+	Inherits       map[string][]string `json:"inherits,omitempty"`
+	InheritedBy    map[string][]string `json:"inherited_by,omitempty"`
 	Pkgs           map[string]*Pkg     `json:"packages"`
 	FileHashes     map[string]string   `json:"file_hashes"`
 	GeneratedFiles map[string]bool     `json:"generated_files,omitempty"`
@@ -46,6 +51,8 @@ func New(root string) *Index {
 		Version:        indexVersion,
 		Calls:          map[string][]string{},
 		Callers:        map[string][]string{},
+		Inherits:       map[string][]string{},
+		InheritedBy:    map[string][]string{},
 		Pkgs:           map[string]*Pkg{},
 		FileHashes:     map[string]string{},
 		GeneratedFiles: map[string]bool{},
@@ -236,15 +243,16 @@ func (ix *Index) addFile(rel string, src []byte) {
 	lang := detectLang(rel, src)
 	var syms []Symbol
 	var calls map[string][]string
+	var inherits map[string][]string
 	var pkg *Pkg
 	if lang == "go" {
 		var err error
-		syms, calls, pkg, err = extract(rel, src)
+		syms, calls, inherits, pkg, err = extract(rel, src)
 		if err != nil {
 			return
 		}
 	} else {
-		syms, calls, pkg, _ = extractForeign(rel, src, lang)
+		syms, calls, inherits, pkg, _ = extractForeign(rel, src, lang)
 	}
 	ix.FileHashes[rel] = cache.Hash(src)
 	if ix.GeneratedFiles == nil {
@@ -254,6 +262,9 @@ func (ix *Index) addFile(rel string, src []byte) {
 	ix.Symbols = append(ix.Symbols, syms...)
 	for owner, callees := range calls {
 		ix.Calls[owner] = append(ix.Calls[owner], callees...)
+	}
+	for subtype, bases := range inherits {
+		ix.Inherits[subtype] = append(ix.Inherits[subtype], bases...)
 	}
 	if pkg != nil {
 		ix.Pkgs[pkg.Path] = pkg
@@ -284,6 +295,19 @@ func (ix *Index) computeCallers() {
 	}
 	for k := range ix.Callers {
 		ix.Callers[k] = dedupeSorted(ix.Callers[k])
+	}
+	// Reverse inheritance map: base name (and bare name) -> subtypes.
+	ix.InheritedBy = map[string][]string{}
+	for subtype, taggedBases := range ix.Inherits {
+		for _, tb := range taggedBases {
+			base := strings.TrimPrefix(tb, "extends:")
+			base = strings.TrimPrefix(base, "implements:")
+			base = strings.TrimPrefix(base, "embeds:")
+			ix.InheritedBy[base] = append(ix.InheritedBy[base], subtype)
+		}
+	}
+	for k := range ix.InheritedBy {
+		ix.InheritedBy[k] = dedupeSorted(ix.InheritedBy[k])
 	}
 }
 
@@ -416,6 +440,27 @@ func (ix *Index) CallsFor(s Symbol) []string {
 	return dedupeSorted(out)
 }
 
+// SupertypesOf returns the inheritance/implementation bases of a symbol as
+// tagged edges ("extends:Animal", "implements:Pet", "embeds:Base"), deduped
+// under any key form of s.
+func (ix *Index) SupertypesOf(s Symbol) []string {
+	var out []string
+	for _, k := range edgeKeys(s) {
+		out = append(out, ix.Inherits[k]...)
+	}
+	return dedupeSorted(out)
+}
+
+// SubtypesOf returns the symbols that extend/implement a base, deduped under
+// any key form of the base.
+func (ix *Index) SubtypesOf(s Symbol) []string {
+	var out []string
+	for _, k := range edgeKeys(s) {
+		out = append(out, ix.InheritedBy[k]...)
+	}
+	return dedupeSorted(out)
+}
+
 // Graph renders the neighbourhood of a symbol: definition, callers, and what
 // it calls.
 func (ix *Index) Graph(symbol string) string {
@@ -465,7 +510,12 @@ func (ix *Index) Graph(symbol string) string {
 			b.WriteString("\n")
 		}
 	}
-	return strings.TrimSuffix(b.String(), "\n")
+	result := strings.TrimSuffix(b.String(), "\n")
+	stats := ix.TokenSavingsForGraph(root.File, result)
+	if summary := stats.Summary(); summary != "" {
+		result += "\n\n" + summary
+	}
+	return result
 }
 
 // Context returns the minimal slice of source an agent needs about a symbol:
@@ -514,7 +564,12 @@ func (ix *Index) Context(symbol string, linesAround int) string {
 		b.WriteString(strings.Join(callees, ", "))
 		b.WriteString("\n")
 	}
-	return strings.TrimSuffix(b.String(), "\n")
+	result := strings.TrimSuffix(b.String(), "\n")
+	stats := ix.TokenSavingsForContext(d.File, result)
+	if summary := stats.Summary(); summary != "" {
+		result += "\n\n" + summary
+	}
+	return result
 }
 
 func itoa(n int) string {

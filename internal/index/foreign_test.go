@@ -5,7 +5,7 @@ import (
 )
 
 func symsIn(lang string, src string) []Symbol {
-	syms, calls, _, _ := extractForeign("file."+extFor(lang), []byte(src), lang)
+	syms, calls, _, _, _ := extractForeign("file."+extFor(lang), []byte(src), lang)
 	_ = calls
 	return syms
 }
@@ -59,7 +59,7 @@ def main():
 `
 
 func TestPythonExtract(t *testing.T) {
-	syms, calls, _, _ := extractForeign("app.py", []byte(pySrc), "python")
+	syms, calls, _, _, _ := extractForeign("app.py", []byte(pySrc), "python")
 	if s := findSym(syms, "greet"); s == nil || s.Kind != "func" || s.Lang != "python" {
 		t.Fatalf("expected func greet, got %+v", s)
 	}
@@ -114,7 +114,7 @@ function helper() {
 `
 
 func TestJavascriptExtract(t *testing.T) {
-	syms, calls, _, _ := extractForeign("store.js", []byte(jsSrc), "javascript")
+	syms, calls, _, _, _ := extractForeign("store.js", []byte(jsSrc), "javascript")
 	if s := findSym(syms, "MAX"); s == nil || s.Kind != "const" {
 		t.Fatalf("expected const MAX, got %+v", s)
 	}
@@ -178,7 +178,7 @@ export class Circle implements Shape {
 `
 
 func TestTypescriptExtract(t *testing.T) {
-	syms, calls, _, _ := extractForeign("shape.ts", []byte(tsSrc), "typescript")
+	syms, calls, _, _, _ := extractForeign("shape.ts", []byte(tsSrc), "typescript")
 	if s := findSym(syms, "Shape"); s == nil || s.Kind != "interface" {
 		t.Fatalf("expected interface Shape, got %+v", s)
 	}
@@ -234,7 +234,7 @@ fn main() {
 `
 
 func TestRustExtract(t *testing.T) {
-	syms, calls, _, _ := extractForeign("point.rs", []byte(rsSrc), "rust")
+	syms, calls, _, _, _ := extractForeign("point.rs", []byte(rsSrc), "rust")
 	if s := findSym(syms, "Point"); s == nil || s.Kind != "struct" {
 		t.Fatalf("expected struct Point, got %+v", s)
 	}
@@ -290,7 +290,7 @@ int main(int argc, char** argv) {
 `
 
 func TestCppExtract(t *testing.T) {
-	syms, calls, _, _ := extractForeign("shape.cpp", []byte(cppSrc), "cpp")
+	syms, calls, _, _, _ := extractForeign("shape.cpp", []byte(cppSrc), "cpp")
 	if s := findSym(syms, "Point"); s == nil || s.Kind != "struct" {
 		t.Fatalf("expected struct Point, got %+v", s)
 	}
@@ -346,7 +346,7 @@ class Helper {
 `
 
 func TestJavaExtract(t *testing.T) {
-	syms, calls, _, _ := extractForeign("App.java", []byte(javaSrc), "java")
+	syms, calls, _, _, _ := extractForeign("App.java", []byte(javaSrc), "java")
 	if s := findSym(syms, "App"); s == nil || s.Kind != "class" {
 		t.Fatalf("expected class App, got %+v", s)
 	}
@@ -396,7 +396,7 @@ end
 `
 
 func TestRubyExtract(t *testing.T) {
-	syms, calls, _, _ := extractForeign("app.rb", []byte(rbSrc), "ruby")
+	syms, calls, _, _, _ := extractForeign("app.rb", []byte(rbSrc), "ruby")
 	if s := findSym(syms, "Util"); s == nil || s.Kind != "module" {
 		t.Fatalf("expected module Util, got %+v", s)
 	}
@@ -530,7 +530,7 @@ export function bump(): number {
 .card { color: red; }
 </style>
 `
-	syms, _, _, _ := extractForeign("components/Counter.vue", []byte(src), "typescript")
+	syms, _, _, _, _ := extractForeign("components/Counter.vue", []byte(src), "typescript")
 	if s := findSym(syms, "bump"); s == nil {
 		t.Fatalf("expected func bump from vue script, got %v", syms)
 	}
@@ -557,7 +557,7 @@ func TestSfcExtractSvelte(t *testing.T) {
 
 <h1 id="title">Hello {name}</h1>
 `
-	syms, _, _, _ := extractForeign("widget.svelte", []byte(src), "javascript")
+	syms, _, _, _, _ := extractForeign("widget.svelte", []byte(src), "javascript")
 	if s := findSym(syms, "greet"); s == nil || s.Kind != "func" {
 		t.Fatalf("expected func greet from svelte script, got %v", s)
 	}
@@ -678,7 +678,7 @@ const title = "Home";
   document.title = "hi";
 </script>
 `
-	syms, _, _, _ := extractForeign("pages/Index.astro", []byte(src), "typescript")
+	syms, _, _, _, _ := extractForeign("pages/Index.astro", []byte(src), "typescript")
 	if s := findSym(syms, "Props"); s == nil || s.Kind != "interface" {
 		t.Fatalf("expected interface Props from astro frontmatter, got %v", s)
 	}

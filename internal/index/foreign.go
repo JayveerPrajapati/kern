@@ -543,12 +543,37 @@ type typeDecl struct {
 	bodyEnd int // exclusive line index
 }
 
-// extractForeign extracts symbols and call edges from a non-Go source file
-// using per-language lexical rules. It is heuristic, not a full parser.
-func extractForeign(rel string, src []byte, lang string) ([]Symbol, map[string][]string, *Pkg, error) {
+// extractForeign extracts symbols, call edges and inheritance edges from a
+// non-Go source file. When built with -tags treesitter, it uses tree-sitter
+// for precise AST-based extraction; otherwise it falls back to regex-based
+// heuristics.
+func extractForeign(rel string, src []byte, lang string) ([]Symbol, map[string][]string, map[string][]string, *Pkg, error) {
+	// Try tree-sitter first if available. Tree-sitter handles definitions and
+	// call edges precisely; entry points (routes, annotations) still come from
+	// the regex entry rules, so merge them in to keep routes searchable.
+	if syms, calls, inherits, pkg, err := tsExtract(rel, src, lang); err == nil {
+		src = sfcScript(rel, src)
+		if len(bytes.TrimSpace(src)) != 0 {
+			spec := specs[lang]
+			f := analyze(src, spec)
+			// Rebuild the type table from tree-sitter symbols so entry rules can
+			// resolve method receivers (UserController.list) the same way the
+			// regex path does.
+			var types []typeDecl
+			for i := range syms {
+				if typeKinds[syms[i].Kind] {
+					types = append(types, typeDecl{sym: syms[i], bodyEnd: syms[i].End})
+				}
+			}
+			syms = append(syms, extractEntries(f, spec, types, syms, rel, lang)...)
+		}
+		return syms, calls, inherits, pkg, nil
+	}
+
+	// Fallback to regex-based extraction
 	src = sfcScript(rel, src)
 	if len(bytes.TrimSpace(src)) == 0 {
-		return nil, nil, nil, nil
+		return nil, nil, nil, nil, nil
 	}
 	spec := specs[lang]
 	f := analyze(src, spec)
@@ -611,7 +636,7 @@ func extractForeign(rel string, src []byte, lang string) ([]Symbol, map[string][
 		Files: []string{rel},
 		Lang:  lang,
 	}
-	return syms, calls, pkg, nil
+	return syms, calls, map[string][]string{}, pkg, nil
 }
 
 func matchRule(line string, spec *langSpec) (*declRule, []string) {

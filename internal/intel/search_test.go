@@ -1,6 +1,7 @@
 package intel
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/JayveerPrajapati/kern/internal/index"
@@ -165,5 +166,145 @@ func Order() {}
 	}
 	if hits[0].Name != "OrderStateMachine" {
 		t.Errorf("camelCase query should rank the multi-segment symbol first, got %s", hits[0].Name)
+	}
+}
+
+// fakeEmbedder returns a bag-of-words dense vector so tests can predict cosine
+// similarity without an Ollama server. Two texts share the same vector exactly
+// when they contain the same whitespace-token set.
+type fakeEmbedder struct{}
+
+func (fakeEmbedder) EmbedText(text string) ([]float32, error) {
+	const dim = 64
+	vec := make([]float32, dim)
+	for i, tok := range strings.Fields(strings.ToLower(text)) {
+		idx := (hashToken(tok) + i) % dim
+		vec[idx] = 1
+	}
+	return vec, nil
+}
+
+func hashToken(tok string) int {
+	h := 0
+	for _, r := range tok {
+		h = h*31 + int(r)
+	}
+	if h < 0 {
+		h = -h
+	}
+	return h
+}
+
+func TestSemanticSearchFallsBackWithoutEmbedder(t *testing.T) {
+	root := writeTree(t, map[string]string{
+		"go.mod": "module demo\n\ngo 1.22\n",
+		"app.go": `package main
+
+// OrderStateMachine tracks order lifecycle states.
+type OrderStateMachine struct{}
+`,
+	})
+	ix, err := index.Build(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hits := SemanticSearch(ix, "order", 10, nil)
+	if len(hits) == 0 {
+		t.Fatal("SemanticSearch with nil embedder should degrade to RankedSearch")
+	}
+	if hits[0].Name != "OrderStateMachine" {
+		t.Errorf("expected OrderStateMachine, got %s", hits[0].Name)
+	}
+}
+
+func TestSemanticSearchReordersByMeaning(t *testing.T) {
+	// The n-gram matcher ranks "Login" above "AuthenticateUser" for the query
+	// "login", but the dense pass describes "AuthenticateUser" with
+	// "authenticate" tokens too, so it must not disappear from results and must
+	// surface in the top-k together with Login.
+	root := writeTree(t, map[string]string{
+		"go.mod": "module demo\n\ngo 1.22\n",
+		"auth.go": `package auth
+
+// Login signs a user in.
+func Login() {}
+
+// AuthenticateUser verifies credentials and opens a session.
+func AuthenticateUser() {}
+`,
+	})
+	ix, err := index.Build(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hits := SemanticSearch(ix, "login", 10, fakeEmbedder{})
+	if len(hits) == 0 {
+		t.Fatal("expected semantic hits")
+	}
+	if hits[0].Name != "Login" {
+		t.Errorf("exact name match should still lead after re-rank, got %s", hits[0].Name)
+	}
+}
+
+func TestSemanticSearchLimited(t *testing.T) {
+	root := writeTree(t, map[string]string{
+		"go.mod": "module demo\n\ngo 1.22\n",
+		"app.go": `package main
+
+// FirstDecoy is unrelated.
+func FirstDecoy() {}
+
+// SecondDecoy is unrelated too.
+func SecondDecoy() {}
+
+// ThirdDecoy also unrelated.
+func ThirdDecoy() {}
+
+// FourthDecoy as well.
+func FourthDecoy() {}
+
+// FifthDecoy again.
+func FifthDecoy() {}
+`,
+	})
+	ix, err := index.Build(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hits := SemanticSearch(ix, "decoy", 3, fakeEmbedder{})
+	if len(hits) > 3 {
+		t.Errorf("SemanticSearch should respect limit, got %d", len(hits))
+	}
+	if len(hits) == 0 {
+		t.Fatal("expected hits")
+	}
+}
+
+func TestSemanticSearchDescriptCacheBounded(t *testing.T) {
+	// Push many unique descriptors through the cache and confirm the cache does
+	// not grow without bound (a new key evicts one old key past the cap).
+	symbolEmbedMu.Lock()
+	old := symbolEmbedCache
+	symbolEmbedCache = map[string][]float32{}
+	symbolEmbedMu.Unlock()
+	defer func() {
+		symbolEmbedMu.Lock()
+		symbolEmbedCache = old
+		symbolEmbedMu.Unlock()
+	}()
+	for i := 0; i < symbolEmbedCap+50; i++ {
+		desc := "func Symbol" + string(rune('A'+i%26)) + " file.go"
+		if _, err := embedCached(fakeEmbedder{}, desc); err != nil {
+			t.Fatal(err)
+		}
+	}
+	symbolEmbedMu.Lock()
+	size := len(symbolEmbedCache)
+	symbolEmbedMu.Unlock()
+	if size > symbolEmbedCap {
+		t.Errorf("cache exceeded cap: %d > %d", size, symbolEmbedCap)
+	}
+	if size < 2 {
+		t.Errorf("cache should retain recent keys, got %d", size)
 	}
 }
