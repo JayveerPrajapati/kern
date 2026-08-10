@@ -149,6 +149,27 @@ func TestHandleHTTPBadProtocolVersion(t *testing.T) {
 	}
 }
 
+func TestHandleHTTPSLegacyProtocolVersionAccepted(t *testing.T) {
+	for _, v := range []string{"2024-11-05", "2025-03-26"} {
+		body := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"` + v + `"}}`
+		req := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("MCP-Protocol-Version", v)
+		rr := httptest.NewRecorder()
+		newHTTPServer().handleHTTP(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("expected 200 for protocol version %s, got %d", v, rr.Code)
+		}
+		var resp map[string]any
+		if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("unmarshal body: %v", err)
+		}
+		if got := resp["result"].(map[string]any)["protocolVersion"]; got != v {
+			t.Fatalf("expected negotiated protocolVersion %s, got %v", v, got)
+		}
+	}
+}
+
 func TestHandleHTTPRemoteOriginRejected(t *testing.T) {
 	body := `{"jsonrpc":"2.0","id":7,"method":"initialize","params":{}}`
 	rr := doHTTP(t, newHTTPServer(), http.MethodPost, "application/json", body, map[string]string{"Origin": "https://evil.example"})

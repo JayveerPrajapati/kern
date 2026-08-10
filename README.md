@@ -1,626 +1,585 @@
+<div align="center">
+
 # kern
 
-Local-first token optimizer for AI agents.
+Already installed? Run `kern doctor` to verify everything is wired.
 
-`kern` is an offline CLI + MCP server that pre-processes prompts, logs, code, and
-build output before they reach an LLM, shrinking token usage. Everything runs on
-your machine — no network calls, no telemetry, no paid APIs. Compression is
-deterministic (regex/heuristic rules; token counts are estimated or exact
-byte-level BPE), so identical input always produces identical output.
+### The deterministic, 100% local context optimizer for AI agents
 
-## Why kern
+**Fewer tokens · honest numbers · zero network calls · one binary**
 
-The selling points, in priority order:
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Language: Go](https://img.shields.io/badge/Language-Go_1.23+-blue.svg)](https://go.dev/)
+[![Telemetry: None](https://img.shields.io/badge/Telemetry-None-brightgreen.svg)](#telemetry--privacy)
+[![Network: none by default](https://img.shields.io/badge/Network-none_by_default-brightgreen.svg)](#telemetry--privacy)
+[![Zero deps](https://img.shields.io/badge/Dependencies-zero_(stdlib_only)-brightgreen.svg)](#how-it-works)
 
-1. **Private & offline by default** — the runtime makes no network calls and
-   reports no telemetry (the one explicit exception: `kern docs fetch` /
-   `kern_doc_fetch`, invoked deliberately to pull a public docs page).
-   Optional local Ollama rewriting is opt-in (`--llm`) and
-   silently falls back to the deterministic path when unavailable.
-2. **Deterministic, reproducible output** — identical input always produces
-   identical output; token counts are exact (byte-level BPE) or consistently
-   estimated, so before/after savings are always honest.
-3. **Instant value** — a 30-second quick start: one command compresses a noisy
-   log, one command maps a whole project.
-4. **One command wires every agent** — `kern setup` configures opencode, Claude
-   Code, Codex, Cursor, Windsurf and 8 more MCP adapters in one shot.
-5. **Savings you can measure** — every run is tracked; `kern stats` / `kern diff`
-   report before/after tokens and cost saved.
-6. **A real code-intelligence engine** — AST index plus dependency-free
-   analysis: change impact, review context, hotspots, dead code, call paths,
-   architecture guards, free-text search.
-7. **Dependency-free static binaries** — Go stdlib only, single binary, no
-   server to run, no modules to install.
+[![Linux](https://img.shields.io/badge/Linux-supported-blue.svg)](#supported-platforms)
+[![macOS](https://img.shields.io/badge/macOS-supported-blue.svg)](#supported-platforms)
+[![Windows](https://img.shields.io/badge/Windows-supported-blue.svg)](#supported-platforms)
 
-## Quick start (30 seconds)
+[![opencode](https://img.shields.io/badge/opencode-supported-blueviolet.svg)](#supported-agents)
+[![Claude Code](https://img.shields.io/badge/Claude_Code-supported-blueviolet.svg)](#supported-agents)
+[![Cursor](https://img.shields.io/badge/Cursor-supported-blueviolet.svg)](#supported-agents)
+[![Codex](https://img.shields.io/badge/Codex-supported-blueviolet.svg)](#supported-agents)
+[![Gemini](https://img.shields.io/badge/Gemini-supported-blueviolet.svg)](#supported-agents)
+[![+ 12 more](https://img.shields.io/badge/%2B12_more_surfaces-blueviolet.svg)](#supported-agents)
 
-```sh
-# compress a noisy log before pasting it into your agent
-tail -n 500 server.log | kern optimize "server log" --attach -
+<br>
 
-# a project map an agent can read instead of the whole codebase
-kern project . > /tmp/project_map.txt
+**61 `kern_*` MCP tools · 50+ CLI commands · 74 detected frameworks · 17 indexed languages (+ Vue/Svelte/Astro SFC)**
 
-# see the savings
-kern stats
+</div>
+
+## Contents
+
+- [Get Started](#get-started)
+- [Why kern?](#why-kern)
+- [Built for determinism — the Go kernel](#built-for-determinism--the-go-kernel)
+- [Key Features](#key-features)
+- [Framework-aware Entry Points](#framework-aware-entry-points)
+- [Quick Start](#quick-start)
+- [How It Works](#how-it-works)
+- [CLI Reference](#cli-reference)
+- [MCP Tools](#mcp-tools)
+- [Telemetry & Privacy](#telemetry--privacy)
+- [Configuration](#configuration)
+- [Verified Releases](#verified-releases)
+- [Supported Platforms](#supported-platforms)
+- [Supported Agents](#supported-agents)
+- [Supported Languages](#supported-languages)
+- [Troubleshooting](#troubleshooting)
+- [License](#license)
+
+## Get Started
+
+### 1. Install the CLI
+
+**No runtime required** — prebuilt static binaries, one command per platform:
+
+```bash
+# macOS / Linux
+curl -fsSL https://raw.githubusercontent.com/JayveerPrajapati/kern/main/install.sh | sh
+
+# Windows
+#   download kern-windows-amd64.zip from GitHub Releases and extract kern.exe
 ```
 
-## Install
+<details>
+<summary><b>Other install methods — Homebrew, pip, go install, source</b></summary>
 
 | Method | Command | Notes |
 |---|---|---|
-| **curl \| sh** | `curl -fsSL https://raw.githubusercontent.com/JayveerPrajapati/kern/main/install.sh \| sh` | Prebuilt binary from GitHub Releases → `~/.local/bin` |
-| **Homebrew** | `brew tap JayveerPrajapati/tap && brew install kern` | Formula in `homebrew/kern.rb` (builds from source). Requires the tap repo to exist: run `./scripts/publish-tap.sh <tag>` once to publish it |
-| **pip** | `pip install kern-context` | Thin shim that fetches the prebuilt binary on first use. Published automatically on each tag via the release workflow (needs a `PYPI_TOKEN` secret) |
+| **Homebrew** | `brew tap JayveerPrajapati/tap && brew install kern` | Formula in `homebrew/kern.rb` (builds from source) |
+| **pip** | `pip install kern-context` | Thin shim that fetches the prebuilt binary on first use |
 | **go install** | `go install github.com/JayveerPrajapati/kern/cmd/kern@latest && go install github.com/JayveerPrajapati/kern/cmd/kern-mcp@latest` | Both binaries to `$(go env GOPATH)/bin` |
-| **from source** | `make build` → `bin/kern`, `bin/kern-mcp` | Requires Go 1.22+ |
+| **from source** | `make build` → `bin/kern`, `bin/kern-mcp` | Requires Go 1.23+ |
 
-`install.sh` honors `KERN_VERSION` (pin a release), `KERN_INSTALL_DIR` (default
-`~/.local/bin`) and falls back to `go install` when no prebuilt asset matches
-your platform. Verify any install with `kern version`.
+<sub>`install.sh` honors `KERN_VERSION` (pin a release) and `KERN_INSTALL_DIR`
+(default `~/.local/bin`); it falls back to `go install` when no prebuilt asset
+matches your platform. Verify any install with `kern version`.</sub>
 
-After installing, run:
+</details>
 
-```sh
-kern setup        # wire kern into your agents (opencode, Claude, any MCP client)
-kern setup --check
-kern doctor       # health report: wiring, index, Ollama
+### 2. Wire up your agent(s)
+
+In a **new terminal**, connect kern to every agent on the machine:
+
+```bash
+kern setup
 ```
 
-## Agent wiring — one command
+<sub>Detects and auto-configures opencode (project + global + plugin), Claude
+Code, Codex CLI, Cursor, Windsurf, Zed, VS Code, Gemini CLI, Antigravity, Qwen,
+Qoder, Kiro, GitHub Copilot (VS Code + CLI), Continue, and any MCP client via a
+project `.mcp.json`. It is idempotent — run it any time. Check the wiring with
+`kern setup --check`.</sub>
 
-`kern setup` makes kern available to every agent on the machine. It is
-idempotent — run it any time:
+### 3. Initialize each project
 
-```sh
-kern setup             # wire everything below
-kern setup --check     # show current wiring status
-kern setup --agents claude    # only wire specific agents
+```bash
+cd your-project
+kern index .        # one-shot: build the symbol index
+kern watch .        # daemon: keep it fresh automatically
 ```
 
-What it configures:
+<sub>`kern index` builds a real AST index (symbols, call edges, inheritance,
+routes) from `go/ast` plus dependency-free heuristics for 17 languages.
+Every read path re-validates the index against a content-hash manifest, so
+analyses are never served stale — `kern index` is optional in practice and only
+speeds up first use.</sub>
 
-| Target | Mechanism |
+### 4. No more syncing!
+
+Auto-sync is on by default. `kern watch` uses native OS file events
+(inotifywait/fswatch when present, a polling fallback otherwise), debounces,
+and re-indexes exactly what changed. Sessions inside opencode run their own
+file-event watcher, so the index is never stale while your agent edits code.
+
+### Uninstall
+
+Nothing to uninstall — a single static binary in your PATH. Remove it
+and the `.mcp.json`/agent-config entries `kern setup` wrote, and you're done.
+
+---
+
+## Why kern?
+
+When an AI agent works, almost every token it consumes passes through the same
+few expensive shapes: raw logs, whole files, prompts padded with boilerplate,
+build output, verbose model replies, repeated file searches. That's context
+burned before the real task starts — and it makes every session slower and
+every bill bigger.
+
+**kern intercepts exactly those costs, locally and deterministically.** Logs
+are compressed before they're pasted (keeping errors and stack frames).
+A 10,000-line codebase becomes a one-call symbolic map. A giant build log
+becomes "pass/fail + errors". Secrets get masked, filler gets stripped, and
+token counts are exact (byte-level BPE) — so the before/after numbers are
+always honest.
+
+> **A note on honesty:** kern measures token reduction **vs. the raw input it
+> is given** — never a LOC→LLM-input ratio. Compression is rule-based and
+> deterministic: identical input always produces identical output, so every
+> reported saving is reproducible. Benchmark numbers from other tools are only
+> comparable when normalized the same way.
+
+### Benchmark Results
+
+Reproducible on any machine — `go run ./evaluate/bench` (or `make bench`),
+fixed inline corpora, no network. Hard gates run inside `go test ./...` so a
+compression regression fails CI:
+
+| Operation | Before | After | Reduction | Note |
+|---|---|---|---|---|
+| **optimize prompt** | 213 | 142 | **33.3%** | deterministic, keeps paths/code/fences |
+| **optimize log** | 176 | 69 | **60.8%** | keeps errors + stack frames |
+| **optimize output (terse)** | 208 | 193 | 7.2% | strips filler/hedging, keeps code |
+| **budget fit (40 tok)** | 176 | 32 | **81.8%** | head + key lines |
+
+**Retrieval recall (docs index): 3/3 (100%)** at recall@5.
+
+Real-world savings run through kern itself (local `kern stats`):
+
+| Scope | Ops | Tokens before | Tokens after | Saved |
+|---|---|---|---|---|
+| **All time (this install)** | 3,647 | — | — | **456,145 (19.3%)** |
+| **Last 24h** | 287 | 597,351 | 486,194 | **111,157 (18.6%)** |
+
+---
+
+## Built for determinism — the Go kernel
+
+kern's engine is a **single static Go binary** — the default build is
+`stdlib only`: no databases, no runtimes, no modules to install, nothing to
+serve. That's what makes the guarantees real:
+
+- **Deterministic by construction** — compression is regex/rule-based, token
+  counts are exact (byte-level BPE) or consistently estimated, and identical
+  input always produces identical output. No model, no randomness, no drift.
+- **Offline by default** — the runtime makes zero network calls and reports
+  zero telemetry. The one explicit exception is `kern docs fetch`, invoked
+  deliberately to pull a public docs page into the local index.
+- **Scales down to a VPS** — no worker daemons, no RAM-hungry caches; index
+  builds take seconds and every analysis reads from the same persisted
+  content-hash-verified index.
+- **Optional precision upgrades, still no infra** — `-tags treesitter` adds
+  tree-sitter extraction for 12 languages (call/inheritance edges, precise
+  parsing); `-tags sqlite` swaps the JSON hash cache for a **SQLite WAL +
+  FTS5** persistent store with full-text search. Both are build tags — never
+  runtime dependencies.
+
+---
+
+## Key Features
+
+| | |
 |---|---|
-| **Any MCP agent** | writes `<root>/.mcp.json` — auto-discovered by Claude Code, Cursor, Windsurf and most MCP clients |
-| **opencode** | `opencode.json` (project MCP) + `.opencode/plugins/kern.ts` (first-class tools + auto-interception) + `AGENTS.md` rules + global config MCP entry |
-| **Claude Code** | `claude mcp add kern -- <abs path to kern-mcp>` |
-| **Codex** | appends `[mcp_servers.kern]` to `~/.codex/config.toml` |
-| **JSON adapters** | `continue`, `windsurf`, `zed`, `vscode`, `cursor`, `gemini`, `antigravity`, `qwen`, `qoder`, `kiro`, `copilot`, `copilot-cli` — writes their MCP config (project- or home-based), creating parent dirs as needed |
+| **Instant value** | One command compresses a noisy log; one command maps a whole project; a 30-second quick start |
+| **Deterministic output** | Rule-based, byte-identical on identical input; exact BPE token counting |
+| **100% private** | No telemetry, no network by default, no paid APIs; optional local Ollama rewriting that silently falls back when absent |
+| **One command wires every agent** | `kern setup` configures 17+ agent surfaces (MCP-based) in one shot |
+| **Savings you can measure** | Every run is tracked: `kern stats` / `kern diff` report before/after tokens and cost saved |
+| **Real code intelligence** | AST index + dependency-free analysis: change impact, blast radius, hotspots, dead code, call paths, architecture guards, communities, coverage gaps |
+| **Framework-aware** | 74-framework detection catalog + route extraction linking URL patterns to handlers |
+| **Always fresh** | File-event watcher (inotifywait/fswatch + poll fallback) with debounced auto-sync; stale-index guard on every read |
+| **Surgical context** | `kern context` / `kern explore` / `kern probe` hand the agent exactly the source it needs — no file-by-file crawling |
+| **Safety tooling** | PII masking, secret scanning, hallucination verification (`file:line` claims), snapshot sandbox, self-healing test fixes, JSON-schema validation |
+| **Multi-repo search** | `kern repos add` registers repos; `kern search --repos` / `--semantic` searches across all of them |
+| **Zero-dependency single binary** | Go stdlib only by default; opt-in tree-sitter (12 grammars) and SQLite WAL + FTS5 via build tags |
 
-When you run `kern setup` inside a project repo it also writes a project-level
-`.mcp.json` so the MCP server picks up the right working directory. For full
-code-intelligence features (change impact, hotspots, call graphs), start the
-background indexer once: `kern index .` (one-shot) or `kern watch .`
-(daemon — re-indexes on any file save). `kern doctor` reports index freshness.
+<details>
+<summary><strong>How auto-syncing works — why the index is never stale</strong></summary>
 
-`kern buddy` prints a session briefing — project map, language mix, symbol
-kinds, most-called hub symbols, entry points, an architecture overview
-(communities + coupling warnings) and recent kern savings — a starting context
-you can paste into a fresh agent session. `kern prompt
-<template>` emits prompts for the templates `code-review`, `fix-bug`,
-`write-tests`, `explain`, `onboard`, `debug`, with project map and file context
-pre-filled.
+Three layers keep the index in step with your code:
 
-## What it does
+1. **File watcher with debounced auto-sync.** `kern watch` and in-agent
+   sessions use native OS file events (inotifywait on Linux, fswatch on macOS)
+   when available — near-real-time with a short debounce — and fall back to
+   content-hash polling otherwise.
+2. **Stale-index guard on every read.** Every code-intelligence command goes
+   through `ReadIndex`, which compares the on-disk file set against the
+   index's content-hash manifest and rebuilds automatically when a source file
+   is added, removed, or edited. Analyses never serve a stale call graph, even
+   with no watcher running.
+3. **Per-session invalidation.** Sessions in opencode invalidate the cached
+   index on file events, bypassing the cooldown so burst tool calls still see
+   fresh code.
 
-| Problem | kern's answer |
+```
+agent saves src/engine.go
+  → watcher fires (<100ms)
+  → debounce (150–300ms)
+  → rebuild; engine.go is in the index
+  → next query sees it
+```
+
+</details>
+
+---
+
+## Framework-aware Entry Points
+
+kern detects web-framework routing and links URL patterns to their handlers —
+`kern entries` lists them, `kern search` matches routes, and callers of a
+handler surface the URL that binds it:
+
+| Framework | Shapes recognized |
 |---|---|
-| Noisy logs pasted into prompts | `kern_optimize_log` — keeps errors, stack traces, build failures; strips timestamps/chatter/dedupes |
-| Agent re-reading the whole codebase | `kern_project_map` / `kern_compact_file` — symbolic summaries (functions, types, lines), cached by content hash |
-| Agent needs the full source to edit against | `kern_pack` — one paste-ready bundle: tree + instructions + contents, sized to a token budget |
-| Huge build/test output flooding context | `kern_run_build` — runs the command, returns only pass/fail + errors |
-| Verbose prompts | `kern_optimize_prompt` — cleans and compresses before sending |
-| Verbose model replies | `kern_optimize_output` — strips filler/pleasantries/hedging from LLM responses, keeps code & errors |
-| Need an exact computed answer | `kern_exec` — runs code in an isolated runtime (python3/node/go/bash/...), returns only stdout |
-| Secrets leaked into agent context | `kern_mask` — replaces secrets/PII with `[MASKED_*]` placeholders locally |
-| Need deterministic JSON output | `kern_schema` — validates JSON against a schema; `kern prompt --schema` injects a formatting block |
-| Agent cites wrong file:line | `kern_verify` — cross-checks file:line / symbol / route claims in agent output |
-| Searching docs across projects | `kern_docs` — local vector search over markdown/txt/rst documents; `kern_docs index --semantic` adds Ollama embeddings (real meaning) fused with n-gram + BM25 |
-| Unknown tech stack | `kern_fw` — detects frameworks from imports/config (catalog listed via `--catalog`) |
-| Flaky failing tests | `kern_heal` — snapshot-based LLM auto-fix, re-validates, shows diff (never edits your tree) |
-| Risky commands in the tree | `kern_sandbox` — runs a command; on failure the tree is restored to a snapshot |
-| Code blocks blowing the budget | `kern_swap` — swap tagged code blocks for per-file signatures, or expand back |
-| "How much did I save?" | `kern_stats` / `kern diff` — before/after tokens, cost saved |
-| "Is this a cached repeat?" | `kern_semcache` — inspect/clear the semantic cache (similar query → instant), preview similarity |
-| "How good is kern really?" | `go run ./evaluate/bench` — reproducible token-reduction + retrieval-recall report with hard gates |
+| **Spring Boot (Java)** | `@RestController` / `@GetMapping` / `@PostMapping` / `@RequestMapping` |
+| **Django (Python)** | `path()`, `re_path()`, `url()`, `include()` in `urls.py` (CBV `.as_view()`, dotted paths) |
+| **Flask (Python)** | `@app.route('/path', methods=[...])`, blueprint routes |
+| **FastAPI (Python)** | `@app.get(...)`, `@router.post(...)`, all standard methods |
+| **Express (Node)** | `app.get(...)`, `router.post(...)` with middleware chains |
+| **NestJS (Node)** | `@Controller` + `@Get/@Post/...` |
+| **Rails (Ruby)** | `get '/x', to: 'users#index'`, hash-rocket syntax |
+| **Laravel (PHP)** | `Route::get()`, `Route::resource()`, `Controller@action` |
+| **Go** | `http.HandleFunc(...)`, `r.GET(...)` (gin), verb routers |
 
-## Benchmarks
+Beyond routes, `kern fw` detects **74 frameworks** from imports, config files
+and code markers (`kern fw --catalog` lists them all) — so an unknown
+codebase's stack is answered in one call.
 
-`go run ./evaluate/bench` (or `make bench`) prints a reproducible report:
-token-reduction for the deterministic optimize-prompt / optimize-log /
-terse-output / budget-fit paths plus a docs retrieval recall@5 test, all on
-fixed inline corpora (no network). Hard gates run inside `go test ./...`
-(`evaluate/bench/main_test.go`) so a compression regression fails CI. kern
-reports token reduction vs the input it is given — never a LOC→LLM-input ratio,
-so numbers are comparable to other tools only when normalized the same way.
-See [`evaluate/README.md`](evaluate/README.md).
+---
 
-## Code intelligence
+## Quick Start
 
-`kern index` builds a real AST-level index of a Go project (via `go/ast` — no
-external dependencies). It tracks symbols, imports, call edges and reverse
-callers. `kern watch` runs a background daemon that detects file changes by
-content hash and re-indexes automatically. Indexes persist in
-`~/.cache/kern/index/` per project.
+### 1. Run the Installer
 
-Every code-intelligence command (`kern changes`, `near`, `probe`, `trace`,
-`guard`, …) goes through `ReadIndex`, which compares the on-disk file set
-against the index's content-hash manifest and rebuilds automatically when a
-source file is added, removed, or edited — so analyses never serve a stale call
-graph and never require a manual `kern index` first.
+```bash
+curl -fsSL https://raw.githubusercontent.com/JayveerPrajapati/kern/main/install.sh | sh
+```
 
-**Multi-language** (dependency-free heuristics): Go is parsed with `go/ast`;
-other languages use a built-in extractor (`internal/index/foreign.go`) that
-strips comments/strings, detects the language by extension or shebang, and
-applies per-language declaration rules (methods via `Type::name` / `name(self)`
-/ indent-based `def`, types via a brace-depth stack). Supported: Go, Rust,
-C/C++, TypeScript, JavaScript (incl. JSX/TSX), Python, Ruby, Java, PHP, shell,
-CSS/SCSS/Less (classes, ids, `@keyframes`, custom properties), HTML (`id`
-anchors), Markdown (headings), JSON and YAML (config keys), and Vue/Svelte/Astro
-single-file components (the `<script>`/frontmatter blocks are extracted and
-indexed as JS/TS, incl. `<script lang="ts">`). `kern index`
-prints the language mix; symbols carry a `Lang` field. `kern ast` understands
-kind prefixes `class`, `enum`, `trait`, `module`, `union`, `impl`, `prop`,
-`heading` alongside the Go ones.
+The installer will:
+
+- Drop `kern` and `kern-mcp` into `~/.local/bin`
+- Fall back to `go install` when no prebuilt asset matches your platform
+
+### 2. Wire Your Agents
+
+```bash
+kern setup                        # wire everything below
+kern setup --check                # show current wiring status
+kern setup --agents claude        # only wire specific agents
+kern doctor                       # full health report: wiring, index, Ollama
+```
 
 | Command | Purpose |
 |---|---|
-| `kern ast "func *Err*"` | AST symbol search; prefixes `func`, `method`, `struct`, `interface`, `type`, `const`, `var`; `*` wildcards |
-| `kern search "load index"` | ranked free-text symbol search — multi-word, name/path matching, best match first; `--repos` searches every registered repo |
-| `kern graph <sym>` | definition + callers + what it calls; `--mermaid` flowchart, `--json`/`--graphml`/`--html` exports (edges carry confidence tiers) |
-| `kern context <sym>` | minimal source slice (definition + callers + calls) |
-| `kern why <sym>` | rationale: doc comment + who depends on it and why (each caller's own doc line) |
-| `kern wiki` | export a markdown wiki — one page per package, symbols with docs, locations, callers |
-| `kern repos add/list/remove` | multi-repo registry powering cross-repo `kern search --repos` |
+| `kern setup` | wires kern into every detected agent (idempotent) |
+| `kern setup --agents claude,codex,...` | only the listed agents |
+| `kern setup --check` | prints per-agent wiring status |
+| `kern doctor` | diagnostics: binary, PATH, agent configs, index freshness, Ollama, telemetry |
 
-<details>
-<summary>Code intelligence — all 15 analysis commands</summary>
+### 3. Initialize Projects
 
-**Code intelligence** — kern turns the same AST index into a dependency-free
-analysis engine (`internal/intel`, pure Go, no databases or servers). All of
-these operate on the persisted index; most take `--json` for machine-readable
-output (notable exception: `kern review` is text-only):
+```bash
+cd your-project
+kern index .          # build the AST index
+kern buddy .          # optional: print a session briefing to paste into a fresh agent
+```
 
-| Command | Purpose | Notes |
+After that, every agent tool works immediately — results are never stale.
+
+---
+
+## How It Works
+
+```
+┌───────────────────────────────────────────────────────────────────┐
+│                        Your AI agent                              │
+│                                                                   │
+│   "compress this log" · "map this repo" · "who calls Load?"       │
+│                                 │                                 │
+└─────────────────────────────────┬─────────────────────────────────┘
+                                  │
+                                  ▼
+┌───────────────────────────────────────────────────────────────────┐
+│                  kern (CLI) / kern-mcp (MCP server)               │
+│                                                                   │
+│  61 kern_* tools → optimize · map · graph · review · verify ...   │
+│                                 │                                 │
+│                                 ▼                                 │
+│                  persisted symbol index (JSON hash cache,         │
+│                  opt-in SQLite WAL + FTS5)                        │
+│          symbols · call edges · inheritance · routes · hashes     │
+└───────────────────────────────────────────────────────────────────┘
+```
+
+1. **Extraction** — `go/ast` parses Go precisely; a dependency-free extractor
+   (comment/string stripping + per-language declaration rules) covers 16 more
+   languages; `-tags treesitter` upgrades 12 languages to tree-sitter grammar
+   parsing (call/inheritance edges included).
+
+2. **Storage** — everything persists to a content-hash-verified index under
+   `~/.cache/kern/` (per project). `-tags sqlite` switches to a SQLite store
+   with WAL journaling and FTS5 full-text search for concurrent access.
+
+3. **Analysis** — 50+ commands and 61 MCP tools read the same index:
+   call graphs, blast radius, change impact, hotspots, dead code, path
+   finding, architecture communities, coverage gaps — all dependency-free,
+   all deterministic.
+
+4. **Auto-sync** — file-event watchers (inotifywait/fswatch + polling
+   fallback) rebuild the index on change; every read re-validates staleness
+   against the manifest so analyses never go stale.
+
+---
+
+## CLI Reference
+
+```bash
+kern optimize <prompt> [--attach FILE] [--session ID] [--model NAME] [--llm MODEL]
+kern preview  <prompt> [--attach FILE]          (dry-run, no stats recorded)
+kern compact <file>                             symbolic summary of a file
+kern project [root]                             compact project map
+kern pack [root] [--max-tokens N] [--out FILE]  one paste-ready bundle: tree + instructions + contents
+kern build "<command>" [--dir DIR]              run build, compact output
+kern log <file>                                 compress a log file
+kern index [root]                               build/refresh the AST index
+kern watch [root]                               daemon: auto re-index on change
+kern ast <pattern> [--all]                      AST symbol search (wildcards, kind prefixes)
+kern search <query> [--limit N] [--repos] [--json] [--semantic]
+                                ranked free-text symbol search
+kern repos (list|add <path> [name]|remove <name>)   multi-repo registry
+kern graph <symbol> [--mermaid] [--json] [--graphml] [--html] [--out FILE]
+                                definition + callers + what it calls; graph exports
+kern inherits <symbol> [root] [--json]           supertypes + subtypes
+kern context <symbolRegex> [--lines N]           minimal source slice
+kern why <symbol> [--json]                       rationale: doc comment + dependents
+kern wiki [root] [--out DIR]                     export a markdown wiki, one page per package
+kern stats [--days N] [--session ID] [--json]    token/cost savings
+kern semcache [stats|clear [NS]|list <NS>|sim <A> <B>]   semantic cache inspection
+kern diff [--session ID]                         recent before/after entries
+kern export --csv                                export stats to CSV
+kern tokens [--bpe] "<text>"                     token count (estimator or exact BPE)
+kern setup [--root DIR] [--agents mcp,opencode,claude]   wire kern into agents
+kern setup --check                               show wiring status
+kern buddy [root]                                session onboarding digest
+kern prompt <template> [--file PATH] [--task TEXT]   fine-tuned prompt templates
+kern prompt list                                 list templates
+kern remember "<lesson>" / kern memory / kern recall "<prompt>"   project memory
+kern budget "<text>" --max N                     fit text to a token budget
+kern terse "<text>"|-                            compress an LLM's output
+kern exec "<code>" [--lang LANG] [--timeout s] [--max bytes] [--stdin file|-]
+                                                isolated local runtime, stdout only
+kern doctor [root]                              diagnostics report
+kern mask [file|-] [--names a,b,c]              mask secrets/PII locally
+kern sec [root] [--severity ...] [--max N] [--json]   security scan (exit 1 on errors)
+kern delete <symbol> [root] [--json]            safe-delete check (exit 1 when unsafe)
+kern rename <old> <new> [root] [--apply] [--json]    structural rename (AST-scoped)
+kern guide                                          categorized tool usage guide (performance tiers)
+kern udiff <file-a> <file-b> [--out patch]          unified line diff between two files (pure Go)
+kern hook install / hook diff [range] / hook store [range]
+                                post-commit diff → project memory
+kern lock <scope> [root] / unlock / status          workspace locks for concurrent agents
+kern precache [root] [--interval s] [--once]        watch daemon: pre-warm code/doc caches
+kern changes / review / hubs / testgaps / entries / flows / communities / path / dead
+       / larges / arch / churn / cochange / near / walk / probe / trace / explore
+                                change impact and code-intelligence analyses
+kern fts "<query>" [root] [--limit N]               full-text search over the SQLite index
+                                (requires -tags sqlite)
+kern guard init [root]                              scaffold .kern/boundaries.json
+kern guard check [root] [--file F] [--range a..b] [--json|--sarif] [--threshold N]
+                                reject boundary violations (exit 2 when count > N)
+kern fw [root] [--catalog]                       framework detection
+kern verify "<text>"                             hallucination check: file:line claims
+kern validate [root]                             run the project's build/test, compact
+kern heal "<task>" [--model MODEL] [--rounds N]  snapshot-based LLM auto-fix
+kern sandbox "<command>"                         run with filesystem snapshot + rollback
+kern schema ...                                  JSON-schema validation
+kern docs index/search/fetch                     local docs index for doc search
+kern version                                     print the installed version
+```
+
+### `kern exec` — think in code
+
+```bash
+kern exec "print(sum(range(101)))" --lang python3   # 5050 (stdout only)
+kern exec './script.py'                             # shebang picks the runtime
+kern exec 'core::panic!("x")' --lang rust           # compiles + runs
+kern exec --list                                    # runtimes installed here
+```
+
+Runtimes resolve from PATH (python3/python, node/bun/deno, bash/sh, perl,
+ruby, php, lua, julia, R, go, rust). Runs in a fresh temp dir with a hard
+timeout (10s default) and a stdout byte cap — only stdout is returned.
+
+---
+
+## MCP Tools
+
+When running as an MCP server (`kern-mcp`), kern exposes **61 `kern_*`
+tools**. They map 1:1 to the CLI commands, so opencode, Claude Code, Codex,
+Cursor and 12 more agents get the full engine as first-class tools:
+
+| Group | Tools |
+|---|---|
+| **Context optimization** | `kern_optimize_prompt`, `kern_optimize_log`, `kern_optimize_output`, `kern_context_budget`, `kern_pack`, `kern_swap`, `kern_compact_file`, `kern_project_map`, `kern_build`→`kern_run_build` |
+| **Code graph** | `kern_ast_search`, `kern_search`, `kern_repo_search`, `kern_code_graph`, `kern_inherits`, `kern_context`, `kern_near`, `kern_walk`, `kern_path`, `kern_probe`, `kern_explore`, `kern_why`, `kern_frameworks`, `kern_entry_points` |
+| **Change & review** | `kern_changes`, `kern_review`, `kern_churn`, `kern_trace`, `kern_hubs`, `kern_bridges`, `kern_arch`, `kern_dead`, `kern_larges`, `kern_test_gaps`, `kern_cochange` |
+| **Safety** | `kern_mask_pii`, `kern_security`, `kern_safe_delete`, `kern_verify_output`, `kern_guard_check`, `kern_schema_validate`, `kern_sandbox` |
+| **Automation** | `kern_run_build`, `kern_validate`, `kern_heal`, `kern_exec`, `kern_rename`, `kern_diff_files`, `kern_commitmsg`, `kern_doc_fetch/index/search`, `kern_precache`, `kern_memory_add/list/recall`, `kern_lock/unlock/lock_status`, `kern_semcache`, `kern_stats`, `kern_usage_guide` |
+
+<sub>Tools are available both over stdio (any MCP client) and the Streamable
+HTTP transport with Origin/CSRF protection. The server's guidance reaches the
+main agent automatically via the MCP `initialize` response.</sub>
+
+---
+
+## Telemetry & Privacy
+
+**kern has no telemetry.** It collects nothing, sends nothing, and reports
+nothing — not usage numbers, not paths, not queries. The binary makes no
+network calls by default at all.
+
+The complete list of network touchpoints, all explicit and optional:
+
+| Path | When | What |
 |---|---|---|
-| `kern changes` | change-impact report: changed symbols → blast radius (transitive callers), risk scores, test gaps, cross-package flags | **line-aware**: `git diff -U0` hunks scope impact to the symbols a diff actually touches; risk adds weight for changes that touch or call hubs |
-| `kern review` | token-optimised review context for a diff, sized to a budget | changed symbols shown with `file:line` spans; budget via `--max` |
-| `kern hubs` / `kern testgaps` | architectural hotspots + bridges; coverage % + untested hotspots | hubs ranked by in-project callers |
-| `kern entries` | framework entry points in the index (handlers, controllers, routes) | |
-| `kern flows` | execution flows from entry points (depth, reach, longest path) | |
-| `kern communities` | call-graph clustering via label propagation (deterministic, no deps) | |
-| `kern path <a> <b>` | shortest call path between two symbols (bidirectional traversal) | |
-| `kern dead` | dead code: functions/methods nothing in-project calls, sorted by size | public symbols flagged as potential API |
-| `kern larges` | largest declarations by source lines — god-function finder | |
-| `kern arch` | architecture overview: subsystems + coupling warnings (cross-community call bundles) | |
-| `kern churn` | change-frequency risk: most-churned files, flagged if edited NOW, with graph risk | |
-| `kern near <sym>` | N-hop semantic neighborhood tree, both directions, budget-capped — "everything two hops away from this model" | `kern walk` is an alias; depth 0 = symbol only, default 2 |
-| `kern probe "<text>"` | task-driven micro-context bundle: candidate symbols → definitions + callers + callees + tests + inter-anchor paths, budget-capped | anchors via regex; caps 12 anchors / 12 callers+callees |
-| `kern trace` | telemetry overlay: hot symbols, their blast radius, risk, test coverage | accepts pprof `-top`, crash stacks, or symbol lists; stdin via `-` |
-| `kern guard` | deterministic architectural guardrails from `.kern/boundaries.json`; `REJECT` + exit 2 on violation | import-level and call-level crossings; allow rules override forbids; missing `--file` → git working-tree diff |
-| `kern lock` / `unlock` / `status` | advisory workspace locks so concurrent agents coordinate (flock on Unix, exclusive-create on Windows) | locks auto-release on process exit; stale files removable |
+| `kern_doc_fetch` (MCP tool) | you ask | pulls one public docs page into the local index |
+| `kern --llm` / semantic search | you pass a flag | talks to your **local** Ollama instance for rewriting/embeddings |
 
-Test files are indexed too, so coverage analysis sees what the tests exercise.
-Only project-local call edges feed flows/communities/hubs/arch — stdlib calls
-are never treated as nodes. Package-qualified callees (`pkg.Fn`) are normalised
-to the canonical symbol so traversals never dead-end.
+Everything else — compression, indexing, analysis, search, masking, token
+counting — runs entirely on your machine. If you're reading a prompt that
+contains secrets, `kern mask` scrubs them **before** any optional LLM call.
 
-</details>
+---
 
-## Agent powerups
+## Configuration
 
-Additional capabilities for long-running agent sessions:
+Next to none — kern is **zero-config by default**, with nothing to write or
+keep in sync to get started. Language support is automatic from file
+extensions; there's nothing to wire per language. What exists:
 
-- **`kern doctor`** — one-shot health report: binary, kern-mcp path, agent
-  wiring, index freshness, Ollama reachability and savings stats, each with
-  `[ok]` / `[warn]` / `[fail]`. Run it after `kern setup` or when something
-  feels off.
-- **Cross-session memory** — `kern remember "<lesson>"` stores a lesson for the
-  project; `kern memory` shows them (newest first). `kern buddy` automatically
-  injects the last few into its briefing, so a fresh agent session inherits
-  what earlier sessions learned.
-- **Context budget** — `kern budget "<text>" --max N` (or pipe stdin) dedupes
-  lines, keeps the head plus important lines (errors, stack frames), then
-  trims to N tokens. The same logic backs the `kern_context_budget` MCP tool.
-- **Git hooks** — `kern hook install` adds a `post-commit` hook that compresses
-  each commit's diff (file headers + hunks + added/removed lines, 200-line
-  cap) and stores it in project memory, so agents always know the latest
-  change. `kern hook diff`/`store` work standalone too.
-- **Mermaid call graphs** — `kern graph <sym> --mermaid` renders the call graph
-  as a `flowchart LR` you can paste straight into a Markdown doc. For
-  visualisation tools, `--json`, `--graphml` (yEd/Gephi/Cytoscape) and
-  `--html` (self-contained interactive SVG: hover to trace edges, click for
-  details) export the same graph; edges carry **confidence tiers** — high when
-  both endpoints resolve to real definitions, dashed/red when an endpoint is an
-  unresolved name.
-- **Cross-project search** — `kern ast "<pattern>" --all` searches every cached
-  project index at once (great for "where have I solved this before?"), and
-  `kern search "query" --repos` does ranked free-text lookup across repos you
-  register with `kern repos add`. `kern_docs "<query>"` searches your local
-  markdown/txt/rst documents via vector search.
-- **Secret & PII masking** — pipe any text or file through `kern_mask` and it
-  replaces API keys, tokens, emails, and other sensitive patterns with
-  `[MASKED_*]` placeholders — useful before pasting agent output or logs.
-  `kern optimize --mask` applies the same inline to a prompt.
-- **Schema-guaranteed output** — `kern_schema data.json --schema schema.json`
-  deterministically validates JSON against a JSON schema; `kern prompt
-  <template> --schema schema.json` appends a strict formatting block to a
-  rendered prompt so structured LLM output is machine-checkable.
-- **Output verification** — `kern_verify` checks file:line, symbol, and route
-  claims in agent-generated text against the real codebase, flagging
-  hallucinated references before they're trusted.
-- **Framework detection** — `kern_fw` reads imports and config files to report
-  the frameworks in use; `kern_fw --catalog` lists the built-in detection rules
-  for every supported language.
-- **Self-healing** — `kern_heal` runs a command, and on failure asks a local
-  Ollama model to fix files in a throwaway snapshot, re-validates there, and
-  shows a diff to review. It never edits your working tree directly.
-- **Sandboxed execution** — `kern_sandbox [root] -- <command>` runs a risky
-  command; on failure the tree is automatically restored to a snapshot taken
-  before it ran (successes keep their changes).
-- **Rationale & docs** — `kern why <sym>` shows a symbol's doc comment plus each
-  caller with its own doc line ("who depends on it and why"); `kern wiki`
-  exports a markdown wiki with one page per package for community reference.
+- **`.kern/boundaries.json`** (optional) — architecture guardrails. Declare
+  forbidden dependency crossings (e.g. a frontend importing a backend DB
+  model); `kern guard` (or `kern_guard_check`) rejects a diff before it
+  touches the filesystem. `kern guard init` writes a starter file.
+- **`.kern/docs/`** (optional) — local doc index. `kern docs index` (or
+  `kern_doc_index(semantic=true)`) embeds project docs with a local Ollama
+  model for real-meaning `kern_doc_search`.
+- **Environment variables** — `OLLAMA_HOST` (default `http://localhost:11434`,
+  used only when you opt in), `KERN_EMBED_MODEL` (default
+  `nomic-embed-text`), `KERN_VERSION`/`KERN_INSTALL_DIR` (installer).
 
-## MCP server (works with any MCP agent)
+What it skips out of the box: dependency/build/cache directories
+(`node_modules`, `vendor`, `dist`, `target`, `.venv`, …), anything in
+`.gitignore` (root and nested), generated files (path conventions or a
+"Code generated" banner), and files over a size budget — so the index is
+your code, not third-party noise.
 
-Start it: `kern-mcp` (or `kern mcp`). It speaks MCP over stdio and exposes 53
-`kern_*` tools plus workflow prompts — any MCP agent can consume it over stdio
-or over HTTP (`kern-mcp --http :8080` speaks the Streamable HTTP transport:
-`POST /mcp` with JSON-RPC bodies, batch requests supported, no SSE streaming,
-advertised via `streamableHttpCapabilities`).
+---
 
-Every tool response is passed through an output sandbox: results over 24KiB are
-truncated with a marker naming a narrower tool for the lost detail, so a huge
-`kern_project_map` or `kern_walk` can never flood your context. Raise or lower
-the global cap with the `KERN_MCP_MAX_OUTPUT` env var, or override it per call
-by passing `max_output=N` bytes (0 = no cap) to any tool — e.g.
-`kern_exec(..., max_output=0)` returns full script stdout.
+## Verified Releases
 
-<details>
-<summary>MCP tools — all 53 `kern_*` tools</summary>
+Every asset is built by the [release workflow](.github/workflows/release.yml),
+never from a laptop:
 
-- `kern_optimize_prompt(prompt, attached_log?, session?, model?)`
-- `kern_optimize_log(log)`
-- `kern_optimize_output(text)` — strip filler/pleasantries from LLM replies, keep code & errors
-- `kern_exec(code, lang?, timeout?, max?, stdin?)` — run code in an isolated runtime, return only stdout
-- `kern_pack(root?, max_tokens?, format?, instructions?)` — pack the repo into one paste-ready bundle (tree + instructions + contents)
-- `kern_mask_pii(text, mask_names?)`
-- `kern_swap(text, root?, max_tokens?, mode?)` — summary/expand/fit tagged code blocks
-- `kern_sandbox(root?, command, timeout?)` — snapshot + rollback on failure
-- `kern_heal(root?, task, model?, max_rounds?, timeout?)` — LLM self-correction loop
-- `kern_validate(root?, command?)` — auto-detect & run build/test/checks
-- `kern_diff_files(a, b)` — unified line diff between two files
-- `kern_schema_validate(data, schema)` — deterministic JSON schema validation
-- `kern_verify_output(text)` — cross-check file:line/symbol/route claims
-- `kern_frameworks(root?)` — detect frameworks from manifests & sources
-- `kern_entry_points(root?, limit?, pattern?)` — handlers/controllers/routes
-- `kern_doc_search(query, root?, k?)` — local vector search over documents
-- `kern_doc_index(root?, semantic?)` — pre-index a project's documents; `semantic=true` adds Ollama embeddings (default model `nomic-embed-text`, overridable via `KERN_EMBED_MODEL`)
-- `kern_doc_fetch(url, root?, name?, semantic?)` — the single explicit network opt-in: fetch one public docs page and merge it into the local doc index as `fetch/<name>.md` (re-fetch replaces); `semantic=true` adds Ollama dense embeddings
-- `kern_commitmsg(root?, staged?, range?)` — deterministic conventional-commit message (type/scope/subject/body) from `git diff`, no LLM
-- `kern_precache(root?)` — pre-warm summary & doc-search caches
-- `kern_compact_file(path)`
-- `kern_project_map(root, max_files?)`
-- `kern_run_build(command, dir?)`
-- `kern_context_budget(text, max_tokens?)`
-- `kern_stats(days?, session?)`
-- `kern_semcache(action?, namespace?, a?, b?)` — inspect/clear the semantic cache (stats, list, clear, similarity)
-- `kern_ast_search(pattern, root?, limit?)`
-- `kern_search(query, root?, limit?)`
-- `kern_repo_search(query, limit?)`
-- `kern_code_graph(symbol, root?)`
-- `kern_context(symbol, root?, lines?)`
-- `kern_why(symbol, root?)`
-- `kern_changes(root?, range?, file?)`
-- `kern_review(root?, range?, file?, max_tokens?)`
-- `kern_hubs(root?, limit?)`
-- `kern_test_gaps(root?, limit?)`
-- `kern_path(root?, from, to)`
-- `kern_dead(root?, limit?)`
-- `kern_larges(root?, min_lines?, limit?)`
-- `kern_arch(root?)`
-- `kern_churn(root?, range?)`
-- `kern_near(symbol, depth?, max?, root?)`
-- `kern_probe(task, root?, max_tokens?)`
-- `kern_trace(trace, root?, limit?)`
-- `kern_lock(scope, root?)`
-- `kern_unlock(scope)`
-- `kern_lock_status(root?)`
-- `kern_guard_check(root?, file?, range?)`
+- **GitHub Releases** — `kern-<os>-<arch>.tar.gz` for Linux/macOS (amd64 +
+  arm64) and `kern-windows-amd64.zip`, produced by `make release`
+  (GOOS/GOARCH matrix, cross-compiled).
+- **install.sh** — pinned download of the matching asset, SHA-verified against
+  the release, with `go install` fallback.
+- **Homebrew formula** (`homebrew/kern.rb`) — builds from source via
+  `scripts/brew-release.sh` / `scripts/publish-tap.sh`.
+- **pip shim** (`python/`, `kern-context`) — fetches the prebuilt binary on
+  first use; published on each tag (needs a `PYPI_TOKEN` secret).
+- **opencode macOS curl** — one-command wiring via `scripts/retarget.sh` in
+  CI, and the compiled plugin asset is embedded in `kern setup`.
 
-</details>
+---
 
-It also exposes **workflow prompts** (`prompts/list`, `prompts/get`) that
-string a sequence of `kern_*` calls into a single step-by-step instruction for
-the host model: `review_changes`, `architecture_map`, `debug_issue`,
-`onboard_developer`, `pre_merge_check`.
+## Supported Platforms
 
-### opencode
+| Platform | Architectures | Artifact |
+|---|---|---|
+| **Linux** | amd64 · arm64 | `kern-linux-{amd64,arm64}.tar.gz` |
+| **macOS** | amd64 · arm64 | `kern-darwin-{amd64,arm64}.tar.gz` |
+| **Windows** | amd64 | `kern-windows-amd64.zip` |
 
-**MCP server** (all 29 `kern_*` tools available in the TUI):
+Any other platform: `go install` (or build from source — stdlib only, no
+CGO required for the default build).
 
-```jsonc
-// opencode.json
-{
-  "mcp": {
-    "kern": { "type": "local", "command": ["kern-mcp"], "enabled": true }
-  }
-}
+---
+
+## Supported Agents
+
+`kern setup` wires kern into every agent it finds — 17 surfaces:
+
+| Agent | Mechanism |
+|---|---|
+| **Any MCP client** | project `<root>/.mcp.json` (auto-discovered by Claude Code, Cursor, Windsurf, most MCP hosts) |
+| **opencode** | `opencode.json` (project MCP) + `.opencode/plugins/kern.ts` (first-class tools + auto-interception of large tool output) + `AGENTS.md` rules + global config |
+| **Claude Code** | `claude mcp add kern -- <abs path to kern-mcp>` |
+| **Codex** | appends `[mcp_servers.kern]` to `~/.codex/config.toml` |
+| **JSON adapters** | `continue`, `windsurf`, `zed`, `vscode`, `cursor`, `gemini`, `antigravity`, `qwen`, `qoder`, `kiro`, `copilot` (VS Code), `copilot-cli` — writes their MCP config, creating parent dirs as needed |
+
+---
+
+## Supported Languages
+
+Updated by one content-hash manifest; language is detected by extension or
+shebang. **17 languages indexed by default** (dependency-free heuristics):
+
+Go · Python · JavaScript (JSX) · TypeScript (TSX) · Rust · C · C++ · C# ·
+Java · Ruby · PHP · Shell · CSS/SCSS/Less · HTML · Markdown · JSON · YAML
+
+<sub>Vue/Svelte single-file components and Astro pages extract their
+`<script>`/frontmatter blocks and index them as JS/TS (`<script lang="ts">`
+included) — so the same 17-language pipeline covers frontend SFCs too. Go is
+parsed precisely with `go/ast`.</sub>
+
+**12 languages upgraded with tree-sitter** (`-tags treesitter` build):
+Go · Python · JavaScript · TypeScript (+ TSX) · Bash/Shell · C · C++ · CSS ·
+Java · PHP · Ruby · Rust — inheritance edges and precise calls included.
+
+---
+
+## Troubleshooting
+
+```bash
+kern doctor          # one report: binary, PATH, agent configs, index, Ollama
+kern setup --check   # per-agent wiring status
+kern version         # installed version
+go run ./evaluate/bench   # verify compression gates still pass
 ```
 
-**Plugin** (`.opencode/plugins/kern.ts`, auto-discovered — no config entry needed):
+Common situations:
 
-- Registers thirty first-class tools (`kern_optimize_prompt`,
-  `kern_compact_file`, `kern_project_map`, `kern_run_build`, `kern_optimize_log`,
-  `kern_stats`, `kern_changes`, `kern_review`, `kern_hubs`, `kern_test_gaps`,
-  `kern_path`, `kern_dead`, `kern_larges`, `kern_arch`, `kern_churn`,
-  `kern_near`, `kern_walk`, `kern_ast_search`, `kern_search`, `kern_repo_search`,
-  `kern_code_graph`, `kern_context`, `kern_context_budget`, `kern_why`,
-  `kern_probe`, `kern_trace`, `kern_lock`, `kern_unlock`, `kern_lock_status`,
-  `kern_guard_check`) that shell out to the local `bin/kern` binary.
-- Auto-intercepts `bash`/`read`/`grep` results over 4 KB and compresses them
-  before they enter context (`kern log` under the hood).
-- Binary resolution: `$KERN_BIN` → `<project>/bin/kern` → `PATH`.
+- **"kern-mcp not found"** in an agent — re-run `kern setup` after
+  installing, or add `$(go env GOPATH)/bin` to PATH (go install target).
+- **"index missing"** — run `kern index .`; `kern doctor` reports freshness.
+- **Semantic features inactive** — kern needs a local Ollama at
+  `OLLAMA_HOST` (default `localhost:11434`); everything else still works.
+- **Agent produces stale answers after edits** — the index auto-rebuilds via
+  staleness checks and watchers; `kern watch .` makes it event-driven.
 
-Global install (available in every project):
+If `kern doctor` reports warnings it's usually optional wiring — the verdict
+lines say exactly what to run next.
 
-```sh
-make install            # cp kern kern-mcp -> ~/.local/bin
-make hooks              # global MCP config + plugin + AGENTS.md
-```
+---
 
-Then restart opencode so the config and plugin load.
+## License
 
-### Claude Code
-
-```sh
-claude mcp add kern -- kern-mcp
-```
-
-### Cursor / other MCP clients
-
-Add a stdio server named `kern` with command `kern-mcp`.
-
-## Local LLM compression (optional)
-
-Deterministic compression is the default and always works offline. If you run
-a local [Ollama](https://ollama.dev), `kern optimize --llm <model>` sends the
-prompt to the local server for a smarter rewrite:
-
-- `--llm` flag on `kern optimize`; env `KERN_MODEL` and `OLLAMA_HOST`
-  (default `http://localhost:11434`, model `llama3.2`).
-- `--fewshot` injects top-recall lessons from project memory as baselines.
-- `--mask` strips secrets/PII from the prompt (restored in output).
-- `--cache` serves identical requests from the local response cache.
-- If Ollama is unreachable, errors, or the response is empty, kern silently
-  falls back to the deterministic path — it never blocks a run.
-
-The same local Ollama instance can power **semantic document search**:
-`kern docs index --semantic` embeds each chunk with an embedding model
-(`KERN_EMBED_MODEL`, default `nomic-embed-text`; `ollama pull nomic-embed-text`
-once). Searches then fuse the dense semantic signal with the deterministic
-n-gram vectors and BM25. Without the model, docs stay fully functional on the
-deterministic path.
-
-## Design
-
-- **Local only** — the runtime makes no network calls and no telemetry. The
-  installers fetch a prebuilt binary once; `kern optimize --llm` talks only to a
-  local Ollama server when you opt in.
-- **No paid APIs** — the deterministic path is pure rule-based compression
-  (regex/AST heuristics). Optional local-model compression via Ollama is opt-in
-  (`--llm`).
-- **State in the cache dir** — analysis state lives in `~/.cache/kern/`
-  (honours `XDG_CACHE_HOME`); only explicit wiring (`kern setup`), guard rules
-  and lock files are written into the workspace.
-- **Dependency-free** — single static binaries, Go stdlib only, no external
-  modules.
-- **Exact BPE counting** — `tokenize.Counter` has two implementations: the
-  default estimator (cheap, consistent before/after) and `BPECounter` — a real
-  byte-level BPE (GPT-2 style) that trains a merge table once from a bundled
-  corpus, so counts are exact and reproducible offline.
-- **Fast-stale index gate** — `Index.MaxMtime` records the newest indexable
-  file mtime at build; `Stale()` short-circuits on a stat-only walk
-  (count + max mtime) before ever re-hashing contents. Old caches keep
-  `MaxMtime == 0`, so they always fall back to the exact hash manifest. Tradeoff
-  (documented in `engine.go`): an edit that preserves its mtime evades the gate
-  until the next build — harmless in practice since edits land after builds.
-- **Security scanner** (`kern sec` / `kern_security`) — deterministic,
-  line-scoped regex rules (hardcoded secrets via the PII pattern set, dynamic
-  SQL, shell command injection, weak crypto, insecure randomness, unsafe
-  deserialization) over the index's file-selection policy.
-- **Safe-delete check** (`kern delete` / `kern_safe_delete`) — conservative
-  verdict from the call graph: production vs test-only callers, exported and
-  entry-point flags. Never a hard guarantee (dynamic/reflection/external
-  references are invisible to the index).
-- **Structural rename** (`kern rename <old> <new> [root] [--apply]` /
-  `kern_rename`) — AST-scoped symbol rename for Go package-level symbols. Every
-  definition/reference is previewed as `file:line:col` edits before anything
-  is written; `--apply` commits transactionally with backups under
-  `.kern/rename-backup/` and rollback on failure. Because edits come from a
-  real `go/ast` parse, strings, comments, struct-field names,
-  composite-literal keys, import aliases and the package clause are never
-  touched, and cross-package references (`pkg.Symbol`) are renamed for exported
-  symbols. Methods and non-Go symbols are refused rather than guessed.
-- **Script sandbox** (`kern exec "<code>" [--lang LANG] [--timeout s] [--max bytes]` /
-  `kern_exec`) — run code in an isolated local runtime and get *only* stdout
-  back. Language comes from `--lang` or the shebang; runtimes are resolved
-  from PATH (python3, node, go, bash, perl, ruby, php, lua, julia, R, bun,
-  deno, rust — `kern exec --list` shows what's installed). Scripts run in a
-  fresh temp dir with a hard timeout and a stdout byte cap; stderr is only
-  surfaced on failure. V1 does not block network egress. "Think in Code": use
-  it to compute exact answers without polluting context.
- - **Repo packing** (`kern pack [root] [--max-tokens N] [--no-instructions] [--out FILE]` /
-   `kern_pack`) — one paste-ready file for the whole repository: root instruction
-   docs (AGENTS.md/README.md/...), a directory tree with per-file token counts,
-   and the file contents themselves, so an agent gets the full working picture to
-   edit against. The bundle is budgeted at file granularity (oversize files are
-   dropped, not cut mid-file, and counted in the STATS section); `format=json`
-   returns it machine-readable. Repomix-style, but token-aware instead of dumping
-   everything.
-- **Project ignores** — `kern pack` and `kern project map` honor a root
-  `.gitignore` plus a `.kernignore` (which takes precedence), with git-style
-  patterns: `#` comments, `!` negation, trailing `/` directories, `*`/`**`/`?`,
-  character classes, leading `/` and multi-segment anchoring. Ignore files are
-  read at every directory level with git's subtree semantics (a deeper rule
-  overrides a shallower one). Matching is pure Go — no `git` binary required,
-  same diff yields the same walk.
-- **Pack security report** — packed bundles include a `SECURITY` section: the
-  secrets/injection rules from `kern sec` run over every packed file and the
-  findings (file:line, severity, rule) ship with the bundle so a repository that
-  would leak credentials surfaces them before they reach an agent's context.
-- **Commit messages** (`kern commitmsg [--staged] [--range a..b] [--subject]` /
-  `kern_commitmsg`; `kern commit [--all] [--message] [--dry-run]`) —
-  deterministic conventional-commit message from the git diff: type
-  (fix/feat/refactor/test/docs/chore) chosen by keyword scoring of added lines,
-  scope from the changed files' common directory, one body bullet per file.
-  Rule-based, no LLM, no network — the same diff always produces the same
-  message to edit by hand. `kern commit` stages everything with `--all` and
-  commits the staged diff with the generated message (`--dry-run` previews,
-  `--message` overrides the subject); the message is fed over stdin, never a
-  shell argument.
-
-### Considered and not built
-- **SQLite graph store** — rejected: breaks the zero-dependency guarantee; the
-  persisted JSON index already answers graph queries under 100ms.
-- **Session persistence** — rejected: kern already keeps per-session stats,
-  the response cache, and project memory; a durable session log adds state
-  without a use case.
-- **Tool-pin lockfiles** — rejected: provenance already stamps the commit and
-  index schema version on every cached answer, which pins behavior more
-  cheaply than a separate lockfile.
-
-```
-core (parse -> compress -> cache -> token-count)
-  ├── kern        CLI + MCP on stdio
-  ├── kern-mcp    MCP server (stdio; --http ADDR for HTTP)
-  └── stats       JSONL before/after tracking
-```
-
-## Reference
-
-<details>
-<summary>CLI usage — full command reference</summary>
-
-```sh
-kern optimize "Fix the login bug, check error handling." --attach build.log
-kern optimize --llm llama3.2 "a very long prompt…"   # local Ollama step (opt-in)
-kern optimize "..." --mask --names api,token          # strip secrets/PII before sending
-kern optimize "..." --cache                           # serve identical requests from cache
-kern optimize "..." --fewshot                         # inject top-recalled lessons as baselines
-kern preview  "..." --attach log.txt        # dry-run, no stats recorded
-kern compact  src/main.go                    # file summary
-kern project  .                              # compact project map
-kern pack     . --max-tokens 8000            # paste-ready bundle (tree + instructions + contents)
-kern build    "go test ./..."                # compact build output
-kern log      server.log
-
- kern index    .                              # build AST index
- kern watch    .                              # daemon: auto re-index on change
- kern ast      "func *rompt*"                 # AST search (wildcards, kind prefixes)
- kern ast      "func *extract*" --all         # search across every cached project
- kern search   "load index" [--repos]         # ranked free-text symbol search (--repos: across registered repos)
- kern repos    (list|add <path> [name]|remove <name>)  # multi-repo registry
- kern graph    Prompt                         # call graph: def + callers + calls
- kern context  symbolRegex                    # minimal source slice for a symbol
- kern why      Prompt                         # rationale: doc comment + who depends on it and why
- kern wiki     [root]                         # export a markdown wiki (one page per package)
-
-# Code intelligence (built on the same AST index)
-kern changes  [root] [--range a..b] [--file f] [--json]   # change impact: blast radius, risk, test gaps
-kern review   [root] [--range a..b] [--max N]             # token-optimised review context for a diff
-kern hubs     [root] [--limit N] [--json]                 # most depended-on symbols + cross-package bridges
-kern testgaps [root] [--limit N] [--json]                 # test coverage % + untested hotspots
-kern entries  [root] [--limit N] [--json]                 # framework entry points in the index
-kern flows    [root] [--limit N] [--json]                 # execution flows from entry points
-kern communities [root] [--json]                          # call-graph communities (label propagation)
-kern arch    [root] [--json]                         # architecture overview: communities + coupling
-kern dead    [root] [--limit N] [--json]             # dead code (no in-project callers)
-kern churn   [root] [--range a..b] [--json]          # change churn over git history
-kern larges  [root] [--lines N] [--limit N] [--json] # largest declarations by source lines
-
-kern near     <sym> [root] [--depth N] [--max N]       # N-hop neighborhood tree (callers + callees)
-kern walk     <sym> [root] [--depth N] [--max N]       # alias of `kern near` (default depth 2)
-kern probe    "<task text>" [root] [--max N]           # task -> budget-capped micro-context bundle
-kern trace    <file|- for stdin> [root] [--limit N]    # overlay pprof/stack trace on the call graph
-kern guard    init [root]                              # write starter .kern/boundaries.json
-kern guard    check [root] [--file f] [--range a..b]   # enforce boundaries; exit 2 on violations
-kern path     <a> <b> [root] [--json]                 # shortest call path between two symbols
-kern path                                    # (no args) show cache directory
-kern lock     <scope> [root] [--hold]                    # acquire advisory lock (block until interrupt; --hold returns immediately)
-kern unlock   <scope> [root]                           # release a held lock / remove stale marker
-kern status   [root] [--json]                          # show held locks
-
-kern stats    --days 7 --json                # savings report
-kern tokens   "fix the login bug."           # token count (estimator)
-kern tokens   --bpe "fix the login bug."     # token count (exact BPE)
-kern diff     --session abc                  # recent before/after entries
-kern export   --csv                          # full history
-
-# Project tooling
-kern setup    --check                        # show agent wiring status
-kern setup    [--agents mcp,opencode,claude]   # wire kern into agents (idempotent)
-kern buddy    [root]                         # session onboarding digest for any agent
-kern prompt   <template> [--file PATH] [--task TEXT]  # fine-tuned prompt template
-kern prompt   list                           # list available templates
-kern doctor   [root]                         # diagnostics: binary, wiring, index, ollama
-kern remember "<lesson>"                     # record a lesson in project memory
-kern memory   [--clear]                      # show / wipe project memory
-kern budget   "$(cat build.log)" --max 4000  # fit text into a token budget
-kern mask     <file|- for stdin> [--names a,b,c]  # mask secrets/PII locally
-kern hook     install                        # post-commit: commit diff -> project memory
-kern hook     diff                           # compressed git diff
-kern hook     store [range]                  # store compressed diff in project memory
-kern validate [root] [--cmd "custom"] [--timeout s]   # auto-detect & run build/test/checks
-kern heal     [root] [--llm model] [--task TEXT] [--max N] [--timeout s]  # LLM self-correction loop
-kern sandbox  [root] -- <command...> [--timeout s]     # run risky cmd; tree restored on failure
-kern swap     <file|-> [root] [--max N] [--mode summary|expand|fit]  # swap/expand tagged code blocks
-kern precache [root] [--interval s] [--once]            # pre-warm code-summary & doc-search caches
-kern schema   <data.json|-> --schema <schema.json>    # deterministic JSON schema validation
-kern verify   <file|- for stdin> [root] [--json]       # cross-check file:line/symbol/route claims
- kern docs     <query> [root] [--k N]                    # local vector search over documents
- kern docs     index [root]                             # pre-index documents; ``clear`` resets
- kern docs     fetch <url> [name] [root] [--semantic]      # fetch one public docs page into the local index (+dense vectors via Ollama)
- kern commitmsg [--staged] [--range a..b] [--subject]    # deterministic commit message from git diff
- kern commit    [--all] [--message S] [--dry-run]        # stage + commit with the generated message
- kern fw       [root] [--catalog [lang]]                # detect frameworks; --catalog lists rules
-kern udiff    <file-a> <file-b> [--out patch]          # unified diff between two files (pure Go)
-kern graph    Prompt --mermaid               # call graph as Mermaid flowchart
-kern graph    Prompt --html --out g.html     # interactive HTML visualisation
-kern graph    Prompt --graphml --out g.xml   # export to yEd/Gepfi/Cytoscape
-kern search   "login" --repos                # cross-repo search (kern repos add <path>)
-kern why      Prompt                         # doc comment + who depends on it and why
-kern wiki     --out docs/wiki                # export a markdown wiki
-kern mcp                                     # run MCP server on stdio
-kern-mcp --http :8080                        # serve MCP over HTTP (Streamable HTTP, POST /mcp)
-kern version                                 # show version
-```
-
-</details>
-
-## Project layout
-
-```
-cmd/kern        CLI
-cmd/kern-mcp    MCP server entry
-internal/tokenize   offline token counting (estimator + exact BPE)
-internal/compress   log/prompt noise stripping
-internal/code       project map + symbol summaries
-internal/cache      ~/.cache/kern persistence
-internal/optimize   orchestrator
-internal/llm        optional local Ollama compression client
-internal/stats      JSONL savings tracking
-internal/mcp        dependency-free MCP server: stdio + HTTP (Streamable HTTP, --http ADDR); tools, prompts
-internal/index      AST index (go/ast + dependency-free multi-language extractor): symbols, imports, call graph, watcher, mermaid, JSON/GraphML/HTML graph exports
-internal/intel      code intelligence: changes, review, hubs, flows, near, probe, trace, guard, path, dead, larges, arch, churn, search, why, wiki, repos
-internal/lock       advisory workspace locks: flock on Unix, exclusive-create on Windows
-internal/setup      one-command agent wiring (opencode / claude / codex / continue / windsurf / zed / vscode / cursor / gemini / antigravity / qwen / qoder / kiro / copilot / copilot-cli)
-internal/brief      session onboarding digest ("buddy")
-internal/prompt     fine-tuned prompt templates
-internal/memory     cross-session per-project lessons
-internal/budget     token-budget fitting (dedup + head + important lines)
-internal/doctor     diagnostics report
-internal/hooks      git post-commit hook (diff -> memory)
-```
+[MIT](LICENSE) © 2026 Jayveer Prajapati

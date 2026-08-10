@@ -15,6 +15,15 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/project"
 )
 
+// supportedProtocolVersions lists every official MCP protocol version the
+// Streamable HTTP transport speaks. The wire format is shared, so a client
+// negotiating any of these versions can talk to this server.
+var supportedProtocolVersions = map[string]bool{
+	"2024-11-05": true,
+	"2025-03-26": true,
+	"2025-06-18": true,
+}
+
 // ServeHTTP runs the MCP server over HTTP using the Streamable HTTP transport:
 // clients POST JSON-RPC messages to /mcp and receive the response body. SSE
 // streaming is not supported (advertised via streamableHttpCapabilities) so the
@@ -125,7 +134,11 @@ func (s *Server) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// MCP-Protocol-Version is mandatory in the Streamable HTTP transport.
-	if v := r.Header.Get("MCP-Protocol-Version"); v != protocolVersion {
+	// The server implements one wire format but accepts every official
+	// version of the MCP spec so standard clients (2024-11-05, 2025-03-26,
+	// 2025-06-18) can connect; the negotiated version is echoed back in the
+	// response header. Unknown or missing versions are rejected.
+	if v := r.Header.Get("MCP-Protocol-Version"); !supportedProtocolVersions[v] {
 		w.Header().Set("MCP-Protocol-Version", protocolVersion)
 		http.Error(w, "unsupported MCP protocol version", http.StatusPreconditionFailed)
 		return
