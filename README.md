@@ -62,16 +62,15 @@ Already installed? Run `kern doctor` to verify everything is wired.
 curl -fsSL https://raw.githubusercontent.com/JayveerPrajapati/kern/main/install.sh | sh
 
 # Windows
-#   download kern-windows-amd64.zip from GitHub Releases and extract kern.exe
+#   the install.sh script is macOS/Linux only — download kern-windows-amd64.zip
+#   from GitHub Releases and extract kern.exe
 ```
 
 <details>
-<summary><b>Other install methods — Homebrew, pip, go install, source</b></summary>
+<summary><b>Other install methods — go install, source</b></summary>
 
 | Method | Command | Notes |
 |---|---|---|
-| **Homebrew** | `brew tap JayveerPrajapati/tap && brew install kern` | Formula in `homebrew/kern.rb` (builds from source) |
-| **pip** | `pip install kern-context` | Thin shim that fetches the prebuilt binary on first use |
 | **go install** | `go install github.com/JayveerPrajapati/kern/cmd/kern@latest && go install github.com/JayveerPrajapati/kern/cmd/kern-mcp@latest` | Both binaries to `$(go env GOPATH)/bin` |
 | **from source** | `make build` → `bin/kern`, `bin/kern-mcp` | Requires Go 1.23+ |
 
@@ -159,12 +158,8 @@ compression regression fails CI:
 
 **Retrieval recall (docs index): 3/3 (100%)** at recall@5.
 
-Real-world savings run through kern itself (local `kern stats`):
-
-| Scope | Ops | Tokens before | Tokens after | Saved |
-|---|---|---|---|---|
-| **All time (this install)** | 3,647 | — | — | **456,145 (19.3%)** |
-| **Last 24h** | 287 | 597,351 | 486,194 | **111,157 (18.6%)** |
+Your own savings are recorded locally and visible with `kern stats` — they are
+per-install numbers, so they are not published here.
 
 ---
 
@@ -501,10 +496,6 @@ never from a laptop:
   (GOOS/GOARCH matrix, cross-compiled).
 - **install.sh** — pinned download of the matching asset, SHA-verified against
   the release, with `go install` fallback.
-- **Homebrew formula** (`homebrew/kern.rb`) — builds from source via
-  `scripts/brew-release.sh` / `scripts/publish-tap.sh`.
-- **pip shim** (`python/`, `kern-context`) — fetches the prebuilt binary on
-  first use; published on each tag (needs a `PYPI_TOKEN` secret).
 - **opencode macOS curl** — one-command wiring via `scripts/retarget.sh` in
   CI, and the compiled plugin asset is embedded in `kern setup`.
 
