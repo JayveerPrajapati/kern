@@ -4,8 +4,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"html"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/JayveerPrajapati/kern/internal/tokenize"
 )
 
 // GraphNode is a single symbol node in a neighbourhood graph.
@@ -18,14 +22,64 @@ type GraphNode struct {
 	Line int    `json:"line,omitempty"`
 }
 
+// Edge confidence tiers describe how reliably an edge was derived.
+const (
+	confHigh   = "high"   // direct same-package call, resolved
+	confMedium = "medium" // cross-package call, resolved to a definition
+	confLow    = "low"    // unresolved/phantom reference
+)
+
+// Edge confidence labels — the industry-standard 3-tier scheme used by
+// Graphify, Code-Review-Graph and CodeGraph. These map to kern's internal
+// high/medium/low tiers so the JSON/GraphML output aligns with peer tools.
+const (
+	confExtracted = "EXTRACTED" // deterministic from AST, no inference
+	confInferred  = "INFERRED"  // resolved but requiring cross-package lookup
+	confAmbiguous = "AMBIGUOUS" // unresolved/phantom reference
+)
+
+// confidenceLabel maps kernel internal tiers (high/medium/low) to the
+// industry-standard EXTRACTED/INFERRED/AMBIGUOUS labels.
+func confidenceLabel(conf string) string {
+	switch conf {
+	case confHigh:
+		return confExtracted
+	case confMedium:
+		return confInferred
+	case confLow:
+		return confAmbiguous
+	default:
+		return confAmbiguous
+	}
+}
+
 // GraphEdge is a directed edge between two graph nodes. Confidence records how
-// reliably the edge was derived: "high" when both endpoints are defined symbols
-// resolved from real call sites, "low" when the endpoint is a name with no
-// definition in the index (a phantom call or unresolved reference).
+// reliably the edge was derived using kern's internal tiers ("high" for
+// same-package resolved calls, "medium" for cross-package resolved calls, "low"
+// for unresolved references). ConfidenceLabel provides the industry-standard
+// EXTRACTED/INFERRED/AMBIGUOUS equivalent.
 type GraphEdge struct {
-	From       string `json:"from"`
-	To         string `json:"to"`
-	Confidence string `json:"confidence,omitempty"`
+	From            string `json:"from"`
+	To              string `json:"to"`
+	Confidence      string `json:"confidence,omitempty"`       // high/medium/low (internal)
+	ConfidenceLabel string `json:"confidence_label,omitempty"` // EXTRACTED/INFERRED/AMBIGUOUS (standard)
+}
+
+// TokenStats records the token count of the full context versus the compressed
+// graph/context representation, so callers can display a savings summary.
+type TokenStats struct {
+	FullContext   int    `json:"full_context_tokens"`
+	CompactTokens int    `json:"compact_tokens"`
+	SavingsPct    int    `json:"savings_percent"`
+	Source        string `json:"source,omitempty"` // "graph" or "context"
+}
+
+func (t TokenStats) Summary() string {
+	if t.FullContext <= 0 {
+		return ""
+	}
+	return fmt.Sprintf("tokens: %s %d → %d (%d%% saved)",
+		t.Source, t.FullContext, t.CompactTokens, t.SavingsPct)
 }
 
 // GraphResult is the structured neighbourhood of a symbol.
@@ -33,6 +87,7 @@ type GraphResult struct {
 	Root  string      `json:"root"`
 	Nodes []GraphNode `json:"nodes"`
 	Edges []GraphEdge `json:"edges"`
+	Stats TokenStats  `json:"stats,omitempty"`
 }
 
 // Neighborhood returns the definition, callers, and callees of a symbol as a
@@ -58,16 +113,20 @@ func (ix *Index) Neighborhood(symbol string) (GraphResult, bool) {
 	}
 	for _, c := range ix.CallersFor(root) {
 		byID[c] = mergeNode(byID[c], GraphNode{ID: c, Name: c, Role: "caller"})
+		conf := edgeConfidence(ix, root.File, c)
 		g.Edges = append(g.Edges, GraphEdge{
 			From: c, To: rootID,
-			Confidence: edgeConfidence(ix, c),
+			Confidence:      conf,
+			ConfidenceLabel: confidenceLabel(conf),
 		})
 	}
 	for _, c := range ix.CallsFor(root) {
 		byID[c] = mergeNode(byID[c], GraphNode{ID: c, Name: c, Role: "callee"})
+		conf := edgeConfidence(ix, root.File, c)
 		g.Edges = append(g.Edges, GraphEdge{
 			From: rootID, To: c,
-			Confidence: edgeConfidence(ix, c),
+			Confidence:      conf,
+			ConfidenceLabel: confidenceLabel(conf),
 		})
 	}
 	// resolve file:line for caller/callee nodes that have a definition
@@ -88,7 +147,72 @@ func (ix *Index) Neighborhood(symbol string) (GraphResult, bool) {
 	for _, id := range ids {
 		g.Nodes = append(g.Nodes, byID[id])
 	}
+	g.Stats = ix.TokenSavingsForNeighborhood(g)
 	return g, true
+}
+
+// computeTokenSavings computes how many tokens the full source context for a
+// symbol would use versus the compact text representation. The "full context"
+// is the concatenation of source files for all graph nodes (the code an agent
+// would read), and the "compact" form is the provided text (graph JSON or
+// context text).
+func computeTokenSavings(fullText, compact, source string) TokenStats {
+	fullTokens := tokenize.Count(fullText)
+	compactTokens := tokenize.Count(compact)
+	savings := 0
+	if fullTokens > 0 {
+		savings = int(float64(fullTokens-compactTokens) / float64(fullTokens) * 100)
+	}
+	return TokenStats{
+		FullContext:   fullTokens,
+		CompactTokens: compactTokens,
+		SavingsPct:    savings,
+		Source:        source,
+	}
+}
+
+// TokenSavingsForGraph computes token savings for the Graph() text output,
+// comparing it against the full source file of the symbol's definition.
+func (ix *Index) TokenSavingsForGraph(defFile, compact string) TokenStats {
+	var fullData []byte
+	if defFile != "" {
+		var err error
+		fullData, err = os.ReadFile(filepath.Join(ix.Root, defFile))
+		if err != nil {
+			fullData = nil
+		}
+	}
+	return computeTokenSavings(string(fullData), compact, "graph")
+}
+
+// TokenSavingsForContext computes token savings for the Context() text output.
+func (ix *Index) TokenSavingsForContext(defFile, compact string) TokenStats {
+	var fullData []byte
+	if defFile != "" {
+		var err error
+		fullData, err = os.ReadFile(filepath.Join(ix.Root, defFile))
+		if err != nil {
+			fullData = nil
+		}
+	}
+	return computeTokenSavings(string(fullData), compact, "context")
+}
+
+// TokenSavingsForNeighborhood computes token savings for the Neighborhood JSON,
+// comparing the compact JSON against the full source files of all referenced
+// nodes.
+func (ix *Index) TokenSavingsForNeighborhood(g GraphResult) TokenStats {
+	var fullText strings.Builder
+	seen := map[string]bool{}
+	for _, n := range g.Nodes {
+		if n.File != "" && !seen[n.File] {
+			seen[n.File] = true
+			if data, err := os.ReadFile(filepath.Join(ix.Root, n.File)); err == nil {
+				fullText.Write(data)
+			}
+		}
+	}
+	return computeTokenSavings(fullText.String(), g.GraphJSON(), "neighborhood")
 }
 
 // resolveName finds a definition for a call target name. Exact matches win;
@@ -106,14 +230,27 @@ func resolveName(ix *Index, name string) (Symbol, bool) {
 	return Symbol{}, false
 }
 
-// edgeConfidence reports how reliably the edge to a named endpoint was derived:
-// high when the name resolves to a definition in the index, low when it is a
-// phantom call or unresolved reference.
-func edgeConfidence(ix *Index, name string) string {
-	if _, ok := resolveName(ix, name); ok {
-		return "high"
+// edgeConfidence reports how reliably an edge from `fromFile` to `to` was
+// derived: "high" for same-package resolved calls, "medium" for cross-package
+// resolved calls, "low" for unresolved references.
+func edgeConfidence(ix *Index, fromFile, name string) string {
+	def, ok := resolveName(ix, name)
+	if !ok {
+		return confLow
 	}
-	return "low"
+	if samePackageDir(fromFile, def.File) {
+		return confHigh
+	}
+	return confMedium
+}
+
+// samePackageDir reports whether two source files live in the same directory
+// (a proxy for "same Go package" since Go packages map 1:1 to their directory).
+func samePackageDir(a, b string) bool {
+	if a == "" || b == "" {
+		return false
+	}
+	return filepath.Dir(a) == filepath.Dir(b)
 }
 
 func mergeNode(a, b GraphNode) GraphNode {
@@ -146,6 +283,7 @@ func (g GraphResult) GraphGraphML() string {
   <key id="file" for="node" attr.name="file" attr.type="string"/>
   <key id="line" for="node" attr.name="line" attr.type="int"/>
   <key id="confidence" for="edge" attr.name="confidence" attr.type="string"/>
+  <key id="confidence_label" for="edge" attr.name="confidence_label" attr.type="string"/>
   <graph id="kern" edgedefault="directed">
 `)
 	for _, n := range g.Nodes {
@@ -162,10 +300,10 @@ func (g GraphResult) GraphGraphML() string {
 		b.WriteString("    </node>\n")
 	}
 	for _, e := range g.Edges {
-		if e.Confidence == "low" {
-			fmt.Fprintf(&b, "    <edge source=%q target=%q>\n      <data key=\"confidence\">low</data>\n    </edge>\n", e.From, e.To)
-		} else {
+		if e.Confidence == confHigh {
 			fmt.Fprintf(&b, "    <edge source=%q target=%q/>\n", e.From, e.To)
+		} else {
+			fmt.Fprintf(&b, "    <edge source=%q target=%q>\n      <data key=\"confidence\">%s</data>\n      <data key=\"confidence_label\">%s</data>\n    </edge>\n", e.From, e.To, xmlEsc(e.Confidence), xmlEsc(e.ConfidenceLabel))
 		}
 	}
 	b.WriteString("  </graph>\n</graphml>\n")
@@ -175,6 +313,14 @@ func (g GraphResult) GraphGraphML() string {
 func xmlEsc(s string) string {
 	r := strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;", `"`, "&quot;", "'", "&apos;")
 	return r.Replace(s)
+}
+
+func tokenStatsPanel(s TokenStats) string {
+	if s.FullContext <= 0 {
+		return ""
+	}
+	return fmt.Sprintf(`<span style="color:#94a3b8;font-size:11px">\u21d2 %s %d → %d tokens (%d%% saved)</span>`,
+		s.Source, s.FullContext, s.CompactTokens, s.SavingsPct)
 }
 
 // GraphHTML renders a self-contained interactive HTML/SVG visualisation of the
@@ -228,7 +374,8 @@ func (g GraphResult) GraphHTML() string {
 <div id="top"><h1>kern graph: `)
 	b.WriteString(html.EscapeString(g.Root))
 	b.WriteString(`</h1><span class="sub">hover to trace edges, click for details</span>
-<div id="legend"><span style="color:#64748b">\u2500\u25b6 high confidence</span><span style="color:#dc2626">\u2500\u2500\u25b6 low confidence (unresolved name)</span></div></div>
+` + tokenStatsPanel(g.Stats) + `
+<div id="legend"><span style="color:#22c55e">\u2500\u25b6 EXTRACTED (same pkg)</span><span style="color:#f59e0b">\u2500\u25b6 INFERRED (cross pkg)</span><span style="color:#dc2626">\u2500\u2500\u25b6 AMBIGUOUS (unresolved)</span></div></div>
 <div id="wrap"><svg id="svg" viewBox="0 0 1000 600"></svg><div id="side"></div></div>
 <script>
 const g = `)
@@ -258,9 +405,13 @@ const edgemap = new Map();
 function addEdge(from, to, confidence) {
   const e = document.createElementNS(NS, 'line');
   e.setAttribute('class', 'edge');
-  if (confidence === 'low') {
+  if (confidence === 'AMBIGUOUS' || confidence === 'low') {
     e.setAttribute('stroke-dasharray', '5,4');
     e.setAttribute('stroke', '#dc2626');
+  } else if (confidence === 'INFERRED' || confidence === 'medium') {
+    e.setAttribute('stroke', '#f59e0b');
+  }
+    e.setAttribute('stroke', '#f59e0b');
   }
   const mk = document.createElementNS(NS, 'marker');
   mk.setAttribute('id', 'arrow' + (edgemap.size));
@@ -303,7 +454,7 @@ function draw() {
     nodeEl.set(n.id, g2);
     n.rx = cx; n.ry = cy; n.w = rw; n.h = rh;
   });
-  g.edges.forEach(e => addEdge(e.from, e.to, e.confidence));
+  g.edges.forEach(e => addEdge(e.from, e.to, e.confidence_label || e.confidence));
   edgesEl.forEach((el, i) => {});
   layout();
 }

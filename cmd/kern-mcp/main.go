@@ -43,10 +43,12 @@ func main() {
 	go func() {
 		<-ctx.Done()
 		srv.CancelAll()
+		srv.Close()
 		_ = os.Stdin.Close()
 	}()
 	if err := srv.Serve(); err != nil {
 		os.Exit(1)
 	}
 	srv.CancelAll()
+	srv.Close()
 }

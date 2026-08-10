@@ -88,6 +88,70 @@ func ToolNames() []string {
 	return out
 }
 
+// toolAllowlist reads the KERN_TOOLS allowlist from the environment. A
+// comma-separated list restricts which tools the server exposes and executes;
+// unset or empty means everything is allowed.
+func toolAllowlist() []string {
+	v := strings.TrimSpace(os.Getenv("KERN_TOOLS"))
+	if v == "" {
+		return nil
+	}
+	var out []string
+	for _, n := range strings.Split(v, ",") {
+		if n = strings.TrimSpace(n); n != "" {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
+// toolAllowed reports whether name passes the KERN_TOOLS allowlist. tools is
+// the (already filtered or full) registered catalog; a nil allowlist allows
+// everything, otherwise membership in the catalog decides.
+func toolAllowed(toolsList []Tool, name string) bool {
+	allowed := toolAllowlist()
+	if len(allowed) == 0 {
+		return true
+	}
+	for _, t := range toolsList {
+		if t.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+// filteredTools returns the registered tools minus any excluded by KERN_TOOLS.
+// It lazily reads the env once per server lifetime and caches the result.
+func (s *Server) filteredTools() []Tool {
+	s.toolsMu.Lock()
+	defer s.toolsMu.Unlock()
+	if s.filtered != nil {
+		return s.filtered
+	}
+	allowed := toolAllowlist()
+	if len(allowed) == 0 {
+		s.filtered = tools
+		return s.filtered
+	}
+	in := func(n string) bool {
+		for _, a := range allowed {
+			if a == n {
+				return true
+			}
+		}
+		return false
+	}
+	out := make([]Tool, 0, len(allowed))
+	for _, t := range tools {
+		if in(t.Name) {
+			out = append(out, t)
+		}
+	}
+	s.filtered = out
+	return s.filtered
+}
+
 func schema(props map[string]any, required []string) map[string]any {
 	s := map[string]any{
 		"type":       "object",
@@ -376,19 +440,21 @@ var tools = []Tool{
 	},
 	{
 		Name:        "kern_search",
-		Description: "Ranked free-text symbol search: returns symbols matching a query by name or file, best matches first. Forgiving lookup for humans — 'load index' or 'login handler' work, and prose hits camelCase symbols by name segment ('state machine' -> OrderStateMachine), plural-folded ('user services' -> UserService), accent-normalized ('résolution' -> ResolveResolution), or as a camelCase query ('stateMachine').",
+		Description: "Ranked free-text symbol search: returns symbols matching a query by name or file, best matches first. Forgiving lookup for humans — 'load index' or 'login handler' work, and prose hits camelCase symbols by name segment ('state machine' -> OrderStateMachine), plural-folded ('user services' -> UserService), accent-normalized ('résolution' -> ResolveResolution), or as a camelCase query ('stateMachine'). Set semantic=true to re-rank results by dense embeddings from a local Ollama server (embedding model " + "KERN_EMBED_MODEL, default nomic-embed-text).",
 		InputSchema: schema(map[string]any{
-			"query": strProp("Free-text query (symbol name, path fragment, or partial name)"),
-			"root":  strProp("Project root (defaults to current directory)"),
-			"limit": strProp("Max results (default 20)"),
+			"query":    strProp("Free-text query (symbol name, path fragment, or partial name)"),
+			"root":     strProp("Project root (defaults to current directory)"),
+			"limit":    strProp("Max results (default 20)"),
+			"semantic": strProp("When 'true', re-rank by Ollama dense embeddings (requires embedding model)"),
 		}, []string{"query"}),
 	},
 	{
 		Name:        "kern_repo_search",
-		Description: "Ranked free-text symbol search across every repo in the kern multi-repo registry (kern repos add). Returns matches tagged with their repo name, best hits first.",
+		Description: "Ranked free-text symbol search across every repo in the kern multi-repo registry (kern repos add). Returns matches tagged with their repo name, best hits first. Set semantic=true to re-rank pooled results by Ollama dense embeddings.",
 		InputSchema: schema(map[string]any{
-			"query": strProp("Free-text query (symbol name, path fragment, or partial name)"),
-			"limit": strProp("Max results (default 20)"),
+			"query":    strProp("Free-text query (symbol name, path fragment, or partial name)"),
+			"limit":    strProp("Max results (default 20)"),
+			"semantic": strProp("When 'true', re-rank by Ollama dense embeddings (requires embedding model)"),
 		}, []string{"query"}),
 	},
 	{
@@ -404,6 +470,14 @@ var tools = []Tool{
 		Description: "Return the call graph neighbourhood of a symbol: its definition, its callers, and what it calls. Use to understand dependencies without reading whole files.",
 		InputSchema: schema(map[string]any{
 			"symbol": strProp("Symbol name (e.g. 'greet' or 'User.Login')"),
+			"root":   strProp("Project root (defaults to current directory)"),
+		}, []string{"symbol"}),
+	},
+	{
+		Name:        "kern_inherits",
+		Description: "Return the inheritance edges of a symbol: its supertypes (extends/implements/embeds) and subtypes (what extends/implements/embeds it). Use to see class hierarchies without reading whole files.",
+		InputSchema: schema(map[string]any{
+			"symbol": strProp("Symbol name (e.g. 'Item' or 'Logger')"),
 			"root":   strProp("Project root (defaults to current directory)"),
 		}, []string{"symbol"}),
 	},
@@ -586,6 +660,42 @@ var tools = []Tool{
 		}, []string{"code"}),
 	},
 	{
+		Name:        "kern_explore",
+		Description: "Single-call explore (#2): return a symbol's verbatim source, direct call flow (callers + callees) and transitive blast radius (with affected files) in one shot. The primitive that replaces three separate calls (graph/near/path) for 'what touches this and how'. Pass depth=N to cap the blast radius to N hops and max=N to cap node count.",
+		InputSchema: schema(map[string]any{
+			"symbol": strProp("Symbol name (e.g. 'greet' or 'User.Login')"),
+			"root":   strProp("Project root (defaults to current directory)"),
+			"depth":  strProp("Cap blast radius to N hops from the symbol (default 0 = unlimited)"),
+			"max":    strProp("Maximum blast-radius symbols to return (default 0 = unlimited)"),
+		}, []string{"symbol"}),
+	},
+	{
+		Name:        "kern_fts_search",
+		Description: "FTS5 full-text search (#3) over the SQLite symbol index. Supports MATCH syntax ('greet', 'func AND greet', `file:\"main.go\"`). Requires a build with -tags sqlite and a persisted index. Falls back to a clear error on the default build.",
+		InputSchema: schema(map[string]any{
+			"query": strProp("FTS5 MATCH query over symbols"),
+			"root":  strProp("Project root (defaults to current directory)"),
+			"limit": strProp("Max results (default 20)"),
+		}, []string{"query"}),
+	},
+	{
+		Name:        "kern_bridges",
+		Description: "Bridge detection (#4): symbols called from two or more distinct packages/directories — the coupling points where a change in one subsystem can break another. Ranks bridges by number of calling packages then caller count.",
+		InputSchema: schema(map[string]any{
+			"root":  strProp("Project root (defaults to current directory)"),
+			"limit": strProp("Max bridges to return (default 15)"),
+		}, nil),
+	},
+	{
+		Name:        "kern_cochange",
+		Description: "Co-change mode (#6): which files are actually changed together in the same commits (from git history), independent of the call graph. Grades change risk by co-change frequency: files that co-change with the current edits are the ones most likely to break next. Use before a commit to see what else must change in lockstep.",
+		InputSchema: schema(map[string]any{
+			"root":  strProp("Project root (defaults to current directory)"),
+			"range": strProp("Git range like 'HEAD~10..HEAD' (default last 30 commits)"),
+			"limit": strProp("Max co-change pairs to return (default 20)"),
+		}, nil),
+	},
+	{
 		Name:        "kern_usage_guide",
 		Description: "Categorized usage guide for every kern MCP tool with performance tiers (fast/moderate/expensive), recommended workflows, and pitfalls. Consult this first when deciding which tool fits a task.",
 		InputSchema: schema(map[string]any{}, nil),
@@ -597,6 +707,8 @@ type Server struct {
 	in        *bufio.Scanner
 	out       io.Writer
 	mu        sync.Mutex
+	toolsMu   sync.Mutex
+	filtered  []Tool // cached KERN_TOOLS-filtered tool list (nil = not computed)
 	locks     map[string]*lock.Lock
 	inflight  map[string]context.CancelFunc
 	sessions  map[string]*project.Session
@@ -771,6 +883,16 @@ func (s *Server) Serve() error {
 	return s.in.Err()
 }
 
+// Close stops all background file watchers associated with this server's
+// sessions. It is safe to call multiple times.
+func (s *Server) Close() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, sess := range s.sessions {
+		sess.Close()
+	}
+}
+
 // dispatch computes the JSON-RPC response for a request. A nil return means
 // the request needs no response (e.g. a notification). The response is a
 // transport-neutral object so both stdio and HTTP can send it.
@@ -820,7 +942,7 @@ func (s *Server) dispatch(req rpcRequest) any {
 	case "ping":
 		return map[string]any{"jsonrpc": "2.0", "id": req.ID, "result": map[string]any{}}
 	case "tools/list":
-		return map[string]any{"jsonrpc": "2.0", "id": req.ID, "result": map[string]any{"tools": tools}}
+		return map[string]any{"jsonrpc": "2.0", "id": req.ID, "result": map[string]any{"tools": s.filteredTools()}}
 	case "tools/call":
 		return s.toolCallResponse(req.ID, req.Params)
 	case "prompts/list":
@@ -1022,6 +1144,9 @@ func argString(args map[string]any, key string) string {
 }
 
 func (s *Server) runTool(ctx context.Context, id string, name string, args map[string]any) (string, error) {
+	if !toolAllowed(s.filteredTools(), name) {
+		return "", fmt.Errorf("tool %q is not allowed (KERN_TOOLS allowlist)", name)
+	}
 	switch name {
 	case "kern_optimize_prompt":
 		prompt := argString(args, "prompt")
@@ -1803,7 +1928,17 @@ func (s *Server) runTool(ctx context.Context, id string, name string, args map[s
 		if v := argString(args, "limit"); v != "" {
 			fmt.Sscanf(v, "%d", &limit)
 		}
-		matches := intel.RankedSearch(ix, query, limit)
+		var matches []index.Symbol
+		sem := argString(args, "semantic")
+		if sem == "true" || sem == "1" {
+			client := llm.New("")
+			if !client.HasEmbeddingModel() {
+				return "", fmt.Errorf("embedding model %q not installed (run: ollama pull %s)", llm.EmbedModel(), llm.EmbedModel())
+			}
+			matches = intel.SemanticSearch(ix, query, limit, client)
+		} else {
+			matches = intel.RankedSearch(ix, query, limit)
+		}
 		if len(matches) == 0 {
 			return "no symbols matched: " + query, nil
 		}
@@ -1832,7 +1967,17 @@ func (s *Server) runTool(ctx context.Context, id string, name string, args map[s
 		if v := argString(args, "limit"); v != "" {
 			fmt.Sscanf(v, "%d", &limit)
 		}
-		hits := intel.SearchRepos(query, limit)
+		var hits []intel.RepoHit
+		sem := argString(args, "semantic")
+		if sem == "true" || sem == "1" {
+			client := llm.New("")
+			if !client.HasEmbeddingModel() {
+				return "", fmt.Errorf("embedding model %q not installed (run: ollama pull %s)", llm.EmbedModel(), llm.EmbedModel())
+			}
+			hits = intel.SemanticSearchRepos(query, limit, client)
+		} else {
+			hits = intel.SearchRepos(query, limit)
+		}
 		if len(hits) == 0 {
 			return "no symbols matched across registered repos: " + query, nil
 		}
@@ -1863,6 +2008,34 @@ func (s *Server) runTool(ctx context.Context, id string, name string, args map[s
 			return "", err
 		}
 		return ix.Graph(symbol), nil
+
+	case "kern_inherits":
+		symbol := argString(args, "symbol")
+		if symbol == "" {
+			return "", fmt.Errorf("symbol is required")
+		}
+		ix, err := s.loadIndex(argString(args, "root"))
+		if err != nil {
+			return "", err
+		}
+		sym, ok := ix.FindSymbol(symbol)
+		if !ok {
+			return "no symbol found: " + symbol, nil
+		}
+		var b strings.Builder
+		fmt.Fprintf(&b, "%s (%s)\n", sym.FullName(), sym.Kind)
+		sup := ix.SupertypesOf(sym)
+		sub := ix.SubtypesOf(sym)
+		if len(sup) == 0 && len(sub) == 0 {
+			b.WriteString("  no inheritance edges\n")
+		}
+		for _, s := range sup {
+			fmt.Fprintf(&b, "  supertype: %s\n", s)
+		}
+		for _, s := range sub {
+			fmt.Fprintf(&b, "  subtype:   %s\n", s)
+		}
+		return strings.TrimRight(b.String(), "\n"), nil
 
 	case "kern_context":
 		symbol := argString(args, "symbol")
@@ -2032,6 +2205,101 @@ func (s *Server) runTool(ctx context.Context, id string, name string, args map[s
 			return "", err
 		}
 		return intel.RenderNear(ix, nodes), nil
+
+	case "kern_explore":
+		symbol := argString(args, "symbol")
+		if symbol == "" {
+			return "", fmt.Errorf("symbol is required")
+		}
+		ix, err := s.loadIndex(argString(args, "root"))
+		if err != nil {
+			return "", err
+		}
+		depth := 0
+		if v := argString(args, "depth"); v != "" {
+			fmt.Sscanf(v, "%d", &depth)
+		}
+		maxNodes := 0
+		if v := argString(args, "max"); v != "" {
+			fmt.Sscanf(v, "%d", &maxNodes)
+		}
+		rep, err := intel.Explore(ix, symbol, depth, maxNodes)
+		if err != nil {
+			return "", err
+		}
+		return intel.RenderExplore(rep), nil
+
+	case "kern_fts_search":
+		query := argString(args, "query")
+		if query == "" {
+			return "", fmt.Errorf("query is required")
+		}
+		root := resolveRoot(argString(args, "root"))
+		if !index.SQLiteEnabled() {
+			return "", fmt.Errorf("FTS5 requires a build with -tags sqlite (rebuild kern with 'go build -tags sqlite')")
+		}
+		limit := 20
+		if v := argString(args, "limit"); v != "" {
+			fmt.Sscanf(v, "%d", &limit)
+		}
+		// Ensure a persisted index exists before searching.
+		if _, err := index.LoadSQLite(root); err != nil {
+			return "", err
+		}
+		matches, err := index.FTS5Search(root, query, limit)
+		if err != nil {
+			return "", err
+		}
+		if len(matches) == 0 {
+			return "no full-text matches: " + query, nil
+		}
+		var b strings.Builder
+		for _, m := range matches {
+			b.WriteString(m.Kind)
+			b.WriteString(" ")
+			b.WriteString(m.FullName())
+			b.WriteString(" ")
+			b.WriteString(m.File)
+			b.WriteString(":")
+			b.WriteString(itoa(m.Line))
+			b.WriteString("\n")
+		}
+		return strings.TrimSuffix(b.String(), "\n"), nil
+
+	case "kern_bridges":
+		ix, err := s.loadIndex(argString(args, "root"))
+		if err != nil {
+			return "", err
+		}
+		limit := 15
+		if v := argString(args, "limit"); v != "" {
+			fmt.Sscanf(v, "%d", &limit)
+		}
+		return intel.RenderBridges(intel.Bridges(ix, limit)), nil
+
+	case "kern_cochange":
+		root := argString(args, "root")
+		if root == "" {
+			cwd, _ := os.Getwd()
+			root = cwd
+		}
+		from, to := "", ""
+		if r := argString(args, "range"); r != "" {
+			if p := strings.SplitN(r, "..", 2); len(p) == 2 {
+				from, to = p[0], p[1]
+			} else {
+				from = r
+			}
+		}
+		limit := 20
+		if v := argString(args, "limit"); v != "" {
+			fmt.Sscanf(v, "%d", &limit)
+		}
+		report, err := intel.CoChange(root, from, to)
+		if err != nil {
+			return "", err
+		}
+		return intel.RenderCoChange(report, limit), nil
 
 	case "kern_probe":
 		task := argString(args, "task")

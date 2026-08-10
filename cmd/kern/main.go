@@ -41,6 +41,7 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/pack"
 	"github.com/JayveerPrajapati/kern/internal/pii"
 	"github.com/JayveerPrajapati/kern/internal/precache"
+	"github.com/JayveerPrajapati/kern/internal/project"
 	"github.com/JayveerPrajapati/kern/internal/prompt"
 	"github.com/JayveerPrajapati/kern/internal/rename"
 	"github.com/JayveerPrajapati/kern/internal/sandbox"
@@ -74,12 +75,13 @@ Usage:
   kern index [root]                               build/refresh the AST index
   kern watch [root]                               daemon: auto re-index on change
   kern ast <pattern> [--all]                      AST symbol search (wildcards, kind prefixes)
-  kern search <query> [--limit N] [--repos] [--json]
-                                 ranked free-text symbol search (--repos: across registered repos)
+  kern search <query> [--limit N] [--repos] [--json] [--semantic]
+                                  ranked free-text symbol search (--semantic: Ollama re-rank; --repos: across registered repos)
   kern repos (list|add <path> [name]|remove <name>)
                                  multi-repo registry for cross-repo search
   kern graph <symbol> [--mermaid] [--json] [--graphml] [--html] [--out FILE]
                                  definition + callers + what it calls; export as JSON/GraphML/HTML
+  kern inherits <symbol> [root] [--json]           supertypes + subtypes (extends/implements/embeds)
   kern context <symbolRegex> [--lines N]          minimal source slice for a symbol
   kern why <symbol> [--json]                      rationale: doc comment + who depends on it and why
   kern wiki [root] [--out DIR]                    export a markdown wiki (one page per package)
@@ -152,6 +154,9 @@ Usage:
   kern larges [root] [--lines N] [--limit N] [--json]   largest declarations by source lines
   kern arch [root] [--json]                       architecture overview + coupling warnings
   kern churn [root] [--range a..b] [--json]       change-frequency risk (most-churned files)
+  kern cochange [root] [--range a..b] [--limit N] [--json]   co-change coupling (files edited in lockstep)
+  kern explore <symbol> [root] [--depth N] [--max N] [--json]   source + call flow + blast radius in one call
+  kern fts "<query>" [root] [--limit N] [--json]  full-text search over the sqlite index (requires -tags sqlite)
   kern near <symbol> [root] [--depth N] [--max N] [--json]   dependency tree N hops away (walk-graph)
   kern walk <symbol> [root] [--depth N] [--max N]             alias of kern near
   kern probe "<task text>" [root] [--max N] [--json]         task -> budget-capped micro-context bundle
@@ -1552,8 +1557,15 @@ func main() {
 		if err := ix.Save(); err != nil {
 			fatal("%v", err)
 		}
+		store := index.StorePath(root)
+		if index.SQLiteEnabled() {
+			if err := index.SaveSQLite(root, ix); err != nil {
+				fatal("%v", err)
+			}
+			store = index.SQLitePath(root)
+		}
 		fmt.Printf("indexed %d symbols in %d files (%d packages) -> %s\n",
-			len(ix.Symbols), len(ix.FileHashes), len(ix.Pkgs), index.StorePath(root))
+			len(ix.Symbols), len(ix.FileHashes), len(ix.Pkgs), store)
 		fmt.Printf("languages: %s\n", strings.Join(ix.Languages(), ", "))
 
 	case "sec":
@@ -1654,10 +1666,14 @@ func main() {
 		if len(rest) > 0 {
 			root = rest[0]
 		}
-		fmt.Printf("kern watch: monitoring %s (index updates automatically)\n", root)
+		mode := "polling"
+		if _, _, err := project.WatcherCommand(root); err == nil {
+			mode = "file-event (inotifywait/fswatch)"
+		}
+		fmt.Printf("kern watch: monitoring %s (mode: %s)\n", root, mode)
 		ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer cancel()
-		err := index.Watch(ctx, root, time.Duration(interval)*time.Second, func(changes []index.Change, ix *index.Index) {
+		err := project.Watch(ctx, root, time.Duration(interval)*time.Second, func(changes []index.Change, ix *index.Index) {
 			for _, c := range changes {
 				fmt.Printf("[kern] %-8s %s\n", c.Kind, c.File)
 			}
@@ -1765,7 +1781,7 @@ func main() {
 
 	case "search":
 		if len(rest) < 1 {
-			fatal("usage: kern search <query> [root] [--limit N] [--repos] [--json]")
+			fatal("usage: kern search <query> [root] [--limit N] [--repos] [--json] [--semantic]")
 		}
 		f, args := parseFlags(rest)
 		query := args[0]
@@ -1794,7 +1810,16 @@ func main() {
 		if err != nil {
 			fatal("%v", err)
 		}
-		matches := intel.RankedSearch(ix, query, limit)
+		var matches []index.Symbol
+		if f.semantic {
+			client := llm.New("")
+			if !client.HasEmbeddingModel() {
+				fatal("embedding model %q not installed (run: ollama pull %s)", llm.EmbedModel(), llm.EmbedModel())
+			}
+			matches = intel.SemanticSearch(ix, query, limit, client)
+		} else {
+			matches = intel.RankedSearch(ix, query, limit)
+		}
 		if len(matches) == 0 {
 			fmt.Printf("no symbols matched: %s\n", query)
 			return
@@ -1850,6 +1875,46 @@ func main() {
 			return
 		}
 		fmt.Println(ix.Graph(symbol))
+
+	case "inherits":
+		if len(rest) < 1 {
+			fatal("usage: kern inherits <symbol> [root] [--json]")
+		}
+		f, args := parseFlags(rest)
+		symbol := args[0]
+		root := "."
+		if len(args) > 1 {
+			root = args[1]
+		}
+		ix, err := loadOrBuild(root)
+		if err != nil {
+			fatal("%v", err)
+		}
+		sym, ok := ix.FindSymbol(symbol)
+		if !ok {
+			fatal("no symbol found: %s", symbol)
+		}
+		sup := ix.SupertypesOf(sym)
+		sub := ix.SubtypesOf(sym)
+		if f.json {
+			b, _ := json.MarshalIndent(map[string]any{
+				"symbol":     sym.FullName(),
+				"supertypes": sup,
+				"subtypes":   sub,
+			}, "", "  ")
+			fmt.Println(string(b))
+			return
+		}
+		fmt.Printf("%s (%s)\n", sym.FullName(), sym.Kind)
+		if len(sup) == 0 && len(sub) == 0 {
+			fmt.Println("  no inheritance edges")
+		}
+		for _, s := range sup {
+			fmt.Printf("  supertype: %s\n", s)
+		}
+		for _, s := range sub {
+			fmt.Printf("  subtype:   %s\n", s)
+		}
 
 	case "context":
 		if len(rest) < 1 {
@@ -2171,6 +2236,79 @@ func main() {
 			return
 		}
 		fmt.Println(intel.RenderChurn(report))
+
+	case "cochange":
+		f, args := parseFlags(rest)
+		root := "."
+		if len(args) > 0 {
+			root = args[0]
+		}
+		from, to := splitRange(f.range_)
+		report, err := intel.CoChange(root, from, to)
+		if err != nil {
+			fatal("%v", err)
+		}
+		if f.json {
+			printJSON(report)
+			return
+		}
+		fmt.Println(intel.RenderCoChange(report, f.limit))
+
+	case "explore":
+		f, args := parseFlags(rest)
+		if len(args) < 1 {
+			fatal("usage: kern explore <symbol> [root] [--depth N] [--max N]")
+		}
+		root := "."
+		if len(args) > 1 {
+			root = args[1]
+		}
+		ix, err := intel.ReadIndex(root)
+		if err != nil {
+			fatal("%v", err)
+		}
+		depth := f.depth
+		if depth < 0 {
+			depth = 0
+		}
+		maxN := f.max
+		if maxN < 0 {
+			maxN = 0
+		}
+		rep, err := intel.Explore(ix, args[0], depth, maxN)
+		if err != nil {
+			fatal("%v", err)
+		}
+		if f.json {
+			printJSON(rep)
+			return
+		}
+		fmt.Println(intel.RenderExplore(rep))
+
+	case "fts":
+		f, args := parseFlags(rest)
+		if len(args) < 1 {
+			fatal("usage: kern fts \"<query>\" [root] [--limit N]")
+		}
+		root := "."
+		if len(args) > 1 {
+			root = args[1]
+		}
+		limit := f.limit
+		if limit <= 0 {
+			limit = 20
+		}
+		matches, err := index.FTS5Search(root, args[0], limit)
+		if err != nil {
+			fatal("%v", err)
+		}
+		if f.json {
+			printJSON(matches)
+			return
+		}
+		for _, m := range matches {
+			fmt.Printf("%s %s %s:%d\n", m.Kind, m.FullName(), m.File, m.Line)
+		}
 
 	case "near", "walk":
 		f, args := parseFlags(rest)

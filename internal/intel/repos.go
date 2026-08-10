@@ -123,6 +123,79 @@ type RepoHit struct {
 	Score  int          `json:"score"`
 }
 
+// SemanticSearchRepos is SearchRepos with a dense re-rank pass: the pooled
+// lexical hits across all registered repos are re-ordered by cosine similarity
+// between the query embedding and each symbol descriptor (see SemanticSearch).
+// Returns nil when the embedder is unavailable or no repo matches.
+func SemanticSearchRepos(query string, limit int, e SymbolEmbedder) []RepoHit {
+	if e == nil {
+		return SearchRepos(query, limit)
+	}
+	pool := SearchRepos(query, limit*4)
+	if len(pool) == 0 {
+		return nil
+	}
+	qvec, err := e.EmbedText(query)
+	if err != nil {
+		return truncateRepoHits(pool, limit)
+	}
+	type scored struct {
+		h    RepoHit
+		cos  float64
+		rank int
+	}
+	var list []scored
+	for rank, h := range pool {
+		vec, err := embedCached(e, symbolDescriptor(h.Symbol))
+		if err != nil {
+			continue
+		}
+		list = append(list, scored{h: h, cos: denseCosine(qvec, vec), rank: rank})
+	}
+	if len(list) == 0 {
+		return truncateRepoHits(pool, limit)
+	}
+	const rrfK = 60
+	type acc struct {
+		h    RepoHit
+		scor float64
+	}
+	byKey := map[string]acc{}
+	for i, sc := range list {
+		key := sc.h.Root + "|" + symbolKey(sc.h.Symbol)
+		a := byKey[key]
+		a.h = sc.h
+		a.scor += 1 / (rrfK + float64(i) + 1)
+		a.scor += 1 / (rrfK + float64(sc.rank) + 1)
+		byKey[key] = a
+	}
+	out := make([]RepoHit, 0, len(byKey))
+	for _, a := range byKey {
+		out = append(out, a.h)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		ki, kj := out[i].Root+"|"+symbolKey(out[i].Symbol), out[j].Root+"|"+symbolKey(out[j].Symbol)
+		if byKey[ki].scor != byKey[kj].scor {
+			return byKey[ki].scor > byKey[kj].scor
+		}
+		if out[i].Repo != out[j].Repo {
+			return out[i].Repo < out[j].Repo
+		}
+		if out[i].Symbol.FullName() != out[j].Symbol.FullName() {
+			return out[i].Symbol.FullName() < out[j].Symbol.FullName()
+		}
+		return out[i].Symbol.File < out[j].Symbol.File
+	})
+	return truncateRepoHits(out, limit)
+}
+
+func truncateRepoHits(in []RepoHit, limit int) []RepoHit {
+	if limit >= len(in) {
+		return in
+	}
+	return in[:limit]
+}
+
 // SearchRepos runs a ranked free-text search across every registered repo and
 // returns the best hits with their repo of origin. Repos whose index cannot be
 // built are skipped.

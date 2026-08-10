@@ -56,14 +56,15 @@ type Pkg struct {
 
 // extract parses a single Go file and returns its symbols, call edges and
 // package info. rel is the path stored on records.
-func extract(rel string, src []byte) ([]Symbol, map[string][]string, *Pkg, error) {
+func extract(rel string, src []byte) ([]Symbol, map[string][]string, map[string][]string, *Pkg, error) {
 	fset := token.NewFileSet()
 	f, err := parser.ParseFile(fset, rel, src, 0)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
 	var syms []Symbol
 	calls := make(map[string][]string)
+	inherits := make(map[string][]string)
 
 	addCalls := func(owner string, body ast.Node) {
 		if body == nil {
@@ -113,6 +114,25 @@ func extract(rel string, src []byte) ([]Symbol, map[string][]string, *Pkg, error
 						kind = "interface"
 					}
 					syms = append(syms, Symbol{Kind: kind, Name: s.Name.Name, File: rel, Line: fset.Position(s.Pos()).Line, End: fset.Position(s.End()).Line, Lang: "go"})
+					// Interface embedding ("type Reader interface { io.Reader }")
+					// and struct embedding ("type T struct { Base }") are
+					// inheritance edges.
+					switch t := s.Type.(type) {
+					case *ast.InterfaceType:
+						for _, m := range t.Methods.List {
+							for _, base := range embeddedNames(m.Type) {
+								inherits[s.Name.Name] = append(inherits[s.Name.Name], "embeds:"+base)
+							}
+						}
+					case *ast.StructType:
+						for _, fld := range t.Fields.List {
+							if fld.Names == nil {
+								for _, base := range embeddedNames(fld.Type) {
+									inherits[s.Name.Name] = append(inherits[s.Name.Name], "embeds:"+base)
+								}
+							}
+						}
+					}
 				case *ast.ValueSpec:
 					kind := "var"
 					if d.Tok == token.CONST {
@@ -133,7 +153,32 @@ func extract(rel string, src []byte) ([]Symbol, map[string][]string, *Pkg, error
 		}
 	}
 	syms = append(syms, extractGoEntries(fset, f, syms, rel)...)
-	return syms, calls, pkg, nil
+	return syms, calls, inherits, pkg, nil
+}
+
+// embeddedNames returns the base type names embedded in an interface method
+// field or struct field with no field name ("io.Reader", "Base", "*P", or
+// "T[A,B]" strips to the base).
+func embeddedNames(t ast.Expr) []string {
+	switch e := t.(type) {
+	case *ast.Ident:
+		return []string{e.Name}
+	case *ast.SelectorExpr:
+		base := embeddedNames(e.X)
+		if len(base) > 0 {
+			return []string{base[len(base)-1]}
+		}
+		return nil
+	case *ast.StarExpr:
+		return embeddedNames(e.X)
+	case *ast.IndexExpr:
+		return embeddedNames(e.X)
+	case *ast.IndexListExpr:
+		return embeddedNames(e.X)
+	case *ast.ParenExpr:
+		return embeddedNames(e.X)
+	}
+	return nil
 }
 
 func calleeName(fun ast.Expr) string {

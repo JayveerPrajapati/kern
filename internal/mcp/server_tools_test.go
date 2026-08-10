@@ -3,6 +3,7 @@ package mcp
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -239,6 +240,7 @@ func TestToolDispatchCoverage(t *testing.T) {
 	if !strings.Contains(strings.ToLower(out), "greet") {
 		t.Fatalf("expected search hit, got %q", out)
 	}
+	_ = mcpAssertOK(t, "kern_inherits", map[string]any{"root": root, "symbol": "Greet"})
 	out = mcpAssertOK(t, "kern_entry_points", map[string]any{"root": root})
 	if !strings.Contains(out, "no framework entry points") {
 		t.Fatalf("expected entry-point message, got %q", out)
@@ -247,6 +249,41 @@ func TestToolDispatchCoverage(t *testing.T) {
 	_ = mcpAssertOK(t, "kern_lock_status", map[string]any{"root": root})
 	_ = mcpAssertOK(t, "kern_guard_check", map[string]any{"root": root, "file": "app.go"})
 	_ = mcpAssertOK(t, "kern_path", map[string]any{"root": root, "from": "main", "to": "Greet"})
+}
+
+func TestInheritsToolViaMCP(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "go.mod"), []byte("module demo\n\ngo 1.22\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	src := `package main
+
+type Reader interface{ Read() int }
+
+type Logger interface {
+	Reader
+	Log(msg string)
+}
+
+type Base struct{ ID int }
+
+type Item struct {
+	Base
+	Logger
+}
+`
+	if err := os.WriteFile(filepath.Join(root, "types.go"), []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out := mcpAssertOK(t, "kern_inherits", map[string]any{"root": root, "symbol": "Logger"})
+	if !strings.Contains(out, "embeds:Reader") || !strings.Contains(out, "Item") {
+		t.Fatalf("expected Logger supertype embeds:Reader and subtype Item, got %q", out)
+	}
+	out = mcpAssertOK(t, "kern_inherits", map[string]any{"root": root, "symbol": "Item"})
+	if !strings.Contains(out, "embeds:Base") || !strings.Contains(out, "embeds:Logger") {
+		t.Fatalf("expected Item supertypes Base+Logger, got %q", out)
+	}
 }
 
 func TestTestGapsHonorsLimit(t *testing.T) {
@@ -732,4 +769,59 @@ func TestPackSandboxOverrideThroughMCP(t *testing.T) {
 	if !strings.Contains(out, "REPOSITORY FILES") {
 		t.Fatalf("expected full pack, got %q", out)
 	}
+}
+
+func TestKernToolsAllowlistFiltersListAndCalls(t *testing.T) {
+	t.Setenv("KERN_TOOLS", "kern_search, kern_usage_guide")
+	s := NewServer(strings.NewReader(""), io.Discard)
+	filtered := s.filteredTools()
+	if len(filtered) != 2 {
+		t.Fatalf("KERN_TOOLS should expose exactly 2 tools, got %d: %v", len(filtered), toolNamesOf(filtered))
+	}
+	for _, want := range []string{"kern_search", "kern_usage_guide"} {
+		if !containsTool(filtered, want) {
+			t.Errorf("filtered list missing %s", want)
+		}
+	}
+
+	// tools/list over the wire honors the allowlist too.
+	resp := serveOne(t, writeReq("tools/list", 3, ``))
+	res := resp["result"].(map[string]any)
+	if got := len(res["tools"].([]any)); got != 2 {
+		t.Errorf("tools/list should return 2 tools under KERN_TOOLS, got %d", got)
+	}
+
+	// An allowlisted tool still runs.
+	_ = mcpAssertOK(t, "kern_search", map[string]any{"root": mcpProject(t), "query": "Greet"})
+
+	// A non-allowlisted tool is rejected.
+	errText := mcpToolError(t, "kern_dead", map[string]any{"root": t.TempDir()})
+	if !strings.Contains(errText, "not allowed") {
+		t.Errorf("expected not-allowed error, got %q", errText)
+	}
+}
+
+func TestKernToolsAllowlistEmptyAllowsAll(t *testing.T) {
+	t.Setenv("KERN_TOOLS", " ")
+	s := NewServer(strings.NewReader(""), io.Discard)
+	if got := len(s.filteredTools()); got != len(tools) {
+		t.Errorf("empty allowlist should expose all %d tools, got %d", len(tools), got)
+	}
+}
+
+func toolNamesOf(ts []Tool) []string {
+	out := make([]string, len(ts))
+	for i, t := range ts {
+		out[i] = t.Name
+	}
+	return out
+}
+
+func containsTool(ts []Tool, name string) bool {
+	for _, t := range ts {
+		if t.Name == name {
+			return true
+		}
+	}
+	return false
 }

@@ -3,7 +3,7 @@ VERSION ?= dev
 LDFLAGS := -X main.version=$(VERSION)
 GOFLAGS := -buildvcs=false
 
-.PHONY: all build test vet bench install hooks release dist clean
+.PHONY: all build build-treesitter test vet bench install hooks release dist clean
 
 all: build
 
@@ -11,6 +11,13 @@ build:
 	mkdir -p $(BIN)
 	go build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(BIN)/kern ./cmd/kern
 	go build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(BIN)/kern-mcp ./cmd/kern-mcp
+
+# build-treesitter builds with tree-sitter support (requires CGO and Go 1.23+).
+# Uses inotifywait/fswatch for file events and tree-sitter for precise parsing.
+build-treesitter:
+	mkdir -p $(BIN)
+	CGO_ENABLED=1 go build -tags treesitter $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(BIN)/kern ./cmd/kern
+	CGO_ENABLED=1 go build -tags treesitter $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(BIN)/kern-mcp ./cmd/kern-mcp
 
 test:
 	go test ./...

@@ -6,7 +6,7 @@ import (
 
 func entryIn(t *testing.T, lang, rel, src string) []Symbol {
 	t.Helper()
-	syms, _, _, err := extractForeign(rel, []byte(src), lang)
+	syms, _, _, _, err := extractForeign(rel, []byte(src), lang)
 	if err != nil {
 		t.Fatalf("extractForeign: %v", err)
 	}
@@ -235,7 +235,7 @@ func main() {
 func indexHandler(w http.ResponseWriter, r *http.Request) {}
 func apiHandler(w http.ResponseWriter, r *http.Request) {}
 `
-	syms, _, _, err := extract("main.go", []byte(src))
+	syms, _, _, _, err := extract("main.go", []byte(src))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -262,7 +262,7 @@ func main() {
 
 func getUsers(c *gin.Context) {}
 `
-	syms, _, _, err := extract("main.go", []byte(src))
+	syms, _, _, _, err := extract("main.go", []byte(src))
 	if err != nil {
 		t.Fatal(err)
 	}

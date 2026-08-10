@@ -1,0 +1,198 @@
+name: 'kern Code Review'
+description: 'Run kern code-intelligence review on PRs: blast radius, token savings, edge confidence, and boundary guard checks.'
+author: 'Jayveer Prajapati'
+branding:
+  icon: 'git-pull-request'
+  color: 'blue'
+inputs:
+  range:
+    description: 'Git range to diff (e.g. "origin/main..HEAD"). If empty, defaults to base..HEAD from the PR event.'
+    required: false
+    default: ''
+  root:
+    description: 'Project root directory (relative to checkout). Defaults to the repo root.'
+    required: false
+    default: '.'
+  file:
+    description: 'Comma-separated list of files to review instead of using a git range (e.g. "src/a.go,src/b.go").'
+    required: false
+    default: ''
+  review-max:
+    description: 'Maximum token budget for the blast-radius review panel.'
+    required: false
+    default: '6000'
+  fail-on-risk:
+    description: 'If "true", the action fails when kern reports boundary guard violations.'
+    required: false
+    default: 'false'
+  version:
+    description: 'kern version to install (e.g. "v1.0.0"). Defaults to "latest".'
+    required: false
+    default: 'latest'
+  install-method:
+    description: 'Install method: "download" (prebuilt binary via install.sh) or "go-install" (go install).'
+    required: false
+    default: 'download'
+outputs:
+  review:
+    description: 'Full kern review report (markdown).'
+    path: 'kern-review.md'
+runs:
+  using: 'composite'
+  steps:
+    - name: Checkout
+      uses: 'actions/checkout@v4'
+      with:
+        fetch-depth: 0
+
+    - name: Setup Go
+      uses: 'actions/setup-go@v5'
+      with:
+        go-version-file: 'go.mod'
+        cache: false
+
+    - name: Install kern
+      shell: 'bash'
+      env:
+        KERN_VERSION: '${{ inputs.version }}'
+        KERN_INSTALL_METHOD: '${{ inputs.install-method }}'
+      run: |
+        case "$KERN_INSTALL_METHOD" in
+          go-install)
+            go install github.com/JayveerPrajapati/kern/cmd/kern@${KERN_VERSION}
+            echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+            ;;
+          download)
+            curl -fsSL "https://raw.githubusercontent.com/JayveerPrajapati/kern/main/install.sh" | sh
+            ;;
+          *)
+            echo "::error::Unknown install-method: $KERN_INSTALL_METHOD"
+            exit 1
+            ;;
+        esac
+
+    - name: Resolve git range
+      id: range
+      shell: 'bash'
+      env:
+        INPUT_RANGE: '${{ inputs.range }}'
+        GITHUB_BASE_REF: '${{ github.base_ref }}'
+      run: |
+        if [ -n "$INPUT_RANGE" ]; then
+          echo "range=$INPUT_RANGE" >> "$GITHUB_OUTPUT"
+        elif [ -n "$GITHUB_BASE_REF" ]; then
+          echo "range=origin/${GITHUB_BASE_REF}..HEAD" >> "$GITHUB_OUTPUT"
+        else
+          echo "range=" >> "$GITHUB_OUTPUT"
+        fi
+
+    - name: Run kern review
+      id: review
+      shell: 'bash'
+      env:
+        RANGE: '${{ steps.range.outputs.range }}'
+        ROOT: '${{ inputs.root }}'
+        MAX: '${{ inputs.review-max }}'
+        FILE: '${{ inputs.file }}'
+      run: |
+        if [ -n "$FILE" ]; then
+          kern review "$ROOT" --file "$FILE" --max "$MAX" > kern-review.md || true
+        elif [ -n "$RANGE" ]; then
+          kern review "$ROOT" --range "$RANGE" --max "$MAX" > kern-review.md || true
+        else
+          echo "::warning::No git range or file list provided; skipping review."
+          echo "" > kern-review.md
+        fi
+        echo "review<<EOF" >> "$GITHUB_OUTPUT"
+        cat kern-review.md >> "$GITHUB_OUTPUT"
+        echo "EOF" >> "$GITHUB_OUTPUT"
+
+    - name: Run kern changes
+      id: changes
+      shell: 'bash'
+      env:
+        RANGE: '${{ steps.range.outputs.range }}'
+        ROOT: '${{ inputs.root }}'
+        FILE: '${{ inputs.file }}'
+      run: |
+        if [ -n "$FILE" ]; then
+          kern changes "$ROOT" --file "$FILE" > kern-changes.txt || true
+        elif [ -n "$RANGE" ]; then
+          kern changes "$ROOT" --range "$RANGE" > kern-changes.txt || true
+        else
+          echo "::warning::No git range or file list provided; skipping changes analysis."
+          echo "" > kern-changes.txt
+        fi
+        echo "changes<<EOF" >> "$GITHUB_OUTPUT"
+        cat kern-changes.txt >> "$GITHUB_OUTPUT"
+        echo "EOF" >> "$GITHUB_OUTPUT"
+
+    - name: Run kern guard check
+      id: guard
+      shell: 'bash'
+      env:
+        RANGE: '${{ steps.range.outputs.range }}'
+        ROOT: '${{ inputs.root }}'
+        FILE: '${{ inputs.file }}'
+      run: |
+        if [ -n "$FILE" ]; then
+          kern guard check "$ROOT" --file "$FILE" > kern-guard.txt 2>/dev/null || true
+        elif [ -n "$RANGE" ]; then
+          kern guard check "$ROOT" --range "$RANGE" > kern-guard.txt 2>/dev/null || true
+        else
+          echo "::warning::No git range or file list provided; skipping guard check."
+          echo "" > kern-guard.txt
+        fi
+        if head -1 kern-guard.txt | grep -q "^REJECT:"; then
+          echo "guard_violations=true" >> "$GITHUB_OUTPUT"
+          echo "::warning::kern boundary violations detected (see output)"
+        else
+          echo "guard_violations=false" >> "$GITHUB_OUTPUT"
+        fi
+
+    - name: Assemble review comment
+      id: assemble
+      shell: 'bash'
+      run: |
+        {
+          echo "<!-- kern-review -->"
+          echo
+          cat kern-review.md 2>/dev/null
+          echo
+          echo "---"
+          cat kern-changes.txt 2>/dev/null
+          echo
+          echo "## Boundary guard"
+          cat kern-guard.txt 2>/dev/null
+        } > kern-comment.md
+        echo "comment<<EOF" >> "$GITHUB_OUTPUT"
+        cat kern-comment.md >> "$GITHUB_OUTPUT"
+        echo "EOF" >> "$GITHUB_OUTPUT"
+
+    - name: Fail on boundary violations
+      if: inputs.fail-on-risk == 'true' && steps.guard.outputs.guard_violations == 'true'
+      shell: 'bash'
+      run: |
+        echo "::error::kern boundary guard violations detected (fail-on-risk is enabled)"
+        exit 1
+
+    - name: Post review comment
+      uses: 'actions/github-script@v7'
+      with:
+        script: |
+          const body = process.env.COMMENT_BODY || 'No kern review generated for this diff.';
+          const { data } = await github.rest.issues.listComments({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            issue_number: context.issue.number,
+          });
+          const marker = '<!-- kern-review -->';
+          const existing = data.find(c => c.body && c.body.includes(marker));
+          const payload = { owner: context.repo.owner, repo: context.repo.repo, issue_number: context.issue.number, body: body };
+          if (existing) {
+            await github.rest.issues.updateComment({ ...payload, comment_id: existing.id });
+          } else {
+            await github.rest.issues.createComment(payload);
+          }
+        env:
+          COMMENT_BODY: '${{ steps.assemble.outputs.comment }}'

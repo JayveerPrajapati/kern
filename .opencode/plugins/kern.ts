@@ -332,6 +332,68 @@ export default (async ({ directory, $ }) => {
           return run(flags)
         },
       }),
+      kern_explore: tool({
+        description:
+          "Single-call explore: a symbol's verbatim source, direct call flow (callers + callees) and transitive blast radius (with affected files) in one shot. Replaces three separate calls for 'what touches this and how'.",
+        args: {
+          symbol: tool.schema.string(),
+          depth: tool.schema.number().optional(),
+          max: tool.schema.number().optional(),
+          root: tool.schema.string().optional(),
+        },
+        async execute(args) {
+          const flags: string[] = ["explore", args.symbol]
+          if (args.depth !== undefined) flags.push("--depth", String(args.depth))
+          if (args.max !== undefined) flags.push("--max", String(args.max))
+          if (args.root) flags.push(args.root)
+          return run(flags)
+        },
+      }),
+      kern_bridges: tool({
+        description:
+          "Bridge detection: symbols called from two or more distinct packages/directories — the coupling points where a change in one subsystem can break another.",
+        args: {
+          root: tool.schema.string().optional(),
+          limit: tool.schema.number().optional(),
+        },
+        async execute(args) {
+          const flags: string[] = ["hubs"]
+          if (args.root) flags.push(args.root)
+          if (args.limit !== undefined) flags.push("--limit", String(args.limit))
+          return run(flags)
+        },
+      }),
+      kern_cochange: tool({
+        description:
+          "Co-change coupling: which files are actually edited in the same commits (from git history), independent of the call graph. Use before a commit to see what else must change in lockstep.",
+        args: {
+          root: tool.schema.string().optional(),
+          range: tool.schema.string().optional(),
+          limit: tool.schema.number().optional(),
+        },
+        async execute(args) {
+          const flags: string[] = ["cochange"]
+          if (args.root) flags.push(args.root)
+          if (args.range) flags.push("--range", args.range)
+          if (args.limit !== undefined) flags.push("--limit", String(args.limit))
+          return run(flags)
+        },
+      }),
+      kern_fts_search: tool({
+        description:
+          "FTS5 full-text search over the persisted SQLite symbol index. Supports MATCH syntax ('greet', 'func AND greet'). Requires a build with -tags sqlite.",
+        args: {
+          query: tool.schema.string(),
+          root: tool.schema.string().optional(),
+          limit: tool.schema.number().optional(),
+        },
+        async execute(args) {
+          const flags: string[] = ["fts", args.query]
+          if (args.root) flags.push(args.root)
+          if (args.limit !== undefined) flags.push("--limit", String(args.limit))
+          return run(flags)
+        },
+      }),
       kern_near: tool({
         description:
           "Dependency-tree expansion: every symbol within N hops of a symbol, in both directions (callers + callees), budget-capped. The graph-guided traversal primitive that replaces blind grep — e.g. 'everything two degrees from this database model' in one call.",
@@ -412,6 +474,19 @@ export default (async ({ directory, $ }) => {
         },
         async execute(args) {
           const flags: string[] = ["graph", args.symbol]
+          if (args.root) flags.push(args.root)
+          return run(flags)
+        },
+      }),
+      kern_inherits: tool({
+        description:
+          "Return the inheritance edges of a symbol: its supertypes (extends/implements/embeds) and subtypes (what extends/implements/embeds it). Use to see class hierarchies without reading whole files.",
+        args: {
+          symbol: tool.schema.string(),
+          root: tool.schema.string().optional(),
+        },
+        async execute(args) {
+          const flags: string[] = ["inherits", args.symbol]
           if (args.root) flags.push(args.root)
           return run(flags)
         },

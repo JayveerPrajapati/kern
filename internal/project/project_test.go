@@ -1,9 +1,16 @@
 package project
 
 import (
+	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
+	"sync"
 	"testing"
+	"time"
+
+	"github.com/JayveerPrajapati/kern/internal/index"
 )
 
 func writeFile(t *testing.T, root, name, content string) {
@@ -78,5 +85,128 @@ func TestSessionRecordBestEffort(t *testing.T) {
 	s.Record("run_build", "test", "", 100, 40)
 	if s.Recorder() == nil {
 		t.Fatal("expected recorder with writable cache")
+	}
+}
+
+func TestLookupWatcherCmd(t *testing.T) {
+	name, args := lookupWatcherCmd(t.TempDir())
+	if name == "" {
+		// No native watcher tool available in test env — that's fine.
+		t.Skip("no inotifywait/fswatch available; skipping watcher test")
+	}
+	if len(args) == 0 {
+		t.Fatal("expected non-empty args for watcher command")
+	}
+}
+
+func TestFileWatcherFallbackWhenNoTool(t *testing.T) {
+	// If no native watcher is installed, newFileWatcher must return nil
+	// gracefully (not panic).
+	fw := newFileWatcher(t.TempDir(), func() {})
+	if fw == nil {
+		// Expected on systems without inotifywait/fswatch.
+		return
+	}
+	fw.Stop()
+}
+
+func TestFileWatcherStopsGracefully(t *testing.T) {
+	if _, err := exec.LookPath("inotifywait"); err != nil && runtime.GOOS == "linux" {
+		if _, err := exec.LookPath("fswatch"); err != nil {
+			t.Skip("no file-event tool available")
+		}
+	}
+	if _, err := exec.LookPath("fswatch"); err != nil && runtime.GOOS == "darwin" {
+		t.Skip("no fswatch available")
+	}
+	fw := newFileWatcher(t.TempDir(), func() {})
+	if fw == nil {
+		t.Skip("file watcher not available on this platform")
+	}
+	fw.Stop()
+	fw.Stop() // double close should be safe
+}
+
+func TestWatchPollFallback(t *testing.T) {
+	dir := t.TempDir()
+	src := "package main\n\nfunc hello() {}\n"
+	if err := os.WriteFile(filepath.Join(dir, "main.go"), []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	defer cancel()
+
+	var mu sync.Mutex
+	var got []string
+	done := make(chan struct{})
+	go func() {
+		Watch(ctx, dir, 50*time.Millisecond, func(changes []index.Change, ix *index.Index) {
+			mu.Lock()
+			for _, c := range changes {
+				got = append(got, string(c.Kind)+":"+c.File)
+			}
+			mu.Unlock()
+			select {
+			case <-done:
+			default:
+				close(done)
+			}
+		})
+	}()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for first change event")
+	}
+	// A change batch must have been observed (initial build reports the file
+	// as added).
+	mu.Lock()
+	defer mu.Unlock()
+	if len(got) == 0 {
+		t.Fatal("expected at least one change event")
+	}
+}
+
+func TestWatchDetectsModification(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "main.go")
+	if err := os.WriteFile(path, []byte("package main\n\nfunc hello() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	defer cancel()
+
+	var mu sync.Mutex
+	var got []string
+	go Watch(ctx, dir, 50*time.Millisecond, func(changes []index.Change, ix *index.Index) {
+		mu.Lock()
+		for _, c := range changes {
+			got = append(got, string(c.Kind)+":"+c.File)
+		}
+		mu.Unlock()
+	})
+
+	time.Sleep(300 * time.Millisecond)
+	if err := os.WriteFile(path, []byte("package main\n\nfunc hello() {}\nfunc bye() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		mu.Lock()
+		found := false
+		for _, c := range got {
+			if c == "modified:main.go" {
+				found = true
+			}
+		}
+		mu.Unlock()
+		if found {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("expected a modified event, got %v", got)
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
 }

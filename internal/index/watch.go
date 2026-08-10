@@ -149,3 +149,16 @@ func diff(prev, cur map[string]string) []Change {
 	sort.Slice(changes, func(i, j int) bool { return changes[i].File < changes[j].File })
 	return changes
 }
+
+// FileHashes returns a map of relative file path to content hash for every
+// indexable source file under root. Exported for watcher implementations that
+// need to compute change sets without rebuilding the whole index.
+func FileHashes(root string) map[string]string {
+	return indexableHashes(root)
+}
+
+// Diff reports the change set (adds, modifies, removes) between two hash maps
+// as produced by FileHashes. Exported for watcher implementations.
+func Diff(prev, cur map[string]string) []Change {
+	return diff(prev, cur)
+}

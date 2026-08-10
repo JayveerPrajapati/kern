@@ -102,11 +102,47 @@ func TestEdgeConfidence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := edgeConfidence(ix, "Public"); got != "high" {
+	if got := edgeConfidence(ix, "lib/lib.go", "Public"); got != "high" {
 		t.Errorf("edgeConfidence(Public) = %q; want high", got)
 	}
-	if got := edgeConfidence(ix, "NeverDefined"); got != "low" {
+	if got := edgeConfidence(ix, "lib/lib.go", "NeverDefined"); got != "low" {
 		t.Errorf("edgeConfidence(NeverDefined) = %q; want low", got)
+	}
+	if got := confidenceLabel("high"); got != "EXTRACTED" {
+		t.Errorf("confidenceLabel(high) = %q; want EXTRACTED", got)
+	}
+	if got := confidenceLabel("medium"); got != "INFERRED" {
+		t.Errorf("confidenceLabel(medium) = %q; want INFERRED", got)
+	}
+	if got := confidenceLabel("low"); got != "AMBIGUOUS" {
+		t.Errorf("confidenceLabel(low) = %q; want AMBIGUOUS", got)
+	}
+	if got := confidenceLabel(""); got != "AMBIGUOUS" {
+		t.Errorf("confidenceLabel(empty) = %q; want AMBIGUOUS", got)
+	}
+}
+
+func TestEdgeConfidenceCrossPackage(t *testing.T) {
+	dir := writeTree(t, map[string]string{
+		"lib/lib.go": helperSrc,
+		"other/other.go": `package other
+import "lib"
+func Cross() {
+	lib.Public()
+}
+`,
+	})
+	ix, err := Build(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Cross-package resolved call should be "medium".
+	if got := edgeConfidence(ix, "other/other.go", "lib.Public"); got != "medium" {
+		t.Errorf("edgeConfidence(cross-pkg Public) = %q; want medium", got)
+	}
+	// Same-package reference still "high".
+	if got := edgeConfidence(ix, "lib/lib.go", "Public"); got != "high" {
+		t.Errorf("edgeConfidence(same-pkg Public) = %q; want high", got)
 	}
 }
 

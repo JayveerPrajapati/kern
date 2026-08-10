@@ -15,6 +15,7 @@ only matter for the exceptions.
 ### Fast (index-backed, use freely)
 - kern_project_map, kern_search, kern_ast_search, kern_entry_points
 - kern_code_graph, kern_context, kern_walk, kern_near, kern_path, kern_why
+- kern_inherits (supertypes/subtypes hierarchy)
 - kern_changes (file= form), kern_hubs, kern_larges, kern_dead, kern_frameworks
 - kern_probe, kern_trace, kern_test_gaps, kern_repo_search
 - kern_optimize_prompt, kern_context_budget, kern_mask_pii, kern_swap
@@ -43,6 +44,7 @@ only matter for the exceptions.
 - Locate code: kern_search -> kern_context -> kern_walk (or kern_near for blast radius)
 - Give the agent the full source to edit against: kern_pack (tree + instructions + contents, sized to a token budget)
 - Why does X exist: kern_why -> kern_code_graph
+- Class hierarchy: kern_inherits (supertypes/subtypes)
 - Before proposing edits: kern_guard_check -> kern_changes -> kern_review
 - Trim context: kern_optimize_prompt -> kern_context_budget -> kern_swap
 - Diagnose a crash/hot path: kern_trace -> kern_probe

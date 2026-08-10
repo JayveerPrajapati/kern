@@ -86,6 +86,47 @@ func TestBuildAndSearch(t *testing.T) {
 	}
 }
 
+func TestGoInheritanceEdges(t *testing.T) {
+	src := `package main
+
+type Reader interface {
+	Read() int
+}
+
+type Logger interface {
+	Reader
+	Log(msg string)
+}
+
+type Base struct{ ID int }
+
+type Item struct {
+	Base
+	Logger
+}
+`
+	dir := writeTree(t, map[string]string{"types.go": src})
+	ix, err := Build(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// SupertypesOf: Logger embeds Reader; Item embeds Base + Logger.
+	if sup := ix.SupertypesOf(Symbol{Name: "Logger", Kind: "interface"}); !contains(sup, "embeds:Reader") {
+		t.Errorf("expected Logger to embed Reader, got %v", sup)
+	}
+	sup := ix.SupertypesOf(Symbol{Name: "Item", Kind: "struct"})
+	if !contains(sup, "embeds:Base") || !contains(sup, "embeds:Logger") {
+		t.Errorf("expected Item to embed Base and Logger, got %v", sup)
+	}
+	// SubtypesOf: Reader has Logger (and transitively Item via Logger embedding).
+	if subs := ix.SubtypesOf(Symbol{Name: "Reader", Kind: "interface"}); !contains(subs, "Logger") {
+		t.Errorf("expected Reader subtypes to include Logger, got %v", subs)
+	}
+	if subs := ix.SubtypesOf(Symbol{Name: "Base", Kind: "struct"}); !contains(subs, "Item") {
+		t.Errorf("expected Base subtypes to include Item, got %v", subs)
+	}
+}
+
 func TestSearchPatterns(t *testing.T) {
 	dir := writeTree(t, map[string]string{"main.go": srcMain})
 	ix, err := Build(dir)
@@ -126,6 +167,32 @@ func TestContextSlices(t *testing.T) {
 	}
 	if !strings.Contains(ctx, "callers:") {
 		t.Fatalf("expected callers in context, got:\n%s", ctx)
+	}
+}
+
+func TestNeighborhoodConfidenceLabels(t *testing.T) {
+	dir := writeTree(t, map[string]string{
+		"main.go": srcMain,
+		"user.go": srcOther,
+	})
+	ix, err := Build(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	g, ok := ix.Neighborhood("greet")
+	if !ok || len(g.Edges) == 0 {
+		t.Fatalf("expected edges for greet, got ok=%v edges=%d", ok, len(g.Edges))
+	}
+	for _, e := range g.Edges {
+		if e.Confidence != "" && e.ConfidenceLabel == "" {
+			t.Errorf("edge %s->%s has Confidence=%q but empty ConfidenceLabel", e.From, e.To, e.Confidence)
+		}
+		// Every edge should carry the standard label.
+		switch e.ConfidenceLabel {
+		case "EXTRACTED", "INFERRED", "AMBIGUOUS":
+		default:
+			t.Errorf("edge %s->%s has unexpected ConfidenceLabel=%q", e.From, e.To, e.ConfidenceLabel)
+		}
 	}
 }
 

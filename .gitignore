@@ -1,6 +1,7 @@
 # Build artifacts
 bin/
 dist/
+/kern
 
 # Node/plugin
 node_modules/
@@ -24,6 +25,9 @@ __pycache__/
 
 # Local test fixtures
 /tmp/
+
+# Fetched doc pages
+index.html
 
 # OS cruft
 .DS_Store
