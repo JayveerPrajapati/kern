@@ -36,16 +36,22 @@ func Watch(ctx context.Context, root string, pollInterval time.Duration, onChang
 		debounce = 300 * time.Millisecond
 	}
 
+	// Baseline hash map: seed from the persisted index when present, otherwise
+	// snapshot the tree at watch start. Keeping prev in memory (instead of
+	// re-reading the saved index on every rebuild) means an edit that lands
+	// before the first poll or event is still diffed against the start state
+	// and reported as "modified", not swallowed into an "added" event.
+	prev := map[string]string{}
+	if ix, err := index.Load(root); err == nil && ix != nil {
+		prev = ix.FileHashes
+	}
+
 	var (
 		timer   *time.Timer
 		timerMu sync.Mutex
 	)
 	var rebuild func()
 	rebuild = func() {
-		prev := map[string]string{}
-		if ix, err := index.Load(root); err == nil && ix != nil {
-			prev = ix.FileHashes
-		}
 		cur := index.FileHashes(root)
 		changes := index.Diff(prev, cur)
 		if len(changes) == 0 {
@@ -56,10 +62,16 @@ func Watch(ctx context.Context, root string, pollInterval time.Duration, onChang
 			return
 		}
 		_ = ix.Save()
+		prev = cur
 		if onChange != nil {
 			onChange(changes, ix)
 		}
 	}
+	// Establish the baseline synchronously at watch start: on a fresh root the
+	// initial population event reports every file as "added"; on an existing
+	// index it reports changes since the last save. After this the baseline is
+	// fixed, so any edit arriving later is reported as "modified".
+	rebuild()
 	schedule := func() {
 		timerMu.Lock()
 		if timer == nil {

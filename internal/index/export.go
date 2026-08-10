@@ -224,6 +224,18 @@ func resolveName(ix *Index, name string) (Symbol, bool) {
 	}
 	if i := strings.LastIndex(name, "."); i >= 0 && i+1 < len(name) {
 		if defs := ix.symbolsFor(name[i+1:]); len(defs) > 0 {
+			// Prefer the definition that lives under the package named by the
+			// qualifier (e.g. "index.Load" should resolve to the index package,
+			// not whatever Load the symbol order happens to list first). Fall
+			// back to the first bare-name match for call sites.
+			if i > 0 {
+				pkg := name[:i]
+				for _, d := range defs {
+					if filepath.Base(filepath.Dir(d.File)) == pkg {
+						return d, true
+					}
+				}
+			}
 			return defs[0], true
 		}
 	}

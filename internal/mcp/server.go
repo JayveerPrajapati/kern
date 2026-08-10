@@ -929,10 +929,19 @@ func (s *Server) dispatch(req rpcRequest) any {
 		if s.transport == "http" {
 			caps["streamableHttpCapabilities"] = map[string]any{"sse": false}
 		}
+		// Echo the client's negotiated protocol version when it is one we
+		// support; otherwise report the version we implement.
+		version := protocolVersion
+		var initParams struct {
+			ProtocolVersion string `json:"protocolVersion"`
+		}
+		if json.Unmarshal(req.Params, &initParams) == nil && supportedProtocolVersions[initParams.ProtocolVersion] {
+			version = initParams.ProtocolVersion
+		}
 		return map[string]any{
 			"jsonrpc": "2.0", "id": req.ID,
 			"result": map[string]any{
-				"protocolVersion": protocolVersion,
+				"protocolVersion": version,
 				"capabilities":    caps,
 				"serverInfo":      map[string]any{"name": serverName, "version": serverVersion},
 			},
