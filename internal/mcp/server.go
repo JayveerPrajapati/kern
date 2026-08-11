@@ -1027,7 +1027,11 @@ func (s *Server) toolCallResponse(id json.RawMessage, params json.RawMessage) an
 	// max_output=N argument (bytes; N=0 disables) and configurable globally via
 	// KERN_MCP_MAX_OUTPUT.
 	if err == nil {
-		text = sandboxOutput(text, callOutputBudget(p.Arguments), p.Name)
+		var budget int
+		budget, err = callOutputBudget(p.Arguments)
+		if err == nil {
+			text = sandboxOutput(text, budget, p.Name)
+		}
 	}
 	result := map[string]any{
 		"content": []any{map[string]any{"type": "text", "text": text}},
@@ -1058,17 +1062,20 @@ func outputBudget() int {
 }
 
 // callOutputBudget returns the per-call budget: an explicit max_output=N
-// argument (bytes; 0 disables the sandbox) wins over the global cap.
-func callOutputBudget(args map[string]any) int {
+// argument (bytes; 0 disables the sandbox) wins over the global cap. A
+// malformed max_output is an error, not a silent fallback.
+func callOutputBudget(args map[string]any) (int, error) {
 	if v := argString(args, "max_output"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil {
-			if n <= 0 {
-				return 0 // disabled for this call
-			}
-			return n
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return 0, fmt.Errorf("max_output: invalid integer %q", v)
 		}
+		if n <= 0 {
+			return 0, nil // disabled for this call
+		}
+		return n, nil
 	}
-	return outputBudget()
+	return outputBudget(), nil
 }
 
 // sandboxOutput truncates text to budget bytes (when budget > 0) and stamps a
@@ -1155,17 +1162,18 @@ func argString(args map[string]any, key string) string {
 	return strings.TrimSpace(fmt.Sprintf("%v", v))
 }
 
-// atoiArg parses an integer CLI/tool argument, falling back to def for empty
-// or invalid input so a malformed value can't silently zero out a limit or
-// mis-size a buffer.
-func atoiArg(v string, def int) int {
+// atoiArg parses an integer tool argument, falling back to def for empty
+// input. A malformed value is an error, not a silent default, so a typo'd
+// number can't quietly zero out a limit or mis-size a buffer.
+func atoiArg(v string, def int) (int, error) {
 	if v == "" {
-		return def
+		return def, nil
 	}
-	if n, err := strconv.Atoi(v); err == nil {
-		return n
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		return 0, fmt.Errorf("invalid integer %q", v)
 	}
-	return def
+	return n, nil
 }
 
 // rootedPath resolves p for a file-reading tool. When root is given, the path
@@ -1268,7 +1276,11 @@ func (s *Server) runTool(ctx context.Context, id string, name string, args map[s
 		}
 		k := 5
 		if v := argString(args, "k"); v != "" {
-			if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			n, err := strconv.Atoi(v)
+			if err != nil {
+				return "", fmt.Errorf("k: invalid integer %q", v)
+			}
+			if n > 0 {
 				k = n
 			}
 		}
@@ -1312,7 +1324,11 @@ func (s *Server) runTool(ctx context.Context, id string, name string, args map[s
 		}
 		max := 100
 		if v := argString(args, "max"); v != "" {
-			if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			n, err := strconv.Atoi(v)
+			if err != nil {
+				return "", fmt.Errorf("max: invalid integer %q", v)
+			}
+			if n > 0 {
 				max = n
 			}
 		}
@@ -1370,7 +1386,11 @@ func (s *Server) runTool(ctx context.Context, id string, name string, args map[s
 		}
 		k := 5
 		if v := argString(args, "k"); v != "" {
-			k = atoiArg(v, k)
+			n, err := atoiArg(v, k)
+			if err != nil {
+				return "", err
+			}
+			k = n
 		}
 		// If the persisted index carries dense vectors, re-attach the local
 		// embedder so queries fuse the semantic signal too.
@@ -1529,7 +1549,11 @@ func (s *Server) runTool(ctx context.Context, id string, name string, args map[s
 		default:
 			maxTok := 0
 			if s := argString(args, "max_tokens"); s != "" {
-				if n, err := strconv.Atoi(s); err == nil && n > 0 {
+				n, err := strconv.Atoi(s)
+				if err != nil {
+					return "", fmt.Errorf("max_tokens: invalid integer %q", s)
+				}
+				if n > 0 {
 					maxTok = n
 				}
 			}
@@ -1557,7 +1581,11 @@ func (s *Server) runTool(ctx context.Context, id string, name string, args map[s
 		}
 		timeout := 120 * time.Second
 		if s := argString(args, "timeout"); s != "" {
-			if sec, err := strconv.Atoi(s); err == nil && sec > 0 {
+			sec, err := strconv.Atoi(s)
+			if err != nil {
+				return "", fmt.Errorf("timeout: invalid integer %q", s)
+			}
+			if sec > 0 {
 				timeout = time.Duration(sec) * time.Second
 			}
 		}
@@ -1623,13 +1651,21 @@ func (s *Server) runTool(ctx context.Context, id string, name string, args map[s
 		model := argString(args, "model")
 		rounds := 3
 		if s := argString(args, "max_rounds"); s != "" {
-			if n, err := strconv.Atoi(s); err == nil && n > 0 {
+			n, err := strconv.Atoi(s)
+			if err != nil {
+				return "", fmt.Errorf("max_rounds: invalid integer %q", s)
+			}
+			if n > 0 {
 				rounds = n
 			}
 		}
 		timeout := 120 * time.Second
 		if s := argString(args, "timeout"); s != "" {
-			if sec, err := strconv.Atoi(s); err == nil && sec > 0 {
+			sec, err := strconv.Atoi(s)
+			if err != nil {
+				return "", fmt.Errorf("timeout: invalid integer %q", s)
+			}
+			if sec > 0 {
 				timeout = time.Duration(sec) * time.Second
 			}
 		}
@@ -1662,7 +1698,11 @@ func (s *Server) runTool(ctx context.Context, id string, name string, args map[s
 		}
 		timeout := 120 * time.Second
 		if s := argString(args, "timeout"); s != "" {
-			if sec, err := strconv.Atoi(s); err == nil && sec > 0 {
+			sec, err := strconv.Atoi(s)
+			if err != nil {
+				return "", fmt.Errorf("timeout: invalid integer %q", s)
+			}
+			if sec > 0 {
 				timeout = time.Duration(sec) * time.Second
 			}
 		}
@@ -1759,7 +1799,11 @@ func (s *Server) runTool(ctx context.Context, id string, name string, args map[s
 		}
 		maxFiles := 500
 		if v := argString(args, "max_files"); v != "" {
-			maxFiles = atoiArg(v, maxFiles)
+			n, err := atoiArg(v, maxFiles)
+			if err != nil {
+				return "", err
+			}
+			maxFiles = n
 		}
 		p, err := code.BuildProject(root, maxFiles, 200)
 		if err != nil {
@@ -1775,7 +1819,11 @@ func (s *Server) runTool(ctx context.Context, id string, name string, args map[s
 		}
 		opts := pack.Options{}
 		if v := argString(args, "max_tokens"); v != "" {
-			opts.MaxTokens = atoiArg(v, opts.MaxTokens)
+			n, err := atoiArg(v, opts.MaxTokens)
+			if err != nil {
+				return "", err
+			}
+			opts.MaxTokens = n
 		} else {
 			opts.MaxTokens = 8000
 		}
@@ -1899,7 +1947,11 @@ func (s *Server) runTool(ctx context.Context, id string, name string, args map[s
 		}
 		maxTokens := 4000
 		if v := argString(args, "max_tokens"); v != "" {
-			maxTokens = atoiArg(v, maxTokens)
+			n, err := atoiArg(v, maxTokens)
+			if err != nil {
+				return "", err
+			}
+			maxTokens = n
 		}
 		out := budget.Fit(text, maxTokens)
 		before := tokenize.Count(text)
@@ -1917,7 +1969,11 @@ func (s *Server) runTool(ctx context.Context, id string, name string, args map[s
 		}
 		limit := 50
 		if v := argString(args, "limit"); v != "" {
-			limit = atoiArg(v, limit)
+			n, err := atoiArg(v, limit)
+			if err != nil {
+				return "", err
+			}
+			limit = n
 		}
 		matches := ix.Search(pattern, limit)
 		if len(matches) == 0 {
@@ -1956,7 +2012,11 @@ func (s *Server) runTool(ctx context.Context, id string, name string, args map[s
 		}
 		limit := 50
 		if v := argString(args, "limit"); v != "" {
-			limit = atoiArg(v, limit)
+			n, err := atoiArg(v, limit)
+			if err != nil {
+				return "", err
+			}
+			limit = n
 		}
 		var b strings.Builder
 		n := 0
@@ -1995,7 +2055,11 @@ func (s *Server) runTool(ctx context.Context, id string, name string, args map[s
 		}
 		limit := 20
 		if v := argString(args, "limit"); v != "" {
-			limit = atoiArg(v, limit)
+			n, err := atoiArg(v, limit)
+			if err != nil {
+				return "", err
+			}
+			limit = n
 		}
 		var matches []index.Symbol
 		sem := argString(args, "semantic")
@@ -2034,7 +2098,11 @@ func (s *Server) runTool(ctx context.Context, id string, name string, args map[s
 		}
 		limit := 20
 		if v := argString(args, "limit"); v != "" {
-			limit = atoiArg(v, limit)
+			n, err := atoiArg(v, limit)
+			if err != nil {
+				return "", err
+			}
+			limit = n
 		}
 		var hits []intel.RepoHit
 		sem := argString(args, "semantic")
@@ -2117,7 +2185,11 @@ func (s *Server) runTool(ctx context.Context, id string, name string, args map[s
 		}
 		lines := 12
 		if v := argString(args, "lines"); v != "" {
-			lines = atoiArg(v, lines)
+			n, err := atoiArg(v, lines)
+			if err != nil {
+				return "", err
+			}
+			lines = n
 		}
 		ctx := ix.Context(symbol, lines)
 		if ctx == "" {
@@ -2139,7 +2211,11 @@ func (s *Server) runTool(ctx context.Context, id string, name string, args map[s
 		}
 		maxTokens := 8000
 		if v := argString(args, "max_tokens"); v != "" {
-			maxTokens = atoiArg(v, maxTokens)
+			n, err := atoiArg(v, maxTokens)
+			if err != nil {
+				return "", err
+			}
+			maxTokens = n
 		}
 		return intel.ReviewRanged(ix, changes, maxTokens), nil
 
@@ -2150,7 +2226,11 @@ func (s *Server) runTool(ctx context.Context, id string, name string, args map[s
 		}
 		limit := 10
 		if v := argString(args, "limit"); v != "" {
-			limit = atoiArg(v, limit)
+			n, err := atoiArg(v, limit)
+			if err != nil {
+				return "", err
+			}
+			limit = n
 		}
 		var b strings.Builder
 		b.WriteString(intel.RenderHubs(intel.Hubs(ix, limit)))
@@ -2165,7 +2245,11 @@ func (s *Server) runTool(ctx context.Context, id string, name string, args map[s
 		}
 		limit := 10
 		if v := argString(args, "limit"); v != "" {
-			limit = atoiArg(v, limit)
+			n, err := atoiArg(v, limit)
+			if err != nil {
+				return "", err
+			}
+			limit = n
 		}
 		c := intel.AnalyzeCoverage(ix)
 		c.HotGaps = intel.TestGaps(ix, limit)
@@ -2199,7 +2283,11 @@ func (s *Server) runTool(ctx context.Context, id string, name string, args map[s
 		dead := intel.DeadCode(ix)
 		limit := 0
 		if v := argString(args, "limit"); v != "" {
-			limit = atoiArg(v, limit)
+			n, err := atoiArg(v, limit)
+			if err != nil {
+				return "", err
+			}
+			limit = n
 		}
 		if limit > 0 && len(dead) > limit {
 			dead = dead[:limit]
@@ -2213,12 +2301,20 @@ func (s *Server) runTool(ctx context.Context, id string, name string, args map[s
 		}
 		minLines := 60
 		if v := argString(args, "min_lines"); v != "" {
-			minLines = atoiArg(v, minLines)
+			n, err := atoiArg(v, minLines)
+			if err != nil {
+				return "", err
+			}
+			minLines = n
 		}
 		large := intel.LargeFunctions(ix, minLines)
 		limit := 0
 		if v := argString(args, "limit"); v != "" {
-			limit = atoiArg(v, limit)
+			n, err := atoiArg(v, limit)
+			if err != nil {
+				return "", err
+			}
+			limit = n
 		}
 		if limit > 0 && len(large) > limit {
 			large = large[:limit]
@@ -2263,11 +2359,19 @@ func (s *Server) runTool(ctx context.Context, id string, name string, args map[s
 		}
 		depth := 2
 		if v := argString(args, "depth"); v != "" {
-			depth = atoiArg(v, depth)
+			n, err := atoiArg(v, depth)
+			if err != nil {
+				return "", err
+			}
+			depth = n
 		}
 		maxNodes := 100
 		if v := argString(args, "max"); v != "" {
-			maxNodes = atoiArg(v, maxNodes)
+			n, err := atoiArg(v, maxNodes)
+			if err != nil {
+				return "", err
+			}
+			maxNodes = n
 		}
 		nodes, err := intel.Near(ix, symbol, depth, maxNodes)
 		if err != nil {
@@ -2286,11 +2390,19 @@ func (s *Server) runTool(ctx context.Context, id string, name string, args map[s
 		}
 		depth := 0
 		if v := argString(args, "depth"); v != "" {
-			depth = atoiArg(v, depth)
+			n, err := atoiArg(v, depth)
+			if err != nil {
+				return "", err
+			}
+			depth = n
 		}
 		maxNodes := 0
 		if v := argString(args, "max"); v != "" {
-			maxNodes = atoiArg(v, maxNodes)
+			n, err := atoiArg(v, maxNodes)
+			if err != nil {
+				return "", err
+			}
+			maxNodes = n
 		}
 		rep, err := intel.Explore(ix, symbol, depth, maxNodes)
 		if err != nil {
@@ -2309,7 +2421,11 @@ func (s *Server) runTool(ctx context.Context, id string, name string, args map[s
 		}
 		limit := 20
 		if v := argString(args, "limit"); v != "" {
-			limit = atoiArg(v, limit)
+			n, err := atoiArg(v, limit)
+			if err != nil {
+				return "", err
+			}
+			limit = n
 		}
 		// Ensure a persisted index exists before searching.
 		if _, err := index.LoadSQLite(root); err != nil {
@@ -2342,7 +2458,11 @@ func (s *Server) runTool(ctx context.Context, id string, name string, args map[s
 		}
 		limit := 15
 		if v := argString(args, "limit"); v != "" {
-			limit = atoiArg(v, limit)
+			n, err := atoiArg(v, limit)
+			if err != nil {
+				return "", err
+			}
+			limit = n
 		}
 		return intel.RenderBridges(intel.Bridges(ix, limit)), nil
 
@@ -2362,7 +2482,11 @@ func (s *Server) runTool(ctx context.Context, id string, name string, args map[s
 		}
 		limit := 20
 		if v := argString(args, "limit"); v != "" {
-			limit = atoiArg(v, limit)
+			n, err := atoiArg(v, limit)
+			if err != nil {
+				return "", err
+			}
+			limit = n
 		}
 		report, err := intel.CoChange(root, from, to)
 		if err != nil {
@@ -2381,7 +2505,11 @@ func (s *Server) runTool(ctx context.Context, id string, name string, args map[s
 		}
 		maxTokens := 4000
 		if v := argString(args, "max_tokens"); v != "" {
-			maxTokens = atoiArg(v, maxTokens)
+			n, err := atoiArg(v, maxTokens)
+			if err != nil {
+				return "", err
+			}
+			maxTokens = n
 		}
 		report := intel.Probe(ix, task, maxTokens)
 		text := intel.RenderProbe(report)
@@ -2401,7 +2529,11 @@ func (s *Server) runTool(ctx context.Context, id string, name string, args map[s
 		}
 		limit := 0
 		if v := argString(args, "limit"); v != "" {
-			limit = atoiArg(v, limit)
+			n, err := atoiArg(v, limit)
+			if err != nil {
+				return "", err
+			}
+			limit = n
 		}
 		return intel.RenderTrace(intel.Trace(ix, src, "trace", limit)), nil
 
@@ -2498,7 +2630,11 @@ func (s *Server) runTool(ctx context.Context, id string, name string, args map[s
 		violations := intel.CheckBoundaries(ix, b, files)
 		threshold := 0
 		if v := argString(args, "threshold"); v != "" {
-			threshold = atoiArg(v, threshold)
+			n, err := atoiArg(v, threshold)
+			if err != nil {
+				return "", err
+			}
+			threshold = n
 		}
 		// threshold=-1 means "never reject" (audit only).
 		if threshold >= 0 && len(violations) > threshold {
@@ -2540,12 +2676,18 @@ func (s *Server) runTool(ctx context.Context, id string, name string, args map[s
 			NoIsolate: argString(args, "no_isolate") == "true" || argString(args, "no_isolate") == "1",
 		}
 		if v := argString(args, "timeout"); v != "" {
-			if sec, err := strconv.Atoi(v); err == nil {
-				run.Timeout = time.Duration(sec) * time.Second
+			sec, err := strconv.Atoi(v)
+			if err != nil {
+				return "", fmt.Errorf("timeout: invalid integer %q", v)
 			}
+			run.Timeout = time.Duration(sec) * time.Second
 		}
 		if v := argString(args, "max"); v != "" {
-			if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			n, err := strconv.Atoi(v)
+			if err != nil {
+				return "", fmt.Errorf("max: invalid integer %q", v)
+			}
+			if n > 0 {
 				run.MaxOut = n
 			}
 		}

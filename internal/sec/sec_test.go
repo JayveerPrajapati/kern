@@ -152,6 +152,37 @@ const k = "ghp_abcdefghijklmnopqrstuvwxyz1234567890"
 	}
 }
 
+func TestScanTreeSkipsTestFixturesEverywhere(t *testing.T) {
+	dir := t.TempDir()
+	write := func(rel, content string) {
+		p := dir + "/" + rel
+		parts := strings.Split(rel, "/")
+		if len(parts) > 1 {
+			_ = os.MkdirAll(dir+"/"+strings.Join(parts[:len(parts)-1], "/"), 0o755)
+		}
+		_ = os.WriteFile(p, []byte(content), 0o644)
+	}
+	secret := `const k = "sk-abcdefghijklmnopqrstuvwxyz1234567890"`
+	write("app.go", secret)
+	write("auth_test.py", secret)
+	write("foo.test.js", secret)
+	write("test/spec_test.go", secret)
+	findings, err := Scan(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var real []Finding
+	for _, f := range findings {
+		if strings.Contains(f.File, "test") {
+			t.Fatalf("test fixture must be skipped, got %+v", f)
+		}
+		real = append(real, f)
+	}
+	if len(real) != 1 || real[0].File != "app.go" {
+		t.Fatalf("expected exactly one finding in app.go, got %+v", real)
+	}
+}
+
 func TestRenderCapsAndCounts(t *testing.T) {
 	src := []byte("const k = \"sk-abcdefghijklmnopqrstuvwxyz1234567890\"\n")
 	findings := ScanFile("a.go", src)

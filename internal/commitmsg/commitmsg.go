@@ -130,13 +130,33 @@ func parseDiff(d string) []fileChange {
 		switch {
 		case strings.HasPrefix(l, "diff --git "):
 			push()
-			p := l[len("diff --git a/"):]
-			// The from path ends at the last " b/" (right-most, so a path
-			// containing " b/" is not split) and may be C-quoted when it has
-			// spaces or non-ASCII bytes.
-			if i := strings.LastIndex(p, " b/"); i >= 0 {
+			// Header: `diff --git a/old b/new`. When core.quotePath kicks in
+			// (spaces, non-ASCII) git C-quotes each side: `diff --git
+			// "a/old file" "b/new file"`, so a fixed-offset slice at a/ breaks.
+			p := strings.TrimSpace(l[len("diff --git "):])
+			if strings.HasPrefix(p, `"`) {
+				// Find the end of the C-quoted first operand, honoring
+				// backslash escapes, then unquote it in full.
+				end := len(p)
+				for i := 1; i < len(p); i++ {
+					if p[i] == '\\' {
+						i++
+						continue
+					}
+					if p[i] == '"' {
+						end = i + 1
+						break
+					}
+				}
+				if q, err := strconv.Unquote(p[:end]); err == nil {
+					p = q
+				}
+			} else if i := strings.LastIndex(p, " b/"); i >= 0 {
+				// The from path ends at the last " b/" (right-most, so a path
+				// containing " b/" is not split).
 				p = p[:i]
 			}
+			p = strings.TrimPrefix(p, "a/")
 			cur = &fileChange{path: unquoteGitPath(p)}
 		case cur == nil:
 			continue

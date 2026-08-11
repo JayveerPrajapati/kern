@@ -6,7 +6,7 @@ import (
 )
 
 func TestMaskIPAndEmail(t *testing.T) {
-	in := "server at 192.168.1.100 failed; contact ops@corp.example.com"
+	in := "server at 8.8.8.8 failed; contact ops@corp.example.com"
 	res := Mask(in)
 	if !strings.Contains(res.Text, "[MASKED_IP_1]") {
 		t.Errorf("IP not masked: %q", res.Text)
@@ -20,15 +20,39 @@ func TestMaskIPAndEmail(t *testing.T) {
 }
 
 func TestMaskSequentialPlaceholders(t *testing.T) {
-	in := "a: 10.0.0.1\nb: 10.0.0.2\nc: 10.0.0.3"
+	in := "a: 8.8.8.8\nb: 1.1.1.1\nc: 9.9.9.9"
 	res := Mask(in)
 	for _, ph := range []string{"[MASKED_IP_1]", "[MASKED_IP_2]", "[MASKED_IP_3]"} {
 		if !strings.Contains(res.Text, ph) {
 			t.Errorf("missing %s in %q", ph, res.Text)
 		}
 	}
-	if res.Mapping["[MASKED_IP_1]"] != "10.0.0.1" {
+	if res.Mapping["[MASKED_IP_1]"] != "8.8.8.8" {
 		t.Errorf("bad mapping: %+v", res.Mapping)
+	}
+}
+
+func TestMaskSkipsNonSecretIPs(t *testing.T) {
+	in := "loopback 127.0.0.1, private 10.0.0.5 and 192.168.1.10, link-local 169.254.1.1, ipv6 ::1 and fe80::1"
+	res := Mask(in)
+	if strings.Contains(res.Text, "[MASKED_IP_") {
+		t.Errorf("non-secret IPs must not be masked: %q", res.Text)
+	}
+	if res.Text != in {
+		t.Errorf("expected input unchanged, got %q", res.Text)
+	}
+	if res.Replaced != 0 {
+		t.Errorf("expected zero replacements, got %d", res.Replaced)
+	}
+}
+
+func TestMaskPublicIPv6(t *testing.T) {
+	res := Mask("router at 2001:db8:85a3::8a2e:370:7334")
+	if !strings.Contains(res.Text, "[MASKED_IPV6_1]") {
+		t.Errorf("public IPv6 not masked: %q", res.Text)
+	}
+	if res.Mapping["[MASKED_IPV6_1]"] != "2001:db8:85a3::8a2e:370:7334" {
+		t.Errorf("bad ipv6 mapping: %+v", res.Mapping)
 	}
 }
 

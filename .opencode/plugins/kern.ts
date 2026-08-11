@@ -894,7 +894,9 @@ export default (async ({ directory, $ }) => {
           if (args.command) flags.push("--cmd", args.command)
           if (args.timeout) flags.push("--timeout", String(args.timeout))
           if (args.root) flags.push(args.root)
-          return run(flags)
+          // validate exits 1 on build failure with the errors on stdout —
+          // use runPayload so the output is surfaced, not dropped.
+          return runPayload(flags)
         },
       }),
       kern_schema_validate: tool({
