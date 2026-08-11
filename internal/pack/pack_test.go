@@ -261,10 +261,17 @@ func TestTreeAndJSON(t *testing.T) {
 		t.Fatal(err)
 	}
 	tree := b.tree()
-	for _, frag := range []string{"cmd/", "internal/a/", "main.go", "a.go", "tokens"} {
+	for _, frag := range []string{"cmd/", "internal/", "a/", "main.go", "a.go", "tokens"} {
 		if !strings.Contains(tree, frag) {
 			t.Fatalf("tree missing %q:\n%s", frag, tree)
 		}
+	}
+	// A real tree nests basenames by depth; the full path must not be echoed.
+	if strings.Contains(tree, "internal/a/a.go") {
+		t.Fatalf("tree must render basenames, not full paths:\n%s", tree)
+	}
+	if !strings.Contains(tree, "├── cmd/\n  ├── main.go") && !strings.Contains(tree, "├── cmd/\n    ├── main.go") {
+		t.Fatalf("tree must nest main.go under cmd/:\n%s", tree)
 	}
 	js, err := b.JSON()
 	if err != nil {

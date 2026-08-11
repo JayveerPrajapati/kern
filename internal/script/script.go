@@ -4,11 +4,15 @@
 // compute things (data munging, math, JSON transforms, quick sims) without
 // polluting its context with build noise or stderr.
 //
-// Isolation model (v1): the script runs in a fresh temp dir with the runtime
-// resolved from PATH, a hard timeout, and a stdout byte cap. The working dir
-// and stdin are controlled; network egress is NOT blocked in v1, so treat
-// untrusted code accordingly. Stderr is never mixed into stdout — it is only
-// surfaced on failure.
+// Isolation model (v2): the script runs in a fresh temp dir with the runtime
+// resolved from PATH, a hard timeout, a stdout byte cap, and a sanitized
+// environment (HOME and the XDG dirs point into the temp dir, so a script
+// cannot read or clobber the user's real configs or env secrets). When the
+// system's unprivileged user namespaces are enabled, the child also runs in a
+// private network namespace (unshare --user --map-root-user --net), so network
+// egress is blocked. If user namespaces are unavailable the run degrades to
+// environment isolation only and Result.Isolated reports the gap. Stderr is
+// never mixed into stdout — it is only surfaced on failure.
 package script
 
 import (
@@ -20,6 +24,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -71,6 +76,9 @@ type Run struct {
 	Stdin   string        // piped to the script's stdin
 	Timeout time.Duration // default 10s
 	MaxOut  int           // max stdout bytes returned; default 16 KiB
+	// NoIsolate opts out of the sandbox: when set, the script inherits the
+	// caller's environment and full network access. Isolation is on by default.
+	NoIsolate bool
 }
 
 // Result is the outcome of one script execution.
@@ -83,8 +91,57 @@ type Result struct {
 	Stderr    string        `json:"stderr,omitempty"`
 	Truncated bool          `json:"truncated"`
 	TimedOut  bool          `json:"timed_out"`
+	Isolated  bool          `json:"isolated"` // network ns active (false = degraded)
 	Duration  time.Duration `json:"duration"`
 	Err       error         `json:"-"`
+}
+
+// networkNSArgs caches the unshare wrapper when unprivileged user namespaces
+// plus a network namespace work; nil means the platform cannot isolate.
+var (
+	netProbeOnce sync.Once
+	netNSArgs    []string
+)
+
+// networkNS returns the unshare prefix that runs a child in a private network
+// namespace, or nil when unavailable (probed once per process). The wrapper is
+// safe: --map-root-user inside a fresh user namespace grants no host access.
+func networkNS() []string {
+	netProbeOnce.Do(func() {
+		bin, err := exec.LookPath("unshare")
+		if err != nil {
+			return
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		if err := exec.CommandContext(ctx, bin, "--user", "--map-root-user", "--net", "true").Run(); err == nil {
+			netNSArgs = []string{bin, "--user", "--map-root-user", "--net"}
+		}
+	})
+	return netNSArgs
+}
+
+// sandboxEnv builds a minimal environment with HOME and the XDG dirs pointed
+// into the sandbox dir, so a script cannot read the user's real configs or
+// exfiltrate environment secrets. Whitelisted vars that are safe and useful
+// are preserved.
+func sandboxEnv(dir string) []string {
+	env := []string{
+		"HOME=" + dir,
+		"XDG_CACHE_HOME=" + filepath.Join(dir, ".cache"),
+		"XDG_CONFIG_HOME=" + filepath.Join(dir, ".config"),
+		"XDG_DATA_HOME=" + filepath.Join(dir, ".local/share"),
+		"TMPDIR=" + dir,
+		"TMP=" + dir,
+		"TEMP=" + dir,
+		"PATH=" + os.Getenv("PATH"),
+	}
+	for _, k := range []string{"LANG", "LC_ALL", "LC_CTYPE", "TERM", "TZ", "KERN_EMBED_MODEL"} {
+		if v := os.Getenv(k); v != "" {
+			env = append(env, k+"="+v)
+		}
+	}
+	return env
 }
 
 // RunScript executes the script and returns a Result. On success Stdout holds
@@ -155,11 +212,32 @@ func RunScript(r Run) *Result {
 	ctx, cancel := context.WithTimeout(context.Background(), r.Timeout)
 	defer cancel()
 
+	var ns []string
+	if !r.NoIsolate {
+		ns = networkNS()
+		res.Isolated = ns != nil
+	}
+	env := sandboxEnv(dir)
+	if r.NoIsolate {
+		env = os.Environ()
+	}
+
+	// wrap prepends the unshare network namespace when available.
+	wrap := func(cmd *exec.Cmd) *exec.Cmd {
+		if len(ns) == 0 {
+			return cmd
+		}
+		cmd.Path = ns[0]
+		cmd.Args = append(append([]string{}, ns...), cmd.Args...)
+		return cmd
+	}
+
 	if r.Lang == "rust" {
 		// Two-step: compile then run the produced binary.
-		cmd := exec.CommandContext(ctx, binPath, append(append([]string{}, rt.post...), src)...)
+		cmd := wrap(exec.CommandContext(ctx, binPath, append(append([]string{}, rt.post...), src)...))
 		cmd.Dir = dir
 		cmd.Stdin = strings.NewReader(r.Stdin)
+		cmd.Env = env
 		var cerr bytes.Buffer
 		cmd.Stdout = &cerr
 		cmd.Stderr = &cerr
@@ -167,16 +245,18 @@ func RunScript(r Run) *Result {
 			res.exitFrom(cmd, err, cerr.String(), "compile")
 			return res
 		}
-		runCmd := exec.CommandContext(ctx, filepath.Join(dir, "prog"))
+		runCmd := wrap(exec.CommandContext(ctx, filepath.Join(dir, "prog")))
 		runCmd.Dir = dir
 		runCmd.Stdin = strings.NewReader(r.Stdin)
+		runCmd.Env = env
 		res.capture(ctx, runCmd, r.MaxOut, r.Timeout)
 		return res
 	}
 
-	cmd := exec.CommandContext(ctx, binPath, append(append([]string{}, rt.pre...), src)...)
+	cmd := wrap(exec.CommandContext(ctx, binPath, append(append([]string{}, rt.pre...), src)...))
 	cmd.Dir = dir
 	cmd.Stdin = strings.NewReader(r.Stdin)
+	cmd.Env = env
 	res.capture(ctx, cmd, r.MaxOut, r.Timeout)
 	return res
 }

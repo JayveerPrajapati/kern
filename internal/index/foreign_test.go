@@ -83,6 +83,32 @@ func TestPythonExtract(t *testing.T) {
 	}
 }
 
+func TestPythonTripleDelimiterIsolation(t *testing.T) {
+	// A ''' docstring spanning lines must not be closed by a """ that appears
+	// inside it, and code after the docstring must still be analysed.
+	src := `'''first line
+inner """quote"""
+still docstring
+'''
+
+def work():
+    return helper()
+
+def helper():
+    return 1
+`
+	syms, calls, _, _, _ := extractForeign("app.py", []byte(src), "python")
+	if s := findSym(syms, "work"); s == nil || s.Kind != "func" {
+		t.Fatalf("expected func work after ''' docstring, got %+v", syms)
+	}
+	if s := findSym(syms, "helper"); s == nil || s.Kind != "func" {
+		t.Fatalf("expected func helper, got %+v", syms)
+	}
+	if !contains(calls["work"], "helper") {
+		t.Fatalf("expected work to call helper, got %v", calls["work"])
+	}
+}
+
 const jsSrc = `import { x } from "./x.js"
 
 export const MAX = 10

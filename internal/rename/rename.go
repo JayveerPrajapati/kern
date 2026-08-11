@@ -163,8 +163,8 @@ func renameFile(ix *index.Index, abs, oldName, newName, symPkg string, exported 
 	// Package-qualifier names for this file: which selector Xs refer to
 	// imported packages, and whether that package is the renamed symbol's own
 	// package (so pkg.Symbol is renamed, while bytes.Buffer never is).
-	qualifiers := map[string]bool{}    // selector X name used as a package qualifier
-	qualToSymPkg := map[string]bool{}  // subset of qualifiers that import the symbol's package
+	qualifiers := map[string]bool{}   // selector X name used as a package qualifier
+	qualToSymPkg := map[string]bool{} // subset of qualifiers that import the symbol's package
 	for _, imp := range f.Imports {
 		if imp.Path == nil {
 			continue
@@ -173,7 +173,7 @@ func renameFile(ix *index.Index, abs, oldName, newName, symPkg string, exported 
 		if err != nil {
 			continue
 		}
-		ours := symPkg != "" && (p == symPkg || strings.HasSuffix(p, "/"+symPkg))
+		ours := symPkg != "" && packageDirOf(ix, p) == symPkg
 		declared := packageNameOf(ix, p)
 		if declared == "" {
 			declared = filepath.Base(p)
@@ -433,18 +433,34 @@ func Render(r *Report) string {
 // against the index's package table (keyed by relative Dir(rel)); module-qualified
 // import paths are matched by trailing suffix.
 func packageNameOf(ix *index.Index, importPath string) string {
-	if ix == nil || importPath == "" {
-		return ""
-	}
-	for k, p := range ix.Pkgs {
-		if p == nil {
-			continue
-		}
-		if importPath == k || strings.HasSuffix(importPath, "/"+k) {
+	if k := packageDirOf(ix, importPath); k != "" {
+		if p := ix.Pkgs[k]; p != nil {
 			return p.Name
 		}
 	}
 	return ""
+}
+
+// packageDirOf returns the in-project package directory that suffix-matches an
+// import path, preferring the LONGEST match. Map iteration is unordered, so
+// picking "the first match" would be nondeterministic, and a short dir like
+// "util" must never shadow "pkg/util" when both could suffix-match the same
+// import path. (A true cross-module name collision with identical directory
+// trees cannot be disambiguated without the module path, which the index does
+// not record.)
+func packageDirOf(ix *index.Index, importPath string) string {
+	if ix == nil || importPath == "" {
+		return ""
+	}
+	best := ""
+	for k := range ix.Pkgs {
+		if importPath == k || strings.HasSuffix(importPath, "/"+k) {
+			if len(k) > len(best) {
+				best = k
+			}
+		}
+	}
+	return best
 }
 
 // callerFile resolves a caller symbol name to its defining file, or "".

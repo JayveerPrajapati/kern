@@ -50,6 +50,28 @@ new file mode 100644
 	}
 }
 
+func TestParseDiffBinaryAndPathSpaces(t *testing.T) {
+	out := `diff --git a/im age.png b/im age.png
+index a6a3e7f..6735744 100644
+Binary files a/im age.png and b/im age.png differ
+
+diff --git a/gone.png b/gone.png
+deleted file mode 100644
+index 0000000..0000000
+Binary files a/gone.png and /dev/null differ
+`
+	changes := parseDiffOutput(out)
+	if len(changes) != 1 {
+		t.Fatalf("expected 1 file (deletion dropped), got %v", changes)
+	}
+	if changes[0].File != "im age.png" {
+		t.Fatalf("expected binary path preserved, got %q", changes[0].File)
+	}
+	if len(changes[0].Ranges) != 0 {
+		t.Fatalf("expected whole-file (empty ranges) for binary, got %v", changes[0].Ranges)
+	}
+}
+
 func TestParseHunk(t *testing.T) {
 	cases := []struct {
 		line  string

@@ -307,8 +307,9 @@ var tools = []Tool{
 		Name:        "kern_diff_files",
 		Description: "Delta streaming (#13): compute a unified line diff between two files (or two versions of the same file) using pure Go. Returns the full patch, or a note when files are identical. Feed the output back to the model as a compact edit description.",
 		InputSchema: schema(map[string]any{
-			"a": strProp("Path to the old/base file"),
-			"b": strProp("Path to the new/changed file"),
+			"a":    strProp("Path to the old/base file"),
+			"b":    strProp("Path to the new/changed file"),
+			"root": strProp("Project root; when set, a and b must stay inside it (defaults to unrestricted)"),
 		}, []string{"a", "b"}),
 	},
 	{
@@ -352,6 +353,7 @@ var tools = []Tool{
 		Description: "Return a compact symbolic summary of a source file (functions, types, line numbers) instead of reading the whole file. Use before reading files in large codebases.",
 		InputSchema: schema(map[string]any{
 			"path": strProp("Absolute or relative path of the file to summarize"),
+			"root": strProp("Project root; when set, path must stay inside it (defaults to unrestricted)"),
 		}, []string{"path"}),
 	},
 	{
@@ -649,14 +651,15 @@ var tools = []Tool{
 	},
 	{
 		Name:        "kern_exec",
-		Description: "Run code in an isolated local runtime and return ONLY stdout — the 'Think in Code' surface. Language is selected by --lang or a shebang line; runtimes are resolved from PATH (python3, node, go, bash, perl, ruby, php, lua, julia, R, bun, deno, rust, ...). The script runs in a fresh temp dir with a hard timeout (default 10s, override timeout=N) and a stdout byte cap (default 16KiB, override max=N); stderr is never mixed into stdout and is only surfaced on failure. Use it to compute things (math, data munging, JSON transforms) without polluting context. V1 does NOT block network egress, so do not feed it untrusted code.",
+		Description: "Run code in an isolated local runtime and return ONLY stdout — the 'Think in Code' surface. Language is selected by --lang or a shebang line; runtimes are resolved from PATH (python3, node, go, bash, perl, ruby, php, lua, julia, R, bun, deno, rust, ...). The script runs in a fresh temp dir with a hard timeout (default 10s, override timeout=N), a stdout byte cap (default 16KiB, override max=N), and a sanitized environment (HOME/XDG pointed into the sandbox, secrets stripped). When unprivileged user namespaces are available the script also runs in a private network namespace, so network egress is blocked; otherwise it degrades to env isolation only. stderr is never mixed into stdout and is only surfaced on failure. Use it to compute things (math, data munging, JSON transforms) without polluting context.",
 		InputSchema: schema(map[string]any{
-			"code":    strProp("The script body (required)"),
-			"lang":    strProp("Language override (e.g. python3, node, bash, go); otherwise detected from the shebang"),
-			"timeout": strProp("Timeout in seconds (default 10)"),
-			"max":     strProp("Max stdout bytes to return (default 16384)"),
-			"stdin":   strProp("Input piped to the script's stdin"),
-			"list":    strProp("If true, return the installed runtimes and supported languages and do nothing else"),
+			"code":       strProp("The script body (required)"),
+			"lang":       strProp("Language override (e.g. python3, node, bash, go); otherwise detected from the shebang"),
+			"timeout":    strProp("Timeout in seconds (default 10)"),
+			"max":        strProp("Max stdout bytes to return (default 16384)"),
+			"stdin":      strProp("Input piped to the script's stdin"),
+			"list":       strProp("If true, return the installed runtimes and supported languages and do nothing else"),
+			"no_isolate": strProp("If true, inherit the caller's environment and full network access (default false)"),
 		}, []string{"code"}),
 	},
 	{
@@ -1152,6 +1155,37 @@ func argString(args map[string]any, key string) string {
 	return strings.TrimSpace(fmt.Sprintf("%v", v))
 }
 
+// atoiArg parses an integer CLI/tool argument, falling back to def for empty
+// or invalid input so a malformed value can't silently zero out a limit or
+// mis-size a buffer.
+func atoiArg(v string, def int) int {
+	if v == "" {
+		return def
+	}
+	if n, err := strconv.Atoi(v); err == nil {
+		return n
+	}
+	return def
+}
+
+// rootedPath resolves p for a file-reading tool. When root is given, the path
+// must stay inside it (rejecting "..", absolute paths outside, and symlink
+// escapes); rootless calls keep the legacy behavior of reading any path, since
+// the caller — a loopback MCP client — is the trusted principal.
+func rootedPath(root, p string) (string, error) {
+	if root == "" {
+		if filepath.IsAbs(p) {
+			return p, nil
+		}
+		cwd, err := os.Getwd()
+		if err != nil {
+			return "", err
+		}
+		return filepath.Join(cwd, p), nil
+	}
+	return withinRoot(root, p)
+}
+
 func (s *Server) runTool(ctx context.Context, id string, name string, args map[string]any) (string, error) {
 	if !toolAllowed(s.filteredTools(), name) {
 		return "", fmt.Errorf("tool %q is not allowed (KERN_TOOLS allowlist)", name)
@@ -1278,12 +1312,20 @@ func (s *Server) runTool(ctx context.Context, id string, name string, args map[s
 		}
 		max := 100
 		if v := argString(args, "max"); v != "" {
-			fmt.Sscanf(v, "%d", &max)
+			if n, err := strconv.Atoi(v); err == nil && n > 0 {
+				max = n
+			}
 		}
-		findings := sec.FilterBySeverity(sec.Scan(root), allow)
+		findings, serr := sec.Scan(root)
+		if serr != nil {
+			return "", fmt.Errorf("security scan failed: %w", serr)
+		}
+		findings = sec.FilterBySeverity(findings, allow)
 		if argString(args, "format") == "json" {
 			var b strings.Builder
-			json.NewEncoder(&b).Encode(findings)
+			if err := json.NewEncoder(&b).Encode(findings); err != nil {
+				return "", fmt.Errorf("encode findings: %w", err)
+			}
 			return b.String(), nil
 		}
 		if len(findings) == 0 {
@@ -1328,7 +1370,7 @@ func (s *Server) runTool(ctx context.Context, id string, name string, args map[s
 		}
 		k := 5
 		if v := argString(args, "k"); v != "" {
-			fmt.Sscanf(v, "%d", &k)
+			k = atoiArg(v, k)
 		}
 		// If the persisted index carries dense vectors, re-attach the local
 		// embedder so queries fuse the semantic signal too.
@@ -1510,6 +1552,9 @@ func (s *Server) runTool(ctx context.Context, id string, name string, args map[s
 		stop := s.startProgress(ctx, id, "kern_sandbox")
 		defer stop()
 		parts := splitShellLine(cmdLine)
+		if len(parts) == 0 {
+			return "", fmt.Errorf("command is empty")
+		}
 		timeout := 120 * time.Second
 		if s := argString(args, "timeout"); s != "" {
 			if sec, err := strconv.Atoi(s); err == nil && sec > 0 {
@@ -1543,11 +1588,20 @@ func (s *Server) runTool(ctx context.Context, id string, name string, args map[s
 		if a == "" || b == "" {
 			return "", fmt.Errorf("a and b are required")
 		}
-		ab, err := os.ReadFile(a)
+		root := argString(args, "root")
+		ap, err := rootedPath(root, a)
+		if err != nil {
+			return "", err
+		}
+		bp, err := rootedPath(root, b)
+		if err != nil {
+			return "", err
+		}
+		ab, err := os.ReadFile(ap)
 		if err != nil {
 			return "", fmt.Errorf("read %s: %w", a, err)
 		}
-		bb, err := os.ReadFile(b)
+		bb, err := os.ReadFile(bp)
 		if err != nil {
 			return "", fmt.Errorf("read %s: %w", b, err)
 		}
@@ -1615,6 +1669,9 @@ func (s *Server) runTool(ctx context.Context, id string, name string, args map[s
 		var c *validate.Command
 		if cmd := argString(args, "command"); cmd != "" {
 			parts := strings.Fields(cmd)
+			if len(parts) == 0 {
+				return "", fmt.Errorf("command is empty")
+			}
 			c = &validate.Command{Name: parts[0], Cmd: parts[0], Args: parts[1:]}
 		} else {
 			var err error
@@ -1682,10 +1739,10 @@ func (s *Server) runTool(ctx context.Context, id string, name string, args map[s
 		if path == "" {
 			return "", fmt.Errorf("path is required")
 		}
-		abs := path
-		if !filepath.IsAbs(abs) {
-			cwd, _ := os.Getwd()
-			abs = filepath.Join(cwd, abs)
+		root := argString(args, "root")
+		abs, err := rootedPath(root, path)
+		if err != nil {
+			return "", err
 		}
 		content, err := code.ReadFile(abs)
 		if err != nil {
@@ -1702,7 +1759,7 @@ func (s *Server) runTool(ctx context.Context, id string, name string, args map[s
 		}
 		maxFiles := 500
 		if v := argString(args, "max_files"); v != "" {
-			fmt.Sscanf(v, "%d", &maxFiles)
+			maxFiles = atoiArg(v, maxFiles)
 		}
 		p, err := code.BuildProject(root, maxFiles, 200)
 		if err != nil {
@@ -1718,7 +1775,7 @@ func (s *Server) runTool(ctx context.Context, id string, name string, args map[s
 		}
 		opts := pack.Options{}
 		if v := argString(args, "max_tokens"); v != "" {
-			fmt.Sscanf(v, "%d", &opts.MaxTokens)
+			opts.MaxTokens = atoiArg(v, opts.MaxTokens)
 		} else {
 			opts.MaxTokens = 8000
 		}
@@ -1842,7 +1899,7 @@ func (s *Server) runTool(ctx context.Context, id string, name string, args map[s
 		}
 		maxTokens := 4000
 		if v := argString(args, "max_tokens"); v != "" {
-			fmt.Sscanf(v, "%d", &maxTokens)
+			maxTokens = atoiArg(v, maxTokens)
 		}
 		out := budget.Fit(text, maxTokens)
 		before := tokenize.Count(text)
@@ -1860,7 +1917,7 @@ func (s *Server) runTool(ctx context.Context, id string, name string, args map[s
 		}
 		limit := 50
 		if v := argString(args, "limit"); v != "" {
-			fmt.Sscanf(v, "%d", &limit)
+			limit = atoiArg(v, limit)
 		}
 		matches := ix.Search(pattern, limit)
 		if len(matches) == 0 {
@@ -1899,7 +1956,7 @@ func (s *Server) runTool(ctx context.Context, id string, name string, args map[s
 		}
 		limit := 50
 		if v := argString(args, "limit"); v != "" {
-			fmt.Sscanf(v, "%d", &limit)
+			limit = atoiArg(v, limit)
 		}
 		var b strings.Builder
 		n := 0
@@ -1908,7 +1965,10 @@ func (s *Server) runTool(ctx context.Context, id string, name string, args map[s
 				continue
 			}
 			if p := argString(args, "pattern"); p != "" {
-				re, _ := regexp.Compile("^" + strings.ReplaceAll(regexp.QuoteMeta(p), `\*`, `.*`) + "$")
+				re, err := regexp.Compile("^" + strings.ReplaceAll(regexp.QuoteMeta(p), `\*`, `.*`) + "$")
+				if err != nil {
+					return "", fmt.Errorf("bad pattern %q: %w", p, err)
+				}
 				if !re.MatchString(s.Name) && (s.Route == "" || !re.MatchString(s.Route)) {
 					continue
 				}
@@ -1935,7 +1995,7 @@ func (s *Server) runTool(ctx context.Context, id string, name string, args map[s
 		}
 		limit := 20
 		if v := argString(args, "limit"); v != "" {
-			fmt.Sscanf(v, "%d", &limit)
+			limit = atoiArg(v, limit)
 		}
 		var matches []index.Symbol
 		sem := argString(args, "semantic")
@@ -1974,7 +2034,7 @@ func (s *Server) runTool(ctx context.Context, id string, name string, args map[s
 		}
 		limit := 20
 		if v := argString(args, "limit"); v != "" {
-			fmt.Sscanf(v, "%d", &limit)
+			limit = atoiArg(v, limit)
 		}
 		var hits []intel.RepoHit
 		sem := argString(args, "semantic")
@@ -2057,7 +2117,7 @@ func (s *Server) runTool(ctx context.Context, id string, name string, args map[s
 		}
 		lines := 12
 		if v := argString(args, "lines"); v != "" {
-			fmt.Sscanf(v, "%d", &lines)
+			lines = atoiArg(v, lines)
 		}
 		ctx := ix.Context(symbol, lines)
 		if ctx == "" {
@@ -2079,7 +2139,7 @@ func (s *Server) runTool(ctx context.Context, id string, name string, args map[s
 		}
 		maxTokens := 8000
 		if v := argString(args, "max_tokens"); v != "" {
-			fmt.Sscanf(v, "%d", &maxTokens)
+			maxTokens = atoiArg(v, maxTokens)
 		}
 		return intel.ReviewRanged(ix, changes, maxTokens), nil
 
@@ -2090,7 +2150,7 @@ func (s *Server) runTool(ctx context.Context, id string, name string, args map[s
 		}
 		limit := 10
 		if v := argString(args, "limit"); v != "" {
-			fmt.Sscanf(v, "%d", &limit)
+			limit = atoiArg(v, limit)
 		}
 		var b strings.Builder
 		b.WriteString(intel.RenderHubs(intel.Hubs(ix, limit)))
@@ -2105,7 +2165,7 @@ func (s *Server) runTool(ctx context.Context, id string, name string, args map[s
 		}
 		limit := 10
 		if v := argString(args, "limit"); v != "" {
-			fmt.Sscanf(v, "%d", &limit)
+			limit = atoiArg(v, limit)
 		}
 		c := intel.AnalyzeCoverage(ix)
 		c.HotGaps = intel.TestGaps(ix, limit)
@@ -2139,7 +2199,7 @@ func (s *Server) runTool(ctx context.Context, id string, name string, args map[s
 		dead := intel.DeadCode(ix)
 		limit := 0
 		if v := argString(args, "limit"); v != "" {
-			fmt.Sscanf(v, "%d", &limit)
+			limit = atoiArg(v, limit)
 		}
 		if limit > 0 && len(dead) > limit {
 			dead = dead[:limit]
@@ -2153,12 +2213,12 @@ func (s *Server) runTool(ctx context.Context, id string, name string, args map[s
 		}
 		minLines := 60
 		if v := argString(args, "min_lines"); v != "" {
-			fmt.Sscanf(v, "%d", &minLines)
+			minLines = atoiArg(v, minLines)
 		}
 		large := intel.LargeFunctions(ix, minLines)
 		limit := 0
 		if v := argString(args, "limit"); v != "" {
-			fmt.Sscanf(v, "%d", &limit)
+			limit = atoiArg(v, limit)
 		}
 		if limit > 0 && len(large) > limit {
 			large = large[:limit]
@@ -2203,11 +2263,11 @@ func (s *Server) runTool(ctx context.Context, id string, name string, args map[s
 		}
 		depth := 2
 		if v := argString(args, "depth"); v != "" {
-			fmt.Sscanf(v, "%d", &depth)
+			depth = atoiArg(v, depth)
 		}
 		maxNodes := 100
 		if v := argString(args, "max"); v != "" {
-			fmt.Sscanf(v, "%d", &maxNodes)
+			maxNodes = atoiArg(v, maxNodes)
 		}
 		nodes, err := intel.Near(ix, symbol, depth, maxNodes)
 		if err != nil {
@@ -2226,11 +2286,11 @@ func (s *Server) runTool(ctx context.Context, id string, name string, args map[s
 		}
 		depth := 0
 		if v := argString(args, "depth"); v != "" {
-			fmt.Sscanf(v, "%d", &depth)
+			depth = atoiArg(v, depth)
 		}
 		maxNodes := 0
 		if v := argString(args, "max"); v != "" {
-			fmt.Sscanf(v, "%d", &maxNodes)
+			maxNodes = atoiArg(v, maxNodes)
 		}
 		rep, err := intel.Explore(ix, symbol, depth, maxNodes)
 		if err != nil {
@@ -2249,7 +2309,7 @@ func (s *Server) runTool(ctx context.Context, id string, name string, args map[s
 		}
 		limit := 20
 		if v := argString(args, "limit"); v != "" {
-			fmt.Sscanf(v, "%d", &limit)
+			limit = atoiArg(v, limit)
 		}
 		// Ensure a persisted index exists before searching.
 		if _, err := index.LoadSQLite(root); err != nil {
@@ -2282,7 +2342,7 @@ func (s *Server) runTool(ctx context.Context, id string, name string, args map[s
 		}
 		limit := 15
 		if v := argString(args, "limit"); v != "" {
-			fmt.Sscanf(v, "%d", &limit)
+			limit = atoiArg(v, limit)
 		}
 		return intel.RenderBridges(intel.Bridges(ix, limit)), nil
 
@@ -2302,7 +2362,7 @@ func (s *Server) runTool(ctx context.Context, id string, name string, args map[s
 		}
 		limit := 20
 		if v := argString(args, "limit"); v != "" {
-			fmt.Sscanf(v, "%d", &limit)
+			limit = atoiArg(v, limit)
 		}
 		report, err := intel.CoChange(root, from, to)
 		if err != nil {
@@ -2321,7 +2381,7 @@ func (s *Server) runTool(ctx context.Context, id string, name string, args map[s
 		}
 		maxTokens := 4000
 		if v := argString(args, "max_tokens"); v != "" {
-			fmt.Sscanf(v, "%d", &maxTokens)
+			maxTokens = atoiArg(v, maxTokens)
 		}
 		report := intel.Probe(ix, task, maxTokens)
 		text := intel.RenderProbe(report)
@@ -2341,7 +2401,7 @@ func (s *Server) runTool(ctx context.Context, id string, name string, args map[s
 		}
 		limit := 0
 		if v := argString(args, "limit"); v != "" {
-			fmt.Sscanf(v, "%d", &limit)
+			limit = atoiArg(v, limit)
 		}
 		return intel.RenderTrace(intel.Trace(ix, src, "trace", limit)), nil
 
@@ -2438,9 +2498,10 @@ func (s *Server) runTool(ctx context.Context, id string, name string, args map[s
 		violations := intel.CheckBoundaries(ix, b, files)
 		threshold := 0
 		if v := argString(args, "threshold"); v != "" {
-			fmt.Sscanf(v, "%d", &threshold)
+			threshold = atoiArg(v, threshold)
 		}
-		if len(violations) > threshold {
+		// threshold=-1 means "never reject" (audit only).
+		if threshold >= 0 && len(violations) > threshold {
 			return "", fmt.Errorf("REJECT: %d boundary violations exceed threshold %d", len(violations), threshold)
 		}
 		if argString(args, "format") == "sarif" {
@@ -2473,9 +2534,10 @@ func (s *Server) runTool(ctx context.Context, id string, name string, args map[s
 				strings.Join(script.Available(), ", "), strings.Join(script.Languages(), ", ")), nil
 		}
 		run := script.Run{
-			Lang:  argString(args, "lang"),
-			Code:  argString(args, "code"),
-			Stdin: argString(args, "stdin"),
+			Lang:      argString(args, "lang"),
+			Code:      argString(args, "code"),
+			Stdin:     argString(args, "stdin"),
+			NoIsolate: argString(args, "no_isolate") == "true" || argString(args, "no_isolate") == "1",
 		}
 		if v := argString(args, "timeout"); v != "" {
 			if sec, err := strconv.Atoi(v); err == nil {

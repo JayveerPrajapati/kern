@@ -57,7 +57,13 @@ func (r *RepoRegistry) Save() error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
-	return os.WriteFile(path, append(data, '\n'), 0o644)
+	// Atomic write (temp file + rename) so a concurrent reader never observes
+	// a partially-written registry.
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, append(data, '\n'), 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
 }
 
 // Add registers a project, replacing any repo with the same name.

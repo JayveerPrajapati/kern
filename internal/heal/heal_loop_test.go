@@ -34,26 +34,17 @@ func TestSplitLines(t *testing.T) {
 func TestFailingFilesNoMatch(t *testing.T) {
 	// Paths that don't exist on disk are dropped (os.Stat guard).
 	out := "app.go:3:1: syntax error\npkg/foo.go:10:5: undefined\nweird line no refs here"
-	if got := failingFiles(out); len(got) != 0 {
+	if got := failingFiles(t.TempDir(), out); len(got) != 0 {
 		t.Fatalf("expected no resolvable files, got %v", got)
 	}
 }
 
 func TestFailingFilesDedupsAndResolves(t *testing.T) {
-	// failingFiles stats against CWD, so run from a temp dir containing the file.
 	dir := t.TempDir()
 	_ = os.WriteFile(filepath.Join(dir, "app.go"), []byte("x"), 0o644)
-	cwd, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chdir(dir); err != nil {
-		t.Fatal(err)
-	}
-	defer os.Chdir(cwd)
 
 	out := "app.go:3:1: syntax error\napp.go:5:1: again\nother.go:2:1: nope"
-	got := failingFiles(out)
+	got := failingFiles(dir, out)
 	if len(got) != 1 || got[0] != "app.go" {
 		t.Fatalf("expected deduped [app.go], got %v (other.go dropped by stat)", got)
 	}

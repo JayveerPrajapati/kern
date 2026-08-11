@@ -137,7 +137,7 @@ func Run(ctx context.Context, root, task, model string, maxRounds int, timeout t
 			res.Duration = time.Since(start)
 			return res
 		}
-		failPaths := failingFiles(base.Output)
+		failPaths := failingFiles(root, base.Output)
 		var b strings.Builder
 		b.WriteString("TASK: " + task + "\n\n")
 		b.WriteString("VALIDATION COMMAND: " + c.Cmd + " " + strings.Join(c.Args, " ") + "\n\n")
@@ -203,8 +203,11 @@ func Run(ctx context.Context, root, task, model string, maxRounds int, timeout t
 
 var failLineRe = regexp.MustCompile(`(?m)^([^\s:][^:]+):(\d+)(?::\d+)?[: ]`)
 
-// failingFiles extracts relative file paths from compiler/test output.
-func failingFiles(output string) []string {
+// failingFiles extracts relative file paths from compiler/test output and
+// keeps only those that exist under root. Paths are resolved against root
+// (not the process working directory) so `kern heal` is correct when invoked
+// from elsewhere.
+func failingFiles(root, output string) []string {
 	seen := map[string]bool{}
 	var out []string
 	for _, m := range failLineRe.FindAllStringSubmatch(output, -1) {
@@ -212,7 +215,7 @@ func failingFiles(output string) []string {
 		if p == "." || p == "" {
 			continue
 		}
-		if _, err := os.Stat(p); err != nil {
+		if _, err := os.Stat(filepath.Join(root, p)); err != nil {
 			continue
 		}
 		if !seen[p] {

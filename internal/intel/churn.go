@@ -43,7 +43,7 @@ func Churn(root, from, to string) (*ChurnReport, error) {
 	if err != nil {
 		return nil, &GitError{Op: "git log --name-only", Err: err}
 	}
-	counts := parseLog(string(out))
+	counts, commits := parseLog(string(out))
 	entries := make([]ChurnEntry, 0, len(counts))
 	for f, n := range counts {
 		entries = append(entries, ChurnEntry{File: f, Commits: n})
@@ -76,7 +76,7 @@ func Churn(root, from, to string) (*ChurnReport, error) {
 		}
 	}
 
-	report := &ChurnReport{From: from, To: to, Commits: len(counts), Files: len(entries), Entries: entries}
+	report := &ChurnReport{From: from, To: to, Commits: commits, Files: len(entries), Entries: entries}
 	return report, nil
 }
 
@@ -90,22 +90,34 @@ func filesOf(entries []ChurnEntry) []string {
 
 // parseLog counts per-commit file occurrences in `git log --name-only`
 // output, where each commit's file list is a contiguous block separated by
-// blank lines.
-func parseLog(out string) map[string]int {
+// blank lines. It also returns the number of commits in the output (one per
+// non-empty block), so the report's commit count is accurate rather than a
+// count of distinct files.
+func parseLog(out string) (map[string]int, int) {
 	counts := map[string]int{}
 	section := map[string]bool{}
+	commits := 0
+	open := false
 	for _, line := range strings.Split(out, "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" {
+			if open {
+				commits++
+				open = false
+			}
 			section = map[string]bool{}
 			continue
 		}
+		open = true
 		if !section[line] {
 			section[line] = true
 			counts[line]++
 		}
 	}
-	return counts
+	if open {
+		commits++
+	}
+	return counts, commits
 }
 
 // RenderChurn returns a compact churn report, flagging files that are both

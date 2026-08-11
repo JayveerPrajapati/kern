@@ -126,7 +126,9 @@ func checkIndex(root string) Finding {
 		detail = fmt.Sprintf("%d symbols, %d files, %d cached projects", len(ix.Symbols), len(ix.FileHashes), n)
 		return Finding{Check: "index", Level: "ok", Detail: detail}
 	}
-	if ix, err := index.Build(root); err == nil && len(ix.Symbols) > 0 {
+	// No cached index: report whether the tree even has indexable sources,
+	// without building a throwaway index just to answer that.
+	if index.HasIndexableSources(root) {
 		return Finding{Check: "index", Level: "warn", Detail: "no cached index for this project — run `kern index .`"}
 	}
 	return Finding{Check: "index", Level: "fail", Detail: "no source files indexed in this project"}

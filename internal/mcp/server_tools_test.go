@@ -145,6 +145,32 @@ func TestPathTraversalFileArgRejected(t *testing.T) {
 	}
 }
 
+func TestRootedPathToolsRejectEscapes(t *testing.T) {
+	root := mcpProject(t)
+	outside := filepath.Join(filepath.Dir(root), "outside.go")
+	_ = os.WriteFile(outside, []byte("package main\n"), 0o644)
+
+	// Declared root: escaping paths are rejected for both file tools.
+	out := mcpToolError(t, "kern_diff_files", map[string]any{"root": root, "a": "../x.go", "b": "app.go"})
+	if !strings.Contains(out, "escapes project root") {
+		t.Fatalf("kern_diff_files should reject relative escape, got %q", out)
+	}
+	out = mcpToolError(t, "kern_compact_file", map[string]any{"root": root, "path": outside})
+	if !strings.Contains(out, "escapes project root") {
+		t.Fatalf("kern_compact_file should reject absolute path outside root, got %q", out)
+	}
+
+	// Inside the root the tools still work.
+	out = mcpAssertOK(t, "kern_diff_files", map[string]any{"root": root, "a": "app.go", "b": "app.go"})
+	if !strings.Contains(out, "files identical") {
+		t.Fatalf("expected identical note, got %q", out)
+	}
+	out = mcpAssertOK(t, "kern_compact_file", map[string]any{"root": root, "path": "app.go"})
+	if !strings.Contains(out, "Greet") {
+		t.Fatalf("expected app.go summary, got %q", out)
+	}
+}
+
 func TestRootlessFileToolsUnaffected(t *testing.T) {
 	root := mcpProject(t)
 	out := mcpAssertOK(t, "kern_compact_file", map[string]any{"path": filepath.Join(root, "app.go")})

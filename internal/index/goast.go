@@ -66,16 +66,18 @@ func extract(rel string, src []byte) ([]Symbol, map[string][]string, map[string]
 	calls := make(map[string][]string)
 	inherits := make(map[string][]string)
 
-	addCalls := func(owner string, body ast.Node) {
+	addCalls := func(owner string, fn *ast.FuncDecl) {
+		body := fn.Body
 		if body == nil {
 			return
 		}
+		lt := collectLocalTypes(fn)
 		ast.Inspect(body, func(n ast.Node) bool {
 			ce, ok := n.(*ast.CallExpr)
 			if !ok {
 				return true
 			}
-			name := calleeName(ce.Fun)
+			name := resolveCallee(calleeName(ce.Fun), lt)
 			if name != "" && name != owner {
 				calls[owner] = append(calls[owner], name)
 			}
@@ -101,7 +103,7 @@ func extract(rel string, src []byte) ([]Symbol, map[string][]string, map[string]
 			}
 			params := paramNames(d.Type.Params)
 			syms = append(syms, Symbol{Kind: kind, Name: name, Receiver: recv, File: rel, Line: fset.Position(d.Pos()).Line, End: fset.Position(d.End()).Line, Params: params, Lang: "go"})
-			addCalls(full, d.Body)
+			addCalls(full, d)
 		case *ast.GenDecl:
 			for _, spec := range d.Specs {
 				switch s := spec.(type) {
@@ -222,4 +224,105 @@ func paramNames(fl *ast.FieldList) []string {
 		}
 	}
 	return out
+}
+
+// localTypes maps a bare identifier (receiver, parameter or declared variable)
+// to the type name it was declared with, gathered from the enclosing function
+// so receiver-var method calls like v.M() can be linked to the type's method
+// T.M instead of dangling on the variable name.
+type localTypes map[string]string
+
+func (lt localTypes) addTypeField(names []*ast.Ident, typ ast.Expr) {
+	if typ == nil {
+		return
+	}
+	t := receiverName(typ)
+	if t == "" {
+		return
+	}
+	for _, n := range names {
+		if n.Name != "_" {
+			lt[n.Name] = t
+		}
+	}
+}
+
+// collectLocalTypes gathers receiver, parameter and short-variable declarations
+// within one function body.
+func collectLocalTypes(fn *ast.FuncDecl) localTypes {
+	lt := localTypes{}
+	if fn.Recv != nil {
+		for _, f := range fn.Recv.List {
+			lt.addTypeField(f.Names, f.Type)
+		}
+	}
+	if fn.Type != nil && fn.Type.Params != nil {
+		for _, f := range fn.Type.Params.List {
+			lt.addTypeField(f.Names, f.Type)
+		}
+	}
+	if fn.Body == nil {
+		return lt
+	}
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		switch s := n.(type) {
+		case *ast.AssignStmt:
+			if len(s.Lhs) == 1 && len(s.Rhs) == 1 {
+				if id, ok := s.Lhs[0].(*ast.Ident); ok {
+					if t := typeNameOfExpr(s.Rhs[0]); t != "" {
+						lt[id.Name] = t
+					}
+				}
+			}
+		case *ast.ValueSpec:
+			for i, n := range s.Names {
+				if s.Type != nil {
+					lt.addTypeField([]*ast.Ident{n}, s.Type)
+				} else if len(s.Values) > i {
+					if t := typeNameOfExpr(s.Values[i]); t != "" {
+						lt[n.Name] = t
+					}
+				}
+			}
+		}
+		return true
+	})
+	return lt
+}
+
+// typeNameOfExpr guesses the constructed type name from an initializer
+// expression: T{}, &T{}, T(x), *T, new(T).
+func typeNameOfExpr(e ast.Expr) string {
+	switch t := e.(type) {
+	case *ast.CompositeLit:
+		return receiverName(t.Type)
+	case *ast.UnaryExpr:
+		if t.Op == token.AND {
+			return typeNameOfExpr(t.X)
+		}
+	case *ast.CallExpr:
+		if id, ok := t.Fun.(*ast.Ident); ok && id.Name == "new" {
+			if len(t.Args) == 1 {
+				return receiverName(t.Args[0])
+			}
+			return ""
+		}
+		return calleeName(t.Fun)
+	}
+	return ""
+}
+
+// resolveCallee rewrites a receiver-var method call to its type-qualified form
+// when the receiver variable's type is known locally: v.M() -> T.M. Calls on
+// variables with unknown or external types are left untouched.
+func resolveCallee(name string, lt localTypes) string {
+	i := strings.LastIndexByte(name, '.')
+	if i <= 0 {
+		return name
+	}
+	prefix, sel := name[:i], name[i+1:]
+	if t, ok := lt[prefix]; ok && t != "" {
+		return t + "." + sel
+	}
+	return name
 }

@@ -372,3 +372,27 @@ func buildTestIndex(t *testing.T, files map[string]string) *Index {
 	}
 	return ix
 }
+
+func TestIgnoreDirsExcludesAgentConfigs(t *testing.T) {
+	ix := buildTestIndex(t, map[string]string{
+		"main.go":                  "package main\nfunc main() {}\n",
+		".cursor/mcp.json":         `{"mcpServers":{"kern":{"type":"stdio"}}}`,
+		".gemini/settings.json":    `{"hooks":{}}`,
+		".kiro/settings/mcp.json":  `{"mcpServers":{}}`,
+		".claude/settings.json":    `{"hooks":{}}`,
+		".opencode/plugins/kern.ts": "import { tool } from \"@opencode-ai/plugin\"\n",
+		".git/config":              "[core]\n",
+	})
+	for f := range ix.FileHashes {
+		if f == ".cursor/mcp.json" || f == ".gemini/settings.json" || f == ".kiro/settings/mcp.json" ||
+			f == ".claude/settings.json" || f == ".opencode/plugins/kern.ts" || f == ".git/config" {
+			t.Errorf("agent/tooling config was indexed: %s", f)
+		}
+	}
+	for f := range ix.FileHashes {
+		if f == "main.go" {
+			return
+		}
+	}
+	t.Errorf("real source was not indexed; got %v", ix.FileHashes)
+}

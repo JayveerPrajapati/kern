@@ -5,6 +5,7 @@
 package commitmsg
 
 import (
+	"strconv"
 	"strings"
 )
 
@@ -130,17 +131,20 @@ func parseDiff(d string) []fileChange {
 		case strings.HasPrefix(l, "diff --git "):
 			push()
 			p := l[len("diff --git a/"):]
-			if i := strings.Index(p, " b/"); i >= 0 {
+			// The from path ends at the last " b/" (right-most, so a path
+			// containing " b/" is not split) and may be C-quoted when it has
+			// spaces or non-ASCII bytes.
+			if i := strings.LastIndex(p, " b/"); i >= 0 {
 				p = p[:i]
 			}
-			cur = &fileChange{path: strings.TrimSpace(p)}
+			cur = &fileChange{path: unquoteGitPath(p)}
 		case cur == nil:
 			continue
 		case strings.HasPrefix(l, "rename from "):
 			cur.renamed = true
 		case strings.HasPrefix(l, "rename to "):
 			cur.renamed = true
-			cur.path = strings.TrimSpace(strings.TrimPrefix(l, "rename to "))
+			cur.path = unquoteGitPath(strings.TrimSpace(strings.TrimPrefix(l, "rename to ")))
 		case strings.HasPrefix(l, "+++ ") || strings.HasPrefix(l, "--- "):
 			continue
 		case strings.HasPrefix(l, "@@"):
@@ -153,6 +157,18 @@ func parseDiff(d string) []fileChange {
 	}
 	push()
 	return files
+}
+
+// unquoteGitPath undoes git's C-quoting of a path header (`"my file.txt"`),
+// returning the literal path. Unquoted paths pass through unchanged.
+func unquoteGitPath(p string) string {
+	p = strings.TrimSpace(p)
+	if strings.HasPrefix(p, `"`) {
+		if u, err := strconv.Unquote(p); err == nil {
+			return u
+		}
+	}
+	return p
 }
 
 func isDoc(path string) bool {
@@ -271,12 +287,8 @@ func subjectNoun(files []fileChange) string {
 			if trimmed == "" {
 				continue
 			}
-			if i := strings.Index(trimmed, "("); i > 0 {
-				id := trimmed[:i]
-				id = lastIdent(id)
-				if id != "" {
-					return strings.ToLower(id)
-				}
+			if id := declIdent(trimmed); id != "" {
+				return strings.ToLower(id)
 			}
 		}
 	}
@@ -287,6 +299,38 @@ func subjectNoun(files []fileChange) string {
 					return w
 				}
 			}
+		}
+	}
+	return ""
+}
+
+// declIdent returns the identifier immediately before the first "(" of a line,
+// skipping a Go method receiver so `func (r *Recv) Name(...)` yields Name
+// rather than func.
+func declIdent(trimmed string) string {
+	s := strings.TrimSpace(trimmed)
+	if strings.HasPrefix(s, "func") {
+		s = strings.TrimSpace(strings.TrimPrefix(s, "func"))
+		if strings.HasPrefix(s, "(") {
+			depth := 0
+			for i := 0; i < len(s); i++ {
+				switch s[i] {
+				case '(':
+					depth++
+				case ')':
+					depth--
+					if depth == 0 {
+						s = strings.TrimSpace(s[i+1:])
+						i = len(s) // receiver consumed
+					}
+				}
+			}
+		}
+	}
+	if i := strings.Index(s, "("); i > 0 {
+		id := lastIdent(s[:i])
+		if id != "" {
+			return id
 		}
 	}
 	return ""

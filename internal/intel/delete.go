@@ -52,7 +52,14 @@ func DeleteCheck(ix *index.Index, sym string) DeleteReport {
 		return r
 	}
 
-	if len(sym) > 0 && unicode.IsUpper(rune(sym[0])) {
+	// Exportedness is determined by the final segment (method name for T.M,
+	// symbol for pkg.Symbol), not the receiver/package qualifier: a lowercase
+	// receiver with an exported method is still an exported symbol.
+	seg := sym
+	if i := strings.LastIndexByte(sym, '.'); i >= 0 {
+		seg = sym[i+1:]
+	}
+	if len(seg) > 0 && unicode.IsUpper(rune(seg[0])) {
 		r.Exported = true
 	}
 	r.EntryPoint = isEntryPoint(sym)

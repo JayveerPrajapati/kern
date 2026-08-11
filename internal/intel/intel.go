@@ -14,15 +14,15 @@ import (
 )
 
 // ChangedFiles returns the files changed in the working tree (staged +
-// unstaged) relative to HEAD. Falls back to `git status --porcelain` when the
-// repository has no commits yet.
+// unstaged) relative to HEAD. Falls back to `git status --porcelain -z` when
+// the repository has no commits yet.
 func ChangedFiles(root string) ([]string, error) {
 	cmd := exec.Command("git", "-C", root, "diff", "HEAD", "--name-only")
 	out, err := cmd.Output()
 	if err != nil {
-		out, err = exec.Command("git", "-C", root, "status", "--porcelain").Output()
+		out, err = exec.Command("git", "-C", root, "status", "--porcelain", "-z").Output()
 		if err != nil {
-			return nil, &GitError{Op: "git diff HEAD --name-only", Err: err}
+			return nil, &GitError{Op: "git status --porcelain -z", Err: err}
 		}
 		return parsePorcelain(string(out)), nil
 	}
@@ -55,18 +55,22 @@ func FilesForRange(root, from, to string) ([]string, error) {
 	return files, nil
 }
 
+// parsePorcelain parses NUL-separated `git status --porcelain -z` output. Each
+// status record is `XY <path>`; a rename/copy status is followed by a record
+// holding the original path, which is skipped so the new path is reported.
+// NUL separation means paths are never C-escaped or quoted, so names with
+// spaces, quotes and non-ASCII round-trip verbatim.
 func parsePorcelain(out string) []string {
 	var files []string
-	for _, l := range strings.Split(out, "\n") {
-		l = strings.TrimSpace(l)
-		if len(l) < 4 {
+	records := strings.Split(out, "\x00")
+	for i := 0; i < len(records); i++ {
+		r := records[i]
+		if len(r) < 3 || r[2] != ' ' {
 			continue
 		}
-		name := l[3:]
-		name = strings.TrimPrefix(name, `"`)
-		name = strings.TrimSuffix(name, `"`)
-		if name != "" {
-			files = append(files, name)
+		files = append(files, r[3:])
+		if r[0] == 'R' || r[0] == 'C' || r[1] == 'R' || r[1] == 'C' {
+			i++ // skip the original-path continuation record
 		}
 	}
 	return files

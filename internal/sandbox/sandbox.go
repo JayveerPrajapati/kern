@@ -87,9 +87,20 @@ func Snapshot(root string) (*Snap, error) {
 // back, files that did not exist in the snapshot are removed, and empty
 // directories created since are pruned. Ignored dirs (e.g. .git) are never
 // descended into or removed, so rollback can never touch VCS state.
+//
+// Each file is written via a temp file + rename so a failure cannot leave a
+// half-written file, and the pass continues past individual failures so a
+// transient error cannot leave the tree half-reverted. The first error is
+// returned if anything could not be restored.
 func (s *Snap) Restore() error {
 	if s == nil || s.tmp == "" {
 		return nil
+	}
+	var firstErr error
+	record := func(err error) {
+		if err != nil && firstErr == nil {
+			firstErr = err
+		}
 	}
 	existed := map[string]bool{}
 	for _, f := range s.files {
@@ -98,19 +109,19 @@ func (s *Snap) Restore() error {
 		dst := filepath.Join(s.root, f)
 		data, err := os.ReadFile(src)
 		if err != nil {
-			return err
+			record(err)
+			continue
 		}
 		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
-			return err
+			record(err)
+			continue
 		}
-		if err := os.WriteFile(dst, data, 0o644); err != nil {
-			return err
-		}
+		record(writeAtomic(dst, data))
 	}
 	// Remove anything new under root that wasn't in the snapshot. Ignored
 	// dirs are still skipped: their contents are not snapshotted, so deleting
 	// them would destroy pre-existing state (or VCS data) we cannot restore.
-	removeErr := filepath.WalkDir(s.root, func(p string, d fs.DirEntry, werr error) error {
+	_ = filepath.WalkDir(s.root, func(p string, d fs.DirEntry, werr error) error {
 		if werr != nil {
 			return nil
 		}
@@ -125,13 +136,10 @@ func (s *Snap) Restore() error {
 			return nil
 		}
 		if !existed[rel] {
-			return os.Remove(p)
+			record(os.Remove(p))
 		}
 		return nil
 	})
-	if removeErr != nil {
-		return removeErr
-	}
 	// Prune empty directories the command created, deepest first. Directories
 	// that existed at snapshot time are never removed even if now empty.
 	var dirs []string
@@ -155,8 +163,34 @@ func (s *Snap) Restore() error {
 		}
 		entries, err := os.ReadDir(dir)
 		if err == nil && len(entries) == 0 {
-			_ = os.Remove(dir)
+			record(os.Remove(dir))
 		}
+	}
+	return firstErr
+}
+
+// writeAtomic writes data to path via a same-directory temp file + rename, so
+// readers never observe a partially written file and the write either lands
+// fully or not at all.
+func writeAtomic(path string, data []byte) error {
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".kern-restore-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	_, werr := tmp.Write(data)
+	cerr := tmp.Close()
+	if werr != nil {
+		os.Remove(tmpName)
+		return werr
+	}
+	if cerr != nil {
+		os.Remove(tmpName)
+		return cerr
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		os.Remove(tmpName)
+		return err
 	}
 	return nil
 }

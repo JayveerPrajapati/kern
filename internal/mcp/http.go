@@ -32,7 +32,9 @@ var supportedProtocolVersions = map[string]bool{
 //
 // The listener binds to localhost (127.0.0.1) unless addr already names a
 // host. Requests carrying an Origin header that is not a local origin are
-// rejected so a browser page cannot call the local endpoint (CSRF guard).
+// rejected so a browser page cannot call the local endpoint. This is an
+// Origin allow-list, not full CSRF protection: empty origins (non-browser
+// clients, curl, MCP SDKs) are permitted by design.
 func ServeHTTP(addr string) error {
 	return ServeHTTPContext(context.Background(), addr)
 }
@@ -56,6 +58,12 @@ func ServeHTTPContext(ctx context.Context, addr string) error {
 		Addr:              localhostAddr(addr),
 		Handler:           mux,
 		ReadHeaderTimeout: 10 * time.Second,
+		// WriteTimeout/IdleTimeout guard the socket phase, not handler
+		// duration: a long-running tool (build, exec) finishes in the handler
+		// and only then the (small) JSON response is written, so 60s is ample.
+		// Loopback-only, but a stalled peer must not hold the socket forever.
+		WriteTimeout: 60 * time.Second,
+		IdleTimeout:  60 * time.Second,
 	}
 	done := make(chan error, 1)
 	go func() {
