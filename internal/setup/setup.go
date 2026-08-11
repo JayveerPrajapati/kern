@@ -145,12 +145,39 @@ func Check(root string) []Status {
 	out = append(out, fileStatus(filepath.Join(root, ".claude", "settings.json"), "claude hooks"))
 	out = append(out, fileStatus(filepath.Join(root, ".gemini", "settings.json"), "gemini hooks"))
 	out = append(out, fileStatus(filepath.Join(root, ".cursor", "rules", "kern-hooks.mdc"), "cursor rule"))
+
+	// Report detected agents and their instruction file status
+	detected := DetectAgents(root)
+	for _, agent := range detected {
+		file, ok := instructionFiles[agent]
+		if ok {
+			path := filepath.Join(root, file)
+			installed := false
+			if b, err := os.ReadFile(path); err == nil && (strings.Contains(string(b), "kern usage rules") || strings.Contains(string(b), "kern-instruction:")) {
+				installed = true
+			}
+			mark := "not present"
+			if installed {
+				mark = "kern-first policy present"
+			}
+			out = append(out, Status{Agent: agent + " (detected)", Installed: installed, Path: path, Note: mark})
+		}
+	}
+
 	out = append(out, fileStatus(filepath.Join(root, ".gitignore"), "gitignore (generated block)"))
 	return out
 }
 
-// Wire configures the requested agents. An empty agents list means all.
-func Wire(root string, agents []string) []Status {
+// Wire configures the requested agents. An empty agents list means all;
+// when detect is true, only agents found by DetectAgents are wired.
+// Instruction files with the kern-first policy are always written for
+// every detected agent that has an instruction file, regardless of the
+// agents list — this ensures kern-first enforcement across all present
+// platforms without per-agent configuration.
+func Wire(root string, agents []string, detect bool) []Status {
+	if detect && len(agents) == 0 {
+		agents = DetectAgents(root)
+	}
 	bin := Bin()
 	enabled := func(name string) bool {
 		if len(agents) == 0 {
@@ -192,6 +219,14 @@ func Wire(root string, agents []string) []Status {
 		out = append(out, wireCursorRules(root))
 	}
 	out = append(out, gitignoreGenerated(root))
+
+	// Always detect agents and wire kern-first instruction files for
+	// every detected platform that has an instruction file. This is
+	// independent of the explicit agents list — it ensures the
+	// kern-first policy reaches all present agents.
+	detected := DetectAgents(root)
+	out = append(out, wireInstructions(root, detected)...)
+
 	return out
 }
 
@@ -218,11 +253,22 @@ func wireMCPJSON(root, bin string) Status {
 
 func wireOpencode(root, bin string) Status {
 	path := filepath.Join(root, "opencode.json")
-	err := mergeJSON(path, "mcp", map[string]any{
+	// For the project-level config, prefer the portable relative path "bin/kern-mcp"
+	// so it works on any machine after a build. Only fall back to the absolute
+	// bin when the relative binary is not present next to the project root.
+	cmd := "bin/kern-mcp"
+	if _, err := os.Stat(filepath.Join(root, cmd)); err != nil {
+		cmd = bin
+	}
+	entry := map[string]any{
 		"type":    "local",
-		"command": []string{bin},
+		"command": []string{cmd},
 		"enabled": true,
-	})
+	}
+	if cmd == "bin/kern-mcp" {
+		entry["cwd"] = "."
+	}
+	err := mergeJSON(path, "mcp", entry)
 	if err != nil {
 		return Status{Agent: "opencode", Path: path, Note: err.Error()}
 	}
@@ -271,6 +317,129 @@ func wirePlugin(root string) Status {
 // host files so every agent sees the rules, but only when the file already
 // exists — setup never creates new rule files unprompted.
 var hostRuleFiles = []string{"CLAUDE.md", "GEMINI.md"}
+
+// detectedAgent maps each agent identifier to a detection function.
+// An agent is considered "present" when any of its indicators exist.
+type agentDetector struct {
+	agent  string
+	paths  []string // project-relative or home-relative paths to check
+	binary string    // optional: binary name to look for on PATH
+}
+
+// agentDetectors is the registry of all supported agents for auto-detection.
+var agentDetectors = []agentDetector{
+	{agent: "opencode", paths: []string{"opencode.json"}, binary: "opencode"},
+	{agent: "claude", paths: []string{"CLAUDE.md", ".claude/settings.json"}, binary: "claude"},
+	{agent: "cursor", paths: []string{".cursor/mcp.json", ".cursor/rules"}, binary: "cursor"},
+	{agent: "copilot", paths: []string{".vscode/mcp.json", ".github/copilot-instructions.md"}, binary: ""},
+	{agent: "gemini", paths: []string{"GEMINI.md", ".gemini/settings.json"}, binary: ""},
+	{agent: "codex", paths: []string{".codex/config.toml"}, binary: "codex"},
+	{agent: "continue", paths: []string{".continuerc.json"}, binary: ""},
+	{agent: "windsurf", paths: []string{".windsurfrc", ".codeium/windsurf/mcp_config.json"}, binary: ""},
+	{agent: "zed", paths: []string{"~/.config/zed/settings.json"}, binary: ""},
+	{agent: "qwen", paths: []string{"~/.qwen/settings.json"}, binary: ""},
+	{agent: "qoder", paths: []string{"~/.qoder/mcp.json"}, binary: ""},
+	{agent: "kiro", paths: []string{".kiro/settings/mcp.json"}, binary: ""},
+}
+
+// instructionFiles maps each agent to its project-level instruction file
+// that receives the kern-first policy. These files are git-ignored when
+// generated by setup (they carry machine-specific paths or are redundant
+// with the universal AGENTS.md).
+var instructionFiles = map[string]string{
+	"claude":  "CLAUDE.md",
+	"gemini":  "GEMINI.md",
+	"copilot": ".github/copilot-instructions.md",
+	"cursor":  ".cursor/instructions/kern.mdc",
+}
+
+// DetectAgents scans the project root and system PATH for evidence that each
+// known agent is in use. Returns the list of detected agent names.
+func DetectAgents(root string) []string {
+	var detected []string
+	for _, d := range agentDetectors {
+		if isAgentPresent(root, d) {
+			detected = append(detected, d.agent)
+		}
+	}
+	return detected
+}
+
+func isAgentPresent(root string, d agentDetector) bool {
+	for _, p := range d.paths {
+		path := p
+		if strings.HasPrefix(p, "~") {
+			path = homeJoin(strings.TrimPrefix(p, "~"))
+		} else {
+			path = filepath.Join(root, p)
+		}
+		if _, err := os.Stat(path); err == nil {
+			return true
+		}
+	}
+	if d.binary != "" {
+		if _, err := exec.LookPath(d.binary); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
+func homeJoin(rel string) string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return filepath.Join(".", rel)
+	}
+	return filepath.Join(home, rel)
+}
+
+// wireInstructions writes the kern-first policy block into each detected
+// agent's instruction file, creating the file if missing. Each written
+// file receives an idempotency marker so re-running setup doesn't duplicate.
+func wireInstructions(root string, agents []string) []Status {
+	rules, err := rulesFS.ReadFile("assets/AGENTS.md")
+	if err != nil {
+		return []Status{{Agent: "instructions", Note: err.Error()}}
+	}
+	rulesText := string(rules)
+	var out []Status
+	for _, agent := range agents {
+		file, ok := instructionFiles[agent]
+		if !ok {
+			continue
+		}
+		path := filepath.Join(root, file)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			out = append(out, Status{Agent: agent + "-instruction", Note: err.Error()})
+			continue
+		}
+		status := writeInstructionFile(path, rulesText)
+		status.Agent = agent + "-instruction"
+		out = append(out, status)
+	}
+	return out
+}
+
+// writeInstructionFile writes the kern-first policy block to a single
+// instruction file, idempotently (never duplicates the block).
+func writeInstructionFile(path, rulesText string) Status {
+	marker := "<!-- kern-instruction: managed by kern setup; remove marker to stop managing -->"
+	content, _ := os.ReadFile(path)
+	cur := string(content)
+	if strings.Contains(cur, "kern-instruction:") || strings.Contains(cur, "kern usage rules") {
+		return Status{Agent: "", Installed: true, Path: path, Note: "kern-first policy already present"}
+	}
+	var joined string
+	if strings.TrimSpace(cur) == "" {
+		joined = marker + "\n\n" + rulesText
+	} else {
+		joined = strings.TrimRight(cur, "\n") + "\n\n" + marker + "\n\n" + rulesText
+	}
+	if err := os.WriteFile(path, []byte(joined), 0o644); err != nil {
+		return Status{Agent: "", Path: path, Note: err.Error()}
+	}
+	return Status{Agent: "", Installed: true, Path: path, Note: "kern-first policy written"}
+}
 
 func wireAgentRules(root string) Status {
 	status := wireRulesFile(root, "AGENTS.md")
@@ -547,8 +716,12 @@ alwaysApply: false
 const gitignoreMarker = "# --- kern generated (agent wiring, machine-specific) ---"
 
 // gitignoreGenerated appends the setup-generated project files to .gitignore.
-// The MCP/hook configs carry absolute binary paths, so they must never be
-// committed; uncommitted copies would leak the machine layout and stale paths.
+// Machine-specific configs (absolute binary paths in .mcp.json, .claude/,
+// .cursor/, .kiro/ hooks) must never be committed; uncommitted copies would
+// leak the machine layout and stale paths. But portable configs like
+// opencode.json (relative "bin/kern-mcp" command) and the .opencache plugins
+// directory ARE committed — only their machine-specific subdirs (node_modules)
+// are ignored.
 // Idempotent: the block is added once, and only when absent.
 func gitignoreGenerated(root string) Status {
 	path := filepath.Join(root, ".gitignore")
@@ -562,13 +735,16 @@ func gitignoreGenerated(root string) Status {
 	block := "\n" + gitignoreMarker + `
 # Re-run ` + "`kern setup`" + ` to refresh. Unignore a line to commit shared config.
 .mcp.json
-opencode.json
-.opencode/
 .claude/
 .cursor/
 .gemini/
 .kiro/
 .kern/
+.opencode/node_modules/
+.opencode/package-lock.json
+CLAUDE.md
+GEMINI.md
+.github/copilot-instructions.md
 `
 	out := strings.TrimRight(string(data), "\n")
 	if out != "" {
