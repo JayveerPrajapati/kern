@@ -90,6 +90,42 @@ func TestMergeJSONInvalid(t *testing.T) {
 	}
 }
 
+func TestMergeJSONHandlesComments(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.jsonc")
+	// JSONC with both line and block comments
+	src := `{
+  // this is a line comment
+  "mcp": {
+    /* block comment */
+    "existing": true
+  },
+  "other": "value"
+}`
+	os.WriteFile(path, []byte(src), 0o644)
+	entry := map[string]any{"command": []string{"kern-mcp"}, "type": "local", "enabled": true}
+	if err := mergeJSON(path, "mcp", entry); err != nil {
+		t.Fatalf("mergeJSON failed on JSONC with comments: %v", err)
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(b, &m); err != nil {
+		t.Fatalf("written file is not valid JSON: %v\n%s", err, b)
+	}
+	// existing key preserved
+	if m["other"] != "value" {
+		t.Errorf("other key not preserved: %v", m)
+	}
+	// kern entry present
+	mcp, _ := m["mcp"].(map[string]any)
+	if mcp == nil || mcp["kern"] == nil {
+		t.Errorf("kern entry not merged: %v", m)
+	}
+}
+
 func TestWireCreatesProjectFiles(t *testing.T) {
 	dir := t.TempDir()
 	sts := Wire(dir, []string{"mcp", "opencode"}, false)
@@ -459,6 +495,25 @@ func TestDetectAgents(t *testing.T) {
 	}
 	if !has["cursor"] {
 		t.Errorf("expected cursor in detected: %v", detected)
+	}
+}
+
+func TestWireDetectEmptyWiresNothing(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("PATH", "/nonexistent")
+	dir := t.TempDir()
+
+	sts := Wire(dir, nil, true)
+	if len(sts) != 1 || sts[0].Installed {
+		t.Fatalf("detect with no agents found must wire nothing, got: %+v", sts)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("detect with no agents found must not create files, got: %v", entries)
 	}
 }
 

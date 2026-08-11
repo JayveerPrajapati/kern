@@ -175,8 +175,12 @@ func Check(root string) []Status {
 // agents list — this ensures kern-first enforcement across all present
 // platforms without per-agent configuration.
 func Wire(root string, agents []string, detect bool) []Status {
+	detected := DetectAgents(root)
 	if detect && len(agents) == 0 {
-		agents = DetectAgents(root)
+		if len(detected) == 0 {
+			return []Status{{Agent: "detect", Note: "no agents detected — nothing to wire"}}
+		}
+		agents = detected
 	}
 	bin := Bin()
 	enabled := func(name string) bool {
@@ -220,11 +224,11 @@ func Wire(root string, agents []string, detect bool) []Status {
 	}
 	out = append(out, gitignoreGenerated(root))
 
-	// Always detect agents and wire kern-first instruction files for
-	// every detected platform that has an instruction file. This is
-	// independent of the explicit agents list — it ensures the
-	// kern-first policy reaches all present agents.
-	detected := DetectAgents(root)
+	// Wire kern-first instruction files for every detected platform that
+	// has an instruction file. This is independent of the explicit agents
+	// list — it ensures the kern-first policy reaches all present agents.
+	// detected is computed before any wiring so it reflects what existed
+	// before this run, not the configs this run just created.
 	out = append(out, wireInstructions(root, detected)...)
 
 	return out
@@ -757,16 +761,20 @@ GEMINI.md
 	return Status{Agent: "gitignore", Installed: true, Path: path, Note: "generated entries added to .gitignore"}
 }
 
-// mergeJSON reads a JSON file, inserts entry under key, and writes it back.
-// A pre-existing "kern" entry is repaired (replaced) when it differs from the
-// current entry — e.g. the binary path changed — instead of being left stale,
-// and the file is not rewritten when nothing changed.
+// mergeJSON reads a JSON (or JSONC) file, inserts entry under key, and writes
+// it back. JSONC comments (// line and /* block */) are stripped before
+// parsing so machine-generated config like opencode.jsonc that users may
+// annotate with comments still loads. A pre-existing "kern" entry is repaired
+// (replaced) when it differs from the current entry — e.g. the binary path
+// changed — instead of being left stale, and the file is not rewritten when
+// nothing changed.
 func mergeJSON(path, key string, entry map[string]any) error {
 	var m map[string]any
 	data, err := os.ReadFile(path)
 	switch {
 	case err == nil:
-		if err := json.Unmarshal(data, &m); err != nil {
+		cleaned := stripJSONC(data)
+		if err := json.Unmarshal(cleaned, &m); err != nil {
 			return fmt.Errorf("%s is not valid JSON: %w", path, err)
 		}
 	case errors.Is(err, os.ErrNotExist):
@@ -803,6 +811,57 @@ func mapsEqual(a, b map[string]any) bool {
 	aj, aerr := json.Marshal(a)
 	bj, berr := json.Marshal(b)
 	return aerr == nil && berr == nil && string(aj) == string(bj)
+}
+
+// stripJSONC removes // line comments and /* block */ comments from JSON data,
+// while preserving strings that contain those sequences. This is a minimal
+// stripper — it does not validate JSON, just removes comment tokens.
+func stripJSONC(data []byte) []byte {
+	var out []byte
+	inString := false
+	escape := false
+	i := 0
+	for i < len(data) {
+		c := data[i]
+		if inString {
+			out = append(out, c)
+			if escape {
+				escape = false
+			} else if c == '\\' {
+				escape = true
+			} else if c == '"' {
+				inString = false
+			}
+			i++
+			continue
+		}
+		// Not inside a string.
+		if c == '"' {
+			inString = true
+			out = append(out, c)
+			i++
+			continue
+		}
+		// Block comment: /* ... */
+		if i+1 < len(data) && c == '/' && data[i+1] == '*' {
+			i += 2
+			for i+1 < len(data) && !(data[i] == '*' && data[i+1] == '/') {
+				i++
+			}
+			i += 2 // skip closing */
+			continue
+		}
+		// Line comment: // ... until end of line
+		if c == '/' && i+1 < len(data) && data[i+1] == '/' {
+			for i < len(data) && data[i] != '\n' {
+				i++
+			}
+			continue
+		}
+		out = append(out, c)
+		i++
+	}
+	return out
 }
 
 func fileStatus(path, label string) Status {

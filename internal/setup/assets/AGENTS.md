@@ -29,18 +29,10 @@ Concrete kern-first rules (replace the corresponding generic tool):
 should start with a kern tool.** If the appropriate kern tool is unavailable
 or not registered, fall back to built-ins — but never the reverse.
 
-## Always prefer kern tools over raw reads
-
-- Before reading a large file, use `kern_compact_file` to get its symbols.
-- Before listing/reading a whole repo, use `kern_project_map`.
 - Before pasting logs into context, use `kern_optimize_log`.
-- To understand a symbol's role, use `kern_code_graph` (callers + callees).
-- To get only the relevant slice of a source file, use `kern_context`.
-- To search code by structure (not regex), use `kern_ast_search`.
-- For builds/tests/lint, use `kern_run_build` — it returns only pass/fail + errors.
-- To look up a library/framework's docs, use `kern_doc_fetch` to pull one public
-  page into the project's local doc index, then `kern_doc_search` to query it.
-  Pass `semantic=true` to also attach local Ollama embeddings to the page.
+- For library/framework docs, `kern_doc_fetch` pulls one public page into the
+  project's local doc index, then `kern_doc_search` queries it; pass
+  `semantic=true` to also attach local Ollama embeddings to the page.
 
 ## When a build, test, or long-running command is needed
 
