@@ -652,6 +652,10 @@ func main() {
 		if f.agents != "" {
 			agents = strings.Split(f.agents, ",")
 		}
+		var detected []string
+		if f.detect && len(f.agents) == 0 {
+			detected = setup.DetectAgents(root)
+		}
 		for _, s := range setup.Wire(root, agents, f.detect) {
 			mark := "ok"
 			if !s.Installed {
@@ -662,7 +666,6 @@ func main() {
 		if len(f.agents) == 0 && !f.detect {
 			fmt.Println("\nWired all agents. Use --detect to wire only detected agents, or --agents to target specific ones.")
 		} else if f.detect && len(f.agents) == 0 {
-			detected := setup.DetectAgents(root)
 			fmt.Printf("\nDetected agents: %v\n", detected)
 		}
 		fmt.Println("Restart your agent (opencode reload / claude) to pick up the MCP servers and kern-first instructions.")
