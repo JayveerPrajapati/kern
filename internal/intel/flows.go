@@ -103,36 +103,43 @@ func Flows(ix *index.Index, limit, maxDepth int) []Flow {
 // maxDepth), preferring routes through heavily-reached symbols.
 func longestPath(ix *index.Index, root string, reachable map[string]bool, maxDepth int) []string {
 	best := []string{root}
-	var dfs func(node string, path []string)
-	dfs = func(node string, path []string) {
-		if len(path) >= maxDepth {
-			if len(path) > len(best) {
-				best = append([]string(nil), path...)
-			}
-			return
-		}
+	var dfs func(node string, path []string, onPath map[string]bool)
+	dfs = func(node string, path []string, onPath map[string]bool) {
+		// Cycle guard: call graphs are cyclic, and re-entering a node already
+		// on the current path would explode the search (or recurse to
+		// maxDepth on every cycle). Skip on-path callees; when every callee
+		// is on the path the branch ends here.
 		callees := localCallees(ix, node)
-		if len(callees) == 0 {
+		var next []string
+		for _, c := range callees {
+			if onPath[c] {
+				continue
+			}
+			if reachable[c] {
+				next = append(next, c)
+			}
+		}
+		if len(next) == 0 {
+			for _, c := range callees {
+				if !onPath[c] {
+					next = append(next, c)
+				}
+			}
+		}
+		if len(path) >= maxDepth || len(next) == 0 {
 			if len(path) > len(best) {
 				best = append([]string(nil), path...)
 			}
 			return
 		}
 		// Prefer callees that are still inside the reachable set.
-		var next []string
-		for _, c := range callees {
-			if reachable[c] {
-				next = append(next, c)
-			}
-		}
-		if len(next) == 0 {
-			next = callees
-		}
 		for _, c := range next[:min(len(next), 3)] {
-			dfs(c, append(path, c))
+			onPath[c] = true
+			dfs(c, append(path, c), onPath)
+			delete(onPath, c)
 		}
 	}
-	dfs(root, []string{root})
+	dfs(root, []string{root}, map[string]bool{root: true})
 	return best
 }
 

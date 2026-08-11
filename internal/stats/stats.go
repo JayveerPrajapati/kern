@@ -26,18 +26,18 @@ const (
 
 // Entry is one recorded optimization.
 type Entry struct {
-	Time          time.Time `json:"time"`
-	Session       string    `json:"session,omitempty"`
-	Operation     Operation `json:"operation"`
-	Source        string    `json:"source,omitempty"`
-	Model         string    `json:"model,omitempty"`
-	BeforeTokens  int       `json:"before_tokens"`
-	AfterTokens   int       `json:"after_tokens"`
-	SavedTokens   int       `json:"saved_tokens"`
-	SavedPercent  float64   `json:"saved_percent"`
-	CostSavedUSD  float64   `json:"cost_saved_usd"`
-	BeforeBytes   int       `json:"before_bytes"`
-	AfterBytes    int       `json:"after_bytes"`
+	Time         time.Time `json:"time"`
+	Session      string    `json:"session,omitempty"`
+	Operation    Operation `json:"operation"`
+	Source       string    `json:"source,omitempty"`
+	Model        string    `json:"model,omitempty"`
+	BeforeTokens int       `json:"before_tokens"`
+	AfterTokens  int       `json:"after_tokens"`
+	SavedTokens  int       `json:"saved_tokens"`
+	SavedPercent float64   `json:"saved_percent"`
+	CostSavedUSD float64   `json:"cost_saved_usd"`
+	BeforeBytes  int       `json:"before_bytes"`
+	AfterBytes   int       `json:"after_bytes"`
 }
 
 // pricesUSD maps model -> USD per 1M tokens (input). Estimates only.
@@ -115,12 +115,12 @@ func (r *Recorder) Record(e Entry) error {
 
 // Summary aggregates entries over a time range.
 type Summary struct {
-	Operations  int              `json:"operations"`
-	BeforeTotal int              `json:"before_tokens"`
-	AfterTotal  int              `json:"after_tokens"`
-	SavedTotal  int              `json:"saved_tokens"`
-	SavedPct    float64          `json:"saved_percent"`
-	CostSaved   float64          `json:"cost_saved_usd"`
+	Operations  int               `json:"operations"`
+	BeforeTotal int               `json:"before_tokens"`
+	AfterTotal  int               `json:"after_tokens"`
+	SavedTotal  int               `json:"saved_tokens"`
+	SavedPct    float64           `json:"saved_percent"`
+	CostSaved   float64           `json:"cost_saved_usd"`
 	ByOperation map[Operation]int `json:"by_operation"`
 }
 
@@ -128,6 +128,12 @@ type Summary struct {
 func (r *Recorder) Summarize(days int, session string) (*Summary, error) {
 	sum := &Summary{ByOperation: make(map[Operation]int)}
 	cutoff := time.Now().UTC().AddDate(0, 0, -days)
+	if days <= 0 {
+		// days<=0 means today only, not "all time": an empty range counts no
+		// full days before today.
+		cutoff = time.Now().UTC()
+	}
+	bound := cutoff.Truncate(24 * time.Hour)
 	entries, err := os.ReadDir(r.dir)
 	if err != nil {
 		return sum, err
@@ -140,7 +146,7 @@ func (r *Recorder) Summarize(days int, session string) (*Summary, error) {
 		if perr != nil {
 			continue
 		}
-		if day.Before(cutoff.Truncate(24*time.Hour)) && days > 0 {
+		if day.Before(bound) {
 			continue
 		}
 		f, ferr := os.Open(filepath.Join(r.dir, de.Name()))

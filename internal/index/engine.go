@@ -69,7 +69,8 @@ func StorePath(root string) string {
 	return cache.Path("index", cache.Hash([]byte(abs))+".json")
 }
 
-// Save persists the index.
+// Save persists the index. The write is atomic (temp file + rename) so a
+// concurrent reader never observes a partially-written index.
 func (ix *Index) Save() error {
 	data, err := json.Marshal(ix)
 	if err != nil {
@@ -79,7 +80,11 @@ func (ix *Index) Save() error {
 	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 		return err
 	}
-	return os.WriteFile(p, data, 0o600)
+	tmp := p + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, p)
 }
 
 // Load reads the index for root. Returns nil if absent.
@@ -118,11 +123,14 @@ func (ix *Index) Stale() bool {
 	// the exact path. Tradeoff: an edit that preserves mtime (rare, e.g.
 	// deliberately-touched timestamps) evades the gate until the next build.
 	if ix.MaxMtime > 0 {
-		if maxMtime, count := indexableMaxMtime(ix.Root); count == len(ix.FileHashes) && maxMtime == ix.MaxMtime {
+		if maxMtime, count, err := indexableMaxMtime(ix.Root); err == nil && count == len(ix.FileHashes) && maxMtime == ix.MaxMtime {
 			return false
 		}
 	}
-	cur := indexableHashes(ix.Root)
+	cur, err := indexableHashes(ix.Root)
+	if err != nil {
+		return true
+	}
 	if len(cur) != len(ix.FileHashes) {
 		return true
 	}
@@ -181,6 +189,11 @@ var ignoreDirs = map[string]bool{
 	".next": true, "__pycache__": true, ".venv": true, ".cache": true,
 	".idea": true, "bin": true, ".mvn": true, "coverage": true, "tmp": true,
 	".kern": true,
+	// Agent/tooling config dirs: generated wiring (MCP endpoints, hooks,
+	// rules) that is machine-specific and never project source.
+	".opencode": true, ".claude": true, ".cursor": true, ".gemini": true,
+	".kiro": true, ".codex": true, ".copilot": true, ".codeium": true,
+	".qwen": true, ".qoder": true,
 }
 
 // IgnoredDir reports whether a directory name is skipped during index walks
@@ -199,7 +212,7 @@ func Build(root string) (*Index, error) {
 	ix := New(abs)
 	err = filepath.WalkDir(abs, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
-			return nil
+			return err
 		}
 		if d.IsDir() {
 			if path != abs && ignoreDirs[d.Name()] {
@@ -209,14 +222,14 @@ func Build(root string) (*Index, error) {
 		}
 		rel, rerr := filepath.Rel(abs, path)
 		if rerr != nil {
-			return nil
+			return rerr
 		}
 		if !quickExt(rel) {
 			return nil
 		}
 		src, serr := os.ReadFile(path)
 		if serr != nil {
-			return nil
+			return serr
 		}
 		if !isIndexable(rel, src) {
 			return nil
@@ -276,18 +289,21 @@ func (ix *Index) computeCallers() {
 	for caller, callees := range ix.Calls {
 		seen := map[string]bool{}
 		for _, c := range callees {
+			if c == caller {
+				continue
+			}
 			simple := c
 			if i := strings.LastIndexByte(c, '.'); i >= 0 {
 				simple = c[i+1:]
-			}
-			if simple == caller {
-				continue
 			}
 			if !seen[c] {
 				seen[c] = true
 				ix.Callers[c] = append(ix.Callers[c], caller)
 			}
-			if simple != c && !seen[simple] {
+			// Also index by the bare method/function name so graph lookups by
+			// simple name work, but never alias a caller to itself (that would
+			// forge a self-caller edge when e.g. Bar calls Foo.Bar).
+			if simple != c && simple != caller && !seen[simple] {
 				seen[simple] = true
 				ix.Callers[simple] = append(ix.Callers[simple], caller)
 			}

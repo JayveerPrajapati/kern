@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -172,7 +173,10 @@ func (s *SQLiteStore) Save(ix *Index) error {
 	}
 	symRow := 0
 	for _, sym := range ix.Symbols {
-		params, _ := json.Marshal(sym.Params)
+		params, err := json.Marshal(sym.Params)
+		if err != nil {
+			return fmt.Errorf("marshal params for %s: %w", sym.Name, err)
+		}
 		entry := 0
 		if sym.Entry {
 			entry = 1
@@ -237,8 +241,14 @@ func (s *SQLiteStore) Save(ix *Index) error {
 		return err
 	}
 	for path, pkg := range ix.Pkgs {
-		imports, _ := json.Marshal(pkg.Imports)
-		files, _ := json.Marshal(pkg.Files)
+		imports, err := json.Marshal(pkg.Imports)
+		if err != nil {
+			return fmt.Errorf("marshal imports for %s: %w", path, err)
+		}
+		files, err := json.Marshal(pkg.Files)
+		if err != nil {
+			return fmt.Errorf("marshal files for %s: %w", path, err)
+		}
 		if _, err := tx.Exec(
 			"INSERT INTO packages(path,name,lang,imports,files) VALUES(?,?,?,?,?) ON CONFLICT(path) DO UPDATE SET name=excluded.name, lang=excluded.lang, imports=excluded.imports, files=excluded.files",
 			path, pkg.Name, pkg.Lang, string(imports), string(files)); err != nil {
@@ -272,7 +282,10 @@ func (s *SQLiteStore) Save(ix *Index) error {
 	}
 	defer ftsStmt.Close()
 	for i, sym := range ix.Symbols {
-		params, _ := json.Marshal(sym.Params)
+		params, err := json.Marshal(sym.Params)
+		if err != nil {
+			return fmt.Errorf("marshal params for %s: %w", sym.Name, err)
+		}
 		if _, err := ftsStmt.Exec(i+1, sym.Kind, sym.Name, sym.Receiver, sym.File, string(params)); err != nil {
 			return err
 		}
@@ -324,7 +337,9 @@ func (s *SQLiteStore) Load() (*Index, error) {
 		}
 		sym.End = end
 		sym.Entry = entry == 1
-		_ = json.Unmarshal([]byte(params), &sym.Params)
+		if err := json.Unmarshal([]byte(params), &sym.Params); err != nil {
+			return nil, fmt.Errorf("decode params for %s: %w", sym.Name, err)
+		}
 		ix.Symbols = append(ix.Symbols, sym)
 	}
 	if err := rows.Err(); err != nil {
@@ -394,8 +409,12 @@ func (s *SQLiteStore) Load() (*Index, error) {
 			return nil, err
 		}
 		pkg := &Pkg{Name: name, Path: path, Lang: lang}
-		_ = json.Unmarshal([]byte(imports), &pkg.Imports)
-		_ = json.Unmarshal([]byte(files), &pkg.Files)
+		if err := json.Unmarshal([]byte(imports), &pkg.Imports); err != nil {
+			return nil, fmt.Errorf("decode imports for %s: %w", path, err)
+		}
+		if err := json.Unmarshal([]byte(files), &pkg.Files); err != nil {
+			return nil, fmt.Errorf("decode files for %s: %w", path, err)
+		}
 		ix.Pkgs[path] = pkg
 	}
 	if err := pr.Err(); err != nil {
@@ -429,6 +448,71 @@ func (s *SQLiteStore) Load() (*Index, error) {
 	return ix, nil
 }
 
+// ftsEscape turns a user query into an FTS5 MATCH string that cannot trigger a
+// syntax error, no matter what punctuation it contains. Standalone AND/OR/NOT
+// operators and `column:"phrase"` / `column:word` filters are preserved;
+// every other token (words, punctuation, stray quotes) is wrapped in FTS5
+// double-quoted phrase form, doubling embedded quotes. Leading/trailing
+// operators are dropped and consecutive ones collapsed so an input like
+// "greet AND" cannot leave FTS5 with an operand-less operator.
+func ftsEscape(q string) string {
+	colRe := regexp.MustCompile(`^[\p{L}\p{N}_]+:("(?:[^"]|"")*"|[\p{L}\p{N}_]+)`)
+	wordRe := regexp.MustCompile(`^[\p{L}\p{N}_]+`)
+	phraseRe := regexp.MustCompile(`^"(?:[^"]|"")*"`)
+	parts := []string{}
+	rest := q
+	for len(rest) > 0 {
+		rest = strings.TrimLeft(rest, " \t")
+		if rest == "" {
+			break
+		}
+		switch {
+		case colRe.MatchString(rest):
+			parts = append(parts, colRe.FindString(rest))
+			rest = rest[len(colRe.FindString(rest)):]
+		case phraseRe.MatchString(rest):
+			parts = append(parts, phraseRe.FindString(rest))
+			rest = rest[len(phraseRe.FindString(rest)):]
+		case wordRe.MatchString(rest):
+			w := wordRe.FindString(rest)
+			if strings.EqualFold(w, "AND") || strings.EqualFold(w, "OR") || strings.EqualFold(w, "NOT") {
+				parts = append(parts, strings.ToUpper(w))
+			} else {
+				parts = append(parts, `"`+w+`"`)
+			}
+			rest = rest[len(w):]
+		default:
+			// A single punctuation or quote char, quoted literally.
+			parts = append(parts, `"`+strings.ReplaceAll(rest[:1], `"`, `""`)+`"`)
+			rest = rest[1:]
+		}
+	}
+	return strings.Join(sanitizeFTSOperators(parts), " ")
+}
+
+// sanitizeFTSOperators removes leading/trailing operators and collapses
+// consecutive ones so the resulting FTS5 expression is always well-formed.
+func sanitizeFTSOperators(parts []string) []string {
+	isOp := func(s string) bool {
+		return s == "AND" || s == "OR" || s == "NOT"
+	}
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if isOp(p) && len(out) > 0 && isOp(out[len(out)-1]) {
+			out[len(out)-1] = p
+			continue
+		}
+		out = append(out, p)
+	}
+	for len(out) > 0 && isOp(out[0]) {
+		out = out[1:]
+	}
+	for len(out) > 0 && isOp(out[len(out)-1]) {
+		out = out[:len(out)-1]
+	}
+	return out
+}
+
 // SearchFTS runs a full-text search over symbols via the FTS5 table. Query
 // syntax follows FTS5 MATCH (e.g. "greet", "func AND greet", `file:"main.go"`).
 // It returns up to limit matching symbols ranked by relevance.
@@ -439,10 +523,10 @@ func (s *SQLiteStore) SearchFTS(query string, limit int) ([]Symbol, error) {
 	if limit <= 0 {
 		limit = 20
 	}
-	// Guard against FTS5 syntax errors: quote a bare term.
-	q := strings.TrimSpace(query)
-	if !strings.ContainsAny(q, `"() AND OR NOT`) {
-		q = `"` + strings.ReplaceAll(q, `"`, `""`) + `"`
+	q := ftsEscape(query)
+	if q == "" {
+		// Query was only operators/punctuation — nothing to match.
+		return nil, nil
 	}
 	rows, err := s.db.Query(`
 SELECT s.kind,s.name,s.receiver,s.file,s.line,s."end",s.lang,s.entry,s.framework,s.route,s.params
@@ -464,7 +548,9 @@ ORDER BY rank LIMIT ?`, q, limit)
 		}
 		sym.End = end
 		sym.Entry = entry == 1
-		_ = json.Unmarshal([]byte(params), &sym.Params)
+		if err := json.Unmarshal([]byte(params), &sym.Params); err != nil {
+			return nil, fmt.Errorf("decode params for %s: %w", sym.Name, err)
+		}
 		out = append(out, sym)
 	}
 	return out, rows.Err()

@@ -30,6 +30,7 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/fetch"
 	"github.com/JayveerPrajapati/kern/internal/fw"
 	"github.com/JayveerPrajapati/kern/internal/heal"
+	"github.com/JayveerPrajapati/kern/internal/hook"
 	"github.com/JayveerPrajapati/kern/internal/hooks"
 	"github.com/JayveerPrajapati/kern/internal/index"
 	"github.com/JayveerPrajapati/kern/internal/intel"
@@ -115,7 +116,7 @@ Usage:
                                                  structural rename (Go, AST-precise): previews every
                                                  definition/reference first; --apply commits with backups
                                                  under .kern/rename-backup/ and transactional rollback
-   kern docs <query> [root] [--k N]                local vector search over documents (md/txt/rst)
+   kern docs <query> [root] [--limit N]            local vector search over documents (md/txt/rst)
    kern docs index [root] [--semantic]             pre-index documents; --semantic adds Ollama embeddings;
                                                   kern docs clear resets
   kern verify <file|- for stdin> [root] [--json]  cross-check file:line/symbol/route claims in agent output
@@ -145,6 +146,7 @@ Usage:
   kern changes [root] [--range a..b] [--file F] [--json]   change-impact: blast radius, risk, test gaps
   kern review [root] [--range a..b] [--max N]     token-optimised review context for changed files
   kern hubs [root] [--limit N] [--json]           most depended-on symbols + cross-package bridges
+  kern bridges [root] [--limit N] [--json]        cross-package bridge detection (coupling points)
   kern testgaps [root] [--limit N] [--json]       test coverage + untested hotspots
   kern entries [root] [--limit N] [--json]        framework entry points in the index
   kern flows [root] [--limit N] [--json]          execution flows from entry points (still available)
@@ -168,6 +170,7 @@ Usage:
   kern guard check [root] [--file F] [--range a..b] [--json|--sarif] [--threshold N]  reject boundary violations (exit 2 when count > N)
   kern version                                    show version
   kern guide                                      categorized tool usage guide (performance tiers)
+  kern hook <install|diff|store|claude-post|claude-prompt|gemini-after|gemini-prompt>   git hooks (install/diff/store) or agent hooks (read hook JSON on stdin)
   kern mcp                                        run MCP server on stdio
 `)
 }
@@ -235,12 +238,24 @@ func mcpHTTPAddr(args []string, f flags) string {
 	return f.http
 }
 
-func parseFlags(args []string) (flags, []string) {
+func parseFlags(args []string) (flags, []string, error) {
 	var f flags
 	f.days = 7
 	f.timeout = 120
 	f.depth = -1
 	var rest []string
+	var parseErr error
+	setInt := func(dst *int, val, flag string) {
+		if parseErr != nil {
+			return
+		}
+		n, err := strconv.Atoi(val)
+		if err != nil {
+			parseErr = fmt.Errorf("%s: invalid integer %q", flag, val)
+			return
+		}
+		*dst = n
+	}
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
 		case "--attach":
@@ -261,7 +276,7 @@ func parseFlags(args []string) (flags, []string) {
 		case "--days":
 			i++
 			if i < len(args) {
-				f.days, _ = strconv.Atoi(args[i])
+				setInt(&f.days, args[i], "--days")
 			}
 		case "--dir":
 			i++
@@ -280,7 +295,7 @@ func parseFlags(args []string) (flags, []string) {
 		case "--threshold":
 			i++
 			if i < len(args) {
-				fmt.Sscanf(args[i], "%d", &f.threshold)
+				setInt(&f.threshold, args[i], "--threshold")
 			}
 		case "--csv":
 			f.csv = true
@@ -334,7 +349,7 @@ func parseFlags(args []string) (flags, []string) {
 		case "--timeout":
 			i++
 			if i < len(args) {
-				f.timeout, _ = strconv.Atoi(args[i])
+				setInt(&f.timeout, args[i], "--timeout")
 			}
 		case "--cache":
 			f.cache = true
@@ -352,7 +367,7 @@ func parseFlags(args []string) (flags, []string) {
 		case "--interval":
 			i++
 			if i < len(args) {
-				f.interval, _ = strconv.Atoi(args[i])
+				setInt(&f.interval, args[i], "--interval")
 			}
 		case "--http":
 			i++
@@ -377,12 +392,12 @@ func parseFlags(args []string) (flags, []string) {
 		case "--max":
 			i++
 			if i < len(args) {
-				f.max, _ = strconv.Atoi(args[i])
+				setInt(&f.max, args[i], "--max")
 			}
 		case "--limit":
 			i++
 			if i < len(args) {
-				f.limit, _ = strconv.Atoi(args[i])
+				setInt(&f.limit, args[i], "--limit")
 			}
 		case "--range":
 			i++
@@ -392,12 +407,12 @@ func parseFlags(args []string) (flags, []string) {
 		case "--lines":
 			i++
 			if i < len(args) {
-				f.lines, _ = strconv.Atoi(args[i])
+				setInt(&f.lines, args[i], "--lines")
 			}
 		case "--depth":
 			i++
 			if i < len(args) {
-				f.depth, _ = strconv.Atoi(args[i])
+				setInt(&f.depth, args[i], "--depth")
 			}
 		case "--severity":
 			i++
@@ -419,7 +434,7 @@ func parseFlags(args []string) (flags, []string) {
 		case "--max-tokens":
 			i++
 			if i < len(args) {
-				f.maxTokens, _ = strconv.Atoi(args[i])
+				setInt(&f.maxTokens, args[i], "--max-tokens")
 			}
 		case "--staged":
 			f.staged = true
@@ -436,7 +451,24 @@ func parseFlags(args []string) (flags, []string) {
 			rest = append(rest, args[i])
 		}
 	}
-	return f, rest
+	return f, rest, parseErr
+}
+
+// maxStdinBytes caps piped input so an uncooperative pipe cannot exhaust
+// memory. 64 MiB is far beyond any legitimate use (prompts, logs, source).
+const maxStdinBytes = 64 << 20
+
+// readStdin returns the full piped stdin, rejecting input larger than
+// maxStdinBytes instead of buffering it all.
+func readStdin() ([]byte, error) {
+	b, err := io.ReadAll(io.LimitReader(os.Stdin, maxStdinBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(b) > maxStdinBytes {
+		return nil, fmt.Errorf("stdin exceeds %d bytes", maxStdinBytes)
+	}
+	return b, nil
 }
 
 func main() {
@@ -455,7 +487,10 @@ func main() {
 		fmt.Println(mcp.Guide())
 
 	case "optimize", "preview":
-		f, args := parseFlags(rest)
+		f, args, err := parseFlags(rest)
+		if err != nil {
+			fatal("flags: %v", err)
+		}
 		prompt := strings.Join(args, " ")
 		if prompt == "" {
 			fatal("prompt is required")
@@ -469,7 +504,7 @@ func main() {
 			}
 			attach = string(b)
 		} else if f.attach == "-" {
-			b, err := io.ReadAll(os.Stdin)
+			b, err := readStdin()
 			if err != nil {
 				fatal("cannot read stdin: %v", err)
 			}
@@ -513,7 +548,10 @@ func main() {
 		fmt.Println(p.Render())
 
 	case "pack":
-		f, args := parseFlags(rest)
+		f, args, err := parseFlags(rest)
+		if err != nil {
+			fatal("flags: %v", err)
+		}
 		root := "."
 		if len(args) > 0 {
 			root = args[0]
@@ -536,7 +574,10 @@ func main() {
 		}
 
 	case "build":
-		f, args := parseFlags(rest)
+		f, args, err := parseFlags(rest)
+		if err != nil {
+			fatal("flags: %v", err)
+		}
 		cmdStr := strings.Join(args, " ")
 		if cmdStr == "" {
 			fatal("usage: kern build <command>")
@@ -565,7 +606,10 @@ func main() {
 		fmt.Fprintf(os.Stderr, "kern: %d -> %d tokens (saved %d, %.1f%%)\n", res.BeforeTokens, res.AfterTokens, res.SavedTokens, res.SavedPercent)
 
 	case "tokens":
-		f, args := parseFlags(rest)
+		f, args, err := parseFlags(rest)
+		if err != nil {
+			fatal("flags: %v", err)
+		}
 		text := strings.Join(args, " ")
 		if text == "" {
 			fatal("usage: kern tokens [--bpe] <text>")
@@ -577,7 +621,10 @@ func main() {
 		fmt.Println(tokenize.Count(text))
 
 	case "setup":
-		f, _ := parseFlags(rest)
+		f, _, err := parseFlags(rest)
+		if err != nil {
+			fatal("flags: %v", err)
+		}
 		root := f.root
 		if root == "" {
 			root = "."
@@ -617,7 +664,10 @@ func main() {
 		fmt.Println(out)
 
 	case "prompt":
-		f, args := parseFlags(rest)
+		f, args, err := parseFlags(rest)
+		if err != nil {
+			fatal("flags: %v", err)
+		}
 		if len(args) == 0 {
 			fatal("usage: kern prompt <template> [--file PATH] [--task TEXT]")
 		}
@@ -668,7 +718,10 @@ func main() {
 		fmt.Print(out)
 
 	case "validate":
-		f, args := parseFlags(rest)
+		f, args, err := parseFlags(rest)
+		if err != nil {
+			fatal("flags: %v", err)
+		}
 		root := "."
 		if len(args) > 0 {
 			root = args[0]
@@ -701,7 +754,10 @@ func main() {
 		os.Exit(1)
 
 	case "heal":
-		f, args := parseFlags(rest)
+		f, args, err := parseFlags(rest)
+		if err != nil {
+			fatal("flags: %v", err)
+		}
 		root := "."
 		if len(args) > 0 {
 			root = args[0]
@@ -737,7 +793,10 @@ func main() {
 		os.Exit(1)
 
 	case "udiff":
-		f, args := parseFlags(rest)
+		f, args, err := parseFlags(rest)
+		if err != nil {
+			fatal("flags: %v", err)
+		}
 		if len(args) < 2 {
 			fatal("usage: kern udiff <file-a> <file-b> [--out out.patch]")
 		}
@@ -764,7 +823,10 @@ func main() {
 		fmt.Print(u)
 
 	case "sandbox":
-		f, args := parseFlags(rest)
+		f, args, err := parseFlags(rest)
+		if err != nil {
+			fatal("flags: %v", err)
+		}
 		root := "."
 		cmdParts := args
 		if len(args) > 0 && args[0] != "--" && isDir(args[0]) {
@@ -799,20 +861,22 @@ func main() {
 		os.Exit(1)
 
 	case "swap":
-		f, args := parseFlags(rest)
+		f, args, err := parseFlags(rest)
+		if err != nil {
+			fatal("flags: %v", err)
+		}
 		root := "."
 		if len(args) > 0 && isDir(args[0]) {
 			root = args[0]
 			args = args[1:]
 		}
 		var b []byte
-		var err error
 		if len(args) > 0 && args[0] == "-" {
-			b, err = io.ReadAll(os.Stdin)
+			b, err = readStdin()
 		} else if len(args) > 0 {
 			b, err = os.ReadFile(args[0])
 		} else {
-			b, err = io.ReadAll(os.Stdin)
+			b, err = readStdin()
 		}
 		if err != nil {
 			fatal("%v", err)
@@ -832,7 +896,10 @@ func main() {
 		}
 
 	case "precache":
-		f, args := parseFlags(rest)
+		f, args, err := parseFlags(rest)
+		if err != nil {
+			fatal("flags: %v", err)
+		}
 		root := "."
 		if len(args) > 0 {
 			root = args[0]
@@ -861,7 +928,10 @@ func main() {
 		}
 
 	case "schema":
-		f, args := parseFlags(rest)
+		f, args, err := parseFlags(rest)
+		if err != nil {
+			fatal("flags: %v", err)
+		}
 		if f.schema == "" {
 			fatal("usage: kern schema <data.json|- for stdin> --schema <schema.json>\n  or: kern prompt <template> --schema <schema.json> to inject the schema")
 		}
@@ -871,11 +941,11 @@ func main() {
 		}
 		var b []byte
 		if len(args) > 0 && args[0] == "-" {
-			b, err = io.ReadAll(os.Stdin)
+			b, err = readStdin()
 		} else if len(args) > 0 {
 			b, err = os.ReadFile(args[0])
 		} else {
-			b, err = io.ReadAll(os.Stdin)
+			b, err = readStdin()
 		}
 		if err != nil {
 			fatal("%v", err)
@@ -902,7 +972,10 @@ func main() {
 		fmt.Println("remembered.")
 
 	case "memory":
-		f, _ := parseFlags(rest)
+		f, _, err := parseFlags(rest)
+		if err != nil {
+			fatal("flags: %v", err)
+		}
 		if f.clear {
 			if err := memory.Clear("."); err != nil {
 				fatal("%v", err)
@@ -915,7 +988,10 @@ func main() {
 		}
 
 	case "recall":
-		f, args := parseFlags(rest)
+		f, args, err := parseFlags(rest)
+		if err != nil {
+			fatal("flags: %v", err)
+		}
 		if len(args) < 1 || args[0] == "" {
 			fatal("usage: kern recall \"<prompt>\" [root] [--limit N]")
 		}
@@ -932,10 +1008,13 @@ func main() {
 		}
 
 	case "budget":
-		f, args := parseFlags(rest)
+		f, args, err := parseFlags(rest)
+		if err != nil {
+			fatal("flags: %v", err)
+		}
 		text := strings.Join(args, " ")
 		if text == "" {
-			b, err := io.ReadAll(os.Stdin)
+			b, err := readStdin()
 			if err != nil {
 				fatal("%v", err)
 			}
@@ -955,11 +1034,14 @@ func main() {
 		fmt.Println(out)
 
 	case "terse":
-		_, args := parseFlags(rest)
+		_, args, err := parseFlags(rest)
+		if err != nil {
+			fatal("flags: %v", err)
+		}
 		text := ""
 		if len(args) > 0 {
 			if args[0] == "-" {
-				b, err := io.ReadAll(os.Stdin)
+				b, err := readStdin()
 				if err != nil {
 					fatal("%v", err)
 				}
@@ -975,7 +1057,7 @@ func main() {
 			}
 		}
 		if text == "" {
-			b, err := io.ReadAll(os.Stdin)
+			b, err := readStdin()
 			if err != nil {
 				fatal("%v", err)
 			}
@@ -991,7 +1073,10 @@ func main() {
 		fmt.Println(out)
 
 	case "exec":
-		f, args := parseFlags(rest)
+		f, args, err := parseFlags(rest)
+		if err != nil {
+			fatal("flags: %v", err)
+		}
 		if len(args) > 0 && args[0] == "--list" {
 			fmt.Printf("kern exec: available runtimes: %s\n", strings.Join(script.Available(), ", "))
 			fmt.Printf("  supported languages: %s\n", strings.Join(script.Languages(), ", "))
@@ -1004,7 +1089,7 @@ func main() {
 		var code, path string
 		switch {
 		case len(args) > 0 && args[0] == "-":
-			b, err := io.ReadAll(os.Stdin)
+			b, err := readStdin()
 			if err != nil {
 				fatal("%v", err)
 			}
@@ -1017,7 +1102,7 @@ func main() {
 			}
 		default:
 			if fi, err := os.Stdin.Stat(); err == nil && fi.Mode()&os.ModeCharDevice == 0 {
-				b, rerr := io.ReadAll(os.Stdin)
+				b, rerr := readStdin()
 				if rerr != nil {
 					fatal("%v", rerr)
 				}
@@ -1039,7 +1124,7 @@ func main() {
 		run.MaxOut = f.max
 		if f.stdin != "" {
 			if f.stdin == "-" {
-				b, err := io.ReadAll(os.Stdin)
+				b, err := readStdin()
 				if err != nil {
 					fatal("%v", err)
 				}
@@ -1075,15 +1160,17 @@ func main() {
 		fmt.Println(doctor.Render(root, doctor.Run(root)))
 
 	case "mask":
-		f, args := parseFlags(rest)
+		f, args, err := parseFlags(rest)
+		if err != nil {
+			fatal("flags: %v", err)
+		}
 		var in string
 		if len(args) > 0 && args[0] != "" {
 			in = args[0]
 		}
 		var b []byte
-		var err error
 		if in == "" || in == "-" {
-			b, err = io.ReadAll(os.Stdin)
+			b, err = readStdin()
 		} else {
 			b, err = os.ReadFile(in)
 		}
@@ -1103,7 +1190,10 @@ func main() {
 		}
 
 	case "verify":
-		f, args := parseFlags(rest)
+		f, args, err := parseFlags(rest)
+		if err != nil {
+			fatal("flags: %v", err)
+		}
 		root := "."
 		in := "-"
 		if len(args) > 0 && args[0] != "" {
@@ -1114,9 +1204,8 @@ func main() {
 			root = args[0]
 		}
 		var b []byte
-		var err error
 		if in == "-" {
-			b, err = io.ReadAll(os.Stdin)
+			b, err = readStdin()
 		} else {
 			b, err = os.ReadFile(in)
 		}
@@ -1135,7 +1224,10 @@ func main() {
 		fmt.Println(verify.Render(rep))
 
 	case "docs":
-		f, args := parseFlags(rest)
+		f, args, err := parseFlags(rest)
+		if err != nil {
+			fatal("flags: %v", err)
+		}
 		sub := ""
 		if len(args) > 0 && (args[0] == "index" || args[0] == "clear" || args[0] == "fetch") {
 			sub = args[0]
@@ -1228,7 +1320,7 @@ func main() {
 			fmt.Println("cleared document index")
 		} else {
 			if query == "" {
-				fatal("usage: kern docs <query> [root] [--k N] | kern docs index [root] [--semantic] | kern docs clear")
+				fatal("usage: kern docs <query> [root] [--limit N] | kern docs index [root] [--semantic] | kern docs clear")
 			}
 			ix := docsearch.Load(root)
 			if ix == nil {
@@ -1307,7 +1399,10 @@ func main() {
 		fmt.Println(fw.Render(det))
 
 	case "hook":
-		f, args := parseFlags(rest)
+		f, args, err := parseFlags(rest)
+		if err != nil {
+			fatal("flags: %v", err)
+		}
 		sub := "store"
 		if len(args) > 0 {
 			sub = args[0]
@@ -1335,14 +1430,56 @@ func main() {
 				fatal("%v", err)
 			}
 			fmt.Println("diff stored in project memory.")
+		case "claude-post", "claude-prompt", "gemini-after", "gemini-prompt":
+			// Native hooks for non-opencode agents (wired by `kern setup`).
+			// Reads the agent's hook JSON from stdin and responds in that
+			// agent's framing. Failures never break the agent's tool call:
+			// handlers swallow their own parse errors.
+			root := "."
+			if len(args) > 1 && args[1] != "" {
+				root = args[1]
+			}
+			in, err := readStdin()
+			if err != nil {
+				fatal("%v", err)
+			}
+			switch sub {
+			case "claude-post":
+				out, err := hook.ClaudePost(root, in)
+				if err != nil {
+					fatal("%v", err)
+				}
+				fmt.Println(out)
+			case "claude-prompt":
+				if err := hook.ClaudePrompt(root, in); err != nil {
+					fatal("%v", err)
+				}
+			case "gemini-after":
+				repl, err := hook.GeminiAfter(root, in)
+				if err != nil {
+					fatal("%v", err)
+				}
+				if repl != "" {
+					// Gemini: exit code 2 + stderr text hides the real tool
+					// result and substitutes the stderr content.
+					fmt.Fprintln(os.Stderr, repl)
+					os.Exit(2)
+				}
+			case "gemini-prompt":
+				if err := hook.GeminiPrompt(root, in); err != nil {
+					fatal("%v", err)
+				}
+			}
 		default:
-			fatal("usage: kern hook <install|diff|store> [--range a..b]")
+			fatal("usage: kern hook <install|diff|store|claude-post|claude-prompt|gemini-after|gemini-prompt> [root] [--range a..b]")
 		}
 
 	case "commitmsg":
-		f, _ := parseFlags(rest)
+		f, _, err := parseFlags(rest)
+		if err != nil {
+			fatal("flags: %v", err)
+		}
 		var out []byte
-		var err error
 		if f.staged {
 			out, err = gitDiff("diff --cached")
 		} else if f.range_ != "" {
@@ -1364,7 +1501,10 @@ func main() {
 		}
 
 	case "commit":
-		f, _ := parseFlags(rest)
+		f, _, err := parseFlags(rest)
+		if err != nil {
+			fatal("flags: %v", err)
+		}
 		if f.all {
 			if _, err := gitOutput("add", "-A"); err != nil {
 				fatal("staging failed: %v", err)
@@ -1467,7 +1607,10 @@ func main() {
 		}
 
 	case "stats", "diff", "export":
-		f, args := parseFlags(rest)
+		f, args, err := parseFlags(rest)
+		if err != nil {
+			fatal("flags: %v", err)
+		}
 		_ = args
 		rec, err := stats.NewRecorder()
 		if err != nil {
@@ -1528,7 +1671,10 @@ func main() {
 		fmt.Printf("  cost saved   : $%.4f\n", sum.CostSaved)
 
 	case "mcp":
-		f, args := parseFlags(rest)
+		f, args, err := parseFlags(rest)
+		if err != nil {
+			fatal("flags: %v", err)
+		}
 		httpAddr := mcpHTTPAddr(args, f)
 		wireRecorder()
 		mcp.SetServerVersion(version)
@@ -1569,7 +1715,10 @@ func main() {
 		fmt.Printf("languages: %s\n", strings.Join(ix.Languages(), ", "))
 
 	case "sec":
-		f, args := parseFlags(rest)
+		f, args, err := parseFlags(rest)
+		if err != nil {
+			fatal("flags: %v", err)
+		}
 		root := f.root
 		if root == "" {
 			root = "."
@@ -1582,7 +1731,11 @@ func main() {
 		if f.severity != "" {
 			allow = strings.Split(f.severity, ",")
 		}
-		findings := sec.FilterBySeverity(sec.Scan(root), allow)
+		findings, serr := sec.Scan(root)
+		if serr != nil {
+			fatal("kern sec: %v", serr)
+		}
+		findings = sec.FilterBySeverity(findings, allow)
 		if f.json {
 			if err := json.NewEncoder(os.Stdout).Encode(findings); err != nil {
 				fatal("%v", err)
@@ -1598,7 +1751,10 @@ func main() {
 		}
 
 	case "delete":
-		f, args := parseFlags(rest)
+		f, args, err := parseFlags(rest)
+		if err != nil {
+			fatal("flags: %v", err)
+		}
 		if len(args) < 1 {
 			fatal("usage: kern delete <symbol> [root] [--json]")
 		}
@@ -1625,7 +1781,10 @@ func main() {
 		}
 
 	case "rename":
-		f, args := parseFlags(rest)
+		f, args, err := parseFlags(rest)
+		if err != nil {
+			fatal("flags: %v", err)
+		}
 		if len(args) < 2 {
 			fatal("usage: kern rename <old> <new> [root] [--apply] [--json]")
 		}
@@ -1679,6 +1838,8 @@ func main() {
 			}
 			fmt.Printf("[kern] index updated: %d symbols, %d packages (%s)\n",
 				len(ix.Symbols), len(ix.Pkgs), strings.Join(ix.Languages(), ", "))
+		}, func(err error) {
+			fmt.Fprintf(os.Stderr, "[kern] watch error: %v\n", err)
 		})
 		if err != nil && err != context.Canceled {
 			fatal("%v", err)
@@ -1688,7 +1849,10 @@ func main() {
 		if len(rest) < 1 {
 			fatal("usage: kern ast <pattern> [root] [--all]")
 		}
-		f, args := parseFlags(rest)
+		f, args, err := parseFlags(rest)
+		if err != nil {
+			fatal("flags: %v", err)
+		}
 		pattern := args[0]
 		if f.all {
 			files, err := os.ReadDir(cache.Path("index"))
@@ -1783,7 +1947,10 @@ func main() {
 		if len(rest) < 1 {
 			fatal("usage: kern search <query> [root] [--limit N] [--repos] [--json] [--semantic]")
 		}
-		f, args := parseFlags(rest)
+		f, args, err := parseFlags(rest)
+		if err != nil {
+			fatal("flags: %v", err)
+		}
 		query := args[0]
 		root := "."
 		if len(args) > 1 {
@@ -1836,7 +2003,10 @@ func main() {
 		if len(rest) < 1 {
 			fatal("usage: kern graph <symbol> [root] [--mermaid] [--json] [--graphml] [--html] [--out FILE]")
 		}
-		f, args := parseFlags(rest)
+		f, args, err := parseFlags(rest)
+		if err != nil {
+			fatal("flags: %v", err)
+		}
 		symbol := args[0]
 		root := "."
 		if len(args) > 1 {
@@ -1880,7 +2050,10 @@ func main() {
 		if len(rest) < 1 {
 			fatal("usage: kern inherits <symbol> [root] [--json]")
 		}
-		f, args := parseFlags(rest)
+		f, args, err := parseFlags(rest)
+		if err != nil {
+			fatal("flags: %v", err)
+		}
 		symbol := args[0]
 		root := "."
 		if len(args) > 1 {
@@ -1939,7 +2112,10 @@ func main() {
 		if len(rest) < 1 {
 			fatal("usage: kern why <symbol> [root] [--json]")
 		}
-		f, args := parseFlags(rest)
+		f, args, err := parseFlags(rest)
+		if err != nil {
+			fatal("flags: %v", err)
+		}
 		symbol := args[0]
 		root := "."
 		if len(args) > 1 {
@@ -1960,7 +2136,10 @@ func main() {
 		fmt.Println(intel.FormatWhy(info))
 
 	case "wiki":
-		f, args := parseFlags(rest)
+		f, args, err := parseFlags(rest)
+		if err != nil {
+			fatal("flags: %v", err)
+		}
 		root := "."
 		if len(args) > 0 {
 			root = args[0]
@@ -1980,7 +2159,10 @@ func main() {
 		fmt.Printf("wrote %d pages to %s\n", len(written), outDir)
 
 	case "changes", "review":
-		f, args := parseFlags(rest)
+		f, args, err := parseFlags(rest)
+		if err != nil {
+			fatal("flags: %v", err)
+		}
 		root := "."
 		if len(args) > 0 {
 			root = args[0]
@@ -2018,7 +2200,10 @@ func main() {
 		fmt.Println(intel.RenderChanges(report))
 
 	case "hubs":
-		f, args := parseFlags(rest)
+		f, args, err := parseFlags(rest)
+		if err != nil {
+			fatal("flags: %v", err)
+		}
 		root := "."
 		if len(args) > 0 {
 			root = args[0]
@@ -2042,8 +2227,34 @@ func main() {
 		fmt.Println()
 		fmt.Println(intel.RenderBridges(intel.Bridges(ix, 15)))
 
+	case "bridges":
+		f, args, err := parseFlags(rest)
+		if err != nil {
+			fatal("flags: %v", err)
+		}
+		root := "."
+		if len(args) > 0 {
+			root = args[0]
+		}
+		ix, err := intel.ReadIndex(root)
+		if err != nil {
+			fatal("%v", err)
+		}
+		limit := f.limit
+		if limit <= 0 {
+			limit = 15
+		}
+		if f.json {
+			printJSON(map[string]any{"bridges": intel.Bridges(ix, limit)})
+			return
+		}
+		fmt.Println(intel.RenderBridges(intel.Bridges(ix, limit)))
+
 	case "testgaps":
-		f, args := parseFlags(rest)
+		f, args, err := parseFlags(rest)
+		if err != nil {
+			fatal("flags: %v", err)
+		}
 		root := "."
 		if len(args) > 0 {
 			root = args[0]
@@ -2063,7 +2274,10 @@ func main() {
 		fmt.Println(cov.Render())
 
 	case "flows":
-		f, args := parseFlags(rest)
+		f, args, err := parseFlags(rest)
+		if err != nil {
+			fatal("flags: %v", err)
+		}
 		root := "."
 		if len(args) > 0 {
 			root = args[0]
@@ -2080,7 +2294,10 @@ func main() {
 		fmt.Println(intel.RenderFlows(flows))
 
 	case "entries":
-		f, args := parseFlags(rest)
+		f, args, err := parseFlags(rest)
+		if err != nil {
+			fatal("flags: %v", err)
+		}
 		root := "."
 		if len(args) > 0 {
 			root = args[0]
@@ -2112,7 +2329,10 @@ func main() {
 		fmt.Print(b.String())
 
 	case "communities":
-		f, args := parseFlags(rest)
+		f, args, err := parseFlags(rest)
+		if err != nil {
+			fatal("flags: %v", err)
+		}
 		root := "."
 		if len(args) > 0 {
 			root = args[0]
@@ -2129,7 +2349,10 @@ func main() {
 		fmt.Println(intel.RenderCommunities(comms))
 
 	case "path":
-		f, args := parseFlags(rest)
+		f, args, err := parseFlags(rest)
+		if err != nil {
+			fatal("flags: %v", err)
+		}
 		// `kern path` with no symbols keeps the legacy behaviour of printing
 		// the cache directory.
 		if len(args) < 2 {
@@ -2163,7 +2386,10 @@ func main() {
 		fmt.Println(intel.RenderPath(ix, path))
 
 	case "dead":
-		f, args := parseFlags(rest)
+		f, args, err := parseFlags(rest)
+		if err != nil {
+			fatal("flags: %v", err)
+		}
 		root := "."
 		if len(args) > 0 {
 			root = args[0]
@@ -2183,7 +2409,10 @@ func main() {
 		fmt.Println(intel.RenderDead(dead))
 
 	case "larges":
-		f, args := parseFlags(rest)
+		f, args, err := parseFlags(rest)
+		if err != nil {
+			fatal("flags: %v", err)
+		}
 		root := "."
 		if len(args) > 0 {
 			root = args[0]
@@ -2204,7 +2433,10 @@ func main() {
 		fmt.Println(intel.RenderLarge(large))
 
 	case "arch":
-		f, args := parseFlags(rest)
+		f, args, err := parseFlags(rest)
+		if err != nil {
+			fatal("flags: %v", err)
+		}
 		root := "."
 		if len(args) > 0 {
 			root = args[0]
@@ -2221,7 +2453,10 @@ func main() {
 		fmt.Println(intel.RenderArch(a))
 
 	case "churn":
-		f, args := parseFlags(rest)
+		f, args, err := parseFlags(rest)
+		if err != nil {
+			fatal("flags: %v", err)
+		}
 		root := "."
 		if len(args) > 0 {
 			root = args[0]
@@ -2238,7 +2473,10 @@ func main() {
 		fmt.Println(intel.RenderChurn(report))
 
 	case "cochange":
-		f, args := parseFlags(rest)
+		f, args, err := parseFlags(rest)
+		if err != nil {
+			fatal("flags: %v", err)
+		}
 		root := "."
 		if len(args) > 0 {
 			root = args[0]
@@ -2255,7 +2493,10 @@ func main() {
 		fmt.Println(intel.RenderCoChange(report, f.limit))
 
 	case "explore":
-		f, args := parseFlags(rest)
+		f, args, err := parseFlags(rest)
+		if err != nil {
+			fatal("flags: %v", err)
+		}
 		if len(args) < 1 {
 			fatal("usage: kern explore <symbol> [root] [--depth N] [--max N]")
 		}
@@ -2286,7 +2527,10 @@ func main() {
 		fmt.Println(intel.RenderExplore(rep))
 
 	case "fts":
-		f, args := parseFlags(rest)
+		f, args, err := parseFlags(rest)
+		if err != nil {
+			fatal("flags: %v", err)
+		}
 		if len(args) < 1 {
 			fatal("usage: kern fts \"<query>\" [root] [--limit N]")
 		}
@@ -2311,7 +2555,10 @@ func main() {
 		}
 
 	case "near", "walk":
-		f, args := parseFlags(rest)
+		f, args, err := parseFlags(rest)
+		if err != nil {
+			fatal("flags: %v", err)
+		}
 		if len(args) < 1 {
 			fatal("usage: kern near <symbol> [root] [--depth N] [--max N]")
 		}
@@ -2342,7 +2589,10 @@ func main() {
 		fmt.Println(intel.RenderNear(ix, nodes))
 
 	case "probe":
-		f, args := parseFlags(rest)
+		f, args, err := parseFlags(rest)
+		if err != nil {
+			fatal("flags: %v", err)
+		}
 		if len(args) < 1 {
 			fatal("usage: kern probe \"<task text>\" [root] [--max N]")
 		}
@@ -2370,14 +2620,17 @@ func main() {
 		fmt.Println(text)
 
 	case "trace":
-		f, args := parseFlags(rest)
+		f, args, err := parseFlags(rest)
+		if err != nil {
+			fatal("flags: %v", err)
+		}
 		if len(args) < 1 {
 			fatal("usage: kern trace <file|- for stdin> [root] [--limit N]")
 		}
 		sourceName := args[0]
 		var src string
 		if sourceName == "-" {
-			b, err := io.ReadAll(os.Stdin)
+			b, err := readStdin()
 			if err != nil {
 				fatal("%v", err)
 			}
@@ -2405,7 +2658,10 @@ func main() {
 		fmt.Println(intel.RenderTrace(report))
 
 	case "lock":
-		f, args := parseFlags(rest)
+		f, args, err := parseFlags(rest)
+		if err != nil {
+			fatal("flags: %v", err)
+		}
 		if len(args) < 1 {
 			fatal("usage: kern lock <scope> [root]")
 		}
@@ -2438,7 +2694,10 @@ func main() {
 		fmt.Printf("lock released: %s\n", scope)
 
 	case "unlock":
-		f, args := parseFlags(rest)
+		f, args, err := parseFlags(rest)
+		if err != nil {
+			fatal("flags: %v", err)
+		}
 		if len(args) < 1 {
 			fatal("usage: kern unlock <scope> [root]")
 		}
@@ -2455,7 +2714,10 @@ func main() {
 		fmt.Printf("lock removed: %s\n", args[0])
 
 	case "status":
-		f, args := parseFlags(rest)
+		f, args, err := parseFlags(rest)
+		if err != nil {
+			fatal("flags: %v", err)
+		}
 		root := "."
 		if len(args) > 0 {
 			root = args[0]
@@ -2485,7 +2747,10 @@ func main() {
 		}
 
 	case "guard":
-		f, args := parseFlags(rest)
+		f, args, err := parseFlags(rest)
+		if err != nil {
+			fatal("flags: %v", err)
+		}
 		sub := "check"
 		if len(args) > 0 {
 			sub = args[0]
@@ -2540,7 +2805,7 @@ func main() {
 			default:
 				fmt.Println(intel.RenderViolations(violations))
 			}
-			if len(violations) > f.threshold {
+			if f.threshold >= 0 && len(violations) > f.threshold {
 				os.Exit(2)
 			}
 		default:

@@ -55,8 +55,26 @@ func parseDiffOutput(out string) []FileChange {
 	last := -1
 	newLine := 0
 	inHunk := false
+	curTo := ""
 	for _, line := range strings.Split(out, "\n") {
 		switch {
+		case strings.HasPrefix(line, "diff --git "):
+			_, curTo = diffPaths(line)
+		case strings.HasPrefix(line, "Binary files "):
+			// The new-side path comes from this line (`Binary files a/X and
+			// b/Y differ`), not the diff --git header: a deletion shows the
+			// old name there and /dev/null here. Deletions (to == /dev/null)
+			// are dropped like their text counterparts.
+			rest := strings.TrimSuffix(strings.TrimPrefix(line, "Binary files "), " differ")
+			to := curTo
+			if i := strings.LastIndex(rest, " and "); i >= 0 {
+				to = unquotePath(rest[i+len(" and "):])
+			}
+			if to != "" && to != "/dev/null" {
+				changes = append(changes, FileChange{File: to})
+				last = len(changes) - 1
+			}
+			inHunk = false
 		case strings.HasPrefix(line, "+++ "):
 			path := unquotePath(strings.TrimPrefix(line, "+++ "))
 			inHunk = false
@@ -91,6 +109,17 @@ func parseDiffOutput(out string) []FileChange {
 		}
 	}
 	return changes
+}
+
+// diffPaths parses the from/to paths out of a `diff --git a/X b/Y` header.
+// Paths are matched from the right so a path containing " b/" is not split.
+func diffPaths(line string) (from, to string) {
+	rest := strings.TrimPrefix(line, "diff --git a/")
+	i := strings.LastIndex(rest, " b/")
+	if i < 0 {
+		return "", ""
+	}
+	return unquotePath(rest[:i]), unquotePath(rest[i+3:])
 }
 
 // addRange records an added line, merging it with the previous range when

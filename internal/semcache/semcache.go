@@ -193,7 +193,12 @@ func Store(ns, input string, v any) error {
 	}
 	es = append(es, entry{Key: key, Input: input, Sig: shingles(input)})
 	if len(es) > MaxEntries {
+		evicted := es[:len(es)-MaxEntries]
 		es = es[len(es)-MaxEntries:]
+		// Reclaim payload files so eviction does not orphan them on disk.
+		for _, e := range evicted {
+			_ = os.Remove(cache.Path("data", e.Key+".json"))
+		}
 	}
 	if err := saveIndex(ns, es); err != nil {
 		return err
@@ -299,13 +304,15 @@ func Entries(ns string) ([]string, error) {
 }
 
 // Clear wipes the index (and payloads) for a namespace, or all namespaces when
-// ns is empty.
+// ns is empty. In-memory state is only updated after the on-disk removal
+// succeeds, so a failure cannot leave memory and disk out of sync.
 func Clear(ns string) error {
 	mu.Lock()
 	defer mu.Unlock()
 	if ns == "" {
-		dir := cache.Path("data", "sem")
-		_ = os.RemoveAll(dir)
+		if err := os.RemoveAll(cache.Path("data", "sem")); err != nil {
+			return err
+		}
 		indexes = map[string][]entry{}
 		return nil
 	}

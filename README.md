@@ -426,7 +426,7 @@ timeout (10s default) and a stdout byte cap — only stdout is returned.
 
 When running as an MCP server (`kern-mcp`), kern exposes **61 `kern_*`
 tools**. They map 1:1 to the CLI commands, so opencode, Claude Code, Codex,
-Cursor and 12 more agents get the full engine as first-class tools:
+Cursor and 12 more agents get the full engine over MCP:
 
 | Group | Tools |
 |---|---|
@@ -437,8 +437,8 @@ Cursor and 12 more agents get the full engine as first-class tools:
 | **Automation** | `kern_run_build`, `kern_validate`, `kern_heal`, `kern_exec`, `kern_rename`, `kern_diff_files`, `kern_commitmsg`, `kern_doc_fetch/index/search`, `kern_precache`, `kern_memory_add/list/recall`, `kern_lock/unlock/lock_status`, `kern_semcache`, `kern_stats`, `kern_usage_guide` |
 
 <sub>Tools are available both over stdio (any MCP client) and the Streamable
-HTTP transport with Origin/CSRF protection. The server's guidance reaches the
-main agent automatically via the MCP `initialize` response.</sub>
+HTTP transport with an Origin allow-list (loopback only; empty origins are
+accepted for non-browser clients).</sub>
 
 ---
 
@@ -516,15 +516,25 @@ CGO required for the default build).
 
 ## Supported Agents
 
-`kern setup` wires kern into every agent it finds — 17 surfaces:
+`kern setup` wires kern into every agent it finds — 17 MCP surfaces plus
+native hooks for agents whose hook APIs allow it:
 
-| Agent | Mechanism |
-|---|---|
-| **Any MCP client** | project `<root>/.mcp.json` (auto-discovered by Claude Code, Cursor, Windsurf, most MCP hosts) |
-| **opencode** | `opencode.json` (project MCP) + `.opencode/plugins/kern.ts` (first-class tools + auto-interception of large tool output) + `AGENTS.md` rules + global config |
-| **Claude Code** | `claude mcp add kern -- <abs path to kern-mcp>` |
-| **Codex** | appends `[mcp_servers.kern]` to `~/.codex/config.toml` |
-| **JSON adapters** | `continue`, `windsurf`, `zed`, `vscode`, `cursor`, `gemini`, `antigravity`, `qwen`, `qoder`, `kiro`, `copilot` (VS Code), `copilot-cli` — writes their MCP config, creating parent dirs as needed |
+| Agent | MCP | Auto-interception & session memory |
+|---|---|---|
+| **Any MCP client** | project `<root>/.mcp.json` (auto-discovered by Claude Code, Cursor, Windsurf, most MCP hosts) | — |
+| **opencode** | `opencode.json` + global config | `.opencode/plugins/kern.ts` — plugin API: compresses oversized tool output in place, captures edits/failures/prompts into project memory |
+| **Claude Code** | `claude mcp add kern -- <abs path to kern-mcp>` | `.claude/settings.json` hooks — `PostToolUse` compresses large Bash/Read/Grep results (via `updatedToolOutput`) and records edits + failures; `UserPromptSubmit` captures prompts (`kern hook claude-post/…`) |
+| **Gemini** | `.gemini/settings.json` (MCP entry) | `.gemini/settings.json` hooks — `AfterTool` compresses oversized shell/read/grep results (exit-2 stderr substitution) and records edits + failures; `BeforeAgent` captures prompts (`kern hook gemini-after/…`) |
+| **Cursor** | `.cursor/mcp.json` | `.cursor/rules/kern-hooks.mdc` — instruction rule (Cursor cannot execute shell hooks; the rule steers the model to kern's MCP tools) |
+| **Codex** | `[mcp_servers.kern]` in `~/.codex/config.toml` | — (no output-rewrite hook API) |
+| **JSON adapters** | `continue`, `windsurf`, `zed`, `vscode`, `antigravity`, `qwen`, `qoder`, `kiro`, `copilot` (VS Code), `copilot-cli` | — (no hook API) |
+
+All agents receive the same 61 MCP tools and the same `AGENTS.md` rules. Output
+compression + session memory run natively where the platform's hook API allows
+in-place output replacement (opencode, Claude Code, Gemini); agents without
+such an API keep full MCP parity but no automatic interception. Generated
+wiring files carry machine-specific binary paths, so `kern setup` adds them to
+`.gitignore` and the index never scans agent config directories.
 
 ---
 

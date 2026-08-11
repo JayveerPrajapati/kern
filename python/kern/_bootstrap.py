@@ -5,6 +5,7 @@
 # Distribution note: replace JayveerPrajapati with your GitHub username.
 
 import os
+import platform
 import shutil
 import subprocess
 import sys
@@ -69,15 +70,30 @@ def _resolve_version():
 
 
 def _os_arch():
-    uname = os.uname()
-    sysname = uname.sysname.lower()
-    machine = uname.machine.lower()
+    # platform is portable; os.uname() does not exist on Windows.
+    sysname = platform.system().lower()
+    machine = platform.machine().lower()
     arch = {"x86_64": "amd64", "amd64": "amd64", "aarch64": "arm64", "arm64": "arm64"}.get(
         machine
     )
     if sysname not in ("linux", "darwin") or arch is None:
         return None
     return "{}-{}".format(sysname, arch)
+
+
+def _safe_extract(tar, dest):
+    """Extract an untrusted archive without letting members escape dest."""
+    base = os.path.normpath(dest)
+    for member in tar.getmembers():
+        target = os.path.normpath(os.path.join(base, member.name))
+        if target != base and not target.startswith(base + os.sep):
+            raise tarfile.TarError(
+                "unsafe member in archive: {!r}".format(member.name)
+            )
+    try:  # Python 3.12+: the data filter blocks absolute/.. members too
+        tar.extractall(dest, filter="data")
+    except TypeError:  # Python < 3.12 has no filter argument
+        tar.extractall(dest)
 
 
 def _fetch(tag, os_arch):
@@ -88,7 +104,7 @@ def _fetch(tag, os_arch):
         print("kern: downloading {} ({})".format(tag, file), file=sys.stderr)
         urllib.request.urlretrieve(url, tarball)
         with tarfile.open(tarball, "r:gz") as t:
-            t.extractall(tmp)
+            _safe_extract(t, tmp)
         bin_dir = os.path.join(_cache_dir(), "bin")
         os.makedirs(bin_dir, exist_ok=True)
         for name in ("kern", "kern-mcp"):

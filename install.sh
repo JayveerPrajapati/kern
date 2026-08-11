@@ -68,7 +68,6 @@ go_install() {
     return 1
   fi
   echo "kern: falling back to 'go install github.com/${REPO}/cmd/kern@${VERSION}'"
-  [ "$VERSION" = "latest" ] && VERSION="latest"
   go install "github.com/${REPO}/cmd/kern@${VERSION}"
   go install "github.com/${REPO}/cmd/kern-mcp@${VERSION}"
   # go install places both into the go bin dir; report it.

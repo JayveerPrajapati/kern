@@ -167,6 +167,24 @@ func TestNestedAnchoredPattern(t *testing.T) {
 	}
 }
 
+func TestNegatedCharClass(t *testing.T) {
+	m := &Matcher{rules: mustRules(t, "file[!0-9].log")}
+	if !m.Ignored("fileA.log") {
+		t.Error("file[!0-9].log should ignore fileA.log")
+	}
+	if m.Ignored("file5.log") {
+		t.Error("file[!0-9].log must not ignore file5.log")
+	}
+	// [^...] is git's synonym for [!...] and must behave identically.
+	m2 := &Matcher{rules: mustRules(t, "file[^0-9].log")}
+	if !m2.Ignored("fileB.log") {
+		t.Error("file[^0-9].log should ignore fileB.log")
+	}
+	if m2.Ignored("file7.log") {
+		t.Error("file[^0-9].log must not ignore file7.log")
+	}
+}
+
 func mustRules(t *testing.T, lines ...string) []scopedRule {
 	t.Helper()
 	var out []scopedRule

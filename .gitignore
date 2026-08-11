@@ -31,3 +31,13 @@ index.html
 
 # OS cruft
 .DS_Store
+
+# --- kern generated (agent wiring, machine-specific) ---
+.mcp.json
+opencode.json
+.opencode/
+.claude/
+.cursor/
+.gemini/
+.kiro/
+.kern/

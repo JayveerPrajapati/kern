@@ -173,8 +173,14 @@ func globToRegexp(p string) string {
 				i++
 				continue
 			}
-			// Pass the class through after validating it has a closing ].
-			b.WriteString(p[i : i+close+1])
+			// Glob negation [!...] (and its git synonym [^...]) must become
+			// the regexp class [^...]; otherwise '!' stays a literal member
+			// and the class means the opposite of the pattern.
+			body := p[i+1 : i+close]
+			if strings.HasPrefix(body, "!") || strings.HasPrefix(body, "^") {
+				body = "^" + body[1:]
+			}
+			b.WriteString("[" + body + "]")
 			i += close + 1
 		case '\\':
 			if i+1 < len(p) {

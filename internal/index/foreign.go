@@ -401,7 +401,7 @@ var specs map[string]*langSpec
 
 type stripState struct {
 	inBlock  bool
-	inTriple bool
+	inTriple string // active triple-quote delimiter ("" = not inside one)
 }
 
 type ffile struct {
@@ -485,10 +485,15 @@ func stripLine(ln string, spec *langSpec, st *stripState) string {
 	}
 	if spec.triple {
 		for _, d := range []string{`"""`, `'''`} {
-			if st.inTriple {
+			if st.inTriple != "" {
+				// A triple string opened by the other delimiter must not be
+				// closed by this one (or truncated at it).
+				if st.inTriple != d {
+					continue
+				}
 				if idx := strings.Index(s, d); idx >= 0 {
 					s = s[idx+len(d):]
-					st.inTriple = false
+					st.inTriple = ""
 				} else {
 					return ""
 				}
@@ -498,7 +503,7 @@ func stripLine(ln string, spec *langSpec, st *stripState) string {
 				end := strings.Index(s[start+len(d):], d)
 				if end < 0 {
 					s = s[:start]
-					st.inTriple = true
+					st.inTriple = d
 					break
 				}
 				s = s[:start] + s[start+len(d)+end+len(d):]

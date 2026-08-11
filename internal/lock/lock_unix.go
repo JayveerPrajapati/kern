@@ -88,14 +88,20 @@ func List(root string) ([]Status, error) {
 		}
 		p := filepath.Join(dir(root), e.Name())
 		s := Status{Scope: strings.TrimSuffix(e.Name(), ".lock"), Path: p}
-		s.PID, s.AcquiredAt = readHolder(p)
 		if f, err := os.OpenFile(p, os.O_RDWR, 0); err == nil {
+			s.PID, s.AcquiredAt = readHolder(p)
 			if syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB) != nil {
 				s.Held = true
 			} else {
 				_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
 			}
 			f.Close()
+		}
+		if !s.Held {
+			// The stored PID belongs to the last holder, which may have died.
+			// A free lock has no live holder, so don't report a stale one.
+			s.PID = 0
+			s.AcquiredAt = time.Time{}
 		}
 		out = append(out, s)
 	}

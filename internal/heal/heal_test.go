@@ -82,11 +82,7 @@ func TestSnapshotCopiesTreeSkipsVendor(t *testing.T) {
 func TestFailingFilesExtractsValidPaths(t *testing.T) {
 	root := t.TempDir()
 	_ = os.WriteFile(filepath.Join(root, "broken.go"), []byte("x"), 0o644)
-	// chdir not needed; failingFiles uses cwd, so simulate with a temp cwd
-	old, _ := os.Getwd()
-	_ = os.Chdir(root)
-	defer os.Chdir(old)
-	files := failingFiles("main.go:1:1: expected\n./broken.go:3:14: syntax error\nnonexist.go:5: err")
+	files := failingFiles(root, "main.go:1:1: expected\n./broken.go:3:14: syntax error\nnonexist.go:5: err")
 	if len(files) != 1 || files[0] != "broken.go" {
 		t.Fatalf("expected only broken.go, got %+v", files)
 	}

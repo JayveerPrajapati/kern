@@ -339,7 +339,10 @@ func tokenStatsPanel(s TokenStats) string {
 // neighbourhood. No external dependencies; the data is embedded as JSON and
 // rendered with inline JavaScript.
 func (g GraphResult) GraphHTML() string {
-	data, _ := json.Marshal(g)
+	data, err := json.Marshal(g)
+	if err != nil {
+		data = []byte(fmt.Sprintf(`{"error":%q}`, err.Error()))
+	}
 	data = []byte(strings.ReplaceAll(string(data), "</", "<\\/"))
 	kindColor := map[string]string{
 		"func": "#3b82f6", "method": "#8b5cf6", "struct": "#ec4899",

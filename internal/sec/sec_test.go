@@ -138,7 +138,10 @@ func main() {
 	write("vendor/dep.go", `package dep
 const k = "ghp_abcdefghijklmnopqrstuvwxyz1234567890"
 `)
-	findings := Scan(dir)
+	findings, err := Scan(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(findings) == 0 {
 		t.Fatal("expected finding in app.go")
 	}

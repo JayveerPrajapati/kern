@@ -13,8 +13,10 @@ import (
 // watcher (inotifywait on Linux, fswatch on macOS) when available, which gives
 // near-real-time notification with a short debounce; otherwise it falls back to
 // polling every pollInterval. The callback runs on a background goroutine and
-// must not block for long. Returns ctx.Err() when the context is cancelled.
-func Watch(ctx context.Context, root string, pollInterval time.Duration, onChange func(changes []index.Change, ix *index.Index)) error {
+// must not block for long. onError receives every scan, build, or save failure
+// instead of the watcher silently dropping it. Returns ctx.Err() when the
+// context is cancelled.
+func Watch(ctx context.Context, root string, pollInterval time.Duration, onChange func(changes []index.Change, ix *index.Index), onError func(err error)) error {
 	ch := make(chan struct{}, 1)
 	notify := func() {
 		select {
@@ -52,16 +54,30 @@ func Watch(ctx context.Context, root string, pollInterval time.Duration, onChang
 	)
 	var rebuild func()
 	rebuild = func() {
-		cur := index.FileHashes(root)
+		cur, err := index.FileHashes(root)
+		if err != nil {
+			if onError != nil {
+				onError(err)
+			}
+			return
+		}
 		changes := index.Diff(prev, cur)
 		if len(changes) == 0 {
 			return
 		}
 		ix, err := index.Build(root)
 		if err != nil {
+			if onError != nil {
+				onError(err)
+			}
 			return
 		}
-		_ = ix.Save()
+		if err := ix.Save(); err != nil {
+			if onError != nil {
+				onError(err)
+			}
+			return
+		}
 		prev = cur
 		if onChange != nil {
 			onChange(changes, ix)

@@ -7,6 +7,7 @@ package sec
 import (
 	"bytes"
 	"io/fs"
+	"net"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -93,12 +94,31 @@ func init() {
 	})
 }
 
+// isNonSecretIP reports whether a hit from the IP/IPV6 patterns is an address
+// that should not be treated as a hardcoded secret: loopback, RFC1918/ULA
+// private ranges, link-local, multicast and unspecified addresses are all
+// ubiquitous in code (local dev configs, comments, tests) and not secrets.
+func isNonSecretIP(label string, hit []byte) bool {
+	if label != "IP" && label != "IPV6" {
+		return false
+	}
+	ip := net.ParseIP(string(hit))
+	if ip == nil {
+		return true
+	}
+	return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() ||
+		ip.IsLinkLocalMulticast() || ip.IsMulticast() || ip.IsUnspecified()
+}
+
 // ScanFile runs every rule against one source file. rel is a root-relative
 // path used only for reporting.
 func ScanFile(rel string, src []byte) []Finding {
 	var findings []Finding
 	for _, r := range Rules {
 		for _, idx := range r.RE.FindAllIndex(src, -1) {
+			if isNonSecretIP(r.Label, src[idx[0]:idx[1]]) {
+				continue
+			}
 			line := lineAt(src, idx[0])
 			findings = append(findings, Finding{
 				File:     rel,
@@ -123,12 +143,15 @@ func ScanFile(rel string, src []byte) []Finding {
 }
 
 // Scan walks root (mirroring the index walk: same extension filter and ignored
-// directories) and returns every finding in the tree.
-func Scan(root string) []Finding {
+// directories) and returns every finding in the tree. Test files (*_test.go)
+// are skipped: their fixtures routinely hold fake secrets that are not real
+// findings. Walk errors are returned so an unreadable tree can't silently
+// produce a misleading "clean" result.
+func Scan(root string) ([]Finding, error) {
 	var findings []Finding
-	_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
-			return nil
+			return err
 		}
 		if d.IsDir() {
 			if path != root && index.IgnoredDir(d.Name()) {
@@ -137,12 +160,12 @@ func Scan(root string) []Finding {
 			return nil
 		}
 		rel, rerr := filepath.Rel(root, path)
-		if rerr != nil || !index.QuickExt(rel) {
+		if rerr != nil || !index.QuickExt(rel) || strings.HasSuffix(rel, "_test.go") {
 			return nil
 		}
 		src, serr := os.ReadFile(path)
 		if serr != nil {
-			return nil
+			return serr
 		}
 		findings = append(findings, ScanFile(rel, src)...)
 		return nil
@@ -156,7 +179,7 @@ func Scan(root string) []Finding {
 		}
 		return findings[i].Rule < findings[j].Rule
 	})
-	return findings
+	return findings, err
 }
 
 // FilterBySeverity keeps only findings whose severity is in the allow list.

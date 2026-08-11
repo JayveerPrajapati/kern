@@ -133,6 +133,35 @@ func TestSQLiteEmptyStoreSearch(t *testing.T) {
 	}
 }
 
+func TestFTS5HostileQueries(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	dir := writeTree(t, map[string]string{"main.go": srcMain})
+	ix, err := Build(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := SaveSQLite(dir, ix); err != nil {
+		t.Fatal(err)
+	}
+	// None of these may produce an FTS5 syntax error; punctuation must be
+	// escaped and stray operators neutralised, not passed through raw.
+	for _, q := range []string{"greet AND", "greet(bar)", `greet"x`, "AND greet OR", "NOT", `(greet`, "greet OR bye OR"} {
+		if _, err := FTS5Search(dir, q, 10); err != nil {
+			t.Errorf("FTS5Search(%q) failed: %v", q, err)
+		}
+	}
+	// The documented column-filter and operator syntax must keep working.
+	for _, q := range []string{`file:"main.go"`, "greet OR nonexistent"} {
+		got, err := FTS5Search(dir, q, 10)
+		if err != nil {
+			t.Fatalf("FTS5Search(%q) failed: %v", q, err)
+		}
+		if len(got) == 0 {
+			t.Errorf("FTS5Search(%q) returned nothing", q)
+		}
+	}
+}
+
 func equalStrings(a, b []string) bool {
 	if len(a) != len(b) {
 		return false

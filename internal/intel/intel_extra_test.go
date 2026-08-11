@@ -145,8 +145,11 @@ func TestArchitectureOverview(t *testing.T) {
 
 func TestParseLogCountsPerCommit(t *testing.T) {
 	out := "a.go\nb.go\n\nb.go\nc.go\n\na.go\n"
-	counts := parseLog(out)
+	counts, commits := parseLog(out)
 	if counts["a.go"] != 2 || counts["b.go"] != 2 || counts["c.go"] != 1 {
 		t.Errorf("parseLog miscounted: %v", counts)
+	}
+	if commits != 3 {
+		t.Errorf("parseLog commit count = %d; want 3", commits)
 	}
 }

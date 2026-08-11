@@ -3,6 +3,7 @@ import { resolve } from "node:path"
 import { existsSync } from "node:fs"
 import { writeFile, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
+import { randomBytes } from "node:crypto"
 
 // Resolve the kern binary. Prefer an explicit env var, then the project's
 // bin/ directory, then PATH.
@@ -13,9 +14,17 @@ function kernBin(directory: string): string {
   return "kern"
 }
 
-// Local cache file for text passed through the CLI (avoids arg-length limits).
-function cacheFile(name: string): string {
-  return resolve(tmpdir(), `kern-${name}`)
+// Pass large text to the CLI through a unique temp file (avoids arg-length
+// limits and races between concurrent tool calls) and always clean it up,
+// even when the CLI fails.
+async function withTempFile<T>(name: string, content: string, fn: (file: string) => Promise<T>): Promise<T> {
+  const file = resolve(tmpdir(), `kern-${name}-${process.pid}-${randomBytes(4).toString("hex")}`)
+  try {
+    await writeFile(file, content)
+    return await fn(file)
+  } finally {
+    await rm(file, { force: true })
+  }
 }
 
 const DEFAULT_COMPACT_THRESHOLD = 4000
@@ -26,7 +35,15 @@ const DEFAULT_COMPACT_THRESHOLD = 4000
 // agent can recall its own recent state via kern buddy / kern_memory_list.
 
 const EDIT_TOOLS = new Set(["edit", "write", "patch", "apply_patch", "update_file"])
-const FAIL_RE = /\berror\b|\bfailed\b|\bFAIL\b|cannot\b|not found|panic:/i
+// The FAIL_RE marks command output that indicates a real failure. It only
+// matches error markers at line start (or specific failure phrases) so a
+// successful command that merely mentions "error" isn't mislogged.
+const FAIL_RE = /^\s*(?:error|fatal|panic|failed|cannot)[:;]|panic:|command not found|: No such file|no such file or directory/i
+
+// Rate-limit and dedupe chat.message memory capture so project memory isn't
+// flooded by ordinary conversation (evicting real lessons).
+let lastChatAt = 0
+let lastChatText = ""
 
 function fileArg(args: any): string {
   if (typeof args !== "object" || args === null) return ""
@@ -43,6 +60,20 @@ export default (async ({ directory, $ }) => {
     // Bun's shell escapes each interpolated array element as one argument.
     const out = await $`${bin} ${args}`.quiet()
     return out.stdout.toString()
+  }
+
+  // Some commands (kern sec, kern delete, kern guard check) print their
+  // payload to stdout and then exit non-zero as a secondary signal. Surface
+  // the payload instead of treating the exit code as a hard failure.
+  async function runPayload(args: string[]): Promise<string> {
+    try {
+      return await run(args)
+    } catch (err) {
+      const e = err as { stdout?: Buffer | Uint8Array }
+      const out = e.stdout ? Buffer.from(e.stdout).toString() : ""
+      if (out.trim() !== "") return out
+      throw err
+    }
   }
 
   // Best-effort: a memory-log failure must never break the host tool call.
@@ -71,15 +102,13 @@ export default (async ({ directory, $ }) => {
         async execute(args, context) {
           const flags: string[] = ["optimize"]
           if (args.attached_log) {
-            const file = cacheFile("prompt.attached.log")
-            await writeFile(file, args.attached_log)
-            flags.push("--attach", file)
+            return withTempFile("prompt.attached.log", args.attached_log, (file) =>
+              run([...flags, "--attach", file, args.prompt])
+            )
           }
           if (args.session) flags.push("--session", args.session)
           if (args.model) flags.push("--model", args.model)
-          const out = await run([...flags, args.prompt])
-          if (args.attached_log) await rm(cacheFile("prompt.attached.log"), { force: true })
-          return out
+          return run([...flags, args.prompt])
         },
       }),
       kern_compact_file: tool({
@@ -113,15 +142,10 @@ export default (async ({ directory, $ }) => {
         },
         async execute(args) {
           const flags: string[] = ["pack"]
-          if (args.max_tokens) flags.push("--max-tokens", String(args.max_tokens))
+          flags.push("--max-tokens", String(args.max_tokens ?? 8000))
           if (args.no_instructions) flags.push("--no-instructions")
-          const root = args.root ?? "."
-          if (args.out) {
-            flags.push("--out", args.out)
-          } else {
-            flags.push("--max-tokens", String(args.max_tokens ?? 8000))
-          }
-          flags.push(root)
+          if (args.out) flags.push("--out", args.out)
+          flags.push(args.root ?? ".")
           return run(flags)
         },
       }),
@@ -143,11 +167,7 @@ export default (async ({ directory, $ }) => {
           "Strip noise from log output: keeps errors, warnings, stack traces and build failures, removes timestamps and chatter. Use before pasting logs into context.",
         args: { log: tool.schema.string() },
         async execute(args) {
-          const file = cacheFile("log.input.log")
-          await writeFile(file, args.log)
-          const out = await run(["log", file])
-          await rm(file, { force: true })
-          return out
+          return withTempFile("log.input.log", args.log, (file) => run(["log", file]))
         },
       }),
       kern_optimize_output: tool({
@@ -155,11 +175,7 @@ export default (async ({ directory, $ }) => {
           "Compress an LLM's response (assistant output) by stripping filler, pleasantries and hedge language while preserving code blocks, lists, errors and technical content. Deterministic and local, no LLM involved. Use on verbose model replies before they are stored or echoed back into context.",
         args: { text: tool.schema.string() },
         async execute(args) {
-          const file = cacheFile("output.text")
-          await writeFile(file, args.text)
-          const out = await run(["terse", file])
-          await rm(file, { force: true })
-          return out
+          return withTempFile("output.text", args.text, (file) => run(["terse", file]))
         },
       }),
       kern_stats: tool({
@@ -189,10 +205,10 @@ export default (async ({ directory, $ }) => {
         },
         async execute(args) {
           const flags: string[] = ["semcache"]
-          const action = args.action ?? "stats"
+          const action = args.action === "similarity" ? "sim" : args.action ?? "stats"
           flags.push(action)
           if (args.namespace) flags.push(args.namespace)
-          if (action === "similarity" && args.a && args.b) {
+          if (action === "sim" && args.a && args.b) {
             flags.push(args.a, args.b)
           }
           return run(flags)
@@ -357,7 +373,7 @@ export default (async ({ directory, $ }) => {
           limit: tool.schema.number().optional(),
         },
         async execute(args) {
-          const flags: string[] = ["hubs"]
+          const flags: string[] = ["bridges"]
           if (args.root) flags.push(args.root)
           if (args.limit !== undefined) flags.push("--limit", String(args.limit))
           return run(flags)
@@ -556,14 +572,10 @@ export default (async ({ directory, $ }) => {
           limit: tool.schema.number().optional(),
         },
         async execute(args) {
-          const file = cacheFile("trace.input.txt")
-          await writeFile(file, args.trace)
-          const flags: string[] = ["trace", file]
+          const flags: string[] = ["trace"]
           if (args.limit) flags.push("--limit", String(args.limit))
           if (args.root) flags.push(args.root)
-          const out = await run(flags)
-          await rm(file, { force: true })
-          return out
+          return withTempFile("trace.input.txt", args.trace, (file) => run([...flags, file]))
         },
       }),
       kern_lock: tool({
@@ -616,7 +628,7 @@ export default (async ({ directory, $ }) => {
           if (args.root) flags.push(args.root)
           if (args.file) flags.push("--file", args.file)
           if (args.range) flags.push("--range", args.range)
-          return run(flags)
+          return runPayload(flags)
         },
       }),
       kern_usage_guide: tool({
@@ -668,13 +680,9 @@ export default (async ({ directory, $ }) => {
           mask_names: tool.schema.string().optional(),
         },
         async execute(args) {
-          const file = cacheFile("pii.input.txt")
-          await writeFile(file, args.text)
-          const flags: string[] = ["mask", file]
+          const flags: string[] = ["mask"]
           if (args.mask_names) flags.push("--names", args.mask_names)
-          const out = await run(flags)
-          await rm(file, { force: true })
-          return out
+          return withTempFile("pii.input.txt", args.text, (file) => run([...flags, file]))
         },
       }),
       kern_security: tool({
@@ -692,7 +700,7 @@ export default (async ({ directory, $ }) => {
           if (args.severity) flags.push("--severity", args.severity)
           if (args.max) flags.push("--max", String(args.max))
           if (args.format === "json") flags.push("--json")
-          return run(flags)
+          return runPayload(flags)
         },
       }),
       kern_safe_delete: tool({
@@ -707,7 +715,7 @@ export default (async ({ directory, $ }) => {
           const flags: string[] = ["delete", args.symbol]
           if (args.root) flags.push(args.root)
           if (args.format === "json") flags.push("--json")
-          return run(flags)
+          return runPayload(flags)
         },
       }),
       kern_rename: tool({
@@ -730,29 +738,27 @@ export default (async ({ directory, $ }) => {
       }),
       kern_exec: tool({
         description:
-          "Run code in an isolated local runtime and return ONLY stdout (Think in Code). Language is selected by lang= or a shebang line; runtimes resolve from PATH (python3, node, go, bash, perl, ...). Runs in a fresh temp dir with a hard timeout (default 10s) and a stdout byte cap (default 16KiB); stderr is only surfaced on failure. Use to compute exact answers (math, data munging, JSON transforms) without polluting context. V1 does NOT block network egress — do not feed untrusted code.",
+          "Run code in an isolated local runtime and return ONLY stdout (Think in Code). Language is selected by lang= or a shebang line; runtimes resolve from PATH (python3, node, go, bash, perl, ...). Runs in a fresh temp dir with a hard timeout (default 10s) and a stdout byte cap (default 16KiB); HOME/XDG point into the sandbox and secrets are stripped. When unprivileged user namespaces are available the script also runs in a private network namespace (network egress blocked); otherwise it degrades to env isolation. stderr is only surfaced on failure. Use to compute exact answers (math, data munging, JSON transforms) without polluting context.",
         args: {
           code: tool.schema.string(),
           lang: tool.schema.string().optional(),
           timeout: tool.schema.number().optional(),
           max: tool.schema.number().optional(),
           stdin: tool.schema.string().optional(),
+          no_isolate: tool.schema.string().optional(),
         },
         async execute(args) {
-          const file = cacheFile("exec.code")
-          await writeFile(file, args.code)
-          const flags: string[] = ["exec", file, "--lang", args.lang ?? "python3"]
+          const flags: string[] = ["exec", "--lang", args.lang ?? "python3"]
           if (args.timeout) flags.push("--timeout", String(args.timeout))
           if (args.max) flags.push("--max", String(args.max))
-          if (args.stdin) {
-            const stdinFile = cacheFile("exec.stdin")
-            await writeFile(stdinFile, args.stdin)
-            flags.push("--stdin", stdinFile)
-          }
-          const out = await run(flags)
-          await rm(file, { force: true })
-          if (args.stdin) await rm(cacheFile("exec.stdin"), { force: true })
-          return out
+          return withTempFile("exec.code", args.code, (file) => {
+            if (args.stdin) {
+              return withTempFile("exec.stdin", args.stdin, (stdinFile) =>
+                run([...flags, file, "--stdin", stdinFile])
+              )
+            }
+            return run([...flags, file])
+          })
         },
       }),
       kern_doc_search: tool({
@@ -837,15 +843,11 @@ export default (async ({ directory, $ }) => {
           max_tokens: tool.schema.number().optional(),
         },
         async execute(args) {
-          const file = cacheFile("swap-input.txt")
-          await writeFile(file, args.text)
-          const flags: string[] = ["swap", file]
+          const flags: string[] = ["swap"]
           if (args.mode) flags.push("--mode", args.mode)
           if (args.max_tokens) flags.push("--max", String(args.max_tokens))
           if (args.root) flags.push(args.root)
-          const out = await run(flags)
-          await rm(file, { force: true })
-          return out
+          return withTempFile("swap-input.txt", args.text, (file) => run([...flags, file]))
         },
       }),
       kern_diff_files: tool({
@@ -903,14 +905,11 @@ export default (async ({ directory, $ }) => {
           schema: tool.schema.string(),
         },
         async execute(args) {
-          const dataFile = cacheFile("schema-data.json")
-          const schemaFile = cacheFile("schema-def.json")
-          await writeFile(dataFile, args.data)
-          await writeFile(schemaFile, args.schema)
-          const out = await run(["schema", dataFile, "--schema", schemaFile])
-          await rm(dataFile, { force: true })
-          await rm(schemaFile, { force: true })
-          return out
+          return withTempFile("schema-data.json", args.data, (dataFile) =>
+            withTempFile("schema-def.json", args.schema, (schemaFile) =>
+              run(["schema", dataFile, "--schema", schemaFile])
+            )
+          )
         },
       }),
       kern_verify_output: tool({
@@ -921,13 +920,9 @@ export default (async ({ directory, $ }) => {
           root: tool.schema.string().optional(),
         },
         async execute(args) {
-          const file = cacheFile("verify-input.txt")
-          await writeFile(file, args.text)
-          const flags: string[] = ["verify", file]
+          const flags: string[] = ["verify"]
           if (args.root) flags.push(args.root)
-          const out = await run(flags)
-          await rm(file, { force: true })
-          return out
+          return withTempFile("verify-input.txt", args.text, (file) => run([...flags, file]))
         },
       }),
       kern_entry_points: tool({
@@ -1002,10 +997,7 @@ export default (async ({ directory, $ }) => {
       }
       if (text.length < DEFAULT_COMPACT_THRESHOLD) return
       try {
-        const file = cacheFile("tool-output.txt")
-        await writeFile(file, text)
-        const compressed = await run(["log", file])
-        await rm(file, { force: true })
+        const compressed = await withTempFile("tool-output.txt", text, (file) => run(["log", file]))
         if (!compressed || compressed.trim() === "") return
         output.output = `[kern] compressed ${text.length} -> ${compressed.length} chars\n${compressed}`
       } catch {
@@ -1014,7 +1006,9 @@ export default (async ({ directory, $ }) => {
     },
 
     // P0-2: capture user decisions at low volume so the session's direction
-    // survives compaction. Only brief, substantive prompts are recorded.
+    // survives compaction. Only brief, substantive prompts are recorded;
+    // questions, tiny messages, repeated prompts and rapid-fire chatter are
+    // skipped so project memory isn't flooded (that would evict real lessons).
     "chat.message": async (_input, output) => {
       try {
         const parts: any[] = (output.parts as any[]) ?? []
@@ -1024,9 +1018,14 @@ export default (async ({ directory, $ }) => {
           else if (typeof p.content === "string") text += p.content
         }
         text = text.trim()
-        if (!text || text.length > 600) return
+        if (!text || text.length < 16 || text.length > 600) return
+        if (text.endsWith("?")) return
         const lower = text.toLowerCase()
         if (/\b(remember|forget)\b|^\/(remember|forget)\b/.test(lower)) return
+        const now = Date.now()
+        if (text === lastChatText || now - lastChatAt < 60_000) return
+        lastChatAt = now
+        lastChatText = text
         await remember(`User: ${text}`, 200)
       } catch {
         /* swallow */

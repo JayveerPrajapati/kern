@@ -62,6 +62,41 @@ func mustIndex(t *testing.T, root string) *index.Index {
 	return ix
 }
 
+func TestPackageDirOfPrefersLongestMatch(t *testing.T) {
+	root := t.TempDir()
+	files := map[string]string{
+		"go.mod":        "module example.com/demo\n\ngo 1.22\n",
+		"pkg/a.go":      "package pkg\n",
+		"pkg/util/b.go": "package util\n",
+	}
+	for rel, body := range files {
+		p := filepath.Join(root, rel)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ix := mustIndex(t, root)
+
+	// A deeper dir must win over a shallower one that also suffix-matches.
+	if k := packageDirOf(ix, "example.com/demo/pkg/util"); k != "pkg/util" {
+		t.Errorf("expected pkg/util, got %q", k)
+	}
+	if k := packageDirOf(ix, "example.com/demo/pkg"); k != "pkg" {
+		t.Errorf("expected pkg, got %q", k)
+	}
+	// An unrelated module that only shares the "pkg" tail still resolves
+	// deterministically to the longest known dir it matches.
+	if k := packageDirOf(ix, "other.com/thing/pkg/util"); k != "pkg/util" {
+		t.Errorf("expected pkg/util, got %q", k)
+	}
+	if k := packageDirOf(ix, "other.com/thing/pkg"); k != "pkg" {
+		t.Errorf("expected pkg, got %q", k)
+	}
+}
+
 func TestRenameExportedSelectorAcrossPackages(t *testing.T) {
 	root := fixture(t)
 	ix := mustIndex(t, root)

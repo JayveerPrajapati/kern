@@ -7,6 +7,7 @@
 package setup
 
 import (
+	"bytes"
 	"embed"
 	"encoding/json"
 	"errors"
@@ -43,6 +44,21 @@ func Bin() string {
 		return abs
 	}
 	return "kern-mcp"
+}
+
+// CLIBin returns the absolute path to the kern CLI binary (the sibling of
+// kern-mcp), used by agent hook commands. Falls back to the bare "kern"
+// command when the sibling is not found.
+func CLIBin() string {
+	exe, err := os.Executable()
+	if err != nil {
+		return "kern"
+	}
+	abs := filepath.Join(filepath.Dir(exe), "kern")
+	if _, err := os.Stat(abs); err == nil {
+		return abs
+	}
+	return "kern"
 }
 
 // adapter describes a JSON-config agent: where its config lives, which key
@@ -126,6 +142,10 @@ func Check(root string) []Status {
 	}
 	out = append(out, claudeStatus())
 	out = append(out, codexStatus())
+	out = append(out, fileStatus(filepath.Join(root, ".claude", "settings.json"), "claude hooks"))
+	out = append(out, fileStatus(filepath.Join(root, ".gemini", "settings.json"), "gemini hooks"))
+	out = append(out, fileStatus(filepath.Join(root, ".cursor", "rules", "kern-hooks.mdc"), "cursor rule"))
+	out = append(out, fileStatus(filepath.Join(root, ".gitignore"), "gitignore (generated block)"))
 	return out
 }
 
@@ -155,6 +175,7 @@ func Wire(root string, agents []string) []Status {
 	}
 	if enabled("claude") {
 		out = append(out, wireClaude(bin))
+		out = append(out, wireClaudeHooks(root, CLIBin()))
 	}
 	if enabled("codex") {
 		out = append(out, wireCodex(bin))
@@ -164,6 +185,13 @@ func Wire(root string, agents []string) []Status {
 			out = append(out, wireAdapter(a, root, bin))
 		}
 	}
+	if enabled("gemini") {
+		out = append(out, wireGeminiHooks(root, CLIBin()))
+	}
+	if enabled("cursor") {
+		out = append(out, wireCursorRules(root))
+	}
+	out = append(out, gitignoreGenerated(root))
 	return out
 }
 
@@ -224,24 +252,54 @@ func wirePlugin(root string) Status {
 	if err != nil {
 		return Status{Agent: "opencode-plugin", Path: path, Note: err.Error()}
 	}
+	// Compare-and-write so re-running setup never torches user edits.
+	if cur, rerr := os.ReadFile(path); rerr == nil {
+		if bytes.Equal(cur, src) {
+			return Status{Agent: "opencode-plugin", Installed: true, Path: path, Note: "plugin already current"}
+		}
+		return Status{Agent: "opencode-plugin", Path: path, Note: "plugin is customized — left untouched"}
+	}
 	if err := os.WriteFile(path, src, 0o644); err != nil {
 		return Status{Agent: "opencode-plugin", Path: path, Note: err.Error()}
 	}
 	return Status{Agent: "opencode-plugin", Installed: true, Path: path, Note: "plugin installed"}
 }
 
+// hostRuleFiles are the per-agent rule files that peer agents read directly
+// (Claude Code: CLAUDE.md, Gemini/CodeBuddy: GEMINI.md). AGENTS.md is the
+// universal source; the same single-source block is instantiated into these
+// host files so every agent sees the rules, but only when the file already
+// exists — setup never creates new rule files unprompted.
+var hostRuleFiles = []string{"CLAUDE.md", "GEMINI.md"}
+
 func wireAgentRules(root string) Status {
-	path := filepath.Join(root, "AGENTS.md")
+	status := wireRulesFile(root, "AGENTS.md")
+	// Same content, per host. Errors here are informational: the universal
+	// AGENTS.md is the primary delivery mechanism.
+	for _, name := range hostRuleFiles {
+		path := filepath.Join(root, name)
+		if _, err := os.Stat(path); err != nil {
+			continue
+		}
+		wireRulesFile(root, name)
+	}
+	return status
+}
+
+// wireRulesFile appends the embedded kern rules block to a single rule file,
+// idempotently (never duplicates) and never overwriting existing content.
+func wireRulesFile(root, name string) Status {
+	path := filepath.Join(root, name)
 	content := ""
 	if b, err := os.ReadFile(path); err == nil {
 		content = string(b)
 	}
 	if strings.Contains(content, "kern usage rules") {
-		return Status{Agent: "AGENTS.md", Installed: true, Path: path, Note: "rules already present"}
+		return Status{Agent: name, Installed: true, Path: path, Note: "rules already present"}
 	}
 	rules, err := rulesFS.ReadFile("assets/AGENTS.md")
 	if err != nil {
-		return Status{Agent: "AGENTS.md", Path: path, Note: err.Error()}
+		return Status{Agent: name, Path: path, Note: err.Error()}
 	}
 	var joined string
 	if content == "" {
@@ -250,9 +308,9 @@ func wireAgentRules(root string) Status {
 		joined = strings.TrimRight(content, "\n") + "\n\n" + string(rules)
 	}
 	if err := os.WriteFile(path, []byte(joined), 0o644); err != nil {
-		return Status{Agent: "AGENTS.md", Path: path, Note: err.Error()}
+		return Status{Agent: name, Path: path, Note: err.Error()}
 	}
-	return Status{Agent: "AGENTS.md", Installed: true, Path: path, Note: "rules appended"}
+	return Status{Agent: name, Installed: true, Path: path, Note: "rules appended"}
 }
 
 func wireClaude(bin string) Status {
@@ -307,8 +365,226 @@ func codexStatus() Status {
 	return Status{Agent: "codex", Path: path, Note: "codex config.toml has no kern MCP"}
 }
 
-// mergeJSON reads a JSON file, inserts entry under key unless "kern" already
-// exists there, and writes it back. Missing or empty files are created.
+// hookCommand builds the shell command for a kern hook event. Agent hook
+// shells expand the per-agent project-dir env var ($CLAUDE_PROJECT_DIR /
+// $GEMINI_PROJECT_DIR), keeping the command free of machine-specific paths.
+func hookCommand(bin, sub string) string {
+	return bin + ` hook ` + sub + ` "$CLAUDE_PROJECT_DIR"`
+}
+
+// wireClaudeHooks registers kern's PostToolUse and UserPromptSubmit hooks in
+// .claude/settings.json. The PostToolUse hook compresses oversized Bash/Read/
+// Grep results and records edits + failures into project memory; the
+// UserPromptSubmit hook captures substantive user prompts. Existing hooks are
+// preserved; the kern group is merged in only when absent.
+func wireClaudeHooks(root, bin string) Status {
+	path := filepath.Join(root, ".claude", "settings.json")
+	groups := map[string]any{
+		"PostToolUse": []any{
+			map[string]any{
+				"matcher": "Edit|Write|Bash|Read|Grep",
+				"hooks": []any{
+					map[string]any{"type": "command", "command": hookCommand(bin, "claude-post")},
+				},
+			},
+		},
+		"UserPromptSubmit": []any{
+			map[string]any{
+				"hooks": []any{
+					map[string]any{"type": "command", "command": hookCommand(bin, "claude-prompt")},
+				},
+			},
+		},
+	}
+	if err := mergeHookGroups(path, groups); err != nil {
+		return Status{Agent: "claude-hooks", Path: path, Note: err.Error()}
+	}
+	return Status{Agent: "claude-hooks", Installed: true, Path: path, Note: "claude PostToolUse/UserPromptSubmit hooks registered"}
+}
+
+// wireGeminiHooks registers kern's AfterTool and BeforeAgent hooks in
+// .gemini/settings.json (Gemini names AfterTool, not PostToolUse; BeforeAgent,
+// not UserPromptSubmit). The AfterTool hook compresses oversized shell/read/
+// grep results (via exit-2 stderr substitution) and records edits + failures;
+// BeforeAgent captures substantive user prompts. Existing hooks and the
+// mcpServers key are preserved.
+func wireGeminiHooks(root, bin string) Status {
+	path := filepath.Join(root, ".gemini", "settings.json")
+	groups := map[string]any{
+		"AfterTool": []any{
+			map[string]any{
+				"matcher": "_shell_|read_file|grep|glob",
+				"hooks": []any{
+					map[string]any{
+						"type":        "command",
+						"command":     bin + ` hook gemini-after "$GEMINI_PROJECT_DIR"`,
+						"name":        "kern-after-tool",
+						"description": "kern: compress oversized tool output, record edits and failures",
+					},
+				},
+			},
+		},
+		"BeforeAgent": []any{
+			map[string]any{
+				"hooks": []any{
+					map[string]any{
+						"type":        "command",
+						"command":     bin + ` hook gemini-prompt "$GEMINI_PROJECT_DIR"`,
+						"name":        "kern-prompt-capture",
+						"description": "kern: capture substantive user prompts into project memory",
+					},
+				},
+			},
+		},
+	}
+	if err := mergeHookGroups(path, groups); err != nil {
+		return Status{Agent: "gemini-hooks", Path: path, Note: err.Error()}
+	}
+	return Status{Agent: "gemini-hooks", Installed: true, Path: path, Note: "gemini AfterTool/BeforeAgent hooks registered"}
+}
+
+// mergeHookGroups merges hook event groups into a settings JSON file (Claude
+// Code and Gemini CLI share the same shape: settings.hooks.<event>[]), creating
+// the file when absent and always preserving unrelated keys (mcpServers, other
+// hooks). A group already containing a "kern hook" command is left untouched,
+// so re-running setup never duplicates hooks.
+func mergeHookGroups(path string, groups map[string]any) error {
+	var m map[string]any
+	data, err := os.ReadFile(path)
+	switch {
+	case err == nil:
+		if err := json.Unmarshal(data, &m); err != nil {
+			return fmt.Errorf("%s is not valid JSON: %w", path, err)
+		}
+	case errors.Is(err, os.ErrNotExist):
+		m = map[string]any{}
+	default:
+		return err
+	}
+	if m == nil {
+		m = map[string]any{}
+	}
+	hooks, _ := m["hooks"].(map[string]any)
+	if hooks == nil {
+		hooks = map[string]any{}
+	}
+	changed := false
+	for event, group := range groups {
+		existing, _ := hooks[event].([]any)
+		if hasKernHook(existing) {
+			continue
+		}
+		// groups values are the matcher-group arrays themselves; append each
+		// group so the JSON shape stays hooks.<event>[] — not doubly nested.
+		for _, g := range group.([]any) {
+			existing = append(existing, g)
+		}
+		hooks[event] = existing
+		changed = true
+	}
+	if !changed {
+		return nil
+	}
+	m["hooks"] = hooks
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	data, err = json.MarshalIndent(m, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, append(data, '\n'), 0o644)
+}
+
+// hasKernHook reports whether any group in an event's hook groups already
+// contains a kern hook command.
+func hasKernHook(groups []any) bool {
+	for _, g := range groups {
+		gm, _ := g.(map[string]any)
+		hs, _ := gm["hooks"].([]any)
+		for _, h := range hs {
+			hm, _ := h.(map[string]any)
+			if cmd, _ := hm["command"].(string); strings.Contains(cmd, " hook ") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// wireCursorRules writes an instruction rule for Cursor. Cursor's rule events
+// cannot execute commands, so the rule tells the model to use kern's MCP tools
+// (compression + memory) — the only interception Cursor's platform supports.
+func wireCursorRules(root string) Status {
+	path := filepath.Join(root, ".cursor", "rules", "kern-hooks.mdc")
+	if b, err := os.ReadFile(path); err == nil && strings.Contains(string(b), "kern-hooks: generated by kern setup") {
+		return Status{Agent: "cursor-rules", Installed: true, Path: path, Note: "cursor rule already present"}
+	}
+	content := `---
+description: Use kern to compress large outputs and keep session memory
+globs:
+alwaysApply: false
+---
+<!-- kern-hooks: generated by kern setup; remove this marker to stop managing the file -->
+
+- When a tool output is very large (roughly more than 4000 characters), do not
+  paste it raw into context. Run ` + "`kern_optimize_log`" + ` (or ` + "`kern_context_budget`" + `) on it and
+  work from the compressed summary.
+- After editing files, record what changed with ` + "`kern_memory_add`" + ` (e.g. "Edited <path>").
+- When a command fails, record the failure line with ` + "`kern_memory_add`" + ` so a
+  compacted or fresh session can recover the state.
+`
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return Status{Agent: "cursor-rules", Path: path, Note: err.Error()}
+	}
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		return Status{Agent: "cursor-rules", Path: path, Note: err.Error()}
+	}
+	return Status{Agent: "cursor-rules", Installed: true, Path: path, Note: "cursor kern rule written"}
+}
+
+// gitignoreMarker identifies the block of generated entries this package owns.
+const gitignoreMarker = "# --- kern generated (agent wiring, machine-specific) ---"
+
+// gitignoreGenerated appends the setup-generated project files to .gitignore.
+// The MCP/hook configs carry absolute binary paths, so they must never be
+// committed; uncommitted copies would leak the machine layout and stale paths.
+// Idempotent: the block is added once, and only when absent.
+func gitignoreGenerated(root string) Status {
+	path := filepath.Join(root, ".gitignore")
+	data, err := os.ReadFile(path)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return Status{Agent: "gitignore", Path: path, Note: err.Error()}
+	}
+	if strings.Contains(string(data), gitignoreMarker) {
+		return Status{Agent: "gitignore", Installed: true, Path: path, Note: "generated entries already gitignored"}
+	}
+	block := "\n" + gitignoreMarker + `
+# Re-run ` + "`kern setup`" + ` to refresh. Unignore a line to commit shared config.
+.mcp.json
+opencode.json
+.opencode/
+.claude/
+.cursor/
+.gemini/
+.kiro/
+.kern/
+`
+	out := strings.TrimRight(string(data), "\n")
+	if out != "" {
+		out += "\n"
+	}
+	out += block
+	if err := os.WriteFile(path, []byte(out), 0o644); err != nil {
+		return Status{Agent: "gitignore", Path: path, Note: err.Error()}
+	}
+	return Status{Agent: "gitignore", Installed: true, Path: path, Note: "generated entries added to .gitignore"}
+}
+
+// mergeJSON reads a JSON file, inserts entry under key, and writes it back.
+// A pre-existing "kern" entry is repaired (replaced) when it differs from the
+// current entry — e.g. the binary path changed — instead of being left stale,
+// and the file is not rewritten when nothing changed.
 func mergeJSON(path, key string, entry map[string]any) error {
 	var m map[string]any
 	data, err := os.ReadFile(path)
@@ -329,9 +605,11 @@ func mergeJSON(path, key string, entry map[string]any) error {
 	if existing == nil {
 		existing = map[string]any{}
 	}
-	if _, ok := existing["kern"]; !ok {
-		existing["kern"] = entry
+	cur, _ := existing["kern"].(map[string]any)
+	if mapsEqual(cur, entry) {
+		return nil
 	}
+	existing["kern"] = entry
 	m[key] = existing
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
@@ -341,6 +619,14 @@ func mergeJSON(path, key string, entry map[string]any) error {
 		return err
 	}
 	return os.WriteFile(path, append(data, '\n'), 0o644)
+}
+
+// mapsEqual reports whether two JSON-encodable maps are semantically equal
+// (marshal sorts keys, so byte equality is order-independent).
+func mapsEqual(a, b map[string]any) bool {
+	aj, aerr := json.Marshal(a)
+	bj, berr := json.Marshal(b)
+	return aerr == nil && berr == nil && string(aj) == string(bj)
 }
 
 func fileStatus(path, label string) Status {

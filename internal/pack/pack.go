@@ -325,9 +325,19 @@ func (b *Bundle) tree() string {
 	var out strings.Builder
 	fmt.Fprintf(&out, "%s/\n", filepath.Base(b.Root))
 	for _, e := range entries {
+		// Render the basename at each depth: the indentation carries the
+		// hierarchy, so printing the full path again would be a list, not a
+		// tree.
+		label := strings.TrimSuffix(e.path, "/")
+		if i := strings.LastIndexByte(label, '/'); i >= 0 {
+			label = label[i+1:]
+		}
+		if strings.HasSuffix(e.path, "/") {
+			label += "/"
+		}
 		out.WriteString(strings.Repeat("  ", e.depth))
 		out.WriteString("├── ")
-		out.WriteString(e.path)
+		out.WriteString(label)
 		if strings.HasSuffix(e.path, "/") {
 			out.WriteString("\n")
 		} else {

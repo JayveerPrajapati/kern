@@ -293,7 +293,7 @@ func TestChangedFilesAndFilesForRange(t *testing.T) {
 }
 
 func TestParsePorcelain(t *testing.T) {
-	out := " M app.go\n?? new.go\n D old.go\n"
+	out := " M app.go\x00?? new.go\x00 D old.go\x00"
 	files := parsePorcelain(out)
 	if len(files) != 3 {
 		t.Fatalf("expected 3 files, got %d: %v", len(files), files)

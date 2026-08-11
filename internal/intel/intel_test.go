@@ -218,6 +218,43 @@ func TestFlowsFromEntryPoints(t *testing.T) {
 	}
 }
 
+func TestFlowsCycleTerminates(t *testing.T) {
+	// Mutual recursion forms a cycle: main -> A -> B -> A -> ...
+	src := `package main
+
+func main() {
+	A()
+}
+
+func A() {
+	B()
+}
+
+func B() {
+	A()
+}
+`
+	dir := writeTree(t, map[string]string{"main.go": src})
+	ix, err := index.Build(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	flows := Flows(ix, 10, 100)
+	if len(flows) == 0 {
+		t.Fatal("expected at least one flow")
+	}
+	// The cycle must be broken: no symbol may repeat within a reported path.
+	for _, f := range flows {
+		seen := map[string]bool{}
+		for _, n := range f.Path {
+			if seen[n] {
+				t.Errorf("cycle not broken in path %v", f.Path)
+			}
+			seen[n] = true
+		}
+	}
+}
+
 func TestCommunitiesCluster(t *testing.T) {
 	dir := writeTree(t, map[string]string{
 		"lib/lib.go":       srcLib,

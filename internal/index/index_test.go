@@ -86,6 +86,34 @@ func TestBuildAndSearch(t *testing.T) {
 	}
 }
 
+func TestCallersSameNameFuncAndMethod(t *testing.T) {
+	src := `package main
+
+type Server struct{}
+
+func (s Server) Start() {}
+
+func Start() {
+	s := Server{}
+	s.Start()
+}
+`
+	dir := writeTree(t, map[string]string{"main.go": src})
+	ix, err := Build(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A bare function Start calling method Server.Start must keep the edge
+	// under the method's full name even though simple == caller.
+	if callers := ix.CallersOf("Server.Start"); !contains(callers, "Start") {
+		t.Errorf("expected Start to call Server.Start, got %v", callers)
+	}
+	// And it must never forge a self-caller edge on the bare name.
+	if callers := ix.CallersOf("Start"); contains(callers, "Start") {
+		t.Errorf("Start must not be its own caller, got %v", callers)
+	}
+}
+
 func TestGoInheritanceEdges(t *testing.T) {
 	src := `package main
 
@@ -258,8 +286,8 @@ func TestStaleGate(t *testing.T) {
 	}
 
 	// The stat gate must match the content manifest count exactly.
-	if maxMtime, count := indexableMaxMtime(dir); count != len(ix.FileHashes) || maxMtime != ix.MaxMtime {
-		t.Fatalf("gate mismatch: count %d vs %d, mtime %d vs %d", count, len(ix.FileHashes), maxMtime, ix.MaxMtime)
+	if maxMtime, count, err := indexableMaxMtime(dir); err != nil || count != len(ix.FileHashes) || maxMtime != ix.MaxMtime {
+		t.Fatalf("gate mismatch: count %d vs %d, mtime %d vs %d (err %v)", count, len(ix.FileHashes), maxMtime, ix.MaxMtime, err)
 	}
 
 	// Corrupt the manifest hash: the gate must short-circuit before the hash

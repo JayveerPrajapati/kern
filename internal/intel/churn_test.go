@@ -111,7 +111,7 @@ func TestRenderChurn(t *testing.T) {
 
 func TestParseLog(t *testing.T) {
 	out := "a.go\nb.go\n\na.go\nb.go\nb.go\n\na.go\n"
-	counts := parseLog(out)
+	counts, commits := parseLog(out)
 	want := map[string]int{"a.go": 3, "b.go": 2}
 	if len(counts) != len(want) {
 		t.Fatalf("parseLog = %v; want %v", counts, want)
@@ -121,10 +121,20 @@ func TestParseLog(t *testing.T) {
 			t.Errorf("parseLog[%q] = %d; want %d", f, counts[f], n)
 		}
 	}
+	if commits != 3 {
+		t.Errorf("parseLog commit count = %d; want 3 (three non-empty blocks)", commits)
+	}
 	// Same file listed twice in one commit counts once.
-	once := parseLog("a.go\na.go\n")
+	once, one := parseLog("a.go\na.go\n")
 	if once["a.go"] != 1 {
 		t.Errorf("duplicate in same commit counted wrong: %d", once["a.go"])
+	}
+	if one != 1 {
+		t.Errorf("parseLog commit count for a single block = %d; want 1", one)
+	}
+	// No trailing blank line still counts as one commit.
+	if _, n := parseLog("a.go\nb.go\n"); n != 1 {
+		t.Errorf("parseLog commit count without trailing blank = %d; want 1", n)
 	}
 }
 

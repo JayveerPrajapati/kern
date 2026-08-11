@@ -151,7 +151,7 @@ func TestWatchPollFallback(t *testing.T) {
 			default:
 				close(done)
 			}
-		})
+		}, nil)
 	}()
 	select {
 	case <-done:
@@ -184,7 +184,7 @@ func TestWatchDetectsModification(t *testing.T) {
 			got = append(got, string(c.Kind)+":"+c.File)
 		}
 		mu.Unlock()
-	})
+	}, nil)
 
 	time.Sleep(300 * time.Millisecond)
 	if err := os.WriteFile(path, []byte("package main\n\nfunc hello() {}\nfunc bye() {}\n"), 0o644); err != nil {

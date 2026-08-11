@@ -4,6 +4,7 @@ package optimize
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -116,7 +117,30 @@ func Prompt(prompt string, attachedLog string, opts Options) (Result, error) {
 		return Result{}, errors.New("nothing to optimize")
 	}
 	if opts.Cache {
-		key := "queries/" + cache.Hash([]byte(modelOrDefault(opts.Model)+"\x00"+prompt+"\x00"+attachedLog))
+		// The key covers every option that can change the result: model, LLM
+		// choice, FewShot/Root (memory context), and Mask/MaskNames
+		// (placeholder remapping). Two calls differing in any of them must not
+		// share a cached entry.
+		kb, _ := json.Marshal(struct {
+			Model     string
+			LLM       string
+			FewShot   bool
+			Root      string
+			Mask      bool
+			MaskNames []string
+			Prompt    string
+			Attached  string
+		}{
+			Model:     modelOrDefault(opts.Model),
+			LLM:       opts.LLM,
+			FewShot:   opts.FewShot,
+			Root:      opts.Root,
+			Mask:      opts.Mask,
+			MaskNames: opts.MaskNames,
+			Prompt:    prompt,
+			Attached:  attachedLog,
+		})
+		key := "queries/" + cache.Hash(kb)
 		var cached Result
 		if err := cache.Load(key, &cached); err == nil && cached.Output != "" {
 			cached.FromCache = true
@@ -254,8 +278,10 @@ func RunBuild(ctx context.Context, command string, dir string, opts Options) (Re
 		outStr += "\n" + err.Error()
 	}
 	compacted := compactCommandOutput(outStr)
-	res := finish(outStr, compacted, tokenize.KindLog)
-	res.Output = "cmd: " + command + "\n" + compacted
+	// The command prefix is part of what the caller receives, so count it on
+	// both sides of the token ledger: raw (before) and compacted (after).
+	display := "cmd: " + command + "\n" + compacted
+	res := finish("cmd: "+command+"\n"+outStr, display, tokenize.KindLog)
 	record(stats.OpRunBuild, opts, res)
 	return res, err
 }

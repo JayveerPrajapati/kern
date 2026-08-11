@@ -3,7 +3,10 @@ package main
 import "testing"
 
 func TestParseFlagsPack(t *testing.T) {
-	f, rest := parseFlags([]string{"--max-tokens", "4000", "--no-instructions", "--out", "x.txt", "."})
+	f, rest, err := parseFlags([]string{"--max-tokens", "4000", "--no-instructions", "--out", "x.txt", "."})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if f.maxTokens != 4000 {
 		t.Fatalf("expected --max-tokens 4000, got %d", f.maxTokens)
 	}
@@ -17,7 +20,10 @@ func TestParseFlagsPack(t *testing.T) {
 		t.Fatalf("expected positional root preserved, got %v", rest)
 	}
 	// Defaults: instructions included, no token budget.
-	f2, rest2 := parseFlags([]string{"."})
+	f2, rest2, err := parseFlags([]string{"."})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if f2.noinstructions {
 		t.Fatal("expected instructions included by default")
 	}
@@ -30,7 +36,10 @@ func TestParseFlagsPack(t *testing.T) {
 }
 
 func TestParseFlagsHTTP(t *testing.T) {
-	f, rest := parseFlags([]string{"--http", "127.0.0.1:8080", "extra"})
+	f, rest, err := parseFlags([]string{"--http", "127.0.0.1:8080", "extra"})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if f.http != "127.0.0.1:8080" {
 		t.Fatalf("expected --http parsed, got %q", f.http)
 	}
@@ -60,14 +69,20 @@ func TestMCPHTTPAddrResolution(t *testing.T) {
 	}
 	// End-to-end through parseFlags, matching the real main() call path
 	// (rest is os.Args[2:], so it excludes the "mcp" subcommand).
-	f, rest := parseFlags([]string{"--http", ":9000"})
+	f, rest, err := parseFlags([]string{"--http", ":9000"})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if got := mcpHTTPAddr(rest, f); got != ":9000" {
 		t.Fatalf("parseFlags + mcpHTTPAddr = %q, want %q", got, ":9000")
 	}
 }
 
 func TestParseFlagsHold(t *testing.T) {
-	f, rest := parseFlags([]string{"--hold", "db-models"})
+	f, rest, err := parseFlags([]string{"--hold", "db-models"})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if !f.hold {
 		t.Fatal("expected --hold parsed")
 	}
@@ -75,25 +90,37 @@ func TestParseFlagsHold(t *testing.T) {
 		t.Fatalf("expected positional scope preserved, got %v", rest)
 	}
 	// Default: --hold absent.
-	f2, _ := parseFlags([]string{"db-models"})
+	f2, _, err := parseFlags([]string{"db-models"})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if f2.hold {
 		t.Fatal("expected --hold unset by default")
 	}
 }
 
 func TestParseFlagsNearDepthDefaults(t *testing.T) {
-	f, _ := parseFlags([]string{"near", "Foo"})
+	f, _, err := parseFlags([]string{"near", "Foo"})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if f.depth != -1 {
 		t.Fatalf("expected depth default -1 (fallback to 2), got %d", f.depth)
 	}
-	f2, _ := parseFlags([]string{"near", "Foo", "--depth", "3"})
+	f2, _, err := parseFlags([]string{"near", "Foo", "--depth", "3"})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if f2.depth != 3 {
 		t.Fatalf("expected --depth 3 parsed, got %d", f2.depth)
 	}
 }
 
 func TestParseFlagsSeverity(t *testing.T) {
-	f, rest := parseFlags([]string{"myrepo", "--severity", "error,warning"})
+	f, rest, err := parseFlags([]string{"myrepo", "--severity", "error,warning"})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if f.severity != "error,warning" {
 		t.Fatalf("expected --severity parsed, got %q", f.severity)
 	}

@@ -109,8 +109,14 @@ func Watch(root string, interval time.Duration, stop <-chan struct{}) <-chan Rep
 	out := make(chan Report)
 	go func() {
 		defer close(out)
-		// Initial warm immediately.
-		out <- *Warm(root)
+		// Initial warm immediately. The send is guarded by the same select as
+		// the loop so a stop signal fired while no one is reading cannot leave
+		// the goroutine blocked forever on the first send.
+		select {
+		case out <- *Warm(root):
+		case <-stop:
+			return
+		}
 		t := time.NewTicker(interval)
 		defer t.Stop()
 		for {
@@ -118,7 +124,12 @@ func Watch(root string, interval time.Duration, stop <-chan struct{}) <-chan Rep
 			case <-stop:
 				return
 			case <-t.C:
-				out <- *Warm(root)
+				r := *Warm(root)
+				select {
+				case out <- r:
+				case <-stop:
+					return
+				}
 			}
 		}
 	}()

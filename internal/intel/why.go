@@ -70,25 +70,39 @@ func uniqueSorted(in []string) []string {
 }
 
 // docComment returns the contiguous comment block directly above a symbol's
-// definition line (the doc reference), empty if none.
+// definition line (the doc reference), empty if none. Line comments are
+// collected verbatim; block comments have their /* */ markers and leading "*"
+// decoration stripped.
 func docComment(root, file string, line int) string {
 	doc := sourceLines(root, file, line-30, line-1)
 	if len(doc) == 0 {
 		return ""
 	}
 	var comment []string
+	inBlock := false
 	for i := len(doc) - 1; i >= 0; i-- {
 		t := strings.TrimSpace(doc[i])
-		if t == "" || strings.HasPrefix(t, "*/") {
-			break // blank line or end of a block comment
+		if strings.HasSuffix(t, "*/") {
+			// closing line of a block comment: strip the marker and continue
+			// scanning upward for the opening line.
+			inBlock = true
+			comment = append(comment, cleanBlockLine(strings.TrimSuffix(t, "*/")))
+			continue
+		}
+		if inBlock {
+			if strings.HasPrefix(t, "/*") {
+				comment = append(comment, cleanBlockLine(strings.TrimPrefix(t, "/*")))
+				break
+			}
+			comment = append(comment, cleanBlockLine(t))
+			continue
+		}
+		if t == "" {
+			break // blank line ends the doc
 		}
 		if strings.HasPrefix(t, "//") {
 			comment = append(comment, strings.TrimSpace(strings.TrimPrefix(t, "//")))
 			continue
-		}
-		if strings.HasPrefix(t, "/*") {
-			comment = append(comment, t)
-			break
 		}
 		break // non-comment line above
 	}
@@ -97,6 +111,15 @@ func docComment(root, file string, line int) string {
 		comment[i], comment[j] = comment[j], comment[i]
 	}
 	return strings.TrimSpace(strings.Join(comment, "\n"))
+}
+
+// cleanBlockLine strips the leading "*" decoration from a block comment line.
+func cleanBlockLine(t string) string {
+	t = strings.TrimSpace(t)
+	t = strings.TrimSuffix(t, "*/")
+	t = strings.TrimPrefix(t, "*")
+	t = strings.TrimPrefix(t, "*")
+	return strings.TrimSpace(t)
 }
 
 // firstDocLine returns the first line of a symbol's doc comment (a one-line
