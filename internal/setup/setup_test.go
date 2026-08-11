@@ -92,7 +92,7 @@ func TestMergeJSONInvalid(t *testing.T) {
 
 func TestWireCreatesProjectFiles(t *testing.T) {
 	dir := t.TempDir()
-	sts := Wire(dir, []string{"mcp", "opencode"})
+	sts := Wire(dir, []string{"mcp", "opencode"}, false)
 	if !allInstalled(sts, "mcp") {
 		t.Fatalf("mcp not installed: %+v", sts)
 	}
@@ -105,8 +105,8 @@ func TestWireCreatesProjectFiles(t *testing.T) {
 
 func TestWireIsIdempotent(t *testing.T) {
 	dir := t.TempDir()
-	Wire(dir, []string{"mcp", "opencode"})
-	Wire(dir, []string{"mcp", "opencode"})
+	Wire(dir, []string{"mcp", "opencode"}, false)
+	Wire(dir, []string{"mcp", "opencode"}, false)
 	b, _ := os.ReadFile(filepath.Join(dir, ".mcp.json"))
 	if strings.Count(string(b), `"kern":`) != 1 {
 		t.Fatalf("duplicated kern entries: %s", b)
@@ -125,7 +125,7 @@ func TestWirePeerAgentRules(t *testing.T) {
 	// Existing host files get the same single-source rules; setup must not
 	// create host rule files that do not exist.
 	os.WriteFile(filepath.Join(dir, "CLAUDE.md"), []byte("# Claude\n"), 0o644)
-	sts := Wire(dir, []string{"mcp", "opencode"})
+	sts := Wire(dir, []string{"mcp", "opencode"}, false)
 	if !allInstalled(sts, "opencode") {
 		t.Fatalf("opencode not installed: %+v", sts)
 	}
@@ -138,7 +138,7 @@ func TestWirePeerAgentRules(t *testing.T) {
 		t.Fatal("setup must not create GEMINI.md unprompted")
 	}
 	// Idempotent: a second run appends nothing.
-	Wire(dir, []string{"mcp", "opencode"})
+	Wire(dir, []string{"mcp", "opencode"}, false)
 	c2, _ := os.ReadFile(filepath.Join(dir, "CLAUDE.md"))
 	if strings.Count(string(c2), "kern usage rules") != 1 {
 		t.Fatalf("CLAUDE.md rules duplicated: %s", c2)
@@ -169,7 +169,7 @@ func TestWireAllAgents(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("HOME", t.TempDir())
 	dir := t.TempDir()
-	sts := Wire(dir, nil)
+	sts := Wire(dir, nil, false)
 
 	bin := Bin()
 	home := os.Getenv("HOME")
@@ -425,4 +425,70 @@ func hookCommandOf(group any) string {
 		}
 	}
 	return ""
+}
+
+func TestDetectAgents(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("HOME", t.TempDir())
+	dir := t.TempDir()
+
+	// No agents present — expect empty (or minimal) detection
+	detected := DetectAgents(dir)
+	for _, d := range detected {
+		t.Logf("detected (empty root): %s", d)
+	}
+
+	// Simulate a CLAUDE.md and cursor config to trigger detection
+	if err := os.WriteFile(filepath.Join(dir, "CLAUDE.md"), []byte("# project"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, ".cursor", "rules"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".cursor", "mcp.json"), []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	detected = DetectAgents(dir)
+	has := map[string]bool{}
+	for _, d := range detected {
+		has[d] = true
+	}
+	if !has["claude"] {
+		t.Errorf("expected claude in detected: %v", detected)
+	}
+	if !has["cursor"] {
+		t.Errorf("expected cursor in detected: %v", detected)
+	}
+}
+
+func TestWireDetectWiresInstructions(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("HOME", t.TempDir())
+	dir := t.TempDir()
+
+	// Simulate agent presence
+	if err := os.WriteFile(filepath.Join(dir, "CLAUDE.md"), []byte("# project"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	sts := Wire(dir, nil, true)
+	found := false
+	for _, s := range sts {
+		if s.Agent == "claude-instruction" && s.Installed {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected claude-instruction to be wired: %+v", sts)
+	}
+	// Verify content
+	b, err := os.ReadFile(filepath.Join(dir, "CLAUDE.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), "kern usage rules") {
+		t.Errorf("CLAUDE.md missing kern-first policy")
+	}
 }

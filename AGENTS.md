@@ -4,7 +4,30 @@
 Use these tools to reduce context usage. All tools run locally — nothing is sent
 to any server.
 
-## Always prefer kern tools over raw reads
+## Kern-first policy (MANDATORY)
+
+Any agent using this workspace MUST call a `kern_*` tool FIRST before using any
+other MCP tool or built-in tool (read, grep, glob, bash, webfetch, etc.).
+If multiple MCPs are configured, kern tools always take priority.
+
+Concrete kern-first rules (replace the corresponding generic tool):
+
+| When you need to…            | CALL THIS FIRST             | Replaces      |
+|------------------------------|-----------------------------|---------------|
+| Read a file                  | `kern_compact_file`         | `read`        |
+| List / explore a repo        | `kern_project_map`          | `glob`/`glob` |
+| Grep for a pattern           | `kern_doc_search` / `kern_ast_search` | `grep`  |
+| Read a source slice          | `kern_context`              | `read`        |
+| Understand a symbol          | `kern_code_graph` / `kern_explore` | `read`  |
+| Search the web / docs        | `kern_doc_fetch` then `kern_doc_search` | `webfetch`/`websearch` |
+| Build / test / lint          | `kern_run_build`            | `bash`        |
+| Run a command / script       | `kern_exec`                 | `bash`        |
+| Commit                       | `kern_commitmsg` or `kern commit` | git CLI  |
+| Search (task/bug/error)      | `kern_probe`                | grep + read   |
+
+**Heuristic: any task involving files, code, logs, builds, or web content
+should start with a kern tool.** If the appropriate kern tool is unavailable
+or not registered, fall back to built-ins — but never the reverse.
 
 - Before reading a large file, use `kern_compact_file` to get its symbols.
 - Before listing/reading a whole repo, use `kern_project_map`.

@@ -91,8 +91,9 @@ Usage:
   kern diff [--session ID]                        recent before/after entries
   kern export --csv                               export stats to CSV
   kern tokens [--bpe] "<text>"                    token count (estimator or exact BPE)
-  kern setup [--root DIR] [--agents mcp,opencode,claude]   wire kern into agents (idempotent)
-  kern setup --check                              show wiring status
+  kern setup [--root DIR] [--agents mcp,opencode,claude] [--detect]   wire kern into agents (idempotent)
+  kern setup --check                                    show wiring status
+  kern setup --detect                                   auto-detect present agents and wire only those
   kern buddy [root]                               session onboarding digest for any agent
   kern prompt <template> [--file PATH] [--task TEXT]   fine-tuned prompt template
   kern prompt list                                list templates
@@ -190,6 +191,7 @@ type flags struct {
 	bpe            bool
 	root           string
 	check          bool
+	detect         bool
 	apply          bool
 	agents         string
 	file           string
@@ -312,6 +314,8 @@ func parseFlags(args []string) (flags, []string, error) {
 			}
 		case "--check":
 			f.check = true
+		case "--detect":
+			f.detect = true
 		case "--apply":
 			f.apply = true
 		case "--agents":
@@ -648,14 +652,20 @@ func main() {
 		if f.agents != "" {
 			agents = strings.Split(f.agents, ",")
 		}
-		for _, s := range setup.Wire(root, agents) {
+		for _, s := range setup.Wire(root, agents, f.detect) {
 			mark := "ok"
 			if !s.Installed {
 				mark = "!!"
 			}
-			fmt.Printf("[%s] %-22s %s\n", mark, s.Agent, s.Note)
+			fmt.Printf("[%s] %-32s %s\n", mark, s.Agent, s.Note)
 		}
-		fmt.Println("\nWiring complete. Restart your agent (opencode reload / claude) to pick up the MCP servers.")
+		if len(f.agents) == 0 && !f.detect {
+			fmt.Println("\nWired all agents. Use --detect to wire only detected agents, or --agents to target specific ones.")
+		} else if f.detect && len(f.agents) == 0 {
+			detected := setup.DetectAgents(root)
+			fmt.Printf("\nDetected agents: %v\n", detected)
+		}
+		fmt.Println("Restart your agent (opencode reload / claude) to pick up the MCP servers and kern-first instructions.")
 
 	case "buddy":
 		root := "."
