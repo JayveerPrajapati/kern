@@ -442,9 +442,9 @@ func TestMemoryToolsViaMCP(t *testing.T) {
 	if miss != "" {
 		t.Fatalf("expected empty recall for unrelated prompt, got %q", miss)
 	}
-	badK := mcpAssertOK(t, "kern_memory_recall", map[string]any{"root": root, "prompt": "how are deploy tags released?", "k": "bogus"})
-	if !strings.Contains(badK, "deploy tags") {
-		t.Fatalf("expected recall hit with fallback k, got %q", badK)
+	badK := mcpToolError(t, "kern_memory_recall", map[string]any{"root": root, "prompt": "how are deploy tags released?", "k": "bogus"})
+	if !strings.Contains(badK, "invalid integer") {
+		t.Fatalf("expected parse error for malformed k, got %q", badK)
 	}
 	zeroK := mcpAssertOK(t, "kern_memory_recall", map[string]any{"root": root, "prompt": "how are deploy tags released?", "k": "0"})
 	if !strings.Contains(zeroK, "deploy tags") {
@@ -690,16 +690,20 @@ func TestOutputSandboxUnit(t *testing.T) {
 
 func TestOutputBudgetResolution(t *testing.T) {
 	// Per-call max_output wins over the global cap.
-	if b := callOutputBudget(map[string]any{"max_output": "500"}); b != 500 {
-		t.Fatalf("max_output override = %d", b)
+	if b, err := callOutputBudget(map[string]any{"max_output": "500"}); err != nil || b != 500 {
+		t.Fatalf("max_output override = %d, err=%v", b, err)
 	}
-	if b := callOutputBudget(map[string]any{"max_output": "0"}); b != 0 {
-		t.Fatalf("max_output=0 should disable, got %d", b)
+	if b, err := callOutputBudget(map[string]any{"max_output": "0"}); err != nil || b != 0 {
+		t.Fatalf("max_output=0 should disable, got %d, err=%v", b, err)
+	}
+	// A malformed max_output is an error, not a silent fallback.
+	if _, err := callOutputBudget(map[string]any{"max_output": "junk"}); err == nil {
+		t.Fatalf("malformed max_output should error")
 	}
 	// Global env cap applies when no per-call override.
 	t.Setenv("KERN_MCP_MAX_OUTPUT", "999")
-	if b := callOutputBudget(map[string]any{}); b != 999 {
-		t.Fatalf("env cap = %d", b)
+	if b, err := callOutputBudget(map[string]any{}); err != nil || b != 999 {
+		t.Fatalf("env cap = %d, err=%v", b, err)
 	}
 	if b := outputBudget(); b != 999 {
 		t.Fatalf("outputBudget = %d", b)
@@ -708,6 +712,21 @@ func TestOutputBudgetResolution(t *testing.T) {
 	t.Setenv("KERN_MCP_MAX_OUTPUT", "junk")
 	if b := outputBudget(); b != defaultOutputBudget {
 		t.Fatalf("invalid env should fall back to default, got %d", b)
+	}
+}
+
+func TestAtoiArgReportsParseErrors(t *testing.T) {
+	// Empty input keeps the default.
+	if n, err := atoiArg("", 42); err != nil || n != 42 {
+		t.Fatalf("empty -> %d, %v; want 42, nil", n, err)
+	}
+	// Valid integers parse.
+	if n, err := atoiArg("7", 42); err != nil || n != 7 {
+		t.Fatalf("7 -> %d, %v; want 7, nil", n, err)
+	}
+	// A malformed value is an error, not a silent default.
+	if _, err := atoiArg("junk", 42); err == nil {
+		t.Fatal("malformed integer must error, not fall back silently")
 	}
 }
 

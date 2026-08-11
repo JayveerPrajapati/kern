@@ -147,6 +147,32 @@ func TestWhyAndFormatWhy(t *testing.T) {
 	}
 }
 
+func TestDocCommentSingleLineBlock(t *testing.T) {
+	dir := t.TempDir()
+	src := `package foo
+
+/* one-line doc */
+func Bar() {}
+
+/*
+ * multi-line doc
+ */
+func Baz() {}
+`
+	if err := os.WriteFile(filepath.Join(dir, "app.go"), []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Bar is on line 4; the single-line block comment above it is its own
+	// opening and closing line, so the doc must not overrun into the package
+	// clause or blank lines.
+	if got := docComment(dir, "app.go", 4); got != "one-line doc" {
+		t.Errorf("single-line block doc = %q, want %q", got, "one-line doc")
+	}
+	if got := docComment(dir, "app.go", 9); got != "multi-line doc" {
+		t.Errorf("multi-line block doc = %q, want %q", got, "multi-line doc")
+	}
+}
+
 func TestWikiExport(t *testing.T) {
 	root := buildTestProject(t)
 	ix := buildIndex(t, root)

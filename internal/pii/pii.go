@@ -6,6 +6,7 @@
 package pii
 
 import (
+	"net"
 	"os"
 	"regexp"
 	"sort"
@@ -36,7 +37,7 @@ var DefaultPatterns = []Pattern{
 	{Label: "TOKEN", RE: regexp.MustCompile(`(?i)\b(?:token|secret)["']?\s*[=:]\s*["']?(?:[A-Za-z0-9_/\-+=]{16,}["']|[A-Za-z0-9_/\-+=]*[0-9][A-Za-z0-9_/\-+=]*)`)},
 	{Label: "URL_CRED", RE: regexp.MustCompile(`\b[a-zA-Z][a-zA-Z0-9+.-]*://[^/\s:@]+:[^/\s@]+@`)},
 	{Label: "IP", RE: regexp.MustCompile(`\b(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\b`)},
-	{Label: "IPV6", RE: regexp.MustCompile(`\b[0-9a-fA-F]{1,4}::(?:[0-9a-fA-F]{1,4}:){0,6}[0-9a-fA-F]{1,4}\b`)},
+	{Label: "IPV6", RE: regexp.MustCompile(`(?i)\b(?:[0-9a-fA-F]{1,4}(?::[0-9a-fA-F]{1,4}){0,6}::[0-9a-fA-F]{1,4}(?::[0-9a-fA-F]{1,4}){0,6}|::[0-9a-fA-F]{1,4}(?::[0-9a-fA-F]{1,4}){0,6}|[0-9a-fA-F]{1,4}(?::[0-9a-fA-F]{1,4}){1,6}::)\b`)},
 	{Label: "EMAIL", RE: regexp.MustCompile(`\b[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+\b`)},
 	{Label: "SSN", RE: regexp.MustCompile(`\b[0-9]{3}-[0-9]{2}-[0-9]{4}\b`)},
 }
@@ -50,6 +51,22 @@ type Result struct {
 	Mapping map[string]string
 	// Found is the number of distinct secrets detected (counts by label).
 	ByLabel map[string]int
+}
+
+// IsNonSecretIP reports whether a hit from the IP/IPV6 patterns is an address
+// that should not be treated as a secret: loopback, RFC1918/ULA private
+// ranges, link-local, multicast and unspecified addresses are all ubiquitous
+// in code (local dev configs, comments, tests) and not secrets.
+func IsNonSecretIP(label string, hit string) bool {
+	if label != "IP" && label != "IPV6" {
+		return false
+	}
+	ip := net.ParseIP(hit)
+	if ip == nil {
+		return true
+	}
+	return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() ||
+		ip.IsLinkLocalMulticast() || ip.IsMulticast() || ip.IsUnspecified()
 }
 
 // Mask scans text with DefaultPatterns and replaces each secret with a
@@ -75,6 +92,9 @@ func MaskCustom(text string, patterns []Pattern, names []string) Result {
 	var hits []hit
 	for _, p := range patterns {
 		for _, m := range p.RE.FindAllStringIndex(text, -1) {
+			if IsNonSecretIP(p.Label, text[m[0]:m[1]]) {
+				continue
+			}
 			hits = append(hits, hit{m[0], m[1], p.Label})
 		}
 	}

@@ -99,6 +99,44 @@ rename to new.go
 	}
 }
 
+func TestGenerateQuotedPaths(t *testing.T) {
+	diff := `diff --git "a/my file.go" "b/my file.go"
+index abc..def 100644
+--- "a/my file.go"
++++ "b/my file.go"
+@@ -1,2 +1,2 @@
++authenticate(req)
+diff --git "a/dir/with space/file.ts" "b/dir/with space/file.ts"
+index 111..222 100644
+--- "a/dir/with space/file.ts"
++++ "b/dir/with space/file.ts"
+@@ -1 +1 @@
++export const x = 1
+`
+	m := Generate(diff)
+	if len(m.Body) != 2 {
+		t.Fatalf("expected 2 body bullets, got %v", m.Body)
+	}
+	if !strings.Contains(m.Body[0], "my file.go (1+,0-)") {
+		t.Errorf("body bullet = %q, want quoted path parsed cleanly", m.Body[0])
+	}
+	if !strings.Contains(m.Body[1], "dir/with space/file.ts (1+,0-)") {
+		t.Errorf("body bullet = %q, want quoted path parsed cleanly", m.Body[1])
+	}
+}
+
+func TestGenerateQuotedRename(t *testing.T) {
+	diff := `diff --git "a/old file.go" "b/new file.go"
+similarity index 95%
+rename from old file.go
+rename to new file.go
+`
+	m := Generate(diff)
+	if len(m.Body) != 1 || !strings.Contains(m.Body[0], "new file.go") || !strings.Contains(m.Body[0], "renamed") {
+		t.Errorf("body = %v, want renamed new file.go", m.Body)
+	}
+}
+
 func TestGenerateDeterministic(t *testing.T) {
 	diff := `diff --git a/x.go b/x.go
 --- a/x.go

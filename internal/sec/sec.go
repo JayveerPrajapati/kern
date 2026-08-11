@@ -7,7 +7,6 @@ package sec
 import (
 	"bytes"
 	"io/fs"
-	"net"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -94,29 +93,13 @@ func init() {
 	})
 }
 
-// isNonSecretIP reports whether a hit from the IP/IPV6 patterns is an address
-// that should not be treated as a hardcoded secret: loopback, RFC1918/ULA
-// private ranges, link-local, multicast and unspecified addresses are all
-// ubiquitous in code (local dev configs, comments, tests) and not secrets.
-func isNonSecretIP(label string, hit []byte) bool {
-	if label != "IP" && label != "IPV6" {
-		return false
-	}
-	ip := net.ParseIP(string(hit))
-	if ip == nil {
-		return true
-	}
-	return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() ||
-		ip.IsLinkLocalMulticast() || ip.IsMulticast() || ip.IsUnspecified()
-}
-
 // ScanFile runs every rule against one source file. rel is a root-relative
 // path used only for reporting.
 func ScanFile(rel string, src []byte) []Finding {
 	var findings []Finding
 	for _, r := range Rules {
 		for _, idx := range r.RE.FindAllIndex(src, -1) {
-			if isNonSecretIP(r.Label, src[idx[0]:idx[1]]) {
+			if pii.IsNonSecretIP(r.Label, string(src[idx[0]:idx[1]])) {
 				continue
 			}
 			line := lineAt(src, idx[0])
@@ -142,11 +125,20 @@ func ScanFile(rel string, src []byte) []Finding {
 	return findings
 }
 
+// isTestFile reports whether a file is a test fixture, matching the naming
+// conventions across the indexed languages (*_test.go, foo_test.py,
+// auth.test.js, ...). Their fixtures routinely hold fake secrets that are not
+// real findings.
+func isTestFile(rel string) bool {
+	base := filepath.Base(rel)
+	return strings.Contains(base, "_test.") || strings.Contains(base, ".test.")
+}
+
 // Scan walks root (mirroring the index walk: same extension filter and ignored
-// directories) and returns every finding in the tree. Test files (*_test.go)
-// are skipped: their fixtures routinely hold fake secrets that are not real
-// findings. Walk errors are returned so an unreadable tree can't silently
-// produce a misleading "clean" result.
+// directories) and returns every finding in the tree. Test files are skipped:
+// their fixtures routinely hold fake secrets that are not real findings. Walk
+// errors are returned so an unreadable tree can't silently produce a
+// misleading "clean" result.
 func Scan(root string) ([]Finding, error) {
 	var findings []Finding
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
@@ -160,7 +152,7 @@ func Scan(root string) ([]Finding, error) {
 			return nil
 		}
 		rel, rerr := filepath.Rel(root, path)
-		if rerr != nil || !index.QuickExt(rel) || strings.HasSuffix(rel, "_test.go") {
+		if rerr != nil || !index.QuickExt(rel) || isTestFile(rel) {
 			return nil
 		}
 		src, serr := os.ReadFile(path)

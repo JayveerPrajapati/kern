@@ -249,7 +249,7 @@ func TestSemcacheManagementViaMCP(t *testing.T) {
 
 func TestMaskPiiViaMCP(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
-	text := "email me at a@b.com, key is 192.168.0.1, token ghp_1234567890abcdefghijklmnopqrstuvw"
+	text := "email me at a@b.com, key is 8.8.8.8, token ghp_1234567890abcdefghijklmnopqrstuvw"
 	args, _ := json.Marshal(map[string]any{"text": text, "mask_names": "acme"})
 	resp := serveOne(t, writeReq("tools/call", 9, `{"name":"kern_mask_pii","arguments":`+string(args)+`}`))
 	out, isErr := toolResultText(t, resp)

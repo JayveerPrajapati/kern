@@ -87,6 +87,11 @@ func docComment(root, file string, line int) string {
 			// scanning upward for the opening line.
 			inBlock = true
 			comment = append(comment, cleanBlockLine(strings.TrimSuffix(t, "*/")))
+			if strings.HasPrefix(t, "/*") {
+				// single-line block comment: /* foo */ is its own opening and
+				// closing line, so the scan must not overrun upward.
+				break
+			}
 			continue
 		}
 		if inBlock {
@@ -113,9 +118,11 @@ func docComment(root, file string, line int) string {
 	return strings.TrimSpace(strings.Join(comment, "\n"))
 }
 
-// cleanBlockLine strips the leading "*" decoration from a block comment line.
+// cleanBlockLine strips the /* */ markers and leading "*" decoration from a
+// block comment line.
 func cleanBlockLine(t string) string {
 	t = strings.TrimSpace(t)
+	t = strings.TrimPrefix(t, "/*")
 	t = strings.TrimSuffix(t, "*/")
 	t = strings.TrimPrefix(t, "*")
 	t = strings.TrimPrefix(t, "*")
