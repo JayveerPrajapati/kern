@@ -97,10 +97,13 @@ func Verify(ix *index.Index, root, text string) Report {
 		}
 	}
 
-	// Any remaining route-like strings are reported as unregistered.
+	// Any remaining route-like strings are reported as unregistered. Paths
+	// that are clearly not routes are skipped: existing filesystem paths
+	// (or paths under an existing ancestor) and date-like /YYYY/MM/DD
+	// (W2-30).
 	for _, m := range routeRe.FindAllString(text, -1) {
 		m = strings.TrimRight(m, ".,;:)!?]}")
-		if m == "" {
+		if m == "" || !looksLikeRoute(m, root) {
 			continue
 		}
 		if !seen["route|"+m] {
@@ -113,6 +116,8 @@ func Verify(ix *index.Index, root, text string) Report {
 }
 
 // fileHasLine reports whether file exists in root and line is within bounds.
+// Absolute file refs are only honored when they stay inside root, so
+// untrusted text can never probe arbitrary machine paths (W2-32).
 func fileHasLine(root, file string, line int) bool {
 	if line < 1 {
 		return false
@@ -121,11 +126,76 @@ func fileHasLine(root, file string, line int) bool {
 	if root != "" && !filepath.IsAbs(file) {
 		path = filepath.Join(root, file)
 	}
+	if filepath.IsAbs(path) {
+		if root == "" || !withinAbs(root, path) {
+			return false
+		}
+	}
 	b, err := os.ReadFile(path)
 	if err != nil {
 		return false
 	}
 	return line <= strings.Count(string(b), "\n")+1
+}
+
+// withinAbs reports whether child (absolute) stays inside parent (absolute).
+func withinAbs(parent, child string) bool {
+	rel, err := filepath.Rel(parent, child)
+	if err != nil {
+		return false
+	}
+	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+// looksLikeRoute reports whether a slash-path is a plausible route candidate
+// rather than noise: paths pointing at (or under an ancestor of) an existing
+// filesystem entry and /YYYY/MM/DD date-like paths are not routes. The
+// filesystem root "/" and the project root are never statted — they always
+// exist and would otherwise hide every absolute route (W2-30).
+func looksLikeRoute(m, root string) bool {
+	segs := strings.Split(strings.Trim(m, "/"), "/")
+	if len(segs) == 3 && isAllDigits(segs[0]) && isAllDigits(segs[1]) && isAllDigits(segs[2]) {
+		return false
+	}
+	p := m
+	rootAbs := ""
+	if root != "" {
+		rootAbs, _ = filepath.Abs(root)
+	}
+	if !filepath.IsAbs(p) && root != "" {
+		p = filepath.Join(root, m)
+	}
+	stops := map[string]bool{"/": true}
+	if rootAbs != "" {
+		stops[rootAbs] = true
+	}
+	dir := p
+	for {
+		if stops[dir] {
+			break
+		}
+		if _, err := os.Stat(dir); err == nil {
+			return false
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
+		dir = parent
+	}
+	return true
+}
+
+func isAllDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 func isExported(s string) bool {

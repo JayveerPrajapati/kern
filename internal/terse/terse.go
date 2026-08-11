@@ -181,7 +181,6 @@ func Compress(text string) (string, int) {
 	inFence := false
 	for _, raw := range lines {
 		trimmed := strings.TrimRightFunc(raw, unicode.IsSpace)
-		ws := raw[:len(raw)-len(trimmed)]
 
 		if isFenceLine(trimmed) {
 			inFence = !inFence
@@ -202,7 +201,10 @@ func Compress(text string) (string, int) {
 			dropped++
 			continue
 		}
-		out = append(out, ws+trimmed)
+		// Keep the leading indentation, drop trailing whitespace. Slicing by
+		// the trimmed length (raw[:len(trimmed)-len(clean)]) must never be
+		// confused with a trailing-whitespace prefix.
+		out = append(out, raw[:len(trimmed)-len(clean)]+clean)
 	}
 
 	// Collapse runs of blank lines to a single blank line, then trim leading
@@ -257,8 +259,8 @@ func StripPromptFluff(text string) (string, int) {
 			dropped++
 			continue
 		}
-		ws := raw[:len(raw)-len(trimmed)]
-		out = append(out, ws+trimmed)
+		// Keep the leading indentation, drop trailing whitespace (see Compress).
+		out = append(out, raw[:len(trimmed)-len(clean)]+clean)
 	}
 	// Collapse blank runs and trim leading/trailing blanks (same as Compress).
 	var collapsed []string

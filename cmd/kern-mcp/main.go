@@ -9,6 +9,7 @@
 package main
 
 import (
+	"time"
 	"context"
 	"flag"
 	"os"
@@ -40,11 +41,23 @@ func main() {
 		return
 	}
 	srv := mcp.NewServer(os.Stdin, os.Stdout)
+	// Closing os.Stdin from another goroutine does not reliably unblock the
+	// scanner's read, so Serve() alone may never return after a signal:
+	// cancel in-flight tools, wait for them to drain, then exit (W2-41).
 	go func() {
 		<-ctx.Done()
 		srv.CancelAll()
 		srv.Close()
 		_ = os.Stdin.Close()
+		deadline := time.Now().Add(5 * time.Second)
+		for time.Now().Before(deadline) {
+			if srv.Inflight() == 0 {
+				time.Sleep(100 * time.Millisecond)
+				os.Exit(0)
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+		os.Exit(1)
 	}()
 	if err := srv.Serve(); err != nil {
 		os.Exit(1)

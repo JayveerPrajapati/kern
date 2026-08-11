@@ -281,17 +281,25 @@ func (ix *Index) Search(query string, k int) []Score {
 // index (the CLI/MCP layer sets it when it indexed the docs).
 var SemanticEmbedder Embedder
 
-// denseCosine is the cosine similarity between two dense vectors.
+// denseCosine is the cosine similarity between two dense vectors. It is a
+// true cosine (dot / (|a|*|b|)) so it ranks correctly for Ollama embeddings,
+// which are not guaranteed to be length-normalized; the previous dot-product
+// variant under-ranked short vectors (W2-51).
 func denseCosine(a, b []float32) float64 {
 	n := len(a)
 	if len(b) < n {
 		n = len(b)
 	}
-	var dot float64
+	var dot, na, nb float64
 	for i := 0; i < n; i++ {
 		dot += float64(a[i]) * float64(b[i])
+		na += float64(a[i]) * float64(a[i])
+		nb += float64(b[i]) * float64(b[i])
 	}
-	return dot
+	if na == 0 || nb == 0 {
+		return 0
+	}
+	return dot / (math.Sqrt(na) * math.Sqrt(nb))
 }
 
 // ChunkText splits text into contiguous chunks of at most maxChars, keeping

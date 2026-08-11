@@ -49,11 +49,14 @@ func Watch(ctx context.Context, root string, pollInterval time.Duration, onChang
 	}
 
 	var (
-		timer   *time.Timer
-		timerMu sync.Mutex
+		timer      *time.Timer
+		timerMu    sync.Mutex
+		rebuildMu  sync.Mutex
 	)
 	var rebuild func()
 	rebuild = func() {
+		rebuildMu.Lock()
+		defer rebuildMu.Unlock()
 		cur, err := index.FileHashes(root)
 		if err != nil {
 			if onError != nil {

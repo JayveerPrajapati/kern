@@ -153,3 +153,74 @@ func TestParseLogCountsPerCommit(t *testing.T) {
 		t.Errorf("parseLog commit count = %d; want 3", commits)
 	}
 }
+
+// W2-16: an uncalled method sharing a simple name with a called method of
+// another type must still be reported dead.
+func TestDeadKeepsUncalledSameNameMethod(t *testing.T) {
+	src := `package lib
+
+type Alpha struct{}
+
+func (a Alpha) Save() {}
+
+type Beta struct{}
+
+func (b Beta) Save() {}
+
+func main() {
+	a := Alpha{}
+	a.Save()
+}
+`
+	dir := writeTree(t, map[string]string{"lib/lib.go": src})
+	ix, err := index.Build(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dead := DeadCode(ix)
+	for _, d := range dead {
+		if d.Name == "Beta.Save" {
+			return
+		}
+	}
+	t.Errorf("Beta.Save is never called and must be reported dead, got %+v", dead)
+}
+
+// W2-17: a test calling fmt.Println must not mark an unrelated local Println
+// as covered.
+func TestCoverageIgnoresForeignCallees(t *testing.T) {
+	dir := writeTree(t, map[string]string{
+		"lib/lib.go": `package lib
+
+func Println(s string) {}
+
+func UntestedHot() {}
+`,
+		"lib/lib_test.go": `package lib
+
+import "fmt"
+
+func TestPrints(t *testing.T) {
+	fmt.Println("x")
+}
+`,
+	})
+	ix, err := index.Build(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	covered := coveredSet(ix)
+	if covered["Println"] {
+		t.Fatal("local Println must not be covered by a call to fmt.Println")
+	}
+	// Println must count as uncovered in the report.
+	cov := AnalyzeCoverage(ix)
+	for _, g := range cov.HotGaps {
+		if g.Symbol == "Println" {
+			t.Fatalf("Println has no callers and must not be a hotspot, got %+v", cov.HotGaps)
+		}
+	}
+	if cov.Uncovered < 1 {
+		t.Errorf("Println should be uncovered, got %d uncovered", cov.Uncovered)
+	}
+}

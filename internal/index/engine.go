@@ -16,7 +16,7 @@ import (
 
 // indexVersion is bumped whenever the persisted index schema changes, so
 // stale caches are rebuilt automatically instead of serving zero-value fields.
-const indexVersion = 6
+const indexVersion = 7
 
 // Index is the in-memory representation of a project's AST index.
 type Index struct {
@@ -25,6 +25,12 @@ type Index struct {
 	Symbols []Symbol            `json:"symbols"`
 	Calls   map[string][]string `json:"calls"`
 	Callers map[string][]string `json:"callers"`
+	// AliasCallers maps a bare name to the callers of dotted callees with that
+	// bare name ("Println" -> callers of "fmt.Println"). It is a lookup aid
+	// for names that do not resolve to a local symbol; it never contributes
+	// callers to a resolved local symbol, so a call to fmt.Println can never
+	// show up as a caller of an unrelated local Println (W2-15, W2-16).
+	AliasCallers map[string][]string `json:"alias_callers,omitempty"`
 	// Inherits maps a subtype's full name to its bases, each tagged with the
 	// edge kind ("extends:Animal", "implements:Pet", "embeds:Base"). InheritedBy
 	// is the reverse map (base -> subtypes) for find-implementations queries.
@@ -224,7 +230,7 @@ func Build(root string) (*Index, error) {
 		if rerr != nil {
 			return rerr
 		}
-		if !quickExt(rel) {
+		if !quickExt(rel) && filepath.Ext(rel) != "" {
 			return nil
 		}
 		src, serr := os.ReadFile(path)
@@ -280,37 +286,51 @@ func (ix *Index) addFile(rel string, src []byte) {
 		ix.Inherits[subtype] = append(ix.Inherits[subtype], bases...)
 	}
 	if pkg != nil {
-		ix.Pkgs[pkg.Path] = pkg
+		if existing, ok := ix.Pkgs[pkg.Path]; ok {
+			existing.Files = append(existing.Files, pkg.Files...)
+		} else {
+			ix.Pkgs[pkg.Path] = pkg
+		}
 	}
 }
 
 func (ix *Index) computeCallers() {
 	ix.Callers = map[string][]string{}
+	ix.AliasCallers = map[string][]string{}
 	for caller, callees := range ix.Calls {
-		seen := map[string]bool{}
 		for _, c := range callees {
 			if c == caller {
 				continue
 			}
-			simple := c
-			if i := strings.LastIndexByte(c, '.'); i >= 0 {
-				simple = c[i+1:]
+			// Canonical edge: recorded under the exact callee key.
+			ix.Callers[c] = append(ix.Callers[c], caller)
+			// Package-qualified local calls ("db.Open") are recorded under
+			// their qualified key, not the symbol's own key ("Open"); merge
+			// them onto the local symbol when the qualifier names the
+			// symbol's package directory. Foreign targets (fmt.Println) and
+			// unresolved receiver calls (v.M) never merge — that would forge
+			// phantom callers for unrelated same-named symbols (W2-15).
+			if d, ok := qualifiedCalleeSymbol(ix, c); ok && d.FullName() != c {
+				ix.Callers[d.FullName()] = append(ix.Callers[d.FullName()], caller)
 			}
-			if !seen[c] {
-				seen[c] = true
-				ix.Callers[c] = append(ix.Callers[c], caller)
-			}
-			// Also index by the bare method/function name so graph lookups by
-			// simple name work, but never alias a caller to itself (that would
-			// forge a self-caller edge when e.g. Bar calls Foo.Bar).
-			if simple != c && simple != caller && !seen[simple] {
-				seen[simple] = true
-				ix.Callers[simple] = append(ix.Callers[simple], caller)
+			// Lookup alias: a dotted callee is also recorded under its bare
+			// name so graph lookups by simple name find foreign or unresolved
+			// targets (fmt.Println -> "Println"). Aliases live in a separate
+			// map and are never merged into a local symbol's caller list —
+			// that would forge phantom callers for unrelated same-named
+			// symbols (W2-15: fmt.Println -> local Println; W2-16:
+			// Alpha.Save -> Beta.Save). Never alias a caller to itself (that
+			// would forge a self-caller edge when e.g. Start calls Server.Start).
+			if simple := simpleKey(c); simple != c && simple != caller {
+				ix.AliasCallers[simple] = append(ix.AliasCallers[simple], caller)
 			}
 		}
 	}
 	for k := range ix.Callers {
 		ix.Callers[k] = dedupeSorted(ix.Callers[k])
+	}
+	for k := range ix.AliasCallers {
+		ix.AliasCallers[k] = dedupeSorted(ix.AliasCallers[k])
 	}
 	// Reverse inheritance map: base name (and bare name) -> subtypes.
 	ix.InheritedBy = map[string][]string{}
@@ -428,32 +448,71 @@ func (ix *Index) CallSites(symbol string) []string {
 	return ix.Calls[symbol]
 }
 
-// edgeKeys returns the map keys under which a symbol's call edges may be
-// recorded: the bare name and, for methods, the "Type.Method" form.
+// simpleKey returns the part of a recorded callee key after the last '.'
+// ("" for a plain name).
+func simpleKey(c string) string {
+	if i := strings.LastIndexByte(c, '.'); i >= 0 {
+		return c[i+1:]
+	}
+	return c
+}
+
+// qualifiedCalleeSymbol resolves a dotted callee key like "db.Open" to the
+// local symbol whose package directory matches the qualifier. It returns
+// ok=false for foreign targets ("fmt.Println") and unresolved receiver calls
+// ("v.M"), whose callers must never be attributed to a local symbol of the
+// same bare name (W2-15).
+func qualifiedCalleeSymbol(ix *Index, c string) (Symbol, bool) {
+	i := strings.LastIndexByte(c, '.')
+	if i <= 0 || i+1 >= len(c) {
+		return Symbol{}, false
+	}
+	qualifier, bare := c[:i], c[i+1:]
+	for _, d := range ix.symbolsFor(bare) {
+		if filepath.Base(filepath.Dir(d.File)) == qualifier {
+			return d, true
+		}
+	}
+	return Symbol{}, false
+}
+
+// CallersFor returns deduplicated callers attributable to a local symbol. Only
+// the exact key ("Type.Method" for methods, the plain name otherwise) is
+// consulted: bare-name aliases are never merged in, because a simple name can
+// name many symbols (Alpha.Save vs Beta.Save) and foreign targets (fmt.Println)
+// would forge phantom callers (W2-15, W2-16).
+func (ix *Index) CallersFor(s Symbol) []string {
+	return dedupeSorted(ix.Callers[s.FullName()])
+}
+
+// CallersOfName returns callers for a possibly-unknown name (a foreign target
+// like "fmt.Println", or an unresolved receiver call like "v.M"). Exact
+// entries win; simple-name aliases are only consulted when the name matches
+// no local symbol, so a local Println never inherits callers of fmt.Println.
+func (ix *Index) CallersOfName(name string) []string {
+	if len(ix.symbolsFor(name)) > 0 {
+		return dedupeSorted(ix.Callers[name])
+	}
+	if exact := ix.Callers[name]; len(exact) > 0 {
+		return dedupeSorted(exact)
+	}
+	return dedupeSorted(ix.AliasCallers[name])
+}
+
+// CallsFor returns deduplicated callees recorded under the exact key of s.
+func (ix *Index) CallsFor(s Symbol) []string {
+	return dedupeSorted(ix.Calls[s.FullName()])
+}
+
+// edgeKeys returns the map keys under which a symbol's inheritance edges may
+// be recorded: the bare name and, for methods, the "Type.Method" form.
+// Inheritance keys only ever store type names (FullName == Name), so both
+// forms coincide.
 func edgeKeys(s Symbol) []string {
 	if fn := s.FullName(); fn != s.Name {
 		return []string{s.Name, fn}
 	}
 	return []string{s.Name}
-}
-
-// CallersFor returns deduplicated callers recorded under any key form of s
-// (bare name or "Type.Method").
-func (ix *Index) CallersFor(s Symbol) []string {
-	var out []string
-	for _, k := range edgeKeys(s) {
-		out = append(out, ix.Callers[k]...)
-	}
-	return dedupeSorted(out)
-}
-
-// CallsFor returns deduplicated callees recorded under any key form of s.
-func (ix *Index) CallsFor(s Symbol) []string {
-	var out []string
-	for _, k := range edgeKeys(s) {
-		out = append(out, ix.Calls[k]...)
-	}
-	return dedupeSorted(out)
 }
 
 // SupertypesOf returns the inheritance/implementation bases of a symbol as

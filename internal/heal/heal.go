@@ -206,17 +206,25 @@ var failLineRe = regexp.MustCompile(`(?m)^([^\s:][^:]+):(\d+)(?::\d+)?[: ]`)
 // failingFiles extracts relative file paths from compiler/test output and
 // keeps only those that exist under root. Paths are resolved against root
 // (not the process working directory) so `kern heal` is correct when invoked
-// from elsewhere.
+// from elsewhere. Absolute paths and paths escaping root via ".." are never
+// probed — untrusted tool output must not become a filesystem oracle (W2-32).
 func failingFiles(root, output string) []string {
 	seen := map[string]bool{}
 	var out []string
 	for _, m := range failLineRe.FindAllStringSubmatch(output, -1) {
 		p := filepath.Clean(strings.TrimPrefix(m[1], "./"))
-		if p == "." || p == "" {
+		if p == "." || p == "" || filepath.IsAbs(p) {
 			continue
 		}
-		if _, err := os.Stat(filepath.Join(root, p)); err != nil {
+		cand := filepath.Join(root, p)
+		if _, err := os.Stat(cand); err != nil {
 			continue
+		}
+		if root != "" {
+			rel, err := filepath.Rel(root, cand)
+			if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+				continue
+			}
 		}
 		if !seen[p] {
 			seen[p] = true

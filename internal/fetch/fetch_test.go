@@ -1,11 +1,21 @@
 package fetch
 
 import (
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 )
+
+// allowLoopback swaps in the guarded-but-loopback-tolerant dialer for tests
+// that run an httptest server on 127.0.0.1.
+func allowLoopback(t *testing.T) {
+	t.Helper()
+	old := dialContext
+	dialContext = guardedAllowLoopbackDialContext
+	t.Cleanup(func() { dialContext = old })
+}
 
 func TestHtmlToTextStripsMarkup(t *testing.T) {
 	html := `<html><head><title>Install Guide</title><style>body{color:red}</style></head>
@@ -39,6 +49,7 @@ func TestFetchRejectsNonHTTP(t *testing.T) {
 }
 
 func TestFetchRoundTrip(t *testing.T) {
+	allowLoopback(t)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html")
 		_, _ = w.Write([]byte(`<title>Docs</title><h1>Hello</h1><p>world</p>`))
@@ -55,6 +66,7 @@ func TestFetchRoundTrip(t *testing.T) {
 }
 
 func TestFetchCapsBody(t *testing.T) {
+	allowLoopback(t)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain")
 		_, _ = w.Write([]byte(strings.Repeat("a", 1000)))
@@ -66,6 +78,7 @@ func TestFetchCapsBody(t *testing.T) {
 }
 
 func TestFetchRejectsBinaryContentType(t *testing.T) {
+	allowLoopback(t)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/octet-stream")
 		_, _ = w.Write([]byte("zzz"))
@@ -73,5 +86,59 @@ func TestFetchRejectsBinaryContentType(t *testing.T) {
 	defer srv.Close()
 	if _, err := Fetch(srv.URL, 0); err == nil {
 		t.Fatal("binary content type must be rejected")
+	}
+}
+
+func TestFetchRejectsPrivateAddresses(t *testing.T) {
+	for _, u := range []string{
+		"http://127.0.0.1/x",
+		"http://localhost/x",
+		"http://[::1]/x",
+		"http://10.0.0.1/x",
+		"http://192.168.1.1/x",
+		"http://172.16.0.1/x",
+		"http://169.254.169.254/latest/meta-data/",
+	} {
+		if _, err := Fetch(u, 0); err == nil {
+			t.Fatalf("%s: expected private-address rejection", u)
+		}
+	}
+}
+
+func TestFetchRedirectToPrivateRejected(t *testing.T) {
+	allowLoopback(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "http://169.254.169.254/latest/meta-data/", http.StatusFound)
+	}))
+	defer srv.Close()
+	_, err := Fetch(srv.URL, 0)
+	if err == nil {
+		t.Fatal("redirect to private address must be rejected")
+	}
+	if !strings.Contains(err.Error(), "private address") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestPrivateIP(t *testing.T) {
+	cases := []struct {
+		ip   string
+		want bool
+	}{
+		{"127.0.0.1", true},
+		{"::1", true},
+		{"10.1.2.3", true},
+		{"172.16.0.1", true},
+		{"192.168.0.1", true},
+		{"169.254.169.254", true},
+		{"0.0.0.0", true},
+		{"8.8.8.8", false},
+		{"1.1.1.1", false},
+		{"93.184.216.34", false},
+	}
+	for _, c := range cases {
+		if got := privateIP(net.ParseIP(c.ip)); got != c.want {
+			t.Fatalf("privateIP(%s) = %v, want %v", c.ip, got, c.want)
+		}
 	}
 }

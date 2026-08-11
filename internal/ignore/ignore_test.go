@@ -167,6 +167,32 @@ func TestNestedAnchoredPattern(t *testing.T) {
 	}
 }
 
+func TestDoubleStarBareNameWithinSegment(t *testing.T) {
+	// ix-4: ** not followed by / must behave like * (within a single path
+	// segment), never crossing '/'.
+	m := &Matcher{rules: mustRules(t, "foo**bar")}
+	// foo**bar is treated as foo*bar (within-segment only).
+	if !m.Ignored("fooxbar") {
+		t.Error("foo**bar should match fooxbar")
+	}
+	if m.Ignored("foo/bar") {
+		t.Error("foo**bar must NOT match foo/bar (crosses segment)")
+	}
+}
+
+func TestNegationCannotReincludeUnderExcludedDir(t *testing.T) {
+	// ix-5: git cannot re-include a file under an excluded directory.
+	m := &Matcher{rules: mustRules(t, "build/", "!build/keep.go")}
+	if !m.Ignored("build/keep.go") {
+		t.Error("build/keep.go must stay ignored (parent dir excluded)")
+	}
+	// Negation that re-includes a file whose parent is NOT excluded still works.
+	m2 := &Matcher{rules: mustRules(t, "*.tmp", "!keep.tmp")}
+	if m2.Ignored("keep.tmp") {
+		t.Error("!keep.tmp must re-include keep.tmp when parent is not excluded")
+	}
+}
+
 func TestNegatedCharClass(t *testing.T) {
 	m := &Matcher{rules: mustRules(t, "file[!0-9].log")}
 	if !m.Ignored("fileA.log") {

@@ -204,6 +204,7 @@ type langSpec struct {
 	blockEnd    string // closes block, default "*/"
 	backtick    bool
 	triple      bool
+	heredoc     bool // Ruby-style <<~HEREDOC heredocs
 	rules       []declRule
 	entries     []entryRule
 	kw          map[string]bool
@@ -211,9 +212,9 @@ type langSpec struct {
 
 var (
 	identRe = `[A-Za-z_$][A-Za-z0-9_$]*`
-	// stripStringRe removes "..."/'...' literals (with backslash escapes).
-	stripStringRe = regexp.MustCompile(`"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'`)
-	backtickRe    = regexp.MustCompile("`(?:\\\\.|[^`\\\\])*`")
+	// heredocStartRe matches a Ruby heredoc opener like <<~HEREDOC, <<-TERM,
+	// or <<TERM, capturing the terminator identifier (group 1).
+	heredocStartRe = regexp.MustCompile(`<<(-?~?)([A-Za-z_]\w*)`)
 	// callRe matches callee chains like foo(, obj.method(, a.b.c(.
 	callRe = regexp.MustCompile(`\b([A-Za-z_$][A-Za-z0-9_$]*)(?:\.[A-Za-z_$][A-Za-z0-9_$]*)*\s*\(`)
 )
@@ -280,8 +281,8 @@ func init() {
 		{kind: "enum", re: regexp.MustCompile(`^\s*(?:typedef\s+)?enum\s+([A-Za-z_]\w*)`)},
 		{kind: "union", re: regexp.MustCompile(`^\s*(?:typedef\s+)?union\s+([A-Za-z_]\w*)`)},
 		{kind: "class", re: regexp.MustCompile(`^\s*class\s+([A-Za-z_]\w*)`)},
-		{kind: "method", isDef: true, recv: 1, re: regexp.MustCompile(`^\s*(?:(?:inline|static|virtual|constexpr)\s+)*(?:[A-Za-z_][\w<>&*\s]*\s+)?([A-Za-z_]\w*)::([A-Za-z_]\w*)\s*\([^;{}]*\)\s*(?:const\s*)?\{`)},
-		{kind: "func", isDef: true, re: regexp.MustCompile(`^\s*(?:(?:inline\s+|static\s+|virtual\s+|constexpr\s+|extern\s+"[^"]*"\s+)*[A-Za-z_][\w:<>*&\s]*\s+)?([A-Za-z_]\w*)\s*\([^;{}]*\)\s*(?:const\s*)?(?:override\s*)?(?:noexcept\s*)?\{`)},
+		{kind: "method", isDef: true, recv: 1, re: regexp.MustCompile(`^\s*(?:(?:inline|static|virtual|constexpr)\s+)*(?:[A-Za-z_][\w<>&*\s]*\s+)?([A-Za-z_]\w*)::([A-Za-z_]\w*)\s*\([^;{}]*\)\s*(?:const\s*)?(?:override\s*)?(?:noexcept\s*)?(?:\s*->\s*[^{]+?)?\s*\{`)},
+		{kind: "func", isDef: true, re: regexp.MustCompile(`^\s*(?:(?:inline\s+|static\s+|virtual\s+|constexpr\s+|extern\s+"[^"]*"\s+)*[A-Za-z_][\w:<>*&\s]*\s+)?([A-Za-z_]\w*)\s*\([^;{}]*\)\s*(?:const\s*)?(?:override\s*)?(?:noexcept\s*)?(?:\s*->\s*[^{]+?)?\s*\{`)},
 	}
 	cfamKw := kwSet("if", "else", "for", "while", "switch", "return", "sizeof", "do",
 		"case", "try", "catch", "throw", "new", "delete", "typeof", "const", "static",
@@ -386,7 +387,7 @@ func init() {
 		"cpp":        {lineComment: []string{"//"}, block: "/*", rules: cfam, kw: cfamKw},
 		"java":       {lineComment: []string{"//"}, block: "/*", rules: java, entries: entryRules["java"], kw: javaKw},
 		"csharp":     {lineComment: []string{"//"}, block: "/*", rules: csharp, kw: csKw},
-		"ruby":       {indent: true, lineComment: []string{"#"}, rules: ruby, entries: entryRules["ruby"], kw: rubyKw},
+		"ruby":       {indent: true, lineComment: []string{"#"}, heredoc: true, rules: ruby, entries: entryRules["ruby"], kw: rubyKw},
 		"php":        {lineComment: []string{"//", "#"}, block: "/*", rules: php, entries: entryRules["php"], kw: phpKw},
 		"shell":      {lineComment: []string{"#"}, rules: shell, kw: shKw},
 		"css":        {lineComment: nil, block: "/*", rules: css, kw: cssKw},
@@ -400,8 +401,9 @@ func init() {
 var specs map[string]*langSpec
 
 type stripState struct {
-	inBlock  bool
-	inTriple string // active triple-quote delimiter ("" = not inside one)
+	inBlock   bool
+	inTriple  string // active triple-quote delimiter ("" = not inside one)
+	inHeredoc string // Ruby heredoc terminator ("" = not in one)
 }
 
 type ffile struct {
@@ -454,73 +456,148 @@ func isCommentLine(trimmed string, spec *langSpec) bool {
 	return false
 }
 
+// stripLine removes comments, string literals and triple-quoted spans from a
+// line, returning the code that remains. State carried across lines (an open
+// block comment, an open triple string) lives in st. Scanning is strictly
+// left-to-right so no construct can poison the rest of the file: a comment
+// opener inside a string (`var s = "/*"`), a string inside a comment
+// (`// " */`), or one triple delimiter inside another
+// (`x = '''hello """world'''`) is consumed by its real container and never
+// starts a bogus span.
 func stripLine(ln string, spec *langSpec, st *stripState) string {
-	s := ln
+	// Finish a block comment opened on a previous line.
 	if st.inBlock {
-		if i := strings.Index(s, "*/"); i >= 0 {
-			s = s[i+2:]
-			st.inBlock = false
-		} else {
+		j := strings.Index(ln, "*/")
+		if j < 0 {
 			return ""
 		}
+		ln = ln[j+2:]
+		st.inBlock = false
 	}
-	if spec.block != "" {
-		blockEnd := spec.blockEnd
-		if blockEnd == "" {
-			blockEnd = "*/"
+	// Finish a triple string opened on a previous line.
+	if spec.triple && st.inTriple != "" {
+		j := strings.Index(ln, st.inTriple)
+		if j < 0 {
+			return ""
 		}
-		for {
-			start := strings.Index(s, spec.block)
-			if start < 0 {
-				break
-			}
-			end := strings.Index(s[start+len(spec.block):], blockEnd)
-			if end < 0 {
-				s = s[:start]
-				st.inBlock = true
-				break
-			}
-			s = s[:start] + s[start+len(spec.block)+end+len(blockEnd):]
-		}
+		ln = ln[j+len(st.inTriple):]
+		st.inTriple = ""
 	}
-	if spec.triple {
-		for _, d := range []string{`"""`, `'''`} {
-			if st.inTriple != "" {
-				// A triple string opened by the other delimiter must not be
-				// closed by this one (or truncated at it).
-				if st.inTriple != d {
-					continue
-				}
-				if idx := strings.Index(s, d); idx >= 0 {
-					s = s[idx+len(d):]
-					st.inTriple = ""
-				} else {
-					return ""
-				}
+	// Finish a Ruby heredoc opened on a previous line. The terminator
+	// must appear on its own line (trimmed). Everything inside the heredoc
+	// body is dropped so def/class rules never match fake code.
+	if spec.heredoc && st.inHeredoc != "" {
+		if strings.TrimSpace(ln) == st.inHeredoc {
+			st.inHeredoc = ""
+			return ""
+		}
+		return ""
+	}
+	blockEnd := spec.blockEnd
+	if blockEnd == "" {
+		blockEnd = "*/"
+	}
+	var b strings.Builder
+	i := 0
+	start := 0 // start of code not yet appended
+	drop := func(end int) {
+		b.WriteString(ln[start:i])
+		i = end
+		start = end
+	}
+	finish := func() string {
+		b.WriteString(ln[start:])
+		return b.String()
+	}
+	n := len(ln)
+	for i < n {
+		// Line comment: the rest of the line is dropped.
+		for _, c := range spec.lineComment {
+			if c != "" && strings.HasPrefix(ln[i:], c) {
+				b.WriteString(ln[start:i])
+				return b.String()
 			}
-			for strings.Contains(s, d) {
-				start := strings.Index(s, d)
-				end := strings.Index(s[start+len(d):], d)
-				if end < 0 {
-					s = s[:start]
-					st.inTriple = d
+		}
+		// Block comment.
+		if spec.block != "" && strings.HasPrefix(ln[i:], spec.block) {
+			if e := strings.Index(ln[i+len(spec.block):], blockEnd); e >= 0 {
+				drop(i + len(spec.block) + e + len(blockEnd))
+				continue
+			}
+			b.WriteString(ln[start:i])
+			st.inBlock = true
+			return b.String()
+		}
+		// Triple-quoted string (Python-style).
+		if spec.triple {
+			matched := false
+			for _, d := range []string{`"""`, `'''`} {
+				if strings.HasPrefix(ln[i:], d) {
+					matched = true
+					if e := strings.Index(ln[i+len(d):], d); e >= 0 {
+						drop(i + len(d) + e + len(d))
+					} else {
+						b.WriteString(ln[start:i])
+						st.inTriple = d
+						return b.String()
+					}
 					break
 				}
-				s = s[:start] + s[start+len(d)+end+len(d):]
+			}
+			if matched {
+				continue
 			}
 		}
-	}
-	s = stripStringRe.ReplaceAllString(s, `""`)
-	if spec.backtick {
-		s = backtickRe.ReplaceAllString(s, "``")
-	}
-	for _, c := range spec.lineComment {
-		if i := strings.Index(s, c); i >= 0 {
-			s = s[:i]
-			break
+		// Plain string or char literal, with backslash escapes.
+		if c := ln[i]; c == '"' || c == '\'' {
+			j := i + 1
+			for j < n {
+				if ln[j] == '\\' {
+					j += 2
+					if j > n {
+						j = n
+					}
+					continue
+				}
+				if ln[j] == c {
+					break
+				}
+				j++
+			}
+			if j >= n {
+				// Unterminated on this line: treat the rest as a string so a
+				// stray `/*`, `//` or quote inside it can't poison the scan.
+				b.WriteString(ln[start:i])
+				return b.String()
+			}
+			drop(j + 1)
+			continue
 		}
+		// Template literal (JavaScript/TypeScript).
+		if spec.backtick && ln[i] == '`' {
+			if e := strings.IndexByte(ln[i+1:], '`'); e >= 0 {
+				drop(i + 1 + e + 1)
+				continue
+			}
+			b.WriteString(ln[start:i])
+			return b.String()
+		}
+		// Ruby heredoc opener: <<IDENT, <<-IDENT, <<~IDENT.
+		// Not preceded by an identifier char to avoid matching left-shift
+		// (x << y, where the regex won't match due to the space, but
+		// x <<y without space is still treated as heredoc — acceptable
+		// edge case).
+		if spec.heredoc && ln[i] == '<' && i+1 < n && ln[i+1] == '<' &&
+			(i == 0 || !isIdentChar(ln[i-1])) {
+			if m := heredocStartRe.FindStringSubmatch(ln[i:]); m != nil {
+				b.WriteString(ln[start:i])
+				st.inHeredoc = m[2]
+				return b.String()
+			}
+		}
+		i++
 	}
-	return s
+	return finish()
 }
 
 func braceDelta(clean string) (opens, closes int) {
@@ -533,6 +610,10 @@ func braceDelta(clean string) (opens, closes int) {
 		}
 	}
 	return
+}
+
+func isIdentChar(c byte) bool {
+	return c == '_' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
 }
 
 func leadingSpaces(s string) int {
@@ -592,6 +673,11 @@ func extractForeign(rel string, src []byte, lang string) ([]Symbol, map[string][
 		if trimmed == "" || f.com[i] {
 			continue
 		}
+		// Skip lines whose stripped form is empty (code inside heredocs,
+		// block comments, or triple strings produces no clean code).
+		if strings.TrimSpace(f.clean[i]) == "" {
+			continue
+		}
 		rule, m := matchRule(f.lines[i], spec)
 		if rule == nil {
 			continue
@@ -623,7 +709,7 @@ func extractForeign(rel string, src []byte, lang string) ([]Symbol, map[string][
 		}
 		if rule.isDef {
 			if bodyEnd > 0 {
-				for j := i + 1; j < bodyEnd && j < n; j++ {
+				for j := i; j < bodyEnd && j < n; j++ {
 					scanCalls(f, j, sym.FullName(), calls, spec)
 				}
 			}
@@ -674,12 +760,24 @@ func bodyEndFor(i int, f *ffile, spec *langSpec) int {
 		return len(f.lines)
 	}
 	base := f.preD[i]
+	// The body opens when depth first exceeds base. If the opening brace is
+	// on the declaration line itself (postD[i] > base), the body starts
+	// here. Otherwise the brace may be on a subsequent line (e.g.
+	// "class Foo\nextends Bar\n{") and we must skip past header lines
+	// until depth exceeds base.
+	started := f.postD[i] > base
 	for j := i + 1; j < len(f.lines); j++ {
-		if f.postD[j] <= base {
+		if !started && f.postD[j] > base {
+			started = true
+		}
+		if started && f.postD[j] <= base {
 			return j
 		}
 	}
-	return len(f.lines)
+	if started {
+		return len(f.lines)
+	}
+	return i + 1
 }
 
 func enclosingType(line int, types []typeDecl) string {
@@ -696,22 +794,19 @@ func enclosingType(line int, types []typeDecl) string {
 }
 
 func scanCalls(f *ffile, i int, owner string, calls map[string][]string, spec *langSpec) {
-	line := f.lines[i]
-	trimmed := strings.TrimSpace(line)
+	trimmed := strings.TrimSpace(f.lines[i])
 	if trimmed == "" || f.com[i] {
 		return
 	}
 	if strings.HasPrefix(trimmed, "#") || strings.HasPrefix(trimmed, "@") {
 		return
 	}
-	for r := range spec.rules {
-		rule := &spec.rules[r]
-		if rule.isDef || typeKinds[rule.kind] {
-			if rule.re.MatchString(line) {
-				return
-			}
-		}
-	}
+	// We intentionally do NOT early-return on declaration lines. A line can
+	// contain both a declaration and calls (e.g. foo(function cb(){})), and
+	// same-line bodies (function foo() { return bar() }) have calls on the
+	// decl line. The self-call check below (full == owner) prevents the
+	// declared name itself from being recorded, and keywords are filtered
+	// separately.
 	for _, m := range callRe.FindAllStringSubmatch(f.clean[i], -1) {
 		first := m[1]
 		full := strings.TrimSpace(strings.TrimSuffix(m[0], "("))

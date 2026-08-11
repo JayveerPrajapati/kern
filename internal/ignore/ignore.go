@@ -150,15 +150,19 @@ func globToRegexp(p string) string {
 		switch c := p[i]; c {
 		case '*':
 			if i+1 < len(p) && p[i+1] == '*' {
-				// ** matches across path separators (git semantics: matches
-				// zero or more complete path segments).
+				// ** is only special when followed by '/' (matches zero or
+				// more complete path segments). In any other position git
+				// treats ** as two consecutive * wildcards, which is
+				// equivalent to a single * (matches within one segment).
 				if i+2 < len(p) && p[i+2] == '/' {
 					b.WriteString("(?:.*/)?")
 					i += 3
 					continue
 				}
-				b.WriteString(".*")
-				i += 2
+				// ** without a trailing / collapses to a single * per git:
+				// it matches within a single path segment, never across '/'.
+				b.WriteString("[^/]*")
+				i++
 				continue
 			}
 			b.WriteString("[^/]*")
@@ -203,6 +207,11 @@ func globToRegexp(p string) string {
 // Directory-only patterns exclude every path beneath the matching directory.
 // The last matching rule wins, so a deeper negation re-includes an earlier
 // ignore (and a deeper ignore beats a shallower one).
+//
+// Git semantics: a negation pattern ("!…") cannot re-include a file if any of
+// its ancestor directories is excluded by an earlier rule, because git does
+// not descend into excluded directories. This prevents "build/keep.go" from
+// being re-included when "build/" is ignored.
 func (m *Matcher) Ignored(rel string) bool {
 	rel = strings.TrimPrefix(filepath.ToSlash(rel), "./")
 	if rel == "" {
@@ -214,9 +223,37 @@ func (m *Matcher) Ignored(rel string) bool {
 		if !ok || !sr.re.MatchString(sub) {
 			continue
 		}
+		if sr.negated && ignored {
+			// Git cannot re-include a file under an excluded directory.
+			if m.ancestorExcluded(rel) {
+				continue
+			}
+		}
 		ignored = !sr.negated
 	}
 	return ignored
+}
+
+// ancestorExcluded reports whether any ancestor directory of rel is excluded
+// by a non-negated rule. In git, excluded directories are not descended into,
+// so a negation pattern cannot re-include files beneath them.
+func (m *Matcher) ancestorExcluded(rel string) bool {
+	for {
+		slash := strings.LastIndexByte(rel, '/')
+		if slash <= 0 {
+			return false
+		}
+		rel = rel[:slash] // parent directory
+		for _, sr := range m.rules {
+			if sr.negated {
+				continue
+			}
+			sub, ok := under(sr.dir, rel)
+			if ok && sr.re.MatchString(sub) {
+				return true
+			}
+		}
+	}
 }
 
 // under returns rel relativized to dir (dir "" means root) and whether rel

@@ -24,10 +24,11 @@ var SkipDirs = map[string]bool{".git": true, ".hg": true, ".svn": true, "node_mo
 
 // Snap is a point-in-time copy of a tree used for rollback.
 type Snap struct {
-	root  string
-	tmp   string
-	files []string
-	dirs  map[string]bool // relative paths of directories that existed at snapshot time
+	root    string
+	tmp     string
+	files   []string
+	skipped map[string]bool // pre-existing files not copied (size cap / read errors); never deleted on restore
+	dirs    map[string]bool // relative paths of directories that existed at snapshot time
 }
 
 // Snapshot copies root into a temp directory and returns a Snap.
@@ -36,7 +37,7 @@ func Snapshot(root string) (*Snap, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := &Snap{root: root, tmp: tmp, dirs: map[string]bool{}}
+	s := &Snap{root: root, tmp: tmp, skipped: map[string]bool{}, dirs: map[string]bool{}}
 	var bytes int64
 	err = filepath.WalkDir(root, func(p string, d fs.DirEntry, werr error) error {
 		if werr != nil {
@@ -63,13 +64,19 @@ func Snapshot(root string) (*Snap, error) {
 		}
 		info, ierr := d.Info()
 		if ierr != nil {
+			s.skipped[rel] = true
 			return nil
 		}
 		if bytes+info.Size() > maxSnapshotBytes {
-			return fs.SkipDir
+			// Skip this file but keep walking: it is pre-existing, so a
+			// rollback must never remove it. Skipping the rest of the dir
+			// (fs.SkipDir) would silently exclude its other files too.
+			s.skipped[rel] = true
+			return nil
 		}
 		data, rerr := os.ReadFile(p)
 		if rerr != nil {
+			s.skipped[rel] = true
 			return nil
 		}
 		bytes += int64(len(data))
@@ -121,6 +128,8 @@ func (s *Snap) Restore() error {
 	// Remove anything new under root that wasn't in the snapshot. Ignored
 	// dirs are still skipped: their contents are not snapshotted, so deleting
 	// them would destroy pre-existing state (or VCS data) we cannot restore.
+	// Files skipped at snapshot time (size cap / read errors) are also never
+	// removed: they pre-date the run, and rollback cannot restore them.
 	_ = filepath.WalkDir(s.root, func(p string, d fs.DirEntry, werr error) error {
 		if werr != nil {
 			return nil
@@ -135,7 +144,7 @@ func (s *Snap) Restore() error {
 			}
 			return nil
 		}
-		if !existed[rel] {
+		if !existed[rel] && !s.skipped[rel] {
 			record(os.Remove(p))
 		}
 		return nil

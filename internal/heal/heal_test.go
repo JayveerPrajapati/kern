@@ -87,3 +87,17 @@ func TestFailingFilesExtractsValidPaths(t *testing.T) {
 		t.Fatalf("expected only broken.go, got %+v", files)
 	}
 }
+
+// TestFailingFilesNeverProbesOutsideRoot verifies absolute paths and ".."
+// escapes in tool output are ignored: untrusted output must not become a
+// filesystem oracle (W2-32).
+func TestFailingFilesNeverProbesOutsideRoot(t *testing.T) {
+	root := t.TempDir()
+	_ = os.WriteFile(filepath.Join(root, "broken.go"), []byte("x"), 0o644)
+	outside := filepath.Join(t.TempDir(), "secret.go")
+	_ = os.WriteFile(outside, []byte("x"), 0o644)
+	files := failingFiles(root, outside+":1:1: err\n../secret.go:1:1: err\n./broken.go:1:1: err")
+	if len(files) != 1 || files[0] != "broken.go" {
+		t.Fatalf("expected only broken.go (no absolute/escape probes), got %+v", files)
+	}
+}

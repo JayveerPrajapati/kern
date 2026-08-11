@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -69,6 +70,7 @@ func TestToolCallCoverage(t *testing.T) {
 }
 
 func TestDocFetchMergesIntoLocalIndex(t *testing.T) {
+	t.Setenv("KERN_ALLOW_LOOPBACK_FETCH", "1")
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html")
 		_, _ = w.Write([]byte(`<title>Widgets API</title>
@@ -105,6 +107,8 @@ func TestProgressNotificationsBeforeResult(t *testing.T) {
 	in := strings.NewReader(req + "\n")
 	buf := &bytes.Buffer{}
 	s := NewServer(in, buf)
+	// Test root is a temp dir outside the process cwd; confine to everything.
+	s.roots = []string{"/"}
 	if err := s.Serve(); err != nil {
 		t.Fatalf("Serve: %v", err)
 	}
@@ -279,4 +283,77 @@ func splitNonEmpty(s string) []string {
 		}
 	}
 	return out
+}
+
+func TestRootConfinementDefaultCwd(t *testing.T) {
+	s := NewServer(strings.NewReader(""), io.Discard)
+	if len(s.roots) != 1 {
+		t.Fatalf("default server should have exactly one root (cwd), got %v", s.roots)
+	}
+	outside := t.TempDir()
+	if err := s.checkWithinWorkspace(outside); err == nil {
+		t.Fatalf("temp dir %q must be rejected by a default (cwd-confined) server", outside)
+	}
+	if err := s.checkWithinWorkspace("."); err != nil {
+		t.Fatalf("cwd must be allowed: %v", err)
+	}
+}
+
+func TestRootConfinementEnvAndSymlink(t *testing.T) {
+	ws := t.TempDir()
+	other := t.TempDir()
+	t.Setenv("KERN_ROOTS", ws)
+	s := NewServer(strings.NewReader(""), io.Discard)
+	if len(s.roots) != 1 {
+		t.Fatalf("KERN_ROOTS should yield exactly one root, got %v", s.roots)
+	}
+	if err := s.checkWithinWorkspace(ws); err != nil {
+		t.Fatalf("workspace root must be allowed: %v", err)
+	}
+	if err := s.checkWithinWorkspace(filepath.Join(ws, "sub", "new")); err != nil {
+		t.Fatalf("nonexistent descendant of workspace root must be allowed: %v", err)
+	}
+	if err := s.checkWithinWorkspace(other); err == nil {
+		t.Fatal("dir outside KERN_ROOTS must be rejected")
+	}
+	// A symlink inside the workspace that points outside must be rejected: its
+	// text lives inside, its target does not.
+	link := filepath.Join(ws, "escape")
+	if err := os.Symlink(other, link); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.checkWithinWorkspace(link); err == nil {
+		t.Fatal("symlink escaping the workspace must be rejected")
+	}
+	// And a symlink pointing back into the workspace stays allowed.
+	link2 := filepath.Join(other, "back")
+	if err := os.Symlink(ws, link2); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.checkWithinWorkspace(link2); err != nil {
+		t.Fatalf("symlink into the workspace must be allowed: %v", err)
+	}
+}
+
+func TestRootConfinementBlocksRunBuildDir(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	root := mcpProject(t)
+	s := NewServer(strings.NewReader(""), io.Discard) // confined to cwd
+	ctx := context.Background()
+	_, err := s.runTool(ctx, "1", "kern_run_build", map[string]any{"command": "cat /etc/passwd", "dir": root})
+	if err == nil || !strings.Contains(err.Error(), "outside the allowed workspace") {
+		t.Fatalf("expected workspace confinement error, got %v", err)
+	}
+	_, err = s.runTool(ctx, "1", "kern_sandbox", map[string]any{"root": root, "command": "echo hi"})
+	if err == nil || !strings.Contains(err.Error(), "outside the allowed workspace") {
+		t.Fatalf("expected sandbox confinement error, got %v", err)
+	}
+	// Same server, workspace extended to the project root: both allowed.
+	s.roots = []string{root}
+	if _, err := s.runTool(ctx, "1", "kern_sandbox", map[string]any{"root": root, "command": "echo hi"}); err != nil {
+		t.Fatalf("sandbox inside workspace should run: %v", err)
+	}
+	if _, err := s.runTool(ctx, "1", "kern_run_build", map[string]any{"command": "echo ok", "dir": root}); err != nil {
+		t.Fatalf("run_build inside workspace should run: %v", err)
+	}
 }

@@ -6,6 +6,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/url"
@@ -716,6 +717,9 @@ type Server struct {
 	inflight  map[string]context.CancelFunc
 	sessions  map[string]*project.Session
 	transport string // "stdio" (default) or "http"
+	// roots are the workspace roots every tool root/dir argument is confined
+	// to (W2-29): KERN_ROOTS when set, else the server's startup directory.
+	roots []string
 	// lastIndex is the symbol index loaded during the current tool call, used
 	// to stamp provenance (symbols/edges/packages/freshness) onto the response.
 	lastIndex *index.Index
@@ -728,7 +732,112 @@ type Server struct {
 func NewServer(in io.Reader, out io.Writer) *Server {
 	sc := bufio.NewScanner(in)
 	sc.Buffer(make([]byte, 4<<20), 4<<20)
-	return &Server{in: sc, out: out, locks: map[string]*lock.Lock{}, inflight: map[string]context.CancelFunc{}, sessions: map[string]*project.Session{}, transport: "stdio", commits: map[string]string{}}
+	return &Server{in: sc, out: out, locks: map[string]*lock.Lock{}, inflight: map[string]context.CancelFunc{}, sessions: map[string]*project.Session{}, transport: "stdio", roots: defaultWorkspaceRoots(), commits: map[string]string{}}
+}
+
+// defaultWorkspaceRoots returns the roots tools may target: the KERN_ROOTS
+// list (colon- or comma-separated) when set, else the directory the server was
+// started in. Every tool root/dir is confined to these so a compromised or
+// prompt-injected client cannot point write/exec tools at arbitrary
+// directories (W2-29).
+func defaultWorkspaceRoots() []string {
+	var roots []string
+	if env := os.Getenv("KERN_ROOTS"); env != "" {
+		for _, r := range strings.FieldsFunc(env, func(r rune) bool { return r == ':' || r == ',' }) {
+			r = strings.TrimSpace(r)
+			if r != "" {
+				roots = append(roots, resolveAbs(r))
+			}
+		}
+	}
+	if len(roots) == 0 {
+		if cwd, err := os.Getwd(); err == nil {
+			roots = []string{resolveAbs(cwd)}
+		}
+	}
+	return roots
+}
+
+// resolveAbs cleans p to an absolute path.
+func resolveAbs(p string) string {
+	if abs, err := filepath.Abs(p); err == nil {
+		return filepath.Clean(abs)
+	}
+	return filepath.Clean(p)
+}
+
+// checkRootArg rejects any non-empty root/dir tool argument that resolves
+// outside the server's workspace roots. Called once per tool call before
+// dispatch so confinement cannot be forgotten for a new tool.
+func (s *Server) checkRootArg(args map[string]any) error {
+	for _, key := range []string{"root", "dir"} {
+		v := argString(args, key)
+		if v == "" {
+			continue
+		}
+		if err := s.checkWithinWorkspace(v); err != nil {
+			return fmt.Errorf("%s %q: %w", key, v, err)
+		}
+	}
+	return nil
+}
+
+// checkWithinWorkspace reports whether p (absolute or relative) resolves
+// inside one of the workspace roots, following symlinks. The resolved target
+// must be the root itself or a descendant; a symlink pointing outside is
+// rejected even though its text lives inside.
+func (s *Server) checkWithinWorkspace(p string) error {
+	real, err := realPath(p)
+	if err != nil {
+		return err
+	}
+	for _, r := range s.roots {
+		rr, err := realPath(r)
+		if err != nil {
+			return err
+		}
+		if real == rr || within(rr, real) {
+			return nil
+		}
+	}
+	var roots []string
+	for _, r := range s.roots {
+		roots = append(roots, resolveAbs(r))
+	}
+	return fmt.Errorf("outside the allowed workspace (roots: %s)", strings.Join(roots, ", "))
+}
+
+// realPath resolves p to an absolute, symlink-resolved path. For paths that do
+// not exist yet it resolves the nearest existing ancestor and re-appends the
+// remaining components.
+func realPath(p string) (string, error) {
+	abs := resolveAbs(p)
+	var rem []string
+	probe := abs
+	for {
+		real, err := filepath.EvalSymlinks(probe)
+		if err == nil {
+			if len(rem) == 0 {
+				return real, nil
+			}
+			return filepath.Join(append([]string{real}, rem...)...), nil
+		}
+		parent := filepath.Dir(probe)
+		if parent == probe {
+			return abs, fmt.Errorf("cannot resolve %q", p)
+		}
+		rem = append([]string{filepath.Base(probe)}, rem...)
+		probe = parent
+	}
+}
+
+// within reports whether child is parent or a descendant of parent.
+func within(parent, child string) bool {
+	rel, err := filepath.Rel(parent, child)
+	if err != nil {
+		return false
+	}
+	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && !filepath.IsAbs(rel)
 }
 
 type rpcRequest struct {
@@ -835,6 +944,15 @@ func (s *Server) cancelAll() {
 // a signal handler or after Serve returns.
 func (s *Server) CancelAll() { s.cancelAll() }
 
+// Inflight returns the number of tool calls currently registered as
+// in-flight. Graceful shutdown polls it after CancelAll so it can wait for
+// cancelled tools to drain their responses before exiting.
+func (s *Server) Inflight() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.inflight)
+}
+
 // registerInflight stores the cancel func for a request id so $/cancelRequest
 // and graceful shutdown can abort it.
 func (s *Server) registerInflight(id string, cancel context.CancelFunc) {
@@ -855,6 +973,8 @@ func (s *Server) unregisterInflight(id string) {
 
 // Serve runs until the stream ends.
 func (s *Server) Serve() error {
+	var wg sync.WaitGroup
+	defer wg.Wait() // drain in-flight tool calls before returning on EOF
 	for s.in.Scan() {
 		line := s.in.Bytes()
 		if len(line) == 0 {
@@ -868,22 +988,42 @@ func (s *Server) Serve() error {
 			}
 			continue
 		}
-		resp := func() (r any) {
-			defer func() {
-				if rec := recover(); rec != nil {
-					r = errorResponse(req.ID, -32603, fmt.Sprintf("internal error: %v", rec))
-					fmt.Fprintf(os.Stderr, "kern-mcp: panic serving %s: %v\n%s\n", req.Method, rec, debug.Stack())
+		if req.Method == "tools/call" {
+			// Run tools concurrently so a slow tool (build, heal, LLM
+			// optimize) can never freeze the stdio server: $/cancelRequest,
+			// progress and other tool calls keep being served while it runs.
+			// Response writes are serialized by s.write's mutex, and the
+			// request is captured by value so the loop can move on.
+			wg.Add(1)
+			go func(req rpcRequest) {
+				defer wg.Done()
+				if resp := s.safeDispatch(req); resp != nil {
+					if err := s.write(resp); err != nil {
+						fmt.Fprintf(os.Stderr, "kern-mcp: write response: %v\n", err)
+					}
 				}
-			}()
-			return s.dispatch(req)
-		}()
-		if resp != nil {
+			}(req)
+			continue
+		}
+		if resp := s.safeDispatch(req); resp != nil {
 			if err := s.write(resp); err != nil {
 				return err
 			}
 		}
 	}
 	return s.in.Err()
+}
+
+// safeDispatch computes a request's response, converting any panic into an
+// internal-error response instead of crashing the server.
+func (s *Server) safeDispatch(req rpcRequest) (r any) {
+	defer func() {
+		if rec := recover(); rec != nil {
+			r = errorResponse(req.ID, -32603, fmt.Sprintf("internal error: %v", rec))
+			fmt.Fprintf(os.Stderr, "kern-mcp: panic serving %s: %v\n%s\n", req.Method, rec, debug.Stack())
+		}
+	}()
+	return s.dispatch(req)
 }
 
 // Close stops all background file watchers associated with this server's
@@ -1198,6 +1338,9 @@ func (s *Server) runTool(ctx context.Context, id string, name string, args map[s
 	if !toolAllowed(s.filteredTools(), name) {
 		return "", fmt.Errorf("tool %q is not allowed (KERN_TOOLS allowlist)", name)
 	}
+	if err := s.checkRootArg(args); err != nil {
+		return "", err
+	}
 	switch name {
 	case "kern_optimize_prompt":
 		prompt := argString(args, "prompt")
@@ -1463,6 +1606,8 @@ func (s *Server) runTool(ctx context.Context, id string, name string, args map[s
 		}
 		if name == "" {
 			name = docSearchSlug(rawURL)
+		} else if name, err = sanitizeDocName(name); err != nil {
+			return "", err
 		}
 		if err := os.MkdirAll(cache.Path("data", "docs-fetch"), 0o755); err != nil {
 			return "", err
@@ -1846,7 +1991,11 @@ func (s *Server) runTool(ctx context.Context, id string, name string, args map[s
 		}
 		stop := s.startProgress(ctx, id, "kern_run_build")
 		defer stop()
-		res, err := optimize.RunBuild(ctx, cmd, argString(args, "dir"), optimize.Options{})
+		// Bound the build so a hanging command cannot hold the server: builds
+		// and tests can legitimately take minutes, but never forever.
+		bctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+		defer cancel()
+		res, err := optimize.RunBuild(bctx, cmd, argString(args, "dir"), optimize.Options{})
 		if err != nil {
 			return "", err
 		}
@@ -2549,8 +2698,14 @@ func (s *Server) runTool(ctx context.Context, id string, name string, args map[s
 		}
 		lk, err := lock.Acquire(root, scope)
 		if err != nil {
-			_, pid, _ := lock.Held(root, scope)
-			return "", fmt.Errorf("lock %q is held (pid %d)", scope, pid)
+			// Only a genuine contention is "held (pid N)"; every other
+			// Acquire failure (bad scope, unwritable root) is reported as
+			// what it is (W2-33).
+			if errors.Is(err, lock.ErrLocked) {
+				_, pid, _ := lock.Held(root, scope)
+				return "", fmt.Errorf("lock %q is held (pid %d)", scope, pid)
+			}
+			return "", err
 		}
 		s.mu.Lock()
 		if s.locks == nil {
@@ -2957,15 +3112,13 @@ func clip(s string, n int) string {
 	return s[:n] + "…"
 }
 
-// docSearchSlug derives a filesystem-safe doc name from a URL, e.g.
-// https://react.dev/reference/usestate -> react.dev-reference-usestate.
-func docSearchSlug(rawURL string) string {
-	u, err := url.Parse(rawURL)
-	if err != nil {
-		return "doc"
-	}
-	name := u.Hostname() + u.Path
-	name = strings.TrimSuffix(name, "/")
+// sanitizeDocName constrains a doc name to a safe cache filename:
+// lowercase alphanumerics and dashes only. Path separators, dot-dot and
+// other punctuation are replaced (or collapse to nothing), so a name can
+// never escape the cache root via ../ or produce a bogus index key.
+// Empty input yields an error.
+func sanitizeDocName(name string) (string, error) {
+	name = strings.TrimSpace(name)
 	var b strings.Builder
 	lastDash := false
 	for _, r := range name {
@@ -2982,6 +3135,21 @@ func docSearchSlug(rawURL string) string {
 		}
 	}
 	if out := strings.Trim(b.String(), "-"); out != "" {
+		return out, nil
+	}
+	return "", fmt.Errorf("invalid doc name %q", name)
+}
+
+// docSearchSlug derives a filesystem-safe doc name from a URL, e.g.
+// https://react.dev/reference/usestate -> react-dev-reference-usestate.
+func docSearchSlug(rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return "doc"
+	}
+	name := u.Hostname() + u.Path
+	name = strings.TrimSuffix(name, "/")
+	if out, err := sanitizeDocName(name); err == nil {
 		return out
 	}
 	return "doc"

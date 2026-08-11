@@ -31,6 +31,36 @@ func TestSnapshotRestore(t *testing.T) {
 	}
 }
 
+// TestRestoreKeepsFilesOverSizeCap: files too big to snapshot must survive a
+// rollback untouched — previously the size-cap fs.SkipDir left them out of the
+// snapshot and Restore deleted them as "new" (silent data loss).
+func TestRestoreKeepsFilesOverSizeCap(t *testing.T) {
+	root := t.TempDir()
+	big := make([]byte, maxSnapshotBytes+1)
+	_ = os.WriteFile(filepath.Join(root, "big.dat"), big, 0o644)
+	_ = os.WriteFile(filepath.Join(root, "small.txt"), []byte("original"), 0o644)
+	snap, err := Snapshot(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer snap.Close()
+	if len(snap.files) != 1 || snap.files[0] != "small.txt" {
+		t.Fatalf("expected only small.txt snapshotted, got %v", snap.files)
+	}
+	// A failed run must leave big.dat alone: it pre-dates the run and was
+	// never copied into the snapshot, so deleting it would lose data.
+	if err := snap.Restore(); err != nil {
+		t.Fatal(err)
+	}
+	if fi, err := os.Stat(filepath.Join(root, "big.dat")); err != nil || fi.Size() != int64(len(big)) {
+		t.Fatalf("big.dat deleted or truncated by restore: %v", err)
+	}
+	b, _ := os.ReadFile(filepath.Join(root, "small.txt"))
+	if string(b) != "original" {
+		t.Fatalf("small.txt not restored: %q", b)
+	}
+}
+
 func TestRunRestoresOnFailure(t *testing.T) {
 	root := t.TempDir()
 	_ = os.WriteFile(filepath.Join(root, "data.txt"), []byte("pristine"), 0o644)

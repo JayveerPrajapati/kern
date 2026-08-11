@@ -47,6 +47,7 @@ func ServeHTTPContext(ctx context.Context, addr string) error {
 		inflight:  map[string]context.CancelFunc{},
 		sessions:  map[string]*project.Session{},
 		transport: "http",
+		roots:     defaultWorkspaceRoots(),
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/mcp", srv.handleHTTP)

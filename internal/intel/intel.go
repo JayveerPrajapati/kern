@@ -117,12 +117,28 @@ func isTestFile(rel string) bool {
 }
 
 // isEntryPoint reports whether a symbol name is conventionally an entry point.
+// Only the final segment matters ("Server.Run" is an entry point because it
+// is named Run; delete.go and dead.go therefore agree on the same symbol,
+// W2-22).
 func isEntryPoint(name string) bool {
+	if i := strings.LastIndexByte(name, '.'); i >= 0 {
+		name = name[i+1:]
+	}
 	switch name {
 	case "main", "init", "run", "Run", "Main", "setup", "Setup", "start", "Start":
 		return true
 	}
 	return false
+}
+
+// simpleName returns the part of a name after the last '.' ("" for a plain
+// name). It is used for display and deduplication only — attribution never
+// matches on simple names (W2-15..W2-18).
+func simpleName(name string) string {
+	if i := strings.LastIndexByte(name, '.'); i >= 0 {
+		return name[i+1:]
+	}
+	return name
 }
 
 // buildFileMap returns symbol -> source file for every indexed symbol.

@@ -4,6 +4,7 @@
 package budget
 
 import (
+	"regexp"
 	"strings"
 
 	"github.com/JayveerPrajapati/kern/internal/tokenize"
@@ -81,6 +82,9 @@ func isImportant(line string) bool {
 	if len(low) > 120 {
 		return true // very long lines usually carry data (paths, hashes)
 	}
+	if isStackFrame(line) {
+		return true
+	}
 	for _, w := range importantWords {
 		if strings.Contains(low, w) {
 			return true
@@ -88,6 +92,27 @@ func isImportant(line string) bool {
 	}
 	return false
 }
+
+// isStackFrame recognises typical Go/Python stack-frame and trace lines so
+// they are kept by Fit even when they do not contain a keyword (W2-50).
+func isStackFrame(line string) bool {
+	if line == "" {
+		return false
+	}
+	// Indented frame bodies (Go frames, Python "  File ...", etc.).
+	if line[0] == '\t' || line[0] == ' ' {
+		if strings.Contains(line, "File ") || strings.Contains(line, "line ") {
+			return true
+		}
+		// Go: func.go:45 +0x1a0 ; runtime.main(0x...)
+		if frameRe.MatchString(line) {
+			return true
+		}
+	}
+	return false
+}
+
+var frameRe = regexp.MustCompile(`[a-zA-Z_][\w./\-]*\([^)]*(?:\b[\w./\-]+\.go|\.py|\.js|\.ts|\.rb|\.java|\.c|\.cpp):0*[1-9]\d*`)
 
 // FitLossless is a strict variant: it only removes duplicates and trailing
 // noise, never truncates semantics. Use when maxTokens <= 0.

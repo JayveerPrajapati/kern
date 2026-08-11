@@ -54,6 +54,21 @@ func TestWarmDocsWhenMissing(t *testing.T) {
 	}
 }
 
+func TestWarmSkipsAgentConfigDirs(t *testing.T) {
+	// ix-12: precache must skip the same agent/tooling dirs as the index.
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	root := t.TempDir()
+	_ = os.WriteFile(filepath.Join(root, "a.go"), []byte("package a\n"), 0o644)
+	for _, dir := range []string{".venv", "__pycache__", ".next", "target", ".opencode"} {
+		_ = os.MkdirAll(filepath.Join(root, dir), 0o755)
+		_ = os.WriteFile(filepath.Join(root, dir, "junk.go"), []byte("package junk\n"), 0o644)
+	}
+	rep := Warm(root)
+	if rep.Warmed != 1 {
+		t.Fatalf("expected only a.go warmed, got %+v", rep)
+	}
+}
+
 func TestWatchStops(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	root := t.TempDir()
