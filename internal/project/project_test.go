@@ -210,3 +210,31 @@ func TestWatchDetectsModification(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 	}
 }
+
+func TestWatchRebuildsAreSerialized(t *testing.T) {
+	// ix-11: concurrent rebuild triggers must be serialized so prev map
+	// access has no data race. The race detector (go test -race) is the
+	// primary check here — it flags any unsynchronized read/write of prev.
+	dir := t.TempDir()
+	src := "package main\n\nfunc hello() {}\n"
+	if err := os.WriteFile(filepath.Join(dir, "main.go"), []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+
+	var mu sync.Mutex
+	var changeCount int
+	var done = make(chan struct{})
+	go Watch(ctx, dir, 20*time.Millisecond, func(changes []index.Change, ix *index.Index) {
+		mu.Lock()
+		changeCount++
+		mu.Unlock()
+		select {
+		case <-done:
+		default:
+			close(done)
+		}
+	}, nil)
+	<-done
+}

@@ -118,7 +118,8 @@ Usage:
                                                  under .kern/rename-backup/ and transactional rollback
    kern docs <query> [root] [--limit N]            local vector search over documents (md/txt/rst)
    kern docs index [root] [--semantic]             pre-index documents; --semantic adds Ollama embeddings;
-                                                  kern docs clear resets
+                                                   kern docs clear resets
+   kern docs fetch <url> [name] [root] [--semantic]  fetch a public doc page into the local index + cache
   kern verify <file|- for stdin> [root] [--json]  cross-check file:line/symbol/route claims in agent output
   kern schema <data.json|-> --schema <schema.json>
                                                 deterministically validate JSON output against a JSON schema
@@ -167,8 +168,10 @@ Usage:
   kern unlock <scope> [root]                     remove a stale lock file
   kern status [root] [--json]                    list workspace locks (held/free)
   kern guard init [root]                         scaffold .kern/boundaries.json
-  kern guard check [root] [--file F] [--range a..b] [--json|--sarif] [--threshold N]  reject boundary violations (exit 2 when count > N)
-  kern version                                    show version
+   kern guard check [root] [--file F] [--range a..b] [--json|--sarif] [--threshold N]  reject boundary violations (exit 2 when count > N)
+   kern commitmsg [--staged|--range a..b] [--subject]   deterministic conventional commit message from the diff
+   kern commit [--staged] [--all] [--message TEXT] [--dry-run]   stage + commit with a generated conventional message
+   kern version                                    show version
   kern guide                                      categorized tool usage guide (performance tiers)
   kern hook <install|diff|store|claude-post|claude-prompt|gemini-after|gemini-prompt>   git hooks (install/diff/store) or agent hooks (read hook JSON on stdin)
   kern mcp                                        run MCP server on stdio
@@ -209,6 +212,7 @@ type flags struct {
 	schema         string
 	cmd            string
 	timeout        int
+	timeoutSet     bool
 	fewshot        bool
 	mode           string
 	once           bool
@@ -350,6 +354,7 @@ func parseFlags(args []string) (flags, []string, error) {
 			i++
 			if i < len(args) {
 				setInt(&f.timeout, args[i], "--timeout")
+				f.timeoutSet = true
 			}
 		case "--cache":
 			f.cache = true
@@ -1115,8 +1120,9 @@ func main() {
 
 		run := script.Run{Lang: f.lang, Code: code, Path: path}
 		// 15s default so a runaway script can't hang an agent for the shared
-		// --timeout default (120s); an explicit --timeout always wins.
-		if f.timeout != 120 {
+		// --timeout default (120s); an explicit --timeout always wins — even
+		// 120, which the old sentinel comparison misread as "unset" (W2-39).
+		if f.timeoutSet {
 			run.Timeout = time.Duration(f.timeout) * time.Second
 		} else {
 			run.Timeout = 15 * time.Second
@@ -1140,6 +1146,9 @@ func main() {
 		res := script.RunScript(run)
 		if f.json {
 			printJSON(res)
+			if res.Err != nil {
+				os.Exit(1)
+			}
 			return
 		}
 		fmt.Print(res.Stdout)
@@ -1239,9 +1248,6 @@ func main() {
 			query = args[0]
 			args = args[1:]
 		}
-		if len(args) > 0 {
-			root = args[0]
-		}
 		if sub == "fetch" {
 			if len(args) == 0 {
 				fatal("usage: kern docs fetch <url> [name] [root]")
@@ -1260,6 +1266,8 @@ func main() {
 			}
 			if name == "" {
 				name = slugName(rawURL)
+			} else {
+				name = sanitizeDocName(name)
 			}
 			if err := os.MkdirAll(cache.Path("data", "docs-fetch"), 0o755); err != nil {
 				fatal("%v", err)
@@ -1292,6 +1300,9 @@ func main() {
 			fmt.Println(clipText(res.Text, 600))
 			return
 		}
+		if len(args) > 0 {
+			root = args[0]
+		}
 		if sub == "index" {
 			var ix *docsearch.Index
 			var err error
@@ -1317,7 +1328,8 @@ func main() {
 			fmt.Printf("indexed %d chunks from %s\n", len(ix.Docs), root)
 		} else if sub == "clear" {
 			_ = os.RemoveAll(cache.Path("data", "docs"))
-			fmt.Println("cleared document index")
+			_ = os.RemoveAll(cache.Path("data", "docs-fetch"))
+			fmt.Println("cleared document index and fetched-doc cache")
 		} else {
 			if query == "" {
 				fatal("usage: kern docs <query> [root] [--limit N] | kern docs index [root] [--semantic] | kern docs clear")
@@ -1411,6 +1423,11 @@ func main() {
 		if f.range_ != "" {
 			if p := strings.SplitN(f.range_, "..", 2); len(p) == 2 {
 				from, to = p[0], p[1]
+			} else {
+				// A single ref means the range ending at that ref (HEAD ->
+				// HEAD~1..HEAD, matching the hook default); it must not be
+				// silently dropped (W2-40).
+				from, to = f.range_+"~1", f.range_
 			}
 		}
 		switch sub {
@@ -1544,20 +1561,27 @@ func main() {
 		fmt.Printf("committed %s %s\n", short, subject)
 
 	case "semcache":
-		sub := ""
-		if len(rest) > 0 {
-			sub = rest[0]
-			rest = rest[1:]
+		f, args, err := parseFlags(rest)
+		if err != nil {
+			fatal("flags: %v", err)
 		}
-		_ = rest
+		sub := ""
+		if len(args) > 0 {
+			sub = args[0]
+			args = args[1:]
+		}
 		switch sub {
 		case "clear":
 			ns := ""
-			if len(rest) > 0 {
-				ns = rest[0]
+			if len(args) > 0 {
+				ns = args[0]
 			}
 			if err := semcache.Clear(ns); err != nil {
 				fatal("%v", err)
+			}
+			if f.json {
+				printJSON(map[string]any{"cleared": ns})
+				return
 			}
 			if ns == "" {
 				fmt.Println("semcache: cleared all namespaces")
@@ -1565,10 +1589,10 @@ func main() {
 				fmt.Printf("semcache: cleared %q\n", ns)
 			}
 		case "list":
-			if len(rest) == 0 {
+			if len(args) == 0 {
 				fatal("usage: kern semcache list <prompt|log>")
 			}
-			ns := rest[0]
+			ns := args[0]
 			entries, err := semcache.Entries(ns)
 			if err != nil {
 				fatal("%v", err)
@@ -1582,14 +1606,18 @@ func main() {
 				fmt.Printf("  %d. %s\n", i+1, in)
 			}
 		case "sim":
-			if len(rest) != 2 {
+			if len(args) != 2 {
 				fatal("usage: kern semcache sim <textA> <textB>")
 			}
-			fmt.Printf("similarity: %.3f\n", semcache.Similarity(rest[0], rest[1]))
+			fmt.Printf("similarity: %.3f\n", semcache.Similarity(args[0], args[1]))
 		default:
 			st, err := semcache.Stats()
 			if err != nil {
 				fatal("%v", err)
+			}
+			if f.json {
+				printJSON(map[string]any{"namespaces": st})
+				return
 			}
 			if len(st) == 0 {
 				fmt.Println("semcache: empty")
@@ -1687,9 +1715,34 @@ func main() {
 			return
 		}
 		srv := mcp.NewServer(os.Stdin, os.Stdout)
+		// SIGINT/SIGTERM: cancel in-flight tool calls and release held locks
+		// so slow tools don't hang the process until the OS force-kills it
+		// (W2-41; mirrors cmd/kern-mcp). Closing os.Stdin from another
+		// goroutine does not reliably unblock the scanner's read, so Serve()
+		// alone may never return: after cancelling, wait for the in-flight
+		// count to drain, then exit.
+		ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer cancel()
+		go func() {
+			<-ctx.Done()
+			srv.CancelAll()
+			srv.Close()
+			_ = os.Stdin.Close()
+			deadline := time.Now().Add(5 * time.Second)
+			for time.Now().Before(deadline) {
+				if srv.Inflight() == 0 {
+					time.Sleep(100 * time.Millisecond)
+					os.Exit(0)
+				}
+				time.Sleep(50 * time.Millisecond)
+			}
+			os.Exit(1)
+		}()
 		if err := srv.Serve(); err != nil {
 			os.Exit(1)
 		}
+		srv.CancelAll()
+		srv.Close()
 
 	case "index":
 		root := "."
@@ -1846,12 +1899,12 @@ func main() {
 		}
 
 	case "ast":
-		if len(rest) < 1 {
-			fatal("usage: kern ast <pattern> [root] [--all]")
-		}
 		f, args, err := parseFlags(rest)
 		if err != nil {
 			fatal("flags: %v", err)
+		}
+		if len(args) < 1 {
+			fatal("usage: kern ast <pattern> [root] [--all]")
 		}
 		pattern := args[0]
 		if f.all {
@@ -1944,12 +1997,12 @@ func main() {
 		}
 
 	case "search":
-		if len(rest) < 1 {
-			fatal("usage: kern search <query> [root] [--limit N] [--repos] [--json] [--semantic]")
-		}
 		f, args, err := parseFlags(rest)
 		if err != nil {
 			fatal("flags: %v", err)
+		}
+		if len(args) < 1 {
+			fatal("usage: kern search <query> [root] [--limit N] [--repos] [--json] [--semantic]")
 		}
 		query := args[0]
 		root := "."
@@ -2000,12 +2053,12 @@ func main() {
 		}
 
 	case "graph":
-		if len(rest) < 1 {
-			fatal("usage: kern graph <symbol> [root] [--mermaid] [--json] [--graphml] [--html] [--out FILE]")
-		}
 		f, args, err := parseFlags(rest)
 		if err != nil {
 			fatal("flags: %v", err)
+		}
+		if len(args) < 1 {
+			fatal("usage: kern graph <symbol> [root] [--mermaid] [--json] [--graphml] [--html] [--out FILE]")
 		}
 		symbol := args[0]
 		root := "."
@@ -2047,12 +2100,12 @@ func main() {
 		fmt.Println(ix.Graph(symbol))
 
 	case "inherits":
-		if len(rest) < 1 {
-			fatal("usage: kern inherits <symbol> [root] [--json]")
-		}
 		f, args, err := parseFlags(rest)
 		if err != nil {
 			fatal("flags: %v", err)
+		}
+		if len(args) < 1 {
+			fatal("usage: kern inherits <symbol> [root] [--json]")
 		}
 		symbol := args[0]
 		root := "."
@@ -2090,31 +2143,41 @@ func main() {
 		}
 
 	case "context":
-		if len(rest) < 1 {
-			fatal("usage: kern context <symbol> [root]")
+		f, args, err := parseFlags(rest)
+		if err != nil {
+			fatal("flags: %v", err)
 		}
-		symbol := rest[0]
+		if len(args) < 1 {
+			fatal("usage: kern context <symbol> [root] [--lines N]")
+		}
+		symbol := args[0]
 		root := "."
-		if len(rest) > 1 {
-			root = rest[1]
+		if len(args) > 1 {
+			root = args[1]
 		}
 		ix, err := loadOrBuild(root)
 		if err != nil {
 			fatal("%v", err)
 		}
-		ctxText := ix.Context(symbol, 12)
+		// --lines is documented and must be honored, not eaten as a symbol
+		// (W2-36).
+		lines := f.lines
+		if lines <= 0 {
+			lines = 12
+		}
+		ctxText := ix.Context(symbol, lines)
 		if ctxText == "" {
 			fatal("no symbol found: %s", symbol)
 		}
 		fmt.Println(ctxText)
 
 	case "why":
-		if len(rest) < 1 {
-			fatal("usage: kern why <symbol> [root] [--json]")
-		}
 		f, args, err := parseFlags(rest)
 		if err != nil {
 			fatal("flags: %v", err)
+		}
+		if len(args) < 1 {
+			fatal("usage: kern why <symbol> [root] [--json]")
 		}
 		symbol := args[0]
 		root := "."
@@ -2186,18 +2249,42 @@ func main() {
 			}
 		}
 		if len(changes) == 0 {
-			fatal("no changed files (use --range a..b, --file f1,f2, or make edits)")
+			// Clean tree is a success for CI: nothing to report.
+			fmt.Println("no changed files (clean)")
+			return
 		}
 		if cmd == "review" {
+			report := intel.AnalyzeChangesRanged(ix, changes)
+			if f.json {
+				// --json is honored here too (same shape as `kern changes
+				// --json`), not silently dropped for the markdown view
+				// (W2-23).
+				printJSON(report)
+				if report.TotalRisk > 0 {
+					os.Exit(1)
+				}
+				return
+			}
 			fmt.Println(intel.ReviewRanged(ix, changes, f.max))
+			if report.TotalRisk > 0 {
+				fmt.Fprintf(os.Stderr, "kern: %d changed file(s) with risk (total %.1f); exit 1\n", len(report.Changes), report.TotalRisk)
+				os.Exit(1)
+			}
 			return
 		}
 		report := intel.AnalyzeChangesRanged(ix, changes)
 		if f.json {
 			printJSON(report)
+			if report.TotalRisk > 0 {
+				os.Exit(1)
+			}
 			return
 		}
 		fmt.Println(intel.RenderChanges(report))
+		if report.TotalRisk > 0 {
+			fmt.Fprintf(os.Stderr, "kern: %d changed file(s) with risk (total %.1f); exit 1\n", len(report.Changes), report.TotalRisk)
+			os.Exit(1)
+		}
 
 	case "hubs":
 		f, args, err := parseFlags(rest)
@@ -2793,6 +2880,11 @@ func main() {
 			}
 			for _, p := range files {
 				if _, err := os.Stat(filepath.Join(root, p)); err != nil {
+					if os.IsNotExist(err) {
+						// Deleted in the diff: nothing to check — the file's
+						// symbols are gone from the index too (W2-20).
+						continue
+					}
 					fatal("file not found: %s", p)
 				}
 			}
@@ -2958,9 +3050,16 @@ func slugName(rawURL string) string {
 	}
 	name := u.Hostname() + u.Path
 	name = strings.TrimSuffix(name, "/")
+	return sanitizeDocName(name)
+}
+
+// sanitizeDocName constrains a doc name to a safe cache filename:
+// lowercase alphanumerics and dashes only, so path separators, "../" or
+// absolute paths can never escape the cache root. Falls back to "doc".
+func sanitizeDocName(name string) string {
 	var b strings.Builder
 	lastDash := false
-	for _, r := range name {
+	for _, r := range strings.TrimSpace(name) {
 		if r >= 'a' && r <= 'z' || r >= '0' && r <= '9' {
 			b.WriteRune(r)
 			lastDash = false

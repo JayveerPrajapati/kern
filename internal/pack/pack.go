@@ -186,7 +186,12 @@ func Build(root string, opts Options) (*Bundle, error) {
 	for _, f := range b.Instructions {
 		b.TotalTokens += f.Tokens
 	}
-	b.Security = scanFindings(b.Files)
+	// Secrets can hide in instructions (READMEs, AGENTS.md) too — scan both
+	// buckets so hardcoded tokens in docs ship flagged, not silently (W2-46).
+	var scan []File
+	scan = append(scan, b.Instructions...)
+	scan = append(scan, b.Files...)
+	b.Security = scanFindings(scan)
 	return b, nil
 }
 

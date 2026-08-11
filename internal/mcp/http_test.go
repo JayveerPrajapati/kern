@@ -18,6 +18,7 @@ func newHTTPServer() *Server {
 	return &Server{
 		locks:     map[string]*lock.Lock{},
 		transport: "http",
+		roots:     defaultWorkspaceRoots(),
 	}
 }
 
@@ -212,6 +213,7 @@ func TestHandleHTTPOversizeBodyRejected(t *testing.T) {
 
 func TestHandleHTTPDocFetchEndToEnd(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	t.Setenv("KERN_ALLOW_LOOPBACK_FETCH", "1")
 	doc := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html")
 		_, _ = io.WriteString(w, "<html><head><title>React Hooks</title></head><body><h1>useState</h1><p>useState manages component state in function components.</p></body></html>")
@@ -222,6 +224,9 @@ func TestHandleHTTPDocFetchEndToEnd(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "local.md"), []byte("local project notes\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	// The root passed to kern_doc_fetch lives outside the process cwd, so the
+	// server's workspace must be extended to include it (W2-29 confinement).
+	t.Setenv("KERN_ROOTS", root)
 
 	args, _ := json.Marshal(map[string]any{"url": doc.URL, "root": root, "name": "react"})
 	body := `{"jsonrpc":"2.0","id":99,"method":"tools/call","params":{"name":"kern_doc_fetch","arguments":` + string(args) + `}}`

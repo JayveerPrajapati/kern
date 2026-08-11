@@ -127,7 +127,7 @@ type Summary struct {
 // Summarize reads all log files matching the filter and aggregates.
 func (r *Recorder) Summarize(days int, session string) (*Summary, error) {
 	sum := &Summary{ByOperation: make(map[Operation]int)}
-	cutoff := time.Now().UTC().AddDate(0, 0, -days)
+	cutoff := time.Now().UTC().AddDate(0, 0, -(days - 1))
 	if days <= 0 {
 		// days<=0 means today only, not "all time": an empty range counts no
 		// full days before today.

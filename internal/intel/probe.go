@@ -113,12 +113,42 @@ func Probe(ix *index.Index, task string, maxTokens int) *ProbeReport {
 	}
 
 	report := &ProbeReport{Task: task, MaxTokens: maxTokens, Anchors: anchors, Paths: paths}
-	text := RenderProbe(report)
-	report.Tokens = tokenize.Count(text)
-	if report.Tokens > maxTokens {
-		report.Truncated = true
-	}
+	// Trim the payload itself to the budget so JSON consumers (kern probe
+	// --json, MCP) never receive an oversized bundle flagged truncated (W2-24).
+	fitReportToBudget(report, maxTokens)
 	return report
+}
+
+// fitReportToBudget shrinks the report until its rendered text fits maxTokens:
+// the largest caller/callee/test list is halved, then trailing anchors are
+// dropped. Deterministic and bounded (halving), and the Truncated flag tells
+// callers the payload was cut rather than reported oversized.
+func fitReportToBudget(r *ProbeReport, maxTokens int) {
+	text := RenderProbe(r)
+	r.Tokens = tokenize.Count(text)
+	if r.Tokens <= maxTokens || len(r.Anchors) == 0 {
+		return
+	}
+	r.Truncated = true
+	for r.Tokens > maxTokens {
+		var biggest *[]string
+		for i := range r.Anchors {
+			for _, list := range []*[]string{&r.Anchors[i].Callers, &r.Anchors[i].Callees, &r.Anchors[i].Tests} {
+				if len(*list) > 1 && (biggest == nil || len(*list) > len(*biggest)) {
+					biggest = list
+				}
+			}
+		}
+		if biggest != nil {
+			*biggest = (*biggest)[:(len(*biggest)+1)/2]
+		} else if len(r.Anchors) > 1 {
+			r.Anchors = r.Anchors[:len(r.Anchors)-1]
+		} else {
+			break
+		}
+		text = RenderProbe(r)
+		r.Tokens = tokenize.Count(text)
+	}
 }
 
 // RenderProbe renders the probe bundle as compact text.

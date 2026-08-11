@@ -41,6 +41,70 @@ func findSym(syms []Symbol, name string) *Symbol {
 	return nil
 }
 
+func TestStripLineBlockMarkerInsideString(t *testing.T) {
+	// ix-1: a `/*` inside a string literal or line comment must not open a
+	// block comment that poisons every following line.
+	src := `var s = "/*"
+function real() {
+  return helper()
+}
+function helper() {
+  return 1
+}
+// still /* open
+function after() {
+  return real()
+}
+`
+	syms, calls, _, _, _ := extractForeign("app.js", []byte(src), "javascript")
+	if s := findSym(syms, "real"); s == nil {
+		t.Fatalf("expected function real after string containing /*, got %+v", syms)
+	}
+	if s := findSym(syms, "after"); s == nil {
+		t.Fatalf("expected function after after line comment containing /*, got %+v", syms)
+	}
+	if !contains(calls["real"], "helper") {
+		t.Fatalf("expected real to call helper, got %v", calls["real"])
+	}
+	if !contains(calls["after"], "real") {
+		t.Fatalf("expected after to call real, got %v", calls["after"])
+	}
+}
+
+func TestStripLineTripleOrdering(t *testing.T) {
+	// ix-2: with both delimiters on one line, the FIRST one wins; an inner
+	// `"""` inside an outer `'''...'''` must not open its own span.
+	src := `x = '''hello """world'''
+def work():
+    return helper()
+def helper():
+    return 1
+`
+	syms, calls, _, _, _ := extractForeign("app.py", []byte(src), "python")
+	if s := findSym(syms, "work"); s == nil {
+		t.Fatalf("expected func work after mixed-delimiter line, got %+v", syms)
+	}
+	if !contains(calls["work"], "helper") {
+		t.Fatalf("expected work to call helper, got %v", calls["work"])
+	}
+}
+
+func TestStripLineCommentMarkerInsideString(t *testing.T) {
+	// A `//` inside a string must not truncate the line.
+	src := `const url = "http://example.com/x"
+function fetch() {
+  return load(url)
+}
+function load(u) {
+  return u
+}
+`
+	_, calls, _, _, _ := extractForeign("app.js", []byte(src), "javascript")
+	if !contains(calls["fetch"], "load") {
+		t.Fatalf("expected fetch to call load, got %v", calls["fetch"])
+	}
+}
+
 const pySrc = `import os
 
 def greet(name):
@@ -778,5 +842,126 @@ tasks:
 		if findSym(syms, bad) != nil {
 			t.Fatalf("nested/comment key %q must not be a top-level symbol", bad)
 		}
+	}
+}
+
+func TestBraceOnDifferentLine(t *testing.T) {
+	// ix-6: when '{' is on a line after the declaration, bodyEndFor must
+	// skip through the header lines to find the body, not return immediately.
+	src := `class Foo
+extends Bar
+{
+  method() {
+    return helper()
+  }
+}
+function helper() {
+  return 1
+}
+`
+	syms, calls, _, _, _ := extractForeign("app.js", []byte(src), "javascript")
+	if s := findSym(syms, "Foo"); s == nil || s.Kind != "class" {
+		t.Fatalf("expected class Foo, got %+v", s)
+	}
+	if s := findSym(syms, "Foo.method"); s == nil || s.Kind != "method" || s.Receiver != "Foo" {
+		t.Fatalf("expected method Foo.method, got %+v", s)
+	}
+	if !contains(calls["Foo.method"], "helper") {
+		t.Fatalf("expected Foo.method to call helper, got %v", calls["Foo.method"])
+	}
+}
+
+func TestCppTrailingReturn(t *testing.T) {
+	// ix-8: trailing return types (auto name() -> T { }) must match func/method.
+	src := `#include <iostream>
+
+struct Shape {
+    auto area() const noexcept -> double {
+        return calc()
+    }
+};
+
+auto Shape::perimeter() const -> double {
+    return calc()
+}
+
+auto main() -> int {
+    return 0;
+}
+`
+	syms, calls, _, _, _ := extractForeign("shape.cpp", []byte(src), "cpp")
+	if s := findSym(syms, "Shape"); s == nil || s.Kind != "struct" {
+		t.Fatalf("expected struct Shape, got %+v", s)
+	}
+	if s := findSym(syms, "Shape.perimeter"); s == nil || s.Kind != "method" || s.Receiver != "Shape" {
+		t.Fatalf("expected method Shape.perimeter, got %+v", s)
+	}
+	if s := findSym(syms, "main"); s == nil || s.Kind != "func" {
+		t.Fatalf("expected func main, got %+v", s)
+	}
+	if !contains(calls["Shape.perimeter"], "calc") {
+		t.Fatalf("expected Shape.perimeter to call calc, got %v", calls["Shape.perimeter"])
+	}
+}
+
+func TestSameLineBodyCalls(t *testing.T) {
+	// ix-9 + ix-10: calls on the declaration line (same-line body) must be
+	// captured, even though the line matches a declaration rule.
+	src := `function foo() { return bar() }
+function bar() { return 1 }
+`
+	syms, calls, _, _, _ := extractForeign("app.js", []byte(src), "javascript")
+	if s := findSym(syms, "foo"); s == nil || s.Kind != "func" {
+		t.Fatalf("expected func foo, got %+v", s)
+	}
+	if s := findSym(syms, "bar"); s == nil || s.Kind != "func" {
+		t.Fatalf("expected func bar, got %+v", s)
+	}
+	if !contains(calls["foo"], "bar") {
+		t.Fatalf("expected foo to call bar on same-line body, got %v", calls["foo"])
+	}
+}
+
+func TestCallsOnDeclLineNotDropped(t *testing.T) {
+	// ix-10: a line that matches a decl rule (function expression name)
+	// must still have its call edges scanned.
+	src := `function outer() {
+  inner(function cb() { used() })
+}
+function inner(cb) { cb() }
+function used() { return 1 }
+`
+	_, calls, _, _, _ := extractForeign("app.js", []byte(src), "javascript")
+	if !contains(calls["outer"], "inner") {
+		t.Fatalf("expected outer to call inner, got %v", calls["outer"])
+	}
+	if !contains(calls["outer"], "used") {
+		t.Fatalf("expected outer to call used (on decl line), got %v", calls["outer"])
+	}
+}
+
+func TestRubyHeredocFakeCodeIgnored(t *testing.T) {
+	// ix-7: def/class lines inside a heredoc must not be indexed.
+	src := `x = <<~HEREDOC
+def fake
+  return 1
+end
+HEREDOC
+def real
+  helper()
+end
+def helper
+  return 1
+end
+`
+	syms, calls, _, _, _ := extractForeign("app.rb", []byte(src), "ruby")
+	if findSym(syms, "fake") != nil {
+		t.Fatal("fake code inside heredoc must not be indexed")
+	}
+	if s := findSym(syms, "real"); s == nil || s.Kind != "func" {
+		t.Fatalf("expected func real after heredoc, got %+v", syms)
+	}
+	if !contains(calls["real"], "helper") {
+		t.Fatalf("expected real to call helper, got %v", calls["real"])
 	}
 }

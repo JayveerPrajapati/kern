@@ -3,10 +3,13 @@ package mcp
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 func writeReq(method string, id any, params string) string {
@@ -28,6 +31,8 @@ func serveMany(t *testing.T, reqs ...string) []map[string]any {
 	in := strings.NewReader(strings.Join(reqs, "\n") + "\n")
 	buf := &bytes.Buffer{}
 	s := NewServer(in, buf)
+	// Tests use temp-dir roots outside the process cwd; confine to everything.
+	s.roots = []string{"/"}
 	if err := s.Serve(); err != nil {
 		t.Fatalf("Serve: %v", err)
 	}
@@ -407,7 +412,9 @@ func TestLockUnlockViaMCP(t *testing.T) {
 	root := t.TempDir()
 	acq := `{"name":"kern_lock","arguments":` + jsonMust(map[string]any{"root": root, "scope": "build"}) + `}`
 	rel := `{"name":"kern_unlock","arguments":` + jsonMust(map[string]any{"scope": "build"}) + `}`
-	resps := serveMany(t,
+	// Lock and unlock are dependent calls: submit one, wait for its response,
+	// then submit the next (as a real client would).
+	resps := serveSequential(t,
 		writeReq("tools/call", 17, acq),
 		writeReq("tools/call", 18, rel),
 	)
@@ -419,6 +426,93 @@ func TestLockUnlockViaMCP(t *testing.T) {
 	if !strings.Contains(rout, "lock released") {
 		t.Fatalf("lock release failed: %q", rout)
 	}
+}
+
+// serveSequential feeds each request into the same running server and waits
+// for its response before submitting the next. Tools run concurrently inside
+// Serve, so dependent calls (lock -> unlock) must be sequenced by the client.
+func serveSequential(t *testing.T, reqs ...string) []map[string]any {
+	t.Helper()
+	pr, pw := io.Pipe()
+	out := &lockedBuffer{}
+	s := NewServer(pr, out)
+	// Tests use temp-dir roots outside the process cwd; confine to everything.
+	s.roots = []string{"/"}
+	done := make(chan error, 1)
+	go func() { done <- s.Serve() }()
+	var resps []map[string]any
+	for _, req := range reqs {
+		if _, err := io.WriteString(pw, req+"\n"); err != nil {
+			t.Fatalf("write request: %v", err)
+		}
+		resps = append(resps, waitForResponse(t, out, req))
+	}
+	pw.Close()
+	if err := <-done; err != nil {
+		t.Fatalf("Serve: %v", err)
+	}
+	return resps
+}
+
+// waitForResponse polls the output buffer until a response whose id matches
+// the request's id appears, then returns it and clears the buffer.
+func waitForResponse(t *testing.T, out *lockedBuffer, req string) map[string]any {
+	t.Helper()
+	var probe struct {
+		ID int64 `json:"id"`
+	}
+	if err := json.Unmarshal([]byte(req), &probe); err != nil {
+		t.Fatalf("parse id from request: %v", err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		for _, line := range strings.Split(out.String(), "\n") {
+			line = strings.TrimSpace(line)
+			if line == "" {
+				continue
+			}
+			var r struct {
+				ID int64 `json:"id"`
+			}
+			if err := json.Unmarshal([]byte(line), &r); err != nil || r.ID != probe.ID {
+				continue
+			}
+			var full map[string]any
+			if err := json.Unmarshal([]byte(line), &full); err != nil {
+				t.Fatalf("unmarshal response %q: %v", line, err)
+			}
+			out.Reset()
+			return full
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("no response for %q", req)
+	return nil
+}
+
+// lockedBuffer is a goroutine-safe buffer for a server that writes responses
+// from tool goroutines while the test reads them.
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+func (b *lockedBuffer) Reset() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.buf.Reset()
 }
 
 func TestUnknownToolReturnsError(t *testing.T) {
@@ -443,4 +537,25 @@ func jsonMust(m map[string]any) string {
 		panic(err)
 	}
 	return string(b)
+}
+
+// TestLockErrorIsNotFakeHeld verifies kern_lock reports the real Acquire
+// failure instead of a fabricated "held (pid 0)" (W2-33).
+func TestLockErrorIsNotFakeHeld(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "notadir")
+	if err := os.WriteFile(root, []byte("file, not dir"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	req := `{"name":"kern_lock","arguments":` + jsonMust(map[string]any{"root": root, "scope": "build"}) + `}`
+	resp := serveOne(t, writeReq("tools/call", 21, req))
+	out, isErr := toolResultText(t, resp)
+	if !isErr {
+		t.Fatalf("expected error for unwritable lock root, got %q", out)
+	}
+	if strings.Contains(out, "held (pid 0)") {
+		t.Fatalf("must not fabricate a holder pid: %q", out)
+	}
+	if !strings.Contains(out, "lock scope is required") && !strings.Contains(out, "not a directory") {
+		t.Fatalf("expected the real acquire error, got %q", out)
+	}
 }

@@ -99,9 +99,7 @@ func wikiPage(ix *index.Index, dir string, syms []index.Symbol) (string, error) 
 		if len(s.Params) > 0 {
 			fmt.Fprintf(&b, "- params: `%s`\n", strings.Join(s.Params, ", "))
 		}
-		if callers := ix.CallersOf(s.FullName()); len(callers) > 0 {
-			fmt.Fprintf(&b, "- callers (%d): %s\n", len(callers), strings.Join(callers, ", "))
-		} else if callers := ix.CallersOf(s.Name); len(callers) > 0 {
+		if callers := ix.CallersFor(s); len(callers) > 0 {
 			fmt.Fprintf(&b, "- callers (%d): %s\n", len(callers), strings.Join(callers, ", "))
 		}
 		b.WriteString("\n")

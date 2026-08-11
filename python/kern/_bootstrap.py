@@ -4,6 +4,7 @@
 #
 # Distribution note: replace JayveerPrajapati with your GitHub username.
 
+import hashlib
 import os
 import platform
 import shutil
@@ -96,13 +97,49 @@ def _safe_extract(tar, dest):
         tar.extractall(dest)
 
 
+def _download(url, dest, timeout=60):
+    """Download url to dest with a timeout (urlretrieve has no timeout knob)."""
+    req = urllib.request.Request(url, headers={"User-Agent": "kern-pip"})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        with open(dest, "wb") as f:
+            shutil.copyfileobj(r, f)
+
+
+def _verify_sha256(tarball, tag):
+    """Verify the tarball against the release SHA256SUMS if present.
+    install.sh already does this; the pip shim must not skip it (W2-49)."""
+    sums_url = "https://github.com/{}/releases/download/{}/{}".format(
+        REPO, tag, "SHA256SUMS"
+    )
+    try:
+        req = urllib.request.Request(sums_url, headers={"User-Agent": "kern-pip"})
+        with urllib.request.urlopen(req, timeout=20) as r:
+            sums = r.read().decode("utf-8", errors="replace")
+    except Exception:
+        # No SHA256SUMS is non-fatal (older/human releases); skip silently.
+        return None
+    name = os.path.basename(tarball)
+    for line in sums.splitlines():
+        parts = line.split()
+        if len(parts) == 2 and parts[1] == name:
+            return parts[0].lower()
+    return None
+
+
 def _fetch(tag, os_arch):
     file = "kern-{}.tar.gz".format(os_arch)
     url = "https://github.com/{}/releases/download/{}/{}".format(REPO, tag, file)
     with tempfile.TemporaryDirectory() as tmp:
         tarball = os.path.join(tmp, file)
         print("kern: downloading {} ({})".format(tag, file), file=sys.stderr)
-        urllib.request.urlretrieve(url, tarball)
+        _download(url, tarball)
+        want = _verify_sha256(tarball, tag)
+        if want:
+            got = hashlib.sha256(open(tarball, "rb").read()).hexdigest()
+            if got != want:
+                raise SystemExit(
+                    "kern: SHA256 mismatch for {}: want {}, got {}".format(file, want, got)
+                )
         with tarfile.open(tarball, "r:gz") as t:
             _safe_extract(t, tmp)
         bin_dir = os.path.join(_cache_dir(), "bin")

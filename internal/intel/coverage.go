@@ -28,9 +28,10 @@ type Gap struct {
 }
 
 // coveredSet returns the set of symbols reachable from any test function via
-// call edges — i.e. everything the tests exercise, transitively. Callees are
-// recorded under both their full name and their simple name, so a call like
-// `ix.addFile(...)` matches the method symbol `Index.addFile`.
+// call edges — i.e. everything the tests exercise, transitively. Only exact
+// names are marked: the old simple-name recursion let a test calling
+// fmt.Println mark an unrelated local Println as covered, hiding coverage
+// gaps (W2-17).
 func coveredSet(ix *index.Index) map[string]bool {
 	covered := map[string]bool{}
 	queue := []string{}
@@ -39,9 +40,6 @@ func coveredSet(ix *index.Index) map[string]bool {
 		if !covered[name] {
 			covered[name] = true
 			queue = append(queue, name)
-		}
-		if simple := simpleName(name); simple != name {
-			mark(simple)
 		}
 	}
 	for _, s := range ix.Symbols {
@@ -59,21 +57,10 @@ func coveredSet(ix *index.Index) map[string]bool {
 	return covered
 }
 
-// simpleName returns the part after the last '.' ("" for a plain name).
-func simpleName(name string) string {
-	if i := strings.LastIndexByte(name, '.'); i >= 0 {
-		return name[i+1:]
-	}
-	return name
-}
-
-// isCovered reports whether a symbol is reached by tests, matching on the
-// full name or its simple name.
+// isCovered reports whether a symbol is reached by tests, matching on its
+// exact name.
 func isCovered(covered map[string]bool, name string) bool {
-	if covered[name] {
-		return true
-	}
-	return covered[simpleName(name)]
+	return covered[name]
 }
 
 // AnalyzeCoverage computes overall coverage and the untested hotspots.

@@ -2,7 +2,6 @@ package code
 
 import (
 	"io/fs"
-	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -112,7 +111,9 @@ func shouldIgnore(rel string) bool {
 	if strings.HasPrefix(name, ".") || strings.HasSuffix(name, ".min.js") || strings.HasSuffix(name, ".min.css") {
 		return true
 	}
-	for _, seg := range strings.Split(rel, string(os.PathSeparator)) {
+	// rel is slash-normalized by the caller, so split on "/" rather than
+	// os.PathSeparator (which never matches on Windows) (W2-54).
+	for _, seg := range strings.Split(rel, "/") {
 		if ignoreDirs[seg] {
 			return true
 		}

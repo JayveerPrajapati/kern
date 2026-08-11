@@ -107,6 +107,15 @@ func TestStripPromptFluffPreservesFence(t *testing.T) {
 	}
 }
 
+func TestCompressPreservesTrailingWhitespaceFreeText(t *testing.T) {
+	// W2-45: trailing whitespace must be dropped, never re-prefixed.
+	in := "hello world   \n  indented line  \n"
+	out, _ := Compress(in)
+	if out != "hello world\n  indented line" {
+		t.Fatalf("compressed = %q, want %q", out, "hello world\n  indented line")
+	}
+}
+
 func TestStripPromptFluffKeepsRequestAfterPrefix(t *testing.T) {
 	// A filler-only line that is the ENTIRE prompt must not vanish: the
 	// empty-result guard falls back to the original text.

@@ -15,6 +15,7 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/cache"
 	"github.com/JayveerPrajapati/kern/internal/code"
 	"github.com/JayveerPrajapati/kern/internal/docsearch"
+	"github.com/JayveerPrajapati/kern/internal/index"
 )
 
 // Report summarizes one warm pass.
@@ -32,13 +33,6 @@ var ignoreDirs = map[string]bool{
 	".git": true, ".hg": true, ".svn": true, "node_modules": true,
 	"vendor": true, "dist": true, "build": true, ".cache": true,
 	".kern": true,
-}
-
-var sourceExts = map[string]bool{
-	".go": true, ".js": true, ".ts": true, ".jsx": true, ".tsx": true,
-	".py": true, ".rb": true, ".rs": true, ".java": true, ".c": true,
-	".h": true, ".cpp": true, ".cs": true, ".php": true, ".swift": true,
-	".kt": true, ".sh": true, ".pl": true, ".lua": true,
 }
 
 // Warm scans root once and fills any missing summary/doc caches.
@@ -60,7 +54,7 @@ func Warm(root string) *Report {
 			return nil
 		}
 		if d.IsDir() {
-			if ignoreDirs[d.Name()] {
+			if index.IgnoredDir(d.Name()) {
 				return filepath.SkipDir
 			}
 			return nil
@@ -68,7 +62,7 @@ func Warm(root string) *Report {
 		if !d.Type().IsRegular() || strings.HasPrefix(d.Name(), ".") {
 			return nil
 		}
-		if !sourceExts[strings.ToLower(filepath.Ext(d.Name()))] {
+		if !index.QuickExt(rel) {
 			return nil
 		}
 		content, rerr := os.ReadFile(p)

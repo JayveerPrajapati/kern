@@ -405,3 +405,139 @@ func contains(list []string, s string) bool {
 	}
 	return false
 }
+
+// W2-15: an external call to fmt.Println must never register a caller under
+// an unrelated local symbol named Println.
+func TestForeignCalleeNeverAliasesLocalSymbol(t *testing.T) {
+	src := `package main
+
+import "fmt"
+
+func Println(s string) {}
+
+func main() {
+	fmt.Println("x")
+}
+`
+	dir := writeTree(t, map[string]string{"main.go": src})
+	ix, err := Build(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The foreign edge is recorded under its own key.
+	if callers := ix.Callers["fmt.Println"]; !contains(callers, "main") {
+		t.Errorf("expected main to call fmt.Println, got %v", callers)
+	}
+	// The local Println must have no callers.
+	sym, ok := ix.FindSymbol("Println")
+	if !ok {
+		t.Fatal("expected local Println symbol")
+	}
+	if callers := ix.CallersFor(sym); len(callers) != 0 {
+		t.Errorf("local Println must have no callers, got %v", callers)
+	}
+	if callers := ix.CallersOfName("Println"); len(callers) != 0 {
+		t.Errorf("CallersOfName(Println) must be empty for a local symbol, got %v", callers)
+	}
+}
+
+// W2-16: a call to Alpha.Save must never show up as a caller of Beta.Save.
+func TestSameNameMethodsDoNotMergeCallers(t *testing.T) {
+	src := `package main
+
+type Alpha struct{}
+
+func (a Alpha) Save() {}
+
+type Beta struct{}
+
+func (b Beta) Save() {}
+
+func main() {
+	a := Alpha{}
+	a.Save()
+}
+`
+	dir := writeTree(t, map[string]string{"main.go": src})
+	ix, err := Build(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	alpha, ok := ix.FindSymbol("Alpha.Save")
+	if !ok {
+		t.Fatal("expected Alpha.Save")
+	}
+	if callers := ix.CallersFor(alpha); !contains(callers, "main") {
+		t.Errorf("expected main to call Alpha.Save, got %v", callers)
+	}
+	beta, ok := ix.FindSymbol("Beta.Save")
+	if !ok {
+		t.Fatal("expected Beta.Save")
+	}
+	if callers := ix.CallersFor(beta); len(callers) != 0 {
+		t.Errorf("Beta.Save must have no callers, got %v", callers)
+	}
+}
+
+// W2-18: hub-style exact lookup and why-style lookup must agree.
+func TestCallerLookupsAgree(t *testing.T) {
+	src := `package main
+
+type Server struct{}
+
+func (s Server) Run() {}
+
+func Start() {
+	s := Server{}
+	s.Run()
+}
+`
+	dir := writeTree(t, map[string]string{"main.go": src})
+	ix, err := Build(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, ok := ix.FindSymbol("Server.Run")
+	if !ok {
+		t.Fatal("expected Server.Run")
+	}
+	exact := ix.Callers["Server.Run"]
+	attributed := ix.CallersFor(run)
+	if len(exact) != len(attributed) {
+		t.Fatalf("exact lookup %v must equal attributed lookup %v", exact, attributed)
+	}
+}
+
+func TestExtensionlessShebangScript(t *testing.T) {
+	// ix-13: extensionless scripts with shebangs must be indexed.
+	dir := writeTree(t, map[string]string{
+		"scripts/run": `#!/usr/bin/env python3
+def main():
+    print("hello")
+main()
+`,
+		"scripts/deploy": `#!/bin/bash
+deploy() {
+  echo deploy
+}
+deploy
+`,
+		"Makefile": "build:\n\tgo build\n",
+	})
+	ix, err := Build(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !contains(ix.Languages(), "python") {
+		t.Fatalf("expected python in languages, got %v", ix.Languages())
+	}
+	if !contains(ix.Languages(), "shell") {
+		t.Fatalf("expected shell in languages, got %v", ix.Languages())
+	}
+	if len(ix.symbolsFor("build")) != 0 {
+		t.Fatal("Makefile without shebang must not be indexed as a source file")
+	}
+	if s := ix.symbolsFor("main"); len(s) == 0 {
+		t.Fatal("expected func main from extensionless python script")
+	}
+}

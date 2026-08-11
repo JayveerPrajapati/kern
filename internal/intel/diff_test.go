@@ -61,14 +61,45 @@ index 0000000..0000000
 Binary files a/gone.png and /dev/null differ
 `
 	changes := parseDiffOutput(out)
-	if len(changes) != 1 {
-		t.Fatalf("expected 1 file (deletion dropped), got %v", changes)
+	// The deleted file is now reported as a whole-file change (W2-19) instead
+	// of being silently dropped.
+	if len(changes) != 2 {
+		t.Fatalf("expected 2 files (modified + deleted), got %v", changes)
 	}
 	if changes[0].File != "im age.png" {
 		t.Fatalf("expected binary path preserved, got %q", changes[0].File)
 	}
 	if len(changes[0].Ranges) != 0 {
 		t.Fatalf("expected whole-file (empty ranges) for binary, got %v", changes[0].Ranges)
+	}
+	if changes[1].File != "gone.png" {
+		t.Fatalf("expected deleted file reported, got %q", changes[1].File)
+	}
+	if len(changes[1].Ranges) != 0 {
+		t.Fatalf("expected whole-file (empty ranges) for deletion, got %v", changes[1].Ranges)
+	}
+}
+
+func TestParseDiffTextDeletionReported(t *testing.T) {
+	out := `diff --git a/old.go b/old.go
+deleted file mode 100644
+index 223b783..0000000
+--- a/old.go
++++ /dev/null
+@@ -1,3 +0,0 @@
+-func Old() {}
+-func Older() {}
+-func Oldest() {}
+`
+	changes := parseDiffOutput(out)
+	if len(changes) != 1 {
+		t.Fatalf("expected 1 deleted file, got %v", changes)
+	}
+	if changes[0].File != "old.go" {
+		t.Fatalf("expected old.go reported, got %q", changes[0].File)
+	}
+	if len(changes[0].Ranges) != 0 {
+		t.Fatalf("expected whole-file (empty ranges) for deletion, got %v", changes[0].Ranges)
 	}
 }
 

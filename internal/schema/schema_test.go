@@ -104,3 +104,19 @@ func TestEnumAndInteger(t *testing.T) {
 		t.Fatalf("expected integer violation, got %v", vs)
 	}
 }
+
+// TestInvalidPatternSurfaces verifies an unparseable pattern is reported as a
+// violation instead of silently dropping the constraint (W2-31).
+func TestInvalidPatternSurfaces(t *testing.T) {
+	s, err := Parse(`{"type": "string", "pattern": "["}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	vs := s.Validate([]byte(`"anything"`))
+	if len(vs) == 0 {
+		t.Fatal("expected violation for invalid pattern, got none")
+	}
+	if !strings.Contains(vs[0], "invalid pattern") {
+		t.Fatalf("expected invalid-pattern violation, got %v", vs)
+	}
+}

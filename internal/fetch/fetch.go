@@ -6,10 +6,13 @@
 package fetch
 
 import (
+	"context"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"regexp"
 	"strings"
 	"time"
@@ -51,7 +54,10 @@ var embeddedBlockRes = func() []*regexp.Regexp {
 
 // Fetch downloads url (http/https only) and returns it as cleaned text. The
 // body is capped at maxBytes (0 = DefaultMaxBytes). Non-HTML text bodies are
-// returned as-is; binary content types are rejected.
+// returned as-is; binary content types are rejected. Private, loopback,
+// link-local and unspecified destinations are refused (SSRF guard) — this
+// covers both the literal host and every IP a hostname resolves to, and
+// redirects are re-checked because they dial through the same guarded dialer.
 func Fetch(rawURL string, maxBytes int) (*Result, error) {
 	u, err := url.Parse(rawURL)
 	if err != nil {
@@ -66,6 +72,9 @@ func Fetch(rawURL string, maxBytes int) (*Result, error) {
 
 	client := &http.Client{
 		Timeout: fetchTimeout,
+		Transport: &http.Transport{
+			DialContext: dialContext,
+		},
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			if len(via) >= maxRedirects {
 				return fmt.Errorf("stopped after %d redirects", maxRedirects)
@@ -133,6 +142,63 @@ func htmlToText(b []byte) *Result {
 }
 
 func stripTags(s string) string { return strings.TrimSpace(tagRe.ReplaceAllString(s, " ")) }
+
+// privateIP reports whether ip must never be fetched: loopback, private,
+// link-local (unicast and multicast), unspecified, or multicast. These cover
+// local services, RFC 1918/4193 nets, and cloud metadata (169.254.169.254).
+func privateIP(ip net.IP) bool {
+	return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() ||
+		ip.IsLinkLocalMulticast() || ip.IsUnspecified() || ip.IsMulticast()
+}
+
+// dialContext performs the guarded connection; tests swap it for a variant
+// that tolerates loopback servers.
+var dialContext = guardedDialContext
+
+// guardedDialContext resolves the host up front and rejects the connection
+// when any candidate address is private, then dials the first public address
+// directly. Resolving and checking here (rather than only validating the URL)
+// means DNS rebinding and redirects cannot smuggle a request to an internal
+// host: every dial — initial and redirected — passes through this check.
+func guardedDialContext(ctx context.Context, network, addr string) (net.Conn, error) {
+	return guardedDial(ctx, network, addr, false)
+}
+
+// guardedAllowLoopbackDialContext is the test variant: same guard, but a
+// loopback address is allowed so httptest servers keep working.
+func guardedAllowLoopbackDialContext(ctx context.Context, network, addr string) (net.Conn, error) {
+	return guardedDial(ctx, network, addr, true)
+}
+
+func guardedDial(ctx context.Context, network, addr string, allowLoopback bool) (net.Conn, error) {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return nil, err
+	}
+	if host == "" {
+		return nil, fmt.Errorf("empty host in %q", addr)
+	}
+	ips, err := net.LookupIP(host)
+	if err != nil {
+		return nil, fmt.Errorf("resolve %s: %w", host, err)
+	}
+	if len(ips) == 0 {
+		return nil, fmt.Errorf("no addresses for %s", host)
+	}
+	for _, ip := range ips {
+		if privateIP(ip) && !(ip.IsLoopback() && (allowLoopback || allowLoopbackEnv())) {
+			return nil, fmt.Errorf("refusing to fetch private address %s (host %s)", ip, host)
+		}
+	}
+	return (&net.Dialer{Timeout: fetchTimeout}).DialContext(ctx, network, net.JoinHostPort(ips[0].String(), port))
+}
+
+// allowLoopbackEnv opts out of the loopback rejection only: set
+// KERN_ALLOW_LOOPBACK_FETCH=1 to fetch docs served on localhost (e.g. a
+// local doc site). Private/link-local/metadata addresses stay blocked.
+func allowLoopbackEnv() bool {
+	return os.Getenv("KERN_ALLOW_LOOPBACK_FETCH") == "1"
+}
 
 var entityRe = regexp.MustCompile(`&(?:#x([0-9a-fA-F]+)|#([0-9]+)|([a-zA-Z]+));`)
 

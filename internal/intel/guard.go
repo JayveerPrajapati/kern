@@ -221,18 +221,22 @@ func importMatches(importPath, dir string) bool {
 }
 
 // resolveCallee maps a raw callee name (simple, qualified, or package-qualified)
-// to a canonical in-project symbol FullName.
+// to a canonical in-project symbol FullName. When several symbols share a
+// simple name the choice must be deterministic: the lexicographically smallest
+// FullName wins, so guard verdicts can't flip between runs (Go map ranges are
+// unordered).
 func resolveCallee(ix *index.Index, meta map[string]index.Symbol, name string) string {
 	if _, ok := meta[name]; ok {
 		return name
 	}
 	simple := simpleName(name)
+	var best string
 	for full, s := range meta {
-		if s.Name == simple {
-			return full
+		if s.Name == simple && (best == "" || full < best) {
+			best = full
 		}
 	}
-	return ""
+	return best
 }
 
 func symbolFile(meta map[string]index.Symbol, name string) string {

@@ -1,6 +1,7 @@
 package intel
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -149,6 +150,16 @@ func TestProbeBudgetCap(t *testing.T) {
 	fitted := FitProbe(RenderProbe(r), r.MaxTokens)
 	if len(fitted) > len(RenderProbe(r)) {
 		t.Error("FitProbe must not grow the bundle")
+	}
+	// W2-24: the report payload itself (what --json serializes) must fit the
+	// budget, not just the text view. A 5-token budget sits below the report
+	// skeleton (task line + anchor headers), so use a reachable budget.
+	r2 := Probe(ix, "Caller Public inner Deep", 120)
+	if _, err := json.Marshal(r2); err != nil {
+		t.Fatalf("report must stay JSON-serializable after trimming: %v", err)
+	}
+	if r2.Tokens > 120 {
+		t.Errorf("report payload must be trimmed to the budget, tokens=%d > 120", r2.Tokens)
 	}
 }
 

@@ -84,3 +84,31 @@ func TestCoarseFallback(t *testing.T) {
 		t.Fatalf("coarse path should emit ~6000 ops, got %d", len(ops))
 	}
 }
+
+// TestLeadingDeletionHunkHeader verifies a hunk beginning with a deletion from
+// line 1 emits a valid header (never "+0,N") (W2-48).
+func TestLeadingDeletionHunkHeader(t *testing.T) {
+	a := []string{"x", "y", "z"}
+	b := []string{"z"} // delete line 1 "x"
+	got := Unified("a", "b", a, b)
+	if strings.Contains(got, "+0,") {
+		t.Fatalf("invalid +0 start header:\n%s", got)
+	}
+	if !strings.Contains(got, "@@ -1,3 +1,1 @@") {
+		t.Fatalf("expected @@ -1,3 +1,1 @@ (delete x,y keep z), got:\n%s", got)
+	}
+}
+
+// TestHunksMergeWithinDoubleContext verifies two change clusters within 2*ctx
+// unchanged lines are merged into one hunk (W2-47).
+func TestHunksMergeWithinDoubleContext(t *testing.T) {
+	// change at line 1, unchanged gap of 6 (=2*ctx), change at line 8
+	ctx := 3
+	a := []string{"L1a", "L2", "L3", "L4", "L5", "L6", "L7", "L8a"}
+	b := []string{"L1b", "L2", "L3", "L4", "L5", "L6", "L7", "L8b"}
+	ops := DiffLines(a, b)
+	hunks := groupHunks(ops, ctx)
+	if len(hunks) != 1 {
+		t.Fatalf("expected 1 merged hunk, got %d:\n%v", len(hunks), hunks)
+	}
+}

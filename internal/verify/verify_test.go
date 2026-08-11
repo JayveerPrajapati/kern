@@ -111,3 +111,53 @@ func findCheck(rep Report, t Type, ref string) *Check {
 	}
 	return nil
 }
+
+// TestVerifyIgnoresNonRoutePaths verifies absolute filesystem paths and
+// date-like strings are not flagged as unregistered routes (W2-30).
+func TestVerifyIgnoresNonRoutePaths(t *testing.T) {
+	ix, root := build(t, map[string]string{
+		"app.py": "@app.route('/users')\ndef list_users():\n    pass\n",
+	})
+	text := "path /usr/local/bin/foo and date /2024/01/01 and route /users"
+	rep := Sorted(Verify(ix, root, text))
+	if !rep.OK {
+		t.Fatalf("expected no missing refs, got %+v", rep.Missing)
+	}
+	if !anyFound(rep, Route, "/users") {
+		t.Errorf("registered route missing: %+v", rep.Checks)
+	}
+	for _, c := range rep.Checks {
+		if c.Type == Route && c.Ref != "/users" {
+			t.Errorf("non-route %q must not be reported: %+v", c.Ref, rep.Checks)
+		}
+	}
+}
+
+// findFileCheck returns the FileRef check whose Ref contains the given file
+// name, if any.
+func findFileCheck(rep Report, name string) *Check {
+	for i := range rep.Checks {
+		if rep.Checks[i].Type == FileRef && strings.Contains(rep.Checks[i].Ref, name) {
+			return &rep.Checks[i]
+		}
+	}
+	return nil
+}
+
+// TestVerifyAbsFileRefConfinedToRoot verifies a file:line ref that resolves to
+// an absolute path outside root is never read (no filesystem oracle): it is
+// reported Found=false (unverifiable) rather than probing the real file
+// (which would flip Found=true for a valid line) (W2-32).
+func TestVerifyAbsFileRefConfinedToRoot(t *testing.T) {
+	ix, root := build(t, map[string]string{"a.go": "package a\n"})
+	outside := filepath.Join(t.TempDir(), "secret.go")
+	_ = os.WriteFile(outside, []byte("line one\nline two\n"), 0o644)
+	rep := Sorted(Verify(ix, root, outside+":1"))
+	c := findFileCheck(rep, "secret.go")
+	if c == nil {
+		t.Fatal("outside file ref not reported at all")
+	}
+	if c.Found {
+		t.Fatalf("outside abs ref must be unverifiable (never read), got Found=true: %+v", c)
+	}
+}

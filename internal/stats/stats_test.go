@@ -197,3 +197,31 @@ func TestEntriesDefaultLimit(t *testing.T) {
 		t.Fatalf("expected no entries, got %d", len(es))
 	}
 }
+
+// TestSummarizeBoundaryDay verifies days=N covers exactly N calendar days
+// including today: a file dated N days ago is excluded, N-1 days ago included
+// (W2-34).
+func TestSummarizeBoundaryDay(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "stats")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	r := &Recorder{dir: dir}
+	writeDay := func(daysAgo int, ops int) {
+		name := time.Now().AddDate(0, 0, -daysAgo).Format("2006-01-02") + ".jsonl"
+		var b strings.Builder
+		for i := 0; i < ops; i++ {
+			b.WriteString(`{"operation":"optimize_prompt","before_tokens":2,"after_tokens":1,"saved_tokens":1,"cost_saved_usd":0}` + "\n")
+		}
+		_ = os.WriteFile(filepath.Join(dir, name), []byte(b.String()), 0o644)
+	}
+	writeDay(7, 3)
+	writeDay(6, 2)
+	sum, err := r.Summarize(7, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sum.Operations != 2 {
+		t.Fatalf("expected only the N-1-days-old entry in a 7-day window, got %d", sum.Operations)
+	}
+}

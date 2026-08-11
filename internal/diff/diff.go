@@ -122,47 +122,60 @@ func labelPath(p string) string {
 }
 
 // groupHunks splits ops into hunks of change-regions padded with context.
+// Consecutive change clusters separated by <= 2*ctx unchanged lines are merged
+// into one hunk (git's rule); the old code measured the leading-context window
+// from the hunk start, causing related changes to be split apart (W2-47).
 func groupHunks(ops []Op, ctx int) [][]Op {
 	var hunks [][]Op
-	changeAt := make([]bool, len(ops))
+	var first, last int
+	hasChange := false
+	needStart := true
 	for i, op := range ops {
-		changeAt[i] = op.Kind != ' '
-	}
-	for i := 0; i < len(ops); {
-		if !changeAt[i] {
-			i++
+		if op.Kind != ' ' {
+			if needStart {
+				first = i
+				needStart = false
+			}
+			last = i
+			hasChange = true
 			continue
 		}
-		start := i
-		for start > 0 && i-start < ctx && !changeAt[start-1] {
-			start--
+		if !hasChange {
+			continue
 		}
-		end := i
-		for end < len(ops) && (changeAt[end] || end-start < ctx) {
-			end++
+		// unchanged line: does it fall within trailing context of the
+		// current cluster, or start a gap big enough to close the hunk?
+		if i-last > 2*ctx {
+			hunks = append(hunks, hunkSpan(ops, first, last, ctx))
+			needStart = true
+			hasChange = false
 		}
-		// close the trailing context
-		if end < len(ops) {
-			end += ctx
-			if end > len(ops) {
-				end = len(ops)
-			}
-		}
-		hunks = append(hunks, ops[start:end])
-		i = end
+	}
+	if hasChange {
+		hunks = append(hunks, hunkSpan(ops, first, last, ctx))
 	}
 	return hunks
 }
 
-func hunkRange(h []Op) (aStart, aCount, bStart, bCount int) {
-	first := h[0]
-	if first.Kind == '+' {
-		bStart = first.B
-		aStart = first.A
-	} else {
-		aStart = first.A
-		bStart = first.B
+// hunkSpan returns the ops of one hunk, clamped to context lines around the
+// change cluster [first,last].
+func hunkSpan(ops []Op, first, last, ctx int) []Op {
+	start := first - ctx
+	if start < 0 {
+		start = 0
 	}
+	end := last + ctx + 1
+	if end > len(ops) {
+		end = len(ops)
+	}
+	return ops[start:end]
+}
+
+// hunkRange computes (aStart,aCount,bStart,bCount) for a hunk. Start lines are
+// the first touched line on each side; a side with no lines is reported as
+// start=0 (git's "from/to empty" convention), which avoids emitting an
+// invalid "+0,N" header for hunks that begin with a deletion (W2-48).
+func hunkRange(h []Op) (aStart, aCount, bStart, bCount int) {
 	for _, op := range h {
 		if op.A > 0 {
 			aCount++
@@ -171,7 +184,23 @@ func hunkRange(h []Op) (aStart, aCount, bStart, bCount int) {
 			bCount++
 		}
 	}
-	// For a pure-insertion hunk, git uses (aStart-1). Keep it simple: use
-	// starting positions as-is; correct-enough for display.
+	for _, op := range h {
+		if op.A > 0 {
+			aStart = op.A
+			break
+		}
+	}
+	for _, op := range h {
+		if op.B > 0 {
+			bStart = op.B
+			break
+		}
+	}
+	if aCount == 0 {
+		aStart = 0
+	}
+	if bCount == 0 {
+		bStart = 0
+	}
 	return aStart, aCount, bStart, bCount
 }

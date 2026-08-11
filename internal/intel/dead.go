@@ -35,16 +35,10 @@ func DeadCode(ix *index.Index) []DeadSymbol {
 			continue
 		}
 		full := s.FullName()
-		if isTestFile(s.File) || isEntryPoint(s.Name) {
+		if isTestFile(s.File) || isEntryPoint(full) {
 			continue
 		}
-		callers := ix.Callers[full]
-		if len(callers) == 0 && s.Kind == "method" {
-			// Receiver-variable calls (v.M()) whose type couldn't be resolved
-			// locally are indexed under the bare method name; fall back so
-			// such methods aren't falsely reported as dead.
-			callers = ix.Callers[s.Name]
-		}
+		callers := ix.CallersFor(s)
 		if len(callers) == 0 {
 			out = append(out, DeadSymbol{
 				Name: full, Kind: s.Kind, File: s.File, Line: s.Line,

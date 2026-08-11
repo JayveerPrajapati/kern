@@ -63,14 +63,18 @@ func parseDiffOutput(out string) []FileChange {
 		case strings.HasPrefix(line, "Binary files "):
 			// The new-side path comes from this line (`Binary files a/X and
 			// b/Y differ`), not the diff --git header: a deletion shows the
-			// old name there and /dev/null here. Deletions (to == /dev/null)
-			// are dropped like their text counterparts.
+			// old name there and /dev/null here.
 			rest := strings.TrimSuffix(strings.TrimPrefix(line, "Binary files "), " differ")
 			to := curTo
 			if i := strings.LastIndex(rest, " and "); i >= 0 {
 				to = unquotePath(rest[i+len(" and "):])
 			}
-			if to != "" && to != "/dev/null" {
+			if to == "/dev/null" {
+				// Binary deletion: report the old path as a whole-file change
+				// (W2-19) so deletions never vanish from kern changes.
+				to = curTo
+			}
+			if to != "" {
 				changes = append(changes, FileChange{File: to})
 				last = len(changes) - 1
 			}
@@ -79,7 +83,15 @@ func parseDiffOutput(out string) []FileChange {
 			path := unquotePath(strings.TrimPrefix(line, "+++ "))
 			inHunk = false
 			if path == "/dev/null" {
-				last = -1 // deleted file: whole-file handled by caller fallback
+				// Deleted file: report it as a whole-file change. A deletion
+				// has no added lines, so Ranges stays empty; without this
+				// entry `kern changes` on a deletion-only diff reported "no
+				// changed files" and mixed commits silently omitted deletions
+				// (W2-19).
+				if curTo != "" {
+					changes = append(changes, FileChange{File: curTo})
+					last = len(changes) - 1
+				}
 				continue
 			}
 			changes = append(changes, FileChange{File: path})
