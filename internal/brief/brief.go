@@ -20,47 +20,113 @@ import (
 
 // Build renders the briefing for root. Errors are reported per section; the
 // function itself only fails if the root is unusable.
+//
+// The digest never blocks on a cold pipeline: when the AST index is not
+// cached, the index/architecture sections are skipped with a hint instead of
+// synchronously building a possibly-huge index (which is what made kern_buddy
+// take ~85s on large repos). Callers warm the index in the background via
+// Warm (kern_buddy) or up front via `kern index .` / `kern precache .`.
 func Build(root string) (string, error) {
 	abs, err := filepath.Abs(root)
 	if err != nil {
 		return "", err
 	}
-	var b strings.Builder
-	fmt.Fprintf(&b, "# kern buddy briefing — %s\n", abs)
-	fmt.Fprintf(&b, "Generated %s. This digest gives you the best starting context.\n\n",
+	var head strings.Builder
+	fmt.Fprintf(&head, "# kern buddy briefing — %s\n", abs)
+	fmt.Fprintf(&head, "Generated %s. This digest gives you the best starting context.\n\n",
 		time.Now().UTC().Format("2006-01-02 15:04"))
 
-	if p, err := code.BuildProject(root, 500, 200); err == nil {
-		b.WriteString("## Project map\n")
-		b.WriteString(p.Render())
-		b.WriteString("\n")
-	}
-
+	// Render the fixed sections (index, architecture, stats, memory,
+	// cheatsheet) first so the project map can be sized into the remaining
+	// budget: the digest must always fit inside the MCP output sandbox
+	// (24KB default) or its tail sections get clipped off in tool output.
+	var tail strings.Builder
 	ix, err := index.Load(root)
 	if err != nil {
-		ix, err = index.Build(root)
+		tail.WriteString("## Index\n(not built yet — run `kern index .` or `kern precache .` once to enable the symbols/architecture sections)\n\n")
+		ix = nil
 	}
-	if err == nil && ix != nil {
-		b.WriteString(indexSection(ix))
-		b.WriteString(architectureSection(ix))
+	if ix != nil {
+		tail.WriteString(indexSection(ix))
+		tail.WriteString(architectureSection(ix))
 	}
-
-	statsSection(&b)
-
+	statsSection(&tail)
 	if entries := memory.List(root); len(entries) > 0 {
-		b.WriteString("## Project memory (from past sessions)\n")
+		tail.WriteString("## Project memory (from past sessions)\n")
 		for _, e := range entries {
 			text := e.Text
 			if len(text) > 400 {
 				text = text[:400] + "…"
 			}
-			fmt.Fprintf(&b, "- %s: %s\n", e.Time.UTC().Format("2006-01-02"), strings.ReplaceAll(text, "\n", " "))
+			fmt.Fprintf(&tail, "- %s: %s\n", e.Time.UTC().Format("2006-01-02"), strings.ReplaceAll(text, "\n", " "))
 		}
+		tail.WriteString("\n")
+	}
+	tail.WriteString(cheatsheet)
+
+	var b strings.Builder
+	b.WriteString(head.String())
+	if p, err := code.BuildProject(root, 500, 200); err == nil {
+		b.WriteString("## Project map\n")
+		b.WriteString(renderProjectMap(p, digestBudget-head.Len()-tail.Len()))
 		b.WriteString("\n")
 	}
-
-	b.WriteString(cheatsheet)
+	b.WriteString(tail.String())
 	return b.String(), nil
+}
+
+// digestBudget caps the whole briefing so it fits inside the MCP output
+// sandbox (24KB default) with headroom; the project map gets whatever the
+// fixed sections leave. The full map stays available via kern_project_map.
+const digestBudget = 21 << 10
+
+// mapFloor is the minimum the project-map section always gets, even when the
+// fixed sections are unusually large.
+const mapFloor = 4 << 10
+
+// renderProjectMap renders the project map, dropping whole file summaries
+// past the byte budget (never cutting mid-file) with a pointer to the full
+// map tool.
+func renderProjectMap(p *code.Project, budget int) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "Project: %s (%d files", p.Root, len(p.Files))
+	if p.CacheHit > 0 {
+		fmt.Fprintf(&b, ", %d from cache", p.CacheHit)
+	}
+	b.WriteString(")\n")
+	shown := 0
+	for _, f := range p.Files {
+		r := f.Render()
+		if r == "" {
+			continue
+		}
+		if b.Len()+len(r)+2 > budget {
+			break
+		}
+		b.WriteString(r)
+		b.WriteString("\n")
+		shown++
+	}
+	if shown < len(p.Files) {
+		fmt.Fprintf(&b, "… %d more files — full map via `kern project_map`\n", len(p.Files)-shown)
+	}
+	return b.String()
+}
+
+// Warm builds and persists the AST index for root so the next Build call
+// renders the full digest without the cold pipeline (which is what made
+// kern_buddy take ~85s on large repos). A fresh cached index is a no-op.
+// Used by the MCP kern_buddy handler (background) and kern precache.
+func Warm(root string) error {
+	ix, err := index.Load(root)
+	if err == nil && ix != nil && !ix.Stale() {
+		return nil
+	}
+	ix, err = index.Build(root)
+	if err != nil {
+		return err
+	}
+	return ix.Save()
 }
 
 func indexSection(ix *index.Index) string {
@@ -171,11 +237,24 @@ func frameworkEntries(ix *index.Index) []fwEntry {
 	return out
 }
 
+// archGateSymbols and archGateEdges cap the architecture section: community
+// detection runs label propagation over the whole call graph, which takes
+// minutes on very large repos. The digest gates it off; per-symbol graph
+// tools still serve analysis on demand.
+const (
+	archGateSymbols = 20000
+	archGateEdges   = 40000
+)
+
 // architectureSection adds the community/coupling overview so the onboarding
-// digest doubles as architecture discovery.
+// digest doubles as architecture discovery. Skipped for huge graphs.
 func architectureSection(ix *index.Index) string {
 	if len(ix.Calls) == 0 {
 		return ""
+	}
+	if len(ix.Symbols) > archGateSymbols || len(ix.Calls) > archGateEdges {
+		return fmt.Sprintf("## Architecture\n(skipped — %d symbols / %d call edges exceed the digest's analysis gate; use `kern graph --html` for the interactive explorer)\n\n",
+			len(ix.Symbols), len(ix.Calls))
 	}
 	arch := intel.AnalyzeArchitecture(ix)
 	if len(arch.Communities) == 0 && len(arch.Coupling) == 0 {

@@ -20,8 +20,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/JayveerPrajapati/kern/internal/budget"
 	"github.com/JayveerPrajapati/kern/internal/brief"
+	"github.com/JayveerPrajapati/kern/internal/budget"
 	"github.com/JayveerPrajapati/kern/internal/cache"
 	"github.com/JayveerPrajapati/kern/internal/code"
 	"github.com/JayveerPrajapati/kern/internal/commitmsg"
@@ -380,7 +380,8 @@ var tools = []Tool{
 		Name:        "kern_buddy",
 		Description: "Session onboarding digest for any agent: the project's conventions, layout, entry points and gotchas distilled from the index, docs and recent history. Call once at the start of a session on an unfamiliar repo.",
 		InputSchema: schema(map[string]any{
-			"root": strProp("Project root (defaults to current directory)"),
+			"root":       strProp("Project root (defaults to current directory)"),
+			"max_output": strProp("Raise the MCP output sandbox cap for this call (bytes; 0 disables). The digest is compact by design; use kern_project_map for the full map."),
 		}, nil),
 	},
 	{
@@ -1967,6 +1968,14 @@ func (s *Server) runTool(ctx context.Context, id string, name string, args map[s
 			cwd, _ := os.Getwd()
 			root = cwd
 		}
+		// Warm the index in the background so the digest is always-warm on
+		// later calls; the first call renders the fast path when the cache
+		// is cold (brief.Build never blocks on a full index build).
+		go func() {
+			if err := brief.Warm(root); err != nil {
+				// best-effort: the digest still renders without index sections
+			}
+		}()
 		out, err := brief.Build(root)
 		if err != nil {
 			return "", err

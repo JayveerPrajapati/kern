@@ -49,8 +49,8 @@ func TestIndexSectionHubsAndEntries(t *testing.T) {
 			{Kind: "func", Name: "f2", File: "a.go", Line: 3},
 			{Kind: "func", Name: "main", File: "a.go", Line: 4},
 		},
-		Calls:    map[string][]string{"f1": {"shared"}, "f2": {"shared"}, "main": {"shared"}},
-		Callers:  map[string][]string{"shared": {"f1", "f2", "main"}},
+		Calls:      map[string][]string{"f1": {"shared"}, "f2": {"shared"}, "main": {"shared"}},
+		Callers:    map[string][]string{"shared": {"f1", "f2", "main"}},
 		FileHashes: map[string]string{"a.go": "h"},
 	}
 	out := indexSection(ix)
@@ -88,6 +88,21 @@ func TestArchitectureSectionEmptyNoCalls(t *testing.T) {
 	ix := &index.Index{} // no calls
 	if got := architectureSection(ix); got != "" {
 		t.Fatalf("expected empty section without calls, got %q", got)
+	}
+}
+
+func TestArchitectureSectionGatedLargeGraph(t *testing.T) {
+	// A graph above the gate must skip community detection (minutes on big
+	// repos) and render the skip note instead.
+	ix := &index.Index{Calls: map[string][]string{"main": {"helper"}}}
+	for i := 0; i < archGateSymbols+1; i++ {
+		ix.Symbols = append(ix.Symbols, index.Symbol{
+			Kind: "func", Name: "f", File: "x.go", Line: i + 1,
+		})
+	}
+	out := architectureSection(ix)
+	if !strings.Contains(out, "skipped") || strings.Contains(out, "communities + coupling") {
+		t.Fatalf("expected gate note, got %q", out)
 	}
 }
 

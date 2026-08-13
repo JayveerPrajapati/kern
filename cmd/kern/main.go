@@ -959,8 +959,8 @@ func main() {
 		}
 		if f.once {
 			rep := precache.Warm(root)
-			fmt.Printf("kern: warmed %d summaries (%d cache hits), %d doc chunks, docs saved=%v in %s\n",
-				rep.Warmed, rep.CacheHits, rep.DocChunks, rep.DocsSaved, rep.Dur.Round(time.Millisecond))
+			fmt.Printf("kern: warmed %d summaries (%d cache hits), %d doc chunks, index %s, docs saved=%v in %s\n",
+				rep.Warmed, rep.CacheHits, rep.DocChunks, rep.IndexStatus, rep.DocsSaved, rep.Dur.Round(time.Millisecond))
 			return
 		}
 		interval := time.Duration(f.interval) * time.Second
