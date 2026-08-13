@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/JayveerPrajapati/kern/internal/brief"
 	"github.com/JayveerPrajapati/kern/internal/cache"
 	"github.com/JayveerPrajapati/kern/internal/code"
 	"github.com/JayveerPrajapati/kern/internal/docsearch"
@@ -20,13 +21,14 @@ import (
 
 // Report summarizes one warm pass.
 type Report struct {
-	Root       string
-	Warmed     int  // summaries newly computed + cached
-	CacheHits  int  // summaries already cached
-	DocChunks  int  // document chunks indexed (docs/index saved)
-	DocsSaved  bool // doc index was persisted
-	Dur        time.Duration
-	SourceMiss bool // root does not exist or is empty
+	Root        string
+	Warmed      int    // summaries newly computed + cached
+	CacheHits   int    // summaries already cached
+	DocChunks   int    // document chunks indexed (docs/index saved)
+	DocsSaved   bool   // doc index was persisted
+	IndexStatus string // AST index after the pass: fresh | built | failed
+	Dur         time.Duration
+	SourceMiss  bool // root does not exist or is empty
 }
 
 var ignoreDirs = map[string]bool{
@@ -93,8 +95,25 @@ func Warm(root string) *Report {
 	} else {
 		rep.DocChunks = len(ix.Docs)
 	}
+	// AST index: build+persist when missing or stale so kern_buddy renders
+	// the full digest on its next call instead of the cold pipeline.
+	warmBefore := indexLoadsFresh(root)
+	switch err := brief.Warm(root); {
+	case err != nil:
+		rep.IndexStatus = "failed"
+	case warmBefore:
+		rep.IndexStatus = "fresh"
+	default:
+		rep.IndexStatus = "built"
+	}
 	rep.Dur = time.Since(start)
 	return rep
+}
+
+// indexLoadsFresh reports whether the AST index cache is present and current.
+func indexLoadsFresh(root string) bool {
+	ix, err := index.Load(root)
+	return err == nil && ix != nil && !ix.Stale()
 }
 
 // Watch runs Warm every interval until stop is closed, emitting a Report per
