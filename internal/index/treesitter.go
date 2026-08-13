@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/UserNobody14/tree-sitter-dart/bindings/go"
 	sitter "github.com/tree-sitter/go-tree-sitter"
 	"github.com/tree-sitter/tree-sitter-bash/bindings/go"
 	"github.com/tree-sitter/tree-sitter-c/bindings/go"
@@ -30,7 +31,7 @@ func treesitterEnabled() bool { return true }
 func TreesitterEnabled() bool { return treesitterEnabled() }
 
 // tsLanguageMap maps kern language IDs to tree-sitter Language pointers.
-var tsLanguageMap = map[string]*sitter.Language{	"go":         sitter.NewLanguage(tree_sitter_go.Language()),
+var tsLanguageMap = map[string]*sitter.Language{"go": sitter.NewLanguage(tree_sitter_go.Language()),
 	"python":     sitter.NewLanguage(tree_sitter_python.Language()),
 	"javascript": sitter.NewLanguage(tree_sitter_javascript.Language()),
 	"typescript": sitter.NewLanguage(tree_sitter_typescript.LanguageTypescript()),
@@ -43,6 +44,7 @@ var tsLanguageMap = map[string]*sitter.Language{	"go":         sitter.NewLanguag
 	"php":        sitter.NewLanguage(tree_sitter_php.LanguagePHP()),
 	"bash":       sitter.NewLanguage(tree_sitter_bash.Language()),
 	"css":        sitter.NewLanguage(tree_sitter_css.Language()),
+	"dart":       sitter.NewLanguage(tree_sitter_dart.Language()),
 }
 
 // tsNodeTypes maps tree-sitter node types to kern symbol kinds. Keys are
@@ -114,6 +116,16 @@ var tsNodeTypes = map[string]string{
 	"module":           "module",
 	// Bash
 	"variable_assignment": "var",
+	// Dart
+	"mixin_declaration":             "class",
+	"extension_declaration":         "class",
+	"getter_signature":              "method",
+	"setter_signature":              "method",
+	"constructor_signature":         "method",
+	"factory_constructor_signature": "method",
+	"operator_signature":            "method",
+	"local_function_declaration":    "func",
+	"type_alias":                    "type",
 	// CSS
 	"class_selector":      "class",
 	"id_selector":         "const",
@@ -265,7 +277,12 @@ func collectCalls(node *sitter.Node, src []byte, defs []Symbol, calls map[string
 		// local function, and object/type creations (Java `new App(1)`).
 		isCall := strings.HasSuffix(kind, "call") || strings.HasSuffix(kind, "invocation") ||
 			kind == "call_expression" || kind == "command" || kind == "object_creation_expression" ||
-			kind == "new_expression"
+			kind == "new_expression" || kind == "function_expression" || kind == "selector"
+		// Dart calls are identifier + selector chains; only selectors that end in
+		// an argument list are calls ("a[0]" index access is not).
+		if kind == "selector" && !hasDescendantKind(n, "argument_part") && !hasDescendantKind(n, "arguments") {
+			isCall = false
+		}
 		if isCall {
 			// Try to extract the callee name
 			if callee := extractCallee(n, src); callee != "" {
@@ -320,12 +337,20 @@ func collectInheritance(node *sitter.Node, src []byte, defs []Symbol, lang strin
 		var bases []string
 
 		switch kind {
-		case "class_definition": // Python: class Cat(Animal, Pet):
+		case "class_definition": // Python: class Cat(Animal); Dart: class Cat extends Animal implements Pet
 			subtype = extractName(n, src, kind)
 			for i := uint(0); i < n.ChildCount(); i++ {
 				c := n.Child(i)
-				if c != nil && c.Kind() == "argument_list" {
+				if c == nil {
+					continue
+				}
+				switch c.Kind() {
+				case "argument_list":
 					bases = append(bases, tag("extends", collectNamesDeep(c))...)
+				case "superclass":
+					bases = append(bases, tag("extends", collectNamesDeep(c))...)
+				case "interfaces":
+					bases = append(bases, tag("implements", collectNamesDeep(c))...)
 				}
 			}
 		case "class_declaration", "interface_declaration": // JS/TS/PHP/Java
@@ -477,6 +502,11 @@ func extractName(node *sitter.Node, src []byte, kind string) string {
 	if nameKinds[node.Kind()] {
 		return string(src[node.StartByte():node.EndByte()])
 	}
+	// Field-based names (Dart signatures carry the name in a "name" field;
+	// other grammars fall through to child scanning).
+	if f := node.ChildByFieldName("name"); f != nil && nameKinds[f.Kind()] {
+		return string(src[f.StartByte():f.EndByte()])
+	}
 	// Method-like declarations carry the return type before the name; the name
 	// is the last name-bearing child ("public String list()" -> "list").
 	if methodLike[node.Kind()] {
@@ -506,7 +536,7 @@ func extractName(node *sitter.Node, src []byte, kind string) string {
 		}
 		if ck == "function_declarator" || ck == "declarator" || ck == "variable_declarator" ||
 			ck == "name" || ck == "method_declarator" || ck == "impl_item" || ck == "class_definition" ||
-			ck == "qualified_identifier" {
+			ck == "qualified_identifier" || ck == "function_signature" {
 			if n := extractName(child, src, ck); n != "" {
 				return n
 			}
@@ -552,13 +582,46 @@ func findReceiver(node, root *sitter.Node, src []byte) string {
 // findEnclosingFunction finds the function containing a call and returns its
 // receiver-qualified name (e.g. "User.login") so call edges land on the same
 // key the definition uses.
+// funcKinds are node kinds that carry a function/method name.
+var funcKinds = map[string]bool{
+	"function_item": true, "function_signature_item": true, "method_declaration": true,
+	"function_definition": true, "constructor_declaration": true, "method_definition": true,
+	"function_signature": true, "function_declaration": true, "generator_function_declaration": true,
+	"method_signature": true, "getter_signature": true, "setter_signature": true,
+	"constructor_signature": true, "factory_constructor_signature": true, "operator_signature": true,
+	"local_function_declaration": true,
+	"method":                     true, "singleton_method": true,
+}
+
+// bodyKinds are container nodes whose previous sibling can carry a function
+// signature (Dart keeps "function_signature" and "function_body" as siblings
+// under program / class_body).
+var bodyKinds = map[string]bool{
+	"function_body": true, "compound_statement": true, "block": true,
+	"class_body": true, "declaration_list": true, "body": true,
+}
+
 func findEnclosingFunction(node *sitter.Node, src []byte) string {
 	for p := node.Parent(); p != nil; p = p.Parent() {
 		k := p.Kind()
-		if strings.HasSuffix(k, "function") || strings.HasSuffix(k, "method") || k == "function_item" ||
-			k == "function_signature_item" || k == "method_declaration" || k == "function_definition" ||
-			k == "constructor_declaration" || k == "method_definition" || k == "function_signature" ||
-			k == "function_declaration" || k == "generator_function_declaration" {
+		// Dart keeps the signature and the body as siblings under the
+		// enclosing list (program / class_body): a body node's previous
+		// sibling carries the signature.
+		if bodyKinds[k] {
+			if ps := p.PrevSibling(); ps != nil && funcKinds[ps.Kind()] {
+				if name := extractName(ps, src, ps.Kind()); name != "" {
+					// C++ qualified definitions ("Shape::area") map to "Shape.area".
+					if i := strings.Index(name, "::"); i >= 0 {
+						return name[:i] + "." + name[i+2:]
+					}
+					if recv := findReceiver(ps, rootOf(ps), src); recv != "" {
+						return recv + "." + name
+					}
+					return name
+				}
+			}
+		}
+		if funcKinds[k] {
 			if name := extractName(p, src, k); name != "" {
 				// C++ qualified definitions ("Shape::area") map to "Shape.area".
 				if i := strings.Index(name, "::"); i >= 0 {
@@ -595,7 +658,7 @@ func extractCallee(node *sitter.Node, src []byte) string {
 	// Member-style nodes resolve to their dotted chain (scoped identifiers keep
 	// only the last segment so "Point::new" lands on "new" like the regex).
 	switch node.Kind() {
-	case "member_expression", "attribute", "method_invocation", "field_expression", "field_access", "call":
+	case "member_expression", "attribute", "method_invocation", "field_expression", "field_access", "call", "function_expression":
 		parts := []string{}
 		for i := uint(0); i < node.ChildCount(); i++ {
 			child := node.Child(i)
@@ -610,7 +673,7 @@ func extractCallee(node *sitter.Node, src []byte) string {
 				ck == "property_identifier" || ck == "name" || ck == "method_name" || ck == "word" ||
 				ck == "constant" {
 				parts = append(parts, string(src[child.StartByte():child.EndByte()]))
-			} else if ck == "member_expression" || ck == "attribute" || ck == "method_invocation" || ck == "field_expression" || ck == "field_access" || ck == "scoped_identifier" || ck == "call" {
+			} else if ck == "member_expression" || ck == "attribute" || ck == "method_invocation" || ck == "field_expression" || ck == "field_access" || ck == "scoped_identifier" || ck == "call" || ck == "function_expression" {
 				if seg := extractCallee(child, src); seg != "" {
 					parts = append(parts, seg)
 				}
@@ -629,6 +692,14 @@ func extractCallee(node *sitter.Node, src []byte) string {
 			}
 		}
 		return name
+	case "selector": // Dart: callee is the receiver chain before the args
+		if p := node.Parent(); p != nil && p.Kind() != "arguments" && p.Kind() != "argument_part" {
+			txt := strings.TrimSpace(string(src[p.StartByte():node.StartByte()]))
+			if i := strings.LastIndex(txt, "="); i >= 0 {
+				txt = txt[i+1:]
+			}
+			return strings.TrimSpace(txt)
+		}
 	}
 	for i := uint(0); i < node.ChildCount(); i++ {
 		child := node.Child(i)

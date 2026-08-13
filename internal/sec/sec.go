@@ -102,6 +102,11 @@ func ScanFile(rel string, src []byte) []Finding {
 			if pii.IsNonSecretIP(r.Label, string(src[idx[0]:idx[1]])) {
 				continue
 			}
+			// PHONE is PII, not a credential: mask it in prompts, but do not
+			// report it as a hardcoded secret.
+			if r.Label == "PHONE" {
+				continue
+			}
 			// Deterministic false-positive filters: a scanner that flags its
 			// own detector regexes or schema introspection is noise.
 			if isRegexLiteral(src, idx[0]) {

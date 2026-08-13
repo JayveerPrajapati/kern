@@ -179,7 +179,7 @@ serve. That's what makes the guarantees real:
   builds take seconds and every analysis reads from the same persisted
   content-hash-verified index.
 - **Optional precision upgrades, still no infra** — `-tags treesitter` adds
-  tree-sitter extraction for 12 languages (call/inheritance edges, precise
+  tree-sitter extraction for 13 languages (call/inheritance edges, precise
   parsing); `-tags sqlite` swaps the JSON hash cache for a **SQLite WAL +
   FTS5** persistent store with full-text search. Both are build tags — never
   runtime dependencies.
@@ -206,7 +206,7 @@ serve. That's what makes the guarantees real:
 | **Surgical context** | `kern context` / `kern explore` / `kern probe` hand the agent exactly the source it needs — no file-by-file crawling |
 | **Safety tooling** | PII masking, secret scanning, hallucination verification (`file:line` claims), snapshot sandbox, self-healing test fixes, JSON-schema validation |
 | **Multi-repo search** | `kern repos add` registers repos; `kern search --repos` / `--semantic` searches across all of them |
-| **Zero-dependency single binary** | Go stdlib only by default; opt-in tree-sitter (12 grammars) and SQLite WAL + FTS5 via build tags |
+| **Zero-dependency single binary** | Go stdlib only by default; opt-in tree-sitter (13 grammars) and SQLite WAL + FTS5 via build tags |
 
 <details>
 <summary><strong>How auto-syncing works — why the index is never stale</strong></summary>
@@ -328,7 +328,7 @@ After that, every agent tool works immediately — results are never stale.
 
 1. **Extraction** — `go/ast` parses Go precisely; a dependency-free extractor
    (comment/string stripping + per-language declaration rules) covers 16 more
-   languages; `-tags treesitter` upgrades 12 languages to tree-sitter grammar
+   languages; `-tags treesitter` upgrades 13 languages to tree-sitter grammar
    parsing (call/inheritance edges included).
 
 2. **Storage** — everything persists to a content-hash-verified index under
@@ -362,8 +362,9 @@ kern ast <pattern> [--all]                      AST symbol search (wildcards, ki
 kern search <query> [--limit N] [--repos] [--json] [--semantic]
                                 ranked free-text symbol search
 kern repos (list|add <path> [name]|remove <name>)   multi-repo registry
-kern graph <symbol> [--mermaid] [--json] [--graphml] [--html] [--out FILE]
-                                definition + callers + what it calls; graph exports
+kern graph <symbol> [--mermaid] [--json] [--graphml] [--html] [--out FILE] [--limit N]
+                                 definition + callers + what it calls; graph exports;
+                                 --html with no symbol renders a whole-repo explorer (community bands + search)
 kern inherits <symbol> [root] [--json]           supertypes + subtypes
 kern context <symbolRegex> [--lines N]           minimal source slice
 kern why <symbol> [--json]                       rationale: doc comment + dependents
@@ -590,9 +591,9 @@ Java · Ruby · PHP · Shell · CSS/SCSS/Less · HTML · Markdown · JSON · YAM
 included) — so the same 17-language pipeline covers frontend SFCs too. Go is
 parsed precisely with `go/ast`.</sub>
 
-**12 languages upgraded with tree-sitter** (`-tags treesitter` build):
+**13 languages upgraded with tree-sitter** (`-tags treesitter` build):
 Go · Python · JavaScript · TypeScript (+ TSX) · Bash/Shell · C · C++ · CSS ·
-Java · PHP · Ruby · Rust — inheritance edges and precise calls included.
+Java · PHP · Ruby · Rust · Dart — inheritance edges and precise calls included.
 
 ---
 

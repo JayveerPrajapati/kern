@@ -375,13 +375,13 @@ func buildTestIndex(t *testing.T, files map[string]string) *Index {
 
 func TestIgnoreDirsExcludesAgentConfigs(t *testing.T) {
 	ix := buildTestIndex(t, map[string]string{
-		"main.go":                  "package main\nfunc main() {}\n",
-		".cursor/mcp.json":         `{"mcpServers":{"kern":{"type":"stdio"}}}`,
-		".gemini/settings.json":    `{"hooks":{}}`,
-		".kiro/settings/mcp.json":  `{"mcpServers":{}}`,
-		".claude/settings.json":    `{"hooks":{}}`,
+		"main.go":                   "package main\nfunc main() {}\n",
+		".cursor/mcp.json":          `{"mcpServers":{"kern":{"type":"stdio"}}}`,
+		".gemini/settings.json":     `{"hooks":{}}`,
+		".kiro/settings/mcp.json":   `{"mcpServers":{}}`,
+		".claude/settings.json":     `{"hooks":{}}`,
 		".opencode/plugins/kern.ts": "import { tool } from \"@opencode-ai/plugin\"\n",
-		".git/config":              "[core]\n",
+		".git/config":               "[core]\n",
 	})
 	for f := range ix.FileHashes {
 		if f == ".cursor/mcp.json" || f == ".gemini/settings.json" || f == ".kiro/settings/mcp.json" ||

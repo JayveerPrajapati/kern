@@ -14,12 +14,14 @@ import (
 
 // GraphNode is a single symbol node in a neighbourhood graph.
 type GraphNode struct {
-	ID   string `json:"id"`
-	Name string `json:"name"`
-	Kind string `json:"kind"`
-	Role string `json:"role,omitempty"` // def, caller, callee
-	File string `json:"file,omitempty"`
-	Line int    `json:"line,omitempty"`
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	Kind      string `json:"kind"`
+	Role      string `json:"role,omitempty"` // def, caller, callee
+	File      string `json:"file,omitempty"`
+	Line      int    `json:"line,omitempty"`
+	Pkg       string `json:"pkg,omitempty"`       // top-level dir of File (whole-repo mode)
+	Community string `json:"community,omitempty"` // label-propagation community (whole-repo mode)
 }
 
 // Edge confidence tiers describe how reliably an edge was derived.
@@ -149,6 +151,97 @@ func (ix *Index) Neighborhood(symbol string) (GraphResult, bool) {
 	}
 	g.Stats = ix.TokenSavingsForNeighborhood(g)
 	return g, true
+}
+
+// WholeGraph renders the whole repository as a graph: every symbol (capped at
+// limit, most-connected first), every resolved call edge between kept symbols,
+// and per-symbol package and community memberships for the banded layout. Root
+// stays empty so the HTML renderer picks the whole-repo branch.
+func (ix *Index) WholeGraph(limit int) GraphResult {
+	if limit <= 0 {
+		limit = 400
+	}
+	labels := ix.Communities
+	if len(labels) == 0 {
+		labels = ix.CommunityLabels()
+	}
+	degree := func(id string) int {
+		return len(ix.Calls[id]) + len(ix.Callers[id])
+	}
+	// FullName is not unique across languages (bash/python/go each define
+	// "main", pack/brief/engine each define "Build"), so dedupe candidates
+	// by name before capping or the degree cut would be full of collisions.
+	seen := map[string]bool{}
+	var cands []struct {
+		s   Symbol
+		deg int
+	}
+	for _, s := range ix.Symbols {
+		id := s.FullName()
+		if seen[id] {
+			continue
+		}
+		seen[id] = true
+		cands = append(cands, struct {
+			s   Symbol
+			deg int
+		}{s, degree(id)})
+	}
+	sort.Slice(cands, func(i, j int) bool {
+		if cands[i].deg != cands[j].deg {
+			return cands[i].deg > cands[j].deg
+		}
+		return cands[i].s.FullName() < cands[j].s.FullName()
+	})
+	if len(cands) > limit {
+		cands = cands[:limit]
+	}
+	byID := map[string]GraphNode{}
+	for _, c := range cands {
+		id := c.s.FullName()
+		byID[id] = GraphNode{
+			ID: id, Name: id, Kind: c.s.Kind, Role: "def",
+			File: c.s.File, Line: c.s.Line,
+			Pkg: topDir(ix.Root, c.s.File), Community: labels[id],
+		}
+	}
+	g := GraphResult{}
+	for _, c := range cands {
+		id := c.s.FullName()
+		for _, callee := range ix.Calls[id] {
+			if _, ok := byID[callee]; !ok {
+				continue
+			}
+			conf := edgeConfidence(ix, c.s.File, callee)
+			g.Edges = append(g.Edges, GraphEdge{
+				From: id, To: callee,
+				Confidence:      conf,
+				ConfidenceLabel: confidenceLabel(conf),
+			})
+		}
+	}
+	ids := make([]string, 0, len(byID))
+	for id := range byID {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		g.Nodes = append(g.Nodes, byID[id])
+	}
+	return g
+}
+
+// topDir returns the top-level directory of file relative to root, or the
+// parent directory when the file sits at the top level.
+func topDir(root, file string) string {
+	rel := filepath.ToSlash(file)
+	if dir := filepath.Dir(rel); dir != "." && dir != "/" {
+		if i := strings.IndexByte(dir, '/'); i >= 0 {
+			return dir[:i]
+		}
+		return dir
+	}
+	return "."
 }
 
 // computeTokenSavings computes how many tokens the full source context for a
@@ -337,13 +430,20 @@ func tokenStatsPanel(s TokenStats) string {
 
 // GraphHTML renders a self-contained interactive HTML/SVG visualisation of the
 // neighbourhood. No external dependencies; the data is embedded as JSON and
-// rendered with inline JavaScript.
+// rendered with inline JavaScript. When Root is empty it renders the
+// whole-repo mode: symbols grouped into community (or package) bands, with a
+// search box to filter them.
 func (g GraphResult) GraphHTML() string {
 	data, err := json.Marshal(g)
 	if err != nil {
 		data = []byte(fmt.Sprintf(`{"error":%q}`, err.Error()))
 	}
 	data = []byte(strings.ReplaceAll(string(data), "</", "<\\/"))
+	title := g.Root
+	whole := title == ""
+	if whole {
+		title = fmt.Sprintf("whole repo (%d symbols, %d edges)", len(g.Nodes), len(g.Edges))
+	}
 	kindColor := map[string]string{
 		"func": "#3b82f6", "method": "#8b5cf6", "struct": "#ec4899",
 		"interface": "#f59e0b", "type": "#14b8a6", "const": "#64748b",
@@ -363,7 +463,7 @@ func (g GraphResult) GraphHTML() string {
 <head>
 <meta charset="utf-8">
 <title>kern graph: `)
-	b.WriteString(html.EscapeString(g.Root))
+	b.WriteString(html.EscapeString(title))
 	b.WriteString(`</title>
 <style>
   body { font-family: system-ui, sans-serif; margin: 0; background: #0f172a; color: #e2e8f0; }
@@ -383,19 +483,24 @@ func (g GraphResult) GraphHTML() string {
   .node text { pointer-events: none; }
   .edge { stroke: #475569; stroke-width: 1.5; }
   .dim { opacity: .12; }
+  #search { background: #0f172a; border: 1px solid #334155; color: #e2e8f0; font-size: 12px; padding: 4px 8px; border-radius: 6px; width: 200px; }
+  #search::placeholder { color: #64748b; }
+  .band-label { fill: #94a3b8; font-size: 11px; }
 </style>
 </head>
 <body>
 <div id="top"><h1>kern graph: `)
-	b.WriteString(html.EscapeString(g.Root))
+	b.WriteString(html.EscapeString(title))
 	b.WriteString(`</h1><span class="sub">hover to trace edges, click for details</span>
 ` + tokenStatsPanel(g.Stats) + `
+<input id="search" type="text" placeholder="filter symbols\u2026">
 <div id="legend"><span style="color:#22c55e">\u2500\u25b6 EXTRACTED (same pkg)</span><span style="color:#f59e0b">\u2500\u25b6 INFERRED (cross pkg)</span><span style="color:#dc2626">\u2500\u2500\u25b6 AMBIGUOUS (unresolved)</span></div></div>
 <div id="wrap"><svg id="svg" viewBox="0 0 1000 600"></svg><div id="side"></div></div>
 <script>
 const g = `)
 	b.WriteString(string(data))
 	b.WriteString(`;
+const whole = (g.root === '');
 const colors = {`)
 	b.WriteString(strings.TrimSuffix(colors.String(), ","))
 	b.WriteString(`};
@@ -418,7 +523,7 @@ const NS = 'http://www.w3.org/2000/svg';
 const edgesEl = [], nodeEl = new Map(), w = new Map();
 const edgemap = new Map();
 function addEdge(from, to, confidence) {
-  const e = document.createElementNS(NS, 'line');
+  const e = whole ? document.createElementNS(NS, 'path') : document.createElementNS(NS, 'line');
   e.setAttribute('class', 'edge');
   if (confidence === 'AMBIGUOUS' || confidence === 'low') {
     e.setAttribute('stroke-dasharray', '5,4');
@@ -445,6 +550,7 @@ function textWidth(s) {
   return w.get(s);
 }
 function draw() {
+  if (whole) return wholeDraw();
   g.nodes.forEach(n => {
     const [cx, cy] = slot(n, n.role || 'callee');
     const tw = Math.min(textWidth(n.id), 180);
@@ -480,6 +586,13 @@ function layout() {
     const lines = edgemap.get(e.from + '>' + e.to) || [];
     lines.forEach((l, i) => {
       const bend = (i - (lines.length - 1) / 2) * 12;
+      if (whole) {
+        const x1 = a.rx + a.w / 2, y1 = a.ry + bend;
+        const x2 = b.rx - b.w / 2, y2 = b.ry + bend;
+        const mx = (x1 + x2) / 2;
+        l.setAttribute('d', 'M ' + x1 + ' ' + y1 + ' C ' + mx + ' ' + y1 + ' ' + mx + ' ' + y2 + ' ' + x2 + ' ' + y2);
+        return;
+      }
       let x1 = a.rx + (e.from === g.root ? a.w / 2 : -a.w / 2);
       let y1 = a.ry + bend;
       let x2 = b.rx + (e.to === g.root ? -b.w / 2 : b.w / 2);
@@ -487,6 +600,60 @@ function layout() {
       l.setAttribute('x1', x1); l.setAttribute('y1', y1);
       l.setAttribute('x2', x2); l.setAttribute('y2', y2);
     });
+  });
+}
+function wholeDraw() {
+  const by = {};
+  g.nodes.forEach(n => { const k = (n.community || n.pkg || '?'); (by[k] = by[k] || []).push(n); });
+  const keys = Object.keys(by).sort((a, b) => by[b].length - by[a].length || a.localeCompare(b));
+  const colW = 200, colH = 470, rowH = 30, pad = 14;
+  let x = 40;
+  const bands = [];
+  keys.forEach(k => {
+    const nodes = by[k];
+    const pos = {};
+    let col = 0, row = 0;
+    nodes.forEach(n => {
+      if (row >= colH / rowH) { row = 0; col++; }
+      pos[n.id] = [x + col * colW + pad + 90, 40 + pad + row * rowH + 10];
+      row++;
+    });
+    const bw = (col + 1) * colW + pad * 2;
+    const band = document.createElementNS(NS, 'g');
+    const r = document.createElementNS(NS, 'rect');
+    r.setAttribute('x', x); r.setAttribute('y', 8); r.setAttribute('width', bw); r.setAttribute('height', 508);
+    r.setAttribute('fill', 'rgba(148,163,184,0.04)'); r.setAttribute('stroke', '#334155'); r.setAttribute('rx', 8);
+    const t = document.createElementNS(NS, 'text');
+    t.setAttribute('x', x + 10); t.setAttribute('y', 24); t.setAttribute('class', 'band-label');
+    t.textContent = k + ' (' + nodes.length + ')';
+    band.appendChild(r); band.appendChild(t); svg.appendChild(band);
+    bands.push({ x, w: bw, pos });
+    x += bw + 24;
+  });
+  svg.setAttribute('viewBox', '0 0 ' + (x + 40) + ' 560');
+  g.nodes.forEach(n => {
+    const b = bands.find(bb => bb.pos[n.id]);
+    const cx = b.pos[n.id][0], cy = b.pos[n.id][1];
+    const tw = Math.min(textWidth(n.id), 170);
+    const rw = tw + 16, rh = 22;
+    const g3 = document.createElementNS(NS, 'g');
+    g3.setAttribute('class', 'node');
+    const rect = document.createElementNS(NS, 'rect');
+    rect.setAttribute('width', rw); rect.setAttribute('height', rh); rect.setAttribute('rx', 5);
+    rect.setAttribute('fill', (colors[n.kind] || '#64748b') + '33');
+    rect.setAttribute('stroke', colors[n.kind] || '#64748b');
+    const t = document.createElementNS(NS, 'text');
+    t.setAttribute('x', rw / 2); t.setAttribute('y', rh / 2 + 4);
+    t.setAttribute('text-anchor', 'middle'); t.setAttribute('font-size', '10');
+    t.textContent = n.id;
+    g3.appendChild(rect); g3.appendChild(t);
+    g3.setAttribute('transform', 'translate(' + (cx - rw / 2) + ',' + (cy - rh / 2) + ')');
+    g3.addEventListener('mouseenter', () => highlight(n, true));
+    g3.addEventListener('mouseleave', () => highlight(n, false));
+    g3.addEventListener('click', () => detail(n));
+    svg.appendChild(g3);
+    nodeEl.set(n.id, g3);
+    n.rx = cx; n.ry = cy; n.w = rw; n.h = rh;
   });
 }
 function highlight(n, on) {
@@ -512,14 +679,32 @@ function detail(n) {
     '<div>kind: <span class="dim">' + (n.kind || '-') + '</span></div>' +
     '<div>file: <span class="dim">' + (n.file || '-') + '</span></div>' +
     '<div>line: <span class="dim">' + (n.line || '-') + '</span></div>' +
+    (n.pkg ? '<div>pkg: <span class="dim">' + n.pkg + '</span></div>' : '') +
+    (n.community ? '<div>community: <span class="dim">' + n.community + '</span></div>' : '') +
     '<div style="margin-top:8px" class="dim">' + n.id + ' has ' + (g.edges.filter(e => e.from === n.id).length) + ' outgoing, ' + (g.edges.filter(e => e.to === n.id).length) + ' incoming edges.</div>';
 }
 function legend() {
   const seen = {};
   g.nodes.forEach(n => { if (!seen[n.kind]) { seen[n.kind] = 1; const s = document.createElement('span'); s.innerHTML = '<span style="color:' + (colors[n.kind] || '#64748b') + '">\u25a0</span> ' + n.kind; document.getElementById('legend').appendChild(s); } });
 }
+const search = document.getElementById('search');
+search.addEventListener('input', () => {
+  const q = search.value.trim().toLowerCase();
+  g.nodes.forEach(n => {
+    const el = nodeEl.get(n.id);
+    if (!el) return;
+    const hit = !q || n.id.toLowerCase().includes(q) || (n.file || '').toLowerCase().includes(q);
+    el.style.opacity = hit ? '1' : '0.12';
+  });
+  g.edges.forEach(e => {
+    const a = nodeEl.get(e.from), b = nodeEl.get(e.to);
+    const vis = !q || (a && a.style.opacity !== '0.12' && b && b.style.opacity !== '0.12');
+    (edgemap.get(e.from + '>' + e.to) || []).forEach(l => { l.style.opacity = vis ? '1' : '0.06'; });
+  });
+});
 draw(); legend();
-detail(nodeById[g.root]);
+if (nodeById[g.root]) detail(nodeById[g.root]);
+else detail({id: 'whole repo', kind: 'index', role: 'whole repo', file: g.nodes.length + ' symbols, ' + g.edges.length + ' edges'});
 </script>
 </body>
 </html>

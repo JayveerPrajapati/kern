@@ -91,6 +91,52 @@ func TestMaskURLCreds(t *testing.T) {
 	}
 }
 
+func TestMaskPhoneFormats(t *testing.T) {
+	in := "us: (555) 123-4567, dash: 555-123-4567, dot: 555.123.4567, e164: +1 202-555-0134, in: +91 98765 43210, uk: 020 7946 0958, bare: 9876543210"
+	res := Mask(in)
+	for _, want := range []string{"[MASKED_PHONE_1]", "[MASKED_PHONE_2]", "[MASKED_PHONE_3]", "[MASKED_PHONE_4]", "[MASKED_PHONE_5]", "[MASKED_PHONE_6]", "[MASKED_PHONE_7]"} {
+		if !strings.Contains(res.Text, want) {
+			t.Errorf("missing %s in %q", want, res.Text)
+		}
+	}
+	if res.ByLabel["PHONE"] != 7 {
+		t.Errorf("expected 7 phones, got %+v", res.ByLabel)
+	}
+}
+
+func TestMaskPhoneDoesNotEatDatesIds(t *testing.T) {
+	in := "date 12.03.2026, ts 20250813151234, ord ORD-12345, ver 1.2.3456"
+	res := Mask(in)
+	if strings.Contains(res.Text, "[MASKED_PHONE_") {
+		t.Errorf("dates/ids must not be masked as phones: %q", res.Text)
+	}
+}
+
+func TestMaskPhoneIPAndSSNNotConfused(t *testing.T) {
+	in := "ip 192.168.1.1, ssn 123-45-6789, phone 07911 123456, uk +44 20 7946 0958"
+	res := Mask(in)
+	if !strings.Contains(res.Text, "[MASKED_PHONE_1]") {
+		t.Errorf("phone not masked: %q", res.Text)
+	}
+	if !strings.Contains(res.Text, "[MASKED_PHONE_2]") {
+		t.Errorf("uk e164 not masked: %q", res.Text)
+	}
+	if strings.Contains(res.Text, "[MASKED_IP_") {
+		t.Errorf("private IP must stay unmasked: %q", res.Text)
+	}
+	if !strings.Contains(res.Text, "[MASKED_SSN_1]") {
+		t.Errorf("ssn not masked: %q", res.Text)
+	}
+}
+
+func TestMaskPhoneDigitRunFilter(t *testing.T) {
+	in := "ts 20250813151234, zip 12345-6789, ord 1234567890123"
+	res := Mask(in)
+	if strings.Contains(res.Text, "[MASKED_PHONE_") {
+		t.Errorf("digit runs must not be masked as phones: %q", res.Text)
+	}
+}
+
 func TestMaskNames(t *testing.T) {
 	res := MaskNames("deploy for Acme Corp at 10.1.1.1", []string{"Acme Corp"})
 	if !strings.Contains(res.Text, "[MASKED_NAME_1]") {
