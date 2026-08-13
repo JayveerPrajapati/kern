@@ -235,6 +235,20 @@ type flags struct {
 	dryRun         bool
 }
 
+// toolTimeout returns the effective timeout for subprocess-running commands
+// (build, validate, heal, sandbox). An unset --timeout gets a 120s default so
+// a hung subprocess can never wedge a tool call forever; an explicit
+// "--timeout 0" means no limit.
+func toolTimeout(f flags) time.Duration {
+	if f.timeoutSet && f.timeout == 0 {
+		return 0
+	}
+	if f.timeout <= 0 {
+		return 120 * time.Second
+	}
+	return time.Duration(f.timeout) * time.Second
+}
+
 // mcpHTTPAddr resolves the address for `kern mcp`: a positional argument wins
 // over the --http flag. An empty result means stdio mode.
 func mcpHTTPAddr(args []string, f flags) string {
@@ -592,7 +606,13 @@ func main() {
 			fatal("usage: kern build <command>")
 		}
 		wireRecorder()
-		res, err := optimize.RunBuild(context.Background(), cmdStr, f.dir, optimize.Options{Session: f.session})
+		ctx := context.Background()
+		if tt := toolTimeout(f); tt > 0 {
+			var cancel context.CancelFunc
+			ctx, cancel = context.WithTimeout(ctx, tt)
+			defer cancel()
+		}
+		res, err := optimize.RunBuild(ctx, cmdStr, f.dir, optimize.Options{Session: f.session})
 		if err != nil {
 			fatal("%v", err)
 		}
@@ -759,7 +779,7 @@ func main() {
 			}
 		}
 		fmt.Printf("kern: running %s %s\n", c.Cmd, strings.Join(c.Args, " "))
-		res := validate.Run(context.Background(), root, c, time.Duration(f.timeout)*time.Second)
+		res := validate.Run(context.Background(), root, c, toolTimeout(f))
 		if res.Err != nil {
 			fmt.Fprintf(os.Stderr, "kern: validation error: %v\n", res.Err)
 		}
@@ -789,7 +809,7 @@ func main() {
 			iters = 3
 		}
 		fmt.Printf("kern: heal %s (cmd=%s, rounds=%d)\n", root, f.llm, iters)
-		res := heal.Run(context.Background(), root, task, f.llm, iters, time.Duration(f.timeout)*time.Second)
+		res := heal.Run(context.Background(), root, task, f.llm, iters, toolTimeout(f))
 		if res.Err != nil {
 			fatal("%v", res.Err)
 		}
@@ -862,7 +882,7 @@ func main() {
 			fatal("usage: kern sandbox [root] -- <command...>")
 		}
 		fmt.Printf("kern: sandbox run in %s: %s\n", root, strings.Join(cmdParts, " "))
-		res := sandbox.Run(context.Background(), root, cmdParts[0], cmdParts[1:], time.Duration(f.timeout)*time.Second)
+		res := sandbox.Run(context.Background(), root, cmdParts[0], cmdParts[1:], toolTimeout(f))
 		fmt.Print(res.Output)
 		if res.OK {
 			fmt.Printf("kern: succeeded (%s); changes kept\n", res.Duration.Round(time.Millisecond))

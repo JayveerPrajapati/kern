@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"runtime"
 	"strings"
+	"syscall"
 
 	"github.com/JayveerPrajapati/kern/internal/cache"
 	"github.com/JayveerPrajapati/kern/internal/compress"
@@ -272,6 +273,24 @@ func RunBuild(ctx context.Context, command string, dir string, opts Options) (Re
 	}
 	cmd := exec.CommandContext(ctx, shell, flag, command)
 	cmd.Dir = dir
+	// The shell wraps the real command, so cancelling the context kills only
+	// the shell; its children survive as orphans and hold the output pipes
+	// open, which makes CombinedOutput block until they finish. Run the
+	// command in its own process group and kill the whole group on timeout.
+	if runtime.GOOS != "windows" {
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		pgidDone := make(chan struct{})
+		defer close(pgidDone)
+		go func() {
+			select {
+			case <-ctx.Done():
+				if cmd.Process != nil {
+					syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+				}
+			case <-pgidDone:
+			}
+		}()
+	}
 	out, err := cmd.CombinedOutput()
 	outStr := string(out)
 	if err != nil {
