@@ -41,7 +41,8 @@ only matter for the exceptions.
 - kern_pack (reads every source file; sized to max_tokens so it still fits context)
 
 ## Recommended workflows
-- Understand a codebase: kern_project_map -> kern_arch -> kern_hubs -> kern_entry_points
+- Understand a codebase: kern_project_map -> kern_arch -> kern_communities -> kern_hubs -> kern_entry_points
+- Onboard to a new repo: kern_buddy (session digest of conventions, layout, gotchas)
 - Minimal graph context in one call: kern_graph (caller-first adjacency, budgeted)
 - Locate code: kern_search -> kern_context -> kern_walk (or kern_near for blast radius)
 - Give the agent the full source to edit against: kern_pack (tree + instructions + contents, sized to a token budget)

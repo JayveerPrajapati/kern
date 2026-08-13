@@ -20,10 +20,20 @@ func TestRunReturnsFindings(t *testing.T) {
 		}
 		seen[f.Check] = true
 	}
-	for _, want := range []string{"binary", "index", "stats"} {
+	for _, want := range []string{"binary", "capabilities", "index", "stats"} {
 		if !seen[want] {
 			t.Fatalf("missing check %q in %v", want, seen)
 		}
+	}
+}
+
+func TestCheckCapabilities(t *testing.T) {
+	f := checkCapabilities()
+	if f.Level != "ok" {
+		t.Fatalf("capabilities should always be ok, got %s", f.Level)
+	}
+	if !strings.Contains(f.Detail, "sqlite: ") || !strings.Contains(f.Detail, "treesitter: ") {
+		t.Fatalf("capabilities detail missing both tags: %q", f.Detail)
 	}
 }
 

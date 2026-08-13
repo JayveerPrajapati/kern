@@ -102,6 +102,14 @@ func ScanFile(rel string, src []byte) []Finding {
 			if pii.IsNonSecretIP(r.Label, string(src[idx[0]:idx[1]])) {
 				continue
 			}
+			// Deterministic false-positive filters: a scanner that flags its
+			// own detector regexes or schema introspection is noise.
+			if isRegexLiteral(src, idx[0]) {
+				continue
+			}
+			if r.ID == "sql-injection" && isPragmaTableInfo(src, idx[0]) {
+				continue
+			}
 			line := lineAt(src, idx[0])
 			findings = append(findings, Finding{
 				File:     rel,
@@ -125,8 +133,47 @@ func ScanFile(rel string, src []byte) []Finding {
 	return findings
 }
 
+// isRegexLiteral reports whether the match at pos sits inside a compiled regex
+// literal (regexp.MustCompile / MustCompile on the same line): a scanner must
+// not flag its own detector patterns (e.g. the weak-crypto regex mentions md5).
+func isRegexLiteral(src []byte, pos int) bool {
+	lineStart := bytes.LastIndexByte(src[:pos], '\n') + 1
+	lineEnd := bytes.IndexByte(src[pos:], '\n')
+	if lineEnd < 0 {
+		lineEnd = len(src)
+	}
+	lineEnd += pos
+	line := src[lineStart:lineEnd]
+	return bytes.Contains(line, []byte("regexp.MustCompile"))
+}
+
+// isPragmaTableInfo reports whether a dynamic-SQL match at pos is a SQLite
+// schema-introspection call whose concatenated operands are bare identifiers
+// (constant table names from the caller), not calls or field access.
+// Trade-off: a variable holding user input would look identical, so pragma
+// calls with bare identifiers are treated as constants; non-pragma SQL with
+// the same shape is still flagged.
+func isPragmaTableInfo(src []byte, pos int) bool {
+	from := pos - 64
+	if from < 0 {
+		from = 0
+	}
+	window := src[from : pos+64]
+	if !bytes.Contains(window, []byte("PRAGMA table_info(")) {
+		return false
+	}
+	return rePragmaConcat.Match(src[pos : pos+64])
+}
+
+// rePragmaConcat matches " + <bare identifier>" operands in a PRAGMA
+// table_info call: the identifier must be followed by a quote, a closing
+// paren, another concat or the end — never a call, method or field access.
+var rePragmaConcat = regexp.MustCompile(`\s*\+\s*[a-zA-Z_][a-zA-Z0-9_]*\s*(?:\)|"|'|\+|\s*$)`)
+
 // isTestFile reports whether a file is a test fixture, matching the naming
 // conventions across the indexed languages (*_test.go, foo_test.py,
+// auth.test.js, ...). Their fixtures routinely hold fake secrets that are not
+// real findings.
 // auth.test.js, ...). Their fixtures routinely hold fake secrets that are not
 // real findings.
 func isTestFile(rel string) bool {

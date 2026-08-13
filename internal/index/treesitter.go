@@ -22,9 +22,15 @@ import (
 	"github.com/tree-sitter/tree-sitter-typescript/bindings/go"
 )
 
+// treesitterEnabled reports whether tree-sitter extraction is compiled in.
+func treesitterEnabled() bool { return true }
+
+// TreesitterEnabled reports whether the tree-sitter extractor is available in
+// this build (-tags treesitter); false builds fall back to regex heuristics.
+func TreesitterEnabled() bool { return treesitterEnabled() }
+
 // tsLanguageMap maps kern language IDs to tree-sitter Language pointers.
-var tsLanguageMap = map[string]*sitter.Language{
-	"go":         sitter.NewLanguage(tree_sitter_go.Language()),
+var tsLanguageMap = map[string]*sitter.Language{	"go":         sitter.NewLanguage(tree_sitter_go.Language()),
 	"python":     sitter.NewLanguage(tree_sitter_python.Language()),
 	"javascript": sitter.NewLanguage(tree_sitter_javascript.Language()),
 	"typescript": sitter.NewLanguage(tree_sitter_typescript.LanguageTypescript()),
