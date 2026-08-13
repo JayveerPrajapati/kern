@@ -274,6 +274,31 @@ func TestCommunitiesCluster(t *testing.T) {
 	}
 }
 
+func TestCommunitiesGatedLargeRepo(t *testing.T) {
+	ix := &index.Index{}
+	for i := 0; i < index.MaxCommunitySymbols+1; i++ {
+		ix.Symbols = append(ix.Symbols, index.Symbol{
+			Kind: "func", Name: "f", File: "x.go", Line: i + 1,
+		})
+	}
+	if comms := Communities(ix); len(comms) != 0 {
+		t.Fatalf("expected no communities above the gate, got %d", len(comms))
+	}
+}
+
+func TestAnalyzeArchitectureGatedLargeRepo(t *testing.T) {
+	ix := &index.Index{Calls: map[string][]string{"main": {"helper"}}}
+	for i := 0; i < index.MaxCommunitySymbols+1; i++ {
+		ix.Symbols = append(ix.Symbols, index.Symbol{
+			Kind: "func", Name: "f", File: "x.go", Line: i + 1,
+		})
+	}
+	a := AnalyzeArchitecture(ix)
+	if len(a.Communities) != 0 || len(a.Coupling) != 0 {
+		t.Fatalf("expected empty architecture above the gate, got %d communities %d coupling", len(a.Communities), len(a.Coupling))
+	}
+}
+
 func TestIsTestFile(t *testing.T) {
 	cases := map[string]bool{
 		"foo_test.go":     true,
