@@ -27,7 +27,7 @@ Already installed? Run `kern doctor` to verify everything is wired.
 
 <br>
 
-**61 `kern_*` MCP tools · 50+ CLI commands · 74 detected frameworks · 17 indexed languages (+ Vue/Svelte/Astro SFC)**
+**62 `kern_*` MCP tools · 50+ CLI commands · 74 detected frameworks · 17 indexed languages (+ Vue/Svelte/Astro SFC)**
 
 </div>
 
@@ -183,6 +183,11 @@ serve. That's what makes the guarantees real:
   parsing); `-tags sqlite` swaps the JSON hash cache for a **SQLite WAL +
   FTS5** persistent store with full-text search. Both are build tags — never
   runtime dependencies.
+- **Quality is CI-enforced, not anecdotal** — the benchmark harness
+  (`go run ./evaluate/bench`) ships deterministic corpora and hard
+  compression gates; `TestGatesAreMet` pins them on every `go test ./...`,
+  so a regression in any compression surface fails CI instead of silently
+  shipping weaker numbers.
 
 ---
 
@@ -312,7 +317,7 @@ After that, every agent tool works immediately — results are never stale.
 ┌───────────────────────────────────────────────────────────────────┐
 │                  kern (CLI) / kern-mcp (MCP server)               │
 │                                                                   │
-│  61 kern_* tools → optimize · map · graph · review · verify ...   │
+│  62 kern_* tools → optimize · map · graph · review · verify ...   │
 │                                 │                                 │
 │                                 ▼                                 │
 │                  persisted symbol index (JSON hash cache,         │
@@ -330,7 +335,7 @@ After that, every agent tool works immediately — results are never stale.
    `~/.cache/kern/` (per project). `-tags sqlite` switches to a SQLite store
    with WAL journaling and FTS5 full-text search for concurrent access.
 
-3. **Analysis** — 50+ commands and 61 MCP tools read the same index:
+3. **Analysis** — 50+ commands and 62 MCP tools read the same index:
    call graphs, blast radius, change impact, hotspots, dead code, path
    finding, architecture communities, coverage gaps — all dependency-free,
    all deterministic.
@@ -424,14 +429,14 @@ timeout (10s default) and a stdout byte cap — only stdout is returned.
 
 ## MCP Tools
 
-When running as an MCP server (`kern-mcp`), kern exposes **61 `kern_*`
+When running as an MCP server (`kern-mcp`), kern exposes **62 `kern_*`
 tools**. They map 1:1 to the CLI commands, so opencode, Claude Code, Codex,
 Cursor and 12 more agents get the full engine over MCP:
 
 | Group | Tools |
 |---|---|
 | **Context optimization** | `kern_optimize_prompt`, `kern_optimize_log`, `kern_optimize_output`, `kern_context_budget`, `kern_pack`, `kern_swap`, `kern_compact_file`, `kern_project_map`, `kern_build`→`kern_run_build` |
-| **Code graph** | `kern_ast_search`, `kern_search`, `kern_repo_search`, `kern_code_graph`, `kern_inherits`, `kern_context`, `kern_near`, `kern_walk`, `kern_path`, `kern_probe`, `kern_explore`, `kern_why`, `kern_frameworks`, `kern_entry_points` |
+| **Code graph** | `kern_ast_search`, `kern_search`, `kern_repo_search`, `kern_code_graph`, `kern_graph`, `kern_inherits`, `kern_context`, `kern_near`, `kern_walk`, `kern_path`, `kern_probe`, `kern_explore`, `kern_why`, `kern_frameworks`, `kern_entry_points` |
 | **Change & review** | `kern_changes`, `kern_review`, `kern_churn`, `kern_trace`, `kern_hubs`, `kern_bridges`, `kern_arch`, `kern_dead`, `kern_larges`, `kern_test_gaps`, `kern_cochange` |
 | **Safety** | `kern_mask_pii`, `kern_security`, `kern_safe_delete`, `kern_verify_output`, `kern_guard_check`, `kern_schema_validate`, `kern_sandbox` |
 | **Automation** | `kern_run_build`, `kern_validate`, `kern_heal`, `kern_exec`, `kern_rename`, `kern_diff_files`, `kern_commitmsg`, `kern_doc_fetch/index/search`, `kern_precache`, `kern_memory_add/list/recall`, `kern_lock/unlock/lock_status`, `kern_semcache`, `kern_stats`, `kern_usage_guide` |
@@ -486,6 +491,40 @@ your code, not third-party noise.
 
 ---
 
+## PR Merge Gate
+
+[`.github/actions/kern-review`](.github/actions/kern-review/action.yml) is a
+reusable composite action that turns kern's change-intel into a pull-request
+merge gate: it diffs against the base ref, runs `kern review` (symbol-impact
+analysis), `kern changes --json` (per-file risk, test gaps, blast radius) and
+`kern guard check` (architectural boundaries), posts an upserted PR comment,
+and can fail the job on demand.
+
+```yaml
+steps:
+  - uses: actions/checkout@v4
+    with:
+      fetch-depth: 0   # the gate diffs against the base ref
+  - uses: JayveerPrajapati/kern/.github/actions/kern-review@v1
+    with:
+      base-ref: origin/${{ github.base_ref }}
+      comment: "true"        # post/update the review comment
+      fail-on-risk: "true"   # merge gate: fail on risky changes
+      risk-threshold: "4.0"  # kern's additive risk scale, not 0..1
+      version: latest        # release tag to install; or pass kern-bin:
+      # kern-bin: /path/to/kern   # reuse a binary already on the runner
+```
+
+`fail-on-risk` fails the job when the highest per-file risk reaches
+`risk-threshold` (default 4.0 on kern's additive scale — 1.0 base +
+`log2(callers)` + `log2(blast)` + untested `+1.5` + cross-package `+2.0`) or
+when `kern guard check` reports boundary violations. It's a hard gate, not a
+report: set it and the PR cannot merge until risk drops. The repo's own
+[`pr-review.yml`](.github/workflows/pr-review.yml) dogfoods the action, so
+kern PRs are gated by the code they propose.
+
+---
+
 ## Verified Releases
 
 Every asset is built by the [release workflow](.github/workflows/release.yml),
@@ -529,7 +568,7 @@ native hooks for agents whose hook APIs allow it:
 | **Codex** | `[mcp_servers.kern]` in `~/.codex/config.toml` | — (no output-rewrite hook API) |
 | **JSON adapters** | `continue`, `windsurf`, `zed`, `vscode`, `antigravity`, `qwen`, `qoder`, `kiro`, `copilot` (VS Code), `copilot-cli` | — (no hook API) |
 
-All agents receive the same 61 MCP tools and the same `AGENTS.md` rules. Output
+All agents receive the same 62 MCP tools and the same `AGENTS.md` rules. Output
 compression + session memory run natively where the platform's hook API allows
 in-place output replacement (opencode, Claude Code, Gemini); agents without
 such an API keep full MCP parity but no automatic interception. Generated

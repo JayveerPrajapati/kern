@@ -1,0 +1,173 @@
+name: kern-review
+description: >
+  kern PR merge gate: runs the code-intel review (kern review), change-impact
+  analysis with risk scores (kern changes), and the architectural boundary
+  guard (kern guard check), posts an upserted PR comment, and can fail the job
+  when risk exceeds a threshold or boundary violations are reported. All
+  analysis is local and deterministic — the kern binary is downloaded from
+  this repo's release assets.
+
+inputs:
+  base-ref:
+    description: >
+      Git ref to diff against, e.g. 'origin/main'. For pull_request workflows
+      pass 'origin/${{ github.base_ref }}'.
+    required: false
+    default: origin/main
+  version:
+    description: kern release tag to install (e.g. v0.1.0); 'latest' uses the newest release.
+    required: false
+    default: latest
+  kern-bin:
+    description: >
+      Path to an existing kern binary (already on the runner). When set, the
+      download step is skipped.
+    required: false
+    default: ""
+  comment:
+    description: Post or update the PR review comment (marker-upserted).
+    required: false
+    default: "true"
+  fail-on-risk:
+    description: >
+      When true, fail the job if the highest per-file risk is >= risk-threshold
+      or boundary violations are reported (merge gate).
+    required: false
+    default: "false"
+  risk-threshold:
+    description: >
+      Risk floor that fails the gate when fail-on-risk is true. Kern's risk is
+      additive, not normalized: 1.0 base + log2(callers) + log2(blast) plus
+      untested (+1.5) and cross-package (+2.0) penalties. A lone untested
+      helper with a few callers lands around 3-4; a 0..1 threshold would fail
+      every diff.
+    required: false
+    default: "4.0"
+  review-max:
+    description: Token budget for the review comment body.
+    required: false
+    default: "6000"
+
+outputs:
+  verdict:
+    description: "pass when the gate cleared, fail otherwise."
+  risk:
+    description: Highest per-file risk score observed on this diff.
+  comment-body:
+    description: The assembled review comment markdown.
+
+runs:
+  using: composite
+  steps:
+    - name: Install kern binary
+      id: install
+      shell: bash
+      run: |
+        set -euo pipefail
+        if [ -n "${{ inputs.kern-bin }}" ]; then
+          echo "KERN_BIN=${{ inputs.kern-bin }}" >> "$GITHUB_ENV"
+        else
+          mkdir -p /tmp/kern-bin
+          gh release download "${{ inputs.version }}" \
+            --repo "${{ github.action_repository }}" \
+            --pattern "kern-linux-amd64.tar.gz" \
+            --dir /tmp/kern-bin --clobber
+          tar -xzf /tmp/kern-bin/kern-linux-amd64.tar.gz -C /tmp/kern-bin
+          echo "KERN_BIN=/tmp/kern-bin/kern-linux-amd64/kern" >> "$GITHUB_ENV"
+        fi
+        "$KERN_BIN" version >/dev/null
+      env:
+        GH_TOKEN: ${{ github.token }}
+
+    - name: Analyze diff
+      id: analyze
+      shell: bash
+      run: |
+        set -u
+        base="${{ inputs.base-ref }}"
+        # All three may exit non-zero as a secondary signal (risk / guard
+        # reject); capture the outputs and decide in the gate step.
+        "$KERN_BIN" review --range "${base}..HEAD" --max "${{ inputs.review-max }}" \
+          > /tmp/kern-review.md || true
+        "$KERN_BIN" changes --json --range "${base}..HEAD" \
+          > /tmp/kern-changes.json || true
+        "$KERN_BIN" guard check --range "${base}..HEAD" \
+          > /tmp/kern-guard.txt 2>/dev/null || true
+        total_risk=$(jq -r '.total_risk // 0' /tmp/kern-changes.json 2>/dev/null || echo 0)
+        max_risk=$(jq -r '[.changes[].risk // 0] | max // 0' /tmp/kern-changes.json 2>/dev/null || echo 0)
+        guard_reject=0
+        if head -1 /tmp/kern-guard.txt 2>/dev/null | grep -q "^REJECT:"; then
+          guard_reject=1
+        fi
+        echo "total_risk=${total_risk}" >> "$GITHUB_OUTPUT"
+        echo "max_risk=${max_risk}" >> "$GITHUB_OUTPUT"
+        echo "guard_reject=${guard_reject}" >> "$GITHUB_OUTPUT"
+
+    - name: Assemble comment body
+      id: assemble
+      shell: bash
+      run: |
+        {
+          cat /tmp/kern-review.md 2>/dev/null
+          echo
+          echo "---"
+          echo "## Risk"
+          jq -r '"total risk: \(.total_risk) · files: \(.files | length) · untested: \(.untested)"' \
+            /tmp/kern-changes.json 2>/dev/null || true
+          echo
+          echo "## Boundary guard"
+          cat /tmp/kern-guard.txt 2>/dev/null
+        } > /tmp/kern-comment.md
+        delim="KERN_REVIEW_EOF"
+        echo "comment-body<<${delim}" >> "$GITHUB_OUTPUT"
+        cat /tmp/kern-comment.md >> "$GITHUB_OUTPUT"
+        echo "${delim}" >> "$GITHUB_OUTPUT"
+
+    - name: Post review comment
+      if: inputs.comment == 'true'
+      uses: actions/github-script@v7
+      with:
+        github-token: ${{ github.token }}
+        script: |
+          const marker = '<!-- kern-review -->';
+          const body = process.env.REVIEW_BODY || 'No kern review generated for this diff.';
+          const { data } = await github.rest.issues.listComments({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            issue_number: context.issue.number,
+          });
+          const existing = data.find(c => c.body && c.body.includes(marker));
+          const payload = {
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            issue_number: context.issue.number,
+            body: marker + '\n' + body,
+          };
+          if (existing) {
+            await github.rest.issues.updateComment({ ...payload, comment_id: existing.id });
+          } else {
+            await github.rest.issues.createComment(payload);
+          }
+      env:
+        REVIEW_BODY: ${{ steps.assemble.outputs.comment-body }}
+
+    - name: Merge gate
+      id: gate
+      shell: bash
+      run: |
+        max_risk="${{ steps.analyze.outputs.max_risk }}"
+        guard_reject="${{ steps.analyze.outputs.guard_reject }}"
+        reason=""
+        if [ "${{ inputs.fail-on-risk }}" = "true" ]; then
+          if awk -v r="${max_risk}" -v t="${{ inputs.risk-threshold }}" 'BEGIN { exit !(r >= t) }'; then
+            reason="risk ${max_risk} >= ${{ inputs.risk-threshold }}"
+          elif [ "${guard_reject}" = "1" ]; then
+            reason="boundary violations"
+          fi
+        fi
+        if [ -n "${reason}" ]; then
+          echo "::error::kern merge gate: ${reason}"
+          echo "verdict=fail" >> "$GITHUB_OUTPUT"
+          exit 1
+        fi
+        echo "verdict=pass" >> "$GITHUB_OUTPUT"

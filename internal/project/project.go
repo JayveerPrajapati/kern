@@ -76,12 +76,6 @@ func (s *Session) Index() (*index.Index, error) {
 		s.staleUntil = time.Now().Add(staleCooldown)
 		return s.ix, nil
 	}
-	if ix, err := index.Load(s.Root); err == nil && ix != nil && !ix.Stale() {
-		s.ix = ix
-		s.staleUntil = time.Now().Add(staleCooldown)
-		s.stale = false
-		return ix, nil
-	}
 	if index.SQLiteEnabled() {
 		// SQLite is the persistent store for concurrent access (WAL). Prefer
 		// it over the JSON cache; rebuild when absent or stale.
@@ -91,6 +85,12 @@ func (s *Session) Index() (*index.Index, error) {
 			s.stale = false
 			return ix, nil
 		}
+	}
+	if ix, err := index.Load(s.Root); err == nil && ix != nil && !ix.Stale() {
+		s.ix = ix
+		s.staleUntil = time.Now().Add(staleCooldown)
+		s.stale = false
+		return ix, nil
 	}
 	ix, err := index.Build(s.Root)
 	if err != nil {

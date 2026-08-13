@@ -72,7 +72,7 @@ Usage:
   kern project [root]                             compact project map
   kern pack [root] [--max-tokens N] [--out FILE]  single paste-ready file: tree + instructions + contents
   kern build "<command>" [--dir DIR]              run build, compact output
-  kern log <file>                                 compress a log file
+  kern log <file|->                                 compress a log file
   kern index [root]                               build/refresh the AST index
   kern watch [root]                               daemon: auto re-index on change
   kern ast <pattern> [--all]                      AST symbol search (wildcards, kind prefixes)
@@ -619,12 +619,18 @@ func main() {
 		fmt.Println(res.Output)
 
 	case "log":
-		if len(rest) < 1 {
-			fatal("usage: kern log <file>")
-		}
-		b, err := os.ReadFile(rest[0])
-		if err != nil {
-			fatal("%v", err)
+		var b []byte
+		var err error
+		if len(rest) < 1 || rest[0] == "-" {
+			b, err = readStdin()
+			if err != nil {
+				fatal("%v", err)
+			}
+		} else {
+			b, err = os.ReadFile(rest[0])
+			if err != nil {
+				fatal("%v", err)
+			}
 		}
 		wireRecorder()
 		res, err := optimize.Log(string(b), optimize.Options{})
@@ -2091,7 +2097,7 @@ func main() {
 			fatal("flags: %v", err)
 		}
 		if len(args) < 1 {
-			fatal("usage: kern graph <symbol> [root] [--mermaid] [--json] [--graphml] [--html] [--out FILE]")
+			fatal("usage: kern graph <symbol> [root] [--mermaid] [--json] [--graphml] [--html] [--out FILE] [--max-tokens N]")
 		}
 		symbol := args[0]
 		root := "."
@@ -2126,6 +2132,14 @@ func main() {
 				}
 				fmt.Printf("wrote %s (%d bytes)\n", f.out, len(out))
 				return
+			}
+			fmt.Println(out)
+			return
+		}
+		if f.maxTokens > 0 {
+			out, err := intel.GraphCtx(ix, symbol, f.maxTokens)
+			if err != nil {
+				fatal("%v", err)
 			}
 			fmt.Println(out)
 			return
