@@ -65,7 +65,7 @@ runs:
       run: |
         set -euo pipefail
         if [ -n "${{ inputs.kern-bin }}" ]; then
-          echo "KERN_BIN=${{ inputs.kern-bin }}" >> "$GITHUB_ENV"
+          KERN_BIN="${{ inputs.kern-bin }}"
         else
           mkdir -p /tmp/kern-bin
           gh release download "${{ inputs.version }}" \
@@ -73,8 +73,11 @@ runs:
             --pattern "kern-linux-amd64.tar.gz" \
             --dir /tmp/kern-bin --clobber
           tar -xzf /tmp/kern-bin/kern-linux-amd64.tar.gz -C /tmp/kern-bin
-          echo "KERN_BIN=/tmp/kern-bin/kern-linux-amd64/kern" >> "$GITHUB_ENV"
+          KERN_BIN=/tmp/kern-bin/kern-linux-amd64/kern
         fi
+        # GITHUB_ENV only applies to later steps, so keep a local copy for the
+        # version probe in this step.
+        echo "KERN_BIN=${KERN_BIN}" >> "$GITHUB_ENV"
         "$KERN_BIN" version >/dev/null
       env:
         GH_TOKEN: ${{ github.token }}
