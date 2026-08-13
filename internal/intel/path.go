@@ -58,9 +58,12 @@ func ShortestPath(ix *index.Index, from, to string) []string {
 		return nil
 	}
 	adj := map[string][]string{}
+	names := canonicalNames(ix)
+	local := localNames(ix)
 	for _, s := range ix.Symbols {
 		caller := s.FullName()
-		for _, c := range localCallees(ix, caller) {
+		for _, c := range localCalleesWith(ix, caller, local) {
+			c = canon(names, c) // receiver-instance form -> canonical method FullName
 			if c == caller {
 				continue
 			}

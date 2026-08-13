@@ -16,12 +16,15 @@ only matter for the exceptions.
 - kern_project_map, kern_search, kern_ast_search, kern_entry_points
 - kern_code_graph, kern_context, kern_walk, kern_near, kern_path, kern_why
 - kern_graph (one-call names-only adjacency: callers first, confidence tags, community)
+- kern_explore (one-call: verbatim source + call flow + transitive blast radius)
 - kern_inherits (supertypes/subtypes hierarchy)
-- kern_changes (file= form), kern_hubs, kern_larges, kern_dead, kern_frameworks
+- kern_changes (file= form), kern_hubs, kern_bridges, kern_larges, kern_dead, kern_frameworks
 - kern_probe, kern_trace, kern_test_gaps, kern_repo_search
-- kern_optimize_prompt, kern_context_budget, kern_mask_pii, kern_swap
+- kern_optimize_prompt, kern_optimize_log, kern_optimize_output, kern_context_budget, kern_mask_pii, kern_swap
 - kern_compact_file, kern_diff_files, kern_doc_search, kern_doc_index, kern_doc_fetch
-- kern_memory_*, kern_stats, kern_verify_output, kern_schema_validate
+- kern_memory_*, kern_stats, kern_semcache, kern_verify_output, kern_schema_validate
+- kern_run_build (runs a build/test, returns exit status + errors only)
+- kern_lock, kern_lock_status, kern_unlock (advisory workspace-scoped locks)
 - kern_security (line-scoped security scan, walks source files)
 - kern_commitmsg (deterministic commit message from git diff — rule-based, no LLM)
 - kern_doc_fetch (explicit network opt-in: pull one public docs page into the local index; semantic=true adds Ollama embeddings)
@@ -31,7 +34,7 @@ only matter for the exceptions.
 
 ### Moderate (first call rebuilds the index or shells out to git)
 - kern_changes/kern_review/kern_guard_check with a range= (git diff)
-- kern_churn, kern_arch, kern_walk with depth>3 on large repos
+- kern_churn, kern_cochange, kern_arch, kern_walk with depth>3 on large repos
 - kern_validate (runs the project's build/test)
 
 ### Expensive (LLM, network, or full-tree work — use deliberately)
@@ -92,5 +95,11 @@ only matter for the exceptions.
   plural folding ('user services' -> UserService), accent normalization
   ('résolution'), and camelCase queries ('stateMachine') all work — no exact
   keyword needed.
+- kern_fts_search requires a kern build with -tags sqlite (FTS5); the default
+  build's tool errors with an explicit rebuild hint — use kern_search instead.
+- kern_lock/kern_unlock are scoped to a workspace + server process: a lock
+  acquired by one MCP server (or CLI process) is not releasable by another;
+  the lock marker persists in <root>/.kern/locks until kern unlock runs in
+  the owning process.
 `
 }

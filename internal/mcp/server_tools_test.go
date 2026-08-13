@@ -607,9 +607,12 @@ func TestRenamePreviewAndApply(t *testing.T) {
 
 func TestRenameRefusesMethodAndNonGo(t *testing.T) {
 	root := mcpProject(t)
+	// v2: method-form names ("main.Greet" = receiver main, method Greet) are
+	// handled by the method path — with no receiver type "main" in the
+	// fixture, the result is a not-found error, never a guessed edit.
 	err := mcpToolError(t, "kern_rename", map[string]any{"root": root, "symbol": "main.Greet", "new_name": "Hi"})
-	if !strings.Contains(err, "not supported") {
-		t.Fatalf("expected method/qualified refusal, got %q", err)
+	if !strings.Contains(err, "not found") {
+		t.Fatalf("expected not-found for method-form name with unknown receiver, got %q", err)
 	}
 }
 

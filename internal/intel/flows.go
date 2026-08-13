@@ -47,6 +47,7 @@ func Flows(ix *index.Index, limit, maxDepth int) []Flow {
 	}
 	sort.Strings(roots)
 
+	local := localNames(ix) // hoisted: localCalleesWith reads this (O(V) if rebuilt per call)
 	var flows []Flow
 	for _, r := range roots {
 		visited := map[string]bool{r: true}
@@ -55,7 +56,7 @@ func Flows(ix *index.Index, limit, maxDepth int) []Flow {
 		for len(queue) > 0 {
 			cur := queue[0]
 			queue = queue[1:]
-			for _, callee := range localCallees(ix, cur) {
+			for _, callee := range localCalleesWith(ix, cur, local) {
 				if !visited[callee] {
 					visited[callee] = true
 					reachable++
@@ -66,7 +67,7 @@ func Flows(ix *index.Index, limit, maxDepth int) []Flow {
 		if reachable == 0 {
 			continue
 		}
-		path := longestPath(ix, r, visited, maxDepth)
+		path := longestPath(ix, r, visited, maxDepth, local)
 		flows = append(flows, Flow{
 			Root: r, File: fileMap[r], Depth: len(path), Reachable: reachable, Path: path,
 		})
@@ -101,7 +102,7 @@ func Flows(ix *index.Index, limit, maxDepth int) []Flow {
 
 // longestPath returns the deepest call chain starting from root (capped at
 // maxDepth), preferring routes through heavily-reached symbols.
-func longestPath(ix *index.Index, root string, reachable map[string]bool, maxDepth int) []string {
+func longestPath(ix *index.Index, root string, reachable map[string]bool, maxDepth int, local map[string]bool) []string {
 	best := []string{root}
 	var dfs func(node string, path []string, onPath map[string]bool)
 	dfs = func(node string, path []string, onPath map[string]bool) {
@@ -109,7 +110,7 @@ func longestPath(ix *index.Index, root string, reachable map[string]bool, maxDep
 		// on the current path would explode the search (or recurse to
 		// maxDepth on every cycle). Skip on-path callees; when every callee
 		// is on the path the branch ends here.
-		callees := localCallees(ix, node)
+		callees := localCalleesWith(ix, node, local)
 		var next []string
 		for _, c := range callees {
 			if onPath[c] {

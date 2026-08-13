@@ -43,9 +43,12 @@ func Near(ix *index.Index, root string, depth, maxNodes int) ([]NearNode, error)
 	}
 
 	adj := map[string][]string{}
+	names := canonicalNames(ix)
+	local := localNames(ix)
 	for _, s := range ix.Symbols {
 		caller := s.FullName()
-		for _, c := range localCallees(ix, caller) {
+		for _, c := range localCalleesWith(ix, caller, local) {
+			c = canon(names, c) // receiver-instance form -> canonical method FullName
 			if c == caller {
 				continue
 			}
@@ -83,7 +86,7 @@ func Near(ix *index.Index, root string, depth, maxNodes int) ([]NearNode, error)
 				Symbol: nb,
 				Depth:  cur.depth + 1,
 				Parent: cur.symbol,
-				Dir:    relDir(ix, cur.symbol, nb),
+				Dir:    relDir(ix, names, cur.symbol, nb),
 			})
 			if len(nodes) >= maxNodes {
 				break
@@ -110,10 +113,11 @@ func Near(ix *index.Index, root string, depth, maxNodes int) ([]NearNode, error)
 }
 
 // relDir reports how nb relates to parent: "caller" when nb calls parent,
-// "callee" when parent calls nb.
-func relDir(ix *index.Index, parent, nb string) string {
+// "callee" when parent calls nb. names is the precomputed canonical-name map
+// (hoisted out of the BFS loop — canonicalNames is O(V) per call).
+func relDir(ix *index.Index, names map[string]string, parent, nb string) string {
 	for _, c := range ix.Callers[parent] {
-		if c == nb {
+		if canon(names, c) == nb {
 			return "caller"
 		}
 	}

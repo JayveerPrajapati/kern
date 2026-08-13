@@ -79,13 +79,14 @@ func AnalyzeArchitecture(ix *index.Index) Architecture {
 	})
 
 	bundles := map[string]*CouplingEdge{}
+	local := localNames(ix)
 	for _, s := range ix.Symbols {
 		caller := s.FullName()
 		cl := labels[caller]
 		if cl == "" {
 			continue
 		}
-		for _, c := range localCallees(ix, caller) {
+		for _, c := range localCalleesWith(ix, caller, local) {
 			lc := labels[c]
 			if lc == "" || lc == cl {
 				continue

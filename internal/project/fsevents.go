@@ -12,10 +12,12 @@ import (
 	"time"
 )
 
-// fileWatcher wraps an external OS file-event tool (inotifywait on Linux,
-// fswatch on macOS) to receive near-real-time notifications when source files
-// change. When no native tool is available it gracefully degrades to nil,
-// and the polling-based Stale() check in index.Stale() serves as the fallback.
+// fileWatcher wraps a file-event source to receive near-real-time
+// notifications when source files change. The underlying source is, in
+// preference order: a native kqueue/inotify watcher (pure stdlib, no deps), a
+// host OS file-event tool (inotifywait on Linux, fswatch on macOS), or nil —
+// where nil means the polling-based Stale() check in index.Stale() serves as
+// the fallback.
 //
 // This keeps kern zero-dependency (stdlib only) while leveraging standard
 // host tools when present.
@@ -29,8 +31,12 @@ type fileWatcher struct {
 
 // newFileWatcher starts a background file watcher for root. The notify
 // callback is called (via Invalidate) when a source file is created,
-// modified, or deleted. If no native watcher tool is available, returns nil
-// and polling fallback is used.
+// modified, or deleted. It prefers the external inotifywait/fswatch tool;
+// when unavailable it returns nil and the polling fallback is used. The
+// stdlib-native kqueue/inotify watcher is used by the long-lived
+// kern watch command instead of per-session watchers, because opening one
+// kqueue/inotify fd per directory would exhaust file descriptors when many
+// sessions exist (each MCP tool server owns one).
 func newFileWatcher(root string, notify func()) *fileWatcher {
 	name, args := lookupWatcherCmd(root)
 	if name == "" {

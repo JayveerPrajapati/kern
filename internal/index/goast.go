@@ -20,6 +20,7 @@ type Symbol struct {
 	Line     int      `json:"line"`
 	End      int      `json:"end,omitempty"` // inclusive last line (0 if unknown)
 	Params   []string `json:"params,omitempty"`
+	Returns  []string `json:"returns,omitempty"` // declared return type names (v2 method-rename receiver proof)
 	Lang     string   `json:"lang,omitempty"`
 	// Framework-aware entry-point metadata: a symbol with Entry set is a
 	// framework entry point (HTTP handler, route, controller endpoint, task).
@@ -102,7 +103,8 @@ func extract(rel string, src []byte) ([]Symbol, map[string][]string, map[string]
 				full = recv + "." + name
 			}
 			params := paramNames(d.Type.Params)
-			syms = append(syms, Symbol{Kind: kind, Name: name, Receiver: recv, File: rel, Line: fset.Position(d.Pos()).Line, End: fset.Position(d.End()).Line, Params: params, Lang: "go"})
+			returns := returnTypeNames(d.Type.Results)
+			syms = append(syms, Symbol{Kind: kind, Name: name, Receiver: recv, File: rel, Line: fset.Position(d.Pos()).Line, End: fset.Position(d.End()).Line, Params: params, Returns: returns, Lang: "go"})
 			addCalls(full, d)
 		case *ast.GenDecl:
 			for _, spec := range d.Specs {
@@ -211,6 +213,37 @@ func receiverName(t ast.Expr) string {
 		return receiverName(r.X)
 	}
 	return ""
+}
+
+// returnTypeNames returns the declared result types of a function/method
+// signature (e.g. ["*Store", "error"]), or nil when the function has none.
+// Used by method-rename receiver proof to resolve "x := pkg.New()" chains.
+func returnTypeNames(fl *ast.FieldList) []string {
+	if fl == nil {
+		return nil
+	}
+	var out []string
+	for _, f := range fl.List {
+		n := receiverName(f.Type)
+		if n == "" {
+			if se, ok := f.Type.(*ast.SelectorExpr); ok && se.Sel != nil {
+				n = se.Sel.Name
+			}
+		}
+		if n == "" {
+			continue
+		}
+		if len(f.Names) == 0 {
+			out = append(out, n)
+			continue
+		}
+		// named results ("(s *Store, err error)"): record the type once per
+		// result name for callers that match by position.
+		for range f.Names {
+			out = append(out, n)
+		}
+	}
+	return out
 }
 
 func paramNames(fl *ast.FieldList) []string {

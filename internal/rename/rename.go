@@ -2,12 +2,20 @@
 // (P0-5, borrowed from Serena's symbol-level edits with refactor guarantees).
 //
 // v1 scope: package-level Go symbols (types, structs, interfaces, funcs, vars,
-// consts). Method rename and non-Go symbols are refused rather than guessed.
-// Edits are computed from a real go/ast parse (never a textual regex), so
-// strings, comments, struct-field names, composite-literal keys, import
-// aliases and the package clause are never touched. Applying is transactional:
-// every touched file is backed up under <root>/.kern/rename-backup/ before any
-// write, and a mid-flight failure restores all files.
+// consts). v2 adds method rename ("Type.Method") when every reference's
+// receiver can be proven to be that type from AST evidence in the same file —
+// explicit typed declarations (var t *Type), composite literals (t := &Type{},
+// Type{}.Method), new(Type), and indexed constructor returns (s := store.New()
+// when New's declared return type is *Store). References whose receiver type
+// cannot be proven are refused, never guessed. A reference provably on a
+// DIFFERENT type (e.g. l.Logger.Save while renaming Store.Save) is skipped,
+// not refused — so two types sharing a method name (Save, Close, String) does
+// not block the rename. Non-Go symbols are refused. Edits are computed from a real go/ast parse
+// (never a textual regex), so strings, comments, struct-field names,
+// composite-literal keys, import aliases and the package clause are never
+// touched. Applying is transactional: every touched file is backed up under
+// <root>/.kern/rename-backup/ before any write, and a mid-flight failure
+// restores all files.
 package rename
 
 import (
@@ -65,13 +73,27 @@ func (e *ErrNotSupported) Error() string { return "rename not supported: " + e.R
 
 // Rename computes every edit needed to rename oldName to newName across the
 // indexed project. It never touches the filesystem; call Apply to commit.
+//
+// oldName is either a package-level Go symbol ("Adder") or a method
+// ("Type.Method"). A method rename is all-or-nothing: it requires every
+// .Method reference in the project to be provably on a receiver typed as
+// "Type" (var t *Type, t := &Type{...}, new(Type), Type{...}, or a constructor
+// call whose indexed return type is "Type"); a reference provably on a
+// different type is skipped, and any reference whose receiver type cannot be
+// proven refuses the whole rename so the tree is never left compiling against
+// a half-renamed method. Call chains whose return type is not in the index
+// (s := localHelper(); s.Save()) are refused rather than guessed — annotate
+// the variable or rename package-level symbols instead.
 func Rename(ix *index.Index, oldName, newName string) (*Report, error) {
 	r := &Report{Symbol: oldName, NewName: newName}
 	if ix == nil {
 		return nil, fmt.Errorf("no index")
 	}
-	if oldName == "" || strings.Contains(oldName, ".") {
-		return nil, &ErrNotSupported{Reason: "method or qualified names (containing '.') are not supported in v1"}
+	if oldName == "" {
+		return nil, fmt.Errorf("symbol is required")
+	}
+	if strings.Contains(oldName, ".") {
+		return RenameMethod(ix, oldName, newName, r)
 	}
 	if !token.IsIdentifier(newName) || token.Lookup(newName).IsKeyword() {
 		return nil, fmt.Errorf("%q is not a valid Go identifier", newName)

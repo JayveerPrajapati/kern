@@ -169,7 +169,14 @@ func dirOf(fileMap map[string]string, sym string) string {
 // Unknown symbols (e.g. stdlib) are kept — they are not in this project's
 // tests.
 func prodCallers(ix *index.Index, sym string) []string {
-	fileMap := buildFileMap(ix)
+	return prodCallersWithFileMap(ix, sym, buildFileMap(ix))
+}
+
+// prodCallersWithFileMap is prodCallers with a precomputed file map. Callers
+// that iterate over the whole symbol table MUST hoist buildFileMap(ix) out of
+// their loop — building it per symbol is O(len(Symbols)) inside an
+// O(len(Symbols)) loop (quadratic on large repos).
+func prodCallersWithFileMap(ix *index.Index, sym string, fileMap map[string]string) []string {
 	var out []string
 	for _, c := range ix.Callers[sym] {
 		if f := fileMap[c]; f == "" || !isTestFile(f) {
@@ -189,12 +196,58 @@ func localNames(ix *index.Index) map[string]bool {
 	return set
 }
 
+// canonicalNames maps every symbol name to its canonical in-project FullName:
+// simple names first, then any form the analyzer recorded for a call target.
+// A simple name that collides (e.g. two types both defining "Save") maps to
+// the qualified forms only — the bare form is left unmapped so graph
+// traversals never forge an edge to the wrong receiver type. This is what
+// lets kern path/near/walk bridge method calls recorded under a
+// receiver-instance form ("store.Open.Save") to the method definition
+// ("Store.Save").
+func canonicalNames(ix *index.Index) map[string]string {
+	bySimple := map[string][]string{}
+	for _, s := range ix.Symbols {
+		if s.Name == "" {
+			continue
+		}
+		bySimple[s.Name] = append(bySimple[s.Name], s.FullName())
+	}
+	out := map[string]string{}
+	for _, s := range ix.Symbols {
+		f := s.FullName()
+		out[f] = f
+		if s.Name == "" {
+			continue
+		}
+		if len(bySimple[s.Name]) == 1 {
+			out[s.Name] = f
+		}
+	}
+	return out
+}
+
+// canon resolves name to its canonical FullName via m, falling back to name
+// itself when unmapped (foreign, ambiguous-simple, or already canonical).
+func canon(m map[string]string, name string) string {
+	if c, ok := m[name]; ok {
+		return c
+	}
+	return name
+}
+
 // localCallees returns the callees of sym that resolve to in-project symbols,
 // filtering out stdlib / third-party calls. Package-qualified callees are
 // normalised to the canonical in-project symbol name so graph traversals never
 // dead-end on "pkg.Fn" while the symbol is indexed as "Fn".
 func localCallees(ix *index.Index, sym string) []string {
-	local := localNames(ix)
+	return localCalleesWith(ix, sym, localNames(ix))
+}
+
+// localCalleesWith is localCallees with a precomputed local-name set. Callers
+// that iterate over the whole symbol table MUST hoist localNames(ix) out of
+// their loop and pass it here — recomputing it per symbol is O(len(Symbols))
+// inside an O(len(Symbols)) loop, i.e. quadratic time on large repos.
+func localCalleesWith(ix *index.Index, sym string, local map[string]bool) []string {
 	var out []string
 	for _, c := range ix.Calls[sym] {
 		if c == sym {
