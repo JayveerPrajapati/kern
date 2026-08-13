@@ -59,7 +59,7 @@ func checkCapabilities() Finding {
 		parts = append(parts, "sqlite: off (in-memory; build with -tags sqlite)")
 	}
 	if index.TreesitterEnabled() {
-		parts = append(parts, "treesitter: on (12 grammars)")
+		parts = append(parts, "treesitter: on (13 grammars)")
 	} else {
 		parts = append(parts, "treesitter: off (regex fallback; build with -tags treesitter)")
 	}
