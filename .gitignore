@@ -42,6 +42,7 @@ index.html
 .kern/
 .opencode/node_modules/
 .opencode/package-lock.json
+.kern-restore-*
 CLAUDE.md
 GEMINI.md
 .github/copilot-instructions.md

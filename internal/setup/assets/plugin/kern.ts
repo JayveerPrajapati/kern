@@ -58,7 +58,9 @@ export default (async ({ directory, $ }) => {
 
   const run = async (args: string[]): Promise<string> => {
     // Bun's shell escapes each interpolated array element as one argument.
-    const out = await $`${bin} ${args}`.quiet()
+    // A hard 2-minute ceiling means a hung subprocess can never wedge the
+    // agent's tool call; the shell kills the child on expiry (exit 124).
+    const out = await $`${bin} ${args}`.timeout(120_000).quiet()
     return out.stdout.toString()
   }
 
