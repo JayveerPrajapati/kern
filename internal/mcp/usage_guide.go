@@ -15,6 +15,7 @@ only matter for the exceptions.
 ### Fast (index-backed, use freely)
 - kern_project_map, kern_search, kern_ast_search, kern_entry_points
 - kern_code_graph, kern_context, kern_walk, kern_near, kern_path, kern_why
+- kern_graph (one-call names-only adjacency: callers first, confidence tags, community)
 - kern_inherits (supertypes/subtypes hierarchy)
 - kern_changes (file= form), kern_hubs, kern_larges, kern_dead, kern_frameworks
 - kern_probe, kern_trace, kern_test_gaps, kern_repo_search
@@ -41,6 +42,7 @@ only matter for the exceptions.
 
 ## Recommended workflows
 - Understand a codebase: kern_project_map -> kern_arch -> kern_hubs -> kern_entry_points
+- Minimal graph context in one call: kern_graph (caller-first adjacency, budgeted)
 - Locate code: kern_search -> kern_context -> kern_walk (or kern_near for blast radius)
 - Give the agent the full source to edit against: kern_pack (tree + instructions + contents, sized to a token budget)
 - Why does X exist: kern_why -> kern_code_graph

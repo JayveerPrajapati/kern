@@ -56,11 +56,28 @@ function fileArg(args: any): string {
 export default (async ({ directory, $ }) => {
   const bin = kernBin(directory)
 
+  // Hard 2-minute ceiling so a hung subprocess can never wedge the agent's
+  // tool call. The runtime `$` shell exposes `.timeout()` in some opencode
+  // versions but not others, so fall back to a manual timer when absent.
+  const withTimeout = <T>(promise: Promise<T>, ms: number): Promise<T> =>
+    new Promise<T>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error(`kern timed out after ${ms}ms`)), ms)
+      promise.then(
+        (v) => { clearTimeout(timer); resolve(v) },
+        (e) => { clearTimeout(timer); reject(e) },
+      )
+    })
+
   const run = async (args: string[]): Promise<string> => {
     // Bun's shell escapes each interpolated array element as one argument.
     // A hard 2-minute ceiling means a hung subprocess can never wedge the
     // agent's tool call; the shell kills the child on expiry (exit 124).
-    const out = await $`${bin} ${args}`.timeout(120_000).quiet()
+    const p = $`${bin} ${args}`
+    // Prefer the runtime .timeout(); fall back to a manual ceiling when the
+    // injected `$` shell does not implement it (observed on opencode 1.18.15).
+    const out = typeof (p as any).timeout === "function"
+      ? await p.timeout(120_000).quiet()
+      : await withTimeout(p.quiet(), 120_000)
     return out.stdout.toString()
   }
 
@@ -425,6 +442,21 @@ export default (async ({ directory, $ }) => {
           const flags: string[] = ["near", args.symbol]
           if (args.depth) flags.push("--depth", String(args.depth))
           if (args.max) flags.push("--max", String(args.max))
+          if (args.root) flags.push(args.root)
+          return run(flags)
+        },
+      }),
+      kern_graph: tool({
+        description:
+          "One-call graph context: token-budgeted names-only adjacency for a symbol — callers first (the direction that matters for impact), then callees, every edge tagged EXTRACTED/INFERRED/AMBIGUOUS, plus community membership. Calls to interface methods carry dispatch hints listing the concrete implementations they can reach.",
+        args: {
+          symbol: tool.schema.string(),
+          max_tokens: tool.schema.number().optional(),
+          root: tool.schema.string().optional(),
+        },
+        async execute(args) {
+          const flags: string[] = ["graph", args.symbol]
+          if (args.max_tokens !== undefined) flags.push("--max-tokens", String(args.max_tokens))
           if (args.root) flags.push(args.root)
           return run(flags)
         },

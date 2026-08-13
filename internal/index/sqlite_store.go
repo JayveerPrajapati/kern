@@ -111,7 +111,8 @@ CREATE INDEX IF NOT EXISTS idx_symbols_name ON symbols(name);
 CREATE INDEX IF NOT EXISTS idx_symbols_file ON symbols(file);
 CREATE TABLE IF NOT EXISTS calls (
 	caller TEXT NOT NULL,
-	callee TEXT NOT NULL
+	callee TEXT NOT NULL,
+	kind   TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_calls_callee ON calls(callee);
 CREATE TABLE IF NOT EXISTS callers (
@@ -119,6 +120,11 @@ CREATE TABLE IF NOT EXISTS callers (
 	caller TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_callers_callee ON callers(callee);
+CREATE TABLE IF NOT EXISTS communities (
+	symbol    TEXT PRIMARY KEY,
+	community TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_communities_label ON communities(community);
 CREATE TABLE IF NOT EXISTS inherits (
 	subtype  TEXT NOT NULL,
 	base     TEXT NOT NULL
@@ -140,7 +146,40 @@ CREATE VIRTUAL TABLE IF NOT EXISTS symbols_fts USING fts5(
 	kind, name, receiver, file, params, content='', content_rowid='rowid', tokenize='unicode61'
 );
 `)
-	return err
+	if err != nil {
+		return err
+	}
+	// v8 migration: the calls table gained a kind column and the communities
+	// table was added. Fresh databases get both from the schema above; stores
+	// written by v7 need the column added (legal with a constant default).
+	if !storeHasColumn(s.db, "calls", "kind") {
+		if _, err := s.db.Exec("ALTER TABLE calls ADD COLUMN kind TEXT NOT NULL DEFAULT ''"); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// storeHasColumn reports whether table has a column named col (PRAGMA
+// table_info is the portable way to inspect SQLite's live schema).
+func storeHasColumn(db *sql.DB, table, col string) bool {
+	rows, err := db.Query("PRAGMA table_info(" + table + ")")
+	if err != nil {
+		return false
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid, notnull, pk int
+		var name, typ string
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &name, &typ, &notnull, &dflt, &pk); err != nil {
+			return false
+		}
+		if name == col {
+			return true
+		}
+	}
+	return false
 }
 
 // Save persists the index to SQLite in one transaction. It is safe to call
@@ -196,14 +235,14 @@ func (s *SQLiteStore) Save(ix *Index) error {
 	if _, err := tx.Exec("DELETE FROM callers"); err != nil {
 		return err
 	}
-	stmtCalls, err := tx.Prepare("INSERT INTO calls(caller,callee) VALUES(?,?)")
+	stmtCalls, err := tx.Prepare("INSERT INTO calls(caller,callee,kind) VALUES(?,?,?)")
 	if err != nil {
 		return err
 	}
 	defer stmtCalls.Close()
 	for caller, callees := range ix.Calls {
 		for _, c := range callees {
-			if _, err := stmtCalls.Exec(caller, c); err != nil {
+			if _, err := stmtCalls.Exec(caller, c, "call"); err != nil {
 				return err
 			}
 		}
@@ -234,6 +273,22 @@ func (s *SQLiteStore) Save(ix *Index) error {
 			if _, err := stmtInherits.Exec(subtype, b); err != nil {
 				return err
 			}
+		}
+	}
+
+	// Communities: persist the label-propagation result so graph consumers
+	// can read membership without recomputing it.
+	if _, err := tx.Exec("DELETE FROM communities"); err != nil {
+		return err
+	}
+	stmtCommunities, err := tx.Prepare("INSERT INTO communities(symbol,community) VALUES(?,?)")
+	if err != nil {
+		return err
+	}
+	defer stmtCommunities.Close()
+	for sym, comm := range ix.CommunityLabels() {
+		if _, err := stmtCommunities.Exec(sym, comm); err != nil {
+			return err
 		}
 	}
 
@@ -394,6 +449,23 @@ func (s *SQLiteStore) Load() (*Index, error) {
 		ix.Inherits[subtype] = append(ix.Inherits[subtype], base)
 	}
 	if err := ir.Err(); err != nil {
+		return nil, err
+	}
+
+	ix.Communities = map[string]string{}
+	com, err := s.db.Query("SELECT symbol,community FROM communities")
+	if err != nil {
+		return nil, err
+	}
+	defer com.Close()
+	for com.Next() {
+		var sym, community string
+		if err := com.Scan(&sym, &community); err != nil {
+			return nil, err
+		}
+		ix.Communities[sym] = community
+	}
+	if err := com.Err(); err != nil {
 		return nil, err
 	}
 

@@ -59,8 +59,47 @@ func TestSQLiteRoundTrip(t *testing.T) {
 			t.Errorf("file hash %s mismatch", f)
 		}
 	}
+	if len(got.Communities) == 0 {
+		t.Errorf("communities not persisted: loaded %d labels", len(got.Communities))
+	}
+	wantLabels := ix.CommunityLabels()
+	for sym, want := range wantLabels {
+		if got.Communities[sym] != want {
+			t.Errorf("community of %q = %q; want %q", sym, got.Communities[sym], want)
+		}
+	}
 	if got.MaxMtime != ix.MaxMtime {
 		t.Errorf("MaxMtime = %d; want %d", got.MaxMtime, ix.MaxMtime)
+	}
+}
+
+func TestSQLiteCallsKindColumn(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	dir := writeTree(t, map[string]string{"main.go": srcMain, "user.go": srcOther})
+	ix, err := Build(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := SaveSQLite(dir, ix); err != nil {
+		t.Fatal(err)
+	}
+	store, err := OpenSQLite(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if !storeHasColumn(store.db, "calls", "kind") {
+		t.Fatal("calls table missing kind column")
+	}
+	if !storeHasColumn(store.db, "communities", "symbol") {
+		t.Fatal("communities table missing symbol column")
+	}
+	var kinds int
+	if err := store.db.QueryRow("SELECT COUNT(*) FROM calls WHERE kind='call'").Scan(&kinds); err != nil {
+		t.Fatal(err)
+	}
+	if kinds == 0 {
+		t.Fatal("expected call edges with kind='call'")
 	}
 }
 

@@ -34,68 +34,16 @@ func Communities(ix *index.Index) []Community {
 }
 
 // labelPropagation returns the community label of every symbol that
-// participates in at least one local call edge.
+// participates in at least one local call edge. The clustering itself lives
+// in the index package (Index.CommunityLabels) so the SQLite store can
+// persist it; this wrapper restores the sorted node list for rendering.
 func labelPropagation(ix *index.Index) (map[string]string, []string) {
-	nodes := make([]string, 0)
-	adj := map[string][]string{}
-	for _, s := range ix.Symbols {
-		caller := s.FullName()
-		for _, c := range localCallees(ix, caller) {
-			if c == caller {
-				continue
-			}
-			if !contains(adj[caller], c) {
-				adj[caller] = append(adj[caller], c)
-				nodes = append(nodes, caller)
-			}
-			if !contains(adj[c], caller) {
-				adj[c] = append(adj[c], caller)
-				nodes = append(nodes, c)
-			}
-		}
-	}
-	nodes = dedupe(nodes)
-	if len(nodes) == 0 {
-		return map[string]string{}, nil
+	label := ix.CommunityLabels()
+	nodes := make([]string, 0, len(label))
+	for n := range label {
+		nodes = append(nodes, n)
 	}
 	sort.Strings(nodes)
-
-	label := map[string]string{}
-	for _, n := range nodes {
-		label[n] = n
-	}
-
-	for iter := 0; iter < maxCommunityIterations; iter++ {
-		changed := false
-		for _, n := range nodes {
-			counts := map[string]int{}
-			for _, nb := range adj[n] {
-				counts[label[nb]]++
-			}
-			if len(counts) == 0 {
-				continue
-			}
-			bestCount := -1
-			var candidates []string
-			for l, c := range counts {
-				if c > bestCount {
-					bestCount = c
-					candidates = []string{l}
-				} else if c == bestCount {
-					candidates = append(candidates, l)
-				}
-			}
-			sort.Strings(candidates)
-			best := candidates[0]
-			if best != label[n] {
-				label[n] = best
-				changed = true
-			}
-		}
-		if !changed {
-			break
-		}
-	}
 	return label, nodes
 }
 

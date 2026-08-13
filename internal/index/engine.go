@@ -16,7 +16,7 @@ import (
 
 // indexVersion is bumped whenever the persisted index schema changes, so
 // stale caches are rebuilt automatically instead of serving zero-value fields.
-const indexVersion = 7
+const indexVersion = 8
 
 // Index is the in-memory representation of a project's AST index.
 type Index struct {
@@ -39,6 +39,12 @@ type Index struct {
 	Pkgs           map[string]*Pkg     `json:"packages"`
 	FileHashes     map[string]string   `json:"file_hashes"`
 	GeneratedFiles map[string]bool     `json:"generated_files,omitempty"`
+	// Communities maps a symbol full name to its community label, populated
+	// by the SQLite store's Load and by CommunityLabels on demand. Graph
+	// consumers read membership from here when non-empty instead of
+	// recomputing the label propagation; the JSON index keeps it empty and
+	// consumers fall back to CommunityLabels.
+	Communities map[string]string `json:"communities,omitempty"`
 	SymbolsByFile  map[string][]Symbol `json:"-"`
 	UpdatedAt      time.Time           `json:"updated_at"`
 	// MaxMtime is the largest file modification time (Unix nanos) across the
@@ -62,6 +68,7 @@ func New(root string) *Index {
 		Pkgs:           map[string]*Pkg{},
 		FileHashes:     map[string]string{},
 		GeneratedFiles: map[string]bool{},
+		Communities:    map[string]string{},
 		SymbolsByFile:  map[string][]Symbol{},
 	}
 }

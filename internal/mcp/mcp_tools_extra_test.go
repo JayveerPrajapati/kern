@@ -93,3 +93,34 @@ func TestPromptGetNotFound(t *testing.T) {
 		t.Fatalf("expected prompt-not-found (-32602), got: %+v", resp)
 	}
 }
+
+func TestGraphCtxToolBudgeted(t *testing.T) {
+	root := mcpProject(t)
+	out := mcpAssertOK(t, "kern_graph", map[string]any{"root": root, "symbol": "Greet", "max_tokens": "150"})
+	if !strings.Contains(out, "callers (1)") {
+		t.Fatalf("expected caller-first adjacency with the caller listed, got %q", out)
+	}
+	if !strings.Contains(out, "[EXTRACTED]") {
+		t.Fatalf("expected confidence tags, got %q", out)
+	}
+	if !strings.Contains(out, "community") {
+		t.Fatalf("expected community membership, got %q", out)
+	}
+}
+
+func TestGraphCtxToolUnknownSymbol(t *testing.T) {
+	root := mcpProject(t)
+	resp := serveOne(t, toolsCallJSON(t, 39, "kern_graph", map[string]any{"root": root, "symbol": "Nope"}))
+	out, isErr := toolResultText(t, resp)
+	if !isErr || !strings.Contains(out, "unknown symbol") {
+		t.Fatalf("expected unknown-symbol isError, got: %+v", resp)
+	}
+}
+
+func TestGraphCtxToolMissingSymbol(t *testing.T) {
+	resp := serveOne(t, toolsCallJSON(t, 40, "kern_graph", map[string]any{}))
+	out, isErr := toolResultText(t, resp)
+	if !isErr || !strings.Contains(out, "symbol is required") {
+		t.Fatalf("expected missing-symbol isError, got: %+v", resp)
+	}
+}

@@ -15,76 +15,28 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          # The action diffs against the base ref, so full history is required.
           fetch-depth: 0
 
+      # The gate is the same reusable action consumers import — this repo
+      # dogfoods it. `kern-bin` points at a binary built from this checkout so
+      # PRs that change kern itself are reviewed with the proposed code.
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
           cache: false
-
-      - name: Build kern
-        run: go build -buildvcs=false -o kern ./cmd/kern
 
       - name: Vet and test
         run: |
           go vet ./...
           go test ./...
 
-      - name: Run code-intel review
-        id: review
-        shell: bash
-        run: |
-          base="origin/${{ github.base_ref }}"
-          # limit the blast-radius panel and cap size for a comment
-          ./kern review --range "${base}..HEAD" --max 6000 > /tmp/kern-review.md || true
-          ./kern changes --range "${base}..HEAD" > /tmp/kern-changes.txt || true
+      - name: Build kern from checkout
+        run: go build -buildvcs=false -o "$RUNNER_TEMP/kern" ./cmd/kern
 
-      - name: Boundary guard check
-        id: guard
-        shell: bash
-        run: |
-          base="origin/${{ github.base_ref }}"
-          ./kern guard check --range "${base}..HEAD" > /tmp/kern-guard.txt 2>/dev/null || true
-          # surface violations as annotations (non-blocking)
-          if head -1 /tmp/kern-guard.txt | grep -q "^REJECT:"; then
-            echo "::error file=pr-review.yml::kern boundary violations detected (see review comment)"
-          fi
-
-      - name: Assemble review comment
-        id: assemble
-        shell: bash
-        run: |
-          {
-            cat /tmp/kern-review.md 2>/dev/null
-            echo
-            echo "---"
-            cat /tmp/kern-changes.txt 2>/dev/null
-            echo
-            echo "## Boundary guard"
-            cat /tmp/kern-guard.txt 2>/dev/null
-          } > /tmp/kern-comment.md
-          # GITHUB_OUTPUT multiline: the delimiter is a literal token (no quotes).
-          echo "preview<<KERN_REVIEW_EOF" >> "$GITHUB_OUTPUT"
-          cat /tmp/kern-comment.md >> "$GITHUB_OUTPUT"
-          echo "KERN_REVIEW_EOF" >> "$GITHUB_OUTPUT"
-
-      - name: Post review comment
-        uses: actions/github-script@v7
+      - uses: ./.github/actions/kern-review
         with:
-          script: |
-            const body = process.env.REVIEW_BODY || 'No kern review generated for this diff.';
-            const { data } = await github.rest.issues.listComments({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: context.issue.number,
-            });
-            const marker = '<!-- kern-review -->';
-            const existing = data.find(c => c.body && c.body.includes(marker));
-            const payload = { owner: context.repo.owner, repo: context.repo.repo, issue_number: context.issue.number, body: marker + '\n' + body };
-            if (existing) {
-              await github.rest.issues.updateComment({ ...payload, comment_id: existing.id });
-            } else {
-              await github.rest.issues.createComment(payload);
-            }
-        env:
-          REVIEW_BODY: ${{ steps.assemble.outputs.preview }}
+          base-ref: origin/${{ github.base_ref }}
+          kern-bin: ${{ runner.temp }}/kern
+          comment: "true"
+          fail-on-risk: "false"

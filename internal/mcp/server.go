@@ -674,6 +674,15 @@ var tools = []Tool{
 		}, []string{"symbol"}),
 	},
 	{
+		Name:        "kern_graph",
+		Description: "One-call graph context: token-budgeted names-only adjacency for a symbol — callers first (the direction that matters for impact), then callees, every edge tagged EXTRACTED/INFERRED/AMBIGUOUS, plus community membership. Calls to interface methods carry dispatch hints listing the concrete implementations they can reach. Parity with code-review-graph's minimal_context: the minimal caller-first answer sized to the context window, no source text.",
+		InputSchema: schema(map[string]any{
+			"symbol":     strProp("Symbol name (simple name or Type.Method)"),
+			"root":       strProp("Project root (defaults to current directory)"),
+			"max_tokens": strProp("Token budget for the names-only adjacency (default 400)"),
+		}, []string{"symbol"}),
+	},
+	{
 		Name:        "kern_fts_search",
 		Description: "FTS5 full-text search (#3) over the SQLite symbol index. Supports MATCH syntax ('greet', 'func AND greet', `file:\"main.go\"`). Requires a build with -tags sqlite and a persisted index. Falls back to a clear error on the default build.",
 		InputSchema: schema(map[string]any{
@@ -2527,6 +2536,25 @@ func (s *Server) runTool(ctx context.Context, id string, name string, args map[s
 			return "", err
 		}
 		return intel.RenderNear(ix, nodes), nil
+
+	case "kern_graph":
+		symbol := argString(args, "symbol")
+		if symbol == "" {
+			return "", fmt.Errorf("symbol is required")
+		}
+		ix, err := s.loadIndex(argString(args, "root"))
+		if err != nil {
+			return "", err
+		}
+		maxTokens := intel.GraphCtxDefaultTokens
+		if v := argString(args, "max_tokens"); v != "" {
+			n, err := atoiArg(v, maxTokens)
+			if err != nil {
+				return "", err
+			}
+			maxTokens = n
+		}
+		return intel.GraphCtx(ix, symbol, maxTokens)
 
 	case "kern_explore":
 		symbol := argString(args, "symbol")
