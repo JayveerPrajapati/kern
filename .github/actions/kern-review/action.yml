@@ -11,7 +11,7 @@ inputs:
   base-ref:
     description: >
       Git ref to diff against, e.g. 'origin/main'. For pull_request workflows
-      pass 'origin/${{ github.base_ref }}'.
+      pass 'origin/<base branch>' (e.g. from the workflow's base-ref input).
     required: false
     default: origin/main
   version:
