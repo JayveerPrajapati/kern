@@ -49,6 +49,8 @@ func detectLang(rel string, src []byte) string {
 		return "php"
 	case ".sh", ".bash":
 		return "shell"
+	case ".dart":
+		return "dart"
 	}
 	if strings.HasPrefix(string(src), "#!") {
 		first := firstLine(src)
@@ -174,7 +176,7 @@ func quickExt(rel string) bool {
 		".vue", ".svelte", ".astro", ".css", ".scss", ".less", ".html", ".htm",
 		".md", ".mdx", ".markdown", ".json", ".jsonc", ".yml", ".yaml",
 		".rs", ".c", ".h", ".cc", ".cpp", ".cxx", ".hpp", ".hxx",
-		".cs", ".java", ".rb", ".php", ".sh", ".bash":
+		".cs", ".java", ".rb", ".php", ".sh", ".bash", ".dart":
 		return true
 	}
 	return false
@@ -462,7 +464,7 @@ func isCommentLine(trimmed string, spec *langSpec) bool {
 // left-to-right so no construct can poison the rest of the file: a comment
 // opener inside a string (`var s = "/*"`), a string inside a comment
 // (`// " */`), or one triple delimiter inside another
-// (`x = '''hello """world'''`) is consumed by its real container and never
+// (`x = ”'hello """world”'`) is consumed by its real container and never
 // starts a bogus span.
 func stripLine(ln string, spec *langSpec, st *stripState) string {
 	// Finish a block comment opened on a previous line.
@@ -641,6 +643,9 @@ func extractForeign(rel string, src []byte, lang string) ([]Symbol, map[string][
 		src = sfcScript(rel, src)
 		if len(bytes.TrimSpace(src)) != 0 {
 			spec := specs[lang]
+			if spec == nil {
+				return syms, calls, inherits, pkg, nil
+			}
 			f := analyze(src, spec)
 			// Rebuild the type table from tree-sitter symbols so entry rules can
 			// resolve method receivers (UserController.list) the same way the
@@ -662,6 +667,9 @@ func extractForeign(rel string, src []byte, lang string) ([]Symbol, map[string][
 		return nil, nil, nil, nil, nil
 	}
 	spec := specs[lang]
+	if spec == nil {
+		return nil, nil, nil, nil, nil
+	}
 	f := analyze(src, spec)
 	calls := map[string][]string{}
 	var syms []Symbol

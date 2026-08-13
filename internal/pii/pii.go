@@ -39,6 +39,17 @@ var DefaultPatterns = []Pattern{
 	{Label: "IP", RE: regexp.MustCompile(`\b(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\b`)},
 	{Label: "IPV6", RE: regexp.MustCompile(`(?i)\b(?:[0-9a-fA-F]{1,4}(?::[0-9a-fA-F]{1,4}){0,6}::[0-9a-fA-F]{1,4}(?::[0-9a-fA-F]{1,4}){0,6}|::[0-9a-fA-F]{1,4}(?::[0-9a-fA-F]{1,4}){0,6}|[0-9a-fA-F]{1,4}(?::[0-9a-fA-F]{1,4}){1,6}::)\b`)},
 	{Label: "EMAIL", RE: regexp.MustCompile(`\b[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+\b`)},
+	// PHONE is split into per-shape patterns because RE2 lacks lookarounds
+	// and alternation backtracks: a single pattern cannot span the 3-3-4
+	// (US), 3-4-4 (UK landline), 5-5 (India) and parenthesized forms. The
+	// country-code group requires a "+" or a separator, or it would absorb
+	// leading digits of a longer numeric run.
+	{Label: "PHONE", RE: regexp.MustCompile(`(?:\+\d{1,3}[\s.-]?|\d{1,3}[\s.-])?\d{3}[\s.-]?\d{3}[\s.-]?\d{3,4}\b`)},
+	{Label: "PHONE", RE: regexp.MustCompile(`\(\d{2,4}\)[\s.-]?\d{3}[\s.-]?\d{4}\b`)},
+	{Label: "PHONE", RE: regexp.MustCompile(`(?:\+\d{1,3}[\s.-]?|\d{1,3}[\s.-])?\d{5}[\s.-]?\d{5}\b`)},
+	{Label: "PHONE", RE: regexp.MustCompile(`\b0\d{2}\s\d{4}\s\d{4}\b`)},
+	{Label: "PHONE", RE: regexp.MustCompile(`\b0\d{4}\s\d{6}\b`)},
+	{Label: "PHONE", RE: regexp.MustCompile(`\+\d{1,3}\s?\d{2}\s\d{4}\s\d{4}\b`)},
 	{Label: "SSN", RE: regexp.MustCompile(`\b[0-9]{3}-[0-9]{2}-[0-9]{4}\b`)},
 }
 
@@ -93,6 +104,12 @@ func MaskCustom(text string, patterns []Pattern, names []string) Result {
 	for _, p := range patterns {
 		for _, m := range p.RE.FindAllStringIndex(text, -1) {
 			if IsNonSecretIP(p.Label, text[m[0]:m[1]]) {
+				continue
+			}
+			// The PHONE shapes are unanchored at the start (a leading \b
+			// cannot precede "(" or "+"), so a longer digit run would match
+			// mid-number. Reject any PHONE hit that starts inside a digit.
+			if p.Label == "PHONE" && m[0] > 0 && text[m[0]-1] >= '0' && text[m[0]-1] <= '9' {
 				continue
 			}
 			hits = append(hits, hit{m[0], m[1], p.Label})

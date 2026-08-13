@@ -12,6 +12,7 @@ func TestTreeSitterAvailableMapping(t *testing.T) {
 		want      bool
 	}{
 		{"python", "x.py", true},
+		{"dart", "a.dart", true},
 		{"typescript", "a.ts", true},
 		{"typescript", "a.tsx", true},
 		{"shell", "a.sh", true},
@@ -187,5 +188,77 @@ fn main() {
 	}
 	if len(calls["main"]) == 0 {
 		t.Errorf("expected main to have calls, got %v", calls)
+	}
+}
+
+func TestTreeSitterExtractDart(t *testing.T) {
+	src := `class Cat extends Animal implements Pet {
+  String name = "cat";
+
+  String meow(String who) {
+    return greet(who) + name;
+  }
+
+  String get label => name;
+
+  set label(String v) {
+    name = v;
+  }
+}
+
+void main() {
+  final c = Cat();
+  c.meow("x");
+  greet("y");
+}
+
+String greet(String who) => "hi " + who;
+`
+	syms, calls, inherits, _, err := tsExtract("main.dart", []byte(src), "dart")
+	if err != nil {
+		t.Fatal(err)
+	}
+	byName := map[string]Symbol{}
+	for _, s := range syms {
+		byName[s.Name] = s
+	}
+	cat, ok := byName["Cat"]
+	if !ok || cat.Kind != "class" {
+		t.Errorf("expected Cat class, got %+v", cat)
+	}
+	meow, ok := byName["meow"]
+	if !ok || meow.Kind != "method" || meow.Receiver != "Cat" {
+		t.Errorf("expected Cat.meow method, got %+v", meow)
+	}
+	if _, ok := byName["greet"]; !ok {
+		t.Errorf("expected greet func, got %v", syms)
+	}
+	bases := inherits["Cat"]
+	if len(bases) != 2 {
+		t.Fatalf("expected 2 bases for Cat, got %v", bases)
+	}
+	hasExt, hasImp := false, false
+	for _, b := range bases {
+		if b == "extends:Animal" {
+			hasExt = true
+		}
+		if b == "implements:Pet" {
+			hasImp = true
+		}
+	}
+	if !hasExt || !hasImp {
+		t.Errorf("expected extends:Animal and implements:Pet, got %v", bases)
+	}
+	if len(calls["main"]) == 0 {
+		t.Errorf("expected main to have calls, got %v", calls)
+	}
+	gotCall := false
+	for _, c := range calls["main"] {
+		if c == "meow" || c == "greet" || c == "Cat" {
+			gotCall = true
+		}
+	}
+	if !gotCall {
+		t.Errorf("expected main to call meow/greet/Cat, got %v", calls["main"])
 	}
 }

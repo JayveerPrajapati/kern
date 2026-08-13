@@ -44,9 +44,9 @@ type Index struct {
 	// consumers read membership from here when non-empty instead of
 	// recomputing the label propagation; the JSON index keeps it empty and
 	// consumers fall back to CommunityLabels.
-	Communities map[string]string `json:"communities,omitempty"`
-	SymbolsByFile  map[string][]Symbol `json:"-"`
-	UpdatedAt      time.Time           `json:"updated_at"`
+	Communities   map[string]string   `json:"communities,omitempty"`
+	SymbolsByFile map[string][]Symbol `json:"-"`
+	UpdatedAt     time.Time           `json:"updated_at"`
 	// MaxMtime is the largest file modification time (Unix nanos) across the
 	// indexable files at build time. Stale() uses it as a cheap generation
 	// gate so repeated freshness checks short-circuit without re-hashing

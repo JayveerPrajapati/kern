@@ -11,6 +11,7 @@ measurable.
 ```sh
 go run ./evaluate/bench              # report against this repo's docs
 go run ./evaluate/bench -root ../some-project
+go run ./evaluate/calibration        # risk-scale calibration + impact F1 (see calibration/README.md)
 make bench                           # gate tests + report
 ```
 

@@ -80,8 +80,8 @@ Usage:
                                   ranked free-text symbol search (--semantic: Ollama re-rank; --repos: across registered repos)
   kern repos (list|add <path> [name]|remove <name>)
                                  multi-repo registry for cross-repo search
-  kern graph <symbol> [--mermaid] [--json] [--graphml] [--html] [--out FILE]
-                                 definition + callers + what it calls; export as JSON/GraphML/HTML
+  kern graph <symbol> [--mermaid] [--json] [--graphml] [--html] [--out FILE] [--limit N]
+                                 definition + callers + what it calls; export as JSON/GraphML/HTML; --html with no symbol renders a whole-repo explorer
   kern inherits <symbol> [root] [--json]           supertypes + subtypes (extends/implements/embeds)
   kern context <symbolRegex> [--lines N]          minimal source slice for a symbol
   kern why <symbol> [--json]                      rationale: doc comment + who depends on it and why
@@ -2105,8 +2105,29 @@ func main() {
 		if err != nil {
 			fatal("flags: %v", err)
 		}
+		if len(args) < 1 && !f.html {
+			fatal("usage: kern graph <symbol> [root] [--mermaid] [--json] [--graphml] [--html] [--out FILE] [--max-tokens N] [--limit N]")
+		}
 		if len(args) < 1 {
-			fatal("usage: kern graph <symbol> [root] [--mermaid] [--json] [--graphml] [--html] [--out FILE] [--max-tokens N]")
+			// Whole-repo explorer: kern graph --html [root] [--limit N]
+			root := "."
+			if f.limit == 0 {
+				f.limit = 400
+			}
+			ix, err := loadOrBuild(root)
+			if err != nil {
+				fatal("%v", err)
+			}
+			out := ix.WholeGraph(f.limit).GraphHTML()
+			if f.out != "" {
+				if err := os.WriteFile(f.out, []byte(out), 0o644); err != nil {
+					fatal("%v", err)
+				}
+				fmt.Printf("wrote %s (%d bytes)\n", f.out, len(out))
+				return
+			}
+			fmt.Println(out)
+			return
 		}
 		symbol := args[0]
 		root := "."

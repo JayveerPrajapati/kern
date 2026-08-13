@@ -198,6 +198,70 @@ func TestContextSlices(t *testing.T) {
 	}
 }
 
+func TestWholeGraphCapsAndEdges(t *testing.T) {
+	dir := writeTree(t, map[string]string{
+		"main.go": srcMain,
+		"user.go": srcOther,
+	})
+	ix, err := Build(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	g := ix.WholeGraph(2)
+	if len(g.Nodes) != 2 {
+		t.Fatalf("expected 2 nodes with limit=2, got %d", len(g.Nodes))
+	}
+	if g.Root != "" {
+		t.Errorf("whole graph must have empty root, got %q", g.Root)
+	}
+	for _, n := range g.Nodes {
+		if n.Pkg == "" {
+			t.Errorf("node %s missing pkg", n.ID)
+		}
+		if n.Role != "def" {
+			t.Errorf("node %s role=%q, want def", n.ID, n.Role)
+		}
+	}
+	if len(g.Edges) == 0 {
+		t.Fatal("expected call edges between kept symbols")
+	}
+	for _, e := range g.Edges {
+		if e.ConfidenceLabel != "EXTRACTED" {
+			t.Errorf("same-pkg edge %s->%s label=%q, want EXTRACTED", e.From, e.To, e.ConfidenceLabel)
+		}
+	}
+}
+
+func TestWholeGraphHTMLWholeBranch(t *testing.T) {
+	dir := writeTree(t, map[string]string{
+		"main.go": srcMain,
+		"user.go": srcOther,
+	})
+	ix, err := Build(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	g := ix.WholeGraph(0)
+	html := g.GraphHTML()
+	for _, want := range []string{"const whole = (g.root === '')", `filter symbols`, "whole repo (", "band-label", "wholeDraw"} {
+		if !strings.Contains(html, want) {
+			t.Errorf("whole-repo HTML missing %q", want)
+		}
+	}
+	// Neighborhood HTML must still be the three-column mode.
+	ng, ok := ix.Neighborhood("greet")
+	if !ok {
+		t.Fatal("no neighborhood for greet")
+	}
+	nh := ng.GraphHTML()
+	if !strings.Contains(nh, "const whole = (g.root === '')") {
+		t.Error("neighborhood HTML must embed the whole-repo flag")
+	}
+	if !strings.Contains(nh, "kern graph: greet") {
+		t.Errorf("neighborhood title missing root: %q", nh[:200])
+	}
+}
+
 func TestNeighborhoodConfidenceLabels(t *testing.T) {
 	dir := writeTree(t, map[string]string{
 		"main.go": srcMain,
