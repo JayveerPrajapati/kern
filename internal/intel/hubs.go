@@ -46,12 +46,14 @@ func hubSet(ix *index.Index) map[string]bool {
 // limit<=0 means "top 10%".
 func Hubs(ix *index.Index, limit int) []Hub {
 	var hubs []Hub
+	local := localNames(ix)
+	fileMap := buildFileMap(ix)
 	for _, s := range ix.Symbols {
 		if isTestFile(s.File) || (s.Kind != "func" && s.Kind != "method") {
 			continue
 		}
-		callers := len(prodCallers(ix, s.FullName()))
-		calls := len(localCallees(ix, s.FullName()))
+		callers := len(prodCallersWithFileMap(ix, s.FullName(), fileMap))
+		calls := len(localCalleesWith(ix, s.FullName(), local))
 		if callers == 0 && calls == 0 {
 			continue
 		}

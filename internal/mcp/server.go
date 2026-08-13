@@ -998,7 +998,57 @@ func (s *Server) unregisterInflight(id string) {
 }
 
 // Serve runs until the stream ends.
+// preloadIndexes eagerly builds and caches each workspace root's index in
+// the background (via its Session, so a later tool call reuses the same
+// in-memory index). This moves the cold first-call reindex cost off the
+// request path: a tool call that used to block ~20s after a fresh server
+// start now finds the index already warm.
+//
+// It is skipped for filesystem roots ("/") and when KERN_PRELOAD=0 — both are
+// guards for test/CI environments where the server's default root is not a
+// project to index.
+func (s *Server) preloadIndexes() {
+	if os.Getenv("KERN_PRELOAD") == "0" {
+		return
+	}
+	for _, r := range s.workspaceRoots() {
+		if isFilesystemRoot(r) {
+			continue
+		}
+		go func(root string) {
+			_, err := s.sessionFor(root).Index()
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "kern-mcp: preload index %s: %v\n", root, err)
+			}
+		}(r)
+	}
+}
+
+// isFilesystemRoot reports whether p is a filesystem root ("/" on Unix, or a
+// drive root on Windows) that must never be treated as a project to index.
+func isFilesystemRoot(p string) bool {
+	vol := filepath.VolumeName(p)
+	return filepath.Clean(p) == filepath.Clean(vol+string(filepath.Separator))
+}
+
+// workspaceRoots returns the roots field, falling back to the default when
+// unset (defensive; NewServer always initializes it).
+func (s *Server) workspaceRoots() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.roots) == 0 {
+		return defaultWorkspaceRoots()
+	}
+	out := append([]string(nil), s.roots...)
+	return out
+}
+
 func (s *Server) Serve() error {
+	// Preload every workspace root's index in the background so the first
+	// tool call after server start hits a warm cache instead of blocking on
+	// a synchronous build (~20s on large repos). Failures are non-fatal:
+	// tools rebuild on demand as before.
+	s.preloadIndexes()
 	var wg sync.WaitGroup
 	defer wg.Wait() // drain in-flight tool calls before returning on EOF
 	for s.in.Scan() {
@@ -2650,7 +2700,7 @@ func (s *Server) runTool(ctx context.Context, id string, name string, args map[s
 		}
 		root := resolveRoot(argString(args, "root"))
 		if !index.SQLiteEnabled() {
-			return "", fmt.Errorf("FTS5 requires a build with -tags sqlite (rebuild kern with 'go build -tags sqlite')")
+			return "", fmt.Errorf("FTS5 requires a build with -tags sqlite (rebuild kern with 'go build -tags sqlite'); use kern_search for ranked free-text search on this default build")
 		}
 		limit := 20
 		if v := argString(args, "limit"); v != "" {

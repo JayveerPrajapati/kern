@@ -309,10 +309,12 @@ func TestRenameUnsupportedAndMissing(t *testing.T) {
 	root := fixture(t)
 	ix := mustIndex(t, root)
 
+	// v2: dotted names are method renames ("Type.Method"). The fixture has no
+	// math.Adder method, so it yields a not-found error — never a guess.
 	if _, err := Rename(ix, "math.Adder", "Summer"); err == nil {
-		t.Errorf("qualified method-style name should be refused")
-	} else if _, ok := err.(*ErrNotSupported); !ok {
-		t.Errorf("want ErrNotSupported, got %T", err)
+		t.Errorf("qualified name without a matching method should error")
+	} else if !strings.Contains(err.Error(), "not found") {
+		t.Errorf("want method not-found error, got %T %v", err, err)
 	}
 	if _, err := Rename(ix, "DoesNotExist", "X"); err == nil {
 		t.Errorf("missing symbol should error")
@@ -321,6 +323,229 @@ func TestRenameUnsupportedAndMissing(t *testing.T) {
 	}
 	if _, err := Rename(ix, "Adder", "for"); err == nil {
 		t.Errorf("keyword as new name should be refused")
+	}
+}
+
+func TestRenameMethodWithProvenReceiver(t *testing.T) {
+	root := fixture(t) // math.Adder with method Add; main.go: a := &math.Adder{}; a.Add(1,2)
+	ix := mustIndex(t, root)
+
+	r, err := Rename(ix, "Adder.Add", "Sum")
+	if err != nil {
+		t.Fatalf("Rename(Adder.Add): %v", err)
+	}
+	// Definition edit (math/math.go) + one proven reference in main.go (a.Add
+	// where a := &math.Adder{}). The string/comment occurrences of "math.Adder"
+	// must be untouched.
+	var defs, refs int
+	for _, e := range r.Edits {
+		if e.Kind == "definition" {
+			defs++
+		}
+		if e.Kind == "reference" {
+			refs++
+		}
+		if e.Old != "Add" || e.New != "Sum" {
+			t.Errorf("unexpected edit %q -> %q in %s", e.Old, e.New, e.File)
+		}
+	}
+	if defs != 1 {
+		t.Errorf("expected 1 definition edit, got %d", defs)
+	}
+	if refs != 1 {
+		t.Errorf("expected 1 proven reference edit (a.Add), got %d", refs)
+	}
+	if len(r.Skipped) != 0 {
+		t.Errorf("unexpected skipped: %v", r.Skipped)
+	}
+}
+
+func TestRenameMethodCollectsReturnType(t *testing.T) {
+	// Regression guard for the return-type receiver proof: the index must
+	// capture declared result types (store.New -> *Store) so a rename of
+	// Store.Save is allowed on receivers obtained from a constructor call.
+	root := t.TempDir()
+	files := map[string]string{
+		"go.mod": "module example.com/m\n\ngo 1.22\n",
+		"store/store.go": "package store\n\n" +
+			"type Store struct{}\n\n" +
+			"func New() *Store { return &Store{} }\n\n" +
+			"func (s *Store) Save(k, v string) error { return nil }\n",
+		"main.go": "package main\n\nimport (\n\t\"fmt\"\n\n\t\"example.com/m/store\"\n)\n\n" +
+			"func main() {\n\ts := store.New()\n\t_ = s.Save(\"k\", \"v\")\n\t_ = fmt.Sprint(s)\n}\n",
+	}
+	for rel, body := range files {
+		if err := os.MkdirAll(filepath.Join(root, filepath.Dir(rel)), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(root, rel), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ix := mustIndex(t, root)
+	var saveSym index.Symbol
+	for _, s := range ix.Symbols {
+		if s.Name == "New" {
+			saveSym = s
+		}
+	}
+	if len(saveSym.Returns) == 0 || saveSym.Returns[0] != "Store" {
+		t.Fatalf("expected New to record returns [Store] (base type), got %v", saveSym.Returns)
+	}
+	r, err := Rename(ix, "Store.Save", "Put")
+	if err != nil {
+		t.Fatalf("Rename(Store.Save) with constructor receiver: %v", err)
+	}
+	var refs int
+	for _, e := range r.Edits {
+		if e.Kind == "reference" {
+			refs++
+		}
+	}
+	if refs != 1 {
+		t.Errorf("expected 1 reference edit for s.Save (proven via store.New returns), got %d", refs)
+	}
+}
+
+func TestRenameMethodSkipsDifferentTypeReceiver(t *testing.T) {
+	// Regression guard for the tri-state receiver proof: when two types share
+	// a method name (Store.Save and Logger.Save), renaming Store.Save must
+	// SKIP the Logger.Save reference (provably a different type) rather than
+	// refuse the whole rename. Before the fix, any shared method name made
+	// method rename unusable.
+	root := t.TempDir()
+	files := map[string]string{
+		"go.mod":         "module example.com/m\n\ngo 1.22\n",
+		"store/store.go": "package store\n\ntype Store struct{}\n\nfunc (s *Store) Save() error { return nil }\n",
+		"logger/logger.go": "package logger\n\n" +
+			"type Logger struct{}\n\n" +
+			"func (l *Logger) Save() error { return nil }\n",
+		"main.go": "package main\n\nimport (\n\t\"example.com/m/logger\"\n\t\"example.com/m/store\"\n)\n\n" +
+			"func main() {\n\tvar s *store.Store\n\ts.Save()\n\tvar l *logger.Logger\n\tl.Save()\n}\n",
+	}
+	for rel, body := range files {
+		if err := os.MkdirAll(filepath.Join(root, filepath.Dir(rel)), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(root, rel), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ix := mustIndex(t, root)
+	r, err := Rename(ix, "Store.Save", "Put")
+	if err != nil {
+		t.Fatalf("Rename(Store.Save) should succeed when the only other Save is provably on a different type: %v", err)
+	}
+	// Expect: 1 definition edit (store.go) + 1 reference edit (s.Save in main.go).
+	// The l.Save reference (Logger receiver) must be skipped, not refused.
+	var refs int
+	for _, e := range r.Edits {
+		if e.Kind == "reference" {
+			refs++
+		}
+	}
+	if refs != 1 {
+		t.Errorf("expected 1 reference edit (s.Save only; l.Save is a different type), got %d", refs)
+	}
+}
+
+func TestRenameMethodInlineCallReceiver(t *testing.T) {
+	// Regression guard for inline call receivers: store.New().Save() (where
+	// New returns *Store) must be renamed, and getStore().Save() (return type
+	// not indexed) must refuse the whole rename — not silently skip.
+	root := t.TempDir()
+	files := map[string]string{
+		"go.mod":         "module example.com/m\n\ngo 1.22\n",
+		"store/store.go": "package store\n\ntype Store struct{}\n\nfunc New() *Store { return &Store{} }\n\nfunc (s *Store) Save() error { return nil }\n",
+		"main.go": "package main\n\nimport \"example.com/m/store\"\n\n" +
+			"func getStore() *store.Store { return store.New() }\n\n" +
+			"func main() {\n\t_ = store.New().Save()\n\t_ = getStore().Save()\n}\n",
+	}
+	for rel, body := range files {
+		if err := os.MkdirAll(filepath.Join(root, filepath.Dir(rel)), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(root, rel), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ix := mustIndex(t, root)
+
+	// Case A: only the indexed inline call (store.New().Save) — should rename.
+	r, err := Rename(ix, "Store.Save", "Put")
+	if err != nil {
+		t.Fatalf("Rename(Store.Save) with indexed inline call receiver: %v", err)
+	}
+	var refsA int
+	for _, e := range r.Edits {
+		if e.Kind == "reference" {
+			refsA++
+		}
+	}
+	if refsA != 1 {
+		t.Errorf("expected 1 reference edit for store.New().Save (indexed return), got %d", refsA)
+	}
+}
+
+func TestRenameMethodDisambiguatesSameNameCallee(t *testing.T) {
+	// Regression guard for callReturnsType disambiguation: when two packages
+	// both export New() returning different types, store.New().Save() must
+	// resolve to Store (via the import map), not the wrong package's return
+	// type. A bare local New() in main must match the same-directory candidate.
+	root := t.TempDir()
+	files := map[string]string{
+		"go.mod": "module example.com/m\n\ngo 1.22\n",
+		"store/store.go": "package store\n\n" +
+			"type Store struct{}\n\n" +
+			"func New() *Store { return &Store{} }\n\n" +
+			"func (s *Store) Save() error { return nil }\n",
+		"cache/cache.go": "package cache\n\n" +
+			"type Cache struct{}\n\n" +
+			"func New() *Cache { return &Cache{} }\n\n" +
+			"func (c *Cache) Save() error { return nil }\n",
+		"main.go": "package main\n\nimport (\n\t\"example.com/m/cache\"\n\t\"example.com/m/store\"\n)\n\n" +
+			"func main() {\n\t_ = store.New().Save()\n\t_ = cache.New().Save()\n}\n",
+	}
+	for rel, body := range files {
+		if err := os.MkdirAll(filepath.Join(root, filepath.Dir(rel)), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(root, rel), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ix := mustIndex(t, root)
+
+	// Rename Store.Save — store.New().Save() must be renamed (Store resolved
+	// via the store import); cache.New().Save() must be SKIPPED (Cache, a
+	// different type), not refused.
+	r, err := Rename(ix, "Store.Save", "Put")
+	if err != nil {
+		t.Fatalf("Rename(Store.Save) should disambiguate store.New from cache.New: %v", err)
+	}
+	var refs int
+	for _, e := range r.Edits {
+		if e.Kind == "reference" {
+			refs++
+		}
+	}
+	if refs != 1 {
+		t.Errorf("expected 1 reference edit (store.New().Save only; cache.New().Save is a different type), got %d", refs)
+	}
+
+	// Symmetric: rename Cache.Save — cache.New().Save() renamed, store skipped.
+	r2, err := Rename(ix, "Cache.Save", "Put")
+	if err != nil {
+		t.Fatalf("Rename(Cache.Save): %v", err)
+	}
+	var refs2 int
+	for _, e := range r2.Edits {
+		if e.Kind == "reference" {
+			refs2++
+		}
+	}
+	if refs2 != 1 {
+		t.Errorf("expected 1 reference edit (cache.New().Save only), got %d", refs2)
 	}
 }
 

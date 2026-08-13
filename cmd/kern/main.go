@@ -165,7 +165,7 @@ Usage:
   kern walk <symbol> [root] [--depth N] [--max N]             alias of kern near
   kern probe "<task text>" [root] [--max N] [--json]         task -> budget-capped micro-context bundle
   kern trace <file|- for stdin> [root] [--limit N] [--json]  overlay pprof/stack trace on call graph
-  kern lock <scope> [root] [--hold]               acquire a workspace lock (held until interrupted, or --hold for non-blocking)
+  kern lock <scope> [root] [--hold]               acquire a workspace lock (held until interrupted, or --hold for non-blocking; lock is per-process — unlock runs in the same process)
   kern unlock <scope> [root]                     remove a stale lock file
   kern status [root] [--json]                    list workspace locks (held/free)
   kern guard init [root]                         scaffold .kern/boundaries.json
@@ -724,13 +724,17 @@ func main() {
 		if len(args) == 0 {
 			fatal("usage: kern prompt <template> [--file PATH] [--task TEXT]")
 		}
-		if args[0] == "list" {
+		if args[0] == "list" || args[0] == "--help" || args[0] == "-h" {
 			names, err := prompt.List()
 			if err != nil {
 				fatal("%v", err)
 			}
+			if args[0] != "list" {
+				fmt.Println("usage: kern prompt <template> [--file PATH] [--task TEXT]")
+				fmt.Println("templates:")
+			}
 			for _, n := range names {
-				fmt.Println(n)
+				fmt.Println("  " + n)
 			}
 			return
 		}
@@ -1228,8 +1232,11 @@ func main() {
 		var b []byte
 		if in == "" || in == "-" {
 			b, err = readStdin()
-		} else {
+		} else if st, serr := os.Stat(in); serr == nil && !st.IsDir() {
 			b, err = os.ReadFile(in)
+		} else {
+			// Not an existing file: treat the argument as inline text to mask.
+			b = []byte(in)
 		}
 		if err != nil {
 			fatal("%v", err)
@@ -1263,11 +1270,16 @@ func main() {
 		var b []byte
 		if in == "-" {
 			b, err = readStdin()
+		} else if st, serr := os.Stat(in); serr == nil && st.IsDir() {
+			fatal("%q is a directory — kern verify checks a file of claims, e.g. \"kern verify <output.txt>\"; pipe stdin with '-'", in)
 		} else {
 			b, err = os.ReadFile(in)
 		}
 		if err != nil {
 			fatal("%v", err)
+		}
+		if len(strings.TrimSpace(string(b))) == 0 {
+			fatal("no claims to verify: %q is empty (pass a file of agent output or '-' for stdin)", in)
 		}
 		ix, ierr := loadOrBuild(root)
 		if ierr != nil {
@@ -1926,10 +1938,7 @@ func main() {
 		if len(rest) > 0 {
 			root = rest[0]
 		}
-		mode := "polling"
-		if _, _, err := project.WatcherCommand(root); err == nil {
-			mode = "file-event (inotifywait/fswatch)"
-		}
+		mode := project.WatchMode(root)
 		fmt.Printf("kern watch: monitoring %s (mode: %s)\n", root, mode)
 		ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer cancel()

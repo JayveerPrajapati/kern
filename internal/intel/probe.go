@@ -69,6 +69,7 @@ func Probe(ix *index.Index, task string, maxTokens int) *ProbeReport {
 			meta[s.FullName()] = s
 		}
 	}
+	local := localNames(ix) // hoisted: localCalleesWith is O(V) if rebuilt per anchor
 
 	var anchors []ProbeAnchor
 	for _, r := range resolved {
@@ -83,7 +84,7 @@ func Probe(ix *index.Index, task string, maxTokens int) *ProbeReport {
 				a.Callers = append(a.Callers, c)
 			}
 		}
-		for _, c := range localCallees(ix, r) {
+		for _, c := range localCalleesWith(ix, r, local) {
 			if c != r && !contains(a.Callees, c) {
 				a.Callees = append(a.Callees, c)
 			}
