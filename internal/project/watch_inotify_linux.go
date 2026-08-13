@@ -39,6 +39,7 @@ func newNativeSource(root string) nativeSource {
 	w := &inotifyWatcher{
 		fd:     fd,
 		dirs:   map[int]string{},
+		files:  map[int]string{},
 		ch:     make(chan struct{}, 1),
 		closed: make(chan struct{}),
 		done:   make(chan struct{}),

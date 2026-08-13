@@ -29,7 +29,7 @@ var DefaultPatterns = []Pattern{
 	{Label: "GITHUB_PAT", RE: regexp.MustCompile(`\bgithub_pat_[A-Za-z0-9_]{60,}\b`)},
 	{Label: "SLACK", RE: regexp.MustCompile(`\bxox[baprs]-[A-Za-z0-9-]{10,}\b`)},
 	{Label: "STRIPE", RE: regexp.MustCompile(`\bsk_(?:live|test)_[A-Za-z0-9]{20,}\b`)},
-	{Label: "OPENAI", RE: regexp.MustCompile(`\bsk-[A-Za-z0-9]{20,}\b`)},
+	{Label: "OPENAI", RE: regexp.MustCompile(`\bsk-(?:proj-[A-Za-z0-9-]{20,}|[A-Za-z0-9]{20,})\b`)},
 	{Label: "JWT", RE: regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b`)},
 	{Label: "BEARER", RE: regexp.MustCompile(`\bBearer\s+[A-Za-z0-9._~+/=-]{20,}\b`)},
 	{Label: "KEY", RE: regexp.MustCompile(`(?i)\b(?:api[_-]?key|apikey|auth[_-]?token|access[_-]?token|refresh[_-]?token|client[_-]?secret|private[_-]?key|app[_-]?secret|consumer[_-]?(?:key|secret))["']?\s*[=:]\s*["']?(?:[A-Za-z0-9_/\-+=]{12,}["']|[A-Za-z0-9_/\-+=]*[0-9][A-Za-z0-9_/\-+=]*)`)},

@@ -61,6 +61,7 @@ func TestMaskKeys(t *testing.T) {
 		{`aws_secret_access_key = "c9as98c27as6c987scx87as69c0as97c6x9as123"`, "AWS_SECRET"},
 		{"AKIAIOSFODNN7EXAMPLE", "AWS"},
 		{"ghp_abcdefghijklmnopqrstuvwxyz1234567890", "GITHUB"},
+		{"sk-proj-4f8a2b9c1d0e3f5a7b8c9d0e1f2a3b4c5d6e7f8a", "OPENAI"},
 		{"xoxb-1234567890123-1234567890123-abc", "SLACK"},
 		{"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxIn0.abc1234567", "JWT"},
 		{`api_key = "abcd1234efgh5678ijkl9012"`, "KEY"},
