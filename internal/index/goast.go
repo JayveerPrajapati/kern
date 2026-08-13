@@ -211,6 +211,8 @@ func receiverName(t ast.Expr) string {
 		return receiverName(r.X)
 	case *ast.IndexListExpr:
 		return receiverName(r.X)
+	case *ast.SelectorExpr:
+		return receiverName(r.Sel)
 	}
 	return ""
 }

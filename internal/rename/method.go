@@ -362,8 +362,11 @@ func (tp *typeProof) receiverType(fd *ast.FuncDecl, expr ast.Expr) string {
 		if t := tp.callReturnsType(ce.Fun); t != "" {
 			return t
 		}
-		// Type conversion: T(raw).M — fun is a type name.
-		if t := typeExprName(ce.Fun); t != "" && t != "new" {
+		// Type conversion: T(raw).M — fun is a type name. Only treat it as a
+		// conversion when the callee is actually an indexed type; a function
+		// call whose return type is not in the index (helper(), pkg.New())
+		// must be unprovable (refuse), never guessed or silently skipped.
+		if t := typeExprName(ce.Fun); t != "" && t != "new" && isKnownType(tp.ix, t) {
 			return t
 		}
 		return ""
@@ -550,4 +553,21 @@ func prefixLines(ss []string, n int) []string {
 	}
 	out := append([]string{}, ss[:n]...)
 	return append(out, fmt.Sprintf("(and %d more)", len(ss)-n))
+}
+
+// isKnownType reports whether the project index declares a type symbol with
+// this name (kind type/struct/interface). Used to distinguish a type
+// conversion T(raw) from a plain function call T() when proving inline-call
+// receivers.
+func isKnownType(ix *index.Index, name string) bool {
+	for _, s := range ix.Symbols {
+		if s.Name != name {
+			continue
+		}
+		switch s.Kind {
+		case "type", "struct", "interface":
+			return true
+		}
+	}
+	return false
 }

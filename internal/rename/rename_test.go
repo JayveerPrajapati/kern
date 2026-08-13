@@ -450,9 +450,10 @@ func TestRenameMethodSkipsDifferentTypeReceiver(t *testing.T) {
 }
 
 func TestRenameMethodInlineCallReceiver(t *testing.T) {
-	// Regression guard for inline call receivers: store.New().Save() (where
-	// New returns *Store) must be renamed, and getStore().Save() (return type
-	// not indexed) must refuse the whole rename — not silently skip.
+	// Regression guard for inline call receivers: both store.New().Save()
+	// (constructor, return type indexed) and getStore().Save() (declared
+	// return *store.Store, also indexed) must be renamed — a call whose
+	// receiver type can be proven is never skipped.
 	root := t.TempDir()
 	files := map[string]string{
 		"go.mod":         "module example.com/m\n\ngo 1.22\n",
@@ -471,10 +472,10 @@ func TestRenameMethodInlineCallReceiver(t *testing.T) {
 	}
 	ix := mustIndex(t, root)
 
-	// Case A: only the indexed inline call (store.New().Save) — should rename.
+	// Both inline receivers prove to *Store (store.New and getStore) — rename.
 	r, err := Rename(ix, "Store.Save", "Put")
 	if err != nil {
-		t.Fatalf("Rename(Store.Save) with indexed inline call receiver: %v", err)
+		t.Fatalf("Rename(Store.Save) with indexed inline call receivers: %v", err)
 	}
 	var refsA int
 	for _, e := range r.Edits {
@@ -482,8 +483,38 @@ func TestRenameMethodInlineCallReceiver(t *testing.T) {
 			refsA++
 		}
 	}
-	if refsA != 1 {
-		t.Errorf("expected 1 reference edit for store.New().Save (indexed return), got %d", refsA)
+	if refsA != 2 {
+		t.Errorf("expected 2 reference edits (store.New().Save and getStore().Save), got %d", refsA)
+	}
+}
+
+func TestRenameMethodRefusesUnprovenCallReceiver(t *testing.T) {
+	// A call receiver whose callee return type is NOT in the index (func-typed
+	// variable, foreign helper) must refuse the whole rename — never silently
+	// skip. Regression guard for treating any ident callee as a type
+	// conversion.
+	root := t.TempDir()
+	files := map[string]string{
+		"go.mod":         "module example.com/m\n\ngo 1.22\n",
+		"store/store.go": "package store\n\ntype Store struct{}\n\nfunc (s *Store) Save() error { return nil }\n",
+		"main.go": "package main\n\nimport (\n\t\"fmt\"\n\n\t\"example.com/m/store\"\n)\n\n" +
+			"func main() {\n\tvar get func() *store.Store\n\t_ = get().Save()\n\t_ = fmt.Sprint(get())\n}\n",
+	}
+	for rel, body := range files {
+		if err := os.MkdirAll(filepath.Join(root, filepath.Dir(rel)), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(root, rel), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ix := mustIndex(t, root)
+	_, err := Rename(ix, "Store.Save", "Put")
+	if err == nil {
+		t.Fatalf("expected refusal for unprovable func-typed receiver get().Save, got success")
+	}
+	if !strings.Contains(err.Error(), "unprovable receiver") {
+		t.Fatalf("expected unprovable-receiver refusal, got %v", err)
 	}
 }
 

@@ -16,7 +16,7 @@ import (
 
 // indexVersion is bumped whenever the persisted index schema changes, so
 // stale caches are rebuilt automatically instead of serving zero-value fields.
-const indexVersion = 8
+const indexVersion = 9
 
 // Index is the in-memory representation of a project's AST index.
 type Index struct {
