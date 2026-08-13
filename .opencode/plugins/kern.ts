@@ -150,6 +150,18 @@ export default (async ({ directory, $ }) => {
           return run(["project", root])
         },
       }),
+      kern_buddy: tool({
+        description:
+          "Session onboarding digest for any agent: the project's conventions, layout, entry points and gotchas distilled from the index, docs and recent history. Call once at the start of a session on an unfamiliar repo.",
+        args: {
+          root: tool.schema.string().optional(),
+        },
+        async execute(args) {
+          const flags: string[] = ["buddy"]
+          if (args.root) flags.push(args.root)
+          return run(flags)
+        },
+      }),
       kern_pack: tool({
         description:
           "Pack a whole project into one paste-ready bundle: project instructions, a directory tree with per-file token counts, and file contents, sized to fit a token budget. Use when an agent needs the full source to edit against, not just a map.",
@@ -313,7 +325,7 @@ export default (async ({ directory, $ }) => {
       }),
       kern_dead: tool({
         description:
-          "Dead-code detection: symbols nothing in the project calls. Private names are dead for certain; public names may be external API. Sorted by size so the biggest cleanup wins show first.",
+          "Dead-code detection: symbols nothing in the project calls. Private names are dead for certain; public names may be external API. Sorted by size so the biggest cleanup wins show first. Callers reached through function values or interface dispatch are invisible to the index and are reported as dead — confirm before removing.",
         args: {
           root: tool.schema.string().optional(),
           limit: tool.schema.number().optional(),
@@ -350,6 +362,20 @@ export default (async ({ directory, $ }) => {
         async execute(args) {
           const flags: string[] = ["arch"]
           if (args.root) flags.push(args.root)
+          return run(flags)
+        },
+      }),
+      kern_communities: tool({
+        description:
+          "Call-graph communities (label propagation): which symbols cluster together as subsystems, with each cluster's size and hub. Use to name the architecture's parts before refactoring.",
+        args: {
+          root: tool.schema.string().optional(),
+          limit: tool.schema.string().optional(),
+        },
+        async execute(args) {
+          const flags: string[] = ["communities"]
+          if (args.root) flags.push(args.root)
+          if (args.limit) flags.push("--limit", args.limit)
           return run(flags)
         },
       }),

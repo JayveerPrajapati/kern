@@ -30,6 +30,7 @@ type Finding struct {
 func Run(root string) []Finding {
 	var out []Finding
 	out = append(out, checkBinary())
+	out = append(out, checkCapabilities())
 	out = append(out, checkPath())
 	out = append(out, checkExec())
 	out = append(out, checkEnv())
@@ -46,6 +47,23 @@ func checkBinary() Finding {
 		return Finding{Check: "binary", Level: "fail", Detail: err.Error()}
 	}
 	return Finding{Check: "binary", Level: "ok", Detail: exe}
+}
+
+// checkCapabilities reports which optional build-time capabilities are
+// compiled into this binary (SQLite persistence, tree-sitter extraction).
+func checkCapabilities() Finding {
+	var parts []string
+	if index.SQLiteEnabled() {
+		parts = append(parts, "sqlite: on (persistent index + FTS5)")
+	} else {
+		parts = append(parts, "sqlite: off (in-memory; build with -tags sqlite)")
+	}
+	if index.TreesitterEnabled() {
+		parts = append(parts, "treesitter: on (12 grammars)")
+	} else {
+		parts = append(parts, "treesitter: off (regex fallback; build with -tags treesitter)")
+	}
+	return Finding{Check: "capabilities", Level: "ok", Detail: strings.Join(parts, " · ")}
 }
 
 func checkPath() Finding {

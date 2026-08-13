@@ -27,7 +27,7 @@ Already installed? Run `kern doctor` to verify everything is wired.
 
 <br>
 
-**62 `kern_*` MCP tools · 50+ CLI commands · 74 detected frameworks · 17 indexed languages (+ Vue/Svelte/Astro SFC)**
+**64 `kern_*` MCP tools · 50+ CLI commands · 74 detected frameworks · 17 indexed languages (+ Vue/Svelte/Astro SFC)**
 
 </div>
 
@@ -317,7 +317,7 @@ After that, every agent tool works immediately — results are never stale.
 ┌───────────────────────────────────────────────────────────────────┐
 │                  kern (CLI) / kern-mcp (MCP server)               │
 │                                                                   │
-│  62 kern_* tools → optimize · map · graph · review · verify ...   │
+│  64 kern_* tools → optimize · map · graph · review · verify ...   │
 │                                 │                                 │
 │                                 ▼                                 │
 │                  persisted symbol index (JSON hash cache,         │
@@ -335,7 +335,7 @@ After that, every agent tool works immediately — results are never stale.
    `~/.cache/kern/` (per project). `-tags sqlite` switches to a SQLite store
    with WAL journaling and FTS5 full-text search for concurrent access.
 
-3. **Analysis** — 50+ commands and 62 MCP tools read the same index:
+3. **Analysis** — 50+ commands and 64 MCP tools read the same index:
    call graphs, blast radius, change impact, hotspots, dead code, path
    finding, architecture communities, coverage gaps — all dependency-free,
    all deterministic.
@@ -429,7 +429,7 @@ timeout (10s default) and a stdout byte cap — only stdout is returned.
 
 ## MCP Tools
 
-When running as an MCP server (`kern-mcp`), kern exposes **62 `kern_*`
+When running as an MCP server (`kern-mcp`), kern exposes **64 `kern_*`
 tools**. They map 1:1 to the CLI commands, so opencode, Claude Code, Codex,
 Cursor and 12 more agents get the full engine over MCP:
 
@@ -568,7 +568,7 @@ native hooks for agents whose hook APIs allow it:
 | **Codex** | `[mcp_servers.kern]` in `~/.codex/config.toml` | — (no output-rewrite hook API) |
 | **JSON adapters** | `continue`, `windsurf`, `zed`, `vscode`, `antigravity`, `qwen`, `qoder`, `kiro`, `copilot` (VS Code), `copilot-cli` | — (no hook API) |
 
-All agents receive the same 62 MCP tools and the same `AGENTS.md` rules. Output
+All agents receive the same 64 MCP tools and the same `AGENTS.md` rules. Output
 compression + session memory run natively where the platform's hook API allows
 in-place output replacement (opencode, Claude Code, Gemini); agents without
 such an API keep full MCP parity but no automatic interception. Generated

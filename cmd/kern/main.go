@@ -151,8 +151,8 @@ Usage:
   kern bridges [root] [--limit N] [--json]        cross-package bridge detection (coupling points)
   kern testgaps [root] [--limit N] [--json]       test coverage + untested hotspots
   kern entries [root] [--limit N] [--json]        framework entry points in the index
-  kern flows [root] [--limit N] [--json]          execution flows from entry points (still available)
-  kern communities [root] [--json]                call-graph communities (label propagation)
+  kern flows [root] [--limit N] [--json]          execution flows from entry points, by reach
+  kern communities [root] [--limit N] [--json]     call-graph communities (label propagation)
   kern path <from> <to> [root] [--json]           shortest call path between two symbols
   kern dead [root] [--limit N] [--json]           dead code: symbols with no in-project callers
   kern larges [root] [--lines N] [--limit N] [--json]   largest declarations by source lines
@@ -515,6 +515,15 @@ func main() {
 			fatal("flags: %v", err)
 		}
 		prompt := strings.Join(args, " ")
+		if prompt == "" || prompt == "-" {
+			b, err := readStdin()
+			if err != nil {
+				fatal("cannot read stdin: %v", err)
+			}
+			if len(b) > 0 {
+				prompt = string(b)
+			}
+		}
 		if prompt == "" {
 			fatal("prompt is required")
 		}
@@ -2476,6 +2485,9 @@ func main() {
 			fatal("%v", err)
 		}
 		comms := intel.Communities(ix)
+		if f.limit > 0 && len(comms) > f.limit {
+			comms = comms[:f.limit]
+		}
 		if f.json {
 			printJSON(map[string]any{"communities": comms})
 			return

@@ -51,6 +51,46 @@ func TestScanFileDynamicSQL(t *testing.T) {
 	}
 }
 
+func TestScanFileFalsePositiveFilters(t *testing.T) {
+	src := []byte(`func check(db *sql.DB, table, user string) {
+	rows, _ := db.Query("PRAGMA table_info(" + table + ")")   // const table: skipped
+	rows2, _ := db.Query("PRAGMA table_info(" + user + ")")   // same shape: skipped by design
+	rows3, _ := db.Query("PRAGMA table_info(" + getTable() + ")") // call: still flagged
+	rows4, _ := db.Query("SELECT * FROM users WHERE id = " + user) // real SQL: flagged
+	_ = rows
+	_ = rows2
+	_ = rows3
+	_ = rows4
+}
+`)
+	findings := ScanFile("db.go", src)
+	var flagged []string
+	for _, f := range findings {
+		if f.Rule == "sql-injection" {
+			flagged = append(flagged, f.Snippet)
+		}
+	}
+	if len(flagged) != 2 {
+		t.Fatalf("expected 2 sql-injection findings (call + real SQL), got %d: %v", len(flagged), flagged)
+	}
+	for _, s := range flagged {
+		if !strings.Contains(s, "getTable()") && !strings.Contains(s, "WHERE id") {
+			t.Fatalf("unexpected finding: %s", s)
+		}
+	}
+}
+
+func TestScanFileSelfRegexNotFlagged(t *testing.T) {
+	src := []byte(`var re = regexp.MustCompile("(?i)\\b(?:md5\\.(?:New|Sum)|sha1\\.(?:New|Sum))\\b")
+`)
+	findings := ScanFile("detector.go", src)
+	for _, f := range findings {
+		if f.Rule == "weak-crypto" || f.Rule == "insecure-random" {
+			t.Fatalf("detector regex flagged itself: %+v", f)
+		}
+	}
+}
+
 func TestScanFileCommandInjection(t *testing.T) {
 	src := []byte(`func run(name string) {
 	out, _ := exec.Command("sh", "-c", "cat "+name).Output()

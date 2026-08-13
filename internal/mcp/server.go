@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/JayveerPrajapati/kern/internal/budget"
+	"github.com/JayveerPrajapati/kern/internal/brief"
 	"github.com/JayveerPrajapati/kern/internal/cache"
 	"github.com/JayveerPrajapati/kern/internal/code"
 	"github.com/JayveerPrajapati/kern/internal/commitmsg"
@@ -376,6 +377,13 @@ var tools = []Tool{
 		}, []string{"root"}),
 	},
 	{
+		Name:        "kern_buddy",
+		Description: "Session onboarding digest for any agent: the project's conventions, layout, entry points and gotchas distilled from the index, docs and recent history. Call once at the start of a session on an unfamiliar repo.",
+		InputSchema: schema(map[string]any{
+			"root": strProp("Project root (defaults to current directory)"),
+		}, nil),
+	},
+	{
 		Name:        "kern_run_build",
 		Description: "Run a build/test command locally and return only the compact result (exit status + errors), not full output. Use for builds, tests, linting to save context.",
 		InputSchema: schema(map[string]any{
@@ -539,7 +547,7 @@ var tools = []Tool{
 	},
 	{
 		Name:        "kern_dead",
-		Description: "Dead-code detection: symbols nothing in the project calls. Private names are dead for certain; public names may be external API. Sorted by size so the biggest cleanup wins show first.",
+		Description: "Dead-code detection: symbols nothing in the project calls. Private names are dead for certain; public names may be external API. Sorted by size so the biggest cleanup wins show first. Callers reached through function values or interface dispatch are invisible to the index and are reported as dead — confirm before removing.",
 		InputSchema: schema(map[string]any{
 			"root":  strProp("Project root (defaults to current directory)"),
 			"limit": strProp("Max entries (default all)"),
@@ -559,6 +567,14 @@ var tools = []Tool{
 		Description: "Architecture overview from call-graph communities: subsystems with their hubs/packages, plus coupling warnings ranking the cross-community call bundles that make changes ripple.",
 		InputSchema: schema(map[string]any{
 			"root": strProp("Project root (defaults to current directory)"),
+		}, nil),
+	},
+	{
+		Name:        "kern_communities",
+		Description: "Call-graph communities (label propagation): which symbols cluster together as subsystems, with each cluster's size and hub. Use to name the architecture's parts before refactoring.",
+		InputSchema: schema(map[string]any{
+			"root":  strProp("Project root (defaults to current directory)"),
+			"limit": strProp("Max communities to return (default all)"),
 		}, nil),
 	},
 	{
@@ -1945,6 +1961,18 @@ func (s *Server) runTool(ctx context.Context, id string, name string, args map[s
 		sum := code.Summarize(abs, content, 200)
 		return sum.Render(), nil
 
+	case "kern_buddy":
+		root := argString(args, "root")
+		if root == "" {
+			cwd, _ := os.Getwd()
+			root = cwd
+		}
+		out, err := brief.Build(root)
+		if err != nil {
+			return "", err
+		}
+		return out, nil
+
 	case "kern_project_map":
 		root := argString(args, "root")
 		if root == "" {
@@ -2485,6 +2513,25 @@ func (s *Server) runTool(ctx context.Context, id string, name string, args map[s
 			return "", err
 		}
 		return intel.RenderArch(intel.AnalyzeArchitecture(ix)), nil
+
+	case "kern_communities":
+		ix, err := s.loadIndex(argString(args, "root"))
+		if err != nil {
+			return "", err
+		}
+		limit := 0
+		if v := argString(args, "limit"); v != "" {
+			n, err := atoiArg(v, 0)
+			if err != nil {
+				return "", err
+			}
+			limit = n
+		}
+		comms := intel.Communities(ix)
+		if limit > 0 && len(comms) > limit {
+			comms = comms[:limit]
+		}
+		return intel.RenderCommunities(comms), nil
 
 	case "kern_churn":
 		root := argString(args, "root")
