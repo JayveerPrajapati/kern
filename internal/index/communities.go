@@ -5,6 +5,7 @@ import "sort"
 const (
 	maxCommunityIterations = 30
 	minCommunitySize       = 2
+	MaxCommunitySymbols    = 50000
 )
 
 // CommunityLabels clusters symbols with label propagation over project-local
@@ -15,7 +16,11 @@ const (
 // the single source of truth for the clustering: the intel package renders
 // it into Community reports and the SQLite store persists it, so graph
 // consumers never recompute the propagation twice.
+// For large repos (> MaxCommunitySymbols), returns empty to avoid O(n*iter) latency.
 func (ix *Index) CommunityLabels() map[string]string {
+	if len(ix.Symbols) > MaxCommunitySymbols {
+		return map[string]string{}
+	}
 	adj := map[string][]string{}
 	nodes := []string{}
 	for _, s := range ix.Symbols {
