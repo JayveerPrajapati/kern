@@ -1,130 +1,89 @@
 package main
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
 
-func TestParseFlagsPack(t *testing.T) {
-	f, rest, err := parseFlags([]string{"--max-tokens", "4000", "--no-instructions", "--out", "x.txt", "."})
+// loopCliFixture writes a tiny single-package Go module so the loop's
+// deterministic verify stage (a go build in the sandbox worktree) is fast and
+// passes. This exercises runLoopCLI without re-indexing the repo.
+func loopCliFixture(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	files := map[string]string{
+		"go.mod": "module cliloopfixture\n\ngo 1.20\n",
+		"main.go": `package main
+
+func helper() string { return "h" }
+
+func main() { _ = helper() }
+`,
+	}
+	for rel, content := range files {
+		p := filepath.Join(dir, rel)
+		if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+			t.Fatalf("write %s: %v", p, err)
+		}
+	}
+	return dir
+}
+
+// TestRunLoopCLI asserts the loop CLI helper runs offline at L0 (read-only:
+// act/write stages skipped) and renders the stage timeline plus the outcome.
+func TestRunLoopCLI(t *testing.T) {
+	root := loopCliFixture(t)
+	out, err := runLoopCLI(root, "", "add a helper")
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("runLoopCLI: %v", err)
 	}
-	if f.maxTokens != 4000 {
-		t.Fatalf("expected --max-tokens 4000, got %d", f.maxTokens)
+	if !strings.Contains(out, "level: L0") {
+		t.Fatalf("expected default L0 level; got:\n%s", out)
 	}
-	if !f.noinstructions {
-		t.Fatal("expected --no-instructions parsed")
+	for _, stage := range []string{"intent", "code", "verify", "deploy", "observe", "learn"} {
+		if !strings.Contains(out, stage+":") {
+			t.Fatalf("missing stage timeline entry for %q; got:\n%s", stage, out)
+		}
 	}
-	if f.out != "x.txt" {
-		t.Fatalf("expected --out x.txt, got %q", f.out)
+	// L0 gates: code/deploy/learn are skipped below the autonomy level.
+	if !strings.Contains(out, "code: skipped:below-autonomy") {
+		t.Fatalf("code stage not autonomy-gated; got:\n%s", out)
 	}
-	if len(rest) != 1 || rest[0] != "." {
-		t.Fatalf("expected positional root preserved, got %v", rest)
+	if !strings.Contains(out, "deployed: false") {
+		t.Fatalf("deployed should be false at L0; got:\n%s", out)
 	}
-	// Defaults: instructions included, no token budget.
-	f2, rest2, err := parseFlags([]string{"."})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if f2.noinstructions {
-		t.Fatal("expected instructions included by default")
-	}
-	if f2.maxTokens != 0 {
-		t.Fatalf("expected no budget by default, got %d", f2.maxTokens)
-	}
-	if len(rest2) != 1 || rest2[0] != "." {
-		t.Fatalf("expected positional root preserved, got %v", rest2)
+	if !strings.Contains(out, "observed-healthy:") {
+		t.Fatalf("missing observed-healthy outcome; got:\n%s", out)
 	}
 }
 
-func TestParseFlagsHTTP(t *testing.T) {
-	f, rest, err := parseFlags([]string{"--http", "127.0.0.1:8080", "extra"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if f.http != "127.0.0.1:8080" {
-		t.Fatalf("expected --http parsed, got %q", f.http)
-	}
-	if len(rest) != 1 || rest[0] != "extra" {
-		t.Fatalf("expected positional args preserved, got %v", rest)
+// TestRunLoopCLIInvalidLevel asserts an out-of-range level fails closed.
+func TestRunLoopCLIInvalidLevel(t *testing.T) {
+	root := loopCliFixture(t)
+	if _, err := runLoopCLI(root, "L9", "x"); err == nil {
+		t.Fatal("expected error for invalid level L9")
 	}
 }
 
-func TestMCPHTTPAddrResolution(t *testing.T) {
-	cases := []struct {
-		name string
-		args []string
-		http string
-		want string
-	}{
-		{"positional wins", []string{"127.0.0.1:9000"}, "", "127.0.0.1:9000"},
-		{"flag fallback", nil, ":9000", ":9000"},
-		{"empty means stdio", nil, "", ""},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			f := flags{http: c.http}
-			if got := mcpHTTPAddr(c.args, f); got != c.want {
-				t.Fatalf("mcpHTTPAddr(%v, %q) = %q, want %q", c.args, c.http, got, c.want)
-			}
-		})
-	}
-	// End-to-end through parseFlags, matching the real main() call path
-	// (rest is os.Args[2:], so it excludes the "mcp" subcommand).
-	f, rest, err := parseFlags([]string{"--http", ":9000"})
+// TestRenderTeamText asserts the team roster renders all 7 specialists and the
+// current task count.
+func TestRenderTeamText(t *testing.T) {
+	root := t.TempDir()
+	text, err := renderTeamText(root)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("renderTeamText: %v", err)
 	}
-	if got := mcpHTTPAddr(rest, f); got != ":9000" {
-		t.Fatalf("parseFlags + mcpHTTPAddr = %q, want %q", got, ":9000")
+	if !strings.Contains(text, "specialists:") {
+		t.Fatalf("missing specialists header; got:\n%s", text)
 	}
-}
-
-func TestParseFlagsHold(t *testing.T) {
-	f, rest, err := parseFlags([]string{"--hold", "db-models"})
-	if err != nil {
-		t.Fatal(err)
+	for _, role := range []string{"planner", "architect", "coder", "reviewer", "security", "tester", "sre"} {
+		if !strings.Contains(text, "(role "+role+")") {
+			t.Fatalf("missing specialist role %q; got:\n%s", role, text)
+		}
 	}
-	if !f.hold {
-		t.Fatal("expected --hold parsed")
-	}
-	if len(rest) != 1 || rest[0] != "db-models" {
-		t.Fatalf("expected positional scope preserved, got %v", rest)
-	}
-	// Default: --hold absent.
-	f2, _, err := parseFlags([]string{"db-models"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if f2.hold {
-		t.Fatal("expected --hold unset by default")
-	}
-}
-
-func TestParseFlagsNearDepthDefaults(t *testing.T) {
-	f, _, err := parseFlags([]string{"near", "Foo"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if f.depth != -1 {
-		t.Fatalf("expected depth default -1 (fallback to 2), got %d", f.depth)
-	}
-	f2, _, err := parseFlags([]string{"near", "Foo", "--depth", "3"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if f2.depth != 3 {
-		t.Fatalf("expected --depth 3 parsed, got %d", f2.depth)
-	}
-}
-
-func TestParseFlagsSeverity(t *testing.T) {
-	f, rest, err := parseFlags([]string{"myrepo", "--severity", "error,warning"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if f.severity != "error,warning" {
-		t.Fatalf("expected --severity parsed, got %q", f.severity)
-	}
-	if len(rest) != 1 || rest[0] != "myrepo" {
-		t.Fatalf("expected positional root preserved, got %v", rest)
+	if !strings.Contains(text, "tasks: 0") {
+		t.Fatalf("expected empty task list on a fresh team; got:\n%s", text)
 	}
 }

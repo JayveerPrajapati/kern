@@ -37,7 +37,7 @@ var ignoreFiles = map[string]bool{
 // persistent cache so unchanged files cost nothing to re-summarize.
 func BuildProject(root string, maxFiles, maxSymbolsPerFile int) (*Project, error) {
 	if maxFiles <= 0 {
-		maxFiles = 500
+		maxFiles = 10000
 	}
 	p := &Project{Root: root}
 	root, err := filepath.Abs(root)
@@ -112,7 +112,7 @@ func shouldIgnore(rel string) bool {
 		return true
 	}
 	// rel is slash-normalized by the caller, so split on "/" rather than
-	// os.PathSeparator (which never matches on Windows) (W2-54).
+	// os.PathSeparator.
 	for _, seg := range strings.Split(rel, "/") {
 		if ignoreDirs[seg] {
 			return true

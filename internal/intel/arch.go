@@ -27,17 +27,33 @@ type CouplingEdge struct {
 }
 
 // Architecture is the community map plus the inter-community coupling that a
-// reviewer needs to judge architecture health. It is the dependency-free
-// equivalent of an architecture-overview tool.
+// reviewer needs to judge architecture health.
 type Architecture struct {
 	Communities []ArchCommunity `json:"communities"`
 	Coupling    []CouplingEdge  `json:"coupling"`
+	// Gated is true when community detection was skipped to avoid O(n*iter)
+	// latency on very large graphs.
+	Gated       bool `json:"gated"`
+	SymbolCount int  `json:"symbol_count"`
+	EdgeCount   int  `json:"edge_count"`
 }
 
 // AnalyzeArchitecture computes the community structure and the cross-community
 // call bundles. Every local call edge whose endpoints land in different
-// communities contributes to one coupling bundle.
+// communities contributes to one coupling bundle. For repos exceeding
+// index.MaxCommunitySymbols, community detection is skipped (Gated=true).
 func AnalyzeArchitecture(ix *index.Index) Architecture {
+	if len(ix.Symbols) > index.MaxCommunitySymbols {
+		edges := 0
+		for _, callees := range ix.Calls {
+			edges += len(callees)
+		}
+		return Architecture{
+			Gated:       true,
+			SymbolCount: len(ix.Symbols),
+			EdgeCount:   edges,
+		}
+	}
 	labels, nodes := labelPropagation(ix)
 	fileMap := buildFileMap(ix)
 
@@ -122,10 +138,17 @@ func AnalyzeArchitecture(ix *index.Index) Architecture {
 }
 
 // RenderArch returns the architecture report: subsystems first, then coupling
-// warnings ranked by bundle size.
+// warnings ranked by bundle size. When community detection was skipped, a
+// skip note is rendered instead of a "no call structure" message.
 func RenderArch(a Architecture) string {
 	var b strings.Builder
 	b.WriteString("architecture overview (communities + coupling):\n\n")
+	if a.Gated {
+		fmt.Fprintf(&b, "  (community detection skipped — %d symbols / %d call edges exceed the %d-symbol gate;\n"+
+			"   use `kern hubs` and `kern bridges` for structural analysis on gated repos)\n",
+			a.SymbolCount, a.EdgeCount, index.MaxCommunitySymbols)
+		return b.String()
+	}
 	if len(a.Communities) == 0 {
 		b.WriteString("  (no project-local call structure detected)\n")
 	}

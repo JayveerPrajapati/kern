@@ -1,9 +1,7 @@
 // Package terse implements deterministic LLM output compression: it strips
 // filler, pleasantries and hedge language from a model's prose response while
-// preserving code blocks, lists, errors and technical terms. It is the
-// rule-based counterpart of Context Mode's "terse response" mode
-// (github.com/mksglu/context-mode) — no LLM involved, byte-for-byte
-// reproducible.
+// preserving code blocks, lists, errors and technical terms. No LLM involved,
+// byte-for-byte reproducible.
 package terse
 
 import (
@@ -201,10 +199,18 @@ func Compress(text string) (string, int) {
 			dropped++
 			continue
 		}
-		// Keep the leading indentation, drop trailing whitespace. Slicing by
-		// the trimmed length (raw[:len(trimmed)-len(clean)]) must never be
-		// confused with a trailing-whitespace prefix.
-		out = append(out, raw[:len(trimmed)-len(clean)]+clean)
+		// Strip inline filler phrases from prose lines (preserving code
+		// fences and payload). This catches phrases like "Well, I think
+		// that, you know, basically just" that wrap a real sentence.
+		// Payload lines (code, paths, "file:line", "a = b") must never be
+		// rewritten, so guard stripInlineFiller with carriesPayload — the
+		// same check isFiller already uses for the drop decision.
+		if carriesPayload(clean) {
+			out = append(out, raw[:len(trimmed)-len(clean)]+clean)
+			continue
+		}
+		stripped := stripInlineFiller(clean)
+		out = append(out, raw[:len(trimmed)-len(clean)]+stripped)
 	}
 
 	// Collapse runs of blank lines to a single blank line, then trim leading
@@ -360,6 +366,106 @@ func isPromptFluff(s string) bool {
 	}
 	// A short line made entirely of filler words ("Sure! Great question.").
 	return isFillerWords(lower)
+}
+
+// inlineFillerPhrases are conversational filler phrases that wrap a real
+// sentence without carrying technical meaning. They are stripped from the
+// beginning of a line and after commas in prose (never inside code fences).
+var inlineFillerPhrases = []string{
+	"well, ", "well ", "so, ", "so ",
+	"i think that, ", "i think that ", "i think, ", "i think ",
+	"you know, ", "you know ",
+	"basically just ", "basically, ", "basically ",
+	"i mean, ", "i mean ",
+	"sort of ", "kind of ",
+	"to be honest, ", "honestly, ", "honestly ",
+	"for what it's worth, ", "for what its worth, ",
+	"at the end of the day, ",
+	"i believe that, ", "i believe that ", "i believe, ", "i believe ",
+	"it seems like, ", "it seems like ", "it seems that, ", "it seems that ",
+	"it appears that, ", "it appears that ",
+	"as you can see, ", "as you know, ",
+	"needless to say, ", "obviously, ", "obviously ",
+	"of course, ", "of course ",
+	"certainly, ", "certainly ",
+	"hopefully, ", "hopefully ",
+	"fortunately, ", "fortunately ",
+	"unfortunately, ", "unfortunately ",
+	"interestingly, ", "interestingly ",
+	"naturally, ", "naturally ",
+	"clearly, ", "clearly ",
+	"indeed, ", "indeed ",
+	"just ",   // "just returns" → "returns"
+	"really ", // "really good" → "good"
+	"very ",   // "very fast" → "fast"
+}
+
+// stripInlineFiller removes conversational filler phrases from a prose line.
+// It strips phrases from the beginning of the line (looped — so "Well, I
+// think that, you know, ..." strips all three openers), after commas, and
+// after sentence-ending periods. Code fences and payload lines are already
+// guarded by the caller.
+func stripInlineFiller(s string) string {
+	lower := strings.ToLower(s)
+	changed := false
+	// Strip from the beginning of the line, looping so consecutive fillers
+	// are all removed ("Well, I think that, you know, ..." → "").
+	for {
+		found := false
+		for _, phrase := range inlineFillerPhrases {
+			if strings.HasPrefix(lower, phrase) {
+				s = s[len(phrase):]
+				lower = strings.ToLower(s)
+				changed = true
+				found = true
+				break
+			}
+		}
+		if !found {
+			break
+		}
+	}
+	// Strip after commas: ", you know, " → ", "
+	for _, phrase := range inlineFillerPhrases {
+		target := ", " + phrase
+		for strings.Contains(lower, target) {
+			idx := strings.Index(lower, target)
+			s = s[:idx] + ", " + s[idx+len(target):]
+			lower = strings.ToLower(s)
+			changed = true
+		}
+	}
+	// Strip after sentence-ending periods: ". Basically just " → ". "
+	for _, phrase := range inlineFillerPhrases {
+		target := ". " + phrase
+		for strings.Contains(lower, target) {
+			idx := strings.Index(lower, target)
+			s = s[:idx] + ". " + s[idx+len(target):]
+			lower = strings.ToLower(s)
+			changed = true
+		}
+	}
+	if !changed {
+		return s
+	}
+	// Clean up: remove leading comma if the line now starts with one,
+	// collapse double commas, and trim leading/trailing whitespace.
+	s = strings.TrimSpace(s)
+	s = strings.TrimPrefix(s, ", ")
+	s = strings.TrimPrefix(s, ",")
+	// Collapse ", , " → ", "
+	for strings.Contains(s, ", , ") {
+		s = strings.ReplaceAll(s, ", , ", ", ")
+	}
+	for strings.Contains(s, ",,") {
+		s = strings.ReplaceAll(s, ",,", ",")
+	}
+	// Capitalize the first letter if the line now starts with a lowercase
+	// letter (the filler was stripping the sentence opener).
+	if len(s) > 0 && s[0] >= 'a' && s[0] <= 'z' {
+		s = string(s[0]-'a'+'A') + s[1:]
+	}
+	return s
 }
 
 func isFenceLine(s string) bool {

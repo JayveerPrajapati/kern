@@ -27,7 +27,7 @@ Already installed? Run `kern doctor` to verify everything is wired.
 
 <br>
 
-**64 `kern_*` MCP tools · 50+ CLI commands · 74 detected frameworks · 17 indexed languages (+ Vue/Svelte/Astro SFC)**
+**74 `kern_*` MCP tools · 50+ CLI commands · 74 detected frameworks · 18 indexed languages (+ Vue/Svelte/Astro SFC)**
 
 </div>
 
@@ -44,7 +44,6 @@ Already installed? Run `kern doctor` to verify everything is wired.
 - [MCP Tools](#mcp-tools)
 - [Telemetry & Privacy](#telemetry--privacy)
 - [Configuration](#configuration)
-- [Verified Releases](#verified-releases)
 - [Supported Platforms](#supported-platforms)
 - [Supported Agents](#supported-agents)
 - [Supported Languages](#supported-languages)
@@ -103,7 +102,7 @@ kern watch .        # daemon: keep it fresh automatically
 ```
 
 <sub>`kern index` builds a real AST index (symbols, call edges, inheritance,
-routes) from `go/ast` plus dependency-free heuristics for 17 languages.
+routes) from `go/ast` plus dependency-free heuristics for 18 languages.
 Every read path re-validates the index against a content-hash manifest, so
 analyses are never served stale — `kern index` is optional in practice and only
 speeds up first use.</sub>
@@ -262,47 +261,6 @@ codebase's stack is answered in one call.
 
 ---
 
-## Quick Start
-
-### 1. Run the Installer
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/JayveerPrajapati/kern/main/install.sh | sh
-```
-
-The installer will:
-
-- Drop `kern` and `kern-mcp` into `~/.local/bin`
-- Fall back to `go install` when no prebuilt asset matches your platform
-
-### 2. Wire Your Agents
-
-```bash
-kern setup                        # wire everything below
-kern setup --check                # show current wiring status
-kern setup --agents claude        # only wire specific agents
-kern doctor                       # full health report: wiring, index, Ollama
-```
-
-| Command | Purpose |
-|---|---|
-| `kern setup` | wires kern into every detected agent (idempotent) |
-| `kern setup --agents claude,codex,...` | only the listed agents |
-| `kern setup --check` | prints per-agent wiring status |
-| `kern doctor` | diagnostics: binary, PATH, agent configs, index freshness, Ollama, telemetry |
-
-### 3. Initialize Projects
-
-```bash
-cd your-project
-kern index .          # build the AST index
-kern buddy .          # optional: print a session briefing to paste into a fresh agent
-```
-
-After that, every agent tool works immediately — results are never stale.
-
----
-
 ## How It Works
 
 ```
@@ -317,7 +275,7 @@ After that, every agent tool works immediately — results are never stale.
 ┌───────────────────────────────────────────────────────────────────┐
 │                  kern (CLI) / kern-mcp (MCP server)               │
 │                                                                   │
-│  64 kern_* tools → optimize · map · graph · review · verify ...   │
+│  74 kern_* tools → optimize · map · graph · review · verify ...   │
 │                                 │                                 │
 │                                 ▼                                 │
 │                  persisted symbol index (JSON hash cache,         │
@@ -327,7 +285,7 @@ After that, every agent tool works immediately — results are never stale.
 ```
 
 1. **Extraction** — `go/ast` parses Go precisely; a dependency-free extractor
-   (comment/string stripping + per-language declaration rules) covers 16 more
+   (comment/string stripping + per-language declaration rules) covers 17 more
    languages; `-tags treesitter` upgrades 13 languages to tree-sitter grammar
    parsing (call/inheritance edges included).
 
@@ -335,7 +293,7 @@ After that, every agent tool works immediately — results are never stale.
    `~/.cache/kern/` (per project). `-tags sqlite` switches to a SQLite store
    with WAL journaling and FTS5 full-text search for concurrent access.
 
-3. **Analysis** — 50+ commands and 64 MCP tools read the same index:
+3. **Analysis** — 50+ commands and 74 MCP tools read the same index:
    call graphs, blast radius, change impact, hotspots, dead code, path
    finding, architecture communities, coverage gaps — all dependency-free,
    all deterministic.
@@ -430,21 +388,48 @@ timeout (10s default) and a stdout byte cap — only stdout is returned.
 
 ## MCP Tools
 
-When running as an MCP server (`kern-mcp`), kern exposes **64 `kern_*`
+When running as an MCP server (`kern-mcp`), kern exposes **74 `kern_*`
 tools**. They map 1:1 to the CLI commands, so opencode, Claude Code, Codex,
 Cursor and 12 more agents get the full engine over MCP:
 
 | Group | Tools |
 |---|---|
-| **Context optimization** | `kern_optimize_prompt`, `kern_optimize_log`, `kern_optimize_output`, `kern_context_budget`, `kern_pack`, `kern_swap`, `kern_compact_file`, `kern_project_map`, `kern_build`→`kern_run_build` |
-| **Code graph** | `kern_ast_search`, `kern_search`, `kern_repo_search`, `kern_code_graph`, `kern_graph`, `kern_inherits`, `kern_context`, `kern_near`, `kern_walk`, `kern_path`, `kern_probe`, `kern_explore`, `kern_why`, `kern_frameworks`, `kern_entry_points` |
+| **Context optimization** | `kern_optimize_prompt`, `kern_optimize_log`, `kern_optimize_output`, `kern_context_budget`, `kern_pack`, `kern_swap`, `kern_compact_file`, `kern_project_map` |
+| **Code graph** | `kern_ast_search`, `kern_fts_search`, `kern_search`, `kern_repo_search`, `kern_code_graph`, `kern_graph`, `kern_inherits`, `kern_context`, `kern_near`, `kern_walk`, `kern_path`, `kern_probe`, `kern_explore`, `kern_why`, `kern_frameworks`, `kern_entry_points`, `kern_communities` |
 | **Change & review** | `kern_changes`, `kern_review`, `kern_churn`, `kern_trace`, `kern_hubs`, `kern_bridges`, `kern_arch`, `kern_dead`, `kern_larges`, `kern_test_gaps`, `kern_cochange` |
 | **Safety** | `kern_mask_pii`, `kern_security`, `kern_safe_delete`, `kern_verify_output`, `kern_guard_check`, `kern_schema_validate`, `kern_sandbox` |
-| **Automation** | `kern_run_build`, `kern_validate`, `kern_heal`, `kern_exec`, `kern_rename`, `kern_diff_files`, `kern_commitmsg`, `kern_doc_fetch/index/search`, `kern_precache`, `kern_memory_add/list/recall`, `kern_lock/unlock/lock_status`, `kern_semcache`, `kern_stats`, `kern_usage_guide` |
+| **Automation** | `kern_run_build`, `kern_validate`, `kern_heal`, `kern_exec`, `kern_execute`, `kern_rename`, `kern_diff_files`, `kern_commitmsg`, `kern_doc_fetch`, `kern_doc_index`, `kern_doc_search`, `kern_precache`, `kern_memory_add`, `kern_memory_list`, `kern_memory_recall`, `kern_memory`, `kern_lock`, `kern_unlock`, `kern_lock_status`, `kern_semcache`, `kern_stats`, `kern_usage_guide`, `kern_buddy` |
+| **Kern 2.0 high-level** | `kern_analyze`, `kern_plan`, `kern_impact`, `kern_what_if`, `kern_verify`, `kern_incident`, `kern_agents`, `kern_loop` |
 
 <sub>Tools are available both over stdio (any MCP client) and the Streamable
 HTTP transport with an Origin allow-list (loopback only; empty origins are
 accepted for non-browser clients).</sub>
+
+### Kern 2.0 — AI Software Engineering Control Plane
+
+The **Kern 2.0 high-level tools** (`kern_analyze`, `kern_plan`, `kern_impact`,
+`kern_what_if`, `kern_verify`, `kern_incident`, `kern_agents`, `kern_loop`)
+extend kern from a context optimizer into an **AI Software Engineering
+Operating System** — a continuously-updated software digital twin with
+engineering memory, a reasoning engine, a policy firewall, a multi-agent
+runtime, and a verification system.
+
+The core loop: **UNDERSTAND → REMEMBER → REASON → PLAN → ACT → VERIFY →
+PROTECT → OBSERVE → LEARN ↺**. Four non-negotiable principles:
+
+1. **Kern is the platform; MCP is one interface** among many (CLI, REST, SDK,
+   IDE, Git, CI/CD, Web UI).
+2. **Don't throw away existing kern** — inspect, reuse, refactor incrementally.
+3. **Deterministic things stay deterministic** — AST, graph, hashes, policy,
+   and tests are never turned into LLM guesses. LLMs are used only for
+   planning, reasoning, and summarization.
+4. **Every important AI claim is typed** — FACT, INFERENCE, HYPOTHESIS, or
+   RECOMMENDATION — with source, provenance, timestamp, scope, and confidence.
+
+Autonomy levels L0–L5 gate which stages run: L0 is read-only; L2 enables
+code generation in a sandbox worktree; L4 adds deploy with human approval;
+L5 is full closed-loop autonomy. The default is L0 — no code is ever written
+or deployed without explicit configuration.
 
 ---
 
@@ -492,55 +477,6 @@ your code, not third-party noise.
 
 ---
 
-## PR Merge Gate
-
-[`.github/actions/kern-review`](.github/actions/kern-review/action.yml) is a
-reusable composite action that turns kern's change-intel into a pull-request
-merge gate: it diffs against the base ref, runs `kern review` (symbol-impact
-analysis), `kern changes --json` (per-file risk, test gaps, blast radius) and
-`kern guard check` (architectural boundaries), posts an upserted PR comment,
-and can fail the job on demand.
-
-```yaml
-steps:
-  - uses: actions/checkout@v4
-    with:
-      fetch-depth: 0   # the gate diffs against the base ref
-  - uses: JayveerPrajapati/kern/.github/actions/kern-review@v1
-    with:
-      base-ref: origin/${{ github.base_ref }}
-      comment: "true"        # post/update the review comment
-      fail-on-risk: "true"   # merge gate: fail on risky changes
-      risk-threshold: "4.0"  # kern's additive risk scale, not 0..1
-      version: latest        # release tag to install; or pass kern-bin:
-      # kern-bin: /path/to/kern   # reuse a binary already on the runner
-```
-
-`fail-on-risk` fails the job when the highest per-file risk reaches
-`risk-threshold` (default 4.0 on kern's additive scale — 1.0 base +
-`log2(callers)` + `log2(blast)` + untested `+1.5` + cross-package `+2.0`) or
-when `kern guard check` reports boundary violations. It's a hard gate, not a
-report: set it and the PR cannot merge until risk drops. The repo's own
-[`pr-review.yml`](.github/workflows/pr-review.yml) dogfoods the action, so
-kern PRs are gated by the code they propose.
-
----
-
-## Verified Releases
-
-Every asset is built by the [release workflow](.github/workflows/release.yml),
-never from a laptop:
-
-- **GitHub Releases** — `kern-<os>-<arch>.tar.gz` for Linux/macOS (amd64 +
-  arm64) and `kern-windows-amd64.zip`, produced by `make release`
-  (GOOS/GOARCH matrix, cross-compiled).
-- **install.sh** — pinned download of the matching asset, SHA-verified against
-  the release, with `go install` fallback.
-- **opencode macOS curl** — one-command wiring via `scripts/retarget.sh` in
-  CI, and the compiled plugin asset is embedded in `kern setup`.
-
----
-
 ## Supported Platforms
 
 | Platform | Architectures | Artifact |
@@ -569,7 +505,7 @@ native hooks for agents whose hook APIs allow it:
 | **Codex** | `[mcp_servers.kern]` in `~/.codex/config.toml` | — (no output-rewrite hook API) |
 | **JSON adapters** | `continue`, `windsurf`, `zed`, `vscode`, `antigravity`, `qwen`, `qoder`, `kiro`, `copilot` (VS Code), `copilot-cli` | — (no hook API) |
 
-All agents receive the same 64 MCP tools and the same `AGENTS.md` rules. Output
+All agents receive the same 74 MCP tools and the same `AGENTS.md` rules. Output
 compression + session memory run natively where the platform's hook API allows
 in-place output replacement (opencode, Claude Code, Gemini); agents without
 such an API keep full MCP parity but no automatic interception. Generated
@@ -581,10 +517,10 @@ wiring files carry machine-specific binary paths, so `kern setup` adds them to
 ## Supported Languages
 
 Updated by one content-hash manifest; language is detected by extension or
-shebang. **17 languages indexed by default** (dependency-free heuristics):
+shebang. **18 languages indexed by default** (dependency-free heuristics):
 
 Go · Python · JavaScript (JSX) · TypeScript (TSX) · Rust · C · C++ · C# ·
-Java · Ruby · PHP · Shell · CSS/SCSS/Less · HTML · Markdown · JSON · YAML
+Java · Ruby · PHP · Shell · CSS/SCSS/Less · HTML · Markdown · JSON · YAML · Dart
 
 <sub>Vue/Svelte single-file components and Astro pages extract their
 `<script>`/frontmatter blocks and index them as JS/TS (`<script lang="ts">`

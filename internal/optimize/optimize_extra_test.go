@@ -65,8 +65,8 @@ func TestPromptSemanticCacheHit(t *testing.T) {
 		t.Fatal("first call must not be served from cache")
 	}
 
-	// Near-duplicate, reworded request: exact hash misses, semantic cache hits.
-	second, err := Prompt("how do I compress a big server log", "", Options{Cache: true})
+	// Near-duplicate (one word removed): exact hash misses, semantic cache hits.
+	second, err := Prompt("how do I compress a very large server log", "", Options{Cache: true})
 	if err != nil {
 		t.Fatal(err)
 	}

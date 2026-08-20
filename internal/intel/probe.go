@@ -42,8 +42,10 @@ var identRe = regexp.MustCompile(`[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]
 // Probe turns a natural-language task (bug report, prompt, error text) into a
 // budget-capped micro-context bundle: it extracts candidate identifiers,
 // resolves them against the index, and returns the definition, callers, callees
-// and tests for each. This is the query-driven micro-context router: the graph
-// is the retrieval index, never the payload.
+// and tests for each.
+//
+// When no exact identifier resolves, a keyword-based fuzzy fallback scans
+// symbol names so natural-language tasks still produce useful context.
 func Probe(ix *index.Index, task string, maxTokens int) *ProbeReport {
 	if maxTokens <= 0 {
 		maxTokens = 4000
@@ -54,6 +56,18 @@ func Probe(ix *index.Index, task string, maxTokens int) *ProbeReport {
 			candidates[r] = true
 		}
 	}
+
+	// Fuzzy fallback for natural-language tasks like "decommission a network
+	// service": match extracted keywords against symbol names and segments.
+	if len(candidates) == 0 {
+		keywords := extractKeywords(task)
+		for _, kw := range keywords {
+			for _, match := range fuzzyMatchSymbols(ix, kw, 5) {
+				candidates[match] = true
+			}
+		}
+	}
+
 	var resolved []string
 	for r := range candidates {
 		resolved = append(resolved, r)
@@ -114,8 +128,7 @@ func Probe(ix *index.Index, task string, maxTokens int) *ProbeReport {
 	}
 
 	report := &ProbeReport{Task: task, MaxTokens: maxTokens, Anchors: anchors, Paths: paths}
-	// Trim the payload itself to the budget so JSON consumers (kern probe
-	// --json, MCP) never receive an oversized bundle flagged truncated (W2-24).
+	// Trim the payload to the budget so JSON consumers never get an oversized bundle.
 	fitReportToBudget(report, maxTokens)
 	return report
 }
@@ -187,4 +200,103 @@ func RenderProbe(r *ProbeReport) string {
 // FitProbe caps the probe bundle to maxTokens using kern's budget fitter.
 func FitProbe(text string, maxTokens int) string {
 	return budget.Fit(text, maxTokens)
+}
+
+// stopWords are common English words that should not be used as symbol-match
+// keywords. They are lowercase for case-insensitive comparison.
+var stopWords = map[string]bool{
+	"the": true, "a": true, "an": true, "is": true, "are": true, "was": true,
+	"were": true, "be": true, "been": true, "being": true, "have": true,
+	"has": true, "had": true, "do": true, "does": true, "did": true,
+	"will": true, "would": true, "could": true, "should": true, "may": true,
+	"might": true, "must": true, "shall": true, "can": true, "need": true,
+	"of": true, "in": true, "on": true, "at": true, "to": true, "for": true,
+	"with": true, "by": true, "from": true, "as": true, "into": true,
+	"about": true, "than": true, "then": true, "so": true, "if": true,
+	"but": true, "or": true, "and": true, "not": true, "no": true,
+	"this": true, "that": true, "these": true, "those": true, "it": true,
+	"its": true, "their": true, "there": true, "here": true, "where": true,
+	"when": true, "how": true, "why": true, "what": true, "which": true,
+	"who": true, "whom": true, "whose": true,
+	"i": true, "you": true, "he": true, "she": true, "we": true, "they": true,
+	"me": true, "him": true, "her": true, "us": true, "them": true,
+	"my": true, "your": true, "his": true, "our": true,
+	"fix": true, "bug": true, "issue": true, "problem": true, "error": true,
+	"task": true, "todo": true, "feature": true, "change": true,
+	"add": true, "remove": true, "update": true, "create": true, "delete": true,
+	"get": true, "set": true, "new": true, "old": true,
+}
+
+// extractKeywords pulls meaningful keywords from a natural-language task
+// string, filtering stop words and short tokens. Keywords are lowercased
+// and deduped. For example, "decommission a network service" yields
+// ["decommission", "network", "service"].
+func extractKeywords(task string) []string {
+	words := strings.Fields(strings.ToLower(task))
+	seen := map[string]bool{}
+	var out []string
+	for _, w := range words {
+		// Strip punctuation.
+		w = strings.Trim(w, ".,;:!?\"'()[]{}<>")
+		if len(w) < 3 || stopWords[w] {
+			continue
+		}
+		if !seen[w] {
+			seen[w] = true
+			out = append(out, w)
+		}
+	}
+	return out
+}
+
+// fuzzyMatchSymbols finds symbols whose names contain the keyword (case-
+// insensitive), splitting CamelCase names into segments for matching. Returns
+// at most limit matches, preferring symbols with source files (project-local).
+func fuzzyMatchSymbols(ix *index.Index, keyword string, limit int) []string {
+	kw := strings.ToLower(keyword)
+	var matches []string
+	for _, s := range ix.Symbols {
+		full := s.FullName()
+		// Match against the full name, the simple name, and CamelCase segments.
+		lower := strings.ToLower(full)
+		if strings.Contains(lower, kw) {
+			matches = append(matches, full)
+			if len(matches) >= limit {
+				break
+			}
+			continue
+		}
+		// Split CamelCase: "ZTPServiceImpl" -> ["ztp", "service", "impl"]
+		for _, seg := range splitCamelCase(full) {
+			if seg == kw || strings.Contains(seg, kw) {
+				matches = append(matches, full)
+				if len(matches) >= limit {
+					return matches
+				}
+				break
+			}
+		}
+	}
+	return matches
+}
+
+// splitCamelCase breaks a CamelCase or PascalCase identifier into lowercase
+// segments. "HttpRequest" -> ["http", "request"], "ZTPServiceImpl" ->
+// ["ztp", "service", "impl"], "getXMLParser" -> ["get", "xml", "parser"].
+func splitCamelCase(s string) []string {
+	var segs []string
+	var cur strings.Builder
+	for i, r := range s {
+		if i > 0 && r >= 'A' && r <= 'Z' {
+			if cur.Len() > 0 {
+				segs = append(segs, strings.ToLower(cur.String()))
+				cur.Reset()
+			}
+		}
+		cur.WriteRune(r)
+	}
+	if cur.Len() > 0 {
+		segs = append(segs, strings.ToLower(cur.String()))
+	}
+	return segs
 }

@@ -1,6 +1,5 @@
 // Package diff computes line-level unified diffs without external tooling.
-// Used by the heal loop (#9) to show what an LLM changed and by the delta
-// tooling (#13). Deterministic and dependency-free.
+// Deterministic and dependency-free.
 package diff
 
 import (
@@ -123,8 +122,7 @@ func labelPath(p string) string {
 
 // groupHunks splits ops into hunks of change-regions padded with context.
 // Consecutive change clusters separated by <= 2*ctx unchanged lines are merged
-// into one hunk (git's rule); the old code measured the leading-context window
-// from the hunk start, causing related changes to be split apart (W2-47).
+// into one hunk (git's rule).
 func groupHunks(ops []Op, ctx int) [][]Op {
 	var hunks [][]Op
 	var first, last int
@@ -173,8 +171,7 @@ func hunkSpan(ops []Op, first, last, ctx int) []Op {
 
 // hunkRange computes (aStart,aCount,bStart,bCount) for a hunk. Start lines are
 // the first touched line on each side; a side with no lines is reported as
-// start=0 (git's "from/to empty" convention), which avoids emitting an
-// invalid "+0,N" header for hunks that begin with a deletion (W2-48).
+// start=0 (git's "from/to empty" convention).
 func hunkRange(h []Op) (aStart, aCount, bStart, bCount int) {
 	for _, op := range h {
 		if op.A > 0 {

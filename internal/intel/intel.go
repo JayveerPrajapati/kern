@@ -1,7 +1,6 @@
-// Package intel turns kern's AST index into a review-grade code intelligence
-// engine: change impact (blast radius + risk), test-coverage gaps, hub/bridge
-// hotspots, execution flows and community clustering. It is 100% dependency
-// free — pure Go over the persisted index, no Tree-sitter, no database.
+// Package intel turns kern's AST index into a code-intelligence engine: change
+// impact (blast radius + risk), test-coverage gaps, hub/bridge hotspots,
+// execution flows and community clustering — pure Go over the persisted index.
 package intel
 
 import (
@@ -56,10 +55,9 @@ func FilesForRange(root, from, to string) ([]string, error) {
 }
 
 // parsePorcelain parses NUL-separated `git status --porcelain -z` output. Each
-// status record is `XY <path>`; a rename/copy status is followed by a record
-// holding the original path, which is skipped so the new path is reported.
-// NUL separation means paths are never C-escaped or quoted, so names with
-// spaces, quotes and non-ASCII round-trip verbatim.
+// record is `XY <path>`; a rename/copy status is followed by a record holding
+// the original path, which is skipped. NUL separation means paths are never
+// escaped, so names with spaces and non-ASCII round-trip verbatim.
 func parsePorcelain(out string) []string {
 	var files []string
 	records := strings.Split(out, "\x00")
@@ -118,8 +116,7 @@ func isTestFile(rel string) bool {
 
 // isEntryPoint reports whether a symbol name is conventionally an entry point.
 // Only the final segment matters ("Server.Run" is an entry point because it
-// is named Run; delete.go and dead.go therefore agree on the same symbol,
-// W2-22).
+// is named Run).
 func isEntryPoint(name string) bool {
 	if i := strings.LastIndexByte(name, '.'); i >= 0 {
 		name = name[i+1:]
@@ -132,8 +129,7 @@ func isEntryPoint(name string) bool {
 }
 
 // simpleName returns the part of a name after the last '.' ("" for a plain
-// name). It is used for display and deduplication only — attribution never
-// matches on simple names (W2-15..W2-18).
+// name). It is used for display and deduplication only.
 func simpleName(name string) string {
 	if i := strings.LastIndexByte(name, '.'); i >= 0 {
 		return name[i+1:]

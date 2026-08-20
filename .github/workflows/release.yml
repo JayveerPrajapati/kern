@@ -25,6 +25,37 @@ jobs:
           go vet ./...
           go test ./...
 
+  review:
+    name: kern code review
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The action diffs the release tag against origin/main, so full
+          # history is required.
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Build kern from checkout
+        run: go build -buildvcs=false -o "$RUNNER_TEMP/kern" ./cmd/kern
+
+      # Run the same reusable code-review action on the release tag that runs
+      # on PRs, so a release is reviewed against main before it ships. `comment`
+      # is disabled because a tag push has no pull request to comment on; the
+      # review + risk + boundary-guard analysis still runs and the verdict is
+      # surfaced in the workflow run.
+      - uses: ./.github/actions/kern-review
+        with:
+          base-ref: origin/main
+          kern-bin: ${{ runner.temp }}/kern
+          comment: "false"
+          fail-on-risk: "false"
+
   build:
     name: build ${{ matrix.target }}
     needs: test

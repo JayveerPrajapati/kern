@@ -28,10 +28,8 @@ type Gap struct {
 }
 
 // coveredSet returns the set of symbols reachable from any test function via
-// call edges — i.e. everything the tests exercise, transitively. Only exact
-// names are marked: the old simple-name recursion let a test calling
-// fmt.Println mark an unrelated local Println as covered, hiding coverage
-// gaps (W2-17).
+// call edges — everything the tests exercise, transitively. Matching is on
+// exact symbol names only.
 func coveredSet(ix *index.Index) map[string]bool {
 	covered := map[string]bool{}
 	queue := []string{}

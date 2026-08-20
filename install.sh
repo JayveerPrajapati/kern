@@ -144,7 +144,32 @@ main() {
     *) echo "note: add $PREFIX to your PATH:  export PATH=\"$PREFIX:\$PATH\"" ;;
   esac
   echo
-  echo "next step: run 'kern setup' in your project to wire kern into your agents."
+
+  # Auto-wire: detect installed agents and wire kern into them automatically.
+  # This runs `kern setup --detect` which finds present agents (opencode,
+  # claude, cursor, vscode, ...) and wires kern's MCP server + kern-first
+  # rules into each. It is idempotent — re-running setup never duplicates
+  # entries. If no agents are detected, the user is told how to wire manually.
+  KERN_BIN="$PREFIX/kern"
+  if [ -x "$KERN_BIN" ]; then
+    # Detect the user's most likely project root: git toplevel of CWD, or CWD.
+    PROJ_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+    echo "auto-wiring kern into detected agents in: $PROJ_ROOT"
+    if "$KERN_BIN" setup --detect --root "$PROJ_ROOT" 2>&1; then
+      echo "kern: auto-wiring complete. Run 'kern setup --check' to verify."
+    else
+      echo "kern: auto-wiring skipped (no agents detected or setup failed)."
+      echo "  run 'kern setup --detect' manually in your project root."
+    fi
+    echo
+    # Auto-index the project so graph commands (walk, path, hubs, ...) work
+    # immediately without a 3-minute cold start on first use.
+    echo "indexing project (first run may take a minute)..."
+    "$KERN_BIN" index "$PROJ_ROOT" 2>&1 || true
+    echo
+  fi
+
+  echo "kern is ready. Use 'kern buddy' for a project onboarding digest."
   echo "  (run from your project root; 'kern setup --check' shows current wiring)"
 }
 

@@ -64,6 +64,9 @@ runs:
             ;;
           download)
             curl -fsSL "https://raw.githubusercontent.com/JayveerPrajapati/kern/main/install.sh" | sh
+            # install.sh writes to ~/.local/bin without adding it to PATH;
+            # add it to $GITHUB_PATH so subsequent steps find `kern`.
+            echo "$HOME/.local/bin" >> "$GITHUB_PATH"
             ;;
           *)
             echo "::error::Unknown install-method: $KERN_INSTALL_METHOD"

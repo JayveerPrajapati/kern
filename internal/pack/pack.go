@@ -1,9 +1,6 @@
 // Package pack builds a single paste-ready bundle of a whole repository:
 // project instructions, a directory tree with per-file token counts, and the
-// file contents themselves, sized to fit a token budget. Adopted from
-// repomix's "pack the repo into one file" idea (github.com/yamadashy/repomix):
-// a project map tells you what exists, a pack hands the agent the source to
-// actually edit against.
+// file contents, sized to fit a token budget.
 package pack
 
 import (
@@ -40,6 +37,13 @@ type Bundle struct {
 	Dropped      int           `json:"dropped"`
 	Ignored      int           `json:"ignored"`
 	Security     []sec.Finding `json:"security,omitempty"`
+
+	// budgetTooSmall is set when MaxTokens was too small to include ANY source
+	// file (instructions consumed the budget). Render surfaces a warning so the
+	// caller knows the bundle is essentially empty rather than silently
+	// shipping an empty REPOSITORY FILES section.
+	budgetTooSmall   bool
+	budgetAfterInstr int
 }
 
 // Options controls a pack build.
@@ -59,6 +63,17 @@ var instructionNames = []string{
 }
 
 const defaultMaxFileBytes = 512 << 10
+
+// FilesTokens returns the total token count of the packed source files
+// (excluding instructions). Used by the budget-too-small warning to report
+// how many tokens instructions consumed.
+func (b *Bundle) FilesTokens() int {
+	sum := 0
+	for _, f := range b.Files {
+		sum += f.Tokens
+	}
+	return sum
+}
 
 // Build walks root and returns a paste-ready bundle. Files are packed in
 // deterministic path order; when MaxTokens > 0 the largest files that do not
@@ -110,6 +125,12 @@ func Build(root string, opts Options) (*Bundle, error) {
 			return nil
 		}
 		if info.IsDir() {
+			return nil
+		}
+		// Check the size cap BEFORE reading so a multi-GB file is never
+		// buffered into memory just to be discarded.
+		if info.Size() > int64(opts.MaxFileBytes) {
+			b.Ignored++
 			return nil
 		}
 		content, err := os.ReadFile(path)
@@ -176,6 +197,15 @@ func Build(root string, opts Options) (*Bundle, error) {
 		if dropped > 0 {
 			b.Truncated = true
 		}
+		// Warn when the budget was too small to include ANY source file: the
+		// bundle would ship only instructions (or nothing) with an empty
+		// REPOSITORY FILES section, which is almost never what the caller
+		// wanted. Surface it explicitly instead of returning a silent empty
+		// tree.
+		if len(b.Files) > 0 && len(kept) == 0 {
+			b.budgetTooSmall = true
+			b.budgetAfterInstr = budget
+		}
 		b.Dropped += dropped
 		b.Files = kept
 	}
@@ -187,7 +217,7 @@ func Build(root string, opts Options) (*Bundle, error) {
 		b.TotalTokens += f.Tokens
 	}
 	// Secrets can hide in instructions (READMEs, AGENTS.md) too — scan both
-	// buckets so hardcoded tokens in docs ship flagged, not silently (W2-46).
+	// buckets so hardcoded tokens in docs ship flagged, not silently.
 	var scan []File
 	scan = append(scan, b.Instructions...)
 	scan = append(scan, b.Files...)
@@ -217,15 +247,29 @@ func scanFindings(files []File) []sec.Finding {
 
 func isInstruction(rel string) bool {
 	base := filepath.Base(rel)
+	dir := filepath.ToSlash(filepath.Dir(rel))
+	// Only promote instruction files (AGENTS.md and friends) when they sit at
+	// the repo root or directly in docs/. A nested submodule/vendor AGENTS.md
+	// is not authoritative project rules and must not be promoted.
+	if dir != "." && dir != "docs" {
+		return false
+	}
 	for _, n := range instructionNames {
-		if rel == n || rel == "docs/"+n {
+		if base == n {
 			return true
 		}
 	}
-	return base == "AGENTS.md"
+	return false
 }
 
 func readFile(rel, path string, maxBytes int) (File, bool) {
+	// Check the size cap via Stat BEFORE reading so oversized files are
+	// skipped without buffering their full contents into memory.
+	if maxBytes > 0 {
+		if info, err := os.Stat(path); err != nil || info.Size() > int64(maxBytes) {
+			return File{}, false
+		}
+	}
 	content, err := os.ReadFile(path)
 	if err != nil || len(content) > maxBytes {
 		return File{}, false
@@ -254,6 +298,30 @@ func isBinary(content []byte) bool {
 	return false
 }
 
+// fence returns a code-fence delimiter (a run of backticks) that cannot be
+// closed by any triple-backtick run inside content. It is one backtick longer
+// than the longest backtick run in content, minimum 3, so a file containing
+// ``` cannot break out of the fence and be interpreted as instructions.
+func fence(content string) string {
+	max := 0
+	run := 0
+	for _, r := range content {
+		if r == '`' {
+			run++
+			if run > max {
+				max = run
+			}
+		} else {
+			run = 0
+		}
+	}
+	n := max + 1
+	if n < 3 {
+		n = 3
+	}
+	return strings.Repeat("`", n)
+}
+
 // Render returns the bundle as a paste-ready text document: header,
 // instructions, tree with token counts, per-file contents, and stats.
 func (b *Bundle) Render() string {
@@ -266,7 +334,8 @@ func (b *Bundle) Render() string {
 		out.WriteString("(no instruction files found)\n")
 	} else {
 		for _, f := range b.Instructions {
-			fmt.Fprintf(&out, "## %s (%d tokens)\n\n%s\n\n", f.Path, f.Tokens, f.Content)
+			delim := fence(f.Content)
+			fmt.Fprintf(&out, "## %s (%d tokens)\n\n%s\n%s\n%s\n\n", f.Path, f.Tokens, delim, f.Content, delim)
 		}
 	}
 
@@ -276,7 +345,8 @@ func (b *Bundle) Render() string {
 	fmt.Fprintf(&out, "\n================================================\nREPOSITORY FILES\n================================================\n\n")
 	for _, f := range b.Files {
 		fmt.Fprintf(&out, "## File: %s (%d tokens)\n\n", f.Path, f.Tokens)
-		fmt.Fprintf(&out, "```%s\n%s\n```\n\n", fenceLang(f.Path), f.Content)
+		delim := fence(f.Content)
+		fmt.Fprintf(&out, "%s%s\n%s\n%s\n\n", delim, fenceLang(f.Path), f.Content, delim)
 	}
 
 	if len(b.Security) > 0 {
@@ -292,6 +362,11 @@ func (b *Bundle) Render() string {
 	fmt.Fprintf(&out, "- Files packed: %d\n", len(b.Files))
 	fmt.Fprintf(&out, "- Instructions: %d\n", len(b.Instructions))
 	fmt.Fprintf(&out, "- Total tokens: %d\n", b.TotalTokens)
+	if b.budgetTooSmall {
+		fmt.Fprintf(&out, "- WARNING: --max-tokens budget too small to include ANY source file\n")
+		fmt.Fprintf(&out, "  (instructions consumed %d tokens; only %d remained after the reserved overhead).\n", b.TotalTokens-b.FilesTokens(), b.budgetAfterInstr)
+		fmt.Fprintf(&out, "  Re-run with a larger --max-tokens (e.g. >=4000) or use `kern pack` without a budget.\n")
+	}
 	if b.Truncated {
 		fmt.Fprintf(&out, "- Dropped to fit budget: %d\n", b.Dropped)
 	}

@@ -55,8 +55,8 @@ func Store(key string, v any) error {
 	return atomicWrite(path, data)
 }
 
-// atomicWrite writes data to path via a temp file + rename so a crash mid-write
-// cannot truncate an existing entry to corrupt JSON (W2-52).
+// atomicWrite writes data via a temp file + rename so a crash mid-write cannot
+// truncate an existing entry into corrupt JSON.
 func atomicWrite(path string, data []byte) error {
 	tmp, err := os.CreateTemp(filepath.Dir(path), ".tmp-*")
 	if err != nil {

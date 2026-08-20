@@ -297,6 +297,24 @@ func TestAnalyzeArchitectureGatedLargeRepo(t *testing.T) {
 	if len(a.Communities) != 0 || len(a.Coupling) != 0 {
 		t.Fatalf("expected empty architecture above the gate, got %d communities %d coupling", len(a.Communities), len(a.Coupling))
 	}
+	if !a.Gated {
+		t.Errorf("expected Gated=true above the gate")
+	}
+	if a.SymbolCount != len(ix.Symbols) {
+		t.Errorf("SymbolCount: got %d, want %d", a.SymbolCount, len(ix.Symbols))
+	}
+	if a.EdgeCount != 1 {
+		t.Errorf("EdgeCount: got %d, want 1", a.EdgeCount)
+	}
+	// The render must surface a skip note, NOT the misleading
+	// "no project-local call structure detected" message.
+	out := RenderArch(a)
+	if !strings.Contains(out, "skipped") {
+		t.Errorf("expected skip note in render, got %q", out)
+	}
+	if strings.Contains(out, "no project-local call structure") {
+		t.Errorf("gated render must not claim 'no call structure', got %q", out)
+	}
 }
 
 func TestIsTestFile(t *testing.T) {

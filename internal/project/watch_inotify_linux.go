@@ -52,8 +52,8 @@ func (w *inotifyWatcher) Event() <-chan struct{} { return w.ch }
 
 func (w *inotifyWatcher) Close() {
 	w.closeOnce.Do(func() {
-		close(w.closed) // tell the loop to exit
-		<-w.done        // wait until the loop has actually stopped touching the maps
+		close(w.closed)
+		<-w.done // wait until the loop has actually stopped touching the maps
 		syscall.Close(w.fd)
 		w.dirs = map[int]string{}
 		w.files = map[int]string{}

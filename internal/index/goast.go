@@ -20,7 +20,7 @@ type Symbol struct {
 	Line     int      `json:"line"`
 	End      int      `json:"end,omitempty"` // inclusive last line (0 if unknown)
 	Params   []string `json:"params,omitempty"`
-	Returns  []string `json:"returns,omitempty"` // declared return type names (v2 method-rename receiver proof)
+	Returns  []string `json:"returns,omitempty"` // declared return type names
 	Lang     string   `json:"lang,omitempty"`
 	// Framework-aware entry-point metadata: a symbol with Entry set is a
 	// framework entry point (HTTP handler, route, controller endpoint, task).
@@ -219,7 +219,6 @@ func receiverName(t ast.Expr) string {
 
 // returnTypeNames returns the declared result types of a function/method
 // signature (e.g. ["*Store", "error"]), or nil when the function has none.
-// Used by method-rename receiver proof to resolve "x := pkg.New()" chains.
 func returnTypeNames(fl *ast.FieldList) []string {
 	if fl == nil {
 		return nil

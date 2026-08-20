@@ -59,8 +59,8 @@ type Options struct {
 	// recomputing or re-calling the LLM.
 	Cache bool
 	// FewShot injects the top recalled lessons from project memory as
-	// "baseline examples" into the prompt before compression, so past
-	// analysis of similar problems steers the current one (#6).
+	// "baseline examples" into the prompt before compression, so past analysis
+	// of similar problems steers the current one.
 	FewShot bool
 	// Root selects the project memory store for FewShot. Defaults to the
 	// current working directory.
@@ -146,7 +146,7 @@ func Prompt(prompt string, attachedLog string, opts Options) (Result, error) {
 			cached.FromCache = true
 			return cached, nil
 		}
-		// Semantic cache (#9): a *similar* prior query returns instantly. Only
+		// Semantic cache: a *similar* prior query returns instantly. Only
 		// deterministic results are stored/served (never LLM runs), and the
 		// LLM path is skipped entirely so a fuzzy hit can never ship a wrong
 		// model's answer.
@@ -181,12 +181,19 @@ func promptUncached(prompt string, attachedLog string, opts Options) (Result, er
 		raw = prompt + "\n\n--- attached log ---\n" + attachedLog
 		prompt = prompt + "\n\n--- attached log (compressed) ---\n" + logPart
 	}
-	// Mask secrets by default when the prompt will be sent to a non-local
-	// LLM host (e.g. OLLAMA_HOST points at a remote server): otherwise the
-	// compression step would ship PII off-box. Explicit mask=false still wins.
+	// Mask secrets by default when the prompt will be sent to a non-local LLM:
+	// a remote OLLAMA_HOST, or any non-Ollama provider selected via
+	// KERN_LLM_PROVIDER. Otherwise the compression step would ship PII off-box.
+	// Explicit mask=false still wins.
 	mask := opts.Mask
-	if !mask && opts.LLM != "" && !isLocalHost(llm.New(opts.LLM).Base) {
-		mask = true
+	if !mask && opts.LLM != "" {
+		if p, perr := llm.NewProvider(); perr == nil {
+			if _, isOllama := p.(*llm.OllamaProvider); isOllama {
+				mask = !isLocalHost(llm.New(opts.LLM).Base)
+			} else {
+				mask = true // openai/anthropic/google are always remote
+			}
+		}
 	}
 	var masked pii.Result
 	if mask {
@@ -210,8 +217,12 @@ func promptUncached(prompt string, attachedLog string, opts Options) (Result, er
 	}
 	out := compress.CompressPrompt(prompt)
 	if opts.LLM != "" {
-		if llmOut, err := llm.New(opts.LLM).Compress(prompt); err == nil && llmOut != "" {
-			out = llmOut
+		// Provider-neutral compression: the factory selects the vendor via
+		// KERN_LLM_PROVIDER (default Ollama), and opts.LLM overrides the model.
+		if p, perr := llm.NewProvider(); perr == nil {
+			if llmOut, err := llm.CompressVia(context.Background(), p, prompt, llm.Options{Model: opts.LLM}); err == nil && llmOut != "" {
+				out = llmOut
+			}
 		}
 	}
 	if mask {

@@ -192,6 +192,47 @@ const k = "ghp_abcdefghijklmnopqrstuvwxyz1234567890"
 	}
 }
 
+func TestScanTreeSkipsMinifiedJS(t *testing.T) {
+	dir := t.TempDir()
+	// A vendored minified bundle: single line > 2000 chars containing a
+	// fake password-like string. Must produce no findings.
+	longLine := strings.Repeat("a", 5000) + ` var pwd = "hunter2secret123";`
+	write := func(rel, content string) {
+		p := dir + "/" + rel
+		parts := strings.Split(rel, "/")
+		if len(parts) > 1 {
+			_ = os.MkdirAll(dir+"/"+strings.Join(parts[:len(parts)-1], "/"), 0o755)
+		}
+		_ = os.WriteFile(p, []byte(content), 0o644)
+	}
+	write("static/redoc.standalone.js", longLine)
+	// A real source file must still be scanned.
+	write("app.go", `package main
+func main() {
+	_ = "sk-abcdefghijklmnopqrstuvwxyz1234567890"
+}
+`)
+	findings, err := Scan(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range findings {
+		if strings.HasSuffix(f.File, ".js") {
+			t.Fatalf("minified JS must be skipped, got %+v", f)
+		}
+	}
+	// Ensure the non-JS source file was still scanned.
+	found := false
+	for _, f := range findings {
+		if strings.HasSuffix(f.File, "app.go") && f.Rule == "hardcoded-secret" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected finding in app.go, got %+v", findings)
+	}
+}
+
 func TestScanTreeSkipsTestFixturesEverywhere(t *testing.T) {
 	dir := t.TempDir()
 	write := func(rel, content string) {
@@ -223,6 +264,41 @@ func TestScanTreeSkipsTestFixturesEverywhere(t *testing.T) {
 	}
 }
 
+// K3 regression: Java test files (*Test.java, *Tests.java, *Spec.java) and
+// files under src/test/ directories must be skipped. The old isTestFile only
+// matched _test. and .test. patterns, missing the JUnit/Maven convention.
+func TestScanTreeSkipsJavaTestFiles(t *testing.T) {
+	dir := t.TempDir()
+	write := func(rel, content string) {
+		p := dir + "/" + rel
+		parts := strings.Split(rel, "/")
+		if len(parts) > 1 {
+			_ = os.MkdirAll(dir+"/"+strings.Join(parts[:len(parts)-1], "/"), 0o755)
+		}
+		_ = os.WriteFile(p, []byte(content), 0o644)
+	}
+	secret := `String k = "sk-abcdefghijklmnopqrstuvwxyz1234567890";`
+	// Production file — should be scanned.
+	write("src/main/java/com/example/Config.java", secret)
+	// Java test files — must be skipped.
+	write("src/test/java/com/example/CacheKeyGeneratorTest.java", secret)
+	write("src/test/java/com/example/ValidationHelperTests.java", secret)
+	write("src/test/java/com/example/FlowSpec.java", secret)
+	write("src/test/java/com/example/IntegrationIT.java", secret)
+	findings, err := Scan(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range findings {
+		if strings.Contains(f.File, "Test") || strings.Contains(f.File, "/test/") {
+			t.Fatalf("Java test file must be skipped, got %+v", f)
+		}
+	}
+	if len(findings) != 1 {
+		t.Fatalf("expected exactly 1 finding (from Config.java), got %d: %+v", len(findings), findings)
+	}
+}
+
 func TestRenderCapsAndCounts(t *testing.T) {
 	src := []byte("const k = \"sk-abcdefghijklmnopqrstuvwxyz1234567890\"\n")
 	findings := ScanFile("a.go", src)
@@ -237,5 +313,104 @@ func TestRenderCapsAndCounts(t *testing.T) {
 	full := Render(findings, 0)
 	if !strings.Contains(full, "a.go:1") {
 		t.Fatalf("zero max should not cap: %q", full)
+	}
+}
+
+// TestInsecureRandomSuppressedForVisualLogic verifies that Math.random /
+// rand.Intn used for visual/animation/game effects (fireworks, particles,
+// dice) is NOT flagged when no security keyword is nearby. The rule's
+// summary is "for security-relevant data" — visual randomness is not.
+func TestInsecureRandomSuppressedForVisualLogic(t *testing.T) {
+	src := []byte(`<script>
+function Firework(x, y) {
+    this.spawningTime = opts.fireworkSpawnTime * Math.random() |0;
+    this.reachTime = opts.fireworkBaseReachTime + opts.fireworkAddedReachTime * Math.random() |0;
+    this.lineWidth = opts.fireworkBaseLineWidth + opts.fireworkAddedLineWidth * Math.random();
+    this.circleFinalSize = opts.fireworkCircleBaseSize + opts.fireworkCircleAddedSize * Math.random();
+}
+</script>`)
+	findings := ScanFile("animation.js", src)
+	for _, f := range findings {
+		if f.Rule == "insecure-random" {
+			t.Fatalf("visual Math.random must not be flagged: %+v", f)
+		}
+	}
+}
+
+// TestInsecureRandomFlaggedForSecurityContext verifies that the same
+// insecure-random call IS flagged when a security keyword (token, password,
+// nonce, session, etc.) is within the context window.
+func TestInsecureRandomFlaggedForSecurityContext(t *testing.T) {
+	src := []byte(`function generateSessionToken() {
+    return Math.random();
+}
+`)
+	findings := ScanFile("auth.js", src)
+	found := false
+	for _, f := range findings {
+		if f.Rule == "insecure-random" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("expected insecure-random for security-relevant Math.random")
+	}
+}
+
+// TestEmailSuppressedInPlaceholder verifies that emails in HTML placeholder
+// attributes are not flagged as hardcoded secrets — they are UX hints, not
+// credentials.
+func TestEmailSuppressedInPlaceholder(t *testing.T) {
+	src := []byte(`<input type="email" placeholder="xyz@gmail.com" id="email" />`)
+	findings := ScanFile("form.html", src)
+	for _, f := range findings {
+		if f.Rule == "hardcoded-secret" {
+			t.Fatalf("placeholder email must not be flagged: %+v", f)
+		}
+	}
+}
+
+// TestEmailSuppressedInCSSComment verifies that emails inside CSS comments
+// (/* ... */) are not flagged — they are documentation, not secrets.
+func TestEmailSuppressedInCSSComment(t *testing.T) {
+	src := []byte(`.candle {
+    /* contact me at nathkaran327@gmail.com for help */
+    color: orange;
+}`)
+	findings := ScanFile("style.css", src)
+	for _, f := range findings {
+		if f.Rule == "hardcoded-secret" {
+			t.Fatalf("CSS comment email must not be flagged: %+v", f)
+		}
+	}
+}
+
+// TestEmailSuppressedInHTMLComment verifies that emails inside HTML comments
+// (<!-- ... -->) are not flagged.
+func TestEmailSuppressedInHTMLComment(t *testing.T) {
+	src := []byte(`<!-- admin contact: admin@example.com -->
+<div>content</div>`)
+	findings := ScanFile("page.html", src)
+	for _, f := range findings {
+		if f.Rule == "hardcoded-secret" {
+			t.Fatalf("HTML comment email must not be flagged: %+v", f)
+		}
+	}
+}
+
+// TestEmailFlaggedInRealCode verifies that a genuinely hardcoded email in
+// source code (not a placeholder/comment) is still flagged.
+func TestEmailFlaggedInRealCode(t *testing.T) {
+	src := []byte(`const adminEmail = "admin@company.com";
+sendAlert(adminEmail);`)
+	findings := ScanFile("alert.go", src)
+	found := false
+	for _, f := range findings {
+		if f.Rule == "hardcoded-secret" && strings.Contains(f.Snippet, "@") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("expected hardcoded email to be flagged in real code")
 	}
 }

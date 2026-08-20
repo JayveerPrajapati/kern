@@ -16,9 +16,7 @@ type ChurnEntry struct {
 }
 
 // ChurnReport is the change-frequency view: which files churn most, whether
-// they are still being edited right now, and how risky each one is in the
-// call graph. Frequently-changed files inside a risky blast radius are the
-// ones most likely to break next.
+// they are still being edited, and how risky each is in the call graph.
 type ChurnReport struct {
 	From    string       `json:"from,omitempty"`
 	To      string       `json:"to,omitempty"`
@@ -28,7 +26,8 @@ type ChurnReport struct {
 }
 
 // Churn counts how many commits touched each file in the range. from/to follow
-// git log semantics: an empty range means the last 30 commits.
+// git log semantics: an empty range means the last 200 commits (raised from 30,
+// which was too short to surface real churn signal).
 func Churn(root, from, to string) (*ChurnReport, error) {
 	args := []string{"-C", root, "log", "--name-only", "--pretty=format:"}
 	if from != "" || to != "" {
@@ -37,7 +36,7 @@ func Churn(root, from, to string) (*ChurnReport, error) {
 		}
 		args = append(args, from+".."+to)
 	} else {
-		args = append(args, "-n", "30")
+		args = append(args, "-n", "200")
 	}
 	out, err := exec.Command("git", args...).Output()
 	if err != nil {
@@ -89,10 +88,8 @@ func filesOf(entries []ChurnEntry) []string {
 }
 
 // parseLog counts per-commit file occurrences in `git log --name-only`
-// output, where each commit's file list is a contiguous block separated by
-// blank lines. It also returns the number of commits in the output (one per
-// non-empty block), so the report's commit count is accurate rather than a
-// count of distinct files.
+// output, where each commit's file list is a blank-line-separated block. It
+// also returns the number of commits in the output.
 func parseLog(out string) (map[string]int, int) {
 	counts := map[string]int{}
 	section := map[string]bool{}

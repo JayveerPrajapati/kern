@@ -7,12 +7,10 @@ import (
 )
 
 // BM25 ranking over the chunk corpus, fused with the cosine embedding score
-// via Reciprocal Rank Fusion (RRF). Adopted from the grepai hybrid-search and
-// jpoindexter/kern suggest-engine patterns: BM25 handles exact keyword
-// matching (rare terms, quoted identifiers) where feature-hashed n-grams blur
-// word boundaries, while cosine stays better at fuzzy and morphological
-// matches. Fusing both with RRF keeps the strengths of each without
-// calibrating their scores against each other.
+// via Reciprocal Rank Fusion (RRF). BM25 handles exact keyword matching (rare
+// terms, quoted identifiers) where feature-hashed n-grams blur word boundaries;
+// cosine stays better at fuzzy and morphological matches. Fusing both keeps the
+// strengths of each without calibrating their scores against each other.
 
 const (
 	bm25K1 = 1.2
@@ -99,7 +97,9 @@ func (st *corpusStats) rankBM25(query []string, docs []Doc) []Score {
 
 // fuseRRF merges two ranked lists by reciprocal rank (k=60). Each chunk keeps
 // the fused score; chunks absent from a list simply get no contribution from
-// it.
+// it. Scores are normalized to [0, 1] by dividing by the theoretical maximum
+// (number of lists / (rrfK + 1)), so a score of 1.0 means the chunk ranked
+// first in every list.
 func fuseRRF(lists ...[]Score) []Score {
 	scores := map[string]float64{}
 	byID := map[string]Doc{}
@@ -109,9 +109,15 @@ func fuseRRF(lists ...[]Score) []Score {
 			scores[s.Doc.ID] += 1 / (rrfK + float64(rank) + 1)
 		}
 	}
+	// Normalize: the max possible score is len(lists) * 1/(rrfK+1).
+	maxScore := float64(len(lists)) / (rrfK + 1)
 	out := make([]Score, 0, len(scores))
 	for id, sc := range scores {
-		out = append(out, Score{Doc: byID[id], Sim: sc})
+		normalized := sc
+		if maxScore > 0 {
+			normalized = sc / maxScore
+		}
+		out = append(out, Score{Doc: byID[id], Sim: normalized})
 	}
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].Sim != out[j].Sim {

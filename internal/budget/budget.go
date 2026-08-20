@@ -6,6 +6,7 @@ package budget
 import (
 	"regexp"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/JayveerPrajapati/kern/internal/tokenize"
 )
@@ -53,7 +54,7 @@ func Fit(text string, maxTokens int) string {
 	}
 	out := join(core, important)
 	for tokenize.Count(out) > maxTokens {
-		if len(core) > 0 {
+		if len(core) > 1 {
 			core = core[:len(core)-1]
 		} else if len(important) > 0 {
 			important = important[:len(important)-1]
@@ -62,7 +63,32 @@ func Fit(text string, maxTokens int) string {
 		}
 		out = join(core, important)
 	}
-	return strings.TrimSpace(out)
+	// Never return empty if the input was non-empty: keep at least the first
+	// line so the caller always gets meaningful output.
+	result := strings.TrimSpace(out)
+	if result == "" && len(kept) > 0 {
+		result = strings.TrimSpace(kept[0])
+	}
+	// Hard guarantee: Fit never returns text exceeding maxTokens. When the
+	// trimming loop bottoms out on a single line that still overflows, the
+	// fallback above would otherwise return it verbatim. Truncate run-safe
+	// until it fits, using a rough token-ratio cut to converge quickly.
+	for tokenize.Count(result) > maxTokens {
+		n := len(result)
+		target := int(float64(n) * float64(maxTokens) / float64(tokenize.Count(result)))
+		if target >= n {
+			target = n - 1
+		}
+		if target < 0 {
+			target = 0
+		}
+		// Back up to a rune boundary so we always keep valid UTF-8.
+		for target > 0 && !utf8.RuneStart(result[target]) {
+			target--
+		}
+		result = result[:target]
+	}
+	return result
 }
 
 func join(core, important []string) string {
@@ -94,7 +120,7 @@ func isImportant(line string) bool {
 }
 
 // isStackFrame recognises typical Go/Python stack-frame and trace lines so
-// they are kept by Fit even when they do not contain a keyword (W2-50).
+// they are kept by Fit even without a keyword.
 func isStackFrame(line string) bool {
 	if line == "" {
 		return false

@@ -236,7 +236,7 @@ var catalog = []Framework{
 		"JavaScript test framework.",
 		nil,
 		[]string{`"jest"`},
-		[]string{"describe(", "it(", "expect("}),
+		[]string{"describe(", `it("`, "it('", "expect("}),
 	fw("vitest", "Vitest", "ts",
 		"Vite-native test framework.",
 		nil,

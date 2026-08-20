@@ -37,6 +37,45 @@ func TestInstallRequiresGitRepo(t *testing.T) {
 	}
 }
 
+func TestInstallDoesNotOverwriteUserHook(t *testing.T) {
+	root := gitInit(t)
+	hook := filepath.Join(root, ".git", "hooks", "post-commit")
+	user := "#!/bin/sh\necho 'user hook'\n"
+	if err := os.WriteFile(hook, []byte(user), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := Install(root); err == nil {
+		t.Fatal("expected error when a user hook already exists, got nil")
+	}
+	b, err := os.ReadFile(hook)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(b) != user {
+		t.Fatalf("user hook was modified: %s", b)
+	}
+}
+
+func TestInstallOverwritesKernHook(t *testing.T) {
+	root := gitInit(t)
+	// Install once (creates a kern-managed hook), then re-install should
+	// succeed because the existing hook carries the "# kern:" marker.
+	if err := Install(root); err != nil {
+		t.Fatal(err)
+	}
+	if err := Install(root); err != nil {
+		t.Fatalf("reinstall over kern hook should succeed: %v", err)
+	}
+	hook := filepath.Join(root, ".git", "hooks", "post-commit")
+	b, err := os.ReadFile(hook)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), "# kern:") {
+		t.Fatalf("hook should still be kern-managed: %s", b)
+	}
+}
+
 func gitInit(t *testing.T) string {
 	t.Helper()
 	root := t.TempDir()

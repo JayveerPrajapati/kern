@@ -1,21 +1,13 @@
-// Package rename implements structural symbol renaming on top of the AST index
-// (P0-5, borrowed from Serena's symbol-level edits with refactor guarantees).
-//
-// v1 scope: package-level Go symbols (types, structs, interfaces, funcs, vars,
-// consts). v2 adds method rename ("Type.Method") when every reference's
-// receiver can be proven to be that type from AST evidence in the same file —
-// explicit typed declarations (var t *Type), composite literals (t := &Type{},
-// Type{}.Method), new(Type), and indexed constructor returns (s := store.New()
-// when New's declared return type is *Store). References whose receiver type
-// cannot be proven are refused, never guessed. A reference provably on a
-// DIFFERENT type (e.g. l.Logger.Save while renaming Store.Save) is skipped,
-// not refused — so two types sharing a method name (Save, Close, String) does
-// not block the rename. Non-Go symbols are refused. Edits are computed from a real go/ast parse
-// (never a textual regex), so strings, comments, struct-field names,
-// composite-literal keys, import aliases and the package clause are never
-// touched. Applying is transactional: every touched file is backed up under
-// <root>/.kern/rename-backup/ before any write, and a mid-flight failure
-// restores all files.
+// Package rename implements structural symbol renaming on top of the AST index.
+// It supports package-level Go symbols and method rename ("Type.Method") when
+// every reference's receiver type can be proven from AST evidence in the same
+// file; unprovable references are refused, never guessed, and references
+// provably on a different type are skipped so shared method names do not block
+// the rename. Edits come from a real go/ast parse (never a textual regex), so
+// strings, comments, struct-field names, composite-literal keys, import aliases
+// and the package clause are never touched. Applying is transactional: every
+// touched file is backed up before any write, and a mid-flight failure restores
+// all files.
 package rename
 
 import (
@@ -65,8 +57,8 @@ type Report struct {
 	NotEdited bool     `json:"not_edited"` // symbol found but had no editable references
 }
 
-// ErrNotSupported is returned when the rename is outside v1 scope (methods,
-// non-Go symbols) so callers can distinguish "not found" from "refused".
+// ErrNotSupported is returned when the rename is unsupported (method-receiver
+// issues, non-Go symbols) so callers can distinguish "not found" from "refused".
 type ErrNotSupported struct{ Reason string }
 
 func (e *ErrNotSupported) Error() string { return "rename not supported: " + e.Reason }
@@ -280,7 +272,7 @@ func classify(parents map[ast.Node]ast.Node, file *ast.File, id *ast.Ident, qual
 		if par.Sel == id {
 			// Package-qualified reference to an exported symbol of its own
 			// package, e.g. pkg.Symbol. Anything else (method call, field
-			// access) is out of v1 scope.
+			// access) is not renamed.
 			if x, isID := par.X.(*ast.Ident); isID && qualifiers[x.Name] && qualToSymPkg[x.Name] && exported {
 				return "reference", true
 			}

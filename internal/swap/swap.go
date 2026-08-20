@@ -1,5 +1,5 @@
 // Package swap swaps code blocks in a context document between full source
-// and per-file signatures depending on a token budget (#18). When a document
+// and per-file signatures depending on a token budget. When a document
 // is too large, each fenced block tagged `lang:path` is replaced by its
 // symbolic summary; when budget is available, summary markers are expanded
 // back to full file contents. Deterministic, dependency-free.
@@ -82,11 +82,36 @@ func Fit(text, root string, maxTokens int) (string, bool) {
 }
 
 func fileAt(root, path string) string {
-	p := path
-	if root != "" && !filepath.IsAbs(path) {
-		p = filepath.Join(root, path)
+	absRoot := ""
+	if root != "" {
+		r, err := filepath.Abs(root)
+		if err != nil {
+			return ""
+		}
+		absRoot = r
 	}
-	b, err := os.ReadFile(p)
+	var full string
+	if filepath.IsAbs(path) {
+		full = path
+	} else if absRoot != "" {
+		full = filepath.Join(absRoot, path)
+	} else {
+		full = path
+	}
+	full = filepath.Clean(full)
+	// Refuse any path that escapes root (e.g. via ../).
+	if absRoot != "" {
+		rel, err := filepath.Rel(absRoot, full)
+		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return ""
+		}
+	}
+	// Cap file size to avoid unbounded reads (10MB).
+	info, err := os.Stat(full)
+	if err != nil || info.Size() > 10<<20 {
+		return ""
+	}
+	b, err := os.ReadFile(full)
 	if err != nil {
 		return ""
 	}

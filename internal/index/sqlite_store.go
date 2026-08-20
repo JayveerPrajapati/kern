@@ -12,7 +12,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/JayveerPrajapati/kern/internal/cache"
 	_ "modernc.org/sqlite"
 )
 
@@ -34,12 +33,14 @@ type SQLiteStore struct {
 }
 
 // sqliteDBPath returns the on-disk location for the SQLite store of root.
+// The index lives per-project under <root>/.kern/ so it is portable,
+// self-contained, and never pollutes a global cache.
 func sqliteDBPath(root string) string {
 	abs, err := filepath.Abs(root)
 	if err != nil {
 		abs = root
 	}
-	return cache.Path("db", cache.Hash([]byte(abs))+".sqlite")
+	return filepath.Join(abs, ".kern", "index.sqlite")
 }
 
 // SQLitePath returns the on-disk location for the SQLite store of root.
@@ -143,7 +144,7 @@ CREATE TABLE IF NOT EXISTS files (
 	generated INTEGER NOT NULL DEFAULT 0
 );
 CREATE VIRTUAL TABLE IF NOT EXISTS symbols_fts USING fts5(
-	kind, name, receiver, file, params, content='', content_rowid='rowid', tokenize='unicode61'
+	kind, name, receiver, file, params, tokenize='unicode61'
 );
 `)
 	if err != nil {
@@ -326,8 +327,9 @@ func (s *SQLiteStore) Save(ix *Index) error {
 		}
 	}
 
-	// FTS5: rebuild the symbol full-text table row by row (contentless tables
-	// do not support the 'rebuild' command).
+	// FTS5: rebuild the symbol full-text table row by row. The table is a
+	// regular (non-contentless) FTS5 table, so DELETE works and clears all
+	// rows before re-inserting.
 	if _, err := tx.Exec("DELETE FROM symbols_fts"); err != nil {
 		return err
 	}

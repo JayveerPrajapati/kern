@@ -47,6 +47,9 @@ func mcpLastOK(t *testing.T, name string, args map[string]any) string {
 func TestToolCallCoverage(t *testing.T) {
 	root := mcpProject(t)
 	rootArg := map[string]any{"root": root}
+	// kern_sandbox is a governed exec surface; opt in so the test exercises
+	// the actual execution path rather than the governance denial.
+	t.Setenv("KERN_ALLOW_EXEC", "1")
 
 	mcpLastOK(t, "kern_validate", map[string]any{"root": root, "timeout": "60"})
 	mcpLastOK(t, "kern_run_build", map[string]any{"command": "true", "dir": root})
@@ -102,6 +105,7 @@ and returns a handle. Call <code>widget.Release</code> to free resources.</p>`))
 // after it.
 func TestProgressNotificationsBeforeResult(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	t.Setenv("KERN_ALLOW_EXEC", "1") // kern_sandbox is a governed exec surface
 	root := mcpProject(t)
 	req := toolsCallJSON(t, 50, "kern_sandbox", map[string]any{"root": root, "command": "sh -c 'printf ok'"})
 	in := strings.NewReader(req + "\n")
@@ -145,6 +149,7 @@ func TestProgressNotificationsBeforeResult(t *testing.T) {
 // TestHTTPNoProgressNotifications verifies the HTTP transport returns exactly
 // the tool result without any push-style notifications.
 func TestHTTPNoProgressNotifications(t *testing.T) {
+	t.Setenv("KERN_ALLOW_EXEC", "1") // kern_sandbox is a governed exec surface
 	root := mcpProject(t)
 	params := map[string]any{
 		"jsonrpc": "2.0", "id": 60, "method": "tools/call",
@@ -228,7 +233,9 @@ func TestIdKeyCanonicalization(t *testing.T) {
 }
 
 // TestCancelAllClearsInflightAndReleasesLocks verifies graceful shutdown
-// cancels every in-flight tool and frees every lock held by the server.
+// cancels every in-flight tool and frees every lock held by the server, while
+// leaving the inflight map intact so shutdown can wait for running tools to
+// drain (each tool goroutine removes itself via unregisterInflight).
 func TestCancelAllClearsInflightAndReleasesLocks(t *testing.T) {
 	root := t.TempDir()
 	s := &Server{transport: "stdio", locks: map[string]*lock.Lock{}, inflight: map[string]context.CancelFunc{}}
@@ -243,8 +250,10 @@ func TestCancelAllClearsInflightAndReleasesLocks(t *testing.T) {
 	if err := ctx.Err(); err != context.Canceled {
 		t.Fatalf("expected inflight cancelled, got %v", err)
 	}
-	if len(s.inflight) != 0 {
-		t.Fatalf("expected empty inflight after CancelAll, got %v", s.inflight)
+	// The inflight entry must survive CancelAll (still counted by Inflight())
+	// so the shutdown drain can wait for the tool goroutine to unregister it.
+	if _, ok := s.inflight["9"]; !ok {
+		t.Fatalf("expected inflight entry to remain after CancelAll, got %v", s.inflight)
 	}
 	if len(s.locks) != 0 {
 		t.Fatalf("expected empty locks after CancelAll, got %v", s.locks)
@@ -259,7 +268,7 @@ func TestCancelAllClearsInflightAndReleasesLocks(t *testing.T) {
 func TestStaleIndexRebuiltOnSecondCall(t *testing.T) {
 	root := mcpProject(t)
 	s := NewServer(strings.NewReader(""), &bytes.Buffer{})
-	if _, err := s.loadIndex(root); err != nil {
+	if _, err := s.loadIndex(context.Background(), root); err != nil {
 		t.Fatalf("first index build: %v", err)
 	}
 	// Add a second file, making the cached index stale.
@@ -337,6 +346,7 @@ func TestRootConfinementEnvAndSymlink(t *testing.T) {
 
 func TestRootConfinementBlocksRunBuildDir(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	t.Setenv("KERN_ALLOW_EXEC", "1") // so sandbox succeeds once inside the workspace
 	root := mcpProject(t)
 	s := NewServer(strings.NewReader(""), io.Discard) // confined to cwd
 	ctx := context.Background()

@@ -91,6 +91,12 @@ func TestRunTimeout(t *testing.T) {
 	if res.Err == nil {
 		t.Fatal("expected timeout error")
 	}
+	// A signal-killed timeout must report exit -1, not the zero value 0
+	// which is indistinguishable from a clean success (the reporting bug
+	// that printed "exit 0" for a timed-out Maven build).
+	if res.ExitCode != -1 {
+		t.Fatalf("timeout exit code = %d, want -1", res.ExitCode)
+	}
 }
 
 func TestDetectGoProjectRuns(t *testing.T) {

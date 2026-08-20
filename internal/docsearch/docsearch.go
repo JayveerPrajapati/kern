@@ -14,6 +14,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/JayveerPrajapati/kern/internal/cache"
 )
@@ -47,6 +48,11 @@ type Embedder interface {
 type Index struct {
 	Root string `json:"root"`
 	Docs []Doc  `json:"docs"`
+
+	// mu serializes concurrent reads (Search) against in-place writes
+	// (MergeFetched, Save). Docs is mutated by reference elsewhere, so all
+	// access to ix.Docs must go through this mutex.
+	mu sync.RWMutex
 }
 
 // Score ranks a chunk against a query.
@@ -56,6 +62,15 @@ type Score struct {
 }
 
 var extRe = regexp.MustCompile(`\.(md|markdown|txt|rst|adoc|asciidoc|org)$`)
+
+// Resource bounds mirror internal/fw/detect.go: cap per-file size and the
+// total number of files indexed so a large corpus can't exhaust heap, and cap
+// the size of externally fetched pages before chunking.
+const (
+	maxFileSize    = 2 << 20 // 2 MiB: skip files larger than this
+	maxFileCount   = 5000    // cap total files indexed per root
+	maxFetchedSize = 4 << 20 // 4 MiB: skip fetched pages larger than this
+)
 
 // CacheKey returns the persisted-index cache key for root.
 func CacheKey(root string) string {
@@ -77,6 +92,7 @@ func Load(root string) *Index {
 func IndexDir(root string) (*Index, error) {
 	ix := &Index{Root: root}
 	seen := map[string]int{}
+	fileCount := 0
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return nil
@@ -84,7 +100,7 @@ func IndexDir(root string) (*Index, error) {
 		if d.IsDir() {
 			// Never skip the root itself: "." would match the hidden-dir
 			// rule and silently skip the whole tree.
-			if path != root && (strings.HasPrefix(d.Name(), ".") || d.Name() == "node_modules" || d.Name() == "vendor") {
+			if path != root && (strings.HasPrefix(d.Name(), ".") || d.Name() == "node_modules" || d.Name() == "vendor" || d.Name() == "target" || d.Name() == "build" || d.Name() == "dist" || d.Name() == "out") {
 				return filepath.SkipDir
 			}
 			return nil
@@ -92,6 +108,18 @@ func IndexDir(root string) (*Index, error) {
 		if !extRe.MatchString(strings.ToLower(d.Name())) {
 			return nil
 		}
+		// Cap the total number of files indexed so a huge corpus can't
+		// exhaust memory.
+		if fileCount >= maxFileCount {
+			return nil
+		}
+		// Stat before reading so oversized files are skipped without ever
+		// being slurped into heap.
+		info, ierr := d.Info()
+		if ierr != nil || info.Size() > maxFileSize {
+			return nil
+		}
+		fileCount++
 		b, err := os.ReadFile(path)
 		if err != nil {
 			return nil
@@ -138,6 +166,8 @@ func IndexDirSemantic(root string, e Embedder) (*Index, error) {
 
 // Save persists the index to the local cache.
 func (ix *Index) Save() error {
+	ix.mu.Lock()
+	defer ix.mu.Unlock()
 	return cache.Store(CacheKey(ix.Root), ix)
 }
 
@@ -149,9 +179,13 @@ const fetchPrefix = "fetch/"
 // index under "fetch/<name>.md", replacing any prior version of that document
 // and persisting the index. The text is chunked and embedded with the same
 // deterministic n-gram vectors as on-disk docs, so it is searchable with
-// Search and survives a `kern docs clear` of nothing. Returns the number of
-// chunks added.
+// Search. Returns the number of chunks added.
 func MergeFetched(root, name, text string) (int, error) {
+	// Cap the fetched page size before chunking so a huge page can't exhaust
+	// heap.
+	if len(text) > maxFetchedSize {
+		return 0, nil
+	}
 	ix := Load(root)
 	if ix == nil {
 		var err error
@@ -160,6 +194,8 @@ func MergeFetched(root, name, text string) (int, error) {
 			return 0, err
 		}
 	}
+	// Serialize the in-place Doc mutation against concurrent Search reads.
+	ix.mu.Lock()
 	file := fetchPrefix + name + ".md"
 	kept := ix.Docs[:0]
 	for _, d := range ix.Docs {
@@ -178,6 +214,7 @@ func MergeFetched(root, name, text string) (int, error) {
 		})
 		added++
 	}
+	ix.mu.Unlock()
 	if err := ix.Save(); err != nil {
 		return added, err
 	}
@@ -220,6 +257,8 @@ func ReembedFetch(root, name string, e Embedder) (int, error) {
 // (exact keyword matching). A chunk matching no signal is omitted. Sim holds
 // the fused RRF score.
 func (ix *Index) Search(query string, k int) []Score {
+	ix.mu.RLock()
+	defer ix.mu.RUnlock()
 	q := Embed(query)
 	st := buildCorpusStats(ix.Docs)
 	queryTerms := tokenizeWords(strings.ToLower(query))
@@ -232,8 +271,8 @@ func (ix *Index) Search(query string, k int) []Score {
 		}
 	}
 	var dense []Score
-	if hasSemantic && SemanticEmbedder != nil {
-		if sq, err := SemanticEmbedder.EmbedText(query); err == nil {
+	if emb := GetSemanticEmbedder(); hasSemantic && emb != nil {
+		if sq, err := emb.EmbedText(query); err == nil {
 			for _, d := range ix.Docs {
 				if len(d.Semantic) > 0 {
 					dense = append(dense, Score{Doc: d, Sim: denseCosine(sq, d.Semantic)})
@@ -279,12 +318,33 @@ func (ix *Index) Search(query string, k int) []Score {
 // SemanticEmbedder, when non-nil, embeds search queries for indexes that carry
 // dense Doc.Semantic vectors. It must be the same embedder used to build the
 // index (the CLI/MCP layer sets it when it indexed the docs).
-var SemanticEmbedder Embedder
+//
+// It is written and read from concurrent handler goroutines, so all access is
+// serialized through semanticEmbedderMu and the Get/Set accessors below. Do not
+// read or write the field directly.
+var (
+	semanticEmbedderMu sync.Mutex
+	SemanticEmbedder   Embedder
+)
 
-// denseCosine is the cosine similarity between two dense vectors. It is a
-// true cosine (dot / (|a|*|b|)) so it ranks correctly for Ollama embeddings,
-// which are not guaranteed to be length-normalized; the previous dot-product
-// variant under-ranked short vectors (W2-51).
+// GetSemanticEmbedder returns the current SemanticEmbedder (nil when unset),
+// guarding the read against concurrent writes.
+func GetSemanticEmbedder() Embedder {
+	semanticEmbedderMu.Lock()
+	defer semanticEmbedderMu.Unlock()
+	return SemanticEmbedder
+}
+
+// SetSemanticEmbedder atomically replaces the package-level SemanticEmbedder.
+func SetSemanticEmbedder(e Embedder) {
+	semanticEmbedderMu.Lock()
+	defer semanticEmbedderMu.Unlock()
+	SemanticEmbedder = e
+}
+
+// denseCosine is the cosine similarity (dot / (|a|*|b|)) between two dense
+// vectors. True cosine is used because Ollama embeddings are not guaranteed
+// to be length-normalized.
 func denseCosine(a, b []float32) float64 {
 	n := len(a)
 	if len(b) < n {
@@ -306,6 +366,9 @@ func denseCosine(a, b []float32) float64 {
 // paragraphs together where possible. Chunks shorter than 40 chars are
 // dropped (they carry no retrieval value). Start is the 1-based line number.
 func ChunkText(text string, maxChars int) []Chunk {
+	if maxChars <= 0 {
+		return nil
+	}
 	lines := strings.Split(text, "\n")
 	var chunks []Chunk
 	start := 1
@@ -342,6 +405,26 @@ func ChunkText(text string, maxChars int) []Chunk {
 			curLen += 1
 			continue
 		}
+		// A single line longer than maxChars must never be appended whole,
+		// or a chunk could far exceed maxChars. Hard-split it at maxChars
+		// boundaries, emitting each piece as its own chunk.
+		if len(ln) >= maxChars {
+			if curLen > 0 {
+				flush()
+			}
+			for off := 0; off < len(ln); off += maxChars {
+				end := off + maxChars
+				if end > len(ln) {
+					end = len(ln)
+				}
+				piece := ln[off:end]
+				if len(piece) >= 40 {
+					chunks = append(chunks, Chunk{Start: i + 1, Text: piece})
+				}
+			}
+			start = i + 1
+			continue
+		}
 		cur = append(cur, ln)
 		curLen += len(ln) + 1
 	}
@@ -355,10 +438,48 @@ const vecDim = 4096
 // word and character n-grams. Deterministic: identical text always yields an
 // identical vector, so a locally-embedded query matches locally-embedded
 // documents exactly.
+//
+// Three feature types are hashed into the same vector space:
+//   - Whole words (exact keyword match boost)
+//   - Word bigrams (phrase matching)
+//   - Character 3-grams (fuzzy/morphological matching)
+//
+// Without whole-word features, the cosine similarity between a query and a
+// chunk that shares all the same words can be as low as 0.03 (the char 3-grams
+// rarely overlap across different words). Whole-word features ensure that
+// exact keyword matches produce a strong signal.
 func Embed(text string) map[int]float64 {
 	vec := make(map[int]float64)
 	lower := strings.ToLower(text)
-	for _, tok := range tokenizeWords(lower) {
+	words := tokenizeWords(lower)
+
+	// Whole-word features: each word contributes a +1 to its hash slot.
+	// This ensures that two texts sharing the same words get a strong
+	// cosine boost even if their char n-grams don't overlap.
+	for _, tok := range words {
+		h := int(fnv32("w:"+tok) % vecDim)
+		if sign("w:" + tok) {
+			vec[h]++
+		} else {
+			vec[h]--
+		}
+	}
+
+	// Word bigram features: consecutive word pairs capture phrase structure
+	// ("kafka consumer", "consumer configuration") that single words miss.
+	for i := 0; i+1 < len(words); i++ {
+		bg := "b:" + words[i] + " " + words[i+1]
+		h := int(fnv32(bg) % vecDim)
+		if sign(bg) {
+			vec[h]++
+		} else {
+			vec[h]--
+		}
+	}
+
+	// Character 3-gram features: fuzzy matching for typos, morphological
+	// variants and partial word overlap.
+	for _, tok := range words {
 		grams := ngrams(tok)
 		for _, g := range grams {
 			h := int(fnv32(g) % vecDim)
@@ -369,6 +490,7 @@ func Embed(text string) map[int]float64 {
 			}
 		}
 	}
+
 	l2 := 0.0
 	for _, v := range vec {
 		l2 += v * v

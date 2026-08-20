@@ -35,8 +35,8 @@ type ChangesReport struct {
 	Summary   string   `json:"summary"`
 	Untested  int      `json:"untested"`
 	MaxBlast  string   `json:"max_blast"`
-	// SourceTokens is the estimated token size of reading the changed files in
-	// full — the naive baseline the graph analysis avoids.
+	// SourceTokens is the token size of reading the changed files in full —
+	// the naive baseline the graph analysis avoids.
 	SourceTokens int `json:"source_tokens"`
 	// DeliveredTokens is the token size of the rendered compact output.
 	DeliveredTokens int `json:"delivered_tokens"`
@@ -53,12 +53,10 @@ func AnalyzeChanges(ix *index.Index, files []string) *ChangesReport {
 	return AnalyzeChangesRanged(ix, changes)
 }
 
-// AnalyzeChangesRanged is the line-aware variant: for files with added-line
-// ranges, only symbols whose declaration overlaps a changed range count as
-// changed. Symbols span [Line, End] in current-file line numbers, matching the
-// "+" side of the diff. A one-line edit no longer flags every symbol in a
-// 500-line file. Files with empty ranges (deletions, --file, no diff info)
-// fall back to whole-file analysis.
+// AnalyzeChangesRanged is the line-aware variant: only symbols whose
+// declaration overlaps an added-line range count as changed, so a one-line edit
+// no longer flags every symbol in a 500-line file. Files with empty ranges
+// (deletions, --file, no diff info) fall back to whole-file analysis.
 func AnalyzeChangesRanged(ix *index.Index, changes []FileChange) *ChangesReport {
 	covered := coveredSet(ix)
 	fileMap := buildFileMap(ix)
@@ -171,8 +169,6 @@ func AnalyzeChangesRanged(ix *index.Index, changes []FileChange) *ChangesReport 
 	return &report
 }
 
-// sourceTokensForFiles estimates how many tokens it would cost to read the
-// given files in full (the baseline the compact analysis avoids).
 // changedSymbols returns the non-test symbols of f that the diff ranges touch.
 // Empty ranges mean the whole file is considered changed.
 func changedSymbols(ix *index.Index, f string, ranges []LineRange) []string {

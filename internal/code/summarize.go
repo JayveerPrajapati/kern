@@ -71,6 +71,14 @@ var patterns = map[string][]struct {
 		{regexp.MustCompile(`^\s*(?:function\s+)?[A-Za-z_]\w*\s*\(\)`), regexp.MustCompile(`(?:function\s+)?([A-Za-z_]\w*)\s*\(\)`)},
 		{regexp.MustCompile(`^\s*[A-Za-z_]\w*=\(\)`), regexp.MustCompile(`^\s*([A-Za-z_]\w*)=\(\)`)},
 	},
+	"yaml": {
+		{regexp.MustCompile(`^[A-Za-z_][\w-]*:`), regexp.MustCompile(`^([A-Za-z_][\w-]*):`)},
+	},
+	"css": {
+		{regexp.MustCompile(`^@(?:keyframes|media|font-face|supports|page)\s+`), regexp.MustCompile(`^@(?:keyframes|media|font-face|supports|page)\s+([A-Za-z_-][\w-]*)`)},
+		{regexp.MustCompile(`^\.[A-Za-z_-]`), regexp.MustCompile(`^\.([A-Za-z_-][\w-]*)`)},
+		{regexp.MustCompile(`^#[A-Za-z_-]`), regexp.MustCompile(`^#([A-Za-z_-][\w-]*)`)},
+	},
 }
 
 // DetectLanguage returns the language key for a file extension.
@@ -92,6 +100,12 @@ func DetectLanguage(path string) string {
 		return "ruby"
 	case "sh", "bash":
 		return "shell"
+	case "yaml", "yml":
+		return "yaml"
+	case "css":
+		return "css"
+	case "html", "htm":
+		return "html"
 	}
 	return ""
 }

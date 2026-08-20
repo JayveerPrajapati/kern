@@ -6,52 +6,30 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
+	kerncontext "github.com/JayveerPrajapati/kern/internal/context"
+	"github.com/JayveerPrajapati/kern/internal/governance"
+	"github.com/JayveerPrajapati/kern/internal/index"
+	"github.com/JayveerPrajapati/kern/internal/intel"
+	"github.com/JayveerPrajapati/kern/internal/intelligence"
+	"github.com/JayveerPrajapati/kern/internal/lock"
+	"github.com/JayveerPrajapati/kern/internal/memory"
+	"github.com/JayveerPrajapati/kern/internal/metrics"
+	"github.com/JayveerPrajapati/kern/internal/optimize"
+	"github.com/JayveerPrajapati/kern/internal/project"
+	"github.com/JayveerPrajapati/kern/internal/stats"
+	"github.com/JayveerPrajapati/kern/internal/tokenize"
+	"github.com/JayveerPrajapati/kern/internal/whatif"
 	"io"
 	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
-
-	"github.com/JayveerPrajapati/kern/internal/brief"
-	"github.com/JayveerPrajapati/kern/internal/budget"
-	"github.com/JayveerPrajapati/kern/internal/cache"
-	"github.com/JayveerPrajapati/kern/internal/code"
-	"github.com/JayveerPrajapati/kern/internal/commitmsg"
-	"github.com/JayveerPrajapati/kern/internal/diff"
-	"github.com/JayveerPrajapati/kern/internal/docsearch"
-	"github.com/JayveerPrajapati/kern/internal/fetch"
-	"github.com/JayveerPrajapati/kern/internal/fw"
-	"github.com/JayveerPrajapati/kern/internal/heal"
-	"github.com/JayveerPrajapati/kern/internal/index"
-	"github.com/JayveerPrajapati/kern/internal/intel"
-	"github.com/JayveerPrajapati/kern/internal/llm"
-	"github.com/JayveerPrajapati/kern/internal/lock"
-	"github.com/JayveerPrajapati/kern/internal/memory"
-	"github.com/JayveerPrajapati/kern/internal/optimize"
-	"github.com/JayveerPrajapati/kern/internal/pack"
-	"github.com/JayveerPrajapati/kern/internal/pii"
-	"github.com/JayveerPrajapati/kern/internal/precache"
-	"github.com/JayveerPrajapati/kern/internal/project"
-	"github.com/JayveerPrajapati/kern/internal/rename"
-	"github.com/JayveerPrajapati/kern/internal/sandbox"
-	jsonschema "github.com/JayveerPrajapati/kern/internal/schema"
-	"github.com/JayveerPrajapati/kern/internal/script"
-	"github.com/JayveerPrajapati/kern/internal/sec"
-	"github.com/JayveerPrajapati/kern/internal/semcache"
-	"github.com/JayveerPrajapati/kern/internal/stats"
-	"github.com/JayveerPrajapati/kern/internal/swap"
-	"github.com/JayveerPrajapati/kern/internal/terse"
-	"github.com/JayveerPrajapati/kern/internal/tokenize"
-	"github.com/JayveerPrajapati/kern/internal/validate"
-	"github.com/JayveerPrajapati/kern/internal/verify"
 )
 
 const (
@@ -79,9 +57,7 @@ type Tool struct {
 	InputSchema map[string]any `json:"inputSchema"`
 }
 
-// ToolNames returns every registered MCP tool name. Used by tests to assert
-// catalog parity with downstream surfaces (e.g. the opencode plugin must not
-// drift from the MCP server that all agents actually consume).
+// ToolNames returns every registered MCP tool name.
 func ToolNames() []string {
 	out := make([]string, len(tools))
 	for i, t := range tools {
@@ -107,6 +83,12 @@ func toolAllowlist() []string {
 	return out
 }
 
+// highLevelOnly reports whether to expose only high-level tools (per the MCP
+// spec) via KERN_MCP_HIGH_LEVEL_ONLY=1; otherwise all tools are registered.
+func highLevelOnly() bool {
+	return os.Getenv("KERN_MCP_HIGH_LEVEL_ONLY") == "1"
+}
+
 // toolAllowed reports whether name passes the KERN_TOOLS allowlist. tools is
 // the (already filtered or full) registered catalog; a nil allowlist allows
 // everything, otherwise membership in the catalog decides.
@@ -123,7 +105,53 @@ func toolAllowed(toolsList []Tool, name string) bool {
 	return false
 }
 
-// filteredTools returns the registered tools minus any excluded by KERN_TOOLS.
+// highLevelTools is the set of tools kept when KERN_MCP_HIGH_LEVEL_ONLY=1.
+// It includes the 5 high-level orchestration tools (kern_analyze, kern_plan,
+// kern_execute, kern_verify, kern_incident) plus a minimal set of essential
+// primitives that high-level agents still need.
+var highLevelTools = map[string]bool{
+	"kern_analyze":         true,
+	"kern_plan":            true,
+	"kern_execute":         true,
+	"kern_verify":          true,
+	"kern_incident":        true,
+	"kern_what_if":         true,
+	"kern_impact":          true,
+	"kern_search":          true,
+	"kern_context":         true,
+	"kern_explore":         true,
+	"kern_graph":           true,
+	"kern_memory_add":      true,
+	"kern_memory_list":     true,
+	"kern_memory_recall":   true,
+	"kern_memory":          true,
+	"kern_review":          true,
+	"kern_security":        true,
+	"kern_validate":        true,
+	"kern_run_build":       true,
+	"kern_exec":            true,
+	"kern_sandbox":         true,
+	"kern_commitmsg":       true,
+	"kern_pack":            true,
+	"kern_project_map":     true,
+	"kern_compact_file":    true,
+	"kern_buddy":           true,
+	"kern_usage_guide":     true,
+	"kern_mask_pii":        true,
+	"kern_optimize_prompt": true,
+	"kern_optimize_log":    true,
+	"kern_doc_search":      true,
+	"kern_doc_fetch":       true,
+	"kern_doc_index":       true,
+	"kern_context_budget":  true,
+	"kern_swap":            true,
+	"kern_verify_output":   true,
+	"kern_schema_validate": true,
+	"kern_stats":           true,
+}
+
+// filteredTools returns the registered tools minus any excluded by the
+// KERN_TOOLS allowlist or the KERN_MCP_HIGH_LEVEL_ONLY high-level-only mode.
 // It lazily reads the env once per server lifetime and caches the result.
 func (s *Server) filteredTools() []Tool {
 	s.toolsMu.Lock()
@@ -132,23 +160,25 @@ func (s *Server) filteredTools() []Tool {
 		return s.filtered
 	}
 	allowed := toolAllowlist()
-	if len(allowed) == 0 {
-		s.filtered = tools
-		return s.filtered
-	}
-	in := func(n string) bool {
-		for _, a := range allowed {
-			if a == n {
-				return true
+	highOnly := highLevelOnly()
+	out := make([]Tool, 0, len(tools))
+	for _, t := range tools {
+		if highOnly && !highLevelTools[t.Name] {
+			continue
+		}
+		if len(allowed) > 0 {
+			in := false
+			for _, a := range allowed {
+				if a == t.Name {
+					in = true
+					break
+				}
+			}
+			if !in {
+				continue
 			}
 		}
-		return false
-	}
-	out := make([]Tool, 0, len(allowed))
-	for _, t := range tools {
-		if in(t.Name) {
-			out = append(out, t)
-		}
+		out = append(out, t)
 	}
 	s.filtered = out
 	return s.filtered
@@ -298,7 +328,7 @@ var tools = []Tool{
 	},
 	{
 		Name:        "kern_sandbox",
-		Description: "Run a risky command inside a snapshot of the project (#15): on non-zero exit the tree is rolled back exactly (files restored, new files removed). Success keeps changes. Use before destructive operations, migrations, or agent-applied edits.",
+		Description: "Run a risky command inside a snapshot of the project (#15): on non-zero exit the tree is rolled back exactly (files restored, new files removed). Success keeps changes. Use before destructive operations, migrations, or agent-applied edits. Gated by the command-execution governance firewall (KERN_ALLOW_EXEC / KERN_TOOLS) and command output is PII/secret-masked before return.",
 		InputSchema: schema(map[string]any{
 			"root":    strProp("Project root to snapshot and run in (defaults to current directory)"),
 			"command": strProp("Full command to run, e.g. \"make migrate\" or \"sh -c 'npm test'\" (shell words, not a shell string)"),
@@ -669,7 +699,7 @@ var tools = []Tool{
 	},
 	{
 		Name:        "kern_exec",
-		Description: "Run code in an isolated local runtime and return ONLY stdout — the 'Think in Code' surface. Language is selected by --lang or a shebang line; runtimes are resolved from PATH (python3, node, go, bash, perl, ruby, php, lua, julia, R, bun, deno, rust, ...). The script runs in a fresh temp dir with a hard timeout (default 10s, override timeout=N), a stdout byte cap (default 16KiB, override max=N), and a sanitized environment (HOME/XDG pointed into the sandbox, secrets stripped). When unprivileged user namespaces are available the script also runs in a private network namespace, so network egress is blocked; otherwise it degrades to env isolation only. stderr is never mixed into stdout and is only surfaced on failure. Use it to compute things (math, data munging, JSON transforms) without polluting context.",
+		Description: "Run code in an isolated local runtime and return ONLY stdout — the 'Think in Code' surface. Language is selected by --lang or a shebang line; runtimes are resolved from PATH (python3, node, go, bash, perl, ruby, php, lua, julia, R, bun, deno, rust, ...). The script runs in a fresh temp dir with a hard timeout (default 10s, override timeout=N), a stdout byte cap (default 16KiB, override max=N), and a sanitized environment (HOME/XDG pointed into the sandbox, secrets stripped). Isolation is enforced: the script runs in a private network namespace when the platform supports it, and the run refuses to execute if network isolation is unavailable (never silently runs with full network). stderr is never mixed into stdout and is only surfaced on failure. Use it to compute things (math, data munging, JSON transforms) without polluting context.",
 		InputSchema: schema(map[string]any{
 			"code":       strProp("The script body (required)"),
 			"lang":       strProp("Language override (e.g. python3, node, bash, go); otherwise detected from the shebang"),
@@ -677,7 +707,7 @@ var tools = []Tool{
 			"max":        strProp("Max stdout bytes to return (default 16384)"),
 			"stdin":      strProp("Input piped to the script's stdin"),
 			"list":       strProp("If true, return the installed runtimes and supported languages and do nothing else"),
-			"no_isolate": strProp("If true, inherit the caller's environment and full network access (default false)"),
+			"no_isolate": strProp("Ignored unless the local operator sets KERN_ALLOW_NO_ISOLATE=1; isolation is enforced by default"),
 		}, []string{"code"}),
 	},
 	{
@@ -730,11 +760,98 @@ var tools = []Tool{
 		Description: "Categorized usage guide for every kern MCP tool with performance tiers (fast/moderate/expensive), recommended workflows, and pitfalls. Consult this first when deciding which tool fits a task.",
 		InputSchema: schema(map[string]any{}, nil),
 	},
+	{
+		Name:        "kern_analyze",
+		Description: "HIGH-LEVEL (ADR-0006): analyze a proposed change against the whole system — relevant code, architecture, dependencies, historical memory, blast radius, risks, evidence, and required validation. This is the Kern 2.0 killer workflow 'Analyze this proposed change' exposed over MCP.",
+		InputSchema: schema(map[string]any{
+			"root":   strProp("Project root (defaults to current directory)"),
+			"change": strProp("The change/symbol to analyze, e.g. 'Add a Greet function' or 'helper'"),
+		}, []string{"change"}),
+	},
+	{
+		Name:        "kern_plan",
+		Description: "HIGH-LEVEL (ADR-0006): produce an implementation plan for a proposed change — affected files, dependencies, risks and required validation. Deterministic plan over the analysis; no LLM required.",
+		InputSchema: schema(map[string]any{
+			"root":   strProp("Project root (defaults to current directory)"),
+			"change": strProp("The change to plan, e.g. 'Add a Greet function to main.go'"),
+		}, []string{"change"}),
+	},
+	{
+		Name:        "kern_execute",
+		Description: "HIGH-LEVEL (ADR-0006): execute a change inside an isolated sandbox worktree (autonomy L2). Applies the given unified diff, verifies it builds, and returns the resulting diff. Never mutates the live repository.",
+		InputSchema: schema(map[string]any{
+			"root":  strProp("Project root (defaults to current directory)"),
+			"patch": strProp("A unified diff to apply to the sandbox worktree"),
+		}, []string{"patch"}),
+	},
+	{
+		Name:        "kern_verify",
+		Description: "HIGH-LEVEL (ADR-0006): verify a change with the unified verification engine — build, unit tests, security, architecture, dependency. Returns the typed verdict (PASS/FAIL/WARN) and per-check summary.",
+		InputSchema: schema(map[string]any{
+			"root":  strProp("Project root (defaults to current directory)"),
+			"types": strProp("Comma-separated checks: build,test,security,architecture,dependency (default 'build,test')"),
+		}, nil),
+	},
+	{
+		Name:        "kern_incident",
+		Description: "HIGH-LEVEL (ADR-0006): investigate a production incident end-to-end — correlate an alert to the affected service and evidence, derive the root cause and hypotheses, and summarize. Provide the alert as JSON; optionally a runtime snapshot (events/deployments/commits) as JSON.",
+		InputSchema: schema(map[string]any{
+			"root":     strProp("Project root (defaults to current directory)"),
+			"alert":    strProp("JSON of a domain.Alert: {id,severity,message,service,source,occurred_at}"),
+			"snapshot": strProp("Optional JSON of a runtime snapshot: {events,deployments,commits}"),
+		}, []string{"alert"}),
+	},
+	{
+		Name:        "kern_what_if",
+		Description: "HIGH-LEVEL (Workflow C / ADR-0012): simulate the impact of a hypothetical change on the knowledge graph — transitively affected symbols, files, services, tests, a deterministic risk level, and a typed RECOMMENDATION claim. Read-only; never mutates the graph or index.",
+		InputSchema: schema(map[string]any{
+			"root":       strProp("Project root (defaults to current directory)"),
+			"change":     strProp("The symbol to change/remove (qualified name), e.g. 'helper'"),
+			"kind":       strProp("Change kind: 'remove_symbol' (default) or 'change_dependency'"),
+			"new_target": strProp("For change_dependency: the symbol Target now depends on"),
+		}, []string{"change"}),
+	},
+	{
+		Name:        "kern_impact",
+		Description: "HIGH-LEVEL: estimate the impact/blast-radius of a change to a symbol — transitively affected symbols/files/services/tests, deterministic risk, and typed claims. Read-only.",
+		InputSchema: schema(map[string]any{
+			"root":       strProp("Project root (defaults to current directory)"),
+			"change":     strProp("The symbol to change/remove (qualified name), e.g. 'helper'"),
+			"kind":       strProp("Change kind: 'remove_symbol' (default) or 'change_dependency'"),
+			"new_target": strProp("For change_dependency: the symbol Target now depends on"),
+		}, []string{"change"}),
+	},
+	{
+		Name:        "kern_memory",
+		Description: "HIGH-LEVEL (Workflow E): manage engineering memory — add a lesson, list stored lessons, or recall the most relevant lessons for a prompt.",
+		InputSchema: schema(map[string]any{
+			"action": strProp("Action to perform: 'add', 'list', or 'recall'"),
+			"lesson": strProp("For 'add': the lesson to remember"),
+			"prompt": strProp("For 'recall': query to match lessons against"),
+			"root":   strProp("Project root (defaults to current directory)"),
+		}, []string{"action"}),
+	},
+	{
+		Name:        "kern_agents",
+		Description: "HIGH-LEVEL (Workflow E): build the standard specialist team and list its roster — name, role, capabilities — plus the current task states from the agent registry. Read-only and deterministic.",
+		InputSchema: schema(map[string]any{
+			"root": strProp("Project root (defaults to current directory)"),
+		}, nil),
+	},
+	{
+		Name:        "kern_loop",
+		Description: "HIGH-LEVEL (Workflow E): run the closed autonomy loop against an intent string and return the stage timeline plus the deployed / observed-healthy / learned outcome. The autonomy level (L0-L5, default L0 read-only) gates which stages run; the AI stages use the deterministic no-op step by default and are pluggable via the loop's StepFunc mechanism.",
+		InputSchema: schema(map[string]any{
+			"root":   strProp("Project root (defaults to current directory)"),
+			"intent": strProp("The intent/goal to run the loop against"),
+			"level":  strProp("Autonomy level L0-L5 (default L0, read-only)"),
+		}, []string{"intent"}),
+	},
 }
 
 // Server handles MCP requests over a stdio stream or HTTP.
 type Server struct {
-	in        *bufio.Scanner
+	in        io.Reader      // raw stdio reader, used to rebuild the scanner after an oversized line
 	out       io.Writer
 	mu        sync.Mutex
 	toolsMu   sync.Mutex
@@ -743,29 +860,27 @@ type Server struct {
 	inflight  map[string]context.CancelFunc
 	sessions  map[string]*project.Session
 	transport string // "stdio" (default) or "http"
-	// roots are the workspace roots every tool root/dir argument is confined
-	// to (W2-29): KERN_ROOTS when set, else the server's startup directory.
+	// sem bounds how many tool calls may build an index concurrently (each
+	// call can construct a full project index). Acquired before a tools/call
+	// goroutine is spawned and released when it finishes.
+	sem chan struct{}
+	// roots confine every tool root/dir argument; KERN_ROOTS when set, else
+	// the server's startup directory.
 	roots []string
-	// lastIndex is the symbol index loaded during the current tool call, used
-	// to stamp provenance (symbols/edges/packages/freshness) onto the response.
-	lastIndex *index.Index
 	// commits caches the short HEAD commit per project root so git is spawned
 	// at most once per root per server lifetime.
 	commits map[string]string
 }
 
-// NewServer returns a server wired to the given reader/writer.
+// NewServer returns a *Server wired to the given reader/writer.
 func NewServer(in io.Reader, out io.Writer) *Server {
 	sc := bufio.NewScanner(in)
-	sc.Buffer(make([]byte, 4<<20), 4<<20)
-	return &Server{in: sc, out: out, locks: map[string]*lock.Lock{}, inflight: map[string]context.CancelFunc{}, sessions: map[string]*project.Session{}, transport: "stdio", roots: defaultWorkspaceRoots(), commits: map[string]string{}}
+	sc.Buffer(make([]byte, 64<<20), 64<<20)
+	return &Server{in: in, out: out, sem: make(chan struct{}, 8), locks: map[string]*lock.Lock{}, inflight: map[string]context.CancelFunc{}, sessions: map[string]*project.Session{}, transport: "stdio", roots: defaultWorkspaceRoots(), commits: map[string]string{}}
 }
 
-// defaultWorkspaceRoots returns the roots tools may target: the KERN_ROOTS
-// list (colon- or comma-separated) when set, else the directory the server was
-// started in. Every tool root/dir is confined to these so a compromised or
-// prompt-injected client cannot point write/exec tools at arbitrary
-// directories (W2-29).
+// defaultWorkspaceRoots returns the roots tools may target: KERN_ROOTS when
+// set, else the startup directory. Every tool root/dir is confined to these.
 func defaultWorkspaceRoots() []string {
 	var roots []string
 	if env := os.Getenv("KERN_ROOTS"); env != "" {
@@ -948,13 +1063,15 @@ func (s *Server) startProgress(ctx context.Context, id, tool string) func() {
 
 // cancelAll cancels every in-flight tool call and releases every lock held by
 // this server. It is invoked on graceful shutdown (SIGINT/SIGTERM) so slow
-// tools stop promptly and the workspace is left unlocked.
+// tools stop promptly and the workspace is left unlocked. The inflight map is
+// deliberately NOT cleared here: each running tool goroutine removes its own
+// entry (unregisterInflight) once it finishes, so Inflight() keeps reporting
+// still-running tools and the shutdown drain can wait for them to exit.
 func (s *Server) cancelAll() {
 	s.mu.Lock()
 	for _, cancel := range s.inflight {
 		cancel()
 	}
-	s.inflight = map[string]context.CancelFunc{}
 	var held []*lock.Lock
 	for _, lk := range s.locks {
 		held = append(held, lk)
@@ -998,15 +1115,9 @@ func (s *Server) unregisterInflight(id string) {
 }
 
 // Serve runs until the stream ends.
-// preloadIndexes eagerly builds and caches each workspace root's index in
-// the background (via its Session, so a later tool call reuses the same
-// in-memory index). This moves the cold first-call reindex cost off the
-// request path: a tool call that used to block ~20s after a fresh server
-// start now finds the index already warm.
-//
-// It is skipped for filesystem roots ("/") and when KERN_PRELOAD=0 — both are
-// guards for test/CI environments where the server's default root is not a
-// project to index.
+// preloadIndexes eagerly builds and caches each workspace root's index in the
+// background so a later tool call reuses it instead of blocking on a cold
+// build. Skipped for filesystem roots and when KERN_PRELOAD=0 (test/CI guard).
 func (s *Server) preloadIndexes() {
 	if os.Getenv("KERN_PRELOAD") == "0" {
 		return
@@ -1044,50 +1155,72 @@ func (s *Server) workspaceRoots() []string {
 }
 
 func (s *Server) Serve() error {
-	// Preload every workspace root's index in the background so the first
-	// tool call after server start hits a warm cache instead of blocking on
-	// a synchronous build (~20s on large repos). Failures are non-fatal:
-	// tools rebuild on demand as before.
+	// Preload indexes in the background so the first tool call hits a warm cache.
 	s.preloadIndexes()
+	if s.sem == nil {
+		s.sem = make(chan struct{}, 8)
+	}
 	var wg sync.WaitGroup
 	defer wg.Wait() // drain in-flight tool calls before returning on EOF
-	for s.in.Scan() {
-		line := s.in.Bytes()
-		if len(line) == 0 {
-			continue
-		}
-		var req rpcRequest
-		if err := json.Unmarshal(line, &req); err != nil {
-			// A malformed line is a protocol error, not a silent drop (#21).
-			if err := s.write(errorResponse(nil, -32700, "parse error: "+err.Error())); err != nil {
-				return err
-			}
-			continue
-		}
-		if req.Method == "tools/call" {
-			// Run tools concurrently so a slow tool (build, heal, LLM
-			// optimize) can never freeze the stdio server: $/cancelRequest,
-			// progress and other tool calls keep being served while it runs.
-			// Response writes are serialized by s.write's mutex, and the
-			// request is captured by value so the loop can move on.
-			wg.Add(1)
-			go func(req rpcRequest) {
-				defer wg.Done()
-				if resp := s.safeDispatch(req); resp != nil {
-					if err := s.write(resp); err != nil {
-						fmt.Fprintf(os.Stderr, "kern-mcp: write response: %v\n", err)
-					}
-				}
-			}(req)
-			continue
-		}
-		if resp := s.safeDispatch(req); resp != nil {
-			if err := s.write(resp); err != nil {
-				return err
-			}
-		}
+	// newScanner rebuilds the stdio line scanner. A scanner cannot be reused
+	// after it hits bufio.ErrTooLong, so it is recreated from the raw reader.
+	newScanner := func() *bufio.Scanner {
+		sc := bufio.NewScanner(s.in)
+		sc.Buffer(make([]byte, 64<<20), 64<<20)
+		return sc
 	}
-	return s.in.Err()
+	for {
+		sc := newScanner()
+		for sc.Scan() {
+			line := sc.Bytes()
+			if len(line) == 0 {
+				continue
+			}
+			var req rpcRequest
+			if err := json.Unmarshal(line, &req); err != nil {
+				// A malformed line is a protocol error, not a silent drop.
+				if err := s.write(errorResponse(nil, -32700, "parse error: "+err.Error())); err != nil {
+					return err
+				}
+				continue
+			}
+			if req.Method == "tools/call" {
+				// Run tools concurrently so a slow tool (build, heal, LLM
+				// optimize) can never freeze the stdio server: $/cancelRequest,
+				// progress and other tool calls keep being served while it runs.
+				// Response writes are serialized by s.write's mutex, and the
+				// request is captured by value so the loop can move on.
+				// Concurrency is bounded by s.sem so a burst of tool calls cannot
+				// spawn unbounded goroutines that each build a full project index.
+				wg.Add(1)
+				s.sem <- struct{}{}
+				go func(req rpcRequest) {
+					defer wg.Done()
+					defer func() { <-s.sem }()
+					if resp := s.safeDispatch(req); resp != nil {
+						if err := s.write(resp); err != nil {
+							fmt.Fprintf(os.Stderr, "kern-mcp: write response: %v\n", err)
+						}
+					}
+				}(req)
+				continue
+			}
+			if resp := s.safeDispatch(req); resp != nil {
+				if err := s.write(resp); err != nil {
+					return err
+				}
+			}
+		}
+		// A single oversized message (>64MB) must not kill the server: the
+		// scanner hit bufio.ErrTooLong, so skip the oversized token (in 64MB
+		// chunks until its newline passes), recreate the scanner and keep
+		// serving instead of terminating on the error.
+		if sc.Err() == bufio.ErrTooLong {
+			fmt.Fprintf(os.Stderr, "kern-mcp: skipping oversized input line (> %d bytes); continuing\n", 64<<20)
+			continue
+		}
+		return sc.Err()
+	}
 }
 
 // safeDispatch computes a request's response, converting any panic into an
@@ -1218,14 +1351,17 @@ func (s *Server) toolCallResponse(id json.RawMessage, params json.RawMessage) an
 	}
 	key := idKey(id)
 	ctx, cancel := context.WithCancel(context.Background())
+	// The per-call scope carries the index loaded during this tool's execution
+	// so provenance is stamped from this call's index, never another's. It is
+	// scoped here instead of on the Server struct to avoid cross-talk between
+	// concurrent tool calls.
+	scope := &indexScope{}
+	ctx = context.WithValue(ctx, indexScopeKey{}, scope)
 	s.registerInflight(key, cancel)
 	defer func() {
 		cancel()
 		s.unregisterInflight(key)
 	}()
-	s.mu.Lock()
-	s.lastIndex = nil
-	s.mu.Unlock()
 
 	text, err := func() (out string, runErr error) {
 		defer func() {
@@ -1236,12 +1372,8 @@ func (s *Server) toolCallResponse(id json.RawMessage, params json.RawMessage) an
 		}()
 		return s.runTool(ctx, key, p.Name, p.Arguments)
 	}()
-	// MCP-layer output sandbox (P1-7): no tool response may exceed the output
-	// budget. This is the chokepoint every tool result flows through, so even a
-	// huge kern_project_map / kern_walk / kern_doc_search can never flood the
-	// agent's context. The budget is per-call overridable with an extra
-	// max_output=N argument (bytes; N=0 disables) and configurable globally via
-	// KERN_MCP_MAX_OUTPUT.
+	// Cap every tool response at the output budget so a large result cannot
+	// flood the agent's context. Overridable per call with max_output=N.
 	if err == nil {
 		var budget int
 		budget, err = callOutputBudget(p.Arguments)
@@ -1256,7 +1388,7 @@ func (s *Server) toolCallResponse(id json.RawMessage, params json.RawMessage) an
 	if err != nil {
 		result["content"] = []any{map[string]any{"type": "text", "text": err.Error()}}
 		result["isError"] = true
-	} else if prov := s.provenance(); prov != "" {
+	} else if prov := s.provenance(scope.ix); prov != "" {
 		result["content"] = []any{map[string]any{"type": "text", "text": text + "\n" + prov}}
 	}
 	return map[string]any{"jsonrpc": "2.0", "id": id, "result": result}
@@ -1394,12 +1526,14 @@ func atoiArg(v string, def int) (int, error) {
 
 // rootedPath resolves p for a file-reading tool. When root is given, the path
 // must stay inside it (rejecting "..", absolute paths outside, and symlink
-// escapes); rootless calls keep the legacy behavior of reading any path, since
-// the caller — a loopback MCP client — is the trusted principal.
+// escapes). A rootless call may only reference a path relative to the current
+// working directory: an absolute path is rejected outright, since otherwise a
+// caller could pass e.g. path=/etc/shadow and read any file on the system
+// outside the confined workspace.
 func rootedPath(root, p string) (string, error) {
 	if root == "" {
 		if filepath.IsAbs(p) {
-			return p, nil
+			return "", fmt.Errorf("absolute path requires root argument")
 		}
 		cwd, err := os.Getwd()
 		if err != nil {
@@ -1410,1594 +1544,232 @@ func rootedPath(root, p string) (string, error) {
 	return withinRoot(root, p)
 }
 
-func (s *Server) runTool(ctx context.Context, id string, name string, args map[string]any) (string, error) {
+func (s *Server) runTool(ctx context.Context, id string, name string, args map[string]any) (out string, runErr error) {
+	// Record every incoming tool call and its duration; the defer covers all
+	// return paths, and runErr is non-nil exactly when dispatch returned an error.
+	metrics.Default().RecordRequest()
+	start := time.Now()
+	defer func() {
+		metrics.Default().RecordToolCall(time.Since(start))
+		if runErr != nil {
+			metrics.Default().RecordError()
+		}
+	}()
 	if !toolAllowed(s.filteredTools(), name) {
 		return "", fmt.Errorf("tool %q is not allowed (KERN_TOOLS allowlist)", name)
 	}
 	if err := s.checkRootArg(args); err != nil {
 		return "", err
 	}
+	if root := argString(args, "root"); root != "" {
+		if err := validateRoot(root); err != nil {
+			return "", err
+		}
+	}
 	switch name {
 	case "kern_optimize_prompt":
-		prompt := argString(args, "prompt")
-		if prompt == "" {
-			return "", fmt.Errorf("prompt is required")
-		}
-		mask := argString(args, "mask") == "true" || argString(args, "mask") == "1"
-		var names []string
-		for _, n := range strings.Split(argString(args, "mask_names"), ",") {
-			if n = strings.TrimSpace(n); n != "" {
-				names = append(names, n)
-			}
-		}
-		cacheOn := true
-		if v := argString(args, "cache"); v != "" {
-			cacheOn = v == "true" || v == "1"
-		}
-		res, err := optimize.Prompt(prompt, argString(args, "attached_log"), optimize.Options{
-			Session:   argString(args, "session"),
-			Model:     argString(args, "model"),
-			Mask:      mask,
-			MaskNames: names,
-			Cache:     cacheOn,
-			FewShot:   argString(args, "few_shot") == "true" || argString(args, "few_shot") == "1",
-			Root:      argString(args, "root"),
-		})
-		if err != nil {
-			return "", err
-		}
-		out := renderOptimize("optimized prompt", res)
-		if res.FromCache {
-			if res.SemanticHit {
-				out += fmt.Sprintf("\n[kern] served from semantic cache (similarity %.2f, matched: %q)\n", res.Similarity, clipForMarker(res.MatchedInput))
-			} else {
-				out += "\n[kern] served from exact cache\n"
-			}
-		}
-		return out, nil
-
+		return s.handleOptimizePrompt(ctx, args)
 	case "kern_memory_add":
-		lesson := argString(args, "lesson")
-		if lesson == "" {
-			return "", fmt.Errorf("lesson is required")
-		}
-		root := argString(args, "root")
-		if root == "" {
-			cwd, _ := os.Getwd()
-			root = cwd
-		}
-		if err := memory.Add(root, lesson); err != nil {
-			return "", err
-		}
-		return "remembered.", nil
-
+		return s.handleMemoryAdd(ctx, args)
 	case "kern_memory_list":
-		root := argString(args, "root")
-		if root == "" {
-			cwd, _ := os.Getwd()
-			root = cwd
-		}
-		var b strings.Builder
-		for _, e := range memory.List(root) {
-			fmt.Fprintf(&b, "%s  %s\n", e.Time.UTC().Format("2006-01-02 15:04"), e.Text)
-		}
-		return strings.TrimSuffix(b.String(), "\n"), nil
-
+		return s.handleMemoryList(ctx, args)
 	case "kern_memory_recall":
-		prompt := argString(args, "prompt")
-		if prompt == "" {
-			return "", fmt.Errorf("prompt is required")
-		}
-		root := argString(args, "root")
-		if root == "" {
-			cwd, _ := os.Getwd()
-			root = cwd
-		}
-		k := 5
-		if v := argString(args, "k"); v != "" {
-			n, err := strconv.Atoi(v)
-			if err != nil {
-				return "", fmt.Errorf("k: invalid integer %q", v)
-			}
-			if n > 0 {
-				k = n
-			}
-		}
-		var b strings.Builder
-		for _, e := range memory.Recall(root, prompt, k) {
-			fmt.Fprintf(&b, "%s  %s\n", e.Time.UTC().Format("2006-01-02 15:04"), e.Text)
-		}
-		return strings.TrimSuffix(b.String(), "\n"), nil
-
+		return s.handleMemoryRecall(ctx, args)
 	case "kern_mask_pii":
-		text := argString(args, "text")
-		if text == "" {
-			return "", fmt.Errorf("text is required")
-		}
-		var names []string
-		for _, n := range strings.Split(argString(args, "mask_names"), ",") {
-			if n = strings.TrimSpace(n); n != "" {
-				names = append(names, n)
-			}
-		}
-		res := pii.MaskNames(text, names)
-		var parts []string
-		for k, v := range res.ByLabel {
-			parts = append(parts, fmt.Sprintf("%s %d", k, v))
-		}
-		summary := "masked " + itoa(res.Replaced) + " secrets"
-		if len(parts) > 0 {
-			summary += ": " + strings.Join(parts, ", ")
-		}
-		return res.Text + "\n[kern] " + summary + "\n", nil
-
+		return s.handleMaskPII(ctx, args)
 	case "kern_security":
-		root := argString(args, "root")
-		if root == "" {
-			cwd, _ := os.Getwd()
-			root = cwd
-		}
-		var allow []string
-		if s := argString(args, "severity"); s != "" {
-			allow = strings.Split(s, ",")
-		}
-		max := 100
-		if v := argString(args, "max"); v != "" {
-			n, err := strconv.Atoi(v)
-			if err != nil {
-				return "", fmt.Errorf("max: invalid integer %q", v)
-			}
-			if n > 0 {
-				max = n
-			}
-		}
-		findings, serr := sec.Scan(root)
-		if serr != nil {
-			return "", fmt.Errorf("security scan failed: %w", serr)
-		}
-		findings = sec.FilterBySeverity(findings, allow)
-		if argString(args, "format") == "json" {
-			var b strings.Builder
-			if err := json.NewEncoder(&b).Encode(findings); err != nil {
-				return "", fmt.Errorf("encode findings: %w", err)
-			}
-			return b.String(), nil
-		}
-		if len(findings) == 0 {
-			return "no security findings", nil
-		}
-		out := sec.Render(findings, max)
-		counts := sec.Counts(findings)
-		out += fmt.Sprintf("[kern] %d findings: %d error, %d warning, %d info\n",
-			len(findings), counts["error"], counts["warning"], counts["info"])
-		return out, nil
-
+		return s.handleSecurity(ctx, args)
 	case "kern_safe_delete":
-		sym := argString(args, "symbol")
-		if sym == "" {
-			return "", fmt.Errorf("symbol is required")
-		}
-		ix, err := s.loadIndex(argString(args, "root"))
-		if err != nil {
-			return "", err
-		}
-		r := intel.DeleteCheck(ix, sym)
-		if argString(args, "format") == "json" {
-			data, _ := json.Marshal(r)
-			return string(data), nil
-		}
-		return intel.RenderDelete(r), nil
-
+		return s.handleSafeDelete(ctx, args)
 	case "kern_doc_search":
-		query := argString(args, "query")
-		if query == "" {
-			return "", fmt.Errorf("query is required")
-		}
-		root := argString(args, "root")
-		ix := docsearch.Load(root)
-		if ix == nil {
-			var err error
-			ix, err = docsearch.IndexDir(root)
-			if err != nil {
-				return "", err
-			}
-			_ = ix.Save()
-		}
-		k := 5
-		if v := argString(args, "k"); v != "" {
-			n, err := atoiArg(v, k)
-			if err != nil {
-				return "", err
-			}
-			k = n
-		}
-		// If the persisted index carries dense vectors, re-attach the local
-		// embedder so queries fuse the semantic signal too.
-		hasDense := false
-		for _, d := range ix.Docs {
-			if len(d.Semantic) > 0 {
-				hasDense = true
-				break
-			}
-		}
-		if hasDense {
-			client := llm.New("")
-			if client.HasEmbeddingModel() {
-				docsearch.SemanticEmbedder = client
-			}
-		}
-		results := ix.Search(query, k)
-		if len(results) == 0 {
-			return "no matching document fragments", nil
-		}
-		var b strings.Builder
-		for i, r := range results {
-			fmt.Fprintf(&b, "#%d score=%.3f %s:%d\n", i+1, r.Sim, r.Doc.Chunk.File, r.Doc.Chunk.Start)
-			b.WriteString(r.Doc.Chunk.Text)
-			if i < len(results)-1 {
-				b.WriteString("\n\n")
-			}
-		}
-		return b.String(), nil
-
+		return s.handleDocSearch(ctx, args)
 	case "kern_doc_index":
-		root := argString(args, "root")
-		if root == "" {
-			cwd, _ := os.Getwd()
-			root = cwd
-		}
-		var ix *docsearch.Index
-		var err error
-		if argString(args, "semantic") == "true" || argString(args, "semantic") == "1" {
-			client := llm.New("")
-			if !client.Available() {
-				return "", fmt.Errorf("ollama not reachable (semantic index requires a local Ollama); run kern_doc_index without semantic for deterministic indexing")
-			}
-			if !client.HasEmbeddingModel() {
-				return "", fmt.Errorf("embedding model %q not installed (run: ollama pull %s)", llm.EmbedModel(), llm.EmbedModel())
-			}
-			docsearch.SemanticEmbedder = client
-			ix, err = docsearch.IndexDirSemantic(root, client)
-		} else {
-			ix, err = docsearch.IndexDir(root)
-		}
-		if err != nil {
-			return "", err
-		}
-		_ = ix.Save()
-		return "indexed " + itoa(len(ix.Docs)) + " chunks from " + root, nil
+		return s.handleDocIndex(ctx, args)
 	case "kern_doc_fetch":
-		rawURL := argString(args, "url")
-		if rawURL == "" {
-			return "", fmt.Errorf("url is required")
-		}
-		root := argString(args, "root")
-		if root == "" {
-			root = "."
-		}
-		name := argString(args, "name")
-		res, err := fetch.Fetch(rawURL, 0)
-		if err != nil {
-			return "", err
-		}
-		if name == "" {
-			name = docSearchSlug(rawURL)
-		} else if name, err = sanitizeDocName(name); err != nil {
-			return "", err
-		}
-		if err := os.MkdirAll(cache.Path("data", "docs-fetch"), 0o755); err != nil {
-			return "", err
-		}
-		if err := os.WriteFile(cache.Path("data", "docs-fetch", name+".md"), []byte(res.Text), 0o600); err != nil {
-			return "", err
-		}
-		added, err := docsearch.MergeFetched(root, name, res.Text)
-		if err != nil {
-			return "", err
-		}
-		var b strings.Builder
-		fmt.Fprintf(&b, "fetched %s -> fetch/%s.md (%d chars, %d chunks indexed into %s)\n\n", rawURL, name, len(res.Text), added, root)
-		if res.Title != "" {
-			fmt.Fprintf(&b, "# %s\n\n", res.Title)
-		}
-		if argString(args, "semantic") == "true" {
-			client := llm.New("")
-			if !client.HasEmbeddingModel() {
-				fmt.Fprintf(&b, "note: semantic embeddings skipped (%s not installed)\n\n", llm.EmbedModel())
-			} else {
-				embedded, eerr := docsearch.ReembedFetch(root, name, client)
-				if eerr != nil {
-					return "", eerr
-				}
-				if embedded > 0 {
-					fmt.Fprintf(&b, "semantic embeddings attached to %d fetched chunks\n\n", embedded)
-				}
-			}
-		}
-		b.WriteString(clip(res.Text, 800))
-		return b.String(), nil
-
+		return s.handleDocFetch(ctx, args)
 	case "kern_commitmsg":
-		root := argString(args, "root")
-		if root == "" {
-			root = "."
-		}
-		var out []byte
-		var err error
-		staged := argString(args, "staged")
-		if staged == "true" || staged == "1" {
-			out, err = exec.Command("git", "-C", root, "diff", "--cached").Output()
-		} else if rng := argString(args, "range"); rng != "" {
-			out, err = exec.Command("git", "-C", root, "diff", "--unified=0", rng).Output()
-		} else {
-			out, err = exec.Command("git", "-C", root, "diff", "HEAD").Output()
-			if err != nil {
-				out, err = exec.Command("git", "-C", root, "diff").Output()
-			}
-		}
-		if err != nil {
-			return "", fmt.Errorf("git diff failed: %w", err)
-		}
-		return commitmsg.Generate(string(out)).String(), nil
-
+		return s.handleCommitmsg(ctx, args)
 	case "kern_precache":
-		root := argString(args, "root")
-		if root == "" {
-			root = "."
-		}
-		rep := precache.Warm(root)
-		if rep.SourceMiss {
-			return "no project at " + root, nil
-		}
-		return fmt.Sprintf("pre-cached %d summaries (%d hits), %d doc chunks (docs saved=%v) in %s",
-			rep.Warmed, rep.CacheHits, rep.DocChunks, rep.DocsSaved, rep.Dur.Round(time.Millisecond)), nil
-
+		return s.handlePrecache(ctx, args)
 	case "kern_swap":
-		text := argString(args, "text")
-		if text == "" {
-			return "", fmt.Errorf("text is required")
-		}
-		root := argString(args, "root")
-		if root == "" {
-			root = "."
-		}
-		mode := argString(args, "mode")
-		switch mode {
-		case "summary":
-			return swap.SummaryMode(text, root), nil
-		case "expand":
-			return swap.ExpandMode(text, root), nil
-		default:
-			maxTok := 0
-			if s := argString(args, "max_tokens"); s != "" {
-				n, err := strconv.Atoi(s)
-				if err != nil {
-					return "", fmt.Errorf("max_tokens: invalid integer %q", s)
-				}
-				if n > 0 {
-					maxTok = n
-				}
-			}
-			out, fits := swap.Fit(text, root, maxTok)
-			if !fits {
-				out += "\n[kern] warning: still over budget after summarization\n"
-			}
-			return out, nil
-		}
-
+		return s.handleSwap(ctx, args)
 	case "kern_sandbox":
-		root := argString(args, "root")
-		if root == "" {
-			root = "."
-		}
-		cmdLine := argString(args, "command")
-		if cmdLine == "" {
-			return "", fmt.Errorf("command is required")
-		}
-		stop := s.startProgress(ctx, id, "kern_sandbox")
-		defer stop()
-		parts := splitShellLine(cmdLine)
-		if len(parts) == 0 {
-			return "", fmt.Errorf("command is empty")
-		}
-		timeout := 120 * time.Second
-		if s := argString(args, "timeout"); s != "" {
-			sec, err := strconv.Atoi(s)
-			if err != nil {
-				return "", fmt.Errorf("timeout: invalid integer %q", s)
-			}
-			if sec > 0 {
-				timeout = time.Duration(sec) * time.Second
-			}
-		}
-		res := sandbox.Run(ctx, root, parts[0], parts[1:], timeout)
-		var b strings.Builder
-		if res.OK {
-			fmt.Fprintf(&b, "status: PASS (%s), changes kept\n", res.Duration.Round(time.Millisecond))
-		} else if res.Restored {
-			fmt.Fprintf(&b, "status: FAIL (exit %d, %s), tree restored to snapshot (%d files)\n", res.ExitCode, res.Duration.Round(time.Millisecond), res.Snapshots)
-		} else {
-			fmt.Fprintf(&b, "status: FAIL (exit %d, %s)\n", res.ExitCode, res.Duration.Round(time.Millisecond))
-		}
-		if res.Err != nil {
-			fmt.Fprintf(&b, "error: %v\n", res.Err)
-		}
-		out := res.Output
-		if len(out) > 4000 {
-			out = out[:4000] + "\n... (truncated)"
-		}
-		if out != "" {
-			fmt.Fprintf(&b, "output:\n%s\n", out)
-		}
-		return b.String(), nil
-
+		return s.handleSandbox(ctx, id, args)
 	case "kern_diff_files":
-		a := argString(args, "a")
-		b := argString(args, "b")
-		if a == "" || b == "" {
-			return "", fmt.Errorf("a and b are required")
-		}
-		root := argString(args, "root")
-		ap, err := rootedPath(root, a)
-		if err != nil {
-			return "", err
-		}
-		bp, err := rootedPath(root, b)
-		if err != nil {
-			return "", err
-		}
-		ab, err := os.ReadFile(ap)
-		if err != nil {
-			return "", fmt.Errorf("read %s: %w", a, err)
-		}
-		bb, err := os.ReadFile(bp)
-		if err != nil {
-			return "", fmt.Errorf("read %s: %w", b, err)
-		}
-		u := diff.Unified(a, b, splitLines(string(ab)), splitLines(string(bb)))
-		if u == "" {
-			return "files identical", nil
-		}
-		return u, nil
-
+		return s.handleDiffFiles(ctx, args)
 	case "kern_heal":
-		root := argString(args, "root")
-		if root == "" {
-			root = "."
-		}
-		task := argString(args, "task")
-		if task == "" {
-			task = "Fix the failing build/test/syntax errors in this project."
-		}
-		model := argString(args, "model")
-		rounds := 3
-		if s := argString(args, "max_rounds"); s != "" {
-			n, err := strconv.Atoi(s)
-			if err != nil {
-				return "", fmt.Errorf("max_rounds: invalid integer %q", s)
-			}
-			if n > 0 {
-				rounds = n
-			}
-		}
-		timeout := 120 * time.Second
-		if s := argString(args, "timeout"); s != "" {
-			sec, err := strconv.Atoi(s)
-			if err != nil {
-				return "", fmt.Errorf("timeout: invalid integer %q", s)
-			}
-			if sec > 0 {
-				timeout = time.Duration(sec) * time.Second
-			}
-		}
-		stop := s.startProgress(ctx, id, "kern_heal")
-		defer stop()
-		res := heal.Run(ctx, root, task, model, rounds, timeout)
-		var b strings.Builder
-		if res.Validated {
-			fmt.Fprintf(&b, "status: healed OK after %d round(s)\n", res.Iterations)
-			for _, c := range res.Changes {
-				fmt.Fprintf(&b, "changed: %s\n", c)
-			}
-			if res.Diff != "" {
-				fmt.Fprintf(&b, "diff:\n%s\n", res.Diff)
-			}
-			return b.String(), nil
-		}
-		fmt.Fprintf(&b, "status: still failing after %d round(s)\n", res.Iterations)
-		if res.Err != nil {
-			fmt.Fprintf(&b, "error: %v\n", res.Err)
-		}
-		if res.LastOutput != "" {
-			fmt.Fprintf(&b, "output:\n%s\n", truncateMCP(res.LastOutput, 3000))
-		}
-		return b.String(), nil
+		return s.handleHeal(ctx, id, args)
 	case "kern_validate":
-		root := argString(args, "root")
-		if root == "" {
-			root = "."
-		}
-		timeout := 120 * time.Second
-		if s := argString(args, "timeout"); s != "" {
-			sec, err := strconv.Atoi(s)
-			if err != nil {
-				return "", fmt.Errorf("timeout: invalid integer %q", s)
-			}
-			if sec > 0 {
-				timeout = time.Duration(sec) * time.Second
-			}
-		}
-		var c *validate.Command
-		if cmd := argString(args, "command"); cmd != "" {
-			parts := strings.Fields(cmd)
-			if len(parts) == 0 {
-				return "", fmt.Errorf("command is empty")
-			}
-			c = &validate.Command{Name: parts[0], Cmd: parts[0], Args: parts[1:]}
-		} else {
-			var err error
-			c, err = validate.Detect(root)
-			if err != nil {
-				return "", err
-			}
-		}
-		res := validate.Run(ctx, root, c, timeout)
-		var b strings.Builder
-		fmt.Fprintf(&b, "command: %s %s\n", c.Cmd, strings.Join(c.Args, " "))
-		fmt.Fprintf(&b, "status: %s\n", map[bool]string{true: "PASS", false: "FAIL"}[res.OK])
-		fmt.Fprintf(&b, "exit: %d\n", res.ExitCode)
-		fmt.Fprintf(&b, "duration: %s\n", res.Dur.Round(time.Millisecond))
-		out := res.Output
-		if len(out) > 4000 {
-			out = out[:4000] + "\n... (truncated)"
-		}
-		if out != "" {
-			fmt.Fprintf(&b, "output:\n%s\n", out)
-		}
-		if res.Err != nil {
-			fmt.Fprintf(&b, "error: %v\n", res.Err)
-		}
-		return b.String(), nil
-
+		return s.handleValidate(ctx, args)
 	case "kern_schema_validate":
-		data := argString(args, "data")
-		sc := argString(args, "schema")
-		if data == "" || sc == "" {
-			return "", fmt.Errorf("data and schema are required")
-		}
-		s, err := jsonschema.Parse(sc)
-		if err != nil {
-			return "", err
-		}
-		vs := s.Validate([]byte(data))
-		if len(vs) == 0 {
-			return "schema OK: output conforms", nil
-		}
-		var b strings.Builder
-		fmt.Fprintf(&b, "schema violations (%d):\n", len(vs))
-		for _, v := range vs {
-			fmt.Fprintln(&b, "  - "+v)
-		}
-		return b.String(), nil
-
+		return s.handleSchemaValidate(ctx, args)
 	case "kern_verify_output":
-		text := argString(args, "text")
-		if text == "" {
-			return "", fmt.Errorf("text is required")
-		}
-		root := argString(args, "root")
-		ix, err := s.loadIndex(root)
-		if err != nil {
-			// Without a usable index the reference checks cannot run; surface
-			// the error instead of emitting a false-positive MISS report.
-			return "", fmt.Errorf("cannot verify: index unavailable for %q: %w", root, err)
-		}
-		rep := verify.Sorted(verify.Verify(ix, root, text))
-		return verify.Render(rep), nil
-
+		return s.handleVerifyOutput(ctx, args)
 	case "kern_compact_file":
-		path := argString(args, "path")
-		if path == "" {
-			return "", fmt.Errorf("path is required")
-		}
-		root := argString(args, "root")
-		abs, err := rootedPath(root, path)
-		if err != nil {
-			return "", err
-		}
-		content, err := code.ReadFile(abs)
-		if err != nil {
-			return "", fmt.Errorf("cannot read %s: %w", path, err)
-		}
-		sum := code.Summarize(abs, content, 200)
-		return sum.Render(), nil
-
+		return s.handleCompact(ctx, args)
 	case "kern_buddy":
-		root := argString(args, "root")
-		if root == "" {
-			cwd, _ := os.Getwd()
-			root = cwd
-		}
-		// Warm the index in the background so the digest is always-warm on
-		// later calls; the first call renders the fast path when the cache
-		// is cold (brief.Build never blocks on a full index build).
-		go func() {
-			if err := brief.Warm(root); err != nil {
-				// best-effort: the digest still renders without index sections
-			}
-		}()
-		out, err := brief.Build(root)
-		if err != nil {
-			return "", err
-		}
-		return out, nil
-
+		return s.handleBuddy(ctx, args)
 	case "kern_project_map":
-		root := argString(args, "root")
-		if root == "" {
-			cwd, _ := os.Getwd()
-			root = cwd
-		}
-		maxFiles := 500
-		if v := argString(args, "max_files"); v != "" {
-			n, err := atoiArg(v, maxFiles)
-			if err != nil {
-				return "", err
-			}
-			maxFiles = n
-		}
-		p, err := code.BuildProject(root, maxFiles, 200)
-		if err != nil {
-			return "", err
-		}
-		return p.Render(), nil
-
+		return s.handleProjectMap(ctx, args)
 	case "kern_pack":
-		root := argString(args, "root")
-		if root == "" {
-			cwd, _ := os.Getwd()
-			root = cwd
-		}
-		opts := pack.Options{}
-		if v := argString(args, "max_tokens"); v != "" {
-			n, err := atoiArg(v, opts.MaxTokens)
-			if err != nil {
-				return "", err
-			}
-			opts.MaxTokens = n
-		} else {
-			opts.MaxTokens = 8000
-		}
-		if v := argString(args, "instructions"); v != "" {
-			opts.SkipInstructions = v == "false"
-		}
-		b, err := pack.Build(root, opts)
-		if err != nil {
-			return "", err
-		}
-		if argString(args, "format") == "json" {
-			return b.JSON()
-		}
-		return b.Render(), nil
-
+		return s.handlePack(ctx, args)
 	case "kern_run_build":
-		cmd := argString(args, "command")
-		if cmd == "" {
-			return "", fmt.Errorf("command is required")
-		}
-		stop := s.startProgress(ctx, id, "kern_run_build")
-		defer stop()
-		// Bound the build so a hanging command cannot hold the server: builds
-		// and tests can legitimately take minutes, but never forever.
-		bctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
-		defer cancel()
-		res, err := optimize.RunBuild(bctx, cmd, argString(args, "dir"), optimize.Options{})
-		if err != nil {
-			return "", err
-		}
-		return res.Output, nil
-
+		return s.handleRunBuild(ctx, id, args)
 	case "kern_optimize_log":
-		log := argString(args, "log")
-		if log == "" {
-			return "", fmt.Errorf("log is required")
-		}
-		cacheOn := true
-		if v := argString(args, "cache"); v != "" {
-			cacheOn = v == "true" || v == "1"
-		}
-		res, err := optimize.Log(log, optimize.Options{Cache: cacheOn})
-		if err != nil {
-			return "", err
-		}
-		out := renderOptimize("optimized log", res)
-		if res.FromCache {
-			if res.SemanticHit {
-				out += fmt.Sprintf("\n[kern] served from semantic cache (similarity %.2f, matched: %q)\n", res.Similarity, clipForMarker(res.MatchedInput))
-			} else {
-				out += "\n[kern] served from exact cache\n"
-			}
-		}
-		return out, nil
-
+		return s.handleOptimizeLog(ctx, args)
 	case "kern_optimize_output":
-		text := argString(args, "text")
-		if text == "" {
-			return "", fmt.Errorf("text is required")
-		}
-		out, dropped := terse.Compress(text)
-		before := tokenize.Count(text)
-		after := tokenize.Count(out)
-		return fmt.Sprintf("%d -> %d tokens (saved %d, %.1f%%, %d filler lines dropped)\n\n%s",
-			before, after, before-after, pct(before, after), dropped, out), nil
-
+		return s.handleOptimizeOutput(ctx, args)
 	case "kern_stats":
-		return renderStats(argString(args, "days"), argString(args, "session"))
-
+		return s.handleStats(ctx, args)
 	case "kern_semcache":
-		switch argString(args, "action") {
-		case "clear":
-			ns := argString(args, "namespace")
-			if err := semcache.Clear(ns); err != nil {
-				return "", err
-			}
-			if ns == "" {
-				return "semcache: cleared all namespaces", nil
-			}
-			return "semcache: cleared " + ns, nil
-		case "list":
-			ns := argString(args, "namespace")
-			if ns == "" {
-				return "", fmt.Errorf("namespace is required for list")
-			}
-			entries, err := semcache.Entries(ns)
-			if err != nil {
-				return "", err
-			}
-			if len(entries) == 0 {
-				return fmt.Sprintf("semcache %q: empty", ns), nil
-			}
-			var b strings.Builder
-			fmt.Fprintf(&b, "semcache %q: %d entries\n", ns, len(entries))
-			for i, in := range entries {
-				fmt.Fprintf(&b, "  %d. %s\n", i+1, truncateMCP(in, 100))
-			}
-			return strings.TrimSuffix(b.String(), "\n"), nil
-		case "similarity":
-			a, b := argString(args, "a"), argString(args, "b")
-			if a == "" || b == "" {
-				return "", fmt.Errorf("a and b are required for similarity")
-			}
-			return fmt.Sprintf("similarity: %.3f", semcache.Similarity(a, b)), nil
-		default: // stats
-			st, err := semcache.Stats()
-			if err != nil {
-				return "", err
-			}
-			if len(st) == 0 {
-				return "semcache: empty", nil
-			}
-			var b strings.Builder
-			b.WriteString("semcache entries by namespace:\n")
-			for ns, n := range st {
-				fmt.Fprintf(&b, "  %-8s %d\n", ns, n)
-			}
-			return strings.TrimSuffix(b.String(), "\n"), nil
-		}
-
+		return s.handleSemcache(ctx, args)
 	case "kern_context_budget":
-		text := argString(args, "text")
-		if text == "" {
-			return "", fmt.Errorf("text is required")
-		}
-		maxTokens := 4000
-		if v := argString(args, "max_tokens"); v != "" {
-			n, err := atoiArg(v, maxTokens)
-			if err != nil {
-				return "", err
-			}
-			maxTokens = n
-		}
-		out := budget.Fit(text, maxTokens)
-		before := tokenize.Count(text)
-		after := tokenize.Count(out)
-		return fmt.Sprintf("%d -> %d tokens (saved %d, %.1f%%)\n\n%s", before, after, before-after, pct(before, after), out), nil
-
+		return s.handleContextBudget(ctx, args)
 	case "kern_ast_search":
-		pattern := argString(args, "pattern")
-		if pattern == "" {
-			return "", fmt.Errorf("pattern is required")
-		}
-		ix, err := s.loadIndex(argString(args, "root"))
-		if err != nil {
-			return "", err
-		}
-		limit := 50
-		if v := argString(args, "limit"); v != "" {
-			n, err := atoiArg(v, limit)
-			if err != nil {
-				return "", err
-			}
-			limit = n
-		}
-		matches := ix.Search(pattern, limit)
-		if len(matches) == 0 {
-			return "no symbols matched: " + pattern, nil
-		}
-		var b strings.Builder
-		for _, m := range matches {
-			b.WriteString(m.Kind)
-			b.WriteString(" ")
-			b.WriteString(m.FullName())
-			b.WriteString(" ")
-			b.WriteString(m.File)
-			b.WriteString(":")
-			b.WriteString(itoa(m.Line))
-			b.WriteString("\n")
-		}
-		return strings.TrimSuffix(b.String(), "\n"), nil
-
+		return s.handleAstSearch(ctx, args)
 	case "kern_frameworks":
-		root := argString(args, "root")
-		if root == "" {
-			cwd, _ := os.Getwd()
-			root = cwd
-		}
-		det, err := fw.Detect(root)
-		if err != nil {
-			return "", err
-		}
-		return fw.Render(det), nil
-
+		return s.handleFrameworks(ctx, args)
 	case "kern_entry_points":
-		root := argString(args, "root")
-		ix, err := s.loadIndex(root)
-		if err != nil {
-			return "", err
-		}
-		limit := 50
-		if v := argString(args, "limit"); v != "" {
-			n, err := atoiArg(v, limit)
-			if err != nil {
-				return "", err
-			}
-			limit = n
-		}
-		var b strings.Builder
-		n := 0
-		for _, s := range ix.Symbols {
-			if !s.Entry || s.Framework == "" {
-				continue
-			}
-			if p := argString(args, "pattern"); p != "" {
-				re, err := regexp.Compile("^" + strings.ReplaceAll(regexp.QuoteMeta(p), `\*`, `.*`) + "$")
-				if err != nil {
-					return "", fmt.Errorf("bad pattern %q: %w", p, err)
-				}
-				if !re.MatchString(s.Name) && (s.Route == "" || !re.MatchString(s.Route)) {
-					continue
-				}
-			}
-			fmt.Fprintf(&b, "%s %s %s %s:%d\n", s.Framework, s.FullName(), s.Route, s.File, s.Line)
-			n++
-			if n >= limit {
-				break
-			}
-		}
-		if n == 0 {
-			return "no framework entry points in index (run kern build/index to populate)", nil
-		}
-		return strings.TrimSuffix(b.String(), "\n"), nil
-
+		return s.handleEntryPoints(ctx, args)
 	case "kern_search":
-		query := argString(args, "query")
-		if query == "" {
-			return "", fmt.Errorf("query is required")
-		}
-		ix, err := s.loadIndex(argString(args, "root"))
-		if err != nil {
-			return "", err
-		}
-		limit := 20
-		if v := argString(args, "limit"); v != "" {
-			n, err := atoiArg(v, limit)
-			if err != nil {
-				return "", err
-			}
-			limit = n
-		}
-		var matches []index.Symbol
-		sem := argString(args, "semantic")
-		if sem == "true" || sem == "1" {
-			client := llm.New("")
-			if !client.HasEmbeddingModel() {
-				return "", fmt.Errorf("embedding model %q not installed (run: ollama pull %s)", llm.EmbedModel(), llm.EmbedModel())
-			}
-			matches = intel.SemanticSearch(ix, query, limit, client)
-		} else {
-			matches = intel.RankedSearch(ix, query, limit)
-		}
-		if len(matches) == 0 {
-			return "no symbols matched: " + query, nil
-		}
-		var b strings.Builder
-		for _, m := range matches {
-			b.WriteString(m.Kind)
-			b.WriteString(" ")
-			b.WriteString(m.FullName())
-			b.WriteString(" ")
-			b.WriteString(m.File)
-			b.WriteString(":")
-			b.WriteString(itoa(m.Line))
-			if ix.IsGenerated(m.File) {
-				b.WriteString(" (generated)")
-			}
-			b.WriteString("\n")
-		}
-		return strings.TrimSuffix(b.String(), "\n"), nil
-
+		return s.handleSearch(ctx, args)
 	case "kern_repo_search":
-		query := argString(args, "query")
-		if query == "" {
-			return "", fmt.Errorf("query is required")
-		}
-		limit := 20
-		if v := argString(args, "limit"); v != "" {
-			n, err := atoiArg(v, limit)
-			if err != nil {
-				return "", err
-			}
-			limit = n
-		}
-		var hits []intel.RepoHit
-		sem := argString(args, "semantic")
-		if sem == "true" || sem == "1" {
-			client := llm.New("")
-			if !client.HasEmbeddingModel() {
-				return "", fmt.Errorf("embedding model %q not installed (run: ollama pull %s)", llm.EmbedModel(), llm.EmbedModel())
-			}
-			hits = intel.SemanticSearchRepos(query, limit, client)
-		} else {
-			hits = intel.SearchRepos(query, limit)
-		}
-		if len(hits) == 0 {
-			return "no symbols matched across registered repos: " + query, nil
-		}
-		return intel.FormatRepoHits(hits), nil
-
+		return s.handleRepoSearch(ctx, args)
 	case "kern_why":
-		symbol := argString(args, "symbol")
-		if symbol == "" {
-			return "", fmt.Errorf("symbol is required")
-		}
-		ix, err := s.loadIndex(argString(args, "root"))
-		if err != nil {
-			return "", err
-		}
-		info, ok := intel.Why(ix, symbol)
-		if !ok {
-			return "no symbol found: " + symbol, nil
-		}
-		return intel.FormatWhy(info), nil
-
+		return s.handleWhy(ctx, args)
 	case "kern_code_graph":
-		symbol := argString(args, "symbol")
-		if symbol == "" {
-			return "", fmt.Errorf("symbol is required")
-		}
-		ix, err := s.loadIndex(argString(args, "root"))
-		if err != nil {
-			return "", err
-		}
-		return ix.Graph(symbol), nil
-
+		return s.handleCodeGraph(ctx, args)
 	case "kern_inherits":
-		symbol := argString(args, "symbol")
-		if symbol == "" {
-			return "", fmt.Errorf("symbol is required")
-		}
-		ix, err := s.loadIndex(argString(args, "root"))
-		if err != nil {
-			return "", err
-		}
-		sym, ok := ix.FindSymbol(symbol)
-		if !ok {
-			return "no symbol found: " + symbol, nil
-		}
-		var b strings.Builder
-		fmt.Fprintf(&b, "%s (%s)\n", sym.FullName(), sym.Kind)
-		sup := ix.SupertypesOf(sym)
-		sub := ix.SubtypesOf(sym)
-		if len(sup) == 0 && len(sub) == 0 {
-			b.WriteString("  no inheritance edges\n")
-		}
-		for _, s := range sup {
-			fmt.Fprintf(&b, "  supertype: %s\n", s)
-		}
-		for _, s := range sub {
-			fmt.Fprintf(&b, "  subtype:   %s\n", s)
-		}
-		return strings.TrimRight(b.String(), "\n"), nil
-
+		return s.handleInherits(ctx, args)
 	case "kern_context":
-		symbol := argString(args, "symbol")
-		if symbol == "" {
-			return "", fmt.Errorf("symbol is required")
-		}
-		ix, err := s.loadIndex(argString(args, "root"))
-		if err != nil {
-			return "", err
-		}
-		lines := 12
-		if v := argString(args, "lines"); v != "" {
-			n, err := atoiArg(v, lines)
-			if err != nil {
-				return "", err
-			}
-			lines = n
-		}
-		ctx := ix.Context(symbol, lines)
-		if ctx == "" {
-			return "no symbol found: " + symbol, nil
-		}
-		return ctx, nil
-
+		return s.handleContext(ctx, args)
 	case "kern_changes":
-		changes, ix, err := s.changedContext(args)
-		if err != nil {
-			return "", err
-		}
-		return intel.RenderChanges(intel.AnalyzeChangesRanged(ix, changes)), nil
-
+		return s.handleChanges(ctx, args)
 	case "kern_review":
-		changes, ix, err := s.changedContext(args)
-		if err != nil {
-			return "", err
-		}
-		maxTokens := 8000
-		if v := argString(args, "max_tokens"); v != "" {
-			n, err := atoiArg(v, maxTokens)
-			if err != nil {
-				return "", err
-			}
-			maxTokens = n
-		}
-		return intel.ReviewRanged(ix, changes, maxTokens), nil
-
+		return s.handleReview(ctx, args)
 	case "kern_hubs":
-		ix, err := s.loadIndex(argString(args, "root"))
-		if err != nil {
-			return "", err
-		}
-		limit := 10
-		if v := argString(args, "limit"); v != "" {
-			n, err := atoiArg(v, limit)
-			if err != nil {
-				return "", err
-			}
-			limit = n
-		}
-		var b strings.Builder
-		b.WriteString(intel.RenderHubs(intel.Hubs(ix, limit)))
-		b.WriteString("\n\n")
-		b.WriteString(intel.RenderBridges(intel.Bridges(ix, 15)))
-		return b.String(), nil
-
+		return s.handleHubs(ctx, args)
 	case "kern_test_gaps":
-		ix, err := s.loadIndex(argString(args, "root"))
-		if err != nil {
-			return "", err
-		}
-		limit := 10
-		if v := argString(args, "limit"); v != "" {
-			n, err := atoiArg(v, limit)
-			if err != nil {
-				return "", err
-			}
-			limit = n
-		}
-		c := intel.AnalyzeCoverage(ix)
-		c.HotGaps = intel.TestGaps(ix, limit)
-		return c.Render(), nil
-
+		return s.handleTestGaps(ctx, args)
 	case "kern_path":
-		from := argString(args, "from")
-		to := argString(args, "to")
-		if from == "" || to == "" {
-			return "", fmt.Errorf("from and to are required")
-		}
-		ix, err := s.loadIndex(argString(args, "root"))
-		if err != nil {
-			return "", err
-		}
-		from, okFrom := intel.Resolve(ix, from)
-		to, okTo := intel.Resolve(ix, to)
-		if !okFrom {
-			return "", fmt.Errorf("unknown symbol: %s", from)
-		}
-		if !okTo {
-			return "", fmt.Errorf("unknown symbol: %s", to)
-		}
-		return intel.RenderPath(ix, intel.ShortestPath(ix, from, to)), nil
-
+		return s.handlePath(ctx, args)
 	case "kern_dead":
-		ix, err := s.loadIndex(argString(args, "root"))
-		if err != nil {
-			return "", err
-		}
-		dead := intel.DeadCode(ix)
-		limit := 0
-		if v := argString(args, "limit"); v != "" {
-			n, err := atoiArg(v, limit)
-			if err != nil {
-				return "", err
-			}
-			limit = n
-		}
-		if limit > 0 && len(dead) > limit {
-			dead = dead[:limit]
-		}
-		return intel.RenderDead(dead), nil
-
+		return s.handleDead(ctx, args)
 	case "kern_larges":
-		ix, err := s.loadIndex(argString(args, "root"))
-		if err != nil {
-			return "", err
-		}
-		minLines := 60
-		if v := argString(args, "min_lines"); v != "" {
-			n, err := atoiArg(v, minLines)
-			if err != nil {
-				return "", err
-			}
-			minLines = n
-		}
-		large := intel.LargeFunctions(ix, minLines)
-		limit := 0
-		if v := argString(args, "limit"); v != "" {
-			n, err := atoiArg(v, limit)
-			if err != nil {
-				return "", err
-			}
-			limit = n
-		}
-		if limit > 0 && len(large) > limit {
-			large = large[:limit]
-		}
-		return intel.RenderLarge(large), nil
-
+		return s.handleLarges(ctx, args)
 	case "kern_arch":
-		ix, err := s.loadIndex(argString(args, "root"))
-		if err != nil {
-			return "", err
-		}
-		return intel.RenderArch(intel.AnalyzeArchitecture(ix)), nil
-
+		return s.handleArch(ctx, args)
 	case "kern_communities":
-		ix, err := s.loadIndex(argString(args, "root"))
-		if err != nil {
-			return "", err
-		}
-		limit := 0
-		if v := argString(args, "limit"); v != "" {
-			n, err := atoiArg(v, 0)
-			if err != nil {
-				return "", err
-			}
-			limit = n
-		}
-		comms := intel.Communities(ix)
-		if limit > 0 && len(comms) > limit {
-			comms = comms[:limit]
-		}
-		return intel.RenderCommunities(comms), nil
-
+		return s.handleCommunities(ctx, args)
 	case "kern_churn":
-		root := argString(args, "root")
-		if root == "" {
-			cwd, _ := os.Getwd()
-			root = cwd
-		}
-		from, to := "", ""
-		if r := argString(args, "range"); r != "" {
-			if p := strings.SplitN(r, "..", 2); len(p) == 2 {
-				from, to = p[0], p[1]
-			} else {
-				from = r
-			}
-		}
-		report, err := intel.Churn(root, from, to)
-		if err != nil {
-			return "", err
-		}
-		return intel.RenderChurn(report), nil
-
+		return s.handleChurn(ctx, args)
 	case "kern_near", "kern_walk":
-		symbol := argString(args, "symbol")
-		if symbol == "" {
-			return "", fmt.Errorf("symbol is required")
-		}
-		ix, err := s.loadIndex(argString(args, "root"))
-		if err != nil {
-			return "", err
-		}
-		depth := 2
-		if v := argString(args, "depth"); v != "" {
-			n, err := atoiArg(v, depth)
-			if err != nil {
-				return "", err
-			}
-			depth = n
-		}
-		maxNodes := 100
-		if v := argString(args, "max"); v != "" {
-			n, err := atoiArg(v, maxNodes)
-			if err != nil {
-				return "", err
-			}
-			maxNodes = n
-		}
-		nodes, err := intel.Near(ix, symbol, depth, maxNodes)
-		if err != nil {
-			return "", err
-		}
-		return intel.RenderNear(ix, nodes), nil
-
+		return s.handleNear(ctx, args)
 	case "kern_graph":
-		symbol := argString(args, "symbol")
-		if symbol == "" {
-			return "", fmt.Errorf("symbol is required")
-		}
-		ix, err := s.loadIndex(argString(args, "root"))
-		if err != nil {
-			return "", err
-		}
-		maxTokens := intel.GraphCtxDefaultTokens
-		if v := argString(args, "max_tokens"); v != "" {
-			n, err := atoiArg(v, maxTokens)
-			if err != nil {
-				return "", err
-			}
-			maxTokens = n
-		}
-		return intel.GraphCtx(ix, symbol, maxTokens)
-
+		return s.handleGraph(ctx, args)
 	case "kern_explore":
-		symbol := argString(args, "symbol")
-		if symbol == "" {
-			return "", fmt.Errorf("symbol is required")
-		}
-		ix, err := s.loadIndex(argString(args, "root"))
-		if err != nil {
-			return "", err
-		}
-		depth := 0
-		if v := argString(args, "depth"); v != "" {
-			n, err := atoiArg(v, depth)
-			if err != nil {
-				return "", err
-			}
-			depth = n
-		}
-		maxNodes := 0
-		if v := argString(args, "max"); v != "" {
-			n, err := atoiArg(v, maxNodes)
-			if err != nil {
-				return "", err
-			}
-			maxNodes = n
-		}
-		rep, err := intel.Explore(ix, symbol, depth, maxNodes)
-		if err != nil {
-			return "", err
-		}
-		return intel.RenderExplore(rep), nil
-
+		return s.handleExplore(ctx, args)
 	case "kern_fts_search":
-		query := argString(args, "query")
-		if query == "" {
-			return "", fmt.Errorf("query is required")
-		}
-		root := resolveRoot(argString(args, "root"))
-		if !index.SQLiteEnabled() {
-			return "", fmt.Errorf("FTS5 requires a build with -tags sqlite (rebuild kern with 'go build -tags sqlite'); use kern_search for ranked free-text search on this default build")
-		}
-		limit := 20
-		if v := argString(args, "limit"); v != "" {
-			n, err := atoiArg(v, limit)
-			if err != nil {
-				return "", err
-			}
-			limit = n
-		}
-		// Ensure a persisted index exists before searching.
-		if _, err := index.LoadSQLite(root); err != nil {
-			return "", err
-		}
-		matches, err := index.FTS5Search(root, query, limit)
-		if err != nil {
-			return "", err
-		}
-		if len(matches) == 0 {
-			return "no full-text matches: " + query, nil
-		}
-		var b strings.Builder
-		for _, m := range matches {
-			b.WriteString(m.Kind)
-			b.WriteString(" ")
-			b.WriteString(m.FullName())
-			b.WriteString(" ")
-			b.WriteString(m.File)
-			b.WriteString(":")
-			b.WriteString(itoa(m.Line))
-			b.WriteString("\n")
-		}
-		return strings.TrimSuffix(b.String(), "\n"), nil
-
+		return s.handleFtsSearch(ctx, args)
 	case "kern_bridges":
-		ix, err := s.loadIndex(argString(args, "root"))
-		if err != nil {
-			return "", err
-		}
-		limit := 15
-		if v := argString(args, "limit"); v != "" {
-			n, err := atoiArg(v, limit)
-			if err != nil {
-				return "", err
-			}
-			limit = n
-		}
-		return intel.RenderBridges(intel.Bridges(ix, limit)), nil
-
+		return s.handleBridges(ctx, args)
 	case "kern_cochange":
-		root := argString(args, "root")
-		if root == "" {
-			cwd, _ := os.Getwd()
-			root = cwd
-		}
-		from, to := "", ""
-		if r := argString(args, "range"); r != "" {
-			if p := strings.SplitN(r, "..", 2); len(p) == 2 {
-				from, to = p[0], p[1]
-			} else {
-				from = r
-			}
-		}
-		limit := 20
-		if v := argString(args, "limit"); v != "" {
-			n, err := atoiArg(v, limit)
-			if err != nil {
-				return "", err
-			}
-			limit = n
-		}
-		report, err := intel.CoChange(root, from, to)
-		if err != nil {
-			return "", err
-		}
-		return intel.RenderCoChange(report, limit), nil
-
+		return s.handleCochange(ctx, args)
 	case "kern_probe":
-		task := argString(args, "task")
-		if task == "" {
-			return "", fmt.Errorf("task is required")
-		}
-		ix, err := s.loadIndex(argString(args, "root"))
-		if err != nil {
-			return "", err
-		}
-		maxTokens := 4000
-		if v := argString(args, "max_tokens"); v != "" {
-			n, err := atoiArg(v, maxTokens)
-			if err != nil {
-				return "", err
-			}
-			maxTokens = n
-		}
-		report := intel.Probe(ix, task, maxTokens)
-		text := intel.RenderProbe(report)
-		if report.Truncated {
-			text = intel.FitProbe(text, maxTokens)
-		}
-		return text, nil
-
+		return s.handleProbe(ctx, args)
 	case "kern_trace":
-		src := argString(args, "trace")
-		if src == "" {
-			return "", fmt.Errorf("trace is required")
-		}
-		ix, err := s.loadIndex(argString(args, "root"))
-		if err != nil {
-			return "", err
-		}
-		limit := 0
-		if v := argString(args, "limit"); v != "" {
-			n, err := atoiArg(v, limit)
-			if err != nil {
-				return "", err
-			}
-			limit = n
-		}
-		return intel.RenderTrace(intel.Trace(ix, src, "trace", limit)), nil
-
+		return s.handleTrace(ctx, args)
 	case "kern_lock":
-		scope := argString(args, "scope")
-		if scope == "" {
-			return "", fmt.Errorf("scope is required")
-		}
-		root := argString(args, "root")
-		if root == "" {
-			cwd, _ := os.Getwd()
-			root = cwd
-		}
-		lk, err := lock.Acquire(root, scope)
-		if err != nil {
-			// Only a genuine contention is "held (pid N)"; every other
-			// Acquire failure (bad scope, unwritable root) is reported as
-			// what it is (W2-33).
-			if errors.Is(err, lock.ErrLocked) {
-				_, pid, _ := lock.Held(root, scope)
-				return "", fmt.Errorf("lock %q is held (pid %d)", scope, pid)
-			}
-			return "", err
-		}
-		s.mu.Lock()
-		if s.locks == nil {
-			s.locks = map[string]*lock.Lock{}
-		}
-		if prev := s.locks[scope]; prev != nil {
-			_ = prev.Release()
-		}
-		s.locks[scope] = lk
-		s.mu.Unlock()
-		return fmt.Sprintf("lock acquired: %s (pid %d)", scope, os.Getpid()), nil
-
+		return s.handleLock(ctx, args)
 	case "kern_unlock":
-		scope := argString(args, "scope")
-		if scope == "" {
-			return "", fmt.Errorf("scope is required")
-		}
-		s.mu.Lock()
-		lk := s.locks[scope]
-		delete(s.locks, scope)
-		s.mu.Unlock()
-		if lk != nil {
-			if err := lk.Release(); err != nil {
-				return "", err
-			}
-			return "lock released: " + scope, nil
-		}
-		return "", fmt.Errorf("lock %q is not held by this server", scope)
-
+		return s.handleUnlock(ctx, args)
 	case "kern_lock_status":
-		root := argString(args, "root")
-		if root == "" {
-			cwd, _ := os.Getwd()
-			root = cwd
-		}
-		sts, err := lock.List(root)
-		if err != nil {
-			return "", err
-		}
-		if len(sts) == 0 {
-			return "no locks in workspace", nil
-		}
-		var b strings.Builder
-		for _, s := range sts {
-			state := "free"
-			if s.Held {
-				state = "HELD"
-			}
-			holder := ""
-			if s.PID > 0 {
-				holder = fmt.Sprintf(" (pid %d)", s.PID)
-			}
-			fmt.Fprintf(&b, "%s %s%s\n", s.Scope, state, holder)
-		}
-		return strings.TrimSuffix(b.String(), "\n"), nil
-
+		return s.handleLockStatus(ctx, args)
 	case "kern_usage_guide":
-		return Guide(), nil
-
+		return s.handleUsageGuide(ctx, args)
 	case "kern_guard_check":
-		changes, ix, err := s.changedContext(args)
-		if err != nil {
-			return "", err
-		}
-		if len(changes) == 0 {
-			return "no changed files (use file= or range=, or make edits)", nil
-		}
-		files := make([]string, 0, len(changes))
-		for _, c := range changes {
-			files = append(files, c.File)
-		}
-		root := resolveRoot(argString(args, "root"))
-		b, err := intel.LoadBoundaries(root)
-		if err != nil {
-			return "", err
-		}
-		violations := intel.CheckBoundaries(ix, b, files)
-		threshold := 0
-		if v := argString(args, "threshold"); v != "" {
-			n, err := atoiArg(v, threshold)
-			if err != nil {
-				return "", err
-			}
-			threshold = n
-		}
-		// threshold=-1 means "never reject" (audit only).
-		if threshold >= 0 && len(violations) > threshold {
-			return "", fmt.Errorf("REJECT: %d boundary violations exceed threshold %d", len(violations), threshold)
-		}
-		if argString(args, "format") == "sarif" {
-			return intel.RenderViolationsSARIF(violations, serverVersion), nil
-		}
-		return intel.RenderViolations(violations), nil
-
+		return s.handleGuardCheck(ctx, args)
 	case "kern_rename":
-		root := resolveRoot(argString(args, "root"))
-		ix, err := s.loadIndex(root)
-		if err != nil {
-			return "", err
-		}
-		oldName := argString(args, "symbol")
-		newName := argString(args, "new_name")
-		rep, err := rename.Rename(ix, oldName, newName)
-		if err != nil {
-			return "", err
-		}
-		if argString(args, "apply") == "true" || argString(args, "apply") == "1" {
-			if _, err := rename.Apply(root, rep); err != nil {
-				return "", fmt.Errorf("apply failed (files restored): %w", err)
-			}
-		}
-		return rename.Render(rep), nil
-
+		return s.handleRename(ctx, args)
 	case "kern_exec":
-		if argString(args, "list") == "true" || argString(args, "list") == "1" {
-			return fmt.Sprintf("installed runtimes: %s\nsupported languages: %s",
-				strings.Join(script.Available(), ", "), strings.Join(script.Languages(), ", ")), nil
-		}
-		run := script.Run{
-			Lang:      argString(args, "lang"),
-			Code:      argString(args, "code"),
-			Stdin:     argString(args, "stdin"),
-			NoIsolate: argString(args, "no_isolate") == "true" || argString(args, "no_isolate") == "1",
-		}
-		if v := argString(args, "timeout"); v != "" {
-			sec, err := strconv.Atoi(v)
-			if err != nil {
-				return "", fmt.Errorf("timeout: invalid integer %q", v)
-			}
-			run.Timeout = time.Duration(sec) * time.Second
-		}
-		if v := argString(args, "max"); v != "" {
-			n, err := strconv.Atoi(v)
-			if err != nil {
-				return "", fmt.Errorf("max: invalid integer %q", v)
-			}
-			if n > 0 {
-				run.MaxOut = n
-			}
-		}
-		res := script.RunScript(run)
-		if res.Err != nil {
-			return "", fmt.Errorf("kern_exec: %s", res.Err)
-		}
-		return res.Stdout, nil
-
+		return s.handleExec(ctx, args)
+	case "kern_analyze":
+		return s.handleAnalyze(ctx, args)
+	case "kern_plan":
+		return s.handlePlan(ctx, args)
+	case "kern_execute":
+		return s.handleExecute(ctx, args)
+	case "kern_verify":
+		return s.handleVerify(ctx, args)
+	case "kern_incident":
+		return s.handleIncident(ctx, args)
+	case "kern_what_if":
+		return s.handleWhatIf(ctx, args)
+	case "kern_impact":
+		return s.handleImpact(ctx, args)
+	case "kern_memory":
+		return s.handleMemory(ctx, args)
+	case "kern_agents":
+		return s.handleAgents(ctx, args)
+	case "kern_loop":
+		return s.handleLoop(ctx, args)
 	default:
 		return "", fmt.Errorf("unknown tool: %s", name)
 	}
+}
+
+// analyzeChange runs the Kern 2.0 context engine against a proposed change and
+// returns the rendered analysis (relevant code, architecture, dependencies,
+// memory, blast radius, risks, evidence, required validation). It is the
+// deterministic core behind the kern_analyze and kern_plan high-level tools.
+func analyzeChange(root, change string) (string, error) {
+	ix, err := index.Build(root)
+	if err != nil {
+		return "", fmt.Errorf("analyze: index: %w", err)
+	}
+	g := intelligence.FromIndex(ix)
+	sym := change
+	if strings.ContainsAny(change, " \t") {
+		cands := whatif.ExtractSymbols(change)
+		if len(cands) == 0 {
+			return "", fmt.Errorf("analyze: could not identify a symbol in the change description. Pass a bare symbol name (e.g. 'GetMySQLDB') or include a qualified name (e.g. 'pkg.Symbol') in the description.")
+		}
+		sym = cands[0]
+	}
+	mem := memory.NewMemoryStore(root)
+	fw := governance.NewFirewall().WithAgents(governance.NewAgent(
+		"context-engine", "Context Engine", "analyzer",
+		[]governance.Permission{
+			{Resource: "source", Action: "read"},
+			{Resource: "source", Action: "write"},
+			{Resource: "security", Action: "write"},
+			{Resource: "tests", Action: "write"},
+			{Resource: "config", Action: "write"},
+			{Resource: "documentation", Action: "write"},
+		},
+	))
+	eng := kerncontext.NewEngine(root, &g, mem, fw)
+	pkt, err := eng.AnalyzeChange(sym)
+	if err != nil {
+		return "", fmt.Errorf("analyze: %w", err)
+	}
+	return kerncontext.RenderText(pkt), nil
+}
+
+// simulateChange runs the what-if engine against a proposed change and returns
+// a deterministic impact report plus any typed claims. Read-only — it never
+// mutates the graph or index — and shared with the CLI via whatif.SimulateRender.
+func simulateChange(root string, kind whatif.ChangeKind, change, newTarget string) (string, error) {
+	return whatif.SimulateRender(root, kind, change, newTarget)
 }
 
 // changedContext resolves the changed files for a tool call: an explicit
 // comma-separated file list wins; otherwise the git range (empty = working
 // tree). Returns line-aware FileChanges so blast radius can be scoped to the
 // changed hunks.
-func (s *Server) changedContext(args map[string]any) ([]intel.FileChange, *index.Index, error) {
+func (s *Server) changedContext(ctx context.Context, args map[string]any) ([]intel.FileChange, *index.Index, error) {
 	root := resolveRoot(argString(args, "root"))
-	ix, err := s.loadIndex(root)
+	ix, err := s.loadIndex(ctx, root)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -3099,8 +1871,9 @@ func resolveRoot(root string) string {
 }
 
 // withinRoot resolves file against root (absolute paths are used as-is) and
-// requires the result to stay inside root, rejecting `..` escapes and absolute
-// paths that point outside the project boundary. It returns the resolved
+// requires the result to stay inside root, rejecting `..` escapes, absolute
+// paths that point outside the project boundary, and symlink escapes (a
+// symlink inside the project that points outside). It returns the resolved
 // absolute path.
 func withinRoot(root, file string) (string, error) {
 	var abs string
@@ -3108,6 +1881,22 @@ func withinRoot(root, file string) (string, error) {
 		abs = filepath.Clean(file)
 	} else {
 		abs = filepath.Join(root, file)
+	}
+	// Resolve symlinks on both the root and the candidate so a symlink inside
+	// the project that points outside cannot read/escape the project boundary.
+	// If either resolution fails (e.g. the file does not exist yet), fall back
+	// to the lexical Clean+Rel check below.
+	if rRoot, rerr := filepath.EvalSymlinks(root); rerr == nil {
+		if rAbs, aerr := filepath.EvalSymlinks(abs); aerr == nil {
+			rel, err := filepath.Rel(rRoot, rAbs)
+			if err != nil {
+				return "", fmt.Errorf("resolve %q: %w", file, err)
+			}
+			if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+				return "", fmt.Errorf("path %s escapes project root %s", abs, root)
+			}
+			return abs, nil
+		}
 	}
 	rel, err := filepath.Rel(root, abs)
 	if err != nil {
@@ -3119,27 +1908,53 @@ func withinRoot(root, file string) (string, error) {
 	return abs, nil
 }
 
+// validateRoot rejects a tool root that exists on disk but is not a directory
+// (e.g. a file). A nonexistent root is allowed because several tools create the
+// target directory before indexing it. The filesystem root ("/") is also
+// rejected: it is never a project to index. It returns "" on success so it can
+// be called inline as `if msg := validateRoot(root); msg != "" { return "", msg }`.
+func validateRoot(root string) error {
+	root = resolveRoot(root)
+	if isFilesystemRoot(root) {
+		return fmt.Errorf("root %q is a filesystem root and cannot be treated as a project", root)
+	}
+	if st, err := os.Stat(root); err == nil {
+		if !st.IsDir() {
+			return fmt.Errorf("root %q exists but is not a directory", root)
+		}
+	}
+	return nil
+}
+
+// indexScope carries the symbol index loaded during one tool call so provenance
+// can be stamped onto that same call's response. It lives on the per-request
+// context instead of the Server struct, so concurrent tool calls never share a
+// mutable lastIndex and read each other's provenance.
+type indexScope struct {
+	ix *index.Index
+}
+
+type indexScopeKey struct{}
+
 // loadIndex returns the session's symbol index, reused while fresh and rebuilt
 // when stale or missing (see project.Session.Index). The returned index is
-// recorded so the tool response can be stamped with provenance.
-func (s *Server) loadIndex(root string) (*index.Index, error) {
+// recorded on the per-call scope so the tool response can be stamped with
+// provenance.
+func (s *Server) loadIndex(ctx context.Context, root string) (*index.Index, error) {
 	ix, err := s.sessionFor(root).Index()
 	if err != nil {
 		return nil, err
 	}
-	s.mu.Lock()
-	s.lastIndex = ix
-	s.mu.Unlock()
+	if scope, ok := ctx.Value(indexScopeKey{}).(*indexScope); ok {
+		scope.ix = ix
+	}
 	return ix, nil
 }
 
 // provenance returns a one-line stamp describing the index the current tool
 // call used, or "" when the call did not load an index (e.g. prompt or memory
 // tools). The index is guaranteed fresh by project.Session.Index.
-func (s *Server) provenance() string {
-	s.mu.Lock()
-	ix := s.lastIndex
-	s.mu.Unlock()
+func (s *Server) provenance(ix *index.Index) string {
 	if ix == nil {
 		return ""
 	}

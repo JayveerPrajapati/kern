@@ -9,12 +9,12 @@
 package main
 
 import (
-	"time"
 	"context"
 	"flag"
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/JayveerPrajapati/kern/internal/mcp"
 	"github.com/JayveerPrajapati/kern/internal/optimize"
@@ -43,7 +43,7 @@ func main() {
 	srv := mcp.NewServer(os.Stdin, os.Stdout)
 	// Closing os.Stdin from another goroutine does not reliably unblock the
 	// scanner's read, so Serve() alone may never return after a signal:
-	// cancel in-flight tools, wait for them to drain, then exit (W2-41).
+	// cancel in-flight tools, wait for them to drain, then exit.
 	go func() {
 		<-ctx.Done()
 		srv.CancelAll()

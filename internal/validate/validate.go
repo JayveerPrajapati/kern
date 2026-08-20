@@ -1,16 +1,20 @@
 // Package validate picks a language-appropriate build/test/syntax-check
-// command for a project and runs it safely. It is the syntax gate that backs
-// the auto-validation feature (#7) and feeds the self-correction loop (#9).
+// command for a project and runs it safely.
 package validate
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"time"
+
+	"github.com/JayveerPrajapati/kern/internal/index"
+	"github.com/JayveerPrajapati/kern/internal/processgroup"
 )
 
 // Command is a detected validation command.
@@ -77,6 +81,30 @@ func detectCandidates(root string) []*Command {
 			&Command{Name: "go test", Cmd: "go", Args: []string{"test", "./..."}},
 			&Command{Name: "go vet", Cmd: "go", Args: []string{"vet", "./..."}},
 		)
+	case has("pom.xml"):
+		out = append(out,
+			&Command{Name: "maven test", Cmd: "mvn", Args: []string{"test", "-q"}},
+			&Command{Name: "maven compile", Cmd: "mvn", Args: []string{"compile", "-q"}},
+		)
+	case has("build.gradle", "build.gradle.kts"):
+		out = append(out,
+			&Command{Name: "gradle build", Cmd: "gradle", Args: []string{"build", "-q"}},
+			&Command{Name: "gradle test", Cmd: "gradle", Args: []string{"test", "-q"}},
+		)
+	case nestedPom(root) != "" || nestedGradle(root) != "":
+		// Single-module Maven/Gradle project in a subdirectory (no root
+		// pom.xml/build.gradle). Use -f so mvn/gradle finds the build file
+		// without a reactor.
+		if p := nestedPom(root); p != "" {
+			out = append(out,
+				&Command{Name: "maven test", Cmd: "mvn", Args: []string{"-f", p, "test", "-q"}},
+				&Command{Name: "maven compile", Cmd: "mvn", Args: []string{"-f", p, "compile", "-q"}},
+			)
+		} else if g := nestedGradle(root); g != "" {
+			out = append(out,
+				&Command{Name: "gradle build", Cmd: "gradle", Args: []string{"-p", filepath.Dir(g), "build", "-q"}},
+			)
+		}
 	case has("Cargo.toml"):
 		out = append(out,
 			&Command{Name: "cargo build", Cmd: "cargo", Args: []string{"build", "--locked"}},
@@ -90,8 +118,8 @@ func detectCandidates(root string) []*Command {
 		)
 	case has("pyproject.toml", "pytest.ini", "setup.py", "setup.cfg", "requirements.txt"):
 		out = append(out,
-			&Command{Name: "pytest", Cmd: "python", Args: []string{"-m", "pytest", "-q"}},
 			&Command{Name: "python py_compile", Cmd: "python", Args: []string{"-m", "compileall", "-q", root}},
+			&Command{Name: "pytest", Cmd: "python", Args: []string{"-m", "pytest", "-q"}},
 		)
 	case has("Gemfile", "Rakefile"):
 		// `ruby -c` with no file argument reads from stdin and blocks forever,
@@ -116,14 +144,114 @@ func detectCandidates(root string) []*Command {
 			&Command{Name: "make test", Cmd: "make", Args: []string{"test"}},
 			&Command{Name: "make build", Cmd: "make", Args: []string{"build"}},
 		)
+	case has("Chart.yaml") || glob("*/Chart.yaml"):
+		// Helm chart repo: lint each chart directory containing Chart.yaml.
+		chartDirs := helmChartDirs(root)
+		for _, d := range chartDirs {
+			out = append(out, &Command{Name: "helm lint " + d, Cmd: "helm", Args: []string{"lint", d}})
+		}
 	case glob("*.go"):
 		out = append(out, &Command{Name: "go vet (no module)", Cmd: "go", Args: []string{"vet", "./..."}})
 	case glob("*.py"):
 		out = append(out, &Command{Name: "python py_compile", Cmd: "python", Args: []string{"-m", "compileall", "-q", root}})
 	case glob("*.js"), glob("*.ts"):
 		out = append(out, &Command{Name: "node syntax check", Cmd: "node", Args: []string{"--check"}})
+	case hasFilesRecursive(root, ".py"):
+		out = append(out, &Command{Name: "python py_compile", Cmd: "python", Args: []string{"-m", "compileall", "-q", root}})
+	case hasFilesRecursive(root, ".js"):
+		out = append(out, &Command{Name: "node syntax check", Cmd: "node", Args: []string{"--check"}})
 	}
 	return out
+}
+
+// hasFilesRecursive reports whether any file with the given extension exists
+// under root, including subdirectories (shallow walk, stops at the first
+// match). Ignored directories (index.IgnoredDir) are skipped. This catches
+// projects whose source lives only in subdirectories, where root-level globs
+// miss every file.
+func hasFilesRecursive(root, ext string) bool {
+	found := false
+	_ = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if d.IsDir() {
+			if path != root && index.IgnoredDir(d.Name()) {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if strings.HasSuffix(strings.ToLower(d.Name()), ext) {
+			found = true
+			return filepath.SkipAll
+		}
+		return nil
+	})
+	return found
+}
+
+// nestedPom returns the root-relative path of the first pom.xml in a
+// subdirectory (one level deep), or "" when none exists. This handles
+// single-module Maven projects that live in a subdirectory without a root
+// aggregator pom (e.g. lcm-app/pom.xml).
+func nestedPom(root string) string {
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return ""
+	}
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		p := filepath.Join(root, e.Name(), "pom.xml")
+		if _, err := os.Stat(p); err == nil {
+			return filepath.Join(e.Name(), "pom.xml")
+		}
+	}
+	return ""
+}
+
+// nestedGradle returns the root-relative path of the first build.gradle or
+// build.gradle.kts in a subdirectory (one level deep), or "" when none exists.
+func nestedGradle(root string) string {
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return ""
+	}
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		for _, name := range []string{"build.gradle", "build.gradle.kts"} {
+			p := filepath.Join(root, e.Name(), name)
+			if _, err := os.Stat(p); err == nil {
+				return filepath.Join(e.Name(), name)
+			}
+		}
+	}
+	return ""
+}
+
+// helmChartDirs returns root-relative chart directories (one level deep)
+// that contain a Chart.yaml, plus "." when root itself has a Chart.yaml.
+func helmChartDirs(root string) []string {
+	var dirs []string
+	if _, err := os.Stat(filepath.Join(root, "Chart.yaml")); err == nil {
+		dirs = append(dirs, ".")
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return dirs
+	}
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		if _, err := os.Stat(filepath.Join(root, e.Name(), "Chart.yaml")); err == nil {
+			dirs = append(dirs, e.Name())
+		}
+	}
+	return dirs
 }
 
 // Result of a validation run.
@@ -136,9 +264,16 @@ type Result struct {
 	Dur      time.Duration
 }
 
+// maxOutput caps the amount of combined output captured from a validation
+// command. A noisy build or test cannot exhaust memory — only this much is
+// buffered as error context for the heal loop.
+const maxOutput = 1 << 20 // 1 MiB
+
 // Run executes the validation command in root with a timeout. Output is
 // capped at maxOutput bytes (error context is enough for the heal loop). The
-// parent context cancels the command (killing it) when aborted.
+// parent context cancels the command when aborted, killing the whole process
+// group (including grandchildren such as compiler daemons or npm
+// postinstall hooks) rather than just the direct child.
 func Run(parent context.Context, root string, c *Command, timeout time.Duration) *Result {
 	if parent == nil {
 		parent = context.Background()
@@ -152,16 +287,26 @@ func Run(parent context.Context, root string, c *Command, timeout time.Duration)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, c.Cmd, c.Args...)
 	cmd.Dir = root
+	out := &cappedBuffer{limit: maxOutput}
+	cmd.Stdout = out
+	cmd.Stderr = out
+	processgroup.Set(cmd)
 	start := time.Now()
-	out, err := cmd.CombinedOutput()
+	err := cmd.Run()
 	res.Dur = time.Since(start)
-	res.Output = string(out)
+	res.Output = out.String()
 	switch {
 	case ctx.Err() == context.DeadlineExceeded:
+		// The context kill only reaches the direct child; kill the process
+		// group so any grandchildren the command spawned also die.
+		processgroup.Kill(cmd)
+		res.ExitCode = -1 // signal-killed, not a clean exit
 		res.Err = fmt.Errorf("timed out after %s", timeout)
 		res.OK = false
 		return res
 	case ctx.Err() == context.Canceled:
+		processgroup.Kill(cmd)
+		res.ExitCode = -1
 		res.Err = fmt.Errorf("cancelled")
 		res.OK = false
 		return res
@@ -177,6 +322,36 @@ func Run(parent context.Context, root string, c *Command, timeout time.Duration)
 	res.OK = true
 	return res
 }
+
+// cappedBuffer buffers up to limit bytes of combined output and discards (but
+// still counts, so writes never block) everything beyond it. It records a
+// single extra byte so the caller can distinguish "exactly limit" from
+// "truncated" without buffering the whole stream. This bounds memory for
+// commands that spew unbounded output.
+type cappedBuffer struct {
+	buf       bytes.Buffer
+	limit     int
+	overLimit bool
+}
+
+func (c *cappedBuffer) Write(p []byte) (int, error) {
+	n := len(p)
+	room := c.limit + 1 - c.buf.Len()
+	if room <= 0 {
+		c.overLimit = true
+		return n, nil
+	}
+	if n > room {
+		p = p[:room]
+		c.overLimit = true
+	}
+	c.buf.Write(p)
+	// Always report the full input length so the exec copy loop does not see a
+	// "short write" (it only errors when n < len(p) with a nil error).
+	return n, nil
+}
+
+func (c *cappedBuffer) String() string { return c.buf.String() }
 
 // Toolchain reports the runtime toolchain available for a detected command
 // (used for richer CLI output).

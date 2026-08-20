@@ -2,6 +2,8 @@
 bin/
 dist/
 /kern
+/kern-server
+/kern-mcp
 
 # Node/plugin
 node_modules/

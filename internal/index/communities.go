@@ -8,18 +8,21 @@ const (
 	MaxCommunitySymbols    = 50000
 )
 
-// CommunityLabels clusters symbols with label propagation over project-local
-// call edges (stdlib/external callees are ignored). The result is
-// deterministic: labels are initialised to the sorted symbol name and updated
-// in a fixed order with lexicographic tie-breaking. Keys are symbol full
-// names; each value is the community label (a member's full name). This is
-// the single source of truth for the clustering: the intel package renders
-// it into Community reports and the SQLite store persists it, so graph
-// consumers never recompute the propagation twice.
-// For large repos (> MaxCommunitySymbols), returns empty to avoid O(n*iter) latency.
+// CommunityLabels clusters symbols with deterministic label propagation over
+// project-local call edges (external callees ignored). Keys are symbol full
+// names; values are community labels. Returns empty for repos over
+// MaxCommunitySymbols to avoid O(n*iter) latency.
 func (ix *Index) CommunityLabels() map[string]string {
 	if len(ix.Symbols) > MaxCommunitySymbols {
 		return map[string]string{}
+	}
+	// Build a set of project-local symbol full names so we can skip external
+	// callees (JDK types like List.of, Date, Optional.of) without relying on
+	// resolveName's bare-name fallback, which would let an external call
+	// "java.util.List.of" resolve to a project method named "of".
+	localFull := map[string]bool{}
+	for _, s := range ix.Symbols {
+		localFull[s.FullName()] = true
 	}
 	adj := map[string][]string{}
 	nodes := []string{}
@@ -29,7 +32,10 @@ func (ix *Index) CommunityLabels() map[string]string {
 			if c == caller {
 				continue
 			}
-			if _, ok := resolveName(ix, c); !ok {
+			// Only include callees that are themselves project-local symbols.
+			// This excludes external/stdlib call targets that would otherwise
+			// dominate communities (e.g. "Date", "List.of", "Optional.of").
+			if !localFull[c] {
 				continue
 			}
 			if !containsStr(adj[caller], c) {

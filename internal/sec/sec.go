@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/JayveerPrajapati/kern/internal/ignore"
 	"github.com/JayveerPrajapati/kern/internal/index"
 	"github.com/JayveerPrajapati/kern/internal/pii"
 )
@@ -60,6 +61,35 @@ var (
 	reCodeEval = regexp.MustCompile(`(?i)\b(?:pickle\.loads?|yaml\.load|yaml\.unsafe_load|eval\s*\(|new\s+Function\s*\()`)
 
 	reUnsafeReflection = regexp.MustCompile(`\b(?:unsafe\.Pointer|unsafe\.StringData|reflect\.UnsafePointer|unsafe\.Slice)\s*\(`)
+
+	// Config-aware rules: detect misconfigurations in .properties/.yml/.yaml
+	// files. These are not source-code patterns — they are config-level bugs
+	// that pattern-based source scanners miss entirely.
+
+	// rePlaceholderBug matches $VAR without braces in Spring properties.
+	// Spring's ${VAR} syntax resolves env variables; $VAR injects the literal
+	// string "$VAR", silently breaking config in production.
+	// Matches: key=$VAR  key=$VAR_PATH  url=jdbc://$HOST:$PORT/db
+	// Does NOT match: ${VAR} (the '{' after '$' fails [A-Z_]), $$, $ (alone)
+	// Note: Go's RE2 has no lookahead; greedy [A-Z0-9_]* already captures the
+	// full variable name, and ${VAR} can't match because '{' isn't [A-Z_].
+	// The key/prefix class excludes newlines ([^\n=]) so a match never crosses
+	// line boundaries — without that guard the regex could start at one line
+	// (e.g. "name: foo") and greedily consume newlines until an "=" appears on
+	// a much later line (e.g. a shell "run:" step in a GitHub Actions YAML),
+	// flagging a CI workflow as a Spring config bug.
+	rePlaceholderBug = regexp.MustCompile(`(?m)^[^#\s][^\n=]*=\s*.*\$([A-Z_][A-Z0-9_]*)`)
+
+	// reHardcodedConfigCred matches password/secret/token/key assignments
+	// with a literal (non-placeholder) value in config files.
+	// Matches: password=secret123  spring.datasource.password=admin
+	// Does NOT match: password=${DB_PASSWORD}  password=$ENV
+	reHardcodedConfigCred = regexp.MustCompile(`(?i)^[^#=\s]*(?:password|passwd|secret|api[_-]?key|auth[_-]?token|access[_-]?key|private[_-]?key)\s*[=:]\s*([^\s${][^\s#]+)`)
+
+	// reDisabledSsl matches SSL/TLS verification disabled in config files.
+	// Matches: feign.client.ssl.verification.enabled=false
+	//          spring.ssl.bundle.*.keystore.type=NONE (false-positive risk; keep narrow)
+	reDisabledSsl = regexp.MustCompile(`(?im)^[^#=\s]*(?:ssl|tls|certificate)[^=]*(?:verify|verification|validation|enabled)\s*=\s*false\b`)
 )
 
 // Rules is the deterministic rule set, sorted by ID then summary. The
@@ -107,11 +137,42 @@ func ScanFile(rel string, src []byte) []Finding {
 			if r.Label == "PHONE" {
 				continue
 			}
-			// Deterministic false-positive filters: a scanner that flags its
-			// own detector regexes or schema introspection is noise.
-			if isRegexLiteral(src, idx[0]) {
-				continue
+			// CDNs use pkg@version URLs (e.g. boxicons@2.1.4) whose "@2.1.4"
+			// suffix matches the EMAIL pattern. A domain part that is a
+			// semantic-version string is not an email address.
+			if r.Label == "EMAIL" {
+				hit := string(src[idx[0]:idx[1]])
+				if at := strings.IndexByte(hit, '@'); at >= 0 && pii.IsVersionLike(hit[at+1:]) {
+					continue
+				}
 			}
+	// Deterministic false-positive filters: a scanner that flags its
+	// own detector regexes or schema introspection is noise.
+	if isRegexLiteral(src, idx[0]) {
+		continue
+	}
+	// Skip matches inside source-code comment lines (// or # after
+	// optional whitespace). Documentation examples like
+	// "// Matches: password=secret123" are not real credentials.
+	if isCommentLine(src, idx[0]) {
+		continue
+	}
+	// EMAIL false-positive guards: emails in HTML placeholder
+	// attributes ("placeholder=xyz@gmail.com"), CSS comments
+	// (/* email here */) and HTML comments (<!-- email here -->)
+	// are not hardcoded secrets — they are UX hints or documentation.
+	if r.Label == "EMAIL" && isInertEmailContext(src, idx[0], idx[1]) {
+		continue
+	}
+	// insecure-random false-positive guard: Math.random / rand.Intn
+	// used for visual/animation/game effects (fireworks, particles,
+	// dice rolls) is not security-relevant. Only flag when a security
+	// keyword (token, password, secret, key, session, nonce, csrf,
+	// salt, otp, auth) appears within a context window around the
+	// match — that is the case the rule's own summary targets.
+	if r.ID == "insecure-random" && !hasSecurityContext(src, idx[0]) {
+		continue
+	}
 			if r.ID == "sql-injection" && isPragmaTableInfo(src, idx[0]) {
 				continue
 			}
@@ -145,11 +206,109 @@ func isRegexLiteral(src []byte, pos int) bool {
 	lineStart := bytes.LastIndexByte(src[:pos], '\n') + 1
 	lineEnd := bytes.IndexByte(src[pos:], '\n')
 	if lineEnd < 0 {
-		lineEnd = len(src)
+		lineEnd = len(src) // no newline after pos: end of file (absolute index)
+	} else {
+		lineEnd += pos // convert relative offset to absolute index
 	}
-	lineEnd += pos
 	line := src[lineStart:lineEnd]
 	return bytes.Contains(line, []byte("regexp.MustCompile"))
+}
+
+// isCommentLine reports whether the match at pos sits on a source-code comment
+// line — a line whose first non-whitespace characters are // (Go/C/JS/...) or #
+// (Shell/Python/Ruby/...). Documentation examples in comments (e.g.
+// "// Matches: password=secret123" in this package's own source) are not real
+// credentials or config, so findings inside comment lines are suppressed.
+func isCommentLine(src []byte, pos int) bool {
+	lineStart := bytes.LastIndexByte(src[:pos], '\n') + 1
+	trimmed := bytes.TrimLeft(src[lineStart:pos], " \t")
+	return bytes.HasPrefix(trimmed, []byte("//")) || bytes.HasPrefix(trimmed, []byte("#"))
+}
+
+// isInertEmailContext reports whether an EMAIL match at src[start:end] sits in
+// a context where the email is not a hardcoded secret: an HTML placeholder
+// attribute (placeholder="xyz@gmail.com"), a CSS comment (/* ... */), or an
+// HTML comment (<!-- ... -->). These are UX hints or documentation, not
+// credentials committed to source.
+func isInertEmailContext(src []byte, start, end int) bool {
+	// HTML placeholder attribute: the match is inside a quoted value of a
+	// placeholder= attribute. Check for "placeholder" followed by = and a
+	// quote before the match position, within a reasonable window.
+	windowStart := start - 80
+	if windowStart < 0 {
+		windowStart = 0
+	}
+	before := src[windowStart:start]
+	if bytes.Contains(bytes.ToLower(before), []byte("placeholder")) {
+		// Verify it's an attribute assignment (placeholder= or placeholder =)
+		// not just the word "placeholder" in prose. Look for = and a quote
+		// in the 30 chars before the match.
+		recent := before
+		if len(recent) > 30 {
+			recent = recent[len(recent)-30:]
+		}
+		if bytes.ContainsAny(recent, "=") && bytes.ContainsAny(recent, "\"'") {
+			return true
+		}
+	}
+	// CSS comment: the match is between /* and */ on the same or a nearby
+	// preceding line. Check if there's an unclosed /* before the match
+	// with no intervening */ .
+	if isInBlockComment(src, start, end, "/*", "*/") {
+		return true
+	}
+	// HTML comment: <!-- ... -->
+	if isInBlockComment(src, start, end, "<!--", "-->") {
+		return true
+	}
+	return false
+}
+
+// isInBlockComment reports whether src[start:end] sits inside an unclosed
+// block comment delimited by openTok and closeTok. It scans backward from
+// start looking for the nearest openTok or closeTok; if openTok is found
+// first (i.e. more recently), the match is inside a comment.
+func isInBlockComment(src []byte, start, end int, openTok, closeTok string) bool {
+	// Scan a window backward from the match position. 512 bytes is enough
+	// to cover multi-line comments in typical source without scanning the
+	// entire file.
+	windowStart := start - 512
+	if windowStart < 0 {
+		windowStart = 0
+	}
+	window := src[windowStart:start]
+	// Find the last occurrence of either token in the backward window.
+	lastOpen := bytes.LastIndex(window, []byte(openTok))
+	lastClose := bytes.LastIndex(window, []byte(closeTok))
+	// Inside a comment if the last opener is more recent than the last
+	// closer (i.e. the comment hasn't been closed yet).
+	return lastOpen > lastClose
+}
+
+// reSecurityContext matches security-relevant keywords that, when present
+// near an insecure-random call, indicate the randomness is used for a
+// security-sensitive purpose (tokens, session IDs, nonces, salts, OTPs). The
+// rule's summary is "non-cryptographic randomness for security-relevant data"
+// — without one of these keywords the call is likely visual/game logic.
+// Substring matching (no \b) so camelCase identifiers like generateSessionToken
+// or createNonce are caught; being liberal here is conservative for a security
+// scanner — over-matching means we flag more, not fewer.
+var reSecurityContext = regexp.MustCompile(`(?i)(?:token|password|passwd|secret|apikey|authtoken|sessionid|nonce|csrf|salt|otp|captcha|verify|challenge|bearer|jwt)`)
+
+// hasSecurityContext reports whether a security-relevant keyword appears
+// within a 200-byte window around pos (100 bytes before and after). This is
+// the gate for the insecure-random rule: a Math.random() call with no
+// security keyword nearby is visual/animation logic, not a crypto weakness.
+func hasSecurityContext(src []byte, pos int) bool {
+	from := pos - 100
+	if from < 0 {
+		from = 0
+	}
+	to := pos + 100
+	if to > len(src) {
+		to = len(src)
+	}
+	return reSecurityContext.Match(src[from:to])
 }
 
 // isPragmaTableInfo reports whether a dynamic-SQL match at pos is a SQLite
@@ -176,42 +335,113 @@ func isPragmaTableInfo(src []byte, pos int) bool {
 var rePragmaConcat = regexp.MustCompile(`\s*\+\s*[a-zA-Z_][a-zA-Z0-9_]*\s*(?:\)|"|'|\+|\s*$)`)
 
 // isTestFile reports whether a file is a test fixture, matching the naming
-// conventions across the indexed languages (*_test.go, foo_test.py,
-// auth.test.js, ...). Their fixtures routinely hold fake secrets that are not
-// real findings.
-// auth.test.js, ...). Their fixtures routinely hold fake secrets that are not
-// real findings.
+// conventions across the indexed languages: *_test.go, foo_test.py,
+// auth.test.js, *Test.java (JUnit/Maven), *Spec.java (Spock), test_*.py
+// (pytest), *_spec.rb (RSpec), *.spec.ts (Jest). Files inside test
+// directories (/test/, /tests/, src/test/) are also caught. Their fixtures
+// routinely hold fake secrets that are not real findings.
 func isTestFile(rel string) bool {
 	base := filepath.Base(rel)
-	return strings.Contains(base, "_test.") || strings.Contains(base, ".test.")
+	// Substring patterns covering Go, Python, JS/TS, Ruby conventions.
+	if strings.Contains(base, "_test.") || strings.Contains(base, ".test.") ||
+		strings.Contains(base, ".spec.") || strings.Contains(base, "_spec.") {
+		return true
+	}
+	// Java/Maven convention: *Test.java, *Tests.java, *IT.java, *Spec.java.
+	// Check the stem (without extension) against common test suffixes.
+	stem := strings.TrimSuffix(base, filepath.Ext(base))
+	for _, suffix := range []string{"Test", "Tests", "IT", "Spec", "Specs", "TestCase", "TestCases"} {
+		if strings.HasSuffix(stem, suffix) {
+			return true
+		}
+	}
+	// Python pytest convention: test_*.py
+	if strings.HasPrefix(base, "test_") {
+		return true
+	}
+	// Directory-based test detection: files under /test/ or /tests/ paths
+	// (Maven's src/test/java, Go's test dirs, etc.).
+	lower := strings.ToLower(rel)
+	if strings.Contains(lower, "/test/") || strings.Contains(lower, "/tests/") {
+		return true
+	}
+	return false
 }
 
-// Scan walks root (mirroring the index walk: same extension filter and ignored
-// directories) and returns every finding in the tree. Test files are skipped:
-// their fixtures routinely hold fake secrets that are not real findings. Walk
-// errors are returned so an unreadable tree can't silently produce a
-// misleading "clean" result.
+// maxLineLength returns the length of the longest line in src. Minified JS
+// bundles pack entire libraries into single lines exceeding thousands of
+// characters; legitimate source rarely exceeds 200.
+func maxLineLength(src []byte) int {
+	max, cur := 0, 0
+	for _, b := range src {
+		cur++
+		if b == '\n' {
+			if cur > max {
+				max = cur
+			}
+			cur = 0
+		}
+	}
+	if cur > max {
+		max = cur
+	}
+	return max
+}
+
+// Scan walks root (mirroring the index walk: same extension filter, ignored
+// directories, and .gitignore/.kernignore patterns) and returns every finding
+// in the tree. Test files are skipped: their fixtures routinely hold fake
+// secrets that are not real findings. Walk errors are returned so an unreadable
+// tree can't silently produce a misleading "clean" result.
 func Scan(root string) ([]Finding, error) {
 	var findings []Finding
+	ign := ignore.Load(root)
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
+		rel, rerr := filepath.Rel(root, path)
+		if rerr != nil {
+			return nil
+		}
+		rel = filepath.ToSlash(rel)
 		if d.IsDir() {
 			if path != root && index.IgnoredDir(d.Name()) {
 				return filepath.SkipDir
 			}
+			// Honor .gitignore/.kernignore directory patterns so trees like
+			// .venv_pdf/, node_modules/, dist/ are not scanned.
+			if path != root && ign.Ignored(rel) {
+				return filepath.SkipDir
+			}
 			return nil
 		}
-		rel, rerr := filepath.Rel(root, path)
-		if rerr != nil || !index.QuickExt(rel) || isTestFile(rel) {
+		// Honor .gitignore/.kernignore file patterns.
+		if ign.Ignored(rel) {
+			return nil
+		}
+		if !index.QuickExt(rel) && !isConfigFile(rel) || isTestFile(rel) {
 			return nil
 		}
 		src, serr := os.ReadFile(path)
 		if serr != nil {
-			return serr
+			// Skip unreadable files (binaries, broken symlinks, permission
+			// denied) and continue the walk instead of aborting the entire
+			// scan. A single unreadable file must not fail the whole check.
+			return nil
+		}
+		// Skip minified JavaScript bundles (vendored libraries in static/
+		// dirs): they pack entire libraries into single lines thousands of
+		// characters long and routinely trip the hardcoded-secret detectors
+		// with bogus findings.
+		if strings.EqualFold(filepath.Ext(rel), ".js") && maxLineLength(src) > 2000 {
+			return nil
 		}
 		findings = append(findings, ScanFile(rel, src)...)
+		// Config files get an additional config-aware scan pass.
+		if isConfigFile(rel) {
+			findings = append(findings, ScanConfigFile(rel, src)...)
+		}
 		return nil
 	})
 	sort.Slice(findings, func(i, j int) bool {
@@ -284,6 +514,55 @@ func Counts(findings []Finding) map[string]int {
 		c[f.Severity]++
 	}
 	return c
+}
+
+// isConfigFile reports whether a file is a configuration file that should
+// receive the config-aware scan pass. These files are not source code but
+// can harbor config-level bugs ($VAR vs ${VAR}, hardcoded credentials).
+func isConfigFile(rel string) bool {
+	ext := strings.ToLower(filepath.Ext(rel))
+	switch ext {
+	case ".properties", ".conf", ".ini", ".cfg", ".env":
+		return true
+	case ".yml", ".yaml":
+		return true
+	}
+	// Spring Boot's application.properties / application.yml by name.
+	base := strings.ToLower(filepath.Base(rel))
+	if strings.HasPrefix(base, "application") {
+		return true
+	}
+	return false
+}
+
+// ScanConfigFile runs config-specific rules against a configuration file.
+// These rules detect misconfigurations that source-code scanners miss:
+// $VAR without ${}, hardcoded credentials, disabled SSL verification.
+func ScanConfigFile(rel string, src []byte) []Finding {
+	var findings []Finding
+	for _, r := range configRules {
+		for _, idx := range r.RE.FindAllIndex(src, -1) {
+			line := lineAt(src, idx[0])
+			findings = append(findings, Finding{
+				File:     rel,
+				Line:     line,
+				Rule:     r.ID,
+				Severity: string(r.Severity),
+				Message:  r.Summary,
+				Snippet:  snippet(src, idx[0], idx[1]),
+			})
+		}
+	}
+	return findings
+}
+
+// configRules are the config-specific rules. They are separate from Rules
+// (source-code rules) so they only fire on config files, not source code
+// that might contain similar patterns (e.g. a Go string literal with $VAR).
+var configRules = []Rule{
+	{ID: "placeholder-bug", Severity: SeverityWarning, Summary: "property placeholder uses $VAR instead of ${VAR} — Spring injects the literal string, not the env value", RE: rePlaceholderBug},
+	{ID: "hardcoded-config-cred", Severity: SeverityWarning, Summary: "hardcoded credential in config file (use ${ENV_VAR} instead)", RE: reHardcodedConfigCred},
+	{ID: "disabled-ssl-verify", Severity: SeverityWarning, Summary: "SSL/TLS verification disabled in config", RE: reDisabledSsl},
 }
 
 func lineAt(src []byte, off int) int {

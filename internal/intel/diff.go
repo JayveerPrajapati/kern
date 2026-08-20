@@ -71,7 +71,7 @@ func parseDiffOutput(out string) []FileChange {
 			}
 			if to == "/dev/null" {
 				// Binary deletion: report the old path as a whole-file change
-				// (W2-19) so deletions never vanish from kern changes.
+				// so deletions never vanish from kern changes.
 				to = curTo
 			}
 			if to != "" {
@@ -84,10 +84,7 @@ func parseDiffOutput(out string) []FileChange {
 			inHunk = false
 			if path == "/dev/null" {
 				// Deleted file: report it as a whole-file change. A deletion
-				// has no added lines, so Ranges stays empty; without this
-				// entry `kern changes` on a deletion-only diff reported "no
-				// changed files" and mixed commits silently omitted deletions
-				// (W2-19).
+				// has no added lines, so Ranges stays empty.
 				if curTo != "" {
 					changes = append(changes, FileChange{File: curTo})
 					last = len(changes) - 1

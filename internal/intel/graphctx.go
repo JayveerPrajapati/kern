@@ -21,14 +21,11 @@ const (
 )
 
 // GraphCtx returns a token-budgeted, names-only graph context for a symbol:
-// its definition line, callers first (the direction that matters most for
-// impact), then callees, every adjacency edge tagged with its confidence
-// (EXTRACTED/INFERRED/AMBIGUOUS), and the community the symbol belongs to.
-// Calls to interface methods carry dispatch hints listing the concrete
-// implementations the call could reach at runtime. It is kern's one-call
-// adjacency answer for agents — parity with code-review-graph's
-// minimal_context and codegraph's explore, without the source text.
-// maxTokens <= 0 means no budget cap.
+// its definition line, callers first, then callees, every adjacency edge
+// tagged with its confidence (EXTRACTED/INFERRED/AMBIGUOUS), and the community
+// the symbol belongs to. Calls to interface methods carry dispatch hints
+// listing the concrete implementations the call could reach. maxTokens <= 0
+// means no budget cap.
 func GraphCtx(ix *index.Index, symbol string, maxTokens int) (string, error) {
 	if symbol == "" {
 		return "", fmt.Errorf("symbol is required")
@@ -153,12 +150,10 @@ func graphInterfaceMethod(ix *index.Index, name string) (recv, meth string, ok b
 }
 
 // graphDispatchImpls lists the concrete runtime targets of a call to an
-// interface method: types in the same module that could satisfy the call. It
-// merges explicit implements edges (languages with an implements clause) with
-// Go-style structural satisfaction — any concrete type in the interface's own
-// package that defines a method of the same name is a possible implementer.
-// Only types that actually define the method are listed; another interface is
-// never a dispatch target. Empty when name is not an interface method.
+// interface method: types in the same module that could satisfy the call.
+// It merges explicit implements edges with Go-style structural satisfaction
+// (any concrete type in the interface's package defining the method). Empty
+// when name is not an interface method.
 func graphDispatchImpls(ix *index.Index, name string) []string {
 	recv, meth, ok := graphInterfaceMethod(ix, name)
 	if !ok {
@@ -231,11 +226,10 @@ func (r graphEdgeRow) String() string {
 }
 
 // graphNeighbors returns the deduped, sorted adjacency of root in one
-// direction ("caller" = from → root, "callee" = root → from), with each
-// edge's confidence label and the neighbor's file:line when resolvable.
-// Interface-method neighbors carry INFERRED and no file:line: the receiver
-// has no definition of its own, so the location would be a misleading
-// fallback to one of the implementations.
+// direction ("caller" = from → root, "callee" = root → from), with each edge's
+// confidence label and the neighbor's file:line when resolvable.
+// Interface-method neighbors carry INFERRED and no file:line: the receiver has
+// no definition, so a location would be misleading.
 func graphNeighbors(ix *index.Index, g index.GraphResult, root, dir string) []graphEdgeRow {
 	loc := map[string]string{}
 	for _, n := range g.Nodes {
@@ -278,9 +272,8 @@ func graphNeighbors(ix *index.Index, g index.GraphResult, root, dir string) []gr
 
 // graphCommunityMembers returns the sorted member names of the community
 // containing root, or nil when root participates in no local call edges. It
-// prefers the labels the SQLite store persisted (ix.Communities) and falls
-// back to computing the label propagation on demand; both sources use the
-// same index-package algorithm, so the answer is identical either way.
+// prefers the persisted labels (ix.Communities) and falls back to computing
+// label propagation on demand; both use the same index-package algorithm.
 func graphCommunityMembers(ix *index.Index, root string) []string {
 	label := ix.Communities
 	if len(label) == 0 {

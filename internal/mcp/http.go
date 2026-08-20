@@ -25,16 +25,9 @@ var supportedProtocolVersions = map[string]bool{
 }
 
 // ServeHTTP runs the MCP server over HTTP using the Streamable HTTP transport:
-// clients POST JSON-RPC messages to /mcp and receive the response body. SSE
-// streaming is not supported (advertised via streamableHttpCapabilities) so the
-// endpoint answers plain JSON. Every request is stateless and handled by the
-// same dispatch as stdio.
-//
-// The listener binds to localhost (127.0.0.1) unless addr already names a
-// host. Requests carrying an Origin header that is not a local origin are
-// rejected so a browser page cannot call the local endpoint. This is an
-// Origin allow-list, not full CSRF protection: empty origins (non-browser
-// clients, curl, MCP SDKs) are permitted by design.
+// clients POST JSON-RPC messages to /mcp and receive a plain JSON response
+// (SSE is not supported). The listener binds to localhost and rejects requests
+// whose Origin is not a local origin.
 func ServeHTTP(addr string) error {
 	return ServeHTTPContext(context.Background(), addr)
 }
@@ -55,14 +48,20 @@ func ServeHTTPContext(ctx context.Context, addr string) error {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		_, _ = io.WriteString(w, "kern MCP server over HTTP\n\nPOST /mcp with a JSON-RPC body (e.g. initialize, tools/list, tools/call, prompts/list, prompts/get).\n")
 	})
+	// Loopback-only: kern-mcp exposes RCE-capable tools (kern_sandbox,
+	// kern_exec), so binding to anything but the loopback interface would be an
+	// unauthenticated network attack surface. An explicitly supplied LAN IP is
+	// refused outright rather than silently rebinding it to loopback.
+	bindAddr, err := localhostAddr(addr)
+	if err != nil {
+		return err
+	}
 	hs := &http.Server{
-		Addr:              localhostAddr(addr),
+		Addr:              bindAddr,
 		Handler:           mux,
 		ReadHeaderTimeout: 10 * time.Second,
-		// WriteTimeout/IdleTimeout guard the socket phase, not handler
-		// duration: a long-running tool (build, exec) finishes in the handler
-		// and only then the (small) JSON response is written, so 60s is ample.
-		// Loopback-only, but a stalled peer must not hold the socket forever.
+		// Timeouts guard the socket phase, not handler duration; a long tool
+		// finishes in the handler and only then writes the small response.
 		WriteTimeout: 60 * time.Second,
 		IdleTimeout:  60 * time.Second,
 	}
@@ -86,21 +85,25 @@ func ServeHTTPContext(ctx context.Context, addr string) error {
 	}
 }
 
-// localhostAddr returns addr with an explicit loopback host when the caller
-// did not specify one, so the MCP endpoint is never exposed to the network by
-// default. A bare port (":8080") or empty address binds to 127.0.0.1.
-func localhostAddr(addr string) string {
+// localhostAddr returns addr bound to an explicit loopback host. A bare port
+// (":8080") or empty address binds to 127.0.0.1. Any explicitly supplied
+// non-loopback host is refused: kern-mcp exposes RCE-capable tools, so
+// exposing it beyond the loopback interface (with only trivially-bypassable
+// Origin-header auth) is an unauthenticated RCE. Use kern-server for network
+// access.
+func localhostAddr(addr string) (string, error) {
 	host, port, err := net.SplitHostPort(addr)
 	if err != nil {
 		if addr == "" {
-			return "127.0.0.1:8080"
+			return "127.0.0.1:8080", nil
 		}
-		return "127.0.0.1:" + addr
+		return "127.0.0.1:" + addr, nil
 	}
-	if host == "" || host == "0.0.0.0" || host == "::" {
-		return "127.0.0.1:" + port
+	host = strings.ToLower(host)
+	if host == "" || host == "0.0.0.0" || host == "::" || host == "127.0.0.1" || host == "localhost" || host == "::1" {
+		return "127.0.0.1:" + port, nil
 	}
-	return addr
+	return "", fmt.Errorf("kern-mcp --http only supports loopback binds for security; use kern-server for network access")
 }
 
 // isLocalhostOrigin reports whether an Origin header comes from the local
@@ -142,11 +145,8 @@ func (s *Server) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "expected Content-Type: application/json", http.StatusUnsupportedMediaType)
 		return
 	}
-	// MCP-Protocol-Version is mandatory in the Streamable HTTP transport.
-	// The server implements one wire format but accepts every official
-	// version of the MCP spec so standard clients (2024-11-05, 2025-03-26,
-	// 2025-06-18) can connect; the negotiated version is echoed back in the
-	// response header. Unknown or missing versions are rejected.
+	// MCP-Protocol-Version is mandatory; any official spec version is accepted
+	// and echoed back. Missing or unknown versions are rejected.
 	if v := r.Header.Get("MCP-Protocol-Version"); !supportedProtocolVersions[v] {
 		w.Header().Set("MCP-Protocol-Version", protocolVersion)
 		http.Error(w, "unsupported MCP protocol version", http.StatusPreconditionFailed)

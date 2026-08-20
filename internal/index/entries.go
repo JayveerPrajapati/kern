@@ -31,8 +31,15 @@ var entryRules = map[string][]entryRule{
 	"java": {
 		{framework: "spring-mvc", re: regexp.MustCompile(`@(?:Get|Post|Put|Delete|Patch|Request)Mapping\s*\(\s*"([^"]*)"`), route: 1, classBase: true},
 		{framework: "spring-mvc", re: regexp.MustCompile(`@(?:Get|Post|Put|Delete|Patch)Mapping\b`), classBase: true},
+		{framework: "spring-mvc", re: regexp.MustCompile(`@(?:RestController|Controller)\b`), classEntry: true},
 		{framework: "spring-boot", re: regexp.MustCompile(`@SpringBootApplication\b`), classEntry: true},
-		{framework: "spring-core", re: regexp.MustCompile(`@(?:Service|Component|Repository|Configuration)\b`), classEntry: true},
+		// Split the former lumped spring-core rule so each stereotype is
+		// distinguishable in `kern entries` output. @RestController/@Controller
+		// are handled above as spring-mvc (they are web entry points).
+		{framework: "spring-service", re: regexp.MustCompile(`@Service\b`), classEntry: true},
+		{framework: "spring-repository", re: regexp.MustCompile(`@Repository\b`), classEntry: true},
+		{framework: "spring-config", re: regexp.MustCompile(`@Configuration\b`), classEntry: true},
+		{framework: "spring-component", re: regexp.MustCompile(`@Component\b`), classEntry: true},
 		{framework: "jakarta-ee", re: regexp.MustCompile(`@Path\s*\(\s*"([^"]*)"\s*\)`), route: 1, classBase: true},
 		{framework: "jakarta-ee", re: regexp.MustCompile(`@(?:GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS)\b`)},
 	},
@@ -214,10 +221,9 @@ func enrichEntry(syms []Symbol, rel, full, framework, route string) bool {
 	return false
 }
 
-// extractEntries runs the framework entry rules over a foreign-language file.
-// It enriches existing handler symbols (decorated functions, mapped methods,
-// controller endpoints) as entry points and returns any standalone entry
-// symbols for routes that could not be tied to a same-file handler.
+// extractEntries runs the framework entry rules over a foreign-language file,
+// enriching handler symbols as entry points and returning standalone entry
+// symbols for routes not tied to a same-file handler.
 func extractEntries(f *ffile, spec *langSpec, types []typeDecl, syms []Symbol, rel, lang string) []Symbol {
 	if len(spec.entries) == 0 {
 		return nil
@@ -310,11 +316,10 @@ var httpVerbs = map[string]bool{
 	"HEAD": true, "OPTIONS": true, "USE": true, "ALL": true, "CONNECT": true, "TRACE": true,
 }
 
-// extractGoEntries finds HTTP entry points in a Go file: http.HandleFunc /
-// http.Handle registrations, ServeMux Handle/HandleFunc calls, and verb-method
-// router calls (r.GET, e.POST, app.PUT, ...) covering gin/echo/chi/fiber. It
-// enriches the handler function symbols it can resolve in this file and
-// returns standalone entry markers for the rest.
+// extractGoEntries finds HTTP entry points in a Go file: http.Handle/HandleFunc
+// registrations, ServeMux handlers, and verb-method router calls (gin/echo/chi/
+// fiber). It enriches resolvable handler symbols and returns standalone entry
+// markers for the rest.
 func extractGoEntries(fset *token.FileSet, f *ast.File, syms []Symbol, rel string) []Symbol {
 	var extra []Symbol
 	pathOf := func(arg ast.Expr) string {

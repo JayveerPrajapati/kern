@@ -146,8 +146,12 @@ export default (async ({ directory, $ }) => {
           max_files: tool.schema.number().optional(),
         },
         async execute(args) {
-          const root = args.root ?? "."
-          return run(["project", root])
+          const flags: string[] = ["project"]
+          if (args.max_files) {
+            flags.push("--max-files", String(args.max_files))
+          }
+          flags.push(args.root ?? ".")
+          return run(flags)
         },
       }),
       kern_buddy: tool({
@@ -957,6 +961,155 @@ export default (async ({ directory, $ }) => {
           // validate exits 1 on build failure with the errors on stdout —
           // use runPayload so the output is surfaced, not dropped.
           return runPayload(flags)
+        },
+      }),
+      kern_analyze: tool({
+        description:
+          "HIGH-LEVEL (ADR-0006): analyze a proposed change against the whole system — relevant code, architecture, dependencies, historical memory, blast radius, risks, evidence, and required validation. This is the Kern 2.0 killer workflow 'Analyze this proposed change'.",
+        args: {
+          root: tool.schema.string().optional(),
+          change: tool.schema.string(),
+        },
+        async execute(args) {
+          const flags: string[] = ["analyze"]
+          if (args.root) flags.push("--root", args.root)
+          return run([...flags, args.change])
+        },
+      }),
+      kern_plan: tool({
+        description:
+          "HIGH-LEVEL (ADR-0006): produce an implementation plan for a proposed change — affected files, dependencies, risks and required validation. Deterministic plan over the analysis; no LLM required.",
+        args: {
+          root: tool.schema.string().optional(),
+          change: tool.schema.string(),
+        },
+        async execute(args) {
+          const flags: string[] = ["plan"]
+          if (args.root) flags.push("--root", args.root)
+          return run([...flags, args.change])
+        },
+      }),
+      kern_execute: tool({
+        description:
+          "HIGH-LEVEL (ADR-0006): execute a change inside an isolated sandbox worktree (autonomy L2). Applies the given unified diff, verifies it builds, and returns the resulting diff. Never mutates the live repository.",
+        args: {
+          root: tool.schema.string().optional(),
+          patch: tool.schema.string(),
+        },
+        async execute(args) {
+          const flags: string[] = ["execute"]
+          if (args.root) flags.push("--root", args.root)
+          return withTempFile("execute.patch", args.patch, (file) => run([...flags, file]))
+        },
+      }),
+      kern_verify: tool({
+        description:
+          "HIGH-LEVEL (ADR-0006): verify a change with the unified verification engine — build, unit tests, security, architecture, dependency. Returns the typed verdict (PASS/FAIL/WARN) and per-check summary.",
+        args: {
+          root: tool.schema.string().optional(),
+          types: tool.schema.string().optional(),
+        },
+        async execute(args) {
+          const flags: string[] = ["verify"]
+          if (args.root) flags.push("--root", args.root)
+          if (args.types) flags.push(args.types)
+          return run(flags)
+        },
+      }),
+      kern_incident: tool({
+        description:
+          "HIGH-LEVEL (ADR-0006): investigate a production incident end-to-end — correlate an alert to the affected service and evidence, derive the root cause and hypotheses, and summarize. Provide the alert as JSON; optionally a runtime snapshot (events/deployments/commits) as JSON.",
+        args: {
+          root: tool.schema.string().optional(),
+          alert: tool.schema.string(),
+          snapshot: tool.schema.string().optional(),
+        },
+        async execute(args) {
+          const flags: string[] = ["incident"]
+          if (args.root) flags.push("--root", args.root)
+          flags.push(args.alert)
+          if (args.snapshot) flags.push(args.snapshot)
+          return run(flags)
+        },
+      }),
+      kern_what_if: tool({
+        description:
+          "HIGH-LEVEL (Workflow C / ADR-0012): simulate the impact of a hypothetical change on the knowledge graph — transitively affected symbols, files, services, tests, a deterministic risk level, and a typed RECOMMENDATION claim. Read-only; never mutates the graph or index.",
+        args: {
+          root: tool.schema.string().optional(),
+          change: tool.schema.string(),
+          kind: tool.schema.string().optional(),
+          new_target: tool.schema.string().optional(),
+        },
+        async execute(args) {
+          const flags: string[] = ["what-if"]
+          if (args.root) flags.push("--root", args.root)
+          flags.push(args.change)
+          if (args.kind) flags.push(args.kind)
+          if (args.new_target) flags.push(args.new_target)
+          return run(flags)
+        },
+      }),
+      kern_impact: tool({
+        description:
+          "HIGH-LEVEL: estimate the impact/blast-radius of a change to a symbol — transitively affected symbols/files/services/tests, deterministic risk, and typed claims. Read-only.",
+        args: {
+          root: tool.schema.string().optional(),
+          change: tool.schema.string(),
+          kind: tool.schema.string().optional(),
+          new_target: tool.schema.string().optional(),
+        },
+        async execute(args) {
+          const flags: string[] = ["impact"]
+          if (args.root) flags.push("--root", args.root)
+          flags.push(args.change)
+          if (args.kind) flags.push(args.kind)
+          if (args.new_target) flags.push(args.new_target)
+          return run(flags)
+        },
+      }),
+      kern_memory: tool({
+        description:
+          "HIGH-LEVEL (Workflow E): manage engineering memory — add a lesson, list stored lessons, or recall the most relevant lessons for a prompt.",
+        args: {
+          action: tool.schema.string(),
+          lesson: tool.schema.string().optional(),
+          prompt: tool.schema.string().optional(),
+          root: tool.schema.string().optional(),
+        },
+        async execute(args) {
+          const flags: string[] = ["memory", args.action]
+          if (args.lesson) flags.push(args.lesson)
+          if (args.prompt) flags.push(args.prompt)
+          if (args.root) flags.push("--root", args.root)
+          return run(flags)
+        },
+      }),
+      kern_agents: tool({
+        description:
+          "HIGH-LEVEL (Workflow E): build the standard specialist team and list its roster — name, role, capabilities — plus the current task states from the agent registry. Read-only and deterministic.",
+        args: {
+          root: tool.schema.string().optional(),
+        },
+        async execute(args) {
+          const flags: string[] = ["team"]
+          if (args.root) flags.push("--root", args.root)
+          return run(flags)
+        },
+      }),
+      kern_loop: tool({
+        description:
+          "HIGH-LEVEL (Workflow E): run the closed autonomy loop against an intent string and return the stage timeline plus the deployed / observed-healthy / learned outcome. The autonomy level (L0-L5, default L0 read-only) gates which stages run.",
+        args: {
+          root: tool.schema.string().optional(),
+          intent: tool.schema.string(),
+          level: tool.schema.string().optional(),
+        },
+        async execute(args) {
+          const flags: string[] = ["loop", args.intent]
+          if (args.level) flags.push("--level", args.level)
+          if (args.root) flags.push("--root", args.root)
+          return run(flags)
         },
       }),
       kern_schema_validate: tool({

@@ -1,6 +1,7 @@
 package intel
 
 import (
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
@@ -9,14 +10,62 @@ import (
 )
 
 // Community is a cluster of symbols discovered by label propagation over the
-// (undirected) call graph — a dependency-free stand-in for Leiden/Newman
-// modularity clustering.
+// (undirected) call graph.
+//
+// By default the JSON output omits the full symbol list (Symbols) and exposes
+// only a Sample (first few names) plus Size — enough to name a cluster without
+// dumping every member. Call WithFullSymbols to render the complete list.
 type Community struct {
 	ID       string   `json:"id"`
-	Symbols  []string `json:"symbols"`
+	Symbols  []string `json:"-"`         // full member list; hidden in JSON unless FullSymbols is set
+	Sample   []string `json:"sample"`    // first up to 8 symbol names, for a quick glance
 	Size     int      `json:"size"`
 	Hub      string   `json:"hub,omitempty"`
 	Packages []string `json:"packages,omitempty"`
+}
+
+// FullSymbols returns a copy of the community's full symbol list. Used by the
+// JSON marshaler path when the caller asks for the complete (verbose) output.
+func (c Community) FullSymbols() []string {
+	if len(c.Symbols) == 0 {
+		return nil
+	}
+	out := make([]string, len(c.Symbols))
+	copy(out, c.Symbols)
+	return out
+}
+
+// communityJSON is the on-wire shape used by MarshalCommunities. When Full is
+// false, Symbols is omitted; when true, the complete member list is included.
+type communityJSON struct {
+	ID       string   `json:"id"`
+	Symbols  []string `json:"symbols,omitempty"`
+	Sample   []string `json:"sample"`
+	Size     int      `json:"size"`
+	Hub      string   `json:"hub,omitempty"`
+	Packages []string `json:"packages,omitempty"`
+}
+
+// MarshalCommunities renders communities as JSON. When full is false (the
+// default) each community carries only a Sample of its members; when true the
+// complete Symbols list is emitted (the legacy verbose behaviour).
+func MarshalCommunities(comms []Community, full bool) []byte {
+	out := make([]communityJSON, len(comms))
+	for i, c := range comms {
+		cj := communityJSON{
+			ID:       c.ID,
+			Sample:   c.Sample,
+			Size:     c.Size,
+			Hub:      c.Hub,
+			Packages: c.Packages,
+		}
+		if full {
+			cj.Symbols = c.FullSymbols()
+		}
+		out[i] = cj
+	}
+	b, _ := json.Marshal(out)
+	return b
 }
 
 const (
@@ -34,9 +83,8 @@ func Communities(ix *index.Index) []Community {
 }
 
 // labelPropagation returns the community label of every symbol that
-// participates in at least one local call edge. The clustering itself lives
-// in the index package (Index.CommunityLabels) so the SQLite store can
-// persist it; this wrapper restores the sorted node list for rendering.
+// participates in at least one local call edge, plus the sorted node list.
+// The clustering itself lives in the index package (Index.CommunityLabels).
 func labelPropagation(ix *index.Index) (map[string]string, []string) {
 	label := ix.CommunityLabels()
 	nodes := make([]string, 0, len(label))
@@ -61,12 +109,25 @@ func renderCommunities(ix *index.Index, label map[string]string) []Community {
 		if len(syms) < minCommunitySize {
 			continue
 		}
+		// Choose the community ID: prefer the first project-local symbol
+		// over external/stdlib names that would dominate the community name.
+		communityID := syms[0]
+		for _, s := range syms {
+			if fileMap[s] != "" {
+				communityID = s
+				break
+			}
+		}
 		hub := ""
 		best := -1
 		packages := map[string]bool{}
 		for _, s := range syms {
 			if d := dirOf(fileMap, s); d != "" {
 				packages[d] = true
+			}
+			// Only consider project-local symbols for the hub role.
+			if fileMap[s] == "" {
+				continue
 			}
 			if n := len(prodCallers(ix, s)); n > best {
 				best = n
@@ -78,8 +139,14 @@ func renderCommunities(ix *index.Index, label map[string]string) []Community {
 			pkgs = append(pkgs, p)
 		}
 		sort.Strings(pkgs)
+		// Sample: first up to 8 sorted member names, enough to identify the
+		// cluster without dumping every symbol in JSON output.
+		sample := syms
+		if len(sample) > 8 {
+			sample = sample[:8]
+		}
 		out = append(out, Community{
-			ID: syms[0], Symbols: syms, Size: len(syms), Hub: hub, Packages: pkgs,
+			ID: communityID, Symbols: syms, Sample: sample, Size: len(syms), Hub: hub, Packages: pkgs,
 		})
 	}
 	sort.Slice(out, func(i, j int) bool {

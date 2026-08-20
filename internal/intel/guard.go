@@ -78,8 +78,6 @@ type Violation struct {
 // crossing that a forbid rule rejects (allow rules for the same pair win).
 // Edges come from resolved in-project call edges; where a file has no local
 // symbol yet (e.g. an import was just added), package imports are checked too.
-// This is the deterministic guardrail layer an agent must pass before touching
-// the filesystem.
 func CheckBoundaries(ix *index.Index, b *Boundaries, files []string) []Violation {
 	var violations []Violation
 	if b == nil || len(b.Rules) == 0 {
@@ -220,11 +218,9 @@ func importMatches(importPath, dir string) bool {
 	return strings.HasSuffix(importPath, "/"+filepath.Base(dir))
 }
 
-// resolveCallee maps a raw callee name (simple, qualified, or package-qualified)
-// to a canonical in-project symbol FullName. When several symbols share a
-// simple name the choice must be deterministic: the lexicographically smallest
-// FullName wins, so guard verdicts can't flip between runs (Go map ranges are
-// unordered).
+// resolveCallee maps a raw callee name to a canonical in-project symbol
+// FullName. When several symbols share a simple name the lexicographically
+// smallest FullName wins, so verdicts are deterministic across runs.
 func resolveCallee(ix *index.Index, meta map[string]index.Symbol, name string) string {
 	if _, ok := meta[name]; ok {
 		return name

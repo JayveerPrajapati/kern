@@ -36,7 +36,9 @@ func TestRoundTrip(t *testing.T) {
 	_ = Clear("")
 	_ = Store("prompt", "how do I compress a large server log?", "cached: dedupe timestamps")
 	var v string
-	matched, sim, hit, err := Lookup("prompt", "how do I compress a big server log", &v, 0)
+	// Genuine near-duplicate: shares enough shingles to clear the 0.60
+	// DefaultThreshold (it must also clear the sim>=0.5 assertion below).
+	matched, sim, hit, err := Lookup("prompt", "how do i compress a very large server log", &v, 0)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -99,8 +99,7 @@ func Verify(ix *index.Index, root, text string) Report {
 
 	// Any remaining route-like strings are reported as unregistered. Paths
 	// that are clearly not routes are skipped: existing filesystem paths
-	// (or paths under an existing ancestor) and date-like /YYYY/MM/DD
-	// (W2-30).
+	// (or paths under an existing ancestor) and date-like /YYYY/MM/DD.
 	for _, m := range routeRe.FindAllString(text, -1) {
 		m = strings.TrimRight(m, ".,;:)!?]}")
 		if m == "" || !looksLikeRoute(m, root) {
@@ -117,7 +116,7 @@ func Verify(ix *index.Index, root, text string) Report {
 
 // fileHasLine reports whether file exists in root and line is within bounds.
 // Absolute file refs are only honored when they stay inside root, so
-// untrusted text can never probe arbitrary machine paths (W2-32).
+// untrusted text can never probe arbitrary machine paths.
 func fileHasLine(root, file string, line int) bool {
 	if line < 1 {
 		return false
@@ -151,10 +150,28 @@ func withinAbs(parent, child string) bool {
 // rather than noise: paths pointing at (or under an ancestor of) an existing
 // filesystem entry and /YYYY/MM/DD date-like paths are not routes. The
 // filesystem root "/" and the project root are never statted — they always
-// exist and would otherwise hide every absolute route (W2-30).
+// exist and would otherwise hide every absolute route.
 func looksLikeRoute(m, root string) bool {
 	segs := strings.Split(strings.Trim(m, "/"), "/")
 	if len(segs) == 3 && isAllDigits(segs[0]) && isAllDigits(segs[1]) && isAllDigits(segs[2]) {
+		return false
+	}
+	// Reject paths that look like file references: any segment with a file
+	// extension (a dot followed by 1-5 alpha chars) is a file path, not a
+	// route. This prevents /NotificationListenerRunner.java and similar
+	// source-file paths from being misreported as unregistered routes.
+	for _, seg := range segs {
+		if i := strings.LastIndex(seg, "."); i > 0 {
+			ext := seg[i+1:]
+			if len(ext) >= 1 && len(ext) <= 5 && isAlphaExt(ext) {
+				return false
+			}
+		}
+	}
+	// Reject paths that contain common source directory segments (src,
+	// main, test, java, com, org, etc.) — these are file paths from
+	// import/package statements, not HTTP routes.
+	if hasSourcePathSegment(segs) {
 		return false
 	}
 	p := m
@@ -184,6 +201,39 @@ func looksLikeRoute(m, root string) bool {
 		dir = parent
 	}
 	return true
+}
+
+// isAlphaExt reports whether s is a short all-alpha file extension (java, py,
+// go, ts, etc.) — used to distinguish file paths from route paths.
+func isAlphaExt(s string) bool {
+	for _, r := range s {
+		if !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z')) {
+			return false
+		}
+	}
+	return true
+}
+
+// sourcePathSegments are directory names that are unambiguously part of a
+// source tree, not an HTTP route. Their presence in a slash-path means the
+// path is a file/import path, not a route.
+var sourcePathSegments = map[string]bool{
+	"src": true, "main": true, "test": true, "tests": true,
+	"java": true, "kotlin": true, "scala": true, "groovy": true,
+	"resources": true, "lib": true, "libs": true, "pkg": true,
+	"internal": true, "cmd": true, "include": true, "includes": true,
+	"shaders": true,
+}
+
+// hasSourcePathSegment reports whether any segment of the path is a known
+// source directory name.
+func hasSourcePathSegment(segs []string) bool {
+	for _, seg := range segs {
+		if sourcePathSegments[seg] {
+			return true
+		}
+	}
+	return false
 }
 
 func isAllDigits(s string) bool {

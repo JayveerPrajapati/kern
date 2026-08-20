@@ -211,8 +211,8 @@ func TestIndexDirSemanticAndSearchFusion(t *testing.T) {
 		}
 	}
 
-	SemanticEmbedder = mockEmbedder{}
-	defer func() { SemanticEmbedder = nil }()
+	SetSemanticEmbedder(mockEmbedder{})
+	defer func() { SetSemanticEmbedder(nil) }()
 
 	res := ix.Search("deploy container cluster", 2)
 	if len(res) == 0 {
@@ -223,7 +223,7 @@ func TestIndexDirSemanticAndSearchFusion(t *testing.T) {
 	}
 
 	// Without the embedder the dense signal is skipped and search still works.
-	SemanticEmbedder = nil
+	SetSemanticEmbedder(nil)
 	res = ix.Search("deploy container cluster", 2)
 	if len(res) == 0 {
 		t.Fatal("no results without semantic embedder")

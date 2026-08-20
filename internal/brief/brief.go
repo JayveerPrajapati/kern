@@ -19,13 +19,9 @@ import (
 )
 
 // Build renders the briefing for root. Errors are reported per section; the
-// function itself only fails if the root is unusable.
-//
-// The digest never blocks on a cold pipeline: when the AST index is not
-// cached, the index/architecture sections are skipped with a hint instead of
-// synchronously building a possibly-huge index (which is what made kern_buddy
-// take ~85s on large repos). Callers warm the index in the background via
-// Warm (kern_buddy) or up front via `kern index .` / `kern precache .`.
+// function itself only fails if the root is unusable. On a cold index it skips
+// the index/architecture sections with a hint rather than building a possibly-
+// huge index; callers can warm it via Warm or `kern index .` / `kern precache .`.
 func Build(root string) (string, error) {
 	abs, err := filepath.Abs(root)
 	if err != nil {
@@ -66,7 +62,7 @@ func Build(root string) (string, error) {
 
 	var b strings.Builder
 	b.WriteString(head.String())
-	if p, err := code.BuildProject(root, 500, 200); err == nil {
+	if p, err := code.BuildProject(root, 0, 200); err == nil {
 		b.WriteString("## Project map\n")
 		b.WriteString(renderProjectMap(p, digestBudget-head.Len()-tail.Len()))
 		b.WriteString("\n")
@@ -114,9 +110,8 @@ func renderProjectMap(p *code.Project, budget int) string {
 }
 
 // Warm builds and persists the AST index for root so the next Build call
-// renders the full digest without the cold pipeline (which is what made
-// kern_buddy take ~85s on large repos). A fresh cached index is a no-op.
-// Used by the MCP kern_buddy handler (background) and kern precache.
+// renders the full digest without a cold pipeline. A fresh cached index is a
+// no-op. Used by the MCP kern_buddy handler and kern precache.
 func Warm(root string) error {
 	ix, err := index.Load(root)
 	if err == nil && ix != nil && !ix.Stale() {
@@ -258,7 +253,10 @@ func architectureSection(ix *index.Index) string {
 	}
 	arch := intel.AnalyzeArchitecture(ix)
 	if len(arch.Communities) == 0 && len(arch.Coupling) == 0 {
-		return ""
+		// The graph has local calls but they did not coalesce into detected
+		// communities (e.g. very small or star-shaped graphs). Surface that
+		// call structure exists rather than reporting nothing.
+		return "## Architecture\n(call structure present but too small to cluster into communities)\n\n"
 	}
 	var b strings.Builder
 	b.WriteString("## Architecture (communities + coupling)\n")
