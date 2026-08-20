@@ -362,7 +362,7 @@ kern guard init [root]                              scaffold .kern/boundaries.js
 kern guard check [root] [--file F] [--range a..b] [--json|--sarif] [--threshold N]
                                 reject boundary violations (exit 2 when count > N)
 kern fw [root] [--catalog]                       framework detection
-kern verify "<text>"                             hallucination check: file:line claims
+kern verify <file|-> [root]                     hallucination check: file:line claims; `kern verify <types>` (build,test,security,arch,deps) runs the verification engine
 kern validate [root]                             run the project's build/test, compact
 kern heal "<task>" [--model MODEL] [--rounds N]  snapshot-based LLM auto-fix
 kern sandbox "<command>"                         run with filesystem snapshot + rollback
@@ -383,6 +383,10 @@ kern exec --list                                    # runtimes installed here
 Runtimes resolve from PATH (python3/python, node/bun/deno, bash/sh, perl,
 ruby, php, lua, julia, R, go, rust). Runs in a fresh temp dir with a hard
 timeout (10s default) and a stdout byte cap — only stdout is returned.
+
+Host command execution is gated by a governance firewall (fail-closed): set
+`KERN_ALLOW_EXEC=1` or allowlist tools via `KERN_TOOLS` to opt in. `kern build`
+and `kern validate` share the same gate.
 
 ---
 
