@@ -1,11 +1,12 @@
 // Package llm implements an optional, opt-in compression step backed by a
 // local Ollama server. It is never used implicitly: callers must request it
-// with an explicit model name (CLI --llm or the KERN_MODEL env var). If
-// Ollama is unreachable the caller falls back to the deterministic path.
+// with an explicit model name (CLI --llm or the KERN_MODEL env var). If Ollama
+// is unreachable the caller falls back to the deterministic path.
 package llm
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -104,7 +105,7 @@ func (c *Client) Compress(prompt string) (string, error) {
 
 // Complete asks the local model to continue a directive prompt (system) plus
 // user context. It is the generic completion used by the self-correction loop
-// (#9) and returns the model's raw text.
+// and returns the model's raw text.
 func (c *Client) Complete(system, user string) (string, error) {
 	if !c.Available() {
 		return "", fmt.Errorf("ollama not reachable at %s", c.Base)
@@ -168,7 +169,7 @@ func (c *Client) HasEmbeddingModel() bool {
 // (POST /api/embed). It returns a dense vector of float32s. Errors when Ollama
 // is unreachable or the model is missing — callers keep their deterministic
 // fallback in that case.
-func (c *Client) EmbedText(text string) ([]float32, error) {
+func (c *Client) EmbedText(ctx context.Context, text string) ([]float32, error) {
 	model := EmbedModel()
 	payload, err := json.Marshal(map[string]any{
 		"model": model,
@@ -177,7 +178,7 @@ func (c *Client) EmbedText(text string) ([]float32, error) {
 	if err != nil {
 		return nil, err
 	}
-	req, err := http.NewRequest(http.MethodPost, c.Base+"/api/embed", bytes.NewReader(payload))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.Base+"/api/embed", bytes.NewReader(payload))
 	if err != nil {
 		return nil, err
 	}

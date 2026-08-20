@@ -22,11 +22,9 @@ type NearNode struct {
 	Dir    string `json:"dir,omitempty"`
 }
 
-// Near expands the call graph outwards from root, in both directions (callers
-// and callees), up to depth hops. It is the dependency-free equivalent of a
-// "walk the graph N degrees away" primitive: one call replaces a blind grep or
-// a directory dump. maxNodes caps the returned expansion (deterministic BFS
-// order, then symbol order within a hop).
+// Near expands the call graph outwards from root in both directions (callers
+// and callees), up to depth hops. maxNodes caps the expansion (deterministic
+// BFS order, then symbol order within a hop).
 func Near(ix *index.Index, root string, depth, maxNodes int) ([]NearNode, error) {
 	if root == "" {
 		return nil, fmt.Errorf("symbol is required")

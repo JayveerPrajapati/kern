@@ -147,7 +147,7 @@ func TestRecordZeroesTime(t *testing.T) {
 	if err := r.Record(Entry{Operation: OpOptimizeLog, BeforeTokens: 2, AfterTokens: 1}); err != nil {
 		t.Fatal(err)
 	}
-	raw, err := os.ReadFile(filepath.Join(dir, time.Now().Format("2006-01-02")+".jsonl"))
+	raw, err := os.ReadFile(filepath.Join(dir, time.Now().UTC().Format("2006-01-02")+".jsonl"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -208,7 +208,7 @@ func TestSummarizeBoundaryDay(t *testing.T) {
 	}
 	r := &Recorder{dir: dir}
 	writeDay := func(daysAgo int, ops int) {
-		name := time.Now().AddDate(0, 0, -daysAgo).Format("2006-01-02") + ".jsonl"
+		name := time.Now().UTC().AddDate(0, 0, -daysAgo).Format("2006-01-02") + ".jsonl"
 		var b strings.Builder
 		for i := 0; i < ops; i++ {
 			b.WriteString(`{"operation":"optimize_prompt","before_tokens":2,"after_tokens":1,"saved_tokens":1,"cost_saved_usd":0}` + "\n")

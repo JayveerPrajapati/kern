@@ -207,8 +207,8 @@ func TestSemanticCacheViaMCP(t *testing.T) {
 	if strings.Contains(first, "served from") {
 		t.Fatalf("first call must not be served from cache, got %q", first)
 	}
-	// Reworded near-duplicate request -> semantic cache hit with a marker.
-	second := mcpAssertOK(t, "kern_optimize_prompt", map[string]any{"prompt": "how do I compress a big server log"})
+	// Near-duplicate (one word removed) -> semantic cache hit with a marker.
+	second := mcpAssertOK(t, "kern_optimize_prompt", map[string]any{"prompt": "how do I compress a very large server log"})
 	if !strings.Contains(second, "served from semantic cache") {
 		t.Fatalf("expected semantic cache marker, got %q", second)
 	}
@@ -302,7 +302,7 @@ func TestCompactFileViaMCP(t *testing.T) {
 	if err := os.WriteFile(f, []byte("package main\n\n// foo is a helper.\nfunc foo() string { return \"hi\" }\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	args, _ := json.Marshal(map[string]any{"path": f})
+	args, _ := json.Marshal(map[string]any{"root": root, "path": f})
 	resp := serveOne(t, writeReq("tools/call", 12, `{"name":"kern_compact_file","arguments":`+string(args)+`}`))
 	out, isErr := toolResultText(t, resp)
 	if isErr {
@@ -393,11 +393,12 @@ func TestVerifyOutputViaMCP(t *testing.T) {
 }
 
 func TestDiffFilesViaMCP(t *testing.T) {
-	a := filepath.Join(t.TempDir(), "a.txt")
-	b := filepath.Join(t.TempDir(), "b.txt")
+	root := t.TempDir()
+	a := filepath.Join(root, "a.txt")
+	b := filepath.Join(root, "b.txt")
 	_ = os.WriteFile(a, []byte("line one\nline two\n"), 0o644)
 	_ = os.WriteFile(b, []byte("line one\nline three\n"), 0o644)
-	args, _ := json.Marshal(map[string]any{"a": a, "b": b})
+	args, _ := json.Marshal(map[string]any{"root": root, "a": a, "b": b})
 	resp := serveOne(t, writeReq("tools/call", 16, `{"name":"kern_diff_files","arguments":`+string(args)+`}`))
 	out, isErr := toolResultText(t, resp)
 	if isErr {

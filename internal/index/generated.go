@@ -6,25 +6,15 @@ import (
 	"strings"
 )
 
-// Generated-file detection follows the convention established by codegraph
-// (generated-detection.ts): generated sources are ranked below hand-written
-// implementations during disambiguation because generated stubs frequently
-// reuse the exact names of real symbols (protobuf scaffolding, test mocks,
-// codegen output) and otherwise drown them out of search results. This is a
-// relevance hint, not a hard filter — generated nodes stay indexed and
-// reachable; they just rank last when a real implementation shares the name.
+// Generated-file detection ranks generated sources below hand-written
+// implementations (they reuse real symbol names: protobuf scaffolding, mocks,
+// codegen) as a relevance hint, not a hard filter. Two separate signals:
 //
-// Two signals, deliberately separate:
-//
-//  1. IsGeneratedPath — PATH only, pure and synchronous. Most generated files
-//     follow the `<basename>.<tool>.<ext>` convention (`.pb.go`, `.g.dart`,
-//     `_pb2.py`).
-//
-//  2. isGeneratedContent — CONTENT banner in the file's head. Go's own
-//     convention is a content marker ("// Code generated ... DO NOT EDIT."),
-//     so a generated file with a hand-written-looking name is invisible to
-//     (1). Evaluated ONCE at index time, when the source is already in
-//     memory, and persisted on the index as GeneratedFiles.
+//  1. IsGeneratedPath — PATH only, the `<basename>.<tool>.<ext>` convention
+//     (`.pb.go`, `.g.dart`, `_pb2.py`).
+//  2. isGeneratedContent — a CONTENT banner in the file's head ("Code
+//     generated ... DO NOT EDIT"), evaluated once at index time and persisted
+//     as GeneratedFiles.
 
 var generatedPathPatterns = []*regexp.Regexp{
 	// Go — protobuf / gRPC / pulsar / mockgen
@@ -168,4 +158,50 @@ func matchesAny(s string, patterns []*regexp.Regexp) bool {
 		}
 	}
 	return false
+}
+
+// isMinified detects minified/bundled JavaScript and CSS by its hallmark:
+// extremely long lines. Hand-written source rarely exceeds ~500 chars/line,
+// while minified bundles pack thousands of characters per line. We sample
+// the file's lines and flag it as minified when a significant fraction
+// exceed a threshold, catching both .min.js (redundant with the path check)
+// and vendored bundles like redoc.standalone.js that lack the .min suffix.
+func isMinified(src []byte) bool {
+	const (
+		maxScanBytes   = 1 << 20 // scan at most 1MB (minified files can be huge)
+		longLineLen    = 500     // chars — hand-written code rarely exceeds this
+		minLongLines   = 10      // need at least 10 long lines to be sure
+		singleLongLine = 5000    // a single line this long is almost certainly minified
+	)
+	if len(src) > maxScanBytes {
+		src = src[:maxScanBytes]
+	}
+	longLines := 0
+	lineStart := 0
+	for i, b := range src {
+		if b == '\n' {
+			length := i - lineStart
+			if length > longLineLen {
+				longLines++
+				if longLines >= minLongLines {
+					return true
+				}
+			}
+			// A single line over singleLongLine chars is minified even if it's
+			// the only long line in the file (common for single-line bundles).
+			if length > singleLongLine {
+				return true
+			}
+			lineStart = i + 1
+		}
+	}
+	// Check the last line (no trailing newline).
+	lastLen := len(src) - lineStart
+	if lastLen > singleLongLine {
+		return true
+	}
+	if lastLen > longLineLen {
+		longLines++
+	}
+	return longLines >= minLongLines
 }

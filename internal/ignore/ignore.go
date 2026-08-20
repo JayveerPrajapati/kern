@@ -120,17 +120,21 @@ func parseLine(line string) (rule, bool) {
 		return rule{}, false
 	}
 	body := globToRegexp(line)
+	prefix := "(?:^|.*/)"
+	suffix := "(?:/|$)"
 	switch {
-	case r.anchored:
-		// " /foo " anchors to the ignore file's root.
-		r.re = regexp.MustCompile("^" + body + end(r.dirOnly))
-	case hasSlash:
-		// A slash anywhere in the middle anchors the pattern too.
-		r.re = regexp.MustCompile("^" + body + end(r.dirOnly))
-	default:
-		// A bare name matches any path segment at any depth.
-		r.re = regexp.MustCompile("(?:^|.*/)" + body + "(?:/|$)")
+	case r.anchored, hasSlash:
+		// " /foo " or a slash anywhere anchors to the ignore file's root.
+		prefix = "^"
+		suffix = end(r.dirOnly)
 	}
+	// Use Compile (not MustCompile): a malformed ignore line (e.g. "[]" or
+	// "[z-a]") must not panic the whole indexer. Drop the bad rule instead.
+	re, err := regexp.Compile(prefix + body + suffix)
+	if err != nil {
+		return rule{}, false
+	}
+	r.re = re
 	return r, true
 }
 

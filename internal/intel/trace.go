@@ -41,11 +41,10 @@ var (
 )
 
 // Trace overlays a runtime trace (pprof -top text, a crash stack trace, or a
-// plain list of function names) onto the index. It extracts candidate symbol
-// names, resolves them, and ranks them by frequency. This is kern's dependency
-// free live-telemetry overlay: point it at a trace file and see which project
-// symbols are hot, how far their blast radius reaches, and whether tests cover
-// them.
+// plain list of function names) onto the index: it extracts candidate symbol
+// names, resolves them, and ranks them by frequency. Point it at a trace file
+// to see which project symbols are hot, how far their blast radius reaches,
+// and whether tests cover them.
 func Trace(ix *index.Index, src, sourceName string, limit int) *TraceReport {
 	frames := 0
 	counts := map[string]int{}

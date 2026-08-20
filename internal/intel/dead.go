@@ -22,13 +22,22 @@ type DeadSymbol struct {
 }
 
 // DeadCode finds callable symbols (functions and methods) with no in-project
-// callers. Types, vars and consts are skipped: the call graph only tracks
-// function calls, so they would all look uncalled. Symbols only referenced
-// from test files are reported with the test-only flag; symbols with zero
-// callers anywhere are the strongest dead-code candidates. Results are sorted
-// by size (largest dead code first) so the biggest cleanup wins show up top.
+// callers. Types, vars and consts are skipped — the call graph only tracks
+// function calls. Symbols called only from tests and symbols with zero callers
+// anywhere are reported. Results are sorted by size (largest first).
+//
+// A symbol referenced outside a call position (a function/method value, an
+// interface member, an argument) is not reported dead: the call graph alone
+// cannot see it, but it is clearly still in use.
+//
+// Known limitation: interface dispatch is still not fully modelled. A method
+// that satisfies an interface and is invoked only through that interface may be
+// reported dead even though it is in use.
 func DeadCode(ix *index.Index) []DeadSymbol {
 	fileMap := buildFileMap(ix)
+	// Scan the indexed Go files once for non-call references. Hoisting this out
+	// of the loop keeps DeadCode linear in the number of files.
+	refs := newNonCallRefIndex(ix)
 	var out []DeadSymbol
 	for _, s := range ix.Symbols {
 		if s.Kind != "func" && s.Kind != "method" {
@@ -36,6 +45,12 @@ func DeadCode(ix *index.Index) []DeadSymbol {
 		}
 		full := s.FullName()
 		if isTestFile(s.File) || isEntryPoint(full) {
+			continue
+		}
+		// A bare-identifier reference outside a call position means the symbol
+		// is in use even with no callers (e.g. `f := Foo; f()` or a method
+		// value). Don't list it as dead.
+		if refs.referencedOutsideCall(simpleName(full)) {
 			continue
 		}
 		callers := ix.CallersFor(s)

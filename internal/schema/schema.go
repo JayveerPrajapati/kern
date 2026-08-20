@@ -23,7 +23,7 @@ type Schema struct {
 	MinLength, MaxLength *int
 	Min, Max             *float64
 	Pattern              *regexp.Regexp
-	PatternInvalid       string // raw pattern text when it failed to compile (W2-31)
+	PatternInvalid       string // raw pattern text when it failed to compile
 	AdditionalProperties *bool
 
 	raw map[string]any // keeps original JSON for prompt injection
@@ -83,9 +83,7 @@ func parseNode(m map[string]any) *Schema {
 		if re, err := regexp.Compile(v); err == nil {
 			sc.Pattern = re
 		} else {
-			// An unparseable pattern must not silently vanish into an
-			// unenforced constraint: record it so Validate surfaces it
-			// (W2-31).
+			// Keep an unparseable pattern so Validate can surface it.
 			sc.PatternInvalid = v
 		}
 	}
@@ -123,7 +121,6 @@ func (s *Schema) check(path string, v any) []string {
 	if s == nil {
 		return nil
 	}
-	// type
 	ok := false
 	switch s.Type {
 	case "":

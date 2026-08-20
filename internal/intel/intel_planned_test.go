@@ -177,6 +177,39 @@ func TestProbeNoAnchors(t *testing.T) {
 	}
 }
 
+// Probe fuzzy fallback regression: when a natural-language task contains no
+// exact identifiers, the probe should still resolve via keyword matching
+// against symbol names. "decommission a network service" should match
+// symbols containing "network" or "service" in their names.
+func TestProbeFuzzyKeywordFallback(t *testing.T) {
+	ix := &index.Index{
+		Symbols: []index.Symbol{
+			{Kind: "func", Name: "decommissionNetworkService", File: "net.go", Line: 10},
+			{Kind: "func", Name: "NetworkClient", File: "client.go", Line: 20},
+			{Kind: "func", Name: "ServiceRegistry", File: "registry.go", Line: 30},
+			{Kind: "func", Name: "unrelated", File: "other.go", Line: 40},
+		},
+		Calls:   map[string][]string{},
+		Callers: map[string][]string{},
+	}
+	r := Probe(ix, "decommission a network service", 4000)
+	if len(r.Anchors) == 0 {
+		t.Fatal("expected fuzzy-matched anchors for natural-language task, got none")
+	}
+	// At least one anchor should relate to network/service.
+	found := false
+	for _, a := range r.Anchors {
+		name := strings.ToLower(a.Name)
+		if strings.Contains(name, "network") || strings.Contains(name, "service") || strings.Contains(name, "decommission") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected at least one network/service anchor, got %+v", r.Anchors)
+	}
+}
+
 func TestTraceOverlaysHotSymbols(t *testing.T) {
 	dir := writeTree(t, map[string]string{
 		"lib/lib.go":       srcLib,

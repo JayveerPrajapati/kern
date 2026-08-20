@@ -27,14 +27,16 @@ func Resolve(ix *index.Index, name string) (string, bool) {
 	if s := simpleName(name); s != name && symbolByName(ix, s) {
 		return s, true
 	}
-	// Simple name: resolve only when unambiguous.
+	// Simple name: resolve when unambiguous; when ambiguous, return the
+	// first match so callers (near, path, probe) still work. The user can
+	// disambiguate with a qualified name ("Type.Method") for precision.
 	var matches []string
 	for _, s := range ix.Symbols {
 		if s.Name == name || s.FullName() == name {
 			matches = append(matches, s.FullName())
 		}
 	}
-	if len(matches) == 1 {
+	if len(matches) >= 1 {
 		return matches[0], true
 	}
 	return "", false

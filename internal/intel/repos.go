@@ -132,7 +132,7 @@ type RepoHit struct {
 // SemanticSearchRepos is SearchRepos with a dense re-rank pass: the pooled
 // lexical hits across all registered repos are re-ordered by cosine similarity
 // between the query embedding and each symbol descriptor (see SemanticSearch).
-// Returns nil when the embedder is unavailable or no repo matches.
+// Returns nil when no repo matches.
 func SemanticSearchRepos(query string, limit int, e SymbolEmbedder) []RepoHit {
 	if e == nil {
 		return SearchRepos(query, limit)

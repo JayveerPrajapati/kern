@@ -18,9 +18,6 @@ import (
 // host OS file-event tool (inotifywait on Linux, fswatch on macOS), or nil —
 // where nil means the polling-based Stale() check in index.Stale() serves as
 // the fallback.
-//
-// This keeps kern zero-dependency (stdlib only) while leveraging standard
-// host tools when present.
 type fileWatcher struct {
 	ctx      context.Context
 	cancel   context.CancelFunc

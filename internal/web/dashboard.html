@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Kern Web Console</title>
+<style>
+:root { --bg:#0f1115; --panel:#171a21; --panel2:#1c2029; --fg:#e6e8ee; --muted:#9aa3b2; --accent:#4f8cff; --border:#262b36; --good:#3fb950; --warn:#d29922; --bad:#f85149; }
+* { box-sizing:border-box; }
+body { margin:0; background:var(--bg); color:var(--fg); font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif; }
+header { padding:20px 28px; border-bottom:1px solid var(--border); background:var(--panel); }
+header h1 { margin:0; font-size:20px; }
+header p { margin:4px 0 0; color:var(--muted); font-size:12px; }
+main { padding:20px 28px; display:grid; grid-template-columns:repeat(auto-fit,minmax(340px,1fr)); gap:16px; }
+section.panel { background:var(--panel); border:1px solid var(--border); border-radius:8px; padding:16px; }
+section.panel h2 { margin:0 0 12px; font-size:15px; text-transform:uppercase; letter-spacing:.04em; color:var(--muted); }
+.kpi { display:grid; grid-template-columns:repeat(auto-fit,minmax(90px,1fr)); gap:10px; }
+.kpi div { background:var(--panel2); border:1px solid var(--border); border-radius:6px; padding:10px; text-align:center; }
+.kpi b { display:block; font-size:22px; }
+.kpi span { font-size:11px; color:var(--muted); }
+table { width:100%; border-collapse:collapse; font-size:12px; }
+th,td { text-align:left; padding:6px 8px; border-bottom:1px solid var(--border); vertical-align:top; }
+th { color:var(--muted); font-weight:600; }
+ul { margin:0; padding-left:18px; }
+li { margin:2px 0; }
+.muted { color:var(--muted); }
+.good { color:var(--good); }
+.warn { color:var(--warn); }
+.bad { color:var(--bad); }
+.badge { display:inline-block; padding:1px 7px; border-radius:10px; font-size:11px; background:var(--panel2); border:1px solid var(--border); }
+</style>
+</head>
+<body>
+<header>
+  <h1>Kern Web Console</h1>
+  <p>Local digital-twin dashboard &mdash; read-only (L0) &mdash; project root: {{.Root}}</p>
+</header>
+<main>
+  <section class="panel">
+    <h2>Overview</h2>
+    <div class="kpi">
+      <div><b>{{.Overview.Symbols}}</b>symbols</div>
+      <div><b>{{.Overview.Files}}</b>files</div>
+      <div><b>{{.Overview.Edges}}</b>edges</div>
+      <div><b>{{.Overview.Communities}}</b>communities</div>
+      <div><b>{{.Overview.Hubs}}</b>hubs</div>
+      <div><b>{{.Overview.Incidents}}</b>incidents</div>
+      <div><b>{{.Overview.Memories}}</b>memories</div>
+      <div><b>{{.Overview.ApprovalsPending}}</b>approvals pending</div>
+      <div><b>{{.Overview.ArchitectureErrors}}</b>arch errors</div>
+      <div><b>{{.Overview.ArchitectureWarn}}</b>arch warnings</div>
+    </div>
+    <p class="muted" style="margin-top:12px">generated {{.Overview.GeneratedAt}}</p>
+  </section>
+
+  <section class="panel">
+    <h2>Graph &mdash; Top Hubs</h2>
+    {{if .Graph.Hubs}}
+    <table>
+      <tr><th>Symbol</th><th>Kind</th><th>Callers</th><th>Calls</th><th>Score</th></tr>
+      {{range .Graph.Hubs}}<tr><td>{{.Symbol}}</td><td>{{.Kind}}</td><td>{{.Callers}}</td><td>{{.Calls}}</td><td>{{.Score}}</td></tr>{{end}}
+    </table>
+    {{else}}<p class="muted">No hubs found.</p>{{end}}
+  </section>
+
+  <section class="panel">
+    <h2>Graph &mdash; Communities</h2>
+    {{if .Graph.Communities}}
+    <table>
+      <tr><th>ID</th><th>Size</th><th>Hub</th><th>Packages</th></tr>
+      {{range .Graph.Communities}}<tr><td>{{.ID}}</td><td>{{.Size}}</td><td>{{.Hub}}</td><td>{{range .Packages}}<span class="badge">{{.}}</span> {{end}}</td></tr>{{end}}
+    </table>
+    {{else}}<p class="muted">No communities found.</p>{{end}}
+  </section>
+
+  <section class="panel">
+    <h2>Memory</h2>
+    {{if .Memory.Items}}
+    <table>
+      <tr><th>Type</th><th>Scope</th><th>Content</th></tr>
+      {{range .Memory.Items}}<tr><td>{{.Type}}</td><td>{{.Scope}}</td><td>{{.Content}}</td></tr>{{end}}
+    </table>
+    {{else}}<p class="muted">No memories recorded.</p>{{end}}
+  </section>
+
+  <section class="panel">
+    <h2>Incidents</h2>
+    {{if .Incidents}}
+    <table>
+      <tr><th>ID</th><th>Title</th><th>Severity</th><th>Status</th><th>Service</th><th>Updated</th></tr>
+      {{range .Incidents}}<tr><td>{{.ID}}</td><td>{{.Title}}</td><td>{{.Severity}}</td><td>{{.Status}}</td><td>{{.AffectedService}}</td><td>{{.UpdatedAt}}</td></tr>{{end}}
+    </table>
+    {{else}}<p class="muted">No incidents recorded.</p>{{end}}
+  </section>
+
+  <section class="panel">
+    <h2>Architecture</h2>
+    <p>Errors: <span class="{{if .Architecture.ErrorCount}}bad{{else}}good{{end}}">{{.Architecture.ErrorCount}}</span> &middot; Warnings: <span class="warn">{{.Architecture.WarningCount}}</span> &middot; <span class="{{if .Architecture.OK}}good{{else}}bad{{end}}">{{if .Architecture.OK}}OK{{else}}FAIL{{end}}</span></p>
+    {{if .Architecture.Violations}}
+    <table>
+      <tr><th>Rule</th><th>Severity</th><th>Caller</th><th>Callee</th><th>Symbol</th></tr>
+      {{range .Architecture.Violations}}<tr><td>{{.RuleID}}</td><td>{{.Severity}}</td><td>{{.CallerFile}}</td><td>{{.CalleeFile}}</td><td>{{.Symbol}}</td></tr>{{end}}
+    </table>
+    {{else}}<p class="muted">No violations.</p>{{end}}
+  </section>
+
+  <section class="panel">
+    <h2>Governance &mdash; Policies</h2>
+    {{if .Governance.Policies}}
+    <table>
+      <tr><th>ID</th><th>Name</th><th>Scope</th><th>Description</th></tr>
+      {{range .Governance.Policies}}<tr><td>{{.ID}}</td><td>{{.Name}}</td><td>{{.Scope}}</td><td>{{.Description}}</td></tr>{{end}}
+    </table>
+    {{else}}<p class="muted">No policies.</p>{{end}}
+  </section>
+
+  <section class="panel">
+    <h2>Governance &mdash; Pending Approvals</h2>
+    {{if .Governance.ApprovalsPending}}
+    <table>
+      <tr><th>ID</th><th>Task</th><th>Requester</th><th>Reason</th><th>Requested</th></tr>
+      {{range .Governance.ApprovalsPending}}<tr><td>{{.ID}}</td><td>{{.TaskID}}</td><td>{{.Requester}}</td><td>{{.Reason}}</td><td>{{.RequestedAt}}</td></tr>{{end}}
+    </table>
+    {{else}}<p class="muted">No pending approvals.</p>{{end}}
+  </section>
+
+  <section class="panel">
+    <h2>Governance &mdash; Audit Log</h2>
+    {{if .Governance.Audit}}
+    <table>
+      <tr><th>Agent</th><th>Action</th><th>Resource</th><th>Approved</th><th>Result</th><th>Time</th></tr>
+      {{range .Governance.Audit}}<tr><td>{{.AgentID}}</td><td>{{.Action}}</td><td>{{.Resource}}</td><td>{{.Approved}}</td><td>{{.Result}}</td><td>{{.Timestamp}}</td></tr>{{end}}
+    </table>
+    {{else}}<p class="muted">Audit log empty.</p>{{end}}
+  </section>
+</main>
+</body>
+</html>

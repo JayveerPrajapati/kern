@@ -132,8 +132,8 @@ func TestDetectGoGinViaDepAndCode(t *testing.T) {
 
 func TestDetectRubyRailsByFile(t *testing.T) {
 	d := detectIn(t, map[string]string{
-		"Gemfile":            `gem "rails", "~> 7.0"`,
-		"config/routes.rb":   `Rails.application.routes.draw do; end`,
+		"Gemfile":          `gem "rails", "~> 7.0"`,
+		"config/routes.rb": `Rails.application.routes.draw do; end`,
 	})
 	got := ids(d)
 	if !got["rails"] {
@@ -150,6 +150,41 @@ func TestDetectIgnoresVendored(t *testing.T) {
 	// express detected only via the real source file — node_modules is skipped.
 	if !got["express"] {
 		t.Errorf("expected express, got %v", got)
+	}
+}
+
+// K1 regression: .kernignore must be honored so a Python venv excluded by
+// .kernignore (containing Django markers like settings.py/urls.py) does not
+// trigger a false Django detection.
+func TestDetectHonorsKernignore(t *testing.T) {
+	d := detectIn(t, map[string]string{
+		".kernignore": ".venv/\n",
+		".venv/lib/site-packages/pdfminer/settings.py": "DEBUG = True\n",
+		".venv/lib/site-packages/pip/urls.py":          "urls = []\n",
+		"src/main/java/com/example/App.java": `package com.example;
+@SpringBootApplication
+public class App { public static void main(String[] args) {} }`,
+	})
+	got := ids(d)
+	if got["django"] {
+		t.Errorf("Django should not be detected from .kernignore-excluded .venv/, got %v", got)
+	}
+}
+
+// K2 regression: a JS package-lock.json mentioning "tokio" (a JS package
+// named tokio) must NOT trigger the Rust Tokio framework. Dep signals are
+// scoped to manifests of the same language as the framework.
+func TestDetectNoPhantomTokioFromJSLockFile(t *testing.T) {
+	d := detectIn(t, map[string]string{
+		"package-lock.json": `{"dependencies": {"tokio": "1.0.0", "express": "^4"}}`,
+		"src/index.js":      `require('express')`,
+	})
+	got := ids(d)
+	if got["tokio"] {
+		t.Errorf("Rust Tokio must not be triggered by a JS package-lock.json mentioning tokio, got %v", got)
+	}
+	if !got["express"] {
+		t.Errorf("express should still be detected from JS manifest, got %v", got)
 	}
 }
 

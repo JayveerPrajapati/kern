@@ -5,11 +5,10 @@ import (
 	"unicode"
 )
 
-// Identifier-segment utilities adopted from codegraph's name_segment_vocab:
-// symbol names split into the words a human would use for them in prose, and
-// prose normalized into candidate words to match those segments with.
-// "OrderStateMachine" -> order/state/machine, so a query like "state machine"
-// can hit it without a keyword list ever knowing the words.
+// Identifier-segment utilities: symbol names split into the words a human
+// would use in prose, and prose normalized into candidate words to match those
+// segments with. "OrderStateMachine" -> order/state/machine, so a query like
+// "state machine" can hit it without a keyword list ever knowing the words.
 
 // Bounds keep degenerate identifiers (minified names, hashes) from bloating the
 // vocabulary: segments outside them carry no prose signal anyway.
@@ -150,11 +149,9 @@ func stripDiacritics(s string) string {
 }
 
 // segmentLookupVariants returns lookup variants for a prose word: the word
-// itself plus light plural folding ("services" -> service), so common plurals
-// still hit their singular segment. Only unambiguous English plural spellings
-// are stripped: -es after x/sh/ss/zz strips 2; ambiguous -ches/-ses/-zes/-oes
-// emit both candidate keys and let matching decide; a bare -s strips 1; a
-// trailing -ss is a singular (class, process), never stripped.
+// itself plus light plural folding ("services" -> service). Only unambiguous
+// English plural spellings are stripped; a trailing -ss is a singular
+// (class, process) and never stripped.
 func segmentLookupVariants(word string) []string {
 	variants := []string{word}
 	canStrip2 := len(word) >= minProseChars+2

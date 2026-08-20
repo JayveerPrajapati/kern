@@ -15,14 +15,9 @@ import (
 
 // RenameMethod renames a method ("Type.Method" or "pkg.Type.Method"). It is
 // all-or-nothing: the method definition and every `.Method` reference whose
-// receiver can be proven to be of type "Type" are renamed; any reference
-// whose receiver type cannot be proven refuses the entire rename, listing the
-// offending file:line. A reference provably on a different type is skipped,
-// not refused, so shared method names (Save, Close, String) do not block the
-// rename. Inline call receivers (s := store.New(); s.Save(), or
-// store.New().Save()) are proven when the callee's declared return type is in
-// the index; genuinely unprovable chains (s := helper(); s.Save()) are
-// refused rather than guessed.
+// receiver type can be proven are renamed; a reference provably on a different
+// type is skipped (so shared method names don't block), and one whose receiver
+// type cannot be proven refuses the entire rename.
 func RenameMethod(ix *index.Index, oldName, newName string, r *Report) (*Report, error) {
 	if !token.IsIdentifier(newName) || token.Lookup(newName).IsKeyword() {
 		return nil, fmt.Errorf("%q is not a valid Go identifier", newName)
@@ -220,8 +215,7 @@ classify:
 
 // newTypeProof builds the variable→type proof for a file. It carries the
 // index so a binding like `s := store.New()` can be proven from the callee's
-// declared return types (ix.Symbol.Returns) — the receiver chain the v1
-// rename refused as unprovable.
+// declared return types (ix.Symbol.Returns).
 func newTypeProof(ix *index.Index, f *ast.File, file string) *typeProof {
 	tp := &typeProof{
 		ix:      ix,

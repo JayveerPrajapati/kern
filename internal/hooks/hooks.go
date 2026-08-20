@@ -29,6 +29,16 @@ func Install(root string) error {
 # kern: compress the new commit's diff into project memory (installed by kern hook install)
 "%s" hook store --range "HEAD~1..HEAD" >/dev/null 2>&1 || true
 `, kernBinPath())
+	// Refuse to clobber an existing user-authored hook. A kern-installed hook
+	// is identified by its "# kern:" marker, so re-running install (e.g. after
+	// an upgrade) overwrites cleanly. The marker is on the second line (after
+	// the #!/bin/sh shebang), so it is detected with Contains rather than
+	// HasPrefix.
+	if b, err := os.ReadFile(hook); err == nil {
+		if !strings.Contains(string(b), "# kern:") {
+			return fmt.Errorf("post-commit hook already exists at %s and is not kern-managed; remove it first or merge manually", hook)
+		}
+	}
 	if err := os.WriteFile(hook, []byte(script), 0o755); err != nil {
 		return err
 	}
@@ -101,7 +111,10 @@ func compressDiff(d string) string {
 	return strings.TrimSuffix(b.String(), "\n")
 }
 
-// Store compresses the diff and records it in the project's memory.
+// Store compresses the diff and records it in the project's memory. The diff
+// content is untrusted (it can contain arbitrary commit data), so it is
+// sanitized before persisting to prevent the learning extractor from promoting
+// raw control characters or injected content into trusted constraints.
 func Store(root, from, to string) error {
 	d, err := Diff(from, to)
 	if err != nil {
@@ -110,5 +123,31 @@ func Store(root, from, to string) error {
 	if strings.TrimSpace(d) == "" {
 		return nil
 	}
-	return memory.Add(root, "latest change:\n"+d)
+	return memory.Add(root, "latest change:\n"+sanitize(d))
+}
+
+// maxStoredContent is the maximum length of persisted commit content.
+const maxStoredContent = 500
+
+// sanitize neutralizes untrusted commit diff content before it is stored in
+// project memory. It collapses newlines to spaces, strips control characters,
+// and truncates to a reasonable length so raw commit bytes cannot be promoted
+// into a trusted constraint by the learning extractor. Mirrors the sanitization
+// used for loop intents (internal/loop sanitizeIntent).
+func sanitize(d string) string {
+	s := strings.Map(func(r rune) rune {
+		switch {
+		case r == '\n' || r == '\r':
+			return ' '
+		case r < 0x20 || r == 0x7f: // control characters
+			return -1
+		default:
+			return r
+		}
+	}, d)
+	s = strings.Join(strings.Fields(s), " ")
+	if len(s) > maxStoredContent {
+		s = s[:maxStoredContent]
+	}
+	return s
 }

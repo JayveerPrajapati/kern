@@ -152,7 +152,7 @@ func ClaudePost(root string, in []byte) (string, error) {
 	// updatedToolOutput replaces the tool's result before Claude sees it.
 	out, err := json.Marshal(map[string]any{
 		"hookSpecificOutput": map[string]any{
-			"hookEventName":    "PostToolUse",
+			"hookEventName":     "PostToolUse",
 			"updatedToolOutput": compressed,
 		},
 	})
@@ -186,9 +186,9 @@ type GeminiAfterInput struct {
 	ToolName   string         `json:"tool_name"`
 	ToolInput  map[string]any `json:"tool_input"`
 	ToolResult struct {
-		LLMContent   string `json:"llmContent"`
+		LLMContent    string `json:"llmContent"`
 		ReturnDisplay string `json:"returnDisplay"`
-		Error        string `json:"error"`
+		Error         string `json:"error"`
 	} `json:"tool_response"`
 }
 
@@ -213,9 +213,9 @@ func GeminiAfter(root string, in []byte) (string, error) {
 // geminiResultText joins the display fields of a Gemini tool_response so
 // compression and failure detection see what the model saw.
 func geminiResultText(r struct {
-	LLMContent   string `json:"llmContent"`
+	LLMContent    string `json:"llmContent"`
 	ReturnDisplay string `json:"returnDisplay"`
-	Error        string `json:"error"`
+	Error         string `json:"error"`
 }) string {
 	var b strings.Builder
 	for _, s := range []string{r.LLMContent, r.ReturnDisplay, r.Error} {
@@ -233,7 +233,7 @@ func geminiResultText(r struct {
 // is recorded into project memory (rate-limited and deduped).
 func GeminiPrompt(root string, in []byte) error {
 	var p struct {
-		Prompt    string `json:"prompt"`
+		Prompt     string `json:"prompt"`
 		LLMRequest struct {
 			Messages []struct {
 				Role    string `json:"role"`

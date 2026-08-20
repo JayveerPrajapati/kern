@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/JayveerPrajapati/kern/internal/cache"
+	"github.com/JayveerPrajapati/kern/internal/ignore"
 )
 
 func readFile(path string) ([]byte, error) {
@@ -21,8 +22,9 @@ func readFile(path string) ([]byte, error) {
 // For every extension quickExt admits, detectLang returns a non-empty language,
 // so a stat-only walk is equivalent to the content-checking indexableHashes.
 // A walk error is returned so callers can decide to rebuild instead of serving
-// a stale index.
-func indexableMaxMtime(root string) (int64, int, error) {
+// a stale index. The ignore matcher mirrors Build's file-selection policy so
+// gitignored files never influence the staleness decision.
+func indexableMaxMtime(root string, ign *ignore.Matcher) (int64, int, error) {
 	var maxMtime int64
 	var count int
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
@@ -33,10 +35,20 @@ func indexableMaxMtime(root string) (int64, int, error) {
 			if path != root && ignoreDirs[d.Name()] {
 				return filepath.SkipDir
 			}
+			// Honor .gitignore/.kernignore directory patterns, as Build does.
+			if path != root && ign != nil {
+				if rel, rerr := filepath.Rel(root, path); rerr == nil && ign.Ignored(filepath.ToSlash(rel)) {
+					return filepath.SkipDir
+				}
+			}
 			return nil
 		}
 		rel, rerr := filepath.Rel(root, path)
 		if rerr != nil || !quickExt(rel) {
+			return nil
+		}
+		// Honor .gitignore/.kernignore file patterns, as Build does.
+		if ign != nil && ign.Ignored(filepath.ToSlash(rel)) {
 			return nil
 		}
 		info, ierr := d.Info()
@@ -90,8 +102,10 @@ func HasIndexableSources(root string) bool {
 // content hash for every indexable source file. Used by the watcher to detect
 // changes and by Load/Stale to decide whether a cached index is out of date.
 // A walk or read error is returned rather than silently producing a partial
-// map, which could wrongly mark an edited tree as unchanged.
-func indexableHashes(root string) (map[string]string, error) {
+// map, which could wrongly mark an edited tree as unchanged. The ignore
+// matcher mirrors Build's file-selection policy so gitignored files never
+// appear in the manifest.
+func indexableHashes(root string, ign *ignore.Matcher) (map[string]string, error) {
 	cur := map[string]string{}
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -101,10 +115,20 @@ func indexableHashes(root string) (map[string]string, error) {
 			if path != root && ignoreDirs[d.Name()] {
 				return filepath.SkipDir
 			}
+			// Honor .gitignore/.kernignore directory patterns, as Build does.
+			if path != root && ign != nil {
+				if rel, rerr := filepath.Rel(root, path); rerr == nil && ign.Ignored(filepath.ToSlash(rel)) {
+					return filepath.SkipDir
+				}
+			}
 			return nil
 		}
 		rel, rerr := filepath.Rel(root, path)
 		if rerr != nil || !quickExt(rel) {
+			return nil
+		}
+		// Honor .gitignore/.kernignore file patterns, as Build does.
+		if ign != nil && ign.Ignored(filepath.ToSlash(rel)) {
 			return nil
 		}
 		data, derr := readFile(path)
@@ -154,7 +178,7 @@ func Watch(ctx context.Context, root string, interval time.Duration, onChange fu
 		prev = ix.FileHashes
 	}
 	for {
-		cur, err := indexableHashes(root)
+		cur, err := indexableHashes(root, ignore.Load(root))
 		if err != nil {
 			if onError != nil {
 				onError(err)
@@ -216,7 +240,7 @@ func diff(prev, cur map[string]string) []Change {
 // need to compute change sets without rebuilding the whole index. A scan error
 // is returned rather than a silent partial result.
 func FileHashes(root string) (map[string]string, error) {
-	return indexableHashes(root)
+	return indexableHashes(root, ignore.Load(root))
 }
 
 // Diff reports the change set (adds, modifies, removes) between two hash maps

@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/JayveerPrajapati/kern/internal/ignore"
 )
 
 func writeTree(t *testing.T, files map[string]string) string {
@@ -350,7 +352,7 @@ func TestStaleGate(t *testing.T) {
 	}
 
 	// The stat gate must match the content manifest count exactly.
-	if maxMtime, count, err := indexableMaxMtime(dir); err != nil || count != len(ix.FileHashes) || maxMtime != ix.MaxMtime {
+	if maxMtime, count, err := indexableMaxMtime(dir, ignore.Load(dir)); err != nil || count != len(ix.FileHashes) || maxMtime != ix.MaxMtime {
 		t.Fatalf("gate mismatch: count %d vs %d, mtime %d vs %d (err %v)", count, len(ix.FileHashes), maxMtime, ix.MaxMtime, err)
 	}
 

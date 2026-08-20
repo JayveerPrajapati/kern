@@ -6,15 +6,23 @@ package memory
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/JayveerPrajapati/kern/internal/cache"
 )
 
 const maxEntries = 50
+
+// mu serializes the load→mutate→save cycle in Add (and the Clear removal) so
+// concurrent writers to the same lesson file cannot clobber each other. The
+// legacy Store is a value type rebuilt on every Load, so the guard is
+// package-level rather than a field on Store.
+var mu sync.Mutex
 
 // Entry is a single recorded lesson.
 type Entry struct {
@@ -54,6 +62,8 @@ func Add(root, lesson string) error {
 	if strings.TrimSpace(lesson) == "" {
 		return nil
 	}
+	mu.Lock()
+	defer mu.Unlock()
 	s := Load(root)
 	s.Entries = append(s.Entries, Entry{Time: time.Now().UTC(), Text: lesson})
 	if len(s.Entries) > maxEntries {
@@ -74,6 +84,8 @@ func List(root string) []Entry {
 
 // Clear removes all lessons for root.
 func Clear(root string) error {
+	mu.Lock()
+	defer mu.Unlock()
 	err := os.Remove(Path(root))
 	if os.IsNotExist(err) {
 		return nil
@@ -166,7 +178,13 @@ func readJSON(path string, v any) error {
 	if err != nil {
 		return err
 	}
-	return json.Unmarshal(b, v)
+	if err := json.Unmarshal(b, v); err != nil {
+		// Preserve the corrupt file for recovery and never silently proceed
+		// with partial data (which would let the next save destroy the file).
+		_ = os.Rename(path, path+".corrupt")
+		return fmt.Errorf("memory: corrupt JSON at %s (renamed to .corrupt): %w", path, err)
+	}
+	return nil
 }
 
 func writeJSON(path string, v any) error {
@@ -178,10 +196,24 @@ func writeJSON(path string, v any) error {
 		return err
 	}
 	// Atomic write (temp file + rename) so a concurrent reader never observes
-	// a partially-written store.
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, b, 0o600); err != nil {
+	// a partially-written store. The temp name is unique so concurrent writers
+	// never clobber each other's staging file.
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".tmp-*")
+	if err != nil {
 		return err
 	}
-	return os.Rename(tmp, path)
+	if _, err := tmp.Write(b); err != nil {
+		tmp.Close()
+		os.Remove(tmp.Name())
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmp.Name())
+		return err
+	}
+	if err := os.Chmod(tmp.Name(), 0o600); err != nil {
+		os.Remove(tmp.Name())
+		return err
+	}
+	return os.Rename(tmp.Name(), path)
 }

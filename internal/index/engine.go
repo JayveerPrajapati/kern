@@ -12,11 +12,18 @@ import (
 	"time"
 
 	"github.com/JayveerPrajapati/kern/internal/cache"
+	"github.com/JayveerPrajapati/kern/internal/ignore"
+	"github.com/JayveerPrajapati/kern/internal/metrics"
 )
 
 // indexVersion is bumped whenever the persisted index schema changes, so
 // stale caches are rebuilt automatically instead of serving zero-value fields.
 const indexVersion = 9
+
+// maxFileBytes is the largest file the index will read into memory and scan.
+// Larger files (e.g. generated .json, bundled .min.js) are skipped to avoid
+// loading huge blobs into RAM and regex-parsing them.
+const maxFileBytes = 10 * 1024 * 1024
 
 // Index is the in-memory representation of a project's AST index.
 type Index struct {
@@ -25,11 +32,9 @@ type Index struct {
 	Symbols []Symbol            `json:"symbols"`
 	Calls   map[string][]string `json:"calls"`
 	Callers map[string][]string `json:"callers"`
-	// AliasCallers maps a bare name to the callers of dotted callees with that
-	// bare name ("Println" -> callers of "fmt.Println"). It is a lookup aid
-	// for names that do not resolve to a local symbol; it never contributes
-	// callers to a resolved local symbol, so a call to fmt.Println can never
-	// show up as a caller of an unrelated local Println (W2-15, W2-16).
+	// AliasCallers maps a bare name to callers of dotted callees with that bare
+	// name ("Println" -> callers of "fmt.Println"); it never contributes callers
+	// to a resolved local symbol.
 	AliasCallers map[string][]string `json:"alias_callers,omitempty"`
 	// Inherits maps a subtype's full name to its bases, each tagged with the
 	// edge kind ("extends:Animal", "implements:Pet", "embeds:Base"). InheritedBy
@@ -39,26 +44,19 @@ type Index struct {
 	Pkgs           map[string]*Pkg     `json:"packages"`
 	FileHashes     map[string]string   `json:"file_hashes"`
 	GeneratedFiles map[string]bool     `json:"generated_files,omitempty"`
-	// Communities maps a symbol full name to its community label, populated
-	// by the SQLite store's Load and by CommunityLabels on demand. Graph
-	// consumers read membership from here when non-empty instead of
-	// recomputing the label propagation; the JSON index keeps it empty and
-	// consumers fall back to CommunityLabels.
+	// Communities maps a symbol full name to its community label, populated by
+	// the SQLite store's Load and by CommunityLabels on demand.
 	Communities   map[string]string   `json:"communities,omitempty"`
 	SymbolsByFile map[string][]Symbol `json:"-"`
 	UpdatedAt     time.Time           `json:"updated_at"`
-	// MaxMtime is the largest file modification time (Unix nanos) across the
-	// indexable files at build time. Stale() uses it as a cheap generation
-	// gate so repeated freshness checks short-circuit without re-hashing
-	// every file; the exact content-hash manifest check only runs when the
-	// gate trips (adopted from code-graph-mcp's generation-counter cache
-	// invalidation).
+	// MaxMtime is the largest file modification time (Unix nanos) at build time.
+	// Stale() uses it as a cheap generation gate before the exact hash check.
 	MaxMtime int64 `json:"max_mtime,omitempty"`
 }
 
 // New returns an empty index rooted at root.
 func New(root string) *Index {
-	return &Index{
+	ix := &Index{
 		Root:           root,
 		Version:        indexVersion,
 		Calls:          map[string][]string{},
@@ -71,19 +69,58 @@ func New(root string) *Index {
 		Communities:    map[string]string{},
 		SymbolsByFile:  map[string][]Symbol{},
 	}
+	ix.initMaps()
+	return ix
+}
+
+// initMaps ensures all map fields are non-nil. A corrupt or hand-edited
+// index.json can leave maps nil after json.Unmarshal, causing panics when
+// downstream code writes to them. Safe to call on an already-initialized index.
+func (ix *Index) initMaps() {
+	if ix.Calls == nil {
+		ix.Calls = map[string][]string{}
+	}
+	if ix.Callers == nil {
+		ix.Callers = map[string][]string{}
+	}
+	if ix.Inherits == nil {
+		ix.Inherits = map[string][]string{}
+	}
+	if ix.InheritedBy == nil {
+		ix.InheritedBy = map[string][]string{}
+	}
+	if ix.Pkgs == nil {
+		ix.Pkgs = map[string]*Pkg{}
+	}
+	if ix.FileHashes == nil {
+		ix.FileHashes = map[string]string{}
+	}
+	if ix.GeneratedFiles == nil {
+		ix.GeneratedFiles = map[string]bool{}
+	}
+	if ix.Communities == nil {
+		ix.Communities = map[string]string{}
+	}
+	if ix.SymbolsByFile == nil {
+		ix.SymbolsByFile = map[string][]Symbol{}
+	}
 }
 
 // StorePath returns the on-disk location for the index of root.
+// The index lives per-project under <root>/.kern/ so it is portable,
+// self-contained, and never pollutes a global cache.
 func StorePath(root string) string {
 	abs, err := filepath.Abs(root)
 	if err != nil {
 		abs = root
 	}
-	return cache.Path("index", cache.Hash([]byte(abs))+".json")
+	return filepath.Join(abs, ".kern", "index.json")
 }
 
 // Save persists the index. The write is atomic (temp file + rename) so a
-// concurrent reader never observes a partially-written index.
+// concurrent reader never observes a partially-written index. The temp file
+// is uniquely named (not a fixed .tmp path) so concurrent writers (watch
+// daemon + CLI) don't race on the same temp file and corrupt the index.
 func (ix *Index) Save() error {
 	data, err := json.Marshal(ix)
 	if err != nil {
@@ -93,11 +130,26 @@ func (ix *Index) Save() error {
 	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 		return err
 	}
-	tmp := p + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+	// Unique temp file avoids the race where two processes both write to
+	// p + ".tmp" and one truncates the other's bytes before rename.
+	f, err := os.CreateTemp(filepath.Dir(p), ".kern-index-*.tmp")
+	if err != nil {
 		return err
 	}
-	return os.Rename(tmp, p)
+	tmpPath := f.Name()
+	defer os.Remove(tmpPath) // no-op if rename succeeded
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpPath, p)
 }
 
 // Load reads the index for root. Returns nil if absent.
@@ -108,39 +160,43 @@ func Load(root string) (*Index, error) {
 	}
 	data, err := os.ReadFile(StorePath(abs))
 	if err != nil {
+		metrics.Default().RecordCacheMiss()
 		return nil, err
 	}
 	ix := &Index{}
 	if err := json.Unmarshal(data, ix); err != nil {
+		metrics.Default().RecordCacheMiss()
 		return nil, err
 	}
 	if ix.Version != indexVersion {
+		metrics.Default().RecordCacheMiss()
 		return nil, fmt.Errorf("index version %d (want %d): rebuild required", ix.Version, indexVersion)
 	}
+	ix.initMaps()
 	ix.reindexByFile()
+	metrics.Default().RecordCacheHit()
 	return ix, nil
 }
 
-// Stale reports whether the cached index no longer matches the files on disk:
-// a source file was added, removed, or edited since the index was built. The
-// check hashes the current indexable file set against the manifest captured at
-// build time, so intel commands never silently serve out-of-date call graphs.
+// Stale reports whether a source file was added, removed, or edited since the
+// index was built, so intel never serves out-of-date call graphs.
 func (ix *Index) Stale() bool {
 	if ix == nil || len(ix.FileHashes) == 0 {
 		return true
 	}
-	// Fast gate: if the indexable file count and newest modification time both
-	// match the build-time manifest, nothing changed, so skip re-hashing. A
-	// gate miss falls through to the exact hash comparison. Old indexes carry
-	// MaxMtime == 0, which never matches a fresh build, so they always take
-	// the exact path. Tradeoff: an edit that preserves mtime (rare, e.g.
-	// deliberately-touched timestamps) evades the gate until the next build.
+	// Load ignore patterns so gitignored files are excluded from the staleness
+	// decision, matching the file set Build indexed. Without this, a gitignored
+	// file would keep the gate/hash counts different from FileHashes and Stale
+	// would report true forever, defeating the cache.
+	ign := ignore.Load(ix.Root)
+	// Fast gate: identical file count and newest mtime mean nothing changed, so
+	// skip re-hashing. An mtime-preserving edit (rare) evades the gate.
 	if ix.MaxMtime > 0 {
-		if maxMtime, count, err := indexableMaxMtime(ix.Root); err == nil && count == len(ix.FileHashes) && maxMtime == ix.MaxMtime {
+		if maxMtime, count, err := indexableMaxMtime(ix.Root, ign); err == nil && count == len(ix.FileHashes) && maxMtime == ix.MaxMtime {
 			return false
 		}
 	}
-	cur, err := indexableHashes(ix.Root)
+	cur, err := indexableHashes(ix.Root, ign)
 	if err != nil {
 		return true
 	}
@@ -169,6 +225,7 @@ func LoadFile(path string) (*Index, error) {
 	if ix.Version != indexVersion {
 		return nil, fmt.Errorf("index version %d (want %d): rebuild required", ix.Version, indexVersion)
 	}
+	ix.initMaps()
 	ix.reindexByFile()
 	return ix, nil
 }
@@ -207,6 +264,10 @@ var ignoreDirs = map[string]bool{
 	".opencode": true, ".claude": true, ".cursor": true, ".gemini": true,
 	".kiro": true, ".codex": true, ".copilot": true, ".codeium": true,
 	".qwen": true, ".qoder": true,
+	// Generated graph/artifact dumps from the graphify skill and similar
+	// tools: multi-MB JSON/HTML that is never project source and can hang
+	// the foreign-language parser on large graphs (51MB+ graph.json files).
+	"graphify-out": true,
 }
 
 // IgnoredDir reports whether a directory name is skipped during index walks
@@ -215,14 +276,21 @@ var ignoreDirs = map[string]bool{
 func IgnoredDir(name string) bool { return ignoreDirs[name] }
 
 // Build walks root, parses every source file and assembles the index. On
-// error it returns a nil index so a half-built index is never mistaken for a
-// usable one.
+// error it returns a nil index so a half-built index is never mistaken for
+// a usable one.
 func Build(root string) (*Index, error) {
+	start := time.Now()
+	metrics.Default().RecordIndexing()
 	abs, err := filepath.Abs(root)
 	if err != nil {
 		return nil, err
 	}
 	ix := New(abs)
+	// Load .gitignore + .kernignore patterns so gitignored directories
+	// (e.g. graphify-out/, dist/, large generated trees) are skipped during
+	// the index walk. Without this, the index scans every file on disk
+	// regardless of .gitignore, producing huge symbol counts and slow builds.
+	ign := ignore.Load(abs)
 	err = filepath.WalkDir(abs, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -231,18 +299,37 @@ func Build(root string) (*Index, error) {
 			if path != abs && ignoreDirs[d.Name()] {
 				return filepath.SkipDir
 			}
+			// Honor .gitignore/.kernignore directory patterns.
+			if path != abs {
+				if rel, rerr := filepath.Rel(abs, path); rerr == nil {
+					if ign.Ignored(filepath.ToSlash(rel)) {
+						return filepath.SkipDir
+					}
+				}
+			}
 			return nil
 		}
 		rel, rerr := filepath.Rel(abs, path)
 		if rerr != nil {
 			return rerr
 		}
+		// Honor .gitignore/.kernignore file patterns.
+		if ign.Ignored(filepath.ToSlash(rel)) {
+			return nil
+		}
 		if !quickExt(rel) && filepath.Ext(rel) != "" {
+			return nil
+		}
+		// Skip files larger than maxFileBytes before reading them so huge
+		// generated/bundled files never get loaded into memory or scanned.
+		if info, ierr := d.Info(); ierr == nil && info.Size() > maxFileBytes {
 			return nil
 		}
 		src, serr := os.ReadFile(path)
 		if serr != nil {
-			return serr
+			// Skip unreadable files (e.g. broken symlinks) instead of aborting
+			// the whole index build. Matches the sec scanner's behavior.
+			return nil
 		}
 		if !isIndexable(rel, src) {
 			return nil
@@ -260,8 +347,10 @@ func Build(root string) (*Index, error) {
 	}
 	ix.UpdatedAt = time.Now().UTC()
 	ix.computeCallers()
+	ix.addDispatchEdges()
 	ix.resolveEntries()
 	ix.reindexByFile()
+	metrics.Default().RecordIndexBuild(time.Since(start))
 	return ix, nil
 }
 
@@ -311,23 +400,16 @@ func (ix *Index) computeCallers() {
 			}
 			// Canonical edge: recorded under the exact callee key.
 			ix.Callers[c] = append(ix.Callers[c], caller)
-			// Package-qualified local calls ("db.Open") are recorded under
-			// their qualified key, not the symbol's own key ("Open"); merge
-			// them onto the local symbol when the qualifier names the
-			// symbol's package directory. Foreign targets (fmt.Println) and
-			// unresolved receiver calls (v.M) never merge — that would forge
-			// phantom callers for unrelated same-named symbols (W2-15).
+			// Merge package-qualified local calls ("db.Open") onto the local
+			// symbol when the qualifier names its package dir; foreign and
+			// unresolved targets never merge (avoids forging callers).
 			if d, ok := qualifiedCalleeSymbol(ix, c); ok && d.FullName() != c {
 				ix.Callers[d.FullName()] = append(ix.Callers[d.FullName()], caller)
 			}
-			// Lookup alias: a dotted callee is also recorded under its bare
-			// name so graph lookups by simple name find foreign or unresolved
-			// targets (fmt.Println -> "Println"). Aliases live in a separate
-			// map and are never merged into a local symbol's caller list —
-			// that would forge phantom callers for unrelated same-named
-			// symbols (W2-15: fmt.Println -> local Println; W2-16:
-			// Alpha.Save -> Beta.Save). Never alias a caller to itself (that
-			// would forge a self-caller edge when e.g. Start calls Server.Start).
+			// Also record a dotted callee under its bare name so simple-name
+			// lookups find foreign or unresolved targets. Aliases stay in a
+			// separate map, never merged into a local symbol's callers, and a
+			// caller is never aliased to itself.
 			if simple := simpleKey(c); simple != c && simple != caller {
 				ix.AliasCallers[simple] = append(ix.AliasCallers[simple], caller)
 			}
@@ -351,6 +433,74 @@ func (ix *Index) computeCallers() {
 	}
 	for k := range ix.InheritedBy {
 		ix.InheritedBy[k] = dedupeSorted(ix.InheritedBy[k])
+	}
+}
+
+// addDispatchEdges adds virtual call edges from a method call on an interface
+// or abstract type to every concrete implementation of that method, so DI call
+// sites reach the code that actually runs.
+func (ix *Index) addDispatchEdges() {
+	if len(ix.InheritedBy) == 0 {
+		return
+	}
+
+	// Build a set of all symbol full names for quick membership checks.
+	symSet := map[string]bool{}
+	methodsByReceiver := map[string]map[string]bool{} // receiver -> set of method names
+	for _, s := range ix.Symbols {
+		fn := s.FullName()
+		symSet[fn] = true
+		if s.Receiver != "" {
+			if methodsByReceiver[s.Receiver] == nil {
+				methodsByReceiver[s.Receiver] = map[string]bool{}
+			}
+			methodsByReceiver[s.Receiver][s.Name] = true
+		}
+	}
+
+	// For each interface/abstract type that has implementers, add virtual edges
+	// to each implementer's method of the same name.
+	added := map[string]bool{} // dedupe key "caller->virtualCallee"
+	for caller, callees := range ix.Calls {
+		for _, c := range callees {
+			// Parse "Receiver.method" to find the receiver and method name.
+			dot := strings.LastIndex(c, ".")
+			if dot < 0 || dot == 0 {
+				continue
+			}
+			receiver := c[:dot]
+			method := c[dot+1:]
+			if receiver == "" || method == "" {
+				continue
+			}
+
+			implementers := ix.InheritedBy[receiver]
+			if len(implementers) == 0 {
+				continue
+			}
+
+			for _, impl := range implementers {
+				virtualCallee := impl + "." + method
+				if !symSet[virtualCallee] {
+					continue
+				}
+				key := caller + "->" + virtualCallee
+				if added[key] {
+					continue
+				}
+				added[key] = true
+				ix.Calls[caller] = append(ix.Calls[caller], virtualCallee)
+				ix.Callers[virtualCallee] = append(ix.Callers[virtualCallee], caller)
+			}
+		}
+	}
+
+	// Dedupe after adding virtual edges.
+	for k := range ix.Calls {
+		ix.Calls[k] = dedupeSorted(ix.Calls[k])
+	}
+	for k := range ix.Callers {
+		ix.Callers[k] = dedupeSorted(ix.Callers[k])
 	}
 }
 
@@ -438,11 +588,25 @@ func symbolMatches(s Symbol, kind string, re *regexp.Regexp) bool {
 		return s.Entry && (re.MatchString(s.Name) || (s.Receiver != "" && re.MatchString(s.Receiver+"."+s.Name)) ||
 			(s.Route != "" && re.MatchString(s.Route)))
 	}
-	if kind != "" && s.Kind != kind {
+	if kind == "type" {
+		// "type" is a super-category matching class, interface, enum, record,
+		// struct, trait, and union kinds, not just the Go-specific "type" kind.
+		if !searchTypeKinds[s.Kind] {
+			return false
+		}
+	} else if kind != "" && s.Kind != kind {
 		return false
 	}
 	return re.MatchString(s.Name) || (s.Receiver != "" && re.MatchString(s.Receiver+"."+s.Name)) ||
 		(s.Route != "" && re.MatchString(s.Route))
+}
+
+// searchTypeKinds is the set of symbol kinds matched by the "type" search
+// prefix. It is a superset of the parser's typeKinds (which is used for call
+// graph construction and must not include "type" or "record").
+var searchTypeKinds = map[string]bool{
+	"type": true, "class": true, "interface": true, "struct": true,
+	"enum": true, "record": true, "trait": true, "union": true,
 }
 
 // CallersOf returns the functions that call a given symbol name.
@@ -464,11 +628,10 @@ func simpleKey(c string) string {
 	return c
 }
 
-// qualifiedCalleeSymbol resolves a dotted callee key like "db.Open" to the
-// local symbol whose package directory matches the qualifier. It returns
-// ok=false for foreign targets ("fmt.Println") and unresolved receiver calls
-// ("v.M"), whose callers must never be attributed to a local symbol of the
-// same bare name (W2-15).
+// qualifiedCalleeSymbol resolves a dotted callee key ("db.Open") to the local
+// symbol whose package directory matches the qualifier. It returns ok=false
+// for foreign targets ("fmt.Println") and unresolved receiver calls ("v.M"),
+// whose callers must never be attributed to a local symbol of the same name.
 func qualifiedCalleeSymbol(ix *Index, c string) (Symbol, bool) {
 	i := strings.LastIndexByte(c, '.')
 	if i <= 0 || i+1 >= len(c) {
@@ -485,9 +648,8 @@ func qualifiedCalleeSymbol(ix *Index, c string) (Symbol, bool) {
 
 // CallersFor returns deduplicated callers attributable to a local symbol. Only
 // the exact key ("Type.Method" for methods, the plain name otherwise) is
-// consulted: bare-name aliases are never merged in, because a simple name can
-// name many symbols (Alpha.Save vs Beta.Save) and foreign targets (fmt.Println)
-// would forge phantom callers (W2-15, W2-16).
+// consulted: bare-name aliases are never merged in, since a simple name can
+// name many symbols (Alpha.Save vs Beta.Save) or a foreign target.
 func (ix *Index) CallersFor(s Symbol) []string {
 	return dedupeSorted(ix.Callers[s.FullName()])
 }

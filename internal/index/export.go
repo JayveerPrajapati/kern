@@ -1,6 +1,7 @@
 package index
 
 import (
+	"embed"
 	"encoding/json"
 	"fmt"
 	"html"
@@ -8,9 +9,19 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"text/template"
 
 	"github.com/JayveerPrajapati/kern/internal/tokenize"
 )
+
+//go:embed export_graph.html
+var graphFS embed.FS
+
+// graphHTMLTmpl is the self-contained HTML/SVG visualisation template. It is
+// parsed once at package init and executed with text/template (not
+// html/template) so the pre-escaped JSON, title and stats HTML are inserted
+// verbatim without double-escaping.
+var graphHTMLTmpl = template.Must(template.ParseFS(graphFS, "export_graph.html"))
 
 // GraphNode is a single symbol node in a neighbourhood graph.
 type GraphNode struct {
@@ -31,9 +42,8 @@ const (
 	confLow    = "low"    // unresolved/phantom reference
 )
 
-// Edge confidence labels — the industry-standard 3-tier scheme used by
-// Graphify, Code-Review-Graph and CodeGraph. These map to kern's internal
-// high/medium/low tiers so the JSON/GraphML output aligns with peer tools.
+// Edge confidence labels — the standard EXTRACTED/INFERRED/AMBIGUOUS scheme
+// mapped to kern's internal high/medium/low tiers for JSON/GraphML output.
 const (
 	confExtracted = "EXTRACTED" // deterministic from AST, no inference
 	confInferred  = "INFERRED"  // resolved but requiring cross-package lookup
@@ -56,10 +66,8 @@ func confidenceLabel(conf string) string {
 }
 
 // GraphEdge is a directed edge between two graph nodes. Confidence records how
-// reliably the edge was derived using kern's internal tiers ("high" for
-// same-package resolved calls, "medium" for cross-package resolved calls, "low"
-// for unresolved references). ConfidenceLabel provides the industry-standard
-// EXTRACTED/INFERRED/AMBIGUOUS equivalent.
+// reliably the edge was derived using kern's internal tiers (high/medium/low);
+// ConfidenceLabel carries the standard EXTRACTED/INFERRED/AMBIGUOUS equivalent.
 type GraphEdge struct {
 	From            string `json:"from"`
 	To              string `json:"to"`
@@ -79,6 +87,10 @@ type TokenStats struct {
 func (t TokenStats) Summary() string {
 	if t.FullContext <= 0 {
 		return ""
+	}
+	if t.CompactTokens >= t.FullContext {
+		return fmt.Sprintf("tokens: %s %d → %d (0%% saved; compact includes metadata)",
+			t.Source, t.FullContext, t.CompactTokens)
 	}
 	return fmt.Sprintf("tokens: %s %d → %d (%d%% saved)",
 		t.Source, t.FullContext, t.CompactTokens, t.SavingsPct)
@@ -244,11 +256,8 @@ func topDir(root, file string) string {
 	return "."
 }
 
-// computeTokenSavings computes how many tokens the full source context for a
-// symbol would use versus the compact text representation. The "full context"
-// is the concatenation of source files for all graph nodes (the code an agent
-// would read), and the "compact" form is the provided text (graph JSON or
-// context text).
+// computeTokenSavings compares tokens in the concatenated source files of all
+// graph nodes against the compact text form (graph JSON or context text).
 func computeTokenSavings(fullText, compact, source string) TokenStats {
 	fullTokens := tokenize.Count(fullText)
 	compactTokens := tokenize.Count(compact)
@@ -424,8 +433,43 @@ func tokenStatsPanel(s TokenStats) string {
 	if s.FullContext <= 0 {
 		return ""
 	}
-	return fmt.Sprintf(`<span style="color:#94a3b8;font-size:11px">\u21d2 %s %d → %d tokens (%d%% saved)</span>`,
-		s.Source, s.FullContext, s.CompactTokens, s.SavingsPct)
+	pct := s.SavingsPct
+	note := ""
+	if s.CompactTokens >= s.FullContext {
+		pct = 0
+		note = "; compact includes metadata"
+	}
+	return fmt.Sprintf(`<span style="color:#94a3b8;font-size:11px">\u21d2 %s %d → %d tokens (%d%% saved%s)</span>`,
+		s.Source, s.FullContext, s.CompactTokens, pct, note)
+}
+
+// graphHTMLData holds the interpolated values injected into export_graph.html.
+// All values are pre-escaped by the caller; text/template inserts them verbatim.
+type graphHTMLData struct {
+	JSON       string
+	Title      string
+	TokenStats string
+	Colors     string
+}
+
+// kindColorJSON renders the kind->color legend as a JSON object string. The key
+// order is intentionally driven by map iteration (matching the original logic);
+// the set of entries is fixed and stable.
+func kindColorJSON() string {
+	kindColor := map[string]string{
+		"func": "#3b82f6", "method": "#8b5cf6", "struct": "#ec4899",
+		"interface": "#f59e0b", "type": "#14b8a6", "const": "#64748b",
+		"var": "#64748b", "call": "#94a3b8",
+	}
+	var colors strings.Builder
+	for k, v := range kindColor {
+		colors.WriteString(`"`)
+		colors.WriteString(k)
+		colors.WriteString(`":"`)
+		colors.WriteString(v)
+		colors.WriteString(`",`)
+	}
+	return "{" + strings.TrimSuffix(colors.String(), ",") + "}"
 }
 
 // GraphHTML renders a self-contained interactive HTML/SVG visualisation of the
@@ -440,274 +484,17 @@ func (g GraphResult) GraphHTML() string {
 	}
 	data = []byte(strings.ReplaceAll(string(data), "</", "<\\/"))
 	title := g.Root
-	whole := title == ""
-	if whole {
+	if title == "" {
 		title = fmt.Sprintf("whole repo (%d symbols, %d edges)", len(g.Nodes), len(g.Edges))
 	}
-	kindColor := map[string]string{
-		"func": "#3b82f6", "method": "#8b5cf6", "struct": "#ec4899",
-		"interface": "#f59e0b", "type": "#14b8a6", "const": "#64748b",
-		"var": "#64748b", "call": "#94a3b8",
-	}
-	var colors strings.Builder
-	for k, v := range kindColor {
-		colors.WriteString(`"`)
-		colors.WriteString(k)
-		colors.WriteString(`":"`)
-		colors.WriteString(v)
-		colors.WriteString(`",`)
-	}
 	var b strings.Builder
-	b.WriteString(`<!DOCTYPE html>
-<html>
-<head>
-<meta charset="utf-8">
-<title>kern graph: `)
-	b.WriteString(html.EscapeString(title))
-	b.WriteString(`</title>
-<style>
-  body { font-family: system-ui, sans-serif; margin: 0; background: #0f172a; color: #e2e8f0; }
-  #top { padding: 10px 16px; border-bottom: 1px solid #334155; display: flex; gap: 16px; align-items: baseline; }
-  #top h1 { font-size: 15px; margin: 0; }
-  #top .sub { color: #94a3b8; font-size: 12px; }
-  #legend { font-size: 11px; color: #94a3b8; }
-  #legend span { margin-right: 10px; }
-.low-edge { stroke: #dc2626; stroke-dasharray: 5,4; }
-  #wrap { display: flex; }
-  svg { flex: 1; height: 600px; }
-  #side { width: 300px; padding: 12px; border-left: 1px solid #334155; font-size: 12px; }
-  #side .title { color: #94a3b8; text-transform: uppercase; font-size: 10px; letter-spacing: 1px; }
-  #side .dim { color: #94a3b8; }
-  svg text { font-family: system-ui, sans-serif; }
-  .node rect { cursor: pointer; transition: opacity .15s; }
-  .node text { pointer-events: none; }
-  .edge { stroke: #475569; stroke-width: 1.5; }
-  .dim { opacity: .12; }
-  #search { background: #0f172a; border: 1px solid #334155; color: #e2e8f0; font-size: 12px; padding: 4px 8px; border-radius: 6px; width: 200px; }
-  #search::placeholder { color: #64748b; }
-  .band-label { fill: #94a3b8; font-size: 11px; }
-</style>
-</head>
-<body>
-<div id="top"><h1>kern graph: `)
-	b.WriteString(html.EscapeString(title))
-	b.WriteString(`</h1><span class="sub">hover to trace edges, click for details</span>
-` + tokenStatsPanel(g.Stats) + `
-<input id="search" type="text" placeholder="filter symbols\u2026">
-<div id="legend"><span style="color:#22c55e">\u2500\u25b6 EXTRACTED (same pkg)</span><span style="color:#f59e0b">\u2500\u25b6 INFERRED (cross pkg)</span><span style="color:#dc2626">\u2500\u2500\u25b6 AMBIGUOUS (unresolved)</span></div></div>
-<div id="wrap"><svg id="svg" viewBox="0 0 1000 600"></svg><div id="side"></div></div>
-<script>
-const g = `)
-	b.WriteString(string(data))
-	b.WriteString(`;
-const whole = (g.root === '');
-const colors = {`)
-	b.WriteString(strings.TrimSuffix(colors.String(), ","))
-	b.WriteString(`};
-const COL = {caller: 120, def: 360, callee: 600};
-const layers = {caller: [], def: [], callee: []};
-const ids = [];
-g.nodes.forEach((n, i) => { n.i = i; n.rx = n.ry = 0; ids.push(n.id); layers[n.role||'callee'].push(n); });
-let nodeById = {};
-g.nodes.forEach(n => nodeById[n.id] = n);
-function slot(n, role) {
-  const col = COL[role];
-  const idx = layers[role].indexOf(n);
-  const nL = layers[role].length;
-  const gap = nL > 1 ? 40 : 0;
-  const start = 300 - ((nL - 1) * gap) / 2;
-  return [col, start + idx * gap];
-}
-const svg = document.getElementById('svg');
-const NS = 'http://www.w3.org/2000/svg';
-const edgesEl = [], nodeEl = new Map(), w = new Map();
-const edgemap = new Map();
-function addEdge(from, to, confidence) {
-  const e = whole ? document.createElementNS(NS, 'path') : document.createElementNS(NS, 'line');
-  e.setAttribute('class', 'edge');
-  if (confidence === 'AMBIGUOUS' || confidence === 'low') {
-    e.setAttribute('stroke-dasharray', '5,4');
-    e.setAttribute('stroke', '#dc2626');
-  } else if (confidence === 'INFERRED' || confidence === 'medium') {
-    e.setAttribute('stroke', '#f59e0b');
-  }
-    e.setAttribute('stroke', '#f59e0b');
-  }
-  const mk = document.createElementNS(NS, 'marker');
-  mk.setAttribute('id', 'arrow' + (edgemap.size));
-  mk.setAttribute('viewBox', '0 0 10 10'); mk.setAttribute('refX', '9'); mk.setAttribute('refY', '5');
-  mk.setAttribute('markerWidth', '6'); mk.setAttribute('markerHeight', '6'); mk.setAttribute('orient', 'auto-start-reverse');
-  const p = document.createElementNS(NS, 'path'); p.setAttribute('d', 'M 0 0 L 10 5 L 0 10 z'); p.setAttribute('fill', '#64748b');
-  mk.appendChild(p); svg.appendChild(mk);
-  e.setAttribute('marker-end', 'url(#arrow' + (edgemap.size) + ')');
-  svg.appendChild(e); edgesEl.push(e);
-  const key = from + '>' + to;
-  if (!edgemap.has(key)) edgemap.set(key, []);
-  edgemap.get(key).push(e);
-}
-function textWidth(s) {
-  if (!w.has(s)) { const t = document.createElementNS(NS, 'text'); t.textContent = s; svg.appendChild(t); w.set(s, t.getComputedTextLength()); t.remove(); }
-  return w.get(s);
-}
-function draw() {
-  if (whole) return wholeDraw();
-  g.nodes.forEach(n => {
-    const [cx, cy] = slot(n, n.role || 'callee');
-    const tw = Math.min(textWidth(n.id), 180);
-    const rw = tw + 22, rh = 30;
-    const g2 = document.createElementNS(NS, 'g');
-    g2.setAttribute('class', 'node');
-    const rect = document.createElementNS(NS, 'rect');
-    rect.setAttribute('width', rw); rect.setAttribute('height', rh);
-    rect.setAttribute('rx', 6);
-    rect.setAttribute('fill', (colors[n.kind] || '#64748b') + '33');
-    rect.setAttribute('stroke', colors[n.kind] || '#64748b');
-    const t = document.createElementNS(NS, 'text');
-    t.setAttribute('x', rw / 2); t.setAttribute('y', rh / 2 + 4);
-    t.setAttribute('text-anchor', 'middle'); t.setAttribute('font-size', '11');
-    t.textContent = n.id;
-    g2.appendChild(rect); g2.appendChild(t);
-    g2.setAttribute('transform', 'translate(' + (cx - rw / 2) + ',' + (cy - rh / 2) + ')');
-    g2.addEventListener('mouseenter', () => highlight(n, true));
-    g2.addEventListener('mouseleave', () => highlight(n, false));
-    g2.addEventListener('click', () => detail(n));
-    svg.appendChild(g2);
-    nodeEl.set(n.id, g2);
-    n.rx = cx; n.ry = cy; n.w = rw; n.h = rh;
-  });
-  g.edges.forEach(e => addEdge(e.from, e.to, e.confidence_label || e.confidence));
-  edgesEl.forEach((el, i) => {});
-  layout();
-}
-function layout() {
-  g.edges.forEach(e => {
-    const a = nodeById[e.from], b = nodeById[e.to];
-    if (!a || !b) return;
-    const lines = edgemap.get(e.from + '>' + e.to) || [];
-    lines.forEach((l, i) => {
-      const bend = (i - (lines.length - 1) / 2) * 12;
-      if (whole) {
-        const x1 = a.rx + a.w / 2, y1 = a.ry + bend;
-        const x2 = b.rx - b.w / 2, y2 = b.ry + bend;
-        const mx = (x1 + x2) / 2;
-        l.setAttribute('d', 'M ' + x1 + ' ' + y1 + ' C ' + mx + ' ' + y1 + ' ' + mx + ' ' + y2 + ' ' + x2 + ' ' + y2);
-        return;
-      }
-      let x1 = a.rx + (e.from === g.root ? a.w / 2 : -a.w / 2);
-      let y1 = a.ry + bend;
-      let x2 = b.rx + (e.to === g.root ? -b.w / 2 : b.w / 2);
-      let y2 = b.ry + bend;
-      l.setAttribute('x1', x1); l.setAttribute('y1', y1);
-      l.setAttribute('x2', x2); l.setAttribute('y2', y2);
-    });
-  });
-}
-function wholeDraw() {
-  const by = {};
-  g.nodes.forEach(n => { const k = (n.community || n.pkg || '?'); (by[k] = by[k] || []).push(n); });
-  const keys = Object.keys(by).sort((a, b) => by[b].length - by[a].length || a.localeCompare(b));
-  const colW = 200, colH = 470, rowH = 30, pad = 14;
-  let x = 40;
-  const bands = [];
-  keys.forEach(k => {
-    const nodes = by[k];
-    const pos = {};
-    let col = 0, row = 0;
-    nodes.forEach(n => {
-      if (row >= colH / rowH) { row = 0; col++; }
-      pos[n.id] = [x + col * colW + pad + 90, 40 + pad + row * rowH + 10];
-      row++;
-    });
-    const bw = (col + 1) * colW + pad * 2;
-    const band = document.createElementNS(NS, 'g');
-    const r = document.createElementNS(NS, 'rect');
-    r.setAttribute('x', x); r.setAttribute('y', 8); r.setAttribute('width', bw); r.setAttribute('height', 508);
-    r.setAttribute('fill', 'rgba(148,163,184,0.04)'); r.setAttribute('stroke', '#334155'); r.setAttribute('rx', 8);
-    const t = document.createElementNS(NS, 'text');
-    t.setAttribute('x', x + 10); t.setAttribute('y', 24); t.setAttribute('class', 'band-label');
-    t.textContent = k + ' (' + nodes.length + ')';
-    band.appendChild(r); band.appendChild(t); svg.appendChild(band);
-    bands.push({ x, w: bw, pos });
-    x += bw + 24;
-  });
-  svg.setAttribute('viewBox', '0 0 ' + (x + 40) + ' 560');
-  g.nodes.forEach(n => {
-    const b = bands.find(bb => bb.pos[n.id]);
-    const cx = b.pos[n.id][0], cy = b.pos[n.id][1];
-    const tw = Math.min(textWidth(n.id), 170);
-    const rw = tw + 16, rh = 22;
-    const g3 = document.createElementNS(NS, 'g');
-    g3.setAttribute('class', 'node');
-    const rect = document.createElementNS(NS, 'rect');
-    rect.setAttribute('width', rw); rect.setAttribute('height', rh); rect.setAttribute('rx', 5);
-    rect.setAttribute('fill', (colors[n.kind] || '#64748b') + '33');
-    rect.setAttribute('stroke', colors[n.kind] || '#64748b');
-    const t = document.createElementNS(NS, 'text');
-    t.setAttribute('x', rw / 2); t.setAttribute('y', rh / 2 + 4);
-    t.setAttribute('text-anchor', 'middle'); t.setAttribute('font-size', '10');
-    t.textContent = n.id;
-    g3.appendChild(rect); g3.appendChild(t);
-    g3.setAttribute('transform', 'translate(' + (cx - rw / 2) + ',' + (cy - rh / 2) + ')');
-    g3.addEventListener('mouseenter', () => highlight(n, true));
-    g3.addEventListener('mouseleave', () => highlight(n, false));
-    g3.addEventListener('click', () => detail(n));
-    svg.appendChild(g3);
-    nodeEl.set(n.id, g3);
-    n.rx = cx; n.ry = cy; n.w = rw; n.h = rh;
-  });
-}
-function highlight(n, on) {
-  const connected = new Set();
-  g.edges.forEach(e => {
-    if (e.from === n.id || e.to === n.id) { connected.add(e.from); connected.add(e.to); }
-  });
-  g.nodes.forEach(m => {
-    const el = nodeEl.get(m.id);
-    if (!el) return;
-    if (!on || m.id === n.id || connected.has(m.id)) el.classList.remove('dim');
-    else el.classList.add('dim');
-  });
-  edgesEl.forEach(l => { if (!on || l.__live) l.classList.remove('dim'); else l.classList.add('dim'); });
-  g.edges.forEach(e => {
-    const isConn = e.from === n.id || e.to === n.id;
-    (edgemap.get(e.from + '>' + e.to) || []).forEach(l => l.__live = isConn);
-  });
-}
-const side = document.getElementById('side');
-function detail(n) {
-  side.innerHTML = '<div class="title">' + (n.role || '') + '</div><div style="font-size:15px;margin:4px 0">' + n.id + '</div>' +
-    '<div>kind: <span class="dim">' + (n.kind || '-') + '</span></div>' +
-    '<div>file: <span class="dim">' + (n.file || '-') + '</span></div>' +
-    '<div>line: <span class="dim">' + (n.line || '-') + '</span></div>' +
-    (n.pkg ? '<div>pkg: <span class="dim">' + n.pkg + '</span></div>' : '') +
-    (n.community ? '<div>community: <span class="dim">' + n.community + '</span></div>' : '') +
-    '<div style="margin-top:8px" class="dim">' + n.id + ' has ' + (g.edges.filter(e => e.from === n.id).length) + ' outgoing, ' + (g.edges.filter(e => e.to === n.id).length) + ' incoming edges.</div>';
-}
-function legend() {
-  const seen = {};
-  g.nodes.forEach(n => { if (!seen[n.kind]) { seen[n.kind] = 1; const s = document.createElement('span'); s.innerHTML = '<span style="color:' + (colors[n.kind] || '#64748b') + '">\u25a0</span> ' + n.kind; document.getElementById('legend').appendChild(s); } });
-}
-const search = document.getElementById('search');
-search.addEventListener('input', () => {
-  const q = search.value.trim().toLowerCase();
-  g.nodes.forEach(n => {
-    const el = nodeEl.get(n.id);
-    if (!el) return;
-    const hit = !q || n.id.toLowerCase().includes(q) || (n.file || '').toLowerCase().includes(q);
-    el.style.opacity = hit ? '1' : '0.12';
-  });
-  g.edges.forEach(e => {
-    const a = nodeEl.get(e.from), b = nodeEl.get(e.to);
-    const vis = !q || (a && a.style.opacity !== '0.12' && b && b.style.opacity !== '0.12');
-    (edgemap.get(e.from + '>' + e.to) || []).forEach(l => { l.style.opacity = vis ? '1' : '0.06'; });
-  });
-});
-draw(); legend();
-if (nodeById[g.root]) detail(nodeById[g.root]);
-else detail({id: 'whole repo', kind: 'index', role: 'whole repo', file: g.nodes.length + ' symbols, ' + g.edges.length + ' edges'});
-</script>
-</body>
-</html>
-`)
+	if err := graphHTMLTmpl.Execute(&b, graphHTMLData{
+		JSON:       string(data),
+		Title:      html.EscapeString(title),
+		TokenStats: tokenStatsPanel(g.Stats),
+		Colors:     kindColorJSON(),
+	}); err != nil {
+		return fmt.Sprintf(`{"error":%q}`, err.Error())
+	}
 	return b.String()
 }

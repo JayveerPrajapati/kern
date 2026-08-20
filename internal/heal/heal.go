@@ -1,6 +1,6 @@
-// Package heal implements the self-correction loop (#9): when validation
-// fails, it asks a local LLM for corrected file contents, applies the fix to
-// a throwaway snapshot copy of the project, re-runs validation there, and
+// Package heal implements a self-correction loop: when validation fails, it
+// asks a local LLM for corrected file contents, applies the fix to a
+// throwaway snapshot copy of the project, re-runs validation there, and
 // reports the resulting diff. The user's working tree is never touched.
 package heal
 
@@ -127,7 +127,13 @@ func Run(ctx context.Context, root, task, model string, maxRounds int, timeout t
 		return res
 	}
 
-	client := llm.New(model)
+	prov, perr := llm.NewProvider()
+	if perr != nil {
+		res.Err = fmt.Errorf("llm: %w", perr)
+		res.Iterations = 0
+		res.Duration = time.Since(start)
+		return res
+	}
 	iter := 0
 	for iter < maxRounds {
 		iter++
@@ -153,7 +159,7 @@ func Run(ctx context.Context, root, task, model string, maxRounds int, timeout t
 		if len(failPaths) == 0 {
 			b.WriteString("(no file:line references found in output; apply your own judgement)\n")
 		}
-		reply, cerr := client.Complete(systemPrompt, b.String())
+		reply, cerr := prov.Generate(ctx, systemPrompt, b.String(), llm.Options{Model: model})
 		if cerr != nil {
 			res.Err = fmt.Errorf("llm round %d: %w", iter, cerr)
 			res.Iterations = iter
@@ -207,7 +213,7 @@ var failLineRe = regexp.MustCompile(`(?m)^([^\s:][^:]+):(\d+)(?::\d+)?[: ]`)
 // keeps only those that exist under root. Paths are resolved against root
 // (not the process working directory) so `kern heal` is correct when invoked
 // from elsewhere. Absolute paths and paths escaping root via ".." are never
-// probed — untrusted tool output must not become a filesystem oracle (W2-32).
+// probed — untrusted tool output must not become a filesystem oracle.
 func failingFiles(root, output string) []string {
 	seen := map[string]bool{}
 	var out []string

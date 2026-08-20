@@ -18,8 +18,7 @@ type CoChangeEntry struct {
 }
 
 // CoChangeReport is the commit-history coupling view: which files actually
-// change together, independent of the call graph. Used to grade change risk —
-// a file whose partners are being edited NOW is the next one to break.
+// change together, independent of the call graph. Used to grade change risk.
 type CoChangeReport struct {
 	From    string          `json:"from,omitempty"`
 	To      string          `json:"to,omitempty"`
@@ -32,7 +31,9 @@ type CoChangeReport struct {
 }
 
 // CoChange computes co-change coupling from git history. from/to follow git log
-// semantics; an empty range means the last 30 commits. The report is built from
+// semantics; an empty range means the last 200 commits (enough to surface real
+// co-change signal in moderately active repos; 30 was too short and left
+// almost every file with a commit count of 1). The report is built from
 // commit metadata only (no call graph), so it works even where indexing fails.
 func CoChange(root, from, to string) (*CoChangeReport, error) {
 	args := []string{"-C", root, "log", "--name-only", "--pretty=format:"}
@@ -42,7 +43,7 @@ func CoChange(root, from, to string) (*CoChangeReport, error) {
 		}
 		args = append(args, from+".."+to)
 	} else {
-		args = append(args, "-n", "30")
+		args = append(args, "-n", "200")
 	}
 	out, err := exec.Command("git", args...).Output()
 	if err != nil {
@@ -50,11 +51,10 @@ func CoChange(root, from, to string) (*CoChangeReport, error) {
 	}
 	commitFiles := parseCommitBlocks(string(out))
 
-	// Per-file co-change partner counts.
 	counts := map[string]int{}              // commits per file
 	partners := map[string]map[string]int{} // file -> partner -> co-change count
 	for _, files := range commitFiles {
-		// Unique files in this commit (a rename appears once).
+		// Dedupe files within a commit (a rename appears once).
 		uniq := make([]string, 0, len(files))
 		uset := map[string]bool{}
 		for _, f := range files {
@@ -112,7 +112,6 @@ func CoChange(root, from, to string) (*CoChangeReport, error) {
 		Files:   len(entries),
 		Entries: entries,
 	}
-	// Mark files dirty in the working tree.
 	if wt, err := ChangedFiles(root); err == nil {
 		report.WorkingTree = map[string]bool{}
 		for _, f := range wt {

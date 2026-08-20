@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"os"
@@ -89,11 +90,11 @@ func TestHelpersItoaPctArgStringTruncate(t *testing.T) {
 func TestLoadOrBuildIndexCacheHit(t *testing.T) {
 	root := mcpProject(t)
 	s := NewServer(strings.NewReader(""), &bytes.Buffer{})
-	ix1, err := s.loadIndex(root)
+	ix1, err := s.loadIndex(context.Background(), root)
 	if err != nil {
 		t.Fatal(err)
 	}
-	ix2, err := s.loadIndex(root)
+	ix2, err := s.loadIndex(context.Background(), root)
 	if err != nil || ix2 == nil {
 		t.Fatalf("cache-hit index load failed: %v", err)
 	}
@@ -171,11 +172,20 @@ func TestRootedPathToolsRejectEscapes(t *testing.T) {
 	}
 }
 
-func TestRootlessFileToolsUnaffected(t *testing.T) {
+// TestRootlessAbsolutePathRejected verifies that a rootless tool call may not
+// target an arbitrary absolute path (e.g. path=/etc/shadow): the call must
+// name a root so the path is confined to the workspace. Rootless relative
+// paths still resolve against the current working directory.
+func TestRootlessAbsolutePathRejected(t *testing.T) {
 	root := mcpProject(t)
-	out := mcpAssertOK(t, "kern_compact_file", map[string]any{"path": filepath.Join(root, "app.go")})
+	msg := mcpToolError(t, "kern_compact_file", map[string]any{"path": filepath.Join(root, "app.go")})
+	if !strings.Contains(msg, "absolute path requires root argument") {
+		t.Fatalf("expected absolute-path rejection, got %q", msg)
+	}
+	// Providing a root confines the path to the workspace and still works.
+	out := mcpAssertOK(t, "kern_compact_file", map[string]any{"root": root, "path": "app.go"})
 	if !strings.Contains(out, "Greet") {
-		t.Fatalf("compact_file should still read arbitrary paths, got %q", out)
+		t.Fatalf("expected app.go summary with root, got %q", out)
 	}
 }
 
@@ -620,6 +630,11 @@ func TestExecReturnsOnlyStdout(t *testing.T) {
 	if _, err := exec.LookPath("python3"); err != nil {
 		t.Skip("python3 not installed")
 	}
+	// kern_exec is a governed exec surface and runs scripts in network
+	// isolation (which fails closed when netns is unavailable). Opt in to both
+	// so the test exercises the real execution path on any host.
+	t.Setenv("KERN_ALLOW_EXEC", "1")
+	t.Setenv("KERN_ALLOW_NET", "1")
 	// Success: stdout only, no stderr, no stats noise.
 	out := mcpAssertOK(t, "kern_exec", map[string]any{
 		"code": "print(6*7)\nimport sys\nprint('noise', file=sys.stderr)\n",
@@ -737,6 +752,9 @@ func TestOutputSandboxThroughMCPChokepoint(t *testing.T) {
 	if _, err := exec.LookPath("python3"); err != nil {
 		t.Skip("python3 not installed")
 	}
+	// Governed exec surface + network-isolation opt-in (see TestExecReturnsOnlyStdout).
+	t.Setenv("KERN_ALLOW_EXEC", "1")
+	t.Setenv("KERN_ALLOW_NET", "1")
 	// A tiny global cap forces every tool result through the sandbox.
 	t.Setenv("KERN_MCP_MAX_OUTPUT", "128")
 	out := mcpAssertOK(t, "kern_exec", map[string]any{
@@ -854,6 +872,39 @@ func TestKernToolsAllowlistEmptyAllowsAll(t *testing.T) {
 	s := NewServer(strings.NewReader(""), io.Discard)
 	if got := len(s.filteredTools()); got != len(tools) {
 		t.Errorf("empty allowlist should expose all %d tools, got %d", len(tools), got)
+	}
+}
+
+func TestKernMCPHighLevelOnlyFiltersTools(t *testing.T) {
+	// A server is created after setting the env var, so tools/list honors it.
+	t.Setenv("KERN_MCP_HIGH_LEVEL_ONLY", "1")
+	resp := serveOne(t, writeReq("tools/list", 3, ``))
+	res := resp["result"].(map[string]any)
+	listed := res["tools"].([]any)
+	if len(listed) == 0 {
+		t.Fatal("tools/list returned no tools under KERN_MCP_HIGH_LEVEL_ONLY")
+	}
+	names := make(map[string]bool, len(listed))
+	for _, t := range listed {
+		names[t.(map[string]any)["name"].(string)] = true
+	}
+	// Only tools in highLevelTools are registered.
+	for name := range names {
+		if !highLevelTools[name] {
+			t.Errorf("tool %q should be filtered out under KERN_MCP_HIGH_LEVEL_ONLY", name)
+		}
+	}
+	// Tools known to be low-level must be absent.
+	for _, low := range []string{"kern_dead", "kern_rename", "kern_churn", "kern_optimize_output"} {
+		if names[low] {
+			t.Errorf("low-level tool %q should be filtered out under KEN_MCP_HIGH_LEVEL_ONLY", low)
+		}
+	}
+	// High-level orchestration tools must be present.
+	for _, high := range []string{"kern_analyze", "kern_plan", "kern_execute", "kern_verify", "kern_incident"} {
+		if !names[high] {
+			t.Errorf("high-level tool %q should be present under KEN_MCP_HIGH_LEVEL_ONLY", high)
+		}
 	}
 }
 

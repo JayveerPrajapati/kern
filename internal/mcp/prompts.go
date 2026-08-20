@@ -20,8 +20,7 @@ type PromptArgument struct {
 	Required    bool   `json:"required"`
 }
 
-// prompts is the curated workflow catalog. Modeled on the review-oriented
-// recipes competitors ship, but every step runs locally through kern tools.
+// prompts is the curated workflow catalog; every step runs locally.
 var prompts = []Prompt{
 	{
 		Name:        "review_changes",

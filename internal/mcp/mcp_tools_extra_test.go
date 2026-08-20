@@ -56,15 +56,22 @@ func TestSchemaValidateMissingArgs(t *testing.T) {
 }
 
 func TestDiffFilesIdenticalAndMissing(t *testing.T) {
-	a := tmpFile(t, "a.txt", "same\n")
-	b := tmpFile(t, "b.txt", "same\n")
-	resp := serveOne(t, toolsCallJSON(t, 34, "kern_diff_files", map[string]any{"a": a, "b": b}))
+	root := t.TempDir()
+	a := filepath.Join(root, "a.txt")
+	b := filepath.Join(root, "b.txt")
+	if err := os.WriteFile(a, []byte("same\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(b, []byte("same\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	resp := serveOne(t, toolsCallJSON(t, 34, "kern_diff_files", map[string]any{"root": root, "a": a, "b": b}))
 	out, _ := toolResultText(t, resp)
 	if out != "files identical" {
 		t.Fatalf("expected identical, got %q", out)
 	}
 
-	resp = serveOne(t, toolsCallJSON(t, 35, "kern_diff_files", map[string]any{"a": "", "b": ""}))
+	resp = serveOne(t, toolsCallJSON(t, 35, "kern_diff_files", map[string]any{"root": root, "a": "", "b": ""}))
 	out, isErr := toolResultText(t, resp)
 	if !isErr || !strings.Contains(out, "are required") {
 		t.Fatalf("expected required-args isError, got: %+v", resp)

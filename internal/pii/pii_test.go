@@ -1,6 +1,8 @@
 package pii
 
 import (
+	"encoding/base64"
+	"encoding/hex"
 	"strings"
 	"testing"
 )
@@ -16,6 +18,22 @@ func TestMaskIPAndEmail(t *testing.T) {
 	}
 	if res.ByLabel["IP"] != 1 || res.ByLabel["EMAIL"] != 1 {
 		t.Errorf("expected 1 IP + 1 email, got %+v", res.ByLabel)
+	}
+}
+
+func TestMaskCDNVersionURLNotEmail(t *testing.T) {
+	in := "load https://unpkg.com/boxicons@2.1.4/css/boxicons.min.css and 1.0.0"
+	res := Mask(in)
+	if strings.Contains(res.Text, "[MASKED_EMAIL_") {
+		t.Errorf("pkg@version URL must not be masked as email: %q", res.Text)
+	}
+	if res.ByLabel["EMAIL"] != 0 {
+		t.Errorf("expected no EMAIL findings, got %+v", res.ByLabel)
+	}
+	// A real email must still be masked.
+	res2 := Mask("contact ops@corp.example.com")
+	if res2.ByLabel["EMAIL"] != 1 {
+		t.Errorf("real email must still be masked, got %+v", res2.ByLabel)
 	}
 }
 
@@ -202,5 +220,55 @@ func TestMaskGithubPATFormat(t *testing.T) {
 	res := Mask(in)
 	if !strings.Contains(res.Text, "[MASKED_GITHUB_PAT_1]") {
 		t.Errorf("github_pat token not masked: %q", res.Text)
+	}
+}
+
+func TestMaskBase64APIKey(t *testing.T) {
+	key := "AKIAIOSFODNN7EXAMPLE" // matches the AWS pattern once decoded
+	enc := base64.StdEncoding.EncodeToString([]byte(key))
+	in := "creds: " + enc
+	res := Mask(in)
+	if !strings.Contains(res.Text, "[MASKED_B64_1]") {
+		t.Fatalf("base64 API key not masked: %q", res.Text)
+	}
+	if strings.Contains(res.Text, enc) {
+		t.Fatalf("base64 API key leaked: %q", res.Text)
+	}
+	if res.ByLabel["B64"] != 1 {
+		t.Errorf("expected 1 B64 finding, got %+v", res.ByLabel)
+	}
+	if back := res.Unmask(res.Text); back != in {
+		t.Errorf("round-trip failed: got %q want %q", back, in)
+	}
+}
+
+func TestMaskHexPassword(t *testing.T) {
+	secret := `password="hunter2secret123"` // decoded content matches PASSWORD
+	enc := hex.EncodeToString([]byte(secret))
+	in := "config: " + enc
+	res := Mask(in)
+	if !strings.Contains(res.Text, "[MASKED_HEX_1]") {
+		t.Fatalf("hex password not masked: %q", res.Text)
+	}
+	if strings.Contains(res.Text, enc) {
+		t.Fatalf("hex password leaked: %q", res.Text)
+	}
+	if res.ByLabel["HEX"] != 1 {
+		t.Errorf("expected 1 HEX finding, got %+v", res.ByLabel)
+	}
+	if back := res.Unmask(res.Text); back != in {
+		t.Errorf("round-trip failed: got %q want %q", back, in)
+	}
+}
+
+func TestMaskNormalBase64NotMasked(t *testing.T) {
+	in := "data:image/png;base64," + base64.StdEncoding.EncodeToString(
+		[]byte("a completely ordinary sentence that is absolutely not a secret"))
+	res := Mask(in)
+	if res.Text != in {
+		t.Errorf("normal base64 data was masked: %q", res.Text)
+	}
+	if res.Replaced != 0 {
+		t.Errorf("expected zero replacements for normal base64, got %d", res.Replaced)
 	}
 }

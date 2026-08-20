@@ -19,9 +19,11 @@ import (
 )
 
 // DefaultThreshold is the minimum Jaccard similarity for a hit on inputs with
-// enough shingles to compare. 0.40 requires ~40% shingle overlap, which clear
-// near-duplicates reach while unrelated text stays far below.
-const DefaultThreshold = 0.40
+// enough shingles to compare. 0.60 requires ~60% shingle overlap, which clear
+// near-duplicates reach while unrelated text (even when it shares a common
+// attached log) stays far below. This is deliberately conservative to avoid
+// serving one prompt's cached result for another.
+const DefaultThreshold = 0.60
 
 // ShortThreshold applies to very short inputs (< 6 shingles) where Jaccard is
 // noisy; require a closer match to avoid false positives.
@@ -35,6 +37,12 @@ const MaxEntries = 200
 // signature is stable across runs.
 const MaxShingles = 2000
 
+// MaxInputLen caps the stored raw input per entry. Matching uses the bounded
+// shingle signature; only a truncated preview of the input is kept on disk/in
+// memory for the "matched" report and Entries() so long prompts and attached
+// logs cannot balloon the index into many MB.
+const MaxInputLen = 2048
+
 type entry struct {
 	Key   string   `json:"key"`   // cache.Load/Store payload key
 	Input string   `json:"input"` // the stored input (for the "matched" report)
@@ -45,6 +53,27 @@ var (
 	mu      sync.Mutex
 	indexes = map[string][]entry{}
 )
+
+// truncate bounds the raw input stored in an index entry to MaxInputLen bytes,
+// without splitting a UTF-8 rune. The full shingle signature is computed and
+// bounded separately, so this only trims what is persisted for display/debugging,
+// keeping index files small.
+func truncate(s string) string {
+	if len(s) <= MaxInputLen {
+		return s
+	}
+	return s[:utf8safecut([]byte(s[:MaxInputLen]))]
+}
+
+// utf8safecut returns the largest index <= len(b) that ends on a rune boundary.
+func utf8safecut(b []byte) int {
+	for i := len(b); i > 0; i-- {
+		if b[i-1]&0xC0 != 0x80 { // not a continuation byte -> rune boundary
+			return i
+		}
+	}
+	return 0
+}
 
 // shingles returns the sorted, de-duplicated shingle set of text, capped at
 // MaxShingles. Words are lowercased, alphanumeric-only, length >= 2; the set
@@ -187,11 +216,11 @@ func Store(ns, input string, v any) error {
 	// Replace an identical input if already present.
 	for i := range es {
 		if es[i].Key == key {
-			es[i] = entry{Key: key, Input: input, Sig: shingles(input)}
+			es[i] = entry{Key: key, Input: truncate(input), Sig: shingles(input)}
 			return saveIndex(ns, es)
 		}
 	}
-	es = append(es, entry{Key: key, Input: input, Sig: shingles(input)})
+	es = append(es, entry{Key: key, Input: truncate(input), Sig: shingles(input)})
 	if len(es) > MaxEntries {
 		evicted := es[:len(es)-MaxEntries]
 		es = es[len(es)-MaxEntries:]

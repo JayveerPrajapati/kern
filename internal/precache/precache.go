@@ -1,10 +1,11 @@
 // Package precache speculatively warms the on-disk caches (code summaries and
 // the document vector index) in the background so interactive tools are fast
-// when they run (#20). It is a watch-style daemon: on each tick it scans the
-// tree for files whose content hash is not yet cached and fills the gap.
+// when they run. It is a watch-style daemon: on each tick it scans the tree
+// for files whose content hash is not yet cached and fills the gap.
 package precache
 
 import (
+	"errors"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -37,6 +38,24 @@ var ignoreDirs = map[string]bool{
 	".kern": true,
 }
 
+// Per-pass warm budgets bound how much work a single Warm pass can do so a
+// huge file or a very large tree cannot cause unbounded memory/CPU/IO spikes.
+// These mirror the per-file size and per-pass count caps used in fw.Detect.
+const (
+	// maxFileSize skips any single indexed file larger than 1MB so a giant
+	// file cannot be read into memory (OOM guard) or dominate a pass.
+	maxFileSize = 1 << 20
+	// maxSourceFiles caps the number of source files read per Warm pass.
+	maxSourceFiles = 2000
+	// maxBytesPerPass caps the total bytes read across all files in a pass,
+	// so sustained background warming stays within a bounded budget.
+	maxBytesPerPass = 100 << 20
+)
+
+// errBudgetExceeded aborts the file walk once the per-pass file/byte budget is
+// exhausted, so we do not keep traversing and reading a large tree needlessly.
+var errBudgetExceeded = errors.New("precache: per-pass budget exceeded")
+
 // Warm scans root once and fills any missing summary/doc caches.
 func Warm(root string) *Report {
 	rep := &Report{Root: root}
@@ -47,6 +66,8 @@ func Warm(root string) *Report {
 		return rep
 	}
 	var mu sync.Mutex
+	filesRead := 0
+	bytesRead := 0
 	_ = filepath.WalkDir(root, func(p string, d fs.DirEntry, werr error) error {
 		if werr != nil {
 			return nil
@@ -67,10 +88,24 @@ func Warm(root string) *Report {
 		if !index.QuickExt(rel) {
 			return nil
 		}
+		// Per-pass budget: stop reading files once we have warmed enough
+		// files or bytes this pass, so a large repo cannot sustain heavy
+		// CPU/IO (Bug 2).
+		if filesRead >= maxSourceFiles || bytesRead >= maxBytesPerPass {
+			return errBudgetExceeded
+		}
+		// Size cap: skip files larger than 1MB so a huge file cannot OOM on
+		// os.ReadFile (Bug 1).
+		finfo, serr := d.Info()
+		if serr != nil || finfo.Size() > maxFileSize {
+			return nil
+		}
 		content, rerr := os.ReadFile(p)
 		if rerr != nil {
 			return nil
 		}
+		filesRead++
+		bytesRead += len(content)
 		h := cache.Hash(content)
 		var cached code.Summary
 		mu.Lock()

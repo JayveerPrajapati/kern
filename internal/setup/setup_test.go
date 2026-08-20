@@ -327,6 +327,125 @@ func allInstalled(sts []Status, agent string) bool {
 	return true
 }
 
+// --- CLI subcommand parity ---
+//
+// The opencode plugin shells out to the kern CLI via run([...]) / a flags
+// array whose first element is the top-level subcommand (cmd/kern/main.go's
+// `switch cmd`). These regexes recover, for each tool, the subcommand token it
+// dispatches. A typo'd subcommand in the plugin would otherwise sail through
+// the name-only parity test; here the token must resolve to a real case.
+
+// cliTopLevelCaseRe matches a top-level `case "name"[, "alias"...]:` inside the
+// `switch cmd` block. Top-level cases are indented with exactly one tab, which
+// excludes the nested sub-dispatch switches (memory, hook, docs, guard, repos,
+// semcache).
+var cliTopLevelCaseRe = regexp.MustCompile(`(?m)^\tcase\s+([^:]+):`)
+
+// toolStartRe finds each kern_xxx tool definition; used to delimit tool bodies.
+var toolStartRe = regexp.MustCompile(`kern_[a-zA-Z0-9_]+:\s*tool\(`)
+
+// flagsFirstSubRe matches `const flags: string[] = ["sub", ...]` — the common
+// pattern where a tool builds its argument vector before run().
+var flagsFirstSubRe = regexp.MustCompile(`const flags: string\[\] = \["([^"]+)"`)
+
+// runFirstSubRe matches `run(["sub", ...])` for tools that dispatch directly.
+var runFirstSubRe = regexp.MustCompile(`run\(\["([^"]+)"`)
+
+// cliSubcommands returns the set of top-level subcommands handled by the kern
+// CLI (the `case "<name>"` labels of the `switch cmd` in cmd/kern/main.go).
+func cliSubcommands(t *testing.T) map[string]bool {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join("..", "..", "cmd", "kern", "main.go"))
+	if err != nil {
+		t.Fatalf("read cmd/kern/main.go: %v", err)
+	}
+	set := map[string]bool{}
+	for _, m := range cliTopLevelCaseRe.FindAllStringSubmatch(string(b), -1) {
+		// m[1] is e.g. `"version", "--version", "-v"` — collect every label.
+		for _, l := range strings.Split(m[1], ",") {
+			l = strings.TrimSpace(l)
+			if l == "" || len(l) < 3 || l[0] != '"' || l[len(l)-1] != '"' {
+				continue
+			}
+			set[l[1:len(l)-1]] = true
+		}
+	}
+	return set
+}
+
+// pluginToolSubcommand returns the CLI subcommand a plugin tool dispatches
+// (the first element of its flags/run argument vector), or "" if none could be
+// parsed. Parsing a tool body is enough to detect drift without running the
+// CLI — a missing/renamed subcommand or a changed dispatch shape fails here.
+func pluginToolSubcommand(toolBody string) string {
+	if m := flagsFirstSubRe.FindStringSubmatch(toolBody); m != nil {
+		return m[1]
+	}
+	if m := runFirstSubRe.FindStringSubmatch(toolBody); m != nil {
+		return m[1]
+	}
+	return ""
+}
+
+// TestPluginSubcommandsReachCLI is the execution-parity half of the plugin
+// invariant. It asserts that every kern_xxx tool in the plugin maps to a CLI
+// subcommand that actually exists in cmd/kern's dispatch, so a typo'd or
+// renamed subcommand (which the name-only TestPluginMatchesMCPCatalog cannot
+// see) fails the build. It is static token parsing — deterministic and fast,
+// no CLI build or run.
+func TestPluginSubcommandsReachCLI(t *testing.T) {
+	cli := cliSubcommands(t)
+	if len(cli) < 20 {
+		t.Fatalf("suspiciously small CLI subcommand set: %d", len(cli))
+	}
+
+	readSrc := func(label string) (string, error) {
+		switch label {
+		case "embedded":
+			b, err := pluginFS.ReadFile("assets/plugin/kern.ts")
+			return string(b), err
+		case "repo":
+			b, err := os.ReadFile(filepath.Join("..", "..", ".opencode", "plugins", "kern.ts"))
+			return string(b), err
+		}
+		return "", os.ErrNotExist
+	}
+
+	// Map each tool name to the subcommand it dispatches, so a tool that is
+	// silently dropped from the plugin (or whose dispatch is ambiguous) is
+	// reported with its name.
+	checked := 0
+	for _, src := range []string{"embedded", "repo"} {
+		content, err := readSrc(src)
+		if err != nil {
+			t.Fatalf("read %s plugin: %v", src, err)
+		}
+		idx := toolStartRe.FindAllStringIndex(content, -1)
+		for i, loc := range idx {
+			start := loc[1]
+			end := len(content)
+			if i+1 < len(idx) {
+				end = idx[i+1][0]
+			}
+			body := content[start:end]
+			name := content[loc[0]:loc[1]]
+			name = strings.TrimSuffix(name, ": tool(")
+			sub := pluginToolSubcommand(body)
+			if sub == "" {
+				t.Errorf("%s: %s: could not parse CLI subcommand from tool body", src, name)
+				continue
+			}
+			checked++
+			if !cli[sub] {
+				t.Errorf("%s: %s dispatches to subcommand %q which does not exist in cmd/kern/main.go (typo or stale mapping)", src, name, sub)
+			}
+		}
+	}
+	if checked == 0 {
+		t.Fatal("no plugin tools parsed — parity check did not run")
+	}
+}
+
 func TestWireClaudeHooks(t *testing.T) {
 	dir := t.TempDir()
 	st := wireClaudeHooks(dir, "/x/kern")

@@ -23,10 +23,9 @@ type ExploreReport struct {
 	Stats        *index.TokenStats `json:"stats,omitempty"`
 }
 
-// Explore is the single-call code-intelligence primitive: given a symbol it
-// returns verbatim source, the direct call flow (callers and callees), and the
-// transitive blast radius with affected files — the three answers agents
-// normally need three separate tools to assemble. depth=0 means unlimited.
+// Explore returns verbatim source, the direct call flow (callers and callees),
+// and the transitive blast radius with affected files for a symbol. depth=0
+// means unlimited.
 func Explore(ix *index.Index, symbol string, depth, maxNodes int) (*ExploreReport, error) {
 	if symbol == "" {
 		return nil, fmt.Errorf("symbol is required")
@@ -49,7 +48,6 @@ func Explore(ix *index.Index, symbol string, depth, maxNodes int) (*ExploreRepor
 		Callees:    cleanNames(ix.CallsFor(d)),
 	}
 
-	// Blast radius: transitive reverse closure, distance from root.
 	radius, dist := BlastRadius(ix, []string{resolved})
 	rep.NearestDepth = dist
 

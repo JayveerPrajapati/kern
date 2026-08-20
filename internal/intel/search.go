@@ -16,13 +16,11 @@ type SymbolEmbedder interface {
 	EmbedText(text string) ([]float32, error)
 }
 
-// SemanticSearch ranks symbols for query using both the deterministic n-gram
-// matcher and, when an embedder is available, dense embeddings of each
-// candidate's descriptor, fused by reciprocal rank. The deterministic pass
-// supplies a widened candidate pool (so embedding cost stays bounded) and the
-// dense signal re-orders it by real meaning: a symbol the n-gram matcher ranks
-// low can surface when its descriptor embeds close to the query. Without an
-// embedder (or when Ollama is unreachable) it degrades to RankedSearch.
+// SemanticSearch ranks symbols for query using the deterministic n-gram
+// matcher and, when an embedder is available, dense embeddings fused by
+// reciprocal rank. The deterministic pass widens the candidate pool (bounded
+// embedding cost); the dense signal re-orders it by meaning. Without an
+// embedder it degrades to RankedSearch.
 func SemanticSearch(ix *index.Index, query string, limit int, e SymbolEmbedder) []index.Symbol {
 	if limit <= 0 {
 		limit = 20
@@ -169,19 +167,15 @@ func denseCosine(a, b []float32) float64 {
 	return dot
 }
 
-// RankedSearch returns symbols matching a free-text query, ranked by how
-// strongly they match: exact name > exact full name > whole-segment match >
-// prefix > plural/diacritic-folded segment > substring in name > substring in
-// full name > file-name hit. Multi-word queries are split and symbols matching
-// more words rank higher. Query words are normalized (lowercased, Latin
-// diacritics stripped) and camelCase query words are split into segments so
-// prose like "state machine" or "résolution" hits OrderStateMachine /
-// resolveUnresolved without a keyword list. Symbols whose file was marked
-// generated at index time are penalized so hand-written implementations of the
-// same name rank first (generated stubs like `.pb.go` output frequently shadow
-// real code otherwise); they remain reachable, just demoted. Unlike
-// Index.Search (AST wildcard patterns) this is forgiving free-text lookup, so
-// a human can type "load index" or "readindex" and get useful anchors.
+// RankedSearch returns symbols matching a free-text query, ranked by match
+// strength: exact name > exact full name > whole-segment match > prefix >
+// plural/diacritic-folded segment > substring > file-name hit. Multi-word
+// queries are split and symbols matching more words rank higher. Query words
+// are normalized (lowercased, diacritics stripped, camelCase split into
+// segments) so prose like "state machine" or "résolution" hits
+// OrderStateMachine / resolveUnresolved. Generated files are penalized so
+// hand-written implementations of the same name rank first. Unlike
+// Index.Search (AST wildcard patterns) this is forgiving free-text lookup.
 func RankedSearch(ix *index.Index, query string, limit int) []index.Symbol {
 	if limit <= 0 {
 		limit = 50

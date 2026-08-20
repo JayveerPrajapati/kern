@@ -1,10 +1,8 @@
 package mcp
 
-// Guide returns a categorized guide to kern's MCP tools with performance
-// tiers, recommended workflows and pitfalls. Adopted from code-graph-mcp's
-// get_usage_guide tool: giving the agent the map up front stops it from
-// burning calls on the wrong tool (or re-running expensive ones). Exported so
-// the `kern guide` CLI command and the opencode plugin can share it verbatim.
+// Guide returns a categorized guide to kern's MCP tools: performance tiers,
+// recommended workflows and pitfalls. Exported so the `kern guide` CLI command
+// and the opencode plugin share it verbatim.
 func Guide() string {
 	return `# kern MCP — Tool Usage Guide
 
@@ -58,6 +56,72 @@ only matter for the exceptions.
 - Review a diff for regressions or vulns: kern_review -> kern_security
 - Refactor safely: kern_why -> kern_near -> kern_rename (preview, then apply=true)
 - Compute something without context noise: kern_exec (pure stdout, isolated runtime)
+
+## High-level Kern 2.0 workflows (ADR-0006 / Workflow C / Workflow E)
+These are the flagship end-to-end workflows. Each is a single MCP call that
+chains the fast primitives above into a full context packet, so you can reason
+about a change against the whole system without assembling it call-by-call.
+
+### The delivery pipeline: analyze → plan → execute → verify
+- kern_analyze(change) — the kernel workflow. Renders a whole-system analysis
+  of a proposed change: relevant code, architecture, dependencies, historical
+  project memory, blast radius, risks, evidence and the validation that will be
+  required. Call it first, before writing anything, whenever a change is
+  non-trivial.
+- kern_plan(change) — turn that analysis into an implementation plan: affected
+  files, dependencies, risks and required validation. Deterministic over the
+  analysis; no LLM. Chain after kern_analyze once the change is understood.
+- kern_execute(patch) — apply a unified diff inside an isolated sandbox
+  worktree, verify it builds, and return the resulting diff. Never mutates your
+  live tree; safe to try a patch before committing to it.
+- kern_verify(types) — gate the result with the unified verification engine
+  (build, test, security, architecture, dependency). Returns a typed
+  PASS/FAIL/WARN verdict and per-check summary. Run at the end to confirm the
+  plan landed correctly.
+
+Chain: kern_analyze → kern_plan → kern_execute → kern_verify. You can stop
+early (analyze alone when you only need insight; analyze → plan when you only
+need the roadmap) — each step is useful on its own.
+
+### Incident investigation: incident
+- **kern_incident(alert, [snapshot])** — investigate a production incident
+  end-to-end. Correlate an alert JSON to the affected service and evidence,
+  derive the root cause and hypotheses, and summarize. Pass the alert as JSON
+  ({id,severity,message,service,source,occurred_at}) and optionally a runtime
+  snapshot ({events,deployments,commits}) as JSON. When the investigation lands
+  on a fix, run it through the analyze → plan → execute → verify pipeline.
+
+### What-if analysis: what-if → impact
+- **kern_what_if(change, [kind], [new_target])** — simulate a hypothetical
+  change on the knowledge graph without touching it: transitively affected
+  symbols, files, services and tests, a deterministic risk level and a typed
+  RECOMMENDATION claim. Read-only — safe to ask "what if I remove this?".
+  kind is 'remove_symbol' (default) or 'change_dependency' (with new_target).
+- **kern_impact(change, [kind], [new_target])** — the same blast-radius engine
+  for a change you intend to make: affected symbols/files/services/tests,
+  deterministic risk and typed claims. Read-only. Use when you actually plan to
+  edit, not just speculate.
+
+Chain: kern_what_if to explore the option space first, then kern_impact on the
+chosen option to size the real edit — both before you run kern_execute.
+
+### Autonomy & teams: agents → loop
+- **kern_agents** — build the standard specialist team and list its roster
+  (name, role, capabilities) plus current task states from the agent registry.
+  Read-only and deterministic; call to see what specialists are available and
+  what's in flight.
+- **kern_loop(intent, [level])** — run the closed autonomy loop against an
+  intent string and get the stage timeline plus the deployed / observed-healthy
+  / learned outcome. The autonomy level (L0-L5, default L0 read-only) gates
+  which stages actually run. Use for an end-to-end intent, from analysis to
+  deployment, without micromanaging each stage.
+
+### Shared context: kern_context
+- **kern_context(symbol)** — the minimal relevant source slice for a symbol:
+  its definition source, its callers and what it calls. Use instead of reading
+  an entire file. It is the low-level primitive the other graph tools build on
+  and is useful inside any workflow when you need a symbol's true shape before
+  you plan or edit around it.
 
 ## Pitfalls
 - kern_walk/kern_near default depth is 2; depth 0 returns only the root symbol.

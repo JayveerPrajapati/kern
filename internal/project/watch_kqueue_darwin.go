@@ -52,8 +52,8 @@ func (w *kqueueWatcher) Event() <-chan struct{} { return w.ch }
 
 func (w *kqueueWatcher) Close() {
 	w.closeOnce.Do(func() {
-		close(w.closed) // tell the loop to exit
-		<-w.done        // wait until the loop has actually stopped touching the maps
+		close(w.closed)
+		<-w.done // wait until the loop has actually stopped touching the maps
 		syscall.Close(w.kq)
 		for fd := range w.fds {
 			syscall.Close(fd)
