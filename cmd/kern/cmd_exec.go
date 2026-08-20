@@ -226,14 +226,14 @@ func runSandbox(rest []string) {
 }
 
 func runExec(rest []string) {
-	f, args, err := parseFlags(rest)
-	if err != nil {
-		fatalUsage("flags: %v", err)
-	}
-	if len(args) > 0 && args[0] == "--list" {
+	if len(rest) > 0 && rest[0] == "--list" {
 		fmt.Printf("kern exec: available runtimes: %s\n", strings.Join(script.Available(), ", "))
 		fmt.Printf("  supported languages: %s\n", strings.Join(script.Languages(), ", "))
 		return
+	}
+	f, args, err := parseFlags(rest)
+	if err != nil {
+		fatalUsage("flags: %v", err)
 	}
 	// Executing a script runs arbitrary code; it must pass the governance
 	// firewall, fail closed (same gate as the MCP kern_exec tool).

@@ -202,7 +202,7 @@ type recall struct {
 // itself on every run.
 var recallQueries = []recall{
 	{"how do I optimize a prompt", "README.md"},
-	{"what commands reduce context", "README.md"},
+	{"how do I compress a log", "README.md"},
 	{"kern usage rules for agents", "AGENTS.md"},
 }
 
