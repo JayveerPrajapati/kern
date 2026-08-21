@@ -6,6 +6,8 @@ import (
 	"time"
 
 	"github.com/JayveerPrajapati/kern/internal/domain"
+	"github.com/JayveerPrajapati/kern/internal/verification"
+	"github.com/JayveerPrajapati/kern/internal/whatif"
 )
 
 // Task is the runtime task model. It extends domain.Task with execution state
@@ -25,6 +27,22 @@ type Task struct {
 	Risks             []domain.Risk  // risks identified during this task
 	Confidence        float64        // 0.0-1.0 confidence in the task outcome
 	RecommendedAction string         // "continue", "retry", "escalate", "abort", etc.
+
+	// Lifecycle results — the Integration Transformation Plan's Phase 2
+	// requires a Task to reference its full lifecycle output so it is the
+	// authoritative object for audit/resume/debugging. These are populated by
+	// TaskService as the task progresses through analyze → impact → plan →
+	// verify. They are intentionally *domain types* (not engine types) so the
+	// Task stays decoupled from engine internals.
+	ContextPacket *domain.ContextPacket            // assembled context for the change
+	ImpactReport  *whatif.Impact                   // deterministic impact (what-if/simulate)
+	Impact        *domain.ImpactReport             // 11-question deterministic impact (Phase 7)
+	Plan          *domain.Plan                     // structured implementation plan (Phase 6)
+	Verification  *verification.VerificationResult // last verification run
+	Intent        string                           // the original human request (from Input)
+
+	PRURL    string // URL of created PR (empty if noop/failed)
+	PRNumber int    // PR number (0 if noop/failed)
 }
 
 // Step records one execution step of a task.
@@ -53,14 +71,20 @@ func nextTaskID() string {
 
 // validTransitions encodes the TaskState state machine. Terminal states are not
 // keys, so no transition is possible FROM them (fail closed).
+//
+// The full code-change lifecycle follows the Integration Transformation Plan's
+// 20-step vertical slice: CREATED → ANALYZING → PLANNING → WAITING_FOR_APPROVAL
+// → APPROVED → EXECUTING → VERIFYING → READY_FOR_PR → PR_CREATED → DEPLOYING →
+// OBSERVING → COMPLETED. Read-only tasks (analyze, verify) may complete
+// directly from their respective state without driving the full lifecycle.
 var validTransitions = map[domain.TaskState][]domain.TaskState{
-	domain.TaskCreated:         {domain.TaskAnalyzing, domain.TaskFailed, domain.TaskBlocked, domain.TaskCancelled},
-	domain.TaskAnalyzing:       {domain.TaskPlanning, domain.TaskFailed, domain.TaskBlocked, domain.TaskCancelled},
-	domain.TaskPlanning:        {domain.TaskWaitingApproval, domain.TaskFailed, domain.TaskBlocked, domain.TaskCancelled},
+	domain.TaskCreated:         {domain.TaskAnalyzing, domain.TaskVerifying, domain.TaskFailed, domain.TaskBlocked, domain.TaskCancelled},
+	domain.TaskAnalyzing:       {domain.TaskPlanning, domain.TaskCompleted, domain.TaskFailed, domain.TaskBlocked, domain.TaskCancelled},
+	domain.TaskPlanning:        {domain.TaskWaitingApproval, domain.TaskCompleted, domain.TaskFailed, domain.TaskBlocked, domain.TaskCancelled},
 	domain.TaskWaitingApproval: {domain.TaskApproved, domain.TaskRejected, domain.TaskFailed, domain.TaskBlocked, domain.TaskCancelled},
 	domain.TaskApproved:        {domain.TaskExecuting, domain.TaskFailed, domain.TaskBlocked, domain.TaskCancelled, domain.TaskRejected},
 	domain.TaskExecuting:       {domain.TaskVerifying, domain.TaskFailed, domain.TaskBlocked, domain.TaskCancelled},
-	domain.TaskVerifying:       {domain.TaskReadyForPR, domain.TaskPRCreated, domain.TaskFailed, domain.TaskBlocked, domain.TaskCancelled},
+	domain.TaskVerifying:       {domain.TaskReadyForPR, domain.TaskPRCreated, domain.TaskCompleted, domain.TaskFailed, domain.TaskBlocked, domain.TaskCancelled},
 	domain.TaskReadyForPR:      {domain.TaskPRCreated, domain.TaskFailed, domain.TaskCancelled},
 	domain.TaskPRCreated:       {domain.TaskDeploying, domain.TaskCompleted, domain.TaskFailed, domain.TaskRolledBack},
 	domain.TaskDeploying:       {domain.TaskObserving, domain.TaskFailed, domain.TaskBlocked, domain.TaskRolledBack},

@@ -1,9 +1,13 @@
 # Homebrew formula for kern.
 #
-# Two ways to use this:
+# This is a GENERIC template: the version and sha256 are filled in at release
+# time from the git tag, so the committed copy always points at whatever tag it
+# was last released under. You normally never edit this file by hand.
+#
+# Three ways to use this:
 #
 # 1. Your own tap (recommended):
-#      brew tap JayveerPrajapati/tap  https://github.com/JayveerPrajapati/homebrew-tap
+#      brew tap <owner>/tap  https://github.com/<owner>/homebrew-tap
 #      brew install kern
 #    Publish the tap with scripts/publish-tap.sh (creates the repo, computes
 #    the sha256 from the GitHub source tarball, pushes Formula/kern.rb).
@@ -15,14 +19,22 @@
 # 2. Local brew install from source (no release needed):
 #      brew install --build-from-source ./homebrew/kern.rb
 #
-# Distribution note: run scripts/brew-release.sh after each release — it
-# prints this formula with the correct SHA256 sums filled in.
+# 3. Latest dev build from the default branch (no release needed):
+#      brew install --HEAD ./homebrew/kern.rb
+#
+# The version/sha256 are substituted by scripts/brew-release.sh and
+# scripts/publish-tap.sh (and by the release workflow) using the placeholders
+# below. Set the env vars KERN_REPO / KERN_REPO_OWNER to retarget.
 
 class Kern < Formula
   desc "Local-only context optimizer for AI agents (compression, indexing, agent wiring)"
   homepage "https://github.com/JayveerPrajapati/kern"
-  url "https://github.com/JayveerPrajapati/kern/archive/refs/tags/v0.1.0.tar.gz"
-  sha256 "REPLACE_WITH_SOURCE_TARBALL_SHA256"
+
+  # Placeholders substituted at release time by the tooling; keep these exact
+  # (scripts/brew-release.sh and scripts/publish-tap.sh sed on them).
+  url "https://github.com/JayveerPrajapati/kern/archive/refs/tags/#{version}.tar.gz"
+  version "__KERN_VERSION__"
+  sha256 "__KERN_SHA256__"
   license "MIT"
 
   depends_on "go" => :build

@@ -164,6 +164,50 @@ func (c *Client) TaskSubmit(input, typ string) (map[string]any, error) {
 	return c.postJSONMap("/v1/tasks", map[string]any{"input": input, "type": typ})
 }
 
+// Execute calls POST /v1/execute to apply a patch in a sandboxed worktree.
+// Phase 11: governance-gated, creates an authoritative Task with a diff artifact.
+func (c *Client) Execute(patch string) (map[string]any, error) {
+	return c.postJSONMap("/v1/execute", map[string]string{"patch": patch})
+}
+
+// Correlate calls POST /v1/correlate to correlate an alert against the runtime.
+// Phase 14: returns the deep evidence chain (alert→service→deployment→commit→symbol).
+func (c *Client) Correlate(alert domain.Alert, snapshot string) (map[string]any, error) {
+	body := map[string]any{"alert": alert}
+	if snapshot != "" {
+		body["snapshot"] = snapshot
+	}
+	return c.postJSONMap("/v1/correlate", body)
+}
+
+// Learn calls POST /v1/learn to extract recurring patterns from engineering memory.
+// Phase 16: returns patterns + surfaced patterns above the threshold.
+func (c *Client) Learn(threshold int) (map[string]any, error) {
+	return c.postJSONMap("/v1/learn", map[string]any{"threshold": threshold})
+}
+
+// Modernize calls POST /v1/modernize to run the legacy modernization analysis.
+// Phase 17: returns the phased extraction plan (contexts, bridges, phases).
+func (c *Client) Modernize() (map[string]any, error) {
+	return c.postJSONMap("/v1/modernize", map[string]any{})
+}
+
+// ArtifactsList calls GET /v1/artifacts to list all artifacts.
+func (c *Client) ArtifactsList() (map[string]any, error) {
+	return c.getJSONMap("/v1/artifacts")
+}
+
+// ArtifactGet calls GET /v1/artifacts/{id} to retrieve a single artifact.
+func (c *Client) ArtifactGet(id string) (map[string]any, error) {
+	return c.getJSONMap("/v1/artifacts/" + url.PathEscape(id))
+}
+
+// Audit calls GET /v1/audit/{task_id} to retrieve the audit trail for a task.
+// Phase 22: returns the task's steps, artifacts, events, and approvals.
+func (c *Client) Audit(taskID string) (map[string]any, error) {
+	return c.getJSONMap("/v1/audit/" + url.PathEscape(taskID))
+}
+
 // postJSON marshals body, POSTs it to path, and decodes the response into out.
 func (c *Client) postJSON(path string, body any, out any) error {
 	payload, err := json.Marshal(body)

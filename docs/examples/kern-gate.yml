@@ -1,0 +1,62 @@
+# Kern Governance Gate — runs kern analyze + verify on every PR as a
+# required check before merge. This is the CI/CD integration reference:
+# every change passes through kern's deterministic analysis before a human
+# reviews it.
+#
+# To use in your repo:
+# 1. Install kern (brew install kern or go install github.com/JayveerPrajapati/kern/cmd/kern@latest)
+# 2. Copy this workflow to .github/workflows/
+# 3. (Optional) Set KERN_GITHUB_TOKEN to enable automatic PR creation
+
+name: kern-gate
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install kern
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/JayveerPrajapati/kern/main/install.sh | bash
+
+      - name: Kern analyze
+        run: |
+          kern analyze "${{ github.event.pull_request.title }}" --root .
+
+      - name: Kern verify (build + test)
+        run: |
+          kern verify --check build,test --root .
+
+      - name: Kern impact
+        run: |
+          kern impact "${{ github.event.pull_request.title }}" --root .
+
+      - name: Kern guard check (architecture)
+        run: |
+          kern guard check --root .
+
+  # Optional: autonomous fix loop (requires KERN_ALLOW_EXEC + KERN_GITHUB_TOKEN)
+  autonomous-fix:
+    runs-on: ubuntu-latest
+    if: contains(github.event.pull_request.labels.*.name, 'kern-autofix')
+    env:
+      KERN_ALLOW_EXEC: "1"
+      KERN_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install kern
+        run: curl -fsSL https://raw.githubusercontent.com/JayveerPrajapati/kern/main/install.sh | bash
+      - name: Run autonomous fix loop
+        run: |
+          kern do "fix issues in PR #${{ github.event.pull_request.number }}" --level L2 --root .

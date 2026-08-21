@@ -203,6 +203,10 @@ func TestLearnWritesEpisodicAndLesson(t *testing.T) {
 func TestPhase15LoopEndToEnd(t *testing.T) {
 	root := loopFixture(t)
 
+	// Phase 9: production mutation is disabled by default (KERN_ALLOW_DEPLOY).
+	// This test exercises the deploy stage, so it must opt in explicitly.
+	t.Setenv("KERN_ALLOW_DEPLOY", "1")
+
 	// Production source with no errors in the observe window → healthy.
 	src := runtime.NewStore()
 	now := time.Now().Truncate(time.Second)
@@ -224,7 +228,6 @@ func TestPhase15LoopEndToEnd(t *testing.T) {
 		t.Fatalf("NewLoop: %v", err)
 	}
 
-	var deployed bool
 	res, err := lp.Run("add a Greet function", func(stage, intent string, wt *execution.Worktree, r *Result) (string, error) {
 		switch stage {
 		case stagePlan:
@@ -235,9 +238,6 @@ func TestPhase15LoopEndToEnd(t *testing.T) {
 				return "", err
 			}
 			return "wrote greet.go", nil
-		case stageDeploy:
-			deployed = true
-			return "deployed v-next", nil
 		}
 		return "", nil
 	})
@@ -245,7 +245,9 @@ func TestPhase15LoopEndToEnd(t *testing.T) {
 		t.Fatalf("Run: %v", err)
 	}
 
-	if !deployed {
+	// The deploy stage is handled by the deployer (NoopDeployer here since
+	// KERN_DEPLOY_COMMAND is unset), which reports a simulated success.
+	if !res.Deployed {
 		t.Fatal("deploy stage did not run")
 	}
 	if res.Diff == "" {

@@ -1,12 +1,15 @@
 package loop
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
 	"github.com/JayveerPrajapati/kern/internal/coder"
+	"github.com/JayveerPrajapati/kern/internal/deployment"
 	"github.com/JayveerPrajapati/kern/internal/domain"
 	"github.com/JayveerPrajapati/kern/internal/eventbus"
 	"github.com/JayveerPrajapati/kern/internal/execution"
@@ -15,6 +18,7 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/incident"
 	"github.com/JayveerPrajapati/kern/internal/learning"
 	"github.com/JayveerPrajapati/kern/internal/memory"
+	"github.com/JayveerPrajapati/kern/internal/planner"
 	"github.com/JayveerPrajapati/kern/internal/runtime"
 	"github.com/JayveerPrajapati/kern/internal/verification"
 )
@@ -40,6 +44,13 @@ type LoopConfig struct {
 	Appr          *governance.ApprovalWorkflow // human approval for deploy
 	Scope         string                       // memory scope tag for learned patterns
 
+	// Deployer optionally wires a deployment.Deployer for the deploy stage.
+	// When nil, the loop resolves one from the environment at NewLoop time:
+	// KERN_DEPLOY_COMMAND set → ShellDeployer (real external deploy), unset →
+	// NoopDeployer (simulated success). Either way the stage still requires
+	// KERN_ALLOW_DEPLOY=1 to proceed.
+	Deployer deployment.Deployer
+
 	// Learning optionally wires the continuous-learning pattern extractor
 	// (internal/learning) into the loop: after each lesson, recurring patterns
 	// above PatternThreshold are surfaced as constraints. Nil skips this wiring.
@@ -57,6 +68,12 @@ type LoopConfig struct {
 	// Coder optionally wires the autonomous coding agent (internal/coder) as
 	// the default code-stage handler, used when the caller's StepFunc is nil.
 	Coder *coder.Agent
+
+	// Planner optionally wires the LLM-driven planner (internal/planner) as
+	// the default plan-stage handler, used when the caller's StepFunc is nil.
+	// When both Planner and Coder are set, the loop uses LLM-driven plan→code
+	// (L3+ autonomy). When neither is set, stages are no-ops (L0-L2 read-only).
+	Planner *planner.Agent
 }
 
 // StageResult is the outcome of one loop stage.
@@ -103,6 +120,9 @@ func NewLoop(cfg LoopConfig) (*Loop, error) {
 	if cfg.Scope == "" {
 		cfg.Scope = "project"
 	}
+	if cfg.Deployer == nil {
+		cfg.Deployer = deployment.NewDeployerFromEnv()
+	}
 	return &Loop{cfg: cfg}, nil
 }
 
@@ -135,8 +155,8 @@ func (l *Loop) publish(ev eventbus.Event) {
 func (l *Loop) Run(intent string, step StepFunc) (*Result, error) {
 	res := &Result{Intent: intent, Level: l.cfg.Level}
 	if step == nil {
-		if l.cfg.Coder != nil {
-			step = l.coderStep()
+		if l.cfg.Coder != nil || l.cfg.Planner != nil {
+			step = l.defaultStep()
 		} else {
 			step = func(string, string, *execution.Worktree, *Result) (string, error) {
 				return "", nil
@@ -205,13 +225,37 @@ func (l *Loop) Run(intent string, step StepFunc) (*Result, error) {
 				err = errors.New("verify: " + v.Summary)
 			}
 		case stageDeploy:
+			// Phase 9: production mutation is disabled by default. The deploy
+			// stage only runs when KERN_ALLOW_DEPLOY=1 is explicitly set, so
+			// a local console or loop run cannot accidentally trigger a
+			// production deployment without operator opt-in. Without it, the
+			// stage is skipped (not failed) so read-only loops still complete.
+			if os.Getenv("KERN_ALLOW_DEPLOY") != "1" {
+				out = "deploy skipped: KERN_ALLOW_DEPLOY not set (production mutation disabled by default)"
+				break
+			}
 			l.publish(eventbus.Event{Kind: eventbus.DeploymentStarted, Subject: l.cfg.Service, Payload: map[string]string{"service": l.cfg.Service}})
-			out, err = step(st, intent, wt, res)
-			if err == nil {
-				res.Deployed = true
-				l.publish(eventbus.Event{Kind: eventbus.DeploymentCompleted, Subject: l.cfg.Service, Payload: map[string]string{"service": l.cfg.Service}})
+			dres, derr := l.cfg.Deployer.Deploy(context.Background(), deployment.DeployRequest{
+				Service:     l.cfg.Service,
+				Version:     "loop",
+				ProjectRoot: l.cfg.Root,
+			})
+			if derr != nil {
+				err = fmt.Errorf("deploy: %w", derr)
+				res.Deployed = false
+				out = "deploy failed: " + derr.Error()
+				l.publish(eventbus.Event{Kind: eventbus.DeploymentFailed, Subject: l.cfg.Service, Payload: map[string]string{"service": l.cfg.Service, "error": derr.Error()}})
+				l.publish(eventbus.Event{Kind: eventbus.DeploymentRolledBack, Subject: l.cfg.Service, Payload: map[string]string{"service": l.cfg.Service, "error": derr.Error()}})
+			} else if !dres.Success {
+				err = errors.New("deploy failed: " + dres.Output)
+				res.Deployed = false
+				out = dres.Output
+				l.publish(eventbus.Event{Kind: eventbus.DeploymentFailed, Subject: l.cfg.Service, Payload: map[string]string{"service": l.cfg.Service, "error": dres.Output}})
+				l.publish(eventbus.Event{Kind: eventbus.DeploymentRolledBack, Subject: l.cfg.Service, Payload: map[string]string{"service": l.cfg.Service, "error": dres.Output}})
 			} else {
-				l.publish(eventbus.Event{Kind: eventbus.DeploymentRolledBack, Subject: l.cfg.Service, Payload: map[string]string{"service": l.cfg.Service, "error": err.Error()}})
+				res.Deployed = true
+				out = dres.Output
+				l.publish(eventbus.Event{Kind: eventbus.DeploymentCompleted, Subject: l.cfg.Service, Payload: map[string]string{"service": l.cfg.Service, "version": dres.Version}})
 			}
 		case stageObserve:
 			res.ObservedHealthy = l.observeHealthy()
@@ -283,6 +327,47 @@ func (l *Loop) coderStep() StepFunc {
 			return fmt.Sprintf("coder: passed in %d round(s) (%.2fs)", len(result.Rounds), result.TotalTime.Seconds()), nil
 		}
 		return fmt.Sprintf("coder: %d round(s), verification did not pass", len(result.Rounds)), fmt.Errorf("coder: verification failed")
+	}
+}
+
+// defaultStep returns a StepFunc that delegates the plan stage to the wired
+// planner.Agent (when configured) and the code stage to the wired coder.Agent
+// (when configured). Stages without a wired agent return empty. This is used
+// when cfg.Planner or cfg.Coder is set and the caller did not supply a
+// StepFunc — enabling L3+ autonomy without caller-provided handlers.
+func (l *Loop) defaultStep() StepFunc {
+	return func(stage, intent string, wt *execution.Worktree, res *Result) (string, error) {
+		switch stage {
+		case stagePlan:
+			if l.cfg.Planner == nil {
+				return "", nil
+			}
+			// Collect recalled memories to inform the plan.
+			var memories []string
+			for _, m := range res.Remembered {
+				memories = append(memories, m.Content)
+			}
+			plan, err := l.cfg.Planner.Plan(intent, memories)
+			if err != nil {
+				// A missing provider is non-fatal: return an empty plan and
+				// let the loop continue (the coder, if wired, still codes).
+				if err == planner.ErrNoProvider {
+					return "planner: no LLM provider configured", nil
+				}
+				return fmt.Sprintf("planner: %v", err), err
+			}
+			return plan, nil
+
+		case stageCode:
+			if l.cfg.Coder == nil {
+				return "", nil
+			}
+			return l.coderStep()(stage, intent, wt, res)
+
+		default:
+			// intent and other non-creative stages: no-op.
+			return "", nil
+		}
 	}
 }
 

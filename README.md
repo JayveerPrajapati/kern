@@ -27,7 +27,7 @@ Already installed? Run `kern doctor` to verify everything is wired.
 
 <br>
 
-**74 `kern_*` MCP tools · 50+ CLI commands · 74 detected frameworks · 18 indexed languages (+ Vue/Svelte/Astro SFC)**
+**77 `kern_*` MCP tools · 50+ CLI commands · 74 detected frameworks · 18 indexed languages (+ Vue/Svelte/Astro SFC)**
 
 </div>
 
@@ -60,9 +60,8 @@ Already installed? Run `kern doctor` to verify everything is wired.
 # macOS / Linux
 curl -fsSL https://raw.githubusercontent.com/JayveerPrajapati/kern/main/install.sh | sh
 
-# Windows
-#   the install.sh script is macOS/Linux only — download kern-windows-amd64.zip
-#   from GitHub Releases and extract kern.exe
+# Windows (PowerShell)
+powershell -ExecutionPolicy Bypass -c "irm https://raw.githubusercontent.com/JayveerPrajapati/kern/main/install.ps1 | iex"
 ```
 
 <details>
@@ -73,9 +72,10 @@ curl -fsSL https://raw.githubusercontent.com/JayveerPrajapati/kern/main/install.
 | **go install** | `go install github.com/JayveerPrajapati/kern/cmd/kern@latest && go install github.com/JayveerPrajapati/kern/cmd/kern-mcp@latest` | Both binaries to `$(go env GOPATH)/bin` |
 | **from source** | `make build` → `bin/kern`, `bin/kern-mcp` | Requires Go 1.23+ |
 
-<sub>`install.sh` honors `KERN_VERSION` (pin a release) and `KERN_INSTALL_DIR`
-(default `~/.local/bin`); it falls back to `go install` when no prebuilt asset
-matches your platform. Verify any install with `kern version`.</sub>
+<sub>`install.sh` (macOS/Linux) and `install.ps1` (Windows) honor `KERN_VERSION`
+(pin a release) and `KERN_INSTALL_DIR` (default `~/.local/bin`); they fall back
+to `go install` when no prebuilt asset matches your platform. Verify any
+install with `kern version`.</sub>
 
 </details>
 
@@ -275,7 +275,7 @@ codebase's stack is answered in one call.
 ┌───────────────────────────────────────────────────────────────────┐
 │                  kern (CLI) / kern-mcp (MCP server)               │
 │                                                                   │
-│  74 kern_* tools → optimize · map · graph · review · verify ...   │
+│  77 kern_* tools → optimize · map · graph · review · verify ...   │
 │                                 │                                 │
 │                                 ▼                                 │
 │                  persisted symbol index (JSON hash cache,         │
@@ -293,7 +293,7 @@ codebase's stack is answered in one call.
    `~/.cache/kern/` (per project). `-tags sqlite` switches to a SQLite store
    with WAL journaling and FTS5 full-text search for concurrent access.
 
-3. **Analysis** — 50+ commands and 74 MCP tools read the same index:
+3. **Analysis** — 50+ commands and 77 MCP tools read the same index:
    call graphs, blast radius, change impact, hotspots, dead code, path
    finding, architecture communities, coverage gaps — all dependency-free,
    all deterministic.
@@ -392,7 +392,7 @@ and `kern validate` share the same gate.
 
 ## MCP Tools
 
-When running as an MCP server (`kern-mcp`), kern exposes **74 `kern_*`
+When running as an MCP server (`kern-mcp`), kern exposes **77 `kern_*`
 tools**. They map 1:1 to the CLI commands, so opencode, Claude Code, Codex,
 Cursor and 12 more agents get the full engine over MCP:
 
@@ -403,7 +403,7 @@ Cursor and 12 more agents get the full engine over MCP:
 | **Change & review** | `kern_changes`, `kern_review`, `kern_churn`, `kern_trace`, `kern_hubs`, `kern_bridges`, `kern_arch`, `kern_dead`, `kern_larges`, `kern_test_gaps`, `kern_cochange` |
 | **Safety** | `kern_mask_pii`, `kern_security`, `kern_safe_delete`, `kern_verify_output`, `kern_guard_check`, `kern_schema_validate`, `kern_sandbox` |
 | **Automation** | `kern_run_build`, `kern_validate`, `kern_heal`, `kern_exec`, `kern_execute`, `kern_rename`, `kern_diff_files`, `kern_commitmsg`, `kern_doc_fetch`, `kern_doc_index`, `kern_doc_search`, `kern_precache`, `kern_memory_add`, `kern_memory_list`, `kern_memory_recall`, `kern_memory`, `kern_lock`, `kern_unlock`, `kern_lock_status`, `kern_semcache`, `kern_stats`, `kern_usage_guide`, `kern_buddy` |
-| **Kern 2.0 high-level** | `kern_analyze`, `kern_plan`, `kern_impact`, `kern_what_if`, `kern_verify`, `kern_incident`, `kern_agents`, `kern_loop` |
+| **Kern 2.0 high-level** | `kern_analyze`, `kern_plan`, `kern_impact`, `kern_what_if`, `kern_verify`, `kern_incident`, `kern_agents`, `kern_loop`, `kern_correlate`, `kern_learn`, `kern_modernize` |
 
 <sub>Tools are available both over stdio (any MCP client) and the Streamable
 HTTP transport with an Origin allow-list (loopback only; empty origins are
@@ -412,7 +412,8 @@ accepted for non-browser clients).</sub>
 ### Kern 2.0 — AI Software Engineering Control Plane
 
 The **Kern 2.0 high-level tools** (`kern_analyze`, `kern_plan`, `kern_impact`,
-`kern_what_if`, `kern_verify`, `kern_incident`, `kern_agents`, `kern_loop`)
+`kern_what_if`, `kern_verify`, `kern_incident`, `kern_agents`, `kern_loop`,
+`kern_correlate`, `kern_learn`, `kern_modernize`)
 extend kern from a context optimizer into an **AI Software Engineering
 Operating System** — a continuously-updated software digital twin with
 engineering memory, a reasoning engine, a policy firewall, a multi-agent
@@ -509,7 +510,7 @@ native hooks for agents whose hook APIs allow it:
 | **Codex** | `[mcp_servers.kern]` in `~/.codex/config.toml` | — (no output-rewrite hook API) |
 | **JSON adapters** | `continue`, `windsurf`, `zed`, `vscode`, `antigravity`, `qwen`, `qoder`, `kiro`, `copilot` (VS Code), `copilot-cli` | — (no hook API) |
 
-All agents receive the same 74 MCP tools and the same `AGENTS.md` rules. Output
+All agents receive the same 77 MCP tools and the same `AGENTS.md` rules. Output
 compression + session memory run natively where the platform's hook API allows
 in-place output replacement (opencode, Claude Code, Gemini); agents without
 such an API keep full MCP parity but no automatic interception. Generated

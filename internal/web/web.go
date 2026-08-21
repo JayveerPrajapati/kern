@@ -13,21 +13,20 @@ package web
 
 import (
 	"encoding/json"
+	"fmt"
 	"html/template"
 	"log"
 	"net/http"
-	"path/filepath"
 	"sync"
 	"time"
 
 	"github.com/JayveerPrajapati/kern/internal/agent"
+	"github.com/JayveerPrajapati/kern/internal/app"
 	kerncontext "github.com/JayveerPrajapati/kern/internal/context"
-	"github.com/JayveerPrajapati/kern/internal/domain"
 	"github.com/JayveerPrajapati/kern/internal/eventbus"
 	"github.com/JayveerPrajapati/kern/internal/governance"
 	"github.com/JayveerPrajapati/kern/internal/incident"
 	"github.com/JayveerPrajapati/kern/internal/index"
-	"github.com/JayveerPrajapati/kern/internal/intel"
 	"github.com/JayveerPrajapati/kern/internal/intelligence"
 	"github.com/JayveerPrajapati/kern/internal/memory"
 	"github.com/JayveerPrajapati/kern/internal/metrics"
@@ -42,6 +41,7 @@ type App struct {
 	mux        *http.ServeMux
 	ix         *index.Index
 	graph      intelligence.Graph
+	platform   *app.Platform
 	inc        *incident.Engine     // prebuilt incident engine (shares a.graph)
 	ver        *verification.Engine // prebuilt verification engine (shares a.ix)
 	archIndex  *index.Index         // shared index for architecture validation
@@ -49,7 +49,9 @@ type App struct {
 	inter      *incident.Store
 	firewall   *governance.Firewall
 	approvals  *governance.ApprovalWorkflow
-	dashboardT *template.Template
+	taskSvc    *app.TaskService // Phase 5/6/8: task-native analyze/plan/what-if
+	dashboardT  *template.Template
+	taskDetailT *template.Template
 	ctx        *kerncontext.Engine // context engine for analyze/plan
 	bus        *eventbus.Bus       // publishes incident/approval events
 	tasks      *agent.Registry     // agent/task registry for /v1/tasks lookup
@@ -84,14 +86,27 @@ func New(root string) (*App, error) {
 	}
 	g := intelligence.FromIndex(ix)
 
+	// Build the shared application-services Platform ONCE at startup. It
+	// owns the twin-merged graph, memory store, governance firewall, and the
+	// context + verification engines. Web handlers delegate to Platform so
+	// the orchestration is shared with MCP and CLI instead of duplicated.
+	// NewWithGraph stores a pointer to a.graph so freshGraph's in-place swap
+	// is visible to the context engine without rebuilding Platform.
+	platform, err := app.NewWithGraph(root, ix, &g)
+	if err != nil {
+		return nil, err
+	}
+
 	a := &App{
 		root:      root,
 		ix:        ix,
 		graph:     g,
-		memories:  memory.NewMemoryStore(root),
+		platform:  platform,
+		memories:  platform.Memory(),
 		inter:     incident.NewStore(root),
-		firewall:  governance.NewFirewall(),
+		firewall:  platform.Firewall(),
 		approvals: governance.NewApprovalWorkflow(),
+		taskSvc:   app.NewTaskService(platform, nil).WithAgentID("web").WithPRProvider(app.AutoPRProvider()),
 		tasks:     agent.NewRegistry(),
 		archTTL:   5 * time.Second,
 	}
@@ -100,14 +115,7 @@ func New(root string) (*App, error) {
 	// non-empty task registry (returning 404 only when a task is genuinely
 	// unknown).
 	a.tasks.SetTaskStore(agent.NewTaskStore(root))
-	a.ctx = kerncontext.NewEngine(root, &a.graph, a.memories, a.firewall)
-	// Wire the production-intelligence source and architecture boundary provider
-	// into the context engine so shipped runs populate ContextPacket.RuntimeEvidence
-	// (when a local snapshot exists) and surface boundary rules in
-	// ArchitectureRules. Both are nil-safe: with no snapshot / no boundaries the
-	// packet stays empty rather than fabricated.
-	a.ctx.WithRuntimeSource(runtimeSource(root))
-	a.ctx.WithBoundaryProvider(boundaryProvider(root))
+	a.ctx = platform.ContextEngine()
 	a.bus = eventbus.New()
 	// Prebuild the per-request engines ONCE at startup and share the already
 	// built index/graph so handlers never re-index the repo per request (this
@@ -119,13 +127,19 @@ func New(root string) (*App, error) {
 		return nil, err
 	}
 	a.inc = incEng
-	a.ver = verification.NewEngineWithIndex(root, a.ix)
+	a.ver = platform.VerificationEngine()
 	a.archIndex = a.ix
 	tmpl, err := parseDashboardTemplate()
 	if err != nil {
 		return nil, err
 	}
 	a.dashboardT = tmpl
+
+	taskDetailTmpl, err := parseTaskDetailTemplate()
+	if err != nil {
+		return nil, fmt.Errorf("parse task detail template: %w", err)
+	}
+	a.taskDetailT = taskDetailTmpl
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", a.handleIndex)
@@ -153,8 +167,16 @@ func New(root string) (*App, error) {
 	mux.HandleFunc("/v1/agents", a.handleV1Agents)
 	mux.HandleFunc("/v1/loop", a.handleV1Loop)
 	mux.HandleFunc("/v1/incidents/investigate", a.handleV1IncidentInvestigate)
+	mux.HandleFunc("/v1/correlate", a.handleV1Correlate)
+	mux.HandleFunc("/v1/learn", a.handleV1Learn)
+	mux.HandleFunc("/v1/modernize", a.handleV1Modernize)
+	mux.HandleFunc("/v1/execute", a.handleV1Execute)
+	mux.HandleFunc("/v1/audit/", a.handleV1Audit)
 	mux.HandleFunc("/v1/tasks", a.handleV1TaskSubmit)
 	mux.HandleFunc("/v1/tasks/", a.handleV1Task)
+	mux.HandleFunc("/v1/artifacts", a.handleV1ArtifactsList)
+	mux.HandleFunc("/v1/artifacts/", a.handleV1ArtifactGet)
+	mux.HandleFunc("/task/", a.handleTaskDetail)
 	a.mux = mux
 	return a, nil
 }
@@ -203,38 +225,22 @@ func (a *App) freshGraph() (*intelligence.Graph, *index.Index) {
 	return &a.graph, a.ix
 }
 
-// runtimeSource returns the local production-intelligence source for root when
-// a snapshot exists at .kern/runtime.json; otherwise it returns nil (nil-safe),
-// so the context engine leaves RuntimeEvidence empty rather than fabricating it.
-func runtimeSource(root string) runtime.Source {
-	st, err := runtime.LoadJSON(filepath.Join(root, ".kern", "runtime.json"))
-	if err != nil {
-		return nil
-	}
-	return st
-}
-
-// boundaryProvider returns a function that surfaces .kern/boundaries.json rules
-// as governance policies, letting the context engine emit boundary rules in
-// ArchitectureRules when a change crosses them. A missing/invalid file yields
-// an empty rule set (never an error), so the engine stays nil-safe.
-func boundaryProvider(root string) func() []domain.Policy {
-	return func() []domain.Policy {
-		b, err := intel.LoadBoundaries(root)
-		if err != nil {
-			return nil
-		}
-		out := make([]domain.Policy, 0, len(b.Rules))
-		for _, r := range b.Rules {
-			out = append(out, domain.FromGuardRule(r))
-		}
-		return out
-	}
-}
+// runtimeSource and boundaryProvider have been migrated to internal/app.Platform,
+// which builds the context engine with the runtime source and boundary provider
+// internally. Web no longer needs its own copies.
 
 // Bus returns the App's shared event bus so callers (e.g. kern-server) can
 // subscribe and fan events out to webhooks or an audit trail.
 func (a *App) Bus() *eventbus.Bus { return a.bus }
+
+// ListTasks returns all tasks in the App's task registry (Phase 23b). Used by
+// the enterprise server to aggregate task visibility across projects.
+func (a *App) ListTasks() []*agent.Task {
+	if a.tasks == nil {
+		return nil
+	}
+	return a.tasks.ListTasks()
+}
 
 // handlePerformance serves the process-wide metrics snapshot as JSON. It uses
 // the shared metrics.Default() recorder, so values aggregate across the MCP and

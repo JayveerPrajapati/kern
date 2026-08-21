@@ -125,6 +125,9 @@ Usage:
   kern lock <scope> [root] [--hold]               acquire a workspace lock (held until interrupted, or --hold for non-blocking; lock is per-process — unlock runs in the same process)
   kern unlock <scope> [root]                     remove a stale lock file
   kern status [root] [--json]                    list workspace locks (held/free)
+   kern approve [id] [--reject --reason "..." --approver "..."]
+                                                 list pending approvals; with an id, approve (or --reject) it
+   kern audit [task-id] [--root ROOT] [--json]   show the audit trail (all entries, or for one task)
   kern guard init [root]                         scaffold .kern/boundaries.json
    kern guard check [root] [--file F] [--range a..b] [--json|--sarif] [--threshold N]  reject boundary violations (exit 2 when count > N)
    kern commitmsg [--staged|--range a..b] [--subject]   deterministic conventional commit message from the diff
@@ -205,6 +208,9 @@ type flags struct {
 	pattern        string
 	full           bool
 	help           bool
+	approver       string
+	reject         bool
+	reason         string
 }
 
 func parseFlags(args []string) (flags, []string, error) {
@@ -443,6 +449,18 @@ func parseFlags(args []string) (flags, []string, error) {
 			}
 		case "--dry-run":
 			f.dryRun = true
+		case "--approver":
+			i++
+			if i < len(args) {
+				f.approver = args[i]
+			}
+		case "--reject":
+			f.reject = true
+		case "--reason":
+			i++
+			if i < len(args) {
+				f.reason = args[i]
+			}
 		case "--help", "-h":
 			f.help = true
 		default:
@@ -618,6 +636,27 @@ func main() {
 
 	case "impact":
 		runImpact(rest)
+
+	case "correlate":
+		runCorrelate(rest)
+
+	case "learn":
+		runLearn(rest)
+
+	case "modernize":
+		runModernize(rest)
+
+	case "task":
+		runTask(rest)
+
+	case "approve":
+		runApprove(rest)
+
+	case "audit":
+		runAudit(rest)
+
+	case "artifacts":
+		runArtifacts(rest)
 
 	case "verify":
 		runVerify(rest)

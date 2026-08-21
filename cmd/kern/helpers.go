@@ -8,28 +8,20 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/cache"
 	"github.com/JayveerPrajapati/kern/internal/code"
 	"github.com/JayveerPrajapati/kern/internal/coder"
-	kerncontext "github.com/JayveerPrajapati/kern/internal/context"
 	"github.com/JayveerPrajapati/kern/internal/docsearch"
-	"github.com/JayveerPrajapati/kern/internal/domain"
 	"github.com/JayveerPrajapati/kern/internal/flight"
-	"github.com/JayveerPrajapati/kern/internal/governance"
 	"github.com/JayveerPrajapati/kern/internal/index"
-	"github.com/JayveerPrajapati/kern/internal/intel"
-	"github.com/JayveerPrajapati/kern/internal/intelligence"
 	"github.com/JayveerPrajapati/kern/internal/loop"
 	"github.com/JayveerPrajapati/kern/internal/memory"
 	"github.com/JayveerPrajapati/kern/internal/metrics"
 	"github.com/JayveerPrajapati/kern/internal/optimize"
-	"github.com/JayveerPrajapati/kern/internal/runtime"
+	"github.com/JayveerPrajapati/kern/internal/planner"
 	"github.com/JayveerPrajapati/kern/internal/schema"
 	"github.com/JayveerPrajapati/kern/internal/stats"
-	"github.com/JayveerPrajapati/kern/internal/twin"
-	"github.com/JayveerPrajapati/kern/internal/whatif"
 	"io"
 	"net/url"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"time"
 )
@@ -74,140 +66,11 @@ func readStdin() ([]byte, error) {
 	return b, nil
 }
 
-// contextEngine builds a wired context engine for the CLI: it attaches the
-// local production-intelligence source (nil-safe) and the architecture boundary
-// provider so shipped runs populate RuntimeEvidence and ArchitectureRules.
-func contextEngine(root string, g *intelligence.Graph, mem *memory.MemoryStore, fw *governance.Firewall) *kerncontext.Engine {
-	eng := kerncontext.NewEngine(root, g, mem, fw)
-	eng.WithRuntimeSource(cliRuntimeSource(root))
-	eng.WithBoundaryProvider(cliBoundaryProvider(root))
-	return eng
-}
-
-// cliRuntimeSource loads .kern/runtime.json when present; nil-safe otherwise.
-func cliRuntimeSource(root string) runtime.Source {
-	st, err := runtime.LoadJSON(filepath.Join(root, ".kern", "runtime.json"))
-	if err != nil {
-		return nil
-	}
-	return st
-}
-
-// cliBoundaryProvider surfaces .kern/boundaries.json rules as governance
-// policies for the context engine (empty rule set when none present).
-func cliBoundaryProvider(root string) func() []domain.Policy {
-	return func() []domain.Policy {
-		b, err := intel.LoadBoundaries(root)
-		if err != nil {
-			return nil
-		}
-		out := make([]domain.Policy, 0, len(b.Rules))
-		for _, r := range b.Rules {
-			out = append(out, domain.FromGuardRule(r))
-		}
-		return out
-	}
-}
-
-// analyzeChangeCLI runs the Kern 2.0 context engine against a proposed change
-// and returns the rendered analysis (relevant code, architecture, dependencies,
-// memory, blast radius, risks, evidence, required validation). It mirrors the
-// mcp package's analyzeChange helper and backs the kern analyze / kern plan
-// CLI subcommands.
-func analyzeChangeCLI(root, change string) (string, error) {
-	ix, err := index.Build(root)
-	if err != nil {
-		return "", fmt.Errorf("analyze: index: %w", err)
-	}
-	g := intelligence.FromIndex(ix)
-	// Merge the Digital Twin's non-code dimensions (API, data, messaging,
-	// infra) into the code graph so the engine reasons over the full
-	// knowledge graph, not just source. Best-effort: extraction errors are
-	// non-fatal (the graph stays code-only).
-	_ = twin.Merge(&g, twin.NewExtractors(root, nil))
-	sym := change
-	if strings.ContainsAny(change, " \t") {
-		cands := whatif.ExtractSymbols(change)
-		if len(cands) == 0 {
-			return "", fmt.Errorf("analyze: could not identify a symbol in the change description. Pass a bare symbol name (e.g. 'GetMySQLDB') or include a qualified name (e.g. 'pkg.Symbol') in the description.")
-		}
-		sym = cands[0]
-	}
-	mem := memory.NewMemoryStore(root)
-	fw := governance.NewFirewall().WithAgents(governance.NewAgent(
-		"context-engine", "Context Engine", "analyzer",
-		[]governance.Permission{
-			{Resource: "source", Action: "read"},
-			{Resource: "source", Action: "write"},
-			{Resource: "security", Action: "write"},
-			{Resource: "tests", Action: "write"},
-			{Resource: "config", Action: "write"},
-			{Resource: "documentation", Action: "write"},
-		},
-	))
-	eng := contextEngine(root, &g, mem, fw)
-	pkt, err := eng.AnalyzeChange(sym)
-	if err != nil {
-		return "", fmt.Errorf("analyze: %w", err)
-	}
-	return kerncontext.RenderText(pkt), nil
-}
-
-// riskChangeCLI runs the Kern 2.0 context engine against a proposed change
-// and returns a focused risk view (LEVEL name, contributing factors and
-// mitigation) rather than the full rendered analysis packet. It mirrors the
-// index/graph/memory/firewall wiring of analyzeChangeCLI and backs the
-// kern risk CLI subcommand.
-func riskChangeCLI(root, change string) (string, error) {
-	ix, err := index.Build(root)
-	if err != nil {
-		return "", fmt.Errorf("risk: index: %w", err)
-	}
-	g := intelligence.FromIndex(ix)
-	// Merge the Digital Twin's non-code dimensions into the graph
-	// (best-effort, same as analyzeChangeCLI).
-	_ = twin.Merge(&g, twin.NewExtractors(root, nil))
-	mem := memory.NewMemoryStore(root)
-	fw := governance.NewFirewall().WithAgents(governance.NewAgent(
-		"context-engine", "Context Engine", "analyzer",
-		[]governance.Permission{
-			{Resource: "source", Action: "read"},
-			{Resource: "source", Action: "write"},
-			{Resource: "security", Action: "write"},
-			{Resource: "tests", Action: "write"},
-			{Resource: "config", Action: "write"},
-			{Resource: "documentation", Action: "write"},
-		},
-	))
-	eng := contextEngine(root, &g, mem, fw)
-	pkt, err := eng.AnalyzeChange(change)
-	if err != nil {
-		return "", fmt.Errorf("risk: %w", err)
-	}
-	var b strings.Builder
-	fmt.Fprintf(&b, "RISK for: %s\n", change)
-	if len(pkt.Risks) == 0 {
-		fmt.Fprintln(&b, "no risks identified")
-		return b.String(), nil
-	}
-	for _, r := range pkt.Risks {
-		fmt.Fprintf(&b, "%s\n", r.Level)
-		for _, f := range r.Factors {
-			fmt.Fprintf(&b, "  factor: %s\n", f)
-		}
-		if r.Mitigation != "" {
-			fmt.Fprintf(&b, "  mitigation: %s\n", r.Mitigation)
-		}
-	}
-	return b.String(), nil
-}
-
-// simulateChangeCLI runs the what-if engine and returns the deterministic
-// impact report, delegating to whatif.SimulateRender — the same helper the
-// MCP surface calls.
-func simulateChangeCLI(root string, kind whatif.ChangeKind, change, newTarget string) (string, error) {
-	return whatif.SimulateRender(root, kind, change, newTarget)
-}
+// contextEngine, cliRuntimeSource, cliBoundaryProvider, analyzeChangeCLI,
+// riskChangeCLI and simulateChangeCLI have been migrated to internal/app.Platform.
+// The CLI now calls app.New(root) + p.Analyze/Risk/WhatIf/Verify so the
+// orchestration is shared with MCP and REST instead of duplicated here.
+func unusedHelpersSentinel() {}
 
 // renderTeamText builds the standard specialist team via agents.StandardTeam
 // and renders the roster plus current task states. Read-only and deterministic.
@@ -306,12 +169,18 @@ func runDo(root, levelStr, intent string) (string, error) {
 	// provider is provider-neutral (KERN_LLM_PROVIDER, default Ollama). When
 	// unreachable, coder.Code returns ErrNoProvider and the loop surfaces it.
 	cdr := coder.New(agent.OllamaProvider())
+	// Wire the LLM-driven planner as the default plan-stage handler. The LLM
+	// provider is provider-neutral (KERN_LLM_PROVIDER, default Ollama). When
+	// unreachable, planner.Plan returns ErrNoProvider and the loop degrades to
+	// an empty plan (non-fatal) while the coder still attempts to code.
+	plr := planner.New(agent.OllamaProvider())
 	cfg := loop.LoopConfig{
 		Root:     root,
 		Level:    level,
 		Mem:      memory.NewMemoryStore(root),
 		Recorder: flight.New(root),
 		Coder:    cdr,
+		Planner:  plr,
 	}
 	l, err := loop.NewLoop(cfg)
 	if err != nil {

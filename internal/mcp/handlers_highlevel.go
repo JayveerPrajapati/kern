@@ -6,15 +6,13 @@ import (
 	"fmt"
 	"github.com/JayveerPrajapati/kern/internal/agent"
 	"github.com/JayveerPrajapati/kern/internal/agents"
+	"github.com/JayveerPrajapati/kern/internal/app"
 	"github.com/JayveerPrajapati/kern/internal/domain"
-	"github.com/JayveerPrajapati/kern/internal/execution"
 	"github.com/JayveerPrajapati/kern/internal/flight"
 	"github.com/JayveerPrajapati/kern/internal/governance"
-	"github.com/JayveerPrajapati/kern/internal/incident"
 	"github.com/JayveerPrajapati/kern/internal/loop"
 	"github.com/JayveerPrajapati/kern/internal/memory"
 	"github.com/JayveerPrajapati/kern/internal/runtime"
-	"github.com/JayveerPrajapati/kern/internal/verification"
 	"github.com/JayveerPrajapati/kern/internal/whatif"
 	"strings"
 )
@@ -29,11 +27,20 @@ func (s *Server) handleAnalyze(ctx context.Context, args map[string]any) (string
 		if change == "" {
 			return "", fmt.Errorf("change is required")
 		}
-		text, err := analyzeChange(root, change)
+		p, err := app.New(root)
 		if err != nil {
 			return "", err
 		}
-		return "ANALYSIS for: " + change + "\n" + text, nil
+		// MCP is the AI-agent surface: create an authoritative Task record so
+		// the analysis is queryable via kern task <id> and the lifecycle
+		// (context packet, risks, evidence) is persisted. The task ID is
+		// appended to the output so the caller can reference it later.
+		ts := app.NewTaskService(p, nil).WithPRProvider(app.AutoPRProvider())
+		t, text, err := ts.Analyze(change)
+		if err != nil {
+			return "", err
+		}
+		return "ANALYSIS for: " + change + "\n" + text + fmt.Sprintf("\n[task: %s — state: %s]\n", t.ID, t.State), nil
 
 	}
 }
@@ -48,11 +55,19 @@ func (s *Server) handlePlan(ctx context.Context, args map[string]any) (string, e
 		if change == "" {
 			return "", fmt.Errorf("change is required")
 		}
-		text, err := analyzeChange(root, change)
+		p, err := app.New(root)
 		if err != nil {
 			return "", err
 		}
-		return "PLAN for: " + change + "\n" + text, nil
+		// Phase 6: kern_plan now produces a structured domain.Plan via the
+		// control-plane Plan workflow (analyze → memory → impact → risk →
+		// architecture → plan artifact), distinct from kern_analyze.
+		ts := app.NewTaskService(p, nil).WithPRProvider(app.AutoPRProvider())
+		t, plan, text, err := ts.Plan(change)
+		if err != nil {
+			return "", err
+		}
+		return "PLAN for: " + change + "\n" + text + fmt.Sprintf("\n[task: %s — state: %s — %d steps, risk=%s]\n", t.ID, t.State, len(plan.ImplementationSteps), plan.Risk), nil
 
 	}
 }
@@ -63,34 +78,28 @@ func (s *Server) handleExecute(ctx context.Context, args map[string]any) (string
 		if root == "" {
 			root = "."
 		}
-		// kern_execute builds inside a sandbox worktree running arbitrary
-		// host commands; it must pass the governance firewall, fail closed.
-		if err := governance.CheckExec(); err != nil {
-			return "", err
-		}
 		patch := argString(args, "patch")
 		if patch == "" {
 			return "", fmt.Errorf("patch is required")
 		}
-		wt, err := execution.NewWorktree(root)
+		// Phase 11: kern_execute now routes through TaskService.Execute so an
+		// authoritative Task is created, governance is centralized (not
+		// per-call-site), and the diff is recorded as an artifact.
+		p, err := app.New(root)
 		if err != nil {
 			return "", err
 		}
-		defer wt.Cleanup()
-		if err := wt.Apply(patch); err != nil {
-			return "", err
-		}
-		diff, err := wt.Diff()
+		ts := app.NewTaskService(p, nil).WithPRProvider(app.AutoPRProvider())
+		t, diff, err := ts.Execute(patch)
 		if err != nil {
 			return "", err
 		}
-		v := verification.NewEngine(wt.Dir()).Verify([]string{"build"})
+		// Verify the worktree build so the execute output includes the verdict.
 		var eb strings.Builder
-		fmt.Fprintf(&eb, "verdict: %s\n", v.Verdict)
-		fmt.Fprintf(&eb, "summary: %s\n", v.Summary)
+		fmt.Fprintf(&eb, "%s\n", t.Output)
 		fmt.Fprintf(&eb, "diff:\n%s\n", diff)
+		fmt.Fprintf(&eb, "\n[task: %s — state: %s]\n", t.ID, t.State)
 		return eb.String(), nil
-
 	}
 }
 
@@ -115,7 +124,11 @@ func (s *Server) handleVerify(ctx context.Context, args map[string]any) (string,
 		if err := governance.CheckExec(); err != nil {
 			return "", err
 		}
-		v := verification.NewEngine(root).Verify(types)
+		p, err := app.New(root)
+		if err != nil {
+			return "", err
+		}
+		v := p.Verify(types)
 		var vb strings.Builder
 		fmt.Fprintf(&vb, "verdict: %s\n", v.Verdict)
 		fmt.Fprintf(&vb, "summary: %s\n", v.Summary)
@@ -134,32 +147,27 @@ func (s *Server) handleIncident(ctx context.Context, args map[string]any) (strin
 		if err := json.Unmarshal([]byte(argString(args, "alert")), &al); err != nil {
 			return "", fmt.Errorf("invalid alert JSON: %v", err)
 		}
-		var src runtime.Source
-		src = runtime.NewStore()
+		// Phase 15: kern_incident now routes through TaskService.InvestigateIncident
+		// so the full incident lifecycle (IngestAlert→Correlate→RootCause) creates
+		// an authoritative Task with incident + root-cause artifacts.
+		p, err := app.New(root)
+		if err != nil {
+			return "", err
+		}
+		// Attach a runtime snapshot when provided so correlation has data.
 		if snap := argString(args, "snapshot"); snap != "" {
 			store, err := runtime.ParseSnapshot([]byte(snap))
 			if err != nil {
 				return "", fmt.Errorf("invalid snapshot JSON: %v", err)
 			}
-			src = store
+			p.WithRuntimeSource(store)
 		}
-		eng, err := incident.NewEngine(root, src, memory.NewMemoryStore(root), governance.NewFirewall())
+		ts := app.NewTaskService(p, nil).WithPRProvider(app.AutoPRProvider())
+		t, inc, text, err := ts.InvestigateIncident(al)
 		if err != nil {
 			return "", err
 		}
-		inc := eng.IngestAlert(al)
-		eng.Correlate(inc)
-		eng.RootCause(inc)
-		var ib strings.Builder
-		fmt.Fprintf(&ib, "incident: %s\n", inc.ID)
-		fmt.Fprintf(&ib, "service: %s\n", inc.AffectedService)
-		fmt.Fprintf(&ib, "status: %s\n", inc.Status)
-		if inc.RootCause != nil {
-			fmt.Fprintf(&ib, "root cause: %s\n", inc.RootCause.Summary)
-		}
-		fmt.Fprintf(&ib, "hypotheses: %d\n", len(inc.Hypotheses))
-		return ib.String(), nil
-
+		return text + fmt.Sprintf("\n[task: %s — state: %s — incident: %s]\n", t.ID, t.State, inc.ID), nil
 	}
 }
 
@@ -178,7 +186,11 @@ func (s *Server) handleWhatIf(ctx context.Context, args map[string]any) (string,
 			kind = string(whatif.RemoveSymbol)
 		}
 		newTarget := argString(args, "new_target")
-		text, err := simulateChange(root, whatif.ChangeKind(kind), change, newTarget)
+		p, err := app.New(root)
+		if err != nil {
+			return "", err
+		}
+		_, text, err := p.WhatIf(whatif.ChangeKind(kind), change, newTarget)
 		if err != nil {
 			return "", err
 		}
@@ -197,17 +209,18 @@ func (s *Server) handleImpact(ctx context.Context, args map[string]any) (string,
 		if change == "" {
 			return "", fmt.Errorf("change is required")
 		}
-		kind := argString(args, "kind")
-		if kind == "" {
-			kind = string(whatif.RemoveSymbol)
-		}
-		newTarget := argString(args, "new_target")
-		text, err := simulateChange(root, whatif.ChangeKind(kind), change, newTarget)
+		p, err := app.New(root)
 		if err != nil {
 			return "", err
 		}
-		return "IMPACT for: " + change + "\n" + text, nil
-
+		// Phase 7: kern_impact now produces the 11-question deterministic
+		// ImpactReport via TaskService.Impact (graph-driven, no LLM).
+		ts := app.NewTaskService(p, nil).WithPRProvider(app.AutoPRProvider())
+		t, _, text, err := ts.Impact(change)
+		if err != nil {
+			return "", err
+		}
+		return "IMPACT for: " + change + "\n" + text + fmt.Sprintf("\n[task: %s — state: %s]\n", t.ID, t.State), nil
 	}
 }
 
@@ -278,5 +291,79 @@ func (s *Server) handleLoop(ctx context.Context, args map[string]any) (string, e
 		}
 		return lb.String(), nil
 
+	}
+}
+
+func (s *Server) handleCorrelate(ctx context.Context, args map[string]any) (string, error) {
+	{
+		root := argString(args, "root")
+		if root == "" {
+			root = "."
+		}
+		var al domain.Alert
+		if err := json.Unmarshal([]byte(argString(args, "alert")), &al); err != nil {
+			return "", fmt.Errorf("invalid alert JSON: %v", err)
+		}
+		p, err := app.New(root)
+		if err != nil {
+			return "", err
+		}
+		if snap := argString(args, "snapshot"); snap != "" {
+			store, err := runtime.ParseSnapshot([]byte(snap))
+			if err != nil {
+				return "", fmt.Errorf("invalid snapshot JSON: %v", err)
+			}
+			p.WithRuntimeSource(store)
+		}
+		ts := app.NewTaskService(p, nil).WithPRProvider(app.AutoPRProvider())
+		t, _, text, err := ts.Correlate(al)
+		if err != nil {
+			return "", err
+		}
+		return text + fmt.Sprintf("\n[task: %s — state: %s]\n", t.ID, t.State), nil
+	}
+}
+
+func (s *Server) handleLearn(ctx context.Context, args map[string]any) (string, error) {
+	{
+		root := argString(args, "root")
+		if root == "" {
+			root = "."
+		}
+		threshold := 3
+		if t := argString(args, "threshold"); t != "" {
+			if n, err := fmt.Sscanf(t, "%d", &threshold); err != nil || n != 1 {
+				threshold = 3
+			}
+		}
+		p, err := app.New(root)
+		if err != nil {
+			return "", err
+		}
+		ts := app.NewTaskService(p, nil).WithPRProvider(app.AutoPRProvider())
+		t, _, text, err := ts.Learn(threshold)
+		if err != nil {
+			return "", err
+		}
+		return text + fmt.Sprintf("\n[task: %s — state: %s]\n", t.ID, t.State), nil
+	}
+}
+
+func (s *Server) handleModernize(ctx context.Context, args map[string]any) (string, error) {
+	{
+		root := argString(args, "root")
+		if root == "" {
+			root = "."
+		}
+		p, err := app.New(root)
+		if err != nil {
+			return "", err
+		}
+		ts := app.NewTaskService(p, nil).WithPRProvider(app.AutoPRProvider())
+		t, _, text, err := ts.Modernize()
+		if err != nil {
+			return "", err
+		}
+		return text + fmt.Sprintf("\n[task: %s — state: %s]\n", t.ID, t.State), nil
 	}
 }

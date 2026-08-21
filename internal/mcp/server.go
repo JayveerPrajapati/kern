@@ -7,19 +7,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	kerncontext "github.com/JayveerPrajapati/kern/internal/context"
-	"github.com/JayveerPrajapati/kern/internal/governance"
 	"github.com/JayveerPrajapati/kern/internal/index"
 	"github.com/JayveerPrajapati/kern/internal/intel"
-	"github.com/JayveerPrajapati/kern/internal/intelligence"
 	"github.com/JayveerPrajapati/kern/internal/lock"
-	"github.com/JayveerPrajapati/kern/internal/memory"
 	"github.com/JayveerPrajapati/kern/internal/metrics"
 	"github.com/JayveerPrajapati/kern/internal/optimize"
 	"github.com/JayveerPrajapati/kern/internal/project"
 	"github.com/JayveerPrajapati/kern/internal/stats"
 	"github.com/JayveerPrajapati/kern/internal/tokenize"
-	"github.com/JayveerPrajapati/kern/internal/whatif"
 	"io"
 	"net/url"
 	"os"
@@ -846,6 +841,30 @@ var tools = []Tool{
 			"intent": strProp("The intent/goal to run the loop against"),
 			"level":  strProp("Autonomy level L0-L5 (default L0, read-only)"),
 		}, []string{"intent"}),
+	},
+	{
+		Name:        "kern_correlate",
+		Description: "HIGH-LEVEL (Phase 14): correlate a production alert against the runtime to produce a deep evidence chain (alert→service→deployment→commit→symbol→task/pr/agent). Deterministic — derived from runtime source and git history, not LLM.",
+		InputSchema: schema(map[string]any{
+			"root":    strProp("Project root (defaults to current directory)"),
+			"alert":   strProp("JSON of a domain.Alert: {id,severity,message,service,source,occurred_at}"),
+			"snapshot": strProp("Optional JSON of a runtime snapshot: {events,deployments,commits}"),
+		}, []string{"alert"}),
+	},
+	{
+		Name:        "kern_learn",
+		Description: "HIGH-LEVEL (Phase 16): extract recurring patterns from engineering memory and surface those above a threshold. Patterns are promoted to memory (evidence-based). Deterministic — the LLM may explain but does not create patterns.",
+		InputSchema: schema(map[string]any{
+			"root":       strProp("Project root (defaults to current directory)"),
+			"threshold":  strProp("Minimum pattern count to surface (default 3)"),
+		}, nil),
+	},
+	{
+		Name:        "kern_modernize",
+		Description: "HIGH-LEVEL (Phase 17): analyze the monolith and produce a phased modernization plan (communities→bridges→churn→candidate boundaries→impact→risk→migration plan). Each extraction phase becomes an auditable Task.",
+		InputSchema: schema(map[string]any{
+			"root": strProp("Project root (defaults to current directory)"),
+		}, nil),
 	},
 }
 
@@ -1713,55 +1732,20 @@ func (s *Server) runTool(ctx context.Context, id string, name string, args map[s
 		return s.handleAgents(ctx, args)
 	case "kern_loop":
 		return s.handleLoop(ctx, args)
+	case "kern_correlate":
+		return s.handleCorrelate(ctx, args)
+	case "kern_learn":
+		return s.handleLearn(ctx, args)
+	case "kern_modernize":
+		return s.handleModernize(ctx, args)
 	default:
 		return "", fmt.Errorf("unknown tool: %s", name)
 	}
 }
 
-// analyzeChange runs the Kern 2.0 context engine against a proposed change and
-// returns the rendered analysis (relevant code, architecture, dependencies,
-// memory, blast radius, risks, evidence, required validation). It is the
-// deterministic core behind the kern_analyze and kern_plan high-level tools.
-func analyzeChange(root, change string) (string, error) {
-	ix, err := index.Build(root)
-	if err != nil {
-		return "", fmt.Errorf("analyze: index: %w", err)
-	}
-	g := intelligence.FromIndex(ix)
-	sym := change
-	if strings.ContainsAny(change, " \t") {
-		cands := whatif.ExtractSymbols(change)
-		if len(cands) == 0 {
-			return "", fmt.Errorf("analyze: could not identify a symbol in the change description. Pass a bare symbol name (e.g. 'GetMySQLDB') or include a qualified name (e.g. 'pkg.Symbol') in the description.")
-		}
-		sym = cands[0]
-	}
-	mem := memory.NewMemoryStore(root)
-	fw := governance.NewFirewall().WithAgents(governance.NewAgent(
-		"context-engine", "Context Engine", "analyzer",
-		[]governance.Permission{
-			{Resource: "source", Action: "read"},
-			{Resource: "source", Action: "write"},
-			{Resource: "security", Action: "write"},
-			{Resource: "tests", Action: "write"},
-			{Resource: "config", Action: "write"},
-			{Resource: "documentation", Action: "write"},
-		},
-	))
-	eng := kerncontext.NewEngine(root, &g, mem, fw)
-	pkt, err := eng.AnalyzeChange(sym)
-	if err != nil {
-		return "", fmt.Errorf("analyze: %w", err)
-	}
-	return kerncontext.RenderText(pkt), nil
-}
-
-// simulateChange runs the what-if engine against a proposed change and returns
-// a deterministic impact report plus any typed claims. Read-only — it never
-// mutates the graph or index — and shared with the CLI via whatif.SimulateRender.
-func simulateChange(root string, kind whatif.ChangeKind, change, newTarget string) (string, error) {
-	return whatif.SimulateRender(root, kind, change, newTarget)
-}
+// analyzeChange and simulateChange have been migrated to internal/app.Platform.
+// The MCP handlers now call app.New(root) + p.Analyze/WhatIf so the
+// orchestration is shared with CLI and REST instead of duplicated here.
 
 // changedContext resolves the changed files for a tool call: an explicit
 // comma-separated file list wins; otherwise the git range (empty = working

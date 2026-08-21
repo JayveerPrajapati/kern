@@ -1,13 +1,13 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
-	"github.com/JayveerPrajapati/kern/internal/execution"
-	"github.com/JayveerPrajapati/kern/internal/index"
+	"github.com/JayveerPrajapati/kern/internal/app"
+	"github.com/JayveerPrajapati/kern/internal/domain"
+	"github.com/JayveerPrajapati/kern/internal/eventbus"
 	"github.com/JayveerPrajapati/kern/internal/intel"
-	"github.com/JayveerPrajapati/kern/internal/intelligence"
 	"github.com/JayveerPrajapati/kern/internal/ownership"
-	"github.com/JayveerPrajapati/kern/internal/verification"
 	"github.com/JayveerPrajapati/kern/internal/verify"
 	"github.com/JayveerPrajapati/kern/internal/whatif"
 	"os"
@@ -28,15 +28,53 @@ func runAnalyze(cmd string, rest []string) {
 		fatalUsage("usage: kern %s <change> [--root ROOT]", cmd)
 	}
 	change := args[0]
-	text, err := analyzeChangeCLI(root, change)
+	p, err := app.New(root)
 	if err != nil {
 		fatal("%v", err)
 	}
-	if cmd == "analyze" {
+	// When --task is set, create an authoritative Task record that tracks the
+	// full lifecycle (context packet, risks, evidence) and can be queried via
+	// `kern task <id>`. Without --task, the analysis runs stateless (the fast
+	// backward-compatible path).
+	if f.task != "" {
+		ts := app.NewTaskService(p, eventbus.New()).WithPRProvider(app.AutoPRProvider())
+		if cmd == "plan" {
+			// Phase 6: kern plan produces a structured domain.Plan via the
+			// control-plane Plan workflow (analyze → memory → impact → risk →
+			// architecture → plan artifact).
+			t, plan, text, err := ts.Plan(change)
+			if err != nil {
+				fatal("%v", err)
+			}
+			fmt.Println("PLAN for: " + change)
+			fmt.Print(text)
+			fmt.Printf("\n[task: %s — state: %s — %d steps, risk=%s]\n", t.ID, t.State, len(plan.ImplementationSteps), plan.Risk)
+			return
+		}
+		t, text, err := ts.Analyze(change)
+		if err != nil {
+			fatal("%v", err)
+		}
 		fmt.Println("ANALYSIS for: " + change)
-	} else {
-		fmt.Println("PLAN for: " + change)
+		fmt.Print(text)
+		fmt.Printf("\n[task: %s — state: %s]\n", t.ID, t.State)
+		return
 	}
+	if cmd == "plan" {
+		// Stateless plan path: run analyze then assemble a plan inline.
+		pkt, _, err := p.Analyze(change)
+		if err != nil {
+			fatal("%v", err)
+		}
+		fmt.Println("PLAN for: " + change)
+		fmt.Print(renderStatelessPlan(change, pkt))
+		return
+	}
+	_, text, err := p.Analyze(change)
+	if err != nil {
+		fatal("%v", err)
+	}
+	fmt.Println("ANALYSIS for: " + change)
 	fmt.Print(text)
 
 }
@@ -54,7 +92,11 @@ func runRisk(rest []string) {
 		fatalUsage("usage: kern risk <change> [--root ROOT]")
 	}
 	change := args[0]
-	text, err := riskChangeCLI(root, change)
+	p, err := app.New(root)
+	if err != nil {
+		fatal("%v", err)
+	}
+	_, text, err := p.Risk(change)
 	if err != nil {
 		fatal("%v", err)
 	}
@@ -87,23 +129,23 @@ func runExecute(rest []string) {
 	if len(strings.TrimSpace(string(pb))) == 0 {
 		fatal("patch is required")
 	}
-	wt, err := execution.NewWorktree(root)
+	// Route through TaskService.ExecuteAndVerify so an authoritative Task is
+	// created, governance is centralized (not per-call-site), and the diff +
+	// verification are recorded as artifacts. This replaces the legacy raw
+	// execution.NewWorktree + manual verify path.
+	p, err := app.New(root)
 	if err != nil {
 		fatal("%v", err)
 	}
-	defer wt.Cleanup()
-	if err := wt.Apply(string(pb)); err != nil {
-		fatal("apply: %v", err)
-	}
-	diff, err := wt.Diff()
+	ts := app.NewTaskService(p, eventbus.New()).WithAgentID("cli").WithPRProvider(app.AutoPRProvider())
+	t, diff, v, err := ts.ExecuteAndVerify(string(pb), []string{"build"})
 	if err != nil {
-		fatal("diff: %v", err)
+		fatal("%v", err)
 	}
-	v := verification.NewEngine(wt.Dir()).Verify([]string{"build"})
 	fmt.Printf("verdict: %s\n", v.Verdict)
 	fmt.Printf("summary: %s\n", v.Summary)
 	fmt.Printf("diff:\n%s\n", diff)
-
+	fmt.Printf("\n[task: %s — state: %s]\n", t.ID, t.State)
 }
 
 func runWhatIf(cmd string, rest []string) {
@@ -127,7 +169,11 @@ func runWhatIf(cmd string, rest []string) {
 	if len(args) > 2 && args[2] != "" {
 		newTarget = args[2]
 	}
-	text, err := simulateChangeCLI(root, whatif.ChangeKind(kind), change, newTarget)
+	p, err := app.New(root)
+	if err != nil {
+		fatal("%v", err)
+	}
+	_, text, err := p.WhatIf(whatif.ChangeKind(kind), change, newTarget)
 	if err != nil {
 		fatal("%v", err)
 	}
@@ -148,15 +194,16 @@ func runImpact(rest []string) {
 		fatalUsage("usage: kern impact <change> [kind] [new-target] [--root ROOT]")
 	}
 	change := args[0]
-	kind := string(parseChangeKind(change))
-	if len(args) > 1 && args[1] != "" {
-		kind = args[1]
+	p, err := app.New(root)
+	if err != nil {
+		fatal("%v", err)
 	}
-	newTarget := ""
-	if len(args) > 2 && args[2] != "" {
-		newTarget = args[2]
-	}
-	text, err := simulateChangeCLI(root, whatif.ChangeKind(kind), change, newTarget)
+	// Phase 7: kern impact now produces the 11-question deterministic ImpactReport
+	// via TaskService.Impact (graph-driven, no LLM). The what-if kind/new-target
+	// args are still honored for backward compatibility but the primary output is
+	// the structured impact report.
+	ts := app.NewTaskService(p, eventbus.New()).WithPRProvider(app.AutoPRProvider())
+	t, rep, text, err := ts.Impact(change)
 	if err != nil {
 		fatal("%v", err)
 	}
@@ -169,15 +216,17 @@ func runImpact(rest []string) {
 		ownerMap = &ownership.Map{}
 	}
 	var teams []string
-	if ix, ierr := index.Build(root); ierr == nil {
-		g := intelligence.FromIndex(ix)
-		imp := whatif.Simulate(&g, whatif.Change{Kind: whatif.ChangeKind(kind), Target: change, NewTarget: newTarget})
+	{
 		seen := map[string]bool{}
-		for _, f := range imp.Files {
-			for _, o := range ownerMap.Lookup(f) {
-				if !seen[o] {
-					seen[o] = true
-					teams = append(teams, o)
+		// Use files from the task's context packet (attached by the analyze
+		// stage inside Impact) for ownership lookup.
+		if t.ContextPacket != nil {
+			for _, f := range t.ContextPacket.Files {
+				for _, o := range ownerMap.Lookup(f.Path) {
+					if !seen[o] {
+						seen[o] = true
+						teams = append(teams, o)
+					}
 				}
 			}
 		}
@@ -188,7 +237,7 @@ func runImpact(rest []string) {
 	if len(teams) > 0 {
 		fmt.Println("Affected teams: " + strings.Join(teams, ", "))
 	}
-
+	fmt.Printf("\n[task: %s — state: %s — risk=%s]\n", t.ID, t.State, rep.Risk)
 }
 
 func runVerify(rest []string) {
@@ -214,7 +263,11 @@ func runVerify(rest []string) {
 				types = append(types, t)
 			}
 		}
-		v := verification.NewEngine(root).Verify(types)
+		p, perr := app.New(root)
+		if perr != nil {
+			fatal("%v", perr)
+		}
+		v := p.Verify(types)
 		if f.json {
 			printJSON(v)
 			return
@@ -411,4 +464,131 @@ func parseChangeKind(change string) whatif.ChangeKind {
 	default:
 		return whatif.RemoveSymbol
 	}
+}
+
+// renderStatelessPlan renders a domain.Plan-shaped text from a context packet
+// for the stateless `kern plan` path (no --task flag). It mirrors the
+// TaskService.Plan output shape so callers see the same sections regardless
+// of whether a Task was created.
+func renderStatelessPlan(change string, pkt domain.ContextPacket) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "PLAN\n")
+	fmt.Fprintf(&b, "Objective: %s\n", change)
+	fmt.Fprintf(&b, "Scope: %d symbols, %d files\n", len(pkt.Symbols), len(pkt.Files))
+	risk := "low"
+	for _, r := range pkt.Risks {
+		if r.Level == domain.RiskCritical || r.Level == domain.RiskHigh {
+			risk = "high"
+			break
+		}
+		if r.Level == domain.RiskMedium {
+			risk = "medium"
+		}
+	}
+	fmt.Fprintf(&b, "Risk: %s\n", risk)
+	fmt.Fprintf(&b, "Affected components:\n")
+	for _, sym := range pkt.Symbols {
+		fmt.Fprintf(&b, "  - %s\n", sym.Name)
+	}
+	for _, f := range pkt.Files {
+		fmt.Fprintf(&b, "  - %s\n", f.Path)
+	}
+	fmt.Fprintf(&b, "Implementation steps:\n")
+	fmt.Fprintf(&b, "  1. Implement the change in the affected components above.\n")
+	for _, v := range pkt.RequiredValidation {
+		fmt.Fprintf(&b, "  - %s\n", v)
+	}
+	if len(pkt.Risks) > 0 {
+		fmt.Fprintf(&b, "Rollback: revert the commit")
+		if risk == "high" {
+			b.WriteString(" and redeploy previous version")
+		}
+		b.WriteString("\n")
+	}
+	if len(pkt.RequiredValidation) > 0 {
+		fmt.Fprintf(&b, "Tests:\n")
+		for _, t := range pkt.RequiredValidation {
+			fmt.Fprintf(&b, "  - %s\n", t)
+		}
+	}
+	return b.String()
+}
+
+func runCorrelate(rest []string) {
+	f, args, err := parseFlags(rest)
+	if err != nil {
+		fatalUsage("flags: %v", err)
+	}
+	root := f.root
+	if root == "" {
+		root = "."
+	}
+	if len(args) < 1 || args[0] == "" {
+		fatalUsage("usage: kern correlate <alert-json> [--root ROOT]")
+	}
+	var al domain.Alert
+	if err := json.Unmarshal([]byte(args[0]), &al); err != nil {
+		fatal("invalid alert JSON: %v", err)
+	}
+	p, err := app.New(root)
+	if err != nil {
+		fatal("%v", err)
+	}
+	ts := app.NewTaskService(p, eventbus.New()).WithPRProvider(app.AutoPRProvider())
+	t, _, text, err := ts.Correlate(al)
+	if err != nil {
+		fatal("%v", err)
+	}
+	fmt.Print(text)
+	fmt.Printf("\n[task: %s — state: %s]\n", t.ID, t.State)
+}
+
+func runLearn(rest []string) {
+	f, args, err := parseFlags(rest)
+	if err != nil {
+		fatalUsage("flags: %v", err)
+	}
+	root := f.root
+	if root == "" {
+		root = "."
+	}
+	threshold := 3
+	if len(args) > 0 && args[0] != "" {
+		if n, err := fmt.Sscanf(args[0], "%d", &threshold); err != nil || n != 1 {
+			threshold = 3
+		}
+	}
+	p, err := app.New(root)
+	if err != nil {
+		fatal("%v", err)
+	}
+	ts := app.NewTaskService(p, eventbus.New()).WithPRProvider(app.AutoPRProvider())
+	t, _, text, err := ts.Learn(threshold)
+	if err != nil {
+		fatal("%v", err)
+	}
+	fmt.Print(text)
+	fmt.Printf("\n[task: %s — state: %s]\n", t.ID, t.State)
+}
+
+func runModernize(rest []string) {
+	f, _, err := parseFlags(rest)
+	if err != nil {
+		fatalUsage("flags: %v", err)
+	}
+	root := f.root
+	if root == "" {
+		root = "."
+	}
+	p, err := app.New(root)
+	if err != nil {
+		fatal("%v", err)
+	}
+	ts := app.NewTaskService(p, eventbus.New()).WithPRProvider(app.AutoPRProvider())
+	t, _, text, err := ts.Modernize()
+	if err != nil {
+		fatal("%v", err)
+	}
+	fmt.Print(text)
+	fmt.Printf("\n[task: %s — state: %s]\n", t.ID, t.State)
 }

@@ -46,6 +46,24 @@ func (w *ApprovalWorkflow) Request(taskID, requester, reason string) domain.Appr
 	return a
 }
 
+// RequestWithBinding creates a pending approval with the full Phase 9 binding
+// context: the risk level that triggered the gate, the policy IDs that
+// evaluated to that risk, evidence references supporting the assessment, and
+// the artifact (e.g. ImpactReport) backing the approval. This makes the
+// approval self-describing for audit — an auditor can reconstruct WHY the
+// approval was requested and WHAT it authorized, not just that it was.
+func (w *ApprovalWorkflow) RequestWithBinding(taskID, requester, reason string, riskLevel domain.RiskLevel, policyIDs, evidenceRefs []string, artifactID string) domain.Approval {
+	a := w.Request(taskID, requester, reason)
+	a.RiskLevel = riskLevel
+	a.PolicyIDs = policyIDs
+	a.EvidenceRefs = evidenceRefs
+	a.ArtifactID = artifactID
+	w.mu.Lock()
+	w.pending[a.ID] = a
+	w.mu.Unlock()
+	return a
+}
+
 // Approve marks an approval as approved. It returns an error if the approval
 // is unknown or not currently pending.
 func (w *ApprovalWorkflow) Approve(approvalID, approver string) (domain.Approval, error) {
