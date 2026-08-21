@@ -1032,6 +1032,46 @@ export default (async ({ directory, $ }) => {
           return run(flags)
         },
       }),
+      kern_correlate: tool({
+        description:
+          "HIGH-LEVEL (Phase 14): correlate a production alert against the runtime to produce a deep evidence chain (alert→service→deployment→commit→symbol→task/pr/agent). Deterministic — derived from runtime source and git history, not LLM.",
+        args: {
+          root: tool.schema.string().optional(),
+          alert: tool.schema.string(),
+          snapshot: tool.schema.string().optional(),
+        },
+        async execute(args) {
+          const flags: string[] = ["correlate", args.alert]
+          if (args.root) flags.push("--root", args.root)
+          return run(flags)
+        },
+      }),
+      kern_learn: tool({
+        description:
+          "HIGH-LEVEL (Phase 16): extract recurring patterns from engineering memory and surface those above a threshold. Patterns are promoted to memory (evidence-based). Deterministic — the LLM may explain but does not create patterns.",
+        args: {
+          root: tool.schema.string().optional(),
+          threshold: tool.schema.string().optional(),
+        },
+        async execute(args) {
+          const flags: string[] = ["learn"]
+          if (args.threshold) flags.push(args.threshold)
+          if (args.root) flags.push("--root", args.root)
+          return run(flags)
+        },
+      }),
+      kern_modernize: tool({
+        description:
+          "HIGH-LEVEL (Phase 17): analyze the monolith and produce a phased modernization plan (communities→bridges→churn→candidate boundaries→impact→risk→migration plan). Each extraction phase becomes an auditable Task.",
+        args: {
+          root: tool.schema.string().optional(),
+        },
+        async execute(args) {
+          const flags: string[] = ["modernize"]
+          if (args.root) flags.push("--root", args.root)
+          return run(flags)
+        },
+      }),
       kern_what_if: tool({
         description:
           "HIGH-LEVEL (Workflow C / ADR-0012): simulate the impact of a hypothetical change on the knowledge graph — transitively affected symbols, files, services, tests, a deterministic risk level, and a typed RECOMMENDATION claim. Read-only; never mutates the graph or index.",
