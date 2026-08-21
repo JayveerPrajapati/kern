@@ -29,10 +29,16 @@ var standardStages = []stageSpec{
 	{name: "test", role: RoleTester, action: "test"},
 }
 
+// DefaultStages returns the current standard 6-stage sequence (a copy), so
+// existing callers and the default task kind keep their behavior.
+func DefaultStages() []stageSpec {
+	return append([]stageSpec{}, standardStages...)
+}
+
 // StageResult records one stage's outcome.
 type StageResult struct {
 	Stage      string // "plan", "architect", "code", "review", "security", "test"
-	Specialist string // specialist name
+	Specialist string // specialist identity
 	Output     string
 	OK         bool
 }
@@ -40,16 +46,28 @@ type StageResult struct {
 // Pipeline runs a task through the specialist team, handing the task forward
 // between stages and invoking the step handler per stage. The caller decides
 // how each specialist executes; the pipeline records a StageResult per stage.
+// The stage sequence is chosen at construction (default: the 6-stage
+// [DefaultStages]) so callers can compose kind-specific pipelines.
 type Pipeline struct {
 	team      *SpecialistRegistry
 	runtime   *agent.Registry // agent runtime registry
 	approvals *governance.ApprovalWorkflow
+	stages    []stageSpec // ordered stages to run; nil means the default
 	bus       *eventbus.Bus // optional event publisher; nil = no-op
 }
 
-// NewPipeline creates a pipeline; nil team, runtime, or approval workflow are
-// replaced with fresh ones. Specialists are resolved from the team.
+// NewPipeline creates a pipeline with the standard 6-stage sequence; nil team,
+// runtime, or approval workflow are replaced with fresh ones. Specialists are
+// resolved from the team. Use [NewPipelineWithStages] to select a custom stage
+// sequence.
 func NewPipeline(team *SpecialistRegistry, runtime *agent.Registry, approvals *governance.ApprovalWorkflow) *Pipeline {
+	return NewPipelineWithStages(team, runtime, approvals, DefaultStages())
+}
+
+// NewPipelineWithStages creates a pipeline running the given stages in order.
+// An empty stages slice falls back to the default 6-stage sequence. Nil team,
+// runtime, or approval workflow are replaced with fresh ones.
+func NewPipelineWithStages(team *SpecialistRegistry, runtime *agent.Registry, approvals *governance.ApprovalWorkflow, stages []stageSpec) *Pipeline {
 	if team == nil {
 		team = NewSpecialistRegistry()
 	}
@@ -59,7 +77,10 @@ func NewPipeline(team *SpecialistRegistry, runtime *agent.Registry, approvals *g
 	if approvals == nil {
 		approvals = governance.NewApprovalWorkflow()
 	}
-	return &Pipeline{team: team, runtime: runtime, approvals: approvals}
+	if len(stages) == 0 {
+		stages = DefaultStages()
+	}
+	return &Pipeline{team: team, runtime: runtime, approvals: approvals, stages: stages}
 }
 
 // WithBus attaches an optional event bus; a nil bus is a no-op.
@@ -98,10 +119,10 @@ func (p *Pipeline) Run(task *agent.Task, stepHandler func(action string, special
 	}
 
 	handoffs := agent.NewHandoffManager()
-	results := make([]StageResult, 0, len(standardStages))
+	results := make([]StageResult, 0, len(p.stages))
 	var previous string
 
-	for _, stage := range standardStages {
+	for _, stage := range p.stages {
 		specialists := p.team.ByRole(stage.role)
 		if len(specialists) == 0 {
 			return task, results, fmt.Errorf("agents: no %q specialist for stage %q", stage.role, stage.name)
@@ -130,6 +151,11 @@ func (p *Pipeline) Run(task *agent.Task, stepHandler func(action string, special
 				Subject: task.ID,
 				Payload: map[string]string{"stage": stage.name, "agent": spec.Agent.ID, "error": err.Error()},
 			})
+			p.publish(eventbus.Event{
+				Kind:    eventbus.AgentFailed,
+				Subject: task.ID,
+				Payload: map[string]string{"stage": stage.name, "agent": spec.Agent.ID, "error": err.Error()},
+			})
 			return task, results, err
 		}
 		task.AddStep(agent.Step{Action: stage.action, AgentID: spec.Agent.ID, Result: out, Status: "success"})
@@ -138,6 +164,11 @@ func (p *Pipeline) Run(task *agent.Task, stepHandler func(action string, special
 			Kind:    eventbus.AgentToolCalled,
 			Subject: task.ID,
 			Payload: map[string]string{"stage": stage.name, "agent": spec.Agent.ID, "action": stage.action},
+		})
+		p.publish(eventbus.Event{
+			Kind:    eventbus.AgentCompleted,
+			Subject: task.ID,
+			Payload: map[string]string{"stage": stage.name, "agent": spec.Agent.ID},
 		})
 		previous = spec.Agent.ID
 	}

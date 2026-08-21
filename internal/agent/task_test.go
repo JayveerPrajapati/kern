@@ -93,17 +93,46 @@ func TestTaskStartCompleteFail(t *testing.T) {
 }
 
 func TestCompleteFromNonTerminalStateRejected(t *testing.T) {
-	// The approval gate must not be bypassable: COMPLETED is only reachable
-	// through the state table, not by calling Complete from an early state.
+	// The approval gate must not be bypassable for code-change tasks: COMPLETED
+	// is only reachable through the state table, not by calling Complete from an
+	// execution state. Read-only tasks (analyze, verify) MAY complete directly
+	// from their respective states — that is tested separately below.
 	tk := NewTask("code", "x")
-	if err := tk.Start("agent-1"); err != nil {
-		t.Fatalf("Start: %v", err)
+	// Drive to EXECUTING (the code-change path) so we test the gate at the
+	// point where bypass would be dangerous: a code change skipping verify.
+	for _, s := range []domain.TaskState{
+		domain.TaskAnalyzing,
+		domain.TaskPlanning,
+		domain.TaskWaitingApproval,
+		domain.TaskApproved,
+		domain.TaskExecuting,
+	} {
+		if err := tk.Transition(s); err != nil {
+			t.Fatalf("Transition to %s: %v", s, err)
+		}
 	}
 	if err := tk.Complete("done"); err == nil {
-		t.Fatal("Complete from ANALYZING: want error (gate bypass guard)")
+		t.Fatal("Complete from EXECUTING: want error (gate bypass guard)")
 	}
 	if tk.State == domain.TaskCompleted {
-		t.Fatal("Complete from ANALYZING reached COMPLETED; want no state change")
+		t.Fatal("Complete from EXECUTING reached COMPLETED; want no state change")
+	}
+}
+
+func TestReadOnlyTaskCompletesFromAnalyzing(t *testing.T) {
+	// Read-only tasks (analyze) may complete directly from ANALYZING without
+	// driving the full code-change lifecycle — there is nothing to approve,
+	// execute, or PR. This is the Phase 2 Task-authoritative path for
+	// kern analyze / kern_analyze.
+	tk := NewTask("analyze", "x")
+	if err := tk.Start("context-engine"); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if err := tk.Complete("analysis done"); err != nil {
+		t.Fatalf("Complete from ANALYZING for read-only task: %v", err)
+	}
+	if tk.State != domain.TaskCompleted {
+		t.Fatalf("state = %s; want COMPLETED", tk.State)
 	}
 }
 
@@ -140,7 +169,7 @@ func TestTransitionInvalid(t *testing.T) {
 	}{
 		{domain.TaskCreated, domain.TaskCompleted},   // skip
 		{domain.TaskAnalyzing, domain.TaskExecuting}, // skip
-		{domain.TaskPlanning, domain.TaskCompleted},  // skip
+		{domain.TaskPlanning, domain.TaskExecuting},  // skip (Plan completes or waits for approval, not execute)
 		{domain.TaskExecuting, domain.TaskPlanning},  // backward
 	}
 	for _, c := range cases {

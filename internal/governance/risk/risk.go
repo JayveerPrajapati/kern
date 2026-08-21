@@ -153,6 +153,12 @@ func policyMatchFor(p domain.Policy, resource, action string) (domain.RiskLevel,
 // "resource" is what is being acted on; "action" is what is being done. It
 // returns a domain.Risk whose Level is the highest matching policy level. If
 // no policy matches, the risk defaults to LOW. The result is deterministic.
+//
+// Phase 9: the returned Risk now sets ApprovalRequired=true for HIGH/CRITICAL
+// levels (the Integration Transformation Plan's Policy Result Contract requires
+// approval_required to be populated, not just inferred from Level). This makes
+// the approval requirement explicit on the Risk object so callers don't have
+// to re-derive it.
 func (r *RiskAssessor) AssessAction(resource, action string) domain.Risk {
 	best := domain.RiskLow
 	var bestRank riskLevel = riskLow
@@ -182,10 +188,16 @@ func (r *RiskAssessor) AssessAction(resource, action string) domain.Risk {
 		}
 	}
 
-	return domain.Risk{
+	risk := domain.Risk{
 		Level:      best,
 		Factors:    factors,
 		Score:      score(best),
 		Mitigation: mitigation,
 	}
+	// ApprovalRequired: HIGH/CRITICAL actions require human approval before
+	// proceeding (the plan's Policy Result Contract §15). This is now an
+	// explicit field on Risk so callers (firewall, TaskService) can read it
+	// directly instead of re-deriving it from Level.
+	risk.ApprovalRequired = bestRank >= riskHigh
+	return risk
 }

@@ -12,12 +12,17 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/JayveerPrajapati/kern/internal/domain"
 	"github.com/JayveerPrajapati/kern/internal/eventbus"
 	"github.com/JayveerPrajapati/kern/internal/governance"
+	"github.com/JayveerPrajapati/kern/internal/governance/identity"
+	"github.com/JayveerPrajapati/kern/internal/intel"
+	"github.com/JayveerPrajapati/kern/internal/memory"
 	"github.com/JayveerPrajapati/kern/internal/storage"
 	"github.com/JayveerPrajapati/kern/internal/web"
 )
@@ -30,20 +35,24 @@ type Project struct {
 
 // Server is the multi-project enterprise server. It wraps multiple
 // web.App instances (one per project) under a shared org-level audit
-// log and policy set.
+// log, policy set, memory store, task visibility, and agent registry.
 type Server struct {
-	mu       sync.RWMutex
-	projects map[string]*projectState // keyed by project name
-	orgAudit *governance.AuditLog     // shared org-level audit
-	orgBus   *eventbus.Bus            // shared org-level event bus
-	store    storage.Store            // optional shared storage (nil = in-memory)
-	policies []domain.Policy          // org-level policies applied to all projects
+	mu        sync.RWMutex
+	projects  map[string]*projectState           // keyed by project name
+	orgAudit  *governance.AuditLog               // shared org-level audit
+	orgBus    *eventbus.Bus                      // shared org-level event bus
+	store     storage.Store                      // optional shared storage (nil = in-memory)
+	policies  []domain.Policy                    // org-level policies applied to all projects
+	orgMemory *memory.MemoryStore                // shared org-level memory (Phase 23a)
+	orgAgents map[string]*identity.AgentIdentity // shared org-level agent registry (Phase 23d)
 }
 
 type projectState struct {
-	project Project
-	app     *web.App // lazily built on first access
-	appErr  error    // build error (cached)
+	project  Project
+	app      *web.App // lazily built on first access
+	appErr   error    // build error (cached)
+	lastUsed time.Time
+	memory   *memory.MemoryStore // per-project memory store (scoped to project root)
 }
 
 // New creates an enterprise server with no projects. Use Register to add
@@ -51,10 +60,12 @@ type projectState struct {
 // shared state.
 func New() *Server {
 	return &Server{
-		projects: map[string]*projectState{},
-		orgAudit: governance.NewAuditLog(),
-		orgBus:   eventbus.New(),
-		policies: governance.DefaultPolicies(),
+		projects:  map[string]*projectState{},
+		orgAudit:  governance.NewAuditLog(),
+		orgBus:    eventbus.New(),
+		policies:  governance.DefaultPolicies(),
+		orgMemory: memory.NewMemoryStore(""), // in-memory org-level store (no root)
+		orgAgents: map[string]*identity.AgentIdentity{},
 	}
 }
 
@@ -133,26 +144,109 @@ func (s *Server) Projects() []Project {
 
 // appFor returns the web.App for a project, building it lazily on first
 // access. The build error is cached so repeated requests don't retry.
+//
+// Cached apps are capped (see maxProjects): when the cache is full and a new
+// project needs building, the least-recently-used cached app is evicted so it
+// can be rebuilt on next access. This bounds memory growth for orgs with many
+// registered projects.
 func (s *Server) appFor(name string) (*web.App, error) {
-	s.mu.RLock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	ps, exists := s.projects[name]
-	s.mu.RUnlock()
 	if !exists {
 		return nil, fmt.Errorf("enterprise: project %q not registered", name)
 	}
+	// Touch recency on every access so LRU eviction reflects true usage.
+	ps.lastUsed = time.Now()
 	if ps.app != nil || ps.appErr != nil {
 		return ps.app, ps.appErr
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	// Double-check after acquiring write lock
-	if ps.app != nil || ps.appErr != nil {
-		return ps.app, ps.appErr
+	// Cache miss: if at the app cap, evict the LRU cached app to make room.
+	if s.cachedCount() >= s.maxProjects() {
+		s.evictLRU()
 	}
 	app, err := web.New(ps.project.Root)
 	ps.app = app
 	ps.appErr = err
+	if err == nil {
+		ps.memory = memory.NewMemoryStore(ps.project.Root)
+	}
 	return app, err
+}
+
+// defaultMaxProjects is the default cap on cached web.App instances. It bounds
+// the number of lazily built apps an enterprise server holds in memory; when
+// exceeded the least-recently-used cached app is evicted (and rebuilt on next
+// access). Configurable via KERN_ENTERPRISE_MAX_PROJECTS.
+const defaultMaxProjects = 16
+
+// maxProjects returns the configured cap on cached web.App instances, read from
+// KERN_ENTERPRISE_MAX_PROJECTS (default 16). Invalid or non-positive values fall
+// back to the default.
+func (s *Server) maxProjects() int {
+	v := os.Getenv("KERN_ENTERPRISE_MAX_PROJECTS")
+	if v == "" {
+		return defaultMaxProjects
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 1 {
+		return defaultMaxProjects
+	}
+	return n
+}
+
+// cachedCount returns how many projects currently hold a built web.App.
+// Must be called with s.mu held.
+func (s *Server) cachedCount() int {
+	n := 0
+	for _, ps := range s.projects {
+		if ps.app != nil {
+			n++
+		}
+	}
+	return n
+}
+
+// evictLRU drops the cached web.App of the least-recently-used project that
+// currently has one built. The projectState (and its per-project memory store)
+// are retained so the app can be rebuilt on next access. Must be called with
+// s.mu held.
+func (s *Server) evictLRU() {
+	var oldest *projectState
+	var oldestT time.Time
+	for _, ps := range s.projects {
+		if ps.app == nil {
+			continue
+		}
+		if oldest == nil || ps.lastUsed.Before(oldestT) {
+			oldest = ps
+			oldestT = ps.lastUsed
+		}
+	}
+	if oldest == nil {
+		return
+	}
+	oldest.app = nil
+	oldest.appErr = nil
+}
+
+// projectMemory returns the per-project memory store for name, creating it
+// lazily on first access. Returns nil if the project is not registered. The
+// per-project store is scoped to the project's root, so lessons written to one
+// project are not visible from another's per-project memory (cross-project
+// lessons live in the org-level store instead).
+func (s *Server) projectMemory(name string) *memory.MemoryStore {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	ps, exists := s.projects[name]
+	if !exists {
+		return nil
+	}
+	if ps.memory != nil {
+		return ps.memory
+	}
+	ps.memory = memory.NewMemoryStore(ps.project.Root)
+	return ps.memory
 }
 
 // OrgAudit returns the shared org-level audit log.
@@ -163,6 +257,76 @@ func (s *Server) OrgBus() *eventbus.Bus { return s.orgBus }
 
 // Store returns the shared org-level storage backend (nil if unset).
 func (s *Server) Store() storage.Store { return s.store }
+
+// OrgMemory returns the shared org-level memory store (Phase 23a). Memories
+// written here are visible across all projects — e.g. a lesson learned in the
+// payments service is recallable when working on the orders service.
+func (s *Server) OrgMemory() *memory.MemoryStore { return s.orgMemory }
+
+// RegisterAgent registers an agent identity at the org level (Phase 23d). The
+// agent's permissions apply across all projects. Returns an error if an agent
+// with the same ID is already registered.
+func (s *Server) RegisterAgent(a *identity.AgentIdentity) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, exists := s.orgAgents[a.ID]; exists {
+		return fmt.Errorf("enterprise: agent %q already registered", a.ID)
+	}
+	s.orgAgents[a.ID] = a
+	return nil
+}
+
+// Agents returns all registered org-level agent identities, sorted by ID.
+func (s *Server) Agents() []*identity.AgentIdentity {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	ids := make([]string, 0, len(s.orgAgents))
+	for id := range s.orgAgents {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	out := make([]*identity.AgentIdentity, 0, len(ids))
+	for _, id := range ids {
+		out = append(out, s.orgAgents[id])
+	}
+	return out
+}
+
+// OrgTasks aggregates tasks across all projects (Phase 23b). Returns a map of
+// project name → task list. Projects whose app hasn't been built yet are
+// skipped (they have no tasks yet).
+func (s *Server) OrgTasks() map[string][]map[string]any {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := map[string][]map[string]any{}
+	for name, ps := range s.projects {
+		if ps.app == nil {
+			continue
+		}
+		// Access the task registry via the web App's public handler data.
+		// We use the /v1/tasks endpoint's data shape for consistency.
+		tasks := ps.app.ListTasks()
+		for _, t := range tasks {
+			out[name] = append(out[name], map[string]any{
+				"id":     t.ID,
+				"state":  string(t.State),
+				"intent": t.Intent,
+				"type":   t.Type,
+			})
+		}
+	}
+	return out
+}
+
+// OrgSearch performs cross-project symbol search (Phase 23c). It delegates to
+// intel.SearchRepos, which searches across all repos registered in the kern
+// multi-repo registry. Returns nil when no repos are registered.
+func (s *Server) OrgSearch(query string, limit int) []intel.RepoHit {
+	if limit <= 0 {
+		limit = 20
+	}
+	return intel.SearchRepos(query, limit)
+}
 
 // authTokenEnv is the environment variable holding the enterprise server's
 // shared bearer token. It must be set before the server is started.
@@ -240,7 +404,7 @@ func (s *Server) serveOrgDashboard(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(w, `<li><a href="/%s/">%s</a></li>`, p.Name, p.Name)
 	}
 	fmt.Fprintf(w, "</ul>")
-	fmt.Fprintf(w, `<p><a href="/org/audit">Org Audit</a> | <a href="/org/policies">Org Policies</a></p>`)
+	fmt.Fprintf(w, `<p><a href="/org/audit">Org Audit</a> | <a href="/org/policies">Org Policies</a> | <a href="/org/memory">Org Memory</a> | <a href="/org/tasks">Org Tasks</a> | <a href="/org/search?q=New">Org Search</a> | <a href="/org/agents">Org Agents</a></p>`)
 	fmt.Fprintf(w, "</body></html>")
 }
 
@@ -255,6 +419,14 @@ func (s *Server) serveOrgAPI(w http.ResponseWriter, r *http.Request) {
 		s.serveOrgPolicies(w, r)
 	case "projects":
 		s.serveOrgProjects(w, r)
+	case "memory":
+		s.serveOrgMemory(w, r)
+	case "tasks":
+		s.serveOrgTasks(w, r)
+	case "search":
+		s.serveOrgSearch(w, r)
+	case "agents":
+		s.serveOrgAgents(w, r)
 	default:
 		http.Error(w, "not found", http.StatusNotFound)
 	}
@@ -292,5 +464,93 @@ func (s *Server) serveOrgProjects(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]any{
 		"projects": info,
 		"count":    len(info),
+	})
+}
+
+// serveOrgMemory serves the org-level memory store (Phase 23a).
+//   - GET /org/memory lists org-level memories. With ?project=<name> it lists
+//     that project's per-project memory store instead (falling back to org
+//     memory is NOT done here — an unknown project is a 404, so clients can
+//     distinguish a missing project from an empty store). POST /org/memory
+//     always writes to the shared org-level store (cross-project lessons).
+func (s *Server) serveOrgMemory(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		store := s.orgMemory
+		if project := r.URL.Query().Get("project"); project != "" {
+			ps := s.projectMemory(project)
+			if ps == nil {
+				http.Error(w, fmt.Sprintf("enterprise: project %q not registered", project), http.StatusNotFound)
+				return
+			}
+			store = ps
+		}
+		memories, err := store.List("")
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"memories": memories,
+			"count":    len(memories),
+		})
+	case http.MethodPost:
+		var m domain.Memory
+		if err := json.NewDecoder(r.Body).Decode(&m); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		saved, err := s.orgMemory.Add(m)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(saved)
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// serveOrgTasks serves aggregated task visibility across all projects
+// (Phase 23b). Returns a map of project name → task list.
+func (s *Server) serveOrgTasks(w http.ResponseWriter, r *http.Request) {
+	tasks := s.OrgTasks()
+	total := 0
+	for _, list := range tasks {
+		total += len(list)
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{
+		"projects": tasks,
+		"total":    total,
+	})
+}
+
+// serveOrgSearch serves cross-project symbol search (Phase 23c). It searches
+// across all repos registered in the kern multi-repo registry.
+func (s *Server) serveOrgSearch(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query().Get("q")
+	if q == "" {
+		http.Error(w, "query parameter 'q' is required", http.StatusBadRequest)
+		return
+	}
+	hits := s.OrgSearch(q, 20)
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{
+		"hits":  hits,
+		"count": len(hits),
+	})
+}
+
+// serveOrgAgents serves the org-level agent registry (Phase 23d). Returns all
+// registered agent identities.
+func (s *Server) serveOrgAgents(w http.ResponseWriter, r *http.Request) {
+	agents := s.Agents()
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{
+		"agents": agents,
+		"count":  len(agents),
 	})
 }

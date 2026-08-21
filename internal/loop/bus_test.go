@@ -17,6 +17,10 @@ import (
 func TestLoopPublishesEvents(t *testing.T) {
 	root := loopFixture(t)
 
+	// Phase 9: production mutation is disabled by default (KERN_ALLOW_DEPLOY).
+	// This test exercises the deploy stage, so it must opt in explicitly.
+	t.Setenv("KERN_ALLOW_DEPLOY", "1")
+
 	src := runtime.NewStore()
 	now := time.Now().Truncate(time.Second)
 	src.Ingest(runtime.Event{ID: "e1", Type: runtime.EventLog, Service: "checkout", Severity: "info", Message: "ok", Timestamp: now})

@@ -32,8 +32,8 @@ echo "==> source sha256: ${SHA256}"
 
 echo "==> generating formula for ${TAG}"
 sed -e "s|JayveerPrajapati/kern|${KERN_REPO}|g" \
-    -e "s|v0.1.0|${TAG}|g" \
-    -e "s|REPLACE_WITH_SOURCE_TARBALL_SHA256|${SHA256}|" \
+    -e "s|__KERN_VERSION__|${TAG}|g" \
+    -e "s|__KERN_SHA256__|${SHA256}|" \
     "$(dirname "$0")/../homebrew/kern.rb" > "$TMP/kern.rb"
 
 cd "$TMP"

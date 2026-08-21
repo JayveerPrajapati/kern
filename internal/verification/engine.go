@@ -2,6 +2,7 @@ package verification
 
 import (
 	"context"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -485,6 +486,16 @@ func (e *Engine) VerifySecurity() *SecurityResult {
 		case string(sec.SeverityInfo):
 			res.Low++
 		}
+		// Emit a security.finding event per finding so the bus carries
+		// individual findings (not just the aggregate) to webhooks/audit.
+		if e.bus != nil {
+			e.bus.Publish(eventbus.Event{
+				Kind:    eventbus.SecurityFinding,
+				Source:  "verification",
+				Subject: fmt.Sprintf("%s:%d", f.File, f.Line),
+				Payload: map[string]string{"rule": f.Rule, "severity": f.Severity, "message": f.Message},
+			})
+		}
 	}
 	// A critical finding fails (blocks) the security check; lower severities
 	// are non-blocking warnings surfaced by verdict aggregation.
@@ -510,6 +521,16 @@ func (e *Engine) VerifyArchitecture() *ArchitectureResult {
 	violations := intel.CheckBoundaries(ix, b, files)
 	for _, v := range violations {
 		res.Violations = append(res.Violations, renderViolation(v))
+		// Emit an architecture.violation event per violation so the bus
+		// carries individual violations to webhooks/audit.
+		if e.bus != nil {
+			e.bus.Publish(eventbus.Event{
+				Kind:    eventbus.ArchitectureViolation,
+				Source:  "verification",
+				Subject: v.CallerFile,
+				Payload: map[string]string{"caller": v.CallerFile, "callee": v.CalleeFile, "from": v.RuleFrom, "to": v.RuleTo},
+			})
+		}
 	}
 	res.OK = len(res.Violations) == 0
 	return res

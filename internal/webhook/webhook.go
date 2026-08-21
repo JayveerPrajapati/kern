@@ -24,11 +24,18 @@ const defaultTimeout = 5 * time.Second
 
 // Client delivers eventbus events to registered webhook URLs over HTTP.
 // It is safe for concurrent use: the hook table is guarded by a mutex.
+//
+// Idempotency (Invariant 9): a delivered event is never redelivered to the
+// same URL. The dedup key is "eventID|url"; once an event has been POSTed to
+// a URL (successfully or not — the attempt itself is the dedup point), it is
+// skipped on subsequent Deliver calls. This makes redelivery a no-op for the
+// same event to the same URL.
 type Client struct {
-	mu      sync.Mutex
-	hooks   map[string]string // name -> url
-	http    *http.Client
-	timeout time.Duration
+	mu        sync.Mutex
+	hooks     map[string]string // name -> url
+	http      *http.Client
+	timeout   time.Duration
+	delivered map[string]bool // "eventID|url" -> true (Invariant 9 idempotency)
 }
 
 // New returns an empty webhook client with the default 5s delivery timeout.
@@ -44,7 +51,8 @@ func New() *Client {
 				return http.ErrUseLastResponse
 			},
 		},
-		timeout: defaultTimeout,
+		timeout:   defaultTimeout,
+		delivered: map[string]bool{},
 	}
 }
 
@@ -146,6 +154,13 @@ func (c *Client) Deliver(ev eventbus.Event) map[string]error {
 	c.mu.Lock()
 	urls := make([]string, 0, len(c.hooks))
 	for _, u := range c.hooks {
+		// Invariant 9 idempotency: skip URLs that have already received this
+		// event ID. The dedup key is "eventID|url".
+		key := ev.ID + "|" + u
+		if c.delivered[key] {
+			continue
+		}
+		c.delivered[key] = true
 		urls = append(urls, u)
 	}
 	cli := c.http

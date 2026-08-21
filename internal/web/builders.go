@@ -1,11 +1,14 @@
 package web
 
 import (
+	"strings"
 	"time"
 
+	"github.com/JayveerPrajapati/kern/internal/agent"
 	"github.com/JayveerPrajapati/kern/internal/architecture"
 	"github.com/JayveerPrajapati/kern/internal/governance"
 	"github.com/JayveerPrajapati/kern/internal/intel"
+	"github.com/JayveerPrajapati/kern/internal/memory"
 )
 
 type overviewData struct {
@@ -304,4 +307,209 @@ func (a *App) buildDashboard() (*dashboardData, error) {
 		Architecture: arch,
 		Governance:   a.buildGovernance(),
 	}, nil
+}
+
+// taskDetailData holds the 13 lifecycle fields for the task detail page.
+type taskDetailData struct {
+	TaskID    string
+	State     string
+	Intent    string
+	Type      string
+	CreatedBy string
+	CreatedAt string
+	UpdatedAt string
+	AgentID   string
+	Steps     []stepRow
+
+	HasContext     bool
+	ContextSymbols int
+	ContextFiles   int
+	ContextEdges   int
+	ContextTokens  int
+
+	Memories    []memoryRow
+	MemoryCount int
+
+	HasImpact     bool
+	ImpactRisk    string
+	ImpactAffected int
+	ImpactServices int
+
+	Risks []riskRow
+
+	ApprovalStatus   string
+	ApprovalApprover string
+	ApprovalReason   string
+
+	Artifacts []artifactRow
+
+	HasVerification     bool
+	VerificationVerdict string
+	VerificationSummary string
+
+	PRURL    string
+	PRNumber int
+
+	DeploymentVersion string
+	DeploymentStatus  string
+	ObservationResult string
+}
+
+type stepRow struct {
+	Index   int
+	Action  string
+	AgentID string
+	Status  string
+	Result  string
+}
+
+type memoryRow struct {
+	Type    string
+	Scope   string
+	Content string
+}
+
+type riskRow struct {
+	Severity    string
+	Description string
+	Mitigation  string
+}
+
+type artifactRow struct {
+	Kind    string
+	Summary string
+	Source  string
+	AgentID string
+}
+
+// buildTaskDetailData projects an agent.Task into the template model for the
+// task detail page. It is read-only and degrades gracefully when lifecycle
+// outputs are nil or empty (the template renders "not assembled"/"not
+// assessed"/etc. placeholders).
+func (a *App) buildTaskDetailData(task *agent.Task) taskDetailData {
+	d := taskDetailData{
+		TaskID:    task.ID,
+		State:     string(task.State),
+		Intent:    task.Intent,
+		Type:      task.Type,
+		CreatedBy: task.CreatedBy,
+		CreatedAt: task.CreatedAt.Format(time.RFC3339),
+		UpdatedAt: task.UpdatedAt.Format(time.RFC3339),
+		AgentID:   task.AgentID,
+	}
+
+	// Steps (includes the step AgentIDs for Field 3).
+	for _, s := range task.Steps {
+		d.Steps = append(d.Steps, stepRow{
+			Index:   s.Index,
+			Action:  s.Action,
+			AgentID: s.AgentID,
+			Status:  s.Status,
+			Result:  s.Result,
+		})
+	}
+
+	// Context packet (Field 4).
+	if task.ContextPacket != nil {
+		d.HasContext = true
+		d.ContextSymbols = len(task.ContextPacket.Symbols)
+		d.ContextFiles = len(task.ContextPacket.Files)
+		d.ContextEdges = len(task.ContextPacket.Dependencies)
+		d.ContextTokens = task.ContextPacket.TokenCount
+	}
+
+	// Memory (Field 5) — recall relevant memories for the task intent.
+	if a.memories != nil && task.Intent != "" {
+		mems, _ := a.memories.Recall(memory.Query{Text: task.Intent, Limit: 10})
+		d.MemoryCount = len(mems)
+		for _, m := range mems {
+			d.Memories = append(d.Memories, memoryRow{
+				Type:    string(m.Type),
+				Scope:   m.Scope,
+				Content: m.Content,
+			})
+		}
+	}
+
+	// Impact (Field 6).
+	if task.ImpactReport != nil {
+		d.HasImpact = true
+		d.ImpactRisk = task.ImpactReport.Risk
+		d.ImpactAffected = len(task.ImpactReport.Affected)
+		d.ImpactServices = len(task.ImpactReport.Services)
+	}
+
+	// Risks (Field 7).
+	for _, r := range task.Risks {
+		d.Risks = append(d.Risks, riskRow{
+			Severity:    string(r.Level),
+			Description: strings.Join(r.Factors, "; "),
+			Mitigation:  r.Mitigation,
+		})
+	}
+
+	// Approval (Field 8) — check pending approvals matching this task.
+	if a.approvals != nil {
+		for _, ap := range a.approvals.Pending() {
+			if ap.TaskID == task.ID {
+				d.ApprovalStatus = ap.Status
+				d.ApprovalApprover = ap.Requester
+				d.ApprovalReason = ap.Reason
+				break
+			}
+		}
+	}
+	if d.ApprovalStatus == "" {
+		// Fall back to any step with an "approve" action that succeeded.
+		for _, s := range task.Steps {
+			if s.Action == "approve" && s.Status == "success" {
+				d.ApprovalStatus = "approved"
+				d.ApprovalApprover = s.AgentID
+				break
+			}
+		}
+	}
+
+	// Artifacts (Field 9).
+	if a.taskSvc != nil {
+		arts, _ := a.taskSvc.Artifacts().GetByTask(task.ID)
+		for _, art := range arts {
+			d.Artifacts = append(d.Artifacts, artifactRow{
+				Kind:    string(art.Kind),
+				Summary: art.URI,
+				Source:  art.Provenance,
+				AgentID: art.CreatedBy,
+			})
+		}
+	}
+
+	// Verification (Field 10).
+	if task.Verification != nil {
+		d.HasVerification = true
+		d.VerificationVerdict = string(task.Verification.Verdict)
+		d.VerificationSummary = task.Verification.Summary
+	}
+
+	// PR (Field 11).
+	d.PRURL = task.PRURL
+	d.PRNumber = task.PRNumber
+
+	// Deployment (Field 12) — scan steps for a deploy action.
+	for _, s := range task.Steps {
+		if s.Action == "deploy" {
+			d.DeploymentVersion = s.Result
+			d.DeploymentStatus = s.Status
+			break
+		}
+	}
+
+	// Production outcome (Field 13) — scan steps for an observe action.
+	for _, s := range task.Steps {
+		if s.Action == "observe" {
+			d.ObservationResult = s.Result
+			break
+		}
+	}
+
+	return d
 }

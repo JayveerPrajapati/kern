@@ -32,8 +32,8 @@ else
 fi
 
 sed -e "s|JayveerPrajapati/kern|${KERN_REPO:-JayveerPrajapati/kern}|g" \
-    -e "s|v0.1.0|${VERSION}|g" \
-    -e "s|REPLACE_WITH_SOURCE_TARBALL_SHA256|${SHA256}|" \
+    -e "s|__KERN_VERSION__|${VERSION}|g" \
+    -e "s|__KERN_SHA256__|${SHA256}|" \
     homebrew/kern.rb
 
 echo "# sha256: ${SHA256}" >&2

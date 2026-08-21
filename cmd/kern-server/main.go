@@ -4,13 +4,17 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"log"
 	"net/http"
 	"net/url"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
+	"time"
 
 	"github.com/JayveerPrajapati/kern/internal/enterprise"
 	"github.com/JayveerPrajapati/kern/internal/eventbus"
@@ -75,7 +79,7 @@ func main() {
 	defer unsub()
 
 	fmt.Printf("kern-server listening on %s\n", *addr)
-	log.Fatal(http.ListenAndServe(*addr, app))
+	serve(*addr, app)
 }
 
 // runEnterprise starts kern-server in multi-project enterprise mode. Projects
@@ -110,5 +114,28 @@ func runEnterprise(addr string) {
 		os.Exit(1)
 	}
 	fmt.Printf("kern-server (enterprise) listening on %s with %d project(s)\n", addr, len(srv.Projects()))
-	log.Fatal(http.ListenAndServe(addr, srv))
+	serve(addr, srv)
+}
+
+// serve runs an http.Server with graceful shutdown. On SIGINT/SIGTERM it drains
+// in-flight requests for up to 10s before returning, so a control-plane server
+// (REST + webhooks + long-running /v1/loop) is not hard-killed mid-request.
+func serve(addr string, handler http.Handler) {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	srv := &http.Server{Addr: addr, Handler: handler}
+	go func() {
+		<-ctx.Done()
+		stop()
+		log.Printf("kern-server: shutting down...")
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := srv.Shutdown(shutdownCtx); err != nil {
+			log.Printf("kern-server: shutdown error: %v", err)
+		}
+	}()
+	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		fmt.Fprintf(os.Stderr, "kern-server: %v\n", err)
+		os.Exit(1)
+	}
 }

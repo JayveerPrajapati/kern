@@ -1,0 +1,14 @@
+{
+  "name": "@kern/sdk",
+  "version": "0.1.0",
+  "description": "Thin HTTP client for the kern-server REST API",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "test": "node --test test/client.test.mjs"
+  },
+  "devDependencies": {
+    "typescript": "^5.0.0"
+  }
+}

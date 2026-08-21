@@ -116,6 +116,7 @@ const (
 	ArtifactRootCauseReport    ArtifactKind = "root_cause_report"
 	ArtifactEvidenceReport     ArtifactKind = "evidence_report"
 	ArtifactPullRequest        ArtifactKind = "pull_request"
+	ArtifactDeployment         ArtifactKind = "deployment"
 	ArtifactDeploymentReport   ArtifactKind = "deployment_report"
 	ArtifactRollbackReport     ArtifactKind = "rollback_report"
 	ArtifactMemoryEntry        ArtifactKind = "memory_entry"

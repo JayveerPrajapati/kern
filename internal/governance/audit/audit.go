@@ -27,6 +27,7 @@ type AuditEntry struct {
 	Approved  bool
 	Result    string // "allowed", "blocked", "pending", "denied"
 	Hash      string // content hash linking this entry to the previous one (tamper chain)
+	TaskID    string // Invariant 4: the task this audit entry belongs to (empty when N/A)
 }
 
 // AuditLog records governance decisions in memory. It optionally persists each
@@ -97,7 +98,7 @@ func (l *AuditLog) persist(entry AuditEntry) {
 // chain: modifying any entry invalidates all subsequent hashes.
 func computeAuditHash(e AuditEntry, prevHash string) string {
 	h := sha256.New()
-	fmt.Fprintf(h, "%s|%s|%s|%s|%s|%v|%v|%v|%s", prevHash, e.ID, e.AgentID, e.Action, e.Resource, e.Timestamp.UnixNano(), e.Risk, e.Approved, e.Result)
+	fmt.Fprintf(h, "%s|%s|%s|%s|%s|%v|%v|%v|%s|%s", prevHash, e.ID, e.AgentID, e.Action, e.Resource, e.Timestamp.UnixNano(), e.Risk, e.Approved, e.Result, e.TaskID)
 	return hex.EncodeToString(h.Sum(nil))
 }
 
@@ -119,6 +120,20 @@ func (l *AuditLog) Filter(agentID string) []AuditEntry {
 	var out []AuditEntry
 	for _, e := range l.entries {
 		if e.AgentID == agentID {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// FilterByTask returns entries matching the given task ID (Invariant 4). An
+// empty taskID returns entries with no task association.
+func (l *AuditLog) FilterByTask(taskID string) []AuditEntry {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	var out []AuditEntry
+	for _, e := range l.entries {
+		if e.TaskID == taskID {
 			out = append(out, e)
 		}
 	}

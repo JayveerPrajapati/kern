@@ -115,7 +115,7 @@ func (f *Firewall) Check(agentID, resource, action string) (allowed bool, risk d
 	// 1. Authentication.
 	agent, ok := f.agents[agentID]
 	if !ok {
-		r := domain.Risk{Level: domain.RiskCritical, Score: 1.0, Factors: []string{"unknown agent"}, Mitigation: "register the agent before use"}
+		r := domain.Risk{Level: domain.RiskCritical, Score: 1.0, Factors: []string{"unknown agent"}, Mitigation: "register the agent before use", Blocked: true}
 		f.audit.Record(audit.AuditEntry{AgentID: agentID, Action: action, Resource: resource, Risk: r, Result: "denied"})
 		f.publish(eventbus.Event{Kind: eventbus.PolicyBlocked, Subject: resource, Payload: map[string]string{"action": action, "reason": "unknown agent"}})
 		return false, r, nil, fmt.Errorf("governance: unknown agent %q", agentID)
@@ -124,6 +124,7 @@ func (f *Firewall) Check(agentID, resource, action string) (allowed bool, risk d
 	// 2. Authorization.
 	if !agent.Can(resource, action) {
 		r := f.assessor.AssessAction(resource, action)
+		r.Blocked = true
 		f.audit.Record(audit.AuditEntry{AgentID: agentID, Action: action, Resource: resource, Risk: r, Result: "denied"})
 		f.publish(eventbus.Event{Kind: eventbus.PolicyBlocked, Subject: resource, Payload: map[string]string{"action": action, "reason": "lacks permission"}})
 		return false, r, nil, fmt.Errorf("governance: agent %q lacks permission %q:%q", agentID, resource, action)
@@ -135,18 +136,19 @@ func (f *Firewall) Check(agentID, resource, action string) (allowed bool, risk d
 
 	// 5. Always-blocked CRITICAL actions.
 	if r.Level == domain.RiskCritical && action == "drop" {
+		r.Blocked = true
 		f.audit.Record(audit.AuditEntry{AgentID: agentID, Action: action, Resource: resource, Risk: r, Result: "blocked"})
 		f.publish(eventbus.Event{Kind: eventbus.PolicyBlocked, Subject: resource, Payload: map[string]string{"action": action, "reason": "always blocked"}})
 		return false, r, nil, fmt.Errorf("governance: %s:%s is always blocked", resource, action)
 	}
 
 	// 4. Approval gate.
-	if appr.RequiresApproval(r.Level) {
+	if r.ApprovalRequired || appr.RequiresApproval(r.Level) {
 		key := TaskKey(agentID, resource, action)
 		if !f.approvedKeys[key] {
-			appr := f.approval.Request(key, agentID, r.Mitigation)
+			appr := f.approval.RequestWithBinding(key, agentID, r.Mitigation, r.Level, nil, nil, "")
 			f.audit.Record(audit.AuditEntry{AgentID: agentID, Action: action, Resource: resource, Risk: r, Result: "pending"})
-			f.publish(eventbus.Event{Kind: eventbus.ApprovalRequested, Subject: appr.ID, Payload: map[string]string{"resource": resource, "action": action}})
+			f.publish(eventbus.Event{Kind: eventbus.ApprovalRequested, Subject: appr.ID, Payload: map[string]string{"resource": resource, "action": action, "risk_level": string(r.Level)}})
 			metrics.Default().RecordApproval()
 			return false, r, &appr, nil
 		}

@@ -9,11 +9,15 @@ import (
 
 	"github.com/JayveerPrajapati/kern/internal/agent"
 	"github.com/JayveerPrajapati/kern/internal/agents"
-	"github.com/JayveerPrajapati/kern/internal/context"
+	"github.com/JayveerPrajapati/kern/internal/app"
 	"github.com/JayveerPrajapati/kern/internal/domain"
 	"github.com/JayveerPrajapati/kern/internal/flight"
+	"github.com/JayveerPrajapati/kern/internal/governance/audit"
+	"github.com/JayveerPrajapati/kern/internal/learning"
 	"github.com/JayveerPrajapati/kern/internal/loop"
 	"github.com/JayveerPrajapati/kern/internal/metrics"
+	"github.com/JayveerPrajapati/kern/internal/modernization"
+	"github.com/JayveerPrajapati/kern/internal/runtime"
 	"github.com/JayveerPrajapati/kern/internal/whatif"
 )
 
@@ -22,12 +26,43 @@ import (
 type v1AnalyzeResponse struct {
 	Packet domain.ContextPacket `json:"packet"`
 	Text   string               `json:"text"`
+	TaskID string               `json:"task_id,omitempty"`
 }
 
-// handleV1Analyze analyzes a proposed change via the context engine and
-// returns the assembled ContextPacket plus a rendered text summary. POST only.
+// v1PlanResponse wraps the structured Plan with its rendered text.
+type v1PlanResponse struct {
+	Plan   domain.Plan `json:"plan"`
+	Text   string      `json:"text"`
+	TaskID string      `json:"task_id,omitempty"`
+}
+
+// handleV1Analyze analyzes a proposed change via the TaskService so an
+// authoritative Task record is created, the lifecycle is recorded, and the
+// context packet is attached. POST only. Phase 5: routes through TaskService
+// instead of calling a.ctx directly.
 func (a *App) handleV1Analyze(w http.ResponseWriter, r *http.Request) {
-	a.handleV1Change(w, r)
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	a.freshGraph()
+	var req struct {
+		Change string `json:"change"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.Change) == "" {
+		writeError(w, http.StatusBadRequest, "change is required")
+		return
+	}
+	t, text, err := a.taskSvc.Analyze(req.Change)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	var pkt domain.ContextPacket
+	if t.ContextPacket != nil {
+		pkt = *t.ContextPacket
+	}
+	writeJSON(w, http.StatusOK, v1AnalyzeResponse{Packet: pkt, Text: text, TaskID: t.ID})
 }
 
 // handleGovernanceMetrics aggregates AI-governance metrics from the
@@ -68,19 +103,14 @@ func (a *App) handleGovernanceMetrics(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, snap)
 }
 
-// handleV1Plan is an alias of the analyze workflow (same deterministic core).
+// handleV1Plan produces a structured Plan via the TaskService.Plan workflow
+// (analyze → memory → impact → risk → architecture → plan artifact). POST
+// only. Phase 6: distinct from /v1/analyze — returns a domain.Plan.
 func (a *App) handleV1Plan(w http.ResponseWriter, r *http.Request) {
-	a.handleV1Change(w, r)
-}
-
-// handleV1Change is the shared implementation for /v1/analyze and /v1/plan.
-func (a *App) handleV1Change(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
-	// Refresh the shared graph/index before analyzing so /v1/analyze reports
-	// current state instead of the startup snapshot after a file edit.
 	a.freshGraph()
 	var req struct {
 		Change string `json:"change"`
@@ -89,17 +119,17 @@ func (a *App) handleV1Change(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "change is required")
 		return
 	}
-	pkt, err := a.ctx.AnalyzeChange(req.Change)
+	t, plan, text, err := a.taskSvc.Plan(req.Change)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, v1AnalyzeResponse{Packet: pkt, Text: context.RenderText(pkt)})
+	writeJSON(w, http.StatusOK, v1PlanResponse{Plan: plan, Text: text, TaskID: t.ID})
 }
 
-// handleV1WhatIf simulates a hypothetical change to the knowledge graph and
-// returns the deterministic impact report. Accepts an optional kind
-// (remove_symbol | change_dependency, default remove_symbol) and new_target.
+// handleV1WhatIf simulates a hypothetical change via TaskService.WhatIf so an
+// authoritative Task record is created. Phase 8: routes through TaskService
+// instead of calling whatif.Simulate directly.
 func (a *App) handleV1WhatIf(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -118,14 +148,45 @@ func (a *App) handleV1WhatIf(w http.ResponseWriter, r *http.Request) {
 	if req.Kind == "" {
 		kind = whatif.RemoveSymbol
 	}
-	g, _ := a.freshGraph()
-	imp := whatif.Simulate(g, whatif.Change{Kind: kind, Target: req.Change, NewTarget: req.NewTarget})
-	writeJSON(w, http.StatusOK, imp)
+	t, _, err := a.taskSvc.WhatIf(kind, req.Change, req.NewTarget)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	var imp whatif.Impact
+	if t.ImpactReport != nil {
+		imp = *t.ImpactReport
+	}
+	writeJSON(w, http.StatusOK, struct {
+		whatif.Impact
+		TaskID string `json:"task_id,omitempty"`
+	}{Impact: imp, TaskID: t.ID})
 }
 
-// handleV1Impact is an alias of the what-if handler (same impact report).
+// handleV1Impact produces the 11-question deterministic ImpactReport via
+// TaskService.Impact. Phase 7: distinct from /v1/what-if — returns a
+// domain.ImpactReport (graph-driven, no LLM).
 func (a *App) handleV1Impact(w http.ResponseWriter, r *http.Request) {
-	a.handleV1WhatIf(w, r)
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	var req struct {
+		Change string `json:"change"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.Change) == "" {
+		writeError(w, http.StatusBadRequest, "change is required")
+		return
+	}
+	t, rep, _, err := a.taskSvc.Impact(req.Change)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, struct {
+		domain.ImpactReport
+		TaskID string `json:"task_id,omitempty"`
+	}{ImpactReport: rep, TaskID: t.ID})
 }
 
 // verifyTypes is a lenient decoder for the /v1/verify "types" field. The
@@ -442,7 +503,19 @@ func (a *App) handleV1Loop(w http.ResponseWriter, r *http.Request) {
 		}
 		level = parsed
 	}
-	l, err := loop.NewLoop(loop.LoopConfig{Root: a.root, Level: level, Mem: a.memories, Recorder: flight.New(a.root)})
+	// Phase 9: production mutation is disabled by default. The deploy stage
+	// (autonomy L4+) is only reached when KERN_ALLOW_DEPLOY=1 is set, so a
+	// local console cannot accidentally trigger a production deployment
+	// without explicit operator opt-in. The approval workflow is also wired
+	// so high-risk stages pass through governance.
+	cfg := loop.LoopConfig{
+		Root:    a.root,
+		Level:   level,
+		Mem:     a.memories,
+		Appr:    a.approvals,
+		Recorder: flight.New(a.root),
+	}
+	l, err := loop.NewLoop(cfg)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -491,5 +564,203 @@ func (a *App) handleV1IncidentInvestigate(w http.ResponseWriter, r *http.Request
 		"incident":         inc,
 		"hypotheses":       inc.Hypotheses,
 		"affected_service": inc.AffectedService,
+	})
+}
+
+// handleV1ArtifactsList lists artifacts, optionally filtered by task ID via
+// ?task=<id>. GET only.
+func (a *App) handleV1ArtifactsList(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	store := app.NewArtifactStore(a.root)
+	taskID := r.URL.Query().Get("task")
+	if taskID != "" {
+		arts, err := store.GetByTask(taskID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, arts)
+		return
+	}
+	arts, err := store.List()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, arts)
+}
+
+// handleV1ArtifactGet serves a single artifact by ID. GET only.
+func (a *App) handleV1ArtifactGet(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	id := strings.TrimPrefix(r.URL.Path, "/v1/artifacts/")
+	id, err := url.PathUnescape(id)
+	if err != nil || strings.TrimSpace(id) == "" {
+		writeError(w, http.StatusBadRequest, "invalid artifact id")
+		return
+	}
+	store := app.NewArtifactStore(a.root)
+	art, err := store.Get(id)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "artifact not found: "+id)
+		return
+	}
+	writeJSON(w, http.StatusOK, art)
+}
+
+// handleV1Correlate correlates a production alert against the runtime and
+// returns the deep evidence chain. Phase 14.
+func (a *App) handleV1Correlate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	var req struct {
+		Alert   domain.Alert `json:"alert"`
+		Snapshot string       `json:"snapshot"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if req.Snapshot != "" {
+		store, err := runtime.ParseSnapshot([]byte(req.Snapshot))
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid snapshot: "+err.Error())
+			return
+		}
+		a.platform.WithRuntimeSource(store)
+	}
+	t, chain, _, err := a.taskSvc.Correlate(req.Alert)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, struct {
+		Chain  runtime.CorrelationChain `json:"chain"`
+		TaskID string                   `json:"task_id,omitempty"`
+	}{Chain: chain, TaskID: t.ID})
+}
+
+// handleV1Learn extracts recurring patterns from engineering memory. Phase 16.
+func (a *App) handleV1Learn(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	var req struct {
+		Threshold int `json:"threshold"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&req)
+	t, patterns, _, err := a.taskSvc.Learn(req.Threshold)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, struct {
+		Patterns []learning.Pattern `json:"patterns"`
+		TaskID   string             `json:"task_id,omitempty"`
+	}{Patterns: patterns, TaskID: t.ID})
+}
+
+// handleV1Modernize runs the legacy modernization analysis. Phase 17.
+func (a *App) handleV1Modernize(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	t, plan, _, err := a.taskSvc.Modernize()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, struct {
+		Plan   modernization.ExtractionPlan `json:"plan"`
+		TaskID string                       `json:"task_id,omitempty"`
+	}{Plan: plan, TaskID: t.ID})
+}
+
+// handleV1Execute applies a patch in a sandboxed worktree via TaskService.Execute.
+// Phase 11/22: governance-gated, creates an authoritative Task with a diff artifact.
+func (a *App) handleV1Execute(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	var req struct {
+		Patch string `json:"patch"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.Patch) == "" {
+		writeError(w, http.StatusBadRequest, "patch is required")
+		return
+	}
+	t, diff, err := a.taskSvc.Execute(req.Patch)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, struct {
+		Diff   string `json:"diff"`
+		TaskID string `json:"task_id,omitempty"`
+		Output string `json:"output,omitempty"`
+	}{Diff: diff, TaskID: t.ID, Output: t.Output})
+}
+
+// handleV1Audit returns the audit trail for a task: its steps, artifacts,
+// governance audit entries, and pending approvals. Invariant 4: every
+// important task action is auditable. The spec requires GET /v1/audit/{task_id}.
+func (a *App) handleV1Audit(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	taskID := strings.TrimPrefix(r.URL.Path, "/v1/audit/")
+	taskID, err := url.PathUnescape(taskID)
+	if err != nil || strings.TrimSpace(taskID) == "" {
+		writeError(w, http.StatusBadRequest, "invalid task id")
+		return
+	}
+	t, ok := a.taskSvc.Get(taskID)
+	if !ok {
+		writeError(w, http.StatusNotFound, "task not found: "+taskID)
+		return
+	}
+	// Gather the task's artifacts from the artifact store.
+	var arts []domain.Artifact
+	if a.taskSvc.Artifacts() != nil {
+		if list, err := a.taskSvc.Artifacts().GetByTask(taskID); err == nil {
+			arts = list
+		}
+	}
+	// Gather governance audit entries for this task (Invariant 4).
+	var auditEntries []audit.AuditEntry
+	if a.firewall != nil {
+		auditEntries = a.firewall.AuditLog().FilterByTask(taskID)
+	}
+	// Gather pending approvals for this task.
+	var pendingApprovals []domain.Approval
+	if a.approvals != nil {
+		for _, ap := range a.approvals.Pending() {
+			if ap.TaskID == taskID {
+				pendingApprovals = append(pendingApprovals, ap)
+			}
+		}
+	}
+	writeJSON(w, http.StatusOK, struct {
+		Task      *agent.Task         `json:"task"`
+		Artifacts []domain.Artifact   `json:"artifacts"`
+		Audit     []audit.AuditEntry  `json:"audit"`
+		Approvals []domain.Approval   `json:"approvals"`
+	}{
+		Task:      t,
+		Artifacts: arts,
+		Audit:     auditEntries,
+		Approvals: pendingApprovals,
 	})
 }

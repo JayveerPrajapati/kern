@@ -244,6 +244,12 @@ type Risk struct {
 }
 
 // Approval is an approval for a high-risk action.
+//
+// Phase 9: the Integration Transformation Plan's Approval Model (§16) requires
+// approval to bind to task, agent, requested action, risk, policy result,
+// evidence, AND artifact — not a bare approved=true. The RiskLevel, PolicyIDs,
+// EvidenceRefs, and ArtifactID fields make the binding explicit so an auditor
+// can reconstruct WHY an approval was granted and WHAT it authorized.
 type Approval struct {
 	ID          string
 	TaskID      string
@@ -253,6 +259,13 @@ type Approval struct {
 	Reason      string
 	RequestedAt time.Time
 	DecidedAt   *time.Time
+
+	// Phase 9 binding fields — populate when the approval is requested so the
+	// decision carries full context for audit, resume, and debugging.
+	RiskLevel    RiskLevel // the risk level that triggered the approval gate
+	PolicyIDs    []string  // policy IDs that evaluated to this risk
+	EvidenceRefs []string  // evidence/claim IDs supporting the risk assessment
+	ArtifactID   string    // the artifact (e.g. ImpactReport) backing the approval
 }
 
 // Agent is an AI agent identity.
@@ -310,4 +323,47 @@ func (t Task) IsTerminal() bool {
 		return true
 	}
 	return false
+}
+
+// Plan is the structured implementation plan produced by the control-plane
+// Plan workflow (Integration Transformation Plan Phase 6). It is assembled
+// deterministically from the analyze context packet, impact report, risk
+// assessment, and architecture rules — the LLM may explain it, but the
+// fields are populated from deterministic sources.
+//
+// The 12 fields mirror the spec's Plan artifact contract (§11): Objective,
+// Scope, AffectedComponents, ImplementationSteps, Dependencies, Risk,
+// Rollback, Tests, Security, Architecture, Deployment, Evidence.
+type Plan struct {
+	Objective          string   // what the change achieves
+	Scope              string   // boundary of the change
+	AffectedComponents []string // symbols/files/packages touched
+	ImplementationSteps []string // ordered steps to implement
+	Dependencies       []string // upstream changes required
+	Risk               string   // low | medium | high (from risk assessment)
+	Rollback           string   // how to undo
+	Tests              []string // test cases to add/run
+	Security           string   // security considerations
+	Architecture       string   // architecture-rule compliance notes
+	Deployment         string   // deployment considerations
+	Evidence           []string // claim/evidence IDs backing the plan
+}
+
+// ImpactReport answers the 11 deterministic impact questions from the
+// Integration Transformation Plan Phase 7 (§12). Each field is populated
+// directly from the knowledge graph — no LLM is the authoritative source.
+// The LLM may explain the results, but the data is deterministic.
+type ImpactReport struct {
+	Target           string   // the symbol the change targets
+	WhoCalls         []string // what calls this
+	WhatItCalls      []string // what does it call
+	ServicesDepend   []string // what services depend on it
+	APIsAffected     []string // which APIs are affected
+	DataStoresAffected []string // which data stores are affected
+	EventsAffected   []string // which events are affected
+	TestsCover       []string // which tests cover it
+	DeploymentsRelated []string // which deployments are related
+	IncidentsRelated []string // which incidents are related
+	ArchitectureRules  []string // which architecture rules apply
+	Risk             string   // low | medium | high (from criticality)
 }
