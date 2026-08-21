@@ -5,6 +5,9 @@ import (
 )
 
 func TestPipelineReadOnlyAnalyzePlan(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow e2e (>30s); skipped with -short")
+	}
 	// Read-only analyze+plan should work without governance gates.
 	p, err := New("../..")
 	if err != nil {

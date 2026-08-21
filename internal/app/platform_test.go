@@ -18,6 +18,9 @@ import (
 // error, the rendered text contains expected section markers, and the
 // verification verdict is a known value.
 func TestPlatformAnalyzeWhatIfVerify(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow e2e (>30s); skipped with -short")
+	}
 	root := "../.."
 
 	p, err := New(root)
