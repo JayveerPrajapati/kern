@@ -32,6 +32,9 @@ import (
 // artifact. It does NOT assert exact symbol counts (those drift as the repo
 // evolves).
 func TestVerticalSlice1AnalyzePlanImpactVerifyPR(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow e2e (>30s); skipped with -short")
+	}
 	root := "../.."
 
 	p, err := New(root)
@@ -228,6 +231,9 @@ func TestVerticalSlice3WhatIfScenario(t *testing.T) {
 // TestTaskServiceAgentIdentity verifies that the agent identity is threaded
 // through all tasks created by a TaskService (Invariant 6).
 func TestTaskServiceAgentIdentity(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow e2e (>30s); skipped with -short")
+	}
 	root := "../.."
 
 	p, err := New(root)
@@ -265,6 +271,9 @@ func TestTaskServiceAgentIdentity(t *testing.T) {
 // TestArtifactImmutability verifies that a finalized artifact cannot be
 // overwritten (Invariant 8).
 func TestArtifactImmutability(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow e2e (>30s); skipped with -short")
+	}
 	root := "../.."
 
 	p, err := New(root)
@@ -605,6 +614,9 @@ func TestVerticalSlice2IncidentCorrelateRootCause(t *testing.T) {
 // This is the definitive proof point that all phases are wired through the
 // authoritative Task with artifacts, events, and lifecycle transitions.
 func TestFullLifecycle20StepVerticalSlice(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow e2e (>30s); skipped with -short")
+	}
 	// Allow execution through the governance firewall so policy evaluation
 	// (step 7) is a green path in this test.
 	t.Setenv("KERN_ALLOW_EXEC", "1")
