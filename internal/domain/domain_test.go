@@ -425,13 +425,13 @@ func TestTaskPopulatedAndTerminal(t *testing.T) {
 	if tk.IsTerminal() {
 		t.Fatalf("executing task should not be terminal")
 	}
-	for _, s := range []TaskState{TaskCompleted, TaskFailed, TaskCancelled, TaskRejected, TaskRolledBack} {
+	for _, s := range []TaskState{TaskCompleted, TaskCancelled, TaskRejected, TaskRolledBack} {
 		tk := Task{State: s}
 		if !tk.IsTerminal() {
 			t.Errorf("state %q should be terminal", s)
 		}
 	}
-	for _, s := range []TaskState{TaskCreated, TaskApproved, TaskBlocked} {
+	for _, s := range []TaskState{TaskCreated, TaskApproved, TaskBlocked, TaskFailed} {
 		tk := Task{State: s}
 		if tk.IsTerminal() {
 			t.Errorf("state %q should not be terminal", s)

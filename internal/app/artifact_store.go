@@ -113,9 +113,11 @@ func (s *ArtifactStore) Save(a domain.Artifact) (domain.Artifact, error) {
 	for _, it := range list {
 		if it.ID != a.ID {
 			kept = append(kept, it)
-		} else if it.Status == "final" && a.Status == "final" {
-			// Invariant 8: a finalized artifact is immutable. Return the
-			// existing record rather than overwriting it.
+		} else if it.Status == "final" {
+			// Invariant 8: a finalized artifact is immutable. Block ANY
+			// overwrite of an existing final artifact, regardless of the new
+			// artifact's Status. Return the existing record rather than
+			// replacing it.
 			return it, fmt.Errorf("artifact %s is finalized and immutable", a.ID)
 		}
 	}
@@ -164,4 +166,118 @@ func (s *ArtifactStore) List() ([]domain.Artifact, error) {
 	}
 	sort.Slice(list, func(i, j int) bool { return list[i].CreatedAt.Before(list[j].CreatedAt) })
 	return list, nil
+}
+
+// Replay reconstructs the artifact chain for a task, returning artifacts in
+// chain order (following ParentArtifactID links from the root). This allows a
+// complete analysis to be reconstructed from stored Task/Artifact/Evidence
+// state without replaying the model (Strict Plan Phase 3 P2 + validation).
+func (s *ArtifactStore) Replay(taskID string) ([]domain.Artifact, error) {
+	all, err := s.GetByTask(taskID)
+	if err != nil {
+		return nil, err
+	}
+	if len(all) == 0 {
+		return []domain.Artifact{}, nil
+	}
+	// Build a map by ID for chain traversal.
+	byID := make(map[string]domain.Artifact, len(all))
+	for _, a := range all {
+		byID[a.ID] = a
+	}
+	// Find the root (artifact with no ParentArtifactID within this task's set).
+	var root domain.Artifact
+	rootFound := false
+	for _, a := range all {
+		if a.ParentArtifactID == "" {
+			root = a
+			rootFound = true
+			break
+		}
+		if _, ok := byID[a.ParentArtifactID]; !ok {
+			root = a
+			rootFound = true
+			break
+		}
+	}
+	if !rootFound {
+		// No root found (circular or all linked); return sorted by time.
+		return all, nil
+	}
+	// Follow the chain: root → child → child → ...
+	chain := []domain.Artifact{root}
+	visited := map[string]bool{root.ID: true}
+	current := root
+	for {
+		nextID := ""
+		for _, a := range all {
+			if a.ParentArtifactID == current.ID && !visited[a.ID] {
+				nextID = a.ID
+				break
+			}
+		}
+		if nextID == "" {
+			break
+		}
+		chain = append(chain, byID[nextID])
+		visited[nextID] = true
+		current = byID[nextID]
+	}
+	return chain, nil
+}
+
+// ArtifactComparison describes the difference between two tasks' artifact
+// chains.
+type ArtifactComparison struct {
+	TaskID1    string         `json:"task_id_1"`
+	TaskID2    string         `json:"task_id_2"`
+	OnlyIn1    []string       `json:"only_in_1"`    // artifact kinds present only in task 1
+	OnlyIn2    []string       `json:"only_in_2"`    // artifact kinds present only in task 2
+	InBoth     []string       `json:"in_both"`      // artifact kinds present in both
+	DigestDiff map[string][2]string `json:"digest_diff"` // kind → [digest1, digest2] where they differ
+}
+
+// Compare compares the artifact chains of two tasks, reporting which artifact
+// kinds are present in each and where digests differ (Strict Plan Phase 3 P2).
+func (s *ArtifactStore) Compare(taskID1, taskID2 string) (*ArtifactComparison, error) {
+	chain1, err := s.GetByTask(taskID1)
+	if err != nil {
+		return nil, err
+	}
+	chain2, err := s.GetByTask(taskID2)
+	if err != nil {
+		return nil, err
+	}
+	kinds1 := map[string]domain.Artifact{}
+	for _, a := range chain1 {
+		kinds1[string(a.Kind)] = a
+	}
+	kinds2 := map[string]domain.Artifact{}
+	for _, a := range chain2 {
+		kinds2[string(a.Kind)] = a
+	}
+	cmp := &ArtifactComparison{
+		TaskID1:    taskID1,
+		TaskID2:    taskID2,
+		DigestDiff: map[string][2]string{},
+	}
+	for kind, a1 := range kinds1 {
+		if a2, ok := kinds2[kind]; ok {
+			cmp.InBoth = append(cmp.InBoth, kind)
+			if a1.Digest != a2.Digest {
+				cmp.DigestDiff[kind] = [2]string{a1.Digest, a2.Digest}
+			}
+		} else {
+			cmp.OnlyIn1 = append(cmp.OnlyIn1, kind)
+		}
+	}
+	for kind := range kinds2 {
+		if _, ok := kinds1[kind]; !ok {
+			cmp.OnlyIn2 = append(cmp.OnlyIn2, kind)
+		}
+	}
+	sort.Strings(cmp.OnlyIn1)
+	sort.Strings(cmp.OnlyIn2)
+	sort.Strings(cmp.InBoth)
+	return cmp, nil
 }

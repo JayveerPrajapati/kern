@@ -169,6 +169,9 @@ func TestPublishSetsDefaults(t *testing.T) {
 	if ev.OccurredAt.IsZero() {
 		t.Errorf("expected a non-zero OccurredAt")
 	}
+	if ev.EventVersion != 1 {
+		t.Errorf("expected EventVersion=1 (default), got %d", ev.EventVersion)
+	}
 }
 
 func TestEventKindsAreDistinct(t *testing.T) {

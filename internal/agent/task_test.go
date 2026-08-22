@@ -87,8 +87,9 @@ func TestTaskStartCompleteFail(t *testing.T) {
 	if tk2.State != domain.TaskFailed || tk2.Output != "boom" {
 		t.Fatalf("after Fail: state=%s output=%q", tk2.State, tk2.Output)
 	}
-	if !tk2.IsTerminal() {
-		t.Fatal("after Fail: task not terminal")
+	// FAILED is recoverable (Retry reopens it), so it is NOT terminal.
+	if tk2.IsTerminal() {
+		t.Fatal("after Fail: FAILED should not be terminal (recoverable via Retry)")
 	}
 }
 
@@ -182,10 +183,11 @@ func TestTransitionInvalid(t *testing.T) {
 }
 
 func TestTransitionFromTerminalRejected(t *testing.T) {
+	// Only truly-terminal states (no recovery): COMPLETED, REJECTED,
+	// CANCELLED, ROLLED_BACK. FAILED and BLOCKED are recoverable via
+	// Retry/Resume and are tested separately.
 	terminals := []domain.TaskState{
 		domain.TaskCompleted,
-		domain.TaskFailed,
-		domain.TaskBlocked,
 		domain.TaskRejected,
 		domain.TaskCancelled,
 		domain.TaskRolledBack,
@@ -198,7 +200,7 @@ func TestTransitionFromTerminalRejected(t *testing.T) {
 			t.Fatalf("transition from terminal %s: want error, got nil", term)
 		}
 		if tk.State != term {
-			t.Fatalf("terminal %s was mutated to %s", term, tk.State)
+			t.Fatalf("terminal %s was mutated to %s", tk.State, term)
 		}
 	}
 }

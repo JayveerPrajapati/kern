@@ -136,8 +136,8 @@ class Client:
         from urllib.parse import quote
         return self._get(f"/v1/artifacts/{quote(artifact_id, safe='')}")
 
-    def audit(self, task_id: str = "") -> dict:
-        if task_id:
-            from urllib.parse import quote
-            return self._get(f"/v1/audit/{quote(task_id, safe='')}")
-        return self._get("/v1/audit")
+    def audit(self, task_id: str) -> dict:
+        if not task_id:
+            raise ValueError("audit() requires a task_id")
+        from urllib.parse import quote
+        return self._get(f"/v1/audit/{quote(task_id, safe='')}")

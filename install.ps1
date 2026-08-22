@@ -117,13 +117,15 @@ try {
 
     $kern = Join-Path $Prefix "kern.exe"
     # Auto-wire: detect installed agents and wire kern into them (idempotent).
+    # --global also writes kern-first policy to ~/AGENTS.md, ~/.claude/CLAUDE.md,
+    # and installs the opencode plugin globally so agents in ANY project use kern.
     try {
         $projRoot = git rev-parse --show-toplevel 2>$null
         if (-not $projRoot) { $projRoot = (Get-Location).Path }
-        Write-Host "auto-wiring kern into detected agents in: $projRoot"
+        Write-Host "auto-wiring kern into detected agents in: $projRoot (and globally)"
         Push-Location $projRoot
         try {
-            & $kern setup --detect --root $projRoot 2>$null
+            & $kern setup --detect --root $projRoot --global 2>$null
             Write-Host "indexing project (first run may take a minute)..."
             & $kern index $projRoot 2>$null
         } finally {

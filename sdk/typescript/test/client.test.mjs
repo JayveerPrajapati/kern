@@ -107,15 +107,18 @@ test("execute POSTs patch to /v1/execute", async () => {
   assert.deepEqual(JSON.parse(calls[0].init.body), { patch: "patch text" });
 });
 
-test("audit GETs /v1/audit/{id} when a task is given, else /v1/audit", async () => {
+test("audit GETs /v1/audit/{id} when a task id is given", async () => {
   const c = new Client("http://test:8090");
-  let calls = mockFetch({});
-  await c.audit("t1");
-  assert.equal(calls[0].url, "http://test:8090/v1/audit/t1");
+  const calls = mockFetch({});
+  await c.audit("task-123");
+  assert.equal(calls[0].url, "http://test:8090/v1/audit/task-123");
+  assert.equal(calls[0].init.method, "GET");
+});
 
-  calls = mockFetch({});
-  await c.audit();
-  assert.equal(calls[0].url, "http://test:8090/v1/audit");
+test("audit throws when no task id is given", async () => {
+  const c = new Client("http://test:8090");
+  assert.throws(() => c.audit(""), /requires a taskId/);
+  assert.throws(() => c.audit(undefined), /requires a taskId/);
 });
 
 test("non-2xx raises KernError with status", async () => {

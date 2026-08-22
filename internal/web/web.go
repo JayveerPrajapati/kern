@@ -167,6 +167,7 @@ func New(root string) (*App, error) {
 	mux.HandleFunc("/v1/agents", a.handleV1Agents)
 	mux.HandleFunc("/v1/loop", a.handleV1Loop)
 	mux.HandleFunc("/v1/incidents/investigate", a.handleV1IncidentInvestigate)
+	mux.HandleFunc("/v1/incidents/", a.handleV1Incident)
 	mux.HandleFunc("/v1/correlate", a.handleV1Correlate)
 	mux.HandleFunc("/v1/learn", a.handleV1Learn)
 	mux.HandleFunc("/v1/modernize", a.handleV1Modernize)

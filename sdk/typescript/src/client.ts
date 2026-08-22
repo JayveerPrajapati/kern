@@ -170,10 +170,10 @@ export class Client {
     return this.get(`/v1/artifacts/${encodeURIComponent(artifactId)}`);
   }
 
-  audit(taskId: string = ""): Promise<any> {
-    if (taskId) {
-      return this.get(`/v1/audit/${encodeURIComponent(taskId)}`);
+  audit(taskId: string): Promise<any> {
+    if (!taskId) {
+      throw new Error("audit() requires a taskId");
     }
-    return this.get("/v1/audit");
+    return this.get(`/v1/audit/${encodeURIComponent(taskId)}`);
   }
 }

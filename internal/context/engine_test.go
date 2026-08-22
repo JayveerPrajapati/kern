@@ -317,3 +317,23 @@ func hasRecommendation(facts []domain.Claim) bool {
 	}
 	return false
 }
+
+// TestContextPacketNoNilFields guards against the carried-forward stubs
+// (FIX #10a): ArchitectureRules and RuntimeEvidence must NEVER be nil after a
+// packet is assembled. They may be empty (no validator/runtime source wired, or
+// nothing matched), but consumers must be able to rely on len() == 0 rather than
+// a nil check.
+func TestContextPacketNoNilFields(t *testing.T) {
+	e := testEngine(t)
+	pkt, err := e.AnalyzeChange("Foo")
+	if err != nil {
+		t.Fatalf("AnalyzeChange(Foo) error: %v", err)
+	}
+
+	if pkt.ArchitectureRules == nil {
+		t.Error("ArchitectureRules is nil; want empty (non-nil) slice")
+	}
+	if pkt.RuntimeEvidence == nil {
+		t.Error("RuntimeEvidence is nil; want empty (non-nil) slice")
+	}
+}

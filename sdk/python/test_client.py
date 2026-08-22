@@ -89,14 +89,15 @@ class ClientTest(unittest.TestCase):
         self.assertEqual(json.loads(req.data), {"patch": "patch text"})
 
     def test_audit_with_task(self):
-        out, req = self._call(self.client.audit, "t1")
+        out, req = self._call(self.client.audit, "task-123")
         self.assertEqual(req.method, "GET")
-        self.assertEqual(req.full_url, "http://test:8090/v1/audit/t1")
+        self.assertEqual(req.full_url, "http://test:8090/v1/audit/task-123")
 
-    def test_audit_all(self):
-        out, req = self._call(self.client.audit)
-        self.assertEqual(req.method, "GET")
-        self.assertEqual(req.full_url, "http://test:8090/v1/audit")
+    def test_audit_empty_raises_value_error(self):
+        with self.assertRaises(ValueError):
+            self.client.audit("")
+        with self.assertRaises(ValueError):
+            self.client.audit(None)
 
     def test_correlate_with_snapshot(self):
         out, req = self._call(

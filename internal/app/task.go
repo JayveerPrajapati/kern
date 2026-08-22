@@ -43,6 +43,7 @@ type TaskService struct {
 	platform   *Platform
 	registry   *agent.Registry
 	store      *agent.TaskStore
+	snapshots  *agent.SnapshotStore
 	arts       *ArtifactStore
 	bus        *eventbus.Bus
 	agentID    string              // identity of the calling interface (Invariant 6)
@@ -65,6 +66,7 @@ func NewTaskService(p *Platform, bus *eventbus.Bus) *TaskService {
 		platform:   p,
 		registry:   reg,
 		store:      store,
+		snapshots:  agent.NewSnapshotStore(p.Root()),
 		arts:       NewArtifactStore(p.Root()),
 		bus:        bus,
 		agentID:    "kern", // default identity; override via WithAgentID
@@ -163,6 +165,178 @@ func (s *TaskService) Get(id string) (*agent.Task, bool) {
 // List returns all tasks known to this service, sorted by ID.
 func (s *TaskService) List() []*agent.Task {
 	return s.registry.ListTasks()
+}
+
+// Run is the kern_run entry point (Strict Plan Phase 6 P0). It compiles the
+// intent, selects the workflow, runs a policy precheck, selects capabilities
+// and tools, creates a Task, and returns a RunResult with the task ID,
+// workflow, capabilities, tools, agents, risk, approval state, and next
+// action.
+//
+// An external agent can call Run(intent) and Kern builds a valid Task/workflow
+// without requiring the external agent to manually orchestrate low-level Kern
+// tools.
+func (s *TaskService) Run(intent string) (*domain.RunResult, error) {
+	compiled := CompileIntent(intent)
+	workflow := SelectWorkflow(compiled.Type)
+	caps := DefaultCapabilities(compiled.Type)
+	tools := CapabilitiesToTools(caps)
+	agentIDs := CapabilitiesToAgents(caps)
+
+	// Policy precheck: verify the agent identity is known and the intent type
+	// is allowed. The firewall gates execution later; here we just assess risk.
+	risk := domain.Risk{Level: domain.RiskLow}
+	for _, c := range caps {
+		if c.Risk == "high" {
+			risk.Level = domain.RiskHigh
+			risk.ApprovalRequired = true
+		} else if c.Risk == "medium" && risk.Level == domain.RiskLow {
+			risk.Level = domain.RiskMedium
+		}
+	}
+	risk.Factors = []string{string(compiled.Type)}
+
+	// Create the Task.
+	t, err := s.Create(intent)
+	if err != nil {
+		return nil, err
+	}
+
+	// Determine approval state and next action.
+	approvalState := "none"
+	nextAction := "execute workflow"
+	if risk.ApprovalRequired {
+		approvalState = "required"
+		nextAction = "request approval"
+	}
+
+	result := &domain.RunResult{
+		TaskID:        t.ID,
+		Workflow:      workflow,
+		Intent:        compiled,
+		Capabilities:  capabilityNames(caps),
+		Tools:         tools,
+		Agents:        agentIDs,
+		ContextPlan:   "analyze → context → memory → impact → risk → plan",
+		Risk:          risk,
+		ApprovalState: approvalState,
+		NextAction:    nextAction,
+	}
+	s.persist(t)
+	return result, nil
+}
+
+func capabilityNames(caps []domain.Capability) []string {
+	var names []string
+	for _, c := range caps {
+		names = append(names, c.Name)
+	}
+	return names
+}
+
+// Cancel transitions a task to CANCELLED with a reason. The task is persisted
+// and a task.updated event is published. Returns an error if the task is
+// already terminal or the transition is invalid.
+func (s *TaskService) Cancel(taskID, reason string) error {
+	t, err := s.getTaskForMutation(taskID)
+	if err != nil {
+		return err
+	}
+	if err := t.Cancel(reason); err != nil {
+		return err
+	}
+	s.persist(t)
+	s.publish(eventbus.TaskUpdated, t.ID, map[string]string{"action": "cancel", "reason": reason})
+	return nil
+}
+
+// Timeout transitions a task to FAILED, indicating it exceeded a deadline.
+func (s *TaskService) Timeout(taskID string) error {
+	t, err := s.getTaskForMutation(taskID)
+	if err != nil {
+		return err
+	}
+	if err := t.Timeout(); err != nil {
+		return err
+	}
+	s.persist(t)
+	s.publish(eventbus.TaskFailed, t.ID, map[string]string{"reason": "timeout"})
+	return nil
+}
+
+// Retry reopens a FAILED task to ANALYZING. Idempotent: if the task is already
+// non-terminal, it is a no-op. The task is persisted and a task.updated event
+// is published.
+func (s *TaskService) Retry(taskID string) (*agent.Task, error) {
+	t, err := s.getTaskForMutation(taskID)
+	if err != nil {
+		return nil, err
+	}
+	if err := t.Retry(); err != nil {
+		return nil, err
+	}
+	s.persist(t)
+	s.publish(eventbus.TaskUpdated, t.ID, map[string]string{"action": "retry"})
+	return t, nil
+}
+
+// Resume unblocks a BLOCKED task, returning it to its PriorState. Idempotent:
+// if the task is already non-terminal, it is a no-op.
+func (s *TaskService) Resume(taskID string) (*agent.Task, error) {
+	t, err := s.getTaskForMutation(taskID)
+	if err != nil {
+		return nil, err
+	}
+	if err := t.Resume(); err != nil {
+		return nil, err
+	}
+	s.persist(t)
+	s.publish(eventbus.TaskUpdated, t.ID, map[string]string{"action": "resume"})
+	return t, nil
+}
+
+// Rollback transitions a PR_CREATED / DEPLOYING / OBSERVING task to
+// ROLLED_BACK with a reason.
+func (s *TaskService) Rollback(taskID, reason string) error {
+	t, err := s.getTaskForMutation(taskID)
+	if err != nil {
+		return err
+	}
+	if err := t.Rollback(reason); err != nil {
+		return err
+	}
+	s.persist(t)
+	s.publish(eventbus.TaskUpdated, t.ID, map[string]string{"action": "rollback", "reason": reason})
+	return nil
+}
+
+// HumanTakeover blocks a task and binds it to a human agent, recording the
+// prior state so it can be resumed after intervention.
+func (s *TaskService) HumanTakeover(taskID, agentID string) error {
+	t, err := s.getTaskForMutation(taskID)
+	if err != nil {
+		return err
+	}
+	if err := t.HumanTakeover(agentID); err != nil {
+		return err
+	}
+	s.persist(t)
+	s.publish(eventbus.TaskBlocked, t.ID, map[string]string{"action": "human_takeover", "agent": agentID})
+	return nil
+}
+
+// getTaskForMutation retrieves a task by ID from the registry or the persisted
+// store, returning an error if not found.
+func (s *TaskService) getTaskForMutation(taskID string) (*agent.Task, error) {
+	t, ok := s.registry.GetTask(taskID)
+	if ok {
+		return t, nil
+	}
+	stored, err := s.store.Get(taskID)
+	if err != nil {
+		return nil, fmt.Errorf("task %s: %w", taskID, err)
+	}
+	return &stored, nil
 }
 
 // Analyze creates a Task for the intent, runs the context engine, and attaches
@@ -574,13 +748,21 @@ func (s *TaskService) Verify(types []string) (*agent.Task, verification.Verifica
 		fmt.Sprintf("verdict: %s, summary: %s", res.Verdict, res.Summary),
 		s.lastArtifactID(t.ID, domain.ArtifactImpactReport), "verification:verify")
 
-	if err := t.Complete(t.Output); err != nil {
-		s.fail(t, err.Error())
-		return t, res, err
+	// Gate completion on the verification verdict: a failed verification must
+	// never yield a COMPLETED task (reliability: verification failure → task
+	// cannot become successful). Only a PASS verdict (or the non-blocking
+	// PASS_WITH_WARNING) may complete; anything else fails the task.
+	if res.Verdict == verification.VerdictPass || res.Verdict == verification.VerdictPassWithWarning {
+		if err := t.Complete(t.Output); err != nil {
+			s.fail(t, err.Error())
+			return t, res, err
+		}
+		s.persist(t)
+		s.publish(eventbus.TaskCompleted, t.ID, map[string]string{"state": "COMPLETED"})
+		return t, res, nil
 	}
-	s.persist(t)
-	s.publish(eventbus.TaskCompleted, t.ID, map[string]string{"state": "COMPLETED"})
-	return t, res, nil
+	s.fail(t, "verification failed: "+res.Summary)
+	return t, res, fmt.Errorf("verification failed: %s", res.Summary)
 }
 
 // RunWorkflow drives a Task through a dynamically selected agent workflow. The
@@ -597,6 +779,13 @@ func (s *TaskService) Verify(types []string) (*agent.Task, verification.Verifica
 // name and the Task, and returns the step output. This is where specialist
 // agents (planner, coder, reviewer, etc.) are invoked. Each step records an
 // artifact when the stepHandler returns a non-empty output.
+//
+// The specialist pipeline (internal/agents: ClassifyTask → SelectWorkflow)
+// provides classification, routing and the RequiresApproval gate. The actual
+// step implementations are the closed-loop stages in internal/loop (the
+// StepFunc stage handlers): the workflow engine here is the router and approval
+// gate, and the loop provides the real plan/code/verify/deploy execution. The
+// two are complementary — workflow selects and gates, loop executes.
 func (s *TaskService) RunWorkflow(intent string, stepHandler func(action string, t *agent.Task) (string, error)) (*agent.Task, error) {
 	t, err := s.Create(intent)
 	if err != nil {
@@ -762,13 +951,20 @@ func (s *TaskService) ExecuteAndVerify(patch string, verifyTypes []string) (*age
 	// Verify the worktree (build/test) before cleanup.
 	vres := s.verifyInWorktree(t, wt.Dir(), verifyTypes)
 
-	if err := t.Complete(t.Output); err != nil {
-		s.fail(t, err.Error())
-		return t, diff, vres, err
+	// Gate completion on the verification verdict: a failed verification must
+	// never yield a COMPLETED task. Only a PASS verdict (or the non-blocking
+	// PASS_WITH_WARNING) may complete; anything else fails the task.
+	if vres.Verdict == verification.VerdictPass || vres.Verdict == verification.VerdictPassWithWarning {
+		if err := t.Complete(t.Output); err != nil {
+			s.fail(t, err.Error())
+			return t, diff, vres, err
+		}
+		s.persist(t)
+		s.publish(eventbus.TaskCompleted, t.ID, map[string]string{"state": "COMPLETED"})
+		return t, diff, vres, nil
 	}
-	s.persist(t)
-	s.publish(eventbus.TaskCompleted, t.ID, map[string]string{"state": "COMPLETED"})
-	return t, diff, vres, nil
+	s.fail(t, "verification failed: "+vres.Summary)
+	return t, diff, vres, fmt.Errorf("verification failed: %s", vres.Summary)
 }
 
 // verifyInWorktree runs verification on the given worktree dir and records the
@@ -1375,7 +1571,13 @@ func (s *TaskService) persist(t *agent.Task) {
 	if s.store != nil {
 		_, _ = s.store.Save(*t)
 	}
+	if s.snapshots != nil {
+		_ = s.snapshots.Record(*t)
+	}
 }
+
+// Snapshots returns the snapshot store, for querying task history.
+func (s *TaskService) Snapshots() *agent.SnapshotStore { return s.snapshots }
 
 // recordArtifact creates a domain.Artifact with the given kind and links it
 // into the task's artifact chain via parentID. It persists the artifact to the
