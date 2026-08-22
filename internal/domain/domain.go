@@ -311,15 +311,19 @@ type Task struct {
 	Output    string // result
 	CreatedAt time.Time
 	UpdatedAt time.Time
+	// PriorState records the state before BLOCKED, so Resume can return to it.
+	PriorState TaskState
 	// TODO(phase 5): Context *ContextPacket added with the Phase 5 context
 	// engine entity.
 }
 
-// IsTerminal reports whether the task has reached a terminal (final) state
-// from which it cannot transition further.
+// IsTerminal reports whether the task has reached a truly final state from
+// which no recovery (retry/resume) is possible. FAILED and BLOCKED are
+// recoverable: Retry reopens FAILED → ANALYZING; Resume reopens BLOCKED →
+// PriorState. Only COMPLETED, CANCELLED, REJECTED, and ROLLED_BACK are final.
 func (t Task) IsTerminal() bool {
 	switch t.State {
-	case TaskCompleted, TaskFailed, TaskCancelled, TaskRejected, TaskRolledBack:
+	case TaskCompleted, TaskCancelled, TaskRejected, TaskRolledBack:
 		return true
 	}
 	return false

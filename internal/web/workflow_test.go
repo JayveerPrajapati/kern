@@ -170,3 +170,102 @@ func TestV1IncidentInvestigateMethodGuard(t *testing.T) {
 		t.Fatalf("status = %d, want 405", rec.Code)
 	}
 }
+
+// TestGetIncidentByID verifies the spec's GET /v1/incidents/{id} route: after
+// recording an incident it is retrievable by id, and unknown ids return 404.
+func TestGetIncidentByID(t *testing.T) {
+	app := newEmptyApp(t)
+	rec := postJSON(t, app, "/api/incidents", `{"title":"checkout 500s","severity":"error","status":"OPEN","affected_service":"checkout"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("save status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	var saved map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &saved); err != nil {
+		t.Fatalf("decode saved: %v", err)
+	}
+	savedID, _ := saved["ID"].(string)
+	if savedID == "" {
+		t.Fatal("saved incident has no ID")
+	}
+
+	rec2 := get(t, app, "/v1/incidents/"+savedID)
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("get status = %d, want 200: %s", rec2.Code, rec2.Body.String())
+	}
+	var got domain.Incident
+	if err := json.Unmarshal(rec2.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode incident: %v", err)
+	}
+	if got.ID != savedID {
+		t.Fatalf("id = %q, want %q", got.ID, savedID)
+	}
+	if got.Title != "checkout 500s" {
+		t.Fatalf("title = %q, want %q", got.Title, "checkout 500s")
+	}
+
+	// Unknown id → 404.
+	rec3 := get(t, app, "/v1/incidents/does-not-exist")
+	if rec3.Code != http.StatusNotFound {
+		t.Fatalf("unknown status = %d, want 404", rec3.Code)
+	}
+}
+
+// TestGetIncidentByIDMethodGuard asserts the by-id route is GET-only.
+func TestGetIncidentByIDMethodGuard(t *testing.T) {
+	app := newEmptyApp(t)
+	rec := postJSON(t, app, "/v1/incidents/does-not-exist", `{}`)
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("status = %d, want 405", rec.Code)
+	}
+}
+
+// TestNestedTaskActionRoutes verifies the spec's nested /v1/tasks/{id}/{action}
+// aliases behave identically to the top-level routes, and that the reserved
+// task-detail GET and unknown actions are handled correctly.
+func TestNestedTaskActionRoutes(t *testing.T) {
+	app := newTestApp(t)
+	sym := firstSymbolNodeID(t, app)
+	sub := postJSON(t, app, "/v1/tasks", `{"input":"submit a task","type":"code"}`)
+	if sub.Code != http.StatusOK {
+		t.Fatalf("submit status = %d, want 200: %s", sub.Code, sub.Body.String())
+	}
+	var s struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(sub.Body.Bytes(), &s); err != nil {
+		t.Fatalf("decode submit: %v", err)
+	}
+	if s.ID == "" {
+		t.Fatal("submit did not return an id")
+	}
+
+	// GET /v1/tasks/{id} task detail still works after the routing change.
+	detail := get(t, app, "/v1/tasks/"+s.ID)
+	if detail.Code != http.StatusOK {
+		t.Fatalf("task detail status = %d, want 200: %s", detail.Code, detail.Body.String())
+	}
+
+	// Nested analyze alias behaves identically to the top-level /v1/analyze.
+	body := `{"change":"` + sym + `"}`
+	top := postJSON(t, app, "/v1/analyze", body)
+	nested := postJSON(t, app, "/v1/tasks/"+s.ID+"/analyze", body)
+	if top.Code != http.StatusOK {
+		t.Fatalf("top-level analyze status = %d, want 200: %s", top.Code, top.Body.String())
+	}
+	if nested.Code != http.StatusOK {
+		t.Fatalf("nested analyze status = %d, want 200: %s", nested.Code, nested.Body.String())
+	}
+	var nresp v1AnalyzeResponse
+	if err := json.Unmarshal(nested.Body.Bytes(), &nresp); err != nil {
+		t.Fatalf("decode nested analyze: %v", err)
+	}
+	if nresp.TaskID == "" {
+		t.Fatal("nested analyze missing task_id")
+	}
+
+	// Unknown action → 404.
+	bad := postJSON(t, app, "/v1/tasks/"+s.ID+"/bogus", body)
+	if bad.Code != http.StatusNotFound {
+		t.Fatalf("bogus action status = %d, want 404", bad.Code)
+	}
+}

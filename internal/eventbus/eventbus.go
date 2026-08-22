@@ -154,6 +154,16 @@ type Event struct {
 	AgentID      string `json:"agent_id,omitempty"`
 	Provenance   string `json:"provenance,omitempty"` // e.g. "loop", "mcp", "web", "incident"
 
+	// EventVersion is the schema version of this event (Strict Plan Phase 4).
+	// Defaults to 1 on Publish when zero. Consumers can use it to handle
+	// evolving event schemas safely.
+	EventVersion int `json:"event_version,omitempty"`
+
+	// EntityRefs are optional references to related entities (files, symbols,
+	// services, etc.) that consumers can use for correlation without parsing
+	// the Payload.
+	EntityRefs []string `json:"entity_refs,omitempty"`
+
 	Payload    any       // optional structured payload
 	OccurredAt time.Time // defaults to now when zero on Publish
 }
@@ -239,6 +249,9 @@ func (b *Bus) Publish(ev Event) {
 	}
 	if ev.OccurredAt.IsZero() {
 		ev.OccurredAt = time.Now()
+	}
+	if ev.EventVersion == 0 {
+		ev.EventVersion = 1 // Strict Plan Phase 4: default schema version
 	}
 
 	b.mu.Lock()

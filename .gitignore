@@ -49,3 +49,6 @@ CLAUDE.md
 GEMINI.md
 .github/copilot-instructions.md
 TODO.md
+
+# local build artifacts
+/bench

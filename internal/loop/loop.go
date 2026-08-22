@@ -74,6 +74,13 @@ type LoopConfig struct {
 	// When both Planner and Coder are set, the loop uses LLM-driven plan→code
 	// (L3+ autonomy). When neither is set, stages are no-ops (L0-L2 read-only).
 	Planner *planner.Agent
+
+	// Budget optionally wires a SafetyBudget (internal/domain) into the loop.
+	// When nil, Run() falls back to domain.DefaultSafetyBudget(). After every
+	// stage the loop increments the tool-call counter and, if a limit is
+	// exceeded, PAUSES the run (fail-closed): it stops executing subsequent
+	// stages, sets Result.BudgetPaused, and returns immediately.
+	Budget *domain.SafetyBudget
 }
 
 // StageResult is the outcome of one loop stage.
@@ -94,6 +101,7 @@ type Result struct {
 	Remembered      []domain.Memory // memories recalled in the remember stage
 	Protected       bool            // true when the protect/approval gate ran and granted
 	Learned         *domain.Memory
+	BudgetPaused    bool // true when the safety budget was exceeded and the loop PAUSED
 }
 
 // Loop drives the continuous closed loop.
@@ -162,6 +170,14 @@ func (l *Loop) Run(intent string, step StepFunc) (*Result, error) {
 				return "", nil
 			}
 		}
+	}
+
+	// Safety budget: default to the conservative limits when the caller did
+	// not wire one. It is enforced (TrackToolCall + Exceeded) after every
+	// stage below.
+	if l.cfg.Budget == nil {
+		d := domain.DefaultSafetyBudget()
+		l.cfg.Budget = &d
 	}
 
 	wt, err := execution.NewWorktree(l.cfg.Root)
@@ -293,6 +309,22 @@ func (l *Loop) Run(intent string, step StepFunc) (*Result, error) {
 		}
 		if err != nil {
 			return res, err
+		}
+
+		// Safety-budget enforcement (fail-closed): after each stage, count the
+		// tool call and check the limits. If the budget is exceeded we PAUSE —
+		// stop executing any subsequent stages and return immediately. Token
+		// usage is tracked only when the wired agents surface it; here we track
+		// the tool-call counter, which drives the budget's Exceeded().
+		l.cfg.Budget.TrackToolCall()
+		if ex, why := l.cfg.Budget.Exceeded(); ex {
+			res.BudgetPaused = true
+			l.publish(eventbus.Event{
+				Kind:    eventbus.Kind("loop.budget_exceeded"),
+				Subject: intent,
+				Payload: map[string]string{"reason": why},
+			})
+			return res, nil
 		}
 	}
 	return res, nil

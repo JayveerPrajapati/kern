@@ -24,7 +24,28 @@ func runTask(rest []string) {
 	}
 	if len(args) < 1 || args[0] == "" {
 		fatalUsage("usage: kern task <id> [--root ROOT]")
+		fatalUsage("       kern task resume <id> [--root ROOT]")
+		fatalUsage("       kern task replay <id> [--root ROOT]")
 	}
+
+	// Subcommands: resume, replay, cancel, retry.
+	if len(args) >= 2 {
+		switch args[0] {
+		case "resume":
+			runTaskResume(root, args[1])
+			return
+		case "replay":
+			runTaskReplay(root, args[1])
+			return
+		case "cancel":
+			runTaskCancel(root, args[1])
+			return
+		case "retry":
+			runTaskRetry(root, args[1])
+			return
+		}
+	}
+
 	id := args[0]
 
 	p, err := app.New(root)
@@ -81,4 +102,70 @@ func runTask(rest []string) {
 	if len(t.Evidence) > 0 {
 		fmt.Printf("evidence: %d claims\n", len(t.Evidence))
 	}
+}
+
+// runTaskResume implements `kern task resume <id>` — resumes a BLOCKED task.
+func runTaskResume(root, id string) {
+	p, err := app.New(root)
+	if err != nil {
+		fatal("%v", err)
+	}
+	ts := app.NewTaskService(p, eventbus.New())
+	t, err := ts.Resume(id)
+	if err != nil {
+		fatal("%v", err)
+	}
+	fmt.Printf("resumed task %s: state=%s\n", t.ID, t.State)
+}
+
+// runTaskReplay implements `kern task replay <id>` — shows the task's snapshot
+// history (the artifact chain can be replayed via `kern artifacts <id>`).
+func runTaskReplay(root, id string) {
+	p, err := app.New(root)
+	if err != nil {
+		fatal("%v", err)
+	}
+	ts := app.NewTaskService(p, eventbus.New())
+	if ts.Snapshots() == nil {
+		fatal("snapshot store not available")
+	}
+	history, err := ts.Snapshots().History(id)
+	if err != nil {
+		fatal("%v", err)
+	}
+	if len(history) == 0 {
+		fmt.Printf("no snapshots for task %s\n", id)
+		return
+	}
+	fmt.Printf("snapshot history for task %s (%d snapshots):\n", id, len(history))
+	for i, snap := range history {
+		fmt.Printf("  %d. state=%s agent=%s time=%s\n", i+1, snap.State, snap.AgentID, snap.Timestamp.Format("2006-01-02 15:04:05"))
+	}
+}
+
+// runTaskCancel implements `kern task cancel <id>`.
+func runTaskCancel(root, id string) {
+	p, err := app.New(root)
+	if err != nil {
+		fatal("%v", err)
+	}
+	ts := app.NewTaskService(p, eventbus.New())
+	if err := ts.Cancel(id, "user requested"); err != nil {
+		fatal("%v", err)
+	}
+	fmt.Printf("cancelled task %s\n", id)
+}
+
+// runTaskRetry implements `kern task retry <id>`.
+func runTaskRetry(root, id string) {
+	p, err := app.New(root)
+	if err != nil {
+		fatal("%v", err)
+	}
+	ts := app.NewTaskService(p, eventbus.New())
+	t, err := ts.Retry(id)
+	if err != nil {
+		fatal("%v", err)
+	}
+	fmt.Printf("retried task %s: state=%s\n", t.ID, t.State)
 }

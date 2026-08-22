@@ -234,7 +234,15 @@ func (e *Engine) assemble(task, scope string, roots []domain.Symbol) domain.Cont
 	pkt.Symbols = e.symbolSet(byID, roots)
 	pkt.Files = filesOf(pkt.Symbols)
 	pkt.Dependencies = e.dependencyEdges(scope, roots)
+
+	// ArchitectureRules depends on the governance firewall and optional boundary
+	// provider (data dependency: when neither is wired, or no rule applies, the
+	// rule set is empty). Normalize to an empty slice so it is NEVER nil —
+	// consumers can rely on len() == 0 rather than a nil check.
 	pkt.ArchitectureRules = e.architectureRules(scope, roots)
+	if pkt.ArchitectureRules == nil {
+		pkt.ArchitectureRules = []domain.Policy{}
+	}
 
 	if e.memory != nil {
 		if mem, err := e.memory.Recall(memory.Query{Scope: scope, Limit: 10}); err == nil {
@@ -245,8 +253,13 @@ func (e *Engine) assemble(task, scope string, roots []domain.Symbol) domain.Cont
 		}
 	}
 
-	// Empty (not nil) when no runtime source is wired.
+	// RuntimeEvidence depends on an optional production runtime source. When no
+	// source is wired (or nothing matches), it is an empty slice (never nil) so
+	// consumers can rely on len() == 0 rather than a nil check.
 	pkt.RuntimeEvidence = e.runtimeEvidence(roots)
+	if pkt.RuntimeEvidence == nil {
+		pkt.RuntimeEvidence = []domain.Evidence{}
+	}
 
 	// Assess through the firewall using the real change scope so sensitive
 	// changes are scored higher and denials surface as Blocked/ApprovalRequired.

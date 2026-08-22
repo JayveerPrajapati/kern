@@ -1,6 +1,7 @@
 package web
 
 import (
+	"bytes"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -369,18 +370,35 @@ func (a *App) handleV1Risk(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]interface{}{"risks": pkt.Risks, "change": req.Change})
 }
 
-// handleV1Task serves a single task by ID (GET). The registry is backed by a
-// persisted TaskStore (wired in New), so submitted tasks are served here; a
-// lookup falls back to the store for tasks persisted across restarts and
-// returns 404 only when a task is genuinely unknown.
+// handleV1Task serves a single task by ID (GET /v1/tasks/{id}) and dispatches
+// the nested task-action aliases (POST /v1/tasks/{id}/{action}: analyze, plan,
+// approve, execute, verify, artifacts). The registry is backed by a persisted
+// TaskStore (wired in New), so submitted tasks are served here; a lookup falls
+// back to the store for tasks persisted across restarts and returns 404 only
+// when a task is genuinely unknown.
 func (a *App) handleV1Task(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
-	}
-	id, err := url.PathUnescape(strings.TrimPrefix(r.URL.Path, "/v1/tasks/"))
+	raw := strings.TrimPrefix(r.URL.Path, "/v1/tasks/")
+	segments := strings.SplitN(raw, "/", 2)
+	id, err := url.PathUnescape(segments[0])
 	if err != nil || strings.TrimSpace(id) == "" {
 		writeError(w, http.StatusBadRequest, "invalid task id")
+		return
+	}
+	var action string
+	if len(segments) > 1 {
+		if action, err = url.PathUnescape(segments[1]); err != nil || action == "" {
+			writeError(w, http.StatusBadRequest, "invalid task action")
+			return
+		}
+	}
+	// Nested task-action alias: /v1/tasks/{id}/{action}
+	if action != "" {
+		a.handleV1TaskAction(w, r, id, action)
+		return
+	}
+	// Plain GET /v1/tasks/{id} → task detail.
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
 	task, ok := a.tasks.Get(id)
@@ -395,6 +413,85 @@ func (a *App) handleV1Task(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, task)
+}
+
+// handleV1TaskAction dispatches the nested task-action aliases under
+// /v1/tasks/{id}/{action}. These are ADDITIONAL routes that delegate to the
+// existing top-level handlers, preserving backward compatibility while
+// exposing the spec's nested action paths. The task id is threaded through the
+// request body (as "task_id", or as "id" for the approval action).
+func (a *App) handleV1TaskAction(w http.ResponseWriter, r *http.Request, taskID, action string) {
+	switch action {
+	case "analyze":
+		a.handleV1Analyze(w, injectBody(r, map[string]interface{}{"task_id": taskID}))
+	case "plan":
+		a.handleV1Plan(w, injectBody(r, map[string]interface{}{"task_id": taskID}))
+	case "approve":
+		a.handleApprovalApprove(w, injectBody(r, map[string]interface{}{"id": taskID}))
+	case "execute":
+		a.handleV1Execute(w, injectBody(r, map[string]interface{}{"task_id": taskID}))
+	case "verify":
+		a.handleV1Verify(w, injectBody(r, map[string]interface{}{"task_id": taskID}))
+	case "artifacts":
+		if r.Method != http.MethodGet {
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		arts, err := app.NewArtifactStore(a.root).GetByTask(taskID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, arts)
+	default:
+		writeError(w, http.StatusNotFound, "unknown task action: "+action)
+	}
+}
+
+// injectBody returns a shallow copy of r whose JSON body is the decoded request
+// object merged with the given key/value pairs. It lets the nested task-action
+// routes append the task id onto the body before delegating to an existing
+// handler without changing the top-level behavior. A non-object/empty body is
+// treated as an empty object.
+func injectBody(r *http.Request, extra map[string]interface{}) *http.Request {
+	var obj map[string]interface{}
+	_ = json.NewDecoder(r.Body).Decode(&obj)
+	if obj == nil {
+		obj = map[string]interface{}{}
+	}
+	for k, v := range extra {
+		obj[k] = v
+	}
+	b, _ := json.Marshal(obj)
+	nr := r.Clone(r.Context())
+	nr.Body = io.NopCloser(bytes.NewReader(b))
+	nr.ContentLength = int64(len(b))
+	return nr
+}
+
+// handleV1Incident serves a single incident by ID (GET /v1/incidents/{id}). The
+// reserved "investigate" segment is delegated to handleV1IncidentInvestigate so
+// both routes coexist.
+func (a *App) handleV1Incident(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	id, err := url.PathUnescape(strings.TrimPrefix(r.URL.Path, "/v1/incidents/"))
+	if err != nil || strings.TrimSpace(id) == "" {
+		writeError(w, http.StatusBadRequest, "invalid incident id")
+		return
+	}
+	if id == "investigate" {
+		a.handleV1IncidentInvestigate(w, r)
+		return
+	}
+	inc, err := a.inter.Get(id)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "incident not found: "+id)
+		return
+	}
+	writeJSON(w, http.StatusOK, inc)
 }
 
 // v1TaskResponse is the lowercase JSON projection for task submission results.

@@ -505,3 +505,36 @@ func TestLoopCoderNoProvider(t *testing.T) {
 		t.Fatal("code stage did not run")
 	}
 }
+
+// TestSafetyBudgetPause verifies that when the wired SafetyBudget is exceeded
+// the loop PAUSES (fail-closed): it stops executing subsequent stages, sets
+// Result.BudgetPaused, and returns instead of proceeding through the rest of
+// the pipeline.
+func TestSafetyBudgetPause(t *testing.T) {
+	budget := &domain.SafetyBudget{MaxToolCalls: 1}
+
+	lp, err := NewLoop(LoopConfig{
+		Root:   loopFixture(t),
+		Level:  L2,
+		Budget: budget,
+	})
+	if err != nil {
+		t.Fatalf("NewLoop: %v", err)
+	}
+
+	res, err := lp.Run("add a helper", func(stage, intent string, wt *execution.Worktree, r *Result) (string, error) {
+		return "", nil
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if !res.BudgetPaused {
+		t.Fatal("expected the loop to PAUSE when the safety budget is exceeded")
+	}
+	// With MaxToolCalls=1 the loop must stop after the first stage — it must
+	// never continue to the subsequent stages of the pipeline.
+	if len(res.Stages) >= 9 {
+		t.Fatalf("expected the loop to stop early after the budget was exceeded, got %d stages", len(res.Stages))
+	}
+}

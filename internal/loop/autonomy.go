@@ -39,10 +39,49 @@ func (a Autonomy) String() string {
 	return "L" + strconv.Itoa(int(a))
 }
 
+// L5ProofRequirement names a capability that must be proven before L5 autonomy
+// (autonomous low-risk changes) is permitted. The spec requires: policy,
+// verification, rollback, monitoring, audit, confidence.
+type L5ProofRequirement string
+
+const (
+	ProofPolicy       L5ProofRequirement = "policy"       // governance policy evaluated and passing
+	ProofVerification L5ProofRequirement = "verification" // verification suite passing
+	ProofRollback     L5ProofRequirement = "rollback"     // rollback path available and tested
+	ProofMonitoring   L5ProofRequirement = "monitoring"   // production monitoring in place
+	ProofAudit        L5ProofRequirement = "audit"        // audit trail active
+	ProofConfidence   L5ProofRequirement = "confidence"   // model/agent confidence above threshold
+)
+
+// L5Proofs is the set of proofs that must all hold before L5 autonomy is
+// exercised. Callers populate it with the outcomes of each proof check.
+type L5Proofs map[L5ProofRequirement]bool
+
+// Satisfied reports whether every required proof has been provided and is true.
+// A nil or empty map is NOT satisfied — L5 is fail-closed until every proof is
+// explicitly confirmed.
+func (p L5Proofs) Satisfied() bool {
+	if len(p) == 0 {
+		return false
+	}
+	for _, req := range []L5ProofRequirement{ProofPolicy, ProofVerification, ProofRollback, ProofMonitoring, ProofAudit, ProofConfidence} {
+		if !p[req] {
+			return false
+		}
+	}
+	return true
+}
+
+// RequiredL5Proofs returns the ordered list of proofs L5 autonomy demands.
+func RequiredL5Proofs() []L5ProofRequirement {
+	return []L5ProofRequirement{ProofPolicy, ProofVerification, ProofRollback, ProofMonitoring, ProofAudit, ProofConfidence}
+}
+
 // AllowsStage reports whether an autonomy level permits the given loop stage.
 // Read-only stages (remember, verify, observe) are always allowed; write/act
 // stages are unlocked at their assigned level (plan/learn ≥ L1, code ≥ L2,
-// deploy/protect ≥ L4).
+// deploy/protect ≥ L4). L5 is additionally gated by L5Proofs — see
+// AllowsStageWithProofs.
 func (a Autonomy) AllowsStage(stage string) bool {
 	switch stage {
 	case stagePlan, stageLearn:
@@ -55,6 +94,25 @@ func (a Autonomy) AllowsStage(stage string) bool {
 		return true // read-only memory recall
 	default: // intent, verify, observe — read-only
 		return true
+	}
+}
+
+// AllowsStageWithProofs is like AllowsStage but enforces the L5 proof gate:
+// at L5, write/act stages (code, deploy, protect) are only permitted when the
+// supplied proofs are all satisfied. Read-only stages (intent, remember,
+// verify, observe) are never gated by proofs — L5 may always analyze.
+// A nil proofs map fails closed (write stages denied) until every proof is
+// explicitly confirmed.
+func (a Autonomy) AllowsStageWithProofs(stage string, proofs L5Proofs) bool {
+	if a < L5 {
+		return a.AllowsStage(stage)
+	}
+	// L5: gate write/act stages on proofs; read-only stages always allowed.
+	switch stage {
+	case stageCode, stageDeploy, stageProtect:
+		return proofs.Satisfied()
+	default:
+		return a.AllowsStage(stage)
 	}
 }
 

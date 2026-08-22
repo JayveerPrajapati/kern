@@ -44,9 +44,10 @@ Usage:
   kern diff [--session ID]                        recent before/after entries
   kern export --csv                               export stats to CSV
   kern tokens [--bpe] "<text>"                    token count (estimator or exact BPE)
-  kern setup [--root DIR] [--agents mcp,opencode,claude] [--detect]   wire kern into agents (idempotent)
+  kern setup [--root DIR] [--agents mcp,opencode,claude] [--detect] [--global]   wire kern into agents (idempotent); --global also writes kern-first instructions to global agent config (~/AGENTS.md, ~/.claude/CLAUDE.md, ~/.config/opencode/plugins/)
   kern setup --check                                    show wiring status
   kern setup --detect                                   auto-detect present agents and wire only those
+  kern setup --global                                   wire kern-first instructions globally for all known agents
   kern buddy [root]                               session onboarding digest for any agent
   kern prompt <template> [--file PATH] [--task TEXT]   fine-tuned prompt template
   kern prompt list                                list templates
@@ -161,6 +162,7 @@ type flags struct {
 	level          string
 	check          bool
 	detect         bool
+	global         bool
 	apply          bool
 	agents         string
 	file           string
@@ -297,6 +299,8 @@ func parseFlags(args []string) (flags, []string, error) {
 			f.check = true
 		case "--detect":
 			f.detect = true
+		case "--global":
+			f.global = true
 		case "--apply":
 			f.apply = true
 		case "--agents":
@@ -630,6 +634,9 @@ func main() {
 
 	case "incident":
 		runIncident(rest)
+
+	case "run":
+		runRun(rest)
 
 	case "what-if", "simulate":
 		runWhatIf(cmd, rest)

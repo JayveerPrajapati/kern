@@ -45,6 +45,36 @@ func RenderText(pkt domain.ContextPacket) string {
 	b.WriteString("\nPotential risk:\n")
 	fmt.Fprintf(&b, "%s\n", level)
 
+	// Ownership: who is responsible for the changed scope. The packet does not
+	// yet carry an ownership record, so this surfaces the section and falls
+	// back to "(not available)" until ownership data is wired in.
+	b.WriteString("\nOwnership:\n")
+	if owner := ownershipOf(pkt); owner != "" {
+		fmt.Fprintf(&b, "%s\n", owner)
+	} else {
+		b.WriteString("(not available)\n")
+	}
+
+	// Confidence: how confident the analysis is. No confidence score is
+	// recorded on the packet yet, so render the section with the fallback.
+	b.WriteString("\nConfidence:\n")
+	if conf, ok := confidenceOf(pkt); ok {
+		fmt.Fprintf(&b, "%.2f\n", conf)
+	} else {
+		b.WriteString("(not assessed)\n")
+	}
+
+	// Evidence: runtime/production evidence surfaced from the packet. Renders
+	// each evidence item, or "(none)" when the packet has none.
+	b.WriteString("\nEvidence:\n")
+	if len(pkt.RuntimeEvidence) > 0 {
+		for _, ev := range pkt.RuntimeEvidence {
+			fmt.Fprintf(&b, "- %s\n", ev.Content)
+		}
+	} else {
+		b.WriteString("(none)\n")
+	}
+
 	// Required validation: verification steps derived from the analysis.
 	b.WriteString("\nRequired validation:\n")
 	if len(pkt.RequiredValidation) > 0 {
@@ -90,6 +120,22 @@ func riskLevelOf(pkt domain.ContextPacket) domain.RiskLevel {
 		}
 	}
 	return level
+}
+
+// ownershipOf returns a human-readable ownership label for the packet's scope,
+// or "" when no ownership data is available. The ContextPacket does not yet
+// carry ownership info, so this currently always returns ""; the section still
+// renders with the "(not available)" fallback so consumers always see it.
+func ownershipOf(pkt domain.ContextPacket) string {
+	return ""
+}
+
+// confidenceOf returns the analysis confidence score (0..1) if one is recorded
+// on the packet, and whether it is available. The packet does not yet carry an
+// aggregate confidence score, so this reports no score (ok=false); the section
+// still renders with the "(not assessed)" fallback.
+func confidenceOf(pkt domain.ContextPacket) (float64, bool) {
+	return 0, false
 }
 
 // rank returns a comparable numeric rank for a risk level.

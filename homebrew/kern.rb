@@ -56,4 +56,21 @@ class Kern < Formula
     assert_match /kern v?\d+\./, shell_output("#{bin}/kern version")
     assert_predicate bin/"kern-mcp", :exist?
   end
+
+  def caveats
+    <<~EOS
+      kern is installed! To wire it into your AI agents:
+
+        kern setup --global
+
+      This writes the kern-first policy to ~/AGENTS.md, ~/.claude/CLAUDE.md,
+      and installs the opencode plugin globally — so agents in ANY project
+      use kern tools (not just the project where you run setup).
+
+      To wire a specific project, run from its root:
+        kern setup --detect
+
+      Restart your agent (opencode reload / claude restart) after wiring.
+    EOS
+  end
 end

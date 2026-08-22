@@ -89,6 +89,10 @@ var validTransitions = map[domain.TaskState][]domain.TaskState{
 	domain.TaskPRCreated:       {domain.TaskDeploying, domain.TaskCompleted, domain.TaskFailed, domain.TaskRolledBack},
 	domain.TaskDeploying:       {domain.TaskObserving, domain.TaskFailed, domain.TaskBlocked, domain.TaskRolledBack},
 	domain.TaskObserving:       {domain.TaskCompleted, domain.TaskFailed, domain.TaskBlocked, domain.TaskRolledBack},
+	// Recoverable states: Retry reopens FAILED → ANALYZING; Resume reopens
+	// BLOCKED → PriorState (or any valid runnable state).
+	domain.TaskFailed:  {domain.TaskAnalyzing},
+	domain.TaskBlocked: {domain.TaskAnalyzing, domain.TaskPlanning, domain.TaskExecuting, domain.TaskVerifying, domain.TaskCompleted, domain.TaskFailed, domain.TaskCancelled},
 }
 
 // NewTask creates a new task with a generated ID, starting in the CREATED state.
@@ -162,4 +166,104 @@ func (t *Task) Transition(next domain.TaskState) error {
 func (t *Task) AddStep(step Step) {
 	step.Index = len(t.Steps) + 1
 	t.Steps = append(t.Steps, step)
+}
+
+// Cancel transitions the task to CANCELLED with a reason. Fails if the task
+// is already in a truly-terminal state (COMPLETED, CANCELLED, REJECTED,
+// ROLLED_BACK) or if the current state does not legally transition to
+// CANCELLED.
+func (t *Task) Cancel(reason string) error {
+	if t.IsTerminal() {
+		return fmt.Errorf("task %s: already in terminal state %s; cannot cancel", t.ID, t.State)
+	}
+	if err := t.Transition(domain.TaskCancelled); err != nil {
+		return err
+	}
+	if reason != "" {
+		t.Output = reason
+	}
+	return nil
+}
+
+// Timeout transitions the task to FAILED, indicating it exceeded a deadline.
+// Fails if already terminal.
+func (t *Task) Timeout() error {
+	if t.IsTerminal() {
+		return fmt.Errorf("task %s: already in terminal state %s; cannot timeout", t.ID, t.State)
+	}
+	if err := t.Transition(domain.TaskFailed); err != nil {
+		return err
+	}
+	t.Output = "task timed out"
+	return nil
+}
+
+// Block transitions the task to BLOCKED, recording its PriorState so Resume
+// can return to it. Fails if already terminal.
+func (t *Task) Block(reason string) error {
+	if t.IsTerminal() {
+		return fmt.Errorf("task %s: already in terminal state %s; cannot block", t.ID, t.State)
+	}
+	prior := t.State
+	if err := t.Transition(domain.TaskBlocked); err != nil {
+		return err
+	}
+	t.PriorState = prior
+	if reason != "" {
+		t.Output = reason
+	}
+	return nil
+}
+
+// Resume transitions a BLOCKED task back to its PriorState (or ANALYZING if
+// PriorState is empty). Idempotent: if the task is already non-terminal and
+// not BLOCKED, Resume is a no-op. Fails if the task is truly-terminal.
+func (t *Task) Resume() error {
+	if t.IsTerminal() {
+		return fmt.Errorf("task %s: already in terminal state %s; cannot resume", t.ID, t.State)
+	}
+	if t.State != domain.TaskBlocked {
+		return nil // idempotent: already running, nothing to resume
+	}
+	target := t.PriorState
+	if target == "" || target == domain.TaskBlocked {
+		target = domain.TaskAnalyzing
+	}
+	return t.Transition(target)
+}
+
+// Retry reopens a FAILED task back to ANALYZING for re-execution. Idempotent:
+// if the task is already non-terminal, Retry is a no-op. Fails if the task is
+// truly-terminal (COMPLETED, CANCELLED, REJECTED, ROLLED_BACK).
+func (t *Task) Retry() error {
+	if t.IsTerminal() {
+		return fmt.Errorf("task %s: already in terminal state %s; cannot retry", t.ID, t.State)
+	}
+	if t.State != domain.TaskFailed {
+		return nil // idempotent: already running, nothing to retry
+	}
+	return t.Transition(domain.TaskAnalyzing)
+}
+
+// Rollback transitions a PR_CREATED / DEPLOYING / OBSERVING task to
+// ROLLED_BACK with a reason. Fails if the current state does not legally
+// transition to ROLLED_BACK.
+func (t *Task) Rollback(reason string) error {
+	if err := t.Transition(domain.TaskRolledBack); err != nil {
+		return err
+	}
+	if reason != "" {
+		t.Output = reason
+	}
+	return nil
+}
+
+// HumanTakeover blocks the task and binds it to a human agent. It records the
+// prior state so the task can be resumed after human intervention.
+func (t *Task) HumanTakeover(agentID string) error {
+	if err := t.Block("human takeover"); err != nil {
+		return err
+	}
+	t.AgentID = agentID
+	return nil
 }

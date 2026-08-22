@@ -56,10 +56,9 @@ func runAnalyze(cmd string, rest []string) {
 			fatal("%v", err)
 		}
 		fmt.Println("ANALYSIS for: " + change)
-		fmt.Print(text)
-		fmt.Printf("\n[task: %s — state: %s]\n", t.ID, t.State)
-		return
-	}
+	fmt.Print(text)
+	fmt.Printf("\n[task: %s — state: %s]\n", t.ID, t.State)
+}
 	if cmd == "plan" {
 		// Stateless plan path: run analyze then assemble a plan inline.
 		pkt, _, err := p.Analyze(change)
@@ -591,4 +590,41 @@ func runModernize(rest []string) {
 	}
 	fmt.Print(text)
 	fmt.Printf("\n[task: %s — state: %s]\n", t.ID, t.State)
+}
+
+// runRun implements `kern run <intent>` — the kern_run entry point (Strict
+// Plan Phase 6). It compiles the intent, selects the workflow + capabilities,
+// creates a Task, and prints the run result.
+func runRun(rest []string) {
+	f, args, err := parseFlags(rest)
+	if err != nil {
+		fatalUsage("flags: %v", err)
+	}
+	root := f.root
+	if root == "" {
+		root = "."
+	}
+	if len(args) < 1 || args[0] == "" {
+		fatalUsage("usage: kern run <intent> [--root ROOT]")
+	}
+	intent := args[0]
+	p, err := app.New(root)
+	if err != nil {
+		fatal("%v", err)
+	}
+	ts := app.NewTaskService(p, eventbus.New()).WithPRProvider(app.AutoPRProvider())
+	result, err := ts.Run(intent)
+	if err != nil {
+		fatal("%v", err)
+	}
+	fmt.Printf("RUN for: %s\n", intent)
+	fmt.Printf("  task:      %s\n", result.TaskID)
+	fmt.Printf("  intent:    %s\n", result.Intent.Type)
+	fmt.Printf("  workflow:  %s\n", result.Workflow)
+	fmt.Printf("  target:    %s\n", result.Intent.Target)
+	fmt.Printf("  risk:      %s (approval: %s)\n", result.Risk.Level, result.ApprovalState)
+	fmt.Printf("  caps:      %s\n", strings.Join(result.Capabilities, ", "))
+	fmt.Printf("  tools:     %s\n", strings.Join(result.Tools, ", "))
+	fmt.Printf("  agents:    %s\n", strings.Join(result.Agents, ", "))
+	fmt.Printf("  next:      %s\n", result.NextAction)
 }

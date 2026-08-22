@@ -49,6 +49,20 @@ func runSetup(rest []string) {
 		}
 		fmt.Printf("[%s] %-32s %s\n", mark, s.Agent, s.Note)
 	}
+	if f.global {
+		globalAgents := agents
+		if len(globalAgents) == 0 && f.detect {
+			globalAgents = detected
+		}
+		for _, s := range setup.WireGlobal(globalAgents) {
+			mark := "ok"
+			if !s.Installed {
+				mark = "!!"
+				failed++
+			}
+			fmt.Printf("[%s] %-32s %s\n", mark, s.Agent, s.Note)
+		}
+	}
 	if len(f.agents) == 0 && !f.detect {
 		fmt.Println("\nWired all agents. Use --detect to wire only detected agents, or --agents to target specific ones.")
 	} else if f.detect && len(f.agents) == 0 {

@@ -107,3 +107,49 @@ func TestRiskLevelOfHighest(t *testing.T) {
 		t.Errorf("riskLevelOf = %v, want HIGH", got)
 	}
 }
+
+func TestRenderIncludesOwnershipConfidenceEvidence(t *testing.T) {
+	// Case 1: no ownership/confidence/evidence data present. The sections must
+	// still appear with their "(not available)" / "(not assessed)" / "(none)"
+	// fallbacks.
+	out := RenderText(buildPacket())
+	for _, want := range []string{"Ownership", "Confidence", "Evidence"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("RenderText missing %q section, got:\n%s", want, out)
+		}
+	}
+	for _, want := range []string{
+		"Ownership:\n(not available)",
+		"Confidence:\n(not assessed)",
+		"Evidence:\n(none)",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("RenderText missing fallback %q, got:\n%s", want, out)
+		}
+	}
+
+	// Case 2: evidence data present. The Evidence section must surface each
+	// item's content instead of "(none)".
+	pkt := buildPacket()
+	pkt.RuntimeEvidence = []domain.Evidence{
+		{Type: domain.EvidenceRuntime, Source: "metrics", Content: "spike observed after deploy v1.2.0"},
+		{Type: domain.EvidenceRuntime, Source: "logs", Content: "timeout in Foo handler"},
+	}
+	out = RenderText(pkt)
+	for _, want := range []string{"Ownership", "Confidence", "Evidence"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("RenderText missing %q section, got:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "Evidence:\n(none)") {
+		t.Errorf("RenderText should not show '(none)' when evidence is present, got:\n%s", out)
+	}
+	for _, want := range []string{
+		"spike observed after deploy v1.2.0",
+		"timeout in Foo handler",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("RenderText missing evidence content %q, got:\n%s", want, out)
+		}
+	}
+}
