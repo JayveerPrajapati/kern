@@ -8,37 +8,76 @@ package setup
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 )
 
-// Bin returns the absolute path to the kern-mcp binary that ships next to the
-// running executable, falling back to the bare "kern-mcp" command.
-func Bin() string {
-	exe, err := os.Executable()
-	if err != nil {
-		return "kern-mcp"
-	}
-	abs := filepath.Join(filepath.Dir(exe), "kern-mcp")
-	if _, err := os.Stat(abs); err == nil {
-		return abs
+// mcpName / cliName return the platform-appropriate binary file names. On
+// Windows the release binaries are kern-mcp.exe / kern.exe; everywhere else
+// they are extensionless. setup resolves sibling and PATH paths with these so a
+// Windows install wires the correct .exe into agent configs instead of a bare
+// name that the OS cannot resolve.
+func mcpName() string {
+	if runtime.GOOS == "windows" {
+		return "kern-mcp.exe"
 	}
 	return "kern-mcp"
 }
 
-// CLIBin returns the absolute path to the kern CLI binary (the sibling of
-// kern-mcp), used by agent hook commands. Falls back to the bare "kern"
-// command when the sibling is not found.
-func CLIBin() string {
+func cliName() string {
+	if runtime.GOOS == "windows" {
+		return "kern.exe"
+	}
+	return "kern"
+}
+
+// Bin returns the absolute path to the kern-mcp binary that ships next to the
+// running executable, falling back to the bare command name (with the platform
+// extension, e.g. kern-mcp.exe on Windows).
+func Bin() string {
 	exe, err := os.Executable()
 	if err != nil {
-		return "kern"
+		return mcpName()
 	}
-	abs := filepath.Join(filepath.Dir(exe), "kern")
+	abs := filepath.Join(filepath.Dir(exe), mcpName())
 	if _, err := os.Stat(abs); err == nil {
 		return abs
 	}
-	return "kern"
+	return mcpName()
+}
+
+// CLIBin returns the absolute path to the kern CLI binary (the sibling of
+// kern-mcp), used by agent hook commands. Falls back to the bare command name
+// (with the platform extension, e.g. kern.exe on Windows) when the sibling is
+// not found.
+func CLIBin() string {
+	exe, err := os.Executable()
+	if err != nil {
+		return cliName()
+	}
+	abs := filepath.Join(filepath.Dir(exe), cliName())
+	if _, err := os.Stat(abs); err == nil {
+		return abs
+	}
+	return cliName()
+}
+
+// GlobalMCPCommand returns the command that GLOBAL agent configs should run to
+// start kern-mcp. Global configs must survive an upgrade or a change of install
+// location, so an absolute os.Executable()-derived path is fragile: if the user
+// later installs a new release elsewhere (or the binary that ran setup lives in
+// a temp/versioned dir like a brew Cellar), the stale absolute path breaks the
+// agent's MCP server. Prefer a PATH-resolved bare "kern-mcp" command — the agent
+// resolves it against PATH at launch time, so it always points at whatever kern
+// is currently installed. Only fall back to the sibling absolute path when
+// kern-mcp is not on PATH at all.
+func GlobalMCPCommand() string {
+	if p, err := exec.LookPath(mcpName()); err == nil && p != "" {
+		return mcpName()
+	}
+	return Bin()
 }
 
 // adapter describes a JSON-config agent: where its config lives, which key
@@ -152,7 +191,7 @@ func Wire(root string, agents []string, detect bool) []Status {
 	if enabled("opencode") {
 		out = append(out, wireOpencode(root, bin))
 		out = append(out, wirePlugin(root))
-		out = append(out, wireGlobal(bin))
+		out = append(out, wireGlobal(GlobalMCPCommand()))
 	}
 	if enabled("claude") {
 		out = append(out, wireClaude(bin))

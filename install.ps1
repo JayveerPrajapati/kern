@@ -39,7 +39,24 @@ function Install-Go {
     Write-Host "kern: falling back to 'go install github.com/$Repo/cmd/kern@$Version'" -ForegroundColor Yellow
     go install "github.com/$Repo/cmd/kern@$Version"
     go install "github.com/$Repo/cmd/kern-mcp@$Version"
-    Write-Host "kern: installed via go install. Ensure `$(go env GOPATH)/bin is on your PATH."
+    # go install drops both binaries into $(go env GOPATH)/bin, which is often
+    # NOT on PATH and never reaches $Prefix. Copy them to the canonical install
+    # dir so the PATH step and auto-wire below see them exactly like a prebuilt
+    # install. Mirrors install.sh's go_install behaviour.
+    $goBin = Join-Path (& go env GOPATH) "bin"
+    $ok = $false
+    if ((Test-Path (Join-Path $goBin "kern.exe")) -and (Test-Path (Join-Path $goBin "kern-mcp.exe"))) {
+        New-Item -ItemType Directory -Force -Path $Prefix | Out-Null
+        Copy-Item (Join-Path $goBin "kern.exe") (Join-Path $Prefix "kern.exe") -Force
+        Copy-Item (Join-Path $goBin "kern-mcp.exe") (Join-Path $Prefix "kern-mcp.exe") -Force
+        $ok = $true
+        Write-Host "kern: copied binaries to $Prefix from $goBin." -ForegroundColor Green
+    }
+    if (-not $ok) {
+        Write-Host "kern: installed via go install, but could not find kern.exe/kern-mcp.exe in $goBin."
+        Write-Host "kern: ensure `$(go env GOPATH)/bin is on your PATH and run 'kern setup' in your project."
+    }
+    return $ok
 }
 
 function Confirm-Sha256 {
@@ -54,10 +71,42 @@ function Confirm-Sha256 {
     return $true
 }
 
+# Wire-Kern adds $Prefix to the user PATH (if needed) and auto-wires kern into
+# the detected agents (setup --detect --global) plus auto-indexes the project.
+# Extracted into a function so BOTH the prebuilt-install path and the go-install
+# fallback run it — a fallback install must wire agents exactly like a prebuilt
+# one (previously it returned early and left nothing wired / MCP broken).
+function Wire-Kern {
+    $oldPath = [Environment]::GetEnvironmentVariable("Path", "User")
+    if ($oldPath -notlike "*$Prefix*") {
+        [Environment]::SetEnvironmentVariable("Path", "$oldPath;$Prefix", "User")
+        Write-Host "note: added $Prefix to your user PATH (open a new terminal)." -ForegroundColor Yellow
+    }
+    $kern = Join-Path $Prefix "kern.exe"
+    if (-not (Test-Path $kern)) {
+        Write-Host "kern: binary not found at $kern; skipping auto-wire." -ForegroundColor Red
+        Write-Host "  run 'kern setup --detect --global' manually in your project root."
+        return
+    }
+    try {
+        $projRoot = git rev-parse --show-toplevel 2>$null
+        if (-not $projRoot) { $projRoot = (Get-Location).Path }
+        Write-Host "auto-wiring kern into detected agents in: $projRoot (and globally)"
+        Push-Location $projRoot
+        try {
+            & $kern setup --detect --root $projRoot --global
+            Write-Host "indexing project (first run may take a minute)..."
+            & $kern index $projRoot 2>$null
+        } finally {
+            Pop-Location
+        }
+    } catch { <# non-fatal: setup/index is best-effort #> }
+}
+
 $tag = Get-Version
 if (-not $tag) {
     Write-Host "kern: could not resolve release version" -ForegroundColor Yellow
-    if (Get-Command go -ErrorAction SilentlyContinue) { Install-Go; exit 0 }
+    if (Get-Command go -ErrorAction SilentlyContinue) { $goInstalled = Install-Go; if ($goInstalled) { & Wire-Kern; exit 0 } ; exit 1 }
     Write-Host "kern: install Go (https://go.dev/dl/) or download from https://github.com/$Repo/releases" -ForegroundColor Red
     exit 1
 }
@@ -67,7 +116,7 @@ $arch = $env:PROCESSOR_ARCHITECTURE
 $goarch = if ($arch -match "ARM64") { "arm64" } elseif ($arch -match "64") { "amd64" } else { "386" }
 if ($goarch -ne "amd64") {
     Write-Host "kern: no prebuilt asset for $goarch on Windows; falling back to go install." -ForegroundColor Yellow
-    if (Get-Command go -ErrorAction SilentlyContinue) { Install-Go; exit 0 }
+    if (Get-Command go -ErrorAction SilentlyContinue) { $goInstalled = Install-Go; if ($goInstalled) { & Wire-Kern; exit 0 }; exit 1 }
     Write-Host "kern: install Go or use a 64-bit Windows." -ForegroundColor Red
     exit 1
 }
@@ -84,7 +133,7 @@ try {
         Invoke-WebRequest -Uri $url -OutFile $zip -UseBasicParsing
     } catch {
         Write-Host "kern: no prebuilt asset for Windows at $tag; falling back to go install." -ForegroundColor Yellow
-        if (Get-Command go -ErrorAction SilentlyContinue) { Install-Go; exit 0 }
+        if (Get-Command go -ErrorAction SilentlyContinue) { $goInstalled = Install-Go; if ($goInstalled) { & Wire-Kern; exit 0 }; exit 1 }
         Write-Host "kern: download failed and go is not installed." -ForegroundColor Red
         exit 1
     }
@@ -95,7 +144,7 @@ try {
         $sums = Invoke-WebRequest -Uri $sumsUrl -UseBasicParsing
         $expected = ($sums.Content -split "`n" | Where-Object { $_ -match [regex]::Escape($file) }) -split "\s+" | Select-Object -First 1
         if ($expected) { if (-not (Confirm-Sha256 -Path $zip -Expected $expected)) { exit 1 } }
-    } catch { /* SHA256SUMS unavailable; skip */ }
+    } catch { <# SHA256SUMS unavailable; skip #> }
 
     New-Item -ItemType Directory -Force -Path $Prefix | Out-Null
     Expand-Archive -Path $zip -DestinationPath $tmp -Force
@@ -109,29 +158,7 @@ try {
     if ($mcp) { Copy-Item $mcp.FullName (Join-Path $Prefix "kern-mcp.exe") -Force }
 
     Write-Host "installed: $(Join-Path $Prefix 'kern.exe') ($tag)"
-    $oldPath = [Environment]::GetEnvironmentVariable("Path", "User")
-    if ($oldPath -notlike "*$Prefix*") {
-        [Environment]::SetEnvironmentVariable("Path", "$oldPath;$Prefix", "User")
-        Write-Host "note: added $Prefix to your user PATH (open a new terminal)." -ForegroundColor Yellow
-    }
-
-    $kern = Join-Path $Prefix "kern.exe"
-    # Auto-wire: detect installed agents and wire kern into them (idempotent).
-    # --global also writes kern-first policy to ~/AGENTS.md, ~/.claude/CLAUDE.md,
-    # and installs the opencode plugin globally so agents in ANY project use kern.
-    try {
-        $projRoot = git rev-parse --show-toplevel 2>$null
-        if (-not $projRoot) { $projRoot = (Get-Location).Path }
-        Write-Host "auto-wiring kern into detected agents in: $projRoot (and globally)"
-        Push-Location $projRoot
-        try {
-            & $kern setup --detect --root $projRoot --global 2>$null
-            Write-Host "indexing project (first run may take a minute)..."
-            & $kern index $projRoot 2>$null
-        } finally {
-            Pop-Location
-        }
-    } catch { /* non-fatal: setup/index is best-effort */ }
+    & Wire-Kern
 
     Write-Host "kern is ready. Run 'kern buddy' for a project onboarding digest."
 } finally {

@@ -41,12 +41,17 @@ get_version() {
 os_arch() {
   os=$(uname -s | tr '[:upper:]' '[:lower:]')
   arch=$(uname -m)
+  # Windows under Git-Bash / MSYS / Cygwin reports MINGW64_NT / MSYS_NT /
+  # CYGWIN_NT; map it to "windows". Only amd64 has a prebuilt asset today.
+  case "$os" in
+    mingw*|msys*|cygwin*) os="windows" ;;
+  esac
   case "$arch" in
     x86_64|amd64) arch="amd64" ;;
     aarch64|arm64) arch="arm64" ;;
     *) return 1 ;;
   esac
-  [ "$os" = "linux" ] || [ "$os" = "darwin" ] || return 1
+  [ "$os" = "linux" ] || [ "$os" = "darwin" ] || [ "$os" = "windows" ] || return 1
   echo "${os}-${arch}"
 }
 
@@ -70,9 +75,65 @@ go_install() {
   echo "kern: falling back to 'go install github.com/${REPO}/cmd/kern@${VERSION}'"
   go install "github.com/${REPO}/cmd/kern@${VERSION}"
   go install "github.com/${REPO}/cmd/kern-mcp@${VERSION}"
-  # go install places both into the go bin dir; report it.
-  echo "kern: installed via go install. Ensure \$(go env GOPATH)/bin is on your PATH."
+  # go install places both into $(go env GOPATH)/bin, which is frequently NOT
+  # on PATH and NOT the requested PREFIX. Copy both into PREFIX so the rest of
+  # the install (PATH check, auto-wire, auto-index) sees them at the canonical
+  # location — otherwise a go_install fallback silently never wires into agents.
+  gobin="$(go env GOPATH)/bin"
+  if [ -f "$gobin/kern" ] && [ -f "$gobin/kern-mcp" ]; then
+    mkdir -p "$PREFIX"
+    cp "$gobin/kern" "$PREFIX/kern"
+    cp "$gobin/kern-mcp" "$PREFIX/kern-mcp"
+    chmod +x "$PREFIX/kern" "$PREFIX/kern-mcp"
+    # macOS quarantine/signing: same treatment as the prebuilt path so a
+    # go-installed kern-mcp is also runnable by agents on first launch.
+    if [ "$(uname -s)" = "Darwin" ]; then
+      if command -v xattr >/dev/null 2>&1; then
+        xattr -dr com.apple.quarantine "$PREFIX/kern" "$PREFIX/kern-mcp" 2>/dev/null || true
+      fi
+      if command -v codesign >/dev/null 2>&1; then
+        codesign --force --sign - "$PREFIX/kern" "$PREFIX/kern-mcp" 2>/dev/null || true
+      fi
+    fi
+    echo "kern: copied binaries to $PREFIX (go install output was in $gobin)."
+  else
+    echo "kern: installed via go install, but could not find binaries in $gobin."
+    echo "kern: ensure \$(go env GOPATH)/bin is on your PATH and run 'kern setup' in your project."
+  fi
   echo "kern: next step: run 'kern setup' in your project to wire kern into your agents."
+  return 0
+}
+
+# wire() auto-detects installed agents and wires kern's MCP server + kern-first
+# rules into each, then auto-indexes the project. It runs `kern setup --detect
+# --global` (see that command's docs for the full behavior). It is idempotent —
+# re-running never duplicates entries. Called from BOTH the prebuilt-install
+# path and the go_install fallback so a fallback install still wires agents
+# (previously go_install returned without ever running setup, so nothing was
+# wired and MCP was broken).
+wire() {
+  local kern_bin="$1"
+  local proj_root
+  if [ ! -x "$kern_bin" ]; then
+    echo "kern: binary not executable at $kern_bin; skipping auto-wire." >&2
+    echo "  run 'kern setup --detect --global' manually in your project root." >&2
+    return 0
+  fi
+  proj_root="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+  echo "auto-wiring kern into detected agents in: $proj_root (and globally)"
+  if "$kern_bin" setup --detect --root "$proj_root" --global 2>&1; then
+    echo "kern: auto-wiring complete. Run 'kern setup --check' to verify."
+  else
+    echo "kern: auto-wiring skipped (no agents detected or setup failed)."
+    echo "  run 'kern setup --detect --global' manually in your project root."
+  fi
+  echo
+  # Auto-index the project so graph commands (walk, path, hubs, ...) work
+  # immediately without a cold start on first use.
+  echo "indexing project (first run may take a minute)..."
+  "$kern_bin" index "$proj_root" 2>&1 || true
+  echo
+  return 0
 }
 
 # verify checks the downloaded tarball against the release's SHA256SUMS asset.
@@ -105,11 +166,18 @@ verify() {
 }
 
 main() {
-  platform="$(os_arch)" || { echo "kern: unsupported platform $(uname -s)/$(uname -m)"; go_install || exit 1; exit 0; }
+  platform="$(os_arch)" || { echo "kern: unsupported platform $(uname -s)/$(uname -m)"; go_install || exit 1; wire "$PREFIX/kern"; exit 0; }
   tag="$(get_version)"
-  [ -z "$tag" ] && { echo "kern: could not resolve release version"; go_install || exit 1; exit 0; }
+  [ -z "$tag" ] && { echo "kern: could not resolve release version"; go_install || exit 1; wire "$PREFIX/kern"; exit 0; }
 
-  file="kern-${platform}.tar.gz"
+  # Windows ships a .zip (kern-windows-amd64.zip); everything else a .tar.gz.
+  if [ "${platform%-*}" = "windows" ]; then
+    file="kern-${platform}.zip"
+    exe=".exe"
+  else
+    file="kern-${platform}.tar.gz"
+    exe=""
+  fi
   url="https://github.com/${REPO}/releases/download/${tag}/${file}"
   tmpdir="$(mktemp -d)"
   trap 'rm -rf "$tmpdir"' EXIT
@@ -118,6 +186,7 @@ main() {
   if ! download "$url" "$tmpdir/${file}"; then
     echo "kern: no prebuilt asset for ${platform} at ${tag}" >&2
     go_install || exit 1
+    wire "$PREFIX/kern"
     exit 0
   fi
   if ! verify "$file" "$tmpdir" "$tag"; then
@@ -126,10 +195,27 @@ main() {
   fi
 
   mkdir -p "$PREFIX"
-  tar -xzf "$tmpdir/${file}" -C "$tmpdir"
-  cp "$tmpdir/kern-${platform}/kern" "$PREFIX/kern"
-  cp "$tmpdir/kern-${platform}/kern-mcp" "$PREFIX/kern-mcp"
-  chmod +x "$PREFIX/kern" "$PREFIX/kern-mcp"
+  if [ "${platform%-*}" = "windows" ]; then
+    # Windows prebuilt is a zip; extract with unzip, else PowerShell (Git-Bash
+    # usually has unzip; fall back to pwsh/powershell Expand-Archive).
+    if command -v unzip >/dev/null 2>&1; then
+      (cd "$tmpdir" && unzip -q "$file")
+    elif command -v powershell >/dev/null 2>&1; then
+      powershell -NoProfile -Command "Expand-Archive -LiteralPath '$tmpdir/$file' -DestinationPath '$tmpdir' -Force"
+    elif command -v pwsh >/dev/null 2>&1; then
+      pwsh -NoProfile -Command "Expand-Archive -LiteralPath '$tmpdir/$file' -DestinationPath '$tmpdir' -Force"
+    else
+      echo "kern: no unzip/powershell available to extract $file" >&2
+      go_install || exit 1
+      wire "$PREFIX/kern"
+      exit 0
+    fi
+  else
+    tar -xzf "$tmpdir/${file}" -C "$tmpdir"
+  fi
+  cp "$tmpdir/kern-${platform}/kern${exe}" "$PREFIX/kern${exe}"
+  cp "$tmpdir/kern-${platform}/kern-mcp${exe}" "$PREFIX/kern-mcp${exe}"
+  chmod +x "$PREFIX/kern${exe}" "$PREFIX/kern-mcp${exe}"
 
   # macOS Gatekeeper kills unsigned binaries with SIGKILL (exit 137) even
   # though os.Stat sees the file; re-sign with an ad-hoc signature so the
@@ -137,44 +223,72 @@ main() {
   if [ "${platform%-*}" = "darwin" ] && command -v codesign >/dev/null 2>&1; then
     codesign --force --sign - "$PREFIX/kern" "$PREFIX/kern-mcp"
   fi
+  # macOS quarantine: the downloaded tarball carries the com.apple.quarantine
+  # xattr, which Gatekeeper propagates onto the extracted copies. codesign alone
+  # does NOT clear it, so the freshly-installed kern-mcp would still be killed
+  # on first agent launch (exit 137). Removing the xattr is required for a
+  # release install to actually run. Best-effort (xattr may not exist on all
+  # platforms / filesystems).
+  if [ "${platform%-*}" = "darwin" ] && command -v xattr >/dev/null 2>&1; then
+    xattr -dr com.apple.quarantine "$PREFIX/kern" "$PREFIX/kern-mcp" 2>/dev/null || true
+  fi
 
-  echo "installed: $PREFIX/kern ($tag)"
-  case ":$PATH:" in
-    *":$PREFIX:"*) ;;
-    *) echo "note: add $PREFIX to your PATH:  export PATH=\"$PREFIX:\$PATH\"" ;;
-  esac
+  echo "installed: $PREFIX/kern${exe} ($tag)"
+
+  # Ensure the install dir is on PATH so `kern` / `kern-mcp` run from anywhere
+  # and agents auto-launch the MCP server by bare name. Best-effort, idempotent:
+  # only appends the export line once per shell rc, never duplicates, and honors
+  # a per-run opt-out (KERN_NO_PATH=1).
+  if [ "${KERN_NO_PATH:-0}" != "1" ]; then
+    ensure_path "$PREFIX"
+  else
+    case ":$PATH:" in
+      *":$PREFIX:"*) ;;
+      *) echo "note: add $PREFIX to your PATH:  export PATH=\"$PREFIX:\$PATH\"" ;;
+    esac
+  fi
   echo
 
-  # Auto-wire: detect installed agents and wire kern into them automatically.
-  # This runs `kern setup --detect --global` which finds present agents (opencode,
-  # claude, cursor, vscode, ...) and wires kern's MCP server + kern-first
-  # rules into each. --global also writes the kern-first policy to ~/AGENTS.md,
-  # ~/.claude/CLAUDE.md, and installs the opencode plugin globally so agents in
-  # ANY project use kern tools, not just this project. It is idempotent —
-  # re-running setup never duplicates entries, and global merges preserve
-  # existing content with timestamped backups. If no agents are detected, the
-  # user is told how to wire manually.
-  KERN_BIN="$PREFIX/kern"
-  if [ -x "$KERN_BIN" ]; then
-    # Detect the user's most likely project root: git toplevel of CWD, or CWD.
-    PROJ_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
-    echo "auto-wiring kern into detected agents in: $PROJ_ROOT (and globally)"
-    if "$KERN_BIN" setup --detect --root "$PROJ_ROOT" --global 2>&1; then
-      echo "kern: auto-wiring complete. Run 'kern setup --check' to verify."
-    else
-      echo "kern: auto-wiring skipped (no agents detected or setup failed)."
-      echo "  run 'kern setup --detect --global' manually in your project root."
-    fi
-    echo
-    # Auto-index the project so graph commands (walk, path, hubs, ...) work
-    # immediately without a 3-minute cold start on first use.
-    echo "indexing project (first run may take a minute)..."
-    "$KERN_BIN" index "$PROJ_ROOT" 2>&1 || true
-    echo
-  fi
+  # Auto-wire into detected agents (and auto-index the project). Extracted into
+  # the wire() helper so both the prebuilt path and the go_install fallback run
+  # it — a fallback install must wire agents exactly like a prebuilt one.
+  wire "$PREFIX/kern${exe}"
 
   echo "kern is ready. Use 'kern buddy' for a project onboarding digest."
   echo "  (run from your project root; 'kern setup --check' shows current wiring)"
+}
+
+# ensure_path appends `export PATH="$PREFIX:$PATH"` to the user's shell rc files
+# (idempotently — one line per rc, only when the dir is not already present).
+# This makes `kern` / `kern-mcp` reachable from any directory and lets agents
+# resolve the global MCP server by name after an upgrade. Best-effort: files
+# that cannot be written are skipped with a note, never fatal.
+ensure_path() {
+  prefix="$1"
+  case ":$PATH:" in
+    *":$prefix:"*) return 0 ;; # already on PATH for this shell
+  esac
+  line="export PATH=\"$prefix:\$PATH\""
+  marker="# added by kern installer"
+  for rc in "$HOME/.profile" "$HOME/.bashrc" "$HOME/.zshrc"; do
+    [ -f "$rc" ] || [ "$rc" = "$HOME/.profile" ] || continue
+    if [ ! -f "$rc" ]; then
+      # create .profile if it does not exist
+      if ! touch "$rc" 2>/dev/null; then continue; fi
+    fi
+    if grep -qF "PATH=\"$prefix" "$rc" 2>/dev/null; then
+      echo "kern: $prefix already on PATH in $rc (skipped)"
+      continue
+    fi
+    {
+      printf '\n%s\n' "$marker"
+      printf '%s\n' "$line"
+    } >> "$rc" 2>/dev/null && {
+      echo "kern: added $prefix to PATH in $rc (open a new shell to pick it up)"
+      export PATH="$prefix:$PATH"
+    } || echo "kern: could not write $rc (add '$line' to your PATH manually)" >&2
+  done
+  return 0
 }
 
 main
