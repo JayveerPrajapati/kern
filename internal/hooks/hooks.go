@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/JayveerPrajapati/kern/internal/memory"
@@ -56,7 +57,12 @@ func kernBinPath() string {
 	if err != nil {
 		return "kern"
 	}
-	abs := filepath.Join(filepath.Dir(exe), "kern")
+	// On Windows the binary is kern.exe; everywhere else it is extensionless.
+	name := "kern"
+	if runtime.GOOS == "windows" {
+		name = "kern.exe"
+	}
+	abs := filepath.Join(filepath.Dir(exe), name)
 	if _, err := os.Stat(abs); err == nil {
 		return abs
 	}

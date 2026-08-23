@@ -192,3 +192,22 @@ func TestWireGlobalSkipsWhenNotInstalled(t *testing.T) {
 		t.Fatalf("claude file should not have been created when not installed")
 	}
 }
+
+// TestGlobalMCPCommandPrefersPATH verifies that the global MCP command resolves
+// to a stable PATH-based "kern-mcp" rather than a volatile absolute path, so a
+// global agent config survives an upgrade or a change of install location. When
+// kern-mcp is resolvable on PATH the command must be the bare "kern-mcp" (the
+// agent re-resolves it at launch against whatever kern is currently installed),
+// and it must never be an os.Executable()-derived temp/versioned path.
+func TestGlobalMCPCommandPrefersPATH(t *testing.T) {
+	cmd := GlobalMCPCommand()
+	if cmd == "" {
+		t.Fatal("GlobalMCPCommand returned empty")
+	}
+	if strings.Contains(cmd, string(filepath.Separator)) {
+		t.Fatalf("GlobalMCPCommand returned an absolute path %q; global configs must use a PATH-resolved bare command so upgrades/relocations don't break MCP", cmd)
+	}
+	if cmd != "kern-mcp" {
+		t.Fatalf("GlobalMCPCommand = %q, want bare \"kern-mcp\" (PATH-resolved at agent launch)", cmd)
+	}
+}
