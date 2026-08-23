@@ -1,0 +1,6 @@
+{
+  "rules": [
+    { "from": "payments", "to": "marketing", "action": "forbid" },
+    { "from": "*", "to": "cache", "action": "allow" }
+  ]
+}
