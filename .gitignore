@@ -42,6 +42,8 @@ index.html
 .gemini/
 .kiro/
 .kern/
+!internal/app/testdata/fixtures/user_service/.kern/
+!internal/app/testdata/fixtures/user_service/.kern/boundaries.json
 .opencode/node_modules/
 .opencode/package-lock.json
 .kern-restore-*
