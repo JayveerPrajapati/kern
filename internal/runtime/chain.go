@@ -14,7 +14,7 @@ var prRefRe = regexp.MustCompile(`(?i)(?:^|\s)(?:\(?#(\d+)\)?|\((\d+)\))`)
 // ChainLink is one step in the deep evidence chain for an alert
 // (alert -> service -> deployment -> commit -> symbol -> task/pr/agent).
 type ChainLink struct {
-	Stage string // "service","deployment","commit","symbol","task","pr","agent"
+	Stage string // "service","deployment","commit","symbol","task","pr","agent","trace","event"
 	ID    string
 }
 
@@ -23,6 +23,10 @@ type CorrelationChain struct {
 	Alert   domain.Alert
 	Service string
 	Links   []ChainLink
+	// TraceLinks tie the chain to the trace/event evidence that produced it
+	// (Phase 13.1): the correlation chain was previously detached from the
+	// raw telemetry. These make the evidence traceable.
+	TraceLinks []TraceLink
 }
 
 // CorrelateChain resolves the affected service and derives the deterministic
@@ -90,7 +94,31 @@ func (c *Correlator) CorrelateChain(a domain.Alert) CorrelationChain {
 	}
 
 	res.Links = dedupeLinks(links)
+
+	// Phase 13.1: link the chain to the trace/event evidence that produced it,
+	// so the chain is traceable back to raw telemetry.
+	res.TraceLinks = TraceEventsFromCorrelation(c.traceCorrelation(a, svc))
 	return res
+}
+
+// traceCorrelation builds a lightweight Correlation (evidence only) so the
+// chain can extract trace/event links without coupling to the full correlate
+// path.
+func (c *Correlator) traceCorrelation(a domain.Alert, svc string) *Correlation {
+	corr := &Correlation{Alert: a, AffectedService: svc}
+	from := a.OccurredAt.Add(-c.window)
+	for _, e := range c.src.Events(svc) {
+		if e.Timestamp.Before(from) || e.Timestamp.After(a.OccurredAt) {
+			continue
+		}
+		switch e.Type {
+		case EventTrace:
+			corr.TraceSpans = append(corr.TraceSpans, e)
+		case EventError:
+			corr.ErrorEvents = append(corr.ErrorEvents, e)
+		}
+	}
+	return corr
 }
 
 // dedupeLinks removes duplicate (Stage,ID) links, preserving first-seen order.

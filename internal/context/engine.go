@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/JayveerPrajapati/kern/internal/budget"
@@ -50,6 +51,17 @@ type Engine struct {
 	// (default), no budgeting is applied (backward-compatible). When >0, the
 	// packet's rendered text is fitted to this budget when it overflows.
 	maxTokens int
+
+	// freshnessScoring gates the Phase 15.5 freshness adjustments (risk-score
+	// scaling and evidence-confidence scaling). It is OFF by default so the
+	// engine's prior output is unchanged; callers opt in with
+	// WithFreshnessScoring(true) to enable it.
+	freshnessScoring bool
+
+	// nodesByIDCache caches the node ID -> node lookup, built once on first use.
+	// The graph is fixed at Engine construction, so the cache never goes stale.
+	nodesByIDOnce  sync.Once
+	nodesByIDCache map[string]domain.Node
 }
 
 // NewEngine creates a context engine with the given dependencies.
@@ -87,6 +99,16 @@ func (e *Engine) WithBus(b *eventbus.Bus) *Engine {
 // e for chaining.
 func (e *Engine) WithMaxTokens(n int) *Engine {
 	e.maxTokens = n
+	return e
+}
+
+// WithFreshnessScoring enables (or disables) the Phase 15.5 freshness scoring
+// adjustments in the assembled packet: risk scores are scaled by the freshness
+// of the runtime evidence, and claim confidence is scaled by the freshness of
+// its evidence. It is OFF by default to keep the engine's output identical to
+// prior behavior; it returns e for chaining.
+func (e *Engine) WithFreshnessScoring(enabled bool) *Engine {
+	e.freshnessScoring = enabled
 	return e
 }
 
@@ -265,10 +287,35 @@ func (e *Engine) assemble(task, scope string, roots []domain.Symbol) domain.Cont
 	// changes are scored higher and denials surface as Blocked/ApprovalRequired.
 	pkt.Risks = e.assessRisk(scope, roots)
 
-	pkt.Facts = e.buildFacts(scope, roots, pkt)
+pkt.Facts = e.buildFacts(scope, roots, pkt)
 	// Surface one evidence-backed claim per risk so the governance decision
 	// flows into the packet.
 	pkt.Facts = append(pkt.Facts, policyEvaluationClaims(pkt.Risks)...)
+
+	// Phase 15.5 freshness scoring (opt-in): when enabled, scale each risk's
+	// Score by the freshness of the packet's runtime evidence (score-only;
+	// Level and Blocked/ApprovalRequired are preserved), and scale each claim's
+	// Confidence by the freshness of its supporting evidence. This is gated by
+	// freshnessScoring (default OFF) so prior output is unchanged.
+	if e.freshnessScoring {
+		now := time.Now()
+		if len(pkt.RuntimeEvidence) > 0 {
+			for i := range pkt.Risks {
+				pkt.Risks[i] = FreshnessAdjustedRisk(pkt.Risks[i], pkt.RuntimeEvidence, now, 0)
+			}
+		}
+		for i := range pkt.Facts {
+			ev := pkt.Facts[i].Evidence
+			if len(ev) == 0 {
+				// Approximate: claims without their own evidence are scored
+				// against the packet's runtime evidence as the freshness signal.
+				ev = pkt.RuntimeEvidence
+			}
+			if pkt.Facts[i].Confidence > 0 {
+				pkt.Facts[i].Confidence = FreshnessAdjustedConfidence(pkt.Facts[i].Confidence, ev, now, 0)
+			}
+		}
+	}
 
 	pkt.RequiredValidation = e.requiredValidation(scope, roots)
 	pkt.TokenCount = e.measureTokens(pkt)
@@ -698,13 +745,17 @@ func (e *Engine) measureTokens(pkt domain.ContextPacket) int {
 	return tokenize.Count(string(b))
 }
 
-// nodesByID returns a lookup of node ID to its graph node.
+// nodesByID returns a lookup of node ID to its graph node. The result is built
+// once per Engine and cached, so repeated calls do not rebuild the map.
 func (e *Engine) nodesByID() map[string]domain.Node {
-	m := make(map[string]domain.Node, len(e.graph.Nodes))
-	for _, n := range e.graph.Nodes {
-		m[n.ID] = n
-	}
-	return m
+	e.nodesByIDOnce.Do(func() {
+		m := make(map[string]domain.Node, len(e.graph.Nodes))
+		for _, n := range e.graph.Nodes {
+			m[n.ID] = n
+		}
+		e.nodesByIDCache = m
+	})
+	return e.nodesByIDCache
 }
 
 // resolveNode finds a graph node by exact ID (FullName), simple name, or

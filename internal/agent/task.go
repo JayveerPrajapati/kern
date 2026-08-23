@@ -22,6 +22,44 @@ type Task struct {
 	Artifacts    []string // artifact paths produced
 	CreatedBy    string   // agent that created this task
 
+	// Aggregate references (Phase 1 Task Center). These are additive identity
+	// fields tying the Task to the project/workspace it operates on, who
+	// requested it, and the *ref IDs of related artifacts (memory, policy,
+	// approval, deployment, outcome). They persist through TaskStore because
+	// it JSON-marshals the whole Task.
+	Project       string // project/workspace name
+	Repository    string // repository name
+	Scope         string // task scope: "repository", "service", "package", "file", etc.
+	Requester     string // who requested (agent id or "human")
+	MemoryRef     string // pointer/object id reference to the task's memory
+	PolicyRef     string // policy evaluation id
+	ApprovalRef   string // approval id
+	DeploymentRef string // deployment id
+	OutcomeRef    string // outcome/observation id
+
+	// Plural aggregate refs (Phase 1.1 Task Center). These are additive identity
+	// fields that supplement the singular refs above with *sets* of related
+	// artifact refs and the lifecycle output ref IDs (context, impact, risk,
+	// plan, verification, PR). The existing singular fields and inline structs
+	// are kept unchanged for backward compatibility. Like the singular refs,
+	// these persist through TaskStore because it JSON-marshals the whole Task.
+	AgentRefs      []string // refs to the agents involved (distinct from singular AgentID)
+	MemoryRefs     []string // plural refs to related memory artifacts
+	ContextRef     string   // ref id of the assembled context packet
+	ImpactRef      string   // ref id of the impact report
+	RiskRef        string   // ref id of the risk assessment
+	PlanRef        string   // ref id of the implementation plan
+	VerificationRef string  // ref id of the verification result
+	PRRef          string   // ref id of the pull request
+	LearningRef    string   // ref id of the learning/lesson record produced by this task
+
+	// Retry tracking (Phase 1.5). Retry only reopens safe/idempotent actions;
+	// these fields record the attempt, reason, and previous result so the
+	// retry trail is auditable.
+	RetryCount  int    // number of retries performed
+	RetryReason string // reason for the last retry
+	LastResult  string // result (Output) before the last retry
+
 	// Structured outputs produced during execution (the agent result contract).
 	Evidence          []domain.Claim // evidence-backed claims produced by this task
 	Risks             []domain.Risk  // risks identified during this task
@@ -215,6 +253,28 @@ func (t *Task) Block(reason string) error {
 	return nil
 }
 
+// Pause transitions the task to BLOCKED, recording its PriorState so Resume
+// can return to it. It is the dedicated pause primitive (Phase 1.4): like
+// Block, it requires the task to be non-terminal. Idempotent: if the task is
+// already BLOCKED, Pause is a no-op.
+func (t *Task) Pause(reason string) error {
+	if t.IsTerminal() {
+		return fmt.Errorf("task %s: already in terminal state %s; cannot pause", t.ID, t.State)
+	}
+	if t.State == domain.TaskBlocked {
+		return nil // idempotent: already paused
+	}
+	prior := t.State
+	if err := t.Transition(domain.TaskBlocked); err != nil {
+		return err
+	}
+	t.PriorState = prior
+	if reason != "" {
+		t.Output = reason
+	}
+	return nil
+}
+
 // Resume transitions a BLOCKED task back to its PriorState (or ANALYZING if
 // PriorState is empty). Idempotent: if the task is already non-terminal and
 // not BLOCKED, Resume is a no-op. Fails if the task is truly-terminal.
@@ -236,13 +296,30 @@ func (t *Task) Resume() error {
 // if the task is already non-terminal, Retry is a no-op. Fails if the task is
 // truly-terminal (COMPLETED, CANCELLED, REJECTED, ROLLED_BACK).
 func (t *Task) Retry() error {
+	return t.RetryWithReason("retry requested")
+}
+
+// RetryWithReason reopens a FAILED task back to ANALYZING, tracking the retry
+// attempt, reason, and the previous result (LastResult) so the retry trail is
+// auditable. Idempotent: if the task is already non-terminal, it is a no-op.
+// Fails if the task is truly-terminal.
+func (t *Task) RetryWithReason(reason string) error {
 	if t.IsTerminal() {
 		return fmt.Errorf("task %s: already in terminal state %s; cannot retry", t.ID, t.State)
 	}
 	if t.State != domain.TaskFailed {
 		return nil // idempotent: already running, nothing to retry
 	}
-	return t.Transition(domain.TaskAnalyzing)
+	t.LastResult = t.Output
+	if err := t.Transition(domain.TaskAnalyzing); err != nil {
+		return err
+	}
+	t.RetryCount++
+	if reason == "" {
+		reason = "retry requested"
+	}
+	t.RetryReason = reason
+	return nil
 }
 
 // Rollback transitions a PR_CREATED / DEPLOYING / OBSERVING task to
@@ -266,4 +343,53 @@ func (t *Task) HumanTakeover(agentID string) error {
 	}
 	t.AgentID = agentID
 	return nil
+}
+
+// ReturnToAgent hands a human-takeover (BLOCKED) task back to an agent. It
+// resumes the task to its PriorState (via Resume) and reassigns AgentID to the
+// given agent. Semantics mirror Resume:
+//   - BLOCKED (paused / human-takeover): resumed to PriorState and rebound.
+//   - already running (non-BLOCKED, non-terminal): idempotent no-op.
+//   - truly-terminal: returns an error.
+func (t *Task) ReturnToAgent(agentID string) error {
+	if t.IsTerminal() {
+		return fmt.Errorf("task %s: already in terminal state %s; cannot return to agent", t.ID, t.State)
+	}
+	if t.State != domain.TaskBlocked {
+		return nil // idempotent no-op: already running, nothing to return
+	}
+	if err := t.Resume(); err != nil {
+		return err
+	}
+	t.AgentID = agentID
+	return nil
+}
+
+// Snapshot returns a compact domain.ContextSnapshot of the task for
+// resume/replay. It derives the Goal from Intent (falling back to Input) and
+// the State from the task's current state. Risks are reduced to their Level
+// string (or their String() representation if one exists).
+func (t *Task) Snapshot() domain.ContextSnapshot {
+	goal := t.Intent
+	if goal == "" {
+		goal = t.Input
+	}
+	risks := make([]string, 0, len(t.Risks))
+	for _, r := range t.Risks {
+		if s, ok := interface{}(r).(fmt.Stringer); ok {
+			risks = append(risks, s.String())
+		} else {
+			risks = append(risks, string(r.Level))
+		}
+	}
+	return domain.ContextSnapshot{
+		Goal:       goal,
+		State:      string(t.State),
+		Decisions:  []string{},
+		Constraints: []string{},
+		Files:      []string{},
+		Tests:      []string{},
+		Risks:      risks,
+		NextAction: "",
+	}
 }

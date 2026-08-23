@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Evaluation &mdash; Kern Web Console</title>
+<style>
+:root { --bg:#0f1115; --panel:#171a21; --panel2:#1c2029; --fg:#e6e8ee; --muted:#9aa3b2; --accent:#4f8cff; --border:#262b36; --good:#3fb950; --warn:#d29922; --bad:#f85149; }
+* { box-sizing:border-box; }
+body { margin:0; background:var(--bg); color:var(--fg); font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif; }
+header { padding:16px 28px; border-bottom:1px solid var(--border); background:var(--panel); display:flex; align-items:center; justify-content:space-between; gap:16px; flex-wrap:wrap; }
+header .brand h1 { margin:0; font-size:20px; }
+header .brand p { margin:4px 0 0; color:var(--muted); font-size:12px; }
+.topnav { display:flex; gap:4px; flex-wrap:wrap; }
+.topnav a { color:var(--muted); text-decoration:none; font-size:12px; padding:6px 12px; border-radius:6px; border:1px solid transparent; }
+.topnav a:hover { color:var(--fg); background:var(--panel2); }
+.topnav a.active { color:var(--accent); border-color:var(--border); background:var(--panel2); }
+main { padding:20px 28px; display:grid; grid-template-columns:repeat(auto-fit,minmax(340px,1fr)); gap:16px; }
+section.panel { background:var(--panel); border:1px solid var(--border); border-radius:8px; padding:16px; }
+section.panel h2 { margin:0 0 12px; font-size:15px; text-transform:uppercase; letter-spacing:.04em; color:var(--muted); }
+.kpi { display:grid; grid-template-columns:repeat(auto-fit,minmax(90px,1fr)); gap:10px; }
+.kpi div { background:var(--panel2); border:1px solid var(--border); border-radius:6px; padding:10px; text-align:center; }
+.kpi b { display:block; font-size:22px; }
+.kpi span { font-size:11px; color:var(--muted); }
+table { width:100%; border-collapse:collapse; font-size:12px; }
+th,td { text-align:left; padding:6px 8px; border-bottom:1px solid var(--border); vertical-align:top; }
+th { color:var(--muted); font-weight:600; }
+ul { margin:0; padding-left:18px; }
+li { margin:2px 0; }
+.muted { color:var(--muted); }
+.good { color:var(--good); }
+.warn { color:var(--warn); }
+.bad { color:var(--bad); }
+.badge { display:inline-block; padding:1px 7px; border-radius:10px; font-size:11px; background:var(--panel2); border:1px solid var(--border); }
+.cap { margin:1px 2px 1px 0; }
+.full { grid-column:1 / -1; }
+td a, a.api { color:var(--accent); text-decoration:none; }
+td a:hover, a.api:hover { text-decoration:underline; }
+.subnav { display:flex; gap:6px; flex-wrap:wrap; margin:10px 0 2px; }
+.subnav a { color:var(--accent); text-decoration:none; font-size:12px; padding:5px 12px; border-radius:6px; border:1px solid var(--border); background:var(--panel2); }
+.subnav a:hover { background:var(--panel); }
+.card { background:var(--panel2); border:1px solid var(--border); border-radius:8px; padding:14px 16px; margin:12px 0; }
+.card-head { display:flex; align-items:center; gap:10px; flex-wrap:wrap; padding-bottom:10px; border-bottom:1px solid var(--border); margin-bottom:10px; }
+.card-head a { color:var(--accent); text-decoration:none; font-weight:600; font-size:13px; }
+.card-head a:hover { text-decoration:underline; }
+.card-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:14px; }
+.card-grid h3 { margin:0 0 6px; font-size:12px; text-transform:uppercase; letter-spacing:.04em; color:var(--muted); }
+.card-grid p { margin:0; font-size:12px; }
+section.target { scroll-margin-top:16px; }
+</style>
+</head>
+<body>
+<header>
+  <div class="brand">
+    <h1>Evaluation</h1>
+    <p>Agent comparison, task replay &amp; context inspection &mdash; project root: {{.Root}}</p>
+  </div>
+  <nav class="topnav">
+    <a href="/">Dashboard</a>
+    <a href="/approvals">Approvals</a>
+    <a href="/risks">Risks</a>
+    <a href="/artifacts">Artifacts</a>
+    <a href="/audit">Audit</a>
+    <a href="/system-map">System Map</a>
+    <a href="/graph">Graph</a>
+    <a href="/memory">Memory</a>
+    <a href="/architecture">Architecture</a>
+    <a href="/incidents">Incidents</a>
+    <a href="/tasks">Tasks</a>
+    <a href="/efficiency">Efficiency</a>
+    <a href="/eval" class="active">Eval</a>
+    <a href="/agents">Agents</a>
+  </nav>
+</header>
+<main>
+  <section class="panel full">
+    <h2>Evaluation views</h2>
+    <p class="muted">Three read-only inspectors over the same task &amp; agent data: compare the specialist roster, replay a task's lifecycle, and inspect the assembled context packet for each task.</p>
+    <nav class="subnav">
+      <a href="#agents">Agent comparison</a>
+      <a href="#replay">Task replay</a>
+      <a href="#context">Context inspection</a>
+    </nav>
+  </section>
+
+  <section class="panel full target" id="agents">
+    <h2>Agent comparison</h2>
+    <div class="kpi">
+      <div><b>{{.Agents.SpecialistCount}}</b><span>specialists</span></div>
+      <div><b>{{.Agents.RoleCount}}</b><span>roles</span></div>
+      <div><b>{{.Agents.CapabilityCount}}</b><span>capabilities</span></div>
+    </div>
+    {{if .Agents.Specialists}}
+    <table style="margin-top:12px">
+      <tr><th>ID</th><th>Role</th><th>Capabilities</th></tr>
+      {{range .Agents.Specialists}}<tr>
+        <td><span class="badge">{{.ID}}</span></td>
+        <td>{{.Role}}</td>
+        <td>{{range .Capabilities}}<span class="badge cap">{{.}}</span> {{end}}</td>
+      </tr>{{end}}
+    </table>
+    {{else}}<p class="muted">No specialists registered.</p>{{end}}
+  </section>
+
+  <section class="panel full target" id="replay">
+    <h2>Task replay</h2>
+    <div class="kpi">
+      <div><b>{{.Tasks.TaskCount}}</b><span>tasks</span></div>
+      <div><b>{{.Tasks.CompletedCount}}</b><span>completed</span></div>
+      <div><b>{{.Tasks.InProgressCount}}</b><span>in progress</span></div>
+      <div><b>{{.Tasks.FailedCount}}</b><span>failed</span></div>
+    </div>
+    <p class="muted" style="margin-top:12px">Each task's lifecycle at a glance. Open a task's detail page to step through its full execution history.</p>
+    {{if .Tasks.Tasks}}
+    <table style="margin-top:4px">
+      <tr><th>Task</th><th>Intent</th><th>State</th><th>Steps</th><th>Outcome</th><th>Duration</th><th></th></tr>
+      {{range .Tasks.Tasks}}<tr>
+        <td><a href="{{.DetailURL}}">{{.TaskID}}</a></td>
+        <td>{{.Intent}}</td>
+        <td><span class="badge">{{.State}}</span></td>
+        <td>{{.Steps}}</td>
+        <td>{{if eq .Outcome "success"}}<span class="badge good">{{.Outcome}}</span>{{else if eq .Outcome "in_progress"}}<span class="badge warn">{{.Outcome}}</span>{{else if eq .Outcome "failure"}}<span class="badge bad">{{.Outcome}}</span>{{else}}<span class="badge">{{.Outcome}}</span>{{end}}</td>
+        <td class="muted">{{.Duration}}</td>
+        <td><a href="{{.DetailURL}}">replay &rarr;</a></td>
+      </tr>{{end}}
+    </table>
+    {{else}}<p class="muted">No tasks submitted yet. POST a task to <code>/v1/tasks</code> to populate this view.</p>{{end}}
+  </section>
+
+  <section class="panel full target" id="context">
+    <h2>Context inspection</h2>
+    <p class="muted">The assembled context packet for each task &mdash; the facts, files, risks and required validation carried into the change. Tasks that have not yet been analyzed show no packet.</p>
+    {{if .ContextItems}}
+    {{range .ContextItems}}
+    <div class="card">
+      <div class="card-head">
+        <a href="{{.DetailURL}}">{{.TaskID}}</a>
+        <span class="badge">{{.State}}</span>
+        <span class="muted">{{.Intent}}</span>
+        {{if .HasContext}}<span class="badge good">context assembled</span><span class="muted">{{.TokenCount}} tokens</span>{{else}}<span class="badge">no context</span>{{end}}
+      </div>
+      {{if .HasContext}}
+      <div class="card-grid">
+        <div>
+          <h3>Facts ({{len .Facts}})</h3>
+          {{if .Facts}}<ul>{{range .Facts}}<li><span class="badge cap">{{.Type}}</span> {{.Statement}}{{if gt .Confidence 0.0}} <span class="muted">{{printf "%.0f%%" .Confidence}}</span>{{end}}</li>{{end}}</ul>{{else}}<p class="muted">none</p>{{end}}
+        </div>
+        <div>
+          <h3>Files ({{len .Files}})</h3>
+          {{if .Files}}<ul>{{range .Files}}<li><span class="muted">{{.Language}}</span> {{.Path}} <span class="muted">{{.Lines}}L</span></li>{{end}}</ul>{{else}}<p class="muted">none</p>{{end}}
+        </div>
+        <div>
+          <h3>Risks ({{len .Risks}})</h3>
+          {{if .Risks}}<ul>{{range .Risks}}<li><span class="badge cap {{if or (eq .Level "CRITICAL") (eq .Level "HIGH")}}bad{{else if eq .Level "MEDIUM"}}warn{{else}}good{{end}}">{{.Level}}</span> {{printf "%.2f" .Score}}{{if .Blocked}} <span class="badge bad">blocked</span>{{end}}<br><span class="muted">{{.Mitigation}}</span></li>{{end}}</ul>{{else}}<p class="muted">none</p>{{end}}
+        </div>
+        <div>
+          <h3>Required validation</h3>
+          {{if .RequiredValidation}}<ul>{{range .RequiredValidation}}<li>{{.}}</li>{{end}}</ul>{{else}}<p class="muted">none</p>{{end}}
+        </div>
+      </div>
+      {{else}}<p class="muted">No context packet assembled for this task yet.</p>{{end}}
+    </div>
+    {{end}}
+    {{else}}<p class="muted">No tasks submitted yet.</p>{{end}}
+  </section>
+</main>
+</body>
+</html>

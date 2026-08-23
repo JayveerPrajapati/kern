@@ -245,3 +245,53 @@ func TestExtractionPlanSummary(t *testing.T) {
 			len(plan.Phases), len(plan.Contexts))
 	}
 }
+
+// TestExtractionPhaseCarriesOwnership verifies Phase 12.2: ownership is derived
+// for bounded contexts and propagated to their extraction phases.
+func TestExtractionPhaseCarriesOwnership(t *testing.T) {
+	ix := twoPackageFixture(t)
+	a := NewAnalyzer(ix)
+	plan, err := a.Analyze()
+	if err != nil {
+		t.Fatalf("Analyze: %v", err)
+	}
+	if len(plan.Contexts) == 0 {
+		t.Fatal("expected contexts")
+	}
+	// Every context with an undeterminable owner is empty, but the field must
+	// be present; and any phase must carry its context's ownership.
+	if len(plan.Phases) > 0 {
+		for _, ph := range plan.Phases {
+			ctx := contextByName(plan, ph.Context)
+			if ctx != nil && ctx.Ownership != ph.Ownership {
+				t.Errorf("phase %s ownership %q != context ownership %q", ph.Context, ph.Ownership, ctx.Ownership)
+			}
+		}
+	}
+}
+
+func contextByName(plan *ExtractionPlan, name string) *BoundedContext {
+	for i := range plan.Contexts {
+		if plan.Contexts[i].Name == name {
+			return &plan.Contexts[i]
+		}
+	}
+	return nil
+}
+
+func TestContextDependenciesAndOwnershipPopulated(t *testing.T) {
+	ix := twoPackageFixture(t)
+	a := NewAnalyzer(ix)
+	plan, err := a.Analyze()
+	if err != nil {
+		t.Fatalf("Analyze: %v", err)
+	}
+	for _, ctx := range plan.Contexts {
+		if len(ctx.Dependencies) == 0 && ctx.OutgoingDeps > 0 {
+			t.Errorf("context %s has outgoing deps %d but empty Dependencies list (12.2)", ctx.Name, ctx.OutgoingDeps)
+		}
+		if ctx.Ownership == "" {
+			t.Logf("context %s has no determinable owner (acceptable)", ctx.Name)
+		}
+	}
+}

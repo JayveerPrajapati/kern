@@ -97,9 +97,10 @@ func TestRecordIDAndTimestampDefault(t *testing.T) {
 func TestActionTypeConstants(t *testing.T) {
 	actions := []ActionType{
 		ActionTaskStarted, ActionContextRetrieved, ActionMemoryRetrieved,
-		ActionToolCalled, ActionDecisionMade, ActionFileModified,
+		ActionToolCalled, ActionDecisionMade, ActionFileModified, ActionFileChanged,
 		ActionTestExecuted, ActionGuardrailTriggered, ActionApprovalRequested,
 		ActionChangeAccepted, ActionDeploymentPerformed, ActionProductionOutcome,
+		ActionPRCreated, ActionVerificationStarted, ActionVerificationCompleted,
 	}
 	seen := map[ActionType]bool{}
 	for _, a := range actions {
@@ -111,8 +112,8 @@ func TestActionTypeConstants(t *testing.T) {
 		}
 		seen[a] = true
 	}
-	if len(actions) != 12 {
-		t.Fatalf("expected 12 ActionTypes, got %d", len(actions))
+	if len(actions) != 16 {
+		t.Fatalf("expected 16 ActionTypes, got %d", len(actions))
 	}
 }
 
@@ -211,5 +212,66 @@ func TestNewRecord(t *testing.T) {
 	}
 	if r.Timestamp.IsZero() {
 		t.Error("NewRecord should set Timestamp")
+	}
+}
+
+// TestLifecycleSequenceRecordsNewActionTypes verifies the full lifecycle — task
+// start, tool call, file change, verification start/complete, PR creation, and
+// production outcome — is persisted and retrievable in chronological order,
+// including the Phase 16.1 additive action types.
+func TestLifecycleSequenceRecordsNewActionTypes(t *testing.T) {
+	r := New(t.TempDir())
+	now := time.Now()
+	seq := []struct {
+		action ActionType
+		at     time.Time
+	}{
+		{ActionTaskStarted, now.Add(-8 * time.Second)},
+		{ActionContextRetrieved, now.Add(-7 * time.Second)},
+		{ActionToolCalled, now.Add(-6 * time.Second)},
+		{ActionDecisionMade, now.Add(-5 * time.Second)},
+		{ActionFileChanged, now.Add(-4 * time.Second)},
+		{ActionVerificationStarted, now.Add(-3 * time.Second)},
+		{ActionTestExecuted, now.Add(-2 * time.Second)},
+		{ActionVerificationCompleted, now.Add(-1500 * time.Millisecond)},
+		{ActionPRCreated, now.Add(-1 * time.Second)},
+		{ActionDeploymentPerformed, now.Add(-500 * time.Millisecond)},
+		{ActionProductionOutcome, now},
+	}
+	for _, s := range seq {
+		rec := NewRecord("agentX", "task-lifecycle", s.action)
+		rec.Timestamp = s.at
+		if _, err := r.Record(rec); err != nil {
+			t.Fatalf("Record(%s): %v", s.action, err)
+		}
+	}
+
+	all := r.WhatHappened("task-lifecycle")
+	if len(all) != len(seq) {
+		t.Fatalf("WhatHappened = %d records, want %d", len(all), len(seq))
+	}
+	want := []ActionType{
+		ActionTaskStarted, ActionContextRetrieved, ActionToolCalled, ActionDecisionMade,
+		ActionFileChanged, ActionVerificationStarted, ActionTestExecuted,
+		ActionVerificationCompleted, ActionPRCreated, ActionDeploymentPerformed,
+		ActionProductionOutcome,
+	}
+	for i, w := range want {
+		if all[i].Action != string(w) {
+			t.Errorf("record[%d] = %q, want %q", i, all[i].Action, w)
+		}
+	}
+
+	if got := r.WhichToolsCalled("task-lifecycle"); len(got) != 1 {
+		t.Errorf("WhichToolsCalled = %d, want 1", len(got))
+	}
+	if got := r.WhatVerified("task-lifecycle"); len(got) != 2 {
+		t.Errorf("WhatVerified = %d, want 2", len(got))
+	}
+	if got := r.WhatOutcome("task-lifecycle"); len(got) != 3 {
+		t.Errorf("WhatOutcome = %d, want 3 (deploy, outcome, verify-complete)", len(got))
+	}
+	if got := r.WhatChanged("task-lifecycle"); len(got) != 1 {
+		t.Errorf("WhatChanged = %d, want 1 (file_changed)", len(got))
 	}
 }

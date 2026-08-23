@@ -5,6 +5,8 @@ import (
 	"time"
 
 	"github.com/JayveerPrajapati/kern/internal/agent"
+	"github.com/JayveerPrajapati/kern/internal/agents"
+	"github.com/JayveerPrajapati/kern/internal/app"
 	"github.com/JayveerPrajapati/kern/internal/architecture"
 	"github.com/JayveerPrajapati/kern/internal/governance"
 	"github.com/JayveerPrajapati/kern/internal/intel"
@@ -80,6 +82,7 @@ type memoryMemory struct {
 	Source    string    `json:"source"`
 	Scope     string    `json:"scope"`
 	Tags      []string  `json:"tags"`
+	Status    string    `json:"status"` // freshness/supersession state (current/superseded/historical)
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 }
@@ -99,6 +102,7 @@ func (a *App) buildMemory() memoryData {
 			Source:    m.Source,
 			Scope:     m.Scope,
 			Tags:      m.Tags,
+			Status:    string(m.Status),
 			CreatedAt: m.CreatedAt,
 			UpdatedAt: m.UpdatedAt,
 		})
@@ -192,6 +196,14 @@ func (a *App) buildArchitecture() (*architectureData, error) {
 	a.archRep = out
 	a.archAt = time.Now()
 	return out, nil
+}
+
+// ArchitectureReport returns the architecture validation report for this
+// project. It is the exported accessor the enterprise org endpoint uses to
+// aggregate per-project architecture health (Phase 19 P19.3 "architecture"),
+// reusing the same cached builder as /api/architecture.
+func (a *App) ArchitectureReport() (*architectureData, error) {
+	return a.buildArchitecture()
 }
 
 // governancePolicy is a projection of a domain.Policy.
@@ -330,8 +342,8 @@ type taskDetailData struct {
 	Memories    []memoryRow
 	MemoryCount int
 
-	HasImpact     bool
-	ImpactRisk    string
+	HasImpact      bool
+	ImpactRisk     string
 	ImpactAffected int
 	ImpactServices int
 
@@ -512,4 +524,262 @@ func (a *App) buildTaskDetailData(task *agent.Task) taskDetailData {
 	}
 
 	return d
+}
+
+// agentsData is the template model for the /agents HTML page.
+type agentsData struct {
+	Root            string
+	Specialists     []specialistRow
+	SpecialistCount int
+	RoleCount       int
+	CapabilityCount int
+}
+
+// specialistRow is one row of the specialist roster.
+type specialistRow struct {
+	ID           string
+	Role         string
+	Capabilities []string
+}
+
+// buildAgents assembles the standard specialist team roster for the /agents
+// page. It rebuilds the standard team (read-only, deterministic) and projects
+// each specialist's id, role and capabilities.
+func (a *App) buildAgents() (*agentsData, error) {
+	_, reg, err := agents.StandardTeam()
+	if err != nil {
+		return nil, err
+	}
+	rows := make([]specialistRow, 0)
+	roles := map[string]struct{}{}
+	capCount := 0
+	for _, ag := range reg.All() {
+		caps := append([]string{}, ag.Capabilities...)
+		rows = append(rows, specialistRow{ID: ag.ID, Role: ag.Type, Capabilities: caps})
+		roles[ag.Type] = struct{}{}
+		capCount += len(caps)
+	}
+	return &agentsData{
+		Root:            a.root,
+		Specialists:     rows,
+		SpecialistCount: len(rows),
+		RoleCount:       len(roles),
+		CapabilityCount: capCount,
+	}, nil
+}
+
+// tasksData is the template model for the /tasks efficiency HTML page.
+type tasksData struct {
+	Root              string
+	Tasks             []taskEfficiencyRow
+	TaskCount         int
+	CompletedCount    int
+	InProgressCount   int
+	FailedCount       int
+	AvgTokenReduction float64
+	AvgRelevance      float64
+}
+
+// taskEfficiencyRow is the compact per-task efficiency projection rendered in
+// the /tasks table. It mirrors app.EfficiencyReport's quality + outcome fields
+// the page needs, plus a link to the task's detail page.
+type taskEfficiencyRow struct {
+	TaskID         string
+	Intent         string
+	State          string
+	Type           string
+	DetailURL      string
+	TokenCount     int
+	TokenReduction float64
+	FactsTotal     int
+	FactsBacked    int
+	Relevance      float64
+	RisksCount     int
+	Sufficiency    string
+	Outcome        string
+	Steps          int
+	Artifacts      int
+	Evidence       int
+	Duration       string
+	RolledBack     bool
+}
+
+// buildTasks assembles the per-task efficiency roster for the /tasks page. It
+// iterates every submitted task and projects app.BuildEfficiencyReport into a
+// compact row, linking each to its /task/{id} detail page. It is read-only and
+// degrades to an empty roster when no tasks have been submitted.
+func (a *App) buildTasks() (*tasksData, error) {
+	tasks := a.tasks.ListTasks()
+	rows := make([]taskEfficiencyRow, 0, len(tasks))
+	completed, inProgress, failed := 0, 0, 0
+	var sumRed, sumRel float64
+	for _, t := range tasks {
+		rep := app.BuildEfficiencyReport(t)
+		rows = append(rows, taskEfficiencyRow{
+			TaskID:         t.ID,
+			Intent:         t.Intent,
+			State:          string(t.State),
+			Type:           t.Type,
+			DetailURL:      "/task/" + t.ID,
+			TokenCount:     rep.Quality.TokenCount,
+			TokenReduction: rep.Quality.TokenReduction,
+			FactsTotal:     rep.Quality.FactsTotal,
+			FactsBacked:    rep.Quality.FactsBacked,
+			Relevance:      rep.Quality.Relevance,
+			RisksCount:     rep.Quality.RisksCount,
+			Sufficiency:    rep.Quality.Sufficiency,
+			Outcome:        rep.Outcome.Outcome,
+			Steps:          rep.Outcome.Steps,
+			Artifacts:      rep.Outcome.Artifacts,
+			Evidence:       rep.Outcome.Evidence,
+			Duration:       rep.Outcome.Duration.String(),
+			RolledBack:     rep.Outcome.RolledBack,
+		})
+		switch rep.Outcome.Outcome {
+		case "success":
+			completed++
+		case "in_progress":
+			inProgress++
+		case "failure":
+			failed++
+		}
+		sumRed += rep.Quality.TokenReduction
+		sumRel += rep.Quality.Relevance
+	}
+	avgRed, avgRel := 0.0, 0.0
+	if len(rows) > 0 {
+		avgRed = sumRed / float64(len(rows))
+		avgRel = sumRel / float64(len(rows))
+	}
+	return &tasksData{
+		Root:              a.root,
+		Tasks:             rows,
+		TaskCount:         len(rows),
+		CompletedCount:    completed,
+		InProgressCount:   inProgress,
+		FailedCount:       failed,
+		AvgTokenReduction: avgRed,
+		AvgRelevance:      avgRel,
+	}, nil
+}
+
+// ---------------------------------------------------------------------------
+// Evaluation views (/eval): agent comparison + task replay + context inspection
+// ---------------------------------------------------------------------------
+
+// evalData is the template model for the /eval HTML page. It bundles the three
+// evaluation sub-views onto one cohesive page, reusing the existing buildAgents
+// and buildTasks builders for the comparison and replay sections and projecting
+// each task's ContextPacket for the inspection section.
+type evalData struct {
+	Root         string
+	Agents       *agentsData
+	Tasks        *tasksData
+	ContextItems []contextInspectionRow
+}
+
+// contextInspectionRow projects a task and its assembled ContextPacket for the
+// context-inspection section of /eval. Tasks that have not yet been analyzed
+// (no ContextPacket) are still listed with HasContext=false so the inspector
+// shows the task lifecycle without a packet.
+type contextInspectionRow struct {
+	TaskID             string
+	Intent             string
+	State              string
+	DetailURL          string
+	HasContext         bool
+	TokenCount         int
+	Facts              []contextFact
+	Files              []contextFile
+	Risks              []contextRisk
+	RequiredValidation []string
+}
+
+// contextFact is a readable projection of a domain.Claim from the packet.
+type contextFact struct {
+	Type       string
+	Statement  string
+	Source     string
+	Confidence float64
+}
+
+// contextFile is a readable projection of a domain.File from the packet.
+type contextFile struct {
+	Path     string
+	Language string
+	Lines    int
+}
+
+// contextRisk is a readable projection of a domain.Risk from the packet.
+type contextRisk struct {
+	Level      string
+	Score      float64
+	Mitigation string
+	Blocked    bool
+}
+
+// buildEval assembles the /eval page model. It reuses buildAgents and
+// buildTasks for the comparison and replay sections, and iterates the same task
+// registry a third time to project each task's ContextPacket (facts, files,
+// risks, required validation) for the inspection section. It is read-only and
+// degrades to empty sections when no tasks/agents are available.
+func (a *App) buildEval() (*evalData, error) {
+	agents, err := a.buildAgents()
+	if err != nil {
+		return nil, err
+	}
+	tasks, err := a.buildTasks()
+	if err != nil {
+		return nil, err
+	}
+	rows := make([]contextInspectionRow, 0, len(a.tasks.ListTasks()))
+	for _, t := range a.tasks.ListTasks() {
+		row := contextInspectionRow{
+			TaskID:    t.ID,
+			Intent:    t.Intent,
+			State:     string(t.State),
+			DetailURL: "/task/" + t.ID,
+		}
+		if cp := t.ContextPacket; cp != nil {
+			row.HasContext = true
+			row.TokenCount = cp.TokenCount
+			row.RequiredValidation = append([]string{}, cp.RequiredValidation...)
+			facts := make([]contextFact, 0, len(cp.Facts))
+			for _, f := range cp.Facts {
+				facts = append(facts, contextFact{
+					Type:       string(f.Type),
+					Statement:  f.Statement,
+					Source:     f.Source,
+					Confidence: f.Confidence,
+				})
+			}
+			row.Facts = facts
+			files := make([]contextFile, 0, len(cp.Files))
+			for _, fl := range cp.Files {
+				files = append(files, contextFile{
+					Path:     fl.Path,
+					Language: fl.Language,
+					Lines:    fl.Lines,
+				})
+			}
+			row.Files = files
+			risks := make([]contextRisk, 0, len(cp.Risks))
+			for _, rk := range cp.Risks {
+				risks = append(risks, contextRisk{
+					Level:      string(rk.Level),
+					Score:      rk.Score,
+					Mitigation: rk.Mitigation,
+					Blocked:    rk.Blocked,
+				})
+			}
+			row.Risks = risks
+		}
+		rows = append(rows, row)
+	}
+	return &evalData{
+		Root:         a.root,
+		Agents:       agents,
+		Tasks:        tasks,
+		ContextItems: rows,
+	}, nil
 }

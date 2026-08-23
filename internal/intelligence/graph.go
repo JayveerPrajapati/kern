@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/JayveerPrajapati/kern/internal/domain"
 	"github.com/JayveerPrajapati/kern/internal/index"
@@ -24,6 +25,16 @@ import (
 type Graph struct {
 	domain.Graph
 	entries map[string]bool
+
+	// Read-only-after-construction caches. The graph is built once (see
+	// FromIndex / NewWithGraph) and treated as immutable afterwards, so these
+	// are lazily initialized on first query and reused for the graph's whole
+	// lifetime. byID maps node ID -> node; nameIndex maps a simple symbol name
+	// -> the node IDs that share it (for O(1) name resolution). indexOnce
+	// guards their one-time construction.
+	byID      map[string]domain.Node
+	nameIndex map[string][]string
+	indexOnce sync.Once
 }
 
 // FromIndex builds a canonical domain.Graph from a v1 index.Index: every symbol

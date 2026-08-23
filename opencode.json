@@ -3,9 +3,8 @@
   "mcp": {
     "kern": {
       "command": [
-        "bin/kern-mcp"
+        "/Users/jayveer.prajapati/.local/bin/kern-mcp"
       ],
-      "cwd": ".",
       "enabled": true,
       "type": "local"
     }

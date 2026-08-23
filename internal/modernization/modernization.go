@@ -6,6 +6,7 @@ package modernization
 
 import (
 	"fmt"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -23,6 +24,13 @@ type BoundedContext struct {
 	Cohesion     float64  // 0.0-1.0, internal coupling density
 	OutgoingDeps int      // dependencies on other contexts (lower = better extraction candidate)
 	IncomingDeps int      // dependencies from other contexts (lower = safer to extract)
+	// Ownership is the owning team/owner of the context (Phase 12): derived
+	// deterministically from the dominant package path prefix (e.g.
+	// "internal/checkout" -> "@checkout"). Empty when undeterminable.
+	Ownership string `json:"ownership,omitempty"`
+	// Dependencies lists the distinct external symbol names this context calls
+	// into (Phase 12 deps), a diagnostic complement to the OutgoingDeps count.
+	Dependencies []string `json:"dependencies,omitempty"`
 }
 
 // Bridge is a coupling point between two bounded contexts. Extracting
@@ -45,6 +53,11 @@ type ExtractionPhase struct {
 	Migration   string   // migration strategy text
 	Rollback    string   // rollback strategy text
 	Validation  string   // validation steps text
+	// Ownership is the owning team of the extracted context (Phase 12.2).
+	Ownership string `json:"ownership,omitempty"`
+	// TaskID is the task that tracks this phase's extraction (Phase 12.3
+	// phase-tasks). Set when the phase is materialized as a task.
+	TaskID string `json:"task_id,omitempty"`
 }
 
 // ExtractionPlan is the full phased plan for modernizing a monolith.
@@ -192,7 +205,54 @@ func buildContext(ix *index.Index, c intel.Community) BoundedContext {
 		Cohesion:     cohesion,
 		OutgoingDeps: outgoing,
 		IncomingDeps: incoming,
+		// Phase 12.2: derive ownership from the dominant package path and list
+		// the external dependency symbols the context calls into.
+		Ownership:    contextOwnership(ix, c.Symbols),
+		Dependencies: contextOutDeps(ix, set),
 	}
+}
+
+// contextOwnership derives an ownership tag (e.g. "@backend") from the dominant
+// package path of the context's symbols. It is deterministic and best-effort:
+// it takes the first path segment after internal/ (or the first directory of
+// the first symbol's file) and prefixes it with "@". Empty when it cannot
+// determine a package path.
+func contextOwnership(ix *index.Index, syms []string) string {
+	for _, s := range syms {
+		file := fileOfSymbol(ix)[s]
+		if file == "" {
+			continue
+		}
+		file = filepath.ToSlash(file)
+		trimmed := strings.TrimPrefix(file, "internal/")
+		if trimmed == file {
+			trimmed = file
+		}
+		if i := strings.IndexByte(trimmed, '/'); i > 0 {
+			return "@" + trimmed[:i]
+		}
+	}
+	return ""
+}
+
+// contextOutDeps returns the distinct external symbol full-names the context's
+// symbols call into (one endpoint inside, one outside). Deterministic, sorted.
+func contextOutDeps(ix *index.Index, set map[string]bool) []string {
+	outSeen := map[string]bool{}
+	for from, tos := range ix.Calls {
+		fromIn := set[from]
+		for _, to := range tos {
+			if fromIn && !set[to] {
+				outSeen[to] = true
+			}
+		}
+	}
+	out := make([]string, 0, len(outSeen))
+	for s := range outSeen {
+		out = append(out, s)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // contextName derives a stable name from the dominant package directory.
@@ -356,6 +416,8 @@ func buildPhase(phaseNum int, ctx BoundedContext, bridgeCount int, all []Bridge,
 		Context:     ctx.Name,
 		RiskLevel:   phaseRisk(bridgeCount),
 		BlastRadius: blastRadius(ctx, contexts),
+		// Phase 12.2: carry the context ownership onto its extraction phase.
+		Ownership: ctx.Ownership,
 		Migration: fmt.Sprintf("Extract %s as a separate module. Update imports in %d dependent files.",
 			ctx.Name, ctx.OutgoingDeps),
 		Rollback:   "Revert the module extraction commit. No data migration needed (code-only).",

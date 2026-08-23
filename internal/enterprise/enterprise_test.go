@@ -1,6 +1,7 @@
 package enterprise
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -279,6 +280,73 @@ func TestOrgDashboardLinksNewEndpoints(t *testing.T) {
 		if !strings.Contains(body, link) {
 			t.Errorf("dashboard should link to %s", link)
 		}
+	}
+}
+
+// TestServeHTTPOrgRepositories verifies the Phase 19 "repository" org route
+// lists the registered repositories (projects) under the canonical name.
+func TestServeHTTPOrgRepositories(t *testing.T) {
+	s := New()
+	if err := s.Register("proj-a", t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Register("proj-b", t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	req := authedRequest(t, "GET", "/org/repository")
+	rr := httptest.NewRecorder()
+	s.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rr.Code, rr.Body.String())
+	}
+	var body struct {
+		Repositories []struct{ Name string `json:"name"` } `json:"repositories"`
+		Count        int                                 `json:"count"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.Count != 2 {
+		t.Errorf("count = %d, want 2", body.Count)
+	}
+	names := map[string]bool{}
+	for _, r := range body.Repositories {
+		names[r.Name] = true
+	}
+	if !names["proj-a"] || !names["proj-b"] {
+		t.Errorf("repositories = %v, want both proj-a and proj-b", body.Repositories)
+	}
+}
+
+// TestServeHTTPOrgArchitecture verifies the Phase 19 "architecture" org-level
+// route aggregates per-project architecture reports.
+func TestServeHTTPOrgArchitecture(t *testing.T) {
+	s := New()
+	if err := s.Register("proj-a", t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	req := authedRequest(t, "GET", "/org/architecture")
+	rr := httptest.NewRecorder()
+	s.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rr.Code, rr.Body.String())
+	}
+	var body struct {
+		Architecture []struct {
+			Project    string   `json:"project"`
+			Violations []string `json:"violations"`
+			OK         bool     `json:"ok"`
+		} `json:"architecture"`
+		Count int `json:"count"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.Count < 1 {
+		t.Errorf("count = %d, want >= 1", body.Count)
+	}
+	if len(body.Architecture) == 0 || body.Architecture[0].Project == "" {
+		t.Errorf("architecture aggregation missing project name: %+v", body.Architecture)
 	}
 }
 

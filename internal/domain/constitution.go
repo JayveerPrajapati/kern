@@ -27,6 +27,11 @@ type ConstitutionRule struct {
 	ApprovalRequired bool `json:"approval,omitempty" yaml:"approval,omitempty"`
 	// Testing rules: public API changes require integration tests.
 	RequireTests []string `json:"require_tests,omitempty" yaml:"require_tests,omitempty"`
+	// Provenance records where this rule came from (P8.4): "adr", "incident",
+	// "policy", "team-rule", or "manual-rule". Empty means the source is
+	// unknown/manual. It is propagated onto violations so the origin of a
+	// constraint is auditable.
+	Provenance string `json:"provenance,omitempty" yaml:"provenance,omitempty"`
 }
 
 // Constitution is the loaded engineering constitution. Strict Plan Phase 8 P0.
@@ -36,8 +41,12 @@ type Constitution struct {
 
 // PlanValidation is the result of validating a plan against the constitution.
 type PlanValidation struct {
-	Passed  bool              `json:"passed"`
-	Violations []PlanViolation `json:"violations,omitempty"`
+	Passed     bool             `json:"passed"`
+	Violations []PlanViolation  `json:"violations,omitempty"`
+	// Provenance records the source of the validation (P8.4), propagated from
+	// the constitution rules that produced the violations. It helps auditors
+	// trace a decision back to the ADR/incident/policy that required it.
+	Provenance string `json:"provenance,omitempty"`
 }
 
 // PlanViolation is a single constraint violation found during plan validation.

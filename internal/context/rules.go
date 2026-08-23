@@ -273,9 +273,10 @@ func (e *Engine) runtimeEvidence(roots []domain.Symbol) []domain.Evidence {
 	out := make([]domain.Evidence, 0, len(matched))
 	for _, ev := range matched {
 		out = append(out, domain.Evidence{
-			Type:    domain.EvidenceRuntime,
-			Source:  e.runtimeSrc.Name(),
-			Content: fmtRuntimeEvent(ev),
+			Type:      domain.EvidenceRuntime,
+			Source:    e.runtimeSrc.Name(),
+			Content:   fmtRuntimeEvent(ev),
+			Timestamp: ev.Timestamp,
 		})
 	}
 	return out

@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Risks &mdash; Kern Web Console</title>
+<style>
+:root { --bg:#0f1115; --panel:#171a21; --panel2:#1c2029; --fg:#e6e8ee; --muted:#9aa3b2; --accent:#4f8cff; --border:#262b36; --good:#3fb950; --warn:#d29922; --bad:#f85149; }
+* { box-sizing:border-box; }
+body { margin:0; background:var(--bg); color:var(--fg); font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif; }
+header { padding:16px 28px; border-bottom:1px solid var(--border); background:var(--panel); display:flex; align-items:center; justify-content:space-between; gap:16px; flex-wrap:wrap; }
+header .brand h1 { margin:0; font-size:20px; }
+header .brand p { margin:4px 0 0; color:var(--muted); font-size:12px; }
+.topnav { display:flex; gap:4px; }
+.topnav a { color:var(--muted); text-decoration:none; font-size:12px; padding:6px 12px; border-radius:6px; border:1px solid transparent; }
+.topnav a:hover { color:var(--fg); background:var(--panel2); }
+.topnav a.active { color:var(--accent); border-color:var(--border); background:var(--panel2); }
+main { padding:20px 28px; display:grid; grid-template-columns:repeat(auto-fit,minmax(340px,1fr)); gap:16px; }
+section.panel { background:var(--panel); border:1px solid var(--border); border-radius:8px; padding:16px; }
+section.panel h2 { margin:0 0 12px; font-size:15px; text-transform:uppercase; letter-spacing:.04em; color:var(--muted); }
+.kpi { display:grid; grid-template-columns:repeat(auto-fit,minmax(90px,1fr)); gap:10px; }
+.kpi div { background:var(--panel2); border:1px solid var(--border); border-radius:6px; padding:10px; text-align:center; }
+.kpi b { display:block; font-size:22px; }
+.kpi span { font-size:11px; color:var(--muted); }
+table { width:100%; border-collapse:collapse; font-size:12px; }
+th,td { text-align:left; padding:6px 8px; border-bottom:1px solid var(--border); vertical-align:top; }
+th { color:var(--muted); font-weight:600; }
+.muted { color:var(--muted); }
+.good { color:var(--good); }
+.warn { color:var(--warn); }
+.bad { color:var(--bad); }
+.badge { display:inline-block; padding:1px 7px; border-radius:10px; font-size:11px; background:var(--panel2); border:1px solid var(--border); }
+.full { grid-column:1 / -1; }
+</style>
+</head>
+<body>
+<header>
+  <div class="brand">
+    <h1>Risks</h1>
+    <p>Deterministic policy risk assessment &mdash; project root: {{.Root}}</p>
+  </div>
+  <nav class="topnav">
+    <a href="/">Dashboard</a>
+    <a href="/approvals">Approvals</a>
+    <a href="/risks" class="active">Risks</a>
+    <a href="/artifacts">Artifacts</a>
+    <a href="/audit">Audit</a>
+    <a href="/system-map">System Map</a>
+    <a href="/incidents">Incidents</a>
+    <a href="/tasks">Tasks</a>
+    <a href="/efficiency">Efficiency</a>
+    <a href="/agents">Agents</a>
+  </nav>
+</header>
+<main>
+  <section class="panel full">
+    <h2>Governance Risk Assessment</h2>
+    {{if .Risks}}
+    <table>
+      <tr><th>Resource</th><th>Action</th><th>Level</th><th>Score</th><th>Approval Required</th><th>Blocked</th><th>Mitigation</th></tr>
+      {{range .Risks}}
+      <tr>
+        <td><span class="badge">{{.Resource}}</span></td>
+        <td>{{.Action}}</td>
+        <td><span class="badge {{if or (eq .Level "HIGH") (eq .Level "CRITICAL")}}bad{{else if eq .Level "MEDIUM"}}warn{{else}}good{{end}}">{{.Level}}</span></td>
+        <td>{{printf "%.2f" .Score}}</td>
+        <td>{{if .ApprovalRequired}}<span class="badge warn">yes</span>{{else}}no{{end}}</td>
+        <td>{{if .Blocked}}<span class="badge bad">yes</span>{{else}}no{{end}}</td>
+        <td>{{.Mitigation}}</td>
+      </tr>
+      {{end}}
+    </table>
+    <p class="muted" style="margin-top:12px">Assessments are computed deterministically from the default governance policy set &mdash; no live model inference.</p>
+    {{else}}<p class="muted">No risk assessments available.</p>{{end}}
+  </section>
+</main>
+</body>
+</html>

@@ -5,6 +5,7 @@ import (
 
 	"github.com/JayveerPrajapati/kern/internal/domain"
 	"github.com/JayveerPrajapati/kern/internal/governance/firewall"
+	"github.com/JayveerPrajapati/kern/internal/governance/identity"
 )
 
 // TestTaskBoundaryCheckPath verifies the task boundary allows/denies paths
@@ -139,5 +140,107 @@ func TestDefaultSafetyBudget(t *testing.T) {
 	}
 	if len(b.AllowedEnvs) == 0 {
 		t.Error("AllowedEnvs should not be empty")
+	}
+}
+
+func TestTaskScopeCheckPathAndEnv(t *testing.T) {
+	s := domain.TaskScope{
+		TaskID:      "t1",
+		Paths:       []string{"UserService/"},
+		DeniedPaths: []string{"payments/"},
+		Envs:        []string{"development", "staging"},
+	}
+	if !s.CheckPath("UserService/user.go") {
+		t.Error("CheckPath should allow UserService path")
+	}
+	if s.CheckPath("payments/refund.go") {
+		t.Error("CheckPath should deny payments path")
+	}
+	if !s.CheckEnv("development") {
+		t.Error("CheckEnv should allow development")
+	}
+	if s.CheckEnv("production") {
+		t.Error("CheckEnv should deny production")
+	}
+	// Empty Envs allows everything.
+	s2 := domain.TaskScope{Envs: nil}
+	if !s2.CheckEnv("anything") {
+		t.Error("empty env scope should allow anything")
+	}
+}
+
+func TestEvaluateScopedEnvDeny(t *testing.T) {
+	fw := firewall.NewFirewall()
+	gw := NewToolGateway(fw)
+	scope := domain.TaskScope{TaskID: "t1", Envs: []string{"development"}}
+	res := gw.EvaluateScoped("agent-1", "t1", "file.go", "read", "production", scope, nil)
+	if res.Decision != domain.DecisionDenied {
+		t.Errorf("decision = %q, want DENIED", res.Decision)
+	}
+	if res.Deny == nil || res.Deny.Stage != "env" {
+		t.Errorf("deny = %+v, want env stage", res.Deny)
+	}
+	if res.Deny.Reason == "" {
+		t.Error("deny reason should be non-empty (explain-deny P7.6)")
+	}
+}
+
+func TestEvaluateScopedPathDeny(t *testing.T) {
+	fw := firewall.NewFirewall()
+	gw := NewToolGateway(fw)
+	scope := domain.TaskScope{TaskID: "t1", Paths: []string{"ok/"}, DeniedPaths: []string{"bad/"}}
+	res := gw.EvaluateScoped("agent-1", "t1", "bad/x.go", "write", "", scope, nil)
+	if res.Decision != domain.DecisionDenied || res.Deny.Stage != "boundary" {
+		t.Errorf("res = %+v, want DENIED/boundary", res)
+	}
+}
+
+func TestEvaluateScopedBudgetPause(t *testing.T) {
+	fw := firewall.NewFirewall()
+	fw.WithAgents(identity.NewAgent("agent-1", "a", "coder", []identity.Permission{{Resource: "file.go", Action: "read"}}))
+	gw := NewToolGateway(fw)
+	scope := domain.TaskScope{TaskID: "t1"}
+	budget := &domain.SafetyBudget{MaxToolCalls: 1}
+	budget.Start()
+	budget.TrackToolCall()
+	budget.TrackToolCall() // exceed
+	res := gw.EvaluateScoped("agent-1", "t1", "file.go", "read", "", scope, budget)
+	if res.Decision != domain.DecisionPaused {
+		t.Errorf("decision = %q, want PAUSE", res.Decision)
+	}
+	if res.Deny == nil || res.Deny.Stage != "budget" {
+		t.Errorf("deny = %+v, want budget stage", res.Deny)
+	}
+}
+
+func TestDryRunDoesNotMutateBudget(t *testing.T) {
+	fw := firewall.NewFirewall()
+	fw.WithAgents(identity.NewAgent("agent-1", "a", "coder", []identity.Permission{{Resource: "file.go", Action: "read"}}))
+	gw := NewToolGateway(fw)
+	scope := domain.TaskScope{TaskID: "t1"}
+	budget := &domain.SafetyBudget{MaxToolCalls: 3}
+	budget.Start()
+	budget.TrackToolCall()
+	before, _ := budget.Exceeded()
+
+	// Dry run for an ALLOW path — must NOT advance the live budget.
+	res := gw.DryRun("agent-1", "t1", "file.go", "read", "", scope, budget)
+	if res.Decision != domain.DecisionAllowed {
+		t.Errorf("dry run decision = %q, want ALLOW", res.Decision)
+	}
+	after, _ := budget.Exceeded()
+	if before != after {
+		t.Errorf("dry run mutated live budget: before=%v after=%v", before, after)
+	}
+}
+
+func TestEvaluateScopedFirewallDeny(t *testing.T) {
+	fw := firewall.NewFirewall()
+	gw := NewToolGateway(fw)
+	scope := domain.TaskScope{TaskID: "t1"}
+	// An unknown agent is denied by the firewall.
+	res := gw.EvaluateScoped("ghost-agent", "t1", "file.go", "read", "", scope, nil)
+	if res.Decision != domain.DecisionDenied || res.Deny.Stage != "firewall" {
+		t.Errorf("res = %+v, want DENIED/firewall", res)
 	}
 }

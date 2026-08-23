@@ -67,3 +67,63 @@ func TestCompareAgentsTie(t *testing.T) {
 		t.Errorf("Winner=%s, want tie (identical metrics)", cmp.Winner)
 	}
 }
+
+func TestRouteModelWithFactors(t *testing.T) {
+	// Low historical success on the balanced model -> promote to most capable.
+	base := routeModelBase(domain.RiskMedium, "medium")
+	got := routeModelWithFactors(base, domain.RoutingFactors{HistoricalSuccess: 0.2})
+	if got.Model != "llama3.1:70b" {
+		t.Errorf("promoted model = %q, want llama3.1:70b", got.Model)
+	}
+	// High historical success on the most capable -> demote to cheap.
+	baseHigh := routeModelBase(domain.RiskHigh, "high")
+	got2 := routeModelWithFactors(baseHigh, domain.RoutingFactors{HistoricalSuccess: 0.95})
+	if got2.Model == "llama3.1:70b" {
+		t.Errorf("should demote off most capable, got %q", got2.Model)
+	}
+	// Language is noted in the reason but does not change the model.
+	got3 := routeModelWithFactors(base, domain.RoutingFactors{Language: "go"})
+	if got3.Model != base.Model {
+		t.Errorf("language should not change model, got %q", got3.Model)
+	}
+}
+
+func TestRouteModelForTaskFactors(t *testing.T) {
+	// Neutral factors route to medium.
+	d := RouteModelForTask(RoleCoder, domain.RiskMedium, "medium", domain.RoutingFactors{})
+	if d.Model == "" {
+		t.Error("expected a model")
+	}
+	// Low historical success biases toward most capable.
+	d2 := RouteModelForTask(RoleCoder, domain.RiskMedium, "medium", domain.RoutingFactors{HistoricalSuccess: 0.1})
+	if d2.Model != "llama3.1:70b" {
+		t.Errorf("low success should route to 70b, got %q", d2.Model)
+	}
+}
+
+func TestEvaluateAgentRecordsDuration(t *testing.T) {
+	ev := EvaluateAgent("a1", "t1", true, 100, 0.1, 5*time.Second, 0, false, 0)
+	if ev.Duration != 5*time.Second {
+		t.Errorf("Duration = %v, want 5s (P9.7)", ev.Duration)
+	}
+}
+
+func TestCompareModels(t *testing.T) {
+	evA := domain.AgentEvaluation{AgentID: "a1", Success: true, TokensUsed: 100, Cost: 0.1}
+	evB := domain.AgentEvaluation{AgentID: "b1", Success: false, TokensUsed: 500, Cost: 0.5}
+	mc := CompareModels("t1", domain.ModelRoutingDecision{}, domain.ModelRoutingDecision{}, evA, evB)
+	// evA (success, cheaper) outscores evB, so candidateA (default 8b) wins.
+	if mc.Winner != mc.ModelA.Model {
+		t.Errorf("winner = %q, want the model behind the better eval (A=%q)", mc.Winner, mc.ModelA.Model)
+	}
+	if mc.Metrics["score"][0] <= mc.Metrics["score"][1] {
+		t.Errorf("A should outscore B: %+v", mc.Metrics)
+	}
+}
+
+func TestEvaluateModel(t *testing.T) {
+	ev := EvaluateModel("m1", "t1", true, 50, 0.05, 1*time.Second)
+	if ev.AgentID != "m1" || !ev.Success || ev.Model != "m1" {
+		t.Errorf("EvaluateModel = %+v", ev)
+	}
+}

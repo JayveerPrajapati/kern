@@ -184,3 +184,82 @@ func TestValidatePlanTestingRequires(t *testing.T) {
 		t.Fatal("plan should pass (API change WITH tests)")
 	}
 }
+
+func TestValidatePlanPropagatesProvenance(t *testing.T) {
+	c := &domain.Constitution{Rules: []domain.ConstitutionRule{
+		{ID: "no-payments", Type: domain.ConstraintMustNot, Category: "architecture",
+			CannotDependOn: []string{"marketing"}, Provenance: "adr"},
+	}}
+	plan := domain.Plan{
+		Dependencies: []string{"marketing/campaign.go"},
+	}
+	pv := ValidatePlan(plan, c)
+	if pv.Passed {
+		t.Fatal("plan should fail (MUST_NOT violated)")
+	}
+	if len(pv.Violations) != 1 {
+		t.Fatalf("violations = %d, want 1", len(pv.Violations))
+	}
+	// P8.4: provenance propagated from the rule.
+	if pv.Violations[0].Provenance != "adr" {
+		t.Errorf("violation provenance = %q, want adr", pv.Violations[0].Provenance)
+	}
+	if pv.Provenance != "adr" {
+		t.Errorf("validation provenance = %q, want adr", pv.Provenance)
+	}
+}
+
+func TestValidatePlanDefaultsProvenance(t *testing.T) {
+	c := &domain.Constitution{Rules: []domain.ConstitutionRule{
+		{ID: "r1", Type: domain.ConstraintMustNot, Category: "security", NeverLog: true},
+	}}
+	plan := domain.Plan{ImplementationSteps: []string{"add logging to auth"}}
+	pv := ValidatePlan(plan, c)
+	if len(pv.Violations) != 1 {
+		t.Fatalf("violations = %d, want 1", len(pv.Violations))
+	}
+	// No declared provenance -> default "manual-rule".
+	if pv.Violations[0].Provenance != "manual-rule" {
+		t.Errorf("provenance = %q, want manual-rule", pv.Violations[0].Provenance)
+	}
+}
+
+func TestSuggestRulesFromViolations(t *testing.T) {
+	c := &domain.Constitution{Rules: []domain.ConstitutionRule{
+		{ID: "no-payments", Type: domain.ConstraintMustNot, Category: "architecture", CannotDependOn: []string{"marketing"}},
+	}}
+	plan := domain.Plan{Dependencies: []string{"marketing/x.go"}}
+	pv := ValidatePlan(plan, c)
+	sugg := SuggestRules(plan, pv)
+	if len(sugg) == 0 {
+		t.Fatal("expected suggestions from architecture violation")
+	}
+	found := false
+	for _, s := range sugg {
+		if s.Rule.Category == "architecture" && s.Rule.CannotDependOn[0] == "marketing" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("architecture suggestion not found: %+v", sugg)
+	}
+	// Suggestions must be non-activating: they never appear in the constitution.
+	if len(c.Rules) != 1 {
+		t.Errorf("SuggestRules mutated constitution: rules=%d", len(c.Rules))
+	}
+}
+
+func TestSuggestRulesDefensive(t *testing.T) {
+	plan := domain.Plan{ImplementationSteps: []string{"run migration to drop table users"}}
+	pv := domain.PlanValidation{Passed: true}
+	suggests := SuggestRules(plan, pv)
+	foundDB := false
+	for _, s := range suggests {
+		if s.Rule.Category == "database" && s.Rule.ApprovalRequired {
+			foundDB = true
+		}
+	}
+	if !foundDB {
+		t.Errorf("expected database approval suggestion, got %+v", suggests)
+	}
+}

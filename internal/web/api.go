@@ -12,7 +12,6 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/agents"
 	"github.com/JayveerPrajapati/kern/internal/app"
 	"github.com/JayveerPrajapati/kern/internal/domain"
-	"github.com/JayveerPrajapati/kern/internal/flight"
 	"github.com/JayveerPrajapati/kern/internal/governance/audit"
 	"github.com/JayveerPrajapati/kern/internal/learning"
 	"github.com/JayveerPrajapati/kern/internal/loop"
@@ -253,7 +252,11 @@ func (a *App) handleV1Verify(w http.ResponseWriter, r *http.Request) {
 	if len(types) == 0 {
 		types = []string{"build", "test"}
 	}
-	res := a.ver.Verify(types)
+	_, res, err := a.taskSvc.Verify(types)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	writeJSON(w, http.StatusOK, res)
 }
 
@@ -362,7 +365,7 @@ func (a *App) handleV1Risk(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.freshGraph()
-	pkt, err := a.ctx.AnalyzeChange(req.Change)
+	pkt, _, err := a.taskSvc.Risk(req.Change)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -605,19 +608,7 @@ func (a *App) handleV1Loop(w http.ResponseWriter, r *http.Request) {
 	// local console cannot accidentally trigger a production deployment
 	// without explicit operator opt-in. The approval workflow is also wired
 	// so high-risk stages pass through governance.
-	cfg := loop.LoopConfig{
-		Root:    a.root,
-		Level:   level,
-		Mem:     a.memories,
-		Appr:    a.approvals,
-		Recorder: flight.New(a.root),
-	}
-	l, err := loop.NewLoop(cfg)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	res, err := l.Run(req.Intent, nil)
+	_, res, err := a.taskSvc.RunLoop(req.Intent, level)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return

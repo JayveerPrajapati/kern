@@ -18,17 +18,48 @@ import (
 //   - authority (is the source authoritative: graph > memory > tool > history?)
 //   - duplicate relationship (is this item a duplicate of another?)
 //   - last use (has the item been referenced recently?)
+//   - dependency_distance (how far the item's target is from the task target in
+//     the dependency graph — nearer = higher score / keep)
+//   - task_relation (how directly the item relates to the current task — more
+//     directly related = higher score / keep)
 type GC struct {
 	intent   string
 	target   string
 	now      time.Time
 	maxItems int // max ACTIVE items (0 = unlimited)
+
+	// P5.5 completeness: per-item factors supplied by the caller.
+	// dependencyDistance maps an item ID to its hop distance from the task
+	// target in the dependency graph (0 = the target itself; higher = farther).
+	dependencyDistance map[string]int
+	// taskRelation maps an item ID to a 0..1 score of how directly the item
+	// relates to the current task (1 = directly on task).
+	taskRelation map[string]float64
 }
 
 // NewGC returns a GC pipeline for the given intent and target. maxItems caps
 // the number of ACTIVE items; excess items are demoted.
 func NewGC(intent, target string, maxItems int) *GC {
 	return &GC{intent: strings.ToLower(intent), target: strings.ToLower(target), now: time.Now(), maxItems: maxItems}
+}
+
+// SetDependencyDistance registers per-item dependency distances (P5.5). It
+// returns the GC for chaining. Distances are hop counts from the task target
+// in the dependency graph: 0 = the target itself, 1 = a direct dependency, and
+// so on. Items far from the target are scored down so they are demoted/dropped
+// before nearer items of equal relevance.
+func (g *GC) SetDependencyDistance(deps map[string]int) *GC {
+	g.dependencyDistance = deps
+	return g
+}
+
+// SetTaskRelation registers per-item task-relation scores (P5.5). Each score is
+// 0..1 and reflects how directly the item relates to the current task; higher
+// values lift the item's score so a directly-related item outranks an
+// unrelated one of equal relevance. It returns the GC for chaining.
+func (g *GC) SetTaskRelation(rel map[string]float64) *GC {
+	g.taskRelation = rel
+	return g
 }
 
 // Run scores each item and returns the GC actions. Items are sorted by
@@ -125,6 +156,38 @@ func (g *GC) score(item domain.ContextItem) float64 {
 		s += 0.1
 	case "memory":
 		s += 0.05
+	}
+
+	// P5.5 GC completeness: long-unused items are scored down so the GC can
+	// evict them before freshly used items of equal relevance.
+	s *= lastUsePenalty(item, g.now)
+
+	// P5.5 GC completeness: dependency_distance. Items whose target is nearer
+	// to the task target in the dependency graph score higher; items far from
+	// the target are penalized so they are demoted/dropped first.
+	if g.dependencyDistance != nil {
+		if d, ok := g.dependencyDistance[item.ID]; ok {
+			switch {
+			case d <= 0:
+				s += 0.4 // the target itself
+			case d == 1:
+				s += 0.3 // direct dependency
+			case d == 2:
+				s += 0.2
+			case d == 3:
+				s += 0.1
+			default:
+				s -= 0.3 // far from the target: demote/drop first
+			}
+		}
+	}
+
+	// P5.5 GC completeness: task_relation. Items that relate directly to the
+	// current task outrank unrelated items of equal relevance.
+	if g.taskRelation != nil {
+		if r, ok := g.taskRelation[item.ID]; ok {
+			s += r * 0.4
+		}
 	}
 
 	// Clamp to [0, 1].

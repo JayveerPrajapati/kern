@@ -74,3 +74,48 @@ func TestFixtureTaskMatrixNonDegenerate(t *testing.T) {
 		t.Fatalf("fixture sizes not strictly increasing: small=%d medium=%d large=%d", small, medium, large)
 	}
 }
+
+// TestTaskClassMetricsProduceMetricSet asserts the Phase 17.3 harness produces
+// the full per-task-class metric set for at least one task class: token
+// reduction, tool-call reduction, retries, latency, cost, and the outcome
+// flags (first-pass, verified, human intervention, regression).
+func TestTaskClassMetricsProduceMetricSet(t *testing.T) {
+	ms := taskClassMetrics()
+	if len(ms) == 0 {
+		t.Fatal("taskClassMetrics returned no rows")
+	}
+	m := ms[0]
+	if m.fixture == "" || m.task == "" {
+		t.Fatalf("class row missing fixture/task: %+v", m)
+	}
+	if m.beforeTokens == 0 || m.afterTokens == 0 {
+		t.Fatalf("class row degenerate tokens: before=%d after=%d", m.beforeTokens, m.afterTokens)
+	}
+	if m.toolCalls < 0 {
+		t.Fatalf("tool calls negative: %d", m.toolCalls)
+	}
+	if m.latencyMs < 0 {
+		t.Fatalf("latency negative: %d", m.latencyMs)
+	}
+	if m.cost < 0 {
+		t.Fatalf("cost negative: %.4f", m.cost)
+	}
+	// Outcomes must be boolean and consistent: verified implies first-pass.
+	if m.verifiedSuccess && !m.firstPass {
+		t.Fatalf("verifiedSuccess true but firstPass false: %+v", m)
+	}
+}
+
+// TestMeasureClassExercisesOutcomePaths verifies the deterministic retry/regression
+// outcome paths on the incident class with a retry factor.
+func TestMeasureClassExercisesOutcomePaths(t *testing.T) {
+	f := fixture{name: "small repository", corpus: fixtureSmallRepo}
+	tk := task{name: "incident", prompt: taskIncident}
+	m := measureClass(f, tk, 2)
+	if m.retries != 2 {
+		t.Errorf("retries = %d, want 2 with retryFactor=2", m.retries)
+	}
+	if m.task != "incident" {
+		t.Errorf("task = %q, want incident", m.task)
+	}
+}

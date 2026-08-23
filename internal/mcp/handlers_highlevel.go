@@ -4,14 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"github.com/JayveerPrajapati/kern/internal/agent"
-	"github.com/JayveerPrajapati/kern/internal/agents"
 	"github.com/JayveerPrajapati/kern/internal/app"
 	"github.com/JayveerPrajapati/kern/internal/domain"
-	"github.com/JayveerPrajapati/kern/internal/flight"
 	"github.com/JayveerPrajapati/kern/internal/governance"
 	"github.com/JayveerPrajapati/kern/internal/loop"
-	"github.com/JayveerPrajapati/kern/internal/memory"
 	"github.com/JayveerPrajapati/kern/internal/runtime"
 	"github.com/JayveerPrajapati/kern/internal/whatif"
 	"strings"
@@ -128,10 +124,17 @@ func (s *Server) handleVerify(ctx context.Context, args map[string]any) (string,
 		if err != nil {
 			return "", err
 		}
-		v := p.Verify(types)
+		// Phase 2.2: kern_verify now routes through TaskService so the
+		// verification is recorded as an artifact on an authoritative Task.
+		ts := app.NewTaskService(p, nil).WithPRProvider(app.AutoPRProvider())
+		t, v, err := ts.Verify(types)
+		if err != nil {
+			return "", err
+		}
 		var vb strings.Builder
 		fmt.Fprintf(&vb, "verdict: %s\n", v.Verdict)
 		fmt.Fprintf(&vb, "summary: %s\n", v.Summary)
+		fmt.Fprintf(&vb, "\n[task: %s — state: %s]\n", t.ID, t.State)
 		return vb.String(), nil
 
 	}
@@ -190,11 +193,14 @@ func (s *Server) handleWhatIf(ctx context.Context, args map[string]any) (string,
 		if err != nil {
 			return "", err
 		}
-		_, text, err := p.WhatIf(whatif.ChangeKind(kind), change, newTarget)
+		// Phase 2.2: kern_what_if routes through TaskService so the impact and
+		// risk are recorded as artifacts on an authoritative Task.
+		ts := app.NewTaskService(p, nil).WithPRProvider(app.AutoPRProvider())
+		t, text, err := ts.WhatIf(whatif.ChangeKind(kind), change, newTarget)
 		if err != nil {
 			return "", err
 		}
-		return text, nil
+		return text + fmt.Sprintf("\n[task: %s — state: %s]\n", t.ID, t.State), nil
 
 	}
 }
@@ -227,20 +233,21 @@ func (s *Server) handleImpact(ctx context.Context, args map[string]any) (string,
 func (s *Server) handleAgents(ctx context.Context, args map[string]any) (string, error) {
 	{
 		root := resolveRoot(argString(args, "root"))
-		_, reg, err := agents.StandardTeam()
+		// Route through the app layer: build the shared Platform + TaskService so
+		// the specialist role list and the task registry are the authoritative
+		// ones (Architecture Invariant 1: interfaces don't orchestrate engines
+		// directly).
+		p, err := app.New(root)
 		if err != nil {
 			return "", err
 		}
-		reg.SetTaskStore(agent.NewTaskStore(root))
+		ts := app.NewTaskService(p, nil)
 		var ab strings.Builder
 		fmt.Fprintln(&ab, "specialists:")
-		for _, ag := range reg.All() {
-			fmt.Fprintf(&ab, "  %s (role %s)\n", ag.ID, ag.Type)
-			if len(ag.Capabilities) > 0 {
-				fmt.Fprintf(&ab, "    capabilities: %s\n", strings.Join(ag.Capabilities, ", "))
-			}
+		for _, r := range ts.Agents() {
+			fmt.Fprintf(&ab, "  %s (role %s)\n", r.Name, r.Role)
 		}
-		tasks := reg.ListTasks()
+		tasks := ts.List()
 		fmt.Fprintf(&ab, "tasks: %d\n", len(tasks))
 		for _, t := range tasks {
 			fmt.Fprintf(&ab, "  %s [%s] %s: %s\n", t.ID, t.State, t.Type, t.Input)
@@ -265,12 +272,15 @@ func (s *Server) handleLoop(ctx context.Context, args map[string]any) (string, e
 			}
 			level = parsed
 		}
-		cfg := loop.LoopConfig{Root: root, Level: level, Mem: memory.NewMemoryStore(root), Recorder: flight.New(root)}
-		l, err := loop.NewLoop(cfg)
+		// Phase 2.2: kern_loop routes through TaskService.RunLoop so the run is
+		// tracked on an authoritative Task and recorded as an artifact. The
+		// handler no longer orchestrates the loop engine inline.
+		p, err := app.New(root)
 		if err != nil {
 			return "", err
 		}
-		res, err := l.Run(intent, nil)
+		ts := app.NewTaskService(p, nil).WithPRProvider(app.AutoPRProvider())
+		t, res, err := ts.RunLoop(intent, level)
 		if err != nil {
 			return "", err
 		}
@@ -289,6 +299,7 @@ func (s *Server) handleLoop(ctx context.Context, args map[string]any) (string, e
 		if res.Learned != nil {
 			fmt.Fprintf(&lb, "learned: %s\n", res.Learned.ID)
 		}
+		fmt.Fprintf(&lb, "\n[task: %s — state: %s]\n", t.ID, t.State)
 		return lb.String(), nil
 
 	}

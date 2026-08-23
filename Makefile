@@ -22,6 +22,13 @@ build-treesitter:
 test:
 	go test ./...
 
+# test-race runs the test suite with the Go race detector. It is slower than
+# `test` but catches data races in the event bus, gateway, stores, and loop.
+# This is the deterministic-verification path for concurrency-sensitive code
+# (Global Validation: go test -race ./...).
+test-race:
+	go test -race ./...
+
 vet:
 	go vet ./...
 

@@ -6,6 +6,7 @@
 package agents
 
 import (
+	"sort"
 	"strings"
 
 	"github.com/JayveerPrajapati/kern/internal/agent"
@@ -154,4 +155,157 @@ func containsAny(s string, subs ...string) bool {
 		}
 	}
 	return false
+}
+
+// RoutingContext carries the Phase 9.4 dynamic routing inputs that influence
+// which agent roles execute a task. It extends the basic intent/task-type
+// classification with repository context, policy constraints, and per-role
+// historical success so routing can honor the full set of inputs described in
+// the plan. All routing decisions derived from it are deterministic — no LLM,
+// no network, no map-iteration nondeterminism.
+//
+// HistoricalSuccess maps an agent/role ID to its historical success rate in
+// the range [0,1]. Roles with a higher rate are preferred, everything else
+// being equal.
+type RoutingContext struct {
+	// Intent is the free-form task description (same input as ClassifyTask).
+	Intent string
+	// TaskType is an optional explicit task type, e.g. "incident", "modernize".
+	TaskType string
+	// Repository is the target repository/service name (may be empty).
+	Repository string
+	// Language is the dominant language of the change (informational today).
+	Language string
+	// Policy is the governance policy label, e.g. "governed", "high-risk",
+	// "production", "sandbox-only" (may be empty). It biases which roles run.
+	Policy string
+	// HistoricalSuccess maps agent/role ID -> success rate in [0,1]. Higher is
+	// preferred. May be nil.
+	HistoricalSuccess map[string]float64
+}
+
+// Kind returns the [TaskKind] for this routing context by delegating to
+// [ClassifyTask], preserving backward compatibility with the existing
+// classification entry point.
+func (r RoutingContext) Kind() TaskKind {
+	return ClassifyTask(r.Intent, r.TaskType)
+}
+
+// RankRoles returns the candidate agent roles sorted by suitability for this
+// routing context. Ranking is deterministic and considers, in order of bias:
+//   - repository match: a candidate role whose lowercase name appears as a
+//     substring of the (lowercased) repository is boosted;
+//   - policy match: if Policy is non-empty, roles implied by the policy (e.g.
+//     "security" for "high-risk", "sre" for "production") are boosted;
+//   - historical success: candidates present in HistoricalSuccess are boosted
+//     by their success rate, so higher-success roles rank higher.
+//
+// The result is ordered score-descending, with alphabetical order as the
+// tie-breaker, so the output is fully deterministic regardless of input map
+// iteration order.
+func (r RoutingContext) RankRoles(candidates []string) []string {
+	type scored struct {
+		role  string
+		score float64
+	}
+
+	repo := strings.ToLower(r.Repository)
+	policyRoles := policyRolesFor(strings.ToLower(strings.TrimSpace(r.Policy)))
+
+	list := make([]scored, 0, len(candidates))
+	for _, c := range candidates {
+		role := strings.ToLower(c)
+		score := 0.0
+
+		// Repository bias: the role's name appears inside the repository.
+		if repo != "" && strings.Contains(repo, role) {
+			score += 1.0
+		}
+
+		// Policy bias: role is implied by the active policy.
+		for _, pr := range policyRoles {
+			if pr == role {
+				score += 2.0
+			}
+		}
+
+		// Historical success: prefer roles that have performed well.
+		if v, ok := r.HistoricalSuccess[c]; ok && v > 0 {
+			score += v
+		}
+
+		list = append(list, scored{role: c, score: score})
+	}
+
+	// Stable sort: score desc, then alphabetical. Stable sort plus an
+	// alphabetical tie-breaker makes the result deterministic.
+	sort.SliceStable(list, func(i, j int) bool {
+		if list[i].score != list[j].score {
+			return list[i].score > list[j].score
+		}
+		return list[i].role < list[j].role
+	})
+
+	out := make([]string, 0, len(list))
+	for _, s := range list {
+		out = append(out, s.role)
+	}
+	return out
+}
+
+// RouteTeam returns the ordered agent roles for this routing context. It
+// starts from the pipeline roles selected for the classified [TaskKind] and
+// reorders them by [RoutingContext.RankRoles] so repository, policy, and
+// historical-success influences are honored where they apply. It never returns
+// an empty slice: if ranking yields nothing useful it falls back to the
+// pipeline roles in their natural order.
+func (r *RoutingContext) RouteTeam() []string {
+	return r.route()
+}
+
+// RouteFor is an alias for [RoutingContext.RouteTeam]; both produce the same
+// deterministic, policy/repository/history-aware role ordering for this
+// routing context.
+func (r *RoutingContext) RouteFor() []string {
+	return r.route()
+}
+
+// route is the shared implementation behind RouteTeam and RouteFor.
+func (r *RoutingContext) route() []string {
+	stages := SelectPipeline(r.Kind())
+	if len(stages) == 0 {
+		return []string{}
+	}
+
+	natural := make([]string, 0, len(stages))
+	for _, s := range stages {
+		natural = append(natural, string(s.role))
+	}
+
+	// Overlay the repository/policy/history ranking. RankRoles always returns
+	// the same number of roles as its input, so this can only reorder the
+	// pipeline set — it can never drop roles or produce an empty result.
+	ranked := r.RankRoles(natural)
+	if len(ranked) == 0 {
+		return natural
+	}
+	return ranked
+}
+
+// policyRolesFor maps a (lowercased) policy label to the set of roles it
+// biases toward. Unknown or empty policies return no roles so they do not
+// affect ranking.
+func policyRolesFor(policy string) []string {
+	switch policy {
+	case "high-risk", "high risk":
+		return []string{"security"}
+	case "production", "governed-prod", "prod":
+		return []string{"sre"}
+	case "governed":
+		return []string{"planner", "reviewer"}
+	case "sandbox-only", "sandbox":
+		return []string{"tester", "reviewer"}
+	default:
+		return nil
+	}
 }

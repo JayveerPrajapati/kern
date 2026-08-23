@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -12,9 +13,11 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/domain"
 	"github.com/JayveerPrajapati/kern/internal/eventbus"
 	"github.com/JayveerPrajapati/kern/internal/execution"
+	"github.com/JayveerPrajapati/kern/internal/flight"
 	"github.com/JayveerPrajapati/kern/internal/governance"
 	"github.com/JayveerPrajapati/kern/internal/incident"
 	"github.com/JayveerPrajapati/kern/internal/learning"
+	"github.com/JayveerPrajapati/kern/internal/loop"
 	"github.com/JayveerPrajapati/kern/internal/memory"
 	"github.com/JayveerPrajapati/kern/internal/modernization"
 	"github.com/JayveerPrajapati/kern/internal/prprovider"
@@ -49,6 +52,12 @@ type TaskService struct {
 	agentID    string              // identity of the calling interface (Invariant 6)
 	prProvider prprovider.Provider // PR creation provider (default Noop)
 	deployer   deployment.Deployer // deployer for the Deploy method (default Noop)
+	scopes     map[string]domain.TaskScope
+	// sharedCorr is the single process-wide correlation service shared by the
+	// correlate / investigate / deploy / observe lanes (Phase 13.3). It is built
+	// lazily over the platform runtime source so every lane reasons over the
+	// same source and lookback window.
+	sharedCorr *runtime.SharedCorrelator
 }
 
 // NewTaskService creates a TaskService for the given Platform. It creates a
@@ -72,6 +81,7 @@ func NewTaskService(p *Platform, bus *eventbus.Bus) *TaskService {
 		agentID:    "kern", // default identity; override via WithAgentID
 		prProvider: prprovider.NoopProvider{},
 		deployer:   deployment.NewDeployerFromEnv(),
+		scopes:     map[string]domain.TaskScope{},
 	}
 }
 
@@ -132,6 +142,72 @@ func (s *TaskService) Store() *agent.TaskStore { return s.store }
 // linked artifact chain via Get/GetByTask/List.
 func (s *TaskService) Artifacts() *ArtifactStore { return s.arts }
 
+// Risk runs the context engine against a proposed change and returns a focused
+// risk view (level, factors, mitigation) rather than the full packet. It is the
+// app-layer (TaskService) equivalent of Platform.Risk — the shared method the
+// CLI (`kern risk`) and REST (`POST /v1/risk`) both call. It makes Risk a
+// first-class application service so interfaces never reach into the engine
+// directly.
+func (s *TaskService) Risk(change string) (domain.ContextPacket, string, error) {
+	if s.platform == nil {
+		return domain.ContextPacket{}, "", fmt.Errorf("task service: platform not configured")
+	}
+	return s.platform.Risk(change)
+}
+
+// Firewall returns the shared governance firewall backing this service. It
+// makes Policy a first-class application service: interfaces gate risk,
+// permissions, and approvals through the single shared firewall instead of
+// constructing their own.
+func (s *TaskService) Firewall() *governance.Firewall {
+	if s.platform == nil {
+		return nil
+	}
+	return s.platform.Firewall()
+}
+
+// AuditLog returns the shared tamper-evident audit log backing this service. It
+// makes Audit a first-class application service so interfaces read the same
+// authoritative governance trail the running firewall writes.
+func (s *TaskService) AuditLog() *governance.AuditLog {
+	if fw := s.Firewall(); fw != nil {
+		return fw.AuditLog()
+	}
+	return nil
+}
+
+// Agents returns the standard specialist team role list. It makes Agent a
+// first-class application service: interfaces ask the service for the available
+// specialist roles instead of importing the agents engine directly.
+func (s *TaskService) Agents() []agents.RoleInfo {
+	return agents.AllRoles()
+}
+
+// MemoryRecall recalls the up-to-5 most relevant past lessons for a query from
+// the engineering memory store. It makes Memory a first-class application
+// service, delegating to the same memory the analysis/incident engines read.
+func (s *TaskService) MemoryRecall(query string) []string {
+	if s.platform == nil {
+		return nil
+	}
+	entries := memory.Recall(s.platform.Root(), query, 5)
+	out := make([]string, 0, len(entries))
+	for _, e := range entries {
+		out = append(out, e.Text)
+	}
+	return out
+}
+
+// MemoryStore returns the shared engineering memory store. It exposes the
+// underlying store for callers that need its richer API while keeping the
+// recall/semantic path on MemoryRecall.
+func (s *TaskService) MemoryStore() *memory.MemoryStore {
+	if s.platform == nil {
+		return nil
+	}
+	return s.platform.Memory()
+}
+
 // Create makes a new Task for the given intent and submits it to the registry.
 // The Task starts in CREATED state with the intent as both Input and Intent.
 // Returns the created Task (a pointer into the registry, so state mutations
@@ -140,6 +216,10 @@ func (s *TaskService) Create(intent string) (*agent.Task, error) {
 	t := agent.NewTask("analyze", intent)
 	t.Intent = intent
 	t.CreatedBy = s.agentID
+	t.Requester = s.agentID
+	if s.platform != nil {
+		t.Project = filepath.Base(s.platform.Root())
+	}
 	if err := s.registry.SubmitTask(t); err != nil {
 		return nil, fmt.Errorf("task service: %w", err)
 	}
@@ -202,6 +282,23 @@ func (s *TaskService) Run(intent string) (*domain.RunResult, error) {
 		return nil, err
 	}
 
+	// Phase 6.4 unified policy precheck: run identity/scope/permission/
+	// environment/risk through one gate so the caller can see the decision
+	// before execution. It is advisory here (execution is gated separately);
+	// the precheck result is surfaced on the RunResult.
+	precheck := s.PolicyPrecheck(context.Background(), domain.PrecheckRequest{
+		AgentID:     s.agentID,
+		TaskID:      t.ID,
+		Resource:    compiled.Scope,
+		Action:      actionForIntent(compiled.Type),
+		Environment: compiled.Environment,
+		Scope: domain.TaskScope{
+			TaskID: t.ID,
+			Paths:  []string{compiled.Scope},
+			Envs:   []string{compiled.Environment, "development", "staging"},
+		},
+	})
+
 	// Determine approval state and next action.
 	approvalState := "none"
 	nextAction := "execute workflow"
@@ -221,9 +318,27 @@ func (s *TaskService) Run(intent string) (*domain.RunResult, error) {
 		Risk:          risk,
 		ApprovalState: approvalState,
 		NextAction:    nextAction,
+		Precheck:      &precheck,
 	}
 	s.persist(t)
 	return result, nil
+}
+
+// actionForIntent maps an intent type to the representative governed action
+// used in the unified policy precheck (Phase 6.4).
+func actionForIntent(it domain.IntentType) string {
+	switch it {
+	case domain.IntentDeploy:
+		return "deploy"
+	case domain.IntentCodeChange, domain.IntentModernization:
+		return "write"
+	case domain.IntentSecurity:
+		return "scan"
+	case domain.IntentAudit:
+		return "audit"
+	default:
+		return "read"
+	}
 }
 
 func capabilityNames(caps []domain.Capability) []string {
@@ -232,6 +347,208 @@ func capabilityNames(caps []domain.Capability) []string {
 		names = append(names, c.Name)
 	}
 	return names
+}
+
+// PolicyPrecheck runs the unified policy precheck (Phase 6.4). It combines the
+// five pre-execution gates — identity, scope, permission (firewall), environment,
+// and preliminary risk — into a single PrecheckResult so a caller (MCP, CLI,
+// REST, or the Run entry point) can see an ALLOW/DENY decision up front without
+// orchestrating separate governance calls. It never mutates state; it is the
+// read-only gate that precedes execution.
+//
+// The gate order follows the firewall's fail-closed model: environment, then
+// path/scope, then firewall permission+risk. Any gate failure denies.
+func (s *TaskService) PolicyPrecheck(ctx context.Context, req domain.PrecheckRequest) domain.PrecheckResult {
+	res := domain.PrecheckResult{
+		Environment: req.Environment,
+		Scope:       req.Resource,
+	}
+
+	// 1. Environment gate from the unified scope.
+	if !req.Scope.CheckEnv(req.Environment) {
+		res.Allowed = false
+		res.Denied = true
+		res.Risk = domain.Risk{Level: domain.RiskCritical, Blocked: true}
+		res.DenyReason = &domain.DenyReason{
+			Stage: "env", AgentID: req.AgentID, TaskID: req.TaskID,
+			Resource: req.Resource, Action: req.Action,
+			Reason: "environment " + req.Environment + " is outside the task scope",
+			Risk:   res.Risk,
+		}
+		return res
+	}
+
+	// 2. Scope/path gate from the unified scope.
+	if !req.Scope.CheckPath(req.Resource) {
+		res.Allowed = false
+		res.Denied = true
+		res.Risk = domain.Risk{Level: domain.RiskCritical, Blocked: true}
+		res.DenyReason = &domain.DenyReason{
+			Stage: "boundary", AgentID: req.AgentID, TaskID: req.TaskID,
+			Resource: req.Resource, Action: req.Action,
+			Reason: "resource " + req.Resource + " is outside the task scope",
+			Risk:   res.Risk,
+		}
+		return res
+	}
+
+	// 3. Permission (firewall) + preliminary risk. An unconfigured firewall is
+	// treated as permissive for the precheck (execution is gated separately);
+	// when present, it is authoritative for identity/permission/risk/approval.
+	fw := s.Firewall()
+	if fw != nil {
+		allowed, risk, approval, fwErr := fw.Check(req.AgentID, req.Resource, req.Action)
+		if fwErr != nil || !allowed {
+			res.Allowed = false
+			res.Denied = true
+			res.Risk = risk
+			res.RequiredApproval = approval
+			reason := "firewall policy denied"
+			if fwErr != nil {
+				reason = fwErr.Error()
+			}
+			res.DenyReason = &domain.DenyReason{
+				Stage: "firewall", AgentID: req.AgentID, TaskID: req.TaskID,
+				Resource: req.Resource, Action: req.Action, Reason: reason,
+				Risk: risk, RequiredApproval: approval,
+			}
+			return res
+		}
+		res.Risk = risk
+		res.RequiredApproval = approval
+	}
+
+	// Passed all gates.
+	res.Allowed = true
+	res.Denied = false
+	return res
+}
+
+// RunLoop is the task-scoped closed-loop entry point (Phase 2.2). It creates an
+// authoritative Task for the intent, runs the closed loop at the requested
+// autonomy level, records the run as an artifact, and returns the Task plus the
+// loop Result so the interface layer can render it. It replaces the previous
+// inline loop.NewLoop(...).Run(...) orchestration in the MCP handler: the
+// service owns the loop so every interface gets task tracking and an audit
+// trail.
+func (s *TaskService) RunLoop(intent string, level loop.Autonomy) (*agent.Task, *loop.Result, error) {
+	if s.platform == nil {
+		return nil, nil, fmt.Errorf("task service: platform not configured")
+	}
+	t, err := s.Create(intent)
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := t.Transition(domain.TaskAnalyzing); err != nil {
+		s.fail(t, err.Error())
+		return t, nil, err
+	}
+	s.publish(eventbus.TaskUpdated, t.ID, map[string]string{"state": "ANALYZING"})
+
+	root := s.platform.Root()
+	cfg := loop.LoopConfig{
+		Root:     root,
+		Level:    level,
+		Mem:      memory.NewMemoryStore(root),
+		Recorder: flight.New(root),
+	}
+	l, err := loop.NewLoop(cfg)
+	if err != nil {
+		s.fail(t, err.Error())
+		return t, nil, err
+	}
+	if s.bus != nil {
+		l.WithBus(s.bus)
+	}
+
+	res, err := l.Run(intent, nil)
+	if res == nil {
+		res = &loop.Result{Intent: intent, Level: level}
+	}
+	t.Output = fmt.Sprintf("level: %s, stages: %d, deployed: %v", level, len(res.Stages), res.Deployed)
+	t.AddStep(agent.Step{
+		Action:     "loop",
+		AgentID:    "loop-engine",
+		StartedAt:  t.UpdatedAt,
+		FinishedAt: time.Now(),
+		Result:     fmt.Sprintf("deployed: %v, healthy: %v", res.Deployed, res.ObservedHealthy),
+		Status:     "success",
+	})
+
+	// Record the loop run as an artifact in the audit chain.
+	s.recordArtifact(domain.ArtifactPlan, t.ID, "loop-engine",
+		fmt.Sprintf("loop run: %s, %d stages, deployed=%v", res.Intent, len(res.Stages), res.Deployed),
+		"", "loop:run")
+
+	if err != nil {
+		s.fail(t, err.Error())
+		return t, res, err
+	}
+
+	if err := t.Complete(t.Output); err != nil {
+		s.fail(t, err.Error())
+		return t, res, err
+	}
+	s.persist(t)
+	s.publish(eventbus.TaskCompleted, t.ID, map[string]string{"state": "COMPLETED"})
+	return t, res, nil
+}
+
+// SetTaskScope attaches the unified task scope (paths + envs) to a task. It is
+// the same scope that gates context/memory/artifact/runtime uniformly through
+// authorizeResource (Phase 7.3). Interfaces set it once when a task is scoped;
+// unset tasks fall back to an allow-all scope (deny nothing).
+func (s *TaskService) SetTaskScope(taskID string, scope domain.TaskScope) {
+	if s.scopes == nil {
+		s.scopes = map[string]domain.TaskScope{}
+	}
+	s.scopes[taskID] = scope
+}
+
+// TaskScope returns the unified scope registered for a task, or an allow-all
+// scope when none was set. It is the single authoritative scope the service
+// applies uniformly across context, memory, artifacts, and runtime.
+func (s *TaskService) TaskScope(taskID string) domain.TaskScope {
+	if s.scopes == nil {
+		return domain.TaskScope{TaskID: taskID}
+	}
+	if sc, ok := s.scopes[taskID]; ok {
+		return sc
+	}
+	return domain.TaskScope{TaskID: taskID}
+}
+
+// authorizeResource is the single policy checkpoint for every resource access
+// (Phase 7.3 unified task policy). It takes the task's SAME TaskScope and
+// applies it uniformly regardless of the resource kind — context, memory,
+// artifact, or runtime. A value that is outside the task's path/environment
+// scope is denied for context, memory, artifacts, AND runtime alike: there is
+// exactly one boundary, not four.
+//
+// resourceKind is informational ("context", "memory", "artifact", "runtime")
+// for provenance and auditing; the denial decision is uniform because it is
+// derived from the task scope alone.
+func (s *TaskService) authorizeResource(ctx context.Context, taskID, resourceKind, action, value string) (bool, string) {
+	scope := s.TaskScope(taskID)
+	if !scope.CheckPath(value) {
+		return false, "resource " + value + " is outside the task scope for " + resourceKind
+	}
+	// Environment is a uniform policy dimension too: an action that requires a
+	// forbidden environment is denied across every resource kind.
+	if env, ok := actionEnv(action); ok && !scope.CheckEnv(env) {
+		return false, "environment " + env + " is outside the task scope for " + resourceKind
+	}
+	return true, ""
+}
+
+// actionEnv extracts an environment from an action when the action encodes one
+// (e.g. "read:production"), so the unified boundary can enforce the env gate on
+// any resource kind.
+func actionEnv(action string) (string, bool) {
+	if i := strings.IndexByte(action, ':'); i > 0 && i < len(action)-1 {
+		return action[i+1:], true
+	}
+	return "", false
 }
 
 // Cancel transitions a task to CANCELLED with a reason. The task is persisted
@@ -276,7 +593,11 @@ func (s *TaskService) Retry(taskID string) (*agent.Task, error) {
 		return nil, err
 	}
 	s.persist(t)
-	s.publish(eventbus.TaskUpdated, t.ID, map[string]string{"action": "retry"})
+	s.publish(eventbus.TaskUpdated, t.ID, map[string]string{
+		"action":       "retry",
+		"retry_count":  fmt.Sprintf("%d", t.RetryCount),
+		"retry_reason": t.RetryReason,
+	})
 	return t, nil
 }
 
@@ -290,9 +611,212 @@ func (s *TaskService) Resume(taskID string) (*agent.Task, error) {
 	if err := t.Resume(); err != nil {
 		return nil, err
 	}
+	// Phase 16.2: full reconstruction on resume. The resumed task rehydrates
+	// its ContextPacket and Plan from the persisted artifacts, so a resumed
+	// task is not a shell — it carries the same working context it had when it
+	// was paused/blocked. Best-effort: if reconstruction fails, resume still
+	// succeeds (the task is usable with what it had).
+	s.reconstructContext(t)
 	s.persist(t)
 	s.publish(eventbus.TaskUpdated, t.ID, map[string]string{"action": "resume"})
 	return t, nil
+}
+
+// reconstructContext rehydrates a task's ContextPacket and Plan from its
+// persisted artifacts and rich context snapshot (Phase 16.2 full
+// reconstruction). It is best-effort and never fails the caller: it only
+// restores fields that can be derived from the artifact chain or the most
+// recent persisted snapshot. Existing fields (e.g. a ContextPacket already
+// attached by a fresh analyze) are preserved; snapshot fields are layered on
+// top when present.
+func (s *TaskService) reconstructContext(t *agent.Task) {
+	if t == nil {
+		return
+	}
+	// Build a minimal packet from the artifact chain if the task has none yet.
+	if t.ContextPacket == nil {
+		pkt := &domain.ContextPacket{GeneratedAt: time.Now()}
+		arts, err := s.arts.GetByTask(t.ID)
+		if err == nil {
+			for _, a := range arts {
+				if a.Kind == domain.ArtifactContextPacket && a.Scope != "" {
+					pkt.Task = a.Scope
+					break
+				}
+			}
+		}
+		t.ContextPacket = pkt
+	}
+	// Layer the rich context snapshot (Goal, Decisions, Constraints, Files,
+	// Tests, Risks) on top so a resumed task carries its prior working context.
+	// Best-effort: only the most recent snapshot is considered.
+	if s.snapshots == nil {
+		return
+	}
+	snaps, err := s.snapshots.History(t.ID)
+	if err != nil || len(snaps) == 0 {
+		return
+	}
+	snap := snaps[len(snaps)-1]
+	pkt := t.ContextPacket
+	if pkt.Task == "" && snap.Goal != "" {
+		pkt.Task = snap.Goal
+	}
+	addFacts := func(stmts []string) {
+		for _, stmt := range stmts {
+			if stmt == "" {
+				continue
+			}
+			pkt.Facts = append(pkt.Facts, domain.Claim{
+				Type:      domain.ClaimFact,
+				Statement: stmt,
+				Source:    "resume:snapshot",
+			})
+		}
+	}
+	addFacts(snap.Decisions)
+	addFacts(snap.Constraints)
+	addFacts(snap.Files)
+	addFacts(snap.Tests)
+	addFacts(snap.Risks)
+}
+
+// ReplayRecord carries the metadata a replay needs to be meaningful (Phase
+// 16.3): which repo version, which model, and which configuration produced the
+// task being replayed. Without this, a replayed task is ambiguous.
+type ReplayRecord struct {
+	TaskID       string    `json:"task_id"`
+	RepoVersion  string    `json:"repo_version"`  // git sha / version at the time
+	Model        string    `json:"model"`         // model that ran the original task
+	ConfigHash   string    `json:"config_hash"`   // hash of the config used
+	ReplayedAt   time.Time `json:"replayed_at"`
+}
+
+// ReplayTask reconstructs a task for replay, returning a ReplayRecord with the
+// metadata (repo version, model, config hash) needed to interpret the replay
+// (Phase 16.3). It returns the reconstructed task's current state plus the
+// metadata record.
+func (s *TaskService) ReplayTask(taskID, repoVersion, model, configHash string) (*ReplayRecord, error) {
+	t, err := s.getTaskForMutation(taskID)
+	if err != nil {
+		return nil, err
+	}
+	s.reconstructContext(t)
+	rec := &ReplayRecord{
+		TaskID:      t.ID,
+		RepoVersion: repoVersion,
+		Model:       model,
+		ConfigHash:  configHash,
+		ReplayedAt:  time.Now().UTC(),
+	}
+	return rec, nil
+}
+
+// RunCompare compares two task runs by their artifact chains and snapshot
+// histories (Phase 16.4 run-compare). It reports which artifact kinds differ,
+// whether the tasks reached the same state, and a per-stage verdict. Unlike the
+// raw ArtifactStore.Compare, RunCompare folds in the snapshot history so the
+// run outcome (not just artifacts) is compared.
+func (s *TaskService) RunCompare(taskID1, taskID2 string) (*RunComparison, error) {
+	arts, err := s.Artifacts().Compare(taskID1, taskID2)
+	if err != nil {
+		return nil, err
+	}
+	res := &RunComparison{
+		ArtifactDiff: arts,
+		DigestDiff:   len(arts.DigestDiff),
+		OnlyIn1:      len(arts.OnlyIn1),
+		OnlyIn2:      len(arts.OnlyIn2),
+	}
+	// Snapshot history for each task.
+	h1, _ := s.Snapshots().History(taskID1)
+	h2, _ := s.Snapshots().History(taskID2)
+	res.Snapshots1 = len(h1)
+	res.Snapshots2 = len(h2)
+	if len(h1) > 0 && len(h2) > 0 {
+		res.State1 = string(h1[len(h1)-1].State)
+		res.State2 = string(h2[len(h2)-1].State)
+		res.StateDiffer = res.State1 != res.State2
+	}
+	// Rich run dimensions (Phase 16.4): agent, model, tool-call proxy, cost,
+	// and success, read from each task's record when available. Best-effort:
+	// zero values when a task cannot be fetched or a dimension is unset.
+	t1, _ := s.getTaskForMutation(taskID1)
+	t2, _ := s.getTaskForMutation(taskID2)
+	if t1 != nil {
+		res.Agent1 = t1.AgentID
+		res.ToolCalls1 = len(t1.Steps)
+		res.Success1 = t1.State == domain.TaskCompleted
+		res.Cost1 = costProxy(t1)
+	}
+	if t2 != nil {
+		res.Agent2 = t2.AgentID
+		res.ToolCalls2 = len(t2.Steps)
+		res.Success2 = t2.State == domain.TaskCompleted
+		res.Cost2 = costProxy(t2)
+	}
+	// Verdict: tasks are equivalent when their artifact kinds and final states
+	// match with no digest differences.
+	res.Equivalent = !res.StateDiffer && res.DigestDiff == 0 && res.OnlyIn1 == 0 && res.OnlyIn2 == 0
+	return res, nil
+}
+
+// costProxy is a deterministic stand-in for the model cost of a task when no
+// measured cost is recorded. It derives a 0..1 proxy from the task's step
+// count so richer run comparisons have a comparable "cost" signal without
+// inventing a currency. Zero when the task has no steps.
+func costProxy(t *agent.Task) float64 {
+	if t == nil || len(t.Steps) == 0 {
+		return 0
+	}
+	n := float64(len(t.Steps))
+	if n > 100 {
+		n = 100
+	}
+	return n / 100
+}
+
+// RunComparison is the run-compare result (Phase 16.4).
+type RunComparison struct {
+	ArtifactDiff *ArtifactComparison
+	DigestDiff   int
+	OnlyIn1      int
+	OnlyIn2      int
+	Snapshots1   int
+	Snapshots2   int
+	State1       string
+	State2       string
+	StateDiffer  bool
+	Equivalent   bool
+
+	// Rich run dimensions (Phase 16.4). Populated best-effort from each task's
+	// record when available; zero values when unavailable.
+	Agent1     string
+	Agent2     string
+	Model1     string
+	Model2     string
+	ToolCalls1 int
+	ToolCalls2 int
+	Cost1      float64
+	Cost2      float64
+	Success1   bool
+	Success2   bool
+}
+
+// Pause blocks a task with a reason, recording its PriorState so Resume can
+// return to it. Idempotent: if the task is already BLOCKED, it is a no-op. The
+// task is persisted and a task.blocked event is published with the pause reason.
+func (s *TaskService) Pause(taskID, reason string) error {
+	t, err := s.getTaskForMutation(taskID)
+	if err != nil {
+		return err
+	}
+	if err := t.Pause(reason); err != nil {
+		return err
+	}
+	s.persist(t)
+	s.publish(eventbus.TaskBlocked, t.ID, map[string]string{"action": "pause", "reason": reason})
+	return nil
 }
 
 // Rollback transitions a PR_CREATED / DEPLOYING / OBSERVING task to
@@ -322,6 +846,22 @@ func (s *TaskService) HumanTakeover(taskID, agentID string) error {
 	}
 	s.persist(t)
 	s.publish(eventbus.TaskBlocked, t.ID, map[string]string{"action": "human_takeover", "agent": agentID})
+	return nil
+}
+
+// ReturnToAgent hands a human-takeover (BLOCKED) task back to an agent. It
+// resumes the task to its prior state and reassigns the AgentID. Mirrors
+// HumanTakeover's structure: get, mutate, persist, publish.
+func (s *TaskService) ReturnToAgent(taskID, agentID string) error {
+	t, err := s.getTaskForMutation(taskID)
+	if err != nil {
+		return err
+	}
+	if err := t.ReturnToAgent(agentID); err != nil {
+		return err
+	}
+	s.persist(t)
+	s.publish(eventbus.TaskUpdated, t.ID, map[string]string{"action": "return_to_agent", "agent": agentID})
 	return nil
 }
 
@@ -402,6 +942,11 @@ func (s *TaskService) analyzeTaskOpts(t *agent.Task, change string, complete boo
 	// Record the ContextPacket as the root artifact of the chain.
 	s.recordArtifact(domain.ArtifactContextPacket, t.ID, "context-engine",
 		"context packet: "+change, "", "context:analyze")
+	// Record the AnalysisReport artifact (P10.4) linked as a child of the
+	// context packet so the analysis is a typed, traceable artifact in the chain.
+	s.recordArtifact(domain.ArtifactAnalysisReport, t.ID, "context-engine",
+		"analysis: "+change,
+		s.lastArtifactID(t.ID, domain.ArtifactContextPacket), "context:analyze")
 
 	if complete {
 		if err := t.Complete(text); err != nil {
@@ -459,6 +1004,11 @@ func (s *TaskService) WhatIf(kind whatif.ChangeKind, change, newTarget string) (
 	s.recordArtifact(domain.ArtifactImpactReport, t.ID, "whatif-engine",
 		fmt.Sprintf("impact: %d affected, risk=%s", len(imp.Affected), imp.Risk),
 		s.lastArtifactID(t.ID, domain.ArtifactContextPacket), "whatif:simulate")
+	// Record the RiskReport artifact (P10.4) so the risk assessment is a typed,
+	// traceable artifact in the chain alongside the impact report.
+	s.recordArtifact(domain.ArtifactRiskReport, t.ID, "whatif-engine",
+		fmt.Sprintf("risk=%s", imp.Risk),
+		s.lastArtifactID(t.ID, domain.ArtifactImpactReport), "whatif:risk")
 
 	if err := t.Complete(text); err != nil {
 		s.fail(t, err.Error())
@@ -747,6 +1297,29 @@ func (s *TaskService) Verify(types []string) (*agent.Task, verification.Verifica
 	s.recordArtifact(domain.ArtifactVerificationReport, t.ID, "verification-engine",
 		fmt.Sprintf("verdict: %s, summary: %s", res.Verdict, res.Summary),
 		s.lastArtifactID(t.ID, domain.ArtifactImpactReport), "verification:verify")
+
+	// Phase 10.4: also emit the typed sub-report artifacts (test, security,
+	// architecture) so the safe-change slice's required artifact set
+	// (ContextPacket, AnalysisReport, ImpactReport, RiskReport, Plan,
+	// CodePatch, TestReport, SecurityReport, ArchitectureReport,
+	// VerificationReport, Diff, PullRequest, Audit) is fully covered by the
+	// lifecycle, not just the verification kinds.
+	if res.UnitTests != nil {
+		ok := res.UnitTests.OK
+		s.recordArtifact(domain.ArtifactTestReport, t.ID, "verification-engine",
+			fmt.Sprintf("tests: passed=%d failed=%d skipped=%d ok=%v", res.UnitTests.Passed, res.UnitTests.Failed, res.UnitTests.Skipped, ok),
+			s.lastArtifactID(t.ID, domain.ArtifactVerificationReport), "verification:test")
+	}
+	if res.Security != nil {
+		s.recordArtifact(domain.ArtifactSecurityReport, t.ID, "verification-engine",
+			fmt.Sprintf("security: findings=%d critical=%d high=%d low=%d ok=%v", res.Security.Count, res.Security.Critical, res.Security.High, res.Security.Low, res.Security.OK),
+			s.lastArtifactID(t.ID, domain.ArtifactTestReport), "verification:security")
+	}
+	if res.Architecture != nil {
+		s.recordArtifact(domain.ArtifactArchitectureReport, t.ID, "verification-engine",
+			fmt.Sprintf("architecture: violations=%d ok=%v", len(res.Architecture.Violations), res.Architecture.OK),
+			s.lastArtifactID(t.ID, domain.ArtifactSecurityReport), "verification:architecture")
+	}
 
 	// Gate completion on the verification verdict: a failed verification must
 	// never yield a COMPLETED task (reliability: verification failure → task
@@ -1264,7 +1837,33 @@ func (s *TaskService) Observe(taskID string) (*agent.Task, error) {
 	}
 	s.persist(t)
 	s.publish(eventbus.TaskCompleted, t.ID, map[string]string{"state": "COMPLETED"})
+	// Record the Audit artifact (P10.4) as the finalize point of the workflow:
+	// after the task completes, the whole lifecycle is summarized in a typed,
+	// traceable audit artifact linked to the last PR/deployment artifact.
+	s.recordAuditArtifact(t.ID, "audit trail for "+t.Intent)
 	return t, nil
+}
+
+// recordAuditArtifact records an ArtifactAudit finalize artifact for a task.
+// It is best-effort and non-breaking: it links the audit trail to the most
+// recent pull-request or deployment artifact in the chain (falling back to an
+// empty parent when neither exists). createdBy is "audit-engine" and the
+// provenance is "audit:finalize".
+func (s *TaskService) recordAuditArtifact(taskID, intent string) {
+	if s.arts == nil {
+		return
+	}
+	parentID := s.lastArtifactID(taskID, domain.ArtifactPullRequest)
+	if parentID == "" {
+		parentID = s.lastArtifactID(taskID, domain.ArtifactDeployment)
+	}
+	arts, err := s.arts.GetByTask(taskID)
+	if err != nil {
+		return
+	}
+	summary := fmt.Sprintf("audit trail for %s (%d artifacts)", intent, len(arts))
+	s.recordArtifact(domain.ArtifactAudit, taskID, "audit-engine",
+		summary, parentID, "audit:finalize")
 }
 
 // renderPRBody generates a PR description from the Task's structured artifacts
@@ -1336,6 +1935,21 @@ func truncate(s string, n int) string {
 	return s[:n] + "…"
 }
 
+// correlator returns the single shared correlation service for this TaskService
+// (Phase 13.3). It is built lazily once over the platform's runtime source so
+// every lane that reasons over runtime-to-code correlation (correlate,
+// investigate, deploy, observe) shares the exact same source + lookback window.
+func (s *TaskService) correlator() *runtime.SharedCorrelator {
+	if s.sharedCorr == nil {
+		src := s.platform.RuntimeSource()
+		if src == nil {
+			src = runtime.NewStore()
+		}
+		s.sharedCorr = runtime.NewSharedCorrelator(src, incident.DefaultLookback)
+	}
+	return s.sharedCorr
+}
+
 // Correlate runs the runtime correlation engine against a production alert and
 // records the result as a Task (Phase 14). It creates a Task, runs the
 // Correlator + CorrelateChain, attaches the deep evidence chain
@@ -1359,8 +1973,9 @@ func (s *TaskService) Correlate(alert domain.Alert) (*agent.Task, runtime.Correl
 	if src == nil {
 		src = runtime.NewStore()
 	}
-	correlator := runtime.NewCorrelator(src, 30*time.Minute)
-	chain := correlator.CorrelateChain(alert)
+	// Phase 13.3: use the single shared correlation service so this lane reasons
+	// over the same source/window as investigate/deploy/observe.
+	chain := s.correlator().CorrelateChain(alert)
 
 	t.Output = renderCorrelationText(chain)
 	t.AddStep(agent.Step{
@@ -1407,11 +2022,15 @@ func (s *TaskService) InvestigateIncident(alert domain.Alert) (*agent.Task, *dom
 	if src == nil {
 		src = runtime.NewStore()
 	}
+	// Phase 13.3: use the single shared correlation service so this lane reasons
+	// over the same source/window as correlate/deploy/observe.
+	shared := s.correlator()
 	eng, err := incident.NewEngineWithGraph(s.platform.Root(), s.platform.Graph(), src, s.platform.Memory(), s.platform.Firewall())
 	if err != nil {
 		s.fail(t, err.Error())
 		return t, nil, "", err
 	}
+	eng.WithSharedCorrelator(shared)
 	if s.bus != nil {
 		eng.WithBus(s.bus)
 	}
@@ -1557,6 +2176,38 @@ func (s *TaskService) Modernize() (*agent.Task, modernization.ExtractionPlan, st
 	s.persist(t)
 	s.publish(eventbus.TaskCompleted, t.ID, map[string]string{"state": "COMPLETED"})
 	return t, plan, t.Output, nil
+}
+
+// ModernizePhaseTasks materializes each extraction phase as its own task
+// (Phase 12.3: one task per phase, not a single task for the whole plan). Each
+// phase-task records an artifact and is linked by a parent reference to the
+// plan task. It returns the created phase tasks.
+func (s *TaskService) ModernizePhaseTasks(plan modernization.ExtractionPlan, parentTaskID string) ([]*agent.Task, error) {
+	var out []*agent.Task
+	for i := range plan.Phases {
+		phase := &plan.Phases[i]
+		pt, err := s.Create(fmt.Sprintf("modernize phase %d: extract %s", phase.Phase, phase.Context))
+		if err != nil {
+			return out, err
+		}
+		pt.Scope = "service:" + phase.Context
+		pt.CreatedBy = "modernization-analyzer"
+		// Link the phase task to its plan task so the audit trail can trace a
+		// phase back to the plan that produced it (Phase 12.3).
+		pt.ParentID = parentTaskID
+		phase.TaskID = pt.ID
+		if err := pt.Transition(domain.TaskCompleted); err == nil {
+			pt.Output = renderModernizePhaseText(*phase)
+			s.persist(pt)
+		}
+		// Record an artifact for the phase (a phase task is an auditable unit).
+		s.recordArtifact(domain.ArtifactArchitectureReport, pt.ID, "modernization-analyzer",
+			fmt.Sprintf("phase %d: extract %s (risk %s)", phase.Phase, phase.Context, phase.RiskLevel),
+			s.lastArtifactID(parentTaskID, domain.ArtifactArchitectureReport), "modernization:phase")
+		s.publish(eventbus.TaskCreated, pt.ID, map[string]string{"kind": "modernize-phase", "parent": parentTaskID})
+		out = append(out, pt)
+	}
+	return out, nil
 }
 
 // fail marks a Task FAILED, persists it, and publishes a task.failed event.

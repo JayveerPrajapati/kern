@@ -446,3 +446,41 @@ func TestMemoryReasonField(t *testing.T) {
 		t.Errorf("Reason = %q", m.Reason)
 	}
 }
+
+func TestStoreSupersede(t *testing.T) {
+	s := NewMemoryStore(t.TempDir())
+	m1, _ := s.Add(domain.Memory{Type: domain.MemoryConstraint, Scope: "svc:x", Content: "use redis for cache"})
+	// Supersede with a newer memory of the same scope+type.
+	m2, err := s.Supersede(domain.Memory{Type: domain.MemoryConstraint, Scope: "svc:x", Content: "use dynamodb for cache"})
+	if err != nil {
+		t.Fatalf("Supersede: %v", err)
+	}
+	if m2.Status != domain.MemoryCurrent {
+		t.Errorf("new memory status = %q, want current", m2.Status)
+	}
+	old, _ := s.Get(m1.ID)
+	if old.Status != domain.MemorySuperseded {
+		t.Errorf("old memory status = %q, want superseded (15.4)", old.Status)
+	}
+	// CurrentMemories must exclude the superseded one.
+	cur, _ := s.CurrentMemories(domain.MemoryConstraint)
+	if len(cur) != 1 || cur[0].ID != m2.ID {
+		t.Errorf("current memories = %+v, want only the new one", cur)
+	}
+}
+
+func TestStoreMarkHistorical(t *testing.T) {
+	s := NewMemoryStore(t.TempDir())
+	m, _ := s.Add(domain.Memory{Type: domain.MemoryLesson, Content: "lesson", Scope: "svc"})
+	if err := s.MarkHistorical(m.ID); err != nil {
+		t.Fatalf("MarkHistorical: %v", err)
+	}
+	cur, _ := s.CurrentMemories(domain.MemoryLesson)
+	if len(cur) != 0 {
+		t.Errorf("historical memory should be excluded from current: %+v", cur)
+	}
+	got, err := s.Get(m.ID)
+	if err != nil || got.Status != domain.MemoryHistorical {
+		t.Errorf("memory status = %q, want historical (15.4)", got.Status)
+	}
+}

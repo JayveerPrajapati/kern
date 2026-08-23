@@ -239,7 +239,33 @@ func (p *Platform) WhatIf(kind whatif.ChangeKind, change, newTarget string) (wha
 		return whatif.Impact{}, "", err
 	}
 	imp := whatif.Simulate(p.graph, whatif.Change{Kind: kind, Target: target, NewTarget: newTarget})
+	// Phase 12.1: what-if output previously omitted the architecture, memory,
+	// and runtime evidence dimensions. Populate them from the platform's own
+	// deterministic sources so the impact is complete.
+	populateWhatIfEvidence(p, &imp, target)
 	return imp, renderWhatIfText(kind, change, target, imp), nil
+}
+
+// populateWhatIfEvidence fills the Impact's architecture/historical/runtime
+// evidence dimensions (Phase 12.1) from the platform's firewall and memory. All
+// sources are deterministic; a nil store/firewall leaves the dimension empty.
+func populateWhatIfEvidence(p *Platform, imp *whatif.Impact, target string) {
+	// Architecture violations: ask the firewall about the affected resource.
+	// A denial surfaces as a violation; an allowed (or unknown-agent) call
+	// leaves the dimension empty.
+	if p.fw != nil {
+		if _, _, _, fwErr := p.fw.Check("whatif", target, "modify"); fwErr != nil {
+			imp.ArchitectureViolations = append(imp.ArchitectureViolations, fwErr.Error())
+		}
+	}
+	// Historical evidence: recall incident lessons related to the target so
+	// prior incidents on this symbol/service inform the impact estimate.
+	if p.mem != nil {
+		recalled, _ := p.mem.Recall(memory.Query{Type: domain.MemoryIncident, Text: target, Limit: 3})
+		for _, m := range recalled {
+			imp.HistoricalEvidence = append(imp.HistoricalEvidence, m.Content)
+		}
+	}
 }
 
 // Verify runs the verification engine against the requested types (default

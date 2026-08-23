@@ -2,6 +2,7 @@ package context
 
 import (
 	"testing"
+	"time"
 
 	"github.com/JayveerPrajapati/kern/internal/domain"
 )
@@ -51,5 +52,75 @@ func TestCheckConsistencySameSourceNoConflict(t *testing.T) {
 	report := CheckConsistency(claims)
 	if len(report.Conflicts) != 0 {
 		t.Fatalf("same-source claims should not conflict, got %d", len(report.Conflicts))
+	}
+}
+
+// TestConflictResultEnum verifies Phase 14.2: the overall ConflictResult enum.
+func TestConflictResultEnum(t *testing.T) {
+	// Empty claims -> UNKNOWN.
+	r := CheckConsistency(nil)
+	if r.Classification() != domain.ConflictUnknown {
+		t.Errorf("empty report = %q, want UNKNOWN", r.Classification())
+	}
+
+	// Conflicting claims -> CONFLICT.
+	claims := []domain.Claim{
+		{Scope: "svc", Source: "GRAPH", Statement: "svc is healthy", Timestamp: time.Now()},
+		{Scope: "svc", Source: "RUNTIME", Statement: "svc is down", Timestamp: time.Now()},
+	}
+	r2 := CheckConsistency(claims)
+	if r2.Classification() != domain.ConflictPresent {
+		t.Errorf("conflict report = %q, want CONFLICT", r2.Classification())
+	}
+}
+
+// TestConflictExplanationPopulated verifies Phase 14.4: each conflict carries an
+// explanation of why it was flagged.
+func TestConflictExplanationPopulated(t *testing.T) {
+	claims := []domain.Claim{
+		{Scope: "svc", Source: "GRAPH", Statement: "x=true", Timestamp: time.Now()},
+		{Scope: "svc", Source: "RUNTIME", Statement: "x=false", Timestamp: time.Now()},
+	}
+	r := CheckConsistency(claims)
+	if len(r.Conflicts) != 1 {
+		t.Fatalf("conflicts = %d, want 1", len(r.Conflicts))
+	}
+	if r.Conflicts[0].Explanation == "" {
+		t.Error("conflict should have an explanation (14.4)")
+	}
+}
+
+// TestStaleDetection verifies Phase 14.3: a conflict where one side is stale is
+// attributed to staleness, and an all-stale agreeing group yields STALE.
+func TestStaleDetection(t *testing.T) {
+	old := time.Now().Add(-10 * 24 * time.Hour) // older than staleness bound
+	now := time.Now()
+	claims := []domain.Claim{
+		{Scope: "svc", Source: "GIT", Statement: "svc health = degraded", Timestamp: old},
+		{Scope: "svc", Source: "RUNTIME", Statement: "svc health = healthy", Timestamp: now},
+	}
+	r := CheckConsistency(claims)
+	if len(r.Conflicts) != 1 {
+		t.Fatalf("conflicts = %d, want 1", len(r.Conflicts))
+	}
+	if r.Conflicts[0].StaleSource != "GIT" {
+		t.Errorf("stale source = %q, want GIT (14.3)", r.Conflicts[0].StaleSource)
+	}
+}
+
+// TestAllStaleGroupMarksStale verifies an agreeing group whose evidence is all
+// stale classifies as STALE, not CONFLICT.
+func TestAllStaleGroupMarksStale(t *testing.T) {
+	old := time.Now().Add(-10 * 24 * time.Hour)
+	claims := []domain.Claim{
+		{Scope: "svc", Source: "GRAPH", Statement: "svc is healthy", Timestamp: old},
+		{Scope: "svc", Source: "MEMORY", Statement: "svc is healthy", Timestamp: old},
+	}
+	r := CheckConsistency(claims)
+	if r.Classification() != domain.ConflictStale {
+		t.Errorf("all-stale report = %q, want STALE", r.Classification())
+	}
+	if len(r.StaleSubjects) == 0 {
+		t.Error("stale subjects should be recorded (14.3)")
 	}
 }

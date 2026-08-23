@@ -125,6 +125,85 @@ func (s *MemoryStore) Add(m domain.Memory) (domain.Memory, error) {
 	return m, nil
 }
 
+// Supersede marks an older memory with the same type+scope as superseded and
+// promotes a new one to current (Phase 15.4 memory supersession). This makes
+// the newest memory authoritative while retaining the older one for audit.
+// The new memory may be an existing entry (promote) or a fresh one (replace).
+func (s *MemoryStore) Supersede(newMemory domain.Memory) (domain.Memory, error) {
+	if strings.TrimSpace(newMemory.Content) == "" {
+		return domain.Memory{}, nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	ms := s.load()
+	now := time.Now().UTC()
+
+	// Find all memories of the same type+scope that are not already superseded.
+	var out []domain.Memory
+	for _, m := range ms {
+		if m.Type == newMemory.Type && m.Scope == newMemory.Scope && m.ID != newMemory.ID {
+			m.Status = domain.MemorySuperseded
+		}
+		out = append(out, m)
+	}
+
+	newMemory.Status = domain.MemoryCurrent
+	if newMemory.ID == "" {
+		newMemory.ID = newID(newMemory.Content, ms)
+	}
+	if newMemory.CreatedAt.IsZero() {
+		newMemory.CreatedAt = now
+	}
+	newMemory.UpdatedAt = now
+	out = append(out, newMemory)
+	if len(out) > maxTypedEntries {
+		out = out[len(out)-maxTypedEntries:]
+	}
+	if err := s.save(out); err != nil {
+		return domain.Memory{}, err
+	}
+	return newMemory, nil
+}
+
+// CurrentMemories returns only the memories that are current (not superseded
+// and not historical) for the given type (Phase 15.4). An empty type returns
+// all current memories.
+func (s *MemoryStore) CurrentMemories(memType domain.MemoryType) ([]domain.Memory, error) {
+	ms := s.load()
+	out := make([]domain.Memory, 0, len(ms))
+	for _, m := range ms {
+		if m.Status == domain.MemorySuperseded || m.Status == domain.MemoryHistorical {
+			continue
+		}
+		if memType != "" && m.Type != memType {
+			continue
+		}
+		out = append(out, m)
+	}
+	sortRecency(out)
+	return out, nil
+}
+
+// MarkHistorical retires a memory to the historical state (Phase 15.4),
+// removing it from the authoritative set without deleting it.
+func (s *MemoryStore) MarkHistorical(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	ms := s.load()
+	updated := false
+	for i := range ms {
+		if ms[i].ID == id {
+			ms[i].Status = domain.MemoryHistorical
+			updated = true
+			break
+		}
+	}
+	if !updated {
+		return os.ErrNotExist
+	}
+	return s.save(ms)
+}
+
 // List returns all memories, optionally filtered by type. If memType is empty,
 // returns all types. Results are sorted by CreatedAt descending.
 func (s *MemoryStore) List(memType domain.MemoryType) ([]domain.Memory, error) {
