@@ -150,8 +150,8 @@ jobs:
           # 'sha256sum -c SHA256SUMS' works from a download directory).
           (cd dist && sha256sum kern-*.tar.gz kern-*.zip) > dist/SHA256SUMS
           # Ready-to-use Homebrew formula: url + sha256 filled in for this tag.
-          sed -e "s|v0.1.0|${tag}|g" \
-              -e "s|REPLACE_WITH_SOURCE_TARBALL_SHA256|${sha}|" \
+          sed -e "s|__KERN_VERSION__|${tag}|g" \
+              -e "s|__KERN_SHA256__|${sha}|" \
               homebrew/kern.rb > kern.rb
           echo "tag=${tag}" >> "$GITHUB_OUTPUT"
           echo "sha=${sha}" >> "$GITHUB_OUTPUT"
@@ -165,7 +165,7 @@ jobs:
           See [README](https://github.com/${{ github.repository }}/blob/main/README.md) for install options:
           - \`curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/main/install.sh | sh\`
           - \`go install github.com/${{ github.repository }}/cmd/kern@$tag\`
-          - \`brew install kern\` — needs the tap repo published; run \`scripts/publish-tap.sh\` (formula also attached as \`kern.rb\`)
+          - \`brew install kern\` — from the tap repo (auto-published by this workflow). Formula also attached as \`kern.rb\`.
 
           Assets include a \`SHA256SUMS\` file (\`install.sh\` verifies against it) and
           a filled-in Homebrew formula for the tap repo.
@@ -174,3 +174,37 @@ jobs:
             --title "$tag" \
             --notes-file /tmp/release-notes.md \
             --draft=false
+
+      # Auto-publish the Homebrew formula to the tap repo so `brew tap <owner>/tap
+      # && brew install kern` works for every released tag WITHOUT running
+      # publish-tap.sh by hand. The tap repo (github.com/<owner>/homebrew-tap)
+      # must exist once (created via `scripts/publish-tap.sh` or manually); after
+      # that this step updates Formula/kern.rb on each tag push.
+      #
+      # Requires a PAT with `repo` scope (GITHUB_TOKEN cannot push to another
+      # repo) stored as the `TAP_PUBLISH_TOKEN` repository secret. The tap owner
+      # defaults to the repo owner; override with the `TAP_OWNER` repo variable.
+      - name: Publish Homebrew tap
+        if: ${{ env.TAP_PUBLISH_TOKEN != '' }}
+        env:
+          TAP_TOKEN: ${{ secrets.TAP_PUBLISH_TOKEN }}
+          TAP_OWNER: ${{ vars.TAP_OWNER }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF#refs/tags/}"
+          owner="${TAP_OWNER:-${{ github.repository_owner }}}"
+          echo "==> publishing kern ${tag} to tap ${owner}/homebrew-tap"
+          git clone "https://${TAP_TOKEN}@github.com/${owner}/homebrew-tap.git" tap
+          mkdir -p tap/Formula
+          cp kern.rb tap/Formula/kern.rb
+          cd tap
+          git add Formula/kern.rb
+          if git diff --cached --quiet; then
+            echo "==> formula unchanged, nothing to push"
+            exit 0
+          fi
+          git -c "user.name=${owner}" -c "user.email=${owner}@users.noreply.github.com" \
+            commit -m "kern ${tag}: update formula"
+          git push
+          echo "==> done: brew tap ${owner}/tap && brew install kern"

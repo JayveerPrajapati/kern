@@ -44,6 +44,9 @@ const (
 	IncidentFixVerified    IncidentStatus = "FIX_VERIFIED"
 	IncidentPRCreated      IncidentStatus = "PR_CREATED"
 	IncidentClosed         IncidentStatus = "CLOSED"
+	// IncidentFixBlocked indicates the fix pipeline's risk step (Phase 11)
+	// denied the candidate fix (governance/risk) before verification.
+	IncidentFixBlocked IncidentStatus = "FIX_BLOCKED"
 )
 
 // Hypothesis is a candidate explanation for an incident, evidence-backed and
@@ -83,6 +86,13 @@ type Incident struct {
 	FixDiff            string
 	Verification       string // human-readable verification summary
 	PRBody             string // PR body once created
+	PRURL              string // web URL of the created PR (empty when no real PR)
+	PRNumber           int    // PR number (0 when no real PR was created)
+	// FixRisk is the governance risk assessment of the candidate fix (Phase
+	// 11). It is set by the fix pipeline's risk step: either the risk level
+	// (e.g. "LOW") when the fix is allowed, or a blocking reason when the fix
+	// was denied before verification.
+	FixRisk string
 	CreatedAt          time.Time
 	UpdatedAt          time.Time
 	Evidence           []Evidence

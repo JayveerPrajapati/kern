@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tasks &amp; Efficiency &mdash; Kern Web Console</title>
+<style>
+:root { --bg:#0f1115; --panel:#171a21; --panel2:#1c2029; --fg:#e6e8ee; --muted:#9aa3b2; --accent:#4f8cff; --border:#262b36; --good:#3fb950; --warn:#d29922; --bad:#f85149; }
+* { box-sizing:border-box; }
+body { margin:0; background:var(--bg); color:var(--fg); font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif; }
+header { padding:16px 28px; border-bottom:1px solid var(--border); background:var(--panel); display:flex; align-items:center; justify-content:space-between; gap:16px; flex-wrap:wrap; }
+header .brand h1 { margin:0; font-size:20px; }
+header .brand p { margin:4px 0 0; color:var(--muted); font-size:12px; }
+.topnav { display:flex; gap:4px; }
+.topnav a { color:var(--muted); text-decoration:none; font-size:12px; padding:6px 12px; border-radius:6px; border:1px solid transparent; }
+.topnav a:hover { color:var(--fg); background:var(--panel2); }
+.topnav a.active { color:var(--accent); border-color:var(--border); background:var(--panel2); }
+main { padding:20px 28px; display:grid; grid-template-columns:repeat(auto-fit,minmax(340px,1fr)); gap:16px; }
+section.panel { background:var(--panel); border:1px solid var(--border); border-radius:8px; padding:16px; }
+section.panel h2 { margin:0 0 12px; font-size:15px; text-transform:uppercase; letter-spacing:.04em; color:var(--muted); }
+.kpi { display:grid; grid-template-columns:repeat(auto-fit,minmax(90px,1fr)); gap:10px; }
+.kpi div { background:var(--panel2); border:1px solid var(--border); border-radius:6px; padding:10px; text-align:center; }
+.kpi b { display:block; font-size:22px; }
+.kpi span { font-size:11px; color:var(--muted); }
+table { width:100%; border-collapse:collapse; font-size:12px; }
+th,td { text-align:left; padding:6px 8px; border-bottom:1px solid var(--border); vertical-align:top; }
+th { color:var(--muted); font-weight:600; }
+.muted { color:var(--muted); }
+.good { color:var(--good); }
+.warn { color:var(--warn); }
+.bad { color:var(--bad); }
+.badge { display:inline-block; padding:1px 7px; border-radius:10px; font-size:11px; background:var(--panel2); border:1px solid var(--border); }
+.full { grid-column:1 / -1; }
+td a { color:var(--accent); text-decoration:none; }
+td a:hover { text-decoration:underline; }
+.eff-bar { height:5px; border-radius:3px; background:var(--panel2); border:1px solid var(--border); overflow:hidden; margin-top:3px; min-width:60px; }
+.eff-bar > i { display:block; height:100%; background:var(--accent); }
+.tbl-wrap { overflow-x:auto; }
+.intent { max-width:260px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+</style>
+</head>
+<body>
+<header>
+  <div class="brand">
+    <h1>Tasks &amp; Efficiency</h1>
+    <p>Per-task context quality &amp; outcome &mdash; project root: {{.Root}}</p>
+  </div>
+  <nav class="topnav">
+    <a href="/">Dashboard</a>
+    <a href="/approvals">Approvals</a>
+    <a href="/risks">Risks</a>
+    <a href="/artifacts">Artifacts</a>
+    <a href="/audit">Audit</a>
+    <a href="/system-map">System Map</a>
+    <a href="/incidents">Incidents</a>
+    <a href="/tasks" class="active">Tasks</a>
+    <a href="/efficiency">Efficiency</a>
+    <a href="/agents">Agents</a>
+  </nav>
+</header>
+<main>
+  <section class="panel full">
+    <h2>Summary</h2>
+    <div class="kpi">
+      <div><b>{{.TaskCount}}</b><span>tasks</span></div>
+      <div><b>{{.CompletedCount}}</b><span>completed</span></div>
+      <div><b>{{.InProgressCount}}</b><span>in progress</span></div>
+      <div><b>{{.FailedCount}}</b><span>failed</span></div>
+      <div><b>{{printf "%.0f" .AvgTokenReduction}}%</b><span>avg token reduction</span></div>
+      <div><b>{{printf "%.0f" .AvgRelevance}}%</b><span>avg relevance</span></div>
+    </div>
+    <p class="muted" style="margin-top:12px">Each row projects a task's context-quality and outcome report. Token reduction is vs a ~4&times; raw-context baseline; relevance is the share of facts carrying evidence. Click a task id for the full lifecycle detail.</p>
+  </section>
+
+  <section class="panel full">
+    <h2>Tasks</h2>
+    {{if .Tasks}}
+    <div class="tbl-wrap">
+    <table>
+      <tr>
+        <th>Task</th><th>Intent</th><th>State</th><th>Sufficiency</th>
+        <th>Tokens</th><th>Reduction</th><th>Facts</th><th>Relevance</th>
+        <th>Risks</th><th>Outcome</th><th>Steps</th><th>Artifacts</th><th>Duration</th>
+      </tr>
+      {{range .Tasks}}
+      <tr>
+        <td><a href="{{.DetailURL}}">{{.TaskID}}</a>{{if .RolledBack}} <span class="badge bad">rolled back</span>{{end}}</td>
+        <td class="intent" title="{{.Intent}}">{{.Intent}}</td>
+        <td><span class="badge">{{.State}}</span></td>
+        <td><span class="badge {{if eq .Sufficiency "sufficient"}}good{{else if eq .Sufficiency "partial"}}warn{{else}}bad{{end}}">{{.Sufficiency}}</span></td>
+        <td>{{.TokenCount}}</td>
+        <td>{{printf "%.0f" .TokenReduction}}%</td>
+        <td>{{.FactsBacked}}/{{.FactsTotal}}</td>
+        <td>
+          {{printf "%.0f" .Relevance}}%
+          <div class="eff-bar"><i style="width:{{printf "%.0f" .Relevance}}%"></i></div>
+        </td>
+        <td>{{.RisksCount}}</td>
+        <td><span class="badge {{if eq .Outcome "success"}}good{{else if eq .Outcome "in_progress"}}warn{{else}}bad{{end}}">{{.Outcome}}</span></td>
+        <td>{{.Steps}}</td>
+        <td>{{.Artifacts}}</td>
+        <td>{{.Duration}}</td>
+      </tr>
+      {{end}}
+    </table>
+    </div>
+    {{else}}<p class="muted">No tasks submitted yet. POST a task to <code>/v1/tasks</code> to populate this view.</p>{{end}}
+  </section>
+</main>
+</body>
+</html>

@@ -103,6 +103,18 @@ const (
 	ClaimRecommendation ClaimType = "RECOMMENDATION" // suggested action
 )
 
+// CorrelationConfidence is the confidence of a single correlation link or the
+// overall correlation contract (Phase 13.2). A link is FACTUAL when it is
+// backed by direct runtime evidence, INFERRED when it is derived from indirect
+// signals, and UNKNOWN when there is no evidence either way.
+type CorrelationConfidence string
+
+const (
+	CorrelationFactual   CorrelationConfidence = "FACTUAL"
+	CorrelationInferred  CorrelationConfidence = "INFERRED"
+	CorrelationUnknown   CorrelationConfidence = "UNKNOWN"
+)
+
 // Claim is a typed claim about the software system. Every high-value analysis
 // output is a Claim.
 type Claim struct {
@@ -183,7 +195,27 @@ type Memory struct {
 	// F-55): "public", "internal", "confidential", or "restricted". Empty
 	// means unclassified (accessible to all).
 	Classification string
+	// Status is the freshness/supersession state of the memory (Phase 15.4):
+	// "current" by default; "superseded" when a newer memory of the same scope
+	// supersedes it; "historical" when it is no longer active but retained.
+	Status MemoryStatus `json:"status,omitempty"`
 }
+
+// MemoryStatus is the supersession state of a memory (Phase 15.4).
+type MemoryStatus string
+
+const (
+	// MemoryCurrent is the default: the memory is the authoritative, active
+	// fact for its scope.
+	MemoryCurrent MemoryStatus = "current"
+	// MemorySuperseded marks a memory that has been replaced by a newer one
+	// with the same scope (supersession). It is retained for audit but not
+	// surfaced as authoritative.
+	MemorySuperseded MemoryStatus = "superseded"
+	// MemoryHistorical marks a memory that is no longer current but is kept
+	// for historical reference.
+	MemoryHistorical MemoryStatus = "historical"
+)
 
 // Classification levels for Memory (spec §41 F-55). Empty Classification is
 // treated as unclassified ("public", level 0).
@@ -241,6 +273,35 @@ type Risk struct {
 	// ApprovalRequired is true when the change risk is HIGH/CRITICAL and the
 	// governance model requires human approval before the change may proceed.
 	ApprovalRequired bool
+}
+
+// PrecheckRequest is the input to the unified policy precheck (Phase 6.4).
+// It carries every dimension the precheck evaluates in one object: the agent
+// identity, the task's resource/action triple, the task scope (paths + envs),
+// and the environment the change would run in. Interfaces (MCP, CLI, REST)
+// submit a PrecheckRequest instead of hand-building separate identity, scope,
+// permission, and risk checks.
+type PrecheckRequest struct {
+	AgentID     string
+	TaskID      string
+	Resource    string // the governed resource (e.g. a path or tool target)
+	Action      string // the governed action (e.g. "execute", "write", "deploy")
+	Scope       TaskScope
+	Environment string
+}
+
+// PrecheckResult is the outcome of the unified policy precheck. It consolidates
+// identity, scope, permission, environment, and preliminary risk into a single
+// decision object so a caller (or UI) can explain an ALLOW or DENY without
+// re-deriving it from scattered checks.
+type PrecheckResult struct {
+	Allowed          bool
+	Denied           bool
+	DenyReason       *DenyReason
+	Risk             Risk
+	RequiredApproval *Approval
+	Environment      string
+	Scope            string
 }
 
 // Approval is an approval for a high-risk action.

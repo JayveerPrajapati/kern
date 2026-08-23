@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"github.com/JayveerPrajapati/kern/internal/agent"
 	"github.com/JayveerPrajapati/kern/internal/agents"
+	"github.com/JayveerPrajapati/kern/internal/app"
 	"github.com/JayveerPrajapati/kern/internal/cache"
 	"github.com/JayveerPrajapati/kern/internal/code"
 	"github.com/JayveerPrajapati/kern/internal/coder"
@@ -111,17 +112,12 @@ func runLoopCLI(root, levelStr, intent string) (string, error) {
 			return "", err
 		}
 	}
-	cfg := loop.LoopConfig{
-		Root:     root,
-		Level:    level,
-		Mem:      memory.NewMemoryStore(root),
-		Recorder: flight.New(root),
-	}
-	l, err := loop.NewLoop(cfg)
+	p, err := app.New(root)
 	if err != nil {
 		return "", err
 	}
-	res, err := l.Run(intent, nil) // nil = deterministic no-op StepFunc
+	ts := app.NewTaskService(p, nil).WithPRProvider(app.AutoPRProvider())
+	_, res, err := ts.RunLoop(intent, level)
 	if err != nil {
 		return "", err
 	}

@@ -324,3 +324,43 @@ func renderModernizationText(plan modernization.ExtractionPlan) string {
 	}
 	return b.String()
 }
+
+// renderModernizePhaseText renders a single extraction phase as a short,
+// auditable summary used as the phase task's output (Phase 12.3).
+func renderModernizePhaseText(phase modernization.ExtractionPhase) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "MODERNIZE PHASE %d\n", phase.Phase)
+	fmt.Fprintf(&b, "Context: %s\n", phase.Context)
+	if phase.Ownership != "" {
+		fmt.Fprintf(&b, "Ownership: %s\n", phase.Ownership)
+	}
+	fmt.Fprintf(&b, "Risk: %s | Blast radius: %d symbols\n", phase.RiskLevel, phase.BlastRadius)
+	if phase.TaskID != "" {
+		fmt.Fprintf(&b, "Task: %s\n", phase.TaskID)
+	}
+	return b.String()
+}
+
+// renderModernizeCandidates renders the extraction plan as a compact candidate
+// visualization (Phase 12.4): one line per candidate context, annotated with
+// ownership, cohesion, and dependency direction, so a human can scan the
+// extraction surface at a glance.
+func renderModernizeCandidates(plan modernization.ExtractionPlan) string {
+	var b strings.Builder
+	b.WriteString("MODERNIZATION CANDIDATES\n")
+	for _, ctx := range plan.Contexts {
+		fmt.Fprintf(&b, "[%s] files=%d cohesion=%.2f in=%d out=%d",
+			ctx.Name, ctx.FileCount, ctx.Cohesion, ctx.IncomingDeps, ctx.OutgoingDeps)
+		if ctx.Ownership != "" {
+			fmt.Fprintf(&b, " owner=%s", ctx.Ownership)
+		}
+		if len(ctx.Dependencies) > 0 {
+			fmt.Fprintf(&b, " deps=%d", len(ctx.Dependencies))
+		}
+		b.WriteString("\n")
+	}
+	for _, phase := range plan.Phases {
+		fmt.Fprintf(&b, "phase %d -> %s (risk=%s, task=%s)\n", phase.Phase, phase.Context, phase.RiskLevel, phase.TaskID)
+	}
+	return b.String()
+}

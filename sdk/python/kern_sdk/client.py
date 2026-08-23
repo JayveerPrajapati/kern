@@ -141,3 +141,22 @@ class Client:
             raise ValueError("audit() requires a task_id")
         from urllib.parse import quote
         return self._get(f"/v1/audit/{quote(task_id, safe='')}")
+
+    def approve(self, approval_id: str, approver: str) -> dict:
+        """Approve a pending approval (Phase 19 REST: /v1/approve)."""
+        if not approval_id or not approver:
+            raise ValueError("approve() requires approval_id and approver")
+        return self._post("/v1/approve", {"id": approval_id, "approver": approver})
+
+    def reject(self, approval_id: str, approver: str) -> dict:
+        """Reject a pending approval (Phase 19 REST: /v1/reject)."""
+        if not approval_id or not approver:
+            raise ValueError("reject() requires approval_id and approver")
+        return self._post("/v1/reject", {"id": approval_id, "approver": approver})
+
+    def deploy(self, task_id: str, version: str = "") -> dict:
+        """Deploy a task through the task-action alias (Phase 19: /v1/tasks/{id}/deploy)."""
+        if not task_id:
+            raise ValueError("deploy() requires a task_id")
+        from urllib.parse import quote
+        return self._post(f"/v1/tasks/{quote(task_id, safe='')}/deploy", {"version": version})

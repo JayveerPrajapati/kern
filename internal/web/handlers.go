@@ -62,6 +62,31 @@ func (a *App) handleTaskDetail(w http.ResponseWriter, r *http.Request) {
 	_ = a.taskDetailT.Execute(w, data)
 }
 
+// handleAgents serves the HTML agents page at /agents, listing the standard
+// specialist team and their capabilities. It is read-only.
+func (a *App) handleAgents(w http.ResponseWriter, r *http.Request) {
+	data, err := a.buildAgents()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	_ = a.agentsT.Execute(w, data)
+}
+
+// handleTasks serves the HTML tasks/efficiency page at /tasks, listing every
+// submitted task with a compact per-task efficiency report and a link to its
+// detail page. It is read-only.
+func (a *App) handleTasks(w http.ResponseWriter, r *http.Request) {
+	data, err := a.buildTasks()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	_ = a.tasksT.Execute(w, data)
+}
+
 // handleOverview serves the aggregate project overview.
 func (a *App) handleOverview(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, a.buildOverview())

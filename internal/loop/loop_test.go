@@ -126,7 +126,7 @@ func TestLoopLearningSurfacesConstraint(t *testing.T) {
 	}
 
 	// Running the wired learn path writes a lesson and triggers extraction.
-	if _, err := lp.learn("checkout health", true, false); err != nil {
+	if _, err := lp.learn("checkout health", &Result{ObservedHealthy: true}); err != nil {
 		t.Fatalf("learn: %v", err)
 	}
 
@@ -157,7 +157,7 @@ func TestLoopLearningSkippedWhenUnwired(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewLoop: %v", err)
 	}
-	if _, err := lp.learn("checkout health", true, false); err != nil {
+	if _, err := lp.learn("checkout health", &Result{ObservedHealthy: true}); err != nil {
 		t.Fatalf("learn: %v", err)
 	}
 	ms, _ := store.List(domain.MemoryConstraint)
@@ -175,7 +175,7 @@ func TestLearnWritesEpisodicAndLesson(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewLoop: %v", err)
 	}
-	if _, err := lp.learn("greet health", true, true); err != nil {
+	if _, err := lp.learn("greet health", &Result{ObservedHealthy: true, Deployed: true}); err != nil {
 		t.Fatalf("learn: %v", err)
 	}
 

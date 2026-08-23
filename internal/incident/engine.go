@@ -12,6 +12,7 @@
 package incident
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"sort"
@@ -26,6 +27,7 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/index"
 	"github.com/JayveerPrajapati/kern/internal/intelligence"
 	"github.com/JayveerPrajapati/kern/internal/memory"
+	"github.com/JayveerPrajapati/kern/internal/prprovider"
 	"github.com/JayveerPrajapati/kern/internal/runtime"
 	"github.com/JayveerPrajapati/kern/internal/verification"
 )
@@ -42,8 +44,10 @@ type Engine struct {
 	fw     *governance.Firewall
 	appr   *governance.ApprovalWorkflow
 	graph  *intelligence.Graph
-	window time.Duration
-	bus    *eventbus.Bus // optional event publisher; nil = no-op
+	window     time.Duration
+	bus        *eventbus.Bus       // optional event publisher; nil = no-op
+	prProvider prprovider.Provider // PR creation provider (default Noop)
+	shared     *runtime.SharedCorrelator // shared correlation service (Phase 13.3); nil = build own
 }
 
 // NewEngine builds an incident engine for a repository. It indexes the repo and
@@ -67,25 +71,56 @@ func NewEngineWithGraph(root string, g *intelligence.Graph, src runtime.Source, 
 	if g == nil {
 		return nil, errors.New("incident: nil knowledge graph")
 	}
-	return &Engine{
-		root:   root,
-		src:    src,
-		mem:    mem,
-		fw:     fw,
-		appr:   governance.NewApprovalWorkflow(),
-		graph:  g,
-		window: DefaultLookback,
-	}, nil
+	e := &Engine{
+		root:       root,
+		src:        src,
+		mem:        mem,
+		fw:         fw,
+		appr:       governance.NewApprovalWorkflow(),
+		graph:      g,
+		window:     DefaultLookback,
+		prProvider: prprovider.NoopProvider{},
+	}
+	// Phase 13.3: the incident engine shares one correlation service instead of
+	// building its own per Correlate call. It is initialized from the source when
+	// present so all consumers reason over the same runtime; a nil source keeps
+	// the shallow-only behavior. Callers may override it via WithSharedCorrelator.
+	if src != nil {
+		e.shared = runtime.NewSharedCorrelator(src, e.window)
+	}
+	return e, nil
 }
 
 // SetLookback overrides the correlation window.
 func (e *Engine) SetLookback(d time.Duration) { e.window = d }
+
+// WithPRProvider sets the PR provider used by CreateFixPR. If not called, the
+// engine uses NoopProvider (render body only, no network). A nil provider is
+// treated as a request for the NoopProvider.
+func (e *Engine) WithPRProvider(p prprovider.Provider) *Engine {
+	if p != nil {
+		e.prProvider = p
+	} else {
+		e.prProvider = prprovider.NoopProvider{}
+	}
+	return e
+}
 
 // WithBus attaches an optional event bus. When non-nil, the engine publishes
 // incident.created, incident.updated and incident.resolved at the lifecycle
 // transitions. A nil bus is a no-op so the engine keeps working unchanged.
 func (e *Engine) WithBus(b *eventbus.Bus) *Engine {
 	e.bus = b
+	return e
+}
+
+// WithSharedCorrelator overrides the correlation service used by Correlate. This
+// is the dependency-injection point: a caller (e.g. the app/web layer) hands in
+// the SAME *runtime.SharedCorrelator shared by deployment/audit/learning so every
+// lane reasons over one consistent correlator (Phase 13.3). A nil value clears
+// the override and falls back to building a correlator from the engine's source.
+func (e *Engine) WithSharedCorrelator(sc *runtime.SharedCorrelator) *Engine {
+	e.shared = sc
 	return e
 }
 
@@ -156,7 +191,7 @@ func validSeverity(s domain.Severity) bool {
 // correlation chain (service -> deployment -> commit -> symbol -> task/pr/agent)
 // as additive evidence; the shallow result is always preserved.
 func (e *Engine) Correlate(inc *domain.Incident) {
-	corr := runtime.NewCorrelator(e.src, e.window).Correlate(inc.Alert)
+	corr := e.correlator().Correlate(inc.Alert)
 	inc.AffectedService = corr.AffectedService
 	inc.RelatedDeployments = corr.Deployments
 	inc.Status = domain.IncidentInvestigating
@@ -164,7 +199,7 @@ func (e *Engine) Correlate(inc *domain.Incident) {
 
 	// Fold the deep correlation chain in when a runtime source is present.
 	if e.src != nil {
-		chain := runtime.NewCorrelator(e.src, e.window).CorrelateChain(inc.Alert)
+		chain := e.correlator().CorrelateChain(inc.Alert)
 		inc.Evidence = append(inc.Evidence, chainEvidence(chain))
 	}
 
@@ -172,11 +207,66 @@ func (e *Engine) Correlate(inc *domain.Incident) {
 	e.publish(eventbus.Event{Kind: eventbus.IncidentUpdated, Subject: inc.ID, Payload: map[string]string{"status": string(inc.Status)}})
 }
 
-// Resolve marks the incident CLOSED and publishes incident.resolved.
+// correlator returns the correlation service to use: the shared correlator when
+// one has been injected (Phase 13.3), otherwise a fresh correlator built over the
+// engine's source. When no source is present it returns a nil-safe no-op path via
+// NewCorrelator(nil, window) which preserves the prior shallow behavior.
+func (e *Engine) correlator() *runtime.Correlator {
+	if e.shared != nil {
+		return e.shared.Correlator()
+	}
+	return runtime.NewCorrelator(e.src, e.window)
+}
+
+// Resolve marks the incident CLOSED, writes the resolution to engineering
+// memory (Phase 11: wire incident → pattern → memory) so the continuous-learning
+// extractor can surface recurring patterns, and publishes incident.resolved.
 func (e *Engine) Resolve(inc *domain.Incident) {
 	inc.Status = domain.IncidentClosed
 	inc.UpdatedAt = time.Now().UTC()
+
+	// Phase 11 (11.5): persist the resolved incident as an incident-type memory
+	// so the learning extractor can group it with similar incidents and surface
+	// a recurring pattern. The lesson is recorded with provenance "incident"
+	// and the affected service as its scope. A nil root cause is still recorded
+	// (with the incident title) so the memory trail is complete.
+	if e.mem != nil {
+		lesson := buildIncidentLesson(inc)
+		if lesson.Content != "" {
+			if _, err := e.mem.Add(lesson); err == nil {
+				inc.Memories = append(inc.Memories, lesson)
+				e.publish(eventbus.Event{Kind: eventbus.LessonRecorded, Subject: inc.ID, Payload: map[string]string{"service": inc.AffectedService, "memory": lesson.ID}})
+			}
+		}
+	}
+
 	e.publish(eventbus.Event{Kind: eventbus.IncidentResolved, Subject: inc.ID, Payload: map[string]string{"service": inc.AffectedService}})
+}
+
+// buildIncidentLesson assembles the incident-resolution memory. It captures the
+// incident summary, root cause, affected service, and fix verification so the
+// learning extractor has structured content to group and pattern-match on.
+func buildIncidentLesson(inc *domain.Incident) domain.Memory {
+	content := "incident " + inc.ID
+	if inc.AffectedService != "" {
+		content += " in " + inc.AffectedService
+	}
+	content += ": " + inc.Title
+	if inc.RootCause != nil {
+		content += "; root cause: " + inc.RootCause.Summary
+	}
+	if inc.Verification != "" {
+		content += "; fix verified: " + inc.Verification
+	}
+	return domain.Memory{
+		Type:       domain.MemoryIncident,
+		Content:    content,
+		Source:     "incident-engine",
+		Scope:      inc.AffectedService,
+		Tags:       []string{"incident", "resolved", "postmortem"},
+		Subject:    inc.ID,
+		Provenance: "incident:" + inc.ID,
+	}
 }
 
 // RootCause derives candidate hypotheses from the correlated evidence, memory
@@ -220,9 +310,12 @@ func (e *Engine) RootCause(inc *domain.Incident) {
 }
 
 // ApplyAndVerifyFix sandboxes a candidate fix, applies it to the isolated
-// worktree, computes the diff and verifies it (build). On success it records the
-// diff, the verification summary and marks the incident FIX_VERIFIED. The fix is
-// never applied to the live repository — only to the sandbox.
+// worktree, computes the diff, assesses the fix's risk against the governance
+// firewall (Phase 11: risk step in the fix pipeline), verifies it (build), and
+// only marks it FIX_VERIFIED when both the risk is acceptable and the build
+// passes. On success it records the diff, the verification summary, and the
+// risk assessment. The fix is never applied to the live repository — only to
+// the sandbox.
 func (e *Engine) ApplyAndVerifyFix(inc *domain.Incident, apply func(workDir string) error) (string, error) {
 	wt, err := execution.NewWorktree(e.root)
 	if err != nil {
@@ -241,6 +334,33 @@ func (e *Engine) ApplyAndVerifyFix(inc *domain.Incident, apply func(workDir stri
 	inc.FixDiff = diff
 	inc.Status = domain.IncidentFixProposed
 
+	// Phase 11 (11.4) — Risk step in the fix pipeline. Before verifying, assess
+	// whether applying this fix carries an unacceptable risk. When a firewall
+	// is configured, the change is gated against the incident's affected
+	// service; an always-blocked CRITICAL action (or a denied permission)
+	// prevents the fix from proceeding to verification. The risk assessment is
+	// recorded on the incident so it is auditable alongside the fix.
+	if e.fw != nil {
+		allowed, r, approval, fwErr := e.fw.Check("incident-fixer", incidentResource(inc), "fix")
+		// An "unknown agent" means the firewall has no policy for the fixer (a
+		// configuration gap, not a definitive risk denial). The incident engine
+		// has a separate human-approval gate for production changes, so we only
+		// hard-block on a real permission/policy denial.
+		denied := fwErr != nil || !allowed
+		if fwErr != nil && strings.Contains(fwErr.Error(), "unknown agent") {
+			denied = false
+		}
+		if denied {
+			inc.FixRisk = fmt.Sprintf("blocked: %s", reasonOf(fwErr, "fix denied by firewall"))
+			inc.Status = domain.IncidentFixBlocked
+			inc.UpdatedAt = time.Now()
+			e.publish(eventbus.Event{Kind: eventbus.IncidentUpdated, Subject: inc.ID, Payload: map[string]string{"status": string(inc.Status), "risk": string(r.Level)}})
+			return diff, errors.New("fix blocked by governance: " + inc.FixRisk)
+		}
+		_ = approval
+		inc.FixRisk = fmt.Sprintf("%s", r.Level)
+	}
+
 	// Human approval gate is required for production changes; verification
 	// happens on the candidate before a PR is created.
 	res := verification.NewEngine(wt.Dir()).Verify([]string{"build"})
@@ -252,6 +372,61 @@ func (e *Engine) ApplyAndVerifyFix(inc *domain.Incident, apply func(workDir stri
 	inc.UpdatedAt = time.Now()
 	e.publish(eventbus.Event{Kind: eventbus.IncidentUpdated, Subject: inc.ID, Payload: map[string]string{"status": string(inc.Status)}})
 	return diff, nil
+}
+
+// incidentRiskService returns the governance resource the incident's fix is
+// gated against (its affected service, or "production" when unknown).
+func incidentResource(inc *domain.Incident) string {
+	if inc.AffectedService != "" {
+		return inc.AffectedService
+	}
+	return "production"
+}
+
+// reasonOf returns a human-readable failure reason, preferring the firewall
+// error when present.
+func reasonOf(err error, fallback string) string {
+	if err != nil {
+		return err.Error()
+	}
+	return fallback
+}
+
+// InjectRegression builds an incident engine whose runtime source encodes a
+// controlled, known regression so the correlation + root-cause pipeline can
+// deterministically resolve it. It creates a runtime source where a recent
+// commit that touched regressionFile was deployed to the service and is
+// corroborated by error events that reference that same file — exactly the
+// signal the pipeline's deploy-regression hypothesis boosts (see hypotheses).
+//
+// The caller supplies the repository root (used to index the code graph), the
+// service name, the known regression file/symbol to inject, and the memory +
+// firewall stores. It returns an engine and a ready-to-ingest alert for that
+// service. IngestAlert → Correlate → RootCause then resolves the root cause to
+// the injected regression file, and ApplyAndVerifyFix can verify a candidate
+// fix. ctx is reserved for future cancellation and is not yet consulted.
+func InjectRegression(ctx context.Context, root, service, regressionFile string, mem *memory.MemoryStore, fw *governance.Firewall) (*Engine, domain.Alert, error) {
+	now := time.Now().Truncate(time.Second)
+	sha := "deadbeefcafe"
+	st := runtime.NewStore()
+	st.AddDeployment(domain.Deployment{Service: service, CommitSHA: sha, Version: "v1.0.0", DeployedAt: now.Add(-15 * time.Minute)})
+	st.AddCommit(runtime.Commit{SHA: sha, Message: "regression: " + regressionFile, Author: "inject", Files: []string{regressionFile}, CommittedAt: now.Add(-16 * time.Minute)})
+	st.IngestAll([]runtime.Event{
+		{ID: "inj-err-1", Type: runtime.EventError, Service: service, Severity: "critical", Message: "panic in " + regressionFile, Timestamp: now.Add(-time.Minute), Attributes: map[string]string{"file": regressionFile}},
+	})
+
+	eng, err := NewEngine(root, st, mem, fw)
+	if err != nil {
+		return nil, domain.Alert{}, err
+	}
+	alert := domain.Alert{
+		ID:         "inj-alert",
+		Severity:   domain.SeverityCritical,
+		Message:    "injected regression in " + regressionFile,
+		Service:    service,
+		OccurredAt: now,
+	}
+	return eng, alert, nil
 }
 
 // RequestApproval opens a human-approval gate for a production fix. It returns
@@ -284,6 +459,96 @@ func (e *Engine) CreatePR(inc *domain.Incident) string {
 	inc.UpdatedAt = time.Now()
 	e.publish(eventbus.Event{Kind: eventbus.IncidentUpdated, Subject: inc.ID, Payload: map[string]string{"status": string(inc.Status)}})
 	return inc.PRBody
+}
+
+// CreateFixPR creates a PR for a verified incident fix (Phase 11.4: the final
+// "PR" step of the candidate-fix pipeline risk → approval → sandbox → verify →
+// PR). The incident must already be in the IncidentFixVerified state; otherwise
+// it returns an error and does not create a PR. The PR title/body are rendered
+// from the incident regardless of provider outcome, mirroring TaskService.CreatePR:
+// a NoopProvider (default) returns Number=0/URL="" with no error, which is
+// treated as a successful noop that still records the rendered PR body.
+func (e *Engine) CreateFixPR(inc *domain.Incident, branch string) (prprovider.Result, error) {
+	if inc.Status != domain.IncidentFixVerified {
+		return prprovider.Result{}, fmt.Errorf("incident %s must be in FIX_VERIFIED state to create a PR (current: %s)", inc.ID, inc.Status)
+	}
+
+	title, body := renderFixPR(inc)
+
+	// Detect the repo owner/repo; on error fall back to empty so the provider
+	// (Noop by default) does not fail on missing metadata.
+	repo, _ := prprovider.DetectRepo(e.root)
+
+	res, err := e.prProvider.CreatePR(prprovider.Request{
+		Owner: repo.Owner,
+		Repo:  repo.Repo,
+		Title: title,
+		Head:  branch,
+		Base:  "main",
+		Body:  body,
+	})
+	if err != nil {
+		return prprovider.Result{}, fmt.Errorf("create PR for incident %s: %w", inc.ID, err)
+	}
+
+	inc.PRBody = body
+	// NoopProvider returns Number=0/URL="" — a successful noop. Record whatever
+	// the provider returned so a real PR is stamped on the incident.
+	if res != nil {
+		inc.PRURL = res.URL
+		inc.PRNumber = res.Number
+	}
+	inc.Status = domain.IncidentPRCreated
+	inc.UpdatedAt = time.Now()
+	e.publish(eventbus.Event{Kind: eventbus.PRCreated, Subject: inc.ID, Payload: map[string]string{"branch": branch, "pr": fmt.Sprintf("%d", inc.PRNumber)}})
+
+	if res != nil {
+		return *res, nil
+	}
+	return prprovider.Result{}, nil
+}
+
+// FixAndPR completes the incident candidate-fix pipeline in one call:
+// risk → sandbox → verify → PR. It applies the candidate fix in the sandbox via
+// ApplyAndVerifyFix and, on success (verification passed), creates a PR from the
+// verified fix via CreateFixPR. It returns the applied diff and any error; if
+// either step fails it returns the diff produced so far and the error.
+func (e *Engine) FixAndPR(inc *domain.Incident, apply func(workDir string) error, branch string) (string, error) {
+	diff, err := e.ApplyAndVerifyFix(inc, apply)
+	if err != nil {
+		return diff, err
+	}
+	if _, err := e.CreateFixPR(inc, branch); err != nil {
+		return diff, err
+	}
+	return diff, nil
+}
+
+// renderFixPR builds the PR title and body for a verified incident fix.
+func renderFixPR(inc *domain.Incident) (string, string) {
+	title := inc.Title
+	if title == "" {
+		if inc.AffectedService != "" {
+			title = "fix: incident in " + inc.AffectedService + " (" + inc.ID + ")"
+		} else {
+			title = "fix: incident " + inc.ID
+		}
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "fix: %s\n\n", inc.Title)
+	if inc.AffectedService != "" {
+		fmt.Fprintf(&b, "Affected service: %s\n\n", inc.AffectedService)
+	}
+	if inc.RootCause != nil {
+		fmt.Fprintf(&b, "Root cause: %s (service %s)\n\n", inc.RootCause.Summary, inc.RootCause.Service)
+	}
+	if inc.Verification != "" {
+		fmt.Fprintf(&b, "Verification: %s\n\n", inc.Verification)
+	}
+	b.WriteString("```diff\n")
+	b.WriteString(inc.FixDiff)
+	b.WriteString("\n```\n")
+	return title, b.String()
 }
 
 // hypotheses derives ranked candidate explanations deterministically from the

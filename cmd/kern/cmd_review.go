@@ -172,7 +172,8 @@ func runWhatIf(cmd string, rest []string) {
 	if err != nil {
 		fatal("%v", err)
 	}
-	_, text, err := p.WhatIf(whatif.ChangeKind(kind), change, newTarget)
+	ts := app.NewTaskService(p, nil).WithPRProvider(app.AutoPRProvider())
+	_, text, err := ts.WhatIf(whatif.ChangeKind(kind), change, newTarget)
 	if err != nil {
 		fatal("%v", err)
 	}
@@ -266,7 +267,11 @@ func runVerify(rest []string) {
 		if perr != nil {
 			fatal("%v", perr)
 		}
-		v := p.Verify(types)
+		ts := app.NewTaskService(p, nil).WithPRProvider(app.AutoPRProvider())
+		_, v, err := ts.Verify(types)
+		if err != nil {
+			fatal("%v", err)
+		}
 		if f.json {
 			printJSON(v)
 			return

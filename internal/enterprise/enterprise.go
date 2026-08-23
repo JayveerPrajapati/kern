@@ -37,14 +37,15 @@ type Project struct {
 // web.App instances (one per project) under a shared org-level audit
 // log, policy set, memory store, task visibility, and agent registry.
 type Server struct {
-	mu        sync.RWMutex
-	projects  map[string]*projectState           // keyed by project name
-	orgAudit  *governance.AuditLog               // shared org-level audit
-	orgBus    *eventbus.Bus                      // shared org-level event bus
-	store     storage.Store                      // optional shared storage (nil = in-memory)
-	policies  []domain.Policy                    // org-level policies applied to all projects
-	orgMemory *memory.MemoryStore                // shared org-level memory (Phase 23a)
-	orgAgents map[string]*identity.AgentIdentity // shared org-level agent registry (Phase 23d)
+	mu           sync.RWMutex
+	projects     map[string]*projectState           // keyed by project name
+	orgAudit     *governance.AuditLog               // shared org-level audit
+	orgBus       *eventbus.Bus                      // shared org-level event bus
+	store        storage.Store                      // optional shared storage (nil = in-memory)
+	policies     []domain.Policy                    // org-level policies applied to all projects
+	orgMemory    *memory.MemoryStore                // shared org-level memory (Phase 23a)
+	orgAgents    map[string]*identity.AgentIdentity // shared org-level agent registry (Phase 23d)
+	teamRegistry map[string]*OrgTeam                // org-level team registry (Phase 19 P19.3)
 }
 
 type projectState struct {
@@ -60,12 +61,13 @@ type projectState struct {
 // shared state.
 func New() *Server {
 	return &Server{
-		projects:  map[string]*projectState{},
-		orgAudit:  governance.NewAuditLog(),
-		orgBus:    eventbus.New(),
-		policies:  governance.DefaultPolicies(),
-		orgMemory: memory.NewMemoryStore(""), // in-memory org-level store (no root)
-		orgAgents: map[string]*identity.AgentIdentity{},
+		projects:     map[string]*projectState{},
+		orgAudit:     governance.NewAuditLog(),
+		orgBus:       eventbus.New(),
+		policies:     governance.DefaultPolicies(),
+		orgMemory:    memory.NewMemoryStore(""), // in-memory org-level store (no root)
+		orgAgents:    map[string]*identity.AgentIdentity{},
+		teamRegistry: map[string]*OrgTeam{},
 	}
 }
 
@@ -404,7 +406,7 @@ func (s *Server) serveOrgDashboard(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(w, `<li><a href="/%s/">%s</a></li>`, p.Name, p.Name)
 	}
 	fmt.Fprintf(w, "</ul>")
-	fmt.Fprintf(w, `<p><a href="/org/audit">Org Audit</a> | <a href="/org/policies">Org Policies</a> | <a href="/org/memory">Org Memory</a> | <a href="/org/tasks">Org Tasks</a> | <a href="/org/search?q=New">Org Search</a> | <a href="/org/agents">Org Agents</a></p>`)
+	fmt.Fprintf(w, `<p><a href="/org/audit">Org Audit</a> | <a href="/org/policies">Org Policies</a> | <a href="/org/memory">Org Memory</a> | <a href="/org/tasks">Org Tasks</a> | <a href="/org/search?q=New">Org Search</a> | <a href="/org/agents">Org Agents</a> | <a href="/org/teams">Org Teams</a></p>`)
 	fmt.Fprintf(w, "</body></html>")
 }
 
@@ -412,7 +414,8 @@ func (s *Server) serveOrgDashboard(w http.ResponseWriter, r *http.Request) {
 func (s *Server) serveOrgAPI(w http.ResponseWriter, r *http.Request) {
 	path := strings.TrimPrefix(r.URL.Path, "/org")
 	path = strings.Trim(path, "/")
-	switch path {
+	parts := strings.Split(path, "/")
+	switch parts[0] {
 	case "audit":
 		s.serveOrgAudit(w, r)
 	case "policies":
@@ -425,8 +428,24 @@ func (s *Server) serveOrgAPI(w http.ResponseWriter, r *http.Request) {
 		s.serveOrgTasks(w, r)
 	case "search":
 		s.serveOrgSearch(w, r)
+	case "repository":
+		s.serveOrgRepositories(w, r)
+	case "architecture":
+		s.serveOrgArchitecture(w, r)
 	case "agents":
+		// /org/agents[/{id}/teams]
+		if len(parts) == 3 && parts[2] == "teams" {
+			s.serveOrgAgentTeams(w, r, parts[1])
+			return
+		}
 		s.serveOrgAgents(w, r)
+	case "teams":
+		// /org/teams[/{id}]
+		if len(parts) > 1 {
+			s.serveOrgTeam(w, r, parts[1])
+			return
+		}
+		s.serveOrgTeams(w, r)
 	default:
 		http.Error(w, "not found", http.StatusNotFound)
 	}
@@ -464,6 +483,58 @@ func (s *Server) serveOrgProjects(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]any{
 		"projects": info,
 		"count":    len(info),
+	})
+}
+
+// serveOrgRepositories lists the repositories (projects) registered at the
+// org level (Phase 19 P19.3 "repository"). It mirrors the project list but is
+// exposed under the canonical "repository" resource name the spec requires.
+func (s *Server) serveOrgRepositories(w http.ResponseWriter, r *http.Request) {
+	type repoInfo struct {
+		Name string `json:"name"`
+	}
+	projects := s.Projects()
+	info := make([]repoInfo, 0, len(projects))
+	for _, p := range projects {
+		info = append(info, repoInfo{Name: p.Name})
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{
+		"repositories": info,
+		"count":        len(info),
+	})
+}
+
+// serveOrgArchitecture aggregates the architecture report across every project
+// (Phase 19 P19.3 "architecture"). It is intentionally cheap: it returns the
+// per-project root/name and a violations count by delegating to each project's
+// cached web.App architecture builder, skipping projects that fail to build.
+func (s *Server) serveOrgArchitecture(w http.ResponseWriter, r *http.Request) {
+	type projectArch struct {
+		Project    string   `json:"project"`
+		Violations []string `json:"violations"`
+		OK         bool     `json:"ok"`
+	}
+	out := make([]projectArch, 0, len(s.projects))
+	for _, p := range s.projects {
+		app, err := s.appFor(p.project.Name)
+		if err != nil {
+			continue
+		}
+		arch, aerr := app.ArchitectureReport()
+		if aerr != nil {
+			continue
+		}
+		viol := make([]string, 0, len(arch.Violations))
+		for _, v := range arch.Violations {
+			viol = append(viol, v.Symbol)
+		}
+		out = append(out, projectArch{Project: p.project.Name, Violations: viol, OK: arch.OK})
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{
+		"architecture": out,
+		"count":        len(out),
 	})
 }
 
@@ -552,5 +623,85 @@ func (s *Server) serveOrgAgents(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]any{
 		"agents": agents,
 		"count":  len(agents),
+	})
+}
+
+// serveOrgTeams serves the team registry (Phase 19 P19.3).
+//   - GET /org/teams lists all teams as {"teams": [...], "count": N}.
+//   - POST /org/teams creates a team from a JSON OrgTeam body; 400 on a bad
+//     body, 409 on a duplicate/validation error, 201 with the created team on
+//     success.
+func (s *Server) serveOrgTeams(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		teams := s.Teams()
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"teams": teams,
+			"count": len(teams),
+		})
+	case http.MethodPost:
+		var team OrgTeam
+		if err := json.NewDecoder(r.Body).Decode(&team); err != nil {
+			http.Error(w, "enterprise: invalid team body: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		if err := s.CreateTeam(team); err != nil {
+			http.Error(w, err.Error(), http.StatusConflict)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(team)
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// serveOrgTeam serves a single team by ID (Phase 19 P19.3).
+//   - GET /org/teams/{id} returns one team (404 if unknown).
+//   - DELETE /org/teams/{id} removes it (404 if unknown, 204 on success).
+func (s *Server) serveOrgTeam(w http.ResponseWriter, r *http.Request, id string) {
+	switch r.Method {
+	case http.MethodGet:
+		team, ok := s.Team(id)
+		if !ok {
+			http.Error(w, fmt.Sprintf("enterprise: team %q not found", id), http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(team)
+	case http.MethodDelete:
+		if err := s.RemoveTeam(id); err != nil {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// serveOrgAgentTeams serves the teams a given agent belongs to
+// (Phase 19 P19.3, optional): GET /org/agents/{id}/teams. Returns 404 when the
+// agent ID is unknown (fail-closed).
+func (s *Server) serveOrgAgentTeams(w http.ResponseWriter, r *http.Request, agentID string) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	s.mu.RLock()
+	_, known := s.orgAgents[agentID]
+	s.mu.RUnlock()
+	if !known {
+		http.Error(w, fmt.Sprintf("enterprise: agent %q not found", agentID), http.StatusNotFound)
+		return
+	}
+	teams := s.AgentTeams(agentID)
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{
+		"agent": agentID,
+		"teams": teams,
+		"count": len(teams),
 	})
 }

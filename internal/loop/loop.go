@@ -81,6 +81,26 @@ type LoopConfig struct {
 	// exceeded, PAUSES the run (fail-closed): it stops executing subsequent
 	// stages, sets Result.BudgetPaused, and returns immediately.
 	Budget *domain.SafetyBudget
+
+	// MaxRiskLevel is the ceiling for the assessed risk of an intent. When the
+	// assessed risk (AssessRisk) is strictly above this ceiling, the loop PAUSES
+	// with reason "risk_exceeded" before running any write stages. Zero → RiskHigh.
+	MaxRiskLevel domain.RiskLevel
+	// AssessRisk optionally assesses the risk of an intent. When nil, intents are
+	// treated as RiskLow and never trip the risk ceiling (preserves prior
+	// behavior). Wire it to gate high-risk intents behind the MaxRiskLevel ceiling.
+	AssessRisk func(intent string) domain.RiskLevel
+
+	// PauseTrigger optionally lets a caller detect ANY Phase 20.4 pause condition
+	// (scope expansion, confidence drop, unexpected file/tool, policy change,
+	// verification regression) and pause the run. It is called after every stage
+	// completes (and once before the first stage, with an empty stage) and is
+	// handed the accumulating Result and the current stage name. When it returns
+	// ok=true, the loop PAUSES with the returned reason via l.pause(res, reason)
+	// and returns immediately. This makes the loop extensible without hard-coding
+	// every trigger. A nil PauseTrigger never triggers (backward compatible).
+	// The built-in budget/risk/approval pauses are independent and unaffected.
+	PauseTrigger func(res *Result, stage string) (string /*pause reason or ""*/, bool)
 }
 
 // StageResult is the outcome of one loop stage.
@@ -101,7 +121,9 @@ type Result struct {
 	Remembered      []domain.Memory // memories recalled in the remember stage
 	Protected       bool            // true when the protect/approval gate ran and granted
 	Learned         *domain.Memory
-	BudgetPaused    bool // true when the safety budget was exceeded and the loop PAUSED
+	BudgetPaused    bool // true when the safety budget was exceeded and the loop PAUSED (kept for back-compat)
+	Paused          bool   // true when the loop PAUSED for any reason
+	PauseReason     string // reason the loop paused: "budget", "risk_exceeded", "approval", or any reason returned by LoopConfig.PauseTrigger (e.g. "scope_change", "confidence_drop", "unexpected_file", "unexpected_tool", "policy_change", "verification_regression"); empty when not paused
 }
 
 // Loop drives the continuous closed loop.
@@ -156,6 +178,60 @@ func (l *Loop) publish(ev eventbus.Event) {
 	l.bus.Publish(ev)
 }
 
+// pause sets Result.Paused and PauseReason, publishes the loop.paused event with
+// the reason, and marks the current (last-appended) stage as "paused:<reason>".
+// It is the single PAUSE point for the loop: budget exceed, high-risk escalation
+// and approval-required all funnel through it (the budget path also keeps
+// publishing loop.budget_exceeded for back-compat).
+func (l *Loop) pause(res *Result, reason string) {
+	res.Paused = true
+	res.PauseReason = reason
+	l.publish(eventbus.Event{
+		Kind:    eventbus.Kind("loop.paused"),
+		Subject: res.Intent,
+		Payload: map[string]string{"reason": reason},
+	})
+	if n := len(res.Stages); n > 0 {
+		res.Stages[n-1].Status = "paused:" + reason
+	}
+}
+
+// riskRank maps a RiskLevel to an ordering so ceilings can be compared. Unknown
+// levels rank below RiskLow (0) so they never trip a ceiling.
+func riskRank(r domain.RiskLevel) int {
+	switch r {
+	case domain.RiskLow:
+		return 1
+	case domain.RiskMedium:
+		return 2
+	case domain.RiskHigh:
+		return 3
+	case domain.RiskCritical:
+		return 4
+	default:
+		return 0
+	}
+}
+
+// autonomyScore derives the multi-dimension autonomy score for the current run
+// from the configured risk ceiling and, when a budget is wired, the remaining
+// tool-call headroom. It is deterministic and advisory.
+func (l *Loop) autonomyScore() AutonomyScore {
+	risk := l.cfg.MaxRiskLevel
+	if risk == "" {
+		risk = domain.RiskHigh
+	}
+	s := AutonomyScoreFromRisk(risk)
+	if b := l.cfg.Budget; b != nil && b.MaxToolCalls > 0 {
+		remaining := b.MaxToolCalls - b.ToolCallsUsed()
+		if remaining < 0 {
+			remaining = 0
+		}
+		s.SafetyBudgetRatio = float64(remaining) / float64(b.MaxToolCalls)
+	}
+	return s
+}
+
 // Run executes the closed loop for an intent: the deterministic stages (verify,
 // observe, learn) run internally; plan/code/deploy are delegated to step.
 // Stages the autonomy level does not permit are skipped (never jumped). The
@@ -185,6 +261,31 @@ func (l *Loop) Run(intent string, step StepFunc) (*Result, error) {
 		return nil, fmt.Errorf("loop: worktree: %w", err)
 	}
 	defer wt.Cleanup()
+
+	// High-risk escalation (Phase 20.4): if the intent's assessed risk exceeds
+	// the configured ceiling, PAUSE before running any stages instead of
+	// proceeding to write stages. With no AssessRisk wired, intents default to
+	// RiskLow and never trip the ceiling (preserves prior behavior).
+	if l.cfg.AssessRisk != nil {
+		ceiling := l.cfg.MaxRiskLevel
+		if ceiling == "" {
+			ceiling = domain.RiskHigh
+		}
+		if riskRank(l.cfg.AssessRisk(intent)) > riskRank(ceiling) {
+			l.pause(res, "risk_exceeded")
+			return res, nil
+		}
+	}
+
+	// Phase 20.4: run the generalized pause-trigger hook ONCE before the first
+	// stage (stage is "") so a pre-run condition (e.g. a policy change detected
+	// at startup) can pause early. Nil PauseTrigger never triggers.
+	if l.cfg.PauseTrigger != nil {
+		if reason, ok := l.cfg.PauseTrigger(res, ""); ok {
+			l.pause(res, reason)
+			return res, nil
+		}
+	}
 
 	for _, st := range []string{stageIntent, stageRemember, stagePlan, stageCode, stageVerify, stageProtect, stageDeploy, stageObserve, stageLearn} {
 		if !l.cfg.Level.AllowsStage(st) {
@@ -220,6 +321,11 @@ func (l *Loop) Run(intent string, step StepFunc) (*Result, error) {
 				if apprErr != nil {
 					err = apprErr
 					out = "approval denied: " + apprErr.Error()
+					// Approval required but not granted: the change cannot
+					// proceed. Reflect the pause on the result (the stage still
+					// errors so the run fails closed as before).
+					res.Paused = true
+					res.PauseReason = "approval"
 				} else {
 					out = "approved " + ap.ID
 					res.Protected = true
@@ -278,7 +384,7 @@ func (l *Loop) Run(intent string, step StepFunc) (*Result, error) {
 			out = fmt.Sprintf("observed %v", res.ObservedHealthy)
 			l.publish(eventbus.Event{Kind: eventbus.ObserveHealthy, Subject: l.cfg.Service, Payload: map[string]string{"service": l.cfg.Service, "healthy": fmt.Sprintf("%v", res.ObservedHealthy)}})
 		case stageLearn:
-			m, lerr := l.learn(intent, res.ObservedHealthy, res.Deployed)
+			m, lerr := l.learn(intent, res)
 			if lerr != nil {
 				err = lerr
 			} else {
@@ -318,13 +424,28 @@ func (l *Loop) Run(intent string, step StepFunc) (*Result, error) {
 		// the tool-call counter, which drives the budget's Exceeded().
 		l.cfg.Budget.TrackToolCall()
 		if ex, why := l.cfg.Budget.Exceeded(); ex {
+			// PAUSE (fail-closed): stop executing subsequent stages and return.
+			// BudgetPaused stays true for back-compat; Paused/PauseReason also
+			// reflect the pause.
 			res.BudgetPaused = true
+			l.pause(res, "budget")
 			l.publish(eventbus.Event{
 				Kind:    eventbus.Kind("loop.budget_exceeded"),
 				Subject: intent,
 				Payload: map[string]string{"reason": why},
 			})
 			return res, nil
+		}
+
+		// Phase 20.4: run the generalized pause-trigger hook after each stage so a
+		// caller can PAUSE on any non-budget condition (scope expansion, confidence
+		// drop, unexpected file/tool, policy change, verification regression). A
+		// non-empty reason pauses and returns. Nil PauseTrigger never triggers.
+		if l.cfg.PauseTrigger != nil {
+			if reason, ok := l.cfg.PauseTrigger(res, st); ok {
+				l.pause(res, reason)
+				return res, nil
+			}
 		}
 	}
 	return res, nil
@@ -448,28 +569,34 @@ func (l *Loop) observeHealthy() bool {
 	return seen
 }
 
-// learn records a memory capturing the loop outcome (Continuous Learning).
-func (l *Loop) learn(intent string, healthy, deployed bool) (domain.Memory, error) {
+// learn records a memory capturing the loop outcome (Continuous Learning). It is
+// autonomy-aware (Phase 20.5): the lesson and episodic memories carry the computed
+// autonomy score and effective level, and a "score" tag, so memory reflects how
+// much autonomy was exercised.
+func (l *Loop) learn(intent string, res *Result) (domain.Memory, error) {
+	healthy, deployed, paused := res.ObservedHealthy, res.Deployed, res.Paused
 	status := "ok"
 	if !healthy {
 		status = "unhealthy"
 	}
 	safe := sanitizeIntent(intent)
-	content := fmt.Sprintf("loop %s: %q → %s (level %s)", l.cfg.Level, safe, status, l.cfg.Level)
+	score := l.autonomyScore()
+	rec := score.RecommendedLevel()
+	content := fmt.Sprintf("loop %s: %q → %s (level %s, score %.3f, recommended %s, paused %v)", l.cfg.Level, safe, status, l.cfg.Level, score.Score(), rec, paused)
 	m := domain.Memory{
 		Type:    domain.MemoryLesson,
 		Content: content,
 		Source:  "loop",
 		Scope:   l.cfg.Scope,
-		Tags:    []string{"loop", "learn", l.cfg.Level.String()},
+		Tags:    []string{"loop", "learn", l.cfg.Level.String(), "score"},
 	}
 	// Episodic (raw event) is recorded before the lesson (derived takeaway).
 	episodic := domain.Memory{
 		Type:    domain.MemoryEpisodic,
-		Content: fmt.Sprintf("episodic: intent=%q level=%s deployed=%v observed_healthy=%v", safe, l.cfg.Level, deployed, healthy),
+		Content: fmt.Sprintf("episodic: intent=%q level=%s deployed=%v observed_healthy=%v score=%.3f paused=%v", safe, l.cfg.Level, deployed, healthy, score.Score(), paused),
 		Source:  "loop",
 		Scope:   l.cfg.Scope,
-		Tags:    []string{"loop", "episodic", l.cfg.Level.String()},
+		Tags:    []string{"loop", "episodic", l.cfg.Level.String(), "score"},
 	}
 	if l.cfg.Mem == nil {
 		return m, errors.New("loop: learn requires a memory store")

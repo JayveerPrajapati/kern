@@ -2,6 +2,7 @@ package app
 
 import (
 	"errors"
+	"fmt"
 	"strconv"
 	"strings"
 	"testing"
@@ -666,6 +667,14 @@ func TestFullLifecycle20StepVerticalSlice(t *testing.T) {
 		t.Fatalf("step4 whatif: %v", err)
 	}
 	task.ImpactReport = &imp
+	// P10.4: record the impact_report and risk_report artifacts for this task's
+	// chain (the manual slice drives p.WhatIf directly, so we record them here).
+	ts.recordArtifact(domain.ArtifactImpactReport, task.ID, "whatif-engine",
+		fmt.Sprintf("impact: %d affected, risk=%s", len(imp.Affected), imp.Risk),
+		ts.lastArtifactID(task.ID, domain.ArtifactContextPacket), "whatif:simulate")
+	ts.recordArtifact(domain.ArtifactRiskReport, task.ID, "whatif-engine",
+		"risk="+imp.Risk,
+		ts.lastArtifactID(task.ID, domain.ArtifactImpactReport), "whatif:risk")
 	task.AddStep(stepResult("impact", "impact-engine", "affected="+strconv.Itoa(len(imp.Affected))+", risk="+imp.Risk))
 
 	// Step 5 — Risk assessment.
@@ -737,6 +746,10 @@ func TestFullLifecycle20StepVerticalSlice(t *testing.T) {
 	task.AddStep(stepResult("execute", "sandbox-engine", "patch applied; diff="+strconv.Itoa(len(diffText))+" chars"))
 	ts.recordArtifact(domain.ArtifactCodePatch, task.ID, "sandbox-engine",
 		"code patch for "+intent, ts.lastArtifactID(task.ID, domain.ArtifactPlan), "exec:apply")
+	// P10.4: record the diff artifact so the full required artifact set
+	// (plan, code_patch, diff, ...) is present end-to-end.
+	ts.recordArtifact(domain.ArtifactDiff, task.ID, "execution-engine",
+		"diff for "+intent, ts.lastArtifactID(task.ID, domain.ArtifactCodePatch), "exec:diff")
 
 	// Steps 11-14 — Verification (VERIFYING → READY_FOR_PR). The verdict may be
 	// influenced by the sandbox 100MiB cap; this test asserts the lifecycle
@@ -804,14 +817,37 @@ func TestFullLifecycle20StepVerticalSlice(t *testing.T) {
 		t.Errorf("step20: got %d artifacts, want >= 5 (context packet, plan, code patch, verification, PR, deployment)", len(arts))
 	}
 	seen := map[string]bool{}
+	kindSet := map[string]bool{}
 	for _, a := range arts {
 		if a.ID == "" {
 			t.Error("step20: artifact with empty ID")
 		}
 		seen[a.ID] = true
+		kindSet[string(a.Kind)] = true
 		if a.ParentArtifactID != "" && !seen[a.ParentArtifactID] {
 			// parent must appear before the child in the chain
 			t.Errorf("step20: artifact %s parent %s not recorded before it", a.ID, a.ParentArtifactID)
+		}
+	}
+	// Phase 10.4: the full manual lifecycle must produce the complete required
+	// artifact set (context_packet, analysis_report, impact_report, risk_report,
+	// plan, code_patch, diff, verification_report, pull_request, deployment, and
+	// audit) so the traceable chain is complete end-to-end.
+	required := []string{
+		"plan",
+		"code_patch",
+		"pull_request",
+		"deployment",
+		"analysis_report",
+		"impact_report",
+		"risk_report",
+		"verification_report",
+		"diff",
+		"audit",
+	}
+	for _, k := range required {
+		if !kindSet[k] {
+			t.Errorf("step20 (P10.4): %s artifact not produced in full lifecycle", k)
 		}
 	}
 	if len(task.Steps) < 15 {

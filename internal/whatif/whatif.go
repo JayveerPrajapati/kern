@@ -79,6 +79,12 @@ type Impact struct {
 	RuntimeEvidence        []string // runtime telemetry evidence
 	Method                 string   // analysis method used, e.g. "graph-traversal"
 	Summary                string   // human-readable summary of the impact; notes pipeline limitations
+	// Facts are the known, deterministic facts the simulation established about
+	// the target change (kind, target, affected set size, risk, confidence).
+	Facts []string `json:"facts,omitempty"`
+	// Limitations are the pipeline/evidence gaps that bound the impact estimate
+	// (missing runtime/historical evidence, or change kinds that need twin data).
+	Limitations []string `json:"limitations,omitempty"`
 }
 
 // Simulate applies the change to the graph (in memory) and returns the impact.
@@ -236,6 +242,8 @@ func Simulate(g *intelligence.Graph, c Change) Impact {
 
 	imp.Recommendation = recommend(c, imp)
 	imp.Claims = []domain.Claim{recommendationClaim(c, imp)}
+	imp.Facts = facts(c, imp)
+	imp.Limitations = limitations(c, imp)
 	return imp
 }
 
@@ -305,6 +313,54 @@ func confidence(c Change, imp Impact) float64 {
 	default:
 		return 0.40
 	}
+}
+
+// facts returns the known, deterministic facts the simulation established about
+// the change: what kind of change it is, what it targets, how much of the graph
+// it touches, and the assessed risk and confidence.
+func facts(c Change, imp Impact) []string {
+	var f []string
+	f = append(f, "change kind: "+string(c.Kind))
+	f = append(f, "target: "+c.Target)
+	if c.NewTarget != "" {
+		f = append(f, "new target: "+c.NewTarget)
+	}
+	f = append(f, "affected symbols: "+itoa(len(imp.Affected)))
+	f = append(f, "affected files: "+itoa(len(imp.Files)))
+	if len(imp.Services) > 0 {
+		f = append(f, "affected services: "+strings.Join(imp.Services, ", "))
+	}
+	f = append(f, "risk: "+imp.Risk)
+	f = append(f, "confidence: "+fmt.Sprintf("%0.2f", imp.Confidence))
+	f = append(f, "isolated: "+boolStr(imp.Isolated))
+	return f
+}
+
+// limitations enumerates the pipeline/evidence gaps that bound the impact
+// estimate. The whatif simulation is graph-traversal only, so runtime and
+// historical evidence are always absent; high-level change kinds additionally
+// need twin/context data that is not available to the pure code-graph pass.
+func limitations(c Change, imp Impact) []string {
+	var l []string
+	switch c.Kind {
+	case SplitService, MoveModule, ChangeInfra:
+		l = append(l, "high-level change kind requires twin/context data for full simulation; only code-graph impact shown")
+	}
+	if len(imp.RuntimeEvidence) == 0 {
+		l = append(l, "no runtime telemetry evidence available to the simulation")
+	}
+	if len(imp.HistoricalEvidence) == 0 {
+		l = append(l, "no historical incident/lesson evidence available to the simulation")
+	}
+	return l
+}
+
+// boolStr renders a bool as a lowercase "true"/"false" for deterministic facts.
+func boolStr(b bool) string {
+	if b {
+		return "true"
+	}
+	return "false"
 }
 
 func recommend(c Change, imp Impact) string {

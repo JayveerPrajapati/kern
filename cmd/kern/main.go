@@ -129,6 +129,7 @@ Usage:
    kern approve [id] [--reject --reason "..." --approver "..."]
                                                  list pending approvals; with an id, approve (or --reject) it
    kern audit [task-id] [--root ROOT] [--json]   show the audit trail (all entries, or for one task)
+    kern efficiency <id> [--root ROOT]    efficiency report (17.6) for a task
   kern guard init [root]                         scaffold .kern/boundaries.json
    kern guard check [root] [--file F] [--range a..b] [--json|--sarif] [--threshold N]  reject boundary violations (exit 2 when count > N)
    kern commitmsg [--staged|--range a..b] [--subject]   deterministic conventional commit message from the diff
@@ -655,6 +656,9 @@ func main() {
 
 	case "task":
 		runTask(rest)
+
+	case "efficiency":
+		runEfficiency(rest)
 
 	case "approve":
 		runApprove(rest)

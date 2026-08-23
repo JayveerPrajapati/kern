@@ -22,6 +22,7 @@ func newTestTaskService(t *testing.T) (*TaskService, *eventbus.Bus) {
 		registry: reg,
 		store:    store,
 		bus:      bus,
+		arts:     NewArtifactStore(t.TempDir()),
 	}, bus
 }
 
@@ -176,6 +177,39 @@ func TestTaskServiceHumanTakeoverPublishesEvent(t *testing.T) {
 	}
 	if stored.AgentID != "human-1" {
 		t.Fatalf("stored AgentID=%q, want human-1", stored.AgentID)
+	}
+}
+
+// TestTaskServiceReturnToAgentPublishesEvent verifies ReturnToAgent resumes a
+// human-takeover task and publishes a task.updated event with action
+// "return_to_agent".
+func TestTaskServiceReturnToAgentPublishesEvent(t *testing.T) {
+	svc, bus := newTestTaskService(t)
+	tk := agent.NewTask("code", "x")
+	_ = tk.Start("bot-1")
+	svc.registry.SubmitTask(tk)
+
+	if err := svc.HumanTakeover(tk.ID, "human-1"); err != nil {
+		t.Fatalf("HumanTakeover: %v", err)
+	}
+
+	if err := svc.ReturnToAgent(tk.ID, "bot-2"); err != nil {
+		t.Fatalf("ReturnToAgent: %v", err)
+	}
+
+	last := lastEvent(t, bus)
+	if last.Kind != eventbus.TaskUpdated {
+		t.Fatalf("event kind=%s, want task.updated", last.Kind)
+	}
+	if got := payloadAction(last); got != "return_to_agent" {
+		t.Fatalf("action=%q, want return_to_agent", got)
+	}
+	stored, _ := svc.store.Get(tk.ID)
+	if stored.State != domain.TaskAnalyzing {
+		t.Fatalf("stored state=%s, want ANALYZING", stored.State)
+	}
+	if stored.AgentID != "bot-2" {
+		t.Fatalf("stored AgentID=%q, want bot-2", stored.AgentID)
 	}
 }
 

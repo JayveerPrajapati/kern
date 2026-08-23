@@ -113,3 +113,61 @@ func TestNewArtifactWorksWithExtendedStruct(t *testing.T) {
 		t.Errorf("RelatedEntities = %v, want empty", a.RelatedEntities)
 	}
 }
+
+// TestNewArtifactLinkValidKinds verifies the three P3.4 link kinds are accepted
+// and the link fields are recorded correctly.
+func TestNewArtifactLinkValidKinds(t *testing.T) {
+	cases := []struct {
+		kind ArtifactLinkKind
+	}{
+		{ArtifactLinkDerivedFrom},
+		{ArtifactLinkSupports},
+		{ArtifactLinkContradicts},
+	}
+	for _, c := range cases {
+		link, err := NewArtifactLink("a-from", "a-to", c.kind, "reason")
+		if err != nil {
+			t.Fatalf("NewArtifactLink(%q) unexpected error: %v", c.kind, err)
+		}
+		if link.FromID != "a-from" || link.ToID != "a-to" || link.Kind != c.kind || link.Reason != "reason" {
+			t.Errorf("NewArtifactLink(%q) = %+v", c.kind, link)
+		}
+	}
+}
+
+// TestNewArtifactLinkRejectsInvalid verifies validation: unknown kinds and
+// self-links must be refused so no invalid edge enters the traceable chain.
+func TestNewArtifactLinkRejectsInvalid(t *testing.T) {
+	if _, err := NewArtifactLink("a", "b", ArtifactLinkKind("dangling"), ""); err == nil {
+		t.Error("unknown kind: want error, got nil")
+	}
+	if _, err := NewArtifactLink("a", "a", ArtifactLinkSupports, ""); err == nil {
+		t.Error("self-link: want error, got nil")
+	}
+	if _, err := NewArtifactLink("", "b", ArtifactLinkSupports, ""); err == nil {
+		t.Error("empty from: want error, got nil")
+	}
+	if _, err := NewArtifactLink("a", "", ArtifactLinkSupports, ""); err == nil {
+		t.Error("empty to: want error, got nil")
+	}
+}
+
+// TestArtifactLinksRoundTrip verifies links recorded on an Artifact are
+// preserved, making the traceability chain auditable.
+func TestArtifactLinksRoundTrip(t *testing.T) {
+	report := NewArtifact(ArtifactRiskReport, "task-1", "reports/risk-1.md")
+	plan := NewArtifact(ArtifactPlan, "task-1", "plans/plan-1.md")
+
+	link, err := NewArtifactLink(plan.ID, report.ID, ArtifactLinkDerivedFrom, "plan is derived from the risk report")
+	if err != nil {
+		t.Fatalf("NewArtifactLink: %v", err)
+	}
+	plan.Links = append(plan.Links, link)
+
+	if len(plan.Links) != 1 {
+		t.Fatalf("Links = %d, want 1", len(plan.Links))
+	}
+	if plan.Links[0].Kind != ArtifactLinkDerivedFrom || plan.Links[0].ToID != report.ID {
+		t.Errorf("Link = %+v, want derived_from -> %s", plan.Links[0], report.ID)
+	}
+}

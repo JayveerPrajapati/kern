@@ -1,0 +1,19 @@
+{
+  "intent": "Add caching to NewServer",
+  "target": "NewServer",
+  "expected_artifacts": [
+    "context_packet",
+    "plan"
+  ],
+  "workflow_stages": [
+    "analyze",
+    "plan",
+    "impact"
+  ],
+  "assertions": {
+    "risk_report_present": false,
+    "diff_present": false,
+    "pr_present": false,
+    "audit_recorded": false
+  }
+}

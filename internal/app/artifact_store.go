@@ -128,6 +128,78 @@ func (s *ArtifactStore) Save(a domain.Artifact) (domain.Artifact, error) {
 	return a, nil
 }
 
+// NewVersion writes the next version of an existing finalized artifact. It
+// implements the Phase 3 "new version instead" rule: a finalized artifact is
+// never silently mutated — when a successor must be produced, the existing
+// final record is marked Status == "superseded" (kept intact for audit) and a
+// new artifact with the same kind/task and Version+1 is written, linked to the
+// superseded parent via ParentArtifactID. Draft/superseded artifacts are
+// replaced freely (their status is not authoritative).
+//
+// It returns the new versioned artifact. If no existing artifact with the given
+// ID is found, the provided artifact is saved as-is (treated as an initial
+// version). If an existing artifact is already finalized, it is superseded and
+// the new one gets Version = existing.Version + 1. If it is not finalized, the
+// new artifact replaces it and inherits its version (no bump).
+func (s *ArtifactStore) NewVersion(a domain.Artifact) (domain.Artifact, error) {
+	if a.ID == "" {
+		return domain.Artifact{}, fmt.Errorf("artifact: id is required for versioning")
+	}
+	list, err := s.load()
+	if err != nil {
+		return domain.Artifact{}, err
+	}
+	// Find the existing record with the same ID, if any.
+	var existing *domain.Artifact
+	for i := range list {
+		if list[i].ID == a.ID {
+			existing = &list[i]
+			break
+		}
+	}
+	if existing == nil {
+		// Nothing to version against: persist as-is (initial version).
+		return s.Save(a)
+	}
+	if existing.Status == "final" {
+		// Supersede the finalized record (keep it for audit), write version+1.
+		existing.Status = "superseded"
+		a.Version = existing.Version + 1
+		a.ParentArtifactID = existing.ID
+	} else {
+		// Not finalized: replace freely, preserving the existing version count.
+		a.Version = existing.Version
+	}
+	// Rebuild the list with the superseded record replaced by the new version.
+	kept := list[:0]
+	for _, it := range list {
+		if it.ID == a.ID {
+			if existing.Status == "superseded" {
+				kept = append(kept, *existing)
+			}
+			continue
+		}
+		kept = append(kept, it)
+	}
+	if existing.Status == "superseded" {
+		// The superseded original was already appended; ensure ordering (orig first).
+		// Re-sort deterministically: orig (superseded) before new version.
+		kept = append(kept, a)
+		sort.SliceStable(kept, func(i, j int) bool {
+			if kept[i].ID == kept[j].ID {
+				return kept[i].Status == "superseded"
+			}
+			return false
+		})
+	} else {
+		kept = append(kept, a)
+	}
+	if err := s.save(kept); err != nil {
+		return domain.Artifact{}, err
+	}
+	return a, nil
+}
+
 // Get returns an artifact by ID, or an error wrapping os.ErrNotExist.
 func (s *ArtifactStore) Get(id string) (domain.Artifact, error) {
 	list, err := s.load()

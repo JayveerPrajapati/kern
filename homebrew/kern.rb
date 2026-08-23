@@ -31,8 +31,11 @@ class Kern < Formula
   homepage "https://github.com/JayveerPrajapati/kern"
 
   # Placeholders substituted at release time by the tooling; keep these exact
-  # (scripts/brew-release.sh and scripts/publish-tap.sh sed on them).
-  url "https://github.com/JayveerPrajapati/kern/archive/refs/tags/#{version}.tar.gz"
+  # (scripts/brew-release.sh and scripts/publish-tap.sh sed on them). The URL
+  # carries the version placeholder directly (NOT #{version}) because Homebrew
+  # interpolates #{version} to an empty string in a url string on some versions,
+  # which would break every release download.
+  url "https://github.com/JayveerPrajapati/kern/archive/refs/tags/__KERN_VERSION__.tar.gz"
   version "__KERN_VERSION__"
   sha256 "__KERN_SHA256__"
   license "MIT"

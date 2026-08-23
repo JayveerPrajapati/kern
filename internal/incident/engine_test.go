@@ -9,6 +9,7 @@ import (
 
 	"github.com/JayveerPrajapati/kern/internal/domain"
 	"github.com/JayveerPrajapati/kern/internal/governance"
+	"github.com/JayveerPrajapati/kern/internal/governance/identity"
 	"github.com/JayveerPrajapati/kern/internal/memory"
 	"github.com/JayveerPrajapati/kern/internal/runtime"
 )
@@ -159,4 +160,67 @@ func TestRootCausePrefersChangedFileRegression(t *testing.T) {
 }
 func contains(s, sub string) bool {
 	return strings.Contains(s, sub)
+}
+
+// TestApplyFixRecordsRisk verifies the Phase 11 (11.4) risk step: a fix applied
+// through the pipeline records a FixRisk assessment, and a firewall with a
+// definitive denial blocks the fix.
+func TestApplyFixRiskStep(t *testing.T) {
+	root := gateFixture(t)
+	st := runtime.NewStore()
+	fw := governance.NewFirewall()
+	// Register a fixer that is explicitly denied the fix on the service.
+	fw.WithAgents(identity.NewAgent("incident-fixer", "fixer", "sre", []identity.Permission{}))
+	mem := memory.NewMemoryStore(t.TempDir())
+	eng, err := NewEngine(root, st, mem, fw)
+	if err != nil {
+		t.Fatalf("NewEngine: %v", err)
+	}
+	inc := eng.IngestAlert(domain.Alert{ID: "al-risk", Severity: domain.SeverityError, Message: "x", Service: "svc-a", OccurredAt: time.Now()})
+
+	// The firewall agent "incident-fixer" has no permissions, so "fix" is
+	// denied (not an unknown-agent gap) -> the fix must be blocked by risk.
+	_, err = eng.ApplyAndVerifyFix(inc, func(workDir string) error { return nil })
+	if err == nil {
+		t.Fatal("expected risk-step denial for a fixer with no permissions")
+	}
+	if inc.Status != domain.IncidentFixBlocked {
+		t.Errorf("status = %s, want FIX_BLOCKED", inc.Status)
+	}
+	if inc.FixRisk == "" {
+		t.Error("FixRisk should be populated on a blocked fix")
+	}
+}
+
+// TestResolveWritesIncidentMemory verifies Phase 11 (11.5): resolving an
+// incident records an incident-type memory so the learning extractor can
+// surface patterns.
+func TestResolveWritesIncidentMemory(t *testing.T) {
+	root := gateFixture(t)
+	st := runtime.NewStore()
+	mem := memory.NewMemoryStore(t.TempDir())
+	eng, err := NewEngine(root, st, mem, governance.NewFirewall())
+	if err != nil {
+		t.Fatalf("NewEngine: %v", err)
+	}
+	inc := eng.IngestAlert(domain.Alert{ID: "a-mem", Severity: domain.SeverityWarning, Message: "latency spike", Service: "svc-x", OccurredAt: time.Now()})
+	inc.RootCause = &domain.RootCause{Summary: "memory leak in cache", Service: "svc-x"}
+
+	eng.Resolve(inc)
+	if inc.Status != domain.IncidentClosed {
+		t.Fatalf("status = %q, want CLOSED", inc.Status)
+	}
+	mems, err := mem.List(domain.MemoryIncident)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(mems) == 0 {
+		t.Fatal("no incident memory written on Resolve (11.5)")
+	}
+	if mems[0].Provenance == "" || mems[0].Subject != inc.ID {
+		t.Errorf("memory provenance/subject not set: %+v", mems[0])
+	}
+	if len(inc.Memories) == 0 {
+		t.Error("incident.Memories not populated with the recorded lesson")
+	}
 }

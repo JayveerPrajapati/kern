@@ -37,24 +37,37 @@ import (
 // App holds the project root and the derived read-only state for the console.
 // It delegates routing to an embedded http.ServeMux via ServeHTTP.
 type App struct {
-	root       string
-	mux        *http.ServeMux
-	ix         *index.Index
-	graph      intelligence.Graph
-	platform   *app.Platform
-	inc        *incident.Engine     // prebuilt incident engine (shares a.graph)
-	ver        *verification.Engine // prebuilt verification engine (shares a.ix)
-	archIndex  *index.Index         // shared index for architecture validation
-	memories   *memory.MemoryStore
-	inter      *incident.Store
-	firewall   *governance.Firewall
-	approvals  *governance.ApprovalWorkflow
-	taskSvc    *app.TaskService // Phase 5/6/8: task-native analyze/plan/what-if
-	dashboardT  *template.Template
-	taskDetailT *template.Template
-	ctx        *kerncontext.Engine // context engine for analyze/plan
-	bus        *eventbus.Bus       // publishes incident/approval events
-	tasks      *agent.Registry     // agent/task registry for /v1/tasks lookup
+	root          string
+	mux           *http.ServeMux
+	ix            *index.Index
+	graph         *intelligence.Graph
+	platform      *app.Platform
+	inc           *incident.Engine     // prebuilt incident engine (shares a.graph)
+	ver           *verification.Engine // prebuilt verification engine (shares a.ix)
+	archIndex     *index.Index         // shared index for architecture validation
+	memories      *memory.MemoryStore
+	inter         *incident.Store
+	firewall      *governance.Firewall
+	approvals     *governance.ApprovalWorkflow
+	taskSvc       *app.TaskService // Phase 5/6/8: task-native analyze/plan/what-if
+	dashboardT    *template.Template
+	taskDetailT   *template.Template
+	agentsT       *template.Template
+	tasksT        *template.Template
+	approvalsT    *template.Template
+	risksT        *template.Template
+	artifactsT    *template.Template
+	auditT        *template.Template
+	systemMapT    *template.Template
+	incidentsT    *template.Template
+	efficiencyT   *template.Template
+	graphT        *template.Template
+	memoryT       *template.Template
+	architectureT *template.Template
+	evalT         *template.Template
+	ctx           *kerncontext.Engine // context engine for analyze/plan
+	bus           *eventbus.Bus       // publishes incident/approval events
+	tasks         *agent.Registry     // agent/task registry for /v1/tasks lookup
 
 	// archTTL is how long a validated architecture report is cached before the
 	// next /api/architecture, /api/overview or "/" request re-runs
@@ -100,7 +113,7 @@ func New(root string) (*App, error) {
 	a := &App{
 		root:      root,
 		ix:        ix,
-		graph:     g,
+		graph:     &g,
 		platform:  platform,
 		memories:  platform.Memory(),
 		inter:     incident.NewStore(root),
@@ -122,7 +135,7 @@ func New(root string) (*App, error) {
 	// was the #1 bottleneck: /v1/incidents/investigate and /v1/verify each
 	// re-ran index.Build). The engines store only read-only references to
 	// a.ix / a.graph and are safe for concurrent handler use.
-	incEng, err := incident.NewEngineWithGraph(root, &a.graph, runtime.NewStore(), a.memories, a.firewall)
+	incEng, err := incident.NewEngineWithGraph(root, a.graph, runtime.NewStore(), a.memories, a.firewall)
 	if err != nil {
 		return nil, err
 	}
@@ -140,6 +153,84 @@ func New(root string) (*App, error) {
 		return nil, fmt.Errorf("parse task detail template: %w", err)
 	}
 	a.taskDetailT = taskDetailTmpl
+
+	agentsTmpl, err := parseAgentsTemplate()
+	if err != nil {
+		return nil, fmt.Errorf("parse agents template: %w", err)
+	}
+	a.agentsT = agentsTmpl
+
+	tasksTmpl, err := parseTasksTemplate()
+	if err != nil {
+		return nil, fmt.Errorf("parse tasks template: %w", err)
+	}
+	a.tasksT = tasksTmpl
+
+	approvalsTmpl, err := parseApprovalsTemplate()
+	if err != nil {
+		return nil, fmt.Errorf("parse approvals template: %w", err)
+	}
+	a.approvalsT = approvalsTmpl
+
+	risksTmpl, err := parseRisksTemplate()
+	if err != nil {
+		return nil, fmt.Errorf("parse risks template: %w", err)
+	}
+	a.risksT = risksTmpl
+
+	artifactsTmpl, err := parseArtifactsTemplate()
+	if err != nil {
+		return nil, fmt.Errorf("parse artifacts template: %w", err)
+	}
+	a.artifactsT = artifactsTmpl
+
+	auditTmpl, err := parseAuditTemplate()
+	if err != nil {
+		return nil, fmt.Errorf("parse audit template: %w", err)
+	}
+	a.auditT = auditTmpl
+
+	systemMapTmpl, err := parseSystemMapTemplate()
+	if err != nil {
+		return nil, fmt.Errorf("parse system map template: %w", err)
+	}
+	a.systemMapT = systemMapTmpl
+
+	incidentsTmpl, err := parseIncidentsTemplate()
+	if err != nil {
+		return nil, fmt.Errorf("parse incidents template: %w", err)
+	}
+	a.incidentsT = incidentsTmpl
+
+	efficiencyTmpl, err := parseEfficiencyTemplate()
+	if err != nil {
+		return nil, fmt.Errorf("parse efficiency template: %w", err)
+	}
+	a.efficiencyT = efficiencyTmpl
+
+	graphTmpl, err := parseGraphTemplate()
+	if err != nil {
+		return nil, fmt.Errorf("parse graph template: %w", err)
+	}
+	a.graphT = graphTmpl
+
+	memoryTmpl, err := parseMemoryTemplate()
+	if err != nil {
+		return nil, fmt.Errorf("parse memory template: %w", err)
+	}
+	a.memoryT = memoryTmpl
+
+	architectureTmpl, err := parseArchitectureTemplate()
+	if err != nil {
+		return nil, fmt.Errorf("parse architecture template: %w", err)
+	}
+	a.architectureT = architectureTmpl
+
+	evalTmpl, err := parseEvalTemplate()
+	if err != nil {
+		return nil, fmt.Errorf("parse eval template: %w", err)
+	}
+	a.evalT = evalTmpl
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", a.handleIndex)
@@ -177,7 +268,28 @@ func New(root string) (*App, error) {
 	mux.HandleFunc("/v1/tasks/", a.handleV1Task)
 	mux.HandleFunc("/v1/artifacts", a.handleV1ArtifactsList)
 	mux.HandleFunc("/v1/artifacts/", a.handleV1ArtifactGet)
+	mux.HandleFunc("/v1/approvals/pending", a.handleApprovalsPending)
+	mux.HandleFunc("/v1/approve", a.handleApprovalApprove)
+	mux.HandleFunc("/v1/reject", a.handleApprovalReject)
 	mux.HandleFunc("/task/", a.handleTaskDetail)
+	mux.HandleFunc("/agents", a.handleAgents)
+	mux.HandleFunc("/tasks", a.handleTasks)
+	mux.HandleFunc("/approvals", a.handleApprovals)
+	mux.HandleFunc("/risks", a.handleRisks)
+	mux.HandleFunc("/artifacts", a.handleArtifacts)
+	mux.HandleFunc("/audit", a.handleAudit)
+	mux.HandleFunc("/system-map", a.handleSystemMap)
+	mux.HandleFunc("/incidents", a.handleIncidentsPage)
+	mux.HandleFunc("/efficiency", a.handleEfficiency)
+	mux.HandleFunc("/graph", a.handleGraphPage)
+	mux.HandleFunc("/memory", a.handleMemoryPage)
+	mux.HandleFunc("/architecture", a.handleArchitecturePage)
+	mux.HandleFunc("/eval", a.handleEvalPage)
+	mux.HandleFunc("/api/risks", a.handleRisksJSON)
+	mux.HandleFunc("/api/artifacts", a.handleArtifactsJSON)
+	mux.HandleFunc("/api/audit", a.handleAuditJSON)
+	mux.HandleFunc("/api/system-map", a.handleSystemMapJSON)
+	mux.HandleFunc("/api/efficiency", a.handleEfficiencyJSON)
 	a.mux = mux
 	return a, nil
 }
@@ -204,7 +316,7 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (a *App) freshGraph() (*intelligence.Graph, *index.Index) {
 	a.graphMu.RLock()
 	if !a.ix.Stale() {
-		g, ix := &a.graph, a.ix
+		g, ix := a.graph, a.ix
 		a.graphMu.RUnlock()
 		return g, ix
 	}
@@ -215,15 +327,16 @@ func (a *App) freshGraph() (*intelligence.Graph, *index.Index) {
 	// Re-check under the write lock: another request may have already rebuilt
 	// while we were waiting for the write lock.
 	if !a.ix.Stale() {
-		return &a.graph, a.ix
+		return a.graph, a.ix
 	}
 	if nix, err := index.Build(a.root); err == nil {
 		a.ix = nix
-		a.graph = intelligence.FromIndex(nix)
+		ng := intelligence.FromIndex(nix)
+		a.graph = &ng
 		a.archIndex = nix
 		a.graphVer++
 	}
-	return &a.graph, a.ix
+	return a.graph, a.ix
 }
 
 // runtimeSource and boundaryProvider have been migrated to internal/app.Platform,

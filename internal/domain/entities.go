@@ -6,6 +6,7 @@ package domain
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"time"
 )
 
@@ -120,6 +121,7 @@ const (
 	ArtifactDeploymentReport   ArtifactKind = "deployment_report"
 	ArtifactRollbackReport     ArtifactKind = "rollback_report"
 	ArtifactMemoryEntry        ArtifactKind = "memory_entry"
+	ArtifactAudit              ArtifactKind = "audit"
 )
 
 // Artifact is a named, traced output of an engineering workflow stage.
@@ -138,6 +140,7 @@ type Artifact struct {
 	Digest           string   // content hash
 	ParentArtifactID string   // parent artifact in the traceable chain
 	RelatedEntities  []string // related entity IDs
+	Links            []ArtifactLink // typed links to other artifacts (P3.4)
 }
 
 // NewArtifact builds an Artifact with a stable, unique id and a deterministic
@@ -165,6 +168,53 @@ func NewArtifact(kind ArtifactKind, taskID, uri string) Artifact {
 		Digest:    digest,
 		CreatedAt: time.Now(),
 	}
+}
+
+// ArtifactLinkKind is the semantic relationship between two artifacts
+// (spec §54, Phase 3 P3.4). A link is directional: From is the dependent
+// artifact, To is the artifact it relates to.
+type ArtifactLinkKind string
+
+const (
+	// LinkDerivedFrom marks To as the source From was produced from (e.g. a
+	// plan derived_from a risk_report).
+	ArtifactLinkDerivedFrom ArtifactLinkKind = "derived_from"
+	// ArtifactLinkSupports marks To as corroborating From (e.g. a test_report
+	// supports a verification_report).
+	ArtifactLinkSupports ArtifactLinkKind = "supports"
+	// ArtifactLinkContradicts marks To as conflicting with From (e.g. a
+	// security_report contradicts an architecture_report).
+	ArtifactLinkContradicts ArtifactLinkKind = "contradicts"
+)
+
+// ArtifactLink is a typed, directional relationship between two artifacts.
+// FromID is the dependent artifact; ToID is the referenced source. Linking
+// makes the artifact traceability chain auditable: from a report you can walk
+// both the artifacts it derives from and the artifacts that support or
+// contradict it.
+type ArtifactLink struct {
+	FromID string           // source artifact ID
+	ToID   string           // target artifact ID
+	Kind   ArtifactLinkKind // derived_from | supports | contradicts
+	Reason string           // optional human/agent rationale for the link
+}
+
+// NewArtifactLink builds a validated ArtifactLink. It refuses self-links and
+// unknown kinds, returning an error so callers can't record an invalid edge in
+// the traceable chain.
+func NewArtifactLink(fromID, toID string, kind ArtifactLinkKind, reason string) (ArtifactLink, error) {
+	if fromID == "" || toID == "" {
+		return ArtifactLink{}, fmt.Errorf("artifact link: from and to ids are required")
+	}
+	if fromID == toID {
+		return ArtifactLink{}, fmt.Errorf("artifact link: cannot link artifact %q to itself", fromID)
+	}
+	switch kind {
+	case ArtifactLinkDerivedFrom, ArtifactLinkSupports, ArtifactLinkContradicts:
+	default:
+		return ArtifactLink{}, fmt.Errorf("artifact link: unknown kind %q", kind)
+	}
+	return ArtifactLink{FromID: fromID, ToID: toID, Kind: kind, Reason: reason}, nil
 }
 
 // VerificationResult is the outcome of a verification check.

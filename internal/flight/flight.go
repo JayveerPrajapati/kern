@@ -45,19 +45,31 @@ type Record struct {
 type ActionType string
 
 const (
-	ActionTaskStarted         ActionType = "task_started"
-	ActionContextRetrieved    ActionType = "context_retrieved"
-	ActionMemoryRetrieved     ActionType = "memory_retrieved"
-	ActionToolCalled          ActionType = "tool_called"
-	ActionDecisionMade        ActionType = "decision_made"
-	ActionFileModified        ActionType = "file_modified"
-	ActionTestExecuted        ActionType = "test_executed"
-	ActionGuardrailTriggered  ActionType = "guardrail_triggered"
-	ActionApprovalRequested   ActionType = "approval_requested"
-	ActionChangeAccepted      ActionType = "change_accepted"
-	ActionDeploymentPerformed ActionType = "deployment_performed"
-	ActionProductionOutcome   ActionType = "production_outcome"
+	ActionTaskStarted           ActionType = "task_started"
+	ActionContextRetrieved      ActionType = "context_retrieved"
+	ActionMemoryRetrieved       ActionType = "memory_retrieved"
+	ActionToolCalled            ActionType = "tool_called"
+	ActionDecisionMade          ActionType = "decision_made"
+	ActionFileModified          ActionType = "file_modified"
+	ActionFileChanged           ActionType = "file_changed"
+	ActionTestExecuted          ActionType = "test_executed"
+	ActionGuardrailTriggered    ActionType = "guardrail_triggered"
+	ActionApprovalRequested     ActionType = "approval_requested"
+	ActionChangeAccepted        ActionType = "change_accepted"
+	ActionDeploymentPerformed   ActionType = "deployment_performed"
+	ActionProductionOutcome     ActionType = "production_outcome"
+	ActionPRCreated             ActionType = "pr_created"
+	ActionVerificationStarted   ActionType = "verification_started"
+	ActionVerificationCompleted ActionType = "verification_completed"
 )
+
+// OutcomeActions is the canonical "outcome" action vocabulary (spec §23): the
+// terminal/observability action types a full lifecycle trail ends with.
+var OutcomeActions = []ActionType{
+	ActionDeploymentPerformed,
+	ActionProductionOutcome,
+	ActionVerificationCompleted,
+}
 
 // NewRecord creates a Record with a typed ActionType, defaulting ID and
 // timestamp. It is the preferred way to construct a flight record.
@@ -259,16 +271,28 @@ func (r *Recorder) WhoApproved(taskID string) []Record {
 	return r.query(taskID, ActionApprovalRequested, ActionChangeAccepted)
 }
 
-// WhatChanged returns all file_modified records for the task, in chronological
-// order. Answers Workflow E: "what files were modified?"
+// WhatChanged returns all file_modified and file_changed records for the task,
+// in chronological order. Answers Workflow E: "what files were modified?"
 func (r *Recorder) WhatChanged(taskID string) []Record {
-	return r.query(taskID, ActionFileModified)
+	return r.query(taskID, ActionFileModified, ActionFileChanged)
 }
 
 // WhatTested returns all test_executed records for the task, in chronological
 // order. Answers Workflow E: "what tests were run?"
 func (r *Recorder) WhatTested(taskID string) []Record {
 	return r.query(taskID, ActionTestExecuted)
+}
+
+// WhatVerified returns all verification_started and verification_completed
+// records for the task, in chronological order.
+func (r *Recorder) WhatVerified(taskID string) []Record {
+	return r.query(taskID, ActionVerificationStarted, ActionVerificationCompleted)
+}
+
+// WhatOutcome returns the terminal "outcome" records for the task (deployment
+// performed, production outcome, verification completed) in chronological order.
+func (r *Recorder) WhatOutcome(taskID string) []Record {
+	return r.query(taskID, OutcomeActions...)
 }
 
 // WhatHappened returns ALL records for the task in chronological order — the

@@ -92,6 +92,8 @@ func parseConstitution(text string) (*domain.Constitution, error) {
 			current.Required = val == "true"
 		case "approval":
 			current.ApprovalRequired = val == "true"
+		case "provenance":
+			current.Provenance = val
 		case "cannot_depend_on", "require_tests":
 			// Parse list items on subsequent indented lines.
 			list := parseListLines(lines, i+1)
@@ -143,17 +145,140 @@ func ValidatePlan(plan domain.Plan, constitution *domain.Constitution) domain.Pl
 	for _, rule := range constitution.Rules {
 		violation := checkRule(plan, rule)
 		if violation != nil {
+			// P8.4: propagate the rule's provenance (defaulting to manual) so
+			// the origin of the constraint is auditable on every violation.
+			if violation.Provenance == "" {
+				violation.Provenance = ruleProvenance(rule)
+			}
 			pv.Violations = append(pv.Violations, *violation)
 			if violation.IsBlocking() {
 				pv.Passed = false
 			}
 		}
 	}
+	if len(pv.Violations) > 0 {
+		pv.Provenance = pv.Violations[0].Provenance
+	}
 	return pv
 }
 
-// checkRule checks a single constitution rule against the plan. Returns nil
-// if the plan complies with the rule.
+// ruleProvenance returns the provenance of a rule, defaulting to "manual-rule"
+// when the rule does not declare one. Valid provenance values are "adr",
+// "incident", "policy", "team-rule", and "manual-rule".
+func ruleProvenance(rule domain.ConstitutionRule) string {
+	switch rule.Provenance {
+	case "adr", "incident", "policy", "team-rule", "manual-rule":
+		return rule.Provenance
+	default:
+		return "manual-rule"
+	}
+}
+
+// SuggestRules proposes NEW constitution rules that would prevent the
+// violations found in a validation, or harden against common risk patterns in
+// the plan (P8.5). Suggestions are NON-ACTIVATING: they never modify the loaded
+// constitution — they only advise a human/governance owner what to add. Each
+// suggestion is a draft ConstitutionRule plus a rationale.
+//
+// Suggestions are deterministic heuristics over the plan and its violations, no
+// LLM involved.
+type RuleSuggestion struct {
+	Rule      domain.ConstitutionRule `json:"rule"`
+	Rationale string                  `json:"rationale"`
+}
+
+// SuggestRules inspects a validated plan + its validation result and produces
+// non-activating rule suggestions. It converts each blocking violation into a
+// draft rule that would catch it, then adds a few defensive defaults for common
+// plan patterns (destructive DB changes, public-API-without-tests, logging).
+func SuggestRules(plan domain.Plan, validation domain.PlanValidation) []RuleSuggestion {
+	var out []RuleSuggestion
+	seen := map[string]bool{}
+
+	add := func(id, category string, rule domain.ConstitutionRule, reason string) {
+		if seen[id] {
+			return
+		}
+		seen[id] = true
+		rule.ID = id
+		rule.Category = category
+		rule.Provenance = "manual-rule" // suggestions are not yet ratified
+		out = append(out, RuleSuggestion{Rule: rule, Rationale: reason})
+	}
+
+	// 1. Convert each violation into a rule that prevents it.
+	for _, v := range validation.Violations {
+		switch v.Category {
+		case "architecture":
+			if strings.Contains(v.Message, "depends on forbidden") {
+				// Message form: "plan depends on forbidden <forbidden> (via <dep>)".
+				// Extract the forbidden name, which is the token between "forbidden "
+				// and " (via ".
+				var forbidden string
+				marker := "forbidden "
+				if i := strings.Index(v.Message, marker); i >= 0 {
+					rest := v.Message[i+len(marker):]
+					if j := strings.Index(rest, " (via "); j > 0 {
+						forbidden = strings.TrimSpace(rest[:j])
+					}
+				}
+				if forbidden == "" {
+					continue // cannot infer; skip
+				}
+				rule := domain.ConstitutionRule{
+					Type:           domain.ConstraintMustNot,
+					CannotDependOn: []string{forbidden},
+					Description:    "prevent dependency on " + forbidden,
+				}
+				add("suggest-arch-"+forbidden, "architecture", rule, "blocking violation: "+v.Message)
+			}
+		case "security":
+			rule := domain.ConstitutionRule{
+				Type:     domain.ConstraintMustNot,
+				NeverLog: true,
+				Description: "secrets must never be logged",
+			}
+			add("suggest-sec-no-log", "security", rule, "security violation: "+v.Message)
+		case "database":
+			rule := domain.ConstitutionRule{
+				Type:             domain.ConstraintMust,
+				ApprovalRequired: true,
+				Description:     "destructive database changes require approval",
+			}
+			add("suggest-db-approval", "database", rule, "database violation: "+v.Message)
+		case "testing":
+			rule := domain.ConstitutionRule{
+				Type:         domain.ConstraintMust,
+				RequireTests: []string{"integration"},
+				Description:  "public API changes require integration tests",
+			}
+			add("suggest-test-api", "testing", rule, "testing violation: "+v.Message)
+		}
+	}
+
+	// 2. Defensive defaults: suggest hardening rules the plan would benefit
+	// from, even when no violation fired.
+	for _, step := range plan.ImplementationSteps {
+		low := strings.ToLower(step)
+		if (strings.Contains(low, "log") || strings.Contains(low, "print")) &&
+			!seen["suggest-sec-no-log"] {
+			add("suggest-sec-no-log", "security", domain.ConstitutionRule{
+				Type:        domain.ConstraintMustNot,
+				NeverLog:    true,
+				Description: "secrets must never be logged",
+			}, "plan touches logging; hardening against secret leakage")
+		}
+		if (strings.Contains(low, "migration") || strings.Contains(low, "drop table")) &&
+			!seen["suggest-db-approval"] {
+			add("suggest-db-approval", "database", domain.ConstitutionRule{
+				Type:             domain.ConstraintMust,
+				ApprovalRequired: true,
+				Description:     "destructive database changes require approval",
+			}, "plan includes destructive DB step; requires approval")
+		}
+	}
+	return out
+}
 func checkRule(plan domain.Plan, rule domain.ConstitutionRule) *domain.PlanViolation {
 	switch rule.Category {
 	case "architecture":

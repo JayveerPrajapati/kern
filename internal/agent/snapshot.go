@@ -21,6 +21,17 @@ type Snapshot struct {
 	AgentID   string           `json:"agent_id,omitempty"`
 	Output    string           `json:"output,omitempty"`
 	Timestamp time.Time        `json:"timestamp"`
+
+	// Rich snapshot fields (Phase 1.7). These carry the compact resume/replay
+	// context so a snapshot matches the domain.ContextSnapshot JSON shape. They
+	// are additive; the fields above are unchanged for backward compatibility.
+	Goal        string   `json:"goal"`
+	Decisions   []string `json:"decisions"`
+	Constraints []string `json:"constraints"`
+	Files       []string `json:"files"`
+	Tests       []string `json:"tests"`
+	Risks       []string `json:"risks"`
+	NextAction  string   `json:"next_action"`
 }
 
 // SnapshotStore is a JSON file store for task snapshots. Snapshots are
@@ -57,6 +68,14 @@ func (s *SnapshotStore) Record(t Task) error {
 		Output:    t.Output,
 		Timestamp: time.Now().UTC(),
 	}
+	cs := t.Snapshot()
+	snap.Goal = cs.Goal
+	snap.Decisions = cs.Decisions
+	snap.Constraints = cs.Constraints
+	snap.Files = cs.Files
+	snap.Tests = cs.Tests
+	snap.Risks = cs.Risks
+	snap.NextAction = cs.NextAction
 	all = append(all, snap)
 	return s.saveLocked(all)
 }

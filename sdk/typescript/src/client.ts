@@ -176,4 +176,25 @@ export class Client {
     }
     return this.get(`/v1/audit/${encodeURIComponent(taskId)}`);
   }
+
+  approve(approvalId: string, approver: string): Promise<any> {
+    if (!approvalId || !approver) {
+      throw new Error("approve() requires approvalId and approver");
+    }
+    return this.post("/v1/approve", { id: approvalId, approver });
+  }
+
+  reject(approvalId: string, approver: string): Promise<any> {
+    if (!approvalId || !approver) {
+      throw new Error("reject() requires approvalId and approver");
+    }
+    return this.post("/v1/reject", { id: approvalId, approver });
+  }
+
+  deploy(taskId: string, version: string = ""): Promise<any> {
+    if (!taskId) {
+      throw new Error("deploy() requires a taskId");
+    }
+    return this.post(`/v1/tasks/${encodeURIComponent(taskId)}/deploy`, { version });
+  }
 }

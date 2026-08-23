@@ -2,6 +2,7 @@ package agents
 
 import (
 	"os"
+	"time"
 
 	"github.com/JayveerPrajapati/kern/internal/domain"
 )
@@ -85,17 +86,116 @@ func routeModelBase(risk domain.RiskLevel, complexity string) domain.ModelRoutin
 }
 
 // EvaluateAgent creates an AgentEvaluation from execution metrics. Strict Plan
-// Phase 9 P2: agent evaluation.
-func EvaluateAgent(agentID, taskID string, success bool, tokens int, cost float64, duration interface{}, retries int, humanIntervention bool, defects int) domain.AgentEvaluation {
-	ev := domain.AgentEvaluation{
-		AgentID: agentID, TaskID: taskID, Success: success,
-		TokensUsed: tokens, Cost: cost, Retries: retries,
-		HumanIntervention: humanIntervention, Defects: defects,
+// Phase 9 P2. The duration is a time.Duration; unlike the earlier placeholder
+// (P9.7), it is now actually recorded on the evaluation so duration feeds the
+// scoring/score model.
+func EvaluateAgent(agentID, taskID string, success bool, tokens int, cost float64, duration time.Duration, retries int, humanIntervention bool, defects int) domain.AgentEvaluation {
+	return domain.AgentEvaluation{
+		AgentID:           agentID,
+		TaskID:            taskID,
+		Success:           success,
+		TokensUsed:        tokens,
+		Cost:              cost,
+		Duration:          duration,
+		Retries:           retries,
+		HumanIntervention: humanIntervention,
+		Defects:           defects,
 	}
-	if d, ok := duration.(domain.AgentEvaluation); ok {
-		_ = d // placeholder for type assertion
+}
+
+// routeModelWithFactors enriches the base routing with P9.4/P9.5 factors:
+// historical success and language. A language that the "most capable" model is
+// weak on, or a low historical success for the current choice, can downgrade or
+// upgrade the model. The decision is deterministic given the factors.
+func routeModelWithFactors(base domain.ModelRoutingDecision, f domain.RoutingFactors) domain.ModelRoutingDecision {
+	reason := base.Reason
+	// Language factor: for the high-complexity pick, some languages prefer a
+	// specialized model. We keep the pick but note it.
+	if f.Language != "" {
+		reason += "; language=" + f.Language
 	}
+	// Historical success: if the candidate's past success is high and it is
+	// already the most capable model, keep it. If historical success is very low
+	// (<= 0.4) and the base is NOT the most capable, promote to most capable.
+	if f.HistoricalSuccess > 0 {
+		if f.HistoricalSuccess <= 0.4 && base.Model != "llama3.1:70b" {
+			base = routeModelBase(domain.RiskHigh, "high")
+			reason = "historical success low; promoted to most capable model"
+		} else if f.HistoricalSuccess >= 0.9 && base.Model == "llama3.1:70b" {
+			base = routeModelBase(domain.RiskLow, "low")
+			reason = "historical success high; demoted to cheap model"
+		}
+	}
+	base.Reason = reason
+	return base
+}
+
+// RouteModelForTask selects a model for a task given intent kind, risk,
+// complexity, and richer routing factors (P9.4/P9.5). It is the entry point the
+// orchestrator uses; it combines the kind-level defaults with the factor
+// adjustments and honors the same env overrides as RouteModel.
+func RouteModelForTask(role Role, risk domain.RiskLevel, complexity string, f domain.RoutingFactors) domain.ModelRoutingDecision {
+	decision := routeModelWithFactors(routeModelBase(risk, complexity), f)
+	// Honor env overrides (same precedence as RouteModel).
+	if env := os.Getenv(modelEnvVar(role)); env != "" {
+		decision.Model = env
+		decision.Reason = "role-specific KERN_MODEL_* override"
+		return decision
+	}
+	if env := os.Getenv("KERN_MODEL_DEFAULT"); env != "" {
+		decision.Model = env
+		decision.Reason = "KERN_MODEL_DEFAULT override"
+		return decision
+	}
+	return decision
+}
+
+// modelScore is the same weighted score used by agentScore but reusable for
+// model A/B so both comparisons share one scoring model.
+func modelScore(ev domain.AgentEvaluation) float64 {
+	return agentScore(ev)
+}
+
+// EvaluateModel records an AgentEvaluation for a single model candidate,
+// tagging the evaluation with the model so model A/B comparisons can attribute
+// the result (P9.8).
+func EvaluateModel(model, taskID string, success bool, tokens int, cost float64, duration time.Duration) domain.AgentEvaluation {
+	ev := EvaluateAgent(model, taskID, success, tokens, cost, duration, 0, false, 0)
+	ev.Model = model
 	return ev
+}
+
+// CompareModels performs a model A/B comparison (P9.8): it routes two candidate
+// models for the same task and scores their evaluations, returning the winning
+// model and the metric deltas. A model may be selected explicitly via
+// candidateA/candidateB (non-empty), otherwise the router picks from risk.
+func CompareModels(taskID string, candidateA, candidateB domain.ModelRoutingDecision, evalA, evalB domain.AgentEvaluation) domain.ModelComparison {
+	if candidateA.Model == "" {
+		candidateA = routeModelBase(domain.RiskMedium, "medium")
+	}
+	if candidateB.Model == "" {
+		candidateB = routeModelBase(domain.RiskHigh, "high")
+	}
+	scoreA := modelScore(evalA)
+	scoreB := modelScore(evalB)
+	winner := "tie"
+	if scoreA > scoreB {
+		winner = candidateA.Model
+	} else if scoreB > scoreA {
+		winner = candidateB.Model
+	}
+	return domain.ModelComparison{
+		TaskID: taskID,
+		ModelA: candidateA, ModelB: candidateB,
+		EvalA: evalA, EvalB: evalB,
+		Winner: winner,
+		Metrics: map[string][2]float64{
+			"score":   {scoreA, scoreB},
+			"cost":    {evalA.Cost, evalB.Cost},
+			"tokens":  {float64(evalA.TokensUsed), float64(evalB.TokensUsed)},
+			"defects": {float64(evalA.Defects), float64(evalB.Defects)},
+		},
+	}
 }
 
 // CompareAgents performs an A/B comparison between two agent evaluations.

@@ -388,3 +388,138 @@ func TestHistoryCapsLargePayload(t *testing.T) {
 		t.Errorf("expected large event retained with nil payload, got %d", bigCount)
 	}
 }
+
+func TestIdempotencyDedupOnPublish(t *testing.T) {
+	b := New()
+	b.EnableIdempotency(100)
+
+	var mu sync.Mutex
+	got := 0
+	b.Subscribe(IncidentCreated, func(ev Event) {
+		mu.Lock()
+		defer mu.Unlock()
+		got++
+	})
+
+	// Same ID published twice: second must be dropped.
+	b.Publish(Event{ID: "ev-1", Kind: IncidentCreated})
+	b.Publish(Event{ID: "ev-1", Kind: IncidentCreated})
+	b.Publish(Event{ID: "ev-2", Kind: IncidentCreated})
+	b.Flush()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if got != 2 {
+		t.Errorf("delivered %d times, want 2 (dedup ev-1)", got)
+	}
+}
+
+func TestIdempotencyCapEvictsOldest(t *testing.T) {
+	b := New()
+	b.EnableIdempotency(2) // only remember 2 ids
+
+	b.Publish(Event{ID: "a", Kind: IncidentCreated})
+	b.Publish(Event{ID: "b", Kind: IncidentCreated})
+	b.Publish(Event{ID: "c", Kind: IncidentCreated}) // evicts "a" (cap 2)
+	b.Flush()
+	// "a" was evicted from the remembered set, so re-publishing it is NOT deduped.
+	b.Publish(Event{ID: "a", Kind: IncidentCreated})
+	b.Flush()
+
+	if n := len(b.History(IncidentCreated)); n != 4 {
+		t.Errorf("history has %d entries, want 4 (a evicted then re-published)", n)
+	}
+}
+
+func TestRetryThenDeadLetter(t *testing.T) {
+	b := New()
+	b.SetRetryPolicy(2, time.Millisecond)
+
+	var mu sync.Mutex
+	delivered := 0
+	b.Subscribe(TaskCreated, func(ev Event) {
+		mu.Lock()
+		defer mu.Unlock()
+		delivered++
+		panic("boom") // always fails
+	})
+
+	var dlMu sync.Mutex
+	dead := 0
+	b.SubscribeDeadLetter(func(ev Event) {
+		dlMu.Lock()
+		defer dlMu.Unlock()
+		dead++
+	})
+
+	b.Publish(Event{Kind: TaskCreated, Subject: "t-1"})
+	b.Flush()
+
+	mu.Lock()
+	d := delivered
+	mu.Unlock()
+	dlMu.Lock()
+	deadCount := dead
+	dlMu.Unlock()
+
+	if d != 3 { // 1 attempt + 2 retries (retryMax=2)
+		t.Errorf("delivered %d times, want 3 (1 + 2 retries)", d)
+	}
+	if deadCount != 1 {
+		t.Errorf("dead-lettered %d, want 1", deadCount)
+	}
+}
+
+func TestNoRetryDeadLettersImmediately(t *testing.T) {
+	b := New() // default retryMax=0
+
+	var dlMu sync.Mutex
+	dead := 0
+	b.SubscribeDeadLetter(func(ev Event) { dlMu.Lock(); dead++; dlMu.Unlock() })
+
+	b.Subscribe(PRCreated, func(ev Event) { panic("fail fast") })
+	b.Publish(Event{Kind: PRCreated})
+	b.Flush()
+
+	dlMu.Lock()
+	defer dlMu.Unlock()
+	if dead != 1 {
+		t.Errorf("dead-lettered %d, want 1 (no retries)", dead)
+	}
+}
+
+func TestPersistedReplay(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/events.jsonl"
+
+	b := New()
+	b.EnablePersistence(path)
+	b.Subscribe(TaskCreated, func(ev Event) {}) // fire into the bus
+	b.Publish(Event{ID: "p-1", Kind: TaskCreated, Subject: "s-1"})
+	b.Publish(Event{ID: "p-2", Kind: TaskCompleted, Subject: "s-2"})
+	b.Flush()
+
+	// Fresh bus replays the persisted history.
+	b2 := New()
+	var mu sync.Mutex
+	var kinds []Kind
+	b2.Subscribe("", func(ev Event) {
+		mu.Lock()
+		defer mu.Unlock()
+		kinds = append(kinds, ev.Kind)
+	})
+	n, err := b2.Replay(path)
+	if err != nil {
+		t.Fatalf("Replay error: %v", err)
+	}
+	b2.Flush()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if n != 2 {
+		t.Errorf("replayed %d, want 2", n)
+	}
+	if len(kinds) != 2 {
+		t.Fatalf("delivered %d events on replay, want 2", len(kinds))
+	}
+}

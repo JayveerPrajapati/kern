@@ -23,9 +23,9 @@ const maxHops = 50
 func (g *Graph) buildAdjacency() (outgoing, incoming map[string][]string) {
 	outgoing = map[string][]string{}
 	incoming = map[string][]string{}
-	byID := g.nodesByID()
+	g.initIndex()
 	canonical := func(id string) string {
-		if r, ok := resolveNodeID(id, byID); ok {
+		if r, ok := g.resolveNodeID(id); ok {
 			return r
 		}
 		return id
@@ -48,13 +48,27 @@ func (g *Graph) buildAdjacency() (outgoing, incoming map[string][]string) {
 	return outgoing, incoming
 }
 
-// nodesByID returns a lookup of node ID to its domain.Node.
+// initIndex lazily builds the node lookup and name index once, on first use.
+// The graph is read-only after construction (FromIndex/NewWithGraph), so the
+// caches never go stale during the graph's lifetime.
+func (g *Graph) initIndex() {
+	g.indexOnce.Do(func() {
+		g.byID = make(map[string]domain.Node, len(g.Nodes))
+		g.nameIndex = make(map[string][]string)
+		for _, n := range g.Nodes {
+			g.byID[n.ID] = n
+			if n.Symbol != nil {
+				g.nameIndex[n.Symbol.Name] = append(g.nameIndex[n.Symbol.Name], n.ID)
+			}
+		}
+	})
+}
+
+// nodesByID returns a lookup of node ID to its domain.Node. The result is built
+// once and cached on the Graph, so repeated calls do not rebuild the map.
 func (g *Graph) nodesByID() map[string]domain.Node {
-	m := make(map[string]domain.Node, len(g.Nodes))
-	for _, n := range g.Nodes {
-		m[n.ID] = n
-	}
-	return m
+	g.initIndex()
+	return g.byID
 }
 
 // resolveNodeID maps a symbol reference (bare name "Func", package-scoped name
@@ -64,28 +78,23 @@ func (g *Graph) nodesByID() map[string]domain.Node {
 // when the reference is unresolvable or ambiguous (the same simple name exists
 // on nodes in different packages, which the index cannot disambiguate from an
 // alias).
-func resolveNodeID(ref string, byID map[string]domain.Node) (string, bool) {
-	if _, ok := byID[ref]; ok {
+func (g *Graph) resolveNodeID(ref string) (string, bool) {
+	g.initIndex()
+	if _, ok := g.byID[ref]; ok {
 		return ref, true
 	}
 	bare := ref
 	if i := strings.LastIndexByte(bare, '.'); i >= 0 {
 		bare = bare[i+1:]
 	}
-	var match string
-	for id, n := range byID {
-		if n.Symbol == nil || n.Symbol.Name != bare {
-			continue
-		}
-		if match != "" && match != id {
-			return ref, false // ambiguous: same name on multiple nodes
-		}
-		match = id
+	switch ids := g.nameIndex[bare]; len(ids) {
+	case 0:
+		return ref, false // unresolvable
+	case 1:
+		return ids[0], true // unique simple name
+	default:
+		return ref, false // ambiguous: same name on multiple nodes
 	}
-	if match == "" {
-		return ref, false
-	}
-	return match, true
 }
 
 // resolveSymbol maps a user-provided symbol to its canonical node ID. It handles
@@ -93,7 +102,7 @@ func resolveNodeID(ref string, byID map[string]domain.Node) (string, bool) {
 // ("Type.Method"). When the input doesn't match a node ID directly, the name is
 // matched against node names, resolving to the unique node when unambiguous.
 func (g *Graph) resolveSymbol(symbol string) string {
-	if id, ok := resolveNodeID(symbol, g.nodesByID()); ok {
+	if id, ok := g.resolveNodeID(symbol); ok {
 		return id
 	}
 	return symbol
