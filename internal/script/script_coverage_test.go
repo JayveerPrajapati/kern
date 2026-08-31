@@ -82,6 +82,10 @@ func TestRunScript_RustCompile(t *testing.T) {
 	if !runtimeInstalled("rust") {
 		t.Skip("rustc not installed")
 	}
+	// Verify rustc actually works (rustup may be present but unconfigured)
+	if out, err := exec.Command("rustc", "--version").CombinedOutput(); err != nil || strings.Contains(string(out), "rustup") {
+		t.Skip("rustc not configured (rustup without default toolchain)")
+	}
 	allowDegradedNetwork(t)
 	dir := t.TempDir()
 	p := filepath.Join(dir, "main.rs")
