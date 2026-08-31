@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/JayveerPrajapati/kern/internal/governance/identity"
+	"github.com/JayveerPrajapati/kern/internal/governance"
 )
 
 // setupOrgWithTeamDeps returns a server with one project ("proj-a") and two
@@ -19,10 +19,10 @@ func setupOrgWithTeamDeps(t *testing.T) *Server {
 	if err := s.Register("proj-a", t.TempDir()); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.RegisterAgent(identity.NewAgent("agent-1", "Agent One", "worker", nil)); err != nil {
+	if err := s.RegisterAgent(governance.NewAgent("agent-1", "Agent One", "worker", nil)); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.RegisterAgent(identity.NewAgent("agent-2", "Agent Two", "worker", nil)); err != nil {
+	if err := s.RegisterAgent(governance.NewAgent("agent-2", "Agent Two", "worker", nil)); err != nil {
 		t.Fatal(err)
 	}
 	return s

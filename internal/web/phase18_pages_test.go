@@ -6,10 +6,10 @@ import (
 	"testing"
 )
 
-// phase18Routes are the HTML page routes added in Phase 18. Each must render
+// phase18Routes are the HTML page routes added in. Each must render
 // with 200, set a text/html Content-Type, carry the shared top navigation, and
 // contain its expected section heading. They mirror the assertions in
-// new_pages_test.go for the earlier Phase 18 pages.
+// new_pages_test.go for the earlier pages.
 var phase18Routes = []struct {
 	path   string
 	title  string
@@ -21,7 +21,7 @@ var phase18Routes = []struct {
 	{"/eval", "<title>Evaluation", "Evaluation views"},
 }
 
-// TestPhase18PagesServe200 asserts every new Phase 18 HTML route returns 200,
+// TestPhase18PagesServe200 asserts every new HTML route returns 200,
 // serves text/html, and renders its title plus an expected heading marker.
 func TestPhase18PagesServe200(t *testing.T) {
 	app := newTestApp(t)

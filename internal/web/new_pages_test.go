@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-// newPageRoutes are the HTML page routes added in Phase 18. Each must render
+// newPageRoutes are the HTML page routes added in. Each must render
 // with a 200 and carry the shared top navigation.
 var newPageRoutes = []struct {
 	path  string

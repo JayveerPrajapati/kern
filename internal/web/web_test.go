@@ -9,9 +9,11 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/JayveerPrajapati/kern/internal/agent"
 	"github.com/JayveerPrajapati/kern/internal/domain"
 	"github.com/JayveerPrajapati/kern/internal/incident"
 	"github.com/JayveerPrajapati/kern/internal/memory"
+	"github.com/JayveerPrajapati/kern/internal/whatif"
 )
 
 // fixtureRoot writes a tiny Go module (go.mod + a helper func + a test) that
@@ -178,6 +180,37 @@ func TestGovernanceEndpoint(t *testing.T) {
 	}
 }
 
+func TestGovernanceMetricsAvgConfidence(t *testing.T) {
+	app := newTestApp(t)
+
+	// Seed two tasks on the TaskService registry, each carrying a what-if
+	// ImpactReport whose Confidence is populated by TaskService.WhatIf.
+	seed := func(id string, conf float64) {
+		task := agent.NewTask("what-if", "change "+id)
+		task.ImpactReport = &whatif.Impact{Confidence: conf}
+		if err := app.taskSvc.Registry().SubmitTask(task); err != nil {
+			t.Fatalf("submit task: %v", err)
+		}
+	}
+	seed("a", 0.8)
+	seed("b", 0.6)
+
+	rec := get(t, app, "/api/governance/metrics")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	var body struct {
+		AvgConfidence float64 `json:"AvgConfidence"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	want := 0.7 // (0.8 + 0.6) / 2
+	if body.AvgConfidence != want {
+		t.Fatalf("AvgConfidence = %v, want %v", body.AvgConfidence, want)
+	}
+}
+
 func TestNotFound(t *testing.T) {
 	app := newTestApp(t)
 	rec := get(t, app, "/api/does-not-exist")
@@ -309,9 +342,9 @@ func Caller() string { return db.Do() }
 	if err != nil {
 		t.Fatalf("web.New: %v", err)
 	}
-	pkt, err := app.ctx.AnalyzeChange("Caller")
+	pkt, _, err := app.platform.Analyze("Caller")
 	if err != nil {
-		t.Fatalf("AnalyzeChange(Caller): %v", err)
+		t.Fatalf("platform.Analyze(Caller): %v", err)
 	}
 
 	if len(pkt.RuntimeEvidence) == 0 {

@@ -1,5 +1,5 @@
 // Package enterprise implements multi-project enterprise mode for kern-server
-// (spec §30): shared org-level policies and audit log, plus per-project
+// Shared org-level policies and audit log, plus per-project
 // digital-twin state (index, graph, memories, incidents) served from a single
 // HTTP listener. It is additive and opt-in; the single-project web.App is
 // unchanged.
@@ -20,7 +20,6 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/domain"
 	"github.com/JayveerPrajapati/kern/internal/eventbus"
 	"github.com/JayveerPrajapati/kern/internal/governance"
-	"github.com/JayveerPrajapati/kern/internal/governance/identity"
 	"github.com/JayveerPrajapati/kern/internal/intel"
 	"github.com/JayveerPrajapati/kern/internal/memory"
 	"github.com/JayveerPrajapati/kern/internal/storage"
@@ -38,14 +37,14 @@ type Project struct {
 // log, policy set, memory store, task visibility, and agent registry.
 type Server struct {
 	mu           sync.RWMutex
-	projects     map[string]*projectState           // keyed by project name
-	orgAudit     *governance.AuditLog               // shared org-level audit
-	orgBus       *eventbus.Bus                      // shared org-level event bus
-	store        storage.Store                      // optional shared storage (nil = in-memory)
-	policies     []domain.Policy                    // org-level policies applied to all projects
-	orgMemory    *memory.MemoryStore                // shared org-level memory (Phase 23a)
-	orgAgents    map[string]*identity.AgentIdentity // shared org-level agent registry (Phase 23d)
-	teamRegistry map[string]*OrgTeam                // org-level team registry (Phase 19 P19.3)
+	projects     map[string]*projectState             // keyed by project name
+	orgAudit     *governance.AuditLog                 // shared org-level audit
+	orgBus       *eventbus.Bus                        // shared org-level event bus
+	store        storage.Store                        // optional shared storage (nil = in-memory)
+	policies     []domain.Policy                      // org-level policies applied to all projects
+	orgMemory    *memory.MemoryStore                  // shared org-level memory
+	orgAgents    map[string]*governance.AgentIdentity // shared org-level agent registry
+	teamRegistry map[string]*OrgTeam                  // org-level team registry
 }
 
 type projectState struct {
@@ -66,7 +65,7 @@ func New() *Server {
 		orgBus:       eventbus.New(),
 		policies:     governance.DefaultPolicies(),
 		orgMemory:    memory.NewMemoryStore(""), // in-memory org-level store (no root)
-		orgAgents:    map[string]*identity.AgentIdentity{},
+		orgAgents:    map[string]*governance.AgentIdentity{},
 		teamRegistry: map[string]*OrgTeam{},
 	}
 }
@@ -146,7 +145,6 @@ func (s *Server) Projects() []Project {
 
 // appFor returns the web.App for a project, building it lazily on first
 // access. The build error is cached so repeated requests don't retry.
-//
 // Cached apps are capped (see maxProjects): when the cache is full and a new
 // project needs building, the least-recently-used cached app is evicted so it
 // can be rebuilt on next access. This bounds memory growth for orgs with many
@@ -260,15 +258,15 @@ func (s *Server) OrgBus() *eventbus.Bus { return s.orgBus }
 // Store returns the shared org-level storage backend (nil if unset).
 func (s *Server) Store() storage.Store { return s.store }
 
-// OrgMemory returns the shared org-level memory store (Phase 23a). Memories
+// OrgMemory returns the shared org-level memory store. Memories
 // written here are visible across all projects — e.g. a lesson learned in the
 // payments service is recallable when working on the orders service.
 func (s *Server) OrgMemory() *memory.MemoryStore { return s.orgMemory }
 
-// RegisterAgent registers an agent identity at the org level (Phase 23d). The
+// RegisterAgent registers an agent identity at the org level. The
 // agent's permissions apply across all projects. Returns an error if an agent
 // with the same ID is already registered.
-func (s *Server) RegisterAgent(a *identity.AgentIdentity) error {
+func (s *Server) RegisterAgent(a *governance.AgentIdentity) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if _, exists := s.orgAgents[a.ID]; exists {
@@ -279,7 +277,7 @@ func (s *Server) RegisterAgent(a *identity.AgentIdentity) error {
 }
 
 // Agents returns all registered org-level agent identities, sorted by ID.
-func (s *Server) Agents() []*identity.AgentIdentity {
+func (s *Server) Agents() []*governance.AgentIdentity {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	ids := make([]string, 0, len(s.orgAgents))
@@ -287,14 +285,14 @@ func (s *Server) Agents() []*identity.AgentIdentity {
 		ids = append(ids, id)
 	}
 	sort.Strings(ids)
-	out := make([]*identity.AgentIdentity, 0, len(ids))
+	out := make([]*governance.AgentIdentity, 0, len(ids))
 	for _, id := range ids {
 		out = append(out, s.orgAgents[id])
 	}
 	return out
 }
 
-// OrgTasks aggregates tasks across all projects (Phase 23b). Returns a map of
+// OrgTasks aggregates tasks across all projects. Returns a map of
 // project name → task list. Projects whose app hasn't been built yet are
 // skipped (they have no tasks yet).
 func (s *Server) OrgTasks() map[string][]map[string]any {
@@ -320,7 +318,7 @@ func (s *Server) OrgTasks() map[string][]map[string]any {
 	return out
 }
 
-// OrgSearch performs cross-project symbol search (Phase 23c). It delegates to
+// OrgSearch performs cross-project symbol search. It delegates to
 // intel.SearchRepos, which searches across all repos registered in the kern
 // multi-repo registry. Returns nil when no repos are registered.
 func (s *Server) OrgSearch(query string, limit int) []intel.RepoHit {
@@ -336,12 +334,11 @@ const authTokenEnv = "KERN_AUTH_TOKEN"
 
 // requireAuth enforces token-based authentication for every enterprise
 // request. It is fail-closed:
-//   - if KERN_AUTH_TOKEN is unset the server refuses to serve (503), because in
-//     enterprise mode even a single unauthenticated request leaks the full
-//     digital twin of every project plus the shared org audit log and policies;
-//   - any request without a matching "Authorization: Bearer <token>" header is
-//     rejected with 401 Unauthorized.
-//
+// - if KERN_AUTH_TOKEN is unset the server refuses to serve (503), because in
+// enterprise mode even a single unauthenticated request leaks the full
+// digital twin of every project plus the shared org audit log and policies;
+// - any request without a matching "Authorization: Bearer <token>" header is
+// rejected with 401 Unauthorized.
 // It writes the error response and returns false when the request is not
 // authorized, so callers should return immediately.
 func (s *Server) requireAuth(w http.ResponseWriter, r *http.Request) bool {
@@ -362,7 +359,6 @@ func (s *Server) requireAuth(w http.ResponseWriter, r *http.Request) bool {
 // ServeHTTP routes requests by project: /<project>/... delegates to the
 // project's web.App; /org/... serves org-level endpoints (audit, projects,
 // policies); / serves an org-level dashboard (list of projects).
-//
 // Every request is gated by requireAuth: in enterprise mode the server serves
 // each project's full digital twin plus the shared org audit log and policies,
 // so nothing is exposed without a valid bearer token (fail-closed).
@@ -487,7 +483,7 @@ func (s *Server) serveOrgProjects(w http.ResponseWriter, r *http.Request) {
 }
 
 // serveOrgRepositories lists the repositories (projects) registered at the
-// org level (Phase 19 P19.3 "repository"). It mirrors the project list but is
+// org level ( .3 "repository"). It mirrors the project list but is
 // exposed under the canonical "repository" resource name the spec requires.
 func (s *Server) serveOrgRepositories(w http.ResponseWriter, r *http.Request) {
 	type repoInfo struct {
@@ -506,7 +502,7 @@ func (s *Server) serveOrgRepositories(w http.ResponseWriter, r *http.Request) {
 }
 
 // serveOrgArchitecture aggregates the architecture report across every project
-// (Phase 19 P19.3 "architecture"). It is intentionally cheap: it returns the
+// ( .3 "architecture"). It is intentionally cheap: it returns the
 // per-project root/name and a violations count by delegating to each project's
 // cached web.App architecture builder, skipping projects that fail to build.
 func (s *Server) serveOrgArchitecture(w http.ResponseWriter, r *http.Request) {
@@ -538,12 +534,12 @@ func (s *Server) serveOrgArchitecture(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// serveOrgMemory serves the org-level memory store (Phase 23a).
-//   - GET /org/memory lists org-level memories. With ?project=<name> it lists
-//     that project's per-project memory store instead (falling back to org
-//     memory is NOT done here — an unknown project is a 404, so clients can
-//     distinguish a missing project from an empty store). POST /org/memory
-//     always writes to the shared org-level store (cross-project lessons).
+// serveOrgMemory serves the org-level memory store.
+// - GET /org/memory lists org-level memories. With ?project=<name> it lists
+// that project's per-project memory store instead (falling back to org
+// memory is NOT done here — an unknown project is a 404, so clients can
+// distinguish a missing project from an empty store). POST /org/memory
+// always writes to the shared org-level store (cross-project lessons).
 func (s *Server) serveOrgMemory(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
@@ -585,7 +581,7 @@ func (s *Server) serveOrgMemory(w http.ResponseWriter, r *http.Request) {
 }
 
 // serveOrgTasks serves aggregated task visibility across all projects
-// (Phase 23b). Returns a map of project name → task list.
+// Returns a map of project name → task list.
 func (s *Server) serveOrgTasks(w http.ResponseWriter, r *http.Request) {
 	tasks := s.OrgTasks()
 	total := 0
@@ -599,7 +595,7 @@ func (s *Server) serveOrgTasks(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// serveOrgSearch serves cross-project symbol search (Phase 23c). It searches
+// serveOrgSearch serves cross-project symbol search. It searches
 // across all repos registered in the kern multi-repo registry.
 func (s *Server) serveOrgSearch(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query().Get("q")
@@ -615,22 +611,48 @@ func (s *Server) serveOrgSearch(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// serveOrgAgents serves the org-level agent registry (Phase 23d). Returns all
-// registered agent identities.
+// serveOrgAgents serves the org-level agent registry.
+// - GET  /org/agents returns all registered agent identities.
+// - POST /org/agents registers a new agent from a JSON AgentIdentity body;
+// 400 on a bad body, 409 on a duplicate ID, 201 with the created agent on
+// success.
+// - any other method → 405.
 func (s *Server) serveOrgAgents(w http.ResponseWriter, r *http.Request) {
-	agents := s.Agents()
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]any{
-		"agents": agents,
-		"count":  len(agents),
-	})
+	switch r.Method {
+	case http.MethodGet:
+		agents := s.Agents()
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"agents": agents,
+			"count":  len(agents),
+		})
+	case http.MethodPost:
+		var agent governance.AgentIdentity
+		if err := json.NewDecoder(r.Body).Decode(&agent); err != nil {
+			http.Error(w, "enterprise: invalid agent body: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		if agent.ID == "" {
+			http.Error(w, "enterprise: agent id is required", http.StatusBadRequest)
+			return
+		}
+		if err := s.RegisterAgent(&agent); err != nil {
+			http.Error(w, err.Error(), http.StatusConflict)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(agent)
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
 }
 
-// serveOrgTeams serves the team registry (Phase 19 P19.3).
-//   - GET /org/teams lists all teams as {"teams": [...], "count": N}.
-//   - POST /org/teams creates a team from a JSON OrgTeam body; 400 on a bad
-//     body, 409 on a duplicate/validation error, 201 with the created team on
-//     success.
+// serveOrgTeams serves the team registry.
+// - GET /org/teams lists all teams as {"teams": [...], "count": N}.
+// - POST /org/teams creates a team from a JSON OrgTeam body; 400 on a bad
+// body, 409 on a duplicate/validation error, 201 with the created team on
+// success.
 func (s *Server) serveOrgTeams(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
@@ -658,9 +680,9 @@ func (s *Server) serveOrgTeams(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// serveOrgTeam serves a single team by ID (Phase 19 P19.3).
-//   - GET /org/teams/{id} returns one team (404 if unknown).
-//   - DELETE /org/teams/{id} removes it (404 if unknown, 204 on success).
+// serveOrgTeam serves a single team by ID.
+// - GET /org/teams/{id} returns one team (404 if unknown).
+// - DELETE /org/teams/{id} removes it (404 if unknown, 204 on success).
 func (s *Server) serveOrgTeam(w http.ResponseWriter, r *http.Request, id string) {
 	switch r.Method {
 	case http.MethodGet:
@@ -683,7 +705,7 @@ func (s *Server) serveOrgTeam(w http.ResponseWriter, r *http.Request, id string)
 }
 
 // serveOrgAgentTeams serves the teams a given agent belongs to
-// (Phase 19 P19.3, optional): GET /org/agents/{id}/teams. Returns 404 when the
+// ( .3, optional): GET /org/agents/{id}/teams. Returns 404 when the
 // agent ID is unknown (fail-closed).
 func (s *Server) serveOrgAgentTeams(w http.ResponseWriter, r *http.Request, agentID string) {
 	if r.Method != http.MethodGet {

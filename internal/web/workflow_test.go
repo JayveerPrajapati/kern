@@ -269,3 +269,87 @@ func TestNestedTaskActionRoutes(t *testing.T) {
 		t.Fatalf("bogus action status = %d, want 404", bad.Code)
 	}
 }
+
+// TestTaskDeployAction verifies the nested /v1/tasks/{id}/deploy route, which
+// all three SDKs (go/python/typescript) call via their deploy() methods. The
+// route was previously missing (404 "unknown task action"). Deploy follows the
+// task state machine: a fresh (CREATED) task is not deployable → 409; a task
+// driven to PR_CREATED deploys → 200 with state DEPLOYING (default Noop
+// deployer). Unknown tasks → 404, non-POST → 405.
+func TestTaskDeployAction(t *testing.T) {
+	app := newTestApp(t)
+
+	// Unknown task → 404, not 500.
+	missing := postJSON(t, app, "/v1/tasks/does-not-exist/deploy", `{"version":"v1.2.3"}`)
+	if missing.Code != http.StatusNotFound {
+		t.Fatalf("unknown task deploy status = %d, want 404: %s", missing.Code, missing.Body.String())
+	}
+
+	// GET on the deploy action → 405 (POST-only).
+	if rec := get(t, app, "/v1/tasks/does-not-exist/deploy"); rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("GET deploy status = %d, want 405", rec.Code)
+	}
+
+	// Fresh task (CREATED) is not deployable → 409 Conflict.
+	fresh := postJSON(t, app, "/v1/tasks", `{"input":"too early","type":"code"}`)
+	var freshSub struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(fresh.Body.Bytes(), &freshSub); err != nil || freshSub.ID == "" {
+		t.Fatalf("decode fresh submit: %v (id=%q)", err, freshSub.ID)
+	}
+	tooSoon := postJSON(t, app, "/v1/tasks/"+freshSub.ID+"/deploy", `{"version":"v1.2.3"}`)
+	if tooSoon.Code != http.StatusConflict {
+		t.Fatalf("fresh-task deploy status = %d, want 409: %s", tooSoon.Code, tooSoon.Body.String())
+	}
+
+	// Separate task driven to PR_CREATED (the legal deploy state) → deploy
+	// succeeds with 200 + state DEPLOYING. The drive happens through the
+	// TaskService store because Deploy resolves tasks from its own persisted
+	// store, not the web registry.
+	sub := postJSON(t, app, "/v1/tasks", `{"input":"deploy a release","type":"code"}`)
+	if sub.Code != http.StatusOK {
+		t.Fatalf("submit status = %d, want 200: %s", sub.Code, sub.Body.String())
+	}
+	var s struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(sub.Body.Bytes(), &s); err != nil {
+		t.Fatalf("decode submit: %v", err)
+	}
+	if s.ID == "" {
+		t.Fatal("submit did not return an id")
+	}
+
+	tk, ok := app.taskSvc.Get(s.ID)
+	if !ok {
+		t.Fatalf("task %s not found in task service", s.ID)
+	}
+	for _, st := range []domain.TaskState{
+		domain.TaskAnalyzing, domain.TaskPlanning, domain.TaskWaitingApproval,
+		domain.TaskApproved, domain.TaskExecuting, domain.TaskVerifying,
+		domain.TaskReadyForPR, domain.TaskPRCreated,
+	} {
+		if err := tk.Transition(st); err != nil {
+			t.Fatalf("transition to %s: %v", st, err)
+		}
+	}
+	if _, err := app.taskSvc.Store().Save(*tk); err != nil {
+		t.Fatalf("persist driven task: %v", err)
+	}
+
+	rec := postJSON(t, app, "/v1/tasks/"+s.ID+"/deploy", `{"version":"v1.2.3"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("deploy status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	var deployed map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &deployed); err != nil {
+		t.Fatalf("decode deploy: %v", err)
+	}
+	if id, _ := deployed["ID"].(string); id != s.ID {
+		t.Fatalf("deployed task ID = %v, want %s", deployed["ID"], s.ID)
+	}
+	if state, _ := deployed["State"].(string); state != string(domain.TaskDeploying) {
+		t.Fatalf("deployed task state = %v, want %s", deployed["State"], domain.TaskDeploying)
+	}
+}

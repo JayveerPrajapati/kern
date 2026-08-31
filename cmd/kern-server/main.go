@@ -18,15 +18,38 @@ import (
 
 	"github.com/JayveerPrajapati/kern/internal/enterprise"
 	"github.com/JayveerPrajapati/kern/internal/eventbus"
+	kversion "github.com/JayveerPrajapati/kern/internal/version"
 	"github.com/JayveerPrajapati/kern/internal/web"
 	"github.com/JayveerPrajapati/kern/internal/webhook"
 )
+
+// version is the build-stamped release version, initialized from the shared
+// internal/version.Version so every kern binary reports the same value.
+// It starts as the literal "dev" (not a copy of kversion.Version) because
+// the legacy -ldflags "-X main.version=..." only rewrites a variable whose
+// initializer is a compile-time constant: a runtime copy from another global
+// aliases the read and silently defeats -X. When unstamped, init() adopts
+// the shared internal/version.Version (default "dev", or the newer
+// "-X github.com/JayveerPrajapati/kern/internal/version.Version=..." form;
+// see .github/workflows/release.yml and homebrew/kern.rb).
+var version = "dev"
+
+func init() {
+	if version == "dev" {
+		version = kversion.Version
+	}
+}
 
 func main() {
 	root := flag.String("root", ".", "project root to serve (single-project mode)")
 	addr := flag.String("addr", "127.0.0.1:8090", "listen address")
 	enterprise := flag.Bool("enterprise", false, "enable multi-project enterprise mode")
+	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
+	if *showVersion {
+		fmt.Printf("kern-server %s\n", version)
+		os.Exit(0)
+	}
 
 	if *enterprise {
 		runEnterprise(*addr)

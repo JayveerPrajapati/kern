@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-// TestV1ApproveAndRejectRoutes verifies the Phase 19.1 REST surface for approvals:
+// TestV1ApproveAndRejectRoutes verifies the REST surface for approvals:
 // POST /v1/approve and POST /v1/reject reachable under the stable /v1 namespace,
 // plus GET /v1/approvals/pending returning the pending roster. These are thin
 // re-registrations of the existing web handlers.
