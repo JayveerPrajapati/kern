@@ -6,11 +6,10 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/domain"
 )
 
-// AgentResult is the result contract for a specialist agent step (Phase 9.3).
+// AgentResult is the result contract for a specialist agent step .
 // It bundles everything an agent produces for a task into one serializable
 // value: the outcome text, the supporting evidence, the risks it identified,
 // a confidence score, any artifacts it wrote, and a recommended next action.
-//
 // The value is deliberately an additive result contract: every field is a
 // value type or a slice, so a zero-value AgentResult is valid and serializes
 // cleanly. Evidence reuses internal/domain.Claim (built via internal/evidence),

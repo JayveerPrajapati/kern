@@ -211,3 +211,120 @@ func TestRestoreRefusesTraversalPath(t *testing.T) {
 		t.Fatal("traversal file should not have been written outside the root")
 	}
 }
+
+// TestSnapshotSkipsLargeFiles: a file over the snapshot cap is not read into
+// the snapshot; it is recorded in skippedOverCap (and skipped), and other
+// files in the same directory are still snapshotted.
+func TestSnapshotSkipsLargeFiles(t *testing.T) {
+	root := t.TempDir()
+	big := make([]byte, maxSnapshotBytes+1)
+	_ = os.WriteFile(filepath.Join(root, "big.dat"), big, 0o644)
+	_ = os.WriteFile(filepath.Join(root, "small.txt"), []byte("ok"), 0o644)
+	snap, err := Snapshot(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer snap.Close()
+	if len(snap.skippedOverCap) != 1 || snap.skippedOverCap[0] != "big.dat" {
+		t.Fatalf("skippedOverCap = %v; want [big.dat]", snap.skippedOverCap)
+	}
+	if len(snap.files) != 1 || snap.files[0] != "small.txt" {
+		t.Fatalf("expected only small.txt snapshotted, got %v", snap.files)
+	}
+	// The snapshot must not contain the over-cap file's contents.
+	if _, err := os.Stat(filepath.Join(snap.Tmp(), "big.dat")); !os.IsNotExist(err) {
+		t.Fatal("snapshot must not contain the over-cap file")
+	}
+}
+
+// TestRunWarnsOnModifiedSkippedFile: when a failed run MODIFIES a file that
+// was skipped at snapshot time (over the cap), Run must refuse to present a
+// rollback as complete: it returns an error naming the file and the cap,
+// BEFORE attempting rollback, and the change is left in place for the caller
+// to decide on.
+func TestRunWarnsOnModifiedSkippedFile(t *testing.T) {
+	root := t.TempDir()
+	big := make([]byte, maxSnapshotBytes+1)
+	_ = os.WriteFile(filepath.Join(root, "big.dat"), big, 0o644)
+	res := Run(context.Background(), root, "sh", []string{"-c", "echo x >> big.dat; exit 1"}, 10*time.Second)
+	if res.OK {
+		t.Fatal("expected failure")
+	}
+	if res.Restored {
+		t.Fatal("rollback must not be attempted (and claimed) when a skipped over-cap file was modified")
+	}
+	if res.Err == nil {
+		t.Fatal("Run returned nil error after a skipped file was modified; want a clear error before rollback")
+	}
+	if !strings.Contains(res.Err.Error(), "big.dat") {
+		t.Fatalf("error should name the skipped file: %v", res.Err)
+	}
+	if !strings.Contains(res.Err.Error(), "snapshot cap") {
+		t.Fatalf("error should mention the snapshot cap: %v", res.Err)
+	}
+	if len(res.SkippedFiles) != 1 || res.SkippedFiles[0] != "big.dat" {
+		t.Fatalf("SkippedFiles = %v; want [big.dat]", res.SkippedFiles)
+	}
+	// The file's post-run state is left in place (nothing to restore from).
+	if fi, err := os.Stat(filepath.Join(root, "big.dat")); err != nil || fi.Size() != int64(len(big))+2 {
+		t.Fatalf("big.dat should retain the run's modification (size %d): %v", int64(len(big))+2, err)
+	}
+}
+
+// TestMaxSnapshotBytesConfigurable: raising the cap via
+// KERN_SANDBOX_MAX_SNAPSHOT_BYTES (suffixed or plain-byte form) lets files
+// over the default 100 MiB cap be snapshotted normally.
+func TestMaxSnapshotBytesConfigurable(t *testing.T) {
+	// Suffixed form.
+	t.Setenv("KERN_SANDBOX_MAX_SNAPSHOT_BYTES", "256MB")
+	if got := snapshotCap(); got != 256<<20 {
+		t.Fatalf("snapshotCap() with 256MB = %d; want %d", got, 256<<20)
+	}
+	// Plain-byte form.
+	t.Setenv("KERN_SANDBOX_MAX_SNAPSHOT_BYTES", "200000000")
+	if got := snapshotCap(); got != 200000000 {
+		t.Fatalf("snapshotCap() with 200000000 = %d; want 200000000", got)
+	}
+	root := t.TempDir()
+	big := make([]byte, maxSnapshotBytes+1) // over the default cap, under the raised one
+	_ = os.WriteFile(filepath.Join(root, "big.dat"), big, 0o644)
+	snap, err := Snapshot(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer snap.Close()
+	if len(snap.skippedOverCap) != 0 {
+		t.Fatalf("file over the default cap should be snapshotted under a raised cap; skipped=%v", snap.skippedOverCap)
+	}
+	if len(snap.files) != 1 || snap.files[0] != "big.dat" {
+		t.Fatalf("expected big.dat snapshotted, got %v", snap.files)
+	}
+}
+
+// TestRollbackRestoresSkippedFileFailsClearly: restoring after a skipped
+// (over-cap) file was DELETED by the run fails loudly, naming the file and
+// the snapshot cap so the data loss is never silent.
+func TestRollbackRestoresSkippedFileFailsClearly(t *testing.T) {
+	root := t.TempDir()
+	big := make([]byte, maxSnapshotBytes+1)
+	_ = os.WriteFile(filepath.Join(root, "big.dat"), big, 0o644)
+	snap, err := Snapshot(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer snap.Close()
+	if err := os.Remove(filepath.Join(root, "big.dat")); err != nil {
+		t.Fatal(err)
+	}
+	err = snap.Restore()
+	if err == nil {
+		t.Fatal("Restore must fail loudly when a skipped file was deleted by the run")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "big.dat") {
+		t.Fatalf("error should name the lost file: %v", err)
+	}
+	if !strings.Contains(msg, "snapshot cap") {
+		t.Fatalf("error should name the snapshot cap: %v", err)
+	}
+}

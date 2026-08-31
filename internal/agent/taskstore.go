@@ -2,8 +2,10 @@ package agent
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
 
 	"github.com/JayveerPrajapati/kern/internal/cache"
@@ -90,12 +92,34 @@ func (s *TaskStore) saveLocked(list []Task) error {
 }
 
 // Save persists a task (insert or replace by ID) and returns the stored record.
+// It takes the process-wide path lock so concurrent store instances (MCP
+// server, web app, CLI) serialize their read-modify-write and never lose each
+// other's updates, and a cross-process file lock so separate kern processes
+// working on the same project (or parallel test binaries) do not interleave
+// their load->modify->save critical sections on the shared JSON file.
+// When t.ID is empty, the store assigns the next deterministic ID
+// ("t-<max+1>") from the persisted content under the lock. This makes task
+// IDs unique across processes: the old package-level counter started at t-1 in
+// every process, so two processes created colliding IDs and Save (replace by
+// ID) silently destroyed one of the tasks. Interfaces that want the store to
+// own IDs (TaskService, web registry) submit tasks with an empty ID.
 func (s *TaskStore) Save(t Task) (Task, error) {
+	fl, err := cache.LockFile(s.path)
+	if err != nil {
+		return Task{}, err
+	}
+	defer fl.Unlock()
+	pl := cache.PathLock(s.path)
+	pl.Lock()
+	defer pl.Unlock()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	list, err := s.loadLocked()
 	if err != nil {
 		return Task{}, err
+	}
+	if t.ID == "" {
+		t.ID = nextStoreTaskID(list)
 	}
 	kept := list[:0]
 	for _, it := range list {
@@ -110,8 +134,38 @@ func (s *TaskStore) Save(t Task) (Task, error) {
 	return t, nil
 }
 
-// Get returns a task by ID, or os.ErrNotExist.
+// nextStoreTaskID returns the next deterministic task ID from the persisted
+// list: the highest numeric "t-<n>" suffix plus one (t-1 when the store is
+// empty or holds no t-<n> IDs). Non-numeric IDs (e.g. "t-replay" in tests)
+// are ignored so they never force an ID collision.
+func nextStoreTaskID(list []Task) string {
+	maxN := 0
+	for _, it := range list {
+		if n, ok := parseTaskNumber(it.ID); ok && n > maxN {
+			maxN = n
+		}
+	}
+	return fmt.Sprintf("t-%d", maxN+1)
+}
+
+// parseTaskNumber extracts the numeric suffix of a "t-<n>" ID.
+func parseTaskNumber(id string) (int, bool) {
+	if len(id) < 3 || id[:2] != "t-" {
+		return 0, false
+	}
+	n, err := strconv.Atoi(id[2:])
+	if err != nil {
+		return 0, false
+	}
+	return n, true
+}
+
+// Get returns a task by ID, or os.ErrNotExist. The path lock guards against
+// reading a half-renamed file while another instance is mid-save.
 func (s *TaskStore) Get(id string) (Task, error) {
+	pl := cache.PathLock(s.path)
+	pl.Lock()
+	defer pl.Unlock()
 	list, err := s.load()
 	if err != nil {
 		return Task{}, err

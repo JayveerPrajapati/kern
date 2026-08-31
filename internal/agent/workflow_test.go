@@ -2,9 +2,11 @@ package agent
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/JayveerPrajapati/kern/internal/domain"
+	"github.com/JayveerPrajapati/kern/internal/governance"
 )
 
 func setupWorkflowRegistry() *Registry {
@@ -162,9 +164,122 @@ func TestRunNilInputs(t *testing.T) {
 	}
 }
 
+// TestLargeStepOutputNormalized verifies tool-output normalization in
+// the workflow engine: a step that produces a large raw output (over the 4 KiB
+// threshold) records a compact normalized summary in its step history while the
+// raw output remains on the task's Output (available outside active context).
+func TestLargeStepOutputNormalized(t *testing.T) {
+	e := NewWorkflowEngine(setupWorkflowRegistry(), nil)
+	tk := NewTask("code", "feature")
+	// Produce a large output that mixes errors with noise — the classic
+	// "large test output" case.
+	big := strings.Repeat("ok line\n", 500)
+	big += "main.go:42: error: undefined: Bar\n" + strings.Repeat("noise\n", 500)
+	handler := func(action string, task *Task) (string, error) {
+		// "code" and the final "pr" step both return the large raw output so
+		// the task's final Output preserves it (the engine sets Output per
+		// step, so the last step wins).
+		if action == "code" || action == "pr" {
+			return big, nil
+		}
+		return "small", nil
+	}
+	task, err := runThroughApproval(t, e, tk, handler)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	// Find the "code" step: it must be normalized.
+	var codeStep *Step
+	for i := range task.Steps {
+		if task.Steps[i].Action == "code" {
+			codeStep = &task.Steps[i]
+			break
+		}
+	}
+	if codeStep == nil {
+		t.Fatal("no code step recorded")
+	}
+	if len(codeStep.Result) >= len(big) {
+		t.Fatalf("step result not normalized: %d chars, want < raw %d", len(codeStep.Result), len(big))
+	}
+	if !strings.Contains(codeStep.Result, "[normalized") {
+		t.Errorf("step result missing normalized marker: %q", codeStep.Result)
+	}
+	// Errors must be retained in the normalized summary.
+	if !strings.Contains(codeStep.Result, "error: undefined: Bar") {
+		t.Errorf("normalized step result lost the error line: %q", codeStep.Result)
+	}
+	// The raw output must remain available on the task (outside active context).
+	if task.Output != big {
+		t.Errorf("task.Output lost the raw output (%d chars, want %d)", len(task.Output), len(big))
+	}
+	// A small step output must be stored verbatim (no normalization).
+	for i := range task.Steps {
+		if task.Steps[i].Action == "analyze" && task.Steps[i].Result != "small" {
+			t.Errorf("analyze step result = %q, want verbatim 'small'", task.Steps[i].Result)
+		}
+	}
+}
+
 func TestCompleteApprovalUnknown(t *testing.T) {
 	e := NewWorkflowEngine(nil, nil)
 	if err := e.CompleteApproval("nope", "human"); err == nil {
 		t.Fatal("CompleteApproval(unknown): want error")
+	}
+}
+
+// TestApprovalGatePersistsAcrossEngine verifies the resume contract:
+// a run that parks at an approval gate records its resume step + approval
+// binding on the task, and a FRESH engine (same task) observes the out-of-band
+// approval decision from the persistent store and drives past the gate.
+func TestApprovalGatePersistsAcrossEngine(t *testing.T) {
+	root := t.TempDir()
+	store := governance.NewFileStore(root)
+
+	// Engine 1 parks the run at the gate.
+	e1 := NewWorkflowEngine(setupWorkflowRegistry(), nil).WithApprovalStore(store)
+	tk := NewTask("code", "feature")
+	tk.WorkflowID = "default"
+	handler := func(action string, task *Task) (string, error) { return "ok", nil }
+	_, err := e1.Run(tk, handler)
+	if !errors.Is(err, ErrApprovalRequired) {
+		t.Fatalf("Run: expected ErrApprovalRequired, got %v", err)
+	}
+	id := ApprovalID(err)
+	if id == "" {
+		t.Fatal("ApprovalID(err): empty")
+	}
+	// The run state must be persisted on the task: resume step + binding.
+	if tk.ResumeStep <= 0 {
+		t.Fatalf("ResumeStep = %d, want > 0 (persisted gate position)", tk.ResumeStep)
+	}
+	if tk.ApprovalRefs[id] != tk.ResumeStep {
+		t.Fatalf("ApprovalRefs[%s] = %d, want %d", id, tk.ApprovalRefs[id], tk.ResumeStep)
+	}
+
+	// Out-of-band approval through the persistent store (what `kern approve`
+	// writes)...
+	if _, err := store.Decide(id, "human", true, ""); err != nil {
+		t.Fatalf("store.Decide: %v", err)
+	}
+
+	// ...and a FRESH engine resumes the SAME task, sees the approved gate, and
+	// completes the workflow (code → verify → pr).
+	e2 := NewWorkflowEngine(setupWorkflowRegistry(), nil).WithApprovalStore(store)
+	tk2 := NewTask("code", "feature")
+	tk2.WorkflowID = "default"
+	tk2.ID = tk.ID // resume the same task identity
+	tk2.ResumeStep = tk.ResumeStep
+	tk2.ApprovalRefs = tk.ApprovalRefs
+	tk2.State = tk.State
+	final, err := e2.Run(tk2, handler)
+	if err != nil {
+		t.Fatalf("fresh-engine resume: %v", err)
+	}
+	if !final.Terminal() {
+		t.Fatalf("state = %s, want terminal after fresh-engine resume", final.State)
+	}
+	if final.ResumeStep != 0 || final.ApprovalRefs != nil {
+		t.Errorf("resume state not cleared on completion: ResumeStep=%d ApprovalRefs=%v", final.ResumeStep, final.ApprovalRefs)
 	}
 }

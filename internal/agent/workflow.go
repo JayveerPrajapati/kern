@@ -7,15 +7,31 @@ import (
 	"sync"
 	"time"
 
+	"github.com/JayveerPrajapati/kern/internal/context"
 	"github.com/JayveerPrajapati/kern/internal/domain"
 	"github.com/JayveerPrajapati/kern/internal/eventbus"
 	"github.com/JayveerPrajapati/kern/internal/governance"
 	"github.com/JayveerPrajapati/kern/internal/metrics"
 )
 
+// maxNormalizedStepOutput is the threshold above which a step's raw output is
+// normalized : the step history keeps a compact summary while the
+// raw output remains on the task and in the artifact chain.
+const maxNormalizedStepOutput = 4 << 10 // 4 KiB
+
 // ErrApprovalRequired is returned by Run when a step requires human approval
 // that has not been granted. The caller must call CompleteApproval and re-run.
 var ErrApprovalRequired = errors.New("agent: human approval required")
+
+// ApprovalStore is the persistent approval backend the engine uses so an
+// approval-gated run can be resumed across processes (e.g. `kern approve`
+// writes the same store). A nil store keeps the approval workflow purely
+// in-memory (v1 behavior).
+type ApprovalStore interface {
+	Get(approvalID string) (domain.Approval, error)
+	AddPending(a domain.Approval) error
+	Decide(approvalID, approver string, approved bool, reason string) (domain.Approval, error)
+}
 
 // approvalRequiredError wraps ErrApprovalRequired with the pending approval ID.
 type approvalRequiredError struct {
@@ -63,6 +79,60 @@ var taskStateForAction = map[string]domain.TaskState{
 	"request": domain.TaskCreated,
 }
 
+// canonicalLifecycle is the full code-change state chain (the Integration
+// Transformation Plan's 20-step vertical slice). The engine advances a task
+// along this chain when a workflow step targets a state beyond the current
+// one, so a workflow need not spell out every intermediate state (e.g. an
+// incident workflow may open with "plan" while the task starts at CREATED).
+var canonicalLifecycle = []domain.TaskState{
+	domain.TaskCreated,
+	domain.TaskAnalyzing,
+	domain.TaskPlanning,
+	domain.TaskWaitingApproval,
+	domain.TaskApproved,
+	domain.TaskExecuting,
+	domain.TaskVerifying,
+	domain.TaskReadyForPR,
+	domain.TaskPRCreated,
+	domain.TaskDeploying,
+	domain.TaskObserving,
+	domain.TaskCompleted,
+}
+
+// driveToState advances the task from its current state to the target state by
+// walking the canonical lifecycle through each intermediate state, applying
+// every transition in order. It is a no-op when the task is already at the
+// target. When the current state is not on the canonical chain (e.g. a
+// recoverable BLOCKED/FAILED state), it falls back to a single direct
+// transition so the strict state machine still validates the move.
+func driveToState(t *Task, target domain.TaskState) error {
+	if t.State == target {
+		return nil
+	}
+	curIdx, curFound := indexInLifecycle(t.State)
+	tgtIdx, tgtFound := indexInLifecycle(target)
+	if curFound && tgtFound && curIdx < tgtIdx {
+		for _, next := range canonicalLifecycle[curIdx+1 : tgtIdx+1] {
+			if err := t.Transition(next); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	return t.Transition(target)
+}
+
+// indexInLifecycle returns the position of a state on the canonical lifecycle,
+// reporting whether it is present.
+func indexInLifecycle(s domain.TaskState) (int, bool) {
+	for i, st := range canonicalLifecycle {
+		if st == s {
+			return i, true
+		}
+	}
+	return 0, false
+}
+
 // approvalKey identifies one approval gate for a task+step.
 func approvalKey(taskID string, step int) string {
 	return fmt.Sprintf("%s:%d", taskID, step)
@@ -77,6 +147,7 @@ type approval struct {
 type WorkflowEngine struct {
 	registry  *Registry
 	approvals *governance.ApprovalWorkflow
+	store     ApprovalStore // persistent approval backend; nil = in-memory only
 	workflows map[string]Workflow
 
 	// mu guards the approvalRef/satisfied/progress maps, which are mutated by
@@ -117,6 +188,14 @@ func (e *WorkflowEngine) WithBus(b *eventbus.Bus) *WorkflowEngine {
 	return e
 }
 
+// WithApprovalStore attaches a persistent approval backend so approval gates
+// survive process restarts and can be resolved out-of-band (e.g. via
+// `kern approve`). A nil store keeps approvals in memory (v1 behavior).
+func (e *WorkflowEngine) WithApprovalStore(s ApprovalStore) *WorkflowEngine {
+	e.store = s
+	return e
+}
+
 // publish delivers a task-lifecycle event to the optional bus.
 func (e *WorkflowEngine) publish(kind eventbus.Kind, subject string, payload map[string]string) {
 	if e.bus == nil {
@@ -145,6 +224,56 @@ func (e *WorkflowEngine) RegisterWorkflow(wf Workflow) {
 func (e *WorkflowEngine) GetWorkflow(id string) (Workflow, bool) {
 	wf, ok := e.workflows[id]
 	return wf, ok
+}
+
+// seedFromTask restores the engine's approval-gate state from the task's
+// persisted resume fields, so a fresh engine can continue a run that
+// parked at an approval gate. It is a no-op when the task carries no resume
+// state (first run or run already completed).
+func (e *WorkflowEngine) seedFromTask(t *Task) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if t.ResumeStep > 0 {
+		e.progress[t.ID] = t.ResumeStep
+	}
+	for approvalID, stepIdx := range t.ApprovalRefs {
+		// The gate is satisfied if the bound approval is already approved in
+		// the persistent store (out-of-band resolution, e.g. `kern approve`).
+		if e.store != nil {
+			if a, err := e.store.Get(approvalID); err == nil && a.Status == "approved" {
+				e.satisfied[approvalKey(t.ID, stepIdx)] = true
+				continue
+			}
+		}
+		e.approvalRef[approvalID] = approval{key: approvalKey(t.ID, stepIdx)}
+	}
+}
+
+// gateSatisfied reports whether a workflow approval gate is satisfied, checking
+// the engine's in-memory state first and then the persistent store bound to the
+// step (a fresh engine + out-of-band approval path).
+func (e *WorkflowEngine) gateSatisfied(t *Task, key string, stepIdx int) bool {
+	e.mu.Lock()
+	sat := e.satisfied[key]
+	e.mu.Unlock()
+	if sat {
+		return true
+	}
+	if e.store == nil {
+		return false
+	}
+	for approvalID, idx := range t.ApprovalRefs {
+		if idx != stepIdx {
+			continue
+		}
+		if a, err := e.store.Get(approvalID); err == nil && a.Status == "approved" {
+			e.mu.Lock()
+			e.satisfied[key] = true
+			e.mu.Unlock()
+			return true
+		}
+	}
+	return false
 }
 
 // resolveWorkflow returns the workflow to run for a task, defaulting to the
@@ -193,33 +322,57 @@ func (e *WorkflowEngine) Run(rootTask *Task, stepHandler func(action string, tas
 
 	wf := e.resolveWorkflow(rootTask.WorkflowID)
 
+	// Resume state is persisted on the task : a run that parked at an
+	// approval gate records its next step index and approval bindings on the
+	// task, so a FRESH engine can resume the same run after the gate is
+	// resolved (the run is the task, not this engine instance). Seed the
+	// engine's maps from the task, then fall back to the in-memory progress.
+	e.seedFromTask(rootTask)
+
 	e.mu.Lock()
 	start := e.progress[rootTask.ID]
+	if rootTask.ResumeStep > start {
+		start = rootTask.ResumeStep
+	}
 	e.mu.Unlock()
 	for i := start; i < len(wf.Steps); i++ {
 		step := wf.Steps[i]
 
 		// Abort if the task reached a terminal state mid-flight.
-		if rootTask.IsTerminal() {
+		if rootTask.Terminal() {
 			return rootTask, fmt.Errorf("agent: task %s reached terminal state %s before step %d", rootTask.ID, rootTask.State, i)
 		}
+
+		// Track the current workflow stage on the task ("current stage" is
+		// persisted with the task). Set before the step runs so a
+		// failure mid-step still records where the task was.
+		rootTask.CurrentStage = step.Action
 
 		// Human approval gate.
 		if step.RequiresApproval {
 			key := approvalKey(rootTask.ID, i)
-			e.mu.Lock()
-			sat := e.satisfied[key]
-			e.mu.Unlock()
+			sat := e.gateSatisfied(rootTask, key, i)
 			if !sat {
 				if err := rootTask.Transition(domain.TaskWaitingApproval); err != nil {
 					return rootTask, err
 				}
 				req := e.approvals.Request(rootTask.ID, rootTask.CreatedBy, step.Action)
+				if e.store != nil {
+					_ = e.store.AddPending(req)
+				}
 				e.mu.Lock()
 				e.approvalRef[req.ID] = approval{key: key}
 				// Resume at this gate step on re-run.
 				e.progress[rootTask.ID] = i
 				e.mu.Unlock()
+				// Persist the run state on the task so a fresh engine can
+				// resume this exact gate after out-of-band approval.
+				if rootTask.ApprovalRefs == nil {
+					rootTask.ApprovalRefs = map[string]int{}
+				}
+				rootTask.ApprovalRefs[req.ID] = i
+				rootTask.ResumeStep = i
+				e.persist(rootTask)
 				rootTask.AddStep(Step{
 					Action:  step.Action,
 					AgentID: "human",
@@ -240,12 +393,13 @@ func (e *WorkflowEngine) Run(rootTask *Task, stepHandler func(action string, tas
 			continue
 		}
 
-		// Drive the state machine for executable steps.
+		// Drive the state machine for executable steps. The task advances
+		// along the canonical lifecycle to the step's target state, so a
+		// workflow may open at any stage (e.g. an incident workflow starting
+		// at "plan") without listing every intermediate state.
 		if next, ok := taskStateForAction[step.Action]; ok {
-			if rootTask.State != next {
-				if err := rootTask.Transition(next); err != nil {
-					return rootTask, err
-				}
+			if err := driveToState(rootTask, next); err != nil {
+				return rootTask, err
 			}
 		}
 
@@ -266,11 +420,29 @@ func (e *WorkflowEngine) Run(rootTask *Task, stepHandler func(action string, tas
 			e.publishTaskState(eventbus.TaskFailed, rootTask)
 			return rootTask, err
 		}
-		rootTask.AddStep(Step{Action: step.Action, AgentID: agentID, Result: out, Status: "success"})
+		// Tool-output normalization. Large raw step outputs are
+		// reduced to a compact summary (facts/errors/evidence/references) in
+		// the step history — the active-context view — while the raw output
+		// stays on the Task (rootTask.Output) and in the artifact chain, i.e.
+		// available outside active context. This keeps the persisted step trail
+		// lean without losing the original tool result.
+		stepResult := out
+		if len(out) > maxNormalizedStepOutput {
+			norm := context.NormalizeToolResult(step.Action, out, 5)
+			stepResult = norm.Summary
+			if len(norm.Errors) > 0 {
+				stepResult += "\n[errors]\n" + strings.Join(norm.Errors, "\n")
+			}
+			stepResult += fmt.Sprintf("\n[normalized %d → %d chars, raw in task output]", len(out), len(stepResult))
+		}
+		rootTask.AddStep(Step{Action: step.Action, AgentID: agentID, Result: stepResult, Status: "success"})
 		rootTask.Output = out
 	}
 
-	// All steps complete: mark the task completed.
+	// All steps complete: mark the task completed. The approval-gate resume
+	// state is cleared so a completed task never resumes from an old gate.
+	rootTask.ResumeStep = 0
+	rootTask.ApprovalRefs = nil
 	if err := rootTask.Complete(rootTask.Output); err != nil {
 		return rootTask, err
 	}
@@ -308,6 +480,13 @@ func (e *WorkflowEngine) CompleteApproval(approvalID, approver string) error {
 	if _, err := e.approvals.Approve(approvalID, approver); err != nil {
 		return err
 	}
+	// Write the decision through the persistent store so an out-of-band
+	// resolver (e.g. `kern approve`) and a fresh engine both observe it.
+	if e.store != nil {
+		if _, err := e.store.Decide(approvalID, approver, true, ""); err != nil {
+			return err
+		}
+	}
 	e.mu.Lock()
 	ref, ok := e.approvalRef[approvalID]
 	if !ok {
@@ -325,6 +504,11 @@ func (e *WorkflowEngine) CompleteApproval(approvalID, approver string) error {
 func (e *WorkflowEngine) RejectApproval(approvalID, approver, reason string) error {
 	if _, err := e.approvals.Reject(approvalID, approver, reason); err != nil {
 		return err
+	}
+	if e.store != nil {
+		if _, err := e.store.Decide(approvalID, approver, false, reason); err != nil {
+			return err
+		}
 	}
 	e.mu.Lock()
 	ref, ok := e.approvalRef[approvalID]

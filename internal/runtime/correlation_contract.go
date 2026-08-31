@@ -1,5 +1,4 @@
-// Phase 13 — Correlation contract + change fingerprint.
-//
+// Correlation contract + change fingerprint.
 // These are additive, deterministic primitives over the runtime correlation
 // layer. They give every correlation a typed FACTUAL/INFERRED/UNKNOWN contract
 // (13.2) and every change a stable, comparable fingerprint (13.4), and they
@@ -21,9 +20,9 @@ import (
 // runtime evidence, INFERRED when derived from other signals, and UNKNOWN when
 // it cannot be verified.
 type CorrelationLinkConfidence struct {
-	Stage      string                          // "service","deployment","commit","symbol","task","pr","agent","trace","event"
-	ID         string                          // the linked id
-	Confidence domain.CorrelationConfidence    `json:"confidence"`
+	Stage      string                       // "service","deployment","commit","symbol","task","pr","agent","trace","event"
+	ID         string                       // the linked id
+	Confidence domain.CorrelationConfidence `json:"confidence"`
 }
 
 // CorrelationContract is the typed confidence contract for a full correlation
@@ -32,16 +31,16 @@ type CorrelationLinkConfidence struct {
 // links present but not directly evidenced are INFERRED, and a correlation with
 // no evidence at all is UNKNOWN overall.
 type CorrelationContract struct {
-	Overall    domain.CorrelationConfidence  `json:"overall"`
-	Links      []CorrelationLinkConfidence   `json:"links"`
-	EvidenceCount int                       `json:"evidence_count"`
-	// Phase 13.2 contract metadata: which runtime source produced it, the
+	Overall       domain.CorrelationConfidence `json:"overall"`
+	Links         []CorrelationLinkConfidence  `json:"links"`
+	EvidenceCount int                          `json:"evidence_count"`
+	// Contract metadata: which runtime source produced it, the
 	// relationship classification (alias of Overall, explicit per spec), when it
 	// was computed, and how it was produced.
-	Source      string                      `json:"source,omitempty"`        // e.g. "runtime"
-	Relationship domain.CorrelationConfidence `json:"relationship"`          // FACTUAL/INFERRED/UNKNOWN
-	Timestamp   time.Time                  `json:"timestamp,omitempty"`      // when computed (UTC)
-	Provenance  string                     `json:"provenance,omitempty"`     // e.g. "runtime:correlate"
+	Source       string                       `json:"source,omitempty"`     // e.g. "runtime"
+	Relationship domain.CorrelationConfidence `json:"relationship"`         // FACTUAL/INFERRED/UNKNOWN
+	Timestamp    time.Time                    `json:"timestamp,omitempty"`  // when computed (UTC)
+	Provenance   string                       `json:"provenance,omitempty"` // e.g. "runtime:correlate"
 }
 
 // Contract derives the confidence contract for a correlation. The overall
@@ -69,7 +68,7 @@ func (c *Correlation) Contract() CorrelationContract {
 	return contract
 }
 
-// populateContractMeta fills the Phase 13.2 contract metadata: source, explicit
+// populateContractMeta fills the contract metadata: source, explicit
 // relationship classification, compute timestamp and provenance. The Correlation
 // value does not carry its own source name, so a stable "runtime" constant is
 // used (the same adapter family all correlations are produced from).
@@ -137,7 +136,6 @@ func correlationCommitConfidence(c *Correlation) domain.CorrelationConfidence {
 // the system detect whether two changes are the same even when their free-text
 // descriptions differ, and to group recurring changes (e.g. "same 500 on the
 // same symbol").
-//
 // The fingerprint enumerates the full dimension set (13.4): beyond kind/target
 // it also captures the files touched, symbols, services, APIs, database/event/
 // risk/test signals, and the agent/model/task that produced the change. Any
@@ -147,17 +145,17 @@ type ChangeFingerprint struct {
 	Kind      string   `json:"kind"`
 	Target    string   `json:"target"`
 	NewTarget string   `json:"new_target,omitempty"`
-	Files     []string `json:"files,omitempty"`     // files touched by the change
-	Symbols   []string `json:"symbols,omitempty"`   // symbols (funcs/types) affected
-	Services  []string `json:"services,omitempty"`  // services affected
-	APIs      []string `json:"apis,omitempty"`      // public APIs affected
-	Database  []string `json:"database,omitempty"`  // schemas/collections/tables touched
-	Events    []string `json:"events,omitempty"`    // domain events emitted
-	Risk      []string `json:"risk,omitempty"`      // risk descriptors
-	Tests     []string `json:"tests,omitempty"`     // tests added/changed
-	Agent     []string `json:"agent,omitempty"`     // agent(s) that produced the change
-	Model     []string `json:"model,omitempty"`     // model(s) used
-	Task      []string `json:"task,omitempty"`      // task(s) the change belongs to
+	Files     []string `json:"files,omitempty"`    // files touched by the change
+	Symbols   []string `json:"symbols,omitempty"`  // symbols (funcs/types) affected
+	Services  []string `json:"services,omitempty"` // services affected
+	APIs      []string `json:"apis,omitempty"`     // public APIs affected
+	Database  []string `json:"database,omitempty"` // schemas/collections/tables touched
+	Events    []string `json:"events,omitempty"`   // domain events emitted
+	Risk      []string `json:"risk,omitempty"`     // risk descriptors
+	Tests     []string `json:"tests,omitempty"`    // tests added/changed
+	Agent     []string `json:"agent,omitempty"`    // agent(s) that produced the change
+	Model     []string `json:"model,omitempty"`    // model(s) used
+	Task      []string `json:"task,omitempty"`     // task(s) the change belongs to
 	Hash      string   `json:"hash"`
 	Canonical string   `json:"canonical"` // normalized canonical form
 }
@@ -213,9 +211,9 @@ func canonicalizeChange(fp ChangeFingerprint) string {
 // TraceLink is the (13.1) link that ties a correlation chain to the trace and
 // event evidence that produced it.
 type TraceLink struct {
-	TraceID string        `json:"trace_id"`
-	EventID string        `json:"event_id"`
-	Stage   string        `json:"stage"` // the chain stage this evidence backs
+	TraceID string `json:"trace_id"`
+	EventID string `json:"event_id"`
+	Stage   string `json:"stage"` // the chain stage this evidence backs
 }
 
 // TraceEventsFromCorrelation extracts the (trace, event) evidence links from a

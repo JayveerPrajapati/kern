@@ -22,7 +22,7 @@ type Snapshot struct {
 	Output    string           `json:"output,omitempty"`
 	Timestamp time.Time        `json:"timestamp"`
 
-	// Rich snapshot fields (Phase 1.7). These carry the compact resume/replay
+	// Rich snapshot fields. These carry the compact resume/replay
 	// context so a snapshot matches the domain.ContextSnapshot JSON shape. They
 	// are additive; the fields above are unchanged for backward compatibility.
 	Goal        string   `json:"goal"`
@@ -53,8 +53,22 @@ func NewSnapshotStore(root string) *SnapshotStore {
 }
 
 // Record appends a snapshot for the given task. Snapshots are stored
-// chronologically per task.
+// chronologically per task. It takes the process-wide path lock so concurrent
+// store instances (MCP server, web app, CLI) serialize their read-modify-write
+// and never lose each other's snapshots.
 func (s *SnapshotStore) Record(t Task) error {
+	// The process-wide path lock serializes concurrent store instances (MCP
+	// server, web app, CLI) so parallel records never lose each other's
+	// snapshots; the cross-process file lock extends the same guarantee to
+	// separate kern processes sharing the project store.
+	fl, err := cache.LockFile(s.path)
+	if err != nil {
+		return err
+	}
+	defer fl.Unlock()
+	pl := cache.PathLock(s.path)
+	pl.Lock()
+	defer pl.Unlock()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	all, err := s.loadLocked()

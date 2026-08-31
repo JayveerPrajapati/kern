@@ -7,8 +7,8 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/domain"
 )
 
-// TestContractCarriesSourceRelationshipTimestampProvenance verifies the Phase
-// 13.2 contract metadata (source, relationship, timestamp, provenance) is
+// TestContractCarriesSourceRelationshipTimestampProvenance verifies the
+// contract metadata (source, relationship, timestamp, provenance) is
 // populated on a real correlation built through the store.
 func TestContractCarriesSourceRelationshipTimestampProvenance(t *testing.T) {
 	now := time.Now().Truncate(time.Second)
@@ -41,7 +41,7 @@ func TestContractCarriesSourceRelationshipTimestampProvenance(t *testing.T) {
 
 // TestSharedCorrelatorIsShared verifies NewSharedCorrelator returns a stable
 // underlying *Correlator and that two consumers handed the same SharedCorrelator
-// share one instance (Phase 13.3).
+// share one instance .
 func TestSharedCorrelatorIsShared(t *testing.T) {
 	now := time.Now().Truncate(time.Second)
 	st := NewStore()

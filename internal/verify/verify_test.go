@@ -113,7 +113,7 @@ func findCheck(rep Report, t Type, ref string) *Check {
 }
 
 // TestVerifyIgnoresNonRoutePaths verifies absolute filesystem paths and
-// date-like strings are not flagged as unregistered routes (W2-30).
+// date-like strings are not flagged as unregistered routes .
 func TestVerifyIgnoresNonRoutePaths(t *testing.T) {
 	ix, root := build(t, map[string]string{
 		"app.py": "@app.route('/users')\ndef list_users():\n    pass\n",
@@ -147,7 +147,7 @@ func findFileCheck(rep Report, name string) *Check {
 // TestVerifyAbsFileRefConfinedToRoot verifies a file:line ref that resolves to
 // an absolute path outside root is never read (no filesystem oracle): it is
 // reported Found=false (unverifiable) rather than probing the real file
-// (which would flip Found=true for a valid line) (W2-32).
+// (which would flip Found=true for a valid line) .
 func TestVerifyAbsFileRefConfinedToRoot(t *testing.T) {
 	ix, root := build(t, map[string]string{"a.go": "package a\n"})
 	outside := filepath.Join(t.TempDir(), "secret.go")

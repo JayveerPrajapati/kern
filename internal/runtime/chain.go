@@ -24,7 +24,7 @@ type CorrelationChain struct {
 	Service string
 	Links   []ChainLink
 	// TraceLinks tie the chain to the trace/event evidence that produced it
-	// (Phase 13.1): the correlation chain was previously detached from the
+	// The correlation chain was previously detached from the
 	// raw telemetry. These make the evidence traceable.
 	TraceLinks []TraceLink
 }
@@ -95,7 +95,7 @@ func (c *Correlator) CorrelateChain(a domain.Alert) CorrelationChain {
 
 	res.Links = dedupeLinks(links)
 
-	// Phase 13.1: link the chain to the trace/event evidence that produced it,
+	// Link the chain to the trace/event evidence that produced it,
 	// so the chain is traceable back to raw telemetry.
 	res.TraceLinks = TraceEventsFromCorrelation(c.traceCorrelation(a, svc))
 	return res

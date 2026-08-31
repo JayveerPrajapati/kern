@@ -14,8 +14,7 @@ import (
 // querying task state. It looks up a task by ID (from the persisted store, so
 // tasks from prior sessions are retrievable) and prints its state, intent,
 // steps, and lifecycle results.
-//
-// This is Phase 2's "Task is authoritative" CLI surface: every analyze/what-if/
+// This is "Task is authoritative" CLI surface: every analyze/what-if/
 // verify that creates a Task can be queried here afterward.
 func runTask(rest []string) {
 	f, args, err := parseFlags(rest)
@@ -132,7 +131,7 @@ func runTaskResume(root, id string) {
 
 // runTaskReplay implements `kern task replay <id>` — shows the task's snapshot
 // history and records the metadata (repo version, model, config hash) needed
-// to interpret the replay (Phase 16.3).
+// to interpret the replay .
 func runTaskReplay(root, id string) {
 	p, err := app.New(root)
 	if err != nil {
@@ -143,7 +142,7 @@ func runTaskReplay(root, id string) {
 		fatal("snapshot store not available")
 	}
 
-	// Phase 16.3: capture the replay metadata. Best-effort — on any error the
+	// Capture the replay metadata. Best-effort — on any error the
 	// field falls back to a sensible default and replay still proceeds.
 	repoVersion := "unknown"
 	if out, err := gitDiffC(root, "rev-parse", "HEAD"); err == nil {
@@ -205,7 +204,7 @@ func runTaskPause(root, id string) {
 	fmt.Printf("paused task %s\n", id)
 }
 
-// runTaskEfficiency implements `kern task efficiency <id>` (Phase 17.6): it
+// runTaskEfficiency implements `kern task efficiency <id>` : it
 // renders the consolidated context-quality + task-outcome report for a task.
 func runTaskEfficiency(root, id string) {
 	p, err := app.New(root)
@@ -221,7 +220,7 @@ func runTaskEfficiency(root, id string) {
 	fmt.Print(app.RenderEfficiencyReport(report))
 }
 
-// runEfficiency implements the top-level `kern efficiency <id>` (Phase 17.6),
+// runEfficiency implements the top-level `kern efficiency <id>` ,
 // which delegates to the same efficiency report renderer as `kern task
 // efficiency <id>`. It parses the standard --root flag so callers can target a
 // different workspace.

@@ -403,6 +403,31 @@ func Caller() string { return lib.Public() }
 	}
 }
 
+// TestVerifyArchitectureWarnsWhenBoundariesMissing: with no .kern/boundaries.json
+// and source files in scope, VerifyArchitecture must not silently pass — it
+// surfaces a "boundaries-not-configured" warning while keeping OK true (a WARN
+// is not a violation, and a missing guard must not fail an advisory verify).
+func TestVerifyArchitectureWarnsWhenBoundariesMissing(t *testing.T) {
+	dir := t.TempDir()
+	writeTree(t, dir, map[string]string{
+		"main.go": `package main
+
+func main() {}
+`,
+	})
+	e := NewEngine(dir)
+	ar := e.VerifyArchitecture()
+	if ar == nil {
+		t.Fatal("nil architecture result")
+	}
+	if !ar.OK {
+		t.Error("missing boundaries is a warning, not a failure: expected OK true")
+	}
+	if len(ar.Warnings) == 0 {
+		t.Error("expected a boundaries-not-configured warning")
+	}
+}
+
 // TestVerifyDependency checks the intelligence graph for a real symbol in the
 // fixture and asserts node/edge counts are populated. Scoped to the fixture so
 // it does not re-index the whole kern repository.

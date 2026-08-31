@@ -52,7 +52,7 @@ type Pipeline struct {
 	team      *SpecialistRegistry
 	runtime   *agent.Registry // agent runtime registry
 	approvals *governance.ApprovalWorkflow
-	stages    []stageSpec // ordered stages to run; nil means the default
+	stages    []stageSpec   // ordered stages to run; nil means the default
 	bus       *eventbus.Bus // optional event publisher; nil = no-op
 }
 
@@ -101,9 +101,7 @@ func (p *Pipeline) publish(ev eventbus.Event) {
 }
 
 // Run executes a task through the full pipeline. The stepHandler signature is
-//
-//	func(action string, specialist *Specialist, task *agent.Task) (string, error)
-//
+// func(action string, specialist *Specialist, task *agent.Task) (string, error)
 // where action is the stage action and specialist the resolved specialist for
 // the stage. Run returns the (possibly partial) task, per-stage results, and an
 // error: it stops when a stage has no specialist or the handler errors. A

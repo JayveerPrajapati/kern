@@ -232,6 +232,52 @@ func TestNewWorktreeCopiesAndSkips(t *testing.T) {
 	}
 }
 
+// TestWorktreeDiffSkipsSkippedDirs: the worktree snapshot excludes
+// sandbox.SkipDirs (.git, node_modules, ...), so the worktree diff must not
+// report those files as deleted — otherwise every execute result diff is
+// polluted with VCS-internal noise.
+func TestWorktreeDiffSkipsSkippedDirs(t *testing.T) {
+	src := newTempProject(t, "")
+	// Simulate a repo with VCS metadata and vendored deps in the source tree.
+	if err := os.MkdirAll(filepath.Join(src, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(src, ".git", "HEAD"), []byte("ref: refs/heads/main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(src, "node_modules", "pkg"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(src, "node_modules", "pkg", "dep.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	w, err := NewWorktree(src)
+	if err != nil {
+		t.Fatalf("NewWorktree: %v", err)
+	}
+	defer w.Cleanup()
+
+	// Make a real change so the diff is non-empty.
+	mod := filepath.Join(w.Dir(), "main.go")
+	if err := os.WriteFile(mod, []byte("package main\nfunc main() { println(\"changed\") }\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	diff, err := w.Diff()
+	if err != nil {
+		t.Fatalf("Diff: %v", err)
+	}
+	if !strings.Contains(diff, "main.go") {
+		t.Fatalf("Diff should mention main.go:\n%s", diff)
+	}
+	for _, bad := range []string{".git/", "node_modules/"} {
+		if strings.Contains(diff, bad) {
+			t.Fatalf("Diff must not mention skipped dir %q:\n%s", bad, diff)
+		}
+	}
+}
+
 func TestWorktreeApplyRoundTrip(t *testing.T) {
 	src := newTempProject(t, "")
 	w1, err := NewWorktree(src)

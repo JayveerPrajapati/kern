@@ -114,7 +114,6 @@ func (s *liveSource) Close() {
 // LivePrometheusSource polls a Prometheus HTTP API endpoint on an interval,
 // fetches metric data, and exposes it as a Source. It reuses ParsePrometheus
 // to parse the text-exposition format.
-//
 // The endpoint should return Prometheus text-exposition format (e.g.
 // /api/v1/query?query=up or a metrics scrape endpoint).
 type LivePrometheusSource struct {
@@ -199,11 +198,9 @@ type LiveKubernetesSource struct {
 // token is the bearer token for authentication (read from
 // KERN_K8S_TOKEN or /var/run/secrets/kubernetes.io/serviceaccount/token).
 // The namespace limits the events query (empty = all namespaces).
-//
 // The source polls two endpoints:
-//   - /apis/apps/v1/namespaces/{ns}/deployments (deployments)
-//   - /api/v1/namespaces/{ns}/events (events)
-//
+// - /apis/apps/v1/namespaces/{ns}/deployments (deployments)
+// - /api/v1/namespaces/{ns}/events (events)
 // Both are fetched on each poll, parsed, and ingested into the store.
 func NewLiveKubernetesSource(apiServer, token, namespace string, interval time.Duration) *LiveKubernetesSource {
 	if apiServer == "" {

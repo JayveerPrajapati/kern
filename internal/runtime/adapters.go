@@ -49,9 +49,8 @@ type otelDoc struct {
 
 // ParseOtel parses a simplified OTLP-style JSON document into telemetry events.
 // Document shape: {"logs":[{"service":..,"timestamp":RFC3339,"severity":"error"|"warning"|"info","body":..,"trace_id":..,"span_id":..,"attributes":{..}}],
-//
-//	"traces":[{...same...}],
-//	"metrics":[{"service":..,"timestamp":..,"name":..,"value":<number|string>,"attributes":{..}}]}
+// "traces":[{...same...}],
+// "metrics":[{"service":..,"timestamp":..,"name":..,"value":<number|string>,"attributes":{..}}]}
 func ParseOtel(data []byte) ([]Event, error) {
 	var doc otelDoc
 	if err := json.Unmarshal(data, &doc); err != nil {
@@ -246,8 +245,7 @@ type kubernetesDoc struct {
 
 // ParseKubernetes parses a Kubernetes JSON snapshot into deployments and
 // events. Document shape: {"deployments":[{"name":..,"service":..,"version":..,"timestamp":RFC3339}],
-//
-//	"events":[{"namespace":..,"service":..,"type":"Warning"|"Normal", "reason":..,"message":..,"timestamp":RFC3339}]}
+// "events":[{"namespace":..,"service":..,"type":"Warning"|"Normal", "reason":..,"message":..,"timestamp":RFC3339}]}
 func ParseKubernetes(data []byte) ([]domain.Deployment, []Event, error) {
 	var doc kubernetesDoc
 	if err := json.Unmarshal(data, &doc); err != nil {

@@ -25,11 +25,9 @@ type moduleDeps struct {
 
 // checkModuleDeps verifies the module's real dependencies by parsing go.mod and
 // the imports of every source file:
-//
-//   - every external (non-stdlib) import must be covered by a module in go.mod
-//     (a missing module is an anomaly);
-//   - no module path may be declared more than once in go.mod (duplication).
-//
+// - every external (non-stdlib) import must be covered by a module in go.mod
+// (a missing module is an anomaly);
+// - no module path may be declared more than once in go.mod (duplication).
 // It never shells out and never touches the network, so it is deterministic and
 // fast on small fixtures.
 func checkModuleDeps(root string) *moduleDeps {

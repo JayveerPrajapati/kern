@@ -96,12 +96,10 @@ func (m *Map) Lookup(path string) []string {
 // matchScore returns a specificity score for a pattern against a path.
 // Higher = more specific. 0 = no match.
 // Patterns:
-//
-//	"*"              → matches everything, score 1
-//	"*.go"           → matches by extension, score 2
-//	"src/"           → matches directory prefix, score 3 + directory depth
-//	"src/foo.go"     → exact path, score 100 (always wins)
-//
+// "*"              → matches everything, score 1
+// "*.go"           → matches by extension, score 2
+// "src/"           → matches directory prefix, score 3 + directory depth
+// "src/foo.go"     → exact path, score 100 (always wins)
 // Directory depth is added to the base so that "src/auth/" is more specific
 // than "src/", while any exact path still beats any directory match.
 func matchScore(pattern, path string) int {
