@@ -13,14 +13,13 @@ func sym(kind, name, file string, line int) index.Symbol {
 }
 
 // fakeIndex builds a small in-memory v1 index:
-//
-//	Foo -> Bar, Baz
-//	Bar -> Baz
-//	Baz -> Foo            (cycle: Foo->Bar->Baz->Foo and Foo->Baz->Foo)
-//	HandleUsers -> Foo    (entry point, Framework "net-http", Route "/users")
-//	TestFoo -> HandleUsers
-//	svc imports "net/http"
-//	Baz inherits "extends:Animal"
+// Foo -> Bar, Baz
+// Bar -> Baz
+// Baz -> Foo            (cycle: Foo->Bar->Baz->Foo and Foo->Baz->Foo)
+// HandleUsers -> Foo    (entry point, Framework "net-http", Route "/users")
+// TestFoo -> HandleUsers
+// svc imports "net/http"
+// Baz inherits "extends:Animal"
 func fakeIndex() *index.Index {
 	ix := &index.Index{
 		Root: "/fake",

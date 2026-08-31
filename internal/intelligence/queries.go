@@ -20,10 +20,29 @@ const maxHops = 50
 // calls. resolveNodeID tries the exact ID first, then resolves a reference to a
 // unique node by its simple name. Neighbour lists are sorted for deterministic
 // query results.
+// buildAdjacency derives, for the "calls" edges only, the outgoing map
+// (caller -> callees) and incoming map (callee -> callers), trusting all
+// edges. Strict callers use buildAdjacencyOpt(true).
 func (g *Graph) buildAdjacency() (outgoing, incoming map[string][]string) {
+	return g.buildAdjacencyOpt(false)
+}
+
+// buildAdjacencyOpt is buildAdjacency with a precision mode. When strict is
+// true, "calls" edges whose caller node's language is not "resolved"-precision
+// (per the index's PrecisionByLang) are dropped, so strict consumers report
+// those callers as unknown instead of trusting heuristic cross-file guesses.
+func (g *Graph) buildAdjacencyOpt(strict bool) (outgoing, incoming map[string][]string) {
 	outgoing = map[string][]string{}
 	incoming = map[string][]string{}
 	g.initIndex()
+	langByID := map[string]string{}
+	if strict {
+		for _, n := range g.Nodes {
+			if n.Symbol != nil && n.Symbol.Language != "" {
+				langByID[n.ID] = n.Symbol.Language
+			}
+		}
+	}
 	canonical := func(id string) string {
 		if r, ok := g.resolveNodeID(id); ok {
 			return r
@@ -35,6 +54,11 @@ func (g *Graph) buildAdjacency() (outgoing, incoming map[string][]string) {
 			continue
 		}
 		from := canonical(e.From)
+		if strict {
+			if p := g.precisionByLang[langByID[from]]; p != "resolved" {
+				continue
+			}
+		}
 		to := canonical(e.To)
 		outgoing[from] = append(outgoing[from], to)
 		incoming[to] = append(incoming[to], from)
@@ -154,7 +178,14 @@ func transitive(start string, neighbor map[string][]string, maxDepth int) []stri
 
 // WhoCalls returns the symbols that directly call the given symbol.
 func (g *Graph) WhoCalls(symbol string) []domain.Node {
-	_, incoming := g.buildAdjacency()
+	return g.WhoCallsPrecise(symbol, false)
+}
+
+// WhoCallsPrecise is WhoCalls with a precision mode: when strict is true,
+// direct callers whose caller language is not "resolved"-precision are
+// skipped (reported as unknown rather than guessed).
+func (g *Graph) WhoCallsPrecise(symbol string, strict bool) []domain.Node {
+	_, incoming := g.buildAdjacencyOpt(strict)
 	reach := transitive(g.resolveSymbol(symbol), incoming, 1)
 	return nodesForIDs(g.nodesByID(), reach)
 }
@@ -163,7 +194,13 @@ func (g *Graph) WhoCalls(symbol string) []domain.Node {
 // transitive callers (the set of symbols reachable by walking the call graph
 // backwards from the symbol).
 func (g *Graph) WhatDependsOn(symbol string) []domain.Node {
-	_, incoming := g.buildAdjacency()
+	return g.WhatDependsOnPrecise(symbol, false)
+}
+
+// WhatDependsOnPrecise is WhatDependsOn with a precision mode: when strict is
+// true, callers whose caller language is not "resolved"-precision are skipped.
+func (g *Graph) WhatDependsOnPrecise(symbol string, strict bool) []domain.Node {
+	_, incoming := g.buildAdjacencyOpt(strict)
 	reach := transitive(g.resolveSymbol(symbol), incoming, maxHops)
 	return nodesForIDs(g.nodesByID(), reach)
 }
@@ -172,7 +209,14 @@ func (g *Graph) WhatDependsOn(symbol string) []domain.Node {
 // transitive callees (the set of symbols reachable by walking the call graph
 // forwards from the symbol).
 func (g *Graph) WhatDoesXDependOn(symbol string) []domain.Node {
-	outgoing, _ := g.buildAdjacency()
+	return g.WhatDoesXDependOnPrecise(symbol, false)
+}
+
+// WhatDoesXDependOnPrecise is WhatDoesXDependOn with a precision mode: when
+// strict is true, outgoing call edges from a caller whose language is not
+// "resolved"-precision are skipped.
+func (g *Graph) WhatDoesXDependOnPrecise(symbol string, strict bool) []domain.Node {
+	outgoing, _ := g.buildAdjacencyOpt(strict)
 	reach := transitive(g.resolveSymbol(symbol), outgoing, maxHops)
 	return nodesForIDs(g.nodesByID(), reach)
 }
@@ -181,7 +225,13 @@ func (g *Graph) WhatDoesXDependOn(symbol string) []domain.Node {
 // the given symbol: every node transitively depending on it that is a framework
 // entry point, plus the symbol itself when it is one.
 func (g *Graph) WhatAPIsAffected(symbol string) []domain.Node {
-	_, incoming := g.buildAdjacency()
+	return g.WhatAPIsAffectedPrecise(symbol, false)
+}
+
+// WhatAPIsAffectedPrecise is WhatAPIsAffected with a precision mode: when
+// strict is true, non-"resolved" caller edges are skipped during traversal.
+func (g *Graph) WhatAPIsAffectedPrecise(symbol string, strict bool) []domain.Node {
+	_, incoming := g.buildAdjacencyOpt(strict)
 	resolved := g.resolveSymbol(symbol)
 	reach := transitive(resolved, incoming, maxHops)
 
@@ -207,7 +257,13 @@ func (g *Graph) WhatAPIsAffected(symbol string) []domain.Node {
 // the given symbol. For now a "service" is a module node whose package contains
 // an affected API entry point. Distinct modules are returned, sorted.
 func (g *Graph) WhatServicesAffected(symbol string) []domain.Node {
-	entries := g.WhatAPIsAffected(symbol)
+	return g.WhatServicesAffectedPrecise(symbol, false)
+}
+
+// WhatServicesAffectedPrecise is WhatServicesAffected with a precision mode:
+// when strict is true, non-"resolved" caller edges are skipped.
+func (g *Graph) WhatServicesAffectedPrecise(symbol string, strict bool) []domain.Node {
+	entries := g.WhatAPIsAffectedPrecise(symbol, strict)
 
 	// Map each affected entry point's file to its containing package path.
 	affected := map[string]bool{}
@@ -256,9 +312,15 @@ func isEventLike(s string) bool {
 // symbol itself when it is event-like. Returns an empty (non-nil) slice if
 // nothing matches.
 func (g *Graph) WhatEventsAffected(symbol string) []domain.Node {
+	return g.WhatEventsAffectedPrecise(symbol, false)
+}
+
+// WhatEventsAffectedPrecise is WhatEventsAffected with a precision mode: when
+// strict is true, non-"resolved" caller edges are skipped.
+func (g *Graph) WhatEventsAffectedPrecise(symbol string, strict bool) []domain.Node {
 	// Direct callees (produced/consumed) and direct callers, plus the symbol
 	// itself. Depth-1 keeps the result tight and deterministic.
-	outgoing, incoming := g.buildAdjacency()
+	outgoing, incoming := g.buildAdjacencyOpt(strict)
 	resolved := g.resolveSymbol(symbol)
 	ids := append(incoming[resolved], resolved)
 	ids = append(ids, outgoing[resolved]...)
@@ -298,7 +360,14 @@ func isTest(s *domain.Symbol) bool {
 // transitive callers in the call graph. Returns "critical" (>20), "high"
 // (10-20), "medium" (3-9), or "low" (<3).
 func (g *Graph) ProductionCriticality(symbol string) string {
-	n := len(g.WhatDependsOn(symbol))
+	return g.ProductionCriticalityPrecise(symbol, false)
+}
+
+// ProductionCriticalityPrecise is ProductionCriticality with a precision mode:
+// when strict is true, the blast radius counts only "resolved"-precision
+// caller edges.
+func (g *Graph) ProductionCriticalityPrecise(symbol string, strict bool) string {
+	n := len(g.WhatDependsOnPrecise(symbol, strict))
 	switch {
 	case n > 20:
 		return "critical"
@@ -367,7 +436,13 @@ func WhatIncidentsAffected(g *Graph, symbol string, store IncidentReader) []Inci
 // WhatTestsCover returns the test nodes that cover the given symbol: tests that
 // directly or transitively reach the symbol through its call graph.
 func (g *Graph) WhatTestsCover(symbol string) []domain.Node {
-	_, incoming := g.buildAdjacency()
+	return g.WhatTestsCoverPrecise(symbol, false)
+}
+
+// WhatTestsCoverPrecise is WhatTestsCover with a precision mode: when strict
+// is true, non-"resolved" caller edges are skipped during traversal.
+func (g *Graph) WhatTestsCoverPrecise(symbol string, strict bool) []domain.Node {
+	_, incoming := g.buildAdjacencyOpt(strict)
 	reach := transitive(g.resolveSymbol(symbol), incoming, maxHops)
 	byID := g.nodesByID()
 
