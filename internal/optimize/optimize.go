@@ -40,6 +40,11 @@ type Result struct {
 	SemanticHit  bool
 	MatchedInput string
 	Similarity   float64
+	// BeforeBytes is the measured byte length of the raw input text (not an
+	// estimate reconstructed from the output).
+	BeforeBytes int
+	// AfterBytes is the measured byte length of the output text.
+	AfterBytes int
 }
 
 // Options for an optimization run.
@@ -81,7 +86,8 @@ func record(op stats.Operation, opts Options, res Result) {
 		Model:        modelOrDefault(opts.Model),
 		BeforeTokens: res.BeforeTokens,
 		AfterTokens:  res.AfterTokens,
-		BeforeBytes:  len([]byte(res.Output)) + res.BeforeTokens*4,
+		BeforeBytes:  res.BeforeBytes,
+		AfterBytes:   res.AfterBytes,
 	})
 }
 
@@ -101,6 +107,8 @@ func finish(raw, out string, kind tokenize.Kind) Result {
 		AfterTokens:  after,
 		SavedTokens:  before - after,
 		SavedPercent: pct(before, after),
+		BeforeBytes:  len([]byte(raw)),
+		AfterBytes:   len([]byte(out)),
 	}
 }
 
@@ -328,9 +336,12 @@ func compactCommandOutput(out string) string {
 			keep = append(keep, t)
 		}
 	}
-	// Always cap.
+	// Always cap — and say so, so a truncated build log is never mistaken for
+	// the full output.
 	if len(keep) > 120 {
+		omitted := len(keep) - 120
 		keep = keep[:120]
+		keep = append(keep, fmt.Sprintf("… (%d lines omitted)", omitted))
 	}
 	return strings.Join(keep, "\n")
 }

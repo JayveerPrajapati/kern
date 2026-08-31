@@ -165,13 +165,13 @@ func (c *Client) TaskSubmit(input, typ string) (map[string]any, error) {
 }
 
 // Execute calls POST /v1/execute to apply a patch in a sandboxed worktree.
-// Phase 11: governance-gated, creates an authoritative Task with a diff artifact.
+// Governance-gated, creates an authoritative Task with a diff artifact.
 func (c *Client) Execute(patch string) (map[string]any, error) {
 	return c.postJSONMap("/v1/execute", map[string]string{"patch": patch})
 }
 
 // Correlate calls POST /v1/correlate to correlate an alert against the runtime.
-// Phase 14: returns the deep evidence chain (alert→service→deployment→commit→symbol).
+// Returns the deep evidence chain (alert→service→deployment→commit→symbol).
 func (c *Client) Correlate(alert domain.Alert, snapshot string) (map[string]any, error) {
 	body := map[string]any{"alert": alert}
 	if snapshot != "" {
@@ -181,13 +181,13 @@ func (c *Client) Correlate(alert domain.Alert, snapshot string) (map[string]any,
 }
 
 // Learn calls POST /v1/learn to extract recurring patterns from engineering memory.
-// Phase 16: returns patterns + surfaced patterns above the threshold.
+// Returns patterns + surfaced patterns above the threshold.
 func (c *Client) Learn(threshold int) (map[string]any, error) {
 	return c.postJSONMap("/v1/learn", map[string]any{"threshold": threshold})
 }
 
 // Modernize calls POST /v1/modernize to run the legacy modernization analysis.
-// Phase 17: returns the phased extraction plan (contexts, bridges, phases).
+// Returns the phased extraction plan (contexts, bridges, phases).
 func (c *Client) Modernize() (map[string]any, error) {
 	return c.postJSONMap("/v1/modernize", map[string]any{})
 }
@@ -203,7 +203,7 @@ func (c *Client) ArtifactGet(id string) (map[string]any, error) {
 }
 
 // Audit calls GET /v1/audit/{task_id} to retrieve the audit trail for a task.
-// Phase 22: returns the task's steps, artifacts, events, and approvals.
+// Returns the task's steps, artifacts, events, and approvals.
 func (c *Client) Audit(taskID string) (map[string]any, error) {
 	return c.getJSONMap("/v1/audit/" + url.PathEscape(taskID))
 }

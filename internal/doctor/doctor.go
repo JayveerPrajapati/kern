@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	goruntime "runtime"
 	"sort"
 	"strings"
 	"time"
@@ -15,6 +16,7 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/cache"
 	"github.com/JayveerPrajapati/kern/internal/index"
 	"github.com/JayveerPrajapati/kern/internal/llm"
+	"github.com/JayveerPrajapati/kern/internal/script"
 	"github.com/JayveerPrajapati/kern/internal/setup"
 	"github.com/JayveerPrajapati/kern/internal/stats"
 )
@@ -33,9 +35,12 @@ func Run(root string) []Finding {
 	out = append(out, checkCapabilities())
 	out = append(out, checkPath())
 	out = append(out, checkExec())
+	out = append(out, checkNetworkIsolation())
 	out = append(out, checkEnv())
 	out = append(out, checkWiring(root)...)
 	out = append(out, checkIndex(root))
+	out = append(out, checkIndexFreshness(root))
+	out = append(out, checkPrecision(root))
 	out = append(out, checkOllama())
 	out = append(out, checkStats())
 	return out
@@ -99,6 +104,20 @@ func checkExec() Finding {
 	return Finding{Check: "binary-exec", Level: "ok", Detail: bin + " runs (" + detail + ")"}
 }
 
+// checkNetworkIsolation reports whether script runs can be network-isolated on
+// this host. macOS and Windows lack unprivileged user/network namespaces, so
+// script execution fails closed there unless the operator explicitly opts in
+// via KERN_ALLOW_UNISOLATED=1 (or the alias KERN_ALLOW_NET=1); this check
+// reports that honestly instead of implying isolation is always available.
+func checkNetworkIsolation() Finding {
+	if script.NetworkIsolationAvailable() {
+		return Finding{Check: "network-isolation", Level: "ok",
+			Detail: "network isolation: available (Linux unshare --user --map-root-user --net)"}
+	}
+	return Finding{Check: "network-isolation", Level: "warn",
+		Detail: fmt.Sprintf("network isolation: unavailable (%s) — scripts fail closed unless KERN_ALLOW_UNISOLATED=1 (or KERN_ALLOW_NET=1) is set", goruntime.GOOS)}
+}
+
 func checkEnv() Finding {
 	var parts []string
 	if x := os.Getenv("XDG_CACHE_HOME"); x != "" {
@@ -150,6 +169,66 @@ func checkIndex(root string) Finding {
 		return Finding{Check: "index", Level: "warn", Detail: "no cached index for this project — run `kern index .`"}
 	}
 	return Finding{Check: "index", Level: "fail", Detail: "no source files indexed in this project"}
+}
+
+// checkIndexFreshness reports whether the cached project index is out of
+// date relative to the source tree (files added/removed/edited since build).
+// Uses the index's own Stale() gate, which is hash-based and honors
+// .gitignore/.kernignore, so it never needs a rebuild to answer.
+func checkIndexFreshness(root string) Finding {
+	ix, err := index.Load(root)
+	if err != nil || ix == nil {
+		// No cached index: checkIndex already reports this; nothing to be
+		// stale about. Report ok so the report does not double-fail.
+		return Finding{Check: "freshness", Level: "ok", Detail: "no cached index to check"}
+	}
+	if ix.Stale() {
+		return Finding{Check: "freshness", Level: "warn",
+			Detail: fmt.Sprintf("index is STALE (%d symbols) — source changed since build; run `kern index .`", len(ix.Symbols))}
+	}
+	return Finding{Check: "freshness", Level: "ok",
+		Detail: fmt.Sprintf("index is fresh (%d symbols, %d files)", len(ix.Symbols), len(ix.FileHashes))}
+}
+
+// checkPrecision reports the per-language edge-precision tier recorded on the
+// cached index (resolved / ast / heuristic). In the default dependency-free
+// build only Go and Java reach "resolved"; the other indexed languages are
+// regex-based and their call edges are skipped under --precision strict. This
+// surfaces that honestly instead of letting "17 indexed languages" imply
+// uniform precision, and points at the opt-in tree-sitter build for AST.
+func checkPrecision(root string) Finding {
+	ix, err := index.Load(root)
+	if err != nil || ix == nil {
+		return Finding{Check: "precision", Level: "warn", Detail: "no index found — run 'kern index' to build"}
+	}
+	if len(ix.PrecisionByLang) == 0 {
+		return Finding{Check: "precision", Level: "warn", Detail: "no precision data recorded — rebuild the index with current kern"}
+	}
+	resolvedCount, astCount, heuristicCount := 0, 0, 0
+	var heuristicLangs []string
+	for lang, tier := range ix.PrecisionByLang {
+		switch tier {
+		case "resolved":
+			resolvedCount++
+		case "ast":
+			astCount++
+		default:
+			heuristicCount++
+			heuristicLangs = append(heuristicLangs, lang)
+		}
+	}
+	if heuristicCount > 0 {
+		sort.Strings(heuristicLangs)
+		return Finding{Check: "precision", Level: "warn",
+			Detail: fmt.Sprintf("%d languages resolved (Go + Java), %d at heuristic precision (skipped under --precision strict): %s. Build with -tags treesitter for AST precision on %d more languages.",
+				resolvedCount, heuristicCount, strings.Join(heuristicLangs, ", "), heuristicCount)}
+	}
+	if index.TreesitterEnabled() {
+		return Finding{Check: "precision", Level: "ok",
+			Detail: fmt.Sprintf("all %d languages at AST-or-better precision (tree-sitter build)", resolvedCount+astCount)}
+	}
+	return Finding{Check: "precision", Level: "ok",
+		Detail: fmt.Sprintf("all %d languages at resolved precision (Go + Java)", resolvedCount)}
 }
 
 func checkOllama() Finding {

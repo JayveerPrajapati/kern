@@ -215,6 +215,62 @@ func TestMaskUnquotedSecretsWithDigits(t *testing.T) {
 	}
 }
 
+func TestMaskAPIKeySpaceSeparator(t *testing.T) {
+	// "api key" (space-separated) must be detected like api_key / api-key.
+	in := "API key: sk-1234567890abcdef"
+	res := Mask(in)
+	if strings.Contains(res.Text, "sk-1234567890abcdef") {
+		t.Errorf("API key with space separator not masked: %q", res.Text)
+	}
+	if res.ByLabel["KEY"] != 1 {
+		t.Errorf("expected KEY finding, got %+v", res.ByLabel)
+	}
+}
+
+func TestMaskShortOpenAIKey(t *testing.T) {
+	// Short sk- keys (10-19 chars) fall outside the OPENAI 20+ pattern.
+	in := "use sk-1234567890abcdef to call the API"
+	res := Mask(in)
+	if strings.Contains(res.Text, "sk-1234567890abcdef") {
+		t.Errorf("short sk- key not masked: %q", res.Text)
+	}
+	if res.ByLabel["OPENAI_SHORT"] != 1 {
+		t.Errorf("expected OPENAI_SHORT finding, got %+v", res.ByLabel)
+	}
+}
+
+func TestMaskAllMasksPrivateIPs(t *testing.T) {
+	// MaskAll is for PII masking before sending text to a remote LLM, where
+	// even private/loopback IPs are PII (unlike Mask / MaskCustom, which
+	// suppress them as non-secrets).
+	in := "Contact me at john.doe@example.com or call 555-123-4567. API key: sk-1234567890abcdef. IP: 192.168.1.1"
+	res := MaskAll(in)
+	for _, leak := range []string{"john.doe@example.com", "555-123-4567", "sk-1234567890abcdef", "192.168.1.1"} {
+		if strings.Contains(res.Text, leak) {
+			t.Errorf("secrets leaked: %q", res.Text)
+		}
+	}
+	for _, ph := range []string{"[MASKED_EMAIL_1]", "[MASKED_PHONE_1]", "[MASKED_IP_1]"} {
+		if !strings.Contains(res.Text, ph) {
+			t.Errorf("missing %s in %q", ph, res.Text)
+		}
+	}
+	if res.ByLabel["IP"] != 1 {
+		t.Errorf("expected private IP masked by MaskAll, got %+v", res.ByLabel)
+	}
+}
+
+func TestMaskAllSuppressVariantStillHidesPrivateIPs(t *testing.T) {
+	// Mask (and MaskCustom) keep suppressing private IPs: only MaskAll flips.
+	in := "db at 10.0.0.5"
+	if res := Mask(in); strings.Contains(res.Text, "[MASKED_IP_") {
+		t.Errorf("Mask must suppress private IPs: %q", res.Text)
+	}
+	if res := MaskAll(in); !strings.Contains(res.Text, "[MASKED_IP_1]") {
+		t.Errorf("MaskAll must mask private IPs: %q", res.Text)
+	}
+}
+
 func TestMaskGithubPATFormat(t *testing.T) {
 	in := "token github_pat_ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890_abcdefghijklmnopqrstuvwxyz1234567890"
 	res := Mask(in)

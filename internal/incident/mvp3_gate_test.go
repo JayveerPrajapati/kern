@@ -14,12 +14,10 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/runtime"
 )
 
-// TestMVP3GateEndToEnd runs the MVP3 killer workflow (spec §46, Workflow D):
-//
-//	Alert → Investigate → Root Cause → Candidate Fix → Sandbox → Verify → PR
-//
+// TestMVP3GateEndToEnd runs the MVP3 killer workflow :
+// Alert → Investigate → Root Cause → Candidate Fix → Sandbox → Verify → PR
 // end-to-end against a tiny fixture module, wiring the real subsystems: the
-// Phase 11 runtime intelligence (Source + correlation), the knowledge graph,
+// Runtime intelligence (Source + correlation), the knowledge graph,
 // engineering memory, the governance firewall, the execution worktree and the
 // verification engine. This is the gate that must pass before the final-product
 // expansion (Phases 14/15) begins.

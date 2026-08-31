@@ -121,10 +121,10 @@ Done.`
 // TestSnapshot verifies the snapshot builder extracts goal, files, risks.
 func TestSnapshot(t *testing.T) {
 	pkt := domain.ContextPacket{
-		Intent: domain.Intent{RawText: "add caching"},
-		Files:  []domain.File{{Path: "svc.go"}, {Path: "svc_test.go"}},
-		Facts:  []domain.Claim{{Type: domain.ClaimFact, Statement: "UserService is in svc.go", Confidence: 0.9}},
-		Risks:  []domain.Risk{{Level: domain.RiskMedium, Mitigation: "add tests for cache invalidation"}},
+		Intent:             domain.Intent{RawText: "add caching"},
+		Files:              []domain.File{{Path: "svc.go"}, {Path: "svc_test.go"}},
+		Facts:              []domain.Claim{{Type: domain.ClaimFact, Statement: "UserService is in svc.go", Confidence: 0.9}},
+		Risks:              []domain.Risk{{Level: domain.RiskMedium, Mitigation: "add tests for cache invalidation"}},
 		RequiredValidation: []string{"build", "test"},
 	}
 	snap := Snapshot(pkt, "EXECUTING", "write cache layer")

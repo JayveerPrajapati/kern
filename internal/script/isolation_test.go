@@ -66,7 +66,75 @@ func TestNoIsolateIgnoredWithoutOptIn(t *testing.T) {
 	}
 	// NoIsolate should have been ignored: the caller env secret must not leak.
 	if strings.Contains(res.Stdout, "s3cr3t") {
-		t.Fatalf("NoIsolate was honored without KERN_ALLOW_NO_ISOLATE; env secret leaked, stdout=%q", res.Stdout)
+		t.Fatalf("NoIsolate not honored despite KERN_ALLOW_NO_ISOLATE=1; stdout=%q", res.Stdout)
+	}
+}
+
+// TestFailsClosedWithoutNetNS asserts the F9 fail-closed contract on platforms
+// without an unprivileged netns (macOS, Windows): script execution is REFUSED
+// rather than silently degrading to full network egress, unless the local
+// operator explicitly opted in via KERN_ALLOW_UNISOLATED=1 (or KERN_ALLOW_NET=1).
+func TestFailsClosedWithoutNetNS(t *testing.T) {
+	if networkNS() != nil {
+		t.Skip("netns available on this host; fail-closed path not reachable")
+	}
+	t.Setenv("KERN_ALLOW_UNISOLATED", "")
+	t.Setenv("KERN_ALLOW_NET", "")
+	res := RunScript(Run{Lang: "bash", Code: "echo hi"})
+	if res.Err == nil {
+		t.Fatalf("expected fail-closed refusal, got success (Isolated=%v, stdout=%q)", res.Isolated, res.Stdout)
+	}
+	for _, want := range []string{"network isolation not available", "KERN_ALLOW_UNISOLATED"} {
+		if !strings.Contains(res.Err.Error(), want) {
+			t.Errorf("fail-closed error %q missing %q", res.Err, want)
+		}
+	}
+	if res.Isolated {
+		t.Error("Isolated must be false on fail-closed refusal")
+	}
+}
+
+// TestFailsClosedOverrideViaUnisolated asserts the escape hatch survives: with
+// KERN_ALLOW_UNISOLATED=1 set, script execution proceeds (env-only sandbox,
+// full network) even where network isolation is unavailable.
+func TestFailsClosedOverrideViaUnisolated(t *testing.T) {
+	if !runtimeInstalled("bash") {
+		t.Skip("bash not installed")
+	}
+	if networkNS() != nil {
+		t.Skip("netns available on this host; override path not reachable")
+	}
+	t.Setenv("KERN_ALLOW_UNISOLATED", "1")
+	t.Setenv("KERN_ALLOW_NET", "")
+	res := RunScript(Run{Lang: "bash", Code: "echo hi"})
+	if res.Err != nil {
+		t.Fatalf("override failed: %v (%s)", res.Err, res.Stderr)
+	}
+	if strings.TrimSpace(res.Stdout) != "hi" {
+		t.Fatalf("stdout = %q, want hi", res.Stdout)
+	}
+	if res.Isolated {
+		t.Error("expected Isolated=false under the unisolated override")
+	}
+}
+
+// TestFailsClosedOverrideViaNetAlias asserts the pre-existing KERN_ALLOW_NET=1
+// alias still opts in (backward compatibility — it must not be removed).
+func TestFailsClosedOverrideViaNetAlias(t *testing.T) {
+	if !runtimeInstalled("bash") {
+		t.Skip("bash not installed")
+	}
+	if networkNS() != nil {
+		t.Skip("netns available on this host; override path not reachable")
+	}
+	t.Setenv("KERN_ALLOW_UNISOLATED", "")
+	t.Setenv("KERN_ALLOW_NET", "1")
+	res := RunScript(Run{Lang: "bash", Code: "echo hi"})
+	if res.Err != nil {
+		t.Fatalf("KERN_ALLOW_NET alias failed: %v (%s)", res.Err, res.Stderr)
+	}
+	if strings.TrimSpace(res.Stdout) != "hi" {
+		t.Fatalf("stdout = %q, want hi", res.Stdout)
 	}
 }
 

@@ -11,8 +11,8 @@ import (
 // stubProvider implements agent.Provider for testing. It records the last
 // prompt so tests can assert on what was sent.
 type stubProvider struct {
-	response string
-	err      error
+	response   string
+	err        error
 	lastPrompt string
 	lastOpts   agent.Option
 }
@@ -81,6 +81,34 @@ func TestBuildUserPrompt(t *testing.T) {
 	}
 	if !strings.Contains(p, "## Objective") {
 		t.Fatalf("expected system prompt formatting in prompt, got: %q", p)
+	}
+}
+
+func TestNewHonorsPlannerModelEnv(t *testing.T) {
+	// No env override -> empty model (provider-neutral default).
+	t.Setenv("KERN_MODEL_PLANNER", "")
+	t.Setenv("KERN_MODEL_DEFAULT", "")
+	if a := New(nil); a.model != "" {
+		t.Errorf("planner model with no env = %q, want empty", a.model)
+	}
+
+	// KERN_MODEL_PLANNER drives the planner default.
+	t.Setenv("KERN_MODEL_PLANNER", "mistral-plan")
+	if a := New(nil); a.model != "mistral-plan" {
+		t.Errorf("planner model with KERN_MODEL_PLANNER = %q, want mistral-plan", a.model)
+	}
+
+	// KERN_MODEL_DEFAULT applies to planner when its role var is unset.
+	t.Setenv("KERN_MODEL_PLANNER", "")
+	t.Setenv("KERN_MODEL_DEFAULT", "deepseek-plan")
+	if a := New(nil); a.model != "deepseek-plan" {
+		t.Errorf("planner model with KERN_MODEL_DEFAULT = %q, want deepseek-plan", a.model)
+	}
+
+	// Explicit WithModel still overrides the env.
+	t.Setenv("KERN_MODEL_PLANNER", "mistral-plan")
+	if a := New(nil, WithModel("llama3")); a.model != "llama3" {
+		t.Errorf("WithModel must override env, got %q", a.model)
 	}
 }
 

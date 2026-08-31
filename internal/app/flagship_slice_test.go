@@ -10,22 +10,19 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/whatif"
 )
 
-// Phase 10 — Flagship Vertical Slice.
-//
-// This file closes the remaining Phase 10 gaps:
-//
-//	10.1 on-disk fixture (testdata/user_service_slice.json) instead of inline consts
-//	10.2 the flagship drives the exact UserService request from the fixture
-//	10.4 asserts RiskReport / Diff / PR / Audit artifacts are produced
-//	10.5 consolidates the scattered failure cases into one 7-failure drill
-//	10.6 per-lifecycle efficiency metrics (durations per stage)
-//
+// Flagship Vertical Slice.
+// This file closes the remaining gaps:
+// 10.1 on-disk fixture (testdata/user_service_slice.json) instead of inline consts
+// 10.2 the flagship drives the exact UserService request from the fixture
+// 10.4 asserts RiskReport / Diff / PR / Audit artifacts are produced
+// 10.5 consolidates the scattered failure cases into one 7-failure drill
+// 10.6 per-lifecycle efficiency metrics (durations per stage)
 // These are e2e tests against the real kern repo and are skipped under -short.
 
 // sliceFixture is the on-disk fixture for the flagship vertical slice.
 type sliceFixture struct {
-	Intent           string   `json:"intent"`
-	Target           string   `json:"target"`
+	Intent            string   `json:"intent"`
+	Target            string   `json:"target"`
 	ExpectedArtifacts []string `json:"expected_artifacts"`
 	WorkflowStages    []string `json:"workflow_stages"`
 	Assertions        struct {
@@ -55,7 +52,7 @@ func loadFixture(t *testing.T) sliceFixture {
 
 // lifecycleMetrics records per-stage durations for a single lifecycle run (P10.6).
 type lifecycleMetrics struct {
-	start map[string]time.Time
+	start   map[string]time.Time
 	elapsed map[string]time.Duration
 	order   []string
 }
@@ -91,7 +88,7 @@ func TestFlagshipVerticalSlice(t *testing.T) {
 	f := loadFixture(t)
 	root := "../.."
 
-	p, err := New(root)
+	p, err := NewWithIndex(root, sharedTestRepoIndex(t))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -171,7 +168,7 @@ func TestSevenFailureDrill(t *testing.T) {
 		t.Skip("slow e2e; skipped with -short")
 	}
 	root := "../.."
-	p, err := New(root)
+	p, err := NewWithIndex(root, sharedTestRepoIndex(t))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}

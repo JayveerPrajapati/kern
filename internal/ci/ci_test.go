@@ -1,7 +1,6 @@
 package ci
 
 import (
-	"os/exec"
 	"testing"
 )
 
@@ -40,13 +39,10 @@ func TestParseRunStatusFailure(t *testing.T) {
 
 func TestGitHubActionsAdapterUnavailableWithoutGH(t *testing.T) {
 	// This test verifies the adapter returns ErrAdapterUnavailable when
-	// gh is not on PATH. We can't remove gh from PATH in a test, so
-	// instead we test the checkAvailable logic indirectly by verifying
-	// that Trigger/Status/Logs handle the error path. Since gh IS likely
-	// installed in the test env, we skip this if gh is available.
-	if _, err := exec.LookPath("gh"); err == nil {
-		t.Skip("gh is installed; cannot test unavailable path")
-	}
+	// gh is not on PATH. We point PATH at an empty temp dir so gh is never
+	// found regardless of the machine's installed tools, making the error
+	// path deterministic.
+	t.Setenv("PATH", t.TempDir())
 	a := NewGitHubActionsAdapter("")
 	if _, err := a.Trigger(Pipeline{Name: "ci.yml", Ref: "main"}); err != ErrAdapterUnavailable {
 		t.Errorf("Trigger without gh = %v, want ErrAdapterUnavailable", err)

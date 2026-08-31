@@ -5,7 +5,7 @@ import (
 	"time"
 
 	"github.com/JayveerPrajapati/kern/internal/domain"
-	"github.com/JayveerPrajapati/kern/internal/governance/firewall"
+	"github.com/JayveerPrajapati/kern/internal/governance"
 )
 
 func mkItem(id string, class domain.ContextClass, dig string, rel float64, used time.Time) domain.ContextItem {
@@ -166,11 +166,11 @@ func TestReplay(t *testing.T) {
 	r := domain.ContextReplay{
 		Input: "fix the login bug",
 		Snapshot: domain.ContextSnapshot{
-			Decisions:  []string{"use jwt"},
+			Decisions:   []string{"use jwt"},
 			Constraints: []string{"no-import-cycle"},
-			Files:      []string{"auth.go"},
-			Tests:      []string{"go test ./auth"},
-			Risks:      []string{"breaking change"},
+			Files:       []string{"auth.go"},
+			Tests:       []string{"go test ./auth"},
+			Risks:       []string{"breaking change"},
 		},
 		Occurred: time.Now(),
 	}
@@ -200,7 +200,7 @@ func TestAuthorizeItems(t *testing.T) {
 	}
 
 	// a real firewall that denies everything for the holder excludes items.
-	fw := firewall.NewFirewall()
+	fw := governance.NewFirewall()
 	out := AuthorizeItems(items, fw, "ghost-agent")
 	if len(out) != 0 {
 		t.Errorf("denying firewall should exclude all, got %d", len(out))

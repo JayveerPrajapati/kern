@@ -1,6 +1,8 @@
 package app
 
 import (
+	"errors"
+	"os"
 	"testing"
 	"time"
 
@@ -43,7 +45,7 @@ func TestFinalArtifactImmutableAcrossStatusChange(t *testing.T) {
 	}
 }
 
-// TestNewVersionSupersedesFinal verifies the Phase 3 "new version instead"
+// TestNewVersionSupersedesFinal verifies the "new version instead"
 // rule: a finalized artifact is never silently mutated; NewVersion marks the
 // original superseded (kept intact for audit) and writes a successor with
 // Version+1 linked via ParentArtifactID.
@@ -117,5 +119,17 @@ func TestNewVersionNoExistingFallsBackToSave(t *testing.T) {
 	}
 	if saved.ID != "brand-new" {
 		t.Errorf("ID = %q, want brand-new", saved.ID)
+	}
+}
+
+// TestArtifactStoreGetMissing verifies ArtifactStore.Get returns a wrapped
+// os.ErrNotExist for an unknown artifact ID: task refs to a missing artifact
+// resolve loudly, not silently.
+func TestArtifactStoreGetMissing(t *testing.T) {
+	store := NewArtifactStore(t.TempDir())
+	if _, err := store.Get("ver-does-not-exist"); err == nil {
+		t.Fatal("Get missing artifact: want error, got nil")
+	} else if !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("missing artifact error = %v, want os.ErrNotExist", err)
 	}
 }

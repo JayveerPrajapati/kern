@@ -168,7 +168,6 @@ func Merge(g *intelligence.Graph, ext *Extractors) error {
 // MergeIntoGraph builds a graph from an index, runs all twin extractors, and
 // returns the merged knowledge graph. This is the one-call way to get the full
 // knowledge graph (code + API + data + messaging + infra + runtime).
-//
 // It returns a pointer because intelligence.Graph embeds a sync.Once (guarding
 // its lazily-built query caches) and must not be copied by value — returning a
 // value would trip go vet's copylock check. Callers receive the same pointer

@@ -5,21 +5,17 @@ import (
 	"time"
 
 	"github.com/JayveerPrajapati/kern/internal/domain"
-	"github.com/JayveerPrajapati/kern/internal/governance/firewall"
+	"github.com/JayveerPrajapati/kern/internal/governance"
 )
 
 // This file implements the unified minimum-sufficient context selection engine
-// (Phase 5.3). Unlike the pieces in phase5.go, SelectContext is a single engine
+// Unlike the pieces in phase5.go, SelectContext is a single engine
 // that takes ALL the selection inputs and applies them in one explicit pass.
-//
 // The documented selection order applied here is:
-//
-//	intent → target → direct dependencies → required constraints →
-//	relevant memory → relevant tests → historical evidence (when justified) →
-//	runtime evidence (when justified)
-//
+// intent → target → direct dependencies → required constraints →
+// relevant memory → relevant tests → historical evidence (when justified) →
+// runtime evidence (when justified)
 // then the selected set is ranked and reduced to the minimum sufficient subset.
-//
 // The pipeline is fully deterministic: permissions are enforced first (P5.4),
 // the selection order is applied, relevance scoring ranks the candidates, the
 // reduction keeps constraints + evidence under aggressive trimming, and the
@@ -44,7 +40,7 @@ type SelectRequest struct {
 
 	// Permissions gate (P5.4). A nil firewall authorizes everything
 	// (backward compatible); otherwise only items the holder may read survive.
-	Firewall *firewall.Firewall
+	Firewall *governance.Firewall
 	Holder   string
 
 	// Scoped authorization dimensions (P5.4). Empty fields are unrestricted;
@@ -113,17 +109,16 @@ func isProtected(it domain.ContextItem) bool {
 	return it.Class == domain.ContextConstraint || it.Class == domain.ContextEvidence
 }
 
-// SelectContext is the unified minimum-sufficient selection engine (Phase
-// 5.3). It enforces permissions FIRST, then applies the documented selection
+// SelectContext is the unified minimum-sufficient selection engine. It
+// enforces permissions FIRST, then applies the documented selection
 // order, ranks by relevance, reduces to the minimum sufficient subset
 // (reusing the SelectMinimal strategy) while keeping constraints + evidence,
 // and applies the freshness policy.
-//
 // The returned slice is the selected ACTIVE context, ordered by the selection
 // order (stage asc, then relevance desc) with protected items preserved.
 func SelectContext(req SelectRequest) []domain.ContextItem {
 	// 1. Permissions / authorization FIRST (P5.4): denied items never enter
-	//    the pool, so they cannot be selected or influence ranking.
+	// the pool, so they cannot be selected or influence ranking.
 	items := AuthorizeItemsScoped(req.Items, req.Firewall, domain.ContextAuthorization{
 		Agent:                  req.Holder,
 		Repository:             req.Repository,
@@ -151,7 +146,7 @@ func SelectContext(req SelectRequest) []domain.ContextItem {
 	}
 
 	// 4. Rank: apply the selection order (stage asc), tie-broken by the
-	//	relevance score (desc) computed from the input signals.
+	// relevance score (desc) computed from the input signals.
 	sort.SliceStable(pool, func(a, b int) bool {
 		if pool[a].stage != pool[b].stage {
 			return pool[a].stage < pool[b].stage

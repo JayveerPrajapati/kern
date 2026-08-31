@@ -31,7 +31,13 @@ type Query struct {
 	Agent           string            // match Scope prefix "agent:"
 	Since           time.Time         // if non-zero, only memories with CreatedAt >= Since
 	Until           time.Time         // if non-zero, only memories with CreatedAt <= Until
-	Limit           int               // max results (0 = unlimited)
+	// IncludeNonCurrent, when true, also recalls superseded and historical
+	// memories. The default (false) recalls only CURRENT memory —
+	// the authoritative set — so stale knowledge is never silently presented
+	// as current fact ( exit gate). Audit-style consumers that need
+	// the full history opt in explicitly.
+	IncludeNonCurrent bool
+	Limit             int // max results (0 = unlimited)
 }
 
 // Recall returns the memories matching the query, ranked by relevance.
@@ -93,6 +99,11 @@ func (s *MemoryStore) Recall(query Query) ([]domain.Memory, error) {
 			continue
 		}
 		if !query.Until.IsZero() && m.CreatedAt.After(query.Until) {
+			continue
+		}
+		// /exit gate: superseded and historical memories are not
+		// current — exclude them unless the caller explicitly asks for them.
+		if !query.IncludeNonCurrent && m.Status != "" && m.Status != domain.MemoryCurrent {
 			continue
 		}
 		out = append(out, m)

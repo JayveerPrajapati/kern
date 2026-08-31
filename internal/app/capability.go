@@ -8,20 +8,18 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/domain"
 )
 
-// This file implements the remaining Phase 6 Intent + Capability features:
-//
-//	P6.6 registry (purpose field)  CapabilityRegistry
-//	P6.7 planner fallback          DeterministicPlan (when no LLM provider)
-//	P6.8 tool-decision trace wiring ToolDecisionRecorder
-//	P6.4 full precheck              CapabilityPrecheck
-//	P6.9 discovery                  Registry.Discover / Tools / Agents
-//	P6.10 tool fallback             FallbackFor
-//
+// This file implements the remaining Intent + Capability features:
+// P6.6 registry (purpose field)  CapabilityRegistry
+// P6.7 planner fallback          DeterministicPlan (when no LLM provider)
+// P6.8 tool-decision trace wiring ToolDecisionRecorder
+// P6.4 full precheck              CapabilityPrecheck
+// P6.9 discovery                  Registry.Discover / Tools / Agents
+// P6.10 tool fallback             FallbackFor
 // Everything is deterministic; the planner already supports an LLM via
 // internal/planner, so P6.7 here provides the deterministic fallback plan the
 // planner returns when no provider is configured.
 
-// CapabilityRegistry is the Phase 6 registry of every known capability, keyed
+// CapabilityRegistry is the registry of every known capability, keyed
 // by name. It is the single source of truth for capability discovery and
 // precheck.
 type CapabilityRegistry struct {
@@ -38,8 +36,10 @@ func allCapabilities() []domain.Capability {
 		{Name: "analyze", Purpose: "Produce a context packet for a proposed change", Inputs: []string{"change"}, Dependencies: []string{"graph", "understand"}, Tools: []string{"kern_analyze"}, Outputs: []string{"context packet"}, Artifacts: []string{"ArtifactContextPacket"}, Risk: "low"},
 		{Name: "plan", Purpose: "Generate an implementation plan for an intent", Inputs: []string{"intent", "context packet"}, Dependencies: []string{"analyze", "impact"}, Tools: []string{"kern_plan"}, Outputs: []string{"plan"}, Artifacts: []string{"ArtifactPlan"}, Risk: "low"},
 		{Name: "impact", Purpose: "Estimate the blast radius of a proposed change", Inputs: []string{"change"}, Dependencies: []string{"graph"}, Tools: []string{"kern_impact", "kern_what_if"}, Outputs: []string{"impact report"}, Artifacts: []string{"ArtifactImpactReport"}, Risk: "low"},
+		{Name: "whatif", Purpose: "Simulate the impact of a hypothetical change without applying it", Inputs: []string{"change"}, Dependencies: []string{"graph", "impact"}, Tools: []string{"kern_what_if"}, Outputs: []string{"impact", "recommendation"}, Risk: "low"},
 		{Name: "execute", Purpose: "Apply a verified code patch in an isolated worktree", Inputs: []string{"plan", "code patch"}, Dependencies: []string{"plan", "sandbox"}, Tools: []string{"kern_execute"}, Permissions: []string{"write"}, Artifacts: []string{"ArtifactCodePatch", "ArtifactDiff"}, Risk: "medium"},
 		{Name: "verify", Purpose: "Run build/test/security verification on a change", Inputs: []string{"change", "patch"}, Dependencies: []string{"execute", "security"}, Tools: []string{"kern_verify", "kern_validate", "kern_test_gaps"}, Outputs: []string{"verification"}, Artifacts: []string{"ArtifactVerificationReport"}, Risk: "low"},
+		{Name: "pr", Purpose: "Create a pull request for a verified change", Inputs: []string{"patch", "verification"}, Dependencies: []string{"execute", "verify"}, Tools: []string{"kern_execute"}, Outputs: []string{"pull request"}, Artifacts: []string{"ArtifactPullRequest"}, Risk: "medium"},
 		{Name: "security", Purpose: "Scan source for security findings", Inputs: []string{"change"}, Dependencies: []string{"graph"}, Tools: []string{"kern_security"}, Outputs: []string{"security report"}, Artifacts: []string{"ArtifactSecurityReport"}, Risk: "medium"},
 		{Name: "correlate", Purpose: "Correlate an alert to a runtime evidence chain", Inputs: []string{"alert"}, Dependencies: []string{"runtime"}, Tools: []string{"kern_correlate"}, Outputs: []string{"correlation chain"}, Risk: "low"},
 		{Name: "investigate", Purpose: "Investigate a production incident end-to-end", Inputs: []string{"alert"}, Dependencies: []string{"correlate", "impact"}, Tools: []string{"kern_incident"}, Outputs: []string{"root cause"}, Artifacts: []string{"ArtifactIncidentReport", "ArtifactRootCauseReport"}, Risk: "medium"},
@@ -86,7 +86,7 @@ func (r *CapabilityRegistry) Tools() []string {
 	return sortedKeys(seen)
 }
 
-// Discover implements Phase 6.9 semantic/lexical capability discovery: given a
+// Discover implements semantic/lexical capability discovery: given a
 // free-text query, it returns the capabilities most relevant to that query,
 // ranked by relevance. Scoring is fully deterministic (no LLM, no network):
 // the query is tokenized into lowercase words and each capability is scored by

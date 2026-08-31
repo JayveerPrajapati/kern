@@ -1,10 +1,9 @@
 // This file holds the concrete report struct types for artifact kinds that had
-// no concrete domain type of their own (Phase 3.1 Artifact contract). Like the
+// no concrete domain type of their own ( Artifact contract). Like the
 // rest of this package, these are pure types: storage-agnostic,
 // provider-independent, and free of MCP, CLI, REST, or SDK specifics. Each type
 // is a focused data carrier; the generic Artifact envelope (ID, Kind, Type,
 // TaskID, Provenance, URI, Digest, ...) lives on Artifact itself.
-//
 // Types that already shipped (ContextPacket, ImpactReport, Plan, PullRequest,
 // VerificationResult, Deployment, Incident, Risk, Claim, Evidence, Memory) are
 // intentionally NOT re-defined here.
@@ -172,7 +171,7 @@ type MemoryEntry struct {
 // AuditReport is the audit-trail summary artifact (ArtifactAudit). It
 // finalizes a task's workflow by summarizing the artifact chain that was
 // produced end-to-end, making the whole lifecycle auditable in one typed
-// artifact (Phase 10.4).
+// artifact .
 type AuditReport struct {
 	TaskID      string    `json:"task_id"`
 	Summary     string    `json:"summary"`
@@ -182,17 +181,17 @@ type AuditReport struct {
 }
 
 // VerificationReport is the artifact-shaped view of a verification run
-// (ArtifactVerificationReport, Phase 3.1 Artifact contract). It is the typed
+// (ArtifactVerificationReport, Artifact contract). It is the typed
 // carrier recorded in the artifact chain for the verification stage, distinct
 // from the engine's VerificationResult (which carries runtime check state).
 // It carries the outcome verdict plus a stable snapshot of the sub-checks so a
 // stored verification artifact is fully auditable and replayable.
 type VerificationReport struct {
-	ID        string              `json:"id"`         // verification run id
-	TaskID    string              `json:"task_id"`    // originating task (empty = ad-hoc)
-	Verdict   string              `json:"verdict"`    // "PASS", "FAIL", "WARN"
-	Summary   string              `json:"summary"`    // human-readable summary
-	Checks    []VerificationCheck `json:"checks"`     // per sub-check outcomes
-	Passed    bool                `json:"passed"`     // convenience: Verdict == "PASS"
-	GeneratedAt time.Time         `json:"generated_at"`
+	ID          string              `json:"id"`      // verification run id
+	TaskID      string              `json:"task_id"` // originating task (empty = ad-hoc)
+	Verdict     string              `json:"verdict"` // "PASS", "FAIL", "WARN"
+	Summary     string              `json:"summary"` // human-readable summary
+	Checks      []VerificationCheck `json:"checks"`  // per sub-check outcomes
+	Passed      bool                `json:"passed"`  // convenience: Verdict == "PASS"
+	GeneratedAt time.Time           `json:"generated_at"`
 }

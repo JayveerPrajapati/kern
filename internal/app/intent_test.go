@@ -52,6 +52,40 @@ func TestCompileIntentFields(t *testing.T) {
 	}
 }
 
+// TestCompileIntentEnvironmentDerived verifies the compiled environment is
+// derived from the intent type: production operations (DEPLOY, INCIDENT) are
+// scoped to "production", ordinary development intents default to
+// "development".
+func TestCompileIntentEnvironmentDerived(t *testing.T) {
+	cases := []struct {
+		intent string
+		want   string
+	}{
+		{"add caching to UserService", "development"},
+		{"deploy version 2.0 to production", "production"},
+		{"production is failing with 500 errors", "production"},
+	}
+	for _, tc := range cases {
+		if got := CompileIntent(tc.intent).Environment; got != tc.want {
+			t.Errorf("CompileIntent(%q).Environment = %q, want %q", tc.intent, got, tc.want)
+		}
+	}
+}
+
+// TestCompileIntentProductionNotUnconditionalIncident verifies that mentioning
+// "production" in a routine change does not force an INCIDENT classification.
+// "production" is not itself an incident signal — a code change to production
+// code is a CODE_CHANGE; a failing/down/outage statement is an INCIDENT.
+func TestCompileIntentProductionNotUnconditionalIncident(t *testing.T) {
+	if got := CompileIntent("refactor production code for readability").Type; got != domain.IntentCodeChange {
+		t.Errorf("refactor production code: Type=%s, want CODE_CHANGE", got)
+	}
+	// A real incident still classifies as INCIDENT via its own signal words.
+	if got := CompileIntent("production is down").Type; got != domain.IntentIncident {
+		t.Errorf("production is down: Type=%s, want INCIDENT", got)
+	}
+}
+
 // TestSelectWorkflow verifies the workflow selector maps intent types to
 // workflows A-E.
 func TestSelectWorkflow(t *testing.T) {
@@ -108,6 +142,59 @@ func TestCapabilitiesToTools(t *testing.T) {
 	}
 }
 
+// TestDefaultCapabilitiesSingleSource verifies DefaultCapabilities resolves
+// through the canonical CapabilityRegistry (allCapabilities) rather than a
+// parallel ad-hoc list. Every returned capability must carry its Purpose — if
+// the two sources ever drift, a capability would come back Purpose-less, which
+// flags the duplicate-system regression the gate-4 fix removed.
+func TestDefaultCapabilitiesSingleSource(t *testing.T) {
+	reg := NewCapabilityRegistry()
+	for _, it := range []domain.IntentType{
+		domain.IntentUnderstand, domain.IntentCodeChange, domain.IntentWhatIf,
+		domain.IntentIncident, domain.IntentModernization, domain.IntentSecurity,
+		domain.IntentTest, domain.IntentDeploy, domain.IntentAudit,
+	} {
+		for _, c := range DefaultCapabilities(it) {
+			if c.Purpose == "" {
+				t.Errorf("%s: capability %q has no Purpose; registry lookup failed or catalog entry lacks it", it, c.Name)
+			}
+			// It must be the SAME metadata as the registry holds (single source).
+			if want, ok := reg.Get(c.Name); !ok || want.Tools[0] != c.Tools[0] {
+				t.Errorf("%s: capability %q does not match the canonical registry entry", it, c.Name)
+			}
+		}
+	}
+}
+
+// TestCapabilitiesToAgentsIntentAware verifies the agent team is derived from a
+// deterministic capability → role mapping, not from capability Dependencies
+// (which are other capabilities, not agents).
+func TestCapabilitiesToAgentsIntentAware(t *testing.T) {
+	cases := []struct {
+		intent string
+		want   []string
+	}{
+		{"add caching", []string{"architect", "planner", "coder", "tester"}},
+		{"deploy", []string{"planner", "sre"}},
+		{"what if", []string{"architect"}},
+		{"audit", []string{"reviewer"}},
+	}
+	for _, tc := range cases {
+		it := CompileIntent(tc.intent).Type
+		got := CapabilitiesToAgents(DefaultCapabilities(it))
+		if len(got) != len(tc.want) {
+			t.Errorf("%s: agents=%v, want %v", tc.intent, got, tc.want)
+			continue
+		}
+		for i := range got {
+			if got[i] != tc.want[i] {
+				t.Errorf("%s: agents=%v, want %v", tc.intent, got, tc.want)
+				break
+			}
+		}
+	}
+}
+
 // TestRun verifies kern_run creates a task and returns a valid RunResult.
 func TestRun(t *testing.T) {
 	svc, _ := newTestTaskService(t)
@@ -155,5 +242,30 @@ func TestRunHighRiskApproval(t *testing.T) {
 	}
 	if result.ApprovalState != "required" {
 		t.Errorf("ApprovalState=%s, want required", result.ApprovalState)
+	}
+}
+
+// TestContextPlanIntentAware verifies the RunResult context plan is derived
+// from the intent's capabilities rather than a hardcoded universal string:
+// a WHAT_IF run shows its capability sequence, a CODE_CHANGE run shows the full
+// canonical execution order.
+func TestContextPlanIntentAware(t *testing.T) {
+	if got := contextPlanFor(domain.IntentWhatIf); got != "whatif" {
+		t.Errorf("WHAT_IF context plan = %q, want %q", got, "whatif")
+	}
+	if got := contextPlanFor(domain.IntentCodeChange); got != "analyze → context → memory → impact → risk → plan → execute → verify → pr" {
+		t.Errorf("CODE_CHANGE context plan = %q", got)
+	}
+	if got := contextPlanFor(domain.IntentDeploy); got != "deploy" {
+		t.Errorf("DEPLOY context plan = %q, want deploy", got)
+	}
+	// Run surfaces the derived plan on the RunResult.
+	svc, _ := newTestTaskService(t)
+	res, err := svc.Run("what if we remove redis")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.ContextPlan != "whatif" {
+		t.Errorf("RunResult.ContextPlan = %q, want %q", res.ContextPlan, "whatif")
 	}
 }

@@ -11,23 +11,22 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/agent"
 	"github.com/JayveerPrajapati/kern/internal/deployment"
 	"github.com/JayveerPrajapati/kern/internal/domain"
+	"github.com/JayveerPrajapati/kern/internal/eventbus"
 	"github.com/JayveerPrajapati/kern/internal/execution"
 	"github.com/JayveerPrajapati/kern/internal/governance"
 	"github.com/JayveerPrajapati/kern/internal/memory"
 	"github.com/JayveerPrajapati/kern/internal/runtime"
 	"github.com/JayveerPrajapati/kern/internal/verification"
+	"github.com/JayveerPrajapati/kern/internal/webhook"
 	"github.com/JayveerPrajapati/kern/internal/whatif"
 )
 
 // TestVerticalSlice1AnalyzePlanImpactVerifyPR is the first required vertical
-// slice proof point from the Integration Transformation Plan (§33):
-//
-//	"Add caching to UserService" → analyze → plan → impact → execute → verify → PR
-//
+// slice proof point from the (§33):
+// "Add caching to UserService" → analyze → plan → impact → execute → verify → PR
 // It exercises the full TaskService lifecycle end-to-end against the real kern
 // repo, proving that every phase is wired through the authoritative Task with
 // artifacts, events, and lifecycle state transitions.
-//
 // This test is structural (not exact-output): it asserts that each phase
 // produces a Task in the expected state, with non-empty output and a recorded
 // artifact. It does NOT assert exact symbol counts (those drift as the repo
@@ -38,16 +37,16 @@ func TestVerticalSlice1AnalyzePlanImpactVerifyPR(t *testing.T) {
 	}
 	root := "../.."
 
-	p, err := New(root)
+	p, err := NewWithIndex(root, sharedTestRepoIndex(t))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
 	ts := NewTaskService(p, nil).WithAgentID("test")
 
-	// --- Phase 5: Analyze ---
+	// --- Analyze ---
 	t.Run("analyze", func(t *testing.T) {
 		task, text, err := ts.Analyze("NewServer")
-			if err != nil {
+		if err != nil {
 			t.Fatalf("Analyze: %v", err)
 		}
 		if task.State != domain.TaskCompleted {
@@ -69,7 +68,7 @@ func TestVerticalSlice1AnalyzePlanImpactVerifyPR(t *testing.T) {
 		}
 	})
 
-	// --- Phase 6: Plan ---
+	// --- Plan ---
 	t.Run("plan", func(t *testing.T) {
 		task, plan, text, err := ts.Plan("NewServer")
 		if err != nil {
@@ -100,7 +99,7 @@ func TestVerticalSlice1AnalyzePlanImpactVerifyPR(t *testing.T) {
 		}
 	})
 
-	// --- Phase 7: Impact ---
+	// --- Impact ---
 	t.Run("impact", func(t *testing.T) {
 		task, rep, text, err := ts.Impact("NewServer")
 		if err != nil {
@@ -126,7 +125,7 @@ func TestVerticalSlice1AnalyzePlanImpactVerifyPR(t *testing.T) {
 		}
 	})
 
-	// --- Phase 8: What-If ---
+	// --- What-If ---
 	t.Run("whatif", func(t *testing.T) {
 		task, text, err := ts.WhatIf(whatif.RemoveSymbol, "NewServer", "")
 		if err != nil {
@@ -143,7 +142,7 @@ func TestVerticalSlice1AnalyzePlanImpactVerifyPR(t *testing.T) {
 		}
 	})
 
-	// --- Phase 12: Verify ---
+	// --- Verify ---
 	t.Run("verify", func(t *testing.T) {
 		task, res, err := ts.Verify([]string{"build"})
 		if err != nil {
@@ -160,7 +159,7 @@ func TestVerticalSlice1AnalyzePlanImpactVerifyPR(t *testing.T) {
 		}
 	})
 
-	// --- Phase 13: CreatePR (requires a task in READY_FOR_PR) ---
+	// --- CreatePR (requires a task in READY_FOR_PR) ---
 	// We can't easily get a task into READY_FOR_PR without executing a real
 	// patch, so we verify that CreatePR correctly rejects a task that hasn't
 	// been verified. This is the negative path — the positive path is covered
@@ -181,15 +180,13 @@ func TestVerticalSlice1AnalyzePlanImpactVerifyPR(t *testing.T) {
 }
 
 // TestVerticalSlice3WhatIfScenario is the third vertical slice proof point:
-//
-//	What-if "split PaymentService" → bounded contexts + impact
-//
+// What-if "split PaymentService" → bounded contexts + impact
 // It exercises the what-if engine's SplitService change kind and verifies the
 // impact report includes affected components, files, and a risk level.
 func TestVerticalSlice3WhatIfScenario(t *testing.T) {
 	root := "../.."
 
-	p, err := New(root)
+	p, err := NewWithIndex(root, sharedTestRepoIndex(t))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -237,7 +234,7 @@ func TestTaskServiceAgentIdentity(t *testing.T) {
 	}
 	root := "../.."
 
-	p, err := New(root)
+	p, err := NewWithIndex(root, sharedTestRepoIndex(t))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -277,7 +274,7 @@ func TestArtifactImmutability(t *testing.T) {
 	}
 	root := "../.."
 
-	p, err := New(root)
+	p, err := NewWithIndex(root, sharedTestRepoIndex(t))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -314,7 +311,7 @@ func TestArtifactImmutability(t *testing.T) {
 func TestDeployApprovalGate(t *testing.T) {
 	root := "../.."
 
-	p, err := New(root)
+	p, err := NewWithIndex(root, sharedTestRepoIndex(t))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -364,7 +361,7 @@ func TestDeployApprovalGate(t *testing.T) {
 func TestDeployNoopSkipsApprovalGate(t *testing.T) {
 	root := "../.."
 
-	p, err := New(root)
+	p, err := NewWithIndex(root, sharedTestRepoIndex(t))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -395,35 +392,38 @@ func TestDeployNoopSkipsApprovalGate(t *testing.T) {
 }
 
 // TestWebhookIdempotency verifies that delivering the same event twice to the
-// same URL is a no-op on the second delivery (Invariant 9).
+// same URL is a no-op on the second delivery (Invariant 9): the dedup key is
+// "eventID|url", checked before the HTTP attempt, so a repeat delivery is
+// skipped entirely. The .invalid TLD never resolves, so the first delivery
+// fails fast and the second — being a no-op — reports no error at all.
 func TestWebhookIdempotency(t *testing.T) {
-	// This test is in internal/webhook, but we verify the contract here at
-	// the integration level: the webhook client should not redeliver.
-	// The unit test lives in internal/webhook/webhook_test.go; this is a
-	// smoke test that the Client struct has the delivered map.
-	//
-	// We can't easily test actual HTTP delivery here without a test server,
-	// but the dedup logic is in the Deliver method which is tested in the
-	// webhook package. This test just ensures the integration path is wired.
-	t.Skip("webhook idempotency is tested in internal/webhook/webhook_test.go")
+	c := webhook.New()
+	c.SetTimeout(100 * time.Millisecond)
+	if err := c.Add("dead", "http://dead.invalid/hook"); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	ev := eventbus.Event{ID: "evt-dup", Kind: eventbus.IncidentCreated}
+	if errs := c.Deliver(ev); len(errs) == 0 {
+		t.Fatal("first delivery to a dead URL should report an error")
+	}
+	if errs := c.Deliver(ev); len(errs) != 0 {
+		t.Errorf("second delivery of the same event should be a no-op (dedup), got: %v", errs)
+	}
 }
 
 // TestVerticalSlice2IncidentCorrelateRootCause is the second required vertical
-// slice proof point from the Integration Transformation Plan (§33):
-//
-//	Incident → correlation → root cause → fix → PR
-//
+// slice proof point from the (§33):
+// Incident → correlation → root cause → fix → PR
 // It exercises the incident workflow end-to-end through TaskService: a
 // production alert is ingested, correlated against a runtime source, root cause
 // hypotheses are generated, and the resulting incident + task are verified.
-//
 // This test uses a synthetic runtime source (no real production telemetry) so
 // it is deterministic and fast. It asserts the structural contract: the
 // incident is created, has hypotheses, and the task completes with artifacts.
 func TestVerticalSlice2IncidentCorrelateRootCause(t *testing.T) {
 	root := "../.."
 
-	p, err := New(root)
+	p, err := NewWithIndex(root, sharedTestRepoIndex(t))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -458,14 +458,14 @@ func TestVerticalSlice2IncidentCorrelateRootCause(t *testing.T) {
 
 	ts := NewTaskService(p, nil).WithAgentID("test")
 
-	// --- Phase 14: Correlate ---
+	// --- Correlate ---
 	t.Run("correlate", func(t *testing.T) {
 		alert := domain.Alert{
-			ID:        "alert-1",
-			Severity:  domain.SeverityError,
-			Message:   "checkout service error rate spiked",
-			Service:   "checkout",
-			Source:    "prometheus",
+			ID:         "alert-1",
+			Severity:   domain.SeverityError,
+			Message:    "checkout service error rate spiked",
+			Service:    "checkout",
+			Source:     "prometheus",
 			OccurredAt: now,
 		}
 		task, chain, text, err := ts.Correlate(alert)
@@ -495,14 +495,14 @@ func TestVerticalSlice2IncidentCorrelateRootCause(t *testing.T) {
 		}
 	})
 
-	// --- Phase 15: InvestigateIncident ---
+	// --- InvestigateIncident ---
 	t.Run("investigateIncident", func(t *testing.T) {
 		alert := domain.Alert{
-			ID:        "alert-2",
-			Severity:  domain.SeverityError,
-			Message:   "checkout service error rate spiked",
-			Service:   "checkout",
-			Source:    "prometheus",
+			ID:         "alert-2",
+			Severity:   domain.SeverityError,
+			Message:    "checkout service error rate spiked",
+			Service:    "checkout",
+			Source:     "prometheus",
 			OccurredAt: now,
 		}
 		task, inc, text, err := ts.InvestigateIncident(alert)
@@ -537,7 +537,7 @@ func TestVerticalSlice2IncidentCorrelateRootCause(t *testing.T) {
 		}
 	})
 
-	// --- Phase 16: Learn ---
+	// --- Learn ---
 	t.Run("learn", func(t *testing.T) {
 		task, patterns, text, err := ts.Learn(1)
 		if err != nil {
@@ -561,7 +561,7 @@ func TestVerticalSlice2IncidentCorrelateRootCause(t *testing.T) {
 		}
 	})
 
-	// --- Phase 17: Modernize ---
+	// --- Modernize ---
 	t.Run("modernize", func(t *testing.T) {
 		task, plan, text, err := ts.Modernize()
 		if err != nil {
@@ -589,17 +589,16 @@ func TestVerticalSlice2IncidentCorrelateRootCause(t *testing.T) {
 }
 
 // TestFullLifecycle20StepVerticalSlice drives a SINGLE Task through the entire
-// 20-step lifecycle specified by the Integration Transformation Plan:
-//
-//  1. Task created (intent captured)
-//  2. Analyze (context packet assembled)
-//  3. Memory recall (relevant memories)
-//  4. Impact assessment (what-if simulation)
-//  5. Risk assessment
-//  6. Plan assembled (from deterministic sources)
-//  7. Policy evaluation (governance firewall check)
-//  8. Approval requested (WAITING_FOR_APPROVAL)
-//  9. Approval granted (APPROVED)
+// 20-step lifecycle specified by the :
+// 1. Task created (intent captured)
+// 2. Analyze (context packet assembled)
+// 3. Memory recall (relevant memories)
+// 4. Impact assessment (what-if simulation)
+// 5. Risk assessment
+// 6. Plan assembled (from deterministic sources)
+// 7. Policy evaluation (governance firewall check)
+// 8. Approval requested (WAITING_FOR_APPROVAL)
+// 9. Approval granted (APPROVED)
 // 10. Sandbox execution (EXECUTING, patch applied in worktree)
 // 11. Test (verification: test type)
 // 12. Security scan (verification: security type — if unsupported, skip gracefully)
@@ -611,7 +610,6 @@ func TestVerticalSlice2IncidentCorrelateRootCause(t *testing.T) {
 // 18. Learning (lesson recorded to memory)
 // 19. Task completed (COMPLETED)
 // 20. Audit trail verified (artifact chain integrity)
-//
 // This is the definitive proof point that all phases are wired through the
 // authoritative Task with artifacts, events, and lifecycle transitions.
 func TestFullLifecycle20StepVerticalSlice(t *testing.T) {
@@ -623,7 +621,7 @@ func TestFullLifecycle20StepVerticalSlice(t *testing.T) {
 	t.Setenv("KERN_ALLOW_EXEC", "1")
 
 	root := "../.."
-	p, err := New(root)
+	p, err := NewWithIndex(root, sharedTestRepoIndex(t))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -829,7 +827,7 @@ func TestFullLifecycle20StepVerticalSlice(t *testing.T) {
 			t.Errorf("step20: artifact %s parent %s not recorded before it", a.ID, a.ParentArtifactID)
 		}
 	}
-	// Phase 10.4: the full manual lifecycle must produce the complete required
+	// The full manual lifecycle must produce the complete required
 	// artifact set (context_packet, analysis_report, impact_report, risk_report,
 	// plan, code_patch, diff, verification_report, pull_request, deployment, and
 	// audit) so the traceable chain is complete end-to-end.

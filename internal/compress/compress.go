@@ -3,6 +3,7 @@
 package compress
 
 import (
+	"fmt"
 	"regexp"
 	"strings"
 
@@ -45,7 +46,7 @@ func CompressLog(text string, opts Options) string {
 		blankPend = false
 	}
 
-	for _, line := range raw {
+	for idx, line := range raw {
 		normalized := timestampRe.ReplaceAllString(line, "")
 		trimmed := strings.TrimSpace(normalized)
 		if trimmed == "" {
@@ -73,6 +74,11 @@ func CompressLog(text string, opts Options) string {
 		flush()
 		out = append(out, strings.TrimRight(normalized, " \t"))
 		if len(out) >= opts.MaxLines {
+			// Say the cap was hit so a truncated compression is never mistaken
+			// for the full log.
+			if remaining := len(raw) - idx - 1; remaining > 0 {
+				out = append(out, fmt.Sprintf("… (%d lines omitted)", remaining))
+			}
 			break
 		}
 	}

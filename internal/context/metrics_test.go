@@ -58,3 +58,27 @@ func TestMeasureCostScalesWithTokens(t *testing.T) {
 		t.Errorf("Cost should scale with tokens: %v -> %v", a.Cost, b.Cost)
 	}
 }
+
+func TestDefaultCostPerToken(t *testing.T) {
+	if CostPerToken() <= 0 {
+		t.Errorf("default costPerToken = %v, want > 0", CostPerToken())
+	}
+}
+
+func TestCostPerTokenFromEnv(t *testing.T) {
+	t.Setenv("KERN_COST_PER_TOKEN", "0.001")
+	tokens := 100
+	m := Measure(domain.ContextPacket{TokenCount: tokens}, 0)
+	want := float64(tokens) * 0.001
+	if m.Cost != want {
+		t.Errorf("Cost = %v, want %v (tokens * env rate)", m.Cost, want)
+	}
+}
+
+func TestCostPerTokenZeroDisablesCost(t *testing.T) {
+	t.Setenv("KERN_COST_PER_TOKEN", "0")
+	m := Measure(domain.ContextPacket{TokenCount: 100}, 0)
+	if m.Cost != 0 {
+		t.Errorf("Cost = %v, want 0 when rate is 0", m.Cost)
+	}
+}

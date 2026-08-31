@@ -13,10 +13,9 @@ import (
 )
 
 // ArtifactStore is a JSON file store for domain.Artifact records, backing the
-// Phase 3 unified artifact chain. It persists artifacts to
+// Unified artifact chain. It persists artifacts to
 // <cache_dir>/artifacts/<project_hash>.json so the chain survives restarts
 // and is queryable via GET /v1/artifacts/{id} and `kern artifacts <task-id>`.
-//
 // Artifacts are keyed by ID (insert-or-replace by ID). The store is safe for
 // concurrent use: a mutex serializes save/load against concurrent writers.
 type ArtifactStore struct {
@@ -99,12 +98,25 @@ func (s *ArtifactStore) saveLocked(list []domain.Artifact) error {
 // record. It is the canonical way to record a typed artifact in the workflow
 // chain. The caller is responsible for setting ParentArtifactID to link the
 // artifact into the chain (TaskService does this automatically).
-//
 // Invariant 8: finalized artifacts (Status == "final") are immutable — a Save
 // that would overwrite an existing final artifact returns an error instead of
 // replacing it. Draft ("draft") and superseded ("superseded") artifacts may be
 // replaced freely.
 func (s *ArtifactStore) Save(a domain.Artifact) (domain.Artifact, error) {
+	// The process-wide path lock serializes concurrent store instances (MCP
+	// server, web app, CLI) that read-modify-write the same backing file, so
+	// parallel saves across instances never lose each other's updates. The
+	// instance mutex alone does not cover that (each instance has its own).
+	// The cross-process file lock extends the same guarantee to separate kern
+	// processes sharing the project store.
+	fl, err := cache.LockFile(s.path)
+	if err != nil {
+		return domain.Artifact{}, err
+	}
+	defer fl.Unlock()
+	pl := cache.PathLock(s.path)
+	pl.Lock()
+	defer pl.Unlock()
 	list, err := s.load()
 	if err != nil {
 		return domain.Artifact{}, err
@@ -129,13 +141,12 @@ func (s *ArtifactStore) Save(a domain.Artifact) (domain.Artifact, error) {
 }
 
 // NewVersion writes the next version of an existing finalized artifact. It
-// implements the Phase 3 "new version instead" rule: a finalized artifact is
+// implements the "new version instead" rule: a finalized artifact is
 // never silently mutated — when a successor must be produced, the existing
 // final record is marked Status == "superseded" (kept intact for audit) and a
 // new artifact with the same kind/task and Version+1 is written, linked to the
 // superseded parent via ParentArtifactID. Draft/superseded artifacts are
 // replaced freely (their status is not authoritative).
-//
 // It returns the new versioned artifact. If no existing artifact with the given
 // ID is found, the provided artifact is saved as-is (treated as an initial
 // version). If an existing artifact is already finalized, it is superseded and
@@ -145,6 +156,17 @@ func (s *ArtifactStore) NewVersion(a domain.Artifact) (domain.Artifact, error) {
 	if a.ID == "" {
 		return domain.Artifact{}, fmt.Errorf("artifact: id is required for versioning")
 	}
+	// Same cross-process + in-process serialization as Save: NewVersion is a
+	// read-modify-write on the shared file and must not interleave with Save
+	// or another NewVersion from a different process/instance.
+	fl, err := cache.LockFile(s.path)
+	if err != nil {
+		return domain.Artifact{}, err
+	}
+	defer fl.Unlock()
+	pl := cache.PathLock(s.path)
+	pl.Lock()
+	defer pl.Unlock()
 	list, err := s.load()
 	if err != nil {
 		return domain.Artifact{}, err
@@ -158,8 +180,21 @@ func (s *ArtifactStore) NewVersion(a domain.Artifact) (domain.Artifact, error) {
 		}
 	}
 	if existing == nil {
-		// Nothing to version against: persist as-is (initial version).
-		return s.Save(a)
+		// Nothing to version against: persist as-is (initial version). Inline
+		// the append+save because s.Save would re-acquire the file lock we
+		// already hold (flock treats the new fd as independent and would
+		// self-deadlock).
+		kept := list[:0]
+		for _, it := range list {
+			if it.ID != a.ID {
+				kept = append(kept, it)
+			}
+		}
+		kept = append(kept, a)
+		if err := s.save(kept); err != nil {
+			return domain.Artifact{}, err
+		}
+		return a, nil
 	}
 	if existing.Status == "final" {
 		// Supersede the finalized record (keep it for audit), write version+1.
@@ -243,7 +278,7 @@ func (s *ArtifactStore) List() ([]domain.Artifact, error) {
 // Replay reconstructs the artifact chain for a task, returning artifacts in
 // chain order (following ParentArtifactID links from the root). This allows a
 // complete analysis to be reconstructed from stored Task/Artifact/Evidence
-// state without replaying the model (Strict Plan Phase 3 P2 + validation).
+// state without replaying the model ( + validation).
 func (s *ArtifactStore) Replay(taskID string) ([]domain.Artifact, error) {
 	all, err := s.GetByTask(taskID)
 	if err != nil {
@@ -301,16 +336,16 @@ func (s *ArtifactStore) Replay(taskID string) ([]domain.Artifact, error) {
 // ArtifactComparison describes the difference between two tasks' artifact
 // chains.
 type ArtifactComparison struct {
-	TaskID1    string         `json:"task_id_1"`
-	TaskID2    string         `json:"task_id_2"`
-	OnlyIn1    []string       `json:"only_in_1"`    // artifact kinds present only in task 1
-	OnlyIn2    []string       `json:"only_in_2"`    // artifact kinds present only in task 2
-	InBoth     []string       `json:"in_both"`      // artifact kinds present in both
+	TaskID1    string               `json:"task_id_1"`
+	TaskID2    string               `json:"task_id_2"`
+	OnlyIn1    []string             `json:"only_in_1"`   // artifact kinds present only in task 1
+	OnlyIn2    []string             `json:"only_in_2"`   // artifact kinds present only in task 2
+	InBoth     []string             `json:"in_both"`     // artifact kinds present in both
 	DigestDiff map[string][2]string `json:"digest_diff"` // kind → [digest1, digest2] where they differ
 }
 
 // Compare compares the artifact chains of two tasks, reporting which artifact
-// kinds are present in each and where digests differ (Strict Plan Phase 3 P2).
+// kinds are present in each and where digests differ ( ).
 func (s *ArtifactStore) Compare(taskID1, taskID2 string) (*ArtifactComparison, error) {
 	chain1, err := s.GetByTask(taskID1)
 	if err != nil {

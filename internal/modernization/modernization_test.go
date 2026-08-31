@@ -246,7 +246,7 @@ func TestExtractionPlanSummary(t *testing.T) {
 	}
 }
 
-// TestExtractionPhaseCarriesOwnership verifies Phase 12.2: ownership is derived
+// TestExtractionPhaseCarriesOwnership verifies ownership is derived
 // for bounded contexts and propagated to their extraction phases.
 func TestExtractionPhaseCarriesOwnership(t *testing.T) {
 	ix := twoPackageFixture(t)

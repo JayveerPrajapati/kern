@@ -42,7 +42,7 @@ func SimulateRender(root string, kind ChangeKind, change, newTarget string) (str
 	fmt.Fprintf(&b, "tests: %d\n", len(imp.Tests))
 	fmt.Fprintf(&b, "risk: %s\n", imp.Risk)
 	fmt.Fprintf(&b, "recommendation: %s\n", imp.Recommendation)
-	// Phase 12.1: the what-if output must surface the full set of findings the
+	// The what-if output must surface the full set of findings the
 	// spec requires — facts, dependencies (databases/services), architecture
 	// impact, confidence, and limitations — not just the affected/risk core.
 	if len(imp.Facts) > 0 {

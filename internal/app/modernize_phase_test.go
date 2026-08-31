@@ -7,7 +7,7 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/modernization"
 )
 
-// TestRenderModernizePhaseText verifies the per-phase render (Phase 12.3) shows
+// TestRenderModernizePhaseText verifies the per-phase render shows
 // the phase number, context, ownership, risk, and task id.
 func TestRenderModernizePhaseText(t *testing.T) {
 	phase := modernization.ExtractionPhase{
@@ -44,10 +44,13 @@ func TestRenderModernizeCandidates(t *testing.T) {
 
 // TestPhaseTaskIDIsSetByModernizePhaseTasks verifies that ModernizePhaseTasks
 // materializes one task per phase and sets the phase TaskID so the audit trail
-// can trace a phase to its task (Phase 12.3).
+// can trace a phase to its task .
 func TestPhaseTaskIDIsSetByModernizePhaseTasks(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping full-platform modernize in -short mode")
+	}
 	// Drive the real platform against the repo so phase tasks are real tasks.
-	p, err := New("../..")
+	p, err := NewWithIndex("../..", sharedTestRepoIndex(t))
 	if err != nil {
 		t.Skipf("New: %v", err)
 	}

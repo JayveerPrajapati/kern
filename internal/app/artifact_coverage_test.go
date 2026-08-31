@@ -16,7 +16,7 @@ import (
 )
 
 // requiredArtifactKinds are the artifact kinds the safe-change vertical slice
-// must produce end-to-end (Phase 10.4). Audit is not an ArtifactKind — it is a
+// must produce end-to-end. Audit is not an ArtifactKind — it is a
 // governance log — so it is asserted separately via the firewall audit log.
 var requiredArtifactKinds = []domain.ArtifactKind{
 	domain.ArtifactContextPacket,      // analyze
@@ -25,9 +25,9 @@ var requiredArtifactKinds = []domain.ArtifactKind{
 	domain.ArtifactRiskReport,         // risk
 	domain.ArtifactPlan,               // plan
 	domain.ArtifactCodePatch,          // code patch
-	domain.ArtifactTestReport,         // test (Phase 10.4 required artifact)
-	domain.ArtifactSecurityReport,     // security (Phase 10.4 required artifact)
-	domain.ArtifactArchitectureReport, // architecture (Phase 10.4 required artifact)
+	domain.ArtifactTestReport,         // test (required artifact)
+	domain.ArtifactSecurityReport,     // security (required artifact)
+	domain.ArtifactArchitectureReport, // architecture (required artifact)
 	domain.ArtifactVerificationReport, // verification
 	domain.ArtifactDiff,               // diff
 	domain.ArtifactPullRequest,        // PR
@@ -35,7 +35,7 @@ var requiredArtifactKinds = []domain.ArtifactKind{
 
 // TestSafeChangeProducesAllArtifacts drives the full safe-change vertical slice
 // and asserts that every required artifact kind is produced and linked into a
-// traceable chain (Phase 10.4). It reuses the manual lifecycle helpers from
+// traceable chain. It reuses the manual lifecycle helpers from
 // vertical_slice_test.go (stepResult, analyzeTaskOpts, assemblePlan,
 // recordArtifact, lastArtifactID) and additionally asserts the governance audit
 // log is written for the policy-evaluation step.
@@ -162,7 +162,7 @@ func TestSafeChangeProducesAllArtifacts(t *testing.T) {
 	recordKinded(t, ts, task.ID, domain.ArtifactVerificationReport,
 		"verdict="+string(res.Verdict), diffArtID, "verification:worktree")
 
-	// Phase 10.4: the lifecycle also emits the typed sub-report artifacts
+	// The lifecycle also emits the typed sub-report artifacts
 	// (test / security / architecture) alongside the aggregate verification
 	// report, so the required artifact set is fully covered. Mirror the
 	// sub-reports TaskService.Verify records for the same sub-checks. These

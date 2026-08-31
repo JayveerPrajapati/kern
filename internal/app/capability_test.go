@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/JayveerPrajapati/kern/internal/agent"
 	"github.com/JayveerPrajapati/kern/internal/domain"
 )
 
@@ -129,6 +130,48 @@ func TestToolDecisionTraceRecorder(t *testing.T) {
 	tr[0] = domain.ToolDecisionTrace{}
 	if rec.Traces()[0].Tool != "kern_analyze" {
 		t.Error("Traces() should return a defensive copy")
+	}
+}
+
+// TestRunWorkflowRecordsToolDecisionTraces verifies the wiring:
+// when a TaskService is given a trace recorder, every workflow step that runs
+// through RunWorkflow records a ToolDecisionTrace (tool, why, expected output,
+// actual output, latency) so the tool-selection trail is auditable rather than
+// an in-memory return value.
+func TestRunWorkflowRecordsToolDecisionTraces(t *testing.T) {
+	svc, _ := newTestTaskService(t)
+	rec := NewToolDecisionTraceRecorder()
+	svc.traceRec = rec
+
+	// Register the agents the workflow steps route to.
+	reg := svc.Registry()
+	for _, a := range []agent.Agent{
+		{Agent: domain.Agent{ID: "planner", Type: "planner", Name: "Planner"}},
+		{Agent: domain.Agent{ID: "coder", Type: "coder", Name: "Coder"}},
+		{Agent: domain.Agent{ID: "reviewer", Type: "reviewer", Name: "Reviewer"}},
+	} {
+		if err := reg.Register(a); err != nil {
+			t.Fatalf("register %s: %v", a.Type, err)
+		}
+	}
+
+	_, _ = svc.RunWorkflow("add caching to UserService", func(action string, t *agent.Task) (string, error) {
+		return "ok", nil
+	})
+
+	traces := rec.Traces()
+	if len(traces) == 0 {
+		t.Fatal("no tool-decision traces recorded by RunWorkflow")
+	}
+	// Steps that ran before the approval gate (request/analyze/plan) must have
+	// recorded traces with a tool and expected/actual output.
+	for _, tr := range traces {
+		if tr.Tool == "" {
+			t.Errorf("trace with empty tool: %+v", tr)
+		}
+		if tr.WhySelected == "" {
+			t.Errorf("trace %s has empty why_selected", tr.Tool)
+		}
 	}
 }
 

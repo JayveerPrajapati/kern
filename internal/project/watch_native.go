@@ -1,12 +1,10 @@
 package project
 
 // Native file-event watchers, zero dependencies (stdlib syscall only):
-//
-//	- darwin : kqueue (EVFILT_VNODE on every directory fd)
-//	- linux  : inotify (IN_MODIFY/IN_CREATE/IN_DELETE/IN_MOVED on the tree)
-//	- others : no native source → nil → external inotifywait/fswatch or the
-//	           polling fallback in index.Stale().
-//
+// - darwin : kqueue (EVFILT_VNODE on every directory fd)
+// - linux  : inotify (IN_MODIFY/IN_CREATE/IN_DELETE/IN_MOVED on the tree)
+// - others : no native source → nil → external inotifywait/fswatch or the
+// polling fallback in index.Stale().
 // When a native source is available it replaces the external-tool dependency
 // on macOS/Linux while keeping kern's default build stdlib-only.
 

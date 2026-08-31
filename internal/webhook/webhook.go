@@ -24,7 +24,6 @@ const defaultTimeout = 5 * time.Second
 
 // Client delivers eventbus events to registered webhook URLs over HTTP.
 // It is safe for concurrent use: the hook table is guarded by a mutex.
-//
 // Idempotency (Invariant 9): a delivered event is never redelivered to the
 // same URL. The dedup key is "eventID|url"; once an event has been POSTed to
 // a URL (successfully or not — the attempt itself is the dedup point), it is

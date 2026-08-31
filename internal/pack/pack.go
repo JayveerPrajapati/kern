@@ -4,6 +4,8 @@
 package pack
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io/fs"
@@ -49,10 +51,11 @@ type Bundle struct {
 // Options controls a pack build.
 type Options struct {
 	Root             string
-	MaxTokens        int  // 0 = unlimited
-	MaxFiles         int  // 0 = unlimited
-	MaxFileBytes     int  // per-file content cap (default 512KiB)
-	SkipInstructions bool // default: include root-level docs as instructions
+	MaxTokens        int       // 0 = unlimited
+	MaxFiles         int       // 0 = unlimited
+	MaxFileBytes     int       // per-file content cap (default 512KiB)
+	SkipInstructions bool      // default: include root-level docs as instructions
+	Tier             code.Tier // content tier applied per file: TierFull (default), TierFolded or TierSummary
 }
 
 // instructionNames are root-level docs packed verbatim as project
@@ -142,11 +145,17 @@ func Build(root string, opts Options) (*Bundle, error) {
 			b.Ignored++
 			return nil
 		}
+		contentStr := string(content)
+		if opts.Tier == code.TierFolded {
+			contentStr = string(code.Fold(rel, content))
+		} else if opts.Tier == code.TierSummary {
+			contentStr = code.Summarize(rel, content, 200).Render()
+		}
 		f := File{
 			Path:    rel,
-			Bytes:   len(content),
-			Tokens:  tokenize.Count(string(content)),
-			Content: string(content),
+			Bytes:   len(contentStr),
+			Tokens:  tokenize.Count(contentStr),
+			Content: contentStr,
 		}
 		b.Files = append(b.Files, f)
 		return nil
@@ -155,7 +164,11 @@ func Build(root string, opts Options) (*Bundle, error) {
 		return nil, err
 	}
 	sort.Slice(b.Instructions, func(i, j int) bool { return b.Instructions[i].Path < b.Instructions[j].Path })
-	sort.Slice(b.Files, func(i, j int) bool { return b.Files[i].Path < b.Files[j].Path })
+	// Files are ordered by the SHA-256 of their slash-normalized relative path
+	// (not lexically): a pack of the same file set is byte-identical across
+	// runs and machines — no absolute paths, no mtimes — so LLM prompt-cache
+	// prefixes hit on re-packs of the same tree.
+	sort.Sort(byPathHash(b.Files))
 
 	// Instruction docs are capped so a giant README cannot blow the budget the
 	// pack was sized to fit; budget.Fit keeps the head and important lines.
@@ -296,6 +309,24 @@ func isBinary(content []byte) bool {
 		}
 	}
 	return false
+}
+
+// byPathHash orders files by the SHA-256 of their relative path. The order is
+// deterministic across runs and machines (relative path only), which keeps
+// packed bundles byte-identical for the same file set so LLM prompt-cache
+// prefixes hit on re-packs.
+type byPathHash []File
+
+func (p byPathHash) Len() int           { return len(p) }
+func (p byPathHash) Less(i, j int) bool { return pathHash(p[i].Path) < pathHash(p[j].Path) }
+func (p byPathHash) Swap(i, j int)      { p[i], p[j] = p[j], p[i] }
+
+// pathHash returns the hex SHA-256 of a slash-normalized relative path.
+// Comparing the hex digests lexicographically is equivalent to comparing the
+// raw digests byte-wise (both fixed-length).
+func pathHash(rel string) string {
+	sum := sha256.Sum256([]byte(rel))
+	return hex.EncodeToString(sum[:])
 }
 
 // fence returns a code-fence delimiter (a run of backticks) that cannot be

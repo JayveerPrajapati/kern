@@ -4,20 +4,19 @@ import (
 	"testing"
 
 	"github.com/JayveerPrajapati/kern/internal/domain"
-	"github.com/JayveerPrajapati/kern/internal/governance/firewall"
-	"github.com/JayveerPrajapati/kern/internal/governance/identity"
+	"github.com/JayveerPrajapati/kern/internal/governance"
 )
 
-// TestAuthorizeItemsScopedAllDimensions verifies the Phase 5.4 scoped
+// TestAuthorizeItemsScopedAllDimensions verifies the scoped
 // authorization covers all five dimensions: agent (firewall), repository,
 // task, tenant, and security classification. An item must pass every dimension
 // to survive; a mismatched dimension excludes it with a precise DenyReason.
 func TestAuthorizeItemsScopedAllDimensions(t *testing.T) {
 	// Agent may read "context" but NOT "source", so a FACT item (which maps to
 	// the "source" resource) is denied by the agent/firewall dimension.
-	agent := identity.NewAgent("a1", "coder", "code",
-		[]identity.Permission{{Resource: "context", Action: "read"}})
-	fw := firewall.NewFirewall().WithAgents(agent)
+	agent := governance.NewAgent("a1", "coder", "code",
+		[]governance.Permission{{Resource: "context", Action: "read"}})
+	fw := governance.NewFirewall().WithAgents(agent)
 
 	auth := domain.ContextAuthorization{
 		Agent:                  "a1",
@@ -148,9 +147,9 @@ func TestCanonicalizeItemsEvidenceRefs(t *testing.T) {
 // TestSelectContextUsesScopedAuth verifies the SelectContext path authorizes a
 // scoped mismatched item away via the scoped authorization wired in select.go.
 func TestSelectContextUsesScopedAuth(t *testing.T) {
-	agent := identity.NewAgent("a1", "coder", "code",
-		[]identity.Permission{{Resource: "context", Action: "read"}})
-	fw := firewall.NewFirewall().WithAgents(agent)
+	agent := governance.NewAgent("a1", "coder", "code",
+		[]governance.Permission{{Resource: "context", Action: "read"}})
+	fw := governance.NewFirewall().WithAgents(agent)
 
 	items := []domain.ContextItem{
 		{ID: "match", Class: domain.ContextMemory, Content: "m", Relevance: 0.9,

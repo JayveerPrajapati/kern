@@ -86,7 +86,7 @@ func TestCoarseFallback(t *testing.T) {
 }
 
 // TestLeadingDeletionHunkHeader verifies a hunk beginning with a deletion from
-// line 1 emits a valid header (never "+0,N") (W2-48).
+// line 1 emits a valid header (never "+0,N") .
 func TestLeadingDeletionHunkHeader(t *testing.T) {
 	a := []string{"x", "y", "z"}
 	b := []string{"z"} // delete line 1 "x"
@@ -100,7 +100,7 @@ func TestLeadingDeletionHunkHeader(t *testing.T) {
 }
 
 // TestHunksMergeWithinDoubleContext verifies two change clusters within 2*ctx
-// unchanged lines are merged into one hunk (W2-47).
+// unchanged lines are merged into one hunk .
 func TestHunksMergeWithinDoubleContext(t *testing.T) {
 	// change at line 1, unchanged gap of 6 (=2*ctx), change at line 8
 	ctx := 3

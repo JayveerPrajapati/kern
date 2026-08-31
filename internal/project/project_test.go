@@ -238,3 +238,43 @@ func TestWatchRebuildsAreSerialized(t *testing.T) {
 	}, nil)
 	<-done
 }
+
+// TestSessionNewKeepsRootVerbatim pins the Session facade's root contract:
+// New stores Root exactly as given (trailing slashes, relative paths and `..`
+// components are NOT normalized here). Path normalization (abs/clean) is the
+// job of mcp.resolveRoot, which runs before it calls project.New. SENTINEL:
+// if New ever starts normalizing, these assertions fail, flagging the
+// behavior change — callers (the MCP server) rely on the verbatim root for
+// workspace-confinement comparisons.
+func TestSessionNewKeepsRootVerbatim(t *testing.T) {
+	trailing := t.TempDir() + string(filepath.Separator)
+	cases := []struct {
+		name string
+		root string
+	}{
+		{"trailing-slash", trailing},
+		{"relative", filepath.Join(".", "some-rel-dir")},
+		{"dotdot", filepath.Join("..", "some-parent-dir")},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := New(tc.root, "")
+			defer s.Close()
+			if s.Root != tc.root {
+				t.Fatalf("New(%q): Root = %q, want verbatim %q", tc.root, s.Root, tc.root)
+			}
+		})
+	}
+}
+
+// TestSessionCloseIdempotent covers Close (0% before): it must release the
+// watcher without panicking and tolerate being called twice (Close guards
+// nil watchers and watcher.Stop is a sync.Once).
+func TestSessionCloseIdempotent(t *testing.T) {
+	s := New(t.TempDir(), "closer")
+	s.Close()
+	s.Close() // double close must be safe
+	// A session whose watcher is nil (no fswatch/inotifywait on PATH) must
+	// also Close cleanly.
+	New(t.TempDir(), "nil-watcher").Close()
+}

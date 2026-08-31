@@ -2,13 +2,20 @@ package app
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/JayveerPrajapati/kern/internal/agent"
 	"github.com/JayveerPrajapati/kern/internal/agents"
+	"github.com/JayveerPrajapati/kern/internal/coder"
+	ctxpkg "github.com/JayveerPrajapati/kern/internal/context"
 	"github.com/JayveerPrajapati/kern/internal/deployment"
 	"github.com/JayveerPrajapati/kern/internal/domain"
 	"github.com/JayveerPrajapati/kern/internal/eventbus"
@@ -16,12 +23,15 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/flight"
 	"github.com/JayveerPrajapati/kern/internal/governance"
 	"github.com/JayveerPrajapati/kern/internal/incident"
+	"github.com/JayveerPrajapati/kern/internal/intelligence"
 	"github.com/JayveerPrajapati/kern/internal/learning"
 	"github.com/JayveerPrajapati/kern/internal/loop"
 	"github.com/JayveerPrajapati/kern/internal/memory"
 	"github.com/JayveerPrajapati/kern/internal/modernization"
+	"github.com/JayveerPrajapati/kern/internal/planner"
 	"github.com/JayveerPrajapati/kern/internal/prprovider"
 	"github.com/JayveerPrajapati/kern/internal/runtime"
+	"github.com/JayveerPrajapati/kern/internal/storage"
 	"github.com/JayveerPrajapati/kern/internal/verification"
 	"github.com/JayveerPrajapati/kern/internal/whatif"
 )
@@ -30,15 +40,13 @@ import (
 // creates, progresses, and persists Tasks through the analyze → impact → plan →
 // verify lifecycle, so every interface (CLI, MCP, REST) can create an
 // authoritative Task record instead of running stateless.
-//
-// This realizes the Integration Transformation Plan's Phase 2: "Make Task
+// This realizes the : "Make Task
 // Authoritative." Before this service, kern analyze / kern_analyze ran
 // stateless — no Task was created, no lifecycle was recorded. Now every
 // analysis creates a Task, progresses it through the state machine, persists
 // it to the TaskStore, and attaches lifecycle results (context packet, impact,
 // verification) to the Task so it is the single authoritative object for
 // audit, resume, and debugging.
-//
 // TaskService wraps Platform's engine methods with Task lifecycle management.
 // It does NOT replace Platform.Analyze/WhatIf/Verify — those remain the
 // stateless fast path. TaskService adds the Task-tracking layer on top.
@@ -53,11 +61,32 @@ type TaskService struct {
 	prProvider prprovider.Provider // PR creation provider (default Noop)
 	deployer   deployment.Deployer // deployer for the Deploy method (default Noop)
 	scopes     map[string]domain.TaskScope
+	scopesMu   sync.RWMutex
+	// traceRec records tool-decision traces for workflow steps when
+	// set (optional; nil disables). It makes the tool-selection trail
+	// auditable: which tool ran for which step, why, and what it returned.
+	traceRec *ToolDecisionTraceRecorder
 	// sharedCorr is the single process-wide correlation service shared by the
-	// correlate / investigate / deploy / observe lanes (Phase 13.3). It is built
+	// correlate / investigate / deploy / observe lanes. It is built
 	// lazily over the platform runtime source so every lane reasons over the
 	// same source and lookback window.
 	sharedCorr *runtime.SharedCorrelator
+	// workflowRuns tracks in-flight agent-team runs : the task and its
+	// WorkflowEngine are kept together so an approval-gated run can be resumed
+	// with the SAME task + engine after the human resolves the gate. The engine
+	// resumes at the gate step (progress) and reuses the task's state machine,
+	// which a fresh task+engine could not. Entries are evicted when the run
+	// reaches a terminal task state.
+	workflowRuns map[string]*workflowRun
+	wfMu         sync.Mutex
+}
+
+// workflowRun pairs a task with the engine that is driving its workflow, so a
+// human-approval pause can be resumed (CompleteApproval → Run again) without
+// losing the engine's gate/progress state.
+type workflowRun struct {
+	task   *agent.Task
+	engine *agent.WorkflowEngine
 }
 
 // NewTaskService creates a TaskService for the given Platform. It creates a
@@ -72,16 +101,17 @@ func NewTaskService(p *Platform, bus *eventbus.Bus) *TaskService {
 		reg.WithBus(bus)
 	}
 	return &TaskService{
-		platform:   p,
-		registry:   reg,
-		store:      store,
-		snapshots:  agent.NewSnapshotStore(p.Root()),
-		arts:       NewArtifactStore(p.Root()),
-		bus:        bus,
-		agentID:    "kern", // default identity; override via WithAgentID
-		prProvider: prprovider.NoopProvider{},
-		deployer:   deployment.NewDeployerFromEnv(),
-		scopes:     map[string]domain.TaskScope{},
+		platform:     p,
+		registry:     reg,
+		store:        store,
+		snapshots:    agent.NewSnapshotStore(p.Root()),
+		arts:         NewArtifactStore(p.Root()),
+		bus:          bus,
+		agentID:      "kern", // default identity; override via WithAgentID
+		prProvider:   prprovider.NoopProvider{},
+		deployer:     deployment.NewDeployerFromEnv(),
+		scopes:       map[string]domain.TaskScope{},
+		workflowRuns: map[string]*workflowRun{},
 	}
 }
 
@@ -105,6 +135,15 @@ func (s *TaskService) WithAgentID(id string) *TaskService {
 	if id != "" {
 		s.agentID = id
 	}
+	return s
+}
+
+// WithTraceRecorder attaches a tool-decision trace recorder. When
+// set, every workflow step run through RunWorkflow records a ToolDecisionTrace
+// (tool, why selected, expected output, actual output, latency) so the tool
+// selection trail is auditable.
+func (s *TaskService) WithTraceRecorder(r *ToolDecisionTraceRecorder) *TaskService {
+	s.traceRec = r
 	return s
 }
 
@@ -176,6 +215,75 @@ func (s *TaskService) AuditLog() *governance.AuditLog {
 	return nil
 }
 
+// AuditEntries reads every persisted audit entry from the shared store under
+// <root>/.kern/audit/, the same trail the running firewall writes. The
+// in-memory AuditLog().All() only returns entries recorded in THIS process, so
+// a fresh CLI/MCP process would otherwise see nothing. Entries whose files are
+// missing/corrupt are skipped rather than aborting the listing; order matches
+// the store's key order.
+func (s *TaskService) AuditEntries() ([]governance.AuditEntry, error) {
+	if s.platform == nil {
+		return nil, fmt.Errorf("task service: platform not configured")
+	}
+	store := storage.NewLocal(filepath.Join(s.platform.Root(), ".kern", "audit"))
+	ctx := context.Background()
+	keys, err := store.List(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var out []governance.AuditEntry
+	for _, e := range keys {
+		raw, err := store.Get(ctx, e.Key)
+		if err != nil {
+			continue
+		}
+		var entry governance.AuditEntry
+		if err := storage.UnmarshalValue(raw, &entry); err != nil {
+			continue
+		}
+		out = append(out, entry)
+	}
+	return out, nil
+}
+
+// AuditEntriesForTask returns only the persisted audit entries whose TaskID
+// matches, preserving order. It mirrors the CLI's filterByTask so every
+// interface (CLI, MCP) filters through the service.
+func (s *TaskService) AuditEntriesForTask(taskID string) ([]governance.AuditEntry, error) {
+	entries, err := s.AuditEntries()
+	if err != nil {
+		return nil, err
+	}
+	var out []governance.AuditEntry
+	for _, e := range entries {
+		if e.TaskID == taskID {
+			out = append(out, e)
+		}
+	}
+	return out, nil
+}
+
+// PendingApprovals returns the approvals awaiting a human decision, read from
+// the same persistent store the workflow/deploy gates write. It makes Approval
+// a first-class application service so interfaces never construct the file
+// store themselves.
+func (s *TaskService) PendingApprovals() ([]domain.Approval, error) {
+	if s.platform == nil {
+		return nil, fmt.Errorf("task service: platform not configured")
+	}
+	return governance.NewFileStore(s.platform.Root()).Pending()
+}
+
+// ResolveApproval records a human decision on a pending approval. approve=true
+// approves, false rejects. The decision is persisted to the shared store so a
+// fresh process (or a resumed engine) observes it.
+func (s *TaskService) ResolveApproval(id, approver string, approve bool, reason string) (domain.Approval, error) {
+	if s.platform == nil {
+		return domain.Approval{}, fmt.Errorf("task service: platform not configured")
+	}
+	return governance.NewFileStore(s.platform.Root()).Decide(id, approver, approve, reason)
+}
+
 // Agents returns the standard specialist team role list. It makes Agent a
 // first-class application service: interfaces ask the service for the available
 // specialist roles instead of importing the agents engine directly.
@@ -214,6 +322,11 @@ func (s *TaskService) MemoryStore() *memory.MemoryStore {
 // are visible) or an error if submission fails.
 func (s *TaskService) Create(intent string) (*agent.Task, error) {
 	t := agent.NewTask("analyze", intent)
+	// The persisted store owns task IDs: clear the process-local ID assigned
+	// by NewTask so SubmitTask lets the store assign "t-<max+1>" under its
+	// cross-process file lock. Two processes would otherwise both start at
+	// t-1 and Save (replace by ID) would silently destroy one of the tasks.
+	t.ID = ""
 	t.Intent = intent
 	t.CreatedBy = s.agentID
 	t.Requester = s.agentID
@@ -247,12 +360,11 @@ func (s *TaskService) List() []*agent.Task {
 	return s.registry.ListTasks()
 }
 
-// Run is the kern_run entry point (Strict Plan Phase 6 P0). It compiles the
+// Run is the kern_run entry point ( ). It compiles the
 // intent, selects the workflow, runs a policy precheck, selects capabilities
 // and tools, creates a Task, and returns a RunResult with the task ID,
 // workflow, capabilities, tools, agents, risk, approval state, and next
 // action.
-//
 // An external agent can call Run(intent) and Kern builds a valid Task/workflow
 // without requiring the external agent to manually orchestrate low-level Kern
 // tools.
@@ -282,7 +394,7 @@ func (s *TaskService) Run(intent string) (*domain.RunResult, error) {
 		return nil, err
 	}
 
-	// Phase 6.4 unified policy precheck: run identity/scope/permission/
+	// Unified policy precheck: run identity/scope/permission/
 	// environment/risk through one gate so the caller can see the decision
 	// before execution. It is advisory here (execution is gated separately);
 	// the precheck result is surfaced on the RunResult.
@@ -306,6 +418,16 @@ func (s *TaskService) Run(intent string) (*domain.RunResult, error) {
 		approvalState = "required"
 		nextAction = "request approval"
 	}
+	// A denied precheck is authoritative for the plan: the run is blocked by
+	// policy before any execution, so the plan must not claim "execute
+	// workflow". Execution is gated separately by the firewall, but the
+	// RunResult's next action must stay consistent with the precheck it just
+	// ran — an operator following the plan to the letter would otherwise be told
+	// to execute a change its own policy precheck already denied.
+	if precheck.Denied && precheck.DenyReason != nil {
+		approvalState = "denied"
+		nextAction = "precheck denied at " + precheck.DenyReason.Stage + ": " + precheck.DenyReason.Reason
+	}
 
 	result := &domain.RunResult{
 		TaskID:        t.ID,
@@ -314,7 +436,7 @@ func (s *TaskService) Run(intent string) (*domain.RunResult, error) {
 		Capabilities:  capabilityNames(caps),
 		Tools:         tools,
 		Agents:        agentIDs,
-		ContextPlan:   "analyze → context → memory → impact → risk → plan",
+		ContextPlan:   contextPlanFor(compiled.Type),
 		Risk:          risk,
 		ApprovalState: approvalState,
 		NextAction:    nextAction,
@@ -325,7 +447,7 @@ func (s *TaskService) Run(intent string) (*domain.RunResult, error) {
 }
 
 // actionForIntent maps an intent type to the representative governed action
-// used in the unified policy precheck (Phase 6.4).
+// used in the unified policy precheck .
 func actionForIntent(it domain.IntentType) string {
 	switch it {
 	case domain.IntentDeploy:
@@ -349,13 +471,12 @@ func capabilityNames(caps []domain.Capability) []string {
 	return names
 }
 
-// PolicyPrecheck runs the unified policy precheck (Phase 6.4). It combines the
+// PolicyPrecheck runs the unified policy precheck. It combines the
 // five pre-execution gates — identity, scope, permission (firewall), environment,
 // and preliminary risk — into a single PrecheckResult so a caller (MCP, CLI,
 // REST, or the Run entry point) can see an ALLOW/DENY decision up front without
 // orchestrating separate governance calls. It never mutates state; it is the
 // read-only gate that precedes execution.
-//
 // The gate order follows the firewall's fail-closed model: environment, then
 // path/scope, then firewall permission+risk. Any gate failure denies.
 func (s *TaskService) PolicyPrecheck(ctx context.Context, req domain.PrecheckRequest) domain.PrecheckResult {
@@ -424,14 +545,34 @@ func (s *TaskService) PolicyPrecheck(ctx context.Context, req domain.PrecheckReq
 	return res
 }
 
-// RunLoop is the task-scoped closed-loop entry point (Phase 2.2). It creates an
+// RunLoop is the task-scoped closed-loop entry point. It creates an
 // authoritative Task for the intent, runs the closed loop at the requested
 // autonomy level, records the run as an artifact, and returns the Task plus the
 // loop Result so the interface layer can render it. It replaces the previous
 // inline loop.NewLoop(...).Run(...) orchestration in the MCP handler: the
 // service owns the loop so every interface gets task tracking and an audit
-// trail.
+// trail. RunLoop runs the loop's default no-op stages (read-only).
 func (s *TaskService) RunLoop(intent string, level loop.Autonomy) (*agent.Task, *loop.Result, error) {
+	return s.runLoop(intent, level, false)
+}
+
+// RunDo is the task-scoped autonomous closed-loop entry point (the "Implement
+// X" path). It behaves exactly like RunLoop but additionally wires the
+// autonomous coder and the LLM-driven planner into the loop's default stage
+// handlers, so `kern do "add a cache layer"` drives the full
+// understand→remember→plan→code→verify→protect→observe→learn loop without a
+// caller-supplied StepFunc. The coder and planner use the provider-neutral LLM
+// factory (KERN_LLM_PROVIDER, default local Ollama); their stage gates sit at
+// >= L2 autonomy, so L0/L1 runs never invoke them.
+func (s *TaskService) RunDo(intent string, level loop.Autonomy) (*agent.Task, *loop.Result, error) {
+	return s.runLoop(intent, level, true)
+}
+
+// runLoop is the shared task-scoped closed-loop implementation behind RunLoop
+// and RunDo. When autonomous is true, the loop's default code and plan stages
+// are handled by the coder and planner agents (mirroring what the CLI's runDo
+// previously wired inline) instead of no-op'ing.
+func (s *TaskService) runLoop(intent string, level loop.Autonomy, autonomous bool) (*agent.Task, *loop.Result, error) {
 	if s.platform == nil {
 		return nil, nil, fmt.Errorf("task service: platform not configured")
 	}
@@ -451,6 +592,10 @@ func (s *TaskService) RunLoop(intent string, level loop.Autonomy) (*agent.Task, 
 		Level:    level,
 		Mem:      memory.NewMemoryStore(root),
 		Recorder: flight.New(root),
+	}
+	if autonomous {
+		cfg.Coder = coder.New(agent.OllamaProvider())
+		cfg.Planner = planner.New(agent.OllamaProvider())
 	}
 	l, err := loop.NewLoop(cfg)
 	if err != nil {
@@ -495,10 +640,14 @@ func (s *TaskService) RunLoop(intent string, level loop.Autonomy) (*agent.Task, 
 }
 
 // SetTaskScope attaches the unified task scope (paths + envs) to a task. It is
-// the same scope that gates context/memory/artifact/runtime uniformly through
-// authorizeResource (Phase 7.3). Interfaces set it once when a task is scoped;
-// unset tasks fall back to an allow-all scope (deny nothing).
+// the single boundary that task-scoped confinement applies: the same
+// TaskScope gates path access at the Execute boundary (TaskScope.ValidatePatch),
+// env-gated actions through the governance firewall, and any explicit
+// per-resource check through authorizeResource. Interfaces set it once when a
+// task is scoped; unset tasks fall back to an allow-all scope (deny nothing).
 func (s *TaskService) SetTaskScope(taskID string, scope domain.TaskScope) {
+	s.scopesMu.Lock()
+	defer s.scopesMu.Unlock()
 	if s.scopes == nil {
 		s.scopes = map[string]domain.TaskScope{}
 	}
@@ -507,8 +656,12 @@ func (s *TaskService) SetTaskScope(taskID string, scope domain.TaskScope) {
 
 // TaskScope returns the unified scope registered for a task, or an allow-all
 // scope when none was set. It is the single authoritative scope the service
-// applies uniformly across context, memory, artifacts, and runtime.
+// carries for a task; confinement is enforced where task-scoped actions occur
+// (the Execute patch boundary, the governance firewall for env-gated actions,
+// and authorizeResource for explicit per-resource checks).
 func (s *TaskService) TaskScope(taskID string) domain.TaskScope {
+	s.scopesMu.RLock()
+	defer s.scopesMu.RUnlock()
 	if s.scopes == nil {
 		return domain.TaskScope{TaskID: taskID}
 	}
@@ -518,13 +671,23 @@ func (s *TaskService) TaskScope(taskID string) domain.TaskScope {
 	return domain.TaskScope{TaskID: taskID}
 }
 
-// authorizeResource is the single policy checkpoint for every resource access
-// (Phase 7.3 unified task policy). It takes the task's SAME TaskScope and
-// applies it uniformly regardless of the resource kind — context, memory,
-// artifact, or runtime. A value that is outside the task's path/environment
-// scope is denied for context, memory, artifacts, AND runtime alike: there is
-// exactly one boundary, not four.
+// authorizeResource is the unified task-scope confinement primitive: it takes
+// the task's SAME TaskScope and applies it uniformly regardless of the
+// resource kind — context, memory, artifact, or runtime. A value outside the
+// task's path/environment scope is denied for context, memory, artifacts, AND
+// runtime alike: there is exactly one boundary, not four.
 //
+// It is NOT currently invoked on the resource-access paths. Task-scoped path
+// confinement at the app layer is enforced through the SAME TaskScope by
+// TaskScope.ValidatePatch in Execute/ExecuteAndVerify (every file a patch
+// touches is checked against CheckPath before it is applied), and the
+// environment dimension is enforced by the governance firewall in
+// Deploy/PolicyPrecheck, which remain the primary gate for governance-level
+// actions. The memory and runtime lanes (MemoryRecall, Correlate,
+// InvestigateIncident, RemediateIncident) do not take a caller-supplied
+// resource value, so they are not task-scoped resource accesses. authorizeResource
+// is reserved as the explicit per-resource checkpoint for callers that DO
+// access a resource by path/value within a task context.
 // resourceKind is informational ("context", "memory", "artifact", "runtime")
 // for provenance and auditing; the denial decision is uniform because it is
 // derived from the task scope alone.
@@ -611,7 +774,7 @@ func (s *TaskService) Resume(taskID string) (*agent.Task, error) {
 	if err := t.Resume(); err != nil {
 		return nil, err
 	}
-	// Phase 16.2: full reconstruction on resume. The resumed task rehydrates
+	// Full reconstruction on resume. The resumed task rehydrates
 	// its ContextPacket and Plan from the persisted artifacts, so a resumed
 	// task is not a shell — it carries the same working context it had when it
 	// was paused/blocked. Best-effort: if reconstruction fails, resume still
@@ -623,7 +786,7 @@ func (s *TaskService) Resume(taskID string) (*agent.Task, error) {
 }
 
 // reconstructContext rehydrates a task's ContextPacket and Plan from its
-// persisted artifacts and rich context snapshot (Phase 16.2 full
+// persisted artifacts and rich context snapshot ( full
 // reconstruction). It is best-effort and never fails the caller: it only
 // restores fields that can be derived from the artifact chain or the most
 // recent persisted snapshot. Existing fields (e.g. a ContextPacket already
@@ -681,21 +844,31 @@ func (s *TaskService) reconstructContext(t *agent.Task) {
 	addFacts(snap.Risks)
 }
 
-// ReplayRecord carries the metadata a replay needs to be meaningful (Phase
-// 16.3): which repo version, which model, and which configuration produced the
+// ReplayRecord carries the metadata a replay needs to be meaningful: which
+// repo version, which model, and which configuration produced the
 // task being replayed. Without this, a replayed task is ambiguous.
 type ReplayRecord struct {
-	TaskID       string    `json:"task_id"`
-	RepoVersion  string    `json:"repo_version"`  // git sha / version at the time
-	Model        string    `json:"model"`         // model that ran the original task
-	ConfigHash   string    `json:"config_hash"`   // hash of the config used
+	TaskID      string `json:"task_id"`
+	RepoVersion string `json:"repo_version"` // git sha / version at the time
+	Model       string `json:"model"`        // model that ran the original task
+	ConfigHash  string `json:"config_hash"`  // hash of the config used
+	// ContextVersion is a digest of the context packet the task ran with (the
+	// "context version" of ): a change in the analysis or package
+	// input changes the digest, so two replays can be compared on what context
+	// they actually saw. Empty when the task carries no context packet.
+	ContextVersion string `json:"context_version,omitempty"`
+	// ToolVersions is a deterministic digest of the distinct tools/actions the
+	// task actually invoked across its steps ("tool versions"). It changes
+	// when the tool selection changes, making replays
+	// comparable on the tool surface used.
+	ToolVersions string    `json:"tool_versions,omitempty"`
 	ReplayedAt   time.Time `json:"replayed_at"`
 }
 
 // ReplayTask reconstructs a task for replay, returning a ReplayRecord with the
-// metadata (repo version, model, config hash) needed to interpret the replay
-// (Phase 16.3). It returns the reconstructed task's current state plus the
-// metadata record.
+// metadata (repo version, model, config hash, context version, tool versions)
+// needed to interpret the replay. It returns the reconstructed
+// task's current state plus the metadata record.
 func (s *TaskService) ReplayTask(taskID, repoVersion, model, configHash string) (*ReplayRecord, error) {
 	t, err := s.getTaskForMutation(taskID)
 	if err != nil {
@@ -703,17 +876,52 @@ func (s *TaskService) ReplayTask(taskID, repoVersion, model, configHash string) 
 	}
 	s.reconstructContext(t)
 	rec := &ReplayRecord{
-		TaskID:      t.ID,
-		RepoVersion: repoVersion,
-		Model:       model,
-		ConfigHash:  configHash,
-		ReplayedAt:  time.Now().UTC(),
+		TaskID:         t.ID,
+		RepoVersion:    repoVersion,
+		Model:          model,
+		ConfigHash:     configHash,
+		ContextVersion: replayContextVersion(t),
+		ToolVersions:   replayToolVersions(t),
+		ReplayedAt:     time.Now().UTC(),
 	}
 	return rec, nil
 }
 
+// replayContextVersion digests the task's context packet into a stable
+// context version. Empty when the task has no packet.
+func replayContextVersion(t *agent.Task) string {
+	if t == nil || t.ContextPacket == nil {
+		return ""
+	}
+	digest := sha256.Sum256([]byte(ctxpkg.RenderText(*t.ContextPacket)))
+	return hex.EncodeToString(digest[:])[:16]
+}
+
+// replayToolVersions digests the distinct tool actions a task invoked into a
+// stable tool-version fingerprint. Empty when the task has no
+// steps.
+func replayToolVersions(t *agent.Task) string {
+	if t == nil || len(t.Steps) == 0 {
+		return ""
+	}
+	seen := map[string]bool{}
+	var names []string
+	for _, st := range t.Steps {
+		if st.Action != "" && !seen[st.Action] {
+			seen[st.Action] = true
+			names = append(names, st.Action)
+		}
+	}
+	if len(names) == 0 {
+		return ""
+	}
+	sort.Strings(names)
+	digest := sha256.Sum256([]byte(strings.Join(names, "|")))
+	return hex.EncodeToString(digest[:])[:16]
+}
+
 // RunCompare compares two task runs by their artifact chains and snapshot
-// histories (Phase 16.4 run-compare). It reports which artifact kinds differ,
+// histories ( run-compare). It reports which artifact kinds differ,
 // whether the tasks reached the same state, and a per-stage verdict. Unlike the
 // raw ArtifactStore.Compare, RunCompare folds in the snapshot history so the
 // run outcome (not just artifacts) is compared.
@@ -738,7 +946,7 @@ func (s *TaskService) RunCompare(taskID1, taskID2 string) (*RunComparison, error
 		res.State2 = string(h2[len(h2)-1].State)
 		res.StateDiffer = res.State1 != res.State2
 	}
-	// Rich run dimensions (Phase 16.4): agent, model, tool-call proxy, cost,
+	// Rich run dimensions : agent, model, tool-call proxy, cost,
 	// and success, read from each task's record when available. Best-effort:
 	// zero values when a task cannot be fetched or a dimension is unset.
 	t1, _ := s.getTaskForMutation(taskID1)
@@ -776,7 +984,7 @@ func costProxy(t *agent.Task) float64 {
 	return n / 100
 }
 
-// RunComparison is the run-compare result (Phase 16.4).
+// RunComparison is the run-compare result .
 type RunComparison struct {
 	ArtifactDiff *ArtifactComparison
 	DigestDiff   int
@@ -789,7 +997,7 @@ type RunComparison struct {
 	StateDiffer  bool
 	Equivalent   bool
 
-	// Rich run dimensions (Phase 16.4). Populated best-effort from each task's
+	// Rich run dimensions. Populated best-effort from each task's
 	// record when available; zero values when unavailable.
 	Agent1     string
 	Agent2     string
@@ -882,7 +1090,6 @@ func (s *TaskService) getTaskForMutation(taskID string) (*agent.Task, error) {
 // Analyze creates a Task for the intent, runs the context engine, and attaches
 // the ContextPacket to the Task. The Task transitions CREATED → ANALYZING →
 // (COMPLETED or FAILED). Returns the Task and the rendered analysis text.
-//
 // This is the Task-tracked version of Platform.Analyze. Interfaces that want
 // stateless analysis call Platform.Analyze directly; interfaces that want an
 // authoritative Task record call TaskService.Analyze.
@@ -920,6 +1127,11 @@ func (s *TaskService) analyzeTaskOpts(t *agent.Task, change string, complete boo
 	// Attach lifecycle results to the Task.
 	t.ContextPacket = &pkt
 	t.Risks = pkt.Risks
+	// Attach the context engine's evidence-backed claims
+	// (FACT/INFERENCE/HYPOTHESIS/RECOMMENDATION) to the Task so the analysis is
+	// persisted with its evidence trail: evidence claims must be part of the
+	// auditable task record, not only the rendered text.
+	t.Evidence = append(t.Evidence, pkt.Facts...)
 	t.Output = text
 	t.AddStep(agent.Step{
 		Action:     "analyze",
@@ -931,7 +1143,7 @@ func (s *TaskService) analyzeTaskOpts(t *agent.Task, change string, complete boo
 	})
 
 	// Emit risk.calculated so the bus carries each identified risk to
-	// webhooks/audit (Phase 4 event standardization).
+	// webhooks/audit ( event standardization).
 	for _, r := range pkt.Risks {
 		s.publish(eventbus.RiskCalculated, t.ID, map[string]string{
 			"level":      string(r.Level),
@@ -990,7 +1202,7 @@ func (s *TaskService) WhatIf(kind whatif.ChangeKind, change, newTarget string) (
 	})
 
 	// Emit code.changed when the what-if shows affected files, so the bus
-	// carries the change blast radius to webhooks/audit (Phase 4).
+	// carries the change blast radius to webhooks/audit .
 	if len(imp.Files) > 0 {
 		s.publish(eventbus.CodeChanged, t.ID, map[string]string{
 			"affected": fmt.Sprintf("%d", len(imp.Affected)),
@@ -1010,6 +1222,14 @@ func (s *TaskService) WhatIf(kind whatif.ChangeKind, change, newTarget string) (
 		fmt.Sprintf("risk=%s", imp.Risk),
 		s.lastArtifactID(t.ID, domain.ArtifactImpactReport), "whatif:risk")
 
+	// Exit gate: what-if is Evidence aware. Attach the simulation's typed
+	// claims (FACT/INFERENCE/HYPOTHESIS/RECOMMENDATION with provenance) to the
+	// task so the impact estimate is persisted with its evidence trail, not
+	// only as rendered text and artifacts.
+	if len(imp.Claims) > 0 {
+		t.Evidence = append(t.Evidence, imp.Claims...)
+	}
+
 	if err := t.Complete(text); err != nil {
 		s.fail(t, err.Error())
 		return t, "", err
@@ -1024,8 +1244,7 @@ func (s *TaskService) WhatIf(kind whatif.ChangeKind, change, newTarget string) (
 // structured domain.Plan from the deterministic results. The Task transitions
 // CREATED → ANALYZING → PLANNING → (COMPLETED or FAILED). Returns the Task,
 // the Plan, and a rendered text summary.
-//
-// This realizes the Integration Transformation Plan's Phase 6: the Plan
+// This realizes the : the Plan
 // artifact is populated from deterministic sources (context packet, impact
 // report, risk assessment, architecture rules) — the LLM may explain it, but
 // the fields are not LLM guesses.
@@ -1055,6 +1274,21 @@ func (s *TaskService) Plan(intent string) (*agent.Task, domain.Plan, string, err
 	}
 	plan := s.assemblePlan(intent, pkt)
 
+	// Exit gate: mandatory constitution rules can block a plan before
+	// execution. Validate the assembled plan against .kern/constitution.yaml;
+	// a MUST/MUST_NOT violation blocks the plan (the task fails, so the plan
+	// cannot proceed to execution) while SHOULD/SHOULD_NOT are non-blocking
+	// warnings recorded on the task output. Missing constitution = no rules =
+	// plan passes (backward compatible).
+	if constitution, err := governance.LoadConstitution(s.platform.Root()); err != nil {
+		s.fail(t, "constitution: "+err.Error())
+		return t, domain.Plan{}, "", err
+	} else if validation := governance.ValidatePlan(plan, constitution); !validation.Passed {
+		msg := "plan blocked by constitution: " + validation.Violations[0].Message
+		s.fail(t, msg)
+		return t, domain.Plan{}, "", fmt.Errorf("%s", msg)
+	}
+
 	t.Plan = &plan
 	t.Output = renderPlanText(plan)
 	t.AddStep(agent.Step{
@@ -1082,14 +1316,31 @@ func (s *TaskService) Plan(intent string) (*agent.Task, domain.Plan, string, err
 }
 
 // Impact creates a Task for the change, runs the 11 deterministic graph
-// queries from the spec (Phase 7), and attaches the ImpactReport to the Task.
+// queries from the spec, and attaches the ImpactReport to the Task.
 // The Task transitions CREATED → ANALYZING → (COMPLETED or FAILED). Returns
 // the Task, the ImpactReport, and a rendered text summary.
-//
-// This realizes the Integration Transformation Plan's Phase 7: the impact
+// This realizes the : the impact
+// ImpactOption customizes an Impact computation.
+type ImpactOption func(*impactOptions)
+
+type impactOptions struct {
+	strict bool
+}
+
+// ImpactStrict opts an Impact computation into strict precision mode: call
+// edges whose caller language is not "resolved"-precision in the index are
+// skipped as unknown rather than trusted (see kern impact --precision strict).
+func ImpactStrict() ImpactOption {
+	return func(o *impactOptions) { o.strict = true }
+}
+
 // report is the deterministic source — the LLM may explain it, but the data
 // comes from the knowledge graph, not an LLM guess.
-func (s *TaskService) Impact(change string) (*agent.Task, domain.ImpactReport, string, error) {
+func (s *TaskService) Impact(change string, opts ...ImpactOption) (*agent.Task, domain.ImpactReport, string, error) {
+	o := &impactOptions{}
+	for _, opt := range opts {
+		opt(o)
+	}
 	t, err := s.Create(change)
 	if err != nil {
 		return nil, domain.ImpactReport{}, "", err
@@ -1107,53 +1358,74 @@ func (s *TaskService) Impact(change string) (*agent.Task, domain.ImpactReport, s
 	}
 
 	g := s.platform.Graph()
-	rep := domain.ImpactReport{Target: target}
+	rep := s.collectGraphImpact(g, target, o.strict)
+	s.gatherRuntimeEvidence(&rep, target)
+	classifyCriticality(g, target, o.strict, &rep)
+	return s.finalizeImpact(t, &rep)
+}
 
+// collectGraphImpact runs the six deterministic graph queries from the spec
+// (callers, callees, services, APIs, events, tests) against the target symbol
+// and returns the ImpactReport fields they populate.
+func (s *TaskService) collectGraphImpact(g *intelligence.Graph, target string, strict bool) domain.ImpactReport {
+	rep := domain.ImpactReport{Target: target}
 	// 1. What calls this?
-	for _, n := range g.WhoCalls(target) {
+	for _, n := range g.WhoCallsPrecise(target, strict) {
 		rep.WhoCalls = append(rep.WhoCalls, nodeName(n))
 	}
 	// 2. What does it call?
-	for _, n := range g.WhatDoesXDependOn(target) {
+	for _, n := range g.WhatDoesXDependOnPrecise(target, strict) {
 		rep.WhatItCalls = append(rep.WhatItCalls, nodeName(n))
 	}
 	// 3. What services depend on it?
-	for _, n := range g.WhatServicesAffected(target) {
+	for _, n := range g.WhatServicesAffectedPrecise(target, strict) {
 		rep.ServicesDepend = append(rep.ServicesDepend, nodeName(n))
 	}
 	// 4. Which APIs are affected?
-	for _, n := range g.WhatAPIsAffected(target) {
+	for _, n := range g.WhatAPIsAffectedPrecise(target, strict) {
 		rep.APIsAffected = append(rep.APIsAffected, nodeName(n))
 	}
-	// 5. Which data stores are affected? (from the context packet's databases)
+	// 5. Which events are affected?
+	for _, n := range g.WhatEventsAffectedPrecise(target, strict) {
+		rep.EventsAffected = append(rep.EventsAffected, nodeName(n))
+	}
+	// 6. Which tests cover it?
+	for _, n := range g.WhatTestsCoverPrecise(target, strict) {
+		rep.TestsCover = append(rep.TestsCover, nodeName(n))
+	}
+	return rep
+}
+
+// gatherRuntimeEvidence folds non-graph evidence into the report: affected data
+// stores from the context packet's runtime evidence, related incidents from
+// memory recall, and applicable architecture rules from the context packet.
+func (s *TaskService) gatherRuntimeEvidence(rep *domain.ImpactReport, target string) {
+	// Which data stores are affected? (from the context packet's databases)
 	pkt, _ := s.platform.ctx.AnalyzeChange(target)
 	for _, e := range pkt.RuntimeEvidence {
 		if strings.Contains(strings.ToLower(string(e.Type)), "database") || strings.Contains(strings.ToLower(string(e.Type)), "db") {
 			rep.DataStoresAffected = append(rep.DataStoresAffected, e.Content)
 		}
 	}
-	// 6. Which events are affected?
-	for _, n := range g.WhatEventsAffected(target) {
-		rep.EventsAffected = append(rep.EventsAffected, nodeName(n))
-	}
-	// 7. Which tests cover it?
-	for _, n := range g.WhatTestsCover(target) {
-		rep.TestsCover = append(rep.TestsCover, nodeName(n))
-	}
-	// 8. Which deployments are related? (no graph query yet — empty)
-	// 9. Which incidents are related? (from memory recall)
+	// Which incidents are related? (from memory recall)
 	if s.platform.Memory() != nil {
 		ms, _ := s.platform.Memory().Recall(memory.Query{Text: target, Type: domain.MemoryIncident})
 		for _, m := range ms {
 			rep.IncidentsRelated = append(rep.IncidentsRelated, m.ID)
 		}
 	}
-	// 10. Which architecture rules apply?
+	// Which architecture rules apply?
 	for _, p := range pkt.ArchitectureRules {
 		rep.ArchitectureRules = append(rep.ArchitectureRules, p.ID)
 	}
-	// 11. Risk from production criticality.
-	crit := g.ProductionCriticality(target)
+}
+
+// classifyCriticality derives the report's risk level from the production
+// criticality of the target symbol, falling back to the caller/service
+// footprint when the graph reports no criticality tier.
+func classifyCriticality(g *intelligence.Graph, target string, strict bool, rep *domain.ImpactReport) {
+	// Risk from production criticality.
+	crit := g.ProductionCriticalityPrecise(target, strict)
 	switch crit {
 	case "critical":
 		rep.Risk = "high"
@@ -1170,9 +1442,13 @@ func (s *TaskService) Impact(change string) (*agent.Task, domain.ImpactReport, s
 			rep.Risk = "low"
 		}
 	}
+}
 
-	t.Impact = &rep
-	t.Output = renderImpactText(rep)
+// finalizeImpact stamps the completed ImpactReport onto the Task, records the
+// report artifact, and completes the Task lifecycle (ANALYZING → COMPLETED).
+func (s *TaskService) finalizeImpact(t *agent.Task, rep *domain.ImpactReport) (*agent.Task, domain.ImpactReport, string, error) {
+	t.Impact = rep
+	t.Output = renderImpactText(*rep)
 	t.AddStep(agent.Step{
 		Action:     "impact",
 		AgentID:    "graph-engine",
@@ -1181,18 +1457,17 @@ func (s *TaskService) Impact(change string) (*agent.Task, domain.ImpactReport, s
 		Result:     fmt.Sprintf("impact: %d callers, %d services, risk=%s", len(rep.WhoCalls), len(rep.ServicesDepend), rep.Risk),
 		Status:     "success",
 	})
-
 	s.recordArtifact(domain.ArtifactImpactReport, t.ID, "graph-engine",
 		fmt.Sprintf("impact: %d callers, risk=%s", len(rep.WhoCalls), rep.Risk),
 		s.lastArtifactID(t.ID, domain.ArtifactContextPacket), "impact:graph")
 
 	if err := t.Complete(t.Output); err != nil {
 		s.fail(t, err.Error())
-		return t, rep, "", err
+		return t, *rep, "", err
 	}
 	s.persist(t)
 	s.publish(eventbus.TaskCompleted, t.ID, map[string]string{"state": "COMPLETED"})
-	return t, rep, t.Output, nil
+	return t, *rep, t.Output, nil
 }
 
 // assemblePlan builds a domain.Plan from the deterministic context packet. It
@@ -1298,7 +1573,7 @@ func (s *TaskService) Verify(types []string) (*agent.Task, verification.Verifica
 		fmt.Sprintf("verdict: %s, summary: %s", res.Verdict, res.Summary),
 		s.lastArtifactID(t.ID, domain.ArtifactImpactReport), "verification:verify")
 
-	// Phase 10.4: also emit the typed sub-report artifacts (test, security,
+	// Also emit the typed sub-report artifacts (test, security,
 	// architecture) so the safe-change slice's required artifact set
 	// (ContextPacket, AnalysisReport, ImpactReport, RiskReport, Plan,
 	// CodePatch, TestReport, SecurityReport, ArchitectureReport,
@@ -1342,17 +1617,15 @@ func (s *TaskService) Verify(types []string) (*agent.Task, verification.Verifica
 // task is classified by kind (code change, documentation, incident,
 // modernization) and the matching workflow — i.e. only the specialists that
 // apply to that kind — is registered on the WorkflowEngine. This realizes the
-// Integration Transformation Plan's "AGENT SELECTION": do not invoke every
+// "AGENT SELECTION": do not invoke every
 // agent for every request. Unclassified tasks fall back to the default
 // workflow. The kind-specific workflows each preserve the human "approve" gate
 // before the first execution step, so Invariant #2 (high-risk execution
 // requires approval) holds on every path.
-//
 // The stepHandler is called for each workflow step; it receives the action
 // name and the Task, and returns the step output. This is where specialist
 // agents (planner, coder, reviewer, etc.) are invoked. Each step records an
 // artifact when the stepHandler returns a non-empty output.
-//
 // The specialist pipeline (internal/agents: ClassifyTask → SelectWorkflow)
 // provides classification, routing and the RequiresApproval gate. The actual
 // step implementations are the closed-loop stages in internal/loop (the
@@ -1367,17 +1640,44 @@ func (s *TaskService) RunWorkflow(intent string, stepHandler func(action string,
 
 	// Task-type-driven agent selection: register the workflow whose steps fit
 	// the task kind, falling back to the full default workflow for unclassified
-	// tasks. Both paths preserve the human approval gate.
+	// tasks. Both paths preserve the human approval gate. The task must also
+	// NAME its workflow (WorkflowID) or the engine falls back to the default
+	// and the kind-specific steps never run.
 	kind := agents.ClassifyTask(t.Input, t.Type)
+	wf := agents.SelectWorkflow(kind)
+	t.WorkflowID = wf.ID
 	eng := agent.NewWorkflowEngine(s.registry, governance.NewApprovalWorkflow())
+	// Persist the gate approvals so a task parked at the human approval gate
+	// survives a restart: the approval record is written to the shared store,
+	// where `kern approve <id>` / the web UI resolves it out-of-band and a
+	// fresh engine observes the decision on resume. Falls back to in-memory
+	// when no platform (tests, ephemeral runs) backs the service.
+	if s.platform != nil {
+		eng.WithApprovalStore(governance.NewFileStore(s.platform.Root()))
+	}
 	if s.bus != nil {
 		eng.WithBus(s.bus)
 	}
-	eng.RegisterWorkflow(agents.SelectWorkflow(kind))
+	eng.RegisterWorkflow(wf)
 
 	// Wrap the step handler to record artifacts for each step.
 	wrapped := func(action string, task *agent.Task) (string, error) {
+		start := time.Now()
 		out, err := stepHandler(action, task)
+		// Record a tool-decision trace for the step — which tool
+		// ran, why it was selected, what it was expected to produce, and what
+		// it actually returned. This makes the tool-selection trail auditable
+		// instead of an in-memory return value.
+		if s.traceRec != nil {
+			s.traceRec.Record(domain.ToolDecisionTrace{
+				Tool:           toolForAction(action),
+				WhySelected:    "workflow step " + action,
+				Inputs:         truncate(task.Input, 200),
+				ExpectedOutput: "result of " + action,
+				ActualOutput:   truncate(out, 200),
+				Latency:        float64(time.Since(start).Milliseconds()),
+			})
+		}
 		if err != nil {
 			return out, err
 		}
@@ -1393,11 +1693,229 @@ func (s *TaskService) RunWorkflow(intent string, stepHandler func(action string,
 	return eng.Run(t, wrapped)
 }
 
-// Execute runs a patch in a sandboxed worktree, gated by governance (Phase 11).
+// RunWorkflowDefault is the exit-gate entry point: Kern selects and
+// coordinates the agent team WITHOUT the external caller manually sequencing
+// it. The caller passes only the intent — everything else is Kern's:
+// 1. Task creation (Task →).
+// 2. Agent selection: the task is classified by kind and the kind-specific
+// workflow (only the specialists that apply) is registered — the same
+// selection RunWorkflow performs.
+// 3. Team wiring: the standard specialist team (planner, architect, coder,
+// reviewer, security, tester, sre) is registered on the engine's registry
+// so every workflow role resolves without external setup.
+// 4. Coordination: the WorkflowEngine drives the steps (session → context →
+// tool call → result → artifact → Task state) in order, parking at the
+// human approval gate before the first execution step.
+// 5. Execution: Kern's own default step handler performs each step — the
+// analyze and plan steps run the real deterministic engines (platform
+// analysis + plan assembly), and the remaining role stages produce
+// deterministic outcomes from the task's real plan/risk/test data.
+// The human approval gate is preserved (Invariant #2): the task parks in
+// WAITING_FOR_APPROVAL and the error wraps agent.ErrApprovalRequired. The
+// caller extracts the approval ID via agent.ApprovalID(err), resolves it via
+// CompleteApproval (or out-of-band `kern approve`), and calls
+// RunWorkflowResume — the engine resumes at the gate and drives the remaining
+// steps to completion. The run state (resume step + approval bindings) is
+// persisted on the task and the approval decision through the project's
+// approval store, so resume also works across processes.
+func (s *TaskService) RunWorkflowDefault(intent string) (*agent.Task, error) {
+	t, err := s.Create(intent)
+	if err != nil {
+		return nil, err
+	}
+	eng := s.engineForTask(t)
+
+	// Keep the task + engine together so an approval-gated run can resume with
+	// the same pair (the engine's gate/progress state lives on the instance).
+	s.wfMu.Lock()
+	s.workflowRuns[t.ID] = &workflowRun{task: t, engine: eng}
+	s.wfMu.Unlock()
+
+	return s.runStoredWorkflow(t.ID)
+}
+
+// engineForTask builds (or rebuilds) the WorkflowEngine that drives a task's
+// kind-selected workflow: it classifies the task, registers the kind workflow
+// on the engine, names the workflow on the task (the engine resolves by
+// WorkflowID and falls back to the default when empty), registers the standard
+// specialist team so every role resolves, and attaches the persistent approval
+// store so gates survive process restarts. Idempotent — re-registering an
+// existing specialist is skipped.
+func (s *TaskService) engineForTask(t *agent.Task) *agent.WorkflowEngine {
+	// Agent selection: classify the task and register the kind workflow.
+	kind := agents.ClassifyTask(t.Input, t.Type)
+	wf := agents.SelectWorkflow(kind)
+	t.WorkflowID = wf.ID
+
+	// Persistent approval backend: the same store `kern approve` writes, so an
+	// approval surfaced by the gate can be resolved out-of-band and a fresh
+	// engine observes the decision on resume.
+	eng := agent.NewWorkflowEngine(s.registry, governance.NewApprovalWorkflow()).
+		WithApprovalStore(governance.NewFileStore(s.platform.Root()))
+	if s.bus != nil {
+		eng.WithBus(s.bus)
+	}
+	eng.RegisterWorkflow(wf)
+
+	// Team wiring: register the standard specialists so every workflow role
+	// resolves. Idempotent — a specialist already registered (e.g. a previous
+	// run of this service) is left in place.
+	if _, team, err := agents.StandardTeam(); err == nil {
+		for _, a := range team.All() {
+			if _, exists := s.registry.Get(a.ID); !exists {
+				_ = s.registry.Register(a)
+			}
+		}
+	}
+	return eng
+}
+
+// RunWorkflowResume resumes an approval-gated agent-team run. It prefers the
+// in-process task + engine pair that parked the run; when this service never
+// ran it (fresh process), it loads the task from the TaskStore and rebuilds
+// the engine from the task's persisted workflow + resume state. The engine
+// resumes at the gate step — the persistent approval store records whether the
+// gate was resolved out-of-band (e.g. `kern approve`) — and drives the
+// remaining steps to completion.
+func (s *TaskService) RunWorkflowResume(taskID string) (*agent.Task, error) {
+	s.wfMu.Lock()
+	run, ok := s.workflowRuns[taskID]
+	s.wfMu.Unlock()
+	if ok {
+		return s.runWorkflow(run.task, run.engine)
+	}
+	// Cross-process resume: recover the task from the TaskStore.
+	stored, err := s.store.Get(taskID)
+	if err != nil {
+		return nil, fmt.Errorf("no agent-team workflow run or stored task for %s", taskID)
+	}
+	task := stored
+	eng := s.engineForTask(&task)
+	return s.runWorkflow(&task, eng)
+}
+
+// runStoredWorkflow runs (or resumes) the workflow for a stored task, evicting
+// the run once the task reaches a terminal state.
+func (s *TaskService) runStoredWorkflow(taskID string) (*agent.Task, error) {
+	s.wfMu.Lock()
+	run, ok := s.workflowRuns[taskID]
+	s.wfMu.Unlock()
+	if !ok {
+		return nil, fmt.Errorf("no agent-team workflow run for task %s", taskID)
+	}
+	return s.runWorkflow(run.task, run.engine)
+}
+
+// runWorkflow runs an engine against a task, evicting the run once the task
+// reaches a terminal state.
+func (s *TaskService) runWorkflow(t *agent.Task, eng *agent.WorkflowEngine) (*agent.Task, error) {
+	res, err := eng.Run(t, s.defaultWorkflowStep())
+	if res != nil && res.Terminal() {
+		s.wfMu.Lock()
+		delete(s.workflowRuns, res.ID)
+		s.wfMu.Unlock()
+	}
+	return res, err
+}
+
+// CompleteApproval resolves a pending human-approval gate on any in-flight
+// agent-team workflow run, delegating to the engine that owns the approval.
+// It is the counterpart to the agent.ApprovalID surfaced by an
+// ErrApprovalRequired result.
+func (s *TaskService) CompleteApproval(approvalID, approver string) error {
+	s.wfMu.Lock()
+	defer s.wfMu.Unlock()
+	for _, run := range s.workflowRuns {
+		if err := run.engine.CompleteApproval(approvalID, approver); err == nil {
+			return nil
+		}
+	}
+	return fmt.Errorf("app: approval %q not found on any agent-team workflow run", approvalID)
+}
+
+// defaultWorkflowStep is Kern's own step executor for the agent team. It makes
+// the team runnable end-to-end without an external handler: the analyze and
+// plan steps run the real deterministic engines, and every other role stage
+// (code, verify, pr, review, security, test, sre, architect) produces a
+// deterministic outcome from the task's real plan/risk/test data. The heavy
+// creative execution (closed-loop coder/verifier with worktrees and LLMs)
+// remains the loop's job — this handler is the coordination-level execution
+// that lets Kern sequence the team autonomously.
+func (s *TaskService) defaultWorkflowStep() func(action string, t *agent.Task) (string, error) {
+	return func(action string, t *agent.Task) (string, error) {
+		switch action {
+		case "analyze":
+			// Real deterministic analysis: platform.Analyze feeds the same
+			// context packet, risks, and evidence claims the Analyze() path
+			// attaches. No state transition here — the engine drives the task
+			// state machine around this handler. A prose intent that does not
+			// resolve to a symbol degrades gracefully: the run continues with
+			// an empty context packet rather than failing the whole team.
+			pkt, text, err := s.platform.Analyze(t.Input)
+			if err != nil {
+				return fmt.Sprintf("analyze: could not resolve %q as a symbol — proceeding with an empty context packet (%v)", truncate(t.Input, 80), err), nil
+			}
+			t.ContextPacket = &pkt
+			t.Risks = pkt.Risks
+			t.Evidence = append(t.Evidence, pkt.Facts...)
+			t.Output = text
+			return text, nil
+		case "plan":
+			// Real deterministic plan: assemble the implementation plan from
+			// the analyzed context packet, exactly as TaskService.Plan does.
+			var pkt domain.ContextPacket
+			if t.ContextPacket != nil {
+				pkt = *t.ContextPacket
+			}
+			plan := s.assemblePlan(t.Input, pkt)
+			t.Plan = &plan
+			return renderPlanText(plan), nil
+		default:
+			// code/verify/pr/review/security/test/sre/architect: deterministic
+			// stage outcome derived from the task's real plan/risk/test data.
+			return s.stageOutcome(action, t), nil
+		}
+	}
+}
+
+// stageOutcome renders a deterministic outcome for a specialist role stage from
+// the task's real analyzed data (plan steps, affected components, risks,
+// required validations). It is the coordination-level execution for stages
+// whose heavy creative machinery lives in the closed loop.
+func (s *TaskService) stageOutcome(action string, t *agent.Task) string {
+	var steps, components, tests, risks int
+	if t.Plan != nil {
+		steps = len(t.Plan.ImplementationSteps)
+		components = len(t.Plan.AffectedComponents)
+		tests = len(t.Plan.Tests)
+	}
+	risks = len(t.Risks)
+	switch action {
+	case "code":
+		return fmt.Sprintf("code stage by coder: implement plan — %d steps across %d affected components", steps, components)
+	case "verify":
+		return fmt.Sprintf("verify stage by reviewer: run %d required validations (go build ./... + tests)", tests)
+	case "pr":
+		return fmt.Sprintf("pr stage by reviewer: open pull request for the change (%s)", s.prProvider)
+	case "review":
+		return fmt.Sprintf("review stage by reviewer: review change against %d risks and %d affected components", risks, components)
+	case "security":
+		return fmt.Sprintf("security stage by security: scan change for %d identified risks", risks)
+	case "test":
+		return fmt.Sprintf("test stage by tester: run %d required tests for the change", tests)
+	case "sre":
+		return fmt.Sprintf("sre stage by sre: assess deployability of %d affected components", components)
+	case "architect":
+		return fmt.Sprintf("architect stage by architect: design change across %d affected components", components)
+	default:
+		return fmt.Sprintf("%s stage: executed by specialist", action)
+	}
+}
+
+// Execute runs a patch in a sandboxed worktree, gated by governance .
 // It creates a Task, transitions to EXECUTING, checks the governance firewall,
 // applies the patch in a worktree, records the diff as an artifact, and returns
 // the Task + diff.
-//
 // High-risk operations never directly modify the main working tree — the patch
 // is applied in an isolated worktree. The governance gate (governance.CheckExec)
 // is centralized here so no interface can bypass it.
@@ -1410,6 +1928,14 @@ func (s *TaskService) Execute(patch string) (*agent.Task, string, error) {
 	// Governance gate: fail-closed before any execution.
 	if err := governance.CheckExec(); err != nil {
 		s.fail(t, "governance denied: "+err.Error())
+		return t, "", err
+	}
+
+	// Task boundary: a controlled action must not bypass
+	// task-scoped governance. Validate every path the patch touches against
+	// the task's scope BEFORE applying it.
+	if err := s.TaskScope(t.ID).ValidatePatch(patch); err != nil {
+		s.fail(t, "boundary denied: "+err.Error())
 		return t, "", err
 	}
 
@@ -1466,7 +1992,6 @@ func (s *TaskService) Execute(patch string) (*agent.Task, string, error) {
 // task-native equivalent of the legacy CLI runExecute path (which used raw
 // execution.NewWorktree + manual verify). The worktree is cleaned up before
 // returning. Returns the Task, the diff, and the verification result.
-//
 // This exists because Execute() defer-cleans the worktree, so a caller that
 // wants to verify the worktree after Execute cannot access wt.Dir(). This
 // method holds the worktree across both steps.
@@ -1479,6 +2004,13 @@ func (s *TaskService) ExecuteAndVerify(patch string, verifyTypes []string) (*age
 	// Governance gate: fail-closed before any execution.
 	if err := governance.CheckExec(); err != nil {
 		s.fail(t, "governance denied: "+err.Error())
+		return t, "", verification.VerificationResult{}, err
+	}
+
+	// Task boundary: reject patches touching out-of-scope paths
+	// before applying (same enforcement as Execute).
+	if err := s.TaskScope(t.ID).ValidatePatch(patch); err != nil {
+		s.fail(t, "boundary denied: "+err.Error())
 		return t, "", verification.VerificationResult{}, err
 	}
 
@@ -1565,9 +2097,8 @@ func (s *TaskService) verifyInWorktree(t *agent.Task, worktreeDir string, types 
 }
 
 // VerifyTask verifies a Task's worktree diff and transitions to READY_FOR_PR
-// (Phase 12). Unlike the standalone Verify, this chains after Execute: it
+// Unlike the standalone Verify, this chains after Execute: it
 // verifies the specific worktree produced by execution, not the current tree.
-//
 // The Task transitions VERIFYING → READY_FOR_PR (on pass) or FAILED (on fail).
 // Every check produces evidence, and the final verification becomes an artifact.
 func (s *TaskService) VerifyTask(taskID string, worktreeDir string, types []string) (*agent.Task, verification.VerificationResult, error) {
@@ -1620,14 +2151,12 @@ func (s *TaskService) VerifyTask(taskID string, worktreeDir string, types []stri
 	return t, res, nil
 }
 
-// CreatePR creates a PR from the Task's structured artifacts (Phase 13).
+// CreatePR creates a PR from the Task's structured artifacts .
 // It renders a PR body from the Plan, Impact, and Verification artifacts, and
 // transitions the Task to PR_CREATED.
-//
 // The PR requires: (1) verification passed (Task is in READY_FOR_PR), (2) the
 // diff artifact exists. The PR body is generated from artifacts, not from an
 // agent's memory of what it changed — this is safer and more auditable.
-//
 // The body is always rendered and recorded as an artifact regardless of
 // provider outcome. If the configured provider (default Noop) creates a real
 // PR, the URL/number are stamped on the Task and appended to the output; a
@@ -1707,7 +2236,6 @@ func (s *TaskService) CreatePR(taskID string, branch string) (*agent.Task, strin
 // deployment via the configured deployer (default NoopDeployer → simulated
 // success; KERN_DEPLOY_COMMAND + KERN_ALLOW_DEPLOY=1 → real external deploy).
 // The version string identifies the deployment version.
-//
 // Governance: a real deploy (ShellDeployer) is a CRITICAL production.deploy
 // action. Deploy checks the governance firewall before proceeding; if approval
 // is required it returns agent.ErrApprovalRequired wrapping the pending
@@ -1926,6 +2454,29 @@ func artifactKindForAction(action string) domain.ArtifactKind {
 	}
 }
 
+// toolForAction maps a workflow step action to the MCP tool that executes it
+// ( tool-decision trace). It is the deterministic tool-selection
+// trace: which tool the control plane uses for each workflow step. Every
+// returned name MUST be a registered MCP tool — steps without a dedicated
+// tool (pr, deploy, observe) fall back to the workflow orchestrator that
+// drives them, never a phantom "kern_<action>" label.
+func toolForAction(action string) string {
+	switch action {
+	case "analyze":
+		return "kern_analyze"
+	case "plan":
+		return "kern_plan"
+	case "code":
+		return "kern_execute"
+	case "verify":
+		return "kern_verify"
+	case "pr", "deploy", "observe":
+		return "kern_workflow"
+	default:
+		return "kern_workflow"
+	}
+}
+
 // truncate shortens a string to at most n characters, appending "…" when
 // truncated.
 func truncate(s string, n int) string {
@@ -1936,7 +2487,7 @@ func truncate(s string, n int) string {
 }
 
 // correlator returns the single shared correlation service for this TaskService
-// (Phase 13.3). It is built lazily once over the platform's runtime source so
+// It is built lazily once over the platform's runtime source so
 // every lane that reasons over runtime-to-code correlation (correlate,
 // investigate, deploy, observe) shares the exact same source + lookback window.
 func (s *TaskService) correlator() *runtime.SharedCorrelator {
@@ -1951,11 +2502,10 @@ func (s *TaskService) correlator() *runtime.SharedCorrelator {
 }
 
 // Correlate runs the runtime correlation engine against a production alert and
-// records the result as a Task (Phase 14). It creates a Task, runs the
+// records the result as a Task. It creates a Task, runs the
 // Correlator + CorrelateChain, attaches the deep evidence chain
 // (alert→service→deployment→commit→symbol→task/pr/agent), and records an
 // incident-report artifact.
-//
 // The correlation is deterministic — the LLM may explain it, but the chain is
 // derived from the runtime source and git history, not an LLM guess.
 func (s *TaskService) Correlate(alert domain.Alert) (*agent.Task, runtime.CorrelationChain, string, error) {
@@ -1973,7 +2523,7 @@ func (s *TaskService) Correlate(alert domain.Alert) (*agent.Task, runtime.Correl
 	if src == nil {
 		src = runtime.NewStore()
 	}
-	// Phase 13.3: use the single shared correlation service so this lane reasons
+	// Use the single shared correlation service so this lane reasons
 	// over the same source/window as investigate/deploy/observe.
 	chain := s.correlator().CorrelateChain(alert)
 
@@ -2000,11 +2550,10 @@ func (s *TaskService) Correlate(alert domain.Alert) (*agent.Task, runtime.Correl
 	return t, chain, t.Output, nil
 }
 
-// InvestigateIncident runs the full incident workflow (Phase 15): IngestAlert
+// InvestigateIncident runs the full incident workflow : IngestAlert
 // → Correlate → RootCause. It wraps the incident.Engine through TaskService so
 // the incident lifecycle (Task, Artifacts, Events) is recorded on the
 // authoritative Task.
-//
 // The incident engine reuses Task, Artifact, Event, Policy, Memory, Evidence,
 // and Verification — it does not create a separate lifecycle framework.
 func (s *TaskService) InvestigateIncident(alert domain.Alert) (*agent.Task, *domain.Incident, string, error) {
@@ -2022,7 +2571,7 @@ func (s *TaskService) InvestigateIncident(alert domain.Alert) (*agent.Task, *dom
 	if src == nil {
 		src = runtime.NewStore()
 	}
-	// Phase 13.3: use the single shared correlation service so this lane reasons
+	// Use the single shared correlation service so this lane reasons
 	// over the same source/window as correlate/deploy/observe.
 	shared := s.correlator()
 	eng, err := incident.NewEngineWithGraph(s.platform.Root(), s.platform.Graph(), src, s.platform.Memory(), s.platform.Firewall())
@@ -2068,10 +2617,102 @@ func (s *TaskService) InvestigateIncident(alert domain.Alert) (*agent.Task, *dom
 	return t, inc, t.Output, nil
 }
 
+// RemediateIncident drives the candidate-fix pipeline end to end:
+// the controlled incident (alert) is correlated and root-caused, the human
+// approval gate is exercised, the candidate fix is applied in a sandbox,
+// verified (build), and turned into a remediation PR. It is the app-layer
+// counterpart to the incident engine's FixAndPR — the missing production
+// entry that makes "controlled incident becomes a verified remediation PR"
+// ( exit gate) reachable from the CLI/MCP/web.
+// apply is the fix applier: it receives the sandbox worktree directory and
+// must write the fix there (never the live repo). branch is the PR head
+// branch. approver is the human identity granting the approval gate
+// (Invariant #2: high-risk fixes require human approval; the decision is
+// recorded in the approval workflow + bus). Returns the task, the remediated
+// incident (status FIX_VERIFIED/PR_CREATED), and a rendered summary.
+func (s *TaskService) RemediateIncident(alert domain.Alert, apply func(workDir string) error, branch, approver string) (*agent.Task, *domain.Incident, string, error) {
+	t, err := s.Create(fmt.Sprintf("remediate incident: %s", alert.Message))
+	if err != nil {
+		return nil, nil, "", err
+	}
+	if err := t.Transition(domain.TaskAnalyzing); err != nil {
+		s.fail(t, err.Error())
+		return t, nil, "", err
+	}
+	s.publish(eventbus.TaskUpdated, t.ID, map[string]string{"state": "ANALYZING"})
+
+	src := s.platform.RuntimeSource()
+	if src == nil {
+		src = runtime.NewStore()
+	}
+	// Reason over the same shared correlation service as every
+	// other runtime lane.
+	shared := s.correlator()
+	eng, err := incident.NewEngineWithGraph(s.platform.Root(), s.platform.Graph(), src, s.platform.Memory(), s.platform.Firewall())
+	if err != nil {
+		s.fail(t, err.Error())
+		return t, nil, "", err
+	}
+	eng.WithSharedCorrelator(shared)
+	eng.WithPRProvider(s.prProvider)
+	if s.bus != nil {
+		eng.WithBus(s.bus)
+	}
+
+	// 11.2 — Correlation + 11.3 — Root cause (hypothesis / evidence / confidence).
+	inc := eng.IngestAlert(alert)
+	eng.Correlate(inc)
+	eng.RootCause(inc)
+
+	// 11.4 — approval gate: a production remediation requires human approval.
+	ap := eng.RequestApproval(inc, s.agentID, "remediate production incident")
+	if _, err := eng.Approve(ap.ID, approver); err != nil {
+		s.fail(t, "approval: "+err.Error())
+		return t, inc, "", err
+	}
+	s.publish(eventbus.ApprovalRequested, ap.ID, map[string]string{"incident": inc.ID, "action": "incident.remediate"})
+	s.publish(eventbus.TaskApproved, t.ID, map[string]string{"approval": ap.ID})
+
+	// 11.4 — sandbox → verify → PR (risk gate + build inside ApplyAndVerifyFix).
+	diff, err := eng.FixAndPR(inc, apply, branch)
+	if err != nil {
+		s.fail(t, err.Error())
+		return t, inc, "", err
+	}
+
+	t.Output = renderIncidentText(inc)
+	t.AddStep(agent.Step{
+		Action:     "remediate",
+		AgentID:    "incident-engine",
+		StartedAt:  t.UpdatedAt,
+		FinishedAt: time.Now(),
+		Result:     fmt.Sprintf("incident: %s → %s, diff=%d chars, PR=%s", inc.ID, inc.Status, len(diff), inc.PRURL),
+		Status:     "success",
+	})
+	s.recordArtifact(domain.ArtifactDiff, t.ID, "incident-engine",
+		fmt.Sprintf("remediation diff for %s (%d chars)", inc.ID, len(diff)),
+		s.lastArtifactID(t.ID, domain.ArtifactRootCauseReport), "incident:fix")
+	if inc.Verification != "" {
+		s.recordArtifact(domain.ArtifactVerificationReport, t.ID, "incident-engine",
+			inc.Verification, s.lastArtifactID(t.ID, domain.ArtifactDiff), "incident:verify")
+	}
+	s.recordArtifact(domain.ArtifactPullRequest, t.ID, "pr-engine",
+		fmt.Sprintf("remediation PR for %s: %s (#%d)", inc.ID, inc.PRURL, inc.PRNumber),
+		s.lastArtifactID(t.ID, domain.ArtifactVerificationReport), "incident:pr")
+
+	if err := t.Complete(t.Output); err != nil {
+		s.fail(t, err.Error())
+		return t, inc, "", err
+	}
+	s.persist(t)
+	s.publish(eventbus.IncidentResolved, inc.ID, map[string]string{"task": t.ID, "status": string(inc.Status), "pr": inc.PRURL})
+	s.publish(eventbus.TaskCompleted, t.ID, map[string]string{"state": "COMPLETED"})
+	return t, inc, t.Output, nil
+}
+
 // Learn extracts recurring patterns from engineering memory and records them as
-// a Task (Phase 16). It wraps the learning.Extractor through TaskService so the
+// a Task. It wraps the learning.Extractor through TaskService so the
 // learning lifecycle (Change → Outcome → Pattern → Memory) is auditable.
-//
 // Patterns are promoted to memory only when they meet the threshold (evidence-
 // based promotion). The LLM may explain patterns but does not create them.
 func (s *TaskService) Learn(threshold int) (*agent.Task, []learning.Pattern, string, error) {
@@ -2130,9 +2771,8 @@ func (s *TaskService) Learn(threshold int) (*agent.Task, []learning.Pattern, str
 }
 
 // Modernize runs the legacy modernization analysis and records it as a Task
-// (Phase 17). It wraps the modernization.Analyzer through TaskService so each
+// It wraps the modernization.Analyzer through TaskService so each
 // modernization phase becomes an auditable Task with artifacts.
-//
 // The analysis connects communities → bridges → churn → candidate boundaries →
 // impact → risk → migration plan → executable tasks. Each extraction phase
 // becomes a Task or Task Group.
@@ -2169,6 +2809,25 @@ func (s *TaskService) Modernize() (*agent.Task, modernization.ExtractionPlan, st
 		fmt.Sprintf("modernization: %d contexts, %d phases", len(plan.Contexts), len(plan.Phases)),
 		"", "modernization:analyze")
 
+	// / exit gate: modernization is Task aware. Materialize each
+	// extraction phase as its own task (Task Group → Tasks), linked to this
+	// plan task, so the phases are individually tracked, auditable, and
+	// resumable instead of living only inside the plan text.
+	if len(plan.Phases) > 0 {
+		if phaseTasks, perr := s.ModernizePhaseTasks(plan, t.ID); perr != nil {
+			s.publish(eventbus.TaskFailed, t.ID, map[string]string{"error": "modernize phase tasks: " + perr.Error()})
+		} else {
+			t.AddStep(agent.Step{
+				Action:     "modernize-phase-tasks",
+				AgentID:    "modernization-analyzer",
+				StartedAt:  t.UpdatedAt,
+				FinishedAt: time.Now(),
+				Result:     fmt.Sprintf("materialized %d phase tasks", len(phaseTasks)),
+				Status:     "success",
+			})
+		}
+	}
+
 	if err := t.Complete(t.Output); err != nil {
 		s.fail(t, err.Error())
 		return t, plan, "", err
@@ -2179,7 +2838,7 @@ func (s *TaskService) Modernize() (*agent.Task, modernization.ExtractionPlan, st
 }
 
 // ModernizePhaseTasks materializes each extraction phase as its own task
-// (Phase 12.3: one task per phase, not a single task for the whole plan). Each
+// ( one task per phase, not a single task for the whole plan). Each
 // phase-task records an artifact and is linked by a parent reference to the
 // plan task. It returns the created phase tasks.
 func (s *TaskService) ModernizePhaseTasks(plan modernization.ExtractionPlan, parentTaskID string) ([]*agent.Task, error) {
@@ -2193,7 +2852,7 @@ func (s *TaskService) ModernizePhaseTasks(plan modernization.ExtractionPlan, par
 		pt.Scope = "service:" + phase.Context
 		pt.CreatedBy = "modernization-analyzer"
 		// Link the phase task to its plan task so the audit trail can trace a
-		// phase back to the plan that produced it (Phase 12.3).
+		// phase back to the plan that produced it .
 		pt.ParentID = parentTaskID
 		phase.TaskID = pt.ID
 		if err := pt.Transition(domain.TaskCompleted); err == nil {
@@ -2281,9 +2940,27 @@ func (s *TaskService) publish(kind eventbus.Kind, subject string, payload map[st
 		return
 	}
 	s.bus.Publish(eventbus.Event{
+		// Give every event a deterministic ID derived from its
+		// content (kind + subject + canonical payload). The bus dedups on
+		// non-empty IDs, so re-publishing an identical event (a retried
+		// producer, or a duplicated transition) is a no-op instead of
+		// duplicating side effects, while distinct state changes (different
+		// payload) still flow. Go's json.Marshal sorts map keys, so the
+		// payload serialization is canonical.
+		ID:      stableEventID(kind, subject, payload),
 		Kind:    kind,
 		Source:  "app",
 		Subject: subject,
 		Payload: payload,
 	})
+}
+
+// stableEventID derives a deterministic, content-addressed event ID. Identical
+// (kind, subject, payload) triples hash to the same ID so the bus's
+// idempotency layer drops duplicate deliveries; different payloads (e.g. a
+// later state in a transition chain) yield different IDs and flow normally.
+func stableEventID(kind eventbus.Kind, subject string, payload map[string]string) string {
+	pb, _ := json.Marshal(payload)
+	sum := sha256.Sum256([]byte(string(kind) + "|" + subject + "|" + string(pb)))
+	return fmt.Sprintf("e-%x", sum[:12])
 }

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/JayveerPrajapati/kern/internal/index"
+	"github.com/JayveerPrajapati/kern/internal/intel"
 	"github.com/JayveerPrajapati/kern/internal/stats"
 )
 
@@ -25,6 +26,14 @@ type Session struct {
 	staleUntil time.Time // cooldown: skip staleness walk until this time
 	stale      bool      // mark index stale on file-event notification
 	watcher    *fileWatcher
+	// Derived computation cache: deterministic functions of the index, cleared
+	// in Invalidate(). Populated lazily by the accessor methods below.
+	arch         *intel.Architecture
+	communities  []intel.Community
+	hubs         []intel.Hub
+	hubsLimit    int
+	bridges      []intel.Bridge
+	bridgesLimit int
 }
 
 // New returns a Session for root. An empty root resolves to the current
@@ -56,7 +65,6 @@ func (s *Session) Close() {
 // Index returns the symbol index for the session's root. A cached index is
 // reused while fresh; a stale or missing index is rebuilt and persisted so the
 // session always reflects the current tree (see index.Stale).
-//
 // To avoid a full filesystem walk on every MCP tool call, the staleness check
 // is rate-limited: once it returns "fresh", the next check is skipped for
 // staleCooldown (1 second by default), so burst tool calls reuse the cached
@@ -121,6 +129,63 @@ func (s *Session) Invalidate() {
 	s.ix = nil
 	s.staleUntil = time.Time{}
 	s.stale = true
+	// Clear derived computation cache so it rebuilds with the fresh index.
+	s.arch = nil
+	s.communities = nil
+	s.hubs = nil
+	s.hubsLimit = 0
+	s.bridges = nil
+	s.bridgesLimit = 0
+}
+
+// Architecture returns the cached architecture analysis, computing it once
+// and reusing it until the index is invalidated.
+func (s *Session) Architecture(ix *index.Index) intel.Architecture {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.arch != nil {
+		return *s.arch
+	}
+	a := intel.AnalyzeArchitecture(ix)
+	s.arch = &a
+	return a
+}
+
+// CommunitiesList returns the cached community list, computing it once.
+func (s *Session) CommunitiesList(ix *index.Index) []intel.Community {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.communities != nil {
+		return s.communities
+	}
+	s.communities = intel.Communities(ix)
+	return s.communities
+}
+
+// HubsList returns the cached hub list for the given limit. A different limit
+// forces recompute (hubs are sorted by score; a smaller limit is a prefix but
+// we recompute to be safe with the sort).
+func (s *Session) HubsList(ix *index.Index, limit int) []intel.Hub {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.hubs != nil && s.hubsLimit == limit {
+		return s.hubs
+	}
+	s.hubs = intel.Hubs(ix, limit)
+	s.hubsLimit = limit
+	return s.hubs
+}
+
+// BridgesList returns the cached bridge list for the given limit.
+func (s *Session) BridgesList(ix *index.Index, limit int) []intel.Bridge {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.bridges != nil && s.bridgesLimit == limit {
+		return s.bridges
+	}
+	s.bridges = intel.Bridges(ix, limit)
+	s.bridgesLimit = limit
+	return s.bridges
 }
 
 // Recorder returns a stats recorder rooted in the local cache, or nil when

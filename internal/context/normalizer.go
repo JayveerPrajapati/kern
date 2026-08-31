@@ -8,15 +8,13 @@ import (
 
 // NormalizeToolResult converts a large raw tool output into a compact
 // ToolResultSummary. The raw output is stored outside active model context
-// (as an artifact reference); only the summary stays in context. Strict Plan
-// Phase 5 P1.
-//
+// (as an artifact reference); only the summary stays in context.
 // Extraction heuristics (deterministic, no LLM):
-//   - Facts: lines containing definitions, declarations, or assignments.
-//   - Errors: lines containing "error", "fail", "panic", or "fatal".
-//   - Evidence: lines containing file:line references.
-//   - Summary: first N non-empty lines (configurable, default 5).
-//   - References: file paths and symbol names extracted from the output.
+// - Facts: lines containing definitions, declarations, or assignments.
+// - Errors: lines containing "error", "fail", "panic", or "fatal".
+// - Evidence: lines containing file:line references.
+// - Summary: first N non-empty lines (configurable, default 5).
+// - References: file paths and symbol names extracted from the output.
 func NormalizeToolResult(tool, raw string, maxSummaryLines int) domain.ToolResultSummary {
 	if maxSummaryLines <= 0 {
 		maxSummaryLines = 5

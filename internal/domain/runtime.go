@@ -44,7 +44,7 @@ const (
 	IncidentFixVerified    IncidentStatus = "FIX_VERIFIED"
 	IncidentPRCreated      IncidentStatus = "PR_CREATED"
 	IncidentClosed         IncidentStatus = "CLOSED"
-	// IncidentFixBlocked indicates the fix pipeline's risk step (Phase 11)
+	// IncidentFixBlocked indicates the fix pipeline's risk step
 	// denied the candidate fix (governance/risk) before verification.
 	IncidentFixBlocked IncidentStatus = "FIX_BLOCKED"
 )
@@ -92,11 +92,11 @@ type Incident struct {
 	// 11). It is set by the fix pipeline's risk step: either the risk level
 	// (e.g. "LOW") when the fix is allowed, or a blocking reason when the fix
 	// was denied before verification.
-	FixRisk string
-	CreatedAt          time.Time
-	UpdatedAt          time.Time
-	Evidence           []Evidence
-	Memories           []Memory
+	FixRisk   string
+	CreatedAt time.Time
+	UpdatedAt time.Time
+	Evidence  []Evidence
+	Memories  []Memory
 	// Claims produced during root-cause analysis (e.g. a Hypothesis per candidate).
 	Claims []Claim
 }

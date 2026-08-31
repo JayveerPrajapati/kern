@@ -1,7 +1,7 @@
 // Package modernization implements the legacy modernization use case
-// (spec §41 lines 3121-3169): "Analyze this monolith and propose a safe
+// "Analyze this monolith and propose a safe
 // extraction plan." It is fully deterministic — reuses intel.Communities,
-// intel.Bridges, intel.Churn for analysis. No LLM (principle 2.3).
+// intel.Bridges, intel.Churn for analysis. No LLM .
 package modernization
 
 import (
@@ -24,12 +24,12 @@ type BoundedContext struct {
 	Cohesion     float64  // 0.0-1.0, internal coupling density
 	OutgoingDeps int      // dependencies on other contexts (lower = better extraction candidate)
 	IncomingDeps int      // dependencies from other contexts (lower = safer to extract)
-	// Ownership is the owning team/owner of the context (Phase 12): derived
+	// Ownership is the owning team/owner of the context
 	// deterministically from the dominant package path prefix (e.g.
 	// "internal/checkout" -> "@checkout"). Empty when undeterminable.
 	Ownership string `json:"ownership,omitempty"`
 	// Dependencies lists the distinct external symbol names this context calls
-	// into (Phase 12 deps), a diagnostic complement to the OutgoingDeps count.
+	// into ( deps), a diagnostic complement to the OutgoingDeps count.
 	Dependencies []string `json:"dependencies,omitempty"`
 }
 
@@ -53,15 +53,14 @@ type ExtractionPhase struct {
 	Migration   string   // migration strategy text
 	Rollback    string   // rollback strategy text
 	Validation  string   // validation steps text
-	// Ownership is the owning team of the extracted context (Phase 12.2).
+	// Ownership is the owning team of the extracted context .
 	Ownership string `json:"ownership,omitempty"`
-	// TaskID is the task that tracks this phase's extraction (Phase 12.3
+	// TaskID is the task that tracks this phase's extraction (
 	// phase-tasks). Set when the phase is materialized as a task.
 	TaskID string `json:"task_id,omitempty"`
 }
 
 // ExtractionPlan is the full phased plan for modernizing a monolith.
-//
 // A plan with empty Contexts/Bridges/Phases but a non-empty Summary indicates
 // the analysis was gated (repo exceeds index.MaxCommunitySymbols); the Summary
 // carries a skip-note explaining why and how to proceed.
@@ -74,12 +73,11 @@ type ExtractionPlan struct {
 
 // Analyzer detects bounded contexts and generates extraction plans.
 // It wraps the intel layer's community/bridge/churn analysis.
-//
 // The reusable intel primitives — intel.Communities, intel.Bridges,
 // intel.Churn — all operate on an *index.Index (the v1 AST index), so the
 // analyzer is constructed from an *index.Index. This keeps the analysis on
 // the deterministic v1 path and avoids reimplementing community or bridge
-// detection (principle 2.3: no LLM).
+// detection .
 type Analyzer struct {
 	ix *index.Index
 }
@@ -112,7 +110,7 @@ func (a *Analyzer) Analyze() (*ExtractionPlan, error) {
 	}
 
 	// 1. Communities -> candidate bounded contexts (intel reuses label
-	//    propagation; no reimplementation here).
+	// propagation; no reimplementation here).
 	communities := intel.Communities(a.ix)
 
 	// symbol full-name -> owning community ID, and community ID -> display name.
@@ -133,7 +131,7 @@ func (a *Analyzer) Analyze() (*ExtractionPlan, error) {
 	}
 
 	// 3. Bridges between contexts (reuses intel.Bridges, which finds symbols
-	//    called from more than one package).
+	// called from more than one package).
 	// intel.Bridges treats limit<=0 as "use default 15" and truncates. The
 	// analyzer wants every coupling bridge so it can derive an accurate risk
 	// level; a large limit avoids silently undercounting bridges (bug: Bridges
@@ -205,7 +203,7 @@ func buildContext(ix *index.Index, c intel.Community) BoundedContext {
 		Cohesion:     cohesion,
 		OutgoingDeps: outgoing,
 		IncomingDeps: incoming,
-		// Phase 12.2: derive ownership from the dominant package path and list
+		// Derive ownership from the dominant package path and list
 		// the external dependency symbols the context calls into.
 		Ownership:    contextOwnership(ix, c.Symbols),
 		Dependencies: contextOutDeps(ix, set),
@@ -416,7 +414,7 @@ func buildPhase(phaseNum int, ctx BoundedContext, bridgeCount int, all []Bridge,
 		Context:     ctx.Name,
 		RiskLevel:   phaseRisk(bridgeCount),
 		BlastRadius: blastRadius(ctx, contexts),
-		// Phase 12.2: carry the context ownership onto its extraction phase.
+		// Carry the context ownership onto its extraction phase.
 		Ownership: ctx.Ownership,
 		Migration: fmt.Sprintf("Extract %s as a separate module. Update imports in %d dependent files.",
 			ctx.Name, ctx.OutgoingDeps),

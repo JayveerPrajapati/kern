@@ -81,7 +81,7 @@ type Node struct {
 	API      *API      // non-nil for "api" nodes
 	Service  *Service  // non-nil for "service" nodes
 	Team     *Team     // non-nil for "team" nodes
-	// TODO(phase 11+): Deployment node kinds.
+	// TODO: Deployment node kinds.
 }
 
 // Edge is an edge in the knowledge graph.
@@ -104,15 +104,15 @@ const (
 )
 
 // CorrelationConfidence is the confidence of a single correlation link or the
-// overall correlation contract (Phase 13.2). A link is FACTUAL when it is
+// overall correlation contract. A link is FACTUAL when it is
 // backed by direct runtime evidence, INFERRED when it is derived from indirect
 // signals, and UNKNOWN when there is no evidence either way.
 type CorrelationConfidence string
 
 const (
-	CorrelationFactual   CorrelationConfidence = "FACTUAL"
-	CorrelationInferred  CorrelationConfidence = "INFERRED"
-	CorrelationUnknown   CorrelationConfidence = "UNKNOWN"
+	CorrelationFactual  CorrelationConfidence = "FACTUAL"
+	CorrelationInferred CorrelationConfidence = "INFERRED"
+	CorrelationUnknown  CorrelationConfidence = "UNKNOWN"
 )
 
 // Claim is a typed claim about the software system. Every high-value analysis
@@ -142,7 +142,7 @@ const (
 	EvidenceTest    EvidenceType = "test"    // test result
 	EvidenceBuild   EvidenceType = "build"   // build result
 	EvidenceGit     EvidenceType = "git"     // commit, diff, history
-	EvidenceRuntime EvidenceType = "runtime" // metrics, traces, logs (Phase 11)
+	EvidenceRuntime EvidenceType = "runtime" // metrics, traces, logs
 	EvidenceMemory  EvidenceType = "memory"  // historical decision/incident
 	EvidencePolicy  EvidenceType = "policy"  // policy evaluation result
 )
@@ -187,21 +187,21 @@ type Memory struct {
 	Provenance      string   // how the memory was derived (e.g. "loop:learn", "human", "incident")
 	RelatedEntities []string // related entity IDs (symbols, tasks, PRs, services)
 
-	// Reason holds the rationale behind a MemoryDecision (spec §8 F-25),
+	// Reason holds the rationale behind a MemoryDecision ,
 	// separate from Content which holds the decision text itself. Empty for
 	// other memory types.
 	Reason string
-	// Classification is the security classification of the memory (spec §41
-	// F-55): "public", "internal", "confidential", or "restricted". Empty
+	// Classification is the security classification of the memory: "public",
+	// "internal", "confidential", or "restricted". Empty
 	// means unclassified (accessible to all).
 	Classification string
-	// Status is the freshness/supersession state of the memory (Phase 15.4):
+	// Status is the freshness/supersession state of the memory :
 	// "current" by default; "superseded" when a newer memory of the same scope
 	// supersedes it; "historical" when it is no longer active but retained.
 	Status MemoryStatus `json:"status,omitempty"`
 }
 
-// MemoryStatus is the supersession state of a memory (Phase 15.4).
+// MemoryStatus is the supersession state of a memory .
 type MemoryStatus string
 
 const (
@@ -217,7 +217,7 @@ const (
 	MemoryHistorical MemoryStatus = "historical"
 )
 
-// Classification levels for Memory (spec §41 F-55). Empty Classification is
+// Classification levels for Memory. Empty Classification is
 // treated as unclassified ("public", level 0).
 const (
 	ClassificationPublic       = "public"
@@ -275,7 +275,7 @@ type Risk struct {
 	ApprovalRequired bool
 }
 
-// PrecheckRequest is the input to the unified policy precheck (Phase 6.4).
+// PrecheckRequest is the input to the unified policy precheck .
 // It carries every dimension the precheck evaluates in one object: the agent
 // identity, the task's resource/action triple, the task scope (paths + envs),
 // and the environment the change would run in. Interfaces (MCP, CLI, REST)
@@ -305,8 +305,7 @@ type PrecheckResult struct {
 }
 
 // Approval is an approval for a high-risk action.
-//
-// Phase 9: the Integration Transformation Plan's Approval Model (§16) requires
+// The Approval Model (§16) requires
 // approval to bind to task, agent, requested action, risk, policy result,
 // evidence, AND artifact — not a bare approved=true. The RiskLevel, PolicyIDs,
 // EvidenceRefs, and ArtifactID fields make the binding explicit so an auditor
@@ -321,7 +320,7 @@ type Approval struct {
 	RequestedAt time.Time
 	DecidedAt   *time.Time
 
-	// Phase 9 binding fields — populate when the approval is requested so the
+	// Binding fields — populate when the approval is requested so the
 	// decision carries full context for audit, resume, and debugging.
 	RiskLevel    RiskLevel // the risk level that triggered the approval gate
 	PolicyIDs    []string  // policy IDs that evaluated to this risk
@@ -335,7 +334,7 @@ type Agent struct {
 	Name      string
 	Type      string // "planner", "coder", "reviewer", "sre", etc.
 	CreatedAt time.Time
-	// TODO(phase 6): Permissions []Permission added with the Phase 6
+	// Permissions []Permission added with the
 	// Permission/AuditEntry entities.
 }
 
@@ -374,7 +373,7 @@ type Task struct {
 	UpdatedAt time.Time
 	// PriorState records the state before BLOCKED, so Resume can return to it.
 	PriorState TaskState
-	// TODO(phase 5): Context *ContextPacket added with the Phase 5 context
+	// Context *ContextPacket added with the context
 	// engine entity.
 }
 
@@ -391,44 +390,43 @@ func (t Task) IsTerminal() bool {
 }
 
 // Plan is the structured implementation plan produced by the control-plane
-// Plan workflow (Integration Transformation Plan Phase 6). It is assembled
+// Plan workflow ( ). It is assembled
 // deterministically from the analyze context packet, impact report, risk
 // assessment, and architecture rules — the LLM may explain it, but the
 // fields are populated from deterministic sources.
-//
 // The 12 fields mirror the spec's Plan artifact contract (§11): Objective,
 // Scope, AffectedComponents, ImplementationSteps, Dependencies, Risk,
 // Rollback, Tests, Security, Architecture, Deployment, Evidence.
 type Plan struct {
-	Objective          string   // what the change achieves
-	Scope              string   // boundary of the change
-	AffectedComponents []string // symbols/files/packages touched
+	Objective           string   // what the change achieves
+	Scope               string   // boundary of the change
+	AffectedComponents  []string // symbols/files/packages touched
 	ImplementationSteps []string // ordered steps to implement
-	Dependencies       []string // upstream changes required
-	Risk               string   // low | medium | high (from risk assessment)
-	Rollback           string   // how to undo
-	Tests              []string // test cases to add/run
-	Security           string   // security considerations
-	Architecture       string   // architecture-rule compliance notes
-	Deployment         string   // deployment considerations
-	Evidence           []string // claim/evidence IDs backing the plan
+	Dependencies        []string // upstream changes required
+	Risk                string   // low | medium | high (from risk assessment)
+	Rollback            string   // how to undo
+	Tests               []string // test cases to add/run
+	Security            string   // security considerations
+	Architecture        string   // architecture-rule compliance notes
+	Deployment          string   // deployment considerations
+	Evidence            []string // claim/evidence IDs backing the plan
 }
 
 // ImpactReport answers the 11 deterministic impact questions from the
-// Integration Transformation Plan Phase 7 (§12). Each field is populated
+// (§12). Each field is populated
 // directly from the knowledge graph — no LLM is the authoritative source.
 // The LLM may explain the results, but the data is deterministic.
 type ImpactReport struct {
-	Target           string   // the symbol the change targets
-	WhoCalls         []string // what calls this
-	WhatItCalls      []string // what does it call
-	ServicesDepend   []string // what services depend on it
-	APIsAffected     []string // which APIs are affected
+	Target             string   // the symbol the change targets
+	WhoCalls           []string // what calls this
+	WhatItCalls        []string // what does it call
+	ServicesDepend     []string // what services depend on it
+	APIsAffected       []string // which APIs are affected
 	DataStoresAffected []string // which data stores are affected
-	EventsAffected   []string // which events are affected
-	TestsCover       []string // which tests cover it
+	EventsAffected     []string // which events are affected
+	TestsCover         []string // which tests cover it
 	DeploymentsRelated []string // which deployments are related
-	IncidentsRelated []string // which incidents are related
+	IncidentsRelated   []string // which incidents are related
 	ArchitectureRules  []string // which architecture rules apply
-	Risk             string   // low | medium | high (from criticality)
+	Risk               string   // low | medium | high (from criticality)
 }

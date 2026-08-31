@@ -4,7 +4,7 @@ import (
 	"testing"
 )
 
-// TestCapabilityDiscoverRanked verifies Phase 6.9 discovery ranks results by
+// TestCapabilityDiscoverRanked verifies discovery ranks results by
 // relevance deterministically.
 func TestCapabilityDiscoverRanked(t *testing.T) {
 	reg := NewCapabilityRegistry()

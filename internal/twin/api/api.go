@@ -64,14 +64,13 @@ type routePattern struct {
 // pattern is written so that a given route line matches at most one
 // framework, avoiding duplicate API nodes with colliding IDs. Capture
 // groups are normalized per framework in extractFile:
-//
-//	gin:        group 1 = method, group 2 = path,   group 3 = handler
-//	express:    group 1 = method, group 2 = path,   group 3 = handler
-//	flask:      group 1 = path
-//	django:     group 1 = path,   group 2 = handler
-//	fastapi:    group 1 = method, group 2 = path
-//	spring:     group 1 = method, group 2 = path
-//	net/http:   group 1 = path,   group 2 = handler
+// gin:        group 1 = method, group 2 = path,   group 3 = handler
+// express:    group 1 = method, group 2 = path,   group 3 = handler
+// flask:      group 1 = path
+// django:     group 1 = path,   group 2 = handler
+// fastapi:    group 1 = method, group 2 = path
+// spring:     group 1 = method, group 2 = path
+// net/http:   group 1 = path,   group 2 = handler
 var routePatterns = []routePattern{
 	// Gin/Echo (Go): r.GET("/path", handler) or r.POST("/path", handler).
 	{framework: "gin", regex: regexp.MustCompile(`\.(GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS)\(\s*"([^"]+)"\s*,\s*(\w+)`)},

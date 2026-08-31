@@ -7,13 +7,13 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/domain"
 )
 
-// TestReplayTaskMetadata verifies Phase 16.3: replay metadata (repo version,
+// TestReplayTaskMetadata verifies replay metadata (repo version,
 // model, config hash) is captured and the reconstructed task carries context.
 func TestReplayTaskMetadata(t *testing.T) {
 	if testing.Short() {
 		t.Skip("slow e2e; skipped with -short")
 	}
-	p, err := New("../..")
+	p, err := NewWithIndex("../..", sharedTestRepoIndex(t))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -42,13 +42,13 @@ func TestReplayTaskMetadata(t *testing.T) {
 	}
 }
 
-// TestRunCompare verifies Phase 16.4 run-compare reports artifact/state
+// TestRunCompare verifies run-compare reports artifact/state
 // differences between two task runs.
 func TestRunCompare(t *testing.T) {
 	if testing.Short() {
 		t.Skip("slow e2e; skipped with -short")
 	}
-	p, err := New("../..")
+	p, err := NewWithIndex("../..", sharedTestRepoIndex(t))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -75,13 +75,13 @@ func TestRunCompare(t *testing.T) {
 	}
 }
 
-// TestResumeReconstructsContext verifies Phase 16.2: resuming a task
+// TestResumeReconstructsContext verifies resuming a task
 // reconstructs its ContextPacket so the resumed task is not a shell.
 func TestResumeReconstructsContext(t *testing.T) {
 	if testing.Short() {
 		t.Skip("slow e2e; skipped with -short")
 	}
-	p, err := New("../..")
+	p, err := NewWithIndex("../..", sharedTestRepoIndex(t))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -115,14 +115,14 @@ func TestResumeReconstructsContext(t *testing.T) {
 	_ = task
 }
 
-// TestResumeReconstructsRichSnapshotContext verifies Phase 16.2's richer
+// TestResumeReconstructsRichSnapshotContext verifies richer
 // reconstruction: resuming a task layers the persisted context snapshot (goal /
 // decisions / constraints / risks) onto the reconstructed ContextPacket.
 func TestResumeReconstructsRichSnapshotContext(t *testing.T) {
 	if testing.Short() {
 		t.Skip("slow e2e; skipped with -short")
 	}
-	p, err := New("../..")
+	p, err := NewWithIndex("../..", sharedTestRepoIndex(t))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -163,13 +163,13 @@ func TestResumeReconstructsRichSnapshotContext(t *testing.T) {
 	_ = task
 }
 
-// TestReplayTaskRecordsMetadataAndReplayRecord verifies Phase 16.3: ReplayTask
+// TestReplayTaskRecordsMetadataAndReplayRecord verifies ReplayTask
 // records repo version, model, config hash, and a replayed-at timestamp.
 func TestReplayTaskRecordsMetadataAndReplayRecord(t *testing.T) {
 	if testing.Short() {
 		t.Skip("slow e2e; skipped with -short")
 	}
-	p, err := New("../..")
+	p, err := NewWithIndex("../..", sharedTestRepoIndex(t))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -195,18 +195,29 @@ func TestReplayTaskRecordsMetadataAndReplayRecord(t *testing.T) {
 	if rec.ConfigHash != "cfg-abc" {
 		t.Errorf("ConfigHash = %q, want cfg-abc", rec.ConfigHash)
 	}
+	// Context + tool versions must be derived from the task's own
+	// context packet and step actions.
+	if rec.ContextVersion == "" {
+		t.Error("ContextVersion empty — the replayed context digest must be recorded (16.3)")
+	}
+	if len(rec.ContextVersion) != 16 {
+		t.Errorf("ContextVersion = %q, want a 16-char digest", rec.ContextVersion)
+	}
+	if rec.ToolVersions == "" {
+		t.Error("ToolVersions empty — the tool-surface digest must be recorded (16.3)")
+	}
 	if rec.ReplayedAt.IsZero() {
 		t.Error("ReplayedAt should be set")
 	}
 }
 
-// TestRunComparePopulatesRichDimensions verifies Phase 16.4: RunCompare
+// TestRunComparePopulatesRichDimensions verifies RunCompare
 // populates the richer run dimensions (agent, tool-call proxy, cost, success).
 func TestRunComparePopulatesRichDimensions(t *testing.T) {
 	if testing.Short() {
 		t.Skip("slow e2e; skipped with -short")
 	}
-	p, err := New("../..")
+	p, err := NewWithIndex("../..", sharedTestRepoIndex(t))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}

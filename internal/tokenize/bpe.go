@@ -1,5 +1,4 @@
 // Byte-level BPE tokenizer (GPT-2 style), self-contained and deterministic.
-//
 // Unlike the Estimator, BPECounter performs a real byte-pair encoding: a merge
 // table is trained once from a bundled multilingual corpus (no network, no
 // files), then any input is segmented by the standard lowest-rank merge

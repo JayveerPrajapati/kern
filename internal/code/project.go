@@ -16,6 +16,7 @@ type Project struct {
 	Files    []Summary `json:"files"`
 	Ignored  int       `json:"ignored"`
 	CacheHit int       `json:"cache_hit"`
+	Capped   bool      `json:"capped,omitempty"` // maxFiles cap reached during build
 }
 
 var ignoreDirs = map[string]bool{
@@ -61,6 +62,7 @@ func BuildProject(root string, maxFiles, maxSymbolsPerFile int) (*Project, error
 			return nil
 		}
 		if len(p.Files) >= maxFiles {
+			p.Capped = true
 			return filepath.SkipAll
 		}
 		if shouldIgnore(rel) || ig.Ignored(rel) {
@@ -137,6 +139,14 @@ func (p *Project) Render() string {
 	b.WriteString(" (")
 	b.WriteString(itoa(len(p.Files)))
 	b.WriteString(" files")
+	if p.Ignored > 0 {
+		b.WriteString(", ")
+		b.WriteString(itoa(p.Ignored))
+		b.WriteString(" ignored")
+	}
+	if p.Capped {
+		b.WriteString(", file cap reached (raise max_files)")
+	}
 	if p.CacheHit > 0 {
 		b.WriteString(", ")
 		b.WriteString(itoa(p.CacheHit))

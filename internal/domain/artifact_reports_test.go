@@ -8,7 +8,7 @@ import (
 )
 
 // TestNewArtifactKindsCovered verifies every ArtifactKind constant is backed by
-// a concrete struct type (either an existing domain type or one of the Phase 3.1
+// a concrete struct type (either an existing domain type or one of the
 // report types). This proves the artifact contract is fully covered.
 func TestNewArtifactKindsCovered(t *testing.T) {
 	// kind -> concrete struct type name.

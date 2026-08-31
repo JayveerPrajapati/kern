@@ -91,7 +91,7 @@ func TestEfficiencyReportInsufficient(t *testing.T) {
 	}
 }
 
-// TestEfficiencyReportExtendedFields verifies the Phase 17.6 extended report
+// TestEfficiencyReportExtendedFields verifies the extended report
 // fields: baseline tokens, tool-call reduction, retry reduction, cost, and
 // verified success are all deterministically derived from task state.
 func TestEfficiencyReportExtendedFields(t *testing.T) {
@@ -140,7 +140,7 @@ func TestVerifiedSuccess(t *testing.T) {
 }
 
 // TestCompareRuns verifies CompareRuns diffs two fabricated runs on context,
-// tools, retries, cost, latency, and success (Phase 16.4).
+// tools, retries, cost, latency, and success .
 func TestCompareRuns(t *testing.T) {
 	a := RunSummary{Agent: "ag", Model: "m1", KernTokens: 1000, TokenReduction: 75, ToolCalls: 4, Retries: 2, Cost: 0.5, LatencyMs: 1200, Success: false}
 	b := RunSummary{Agent: "ag", Model: "m2", KernTokens: 500, TokenReduction: 90, ToolCalls: 2, Retries: 0, Cost: 0.25, LatencyMs: 600, Success: true}
