@@ -1,0 +1,47 @@
+name: ci
+on:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Vet
+        run: go vet ./...
+      - name: Format
+        run: test -z "$(gofmt -l .)" || { echo "gofmt needed on:"; gofmt -l .; exit 1; }
+      - name: Test
+        run: go test ./...
+      - name: Test (sqlite tags)
+        run: go test -tags sqlite ./internal/index/... ./internal/doctor/...
+      - name: Test (treesitter tags)
+        run: CGO_ENABLED=1 go test -tags treesitter ./internal/index/... ./internal/doctor/...
+      - name: Build all binaries
+        run: |
+          go build -buildvcs=false -o "$RUNNER_TEMP/kern" ./cmd/kern
+          go build -buildvcs=false -o "$RUNNER_TEMP/kern-mcp" ./cmd/kern-mcp
+          go build -buildvcs=false -o "$RUNNER_TEMP/kern-server" ./cmd/kern-server
+      # `make release` and release.yml build with -tags sqlite; make sure that
+      # configuration compiles end-to-end in CI too (output to /dev/null since
+      # we only need to verify it compiles, not cache the binary).
+      - name: Build all binaries (sqlite tags)
+        run: |
+          go build -buildvcs=false -tags sqlite -o /dev/null ./cmd/kern
+          go build -buildvcs=false -tags sqlite -o /dev/null ./cmd/kern-mcp
+          go build -buildvcs=false -tags sqlite -o /dev/null ./cmd/kern-server
+      # Race detector over the concurrency-sensitive packages (covers the
+      # agent registry / in-flight tool / lock lifecycle races). Scoped to
+      # keep the full -race ./... suite from slowing CI. The -timeout is sized
+      # for the race run: internal/app alone is ~3min without -race and
+      # exceeds the default 10m cap under instrumentation.
+      - name: Test (race detector)
+        run: go test -race -timeout 40m ./internal/governance/... ./internal/mcp/... ./internal/app/... ./internal/web/...
+      - name: MCP catalog parity
+        run: go test ./internal/setup/ -run TestPluginMatchesMCPCatalog -count=1

@@ -42,7 +42,9 @@ jobs:
           cache: false
 
       - name: Build kern from checkout
-        run: go build -buildvcs=false -o "$RUNNER_TEMP/kern" ./cmd/kern
+        run: |
+          go build -buildvcs=false -o "$RUNNER_TEMP/kern" ./cmd/kern
+          go build -buildvcs=false -o "$RUNNER_TEMP/kern-server" ./cmd/kern-server
 
       # Run the same reusable code-review action on the release tag that runs
       # on PRs, so a release is reviewed against main before it ships. `comment`
@@ -98,11 +100,14 @@ jobs:
           dir="${{ steps.vars.outputs.dir }}"
           mkdir -p "$dir"
           GOOS="$os" GOARCH="$arch" CGO_ENABLED=0 \
-            go build -buildvcs=false -ldflags "-X main.version=${{ steps.vars.outputs.tag }}" \
+            go build -buildvcs=false -tags sqlite -ldflags "-X main.version=${{ steps.vars.outputs.tag }}" \
             -o "$dir/kern" ./cmd/kern
           GOOS="$os" GOARCH="$arch" CGO_ENABLED=0 \
-            go build -buildvcs=false -ldflags "-X main.version=${{ steps.vars.outputs.tag }}" \
+            go build -buildvcs=false -tags sqlite -ldflags "-X main.version=${{ steps.vars.outputs.tag }}" \
             -o "$dir/kern-mcp" ./cmd/kern-mcp
+          GOOS="$os" GOARCH="$arch" CGO_ENABLED=0 \
+            go build -buildvcs=false -tags sqlite -ldflags "-X main.version=${{ steps.vars.outputs.tag }}" \
+            -o "$dir/kern-server" ./cmd/kern-server
 
       - name: Package (tar.gz, or zip for windows)
         shell: bash
@@ -113,6 +118,7 @@ jobs:
           if [ "$os" = "windows" ]; then
             mv "$dir/kern" "$dir/kern.exe"
             mv "$dir/kern-mcp" "$dir/kern-mcp.exe"
+            mv "$dir/kern-server" "$dir/kern-server.exe"
             zip -q -r "kern-$os-$arch.zip" "$dir"
           else
             tar -czf "kern-$os-$arch.tar.gz" "$dir"

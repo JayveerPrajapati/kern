@@ -3,7 +3,7 @@
   "mcp": {
     "kern": {
       "command": [
-        "$HOME/.local/bin/kern-mcp"
+        "kern-mcp"
       ],
       "enabled": true,
       "type": "local"

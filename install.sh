@@ -75,24 +75,26 @@ go_install() {
   echo "kern: falling back to 'go install github.com/${REPO}/cmd/kern@${VERSION}'"
   go install "github.com/${REPO}/cmd/kern@${VERSION}"
   go install "github.com/${REPO}/cmd/kern-mcp@${VERSION}"
+  go install "github.com/${REPO}/cmd/kern-server@${VERSION}"
   # go install places both into $(go env GOPATH)/bin, which is frequently NOT
   # on PATH and NOT the requested PREFIX. Copy both into PREFIX so the rest of
   # the install (PATH check, auto-wire, auto-index) sees them at the canonical
   # location — otherwise a go_install fallback silently never wires into agents.
   gobin="$(go env GOPATH)/bin"
-  if [ -f "$gobin/kern" ] && [ -f "$gobin/kern-mcp" ]; then
+  if [ -f "$gobin/kern" ] && [ -f "$gobin/kern-mcp" ] && [ -f "$gobin/kern-server" ]; then
     mkdir -p "$PREFIX"
     cp "$gobin/kern" "$PREFIX/kern"
     cp "$gobin/kern-mcp" "$PREFIX/kern-mcp"
-    chmod +x "$PREFIX/kern" "$PREFIX/kern-mcp"
+    cp "$gobin/kern-server" "$PREFIX/kern-server"
+    chmod +x "$PREFIX/kern" "$PREFIX/kern-mcp" "$PREFIX/kern-server"
     # macOS quarantine/signing: same treatment as the prebuilt path so a
     # go-installed kern-mcp is also runnable by agents on first launch.
     if [ "$(uname -s)" = "Darwin" ]; then
       if command -v xattr >/dev/null 2>&1; then
-        xattr -dr com.apple.quarantine "$PREFIX/kern" "$PREFIX/kern-mcp" 2>/dev/null || true
+        xattr -dr com.apple.quarantine "$PREFIX/kern" "$PREFIX/kern-mcp" "$PREFIX/kern-server" 2>/dev/null || true
       fi
       if command -v codesign >/dev/null 2>&1; then
-        codesign --force --sign - "$PREFIX/kern" "$PREFIX/kern-mcp" 2>/dev/null || true
+        codesign --force --sign - "$PREFIX/kern" "$PREFIX/kern-mcp" "$PREFIX/kern-server" 2>/dev/null || true
       fi
     fi
     echo "kern: copied binaries to $PREFIX (go install output was in $gobin)."
@@ -127,13 +129,8 @@ wire() {
     echo "kern: auto-wiring skipped (no agents detected or setup failed)."
     echo "  run 'kern setup --detect --global' manually in your project root."
   fi
-  echo
-  # Auto-index the project so graph commands (walk, path, hubs, ...) work
-  # immediately without a cold start on first use.
-  echo "indexing project (first run may take a minute)..."
-  "$kern_bin" index "$proj_root" 2>&1 || true
-  echo
-  return 0
+echo
+return 0
 }
 
 # verify checks the downloaded tarball against the release's SHA256SUMS asset.
@@ -215,13 +212,14 @@ main() {
   fi
   cp "$tmpdir/kern-${platform}/kern${exe}" "$PREFIX/kern${exe}"
   cp "$tmpdir/kern-${platform}/kern-mcp${exe}" "$PREFIX/kern-mcp${exe}"
-  chmod +x "$PREFIX/kern${exe}" "$PREFIX/kern-mcp${exe}"
+  cp "$tmpdir/kern-${platform}/kern-server${exe}" "$PREFIX/kern-server${exe}"
+  chmod +x "$PREFIX/kern${exe}" "$PREFIX/kern-mcp${exe}" "$PREFIX/kern-server${exe}"
 
   # macOS Gatekeeper kills unsigned binaries with SIGKILL (exit 137) even
   # though os.Stat sees the file; re-sign with an ad-hoc signature so the
   # copy is executable.
   if [ "${platform%-*}" = "darwin" ] && command -v codesign >/dev/null 2>&1; then
-    codesign --force --sign - "$PREFIX/kern" "$PREFIX/kern-mcp"
+    codesign --force --sign - "$PREFIX/kern" "$PREFIX/kern-mcp" "$PREFIX/kern-server"
   fi
   # macOS quarantine: the downloaded tarball carries the com.apple.quarantine
   # xattr, which Gatekeeper propagates onto the extracted copies. codesign alone
@@ -230,12 +228,12 @@ main() {
   # release install to actually run. Best-effort (xattr may not exist on all
   # platforms / filesystems).
   if [ "${platform%-*}" = "darwin" ] && command -v xattr >/dev/null 2>&1; then
-    xattr -dr com.apple.quarantine "$PREFIX/kern" "$PREFIX/kern-mcp" 2>/dev/null || true
+    xattr -dr com.apple.quarantine "$PREFIX/kern" "$PREFIX/kern-mcp" "$PREFIX/kern-server" 2>/dev/null || true
   fi
 
   echo "installed: $PREFIX/kern${exe} ($tag)"
 
-  # Ensure the install dir is on PATH so `kern` / `kern-mcp` run from anywhere
+  # Ensure the install dir is on PATH so `kern` / `kern-mcp` / `kern-server` run from anywhere
   # and agents auto-launch the MCP server by bare name. Best-effort, idempotent:
   # only appends the export line once per shell rc, never duplicates, and honors
   # a per-run opt-out (KERN_NO_PATH=1).
@@ -254,13 +252,13 @@ main() {
   # it — a fallback install must wire agents exactly like a prebuilt one.
   wire "$PREFIX/kern${exe}"
 
-  echo "kern is ready. Use 'kern buddy' for a project onboarding digest."
+  echo "kern is ready. Open your project in any agent — it auto-indexes on first use."
   echo "  (run from your project root; 'kern setup --check' shows current wiring)"
 }
 
 # ensure_path appends `export PATH="$PREFIX:$PATH"` to the user's shell rc files
 # (idempotently — one line per rc, only when the dir is not already present).
-# This makes `kern` / `kern-mcp` reachable from any directory and lets agents
+# This makes `kern` / `kern-mcp` / `kern-server` reachable from any directory and lets agents
 # resolve the global MCP server by name after an upgrade. Best-effort: files
 # that cannot be written are skipped with a note, never fatal.
 ensure_path() {

@@ -5,10 +5,8 @@
 // (github.com/tirth8205/code-review-graph): kern reports its own numbers as
 // token-reduction vs. the raw input — never as a LOC->LLM-input ratio — and
 // every sample corpus is deterministic and shipped in this file.
-//
 // Run:  go run ./evaluate/bench  (from the repo root)
 // Flags: -root DIR   use DIR's docs for the retrieval-recall test
-//
 // Exit code is 0 when every hard gate passes, 1 otherwise.
 package main
 
@@ -30,11 +28,10 @@ import (
 // deterministic path is line-structured, so samples use realistic multi-line
 // inputs — a wall-of-text single paragraph is a degenerate case for every
 // line-based optimizer, not just kern.
-//
-// Phase 17 fixture matrix: every fixture and task-type corpus below is a fixed
+// Fixture matrix: every fixture and task-type corpus below is a fixed
 // string in this file (a hard contract — no network, no on-disk fixtures beyond
 // the docsearch index). Sizes are chosen to be genuinely different scales so the
-// matrix proves the Phase 17 gate is real: small < medium < large by line count.
+// matrix proves the gate is real: small < medium < large by line count.
 const verbosePrompt = `Hello! I hope you're doing well today. I was wondering if you could help me out with something.
 
 I'm trying to debug why my Go service is not starting up. The service is called billing-worker and it lives at internal/worker/billing.go.
@@ -87,7 +84,7 @@ created by os.StartProcess in /usr/bin/billing-worker
 `
 
 // ---------------------------------------------------------------------------
-// Phase 17 fixture matrix — 6 deterministic fixture corpora. Each represents a
+// Fixture matrix — 6 deterministic fixture corpora. Each represents a
 // required benchmark fixture type. They are synthetic but realistic source
 // blobs sized to their category and shipped inline (never network-sourced).
 // They do not need to compile; they are benchmark input for the token-reduction
@@ -430,9 +427,9 @@ import (
 )
 
 // proto/order.proto (contract)
-//   message OrderRequest { string id = 1; string customer = 2; }
-//   message OrderReply  { string status = 1; repeated string line = 2; }
-//   service Order { rpc Create(OrderRequest) returns (OrderReply); }
+// message OrderRequest { string id = 1; string customer = 2; }
+// message OrderReply  { string status = 1; repeated string line = 2; }
+// service Order { rpc Create(OrderRequest) returns (OrderReply); }
 
 type Order struct {
 	ID       string
@@ -513,7 +510,6 @@ func (r *bytesReaderT) Read(p []byte) (int, error) { copy(p, r.b); return len(r.
 // out blocks, mixed patterns, no interfaces.
 const fixtureLegacySystem = `// legacy_billing.c_shim — legacy order-billing module.
 // TODO: remove after migration to the new service.
-//
 // WARNING: this module uses global state and is not covered by tests.
 // Do not refactor without a safety net.
 
@@ -549,9 +545,9 @@ func BillCustomer(customerID string, amount int) error {
 
 // ---- commented out for now ----
 // func oldBill(customerID string, amount int) {
-//     // previous implementation, kept for reference
-//     total := amount * 100
-//     log.Printf("billing old path for %s = %d", customerID, total)
+// // previous implementation, kept for reference
+// total := amount * 100
+// log.Printf("billing old path for %s = %d", customerID, total)
 // }
 
 // -- this file intentionally contains mixed indentation and no tests --
@@ -639,7 +635,7 @@ export const createOrder = (o: Order): Promise<Order> =>
 `
 
 // ---------------------------------------------------------------------------
-// Phase 17 task types — 8 deterministic prompts matched to a fixture.
+// Task types — 8 deterministic prompts matched to a fixture.
 // ---------------------------------------------------------------------------
 const taskLookup = "Where is the UserService defined?"
 const taskExplain = "Explain how the billing worker connects to the database."
@@ -658,7 +654,7 @@ type metric struct {
 	gate float64 // minimum % reduction the harness expects; 0 = informational
 }
 
-// classMetrics is the Phase 17.3 per-task-class metric set the harness reports
+// classMetrics is the per-task-class metric set the harness reports
 // for a (fixture, task) pair through the deterministic optimize.Prompt surface.
 // Every value is derived offline — no live LLM.
 type classMetrics struct {
@@ -679,7 +675,7 @@ type classMetrics struct {
 }
 
 // measureClass runs one (fixture, task) pair through optimize.Prompt and
-// derives the full Phase 17.3 metric set deterministically. retryFactor selects
+// derives the full metric set deterministically. retryFactor selects
 // how aggressively the class retries (0 = never, higher = more retries), letting
 // tests exercise the retry/regression outcome paths offline.
 func measureClass(f fixture, t task, retryFactor int) classMetrics {
@@ -725,7 +721,7 @@ func measureClass(f fixture, t task, retryFactor int) classMetrics {
 	return m
 }
 
-// TaskClassMetrics returns the Phase 17.3 metric set for the "small change"
+// TaskClassMetrics returns the metric set for the "small change"
 // task class across every fixture, and for a named task class when given. It is
 // the harness's deterministic per-task-class report.
 func taskClassMetrics() []classMetrics {
@@ -763,7 +759,7 @@ func main() {
 	gates = checkGates(rows)
 	fmt.Println()
 
-	// Phase 17 fixture x task-type matrix. Rows are informational (gate=0) but
+	// Fixture x task-type matrix. Rows are informational (gate=0) but
 	// prove every (fixture, task) pair is measured through a compression surface.
 	fmt.Println("## fixture x task-type matrix")
 	fmt.Println()
@@ -772,7 +768,7 @@ func main() {
 	printMatrixCoverage()
 	fmt.Println()
 
-	// Phase 17.3 per-task-class metric set: token/tool-call/retry reduction,
+	// Per-task-class metric set: token/tool-call/retry reduction,
 	// latency, cost, and task outcomes — all derived offline.
 	fmt.Println("## task-class metrics")
 	fmt.Println()
@@ -859,7 +855,7 @@ func checkGates(rows []metric) []string {
 }
 
 // ---------------------------------------------------------------------------
-// Phase 17 fixture matrix data. The six fixture corpora and eight task prompts
+// Fixture matrix data. The six fixture corpora and eight task prompts
 // are the consts above; these slices are the fixed wiring that the harness runs.
 // ---------------------------------------------------------------------------
 
@@ -938,13 +934,13 @@ func runMatrix() []string {
 	return gates
 }
 
-// printMatrixCoverage prints the Phase 17 coverage line: 6/6 fixtures, 8/8 tasks.
+// printMatrixCoverage prints the coverage line: 6/6 fixtures, 8/8 tasks.
 func printMatrixCoverage() {
 	fmt.Printf("_Phase 17 fixture coverage: %d/%d fixture types and %d/%d task types present; every (fixture, task) pair measured through optimize.Prompt._\n",
 		len(fixtures), len(fixtures), len(tasks), len(tasks))
 }
 
-// reportClassMetrics prints the Phase 17.3 per-task-class metric set and
+// reportClassMetrics prints the per-task-class metric set and
 // returns any hard-gate failures (informational here, so always empty).
 func reportClassMetrics() []string {
 	fmt.Println("| fixture | task | tokens(before/after) | tok% | tools | tool% | retries | latency(ms) | cost | first-pass | verified | human | regression |")
