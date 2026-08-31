@@ -38,7 +38,6 @@ type DeleteReport struct {
 // AST scan so a symbol that is genuinely in use but not "called" is still
 // unsafe to delete. Dynamic references and usage outside the indexed project
 // are invisible, so an exported symbol is always unsafe.
-//
 // Known limitation: a method reached only through interface dispatch
 // (`var i I = impl; i.M()`) may be in use even with no visible reference at
 // all, because the index does not model which methods satisfy an interface.

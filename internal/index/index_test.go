@@ -27,6 +27,52 @@ func writeTree(t *testing.T, files map[string]string) string {
 	return dir
 }
 
+// TestBuildPopulatesImportsByFile: Build must record per-file imports so
+// guard's import-level boundary check can attribute a forbidden import to the
+// file that actually imports it, while package-aggregated Pkgs[dir].Imports
+// stays intact for existing JSON consumers.
+func TestBuildPopulatesImportsByFile(t *testing.T) {
+	dir := writeTree(t, map[string]string{
+		"db/db.go": `package db
+
+func Get() {}
+`,
+		"web/web.go": `package web
+
+import "example.com/repo/db"
+
+func UseDB() {}
+`,
+		"web/clean.go": `package web
+
+func Clean() {}
+`,
+	})
+	ix, err := Build(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ix.ImportsByFile == nil {
+		t.Fatal("ImportsByFile must be non-nil after Build")
+	}
+	webImports := ix.ImportsByFile["web/web.go"]
+	if len(webImports) != 1 || webImports[0] != "example.com/repo/db" {
+		t.Errorf("web/web.go imports = %v, want [example.com/repo/db]", webImports)
+	}
+	clean, ok := ix.ImportsByFile["web/clean.go"]
+	if !ok {
+		t.Fatal("web/clean.go must be present in ImportsByFile (indexed, no imports)")
+	}
+	if len(clean) != 0 {
+		t.Errorf("web/clean.go imports = %v, want empty", clean)
+	}
+	// Package-aggregated imports must remain intact for JSON consumers
+	// (e.g. blueprint's java import coverage warning reads packages[].imports).
+	if got := ix.Pkgs["web"].Imports; len(got) != 1 || got[0] != "example.com/repo/db" {
+		t.Errorf("Pkgs[web].Imports = %v, want [example.com/repo/db]", got)
+	}
+}
+
 const srcMain = `package main
 
 import "strings"

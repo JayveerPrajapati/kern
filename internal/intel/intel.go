@@ -263,9 +263,30 @@ func localCalleesWith(ix *index.Index, sym string, local map[string]bool) []stri
 // BlastRadius returns the transitive reverse closure of callers for the given
 // roots: every symbol that (directly or transitively) calls one of the roots.
 // The returned map records each symbol's distance from the nearest root.
+// Default precision: all edges are trusted.
 func BlastRadius(ix *index.Index, roots []string) ([]string, map[string]int) {
+	reach, dist, _ := BlastRadiusPrecise(ix, roots, false)
+	return reach, dist
+}
+
+// BlastRadiusPrecise is BlastRadius with a precision mode. When strict is
+// true, call edges whose caller language is not "resolved"-precision in the
+// index (ix.PrecisionByLang) are skipped: the caller is reported as unknown
+// rather than guessed into the blast radius. The third return value is the
+// number of heuristic edges skipped.
+func BlastRadiusPrecise(ix *index.Index, roots []string, strict bool) ([]string, map[string]int, int) {
 	visited := map[string]int{}
 	queue := make([]string, 0, len(roots))
+	skipped := 0
+	var langByFull map[string]string
+	if strict {
+		langByFull = map[string]string{}
+		for _, s := range ix.Symbols {
+			if _, ok := langByFull[s.FullName()]; !ok {
+				langByFull[s.FullName()] = s.Lang
+			}
+		}
+	}
 	for _, r := range roots {
 		if r == "" {
 			continue
@@ -279,6 +300,14 @@ func BlastRadius(ix *index.Index, roots []string) ([]string, map[string]int) {
 		cur := queue[0]
 		queue = queue[1:]
 		for _, caller := range ix.Callers[cur] {
+			if strict {
+				// Strict precision: an edge whose caller language is not fully
+				// resolved is unknown, not guessable, so the caller is skipped.
+				if p := ix.PrecisionByLang[langByFull[caller]]; p != "resolved" {
+					skipped++
+					continue
+				}
+			}
 			if _, ok := visited[caller]; !ok {
 				visited[caller] = visited[cur] + 1
 				queue = append(queue, caller)
@@ -290,7 +319,7 @@ func BlastRadius(ix *index.Index, roots []string) ([]string, map[string]int) {
 		out = append(out, s)
 	}
 	sort.Strings(out)
-	return out, visited
+	return out, visited, skipped
 }
 
 // AffectedFiles returns the distinct files touched by a set of symbols.

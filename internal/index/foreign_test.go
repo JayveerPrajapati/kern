@@ -965,3 +965,65 @@ end
 		t.Fatalf("expected real to call helper, got %v", calls["real"])
 	}
 }
+
+func TestForeignImportsJava(t *testing.T) {
+	src := `package com.rakuten.rcp.cloudadapter.config;
+
+import org.springframework.context.annotation.Configuration;
+import static com.rakuten.rcp.cloudadapter.commons.vault.VaultUtil.login;
+import com.rakuten.rcp.cloudadapter.commons.vault.*;
+import com.rakuten.rcp.cloudadapter.commons.utils.Strings;
+
+@Configuration
+public class Config {
+}
+`
+	imports := foreignImports([]byte(src), "java")
+	want := []string{
+		"org.springframework.context.annotation",
+		"com.rakuten.rcp.cloudadapter.commons.vault",
+		"com.rakuten.rcp.cloudadapter.commons.vault",
+		"com.rakuten.rcp.cloudadapter.commons.utils",
+	}
+	if len(imports) != len(want) {
+		t.Fatalf("expected %d imports, got %d: %v", len(want), len(imports), imports)
+	}
+	for i, w := range want {
+		if imports[i] != w {
+			t.Errorf("import[%d] = %q, want %q", i, imports[i], w)
+		}
+	}
+}
+
+func TestForeignImportsNonJava(t *testing.T) {
+	// Import extraction currently covers Java only; other languages must
+	// return nil (no imports) so their existing behavior is unchanged.
+	if imports := foreignImports([]byte("import babel from '@babel/core'\n"), "javascript"); imports != nil {
+		t.Errorf("javascript should have no import extraction, got %v", imports)
+	}
+	if imports := foreignImports([]byte("import os\n"), "python"); imports != nil {
+		t.Errorf("python should have no import extraction, got %v", imports)
+	}
+}
+
+func TestExtractForeignPopulatesJavaImports(t *testing.T) {
+	src := `package com.rakuten.rcp.cloudadapter.config;
+import com.rakuten.rcp.cloudadapter.commons.vault.IVaultService;
+public class Config {
+    IVaultService svc;
+}
+`
+	syms, _, _, pkg, err := extractForeign("Config.java", []byte(src), "java")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(syms) == 0 {
+		t.Fatal("expected symbols from java file")
+	}
+	if pkg == nil {
+		t.Fatal("expected a package")
+	}
+	if len(pkg.Imports) != 1 || pkg.Imports[0] != "com.rakuten.rcp.cloudadapter.commons.vault" {
+		t.Errorf("pkg.Imports = %v, want the vault package", pkg.Imports)
+	}
+}

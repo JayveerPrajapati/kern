@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -18,7 +19,7 @@ import (
 
 // indexVersion is bumped whenever the persisted index schema changes, so
 // stale caches are rebuilt automatically instead of serving zero-value fields.
-const indexVersion = 9
+const indexVersion = 11
 
 // maxFileBytes is the largest file the index will read into memory and scan.
 // Larger files (e.g. generated .json, bundled .min.js) are skipped to avoid
@@ -39,35 +40,54 @@ type Index struct {
 	// Inherits maps a subtype's full name to its bases, each tagged with the
 	// edge kind ("extends:Animal", "implements:Pet", "embeds:Base"). InheritedBy
 	// is the reverse map (base -> subtypes) for find-implementations queries.
-	Inherits       map[string][]string `json:"inherits,omitempty"`
-	InheritedBy    map[string][]string `json:"inherited_by,omitempty"`
-	Pkgs           map[string]*Pkg     `json:"packages"`
+	Inherits    map[string][]string `json:"inherits,omitempty"`
+	InheritedBy map[string][]string `json:"inherited_by,omitempty"`
+	Pkgs        map[string]*Pkg     `json:"packages"`
+	// ImportsByFile maps a source file (relative path) to the imports of that
+	// exact file. Unlike Pkgs[dir].Imports (package-aggregated), attribution is
+	// per file, so guard's import-level boundary check can tell which changed
+	// file actually imports a forbidden package. Populated by Build/extract;
+	// absent in indexes written by older kern (guard then no-ops the
+	// import-level check per file, fail-open).
+	ImportsByFile  map[string][]string `json:"imports_by_file,omitempty"`
 	FileHashes     map[string]string   `json:"file_hashes"`
 	GeneratedFiles map[string]bool     `json:"generated_files,omitempty"`
 	// Communities maps a symbol full name to its community label, populated by
 	// the SQLite store's Load and by CommunityLabels on demand.
-	Communities   map[string]string   `json:"communities,omitempty"`
-	SymbolsByFile map[string][]Symbol `json:"-"`
-	UpdatedAt     time.Time           `json:"updated_at"`
+	Communities map[string]string `json:"communities,omitempty"`
+	// PrecisionByLang records the highest edge-precision tier achieved per
+	// language in this index. Values: "resolved" (cross-file binding
+	// resolution via go/ast), "ast" (per-file AST/tree-sitter extraction,
+	// name-heuristic cross-file), "heuristic" (regex). Drives --precision strict.
+	PrecisionByLang map[string]string   `json:"precision_by_lang,omitempty"`
+	SymbolsByFile   map[string][]Symbol `json:"-"`
+	UpdatedAt       time.Time           `json:"updated_at"`
 	// MaxMtime is the largest file modification time (Unix nanos) at build time.
 	// Stale() uses it as a cheap generation gate before the exact hash check.
 	MaxMtime int64 `json:"max_mtime,omitempty"`
+	// Identity records the content-addressed build-time identity (content
+	// root hash + best-effort git tree/commit). FreshnessProof/Stale compare
+	// the live tree against it. Populated by Build; nil for indexes built by
+	// older kern or hand-constructed in-memory indexes.
+	Identity *IndexIdentity `json:"identity,omitempty"`
 }
 
 // New returns an empty index rooted at root.
 func New(root string) *Index {
 	ix := &Index{
-		Root:           root,
-		Version:        indexVersion,
-		Calls:          map[string][]string{},
-		Callers:        map[string][]string{},
-		Inherits:       map[string][]string{},
-		InheritedBy:    map[string][]string{},
-		Pkgs:           map[string]*Pkg{},
-		FileHashes:     map[string]string{},
-		GeneratedFiles: map[string]bool{},
-		Communities:    map[string]string{},
-		SymbolsByFile:  map[string][]Symbol{},
+		Root:            root,
+		Version:         indexVersion,
+		Calls:           map[string][]string{},
+		Callers:         map[string][]string{},
+		Inherits:        map[string][]string{},
+		InheritedBy:     map[string][]string{},
+		Pkgs:            map[string]*Pkg{},
+		ImportsByFile:   map[string][]string{},
+		FileHashes:      map[string]string{},
+		GeneratedFiles:  map[string]bool{},
+		Communities:     map[string]string{},
+		PrecisionByLang: map[string]string{},
+		SymbolsByFile:   map[string][]Symbol{},
 	}
 	ix.initMaps()
 	return ix
@@ -92,6 +112,9 @@ func (ix *Index) initMaps() {
 	if ix.Pkgs == nil {
 		ix.Pkgs = map[string]*Pkg{}
 	}
+	if ix.ImportsByFile == nil {
+		ix.ImportsByFile = map[string][]string{}
+	}
 	if ix.FileHashes == nil {
 		ix.FileHashes = map[string]string{}
 	}
@@ -100,6 +123,9 @@ func (ix *Index) initMaps() {
 	}
 	if ix.Communities == nil {
 		ix.Communities = map[string]string{}
+	}
+	if ix.PrecisionByLang == nil {
+		ix.PrecisionByLang = map[string]string{}
 	}
 	if ix.SymbolsByFile == nil {
 		ix.SymbolsByFile = map[string][]Symbol{}
@@ -179,15 +205,44 @@ func Load(root string) (*Index, error) {
 }
 
 // Stale reports whether a source file was added, removed, or edited since the
-// index was built, so intel never serves out-of-date call graphs.
+// index was built, so intel never serves out-of-date call graphs. The
+// authoritative verdict comes from FreshnessProof (git tree OID, falling back
+// to a content re-hash); the stat gate is kept only to reject cheaply on a
+// file-count change.
 func (ix *Index) Stale() bool {
 	if ix == nil || len(ix.FileHashes) == 0 {
 		return true
+	}
+	// No recorded identity (in-memory test index, or hand-built Index struct):
+	// fall back to the pre-identity content-hash comparison.
+	if ix.Identity == nil {
+		return ix.legacyStale()
 	}
 	// Load ignore patterns so gitignored files are excluded from the staleness
 	// decision, matching the file set Build indexed. Without this, a gitignored
 	// file would keep the gate/hash counts different from FileHashes and Stale
 	// would report true forever, defeating the cache.
+	ign := ignore.Load(ix.Root)
+	// Cheap rejection: a different indexable-file count proves files were
+	// added or removed — no git round-trip needed. An mtime mismatch alone is
+	// deliberately NOT rejected: touching a file changes its mtime without
+	// changing its content, so only the git/content check below can decide
+	// those cases (and an mtime-preserving edit must never be served fresh).
+	if ix.MaxMtime > 0 {
+		if _, count, err := indexableMaxMtime(ix.Root, ign); err == nil && count != len(ix.FileHashes) {
+			return true
+		}
+	}
+	return ix.FreshnessProof(ix.Root).Stale()
+}
+
+// legacyStale is the pre-identity staleness check: the mtime fast gate plus
+// an exact content-hash walk. Retained for indexes with a nil Identity (e.g.
+// in-memory test indexes constructed without a Build) where there is no
+// FreshnessProof baseline to compare against. Note the gate here returns
+// "not stale" on a match, so mtime-preserving edits evade it — acceptable for
+// the defensive path only, never for persisted indexes.
+func (ix *Index) legacyStale() bool {
 	ign := ignore.Load(ix.Root)
 	// Fast gate: identical file count and newest mtime mean nothing changed, so
 	// skip re-hashing. An mtime-preserving edit (rare) evades the gate.
@@ -350,12 +405,59 @@ func Build(root string) (*Index, error) {
 	ix.addDispatchEdges()
 	ix.resolveEntries()
 	ix.reindexByFile()
+	// Record the edge-precision tier per language so strict call-edge following
+	// (kern guard/impact --precision strict) can skip edges whose caller
+	// language is not fully resolved instead of guessing at their meaning.
+	ix.computePrecisionByLang()
+	// Content-addressed identity: the file walk is complete, so FileHashes and
+	// MaxMtime are final. The identity is what FreshnessProof later compares
+	// the live tree against; persisted by Save().
+	ix.Identity = buildIdentity(abs, ix.FileHashes, ix.UpdatedAt)
 	metrics.Default().RecordIndexBuild(time.Since(start))
 	return ix, nil
 }
 
+// computePrecisionByLang records the highest edge-precision tier achieved per
+// language present in the index. go/ast and Java resolve cross-file bindings
+// ("resolved"): Go via go/ast, Java via per-method local-type tracking +
+// callee resolution (java_resolve.go: v.method() -> Type.method() binds
+// against symbols cross-file). Java's regex extractor reaches "resolved"; under
+// the tree-sitter build call edges are still receiver-var heuristics, so the
+// tier stays "ast" there to keep strict precision honest. Other foreign
+// languages are "ast" under the tree-sitter build and "heuristic" (regex)
+// otherwise.
+func (ix *Index) computePrecisionByLang() {
+	ix.PrecisionByLang = map[string]string{}
+	for _, lang := range ix.Languages() {
+		switch lang {
+		case "go":
+			ix.PrecisionByLang[lang] = "resolved"
+		case "java":
+			if treesitterEnabled() {
+				ix.PrecisionByLang[lang] = "ast"
+			} else {
+				ix.PrecisionByLang[lang] = "resolved"
+			}
+		default:
+			if treesitterEnabled() {
+				ix.PrecisionByLang[lang] = "ast"
+			} else {
+				ix.PrecisionByLang[lang] = "heuristic"
+			}
+		}
+	}
+}
+
 func (ix *Index) addFile(rel string, src []byte) {
 	lang := detectLang(rel, src)
+	// Record the content hash BEFORE the parse step. FreshnessProof's
+	// indexableHashes hashes every indexable file (by extension/content,
+	// not parse success), so FileHashes must cover the same set — including
+	// files that fail to parse (e.g. broken.go in a test fixture). Recording
+	// the hash after the parse-error early-return would exclude unparseable
+	// files from FileHashes while indexableHashes includes them, causing a
+	// permanent ContentRoot mismatch → false "stale" → ERROR.
+	ix.FileHashes[rel] = cache.Hash(src)
 	var syms []Symbol
 	var calls map[string][]string
 	var inherits map[string][]string
@@ -369,7 +471,6 @@ func (ix *Index) addFile(rel string, src []byte) {
 	} else {
 		syms, calls, inherits, pkg, _ = extractForeign(rel, src, lang)
 	}
-	ix.FileHashes[rel] = cache.Hash(src)
 	if ix.GeneratedFiles == nil {
 		ix.GeneratedFiles = map[string]bool{}
 	}
@@ -384,8 +485,28 @@ func (ix *Index) addFile(rel string, src []byte) {
 	if pkg != nil {
 		if existing, ok := ix.Pkgs[pkg.Path]; ok {
 			existing.Files = append(existing.Files, pkg.Files...)
+			// Merge imports from every file of the package, not just the
+			// first one indexed. Without this, guard's import-level
+			// boundary check only ever sees the first file's imports.
+			for _, imp := range pkg.Imports {
+				if !slices.Contains(existing.Imports, imp) {
+					existing.Imports = append(existing.Imports, imp)
+				}
+			}
 		} else {
 			ix.Pkgs[pkg.Path] = pkg
+		}
+		// Per-file import attribution: the extractor's pkg carries exactly
+		// this file's imports (Go: pkg built from f.Imports; foreign: the
+		// per-file imports list). Record the file's own imports, never the
+		// package-aggregated ones, so guard can attribute a forbidden import
+		// to the file that actually imports it. Files with no imports still
+		// get a (empty) entry so guard can distinguish "file indexed, no
+		// imports" from "old index format without imports_by_file".
+		for _, file := range pkg.Files {
+			// append([]string{}, ...) keeps a non-nil empty slice for files
+			// with no imports so they serialize as [] (not null) in index.json.
+			ix.ImportsByFile[file] = append([]string{}, pkg.Imports...)
 		}
 	}
 }

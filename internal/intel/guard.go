@@ -3,6 +3,7 @@ package intel
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -32,12 +33,16 @@ func DefaultBoundariesPath(root string) string {
 }
 
 // LoadBoundaries reads the guardrail rules for root. A missing file is not an
-// error — it yields an empty rule set (everything is permitted).
+// error — it yields a nil ruleset (nothing to enforce), preserving the
+// zero-config experience, but logs a warning so the absence of guardrails is
+// visible. A present-but-malformed file IS an error (fail-closed): a broken
+// boundaries.json must never silently permit everything.
 func LoadBoundaries(root string) (*Boundaries, error) {
 	data, err := os.ReadFile(DefaultBoundariesPath(root))
 	if err != nil {
 		if os.IsNotExist(err) {
-			return &Boundaries{}, nil
+			log.Printf("WARNING: no boundary rules configured — %s not found; nothing to enforce", DefaultBoundariesPath(root))
+			return nil, nil
 		}
 		return nil, err
 	}
@@ -78,10 +83,41 @@ type Violation struct {
 // crossing that a forbid rule rejects (allow rules for the same pair win).
 // Edges come from resolved in-project call edges; where a file has no local
 // symbol yet (e.g. an import was just added), package imports are checked too.
+// Default precision: all edges are trusted.
 func CheckBoundaries(ix *index.Index, b *Boundaries, files []string) []Violation {
+	v, _ := CheckBoundariesPrecise(ix, b, files, false)
+	return v
+}
+
+// CheckBoundariesPrecise is CheckBoundaries with a precision mode. When strict
+// is true, call edges whose caller language is not "resolved"-precision in the
+// index (ix.PrecisionByLang) are skipped rather than guessed at, so a
+// heuristic edge can never fabricate a boundary violation. The returned map
+// records, per caller language, how many call edges were skipped.
+//
+// Fail-open on missing mandatory data is surfaced, never silent: a nil
+// boundaries ruleset (no .kern/boundaries.json) with a non-empty check scope
+// records a "boundaries-not-configured" skip (a warning), not a violation.
+func CheckBoundariesPrecise(ix *index.Index, b *Boundaries, files []string, strict bool) ([]Violation, map[string]int) {
 	var violations []Violation
-	if b == nil || len(b.Rules) == 0 {
-		return violations
+	skipped := map[string]int{}
+	if len(files) == 0 {
+		// Clean skip: nothing is in scope to check, so there is nothing to
+		// warn about either.
+		return violations, skipped
+	}
+	if b == nil {
+		// No .kern/boundaries.json — the guard is not configured. Returning
+		// empty violations here would be a silent PASS, so mirror the
+		// imports-by-file-missing precedent: surface the gap as a skip (a
+		// warning), never a violation.
+		skipped["boundaries-not-configured"] = len(files)
+		return violations, skipped
+	}
+	if len(b.Rules) == 0 {
+		// An explicitly empty rule list ("rules": []) in a present file is
+		// deliberate user intent: nothing to enforce. Clean skip, no warning.
+		return violations, skipped
 	}
 
 	meta := map[string]index.Symbol{}
@@ -120,6 +156,15 @@ func CheckBoundaries(ix *index.Index, b *Boundaries, files []string) []Violation
 		for _, s := range syms {
 			full := s.FullName()
 			for _, c := range ix.Calls[full] {
+				if strict {
+					// Strict precision: an edge whose caller language is not fully
+					// resolved ("resolved" tier) is unknown, not guessable, so it
+					// is skipped instead of trusted.
+					if p := ix.PrecisionByLang[s.Lang]; p != "resolved" {
+						skipped[s.Lang]++
+						continue
+					}
+				}
 				resolved := resolveCallee(ix, meta, c)
 				if resolved == "" || resolved == full {
 					continue
@@ -130,22 +175,43 @@ func CheckBoundaries(ix *index.Index, b *Boundaries, files []string) []Violation
 			}
 		}
 		// Import-level check: catch edges where a file imports a forbidden
-		// package even before it calls into it.
-		if pkg := ix.Pkgs[fromDir]; pkg != nil {
-			for _, imp := range pkg.Imports {
-				for toDir := range indexDirs(ix) {
-					if toDir == "" || toDir == fromDir {
-						continue
-					}
-					if importMatches(imp, toDir) {
-						if rule := verdict(b.Rules, fromDir, toDir); rule != nil {
-							violations = append(violations, Violation{
-								CallerFile: f,
-								CalleeFile: toDir + "/",
-								RuleFrom:   rule.From,
-								RuleTo:     rule.To,
-							})
-						}
+		// package even before it calls into it. Uses the changed file's own
+		// imports (ix.ImportsByFile) — never the package-aggregated
+		// Pkgs[dir].Imports, which would wrongly attribute a sibling file's
+		// import to every changed file in the directory (that was the
+		// false-positive bug). Indexes built by older kern lack
+		// imports_by_file; when the directory still carries package-level
+		// imports, that missing per-file data is surfaced below as a
+		// skipped-precision warning rather than a silent pass — `kern index`
+		// rebuilds restore full coverage.
+		fImports := ix.ImportsByFile[f]
+		if len(fImports) == 0 {
+			// No per-file import data for this file. If the index still knows
+			// the package imports something (Pkgs[dir].Imports non-empty), the
+			// import-level check is about to pass without ever inspecting the
+			// file's imports — fail-open on missing mandatory data. Surface the
+			// gap as a skip (a warning), never a violation: we cannot know
+			// whether the file itself imports a forbidden package, so no
+			// verdict is fabricated, but the incomplete check must not be
+			// silent either. Rebuild the index (`kern index`) to restore
+			// per-file coverage.
+			if pkg := ix.Pkgs[fromDir]; pkg != nil && len(pkg.Imports) > 0 {
+				skipped["imports-by-file-missing:"+f]++
+			}
+		}
+		for _, imp := range fImports {
+			for toDir := range indexDirs(ix) {
+				if toDir == "" || toDir == fromDir {
+					continue
+				}
+				if importMatches(imp, toDir) {
+					if rule := verdict(b.Rules, fromDir, toDir); rule != nil {
+						violations = append(violations, Violation{
+							CallerFile: f,
+							CalleeFile: toDir + "/",
+							RuleFrom:   rule.From,
+							RuleTo:     rule.To,
+						})
 					}
 				}
 			}
@@ -177,11 +243,14 @@ func CheckBoundaries(ix *index.Index, b *Boundaries, files []string) []Violation
 		}
 		return violations[i].CalleeFile < violations[j].CalleeFile
 	})
-	return violations
+	return violations, skipped
 }
 
-// verdict returns the rule that decides a from→to edge: an allow rule always
-// wins; otherwise the first forbid rule that matches. nil means permitted.
+// verdict decides a from→to edge and is order-invariant. If ANY rule allows
+// the pair the verdict is nil (permitted) — allow dominates no matter where
+// in the slice it appears. Only when no allow rule matches is the first
+// forbid rule that matches returned (a violation). If nothing matches, the
+// pair is permitted (default-permit for unconfigured pairs).
 func verdict(rules []BoundaryRule, fromDir, toDir string) *BoundaryRule {
 	for i := range rules {
 		if rules[i].Action == "allow" && dirMatch(rules[i].From, fromDir) && dirMatch(rules[i].To, toDir) {
@@ -208,14 +277,23 @@ func dirMatch(pattern, dir string) bool {
 }
 
 // importMatches reports whether an import path refers to a local directory.
+// Go import paths are slash-separated; Java (and other JVM languages) use
+// dotted package paths, so a slash-converted variant is tested as well.
 func importMatches(importPath, dir string) bool {
-	if importPath == "" {
+	if importPath == "" || dir == "" {
 		return false
 	}
 	if strings.HasSuffix(importPath, "/"+dir) || importPath == dir {
 		return true
 	}
-	return strings.HasSuffix(importPath, "/"+filepath.Base(dir))
+	if strings.HasSuffix(importPath, "/"+filepath.Base(dir)) {
+		return true
+	}
+	if strings.Contains(importPath, ".") {
+		slash := strings.ReplaceAll(importPath, ".", "/")
+		return slash == dir || strings.HasSuffix(slash, "/"+dir) || strings.HasSuffix(slash, "/"+filepath.Base(dir))
+	}
+	return false
 }
 
 // resolveCallee maps a raw callee name to a canonical in-project symbol

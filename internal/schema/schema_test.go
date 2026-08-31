@@ -106,7 +106,7 @@ func TestEnumAndInteger(t *testing.T) {
 }
 
 // TestInvalidPatternSurfaces verifies an unparseable pattern is reported as a
-// violation instead of silently dropping the constraint (W2-31).
+// violation instead of silently dropping the constraint .
 func TestInvalidPatternSurfaces(t *testing.T) {
 	s, err := Parse(`{"type": "string", "pattern": "["}`)
 	if err != nil {

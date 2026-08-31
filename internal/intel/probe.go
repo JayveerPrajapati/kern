@@ -43,7 +43,6 @@ var identRe = regexp.MustCompile(`[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]
 // budget-capped micro-context bundle: it extracts candidate identifiers,
 // resolves them against the index, and returns the definition, callers, callees
 // and tests for each.
-//
 // When no exact identifier resolves, a keyword-based fuzzy fallback scans
 // symbol names so natural-language tasks still produce useful context.
 func Probe(ix *index.Index, task string, maxTokens int) *ProbeReport {

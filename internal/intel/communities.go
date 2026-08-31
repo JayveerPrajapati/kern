@@ -11,14 +11,13 @@ import (
 
 // Community is a cluster of symbols discovered by label propagation over the
 // (undirected) call graph.
-//
 // By default the JSON output omits the full symbol list (Symbols) and exposes
 // only a Sample (first few names) plus Size — enough to name a cluster without
 // dumping every member. Call WithFullSymbols to render the complete list.
 type Community struct {
 	ID       string   `json:"id"`
-	Symbols  []string `json:"-"`         // full member list; hidden in JSON unless FullSymbols is set
-	Sample   []string `json:"sample"`    // first up to 8 symbol names, for a quick glance
+	Symbols  []string `json:"-"`      // full member list; hidden in JSON unless FullSymbols is set
+	Sample   []string `json:"sample"` // first up to 8 symbol names, for a quick glance
 	Size     int      `json:"size"`
 	Hub      string   `json:"hub,omitempty"`
 	Packages []string `json:"packages,omitempty"`

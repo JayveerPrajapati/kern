@@ -9,12 +9,11 @@ import (
 // Generated-file detection ranks generated sources below hand-written
 // implementations (they reuse real symbol names: protobuf scaffolding, mocks,
 // codegen) as a relevance hint, not a hard filter. Two separate signals:
-//
-//  1. IsGeneratedPath — PATH only, the `<basename>.<tool>.<ext>` convention
-//     (`.pb.go`, `.g.dart`, `_pb2.py`).
-//  2. isGeneratedContent — a CONTENT banner in the file's head ("Code
-//     generated ... DO NOT EDIT"), evaluated once at index time and persisted
-//     as GeneratedFiles.
+// 1. IsGeneratedPath — PATH only, the `<basename>.<tool>.<ext>` convention
+// (`.pb.go`, `.g.dart`, `_pb2.py`).
+// 2. isGeneratedContent — a CONTENT banner in the file's head ("Code
+// generated ... DO NOT EDIT"), evaluated once at index time and persisted
+// as GeneratedFiles.
 
 var generatedPathPatterns = []*regexp.Regexp{
 	// Go — protobuf / gRPC / pulsar / mockgen

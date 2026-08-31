@@ -20,7 +20,6 @@ import (
 // comparison — is invisible to the call graph. This pass makes DeleteCheck and
 // DeadCode aware of those references so they never report genuinely-used code
 // as dead or safe to delete.
-//
 // It is built at query time (not persisted into the index cache) and parses each
 // indexed Go file exactly once.
 type nonCallRefIndex struct {

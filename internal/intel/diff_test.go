@@ -61,7 +61,7 @@ index 0000000..0000000
 Binary files a/gone.png and /dev/null differ
 `
 	changes := parseDiffOutput(out)
-	// The deleted file is now reported as a whole-file change (W2-19) instead
+	// The deleted file is now reported as a whole-file change instead
 	// of being silently dropped.
 	if len(changes) != 2 {
 		t.Fatalf("expected 2 files (modified + deleted), got %v", changes)

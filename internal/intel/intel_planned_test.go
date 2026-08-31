@@ -333,6 +333,74 @@ func Touch() {}`,
 	}
 }
 
+// TestGuardImportAttributionCleanChangedFile: the import-level boundary check
+// must attribute imports per changed file, not per package. A clean file in a
+// package where a sibling file imports a forbidden package is NOT a violation
+// (regression: the old check used package-aggregated imports and falsely
+// flagged every changed file in the directory).
+func TestGuardImportAttributionCleanChangedFile(t *testing.T) {
+	dir := writeTree(t, map[string]string{
+		"db/db.go": `package db
+
+func Get() {}
+`,
+		"web/web.go": `package web
+
+import "example.com/repo/db"
+
+func UseDB() {}
+`,
+		"web/clean.go": `package web
+
+func Clean() {}
+`,
+	})
+	ix, err := index.Build(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := &Boundaries{Rules: []BoundaryRule{{From: "web", To: "db", Action: "forbid"}}}
+	violations := CheckBoundaries(ix, b, []string{"web/clean.go"})
+	if len(violations) != 0 {
+		t.Fatalf("clean changed file must not inherit a sibling's forbidden import, got %+v", violations)
+	}
+}
+
+// TestGuardImportAttributionChangedImporter: when the changed file itself
+// imports the forbidden package, exactly one violation is reported with that
+// file as the caller.
+func TestGuardImportAttributionChangedImporter(t *testing.T) {
+	dir := writeTree(t, map[string]string{
+		"db/db.go": `package db
+
+func Get() {}
+`,
+		"web/clean.go": `package web
+
+func Clean() {}
+`,
+		"web/bad.go": `package web
+
+import "example.com/repo/db"
+
+func UseDB() {}
+`,
+	})
+	ix, err := index.Build(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := &Boundaries{Rules: []BoundaryRule{{From: "web", To: "db", Action: "forbid"}}}
+	violations := CheckBoundaries(ix, b, []string{"web/bad.go"})
+	if len(violations) != 1 {
+		t.Fatalf("expected exactly 1 violation, got %+v", violations)
+	}
+	v := violations[0]
+	if v.CallerFile != "web/bad.go" || v.CalleeFile != "db/" {
+		t.Errorf("wrong edge evidence: %+v", v)
+	}
+}
+
 func TestGuardLoadAndInit(t *testing.T) {
 	dir := writeTree(t, map[string]string{})
 	if err := InitBoundaries(dir); err != nil {
@@ -347,5 +415,85 @@ func TestGuardLoadAndInit(t *testing.T) {
 	}
 	if len(b.Rules) == 0 {
 		t.Error("starter template should contain a rule")
+	}
+}
+
+// TestGuardCatchesJavaImportViolation: Java import edges are now extracted
+// by the indexer, so guard's import-level check must catch a forbidden
+// dotted import even though no call edge exists.
+func TestGuardCatchesJavaImportViolation(t *testing.T) {
+	dir := writeTree(t, map[string]string{
+		"src/main/java/com/example/config/AppConfig.java": `package com.example.config;
+import com.example.commons.vault.IVaultService;
+public class AppConfig {
+    // import only — no call into vault
+}
+`,
+		"src/main/java/com/example/commons/vault/IVaultService.java": `package com.example.commons.vault;
+public interface IVaultService {
+}
+`,
+	})
+	ix, err := index.Build(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := &Boundaries{Rules: []BoundaryRule{{From: "config", To: "vault", Action: "forbid"}}}
+	violations := CheckBoundaries(ix, b, []string{"src/main/java/com/example/config/AppConfig.java"})
+	if len(violations) == 0 {
+		t.Fatal("expected a violation for config -> vault import, got none")
+	}
+	v := violations[0]
+	if v.CallerFile != "src/main/java/com/example/config/AppConfig.java" {
+		t.Errorf("wrong caller file: %s", v.CallerFile)
+	}
+	if v.RuleFrom != "config" || v.RuleTo != "vault" {
+		t.Errorf("wrong rule: %s -> %s", v.RuleFrom, v.RuleTo)
+	}
+}
+
+// TestGuardJavaAllowOverridesForbid: an explicit allow rule must win over a
+// forbid rule for Java dotted imports too.
+func TestGuardJavaAllowOverridesForbid(t *testing.T) {
+	dir := writeTree(t, map[string]string{
+		"src/main/java/com/example/config/AppConfig.java": `package com.example.config;
+import com.example.commons.vault.IVaultService;
+public class AppConfig {
+}
+`,
+		"src/main/java/com/example/commons/vault/IVaultService.java": `package com.example.commons.vault;
+public interface IVaultService {
+}
+`,
+	})
+	ix, err := index.Build(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := &Boundaries{Rules: []BoundaryRule{
+		{From: "config", To: "vault", Action: "forbid"},
+		{From: "config", To: "vault", Action: "allow"},
+	}}
+	if v := CheckBoundaries(ix, b, []string{"src/main/java/com/example/config/AppConfig.java"}); len(v) != 0 {
+		t.Errorf("allow rule must override forbid for java imports, got %+v", v)
+	}
+}
+
+// TestGuardImportMatchesDotted: the dotted-path matcher itself.
+func TestGuardImportMatchesDotted(t *testing.T) {
+	cases := []struct {
+		importPath string
+		dir        string
+		want       bool
+	}{
+		{"com.example.commons.vault", "src/main/java/com/example/commons/vault", true}, // Base match
+		{"com.example.commons.vault", "src/main/java/com/example/commons/utils", false},
+		{"kern/internal/intel", "internal/intel", true}, // Go path, suffix match
+		{"", "internal/intel", false},
+	}
+	for _, c := range cases {
+		if got := importMatches(c.importPath, c.dir); got != c.want {
+			t.Errorf("importMatches(%q, %q) = %v, want %v", c.importPath, c.dir, got, c.want)
+		}
 	}
 }
