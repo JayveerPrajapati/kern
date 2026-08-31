@@ -1,6 +1,7 @@
 package mcp
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -12,13 +13,23 @@ import (
 
 	"github.com/JayveerPrajapati/kern/internal/docsearch"
 	"github.com/JayveerPrajapati/kern/internal/lock"
+	"github.com/JayveerPrajapati/kern/internal/project"
 )
 
 func newHTTPServer() *Server {
+	// Mirrors the production ServeHTTPContext constructor: every map/channel
+	// field must be initialized or an index-loading tool panics ("assignment
+	// to entry in nil map" in Server.commit / deadlocks on a nil sem). Keep in
+	// sync with ServeHTTPContext in http.go.
 	return &Server{
+		sem:       make(chan struct{}, 8),
 		locks:     map[string]*lock.Lock{},
+		inflight:  map[string]context.CancelFunc{},
+		sessions:  map[string]*project.Session{},
 		transport: "http",
 		roots:     defaultWorkspaceRoots(),
+		gate:      NewGateFromEnv(),
+		commits:   map[string]string{},
 	}
 }
 
@@ -225,8 +236,11 @@ func TestHandleHTTPDocFetchEndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 	// The root passed to kern_doc_fetch lives outside the process cwd, so the
-	// server's workspace must be extended to include it (W2-29 confinement).
+	// server's workspace must be extended to include it (confinement). The
+	// KERN_MCP_ROOTS gate must be aligned with the same root (it fails closed
+	// to the process cwd when unset).
 	t.Setenv("KERN_ROOTS", root)
+	t.Setenv("KERN_MCP_ROOTS", root)
 
 	args, _ := json.Marshal(map[string]any{"url": doc.URL, "root": root, "name": "react"})
 	body := `{"jsonrpc":"2.0","id":99,"method":"tools/call","params":{"name":"kern_doc_fetch","arguments":` + string(args) + `}}`
@@ -281,5 +295,36 @@ func TestIsLocalhostOrigin(t *testing.T) {
 		if got := isLocalhostOrigin(req); got != c.want {
 			t.Errorf("isLocalhostOrigin(%q) = %v, want %v", c.origin, got, c.want)
 		}
+	}
+}
+
+// TestHandleHTTPIndexToolNoPanic is a regression test for the HTTP transport
+// panic where an index-loading tool call crashed with "assignment to entry in
+// nil map" in Server.commit (s.commits was nil because the HTTP constructor
+// omitted it). Driving an index tool over HTTP must return a valid result with
+// no panic.
+func TestHandleHTTPIndexToolNoPanic(t *testing.T) {
+	// Point the workspace at a real repo so kern_search loads an index, and
+	// align the KERN_MCP_ROOTS gate with the same root (the gate fails closed
+	// to the process cwd when unset).
+	t.Setenv("KERN_ROOTS", kernRepoRoot)
+	t.Setenv("KERN_MCP_ROOTS", kernRepoRoot)
+	s := newHTTPServer()
+
+	body := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"kern_search","arguments":{"root":"` + kernRepoRoot + `","query":"TaskService","limit":1}}}`
+	rr := doHTTP(t, s, http.MethodPost, "application/json", body, nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (body: %s)", rr.Code, rr.Body.String())
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v (raw: %s)", err, rr.Body.String())
+	}
+	if _, isErr := toolResultText(t, resp); isErr {
+		t.Fatalf("index tool over HTTP returned an error result: %s", rr.Body.String())
+	}
+	// The provenance stamp must include a commit (this exact path panicked).
+	if !strings.Contains(rr.Body.String(), "commit ") {
+		t.Fatalf("expected provenance commit stamp, got: %s", rr.Body.String())
 	}
 }

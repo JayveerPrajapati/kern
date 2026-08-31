@@ -477,6 +477,9 @@ func TestToolsListMatchesDispatchCases(t *testing.T) {
 }
 
 func TestToolsListContainsWalk(t *testing.T) {
+	// kern_walk is not in the default minimal surface; opt in to the full
+	// catalog so the wire response advertises it.
+	t.Setenv("KERN_MCP_FULL", "1")
 	resp := serveOne(t, writeReq("tools/list", 3, ``))
 	res := resp["result"].(map[string]any)
 	for _, item := range res["tools"].([]any) {
@@ -838,6 +841,9 @@ func TestPackSandboxOverrideThroughMCP(t *testing.T) {
 }
 
 func TestKernToolsAllowlistFiltersListAndCalls(t *testing.T) {
+	// Full catalog so the allowlist intersects the complete 84-tool set
+	// (kern_usage_guide is not part of the default minimal surface).
+	t.Setenv("KERN_MCP_FULL", "1")
 	t.Setenv("KERN_TOOLS", "kern_search, kern_usage_guide")
 	s := NewServer(strings.NewReader(""), io.Discard)
 	filtered := s.filteredTools()
@@ -868,6 +874,9 @@ func TestKernToolsAllowlistFiltersListAndCalls(t *testing.T) {
 }
 
 func TestKernToolsAllowlistEmptyAllowsAll(t *testing.T) {
+	// The point is that an empty allowlist restricts nothing, so the full
+	// catalog must be exposed under KERN_MCP_FULL=1.
+	t.Setenv("KERN_MCP_FULL", "1")
 	t.Setenv("KERN_TOOLS", " ")
 	s := NewServer(strings.NewReader(""), io.Discard)
 	if got := len(s.filteredTools()); got != len(tools) {

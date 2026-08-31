@@ -36,11 +36,19 @@ func ServeHTTP(addr string) error {
 // listener shuts down gracefully and in-flight tools are cancelled.
 func ServeHTTPContext(ctx context.Context, addr string) error {
 	srv := &Server{
+		sem:       make(chan struct{}, 8),
 		locks:     map[string]*lock.Lock{},
 		inflight:  map[string]context.CancelFunc{},
 		sessions:  map[string]*project.Session{},
 		transport: "http",
 		roots:     defaultWorkspaceRoots(),
+		gate:      confinementGate(),
+		commits:   map[string]string{},
+	}
+	// Same default-on confinement as the stdio path: the KERN_MCP_ROOTS gate
+	// runs as the pre-tool-use hook, and KERN_MCP_NO_CONFINE=1 opts out.
+	if srv.gate != nil {
+		srv.preTool = srv.gate.Check
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/mcp", srv.handleHTTP)

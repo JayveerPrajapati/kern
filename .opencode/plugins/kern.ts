@@ -1,7 +1,7 @@
 import { type Plugin, tool } from "@opencode-ai/plugin"
-import { resolve } from "node:path"
+import { resolve, relative } from "node:path"
 import { existsSync } from "node:fs"
-import { writeFile, rm } from "node:fs/promises"
+import { writeFile, rm, readFile, readdir, stat } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { randomBytes } from "node:crypto"
 
@@ -53,12 +53,145 @@ function fileArg(args: any): string {
   return ""
 }
 
+// --- Shadow built-in fallbacks (raw behavior) ---
+// The opencode ToolContext exposes no way to re-invoke the tool being
+// shadowed (there is no context.tool), so each shadow tool reimplements the
+// built-in's behavior with node:fs / the host `$` shell. These run ONLY when
+// kern is unavailable, so a missing binary can never block the agent.
+
+// Directories never worth walking in a fallback glob/grep.
+const SKIP_DIRS = new Set([".git", "node_modules", ".kern", "dist", "build", "vendor", "target", ".cache", ".next", ".turbo"])
+
+// Translate one glob segment (*, ?, {a,b}) into an anchored regex.
+function segmentRe(seg: string): RegExp {
+  let src = ""
+  let brace = 0
+  for (let i = 0; i < seg.length; i++) {
+    const c = seg[i]
+    if (c === "{") { brace++; src += "(?:" }
+    else if (c === "}") { brace--; src += ")" }
+    else if (c === "," && brace > 0) { src += "|" }
+    else if (c === "*") { src += "[^/]*" }
+    else if (c === "?") { src += "[^/]" }
+    else { src += c.replace(/[.+^$()|[\]\\]/g, "\\$&") }
+  }
+  return new RegExp("^" + src + "$")
+}
+
+// Minimal recursive glob: supports *, **, ? and {a,b}. Used only as the
+// fallback when the kern binary is unavailable, so it never needs to be
+// exhaustive — but it must not hang, so heavy/generated directories are
+// skipped.
+async function globFallback(pattern: string, base: string): Promise<string> {
+  const segments = pattern.replace(/\\/g, "/").split("/").filter((s) => s !== "" && s !== ".")
+  if (segments.length === 0) return "error: empty glob pattern"
+  const firstWild = segments.findIndex((s) => /[*?{]/.test(s))
+  if (firstWild === -1) {
+    const full = resolve(base, ...segments)
+    try { await stat(full); return full } catch { return `error: no files matched pattern ${pattern}` }
+  }
+  const root = resolve(base, ...segments.slice(0, firstWild))
+  const rest = segments.slice(firstWild)
+  const out: string[] = []
+  const walk = async (dir: string, segs: string[]): Promise<void> => {
+    const [seg, ...tail] = segs
+    if (seg === undefined) { out.push(dir); return }
+    let entries: Awaited<ReturnType<typeof readdir>>
+    try { entries = await readdir(dir, { withFileTypes: true }) } catch { return }
+    if (seg === "**") {
+      // Match zero or more directory levels, then descend keeping `**`.
+      await walk(dir, tail)
+      for (const e of entries) {
+        if (e.isDirectory() && !SKIP_DIRS.has(e.name)) await walk(resolve(dir, e.name), segs)
+      }
+      return
+    }
+    const re = segmentRe(seg)
+    for (const e of entries) {
+      if (!re.test(e.name)) continue
+      const child = resolve(dir, e.name)
+      if (tail.length === 0) {
+        if (e.isFile() || e.isDirectory()) out.push(child)
+      } else if (e.isDirectory()) {
+        await walk(child, tail)
+      }
+    }
+  }
+  await walk(root, rest)
+  if (out.length === 0) return `error: no files matched pattern ${pattern}`
+  return out.sort().join("\n")
+}
+
+// Raw regex search over files under a directory, mirroring the built-in grep
+// (path:line: content output). Only used when kern is unavailable.
+async function grepFallback(pattern: string, path: string | undefined, include: string | undefined): Promise<string> {
+  let re: RegExp
+  try { re = new RegExp(pattern) } catch { return `error: invalid regex: ${pattern}` }
+  const incRe = include ? segmentRe(include) : null
+  const root = resolve(path ?? ".")
+  const out: string[] = []
+  const scan = async (file: string): Promise<void> => {
+    if (incRe) {
+      const name = file.split("/").pop() ?? file
+      const rel = relative(root, file)
+      if (!(incRe.test(name) || incRe.test(rel))) return
+    }
+    let text: string
+    try { text = await readFile(file, "utf8") } catch { return } // binary/unreadable: skip
+    const lines = text.split("\n")
+    for (let i = 0; i < lines.length; i++) {
+      if (re.test(lines[i])) {
+        out.push(`${file}:${i + 1}: ${lines[i].trim()}`)
+        if (out.length >= 200) return
+      }
+    }
+  }
+  const walk = async (dir: string): Promise<void> => {
+    let entries: Awaited<ReturnType<typeof readdir>>
+    try { entries = await readdir(dir, { withFileTypes: true }) } catch { return }
+    for (const e of entries) {
+      if (out.length >= 200) return
+      const full = resolve(dir, e.name)
+      if (e.isDirectory()) {
+        if (!SKIP_DIRS.has(e.name)) await walk(full)
+      } else if (e.isFile()) {
+        await scan(full)
+      }
+    }
+  }
+  await walk(root)
+  if (out.length === 0) return "No files found"
+  return out.join("\n")
+}
+
+// Raw read: verbatim file contents (or a directory listing), mirroring the
+// built-in read tool. Only used when kern is unavailable.
+async function readFallback(filePath: string): Promise<string> {
+  try {
+    const st = await stat(filePath)
+    if (st.isDirectory()) {
+      const entries = await readdir(filePath, { withFileTypes: true })
+      return entries.map((e) => e.name + (e.isDirectory() ? "/" : "")).join("\n")
+    }
+    return await readFile(filePath, "utf8")
+  } catch (err) {
+    return `error: ${(err as Error).message}`
+  }
+}
+
 export default (async ({ directory, $ }) => {
   const bin = kernBin(directory)
 
-  // Hard 2-minute ceiling so a hung subprocess can never wedge the agent's
-  // tool call. The runtime `$` shell exposes `.timeout()` in some opencode
-  // versions but not others, so fall back to a manual timer when absent.
+  // Timeout ceiling for governed tool calls: an explicit agent-provided
+  // timeout (milliseconds — the opencode bash convention) is honored up to a
+  // 30-minute absolute cap, so long builds/tests can run when the agent asks
+  // for them; without one, a 2-minute default keeps a hung subprocess from
+  // wedging the agent's tool call. The runtime `$` shell exposes `.timeout()`
+  // in some opencode versions but not others, so fall back to a manual timer
+  // when absent.
+  // must stay <= MCP per-call ceiling (server.go) which is the effective cap
+  const MAX_CEILING_MS = 1_800_000
+  const ceilingMs = (requested?: number) => Math.min(requested ?? 120_000, MAX_CEILING_MS)
   const withTimeout = <T>(promise: Promise<T>, ms: number): Promise<T> =>
     new Promise<T>((resolve, reject) => {
       const timer = setTimeout(() => reject(new Error(`kern timed out after ${ms}ms`)), ms)
@@ -68,30 +201,64 @@ export default (async ({ directory, $ }) => {
       )
     })
 
-  const run = async (args: string[]): Promise<string> => {
+  const run = async (args: string[], timeoutMs?: number): Promise<string> => {
     // Bun's shell escapes each interpolated array element as one argument.
-    // A hard 2-minute ceiling means a hung subprocess can never wedge the
-    // agent's tool call; the shell kills the child on expiry (exit 124).
+    // The ceiling is the agent's requested budget (or the 2-minute default);
+    // the shell kills the child on expiry (exit 124).
     const p = $`${bin} ${args}`
+    const ms = ceilingMs(timeoutMs)
     // Prefer the runtime .timeout(); fall back to a manual ceiling when the
     // injected `$` shell does not implement it (observed on opencode 1.18.15).
     const out = typeof (p as any).timeout === "function"
-      ? await p.timeout(120_000).quiet()
-      : await withTimeout(p.quiet(), 120_000)
+      ? await p.timeout(ms).quiet()
+      : await withTimeout(p.quiet(), ms)
+    return out.stdout.toString()
+  }
+
+  // Raw shell fallback for the shadow bash tool: run the command through the
+  // host `$` shell (sh -c) exactly as opencode's built-in bash would, with the
+  // same timeout ceiling as `run` (timeout is milliseconds, the opencode bash
+  // convention). Only used when kern is unavailable.
+  const runRaw = async (command: string, workdir?: string, timeout?: number): Promise<string> => {
+    const p = $`sh -c ${command}`
+    if (workdir) p.cwd(workdir)
+    const ms = ceilingMs(timeout)
+    const out = typeof (p as any).timeout === "function"
+      ? await p.timeout(ms).quiet()
+      : await withTimeout(p.quiet(), ms)
     return out.stdout.toString()
   }
 
   // Some commands (kern sec, kern delete, kern guard check) print their
   // payload to stdout and then exit non-zero as a secondary signal. Surface
   // the payload instead of treating the exit code as a hard failure.
-  async function runPayload(args: string[]): Promise<string> {
+async function runPayload(args: string[], timeoutMs?: number, preserveExit = false): Promise<string> {
+    // Several kern CLI commands print their full report to stdout and then
+    // exit non-zero BY DESIGN as a CI signal (kern changes/review exit 1 when
+    // risk > 0, kern security on error findings, kern validate on FAILED,
+    // kern guard check exits 2 on violations, kern build/heal/sandbox/exec on
+    // command failure). The report must survive as the tool result. Capture it
+    // via sh -c with output redirection and a forced exit 0: some host `$`
+    // shells reject redirect tokens in the template literal itself AND do not
+    // attach stdout to the rejection error, either of which would lose the
+    // report. With preserveExit=true the forced exit 0 is dropped and a
+    // non-zero exit throws with the captured output, so callers that need the
+    // real exit status (kern_exec: "stderr is only surfaced on failure") get it.
+    const sq = (s: string) => `'${s.replace(/'/g, `'\\\\''`)}'`
+    const outFile = resolve(tmpdir(), `kern-shadow-${process.pid}-${randomBytes(4).toString("hex")}.out`)
     try {
-      return await run(args)
-    } catch (err) {
-      const e = err as { stdout?: Buffer | Uint8Array }
-      const out = e.stdout ? Buffer.from(e.stdout).toString() : ""
-      if (out.trim() !== "") return out
-      throw err
+      const cmdStr = `${sq(bin)} ${args.map(sq).join(" ")} > ${sq(outFile)} 2>&1${preserveExit ? "" : "; exit 0"}`
+      const p = $`sh -c ${cmdStr}`
+      try {
+        if (typeof (p as any).timeout === 'function') await p.timeout(ceilingMs(timeoutMs)).quiet()
+        else await withTimeout(p.quiet(), ceilingMs(timeoutMs))
+      } catch (err) {
+        if (preserveExit) throw new Error(await readFile(outFile, 'utf8'))
+        throw err
+      }
+      return await readFile(outFile, 'utf8')
+    } finally {
+      await rm(outFile, { force: true })
     }
   }
 
@@ -186,15 +353,17 @@ export default (async ({ directory, $ }) => {
       }),
       kern_run_build: tool({
         description:
-          "Run a build/test command locally and return only the compact result (exit status + errors), not full output. Use for builds, tests, linting to save context.",
+          "Run a build/test command locally and return only the compact result (exit status + errors), not full output. Use for builds, tests, linting to save context. timeout is in MILLISECONDS (default 120000, max 1800000).",
         args: {
           command: tool.schema.string(),
           dir: tool.schema.string().optional(),
+          timeout: tool.schema.number().optional(),
         },
         async execute(args) {
           const flags: string[] = ["build"]
           if (args.dir) flags.push("--dir", args.dir)
-          return run([...flags, args.command])
+          if (args.timeout) flags.push("--timeout", String(Math.max(1, Math.ceil(args.timeout / 1000))))
+          return runPayload([...flags, args.command], args.timeout)
         },
       }),
       kern_optimize_log: tool({
@@ -264,7 +433,7 @@ export default (async ({ directory, $ }) => {
           if (args.range) flags.push("--range", args.range)
           if (args.file) flags.push("--file", args.file)
           if (args.json) flags.push("--json")
-          return run(flags)
+          return runPayload(flags)
         },
       }),
       kern_review: tool({
@@ -282,7 +451,7 @@ export default (async ({ directory, $ }) => {
           if (args.range) flags.push("--range", args.range)
           if (args.file) flags.push("--file", args.file)
           if (args.max_tokens) flags.push("--max", String(args.max_tokens))
-          return run(flags)
+          return runPayload(flags)
         },
       }),
       kern_hubs: tool({
@@ -374,12 +543,12 @@ export default (async ({ directory, $ }) => {
           "Call-graph communities (label propagation): which symbols cluster together as subsystems, with each cluster's size and hub. Use to name the architecture's parts before refactoring.",
         args: {
           root: tool.schema.string().optional(),
-          limit: tool.schema.string().optional(),
+          limit: tool.schema.number().optional(),
         },
         async execute(args) {
           const flags: string[] = ["communities"]
           if (args.root) flags.push(args.root)
-          if (args.limit) flags.push("--limit", args.limit)
+          if (args.limit) flags.push("--limit", String(args.limit))
           return run(flags)
         },
       }),
@@ -695,6 +864,22 @@ export default (async ({ directory, $ }) => {
           return runPayload(flags)
         },
       }),
+      kern_authorize_context: tool({
+        description:
+          "Authorized-context primitive (P0.1): compute the exact set of symbols and call edges an agent may legally read for a task, filtered by the agent's identity (firewall context.read permission) and an optional task scope, and return it with an auditable authorization proof (decision, fingerprint, index freshness). Use before retrieval when a task must not leak out-of-scope code.",
+        args: {
+          agent_id: tool.schema.string(),
+          task: tool.schema.string(),
+          root: tool.schema.string().optional(),
+          symbol_filter: tool.schema.string().optional(),
+        },
+        async execute(args) {
+          const flags: string[] = ["authorize-context", "--agent", args.agent_id, "--task", args.task]
+          if (args.root) flags.push("--root", args.root)
+          if (args.symbol_filter) flags.push("--symbol", args.symbol_filter)
+          return runPayload(flags)
+        },
+      }),
       kern_usage_guide: tool({
         description:
           "Categorized usage guide for every kern MCP tool with performance tiers (fast/moderate/expensive), recommended workflows, and pitfalls. Consult this first when deciding which tool fits a task.",
@@ -802,26 +987,25 @@ export default (async ({ directory, $ }) => {
       }),
       kern_exec: tool({
         description:
-          "Run code in an isolated local runtime and return ONLY stdout (Think in Code). Language is selected by lang= or a shebang line; runtimes resolve from PATH (python3, node, go, bash, perl, ...). Runs in a fresh temp dir with a hard timeout (default 10s) and a stdout byte cap (default 16KiB); HOME/XDG point into the sandbox and secrets are stripped. When unprivileged user namespaces are available the script also runs in a private network namespace (network egress blocked); otherwise it degrades to env isolation. stderr is only surfaced on failure. Use to compute exact answers (math, data munging, JSON transforms) without polluting context.",
+          "Run code in an isolated local runtime and return ONLY stdout (Think in Code). Language is selected by lang= or a shebang line; runtimes resolve from PATH (python3, node, go, bash, perl, ...). Runs in a fresh temp dir with a hard timeout (default 15s via the CLI; timeout is in MILLISECONDS) and a stdout byte cap (default 16KiB); HOME/XDG point into the sandbox and secrets are stripped. When unprivileged user namespaces are available the script also runs in a private network namespace (network egress blocked); otherwise it degrades to env isolation. stderr is only surfaced on failure. Use to compute exact answers (math, data munging, JSON transforms) without polluting context.",
         args: {
           code: tool.schema.string(),
           lang: tool.schema.string().optional(),
           timeout: tool.schema.number().optional(),
           max: tool.schema.number().optional(),
           stdin: tool.schema.string().optional(),
-          no_isolate: tool.schema.string().optional(),
         },
         async execute(args) {
           const flags: string[] = ["exec", "--lang", args.lang ?? "python3"]
-          if (args.timeout) flags.push("--timeout", String(args.timeout))
+          if (args.timeout) flags.push("--timeout", String(Math.max(1, Math.ceil(args.timeout / 1000))))
           if (args.max) flags.push("--max", String(args.max))
           return withTempFile("exec.code", args.code, (file) => {
             if (args.stdin) {
               return withTempFile("exec.stdin", args.stdin, (stdinFile) =>
-                run([...flags, file, "--stdin", stdinFile])
+                runPayload([...flags, file, "--stdin", stdinFile], args.timeout, true)
               )
             }
-            return run([...flags, file])
+            return runPayload([...flags, file], args.timeout, true)
           })
         },
       }),
@@ -927,7 +1111,7 @@ export default (async ({ directory, $ }) => {
       }),
       kern_heal: tool({
         description:
-          "Self-correction loop: run validation; on failure ask a local Ollama model to rewrite the failing files, apply the fix inside a throwaway snapshot, re-validate, and report a diff to review. Never edits the user's working tree.",
+          "Self-correction loop: run validation; on failure ask a local Ollama model to rewrite the failing files, apply the fix inside a throwaway snapshot, re-validate, and report a diff to review. Never edits the user's working tree. timeout is in MILLISECONDS.",
         args: {
           root: tool.schema.string().optional(),
           task: tool.schema.string().optional(),
@@ -940,9 +1124,9 @@ export default (async ({ directory, $ }) => {
           if (args.task) flags.push("--task", args.task)
           if (args.model) flags.push("--llm", args.model)
           if (args.max_rounds) flags.push("--max", String(args.max_rounds))
-          if (args.timeout) flags.push("--timeout", String(args.timeout))
+          if (args.timeout) flags.push("--timeout", String(Math.max(1, Math.ceil(args.timeout / 1000))))
           if (args.root) flags.push(args.root)
-          return run(flags)
+          return runPayload(flags, args.timeout)
         },
       }),
       kern_validate: tool({
@@ -956,11 +1140,11 @@ export default (async ({ directory, $ }) => {
         async execute(args) {
           const flags: string[] = ["validate"]
           if (args.command) flags.push("--cmd", args.command)
-          if (args.timeout) flags.push("--timeout", String(args.timeout))
+          if (args.timeout) flags.push("--timeout", String(Math.max(1, Math.ceil(args.timeout / 1000))))
           if (args.root) flags.push(args.root)
           // validate exits 1 on build failure with the errors on stdout —
           // use runPayload so the output is surfaced, not dropped.
-          return runPayload(flags)
+          return runPayload(flags, args.timeout)
         },
       }),
       kern_analyze: tool({
@@ -1029,46 +1213,6 @@ export default (async ({ directory, $ }) => {
           if (args.root) flags.push("--root", args.root)
           flags.push(args.alert)
           if (args.snapshot) flags.push(args.snapshot)
-          return run(flags)
-        },
-      }),
-      kern_correlate: tool({
-        description:
-          "HIGH-LEVEL (Phase 14): correlate a production alert against the runtime to produce a deep evidence chain (alert→service→deployment→commit→symbol→task/pr/agent). Deterministic — derived from runtime source and git history, not LLM.",
-        args: {
-          root: tool.schema.string().optional(),
-          alert: tool.schema.string(),
-          snapshot: tool.schema.string().optional(),
-        },
-        async execute(args) {
-          const flags: string[] = ["correlate", args.alert]
-          if (args.root) flags.push("--root", args.root)
-          return run(flags)
-        },
-      }),
-      kern_learn: tool({
-        description:
-          "HIGH-LEVEL (Phase 16): extract recurring patterns from engineering memory and surface those above a threshold. Patterns are promoted to memory (evidence-based). Deterministic — the LLM may explain but does not create patterns.",
-        args: {
-          root: tool.schema.string().optional(),
-          threshold: tool.schema.string().optional(),
-        },
-        async execute(args) {
-          const flags: string[] = ["learn"]
-          if (args.threshold) flags.push(args.threshold)
-          if (args.root) flags.push("--root", args.root)
-          return run(flags)
-        },
-      }),
-      kern_modernize: tool({
-        description:
-          "HIGH-LEVEL (Phase 17): analyze the monolith and produce a phased modernization plan (communities→bridges→churn→candidate boundaries→impact→risk→migration plan). Each extraction phase becomes an auditable Task.",
-        args: {
-          root: tool.schema.string().optional(),
-        },
-        async execute(args) {
-          const flags: string[] = ["modernize"]
-          if (args.root) flags.push("--root", args.root)
           return run(flags)
         },
       }),
@@ -1152,13 +1296,103 @@ export default (async ({ directory, $ }) => {
           return run(flags)
         },
       }),
+      kern_meta: tool({
+        description:
+          "Single entry point: describe what you need in natural language and kern classifies the request and runs the right tool(s) internally. Examples: 'how does dispatch work?' → kern_explore, 'what breaks if I change dispatch?' → kern_impact, 'compress this log: ...' → kern_optimize_log, 'mask secrets in: ...' → kern_mask_pii, 'find the dispatch function' → kern_search, 'show me the architecture' → kern_arch. Prefer this over calling individual kern_* tools — it picks the right one for you.",
+        args: {
+          root: tool.schema.string().optional(),
+          request: tool.schema.string(),
+        },
+        async execute(args) {
+          const flags: string[] = ["meta", args.request]
+          if (args.root) flags.push("--root", args.root)
+          return run(flags)
+        },
+      }),
+      kern_run: tool({
+        description:
+          "HIGH-LEVEL (Workflow E): run an intent through the full task pipeline — compile the intent, select workflow + capabilities + agents, create the Task, run policy preflight, and return the result (task, workflow, risk/approval, caps, tools, agents, next). Single entry point that orchestrates the whole workflow.",
+        args: {
+          root: tool.schema.string().optional(),
+          intent: tool.schema.string(),
+        },
+        async execute(args) {
+          const flags: string[] = ["run", args.intent]
+          if (args.root) flags.push("--root", args.root)
+          return run(flags)
+        },
+      }),
+      kern_workflow: tool({
+        description:
+          "HIGH-LEVEL: select and coordinate the agent team without the external caller manually sequencing it. Classifies the intent, registers the kind-specific workflow, wires the standard team, and drives the steps to the human approval gate. The run parks at the gate with an approval ID; resolve it via kern_approve then call kern_workflow again with the same task_id to resume.",
+        args: {
+          root: tool.schema.string().optional(),
+          intent: tool.schema.string(),
+          task_id: tool.schema.string().optional(),
+        },
+        async execute(args) {
+          if (args.task_id) {
+            const flags: string[] = ["workflow", "--task", args.task_id]
+            if (args.root) flags.push("--root", args.root)
+            return run(flags)
+          }
+          const flags: string[] = ["workflow", args.intent]
+          if (args.root) flags.push("--root", args.root)
+          return run(flags)
+        },
+      }),
+      kern_onboard: tool({
+        description:
+          "Session onboarding: ensure the working directory is indexed and registered for kern (build/refresh the index, register the repo, write AGENTS.md if missing) and report status. Call at session start in a new repo instead of re-selecting files manually.",
+        args: {
+          root: tool.schema.string().optional(),
+        },
+        async execute(args) {
+          const flags: string[] = ["onboard"]
+          if (args.root) flags.push("--root", args.root)
+          return run(flags)
+        },
+      }),
+      kern_audit: tool({
+        description:
+          "HIGH-LEVEL: return the tamper-evident governance audit log for the project (every firewall decision/approval). CLI-equivalent: kern audit. Backs the AUDIT intent workflow.",
+        args: {
+          root: tool.schema.string().optional(),
+        },
+        async execute(args) {
+          const flags: string[] = ["audit"]
+          if (args.root) flags.push("--root", args.root)
+          return run(flags)
+        },
+      }),
+      kern_approve: tool({
+        description:
+          "HIGH-LEVEL: resolve a governance approval gate. With no id, lists pending approvals. With an id, approves it; set reject=true to reject instead. CLI-equivalent: kern approve. Agents hit this when kern_run/kern_workflow parks at the human approval gate.",
+        args: {
+          root: tool.schema.string().optional(),
+          id: tool.schema.string().optional(),
+          reject: tool.schema.string().optional(),
+          reason: tool.schema.string().optional(),
+          approver: tool.schema.string().optional(),
+        },
+        async execute(args) {
+          const flags: string[] = ["approve"]
+          if (args.id) flags.push(args.id)
+          if (args.reject === "true") flags.push("--reject")
+          if (args.reason) flags.push("--reason", args.reason)
+          if (args.approver) flags.push("--approver", args.approver)
+          if (args.root) flags.push("--root", args.root)
+          return run(flags)
+        },
+      }),
       kern_correlate: tool({
         description:
-          "HIGH-LEVEL (Phase 14): correlate a production alert against the runtime to produce a deep evidence chain (alert→service→deployment→commit→symbol→task/pr/agent). Deterministic — derived from runtime source and git history, not LLM.",
+          "HIGH-LEVEL: correlate a production alert against the runtime to produce a deep evidence chain (alert→service→deployment→commit→symbol→task/pr/agent). Deterministic — derived from runtime source and git history, not LLM.",
         args: {
           root: tool.schema.string().optional(),
           alert: tool.schema.string(),
-          snapshot: tool.schema.string().optional(),
+          // snapshot is intentionally absent: the kern CLI correlate command
+          // takes only <alert-json> and --root, so the arg would be dropped.
         },
         async execute(args) {
           const flags: string[] = ["correlate", args.alert]
@@ -1168,7 +1402,7 @@ export default (async ({ directory, $ }) => {
       }),
       kern_learn: tool({
         description:
-          "HIGH-LEVEL (Phase 16): extract recurring patterns from engineering memory and surface those above a threshold. Patterns are promoted to memory (evidence-based). Deterministic — the LLM may explain but does not create patterns.",
+          "HIGH-LEVEL: extract recurring patterns from engineering memory and surface those above a threshold. Patterns are promoted to memory (evidence-based). Deterministic — the LLM may explain but does not create patterns.",
         args: {
           root: tool.schema.string().optional(),
           threshold: tool.schema.string().optional(),
@@ -1182,7 +1416,7 @@ export default (async ({ directory, $ }) => {
       }),
       kern_modernize: tool({
         description:
-          "HIGH-LEVEL (Phase 17): analyze the monolith and produce a phased modernization plan (communities→bridges→churn→candidate boundaries→impact→risk→migration plan). Each extraction phase becomes an auditable Task.",
+          "HIGH-LEVEL: analyze the monolith and produce a phased modernization plan (communities→bridges→churn→candidate boundaries→impact→risk→migration plan). Each extraction phase becomes an auditable Task.",
         args: {
           root: tool.schema.string().optional(),
         },
@@ -1202,7 +1436,7 @@ export default (async ({ directory, $ }) => {
         async execute(args) {
           return withTempFile("schema-data.json", args.data, (dataFile) =>
             withTempFile("schema-def.json", args.schema, (schemaFile) =>
-              run(["schema", dataFile, "--schema", schemaFile])
+              runPayload(["schema", dataFile, "--schema", schemaFile])
             )
           )
         },
@@ -1258,10 +1492,141 @@ export default (async ({ directory, $ }) => {
           const parts = args.command.trim().split(/\s+/).filter(Boolean)
           if (parts.length === 0) return "error: empty command"
           const flags: string[] = ["sandbox"]
-          if (args.timeout) flags.push("--timeout", String(args.timeout))
+          if (args.timeout) flags.push("--timeout", String(Math.max(1, Math.ceil(args.timeout / 1000))))
           if (args.root) flags.push(args.root)
           flags.push("--", ...parts)
-          return run(flags)
+          return runPayload(flags, args.timeout)
+        },
+      }),
+      // --- Shadow built-ins: route read/grep/glob/bash to kern transparently ---
+      // A plugin tool with the same name as a built-in takes precedence, so the
+      // agent's "read the file" call hits kern_compact_file under the hood. If
+      // kern is unavailable (missing binary, no index), fall back to the raw
+      // built-in behavior (node:fs / the `$` shell — the opencode ToolContext
+      // has no context.tool to re-invoke the replaced tool) so the agent is
+      // never blocked.
+      read: tool({
+        description:
+          "Read a file. Routes to kern_compact_file (symbolic summary) by default for large codebases; set full=true for verbatim content. Falls back to raw read if kern is unavailable.",
+        args: {
+          filePath: tool.schema.string(),
+          full: tool.schema.boolean().optional(),
+        },
+        async execute(args) {
+          if (args.full) {
+            // Explicit verbatim request — read directly, no kern.
+            return readFallback(args.filePath)
+          }
+          try {
+            return await run(["compact", args.filePath])
+          } catch {
+            // kern unavailable — fall back to a raw read so the agent is never blocked.
+            return readFallback(args.filePath)
+          }
+        },
+      }),
+      glob: tool({
+        description:
+          "Find files by glob pattern. Routes to kern_project_map (symbol map) for repo exploration; set raw=true for plain file listing. Falls back to raw glob if kern is unavailable.",
+        args: {
+          pattern: tool.schema.string(),
+          path: tool.schema.string().optional(),
+          raw: tool.schema.boolean().optional(),
+        },
+        async execute(args) {
+          if (args.raw) {
+            return globFallback(args.pattern, args.path ?? ".")
+          }
+          // A glob pattern with metacharacters can't be expressed by the kern
+          // project symbol map — route it to the raw glob so the pattern is
+          // honored instead of silently dropped.
+          if (/[*?[\]{}]/.test(args.pattern)) {
+            return globFallback(args.pattern, args.path ?? ".")
+          }
+          try {
+            return await run(["project", args.path ?? "."])
+          } catch {
+            return globFallback(args.pattern, args.path ?? ".")
+          }
+        },
+      }),
+      grep: tool({
+        description:
+          "Search file contents by regex. Routes to kern_ast_search (code symbols) by default; set docs=true for kern_doc_search, or raw=true for plain grep. Falls back to raw grep if kern is unavailable.",
+        args: {
+          pattern: tool.schema.string(),
+          path: tool.schema.string().optional(),
+          include: tool.schema.string().optional(),
+          docs: tool.schema.boolean().optional(),
+          raw: tool.schema.boolean().optional(),
+        },
+        async execute(args) {
+          if (args.raw) {
+            return grepFallback(args.pattern, args.path, args.include)
+          }
+          if (args.include) {
+            // kern ast/docs searches have no include filter — route to the raw
+            // grep so the filter is honored instead of silently dropped.
+            return grepFallback(args.pattern, args.path, args.include)
+          }
+          try {
+            if (args.docs) {
+              const flags: string[] = ["docs", args.pattern]
+              if (args.path) flags.push("--root", args.path)
+              return await run(flags)
+            }
+            // Code search via AST
+            const flags: string[] = ["ast", args.pattern]
+            if (args.path) flags.push("--root", args.path)
+            return await run(flags)
+          } catch {
+            return grepFallback(args.pattern, args.path, args.include)
+          }
+        },
+      }),
+      bash: tool({
+        description:
+          "Run a shell command. Routes to kern build (governed, compact output) when kern is available; set raw=true to bypass kern. Falls back to raw bash (host `$` shell) if kern is unavailable, so the agent is never blocked. timeout is in MILLISECONDS (default 120000, max 1800000).",
+        args: {
+          command: tool.schema.string(),
+          workdir: tool.schema.string().optional(),
+          timeout: tool.schema.number().optional(),
+          raw: tool.schema.boolean().optional(),
+        },
+        async execute(args) {
+          const cmd = args.command.trim()
+          if (cmd === "") return "error: empty command"
+          if (args.raw) {
+            return runRaw(args.command, args.workdir, args.timeout)
+          }
+          // kern build runs any command (sh -c) in the project dir, gated by
+          // the governance firewall, and returns compact output. kern exec is
+          // NOT used for this: it executes code in an isolated temp sandbox
+          // (wrong cwd, no network, stripped env), which would break ordinary
+          // shell usage — so every command goes through the same governed path.
+          try {
+            const flags: string[] = ["build", cmd]
+            if (args.workdir) flags.push("--dir", args.workdir)
+            if (args.timeout) flags.push("--timeout", String(Math.max(1, Math.ceil(args.timeout / 1000))))
+            // Pass the agent's budget (ms) through so the governed path honors
+            // it instead of the 2-minute default ceiling.
+            return await run(flags, args.timeout)
+          } catch (err) {
+            // Never silently bypass the exec firewall: if the governed path
+            // was DENIED (no KERN_TOOLS allowlist / no KERN_ALLOW_EXEC, or an
+            // approval-required risk), surface the denial instead of falling
+            // back to raw shell — a raw run would execute the command
+            // ungoverned while the agent believes it was governed. Also never
+            // re-run raw after a governed TIMEOUT: that would double-execute a
+            // possibly stateful command with a shorter, differently-united
+            // budget. The raw fallback is reserved for genuine unavailability:
+            // the kern binary itself is missing.
+            const e = err as { message?: string; stdout?: Buffer | Uint8Array; stderr?: Buffer | Uint8Array }
+            const text = [e.message, e.stdout?.toString(), e.stderr?.toString()].filter(Boolean).join("\n")
+            if (/blocked|denied|allowlist|approval|firewall|governance|not permitted|refused|timed out|timeout/i.test(text)) throw err
+            if (!existsSync(bin)) return runRaw(args.command, args.workdir, args.timeout)
+            throw err
+          }
         },
       }),
     },

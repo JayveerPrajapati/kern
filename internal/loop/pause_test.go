@@ -9,7 +9,7 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/memory"
 )
 
-// TestLoopPausesOnRiskExceeded verifies the Phase 20.4 high-risk escalation gate:
+// TestLoopPausesOnRiskExceeded verifies the high-risk escalation gate:
 // when the assessed risk of the intent exceeds the configured MaxRiskLevel ceiling,
 // the loop PAUSES with reason "risk_exceeded" before running any stages.
 func TestLoopPausesOnRiskExceeded(t *testing.T) {
@@ -77,7 +77,7 @@ func TestBudgetPauseSetsPausedFlag(t *testing.T) {
 	}
 }
 
-// TestPauseOnBudgetEnvNotAllowed verifies the env dimension from Phase 20.3 trips
+// TestPauseOnBudgetEnvNotAllowed verifies the env dimension from trips
 // the budget and pauses with the env reason.
 func TestPauseOnBudgetEnvNotAllowed(t *testing.T) {
 	budget := &domain.SafetyBudget{MaxToolCalls: 100, AllowedEnvs: []string{"development"}}
@@ -125,7 +125,7 @@ func TestPauseOnToolKindLimit(t *testing.T) {
 	}
 }
 
-// TestLearnIsAutonomyAware verifies Phase 20.5: the learn stage records the
+// TestLearnIsAutonomyAware verifies the learn stage records the
 // autonomy score and a "score" tag in memory.
 func TestLearnIsAutonomyAware(t *testing.T) {
 	store := memory.NewMemoryStore(t.TempDir())

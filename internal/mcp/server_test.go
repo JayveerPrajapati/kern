@@ -33,6 +33,11 @@ func serveMany(t *testing.T, reqs ...string) []map[string]any {
 	s := NewServer(in, buf)
 	// Tests use temp-dir roots outside the process cwd; confine to everything.
 	s.roots = []string{"/"}
+	// The KERN_MCP_ROOTS gate now fails closed to the process cwd; tests
+	// target temp-dirs outside it, so disable the gate for the harness. Gate
+	// behavior is exercised by the gate's own tests.
+	s.gate = nil
+	s.preTool = nil
 	if err := s.Serve(); err != nil {
 		t.Fatalf("Serve: %v", err)
 	}
@@ -439,6 +444,10 @@ func serveSequential(t *testing.T, reqs ...string) []map[string]any {
 	s := NewServer(pr, out)
 	// Tests use temp-dir roots outside the process cwd; confine to everything.
 	s.roots = []string{"/"}
+	// Disable the fail-closed-to-cwd KERN_MCP_ROOTS gate for the harness (see
+	// serveMany); the gate's own tests exercise it explicitly.
+	s.gate = nil
+	s.preTool = nil
 	done := make(chan error, 1)
 	go func() { done <- s.Serve() }()
 	var resps []map[string]any
@@ -541,7 +550,7 @@ func jsonMust(m map[string]any) string {
 }
 
 // TestLockErrorIsNotFakeHeld verifies kern_lock reports the real Acquire
-// failure instead of a fabricated "held (pid 0)" (W2-33).
+// failure instead of a fabricated "held (pid 0)" .
 func TestLockErrorIsNotFakeHeld(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "notadir")
 	if err := os.WriteFile(root, []byte("file, not dir"), 0o644); err != nil {

@@ -1,16 +1,24 @@
 package main
 
 import (
+	"bufio"
+	"context"
+	"encoding/json"
 	"fmt"
 	"github.com/JayveerPrajapati/kern/internal/brief"
 	"github.com/JayveerPrajapati/kern/internal/commitmsg"
 	"github.com/JayveerPrajapati/kern/internal/fw"
 	"github.com/JayveerPrajapati/kern/internal/hook"
 	"github.com/JayveerPrajapati/kern/internal/hooks"
+	"github.com/JayveerPrajapati/kern/internal/intel"
 	"github.com/JayveerPrajapati/kern/internal/setup"
+	"io"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 )
 
 func runSetup(rest []string) {
@@ -32,6 +40,14 @@ func runSetup(rest []string) {
 		}
 		return
 	}
+	if f.verify {
+		if err := verifyMCP(root); err != nil {
+			fmt.Printf("[FAIL] mcp binary not reachable: %v\n", err)
+			panic(exitError{code: 1})
+		}
+		fmt.Println("[ok] mcp binary responds to initialize")
+		return
+	}
 	var agents []string
 	if f.agents != "" {
 		agents = strings.Split(f.agents, ",")
@@ -43,20 +59,25 @@ func runSetup(rest []string) {
 	failed := 0
 	for _, s := range setup.Wire(root, agents, f.detect) {
 		mark := "ok"
-		if !s.Installed {
+		if s.Skipped {
+			mark = "--"
+		} else if !s.Installed {
 			mark = "!!"
 			failed++
 		}
 		fmt.Printf("[%s] %-32s %s\n", mark, s.Agent, s.Note)
 	}
 	if f.global {
-		globalAgents := agents
-		if len(globalAgents) == 0 && f.detect {
-			globalAgents = detected
-		}
-		for _, s := range setup.WireGlobal(globalAgents) {
+		// Global pre-wiring targets ALL agents (or the explicit --agents
+		// list), never just the detected subset: an agent installed later is
+		// already wired with no re-run. Wire() itself already pre-wires
+		// global hooks/adapters for all agents; WireGlobal adds the global
+		// instruction files (AGENTS.md, CLAUDE.md) and the opencode plugin.
+		for _, s := range setup.WireGlobal(agents) {
 			mark := "ok"
-			if !s.Installed {
+			if s.Skipped {
+				mark = "--"
+			} else if !s.Installed {
 				mark = "!!"
 				failed++
 			}
@@ -72,8 +93,100 @@ func runSetup(rest []string) {
 	// Fail closed: a partial wiring (some agents errored) must not look like a
 	// clean success. Exit non-zero so install scripts and CI can detect it.
 	if failed > 0 {
-		os.Exit(1)
+		panic(exitError{code: 1})
 	}
+}
+
+// verifyMCP spawns the kern-mcp command configured in .mcp.json and checks it
+// completes an MCP initialize handshake within 5 seconds. This catches a
+// missing binary or a stale command path at setup time instead of at agent
+// launch time.
+func verifyMCP(root string) error {
+	raw, err := os.ReadFile(filepath.Join(root, ".mcp.json"))
+	if err != nil {
+		return fmt.Errorf("read .mcp.json: %w", err)
+	}
+	var cfg struct {
+		MCPServers map[string]struct {
+			Command string   `json:"command"`
+			Args    []string `json:"args"`
+		} `json:"mcpServers"`
+	}
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		return fmt.Errorf("parse .mcp.json: %w", err)
+	}
+	server, ok := cfg.MCPServers["kern"]
+	if !ok {
+		return fmt.Errorf(".mcp.json has no \"kern\" mcpServers entry")
+	}
+	cmd := server.Command
+	if cmd == "" {
+		cmd = "kern-mcp"
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	proc := exec.CommandContext(ctx, cmd, server.Args...)
+	stdin, err := proc.StdinPipe()
+	if err != nil {
+		return fmt.Errorf("stdin pipe: %w", err)
+	}
+	// StdoutPipe blocks on Read until the server writes, unlike a bytes.Buffer
+	// whose Read returns io.EOF immediately while empty.
+	stdout, err := proc.StdoutPipe()
+	if err != nil {
+		return fmt.Errorf("stdout pipe: %w", err)
+	}
+	proc.Stderr = io.Discard
+	if err := proc.Start(); err != nil {
+		return fmt.Errorf("spawn %q: %w", cmd, err)
+	}
+	// MCP servers are long-lived; always reap the spawned process.
+	defer func() {
+		proc.Process.Kill()
+		proc.Wait()
+	}()
+
+	req := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"kern-setup-check","version":"1"}}}`
+	if _, err := io.WriteString(stdin, req+"\n"); err != nil {
+		return fmt.Errorf("write initialize request: %w", err)
+	}
+
+	type lineResult struct {
+		line string
+		err  error
+	}
+	ch := make(chan lineResult, 1)
+	go func() {
+		line, rerr := bufio.NewReader(stdout).ReadString('\n')
+		ch <- lineResult{line, rerr}
+	}()
+
+	var resp struct {
+		Result json.RawMessage `json:"result"`
+		Error  *struct {
+			Code    int    `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	select {
+	case r := <-ch:
+		if r.err != nil {
+			return fmt.Errorf("read initialize response: %w", r.err)
+		}
+		if err := json.Unmarshal([]byte(r.line), &resp); err != nil {
+			return fmt.Errorf("invalid initialize response %q: %w", r.line, err)
+		}
+		if resp.Error != nil {
+			return fmt.Errorf("initialize error %d: %s", resp.Error.Code, resp.Error.Message)
+		}
+		if len(resp.Result) == 0 {
+			return fmt.Errorf("initialize returned no result: %q", r.line)
+		}
+	case <-ctx.Done():
+		return fmt.Errorf("no initialize response within 5s: %w", ctx.Err())
+	}
+	return nil
 }
 
 func runBuddy(rest []string) {
@@ -86,6 +199,87 @@ func runBuddy(rest []string) {
 		fatal("%v", err)
 	}
 	fmt.Println(out)
+
+}
+
+// runOnboard ensures a working directory is fully wired to kern: registers the
+// repo in the registry, builds/refreshes the index, writes AGENTS.md if
+// missing, and prints a status report. Mirrors the MCP tool kern_onboard.
+// Usage: kern onboard [--root DIR]
+func runOnboard(rest []string) {
+	f, args, err := parseFlags(rest)
+	if err != nil {
+		fatalUsage("flags: %v", err)
+	}
+	root := f.root
+	if root == "" {
+		root = "."
+		if len(args) > 0 && args[0] != "" {
+			root = args[0]
+		}
+	}
+	abs, err := filepath.Abs(root)
+	if err != nil {
+		abs = root
+	}
+	abs = filepath.Clean(abs)
+
+	// Register the repo if not already present.
+	registered := ""
+	reg, rerr := intel.LoadRepos()
+	if rerr != nil {
+		registered = "error: " + rerr.Error()
+	} else {
+		already := false
+		for _, r := range reg.Repos {
+			if filepath.Clean(r.Root) == abs {
+				already = true
+				break
+			}
+		}
+		if already {
+			registered = "present"
+		} else if aerr := reg.Add(abs, ""); aerr != nil {
+			registered = "error: " + aerr.Error()
+		} else if serr := reg.Save(); serr != nil {
+			registered = "added (save error: " + serr.Error() + ")"
+		} else {
+			registered = "added"
+		}
+	}
+
+	// Build/refresh the index (loads a fresh cached one if present).
+	indexed := ""
+	ix, ierr := loadOrBuild(abs)
+	if ierr != nil {
+		indexed = "error: " + ierr.Error()
+	} else {
+		edges := 0
+		for _, callees := range ix.Calls {
+			edges += len(callees)
+		}
+		indexed = fmt.Sprintf("%d symbols, %d call edges, %d files", len(ix.Symbols), edges, len(ix.FileHashes))
+	}
+
+	// AGENTS.md wiring, only if the file is missing.
+	wired := ""
+	if _, serr := os.Stat(filepath.Join(abs, "AGENTS.md")); os.IsNotExist(serr) {
+		agents := setup.DetectAgents(abs)
+		setup.Wire(abs, agents, false)
+		if _, werr := os.Stat(filepath.Join(abs, "AGENTS.md")); werr == nil {
+			wired = "written"
+		} else {
+			wired = "write failed"
+		}
+	} else {
+		wired = "present"
+	}
+
+	fmt.Printf("root:       %s\n", abs)
+	fmt.Printf("registered: %s\n", registered)
+	fmt.Printf("indexed:    %s\n", indexed)
+	fmt.Printf("AGENTS.md:  %s\n", wired)
+	fmt.Printf("next:       explore with kern_explore / kern_code_graph, or kern buddy for a session digest\n")
 
 }
 
@@ -256,7 +450,7 @@ func runHook(rest []string) {
 				// Gemini: exit code 2 + stderr text hides the real tool
 				// result and substitutes the stderr content.
 				fmt.Fprintln(os.Stderr, repl)
-				os.Exit(2)
+				panic(exitError{code: 2})
 			}
 		case "gemini-prompt":
 			if err := hook.GeminiPrompt(root, in); err != nil {

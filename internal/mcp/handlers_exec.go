@@ -243,7 +243,11 @@ func (s *Server) handleRunBuild(ctx context.Context, id string, args map[string]
 		defer cancel()
 		res, err := optimize.RunBuild(bctx, cmd, argString(args, "dir"), optimize.Options{})
 		if err != nil {
-			return "", err
+			// Fold partial output into the result: RunBuild already appends the
+			// error text to res.Output, and on a timeout that partial output is
+			// usually the actual compiler/test error — discarding it (as the
+			// previous bare error return did) hides the only useful signal.
+			return res.Output, err
 		}
 		return res.Output, nil
 

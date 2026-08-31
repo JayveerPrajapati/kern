@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"github.com/JayveerPrajapati/kern/internal/fw"
 	"github.com/JayveerPrajapati/kern/internal/index"
@@ -139,6 +140,27 @@ func (s *Server) handleSearch(ctx context.Context, args map[string]any) (string,
 		} else {
 			matches = intel.RankedSearch(ix, query, limit)
 		}
+		// Governance (P0.1): kern_search runs authorization like every other
+		// retrieval tool. No agent_id → the default agent + cwd-scoped scope
+		// governs; KERN_MCP_PERMISSIVE=1 restores raw mode (nil governor,
+		// unfiltered results).
+		gov, err := s.newGovernor(ctx, args, ix)
+		if err != nil {
+			s.stampProvenance(ctx, s.governedProvenance(ix, gov.policySource, gov.proof, nil))
+			return "", err
+		}
+		if gov != nil {
+			var kept []index.Symbol
+			for _, m := range matches {
+				if gov.allowed[m.FullName()] {
+					kept = append(kept, m)
+				}
+			}
+			matches = kept
+			s.stampProvenance(ctx, s.governedProvenance(ix, gov.policySource, gov.proof, symbolProvenances(ix, searchSymbolNames(matches))))
+		} else {
+			s.stampProvenance(ctx, s.rawProvenance(ix, symbolProvenances(ix, searchSymbolNames(matches))))
+		}
 		if len(matches) == 0 {
 			return "no symbols matched: " + query, nil
 		}
@@ -159,6 +181,16 @@ func (s *Server) handleSearch(ctx context.Context, args map[string]any) (string,
 		return strings.TrimSuffix(b.String(), "\n"), nil
 
 	}
+}
+
+// searchSymbolNames extracts the qualified names from a ranked/semantic search
+// result set, for provenance and governance filtering.
+func searchSymbolNames(matches []index.Symbol) []string {
+	names := make([]string, 0, len(matches))
+	for _, m := range matches {
+		names = append(names, m.FullName())
+	}
+	return names
 }
 
 func (s *Server) handleRepoSearch(ctx context.Context, args map[string]any) (string, error) {
@@ -260,6 +292,20 @@ func (s *Server) handleInherits(ctx context.Context, args map[string]any) (strin
 	}
 }
 
+// freshnessFooter renders the opt-in content-addressed freshness proof footer.
+// It is appended ONLY when the caller passes with_freshness=true (or "true"/"1")
+// in the tool arguments, so existing agents see byte-identical responses.
+func (s *Server) freshnessFooter(args map[string]any, ix *index.Index) string {
+	if !argBool(args, "with_freshness") {
+		return ""
+	}
+	data, err := json.Marshal(ix.FreshnessProof(ix.Root))
+	if err != nil {
+		return ""
+	}
+	return "\n---freshness-proof---\n" + string(data)
+}
+
 func (s *Server) handleContext(ctx context.Context, args map[string]any) (string, error) {
 	{
 		symbol := argString(args, "symbol")
@@ -278,15 +324,40 @@ func (s *Server) handleContext(ctx context.Context, args map[string]any) (string
 			}
 			lines = n
 		}
-		ctx := ix.Context(symbol, lines)
-		if ctx == "" {
-			return "no symbol found: " + symbol, nil
+		gov, err := s.newGovernor(ctx, args, ix)
+		if err != nil {
+			// Authorization failure (unknown agent, firewall deny): auditable
+			// denial provenance, no symbol content.
+			s.stampProvenance(ctx, s.governedProvenance(ix, gov.policySource, gov.proof, nil))
+			return "", err
 		}
-		return ctx, nil
-
+		body := ix.Context(symbol, lines)
+		if gov != nil {
+			// The Context footer lists the symbol's callers/callees by name;
+			// filter it so no denied name leaks through the source slice.
+			body = gov.filterContextFooter(ix, body)
+			def, found := ix.ResolveName(symbol)
+			if !found || !gov.nameAllowed(ix, def.FullName()) {
+				// Denied or absent — identical non-leaking response (the agent
+				// cannot tell "denied" from "does not exist"), governed
+				// provenance with an empty symbol set and the authorizing rule.
+				s.stampProvenance(ctx, s.governedProvenance(ix, gov.policySource, gov.proof, nil))
+				return "no symbol found: " + symbol, nil
+			}
+			s.stampProvenance(ctx, s.governedProvenance(ix, gov.policySource, gov.proof, symbolProvenances(ix, []string{def.FullName()})))
+		} else {
+			syms := []SymbolProvenance{}
+			if def, ok := ix.ResolveName(symbol); ok {
+				syms = symbolProvenances(ix, []string{def.FullName()})
+			}
+			s.stampProvenance(ctx, s.rawProvenance(ix, syms))
+		}
+		if body == "" {
+			return "no symbol found: " + symbol + s.freshnessFooter(args, ix), nil
+		}
+		return body + s.freshnessFooter(args, ix), nil
 	}
 }
-
 func (s *Server) handlePath(ctx context.Context, args map[string]any) (string, error) {
 	{
 		from := argString(args, "from")
@@ -390,7 +461,8 @@ func (s *Server) handleCommunities(ctx context.Context, args map[string]any) (st
 			}
 			limit = n
 		}
-		comms := intel.Communities(ix)
+		sess := s.sessionFor(argString(args, "root"))
+		comms := sess.CommunitiesList(ix)
 		if limit > 0 && len(comms) > limit {
 			comms = comms[:limit]
 		}
@@ -476,11 +548,33 @@ func (s *Server) handleGraph(ctx context.Context, args map[string]any) (string, 
 			}
 			maxTokens = n
 		}
-		return intel.GraphCtx(ix, symbol, maxTokens)
-
+		gov, err := s.newGovernor(ctx, args, ix)
+		if err != nil {
+			s.stampProvenance(ctx, s.governedProvenance(ix, gov.policySource, gov.proof, nil))
+			return "", err
+		}
+		out, err := intel.GraphCtx(ix, symbol, maxTokens)
+		if err != nil {
+			if gov != nil {
+				s.stampProvenance(ctx, s.governedProvenance(ix, gov.policySource, gov.proof, nil))
+			}
+			return "", err
+		}
+		if gov != nil {
+			if resolved, ok := intel.Resolve(ix, symbol); ok && !gov.allowed[resolved] {
+				// Root denied: identical to the unknown-symbol error, so the agent
+				// cannot tell "denied" from "does not exist".
+				s.stampProvenance(ctx, s.governedProvenance(ix, gov.policySource, gov.proof, nil))
+				return "", fmt.Errorf("unknown symbol: %s", symbol)
+			}
+			out = gov.filterGraphText(ix, out)
+			s.stampProvenance(ctx, s.governedProvenance(ix, gov.policySource, gov.proof, graphSymbolsFromText(ix, out)))
+		} else {
+			s.stampProvenance(ctx, s.rawProvenance(ix, graphSymbolsFromText(ix, out)))
+		}
+		return out + s.freshnessFooter(args, ix), nil
 	}
 }
-
 func (s *Server) handleExplore(ctx context.Context, args map[string]any) (string, error) {
 	{
 		symbol := argString(args, "symbol")
@@ -511,11 +605,42 @@ func (s *Server) handleExplore(ctx context.Context, args map[string]any) (string
 		if err != nil {
 			return "", err
 		}
-		return intel.RenderExplore(rep), nil
-
+		gov, err := s.newGovernor(ctx, args, ix)
+		if err != nil {
+			s.stampProvenance(ctx, s.governedProvenance(ix, gov.policySource, gov.proof, nil))
+			return "", err
+		}
+		if gov != nil {
+			if !gov.allowed[rep.Resolved] {
+				// Root denied: identical to the unknown-symbol error, so the agent
+				// cannot tell "denied" from "does not exist".
+				s.stampProvenance(ctx, s.governedProvenance(ix, gov.policySource, gov.proof, nil))
+				return "", fmt.Errorf("unknown symbol: %s", symbol)
+			}
+			// Filter pre-render, in the handler layer: drop nodes outside the
+			// authorized scope and edges touching them, then re-derive the
+			// affected files from the filtered radius.
+			callers := gov.filterQualified(ix, ix.CallersFor(rep.Definition), false)
+			callees := gov.filterQualified(ix, ix.CallsFor(rep.Definition), true)
+			radius := gov.filterQualified(ix, rep.BlastRadius, false)
+			rep.Callers = simpleNames(callers)
+			rep.Callees = simpleNames(callees)
+			rep.BlastRadius = radius
+			rep.BlastFiles = intel.AffectedFiles(ix, radius)
+			rep.Source = gov.filterContextFooter(ix, rep.Source)
+			names := append([]string{rep.Resolved}, callers...)
+			names = append(names, callees...)
+			names = append(names, radius...)
+			s.stampProvenance(ctx, s.governedProvenance(ix, gov.policySource, gov.proof, symbolProvenances(ix, names)))
+		} else {
+			names := append([]string{rep.Resolved}, rep.Callers...)
+			names = append(names, rep.Callees...)
+			names = append(names, rep.BlastRadius...)
+			s.stampProvenance(ctx, s.rawProvenance(ix, symbolProvenances(ix, names)))
+		}
+		return intel.RenderExplore(rep) + s.freshnessFooter(args, ix), nil
 	}
 }
-
 func (s *Server) handleFtsSearch(ctx context.Context, args map[string]any) (string, error) {
 	{
 		query := argString(args, "query")

@@ -328,9 +328,8 @@ func allInstalled(sts []Status, agent string) bool {
 }
 
 // --- CLI subcommand parity ---
-//
 // The opencode plugin shells out to the kern CLI via run([...]) / a flags
-// array whose first element is the top-level subcommand (cmd/kern/main.go's
+// array whose first element is the top-level subcommand (cmd/kern/dispatch.go's
 // `switch cmd`). These regexes recover, for each tool, the subcommand token it
 // dispatches. A typo'd subcommand in the plugin would otherwise sail through
 // the name-only parity test; here the token must resolve to a real case.
@@ -351,13 +350,18 @@ var flagsFirstSubRe = regexp.MustCompile(`const flags: string\[\] = \["([^"]+)"`
 // runFirstSubRe matches `run(["sub", ...])` for tools that dispatch directly.
 var runFirstSubRe = regexp.MustCompile(`run\(\["([^"]+)"`)
 
+// runPayloadFirstSubRe matches `runPayload(["sub", ...])` — the report-
+// preserving wrapper used by tools whose CLI exits non-zero by design (CI
+// signal); the first element is still the top-level subcommand.
+var runPayloadFirstSubRe = regexp.MustCompile(`runPayload\(\["([^"]+)"`)
+
 // cliSubcommands returns the set of top-level subcommands handled by the kern
-// CLI (the `case "<name>"` labels of the `switch cmd` in cmd/kern/main.go).
+// CLI (the `case "<name>"` labels of the `switch cmd` in cmd/kern/dispatch.go).
 func cliSubcommands(t *testing.T) map[string]bool {
 	t.Helper()
-	b, err := os.ReadFile(filepath.Join("..", "..", "cmd", "kern", "main.go"))
+	b, err := os.ReadFile(filepath.Join("..", "..", "cmd", "kern", "dispatch.go"))
 	if err != nil {
-		t.Fatalf("read cmd/kern/main.go: %v", err)
+		t.Fatalf("read cmd/kern/dispatch.go: %v", err)
 	}
 	set := map[string]bool{}
 	for _, m := range cliTopLevelCaseRe.FindAllStringSubmatch(string(b), -1) {
@@ -382,6 +386,9 @@ func pluginToolSubcommand(toolBody string) string {
 		return m[1]
 	}
 	if m := runFirstSubRe.FindStringSubmatch(toolBody); m != nil {
+		return m[1]
+	}
+	if m := runPayloadFirstSubRe.FindStringSubmatch(toolBody); m != nil {
 		return m[1]
 	}
 	return ""
@@ -437,7 +444,7 @@ func TestPluginSubcommandsReachCLI(t *testing.T) {
 			}
 			checked++
 			if !cli[sub] {
-				t.Errorf("%s: %s dispatches to subcommand %q which does not exist in cmd/kern/main.go (typo or stale mapping)", src, name, sub)
+				t.Errorf("%s: %s dispatches to subcommand %q which does not exist in cmd/kern/dispatch.go (typo or stale mapping)", src, name, sub)
 			}
 		}
 	}
@@ -448,7 +455,8 @@ func TestPluginSubcommandsReachCLI(t *testing.T) {
 
 func TestWireClaudeHooks(t *testing.T) {
 	dir := t.TempDir()
-	st := wireClaudeHooks(dir, "/x/kern")
+	t.Setenv("HOME", dir) // claude hooks are now global (user-scope)
+	st := wireClaudeHooks("/x/kern")
 	if !st.Installed {
 		t.Fatalf("install failed: %s", st.Note)
 	}
@@ -471,7 +479,7 @@ func TestWireClaudeHooks(t *testing.T) {
 	}
 
 	// Idempotent: a second run must not duplicate the group.
-	if st := wireClaudeHooks(dir, "/x/kern"); !st.Installed {
+	if st := wireClaudeHooks("/x/kern"); !st.Installed {
 		t.Fatalf("second install failed: %s", st.Note)
 	}
 	b, _ = os.ReadFile(filepath.Join(dir, ".claude", "settings.json"))
@@ -484,7 +492,8 @@ func TestWireClaudeHooks(t *testing.T) {
 
 func TestWireGeminiHooksPreservesMCPServers(t *testing.T) {
 	dir := t.TempDir()
-	// A pre-existing .gemini/settings.json with mcpServers (as the adapter
+	t.Setenv("HOME", dir) // gemini hooks are now global (user-scope)
+	// A pre-existing ~/.gemini/settings.json with mcpServers (as the adapter
 	// writer produces) must keep that key when hooks are merged in.
 	gpath := filepath.Join(dir, ".gemini", "settings.json")
 	if err := os.MkdirAll(filepath.Dir(gpath), 0o755); err != nil {
@@ -494,7 +503,7 @@ func TestWireGeminiHooksPreservesMCPServers(t *testing.T) {
 	b, _ := json.Marshal(existing)
 	os.WriteFile(gpath, b, 0o644)
 
-	st := wireGeminiHooks(dir, "/x/kern")
+	st := wireGeminiHooks("/x/kern")
 	if !st.Installed {
 		t.Fatalf("install failed: %s", st.Note)
 	}
@@ -617,22 +626,50 @@ func TestDetectAgents(t *testing.T) {
 	}
 }
 
-func TestWireDetectEmptyWiresNothing(t *testing.T) {
+// TestWireDetectEmptyPreWiresGlobalOnly verifies the global-first semantics:
+// when --detect finds NO agents, no per-repo agent files are written, but
+// global-scoped configs (hooks + home/global MCP adapters) are still pre-wired
+// for ALL agents, so an agent installed later is already wired with no re-run.
+// The universal per-repo files (.mcp.json, AGENTS.md, .gitignore) are always
+// written; per-repo agent files (CLAUDE.md instruction, .cursor/rules, .vscode
+// adapters) are not.
+func TestWireDetectEmptyPreWiresGlobalOnly(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("PATH", "/nonexistent")
 	dir := t.TempDir()
 
 	sts := Wire(dir, nil, true)
-	if len(sts) != 1 || sts[0].Installed {
-		t.Fatalf("detect with no agents found must wire nothing, got: %+v", sts)
+	var sawGlobalHook, sawUniversal bool
+	for _, s := range sts {
+		switch s.Agent {
+		case "cursor-hooks", "gemini-hooks", "claude-hooks", "codex-hooks", "copilot-hooks", "qwen-hooks", "qoder-hooks":
+			sawGlobalHook = true
+			if !s.Installed {
+				t.Fatalf("global hook %s must be pre-wired, got: %+v", s.Agent, s)
+			}
+		case "mcp", "AGENTS.md", "gitignore":
+			sawUniversal = true
+		}
+		if !s.Installed && !s.Skipped {
+			t.Fatalf("no status may be a real failure in detect-empty mode, got: %+v", s)
+		}
 	}
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		t.Fatal(err)
+	if !sawGlobalHook {
+		t.Fatalf("expected global hooks pre-wired for all agents, got: %+v", sts)
 	}
-	if len(entries) != 0 {
-		t.Fatalf("detect with no agents found must not create files, got: %v", entries)
+	if !sawUniversal {
+		t.Fatalf("expected universal per-repo files written, got: %+v", sts)
+	}
+	// Per-repo agent files must NOT be created: no instruction files, no
+	// .cursor/rules, no .vscode adapters, no claude/gemini per-repo configs.
+	for _, rel := range []string{
+		"CLAUDE.md", "GEMINI.md", ".github/copilot-instructions.md",
+		".cursor/rules", ".vscode/mcp.json", ".claude/settings.json", ".gemini/settings.json",
+	} {
+		if _, err := os.Stat(filepath.Join(dir, rel)); err == nil {
+			t.Fatalf("detect-empty must not create per-repo agent file %s", rel)
+		}
 	}
 }
 
@@ -664,5 +701,26 @@ func TestWireDetectWiresInstructions(t *testing.T) {
 	}
 	if !strings.Contains(string(b), "kern usage rules") {
 		t.Errorf("CLAUDE.md missing kern-first policy")
+	}
+}
+
+// TestAGENTSMdParity is the AGENTS.md analog of the plugin parity invariant:
+// the embedded asset (what `kern setup` installs everywhere) must be
+// byte-identical to the repo's own root AGENTS.md. A fix applied to the
+// working copy but not synced would ship to every user while the repo itself
+// reads stale instructions — and vice versa. Sync with:
+//
+//	cp AGENTS.md internal/setup/assets/AGENTS.md
+func TestAGENTSMdParity(t *testing.T) {
+	emb, err := rulesFS.ReadFile("assets/AGENTS.md")
+	if err != nil {
+		t.Fatalf("read embedded AGENTS.md: %v", err)
+	}
+	repo, err := os.ReadFile(filepath.Join("..", "..", "AGENTS.md"))
+	if err != nil {
+		t.Fatalf("read repo AGENTS.md: %v", err)
+	}
+	if !bytes.Equal(emb, repo) {
+		t.Error("internal/setup/assets/AGENTS.md drifted from AGENTS.md — run: cp AGENTS.md internal/setup/assets/AGENTS.md")
 	}
 }

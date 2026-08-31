@@ -19,8 +19,12 @@ var rulesFS embed.FS
 type Status struct {
 	Agent     string
 	Installed bool
-	Path      string
-	Note      string
+	// Skipped marks a deliberate no-op (agent not installed, config dir
+	// absent). It is not an error: setup must not exit non-zero for skips,
+	// only for real failures.
+	Skipped bool
+	Path    string
+	Note    string
 }
 
 // detectedAgent maps each agent identifier to a detection function.
@@ -127,20 +131,36 @@ func writePerm(path string) os.FileMode {
 	return 0o600
 }
 
+// instructionMarkerOpen / instructionMarkerClose bracket the kern-managed block
+// in a per-agent instruction file (CLAUDE.md, GEMINI.md, etc.). They let us
+// remove-and-rewrite the block on every setup run so an upgrade always writes
+// fresh rules rather than skipping when stale rules are detected.
+const (
+	instructionMarkerOpen  = "<!-- kern-instruction: managed by kern setup; do not edit between markers -->"
+	instructionMarkerClose = "<!-- /kern-instruction -->"
+)
+
 // writeInstructionFile writes the kern-first policy block to a single
-// instruction file, idempotently (never duplicates the block).
+// instruction file. On every run it removes any existing kern-managed block
+// (between instructionMarkerOpen and instructionMarkerClose) and re-inserts
+// the fresh embedded rules, preserving all user content outside the block.
+// This is overwrite-always: an upgrade with new rules always replaces the old
+// block rather than skipping when a marker is present.
+// The same per-agent files (CLAUDE.md, GEMINI.md, …) can also be written by
+// wireRulesFile using an unmarked kern section. To avoid duplicate blocks when
+// both paths run, writeInstructionFile strips BOTH the marked instruction
+// block AND any unmarked kern section before re-inserting.
 func writeInstructionFile(path, rulesText string) Status {
-	marker := "<!-- kern-instruction: managed by kern setup; remove marker to stop managing -->"
-	content, _ := os.ReadFile(path)
-	cur := string(content)
-	if strings.Contains(cur, "kern-instruction:") || strings.Contains(cur, "kern usage rules") {
-		return Status{Agent: "", Installed: true, Path: path, Note: "kern-first policy already present"}
-	}
+	cur, _ := os.ReadFile(path)
+	content := string(cur)
+	cleaned := removeMarkedBlock(content, instructionMarkerOpen, instructionMarkerClose)
+	cleaned = removeKernSection(cleaned)
+	block := instructionMarkerOpen + "\n\n" + strings.TrimRight(rulesText, "\n") + "\n\n" + instructionMarkerClose
 	var joined string
-	if strings.TrimSpace(cur) == "" {
-		joined = marker + "\n\n" + rulesText
+	if strings.TrimSpace(cleaned) == "" {
+		joined = block + "\n"
 	} else {
-		joined = strings.TrimRight(cur, "\n") + "\n\n" + marker + "\n\n" + rulesText
+		joined = strings.TrimRight(cleaned, "\n") + "\n\n" + block + "\n"
 	}
 	if err := os.WriteFile(path, []byte(joined), writePerm(path)); err != nil {
 		return Status{Agent: "", Path: path, Note: err.Error()}
@@ -148,53 +168,80 @@ func writeInstructionFile(path, rulesText string) Status {
 	return Status{Agent: "", Installed: true, Path: path, Note: "kern-first policy written"}
 }
 
-// wireRulesFile appends the embedded kern rules block to a single rule file,
-// idempotently (never duplicates) and never overwriting existing content.
+// removeMarkedBlock strips the substring between openMarker and closeMarker
+// (inclusive of both markers) from s. If either marker is absent the input is
+// returned unchanged. Used to refresh kern-managed blocks on every setup run.
+func removeMarkedBlock(s, openMarker, closeMarker string) string {
+	start := strings.Index(s, openMarker)
+	if start < 0 {
+		return s
+	}
+	end := strings.Index(s[start:], closeMarker)
+	if end < 0 {
+		return s
+	}
+	end += start + len(closeMarker)
+	// Collapse a single trailing newline so we don't accumulate blank lines
+	// across rewrites.
+	if end < len(s) && s[end] == '\n' {
+		end++
+	}
+	return s[:start] + s[end:]
+}
+
+// wireRulesFile writes the embedded kern rules block to a single rule file
+// (AGENTS.md). On every run it removes any existing kern section and re-inserts
+// the fresh embedded rules, preserving all user content outside the block.
+// This is overwrite-always: an upgrade with new rules always replaces the old
+// block rather than skipping when a "kern usage rules" header is present.
+// The same per-agent files (CLAUDE.md, GEMINI.md, …) can also be written by
+// writeInstructionFile using a marked block (instructionMarkerOpen/Close).
+// To avoid duplicate blocks when both paths run, wireRulesFile strips BOTH the
+// unmarked kern section AND any marked instruction block before re-inserting.
 func wireRulesFile(root, name string) Status {
 	path := filepath.Join(root, name)
 	content := ""
 	if b, err := os.ReadFile(path); err == nil {
 		content = string(b)
 	}
-	if strings.Contains(content, "kern usage rules") {
-		return Status{Agent: name, Installed: true, Path: path, Note: "rules already present"}
-	}
 	rules, err := rulesFS.ReadFile("assets/AGENTS.md")
 	if err != nil {
 		return Status{Agent: name, Path: path, Note: err.Error()}
 	}
-	var joined string
-	if content == "" {
-		joined = string(rules)
-	} else {
-		joined = strings.TrimRight(content, "\n") + "\n\n" + string(rules)
+	cleaned := removeKernSection(content)
+	cleaned = removeMarkedBlock(cleaned, instructionMarkerOpen, instructionMarkerClose)
+	// If the block is unchanged (same content after remove+reinsert), skip the
+	// write to avoid needlessly bumping mtime. This mirrors the global path.
+	final := mergeAppend(cleaned, string(rules))
+	if content != "" && final == content {
+		return Status{Agent: name, Installed: true, Path: path, Note: "rules already current"}
 	}
-	if err := os.WriteFile(path, []byte(joined), writePerm(path)); err != nil {
+	if err := os.WriteFile(path, []byte(final), writePerm(path)); err != nil {
 		return Status{Agent: name, Path: path, Note: err.Error()}
 	}
-	return Status{Agent: name, Installed: true, Path: path, Note: "rules appended"}
+	return Status{Agent: name, Installed: true, Path: path, Note: "rules written"}
 }
 
 // gitignoreMarker identifies the block of generated entries this package owns.
 const gitignoreMarker = "# --- kern generated (agent wiring, machine-specific) ---"
 
-// gitignoreGenerated appends the setup-generated project files to .gitignore.
+// gitignoreGenerated writes the setup-generated project files to .gitignore.
 // Machine-specific configs (absolute binary paths in .mcp.json, .claude/,
 // .cursor/, .kiro/ hooks) must never be committed; uncommitted copies would
 // leak the machine layout and stale paths. But portable configs like
 // opencode.json (relative "bin/kern-mcp" command) and the .opencache plugins
 // directory ARE committed — only their machine-specific subdirs (node_modules)
 // are ignored.
-// Idempotent: the block is added once, and only when absent.
+// Overwrite-always: on every run the existing kern-generated block (between the
+// markers) is removed and the fresh block re-inserted, so new ignore entries
+// added in an upgrade are picked up rather than skipped.
 func gitignoreGenerated(root string) Status {
 	path := filepath.Join(root, ".gitignore")
 	data, err := os.ReadFile(path)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return Status{Agent: "gitignore", Path: path, Note: err.Error()}
 	}
-	if strings.Contains(string(data), gitignoreMarker) {
-		return Status{Agent: "gitignore", Installed: true, Path: path, Note: "generated entries already gitignored"}
-	}
+	closeMarker := "# --- end kern generated ---"
 	block := "\n" + gitignoreMarker + `
 # Re-run ` + "`kern setup`" + ` to refresh. Unignore a line to commit shared config.
 .mcp.json
@@ -203,13 +250,18 @@ func gitignoreGenerated(root string) Status {
 .gemini/
 .kiro/
 .kern/
+.continue/
+.windsurf/
 .opencode/node_modules/
 .opencode/package-lock.json
+.cortexkit/
 CLAUDE.md
 GEMINI.md
 .github/copilot-instructions.md
-`
-	out := strings.TrimRight(string(data), "\n")
+.github/hooks/
+` + closeMarker + "\n"
+	cleaned := removeMarkedBlock(string(data), gitignoreMarker, closeMarker)
+	out := strings.TrimRight(cleaned, "\n")
 	if out != "" {
 		out += "\n"
 	}
@@ -217,5 +269,5 @@ GEMINI.md
 	if err := os.WriteFile(path, []byte(out), 0o644); err != nil {
 		return Status{Agent: "gitignore", Path: path, Note: err.Error()}
 	}
-	return Status{Agent: "gitignore", Installed: true, Path: path, Note: "generated entries added to .gitignore"}
+	return Status{Agent: "gitignore", Installed: true, Path: path, Note: "generated entries written to .gitignore"}
 }

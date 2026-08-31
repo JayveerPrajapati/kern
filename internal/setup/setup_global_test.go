@@ -211,3 +211,49 @@ func TestGlobalMCPCommandPrefersPATH(t *testing.T) {
 		t.Fatalf("GlobalMCPCommand = %q, want bare \"kern-mcp\" (PATH-resolved at agent launch)", cmd)
 	}
 }
+
+// TestPortableCLICommandPrefersPATH verifies that the portable CLI command used
+// for agent hooks resolves to a stable PATH-based "kern" rather than a volatile
+// absolute path, so a hook survives an upgrade or a change of install location.
+// When kern is resolvable on PATH the command must be the bare "kern" (the agent
+// re-resolves it at launch against whatever kern is currently installed), and it
+// must never be an os.Executable()-derived temp/versioned path.
+func TestPortableCLICommandPrefersPATH(t *testing.T) {
+	cmd := PortableCLICommand()
+	if cmd == "" {
+		t.Fatal("PortableCLICommand returned empty")
+	}
+	if strings.Contains(cmd, string(filepath.Separator)) {
+		t.Fatalf("PortableCLICommand returned an absolute path %q; hooks must use a PATH-resolved bare command so upgrades/relocations don't break", cmd)
+	}
+	if cmd != "kern" {
+		t.Fatalf("PortableCLICommand = %q, want bare \"kern\" (PATH-resolved at agent launch)", cmd)
+	}
+}
+
+// TestWireUsesPortableMCPCommand verifies that the project-level configs written
+// by Wire reference the kern MCP server via a portable command (bare "kern-mcp"
+// or a relative path), never an absolute os.Executable()-derived path, so the
+// generated configs work on any machine and survive a kern relocation.
+func TestWireUsesPortableMCPCommand(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("HOME", t.TempDir())
+	dir := t.TempDir()
+	Wire(dir, []string{"mcp", "opencode"}, false)
+
+	exeDir := ""
+	if abs, err := os.Executable(); err == nil {
+		exeDir = filepath.Dir(abs)
+	}
+
+	for _, name := range []string{"opencode.json", ".mcp.json"} {
+		b, err := os.ReadFile(filepath.Join(dir, name))
+		if err != nil {
+			t.Fatalf("read %s: %v", name, err)
+		}
+		content := string(b)
+		if exeDir != "" && strings.Contains(content, exeDir) {
+			t.Errorf("%s contains an absolute os.Executable()-derived path %q (must be portable):\n%s", name, exeDir, content)
+		}
+	}
+}

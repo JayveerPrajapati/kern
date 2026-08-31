@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/JayveerPrajapati/kern/internal/app"
 	"github.com/JayveerPrajapati/kern/internal/index"
 	"github.com/JayveerPrajapati/kern/internal/intel"
 	"github.com/JayveerPrajapati/kern/internal/lock"
@@ -25,6 +26,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 const (
@@ -50,7 +52,31 @@ type Tool struct {
 	Name        string         `json:"name"`
 	Description string         `json:"description"`
 	InputSchema map[string]any `json:"inputSchema"`
+	// Phase tags the tool with the agent phase it belongs to (explore, plan,
+	// edit or verify). "meta" (kern_meta itself) and "cross" (phase-agnostic
+	// utilities) are always advertised regardless of the active phase; an
+	// empty phase means the tool is not phase-filtered.
+	Phase string `json:"phase,omitempty"`
 }
+
+// Agent phases for phase-aware tool routing (P1.2). Each phase exposes a
+// focused shortlist of tools instead of the full catalog; kern_meta routes
+// within whatever tools are available. Tools tagged PhaseMeta or PhaseCross
+// are always advertised regardless of the active KERN_MCP_PHASE.
+const (
+	PhaseExplore = "explore"
+	PhasePlan    = "plan"
+	PhaseEdit    = "edit"
+	PhaseVerify  = "verify"
+	PhaseMeta    = "meta"
+	PhaseCross   = "cross"
+)
+
+// NOTE: KERN_MCP_PHASE filters tool ADVERTISEMENT only (tools/list responses),
+// not tool EXECUTION (tools/call). A client that knows a tool name can call it
+// directly regardless of the phase setting. This is by design so kern_meta can
+// route to unadvertised sub-tools. KERN_MCP_PHASE is NOT a security boundary —
+// for real per-phase tool restriction, use the KERN_TOOLS allowlist.
 
 // ToolNames returns every registered MCP tool name.
 func ToolNames() []string {
@@ -84,16 +110,78 @@ func highLevelOnly() bool {
 	return os.Getenv("KERN_MCP_HIGH_LEVEL_ONLY") == "1"
 }
 
-// toolAllowed reports whether name passes the KERN_TOOLS allowlist. tools is
-// the (already filtered or full) registered catalog; a nil allowlist allows
-// everything, otherwise membership in the catalog decides.
+// singleTool reports whether to expose only the kern meta-tool via
+// KERN_MCP_SINGLE_TOOL=1. Agents that find the tool catalog overwhelming
+// can point their MCP config at this mode and interact with kern through the
+// single natural-language `kern` entry point.
+func singleTool() bool {
+	return os.Getenv("KERN_MCP_SINGLE_TOOL") == "1"
+}
+
+// fullCatalog reports whether to advertise the full tool catalog via
+// KERN_MCP_FULL=1. By default only the minimal defaultTools surface is
+// advertised; this opts back in to the full 84-tool catalog for power users
+// and direct sub-tool callers. Phase-aware routing (KERN_MCP_PHASE) still
+// filters the advertised list within the full catalog.
+func fullCatalog() bool {
+	return os.Getenv("KERN_MCP_FULL") == "1"
+}
+
+// mcpPhase returns the active agent phase from KERN_MCP_PHASE. An unset or
+// invalid value returns "" which means no phase filtering: the whole tier
+// surface (default/high-level/full) is advertised as before.
+func mcpPhase() string {
+	p := strings.ToLower(strings.TrimSpace(os.Getenv("KERN_MCP_PHASE")))
+	if !validPhase(p) {
+		return ""
+	}
+	return p
+}
+
+// validPhase reports whether p is one of the four agent phases.
+func validPhase(p string) bool {
+	switch p {
+	case PhaseExplore, PhasePlan, PhaseEdit, PhaseVerify:
+		return true
+	}
+	return false
+}
+
+// phaseToolAllowed reports whether a tool should be advertised for the active
+// phase. Tools tagged "meta" or "cross" are always available; otherwise the
+// tool's phase must equal the active phase. An empty phase allows everything.
+func phaseToolAllowed(t Tool, phase string) bool {
+	if phase == "" {
+		return true
+	}
+	switch t.Phase {
+	case PhaseMeta, PhaseCross:
+		return true
+	}
+	return t.Phase == phase
+}
+
+// toolAllowed reports whether name passes the KERN_TOOLS allowlist. toolsList
+// is the (already filtered or full) registered catalog; a nil allowlist
+// allows everything, otherwise name must appear in both the allowlist and
+// the catalog.
 func toolAllowed(toolsList []Tool, name string) bool {
 	allowed := toolAllowlist()
 	if len(allowed) == 0 {
 		return true
 	}
+	inCatalog := false
 	for _, t := range toolsList {
 		if t.Name == name {
+			inCatalog = true
+			break
+		}
+	}
+	if !inCatalog {
+		return false
+	}
+	for _, a := range allowed {
+		if a == name {
 			return true
 		}
 	}
@@ -145,20 +233,89 @@ var highLevelTools = map[string]bool{
 	"kern_stats":           true,
 }
 
+// defaultTools is the minimal surface advertised by default. The full
+// 84-tool catalog is gated behind KERN_MCP_FULL=1, and phase-aware routing
+// (KERN_MCP_PHASE) filters either surface down to the active phase's
+// shortlist. kern_meta's NL router
+// still reaches every sub-tool handler internally regardless of what is
+// advertised, so no capability is lost — only the advertised surface
+// shrinks. This implements the MCP spec's "high-level tools, not dozens
+// of tiny low-value tools" guidance.
+var defaultTools = map[string]bool{
+	"kern_meta":              true, // NL router → all sub-tools
+	"kern_explore":           true, // symbol source + callers/callees + blast radius
+	"kern_impact":            true, // blast radius of a change
+	"kern_review":            true, // token-optimised review context
+	"kern_search":            true, // ranked symbol search
+	"kern_context":           true, // minimal source slice
+	"kern_optimize_prompt":   true, // compress prompts
+	"kern_plan":              true, // implementation plan
+	"kern_verify":            true, // unified verification
+	"kern_run":               true, // orchestrate a whole task
+	"kern_authorize_context": true, // authorized-context primitive (P0.1)
+}
+
 // filteredTools returns the registered tools minus any excluded by the
-// KERN_TOOLS allowlist or the KERN_MCP_HIGH_LEVEL_ONLY high-level-only mode.
-// It lazily reads the env once per server lifetime and caches the result.
+// KERN_TOOLS allowlist, intersected with the active agent phase from
+// KERN_MCP_PHASE. By default only the minimal defaultTools surface is
+// advertised; KERN_MCP_FULL=1 opts back in to the full catalog, the legacy
+// KERN_MCP_HIGH_LEVEL_ONLY mode keeps the mid-size highLevelTools set for
+// backward compat, and KERN_MCP_SINGLE_TOOL=1 collapses to kern_meta alone.
+// Phase-aware routing (KERN_MCP_PHASE=explore|plan|edit|verify) keeps only
+// the active phase's tools plus the always-on meta/cross tools; an unset or
+// invalid phase advertises the whole tier surface. It lazily reads the env
+// once per server lifetime and caches the result.
 func (s *Server) filteredTools() []Tool {
 	s.toolsMu.Lock()
 	defer s.toolsMu.Unlock()
 	if s.filtered != nil {
 		return s.filtered
 	}
+	if singleTool() {
+		for _, t := range tools {
+			if t.Name == "kern_meta" {
+				s.filtered = []Tool{t}
+				return s.filtered
+			}
+		}
+	}
 	allowed := toolAllowlist()
-	highOnly := highLevelOnly()
-	out := make([]Tool, 0, len(tools))
+	// KERN_MCP_FULL=1 → advertise the full catalog (with KERN_TOOLS filter).
+	if fullCatalog() {
+		out := make([]Tool, 0, len(tools))
+		for _, t := range tools {
+			if len(allowed) > 0 {
+				in := false
+				for _, a := range allowed {
+					if a == t.Name {
+						in = true
+						break
+					}
+				}
+				if !in {
+					continue
+				}
+			}
+			if !phaseToolAllowed(t, mcpPhase()) {
+				continue
+			}
+			out = append(out, t)
+		}
+		s.filtered = out
+		return s.filtered
+	}
+	// KERN_MCP_HIGH_LEVEL_ONLY=1 → the legacy 38-tool middle set (deprecated;
+	// prefer the default minimal set or KERN_MCP_FULL). Otherwise the NEW
+	// DEFAULT: the minimal 11-tool defaultTools surface.
+	var keep map[string]bool
+	if highLevelOnly() {
+		keep = highLevelTools
+	} else {
+		keep = defaultTools
+	}
+	out := make([]Tool, 0, len(keep))
 	for _, t := range tools {
-		if highOnly && !highLevelTools[t.Name] {
+		if !keep[t.Name] {
 			continue
 		}
 		if len(allowed) > 0 {
@@ -172,6 +329,9 @@ func (s *Server) filteredTools() []Tool {
 			if !in {
 				continue
 			}
+		}
+		if !phaseToolAllowed(t, mcpPhase()) {
+			continue
 		}
 		out = append(out, t)
 	}
@@ -197,6 +357,7 @@ func strProp(desc string) map[string]any {
 var tools = []Tool{
 	{
 		Name:        "kern_optimize_prompt",
+		Phase:       "cross",
 		Description: "Compress and clean a raw prompt before sending it to an LLM. Returns the optimized prompt plus token savings. Use this to reduce context cost for large or noisy prompts. When OLLAMA_HOST points at a non-local (remote) LLM, secrets/PII are masked automatically before processing and restored in the output (the result may contain [MASKED_*] placeholders).",
 		InputSchema: schema(map[string]any{
 			"prompt":       strProp("The raw prompt text to optimize"),
@@ -212,6 +373,7 @@ var tools = []Tool{
 	},
 	{
 		Name:        "kern_optimize_output",
+		Phase:       "cross",
 		Description: "Compress an LLM's response (assistant output) by stripping filler, pleasantries and hedge language while preserving code blocks, lists, errors and technical content. Deterministic and local, no LLM involved. Use on verbose model replies before they are stored or echoed back into context.",
 		InputSchema: schema(map[string]any{
 			"text": strProp("The LLM output text to compress"),
@@ -219,6 +381,7 @@ var tools = []Tool{
 	},
 	{
 		Name:        "kern_memory_add",
+		Phase:       "cross",
 		Description: "Persist a distilled, cross-session lesson for a project (the project 'brain'). Agents record what they learned so future sessions can recall it. Appends to the project memory store (most recent 50 entries kept).",
 		InputSchema: schema(map[string]any{
 			"lesson": strProp("The lesson to remember, e.g. 'deploy tags are pushed from a manual release workflow, not CI'"),
@@ -227,6 +390,7 @@ var tools = []Tool{
 	},
 	{
 		Name:        "kern_memory_list",
+		Phase:       "cross",
 		Description: "List all stored lessons for a project, most recent first with timestamps.",
 		InputSchema: schema(map[string]any{
 			"root": strProp("Project root (defaults to current directory)"),
@@ -234,6 +398,7 @@ var tools = []Tool{
 	},
 	{
 		Name:        "kern_memory_recall",
+		Phase:       "cross",
 		Description: "Recall the up-to-k most relevant past lessons for a prompt by keyword overlap. Returns only lessons whose tokens match; deterministic and local.",
 		InputSchema: schema(map[string]any{
 			"prompt": strProp("Query to match lessons against"),
@@ -243,6 +408,7 @@ var tools = []Tool{
 	},
 	{
 		Name:        "kern_mask_pii",
+		Phase:       "cross",
 		Description: "Locally scan text for secrets and PII (API keys, passwords, tokens, URLs with credentials, IPs, emails) and replace them with safe [MASKED_*] placeholders. Use before sending any text to a remote LLM. Pure local, deterministic, reversible via the returned mapping.",
 		InputSchema: schema(map[string]any{
 			"text":       strProp("The raw text to mask"),
@@ -251,6 +417,7 @@ var tools = []Tool{
 	},
 	{
 		Name:        "kern_security",
+		Phase:       "verify",
 		Description: "Local security scan of a project's source files: hardcoded secrets, dynamic SQL, shell command injection, weak crypto, insecure randomness and unsafe deserialization. Deterministic and line-scoped. Use before reviewing code or shipping changes.",
 		InputSchema: schema(map[string]any{
 			"root":     strProp("Project root to scan (defaults to current directory)"),
@@ -261,6 +428,7 @@ var tools = []Tool{
 	},
 	{
 		Name:        "kern_safe_delete",
+		Phase:       "edit",
 		Description: "Check whether a symbol can be safely deleted: reports in-project callers (production vs test-only), whether it is exported or an entry point, and a conservative SAFE/NOT SAFE verdict. Use before removing dead code.",
 		InputSchema: schema(map[string]any{
 			"symbol": strProp("Symbol name (simple name like 'greet' or qualified like 'User.Login')"),
@@ -270,6 +438,7 @@ var tools = []Tool{
 	},
 	{
 		Name:        "kern_doc_search",
+		Phase:       "cross",
 		Description: "Local vector search over a project's documents (markdown, text, rst, adoc). Chunks and embeds docs locally with deterministic n-gram hashing (no ML deps) and returns only the most relevant fragments. Use instead of pasting whole documents into context.",
 		InputSchema: schema(map[string]any{
 			"query": strProp("Natural-language or keyword query"),
@@ -279,6 +448,7 @@ var tools = []Tool{
 	},
 	{
 		Name:        "kern_doc_index",
+		Phase:       "cross",
 		Description: "Pre-index a project's documents for kern_doc_search. Run once after documents change; searches auto-index on first use. Pass semantic=true to also embed chunks with a local Ollama embedding model (KERN_EMBED_MODEL, default nomic-embed-text); queries then fuse a real-meaning dense signal with the deterministic n-gram vectors and BM25.",
 		InputSchema: schema(map[string]any{
 			"root":     strProp("Project root (defaults to current directory)"),
@@ -287,6 +457,7 @@ var tools = []Tool{
 	},
 	{
 		Name:        "kern_doc_fetch",
+		Phase:       "cross",
 		Description: "Fetch a public documentation page and merge it into the project's local doc index so kern_doc_search can find it. This is the ONLY network call in kern and is invoked explicitly by the user; everything else stays local. The page is HTML-stripped, capped, stored under cache/data/docs-fetch and indexed as fetch/<name>.md (re-fetching a name replaces it). Pass semantic=true to also attach dense embeddings via the local Ollama model so the page ranks in semantic search.",
 		InputSchema: schema(map[string]any{
 			"url":      strProp("https URL of the documentation page to fetch"),
@@ -297,6 +468,7 @@ var tools = []Tool{
 	},
 	{
 		Name:        "kern_commitmsg",
+		Phase:       "edit",
 		Description: "Generate a deterministic conventional-commit message (type, scope, subject, per-file body) from the git diff — rule-based, no LLM, no network; the same diff always yields the same message. Use when a commit needs a starting message the human can tweak.",
 		InputSchema: schema(map[string]any{
 			"root":   strProp("Project root (defaults to current directory)"),
@@ -306,6 +478,7 @@ var tools = []Tool{
 	},
 	{
 		Name:        "kern_precache",
+		Phase:       "verify",
 		Description: "Speculative pre-caching (#20): scan the project once and fill the code-summary and document-vector caches so later kern calls are instant. Run periodically or after bulk edits.",
 		InputSchema: schema(map[string]any{
 			"root": strProp("Project root (defaults to current directory)"),
@@ -313,6 +486,7 @@ var tools = []Tool{
 	},
 	{
 		Name:        "kern_swap",
+		Phase:       "plan",
 		Description: "Budget swapping (#18): in a context document, replace fenced code blocks tagged `lang:path` with per-file symbolic signatures to fit a token budget, or expand `lang:path:summary` blocks back to full file contents. Returns the budget-fitted document.",
 		InputSchema: schema(map[string]any{
 			"text":       strProp("The context document containing fenced code blocks"),
@@ -323,6 +497,7 @@ var tools = []Tool{
 	},
 	{
 		Name:        "kern_sandbox",
+		Phase:       "edit",
 		Description: "Run a risky command inside a snapshot of the project (#15): on non-zero exit the tree is rolled back exactly (files restored, new files removed). Success keeps changes. Use before destructive operations, migrations, or agent-applied edits. Gated by the command-execution governance firewall (KERN_ALLOW_EXEC / KERN_TOOLS) and command output is PII/secret-masked before return.",
 		InputSchema: schema(map[string]any{
 			"root":    strProp("Project root to snapshot and run in (defaults to current directory)"),
@@ -332,6 +507,7 @@ var tools = []Tool{
 	},
 	{
 		Name:        "kern_diff_files",
+		Phase:       "verify",
 		Description: "Delta streaming (#13): compute a unified line diff between two files (or two versions of the same file) using pure Go. Returns the full patch, or a note when files are identical. Feed the output back to the model as a compact edit description.",
 		InputSchema: schema(map[string]any{
 			"a":    strProp("Path to the old/base file"),
@@ -341,6 +517,7 @@ var tools = []Tool{
 	},
 	{
 		Name:        "kern_heal",
+		Phase:       "edit",
 		Description: "Self-correction loop (#9): run validation; on failure ask a local Ollama model to rewrite the failing files, apply the fix inside a throwaway snapshot, re-validate, and report a diff to review. Never edits the user's working tree. Requires Ollama at localhost:11434.",
 		InputSchema: schema(map[string]any{
 			"root":       strProp("Project root (defaults to current directory)"),
@@ -352,6 +529,7 @@ var tools = []Tool{
 	},
 	{
 		Name:        "kern_validate",
+		Phase:       "verify",
 		Description: "Auto-validation (#7): detect the project's language-appropriate build/test/syntax command and run it. Returns exit status, truncated output and duration. Use after editing code to gate correctness before final answers.",
 		InputSchema: schema(map[string]any{
 			"root":    strProp("Project root (defaults to current directory)"),
@@ -361,6 +539,7 @@ var tools = []Tool{
 	},
 	{
 		Name:        "kern_schema_validate",
+		Phase:       "verify",
 		Description: "Deterministically validate JSON output against a JSON schema (subset: object/array/primitives, required, enum, min/max/length, pattern, additionalProperties). Returns either a conform message or one line per violation.",
 		InputSchema: schema(map[string]any{
 			"data":   strProp("The JSON output to validate"),
@@ -369,6 +548,7 @@ var tools = []Tool{
 	},
 	{
 		Name:        "kern_verify_output",
+		Phase:       "verify",
 		Description: "Hallucination check: extract file:line, symbol-name and route references from an agent's output text and confirm each against the real source tree and index. Returns ok/MISS verdicts for every reference.",
 		InputSchema: schema(map[string]any{
 			"text": strProp("The agent output text to verify"),
@@ -377,14 +557,17 @@ var tools = []Tool{
 	},
 	{
 		Name:        "kern_compact_file",
-		Description: "Return a compact symbolic summary of a source file (functions, types, line numbers) instead of reading the whole file. Use before reading files in large codebases.",
+		Phase:       "explore",
+		Description: "Return a compact symbolic summary of a source file (functions, types, line numbers) instead of reading the whole file. Use before reading files in large codebases. Optional tier: 'summary' (default, symbol list), 'full' (entire source), or 'folded' (signatures kept, bodies replaced with 'body elided: N lines' placeholders).",
 		InputSchema: schema(map[string]any{
 			"path": strProp("Absolute or relative path of the file to summarize"),
 			"root": strProp("Project root; when set, path must stay inside it (defaults to unrestricted)"),
+			"tier": strProp("'summary' (default), 'full', or 'folded'"),
 		}, []string{"path"}),
 	},
 	{
 		Name:        "kern_project_map",
+		Phase:       "explore",
 		Description: "Return a compressed map of a whole project: every source file with its symbols and line counts. Use instead of listing/reading every file in a repo.",
 		InputSchema: schema(map[string]any{
 			"root":      strProp("Project root directory"),
@@ -393,16 +576,20 @@ var tools = []Tool{
 	},
 	{
 		Name:        "kern_pack",
-		Description: "Pack a whole project into one paste-ready bundle: project instructions, a directory tree with per-file token counts, and file contents, sized to fit max_tokens. Use when an agent needs the full working picture (source to edit against), not just a map.",
+		Phase:       "plan",
+		Description: "Pack a whole project into one paste-ready bundle: project instructions, a directory tree with per-file token counts, and file contents, sized to fit max_tokens. Use when an agent needs the full working picture (source to edit against), not just a map. Files are ordered by sha256 of their relative path so re-packs of the same tree are byte-identical (LLM prompt-cache friendly). Set fold=true to pack signatures with bodies elided.",
 		InputSchema: schema(map[string]any{
 			"root":         strProp("Project root directory"),
 			"max_tokens":   strProp("Token budget for the bundle (default 8000; 0 = unlimited — use with max_output=0 to avoid the output sandbox)"),
 			"format":       strProp("'text' (default) or 'json'"),
 			"instructions": strProp("'true' to include root-level docs as instructions (default), 'false' to skip them"),
+			"fold":         strProp("'true' to pack tier=folded content (signatures kept, bodies elided with line counts)"),
+			"tier":         strProp("Content tier: 'full' (default), 'folded', or 'summary'"),
 		}, []string{"root"}),
 	},
 	{
 		Name:        "kern_buddy",
+		Phase:       "explore",
 		Description: "Session onboarding digest for any agent: the project's conventions, layout, entry points and gotchas distilled from the index, docs and recent history. Call once at the start of a session on an unfamiliar repo.",
 		InputSchema: schema(map[string]any{
 			"root":       strProp("Project root (defaults to current directory)"),
@@ -411,6 +598,7 @@ var tools = []Tool{
 	},
 	{
 		Name:        "kern_run_build",
+		Phase:       "edit",
 		Description: "Run a build/test command locally and return only the compact result (exit status + errors), not full output. Use for builds, tests, linting to save context.",
 		InputSchema: schema(map[string]any{
 			"command": strProp("Shell command to run"),
@@ -419,6 +607,7 @@ var tools = []Tool{
 	},
 	{
 		Name:        "kern_optimize_log",
+		Phase:       "cross",
 		Description: "Strip noise from log output: keeps errors, warnings, stack traces and build failures, removes timestamps and chatter. Use before pasting logs into context.",
 		InputSchema: schema(map[string]any{
 			"log": strProp("The log text to compress"),
@@ -426,6 +615,7 @@ var tools = []Tool{
 	},
 	{
 		Name:        "kern_context_budget",
+		Phase:       "plan",
 		Description: "Fit text into a token budget: deduplicate lines, keep the head plus important lines (errors, stack frames), then trim. Use to manage a crowded context window before adding more content.",
 		InputSchema: schema(map[string]any{
 			"text":       strProp("The text (log output, file dump, conversation) to fit into the budget"),
@@ -434,6 +624,7 @@ var tools = []Tool{
 	},
 	{
 		Name:        "kern_stats",
+		Phase:       "cross",
 		Description: "Return before/after token savings and cost estimates from kern optimizations, optionally filtered to today or a session.",
 		InputSchema: schema(map[string]any{
 			"days":    strProp("Aggregate over the last N days (default 7)"),
@@ -442,6 +633,7 @@ var tools = []Tool{
 	},
 	{
 		Name:        "kern_semcache",
+		Phase:       "cross",
 		Description: "Inspect and manage the semantic cache that serves similar (not just identical) prior queries instantly. Actions: 'stats' (default) lists entries per namespace (prompt/log), 'list' shows the stored inputs of a namespace, 'clear' wipes it (or all), 'similarity' reports the Jaccard overlap of two inputs so you can predict whether a near-duplicate will hit. Use to verify or reset the fuzzy layer.",
 		InputSchema: schema(map[string]any{
 			"action":    strProp("'stats' (default), 'list', 'clear', or 'similarity'"),
@@ -452,6 +644,7 @@ var tools = []Tool{
 	},
 	{
 		Name:        "kern_ast_search",
+		Phase:       "explore",
 		Description: "AST-level symbol search across a Go project. Supports patterns like 'func greet', 'type *User*', 'method *', '*Handler*'. Returns definitions with file:line.",
 		InputSchema: schema(map[string]any{
 			"pattern": strProp("Symbol pattern. Prefixes: func, method, struct, interface, type, const, var. '*' wildcards supported"),
@@ -461,6 +654,7 @@ var tools = []Tool{
 	},
 	{
 		Name:        "kern_frameworks",
+		Phase:       "explore",
 		Description: "Detect the frameworks and libraries a project uses (Spring, Rails, Django, Express, gin, etc.) by scanning manifests and source markers. Use to know what stack the codebase is on.",
 		InputSchema: schema(map[string]any{
 			"root": strProp("Project root (defaults to current directory)"),
@@ -468,6 +662,7 @@ var tools = []Tool{
 	},
 	{
 		Name:        "kern_entry_points",
+		Phase:       "explore",
 		Description: "List framework entry points found in the index: handlers, controllers and route targets with their framework and route (e.g. spring-mvc UserController.list /api/users). Search for all symbols with the 'entry' kind prefix via kern_ast_search.",
 		InputSchema: schema(map[string]any{
 			"root":    strProp("Project root (defaults to current directory)"),
@@ -477,6 +672,7 @@ var tools = []Tool{
 	},
 	{
 		Name:        "kern_search",
+		Phase:       "explore",
 		Description: "Ranked free-text symbol search: returns symbols matching a query by name or file, best matches first. Forgiving lookup for humans — 'load index' or 'login handler' work, and prose hits camelCase symbols by name segment ('state machine' -> OrderStateMachine), plural-folded ('user services' -> UserService), accent-normalized ('résolution' -> ResolveResolution), or as a camelCase query ('stateMachine'). Set semantic=true to re-rank results by dense embeddings from a local Ollama server (embedding model " + "KERN_EMBED_MODEL, default nomic-embed-text).",
 		InputSchema: schema(map[string]any{
 			"query":    strProp("Free-text query (symbol name, path fragment, or partial name)"),
@@ -487,6 +683,7 @@ var tools = []Tool{
 	},
 	{
 		Name:        "kern_repo_search",
+		Phase:       "explore",
 		Description: "Ranked free-text symbol search across every repo in the kern multi-repo registry (kern repos add). Returns matches tagged with their repo name, best hits first. Set semantic=true to re-rank pooled results by Ollama dense embeddings.",
 		InputSchema: schema(map[string]any{
 			"query":    strProp("Free-text query (symbol name, path fragment, or partial name)"),
@@ -496,6 +693,7 @@ var tools = []Tool{
 	},
 	{
 		Name:        "kern_why",
+		Phase:       "explore",
 		Description: "Rationale and doc-reference report for a symbol: its doc comment, who depends on it and why (each caller's own doc line), and its in/out edge counts. Use to answer 'why does this exist and who needs it'.",
 		InputSchema: schema(map[string]any{
 			"symbol": strProp("Symbol name or Receiver.Name"),
@@ -504,6 +702,7 @@ var tools = []Tool{
 	},
 	{
 		Name:        "kern_code_graph",
+		Phase:       "explore",
 		Description: "Return the call graph neighbourhood of a symbol: its definition, its callers, and what it calls. Use to understand dependencies without reading whole files.",
 		InputSchema: schema(map[string]any{
 			"symbol": strProp("Symbol name (e.g. 'greet' or 'User.Login')"),
@@ -512,6 +711,7 @@ var tools = []Tool{
 	},
 	{
 		Name:        "kern_inherits",
+		Phase:       "explore",
 		Description: "Return the inheritance edges of a symbol: its supertypes (extends/implements/embeds) and subtypes (what extends/implements/embeds it). Use to see class hierarchies without reading whole files.",
 		InputSchema: schema(map[string]any{
 			"symbol": strProp("Symbol name (e.g. 'Item' or 'Logger')"),
@@ -520,15 +720,21 @@ var tools = []Tool{
 	},
 	{
 		Name:        "kern_context",
+		Phase:       "explore",
 		Description: "Return the minimal relevant source slice for a symbol: its definition source, its callers, and what it calls. Use instead of reading an entire file.",
 		InputSchema: schema(map[string]any{
-			"symbol": strProp("Symbol name (e.g. 'greet')"),
-			"root":   strProp("Project root (defaults to current directory)"),
-			"lines":  strProp("Lines of source context around the definition (default 12)"),
+			"symbol":         strProp("Symbol name (e.g. 'greet')"),
+			"root":           strProp("Project root (defaults to current directory)"),
+			"lines":          strProp("Lines of source context around the definition (default 12)"),
+			"agent_id":       strProp("Agent identity for governed mode (P1.2): enables authorized-context filtering — results are scoped to what this agent may read. Omit for raw (ungoverned) mode."),
+			"task":           strProp("Task ID for governed mode; pairs with agent_id to scope authorization to the task paths."),
+			"scope":          map[string]any{"type": "object", "description": "Optional task scope object {paths, denied_paths, services, envs, artifacts} for governed mode."},
+			"with_freshness": strProp("When 'true', append a ---freshness-proof--- footer with the index's content-addressed freshness proof"),
 		}, []string{"symbol"}),
 	},
 	{
 		Name:        "kern_changes",
+		Phase:       "verify",
 		Description: "Line-aware change-impact analysis for a diff: scopes each changed file to the symbols its added lines actually touch (from git diff hunks), then computes blast radius (transitive callers), risk scores, and test gaps. Use to review what a PR could break before reading files.",
 		InputSchema: schema(map[string]any{
 			"root":  strProp("Project root (defaults to current directory)"),
@@ -538,6 +744,7 @@ var tools = []Tool{
 	},
 	{
 		Name:        "kern_review",
+		Phase:       "verify",
 		Description: "Token-optimised code-review context for changed files: line-scoped changed symbols (with file:line spans), their callers, blast radius, risk and test gaps, sized to fit a token budget. The smallest answer a reviewer needs.",
 		InputSchema: schema(map[string]any{
 			"root":       strProp("Project root (defaults to current directory)"),
@@ -548,6 +755,7 @@ var tools = []Tool{
 	},
 	{
 		Name:        "kern_hubs",
+		Phase:       "explore",
 		Description: "Architectural hotspots: the most depended-on symbols (hubs) and cross-package bridges where a change in one subsystem can break another.",
 		InputSchema: schema(map[string]any{
 			"root":  strProp("Project root (defaults to current directory)"),
@@ -556,6 +764,7 @@ var tools = []Tool{
 	},
 	{
 		Name:        "kern_test_gaps",
+		Phase:       "plan",
 		Description: "Test-coverage analysis from the call graph: what percent of callable symbols are exercised by tests, plus untested hotspots (called by many, covered by none).",
 		InputSchema: schema(map[string]any{
 			"root":  strProp("Project root (defaults to current directory)"),
@@ -564,6 +773,7 @@ var tools = []Tool{
 	},
 	{
 		Name:        "kern_path",
+		Phase:       "explore",
 		Description: "Shortest call path between two symbols, following in-project call edges in either direction. Traces how two things connect without reading files.",
 		InputSchema: schema(map[string]any{
 			"root": strProp("Project root (defaults to current directory)"),
@@ -573,6 +783,7 @@ var tools = []Tool{
 	},
 	{
 		Name:        "kern_dead",
+		Phase:       "explore",
 		Description: "Dead-code detection: symbols nothing in the project calls. Private names are dead for certain; public names may be external API. Sorted by size so the biggest cleanup wins show first. Callers reached through function values or interface dispatch are invisible to the index and are reported as dead — confirm before removing.",
 		InputSchema: schema(map[string]any{
 			"root":  strProp("Project root (defaults to current directory)"),
@@ -581,6 +792,7 @@ var tools = []Tool{
 	},
 	{
 		Name:        "kern_larges",
+		Phase:       "explore",
 		Description: "Find the largest function/method declarations by source lines. Use to locate god functions that beg for refactoring.",
 		InputSchema: schema(map[string]any{
 			"root":      strProp("Project root (defaults to current directory)"),
@@ -590,6 +802,7 @@ var tools = []Tool{
 	},
 	{
 		Name:        "kern_arch",
+		Phase:       "explore",
 		Description: "Architecture overview from call-graph communities: subsystems with their hubs/packages, plus coupling warnings ranking the cross-community call bundles that make changes ripple.",
 		InputSchema: schema(map[string]any{
 			"root": strProp("Project root (defaults to current directory)"),
@@ -597,6 +810,7 @@ var tools = []Tool{
 	},
 	{
 		Name:        "kern_communities",
+		Phase:       "explore",
 		Description: "Call-graph communities (label propagation): which symbols cluster together as subsystems, with each cluster's size and hub. Use to name the architecture's parts before refactoring.",
 		InputSchema: schema(map[string]any{
 			"root":  strProp("Project root (defaults to current directory)"),
@@ -605,6 +819,7 @@ var tools = []Tool{
 	},
 	{
 		Name:        "kern_churn",
+		Phase:       "explore",
 		Description: "Change-frequency risk: which files were touched by the most commits in a range, whether they are being edited right now, and how risky they are in the call graph.",
 		InputSchema: schema(map[string]any{
 			"root":  strProp("Project root (defaults to current directory)"),
@@ -613,6 +828,7 @@ var tools = []Tool{
 	},
 	{
 		Name:        "kern_near",
+		Phase:       "explore",
 		Description: "Dependency-tree expansion: every symbol within N hops of a symbol, in both directions (callers + callees), budget-capped. The graph-guided traversal primitive that replaces blind grep — e.g. 'everything two degrees from this database model' in one call.",
 		InputSchema: schema(map[string]any{
 			"symbol": strProp("Root symbol (simple name or Type.Method)"),
@@ -623,6 +839,7 @@ var tools = []Tool{
 	},
 	{
 		Name:        "kern_walk",
+		Phase:       "explore",
 		Description: "Graph-guided walk: the /walk-graph primitive. Returns an indented parent-child dependency tree of every symbol up to N hops away from a symbol, across files, with file:line per node. Alias of kern_near with a tree-oriented description; use instead of grepping or reading whole files to locate code.",
 		InputSchema: schema(map[string]any{
 			"symbol": strProp("Root symbol (simple name or Type.Method)"),
@@ -633,6 +850,7 @@ var tools = []Tool{
 	},
 	{
 		Name:        "kern_probe",
+		Phase:       "explore",
 		Description: "Query-driven micro-context router: given a task (bug report, prompt, error text), extract the symbol names it mentions, resolve them against the index, and return a budget-capped bundle of definitions, callers, callees and tests. The graph is the retrieval index, never the payload.",
 		InputSchema: schema(map[string]any{
 			"task":       strProp("Natural-language task, bug report or error text mentioning symbols"),
@@ -642,6 +860,7 @@ var tools = []Tool{
 	},
 	{
 		Name:        "kern_trace",
+		Phase:       "plan",
 		Description: "Runtime-impact overlay: parse a pprof -top dump, a crash stack trace, or a plain list of function names and map the hot symbols onto the call graph — file:line, blast radius, test coverage and risk. Use to see what a hot path touches at runtime.",
 		InputSchema: schema(map[string]any{
 			"trace": strProp("The trace text (pprof -top, stack trace, or symbol list)"),
@@ -651,6 +870,7 @@ var tools = []Tool{
 	},
 	{
 		Name:        "kern_lock",
+		Phase:       "edit",
 		Description: "Acquire an advisory workspace lock on a scope (flock-based). Held by this server until kern_unlock. Lets concurrent agents coordinate before touching shared files. Errors when the scope is already held.",
 		InputSchema: schema(map[string]any{
 			"scope": strProp("Lock scope, e.g. 'db-models' or 'checkout'"),
@@ -659,6 +879,7 @@ var tools = []Tool{
 	},
 	{
 		Name:        "kern_unlock",
+		Phase:       "edit",
 		Description: "Release a workspace lock previously acquired via kern_lock.",
 		InputSchema: schema(map[string]any{
 			"scope": strProp("Lock scope to release"),
@@ -666,6 +887,7 @@ var tools = []Tool{
 	},
 	{
 		Name:        "kern_lock_status",
+		Phase:       "edit",
 		Description: "List workspace locks with whether each is held and by which PID. Use to see what other agents are working on.",
 		InputSchema: schema(map[string]any{
 			"root": strProp("Project root (defaults to current directory)"),
@@ -673,6 +895,7 @@ var tools = []Tool{
 	},
 	{
 		Name:        "kern_guard_check",
+		Phase:       "edit",
 		Description: "Deterministic architectural guardrails: validate changed files against .kern/boundaries.json rules and return every forbidden dependency crossing (e.g. a frontend importing a backend DB model) with file evidence. Rejects a proposal before it touches the filesystem. Use format=sarif for a SARIF 2.1.0 report (GitHub code scanning / Azure DevOps) and threshold=N to fail (isError) when the violation count exceeds N.",
 		InputSchema: schema(map[string]any{
 			"root":      strProp("Project root (defaults to current directory)"),
@@ -683,7 +906,20 @@ var tools = []Tool{
 		}, nil),
 	},
 	{
+		Name:        "kern_authorize_context",
+		Phase:       "cross",
+		Description: "Authorized-context primitive (P0.1): compute the exact set of symbols and call edges an agent may legally read for a task, filtered by the agent's identity (firewall context.read permission) and an optional task scope, and return it with an auditable authorization proof (decision, fingerprint, index freshness). Denied symbols are listed with their denial stage and reason. Use before retrieval when a task must not leak out-of-scope code.",
+		InputSchema: schema(map[string]any{
+			"agent_id":      strProp("Agent ID to authorize (must be registered, e.g. via identity.RegisterAgent / kern_agent)"),
+			"task":          strProp("Task ID the authorization is scoped to"),
+			"root":          strProp("Project root (defaults to current directory)"),
+			"symbol_filter": strProp("Optional substring filter applied to the allowed symbols only"),
+			"scope":         strProp("Optional task scope object: {paths: [], denied_paths: [], services: [], envs: [], artifacts: []}"),
+		}, []string{"agent_id", "task"}),
+	},
+	{
 		Name:        "kern_rename",
+		Phase:       "edit",
 		Description: "Structural symbol rename on the AST index (P0-5): previews every definition/reference for a Go package-level symbol (types, funcs, vars, consts) with file:line:col edits, then applies them transactionally when apply=true. Edits come from a real go/ast parse, so strings, comments, struct-field names, composite-literal keys, import aliases and the package clause are never touched; cross-package references (pkg.Symbol) are handled for exported symbols. Before applying, every touched file is backed up under <root>/.kern/rename-backup/ and a mid-flight failure restores all files. Method rename and non-Go symbols are refused. Returns the preview (or apply result) as text.",
 		InputSchema: schema(map[string]any{
 			"root":     strProp("Project root (defaults to current directory)"),
@@ -694,6 +930,7 @@ var tools = []Tool{
 	},
 	{
 		Name:        "kern_exec",
+		Phase:       "edit",
 		Description: "Run code in an isolated local runtime and return ONLY stdout — the 'Think in Code' surface. Language is selected by --lang or a shebang line; runtimes are resolved from PATH (python3, node, go, bash, perl, ruby, php, lua, julia, R, bun, deno, rust, ...). The script runs in a fresh temp dir with a hard timeout (default 10s, override timeout=N), a stdout byte cap (default 16KiB, override max=N), and a sanitized environment (HOME/XDG pointed into the sandbox, secrets stripped). Isolation is enforced: the script runs in a private network namespace when the platform supports it, and the run refuses to execute if network isolation is unavailable (never silently runs with full network). stderr is never mixed into stdout and is only surfaced on failure. Use it to compute things (math, data munging, JSON transforms) without polluting context.",
 		InputSchema: schema(map[string]any{
 			"code":       strProp("The script body (required)"),
@@ -707,25 +944,36 @@ var tools = []Tool{
 	},
 	{
 		Name:        "kern_explore",
+		Phase:       "explore",
 		Description: "Single-call explore (#2): return a symbol's verbatim source, direct call flow (callers + callees) and transitive blast radius (with affected files) in one shot. The primitive that replaces three separate calls (graph/near/path) for 'what touches this and how'. Pass depth=N to cap the blast radius to N hops and max=N to cap node count.",
 		InputSchema: schema(map[string]any{
-			"symbol": strProp("Symbol name (e.g. 'greet' or 'User.Login')"),
-			"root":   strProp("Project root (defaults to current directory)"),
-			"depth":  strProp("Cap blast radius to N hops from the symbol (default 0 = unlimited)"),
-			"max":    strProp("Maximum blast-radius symbols to return (default 0 = unlimited)"),
+			"symbol":         strProp("Symbol name (e.g. 'greet' or 'User.Login')"),
+			"root":           strProp("Project root (defaults to current directory)"),
+			"depth":          strProp("Cap blast radius to N hops from the symbol (default 0 = unlimited)"),
+			"max":            strProp("Maximum blast-radius symbols to return (default 0 = unlimited)"),
+			"agent_id":       strProp("Agent identity for governed mode (P1.2): enables authorized-context filtering — results are scoped to what this agent may read. Omit for raw (ungoverned) mode."),
+			"task":           strProp("Task ID for governed mode; pairs with agent_id to scope authorization to the task paths."),
+			"scope":          map[string]any{"type": "object", "description": "Optional task scope object {paths, denied_paths, services, envs, artifacts} for governed mode."},
+			"with_freshness": strProp("When 'true', append a ---freshness-proof--- footer with the index's content-addressed freshness proof"),
 		}, []string{"symbol"}),
 	},
 	{
 		Name:        "kern_graph",
+		Phase:       "explore",
 		Description: "One-call graph context: token-budgeted names-only adjacency for a symbol — callers first (the direction that matters for impact), then callees, every edge tagged EXTRACTED/INFERRED/AMBIGUOUS, plus community membership. Calls to interface methods carry dispatch hints listing the concrete implementations they can reach. Parity with code-review-graph's minimal_context: the minimal caller-first answer sized to the context window, no source text.",
 		InputSchema: schema(map[string]any{
-			"symbol":     strProp("Symbol name (simple name or Type.Method)"),
-			"root":       strProp("Project root (defaults to current directory)"),
-			"max_tokens": strProp("Token budget for the names-only adjacency (default 400)"),
+			"symbol":         strProp("Symbol name (simple name or Type.Method)"),
+			"root":           strProp("Project root (defaults to current directory)"),
+			"max_tokens":     strProp("Token budget for the names-only adjacency (default 400)"),
+			"agent_id":       strProp("Agent identity for governed mode (P1.2): enables authorized-context filtering — results are scoped to what this agent may read. Omit for raw (ungoverned) mode."),
+			"task":           strProp("Task ID for governed mode; pairs with agent_id to scope authorization to the task paths."),
+			"scope":          map[string]any{"type": "object", "description": "Optional task scope object {paths, denied_paths, services, envs, artifacts} for governed mode."},
+			"with_freshness": strProp("When 'true', append a ---freshness-proof--- footer with the index's content-addressed freshness proof"),
 		}, []string{"symbol"}),
 	},
 	{
 		Name:        "kern_fts_search",
+		Phase:       "explore",
 		Description: "FTS5 full-text search (#3) over the SQLite symbol index. Supports MATCH syntax ('greet', 'func AND greet', `file:\"main.go\"`). Requires a build with -tags sqlite and a persisted index. Falls back to a clear error on the default build.",
 		InputSchema: schema(map[string]any{
 			"query": strProp("FTS5 MATCH query over symbols"),
@@ -735,6 +983,7 @@ var tools = []Tool{
 	},
 	{
 		Name:        "kern_bridges",
+		Phase:       "explore",
 		Description: "Bridge detection (#4): symbols called from two or more distinct packages/directories — the coupling points where a change in one subsystem can break another. Ranks bridges by number of calling packages then caller count.",
 		InputSchema: schema(map[string]any{
 			"root":  strProp("Project root (defaults to current directory)"),
@@ -743,6 +992,7 @@ var tools = []Tool{
 	},
 	{
 		Name:        "kern_cochange",
+		Phase:       "explore",
 		Description: "Co-change mode (#6): which files are actually changed together in the same commits (from git history), independent of the call graph. Grades change risk by co-change frequency: files that co-change with the current edits are the ones most likely to break next. Use before a commit to see what else must change in lockstep.",
 		InputSchema: schema(map[string]any{
 			"root":  strProp("Project root (defaults to current directory)"),
@@ -752,11 +1002,13 @@ var tools = []Tool{
 	},
 	{
 		Name:        "kern_usage_guide",
+		Phase:       "plan",
 		Description: "Categorized usage guide for every kern MCP tool with performance tiers (fast/moderate/expensive), recommended workflows, and pitfalls. Consult this first when deciding which tool fits a task.",
 		InputSchema: schema(map[string]any{}, nil),
 	},
 	{
 		Name:        "kern_analyze",
+		Phase:       "plan",
 		Description: "HIGH-LEVEL (ADR-0006): analyze a proposed change against the whole system — relevant code, architecture, dependencies, historical memory, blast radius, risks, evidence, and required validation. This is the Kern 2.0 killer workflow 'Analyze this proposed change' exposed over MCP.",
 		InputSchema: schema(map[string]any{
 			"root":   strProp("Project root (defaults to current directory)"),
@@ -765,6 +1017,7 @@ var tools = []Tool{
 	},
 	{
 		Name:        "kern_plan",
+		Phase:       "plan",
 		Description: "HIGH-LEVEL (ADR-0006): produce an implementation plan for a proposed change — affected files, dependencies, risks and required validation. Deterministic plan over the analysis; no LLM required.",
 		InputSchema: schema(map[string]any{
 			"root":   strProp("Project root (defaults to current directory)"),
@@ -773,6 +1026,7 @@ var tools = []Tool{
 	},
 	{
 		Name:        "kern_execute",
+		Phase:       "edit",
 		Description: "HIGH-LEVEL (ADR-0006): execute a change inside an isolated sandbox worktree (autonomy L2). Applies the given unified diff, verifies it builds, and returns the resulting diff. Never mutates the live repository.",
 		InputSchema: schema(map[string]any{
 			"root":  strProp("Project root (defaults to current directory)"),
@@ -781,6 +1035,7 @@ var tools = []Tool{
 	},
 	{
 		Name:        "kern_verify",
+		Phase:       "verify",
 		Description: "HIGH-LEVEL (ADR-0006): verify a change with the unified verification engine — build, unit tests, security, architecture, dependency. Returns the typed verdict (PASS/FAIL/WARN) and per-check summary.",
 		InputSchema: schema(map[string]any{
 			"root":  strProp("Project root (defaults to current directory)"),
@@ -789,6 +1044,7 @@ var tools = []Tool{
 	},
 	{
 		Name:        "kern_incident",
+		Phase:       "cross",
 		Description: "HIGH-LEVEL (ADR-0006): investigate a production incident end-to-end — correlate an alert to the affected service and evidence, derive the root cause and hypotheses, and summarize. Provide the alert as JSON; optionally a runtime snapshot (events/deployments/commits) as JSON.",
 		InputSchema: schema(map[string]any{
 			"root":     strProp("Project root (defaults to current directory)"),
@@ -798,6 +1054,7 @@ var tools = []Tool{
 	},
 	{
 		Name:        "kern_what_if",
+		Phase:       "plan",
 		Description: "HIGH-LEVEL (Workflow C / ADR-0012): simulate the impact of a hypothetical change on the knowledge graph — transitively affected symbols, files, services, tests, a deterministic risk level, and a typed RECOMMENDATION claim. Read-only; never mutates the graph or index.",
 		InputSchema: schema(map[string]any{
 			"root":       strProp("Project root (defaults to current directory)"),
@@ -808,6 +1065,7 @@ var tools = []Tool{
 	},
 	{
 		Name:        "kern_impact",
+		Phase:       "plan",
 		Description: "HIGH-LEVEL: estimate the impact/blast-radius of a change to a symbol — transitively affected symbols/files/services/tests, deterministic risk, and typed claims. Read-only.",
 		InputSchema: schema(map[string]any{
 			"root":       strProp("Project root (defaults to current directory)"),
@@ -818,6 +1076,7 @@ var tools = []Tool{
 	},
 	{
 		Name:        "kern_memory",
+		Phase:       "cross",
 		Description: "HIGH-LEVEL (Workflow E): manage engineering memory — add a lesson, list stored lessons, or recall the most relevant lessons for a prompt.",
 		InputSchema: schema(map[string]any{
 			"action": strProp("Action to perform: 'add', 'list', or 'recall'"),
@@ -828,6 +1087,7 @@ var tools = []Tool{
 	},
 	{
 		Name:        "kern_agents",
+		Phase:       "cross",
 		Description: "HIGH-LEVEL (Workflow E): build the standard specialist team and list its roster — name, role, capabilities — plus the current task states from the agent registry. Read-only and deterministic.",
 		InputSchema: schema(map[string]any{
 			"root": strProp("Project root (defaults to current directory)"),
@@ -835,6 +1095,7 @@ var tools = []Tool{
 	},
 	{
 		Name:        "kern_loop",
+		Phase:       "cross",
 		Description: "HIGH-LEVEL (Workflow E): run the closed autonomy loop against an intent string and return the stage timeline plus the deployed / observed-healthy / learned outcome. The autonomy level (L0-L5, default L0 read-only) gates which stages run; the AI stages use the deterministic no-op step by default and are pluggable via the loop's StepFunc mechanism.",
 		InputSchema: schema(map[string]any{
 			"root":   strProp("Project root (defaults to current directory)"),
@@ -843,25 +1104,88 @@ var tools = []Tool{
 		}, []string{"intent"}),
 	},
 	{
-		Name:        "kern_correlate",
-		Description: "HIGH-LEVEL (Phase 14): correlate a production alert against the runtime to produce a deep evidence chain (alert→service→deployment→commit→symbol→task/pr/agent). Deterministic — derived from runtime source and git history, not LLM.",
+		Name:        "kern_run",
+		Phase:       "cross",
+		Description: "HIGH-LEVEL (Workflow E): run an intent through the full task pipeline — compiles the intent, selects workflow + capabilities + agents, creates a Task, runs policy precheck, and returns the run result (task id, workflow, risk/approval, capabilities, tools, agents, next action). This is the single entry point that orchestrates the whole workflow from one call.",
+		InputSchema: schema(map[string]any{
+			"root":   strProp("Project root (defaults to current directory)"),
+			"intent": strProp("The intent/goal to run through the pipeline"),
+		}, []string{"intent"}),
+	},
+	{
+		Name:        "kern_meta",
+		Phase:       "meta",
+		Description: "Single entry point: describe what you need in natural language and kern classifies the request and runs the right tool(s) internally. Examples: 'how does dispatch work?' → kern_explore, 'what breaks if I change dispatch?' → kern_impact, 'compress this log: ...' → kern_optimize_log, 'mask secrets in: ...' → kern_mask_pii, 'find the dispatch function' → kern_search, 'show me the architecture' → kern_arch. Prefer this over calling individual kern_* tools — it picks the right one for you.",
+		InputSchema: schema(map[string]any{
+			"request":  strProp("Natural-language request describing what you need from kern"),
+			"phase":    strProp("Agent phase: explore|plan|edit|verify. Hints the phase context for routing; the advertised tool list is filtered server-wide via KERN_MCP_PHASE. Optional."),
+			"agent_id": strProp("Agent identity for governed mode (P1.2): enables authorized-context filtering — results are scoped to what this agent may read. Omit for raw (ungoverned) mode."),
+			"task":     strProp("Task ID for governed mode; pairs with agent_id to scope authorization to the task paths."),
+			"scope":    map[string]any{"type": "object", "description": "Optional task scope object {paths, denied_paths, services, envs, artifacts} for governed mode."},
+			"root":     strProp("Project root (defaults to current directory)"),
+		}, []string{"request"}),
+	},
+	{
+		Name:        "kern_workflow",
+		Phase:       "cross",
+		Description: "HIGH-LEVEL (Workflow E): select and coordinate the agent team without the external caller manually sequencing it. Classifies the intent, registers the kind-specific workflow (only the specialists that apply), wires the standard team, and drives the steps (analyze → plan → [human approval gate] → code → verify → pr for code changes; kind-specific stages for incident/documentation/modernization tasks). The run parks at the human approval gate before the first execution step: the returned error carries the approval ID, resolve it via kern_approve then call kern_workflow again with the same task_id to resume.",
 		InputSchema: schema(map[string]any{
 			"root":    strProp("Project root (defaults to current directory)"),
-			"alert":   strProp("JSON of a domain.Alert: {id,severity,message,service,source,occurred_at}"),
+			"intent":  strProp("The intent/goal to run through the agent team"),
+			"task_id": strProp("Resume an approval-parked run for this task (omit to start a new run)"),
+		}, []string{"intent"}),
+	},
+	{
+		Name:        "kern_onboard",
+		Phase:       "cross",
+		Description: "Session-start onboarding: ensure the working directory is fully wired to kern in one call. Checks whether the repo is registered (repos registry) and indexed; if not, registers it, builds/refreshes the index, and writes AGENTS.md rules if missing. Returns a status report (registered, indexed, wired, symbols/edges/files). Call this at session start in a new project instead of manually indexing or re-exploring with read/grep/glob.",
+		InputSchema: schema(map[string]any{
+			"root": strProp("Project root (defaults to current directory)"),
+		}, nil),
+	},
+	{
+		Name:        "kern_audit",
+		Phase:       "verify",
+		Description: "HIGH-LEVEL: return the tamper-evident governance audit log for the project (every firewall decision/approval). CLI-equivalent: kern audit. Backs the AUDIT intent workflow.",
+		InputSchema: schema(map[string]any{
+			"root": strProp("Project root (defaults to current directory)"),
+		}, nil),
+	},
+	{
+		Name:        "kern_approve",
+		Phase:       "edit",
+		Description: "HIGH-LEVEL: resolve a governance approval gate. With no id, lists pending approvals. With an id, approves it; set reject=true to reject instead. CLI-equivalent: kern approve. Agents hit this when kern_run/kern_workflow parks at the human approval gate — the returned error carries the approval ID.",
+		InputSchema: schema(map[string]any{
+			"root":     strProp("Project root (defaults to current directory)"),
+			"id":       strProp("Approval ID to approve/reject (omit to list pending approvals)"),
+			"reject":   strProp("If true, reject the approval instead of approving it (default false)"),
+			"reason":   strProp("Optional reason for the decision"),
+			"approver": strProp("Optional approver identity (defaults to 'mcp-user')"),
+		}, nil),
+	},
+	{
+		Name:        "kern_correlate",
+		Phase:       "cross",
+		Description: "HIGH-LEVEL: correlate a production alert against the runtime to produce a deep evidence chain (alert→service→deployment→commit→symbol→task/pr/agent). Deterministic — derived from runtime source and git history, not LLM.",
+		InputSchema: schema(map[string]any{
+			"root":     strProp("Project root (defaults to current directory)"),
+			"alert":    strProp("JSON of a domain.Alert: {id,severity,message,service,source,occurred_at}"),
 			"snapshot": strProp("Optional JSON of a runtime snapshot: {events,deployments,commits}"),
 		}, []string{"alert"}),
 	},
 	{
 		Name:        "kern_learn",
-		Description: "HIGH-LEVEL (Phase 16): extract recurring patterns from engineering memory and surface those above a threshold. Patterns are promoted to memory (evidence-based). Deterministic — the LLM may explain but does not create patterns.",
+		Phase:       "cross",
+		Description: "HIGH-LEVEL: extract recurring patterns from engineering memory and surface those above a threshold. Patterns are promoted to memory (evidence-based). Deterministic — the LLM may explain but does not create patterns.",
 		InputSchema: schema(map[string]any{
-			"root":       strProp("Project root (defaults to current directory)"),
-			"threshold":  strProp("Minimum pattern count to surface (default 3)"),
+			"root":      strProp("Project root (defaults to current directory)"),
+			"threshold": strProp("Minimum pattern count to surface (default 3)"),
 		}, nil),
 	},
 	{
 		Name:        "kern_modernize",
-		Description: "HIGH-LEVEL (Phase 17): analyze the monolith and produce a phased modernization plan (communities→bridges→churn→candidate boundaries→impact→risk→migration plan). Each extraction phase becomes an auditable Task.",
+		Phase:       "cross",
+		Description: "HIGH-LEVEL: analyze the monolith and produce a phased modernization plan (communities→bridges→churn→candidate boundaries→impact→risk→migration plan). Each extraction phase becomes an auditable Task.",
 		InputSchema: schema(map[string]any{
 			"root": strProp("Project root (defaults to current directory)"),
 		}, nil),
@@ -870,14 +1194,21 @@ var tools = []Tool{
 
 // Server handles MCP requests over a stdio stream or HTTP.
 type Server struct {
-	in        io.Reader      // raw stdio reader, used to rebuild the scanner after an oversized line
-	out       io.Writer
-	mu        sync.Mutex
-	toolsMu   sync.Mutex
-	filtered  []Tool // cached KERN_TOOLS-filtered tool list (nil = not computed)
-	locks     map[string]*lock.Lock
-	inflight  map[string]context.CancelFunc
-	sessions  map[string]*project.Session
+	in       io.Reader // raw stdio reader, used to rebuild the scanner after an oversized line
+	out      io.Writer
+	mu       sync.Mutex
+	toolsMu  sync.Mutex
+	filtered []Tool // cached KERN_TOOLS-filtered tool list (nil = not computed)
+	locks    map[string]*lock.Lock
+	inflight map[string]context.CancelFunc
+	sessions map[string]*project.Session
+	// platforms caches one application Platform per project root, keyed to
+	// the exact index instance it was built from. High-level handlers used to
+	// rebuild the whole Platform (call graph + 4 twin extractors, each a full
+	// tree walk) on every tool call; the cache reuses it while the session
+	// serves the same index instance and rebuilds only after a real index
+	// rebuild (new instance pointer).
+	platforms map[string]*platformEntry
 	transport string // "stdio" (default) or "http"
 	// sem bounds how many tool calls may build an index concurrently (each
 	// call can construct a full project index). Acquired before a tools/call
@@ -886,16 +1217,70 @@ type Server struct {
 	// roots confine every tool root/dir argument; KERN_ROOTS when set, else
 	// the server's startup directory.
 	roots []string
+	// gate confines every tool call's path-typed arguments (root, dir, or any
+	// key containing "path") to the KERN_MCP_ROOTS roots, resolving symlinks
+	// before containment. A nil gate preserves the default behavior exactly.
+	gate *Gate
 	// commits caches the short HEAD commit per project root so git is spawned
 	// at most once per root per server lifetime.
 	commits map[string]string
+	// indexOnce defers background index preloading until the first MCP
+	// request (initialize or tools/call) instead of server startup, so
+	// setup is instant and the index cost is paid while the user waits.
+	indexOnce sync.Once
+	// indexedRoots records which project roots have completed at least one
+	// index build this process, so the "first build in progress" notice is
+	// printed once per root instead of on every stale rebuild.
+	indexedRoots sync.Map
+	// preTool is an optional hook invoked before every tools/call execution.
+	// It receives the tool name and its arguments and returns nil to allow the
+	// call or an error to deny it (denial surfaces as a tool error response,
+	// isError=true, no side effects). A nil hook preserves the default
+	// behavior exactly — callers that never set it see zero change.
+	preTool func(name string, args map[string]any) error
+}
+
+// WithPreToolHook registers a pre-tool-use hook. NewServer wires the
+// KERN_MCP_ROOTS confinement gate as the default hook (opt out via
+// KERN_MCP_NO_CONFINE=1); calling WithPreToolHook replaces that default with
+// the caller's own governance/allowlist/accounting hook. A nil hook leaves
+// every tools/call untouched, so callers that explicitly pass nil get the
+// fully default behavior.
+func (s *Server) WithPreToolHook(fn func(name string, args map[string]any) error) *Server {
+	s.preTool = fn
+	return s
 }
 
 // NewServer returns a *Server wired to the given reader/writer.
 func NewServer(in io.Reader, out io.Writer) *Server {
 	sc := bufio.NewScanner(in)
 	sc.Buffer(make([]byte, 64<<20), 64<<20)
-	return &Server{in: in, out: out, sem: make(chan struct{}, 8), locks: map[string]*lock.Lock{}, inflight: map[string]context.CancelFunc{}, sessions: map[string]*project.Session{}, transport: "stdio", roots: defaultWorkspaceRoots(), commits: map[string]string{}}
+	s := &Server{in: in, out: out, sem: make(chan struct{}, 8), locks: map[string]*lock.Lock{}, inflight: map[string]context.CancelFunc{}, sessions: map[string]*project.Session{}, transport: "stdio", roots: defaultWorkspaceRoots(), gate: confinementGate(), commits: map[string]string{}}
+	// P0.1: register the built-in default agent so calls without an explicit
+	// agent_id are governed (cwd-scoped) instead of raw. KERN_MCP_PERMISSIVE=1
+	// remains the explicit opt-out that restores raw mode.
+	registerDefaultAgent()
+	// Confinement is default-on: the KERN_MCP_ROOTS gate runs as the
+	// pre-tool-use hook, so a tool call whose path-typed arguments resolve
+	// outside the allowed roots is denied before any handler side effect runs.
+	// KERN_MCP_NO_CONFINE=1 opts out entirely. With no KERN_MCP_ROOTS the gate
+	// fails closed to the process cwd; KERN_MCP_PERMISSIVE=1 restores the old
+	// allow-all loopback-client-trust behavior.
+	if s.gate != nil {
+		s.preTool = s.gate.Check
+	}
+	return s
+}
+
+// confinementGate builds the KERN_MCP_ROOTS confinement gate, or nil when
+// KERN_MCP_NO_CONFINE=1 opts out of confinement. A nil gate allows every
+// call; a non-nil gate is enabled unless KERN_MCP_PERMISSIVE=1 opts out, and
+// defaults its roots to the process cwd when KERN_MCP_ROOTS is unset.
+func confinementGate() *Gate {
+	if os.Getenv("KERN_MCP_NO_CONFINE") == "1" {
+		return nil
+	}
+	return NewGateFromEnv()
 }
 
 // defaultWorkspaceRoots returns the roots tools may target: KERN_ROOTS when
@@ -1134,9 +1519,11 @@ func (s *Server) unregisterInflight(id string) {
 }
 
 // Serve runs until the stream ends.
-// preloadIndexes eagerly builds and caches each workspace root's index in the
+// preloadIndexes builds and caches each workspace root's index in the
 // background so a later tool call reuses it instead of blocking on a cold
-// build. Skipped for filesystem roots and when KERN_PRELOAD=0 (test/CI guard).
+// build. It is triggered lazily on the first MCP request (see indexOnce) and
+// runs in a goroutine so setup never blocks on it. Skipped for filesystem
+// roots and when KERN_PRELOAD=0 (test/CI guard).
 func (s *Server) preloadIndexes() {
 	if os.Getenv("KERN_PRELOAD") == "0" {
 		return
@@ -1146,10 +1533,19 @@ func (s *Server) preloadIndexes() {
 			continue
 		}
 		go func(root string) {
+			defer func() {
+				if r := recover(); r != nil {
+					fmt.Fprintf(os.Stderr, "kern-mcp: preload index %s: panic recovered: %v\n", root, r)
+				}
+			}()
 			_, err := s.sessionFor(root).Index()
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "kern-mcp: preload index %s: %v\n", root, err)
+				return
 			}
+			// Record the build so a later graph tool call that reuses this
+			// warm index does not print the "first build in progress" notice.
+			s.indexedRoots.Store(root, true)
 		}(r)
 	}
 }
@@ -1174,8 +1570,6 @@ func (s *Server) workspaceRoots() []string {
 }
 
 func (s *Server) Serve() error {
-	// Preload indexes in the background so the first tool call hits a warm cache.
-	s.preloadIndexes()
 	if s.sem == nil {
 		s.sem = make(chan struct{}, 8)
 	}
@@ -1268,6 +1662,30 @@ func (s *Server) Close() {
 // the request needs no response (e.g. a notification). The response is a
 // transport-neutral object so both stdio and HTTP can send it.
 func (s *Server) dispatch(req rpcRequest) any {
+	// KERN_MCP_ROOTS confinement gate (memory-#31): every tools/call whose
+	// path-typed arguments (root, dir, or any key containing "path") resolve
+	// outside the allowed roots is rejected here, before any handler runs.
+	// The rejection uses the same result shape a handler error produces — a
+	// tool result with isError=true — so the client sees a clean tool error
+	// rather than a panic or a JSON-RPC error. A nil or disabled gate is a
+	// no-op, keeping the default (loopback-client trust) behavior identical.
+	if s.gate != nil && s.gate.enabled && req.Method == "tools/call" {
+		var p struct {
+			Name      string         `json:"name"`
+			Arguments map[string]any `json:"arguments"`
+		}
+		if json.Unmarshal(req.Params, &p) == nil {
+			if err := s.gate.Check(p.Name, p.Arguments); err != nil {
+				return map[string]any{
+					"jsonrpc": "2.0", "id": req.ID,
+					"result": map[string]any{
+						"content": []any{map[string]any{"type": "text", "text": "pre-tool-use denied: " + err.Error()}},
+						"isError": true,
+					},
+				}
+			}
+		}
+	}
 	// $/cancelRequest is a notification per JSON-RPC (no response expected),
 	// but must still be processed: dispatch returns nil for notifications
 	// below, so it is handled here before the short-circuit.
@@ -1293,6 +1711,11 @@ func (s *Server) dispatch(req rpcRequest) any {
 	}
 	switch req.Method {
 	case "initialize":
+		// Kick off background indexing on the first connection so setup stays
+		// instant: graph tools block until the build finishes, while tools
+		// that don't need the index serve immediately. indexOnce guards the
+		// trigger so it fires exactly once per server lifetime.
+		s.indexOnce.Do(func() { go s.preloadIndexes() })
 		caps := map[string]any{
 			"tools":   map[string]any{"listChanged": false},
 			"prompts": map[string]any{"listChanged": false},
@@ -1359,8 +1782,10 @@ func idKey(id json.RawMessage) string {
 		return fmt.Sprintf("%v", v)
 	}
 }
-
 func (s *Server) toolCallResponse(id json.RawMessage, params json.RawMessage) any {
+	// First real use: start background indexing (no-op if initialize already
+	// triggered it — indexOnce fires exactly once per server lifetime).
+	s.indexOnce.Do(func() { go s.preloadIndexes() })
 	var p struct {
 		Name      string         `json:"name"`
 		Arguments map[string]any `json:"arguments"`
@@ -1369,7 +1794,30 @@ func (s *Server) toolCallResponse(id json.RawMessage, params json.RawMessage) an
 		return errorResponse(id, -32602, "invalid params")
 	}
 	key := idKey(id)
-	ctx, cancel := context.WithCancel(context.Background())
+	// Pre-tool-use hook: deny the call before any side effect runs. The hook
+	// is optional (nil = no-op) and returns nil to allow, or an error to
+	// reject — rejection is reported as a tool error (isError=true) so the
+	// agent sees why the call was blocked.
+	if s.preTool != nil {
+		if err := s.preTool(p.Name, p.Arguments); err != nil {
+			return map[string]any{
+				"jsonrpc": "2.0", "id": id,
+				"result": map[string]any{
+					"content": []any{map[string]any{"type": "text", "text": fmt.Sprintf("pre-tool-use denied: %s", err)}},
+					"isError": true,
+				},
+			}
+		}
+	}
+	// A generous 30-minute per-call ceiling so a hung subprocess (an
+	// unresponsive Ollama during plan/analyze, or a slow index build) can
+	// never wedge the server goroutine forever; long legitimate operations
+	// (kern_execute sandbox builds, kern_verify full suites) run within it.
+	// This is the effective cap for plugin-driven calls: it must be >= the
+	// plugin MAX_CEILING_MS (kern.ts) so the agent's requested timeout
+	// governs. The exec-family handlers install their own shorter deadlines
+	// on top.
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
 	// The per-call scope carries the index loaded during this tool's execution
 	// so provenance is stamped from this call's index, never another's. It is
 	// scoped here instead of on the Server struct to avoid cross-talk between
@@ -1381,7 +1829,6 @@ func (s *Server) toolCallResponse(id json.RawMessage, params json.RawMessage) an
 		cancel()
 		s.unregisterInflight(key)
 	}()
-
 	text, err := func() (out string, runErr error) {
 		defer func() {
 			if rec := recover(); rec != nil {
@@ -1404,11 +1851,28 @@ func (s *Server) toolCallResponse(id json.RawMessage, params json.RawMessage) an
 		"content": []any{map[string]any{"type": "text", "text": text}},
 		"isError": false,
 	}
+	// Structured provenance (P1.2): retrieval handlers stamp it on the
+	// per-call scope; any other tool that loaded an index gets
+	// index-identity-only raw provenance. The one-line summary appended to
+	// the content text is derived from the same structured field, so there
+	// is a single source of truth for index evidence.
+	if scope.prov == nil && scope.ix != nil {
+		scope.prov = s.rawProvenance(scope.ix, nil)
+	}
 	if err != nil {
-		result["content"] = []any{map[string]any{"type": "text", "text": err.Error()}}
+		if scope.prov != nil {
+			// Errors can carry provenance too: governed denials attach the
+			// auditable authorizing rule alongside the error text.
+			text = err.Error() + "\n" + s.provenanceSummary(scope.ix, scope.prov)
+			result["provenance"] = scope.prov
+		} else {
+			text = err.Error()
+		}
+		result["content"] = []any{map[string]any{"type": "text", "text": text}}
 		result["isError"] = true
-	} else if prov := s.provenance(scope.ix); prov != "" {
-		result["content"] = []any{map[string]any{"type": "text", "text": text + "\n" + prov}}
+	} else if scope.prov != nil {
+		result["provenance"] = scope.prov
+		result["content"] = []any{map[string]any{"type": "text", "text": text + "\n" + s.provenanceSummary(scope.ix, scope.prov)}}
 	}
 	return map[string]any{"jsonrpc": "2.0", "id": id, "result": result}
 }
@@ -1453,8 +1917,15 @@ func sandboxOutput(text string, budget int, tool string) string {
 	if budget <= 0 || len(text) <= budget {
 		return text
 	}
-	return text[:budget] + fmt.Sprintf("\n\n… [MCP output sandbox: %d → %d chars (%d → %d tokens). %s Pass max_output=N to this tool for more, or narrow the request.]",
-		len(text), budget, tokenize.Count(text), tokenize.Count(text[:budget]), recoveryHint(tool))
+	// Trim to a rune-safe boundary: slicing mid-multi-byte-rune would leave a
+	// dangling UTF-8 sequence that corrupts the marker's own token counts and
+	// any downstream tokenizer.
+	cut := budget
+	for cut > 0 && !utf8.RuneStart(text[cut]) {
+		cut--
+	}
+	return text[:cut] + fmt.Sprintf("\n\n… [MCP output sandbox: %d → %d chars (%d → %d tokens). %s Pass max_output=N to this tool for more, or narrow the request.]",
+		len(text), cut, tokenize.Count(text), tokenize.Count(text[:cut]), recoveryHint(tool))
 }
 
 // recoveryHint suggests the narrower tool to recover the truncated detail.
@@ -1529,6 +2000,25 @@ func argString(args map[string]any, key string) string {
 	return strings.TrimSpace(fmt.Sprintf("%v", v))
 }
 
+// argBool reads an optional boolean tool argument. Accepts native bools and
+// the strings "true"/"1" (MCP clients often pass everything as strings).
+func argBool(args map[string]any, key string) bool {
+	v, ok := args[key]
+	if !ok || v == nil {
+		return false
+	}
+	switch t := v.(type) {
+	case bool:
+		return t
+	case string:
+		s := strings.TrimSpace(t)
+		return s == "true" || s == "1"
+	case float64:
+		return t != 0
+	}
+	return false
+}
+
 // atoiArg parses an integer tool argument, falling back to def for empty
 // input. A malformed value is an error, not a silent default, so a typo'd
 // number can't quietly zero out a limit or mis-size a buffer.
@@ -1574,8 +2064,40 @@ func (s *Server) runTool(ctx context.Context, id string, name string, args map[s
 			metrics.Default().RecordError()
 		}
 	}()
-	if !toolAllowed(s.filteredTools(), name) {
-		return "", fmt.Errorf("tool %q is not allowed (KERN_TOOLS allowlist)", name)
+	name, err := s.precheckTool(name, args)
+	if err != nil {
+		return "", err
+	}
+	return s.dispatchTool(ctx, id, name, args)
+}
+
+// precheckTool validates a tool name against the KERN_TOOLS allowlist and the
+// root argument before dispatch, resolving blocked tools to their
+// policy-approved fallback. It returns the (possibly fallback) tool name to
+// dispatch, or an error when the tool is not allowed and no allowed
+// alternative exists, or when the root argument fails validation.
+func (s *Server) precheckTool(name string, args map[string]any) (string, error) {
+	// Validates against the full registered catalog by design — phase
+	// filtering (KERN_MCP_PHASE) only affects advertisement, never execution.
+	// Resolve against the FULL registered catalog, not the advertised
+	// (filtered) set: kern_meta's NL router reaches every sub-tool handler
+	// internally even when the sub-tool is not advertised, and an explicit
+	// KERN_TOOLS allowlist still gates execution here.
+	if !toolAllowed(tools, name) {
+		// Tool fallback: when a tool is blocked by the KERN_TOOLS
+		// allowlist, route to its policy-approved alternative if one exists and
+		// IS allowed, so a restricted deployment still gets an equivalent
+		// result instead of a hard failure. Fail closed when no allowed
+		// alternative exists.
+		if alt := app.FallbackFor(name); alt != "" {
+			if toolAllowed(tools, alt) {
+				name = alt
+			}
+		}
+		// Fail closed only when no allowed alternative exists.
+		if !toolAllowed(tools, name) {
+			return "", fmt.Errorf("tool %q is not allowed (KERN_TOOLS allowlist)", name)
+		}
 	}
 	if err := s.checkRootArg(args); err != nil {
 		return "", err
@@ -1585,7 +2107,17 @@ func (s *Server) runTool(ctx context.Context, id string, name string, args map[s
 			return "", err
 		}
 	}
+	return name, nil
+}
+
+// dispatchTool routes a prechecked tool name to its handler. Every registered
+// kern_* tool has a case here; runTool applies allowlist and root validation
+// via precheckTool before dispatching, so dispatchTool only ever sees a tool
+// that passed the gate.
+func (s *Server) dispatchTool(ctx context.Context, id string, name string, args map[string]any) (string, error) {
 	switch name {
+	case "kern_meta":
+		return s.handleMeta(ctx, args)
 	case "kern_optimize_prompt":
 		return s.handleOptimizePrompt(ctx, args)
 	case "kern_memory_add":
@@ -1708,6 +2240,8 @@ func (s *Server) runTool(ctx context.Context, id string, name string, args map[s
 		return s.handleUsageGuide(ctx, args)
 	case "kern_guard_check":
 		return s.handleGuardCheck(ctx, args)
+	case "kern_authorize_context":
+		return s.handleAuthorizeContext(ctx, args)
 	case "kern_rename":
 		return s.handleRename(ctx, args)
 	case "kern_exec":
@@ -1732,6 +2266,16 @@ func (s *Server) runTool(ctx context.Context, id string, name string, args map[s
 		return s.handleAgents(ctx, args)
 	case "kern_loop":
 		return s.handleLoop(ctx, args)
+	case "kern_run":
+		return s.handleRun(ctx, args)
+	case "kern_workflow":
+		return s.handleWorkflow(ctx, args)
+	case "kern_onboard":
+		return s.handleOnboard(ctx, args)
+	case "kern_audit":
+		return s.handleAudit(ctx, args)
+	case "kern_approve":
+		return s.handleApprove(ctx, args)
 	case "kern_correlate":
 		return s.handleCorrelate(ctx, args)
 	case "kern_learn":
@@ -1915,9 +2459,9 @@ func validateRoot(root string) error {
 // context instead of the Server struct, so concurrent tool calls never share a
 // mutable lastIndex and read each other's provenance.
 type indexScope struct {
-	ix *index.Index
+	ix   *index.Index
+	prov *Provenance // structured evidence stamped by retrieval handlers
 }
-
 type indexScopeKey struct{}
 
 // loadIndex returns the session's symbol index, reused while fresh and rebuilt
@@ -1925,34 +2469,74 @@ type indexScopeKey struct{}
 // recorded on the per-call scope so the tool response can be stamped with
 // provenance.
 func (s *Server) loadIndex(ctx context.Context, root string) (*index.Index, error) {
+	// First time this root is indexed in-process (including while a lazy
+	// background preload is still running): tell the user the wait is the
+	// initial build, not a hang. Subsequent stale rebuilds stay silent.
+	if _, built := s.indexedRoots.Load(root); !built {
+		fmt.Fprintf(os.Stderr, "kern-mcp: first index build for %s in progress, tool call waiting...\n", root)
+	}
 	ix, err := s.sessionFor(root).Index()
 	if err != nil {
 		return nil, err
 	}
+	s.indexedRoots.Store(root, true)
 	if scope, ok := ctx.Value(indexScopeKey{}).(*indexScope); ok {
 		scope.ix = ix
 	}
 	return ix, nil
 }
 
-// provenance returns a one-line stamp describing the index the current tool
-// call used, or "" when the call did not load an index (e.g. prompt or memory
-// tools). The index is guaranteed fresh by project.Session.Index.
-func (s *Server) provenance(ix *index.Index) string {
-	if ix == nil {
-		return ""
+// platformEntry ties a cached Platform to the exact index instance it was
+// built from. The Platform owns the call graph and the twin-merged knowledge
+// graph; constructing it runs intelligence.FromIndex plus four twin
+// extractors, each a full filesystem walk. Reusing it while the session
+// serves the same index instance turns ~5 tree walks per high-level tool
+// call into zero.
+type platformEntry struct {
+	ix *index.Index
+	p  *app.Platform
+}
+
+// platformFor returns the shared application Platform for root, caching it
+// per root keyed by the index instance it was built from. While
+// project.Session serves the same *index.Index pointer (fresh index, 1s
+// staleness cooldown), the cached Platform is returned; a real index rebuild
+// allocates a new instance, so the next call rebuilds the Platform exactly
+// once. The Platform and its graph are treated as read-only after
+// construction (same contract as web.App), so sharing across tool calls is
+// safe. Handlers that previously called loadIndex + app.NewWithIndex per
+// call should use this instead.
+func (s *Server) platformFor(ctx context.Context, root string) (*app.Platform, error) {
+	ix, err := s.loadIndex(ctx, root)
+	if err != nil {
+		return nil, err
 	}
-	var edges int
-	for _, callees := range ix.Calls {
-		edges += len(callees)
+	root = resolveRoot(root)
+	s.mu.Lock()
+	if s.platforms == nil {
+		s.platforms = map[string]*platformEntry{}
 	}
-	age := time.Since(ix.UpdatedAt)
-	if age < 0 {
-		age = 0
+	if e, ok := s.platforms[root]; ok && e.ix == ix {
+		p := e.p
+		s.mu.Unlock()
+		return p, nil
 	}
-	age = age.Round(time.Second)
-	return fmt.Sprintf("[kern] index: %d symbols, %d call edges, %d packages · built %s ago · fresh · commit %s",
-		len(ix.Symbols), edges, len(ix.Pkgs), age, s.commit(ix.Root))
+	s.mu.Unlock()
+	p, err := app.NewWithIndex(root, ix)
+	if err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	// Another caller may have populated the cache while we built; prefer the
+	// existing entry when it matches the same index instance (identical
+	// content, saves the duplicate graph).
+	if e, ok := s.platforms[root]; ok && e.ix == ix {
+		p = e.p
+	} else {
+		s.platforms[root] = &platformEntry{ix: ix, p: p}
+	}
+	s.mu.Unlock()
+	return p, nil
 }
 
 // commit returns the short HEAD commit of root, cached per root. Git is

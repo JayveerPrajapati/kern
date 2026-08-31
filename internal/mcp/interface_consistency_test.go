@@ -76,15 +76,18 @@ func freshTaskService(t *testing.T) *app.TaskService {
 // TestCrossInterfaceAnalyzeConsistency drives the real MCP kern_analyze handler
 // AND the real REST /v1/analyze handler with the same input/root and asserts
 // both produce equivalent domain results that land in the same authoritative
-// task store. This is the Phase 2.5 cross-interface exit gate.
+// task store. This is the cross-interface exit gate.
 func TestCrossInterfaceAnalyzeConsistency(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping cross-interface index build in -short mode")
 	}
 
 	// --- MCP leg: real kern_analyze JSON-RPC handler ---
+	// max_output=0 disables the MCP output sandbox: this gate asserts the
+	// [task: ...] trailer survives end-to-end, and the analyze body legitimately
+	// grows with the repo's test surface (the "tests covering" evidence list).
 	resp := serveOne(t, writeReq("tools/call", 1,
-		`{"name":"kern_analyze","arguments":{"root":"`+kernRepoRoot+`","change":"`+crossAnalyzeChange+`"}}`))
+		`{"name":"kern_analyze","arguments":{"root":"`+kernRepoRoot+`","change":"`+crossAnalyzeChange+`","max_output":0}}`))
 	text, isErr := toolResultText(t, resp)
 	if isErr {
 		t.Fatalf("MCP kern_analyze returned an error: %s", text)
@@ -165,5 +168,74 @@ func TestCrossInterfaceMatchesCLIServicePath(t *testing.T) {
 	}
 	if strings.TrimSpace(text) == "" {
 		t.Fatal("CLI-path analyze text is empty")
+	}
+}
+
+// TestCrossInterfaceIncidentConsistency drives the real MCP kern_incident
+// handler AND the real REST /v1/incidents/investigate handler with the same
+// alert and asserts both route through TaskService.InvestigateIncident — the
+// shared Incident service — producing an authoritative Task with the same
+// incident in the shared store. This guards the P2 exit gate for the incident
+// workflow specifically (CLI `kern incident` was refactored to the same
+// service in ; see cmd/kern/cmd_agent.go runIncident).
+func TestCrossInterfaceIncidentConsistency(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping cross-interface incident index build in -short mode")
+	}
+	alert := `{"id":"checkout-500","severity":"error","message":"checkout 500s","service":"checkout","source":"prometheus"}`
+
+	// --- MCP leg: real kern_incident JSON-RPC handler. The alert argument is a
+	// JSON-encoded string (the tool's documented shape; argString %v-renders it
+	// back to JSON text for Unmarshal).
+	alertArg, err := json.Marshal(alert)
+	if err != nil {
+		t.Fatalf("marshal alert arg: %v", err)
+	}
+	resp := serveOne(t, writeReq("tools/call", 1,
+		`{"name":"kern_incident","arguments":{"root":"`+kernRepoRoot+`","alert":`+string(alertArg)+`}}`))
+	text, isErr := toolResultText(t, resp)
+	if isErr {
+		t.Fatalf("MCP kern_incident returned an error: %s", text)
+	}
+	if !strings.Contains(text, "INCIDENT") {
+		t.Fatalf("MCP output missing INCIDENT marker: %q", text)
+	}
+	mcpID, _ := parseTaskRef(t, text)
+	if mcpID == "" {
+		t.Fatal("MCP incident task id is empty")
+	}
+
+	// --- REST leg: real /v1/incidents/investigate handler on web.App ---
+	a, err := web.New(kernRepoRoot)
+	if err != nil {
+		t.Fatalf("web.New(%q): %v", kernRepoRoot, err)
+	}
+	body, err := json.Marshal(map[string]any{"alert": json.RawMessage(alert)})
+	if err != nil {
+		t.Fatalf("marshal body: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v1/incidents/investigate", strings.NewReader(string(body)))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	a.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("/v1/incidents/investigate status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	var out struct {
+		Incident domain.Incident `json:"incident"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode incident response: %v", err)
+	}
+	if out.Incident.ID == "" {
+		t.Fatal("REST incident id is empty")
+	}
+
+	// --- Equivalence: both persisted to the shared store, both authoritative ---
+	svc := freshTaskService(t)
+	if task, ok := svc.Get(mcpID); !ok {
+		t.Fatalf("MCP incident task %q not queryable via the shared task store", mcpID)
+	} else if task.State != domain.TaskCompleted {
+		t.Fatalf("MCP incident task state = %q, want COMPLETED", task.State)
 	}
 }
