@@ -8,14 +8,12 @@ import (
 )
 
 // RouteModel selects a model/provider for a task based on complexity, risk, and
-// cost. Strict Plan Phase 9 P1: model routing.
-//
+// cost. : model routing.
 // Routing logic (deterministic, no LLM):
-//   - HIGH risk + HIGH complexity → most capable model (e.g. large model)
-//   - MEDIUM risk + MEDIUM complexity → balanced model
-//   - LOW risk + LOW complexity → fast/cheap model
-//   - Default → balanced model
-//
+// - HIGH risk + HIGH complexity → most capable model (e.g. large model)
+// - MEDIUM risk + MEDIUM complexity → balanced model
+// - LOW risk + LOW complexity → fast/cheap model
+// - Default → balanced model
 // Per-specialist model selection is honored via environment variables:
 // KERN_MODEL_PLANNER, KERN_MODEL_ARCHITECT, KERN_MODEL_CODER,
 // KERN_MODEL_REVIEWER, KERN_MODEL_SECURITY, KERN_MODEL_TESTER, KERN_MODEL_SRE.
@@ -60,6 +58,21 @@ func modelEnvVar(role Role) string {
 	}
 }
 
+// ModelOverride returns the role-specific model override from the environment
+// (KERN_MODEL_<ROLE>, falling back to KERN_MODEL_DEFAULT), or "" when no
+// override is set. Production agent entry points (coder/planner) use this to
+// let operators steer the model per role without forcing a provider-specific
+// hardcoded default. It is the production-facing entry point for model routing:
+// unlike RouteModel/RouteModelForTask, it does NOT fall back to a hardcoded
+// heuristic default, so an unset override leaves the provider's own default
+// in effect (provider-neutral).
+func ModelOverride(role Role) string {
+	if env := os.Getenv(modelEnvVar(role)); env != "" {
+		return env
+	}
+	return os.Getenv("KERN_MODEL_DEFAULT")
+}
+
 // routeModelBase computes the deterministic default model selection from risk
 // and complexity, ignoring any environment overrides.
 func routeModelBase(risk domain.RiskLevel, complexity string) domain.ModelRoutingDecision {
@@ -85,8 +98,8 @@ func routeModelBase(risk domain.RiskLevel, complexity string) domain.ModelRoutin
 	}
 }
 
-// EvaluateAgent creates an AgentEvaluation from execution metrics. Strict Plan
-// Phase 9 P2. The duration is a time.Duration; unlike the earlier placeholder
+// EvaluateAgent creates an AgentEvaluation from execution metrics. The
+// duration is a time.Duration; unlike the earlier placeholder
 // (P9.7), it is now actually recorded on the evaluation so duration feeds the
 // scoring/score model.
 func EvaluateAgent(agentID, taskID string, success bool, tokens int, cost float64, duration time.Duration, retries int, humanIntervention bool, defects int) domain.AgentEvaluation {
@@ -199,10 +212,8 @@ func CompareModels(taskID string, candidateA, candidateB domain.ModelRoutingDeci
 }
 
 // CompareAgents performs an A/B comparison between two agent evaluations.
-// Strict Plan Phase 9 P2.
-//
 // The winner is determined by a weighted score:
-//   success (×100) - cost (×10) - tokens (×0.001) - duration_seconds (×0.1) - defects (×20) - retries (×5)
+// success (×100) - cost (×10) - tokens (×0.001) - duration_seconds (×0.1) - defects (×20) - retries (×5)
 func CompareAgents(taskID string, a, b domain.AgentEvaluation) domain.AgentComparison {
 	scoreA := agentScore(a)
 	scoreB := agentScore(b)

@@ -121,7 +121,11 @@ type Finding struct {
 // ArchitectureResult aggregates architectural rule violations.
 type ArchitectureResult struct {
 	Violations []string // rule violations found
-	OK         bool
+	// Warnings surfaces gaps that are not violations but must not be silent
+	// either (e.g. no .kern/boundaries.json was found, so the guard was not
+	// enforced). A warning does not flip OK to false.
+	Warnings []string
+	OK       bool
 }
 
 // DependencyResult verifies real module dependencies (missing modules, version
@@ -160,7 +164,7 @@ type StaticAnalysisResult struct {
 }
 
 // PerformanceResult holds benchmark results. Optional — only populated
-// when benchmark data is available (spec says "where available").
+// when benchmark data is available.
 type PerformanceResult struct {
 	OK         bool
 	Benchmarks []BenchmarkResult

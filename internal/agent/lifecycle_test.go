@@ -89,7 +89,7 @@ func TestRetryFromTerminalFails(t *testing.T) {
 // PriorState.
 func TestResumeFromBlocked(t *testing.T) {
 	tk := NewTask("code", "x")
-	_ = tk.Start("agent-1") // CREATED → ANALYZING
+	_ = tk.Start("agent-1")                // CREATED → ANALYZING
 	_ = tk.Transition(domain.TaskPlanning) // ANALYZING → PLANNING
 	if err := tk.Block("waiting for input"); err != nil {
 		t.Fatalf("Block: %v", err)

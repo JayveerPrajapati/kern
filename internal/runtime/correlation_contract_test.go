@@ -70,7 +70,7 @@ func TestFingerprintStable(t *testing.T) {
 func TestTraceEventsFromCorrelation(t *testing.T) {
 	now := time.Now()
 	c := &Correlation{
-		TraceSpans: []Event{{ID: "t1", Type: EventTrace, TraceID: "tr-1", Timestamp: now}},
+		TraceSpans:  []Event{{ID: "t1", Type: EventTrace, TraceID: "tr-1", Timestamp: now}},
 		ErrorEvents: []Event{{ID: "e1", Type: EventError, TraceID: "tr-1", Timestamp: now}},
 	}
 	links := TraceEventsFromCorrelation(c)
@@ -152,7 +152,7 @@ func TestFingerprintFullDimensions(t *testing.T) {
 
 // TestSharedCorrelatorIdentity verifies that the incident and deployment
 // consumers receive the SAME underlying *Correlator via dependency injection,
-// so they observe identical correlations (Phase 13).
+// so they observe identical correlations .
 func TestSharedCorrelatorIdentity(t *testing.T) {
 	now := time.Now()
 	st := NewStore()

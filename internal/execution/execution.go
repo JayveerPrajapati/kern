@@ -1,8 +1,7 @@
-// Package execution is the 2.0 execution/sandbox layer (Phase 8 of the Kern 2.0
+// Package execution is the 2.0 execution/sandbox layer ( of the Kern 2.0
 // migration; see spec §15). It wraps internal/sandbox into a higher-level
 // service combining isolated worktrees, snapshot+rollback execution, test/build
 // runs, and artifact collection.
-//
 // SECURITY: Execute and its helpers run arbitrary host commands and must never
 // be exposed to an ungoverned caller. New call surfaces that run commands
 // through an Executor MUST apply the governance firewall (governance.CheckExec)
@@ -23,7 +22,6 @@ import (
 
 // Executor runs commands safely: snapshot, execute, rollback on failure, keep
 // on success.
-//
 // SECURITY: an Executor can enforce a governance gate before every command via
 // WithGovernance or WithExecFirewall. By default the gate is nil and the
 // executor relies on the caller's call-site gating. When a gate is set and

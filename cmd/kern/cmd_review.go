@@ -39,7 +39,7 @@ func runAnalyze(cmd string, rest []string) {
 	if f.task != "" {
 		ts := app.NewTaskService(p, eventbus.New()).WithPRProvider(app.AutoPRProvider())
 		if cmd == "plan" {
-			// Phase 6: kern plan produces a structured domain.Plan via the
+			// Kern plan produces a structured domain.Plan via the
 			// control-plane Plan workflow (analyze → memory → impact → risk →
 			// architecture → plan artifact).
 			t, plan, text, err := ts.Plan(change)
@@ -56,9 +56,9 @@ func runAnalyze(cmd string, rest []string) {
 			fatal("%v", err)
 		}
 		fmt.Println("ANALYSIS for: " + change)
-	fmt.Print(text)
-	fmt.Printf("\n[task: %s — state: %s]\n", t.ID, t.State)
-}
+		fmt.Print(text)
+		fmt.Printf("\n[task: %s — state: %s]\n", t.ID, t.State)
+	}
 	if cmd == "plan" {
 		// Stateless plan path: run analyze then assemble a plan inline.
 		pkt, _, err := p.Analyze(change)
@@ -173,9 +173,19 @@ func runWhatIf(cmd string, rest []string) {
 		fatal("%v", err)
 	}
 	ts := app.NewTaskService(p, nil).WithPRProvider(app.AutoPRProvider())
-	_, text, err := ts.WhatIf(whatif.ChangeKind(kind), change, newTarget)
+	t, text, err := ts.WhatIf(whatif.ChangeKind(kind), change, newTarget)
 	if err != nil {
 		fatal("%v", err)
+	}
+	if f.json {
+		printJSON(map[string]any{
+			"change":  change,
+			"kind":    kind,
+			"task_id": t.ID,
+			"state":   t.State,
+			"impact":  t.ImpactReport,
+		})
+		return
 	}
 	fmt.Print(text)
 
@@ -198,12 +208,18 @@ func runImpact(rest []string) {
 	if err != nil {
 		fatal("%v", err)
 	}
-	// Phase 7: kern impact now produces the 11-question deterministic ImpactReport
+	// Kern impact now produces the 11-question deterministic ImpactReport
 	// via TaskService.Impact (graph-driven, no LLM). The what-if kind/new-target
 	// args are still honored for backward compatibility but the primary output is
 	// the structured impact report.
 	ts := app.NewTaskService(p, eventbus.New()).WithPRProvider(app.AutoPRProvider())
-	t, rep, text, err := ts.Impact(change)
+	var impactOpts []app.ImpactOption
+	if f.precision == "strict" {
+		// Strict precision: skip call edges whose caller language is not
+		// "resolved"-precision in the index (they are unknown, not guessable).
+		impactOpts = append(impactOpts, app.ImpactStrict())
+	}
+	t, rep, text, err := ts.Impact(change, impactOpts...)
 	if err != nil {
 		fatal("%v", err)
 	}
@@ -232,8 +248,25 @@ func runImpact(rest []string) {
 		}
 		sort.Strings(teams)
 	}
+	if f.json {
+		// Structured, tool-friendly output: the deterministic 11-question
+		// ImpactReport plus routing context. Text behavior is unchanged when
+		// --json is absent.
+		printJSON(map[string]any{
+			"change":  change,
+			"task_id": t.ID,
+			"state":   t.State,
+			"risk":    rep.Risk,
+			"teams":   teams,
+			"impact":  rep,
+		})
+		return
+	}
 	fmt.Print("IMPACT for: " + change + "\n")
 	fmt.Print(text)
+	if f.precision == "strict" {
+		fmt.Println("precision: strict — call edges from non-resolved languages were skipped (unknown)")
+	}
 	if len(teams) > 0 {
 		fmt.Println("Affected teams: " + strings.Join(teams, ", "))
 	}
@@ -416,14 +449,14 @@ func runChanges(cmd string, rest []string) {
 			// not silently dropped for the markdown view.
 			printJSON(report)
 			if report.TotalRisk > 0 {
-				os.Exit(1)
+				panic(exitError{code: 1})
 			}
 			return
 		}
 		fmt.Println(intel.ReviewRanged(ix, changes, f.max))
 		if report.TotalRisk > 0 {
 			fmt.Fprintf(os.Stderr, "kern: %d changed file(s) with risk (total %.1f); exit 1\n", len(report.Changes), report.TotalRisk)
-			os.Exit(1)
+			panic(exitError{code: 1})
 		}
 		return
 	}
@@ -431,14 +464,14 @@ func runChanges(cmd string, rest []string) {
 	if f.json {
 		printJSON(report)
 		if report.TotalRisk > 0 {
-			os.Exit(1)
+			panic(exitError{code: 1})
 		}
 		return
 	}
 	fmt.Println(intel.RenderChanges(report))
 	if report.TotalRisk > 0 {
 		fmt.Fprintf(os.Stderr, "kern: %d changed file(s) with risk (total %.1f); exit 1\n", len(report.Changes), report.TotalRisk)
-		os.Exit(1)
+		panic(exitError{code: 1})
 	}
 
 }
@@ -598,7 +631,7 @@ func runModernize(rest []string) {
 }
 
 // runRun implements `kern run <intent>` — the kern_run entry point (Strict
-// Plan Phase 6). It compiles the intent, selects the workflow + capabilities,
+// Plan ). It compiles the intent, selects the workflow + capabilities,
 // creates a Task, and prints the run result.
 func runRun(rest []string) {
 	f, args, err := parseFlags(rest)

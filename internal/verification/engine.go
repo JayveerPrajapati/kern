@@ -518,7 +518,23 @@ func (e *Engine) VerifyArchitecture() *ArchitectureResult {
 		return res
 	}
 	files := listSourceFiles(e.root)
-	violations := intel.CheckBoundaries(ix, b, files)
+	violations, skipped := intel.CheckBoundariesPrecise(ix, b, files, false)
+	// A missing boundaries file with files in scope is a warning, not a
+	// violation: the guard was not enforced. Surface it on the result and the
+	// bus so it is observable, but keep OK driven by real violations — a WARN
+	// must not silently pass, yet must not fail an advisory verify either.
+	if n := skipped["boundaries-not-configured"]; n > 0 {
+		msg := fmt.Sprintf("no boundary rules configured (.kern/boundaries.json not found) — architecture guard NOT enforced; %d files unchecked", n)
+		res.Warnings = append(res.Warnings, msg)
+		if e.bus != nil {
+			e.bus.Publish(eventbus.Event{
+				Kind:    eventbus.ArchitectureWarning,
+				Source:  "verification",
+				Subject: "architecture",
+				Payload: map[string]string{"warning": msg},
+			})
+		}
+	}
 	for _, v := range violations {
 		res.Violations = append(res.Violations, renderViolation(v))
 		// Emit an architecture.violation event per violation so the bus

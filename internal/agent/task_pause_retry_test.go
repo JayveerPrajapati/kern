@@ -116,8 +116,8 @@ func TestRetryFailsOnTerminal(t *testing.T) {
 	}
 }
 
-// TestTaskAggregateRefsRoundTrip verifies the Phase 1.1 aggregate reference
-// fields and the Phase 1.5 retry fields survive a TaskStore JSON save/load.
+// TestTaskAggregateRefsRoundTrip verifies the aggregate reference
+// fields and the retry fields survive a TaskStore JSON save/load.
 func TestTaskAggregateRefsRoundTrip(t *testing.T) {
 	tk := NewTask("code", "implement foo")
 	tk.Project = "myproject"
@@ -177,5 +177,36 @@ func TestTaskAggregateRefsRoundTrip(t *testing.T) {
 	}
 	if loaded.LastResult != "prev-out" {
 		t.Errorf("LastResult = %q, want prev-out", loaded.LastResult)
+	}
+}
+
+// TestResumeFromBlockedProductionStates verifies a task paused during
+// WAITING_FOR_APPROVAL, APPROVED, DEPLOYING or OBSERVING can resume back to
+// its PriorState. These states are all legal Pause sources (they transition to
+// BLOCKED), so Resume must return to them — otherwise a deploy/observe task
+// that hits an approval gate or pause would be permanently unresumable.
+func TestResumeFromBlockedProductionStates(t *testing.T) {
+	for _, st := range []domain.TaskState{
+		domain.TaskWaitingApproval,
+		domain.TaskApproved,
+		domain.TaskDeploying,
+		domain.TaskObserving,
+	} {
+		t.Run(string(st), func(t *testing.T) {
+			tk := NewTask("code", "x")
+			tk.State = st
+			if err := tk.Pause("pause"); err != nil {
+				t.Fatalf("Pause from %s: %v", st, err)
+			}
+			if tk.State != domain.TaskBlocked {
+				t.Fatalf("after Pause: state=%s, want BLOCKED", tk.State)
+			}
+			if err := tk.Resume(); err != nil {
+				t.Fatalf("Resume from BLOCKED (prior %s): %v", st, err)
+			}
+			if tk.State != st {
+				t.Fatalf("after Resume: state=%s, want back to %s", tk.State, st)
+			}
+		})
 	}
 }

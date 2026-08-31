@@ -10,7 +10,7 @@ import (
 )
 
 // TestAgentResultRequiredFields verifies that a constructed result carries all
-// the Phase 9.3 contract fields (task_id, agent, status, result, evidence,
+// the contract fields (task_id, agent, status, result, evidence,
 // risks, confidence, artifacts, recommended_action).
 func TestAgentResultRequiredFields(t *testing.T) {
 	r := NewAgentResult("task-1", "coder-a").

@@ -6,7 +6,7 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/domain"
 )
 
-// TestTaskAggregateRefsJSONRoundTrip verifies the Phase 1.1 plural aggregate
+// TestTaskAggregateRefsJSONRoundTrip verifies the plural aggregate
 // reference fields survive a TaskStore JSON save/load.
 func TestTaskAggregateRefsJSONRoundTrip(t *testing.T) {
 	tk := NewTask("code", "implement foo")

@@ -50,6 +50,34 @@ func TestRouteModelDefaultEnvFallback(t *testing.T) {
 	}
 }
 
+func TestModelOverride(t *testing.T) {
+	// No override set -> empty (provider default stays in effect).
+	t.Setenv("KERN_MODEL_DEFAULT", "")
+	t.Setenv("KERN_MODEL_CODER", "")
+	if got := ModelOverride(RoleCoder); got != "" {
+		t.Errorf("ModelOverride(RoleCoder) with no env = %q, want empty", got)
+	}
+
+	// Role-specific override wins.
+	t.Setenv("KERN_MODEL_CODER", "codellama")
+	if got := ModelOverride(RoleCoder); got != "codellama" {
+		t.Errorf("ModelOverride(RoleCoder) = %q, want codellama", got)
+	}
+
+	// Role without its own var falls back to KERN_MODEL_DEFAULT.
+	t.Setenv("KERN_MODEL_ARCHITECT", "")
+	t.Setenv("KERN_MODEL_DEFAULT", "default-model")
+	if got := ModelOverride(RoleArchitect); got != "default-model" {
+		t.Errorf("ModelOverride(RoleArchitect) = %q, want default-model (KERN_MODEL_DEFAULT fallback)", got)
+	}
+
+	// Explicit empty role-specific var must NOT shadow the default.
+	t.Setenv("KERN_MODEL_CODER", "")
+	if got := ModelOverride(RoleCoder); got != "default-model" {
+		t.Errorf("ModelOverride(RoleCoder) with empty KERN_MODEL_CODER = %q, want default-model", got)
+	}
+}
+
 func TestCompareAgentsWinner(t *testing.T) {
 	a := domain.AgentEvaluation{AgentID: "a1", Success: true, TokensUsed: 1000, Cost: 0.01, Duration: 5 * time.Second, Defects: 0}
 	b := domain.AgentEvaluation{AgentID: "a2", Success: false, TokensUsed: 5000, Cost: 0.10, Duration: 30 * time.Second, Defects: 3}

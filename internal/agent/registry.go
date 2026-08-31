@@ -25,7 +25,7 @@ type Registry struct {
 	mu     sync.RWMutex
 	agents map[string]Agent
 	tasks  map[string]*Task // in-memory task registry (never definitionally empty)
-	store  *TaskStore        // optional persisted store; nil = in-memory
+	store  *TaskStore       // optional persisted store; nil = in-memory
 	bus    *eventbus.Bus    // optional event publisher; nil = no-op
 }
 
@@ -102,12 +102,28 @@ func (r *Registry) TaskStore() *TaskStore { return r.store }
 // SubmitTask registers a task, assigning an ID when none is set, persisting it
 // to the optional store, and publishing task.created on the optional bus. It
 // fails closed on a nil task.
+// When a persisted store is attached, an empty-ID task is saved first so the
+// store assigns a cross-process-unique ID ("t-<max+1>" under its file lock);
+// the package-level counter alone would restart at t-1 in every process and
+// collide in the shared store file. An explicit ID is kept as-is.
 func (r *Registry) SubmitTask(task *Task) error {
 	if task == nil {
 		return fmt.Errorf("agent: cannot submit a nil task")
 	}
+	persisted := false
 	if task.ID == "" {
-		task.ID = nextTaskID()
+		if r.store != nil {
+			// Store assigns the ID and persists in one locked critical
+			// section; skip the second save below.
+			saved, err := r.store.Save(*task)
+			if err != nil {
+				return fmt.Errorf("agent: persist task: %w", err)
+			}
+			task.ID = saved.ID
+			persisted = true
+		} else {
+			task.ID = nextTaskID()
+		}
 	}
 	r.mu.Lock()
 	if _, exists := r.tasks[task.ID]; exists {
@@ -118,7 +134,7 @@ func (r *Registry) SubmitTask(task *Task) error {
 	// visible through the registry.
 	r.tasks[task.ID] = task
 	r.mu.Unlock()
-	if r.store != nil {
+	if r.store != nil && !persisted {
 		if _, err := r.store.Save(*task); err != nil {
 			return fmt.Errorf("agent: persist task: %w", err)
 		}

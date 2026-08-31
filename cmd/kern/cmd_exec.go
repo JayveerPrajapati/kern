@@ -38,7 +38,11 @@ func runBuild(rest []string) {
 	}
 	res, err := optimize.RunBuild(ctx, cmdStr, f.dir, optimize.Options{Session: f.session})
 	if err != nil {
-		fatal("%v", err)
+		// RunBuild folds the error text into res.Output; print the partial
+		// output (usually the actual compile/test error) before exiting, and
+		// point at the timeout knob instead of a bare error.
+		fmt.Print(res.Output)
+		fatal("\nkern build: command failed (raise with --timeout N; --timeout 0 = no limit)")
 	}
 	fmt.Println(res.Output)
 
@@ -75,6 +79,27 @@ func runValidate(rest []string) {
 			fatal("%v", err)
 		}
 	}
+	if f.json {
+		res := validate.Run(context.Background(), root, c, toolTimeout(f))
+		errStr := ""
+		if res.Err != nil {
+			errStr = res.Err.Error()
+		}
+		printJSON(map[string]any{
+			"command":     c.Name,
+			"cmd":         c.Cmd,
+			"args":        c.Args,
+			"ok":          res.OK,
+			"exit_code":   res.ExitCode,
+			"error":       errStr,
+			"duration_ms": res.Dur.Milliseconds(),
+			"output":      res.Output,
+		})
+		if !res.OK {
+			panic(exitError{code: 1})
+		}
+		return
+	}
 	fmt.Printf("kern: running %s %s\n", c.Cmd, strings.Join(c.Args, " "))
 	res := validate.Run(context.Background(), root, c, toolTimeout(f))
 	fmt.Print(res.Output)
@@ -91,7 +116,7 @@ func runValidate(rest []string) {
 	} else {
 		fmt.Printf("kern: validation FAILED (%s, exit %d)\n", c.Name, res.ExitCode)
 	}
-	os.Exit(1)
+	panic(exitError{code: 1})
 
 }
 
@@ -132,7 +157,7 @@ func runHeal(rest []string) {
 	}
 	fmt.Printf("kern: still failing after %d round(s)\n", res.Iterations)
 	fmt.Print(res.LastOutput)
-	os.Exit(1)
+	panic(exitError{code: 1})
 
 }
 
@@ -169,22 +194,37 @@ func runUdiff(rest []string) {
 }
 
 func runSandbox(rest []string) {
-	f, args, err := parseFlags(rest)
+	// A `--` separator ends kern flag parsing: everything after it is the
+	// sandboxed command, verbatim. Without this split, parseFlags treats
+	// shell flags like `-c` as unknown kern flags and the command can never
+	// run. kern flags (e.g. --json) must come before the separator; a root
+	// directory may come before or after it.
+	var flagArgs, cmdRest []string
+	separator := false
+	for i, a := range rest {
+		if a == "--" {
+			flagArgs, cmdRest = rest[:i], rest[i+1:]
+			separator = true
+			break
+		}
+	}
+	if !separator {
+		flagArgs = rest // no separator: parse everything (legacy behavior)
+	}
+	f, args, err := parseFlags(flagArgs)
 	if err != nil {
 		fatalUsage("flags: %v", err)
 	}
 	root := "."
-	cmdParts := args
+	cmdParts := cmdRest
 	if len(args) > 0 && args[0] != "--" && isDir(args[0]) {
+		// A directory positional (root) precedes the command.
 		root = args[0]
-		cmdParts = args[1:]
-	}
-	if len(cmdParts) == 0 {
-		fatalUsage("usage: kern sandbox [root] -- <command...>")
-	}
-	// Strip a leading -- separator.
-	if cmdParts[0] == "--" {
-		cmdParts = cmdParts[1:]
+		if cmdParts == nil {
+			cmdParts = args[1:]
+		}
+	} else if cmdParts == nil {
+		cmdParts = args
 	}
 	if len(cmdParts) == 0 {
 		fatalUsage("usage: kern sandbox [root] -- <command...>")
@@ -200,6 +240,26 @@ func runSandbox(rest []string) {
 	// governance firewall, fail closed.
 	if err := governance.CheckExec(); err != nil {
 		fatal("%v", err)
+	}
+	if f.json {
+		res := sandbox.Run(context.Background(), root, cmdParts[0], cmdParts[1:], toolTimeout(f))
+		errStr := ""
+		if res.Err != nil {
+			errStr = res.Err.Error()
+		}
+		printJSON(map[string]any{
+			"ok":          res.OK,
+			"exit_code":   res.ExitCode,
+			"error":       errStr,
+			"duration_ms": res.Duration.Milliseconds(),
+			"restored":    res.Restored,
+			"snapshots":   res.Snapshots,
+			"output":      res.Output,
+		})
+		if !res.OK {
+			panic(exitError{code: 1})
+		}
+		return
 	}
 	fmt.Printf("kern: sandbox run in %s: %s\n", root, strings.Join(cmdParts, " "))
 	res := sandbox.Run(context.Background(), root, cmdParts[0], cmdParts[1:], toolTimeout(f))
@@ -221,7 +281,7 @@ func runSandbox(rest []string) {
 	} else {
 		fmt.Printf("kern: FAILED (%s)\n", reason)
 	}
-	os.Exit(1)
+	panic(exitError{code: 1})
 
 }
 
@@ -274,9 +334,16 @@ func runExec(rest []string) {
 	run := script.Run{Lang: f.lang, Code: code, Path: path}
 	// 15s default so a runaway script can't hang an agent for the shared
 	// --timeout default (120s); an explicit --timeout always wins — even
-	// 120, which the old sentinel comparison misread as "unset" (W2-39).
+	// 120, which the old sentinel comparison misread as "unset". An explicit
+	// "--timeout 0" means no limit (the toolTimeout contract); the script
+	// runner turns Timeout <= 0 into its own 10s default, so translate 0 to a
+	// 24h ceiling instead of passing it through.
 	if f.timeoutSet {
-		run.Timeout = time.Duration(f.timeout) * time.Second
+		if f.timeout == 0 {
+			run.Timeout = 24 * time.Hour
+		} else {
+			run.Timeout = time.Duration(f.timeout) * time.Second
+		}
 	} else {
 		run.Timeout = 15 * time.Second
 	}
@@ -300,7 +367,7 @@ func runExec(rest []string) {
 	if f.json {
 		printJSON(res)
 		if res.Err != nil {
-			os.Exit(1)
+			panic(exitError{code: 1})
 		}
 		return
 	}
@@ -310,7 +377,7 @@ func runExec(rest []string) {
 	}
 	if res.Err != nil {
 		fmt.Fprintln(os.Stderr, "kern exec: "+res.Err.Error())
-		os.Exit(1)
+		panic(exitError{code: 1})
 	}
 	fmt.Fprintf(os.Stderr, "kern exec: %s ok (%s, %d bytes stdout)\n", res.Runtime, res.Duration.Round(time.Millisecond), len(res.Stdout))
 

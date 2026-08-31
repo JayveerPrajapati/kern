@@ -108,7 +108,52 @@ func (w *Worktree) Diff() (string, error) {
 			lines[i] = ln
 		}
 	}
-	return strings.Join(lines, "\n"), nil
+	// The worktree snapshot skips sandbox.SkipDirs (VCS metadata, node_modules,
+	// vendor, build output, ...) but the source tree still contains them, so
+	// `git diff --no-index` reports every skipped file as deleted. That noise
+	// would corrupt the execute result diff, so drop whole sections whose
+	// paths belong to a skipped directory.
+	var filtered []string
+	skip := false // true while inside a section whose path is skip-listed
+	for _, ln := range lines {
+		if strings.HasPrefix(ln, "diff --git ") {
+			skip = skippedDiffSection(ln)
+			if skip {
+				continue
+			}
+		} else if skip {
+			continue
+		}
+		filtered = append(filtered, ln)
+	}
+	return strings.Join(filtered, "\n"), nil
+}
+
+// skippedDiffSection reports whether a normalized "diff --git a/X b/Y" header
+// references a path inside one of the snapshot's skipped directories.
+func skippedDiffSection(header string) bool {
+	rest := strings.TrimPrefix(header, "diff --git ")
+	for _, p := range strings.Fields(rest) {
+		// Paths carry "a/" or "b/" prefixes after normalization; "/dev/null"
+		// is the git sentinel for added/deleted files and never a skip path.
+		for _, marker := range []string{"a/", "b/"} {
+			if strings.HasPrefix(p, marker) {
+				p = strings.TrimPrefix(p, marker)
+				break
+			}
+		}
+		if p == "/dev/null" {
+			continue
+		}
+		head := p
+		if idx := strings.Index(head, "/"); idx >= 0 {
+			head = head[:idx]
+		}
+		if sandbox.SkipDirs[head] {
+			return true
+		}
+	}
+	return false
 }
 
 // isDiffHeaderLine reports whether a diff line is a header line carrying a

@@ -3,14 +3,12 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/JayveerPrajapati/kern/internal/app"
 	"github.com/JayveerPrajapati/kern/internal/cache"
 	"github.com/JayveerPrajapati/kern/internal/docsearch"
 	"github.com/JayveerPrajapati/kern/internal/domain"
 	"github.com/JayveerPrajapati/kern/internal/fetch"
-	"github.com/JayveerPrajapati/kern/internal/governance"
-	"github.com/JayveerPrajapati/kern/internal/incident"
 	"github.com/JayveerPrajapati/kern/internal/llm"
-	"github.com/JayveerPrajapati/kern/internal/memory"
 	"github.com/JayveerPrajapati/kern/internal/runtime"
 	"os"
 	"strings"
@@ -31,6 +29,39 @@ func runTeam(rest []string) {
 	}
 	fmt.Print(text)
 
+}
+
+// runWorkflow runs an intent through the agent team ( exit gate): Kern
+// selects and coordinates the specialists without the external caller manually
+// sequencing it. The run parks at the human approval gate before the first
+// execution step; resolve the surfaced approval via `kern approve <id>` and
+// resume with `kern workflow --task <task-id>`.
+func runWorkflow(rest []string) {
+	f, args, err := parseFlags(rest)
+	if err != nil {
+		fatalUsage("flags: %v", err)
+	}
+	root := f.root
+	if root == "" {
+		root = "."
+	}
+	if f.task != "" {
+		text, err := runWorkflowResumeCLI(root, f.task)
+		if err != nil {
+			fatal("%v", err)
+		}
+		fmt.Print(text)
+		return
+	}
+	intent := strings.Join(args, " ")
+	if intent == "" {
+		fatalUsage("usage: kern workflow <intent> [--task TASK_ID] [--root ROOT]")
+	}
+	text, err := runWorkflowCLI(root, intent)
+	if err != nil {
+		fatal("%v", err)
+	}
+	fmt.Print(text)
 }
 
 func runLoop(cmd string, rest []string) {
@@ -70,31 +101,29 @@ func runIncident(rest []string) {
 	if err := json.Unmarshal([]byte(args[0]), &al); err != nil {
 		fatal("invalid alert JSON: %v", err)
 	}
-	var src runtime.Source
-	src = runtime.NewStore()
+	// Route through the shared TaskService.InvestigateIncident service
+	// (the same path MCP kern_incident and REST /v1/incidents use) so the full
+	// incident lifecycle (IngestAlert→Correlate→RootCause) creates an
+	// authoritative Task with incident + root-cause artifacts. No interface may
+	// inline the incident workflow (P2 exit gate).
+	p, err := app.New(root)
+	if err != nil {
+		fatal("%v", err)
+	}
 	if len(args) > 1 && args[1] != "" {
 		store, err := runtime.ParseSnapshot([]byte(args[1]))
 		if err != nil {
 			fatal("invalid snapshot JSON: %v", err)
 		}
-		src = store
+		p.WithRuntimeSource(store)
 	}
-	eng, err := incident.NewEngine(root, src, memory.NewMemoryStore(root), governance.NewFirewall())
+	ts := app.NewTaskService(p, nil).WithPRProvider(app.AutoPRProvider())
+	t, inc, text, err := ts.InvestigateIncident(al)
 	if err != nil {
 		fatal("%v", err)
 	}
-	inc := eng.IngestAlert(al)
-	eng.Correlate(inc)
-	eng.RootCause(inc)
-	fmt.Printf("incident: %s\n", inc.ID)
-	fmt.Printf("service: %s\n", inc.AffectedService)
-	fmt.Printf("status: %s\n", inc.Status)
-	if inc.RootCause != nil {
-		fmt.Printf("root cause: %s\n", inc.RootCause.Summary)
-	}
-	fmt.Printf("hypotheses: %d\n", len(inc.Hypotheses))
-	fmt.Printf("evidence: %d\n", len(inc.Evidence))
-
+	fmt.Print(text)
+	fmt.Printf("[task: %s — state: %s — incident: %s]\n", t.ID, t.State, inc.ID)
 }
 
 func runDocs(rest []string) {

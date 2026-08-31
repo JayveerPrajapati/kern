@@ -95,35 +95,44 @@ func TestTaskStartCompleteFail(t *testing.T) {
 
 func TestCompleteFromNonTerminalStateRejected(t *testing.T) {
 	// The approval gate must not be bypassable for code-change tasks: COMPLETED
-	// is only reachable through the state table, not by calling Complete from an
-	// execution state. Read-only tasks (analyze, verify) MAY complete directly
-	// from their respective states — that is tested separately below.
+	// is only reachable through the state table, not by calling Complete from
+	// a pre-approval state. (EXECUTING -> COMPLETED is a sanctioned table edge:
+	// TaskService.Execute's direct path — kern_execute / `kern execute` — runs
+	// governance + task-scope gates BEFORE transitioning to EXECUTING, then
+	// completes; the state table is its contract, not a security boundary.)
+	// Read-only tasks (analyze, verify) MAY complete directly from their
+	// respective states — that is tested separately below.
 	tk := NewTask("code", "x")
-	// Drive to EXECUTING (the code-change path) so we test the gate at the
-	// point where bypass would be dangerous: a code change skipping verify.
+	// Drive to WAITING_APPROVAL (the code-change path) so we test the gate at
+	// the point where bypass would be dangerous: completing a code change
+	// without approval.
 	for _, s := range []domain.TaskState{
 		domain.TaskAnalyzing,
 		domain.TaskPlanning,
 		domain.TaskWaitingApproval,
-		domain.TaskApproved,
-		domain.TaskExecuting,
 	} {
 		if err := tk.Transition(s); err != nil {
 			t.Fatalf("Transition to %s: %v", s, err)
 		}
 	}
 	if err := tk.Complete("done"); err == nil {
-		t.Fatal("Complete from EXECUTING: want error (gate bypass guard)")
+		t.Fatal("Complete from WAITING_APPROVAL: want error (approval bypass guard)")
 	}
 	if tk.State == domain.TaskCompleted {
-		t.Fatal("Complete from EXECUTING reached COMPLETED; want no state change")
+		t.Fatal("Complete from WAITING_APPROVAL reached COMPLETED; want no state change")
+	}
+
+	// A freshly created task must not complete either.
+	fresh := NewTask("code", "x")
+	if err := fresh.Complete("done"); err == nil {
+		t.Fatal("Complete from CREATED: want error")
 	}
 }
 
 func TestReadOnlyTaskCompletesFromAnalyzing(t *testing.T) {
 	// Read-only tasks (analyze) may complete directly from ANALYZING without
 	// driving the full code-change lifecycle — there is nothing to approve,
-	// execute, or PR. This is the Phase 2 Task-authoritative path for
+	// execute, or PR. This is the Task-authoritative path for
 	// kern analyze / kern_analyze.
 	tk := NewTask("analyze", "x")
 	if err := tk.Start("context-engine"); err != nil {

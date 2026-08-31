@@ -51,10 +51,8 @@ func TestHelper(t *testing.T) {
 	return dir
 }
 
-// TestMVP2GateEndToEnd runs the MVP2 killer workflow (spec §45):
-//
-//	Request → Analyze → Plan → Approve → Code → Verify → PR
-//
+// TestMVP2GateEndToEnd runs the MVP2 killer workflow :
+// Request → Analyze → Plan → Approve → Code → Verify → PR
 // end-to-end against a tiny fixture module, wiring the real subsystems
 // (context engine, execution worktree, verification engine) into the
 // agent runtime's DefaultWorkflow. This is the gate that must pass before

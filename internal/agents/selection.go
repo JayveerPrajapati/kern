@@ -157,13 +157,12 @@ func containsAny(s string, subs ...string) bool {
 	return false
 }
 
-// RoutingContext carries the Phase 9.4 dynamic routing inputs that influence
+// RoutingContext carries the dynamic routing inputs that influence
 // which agent roles execute a task. It extends the basic intent/task-type
 // classification with repository context, policy constraints, and per-role
 // historical success so routing can honor the full set of inputs described in
 // the plan. All routing decisions derived from it are deterministic — no LLM,
 // no network, no map-iteration nondeterminism.
-//
 // HistoricalSuccess maps an agent/role ID to its historical success rate in
 // the range [0,1]. Roles with a higher rate are preferred, everything else
 // being equal.
@@ -193,13 +192,12 @@ func (r RoutingContext) Kind() TaskKind {
 
 // RankRoles returns the candidate agent roles sorted by suitability for this
 // routing context. Ranking is deterministic and considers, in order of bias:
-//   - repository match: a candidate role whose lowercase name appears as a
-//     substring of the (lowercased) repository is boosted;
-//   - policy match: if Policy is non-empty, roles implied by the policy (e.g.
-//     "security" for "high-risk", "sre" for "production") are boosted;
-//   - historical success: candidates present in HistoricalSuccess are boosted
-//     by their success rate, so higher-success roles rank higher.
-//
+// - repository match: a candidate role whose lowercase name appears as a
+// substring of the (lowercased) repository is boosted;
+// - policy match: if Policy is non-empty, roles implied by the policy (e.g.
+// "security" for "high-risk", "sre" for "production") are boosted;
+// - historical success: candidates present in HistoricalSuccess are boosted
+// by their success rate, so higher-success roles rank higher.
 // The result is ordered score-descending, with alphabetical order as the
 // tie-breaker, so the output is fully deterministic regardless of input map
 // iteration order.
