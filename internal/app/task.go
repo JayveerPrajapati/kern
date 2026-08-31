@@ -36,20 +36,7 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/whatif"
 )
 
-// TaskService is the application service that makes Task authoritative. It
-// creates, progresses, and persists Tasks through the analyze → impact → plan →
-// verify lifecycle, so every interface (CLI, MCP, REST) can create an
-// authoritative Task record instead of running stateless.
-// This realizes the : "Make Task
-// Authoritative." Before this service, kern analyze / kern_analyze ran
-// stateless — no Task was created, no lifecycle was recorded. Now every
-// analysis creates a Task, progresses it through the state machine, persists
-// it to the TaskStore, and attaches lifecycle results (context packet, impact,
-// verification) to the Task so it is the single authoritative object for
-// audit, resume, and debugging.
-// TaskService wraps Platform's engine methods with Task lifecycle management.
-// It does NOT replace Platform.Analyze/WhatIf/Verify — those remain the
-// stateless fast path. TaskService adds the Task-tracking layer on top.
+// TaskService creates, progresses, and persists Tasks through the lifecycle.
 type TaskService struct {
 	platform   *Platform
 	registry   *agent.Registry
@@ -81,18 +68,13 @@ type TaskService struct {
 	wfMu         sync.Mutex
 }
 
-// workflowRun pairs a task with the engine that is driving its workflow, so a
-// human-approval pause can be resumed (CompleteApproval → Run again) without
-// losing the engine's gate/progress state.
+// workflowRun pairs a task with its driving workflow engine.
 type workflowRun struct {
 	task   *agent.Task
 	engine *agent.WorkflowEngine
 }
 
-// NewTaskService creates a TaskService for the given Platform. It creates a
-// fresh Registry, TaskStore, and ArtifactStore rooted at the Platform's root.
-// The optional bus publishes task lifecycle events (task.created, task.updated,
-// etc.).
+// NewTaskService creates a TaskService for the given Platform.
 func NewTaskService(p *Platform, bus *eventbus.Bus) *TaskService {
 	reg := agent.NewRegistry()
 	store := agent.NewTaskStore(p.Root())

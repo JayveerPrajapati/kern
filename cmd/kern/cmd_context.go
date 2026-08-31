@@ -22,19 +22,10 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/swap"
 )
 
-// kernJSONContractVersion is the version of kern's machine-readable JSON
-// output contracts (kern guard check --json, kern sec --json). Consumers
-// (e.g. blueprint) must check it before parsing.
-//
-// v2 (P0.4): guard check gains the optional authz_verdict object when
-// --agent-id/--task are supplied; audit append consumes blueprint's
-// ValidationOutcome. Consumers must fail closed on any other version.
+// kernJSONContractVersion is the schema version for machine-readable JSON output.
 const kernJSONContractVersion = 2
 
-// AuthzVerdictSchemaVersion is the schema version of the nested authz_verdict
-// object emitted by `kern guard check --agent-id <id> --task <desc>` (P0.4
-// shared-state contract with blueprint). It is independent of the top-level
-// kernJSONContractVersion.
+// AuthzVerdictSchemaVersion is the schema version for authorization verdicts.
 const AuthzVerdictSchemaVersion = 1
 
 func runProject(rest []string) {
@@ -480,15 +471,10 @@ func runGuard(rest []string) {
 
 }
 
-// cliDefaultAgentID is the built-in agent identity `kern guard check
-// --agent-id default` resolves to. It mirrors the MCP server's default agent
-// (registered at server init) so the CLI path works standalone.
+// cliDefaultAgentID is the default agent identity for CLI guard checks.
 const cliDefaultAgentID = "default"
 
-// registerDefaultAgentCLI registers the default agent identity for the CLI,
-// idempotently (re-entry after a prior registration — e.g. across tests
-// sharing the in-memory registry — is a no-op). Mirrors
-// internal/mcp/govern.go's registerDefaultAgent for the standalone CLI path.
+// registerDefaultAgentCLI registers the default agent for CLI (idempotent).
 func registerDefaultAgentCLI() {
 	if _, err := governance.GetAgent(cliDefaultAgentID); err == nil {
 		return
@@ -498,21 +484,13 @@ func registerDefaultAgentCLI() {
 	}))
 }
 
-// permissiveGuardMode reports whether the KERN_MCP_PERMISSIVE escape hatch is
-// set (explicit opt-in only: anything except "1"/"true" keeps default
-// governance). Mirrors internal/mcp/govern.go's permissiveMode.
+// permissiveGuardMode reports whether KERN_MCP_PERMISSIVE is set.
 func permissiveGuardMode() bool {
 	v := os.Getenv("KERN_MCP_PERMISSIVE")
 	return v == "1" || strings.EqualFold(v, "true")
 }
 
-// guardAuthzVerdict runs the P0.4 authorization gate for `kern guard check
-// --agent-id <id> --task <desc>`: it resolves the agent, calls
-// governance.AuthorizeContext against the cwd-scoped default scope, and maps the
-// response to the authz_verdict JSON object. The second return value reports
-// whether the verdict is a blocking denial. Unknown agents fail closed
-// (denied, all requested files blocked) unless KERN_MCP_PERMISSIVE opts into
-// the soft "unknown" verdict (no files denied, no exit-code gate).
+// guardAuthzVerdict runs authorization for guard check and returns the verdict.
 func guardAuthzVerdict(agentID, task string, ix *index.Index, files []string) (map[string]any, bool) {
 	if agentID == cliDefaultAgentID {
 		registerDefaultAgentCLI()
@@ -573,9 +551,7 @@ func guardAuthzVerdict(agentID, task string, ix *index.Index, files []string) (m
 	}, decision == "denied"
 }
 
-// deniedFilesForRequest returns the subset of the requested --file set that
-// the authorization scope denied, mapping DeniedSymbol entries to their
-// files. Empty when the scope denied nothing among the requested files.
+// deniedFilesForRequest returns files that were denied by authorization.
 func deniedFilesForRequest(denied []governance.DeniedSymbol, files []string) []string {
 	if len(denied) == 0 || len(files) == 0 {
 		return []string{}

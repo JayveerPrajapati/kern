@@ -31,11 +31,7 @@ func runTeam(rest []string) {
 
 }
 
-// runWorkflow runs an intent through the agent team ( exit gate): Kern
-// selects and coordinates the specialists without the external caller manually
-// sequencing it. The run parks at the human approval gate before the first
-// execution step; resolve the surfaced approval via `kern approve <id>` and
-// resume with `kern workflow --task <task-id>`.
+// runWorkflow runs an intent through the agent team workflow.
 func runWorkflow(rest []string) {
 	f, args, err := parseFlags(rest)
 	if err != nil {
@@ -101,11 +97,7 @@ func runIncident(rest []string) {
 	if err := json.Unmarshal([]byte(args[0]), &al); err != nil {
 		fatal("invalid alert JSON: %v", err)
 	}
-	// Route through the shared TaskService.InvestigateIncident service
-	// (the same path MCP kern_incident and REST /v1/incidents use) so the full
-	// incident lifecycle (IngestAlert→Correlate→RootCause) creates an
-	// authoritative Task with incident + root-cause artifacts. No interface may
-	// inline the incident workflow (P2 exit gate).
+	// Route through TaskService.InvestigateIncident for the full lifecycle.
 	p, err := app.New(root)
 	if err != nil {
 		fatal("%v", err)

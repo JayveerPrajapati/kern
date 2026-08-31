@@ -14,23 +14,12 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/storage"
 )
 
-// auditInvalidate is the invalidation seam for P0.4's blueprint validation
-// consumption: a BLOCK/ERROR validation outcome marks the blocked context
-// entities stale. Production behavior is in-memory invalidation (no
-// persistence); tests replace it to observe the call.
+// auditInvalidate marks blocked context entities stale on validation failure.
 var auditInvalidate = func(entities []string, reason, source string, at time.Time) []kctx.InvalidationMarker {
 	return kctx.InvalidateContext(entities, reason, source, at)
 }
 
-// runAudit implements `kern audit [task-id] [--root ROOT] [--json]`.
-// With no task-id, shows all audit entries. With a task-id, shows entries for
-// that task only.
-// It reads the persisted trail through TaskService (one file per entry under
-// <root>/.kern/audit/): the audit log's All() only returns in-memory entries,
-// so a fresh process would otherwise see nothing. TaskService owns the
-// persisted read so the CLI and MCP surface the same authoritative trail.
-// `kern audit append` (see runAuditAppend) links an externally-authored entry
-// into the chain instead of listing.
+// runAudit shows audit trail entries, optionally filtered by task ID.
 func runAudit(rest []string) {
 	if len(rest) > 0 && rest[0] == "append" {
 		runAuditAppend(rest[1:])
@@ -102,15 +91,7 @@ func runAudit(rest []string) {
 	}
 }
 
-// runAuditAppend implements `kern audit append [--root ROOT] [--file PATH]`,
-// which links one externally-authored AuditEntry into the tamper-evident hash
-// chain. The entry JSON is read from stdin (or from --file), Replay() loads
-// the existing chain head from <root>/.kern/audit/, and AppendExternal chains
-// the new entry onto it (first entry in a fresh chain links from ""). On
-// success the assigned ID and chain hash are printed and the process exits 0;
-// usage/parse errors exit 2, persistence failures exit 1. This is the
-// external-append path Blueprint's audit writer uses so its records join
-// kern's chain without corrupting it.
+// runAuditAppend links an external entry into the tamper-evident audit chain.
 func runAuditAppend(rest []string) {
 	f, args, err := parseFlags(rest)
 	if err != nil {
