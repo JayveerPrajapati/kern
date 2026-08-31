@@ -1,6 +1,6 @@
 // Package exec is the single governance gate that the execution tools
 // (kern_exec, kern_sandbox, kern_execute) pass through. It fails closed.
-package exec
+package governance
 
 import (
 	"errors"
@@ -9,24 +9,19 @@ import (
 	"strings"
 
 	"github.com/JayveerPrajapati/kern/internal/domain"
-	appr "github.com/JayveerPrajapati/kern/internal/governance/approval"
-	"github.com/JayveerPrajapati/kern/internal/governance/firewall"
-	"github.com/JayveerPrajapati/kern/internal/governance/identity"
-	"github.com/JayveerPrajapati/kern/internal/governance/risk"
 )
 
 // Execution surfaces (kern_exec, kern_sandbox, kern_execute) run arbitrary
 // host commands, so this file is the single governance gate those tools pass
 // through. It fails closed — any error or denial refuses to run. Three
 // independent gates apply:
-//
-//  1. An empty (unset) KERN_TOOLS allowlist means "all tools allowed", so exec
-//     is refused unless the operator opts in via KERN_ALLOW_EXEC=1.
-//  2. When KERN_TOOLS is set, the specific exec tool being invoked must be
-//     named in it; a non-empty but unrelated allowlist does not re-enable exec.
-//  3. The change firewall authorizes the command via the risk model, so a
-//     command.execute can become approval-gated (HIGH/CRITICAL) rather than
-//     hardcoded LOW.
+// 1. An empty (unset) KERN_TOOLS allowlist means "all tools allowed", so exec
+// is refused unless the operator opts in via KERN_ALLOW_EXEC=1.
+// 2. When KERN_TOOLS is set, the specific exec tool being invoked must be
+// named in it; a non-empty but unrelated allowlist does not re-enable exec.
+// 3. The change firewall authorizes the command via the risk model, so a
+// command.execute can become approval-gated (HIGH/CRITICAL) rather than
+// hardcoded LOW.
 const execAgentID = "mcp-exec"
 
 // execToolNames are the host-command tools that a KERN_TOOLS allowlist must
@@ -39,7 +34,6 @@ var execToolNames = []string{"kern_exec", "kern_sandbox", "kern_execute"}
 // refused. toolName optionally names the specific exec tool so the allowlist
 // is validated against exactly what is being allowed; when empty, at least one
 // exec tool must be present in the allowlist.
-//
 // A HIGH/CRITICAL command.execute fails closed here with an
 // approval-required error. Callers that want to drive the human-approval
 // workflow should use RequestExecApproval / ResumeExecApproval instead.
@@ -56,7 +50,7 @@ func CheckExec(toolName ...string) error {
 		return fmt.Errorf("governance: exec firewall denied: %w", err)
 	}
 	if !allowed {
-		if approval != nil || appr.RequiresApproval(risk.Level) {
+		if approval != nil || RequiresApproval(risk.Level) {
 			return fmt.Errorf("governance: command execution requires human approval (risk level %s, score %.2f); approve it before running", risk.Level, risk.Score)
 		}
 		return errors.New("governance: exec firewall denied command execution")
@@ -96,8 +90,8 @@ func execAllowlistGate(tool string) error {
 // workflow. Callers that want a real, externally-reviewable approval should
 // use RequestExecApproval instead.
 func execFirewallCheck() (allowed bool, risk domain.Risk, approval *domain.Approval, err error) {
-	fw := firewall.NewFirewall().WithPolicies(execPolicies())
-	agent := identity.NewAgent(execAgentID, "mcp-exec", "application", []identity.Permission{{Resource: "command", Action: "execute"}})
+	fw := NewFirewall().WithPolicies(execPolicies())
+	agent := NewAgent(execAgentID, "mcp-exec", "application", []Permission{{Resource: "command", Action: "execute"}})
 	allowed, risk, approval, err = fw.WithAgents(agent).Check(execAgentID, "command", "execute")
 	return allowed, risk, approval, err
 }
@@ -106,14 +100,13 @@ func execFirewallCheck() (allowed bool, risk domain.Risk, approval *domain.Appro
 // is approval-gated (command.execute scoring HIGH/CRITICAL via KERN_EXEC_RISK),
 // submits an ApprovalRequest to wf and returns the pending approval so the
 // orchestrator/CLI can route it to a human reviewer.
-//
 // Returns:
-//   - (nil, risk, nil): the command may run directly (no approval required).
-//   - (&approval, risk, nil): an approval is pending; it must be approved
-//     (wf.Approve) before ResumeExecApproval lets the command run.
-//   - (nil, risk, err): the command is denied, or approval is required but no
-//     workflow is configured (fails closed).
-func RequestExecApproval(wf *appr.ApprovalWorkflow, toolName ...string) (*domain.Approval, domain.Risk, error) {
+// - (nil, risk, nil): the command may run directly (no approval required).
+// - (&approval, risk, nil): an approval is pending; it must be approved
+// (wf.Approve) before ResumeExecApproval lets the command run.
+// - (nil, risk, err): the command is denied, or approval is required but no
+// workflow is configured (fails closed).
+func RequestExecApproval(wf *ApprovalWorkflow, toolName ...string) (*domain.Approval, domain.Risk, error) {
 	tool := ""
 	if len(toolName) > 0 {
 		tool = strings.TrimSpace(toolName[0])
@@ -128,7 +121,7 @@ func RequestExecApproval(wf *appr.ApprovalWorkflow, toolName ...string) (*domain
 	if allowed {
 		return nil, risk, nil // no approval needed; proceed directly
 	}
-	if !appr.RequiresApproval(risk.Level) {
+	if !RequiresApproval(risk.Level) {
 		return nil, risk, errors.New("governance: exec firewall denied command execution")
 	}
 	if wf == nil {
@@ -136,7 +129,7 @@ func RequestExecApproval(wf *appr.ApprovalWorkflow, toolName ...string) (*domain
 		// a HIGH/CRITICAL command without a human approval path.
 		return nil, risk, fmt.Errorf("governance: command execution requires human approval (risk level %s, score %.2f) but no approval workflow is configured; failing closed", risk.Level, risk.Score)
 	}
-	ap := wf.Request(firewall.TaskKey(execAgentID, "command", "execute"), execAgentID, risk.Mitigation)
+	ap := wf.Request(TaskKey(execAgentID, "command", "execute"), execAgentID, risk.Mitigation)
 	return &ap, risk, nil
 }
 
@@ -144,7 +137,7 @@ func RequestExecApproval(wf *appr.ApprovalWorkflow, toolName ...string) (*domain
 // proceed, i.e. the human has approved it. It returns nil (proceed) only when
 // wf has the approval in the "approved" state; otherwise it fails closed
 // (still pending / rejected / unknown).
-func ResumeExecApproval(wf *appr.ApprovalWorkflow, approvalID string) error {
+func ResumeExecApproval(wf *ApprovalWorkflow, approvalID string) error {
 	if wf == nil {
 		return errors.New("governance: no approval workflow configured; cannot resume command execution")
 	}
@@ -170,7 +163,7 @@ func execPolicies() []domain.Policy {
 			level = v
 		}
 	}
-	return append(risk.DefaultPolicies(), domain.Policy{
+	return append(DefaultPolicies(), domain.Policy{
 		ID:          "pol-command-execute",
 		Name:        "command_execute",
 		Description: "Arbitrary host command execution (operator-configurable risk).",

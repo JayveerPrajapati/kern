@@ -4,8 +4,6 @@ import (
 	"testing"
 
 	"github.com/JayveerPrajapati/kern/internal/domain"
-	"github.com/JayveerPrajapati/kern/internal/governance/firewall"
-	"github.com/JayveerPrajapati/kern/internal/governance/identity"
 )
 
 // TestEvaluateScopedFullServiceArtifactGates verifies that EvaluateScopedFull
@@ -13,8 +11,8 @@ import (
 // env/path gates, and that denials carry a non-empty Policy and
 // SafeAlternative (P7.6).
 func TestEvaluateScopedFullServiceArtifactGates(t *testing.T) {
-	fw := firewall.NewFirewall()
-	fw.WithAgents(identity.NewAgent("agent-1", "a", "coder", []identity.Permission{
+	fw := NewFirewall()
+	fw.WithAgents(NewAgent("agent-1", "a", "coder", []Permission{
 		{Resource: "payments/ref.go", Action: "write"},
 		{Resource: "payments/refund.go", Action: "write"},
 	}))
@@ -64,7 +62,7 @@ func TestEvaluateScopedFullServiceArtifactGates(t *testing.T) {
 // SafeAlternative (P7.6 explain-deny).
 func TestDenyReasonPolicyAndSafeAlternative(t *testing.T) {
 	// env denial.
-	fw := firewall.NewFirewall()
+	fw := NewFirewall()
 	gw := NewToolGateway(fw)
 	res := gw.EvaluateScoped("agent-1", "t1", "file.go", "read", "production", domain.TaskScope{TaskID: "t1", Envs: []string{"dev"}}, nil)
 	if res.Deny == nil || res.Deny.Policy == "" || res.Deny.SafeAlternative == "" {
@@ -84,8 +82,8 @@ func TestDenyReasonPolicyAndSafeAlternative(t *testing.T) {
 	}
 
 	// budget denial.
-	fw2 := firewall.NewFirewall()
-	fw2.WithAgents(identity.NewAgent("agent-1", "a", "coder", []identity.Permission{{Resource: "file.go", Action: "read"}}))
+	fw2 := NewFirewall()
+	fw2.WithAgents(NewAgent("agent-1", "a", "coder", []Permission{{Resource: "file.go", Action: "read"}}))
 	gw2 := NewToolGateway(fw2)
 	budget := &domain.SafetyBudget{MaxToolCalls: 1}
 	budget.Start()
@@ -102,8 +100,8 @@ func TestDenyReasonPolicyAndSafeAlternative(t *testing.T) {
 // Services/Artifacts and a valid path+env+firewall, proving backward
 // compatibility.
 func TestEvaluateScopedWrapperBackwardCompat(t *testing.T) {
-	fw := firewall.NewFirewall()
-	fw.WithAgents(identity.NewAgent("agent-1", "a", "coder", []identity.Permission{{Resource: "ok/file.go", Action: "write"}}))
+	fw := NewFirewall()
+	fw.WithAgents(NewAgent("agent-1", "a", "coder", []Permission{{Resource: "ok/file.go", Action: "write"}}))
 	gw := NewToolGateway(fw)
 
 	scope := domain.TaskScope{

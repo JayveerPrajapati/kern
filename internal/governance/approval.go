@@ -1,6 +1,6 @@
 // Package approval provides the human-in-the-loop approval workflow used to
 // gate HIGH/CRITICAL risk actions.
-package approval
+package governance
 
 import (
 	"crypto/rand"
@@ -14,17 +14,53 @@ import (
 )
 
 // ApprovalWorkflow manages human-in-the-loop approvals for high-risk actions.
-// Approvals live in memory; no persistence needed. The mutex guards the
-// pending map against concurrent web requests (approve/reject/pending handlers
-// each run in their own goroutine).
+// Approvals can live purely in memory (the default) or be backed by the
+// project's approval file (NewPersistedApprovalWorkflow), which restores
+// pending approvals on construction and writes every mutation through the
+// shared file store. The mutex guards the pending map (and, when a store is
+// attached, the file I/O) against concurrent web requests — approve/reject/
+// pending handlers each run in their own goroutine.
 type ApprovalWorkflow struct {
 	mu      sync.Mutex
 	pending map[string]domain.Approval
+	store   *FileStore // optional persistent backend; nil = in-memory only
 }
 
-// NewApprovalWorkflow creates a new approval workflow.
+// NewApprovalWorkflow creates a new in-memory approval workflow. Approvals do
+// not survive a process restart.
 func NewApprovalWorkflow() *ApprovalWorkflow {
 	return &ApprovalWorkflow{pending: map[string]domain.Approval{}}
+}
+
+// NewPersistedApprovalWorkflow creates an approval workflow backed by the
+// project's approval file (<root>/.kern/approvals.json). Pending approvals
+// persisted by a previous process are loaded into memory on construction, so a
+// task parked at an approval gate before a restart still has its approval
+// resolvable afterwards (`kern approve <id>`), and every mutation (Request,
+// RequestWithBinding, Approve, Reject) is written through the shared file
+// store so other processes observe it. An empty root falls back to the
+// in-memory workflow.
+func NewPersistedApprovalWorkflow(root string) *ApprovalWorkflow {
+	if root == "" {
+		return NewApprovalWorkflow()
+	}
+	return NewPersistedApprovalWorkflowFromStore(NewFileStore(root))
+}
+
+// NewPersistedApprovalWorkflowFromStore wraps an existing FileStore as the
+// workflow's persistence backend, restoring persisted approvals into memory on
+// construction. A nil store yields the plain in-memory workflow.
+func NewPersistedApprovalWorkflowFromStore(s *FileStore) *ApprovalWorkflow {
+	w := &ApprovalWorkflow{pending: map[string]domain.Approval{}, store: s}
+	if s == nil {
+		return w
+	}
+	if saved, err := s.Load(); err == nil {
+		for _, a := range saved {
+			w.pending[a.ID] = a
+		}
+	}
+	return w
 }
 
 // Request creates a pending approval for a task. The approval ID is a
@@ -42,16 +78,21 @@ func (w *ApprovalWorkflow) Request(taskID, requester, reason string) domain.Appr
 	}
 	w.mu.Lock()
 	w.pending[a.ID] = a
+	if w.store != nil {
+		_ = w.store.AddPending(a)
+	}
 	w.mu.Unlock()
 	return a
 }
 
-// RequestWithBinding creates a pending approval with the full Phase 9 binding
+// RequestWithBinding creates a pending approval with the full binding
 // context: the risk level that triggered the gate, the policy IDs that
 // evaluated to that risk, evidence references supporting the assessment, and
 // the artifact (e.g. ImpactReport) backing the approval. This makes the
 // approval self-describing for audit — an auditor can reconstruct WHY the
 // approval was requested and WHAT it authorized, not just that it was.
+// The persisted copy is upserted with the full binding so a restarted process
+// restores the complete record, not the base fields only.
 func (w *ApprovalWorkflow) RequestWithBinding(taskID, requester, reason string, riskLevel domain.RiskLevel, policyIDs, evidenceRefs []string, artifactID string) domain.Approval {
 	a := w.Request(taskID, requester, reason)
 	a.RiskLevel = riskLevel
@@ -60,6 +101,9 @@ func (w *ApprovalWorkflow) RequestWithBinding(taskID, requester, reason string, 
 	a.ArtifactID = artifactID
 	w.mu.Lock()
 	w.pending[a.ID] = a
+	if w.store != nil {
+		_ = w.store.AddPending(a)
+	}
 	w.mu.Unlock()
 	return a
 }
@@ -81,6 +125,9 @@ func (w *ApprovalWorkflow) Approve(approvalID, approver string) (domain.Approval
 	now := time.Now()
 	a.DecidedAt = &now
 	w.pending[approvalID] = a
+	if w.store != nil {
+		_, _ = w.store.Decide(approvalID, approver, true, "")
+	}
 	return a, nil
 }
 
@@ -102,6 +149,9 @@ func (w *ApprovalWorkflow) Reject(approvalID, approver, reason string) (domain.A
 	now := time.Now()
 	a.DecidedAt = &now
 	w.pending[approvalID] = a
+	if w.store != nil {
+		_, _ = w.store.Decide(approvalID, approver, false, reason)
+	}
 	return a, nil
 }
 

@@ -12,21 +12,19 @@ import (
 // LoadConstitution reads .kern/constitution.yaml from the given project root.
 // Returns an empty constitution (no rules) if the file does not exist — this
 // is not an error, it means the project has no constitution constraints.
-//
 // The YAML format is intentionally simple (no external YAML dependency):
-//
-//	rules:
-//	  - id: no-payments-deps
-//	    type: MUST_NOT
-//	    category: architecture
-//	    description: "payments cannot depend on marketing"
-//	    cannot_depend_on:
-//	      - marketing
-//	  - id: never-log-secrets
-//	    type: MUST_NOT
-//	    category: security
-//	    description: "secrets must never be logged"
-//	    never_log: true
+// rules:
+// - id: no-payments-deps
+// type: MUST_NOT
+// category: architecture
+// description: "payments cannot depend on marketing"
+// cannot_depend_on:
+// - marketing
+// - id: never-log-secrets
+// type: MUST_NOT
+// category: security
+// description: "secrets must never be logged"
+// never_log: true
 func LoadConstitution(root string) (*domain.Constitution, error) {
 	path := filepath.Join(root, ".kern", "constitution.yaml")
 	b, err := os.ReadFile(path)
@@ -134,9 +132,8 @@ func parseListLines(lines []string, startIndex int) []string {
 }
 
 // ValidatePlan checks a plan against the constitution. Returns a PlanValidation
-// with any violations found. Strict Plan Phase 8 P0: Plan → Architecture →
+// with any violations found. : Plan → Architecture →
 // Security → Constraints → Impact → Risk → Policy.
-//
 // A MUST or MUST_NOT violation is blocking (PlanValidation.Passed = false).
 // SHOULD and SHOULD_NOT violations are warnings (non-blocking).
 func ValidatePlan(plan domain.Plan, constitution *domain.Constitution) domain.PlanValidation {
@@ -179,7 +176,6 @@ func ruleProvenance(rule domain.ConstitutionRule) string {
 // the plan (P8.5). Suggestions are NON-ACTIVATING: they never modify the loaded
 // constitution — they only advise a human/governance owner what to add. Each
 // suggestion is a draft ConstitutionRule plus a rationale.
-//
 // Suggestions are deterministic heuristics over the plan and its violations, no
 // LLM involved.
 type RuleSuggestion struct {
@@ -234,8 +230,8 @@ func SuggestRules(plan domain.Plan, validation domain.PlanValidation) []RuleSugg
 			}
 		case "security":
 			rule := domain.ConstitutionRule{
-				Type:     domain.ConstraintMustNot,
-				NeverLog: true,
+				Type:        domain.ConstraintMustNot,
+				NeverLog:    true,
 				Description: "secrets must never be logged",
 			}
 			add("suggest-sec-no-log", "security", rule, "security violation: "+v.Message)
@@ -243,7 +239,7 @@ func SuggestRules(plan domain.Plan, validation domain.PlanValidation) []RuleSugg
 			rule := domain.ConstitutionRule{
 				Type:             domain.ConstraintMust,
 				ApprovalRequired: true,
-				Description:     "destructive database changes require approval",
+				Description:      "destructive database changes require approval",
 			}
 			add("suggest-db-approval", "database", rule, "database violation: "+v.Message)
 		case "testing":
@@ -273,7 +269,7 @@ func SuggestRules(plan domain.Plan, validation domain.PlanValidation) []RuleSugg
 			add("suggest-db-approval", "database", domain.ConstitutionRule{
 				Type:             domain.ConstraintMust,
 				ApprovalRequired: true,
-				Description:     "destructive database changes require approval",
+				Description:      "destructive database changes require approval",
 			}, "plan includes destructive DB step; requires approval")
 		}
 	}

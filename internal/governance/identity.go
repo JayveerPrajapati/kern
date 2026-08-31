@@ -1,9 +1,10 @@
 // Package identity provides agent identities and the permission model used
 // by the governance change firewall.
-package identity
+package governance
 
 import (
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/JayveerPrajapati/kern/internal/domain"
@@ -57,7 +58,12 @@ func (a *AgentIdentity) HasPermission(resource, action string) bool {
 }
 
 // agentRegistry is the in-memory agent registry; no persistence is needed.
-var agentRegistry = map[string]*AgentIdentity{}
+// agentRegistryMu guards the registry: Enterprise Server registers agents
+// concurrently with MCP GetAgent reads on the per-call critical path.
+var (
+	agentRegistryMu sync.RWMutex
+	agentRegistry   = map[string]*AgentIdentity{}
+)
 
 // RegisterAgent stores an agent identity for later lookup by ID. It returns an
 // error when given a nil agent or an agent with an empty ID.
@@ -65,6 +71,8 @@ func RegisterAgent(a *AgentIdentity) error {
 	if a == nil || a.ID == "" {
 		return fmt.Errorf("governance: cannot register nil or empty-ID agent")
 	}
+	agentRegistryMu.Lock()
+	defer agentRegistryMu.Unlock()
 	agentRegistry[a.ID] = a
 	return nil
 }
@@ -72,6 +80,8 @@ func RegisterAgent(a *AgentIdentity) error {
 // GetAgent retrieves a registered agent by ID. It returns an error (fail
 // closed) when the agent is unknown.
 func GetAgent(id string) (*AgentIdentity, error) {
+	agentRegistryMu.RLock()
+	defer agentRegistryMu.RUnlock()
 	a, ok := agentRegistry[id]
 	if !ok {
 		return nil, fmt.Errorf("governance: agent %q not found", id)

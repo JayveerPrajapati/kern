@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/JayveerPrajapati/kern/internal/governance/approval"
+	"github.com/JayveerPrajapati/kern/internal/app"
 )
 
 // runApprove implements `kern approve [id] [--reject --reason "..." --approver "..."]`.
@@ -20,11 +20,15 @@ func runApprove(rest []string) {
 		root = "."
 	}
 
-	store := approval.NewFileStore(root)
+	p, err := app.New(root)
+	if err != nil {
+		fatal("%v", err)
+	}
+	ts := app.NewTaskService(p, nil)
 
 	if len(args) < 1 || args[0] == "" {
 		// List pending approvals.
-		pending, err := store.Pending()
+		pending, err := ts.PendingApprovals()
 		if err != nil {
 			fatal("%v", err)
 		}
@@ -50,13 +54,13 @@ func runApprove(rest []string) {
 	}
 
 	if f.reject {
-		_, err := store.Decide(id, approver, false, f.reason)
+		_, err := ts.ResolveApproval(id, approver, false, f.reason)
 		if err != nil {
 			fatal("%v", err)
 		}
 		fmt.Printf("rejected: %s (by %s)\n", id, approver)
 	} else {
-		a, err := store.Decide(id, approver, true, f.reason)
+		a, err := ts.ResolveApproval(id, approver, true, f.reason)
 		if err != nil {
 			fatal("%v", err)
 		}

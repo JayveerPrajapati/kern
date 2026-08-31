@@ -169,7 +169,7 @@ func TestValidatePlanTestingRequires(t *testing.T) {
 		},
 	}
 	plan := domain.Plan{
-		AffectedComponents: []string{"api/handler"},
+		AffectedComponents:  []string{"api/handler"},
 		ImplementationSteps: []string{"add new endpoint"},
 	}
 	pv := ValidatePlan(plan, c)

@@ -1,5 +1,5 @@
 // Package risk provides deterministic risk scoring over domain.Policy rules.
-package risk
+package governance
 
 import (
 	"fmt"
@@ -153,9 +153,8 @@ func policyMatchFor(p domain.Policy, resource, action string) (domain.RiskLevel,
 // "resource" is what is being acted on; "action" is what is being done. It
 // returns a domain.Risk whose Level is the highest matching policy level. If
 // no policy matches, the risk defaults to LOW. The result is deterministic.
-//
-// Phase 9: the returned Risk now sets ApprovalRequired=true for HIGH/CRITICAL
-// levels (the Integration Transformation Plan's Policy Result Contract requires
+// The returned Risk now sets ApprovalRequired=true for HIGH/CRITICAL
+// levels (the Policy Result Contract requires
 // approval_required to be populated, not just inferred from Level). This makes
 // the approval requirement explicit on the Risk object so callers don't have
 // to re-derive it.
