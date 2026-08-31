@@ -43,7 +43,7 @@ func runSchema(rest []string) {
 	for _, v := range violations {
 		fmt.Println("  - " + v)
 	}
-	os.Exit(1)
+	panic(exitError{code: 1})
 
 }
 
@@ -68,7 +68,7 @@ func runMask(rest []string) {
 	if err != nil {
 		fatal("%v", err)
 	}
-	res := pii.MaskNames(string(b), splitNames(f.names))
+	res := pii.MaskAllCustom(string(b), pii.DefaultPatterns, splitNames(f.names))
 	fmt.Print(res.Text)
 	if res.Replaced > 0 {
 		fmt.Fprintf(os.Stderr, "\nkern: masked %d secrets: ", res.Replaced)
@@ -106,7 +106,10 @@ func runSec(rest []string) {
 	findings = sec.FilterBySeverity(findings, allow)
 	counts := sec.Counts(findings)
 	if f.json {
-		if err := json.NewEncoder(os.Stdout).Encode(findings); err != nil {
+		if err := json.NewEncoder(os.Stdout).Encode(map[string]any{
+			"schema_version": kernJSONContractVersion,
+			"findings":       findings,
+		}); err != nil {
 			fatal("%v", err)
 		}
 	} else {
@@ -117,7 +120,7 @@ func runSec(rest []string) {
 	// The exit code must be the same in --json and text mode: error-severity
 	// findings are a CI gate failure regardless of output format.
 	if counts["error"] > 0 {
-		os.Exit(1)
+		panic(exitError{code: 1})
 	}
 
 }
@@ -151,7 +154,7 @@ func runDelete(rest []string) {
 	// The exit code must be the same in --json and text mode: an unsafe
 	// deletion is a gate failure regardless of output format.
 	if !r.Safe {
-		os.Exit(1)
+		panic(exitError{code: 1})
 	}
 
 }

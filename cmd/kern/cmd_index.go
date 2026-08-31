@@ -90,9 +90,36 @@ func runPrecache(rest []string) {
 }
 
 func runIndex(rest []string) {
-	root := "."
-	if len(rest) > 0 {
-		root = rest[0]
+	f, args, err := parseFlags(rest)
+	if err != nil {
+		fatalUsage("flags: %v", err)
+	}
+	root := f.root
+	if root == "" {
+		root = "."
+		if len(args) > 0 {
+			root = args[0]
+		}
+	}
+	// `kern index --status [--json]` is read-only: it reports the cached
+	// index's health without rebuilding anything, so CI and agents can gate
+	// on freshness cheaply.
+	if f.status {
+		status := indexStatus(root, f.strict)
+		if f.json {
+			printJSON(status)
+			return
+		}
+		if status["built"].(bool) {
+			fmt.Printf("index: BUILT (%d symbols, %d files, %d packages, version %d)\n",
+				status["symbols"], status["files"], status["packages"], status["version"])
+			fmt.Printf("  languages: %s\n", status["languages"])
+			fmt.Printf("  stale: %v\n", status["stale"])
+			fmt.Printf("  store: %s\n", status["store"])
+		} else {
+			fmt.Printf("index: NOT BUILT for %s\n", root)
+		}
+		return
 	}
 	ix, err := index.Build(root)
 	if err != nil {
@@ -112,6 +139,60 @@ func runIndex(rest []string) {
 		len(ix.Symbols), len(ix.FileHashes), len(ix.Pkgs), store)
 	fmt.Printf("languages: %s\n", strings.Join(ix.Languages(), ", "))
 
+}
+
+// indexStatus reports the cached index's state for `kern index --status`.
+// Read-only: it never builds or saves an index. The returned map is
+// JSON-ready so callers can render text or pass it straight to printJSON.
+// strict selects FreshnessProofStrict (full content re-hash) over the default
+// fast FreshnessProof (git tree-OID compare).
+func indexStatus(root string, strict bool) map[string]any {
+	status := map[string]any{
+		"schema_version":      "2",
+		"root":                root,
+		"built":               false,
+		"symbols":             0,
+		"files":               0,
+		"packages":            0,
+		"version":             0,
+		"stale":               true,
+		"languages":           []string{},
+		"store":               "",
+		"precision_by_lang":   map[string]string{},
+		"tree_sitter_enabled": index.TreesitterEnabled(),
+	}
+	ix, err := index.Load(root)
+	if err != nil || ix == nil {
+		return status
+	}
+	status["built"] = true
+	status["symbols"] = len(ix.Symbols)
+	status["files"] = len(ix.FileHashes)
+	status["packages"] = len(ix.Pkgs)
+	status["version"] = ix.Version
+	status["stale"] = ix.Stale()
+	status["languages"] = ix.Languages()
+	store := index.StorePath(root)
+	if index.SQLiteEnabled() {
+		store = index.SQLitePath(root)
+	}
+	status["store"] = store
+	// Per-language edge-precision tier (resolved/ast/heuristic) from the
+	// index itself, so consumers (blueprint, CI, humans) can see which
+	// languages are skipped under --precision strict without building.
+	status["precision_by_lang"] = ix.PrecisionByLang
+	// Content-addressed freshness proof: the contract the blueprint fixer
+	// codes against. --strict forces a full content re-hash instead of the
+	// git tree-OID fast path.
+	proof := ix.FreshnessProof(root)
+	if strict {
+		proof = ix.FreshnessProofStrict(root)
+	}
+	status["freshness_proof"] = proof
+	if ix.Identity != nil {
+		status["index_identity"] = *ix.Identity
+	}
+	return status
 }
 
 func runWatch(rest []string) {

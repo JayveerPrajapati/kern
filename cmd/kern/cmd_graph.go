@@ -3,9 +3,11 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/JayveerPrajapati/kern/internal/app"
 	"github.com/JayveerPrajapati/kern/internal/intel"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -25,6 +27,7 @@ func runGraph(rest []string) {
 		}
 		if f.limit == 0 {
 			f.limit = 400
+			fmt.Fprintf(os.Stderr, "kern: whole-repo graph limited to 400 symbols (--limit to raise)\n")
 		}
 		ix, err := loadOrBuild(root)
 		if err != nil {
@@ -528,6 +531,59 @@ func runArch(rest []string) {
 
 }
 
+// runTwin summarizes the merged knowledge graph's digital-twin dimensions:
+// node counts per kind (api/data/messaging/infra/runtime plus code kinds)
+// followed by the extracted API endpoint list. Deterministic ordering: kinds
+// and endpoint names are sorted.
+func runTwin(rest []string) {
+	f, args, err := parseFlags(rest)
+	if err != nil {
+		fatalUsage("flags: %v", err)
+	}
+	root := f.root
+	if root == "" {
+		root = "."
+	}
+	if len(args) > 0 {
+		root = args[0]
+	}
+	p, err := app.New(root)
+	if err != nil {
+		fatal("%v", err)
+	}
+	g := p.Graph()
+
+	counts := map[string]int{}
+	var apis []string
+	for _, n := range g.Nodes {
+		counts[n.Kind]++
+		if n.Kind == "api" {
+			name := n.Label
+			if name == "" {
+				name = n.ID
+			}
+			apis = append(apis, name)
+		}
+	}
+	kinds := make([]string, 0, len(counts))
+	for k := range counts {
+		kinds = append(kinds, k)
+	}
+	sort.Strings(kinds)
+	sort.Strings(apis)
+
+	fmt.Printf("twin knowledge graph: %s\n", g.Project.Root)
+	for _, k := range kinds {
+		fmt.Printf("  %-12s %d\n", k+":", counts[k])
+	}
+	if len(apis) > 0 {
+		fmt.Printf("api endpoints (%d):\n", len(apis))
+		for _, a := range apis {
+			fmt.Printf("  %s\n", a)
+		}
+	}
+}
+
 func runChurn(rest []string) {
 	f, args, err := parseFlags(rest)
 	if err != nil {
@@ -643,6 +699,11 @@ func runNear(rest []string) {
 	maxN := f.max
 	if maxN <= 0 {
 		maxN = 100
+	}
+	if f.depth < 0 || f.max <= 0 {
+		// Surface the defaults so a capped tree is never mistaken for the
+		// full result (--json already reports depth/max_nodes).
+		fmt.Fprintf(os.Stderr, "kern: walk defaults depth=%d max=%d (use --depth/--max to widen)\n", depth, maxN)
 	}
 	nodes, err := intel.Near(ix, args[0], depth, maxN)
 	if err != nil {

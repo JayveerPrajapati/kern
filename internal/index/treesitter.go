@@ -183,6 +183,13 @@ func tsExtract(rel string, src []byte, lang string) ([]Symbol, map[string][]stri
 	// Second pass: collect call edges
 	collectCalls(root, src, defs, calls)
 
+	// Java: resolve member-invocation callees through per-method local types
+	// (x.bar() -> Foo.bar()) so cross-file edges bind, mirroring the regex
+	// path's collectJavaLocalTypes/resolveJavaCallee pair (java_resolve.go).
+	if lang == "java" {
+		resolveJavaCalls(root, src, calls)
+	}
+
 	// Third pass: collect inheritance (extends / implements) edges
 	inherits := collectInheritance(root, src, defs, lang)
 

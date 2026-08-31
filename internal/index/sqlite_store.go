@@ -138,6 +138,10 @@ CREATE TABLE IF NOT EXISTS packages (
 	imports TEXT NOT NULL DEFAULT '[]',
 	files   TEXT NOT NULL DEFAULT '[]'
 );
+CREATE TABLE IF NOT EXISTS file_imports (
+	file    TEXT PRIMARY KEY,
+	imports TEXT NOT NULL DEFAULT '[]'
+);
 CREATE TABLE IF NOT EXISTS files (
 	path      TEXT PRIMARY KEY,
 	hash      TEXT NOT NULL DEFAULT '',
@@ -192,13 +196,20 @@ func (s *SQLiteStore) Save(ix *Index) error {
 	}
 	defer tx.Rollback()
 
-	// meta: root, version, updated_at, max_mtime
+	// meta: root, version, updated_at, max_mtime, identity
 	meta := map[string]string{
 		"root":       ix.Root,
 		"version":    fmt.Sprintf("%d", ix.Version),
 		"updated_at": ix.UpdatedAt.UTC().Format(time.RFC3339Nano),
 		"max_mtime":  fmt.Sprintf("%d", ix.MaxMtime),
 		"index_kind": "symbols",
+	}
+	// Persist the content-addressed identity (best-effort) so SQLite-loaded
+	// indexes get the same freshness proof as JSON-loaded ones.
+	if ix.Identity != nil {
+		if idData, err := json.Marshal(ix.Identity); err == nil {
+			meta["identity"] = string(idData)
+		}
 	}
 	for k, v := range meta {
 		if _, err := tx.Exec(
@@ -311,6 +322,20 @@ func (s *SQLiteStore) Save(ix *Index) error {
 			return err
 		}
 	}
+	if _, err := tx.Exec("DELETE FROM file_imports"); err != nil {
+		return err
+	}
+	for file, imps := range ix.ImportsByFile {
+		fileImports, err := json.Marshal(imps)
+		if err != nil {
+			return fmt.Errorf("marshal imports for %s: %w", file, err)
+		}
+		if _, err := tx.Exec(
+			"INSERT INTO file_imports(file,imports) VALUES(?,?) ON CONFLICT(file) DO UPDATE SET imports=excluded.imports",
+			file, string(fileImports)); err != nil {
+			return err
+		}
+	}
 
 	if _, err := tx.Exec("DELETE FROM files"); err != nil {
 		return err
@@ -378,6 +403,16 @@ func (s *SQLiteStore) Load() (*Index, error) {
 		ix.UpdatedAt = t
 	}
 	fmt.Sscanf(maxMtime, "%d", &ix.MaxMtime)
+	// Restore the content-addressed identity if the store has one; indexes
+	// written before identity existed get a nil Identity and fail closed.
+	var identity string
+	_ = s.db.QueryRow("SELECT value FROM meta WHERE key='identity'").Scan(&identity)
+	if identity != "" {
+		var id IndexIdentity
+		if err := json.Unmarshal([]byte(identity), &id); err == nil {
+			ix.Identity = &id
+		}
+	}
 
 	rows, err := s.db.Query("SELECT kind,name,receiver,file,line,\"end\",lang,entry,framework,route,params FROM symbols")
 	if err != nil {
@@ -492,6 +527,25 @@ func (s *SQLiteStore) Load() (*Index, error) {
 		ix.Pkgs[path] = pkg
 	}
 	if err := pr.Err(); err != nil {
+		return nil, err
+	}
+	ix.ImportsByFile = map[string][]string{}
+	fir, err := s.db.Query("SELECT file,imports FROM file_imports")
+	if err != nil {
+		return nil, err
+	}
+	for fir.Next() {
+		var file, imports string
+		if err := fir.Scan(&file, &imports); err != nil {
+			return nil, err
+		}
+		var imps []string
+		if err := json.Unmarshal([]byte(imports), &imps); err != nil {
+			return nil, fmt.Errorf("decode imports for %s: %w", file, err)
+		}
+		ix.ImportsByFile[file] = imps
+	}
+	if err := fir.Err(); err != nil {
 		return nil, err
 	}
 

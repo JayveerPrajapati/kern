@@ -54,6 +54,11 @@ func TestSQLiteRoundTrip(t *testing.T) {
 			t.Errorf("pkg %s name = %q; want %q", p, gotPkg.Name, want.Name)
 		}
 	}
+	for f, want := range ix.ImportsByFile {
+		if !equalStrings(got.ImportsByFile[f], want) {
+			t.Errorf("ImportsByFile[%q] = %v; want %v", f, got.ImportsByFile[f], want)
+		}
+	}
 	for f, h := range ix.FileHashes {
 		if got.FileHashes[f] != h {
 			t.Errorf("file hash %s mismatch", f)

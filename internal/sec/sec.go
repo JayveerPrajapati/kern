@@ -88,7 +88,7 @@ var (
 
 	// reDisabledSsl matches SSL/TLS verification disabled in config files.
 	// Matches: feign.client.ssl.verification.enabled=false
-	//          spring.ssl.bundle.*.keystore.type=NONE (false-positive risk; keep narrow)
+	// spring.ssl.bundle.*.keystore.type=NONE (false-positive risk; keep narrow)
 	reDisabledSsl = regexp.MustCompile(`(?im)^[^#=\s]*(?:ssl|tls|certificate)[^=]*(?:verify|verification|validation|enabled)\s*=\s*false\b`)
 )
 
@@ -146,33 +146,33 @@ func ScanFile(rel string, src []byte) []Finding {
 					continue
 				}
 			}
-	// Deterministic false-positive filters: a scanner that flags its
-	// own detector regexes or schema introspection is noise.
-	if isRegexLiteral(src, idx[0]) {
-		continue
-	}
-	// Skip matches inside source-code comment lines (// or # after
-	// optional whitespace). Documentation examples like
-	// "// Matches: password=secret123" are not real credentials.
-	if isCommentLine(src, idx[0]) {
-		continue
-	}
-	// EMAIL false-positive guards: emails in HTML placeholder
-	// attributes ("placeholder=xyz@gmail.com"), CSS comments
-	// (/* email here */) and HTML comments (<!-- email here -->)
-	// are not hardcoded secrets — they are UX hints or documentation.
-	if r.Label == "EMAIL" && isInertEmailContext(src, idx[0], idx[1]) {
-		continue
-	}
-	// insecure-random false-positive guard: Math.random / rand.Intn
-	// used for visual/animation/game effects (fireworks, particles,
-	// dice rolls) is not security-relevant. Only flag when a security
-	// keyword (token, password, secret, key, session, nonce, csrf,
-	// salt, otp, auth) appears within a context window around the
-	// match — that is the case the rule's own summary targets.
-	if r.ID == "insecure-random" && !hasSecurityContext(src, idx[0]) {
-		continue
-	}
+			// Deterministic false-positive filters: a scanner that flags its
+			// own detector regexes or schema introspection is noise.
+			if isRegexLiteral(src, idx[0]) {
+				continue
+			}
+			// Skip matches inside source-code comment lines (// or # after
+			// optional whitespace). Documentation examples like
+			// "// Matches: password=secret123" are not real credentials.
+			if isCommentLine(src, idx[0]) {
+				continue
+			}
+			// EMAIL false-positive guards: emails in HTML placeholder
+			// attributes ("placeholder=xyz@gmail.com"), CSS comments
+			// (/* email here */) and HTML comments (<!-- email here -->)
+			// are not hardcoded secrets — they are UX hints or documentation.
+			if r.Label == "EMAIL" && isInertEmailContext(src, idx[0], idx[1]) {
+				continue
+			}
+			// insecure-random false-positive guard: Math.random / rand.Intn
+			// used for visual/animation/game effects (fireworks, particles,
+			// dice rolls) is not security-relevant. Only flag when a security
+			// keyword (token, password, secret, key, session, nonce, csrf,
+			// salt, otp, auth) appears within a context window around the
+			// match — that is the case the rule's own summary targets.
+			if r.ID == "insecure-random" && !hasSecurityContext(src, idx[0]) {
+				continue
+			}
 			if r.ID == "sql-injection" && isPragmaTableInfo(src, idx[0]) {
 				continue
 			}

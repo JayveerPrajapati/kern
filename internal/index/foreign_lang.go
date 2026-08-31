@@ -181,11 +181,71 @@ type typeDecl struct {
 // non-Go source file. When built with -tags treesitter, it uses tree-sitter
 // for precise AST-based extraction; otherwise it falls back to regex-based
 // heuristics.
+
+var (
+	// reJavaImport matches a single-line Java import: optional `static`,
+	// then a dotted chain of identifiers optionally ending in `.*`. Group 1
+	// is the full dotted chain (wildcard included).
+	reJavaImport = regexp.MustCompile(`^\s*import\s+(?:static\s+)?([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*|\.[*])*)\s*;`)
+)
+
+// foreignImports extracts package imports for foreign languages whose import
+// syntax is a simple single-line statement (currently Java). Go imports are
+// extracted by goast.go; other languages are not yet covered. Returns nil
+// when the language has no import extraction.
+func foreignImports(src []byte, lang string) []string {
+	switch lang {
+	case "java":
+		var out []string
+		for _, ln := range bytes.Split(src, []byte("\n")) {
+			m := reJavaImport.FindSubmatch(ln)
+			if m == nil {
+				continue
+			}
+			line := string(ln)
+			isStatic := strings.HasPrefix(strings.TrimSpace(line), "import static")
+			if pkg := javaPackagePath(string(m[1]), isStatic); pkg != "" {
+				out = append(out, pkg)
+			}
+		}
+		if len(out) == 0 {
+			return nil
+		}
+		return out
+	}
+	return nil
+}
+
+// javaPackagePath normalizes a Java import to its package path so boundary
+// rules match against directories, not types:
+//   - "a.b.*" (wildcard) is already a package.
+//   - "a.b.C" names a type; the trailing type segment is dropped.
+//   - "a.b.C.m" (static member) drops the member and the type.
+func javaPackagePath(full string, isStatic bool) string {
+	if strings.HasSuffix(full, ".*") {
+		return strings.TrimSuffix(full, ".*")
+	}
+	n := 1
+	if isStatic {
+		n = 2
+	}
+	for i := 0; i < n; i++ {
+		if j := strings.LastIndexByte(full, '.'); j > 0 {
+			full = full[:j]
+		}
+	}
+	return full
+}
+
 func extractForeign(rel string, src []byte, lang string) ([]Symbol, map[string][]string, map[string][]string, *Pkg, error) {
 	// Try tree-sitter first if available. Tree-sitter handles definitions and
 	// call edges precisely; entry points (routes, annotations) still come from
 	// the regex entry rules, so merge them in to keep routes searchable.
+	imports := foreignImports(src, lang)
 	if syms, calls, inherits, pkg, err := tsExtract(rel, src, lang); err == nil {
+		if pkg != nil {
+			pkg.Imports = imports
+		}
 		src = sfcScript(rel, src)
 		if len(bytes.TrimSpace(src)) != 0 {
 			spec := specs[lang]
@@ -268,8 +328,22 @@ func extractForeign(rel string, src []byte, lang string) ([]Symbol, map[string][
 		}
 		if rule.isDef {
 			if bodyEnd > 0 {
+				// Java declares types explicitly, so per-method local-type
+				// tracking + callee resolution promote Java to "resolved"
+				// precision: v.method() is recorded as Type.method() and binds
+				// cross-file against symbols by name, mirroring Go's
+				// resolveCallee. All other languages keep the name-heuristic
+				// path (lt == nil).
+				var lt map[string]string
+				if lang == "java" {
+					lt = collectJavaLocalTypes(f, i, bodyEnd, spec)
+				}
 				for j := i; j < bodyEnd && j < n; j++ {
-					scanCalls(f, j, sym.FullName(), calls, spec)
+					if lt != nil {
+						scanCallsResolved(f, j, sym.FullName(), calls, spec, lt)
+					} else {
+						scanCalls(f, j, sym.FullName(), calls, spec)
+					}
 				}
 			}
 		} else {
@@ -281,10 +355,11 @@ func extractForeign(rel string, src []byte, lang string) ([]Symbol, map[string][
 	syms = append(syms, extractEntries(f, spec, types, syms, rel, lang)...)
 	dedupeCalls(calls)
 	pkg := &Pkg{
-		Name:  filepath.Base(filepath.Dir(rel)),
-		Path:  filepath.Dir(rel),
-		Files: []string{rel},
-		Lang:  lang,
+		Name:    filepath.Base(filepath.Dir(rel)),
+		Path:    filepath.Dir(rel),
+		Files:   []string{rel},
+		Lang:    lang,
+		Imports: imports,
 	}
 	return syms, calls, inherits, pkg, nil
 }
@@ -353,6 +428,18 @@ func enclosingType(line int, types []typeDecl) string {
 }
 
 func scanCalls(f *ffile, i int, owner string, calls map[string][]string, spec *langSpec) {
+	scanCallsInner(f, i, owner, calls, spec, nil)
+}
+
+// scanCallsResolved is scanCalls with receiver-var calls rewritten through a
+// per-method local-types map before recording: v.method(...) is recorded as
+// Type.method(...) when v is a known local of type Type. It drives Java's
+// "resolved" precision tier (see java_resolve.go).
+func scanCallsResolved(f *ffile, i int, owner string, calls map[string][]string, spec *langSpec, lt map[string]string) {
+	scanCallsInner(f, i, owner, calls, spec, lt)
+}
+
+func scanCallsInner(f *ffile, i int, owner string, calls map[string][]string, spec *langSpec, lt map[string]string) {
 	trimmed := strings.TrimSpace(f.lines[i])
 	if trimmed == "" || f.com[i] {
 		return
@@ -378,6 +465,12 @@ func scanCalls(f *ffile, i int, owner string, calls map[string][]string, spec *l
 				continue
 			}
 			full = last
+		}
+		// Resolve a known receiver variable to its declared type before the
+		// self-call check so a call through a local (app.run()) is still seen
+		// as a self-call. A nil lt is a no-op for other languages.
+		if lt != nil {
+			full = resolveJavaCallee(full, lt)
 		}
 		if full == owner {
 			continue
