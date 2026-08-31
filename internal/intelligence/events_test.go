@@ -11,12 +11,11 @@ import (
 // eventIndex builds a code-only index whose graph carries event/topic-like
 // symbols (OrderCreatedEvent, PaymentTopic) plus ordinary symbols that consume
 // and produce them:
-//
-//	Handler -> OrderService
-//	OrderService -> OrderCreatedEvent (producer of the event)
-//	ConsumeOrders -> PaymentTopic (consumer of a topic)
-//	ConsumeOrders -> OrderCreatedEvent
-//	Utility -> OrderService (unrelated helper)
+// Handler -> OrderService
+// OrderService -> OrderCreatedEvent (producer of the event)
+// ConsumeOrders -> PaymentTopic (consumer of a topic)
+// ConsumeOrders -> OrderCreatedEvent
+// Utility -> OrderService (unrelated helper)
 func eventIndex() *index.Index {
 	return &index.Index{
 		Root: "/fake",

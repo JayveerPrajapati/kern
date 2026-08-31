@@ -7,7 +7,6 @@ import (
 )
 
 // --- minimal YAML parser (fixed schema subset, stdlib-only) ---
-//
 // Handles the YAML shapes this package emits: block mappings, block sequences,
 // scalar values (unquoted, single/double quoted, bool/int), flow lists like
 // [a, b], and nested blocks via indentation. It is intentionally NOT a general

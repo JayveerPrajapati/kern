@@ -25,6 +25,10 @@ import (
 type Graph struct {
 	domain.Graph
 	entries map[string]bool
+	// precisionByLang records the edge-precision tier per language, carried
+	// over from the index's PrecisionByLang so strict queries (--precision
+	// strict) can skip call edges whose caller language is not fully resolved.
+	precisionByLang map[string]string
 
 	// Read-only-after-construction caches. The graph is built once (see
 	// FromIndex / NewWithGraph) and treated as immutable afterwards, so these
@@ -151,7 +155,7 @@ func FromIndex(ix *index.Index) Graph {
 		GraphHash:   graphHash(g),
 	}
 
-	return Graph{Graph: g, entries: entries}
+	return Graph{Graph: g, entries: entries, precisionByLang: ix.PrecisionByLang}
 }
 
 // packagePathByFile maps each file in the index's package table to its package
