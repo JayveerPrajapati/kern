@@ -3,19 +3,39 @@ package main
 import (
 	"context"
 	"fmt"
+	"os"
+	"os/signal"
+	"path/filepath"
+	"sort"
+	"strings"
+	"syscall"
+	"time"
+
 	"github.com/JayveerPrajapati/kern/internal/code"
 	"github.com/JayveerPrajapati/kern/internal/doctor"
+	"github.com/JayveerPrajapati/kern/internal/governance"
+	"github.com/JayveerPrajapati/kern/internal/index"
 	"github.com/JayveerPrajapati/kern/internal/intel"
 	"github.com/JayveerPrajapati/kern/internal/lock"
 	"github.com/JayveerPrajapati/kern/internal/pack"
 	"github.com/JayveerPrajapati/kern/internal/prompt"
 	"github.com/JayveerPrajapati/kern/internal/swap"
-	"os"
-	"os/signal"
-	"path/filepath"
-	"strings"
-	"syscall"
 )
+
+// kernJSONContractVersion is the version of kern's machine-readable JSON
+// output contracts (kern guard check --json, kern sec --json). Consumers
+// (e.g. blueprint) must check it before parsing.
+//
+// v2 (P0.4): guard check gains the optional authz_verdict object when
+// --agent-id/--task are supplied; audit append consumes blueprint's
+// ValidationOutcome. Consumers must fail closed on any other version.
+const kernJSONContractVersion = 2
+
+// AuthzVerdictSchemaVersion is the schema version of the nested authz_verdict
+// object emitted by `kern guard check --agent-id <id> --task <desc>` (P0.4
+// shared-state contract with blueprint). It is independent of the top-level
+// kernJSONContractVersion.
+const AuthzVerdictSchemaVersion = 1
 
 func runProject(rest []string) {
 	f, args, err := parseFlags(rest)
@@ -43,9 +63,20 @@ func runPack(rest []string) {
 	if len(args) > 0 {
 		root = args[0]
 	}
+	tier := code.TierFull
+	if f.fold {
+		tier = code.TierFolded
+	} else if f.tier != "" {
+		t, terr := code.ParseTier(f.tier)
+		if terr != nil {
+			fatalUsage("%v", terr)
+		}
+		tier = t
+	}
 	b, err := pack.Build(root, pack.Options{
 		MaxTokens:        f.maxTokens,
 		SkipInstructions: f.noinstructions,
+		Tier:             tier,
 	})
 	if err != nil {
 		fatal("%v", err)
@@ -160,11 +191,23 @@ func runSwap(rest []string) {
 }
 
 func runDoctor(rest []string) {
-	root := "."
-	if len(rest) > 0 {
-		root = rest[0]
+	f, args, err := parseFlags(rest)
+	if err != nil {
+		fatalUsage("flags: %v", err)
 	}
-	fmt.Println(doctor.Render(root, doctor.Run(root)))
+	root := f.root
+	if root == "" {
+		root = "."
+		if len(args) > 0 {
+			root = args[0]
+		}
+	}
+	findings := doctor.Run(root)
+	if f.json {
+		printJSON(findings)
+		return
+	}
+	fmt.Println(doctor.Render(root, findings))
 
 }
 
@@ -301,6 +344,11 @@ func runGuard(rest []string) {
 	if err != nil {
 		fatalUsage("flags: %v", err)
 	}
+	// P0.4: the authz gate needs both halves of the agent identity — an
+	// agent-id without a task description is a usage error.
+	if f.agentID != "" && f.task == "" {
+		fatalUsage("--agent-id requires --task")
+	}
 	sub := "check"
 	if len(args) > 0 {
 		sub = args[0]
@@ -345,26 +393,202 @@ func runGuard(rest []string) {
 			if _, err := os.Stat(filepath.Join(root, p)); err != nil {
 				if os.IsNotExist(err) {
 					// Deleted in the diff: nothing to check — the file's
-					// symbols are gone from the index too (W2-20).
+					// symbols are gone from the index too .
 					continue
 				}
 				fatal("file not found: %s", p)
 			}
 		}
-		violations := intel.CheckBoundaries(ix, b, files)
+
+		// P0.4 authz gate: when both --agent-id and --task are present, run
+		// AuthorizeContext BEFORE the boundary check and surface the verdict in
+		// the JSON output. A denied verdict is a blocking gate: exit 2 without
+		// proceeding to the boundary check.
+		var authzVerdict map[string]any
+		authzDenied := false
+		if f.agentID != "" && f.task != "" {
+			authzVerdict, authzDenied = guardAuthzVerdict(f.agentID, f.task, ix, files)
+		}
+		if authzDenied {
+			if f.json {
+				printJSON(map[string]any{
+					"schema_version":  kernJSONContractVersion,
+					"violations":      []intel.Violation{}, // boundary check skipped
+					"freshness_proof": ix.FreshnessProof(root),
+					"authz_verdict":   authzVerdict,
+				})
+			} else {
+				fmt.Fprintf(os.Stderr, "kern: guard: authz denied for agent %q task %q\n", f.agentID, f.task)
+			}
+			panic(exitError{code: 2})
+		}
+
+		strict := f.precision == "strict"
+		violations, skipped := intel.CheckBoundariesPrecise(ix, b, files, strict)
 		switch {
 		case f.sarif:
 			fmt.Println(intel.RenderViolationsSARIF(violations, version))
 		case f.json:
-			printJSON(map[string]any{"violations": violations})
+			out := map[string]any{
+				"schema_version":  kernJSONContractVersion,
+				"violations":      violations,
+				"freshness_proof": ix.FreshnessProof(root),
+			}
+			// Only surface skipped edges when strict mode actually skipped
+			// some, so default-mode JSON output is unchanged.
+			if len(skipped) > 0 {
+				out["skipped_edges"] = skipped
+			}
+			// The authz_verdict is emitted only when --agent-id/--task were
+			// supplied (backward compat: old callers see no new key).
+			if authzVerdict != nil {
+				out["authz_verdict"] = authzVerdict
+			}
+			printJSON(out)
 		default:
 			fmt.Println(intel.RenderViolations(violations))
+			if len(skipped) > 0 {
+				// A missing boundaries file is not a silent pass: make the gap
+				// visible as a clear WARN (a warning, never a violation — the
+				// exit code stays driven by violations alone).
+				if n := skipped["boundaries-not-configured"]; n > 0 {
+					fmt.Printf("WARN: no boundary rules configured (.kern/boundaries.json not found) — architecture guard NOT enforced; %d files unchecked\n", n)
+				}
+				langs := make([]string, 0, len(skipped))
+				total := 0
+				for l, n := range skipped {
+					if l == "boundaries-not-configured" {
+						continue
+					}
+					if l != "" {
+						langs = append(langs, l)
+					}
+					total += n
+				}
+				sort.Strings(langs)
+				if total > 0 {
+					fmt.Printf("skipped %d heuristic edges across {%s}; use --precision default to trust them\n", total, strings.Join(langs, ","))
+				}
+			}
 		}
 		if f.threshold >= 0 && len(violations) > f.threshold {
-			os.Exit(2)
+			panic(exitError{code: 2})
 		}
 	default:
-		fatalUsage("usage: kern guard <check|init> [root] [--file f1,f2] [--range a..b] [--json|--sarif] [--threshold N]")
+		fatalUsage("usage: kern guard <check|init> [root] [--file f1,f2] [--range a..b] [--json|--sarif] [--threshold N] [--precision default|strict] [--agent-id ID --task DESC]")
 	}
 
+}
+
+// cliDefaultAgentID is the built-in agent identity `kern guard check
+// --agent-id default` resolves to. It mirrors the MCP server's default agent
+// (registered at server init) so the CLI path works standalone.
+const cliDefaultAgentID = "default"
+
+// registerDefaultAgentCLI registers the default agent identity for the CLI,
+// idempotently (re-entry after a prior registration — e.g. across tests
+// sharing the in-memory registry — is a no-op). Mirrors
+// internal/mcp/govern.go's registerDefaultAgent for the standalone CLI path.
+func registerDefaultAgentCLI() {
+	if _, err := governance.GetAgent(cliDefaultAgentID); err == nil {
+		return
+	}
+	_ = governance.RegisterAgent(governance.NewAgent(cliDefaultAgentID, "Default Agent", "default", []governance.Permission{
+		{Resource: "context", Action: "read"},
+	}))
+}
+
+// permissiveGuardMode reports whether the KERN_MCP_PERMISSIVE escape hatch is
+// set (explicit opt-in only: anything except "1"/"true" keeps default
+// governance). Mirrors internal/mcp/govern.go's permissiveMode.
+func permissiveGuardMode() bool {
+	v := os.Getenv("KERN_MCP_PERMISSIVE")
+	return v == "1" || strings.EqualFold(v, "true")
+}
+
+// guardAuthzVerdict runs the P0.4 authorization gate for `kern guard check
+// --agent-id <id> --task <desc>`: it resolves the agent, calls
+// governance.AuthorizeContext against the cwd-scoped default scope, and maps the
+// response to the authz_verdict JSON object. The second return value reports
+// whether the verdict is a blocking denial. Unknown agents fail closed
+// (denied, all requested files blocked) unless KERN_MCP_PERMISSIVE opts into
+// the soft "unknown" verdict (no files denied, no exit-code gate).
+func guardAuthzVerdict(agentID, task string, ix *index.Index, files []string) (map[string]any, bool) {
+	if agentID == cliDefaultAgentID {
+		registerDefaultAgentCLI()
+	}
+
+	agent, aerr := governance.GetAgent(agentID)
+	if aerr != nil {
+		if permissiveGuardMode() {
+			return map[string]any{
+				"schema_version": AuthzVerdictSchemaVersion,
+				"agent_id":       agentID,
+				"task":           task,
+				"decision":       "unknown",
+				"policy_source":  "permissive-default",
+				"denied_files":   []string{},
+				"fingerprint":    "",
+				"decided_at":     time.Now().UTC(),
+			}, false
+		}
+		return map[string]any{
+			"schema_version": AuthzVerdictSchemaVersion,
+			"agent_id":       agentID,
+			"task":           task,
+			"decision":       "denied",
+			"policy_source":  "default-scoped",
+			"denied_files":   files,
+			"fingerprint":    "",
+			"decided_at":     time.Now().UTC(),
+		}, true
+	}
+
+	fw := governance.NewFirewall().WithAgents(agent)
+	req := governance.Request{
+		Task:    task,
+		AgentID: agentID,
+		Root:    ix.Root,
+		// Scope nil: the cwd-scoped default scope (effectiveScope) applies.
+	}
+	resp, err := governance.AuthorizeContext(req, ix, fw)
+	if err != nil && err != governance.ErrUnauthorized {
+		fatal("%v", err)
+	}
+
+	decision := "denied"
+	if resp.Proof.Decision.Allowed {
+		decision = "allowed"
+	}
+
+	return map[string]any{
+		"schema_version": AuthzVerdictSchemaVersion,
+		"agent_id":       agentID,
+		"task":           task,
+		"decision":       decision,
+		"policy_source":  resp.Scope.PolicySource,
+		"denied_files":   deniedFilesForRequest(resp.Scope.Denied, files),
+		"fingerprint":    resp.Proof.Fingerprint,
+		"decided_at":     resp.Proof.DecidedAt,
+	}, decision == "denied"
+}
+
+// deniedFilesForRequest returns the subset of the requested --file set that
+// the authorization scope denied, mapping DeniedSymbol entries to their
+// files. Empty when the scope denied nothing among the requested files.
+func deniedFilesForRequest(denied []governance.DeniedSymbol, files []string) []string {
+	if len(denied) == 0 || len(files) == 0 {
+		return []string{}
+	}
+	deniedSet := make(map[string]bool, len(denied))
+	for _, d := range denied {
+		deniedSet[d.Symbol.File] = true
+	}
+	var out []string
+	for _, f := range files {
+		if deniedSet[f] {
+			out = append(out, f)
+		}
+	}
+	return out
 }

@@ -1,6 +1,6 @@
 # Kern 2.0 — Gap Analysis (Phase 0.4)
 
-Classification: CURRENT / PARTIAL / MISSING. Baseline frozen at `894fb10`.
+Classification: CURRENT / PARTIAL / MISSING. Baseline frozen at `894fb10` (2026-08-23). Reconciled against current source on **2026-08-27** — many items previously marked PARTIAL are now implemented; see the reconciled PARTIAL section below for per-item verdicts with file:line evidence.
 
 ## Fully CURRENT (no work needed)
 1.2 Task state machine (17 states + explicit transitions) · 1.3 Persistence · 1.6 Human takeover · 1.7 Task snapshot
@@ -24,29 +24,56 @@ Test matrix A-J (all 10)
 Build/vet/tests clean; MCP 77 tools
 All 16 former MISSING items (4.3, 4.4, 5.4, 5.10-5.12, 6.9-6.10, 7.5-7.6, 8.5, 13.2, 13.4, 14.2, 15.4, 17.6) — verified CURRENT, see table below
 
-## PARTIAL (exists, tighten)
-1.1 Task aggregate (no project/repo/scope/requester, refs are inline objects not *_ref IDs)
-1.4 No dedicated Pause (only BLOCKED/takeover)
-1.5 Retry no attempt counter/reason/prev-new result
-2.1 No 15 discrete service interfaces (Platform facade instead)
+## PARTIAL — reconciled 2026-08-27
+Re-verified every item against current source on 2026-08-27. Items marked ✅ are now implemented (moved to CURRENT) with evidence. Genuinely-partial items stay PARTIAL with updated notes. (2.5, 19.3 not re-verified this pass.)
+
+### Moved to CURRENT since baseline (verified 2026-08-27)
+1.1 Task aggregate — ✅ `agent.Task` carries Project/Repository/Scope/Requester + `*_ref` IDs (MemoryRef/PolicyRef/ApprovalRef/…/PRRef/LearningRef) (internal/agent/task.go:48-78)
+1.4 Dedicated Pause — ✅ `Task.Pause` (internal/agent/task.go:405), `TaskService.Pause` (internal/app/task.go:998), PriorState for Resume (internal/domain/domain.go:386)
+1.5 Retry attempt/reason/prev-result — ✅ `RetryCount`/`RetryReason`/`LastResult` + `RetryWithReason` (internal/agent/task.go:83-85, 467-473)
+2.1 Discrete service interfaces — ✅ 16 typed service interfaces replace the Platform facade (internal/app/services.go:32-180)
+3.4 Artifact links — ✅ `ArtifactLink` derived_from/supports/contradicts + `Artifact.Links` (internal/domain/entities.go:143, 179-198)
+4.5 Persisted event replay — ✅ `EnablePersistence` + `Replay` (internal/eventbus/eventbus.go:527, 564)
+6.4 Policy precheck — ✅ env/scope/path + firewall identity/permission/risk gate (internal/app/task.go:474-560)
+6.6 Registry purpose field — ✅ `Capability.Purpose` (internal/app/capability.go:30)
+6.7 Planner static — ✅ planner selects role-based model via `agents.ModelOverride(RolePlanner)` (internal/planner/planner.go:60)
+7.3 Unified task scoping — ✅ `TaskScope` unifies paths/services/envs/artifacts + `SetTaskScope` (internal/domain/boundary.go:266-296; internal/app/task.go:642)
+8.4 Constitution provenance — ✅ provenance propagated, default "manual-rule" (internal/governance/constitution.go:145-165)
+9.4/9.5 Routing by risk/language/historical — ✅ `routeModelWithFactors`/`RouteModelForTask` (internal/agents/model_routing.go:120-175)
+9.7 Eval duration — ✅ `EvaluateAgent` records real `Duration` (internal/agents/model_routing.go:102-115)
+9.8 Agent/model A/B — ✅ `CompareModels`/`CompareAgents`/`EvaluateModel` (internal/agents/model_routing.go:175-217)
+10.1/10.2 Fixture — ✅ on-disk fixture `testdata/user_service_slice.json`; flagship drives the exact UserService request (internal/app/flagship_slice_test.go:15, 36-48, 98)
+10.4 Artifact asserts — ✅ RiskReport/Diff/PR asserted + audit via firewall log (internal/app/artifact_coverage_test.go:21-33, 40)
+10.5 Failures consolidated — ✅ single `TestSevenFailureDrill` (internal/app/failure_drill_test.go)
+10.6 Per-lifecycle metrics — ✅ per-op `Recorder` (internal/metrics/metrics.go:83-289)
+11.4 Fix pipeline risk step — ✅ (internal/incident/engine.go:310-314)
+11.5 Learning wired to incident — ✅ resolved incident → `buildIncidentLesson` memory + `LessonRecorded` event (internal/incident/engine.go:219-246)
+12.1 What-if output — ✅ arch/confidence/limitations + historical-evidence surfaced (internal/whatif/whatif.go:73-87; render.go:46-75)
+12.2 Modernization ownership/deps — ✅ `Ownership`/`Dependencies` (internal/modernization/modernization.go:30-33, 206-238)
+12.3 One task per phase — ✅ `ModernizePhaseTasks` materializes each extraction phase as its own task (internal/app/task.go:2783-2796)
+13.1 Trace/Event link — ✅ `Correlation` captures TraceSpans/MetricEvents into the contract (internal/runtime/correlate.go:19-22; correlation_contract.go:51)
+13.3 Single shared correlator — ✅ `SharedCorrelator` (internal/runtime/shared.go:14)
+14.4 Explanation/resolution — ✅ `Explanation`/`Resolution` fields + `Explain()` (internal/domain/consistency.go:44-62)
+16.2 Resume full reconstruction — ✅ `Resume` + `reconstructContext` (internal/app/task.go:748-790)
+16.4 Run-compare — ✅ `RunCompare` (internal/app/task.go:909) + `CompareRuns` (internal/app/efficiency.go:331)
+20.1/20.3/20.4/20.5 Autonomy — ✅ multi-dimension `AutonomyScore` (risk/confidence/env/perms/verification), budget env/perms, multi pause triggers, learning at autonomy level (internal/loop/autonomy_score.go:25; autonomy_triggers.go:13-60; loop.go:224, 588)
+
+### Still PARTIAL (implementation exists but not wired into the primary run path)
+5.3 Min-sufficient selector — `SelectContext` has explicit memory+freshness (internal/context/select.go:119) but is not invoked from `AnalyzeChange`/`assemble`
+5.5 GC completeness — `SetDependencyDistance`/`SetTaskRelation`/`lastUsePenalty` present (internal/context/gc.go:50-59,162,184) but GC not wired into assembly
+5.8 Dedup — `DedupItems` pipeline exists (internal/context/phase5.go:124) but not wired
+5.9 Freshness policy — `ApplyFreshnessPolicy` exists (internal/context/phase5.go:355) but only runs inside the unwired `SelectContext`
+6.8 Tool-decision-trace — recorder exists (internal/app/capability.go:339-360) but `WithTraceRecorder` has no non-test caller; in-memory only
+12.4 Candidate/migration visualization — text render of candidates + phase-tasks exists (internal/app/render.go:348-363); no graph/diagram (DOT/mermaid) output
+14.3 Stale-detection path — consistency engine exists (internal/consistency/engine.go:72) but is not wired into a run path
+15.3 Invalidation marker — `InvalidationMarker`/`InvalidateContext` exist (internal/context/freshness.go:159) + consistency `Invalidations` but not wired
+15.5 Freshness beyond GC — policy only inside unwired `SelectContext`; no wired full-policy application
+16.3 Replay — metadata-level: `ReplayTask(taskID, repoVersion, model, configHash)` accepts args (internal/app/task.go:853-872) but replays the chain without re-execution
+17.3-17.5 Benchmarking — `classMetrics` includes toolCalls/retries/latency/cost/… but all are deterministic token-derived estimates; `reportClassMetrics` returns nil (no gates) (evaluate/bench/main.go:666-730)
+
+### Unchanged from prior pass (not re-verified this pass)
 2.5 No MCP↔CLI↔REST equivalence test
-3.4 Artifact links: parent only (no derived_from/supports/contradicts)
-4.5 Event history in-memory cap 100, no persisted replay
-5.3 Min-sufficient selector (no explicit memory/freshness) · 5.5 GC missing last_used/dependency_distance/task_relation · 5.8 dedup only in GC · 5.9 freshness not full policy
-6.4 Policy precheck (no identity/scope/env) · 6.6 registry no purpose field · 6.7 planner static · 6.8 tool-decision-trace unwired
-7.3 Unified task scoping (context/runtime/artifacts not unified)
-8.4 Constitution provenance not populated
-9.4 Routing by kind only (no risk/language/historical) · 9.5 model routing no language/historical · 9.7 eval duration no-op · 9.8 agent A/B no model A/B
-10.1 fixture not on disk (inline consts) · 10.2 flagship drives "NewServer" not exact request · 10.4 RiskReport/Diff/PR/Audit artifacts not asserted · 10.5 failures scattered not consolidated · 10.6 metrics in stats/bench not per-lifecycle
-11.4 Fix pipeline lacks risk step · 11.5 learning not wired to incident
-12.1 what-if output omits arch/memory/confidence/limitations · 12.2 modernization lacks ownership/deps · 12.3 one task not phase-tasks · 12.4 no candidate/migration visualization
-13.1 Correlation chain lacks Trace/Event link · 13.3 not a single shared service
-14.3 no stale-detection path · 14.4 no explanation/resolution field
-15.3 no invalidation marker · 15.5 freshness only in GC scoring
-16.2 resume not full reconstruction · 16.3 replay missing repo-version/model/config · 16.4 run-compare absent
-17.3 only token reduction measured · 17.4 no ratio/sufficiency report · 17.5 no outcome report
 19.3 enterprise org/team partial (now CURRENT — see Phase 19 roadmap ✅)
-20.1 autonomy score = policy-risk only · 20.3 budget no tool-count/env · 20.4 only budget pause trigger · 20.5 learning not autonomy-level (all now CURRENT — see Phase 20 roadmap ✅)
 
 ## MISSING — none (all 16 items implemented; verified 2026-08-23)
 | ID | Item | Impl (location) |

@@ -8,15 +8,11 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/app"
 	"github.com/JayveerPrajapati/kern/internal/cache"
 	"github.com/JayveerPrajapati/kern/internal/code"
-	"github.com/JayveerPrajapati/kern/internal/coder"
 	"github.com/JayveerPrajapati/kern/internal/docsearch"
-	"github.com/JayveerPrajapati/kern/internal/flight"
 	"github.com/JayveerPrajapati/kern/internal/index"
 	"github.com/JayveerPrajapati/kern/internal/loop"
-	"github.com/JayveerPrajapati/kern/internal/memory"
 	"github.com/JayveerPrajapati/kern/internal/metrics"
 	"github.com/JayveerPrajapati/kern/internal/optimize"
-	"github.com/JayveerPrajapati/kern/internal/planner"
 	"github.com/JayveerPrajapati/kern/internal/schema"
 	"github.com/JayveerPrajapati/kern/internal/stats"
 	"io"
@@ -140,14 +136,14 @@ func runLoopCLI(root, levelStr, intent string) (string, error) {
 }
 
 // runDo is the single-entry "Implement X" command (findings F-12/F-36/F-50).
-// It runs the closed loop at L2 (sandbox modifications) with the autonomous
-// coder wired in as the default code-stage handler, so `kern do "add a cache
-// layer"` drives the full understand→remember→plan→code→verify→protect→
-// observe→learn loop without a caller-supplied StepFunc. The coder uses the
-// provider-neutral LLM factory (KERN_LLM_PROVIDER, default local Ollama); when
-// no provider is reachable the coder returns ErrNoProvider and the loop's code
-// stage surfaces a clear error instead of silently no-op'ing.
-//
+// It routes through TaskService.RunDo, which runs the closed loop at L2
+// (sandbox modifications) with the autonomous coder wired in as the default
+// code-stage handler, so `kern do "add a cache layer"` drives the full
+// understand→remember→plan→code→verify→protect→observe→learn loop without a
+// caller-supplied StepFunc. The coder uses the provider-neutral LLM factory
+// (KERN_LLM_PROVIDER, default local Ollama); when no provider is reachable the
+// coder returns ErrNoProvider and the loop's code stage surfaces a clear error
+// instead of silently no-op'ing.
 // The level (default L2) controls which stages run: L0 read-only, L2 sandbox
 // code, L3 PR creation, L4 deploy with approval. A caller-supplied plan is
 // optional; when empty the loop's plan stage is a no-op and the coder receives
@@ -161,29 +157,12 @@ func runDo(root, levelStr, intent string) (string, error) {
 			return "", err
 		}
 	}
-	// Wire the autonomous coder as the default code-stage handler. The LLM
-	// provider is provider-neutral (KERN_LLM_PROVIDER, default Ollama). When
-	// unreachable, coder.Code returns ErrNoProvider and the loop surfaces it.
-	cdr := coder.New(agent.OllamaProvider())
-	// Wire the LLM-driven planner as the default plan-stage handler. The LLM
-	// provider is provider-neutral (KERN_LLM_PROVIDER, default Ollama). When
-	// unreachable, planner.Plan returns ErrNoProvider and the loop degrades to
-	// an empty plan (non-fatal) while the coder still attempts to code.
-	plr := planner.New(agent.OllamaProvider())
-	cfg := loop.LoopConfig{
-		Root:     root,
-		Level:    level,
-		Mem:      memory.NewMemoryStore(root),
-		Recorder: flight.New(root),
-		Coder:    cdr,
-		Planner:  plr,
-	}
-	l, err := loop.NewLoop(cfg)
+	p, err := app.New(root)
 	if err != nil {
 		return "", err
 	}
-	// nil StepFunc → the loop uses cfg.Coder for the code stage (F-8/F-49).
-	res, err := l.Run(intent, nil)
+	ts := app.NewTaskService(p, nil).WithPRProvider(app.AutoPRProvider())
+	_, res, err := ts.RunDo(intent, level)
 	var b strings.Builder
 	fmt.Fprintf(&b, "intent: %s\n", res.Intent)
 	fmt.Fprintf(&b, "level: %s\n", res.Level)
@@ -208,11 +187,66 @@ func runDo(root, levelStr, intent string) (string, error) {
 	return b.String(), nil
 }
 
+// runWorkflowCLI runs an intent through the agent team ( exit gate) and
+// renders the step trace. A fresh run parks at the human approval gate; the
+// output surfaces the approval ID and the task ID needed to resume.
+func runWorkflowCLI(root, intent string) (string, error) {
+	p, err := app.New(root)
+	if err != nil {
+		return "", err
+	}
+	ts := app.NewTaskService(p, nil).WithPRProvider(app.AutoPRProvider())
+	task, err := ts.RunWorkflowDefault(intent)
+	if err != nil && task == nil {
+		return "", err
+	}
+	return renderWorkflowResult(task, err), nil
+}
+
+// runWorkflowResumeCLI resumes an approval-parked agent-team run for a task.
+func runWorkflowResumeCLI(root, taskID string) (string, error) {
+	p, err := app.New(root)
+	if err != nil {
+		return "", err
+	}
+	ts := app.NewTaskService(p, nil).WithPRProvider(app.AutoPRProvider())
+	task, err := ts.RunWorkflowResume(taskID)
+	if err != nil && task == nil {
+		return "", err
+	}
+	return renderWorkflowResult(task, err), nil
+}
+
+// renderWorkflowResult renders the task state, its selected workflow, the step
+// trace, and any pending approval gate.
+func renderWorkflowResult(task *agent.Task, err error) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "task:     %s\n", task.ID)
+	fmt.Fprintf(&b, "state:    %s\n", task.State)
+	if task.WorkflowID != "" {
+		fmt.Fprintf(&b, "workflow: %s\n", task.WorkflowID)
+	}
+	for _, st := range task.Steps {
+		status := st.Status
+		if status == "" {
+			status = "done"
+		}
+		fmt.Fprintf(&b, "  - %s [%s] %s\n", st.Action, st.AgentID, status)
+	}
+	if id := agent.ApprovalID(err); id != "" {
+		fmt.Fprintf(&b, "\napproval required: %s\n", id)
+		fmt.Fprintf(&b, "resolve: kern approve %s\n", id)
+		fmt.Fprintf(&b, "resume:  kern workflow --task %s\n", task.ID)
+	} else if err != nil {
+		fmt.Fprintf(&b, "error: %v\n", err)
+	}
+	return b.String()
+}
+
 // runStatsPerformance renders the process-wide metrics snapshot (findings
 // F-41/F-46/F-47/F-56). The Recorder is the process-level Default() singleton;
 // main() loads the prior persisted snapshot from cache.Path("metrics.json") on
 // startup so metrics accumulate across CLI invocations, and saves on exit.
-//
 // --reset clears the singleton AND the persisted file (useful for a fresh
 // measurement window). --json emits the structured Snapshot instead of the
 // human-readable Render.
@@ -345,17 +379,36 @@ func fileContext(path string) string {
 	return code.Summarize(path, content, 200).Render()
 }
 
+// exitError is the sentinel panic type used by fatal and fatalUsage to
+// signal a process exit. main() recovers it and converts it back into the
+// exit code, so the metrics-save block runs before the real exit (a direct
+// os.Exit would skip it — os.Exit does not run deferred functions or any
+// code after the call).
+type exitError struct{ code int }
+
+// fatal prints an error to stderr and exits with code 1 (the Unix convention
+// for runtime errors). Keep fatalUsage() for usage errors. Like fatalUsage,
+// it panics with the exitError sentinel instead of calling os.Exit directly
+// so main() can persist metrics before the real exit.
+//
+// MUST be called from the main dispatch goroutine only; panicking from a
+// spawned goroutine will not be recovered and will crash the process.
 func fatal(format string, args ...any) {
 	fmt.Fprintf(os.Stderr, "kern: "+format+"\n", args...)
-	os.Exit(1)
+	panic(exitError{code: 1})
 }
 
 // fatalUsage prints an error to stderr and exits with code 2 (the Unix
 // convention for usage errors). Use it for bad flags, missing required
 // arguments, and unknown commands. Keep fatal() for runtime errors.
+// Like fatal, it panics with the exitError sentinel instead of calling
+// os.Exit directly so main() can persist metrics before the real exit.
+//
+// MUST be called from the main dispatch goroutine only; panicking from a
+// spawned goroutine will not be recovered and will crash the process.
 func fatalUsage(format string, args ...any) {
 	fmt.Fprintf(os.Stderr, "kern: "+format+"\n", args...)
-	os.Exit(2)
+	panic(exitError{code: 2})
 }
 
 func splitNames(s string) []string {

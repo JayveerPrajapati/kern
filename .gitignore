@@ -42,15 +42,23 @@ index.html
 .gemini/
 .kiro/
 .kern/
+.continue/
+.windsurf/
 !internal/app/testdata/fixtures/user_service/.kern/
 !internal/app/testdata/fixtures/user_service/.kern/boundaries.json
 .opencode/node_modules/
 .opencode/package-lock.json
+.cortexkit/
+.blueprint/
 .kern-restore-*
+# Committed test fixture binary leaked build-machine paths; rebuild from source
+internal/app/testdata/fixtures/user_service/user.service.fixture
 CLAUDE.md
 GEMINI.md
 .github/copilot-instructions.md
+.github/hooks/
 TODO.md
 
 # local build artifacts
 /bench
+.aider*

@@ -11,8 +11,7 @@ import (
 // the linked artifacts for that task (ContextPacket → ImpactReport →
 // VerificationReport, chained via parent_artifact_id). Without a task ID, it
 // lists all known artifacts.
-//
-// This is Phase 3's "Unify Artifacts" CLI surface: every Task that runs
+// This is "Unify Artifacts" CLI surface: every Task that runs
 // through TaskService produces a linked artifact chain that is queryable here.
 func runArtifacts(rest []string) {
 	f, args, err := parseFlags(rest)

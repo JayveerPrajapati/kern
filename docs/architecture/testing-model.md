@@ -123,3 +123,21 @@ Every package ships focused unit tests, e.g.:
   real on-disk fixture (`go build`/`go test` inside it) verifies end-to-end
   behavior at the cost of a slower test run, mitigated by lazy construction and
   `-short` skips.
+
+## Named gates - shared convention (E-4)
+
+Blueprint's suite organizes verification as named gates (`TestG<n>_<what>`:
+G14 contract, G22 repair-loop isolation, G26 MCP root confinement ...) so
+"what is verified" is legible per gate. Kern adopts the same convention so
+coverage reads consistently across both repos:
+
+- **Gate-named tests**: `TestGate*` / `TestG<n>_<what>` - one gate, one
+  verifiable claim, with a comment stating the claim.
+- **Existing kern named coverage maps onto it**: the acceptance matrix A-J
+  (internal/app), the guard/intel tests (`TestGuard*`,
+  `TestGuardCheck*`, `TestGuardImportAttribution*`), and the MCP gate tests
+  (`TestGate*`, `TestDispatchGate*` in internal/mcp).
+- **Rule**: a new test that verifies a gate ("a change is rejected /
+  approved / isolated under condition X") is named `TestGate<n>_<what>`
+  (kern) or `TestG<n>_<what>` (blueprint) with a comment naming the claim.
+  Gate numbers are stable; new gates append.

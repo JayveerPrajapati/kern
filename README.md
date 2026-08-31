@@ -4,9 +4,9 @@
 
 Already installed? Run `kern doctor` to verify everything is wired.
 
-### The deterministic, 100% local context optimizer for AI agents
+### The local, deterministic code-intelligence engine for AI agents
 
-**Fewer tokens · honest numbers · zero network calls · one binary**
+**Index · graph · guard · audit · context optimization — one binary, zero network, no telemetry**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Language: Go](https://img.shields.io/badge/Language-Go_1.23+-blue.svg)](https://go.dev/)
@@ -27,7 +27,7 @@ Already installed? Run `kern doctor` to verify everything is wired.
 
 <br>
 
-**77 `kern_*` MCP tools · 50+ CLI commands · 74 detected frameworks · 18 indexed languages (+ Vue/Svelte/Astro SFC)**
+**Phase-aware MCP routing (11 high-level tools by default, 84 in full mode) · 90+ CLI commands · 17 indexed languages (Go + Java resolved; 15 at heuristic precision — skipped under `--precision strict`; build with `-tags treesitter` for AST) · 100% local**
 
 </div>
 
@@ -46,8 +46,10 @@ Already installed? Run `kern doctor` to verify everything is wired.
 - [Configuration](#configuration)
 - [Supported Platforms](#supported-platforms)
 - [Supported Agents](#supported-agents)
+- [GitHub Action](#github-action)
 - [Supported Languages](#supported-languages)
 - [Troubleshooting](#troubleshooting)
+- [Roadmap](#roadmap)
 - [License](#license)
 
 ## Get Started
@@ -69,8 +71,8 @@ powershell -ExecutionPolicy Bypass -c "irm https://raw.githubusercontent.com/Jay
 
 | Method | Command | Notes |
 |---|---|---|
-| **go install** | `go install github.com/JayveerPrajapati/kern/cmd/kern@latest && go install github.com/JayveerPrajapati/kern/cmd/kern-mcp@latest` | Both binaries to `$(go env GOPATH)/bin` |
-| **from source** | `make build` → `bin/kern`, `bin/kern-mcp` | Requires Go 1.23+ |
+| **go install** | `go install github.com/JayveerPrajapati/kern/cmd/kern@latest && go install github.com/JayveerPrajapati/kern/cmd/kern-mcp@latest && go install github.com/JayveerPrajapati/kern/cmd/kern-server@latest` | All three binaries to `$(go env GOPATH)/bin` |
+| **from source** | `make build` → `bin/kern`, `bin/kern-mcp`, `bin/kern-server` | Requires Go 1.23+ |
 
 <sub>`install.sh` (macOS/Linux) and `install.ps1` (Windows) honor `KERN_VERSION`
 (pin a release) and `KERN_INSTALL_DIR` (default `~/.local/bin`); they fall back
@@ -93,6 +95,29 @@ Qoder, Kiro, GitHub Copilot (VS Code + CLI), Continue, and any MCP client via a
 project `.mcp.json`. It is idempotent — run it any time. Check the wiring with
 `kern setup --check`.</sub>
 
+#### MCP clients (Claude Code, Cursor, VS Code)
+Prefer `kern setup` — it wires every agent automatically. To connect a
+specific MCP client manually, point it at the `kern` binary's `mcp`
+subcommand (stdio transport):
+
+**Claude Code:**
+```sh
+claude mcp add kern -- kern mcp
+```
+
+**Cursor / VS Code** — add to your project's `.mcp.json`:
+```json
+{
+  "mcpServers": {
+    "kern": { "command": "kern", "args": ["mcp"] }
+  }
+}
+```
+
+Optional env vars:
+- `KERN_ROOTS` — workspace root paths to index (defaults to cwd).
+- `KERN_BINARY` — path to the kern binary (defaults to PATH).
+
 ### 3. Initialize each project
 
 ```bash
@@ -102,7 +127,7 @@ kern watch .        # daemon: keep it fresh automatically
 ```
 
 <sub>`kern index` builds a real AST index (symbols, call edges, inheritance,
-routes) from `go/ast` plus dependency-free heuristics for 18 languages.
+routes) from `go/ast` plus dependency-free heuristics for 17 languages.
 Every read path re-validates the index against a content-hash manifest, so
 analyses are never served stale — `kern index` is optional in practice and only
 speeds up first use.</sub>
@@ -123,6 +148,18 @@ and the `.mcp.json`/agent-config entries `kern setup` wrote, and you're done.
 
 ## Why kern?
 
+kern gives AI coding agents a **local, deterministic model of your
+codebase** — symbols, call graphs, architecture boundaries, and a
+tamper-evident audit trail — so agents work from evidence instead of
+guessing. It is a code-intelligence and governance engine that runs entirely
+on your machine: one binary, zero network calls, no telemetry.
+
+What's delivered is concrete: a symbol index across 17 languages (Go and Java
+at "resolved" precision), call-graph and blast-radius analysis, architecture
+guards (`kern guard`), an approvals/governance firewall, and a tamper-evident
+audit chain (`kern audit`). On top of that foundation sits context
+optimization:
+
 When an AI agent works, almost every token it consumes passes through the same
 few expensive shapes: raw logs, whole files, prompts padded with boilerplate,
 build output, verbose model replies, repeated file searches. That's context
@@ -133,8 +170,10 @@ every bill bigger.
 are compressed before they're pasted (keeping errors and stack frames).
 A 10,000-line codebase becomes a one-call symbolic map. A giant build log
 becomes "pass/fail + errors". Secrets get masked, filler gets stripped, and
-token counts are exact (byte-level BPE) — so the before/after numbers are
-always honest.
+token counts use a deterministic heuristic estimator (chars/word density per
+content kind) — so the before/after numbers are always honest. Savings stats
+use that estimator; an opt-in byte-level BPE counter is available via
+`kern tokens --bpe`.
 
 > **A note on honesty:** kern measures token reduction **vs. the raw input it
 > is given** — never a LOC→LLM-input ratio. Compression is rule-based and
@@ -169,16 +208,18 @@ kern's engine is a **single static Go binary** — the default build is
 serve. That's what makes the guarantees real:
 
 - **Deterministic by construction** — compression is regex/rule-based, token
-  counts are exact (byte-level BPE) or consistently estimated, and identical
-  input always produces identical output. No model, no randomness, no drift.
+counts use a deterministic heuristic estimator (chars/word density per content
+kind; opt-in byte-level BPE counter via `kern tokens --bpe`), and identical
+input always produces identical output. No model, no randomness, no drift.
 - **Offline by default** — the runtime makes zero network calls and reports
-  zero telemetry. The one explicit exception is `kern docs fetch`, invoked
-  deliberately to pull a public docs page into the local index.
+zero telemetry. The only exceptions are deliberate opt-ins: `kern docs fetch`
+and LLM rewriting via `--llm` / semantic features (local Ollama by default;
+remote providers only if you set `KERN_LLM_PROVIDER`).
 - **Scales down to a VPS** — no worker daemons, no RAM-hungry caches; index
   builds take seconds and every analysis reads from the same persisted
   content-hash-verified index.
 - **Optional precision upgrades, still no infra** — `-tags treesitter` adds
-  tree-sitter extraction for 13 languages (call/inheritance edges, precise
+  tree-sitter extraction for 14 languages (call/inheritance edges, precise
   parsing); `-tags sqlite` swaps the JSON hash cache for a **SQLite WAL +
   FTS5** persistent store with full-text search. Both are build tags — never
   runtime dependencies.
@@ -195,8 +236,8 @@ serve. That's what makes the guarantees real:
 | | |
 |---|---|
 | **Instant value** | One command compresses a noisy log; one command maps a whole project; a 30-second quick start |
-| **Deterministic output** | Rule-based, byte-identical on identical input; exact BPE token counting |
-| **100% private** | No telemetry, no network by default, no paid APIs; optional local Ollama rewriting that silently falls back when absent |
+| **Deterministic output** | Rule-based, byte-identical on identical input; heuristic token counting (opt-in byte-level BPE counter) |
+| **100% private** | No telemetry, no network by default, no paid APIs; optional LLM rewriting (local Ollama by default) that silently falls back when absent |
 | **One command wires every agent** | `kern setup` configures 17+ agent surfaces (MCP-based) in one shot |
 | **Savings you can measure** | Every run is tracked: `kern stats` / `kern diff` report before/after tokens and cost saved |
 | **Real code intelligence** | AST index + dependency-free analysis: change impact, blast radius, hotspots, dead code, call paths, architecture guards, communities, coverage gaps |
@@ -205,7 +246,7 @@ serve. That's what makes the guarantees real:
 | **Surgical context** | `kern context` / `kern explore` / `kern probe` hand the agent exactly the source it needs — no file-by-file crawling |
 | **Safety tooling** | PII masking, secret scanning, hallucination verification (`file:line` claims), snapshot sandbox, self-healing test fixes, JSON-schema validation |
 | **Multi-repo search** | `kern repos add` registers repos; `kern search --repos` / `--semantic` searches across all of them |
-| **Zero-dependency single binary** | Go stdlib only by default; opt-in tree-sitter (13 grammars) and SQLite WAL + FTS5 via build tags |
+| **Zero-dependency single binary** | Go stdlib only by default; opt-in tree-sitter (14 grammars) and SQLite WAL + FTS5 via build tags |
 
 <details>
 <summary><strong>How auto-syncing works — why the index is never stale</strong></summary>
@@ -275,7 +316,7 @@ codebase's stack is answered in one call.
 ┌───────────────────────────────────────────────────────────────────┐
 │                  kern (CLI) / kern-mcp (MCP server)               │
 │                                                                   │
-│  77 kern_* tools → optimize · map · graph · review · verify ...   │
+│  11 high-level tools → optimize · map · graph · review · verify   │
 │                                 │                                 │
 │                                 ▼                                 │
 │                  persisted symbol index (JSON hash cache,         │
@@ -285,15 +326,16 @@ codebase's stack is answered in one call.
 ```
 
 1. **Extraction** — `go/ast` parses Go precisely; a dependency-free extractor
-   (comment/string stripping + per-language declaration rules) covers 17 more
-   languages; `-tags treesitter` upgrades 13 languages to tree-sitter grammar
+   (comment/string stripping + per-language declaration rules) covers 16 more
+   languages; `-tags treesitter` upgrades 14 languages to tree-sitter grammar
    parsing (call/inheritance edges included).
 
 2. **Storage** — everything persists to a content-hash-verified index under
    `~/.cache/kern/` (per project). `-tags sqlite` switches to a SQLite store
    with WAL journaling and FTS5 full-text search for concurrent access.
 
-3. **Analysis** — 50+ commands and 77 MCP tools read the same index:
+3. **Analysis** — 90+ CLI commands and the MCP tool catalog (11 high-level
+   tools by default, 84 in full mode) read the same index:
    call graphs, blast radius, change impact, hotspots, dead code, path
    finding, architecture communities, coverage gaps — all dependency-free,
    all deterministic.
@@ -331,10 +373,15 @@ kern stats [--days N] [--session ID] [--json]    token/cost savings
 kern semcache [stats|clear [NS]|list <NS>|sim <A> <B>]   semantic cache inspection
 kern diff [--session ID]                         recent before/after entries
 kern export --csv                                export stats to CSV
-kern tokens [--bpe] "<text>"                     token count (estimator or exact BPE)
+kern tokens [--bpe] "<text>"                     token count (estimator or byte-level BPE counter)
 kern setup [--root DIR] [--agents mcp,opencode,claude]   wire kern into agents
 kern setup --check                               show wiring status
 kern buddy [root]                                session onboarding digest
+kern onboard [root]                              register + index + wire a repo for kern (session-start)
+kern artifacts [task-id]                         inspect task artifacts (ContextPacket → ImpactReport → VerificationReport chain)
+kern correlate <alert-json> [--root ROOT]        correlate a production alert to evidence (alert → service → commit → symbol)
+kern learn [threshold]                           extract recurring patterns from engineering memory
+kern modernize [root]                            phased monolith modernization plan
 kern prompt <template> [--file PATH] [--task TEXT]   fine-tuned prompt templates
 kern prompt list                                 list templates
 kern remember "<lesson>" / kern memory / kern recall "<prompt>"   project memory
@@ -365,10 +412,18 @@ kern fw [root] [--catalog]                       framework detection
 kern verify <file|-> [root]                     hallucination check: file:line claims; `kern verify <types>` (build,test,security,arch,deps) runs the verification engine
 kern validate [root]                             run the project's build/test, compact
 kern heal "<task>" [--model MODEL] [--rounds N]  snapshot-based LLM auto-fix
+kern analyze <change> [--root ROOT]          analyze a proposed change against the whole system (ADR)
+kern team [--root ROOT]                      build the standard specialist team; list roles + task states
+kern risk <change> [--root ROOT]             deterministic risk report for a proposed change
+kern bridges [root] [--limit N] [--json]     cross-package bridge detection (coupling points)
 kern sandbox "<command>"                         run with filesystem snapshot + rollback
 kern schema ...                                  JSON-schema validation
 kern docs index/search/fetch                     local docs index for doc search
 kern version                                     print the installed version
+kern serve [--root PATH] [--addr ADDR] [--enterprise] [--project NAME=PATH]...
+                                                start the REST API + dashboard server
+                                                (single-project, or --enterprise multi-project
+                                                with shared org audit/memory/policies)
 ```
 
 ### `kern exec` — think in code
@@ -392,9 +447,30 @@ and `kern validate` share the same gate.
 
 ## MCP Tools
 
-When running as an MCP server (`kern-mcp`), kern exposes **77 `kern_*`
-tools**. They map 1:1 to the CLI commands, so opencode, Claude Code, Codex,
-Cursor and 12 more agents get the full engine over MCP:
+kern's MCP server is **auditable, sandboxed, and governance-aware** — not just
+another code-intelligence MCP. Three properties set it apart:
+
+- **Auditable** — every tool call lands in a tamper-evident SHA-256 hash chain
+  (`kern audit`). `VerifyChain()` detects tampering. External systems append
+  via `kern audit append`. Most MCP servers have no audit trail.
+- **Sandboxed** — `KERN_MCP_ROOTS` confines path arguments to workspace roots;
+  the `WithPreToolHook` gate denies calls before side effects; `kern_sandbox`
+  runs commands in a filesystem snapshot with rollback. Most MCP servers run
+  with full user privileges and no rollback.
+- **Governance-aware** — an approval workflow gates risky changes; `kern guard`
+  enforces architecture boundaries; phase-aware routing keeps agents focused
+  instead of overwhelmed — 4 phases (explore/plan/edit/verify), each with a
+  focused shortlist. Set `KERN_MCP_PHASE=explore` to filter the advertised
+  tools; the full 84-tool catalog stays behind `KERN_MCP_FULL=1`.
+  Most MCP servers expose capability with no policy layer.
+
+When running as an MCP server (`kern-mcp`), kern exposes an **11-tool
+high-level surface by default** (routed through `kern_meta`), with the full
+**toolset (84 tools)** behind `KERN_MCP_FULL=1` for advanced use — and
+phase-aware routing (`KERN_MCP_PHASE=explore|plan|edit|verify`) as the
+default way to keep the advertised list focused. They map 1:1 to the CLI
+commands, so opencode, Claude Code, Codex, Cursor and 12 more agents get the
+engine over MCP:
 
 | Group | Tools |
 |---|---|
@@ -403,38 +479,37 @@ Cursor and 12 more agents get the full engine over MCP:
 | **Change & review** | `kern_changes`, `kern_review`, `kern_churn`, `kern_trace`, `kern_hubs`, `kern_bridges`, `kern_arch`, `kern_dead`, `kern_larges`, `kern_test_gaps`, `kern_cochange` |
 | **Safety** | `kern_mask_pii`, `kern_security`, `kern_safe_delete`, `kern_verify_output`, `kern_guard_check`, `kern_schema_validate`, `kern_sandbox` |
 | **Automation** | `kern_run_build`, `kern_validate`, `kern_heal`, `kern_exec`, `kern_execute`, `kern_rename`, `kern_diff_files`, `kern_commitmsg`, `kern_doc_fetch`, `kern_doc_index`, `kern_doc_search`, `kern_precache`, `kern_memory_add`, `kern_memory_list`, `kern_memory_recall`, `kern_memory`, `kern_lock`, `kern_unlock`, `kern_lock_status`, `kern_semcache`, `kern_stats`, `kern_usage_guide`, `kern_buddy` |
-| **Kern 2.0 high-level** | `kern_analyze`, `kern_plan`, `kern_impact`, `kern_what_if`, `kern_verify`, `kern_incident`, `kern_agents`, `kern_loop`, `kern_correlate`, `kern_learn`, `kern_modernize` |
+| **High-level workflow** | `kern_analyze`, `kern_plan`, `kern_impact`, `kern_what_if`, `kern_verify`, `kern_incident`, `kern_agents`, `kern_loop`, `kern_correlate`, `kern_learn`, `kern_modernize` |
 
 <sub>Tools are available both over stdio (any MCP client) and the Streamable
 HTTP transport with an Origin allow-list (loopback only; empty origins are
 accepted for non-browser clients).</sub>
 
-### Kern 2.0 — AI Software Engineering Control Plane
+### High-level analysis & workflow tools
 
-The **Kern 2.0 high-level tools** (`kern_analyze`, `kern_plan`, `kern_impact`,
+The **high-level tools** (`kern_analyze`, `kern_plan`, `kern_impact`,
 `kern_what_if`, `kern_verify`, `kern_incident`, `kern_agents`, `kern_loop`,
 `kern_correlate`, `kern_learn`, `kern_modernize`)
-extend kern from a context optimizer into an **AI Software Engineering
-Operating System** — a continuously-updated software digital twin with
-engineering memory, a reasoning engine, a policy firewall, a multi-agent
-runtime, and a verification system.
+build higher-level workflows on the index and graph: analyzing a proposed
+change against the whole system, planning the change, estimating blast
+radius, verifying claims, and recovering from incidents — deterministic and
+local, like everything else in kern.
 
-The core loop: **UNDERSTAND → REMEMBER → REASON → PLAN → ACT → VERIFY →
-PROTECT → OBSERVE → LEARN ↺**. Four non-negotiable principles:
+The design loop: **UNDERSTAND → REMEMBER → REASON → PLAN → ACT → VERIFY →
+PROTECT → OBSERVE → LEARN ↺**. The governing principles:
 
-1. **Kern is the platform; MCP is one interface** among many (CLI, REST, SDK,
-   IDE, Git, CI/CD, Web UI).
-2. **Don't throw away existing kern** — inspect, reuse, refactor incrementally.
-3. **Deterministic things stay deterministic** — AST, graph, hashes, policy,
+1. **Deterministic things stay deterministic** — AST, graph, hashes, policy,
    and tests are never turned into LLM guesses. LLMs are used only for
    planning, reasoning, and summarization.
-4. **Every important AI claim is typed** — FACT, INFERENCE, HYPOTHESIS, or
+2. **Every important AI claim is typed** — FACT, INFERENCE, HYPOTHESIS, or
    RECOMMENDATION — with source, provenance, timestamp, scope, and confidence.
+3. **Governance is local-first** — approvals, policy, and the tamper-evident
+   audit chain (`kern audit`) gate what an agent may do, and every governed
+   action is recorded.
 
-Autonomy levels L0–L5 gate which stages run: L0 is read-only; L2 enables
-code generation in a sandbox worktree; L4 adds deploy with human approval;
-L5 is full closed-loop autonomy. The default is L0 — no code is ever written
-or deployed without explicit configuration.
+The broader north-star ambitions — a multi-agent runtime, additional surfaces
+(REST/SDK/IDE/K8s/webhooks), deployment, and a production feedback loop — are
+explicitly **future**; see [Roadmap](#roadmap).
 
 ---
 
@@ -450,6 +525,7 @@ The complete list of network touchpoints, all explicit and optional:
 |---|---|---|
 | `kern_doc_fetch` (MCP tool) | you ask | pulls one public docs page into the local index |
 | `kern --llm` / semantic search | you pass a flag | talks to your **local** Ollama instance for rewriting/embeddings |
+| `kern --llm` + `KERN_LLM_PROVIDER` (`anthropic`/`openai`/`google`) | you pass a flag **and** set the provider env | optional remote LLM rewriting — sends your prompt to the chosen vendor's API; never invoked by default |
 
 Everything else — compression, indexing, analysis, search, masking, token
 counting — runs entirely on your machine. If you're reading a prompt that
@@ -492,6 +568,7 @@ your code, not third-party noise.
 
 Any other platform: `go install` (or build from source — stdlib only, no
 CGO required for the default build).
+Release binaries are built with CGO_ENABLED=0 for portability, so the bundled lightweight build uses fast regex extraction instead of the optional tree-sitter grammars and JSON (not SQLite) caching; build locally with `-tags "sqlite treesitter"` to enable full FTS5 search and tree-sitter extraction.
 
 ---
 
@@ -510,7 +587,8 @@ native hooks for agents whose hook APIs allow it:
 | **Codex** | `[mcp_servers.kern]` in `~/.codex/config.toml` | — (no output-rewrite hook API) |
 | **JSON adapters** | `continue`, `windsurf`, `zed`, `vscode`, `antigravity`, `qwen`, `qoder`, `kiro`, `copilot` (VS Code), `copilot-cli` | — (no hook API) |
 
-All agents receive the same 77 MCP tools and the same `AGENTS.md` rules. Output
+All agents receive the same MCP surface (11 high-level tools by default, 84
+in full mode, phase-filtered via `KERN_MCP_PHASE`) and the same `AGENTS.md` rules. Output
 compression + session memory run natively where the platform's hook API allows
 in-place output replacement (opencode, Claude Code, Gemini); agents without
 such an API keep full MCP parity but no automatic interception. Generated
@@ -519,22 +597,65 @@ wiring files carry machine-specific binary paths, so `kern setup` adds them to
 
 ---
 
+## GitHub Action
+
+`action/action.yml` ships a reusable **composite GitHub Action** ("kern Code
+Review") that runs kern's code-intelligence review on a PR — blast radius,
+token savings, edge confidence, and boundary guard checks — and posts the
+result as a PR comment (updating the previous `<!-- kern-review -->` comment
+on re-runs). Reference it from any workflow:
+
+```yaml
+- uses: JayveerPrajapati/kern/action@v0.8.0
+  with:
+    install-method: download   # "download" (prebuilt binary) or "go-install"
+    fail-on-risk: "false"      # "true" fails the job on boundary guard violations
+    range: origin/main..HEAD   # optional; defaults to base..HEAD from the PR event
+```
+
+Inputs: `range` (git range to review, default `base..HEAD` from the PR
+event), `root` (project root, default `.`), `file` (comma-separated files to
+review instead of a range), `review-max` (token budget for the blast-radius
+panel, default `6000`), `fail-on-risk` (fail on guard violations), `version`
+(kern version to install, default `latest`), and `install-method`
+(`download` or `go-install`, default `download`).
+
 ## Supported Languages
 
 Updated by one content-hash manifest; language is detected by extension or
-shebang. **18 languages indexed by default** (dependency-free heuristics):
+shebang. **17 languages indexed by default** (dependency-free heuristics):
 
 Go · Python · JavaScript (JSX) · TypeScript (TSX) · Rust · C · C++ · C# ·
-Java · Ruby · PHP · Shell · CSS/SCSS/Less · HTML · Markdown · JSON · YAML · Dart
+Java · Ruby · PHP · Shell · CSS/SCSS/Less · HTML · Markdown · JSON · YAML
 
 <sub>Vue/Svelte single-file components and Astro pages extract their
 `<script>`/frontmatter blocks and index them as JS/TS (`<script lang="ts">`
 included) — so the same 17-language pipeline covers frontend SFCs too. Go is
 parsed precisely with `go/ast`.</sub>
 
-**13 languages upgraded with tree-sitter** (`-tags treesitter` build):
-Go · Python · JavaScript · TypeScript (+ TSX) · Bash/Shell · C · C++ · CSS ·
+**14 languages upgraded with tree-sitter** (`-tags treesitter` build):
+Go · Python · JavaScript · TypeScript · TSX · Bash/Shell · C · C++ · CSS ·
 Java · PHP · Ruby · Rust · Dart — inheritance edges and precise calls included.
+
+### Precision
+
+kern indexes 17 languages. In the default (dependency-free) build, Go and
+Java are at **resolved** precision (compiler-accurate call edges); the other
+15 are at **heuristic** precision (regex-based, skipped under
+`--precision strict`).
+
+For AST-level precision on 14 more languages (Python, JavaScript, TypeScript,
+TSX, Bash, C, C++, CSS, PHP, Ruby, Rust, Dart, and more), build with
+`-tags treesitter`. This requires CGO and the tree-sitter grammar
+dependencies — see `go.mod`.
+
+Run `kern doctor` or `kern index --status` to see which languages are resolved
+for your build.
+
+This tradeoff (dependency-free default vs. AST-precision opt-in) is
+intentional: kern's core value is 100% local, zero-config operation.
+Tree-sitter is available for users who need deeper cross-language analysis and
+can accept the CGO dependency.
 
 ---
 
@@ -559,6 +680,32 @@ Common situations:
 
 If `kern doctor` reports warnings it's usually optional wiring — the verdict
 lines say exactly what to run next.
+
+---
+
+## Roadmap
+
+kern's delivered scope is a local code-intelligence and governance engine. The
+north-star vision extends further — these are explicitly **future** and not yet
+shipped:
+
+- **ModelProvider abstraction** — pluggable LLM backends (OpenAI, Anthropic,
+  Google) beyond the current Ollama-only path.
+- **Additional surfaces** — IDE integrations and a Kubernetes operator are
+  still future. REST API, typed Go SDK, outbound webhooks, and the HTML
+  dashboard are **shipped**: start them with `kern serve` (single-project
+  REST + dashboard) or `kern serve --enterprise` (multi-project, shared org
+  audit/memory/policies).
+- **Multi-agent runtime** — coordinated agent orchestration with shared state.
+- **Production feedback loop** — runtime trace correlation and deployment
+  evidence chains.
+- **Enterprise/shared mode** — **shipped** via `kern serve --enterprise`:
+  multiple projects behind one listener with shared org-level audit log, event
+  bus, memory store, and policy set, gated by a bearer token (`KERN_AUTH_TOKEN`).
+  Multi-user/centrally-hosted server deployment is still future.
+
+What's shipped today is the foundation: index, graph, guard, audit, context
+optimization, and the MCP/CLI surfaces. Everything above builds on it.
 
 ---
 
