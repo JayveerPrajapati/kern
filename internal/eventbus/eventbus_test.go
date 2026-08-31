@@ -205,6 +205,7 @@ func TestEventKindsAreDistinct(t *testing.T) {
 		TestRunCompleted,
 		SecurityFinding,
 		ArchitectureViolation,
+		ArchitectureWarning,
 		IncidentInvestigated,
 		RootCauseDetermined,
 		FixProposed,

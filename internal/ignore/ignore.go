@@ -211,7 +211,6 @@ func globToRegexp(p string) string {
 // Directory-only patterns exclude every path beneath the matching directory.
 // The last matching rule wins, so a deeper negation re-includes an earlier
 // ignore (and a deeper ignore beats a shallower one).
-//
 // Git semantics: a negation pattern ("!…") cannot re-include a file if any of
 // its ancestor directories is excluded by an earlier rule, because git does
 // not descend into excluded directories. This prevents "build/keep.go" from

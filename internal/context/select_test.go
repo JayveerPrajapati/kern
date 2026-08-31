@@ -5,8 +5,7 @@ import (
 	"time"
 
 	"github.com/JayveerPrajapati/kern/internal/domain"
-	"github.com/JayveerPrajapati/kern/internal/governance/firewall"
-	"github.com/JayveerPrajapati/kern/internal/governance/identity"
+	"github.com/JayveerPrajapati/kern/internal/governance"
 )
 
 func mkSel(id string, class domain.ContextClass, rel float64) domain.ContextItem {
@@ -63,9 +62,9 @@ func TestSelectContextAppliesSelectionOrder(t *testing.T) {
 func TestSelectContextPermissionsFilter(t *testing.T) {
 	// Agent may read "source" but not "context". Per resourceForItem, facts map
 	// to "source" (kept) and constraints map to "context" (denied).
-	agent := identity.NewAgent("a1", "coder", "code",
-		[]identity.Permission{{Resource: "source", Action: "read"}})
-	fw := firewall.NewFirewall().WithAgents(agent)
+	agent := governance.NewAgent("a1", "coder", "code",
+		[]governance.Permission{{Resource: "source", Action: "read"}})
+	fw := governance.NewFirewall().WithAgents(agent)
 
 	items := []domain.ContextItem{
 		mkSel("fact", domain.ContextFact, 0.9),             // source -> allowed

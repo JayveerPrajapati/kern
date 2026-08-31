@@ -96,3 +96,32 @@ func TestNewWithOptions(t *testing.T) {
 		t.Error("verifyTypes not set")
 	}
 }
+
+func TestNewHonorsModelOverrideEnv(t *testing.T) {
+	// With no env override and no WithModel, the model stays empty so the
+	// provider's own default is used (provider-neutral).
+	t.Setenv("KERN_MODEL_CODER", "")
+	t.Setenv("KERN_MODEL_DEFAULT", "")
+	if a := New(nil); a.model != "" {
+		t.Errorf("model with no env override = %q, want empty", a.model)
+	}
+
+	// KERN_MODEL_CODER drives the default model for coder.New.
+	t.Setenv("KERN_MODEL_CODER", "codellama:7b")
+	if a := New(nil); a.model != "codellama:7b" {
+		t.Errorf("model with KERN_MODEL_CODER = %q, want codellama:7b", a.model)
+	}
+
+	// KERN_MODEL_DEFAULT applies when the role var is unset.
+	t.Setenv("KERN_MODEL_CODER", "")
+	t.Setenv("KERN_MODEL_DEFAULT", "deepseek-coder")
+	if a := New(nil); a.model != "deepseek-coder" {
+		t.Errorf("model with KERN_MODEL_DEFAULT = %q, want deepseek-coder", a.model)
+	}
+
+	// Explicit WithModel still overrides the env (env is only the default).
+	t.Setenv("KERN_MODEL_CODER", "codellama:7b")
+	if a := New(nil, WithModel("llama3")); a.model != "llama3" {
+		t.Errorf("WithModel must override env, got %q", a.model)
+	}
+}

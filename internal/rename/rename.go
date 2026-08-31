@@ -65,7 +65,6 @@ func (e *ErrNotSupported) Error() string { return "rename not supported: " + e.R
 
 // Rename computes every edit needed to rename oldName to newName across the
 // indexed project. It never touches the filesystem; call Apply to commit.
-//
 // oldName is either a package-level Go symbol ("Adder") or a method
 // ("Type.Method"). A method rename is all-or-nothing: it requires every
 // .Method reference in the project to be provably on a receiver typed as

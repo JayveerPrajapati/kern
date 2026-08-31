@@ -5,20 +5,18 @@ import (
 	"time"
 
 	"github.com/JayveerPrajapati/kern/internal/domain"
-	"github.com/JayveerPrajapati/kern/internal/governance/firewall"
+	"github.com/JayveerPrajapati/kern/internal/governance"
 )
 
-// This file implements the remaining Phase 5 Context Runtime features:
-//
-//	P5.3 min-sufficient selector        SelectMinimal
-//	P5.4 per-item authorization         AuthorizeItems
-//	P5.5 GC completeness (last_used)    GC.lastUsePenalty
-//	P5.8 dedup pipeline                 DedupItems
-//	P5.9 freshness policy               ApplyFreshnessPolicy
-//	P5.10 paging                          PageItems
-//	P5.11 leases                          LeaseManager
-//	P5.12 replay engine                  ReplayPacket
-//
+// This file implements the remaining Context Runtime features:
+// P5.3 min-sufficient selector        SelectMinimal
+// P5.4 per-item authorization         AuthorizeItems
+// P5.5 GC completeness (last_used)    GC.lastUsePenalty
+// P5.8 dedup pipeline                 DedupItems
+// P5.9 freshness policy               ApplyFreshnessPolicy
+// P5.10 paging                          PageItems
+// P5.11 leases                          LeaseManager
+// P5.12 replay engine                  ReplayPacket
 // All are additive and deterministic; nothing here calls an LLM.
 
 // resourceForItem maps a context item to a governance resource name so the
@@ -38,7 +36,7 @@ func resourceForItem(item domain.ContextItem) string {
 // holder. It is a thin, backward-compatible wrapper around AuthorizeItemsScoped
 // that checks only the agent → resource dimension. A nil firewall authorizes
 // everything (backward-compatible).
-func AuthorizeItems(items []domain.ContextItem, fw *firewall.Firewall, holder string) []domain.ContextItem {
+func AuthorizeItems(items []domain.ContextItem, fw *governance.Firewall, holder string) []domain.ContextItem {
 	return AuthorizeItemsScoped(items, fw, domain.ContextAuthorization{Agent: holder})
 }
 
@@ -56,19 +54,18 @@ func containsString(list []string, s string) bool {
 // scoped authorization dimensions: agent (via the firewall), repository, task,
 // tenant/team, and security classification. It fails closed — an unauthorized
 // dimension excludes the item from the returned set and records a DenyReason.
-//
-//   - Firewall dimension: if fw is non-nil, the item is denied unless the agent
-//     may read resourceForItem(item).
-//   - Repository dimension: when auth.Repository is set and the item is scoped
-//     to a different repository, the item is denied.
-//   - Task dimension: when auth.TaskID is set and the item is scoped to a
-//     different task, the item is denied.
-//   - Tenant dimension: when auth.Tenant is set and the item is scoped to a
-//     different tenant, the item is denied; a non-empty AllowedTenants list also
-//     denies an item whose tenant is not in it.
-//   - Security-class dimension: a non-empty AllowedSecurityClasses list denies
-//     an item whose SecurityClass is not in it.
-func AuthorizeItemsScoped(items []domain.ContextItem, fw *firewall.Firewall, auth domain.ContextAuthorization) []domain.ContextItem {
+// - Firewall dimension: if fw is non-nil, the item is denied unless the agent
+// may read resourceForItem(item).
+// - Repository dimension: when auth.Repository is set and the item is scoped
+// to a different repository, the item is denied.
+// - Task dimension: when auth.TaskID is set and the item is scoped to a
+// different task, the item is denied.
+// - Tenant dimension: when auth.Tenant is set and the item is scoped to a
+// different tenant, the item is denied; a non-empty AllowedTenants list also
+// denies an item whose tenant is not in it.
+// - Security-class dimension: a non-empty AllowedSecurityClasses list denies
+// an item whose SecurityClass is not in it.
+func AuthorizeItemsScoped(items []domain.ContextItem, fw *governance.Firewall, auth domain.ContextAuthorization) []domain.ContextItem {
 	out := make([]domain.ContextItem, 0, len(items))
 	for i := range items {
 		item := &items[i]
@@ -139,12 +136,11 @@ func DedupItems(items []domain.ContextItem) []domain.ContextItem {
 	return out
 }
 
-// CanonicalizeItems implements the Phase 5.8 canonical-fact dedup model: for
+// CanonicalizeItems implements the canonical-fact dedup model: for
 // items that share the same content digest, the FIRST occurrence is kept as the
 // canonical item and each later duplicate's ID is appended to the canonical
 // item's EvidenceRefs (the duplicates become evidence references for the single
 // canonical fact). Items without a digest are always kept unchanged.
-//
 // Output ordering: canonical items (one per digest, in first-seen order)
 // followed by the distinct digest-less items in their original relative order.
 func CanonicalizeItems(items []domain.ContextItem) []domain.ContextItem {

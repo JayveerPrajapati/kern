@@ -174,8 +174,8 @@ func TestDetectLangFromContent(t *testing.T) {
 		{"use strict;\nprint 1;", "perl"},
 		{"local x = 1\nfunction f() end", "lua"},
 		{"fn main() { println!(\"hi\"); }", "rust"},
-		{"x = 42", ""},                 // ambiguous → no detection
-		{"   \n  \n", ""},              // empty → no detection
+		{"x = 42", ""},    // ambiguous → no detection
+		{"   \n  \n", ""}, // empty → no detection
 	}
 	for _, c := range cases {
 		got := DetectLang(c.code)

@@ -10,29 +10,26 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/verification"
 )
 
-// Phase 17 — Benchmarking.
-//
+// Benchmarking.
 // This file implements the benchmarking reports:
-//
-//	17.3 token reduction (already measured; surfaced here per task)
-//	17.4 ratio/sufficiency report
-//	17.5 task-outcome report
-//	17.6 `kern efficiency <task-id>`
-//
+// 17.3 token reduction (already measured; surfaced here per task)
+// 17.4 ratio/sufficiency report
+// 17.5 task-outcome report
+// 17.6 `kern efficiency <task-id>`
 // All metrics are derived deterministically from the task's own recorded state
 // (context packet, steps, evidence, risks, verification, snapshots). No LLM.
 
-// ContextQualityReport is the Phase 17.4 context-quality report for a task.
+// ContextQualityReport is the context-quality report for a task.
 type ContextQualityReport struct {
 	TaskID         string  `json:"task_id"`
 	TokenCount     int     `json:"token_count"`
-	BaselineTokens int     `json:"baseline_tokens"`      // raw-context baseline (heuristic ~4x)
-	TokenReduction float64 `json:"token_reduction_pct"`  // % vs raw-context baseline
+	BaselineTokens int     `json:"baseline_tokens"`     // raw-context baseline (heuristic ~4x)
+	TokenReduction float64 `json:"token_reduction_pct"` // % vs raw-context baseline
 	FactsTotal     int     `json:"facts_total"`
-	FactsBacked    int     `json:"facts_backed"`          // facts carrying evidence
-	Relevance      float64 `json:"relevance_pct"`         // relevant-context ratio: backed/total * 100
+	FactsBacked    int     `json:"facts_backed"`  // facts carrying evidence
+	Relevance      float64 `json:"relevance_pct"` // relevant-context ratio: backed/total * 100
 	RisksCount     int     `json:"risks_count"`
-	Sufficiency    string  `json:"sufficiency"`           // "sufficient" | "partial" | "insufficient"
+	Sufficiency    string  `json:"sufficiency"` // "sufficient" | "partial" | "insufficient"
 	// StaleContextRatio is the % of context claims whose source signals they are
 	// stale/invalidated/superseded (0-100). Deterministic: it counts claims whose
 	// Source contains "stale", "invalidated", or "superseded". Typical packets
@@ -43,13 +40,13 @@ type ContextQualityReport struct {
 	// using Claim.Statement as the dedup key. Typical packets have distinct
 	// statements, so this defaults to 0.
 	DuplicateContextRatio float64 `json:"duplicate_context_ratio"`
-	ToolCalls      int     `json:"tool_calls"`            // actual (deterministic) tool calls
-	ToolCallReduction float64 `json:"tool_call_reduction_pct"` // % vs naive baseline
-	RetryReduction float64 `json:"retry_reduction_pct"`   // % retries avoided vs naive baseline
-	Summary        string  `json:"summary"`
+	ToolCalls             int     `json:"tool_calls"`              // actual (deterministic) tool calls
+	ToolCallReduction     float64 `json:"tool_call_reduction_pct"` // % vs naive baseline
+	RetryReduction        float64 `json:"retry_reduction_pct"`     // % retries avoided vs naive baseline
+	Summary               string  `json:"summary"`
 }
 
-// TaskOutcomeReport is the Phase 17.5 task-outcome report for a task.
+// TaskOutcomeReport is the task-outcome report for a task.
 type TaskOutcomeReport struct {
 	TaskID          string        `json:"task_id"`
 	State           string        `json:"state"`
@@ -57,7 +54,7 @@ type TaskOutcomeReport struct {
 	Artifacts       int           `json:"artifacts"`
 	Evidence        int           `json:"evidence"`
 	Duration        time.Duration `json:"duration"`
-	Outcome         string        `json:"outcome"`  // "success", "failure", "pending"
+	Outcome         string        `json:"outcome"` // "success", "failure", "pending"
 	RolledBack      bool          `json:"rolled_back"`
 	EstimatedCost   float64       `json:"estimated_cost"`   // deterministic $ estimate
 	VerifiedSuccess bool          `json:"verified_success"` // success AND verification passed
@@ -71,23 +68,23 @@ type TaskOutcomeReport struct {
 	// PostDeployRegression is true when the task shows evidence of a post-deploy
 	// regression. Deterministic best-effort: the task state contains "ROLLED_BACK",
 	// or any artifact path mentions a rollback report.
-	PostDeployRegression bool `json:"post_deploy_regression"`
+	PostDeployRegression bool   `json:"post_deploy_regression"`
 	Summary              string `json:"summary"`
 }
 
 // EfficiencyReport is the consolidated report for `kern efficiency <task-id>`
-// (Phase 17.6): context quality + task outcome.
+// Context quality + task outcome.
 type EfficiencyReport struct {
 	TaskID  string               `json:"task_id"`
 	Quality ContextQualityReport `json:"quality"`
 	Outcome TaskOutcomeReport    `json:"outcome"`
-	// Baseline is the Phase 17.3 baseline-vs-Kern comparison (input tokens,
+	// Baseline is the baseline-vs-Kern comparison (input tokens,
 	// tool calls, retries, cost reduction percentages) for this task.
 	Baseline BaselineComparison `json:"baseline"`
 }
 
 // BuildEfficiencyReport derives the efficiency report for a task from its own
-// state (Phase 17.4/17.5/17.6). It is deterministic.
+// state ( /17.5/17.6). It is deterministic.
 func BuildEfficiencyReport(t *agent.Task) EfficiencyReport {
 	return EfficiencyReport{
 		TaskID:   t.ID,
@@ -303,36 +300,36 @@ func RenderEfficiencyReport(r EfficiencyReport) string {
 	return b.String()
 }
 
-// RunSummary is a single benchmark/efficiency run record used for Phase 16.4
+// RunSummary is a single benchmark/efficiency run record used for
 // two-run comparison. It is fully deterministic and LLM-free.
 type RunSummary struct {
-	Agent        string  `json:"agent"`
-	Model        string  `json:"model"`
-	Baseline     int     `json:"baseline_tokens"`
-	KernTokens   int     `json:"kern_tokens"`
+	Agent          string  `json:"agent"`
+	Model          string  `json:"model"`
+	Baseline       int     `json:"baseline_tokens"`
+	KernTokens     int     `json:"kern_tokens"`
 	TokenReduction float64 `json:"token_reduction_pct"`
-	ToolCalls    int     `json:"tool_calls"`
-	Retries      int     `json:"retries"`
-	LatencyMs    int64   `json:"latency_ms"`
-	Cost         float64 `json:"cost"`
-	Success      bool    `json:"success"`
+	ToolCalls      int     `json:"tool_calls"`
+	Retries        int     `json:"retries"`
+	LatencyMs      int64   `json:"latency_ms"`
+	Cost           float64 `json:"cost"`
+	Success        bool    `json:"success"`
 }
 
-// RunDiff is the Phase 16.4 result of comparing two RunSummary records.
+// RunDiff is the result of comparing two RunSummary records.
 type RunDiff struct {
 	Agent          string  `json:"agent"`
 	Model          string  `json:"model"`
-	ContextDelta   int     `json:"context_tokens_delta"`    // b - a (negative = fewer = better)
+	ContextDelta   int     `json:"context_tokens_delta"`     // b - a (negative = fewer = better)
 	ReductionDelta float64 `json:"token_reduction_delta_pp"` // b - a in percentage points
-	ToolDelta      int     `json:"tool_calls_delta"`        // b - a (negative = better)
-	RetryDelta     int     `json:"retries_delta"`           // b - a (negative = better)
-	CostDelta      float64 `json:"cost_delta"`              // b - a (negative = cheaper)
-	LatencyDelta   int64   `json:"latency_ms_delta"`        // b - a (negative = faster)
-	SuccessDelta   string  `json:"success_delta"`           // "same" | "improved" | "regressed"
+	ToolDelta      int     `json:"tool_calls_delta"`         // b - a (negative = better)
+	RetryDelta     int     `json:"retries_delta"`            // b - a (negative = better)
+	CostDelta      float64 `json:"cost_delta"`               // b - a (negative = cheaper)
+	LatencyDelta   int64   `json:"latency_ms_delta"`         // b - a (negative = faster)
+	SuccessDelta   string  `json:"success_delta"`            // "same" | "improved" | "regressed"
 }
 
 // CompareRuns diffs two run/efficiency records on agent, model, context,
-// reduction, tools, cost, latency, and success (Phase 16.4). It is
+// reduction, tools, cost, latency, and success. It is
 // deterministic and LLM-free.
 func CompareRuns(a, b RunSummary) RunDiff {
 	d := RunDiff{

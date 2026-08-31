@@ -55,7 +55,7 @@ func TestCheckConsistencySameSourceNoConflict(t *testing.T) {
 	}
 }
 
-// TestConflictResultEnum verifies Phase 14.2: the overall ConflictResult enum.
+// TestConflictResultEnum verifies the overall ConflictResult enum.
 func TestConflictResultEnum(t *testing.T) {
 	// Empty claims -> UNKNOWN.
 	r := CheckConsistency(nil)
@@ -74,7 +74,7 @@ func TestConflictResultEnum(t *testing.T) {
 	}
 }
 
-// TestConflictExplanationPopulated verifies Phase 14.4: each conflict carries an
+// TestConflictExplanationPopulated verifies each conflict carries an
 // explanation of why it was flagged.
 func TestConflictExplanationPopulated(t *testing.T) {
 	claims := []domain.Claim{
@@ -90,7 +90,7 @@ func TestConflictExplanationPopulated(t *testing.T) {
 	}
 }
 
-// TestStaleDetection verifies Phase 14.3: a conflict where one side is stale is
+// TestStaleDetection verifies a conflict where one side is stale is
 // attributed to staleness, and an all-stale agreeing group yields STALE.
 func TestStaleDetection(t *testing.T) {
 	old := time.Now().Add(-10 * 24 * time.Hour) // older than staleness bound

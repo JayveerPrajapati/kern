@@ -216,11 +216,15 @@ func countHits(lines []string, words map[string]bool) int {
 	return hits
 }
 
-// classify picks the change type. Code changes are typed by fix/feat/refactor
-// keyword hits in added lines (highest score wins, fix first for ties); a
-// change touching only tests is "test" and only docs is "docs"; otherwise
-// "chore". Doc/test type is decided by file kind, never by content keywords,
-// so prose mentioning "docs" cannot outvote a code change.
+// classify picks the commit message. When the change adds top-level Go
+// declarations (col-0 func/type/var/const), the type is driven by those
+// declarations alone — a new exported symbol is a feature, and incidental
+// fix keywords in surrounding body lines can no longer outvote it. Without
+// added declarations, it falls back to fix/feat/refactor keyword hits over
+// the added lines (highest score wins, fix first for ties). A change touching
+// only tests is "test" and only docs is "docs"; otherwise "chore". Doc/test
+// type is decided by file kind, never by content keywords, so prose mentioning
+// "docs" cannot outvote a code change.
 func classify(files []fileChange) string {
 	var codeFiles, testFiles, docFiles []fileChange
 	for _, f := range files {
@@ -242,6 +246,34 @@ func classify(files []fileChange) string {
 		}
 		return "chore"
 	}
+
+	// Declaration-aware path: the added top-level declarations are the signal,
+	// not the incidental keywords in modified bodies.
+	if decls, lines := codeAddedDeclarations(codeFiles); len(decls) > 0 {
+		for _, d := range decls {
+			if isExported(d) {
+				return "feat" // new public API is the strongest feature signal
+			}
+		}
+		best, bestScore := "chore", 0
+		for _, sig := range []struct {
+			typ   string
+			words map[string]bool
+		}{
+			{"feat", featWords}, {"fix", fixWords}, {"refactor", refactorWords},
+		} {
+			if s := countHits(lines, sig.words); s > bestScore {
+				best, bestScore = sig.typ, s
+			}
+		}
+		if bestScore > 0 {
+			return best
+		}
+		// New top-level symbols with no decisive keyword footprint: additive
+		// new code.
+		return "feat"
+	}
+
 	scores := map[string]int{"fix": 0, "feat": 0, "refactor": 0}
 	for _, f := range codeFiles {
 		scores["fix"] += countHits(f.added, fixWords)
@@ -256,6 +288,113 @@ func classify(files []fileChange) string {
 		}
 	}
 	return best
+}
+
+// codeAddedDeclarations collects the added top-level declarations across the
+// code files (names, preserving case) and their source lines, so classification
+// can weight declarations instead of arbitrary added body lines.
+func codeAddedDeclarations(codeFiles []fileChange) (names []string, lines []string) {
+	for _, f := range codeFiles {
+		for _, l := range f.added {
+			if n, ok := declOf(l); ok {
+				names = append(names, n)
+				lines = append(lines, l)
+			}
+		}
+	}
+	return names, lines
+}
+
+// declOf reports whether a line begins a top-level Go declaration (at column 0,
+// so an indented function/local is ignored) and returns the declared symbol's
+// name preserving case. Handles func, methods (func (r *Recv) Name), type, var
+// and const.
+func declOf(line string) (string, bool) {
+	if line == "" {
+		return "", false
+	}
+	switch line[0] {
+	case ' ', '\t':
+		return "", false // indented → not a top-level declaration
+	}
+	var rest string
+	switch {
+	case strings.HasPrefix(line, "func "):
+		rest = strings.TrimSpace(strings.TrimPrefix(line, "func "))
+		if strings.HasPrefix(rest, "(") {
+			rest = trimAfterReceiver(rest) // method: drop the receiver, keep Name
+		}
+	case strings.HasPrefix(line, "type "):
+		rest = strings.TrimSpace(strings.TrimPrefix(line, "type "))
+	case strings.HasPrefix(line, "var "):
+		rest = strings.TrimSpace(strings.TrimPrefix(line, "var "))
+	case strings.HasPrefix(line, "const "):
+		rest = strings.TrimSpace(strings.TrimPrefix(line, "const "))
+	default:
+		return "", false
+	}
+	name := firstIdent(rest)
+	if name == "" {
+		return "", false
+	}
+	return name, true
+}
+
+// trimAfterReceiver consumes a leading "(" ... ")" receiver and returns what
+// follows (the method name).
+func trimAfterReceiver(s string) string {
+	if !strings.HasPrefix(s, "(") {
+		return s
+	}
+	depth := 0
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case '(':
+			depth++
+		case ')':
+			depth--
+			if depth == 0 {
+				return strings.TrimSpace(s[i+1:])
+			}
+		}
+	}
+	return s
+}
+
+// firstIdent returns the first identifier in s (preserving case), or "".
+func firstIdent(s string) string {
+	for i := 0; i < len(s); i++ {
+		if isIdentStart(s[i]) {
+			j := i + 1
+			for j < len(s) && isIdentChar(s[j]) {
+				j++
+			}
+			return s[i:j]
+		}
+	}
+	return ""
+}
+
+func isIdentStart(c byte) bool {
+	return c == '_' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+}
+
+func isIdentChar(c byte) bool {
+	return isIdentStart(c) || (c >= '0' && c <= '9')
+}
+
+// isExported reports whether name is an exported Go identifier (uppercase).
+func isExported(name string) bool {
+	return name != "" && name[0] >= 'A' && name[0] <= 'Z'
+}
+
+// isTestFunc reports whether name is a Go test/benchmark/example function that
+// should not name a commit's subject.
+func isTestFunc(name string) bool {
+	return strings.HasPrefix(name, "Test") ||
+		strings.HasPrefix(name, "Benchmark") ||
+		strings.HasPrefix(name, "Example") ||
+		strings.HasPrefix(name, "Fuzz")
 }
 
 // scopeOf is the common directory prefix of the changed files, with generic
@@ -298,9 +437,18 @@ func scopeOf(files []fileChange) string {
 	return strings.Join(dirs, "/")
 }
 
-// subjectNoun picks the strongest noun from the added lines: the first
+// subjectNoun picks the strongest noun from the added lines: the first added
+// top-level declaration's identifier (the new symbol the commit introduces),
+// skipping Go test/benchmark/example functions; else the first
 // function/method identifier, else the first identifier token.
 func subjectNoun(files []fileChange) string {
+	for _, f := range files {
+		for _, l := range f.added {
+			if n, ok := declOf(l); ok && !isTestFunc(n) {
+				return strings.ToLower(n)
+			}
+		}
+	}
 	for _, f := range files {
 		for _, l := range f.added {
 			trimmed := strings.TrimSpace(l)
@@ -365,6 +513,13 @@ func lastIdent(s string) string {
 }
 
 func classifyNote(f fileChange) string {
+	// Prefer the top-level declaration the file adds, so the note names the
+	// introduced symbol instead of grabbing two random tokens from a body line.
+	for _, l := range f.added {
+		if n, ok := declOf(l); ok && !isTestFunc(n) {
+			return "add " + strings.ToLower(n)
+		}
+	}
 	words := tokenizeWords(strings.Join(f.added, " "))
 	if len(words) == 0 {
 		return ""

@@ -284,6 +284,44 @@ func TestMergeFetchedSearchableAndReplaceable(t *testing.T) {
 	}
 }
 
+// TestIndexDirPreservesFetchedDocs: a full re-index (what `kern docs index`
+// and kern_doc_index do) must not silently drop documents previously merged
+// via MergeFetched — indexing must not undo fetching.
+func TestIndexDirPreservesFetchedDocs(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "local.md"), []byte("local project notes about the deploy pipeline here"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	text := strings.Repeat("The react useState hook lets you manage component state. ", 40)
+	if _, err := MergeFetched(dir, "react", text); err != nil {
+		t.Fatal(err)
+	}
+	// Full re-index (what kern doc index / kern_doc_index does).
+	ix, err := IndexDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := ix.Search("useState component state", 2)
+	if len(res) == 0 {
+		t.Fatal("fetched doc lost after re-index")
+	}
+	if res[0].Doc.Chunk.File != "fetch/react.md" {
+		t.Fatalf("expected fetch/react.md to rank first, got %s", res[0].Doc.Chunk.File)
+	}
+	// And the re-indexed result persists across a reload.
+	if err := ix.Save(); err != nil {
+		t.Fatal(err)
+	}
+	ix2 := Load(dir)
+	if ix2 == nil {
+		t.Fatal("index not persisted")
+	}
+	res2 := ix2.Search("useState component state", 2)
+	if len(res2) == 0 || res2[0].Doc.Chunk.File != "fetch/react.md" {
+		t.Fatalf("fetched doc lost after persisted re-index: %+v", res2)
+	}
+}
+
 func TestReembedFetchAttachesDenseVectors(t *testing.T) {
 	dir := t.TempDir()
 	text := strings.Repeat("The react useState hook manages component state. ", 40)

@@ -200,15 +200,10 @@ func Compress(text string) (string, int) {
 			continue
 		}
 		// Strip inline filler phrases from prose lines (preserving code
-		// fences and payload). This catches phrases like "Well, I think
-		// that, you know, basically just" that wrap a real sentence.
-		// Payload lines (code, paths, "file:line", "a = b") must never be
-		// rewritten, so guard stripInlineFiller with carriesPayload — the
-		// same check isFiller already uses for the drop decision.
-		if carriesPayload(clean) {
-			out = append(out, raw[:len(trimmed)-len(clean)]+clean)
-			continue
-		}
+		// fences). stripInlineFiller only removes filler phrases and keeps
+		// any payload, so it is safe to run on payload lines too: a short
+		// line like "Sure! The dispatch is in server.go. Hope that helps!"
+		// keeps its payload while losing the filler.
 		stripped := stripInlineFiller(clean)
 		out = append(out, raw[:len(trimmed)-len(clean)]+stripped)
 	}
@@ -398,6 +393,15 @@ var inlineFillerPhrases = []string{
 	"just ",   // "just returns" → "returns"
 	"really ", // "really good" → "good"
 	"very ",   // "very fast" → "fast"
+	"sure! ", "sure, ", "sure ",
+	"i'd be happy to help you with that. ",
+	"i'd be happy to help you with that.",
+	"i'd be happy to help", "i'd be happy to ",
+	"i'd be glad to help", "i'd be glad to ",
+	"hope that helps! ", "hope that helps!",
+	"hope that helps", "hope this helps! ", "hope this helps!",
+	"hope this helps",
+	"let me know if you need anything else", "let me know if you need anything",
 }
 
 // stripInlineFiller removes conversational filler phrases from a prose line.
@@ -445,6 +449,22 @@ func stripInlineFiller(s string) string {
 			changed = true
 		}
 	}
+	// Strip trailing filler phrases (e.g., " Hope that helps!" at end of line)
+	for {
+		found := false
+		for _, phrase := range inlineFillerPhrases {
+			if strings.HasSuffix(lower, phrase) {
+				s = s[:len(s)-len(phrase)]
+				lower = strings.ToLower(s)
+				changed = true
+				found = true
+				break
+			}
+		}
+		if !found {
+			break
+		}
+	}
 	if !changed {
 		return s
 	}
@@ -453,7 +473,7 @@ func stripInlineFiller(s string) string {
 	s = strings.TrimSpace(s)
 	s = strings.TrimPrefix(s, ", ")
 	s = strings.TrimPrefix(s, ",")
-	// Collapse ", , " → ", "
+	// Collapse ",, " → ", "
 	for strings.Contains(s, ", , ") {
 		s = strings.ReplaceAll(s, ", , ", ", ")
 	}

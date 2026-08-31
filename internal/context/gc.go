@@ -10,18 +10,17 @@ import (
 
 // GC runs the context garbage-collection pipeline over a set of context items.
 // It scores each item's relevance and decides a GCAction (KEEP/COMPRESS/DEMOTE/
-// ARCHIVE/DROP). Strict Plan Phase 5 P1.
-//
+// ARCHIVE/DROP). .
 // Scoring factors:
-//   - task relevance (does the item's content match the task intent/target?)
-//   - freshness (how recently was the item observed?)
-//   - authority (is the source authoritative: graph > memory > tool > history?)
-//   - duplicate relationship (is this item a duplicate of another?)
-//   - last use (has the item been referenced recently?)
-//   - dependency_distance (how far the item's target is from the task target in
-//     the dependency graph — nearer = higher score / keep)
-//   - task_relation (how directly the item relates to the current task — more
-//     directly related = higher score / keep)
+// - task relevance (does the item's content match the task intent/target?)
+// - freshness (how recently was the item observed?)
+// - authority (is the source authoritative: graph > memory > tool > history?)
+// - duplicate relationship (is this item a duplicate of another?)
+// - last use (has the item been referenced recently?)
+// - dependency_distance (how far the item's target is from the task target in
+// the dependency graph — nearer = higher score / keep)
+// - task_relation (how directly the item relates to the current task — more
+// directly related = higher score / keep)
 type GC struct {
 	intent   string
 	target   string

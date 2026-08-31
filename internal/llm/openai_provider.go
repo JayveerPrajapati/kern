@@ -18,7 +18,6 @@ import (
 // OpenAICompatibleProvider speaks the OpenAI chat/completions + embeddings wire
 // format against a configurable base URL and API key. One adapter covers OpenAI
 // plus any OpenAI-compatible host (OpenRouter, Groq, LiteLLM, vLLM).
-//
 // Env: OPENAI_BASE_URL (default https://api.openai.com/v1), OPENAI_API_KEY,
 // OPENAI_MODEL, OPENAI_EMBED_MODEL.
 type OpenAICompatibleProvider struct {

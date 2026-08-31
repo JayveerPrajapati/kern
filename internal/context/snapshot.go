@@ -6,7 +6,7 @@ import (
 
 // Snapshot builds a compact ContextSnapshot from a ContextPacket. The snapshot
 // is a minimal representation of the task's current state, suitable for
-// resume/replay. Strict Plan Phase 5 P1.
+// resume/replay. .
 func Snapshot(pkt domain.ContextPacket, taskState, nextAction string) domain.ContextSnapshot {
 	snap := domain.ContextSnapshot{
 		Goal:       pkt.Intent.RawText,

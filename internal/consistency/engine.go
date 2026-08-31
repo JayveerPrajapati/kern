@@ -1,5 +1,5 @@
 // Package consistency provides a cross-engine, multi-source consistency checker
-// (Strict Plan Phase 14). It compares several knowledge sources — graph,
+// ( ). It compares several knowledge sources — graph,
 // digital twin, memory, Git, runtime, architecture, tests — about the same
 // subject, detects version/fingerprint mismatches as stale, and produces
 // human-readable conflict explanations. All logic is deterministic: no live LLM.
@@ -53,22 +53,19 @@ type Result struct {
 	// PerSubject maps each subject to its own classification.
 	PerSubject map[string]domain.ConflictResult
 	// Invalidations are the freshness markers recorded for every stale
-	// source/subject (Phase 15.3), so stale context is not silently reused.
+	// source/subject, so stale context is not silently reused.
 	Invalidations []contextpkg.InvalidationMarker
 }
 
 // Check checks every subject against sources, producing a per-subject and
 // overall classification.
-//
 // Stale detection: a source is STALE for a subject when its version differs
 // from the newest version reported by any source claiming that subject, or
 // when its UpdatedAt is older than the freshness bound. Stale sources are
 // invalidated and excluded from conflict resolution.
-//
 // Conflict detection: among the non-stale sources claiming a subject, if any
 // two claim distinct values the subject is in CONFLICT and the first distinct
 // pair is reported with a full explanation.
-//
 // UNKNOWN: a subject no source claims. NO_CONFLICT: every claimed subject
 // agrees across fresh sources. The overall classification is the highest
 // severity: CONFLICT > STALE > UNKNOWN > NO_CONFLICT.
@@ -203,7 +200,6 @@ func (e *Engine) classifySubject(sources []Source, subject string, now time.Time
 
 	// Fresh sources agree, but if any source claiming this subject was stale
 	// the evidence cannot be fully trusted → downgrade the subject to STALE
-	// (Phase 14.3).
 	if len(stale) > 0 {
 		return domain.ConflictStale, conflicts, stale, downgrades
 	}

@@ -13,7 +13,6 @@ import (
 
 // GoogleProvider speaks the Gemini generateContent API. Generate only — no
 // embedding endpoint, so Capabilities.Embed=false.
-//
 // Env: GEMINI_API_KEY, GEMINI_MODEL (default gemini-2.5-flash).
 type GoogleProvider struct {
 	APIKey  string

@@ -586,7 +586,6 @@ func sortedKeys(m map[string]int) []string {
 }
 
 // --- Disk persistence (cross-process CLI metrics) ---
-//
 // The CLI runs as a fresh process per invocation, so in-memory metrics are
 // lost on exit. Save/Load persist a Snapshot to disk so `kern stats
 // performance` can show accumulated metrics across invocations. The MCP
@@ -618,7 +617,6 @@ func (r *Recorder) Save(path string) error {
 // counters/durations into this Recorder. A missing file is a no-op (returns
 // nil). This allows the CLI to accumulate metrics across process invocations:
 // each invocation loads the prior state, records its own metrics, then saves.
-//
 // Merging strategy: duration-based metrics are converted back to a single
 // synthetic duration entry (avg * count) so the next Snapshot recomputes
 // approximately the same average. Counters are added directly.

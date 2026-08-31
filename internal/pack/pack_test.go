@@ -1,10 +1,14 @@
 package pack
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
+
+	"github.com/JayveerPrajapati/kern/internal/code"
 )
 
 func writeTree(t *testing.T, files map[string]string) string {
@@ -22,7 +26,7 @@ func writeTree(t *testing.T, files map[string]string) string {
 	return root
 }
 
-func TestBuildPacksEverythingInPathOrder(t *testing.T) {
+func TestBuildPacksEverythingDeterministic(t *testing.T) {
 	root := writeTree(t, map[string]string{
 		"AGENTS.md":       "# rules\nfollow the style\n",
 		"README.md":       "# demo\n",
@@ -40,19 +44,27 @@ func TestBuildPacksEverythingInPathOrder(t *testing.T) {
 	if len(b.Files) != 3 {
 		t.Fatalf("expected 3 source files, got %d", len(b.Files))
 	}
-	// Path order.
+	// Files are ordered by sha256(relative path) — a KV-cache-friendly
+	// deterministic order, not lexical.
 	got := []string{b.Files[0].Path, b.Files[1].Path, b.Files[2].Path}
 	want := []string{"cmd/main.go", "internal/a/a.go", "internal/b/b.go"}
+	sort.Slice(want, func(i, j int) bool { return pathHash(want[i]) < pathHash(want[j]) })
 	for i := range want {
 		if got[i] != want[i] {
-			t.Fatalf("file order = %v, want %v", got, want)
+			t.Fatalf("file order = %v, want sha256-path order %v", got, want)
 		}
 	}
-	// Content actually packed.
-	if !strings.Contains(b.Files[0].Content, "package main") {
-		t.Fatalf("content not packed: %q", b.Files[0].Content)
+	// Content actually packed (locate by path — hash order is not lexical).
+	var mainGo *File
+	for i := range b.Files {
+		if b.Files[i].Path == "cmd/main.go" {
+			mainGo = &b.Files[i]
+		}
 	}
-	if b.Files[0].Tokens == 0 {
+	if mainGo == nil || !strings.Contains(mainGo.Content, "package main") {
+		t.Fatalf("cmd/main.go content not packed: %+v", b.Files)
+	}
+	if mainGo.Tokens == 0 {
 		t.Fatalf("expected token count > 0")
 	}
 	out := b.Render()
@@ -104,6 +116,7 @@ func TestBuildHonorsGitignoreAndKernignore(t *testing.T) {
 	for _, f := range b.Files {
 		paths = append(paths, f.Path)
 	}
+	sort.Strings(paths)
 	if len(paths) != 2 || paths[0] != "keep.go" || paths[1] != "main.go" {
 		t.Fatalf("expected only keep.go and main.go, got %v", paths)
 	}
@@ -158,6 +171,7 @@ func TestNestedGitignoreHonoredByPack(t *testing.T) {
 	for _, f := range b.Files {
 		paths = append(paths, f.Path)
 	}
+	sort.Strings(paths)
 	want := []string{"main.go", "sub/keep.go"}
 	if len(paths) != len(want) {
 		t.Fatalf("expected %v, got %v", want, paths)
@@ -280,6 +294,125 @@ func TestTreeAndJSON(t *testing.T) {
 	for _, frag := range []string{`"root"`, `"files"`, `"content"`, `"tokens"`} {
 		if !strings.Contains(js, frag) {
 			t.Fatalf("JSON missing %q", frag)
+		}
+	}
+}
+
+// TestPackDeterministicOrder packs the same file set twice and asserts the
+// rendered bundles are byte-identical: same order, same content — the property
+// LLM prompt caches rely on.
+func TestPackDeterministicOrder(t *testing.T) {
+	root := writeTree(t, map[string]string{
+		"zebra.go":      "package z\nfunc Z() {}\n",
+		"alpha.go":      "package a\nfunc A() {}\n",
+		"internal/m.go": "package m\nvar M = 1\n",
+		"beta/b.go":     "package b\nvar B = 2\n",
+	})
+	b1, err := Build(root, Options{Root: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b2, err := Build(root, Options{Root: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal([]byte(b1.Render()), []byte(b2.Render())) {
+		t.Fatalf("packs of the same file set must be byte-identical:\n%s\n---\n%s", b1.Render(), b2.Render())
+	}
+	for i := range b1.Files {
+		if b1.Files[i].Path != b2.Files[i].Path || b1.Files[i].Content != b2.Files[i].Content {
+			t.Fatalf("file %d differs between packs: %+v vs %+v", i, b1.Files[i], b2.Files[i])
+		}
+	}
+}
+
+// TestPackOrderIsPathHashStable asserts the packed order equals a stable sort
+// of the file set by sha256(relative path), computed independently of the pack.
+func TestPackOrderIsPathHashStable(t *testing.T) {
+	files := map[string]string{
+		"a.go":     "package a\n",
+		"b.go":     "package b\n",
+		"c/d.go":   "package d\n",
+		"zebra.go": "package z\n",
+		"main.go":  "package main\n",
+		"x/y/z.go": "package zz\n",
+	}
+	root := writeTree(t, files)
+	b, err := Build(root, Options{Root: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Expected order: the file set sorted by sha256 of the relative path.
+	var want []string
+	for rel := range files {
+		want = append(want, rel)
+	}
+	sort.Slice(want, func(i, j int) bool { return pathHash(want[i]) < pathHash(want[j]) })
+	var got []string
+	for _, f := range b.Files {
+		got = append(got, f.Path)
+	}
+	if len(got) != len(want) {
+		t.Fatalf("packed %d files, want %d: %v", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("pack order = %v, want sha256-path order %v", got, want)
+		}
+	}
+	// sha256(path) is stable: same path always hashes the same way.
+	if pathHash("a.go") != pathHash("a.go") {
+		t.Fatalf("pathHash must be deterministic")
+	}
+}
+
+// TestPackWithFold packs a tree with Tier=folded (the --fold flag) and asserts
+// Go and non-Go files carry signatures with bodies elided by line-counted
+// placeholders.
+func TestPackWithFold(t *testing.T) {
+	root := writeTree(t, map[string]string{
+		"main.go": "package main\n\nfunc Greet(name string) string {\n\treturn \"hi \" + name\n}\n",
+		"util.py": "def helper():\n    return 1\n",
+	})
+	b, err := Build(root, Options{Root: root, Tier: code.TierFolded})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sawGo, sawPy bool
+	for _, f := range b.Files {
+		switch f.Path {
+		case "main.go":
+			sawGo = true
+			if !strings.Contains(f.Content, "func Greet(name string) string {") {
+				t.Fatalf("folded Go file must keep the signature:\n%s", f.Content)
+			}
+			if strings.Contains(f.Content, `return "hi " + name`) {
+				t.Fatalf("folded Go file must elide the body:\n%s", f.Content)
+			}
+			if !strings.Contains(f.Content, "// ... body elided: 1 lines ...") {
+				t.Fatalf("folded Go file must carry an elided-lines placeholder:\n%s", f.Content)
+			}
+		case "util.py":
+			sawPy = true
+			if strings.Contains(f.Content, "return 1") {
+				t.Fatalf("folded python file must elide the body:\n%s", f.Content)
+			}
+			if !strings.Contains(f.Content, "# ... body elided: 1 lines ...") {
+				t.Fatalf("folded python file must carry an elided-lines placeholder:\n%s", f.Content)
+			}
+		}
+	}
+	if !sawGo || !sawPy {
+		t.Fatalf("expected main.go and util.py in the pack, got %v", b.Files)
+	}
+	// Tier=full is the default and packs the original source unchanged.
+	bFull, err := Build(root, Options{Root: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range bFull.Files {
+		if f.Path == "main.go" && !strings.Contains(f.Content, `return "hi " + name`) {
+			t.Fatalf("tier=full must pack the original source:\n%s", f.Content)
 		}
 	}
 }

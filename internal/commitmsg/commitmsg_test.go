@@ -137,6 +137,71 @@ rename to new file.go
 	}
 }
 
+func TestGenerateDeclarationExportedIsFeat(t *testing.T) {
+	// A new exported declaration is a feature even when the surrounding added
+	// body line carries fix keywords ("error"), which used to over-match.
+	diff := `diff --git a/api/handler.go b/api/handler.go
+--- a/api/handler.go
++++ b/api/handler.go
+@@ -1,2 +1,6 @@
+ func loginHandler() {
++func (h *Handler) Login() {
++	return h.session, fmt.Errorf("guard the error path")
++}
+ 	return h.session
+ }
+`
+	m := Generate(diff)
+	if m.Type != "feat" {
+		t.Errorf("type = %q, want feat (exported declaration beats body fix keywords)", m.Type)
+	}
+	if !strings.HasPrefix(m.Subject, "feat(") {
+		t.Errorf("subject = %q, want feat(...)", m.Subject)
+	}
+	if !strings.Contains(m.Subject, "login") {
+		t.Errorf("subject = %q, want it named after the added declaration", m.Subject)
+	}
+}
+
+func TestGenerateDeclarationNaming(t *testing.T) {
+	// The subject must name the added top-level declaration, not a random
+	// non-stopword from an added body line.
+	diff := `diff --git a/internal/app/intent.go b/internal/app/intent.go
+--- a/internal/app/intent.go
++++ b/internal/app/intent.go
+@@ -1,3 +1,4 @@
+ func CompileIntent(raw string) {
++func environmentFor(it string) string {
++	return "production"
++}
+ 	return raw
+ }
+`
+	m := Generate(diff)
+	if m.Type != "feat" {
+		t.Errorf("type = %q, want feat (additive new symbol)", m.Type)
+	}
+	if !strings.Contains(m.Subject, "environmentfor") {
+		t.Errorf("subject = %q, want it named after the added declaration", m.Subject)
+	}
+}
+
+func TestGenerateNoDeclarationKeepsKeywordScoring(t *testing.T) {
+	// Without any top-level declaration, the legacy fix-keyword scoring must
+	// still win (fix over feat) so existing behavior is preserved.
+	diff := `diff --git a/cmd/kern/main.go b/cmd/kern/main.go
+--- a/cmd/kern/main.go
++++ b/cmd/kern/main.go
+@@ -1,2 +1,2 @@
+-return nil
++return fmt.Errorf("fix the crash: %w", err)
+`
+	m := Generate(diff)
+	if m.Type != "fix" {
+		t.Errorf("type = %q, want fix (no declarations → body keyword scoring)", m.Type)
+	}
+}
+
 func TestGenerateDeterministic(t *testing.T) {
 	diff := `diff --git a/x.go b/x.go
 --- a/x.go

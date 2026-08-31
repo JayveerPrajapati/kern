@@ -1,12 +1,9 @@
-// Package incident implements Incident Engineering (Phase 12): turning a
+// Package incident implements Incident Engineering : turning a
 // production alert into a root-caused, evidence-backed, sandbox-verified fix
 // and PR. It reuses the runtime layer, knowledge graph, memory, evidence,
 // governance (firewall + approval) and execution/verification engines.
-//
 // Workflow D (OPERATE / FIX PRODUCTION) pipeline:
-//
-//	Alert → Correlate → Root Cause → Candidate Fix → Sandbox → Verify → PR
-//
+// Alert → Correlate → Root Cause → Candidate Fix → Sandbox → Verify → PR
 // Human approval is required for production changes by default: the fix never
 // advances past the sandboxed, verified stage until an approval gate is granted.
 package incident
@@ -38,16 +35,16 @@ const DefaultLookback = 30 * time.Minute
 // Engine orchestrates the incident workflow for a production repository. It is
 // constructed once per repository root and reused across incidents.
 type Engine struct {
-	root   string
-	src    runtime.Source
-	mem    *memory.MemoryStore
-	fw     *governance.Firewall
-	appr   *governance.ApprovalWorkflow
-	graph  *intelligence.Graph
+	root       string
+	src        runtime.Source
+	mem        *memory.MemoryStore
+	fw         *governance.Firewall
+	appr       *governance.ApprovalWorkflow
+	graph      *intelligence.Graph
 	window     time.Duration
-	bus        *eventbus.Bus       // optional event publisher; nil = no-op
-	prProvider prprovider.Provider // PR creation provider (default Noop)
-	shared     *runtime.SharedCorrelator // shared correlation service (Phase 13.3); nil = build own
+	bus        *eventbus.Bus             // optional event publisher; nil = no-op
+	prProvider prprovider.Provider       // PR creation provider (default Noop)
+	shared     *runtime.SharedCorrelator // shared correlation service; nil = build own
 }
 
 // NewEngine builds an incident engine for a repository. It indexes the repo and
@@ -76,12 +73,12 @@ func NewEngineWithGraph(root string, g *intelligence.Graph, src runtime.Source, 
 		src:        src,
 		mem:        mem,
 		fw:         fw,
-		appr:       governance.NewApprovalWorkflow(),
+		appr:       governance.NewPersistedApprovalWorkflow(root),
 		graph:      g,
 		window:     DefaultLookback,
 		prProvider: prprovider.NoopProvider{},
 	}
-	// Phase 13.3: the incident engine shares one correlation service instead of
+	// The incident engine shares one correlation service instead of
 	// building its own per Correlate call. It is initialized from the source when
 	// present so all consumers reason over the same runtime; a nil source keeps
 	// the shallow-only behavior. Callers may override it via WithSharedCorrelator.
@@ -117,7 +114,7 @@ func (e *Engine) WithBus(b *eventbus.Bus) *Engine {
 // WithSharedCorrelator overrides the correlation service used by Correlate. This
 // is the dependency-injection point: a caller (e.g. the app/web layer) hands in
 // the SAME *runtime.SharedCorrelator shared by deployment/audit/learning so every
-// lane reasons over one consistent correlator (Phase 13.3). A nil value clears
+// lane reasons over one consistent correlator. A nil value clears
 // the override and falls back to building a correlator from the engine's source.
 func (e *Engine) WithSharedCorrelator(sc *runtime.SharedCorrelator) *Engine {
 	e.shared = sc
@@ -160,9 +157,9 @@ func (e *Engine) IngestAlert(a domain.Alert) *domain.Incident {
 
 // sanitizeAlert normalizes and bounds untrusted alert fields so a client cannot
 // inject fabricated evidence or force correlation onto an arbitrary service:
-//   - unknown/absent severity is clamped to the known enum;
-//   - a missing or implausibly-future OccurredAt (>24h ahead) is replaced with now;
-//   - the service name is bounded to 200 chars.
+// - unknown/absent severity is clamped to the known enum;
+// - a missing or implausibly-future OccurredAt (>24h ahead) is replaced with now;
+// - the service name is bounded to 200 chars.
 func sanitizeAlert(a domain.Alert) domain.Alert {
 	if !validSeverity(a.Severity) {
 		a.Severity = domain.SeverityInfo
@@ -208,7 +205,7 @@ func (e *Engine) Correlate(inc *domain.Incident) {
 }
 
 // correlator returns the correlation service to use: the shared correlator when
-// one has been injected (Phase 13.3), otherwise a fresh correlator built over the
+// one has been injected, otherwise a fresh correlator built over the
 // engine's source. When no source is present it returns a nil-safe no-op path via
 // NewCorrelator(nil, window) which preserves the prior shallow behavior.
 func (e *Engine) correlator() *runtime.Correlator {
@@ -219,13 +216,13 @@ func (e *Engine) correlator() *runtime.Correlator {
 }
 
 // Resolve marks the incident CLOSED, writes the resolution to engineering
-// memory (Phase 11: wire incident → pattern → memory) so the continuous-learning
+// memory ( wire incident → pattern → memory) so the continuous-learning
 // extractor can surface recurring patterns, and publishes incident.resolved.
 func (e *Engine) Resolve(inc *domain.Incident) {
 	inc.Status = domain.IncidentClosed
 	inc.UpdatedAt = time.Now().UTC()
 
-	// Phase 11 (11.5): persist the resolved incident as an incident-type memory
+	// (11.5): persist the resolved incident as an incident-type memory
 	// so the learning extractor can group it with similar incidents and surface
 	// a recurring pattern. The lesson is recorded with provenance "incident"
 	// and the affected service as its scope. A nil root cause is still recorded
@@ -311,7 +308,7 @@ func (e *Engine) RootCause(inc *domain.Incident) {
 
 // ApplyAndVerifyFix sandboxes a candidate fix, applies it to the isolated
 // worktree, computes the diff, assesses the fix's risk against the governance
-// firewall (Phase 11: risk step in the fix pipeline), verifies it (build), and
+// firewall ( risk step in the fix pipeline), verifies it (build), and
 // only marks it FIX_VERIFIED when both the risk is acceptable and the build
 // passes. On success it records the diff, the verification summary, and the
 // risk assessment. The fix is never applied to the live repository — only to
@@ -334,7 +331,7 @@ func (e *Engine) ApplyAndVerifyFix(inc *domain.Incident, apply func(workDir stri
 	inc.FixDiff = diff
 	inc.Status = domain.IncidentFixProposed
 
-	// Phase 11 (11.4) — Risk step in the fix pipeline. Before verifying, assess
+	// (11.4) — Risk step in the fix pipeline. Before verifying, assess
 	// whether applying this fix carries an unacceptable risk. When a firewall
 	// is configured, the change is gated against the incident's affected
 	// service; an always-blocked CRITICAL action (or a denied permission)
@@ -398,7 +395,6 @@ func reasonOf(err error, fallback string) string {
 // commit that touched regressionFile was deployed to the service and is
 // corroborated by error events that reference that same file — exactly the
 // signal the pipeline's deploy-regression hypothesis boosts (see hypotheses).
-//
 // The caller supplies the repository root (used to index the code graph), the
 // service name, the known regression file/symbol to inject, and the memory +
 // firewall stores. It returns an engine and a ready-to-ingest alert for that
@@ -461,7 +457,7 @@ func (e *Engine) CreatePR(inc *domain.Incident) string {
 	return inc.PRBody
 }
 
-// CreateFixPR creates a PR for a verified incident fix (Phase 11.4: the final
+// CreateFixPR creates a PR for a verified incident fix ( the final
 // "PR" step of the candidate-fix pipeline risk → approval → sandbox → verify →
 // PR). The incident must already be in the IncidentFixVerified state; otherwise
 // it returns an error and does not create a PR. The PR title/body are rendered

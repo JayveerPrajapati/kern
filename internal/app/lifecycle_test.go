@@ -230,3 +230,59 @@ func TestTaskServiceTimeoutPublishesEvent(t *testing.T) {
 		t.Fatalf("event kind=%s, want task.failed", last.Kind)
 	}
 }
+
+// TestPublishIdempotentAtAppLayer verifies end-to-end: the
+// TaskService publishes events with deterministic content-derived IDs, so the
+// bus dedups an identical re-publish (a retried producer does not duplicate
+// side effects) while a distinct event (different payload) still flows.
+func TestPublishIdempotentAtAppLayer(t *testing.T) {
+	svc, bus := newTestTaskService(t)
+
+	// Two distinct transitions produce distinct events (different payloads).
+	tk := agent.NewTask("code", "x")
+	_ = tk.Start("bot-1")
+	svc.registry.SubmitTask(tk)
+	if err := svc.Timeout(tk.ID); err != nil {
+		t.Fatalf("Timeout: %v", err)
+	}
+	events := bus.History("")
+	if len(events) < 2 {
+		t.Fatalf("expected >=2 events after lifecycle, got %d", len(events))
+	}
+	// Every event must carry a stable non-empty ID (the bus only dedups on
+	// non-empty IDs; empty means no idempotency).
+	for _, ev := range events {
+		if ev.ID == "" {
+			t.Fatalf("event %s has empty ID — idempotency disabled at app layer", ev.Kind)
+		}
+	}
+
+	// Re-publishing the exact same event (same kind+subject+payload) is a
+	// no-op: history length and delivery count do not grow.
+	dup := events[len(events)-1]
+	before := len(bus.History(""))
+	var delivered int
+	unsub := bus.Subscribe(dup.Kind, func(e eventbus.Event) { delivered++ })
+	bus.Publish(dup) // same content-derived ID as the original
+	bus.Publish(dup) // again — must be deduped
+	bus.Flush()
+	unsub()
+	if delivered != 0 {
+		t.Fatalf("duplicate event delivered %d times, want 0 (idempotency)", delivered)
+	}
+	if got := len(bus.History("")); got != before {
+		t.Fatalf("history grew on duplicate publish: %d -> %d", before, got)
+	}
+
+	// A different payload for the same kind+subject still flows: the producer
+	// derives a NEW content-addressed ID for the changed event, so it is not
+	// deduped against the original.
+	ev2 := events[len(events)-1]
+	ev2.Payload = map[string]string{"state": "DIFFERENT"}
+	ev2.ID = stableEventID(ev2.Kind, ev2.Subject, ev2.Payload.(map[string]string))
+	bus.Publish(ev2)
+	bus.Flush()
+	if got := len(bus.History("")); got != before+1 {
+		t.Fatalf("history after distinct event = %d, want %d", got, before+1)
+	}
+}

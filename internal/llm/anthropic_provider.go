@@ -13,7 +13,6 @@ import (
 
 // AnthropicProvider speaks the Anthropic Messages API. Generate only — it has
 // no embedding endpoint, so Capabilities.Embed=false.
-//
 // Env: ANTHROPIC_API_KEY, ANTHROPIC_MODEL (default claude-sonnet-4-5).
 type AnthropicProvider struct {
 	APIKey  string

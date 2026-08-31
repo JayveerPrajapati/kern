@@ -199,8 +199,8 @@ func TestEntriesDefaultLimit(t *testing.T) {
 }
 
 // TestSummarizeBoundaryDay verifies days=N covers exactly N calendar days
-// including today: a file dated N days ago is excluded, N-1 days ago included
-// (W2-34).
+// including today: a file dated N days ago is excluded, N-1 days ago
+// included.
 func TestSummarizeBoundaryDay(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "stats")
 	if err := os.MkdirAll(dir, 0o755); err != nil {

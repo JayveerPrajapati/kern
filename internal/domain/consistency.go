@@ -6,17 +6,17 @@ import (
 )
 
 // KnowledgeSource is a source of engineering knowledge that may contradict
-// other sources. Strict Plan Phase 14.
+// other sources. .
 type KnowledgeSource string
 
 const (
-	SourceGraph       KnowledgeSource = "GRAPH"
-	SourceTwin        KnowledgeSource = "TWIN"
-	SourceMemory      KnowledgeSource = "MEMORY"
-	SourceGit         KnowledgeSource = "GIT"
-	SourceRuntime     KnowledgeSource = "RUNTIME"
+	SourceGraph        KnowledgeSource = "GRAPH"
+	SourceTwin         KnowledgeSource = "TWIN"
+	SourceMemory       KnowledgeSource = "MEMORY"
+	SourceGit          KnowledgeSource = "GIT"
+	SourceRuntime      KnowledgeSource = "RUNTIME"
 	SourceArchitecture KnowledgeSource = "ARCHITECTURE"
-	SourceTests       KnowledgeSource = "TESTS"
+	SourceTests        KnowledgeSource = "TESTS"
 )
 
 // ConflictResult is the enum result of a per-subject consistency check (Phase
@@ -34,19 +34,19 @@ const (
 )
 
 // ConsistencyConflict represents a contradiction between two or more knowledge
-// sources about the same subject. Strict Plan Phase 14.
+// sources about the same subject. .
 type ConsistencyConflict struct {
-	Subject   string          `json:"subject"`   // what the conflict is about (symbol, service, etc.)
-	ClaimA    string          `json:"claim_a"`   // the first claim
-	SourceA   KnowledgeSource `json:"source_a"`  // source of the first claim
-	ClaimB    string          `json:"claim_b"`   // the contradicting claim
-	SourceB   KnowledgeSource `json:"source_b"`  // source of the second claim
-	Resolution string         `json:"resolution,omitempty"` // how to resolve (empty = unresolved)
-	// Explanation is the Phase 14.4 explanation of the conflict: WHY the two
+	Subject    string          `json:"subject"`              // what the conflict is about (symbol, service, etc.)
+	ClaimA     string          `json:"claim_a"`              // the first claim
+	SourceA    KnowledgeSource `json:"source_a"`             // source of the first claim
+	ClaimB     string          `json:"claim_b"`              // the contradicting claim
+	SourceB    KnowledgeSource `json:"source_b"`             // source of the second claim
+	Resolution string          `json:"resolution,omitempty"` // how to resolve (empty = unresolved)
+	// Explanation is the explanation of the conflict: WHY the two
 	// claims were deemed contradictory, in human-readable form. Populated by
 	// the stale-aware classifier so the decision is explainable.
 	Explanation string `json:"explanation,omitempty"`
-	// StaleSource records which source was determined to be stale (Phase 14.3),
+	// StaleSource records which source was determined to be stale ,
 	// when the conflict is attributed to staleness.
 	StaleSource string `json:"stale_source,omitempty"`
 	// VersionA and VersionB record the version/fingerprint each side was
@@ -55,11 +55,11 @@ type ConsistencyConflict struct {
 	VersionA string `json:"version_a,omitempty"`
 	VersionB string `json:"version_b,omitempty"`
 	// SourceNewer names which of SourceA/SourceB was newer at check time
-	// (Phase 14.4); empty when neither is known to be newer.
+	// ; empty when neither is known to be newer.
 	SourceNewer KnowledgeSource `json:"source_newer,omitempty"`
 }
 
-// Explain renders a human-readable explanation of the conflict (Phase 14.4):
+// Explain renders a human-readable explanation of the conflict :
 // which two sources disagree, the two claims, which source is newer, and the
 // next recommended check (re-validate the newer source, falling back to A).
 // The output is deterministic given the conflict's fields.
@@ -80,11 +80,11 @@ func (c *ConsistencyConflict) Explain() string {
 
 // ConsistencyReport is the result of a cross-engine consistency check.
 type ConsistencyReport struct {
-	Conflicts       []ConsistencyConflict `json:"conflicts"`
-	ConfidenceDowngrades map[string]float64 `json:"confidence_downgrades"` // subject → new confidence (downgraded)
-	// Result is the overall consistency result of the whole report (Phase 14.2).
+	Conflicts            []ConsistencyConflict `json:"conflicts"`
+	ConfidenceDowngrades map[string]float64    `json:"confidence_downgrades"` // subject → new confidence (downgraded)
+	// Result is the overall consistency result of the whole report .
 	Result ConflictResult `json:"result"`
-	// StaleSubjects lists subjects whose evidence was deemed stale (Phase 14.3).
+	// StaleSubjects lists subjects whose evidence was deemed stale .
 	StaleSubjects []string `json:"stale_subjects,omitempty"`
 }
 

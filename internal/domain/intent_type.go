@@ -1,6 +1,6 @@
 package domain
 
-// IntentType classifies the kind of engineering request. Strict Plan Phase 6:
+// IntentType classifies the kind of engineering request. :
 // 10 intent types.
 type IntentType string
 
@@ -17,15 +17,15 @@ const (
 	IntentAudit         IntentType = "AUDIT"
 )
 
-// CompiledIntent is the output of the Intent Compiler. Strict Plan Phase 6 P0.
+// CompiledIntent is the output of the Intent Compiler. .
 type CompiledIntent struct {
-	Type            IntentType `json:"intent_type"`
-	Objective       string     `json:"objective"`
-	Target          string     `json:"target"`
-	Scope           string     `json:"scope"`
-	Environment     string     `json:"environment"`
-	DesiredOutcome  string     `json:"desired_outcome"`
-	RawText         string     `json:"raw_text"`
+	Type           IntentType `json:"intent_type"`
+	Objective      string     `json:"objective"`
+	Target         string     `json:"target"`
+	Scope          string     `json:"scope"`
+	Environment    string     `json:"environment"`
+	DesiredOutcome string     `json:"desired_outcome"`
+	RawText        string     `json:"raw_text"`
 }
 
 // WorkflowID identifies one of the 5 primary user workflows (A-E).
@@ -39,28 +39,27 @@ const (
 	WorkflowGovern     WorkflowID = "E_GOVERN"
 )
 
-// RunResult is the output of kern_run. Strict Plan Phase 6 P0: returns Task,
+// RunResult is the output of kern_run. : returns Task,
 // workflow, required capabilities, selected tools, selected agents, context
 // plan, risk, approval state, next action.
 type RunResult struct {
-	TaskID        string            `json:"task_id"`
-	Workflow      WorkflowID        `json:"workflow"`
-	Intent        CompiledIntent    `json:"intent"`
-	Capabilities  []string          `json:"capabilities"`
-	Tools         []string          `json:"tools"`
-	Agents        []string          `json:"agents"`
-	ContextPlan   string            `json:"context_plan"`
-	Risk          Risk              `json:"risk"`
-	ApprovalState string            `json:"approval_state"` // "none", "required", "granted"
-	NextAction    string            `json:"next_action"`
+	TaskID        string         `json:"task_id"`
+	Workflow      WorkflowID     `json:"workflow"`
+	Intent        CompiledIntent `json:"intent"`
+	Capabilities  []string       `json:"capabilities"`
+	Tools         []string       `json:"tools"`
+	Agents        []string       `json:"agents"`
+	ContextPlan   string         `json:"context_plan"`
+	Risk          Risk           `json:"risk"`
+	ApprovalState string         `json:"approval_state"` // "none", "required", "granted"
+	NextAction    string         `json:"next_action"`
 	// Precheck is the unified policy precheck result computed before execution
-	// (Phase 6.4). It is set by TaskService.Run so the caller can see whether
+	// It is set by TaskService.Run so the caller can see whether
 	// the intent cleared identity/scope/permission/environment gates up front.
 	Precheck *PrecheckResult `json:"precheck,omitempty"`
 }
 
 // Capability describes a kern capability that can be selected for a task.
-// Strict Plan Phase 6 P1.
 type Capability struct {
 	Name         string   `json:"name"`
 	Purpose      string   `json:"purpose"` // why this capability exists (P6.6)
@@ -74,7 +73,7 @@ type Capability struct {
 }
 
 // CapabilityMatch is the result of a semantic/lexical capability discovery
-// query (Phase 6.9). It pairs a capability with a relevance score and the list
+// query. It pairs a capability with a relevance score and the list
 // of capability fields whose text overlapped the query tokens. The score is a
 // deterministic fraction of query terms present, weighted toward name/purpose.
 type CapabilityMatch struct {
@@ -84,13 +83,12 @@ type CapabilityMatch struct {
 }
 
 // ToolDecisionTrace records why a tool was selected and what it produced.
-// Strict Plan Phase 6 P1.
 type ToolDecisionTrace struct {
-	Tool          string  `json:"tool"`
-	WhySelected   string  `json:"why_selected"`
-	Inputs        string  `json:"inputs"`
-	ExpectedOutput string `json:"expected_output"`
-	ActualOutput  string  `json:"actual_output"`
-	Cost          float64 `json:"cost"`
-	Latency       float64 `json:"latency_ms"`
+	Tool           string  `json:"tool"`
+	WhySelected    string  `json:"why_selected"`
+	Inputs         string  `json:"inputs"`
+	ExpectedOutput string  `json:"expected_output"`
+	ActualOutput   string  `json:"actual_output"`
+	Cost           float64 `json:"cost"`
+	Latency        float64 `json:"latency_ms"`
 }

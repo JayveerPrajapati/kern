@@ -7,14 +7,11 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/domain"
 )
 
-// Phase 15 — Freshness.
-//
+// Freshness.
 // This file adds the remaining freshness primitives:
-//
-//	15.3  invalidation marker          NewInvalidation / InvalidationMarker
-//	15.4  memory supersession          (implemented in internal/memory)
-//	15.5  freshness in scoring         ScoreEvidenceFreshness / RiskFreshnessMultiplier
-//
+// 15.3  invalidation marker          NewInvalidation / InvalidationMarker
+// 15.4  memory supersession          (implemented in internal/memory)
+// 15.5  freshness in scoring         ScoreEvidenceFreshness / RiskFreshnessMultiplier
 // All are deterministic.
 
 // defaultFreshBound is the default staleness bound used by the freshness
@@ -22,7 +19,7 @@ import (
 const defaultFreshBound = 7 * 24 * time.Hour
 
 // InvalidationMarker is a record that a piece of context/memory was invalidated
-// (Phase 15.3). It lets consumers know when a previously-trusted fact no longer
+// It lets consumers know when a previously-trusted fact no longer
 // holds, so stale context is not silently reused. It is deterministic and
 // timestamped.
 type InvalidationMarker struct {
@@ -42,7 +39,7 @@ func NewInvalidationMarker(entity, reason, source string, at time.Time) Invalida
 	return InvalidationMarker{Entity: entity, Reason: reason, Source: source, At: at}
 }
 
-// FreshnessClass is the freshness classification of an item (Phase 15.5).
+// FreshnessClass is the freshness classification of an item .
 type FreshnessClass string
 
 const (
@@ -86,14 +83,14 @@ func evidenceScore(ts time.Time, now time.Time, bound time.Duration) float64 {
 }
 
 // EvidenceFreshness reports the freshness class and score of an evidence item
-// (Phase 15.5). A nil bound uses the default staleness bound.
+// A nil bound uses the default staleness bound.
 func EvidenceFreshness(ev domain.Evidence, now time.Time, bound time.Duration) (FreshnessClass, float64) {
 	cls := evidenceFreshnessClass(ev.Timestamp, now, bound)
 	return cls, evidenceScore(ev.Timestamp, now, bound)
 }
 
 // RiskFreshnessMultiplier scales a risk score by the freshness of its evidence
-// (Phase 15.5): a risk supported by fresh evidence keeps full weight; a risk
+// A risk supported by fresh evidence keeps full weight; a risk
 // supported only by stale evidence is scaled down, because stale signals are
 // less reliable. It returns the multiplier in [0, 1] and the classification.
 func RiskFreshnessMultiplier(evidence []domain.Evidence, now time.Time, bound time.Duration) (float64, FreshnessClass) {
@@ -117,7 +114,7 @@ func RiskFreshnessMultiplier(evidence []domain.Evidence, now time.Time, bound ti
 }
 
 // FreshnessAdjustedConfidence scales a claim/evidence confidence by the
-// freshness of the evidence set (Phase 15.5). It reuses the worst-class
+// freshness of the evidence set. It reuses the worst-class
 // freshness classification over the evidence and applies a deterministic
 // multiplier: 1.0 for fresh evidence, 0.8 for aging, 0.5 for stale. A claim
 // with no evidence returns its confidence unchanged (nothing to penalize).
@@ -130,7 +127,7 @@ func FreshnessAdjustedConfidence(conf float64, evidence []domain.Evidence, now t
 }
 
 // FreshnessAdjustedRisk scales a risk score by the freshness of the evidence
-// backing it (Phase 15.5). It reuses RiskFreshnessMultiplier so a risk
+// backing it. It reuses RiskFreshnessMultiplier so a risk
 // supported only by stale evidence is down-weighted (score = score * multiplier)
 // and a "freshness:<class>" factor is appended when the multiplier is < 1. The
 // risk Level and block/approval state are preserved; only the Score changes.
@@ -144,7 +141,7 @@ func FreshnessAdjustedRisk(risk domain.Risk, evidence []domain.Evidence, now tim
 }
 
 // ToolFreshnessBoost returns a deterministic 0..1 multiplier a capability/tool
-// planner can use to down-rank tools backed by stale evidence (Phase 15.5). A
+// planner can use to down-rank tools backed by stale evidence. A
 // tool with no evidence (or fresh evidence) keeps full weight (1.0); stale
 // evidence yields a value < 1.0. The tool string is accepted for signature
 // completeness; the boost is derived entirely from the evidence freshness.
@@ -157,7 +154,7 @@ func ToolFreshnessBoost(tool string, evidence []domain.Evidence, now time.Time, 
 }
 
 // InvalidateContext records invalidation markers for a set of stale entities
-// (Phase 15.3). It is a convenience that fans an invalidation out to a list of
+// It is a convenience that fans an invalidation out to a list of
 // entities with the same reason/source/at.
 func InvalidateContext(entities []string, reason, source string, at time.Time) []InvalidationMarker {
 	markers := make([]InvalidationMarker, 0, len(entities))

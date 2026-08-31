@@ -3,7 +3,7 @@ package domain
 import "time"
 
 // ContextClass categorizes a piece of context by its semantic role in the
-// task. Strict Plan Phase 5 P0: 15 context classes.
+// task. : 15 context classes.
 type ContextClass string
 
 const (
@@ -24,7 +24,7 @@ const (
 	ContextArtifact   ContextClass = "ARTIFACT"
 )
 
-// ContextState is the retention state of a context item. Strict Plan Phase 5
+// ContextState is the retention state of a context item.
 // P0: 5 context states. The GC pipeline (P1) transitions items between states
 // based on relevance, freshness, authority, and duplicate relationships.
 type ContextState string
@@ -76,7 +76,7 @@ type ContextItem struct {
 }
 
 // ContextAuthorization carries the scoped identity used to authorize a context
-// item across the five Phase 5.4 dimensions. Agent is the primary identity;
+// item across the five dimensions. Agent is the primary identity;
 // repository/task/tenant/classification refine the scope within which that
 // agent may access an item. An empty scope field means that dimension is
 // unrestricted (fail-open on scope, fail-closed on entitlement via the
@@ -100,7 +100,6 @@ type ContextAuthorization struct {
 }
 
 // GCAction is the action the context GC pipeline decides for an item.
-// Strict Plan Phase 5 P1.
 type GCAction string
 
 const (
@@ -111,8 +110,7 @@ const (
 	GCDrop     GCAction = "DROP"     // remove entirely
 )
 
-// ContextSnapshot is a compact task snapshot for resume/replay. Strict Plan
-// Phase 5 P1.
+// ContextSnapshot is a compact task snapshot for resume/replay.
 type ContextSnapshot struct {
 	Goal        string   `json:"goal"`
 	State       string   `json:"state"`
@@ -125,7 +123,7 @@ type ContextSnapshot struct {
 }
 
 // ToolResultSummary is the normalized form of a large raw tool output. Strict
-// Plan Phase 5 P1: "Convert large raw tool outputs into facts, errors,
+// Plan "Convert large raw tool outputs into facts, errors,
 // evidence, summary, references, artifact. Store the raw output outside active
 // model context."
 type ToolResultSummary struct {

@@ -8,7 +8,7 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/runtime"
 )
 
-// TestFreshnessAdjustedEvidenceConfidence verifies the Phase 15.5 confidence
+// TestFreshnessAdjustedEvidenceConfidence verifies the confidence
 // scaling: fresh evidence leaves the confidence unchanged (factor 1.0), stale
 // evidence scales it down to 0.5, and no evidence is a no-op.
 func TestFreshnessAdjustedEvidenceConfidence(t *testing.T) {
@@ -31,7 +31,7 @@ func TestFreshnessAdjustedEvidenceConfidence(t *testing.T) {
 	}
 }
 
-// TestFreshnessAdjustedRisk verifies the Phase 15.5 risk scaling: stale
+// TestFreshnessAdjustedRisk verifies the risk scaling: stale
 // evidence applies the 0.5 multiplier to the score and appends a
 // "freshness:stale" factor; fresh evidence leaves the risk unchanged.
 func TestFreshnessAdjustedRisk(t *testing.T) {
@@ -66,7 +66,7 @@ func TestFreshnessAdjustedRisk(t *testing.T) {
 	}
 }
 
-// TestEngineFreshnessScoringOptIn proves the Phase 15.5 opt-in flag actually
+// TestEngineFreshnessScoringOptIn proves the opt-in flag actually
 // changes the assembled packet: with stale runtime evidence, the risk scores
 // differ from the default (no-freshness) path, while the default path is
 // unchanged.

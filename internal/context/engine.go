@@ -52,7 +52,7 @@ type Engine struct {
 	// packet's rendered text is fitted to this budget when it overflows.
 	maxTokens int
 
-	// freshnessScoring gates the Phase 15.5 freshness adjustments (risk-score
+	// freshnessScoring gates the freshness adjustments (risk-score
 	// scaling and evidence-confidence scaling). It is OFF by default so the
 	// engine's prior output is unchanged; callers opt in with
 	// WithFreshnessScoring(true) to enable it.
@@ -102,7 +102,7 @@ func (e *Engine) WithMaxTokens(n int) *Engine {
 	return e
 }
 
-// WithFreshnessScoring enables (or disables) the Phase 15.5 freshness scoring
+// WithFreshnessScoring enables (or disables) the freshness scoring
 // adjustments in the assembled packet: risk scores are scaled by the freshness
 // of the runtime evidence, and claim confidence is scaled by the freshness of
 // its evidence. It is OFF by default to keep the engine's output identical to
@@ -287,12 +287,12 @@ func (e *Engine) assemble(task, scope string, roots []domain.Symbol) domain.Cont
 	// changes are scored higher and denials surface as Blocked/ApprovalRequired.
 	pkt.Risks = e.assessRisk(scope, roots)
 
-pkt.Facts = e.buildFacts(scope, roots, pkt)
+	pkt.Facts = e.buildFacts(scope, roots, pkt)
 	// Surface one evidence-backed claim per risk so the governance decision
 	// flows into the packet.
 	pkt.Facts = append(pkt.Facts, policyEvaluationClaims(pkt.Risks)...)
 
-	// Phase 15.5 freshness scoring (opt-in): when enabled, scale each risk's
+	// Freshness scoring (opt-in): when enabled, scale each risk's
 	// Score by the freshness of the packet's runtime evidence (score-only;
 	// Level and Blocked/ApprovalRequired are preserved), and scale each claim's
 	// Confidence by the freshness of its supporting evidence. This is gated by
@@ -316,6 +316,13 @@ pkt.Facts = e.buildFacts(scope, roots, pkt)
 			}
 		}
 	}
+
+	// Exit gate: cross-engine consistency. Conflicting claims (graph
+	// vs memory vs runtime vs git ...) about the same subject are NEVER
+	// silently collapsed into certainty — the conflicting claims' confidence
+	// is downgraded and the report (result, per-conflict explanation,
+	// staleness attribution) is attached to the packet.
+	ApplyConsistency(&pkt)
 
 	pkt.RequiredValidation = e.requiredValidation(scope, roots)
 	pkt.TokenCount = e.measureTokens(pkt)

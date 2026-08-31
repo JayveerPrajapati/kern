@@ -6,7 +6,7 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/domain"
 )
 
-// Edge kinds (spec §7 relationship types).
+// Edge kinds .
 const (
 	KindChangedBy    = "changed_by"    // file ← commit (git history)
 	KindAffects      = "affects"       // symbol → symbol (impact/blast radius)

@@ -1,11 +1,9 @@
 // Package app service contracts.
-//
-// This file defines the 15 discrete application-service interfaces (Phase 2.1
-// of the Integration Transformation Plan). They are the contract every
+// This file defines the 15 discrete application-service interfaces (
+// of the ). They are the contract every
 // interface layer (MCP, CLI, REST) uses, and they are all satisfied by the
 // existing *TaskService and *Platform types WITHOUT engine changes — the
 // interfaces capture the exact method signatures those types already expose.
-//
 // The P2 exit gate — "no core business workflow exists only in one interface" —
 // is enforced by having each interface route through these shared services.
 // Adding a method here requires implementing it on *TaskService or *Platform,
@@ -70,7 +68,8 @@ type Analysis interface {
 // Implemented by *TaskService.
 type Impact interface {
 	// Impact returns the Task and its deterministic ImpactReport + rendered text.
-	Impact(change string) (*agent.Task, domain.ImpactReport, string, error)
+	// Options (e.g. ImpactStrict) customize the computation.
+	Impact(change string, opts ...ImpactOption) (*agent.Task, domain.ImpactReport, string, error)
 }
 
 // WhatIf is the what-if simulation contract service. It simulates a
@@ -106,7 +105,7 @@ type Policy interface {
 	// Firewall returns the shared governance firewall.
 	Firewall() *governance.Firewall
 	// PolicyPrecheck runs the unified identity/scope/permission/environment/risk
-	// precheck (Phase 6.4) and returns the single PrecheckResult.
+	// precheck and returns the single PrecheckResult.
 	PolicyPrecheck(ctx context.Context, req domain.PrecheckRequest) domain.PrecheckResult
 }
 
@@ -188,20 +187,20 @@ type Audit interface {
 // contracts without engine changes. A compile failure here means an interface
 // drifted from the real *TaskService / *Platform signatures.
 var (
-	_ Task         = (*TaskService)(nil)
-	_ Context      = (*Platform)(nil)
-	_ Analysis     = (*TaskService)(nil)
-	_ Impact       = (*TaskService)(nil)
-	_ WhatIf       = (*TaskService)(nil)
-	_ Memory       = (*TaskService)(nil)
-	_ Risk         = (*TaskService)(nil)
-	_ Policy       = (*TaskService)(nil)
-	_ Agent        = (*TaskService)(nil)
-	_ Execution    = (*TaskService)(nil)
-	_ Loop         = (*TaskService)(nil)
-	_ Verification = (*TaskService)(nil)
-	_ Incident     = (*TaskService)(nil)
+	_ Task          = (*TaskService)(nil)
+	_ Context       = (*Platform)(nil)
+	_ Analysis      = (*TaskService)(nil)
+	_ Impact        = (*TaskService)(nil)
+	_ WhatIf        = (*TaskService)(nil)
+	_ Memory        = (*TaskService)(nil)
+	_ Risk          = (*TaskService)(nil)
+	_ Policy        = (*TaskService)(nil)
+	_ Agent         = (*TaskService)(nil)
+	_ Execution     = (*TaskService)(nil)
+	_ Loop          = (*TaskService)(nil)
+	_ Verification  = (*TaskService)(nil)
+	_ Incident      = (*TaskService)(nil)
 	_ Modernization = (*TaskService)(nil)
-	_ Deployment   = (*TaskService)(nil)
-	_ Audit        = (*TaskService)(nil)
+	_ Deployment    = (*TaskService)(nil)
+	_ Audit         = (*TaskService)(nil)
 )

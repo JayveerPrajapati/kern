@@ -2,18 +2,18 @@
 // stdout — the "Think in Code" surface of a local context optimizer. An agent
 // can compute things (data munging, math, JSON transforms, quick sims) without
 // polluting its context with build noise or stderr.
-//
 // Isolation model: the script runs in a fresh temp dir with the runtime
 // resolved from PATH, a hard timeout, a stdout byte cap, and a sanitized
 // environment (HOME and the XDG dirs point into the temp dir, so a script
 // cannot read or clobber the user's real configs or env secrets). When the
 // system's unprivileged user namespaces are enabled, the child also runs in a
 // private network namespace (unshare --user --map-root-user --net), so network
-// egress is blocked. Network isolation fails closed: if user namespaces are
-// unavailable the run is refused rather than silently degrading to full
-// network egress, unless the local operator explicitly opts in via
-// KERN_ALLOW_NET. Stderr is never mixed into stdout — it is only surfaced on
-// failure.
+// egress is blocked. Network isolation fails closed on every platform: if
+// user/network namespaces are unavailable the run is refused rather than
+// silently degrading to full network egress, unless the local operator
+// explicitly opts in via KERN_ALLOW_UNISOLATED=1 (or the pre-existing alias
+// KERN_ALLOW_NET=1). Stderr is never mixed into stdout — it is only surfaced
+// on failure.
 package script
 
 import (
@@ -129,6 +129,21 @@ func networkNS() []string {
 	return netNSArgs
 }
 
+// allowUnisolated reports whether the local operator has explicitly opted in
+// to running scripts without network isolation (KERN_ALLOW_UNISOLATED=1, or
+// the pre-existing alias KERN_ALLOW_NET=1). Only the operator's environment
+// can set this — an arbitrary agent call never can.
+func allowUnisolated() bool {
+	return os.Getenv("KERN_ALLOW_UNISOLATED") != "" || os.Getenv("KERN_ALLOW_NET") != ""
+}
+
+// NetworkIsolationAvailable reports whether script runs can be network-isolated
+// on this host (unprivileged user + network namespaces). kern doctor uses it to
+// report the platform's isolation capability honestly.
+func NetworkIsolationAvailable() bool {
+	return networkNS() != nil
+}
+
 // sandboxEnv builds a minimal environment with HOME and the XDG dirs pointed
 // into the sandbox dir, so a script cannot read the user's real configs or
 // exfiltrate environment secrets. Whitelisted vars that are safe and useful
@@ -230,26 +245,17 @@ func RunScript(r Run) *Result {
 	if !r.NoIsolate {
 		ns = networkNS()
 		res.Isolated = ns != nil
-		// Never silently degrade to full network egress. If isolation was
-		// requested but the netns/unshare path is unavailable, refuse to run
-		// rather than quietly exposing the full network — unless the local
-		// operator explicitly opted into running unisolated via KERN_ALLOW_NET.
-		if ns == nil && os.Getenv("KERN_ALLOW_NET") == "" {
-			// On macOS and Windows (no unprivileged user namespaces) the
-			// env-only sandbox (sanitized HOME/XDG, temp dir, no secrets)
-			// still prevents config/secret exfiltration, so degrade to it
-			// with a warning rather than refusing. On Linux the operator
-			// should enable user namespaces or set KERN_ALLOW_NET=1 for
-			// full network access.
-			if goruntime.GOOS == "linux" {
-				res.Err = fmt.Errorf("network isolation unavailable (no unprivileged user/network namespace on this host) and KERN_ALLOW_NET is not set; refusing to run unisolated\n" +
-					"  to allow unisolated execution (full network access), set: export KERN_ALLOW_NET=1\n" +
-					"  to enable network isolation, run: sysctl -w kernel.unprivileged_userns_clone=1 (Linux) or use a Linux VM/container")
-				return res
-			}
-			// macOS: degrade to env-only isolation (no network namespace); the
-			// sandboxed env + temp dir still protect config and secrets.
-			res.Isolated = false
+		// Never silently degrade to full network egress — fail closed on every
+		// platform. If isolation was requested but the netns/unshare path is
+		// unavailable (macOS and Windows have no unprivileged user namespaces),
+		// refuse to run rather than quietly exposing the full network, unless
+		// the local operator explicitly opted into running unisolated via
+		// KERN_ALLOW_UNISOLATED=1 (or the pre-existing alias KERN_ALLOW_NET=1).
+		if ns == nil && !allowUnisolated() {
+			res.Err = fmt.Errorf("network isolation not available on this platform (%s); refusing to run unisolated (fail-closed)\n"+
+				"  to override and run without network isolation, set: export KERN_ALLOW_UNISOLATED=1 (or KERN_ALLOW_NET=1)\n"+
+				"  to enable network isolation on Linux, run: sysctl -w kernel.unprivileged_userns_clone=1 (or use a Linux VM/container)", goruntime.GOOS)
+			return res
 		}
 	}
 	env := sandboxEnv(dir)

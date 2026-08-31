@@ -139,6 +139,19 @@ func IndexDir(root string) (*Index, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Re-merge documents previously fetched for this project (kern doc fetch /
+	// kern_doc_fetch). Fetched pages live in the global docs-fetch cache and
+	// only reach this project's persisted index via MergeFetched, so a full
+	// re-index would silently drop them without this step.
+	for _, name := range fetchNames(root) {
+		text, err := os.ReadFile(cache.Path("data", "docs-fetch", name+".md"))
+		if err != nil {
+			continue // cache entry evicted or missing; nothing to re-merge
+		}
+		ix.mu.Lock()
+		ix.mergeFetchedLocked(name, string(text))
+		ix.mu.Unlock()
+	}
 	return ix, nil
 }
 
@@ -175,6 +188,42 @@ func (ix *Index) Save() error {
 // distinguishable from on-disk project documents.
 const fetchPrefix = "fetch/"
 
+// fetchMapKey persists, per absolute project root, the names of externally
+// fetched documents merged into that root's doc index, so a later full
+// re-index (IndexDir+Save) can re-merge them instead of silently dropping
+// them. Stored in the global cache (not the project) to keep the project tree
+// clean and to preserve per-project isolation: a project only ever sees the
+// pages fetched for itself.
+const fetchMapKey = "docs-fetch-map"
+
+func fetchNames(root string) []string {
+	abs, err := filepath.Abs(root)
+	if err != nil {
+		return nil
+	}
+	m := map[string][]string{}
+	if err := cache.Load(fetchMapKey, &m); err != nil {
+		return nil
+	}
+	return m[abs]
+}
+
+func rememberFetch(root, name string) {
+	abs, err := filepath.Abs(root)
+	if err != nil {
+		return
+	}
+	m := map[string][]string{}
+	_ = cache.Load(fetchMapKey, &m)
+	for _, n := range m[abs] {
+		if n == name {
+			return
+		}
+	}
+	m[abs] = append(m[abs], name)
+	_ = cache.Store(fetchMapKey, m)
+}
+
 // MergeFetched merges an externally fetched document into root's persisted
 // index under "fetch/<name>.md", replacing any prior version of that document
 // and persisting the index. The text is chunked and embedded with the same
@@ -186,6 +235,15 @@ func MergeFetched(root, name, text string) (int, error) {
 	if len(text) > maxFetchedSize {
 		return 0, nil
 	}
+	// Persist the raw page in the global docs-fetch cache so a later full
+	// re-index (IndexDir) can re-merge it. Callers that already wrote the
+	// file (the MCP/CLI fetch handlers) simply overwrite it identically.
+	if err := os.MkdirAll(cache.Path("data", "docs-fetch"), 0o755); err != nil {
+		return 0, err
+	}
+	if err := os.WriteFile(cache.Path("data", "docs-fetch", name+".md"), []byte(text), 0o600); err != nil {
+		return 0, err
+	}
 	ix := Load(root)
 	if ix == nil {
 		var err error
@@ -196,6 +254,18 @@ func MergeFetched(root, name, text string) (int, error) {
 	}
 	// Serialize the in-place Doc mutation against concurrent Search reads.
 	ix.mu.Lock()
+	added := ix.mergeFetchedLocked(name, text)
+	ix.mu.Unlock()
+	if err := ix.Save(); err != nil {
+		return added, err
+	}
+	rememberFetch(root, name)
+	return added, nil
+}
+
+// mergeFetchedLocked replaces any prior chunks for fetched document name with
+// fresh chunks of text. Callers must hold ix.mu.
+func (ix *Index) mergeFetchedLocked(name, text string) int {
 	file := fetchPrefix + name + ".md"
 	kept := ix.Docs[:0]
 	for _, d := range ix.Docs {
@@ -214,11 +284,7 @@ func MergeFetched(root, name, text string) (int, error) {
 		})
 		added++
 	}
-	ix.mu.Unlock()
-	if err := ix.Save(); err != nil {
-		return added, err
-	}
-	return added, nil
+	return added
 }
 
 // ReembedFetch attaches dense embeddings (via a local Ollama embedder) to the
@@ -318,7 +384,6 @@ func (ix *Index) Search(query string, k int) []Score {
 // SemanticEmbedder, when non-nil, embeds search queries for indexes that carry
 // dense Doc.Semantic vectors. It must be the same embedder used to build the
 // index (the CLI/MCP layer sets it when it indexed the docs).
-//
 // It is written and read from concurrent handler goroutines, so all access is
 // serialized through semanticEmbedderMu and the Get/Set accessors below. Do not
 // read or write the field directly.
@@ -438,12 +503,10 @@ const vecDim = 4096
 // word and character n-grams. Deterministic: identical text always yields an
 // identical vector, so a locally-embedded query matches locally-embedded
 // documents exactly.
-//
 // Three feature types are hashed into the same vector space:
-//   - Whole words (exact keyword match boost)
-//   - Word bigrams (phrase matching)
-//   - Character 3-grams (fuzzy/morphological matching)
-//
+// - Whole words (exact keyword match boost)
+// - Word bigrams (phrase matching)
+// - Character 3-grams (fuzzy/morphological matching)
 // Without whole-word features, the cosine similarity between a query and a
 // chunk that shares all the same words can be as low as 0.03 (the char 3-grams
 // rarely overlap across different words). Whole-word features ensure that

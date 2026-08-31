@@ -36,10 +36,9 @@ func New(mem *memory.MemoryStore) *Extractor {
 }
 
 // Patterns reads ALL memories and groups them by a deterministic key:
-//   - "scope:"+Scope when the memory has a non-empty Scope, otherwise
-//   - "sig:"+hash12 where hash12 is the first 12 characters of a content
-//     hash computed from the trimmed content.
-//
+// - "scope:"+Scope when the memory has a non-empty Scope, otherwise
+// - "sig:"+hash12 where hash12 is the first 12 characters of a content
+// hash computed from the trimmed content.
 // Each group becomes a Pattern: Count is the number of grouped memories,
 // Scopes the distinct scopes (sorted), Sample the most recent contents capped
 // at 3 (sorted by CreatedAt desc, then Content asc), and Created the newest
@@ -89,7 +88,6 @@ func (e *Extractor) Surface(threshold int) ([]Pattern, error) {
 
 // Remember writes a synthesized MemoryConstraint describing the pattern back
 // to the store so the recurring pattern becomes recallable engineering memory.
-//
 // It upserts by scope: if a constraint with the same scope already exists, its
 // content is replaced in place rather than appending a new entry. keyFor groups
 // memories by scope, so naively appending here would write the new constraint

@@ -42,14 +42,14 @@ type DeployRequest struct {
 
 // DeployResult is the outcome of a deployment attempt.
 type DeployResult struct {
-	Service     string
-	Version     string
+	Service      string
+	Version      string
 	DeploymentID string
-	Output      string
-	StartedAt   time.Time
-	CompletedAt time.Time
-	Success     bool
-	Rollback    bool
+	Output       string
+	StartedAt    time.Time
+	CompletedAt  time.Time
+	Success      bool
+	Rollback     bool
 }
 
 // NoopDeployer is the default deployer used when no KERN_DEPLOY_COMMAND is
@@ -73,9 +73,7 @@ func (NoopDeployer) Deploy(ctx context.Context, req DeployRequest) (DeployResult
 // upgrade, docker compose up, make deploy, ...) to perform the deployment. The
 // command runs via exec.CommandContext with a timeout and receives the
 // deployment context as environment variables:
-//
-//	KERN_SERVICE, KERN_VERSION, KERN_IMAGE, KERN_COMMIT, KERN_PROJECT_ROOT
-//
+// KERN_SERVICE, KERN_VERSION, KERN_IMAGE, KERN_COMMIT, KERN_PROJECT_ROOT
 // It refuses to run unless KERN_ALLOW_DEPLOY=1 (fail-closed, the same gate the
 // loop enforces). A non-zero exit yields Success=false; the combined
 // stdout+stderr (capped) is returned as Output. The command is an external

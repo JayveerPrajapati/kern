@@ -324,15 +324,14 @@ type typeProof struct {
 // typeName means the reference is provably on a different type and must be
 // SKIPPED, not refused — this is what lets two types share a method name
 // (Save, Close, String) without breaking the rename. nil fd = package level.
-//
 // Resolution order:
-//  1. Variable receiver (a.M) — scope binding from typeProof. Checked FIRST
-//     because literalReceiverType returns the bare ident name for an Ident,
-//     which is a variable name, not a type.
-//  2. Inline call receiver (f().M, new(T).M, T(raw).M) — callee return type
-//     from the index, or the type argument for new(), or the fun name for a
-//     conversion.
-//  3. Literal construction (&Type{}, Type{}) — type written in source.
+// 1. Variable receiver (a.M) — scope binding from typeProof. Checked FIRST
+// because literalReceiverType returns the bare ident name for an Ident,
+// which is a variable name, not a type.
+// 2. Inline call receiver (f().M, new(T).M, T(raw).M) — callee return type
+// from the index, or the type argument for new(), or the fun name for a
+// conversion.
+// 3. Literal construction (&Type{}, Type{}) — type written in source.
 func (tp *typeProof) receiverType(fd *ast.FuncDecl, expr ast.Expr) string {
 	// Variable receiver: a.M — resolve from the scope binding.
 	if id, ok := expr.(*ast.Ident); ok {
@@ -441,7 +440,6 @@ func callReturnsType(ix *index.Index, fun ast.Expr) string {
 // callReturnsType resolves the declared first return type of a callee
 // expression against the index, e.g. `store.New` -> "Store" when the symbol's
 // Returns contains it. "" when unknown.
-//
 // Disambiguation: when multiple symbols share the callee name (e.g. two
 // packages both export `New()`), the qualifier is matched against the file's
 // import map to find the import path, and the candidate whose directory is

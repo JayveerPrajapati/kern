@@ -10,7 +10,7 @@ import (
 )
 
 // TestIncidentEngineUsesSharedCorrelator verifies the incident engine uses the
-// injected shared correlator (Phase 13.3) and still produces the same evidence
+// injected shared correlator and still produces the same evidence
 // as the inline path.
 func TestIncidentEngineUsesSharedCorrelator(t *testing.T) {
 	root := fixtureRoot(t)

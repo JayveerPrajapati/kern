@@ -21,7 +21,7 @@ import (
 // bounded-capacity history bounded in bytes as well as count.
 const maxHistoryPayloadSize = 4 << 10 // 4 KiB
 
-// Kind discriminates the class of system event crossing the bus (spec §52).
+// Kind discriminates the class of system event crossing the bus .
 type Kind string
 
 const (
@@ -70,6 +70,9 @@ const (
 	SecurityFinding Kind = "security.finding"
 	// ArchitectureViolation indicates architecture constraints were violated.
 	ArchitectureViolation Kind = "architecture.violation"
+	// ArchitectureWarning indicates an architecture check ran but could not be
+	// enforced (e.g. no boundaries file configured) — a warning, not a violation.
+	ArchitectureWarning Kind = "architecture.warning"
 	// IncidentInvestigated indicates an incident investigation began.
 	IncidentInvestigated Kind = "incident.investigated"
 	// RootCauseDetermined indicates an incident root cause was identified.
@@ -100,7 +103,7 @@ const (
 	TaskUpdated Kind = "task.updated"
 	// TaskStateChanged indicates a task transitioned between lifecycle states
 	// (CREATED → ANALYZING → ... ). It is the canonical state-change event the
-	// event taxonomy requires (Phase 4.2), distinct from generic TaskUpdated.
+	// event taxonomy requires, distinct from generic TaskUpdated.
 	TaskStateChanged Kind = "task.state_changed"
 	// TaskCompleted indicates a task completed successfully.
 	TaskCompleted Kind = "task.completed"
@@ -164,7 +167,7 @@ type Event struct {
 	AgentID      string `json:"agent_id,omitempty"`
 	Provenance   string `json:"provenance,omitempty"` // e.g. "loop", "mcp", "web", "incident"
 
-	// EventVersion is the schema version of this event (Strict Plan Phase 4).
+	// EventVersion is the schema version of this event ( ).
 	// Defaults to 1 on Publish when zero. Consumers can use it to handle
 	// evolving event schemas safely.
 	EventVersion int `json:"event_version,omitempty"`
@@ -287,7 +290,6 @@ func payloadTooLarge(p any) bool {
 // (each handler runs in its own goroutine, so a slow or panicking subscriber
 // never blocks the publisher) and appends it to history (capped at max). ID
 // and OccurredAt default when zero.
-//
 // Idempotency (P4.3): if ev.ID is non-empty and was already published, the
 // event is dropped silently — producers may retry publishing the same event
 // without causing duplicate delivery.
@@ -301,7 +303,7 @@ func (b *Bus) Publish(ev Event) {
 		ev.OccurredAt = time.Now()
 	}
 	if ev.EventVersion == 0 {
-		ev.EventVersion = 1 // Strict Plan Phase 4: default schema version
+		ev.EventVersion = 1 // Default schema version
 	}
 
 	// P4.3 dedup: a non-empty ID that was already seen is dropped. This runs

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/JayveerPrajapati/kern/internal/agent"
+	"github.com/JayveerPrajapati/kern/internal/agents"
 	"github.com/JayveerPrajapati/kern/internal/execution"
 	"github.com/JayveerPrajapati/kern/internal/llm"
 	"github.com/JayveerPrajapati/kern/internal/pii"
@@ -59,6 +60,7 @@ func WithVerifyTypes(types []string) Option {
 func New(provider agent.Provider, opts ...Option) *Agent {
 	a := &Agent{
 		provider:    provider,
+		model:       agents.ModelOverride(agents.RoleCoder),
 		maxRounds:   3,
 		verifyTypes: []string{"build"},
 	}

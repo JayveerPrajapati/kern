@@ -2,7 +2,6 @@
 // Jenkins, etc.). It wraps TaskService operations with governance gates so
 // CI/CD-triggered changes pass through the same firewall as interactive
 // changes — no bypass path.
-//
 // The Pipeline runs: analyze → plan → execute → verify → PR, with each
 // mutation gated by governance.CheckExec and the deploy stage requiring
 // explicit KERN_ALLOW_DEPLOY=1 (same as the loop).
@@ -69,13 +68,12 @@ func New(root string) (*Pipeline, error) {
 }
 
 // Run executes the CI/CD pipeline for the given trigger. It:
-//  1. If a patch is provided, checks the governance gate (KERN_ALLOW_EXEC must
-//     be set for execution) then applies it via ExecuteAndVerify.
-//  2. If no patch, runs Analyze + Plan (read-only, no governance gate needed).
-//  3. Creates a PR when execution + verification succeed and a repo/branch is
-//     given.
-//  4. Returns the result with all phase outputs.
-//
+// 1. If a patch is provided, checks the governance gate (KERN_ALLOW_EXEC must
+// be set for execution) then applies it via ExecuteAndVerify.
+// 2. If no patch, runs Analyze + Plan (read-only, no governance gate needed).
+// 3. Creates a PR when execution + verification succeed and a repo/branch is
+// given.
+// 4. Returns the result with all phase outputs.
 // The pipeline NEVER deploys — deployment is a separate, human-approved step
 // (use the loop with KERN_ALLOW_DEPLOY=1 for that). CI/CD stops at PR creation.
 func (p *Pipeline) Run(trigger Trigger) *Result {

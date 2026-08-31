@@ -9,7 +9,7 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/verification"
 )
 
-// TestContextQualityStaleAndDuplicateRatios verifies the Phase 17.4
+// TestContextQualityStaleAndDuplicateRatios verifies the
 // stale-context and duplicate-context ratios are derived from a context packet
 // with duplicate statements and a stale source marker.
 func TestContextQualityStaleAndDuplicateRatios(t *testing.T) {
@@ -20,8 +20,8 @@ func TestContextQualityStaleAndDuplicateRatios(t *testing.T) {
 		TokenCount: 1000,
 		Facts: []domain.Claim{
 			{Statement: "x", Source: "graph", Evidence: []domain.Evidence{{Type: domain.EvidenceGraph, Content: "g"}}},
-			{Statement: "x", Source: "graph"},                                        // duplicate of the above
-			{Statement: "y", Source: "superseded-cache"},                             // stale source marker
+			{Statement: "x", Source: "graph"},            // duplicate of the above
+			{Statement: "y", Source: "superseded-cache"}, // stale source marker
 			{Statement: "z", Source: "memory", Evidence: []domain.Evidence{{Type: domain.EvidenceMemory}}},
 		},
 	}
@@ -46,7 +46,7 @@ func TestContextQualityStaleAndDuplicateRatios(t *testing.T) {
 	}
 }
 
-// TestTaskOutcomeHumanInterventionAndFirstPass verifies the Phase 17.5
+// TestTaskOutcomeHumanInterventionAndFirstPass verifies the
 // first-pass-success and human-intervention flags.
 func TestTaskOutcomeHumanInterventionAndFirstPass(t *testing.T) {
 	// A task that retried and required an approval handoff.
@@ -104,7 +104,7 @@ func TestTaskOutcomePostDeployRegression(t *testing.T) {
 	}
 }
 
-// TestBaselineComparisonFields verifies the Phase 17.3 baseline-vs-Kern
+// TestBaselineComparisonFields verifies the baseline-vs-Kern
 // comparison yields reduction percentages in the expected ranges.
 func TestBaselineComparisonFields(t *testing.T) {
 	task := agent.NewTask("CODE_CHANGE", "add caching")

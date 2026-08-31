@@ -1,4 +1,4 @@
-// Package coder implements the autonomous coding agent (spec §3 capability 9).
+// Package coder implements the autonomous coding agent .
 // It drives an LLM provider to generate code from an intent + plan, applies
 // the patch to a sandbox worktree, verifies it (build/test), and iterates on
 // failure until verification passes or the round budget is exhausted. It can

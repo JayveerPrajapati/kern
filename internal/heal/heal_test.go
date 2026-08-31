@@ -90,7 +90,7 @@ func TestFailingFilesExtractsValidPaths(t *testing.T) {
 
 // TestFailingFilesNeverProbesOutsideRoot verifies absolute paths and ".."
 // escapes in tool output are ignored: untrusted output must not become a
-// filesystem oracle (W2-32).
+// filesystem oracle .
 func TestFailingFilesNeverProbesOutsideRoot(t *testing.T) {
 	root := t.TempDir()
 	_ = os.WriteFile(filepath.Join(root, "broken.go"), []byte("x"), 0o644)

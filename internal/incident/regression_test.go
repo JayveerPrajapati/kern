@@ -13,12 +13,11 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/memory"
 )
 
-// TestInjectRegressionFullPipeline is the Phase 11.1 proof point: an explicitly
+// TestInjectRegressionFullPipeline is the proof point: an explicitly
 // injected known regression flows through the whole incident pipeline and
 // resolves deterministically to the injected symbol. It asserts:
-//
-//	inject → alert → correlate → root cause identifies the injected regression
-//	file/symbol → candidate fix passes verification.
+// inject → alert → correlate → root cause identifies the injected regression
+// file/symbol → candidate fix passes verification.
 func TestInjectRegressionFullPipeline(t *testing.T) {
 	root := fixtureRoot(t)
 	mem := memory.NewMemoryStore(t.TempDir())

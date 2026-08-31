@@ -326,7 +326,7 @@ func renderModernizationText(plan modernization.ExtractionPlan) string {
 }
 
 // renderModernizePhaseText renders a single extraction phase as a short,
-// auditable summary used as the phase task's output (Phase 12.3).
+// auditable summary used as the phase task's output .
 func renderModernizePhaseText(phase modernization.ExtractionPhase) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "MODERNIZE PHASE %d\n", phase.Phase)
@@ -342,7 +342,7 @@ func renderModernizePhaseText(phase modernization.ExtractionPhase) string {
 }
 
 // renderModernizeCandidates renders the extraction plan as a compact candidate
-// visualization (Phase 12.4): one line per candidate context, annotated with
+// visualization : one line per candidate context, annotated with
 // ownership, cohesion, and dependency direction, so a human can scan the
 // extraction surface at a glance.
 func renderModernizeCandidates(plan modernization.ExtractionPlan) string {

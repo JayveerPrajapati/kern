@@ -1,12 +1,14 @@
 package domain
 
 import (
+	"fmt"
 	"sort"
+	"strings"
 	"time"
 )
 
 // TaskBoundary defines the allowed and denied file paths for a task. Strict
-// Plan Phase 7 P0: task-scoped boundaries.
+// Plan task-scoped boundaries.
 type TaskBoundary struct {
 	TaskID       string   `json:"task_id"`
 	AllowedPaths []string `json:"allowed_paths"` // paths the task may read/write
@@ -47,7 +49,7 @@ func pathMatches(path, prefix string) bool {
 	return false
 }
 
-// SafetyBudget tracks resource limits for a task. Strict Plan Phase 7 P1.
+// SafetyBudget tracks resource limits for a task. .
 // Exceeding any limit should cause the system to PAUSE (not proceed).
 type SafetyBudget struct {
 	MaxFiles         int           `json:"max_files"`
@@ -60,7 +62,7 @@ type SafetyBudget struct {
 	MaxRuntime       time.Duration `json:"max_runtime"`
 	AllowedEnvs      []string      `json:"allowed_envs"`
 
-	// Phase 20.3 full budget dimensions.
+	// Full budget dimensions.
 	// MaxToolCallsByKind caps tool-call volume per tool kind (e.g. "exec"),
 	// independently of the total MaxToolCalls counter. A kind with a positive
 	// limit is enforced by Exceeded().
@@ -200,7 +202,7 @@ func (b *SafetyBudget) Start() {
 }
 
 // DenyReason is the explain-deny object returned by a gateway when a governed
-// action is denied. Strict Plan Phase 7 P6: it carries structured, actionable
+// action is denied. : it carries structured, actionable
 // detail about WHY the action was blocked so callers and the UI can explain the
 // decision to a human without re-deriving it from an error string.
 type DenyReason struct {
@@ -230,7 +232,7 @@ type DenyReason struct {
 	SafeAlternative string `json:"safe_alternative,omitempty"`
 }
 
-// GatewayDecision is the outcome of a gateway evaluation. Strict Plan Phase 7:
+// GatewayDecision is the outcome of a gateway evaluation. :
 // it unifies the ALLOW / DENY / PAUSE / APPROVAL_REQUIRED outcomes with the
 // explain-deny object so dry runs and live calls share one result shape.
 type GatewayDecision string
@@ -256,8 +258,8 @@ type GatewayResult struct {
 	Budget *SafetyBudget `json:"budget,omitempty"`
 }
 
-// TaskScope unifies the three dimensions of task scoping (Strict Plan Phase
-// 7 P3): which paths, which services, and which environments a task may touch,
+// TaskScope unifies the three dimensions of task scoping: which paths,
+// which services, and which environments a task may touch,
 // plus its artifact/output scope. It is the single authoritative scope a
 // governed task carries, replacing the need to thread boundary + env + artifact
 // lists separately.
@@ -319,4 +321,57 @@ func (s TaskScope) CheckArtifact(kind string) bool {
 		}
 	}
 	return false
+}
+
+// ValidatePatch checks every file path touched by a unified diff against the
+// task scope ( task boundary enforced on execution). It extracts the
+// a/... and b/... paths from each "diff --git"/"---"/"+++" header and requires
+// each one to pass CheckPath. A patch that touches an out-of-scope path (a
+// denied path, or a path outside the allowed set) is rejected BEFORE it is
+// applied, so a controlled action cannot bypass task-scoped governance.
+// An empty scope (no Paths/DeniedPaths) allows everything (backward-compatible).
+func (s TaskScope) ValidatePatch(patch string) error {
+	paths := patchTouchedPaths(patch)
+	if len(s.Paths) == 0 && len(s.DeniedPaths) == 0 {
+		return nil // unrestricted scope: nothing to enforce
+	}
+	for _, p := range paths {
+		if !s.CheckPath(p) {
+			return fmt.Errorf("task scope %s: patch touches %q, which is outside the allowed boundary (allowed=%v denied=%v)",
+				s.TaskID, p, s.Paths, s.DeniedPaths)
+		}
+	}
+	return nil
+}
+
+// patchTouchedPaths returns the distinct file paths referenced by a unified
+// diff, with the a/ b/ +++/ --- markers stripped and leading slashes removed.
+func patchTouchedPaths(patch string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, ln := range strings.Split(patch, "\n") {
+		trimmed := strings.TrimPrefix(ln, "\t")
+		var p string
+		switch {
+		case strings.HasPrefix(trimmed, "diff --git "):
+			// "diff --git a/x b/x" → the second token's b/ path.
+			parts := strings.Fields(trimmed)
+			if len(parts) >= 4 {
+				p = strings.TrimPrefix(parts[3], "b/")
+			}
+		case strings.HasPrefix(trimmed, "+++ "):
+			p = strings.TrimPrefix(trimmed[4:], "b/")
+		case strings.HasPrefix(trimmed, "--- "):
+			p = strings.TrimPrefix(trimmed[4:], "a/")
+		}
+		if p == "" || p == "/dev/null" {
+			continue
+		}
+		p = strings.TrimPrefix(p, "/")
+		if !seen[p] {
+			seen[p] = true
+			out = append(out, p)
+		}
+	}
+	return out
 }

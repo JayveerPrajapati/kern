@@ -2,7 +2,6 @@
 // language has (Spring/Spring Boot for Java, Django/Flask/FastAPI for Python,
 // Express/NestJS for TypeScript, Rails for Ruby, ...), the signals that reveal
 // them in a project, and project-level detection over those signals.
-//
 // The catalog is the single source of truth for framework IDs used by the
 // indexer's framework-aware symbol extraction (entry points, routes, handlers)
 // and by `kern fw`, which answers "what stack is this project running?".

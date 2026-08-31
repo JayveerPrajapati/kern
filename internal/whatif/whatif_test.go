@@ -197,7 +197,7 @@ func TestSimulateAlternatives(t *testing.T) {
 }
 
 // TestWhatIfAlias asserts WhatIf is a drop-in alias for Simulate: identical
-// inputs produce identical Impact (spec §12 calls the operation "What-If").
+// inputs produce identical Impact .
 func TestWhatIfAlias(t *testing.T) {
 	g := buildGraph(t)
 	id := nodeID(g, "helper")

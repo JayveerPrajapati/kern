@@ -34,9 +34,10 @@ var DefaultPatterns = []Pattern{
 	{Label: "SLACK", RE: regexp.MustCompile(`\bxox[baprs]-[A-Za-z0-9-]{10,}\b`)},
 	{Label: "STRIPE", RE: regexp.MustCompile(`\bsk_(?:live|test)_[A-Za-z0-9]{20,}\b`)},
 	{Label: "OPENAI", RE: regexp.MustCompile(`\bsk-(?:proj-[A-Za-z0-9-]{20,}|[A-Za-z0-9]{20,})\b`)},
+	{Label: "OPENAI_SHORT", RE: regexp.MustCompile(`\bsk-[A-Za-z0-9]{10,19}\b`)},
 	{Label: "JWT", RE: regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b`)},
 	{Label: "BEARER", RE: regexp.MustCompile(`\bBearer\s+[A-Za-z0-9._~+/=-]{20,}\b`)},
-	{Label: "KEY", RE: regexp.MustCompile(`(?i)\b(?:api[_-]?key|apikey|auth[_-]?token|access[_-]?token|refresh[_-]?token|client[_-]?secret|private[_-]?key|app[_-]?secret|consumer[_-]?(?:key|secret))["']?\s*[=:]\s*["']?(?:[A-Za-z0-9_/\-+=]{12,}["']|[A-Za-z0-9_/\-+=]*[0-9][A-Za-z0-9_/\-+=]*)`)},
+	{Label: "KEY", RE: regexp.MustCompile(`(?i)\b(?:api[_\s-]?key|apikey|auth[_\s-]?token|access[_\s-]?token|refresh[_\s-]?token|client[_\s-]?secret|private[_\s-]?key|app[_\s-]?secret|consumer[_\s-]?(?:key|secret))["']?\s*[=:]\s*["']?(?:[A-Za-z0-9_/\-+=]{12,}["']|[A-Za-z0-9_/\-+=]*[0-9][A-Za-z0-9_/\-+=]*)`)},
 	{Label: "PASSWORD", RE: regexp.MustCompile(`(?i)\b(?:password|passwd|pwd)["']?\s*[=:]\s*["']?(?:[A-Za-z0-9_/\-+=@!]{6,}["']|[A-Za-z0-9_/\-+=@!]*[0-9][A-Za-z0-9_/\-+=@!]*)`)},
 	{Label: "TOKEN", RE: regexp.MustCompile(`(?i)\b(?:token|secret)["']?\s*[=:]\s*["']?(?:[A-Za-z0-9_/\-+=]{16,}["']|[A-Za-z0-9_/\-+=]*[0-9][A-Za-z0-9_/\-+=]*)`)},
 	{Label: "URL_CRED", RE: regexp.MustCompile(`\b[a-zA-Z][a-zA-Z0-9+.-]*://[^/\s:@]+:[^/\s@]+@`)},
@@ -129,6 +130,25 @@ func MaskNames(text string, names []string) Result {
 // Patterns are applied greedily: overlapping matches keep the longest, so a
 // URL-with-credentials is masked before its password could be picked up.
 func MaskCustom(text string, patterns []Pattern, names []string) Result {
+	return maskCustom(text, patterns, names, true)
+}
+
+// MaskAll is like Mask but also masks private/loopback IPs. Use for PII
+// masking before sending text to a remote LLM, where even private IPs are PII.
+func MaskAll(text string) Result {
+	return MaskAllCustom(text, DefaultPatterns, nil)
+}
+
+// MaskAllCustom is like MaskCustom but does not suppress private IPs.
+func MaskAllCustom(text string, patterns []Pattern, names []string) Result {
+	return maskCustom(text, patterns, names, false)
+}
+
+// maskCustom is the shared masking implementation. When suppressNonSecretIPs
+// is true, loopback/private IPs (ubiquitous in code and not secrets) stay
+// unmasked; when false every IP is masked, as needed when sending text to a
+// remote LLM where even private IPs are PII.
+func maskCustom(text string, patterns []Pattern, names []string, suppressNonSecretIPs bool) Result {
 	// Encoding pre-pass: secrets hidden behind base64/hex/percent/unicode
 	// encodings would otherwise bypass the plain-text regex patterns below.
 	// maskEncoded decodes each candidate run, checks the decoded content
@@ -149,7 +169,7 @@ func MaskCustom(text string, patterns []Pattern, names []string) Result {
 	var hits []hit
 	for _, p := range patterns {
 		for _, m := range p.RE.FindAllStringIndex(text, -1) {
-			if IsNonSecretIP(p.Label, text[m[0]:m[1]]) {
+			if suppressNonSecretIPs && IsNonSecretIP(p.Label, text[m[0]:m[1]]) {
 				continue
 			}
 			// CDNs use pkg@version URLs (e.g. boxicons@2.1.4) whose "@2.1.4"

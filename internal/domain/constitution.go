@@ -1,13 +1,12 @@
 package domain
 
-// ConstraintType is the severity of a constitution constraint. Strict Plan
-// Phase 8 P0.
+// ConstraintType is the severity of a constitution constraint.
 type ConstraintType string
 
 const (
-	ConstraintMust     ConstraintType = "MUST"
-	ConstraintMustNot  ConstraintType = "MUST_NOT"
-	ConstraintShould   ConstraintType = "SHOULD"
+	ConstraintMust      ConstraintType = "MUST"
+	ConstraintMustNot   ConstraintType = "MUST_NOT"
+	ConstraintShould    ConstraintType = "SHOULD"
 	ConstraintShouldNot ConstraintType = "SHOULD_NOT"
 )
 
@@ -34,15 +33,15 @@ type ConstitutionRule struct {
 	Provenance string `json:"provenance,omitempty" yaml:"provenance,omitempty"`
 }
 
-// Constitution is the loaded engineering constitution. Strict Plan Phase 8 P0.
+// Constitution is the loaded engineering constitution.
 type Constitution struct {
 	Rules []ConstitutionRule `json:"rules" yaml:"rules"`
 }
 
 // PlanValidation is the result of validating a plan against the constitution.
 type PlanValidation struct {
-	Passed     bool             `json:"passed"`
-	Violations []PlanViolation  `json:"violations,omitempty"`
+	Passed     bool            `json:"passed"`
+	Violations []PlanViolation `json:"violations,omitempty"`
 	// Provenance records the source of the validation (P8.4), propagated from
 	// the constitution rules that produced the violations. It helps auditors
 	// trace a decision back to the ADR/incident/policy that required it.

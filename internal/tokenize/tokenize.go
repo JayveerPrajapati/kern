@@ -1,5 +1,4 @@
 // Package tokenize provides local, offline token counting for prompts.
-//
 // It uses a character/word based estimator that is consistent between the
 // "before" and "after" versions of a prompt, so token savings percentages are
 // accurate even though absolute counts are approximate. A pluggable interface

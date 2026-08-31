@@ -12,7 +12,7 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/runtime"
 )
 
-// Phase 11 (P1.3) failure-scenario tests: the incident pipeline must handle
+// (P1.3) failure-scenario tests: the incident pipeline must handle
 // degraded inputs deterministically and fail safe — it must not fabricate a
 // root cause or a verified fix when evidence is missing, stale, or low
 // confidence, and a verification failure must not yield a verified fix.
@@ -109,7 +109,7 @@ func TestStaleDeploymentMappingDowngradesCorrelation(t *testing.T) {
 // source there is no evidence, so no hypothesis may be asserted as a root cause.
 func TestLowConfidenceHypothesisNotPromoted(t *testing.T) {
 	eng, alert := emptyAlertEngine(t, map[string]string{
-		"go.mod": "module inc\n\ngo 1.20\n",
+		"go.mod":  "module inc\n\ngo 1.20\n",
 		"main.go": "package main\n\nfunc x() int { return 1 }\nfunc main() { println(x()) }\n",
 	})
 	inc := eng.IngestAlert(alert)
@@ -165,7 +165,7 @@ func TestVerificationFailureBlocksFix(t *testing.T) {
 }
 
 // TestVerificationFailureNoSideEffect verifies that a failed verification does
-// not mutate the live repository — the worktree is isolated (Phase 11 exit gate:
+// not mutate the live repository — the worktree is isolated ( exit gate:
 // a controlled incident produces a verified remediation PR, never a broken live tree).
 func TestVerificationFailureNoSideEffect(t *testing.T) {
 	root := fixtureRoot(t)
@@ -199,7 +199,7 @@ func main() { println(helper()) }
 // correlation folds the alert into an incident without panicking.
 func TestIncidentCorrelateEmptyRuntimeNoPanic(t *testing.T) {
 	eng, alert := emptyAlertEngine(t, map[string]string{
-		"go.mod": "module e\n\ngo 1.20\n",
+		"go.mod":  "module e\n\ngo 1.20\n",
 		"main.go": "package main\nfunc main() {}\n",
 	})
 	inc := eng.IngestAlert(alert)

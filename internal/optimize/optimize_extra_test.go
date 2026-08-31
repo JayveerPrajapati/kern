@@ -266,6 +266,54 @@ func TestRecordWritesStats(t *testing.T) {
 	}
 }
 
+func TestRecordBeforeBytesIsMeasuredInput(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	prev := Recorder
+	defer func() { Recorder = prev }()
+	r, err := stats.NewRecorder()
+	if err != nil {
+		t.Fatal(err)
+	}
+	Recorder = r
+
+	input := "record this prompt and count its raw bytes"
+	res, err := Prompt(input, "", Options{Session: "bytes-test", Model: "gpt-4o-mini"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The result itself must carry the measured byte counts.
+	if want := len([]byte(input)); res.BeforeBytes != want {
+		t.Fatalf("BeforeBytes = %d, want measured %d", res.BeforeBytes, want)
+	}
+	if want := len([]byte(res.Output)); res.AfterBytes != want {
+		t.Fatalf("AfterBytes = %d, want measured %d", res.AfterBytes, want)
+	}
+
+	// And the recorded stats entry must persist the measured value, not a
+	// reconstruction from the output plus an assumed bytes-per-token rate.
+	entries, err := r.Entries(10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found *stats.Entry
+	for i := range entries {
+		if entries[i].Session == "bytes-test" {
+			found = &entries[i]
+			break
+		}
+	}
+	if found == nil {
+		t.Fatal("expected a recorded entry for the bytes-test session")
+	}
+	if want := len([]byte(input)); found.BeforeBytes != want {
+		t.Fatalf("recorded BeforeBytes = %d, want %d", found.BeforeBytes, want)
+	}
+	if found.AfterBytes <= 0 {
+		t.Fatalf("recorded AfterBytes should be measured > 0, got %d", found.AfterBytes)
+	}
+}
+
 func TestRecordNilRecorderIsNoop(t *testing.T) {
 	prev := Recorder
 	defer func() { Recorder = prev }()

@@ -30,6 +30,9 @@ func TestPipelineReadOnlyAnalyzePlan(t *testing.T) {
 
 func TestPipelinePatchExecutionGovernanceGate(t *testing.T) {
 	// Without KERN_ALLOW_EXEC, execution should be denied by governance.
+	// Pin the env explicitly so an ambient KERN_ALLOW_EXEC=1 in the caller's
+	// shell cannot flip this test (it must assert the denied path).
+	t.Setenv("KERN_ALLOW_EXEC", "")
 	p, err := New("../..")
 	if err != nil {
 		t.Fatalf("New: %v", err)

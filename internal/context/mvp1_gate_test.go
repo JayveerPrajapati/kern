@@ -53,11 +53,10 @@ func TestHelper(t *testing.T) {
 	return dir
 }
 
-// TestMVP1GateAnalyzeChange is the MVP1 GATE test (spec §44).
+// TestMVP1GateAnalyzeChange is the MVP1 GATE test .
 // It runs the killer workflow "Analyze this proposed change" end-to-end
 // against a small in-repo fixture module and asserts all 9 output fields are
 // populated. This test is the gate that must pass before MVP2 work begins.
-//
 // It is scoped to the tiny fixture (not the whole kern repo) so it completes
 // in seconds and never spawns runaway index/build processes.
 func TestMVP1GateAnalyzeChange(t *testing.T) {

@@ -2,7 +2,6 @@
 // intent. It is the plan-stage equivalent of internal/coder: where the coder
 // generates and verifies a patch, the planner generates a structured plan that
 // the coder (or a human) can follow.
-//
 // The planner is provider-neutral: it talks only to the agent.Provider
 // interface. A nil provider makes Plan return ErrNoProvider so callers can fall
 // back to a deterministic plan or skip the stage.
@@ -14,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/JayveerPrajapati/kern/internal/agent"
+	"github.com/JayveerPrajapati/kern/internal/agents"
 	"github.com/JayveerPrajapati/kern/internal/llm"
 	"github.com/JayveerPrajapati/kern/internal/pii"
 )
@@ -46,7 +46,7 @@ func WithMaxTokens(n int) Option {
 // New creates a planner Agent. A nil provider makes Plan return ErrNoProvider
 // instead of silently no-op'ing.
 func New(provider agent.Provider, opts ...Option) *Agent {
-	a := &Agent{provider: provider}
+	a := &Agent{provider: provider, model: agents.ModelOverride(agents.RolePlanner)}
 	for _, opt := range opts {
 		opt(a)
 	}

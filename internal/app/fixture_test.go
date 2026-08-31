@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-// fixtureDir is the on-disk standalone fixture repository (Phase 10.1). It is a
+// fixtureDir is the on-disk standalone fixture repository. It is a
 // real, buildable Go module that mirrors the UserService vertical slice, so the
 // safe-change tests exercise a concrete repository rather than inline consts.
 const fixtureDir = "testdata/fixtures/user_service"
@@ -42,10 +42,14 @@ func loadUserFixture(t *testing.T) string {
 // TestUserServiceFixtureBuildable proves the standalone fixture repository is a
 // real, buildable Go module with passing tests — not just a JSON spec. It runs
 // `go build` and `go test` in the fixture directory.
+// The build writes to a temp output file: building in-place would overwrite
+// the committed binary artifact (the module is named user.service.fixture, so
+// `go build ./...` drops its binary into the fixture dir), dirtying the tree on
+// every test run.
 func TestUserServiceFixtureBuildable(t *testing.T) {
 	dir := loadUserFixture(t)
 
-	build := exec.Command("go", "build", "./...")
+	build := exec.Command("go", "build", "-o", filepath.Join(t.TempDir(), "fixture-build"), "./...")
 	build.Dir = dir
 	if out, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("fixture repo does not build: %v\n%s", err, out)

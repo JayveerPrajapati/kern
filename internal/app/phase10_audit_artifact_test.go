@@ -9,7 +9,6 @@ import (
 
 // TestAnalyzeRecordsAnalysisReport verifies that the Analyze workflow records a
 // typed AnalysisReport artifact linked as a child of the context-packet artifact
-// (Phase 10.4).
 func TestAnalyzeRecordsAnalysisReport(t *testing.T) {
 	root := t.TempDir()
 	writeFile(t, filepath.Join(root, "go.mod"), "module analyzep10\n\ngo 1.21\n")
@@ -57,7 +56,7 @@ func TestAnalyzeRecordsAnalysisReport(t *testing.T) {
 }
 
 // TestObserveRecordsAuditArtifact verifies that when a task completes through
-// the Observe finalize point, an audit artifact is recorded (Phase 10.4).
+// the Observe finalize point, an audit artifact is recorded .
 func TestObserveRecordsAuditArtifact(t *testing.T) {
 	if testing.Short() {
 		t.Skip("slow e2e; skipped with -short")

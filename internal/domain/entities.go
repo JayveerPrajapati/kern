@@ -10,7 +10,7 @@ import (
 	"time"
 )
 
-// Team is a group of owners (spec §7 node type, F-21). Teams own
+// Team is a group of owners. Teams own
 // files/symbols (via ownership.Map) and are graph nodes.
 type Team struct {
 	ID             string   // stable identifier (e.g. "@backend-team")
@@ -98,7 +98,7 @@ type Permission struct {
 	Allowed  bool
 }
 
-// ArtifactKind is the canonical type of a workflow artifact (spec §54).
+// ArtifactKind is the canonical type of a workflow artifact .
 type ArtifactKind string
 
 const (
@@ -132,14 +132,14 @@ type Artifact struct {
 	TaskID           string       // originating Task ID
 	CreatedBy        string       // agent ID that produced this artifact
 	CreatedAt        time.Time
-	Version          int      // artifact version (0 = initial)
-	Status           string   // "draft", "final", "superseded"
-	Scope            string   // what the artifact applies to
-	Provenance       string   // how the artifact was produced
-	URI              string   // location of the artifact
-	Digest           string   // content hash
-	ParentArtifactID string   // parent artifact in the traceable chain
-	RelatedEntities  []string // related entity IDs
+	Version          int            // artifact version (0 = initial)
+	Status           string         // "draft", "final", "superseded"
+	Scope            string         // what the artifact applies to
+	Provenance       string         // how the artifact was produced
+	URI              string         // location of the artifact
+	Digest           string         // content hash
+	ParentArtifactID string         // parent artifact in the traceable chain
+	RelatedEntities  []string       // related entity IDs
 	Links            []ArtifactLink // typed links to other artifacts (P3.4)
 }
 
@@ -171,7 +171,7 @@ func NewArtifact(kind ArtifactKind, taskID, uri string) Artifact {
 }
 
 // ArtifactLinkKind is the semantic relationship between two artifacts
-// (spec §54, Phase 3 P3.4). A link is directional: From is the dependent
+// A link is directional: From is the dependent
 // artifact, To is the artifact it relates to.
 type ArtifactLinkKind string
 

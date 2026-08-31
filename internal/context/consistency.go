@@ -8,24 +8,46 @@ import (
 )
 
 // staleAfter is the freshness bound past which a claim's source is treated as
-// stale for consistency purposes (Phase 14.3). Claims older than this cannot
+// stale for consistency purposes. Claims older than this cannot
 // reliably confirm or deny a newer claim, so the subject is marked STALE rather
 // than CONFLICT.
 const staleAfter = 7 * 24 * time.Hour
 
+// ApplyConsistency wires the exit gate into a context packet: it runs
+// CheckConsistency over the packet's claims and, whenever the result is not a
+// clean NO_CONFLICT, applies the confidence downgrades (never raising any
+// claim's confidence) and attaches the report to the packet. A packet whose
+// claims conflict is therefore never silently treated as certain — downstream
+// consumers see the downgraded confidence and the report with the conflict
+// explanation (14.4), staleness attribution (14.3), and overall result (14.2).
+// NO_CONFLICT packets are left untouched (Consistency stays nil), so callers
+// that checked for a nil report keep working.
+func ApplyConsistency(pkt *domain.ContextPacket) {
+	if pkt == nil {
+		return
+	}
+	report := CheckConsistency(pkt.Facts)
+	if report.Result == domain.ConflictNone {
+		return
+	}
+	for i := range pkt.Facts {
+		if nc, ok := report.ConfidenceDowngrades[pkt.Facts[i].Scope]; ok && pkt.Facts[i].Confidence > nc {
+			pkt.Facts[i].Confidence = nc
+		}
+	}
+	pkt.Consistency = &report
+}
+
 // CheckConsistency detects contradictions between claims from different knowledge
-// sources. Strict Plan Phase 14: "Conflicting information cannot silently
+// sources. : "Conflicting information cannot silently
 // produce a high-confidence engineering recommendation."
-//
 // The check groups claims by Scope (subject), then for each group, looks for
 // pairs of claims from DIFFERENT sources that make contradicting statements.
 // A contradiction is detected when two claims about the same subject:
-//   - Come from different sources (e.g., GRAPH vs RUNTIME)
-//   - Have different Statement text (after normalization)
-//
+// - Come from different sources (e.g., GRAPH vs RUNTIME)
+// - Have different Statement text (after normalization)
 // When conflicts are found, confidence is downgraded for the affected subjects.
-//
-// Phase 14 additions: each conflict carries an Explanation (14.4) and a
+// Additions: each conflict carries an Explanation (14.4) and a
 // StaleSource when the contradiction is attributable to one side being stale
 // (14.3); the report carries the overall ConflictResult enum (14.2).
 func CheckConsistency(claims []domain.Claim) domain.ConsistencyReport {
@@ -63,7 +85,7 @@ func CheckConsistency(claims []domain.Claim) domain.ConsistencyReport {
 					continue // same statement: consistent
 				}
 				conflicted = true
-				// Phase 14.3: attribute staleness when one side is old.
+				// Attribute staleness when one side is old.
 				staleSource := ""
 				if isStale(a.Timestamp, now) && !isStale(b.Timestamp, now) {
 					staleSource = a.Source
@@ -71,13 +93,13 @@ func CheckConsistency(claims []domain.Claim) domain.ConsistencyReport {
 					staleSource = b.Source
 				}
 				report.Conflicts = append(report.Conflicts, domain.ConsistencyConflict{
-					Subject:   subject,
-					ClaimA:    a.Statement,
-					SourceA:   domain.KnowledgeSource(a.Source),
-					ClaimB:    b.Statement,
-					SourceB:   domain.KnowledgeSource(b.Source),
+					Subject:     subject,
+					ClaimA:      a.Statement,
+					SourceA:     domain.KnowledgeSource(a.Source),
+					ClaimB:      b.Statement,
+					SourceB:     domain.KnowledgeSource(b.Source),
 					StaleSource: staleSource,
-					// Phase 14.4: explain why the two claims conflict.
+					// Explain why the two claims conflict.
 					Explanation: explainConflict(subject, a, b),
 				})
 				// Downgrade confidence for this subject.
@@ -95,7 +117,7 @@ func CheckConsistency(claims []domain.Claim) domain.ConsistencyReport {
 			report.Result = domain.ConflictPresent
 		} else {
 			report.Result = domain.ConflictNone
-			// Phase 14.3: if the agreeing subject's evidence is stale, mark it.
+			// If the agreeing subject's evidence is stale, mark it.
 			if isGroupStale(group, now) {
 				report.StaleSubjects = append(report.StaleSubjects, subject)
 				report.Result = domain.ConflictStale
@@ -129,7 +151,7 @@ func isGroupStale(group []domain.Claim, now time.Time) bool {
 }
 
 // explainConflict builds a human-readable explanation of why two claims
-// contradict (Phase 14.4).
+// contradict .
 func explainConflict(subject string, a, b domain.Claim) string {
 	return "subject " + subject + ": source " + a.Source + " (" + a.Statement + ") contradicts source " + b.Source + " (" + b.Statement + ")"
 }

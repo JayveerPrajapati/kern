@@ -3,16 +3,17 @@ package app
 import (
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/JayveerPrajapati/kern/internal/runtime"
 	"github.com/JayveerPrajapati/kern/internal/whatif"
 )
 
 // TestPlatformAnalyzeWhatIfVerify exercises the three core service methods
-// (Analyze, WhatIf, Verify) against the real kern repo. It is the Phase 1
+// (Analyze, WhatIf, Verify) against the real kern repo. It is the
 // contract test: it proves the shared application-services layer wires the
 // index → twin-merged graph → memory → firewall → context/verification engines
 // correctly and that all three interfaces (CLI/MCP/REST) can rely on it.
-//
 // It does NOT assert exact output shapes (those drift as the repo evolves);
 // it asserts the structural contract: methods return non-empty results without
 // error, the rendered text contains expected section markers, and the
@@ -23,7 +24,7 @@ func TestPlatformAnalyzeWhatIfVerify(t *testing.T) {
 	}
 	root := "../.."
 
-	p, err := New(root)
+	p, err := NewWithIndex(root, sharedTestRepoIndex(t))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -68,13 +69,67 @@ func TestPlatformAnalyzeWhatIfVerify(t *testing.T) {
 	}
 }
 
+// TestWhatIfRuntimeEvidence asserts the RuntimeEvidence dimension is filled
+// from the platform's runtime source : with a source carrying error
+// events attached via WithRuntimeSource, WhatIf returns a non-empty
+// RuntimeEvidence; with no source, the dimension stays empty.
+func TestWhatIfRuntimeEvidence(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow e2e (>30s); skipped with -short")
+	}
+	root := "../.."
+
+	p, err := NewWithIndex(root, sharedTestRepoIndex(t))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	// Without a runtime source, RuntimeEvidence stays empty.
+	imp, _, err := p.WhatIf(whatif.RemoveSymbol, "NewServer", "")
+	if err != nil {
+		t.Fatalf("WhatIf (no source): %v", err)
+	}
+	if len(imp.RuntimeEvidence) != 0 {
+		t.Fatalf("expected empty RuntimeEvidence with no source, got %d entries", len(imp.RuntimeEvidence))
+	}
+
+	// With a runtime source carrying error events, RuntimeEvidence is populated.
+	store := runtime.NewStore()
+	now := time.Now().Truncate(time.Second)
+	store.Ingest(runtime.Event{
+		ID:        "evt-1",
+		Type:      runtime.EventError,
+		Service:   "whatif",
+		Severity:  "error",
+		Message:   "nil pointer in whatif handler",
+		Timestamp: now,
+	})
+	p.WithRuntimeSource(store)
+
+	imp, _, err = p.WhatIf(whatif.RemoveSymbol, "NewServer", "")
+	if err != nil {
+		t.Fatalf("WhatIf (with source): %v", err)
+	}
+	if len(imp.RuntimeEvidence) == 0 {
+		t.Fatal("expected non-empty RuntimeEvidence when a runtime source with error events is attached")
+	}
+	if !strings.Contains(imp.RuntimeEvidence[0], "[whatif] error: nil pointer in whatif handler") {
+		t.Errorf("RuntimeEvidence[0] not rendered as expected; got: %q", imp.RuntimeEvidence[0])
+	}
+
+	// Non-error events must never leak into the dimension.
+	if strings.Contains(strings.Join(imp.RuntimeEvidence, "\n"), "no runtime telemetry") {
+		t.Error("unexpected content in RuntimeEvidence")
+	}
+}
+
 // TestPlatformNewWithGraph tests the server constructor that shares a
 // caller-owned graph pointer. It verifies the Platform's engines see the
 // graph that the caller built (not a copy).
 func TestPlatformNewWithGraph(t *testing.T) {
 	root := "../.."
 
-	p, err := New(root)
+	p, err := NewWithIndex(root, sharedTestRepoIndex(t))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}

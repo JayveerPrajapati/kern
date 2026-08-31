@@ -22,7 +22,7 @@ func TestInterfaceConsistencySharedAnalysis(t *testing.T) {
 	}
 	root := "../.."
 
-	p, err := New(root)
+	p, err := NewWithIndex(root, sharedTestRepoIndex(t))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -112,7 +112,7 @@ func TestInterfaceConsistencySharedAnalysis(t *testing.T) {
 }
 
 // TestServiceContractsExerciseNewAccessors asserts the app-layer surface added
-// in Phase 2.1 is live: Policy (Firewall), Agent (Registry + Agents), Audit
+// in is live: Policy (Firewall), Agent (Registry + Agents), Audit
 // (AuditLog), and Memory (MemoryRecall) are all first-class services satisfied
 // by *TaskService.
 func TestServiceContracts(t *testing.T) {
@@ -121,7 +121,7 @@ func TestServiceContracts(t *testing.T) {
 	}
 	root := "../.."
 
-	p, err := New(root)
+	p, err := NewWithIndex(root, sharedTestRepoIndex(t))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}

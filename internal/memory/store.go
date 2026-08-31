@@ -25,7 +25,6 @@ const maxTypedEntries = 200
 // MemoryStore is a typed engineering memory store supporting all MemoryType
 // values. It persists to a separate JSON file from the legacy lesson store
 // (memory.json -> ememory.json) so v1 behavior is untouched.
-//
 // mu serializes the load→mutate→save cycle so concurrent writers cannot clobber
 // each other's updates.
 type MemoryStore struct {
@@ -114,6 +113,11 @@ func (s *MemoryStore) Add(m domain.Memory) (domain.Memory, error) {
 		m.CreatedAt = now
 	}
 	m.UpdatedAt = now
+	// A newly added memory is the authoritative, current entry ;
+	// an explicit status is preserved for promoted entries.
+	if m.Status == "" {
+		m.Status = domain.MemoryCurrent
+	}
 	ms = append(ms, m)
 	// FIFO eviction: keep only the newest maxTypedEntries, dropping the oldest.
 	if len(ms) > maxTypedEntries {
@@ -126,7 +130,7 @@ func (s *MemoryStore) Add(m domain.Memory) (domain.Memory, error) {
 }
 
 // Supersede marks an older memory with the same type+scope as superseded and
-// promotes a new one to current (Phase 15.4 memory supersession). This makes
+// promotes a new one to current ( memory supersession). This makes
 // the newest memory authoritative while retaining the older one for audit.
 // The new memory may be an existing entry (promote) or a fresh one (replace).
 func (s *MemoryStore) Supersede(newMemory domain.Memory) (domain.Memory, error) {
@@ -166,7 +170,7 @@ func (s *MemoryStore) Supersede(newMemory domain.Memory) (domain.Memory, error) 
 }
 
 // CurrentMemories returns only the memories that are current (not superseded
-// and not historical) for the given type (Phase 15.4). An empty type returns
+// and not historical) for the given type. An empty type returns
 // all current memories.
 func (s *MemoryStore) CurrentMemories(memType domain.MemoryType) ([]domain.Memory, error) {
 	ms := s.load()
@@ -184,7 +188,7 @@ func (s *MemoryStore) CurrentMemories(memType domain.MemoryType) ([]domain.Memor
 	return out, nil
 }
 
-// MarkHistorical retires a memory to the historical state (Phase 15.4),
+// MarkHistorical retires a memory to the historical state ,
 // removing it from the authoritative set without deleting it.
 func (s *MemoryStore) MarkHistorical(id string) error {
 	s.mu.Lock()
@@ -311,12 +315,9 @@ func itoa(n int) string {
 // caller's security clearance. Memories with a Classification higher than the
 // caller's clearance are excluded. This closes spec §41 F-55 (per-agent
 // authorization for shared memory).
-//
 // clearanceLevels maps classification strings to numeric levels:
-//
-//	"" (unclassified) = 0, "public" = 0, "internal" = 1,
-//	"confidential" = 2, "restricted" = 3
-//
+// "" (unclassified) = 0, "public" = 0, "internal" = 1,
+// "confidential" = 2, "restricted" = 3
 // A caller with clearance N can read memories with classification <= N.
 // agentID is reserved for future per-agent attribution/auditing.
 func (s *MemoryStore) AuthorizedRecall(q Query, agentID string, clearance int) ([]domain.Memory, error) {

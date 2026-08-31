@@ -9,7 +9,6 @@ import (
 
 	"github.com/JayveerPrajapati/kern/internal/domain"
 	"github.com/JayveerPrajapati/kern/internal/governance"
-	"github.com/JayveerPrajapati/kern/internal/governance/identity"
 	"github.com/JayveerPrajapati/kern/internal/memory"
 	"github.com/JayveerPrajapati/kern/internal/runtime"
 )
@@ -162,7 +161,7 @@ func contains(s, sub string) bool {
 	return strings.Contains(s, sub)
 }
 
-// TestApplyFixRecordsRisk verifies the Phase 11 (11.4) risk step: a fix applied
+// TestApplyFixRecordsRisk verifies the (11.4) risk step: a fix applied
 // through the pipeline records a FixRisk assessment, and a firewall with a
 // definitive denial blocks the fix.
 func TestApplyFixRiskStep(t *testing.T) {
@@ -170,7 +169,7 @@ func TestApplyFixRiskStep(t *testing.T) {
 	st := runtime.NewStore()
 	fw := governance.NewFirewall()
 	// Register a fixer that is explicitly denied the fix on the service.
-	fw.WithAgents(identity.NewAgent("incident-fixer", "fixer", "sre", []identity.Permission{}))
+	fw.WithAgents(governance.NewAgent("incident-fixer", "fixer", "sre", []governance.Permission{}))
 	mem := memory.NewMemoryStore(t.TempDir())
 	eng, err := NewEngine(root, st, mem, fw)
 	if err != nil {
@@ -192,7 +191,7 @@ func TestApplyFixRiskStep(t *testing.T) {
 	}
 }
 
-// TestResolveWritesIncidentMemory verifies Phase 11 (11.5): resolving an
+// TestResolveWritesIncidentMemory verifies (11.5): resolving an
 // incident records an incident-type memory so the learning extractor can
 // surface patterns.
 func TestResolveWritesIncidentMemory(t *testing.T) {

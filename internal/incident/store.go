@@ -14,8 +14,8 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/domain"
 )
 
-// Store persists incidents per project so the Web Console (Phase 14) and the
-// closed-loop learning step (Phase 15) can list and correlate historical
+// Store persists incidents per project so the Web Console and the
+// closed-loop learning step can list and correlate historical
 // incidents across sessions. It mirrors the memory store persistence pattern
 // (JSON under the project cache, additive, atomic temp-file rename).
 type Store struct {

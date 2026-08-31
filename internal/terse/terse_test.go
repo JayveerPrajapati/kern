@@ -63,6 +63,24 @@ func TestCompressCollapsesBlankRuns(t *testing.T) {
 	}
 }
 
+func TestCompressStripsFillerFromShortPayloadLine(t *testing.T) {
+	// A short single-line response that carries technical payload must still
+	// have its filler stripped (regression: payload lines were appended
+	// verbatim, so "Sure! ... server.go. Hope that helps!" survived intact).
+	in := "Sure! I'd be happy to help you with that. The function dispatch is defined in server.go. Hope that helps!"
+	out, dropped := Compress(in)
+	want := "The function dispatch is defined in server.go."
+	if strings.TrimSpace(out) != want {
+		t.Fatalf("compressed = %q, want %q", out, want)
+	}
+	if contains(out, "Sure!") || contains(out, "happy to help") || contains(out, "Hope that helps") {
+		t.Fatalf("filler survived: %q", out)
+	}
+	if dropped != 0 {
+		t.Fatalf("expected 0 dropped lines, got %d", dropped)
+	}
+}
+
 func contains(s, sub string) bool {
 	for i := 0; i+len(sub) <= len(s); i++ {
 		if s[i:i+len(sub)] == sub {

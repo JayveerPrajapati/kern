@@ -11,14 +11,12 @@ import (
 
 // architectureRules determines which governance / architecture rules apply to
 // a change to the given roots.
-//
 // It is an additive, honest integration:
-//  1. Every enabled governance policy from the firewall whose Scope matches the
-//     change scope (derived deterministically from the root files) is surfaced.
-//  2. When a boundary provider is attached, each provided boundary rule that the
-//     change actually crosses (a forbidden dependency edge within the change's
-//     blast region) is surfaced as an ArchitectureRules entry.
-//
+// 1. Every enabled governance policy from the firewall whose Scope matches the
+// change scope (derived deterministically from the root files) is surfaced.
+// 2. When a boundary provider is attached, each provided boundary rule that the
+// change actually crosses (a forbidden dependency edge within the change's
+// blast region) is surfaced as an ArchitectureRules entry.
 // The result is deterministic: rules are emitted in a stable order with
 // duplicates removed.
 func (e *Engine) architectureRules(scope string, roots []domain.Symbol) []domain.Policy {
@@ -86,7 +84,6 @@ func changeScope(roots []domain.Symbol) string {
 
 // crossesBoundary reports whether a change to the given roots crosses the
 // forbidden dependency boundary encoded in a boundary rule policy.
-//
 // A boundary policy is expected to have the shape produced by
 // domain.FromBoundaryRule: Name = "boundary:<from>-><to>". It reports true when
 // some dependency edge within the change's blast region goes from a directory
@@ -224,7 +221,6 @@ func dirMatch(pattern, dir string) bool {
 // runtimeEvidence gathers recent error/notification events relevant to the
 // changed symbol's scope from the optional runtime source. It returns an empty
 // (non-nil) slice when no source is wired or nothing matches.
-//
 // Relevance is deterministic: an event matches if its Service equals the
 // directory of a root file, or its "file" attribute equals a root file. When no
 // explicit match is found, error events within the source are still surfaced

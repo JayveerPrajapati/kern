@@ -22,4 +22,8 @@ type ContextPacket struct {
 	GeneratedAt        time.Time
 	TokenCount         int    // measured token count of the packet
 	FittedText         string // budget-fitted rendered text (empty when no budgeting applied)
+	// Consistency is the cross-engine consistency report for the packet's
+	// claims. It is nil when no conflicts/staleness were detected —
+	// a nil report means the packet may be treated as internally consistent.
+	Consistency *ConsistencyReport
 }

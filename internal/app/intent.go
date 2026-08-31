@@ -7,19 +7,21 @@ import (
 )
 
 // CompileIntent classifies a raw intent string into a CompiledIntent with an
-// IntentType, objective, target, scope, and environment. Strict Plan Phase 6 P0.
-//
+// IntentType, objective, target, scope, and environment. .
 // Classification is deterministic (keyword/verb matching, no LLM):
-//   - "explain"/"understand"/"what does" → UNDERSTAND
-//   - "add"/"implement"/"fix"/"refactor"/"remove" → CODE_CHANGE
-//   - "review"/"check" → REVIEW
-//   - "what if"/"simulate"/"predict" → WHAT_IF
-//   - "incident"/"alert"/"failing"/"down" → INCIDENT
-//   - "modernize"/"split"/"extract" → MODERNIZATION
-//   - "security"/"vulnerab"/"secret" → SECURITY
-//   - "test" → TEST
-//   - "deploy"/"release" → DEPLOY
-//   - "audit"/"who changed"/"what did" → AUDIT
+// - "explain"/"understand"/"what does" → UNDERSTAND
+// - "add"/"implement"/"fix"/"refactor"/"remove" → CODE_CHANGE
+// - "review"/"check" → REVIEW
+// - "what if"/"simulate"/"predict" → WHAT_IF
+// - "incident"/"alert"/"failing"/"down" → INCIDENT
+// - "modernize"/"split"/"extract" → MODERNIZATION
+// - "security"/"vulnerab"/"secret" → SECURITY
+// - "test" → TEST
+// - "deploy"/"release" → DEPLOY
+// - "audit"/"who changed"/"what did" → AUDIT
+// The compiled environment is derived from the intent type: production
+// operations (DEPLOY, INCIDENT) compile to "production"; everything else
+// defaults to "development". Scope is "repository".
 func CompileIntent(raw string) domain.CompiledIntent {
 	raw = strings.TrimSpace(raw)
 	lower := strings.ToLower(raw)
@@ -32,7 +34,7 @@ func CompileIntent(raw string) domain.CompiledIntent {
 		it = domain.IntentWhatIf
 	case containsAny(lower, "deploy", "release", "rollout"):
 		it = domain.IntentDeploy
-	case containsAny(lower, "incident", "alert", "failing", "down", "outage", "production"):
+	case containsAny(lower, "incident", "alert", "failing", "down", "outage"):
 		it = domain.IntentIncident
 	case containsAny(lower, "modernize", "split", "extract service", "monolith"):
 		it = domain.IntentModernization
@@ -54,14 +56,27 @@ func CompileIntent(raw string) domain.CompiledIntent {
 		Objective:      raw,
 		Target:         target,
 		Scope:          "repository",
-		Environment:    "development",
+		Environment:    environmentFor(it),
 		DesiredOutcome: raw,
 		RawText:        raw,
 	}
 }
 
-// SelectWorkflow maps an IntentType to a primary workflow (A-E). Strict Plan
-// Phase 6 P0.
+// environmentFor derives the operating environment from the intent type.
+// Production operations (deploy, incident response) target "production"; all
+// other intents default to "development". The compiler derives this so the
+// precheck's environment gate can enforce the correct boundary for a request —
+// a deploy must be scoped to production, not silently reported as development.
+func environmentFor(it domain.IntentType) string {
+	switch it {
+	case domain.IntentDeploy, domain.IntentIncident:
+		return "production"
+	default:
+		return "development"
+	}
+}
+
+// SelectWorkflow maps an IntentType to a primary workflow (A-E).
 func SelectWorkflow(it domain.IntentType) domain.WorkflowID {
 	switch it {
 	case domain.IntentUnderstand:
@@ -80,54 +95,65 @@ func SelectWorkflow(it domain.IntentType) domain.WorkflowID {
 }
 
 // DefaultCapabilities returns the capabilities required for an intent type.
-// Strict Plan Phase 6 P1: capability planner selects only the required
-// capabilities.
+// The capability planner selects only the required
+// capabilities. It resolves names through the canonical CapabilityRegistry
+// (allCapabilities) so the Run path uses the SAME single source of truth as
+// discovery/precheck — there is exactly one capability catalog, and every
+// capability returned carries its Purpose, Inputs and Dependencies.
 func DefaultCapabilities(it domain.IntentType) []domain.Capability {
+	reg := NewCapabilityRegistry()
+	names := capabilityNamesFor(it)
+	caps := make([]domain.Capability, 0, len(names))
+	for _, n := range names {
+		if c, ok := reg.Get(n); ok {
+			caps = append(caps, c)
+		}
+	}
+	return caps
+}
+
+// capabilityNamesFor returns the canonical capability names an intent type
+// requires. This is the only place intent → capability membership is declared;
+// the actual capability metadata (tools, permissions, risk, purpose) lives in
+// allCapabilities().
+func capabilityNamesFor(it domain.IntentType) []string {
 	switch it {
 	case domain.IntentUnderstand:
-		return []domain.Capability{
-			{Name: "understand", Tools: []string{"kern_explore", "kern_graph", "kern_code_graph"}, Outputs: []string{"system context"}, Risk: "low"},
-		}
+		return []string{"understand"}
 	case domain.IntentCodeChange:
-		return []domain.Capability{
-			{Name: "analyze", Tools: []string{"kern_analyze"}, Outputs: []string{"context packet"}, Artifacts: []string{"ArtifactContextPacket"}, Risk: "low"},
-			{Name: "plan", Tools: []string{"kern_plan"}, Outputs: []string{"plan"}, Artifacts: []string{"ArtifactPlan"}, Risk: "low"},
-			{Name: "impact", Tools: []string{"kern_impact"}, Outputs: []string{"impact report"}, Artifacts: []string{"ArtifactImpactReport"}, Risk: "low"},
-			{Name: "execute", Tools: []string{"kern_execute"}, Permissions: []string{"write"}, Artifacts: []string{"ArtifactCodePatch", "ArtifactDiff"}, Risk: "medium"},
-			{Name: "verify", Tools: []string{"kern_verify"}, Outputs: []string{"verification"}, Artifacts: []string{"ArtifactVerificationReport"}, Risk: "low"},
-			{Name: "pr", Tools: []string{"kern_execute"}, Outputs: []string{"pull request"}, Artifacts: []string{"ArtifactPullRequest"}, Risk: "medium"},
-		}
+		return []string{"analyze", "plan", "impact", "execute", "verify", "pr"}
 	case domain.IntentWhatIf:
-		return []domain.Capability{
-			{Name: "whatif", Tools: []string{"kern_what_if"}, Outputs: []string{"impact", "recommendation"}, Risk: "low"},
-		}
+		return []string{"whatif"}
 	case domain.IntentIncident:
-		return []domain.Capability{
-			{Name: "correlate", Tools: []string{"kern_correlate"}, Outputs: []string{"correlation chain"}, Risk: "low"},
-			{Name: "investigate", Tools: []string{"kern_incident"}, Outputs: []string{"root cause"}, Artifacts: []string{"ArtifactIncidentReport", "ArtifactRootCauseReport"}, Risk: "medium"},
-		}
+		return []string{"correlate", "investigate"}
 	case domain.IntentModernization:
-		return []domain.Capability{
-			{Name: "modernize", Tools: []string{"kern_modernize"}, Outputs: []string{"modernization plan"}, Risk: "low"},
-		}
+		return []string{"modernize"}
 	case domain.IntentSecurity:
-		return []domain.Capability{
-			{Name: "security", Tools: []string{"kern_security"}, Outputs: []string{"security report"}, Artifacts: []string{"ArtifactSecurityReport"}, Risk: "medium"},
-		}
+		return []string{"security"}
 	case domain.IntentTest:
-		return []domain.Capability{
-			{Name: "verify", Tools: []string{"kern_verify"}, Outputs: []string{"test report"}, Artifacts: []string{"ArtifactTestReport"}, Risk: "low"},
-		}
+		return []string{"verify"}
 	case domain.IntentDeploy:
-		return []domain.Capability{
-			{Name: "deploy", Tools: []string{"kern_execute"}, Permissions: []string{"deploy"}, Artifacts: []string{"ArtifactDeploymentReport"}, Risk: "high"},
-		}
+		return []string{"deploy"}
 	case domain.IntentAudit:
-		return []domain.Capability{
-			{Name: "audit", Tools: []string{"kern_audit"}, Outputs: []string{"audit log"}, Risk: "low"},
-		}
+		return []string{"audit"}
 	default:
-		return []domain.Capability{{Name: "analyze", Tools: []string{"kern_analyze"}, Risk: "low"}}
+		return []string{"analyze"}
+	}
+}
+
+// contextPlanFor derives the RunResult context plan for an intent from the
+// capabilities it requires, in execution order. It is deterministic and
+// intent-aware: the plan is a faithful projection of the canonical capability
+// membership rather than a hardcoded universal string, so a WHAT_IF run shows
+// "whatif", an INCIDENT run shows its correlate/investigate sequence, and so
+// on. For CODE_CHANGE the canonical execution order is preserved (analyze →
+// context → memory → impact → risk → plan → execute → verify → pr).
+func contextPlanFor(it domain.IntentType) string {
+	switch it {
+	case domain.IntentCodeChange:
+		return "analyze → context → memory → impact → risk → plan → execute → verify → pr"
+	default:
+		return strings.Join(capabilityNamesFor(it), " → ")
 	}
 }
 
@@ -146,20 +172,47 @@ func CapabilitiesToTools(caps []domain.Capability) []string {
 	return tools
 }
 
-// CapabilitiesToAgents returns the specialist agents needed for the capabilities.
+// capabilityAgents maps each capability name to the specialist roles that
+// execute it. This is the canonical capability → role bridge: capabilities are
+// NOT agents, so a capability's Dependencies field (other capabilities) must
+// never be mistaken for the agent team. The mapping produces a deterministic,
+// intent-aware agent team instead of a flat default.
+var capabilityAgents = map[string][]string{
+	"understand":  {"architect"},
+	"analyze":     {"architect"},
+	"impact":      {"architect"},
+	"whatif":      {"architect"},
+	"plan":        {"planner"},
+	"modernize":   {"architect", "planner"},
+	"execute":     {"coder"},
+	"pr":          {"coder"},
+	"verify":      {"tester"},
+	"security":    {"security"},
+	"correlate":   {"sre"},
+	"investigate": {"sre"},
+	"deploy":      {"sre", "planner"},
+	"audit":       {"reviewer"},
+}
+
+// fixedAgentOrder is the canonical specialist-role ordering so the returned
+// agent team is stable and deterministic.
+var fixedAgentOrder = []string{"architect", "planner", "coder", "reviewer", "tester", "security", "sre"}
+
+// CapabilitiesToAgents returns the specialist agent team required by the
+// capabilities, derived from the canonical capability → role mapping in fixed
+// role order. It never treats a capability dependency as an agent.
 func CapabilitiesToAgents(caps []domain.Capability) []string {
-	has := map[string]bool{}
+	want := map[string]bool{}
 	for _, c := range caps {
-		for _, n := range c.Dependencies {
-			has[n] = true
+		for _, role := range capabilityAgents[c.Name] {
+			want[role] = true
 		}
 	}
 	var agents []string
-	for name := range has {
-		agents = append(agents, name)
-	}
-	if len(agents) == 0 {
-		agents = []string{"planner", "coder", "reviewer", "tester"}
+	for _, role := range fixedAgentOrder {
+		if want[role] {
+			agents = append(agents, role)
+		}
 	}
 	return agents
 }

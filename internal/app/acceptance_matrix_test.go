@@ -1,48 +1,45 @@
 // acceptance_matrix_test.go consolidates the 10 mandatory E2E acceptance
-// scenarios (A–J) required by the Kern 2.0 Strict Phased Implementation Plan
-// §7 "MANDATORY END-TO-END ACCEPTANCE MATRIX" into a single labeled matrix.
-//
+// scenarios (A–J) into a single labeled matrix.
 // Each subtest asserts the scenario's expected behavior. Where an existing
 // test already covers a scenario, this matrix reuses its helpers/assertions
 // rather than duplicating setup.
-//
 // Scenario map (plan §7):
-//   A. Code change        — "add tenant-aware caching"     → verified PR
-//        consolidates: TestVerticalSlice1AnalyzePlanImpactVerifyPR
-//        (lighter path: assert an Analyze task reaches COMPLETED with a
-//        recorded artifact; gated behind !short because it indexes the repo)
-//   B. High-risk change   — security-sensitive change      → approval required
-//        consolidates: TestDeployApprovalGate, governance gateway tests
-//        (governance.NewFirewall + Check on a HIGH-risk security.write)
-//   C. What-if            — "split service"                → scenario report
-//        consolidates: TestVerticalSlice3WhatIfScenario
-//        (WhatIf(SplitService) → ImpactReport attached, non-empty risk/text)
-//   D. Incident           — N+1 regression                 → incident → PR
-//        consolidates: TestMVP3GateEndToEnd
-//        (TaskService.InvestigateIncident → task + incident + remediation
-//        artifact)
-//   E. Resume             — terminate mid-task             → resume → same state
-//        consolidates: internal/agent TestRestartResume
-//        (task persisted to store, reloaded after a "restart", resumed to the
-//        same logical state)
-//   F. Policy block       — unauthorized prod op           → DENY + audit + no side effect
-//        consolidates: governance firewall/gateway tests
-//        (firewall.Check on an unauthorized production.deploy → denied, audit
-//        record, side-effect counter unchanged)
-//   G. Context pruning    — long multi-turn                → irrelevant removed, constraints retained
-//        consolidates: internal/context GC tests
-//        (NewContext + Run + ApplyActions → histories demoted/dropped, active
-//        constraints retained)
-//   H. Context sufficiency— aggressive pruning             → no critical fact lost OR pause
-//        consolidates: internal/context GC/consistency tests
-//        (aggressive maxItems=1 GC still retains a required constraint fact)
-//   I. Cross-task isolation — Task A + Task B              → no leakage
-//        consolidates: internal/enterprise memory isolation pattern
-//        (two per-project memory stores; B cannot read A's entry)
-//   J. Agent routing      — multiple agents, same task     → policy-aware + auditable
-//        consolidates: agents model_routing_test, selection tests
-//        (ClassifyTask/SelectWorkflow deterministic; routing decision recorded
-//        in an audit log)
+// A. Code change        — "add tenant-aware caching"     → verified PR
+// consolidates: TestVerticalSlice1AnalyzePlanImpactVerifyPR
+// (lighter path: assert an Analyze task reaches COMPLETED with a
+// recorded artifact; gated behind !short because it indexes the repo)
+// B. High-risk change   — security-sensitive change      → approval required
+// consolidates: TestDeployApprovalGate, governance gateway tests
+// (governance.NewFirewall + Check on a HIGH-risk security.write)
+// C. What-if            — "split service"                → scenario report
+// consolidates: TestVerticalSlice3WhatIfScenario
+// (WhatIf(SplitService) → ImpactReport attached, non-empty risk/text)
+// D. Incident           — N+1 regression                 → incident → PR
+// consolidates: TestMVP3GateEndToEnd
+// (TaskService.InvestigateIncident → task + incident + remediation
+// artifact)
+// E. Resume             — terminate mid-task             → resume → same state
+// consolidates: internal/agent TestRestartResume
+// (task persisted to store, reloaded after a "restart", resumed to the
+// same logical state)
+// F. Policy block       — unauthorized prod op           → DENY + audit + no side effect
+// consolidates: governance firewall/gateway tests
+// (firewall.Check on an unauthorized production.deploy → denied, audit
+// record, side-effect counter unchanged)
+// G. Context pruning    — long multi-turn                → irrelevant removed, constraints retained
+// consolidates: internal/context GC tests
+// (NewContext + Run + ApplyActions → histories demoted/dropped, active
+// constraints retained)
+// H. Context sufficiency— aggressive pruning             → no critical fact lost OR pause
+// consolidates: internal/context GC/consistency tests
+// (aggressive maxItems=1 GC still retains a required constraint fact)
+// I. Cross-task isolation — Task A + Task B              → no leakage
+// consolidates: internal/enterprise memory isolation pattern
+// (two per-project memory stores; B cannot read A's entry)
+// J. Agent routing      — multiple agents, same task     → policy-aware + auditable
+// consolidates: agents model_routing_test, selection tests
+// (ClassifyTask/SelectWorkflow deterministic; routing decision recorded
+// in an audit log)
 package app
 
 import (
@@ -72,7 +69,7 @@ var (
 func matrixPlatform(t *testing.T) *TaskService {
 	t.Helper()
 	matrixOnce.Do(func() {
-		p, err := New("../..")
+		p, err := NewWithIndex("../..", sharedTestRepoIndex(t))
 		if err != nil {
 			matrixPlatErr = err
 			return
@@ -162,10 +159,10 @@ func TestAcceptanceMatrix(t *testing.T) {
 		}
 		ts := matrixPlatform(t)
 		alert := domain.Alert{
-			ID:        "al-matrix",
-			Severity:  domain.SeverityCritical,
-			Message:   "checkout is failing (500s) — N+1 regression",
-			Service:   "checkout",
+			ID:         "al-matrix",
+			Severity:   domain.SeverityCritical,
+			Message:    "checkout is failing (500s) — N+1 regression",
+			Service:    "checkout",
 			OccurredAt: time.Now().Truncate(time.Second),
 		}
 		task, inc, _, err := ts.InvestigateIncident(alert)

@@ -13,7 +13,7 @@ import (
 )
 
 // failure_drill_test.go consolidates the required failure modes for the
-// safe-change vertical slice (Phase 10.5). Each test is deterministic and
+// safe-change vertical slice. Each test is deterministic and
 // reuses the existing verification, governance and sandbox engines — no live
 // LLM and no network. The pre-existing TestSevenFailureDrill covers
 // nonexistent-task errors; these cover the seven substantive failure modes.
