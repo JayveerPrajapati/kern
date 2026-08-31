@@ -4,31 +4,28 @@ import (
 	"fmt"
 
 	"github.com/JayveerPrajapati/kern/internal/domain"
-	"github.com/JayveerPrajapati/kern/internal/governance/firewall"
 )
 
 // ToolGateway is the unified gateway that every governed tool call passes
-// through. Strict Plan Phase 7 P0: "All governed operations pass through one
+// through. : "All governed operations pass through one
 // gateway."
-//
 // It evaluates: agent identity, task boundary, resource, action, permission,
 // risk, policy, and approval — then allows or denies. Every evaluation is
 // logged to the audit log.
 type ToolGateway struct {
-	firewall *firewall.Firewall
+	firewall *Firewall
 	audit    func(domain.TaskState, string, string) // optional audit callback
 }
 
 // NewToolGateway wraps a firewall with task-boundary and budget enforcement.
-func NewToolGateway(fw *firewall.Firewall) *ToolGateway {
+func NewToolGateway(fw *Firewall) *ToolGateway {
 	return &ToolGateway{firewall: fw}
 }
 
 // Evaluate checks whether a tool call is allowed. It evaluates:
-//  1. Task boundary (is the resource path within the task's allowed paths?)
-//  2. Firewall policy (agent + resource + action → allowed/risk/approval)
-//  3. Safety budget (has the task exceeded its limits?)
-//
+// 1. Task boundary (is the resource path within the task's allowed paths?)
+// 2. Firewall policy (agent + resource + action → allowed/risk/approval)
+// 3. Safety budget (has the task exceeded its limits?)
 // Returns: allowed, risk, approval, error (error when denied with reason).
 func (g *ToolGateway) Evaluate(agentID, taskID, resource, action string, boundary domain.TaskBoundary, budget *domain.SafetyBudget) (bool, domain.Risk, *domain.Approval, error) {
 	// 1. Task boundary check.
@@ -66,7 +63,6 @@ func (g *ToolGateway) Evaluate(agentID, taskID, resource, action string, boundar
 // TaskScope (paths + envs + services) instead of a bare TaskBoundary, runs the
 // same path/firewall/budget pipeline, and returns a structured GatewayResult
 // with an explain-deny object (P7.6) so callers never parse error strings.
-//
 // It is a thin wrapper over EvaluateScopedFull that passes empty service and
 // artifact dimensions, so its behavior is unchanged and backward-compatible:
 // when scope.Services and scope.Artifacts are empty, those gates are all-pass.
@@ -77,9 +73,7 @@ func (g *ToolGateway) EvaluateScoped(agentID, taskID, resource, action, env stri
 // EvaluateScopedFull is the unified-scoped gateway entry that additionally
 // enforces the service and artifact scope dimensions (P7.3: "the same task
 // policy applies to tools, artifacts, runtime"). It runs, in order:
-//
-//	env gate → service gate → artifact gate → path gate → firewall → budget
-//
+// env gate → service gate → artifact gate → path gate → firewall → budget
 // and returns a structured GatewayResult with an explain-deny object (P7.6).
 // The service and artifact gates are all-pass when scope.Services /
 // scope.Artifacts are empty.

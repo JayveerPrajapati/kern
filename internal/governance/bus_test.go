@@ -3,40 +3,12 @@ package governance
 import (
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/JayveerPrajapati/kern/internal/eventbus"
 )
 
 // waitKinds waits until every kind in want has been observed at least once.
 // Delivery is asynchronous, so publishers must not assert synchronously.
-func waitKinds(t *testing.T, kinds map[eventbus.Kind]int, mu *sync.Mutex, want ...eventbus.Kind) {
-	t.Helper()
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		mu.Lock()
-		all := true
-		for _, k := range want {
-			if kinds[k] == 0 {
-				all = false
-				break
-			}
-		}
-		mu.Unlock()
-		if all {
-			return
-		}
-		time.Sleep(time.Millisecond)
-	}
-	for _, k := range want {
-		mu.Lock()
-		n := kinds[k]
-		mu.Unlock()
-		if n == 0 {
-			t.Errorf("no %s published", k)
-		}
-	}
-}
 
 // TestFirewallPublishesLifecycle verifies the firewall publishes
 // policy.evaluated, policy.blocked and approval.requested when a bus is

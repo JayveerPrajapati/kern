@@ -10,6 +10,7 @@ import (
 func TestCheckExecFailsClosedOnEmptyAllowlist(t *testing.T) {
 	t.Setenv("KERN_TOOLS", "")
 	t.Setenv("KERN_ALLOW_EXEC", "")
+	t.Setenv("KERN_EXEC_RISK", "")
 	err := CheckExec()
 	if err == nil {
 		t.Fatal("CheckExec allowed execution with empty allowlist and no opt-in; want denial")
@@ -22,35 +23,32 @@ func TestCheckExecFailsClosedOnEmptyAllowlist(t *testing.T) {
 func TestCheckExecOptInAllows(t *testing.T) {
 	t.Setenv("KERN_TOOLS", "")
 	t.Setenv("KERN_ALLOW_EXEC", "1")
+	t.Setenv("KERN_EXEC_RISK", "")
 	if err := CheckExec(); err != nil {
 		t.Fatalf("CheckExec denied despite KERN_ALLOW_EXEC=1: %v", err)
 	}
 }
 
 func TestCheckExecAllowedWithExecAllowlist(t *testing.T) {
-	// KERN_TOOLS naming a real exec tool permits exec (no opt-in needed) — the
-	// allowlist contents are validated, and this one is a genuine exec tool.
 	t.Setenv("KERN_TOOLS", "kern_exec,kern_sandbox,kern_execute")
 	t.Setenv("KERN_ALLOW_EXEC", "")
+	t.Setenv("KERN_EXEC_RISK", "")
 	if err := CheckExec(); err != nil {
 		t.Fatalf("CheckExec denied despite an exec-tool allowlist: %v", err)
 	}
-	// A specific, allowlisted tool is also allowed.
 	if err := CheckExec("kern_sandbox"); err != nil {
-		t.Fatalf("CheckExec denied kern_sandbox despite it being allowlisted: %v", err)
+		t.Fatalf("CheckExec denied allowlisted tool kern_sandbox: %v", err)
 	}
 }
 
-// TestCheckExecUnrelatedAllowlistDenied: a non-empty KERN_TOOLS that names only
-// unrelated tools must NOT re-enable arbitrary host command execution. This is
-// the bypass the original gate had (any non-empty value allowed exec).
 func TestCheckExecUnrelatedAllowlistDenied(t *testing.T) {
+	// A non-empty allowlist naming only unrelated tools must NOT re-enable exec.
 	t.Setenv("KERN_TOOLS", "kern_search,kern_plan")
 	t.Setenv("KERN_ALLOW_EXEC", "")
+	t.Setenv("KERN_EXEC_RISK", "")
 	if err := CheckExec(); err == nil {
 		t.Fatal("CheckExec allowed exec with an unrelated-only allowlist; want denial")
 	}
-	// A specific exec tool that is not in the allowlist is refused too.
 	if err := CheckExec("kern_sandbox"); err == nil {
 		t.Fatal("CheckExec allowed kern_sandbox despite it not being allowlisted; want denial")
 	}
@@ -59,11 +57,10 @@ func TestCheckExecUnrelatedAllowlistDenied(t *testing.T) {
 	}
 }
 
-// TestCheckExecToolNotAllowed denies a requested exec tool that is absent from
-// an otherwise valid allowlist.
 func TestCheckExecToolNotAllowed(t *testing.T) {
 	t.Setenv("KERN_TOOLS", "kern_sandbox")
 	t.Setenv("KERN_ALLOW_EXEC", "")
+	t.Setenv("KERN_EXEC_RISK", "")
 	if err := CheckExec("kern_exec"); err == nil {
 		t.Fatal("CheckExec allowed kern_exec despite it not being allowlisted; want denial")
 	}
@@ -72,9 +69,6 @@ func TestCheckExecToolNotAllowed(t *testing.T) {
 	}
 }
 
-// TestCheckExecHighRiskRequiresApproval a sensitive (operator-configurable)
-// command.execute scores HIGH and therefore requires approval, failing closed
-// rather than running ungoverned.
 func TestCheckExecHighRiskRequiresApproval(t *testing.T) {
 	t.Setenv("KERN_TOOLS", "kern_sandbox")
 	t.Setenv("KERN_ALLOW_EXEC", "")
@@ -86,17 +80,32 @@ func TestCheckExecHighRiskRequiresApproval(t *testing.T) {
 	if !strings.Contains(err.Error(), "approval") {
 		t.Fatalf("error should mention human approval: %v", err)
 	}
-	// Default (unset) KERN_EXEC_RISK stays MEDIUM: not approval-gated, so the
-	// same command runs.
+	// Default (unset) stays MEDIUM: not approval-gated, so the command runs.
 	t.Setenv("KERN_EXEC_RISK", "")
 	if err := CheckExec("kern_sandbox"); err != nil {
 		t.Fatalf("default MEDIUM command should not require approval: %v", err)
 	}
 }
 
-// TestRequestExecApprovalHighWithWorkflow: a HIGH-risk command with an approval
-// workflow configured returns a pending approval carrying an ID, and the command
-// does not run until the human approves.
+func TestCheckExecRiskDefaultMedium(t *testing.T) {
+	t.Setenv("KERN_TOOLS", "kern_sandbox")
+	t.Setenv("KERN_ALLOW_EXEC", "")
+	t.Setenv("KERN_EXEC_RISK", "")
+	if err := CheckExec("kern_sandbox"); err != nil {
+		t.Fatalf("default-risk command should run: %v", err)
+	}
+}
+
+func TestCheckExecRiskInvalidValueDefaultsMedium(t *testing.T) {
+	t.Setenv("KERN_TOOLS", "kern_sandbox")
+	t.Setenv("KERN_ALLOW_EXEC", "")
+	t.Setenv("KERN_EXEC_RISK", "EXTREME")
+	// Unrecognized value must fall back to MEDIUM and not gate approval.
+	if err := CheckExec("kern_sandbox"); err != nil {
+		t.Fatalf("invalid KERN_EXEC_RISK should default to MEDIUM and run: %v", err)
+	}
+}
+
 func TestRequestExecApprovalHighWithWorkflow(t *testing.T) {
 	t.Setenv("KERN_TOOLS", "kern_sandbox")
 	t.Setenv("KERN_ALLOW_EXEC", "")
@@ -120,12 +129,9 @@ func TestRequestExecApprovalHighWithWorkflow(t *testing.T) {
 		t.Fatalf("risk level = %q, want HIGH", risk.Level)
 	}
 
-	// Before approval the command must not run.
 	if err := ResumeExecApproval(wf, ap.ID); err == nil {
 		t.Fatal("ResumeExecApproval allowed the command before approval; want denial")
 	}
-
-	// After the human approves, resume proceeds (command may run).
 	if _, err := wf.Approve(ap.ID, "oncall-human"); err != nil {
 		t.Fatalf("Approve: %v", err)
 	}
@@ -134,8 +140,6 @@ func TestRequestExecApprovalHighWithWorkflow(t *testing.T) {
 	}
 }
 
-// TestRequestExecApprovalHighNoWorkflow: a HIGH-risk command with NO approval
-// workflow configured fails closed and never runs.
 func TestRequestExecApprovalHighNoWorkflow(t *testing.T) {
 	t.Setenv("KERN_TOOLS", "kern_sandbox")
 	t.Setenv("KERN_ALLOW_EXEC", "")
@@ -153,8 +157,6 @@ func TestRequestExecApprovalHighNoWorkflow(t *testing.T) {
 	}
 }
 
-// TestRequestExecApprovalMediumAllowed: a MEDIUM (default) command needs no
-// approval and may proceed directly.
 func TestRequestExecApprovalMediumAllowed(t *testing.T) {
 	t.Setenv("KERN_TOOLS", "kern_sandbox")
 	t.Setenv("KERN_ALLOW_EXEC", "")
@@ -170,8 +172,16 @@ func TestRequestExecApprovalMediumAllowed(t *testing.T) {
 	}
 }
 
-// TestResumeExecApprovalRejected: a rejected approval must not let the command
-// run.
+func TestRequestExecApprovalBlockedNoAllowlist(t *testing.T) {
+	t.Setenv("KERN_TOOLS", "")
+	t.Setenv("KERN_ALLOW_EXEC", "")
+	t.Setenv("KERN_EXEC_RISK", "")
+	wf := NewApprovalWorkflow()
+	if _, _, err := RequestExecApproval(wf); err == nil {
+		t.Fatal("RequestExecApproval should fail closed without an allowlist or opt-in")
+	}
+}
+
 func TestResumeExecApprovalRejected(t *testing.T) {
 	t.Setenv("KERN_TOOLS", "kern_sandbox")
 	t.Setenv("KERN_ALLOW_EXEC", "")
@@ -187,5 +197,58 @@ func TestResumeExecApprovalRejected(t *testing.T) {
 	}
 	if err := ResumeExecApproval(wf, ap.ID); err == nil {
 		t.Fatal("ResumeExecApproval allowed a rejected approval; want denial")
+	}
+}
+
+func TestResumeExecApprovalUnknown(t *testing.T) {
+	wf := NewApprovalWorkflow()
+	if err := ResumeExecApproval(wf, "does-not-exist"); err == nil {
+		t.Fatal("ResumeExecApproval for unknown approval should fail closed")
+	}
+}
+
+func TestResumeExecApprovalNilWorkflow(t *testing.T) {
+	if err := ResumeExecApproval(nil, "appr-1"); err == nil {
+		t.Fatal("ResumeExecApproval with nil workflow should fail closed")
+	}
+}
+
+func TestParseToolAllowlist(t *testing.T) {
+	cases := []struct {
+		in   string
+		want []string
+	}{
+		{"", []string{}},
+		{"a,b,c", []string{"a", "b", "c"}},
+		{" a , b ,, c ", []string{"a", "b", "c"}},
+		{",,,", []string{}},
+	}
+	for _, c := range cases {
+		got := parseToolAllowlist(c.in)
+		if len(got) != len(c.want) {
+			t.Errorf("parseToolAllowlist(%q) = %v, want %v", c.in, got, c.want)
+			continue
+		}
+		for i := range got {
+			if got[i] != c.want[i] {
+				t.Errorf("parseToolAllowlist(%q)[%d] = %q, want %q", c.in, i, got[i], c.want[i])
+			}
+		}
+	}
+}
+
+func TestContainsString(t *testing.T) {
+	list := []string{"kern_exec", "kern_sandbox"}
+	if !containsString(list, "kern_exec") {
+		t.Error("containsString should find an exact match")
+	}
+	if containsString(list, "kern") {
+		t.Error("containsString should not do substring matching")
+	}
+	if containsString(list, "other") {
+		t.Error("containsString should not match absent entries")
+	}
+	if containsString(nil, "x") {
+		t.Error("containsString(nil) should be false")
 	}
 }

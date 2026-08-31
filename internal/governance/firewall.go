@@ -1,6 +1,6 @@
 // Package firewall provides the unified AI change firewall that ties together
 // agent identity, risk scoring, the approval workflow, and the audit log.
-package firewall
+package governance
 
 import (
 	"fmt"
@@ -9,10 +9,6 @@ import (
 
 	"github.com/JayveerPrajapati/kern/internal/domain"
 	"github.com/JayveerPrajapati/kern/internal/eventbus"
-	appr "github.com/JayveerPrajapati/kern/internal/governance/approval"
-	"github.com/JayveerPrajapati/kern/internal/governance/audit"
-	"github.com/JayveerPrajapati/kern/internal/governance/identity"
-	"github.com/JayveerPrajapati/kern/internal/governance/risk"
 	"github.com/JayveerPrajapati/kern/internal/metrics"
 )
 
@@ -21,29 +17,46 @@ import (
 // → Policy → Approval → Execution. It fails closed: unknown agents, missing
 // permissions, and always-blocked actions are denied by default.
 type Firewall struct {
-	agents       map[string]*identity.AgentIdentity
-	assessor     *risk.RiskAssessor
-	approval     *appr.ApprovalWorkflow
-	audit        *audit.AuditLog
+	agents       map[string]*AgentIdentity
+	assessor     *RiskAssessor
+	approval     *ApprovalWorkflow
+	audit        *AuditLog
 	approvedKeys map[string]bool
 	bus          *eventbus.Bus // optional event publisher; nil = no-op
 }
 
 // NewFirewall creates a new change firewall with the default policies. No
-// agents are registered; call WithAgents to add them.
+// agents are registered; call WithAgents to add them. Approvals live in memory
+// and do not survive a restart.
 func NewFirewall() *Firewall {
 	return &Firewall{
-		agents:       map[string]*identity.AgentIdentity{},
-		assessor:     risk.NewRiskAssessor(risk.DefaultPolicies()),
-		approval:     appr.NewApprovalWorkflow(),
-		audit:        audit.NewAuditLog(),
+		agents:       map[string]*AgentIdentity{},
+		assessor:     NewRiskAssessor(DefaultPolicies()),
+		approval:     NewApprovalWorkflow(),
+		audit:        NewAuditLog(),
+		approvedKeys: map[string]bool{},
+	}
+}
+
+// NewFirewallWithApprovalStore creates a change firewall whose approval
+// workflow is backed by the project's approval file (<root>/.kern/
+// approvals.json): approvals requested by Check survive restarts and can be
+// resolved out-of-band (`kern approve <id>` or the web UI), and pending
+// approvals from a previous process are restored on construction. An empty
+// root falls back to the in-memory firewall.
+func NewFirewallWithApprovalStore(root string) *Firewall {
+	return &Firewall{
+		agents:       map[string]*AgentIdentity{},
+		assessor:     NewRiskAssessor(DefaultPolicies()),
+		approval:     NewPersistedApprovalWorkflow(root),
+		audit:        NewAuditLog(),
 		approvedKeys: map[string]bool{},
 	}
 }
 
 // WithAgents registers agents that can act through the firewall. It returns
 // the firewall for chaining.
-func (f *Firewall) WithAgents(agents ...*identity.AgentIdentity) *Firewall {
+func (f *Firewall) WithAgents(agents ...*AgentIdentity) *Firewall {
 	for _, a := range agents {
 		if a != nil {
 			f.agents[a.ID] = a
@@ -55,7 +68,7 @@ func (f *Firewall) WithAgents(agents ...*identity.AgentIdentity) *Firewall {
 // WithPolicies sets custom risk policies (overrides the defaults). It returns
 // the firewall for chaining.
 func (f *Firewall) WithPolicies(policies []domain.Policy) *Firewall {
-	f.assessor = risk.NewRiskAssessor(policies)
+	f.assessor = NewRiskAssessor(policies)
 	return f
 }
 
@@ -116,7 +129,7 @@ func (f *Firewall) Check(agentID, resource, action string) (allowed bool, risk d
 	agent, ok := f.agents[agentID]
 	if !ok {
 		r := domain.Risk{Level: domain.RiskCritical, Score: 1.0, Factors: []string{"unknown agent"}, Mitigation: "register the agent before use", Blocked: true}
-		f.audit.Record(audit.AuditEntry{AgentID: agentID, Action: action, Resource: resource, Risk: r, Result: "denied"})
+		f.audit.Record(AuditEntry{AgentID: agentID, Action: action, Resource: resource, Risk: r, Result: "denied"})
 		f.publish(eventbus.Event{Kind: eventbus.PolicyBlocked, Subject: resource, Payload: map[string]string{"action": action, "reason": "unknown agent"}})
 		return false, r, nil, fmt.Errorf("governance: unknown agent %q", agentID)
 	}
@@ -125,7 +138,7 @@ func (f *Firewall) Check(agentID, resource, action string) (allowed bool, risk d
 	if !agent.Can(resource, action) {
 		r := f.assessor.AssessAction(resource, action)
 		r.Blocked = true
-		f.audit.Record(audit.AuditEntry{AgentID: agentID, Action: action, Resource: resource, Risk: r, Result: "denied"})
+		f.audit.Record(AuditEntry{AgentID: agentID, Action: action, Resource: resource, Risk: r, Result: "denied"})
 		f.publish(eventbus.Event{Kind: eventbus.PolicyBlocked, Subject: resource, Payload: map[string]string{"action": action, "reason": "lacks permission"}})
 		return false, r, nil, fmt.Errorf("governance: agent %q lacks permission %q:%q", agentID, resource, action)
 	}
@@ -137,17 +150,17 @@ func (f *Firewall) Check(agentID, resource, action string) (allowed bool, risk d
 	// 5. Always-blocked CRITICAL actions.
 	if r.Level == domain.RiskCritical && action == "drop" {
 		r.Blocked = true
-		f.audit.Record(audit.AuditEntry{AgentID: agentID, Action: action, Resource: resource, Risk: r, Result: "blocked"})
+		f.audit.Record(AuditEntry{AgentID: agentID, Action: action, Resource: resource, Risk: r, Result: "blocked"})
 		f.publish(eventbus.Event{Kind: eventbus.PolicyBlocked, Subject: resource, Payload: map[string]string{"action": action, "reason": "always blocked"}})
 		return false, r, nil, fmt.Errorf("governance: %s:%s is always blocked", resource, action)
 	}
 
 	// 4. Approval gate.
-	if r.ApprovalRequired || appr.RequiresApproval(r.Level) {
+	if r.ApprovalRequired || RequiresApproval(r.Level) {
 		key := TaskKey(agentID, resource, action)
 		if !f.approvedKeys[key] {
 			appr := f.approval.RequestWithBinding(key, agentID, r.Mitigation, r.Level, nil, nil, "")
-			f.audit.Record(audit.AuditEntry{AgentID: agentID, Action: action, Resource: resource, Risk: r, Result: "pending"})
+			f.audit.Record(AuditEntry{AgentID: agentID, Action: action, Resource: resource, Risk: r, Result: "pending"})
 			f.publish(eventbus.Event{Kind: eventbus.ApprovalRequested, Subject: appr.ID, Payload: map[string]string{"resource": resource, "action": action, "risk_level": string(r.Level)}})
 			metrics.Default().RecordApproval()
 			return false, r, &appr, nil
@@ -158,7 +171,7 @@ func (f *Firewall) Check(agentID, resource, action string) (allowed bool, risk d
 	}
 
 	// 7. Allowed.
-	f.audit.Record(audit.AuditEntry{AgentID: agentID, Action: action, Resource: resource, Risk: r, Approved: true, Result: "allowed"})
+	f.audit.Record(AuditEntry{AgentID: agentID, Action: action, Resource: resource, Risk: r, Approved: true, Result: "allowed"})
 	return true, r, nil, nil
 }
 
@@ -173,7 +186,7 @@ func (f *Firewall) ApproveAction(approvalID, approver string) error {
 	agentID, resource, action := splitTaskKey(appr.TaskID)
 	f.approvedKeys[appr.TaskID] = true
 	risk := domain.Risk{Level: domain.RiskHigh, Score: 0.75, Factors: []string{"approved by human"}, Mitigation: "human approval granted"}
-	f.audit.Record(audit.AuditEntry{AgentID: agentID, Action: action, Resource: resource, Risk: risk, Approved: true, Result: "approved"})
+	f.audit.Record(AuditEntry{AgentID: agentID, Action: action, Resource: resource, Risk: risk, Approved: true, Result: "approved"})
 	metrics.Default().RecordApproval()
 	return nil
 }
@@ -188,12 +201,12 @@ func (f *Firewall) RejectAction(approvalID, approver, reason string) error {
 	agentID, resource, action := splitTaskKey(appr.TaskID)
 	delete(f.approvedKeys, appr.TaskID)
 	risk := domain.Risk{Level: domain.RiskHigh, Score: 0.75, Factors: []string{"rejected by human"}, Mitigation: "human approval denied"}
-	f.audit.Record(audit.AuditEntry{AgentID: agentID, Action: action, Resource: resource, Risk: risk, Result: "denied"})
+	f.audit.Record(AuditEntry{AgentID: agentID, Action: action, Resource: resource, Risk: risk, Result: "denied"})
 	metrics.Default().RecordApproval()
 	return nil
 }
 
 // AuditLog returns the firewall's audit log for inspection.
-func (f *Firewall) AuditLog() *audit.AuditLog {
+func (f *Firewall) AuditLog() *AuditLog {
 	return f.audit
 }

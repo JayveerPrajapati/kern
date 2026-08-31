@@ -4,8 +4,6 @@ import (
 	"testing"
 
 	"github.com/JayveerPrajapati/kern/internal/domain"
-	"github.com/JayveerPrajapati/kern/internal/governance/firewall"
-	"github.com/JayveerPrajapati/kern/internal/governance/identity"
 )
 
 // TestTaskBoundaryCheckPath verifies the task boundary allows/denies paths
@@ -86,7 +84,7 @@ func TestSafetyBudgetExceeded(t *testing.T) {
 // TestToolGatewayBoundaryDeny verifies the gateway denies resources outside
 // the task boundary.
 func TestToolGatewayBoundaryDeny(t *testing.T) {
-	fw := firewall.NewFirewall()
+	fw := NewFirewall()
 	gw := NewToolGateway(fw)
 	boundary := domain.TaskBoundary{
 		TaskID:       "t1",
@@ -106,7 +104,7 @@ func TestToolGatewayBoundaryDeny(t *testing.T) {
 // TestToolGatewayBudgetExceeded verifies the gateway denies when budget is
 // exceeded.
 func TestToolGatewayBudgetExceeded(t *testing.T) {
-	fw := firewall.NewFirewall()
+	fw := NewFirewall()
 	gw := NewToolGateway(fw)
 	boundary := domain.TaskBoundary{TaskID: "t1"}
 	budget := &domain.SafetyBudget{MaxToolCalls: 1}
@@ -170,7 +168,7 @@ func TestTaskScopeCheckPathAndEnv(t *testing.T) {
 }
 
 func TestEvaluateScopedEnvDeny(t *testing.T) {
-	fw := firewall.NewFirewall()
+	fw := NewFirewall()
 	gw := NewToolGateway(fw)
 	scope := domain.TaskScope{TaskID: "t1", Envs: []string{"development"}}
 	res := gw.EvaluateScoped("agent-1", "t1", "file.go", "read", "production", scope, nil)
@@ -186,7 +184,7 @@ func TestEvaluateScopedEnvDeny(t *testing.T) {
 }
 
 func TestEvaluateScopedPathDeny(t *testing.T) {
-	fw := firewall.NewFirewall()
+	fw := NewFirewall()
 	gw := NewToolGateway(fw)
 	scope := domain.TaskScope{TaskID: "t1", Paths: []string{"ok/"}, DeniedPaths: []string{"bad/"}}
 	res := gw.EvaluateScoped("agent-1", "t1", "bad/x.go", "write", "", scope, nil)
@@ -196,8 +194,8 @@ func TestEvaluateScopedPathDeny(t *testing.T) {
 }
 
 func TestEvaluateScopedBudgetPause(t *testing.T) {
-	fw := firewall.NewFirewall()
-	fw.WithAgents(identity.NewAgent("agent-1", "a", "coder", []identity.Permission{{Resource: "file.go", Action: "read"}}))
+	fw := NewFirewall()
+	fw.WithAgents(NewAgent("agent-1", "a", "coder", []Permission{{Resource: "file.go", Action: "read"}}))
 	gw := NewToolGateway(fw)
 	scope := domain.TaskScope{TaskID: "t1"}
 	budget := &domain.SafetyBudget{MaxToolCalls: 1}
@@ -214,8 +212,8 @@ func TestEvaluateScopedBudgetPause(t *testing.T) {
 }
 
 func TestDryRunDoesNotMutateBudget(t *testing.T) {
-	fw := firewall.NewFirewall()
-	fw.WithAgents(identity.NewAgent("agent-1", "a", "coder", []identity.Permission{{Resource: "file.go", Action: "read"}}))
+	fw := NewFirewall()
+	fw.WithAgents(NewAgent("agent-1", "a", "coder", []Permission{{Resource: "file.go", Action: "read"}}))
 	gw := NewToolGateway(fw)
 	scope := domain.TaskScope{TaskID: "t1"}
 	budget := &domain.SafetyBudget{MaxToolCalls: 3}
@@ -235,12 +233,61 @@ func TestDryRunDoesNotMutateBudget(t *testing.T) {
 }
 
 func TestEvaluateScopedFirewallDeny(t *testing.T) {
-	fw := firewall.NewFirewall()
+	fw := NewFirewall()
 	gw := NewToolGateway(fw)
 	scope := domain.TaskScope{TaskID: "t1"}
 	// An unknown agent is denied by the firewall.
 	res := gw.EvaluateScoped("ghost-agent", "t1", "file.go", "read", "", scope, nil)
 	if res.Decision != domain.DecisionDenied || res.Deny.Stage != "firewall" {
 		t.Errorf("res = %+v, want DENIED/firewall", res)
+	}
+}
+
+// TestTaskScopeValidatePatch verifies a patch is rejected when it touches a
+// path outside the task scope ( /7.3 boundary enforced on execution)
+// and accepted when all touched paths are inside the scope.
+func TestTaskScopeValidatePatch(t *testing.T) {
+	scope := domain.TaskScope{
+		TaskID:      "t1",
+		Paths:       []string{"UserService", "tests/"},
+		DeniedPaths: []string{"UserService/secret/"},
+	}
+	good := `diff --git a/UserService/user.go b/UserService/user.go
+--- a/UserService/user.go
++++ b/UserService/user.go
+@@ -1 +1 @@
+-old
++new
+`
+	if err := scope.ValidatePatch(good); err != nil {
+		t.Errorf("ValidatePatch(good) unexpected error: %v", err)
+	}
+
+	bad := `diff --git a/payments/refund.go b/payments/refund.go
+--- a/payments/refund.go
++++ b/payments/refund.go
+@@ -1 +1 @@
+-old
++new
+`
+	if err := scope.ValidatePatch(bad); err == nil {
+		t.Error("ValidatePatch(out-of-scope path) accepted, want deny")
+	}
+
+	// A denied sub-path is rejected even though its parent is allowed.
+	deniedSub := `diff --git a/UserService/secret/keys.go b/UserService/secret/keys.go
+--- a/UserService/secret/keys.go
++++ b/UserService/secret/keys.go
+@@ -1 +1 @@
+-old
++new
+`
+	if err := scope.ValidatePatch(deniedSub); err == nil {
+		t.Error("ValidatePatch(denied sub-path) accepted, want deny")
+	}
+
+	// An unrestricted scope allows any patch (backward compatible).
+	if err := (domain.TaskScope{TaskID: "t2"}).ValidatePatch(bad); err != nil {
+		t.Errorf("ValidatePatch(unrestricted scope) unexpected error: %v", err)
 	}
 }
