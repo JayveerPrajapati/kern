@@ -12,9 +12,7 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/web"
 )
 
-// defaultServeAddr is the listen address used when --addr is not given. It
-// matches the SDK default base URL (internal/sdk/client.go:
-// DefaultBaseURL = "http://localhost:8090").
+// defaultServeAddr is the default listen address for the serve command.
 const defaultServeAddr = ":8090"
 
 // serveProject is a single NAME=PATH project registration for enterprise mode.
@@ -23,9 +21,7 @@ type serveProject struct {
 	root string
 }
 
-// serveUsage is the help text for `kern serve`. main() intercepts --help/-h on
-// every subcommand before dispatch, but buildServeHandler also honors them so
-// direct callers (and tests) get the same behaviour without starting a server.
+// serveUsage is the help text for kern serve.
 const serveUsage = `usage: kern serve [--root PATH] [--addr ADDR] [--enterprise] [--project NAME=PATH]...
 
 Start the kern REST API + HTML dashboard server.
@@ -50,9 +46,7 @@ Examples:
   kern serve --enterprise --project api=./api --project web=./web
 `
 
-// runServe implements `kern serve` / `kern web`. It builds the handler
-// (without ever binding a port until ListenAndServe) and blocks forever
-// serving it. A nil handler with no error means help/usage was printed.
+// runServe starts the REST API and dashboard server.
 func runServe(rest []string) {
 	h, mode, err := buildServeHandler(rest)
 	if err != nil {
@@ -88,11 +82,7 @@ func runServe(rest []string) {
 	log.Fatal(http.ListenAndServe(addr, h))
 }
 
-// buildServeHandler parses `kern serve` args and constructs the HTTP handler
-// WITHOUT starting a listener, so tests can exercise the parsing + construction
-// logic directly. The returned mode is "single-project" or "enterprise". A nil
-// handler with a nil error means help/usage was printed and no server should
-// start.
+// buildServeHandler constructs the HTTP handler from serve args.
 func buildServeHandler(args []string) (http.Handler, string, error) {
 	f, _, err := parseFlags(args)
 	if err != nil {
@@ -126,9 +116,7 @@ func buildServeHandler(args []string) (http.Handler, string, error) {
 	return app, "single-project", nil
 }
 
-// resolveServeProjects turns --project NAME=PATH pairs into registrations. With
-// no pairs, the default root is registered as a single project named after its
-// base directory.
+// resolveServeProjects parses --project NAME=PATH pairs into registrations.
 func resolveServeProjects(pairs []string, defaultRoot string) ([]serveProject, error) {
 	if len(pairs) == 0 {
 		return []serveProject{{name: projectNameFromRoot(defaultRoot), root: defaultRoot}}, nil
@@ -144,8 +132,7 @@ func resolveServeProjects(pairs []string, defaultRoot string) ([]serveProject, e
 	return projects, nil
 }
 
-// projectNameFromRoot derives a project name from a directory path (its base
-// directory). A bare "." resolves to the current directory's name.
+// projectNameFromRoot derives a project name from a directory path.
 func projectNameFromRoot(root string) string {
 	name := filepath.Base(root)
 	if name == "." || name == string(filepath.Separator) || name == "" {

@@ -12,9 +12,7 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/storage"
 )
 
-// runEvidence implements `kern evidence export|verify` — the certifiable
-// evidence artifact (P1.1). Exit codes: export 0 = ok / 1 = error;
-// verify 0 = valid / 2 = tampered or broken / 1 = parse or usage error.
+// runEvidence handles evidence export and verify subcommands.
 func runEvidence(args []string) int {
 	if len(args) == 0 {
 		fmt.Fprintln(os.Stderr, "kern evidence: subcommand required (export|verify)")
@@ -31,9 +29,7 @@ func runEvidence(args []string) int {
 	}
 }
 
-// runEvidenceExport implements `kern evidence export`: build a signed,
-// tamper-evident evidence bundle for a repo and emit it as JSON to stdout
-// (default) or a file.
+// runEvidenceExport builds a signed evidence bundle for a repo.
 func runEvidenceExport(rest []string) int {
 	fs := flag.NewFlagSet("evidence export", flag.ContinueOnError)
 	var (
@@ -83,9 +79,7 @@ func runEvidenceExport(rest []string) int {
 	return 0
 }
 
-// runEvidenceVerify implements `kern evidence verify`: validate a bundle's
-// tamper-evidence seal and the on-disk audit chain of the repo it claims.
-// Exit codes: 0 = valid, 2 = tampered/broken, 1 = parse or usage error.
+// runEvidenceVerify validates an evidence bundle's seal and audit chain.
 func runEvidenceVerify(rest []string) int {
 	fs := flag.NewFlagSet("evidence verify", flag.ContinueOnError)
 	var (

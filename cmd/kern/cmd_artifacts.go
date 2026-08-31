@@ -6,13 +6,7 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/eventbus"
 )
 
-// runArtifacts implements `kern artifacts [task-id]` — the human-facing control
-// surface for querying the unified artifact chain. With a task ID, it lists
-// the linked artifacts for that task (ContextPacket → ImpactReport →
-// VerificationReport, chained via parent_artifact_id). Without a task ID, it
-// lists all known artifacts.
-// This is "Unify Artifacts" CLI surface: every Task that runs
-// through TaskService produces a linked artifact chain that is queryable here.
+// runArtifacts lists task artifacts or all known artifacts.
 func runArtifacts(rest []string) {
 	f, args, err := parseFlags(rest)
 	if err != nil {

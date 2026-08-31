@@ -11,9 +11,7 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/intel"
 )
 
-// fingerprintRecord is the machine-readable shape emitted by `kern fingerprint
-// --json`. It is the contract consumed by the blueprint duplication pipeline;
-// field names and semantics stay in lockstep with intel.Fingerprint.
+// fingerprintRecord is the JSON output shape for kern fingerprint.
 type fingerprintRecord struct {
 	File           string              `json:"file"`
 	Name           string              `json:"name"`
@@ -28,28 +26,13 @@ type fingerprintRecord struct {
 	ControlFlow    intel.CFFingerprint `json:"control_flow"`
 }
 
-// fatal2 prints an error to stderr and exits with code 2 (tool error). Used by
-// runFingerprint, which is a data command: it never gates, so a tool error is
-// a usage-style failure (exit 2) rather than a gate failure.
+// fatal2 prints an error and exits with code 2 (tool error).
 func fatal2(format string, args ...any) {
 	fmt.Fprintf(os.Stderr, "kern: "+format+"\n", args...)
 	panic(exitError{code: 2})
 }
 
-// runFingerprint implements `kern fingerprint [root] [--file f1,f2] [--json]`.
-//
-// It emits structural fingerprints for Go functions (signature shape,
-// control-flow shape, called symbols, literal and statement counts) — the
-// input blueprint's duplication similarity pipeline consumes. The command is a
-// pure data command: it exits 0 on success and never acts as a gate.
-//
-// File selection: --file paths are relative to root and joined with it;
-// otherwise every *.go file under root is walked (hidden dirs and
-// vendor/node_modules-style trees are skipped, mirroring the index's policy).
-// Unparsable Go files are skipped silently (the index is tolerant of broken
-// files); unreadable files are a tool error (exit 2). Non-Go files are skipped
-// entirely: structural fingerprints are Go-only in v1 — non-Go coverage is
-// future work.
+// runFingerprint emits structural fingerprints for Go functions.
 func runFingerprint(rest []string) {
 	f, args, err := parseFlags(rest)
 	if err != nil {
