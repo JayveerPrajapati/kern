@@ -6,7 +6,6 @@ import (
 
 	"github.com/JayveerPrajapati/kern/internal/app"
 	"github.com/JayveerPrajapati/kern/internal/governance"
-	"github.com/JayveerPrajapati/kern/internal/governance/risk"
 	"github.com/JayveerPrajapati/kern/internal/intel"
 )
 
@@ -42,7 +41,7 @@ var riskPairs = []struct{ res, act string }{
 // buildRisks computes a deterministic risk assessment for each standard
 // resource+action pair via the shared governance/risk assessor.
 func (a *App) buildRisks() []riskItem {
-	assessor := risk.NewRiskAssessor(governance.DefaultPolicies())
+	assessor := governance.NewRiskAssessor(governance.DefaultPolicies())
 	out := make([]riskItem, 0, len(riskPairs))
 	for _, p := range riskPairs {
 		r := assessor.AssessAction(p.res, p.act)
@@ -299,7 +298,7 @@ func (a *App) handleApprovals(w http.ResponseWriter, r *http.Request) {
 }
 
 // ---------------------------------------------------------------------------
-// Graph / Memory / Architecture / Eval (Phase 18)
+// Graph / Memory / Architecture / Eval
 // ---------------------------------------------------------------------------
 
 // graphPageData wraps graphData with the project root for the /graph HTML page.

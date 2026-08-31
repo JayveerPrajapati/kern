@@ -9,7 +9,7 @@ import (
 
 	"github.com/JayveerPrajapati/kern/internal/domain"
 	"github.com/JayveerPrajapati/kern/internal/eventbus"
-	"github.com/JayveerPrajapati/kern/internal/governance/audit"
+	"github.com/JayveerPrajapati/kern/internal/governance"
 )
 
 // handleIndex serves the HTML dashboard at "/" and a 404 JSON object for any
@@ -153,8 +153,7 @@ type approvalDecision struct {
 
 // handleApprovalApprove marks a pending approval as approved. It only accepts
 // POST; any other method returns 405.
-//
-// Phase 9: in addition to marking the approval workflow's record as approved,
+// In addition to marking the approval workflow's record as approved,
 // this now also calls firewall.ApproveAction so the governance gate's
 // approvedKeys map is populated — without this, a web approval would never
 // unblock the firewall Check that originally requested it.
@@ -170,8 +169,28 @@ func (a *App) handleApprovalApprove(w http.ResponseWriter, r *http.Request) {
 	}
 	updated, err := a.approvals.Approve(req.ID, req.Approver)
 	if err != nil {
+		// The approval may be a workflow-engine gate persisted only in the
+		// file store (not this in-memory workflow): fall back to the file
+		// store so a UI approve still resolves it.
+		if a.fileApprovals != nil {
+			if _, ferr := a.fileApprovals.Decide(req.ID, req.Approver, true, ""); ferr != nil {
+				writeError(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			if a.firewall != nil {
+				_ = a.firewall.ApproveAction(req.ID, req.Approver)
+			}
+			a.bus.Publish(eventbus.Event{Kind: eventbus.ApprovalGranted, Source: "web", Subject: req.ID})
+			writeJSON(w, http.StatusOK, map[string]string{"id": req.ID, "status": "approved"})
+			return
+		}
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
+	}
+	// Also record the decision in the persistent store so the workflow engine
+	// (which reads the file store for its gates) observes it on resume.
+	if a.fileApprovals != nil {
+		_, _ = a.fileApprovals.Decide(req.ID, req.Approver, true, "")
 	}
 	// Propagate the approval to the firewall so the governance gate's
 	// approvedKeys map is populated and a subsequent Check passes.
@@ -179,12 +198,12 @@ func (a *App) handleApprovalApprove(w http.ResponseWriter, r *http.Request) {
 		_ = a.firewall.ApproveAction(req.ID, req.Approver)
 		// Invariant 4/6: record the approval with the approver's identity and
 		// the task ID so the audit trail is queryable by task.
-		a.firewall.AuditLog().Record(audit.AuditEntry{
-			AgentID: req.Approver,
-			Action:  "approve",
+		a.firewall.AuditLog().Record(governance.AuditEntry{
+			AgentID:  req.Approver,
+			Action:   "approve",
 			Resource: req.ID,
-			Result:  "approved",
-			TaskID:  updated.TaskID,
+			Result:   "approved",
+			TaskID:   updated.TaskID,
 		})
 	}
 	a.bus.Publish(eventbus.Event{Kind: eventbus.ApprovalGranted, Source: "web", Subject: req.ID})
@@ -205,12 +224,27 @@ func (a *App) handleApprovalReject(w http.ResponseWriter, r *http.Request) {
 	}
 	updated, err := a.approvals.Reject(req.ID, req.Approver, "rejected via console")
 	if err != nil {
+		// Fall back to the persistent store (workflow-engine gates live there).
+		if a.fileApprovals != nil {
+			if _, ferr := a.fileApprovals.Decide(req.ID, req.Approver, false, "rejected via console"); ferr != nil {
+				writeError(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			a.bus.Publish(eventbus.Event{Kind: eventbus.ApprovalRejected, Source: "web", Subject: req.ID})
+			writeJSON(w, http.StatusOK, map[string]string{"id": req.ID, "status": "rejected"})
+			return
+		}
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	// Record the rejection in the persistent store too, so any gate reading
+	// the file store observes it.
+	if a.fileApprovals != nil {
+		_, _ = a.fileApprovals.Decide(req.ID, req.Approver, false, "rejected via console")
+	}
 	// Invariant 4/6: record the rejection with the approver's identity.
 	if a.firewall != nil {
-		a.firewall.AuditLog().Record(audit.AuditEntry{
+		a.firewall.AuditLog().Record(governance.AuditEntry{
 			AgentID:  req.Approver,
 			Action:   "reject",
 			Resource: req.ID,

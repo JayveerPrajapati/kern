@@ -4,7 +4,6 @@
 // with a single embedded template, and all payloads use encoding/json — no
 // external dependencies are required. Read-only endpoints are fail-closed:
 // build or validation errors surface as 500 JSON rather than panicking.
-//
 // A small set of write endpoints (approve/reject approvals, record incidents)
 // is exposed for a loopback/local console, where the loopback client is the
 // trusted principal. These are not an authentication boundary and must not be
@@ -22,7 +21,6 @@ import (
 
 	"github.com/JayveerPrajapati/kern/internal/agent"
 	"github.com/JayveerPrajapati/kern/internal/app"
-	kerncontext "github.com/JayveerPrajapati/kern/internal/context"
 	"github.com/JayveerPrajapati/kern/internal/eventbus"
 	"github.com/JayveerPrajapati/kern/internal/governance"
 	"github.com/JayveerPrajapati/kern/internal/incident"
@@ -30,26 +28,29 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/intelligence"
 	"github.com/JayveerPrajapati/kern/internal/memory"
 	"github.com/JayveerPrajapati/kern/internal/metrics"
-	"github.com/JayveerPrajapati/kern/internal/runtime"
 	"github.com/JayveerPrajapati/kern/internal/verification"
 )
 
 // App holds the project root and the derived read-only state for the console.
 // It delegates routing to an embedded http.ServeMux via ServeHTTP.
 type App struct {
-	root          string
-	mux           *http.ServeMux
-	ix            *index.Index
-	graph         *intelligence.Graph
-	platform      *app.Platform
-	inc           *incident.Engine     // prebuilt incident engine (shares a.graph)
-	ver           *verification.Engine // prebuilt verification engine (shares a.ix)
-	archIndex     *index.Index         // shared index for architecture validation
-	memories      *memory.MemoryStore
-	inter         *incident.Store
-	firewall      *governance.Firewall
-	approvals     *governance.ApprovalWorkflow
-	taskSvc       *app.TaskService // Phase 5/6/8: task-native analyze/plan/what-if
+	root      string
+	mux       *http.ServeMux
+	ix        *index.Index
+	graph     *intelligence.Graph
+	platform  *app.Platform
+	ver       *verification.Engine // prebuilt verification engine (shares a.ix)
+	archIndex *index.Index         // shared index for architecture validation
+	memories  *memory.MemoryStore
+	inter     *incident.Store
+	firewall  *governance.Firewall
+	approvals *governance.ApprovalWorkflow
+	// fileApprovals is the persistent approval store ( exit gate): the
+	// agent-team workflow engine persists its approval gates here, so the UI's
+	// pending/approve/reject surfaces read and write the SAME store a human
+	// uses to unblock a parked workflow (or a `kern approve` does).
+	fileApprovals *governance.FileStore
+	taskSvc       *app.TaskService // task-native analyze/plan/what-if
 	dashboardT    *template.Template
 	taskDetailT   *template.Template
 	agentsT       *template.Template
@@ -65,9 +66,8 @@ type App struct {
 	memoryT       *template.Template
 	architectureT *template.Template
 	evalT         *template.Template
-	ctx           *kerncontext.Engine // context engine for analyze/plan
-	bus           *eventbus.Bus       // publishes incident/approval events
-	tasks         *agent.Registry     // agent/task registry for /v1/tasks lookup
+	bus           *eventbus.Bus   // publishes incident/approval events
+	tasks         *agent.Registry // agent/task registry for /v1/tasks lookup
 
 	// archTTL is how long a validated architecture report is cached before the
 	// next /api/architecture, /api/overview or "/" request re-runs
@@ -86,9 +86,20 @@ type App struct {
 	// requests that detect staleness share a single rebuild instead of racing
 	// to re-index simultaneously. graphVer is bumped on every rebuild so
 	// callers/logs can observe that a refresh happened.
-	graphMu  sync.RWMutex
-	graphVer int
+	// staleUntil rate-limits the staleness check itself: Stale() walks the
+	// whole tree (and re-reads ignore files), so once a "fresh" verdict is
+	// produced the next check is skipped for staleCooldown. Burst requests
+	// therefore pay zero disk walks; an edit is picked up within ~1s.
+	graphMu    sync.RWMutex
+	graphVer   int
+	staleUntil time.Time
 }
+
+// staleCooldown is how long a "fresh" verdict from index.Stale() is trusted
+// before the next staleness check (a full tree walk + ignore-file re-read)
+// runs. 1s mirrors project.Session's cooldown: burst requests pay zero disk
+// walks and edits are reflected within a second.
+const staleCooldown = 1 * time.Second
 
 // New builds the digital-twin state for root and returns a ready-to-serve App.
 // It never panics: any build error is wrapped and returned to the caller.
@@ -111,35 +122,30 @@ func New(root string) (*App, error) {
 	}
 
 	a := &App{
-		root:      root,
-		ix:        ix,
-		graph:     &g,
-		platform:  platform,
-		memories:  platform.Memory(),
-		inter:     incident.NewStore(root),
-		firewall:  platform.Firewall(),
-		approvals: governance.NewApprovalWorkflow(),
-		taskSvc:   app.NewTaskService(platform, nil).WithAgentID("web").WithPRProvider(app.AutoPRProvider()),
-		tasks:     agent.NewRegistry(),
-		archTTL:   5 * time.Second,
+		root:          root,
+		ix:            ix,
+		graph:         &g,
+		platform:      platform,
+		memories:      platform.Memory(),
+		inter:         incident.NewStore(root),
+		firewall:      platform.Firewall(),
+		approvals:     governance.NewPersistedApprovalWorkflow(root),
+		fileApprovals: governance.NewFileStore(root),
+		taskSvc:       app.NewTaskService(platform, nil).WithAgentID("web").WithPRProvider(app.AutoPRProvider()),
+		tasks:         agent.NewRegistry(),
+		archTTL:       5 * time.Second,
 	}
 	// Back the /v1/tasks registry with a persisted task store so submitted
 	// tasks survive across server restarts and handleV1Task can serve a real,
 	// non-empty task registry (returning 404 only when a task is genuinely
 	// unknown).
 	a.tasks.SetTaskStore(agent.NewTaskStore(root))
-	a.ctx = platform.ContextEngine()
 	a.bus = eventbus.New()
 	// Prebuild the per-request engines ONCE at startup and share the already
 	// built index/graph so handlers never re-index the repo per request (this
 	// was the #1 bottleneck: /v1/incidents/investigate and /v1/verify each
 	// re-ran index.Build). The engines store only read-only references to
 	// a.ix / a.graph and are safe for concurrent handler use.
-	incEng, err := incident.NewEngineWithGraph(root, a.graph, runtime.NewStore(), a.memories, a.firewall)
-	if err != nil {
-		return nil, err
-	}
-	a.inc = incEng
 	a.ver = platform.VerificationEngine()
 	a.archIndex = a.ix
 	tmpl, err := parseDashboardTemplate()
@@ -315,7 +321,13 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // rest wait and return the freshly swapped state.
 func (a *App) freshGraph() (*intelligence.Graph, *index.Index) {
 	a.graphMu.RLock()
+	if time.Now().Before(a.staleUntil) {
+		g, ix := a.graph, a.ix
+		a.graphMu.RUnlock()
+		return g, ix
+	}
 	if !a.ix.Stale() {
+		a.staleUntil = time.Now().Add(staleCooldown)
 		g, ix := a.graph, a.ix
 		a.graphMu.RUnlock()
 		return g, ix
@@ -327,6 +339,7 @@ func (a *App) freshGraph() (*intelligence.Graph, *index.Index) {
 	// Re-check under the write lock: another request may have already rebuilt
 	// while we were waiting for the write lock.
 	if !a.ix.Stale() {
+		a.staleUntil = time.Now().Add(staleCooldown)
 		return a.graph, a.ix
 	}
 	if nix, err := index.Build(a.root); err == nil {
@@ -334,8 +347,15 @@ func (a *App) freshGraph() (*intelligence.Graph, *index.Index) {
 		ng := intelligence.FromIndex(nix)
 		a.graph = &ng
 		a.archIndex = nix
+		// The verification engine captured the pre-swap index at construction;
+		// rebuild it against the new index so future verify calls are not
+		// stale (same constructor path used in New).
+		if a.ver != nil {
+			a.ver = verification.NewEngineWithIndex(a.root, nix)
+		}
 		a.graphVer++
 	}
+	a.staleUntil = time.Now().Add(staleCooldown)
 	return a.graph, a.ix
 }
 
@@ -347,7 +367,7 @@ func (a *App) freshGraph() (*intelligence.Graph, *index.Index) {
 // subscribe and fan events out to webhooks or an audit trail.
 func (a *App) Bus() *eventbus.Bus { return a.bus }
 
-// ListTasks returns all tasks in the App's task registry (Phase 23b). Used by
+// ListTasks returns all tasks in the App's task registry. Used by
 // the enterprise server to aggregate task visibility across projects.
 func (a *App) ListTasks() []*agent.Task {
 	if a.tasks == nil {

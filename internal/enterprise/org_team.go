@@ -1,4 +1,4 @@
-// Org/team model (Phase 19 gap P19.3). Adds a minimal but complete notion of
+// Org/team model ( gap P19.3). Adds a minimal but complete notion of
 // teams that own projects and group agents as members, layered on top of the
 // existing flat org (projects + agents). Additive only: web.App, domain.Team,
 // and the single-project path are untouched.
@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"sort"
 
-	"github.com/JayveerPrajapati/kern/internal/governance/identity"
+	"github.com/JayveerPrajapati/kern/internal/governance"
 )
 
 // OrgTeam is a team within the org: a named group that owns/accesses a set of
@@ -90,7 +90,7 @@ func (s *Server) RemoveTeam(id string) error {
 // TeamAgents returns the member agents of a team, resolved via the org agent
 // registry and sorted by ID. Returns nil (with ok=false) when the team is
 // unknown; members that somehow reference unregistered agents are skipped.
-func (s *Server) TeamAgents(teamID string) []*identity.AgentIdentity {
+func (s *Server) TeamAgents(teamID string) []*governance.AgentIdentity {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	team, exists := s.teamRegistry[teamID]
@@ -104,7 +104,7 @@ func (s *Server) TeamAgents(teamID string) []*identity.AgentIdentity {
 		}
 	}
 	sort.Strings(ids)
-	out := make([]*identity.AgentIdentity, 0, len(ids))
+	out := make([]*governance.AgentIdentity, 0, len(ids))
 	for _, id := range ids {
 		out = append(out, s.orgAgents[id])
 	}

@@ -1,0 +1,12 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.JayveerPrajapati/kern",
+  "title": "Kern",
+  "description": "Auditable, sandboxed, governance-aware code-intelligence MCP for AI agents.",
+  "version": "0.1.0",
+  "websiteUrl": "https://github.com/JayveerPrajapati/kern#install",
+  "repository": {
+    "url": "https://github.com/JayveerPrajapati/kern",
+    "source": "github"
+  }
+}

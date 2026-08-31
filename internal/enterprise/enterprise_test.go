@@ -2,6 +2,7 @@ package enterprise
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -9,7 +10,6 @@ import (
 
 	"github.com/JayveerPrajapati/kern/internal/domain"
 	"github.com/JayveerPrajapati/kern/internal/governance"
-	"github.com/JayveerPrajapati/kern/internal/governance/identity"
 )
 
 const testToken = "test-enterprise-token"
@@ -235,7 +235,7 @@ func TestServeHTTPOrgAgents(t *testing.T) {
 	s := New()
 
 	// Register an org-level agent.
-	err := s.RegisterAgent(identity.NewAgent("agent-coder-1", "Coder Agent", "coder", []identity.Permission{
+	err := s.RegisterAgent(governance.NewAgent("agent-coder-1", "Coder Agent", "coder", []governance.Permission{
 		{Resource: "code", Action: "write"},
 	}))
 	if err != nil {
@@ -259,11 +259,11 @@ func TestServeHTTPOrgAgents(t *testing.T) {
 
 func TestRegisterAgentDuplicate(t *testing.T) {
 	s := New()
-	agent1 := identity.NewAgent("agent-1", "Agent One", "coder", nil)
+	agent1 := governance.NewAgent("agent-1", "Agent One", "coder", nil)
 	if err := s.RegisterAgent(agent1); err != nil {
 		t.Fatal(err)
 	}
-	agent2 := identity.NewAgent("agent-1", "Agent Two", "reviewer", nil)
+	agent2 := governance.NewAgent("agent-1", "Agent Two", "reviewer", nil)
 	if err := s.RegisterAgent(agent2); err == nil {
 		t.Error("expected error for duplicate agent registration")
 	}
@@ -283,7 +283,7 @@ func TestOrgDashboardLinksNewEndpoints(t *testing.T) {
 	}
 }
 
-// TestServeHTTPOrgRepositories verifies the Phase 19 "repository" org route
+// TestServeHTTPOrgRepositories verifies the "repository" org route
 // lists the registered repositories (projects) under the canonical name.
 func TestServeHTTPOrgRepositories(t *testing.T) {
 	s := New()
@@ -300,8 +300,10 @@ func TestServeHTTPOrgRepositories(t *testing.T) {
 		t.Fatalf("status = %d, want 200: %s", rr.Code, rr.Body.String())
 	}
 	var body struct {
-		Repositories []struct{ Name string `json:"name"` } `json:"repositories"`
-		Count        int                                 `json:"count"`
+		Repositories []struct {
+			Name string `json:"name"`
+		} `json:"repositories"`
+		Count int `json:"count"`
 	}
 	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
 		t.Fatalf("decode: %v", err)
@@ -318,7 +320,7 @@ func TestServeHTTPOrgRepositories(t *testing.T) {
 	}
 }
 
-// TestServeHTTPOrgArchitecture verifies the Phase 19 "architecture" org-level
+// TestServeHTTPOrgArchitecture verifies the "architecture" org-level
 // route aggregates per-project architecture reports.
 func TestServeHTTPOrgArchitecture(t *testing.T) {
 	s := New()
@@ -479,5 +481,60 @@ func TestAppEviction(t *testing.T) {
 	}
 	if s.projectMemory("p1") == nil {
 		t.Error("evicted project should retain its per-project memory store")
+	}
+}
+
+func TestServeOrgAgentsPostRegister(t *testing.T) {
+	s := New()
+
+	// Register via POST /org/agents (must create + return 201).
+	body := `{"id":"agent-1","name":"Agent One","type":"coder","permissions":[{"resource":"source","action":"read"}]}`
+	req := authedRequest(t, "POST", "/org/agents")
+	req.Body = io.NopCloser(strings.NewReader(body))
+	rr := httptest.NewRecorder()
+	s.ServeHTTP(rr, req)
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("POST /org/agents code = %d, want 201 (body: %s)", rr.Code, rr.Body.String())
+	}
+
+	// It must now appear in GET /org/agents.
+	greq := authedRequest(t, "GET", "/org/agents")
+	grr := httptest.NewRecorder()
+	s.ServeHTTP(grr, greq)
+	var got struct {
+		Agents []governance.AgentIdentity `json:"agents"`
+		Count  int                        `json:"count"`
+	}
+	if err := json.Unmarshal(grr.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode GET /org/agents: %v", err)
+	}
+	if got.Count != 1 || len(got.Agents) != 1 || got.Agents[0].ID != "agent-1" {
+		t.Fatalf("after POST, agents = %+v, want 1 agent with ID agent-1", got)
+	}
+
+	// Duplicate POST → 409.
+	dup := authedRequest(t, "POST", "/org/agents")
+	dup.Body = io.NopCloser(strings.NewReader(body))
+	drr := httptest.NewRecorder()
+	s.ServeHTTP(drr, dup)
+	if drr.Code != http.StatusConflict {
+		t.Fatalf("duplicate POST /org/agents code = %d, want 409", drr.Code)
+	}
+
+	// Bad method → 405.
+	del := authedRequest(t, "DELETE", "/org/agents")
+	dlr := httptest.NewRecorder()
+	s.ServeHTTP(dlr, del)
+	if dlr.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("DELETE /org/agents code = %d, want 405", dlr.Code)
+	}
+
+	// Missing id → 400.
+	noid := authedRequest(t, "POST", "/org/agents")
+	noid.Body = io.NopCloser(strings.NewReader(`{"name":"No ID"}`))
+	nrr := httptest.NewRecorder()
+	s.ServeHTTP(nrr, noid)
+	if nrr.Code != http.StatusBadRequest {
+		t.Fatalf("POST /org/agents without id code = %d, want 400", nrr.Code)
 	}
 }

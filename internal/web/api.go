@@ -3,6 +3,7 @@ package web
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/url"
@@ -12,7 +13,7 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/agents"
 	"github.com/JayveerPrajapati/kern/internal/app"
 	"github.com/JayveerPrajapati/kern/internal/domain"
-	"github.com/JayveerPrajapati/kern/internal/governance/audit"
+	"github.com/JayveerPrajapati/kern/internal/governance"
 	"github.com/JayveerPrajapati/kern/internal/learning"
 	"github.com/JayveerPrajapati/kern/internal/loop"
 	"github.com/JayveerPrajapati/kern/internal/metrics"
@@ -38,7 +39,7 @@ type v1PlanResponse struct {
 
 // handleV1Analyze analyzes a proposed change via the TaskService so an
 // authoritative Task record is created, the lifecycle is recorded, and the
-// context packet is attached. POST only. Phase 5: routes through TaskService
+// context packet is attached. POST only. routes through TaskService
 // instead of calling a.ctx directly.
 func (a *App) handleV1Analyze(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -71,18 +72,37 @@ func (a *App) handleV1Analyze(w http.ResponseWriter, r *http.Request) {
 // recorder snapshot (so performance/self-observability counts ride along) and
 // overrides only the governance fields. Sources that are not wired on this App
 // contribute 0 rather than forcing new dependencies:
-//   - AgentCount: registered agents from agent.Registry
-//   - TaskCount: tasks tracked by the agent registry
-//   - BlocksCount: audit entries with a blocked/denied decision
-//   - OverridesCount: audit entries with a human "approved" decision (override)
-//   - ViolationsCount: cached architecture validation report violations
-//   - AvgConfidence: no claim store is exposed on the App; 0 until one is wired
+// - AgentCount: registered agents from agent.Registry
+// - TaskCount: tasks tracked by the agent registry
+// - BlocksCount: audit entries with a blocked/denied decision
+// - OverridesCount: audit entries with a human "approved" decision (override)
+// - ViolationsCount: cached architecture validation report violations
+// - AvgConfidence: the task's ImpactReport.Confidence averaged over all tasks
+// known to the TaskService (a.taskSvc.List()). Each what-if/impact task
+// stores whatif.Impact.Confidence into its ImpactReport, so this reflects
+// the deterministic confidence of real impact estimates. Tasks without an
+// ImpactReport (e.g. bare analyze tasks) are skipped; 0 when no task
+// carries a confidence.
 func (a *App) handleGovernanceMetrics(w http.ResponseWriter, r *http.Request) {
 	snap := metrics.Default().Snapshot()
 
 	if a.tasks != nil {
 		snap.AgentCount = len(a.tasks.All())
 		snap.TaskCount = a.tasks.TaskCount()
+	}
+
+	if a.taskSvc != nil {
+		var sum float64
+		var n int
+		for _, t := range a.taskSvc.List() {
+			if t != nil && t.ImpactReport != nil {
+				sum += t.ImpactReport.Confidence
+				n++
+			}
+		}
+		if n > 0 {
+			snap.AvgConfidence = sum / float64(n)
+		}
 	}
 
 	if a.firewall != nil {
@@ -105,7 +125,7 @@ func (a *App) handleGovernanceMetrics(w http.ResponseWriter, r *http.Request) {
 
 // handleV1Plan produces a structured Plan via the TaskService.Plan workflow
 // (analyze → memory → impact → risk → architecture → plan artifact). POST
-// only. Phase 6: distinct from /v1/analyze — returns a domain.Plan.
+// only. distinct from /v1/analyze — returns a domain.Plan.
 func (a *App) handleV1Plan(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -128,7 +148,7 @@ func (a *App) handleV1Plan(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleV1WhatIf simulates a hypothetical change via TaskService.WhatIf so an
-// authoritative Task record is created. Phase 8: routes through TaskService
+// authoritative Task record is created. routes through TaskService
 // instead of calling whatif.Simulate directly.
 func (a *App) handleV1WhatIf(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -164,7 +184,7 @@ func (a *App) handleV1WhatIf(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleV1Impact produces the 11-question deterministic ImpactReport via
-// TaskService.Impact. Phase 7: distinct from /v1/what-if — returns a
+// TaskService.Impact. distinct from /v1/what-if — returns a
 // domain.ImpactReport (graph-driven, no LLM).
 func (a *App) handleV1Impact(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -328,7 +348,11 @@ func (a *App) handleV1Graph(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleV1Context analyzes a proposed change and returns the raw ContextPacket
-// (the "context" view) with no rendered summary wrapper. POST only.
+// (the "context" view) with no rendered summary wrapper. It routes through the
+// shared Context application service (Platform.Analyze) — the same service the
+// CLI `kern analyze` fast path uses — so no interface inlines the context
+// workflow (P2 exit gate: no core business workflow exists only in one
+// interface). POST only.
 func (a *App) handleV1Context(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -342,7 +366,7 @@ func (a *App) handleV1Context(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.freshGraph()
-	pkt, err := a.ctx.AnalyzeChange(req.Change)
+	pkt, _, err := a.platform.Analyze(req.Change)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -375,10 +399,10 @@ func (a *App) handleV1Risk(w http.ResponseWriter, r *http.Request) {
 
 // handleV1Task serves a single task by ID (GET /v1/tasks/{id}) and dispatches
 // the nested task-action aliases (POST /v1/tasks/{id}/{action}: analyze, plan,
-// approve, execute, verify, artifacts). The registry is backed by a persisted
-// TaskStore (wired in New), so submitted tasks are served here; a lookup falls
-// back to the store for tasks persisted across restarts and returns 404 only
-// when a task is genuinely unknown.
+// approve, execute, verify, deploy, artifacts). The registry is backed by a
+// persisted TaskStore (wired in New), so submitted tasks are served here; a
+// lookup falls back to the store for tasks persisted across restarts and
+// returns 404 only when a task is genuinely unknown.
 func (a *App) handleV1Task(w http.ResponseWriter, r *http.Request) {
 	raw := strings.TrimPrefix(r.URL.Path, "/v1/tasks/")
 	segments := strings.SplitN(raw, "/", 2)
@@ -435,6 +459,8 @@ func (a *App) handleV1TaskAction(w http.ResponseWriter, r *http.Request, taskID,
 		a.handleV1Execute(w, injectBody(r, map[string]interface{}{"task_id": taskID}))
 	case "verify":
 		a.handleV1Verify(w, injectBody(r, map[string]interface{}{"task_id": taskID}))
+	case "deploy":
+		a.handleV1Deploy(w, r, taskID)
 	case "artifacts":
 		if r.Method != http.MethodGet {
 			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -449,6 +475,49 @@ func (a *App) handleV1TaskAction(w http.ResponseWriter, r *http.Request, taskID,
 	default:
 		writeError(w, http.StatusNotFound, "unknown task action: "+action)
 	}
+}
+
+// handleV1Deploy deploys a task through the task-action alias
+// (POST /v1/tasks/{id}/deploy). Routes through TaskService.Deploy so the
+// governance firewall, approval gate, and lifecycle events all apply. The
+// task id is threaded directly (not via injectBody) because Deploy takes it
+// as an argument, and the body carries only the optional version. Returns the
+// updated task on success; 404 for unknown tasks, 403 when a human approval
+// is pending (the approval id is embedded in the error message), and 500 for
+// any other failure.
+func (a *App) handleV1Deploy(w http.ResponseWriter, r *http.Request, taskID string) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	var req struct {
+		Version string `json:"version"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body: "+err.Error())
+		return
+	}
+	t, err := a.taskSvc.Deploy(taskID, req.Version)
+	if err != nil {
+		if errors.Is(err, agent.ErrApprovalRequired) {
+			writeError(w, http.StatusForbidden, err.Error())
+			return
+		}
+		if errors.Is(err, agent.ErrInvalidTransition) {
+			// The task is not in a deployable state (e.g. freshly created,
+			// still running, or already terminal). 409 tells the caller the
+			// task exists but cannot be deployed in its current state.
+			writeError(w, http.StatusConflict, err.Error())
+			return
+		}
+		if strings.Contains(err.Error(), "task not found") {
+			writeError(w, http.StatusNotFound, err.Error())
+			return
+		}
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, t)
 }
 
 // injectBody returns a shallow copy of r whose JSON body is the decoded request
@@ -523,6 +592,11 @@ func (a *App) handleV1TaskSubmit(w http.ResponseWriter, r *http.Request) {
 		req.Type = "code"
 	}
 	tk := agent.NewTask(req.Type, req.Input)
+	if a.tasks.TaskStore() != nil {
+		// The persisted store owns task IDs (cross-process unique under its
+		// file lock); see agent.Registry.SubmitTask.
+		tk.ID = ""
+	}
 	if err := a.tasks.SubmitTask(tk); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -603,7 +677,7 @@ func (a *App) handleV1Loop(w http.ResponseWriter, r *http.Request) {
 		}
 		level = parsed
 	}
-	// Phase 9: production mutation is disabled by default. The deploy stage
+	// Production mutation is disabled by default. The deploy stage
 	// (autonomy L4+) is only reached when KERN_ALLOW_DEPLOY=1 is set, so a
 	// local console cannot accidentally trigger a production deployment
 	// without explicit operator opt-in. The approval workflow is also wired
@@ -628,10 +702,13 @@ func (a *App) handleV1Loop(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, out)
 }
 
-// handleV1IncidentInvestigate runs the incident engine against an alert —
-// IngestAlert + Correlate + RootCause — and returns the resulting incident, its
-// hypotheses and the affected service (POST /v1/incidents/investigate). A
-// runtime source is wired so correlation can reason over production telemetry.
+// handleV1IncidentInvestigate runs the full incident workflow against an alert
+// through the shared Incident application service (TaskService.InvestigateIncident)
+// — the same service MCP kern_incident and CLI `kern incident` use — so the
+// lifecycle (IngestAlert → Correlate → RootCause) creates an authoritative Task
+// with incident + root-cause artifacts and no interface inlines the workflow
+// (P2 exit gate). Returns the incident, its hypotheses and the affected service
+// (POST /v1/incidents/investigate).
 func (a *App) handleV1IncidentInvestigate(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -644,10 +721,11 @@ func (a *App) handleV1IncidentInvestigate(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusBadRequest, "alert with a message is required")
 		return
 	}
-	eng := a.inc
-	inc := eng.IngestAlert(req.Alert)
-	eng.Correlate(inc)
-	eng.RootCause(inc)
+	_, inc, _, err := a.taskSvc.InvestigateIncident(req.Alert)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"incident":         inc,
 		"hypotheses":       inc.Hypotheses,
@@ -703,14 +781,14 @@ func (a *App) handleV1ArtifactGet(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleV1Correlate correlates a production alert against the runtime and
-// returns the deep evidence chain. Phase 14.
+// returns the deep evidence chain. .
 func (a *App) handleV1Correlate(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
 	var req struct {
-		Alert   domain.Alert `json:"alert"`
+		Alert    domain.Alert `json:"alert"`
 		Snapshot string       `json:"snapshot"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -736,7 +814,7 @@ func (a *App) handleV1Correlate(w http.ResponseWriter, r *http.Request) {
 	}{Chain: chain, TaskID: t.ID})
 }
 
-// handleV1Learn extracts recurring patterns from engineering memory. Phase 16.
+// handleV1Learn extracts recurring patterns from engineering memory. .
 func (a *App) handleV1Learn(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -757,7 +835,7 @@ func (a *App) handleV1Learn(w http.ResponseWriter, r *http.Request) {
 	}{Patterns: patterns, TaskID: t.ID})
 }
 
-// handleV1Modernize runs the legacy modernization analysis. Phase 17.
+// handleV1Modernize runs the legacy modernization analysis. .
 func (a *App) handleV1Modernize(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -775,7 +853,7 @@ func (a *App) handleV1Modernize(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleV1Execute applies a patch in a sandboxed worktree via TaskService.Execute.
-// Phase 11/22: governance-gated, creates an authoritative Task with a diff artifact.
+// /22: governance-gated, creates an authoritative Task with a diff artifact.
 func (a *App) handleV1Execute(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -827,7 +905,7 @@ func (a *App) handleV1Audit(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	// Gather governance audit entries for this task (Invariant 4).
-	var auditEntries []audit.AuditEntry
+	var auditEntries []governance.AuditEntry
 	if a.firewall != nil {
 		auditEntries = a.firewall.AuditLog().FilterByTask(taskID)
 	}
@@ -841,10 +919,10 @@ func (a *App) handleV1Audit(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusOK, struct {
-		Task      *agent.Task         `json:"task"`
-		Artifacts []domain.Artifact   `json:"artifacts"`
-		Audit     []audit.AuditEntry  `json:"audit"`
-		Approvals []domain.Approval   `json:"approvals"`
+		Task      *agent.Task             `json:"task"`
+		Artifacts []domain.Artifact       `json:"artifacts"`
+		Audit     []governance.AuditEntry `json:"audit"`
+		Approvals []domain.Approval       `json:"approvals"`
 	}{
 		Task:      t,
 		Artifacts: arts,

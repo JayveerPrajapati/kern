@@ -200,7 +200,7 @@ func (a *App) buildArchitecture() (*architectureData, error) {
 
 // ArchitectureReport returns the architecture validation report for this
 // project. It is the exported accessor the enterprise org endpoint uses to
-// aggregate per-project architecture health (Phase 19 P19.3 "architecture"),
+// aggregate per-project architecture health ( .3 "architecture"),
 // reusing the same cached builder as /api/architecture.
 func (a *App) ArchitectureReport() (*architectureData, error) {
 	return a.buildArchitecture()
@@ -258,6 +258,32 @@ func (a *App) buildApprovals() []domainApproval {
 			RequestedAt: ap.RequestedAt,
 			DecidedAt:   ap.DecidedAt,
 		})
+	}
+	// Merge the persistent store's pending approvals (workflow-engine gates)
+	// so a human sees every gate, including ones parked by kern_workflow / a
+	// separate process. Deduped by ID against the in-memory list.
+	if a.fileApprovals != nil {
+		seen := map[string]bool{}
+		for _, ap := range approvals {
+			seen[ap.ID] = true
+		}
+		if pending, err := a.fileApprovals.Pending(); err == nil {
+			for _, ap := range pending {
+				if seen[ap.ID] {
+					continue
+				}
+				approvals = append(approvals, domainApproval{
+					ID:          ap.ID,
+					TaskID:      ap.TaskID,
+					Requester:   ap.Requester,
+					Approver:    ap.Approver,
+					Status:      ap.Status,
+					Reason:      ap.Reason,
+					RequestedAt: ap.RequestedAt,
+					DecidedAt:   ap.DecidedAt,
+				})
+			}
+		}
 	}
 	return approvals
 }
