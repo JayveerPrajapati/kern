@@ -21,7 +21,7 @@ For each major capability: package / CLI / MCP / API / inputs / outputs / events
 | Incident | `incident` | `kern incident` | yes | /v1/incidents |
 | Modernization | `modernization` | `kern modernize` | yes | /v1/modernize |
 | Runtime correl. | `runtime` | — | yes | /v1/correlate |
-| Deployment | `deployment` | `kern deploy`(via task) | yes | /v1/tasks |
+| Deployment | `deployment` | via task pipeline (`kern run`/`kern do`) | yes | /v1/tasks |
 | Memory | `memory` | `kern memory` | yes | /v1/memory |
 | Learning | `learning` | — | yes | /v1/learn |
 | Flight/audit | `flight` | `kern audit` | yes | /v1/audit |

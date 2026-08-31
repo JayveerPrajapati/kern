@@ -87,3 +87,25 @@ func TestRenderTeamText(t *testing.T) {
 		t.Fatalf("expected empty task list on a fresh team; got:\n%s", text)
 	}
 }
+
+// TestRunWorkflowCLI asserts the agent-team workflow CLI runs offline: it
+// selects the team, drives the pre-gate steps, and parks at the human approval
+// gate with a resolvable approval ID — the exit gate over the CLI.
+func TestRunWorkflowCLI(t *testing.T) {
+	root := loopCliFixture(t)
+	text, err := runWorkflowCLI(root, "Greet")
+	if err != nil {
+		t.Fatalf("runWorkflowCLI: %v", err)
+	}
+	if !strings.Contains(text, "WAITING_FOR_APPROVAL") {
+		t.Fatalf("run parked state missing; got:\n%s", text)
+	}
+	if !strings.Contains(text, "approval required:") {
+		t.Fatalf("approval gate not surfaced; got:\n%s", text)
+	}
+	for _, want := range []string{"analyze", "plan"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("pre-gate steps missing %q; got:\n%s", want, text)
+		}
+	}
+}

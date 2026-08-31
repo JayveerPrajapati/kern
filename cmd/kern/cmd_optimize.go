@@ -97,8 +97,18 @@ func runCompact(rest []string) {
 	if err != nil {
 		fatal("%v", err)
 	}
-	sum := code.Summarize(file, content, 200)
-	fmt.Println(sum.Render())
+	// The default tier preserves the historical behavior: a symbolic summary.
+	// --tier full returns the whole file and --tier folded returns signatures
+	// with bodies elided (each elision counts the lines removed).
+	tier := code.TierSummary
+	if f.tier != "" {
+		t, terr := code.ParseTier(f.tier)
+		if terr != nil {
+			fatalUsage("%v", terr)
+		}
+		tier = t
+	}
+	fmt.Println(code.RenderTier(file, content, tier))
 
 }
 
@@ -186,7 +196,9 @@ func runBudget(rest []string) {
 	out := budget.Fit(text, maxTokens)
 	before := tokenize.Count(text)
 	after := tokenize.Count(out)
-	fmt.Fprintf(os.Stderr, "kern: %d -> %d tokens (saved %d, %.1f%%)\n", before, after, before-after, pct(before, after))
+	// Always state the applied budget so a silent default (4000 when --max is
+	// omitted) can never be mistaken for a requested cap.
+	fmt.Fprintf(os.Stderr, "kern: %d -> %d tokens (saved %d, %.1f%%, budget %d)\n", before, after, before-after, pct(before, after), maxTokens)
 	fmt.Println(out)
 
 }
@@ -319,9 +331,19 @@ func runStats(cmd string, rest []string) {
 		fatal("%v", err)
 	}
 	if cmd == "diff" {
-		entries, err := rec.Entries(20)
+		limit := 20
+		if f.limit > 0 {
+			limit = f.limit
+		}
+		entries, err := rec.Entries(limit)
 		if err != nil {
 			fatal("%v", err)
+		}
+		if f.limit <= 0 && len(entries) >= limit {
+			// The default 20-entry cap is silent by design only if it does not
+			// bind; say so when it might, so a truncated diff is not mistaken
+			// for the full history.
+			fmt.Fprintf(os.Stderr, "kern: showing up to %d entries (pass --limit to raise)\n", limit)
 		}
 		for _, e := range entries {
 			if f.session != "" && e.Session != f.session {
@@ -332,7 +354,11 @@ func runStats(cmd string, rest []string) {
 		}
 		return
 	}
-	if cmd == "export" {
+	// `kern export --csv` writes the CSV ledger; without the flag it falls
+	// through to the same summary as `kern stats` (the usage line documents
+	// --csv as the CSV switch, so the flag gates the format instead of being
+	// a no-op).
+	if cmd == "export" && f.csv {
 		entries, err := rec.Entries(100000)
 		if err != nil {
 			fatal("%v", err)

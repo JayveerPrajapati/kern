@@ -11,9 +11,24 @@ import (
 
 	"github.com/JayveerPrajapati/kern/internal/cache"
 	"github.com/JayveerPrajapati/kern/internal/metrics"
+	kversion "github.com/JayveerPrajapati/kern/internal/version"
 )
 
+// version is the build-stamped release version, initialized from the shared
+// internal/version.Version so every kern binary reports the same value.
+// It starts as the literal "dev" (not a copy of kversion.Version) because
+// the legacy -ldflags "-X main.version=..." only rewrites a variable whose
+// initializer is a compile-time constant: a runtime copy from another global
+// aliases the read and silently defeats -X. When unstamped, init() adopts
+// the shared internal/version.Version (default "dev", or the newer
+// "-X github.com/JayveerPrajapati/kern/internal/version.Version=..." form).
 var version = "dev"
+
+func init() {
+	if version == "dev" {
+		version = kversion.Version
+	}
+}
 
 func usage() {
 	fmt.Fprintf(os.Stderr, `kern - kern your context. Local-only token optimizer for AI agents.
@@ -26,7 +41,8 @@ Usage:
   kern pack [root] [--max-tokens N] [--out FILE]  single paste-ready file: tree + instructions + contents
   kern build "<command>" [--dir DIR]              run build, compact output
   kern log <file|->                                 compress a log file
-  kern index [root]                               build/refresh the AST index
+  kern index [root] [--status] [--json]           build/refresh the AST index; --status reports cached
+                                                index health (symbols/files/stale) without rebuilding
   kern watch [root]                               daemon: auto re-index on change
   kern ast <pattern> [--all]                      AST symbol search (wildcards, kind prefixes; --all: search ALL cached projects)
   kern search <query> [--limit N] [--repos] [--json] [--semantic]
@@ -46,21 +62,24 @@ Usage:
   kern tokens [--bpe] "<text>"                    token count (estimator or exact BPE)
   kern setup [--root DIR] [--agents mcp,opencode,claude] [--detect] [--global]   wire kern into agents (idempotent); --global also writes kern-first instructions to global agent config (~/AGENTS.md, ~/.claude/CLAUDE.md, ~/.config/opencode/plugins/)
   kern setup --check                                    show wiring status
+  kern setup --verify                                   spawn the configured kern-mcp and check it answers the MCP initialize handshake
   kern setup --detect                                   auto-detect present agents and wire only those
   kern setup --global                                   wire kern-first instructions globally for all known agents
   kern buddy [root]                               session onboarding digest for any agent
+  kern onboard [root]                             ensure repo is registered, indexed and wired (session start)
   kern prompt <template> [--file PATH] [--task TEXT]   fine-tuned prompt template
   kern prompt list                                list templates
   kern remember "<lesson>"                        record a lesson in project memory
   kern memory [--clear]                           show project memory
   kern recall "<prompt>" [root] [--limit N]        recall up-to-N relevant past lessons for a prompt
+  kern learn                                      extract recurring patterns from engineering memory
    kern budget "<text>" --max N                    fit text into a token budget
    kern terse "<text>"|-                            compress an LLM's output: strip filler, keep code
    kern exec "<code>" [--lang LANG] [--timeout s] [--max bytes] [--stdin file|-]
                                                  run a script in an isolated local runtime (python3,
                                                  node, go, bash, ...) and return ONLY stdout; shebang
                                                  or --lang selects the runtime; --list shows installed
-  kern doctor [root]                              diagnostics report
+  kern doctor [root] [--json]                     diagnostics report (binary, wiring, index, freshness, LLM)
   kern mask [file|-] [--names a,b,c]              mask secrets/PII locally with [MASKED_*] placeholders
   kern sec [root] [--severity error,warning,info] [--max N] [--json]
                                                  security scan: hardcoded secrets, dynamic SQL, command
@@ -81,14 +100,14 @@ Usage:
   kern schema <data.json|-> --schema <schema.json>
                                                 deterministically validate JSON output against a JSON schema
   kern prompt <template> --schema <schema.json>  append strict schema formatting block to a rendered prompt
-  kern validate [root] [--cmd "custom"] [--timeout s]
+  kern validate [root] [--cmd "custom"] [--timeout s] [--json]
                                                 auto-detect and run the project's build/test/syntax check
   kern heal [root] [--llm model] [--task TEXT] [--max N] [--timeout s]
                                                 on failure, have the local LLM fix files in a snapshot,
                                                 re-validate there, and show a diff to review (never edits your tree)
   kern optimize <prompt> [--fewshot]           inject top recalled lessons from project memory as baselines
   kern udiff <file-a> <file-b> [--out patch]    unified line diff between two files (pure Go, no deps)
-  kern sandbox [root] -- <command...> [--timeout s]
+  kern sandbox [root] -- <command...> [--timeout s] [--json]
                                                 run a risky command; on failure the tree is restored to a
                                                 snapshot (success keeps changes)
   kern swap <file|-> [root] [--max N] [--mode summary|expand]
@@ -107,7 +126,12 @@ Usage:
   kern review [root] [--range a..b] [--max N]     token-optimised review context for changed files
   kern hubs [root] [--limit N] [--json]           most depended-on symbols + cross-package bridges
   kern bridges [root] [--limit N] [--json]        cross-package bridge detection (coupling points)
-  kern testgaps [root] [--limit N] [--json]       test coverage + untested hotspots
+  kern testgaps|test-gaps [root] [--limit N] [--json]   test coverage + untested hotspots
+  kern impact <change> [kind] [new-target] [--root ROOT] [--json]
+                                                deterministic 11-question ImpactReport (graph-driven, no LLM)
+  kern what-if|simulate <change> [kind] [new-target] [--root ROOT] [--json]
+                                                simulate a change on the graph; JSON emits the full
+                                                impact report (affected, risk, claims, mitigations)
   kern entries [root] [--limit N] [--json]        framework entry points in the index
   kern flows [root] [--limit N] [--json]          execution flows from entry points, by reach
   kern communities [root] [--limit N] [--json] [--full]     call-graph communities (label propagation)
@@ -115,6 +139,7 @@ Usage:
   kern dead [root] [--limit N] [--json]           dead code: symbols with no in-project callers
   kern larges [root] [--lines N] [--limit N] [--json]   largest declarations by source lines
   kern arch [root] [--json]                       architecture overview + coupling warnings
+kern twin [root] [--root ROOT]                  digital twin knowledge graph: node counts per kind + api endpoints
   kern churn [root] [--range a..b] [--json]       change-frequency risk (most-churned files)
   kern cochange [root] [--range a..b] [--limit N] [--json]   co-change coupling (files edited in lockstep)
   kern explore <symbol> [root] [--depth N] [--max N] [--json]   source + call flow + blast radius in one call
@@ -129,23 +154,40 @@ Usage:
    kern approve [id] [--reject --reason "..." --approver "..."]
                                                  list pending approvals; with an id, approve (or --reject) it
    kern audit [task-id] [--root ROOT] [--json]   show the audit trail (all entries, or for one task)
+   kern audit append [--root ROOT] [--file PATH]  link an external entry into the tamper-evident hash chain (entry JSON from stdin or --file)
+   kern evidence export [--root ROOT] [--agent-id ID] [--task T] [--out FILE]
+                                                 signed, tamper-evident evidence bundle (authorization +
+                                                 freshness + lineage + audit trail snapshot, SHA-256 sealed)
+                                                 for SOC 2 / ISO 42001 / EU AI Act review; --out "-" = stdout
+   kern evidence verify [--file FILE] [--root ROOT]
+                                                 validate a bundle's seal and the repo's audit chain;
+                                                 exit 0 = valid, 2 = tampered/broken, 1 = parse error
     kern efficiency <id> [--root ROOT]    efficiency report (17.6) for a task
   kern guard init [root]                         scaffold .kern/boundaries.json
    kern guard check [root] [--file F] [--range a..b] [--json|--sarif] [--threshold N]  reject boundary violations (exit 2 when count > N)
+   kern fingerprint [root] [--file f1,f2] [--json]   structural fingerprints of Go functions (data command; never a gate)
    kern commitmsg [--staged|--range a..b] [--subject]   deterministic conventional commit message from the diff
    kern commit [--staged] [--all] [--message TEXT] [--dry-run]   stage + commit with a generated conventional message
    kern version                                    show version
   kern guide                                      categorized tool usage guide (performance tiers)
   kern hook <install|diff|store|claude-post|claude-prompt|gemini-after|gemini-prompt>   git hooks (install/diff/store) or agent hooks (read hook JSON on stdin)
   kern mcp                                        run MCP server on stdio
+  kern meta "<request>"                           single entry point: describe what you need, kern picks the tool
    kern analyze <change> [--root ROOT]       analyze a proposed change against the whole system
    kern plan <change> [--root ROOT]          implementation plan for a proposed change
+   kern modernize [--root ROOT]              phased monolith modernization plan
    kern execute <patch|patch-file> [--root]  apply a diff in an isolated worktree and verify build
    kern verify <types> [--root ROOT]         unified verification engine (types: build,test,security,architecture,dependency; default build,test)
    kern incident <alert-json> [snapshot] [--root]  end-to-end incident investigation
+   kern correlate <alert-json> [--root ROOT]       correlate an alert to evidence (alert→service→commit→symbol)
    kern team [--root ROOT]          build the standard specialist team; list roles + task states
+   kern artifacts [task-id] [--root ROOT]          inspect task artifacts
    kern loop <intent> [--level L0..L5] [--root]    run the closed loop (default L0 read-only) and show the stage timeline
    kern autonomy <intent> [--level L0..L5]         alias of kern loop
+  kern serve [--root PATH] [--addr ADDR] [--enterprise] [--project NAME=PATH]...
+                                 start the kern REST API + dashboard server
+                                 (single-project, or --enterprise multi-project
+                                 with shared org audit/memory/policies)
 `)
 }
 
@@ -162,12 +204,14 @@ type flags struct {
 	root           string
 	level          string
 	check          bool
+	verify         bool
 	detect         bool
 	global         bool
 	apply          bool
 	agents         string
 	file           string
 	task           string
+	agentID        string
 	mermaid        bool
 	all            bool
 	clear          bool
@@ -202,6 +246,9 @@ type flags struct {
 	noinstructions bool
 	maxTokens      int
 	maxFiles       int
+	tier           string
+	precision      string
+	fold           bool
 	staged         bool
 	subject        bool
 	message        string
@@ -214,6 +261,11 @@ type flags struct {
 	approver       string
 	reject         bool
 	reason         string
+	status         bool
+	strict         bool
+	addr           string
+	enterprise     bool
+	projects       []string
 }
 
 func parseFlags(args []string) (flags, []string, error) {
@@ -268,6 +320,10 @@ func parseFlags(args []string) (flags, []string, error) {
 			}
 		case "--json":
 			f.json = true
+		case "--status":
+			f.status = true
+		case "--strict":
+			f.strict = true
 		case "--reset":
 			f.reset = true
 		case "--sarif":
@@ -286,6 +342,18 @@ func parseFlags(args []string) (flags, []string, error) {
 			if i < len(args) {
 				f.root = args[i]
 			}
+		case "--addr":
+			i++
+			if i < len(args) {
+				f.addr = args[i]
+			}
+		case "--enterprise":
+			f.enterprise = true
+		case "--project":
+			i++
+			if i < len(args) {
+				f.projects = append(f.projects, args[i])
+			}
 		case "--pattern":
 			i++
 			if i < len(args) {
@@ -298,6 +366,8 @@ func parseFlags(args []string) (flags, []string, error) {
 			}
 		case "--check":
 			f.check = true
+		case "--verify":
+			f.verify = true
 		case "--detect":
 			f.detect = true
 		case "--global":
@@ -318,6 +388,11 @@ func parseFlags(args []string) (flags, []string, error) {
 			i++
 			if i < len(args) {
 				f.task = args[i]
+			}
+		case "--agent-id":
+			i++
+			if i < len(args) {
+				f.agentID = args[i]
 			}
 		case "--mermaid":
 			f.mermaid = true
@@ -438,6 +513,18 @@ func parseFlags(args []string) (flags, []string, error) {
 			if i < len(args) {
 				setInt(&f.maxFiles, args[i], "--max-files")
 			}
+		case "--tier":
+			i++
+			if i < len(args) {
+				f.tier = args[i]
+			}
+		case "--precision":
+			i++
+			if i < len(args) {
+				f.precision = args[i]
+			}
+		case "--fold":
+			f.fold = true
 		case "--staged":
 			f.staged = true
 		case "--subject":
@@ -503,19 +590,7 @@ func hasFlag(args []string, flag string) bool {
 }
 
 func main() {
-	if len(os.Args) < 2 {
-		usage()
-		os.Exit(2)
-	}
-	cmd := os.Args[1]
-	rest := os.Args[2:]
-
-	// `--help`/`-h` on any subcommand (or on kern itself) prints the global
-	// usage and exits 0 instead of being dispatched to a subcommand handler.
-	if cmd == "--help" || cmd == "-h" || hasFlag(rest, "--help") || hasFlag(rest, "-h") {
-		usage()
-		os.Exit(0)
-	}
+	cmd, rest := resolveCommandAndFlags()
 
 	// Load prior metrics snapshot from disk so CLI metrics accumulate across
 	// invocations (F-46/F-47/F-56). The `stats performance --reset` command
@@ -526,336 +601,33 @@ func main() {
 	if !isStatsPerfReset {
 		_ = metrics.Default().Load(metricsPath) // best-effort; missing file is fine
 	}
-	// Persist the updated snapshot on exit. Best-effort: a write failure is
-	// non-fatal (metrics are non-critical). For `stats performance --reset`,
-	// runStatsPerformance handles persistence (Reset + Save) in-place.
-	defer func() {
-		if !isStatsPerfReset {
-			_ = os.MkdirAll(cache.Dir(), 0o755)
-			_ = metrics.Default().Save(metricsPath)
-		}
+
+	// dispatchCommand is wrapped in a func literal that recovers the
+	// exitError sentinel panicked by fatal/fatalUsage (and other handler
+	// exits routed through it) and converts it back into the exit code. This
+	// keeps every exit on the single path below so the metrics snapshot is
+	// persisted before os.Exit runs.
+	code := func() (c int) {
+		defer func() {
+			if r := recover(); r != nil {
+				if e, ok := r.(exitError); ok {
+					c = e.code
+					return
+				}
+				panic(r) // re-panic non-sentinel
+			}
+		}()
+		return dispatchCommand(cmd, rest)
 	}()
 
-	switch cmd {
-	case "version", "--version", "-v":
-		runVersion(rest)
-
-	case "guide":
-		runGuide(rest)
-
-	case "optimize", "preview":
-		runOptimize(cmd, rest)
-
-	case "compact":
-		runCompact(rest)
-
-	case "project":
-		runProject(rest)
-
-	case "pack":
-		runPack(rest)
-
-	case "build":
-		runBuild(rest)
-
-	case "log":
-		runLog(rest)
-
-	case "tokens":
-		runTokens(rest)
-
-	case "setup":
-		runSetup(rest)
-
-	case "buddy":
-		runBuddy(rest)
-
-	case "prompt":
-		runPrompt(rest)
-
-	case "validate":
-		runValidate(rest)
-
-	case "heal":
-		runHeal(rest)
-
-	case "udiff":
-		runUdiff(rest)
-
-	case "sandbox":
-		runSandbox(rest)
-
-	case "swap":
-		runSwap(rest)
-
-	case "precache":
-		runPrecache(rest)
-
-	case "schema":
-		runSchema(rest)
-
-	case "remember":
-		runRemember(rest)
-
-	case "memory":
-		runMemory(rest)
-
-	case "recall":
-		runRecall(rest)
-
-	case "budget":
-		runBudget(rest)
-
-	case "terse":
-		runTerse(rest)
-
-	case "exec":
-		runExec(rest)
-
-	case "doctor":
-		runDoctor(rest)
-
-	case "mask":
-		runMask(rest)
-
-	case "analyze", "plan":
-		runAnalyze(cmd, rest)
-
-	case "team":
-		runTeam(rest)
-
-	case "loop", "autonomy":
-		runLoop(cmd, rest)
-
-	case "risk":
-		runRisk(rest)
-
-	case "execute":
-		runExecute(rest)
-
-	case "incident":
-		runIncident(rest)
-
-	case "run":
-		runRun(rest)
-
-	case "what-if", "simulate":
-		runWhatIf(cmd, rest)
-
-	case "impact":
-		runImpact(rest)
-
-	case "correlate":
-		runCorrelate(rest)
-
-	case "learn":
-		runLearn(rest)
-
-	case "modernize":
-		runModernize(rest)
-
-	case "task":
-		runTask(rest)
-
-	case "efficiency":
-		runEfficiency(rest)
-
-	case "approve":
-		runApprove(rest)
-
-	case "audit":
-		runAudit(rest)
-
-	case "artifacts":
-		runArtifacts(rest)
-
-	case "verify":
-		runVerify(rest)
-
-	case "docs":
-		runDocs(rest)
-
-	case "doc_fetch":
-		runDocFetch(rest)
-
-	case "doc_search":
-		runDocSearch(rest)
-
-	case "fw", "frameworks":
-		runFw(rest)
-
-	case "entry-points", "entrypoints":
-		runEntryPoints(rest)
-
-	case "hook":
-		runHook(rest)
-
-	case "commitmsg":
-		runCommitmsg(rest)
-
-	case "commit":
-		runCommit(rest)
-
-	case "semcache":
-		runSemcache(rest)
-
-	case "stats", "diff", "export":
-		// `kern stats performance` routes to the metrics snapshot (F-41/F-46/
-		// F-47/F-56) instead of the token-savings stats. `--reset` clears the
-		// process-wide recorder first; `--json` emits the structured snapshot.
-		if cmd == "stats" && len(rest) > 0 && rest[0] == "performance" {
-			f, _, err := parseFlags(rest[1:])
-			if err != nil {
-				fatalUsage("flags: %v", err)
-			}
-			out, err := runStatsPerformance(f.reset, f.json)
-			if err != nil {
-				fatal("%v", err)
-			}
-			fmt.Println(out)
-			return
-		}
-		runStats(cmd, rest)
-
-	case "mcp":
-		runMCP(rest)
-
-	case "index":
-		runIndex(rest)
-
-	case "sec":
-		runSec(rest)
-
-	case "delete":
-		runDelete(rest)
-
-	case "rename":
-		runRename(rest)
-
-	case "watch":
-		runWatch(rest)
-
-	case "ast":
-		runAst(rest)
-
-	case "repos":
-		runRepos(rest)
-
-	case "search":
-		runSearch(rest)
-
-	case "graph":
-		runGraph(rest)
-
-	case "inherits":
-		runInherits(rest)
-
-	case "context":
-		runContext(rest)
-
-	case "why":
-		runWhy(rest)
-
-	case "wiki":
-		runWiki(rest)
-
-	case "changes", "review":
-		runChanges(cmd, rest)
-
-	case "hubs":
-		runHubs(rest)
-
-	case "bridges":
-		runBridges(rest)
-
-	case "testgaps":
-		runTestgaps(rest)
-
-	case "flows":
-		runFlows(rest)
-
-	case "entries":
-		runEntries(rest)
-
-	case "communities":
-		runCommunities(rest)
-
-	case "path":
-		runPath(rest)
-
-	case "dead":
-		runDead(rest)
-
-	case "larges":
-		runLarges(rest)
-
-	case "arch":
-		runArch(rest)
-
-	case "churn":
-		runChurn(rest)
-
-	case "cochange":
-		runCochange(rest)
-
-	case "explore":
-		runExplore(rest)
-
-	case "fts":
-		runFts(rest)
-
-	case "near", "walk":
-		runNear(rest)
-
-	case "probe":
-		runProbe(rest)
-
-	case "trace":
-		runTrace(rest)
-
-	case "lock":
-		runLock(rest)
-
-	case "unlock":
-		runUnlock(rest)
-
-	case "status":
-		runStatus(rest)
-
-	case "guard":
-		runGuard(rest)
-
-	case "do":
-		// `kern do "<intent>"` — single-entry autonomous coding (F-12/F-36/F-50).
-		// Runs the closed loop at L2 (sandbox modifications) with the autonomous
-		// coder wired as the default code-stage handler. Optional --level L0..L5
-		// overrides the autonomy gate.
-		f, dargs, err := parseFlags(rest)
-		if err != nil {
-			fatalUsage("flags: %v", err)
-		}
-		intent := strings.Join(dargs, " ")
-		if intent == "" {
-			if b, berr := readStdin(); berr == nil {
-				intent = strings.TrimSpace(string(b))
-			}
-		}
-		if intent == "" {
-			fatal("do: intent required (pass as args or stdin)")
-		}
-		root := f.root
-		if root == "" {
-			root = "."
-		}
-		out, err := runDo(root, f.level, intent)
-		if err != nil {
-			fmt.Print(out)
-			fatal("do: %v", err)
-		}
-		fmt.Print(out)
-
-	default:
-		usage()
-		os.Exit(2)
+	// Persist the updated snapshot before exiting. Best-effort: a write
+	// failure is non-fatal (metrics are non-critical). This runs explicitly
+	// (not via defer) because os.Exit below does not run deferred functions.
+	// For `stats performance --reset`, runStatsPerformance handles persistence
+	// (Reset + Save) in-place.
+	if !isStatsPerfReset {
+		_ = os.MkdirAll(cache.Dir(), 0o755)
+		_ = metrics.Default().Save(metricsPath)
 	}
+	os.Exit(code)
 }
