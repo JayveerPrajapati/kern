@@ -5,8 +5,11 @@ import (
 	"fmt"
 	"github.com/JayveerPrajapati/kern/internal/brief"
 	"github.com/JayveerPrajapati/kern/internal/code"
+	"github.com/JayveerPrajapati/kern/internal/intel"
 	"github.com/JayveerPrajapati/kern/internal/pack"
 	"os"
+	"path/filepath"
+	"strings"
 )
 
 func (s *Server) handleCompact(ctx context.Context, args map[string]any) (string, error) {
@@ -24,8 +27,20 @@ func (s *Server) handleCompact(ctx context.Context, args map[string]any) (string
 		if err != nil {
 			return "", fmt.Errorf("cannot read %s: %w", path, err)
 		}
-		sum := code.Summarize(abs, content, 200)
-		return sum.Render(), nil
+		// The default tier preserves the historical behavior: a symbolic
+		// summary. tier=full returns the whole file, tier=folded returns
+		// signatures with bodies elided (each elision counts the removed
+		// lines, so the agent can request the full file knowing what it
+		// missed).
+		tier := code.TierSummary
+		if v := argString(args, "tier"); v != "" {
+			t, terr := code.ParseTier(v)
+			if terr != nil {
+				return "", terr
+			}
+			tier = t
+		}
+		return code.RenderTier(abs, content, tier), nil
 
 	}
 }
@@ -48,6 +63,79 @@ func (s *Server) handleBuddy(ctx context.Context, args map[string]any) (string, 
 			return "", err
 		}
 		return out, nil
+
+	}
+}
+
+func (s *Server) handleOnboard(ctx context.Context, args map[string]any) (string, error) {
+	{
+		root := argString(args, "root")
+		if root == "" {
+			root, _ = os.Getwd()
+		}
+		abs, err := filepath.Abs(root)
+		if err != nil {
+			abs = root
+		}
+		abs = filepath.Clean(abs)
+
+		var lb strings.Builder
+
+		// 1. Register the repo if not already present in the registry.
+		registered := ""
+		reg, rerr := intel.LoadRepos()
+		if rerr != nil {
+			registered = "error: " + rerr.Error()
+		} else {
+			already := false
+			for _, r := range reg.Repos {
+				if filepath.Clean(r.Root) == abs {
+					already = true
+					break
+				}
+			}
+			if already {
+				registered = "present"
+			} else if aerr := reg.Add(abs, ""); aerr != nil {
+				registered = "error: " + aerr.Error()
+			} else if serr := reg.Save(); serr != nil {
+				registered = "added (save error: " + serr.Error() + ")"
+			} else {
+				registered = "added"
+			}
+		}
+
+		// 2. Ensure the index is built/refreshed (loadIndex auto-builds if
+		// stale or missing — do NOT build manually here).
+		indexed := ""
+		ix, ierr := s.loadIndex(ctx, abs)
+		if ierr != nil {
+			indexed = "error: " + ierr.Error()
+		} else {
+			edges := 0
+			for _, callees := range ix.Calls {
+				edges += len(callees)
+			}
+			indexed = fmt.Sprintf("%d symbols, %d call edges, %d files", len(ix.Symbols), edges, len(ix.FileHashes))
+		}
+
+		// 3. AGENTS.md wiring, only if the file is missing. setup.Wire cannot
+		// be called from the MCP package (internal/setup's tests import
+		// internal/mcp, which would create an import cycle), so report the
+		// missing file and direct the caller to `kern setup` / `kern onboard`.
+		wired := ""
+		if _, serr := os.Stat(filepath.Join(abs, "AGENTS.md")); os.IsNotExist(serr) {
+			wired = "missing — run kern setup (or kern onboard) to write it"
+		} else {
+			wired = "present"
+		}
+
+		fmt.Fprintf(&lb, "root:       %s\n", abs)
+		fmt.Fprintf(&lb, "registered: %s\n", registered)
+		fmt.Fprintf(&lb, "indexed:    %s\n", indexed)
+		fmt.Fprintf(&lb, "AGENTS.md:  %s\n", wired)
+		fmt.Fprintf(&lb, "next:       explore the repo with kern_explore / kern_code_graph, or run kern_buddy for a session digest\n")
+		return lb.String(), nil
 
 	}
 }
@@ -98,6 +186,17 @@ func (s *Server) handlePack(ctx context.Context, args map[string]any) (string, e
 		}
 		if v := argString(args, "instructions"); v != "" {
 			opts.SkipInstructions = v == "false"
+		}
+		// Content tier: fold=true is shorthand for tier=folded. Default (no
+		// args) packs full source, exactly as before.
+		if argString(args, "fold") == "true" {
+			opts.Tier = code.TierFolded
+		} else if v := argString(args, "tier"); v != "" {
+			t, err := code.ParseTier(v)
+			if err != nil {
+				return "", err
+			}
+			opts.Tier = t
 		}
 		b, err := pack.Build(root, opts)
 		if err != nil {

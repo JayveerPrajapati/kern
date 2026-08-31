@@ -98,7 +98,7 @@ func writeGlobalAGENTS() Status {
 func writeGlobalClaude() Status {
 	dir := filepath.Join(globalHomeDir(), ".claude")
 	if _, err := os.Stat(dir); err != nil {
-		return Status{Agent: "claude-global", Path: dir, Note: "~/.claude not present — skipped"}
+		return Status{Agent: "claude-global", Skipped: true, Path: dir, Note: "~/.claude not present — skipped"}
 	}
 	path := globalClaudePath()
 	kern, err := rulesFS.ReadFile("assets/AGENTS.md")
@@ -131,7 +131,7 @@ func copyGlobalPlugin() Status {
 	dst := globalPluginPath()
 	opencodeDir := filepath.Dir(filepath.Dir(dst))
 	if _, err := os.Stat(opencodeDir); err != nil {
-		return Status{Agent: "opencode-plugin-global", Path: dst, Note: "opencode not installed — skipped"}
+		return Status{Agent: "opencode-plugin-global", Skipped: true, Path: dst, Note: "opencode not installed — skipped"}
 	}
 	src, err := pluginFS.ReadFile("assets/plugin/kern.ts")
 	if err != nil {

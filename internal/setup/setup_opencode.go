@@ -18,22 +18,22 @@ func wireMCPJSON(root, bin string) Status {
 	return Status{Agent: "mcp", Installed: true, Path: path, Note: "project .mcp.json written (auto-discovered by Claude Code, Cursor, Windsurf, …)"}
 }
 
-func wireOpencode(root, bin string) Status {
+func wireOpencode(root string) Status {
 	path := filepath.Join(root, "opencode.json")
-	// For the project-level config, prefer the portable relative path "bin/kern-mcp"
-	// so it works on any machine after a build. Only fall back to the absolute
-	// bin when the relative binary is not present next to the project root.
-	cmd := "bin/kern-mcp"
-	if _, err := os.Stat(filepath.Join(root, cmd)); err != nil {
-		cmd = bin
-	}
+	// PortableMCPCommand returns bare "kern-mcp" when it is on PATH (the agent
+	// re-resolves it at launch, so the config survives relocation) and falls
+	// back to the absolute sibling Bin() path otherwise. It never emits the
+	// fragile "bin/kern-mcp" relative path, which breaks agents whenever the
+	// repo has no bin/kern-mcp binary.
+	cmd := PortableMCPCommand()
 	entry := map[string]any{
 		"type":    "local",
 		"command": []string{cmd},
 		"enabled": true,
-	}
-	if cmd == "bin/kern-mcp" {
-		entry["cwd"] = "."
+		// No cwd field: opencode resolves opencode.json from the project root
+		// and launches MCP servers with cwd = project root by default. Writing
+		// an absolute cwd here would leak a machine-specific path into a
+		// committed config file, breaking portability.
 	}
 	err := mergeJSON(path, "mcp", entry)
 	if err != nil {

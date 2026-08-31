@@ -2,11 +2,11 @@ package main
 
 import (
 	"context"
-	"github.com/JayveerPrajapati/kern/internal/mcp"
 	"os"
 	"os/signal"
 	"syscall"
-	"time"
+
+	"github.com/JayveerPrajapati/kern/internal/mcp"
 )
 
 func runMCP(rest []string) {
@@ -21,35 +21,19 @@ func runMCP(rest []string) {
 		ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer cancel()
 		if err := mcp.ServeHTTPContext(ctx, httpAddr); err != nil {
-			os.Exit(1)
+			// Route through the exitError sentinel so main() persists
+			// metrics before the real exit (same exit code 1 as before).
+			panic(exitError{code: 1})
 		}
 		return
 	}
 	srv := mcp.NewServer(os.Stdin, os.Stdout)
-	// On SIGINT/SIGTERM cancel in-flight tool calls and release locks so slow
-	// tools can't hang the process. Closing os.Stdin doesn't reliably unblock
-	// the scanner, so wait for in-flight calls to drain, then exit.
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer cancel()
-	go func() {
-		<-ctx.Done()
-		srv.CancelAll()
-		srv.Close()
-		_ = os.Stdin.Close()
-		deadline := time.Now().Add(5 * time.Second)
-		for time.Now().Before(deadline) {
-			if srv.Inflight() == 0 {
-				time.Sleep(100 * time.Millisecond)
-				os.Exit(0)
-			}
-			time.Sleep(50 * time.Millisecond)
-		}
-		os.Exit(1)
-	}()
-	if err := srv.Serve(); err != nil {
-		os.Exit(1)
+	// ServeStdio owns the SIGINT/SIGTERM drain (cancel in-flight tools,
+	// release locks, close stdin, wait up to 5s for in-flight calls). It
+	// never calls os.Exit: a clean drain returns nil (exit 0), a drain
+	// timeout or serve error returns a non-nil error (exit 1) routed through
+	// the exitError sentinel so main() persists metrics before the real exit.
+	if err := mcp.ServeStdio(srv); err != nil {
+		panic(exitError{code: 1})
 	}
-	srv.CancelAll()
-	srv.Close()
-
 }

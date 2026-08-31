@@ -26,7 +26,7 @@ func (s *Server) handleMaskPII(ctx context.Context, args map[string]any) (string
 				names = append(names, n)
 			}
 		}
-		res := pii.MaskNames(text, names)
+		res := pii.MaskAllCustom(text, pii.DefaultPatterns, names)
 		var parts []string
 		for k, v := range res.ByLabel {
 			parts = append(parts, fmt.Sprintf("%s %d", k, v))
@@ -97,7 +97,10 @@ func (s *Server) handleSafeDelete(ctx context.Context, args map[string]any) (str
 		}
 		r := intel.DeleteCheck(ix, sym)
 		if argString(args, "format") == "json" {
-			data, _ := json.Marshal(r)
+			data, err := json.Marshal(r)
+			if err != nil {
+				return "", err
+			}
 			return string(data), nil
 		}
 		return intel.RenderDelete(r), nil
@@ -167,7 +170,7 @@ func (s *Server) handleGuardCheck(ctx context.Context, args map[string]any) (str
 		if err != nil {
 			return "", err
 		}
-		violations := intel.CheckBoundaries(ix, b, files)
+		violations, skipped := intel.CheckBoundariesPrecise(ix, b, files, false)
 		threshold := 0
 		if v := argString(args, "threshold"); v != "" {
 			n, err := atoiArg(v, threshold)
@@ -183,7 +186,13 @@ func (s *Server) handleGuardCheck(ctx context.Context, args map[string]any) (str
 		if argString(args, "format") == "sarif" {
 			return intel.RenderViolationsSARIF(violations, serverVersion), nil
 		}
-		return intel.RenderViolations(violations), nil
+		out := intel.RenderViolations(violations)
+		// A missing boundaries file is not a silent pass: surface the gap as a
+		// visible WARN ahead of the verdict.
+		if n := skipped["boundaries-not-configured"]; n > 0 {
+			out = fmt.Sprintf("WARN: no boundary rules configured (.kern/boundaries.json not found) — architecture guard NOT enforced; %d files unchecked\n%s", n, out)
+		}
+		return out, nil
 
 	}
 }

@@ -218,7 +218,7 @@ func TestNewRecord(t *testing.T) {
 // TestLifecycleSequenceRecordsNewActionTypes verifies the full lifecycle — task
 // start, tool call, file change, verification start/complete, PR creation, and
 // production outcome — is persisted and retrievable in chronological order,
-// including the Phase 16.1 additive action types.
+// including the additive action types.
 func TestLifecycleSequenceRecordsNewActionTypes(t *testing.T) {
 	r := New(t.TempDir())
 	now := time.Now()

@@ -91,7 +91,7 @@ func TestHelper(t *testing.T) {
 	return dir
 }
 
-// TestPhase15LoopEndToEnd runs the Phase 15 closed loop (Intent → Plan → Code →
+// TestPhase15LoopEndToEnd runs the closed loop (Intent → Plan → Code →
 // Verify → Deploy → Observe → Learn) against a tiny fixture with a real
 // worktree, verification, approval gate and memory store, and asserts the
 // outcome is learned back into memory.
@@ -203,7 +203,7 @@ func TestLearnWritesEpisodicAndLesson(t *testing.T) {
 func TestPhase15LoopEndToEnd(t *testing.T) {
 	root := loopFixture(t)
 
-	// Phase 9: production mutation is disabled by default (KERN_ALLOW_DEPLOY).
+	// Production mutation is disabled by default (KERN_ALLOW_DEPLOY).
 	// This test exercises the deploy stage, so it must opt in explicitly.
 	t.Setenv("KERN_ALLOW_DEPLOY", "1")
 
@@ -303,6 +303,74 @@ func TestPhase15LoopEndToEnd(t *testing.T) {
 	for _, st := range res0.Stages {
 		if (st.Stage == stageCode || st.Stage == stageDeploy || st.Stage == stageProtect || st.Stage == stageLearn) && st.Status != "skipped:below-autonomy" {
 			t.Fatalf("L0 stage %q status = %q, want skipped", st.Stage, st.Status)
+		}
+	}
+}
+
+// TestL5ProofGate verifies the loop enforces the L5 proof gate at runtime: at
+// L5 autonomy with a nil (or incomplete) proof map, write/act stages (code,
+// deploy, protect) are skipped and the run fails closed; once all required
+// proofs are satisfied they are permitted. This closes the prior gap where
+// the L5 proof machinery (AllowsStageWithProofs/L5Proofs) was dead code.
+func TestL5ProofGate(t *testing.T) {
+	root := loopFixture(t)
+
+	// 1) L5 with nil proofs: write stages must be skipped (fail closed).
+	lp, err := NewLoop(LoopConfig{Root: root, Level: L5, Mem: memory.NewMemoryStore(t.TempDir()), Service: "checkout", Source: runtime.NewStore()})
+	if err != nil {
+		t.Fatalf("NewLoop: %v", err)
+	}
+	res, err := lp.Run("make a low-risk change", nil)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	for _, st := range res.Stages {
+		switch st.Stage {
+		case stageCode, stageDeploy, stageProtect:
+			if st.Status != "skipped:below-autonomy" {
+				t.Fatalf("L5 with nil proofs: stage %q status = %q, want skipped:below-autonomy", st.Stage, st.Status)
+			}
+		}
+	}
+
+	// 2) L5 with ALL proofs satisfied: write stages must be allowed.
+	proofs := L5Proofs{}
+	for _, req := range RequiredL5Proofs() {
+		proofs[req] = true
+	}
+	lpFull, err := NewLoop(LoopConfig{Root: root, Level: L5, Proofs: proofs, Mem: memory.NewMemoryStore(t.TempDir()), Service: "checkout", Source: runtime.NewStore()})
+	if err != nil {
+		t.Fatalf("NewLoop: %v", err)
+	}
+	resFull, err := lpFull.Run("make a low-risk change", nil)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	for _, st := range resFull.Stages {
+		switch st.Stage {
+		case stageCode, stageDeploy, stageProtect:
+			if st.Status == "skipped:below-autonomy" {
+				t.Fatalf("L5 with full proofs: stage %q must not be skipped", st.Stage)
+			}
+		}
+	}
+
+	// 3) L5 with a PARTIAL proof map: still fails closed (any missing proof).
+	partial := L5Proofs{ProofPolicy: true, ProofVerification: true}
+	lpPart, err := NewLoop(LoopConfig{Root: root, Level: L5, Proofs: partial, Mem: memory.NewMemoryStore(t.TempDir()), Service: "checkout", Source: runtime.NewStore()})
+	if err != nil {
+		t.Fatalf("NewLoop: %v", err)
+	}
+	resPart, err := lpPart.Run("make a low-risk change", nil)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	for _, st := range resPart.Stages {
+		switch st.Stage {
+		case stageCode, stageDeploy, stageProtect:
+			if st.Status != "skipped:below-autonomy" {
+				t.Fatalf("L5 with partial proofs: stage %q status = %q, want skipped", st.Stage, st.Status)
+			}
 		}
 	}
 }

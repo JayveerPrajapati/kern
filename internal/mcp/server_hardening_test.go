@@ -113,6 +113,10 @@ func TestProgressNotificationsBeforeResult(t *testing.T) {
 	s := NewServer(in, buf)
 	// Test root is a temp dir outside the process cwd; confine to everything.
 	s.roots = []string{"/"}
+	// Disable the fail-closed-to-cwd KERN_MCP_ROOTS gate for this harness (see
+	// serveMany); the gate's own tests exercise it explicitly.
+	s.gate = nil
+	s.preTool = nil
 	if err := s.Serve(); err != nil {
 		t.Fatalf("Serve: %v", err)
 	}

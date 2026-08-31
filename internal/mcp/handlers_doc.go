@@ -165,9 +165,15 @@ func (s *Server) handleCommitmsg(ctx context.Context, args map[string]any) (stri
 		var out []byte
 		var err error
 		staged := argString(args, "staged")
+		rng := argString(args, "range")
+		// A crafted range starting with "-" would be parsed by git as an
+		// option rather than a revision range: reject it fail-closed.
+		if rng != "" && strings.HasPrefix(rng, "-") {
+			return "", fmt.Errorf("invalid range %q: must not start with -", rng)
+		}
 		if staged == "true" || staged == "1" {
 			out, err = exec.Command("git", "-C", root, "diff", "--cached").Output()
-		} else if rng := argString(args, "range"); rng != "" {
+		} else if rng != "" {
 			out, err = exec.Command("git", "-C", root, "diff", "--unified=0", rng).Output()
 		} else {
 			out, err = exec.Command("git", "-C", root, "diff", "HEAD").Output()

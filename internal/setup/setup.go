@@ -1,5 +1,4 @@
 // Package setup wires kern into code agents with a single command.
-//
 // It writes the standard project-level .mcp.json (auto-discovered by Claude
 // Code, Cursor, Windsurf and most MCP-compatible agents), the opencode
 // project/global MCP config, the opencode plugin, and the AGENTS.md usage
@@ -64,6 +63,17 @@ func CLIBin() string {
 	return cliName()
 }
 
+// PortableMCPCommand returns the command that agent configs should run to
+// start kern-mcp. Prefer a PATH-resolved bare "kern-mcp" (the agent re-resolves
+// it against PATH at launch, so it works on any machine and survives relocation);
+// fall back to the sibling absolute path only when kern-mcp is not on PATH.
+func PortableMCPCommand() string {
+	if p, err := exec.LookPath(mcpName()); err == nil && p != "" {
+		return mcpName()
+	}
+	return Bin()
+}
+
 // GlobalMCPCommand returns the command that GLOBAL agent configs should run to
 // start kern-mcp. Global configs must survive an upgrade or a change of install
 // location, so an absolute os.Executable()-derived path is fragile: if the user
@@ -73,11 +83,16 @@ func CLIBin() string {
 // resolves it against PATH at launch time, so it always points at whatever kern
 // is currently installed. Only fall back to the sibling absolute path when
 // kern-mcp is not on PATH at all.
-func GlobalMCPCommand() string {
-	if p, err := exec.LookPath(mcpName()); err == nil && p != "" {
-		return mcpName()
+func GlobalMCPCommand() string { return PortableMCPCommand() }
+
+// PortableCLICommand returns the portable kern CLI command for agent hooks.
+// Prefer a PATH-resolved bare "kern"; fall back to the sibling absolute path
+// only when kern is not on PATH.
+func PortableCLICommand() string {
+	if p, err := exec.LookPath(cliName()); err == nil && p != "" {
+		return cliName()
 	}
-	return Bin()
+	return CLIBin()
 }
 
 // adapter describes a JSON-config agent: where its config lives, which key
@@ -87,22 +102,27 @@ type adapter struct {
 	path  func(root string) string
 	key   string
 	entry func(bin string) map[string]any
+	// scope marks where the config lives: "global" (home/global config dir,
+	// safe to pre-wire for ALL agents regardless of detection — an agent
+	// installed later is already wired) or "repo" (project-root file, only
+	// wired for detected/present agents).
+	scope string
 }
 
 // adapters is the registry of JSON-config agents supported by setup.
 var adapters = []adapter{
-	{name: "continue", path: globalConfig("continue", "config.json"), key: "mcpServers", entry: stdioEntry},
-	{name: "windsurf", path: globalConfig(".codeium", "windsurf", "mcp_config.json"), key: "mcpServers", entry: stdioEntry},
-	{name: "zed", path: globalConfig("zed", "settings.json"), key: "context_servers", entry: cmdEntry},
-	{name: "vscode", path: projectConfig(".vscode", "mcp.json"), key: "servers", entry: stdioEntry},
-	{name: "cursor", path: projectConfig(".cursor", "mcp.json"), key: "mcpServers", entry: stdioEntry},
-	{name: "gemini", path: projectConfig(".gemini", "settings.json"), key: "mcpServers", entry: stdioEntry},
-	{name: "antigravity", path: globalConfig(".gemini", "antigravity", "mcp_config.json"), key: "mcpServers", entry: stdioEntry},
-	{name: "qwen", path: homeConfig(".qwen", "settings.json"), key: "mcpServers", entry: stdioEntry},
-	{name: "qoder", path: homeConfig(".qoder", "mcp.json"), key: "mcpServers", entry: stdioEntry},
-	{name: "kiro", path: projectConfig(".kiro", "settings", "mcp.json"), key: "mcpServers", entry: stdioEntry},
-	{name: "copilot", path: projectConfig(".vscode", "mcp.json"), key: "servers", entry: stdioEntry},
-	{name: "copilot-cli", path: globalConfig(".copilot", "mcp-config.json"), key: "mcpServers", entry: stdioEntry},
+	{name: "continue", path: globalConfig("continue", "config.json"), key: "mcpServers", entry: stdioEntry, scope: "global"},
+	{name: "windsurf", path: globalConfig(".codeium", "windsurf", "mcp_config.json"), key: "mcpServers", entry: stdioEntry, scope: "global"},
+	{name: "zed", path: globalConfig("zed", "settings.json"), key: "context_servers", entry: cmdEntry, scope: "global"},
+	{name: "vscode", path: projectConfig(".vscode", "mcp.json"), key: "servers", entry: stdioEntry, scope: "repo"},
+	{name: "cursor", path: homeConfig(".cursor", "mcp.json"), key: "mcpServers", entry: stdioEntry, scope: "global"},
+	{name: "gemini", path: homeConfig(".gemini", "settings.json"), key: "mcpServers", entry: stdioEntry, scope: "global"},
+	{name: "antigravity", path: globalConfig(".gemini", "antigravity", "mcp_config.json"), key: "mcpServers", entry: stdioEntry, scope: "global"},
+	{name: "qwen", path: homeConfig(".qwen", "settings.json"), key: "mcpServers", entry: stdioEntry, scope: "global"},
+	{name: "qoder", path: homeConfig(".qoder", "mcp.json"), key: "mcpServers", entry: stdioEntry, scope: "global"},
+	{name: "kiro", path: homeConfig(".kiro", "settings", "mcp.json"), key: "mcpServers", entry: stdioEntry, scope: "global"},
+	{name: "copilot", path: projectConfig(".vscode", "mcp.json"), key: "servers", entry: stdioEntry, scope: "repo"},
+	{name: "copilot-cli", path: globalConfig(".copilot", "mcp-config.json"), key: "mcpServers", entry: stdioEntry, scope: "global"},
 }
 
 func stdioEntry(bin string) map[string]any {
@@ -130,6 +150,10 @@ func Check(root string) []Status {
 	out = append(out, fileStatus(filepath.Join(root, ".claude", "settings.json"), "claude hooks"))
 	out = append(out, fileStatus(filepath.Join(root, ".gemini", "settings.json"), "gemini hooks"))
 	out = append(out, fileStatus(filepath.Join(root, ".cursor", "rules", "kern-hooks.mdc"), "cursor rule"))
+	out = append(out, fileStatus(filepath.Join(root, ".cursor", "hooks.json"), "cursor hooks"))
+	out = append(out, fileStatus(filepath.Join(root, ".github", "hooks", "kern-pretooluse.json"), "copilot hooks"))
+	out = append(out, fileStatus(filepath.Join(homeConfig(".codex", "hooks.json")("")), "codex hooks"))
+	out = append(out, fileStatus(filepath.Join(homeConfig(".qoder", "settings.json")("")), "qoder hooks"))
 
 	// Report detected agents and their instruction file status
 	detected := DetectAgents(root)
@@ -159,57 +183,114 @@ func Check(root string) []Status {
 // every detected agent that has an instruction file, regardless of the
 // agents list — this ensures kern-first enforcement across all present
 // platforms without per-agent configuration.
+// GLOBAL-scoped configs (user-scope hooks, home/global MCP adapters) are
+// pre-wired for EVERY agent regardless of detection: an agent installed
+// later (or used from a different machine) is already wired with no
+// re-run. Detection only gates per-repo files (.mcp.json, opencode.json,
+// cursor rules, vscode/copilot adapters, instruction files).
 func Wire(root string, agents []string, detect bool) []Status {
 	detected := DetectAgents(root)
+	explicit := agents // snapshot: explicit --agents list, if any
 	if detect && len(agents) == 0 {
-		if len(detected) == 0 {
-			return []Status{{Agent: "detect", Note: "no agents detected — nothing to wire"}}
-		}
 		agents = detected
 	}
-	bin := Bin()
-	enabled := func(name string) bool {
-		if len(agents) == 0 {
-			return true
-		}
-		for _, a := range agents {
-			if a == name {
-				return true
+	bin := PortableMCPCommand()
+	// repoEnabled gates project-scope files: explicit list wins; else
+	// detected agents (when detect); else all.
+	repoEnabled := func(name string) bool {
+		if len(explicit) > 0 {
+			for _, a := range explicit {
+				if a == name {
+					return true
+				}
 			}
+			return false
 		}
-		return false
+		if detect {
+			for _, a := range detected {
+				if a == name {
+					return true
+				}
+			}
+			return false
+		}
+		return true
+	}
+	// globalEnabled gates user-scope configs: explicit list wins; else ALL
+	// agents — never detection-gated, so an agent installed later is already
+	// wired globally.
+	globalEnabled := func(name string) bool {
+		if len(explicit) > 0 {
+			for _, a := range explicit {
+				if a == name {
+					return true
+				}
+			}
+			return false
+		}
+		return true
 	}
 	var out []Status
-	if enabled("mcp") {
-		out = append(out, wireMCPJSON(root, bin))
-	}
+	// .mcp.json is the universal auto-discovered MCP file — always written.
+	out = append(out, wireMCPJSON(root, bin))
 	// AGENTS.md is the universal instruction file — every detected agent
 	// reads it natively (Claude, Codex, Gemini, Continue, Windsurf, Zed,
 	// Qwen, Qoder, Kiro, opencode). Write it unconditionally so the
 	// kern-first policy reaches all agents regardless of which are wired.
 	out = append(out, wireAgentRules(root))
-	if enabled("opencode") {
-		out = append(out, wireOpencode(root, bin))
+	if repoEnabled("opencode") {
+		out = append(out, wireOpencode(root))
 		out = append(out, wirePlugin(root))
+	}
+	if globalEnabled("opencode") {
 		out = append(out, wireGlobal(GlobalMCPCommand()))
 	}
-	if enabled("claude") {
+	if globalEnabled("claude") {
 		out = append(out, wireClaude(bin))
-		out = append(out, wireClaudeHooks(root, CLIBin()))
+		out = append(out, wireClaudeHooks(PortableCLICommand()))
 	}
-	if enabled("codex") {
+	if globalEnabled("codex") {
 		out = append(out, wireCodex(bin))
+		out = append(out, wireCodexHooks(root))
 	}
 	for _, a := range adapters {
-		if enabled(a.name) {
+		gate := repoEnabled
+		if a.scope == "global" {
+			gate = globalEnabled
+		}
+		if gate(a.name) {
 			out = append(out, wireAdapter(a, root, bin))
 		}
+		// Instruction files are per-repo; only wire for present/detected
+		// agents, independent of the adapter's config scope.
+		if repoEnabled(a.name) {
+			switch a.name {
+			case "continue":
+				out = append(out, wireContinueInstructions(root))
+			case "windsurf":
+				out = append(out, wireWindsurfInstructions(root))
+			case "kiro":
+				out = append(out, wireKiroInstructions(root))
+			}
+		}
 	}
-	if enabled("gemini") {
-		out = append(out, wireGeminiHooks(root, CLIBin()))
+	if globalEnabled("gemini") {
+		out = append(out, wireGeminiHooks(PortableCLICommand()))
 	}
-	if enabled("cursor") {
+	if repoEnabled("cursor") {
 		out = append(out, wireCursorRules(root))
+	}
+	if globalEnabled("cursor") {
+		out = append(out, wireCursorHooks())
+	}
+	if globalEnabled("copilot") {
+		out = append(out, wireCopilotHooks())
+	}
+	if globalEnabled("qwen") {
+		out = append(out, wireQwenHooks(root))
+	}
+	if globalEnabled("qoder") {
+		out = append(out, wireQoderHooks(root))
 	}
 	out = append(out, gitignoreGenerated(root))
 

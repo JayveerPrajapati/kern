@@ -6,22 +6,19 @@ import "github.com/JayveerPrajapati/kern/internal/domain"
 // plus a recommended level. It is advisory only: the configured level remains
 // the HARD ceiling (AllowsStage / AllowsStageWithProofs). The score informs and
 // recommends but never grants more autonomy than the config permits.
-//
 // It combines five base dimensions, each in [0.0, 1.0]:
-//   - Confidence:         how confident the run is in its outcome.
-//   - RiskTolerance:      how much risk is tolerated (higher = more tolerant).
-//   - PolicyCoverage:     how much of the relevant policy surface was evaluated.
-//   - VerificationCoverage: how many verification gates passed.
-//   - SafetyBudgetRatio:  remaining budget headroom (1.0 = unused, 0.0 = exhausted).
-//
-// It also carries the three Phase 20.1 context dimensions the spec requires
+// - Confidence:         how confident the run is in its outcome.
+// - RiskTolerance:      how much risk is tolerated (higher = more tolerant).
+// - PolicyCoverage:     how much of the relevant policy surface was evaluated.
+// - VerificationCoverage: how many verification gates passed.
+// - SafetyBudgetRatio:  remaining budget headroom (1.0 = unused, 0.0 = exhausted).
+// It also carries the three context dimensions the spec requires
 // (reversibility, environment, permissions). These are advisory and, unlike
 // the five base dimensions, are only blended into the score when explicitly set
 // (> 0): a zero value means "not evaluated" and leaves the score unchanged, so
 // existing callers that only populate the five base dimensions are fully
 // backward compatible. When any of the three is set, the base weights are
 // renormalized to keep the total at 1.0.
-//
 // When HistoricalSuccess > 0 it is blended into Score() as a lightly-weighted
 // evidence dimension (see Score), representing evidence-based success from
 // recorded runs.
@@ -32,22 +29,22 @@ type AutonomyScore struct {
 	VerificationCoverage float64
 	SafetyBudgetRatio    float64
 	// Reversibility is how reversible the operation is (1.0 = fully
-	// reversible / rollback-able, 0.0 = irreversible). Phase 20.1. Only
+	// reversible / rollback-able, 0.0 = irreversible).. Only
 	// blended into the score when > 0 (backward compatible).
 	Reversibility float64
 	// Environment is how safe the target environment is (1.0 = development /
-	// low-risk, 0.0 = production / high-risk). Phase 20.1. Only blended in
+	// low-risk, 0.0 = production / high-risk).. Only blended in
 	// when > 0.
 	Environment float64
 	// Permissions is the fraction of required permissions the agent holds
-	// (1.0 = fully authorized, 0.0 = none). Phase 20.1. Only blended in
+	// (1.0 = fully authorized, 0.0 = none).. Only blended in
 	// when > 0.
 	Permissions float64
 	// HistoricalSuccess is an evidence-based success rate in [0.0, 1.0] from
 	// recorded past runs (0 = no history recorded). It is advisory only: when
 	// set it may RAISE the RECOMMENDED level (RecommendedLevel), but the
 	// configured level remains the HARD ceiling via AllowedByScore — recorded
-	// evidence never widens what the config permits, exactly as Phase 20.5
+	// evidence never widens what the config permits, exactly as
 	// requires. JSON-serializable; 0 means no history.
 	HistoricalSuccess float64
 }
@@ -60,7 +57,7 @@ const (
 	scoreWeightPolicyCoverage       = 0.15
 	scoreWeightVerificationCoverage = 0.15
 	scoreWeightSafetyBudgetRatio    = 0.20
-	// scoreWeightReversibility / Environment / Permissions are the Phase 20.1
+	// scoreWeightReversibility / Environment / Permissions are the
 	// context dimensions. They are only consumed when the corresponding field
 	// is set (> 0); when consumed, the base weights are renormalized so the
 	// total still sums to 1.0.
@@ -81,14 +78,13 @@ const (
 // HistoricalSuccess > 0 it is blended in as an evidence dimension with weight
 // scoreWeightHistoricalSuccess, and the other contributions are scaled down so
 // the total still sums to 1.0.
-//
-// The Phase 20.1 context dimensions (Reversibility, Environment, Permissions)
+// The context dimensions (Reversibility, Environment, Permissions)
 // are only consumed when set (> 0); when any is set the base weights are
 // renormalized by (1 - sum(set context weights)) so the total stays 1.0. This
 // keeps callers that only populate the five base dimensions fully backward
 // compatible.
 func (a AutonomyScore) Score() float64 {
-	// Determine which Phase 20.1 context dimensions are present.
+	// Determine which context dimensions are present.
 	contextWeight := 0.0
 	if a.Reversibility > 0 {
 		contextWeight += scoreWeightReversibility
@@ -130,7 +126,7 @@ func (a AutonomyScore) Score() float64 {
 }
 
 // WithHistoricalSuccess returns a copy of a with the evidence-based historical
-// success rate recorded and blended into the score (Phase 20.5). The rate is
+// success rate recorded and blended into the score. The rate is
 // clamped to [0.0, 1.0]; window records how many past runs the evidence covers
 // (advisory metadata, not used in the score). The returned score may raise the
 // RECOMMENDED level but never raises the configured level, which stays the hard
@@ -168,7 +164,7 @@ func (a AutonomyScore) RecommendedLevel() Autonomy {
 // AutonomyScoreFromRisk derives an AutonomyScore from a risk level. A HIGH-risk
 // change lowers confidence/verification coverage and raises the needed approval,
 // so it recommends a LOWER autonomy level than a low-risk change. It also seeds
-// the Phase 20.1 context dimensions from the risk level: higher-risk changes
+// the context dimensions from the risk level: higher-risk changes
 // are less reversible, run in a more restricted environment, and need fuller
 // permission coverage before higher autonomy is recommended.
 func AutonomyScoreFromRisk(level domain.RiskLevel) AutonomyScore {

@@ -17,7 +17,7 @@ import (
 func TestLoopPublishesEvents(t *testing.T) {
 	root := loopFixture(t)
 
-	// Phase 9: production mutation is disabled by default (KERN_ALLOW_DEPLOY).
+	// Production mutation is disabled by default (KERN_ALLOW_DEPLOY).
 	// This test exercises the deploy stage, so it must opt in explicitly.
 	t.Setenv("KERN_ALLOW_DEPLOY", "1")
 

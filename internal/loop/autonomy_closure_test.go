@@ -8,7 +8,7 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/memory"
 )
 
-// TestPauseTriggerHookPauses verifies Phase 20.4: a LoopConfig.PauseTrigger can
+// TestPauseTriggerHookPauses verifies a LoopConfig.PauseTrigger can
 // pause the run with a caller-chosen reason on a given stage, while a nil
 // PauseTrigger never triggers (backward compatible).
 func TestPauseTriggerHookPauses(t *testing.T) {
@@ -55,7 +55,7 @@ func TestPauseTriggerHookPauses(t *testing.T) {
 	}
 }
 
-// TestTriggerHelpers verifies each Phase 20.4 deterministic trigger helper
+// TestTriggerHelpers verifies each deterministic trigger helper
 // returns the expected bool for representative true and false cases.
 func TestTriggerHelpers(t *testing.T) {
 	// ScopeExpanded: true when newScope is not a prefix of originalScope.
@@ -127,8 +127,8 @@ func TestTriggerHelpers(t *testing.T) {
 	}
 }
 
-// TestHistoricalSuccessRaisesRecommendedLevel verifies Phase 20.5: recorded
-// TestHistoricalSuccessRaisesRecommendedLevel verifies Phase 20.5: recorded
+// TestHistoricalSuccessRaisesRecommendedLevel verifies recorded
+// TestHistoricalSuccessRaisesRecommendedLevel verifies recorded
 // historical success is blended into the score, can raise the RECOMMENDED
 // level, and the configured level remains the hard ceiling via AllowedByScore.
 func TestHistoricalSuccessRaisesRecommendedLevel(t *testing.T) {
@@ -181,7 +181,7 @@ func TestHistoricalSuccessRaisesRecommendedLevel(t *testing.T) {
 	}
 }
 
-// TestContextDimensionsInfluenceScore verifies the Phase 20.1 context
+// TestContextDimensionsInfluenceScore verifies the context
 // dimensions (reversibility, environment, permissions) are part of the score:
 // a score that evaluates them (set > 0) differs from the identical base score
 // without them, and higher reversibility/environment/permissions raise the

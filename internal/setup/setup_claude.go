@@ -13,7 +13,7 @@ import (
 func wireClaude(bin string) Status {
 	path, err := exec.LookPath("claude")
 	if err != nil {
-		return Status{Agent: "claude", Note: "claude not on PATH — project .mcp.json still covers Claude Code"}
+		return Status{Agent: "claude", Skipped: true, Note: "claude not on PATH — project .mcp.json still covers Claude Code"}
 	}
 	cmd := exec.Command(path, "mcp", "add", "kern", "--", bin)
 	if out, err := cmd.CombinedOutput(); err != nil {
@@ -40,14 +40,29 @@ func hookCommand(bin, sub string) string {
 	return bin + ` hook ` + sub + ` "$CLAUDE_PROJECT_DIR"`
 }
 
-// wireClaudeHooks registers kern's PostToolUse and UserPromptSubmit hooks in
-// .claude/settings.json. The PostToolUse hook compresses oversized Bash/Read/
-// Grep results and records edits + failures into project memory; the
-// UserPromptSubmit hook captures substantive user prompts. Existing hooks are
-// preserved; the kern group is merged in only when absent.
-func wireClaudeHooks(root, bin string) Status {
-	path := filepath.Join(root, ".claude", "settings.json")
+// wireClaudeHooks registers kern's PreToolUse, PostToolUse and UserPromptSubmit
+// hooks in ~/.claude/settings.json (global user scope). The PreToolUse hook
+// blocks built-in Read/Grep/Glob/Bash calls via the kern-guard script (hard
+// block + suggest); the PostToolUse hook compresses oversized Bash/Read/Grep
+// results and records edits + failures into project memory; the
+// UserPromptSubmit hook captures substantive user prompts. Global scope means
+// hooks fire in EVERY project without per-repo setup. Existing hooks are
+// preserved; stale kern hooks are replaced on re-run (overwrite-always).
+func wireClaudeHooks(bin string) Status {
+	guardPath, err := writeGuardScriptGlobal()
+	if err != nil {
+		return Status{Agent: "claude-hooks", Installed: false, Path: filepath.Join(globalHomeDir(), ".claude", "settings.json"), Note: err.Error()}
+	}
+	path := filepath.Join(globalHomeDir(), ".claude", "settings.json")
 	groups := map[string]any{
+		"PreToolUse": []any{
+			map[string]any{
+				"matcher": "Read|Grep|Glob|Bash",
+				"hooks": []any{
+					map[string]any{"type": "command", "command": guardPath},
+				},
+			},
+		},
 		"PostToolUse": []any{
 			map[string]any{
 				"matcher": "Edit|Write|Bash|Read|Grep",
@@ -67,14 +82,16 @@ func wireClaudeHooks(root, bin string) Status {
 	if err := mergeHookGroups(path, groups); err != nil {
 		return Status{Agent: "claude-hooks", Path: path, Note: err.Error()}
 	}
-	return Status{Agent: "claude-hooks", Installed: true, Path: path, Note: "claude PostToolUse/UserPromptSubmit hooks registered"}
+	return Status{Agent: "claude-hooks", Installed: true, Path: path, Note: "claude PreToolUse/PostToolUse/UserPromptSubmit hooks registered"}
 }
 
 // mergeHookGroups merges hook event groups into a settings JSON file (Claude
 // Code and Gemini CLI share the same shape: settings.hooks.<event>[]), creating
 // the file when absent and always preserving unrelated keys (mcpServers, other
-// hooks). A group already containing a "kern hook" command is left untouched,
-// so re-running setup never duplicates hooks.
+// hooks). Overwrite-always: on every run, any existing kern-owned hook groups
+// (identified by hasKernHook) are removed from each event and the fresh kern
+// groups re-inserted, so an upgrade that changes the hook command always
+// replaces the stale hook rather than skipping when a kern hook is detected.
 func mergeHookGroups(path string, groups map[string]any) error {
 	var m map[string]any
 	data, err := os.ReadFile(path)
@@ -98,15 +115,14 @@ func mergeHookGroups(path string, groups map[string]any) error {
 	changed := false
 	for event, group := range groups {
 		existing, _ := hooks[event].([]any)
-		if hasKernHook(existing) {
-			continue
-		}
-		// groups values are the matcher-group arrays themselves; append each
-		// group so the JSON shape stays hooks.<event>[] — not doubly nested.
+		// Overwrite-always: strip any kern-owned groups first, then append the
+		// fresh ones. This replaces stale hooks from a prior setup run instead
+		// of skipping when a kern hook is already present.
+		filtered := filterKernHooks(existing)
 		for _, g := range group.([]any) {
-			existing = append(existing, g)
+			filtered = append(filtered, g)
 		}
-		hooks[event] = existing
+		hooks[event] = filtered
 		changed = true
 	}
 	if !changed {
@@ -123,15 +139,30 @@ func mergeHookGroups(path string, groups map[string]any) error {
 	return os.WriteFile(path, append(data, '\n'), 0o644)
 }
 
+// filterKernHooks returns groups with any kern-owned hook groups removed. A
+// group is kern-owned when any of its hook commands contains " hook " (kern
+// hook subcommands) or "kern-guard.sh" (the PreToolUse guard script). Used by
+// mergeHookGroups to strip stale kern hooks before re-inserting fresh ones.
+func filterKernHooks(groups []any) []any {
+	out := make([]any, 0, len(groups))
+	for _, g := range groups {
+		if !hasKernHook([]any{g}) {
+			out = append(out, g)
+		}
+	}
+	return out
+}
+
 // hasKernHook reports whether any group in an event's hook groups already
-// contains a kern hook command.
+// contains a kern hook command (either a "kern <sub> hook ..." command or the
+// kern-guard.sh PreToolUse guard).
 func hasKernHook(groups []any) bool {
 	for _, g := range groups {
 		gm, _ := g.(map[string]any)
 		hs, _ := gm["hooks"].([]any)
 		for _, h := range hs {
 			hm, _ := h.(map[string]any)
-			if cmd, _ := hm["command"].(string); strings.Contains(cmd, " hook ") {
+			if cmd, _ := hm["command"].(string); strings.Contains(cmd, " hook ") || strings.Contains(cmd, "kern-guard.sh") {
 				return true
 			}
 		}

@@ -3,14 +3,12 @@
 // provides (see .opencode/plugins/kern.ts). Each agent's hook system has its
 // own JSON framing, so the package parses the per-agent payloads and emits the
 // agent-specific response:
-//
-//   - Claude Code: PostToolUse / UserPromptSubmit, configured in
-//     .claude/settings.json under "hooks". A PostToolUse handler may replace
-//     the tool's result via "updatedToolOutput".
-//   - Gemini CLI: AfterTool / BeforeAgent, configured in .gemini/settings.json
-//     (note: Gemini uses AfterTool, not PostToolUse). A handler that exits 2
-//     with text on stderr hides the real tool result and substitutes it.
-//
+// - Claude Code: PostToolUse / UserPromptSubmit, configured in
+// .claude/settings.json under "hooks". A PostToolUse handler may replace
+// the tool's result via "updatedToolOutput".
+// - Gemini CLI: AfterTool / BeforeAgent, configured in .gemini/settings.json
+// (note: Gemini uses AfterTool, not PostToolUse). A handler that exits 2
+// with text on stderr hides the real tool result and substitutes it.
 // Every handler is best-effort: a failure to parse, compress or remember never
 // breaks the agent's tool call. The kern CLI exposes these via
 // `kern hook <claude-post|claude-prompt|gemini-after|gemini-prompt> [root]`.

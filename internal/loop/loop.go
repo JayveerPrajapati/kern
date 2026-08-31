@@ -33,8 +33,13 @@ type StepFunc func(stage, intent string, wt *execution.Worktree, res *Result) (s
 
 // LoopConfig configures a closed loop instance.
 type LoopConfig struct {
-	Root          string                       // repository root
-	Level         Autonomy                     // autonomy gate (L0-L5)
+	Root  string   // repository root
+	Level Autonomy // autonomy gate (L0-L5)
+	// Proofs are the L5 proof outcomes (policy, verification, rollback,
+	// monitoring, audit, confidence) that must ALL hold before L5 autonomy
+	// permits write/act stages. A nil map fails closed at L5: write stages are
+	// denied until every proof is explicitly confirmed. Below L5 it is ignored.
+	Proofs        L5Proofs                     // L5 autonomy proof gate (nil fails closed)
 	Service       string                       // service observed after deploy
 	Since         time.Time                    // observe window start (0 → now - ObserveWindow)
 	ObserveWindow time.Duration                // default observe lookback when Since is zero
@@ -91,7 +96,7 @@ type LoopConfig struct {
 	// behavior). Wire it to gate high-risk intents behind the MaxRiskLevel ceiling.
 	AssessRisk func(intent string) domain.RiskLevel
 
-	// PauseTrigger optionally lets a caller detect ANY Phase 20.4 pause condition
+	// PauseTrigger optionally lets a caller detect ANY pause condition
 	// (scope expansion, confidence drop, unexpected file/tool, policy change,
 	// verification regression) and pause the run. It is called after every stage
 	// completes (and once before the first stage, with an empty stage) and is
@@ -121,7 +126,7 @@ type Result struct {
 	Remembered      []domain.Memory // memories recalled in the remember stage
 	Protected       bool            // true when the protect/approval gate ran and granted
 	Learned         *domain.Memory
-	BudgetPaused    bool // true when the safety budget was exceeded and the loop PAUSED (kept for back-compat)
+	BudgetPaused    bool   // true when the safety budget was exceeded and the loop PAUSED (kept for back-compat)
 	Paused          bool   // true when the loop PAUSED for any reason
 	PauseReason     string // reason the loop paused: "budget", "risk_exceeded", "approval", or any reason returned by LoopConfig.PauseTrigger (e.g. "scope_change", "confidence_drop", "unexpected_file", "unexpected_tool", "policy_change", "verification_regression"); empty when not paused
 }
@@ -248,154 +253,23 @@ func (l *Loop) Run(intent string, step StepFunc) (*Result, error) {
 		}
 	}
 
-	// Safety budget: default to the conservative limits when the caller did
-	// not wire one. It is enforced (TrackToolCall + Exceeded) after every
-	// stage below.
-	if l.cfg.Budget == nil {
-		d := domain.DefaultSafetyBudget()
-		l.cfg.Budget = &d
-	}
-
-	wt, err := execution.NewWorktree(l.cfg.Root)
+	wt, err := l.prepareWorktree()
 	if err != nil {
-		return nil, fmt.Errorf("loop: worktree: %w", err)
+		return nil, err
 	}
 	defer wt.Cleanup()
 
-	// High-risk escalation (Phase 20.4): if the intent's assessed risk exceeds
-	// the configured ceiling, PAUSE before running any stages instead of
-	// proceeding to write stages. With no AssessRisk wired, intents default to
-	// RiskLow and never trip the ceiling (preserves prior behavior).
-	if l.cfg.AssessRisk != nil {
-		ceiling := l.cfg.MaxRiskLevel
-		if ceiling == "" {
-			ceiling = domain.RiskHigh
-		}
-		if riskRank(l.cfg.AssessRisk(intent)) > riskRank(ceiling) {
-			l.pause(res, "risk_exceeded")
-			return res, nil
-		}
-	}
-
-	// Phase 20.4: run the generalized pause-trigger hook ONCE before the first
-	// stage (stage is "") so a pre-run condition (e.g. a policy change detected
-	// at startup) can pause early. Nil PauseTrigger never triggers.
-	if l.cfg.PauseTrigger != nil {
-		if reason, ok := l.cfg.PauseTrigger(res, ""); ok {
-			l.pause(res, reason)
-			return res, nil
-		}
+	if paused, _ := l.preflight(intent, res); paused {
+		return res, nil
 	}
 
 	for _, st := range []string{stageIntent, stageRemember, stagePlan, stageCode, stageVerify, stageProtect, stageDeploy, stageObserve, stageLearn} {
-		if !l.cfg.Level.AllowsStage(st) {
+		if !l.cfg.Level.AllowsStageWithProofs(st, l.cfg.Proofs) {
 			res.Stages = append(res.Stages, StageResult{Stage: st, Status: "skipped:below-autonomy"})
 			continue
 		}
 
-		var out string
-		var err error
-		switch st {
-		case stageRemember:
-			// Recall engineering memory relevant to the intent (read-only).
-			if l.cfg.Mem != nil {
-				mems, merr := l.cfg.Mem.Recall(memory.Query{Text: intent, Limit: 5})
-				if merr == nil && len(mems) > 0 {
-					parts := make([]string, 0, len(mems))
-					for _, m := range mems {
-						parts = append(parts, m.Content)
-					}
-					out = strings.Join(parts, "; ")
-					res.Remembered = mems
-				} else {
-					out = "no relevant memories"
-				}
-			} else {
-				out = "memory not configured"
-			}
-		case stageProtect:
-			// Invoke governance approval before deploy; fail-closed if denied.
-			// A nil workflow (cfg.Appr == nil) means no approval gate.
-			if l.cfg.Appr != nil {
-				ap, apprErr := l.requestApproval(intent)
-				if apprErr != nil {
-					err = apprErr
-					out = "approval denied: " + apprErr.Error()
-					// Approval required but not granted: the change cannot
-					// proceed. Reflect the pause on the result (the stage still
-					// errors so the run fails closed as before).
-					res.Paused = true
-					res.PauseReason = "approval"
-				} else {
-					out = "approved " + ap.ID
-					res.Protected = true
-				}
-			} else {
-				out = "governance not configured"
-			}
-		case stageCode:
-			out, err = step(st, intent, wt, res)
-			if err == nil {
-				if d, derr := wt.Diff(); derr == nil {
-					res.Diff = d
-				}
-			}
-		case stageVerify:
-			v := verification.NewEngine(wt.Dir()).Verify([]string{"build", "test", "security", "architecture", "dependency"})
-			out = v.Summary
-			if v.Verdict != verification.VerdictPass {
-				err = errors.New("verify: " + v.Summary)
-			}
-		case stageDeploy:
-			// Phase 9: production mutation is disabled by default. The deploy
-			// stage only runs when KERN_ALLOW_DEPLOY=1 is explicitly set, so
-			// a local console or loop run cannot accidentally trigger a
-			// production deployment without operator opt-in. Without it, the
-			// stage is skipped (not failed) so read-only loops still complete.
-			if os.Getenv("KERN_ALLOW_DEPLOY") != "1" {
-				out = "deploy skipped: KERN_ALLOW_DEPLOY not set (production mutation disabled by default)"
-				break
-			}
-			l.publish(eventbus.Event{Kind: eventbus.DeploymentStarted, Subject: l.cfg.Service, Payload: map[string]string{"service": l.cfg.Service}})
-			dres, derr := l.cfg.Deployer.Deploy(context.Background(), deployment.DeployRequest{
-				Service:     l.cfg.Service,
-				Version:     "loop",
-				ProjectRoot: l.cfg.Root,
-			})
-			if derr != nil {
-				err = fmt.Errorf("deploy: %w", derr)
-				res.Deployed = false
-				out = "deploy failed: " + derr.Error()
-				l.publish(eventbus.Event{Kind: eventbus.DeploymentFailed, Subject: l.cfg.Service, Payload: map[string]string{"service": l.cfg.Service, "error": derr.Error()}})
-				l.publish(eventbus.Event{Kind: eventbus.DeploymentRolledBack, Subject: l.cfg.Service, Payload: map[string]string{"service": l.cfg.Service, "error": derr.Error()}})
-			} else if !dres.Success {
-				err = errors.New("deploy failed: " + dres.Output)
-				res.Deployed = false
-				out = dres.Output
-				l.publish(eventbus.Event{Kind: eventbus.DeploymentFailed, Subject: l.cfg.Service, Payload: map[string]string{"service": l.cfg.Service, "error": dres.Output}})
-				l.publish(eventbus.Event{Kind: eventbus.DeploymentRolledBack, Subject: l.cfg.Service, Payload: map[string]string{"service": l.cfg.Service, "error": dres.Output}})
-			} else {
-				res.Deployed = true
-				out = dres.Output
-				l.publish(eventbus.Event{Kind: eventbus.DeploymentCompleted, Subject: l.cfg.Service, Payload: map[string]string{"service": l.cfg.Service, "version": dres.Version}})
-			}
-		case stageObserve:
-			res.ObservedHealthy = l.observeHealthy()
-			out = fmt.Sprintf("observed %v", res.ObservedHealthy)
-			l.publish(eventbus.Event{Kind: eventbus.ObserveHealthy, Subject: l.cfg.Service, Payload: map[string]string{"service": l.cfg.Service, "healthy": fmt.Sprintf("%v", res.ObservedHealthy)}})
-		case stageLearn:
-			m, lerr := l.learn(intent, res)
-			if lerr != nil {
-				err = lerr
-			} else {
-				res.Learned = &m
-				out = "learned " + m.ID
-				l.publish(eventbus.Event{Kind: eventbus.LessonRecorded, Subject: m.ID, Payload: map[string]string{"scope": l.cfg.Scope}})
-			}
-		default: // intent, plan
-			out, err = step(st, intent, wt, res)
-		}
-
+		out, err := l.runStage(st, intent, step, wt, res)
 		status := "ok"
 		if err != nil {
 			status = "error"
@@ -418,15 +292,9 @@ func (l *Loop) Run(intent string, step StepFunc) (*Result, error) {
 		}
 
 		// Safety-budget enforcement (fail-closed): after each stage, count the
-		// tool call and check the limits. If the budget is exceeded we PAUSE —
-		// stop executing any subsequent stages and return immediately. Token
-		// usage is tracked only when the wired agents surface it; here we track
-		// the tool-call counter, which drives the budget's Exceeded().
+		// tool call and PAUSE when a limit is exceeded (stop subsequent stages).
 		l.cfg.Budget.TrackToolCall()
 		if ex, why := l.cfg.Budget.Exceeded(); ex {
-			// PAUSE (fail-closed): stop executing subsequent stages and return.
-			// BudgetPaused stays true for back-compat; Paused/PauseReason also
-			// reflect the pause.
 			res.BudgetPaused = true
 			l.pause(res, "budget")
 			l.publish(eventbus.Event{
@@ -437,10 +305,7 @@ func (l *Loop) Run(intent string, step StepFunc) (*Result, error) {
 			return res, nil
 		}
 
-		// Phase 20.4: run the generalized pause-trigger hook after each stage so a
-		// caller can PAUSE on any non-budget condition (scope expansion, confidence
-		// drop, unexpected file/tool, policy change, verification regression). A
-		// non-empty reason pauses and returns. Nil PauseTrigger never triggers.
+		// Run the generalized pause-trigger hook after each stage.
 		if l.cfg.PauseTrigger != nil {
 			if reason, ok := l.cfg.PauseTrigger(res, st); ok {
 				l.pause(res, reason)
@@ -449,6 +314,167 @@ func (l *Loop) Run(intent string, step StepFunc) (*Result, error) {
 		}
 	}
 	return res, nil
+}
+
+// prepareWorktree wires the safety budget (defaulting to the conservative
+// limits when the caller did not wire one) and creates the sandbox worktree
+// the loop stages operate in. It is enforced (TrackToolCall + Exceeded) after
+// every stage.
+func (l *Loop) prepareWorktree() (*execution.Worktree, error) {
+	if l.cfg.Budget == nil {
+		d := domain.DefaultSafetyBudget()
+		l.cfg.Budget = &d
+	}
+
+	wt, err := execution.NewWorktree(l.cfg.Root)
+	if err != nil {
+		return nil, fmt.Errorf("loop: worktree: %w", err)
+	}
+	return wt, nil
+}
+
+// preflight applies the high-risk escalation ceiling and the pre-run
+// pause-trigger hook before any stage executes. When the intent's assessed risk
+// exceeds the configured ceiling, or a caller pause-trigger fires on the empty
+// stage, it pauses the run and returns paused=true so Run returns immediately
+// without executing any stage.
+func (l *Loop) preflight(intent string, res *Result) (paused bool, reason string) {
+	// High-risk escalation : if the intent's assessed risk exceeds
+	// the configured ceiling, PAUSE before running any stages instead of
+	// proceeding to write stages. With no AssessRisk wired, intents default to
+	// RiskLow and never trip the ceiling (preserves prior behavior).
+	if l.cfg.AssessRisk != nil {
+		ceiling := l.cfg.MaxRiskLevel
+		if ceiling == "" {
+			ceiling = domain.RiskHigh
+		}
+		if riskRank(l.cfg.AssessRisk(intent)) > riskRank(ceiling) {
+			l.pause(res, "risk_exceeded")
+			return true, "risk_exceeded"
+		}
+	}
+
+	// Run the generalized pause-trigger hook ONCE before the first
+	// stage (stage is "") so a pre-run condition (e.g. a policy change detected
+	// at startup) can pause early. Nil PauseTrigger never triggers.
+	if l.cfg.PauseTrigger != nil {
+		if reason, ok := l.cfg.PauseTrigger(res, ""); ok {
+			l.pause(res, reason)
+			return true, reason
+		}
+	}
+
+	return false, ""
+}
+
+// runStage executes one loop stage. The deterministic internal stages
+// (remember, verify, protect, deploy, observe, learn) run inside the loop;
+// intent/plan/code are delegated to the caller-provided step. It returns the
+// stage's textual output and an error when the stage failed.
+func (l *Loop) runStage(st, intent string, step StepFunc, wt *execution.Worktree, res *Result) (string, error) {
+	var out string
+	var err error
+	switch st {
+	case stageRemember:
+		// Recall engineering memory relevant to the intent (read-only).
+		if l.cfg.Mem != nil {
+			mems, merr := l.cfg.Mem.Recall(memory.Query{Text: intent, Limit: 5})
+			if merr == nil && len(mems) > 0 {
+				parts := make([]string, 0, len(mems))
+				for _, m := range mems {
+					parts = append(parts, m.Content)
+				}
+				out = strings.Join(parts, "; ")
+				res.Remembered = mems
+			} else {
+				out = "no relevant memories"
+			}
+		} else {
+			out = "memory not configured"
+		}
+	case stageProtect:
+		// Invoke governance approval before deploy; fail-closed if denied.
+		// A nil workflow (cfg.Appr == nil) means no approval gate.
+		if l.cfg.Appr != nil {
+			ap, apprErr := l.requestApproval(intent)
+			if apprErr != nil {
+				err = apprErr
+				out = "approval denied: " + apprErr.Error()
+				// Approval required but not granted: the change cannot
+				// proceed. Reflect the pause on the result (the stage still
+				// errors so the run fails closed as before).
+				res.Paused = true
+				res.PauseReason = "approval"
+			} else {
+				out = "approved " + ap.ID
+				res.Protected = true
+			}
+		} else {
+			out = "governance not configured"
+		}
+	case stageCode:
+		out, err = step(st, intent, wt, res)
+		if err == nil {
+			if d, derr := wt.Diff(); derr == nil {
+				res.Diff = d
+			}
+		}
+	case stageVerify:
+		v := verification.NewEngine(wt.Dir()).Verify([]string{"build", "test", "security", "architecture", "dependency"})
+		out = v.Summary
+		if v.Verdict != verification.VerdictPass {
+			err = errors.New("verify: " + v.Summary)
+		}
+	case stageDeploy:
+		// Production mutation is disabled by default. The deploy
+		// stage only runs when KERN_ALLOW_DEPLOY=1 is explicitly set, so
+		// a local console or loop run cannot accidentally trigger a
+		// production deployment without operator opt-in. Without it, the
+		// stage is skipped (not failed) so read-only loops still complete.
+		if os.Getenv("KERN_ALLOW_DEPLOY") != "1" {
+			out = "deploy skipped: KERN_ALLOW_DEPLOY not set (production mutation disabled by default)"
+			break
+		}
+		l.publish(eventbus.Event{Kind: eventbus.DeploymentStarted, Subject: l.cfg.Service, Payload: map[string]string{"service": l.cfg.Service}})
+		dres, derr := l.cfg.Deployer.Deploy(context.Background(), deployment.DeployRequest{
+			Service:     l.cfg.Service,
+			Version:     "loop",
+			ProjectRoot: l.cfg.Root,
+		})
+		if derr != nil {
+			err = fmt.Errorf("deploy: %w", derr)
+			res.Deployed = false
+			out = "deploy failed: " + derr.Error()
+			l.publish(eventbus.Event{Kind: eventbus.DeploymentFailed, Subject: l.cfg.Service, Payload: map[string]string{"service": l.cfg.Service, "error": derr.Error()}})
+			l.publish(eventbus.Event{Kind: eventbus.DeploymentRolledBack, Subject: l.cfg.Service, Payload: map[string]string{"service": l.cfg.Service, "error": derr.Error()}})
+		} else if !dres.Success {
+			err = errors.New("deploy failed: " + dres.Output)
+			res.Deployed = false
+			out = dres.Output
+			l.publish(eventbus.Event{Kind: eventbus.DeploymentFailed, Subject: l.cfg.Service, Payload: map[string]string{"service": l.cfg.Service, "error": dres.Output}})
+			l.publish(eventbus.Event{Kind: eventbus.DeploymentRolledBack, Subject: l.cfg.Service, Payload: map[string]string{"service": l.cfg.Service, "error": dres.Output}})
+		} else {
+			res.Deployed = true
+			out = dres.Output
+			l.publish(eventbus.Event{Kind: eventbus.DeploymentCompleted, Subject: l.cfg.Service, Payload: map[string]string{"service": l.cfg.Service, "version": dres.Version}})
+		}
+	case stageObserve:
+		res.ObservedHealthy = l.observeHealthy()
+		out = fmt.Sprintf("observed %v", res.ObservedHealthy)
+		l.publish(eventbus.Event{Kind: eventbus.ObserveHealthy, Subject: l.cfg.Service, Payload: map[string]string{"service": l.cfg.Service, "healthy": fmt.Sprintf("%v", res.ObservedHealthy)}})
+	case stageLearn:
+		m, lerr := l.learn(intent, res)
+		if lerr != nil {
+			err = lerr
+		} else {
+			res.Learned = &m
+			out = "learned " + m.ID
+			l.publish(eventbus.Event{Kind: eventbus.LessonRecorded, Subject: m.ID, Payload: map[string]string{"scope": l.cfg.Scope}})
+		}
+	default: // intent, plan
+		out, err = step(st, intent, wt, res)
+	}
+	return out, err
 }
 
 // coderStep returns a StepFunc that delegates the code stage to the wired
@@ -524,7 +550,7 @@ func (l *Loop) defaultStep() StepFunc {
 	}
 }
 
-// requestApproval requests governance for the deploy (spec PROTECT). It
+// requestApproval requests governance for the deploy. It
 // returns an error if approval is denied (fail-closed); otherwise (granted or
 // pending) it returns the approval and the deploy may proceed. Requires
 // cfg.Appr to be non-nil.
@@ -570,7 +596,7 @@ func (l *Loop) observeHealthy() bool {
 }
 
 // learn records a memory capturing the loop outcome (Continuous Learning). It is
-// autonomy-aware (Phase 20.5): the lesson and episodic memories carry the computed
+// autonomy-aware : the lesson and episodic memories carry the computed
 // autonomy score and effective level, and a "score" tag, so memory reflects how
 // much autonomy was exercised.
 func (l *Loop) learn(intent string, res *Result) (domain.Memory, error) {

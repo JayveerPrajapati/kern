@@ -1,6 +1,5 @@
 // Package flight is the flight recorder for Workflow E (GOVERN AI
 // ENGINEERING — "What did our AI agents do, why, and what happened?").
-//
 // It records a deterministic, append-only log of every agent action: which
 // agent performed which task, the tool/operation invoked, its arguments, a
 // short context snapshot (e.g. the agent's intent), the outcome, and its
@@ -38,7 +37,7 @@ type Record struct {
 	Timestamp time.Time
 }
 
-// ActionType is a typed flight-recorder action name (spec §23). The Action
+// ActionType is a typed flight-recorder action name. The Action
 // field on Record accepts any string for backward compatibility; these
 // constants provide the spec's canonical vocabulary so callers use
 // consistent names.
@@ -63,7 +62,7 @@ const (
 	ActionVerificationCompleted ActionType = "verification_completed"
 )
 
-// OutcomeActions is the canonical "outcome" action vocabulary (spec §23): the
+// OutcomeActions is the canonical "outcome" action vocabulary : the
 // terminal/observability action types a full lifecycle trail ends with.
 var OutcomeActions = []ActionType{
 	ActionDeploymentPerformed,
