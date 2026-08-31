@@ -82,12 +82,14 @@ func TestRunScript_RustCompile(t *testing.T) {
 	if !runtimeInstalled("rust") {
 		t.Skip("rustc not installed")
 	}
-	// Verify rustc actually works (rustup may be present but unconfigured)
-	if out, err := exec.Command("rustc", "--version").CombinedOutput(); err != nil || strings.Contains(string(out), "rustup") {
-		t.Skip("rustc not configured (rustup without default toolchain)")
+	// Verify rustc actually compiles (rustup shim may exist but be unconfigured)
+	dir := t.TempDir()
+	probe := filepath.Join(dir, "probe.rs")
+	os.WriteFile(probe, []byte("fn main() {}\n"), 0o644)
+	if out, err := exec.Command("rustc", probe, "-o", filepath.Join(dir, "probe")).CombinedOutput(); err != nil {
+		t.Skipf("rustc not usable: %s", out)
 	}
 	allowDegradedNetwork(t)
-	dir := t.TempDir()
 	p := filepath.Join(dir, "main.rs")
 	if err := os.WriteFile(p, []byte("fn main() { println!(\"hi from rust\"); }\n"), 0o644); err != nil {
 		t.Fatal(err)
