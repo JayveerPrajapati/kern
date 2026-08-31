@@ -3,7 +3,7 @@ VERSION ?= dev
 LDFLAGS := -X main.version=$(VERSION)
 GOFLAGS := -buildvcs=false
 
-.PHONY: all build build-treesitter test vet bench install hooks release dist clean
+.PHONY: all build build-treesitter test test-race vet lint bench install hooks release dist mcpb clean
 
 all: build
 
@@ -11,6 +11,7 @@ build:
 	mkdir -p $(BIN)
 	go build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(BIN)/kern ./cmd/kern
 	go build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(BIN)/kern-mcp ./cmd/kern-mcp
+	go build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(BIN)/kern-server ./cmd/kern-server
 
 # build-treesitter builds with tree-sitter support (requires CGO and Go 1.23+).
 # Uses inotifywait/fswatch for file events and tree-sitter for precise parsing.
@@ -18,6 +19,7 @@ build-treesitter:
 	mkdir -p $(BIN)
 	CGO_ENABLED=1 go build -tags treesitter $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(BIN)/kern ./cmd/kern
 	CGO_ENABLED=1 go build -tags treesitter $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(BIN)/kern-mcp ./cmd/kern-mcp
+	CGO_ENABLED=1 go build -tags treesitter $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(BIN)/kern-server ./cmd/kern-server
 
 test:
 	go test ./...
@@ -32,12 +34,16 @@ test-race:
 vet:
 	go vet ./...
 
+lint: vet
+	@test -z "$$(gofmt -l .)" || { echo "gofmt needed on:"; gofmt -l .; exit 1; }
+
 bench:
 	go test ./evaluate/bench/
 	go run ./evaluate/bench
 
 install: build
-	cp $(BIN)/kern $(BIN)/kern-mcp $${HOME}/.local/bin/
+	mkdir -p $${HOME}/.local/bin
+	cp $(BIN)/kern $(BIN)/kern-mcp $(BIN)/kern-server $${HOME}/.local/bin/
 
 # opencode hooks: MCP config + auto-discovered plugin + agent rules
 hooks: build
@@ -48,6 +54,7 @@ hooks: build
 
 # Cross-compile release tarballs into dist/ (used by the release workflow).
 # Usage: make release VERSION=v1.0.0
+# Binaries match release.yml: built with -tags sqlite (pure-Go, CGO_ENABLED=0 safe).
 release: clean
 	$(eval VERSION := $(if $(filter v%,$(VERSION)),$(VERSION),v$(VERSION)))
 	mkdir -p $(BIN)
@@ -55,18 +62,32 @@ release: clean
 		set -- $$target; os=$$1; arch=$$2; \
 		echo "==> building kern-$$os-$$arch"; \
 		mkdir -p $(BIN)/kern-$$os-$$arch; \
-		GOOS=$$os GOARCH=$$arch go build $(GOFLAGS) -ldflags "-X main.version=$(VERSION)" -o $(BIN)/kern-$$os-$$arch/kern ./cmd/kern; \
-		GOOS=$$os GOARCH=$$arch go build $(GOFLAGS) -ldflags "-X main.version=$(VERSION)" -o $(BIN)/kern-$$os-$$arch/kern-mcp ./cmd/kern-mcp; \
+		GOOS=$$os GOARCH=$$arch go build -tags sqlite $(GOFLAGS) -ldflags "-X main.version=$(VERSION)" -o $(BIN)/kern-$$os-$$arch/kern ./cmd/kern; \
+		GOOS=$$os GOARCH=$$arch go build -tags sqlite $(GOFLAGS) -ldflags "-X main.version=$(VERSION)" -o $(BIN)/kern-$$os-$$arch/kern-mcp ./cmd/kern-mcp; \
+		GOOS=$$os GOARCH=$$arch go build -tags sqlite $(GOFLAGS) -ldflags "-X main.version=$(VERSION)" -o $(BIN)/kern-$$os-$$arch/kern-server ./cmd/kern-server; \
 		tar -C $(BIN) -czf $(BIN)/kern-$$os-$$arch.tar.gz kern-$$os-$$arch/; \
 		rm -rf $(BIN)/kern-$$os-$$arch; \
 	done; \
 	mkdir -p $(BIN)/kern-windows-amd64; \
-	GOOS=windows GOARCH=amd64 go build $(GOFLAGS) -ldflags "-X main.version=$(VERSION)" -o $(BIN)/kern-windows-amd64/kern.exe ./cmd/kern; \
-	GOOS=windows GOARCH=amd64 go build $(GOFLAGS) -ldflags "-X main.version=$(VERSION)" -o $(BIN)/kern-windows-amd64/kern-mcp.exe ./cmd/kern-mcp; \
+	GOOS=windows GOARCH=amd64 go build -tags sqlite $(GOFLAGS) -ldflags "-X main.version=$(VERSION)" -o $(BIN)/kern-windows-amd64/kern.exe ./cmd/kern; \
+	GOOS=windows GOARCH=amd64 go build -tags sqlite $(GOFLAGS) -ldflags "-X main.version=$(VERSION)" -o $(BIN)/kern-windows-amd64/kern-mcp.exe ./cmd/kern-mcp; \
+	GOOS=windows GOARCH=amd64 go build -tags sqlite $(GOFLAGS) -ldflags "-X main.version=$(VERSION)" -o $(BIN)/kern-windows-amd64/kern-server.exe ./cmd/kern-server; \
 	cd $(BIN) && zip -q -r kern-windows-amd64.zip kern-windows-amd64/ && rm -rf kern-windows-amd64
 	@echo "release assets in $(BIN):"; ls $(BIN)/*.tar.gz $(BIN)/*.zip
 
 dist: release
 
+# Build a .mcpb bundle for MCP registry distribution (future releases).
+# Usage: make mcpb VERSION=v0.1.0
+mcpb: build
+	@mkdir -p dist
+	@echo '{"manifest":{"name":"kern","version":"$(VERSION)","transport":{"type":"stdio"},"command":"kern","args":["mcp"]}}' > dist/manifest.json
+	@cp $(BIN)/kern dist/
+	@cd dist && zip -j kern-$(VERSION).mcpb manifest.json kern
+	@echo "Built dist/kern-$(VERSION).mcpb"
+	@echo "SHA256: $$(openssl dgst -sha256 dist/kern-$(VERSION).mcpb | awk '{print $$2}')"
+	@rm dist/manifest.json dist/kern
+
 clean:
 	rm -rf $(BIN)
+	rm -rf dist

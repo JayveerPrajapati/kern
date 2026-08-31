@@ -22,7 +22,7 @@ func TestSamplesAreNonDegenerate(t *testing.T) {
 	}
 }
 
-// TestFixtureTaskMatrixNonDegenerate guards the Phase 17 fixture matrix: every
+// TestFixtureTaskMatrixNonDegenerate guards the fixture matrix: every
 // fixture and task const must be non-empty, the six fixture types must all be
 // present, and the fixtures must be meaningfully different in size.
 func TestFixtureTaskMatrixNonDegenerate(t *testing.T) {
@@ -75,7 +75,7 @@ func TestFixtureTaskMatrixNonDegenerate(t *testing.T) {
 	}
 }
 
-// TestTaskClassMetricsProduceMetricSet asserts the Phase 17.3 harness produces
+// TestTaskClassMetricsProduceMetricSet asserts the harness produces
 // the full per-task-class metric set for at least one task class: token
 // reduction, tool-call reduction, retries, latency, cost, and the outcome
 // flags (first-pass, verified, human intervention, regression).

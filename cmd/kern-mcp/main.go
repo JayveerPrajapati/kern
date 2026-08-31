@@ -1,7 +1,6 @@
 // Command kern-mcp runs the kern MCP server over stdio (default) or HTTP
 // (--http ADDR). The HTTP transport is Streamable HTTP style: POST JSON-RPC
 // messages to /mcp and read the response body.
-//
 // SIGINT/SIGTERM trigger a graceful shutdown: in-flight tool calls are
 // cancelled (their child processes killed), held locks are released, and the
 // server stops reading input. This keeps slow tools from hanging the process
@@ -14,15 +13,28 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
-	"time"
 
 	"github.com/JayveerPrajapati/kern/internal/mcp"
 	"github.com/JayveerPrajapati/kern/internal/optimize"
 	"github.com/JayveerPrajapati/kern/internal/stats"
+	kversion "github.com/JayveerPrajapati/kern/internal/version"
 )
 
-// version is stamped at build time via -ldflags "-X main.version=v1.2.3".
+// version is the build-stamped release version, initialized from the shared
+// internal/version.Version so every kern binary reports the same value.
+// It starts as the literal "dev" (not a copy of kversion.Version) because
+// the legacy -ldflags "-X main.version=..." only rewrites a variable whose
+// initializer is a compile-time constant: a runtime copy from another global
+// aliases the read and silently defeats -X. When unstamped, init() adopts
+// the shared internal/version.Version (default "dev", or the newer
+// "-X github.com/JayveerPrajapati/kern/internal/version.Version=..." form).
 var version = "dev"
+
+func init() {
+	if version == "dev" {
+		version = kversion.Version
+	}
+}
 
 func main() {
 	httpAddr := flag.String("http", "", "serve MCP over HTTP on this address (e.g. :8080) instead of stdio")
@@ -41,27 +53,12 @@ func main() {
 		return
 	}
 	srv := mcp.NewServer(os.Stdin, os.Stdout)
-	// Closing os.Stdin from another goroutine does not reliably unblock the
-	// scanner's read, so Serve() alone may never return after a signal:
-	// cancel in-flight tools, wait for them to drain, then exit.
-	go func() {
-		<-ctx.Done()
-		srv.CancelAll()
-		srv.Close()
-		_ = os.Stdin.Close()
-		deadline := time.Now().Add(5 * time.Second)
-		for time.Now().Before(deadline) {
-			if srv.Inflight() == 0 {
-				time.Sleep(100 * time.Millisecond)
-				os.Exit(0)
-			}
-			time.Sleep(50 * time.Millisecond)
-		}
-		os.Exit(1)
-	}()
-	if err := srv.Serve(); err != nil {
+	// ServeStdio owns the SIGINT/SIGTERM drain (cancel in-flight tools,
+	// release locks, close stdin, wait up to 5s for in-flight calls). It
+	// never calls os.Exit: a clean drain returns nil (exit 0), a drain
+	// timeout or serve error returns a non-nil error (exit 1), so deferred
+	// cleanup runs on every path.
+	if err := mcp.ServeStdio(srv); err != nil {
 		os.Exit(1)
 	}
-	srv.CancelAll()
-	srv.Close()
 }

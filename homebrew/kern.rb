@@ -43,21 +43,25 @@ class Kern < Formula
   depends_on "go" => :build
 
   def install
-    system "go", "build", "-buildvcs=false", "-ldflags", "-X main.version=#{version}", "-o", "kern", "./cmd/kern"
-    system "go", "build", "-buildvcs=false", "-ldflags", "-X main.version=#{version}", "-o", "kern-mcp", "./cmd/kern-mcp"
+    system "go", "build", "-buildvcs=false", "-tags", "sqlite", "-ldflags", "-X main.version=#{version}", "-o", "kern", "./cmd/kern"
+    system "go", "build", "-buildvcs=false", "-tags", "sqlite", "-ldflags", "-X main.version=#{version}", "-o", "kern-mcp", "./cmd/kern-mcp"
+    system "go", "build", "-buildvcs=false", "-tags", "sqlite", "-ldflags", "-X main.version=#{version}", "-o", "kern-server", "./cmd/kern-server"
     # macOS Gatekeeper kills unsigned binaries with SIGKILL (exit 137); apply
     # an ad-hoc signature so the built copies are executable.
     if OS.mac?
       system "codesign", "--force", "--sign", "-", "kern"
       system "codesign", "--force", "--sign", "-", "kern-mcp"
+      system "codesign", "--force", "--sign", "-", "kern-server"
     end
     bin.install "kern"
     bin.install "kern-mcp"
+    bin.install "kern-server"
   end
 
   test do
     assert_match /kern v?\d+\./, shell_output("#{bin}/kern version")
     assert_predicate bin/"kern-mcp", :exist?
+    assert_predicate bin/"kern-server", :exist?
   end
 
   def caveats

@@ -39,21 +39,23 @@ function Install-Go {
     Write-Host "kern: falling back to 'go install github.com/$Repo/cmd/kern@$Version'" -ForegroundColor Yellow
     go install "github.com/$Repo/cmd/kern@$Version"
     go install "github.com/$Repo/cmd/kern-mcp@$Version"
-    # go install drops both binaries into $(go env GOPATH)/bin, which is often
-    # NOT on PATH and never reaches $Prefix. Copy them to the canonical install
-    # dir so the PATH step and auto-wire below see them exactly like a prebuilt
-    # install. Mirrors install.sh's go_install behaviour.
+    go install "github.com/$Repo/cmd/kern-server@$Version"
+    # go install drops all three binaries into $(go env GOPATH)/bin, which is
+    # often NOT on PATH and never reaches $Prefix. Copy them to the canonical
+    # install dir so the PATH step and auto-wire below see them exactly like a
+    # prebuilt install. Mirrors install.sh's go_install behaviour.
     $goBin = Join-Path (& go env GOPATH) "bin"
     $ok = $false
-    if ((Test-Path (Join-Path $goBin "kern.exe")) -and (Test-Path (Join-Path $goBin "kern-mcp.exe"))) {
+    if ((Test-Path (Join-Path $goBin "kern.exe")) -and (Test-Path (Join-Path $goBin "kern-mcp.exe")) -and (Test-Path (Join-Path $goBin "kern-server.exe"))) {
         New-Item -ItemType Directory -Force -Path $Prefix | Out-Null
         Copy-Item (Join-Path $goBin "kern.exe") (Join-Path $Prefix "kern.exe") -Force
         Copy-Item (Join-Path $goBin "kern-mcp.exe") (Join-Path $Prefix "kern-mcp.exe") -Force
+        Copy-Item (Join-Path $goBin "kern-server.exe") (Join-Path $Prefix "kern-server.exe") -Force
         $ok = $true
         Write-Host "kern: copied binaries to $Prefix from $goBin." -ForegroundColor Green
     }
     if (-not $ok) {
-        Write-Host "kern: installed via go install, but could not find kern.exe/kern-mcp.exe in $goBin."
+        Write-Host "kern: installed via go install, but could not find kern.exe/kern-mcp.exe/kern-server.exe in $goBin."
         Write-Host "kern: ensure `$(go env GOPATH)/bin is on your PATH and run 'kern setup' in your project."
     }
     return $ok
@@ -153,9 +155,11 @@ try {
     if (-not $extract) { throw "kern.exe not found in archive" }
     Copy-Item $extract.FullName (Join-Path $Prefix "kern.exe") -Force
 
-    # kern-mcp.exe is co-located; copy if present.
+    # kern-mcp.exe and kern-server.exe are co-located; copy if present.
     $mcp = Get-ChildItem -Path $tmp -Recurse -Filter "kern-mcp.exe" | Select-Object -First 1
     if ($mcp) { Copy-Item $mcp.FullName (Join-Path $Prefix "kern-mcp.exe") -Force }
+    $server = Get-ChildItem -Path $tmp -Recurse -Filter "kern-server.exe" | Select-Object -First 1
+    if ($server) { Copy-Item $server.FullName (Join-Path $Prefix "kern-server.exe") -Force }
 
     Write-Host "installed: $(Join-Path $Prefix 'kern.exe') ($tag)"
     & Wire-Kern
