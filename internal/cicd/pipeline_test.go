@@ -29,6 +29,9 @@ func TestPipelineReadOnlyAnalyzePlan(t *testing.T) {
 }
 
 func TestPipelinePatchExecutionGovernanceGate(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow e2e (>20s); skipped with -short")
+	}
 	// Without KERN_ALLOW_EXEC, execution should be denied by governance.
 	// Pin the env explicitly so an ambient KERN_ALLOW_EXEC=1 in the caller's
 	// shell cannot flip this test (it must assert the denied path).
@@ -60,6 +63,9 @@ new file mode 100644
 }
 
 func TestPipelineExecutionGateApproved(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow e2e (>20s); skipped with -short")
+	}
 	// With KERN_ALLOW_EXEC=1, the governance gate must approve. We assert only
 	// the gate wiring here — the actual worktree build/verify may fail on the
 	// sandbox 100MiB cap, which is unrelated to the CI/CD governance wiring.

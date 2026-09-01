@@ -304,6 +304,9 @@ func TestIsLocalhostOrigin(t *testing.T) {
 // omitted it). Driving an index tool over HTTP must return a valid result with
 // no panic.
 func TestHandleHTTPIndexToolNoPanic(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds full index; skipped with -short")
+	}
 	// Point the workspace at a real repo so kern_search loads an index, and
 	// align the KERN_MCP_ROOTS gate with the same root (the gate fails closed
 	// to the process cwd when unset).

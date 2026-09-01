@@ -84,6 +84,9 @@ func matrixPlatform(t *testing.T) *TaskService {
 
 // TestAcceptanceMatrix runs the 10 mandatory E2E acceptance scenarios A–J.
 func TestAcceptanceMatrix(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow e2e (>15s); skipped with -short")
+	}
 	t.Run("A_code_change_verified_PR", func(t *testing.T) {
 		if testing.Short() {
 			t.Skip("indexes the real repo; skipped with -short")

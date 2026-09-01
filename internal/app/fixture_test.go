@@ -47,6 +47,9 @@ func loadUserFixture(t *testing.T) string {
 // `go build ./...` drops its binary into the fixture dir), dirtying the tree on
 // every test run.
 func TestUserServiceFixtureBuildable(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow build+test; skipped with -short")
+	}
 	dir := loadUserFixture(t)
 
 	build := exec.Command("go", "build", "-o", filepath.Join(t.TempDir(), "fixture-build"), "./...")
