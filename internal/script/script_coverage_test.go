@@ -85,13 +85,22 @@ func TestRunScript_RustCompile(t *testing.T) {
 	if !runtimeInstalled("rust") {
 		t.Skip("rustc not installed")
 	}
-	// Verify rustc actually compiles (rustup shim may exist but be unconfigured).
-	// Reproduce the exact flags RunScript uses: -o <out> --edition 2021.
+	// Verify rustc actually compiles under the same sandboxed conditions
+	// RunScript uses (sandboxed env + network namespace on Linux). The rustup
+	// proxy shim needs RUSTUP_HOME/CARGO_HOME which sandboxEnv drops, so this
+	// probe catches that case and skips rather than letting RunScript fail.
 	dir := t.TempDir()
 	probe := filepath.Join(dir, "probe.rs")
 	os.WriteFile(probe, []byte("fn main() {}\n"), 0o644)
-	if out, err := exec.Command("rustc", probe, "-o", filepath.Join(dir, "probe"), "--edition", "2021").CombinedOutput(); err != nil {
-		t.Skipf("rustc not usable: %s", out)
+	probeCmd := exec.Command("rustc", probe, "-o", filepath.Join(dir, "probe"), "--edition", "2021")
+	probeCmd.Env = sandboxEnv(dir)
+	probeCmd.Dir = dir
+	if ns := networkNS(); len(ns) > 0 {
+		probeCmd.Path = ns[0]
+		probeCmd.Args = append(append([]string{}, ns...), probeCmd.Args...)
+	}
+	if out, err := probeCmd.CombinedOutput(); err != nil {
+		t.Skipf("rustc not usable under sandbox conditions: %s", out)
 	}
 	allowDegradedNetwork(t)
 	p := filepath.Join(dir, "main.rs")
