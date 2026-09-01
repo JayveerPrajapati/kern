@@ -184,6 +184,9 @@ func TestVerticalSlice1AnalyzePlanImpactVerifyPR(t *testing.T) {
 // It exercises the what-if engine's SplitService change kind and verifies the
 // impact report includes affected components, files, and a risk level.
 func TestVerticalSlice3WhatIfScenario(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow e2e; skipped with -short")
+	}
 	root := "../.."
 
 	p, err := NewWithIndex(root, sharedTestRepoIndex(t))
@@ -309,6 +312,9 @@ func TestArtifactImmutability(t *testing.T) {
 // the pending approval ID, and the task is NOT transitioned to Deploying. The
 // NoopDeployer (default, simulated) skips the gate to preserve v1 behavior.
 func TestDeployApprovalGate(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow e2e; skipped with -short")
+	}
 	root := "../.."
 
 	p, err := NewWithIndex(root, sharedTestRepoIndex(t))
@@ -359,6 +365,9 @@ func TestDeployApprovalGate(t *testing.T) {
 // TestDeployNoopSkipsApprovalGate verifies that the NoopDeployer (default,
 // simulated) does NOT trigger the approval gate — v1 behavior is preserved.
 func TestDeployNoopSkipsApprovalGate(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow e2e; skipped with -short")
+	}
 	root := "../.."
 
 	p, err := NewWithIndex(root, sharedTestRepoIndex(t))
@@ -421,6 +430,9 @@ func TestWebhookIdempotency(t *testing.T) {
 // it is deterministic and fast. It asserts the structural contract: the
 // incident is created, has hypotheses, and the task completes with artifacts.
 func TestVerticalSlice2IncidentCorrelateRootCause(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow e2e; skipped with -short")
+	}
 	root := "../.."
 
 	p, err := NewWithIndex(root, sharedTestRepoIndex(t))

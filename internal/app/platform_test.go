@@ -127,6 +127,9 @@ func TestWhatIfRuntimeEvidence(t *testing.T) {
 // caller-owned graph pointer. It verifies the Platform's engines see the
 // graph that the caller built (not a copy).
 func TestPlatformNewWithGraph(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds full index; skipped with -short")
+	}
 	root := "../.."
 
 	p, err := NewWithIndex(root, sharedTestRepoIndex(t))
