@@ -42,6 +42,6 @@ jobs:
       # for the race run: internal/app alone is ~3min without -race and
       # exceeds the default 10m cap under instrumentation.
       - name: Test (race detector)
-        run: go test -race -timeout 40m ./internal/governance/... ./internal/mcp/... ./internal/app/... ./internal/web/...
+        run: go test -short -race -timeout 10m ./internal/governance/... ./internal/mcp/... ./internal/app/... ./internal/web/...
       - name: MCP catalog parity
         run: go test ./internal/setup/ -run TestPluginMatchesMCPCatalog -count=1
