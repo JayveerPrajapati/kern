@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/JayveerPrajapati/kern/internal/deployment"
 	"github.com/JayveerPrajapati/kern/internal/domain"
@@ -73,9 +74,9 @@ func TestAutonomyExitGate(t *testing.T) {
 		// event, error surfaced) — never a silent success.
 		t.Setenv("KERN_ALLOW_DEPLOY", "1")
 		bus := eventbus.New()
-		gotRollback := false
+		rolledBack := make(chan eventbus.Event, 1)
 		bus.Subscribe(eventbus.DeploymentRolledBack, func(ev eventbus.Event) {
-			gotRollback = true
+			rolledBack <- ev
 		})
 		lp, err := NewLoop(LoopConfig{
 			Root:     loopFixture(t),
@@ -95,7 +96,9 @@ func TestAutonomyExitGate(t *testing.T) {
 		if res.Deployed {
 			t.Error("res.Deployed = true after a failed deployment — rollback bypassed")
 		}
-		if !gotRollback {
+		select {
+		case <-rolledBack:
+		case <-time.After(time.Second):
 			t.Error("no DeploymentRolledBack event on failed deployment")
 		}
 	})
