@@ -79,14 +79,18 @@ func TestRunScript_Path(t *testing.T) {
 }
 
 func TestRunScript_RustCompile(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires working rustc; skipped with -short")
+	}
 	if !runtimeInstalled("rust") {
 		t.Skip("rustc not installed")
 	}
-	// Verify rustc actually compiles (rustup shim may exist but be unconfigured)
+	// Verify rustc actually compiles (rustup shim may exist but be unconfigured).
+	// Reproduce the exact flags RunScript uses: -o <out> --edition 2021.
 	dir := t.TempDir()
 	probe := filepath.Join(dir, "probe.rs")
 	os.WriteFile(probe, []byte("fn main() {}\n"), 0o644)
-	if out, err := exec.Command("rustc", probe, "-o", filepath.Join(dir, "probe")).CombinedOutput(); err != nil {
+	if out, err := exec.Command("rustc", probe, "-o", filepath.Join(dir, "probe"), "--edition", "2021").CombinedOutput(); err != nil {
 		t.Skipf("rustc not usable: %s", out)
 	}
 	allowDegradedNetwork(t)
