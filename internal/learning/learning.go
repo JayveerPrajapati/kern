@@ -5,6 +5,7 @@ package learning
 
 import (
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -184,37 +185,13 @@ func patternContent(p Pattern) string {
 	b.WriteString("pattern: ")
 	b.WriteString(p.Key)
 	b.WriteString(" recurring ")
-	b.WriteString(itoa(p.Count))
+	b.WriteString(strconv.Itoa(p.Count))
 	b.WriteString(" times across ")
-	b.WriteString(itoa(len(p.Scopes)))
+	b.WriteString(strconv.Itoa(len(p.Scopes)))
 	b.WriteString(" scope(s)")
 	if p.Recommendation != "" {
 		b.WriteString("\n")
 		b.WriteString(p.Recommendation)
 	}
 	return b.String()
-}
-
-// itoa is a minimal integer-to-string helper (avoids strconv dependency, keeps
-// the package consistent with the memory store's own helper).
-func itoa(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	neg := n < 0
-	if neg {
-		n = -n
-	}
-	var b [20]byte
-	i := len(b)
-	for n > 0 {
-		i--
-		b[i] = byte('0' + n%10)
-		n /= 10
-	}
-	if neg {
-		i--
-		b[i] = '-'
-	}
-	return string(b[i:])
 }

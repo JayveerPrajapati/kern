@@ -52,6 +52,73 @@ func recordAuditEntries(t *testing.T, p *Platform) {
 	}
 }
 
+// tamperFirstAuditEntry rewrites the persisted first audit entry so its
+// AgentID is "evil-agent". It handles both on-disk formats: the legacy
+// per-key <key>.json files and the chain.jsonl lines of LogStore.
+func tamperFirstAuditEntry(t *testing.T, root string) {
+	t.Helper()
+	auditDir := filepath.Join(root, ".kern", "audit")
+
+	// Legacy format: one JSON document per key.
+	first := filepath.Join(auditDir, "audit-audit-1.json")
+	if data, err := os.ReadFile(first); err == nil {
+		var e governance.AuditEntry
+		if err := json.Unmarshal(data, &e); err != nil {
+			t.Fatalf("unmarshal persisted entry: %v", err)
+		}
+		e.AgentID = "evil-agent"
+		raw, err := json.Marshal(e)
+		if err != nil {
+			t.Fatalf("marshal tampered entry: %v", err)
+		}
+		if err := os.WriteFile(first, raw, 0o600); err != nil {
+			t.Fatalf("tamper write: %v", err)
+		}
+		return
+	}
+
+	// Chain format: rewrite the first chain.jsonl line whose key matches.
+	chain := filepath.Join(auditDir, "chain.jsonl")
+	data, err := os.ReadFile(chain)
+	if err != nil {
+		t.Fatalf("read persisted entry (legacy or chain): %v", err)
+	}
+	lines := strings.Split(strings.TrimSuffix(string(data), "\n"), "\n")
+	tampered := false
+	for i, line := range lines {
+		var rec struct {
+			K string          `json:"k"`
+			V json.RawMessage `json:"v"`
+		}
+		if err := json.Unmarshal([]byte(line), &rec); err != nil || rec.K != "audit-audit-1" {
+			continue
+		}
+		var e governance.AuditEntry
+		if err := json.Unmarshal(rec.V, &e); err != nil {
+			t.Fatalf("unmarshal persisted entry: %v", err)
+		}
+		e.AgentID = "evil-agent"
+		raw, err := json.Marshal(e)
+		if err != nil {
+			t.Fatalf("marshal tampered entry: %v", err)
+		}
+		rec.V = raw
+		out, err := json.Marshal(rec)
+		if err != nil {
+			t.Fatalf("marshal tampered line: %v", err)
+		}
+		lines[i] = string(out)
+		tampered = true
+		break
+	}
+	if !tampered {
+		t.Fatal("persisted entry audit-audit-1 not found in legacy files or chain.jsonl")
+	}
+	if err := os.WriteFile(chain, []byte(strings.Join(lines, "\n")+"\n"), 0o600); err != nil {
+		t.Fatalf("tamper write: %v", err)
+	}
+}
+
 // TestAuditChainVerifiedAtStartup ensures the server startup path replays the
 // persisted governance audit log and warns loudly — without halting startup —
 // when the tamper-evident chain is broken, and stays silent when the chain is
@@ -65,24 +132,9 @@ func TestAuditChainVerifiedAtStartup(t *testing.T) {
 		}
 		recordAuditEntries(t, p1)
 
-		// Tamper with the persisted first entry (the file itself).
-		first := filepath.Join(root, ".kern", "audit", "audit-audit-1.json")
-		data, err := os.ReadFile(first)
-		if err != nil {
-			t.Fatalf("read persisted entry: %v", err)
-		}
-		var e governance.AuditEntry
-		if err := json.Unmarshal(data, &e); err != nil {
-			t.Fatalf("unmarshal persisted entry: %v", err)
-		}
-		e.AgentID = "evil-agent"
-		raw, err := json.Marshal(e)
-		if err != nil {
-			t.Fatalf("marshal tampered entry: %v", err)
-		}
-		if err := os.WriteFile(first, raw, 0o600); err != nil {
-			t.Fatalf("tamper write: %v", err)
-		}
+		// Tamper with the persisted first entry (the file itself), whichever
+		// on-disk format the store uses.
+		tamperFirstAuditEntry(t, root)
 
 		stderr := captureStderr(t, func() {
 			// Startup must NOT fatal on a broken chain.

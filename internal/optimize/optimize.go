@@ -75,6 +75,18 @@ type Options struct {
 // Recorder is the stats sink. It is nilable for pure/dry-run usage.
 var Recorder *stats.Recorder
 
+// EnsureRecorder wires the shared stats recorder used by optimize operations.
+// It is the canonical wiring — cmd/kern, mcp and other entry points delegate
+// to it instead of calling stats.NewRecorder themselves.
+func EnsureRecorder() error {
+	rec, err := stats.NewRecorder()
+	if err != nil {
+		return err
+	}
+	Recorder = rec
+	return nil
+}
+
 func record(op stats.Operation, opts Options, res Result) {
 	if Recorder == nil {
 		return
@@ -185,7 +197,7 @@ func Prompt(prompt string, attachedLog string, opts Options) (Result, error) {
 func promptUncached(prompt string, attachedLog string, opts Options) (Result, error) {
 	raw := prompt
 	if attachedLog != "" {
-		logPart := compress.CompressLog(attachedLog, compress.Options{MaxLines: 200})
+		logPart := compress.CompressLog(attachedLog, compress.Options{MaxLines: 200, Cluster: true})
 		raw = prompt + "\n\n--- attached log ---\n" + attachedLog
 		prompt = prompt + "\n\n--- attached log (compressed) ---\n" + logPart
 	}
@@ -261,13 +273,13 @@ func Log(text string, opts Options) (Result, error) {
 			sem.Similarity = sim
 			return sem, nil
 		}
-		res := finish(text, compress.CompressLog(text, compress.Options{MaxLines: 200}), tokenize.KindLog)
+		res := finish(text, compress.CompressLog(text, compress.Options{MaxLines: 200, Cluster: true}), tokenize.KindLog)
 		record(stats.OpOptimizeLog, opts, res)
 		_ = cache.Store(key, res)
 		_ = semcache.Store("log", text, res)
 		return res, nil
 	}
-	out := compress.CompressLog(text, compress.Options{MaxLines: 200})
+	out := compress.CompressLog(text, compress.Options{MaxLines: 200, Cluster: true})
 	res := finish(text, out, tokenize.KindLog)
 	record(stats.OpOptimizeLog, opts, res)
 	return res, nil
