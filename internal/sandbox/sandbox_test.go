@@ -328,3 +328,132 @@ func TestRollbackRestoresSkippedFileFailsClearly(t *testing.T) {
 		t.Fatalf("error should name the snapshot cap: %v", err)
 	}
 }
+
+func TestRunManifestCreatedModified(t *testing.T) {
+	root := t.TempDir()
+	_ = os.WriteFile(filepath.Join(root, "a.go"), []byte("package a\n"), 0o644)
+	res := Run(context.Background(), root, "sh", []string{"-c", "echo x > b.go && echo y >> a.go"}, 10*time.Second)
+	if !res.OK {
+		t.Fatalf("expected success: %+v", res)
+	}
+	byPath := map[string]Change{}
+	for _, c := range res.Manifest {
+		byPath[c.Path] = c
+	}
+	created, ok := byPath["b.go"]
+	if !ok || created.Kind != "created" {
+		t.Fatalf("expected created b.go, got %+v", res.Manifest)
+	}
+	if len(created.Hash) != 64 {
+		t.Fatalf("expected 64-hex sha256, got %q", created.Hash)
+	}
+	if created.Size <= 0 {
+		t.Fatalf("expected positive size, got %d", created.Size)
+	}
+	modified, ok := byPath["a.go"]
+	if !ok || modified.Kind != "modified" {
+		t.Fatalf("expected modified a.go, got %+v", res.Manifest)
+	}
+	if len(modified.Hash) != 64 {
+		t.Fatalf("expected 64-hex sha256, got %q", modified.Hash)
+	}
+	if modified.Size <= 0 {
+		t.Fatalf("expected positive size, got %d", modified.Size)
+	}
+	for _, c := range res.Manifest {
+		if c.Kind == "deleted" {
+			t.Fatalf("unexpected deleted entry: %+v", c)
+		}
+	}
+}
+
+func TestRunManifestDeleted(t *testing.T) {
+	root := t.TempDir()
+	_ = os.WriteFile(filepath.Join(root, "a.go"), []byte("package a\n"), 0o644)
+	res := Run(context.Background(), root, "sh", []string{"-c", "rm a.go"}, 10*time.Second)
+	if !res.OK {
+		t.Fatalf("expected success: %+v", res)
+	}
+	found := false
+	for _, c := range res.Manifest {
+		if c.Path == "a.go" && c.Kind == "deleted" {
+			found = true
+			if len(c.Hash) != 64 {
+				t.Fatalf("expected 64-hex sha256 from snapshot copy, got %q", c.Hash)
+			}
+			if c.Size <= 0 {
+				t.Fatalf("expected positive size, got %d", c.Size)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("expected deleted a.go, got %+v", res.Manifest)
+	}
+}
+
+func TestRunManifestOnFailureRollbackAudit(t *testing.T) {
+	root := t.TempDir()
+	res := Run(context.Background(), root, "sh", []string{"-c", "echo x > c.go; exit 1"}, 10*time.Second)
+	if res.OK {
+		t.Fatal("expected failure")
+	}
+	if !res.Restored {
+		t.Fatal("expected restore")
+	}
+	found := false
+	for _, c := range res.Manifest {
+		if c.Path == "c.go" && c.Kind == "created" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected created c.go recorded despite rollback, got %+v", res.Manifest)
+	}
+}
+
+func TestRunManifestEmptyWhenNoChanges(t *testing.T) {
+	root := t.TempDir()
+	_ = os.WriteFile(filepath.Join(root, "a.go"), []byte("package a\n"), 0o644)
+	res := Run(context.Background(), root, "sh", []string{"-c", "true"}, 10*time.Second)
+	if !res.OK {
+		t.Fatalf("expected success: %+v", res)
+	}
+	if len(res.Manifest) != 0 {
+		t.Fatalf("expected empty manifest, got %+v", res.Manifest)
+	}
+}
+
+func TestManifestSortedDeterministic(t *testing.T) {
+	root := t.TempDir()
+	_ = os.WriteFile(filepath.Join(root, "a.go"), []byte("package a\n"), 0o644)
+	_ = os.WriteFile(filepath.Join(root, "d.txt"), []byte("gone\n"), 0o644)
+	snap, err := Snapshot(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer snap.Close()
+	// Create, modify, and delete one file each, then diff twice.
+	_ = os.WriteFile(filepath.Join(root, "b.go"), []byte("x\n"), 0o644)
+	_ = os.WriteFile(filepath.Join(root, "a.go"), []byte("package a\nchanged\n"), 0o644)
+	if err := os.Remove(filepath.Join(root, "d.txt")); err != nil {
+		t.Fatal(err)
+	}
+	man1, _ := snap.Manifest()
+	man2, _ := snap.Manifest()
+	if len(man1) != 3 {
+		t.Fatalf("expected 3 changes, got %+v", man1)
+	}
+	if len(man1) != len(man2) {
+		t.Fatalf("non-deterministic manifest: %+v vs %+v", man1, man2)
+	}
+	for i := range man1 {
+		if man1[i] != man2[i] {
+			t.Fatalf("non-deterministic manifest: %+v vs %+v", man1, man2)
+		}
+	}
+	for i := 1; i < len(man1); i++ {
+		if man1[i-1].Path >= man1[i].Path {
+			t.Fatalf("manifest not sorted by Path: %+v", man1)
+		}
+	}
+}
