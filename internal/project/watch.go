@@ -8,6 +8,11 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/index"
 )
 
+// watchDebounce is the trailing settle window before a rebuild fires after a
+// burst of file events. It is a package-internal knob so tests can shorten
+// it; the native watcher doubles it (it debounces internally first).
+var watchDebounce = 150 * time.Millisecond
+
 // Watch monitors root for source-file changes and calls onChange after every
 // change batch with the freshly rebuilt index. It prefers the stdlib-native
 // kqueue/inotify watcher (zero dependencies), then the external OS file-event
@@ -17,10 +22,10 @@ import (
 // instead of the watcher silently dropping it. Returns ctx.Err() when the
 // context is cancelled.
 func Watch(ctx context.Context, root string, pollInterval time.Duration, onChange func(changes []index.Change, ix *index.Index), onError func(err error)) error {
-	ch := make(chan struct{}, 1)
-	notify := func() {
+	ch := make(chan string, 16)
+	notify := func(p string) {
 		select {
-		case ch <- struct{}{}:
+		case ch <- p:
 		default:
 		}
 	}
@@ -40,11 +45,11 @@ func Watch(ctx context.Context, root string, pollInterval time.Duration, onChang
 		defer fw.Stop()
 	}
 
-	debounce := 150 * time.Millisecond
+	debounce := watchDebounce
 	if native {
 		// The file-event watcher already debounces internally; a short settle
 		// window prevents a burst of edits from triggering several rebuilds.
-		debounce = 300 * time.Millisecond
+		debounce = 2 * watchDebounce
 	}
 
 	// Baseline hash map: seed from the persisted index when present, otherwise
@@ -58,8 +63,11 @@ func Watch(ctx context.Context, root string, pollInterval time.Duration, onChang
 	}
 
 	var (
-		timer     *time.Timer
 		timerMu   sync.Mutex
+		timer     *time.Timer
+		seq       uint64 // generation counter: a fired callback only acts if its seq is current
+		recent    = map[string]time.Time{}
+		extends   int
 		rebuildMu sync.Mutex
 	)
 	var rebuild func()
@@ -100,16 +108,67 @@ func Watch(ctx context.Context, root string, pollInterval time.Duration, onChang
 	// index it reports changes since the last save. After this the baseline is
 	// fixed, so any edit arriving later is reported as "modified".
 	rebuild()
-	schedule := func() {
-		timerMu.Lock()
-		if timer == nil {
-			timer = time.AfterFunc(debounce, func() {
-				timerMu.Lock()
-				timer = nil
+
+	// arm schedules a trailing debounce fire: the timer resets on every
+	// schedule, so fire runs once after the LAST event settles. It must be
+	// called with timerMu held. fire is re-entrant (re-arms when the
+	// dependency wait extends the window); the seq guard drops stale callbacks
+	// from timers that were already replaced, keeping re-arm deadlock-free.
+	var arm func()
+	arm = func() {
+		seq++
+		my := seq
+		timer = time.AfterFunc(debounce, func() {
+			timerMu.Lock()
+			if seq != my {
 				timerMu.Unlock()
-				rebuild()
-			})
+				return // a newer schedule superseded this fire
+			}
+			timer = nil
+			seq++
+			// Hold the rebuild while a related file is still being edited,
+			// bounded so staleness never grows unbounded (max 3 extensions).
+			if extends < 3 && shouldExtendDependency(recent, time.Now(), debounce) {
+				extends++
+				arm()
+				timerMu.Unlock()
+				return
+			}
+			recent = map[string]time.Time{}
+			extends = 0
+			timerMu.Unlock()
+			rebuild()
+		})
+	}
+	schedule := func(p string) {
+		timerMu.Lock()
+		if p != "" {
+			now := time.Now()
+			recent[p] = now
+			// Bound the touch map: drop entries older than 3×debounce and cap
+			// at 128 entries so it never grows unbounded.
+			cutoff := now.Add(-3 * debounce)
+			for k, ts := range recent {
+				if ts.Before(cutoff) {
+					delete(recent, k)
+				}
+			}
+			for len(recent) > 128 {
+				var oldest string
+				var oldestT time.Time
+				first := true
+				for k, ts := range recent {
+					if first || ts.Before(oldestT) {
+						oldest, oldestT, first = k, ts, false
+					}
+				}
+				delete(recent, oldest)
+			}
 		}
+		if timer != nil {
+			timer.Stop()
+		}
+		arm()
 		timerMu.Unlock()
 	}
 
@@ -126,8 +185,8 @@ func Watch(ctx context.Context, root string, pollInterval time.Duration, onChang
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-ch:
-			schedule()
+		case p := <-ch:
+			schedule(p)
 		case <-tick.C:
 			rebuild()
 		}

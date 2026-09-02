@@ -102,7 +102,7 @@ func TestLookupWatcherCmd(t *testing.T) {
 func TestFileWatcherFallbackWhenNoTool(t *testing.T) {
 	// If no native watcher is installed, newFileWatcher must return nil
 	// gracefully (not panic).
-	fw := newFileWatcher(t.TempDir(), func() {})
+	fw := newFileWatcher(t.TempDir(), func(string) {})
 	if fw == nil {
 		// Expected on systems without inotifywait/fswatch.
 		return
@@ -119,7 +119,7 @@ func TestFileWatcherStopsGracefully(t *testing.T) {
 	if _, err := exec.LookPath("fswatch"); err != nil && runtime.GOOS == "darwin" {
 		t.Skip("no fswatch available")
 	}
-	fw := newFileWatcher(t.TempDir(), func() {})
+	fw := newFileWatcher(t.TempDir(), func(string) {})
 	if fw == nil {
 		t.Skip("file watcher not available on this platform")
 	}

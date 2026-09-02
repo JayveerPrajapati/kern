@@ -23,7 +23,7 @@ type kqueueWatcher struct {
 	kq        int
 	fds       map[int]string // dir fd -> dir path
 	files     map[int]string // file fd -> file path (content-edit watches)
-	ch        chan struct{}
+	ch        chan string
 	closed    chan struct{} // Close closes this to tell the loop to exit
 	done      chan struct{} // loop closes this when it has actually exited
 	closeOnce sync.Once
@@ -40,7 +40,7 @@ func newNativeSource(root string) nativeSource {
 		kq:     kq,
 		fds:    map[int]string{},
 		files:  map[int]string{},
-		ch:     make(chan struct{}, 1),
+		ch:     make(chan string, 16),
 		closed: make(chan struct{}),
 		done:   make(chan struct{}),
 	}
@@ -48,7 +48,7 @@ func newNativeSource(root string) nativeSource {
 	return w
 }
 
-func (w *kqueueWatcher) Event() <-chan struct{} { return w.ch }
+func (w *kqueueWatcher) Event() <-chan string { return w.ch }
 
 func (w *kqueueWatcher) Close() {
 	w.closeOnce.Do(func() {
@@ -169,6 +169,19 @@ func (w *kqueueWatcher) knownFile(p string) (string, bool) {
 	return "", false
 }
 
+// fdPath resolves the path registered for a fired kqueue event's fd: the
+// file path for content-edit watches, or the directory path for directory
+// watches (kqueue carries no file name for directory events).
+func (w *kqueueWatcher) fdPath(fd int) string {
+	if p, ok := w.files[fd]; ok {
+		return p
+	}
+	if p, ok := w.fds[fd]; ok {
+		return p
+	}
+	return ""
+}
+
 func (w *kqueueWatcher) loop(root string) {
 	defer close(w.done) // signal Close() that the loop has stopped touching the maps
 	w.reRegister(root)
@@ -194,16 +207,25 @@ func (w *kqueueWatcher) loop(root string) {
 			}
 		}
 		fired := false
+		var paths []string
 		for i := 0; i < n; i++ {
 			if events[i].Filter == syscall.EVFILT_VNODE &&
 				events[i].Fflags&(syscall.NOTE_WRITE|syscall.NOTE_DELETE|syscall.NOTE_RENAME|syscall.NOTE_EXTEND) != 0 {
 				fired = true
+				if p := w.fdPath(int(events[i].Ident)); p != "" {
+					paths = append(paths, p)
+				}
 			}
 		}
 		if fired {
-			select {
-			case w.ch <- struct{}{}:
-			default:
+			for _, p := range paths {
+				if rel, rerr := filepath.Rel(root, p); rerr == nil {
+					p = rel
+				}
+				select {
+				case w.ch <- p:
+				default:
+				}
 			}
 		}
 		// Re-register periodically so directories created after startup are

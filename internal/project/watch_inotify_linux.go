@@ -3,6 +3,7 @@
 package project
 
 import (
+	"bytes"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -23,7 +24,7 @@ type inotifyWatcher struct {
 	fd        int
 	dirs      map[int]string // watch descriptor -> dir path
 	files     map[int]string // watch descriptor -> file path (content edits)
-	ch        chan struct{}
+	ch        chan string
 	closed    chan struct{} // Close closes this to tell the loop to exit
 	done      chan struct{} // loop closes this when it has actually exited
 	closeOnce sync.Once
@@ -40,7 +41,7 @@ func newNativeSource(root string) nativeSource {
 		fd:     fd,
 		dirs:   map[int]string{},
 		files:  map[int]string{},
-		ch:     make(chan struct{}, 1),
+		ch:     make(chan string, 16),
 		closed: make(chan struct{}),
 		done:   make(chan struct{}),
 	}
@@ -48,7 +49,7 @@ func newNativeSource(root string) nativeSource {
 	return w
 }
 
-func (w *inotifyWatcher) Event() <-chan struct{} { return w.ch }
+func (w *inotifyWatcher) Event() <-chan string { return w.ch }
 
 func (w *inotifyWatcher) Close() {
 	w.closeOnce.Do(func() {
@@ -133,6 +134,27 @@ func (w *inotifyWatcher) watchedFile(p string) bool {
 	return false
 }
 
+// eventPath resolves the file a fired inotify event refers to: for a file
+// watch the registered file path, for a directory watch the directory path
+// joined with the event's name (the created/deleted/renamed entry). name is
+// the raw NUL-terminated name bytes following the event header.
+func (w *inotifyWatcher) eventPath(ev *syscall.InotifyEvent, name []byte) string {
+	if p, ok := w.files[int(ev.Wd)]; ok {
+		return p
+	}
+	p, ok := w.dirs[int(ev.Wd)]
+	if !ok {
+		return ""
+	}
+	if i := bytes.IndexByte(name, 0); i >= 0 {
+		name = name[:i]
+	}
+	if len(name) == 0 {
+		return p
+	}
+	return filepath.Join(p, string(name))
+}
+
 func (w *inotifyWatcher) loop(root string) {
 	defer close(w.done)       // signal Close() that the loop has stopped touching the maps
 	buf := make([]byte, 4096) // events are read in a loop; large enough for a burst
@@ -156,18 +178,31 @@ func (w *inotifyWatcher) loop(root string) {
 			continue
 		}
 		fired := false
+		var paths []string
 		for off := 0; off+syscall.SizeofInotifyEvent <= n; {
 			ev := (*syscall.InotifyEvent)(unsafe.Pointer(&buf[off]))
 			if ev.Mask&(syscall.IN_MODIFY|syscall.IN_CREATE|syscall.IN_DELETE|
 				syscall.IN_MOVED_TO|syscall.IN_MOVED_FROM|syscall.IN_CLOSE_WRITE) != 0 {
 				fired = true
+				nameLen := int(ev.Len)
+				if nameLen > n-off-syscall.SizeofInotifyEvent {
+					nameLen = n - off - syscall.SizeofInotifyEvent
+				}
+				if p := w.eventPath(ev, buf[off+syscall.SizeofInotifyEvent:off+syscall.SizeofInotifyEvent+nameLen]); p != "" {
+					paths = append(paths, p)
+				}
 			}
 			off += syscall.SizeofInotifyEvent + int(ev.Len)
 		}
 		if fired {
-			select {
-			case w.ch <- struct{}{}:
-			default:
+			for _, p := range paths {
+				if rel, rerr := filepath.Rel(root, p); rerr == nil {
+					p = rel
+				}
+				select {
+				case w.ch <- p:
+				default:
+				}
 			}
 			w.reRegister(root)
 		}
