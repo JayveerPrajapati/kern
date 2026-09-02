@@ -3,7 +3,7 @@ VERSION ?= dev
 LDFLAGS := -X main.version=$(VERSION)
 GOFLAGS := -buildvcs=false
 
-.PHONY: all build build-treesitter test test-race vet lint bench install hooks release dist mcpb clean
+.PHONY: all build build-treesitter test test-race vet lint bench install hooks release dist mcpb clean clean-artifacts
 
 all: build
 
@@ -91,3 +91,12 @@ mcpb: build
 clean:
 	rm -rf $(BIN)
 	rm -rf dist
+
+# clean-artifacts removes stray build/test binaries and bytecode caches left
+# at the repo root by ad-hoc builds (go build without -o, go test -c, pip
+# imports). All targets are gitignored, so this only reclaims disk space.
+clean-artifacts:
+	rm -f kern kern-mcp kern-server
+	rm -f *.test
+	rm -f bench
+	rm -rf __pycache__
