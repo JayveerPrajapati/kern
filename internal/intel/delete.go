@@ -2,6 +2,7 @@ package intel
 
 import (
 	"sort"
+	"strconv"
 	"strings"
 	"unicode"
 
@@ -124,7 +125,7 @@ func DeleteCheck(ix *index.Index, sym string) DeleteReport {
 func RenderDelete(r DeleteReport) string {
 	var b strings.Builder
 	if r.Defs > 1 {
-		b.WriteString("warning: symbol defined " + itoa(r.Defs) + " times (first at " + r.File + ")\n")
+		b.WriteString("warning: symbol defined " + strconv.Itoa(r.Defs) + " times (first at " + r.File + ")\n")
 	} else if r.Defined {
 		b.WriteString("defined at " + r.File + "\n")
 	}
@@ -158,18 +159,4 @@ func RenderDelete(r DeleteReport) string {
 		}
 	}
 	return strings.TrimSuffix(b.String(), "\n")
-}
-
-func itoa(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	var buf [8]byte
-	i := len(buf)
-	for n > 0 {
-		i--
-		buf[i] = byte('0' + n%10)
-		n /= 10
-	}
-	return string(buf[i:])
 }
