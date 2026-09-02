@@ -3,6 +3,7 @@ package intel
 import (
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/JayveerPrajapati/kern/internal/index"
@@ -102,11 +103,11 @@ func RenderExplore(r *ExploreReport) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "symbol: %s (%s %s:%d)\n\n",
 		r.Resolved, r.Definition.Kind, r.Definition.File, r.Definition.Line)
-	b.WriteString("== callers (" + itoa(len(r.Callers)) + ") ==\n")
+	b.WriteString("== callers (" + strconv.Itoa(len(r.Callers)) + ") ==\n")
 	b.WriteString(joinLines(r.Callers))
-	b.WriteString("== callees (" + itoa(len(r.Callees)) + ") ==\n")
+	b.WriteString("== callees (" + strconv.Itoa(len(r.Callees)) + ") ==\n")
 	b.WriteString(joinLines(r.Callees))
-	b.WriteString("== blast radius (" + itoa(len(r.BlastRadius)) + " symbols, " + itoa(len(r.BlastFiles)) + " files) ==\n")
+	b.WriteString("== blast radius (" + strconv.Itoa(len(r.BlastRadius)) + " symbols, " + strconv.Itoa(len(r.BlastFiles)) + " files) ==\n")
 	b.WriteString(joinLines(r.BlastRadius))
 	if len(r.BlastFiles) > 0 {
 		b.WriteString("== affected files ==\n")

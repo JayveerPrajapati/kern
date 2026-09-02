@@ -25,6 +25,12 @@ type BoundaryRule struct {
 type Boundaries struct {
 	Description string         `json:"description,omitempty"`
 	Rules       []BoundaryRule `json:"rules"`
+	// Pure opts into @pure mutability assertions: when true, `kern guard
+	// check` (and the MCP guard tool) also validate that every Go
+	// function/method whose doc comment contains "@pure" does not mutate
+	// anything outside its own stack frame. Off by default; the flag changes
+	// nothing when absent.
+	Pure bool `json:"pure,omitempty"`
 }
 
 // DefaultBoundariesPath returns where the guardrail rules live for a root.
@@ -253,21 +259,23 @@ func CheckBoundariesPrecise(ix *index.Index, b *Boundaries, files []string, stri
 // pair is permitted (default-permit for unconfigured pairs).
 func verdict(rules []BoundaryRule, fromDir, toDir string) *BoundaryRule {
 	for i := range rules {
-		if rules[i].Action == "allow" && dirMatch(rules[i].From, fromDir) && dirMatch(rules[i].To, toDir) {
+		if rules[i].Action == "allow" && DirMatch(rules[i].From, fromDir) && DirMatch(rules[i].To, toDir) {
 			return nil
 		}
 	}
 	for i := range rules {
-		if rules[i].Action == "forbid" && dirMatch(rules[i].From, fromDir) && dirMatch(rules[i].To, toDir) {
+		if rules[i].Action == "forbid" && DirMatch(rules[i].From, fromDir) && DirMatch(rules[i].To, toDir) {
 			return &rules[i]
 		}
 	}
 	return nil
 }
 
-// dirMatch matches a rule pattern against a directory: exact, "pattern/…"
-// prefix, or "…/pattern" suffix.
-func dirMatch(pattern, dir string) bool {
+// DirMatch is the canonical directory-pattern matcher (exact, "pattern/…"
+// prefix, or "…/pattern" suffix match). It matches a rule pattern against a
+// directory and is shared by the boundary guard layer and consumers in other
+// packages (e.g. internal/context) that need the same semantics.
+func DirMatch(pattern, dir string) bool {
 	if pattern == "" {
 		return false
 	}
