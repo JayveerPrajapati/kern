@@ -2,6 +2,7 @@ package execution
 
 import (
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -77,6 +78,15 @@ func (w *Worktree) Apply(patch string) error {
 // worktree is a git repo). Header paths are normalized to be relative to the
 // worktree root so the patch applies cleanly inside a copy.
 func (w *Worktree) Diff() (string, error) {
+	// `git diff --no-index` aborts with exit 128 ("fatal: cannot hash")
+	// when the source tree contains a file git cannot hash — unix sockets,
+	// FIFOs, device nodes (e.g. the event relay's .kern/events.sock). Move
+	// every non-regular file out of the compared tree first and restore it
+	// afterwards; the inode survives the round-trip, so a bound socket
+	// keeps working (new dials briefly fail while it is moved aside).
+	moves := moveUnhashableAside(w.srcRoot)
+	defer restoreMoved(moves)
+
 	cmd := exec.Command("git", "diff", "--no-index", "--", w.srcRoot, w.workDir)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -127,6 +137,40 @@ func (w *Worktree) Diff() (string, error) {
 		filtered = append(filtered, ln)
 	}
 	return strings.Join(filtered, "\n"), nil
+}
+
+// moveUnhashableAside moves non-regular files (sockets, FIFOs, device
+// nodes) out of root so git can hash every remaining entry, and returns
+// the [original, hidden] pairs for restoreMoved. Symlinks stay put: git
+// hashes them by target. Directories are never moved.
+func moveUnhashableAside(root string) [][2]string {
+	var moves [][2]string
+	_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return nil // unreadable entries are git's problem to report
+		}
+		info, ierr := d.Info()
+		if ierr != nil {
+			return nil
+		}
+		if info.Mode().Type()&(os.ModeSocket|os.ModeNamedPipe|os.ModeDevice) == 0 {
+			return nil
+		}
+		hidden := filepath.Join(os.TempDir(),
+			fmt.Sprintf("kern-diff-hidden-%d-%d", os.Getpid(), len(moves)))
+		if os.Rename(path, hidden) == nil {
+			moves = append(moves, [2]string{path, hidden})
+		}
+		return nil
+	})
+	return moves
+}
+
+// restoreMoved moves files hidden by moveUnhashableAside back into place.
+func restoreMoved(moves [][2]string) {
+	for i := len(moves) - 1; i >= 0; i-- {
+		_ = os.Rename(moves[i][1], moves[i][0])
+	}
 }
 
 // skippedDiffSection reports whether a normalized "diff --git a/X b/Y" header

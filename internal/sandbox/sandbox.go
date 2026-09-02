@@ -6,6 +6,8 @@ package sandbox
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io/fs"
 	"log"
@@ -240,6 +242,95 @@ func (s *Snap) changedSkipped() []string {
 	return changed
 }
 
+// Change is one entry of the sandbox impact manifest.
+type Change struct {
+	Path string `json:"path"` // relative to the sandbox root
+	Kind string `json:"kind"` // "created" | "modified" | "deleted"
+	Size int64  `json:"size"` // bytes (live file for created/modified; snapshot copy for deleted)
+	Hash string `json:"hash"` // sha256 hex of the content (live for created/modified; snapshot copy for deleted)
+}
+
+// Manifest diffs the live tree against the snapshot: paths present in the
+// snapshot but missing live are "deleted"; paths live but absent from the
+// snapshot are "created"; paths in both with different content are
+// "modified". Skipped (cap/read-error) paths are excluded from the entries —
+// the returned summary line notes them separately. Sorted by Path.
+func (s *Snap) Manifest() ([]Change, int) {
+	if s == nil || s.tmp == "" {
+		return nil, 0
+	}
+	// Hash every snapshotted file from the copy under s.tmp (the exact bytes
+	// at snapshot time) so deleted files can still be described by content.
+	snapshotHashes := make(map[string]string, len(s.files))
+	for _, rel := range s.files {
+		snapshotHashes[rel] = hashFile(filepath.Join(s.tmp, rel))
+	}
+	// Walk the live tree with the same ignore policy as Snapshot: SkipDirs are
+	// never descended into and non-regular/skipped files are ignored, so a
+	// rollback-visible file set is exactly what the manifest covers.
+	live := make(map[string]bool, len(s.files))
+	var changes []Change
+	_ = filepath.WalkDir(s.root, func(p string, d fs.DirEntry, werr error) error {
+		if werr != nil {
+			return nil
+		}
+		rel, rerr := filepath.Rel(s.root, p)
+		if rerr != nil || rel == "." {
+			return nil
+		}
+		if d.IsDir() {
+			if SkipDirs[d.Name()] {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !d.Type().IsRegular() || s.skipped[rel] {
+			return nil
+		}
+		live[rel] = true
+		livePath := filepath.Join(s.root, rel)
+		liveHash := hashFile(livePath)
+		if snapshotHash, ok := snapshotHashes[rel]; ok {
+			if liveHash != snapshotHash {
+				changes = append(changes, Change{Path: rel, Kind: "modified", Size: fileSize(livePath), Hash: liveHash})
+			}
+		} else {
+			changes = append(changes, Change{Path: rel, Kind: "created", Size: fileSize(livePath), Hash: liveHash})
+		}
+		return nil
+	})
+	// Deleted: present in the snapshot but gone from the live tree. Size and
+	// hash come from the snapshot copy, which still holds the original bytes.
+	for _, rel := range s.files {
+		if live[rel] {
+			continue
+		}
+		snapPath := filepath.Join(s.tmp, rel)
+		changes = append(changes, Change{Path: rel, Kind: "deleted", Size: fileSize(snapPath), Hash: hashFile(snapPath)})
+	}
+	sort.Slice(changes, func(i, j int) bool { return changes[i].Path < changes[j].Path })
+	return changes, len(s.skippedOverCap)
+}
+
+// hashFile returns the lowercase hex sha256 of a file's contents, or "" if it
+// cannot be read.
+func hashFile(path string) string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
+}
+
+// fileSize returns the size in bytes of path, or 0 when it cannot be stat'd.
+func fileSize(path string) int64 {
+	if fi, err := os.Lstat(path); err == nil {
+		return fi.Size()
+	}
+	return 0
+}
+
 // Restore reverts the live tree to the snapshot: tracked files are copied
 // back, files that did not exist in the snapshot are removed, and empty
 // directories created since are pruned. Ignored dirs (e.g. .git) are never
@@ -406,6 +497,16 @@ type Result struct {
 	// 100 MiB). Changes to these files cannot be rolled back, so callers should
 	// treat them with care and raise the cap if they must be restore-protected.
 	SkippedFiles []string
+	// Manifest lists the per-file impact of the run (created/modified/deleted
+	// vs the snapshot), computed after the command exits whether it succeeded
+	// or failed. Empty when the run left the snapshotted tree unchanged.
+	Manifest []Change
+	// Network records the run's network posture — the network half of the
+	// impact manifest (G-3). Zero-dependency builds cannot trace syscalls,
+	// so it captures the enforced policy and any network failures visible
+	// in the output, not per-connection attempts. Nil only when the run
+	// never started (snapshot failure).
+	Network *NetworkPolicy
 }
 
 // Run snapshots root, executes cmd in root, and restores the tree when the
@@ -444,6 +545,9 @@ func Run(parent context.Context, root string, cmdName string, args []string, tim
 	processgroup.Set(c)
 	out, err := c.CombinedOutput()
 	res.Output = string(out)
+	// G-3: record the run's network posture alongside the FS manifest so
+	// the impact audit covers the network half too.
+	res.Network = assessNetwork(string(out))
 	res.Duration = time.Since(start)
 	if ctx.Err() == context.DeadlineExceeded || ctx.Err() == context.Canceled {
 		// The context kill only reaches the direct child; kill the process
@@ -465,6 +569,11 @@ func Run(parent context.Context, root string, cmdName string, args []string, tim
 			res.Err = err
 		}
 	}
+	// Compute the impact manifest (created/modified/deleted vs the snapshot)
+	// before the restore decision: a failed run's changes are about to be
+	// rolled back, but they must still be auditable via res.Manifest. The
+	// skipped count is surfaced through res.SkippedFiles for the summary.
+	res.Manifest, _ = snap.Manifest()
 	if res.ExitCode != 0 || res.Err != nil {
 		// F7: files that exceeded the snapshot cap were never copied into the
 		// snapshot, so if the failed run modified or deleted one of them,
