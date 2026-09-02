@@ -9,6 +9,7 @@ import (
 	"os"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -179,9 +180,9 @@ func (s Summary) Render() string {
 	b.WriteString(" [")
 	b.WriteString(s.Language)
 	b.WriteString(", ")
-	b.WriteString(itoa(s.Lines))
+	b.WriteString(strconv.Itoa(s.Lines))
 	b.WriteString(" lines, ")
-	b.WriteString(itoa(len(s.Symbols)))
+	b.WriteString(strconv.Itoa(len(s.Symbols)))
 	b.WriteString(" symbols]\n")
 	for _, sym := range s.Symbols {
 		b.WriteString("  ")
@@ -189,7 +190,7 @@ func (s Summary) Render() string {
 		b.WriteString(" ")
 		b.WriteString(sym.Name)
 		b.WriteString(" :")
-		b.WriteString(itoa(sym.Line))
+		b.WriteString(strconv.Itoa(sym.Line))
 		if sym.Params != "" {
 			b.WriteString(" ")
 			b.WriteString(sym.Params)
@@ -197,28 +198,6 @@ func (s Summary) Render() string {
 		b.WriteString("\n")
 	}
 	return strings.TrimSuffix(b.String(), "\n")
-}
-
-func itoa(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	neg := n < 0
-	if neg {
-		n = -n
-	}
-	var buf [20]byte
-	i := len(buf)
-	for n > 0 {
-		i--
-		buf[i] = byte('0' + n%10)
-		n /= 10
-	}
-	if neg {
-		i--
-		buf[i] = '-'
-	}
-	return string(buf[i:])
 }
 
 func paramSnippet(line string) string {

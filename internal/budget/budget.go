@@ -4,10 +4,12 @@
 package budget
 
 import (
+	"bytes"
 	"regexp"
 	"strings"
 	"unicode/utf8"
 
+	"github.com/JayveerPrajapati/kern/internal/code"
 	"github.com/JayveerPrajapati/kern/internal/tokenize"
 )
 
@@ -89,6 +91,24 @@ func Fit(text string, maxTokens int) string {
 		result = result[:target]
 	}
 	return result
+}
+
+// FitCode fits text to maxTokens like Fit, but first tries signature-preserving
+// code folding (code.FoldContent): when the text is recognized as source code,
+// function/method bodies are replaced with elision markers so the type
+// skeleton survives the budget. Unknown or non-code text takes the plain Fit
+// path (byte-identical to Fit).
+func FitCode(text string, maxTokens int) string {
+	if text == "" || maxTokens <= 0 {
+		return Fit(text, maxTokens)
+	}
+	if tokenize.Count(text) <= maxTokens {
+		return text
+	}
+	if folded := code.FoldContent([]byte(text)); !bytes.Equal(folded, []byte(text)) {
+		text = string(folded)
+	}
+	return Fit(text, maxTokens)
 }
 
 func join(core, important []string) string {
