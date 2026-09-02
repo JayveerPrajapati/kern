@@ -23,18 +23,18 @@ type fileWatcher struct {
 	cancel   context.CancelFunc
 	wg       sync.WaitGroup
 	stopOnce sync.Once
-	notify   func()
+	notify   func(path string)
 }
 
 // newFileWatcher starts a background file watcher for root. The notify
-// callback is called (via Invalidate) when a source file is created,
-// modified, or deleted. It prefers the external inotifywait/fswatch tool;
+// callback is called with the relative path of a changed source file when a
+// burst of events settles. It prefers the external inotifywait/fswatch tool;
 // when unavailable it returns nil and the polling fallback is used. The
 // stdlib-native kqueue/inotify watcher is used by the long-lived
 // kern watch command instead of per-session watchers, because opening one
 // kqueue/inotify fd per directory would exhaust file descriptors when many
 // sessions exist (each MCP tool server owns one).
-func newFileWatcher(root string, notify func()) *fileWatcher {
+func newFileWatcher(root string, notify func(path string)) *fileWatcher {
 	name, args := lookupWatcherCmd(root)
 	if name == "" {
 		return nil
@@ -103,14 +103,16 @@ func (fw *fileWatcher) run(ctx context.Context, name string, args []string, root
 		debounce   time.Timer
 		debounceMu sync.Mutex
 		hasPending bool
-		reset      = func() {
+		lastPath   string
+		reset      = func(path string) {
 			debounce.Stop()
+			lastPath = path
 			debounce = *time.AfterFunc(200*time.Millisecond, func() {
 				debounceMu.Lock()
 				defer debounceMu.Unlock()
 				if hasPending {
 					hasPending = false
-					fw.notify()
+					fw.notify(lastPath)
 				}
 			})
 			hasPending = true
@@ -141,8 +143,11 @@ func (fw *fileWatcher) run(ctx context.Context, name string, args []string, root
 		if !isIndexablePath(path) {
 			continue
 		}
+		if rel, rerr := filepath.Rel(root, path); rerr == nil {
+			path = rel
+		}
 		debounceMu.Lock()
-		reset()
+		reset(path)
 		debounceMu.Unlock()
 	}
 }

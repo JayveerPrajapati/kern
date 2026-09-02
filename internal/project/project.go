@@ -48,7 +48,7 @@ func New(root, session string) *Session {
 		}
 	}
 	s := &Session{Root: root, Session: session}
-	s.watcher = newFileWatcher(root, s.Invalidate)
+	s.watcher = newFileWatcher(root, func(string) { s.Invalidate() })
 	return s
 }
 

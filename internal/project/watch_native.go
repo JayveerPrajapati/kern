@@ -15,10 +15,11 @@ import (
 )
 
 // nativeSource abstracts one OS file-event source. Event() delivers a
-// channel that fires (deduplicated, but not debounced) whenever an indexable
-// file under the watched root changes. Close releases the OS resources.
+// channel of relative paths (deduplicated per batch, but not debounced) for
+// every indexable file under the watched root that changed. Close releases
+// the OS resources.
 type nativeSource interface {
-	Event() <-chan struct{}
+	Event() <-chan string
 	Close()
 }
 
@@ -46,8 +47,9 @@ func WatchMode(root string) string {
 
 // newNativeFileWatcher starts a background native watcher for root, or
 // returns nil when this platform has no native source (fall back to the
-// external tool / polling path).
-func newNativeFileWatcher(root string, notify func()) *fileWatcher {
+// external tool / polling path). notify receives the relative path of the
+// last changed file in each collapsed burst.
+func newNativeFileWatcher(root string, notify func(path string)) *fileWatcher {
 	src := newNativeSource(root)
 	if src == nil {
 		return nil
@@ -65,11 +67,11 @@ func newNativeFileWatcher(root string, notify func()) *fileWatcher {
 			select {
 			case <-ctx.Done():
 				return
-			case _, ok := <-ev:
+			case p, ok := <-ev:
 				if !ok {
 					return
 				}
-				send()
+				send(p)
 			}
 		}
 	}()
@@ -77,28 +79,33 @@ func newNativeFileWatcher(root string, notify func()) *fileWatcher {
 }
 
 // debounceSend returns a function that, once called, fires send() after the
-// streaks of events settle for `settle` (collapsing bursts like the external
-// watcher does). stop() aborts a pending fire.
-func debounceSend(send func(), settle time.Duration) (notify func(), stop func()) {
+// streak of events settles for `settle` (collapsing bursts like the external
+// watcher does). Trailing: every notify resets the timer, so send fires
+// exactly once per burst, after the LAST event settles, carrying the path of
+// the most recent event. stop() aborts a pending fire.
+func debounceSend(send func(path string), settle time.Duration) (notify func(path string), stop func()) {
 	var (
 		mu   sync.Mutex
 		t    *time.Timer
 		pend bool
+		last string
 		fire = func() {
 			mu.Lock()
 			defer mu.Unlock()
 			if pend {
 				pend = false
-				send()
+				send(last)
 			}
 		}
 	)
-	notify = func() {
+	notify = func(path string) {
 		mu.Lock()
 		defer mu.Unlock()
-		if t == nil {
-			t = time.AfterFunc(settle, fire)
+		if t != nil {
+			t.Stop()
 		}
+		last = path
+		t = time.AfterFunc(settle, fire)
 		pend = true
 	}
 	stop = func() {
