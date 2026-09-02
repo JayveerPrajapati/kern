@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/JayveerPrajapati/kern/internal/ignore"
@@ -442,6 +443,10 @@ func Scan(root string) ([]Finding, error) {
 		if isConfigFile(rel) {
 			findings = append(findings, ScanConfigFile(rel, src)...)
 		}
+		// Python files get an additional Python-aware scan pass (G-4).
+		if isPythonFile(rel) {
+			findings = append(findings, ScanPythonFile(rel, src)...)
+		}
 		return nil
 	})
 	sort.Slice(findings, func(i, j int) bool {
@@ -475,6 +480,26 @@ func FilterBySeverity(findings []Finding, allow []string) []Finding {
 	return out
 }
 
+// FilterByFiles keeps only findings whose File is in the files set (G-4),
+// used to scope findings to the files touched by a git range. An empty set
+// matches nothing — pass nil to disable the filter.
+func FilterByFiles(findings []Finding, files []string) []Finding {
+	if len(files) == 0 {
+		return nil
+	}
+	set := make(map[string]bool, len(files))
+	for _, f := range files {
+		set[f] = true
+	}
+	out := make([]Finding, 0, len(findings))
+	for _, fd := range findings {
+		if set[fd.File] {
+			out = append(out, fd)
+		}
+	}
+	return out
+}
+
 // Render formats findings as stable "severity rule file:line message" lines.
 func Render(findings []Finding, max int) string {
 	var b strings.Builder
@@ -489,7 +514,7 @@ func Render(findings []Finding, max int) string {
 		b.WriteString(" ")
 		b.WriteString(f.File)
 		b.WriteString(":")
-		b.WriteString(itoa(f.Line))
+		b.WriteString(strconv.Itoa(f.Line))
 		b.WriteString(" ")
 		b.WriteString(f.Message)
 		if f.Snippet != "" {
@@ -501,7 +526,7 @@ func Render(findings []Finding, max int) string {
 	}
 	if max > 0 && len(findings) > max {
 		b.WriteString("... and ")
-		b.WriteString(itoa(len(findings) - max))
+		b.WriteString(strconv.Itoa(len(findings) - max))
 		b.WriteString(" more findings\n")
 	}
 	return b.String()
@@ -533,6 +558,12 @@ func isConfigFile(rel string) bool {
 		return true
 	}
 	return false
+}
+
+// isPythonFile reports whether the file is a Python source file, which
+// receives the Python-aware scan pass (G-4) in addition to the generic one.
+func isPythonFile(rel string) bool {
+	return strings.EqualFold(filepath.Ext(rel), ".py")
 }
 
 // ScanConfigFile runs config-specific rules against a configuration file.
@@ -586,18 +617,4 @@ func snippet(src []byte, start, end int) string {
 		s = s[:117] + "..."
 	}
 	return s
-}
-
-func itoa(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	var buf [8]byte
-	i := len(buf)
-	for n > 0 {
-		i--
-		buf[i] = byte('0' + n%10)
-		n /= 10
-	}
-	return string(buf[i:])
 }
