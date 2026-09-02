@@ -13,12 +13,14 @@ import (
 
 	"github.com/JayveerPrajapati/kern/internal/code"
 	"github.com/JayveerPrajapati/kern/internal/doctor"
+	"github.com/JayveerPrajapati/kern/internal/eventbus"
 	"github.com/JayveerPrajapati/kern/internal/governance"
 	"github.com/JayveerPrajapati/kern/internal/index"
 	"github.com/JayveerPrajapati/kern/internal/intel"
 	"github.com/JayveerPrajapati/kern/internal/lock"
 	"github.com/JayveerPrajapati/kern/internal/pack"
 	"github.com/JayveerPrajapati/kern/internal/prompt"
+	"github.com/JayveerPrajapati/kern/internal/relay"
 	"github.com/JayveerPrajapati/kern/internal/swap"
 )
 
@@ -254,9 +256,11 @@ func runLock(rest []string) {
 	lk, err := lock.Acquire(root, scope)
 	if err != nil {
 		_, pid, _ := lock.Held(root, scope)
+		emitLockEvent(root, string(eventbus.LockContended), scope, map[string]any{"holder_pid": pid})
 		fatal("lock %q is held (pid %d): %v", scope, pid, err)
 	}
 	defer lk.Release()
+	emitLockEvent(root, string(eventbus.LockAcquired), scope, map[string]any{"pid": os.Getpid()})
 	if f.hold {
 		// Non-blocking mode for tool/plugin callers: acquire, report, and
 		// return immediately. The OS releases the flock on exit, so the
@@ -291,6 +295,7 @@ func runUnlock(rest []string) {
 	if err := lock.Remove(root, args[0]); err != nil {
 		fatal("%v", err)
 	}
+	emitLockEvent(root, string(eventbus.LockReleased), args[0], nil)
 	fmt.Printf("lock removed: %s\n", args[0])
 
 }
@@ -416,6 +421,12 @@ func runGuard(rest []string) {
 
 		strict := f.precision == "strict"
 		violations, skipped := intel.CheckBoundariesPrecise(ix, b, files, strict)
+		// @pure mutability assertions are opt-in via "pure": true in
+		// .kern/boundaries.json. A nil ruleset (missing file) has no Pure flag,
+		// so the check is naturally skipped when the guard is not configured.
+		if b != nil && b.Pure {
+			violations = append(violations, intel.CheckPurity(ix, files)...)
+		}
 		switch {
 		case f.sarif:
 			fmt.Println(intel.RenderViolationsSARIF(violations, version))
@@ -462,6 +473,12 @@ func runGuard(rest []string) {
 				}
 			}
 		}
+		// Publish guard outcomes as ArchitectureViolation / ArchitectureWarning
+		// events on a persisted bus rooted at root, so other processes (e.g.
+		// kern-server webhook delivery) can see guard results. Best-effort
+		// side effect: output and exit behavior are unchanged, and the events
+		// are persisted even when the check REJECTs below.
+		publishGuardEvents(root, violations, skipped["boundaries-not-configured"] > 0)
 		if f.threshold >= 0 && len(violations) > f.threshold {
 			panic(exitError{code: 2})
 		}
@@ -471,34 +488,31 @@ func runGuard(rest []string) {
 
 }
 
-// cliDefaultAgentID is the default agent identity for CLI guard checks.
-const cliDefaultAgentID = "default"
-
-// registerDefaultAgentCLI registers the default agent for CLI (idempotent).
-func registerDefaultAgentCLI() {
-	if _, err := governance.GetAgent(cliDefaultAgentID); err == nil {
-		return
-	}
-	_ = governance.RegisterAgent(governance.NewAgent(cliDefaultAgentID, "Default Agent", "default", []governance.Permission{
-		{Resource: "context", Action: "read"},
-	}))
+// publishGuardEvents publishes guard outcomes as ArchitectureViolation /
+// ArchitectureWarning events: appended to the persisted bus at
+// <root>/.kern/events.jsonl (replayed by kern-server on start) AND, when a
+// relay owns <root>/.kern/events.sock, emitted live so `kern events watch`
+// subscribers see guard results immediately instead of at the next replay.
+// Publishing is best-effort and deterministic (event order = violation order);
+// it never fails the guard or alters its output or exit behavior.
+func publishGuardEvents(root string, violations []intel.Violation, warnNotConfigured bool) {
+	relay.PublishPersisted(root, intel.GuardEvents(violations, warnNotConfigured))
 }
 
-// permissiveGuardMode reports whether KERN_MCP_PERMISSIVE is set.
-func permissiveGuardMode() bool {
-	v := os.Getenv("KERN_MCP_PERMISSIVE")
-	return v == "1" || strings.EqualFold(v, "true")
-}
+// The CLI guard's default agent identity and the KERN_MCP_PERMISSIVE escape
+// hatch live in internal/governance (DefaultAgentID, PermissiveMode,
+// EnsureDefaultAgent) — shared with the MCP server so both surfaces govern
+// identically.
 
 // guardAuthzVerdict runs authorization for guard check and returns the verdict.
 func guardAuthzVerdict(agentID, task string, ix *index.Index, files []string) (map[string]any, bool) {
-	if agentID == cliDefaultAgentID {
-		registerDefaultAgentCLI()
+	if agentID == governance.DefaultAgentID {
+		governance.EnsureDefaultAgent()
 	}
 
 	agent, aerr := governance.GetAgent(agentID)
 	if aerr != nil {
-		if permissiveGuardMode() {
+		if governance.PermissiveMode() {
 			return map[string]any{
 				"schema_version": AuthzVerdictSchemaVersion,
 				"agent_id":       agentID,

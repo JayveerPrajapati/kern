@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -13,6 +14,67 @@ import (
 func guardCheckFixture(t *testing.T) string {
 	t.Helper()
 	return jsonCliFixture(t)
+}
+
+// pureGuardCLIFixture writes a module whose boundaries opt into @pure
+// assertions and whose main.go carries an @pure function that mutates a
+// package-level var.
+func pureGuardCLIFixture(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	files := map[string]string{
+		"go.mod": "module pureguard\n\ngo 1.20\n",
+		"main.go": `package main
+
+var counter int
+
+// Inc bumps the counter. @pure
+func Inc() {
+	counter++
+}
+
+func main() { Inc() }
+`,
+		".kern/boundaries.json": `{"pure": true}
+`,
+	}
+	for rel, content := range files {
+		p := filepath.Join(dir, rel)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return dir
+}
+
+// TestGuardCheck_PureRules: with "pure": true the @pure mutation is reported
+// as a violation in the guard JSON; without the flag it is not (opt-in).
+func TestGuardCheck_PureRules(t *testing.T) {
+	root := pureGuardCLIFixture(t)
+	out := guardCheckJSON(t, root, "--file", "main.go", "--threshold", "5")
+	violations, ok := out["violations"].([]any)
+	if !ok || len(violations) == 0 {
+		t.Fatalf("expected @pure violation, got JSON %v", out)
+	}
+	v := violations[0].(map[string]any)
+	if v["rule_from"] != "@pure" {
+		t.Fatalf("rule_from = %v, want @pure (violation %v)", v["rule_from"], v)
+	}
+	if !strings.Contains(v["rule_to"].(string), "counter") {
+		t.Fatalf("rule_to = %v, want var:counter", v["rule_to"])
+	}
+	// Same code, no "pure" flag -> no violations at all.
+	root2 := pureGuardCLIFixture(t)
+	if err := os.WriteFile(filepath.Join(root2, ".kern", "boundaries.json"), []byte("{\"rules\": []}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out2 := guardCheckJSON(t, root2, "--file", "main.go", "--threshold", "5")
+	if vs, ok := out2["violations"].([]any); ok && len(vs) != 0 {
+		t.Fatalf("expected no violations without the pure flag, got %v", vs)
+	}
 }
 
 // guardCheckJSON runs `kern guard check --json` in-process against root with
@@ -182,5 +244,110 @@ func TestGuardCheck_SchemaVersionBumped(t *testing.T) {
 	out := guardCheckJSON(t, root, "--file", "main.go")
 	if sv, ok := out["schema_version"].(float64); !ok || int(sv) != 2 {
 		t.Fatalf("schema_version = %v, want 2", out["schema_version"])
+	}
+}
+
+// guardViolationFixture writes a module whose boundaries forbid a web->db
+// crossing that web/caller.go commits, so `kern guard check --file web/caller.go`
+// reports an ArchitectureViolation.
+func guardViolationFixture(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	files := map[string]string{
+		"go.mod": "module guardviolation\n\ngo 1.20\n",
+		"web/caller.go": `package web
+
+import "guardviolation/db"
+
+func Caller() string { return db.Do() }
+`,
+		"db/db.go":              "package db\n\nfunc Do() string { return \"d\" }\n",
+		".kern/boundaries.json": `{"rules":[{"from":"web","to":"db","action":"forbid"}]}`,
+	}
+	for rel, content := range files {
+		p := filepath.Join(dir, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return dir
+}
+
+// TestGuardCheckPublishesEvents: a violating `kern guard check` persists an
+// ArchitectureViolation event to .kern/events.jsonl (before any REJECT exit),
+// so kern-server can replay guard results into its webhook bus.
+func TestGuardCheckPublishesEvents(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	root := guardViolationFixture(t)
+	out := guardCheckJSON(t, root, "--file", "web/caller.go", "--threshold", "5")
+	violations, ok := out["violations"].([]any)
+	if !ok || len(violations) == 0 {
+		t.Fatalf("expected a boundary violation, got JSON %v", out)
+	}
+	v := violations[0].(map[string]any)
+	sym, _ := v["symbol"].(string)
+	if sym == "" {
+		sym, _ = v["caller_file"].(string)
+	}
+
+	eventsPath := filepath.Join(root, ".kern", "events.jsonl")
+	data, err := os.ReadFile(eventsPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", eventsPath, err)
+	}
+	content := string(data)
+	if !strings.Contains(content, `"Kind":"architecture.violation"`) {
+		t.Fatalf("events file missing ArchitectureViolation event, got: %s", content)
+	}
+	if !strings.Contains(content, `"Source":"guard"`) {
+		t.Fatalf("events file missing guard source, got: %s", content)
+	}
+	if sym == "" || !strings.Contains(content, sym) {
+		t.Fatalf("events file missing violating symbol %q, got: %s", sym, content)
+	}
+
+	// REJECT behavior is unchanged: default threshold 0 with a violation exits
+	// 2 — but the events were already persisted before the panic.
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				if e, ok := r.(exitError); ok && e.code == 2 {
+					return
+				}
+				t.Fatalf("unexpected panic: %v", r)
+			}
+			t.Fatal("expected exitError{code: 2} on REJECT, got no panic")
+		}()
+		runGuard([]string{"check", root, "--file", "web/caller.go"})
+	}()
+	if data, err := os.ReadFile(eventsPath); err != nil {
+		t.Fatalf("events file missing after REJECT: %v", err)
+	} else if !strings.Contains(string(data), `"Kind":"architecture.violation"`) {
+		t.Fatalf("events file lost the violation after REJECT, got: %s", string(data))
+	}
+}
+
+// TestGuardCheckPublishesWarningWhenUnconfigured: with no boundaries file the
+// guard publishes a single ArchitectureWarning event instead of a violation.
+func TestGuardCheckPublishesWarningWhenUnconfigured(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	root := guardCheckFixture(t) // no .kern/boundaries.json
+	out := guardCheckJSON(t, root, "--file", "main.go")
+	if vs, ok := out["violations"].([]any); ok && len(vs) != 0 {
+		t.Fatalf("expected no violations, got %v", vs)
+	}
+	data, err := os.ReadFile(filepath.Join(root, ".kern", "events.jsonl"))
+	if err != nil {
+		t.Fatalf("read events file: %v", err)
+	}
+	content := string(data)
+	if !strings.Contains(content, `"Kind":"architecture.warning"`) {
+		t.Fatalf("events file missing ArchitectureWarning event, got: %s", content)
+	}
+	if !strings.Contains(content, "boundaries not configured") {
+		t.Fatalf("events file missing unconfigured warning payload, got: %s", content)
 	}
 }

@@ -122,7 +122,7 @@ func runEvidenceVerify(rest []string) int {
 	if *root != "" {
 		repoRoot = *root
 	}
-	store := storage.NewLocal(filepath.Join(repoRoot, ".kern", "audit"))
+	store := storage.NewLog(filepath.Join(repoRoot, ".kern", "audit"))
 	log := governance.NewAuditLog().WithStore(store)
 	if _, err := log.Replay(); err != nil {
 		fmt.Fprintf(os.Stderr, "kern evidence verify: replay audit chain at %s: %v\n", repoRoot, err)
