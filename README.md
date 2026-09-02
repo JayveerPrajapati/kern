@@ -27,7 +27,7 @@ Already installed? Run `kern doctor` to verify everything is wired.
 
 <br>
 
-**Phase-aware MCP routing (11 high-level tools by default, 84 in full mode) · 90+ CLI commands · 17 indexed languages (Go + Java resolved; 15 at heuristic precision — skipped under `--precision strict`; build with `-tags treesitter` for AST) · 100% local**
+**Phase-aware MCP routing (11 high-level tools by default, 86 in full mode) · 90+ CLI commands · 17 indexed languages (Go + Java resolved; 15 at heuristic precision — skipped under `--precision strict`; build with `-tags treesitter` for AST) · 100% local**
 
 </div>
 
@@ -238,7 +238,7 @@ remote providers only if you set `KERN_LLM_PROVIDER`).
 | **Instant value** | One command compresses a noisy log; one command maps a whole project; a 30-second quick start |
 | **Deterministic output** | Rule-based, byte-identical on identical input; heuristic token counting (opt-in byte-level BPE counter) |
 | **100% private** | No telemetry, no network by default, no paid APIs; optional LLM rewriting (local Ollama by default) that silently falls back when absent |
-| **One command wires every agent** | `kern setup` configures 17+ agent surfaces (MCP-based) in one shot |
+| **One command wires every agent** | `kern setup` configures 12 built-in agent surfaces (MCP-based) plus custom adapters via `.kern/agents.json` in one shot |
 | **Savings you can measure** | Every run is tracked: `kern stats` / `kern diff` report before/after tokens and cost saved |
 | **Real code intelligence** | AST index + dependency-free analysis: change impact, blast radius, hotspots, dead code, call paths, architecture guards, communities, coverage gaps |
 | **Framework-aware** | 74-framework detection catalog + route extraction linking URL patterns to handlers |
@@ -335,7 +335,7 @@ codebase's stack is answered in one call.
    with WAL journaling and FTS5 full-text search for concurrent access.
 
 3. **Analysis** — 90+ CLI commands and the MCP tool catalog (11 high-level
-   tools by default, 84 in full mode) read the same index:
+   tools by default, 86 in full mode) read the same index:
    call graphs, blast radius, change impact, hotspots, dead code, path
    finding, architecture communities, coverage gaps — all dependency-free,
    all deterministic.
@@ -392,6 +392,7 @@ kern exec "<code>" [--lang LANG] [--timeout s] [--max bytes] [--stdin file|-]
 kern doctor [root]                              diagnostics report
 kern mask [file|-] [--names a,b,c]              mask secrets/PII locally
 kern sec [root] [--severity ...] [--max N] [--json]   security scan (exit 1 on errors)
+kern taint [root] [--file F] [--range a..b] [--generate]   taint-lite scan; --range scopes to files changed in a git range; --generate emits test scaffolds (Go + pytest)
 kern delete <symbol> [root] [--json]            safe-delete check (exit 1 when unsafe)
 kern rename <old> <new> [root] [--apply] [--json]    structural rename (AST-scoped)
 kern guide                                          categorized tool usage guide (performance tiers)
@@ -405,6 +406,8 @@ kern changes / review / hubs / testgaps / entries / flows / communities / path /
                                 change impact and code-intelligence analyses
 kern fts "<query>" [root] [--limit N]               full-text search over the SQLite index
                                 (requires -tags sqlite)
+kern cache (dir|entries|size|maintain) [root] [--dry-run]   cache GC: gzip-archive dormant entries, TTL-evict stale ones
+kern lsp [root]                                     LSP over stdio: hover/definition/references from the index
 kern guard init [root]                              scaffold .kern/boundaries.json
 kern guard check [root] [--file F] [--range a..b] [--json|--sarif] [--threshold N]
                                 reject boundary violations (exit 2 when count > N)
@@ -416,7 +419,7 @@ kern analyze <change> [--root ROOT]          analyze a proposed change against t
 kern team [--root ROOT]                      build the standard specialist team; list roles + task states
 kern risk <change> [--root ROOT]             deterministic risk report for a proposed change
 kern bridges [root] [--limit N] [--json]     cross-package bridge detection (coupling points)
-kern sandbox "<command>"                         run with filesystem snapshot + rollback
+kern sandbox "<command>"                         run with filesystem snapshot + rollback; every run reports its network policy (posture + network-error hits from output)
 kern schema ...                                  JSON-schema validation
 kern docs index/search/fetch                     local docs index for doc search
 kern version                                     print the installed version
@@ -461,15 +464,15 @@ another code-intelligence MCP. Three properties set it apart:
   enforces architecture boundaries; phase-aware routing keeps agents focused
   instead of overwhelmed — 4 phases (explore/plan/edit/verify), each with a
   focused shortlist. Set `KERN_MCP_PHASE=explore` to filter the advertised
-  tools; the full 84-tool catalog stays behind `KERN_MCP_FULL=1`.
+  tools; the full 86-tool catalog stays behind `KERN_MCP_FULL=1`.
   Most MCP servers expose capability with no policy layer.
 
 When running as an MCP server (`kern-mcp`), kern exposes an **11-tool
 high-level surface by default** (routed through `kern_meta`), with the full
-**toolset (84 tools)** behind `KERN_MCP_FULL=1` for advanced use — and
+**toolset (86 tools)** behind `KERN_MCP_FULL=1` for advanced use — and
 phase-aware routing (`KERN_MCP_PHASE=explore|plan|edit|verify`) as the
 default way to keep the advertised list focused. They map 1:1 to the CLI
-commands, so opencode, Claude Code, Codex, Cursor and 12 more agents get the
+commands, so opencode, Claude Code, Codex, Cursor and 8 more agents get the
 engine over MCP:
 
 | Group | Tools |
@@ -531,7 +534,29 @@ Everything else — compression, indexing, analysis, search, masking, token
 counting — runs entirely on your machine. If you're reading a prompt that
 contains secrets, `kern mask` scrubs them **before** any optional LLM call.
 
+### Security posture at a glance
+
+kern's surfaces are deliberately fail-closed: nothing exposes data or runs
+code unless a human opt-in exists. The matrix:
+
+| Surface | Default posture | Opt-in / escape hatch |
+|---|---|---|
+| **CLI** (`kern ...`) | local process, no daemon, no listening socket | - |
+| **MCP stdio** (`kern mcp`) | local pipe; path args confined to cwd (**fail-closed**) | `KERN_MCP_PERMISSIVE=1` restores raw mode; `KERN_MCP_ROOTS` pins explicit roots |
+| **MCP HTTP** (`kern-mcp --http`) | **loopback-only** - a non-loopback bind is refused (kern-mcp exposes RCE-capable tools) | run behind your own authenticated proxy if remote access is required |
+| **MCP exec tools** (`kern_exec`/`kern_sandbox`/`kern_execute`) | **denied** unless allowlisted | `KERN_ALLOW_EXEC=1` or `KERN_TOOLS` allowlist |
+| **Script/sandbox isolation** | isolated by default; `no_isolate` ignored, network blocked | `KERN_ALLOW_NO_ISOLATE=1`, `KERN_ALLOW_NET=1` |
+| **kern-server (local mode)** | binds `127.0.0.1:8090` by default, **no auth** - localhost only | change `-addr` at your own risk; put a proxy in front for remote |
+| **kern-server (enterprise mode)** | **fail-closed**: refuses to serve (503) without `KERN_AUTH_TOKEN`; per-project isolation | `-enterprise` + `KERN_ENTERPRISE_PROJECTS` |
+| **Deploy** (`ShellDeployer`) | **fail-closed**: refuses to run unless explicitly enabled | `KERN_ALLOW_DEPLOY=1` (+ optional `KERN_DEPLOY_COMMAND`) |
+| **Remote LLM providers** | never contacted by default | `--llm` + `KERN_LLM_PROVIDER=anthropic|openai|google`; prompts masked first |
+
+Every gate is documented in code next to its check (e.g.
+`internal/governance/exec.go`, `internal/deployment/deployment.go`,
+`internal/mcp/gate.go`), so the fail-closed behavior is auditable, not a claim.
+
 ---
+
 
 ## Configuration
 
@@ -546,10 +571,49 @@ extensions; there's nothing to wire per language. What exists:
 - **`.kern/docs/`** (optional) — local doc index. `kern docs index` (or
   `kern_doc_index(semantic=true)`) embeds project docs with a local Ollama
   model for real-meaning `kern_doc_search`.
+- **`.kern/agents.json`** (optional) — custom agent wiring. Declare
+  forked/private agents as JSON (`name`, config `path` with `~`/`$VAR`
+  expansion, servers `key`, `entry` shape `stdio`|`cmd`, `scope`
+  `global`|`repo`) and `kern setup` wires them exactly like the built-in
+  adapters; a name clash with a builtin overrides it. The user-scope
+  counterpart is `~/.config/kern/agents.json` (project file wins on
+  clash). Like the rest of `.kern/`, it is gitignored by default —
+  unignore it to share a team's agent list.
+- **Event relay** — `kern events serve` owns `.kern/events.sock` and fans
+  the system event bus out to any number of watchers across processes;
+  `kern events watch [--kind policy.evaluated,...] [--json]` streams it,
+  and `kern events emit <kind> [--subject S] [--payload k=v]` publishes
+  from scripts. `kern lock`/`unlock` publish lock lifecycle events
+  (acquired/contended/released) through the relay, so concurrent agents
+  see contention in real time. Guard check outcomes publish the same way:
+violations and the not-configured warning are appended to
+`.kern/events.jsonl` for replay when no relay is running, and streamed
+live when one is. The socket is local-user-only; a second
+  server (e.g. kern-server) detects the live owner and runs without its
+  own relay. Deep workspace paths that exceed the OS socket-path limit
+  transparently bind under a hashed name in the temp dir.
 - **Environment variables** — `OLLAMA_HOST` (default `http://localhost:11434`,
   used only when you opt in), `KERN_EMBED_MODEL` (default
   `nomic-embed-text`), `KERN_VERSION`/`KERN_INSTALL_DIR` (installer).
-
+`KERN_TOKENIZER` selects the token counter used across all sizing and
+savings numbers: `estimator` (default — stable, heuristic, offline),
+`bpe` (self-trained byte-level BPE), or exact OpenAI encodings
+`cl100k` / `o200k` (official rank tables embedded in the binary; GPT-4o
+and o-series models map to o200k, GPT-3.5/4 to cl100k via `KERN_MODEL`).
+The estimator stays the default so historical numbers remain comparable;
+`go run ./evaluate/bench` gates the exact counters against reference
+counts. `KERN_CACHE_ARCHIVE_DAYS` (default 7) and `KERN_CACHE_TTL_DAYS`
+(default 30) drive the cache garbage collector: entries untouched past
+the archive age are gzip-compressed in place, and past the TTL they are
+evicted (`kern cache maintain [--dry-run]` runs it on demand; it also
+runs automatically, at most once an hour). `KERN_MCP_AUDIT_DIR` overrides
+where the MCP server persists its tool-call audit chain (default
+`<project>/.kern/audit`).
+`KERN_INCREMENTAL=1` makes the web console rebuild its index
+incrementally on staleness: unchanged files (mtime fast path, then
+content-hash check) reuse the previous index's per-file parse results
+instead of re-parsing. Rebuilds stay equivalent to full rebuilds; the
+flag only changes how the new index is computed.
 What it skips out of the box: dependency/build/cache directories
 (`node_modules`, `vendor`, `dist`, `target`, `.venv`, …), anything in
 `.gitignore` (root and nested), generated files (path conventions or a
@@ -587,7 +651,7 @@ native hooks for agents whose hook APIs allow it:
 | **Codex** | `[mcp_servers.kern]` in `~/.codex/config.toml` | — (no output-rewrite hook API) |
 | **JSON adapters** | `continue`, `windsurf`, `zed`, `vscode`, `antigravity`, `qwen`, `qoder`, `kiro`, `copilot` (VS Code), `copilot-cli` | — (no hook API) |
 
-All agents receive the same MCP surface (11 high-level tools by default, 84
+All agents receive the same MCP surface (11 high-level tools by default, 86
 in full mode, phase-filtered via `KERN_MCP_PHASE`) and the same `AGENTS.md` rules. Output
 compression + session memory run natively where the platform's hook API allows
 in-place output replacement (opencode, Claude Code, Gemini); agents without
