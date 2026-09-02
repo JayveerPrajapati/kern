@@ -30,6 +30,9 @@ func Acquire(root, scope string) (*Lock, error) {
 	}
 	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		f.Close()
+		if hook := ContentionHook; hook != nil {
+			hook(scope, holderPID(p))
+		}
 		return nil, ErrLocked
 	}
 	h := holder{Scope: scope, PID: os.Getpid(), AcquiredAt: time.Now().UTC()}

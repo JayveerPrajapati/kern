@@ -8,7 +8,7 @@ prebuilt symbol index instead of re-reading files.
 
 ## The kern_meta tool (preferred entry point)
 
-Instead of choosing among 84 individual `kern_*` tools, call the single
+Instead of choosing among 86 individual `kern_*` tools, call the single
 **`kern_meta`** tool with a natural-language request. Kern classifies the
 request and runs the right tool(s) internally — you get the same result
 without having to know which tool fits. Think in phases: explore (read/discover),
@@ -127,7 +127,7 @@ re-explore or re-parse files that the index already covers.
 
 ## Full capability catalog
 
-`kern` ships ~79 `kern_*` MCP tools across these domains. If you are unsure
+`kern` ships 86 `kern_*` MCP tools across these domains. If you are unsure
 which tool fits, call `kern_usage_guide` (categorized guide with performance
 tiers) or `kern_agents` (specialist roster) first to enumerate options. Reach
 into these groups for the "full capabilities" — do not limit yourself to the

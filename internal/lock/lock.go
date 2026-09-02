@@ -21,6 +21,13 @@ var ErrLocked = errors.New("lock is held by another process")
 // ErrScopeRequired is returned when Acquire is called with an empty scope.
 var ErrScopeRequired = errors.New("lock scope is required")
 
+// ContentionHook, when non-nil, is invoked when Acquire finds a scope
+// already held by another process, with the holder's recorded PID (0
+// when unknown). Set it once at startup, before concurrent Acquire
+// calls, to surface contention to an event relay or logger; the package
+// itself stays free of event dependencies.
+var ContentionHook func(scope string, holderPID int)
+
 // Lock is a held advisory lock. Release it when the guarded region ends; the
 // operating system releases it automatically on process exit.
 type Lock struct {

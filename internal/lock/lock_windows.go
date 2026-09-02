@@ -61,10 +61,16 @@ func Acquire(root, scope string) (*Lock, error) {
 			return nil, err
 		}
 		if !reclaim(p) {
+			if hook := ContentionHook; hook != nil {
+				hook(scope, holderPID(p))
+			}
 			return nil, ErrLocked
 		}
 		f, err = os.OpenFile(p, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
 		if err != nil {
+			if hook := ContentionHook; hook != nil {
+				hook(scope, holderPID(p))
+			}
 			return nil, ErrLocked
 		}
 	}
