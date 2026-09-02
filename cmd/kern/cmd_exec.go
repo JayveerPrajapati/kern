@@ -6,6 +6,7 @@ import (
 	kdiff "github.com/JayveerPrajapati/kern/internal/diff"
 	"github.com/JayveerPrajapati/kern/internal/governance"
 	"github.com/JayveerPrajapati/kern/internal/heal"
+	"github.com/JayveerPrajapati/kern/internal/index"
 	"github.com/JayveerPrajapati/kern/internal/optimize"
 	"github.com/JayveerPrajapati/kern/internal/sandbox"
 	"github.com/JayveerPrajapati/kern/internal/script"
@@ -167,7 +168,7 @@ func runUdiff(rest []string) {
 		fatalUsage("flags: %v", err)
 	}
 	if len(args) < 2 {
-		fatalUsage("usage: kern udiff <file-a> <file-b> [--out out.patch]")
+		fatalUsage("usage: kern udiff <file-a> <file-b> [--out out.patch] [--compact]")
 	}
 	ab, err := os.ReadFile(args[0])
 	if err != nil {
@@ -176,6 +177,24 @@ func runUdiff(rest []string) {
 	bb, err := os.ReadFile(args[1])
 	if err != nil {
 		fatal("cannot read %s: %v", args[1], err)
+	}
+	if f.compact {
+		// View-only compact diff: cannot combine with --out (not a patch).
+		if f.out != "" {
+			fatalUsage("--compact and --out cannot be combined")
+		}
+		root := f.root
+		if root == "" {
+			root = "."
+		}
+		ix, _ := index.Load(root)
+		u := kdiff.Compact(args[0], args[1], splitLines(string(ab)), splitLines(string(bb)), kdiff.IndexSpanResolver(ix))
+		if u == "" {
+			fmt.Println("files identical")
+			return
+		}
+		fmt.Print(u)
+		return
 	}
 	u := kdiff.Unified(args[0], args[1], splitLines(string(ab)), splitLines(string(bb)))
 	if u == "" {
@@ -255,6 +274,7 @@ func runSandbox(rest []string) {
 			"restored":    res.Restored,
 			"snapshots":   res.Snapshots,
 			"output":      res.Output,
+			"network":     res.Network.Summary(),
 		})
 		if !res.OK {
 			panic(exitError{code: 1})
@@ -264,6 +284,9 @@ func runSandbox(rest []string) {
 	fmt.Printf("kern: sandbox run in %s: %s\n", root, strings.Join(cmdParts, " "))
 	res := sandbox.Run(context.Background(), root, cmdParts[0], cmdParts[1:], toolTimeout(f))
 	fmt.Print(res.Output)
+	if res.Network != nil {
+		fmt.Printf("kern: network: %s\n", res.Network.Summary())
+	}
 	if res.OK {
 		fmt.Printf("kern: succeeded (%s); changes kept\n", res.Duration.Round(time.Millisecond))
 		return

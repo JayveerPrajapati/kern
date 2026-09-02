@@ -16,7 +16,6 @@ import (
 
 	"github.com/JayveerPrajapati/kern/internal/mcp"
 	"github.com/JayveerPrajapati/kern/internal/optimize"
-	"github.com/JayveerPrajapati/kern/internal/stats"
 	kversion "github.com/JayveerPrajapati/kern/internal/version"
 )
 
@@ -40,10 +39,7 @@ func main() {
 	httpAddr := flag.String("http", "", "serve MCP over HTTP on this address (e.g. :8080) instead of stdio")
 	flag.Parse()
 	mcp.SetServerVersion(version)
-	rec, err := stats.NewRecorder()
-	if err == nil {
-		optimize.Recorder = rec
-	}
+	_ = optimize.EnsureRecorder()
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	if *httpAddr != "" {

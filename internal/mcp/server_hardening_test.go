@@ -371,3 +371,24 @@ func TestRootConfinementBlocksRunBuildDir(t *testing.T) {
 		t.Fatalf("run_build inside workspace should run: %v", err)
 	}
 }
+
+// TestSandboxManifestViaMCP verifies the kern_sandbox tool surfaces the
+// post-run impact manifest (created/modified/deleted lines + summary) when the
+// command changes the tree.
+func TestSandboxManifestViaMCP(t *testing.T) {
+	t.Setenv("KERN_ALLOW_EXEC", "1") // kern_sandbox is a governed exec surface
+	root := mcpProject(t)
+	out := mcpLastOK(t, "kern_sandbox", map[string]any{"root": root, "command": "sh -c 'echo x > created.go && echo y >> app.go'"})
+	if !strings.Contains(out, "=== sandbox impact manifest ===") {
+		t.Fatalf("expected manifest section in output, got %q", out)
+	}
+	if !strings.Contains(out, "+ created.go (") {
+		t.Fatalf("expected created entry for created.go, got %q", out)
+	}
+	if !strings.Contains(out, "~ app.go (") {
+		t.Fatalf("expected modified entry for app.go, got %q", out)
+	}
+	if !strings.Contains(out, "2 change(s)") {
+		t.Fatalf("expected summary line, got %q", out)
+	}
+}

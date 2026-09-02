@@ -10,6 +10,7 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/llm"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -43,7 +44,7 @@ func (s *Server) handleAstSearch(ctx context.Context, args map[string]any) (stri
 			b.WriteString(" ")
 			b.WriteString(m.File)
 			b.WriteString(":")
-			b.WriteString(itoa(m.Line))
+			b.WriteString(strconv.Itoa(m.Line))
 			b.WriteString("\n")
 		}
 		return strings.TrimSuffix(b.String(), "\n"), nil
@@ -172,7 +173,7 @@ func (s *Server) handleSearch(ctx context.Context, args map[string]any) (string,
 			b.WriteString(" ")
 			b.WriteString(m.File)
 			b.WriteString(":")
-			b.WriteString(itoa(m.Line))
+			b.WriteString(strconv.Itoa(m.Line))
 			if ix.IsGenerated(m.File) {
 				b.WriteString(" (generated)")
 			}
@@ -677,7 +678,7 @@ func (s *Server) handleFtsSearch(ctx context.Context, args map[string]any) (stri
 			b.WriteString(" ")
 			b.WriteString(m.File)
 			b.WriteString(":")
-			b.WriteString(itoa(m.Line))
+			b.WriteString(strconv.Itoa(m.Line))
 			b.WriteString("\n")
 		}
 		return strings.TrimSuffix(b.String(), "\n"), nil

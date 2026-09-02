@@ -16,6 +16,14 @@ import (
 // processes (e.g. the cross-process store tests) inherit the parent's cache
 // dir and must keep writing to the SAME store the parent reads.
 func TestMain(m *testing.M) {
+	// G-2: keep the tool-call audit chain out of the package dir's real
+	// .kern/audit store while tests run (individual tests may override with
+	// t.Setenv for their own assertions).
+	auditDir, err := os.MkdirTemp("", "kern-test-mcp-audit-*")
+	if err != nil {
+		panic(err)
+	}
+	_ = os.Setenv("KERN_MCP_AUDIT_DIR", auditDir)
 	if os.Getenv("XDG_CACHE_HOME") == "" {
 		dir, err := os.MkdirTemp("", "kern-test-mcp-*")
 		if err != nil {
@@ -24,7 +32,10 @@ func TestMain(m *testing.M) {
 		_ = os.Setenv("XDG_CACHE_HOME", dir)
 		code := m.Run()
 		_ = os.RemoveAll(dir)
+		_ = os.RemoveAll(auditDir)
 		os.Exit(code)
 	}
-	os.Exit(m.Run())
+	code := m.Run()
+	_ = os.RemoveAll(auditDir)
+	os.Exit(code)
 }

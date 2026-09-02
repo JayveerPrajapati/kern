@@ -1,4 +1,4 @@
-// Command kern-server starts a local, read-only (autonomy L0), stdlib-only HTTP server exposing the project's digital-twin
+// Command kern-server starts a local, stdlib-only HTTP server exposing the project's digital-twin
 // data as JSON and a minimal server-rendered HTML dashboard. No external
 // dependencies are required.
 package main

@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -58,12 +59,12 @@ func mcpToolError(t *testing.T, name string, args map[string]any) string {
 	return text
 }
 
-func TestHelpersItoaPctArgStringTruncate(t *testing.T) {
-	if itoa(0) != "0" {
-		t.Fatalf("itoa(0) = %q", itoa(0))
+func TestHelpersPctArgStringTruncate(t *testing.T) {
+	if strconv.Itoa(0) != "0" {
+		t.Fatalf("strconv.Itoa(0) = %q", strconv.Itoa(0))
 	}
-	if itoa(42) != "42" {
-		t.Fatalf("itoa(42) = %q", itoa(42))
+	if strconv.Itoa(42) != "42" {
+		t.Fatalf("strconv.Itoa(42) = %q", strconv.Itoa(42))
 	}
 	if pct(100, 25) != 75 || pct(0, 1) != 0 {
 		t.Fatal("pct wrong")
@@ -414,20 +415,13 @@ func TestMissingRequiredArgs(t *testing.T) {
 	mcpToolError(t, "kern_why", map[string]any{"root": "."})
 }
 
+// runToolCases returns the dispatchable tool names from dispatchTable. The
+// dispatch switch was replaced by the table (G-11 expensive tier), so this is
+// a structural read of the table keys — no source parsing.
 func runToolCases() []string {
-	src, err := os.ReadFile("server.go")
-	if err != nil {
-		panic(err)
-	}
 	var out []string
-	for _, line := range strings.Split(string(src), "\n") {
-		line = strings.TrimSpace(line)
-		if !strings.HasPrefix(line, `case "kern_`) {
-			continue
-		}
-		for _, name := range strings.Split(strings.TrimSuffix(line[len(`case "`):], `":`), `", "`) {
-			out = append(out, name)
-		}
+	for name := range dispatchTable {
+		out = append(out, name)
 	}
 	return out
 }
@@ -574,6 +568,66 @@ func TestGuardCheckThresholdGates(t *testing.T) {
 	_ = mcpAssertOK(t, "kern_guard_check", map[string]any{
 		"root": root, "file": "client/client.go", "threshold": "1",
 	})
+}
+
+// pureGuardProject writes a tree whose boundaries opt into @pure assertions
+// and whose Go file carries an @pure function that mutates a package var.
+func pureGuardProject(t *testing.T) string {
+	t.Helper()
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	root := t.TempDir()
+	files := map[string]string{
+		"pure.go": `package pure
+
+var counter int
+
+// Inc bumps the counter. @pure
+func Inc() {
+	counter++
+}
+`,
+		".kern/boundaries.json": `{
+  "pure": true
+}
+`,
+	}
+	for rel, content := range files {
+		p := filepath.Join(root, rel)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return root
+}
+
+// TestGuardCheckPureRulesViaMCP: with "pure": true the @pure mutation is
+// reported through the guard tool; without the flag it is not (opt-in).
+func TestGuardCheckPureRulesViaMCP(t *testing.T) {
+	root := pureGuardProject(t)
+	out := mcpAssertOK(t, "kern_guard_check", map[string]any{
+		"root": root, "file": "pure.go", "threshold": "5",
+	})
+	if !strings.Contains(out, "@pure") || !strings.Contains(out, "var:counter") {
+		t.Fatalf("expected @pure violation in guard output, got %q", out)
+	}
+	if !strings.Contains(out, "Inc") {
+		t.Fatalf("expected violation symbol Inc, got %q", out)
+	}
+	// Same code, no "pure" flag -> the mutation is not the guard's concern.
+	root2 := pureGuardProject(t)
+	noPure := "{\"rules\": []}\n"
+	if err := os.WriteFile(filepath.Join(root2, ".kern", "boundaries.json"), []byte(noPure), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out2 := mcpAssertOK(t, "kern_guard_check", map[string]any{
+		"root": root2, "file": "pure.go", "threshold": "5",
+	})
+	if strings.Contains(out2, "@pure") {
+		t.Fatalf("expected no @pure violation without the pure flag, got %q", out2)
+	}
 }
 
 func TestRenamePreviewAndApply(t *testing.T) {
@@ -841,7 +895,7 @@ func TestPackSandboxOverrideThroughMCP(t *testing.T) {
 }
 
 func TestKernToolsAllowlistFiltersListAndCalls(t *testing.T) {
-	// Full catalog so the allowlist intersects the complete 84-tool set
+	// Full catalog so the allowlist intersects the complete 86-tool set
 	// (kern_usage_guide is not part of the default minimal surface).
 	t.Setenv("KERN_MCP_FULL", "1")
 	t.Setenv("KERN_TOOLS", "kern_search, kern_usage_guide")

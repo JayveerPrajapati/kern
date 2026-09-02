@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/JayveerPrajapati/kern/internal/governance"
 	"github.com/JayveerPrajapati/kern/internal/index"
 )
 
@@ -31,7 +32,7 @@ func TestNewGovernator_PermissiveRawMode(t *testing.T) {
 // allowed set is confined to the project root symbols (the whole fixture
 // project is the cwd scope).
 func TestNewGovernator_DefaultScoped(t *testing.T) {
-	registerDefaultAgent() // NewServer does this at init; these tests call the handler directly
+	governance.EnsureDefaultAgent() // NewServer does this at init; these tests call the handler directly
 	root := provenanceProject(t)
 	ix, err := index.Build(root)
 	if err != nil {

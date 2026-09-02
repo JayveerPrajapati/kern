@@ -44,6 +44,8 @@ var commandHelp = map[string]string{
 	"stats":             "token savings",
 	"exec":              "run code in an isolated sandbox",
 	"doctor":            "self-diagnostics",
+	"cache":             "cache stats + G-7 maintain (archive/evict)",
+	"calibrate":         "measure how well blast-radius prediction matches git history (F1)",
 	"mask":              "mask secrets/PII",
 	"precache":          "warm caches",
 	"index":             "(re)build the symbol index",
@@ -82,6 +84,8 @@ var commandHelp = map[string]string{
 	"impact":            "blast radius of a change",
 	"execute":           "apply a patch in a sandbox",
 	"verify":            "verify a change",
+	"check-draft":       "validate draft code against the index",
+	"taint":             "taint-lite: flag security sinks reachable from sources",
 	"changes":           "review context for changed files",
 	"review":            "review context for changed files",
 	"heal":              "self-correct failing files",
@@ -102,6 +106,7 @@ var commandHelp = map[string]string{
 	"authorize-context": "compute authorized context",
 	"lock":              "acquire workspace lock",
 	"unlock":            "release workspace lock",
+	"events":            "serve/watch/emit system events (relay)",
 	"status":            "workspace lock status",
 	"sec":               "security scan",
 	"delete":            "safe symbol deletion",
@@ -132,6 +137,7 @@ var commandHelp = map[string]string{
 	"guide":             "usage guide",
 	"meta":              "NL request router",
 	"mcp":               "run the MCP server",
+	"lsp":               "run the LSP server over stdio",
 	"serve":             "run the web console",
 	"web":               "run the web console",
 	"version":           "print version",
@@ -173,6 +179,8 @@ var mcpCLIAlias = map[string]string{
 	"kern_usage_guide":       "guide",
 	"kern_verify_output":     "verify",
 	"kern_what_if":           "what-if",
+	"kern_check_draft":       "check-draft",
+	"kern_taint":             "taint",
 }
 
 // printCommandHelp prints the one-line help for a subcommand and exits 0.
@@ -300,6 +308,10 @@ func dispatchCommand(cmd string, rest []string) int {
 		runDoctor(rest)
 		return 0
 
+	case "calibrate":
+		runCalibrate(rest)
+		return 0
+
 	case "mask":
 		runMask(rest)
 		return 0
@@ -383,6 +395,13 @@ func dispatchCommand(cmd string, rest []string) int {
 		runVerify(rest)
 		return 0
 
+	case "check-draft":
+		runCheckDraft(rest)
+		return 0
+	case "taint":
+		runTaint(rest)
+		return 0
+
 	case "docs":
 		runDocs(rest)
 		return 0
@@ -440,6 +459,9 @@ func dispatchCommand(cmd string, rest []string) int {
 
 	case "mcp":
 		runMCP(rest)
+		return 0
+	case "lsp":
+		runLSP(rest)
 		return 0
 	case "meta":
 		runMeta(rest)
@@ -583,6 +605,9 @@ func dispatchCommand(cmd string, rest []string) int {
 		runUnlock(rest)
 		return 0
 
+	case "events":
+		return runEvents(rest)
+
 	case "status":
 		runStatus(rest)
 		return 0
@@ -629,6 +654,9 @@ func dispatchCommand(cmd string, rest []string) int {
 		fmt.Print(out)
 		return 0
 
+	case "cache":
+		runCache(rest)
+		return 0
 	default:
 		usage()
 		return 2

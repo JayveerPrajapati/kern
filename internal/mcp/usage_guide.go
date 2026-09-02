@@ -7,7 +7,7 @@ func Guide() string {
 	return `# kern MCP — Tool Usage Guide
 
 ## Phase-aware tool selection
-Don't memorize 84 tools. Identify your phase (explore / plan / edit / verify),
+Don't memorize 86 tools. Identify your phase (explore / plan / edit / verify),
 use the phase shortlist below, and let kern_meta route within it. Set
 KERN_MCP_PHASE=<phase> at server start to filter the advertised tool list to
 that phase's shortlist plus the always-on meta/cross utilities; kern_meta
