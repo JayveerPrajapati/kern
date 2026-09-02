@@ -4,6 +4,7 @@ import (
 	"io/fs"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/JayveerPrajapati/kern/internal/cache"
@@ -137,11 +138,11 @@ func (p *Project) Render() string {
 	b.WriteString("Project: ")
 	b.WriteString(p.Root)
 	b.WriteString(" (")
-	b.WriteString(itoa(len(p.Files)))
+	b.WriteString(strconv.Itoa(len(p.Files)))
 	b.WriteString(" files")
 	if p.Ignored > 0 {
 		b.WriteString(", ")
-		b.WriteString(itoa(p.Ignored))
+		b.WriteString(strconv.Itoa(p.Ignored))
 		b.WriteString(" ignored")
 	}
 	if p.Capped {
@@ -149,7 +150,7 @@ func (p *Project) Render() string {
 	}
 	if p.CacheHit > 0 {
 		b.WriteString(", ")
-		b.WriteString(itoa(p.CacheHit))
+		b.WriteString(strconv.Itoa(p.CacheHit))
 		b.WriteString(" from cache")
 	}
 	b.WriteString(")\n")
