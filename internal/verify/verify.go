@@ -80,7 +80,7 @@ func Verify(ix *index.Index, root, text string) Report {
 			full := s.FullName()
 			for _, m := range symbolRe.FindAllString(text, -1) {
 				if m == full || (m == s.Name && isExported(s.Name)) {
-					add(Sym, m, true, "indexed at "+s.File+":"+itoa(s.Line))
+					add(Sym, m, true, "indexed at "+s.File+":"+strconv.Itoa(s.Line))
 				}
 			}
 		}
@@ -138,6 +138,8 @@ func fileHasLine(root, file string, line int) bool {
 }
 
 // withinAbs reports whether child (absolute) stays inside parent (absolute).
+// Unlike mcp's within, it does not reject an absolute rel (e.g. another drive
+// root), which mcp's variant guards against.
 func withinAbs(parent, child string) bool {
 	rel, err := filepath.Rel(parent, child)
 	if err != nil {
@@ -286,8 +288,4 @@ func Render(rep Report) string {
 func atoi(s string) int {
 	n, _ := strconv.Atoi(s)
 	return n
-}
-
-func itoa(n int) string {
-	return strconv.Itoa(n)
 }
