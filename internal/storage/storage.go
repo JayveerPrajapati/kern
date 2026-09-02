@@ -1,6 +1,8 @@
-// Package storage provides a vendor-agnostic storage abstraction. The only
-// implementation today is LocalStore, a file-per-key JSON store using atomic
-// temp-file renames with zero third-party dependencies.
+// Package storage provides a vendor-agnostic storage abstraction with two
+// implementations: LocalStore, a file-per-key JSON store using atomic
+// temp-file renames, and LogStore, an append-only JSON-lines store whose O(1)
+// appends keep audit-style logs fast as they grow. Both use only the standard
+// library.
 package storage
 
 import (
