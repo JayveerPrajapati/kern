@@ -3,6 +3,7 @@ package mcp
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -397,6 +398,45 @@ func TestVerifyOutputViaMCP(t *testing.T) {
 	}
 }
 
+func TestCheckDraftViaMCP(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	root := testRoot(t)
+	f := filepath.Join(root, "app.go")
+	_ = os.WriteFile(f, []byte("package main\n\nfunc helper() {}\nfunc main() { helper() }\n"), 0o644)
+
+	// A clean draft (builtins + local func) validates with an OK verdict.
+	clean := "package main\n\nfunc main() { println(len(\"x\")) }\n"
+	args, _ := json.Marshal(map[string]any{"root": root, "code": clean})
+	resp := serveOne(t, writeReq("tools/call", 40, `{"name":"kern_check_draft","arguments":`+string(args)+`}`))
+	out, isErr := toolResultText(t, resp)
+	if isErr {
+		t.Fatalf("unexpected error: %s", out)
+	}
+	if !strings.Contains(out, "OK") {
+		t.Fatalf("expected clean verdict, got %q", out)
+	}
+
+	// A draft calling an unknown symbol reports one finding line.
+	bad := "package main\n\nfunc main() { totallyMissingFunc() }\n"
+	args2, _ := json.Marshal(map[string]any{"root": root, "code": bad})
+	resp2 := serveOne(t, writeReq("tools/call", 41, `{"name":"kern_check_draft","arguments":`+string(args2)+`}`))
+	out2, isErr2 := toolResultText(t, resp2)
+	if isErr2 {
+		t.Fatalf("unexpected error: %s", out2)
+	}
+	if !strings.Contains(out2, "unknown_symbol") || !strings.Contains(out2, "issue(s) found") {
+		t.Fatalf("expected finding line, got %q", out2)
+	}
+}
+
+func TestCheckDraftMissingCode(t *testing.T) {
+	resp := serveOne(t, toolsCallJSON(t, 42, "kern_check_draft", map[string]any{}))
+	out, isErr := toolResultText(t, resp)
+	if !isErr || !strings.Contains(out, "code is required") {
+		t.Fatalf("expected missing-code isError, got: %+v", resp)
+	}
+}
+
 func TestDiffFilesViaMCP(t *testing.T) {
 	root := t.TempDir()
 	a := filepath.Join(root, "a.txt")
@@ -411,6 +451,43 @@ func TestDiffFilesViaMCP(t *testing.T) {
 	}
 	if !strings.Contains(out, "line two") || !strings.Contains(out, "line three") {
 		t.Fatalf("expected diff hunk, got %q", out)
+	}
+}
+
+// TestDiffFilesCompactViaMCP verifies the compact=true mode collapses long
+// context runs into annotation lines while preserving changed lines.
+func TestDiffFilesCompactViaMCP(t *testing.T) {
+	root := t.TempDir()
+	a := filepath.Join(root, "a.txt")
+	b := filepath.Join(root, "b.txt")
+	var sb strings.Builder
+	for i := 1; i <= 30; i++ {
+		fmt.Fprintf(&sb, "line %d\n", i)
+	}
+	content := sb.String()
+	_ = os.WriteFile(a, []byte(content), 0o644)
+	_ = os.WriteFile(b, []byte(strings.Replace(content, "line 15\n", "line 15 changed\n", 1)), 0o644)
+	args, _ := json.Marshal(map[string]any{"root": root, "a": a, "b": b, "compact": true})
+	resp := serveOne(t, writeReq("tools/call", 40, `{"name":"kern_diff_files","arguments":`+string(args)+`}`))
+	out, isErr := toolResultText(t, resp)
+	if isErr {
+		t.Fatalf("unexpected error: %s", out)
+	}
+	if !strings.Contains(out, "lines unchanged") {
+		t.Fatalf("expected compact annotation, got %q", out)
+	}
+	if !strings.Contains(out, "-line 15") || !strings.Contains(out, "+line 15 changed") {
+		t.Fatalf("expected changed lines verbatim, got %q", out)
+	}
+	// Non-compact mode must still emit a normal patch with hunk headers.
+	args2, _ := json.Marshal(map[string]any{"root": root, "a": a, "b": b})
+	resp2 := serveOne(t, writeReq("tools/call", 41, `{"name":"kern_diff_files","arguments":`+string(args2)+`}`))
+	out2, isErr2 := toolResultText(t, resp2)
+	if isErr2 {
+		t.Fatalf("unexpected error: %s", out2)
+	}
+	if !strings.Contains(out2, "@@") {
+		t.Fatalf("expected hunk header in non-compact diff, got %q", out2)
 	}
 }
 

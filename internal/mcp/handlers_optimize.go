@@ -213,7 +213,7 @@ func (s *Server) handleContextBudget(ctx context.Context, args map[string]any) (
 			}
 			maxTokens = n
 		}
-		out := budget.Fit(text, maxTokens)
+		out := budget.FitCode(text, maxTokens)
 		before := tokenize.Count(text)
 		after := tokenize.Count(out)
 		return fmt.Sprintf("%d -> %d tokens (saved %d, %.1f%%)\n\n%s", before, after, before-after, pct(before, after), out), nil

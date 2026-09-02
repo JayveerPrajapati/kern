@@ -193,7 +193,7 @@ func runBudget(rest []string) {
 	if maxTokens <= 0 {
 		maxTokens = 4000
 	}
-	out := budget.Fit(text, maxTokens)
+	out := budget.FitCode(text, maxTokens)
 	before := tokenize.Count(text)
 	after := tokenize.Count(out)
 	// Always state the applied budget so a silent default (4000 when --max is

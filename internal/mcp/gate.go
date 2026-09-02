@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/JayveerPrajapati/kern/internal/governance"
 )
 
 // Gate confines every tool call's path-typed arguments to a set of allowed
@@ -54,7 +56,7 @@ func NewGateFromEnv() *Gate {
 		}
 	}
 	// The gate is enabled unless permissive mode explicitly opts out.
-	g.enabled = !permissiveMode() && len(g.roots) > 0
+	g.enabled = !governance.PermissiveMode() && len(g.roots) > 0
 	return g
 }
 

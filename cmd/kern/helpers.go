@@ -14,7 +14,6 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/metrics"
 	"github.com/JayveerPrajapati/kern/internal/optimize"
 	"github.com/JayveerPrajapati/kern/internal/schema"
-	"github.com/JayveerPrajapati/kern/internal/stats"
 	"io"
 	"net/url"
 	"os"
@@ -289,22 +288,13 @@ func isVerifyTypes(s string) bool {
 }
 
 func wireRecorder() {
-	rec, err := stats.NewRecorder()
-	if err == nil {
-		optimize.Recorder = rec
-	}
+	_ = optimize.EnsureRecorder()
 }
 
+// loadOrBuild delegates to index.LoadOrBuild — the canonical shared
+// implementation (G-11). Kept as a thin wrapper for its many CLI callers.
 func loadOrBuild(root string) (*index.Index, error) {
-	if ix, err := index.Load(root); err == nil && ix != nil && !ix.Stale() {
-		return ix, nil
-	}
-	ix, err := index.Build(root)
-	if err != nil {
-		return nil, err
-	}
-	_ = ix.Save()
-	return ix, nil
+	return index.LoadOrBuild(root)
 }
 
 // suggestSymbols returns up to 5 symbol names from ix that are similar to

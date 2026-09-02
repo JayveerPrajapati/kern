@@ -3,7 +3,6 @@ package mcp
 import (
 	"context"
 	"fmt"
-	"os"
 	"sort"
 	"strings"
 
@@ -20,33 +19,10 @@ const (
 	policySourceDefaultScoped = "default-scoped"
 )
 
-// defaultAgentID is the built-in agent identity used to govern calls that
-// omit agent_id (the P0.1 default retrieval path). It is registered at server
-// init with the minimal context.read permission; path confinement comes from
-// the cwd-scoped default task scope.
-const defaultAgentID = "default"
-
-// permissiveMode reports whether the KERN_MCP_PERMISSIVE escape hatch is set,
-// opting out of default governance and restoring raw (ungoverned) mode for
-// calls without an agent_id. Explicit opt-in only: anything except "1" or
-// "true" keeps default governance on.
-func permissiveMode() bool {
-	v := os.Getenv("KERN_MCP_PERMISSIVE")
-	return v == "1" || strings.EqualFold(v, "true")
-}
-
-// registerDefaultAgent registers the built-in default agent identity used for
-// governed calls without an explicit agent_id. It is idempotent: re-entry
-// after a prior registration (e.g. across tests sharing the in-memory
-// registry) is a no-op.
-func registerDefaultAgent() {
-	if _, err := governance.GetAgent(defaultAgentID); err == nil {
-		return
-	}
-	_ = governance.RegisterAgent(governance.NewAgent(defaultAgentID, "Default Agent", "default", []governance.Permission{
-		{Resource: "context", Action: "read"},
-	}))
-}
+// The built-in default agent identity, the KERN_MCP_PERMISSIVE escape hatch,
+// and the default agent registration live in internal/governance
+// (DefaultAgentID, PermissiveMode, EnsureDefaultAgent) — shared with the CLI
+// guard so both surfaces govern identically.
 
 // governor carries the authorized scope for one governed retrieval call. It
 // is nil (raw mode) only when KERN_MCP_PERMISSIVE=1 opts out of default
@@ -70,10 +46,10 @@ func (s *Server) newGovernor(ctx context.Context, args map[string]any, ix *index
 	agentID := argString(args, "agent_id")
 	wasDefault := false
 	if agentID == "" {
-		if permissiveMode() {
+		if governance.PermissiveMode() {
 			return nil, nil // explicit opt-out: raw mode, byte-for-byte legacy behavior
 		}
-		agentID = defaultAgentID
+		agentID = governance.DefaultAgentID
 		wasDefault = true
 	}
 	task := argString(args, "task")

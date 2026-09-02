@@ -220,6 +220,8 @@ type flags struct {
 	lines          int
 	depth          int
 	range_         string
+	commits        int
+	thresholds     string
 	graphml        bool
 	html           bool
 	out            string
@@ -250,6 +252,7 @@ type flags struct {
 	precision      string
 	fold           bool
 	staged         bool
+	compact        bool
 	subject        bool
 	message        string
 	dryRun         bool
@@ -257,6 +260,7 @@ type flags struct {
 	name           string
 	pattern        string
 	full           bool
+	generate       bool
 	help           bool
 	approver       string
 	reject         bool
@@ -273,6 +277,8 @@ func parseFlags(args []string) (flags, []string, error) {
 	f.days = 7
 	f.timeout = 120
 	f.depth = -1
+	f.commits = 60
+	f.thresholds = "2.0,4.0,6.0,8.0"
 	var rest []string
 	var parseErr error
 	setInt := func(dst *int, val, flag string) {
@@ -332,6 +338,16 @@ func parseFlags(args []string) (flags, []string, error) {
 			i++
 			if i < len(args) {
 				setInt(&f.threshold, args[i], "--threshold")
+			}
+		case "--commits":
+			i++
+			if i < len(args) {
+				setInt(&f.commits, args[i], "--commits")
+			}
+		case "--thresholds":
+			i++
+			if i < len(args) {
+				f.thresholds = args[i]
 			}
 		case "--csv":
 			f.csv = true
@@ -455,6 +471,8 @@ func parseFlags(args []string) (flags, []string, error) {
 			if i < len(args) {
 				f.out = args[i]
 			}
+		case "--compact":
+			f.compact = true
 		case "--all":
 			f.all = true
 		case "--clear":
@@ -525,6 +543,8 @@ func parseFlags(args []string) (flags, []string, error) {
 			}
 		case "--fold":
 			f.fold = true
+		case "--generate":
+			f.generate = true
 		case "--staged":
 			f.staged = true
 		case "--subject":

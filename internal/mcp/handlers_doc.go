@@ -11,6 +11,7 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/precache"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -97,7 +98,7 @@ func (s *Server) handleDocIndex(ctx context.Context, args map[string]any) (strin
 			return "", err
 		}
 		_ = ix.Save()
-		return "indexed " + itoa(len(ix.Docs)) + " chunks from " + root, nil
+		return "indexed " + strconv.Itoa(len(ix.Docs)) + " chunks from " + root, nil
 	}
 }
 

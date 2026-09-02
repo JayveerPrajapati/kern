@@ -59,6 +59,9 @@ func (s *Server) handleSandbox(ctx context.Context, id string, args map[string]a
 		if res.Err != nil {
 			fmt.Fprintf(&b, "error: %v\n", res.Err)
 		}
+		if res.Network != nil {
+			fmt.Fprintf(&b, "network: %s\n", res.Network.Summary())
+		}
 		out := res.Output
 		if len(out) > 4000 {
 			out = out[:4000] + "\n... (truncated)"
@@ -67,6 +70,27 @@ func (s *Server) handleSandbox(ctx context.Context, id string, args map[string]a
 			// Mask PII/secrets in command output before returning it to the caller.
 			out = pii.Mask(out).Text
 			fmt.Fprintf(&b, "output:\n%s\n", out)
+		}
+		if len(res.Manifest) > 0 {
+			fmt.Fprintf(&b, "=== sandbox impact manifest ===\n")
+			for _, c := range res.Manifest {
+				marker := "~"
+				switch c.Kind {
+				case "created":
+					marker = "+"
+				case "deleted":
+					marker = "-"
+				}
+				fmt.Fprintf(&b, "%s %s (%d B, sha256:%s)\n", marker, c.Path, c.Size, c.Hash)
+			}
+			fmt.Fprintf(&b, "%d change(s)", len(res.Manifest))
+			if m := len(res.SkippedFiles); m > 0 {
+				fmt.Fprintf(&b, "; %d file(s) skipped (over snapshot cap)", m)
+			}
+			if res.Restored {
+				fmt.Fprintf(&b, "; tree restored to snapshot — changes rolled back")
+			}
+			fmt.Fprintf(&b, "\n")
 		}
 		return b.String(), nil
 
@@ -97,7 +121,16 @@ func (s *Server) handleDiffFiles(ctx context.Context, args map[string]any) (stri
 		if err != nil {
 			return "", fmt.Errorf("read %s: %w", b, err)
 		}
-		u := diff.Unified(a, b, splitLines(string(ab)), splitLines(string(bb)))
+		var u string
+		if argBool(args, "compact") {
+			// Compact mode: view-only diff with collapsed context runs,
+			// annotated with the enclosing symbol when the index resolves it.
+			// A failed index load just means no span annotations.
+			ix, _ := s.loadIndex(ctx, root)
+			u = diff.Compact(a, b, splitLines(string(ab)), splitLines(string(bb)), diff.IndexSpanResolver(ix))
+		} else {
+			u = diff.Unified(a, b, splitLines(string(ab)), splitLines(string(bb)))
+		}
 		if u == "" {
 			return "files identical", nil
 		}
