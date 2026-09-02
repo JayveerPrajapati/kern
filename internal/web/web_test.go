@@ -1,6 +1,7 @@
 package web
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -77,6 +78,50 @@ func TestHelper(t *testing.T) {
 		t.Fatal(err)
 	}
 	return root
+}
+
+// TestWebBridgesPlatformBus: web.New wires the App's event bus into the
+// Platform (so verification-engine architecture events reach the
+// webhook-subscribed bus) and enables persistence/replay from the shared
+// .kern/events.jsonl file. Replay must be safe when no events file exists
+// (first run): New ignores the error and never propagates it. Replaying an
+// existing file must not re-append the replayed events to the same file.
+func TestWebBridgesPlatformBus(t *testing.T) {
+	root := fixtureRoot(t)
+	a, err := New(root)
+	if err != nil {
+		t.Fatalf("web.New: %v", err)
+	}
+	if a.Bus() == nil {
+		t.Fatal("a.Bus() is nil")
+	}
+	if a.platform.Bus() != a.bus {
+		t.Fatal("platform bus is not bridged to the app bus")
+	}
+	// Best-effort replay: a missing events file must not panic or fail.
+	_, _ = a.bus.Replay(filepath.Join(root, ".kern", "events.jsonl"))
+
+	// A pre-existing events file (e.g. written by the guard CLI) must be
+	// replayed without growing the file itself on every server restart.
+	eventsPath := filepath.Join(root, ".kern", "events.jsonl")
+	line := `{"ID":"e-1-1","Kind":"architecture.violation","Source":"guard","Subject":"Do","OccurredAt":"2026-09-01T00:00:00Z"}` + "\n"
+	if err := os.WriteFile(eventsPath, []byte(line), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	a2, err := New(root)
+	if err != nil {
+		t.Fatalf("web.New: %v", err)
+	}
+	if a2.Bus() == nil || a2.platform.Bus() != a2.bus {
+		t.Fatal("platform bus not bridged on second New")
+	}
+	data, err := os.ReadFile(eventsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := bytes.Count(data, []byte("e-1-1")); got != 1 {
+		t.Fatalf("replay re-appended events to the persistence file: %d copies of e-1-1 in %q", got, data)
+	}
 }
 
 // newTestApp builds an App over a fresh fixture root.

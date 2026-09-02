@@ -1,4 +1,4 @@
-// Package web is a small, read-only, stdlib-only HTTP console that serves the
+// Package web is a small, stdlib-only HTTP console that serves the
 // project's digital-twin data as JSON plus a minimal server-rendered HTML
 // dashboard. Routing uses net/http's ServeMux, the dashboard uses html/template
 // with a single embedded template, and all payloads use encoding/json — no
@@ -16,6 +16,8 @@ import (
 	"html/template"
 	"log"
 	"net/http"
+	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -28,10 +30,11 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/intelligence"
 	"github.com/JayveerPrajapati/kern/internal/memory"
 	"github.com/JayveerPrajapati/kern/internal/metrics"
+	"github.com/JayveerPrajapati/kern/internal/relay"
 	"github.com/JayveerPrajapati/kern/internal/verification"
 )
 
-// App holds the project root and the derived read-only state for the console.
+// App holds the project root and the derived console state.
 // It delegates routing to an embedded http.ServeMux via ServeHTTP.
 type App struct {
 	root      string
@@ -141,6 +144,22 @@ func New(root string) (*App, error) {
 	// unknown).
 	a.tasks.SetTaskStore(agent.NewTaskStore(root))
 	a.bus = eventbus.New()
+	// Cross-process event relay: the first process to bind owns the
+	// socket; concurrent servers (or a kern events serve instance) run
+	// without one. Purely additive observability — never fatal.
+	if srv, rerr := relay.Start(root); rerr == nil {
+		a.bus.Subscribe("", srv.Broadcast) // "" = every kind
+		srv.SetPublisher(a.bus.Publish)
+	}
+	// Bridge the verification engine's architecture events onto the
+	// webhook-subscribed bus, and share the persisted guard-CLI event file so
+	// cross-process events (e.g. `kern guard check`) replay into this bus.
+	// Replay runs BEFORE EnablePersistence so replayed events are not
+	// re-appended to the same file on every restart (unbounded growth); a
+	// missing events file (first run) is not an error.
+	_, _ = a.bus.Replay(filepath.Join(root, ".kern", "events.jsonl"))
+	a.bus.EnablePersistence(filepath.Join(root, ".kern", "events.jsonl"))
+	platform.WithBus(a.bus)
 	// Prebuild the per-request engines ONCE at startup and share the already
 	// built index/graph so handlers never re-index the repo per request (this
 	// was the #1 bottleneck: /v1/incidents/investigate and /v1/verify each
@@ -342,7 +361,7 @@ func (a *App) freshGraph() (*intelligence.Graph, *index.Index) {
 		a.staleUntil = time.Now().Add(staleCooldown)
 		return a.graph, a.ix
 	}
-	if nix, err := index.Build(a.root); err == nil {
+	if nix, err := a.rebuildIndex(); err == nil {
 		a.ix = nix
 		ng := intelligence.FromIndex(nix)
 		a.graph = &ng
@@ -357,6 +376,18 @@ func (a *App) freshGraph() (*intelligence.Graph, *index.Index) {
 	}
 	a.staleUntil = time.Now().Add(staleCooldown)
 	return a.graph, a.ix
+}
+
+// rebuildIndex builds a fresh index for a.root. With KERN_INCREMENTAL=1 it
+// reuses the current index's per-file parse results for unchanged files —
+// parsing dominates rebuild time on large trees — while remaining
+// equivalent to a full rebuild (same symbols, hashes, and MaxMtime). The
+// swap semantics in freshGraph are unchanged either way.
+func (a *App) rebuildIndex() (*index.Index, error) {
+	if os.Getenv("KERN_INCREMENTAL") == "1" {
+		return index.BuildWithOptions(a.root, index.WithPriorIndex(a.ix))
+	}
+	return index.Build(a.root)
 }
 
 // runtimeSource and boundaryProvider have been migrated to internal/app.Platform,

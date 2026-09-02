@@ -248,6 +248,11 @@ func scanFindings(files []File) []sec.Finding {
 	var out []sec.Finding
 	for _, f := range files {
 		out = append(out, sec.ScanFile(f.Path, []byte(f.Content))...)
+		// G-4: python sinks get the same treatment in bundles as in sec.Scan,
+		// so a packed .py file carrying eval/os.system surfaces too.
+		if strings.HasSuffix(f.Path, ".py") {
+			out = append(out, sec.ScanPythonFile(f.Path, []byte(f.Content))...)
+		}
 		if len(out) >= maxFindings {
 			break
 		}

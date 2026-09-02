@@ -230,7 +230,7 @@ func maskCustom(text string, patterns []Pattern, names []string, suppressNonSecr
 	// Build placeholders first so ordering is deterministic.
 	for i, h := range chosen {
 		counts[h.label]++
-		ph := "[MASKED_" + h.label + "_" + itoa(counts[h.label]) + "]"
+		ph := "[MASKED_" + h.label + "_" + strconv.Itoa(counts[h.label]) + "]"
 		placeholders[i] = ph
 		res.Mapping[ph] = text[h.start:h.end]
 		res.ByLabel[h.label]++
@@ -266,20 +266,6 @@ func MaskFile(path string) (Result, error) {
 		return Result{}, err
 	}
 	return Mask(string(b)), nil
-}
-
-func itoa(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	var buf [8]byte
-	i := len(buf)
-	for n > 0 {
-		i--
-		buf[i] = byte('0' + n%10)
-		n /= 10
-	}
-	return string(buf[i:])
 }
 
 // maskEncoded scans text for runs of encoded secrets (base64, hex,
@@ -340,7 +326,7 @@ func maskEncoded(text string, patterns []*regexp.Regexp, mapping map[string]stri
 	for _, c := range chosen {
 		b.WriteString(text[prev:c.start])
 		counts[c.kind]++
-		ph := "[MASKED_" + strings.ToUpper(c.kind) + "_" + itoa(counts[c.kind]) + "]"
+		ph := "[MASKED_" + strings.ToUpper(c.kind) + "_" + strconv.Itoa(counts[c.kind]) + "]"
 		mapping[ph] = text[c.start:c.end]
 		b.WriteString(ph)
 		prev = c.end

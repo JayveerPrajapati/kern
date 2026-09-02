@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/JayveerPrajapati/kern/internal/domain"
+	"github.com/JayveerPrajapati/kern/internal/intel"
 	"github.com/JayveerPrajapati/kern/internal/runtime"
 )
 
@@ -165,7 +166,7 @@ func (e *Engine) crossesBoundary(p domain.Policy, roots []domain.Symbol) bool {
 		if fromDir == "" || toDir == "" || fromDir == toDir {
 			continue
 		}
-		if dirMatch(from, fromDir) && dirMatch(to, toDir) {
+		if intel.DirMatch(from, fromDir) && intel.DirMatch(to, toDir) {
 			return true
 		}
 	}
@@ -205,17 +206,6 @@ func parseBoundary(name string) (string, string) {
 		return name[:i], name[i+2:]
 	}
 	return "", ""
-}
-
-// dirMatch matches a directory pattern against a directory the same way the
-// boundary guard layer does: exact, "pattern/…" prefix, or "…/pattern" suffix.
-func dirMatch(pattern, dir string) bool {
-	if pattern == "" {
-		return false
-	}
-	return dir == pattern ||
-		strings.HasPrefix(dir, pattern+"/") ||
-		strings.HasSuffix(dir, "/"+pattern)
 }
 
 // runtimeEvidence gathers recent error/notification events relevant to the
@@ -271,22 +261,9 @@ func (e *Engine) runtimeEvidence(roots []domain.Symbol) []domain.Evidence {
 		out = append(out, domain.Evidence{
 			Type:      domain.EvidenceRuntime,
 			Source:    e.runtimeSrc.Name(),
-			Content:   fmtRuntimeEvent(ev),
+			Content:   runtime.FormatEvent(ev),
 			Timestamp: ev.Timestamp,
 		})
 	}
 	return out
-}
-
-// fmtRuntimeEvent renders a runtime event deterministically (no secrets: only
-// type/severity/message/service).
-func fmtRuntimeEvent(ev runtime.Event) string {
-	msg := strings.TrimSpace(ev.Message)
-	if msg == "" {
-		msg = string(ev.Type)
-	}
-	if ev.Service != "" {
-		return "[" + ev.Service + "] " + string(ev.Severity) + ": " + msg
-	}
-	return string(ev.Severity) + ": " + msg
 }

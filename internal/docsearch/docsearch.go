@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -126,7 +127,7 @@ func IndexDir(root string) (*Index, error) {
 		}
 		rel, _ := filepath.Rel(root, path)
 		for _, c := range ChunkText(string(b), 2000) {
-			key := rel + "#" + itoa(c.Start)
+			key := rel + "#" + strconv.Itoa(c.Start)
 			ix.Docs = append(ix.Docs, Doc{
 				ID:    key,
 				Chunk: Chunk{File: rel, Start: c.Start, Text: c.Text},
@@ -278,7 +279,7 @@ func (ix *Index) mergeFetchedLocked(name, text string) int {
 	added := 0
 	for _, c := range ChunkText(text, 2000) {
 		ix.Docs = append(ix.Docs, Doc{
-			ID:    file + "#" + itoa(c.Start),
+			ID:    file + "#" + strconv.Itoa(c.Start),
 			Chunk: Chunk{File: file, Start: c.Start, Text: c.Text},
 			Vec:   Embed(c.Text),
 		})
@@ -609,18 +610,4 @@ func fnv32(s string) uint32 {
 // (a random-projection flavour of feature hashing).
 func sign(s string) bool {
 	return fnv32(s)&1 == 0
-}
-
-func itoa(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	var buf [8]byte
-	i := len(buf)
-	for n > 0 {
-		i--
-		buf[i] = byte('0' + n%10)
-		n /= 10
-	}
-	return string(buf[i:])
 }

@@ -23,6 +23,16 @@ const maxHops = 50
 // buildAdjacency derives, for the "calls" edges only, the outgoing map
 // (caller -> callees) and incoming map (callee -> callers), trusting all
 // edges. Strict callers use buildAdjacencyOpt(true).
+//
+// NOTE — edge endpoint quirk: raw call edges reference the callee by a
+// QUALIFIED name (e.g. "db.Do") while graph node IDs are bare symbol names
+// ("Do"). This function canonicalizes endpoints via resolveNodeID so its
+// maps key on node IDs; but a qualified endpoint with no matching node is
+// passed through unresolved (canonical keeps the raw string), and consumers
+// that map results back through nodesForIDs silently DROP unresolvable IDs.
+// Code that must not lose cross-package callees should traverse the raw
+// domain.Edge endpoints (as internal/context/rules.go does) instead of the
+// adjacency maps or the node query helpers.
 func (g *Graph) buildAdjacency() (outgoing, incoming map[string][]string) {
 	return g.buildAdjacencyOpt(false)
 }

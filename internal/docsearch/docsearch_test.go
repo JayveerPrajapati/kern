@@ -3,6 +3,7 @@ package docsearch
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -25,7 +26,7 @@ func TestChunkTextSplitsLarge(t *testing.T) {
 	var b strings.Builder
 	for i := 0; i < 100; i++ {
 		b.WriteString("paragraph number ")
-		b.WriteString(itoa(i))
+		b.WriteString(strconv.Itoa(i))
 		b.WriteString(" with some filler words here.\n\n")
 	}
 	chunks := ChunkText(b.String(), 2000)
