@@ -142,7 +142,11 @@ func Check(root string) []Status {
 		fileStatus(filepath.Join(root, "AGENTS.md"), "AGENTS.md rules"),
 		fileStatus(globalOpencodePath(), "opencode (global config)"),
 	}
-	for _, a := range adapters {
+	allAdapters, customErrs := effectiveAdapters(root)
+	for _, err := range customErrs {
+		out = append(out, Status{Agent: "custom adapters", Note: err.Error()})
+	}
+	for _, a := range allAdapters {
 		out = append(out, fileStatus(a.path(root), a.name))
 	}
 	out = append(out, claudeStatus())
@@ -253,7 +257,11 @@ func Wire(root string, agents []string, detect bool) []Status {
 		out = append(out, wireCodex(bin))
 		out = append(out, wireCodexHooks(root))
 	}
-	for _, a := range adapters {
+	allAdapters, customErrs := effectiveAdapters(root)
+	for _, err := range customErrs {
+		out = append(out, Status{Agent: "custom adapters", Note: err.Error()})
+	}
+	for _, a := range allAdapters {
 		gate := repoEnabled
 		if a.scope == "global" {
 			gate = globalEnabled

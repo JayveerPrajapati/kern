@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -316,6 +317,50 @@ func TestPluginMatchesMCPCatalog(t *testing.T) {
 	if !bytes.Equal(emb, repo) {
 		t.Error("embedded plugin asset drifted from .opencode/plugins/kern.ts — run: cp .opencode/plugins/kern.ts internal/setup/assets/plugin/kern.ts")
 	}
+}
+
+// TestDocsStateMCPToolCount is the doc-side parity invariant behind the
+// catalog count: README.md and AGENTS.md both state the full MCP tool count.
+// The MCP registration table is the source of truth — when the catalog grows
+// or shrinks, this test fails until the docs are updated, so the "84 vs 86"
+// drift class (G-6 claimed a fix; it was incomplete across README + AGENTS)
+// cannot recur.
+func TestDocsStateMCPToolCount(t *testing.T) {
+	count := 0
+	for _, n := range mcp.ToolNames() {
+		if strings.HasPrefix(n, "kern_") {
+			count++
+		}
+	}
+	if count < 40 {
+		t.Fatalf("suspiciously small MCP catalog: %d tools", count)
+	}
+	want := strconv.Itoa(count)
+
+	// Tests run with the package dir as CWD (internal/setup); docs live at
+	// the repo root, two levels up — same pattern as the plugin parity test.
+	readRoot := func(rel string) string {
+		b, err := os.ReadFile(filepath.Join("..", "..", rel))
+		if err != nil {
+			t.Fatalf("read %s: %v", rel, err)
+		}
+		return string(b)
+	}
+	readme := readRoot("README.md")
+	agents := readRoot("AGENTS.md")
+
+	check := func(label, text, pattern string) {
+		re := regexp.MustCompile(pattern)
+		if !re.MatchString(text) {
+			t.Errorf("%s: does not state the registered catalog size (%s tools) — pattern %q", label, want, pattern)
+		}
+	}
+
+	check("README banner", readme, `\(11 high-level tools by default, `+want+` in full mode\)`)
+	check("README MCP section", readme, `by default, `+want+` in full mode\)`)
+	check("README agents section", readme, `by default, `+want+`\nin full mode`)
+	check("AGENTS kern_meta section", agents, `among `+want+` individual `+"`kern_\\*`"+` tools`)
+	check("AGENTS catalog section", agents, `ships `+want+` `+"`kern_\\*`"+` MCP tools`)
 }
 
 func allInstalled(sts []Status, agent string) bool {
