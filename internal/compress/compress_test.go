@@ -1,6 +1,7 @@
 package compress
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -79,5 +80,101 @@ func TestCompressPromptCollapsesBlanksAndRuns(t *testing.T) {
 	want := "a\n\nb\nc"
 	if got != want {
 		t.Fatalf("expected %q, got %q", want, got)
+	}
+}
+
+func TestCompressLogClustersRepeatedTraces(t *testing.T) {
+	var sb strings.Builder
+	for i := 1; i <= 450; i++ {
+		fmt.Fprintf(&sb, "2024-01-01 10:00:%02d ERROR ConnTimeout: database unreachable at address 0x%X (goroutine %d)\n", i%60, 0x7fA1B2+i, i)
+	}
+	got := CompressLog(sb.String(), Options{MaxLines: 1000, Cluster: true})
+	if c := strings.Count(got, "ConnTimeout"); c != 1 {
+		t.Fatalf("expected exactly one ConnTimeout line, got %d:\n%s", c, got)
+	}
+	if !strings.Contains(got, "ConnTimeout") {
+		t.Fatalf("expected clustered ConnTimeout line retained, got:\n%s", got)
+	}
+	if !strings.HasSuffix(strings.TrimSpace(got), "(repeated 450x)") {
+		t.Fatalf("expected line ending in '(repeated 450x)', got:\n%s", got)
+	}
+}
+
+func TestCompressLogClusterDisabled(t *testing.T) {
+	var sb strings.Builder
+	for i := 1; i <= 20; i++ {
+		fmt.Fprintf(&sb, "2024-01-01 10:00:%02d ERROR ConnTimeout: database unreachable at address 0x%X (goroutine %d)\n", i, 0x7fA1B2+i, i)
+	}
+	got := CompressLog(sb.String(), Options{MaxLines: 1000})
+	if c := strings.Count(got, "ConnTimeout"); c < 2 {
+		t.Fatalf("expected near-duplicate lines to stay distinct without clustering, got %d:\n%s", c, got)
+	}
+	if strings.Contains(got, "repeated") {
+		t.Fatalf("expected no repeat annotation without clustering, got:\n%s", got)
+	}
+}
+
+func TestCompressLogClusterDeterministic(t *testing.T) {
+	var sb strings.Builder
+	for i := 1; i <= 50; i++ {
+		fmt.Fprintf(&sb, "2024-01-01 10:00:%02d ERROR ConnTimeout: database unreachable at address 0x%X (goroutine %d)\n", i%60, 0x7fA1B2+i, i)
+	}
+	in := sb.String()
+	a := CompressLog(in, Options{MaxLines: 1000, Cluster: true})
+	b := CompressLog(in, Options{MaxLines: 1000, Cluster: true})
+	if a != b {
+		t.Fatalf("expected byte-identical output, got:\n%q\nvs\n%q", a, b)
+	}
+}
+
+func TestCompressLogClusterFuzzyMerge(t *testing.T) {
+	log := "ERROR request failed for user alice\nERROR request failed for user bob\n"
+	got := CompressLog(log, Options{MaxLines: 200, Cluster: true})
+	if c := strings.Count(got, "ERROR request failed for user"); c != 1 {
+		t.Fatalf("expected one merged line, got %d:\n%s", c, got)
+	}
+	if !strings.Contains(got, "(repeated 2x)") {
+		t.Fatalf("expected fuzzy-merged line annotated '(repeated 2x)', got:\n%s", got)
+	}
+}
+
+func TestCompressLogClusterRespectsMaxLines(t *testing.T) {
+	msgs := []string{
+		"connection refused", "timeout", "permission denied", "disk full",
+		"invalid argument", "broken pipe", "deadline exceeded", "resource busy",
+		"not found", "out of memory",
+	}
+	var sb strings.Builder
+	for r := 0; r < 20; r++ {
+		for i, m := range msgs {
+			fmt.Fprintf(&sb, "2024-01-01 10:00:%02d ERROR %s on attempt %d (goroutine %d)\n", (i+r*10)%60, m, r+1, r*10+i+1)
+		}
+	}
+	got := CompressLog(sb.String(), Options{MaxLines: 5, Cluster: true})
+	if n := strings.Count(got, "ERROR "); n > 5 {
+		t.Fatalf("expected at most 5 clustered lines, got %d:\n%s", n, got)
+	}
+	if !strings.Contains(got, "lines omitted") {
+		t.Fatalf("expected omission message, got:\n%s", got)
+	}
+}
+
+func TestCompressLogClusterKeepsUniqueErrors(t *testing.T) {
+	log := strings.Join([]string{
+		"2024-01-01 10:00:00 ERROR connection refused on port 8080",
+		"2024-01-01 10:00:01 WARN disk space low at 91%",
+		"2024-01-01 10:00:02 FATAL nil pointer dereference in handler",
+	}, "\n")
+	got := CompressLog(log, Options{MaxLines: 200, Cluster: true})
+	for _, want := range []string{"connection refused", "disk space low", "nil pointer dereference"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("expected distinct error %q preserved, got:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "repeated") {
+		t.Fatalf("expected no repeat annotation for distinct errors, got:\n%s", got)
+	}
+	if c := strings.Count(got, "\n") + 1; c != 3 {
+		t.Fatalf("expected all 3 distinct lines, got %d:\n%s", c, got)
 	}
 }
