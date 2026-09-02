@@ -7,6 +7,55 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+
+- Live guard-event streaming: `relay.PublishPersisted` dual-leg (durable append
+  + live socket emit) wired into the CLI guard path and MCP `handleGuardCheck`
+  (G-1).
+- Audit-chain coverage for every MCP tool call: one chained entry per dispatch
+  via `toolAudit`, lazily persisted to `.kern/audit` (G-2); O(1) JSONL appends
+  for the chain; cross-process writer serialization + tamper-chain repair.
+- Sandbox network-policy audit on the impact manifest (netns state,
+  KERN_ALLOW_NET / KERN_ALLOW_NO_ISOLATE, network-error signatures) (G-3);
+  post-run impact manifest with content hashes.
+- Range-scoped taint generation + Python sink scanning (7 rules) with pytest
+  scaffolds (G-4).
+- Cache maintenance: TTL eviction + gzip archival of dormant entries, `kern
+  cache` CLI (G-7).
+- Minimal stdio JSON-RPC LSP server: `kern lsp` — hover, definition,
+  references (G-8).
+- MinHash LSH banding for large-log clustering + near-duplicate log-line
+  clustering with repetition counts (G-9).
+- Duplication-debt cleanup (G-11): canonical `index.LoadOrBuild` and
+  `runtime.FormatEvent`; itoa/dirMatch/recorder-wiring families extinct
+  repo-wide; CLI<->MCP default-agent twins consolidated.
+- Incremental index rebuilds with prior-index reuse; parallel index build with
+  deterministic merge.
+- Cross-process event relay over `.kern/events.sock`.
+- Declarative custom agent adapters (`.kern/agents.json`).
+- Model-aware tokenizer hot-swap with exact cl100k/o200k BPE.
+- MCP draft-code validation + taint-lite analysis tools.
+- `kern calibrate` — F1 calibration harness exposed as a CLI command.
+- Watch: trailing debounce with dependency-aware rebuild wait.
+- Guard: `@pure` mutation assertions and violation event publishing.
+- Diff: compact view-only diffs with symbol span annotations.
+- Budget: AST-aware code fitting that preserves signatures.
+- What-if: flags broken call sites, untested symbols, boundary violations.
+
+### Fixed
+
+- `storage.LogStore` de-flaked: deterministic Put order in TestLogStoreCRUD.
+- `execution.Worktree.Diff` tolerates unhashable files.
+- Audit chain repair for cross-process writers.
+
+### Docs
+
+- Corrected stale tool counts and the "read-only" server claim (G-6); G-11
+  tracker marked DONE; next-plan gap surfaces documented.
+
+## [0.9.0] - 2026-09-01
+
+### Added
+
 - Governance as the authz spine: `authorize-context` (P0.1 authorized-context
   primitive), freshness, and isolation checks; evidence bundle (P1.1) with
   tamper-evidence seal; phase-aware MCP tool catalog.

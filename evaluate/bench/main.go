@@ -774,6 +774,12 @@ func main() {
 	fmt.Println()
 	gates = append(gates, reportClassMetrics()...)
 	fmt.Println()
+	// Tokenizer accuracy: exact counters (cl100k/o200k) must reproduce
+	// reference counts; estimator drift is reported for transparency.
+	fmt.Println("## tokenizer accuracy")
+	fmt.Println()
+	gates = append(gates, reportTokenizerAccuracy()...)
+	fmt.Println()
 
 	// Retrieval recall: index the project's docs on the deterministic n-gram
 	// path, then verify known "needle" queries surface the expected file in the
@@ -952,6 +958,57 @@ func reportClassMetrics() []string {
 			m.firstPass, m.verifiedSuccess, m.humanIntervention, m.postDeployRegression)
 	}
 	return nil
+}
+
+// tokenizerFixtures are reference token counts from the tiktoken 0.14.0
+// reference implementation over the same rank tables embedded in
+// internal/tokenize/data. Values generated offline (see
+// internal/tokenize/tiktoken_fixtures_test.go); do not hand-edit.
+var tokenizerFixtures = []struct {
+	text   string
+	cl100k int
+	o200k  int
+}{
+	{"hello world", 2, 2},
+	{"tiktoken is great!", 6, 6},
+	{"don't stop believin'", 6, 5},
+	{"digits 123456789 and 42 and 007", 11, 11},
+	{"unicode: café naïve 日本語 中文 한국어 🚀 emoji", 19, 13},
+	{"CamelCaseIdentifier and snake_case_id", 8, 7},
+	{"https://example.com/path?query=1&x=2#frag", 15, 15},
+	{"error: connection refused (errno 61); retrying in 500ms", 15, 15},
+}
+
+// reportTokenizerAccuracy verifies the exact BPE tokenizers reproduce
+// reference counts (hard gate) and reports estimator drift for
+// transparency (the estimator remains the default counter so historical
+// numbers stay comparable).
+func reportTokenizerAccuracy() []string {
+	var gates []string
+	est := tokenize.Estimator{Kind: tokenize.KindGeneric}
+	cl, errC := tokenize.NewCl100kCounter()
+	o2, errO := tokenize.NewO200kCounter()
+	if errC != nil || errO != nil {
+		return []string{fmt.Sprintf("tokenizer table load failed: cl100k=%v o200k=%v", errC, errO)}
+	}
+	fmt.Println("| sample | estimator | cl100k | o200k | cl100k ref | o200k ref | estimator vs cl100k |")
+	fmt.Println("|---|---|---|---|---|---|---|")
+	for _, f := range tokenizerFixtures {
+		ec := est.Count(f.text)
+		cc, oc := cl.Count(f.text), o2.Count(f.text)
+		drift := 0.0
+		if cc > 0 {
+			drift = float64(ec-cc) / float64(cc) * 100
+		}
+		fmt.Printf("| %q | %d | %d | %d | %d | %d | %+.1f%% |\n", f.text, ec, cc, oc, f.cl100k, f.o200k, drift)
+		if cc != f.cl100k {
+			gates = append(gates, fmt.Sprintf("cl100k count mismatch on %q: got %d want %d", f.text, cc, f.cl100k))
+		}
+		if oc != f.o200k {
+			gates = append(gates, fmt.Sprintf("o200k count mismatch on %q: got %d want %d", f.text, oc, f.o200k))
+		}
+	}
+	return gates
 }
 
 type recall struct {
