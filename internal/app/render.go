@@ -50,6 +50,12 @@ func renderWhatIfText(kind whatif.ChangeKind, change, target string, imp whatif.
 	fmt.Fprintf(&b, "files: %d\n", len(imp.Files))
 	fmt.Fprintf(&b, "services: %d\n", len(imp.Services))
 	fmt.Fprintf(&b, "tests: %d\n", len(imp.Tests))
+	if len(imp.BrokenCallSites) > 0 {
+		fmt.Fprintf(&b, "Broken call sites: %s\n", strings.Join(imp.BrokenCallSites, ", "))
+	}
+	if len(imp.UntestedAffected) > 0 {
+		fmt.Fprintf(&b, "Untested affected: %s\n", strings.Join(imp.UntestedAffected, ", "))
+	}
 	fmt.Fprintf(&b, "risk: %s\n", imp.Risk)
 	fmt.Fprintf(&b, "recommendation: %s\n", imp.Recommendation)
 	for _, c := range imp.Claims {

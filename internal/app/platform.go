@@ -155,7 +155,7 @@ func NewWithGraph(root string, ix *index.Index, g *intelligence.Graph) (*Platfor
 	// one). The CLI only ever reads these files; the running firewall writes them.
 	auditDir := filepath.Join(root, ".kern", "audit")
 	_ = os.MkdirAll(auditDir, 0o755)
-	fw.AuditLog().WithStore(storage.NewLocal(auditDir))
+	fw.AuditLog().WithStore(storage.NewLog(auditDir)).WithLockPath(filepath.Join(auditDir, ".lock"))
 	// Replay persisted entries into memory, then verify the tamper-evident
 	// chain. A broken chain is evidence to investigate — not a reason to refuse
 	// to start: warn loudly on stderr and continue. When NOTHING verifies —
@@ -335,6 +335,21 @@ func populateWhatIfEvidence(p *Platform, imp *whatif.Impact, target string) {
 			imp.ArchitectureViolations = append(imp.ArchitectureViolations, fwErr.Error())
 		}
 	}
+	// Boundary violations: check the affected files against the
+	// .kern/boundaries.json guardrails when the platform has an index and a
+	// non-empty rule set is configured (same guard semantics as `kern guard`).
+	// A missing boundaries.json is fail-open — no rule set, no entries.
+	if p.ix != nil {
+		b, bErr := intel.LoadBoundaries(p.root)
+		if bErr == nil && b != nil && len(b.Rules) > 0 {
+			for _, v := range intel.CheckBoundaries(p.ix, b, imp.Files) {
+				imp.ArchitectureViolations = append(imp.ArchitectureViolations,
+					fmt.Sprintf("boundary: %s -> %s forbidden by rule %s -> %s (%s)", v.CallerFile, v.CalleeFile, v.RuleFrom, v.RuleTo, v.CallerFile))
+			}
+			// Dedupe against entries the firewall block already added.
+			imp.ArchitectureViolations = dedupeStrings(imp.ArchitectureViolations)
+		}
+	}
 	// Historical evidence: recall incident lessons related to the target so
 	// prior incidents on this symbol/service inform the impact estimate.
 	if p.mem != nil {
@@ -348,6 +363,21 @@ func populateWhatIfEvidence(p *Platform, imp *whatif.Impact, target string) {
 	if p.rtSrc != nil {
 		imp.RuntimeEvidence = append(imp.RuntimeEvidence, p.runtimeEvidenceFor(target)...)
 	}
+}
+
+// dedupeStrings removes duplicate strings, keeping the first occurrence, and
+// preserves order.
+func dedupeStrings(in []string) []string {
+	seen := map[string]bool{}
+	out := make([]string, 0, len(in))
+	for _, s := range in {
+		if seen[s] {
+			continue
+		}
+		seen[s] = true
+		out = append(out, s)
+	}
+	return out
 }
 
 // runtimeEvidenceFor returns the target's runtime error evidence from the
@@ -396,22 +426,9 @@ func (p *Platform) runtimeEvidenceFor(target string) []string {
 	}
 	out := make([]string, 0, len(matched))
 	for _, ev := range matched {
-		out = append(out, fmtRuntimeEventStr(ev))
+		out = append(out, runtime.FormatEvent(ev))
 	}
 	return out
-}
-
-// fmtRuntimeEventStr renders a runtime event deterministically (no secrets:
-// only type/severity/message/service), mirroring context.fmtRuntimeEvent.
-func fmtRuntimeEventStr(ev runtime.Event) string {
-	msg := strings.TrimSpace(ev.Message)
-	if msg == "" {
-		msg = string(ev.Type)
-	}
-	if ev.Service != "" {
-		return "[" + ev.Service + "] " + string(ev.Severity) + ": " + msg
-	}
-	return string(ev.Severity) + ": " + msg
 }
 
 // Verify runs the verification engine against the requested types (default
