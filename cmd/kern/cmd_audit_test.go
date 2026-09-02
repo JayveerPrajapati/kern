@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"log"
@@ -11,6 +12,8 @@ import (
 	"time"
 
 	kctx "github.com/JayveerPrajapati/kern/internal/context"
+	"github.com/JayveerPrajapati/kern/internal/governance"
+	"github.com/JayveerPrajapati/kern/internal/storage"
 )
 
 // captureStderr runs fn with os.Stderr redirected to a pipe and returns the
@@ -188,4 +191,61 @@ func TestAuditAppend_ConsumesValidationOutcome_Warn(t *testing.T) {
 	if !strings.Contains(logBuf.String(), "blueprint validation warning (status=WARN, correlation=c4)") {
 		t.Errorf("log = %q, want INFO WARN log line", logBuf.String())
 	}
+}
+
+// TestAuditRepairCommand: `kern audit repair` re-chains a store with a broken
+// link on the first run and reports an already-verified chain on the second.
+func TestAuditRepairCommand(t *testing.T) {
+	root := t.TempDir()
+	auditDir := filepath.Join(root, ".kern", "audit")
+	if err := os.MkdirAll(auditDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	lock := filepath.Join(auditDir, ".lock")
+	store := storage.NewLocal(auditDir)
+	l := governance.NewAuditLog().WithStore(store).WithLockPath(lock)
+	for i := 0; i < 3; i++ {
+		l.Record(governance.AuditEntry{
+			AgentID: "agent-x", Action: "write", Resource: "source", Result: "allowed",
+		})
+	}
+
+	// Corrupt the middle entry's stored hash in the persisted file.
+	if err := corruptAuditHash(t, store, "audit-audit-2"); err != nil {
+		t.Fatal(err)
+	}
+
+	out := captureStdout(t, func() {
+		runAuditRepair([]string{"--root", root})
+	})
+	if !strings.Contains(out, "re-chained") {
+		t.Fatalf("first repair output = %q, want re-chained", out)
+	}
+
+	out = captureStdout(t, func() {
+		runAuditRepair([]string{"--root", root})
+	})
+	if !strings.Contains(out, "already verified") {
+		t.Fatalf("second repair output = %q, want already verified", out)
+	}
+}
+
+// corruptAuditHash rewrites a stored entry with a bogus hash to simulate a
+// broken chain link.
+func corruptAuditHash(t *testing.T, store storage.Store, key string) error {
+	t.Helper()
+	raw, err := store.Get(context.Background(), key)
+	if err != nil {
+		return err
+	}
+	var ent governance.AuditEntry
+	if err := json.Unmarshal(raw, &ent); err != nil {
+		return err
+	}
+	ent.Hash = strings.Repeat("0", 64)
+	data, err := json.Marshal(ent)
+	if err != nil {
+		return err
+	}
+	return store.Put(context.Background(), key, data)
 }

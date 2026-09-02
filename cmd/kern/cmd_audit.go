@@ -21,9 +21,15 @@ var auditInvalidate = func(entities []string, reason, source string, at time.Tim
 
 // runAudit shows audit trail entries, optionally filtered by task ID.
 func runAudit(rest []string) {
-	if len(rest) > 0 && rest[0] == "append" {
-		runAuditAppend(rest[1:])
-		return
+	if len(rest) > 0 {
+		switch rest[0] {
+		case "append":
+			runAuditAppend(rest[1:])
+			return
+		case "repair":
+			runAuditRepair(rest[1:])
+			return
+		}
 	}
 
 	f, args, err := parseFlags(rest)
@@ -125,8 +131,9 @@ func runAuditAppend(rest []string) {
 		}
 	}
 
-	store := storage.NewLocal(filepath.Join(root, ".kern", "audit"))
-	log := governance.NewAuditLog().WithStore(store)
+	auditDir := filepath.Join(root, ".kern", "audit")
+	store := storage.NewLog(auditDir)
+	log := governance.NewAuditLog().WithStore(store).WithLockPath(filepath.Join(auditDir, ".lock"))
 	if _, err := log.Replay(); err != nil {
 		fatal("audit append: replay: %v", err)
 	}
@@ -152,4 +159,43 @@ func runAuditAppend(rest []string) {
 	all := log.All()
 	last := all[len(all)-1]
 	fmt.Printf("appended %s (hash %s)\n", last.ID, last.Hash)
+}
+
+// runAuditRepair re-chains persisted audit entries from the first broken
+// link. It repairs self-inflicted breaks (e.g. the pre-lock concurrent-writer
+// bug) but cannot distinguish those from genuine tampering, so it only runs
+// on explicit user request.
+func runAuditRepair(rest []string) {
+	f, args, err := parseFlags(rest)
+	if err != nil {
+		fatalUsage("flags: %v", err)
+	}
+	if len(args) > 0 {
+		fatalUsage("audit repair: unexpected argument %q", args[0])
+	}
+	root := f.root
+	if root == "" {
+		root = "."
+	}
+
+	auditDir := filepath.Join(root, ".kern", "audit")
+	if fi, err := os.Stat(auditDir); err != nil || !fi.IsDir() {
+		fatal("no audit store at %s", auditDir)
+	}
+
+	l := governance.NewAuditLog().
+		WithStore(storage.NewLog(auditDir)).
+		WithLockPath(filepath.Join(auditDir, ".lock"))
+	if _, err := l.Replay(); err != nil {
+		fatal("audit repair: replay: %v", err)
+	}
+	n, err := l.RepairChain()
+	if err != nil {
+		fatal("audit repair: %v", err)
+	}
+	if n == 0 {
+		fmt.Println("audit chain already verified (no repair needed)")
+		return
+	}
+	fmt.Printf("repair: re-chained %d entry/entries; chain verified\n", n)
 }
