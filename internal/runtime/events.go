@@ -6,6 +6,7 @@
 package runtime
 
 import (
+	"strings"
 	"time"
 
 	"github.com/JayveerPrajapati/kern/internal/domain"
@@ -34,6 +35,22 @@ type Event struct {
 	TraceID    string
 	SpanID     string
 	Attributes map[string]string
+}
+
+// FormatEvent renders an event deterministically for evidence lines (no
+// secrets: only type/severity/message/service). It is the canonical
+// renderer shared by the context engine's rule evidence and the app
+// platform's what-if runtime evidence — previously two byte-identical
+// private mirrors (blueprint duplication finding, G-11).
+func FormatEvent(ev Event) string {
+	msg := strings.TrimSpace(ev.Message)
+	if msg == "" {
+		msg = string(ev.Type)
+	}
+	if ev.Service != "" {
+		return "[" + ev.Service + "] " + string(ev.Severity) + ": " + msg
+	}
+	return string(ev.Severity) + ": " + msg
 }
 
 // IsError reports whether the event represents an error or critical condition.

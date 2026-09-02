@@ -4,7 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/JayveerPrajapati/kern/internal/domain"
@@ -545,4 +548,296 @@ func TestVerifyChainReport(t *testing.T) {
 			t.Fatalf("VerifyChainReport() = (%d, %d) for legacy entries, want (0, 0)", brk, verified)
 		}
 	})
+}
+
+// --- Cross-process writer fix: tail-accurate, locked writes ---
+
+// TestStaleHeadChainsFromPersistedTail is the regression test for the
+// concurrent-writer bug: process B holds an in-memory chain head from an
+// older tail; when process A appends entries in between, B's next write must
+// re-read the TRUE persisted tail and chain from it, not from its stale head.
+func TestStaleHeadChainsFromPersistedTail(t *testing.T) {
+	dir := t.TempDir()
+	store := storage.NewLocal(dir)
+	lock := filepath.Join(dir, ".lock")
+
+	A := NewAuditLog().WithStore(store).WithLockPath(lock)
+	A.Record(entry("", "a"))
+	A.Record(entry("", "b"))
+
+	B := NewAuditLog().WithStore(store).WithLockPath(lock)
+	if _, err := B.Replay(); err != nil {
+		t.Fatalf("B.Replay(): %v", err)
+	}
+
+	A.Record(entry("", "c"))
+	B.Record(entry("", "d"))
+
+	C := NewAuditLog().WithStore(store)
+	if _, err := C.Replay(); err != nil {
+		t.Fatalf("C.Replay(): %v", err)
+	}
+	brk, verified := C.VerifyChainReport()
+	if brk != -1 || verified != 4 {
+		t.Fatalf("VerifyChainReport() = (%d, %d), want (-1, 4)", brk, verified)
+	}
+}
+
+// TestAppendExternalStaleHead covers the Blueprint path: a fresh process that
+// skipped Replay() appends onto a chain that another process extended in the
+// meantime — the append must chain from the persisted tail, not an empty or
+// stale head.
+func TestAppendExternalStaleHead(t *testing.T) {
+	dir := t.TempDir()
+	store := storage.NewLocal(dir)
+	lock := filepath.Join(dir, ".lock")
+
+	A := NewAuditLog().WithStore(store).WithLockPath(lock)
+	A.Record(entry("", "a"))
+	A.Record(entry("", "b"))
+
+	// Fresh-process path: build a log over the same store+lock but do NOT
+	// Replay() before the append.
+	B := NewAuditLog().WithStore(store).WithLockPath(lock)
+	A.Record(entry("", "c"))
+	if err := B.AppendExternal(entry("", "d")); err != nil {
+		t.Fatalf("AppendExternal: %v", err)
+	}
+
+	C := NewAuditLog().WithStore(store)
+	if _, err := C.Replay(); err != nil {
+		t.Fatalf("C.Replay(): %v", err)
+	}
+	brk, verified := C.VerifyChainReport()
+	if brk != -1 || verified != 4 {
+		t.Fatalf("VerifyChainReport() = (%d, %d), want (-1, 4)", brk, verified)
+	}
+}
+
+// TestConcurrentWritersKeepChainIntact hammers the store with two logs (as
+// two processes would) writing interleaved entries; the flock + tail re-read
+// must keep every entry on one contiguous chain with no ID overwrites.
+func TestConcurrentWritersKeepChainIntact(t *testing.T) {
+	dir := t.TempDir()
+	store := storage.NewLocal(dir)
+	lock := filepath.Join(dir, ".lock")
+
+	A := NewAuditLog().WithStore(store).WithLockPath(lock)
+	B := NewAuditLog().WithStore(store).WithLockPath(lock)
+
+	var wg sync.WaitGroup
+	for g := 0; g < 2; g++ {
+		wg.Add(1)
+		go func(useB bool) {
+			defer wg.Done()
+			log := A
+			if useB {
+				log = B
+			}
+			for i := 0; i < 15; i++ {
+				log.Record(entry("", "agent-x"))
+			}
+		}(g == 1)
+	}
+	wg.Wait()
+
+	fresh := NewAuditLog().WithStore(store)
+	if _, err := fresh.Replay(); err != nil {
+		t.Fatalf("Replay(): %v", err)
+	}
+	brk, verified := fresh.VerifyChainReport()
+	if brk != -1 || verified != 30 {
+		t.Fatalf("VerifyChainReport() = (%d, %d), want (-1, 30)", brk, verified)
+	}
+	if got := len(fresh.All()); got != 30 {
+		t.Fatalf("len(All()) = %d, want 30 (no ID overwrites)", got)
+	}
+}
+
+// TestRepairChainRechainsFromFirstBroken: RepairChain recomputes chain-link
+// hashes from the first broken entry onward, preserving entry content.
+func TestRepairChainRechainsFromFirstBroken(t *testing.T) {
+	dir := t.TempDir()
+	store := storage.NewLocal(dir)
+	lock := filepath.Join(dir, ".lock")
+
+	l := NewAuditLog().WithStore(store).WithLockPath(lock)
+	l.Record(entry("", "a"))
+	l.Record(entry("", "b"))
+	l.Record(entry("", "c"))
+
+	// Corrupt the middle entry's stored hash in the persisted file.
+	corrupted := l.All()[1]
+	corrupted.Hash = strings.Repeat("0", 64)
+	data, err := json.Marshal(corrupted)
+	if err != nil {
+		t.Fatalf("marshal corrupted entry: %v", err)
+	}
+	if err := store.Put(context.Background(), "audit-"+corrupted.ID, data); err != nil {
+		t.Fatalf("Put corrupted entry: %v", err)
+	}
+
+	fresh := NewAuditLog().WithStore(store)
+	if _, err := fresh.Replay(); err != nil {
+		t.Fatalf("Replay(): %v", err)
+	}
+	brk, _ := fresh.VerifyChainReport()
+	if brk != 1 {
+		t.Fatalf("VerifyChainReport() firstBroken = %d, want 1", brk)
+	}
+
+	n, err := fresh.RepairChain()
+	if err != nil {
+		t.Fatalf("RepairChain(): %v", err)
+	}
+	if n < 1 {
+		t.Fatalf("RepairChain() = %d, want >= 1", n)
+	}
+
+	// A fresh log now verifies the whole chain, and entry content is
+	// preserved — only the chain-link Hash differs from the corrupted value.
+	repaired := NewAuditLog().WithStore(store)
+	if _, err := repaired.Replay(); err != nil {
+		t.Fatalf("Replay(): %v", err)
+	}
+	brk, verified := repaired.VerifyChainReport()
+	if brk != -1 || verified != 3 {
+		t.Fatalf("after repair VerifyChainReport() = (%d, %d), want (-1, 3)", brk, verified)
+	}
+	orig := l.All()
+	got := repaired.All()
+	if len(got) != len(orig) {
+		t.Fatalf("entry count = %d, want %d", len(got), len(orig))
+	}
+	for i := range got {
+		if got[i].ID != orig[i].ID ||
+			!got[i].Timestamp.Equal(orig[i].Timestamp) ||
+			got[i].AgentID != orig[i].AgentID ||
+			got[i].Action != orig[i].Action ||
+			got[i].Result != orig[i].Result {
+			t.Fatalf("entry %d content changed by repair: %+v vs %+v", i, got[i], orig[i])
+		}
+		if got[i].Hash == "" {
+			t.Fatalf("entry %d has empty hash after repair", i)
+		}
+	}
+}
+
+// TestLegacyNoLockPathStillWorks: a log without WithLockPath still re-reads
+// the persisted tail before each write and chains correctly (backward compat,
+// single-writer safe).
+func TestLegacyNoLockPathStillWorks(t *testing.T) {
+	dir := t.TempDir()
+	store := storage.NewLocal(dir)
+
+	l := NewAuditLog().WithStore(store) // no lock path
+	l.Record(entry("", "a"))
+	l.Record(entry("", "b"))
+	l.Record(entry("", "c"))
+
+	fresh := NewAuditLog().WithStore(store)
+	if _, err := fresh.Replay(); err != nil {
+		t.Fatalf("Replay(): %v", err)
+	}
+	brk, verified := fresh.VerifyChainReport()
+	if brk != -1 || verified != 3 {
+		t.Fatalf("VerifyChainReport() = (%d, %d), want (-1, 3)", brk, verified)
+	}
+}
+
+// TestLegacyToChainContinuation: entries written via a LocalStore-backed
+// AuditLog (legacy per-key files) are continued by a NewLog-backed AuditLog
+// over the same directory — a fresh process — which Records more entries via
+// the chain.jsonl append path. The chain must verify across the boundary and
+// the "audit-N" IDs must continue without restart.
+func TestLegacyToChainContinuation(t *testing.T) {
+	dir := t.TempDir()
+
+	// Phase 1: an older writer persisted to per-key files (LocalStore).
+	legacy := storage.NewLocal(dir)
+	l1 := NewAuditLog().WithStore(legacy)
+	l1.Record(entry("", "a"))
+	l1.Record(entry("", "b"))
+	l1.Record(entry("", "c"))
+
+	// Phase 2: a fresh process over the append-only chain store, same dir.
+	chained := storage.NewLog(dir)
+	l2 := NewAuditLog().WithStore(chained)
+	if n, err := l2.Replay(); err != nil {
+		t.Fatalf("Replay(): %v", err)
+	} else if n != 3 {
+		t.Fatalf("Replay() = %d entries, want 3 (legacy files must be read)", n)
+	}
+	l2.Record(entry("", "d"))
+	l2.Record(entry("", "e"))
+
+	all := l2.All()
+	if len(all) != 5 {
+		t.Fatalf("All() = %d entries, want 5", len(all))
+	}
+	if got := all[3].ID; got != "audit-4" {
+		t.Errorf("entry 4 ID = %q, want audit-4 (sequence must continue)", got)
+	}
+	if got := all[4].ID; got != "audit-5" {
+		t.Errorf("entry 5 ID = %q, want audit-5 (sequence must continue)", got)
+	}
+	brk, verified := l2.VerifyChainReport()
+	if brk != -1 || verified != 5 {
+		t.Fatalf("VerifyChainReport() = (%d, %d), want (-1, 5) across legacy → chain.jsonl boundary", brk, verified)
+	}
+
+	// On disk: the 3 legacy files remain and chain.jsonl holds the 2 new
+	// entries as JSON lines.
+	if fi, err := os.Stat(filepath.Join(dir, "audit-audit-3.json")); err != nil || fi.IsDir() {
+		t.Errorf("legacy file audit-audit-3.json missing after migration: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "chain.jsonl"))
+	if err != nil {
+		t.Fatalf("read chain.jsonl: %v", err)
+	}
+	if got := strings.Count(string(data), "\n"); got != 2 {
+		t.Errorf("chain.jsonl has %d lines, want 2", got)
+	}
+	entries, err := chained.List(context.Background())
+	if err != nil {
+		t.Fatalf("List(): %v", err)
+	}
+	if len(entries) != 5 {
+		t.Fatalf("store has %d entries, want 5 (3 legacy + 2 chain)", len(entries))
+	}
+}
+
+// TestFreshLogChainsFromChainTail: a fresh AuditLog over a NewLog store that
+// skips Replay() still chains its first write from the TRUE persisted tail
+// via LastEntry — the same stale-head-writer guarantee the full re-list gave,
+// now through the O(1) fast path.
+func TestFreshLogChainsFromChainTail(t *testing.T) {
+	dir := t.TempDir()
+	store := storage.NewLog(dir)
+
+	l1 := NewAuditLog().WithStore(store)
+	l1.Record(entry("", "a"))
+	l1.Record(entry("", "b"))
+
+	// Fresh process, no Replay: the first write must continue the persisted
+	// sequence and chain from the persisted tail hash.
+	l2 := NewAuditLog().WithStore(store)
+	l2.Record(entry("", "c"))
+	all := l2.All()
+	if len(all) != 1 {
+		t.Fatalf("All() = %d entries, want 1", len(all))
+	}
+	if got := all[0].ID; got != "audit-3" {
+		t.Errorf("ID = %q, want audit-3 (continuation without Replay)", got)
+	}
+
+	// A third log replays everything and must verify the whole chain.
+	l3 := NewAuditLog().WithStore(store)
+	if _, err := l3.Replay(); err != nil {
+		t.Fatalf("Replay(): %v", err)
+	}
+	brk, verified := l3.VerifyChainReport()
+	if brk != -1 || verified != 3 {
+		t.Fatalf("VerifyChainReport() = (%d, %d), want (-1, 3) across fresh-writer boundary", brk, verified)
+	}
 }

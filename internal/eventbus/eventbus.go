@@ -87,6 +87,13 @@ const (
 	DeploymentCompleted Kind = "deployment.completed"
 	// DeploymentRolledBack indicates a deployment was rolled back.
 	DeploymentRolledBack Kind = "deployment.rolled_back"
+	// LockAcquired indicates a workspace lock was acquired.
+	LockAcquired Kind = "lock.acquired"
+	// LockContended indicates a workspace lock acquisition failed because
+	// another process holds the lock.
+	LockContended Kind = "lock.contended"
+	// LockReleased indicates a workspace lock was released.
+	LockReleased Kind = "lock.released"
 	// ObserveHealthy indicates the system was observed healthy.
 	ObserveHealthy Kind = "observe.healthy"
 	// LessonRecorded indicates a lesson was recorded.
@@ -531,6 +538,14 @@ func (b *Bus) EnablePersistence(path string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.persistPath = path
+}
+
+// DefaultPersistPath returns the conventional per-root event persistence
+// file: <root>/.kern/events.jsonl. Callers may persist anywhere, but the
+// guard, kern-server, and the relay all converge on this path so the
+// persisted file and the live socket describe the same event stream.
+func DefaultPersistPath(root string) string {
+	return filepath.Join(root, ".kern", "events.jsonl")
 }
 
 // appendPersist appends ev as a JSON line to persistPath. Best-effort.

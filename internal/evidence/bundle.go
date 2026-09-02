@@ -114,8 +114,8 @@ type AuditEntrySnapshot struct {
 	ValidationOutcome *governance.ValidationOutcome `json:"validation_outcome,omitempty"`
 }
 
-// defaultAgentPermissions mirrors the CLI's built-in agent (cmd_context.go:
-// registerDefaultAgentCLI): the default identity may read context.
+// defaultAgentPermissions mirrors the built-in default agent (governance.
+// EnsureDefaultAgent): the default identity may read context.
 var defaultAgentPermissions = []governance.Permission{{Resource: "context", Action: "read"}}
 
 // Generate assembles an evidence bundle for root. The authorization pillar is
@@ -220,7 +220,7 @@ func lineageFromScope(scope governance.AuthorizedScope, task string) *LineageSec
 // and returns a flat snapshot of every entry in insertion order. An empty or
 // absent trail is not an error (fresh repo with no governance events yet).
 func snapshotAuditTrail(root string) ([]AuditEntrySnapshot, error) {
-	store := storage.NewLocal(filepath.Join(root, ".kern", "audit"))
+	store := storage.NewLog(filepath.Join(root, ".kern", "audit"))
 	log := governance.NewAuditLog().WithStore(store)
 	if _, err := log.Replay(); err != nil {
 		return nil, fmt.Errorf("evidence: replay audit chain: %w", err)
