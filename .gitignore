@@ -62,3 +62,25 @@ TODO.md
 # local build artifacts
 /bench
 .aider*
+
+# Deepwork session state (git-local, OpenCode-readable)
+.slim/deepwork/
+
+# --- kern generated (agent wiring, machine-specific) ---
+# Re-run `kern setup` to refresh. Unignore a line to commit shared config.
+.mcp.json
+.claude/
+.cursor/
+.gemini/
+.kiro/
+.kern/
+.continue/
+.windsurf/
+.opencode/node_modules/
+.opencode/package-lock.json
+.cortexkit/
+CLAUDE.md
+GEMINI.md
+.github/copilot-instructions.md
+.github/hooks/
+# --- end kern generated ---

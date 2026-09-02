@@ -20,6 +20,15 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      - name: Changelog entry exists for tag
+        run: |
+          tag="${GITHUB_REF#refs/tags/}"
+          version="${tag#v}"
+          if ! grep -qF "## [${version}]" CHANGELOG.md; then
+            echo "::error::CHANGELOG.md has no '## [${version}]' section for tag ${tag} — add one (Keep a Changelog) before releasing."
+            exit 1
+          fi
+
       - name: Vet and test
         run: |
           go vet ./...

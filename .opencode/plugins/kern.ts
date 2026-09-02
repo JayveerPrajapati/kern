@@ -1454,7 +1454,41 @@ async function runPayload(args: string[], timeoutMs?: number, preserveExit = fal
           return withTempFile("verify-input.txt", args.text, (file) => run([...flags, file]))
         },
       }),
-      kern_entry_points: tool({
+      kern_check_draft: tool({
+        description:
+          "Validate an agent's draft code against the project index (lighter than LSP, deterministic): Go parse errors, relative imports that do not resolve under root, calls to symbols that are neither declared in the draft nor indexed, and method calls on package aliases not found in the indexed package. Non-Go languages are skipped conservatively.",
+        args: {
+          code: tool.schema.string(),
+          root: tool.schema.string().optional(),
+          lang: tool.schema.string().optional(),
+        },
+        async execute(args) {
+          const flags: string[] = ["check-draft"]
+          if (args.lang) flags.push("--lang", args.lang)
+          return withTempFile("draft.go", args.code, (file) => {
+            const rest = [...flags, file]
+            if (args.root) rest.push(args.root)
+            return run(rest)
+          })
+        },
+      }),
+      kern_taint: tool({
+        description:
+          "Taint-lite analysis: flag security sinks (SQL injection, command injection, unsafe deserialization) whose containing function is transitively called by a framework entry point or whose file contains source expressions (request params, bodies, CLI args). With generate, emits a deterministic go test scaffold per tainted sink (package clause, testing import, TestTaint<Rule><Line> with a TODO body) for LLM-assisted fill.",
+        args: {
+          root: tool.schema.string().optional(),
+          file: tool.schema.string().optional(),
+          generate: tool.schema.boolean().optional(),
+        },
+        async execute(args) {
+          const flags: string[] = ["taint"]
+          if (args.file) flags.push("--file", args.file)
+          if (args.generate) flags.push("--generate")
+          if (args.root) flags.push(args.root)
+          return run(flags)
+        },
+      }),
+kern_entry_points: tool({
         description:
           "List framework entry points found in the index: handlers, controllers and route targets. Use to know what endpoints a codebase exposes.",
         args: {
