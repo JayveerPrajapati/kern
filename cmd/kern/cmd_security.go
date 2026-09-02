@@ -122,7 +122,98 @@ func runSec(rest []string) {
 	if counts["error"] > 0 {
 		panic(exitError{code: 1})
 	}
+}
 
+// runTaint implements `kern taint [root] [--file f] [--range a..b] [--generate]`:
+// taint-lite analysis over security findings. Each finding's containing
+// function is marked tainted when it is transitively called by a framework
+// entry point or its file contains a source expression; --generate appends a
+// test scaffold per tainted sink (go test for Go sinks, pytest for Python
+// sinks, G-4). --range scopes findings to the files changed in a git range
+// (".." = working tree). The MCP tool kern_taint is the primary surface (this
+// thin CLI form exists so the opencode plugin can reach the same check).
+func runTaint(rest []string) {
+	f, args, err := parseFlags(rest)
+	if err != nil {
+		fatalUsage("flags: %v", err)
+	}
+	root := f.root
+	if root == "" {
+		root = "."
+	}
+	if len(args) > 0 {
+		root = args[0]
+	}
+	findings, serr := sec.Scan(root)
+	if serr != nil {
+		fatal("kern taint: %v", serr)
+	}
+	if f.file != "" {
+		filtered := findings[:0]
+		for _, fd := range findings {
+			if fd.File == f.file {
+				filtered = append(filtered, fd)
+			}
+		}
+		findings = filtered
+	}
+	// G-4: --range scopes findings to the files changed in a git range.
+	// Combined with --file the two filters intersect.
+	if f.range_ != "" {
+		from, to, rerr := parseTaintRange(f.range_)
+		if rerr != nil {
+			fatalUsage("kern taint: %v", rerr)
+		}
+		files, rerr := intel.FilesForRange(root, from, to)
+		if rerr != nil {
+			fatal("kern taint: %v", rerr)
+		}
+		scope := fmt.Sprintf("range %s..%s", from, to)
+		if from == "" && to == "" {
+			scope = "worktree"
+		}
+		fmt.Printf("scope: %d file(s) changed in %s\n", len(files), scope)
+		findings = sec.FilterByFiles(findings, files)
+	}
+	ix, ierr := loadOrBuild(root)
+	if ierr != nil {
+		ix = nil
+	}
+	tainted := sec.TaintLite(ix, findings)
+	if len(tainted) == 0 {
+		fmt.Println("no security findings")
+		return
+	}
+	for _, tf := range tainted {
+		fmt.Printf("%s:%d [%s] %s — %s\n", tf.File, tf.Line, tf.Severity, tf.Rule, tf.Message)
+		if tf.Tainted {
+			fmt.Printf("  tainted: yes")
+			if tf.EntryPoint != "" {
+				fmt.Printf(" (via %s: path %s)", tf.EntryPoint, strings.Join(tf.Path, " → "))
+			}
+			fmt.Println()
+		} else {
+			fmt.Println("  tainted: no")
+		}
+		if f.generate && tf.Tainted {
+			sc := sec.ScaffoldFor(tf)
+			lang := "go"
+			if strings.HasSuffix(strings.ToLower(tf.File), ".py") || strings.HasPrefix(tf.Rule, "py-") {
+				lang = "python"
+			}
+			fmt.Printf("# write to: %s\n```%s\n%s\n```\n", sc.File, lang, sc.Code)
+		}
+	}
+}
+
+// parseTaintRange splits a "from..to" git range into its endpoints. An empty
+// from and to ("..") means the working tree (G-4).
+func parseTaintRange(r string) (from, to string, err error) {
+	parts := strings.Split(r, "..")
+	if len(parts) != 2 {
+		return "", "", fmt.Errorf("invalid range %q: want <from>..<to>", r)
+	}
+	return parts[0], parts[1], nil
 }
 
 func runDelete(rest []string) {

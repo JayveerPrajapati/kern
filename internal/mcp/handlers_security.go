@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"github.com/JayveerPrajapati/kern/internal/intel"
 	"github.com/JayveerPrajapati/kern/internal/pii"
+	"github.com/JayveerPrajapati/kern/internal/relay"
 	jsonschema "github.com/JayveerPrajapati/kern/internal/schema"
 	"github.com/JayveerPrajapati/kern/internal/sec"
 	"github.com/JayveerPrajapati/kern/internal/verify"
@@ -31,7 +32,7 @@ func (s *Server) handleMaskPII(ctx context.Context, args map[string]any) (string
 		for k, v := range res.ByLabel {
 			parts = append(parts, fmt.Sprintf("%s %d", k, v))
 		}
-		summary := "masked " + itoa(res.Replaced) + " secrets"
+		summary := "masked " + strconv.Itoa(res.Replaced) + " secrets"
 		if len(parts) > 0 {
 			summary += ": " + strings.Join(parts, ", ")
 		}
@@ -81,7 +82,88 @@ func (s *Server) handleSecurity(ctx context.Context, args map[string]any) (strin
 		out += fmt.Sprintf("[kern] %d findings: %d error, %d warning, %d info\n",
 			len(findings), counts["error"], counts["warning"], counts["info"])
 		return out, nil
+	}
+}
 
+// handleTaint implements kern_taint: taint-lite analysis over security
+// findings. Each finding's containing function is marked tainted when it is
+// transitively called by a framework entry point (Symbol.Entry) or its file
+// contains a source expression; with generate=true, a deterministic test
+// scaffold (go test for Go sinks, pytest for Python sinks, G-4) is appended
+// per tainted sink for the caller to fill. The optional range argument
+// scopes findings to the files changed in a "from..to" git range.
+func (s *Server) handleTaint(ctx context.Context, args map[string]any) (string, error) {
+	{
+		root := argString(args, "root")
+		if root == "" {
+			cwd, _ := os.Getwd()
+			root = cwd
+		}
+		fileFilter := argString(args, "file")
+		generate := argBool(args, "generate")
+		rng := argString(args, "range")
+
+		findings, serr := sec.Scan(root)
+		if serr != nil {
+			return "", fmt.Errorf("security scan failed: %w", serr)
+		}
+		if fileFilter != "" {
+			filtered := findings[:0]
+			for _, f := range findings {
+				if f.File == fileFilter {
+					filtered = append(filtered, f)
+				}
+			}
+			findings = filtered
+		}
+		// G-4: scope findings to the files changed in a git range
+		// ("from..to", ".." = working tree). Combined with fileFilter the
+		// two filters intersect.
+		scopeNote := ""
+		if rng != "" {
+			parts := strings.Split(rng, "..")
+			if len(parts) != 2 {
+				return "", fmt.Errorf("invalid range %q: want <from>..<to>", rng)
+			}
+			files, gerr := intel.FilesForRange(root, parts[0], parts[1])
+			if gerr != nil {
+				return "", fmt.Errorf("range lookup failed: %w", gerr)
+			}
+			scope := fmt.Sprintf("range %s..%s", parts[0], parts[1])
+			if parts[0] == "" && parts[1] == "" {
+				scope = "worktree"
+			}
+			scopeNote = fmt.Sprintf("scope: %d file(s) changed in %s\n", len(files), scope)
+			findings = sec.FilterByFiles(findings, files)
+		}
+		ix, _ := s.loadIndex(ctx, root)
+		tainted := sec.TaintLite(ix, findings)
+		if len(tainted) == 0 {
+			return scopeNote + "no security findings", nil
+		}
+		var b strings.Builder
+		b.WriteString(scopeNote)
+		for _, tf := range tainted {
+			fmt.Fprintf(&b, "%s:%d [%s] %s — %s\n", tf.File, tf.Line, tf.Severity, tf.Rule, tf.Message)
+			if tf.Tainted {
+				b.WriteString("  tainted: yes")
+				if tf.EntryPoint != "" {
+					fmt.Fprintf(&b, " (via %s: path %s)", tf.EntryPoint, strings.Join(tf.Path, " → "))
+				}
+				b.WriteString("\n")
+			} else {
+				b.WriteString("  tainted: no\n")
+			}
+			if generate && tf.Tainted {
+				sc := sec.ScaffoldFor(tf)
+				lang := "go"
+				if strings.HasSuffix(strings.ToLower(tf.File), ".py") || strings.HasPrefix(tf.Rule, "py-") {
+					lang = "python"
+				}
+				fmt.Fprintf(&b, "# write to: %s\n```%s\n%s\n```\n", sc.File, lang, sc.Code)
+			}
+		}
+		return b.String(), nil
 	}
 }
 
@@ -152,6 +234,38 @@ func (s *Server) handleVerifyOutput(ctx context.Context, args map[string]any) (s
 	}
 }
 
+func (s *Server) handleCheckDraft(ctx context.Context, args map[string]any) (string, error) {
+	{
+		code := argString(args, "code")
+		if code == "" {
+			return "", fmt.Errorf("code is required")
+		}
+		root := argString(args, "root")
+		if root == "" {
+			cwd, _ := os.Getwd()
+			root = cwd
+		}
+		lang := argString(args, "lang")
+		ix, err := s.loadIndex(ctx, root)
+		if err != nil {
+			// Without a usable index the symbol checks cannot run; surface the
+			// error instead of emitting a false-positive clean verdict.
+			return "", fmt.Errorf("cannot check draft: index unavailable for %q: %w", root, err)
+		}
+		findings := verify.CheckDraft(ix, root, []byte(code), lang)
+		if len(findings) == 0 {
+			return "OK: draft validates cleanly — no issues found", nil
+		}
+		var b strings.Builder
+		for _, f := range findings {
+			fmt.Fprintf(&b, "draft.go:%d [%s] %s\n", f.Line, f.Kind, f.Message)
+		}
+		fmt.Fprintf(&b, "%d issue(s) found", len(findings))
+		return b.String(), nil
+
+	}
+}
+
 func (s *Server) handleGuardCheck(ctx context.Context, args map[string]any) (string, error) {
 	{
 		changes, ix, err := s.changedContext(ctx, args)
@@ -171,6 +285,16 @@ func (s *Server) handleGuardCheck(ctx context.Context, args map[string]any) (str
 			return "", err
 		}
 		violations, skipped := intel.CheckBoundariesPrecise(ix, b, files, false)
+		// @pure mutability assertions are opt-in via "pure": true in
+		// .kern/boundaries.json; a nil ruleset carries no Pure flag, so the
+		// check is skipped when the guard is not configured.
+		if b != nil && b.Pure {
+			violations = append(violations, intel.CheckPurity(ix, files)...)
+		}
+		// Publish guard outcomes exactly like the CLI guard check: persisted
+		// to .kern/events.jsonl for replay and, when a relay owns the socket,
+		// emitted live to watchers. Best-effort; never changes the verdict.
+		relay.PublishPersisted(root, intel.GuardEvents(violations, skipped["boundaries-not-configured"] > 0))
 		threshold := 0
 		if v := argString(args, "threshold"); v != "" {
 			n, err := atoiArg(v, threshold)
