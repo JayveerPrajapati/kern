@@ -9,6 +9,7 @@ package whatif
 import (
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -72,6 +73,13 @@ type Impact struct {
 	Mitigations    []string       // concrete steps to reduce the risk of the change
 	Confidence     float64        // 0..1 confidence in the impact estimate
 	Databases      []string       // databases affected by the change
+	// BrokenCallSites are the direct callers that would break because they call
+	// the changed symbol with its old signature/name (ChangeSignature and
+	// RenameSymbol only; empty/nil for every other kind).
+	BrokenCallSites []string `json:"broken_call_sites,omitempty"` // direct callers that would break (ChangeSignature/RenameSymbol)
+	// UntestedAffected are the affected symbols that have no covering tests,
+	// i.e. WhatTestsCover returns nothing for them.
+	UntestedAffected []string `json:"untested_affected,omitempty"` // affected symbols with no covering tests
 	// The following fields exist so the Impact shape stays stable even when
 	// whatif cannot populate them without external data.
 	ArchitectureViolations []string // architecture rules violated by the change
@@ -207,6 +215,52 @@ func Simulate(g *intelligence.Graph, c Change) Impact {
 	}
 	sort.Strings(imp.Tests)
 
+	// Broken call sites: for signature/rename changes, every direct caller of
+	// the target breaks because it must be updated to the new signature/name.
+	// Collected from the raw "calls" edges into the target (excluding self
+	// edges); transitive dependents that do not call the target directly are
+	// not broken call sites.
+	brokenCallers := map[string]bool{}
+	if c.Kind == ChangeSignature || c.Kind == RenameSymbol {
+		for _, e := range g.Edges {
+			if e.Kind == "calls" && e.To == c.Target && e.From != c.Target {
+				brokenCallers[e.From] = true
+			}
+		}
+	}
+	imp.BrokenCallSites = sortedKeys(brokenCallers)
+
+	// Untested affected: the symbols the change touches that have no covering
+	// tests. The checked set is the target plus its direct callers (for
+	// signature/rename) or the target plus the transitively affected set
+	// (otherwise). It is capped at 25 symbols to bound the WhatTestsCover
+	// traversal cost. Unresolvable names are skipped.
+	untestedCandidates := map[string]bool{c.Target: true}
+	if c.Kind == ChangeSignature || c.Kind == RenameSymbol {
+		for _, id := range imp.BrokenCallSites {
+			untestedCandidates[id] = true
+		}
+	} else {
+		for _, id := range imp.Affected {
+			untestedCandidates[id] = true
+		}
+	}
+	checked := sortedKeys(untestedCandidates)
+	capped := len(checked) > 25
+	if capped {
+		checked = checked[:25]
+	}
+	untested := map[string]bool{}
+	for _, sym := range checked {
+		if _, ok := graphByID[sym]; !ok {
+			continue // unresolvable name — skip
+		}
+		if len(g.WhatTestsCover(sym)) == 0 {
+			untested[sym] = true
+		}
+	}
+	imp.UntestedAffected = sortedKeys(untested)
+
 	// Databases reachable from the changed symbol.
 	imp.Databases = databasesAffected(g, c.Target)
 	sort.Strings(imp.Databases)
@@ -242,9 +296,47 @@ func Simulate(g *intelligence.Graph, c Change) Impact {
 
 	imp.Recommendation = recommend(c, imp)
 	imp.Claims = []domain.Claim{recommendationClaim(c, imp)}
+	// Typed claims for the new deterministic dimensions: broken direct call
+	// sites and affected symbols without covering tests.
+	if len(imp.BrokenCallSites) > 0 {
+		imp.Claims = append(imp.Claims, domain.Claim{
+			Type:       domain.ClaimInference,
+			Statement:  fmt.Sprintf("%s of %s breaks %d direct call site(s)", c.Kind, c.Target, len(imp.BrokenCallSites)),
+			Source:     "whatif",
+			Provenance: "direct-call-edge scan of the knowledge graph",
+			Scope:      c.Target,
+			Timestamp:  time.Now().UTC(),
+			Confidence: 1.0,
+		})
+	}
+	if len(imp.UntestedAffected) > 0 {
+		stmt := fmt.Sprintf("%d affected symbol(s) have no covering tests", len(imp.UntestedAffected))
+		if capped {
+			stmt = fmt.Sprintf("%d affected symbol(s) have no covering tests (checked first 25 of %d candidates)", len(imp.UntestedAffected), len(untestedCandidates))
+		}
+		imp.Claims = append(imp.Claims, domain.Claim{
+			Type:       domain.ClaimInference,
+			Statement:  stmt,
+			Source:     "whatif",
+			Provenance: "WhatTestsCover scan over affected symbols",
+			Scope:      c.Target,
+			Timestamp:  time.Now().UTC(),
+			Confidence: 1.0,
+		})
+	}
 	imp.Facts = facts(c, imp)
 	imp.Limitations = limitations(c, imp)
 	return imp
+}
+
+// sortedKeys returns the map's keys sorted ascending, deduplicated by the map.
+func sortedKeys(m map[string]bool) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // alternatives generates 1-2 deterministic lower-risk ways to achieve the same
@@ -325,8 +417,8 @@ func facts(c Change, imp Impact) []string {
 	if c.NewTarget != "" {
 		f = append(f, "new target: "+c.NewTarget)
 	}
-	f = append(f, "affected symbols: "+itoa(len(imp.Affected)))
-	f = append(f, "affected files: "+itoa(len(imp.Files)))
+	f = append(f, "affected symbols: "+strconv.Itoa(len(imp.Affected)))
+	f = append(f, "affected files: "+strconv.Itoa(len(imp.Files)))
 	if len(imp.Services) > 0 {
 		f = append(f, "affected services: "+strings.Join(imp.Services, ", "))
 	}
@@ -400,13 +492,13 @@ func recommend(c Change, imp Impact) string {
 	case len(imp.Services) > 0:
 		b.WriteString(" affects service(s) " + strings.Join(imp.Services, ", ") + " — treat as high risk; run full verification and require human approval before deploy.")
 	case len(imp.Affected) > 10:
-		b.WriteString(" affects " + itoa(len(imp.Affected)) + " symbols — high blast radius; require human approval.")
+		b.WriteString(" affects " + strconv.Itoa(len(imp.Affected)) + " symbols — high blast radius; require human approval.")
 	default:
 		// The "run the affected tests (...)" tail only reads well when
 		// there are actually affected tests; otherwise drop the empty
 		// parenthetical.
 		tests := strings.Join(imp.Tests, ", ")
-		b.WriteString(" affects " + itoa(len(imp.Affected)) + " symbols across " + itoa(len(imp.Files)) + " file(s)")
+		b.WriteString(" affects " + strconv.Itoa(len(imp.Affected)) + " symbols across " + strconv.Itoa(len(imp.Files)) + " file(s)")
 		if tests != "" {
 			b.WriteString("; run the affected tests (" + tests + ")")
 		}
@@ -493,27 +585,4 @@ func databasesAffected(g *intelligence.Graph, target string) []string {
 // WhatIf is an alias for Simulate. It remains for backward compatibility.
 func WhatIf(g *intelligence.Graph, c Change) Impact {
 	return Simulate(g, c)
-}
-
-// itoa is a minimal integer formatter (stdlib-only, avoids strconv).
-func itoa(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	neg := n < 0
-	if neg {
-		n = -n
-	}
-	var b [20]byte
-	i := len(b)
-	for n > 0 {
-		i--
-		b[i] = byte('0' + n%10)
-		n /= 10
-	}
-	if neg {
-		i--
-		b[i] = '-'
-	}
-	return string(b[i:])
 }
