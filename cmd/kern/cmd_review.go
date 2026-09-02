@@ -401,6 +401,51 @@ func runVerify(rest []string) {
 
 }
 
+// runCheckDraft implements `kern check-draft <file|-> [root] [--lang LANG]`:
+// validate a draft code snippet against the project index. The MCP tool
+// kern_check_draft is the primary surface (this thin CLI form exists so the
+// opencode plugin, which shells out to the CLI, can reach the same check).
+func runCheckDraft(rest []string) {
+	f, args, err := parseFlags(rest)
+	if err != nil {
+		fatalUsage("flags: %v", err)
+	}
+	root := f.root
+	if root == "" {
+		root = "."
+	}
+	in := "-"
+	if len(args) > 0 && args[0] != "" {
+		in = args[0]
+		args = args[1:]
+	}
+	if len(args) > 0 {
+		root = args[0]
+	}
+	var b []byte
+	if in == "-" {
+		b, err = readStdin()
+	} else {
+		b, err = os.ReadFile(in)
+	}
+	if err != nil {
+		fatal("%v", err)
+	}
+	ix, ierr := loadOrBuild(root)
+	if ierr != nil {
+		ix = nil
+	}
+	findings := verify.CheckDraft(ix, root, b, f.lang)
+	if len(findings) == 0 {
+		fmt.Println("OK: draft validates cleanly — no issues found")
+		return
+	}
+	for _, fd := range findings {
+		fmt.Printf("draft.go:%d [%s] %s\n", fd.Line, fd.Kind, fd.Message)
+	}
+	fmt.Printf("%d issue(s) found\n", len(findings))
+}
+
 func runChanges(cmd string, rest []string) {
 	f, args, err := parseFlags(rest)
 	if err != nil {

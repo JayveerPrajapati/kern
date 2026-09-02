@@ -1,6 +1,7 @@
 package diff
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -110,5 +111,142 @@ func TestHunksMergeWithinDoubleContext(t *testing.T) {
 	hunks := groupHunks(ops, ctx)
 	if len(hunks) != 1 {
 		t.Fatalf("expected 1 merged hunk, got %d:\n%v", len(hunks), hunks)
+	}
+}
+
+// TestCompactCollapsesContextRuns verifies long unchanged runs collapse into
+// annotation lines while every changed line is preserved verbatim.
+func TestCompactCollapsesContextRuns(t *testing.T) {
+	a := make([]string, 120)
+	for i := range a {
+		a[i] = fmt.Sprintf("line %d", i+1)
+	}
+	b := make([]string, 0, 125)
+	b = append(b, a[:49]...) // lines 1-49 unchanged
+	b = append(b, "replaced 50", "replaced 51", "replaced 52", "replaced 53")
+	b = append(b, "added after 53")
+	b = append(b, a[53:]...) // lines 54-120 unchanged
+	got := Compact("old.go", "new.go", a, b, nil)
+	if !strings.HasPrefix(got, "--- a/old.go\n+++ b/new.go\n") {
+		t.Fatalf("expected header first, got:\n%s", got)
+	}
+	if !strings.Contains(got, " ... 49 lines unchanged") {
+		t.Fatalf("expected 49-line annotation, got:\n%s", got)
+	}
+	if !strings.Contains(got, " ... 67 lines unchanged") {
+		t.Fatalf("expected 67-line annotation, got:\n%s", got)
+	}
+	for _, w := range []string{
+		"-line 50", "-line 51", "-line 52", "-line 53",
+		"+replaced 50", "+replaced 51", "+replaced 52", "+replaced 53",
+		"+added after 53",
+	} {
+		if !strings.Contains(got, w) {
+			t.Fatalf("expected %q verbatim in compact diff:\n%s", w, got)
+		}
+	}
+}
+
+// TestCompactShortRunsVerbatim verifies context runs of <= 2 lines stay
+// verbatim and no annotation lines appear.
+func TestCompactShortRunsVerbatim(t *testing.T) {
+	a := []string{"l1", "l2", "l3", "l4", "l5", "l6", "l7"}
+	b := []string{"l1", "l2", "l3x", "l4", "l5", "l6x", "l7"}
+	got := Compact("a.txt", "b.txt", a, b, nil)
+	if strings.Contains(got, "lines unchanged") {
+		t.Fatalf("no annotation expected for short runs:\n%s", got)
+	}
+	for _, w := range []string{" l1", " l2", " l4", " l5", " l7", "-l3", "+l3x", "-l6", "+l6x"} {
+		if !strings.Contains(got, w) {
+			t.Fatalf("expected %q verbatim:\n%s", w, got)
+		}
+	}
+}
+
+// TestCompactSpanAnnotation verifies the span resolver annotates the run whose
+// first line falls inside the resolved span.
+func TestCompactSpanAnnotation(t *testing.T) {
+	a := make([]string, 100)
+	for i := range a {
+		a[i] = fmt.Sprintf("line %d", i+1)
+	}
+	b := make([]string, len(a))
+	copy(b, a)
+	b[49] = "changed 50"
+	resolve := func(file string, line int) string {
+		if line >= 40 && line <= 55 {
+			return "main"
+		}
+		return ""
+	}
+	got := Compact("app.go", "app.go", a, b, resolve)
+	if !strings.Contains(got, " ... 50 lines unchanged in main ...") {
+		t.Fatalf("expected span-annotated trailing run, got:\n%s", got)
+	}
+	if strings.Contains(got, "49 lines unchanged in main") {
+		t.Fatalf("leading run (first line 1) must not be span-annotated:\n%s", got)
+	}
+}
+
+// TestCompactNilResolver verifies a nil resolver yields annotations without
+// span text.
+func TestCompactNilResolver(t *testing.T) {
+	a := make([]string, 80)
+	for i := range a {
+		a[i] = fmt.Sprintf("line %d", i+1)
+	}
+	b := make([]string, len(a))
+	copy(b, a)
+	b[39] = "changed 40"
+	got := Compact("a.txt", "b.txt", a, b, nil)
+	if !strings.Contains(got, "lines unchanged") {
+		t.Fatalf("expected annotation, got:\n%s", got)
+	}
+	if strings.Contains(got, " in ") {
+		t.Fatalf("nil resolver must not annotate spans:\n%s", got)
+	}
+}
+
+// TestCompactDeterministic verifies identical inputs produce identical output.
+func TestCompactDeterministic(t *testing.T) {
+	a := make([]string, 60)
+	for i := range a {
+		a[i] = fmt.Sprintf("line %d", i+1)
+	}
+	b := make([]string, len(a))
+	copy(b, a)
+	b[20], b[40] = "x20", "x40"
+	first := Compact("a.txt", "b.txt", a, b, nil)
+	second := Compact("a.txt", "b.txt", a, b, nil)
+	if first != second {
+		t.Fatalf("compact output must be deterministic")
+	}
+}
+
+// TestCompactTrailingAndLeadingRuns verifies collapsed runs on both the very
+// start (trailing run) and the very end (leading run) of a file.
+func TestCompactTrailingAndLeadingRuns(t *testing.T) {
+	mk := func(n int) []string {
+		s := make([]string, n)
+		for i := range s {
+			s[i] = fmt.Sprintf("line %d", i+1)
+		}
+		return s
+	}
+	// Change at the very start: trailing run collapsed.
+	a := mk(100)
+	b := append([]string{"replaced first"}, a[1:]...)
+	got := Compact("a.txt", "b.txt", a, b, nil)
+	if !strings.Contains(got, " ... 99 lines unchanged") {
+		t.Fatalf("expected collapsed trailing run, got:\n%s", got)
+	}
+	// Change at the very end: leading run collapsed.
+	a2 := mk(100)
+	b2 := make([]string, 100)
+	copy(b2, a2)
+	b2[99] = "replaced last"
+	got2 := Compact("a.txt", "b.txt", a2, b2, nil)
+	if !strings.Contains(got2, " ... 99 lines unchanged") {
+		t.Fatalf("expected collapsed leading run, got:\n%s", got2)
 	}
 }
