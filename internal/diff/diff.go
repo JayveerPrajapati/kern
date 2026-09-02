@@ -201,3 +201,60 @@ func hunkRange(h []Op) (aStart, aCount, bStart, bCount int) {
 	}
 	return aStart, aCount, bStart, bCount
 }
+
+// SpanResolver returns the enclosing symbol's display name for a line of a
+// file, or "" when unknown. Used by Compact to annotate collapsed context runs.
+type SpanResolver func(file string, line int) string
+
+// Compact renders a compacted, VIEW-ONLY diff: unchanged context runs longer
+// than 2 lines collapse into a single annotation line, preserving every
+// changed line verbatim. The output is NOT a valid patch — it exists for
+// reading/agent consumption only.
+func Compact(aPath, bPath string, a, b []string, resolve SpanResolver) string {
+	ops := DiffLines(a, b)
+	hasChange := false
+	for _, op := range ops {
+		if op.Kind != ' ' {
+			hasChange = true
+			break
+		}
+	}
+	if !hasChange {
+		return ""
+	}
+	if resolve == nil {
+		resolve = func(string, int) string { return "" }
+	}
+	var bd strings.Builder
+	bd.WriteString("--- a/" + labelPath(aPath) + "\n")
+	bd.WriteString("+++ b/" + labelPath(bPath) + "\n")
+	var run []Op
+	flush := func() {
+		n := len(run)
+		if n <= 2 {
+			for _, op := range run {
+				bd.WriteString(" " + op.Text + "\n")
+			}
+			run = nil
+			return
+		}
+		// Collapse the run into one annotation line. The line number used for
+		// span resolution is the A value of the run's first op.
+		ann := fmt.Sprintf(" ... %d lines unchanged", n)
+		if span := resolve(aPath, run[0].A); span != "" {
+			ann += " in " + span
+		}
+		bd.WriteString(ann + " ...\n")
+		run = nil
+	}
+	for _, op := range ops {
+		if op.Kind == ' ' {
+			run = append(run, op)
+			continue
+		}
+		flush()
+		bd.WriteString(string(op.Kind) + op.Text + "\n")
+	}
+	flush()
+	return bd.String()
+}
