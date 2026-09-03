@@ -208,8 +208,8 @@ func wireRulesFile(root, name string) Status {
 	if err != nil {
 		return Status{Agent: name, Path: path, Note: err.Error()}
 	}
-	cleaned := removeKernSection(content)
-	cleaned = removeMarkedBlock(cleaned, instructionMarkerOpen, instructionMarkerClose)
+	cleaned := removeMarkedBlock(content, instructionMarkerOpen, instructionMarkerClose)
+	cleaned = removeKernSection(cleaned)
 	// If the block is unchanged (same content after remove+reinsert), skip the
 	// write to avoid needlessly bumping mtime. This mirrors the global path.
 	final := mergeAppend(cleaned, string(rules))
