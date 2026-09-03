@@ -1,6 +1,6 @@
 # kern usage rules for agents — READ FIRST
 
-`kern` is this workspace's local context engine. These are the kern usage rules for agents. It is ALREADY INSTALLED and
+`kern` is this workspace's local context engine. It is ALREADY INSTALLED and
 WIRED — the `kern_*` MCP tools below are available to you right now. They run
 locally (nothing leaves your machine) and are FASTER and CHEAPER than the
 built-in read/grep/glob for any non-trivial codebase because they query a
