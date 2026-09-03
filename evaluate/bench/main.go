@@ -837,7 +837,7 @@ func runMetrics() []metric {
 	b := budget.Fit(noisyLog, 40)
 	return []metric{
 		{name: "optimize prompt", raw: verbosePrompt, out: p.Output, note: "deterministic", gate: 25},
-		{name: "optimize log", raw: noisyLog, out: l.Output, note: "keeps errors + frames", gate: 40},
+		{name: "optimize log", raw: noisyLog, out: l.Output, note: "keeps errors + frames", gate: 85},
 		{name: "optimize output (terse)", raw: verboseReply, out: t, note: "strips filler, keeps code", gate: 5},
 		{name: "budget fit (40 tok)", raw: noisyLog, out: b, note: "head + key lines", gate: 75},
 	}

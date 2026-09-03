@@ -130,3 +130,13 @@ func TestSignatureStable(t *testing.T) {
 		t.Fatalf("signature not capped: %d", len(sa))
 	}
 }
+
+func BenchmarkShingles(b *testing.B) {
+	text := "the quick brown fox jumps over the lazy dog and the database connection failed during migration"
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = shingles(text)
+	}
+}
+

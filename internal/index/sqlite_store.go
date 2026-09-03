@@ -53,22 +53,27 @@ func OpenSQLite(root string) (*SQLiteStore, error) {
 	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 		return nil, err
 	}
-	db, err := sql.Open("sqlite", "file:"+p)
+	dsn := fmt.Sprintf("file:%s?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=temp_store(MEMORY)&_pragma=cache_size(-20000)", p)
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, err
 	}
 	// WAL for concurrent access; busy_timeout so writers wait instead of
 	// failing when another process holds the write lock momentarily.
 	for _, pragma := range []string{
-		"PRAGMA journal_mode=WAL",
-		"PRAGMA busy_timeout=5000",
-		"PRAGMA synchronous=NORMAL",
+		"PRAGMA journal_mode=WAL;",
+		"PRAGMA synchronous=NORMAL;",
+		"PRAGMA busy_timeout=5000;",
+		"PRAGMA temp_store=MEMORY;",
+		"PRAGMA cache_size=-20000;",
 	} {
 		if _, err := db.Exec(pragma); err != nil {
 			db.Close()
 			return nil, err
 		}
 	}
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
 	s := &SQLiteStore{db: db, root: root, path: p}
 	if err := s.applySchema(); err != nil {
 		db.Close()
@@ -116,6 +121,7 @@ CREATE TABLE IF NOT EXISTS calls (
 	kind   TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_calls_callee ON calls(callee);
+CREATE INDEX IF NOT EXISTS idx_calls_caller ON calls(caller);
 CREATE TABLE IF NOT EXISTS callers (
 	callee TEXT NOT NULL,
 	caller TEXT NOT NULL

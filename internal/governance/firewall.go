@@ -5,6 +5,7 @@ package governance
 import (
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/JayveerPrajapati/kern/internal/domain"
@@ -17,6 +18,7 @@ import (
 // → Policy → Approval → Execution. It fails closed: unknown agents, missing
 // permissions, and always-blocked actions are denied by default.
 type Firewall struct {
+	mu           sync.RWMutex
 	agents       map[string]*AgentIdentity
 	assessor     *RiskAssessor
 	approval     *ApprovalWorkflow
@@ -57,6 +59,8 @@ func NewFirewallWithApprovalStore(root string) *Firewall {
 // WithAgents registers agents that can act through the firewall. It returns
 // the firewall for chaining.
 func (f *Firewall) WithAgents(agents ...*AgentIdentity) *Firewall {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	for _, a := range agents {
 		if a != nil {
 			f.agents[a.ID] = a
@@ -126,7 +130,9 @@ func (f *Firewall) Check(agentID, resource, action string) (allowed bool, risk d
 	defer func() { metrics.Default().RecordPolicyEval(time.Since(start)) }()
 
 	// 1. Authentication.
+	f.mu.RLock()
 	agent, ok := f.agents[agentID]
+	f.mu.RUnlock()
 	if !ok {
 		r := domain.Risk{Level: domain.RiskCritical, Score: 1.0, Factors: []string{"unknown agent"}, Mitigation: "register the agent before use", Blocked: true}
 		f.audit.Record(AuditEntry{AgentID: agentID, Action: action, Resource: resource, Risk: r, Result: "denied"})
@@ -158,16 +164,22 @@ func (f *Firewall) Check(agentID, resource, action string) (allowed bool, risk d
 	// 4. Approval gate.
 	if r.ApprovalRequired || RequiresApproval(r.Level) {
 		key := TaskKey(agentID, resource, action)
-		if !f.approvedKeys[key] {
+		f.mu.Lock()
+		approved := f.approvedKeys[key]
+		if approved {
+			// A granted approval authorizes exactly one action: consume it so it
+			// cannot be reused on subsequent Checks.
+			delete(f.approvedKeys, key)
+		}
+		f.mu.Unlock()
+
+		if !approved {
 			appr := f.approval.RequestWithBinding(key, agentID, r.Mitigation, r.Level, nil, nil, "")
 			f.audit.Record(AuditEntry{AgentID: agentID, Action: action, Resource: resource, Risk: r, Result: "pending"})
 			f.publish(eventbus.Event{Kind: eventbus.ApprovalRequested, Subject: appr.ID, Payload: map[string]string{"resource": resource, "action": action, "risk_level": string(r.Level)}})
 			metrics.Default().RecordApproval()
 			return false, r, &appr, nil
 		}
-		// A granted approval authorizes exactly one action: consume it so it
-		// cannot be reused on subsequent Checks.
-		delete(f.approvedKeys, key)
 	}
 
 	// 7. Allowed.
@@ -184,7 +196,9 @@ func (f *Firewall) ApproveAction(approvalID, approver string) error {
 		return err
 	}
 	agentID, resource, action := splitTaskKey(appr.TaskID)
+	f.mu.Lock()
 	f.approvedKeys[appr.TaskID] = true
+	f.mu.Unlock()
 	risk := domain.Risk{Level: domain.RiskHigh, Score: 0.75, Factors: []string{"approved by human"}, Mitigation: "human approval granted"}
 	f.audit.Record(AuditEntry{AgentID: agentID, Action: action, Resource: resource, Risk: risk, Approved: true, Result: "approved"})
 	metrics.Default().RecordApproval()
@@ -199,7 +213,9 @@ func (f *Firewall) RejectAction(approvalID, approver, reason string) error {
 		return err
 	}
 	agentID, resource, action := splitTaskKey(appr.TaskID)
+	f.mu.Lock()
 	delete(f.approvedKeys, appr.TaskID)
+	f.mu.Unlock()
 	risk := domain.Risk{Level: domain.RiskHigh, Score: 0.75, Factors: []string{"rejected by human"}, Mitigation: "human approval denied"}
 	f.audit.Record(AuditEntry{AgentID: agentID, Action: action, Resource: resource, Risk: risk, Result: "denied"})
 	metrics.Default().RecordApproval()

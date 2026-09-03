@@ -54,6 +54,14 @@ Already installed? Run `kern doctor` to verify everything is wired.
 
 ## Get Started
 
+### FAQ & Common Questions
+
+#### How do I optimize a prompt
+Run `kern optimize <prompt>` or call `kern_optimize_prompt`. It strips conversational filler and normalizes whitespace deterministically without external LLM dependencies.
+
+#### How do I compress a log
+Run `kern log <file>` or call `kern_optimize_log`. It folds repetitive external stack frames and compresses log output deterministically.
+
 ### 1. Install the CLI
 
 **No runtime required** — prebuilt static binaries, one command per platform:

@@ -4,6 +4,7 @@ package compress
 
 import (
 	"fmt"
+	"os"
 	"regexp"
 	"strings"
 
@@ -56,6 +57,7 @@ func CompressLog(text string, opts Options) string {
 		opts.MaxLines = 200
 	}
 	raw := strings.Split(text, "\n")
+
 	var out []string
 	seen := make(map[string]bool)
 	blankPend := false
@@ -72,6 +74,11 @@ func CompressLog(text string, opts Options) string {
 	var important []string
 	for idx, line := range raw {
 		normalized := timestampRe.ReplaceAllString(line, "")
+		// Strip hex offset from stack frame lines (+0x1a3 -> "")
+		if stackFrameRe.MatchString(normalized) || strings.Contains(normalized, "+0x") {
+			normalized = hexRe.ReplaceAllLiteralString(normalized, "")
+			normalized = strings.ReplaceAll(normalized, " +", "")
+		}
 		trimmed := strings.TrimSpace(normalized)
 		if trimmed == "" {
 			blankPend = true
@@ -80,8 +87,12 @@ func CompressLog(text string, opts Options) string {
 		if separatorRe.MatchString(trimmed) {
 			continue
 		}
+
+		if isChatter(trimmed) || strings.Contains(strings.ToLower(trimmed), "exit status") {
+			continue
+		}
 		importantLine := false
-		if stackFrameRe.MatchString(trimmed) || warnLevelRe.MatchString(trimmed) || buildErrRe.MatchString(trimmed) {
+		if stackFrameRe.MatchString(trimmed) || warnLevelRe.MatchString(trimmed) || buildErrRe.MatchString(trimmed) || (strings.Contains(trimmed, "(") && strings.Contains(trimmed, ")")) || (idx+1 < len(raw) && strings.HasPrefix(raw[idx+1], "\t")) {
 			importantLine = true
 		}
 		if !importantLine && infoLevelRe.MatchString(trimmed) {
@@ -135,7 +146,150 @@ func CompressLog(text string, opts Options) string {
 		}
 	}
 
+	// Perform contextual stack frame folding for external/system frames
+	out = foldStackFrames(out)
+
 	return strings.Join(out, "\n")
+}
+
+var systemFrameRe = regexp.MustCompile(`(?i)(runtime[/.]|net/http|syscall/|os/exec|os\.StartProcess|testing/|vendor/|node_modules/|site-packages/|dist-packages/|java\.base/|java\.|javax\.|sun\.|com\.sun\.|org\.springframework\.|org\.apache\.|/usr/lib/|/usr/local/go/|/usr/share/|/usr/bin/|pkg/mod/|gopkg\.in/|github\.com/gin-gonic/|github\.com/stretchr/)`)
+
+type stackFrame struct {
+	lines    []string
+	isSystem bool
+}
+
+// foldStackFrames identifies consecutive stack frames belonging to external/system libraries
+// and folds intermediate frames into [... N standard system frames folded ...].
+func foldStackFrames(lines []string) []string {
+	if len(lines) == 0 {
+		return lines
+	}
+
+	var frames []stackFrame
+	var nonStack []string
+	var result []string
+
+	cwd, _ := os.Getwd()
+	if cwd != "" && !strings.HasSuffix(cwd, "/") {
+		cwd += "/"
+	}
+
+	formatFrame := func(f stackFrame) []string {
+		if len(f.lines) == 2 && (strings.HasPrefix(f.lines[1], "\t") || strings.Contains(f.lines[1], ".go:")) {
+			loc := strings.TrimSpace(f.lines[1])
+			if cwd != "" {
+				loc = strings.TrimPrefix(loc, cwd)
+			}
+			loc = strings.TrimPrefix(loc, "/workspace/")
+			fn := strings.TrimSpace(f.lines[0])
+			return []string{fn + " (" + loc + ")"}
+		}
+		return f.lines
+	}
+
+	flushFrames := func() {
+		if len(frames) == 0 {
+			return
+		}
+		// Contextual folding over consecutive system frames
+		i := 0
+		for i < len(frames) {
+			if !frames[i].isSystem {
+				result = append(result, formatFrame(frames[i])...)
+				i++
+				continue
+			}
+
+			// Find run of system frames
+			j := i
+			for j < len(frames) && frames[j].isSystem {
+				j++
+			}
+			count := j - i
+			if count >= 3 {
+				// Retain topmost (i) and bottommost (j-1)
+				result = append(result, formatFrame(frames[i])...)
+				foldedCount := count - 2
+				result = append(result, fmt.Sprintf("[... %d external frames folded ...]", foldedCount))
+				result = append(result, formatFrame(frames[j-1])...)
+			} else {
+				for k := i; k < j; k++ {
+					result = append(result, formatFrame(frames[k])...)
+				}
+			}
+			i = j
+		}
+		frames = nil
+	}
+
+	isLocationLine := func(l string) bool {
+		return strings.HasPrefix(l, "\t") || strings.Contains(l, ".go:") || strings.Contains(l, ".py:") || strings.Contains(l, ".java:")
+	}
+
+	hasAppFrame := false
+	for _, l := range lines {
+		if (strings.Contains(l, ".go:") || strings.Contains(l, ".py:") || strings.Contains(l, ".java:")) && !systemFrameRe.MatchString(l) {
+			hasAppFrame = true
+			break
+		}
+	}
+
+	i := 0
+	for i < len(lines) {
+		line := lines[i]
+		if strings.HasPrefix(line, "goroutine ") && hasAppFrame {
+			i++
+			continue
+		}
+		if strings.HasPrefix(line, "created by ") && hasAppFrame {
+			i++
+			continue
+		}
+
+		isHeader := strings.HasPrefix(line, "goroutine ") || strings.HasPrefix(line, "created by ")
+		hasLocNext := i+1 < len(lines) && isLocationLine(lines[i+1])
+		isFrameStart := stackFrameRe.MatchString(line) || isHeader || hasLocNext
+
+		if isFrameStart {
+			// Flush non-stack lines
+			if len(nonStack) > 0 {
+				result = append(result, nonStack...)
+				nonStack = nil
+			}
+
+			// Collect frame lines (Go 2-line frame: func line + file:line)
+			frameLines := []string{line}
+			if !isHeader && hasLocNext && !isLocationLine(line) {
+				i++
+				frameLines = append(frameLines, lines[i])
+			}
+
+			isSys := false
+			for _, fl := range frameLines {
+				if systemFrameRe.MatchString(fl) {
+					isSys = true
+					break
+				}
+			}
+			frames = append(frames, stackFrame{lines: frameLines, isSystem: isSys})
+		} else {
+			if len(frames) > 0 {
+				flushFrames()
+			}
+			nonStack = append(nonStack, line)
+		}
+		i++
+	}
+
+	if len(frames) > 0 {
+		flushFrames()
+	}
+	if len(nonStack) > 0 {
+		result = append(result, nonStack...)
+	}
+
+	return result
 }
 
 // normalizeForCluster rewrites volatile tokens (timestamps, goroutine IDs,
@@ -302,14 +456,18 @@ func clusterLines(lines []string) []string {
 	return out
 }
 
+func isChatter(s string) bool {
+	lower := strings.ToLower(s)
+	return strings.Contains(lower, "heartbeat") || strings.Contains(lower, "keepalive") || strings.Contains(lower, "polling") || strings.Contains(lower, "slow query")
+}
+
 func isUsefulLogLine(s string) bool {
 	// Keep lines that mention files, modules, IPs or key/value pairs; drop pure
 	// chatter like heartbeats and periodic counters.
 	if len(s) > 200 {
 		return true
 	}
-	lower := strings.ToLower(s)
-	if strings.Contains(lower, "heartbeat") || strings.Contains(lower, "keepalive") || strings.Contains(lower, "polling") {
+	if isChatter(s) {
 		return false
 	}
 	if strings.ContainsAny(s, "=:{}[]") || strings.Contains(s, "/") {

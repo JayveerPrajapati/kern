@@ -45,13 +45,30 @@ func SemanticSearch(ix *index.Index, query string, limit int, e SymbolEmbedder) 
 		cos  float64 // dense cosine to query
 		rank int     // deterministic rank (0-based)
 	}
+	scoredList := make([]*scored, len(pool))
+	var wg sync.WaitGroup
+	// Concurrently embed up to 8 candidates in parallel
+	sem := make(chan struct{}, 8)
+	for idx, s := range pool {
+		wg.Add(1)
+		go func(rank int, sym index.Symbol) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			vec, err := embedCached(e, symbolDescriptor(sym))
+			if err != nil {
+				return
+			}
+			scoredList[rank] = &scored{s: sym, cos: denseCosine(qvec, vec), rank: rank}
+		}(idx, s)
+	}
+	wg.Wait()
+
 	var list []scored
-	for rank, s := range pool {
-		vec, err := embedCached(e, symbolDescriptor(s))
-		if err != nil {
-			continue
+	for _, sc := range scoredList {
+		if sc != nil {
+			list = append(list, *sc)
 		}
-		list = append(list, scored{s: s, cos: denseCosine(qvec, vec), rank: rank})
 	}
 	if len(list) == 0 {
 		return truncate(pool, limit)

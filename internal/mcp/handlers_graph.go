@@ -8,6 +8,7 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/index"
 	"github.com/JayveerPrajapati/kern/internal/intel"
 	"github.com/JayveerPrajapati/kern/internal/llm"
+	kernctx "github.com/JayveerPrajapati/kern/internal/context"
 	"os"
 	"regexp"
 	"strconv"
@@ -355,6 +356,13 @@ func (s *Server) handleContext(ctx context.Context, args map[string]any) (string
 		}
 		if body == "" {
 			return "no symbol found: " + symbol + s.freshnessFooter(args, ix), nil
+		}
+		if argBool(args, "terse_code") || argBool(args, "terse") {
+			path := symbol + ".go"
+			if def, ok := ix.ResolveName(symbol); ok && def.File != "" {
+				path = def.File
+			}
+			body = string(kernctx.PruneCode(path, []byte(body), true))
 		}
 		return body + s.freshnessFooter(args, ix), nil
 	}

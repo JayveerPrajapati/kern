@@ -8,7 +8,6 @@ package semcache
 
 import (
 	"encoding/json"
-	"hash/fnv"
 	"os"
 	"path/filepath"
 	"sort"
@@ -77,6 +76,36 @@ func utf8safecut(b []byte) int {
 
 // shingles returns the sorted, de-duplicated shingle set of text, capped at
 // MaxShingles. Words are lowercased, alphanumeric-only, length >= 2; the set
+func fnv32(s string) uint32 {
+	const offset32 = 2166136261
+	const prime32 = 16777619
+	h := uint32(offset32)
+	for i := 0; i < len(s); i++ {
+		h ^= uint32(s[i])
+		h *= prime32
+	}
+	return h
+}
+
+func fnv32Bigram(w1, w2 string) uint32 {
+	const offset32 = 2166136261
+	const prime32 = 16777619
+	h := uint32(offset32)
+	for i := 0; i < len(w1); i++ {
+		h ^= uint32(w1[i])
+		h *= prime32
+	}
+	h ^= uint32(' ')
+	h *= prime32
+	for i := 0; i < len(w2); i++ {
+		h ^= uint32(w2[i])
+		h *= prime32
+	}
+	return h
+}
+
+// shingles returns the sorted, de-duplicated shingle set of text, capped at
+// MaxShingles. Words are lowercased, alphanumeric-only, length >= 2; the set
 // is the union of single words (for short inputs) and word bigrams.
 func shingles(text string) []uint32 {
 	words := tokenizeWords(text)
@@ -84,22 +113,15 @@ func shingles(text string) []uint32 {
 		return nil
 	}
 	set := map[uint32]struct{}{}
-	hashes := func(ss []string) {
-		for _, s := range ss {
-			h := fnv.New32a()
-			_, _ = h.Write([]byte(s))
-			set[h.Sum32()] = struct{}{}
-		}
+	for _, w := range words {
+		set[fnv32(w)] = struct{}{}
 	}
-	if len(words) <= 2 {
-		hashes(words)
-	} else {
+	if len(words) > 2 {
 		// Always mix unigrams and bigrams so short near-duplicate phrasing
 		// overlaps enough; long inputs are capped by the deterministic sample
 		// below, which keeps the signature stable across runs.
-		hashes(words)
 		for i := 0; i+1 < len(words); i++ {
-			hashes([]string{words[i] + " " + words[i+1]})
+			set[fnv32Bigram(words[i], words[i+1])] = struct{}{}
 		}
 	}
 	if len(set) > MaxShingles {

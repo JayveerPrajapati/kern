@@ -605,3 +605,42 @@ func TestDefaultPoliciesMatchSpec(t *testing.T) {
 		}
 	}
 }
+
+func TestFirewallConcurrentCheckAndApprove(t *testing.T) {
+	agent := broadAgent("concurrent-agent")
+	f := NewFirewall().WithAgents(agent)
+	f.WithPolicies([]domain.Policy{
+		{ID: "p1", Name: "high_risk", Rule: "HIGH source.write", Scope: "source", Enabled: true},
+	})
+
+	const numGoroutines = 20
+	const iterations = 50
+	var wg sync.WaitGroup
+	wg.Add(numGoroutines * 2)
+
+	// Half the goroutines call Check
+	for i := 0; i < numGoroutines; i++ {
+		go func(id int) {
+			defer wg.Done()
+			for j := 0; j < iterations; j++ {
+				_, _, _, _ = f.Check("concurrent-agent", "source", "write")
+			}
+		}(i)
+	}
+
+	// The other half concurrently Approve and Reject actions
+	for i := 0; i < numGoroutines; i++ {
+		go func(id int) {
+			defer wg.Done()
+			for j := 0; j < iterations; j++ {
+				taskKey := "concurrent-agent|source|write"
+				f.mu.Lock()
+				f.approvedKeys[taskKey] = true
+				f.mu.Unlock()
+			}
+		}(i)
+	}
+
+	wg.Wait()
+}
+
