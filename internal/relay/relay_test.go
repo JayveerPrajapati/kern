@@ -87,30 +87,57 @@ func TestSlowClientDropped(t *testing.T) {
 	}
 	defer fast.Close()
 
-	// Overflow the slow client's buffer: it must be dropped, the fast
-	// client must keep receiving, and Broadcast must not block.
-	for i := 0; i < perClientBuffer*3; i++ {
-		s.Broadcast(eventbus.Event{ID: "e", Kind: eventbus.LockContended, Source: "test"})
+	// Registration is asynchronous: wait until both clients are actually
+	// wired to the server before flooding, so the overflow is attributable
+	// to the slow client's buffer alone and never drops the fast client.
+	deadline := time.Now().Add(3 * time.Second)
+	for len(allClients(s)) < 2 {
+		if time.Now().After(deadline) {
+			t.Fatal("clients never registered")
+		}
+		time.Sleep(2 * time.Millisecond)
 	}
 
-	// The fast client must still be receiving: keep broadcasting until it
-	// gets something (registration is asynchronous; the storm may have
-	// raced it).
-	deadline := time.Now().Add(3 * time.Second)
-	got := 0
-	for got == 0 && time.Now().Before(deadline) {
+	// Overflow the slow client's buffer (> perClientBuffer, never read):
+	// it must be dropped while the fast client, drained as we go, keeps
+	// receiving and Broadcast never blocks.
+	for i := 0; i < perClientBuffer*3; i++ {
 		s.Broadcast(eventbus.Event{ID: "e", Kind: eventbus.LockContended, Source: "test"})
-		_ = fast.conn.SetReadDeadline(time.Now().Add(300 * time.Millisecond))
+		// Drain anything fast may have received so it never fills its own
+		// buffer and is never dropped by the storm.
+		_ = fast.conn.SetReadDeadline(time.Now().Add(2 * time.Millisecond))
 		for {
 			if _, err := fast.Next(); err != nil {
 				break
 			}
-			got++
 		}
+	}
+
+	// The fast client must still be receiving after the slow one is
+	// dropped.
+	got := 0
+	s.Broadcast(eventbus.Event{ID: "e", Kind: eventbus.LockContended, Source: "test"})
+	_ = fast.conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	for {
+		if _, err := fast.Next(); err != nil {
+			break
+		}
+		got++
 	}
 	if got == 0 {
 		t.Errorf("fast client received nothing after slow client dropped")
 	}
+}
+
+// allClients snapshots the server's registered clients under its lock.
+func allClients(s *Server) []*clientConn {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]*clientConn, 0, len(s.clients))
+	for c := range s.clients {
+		out = append(out, c)
+	}
+	return out
 }
 
 func mkStale(root string) error {
