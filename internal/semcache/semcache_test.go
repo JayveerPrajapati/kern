@@ -139,4 +139,3 @@ func BenchmarkShingles(b *testing.B) {
 		_ = shingles(text)
 	}
 }
-

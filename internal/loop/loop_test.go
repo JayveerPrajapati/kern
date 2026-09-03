@@ -630,4 +630,3 @@ func TestLoopRunContextCancellation(t *testing.T) {
 		t.Fatalf("expected stage to be cancelled, got: %+v", res)
 	}
 }
-

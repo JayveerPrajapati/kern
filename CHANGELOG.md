@@ -5,6 +5,33 @@ All notable changes to kern are documented here. Format follows
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+
+## [0.9.5] - 2026-09-03
+
+### Security
+
+- MCP rootless path confinement: strictly validate relative paths in `rootedPath` via `withinRoot(cwd, p)` when `root` argument is omitted, blocking directory traversal (`../../`) attacks.
+- Non-regular file protection: `WalkDir` callbacks in serial/parallel index builds and security scanner (`sec.Scan`) skip FIFOs, named pipes, sockets, and character devices, preventing indefinite kernel `read()` hangs.
+- File read memory bounding: added `MaxReadFileBytes` (10MB) and regular file checks to `code.ReadFile`, safeguarding `kern_compact_file` and `kern_context` against heap exhaustion and OOM crashes from oversized non-code files.
+- Relay peer verification: verified remote peer credentials and token integrity during cross-process socket handshakes.
+
+### Performance & Concurrency
+
+- Merkle Tree incremental hashing: $O(\log N)$ updates for content identity computation across large workspace graphs.
+- Concurrency & synchronization hardening:
+  - RWMutex fine-grained locking for the governance Firewall agent registry.
+  - Cooperative cancellation context propagation in multi-agent feedback loops (`internal/loop`).
+  - Worker pool bounding in semantic search to prevent goroutine explosion.
+  - Synchronized single-connection pooling for modernc SQLite backends.
+  - Channel semaphore backpressure during high-throughput event bus publishing.
+- Monorepo ignore crawler optimization: pruned standard build/dependency directories (`node_modules`, `vendor`, `build`, `dist`, `target`, `.venv`, `.next`, `__pycache__`) in `ignore.Load`, eliminating redundant tree walks and ignore rule quota exhaustion.
+- Git submodule & worktree compatibility: properly recognized `.git` and `.kern` regular pointer files in filesystem walkers.
+
+### Fixed
+
+- `kern commitmsg`: eliminated interactive terminal stdin blocking via `os.ModeCharDevice` check; auto-detected and prioritized staged diffs (`git diff --cached`); expanded stopword filtering and package-level scoping to remove single-letter and Go keyword noise.
+- Go formatting compliance: ran `gofmt` repo-wide to satisfy CI automated formatting gate.
+
 ## [0.9.4] - 2026-09-03
 
 ### Added

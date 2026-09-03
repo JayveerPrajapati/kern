@@ -945,5 +945,3 @@ func BenchmarkRecordParallelContention(b *testing.B) {
 		}
 	})
 }
-
-
