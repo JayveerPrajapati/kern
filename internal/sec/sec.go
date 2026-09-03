@@ -417,11 +417,22 @@ func Scan(root string) ([]Finding, error) {
 			}
 			return nil
 		}
+		if d.Name() == ".git" || d.Name() == ".kern" {
+			return nil
+		}
 		// Honor .gitignore/.kernignore file patterns.
 		if ign.Ignored(rel) {
 			return nil
 		}
 		if !index.QuickExt(rel) && !isConfigFile(rel) || isTestFile(rel) {
+			return nil
+		}
+		// Skip non-regular files (FIFOs, sockets, device nodes) to prevent blocking reads.
+		if !d.Type().IsRegular() {
+			return nil
+		}
+		// Skip oversized files before reading them.
+		if info, ierr := d.Info(); ierr == nil && info.Size() > 10*1024*1024 {
 			return nil
 		}
 		src, serr := os.ReadFile(path)

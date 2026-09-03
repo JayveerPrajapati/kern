@@ -1220,7 +1220,7 @@ func rootedPath(root, p string) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		return filepath.Join(cwd, p), nil
+		return withinRoot(cwd, p)
 	}
 	return withinRoot(root, p)
 }

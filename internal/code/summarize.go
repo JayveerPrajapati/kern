@@ -6,6 +6,7 @@ import (
 	"bufio"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"os"
 	"regexp"
 	"sort"
@@ -221,8 +222,22 @@ func hashBytes(b []byte) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// ReadFile reads a file for summarization.
+// MaxReadFileBytes is the largest file allowed to be loaded for summarization (10MB).
+const MaxReadFileBytes = 10 * 1024 * 1024
+
+// ReadFile reads a file for summarization, verifying that it is a regular file
+// within the size bound.
 func ReadFile(path string) ([]byte, error) {
+	fi, err := os.Stat(path)
+	if err != nil {
+		return nil, err
+	}
+	if !fi.Mode().IsRegular() {
+		return nil, fmt.Errorf("%s is not a regular file", path)
+	}
+	if fi.Size() > MaxReadFileBytes {
+		return nil, fmt.Errorf("%s exceeds maximum size (%d bytes > %d)", path, fi.Size(), MaxReadFileBytes)
+	}
 	return os.ReadFile(path)
 }
 

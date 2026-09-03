@@ -39,12 +39,15 @@ func canonical(t *testing.T, ix *Index) *Index {
 	c.reusedResults = 0
 	c.fileResults = nil
 	c.Identity = nil // captured per-build (timestamps inside)
+	c.symbolIdx = nil
 	return &c
 }
 
 func assertEquivalent(t *testing.T, label string, a, b *Index) {
 	t.Helper()
-	if !reflect.DeepEqual(canonical(t, a), canonical(t, b)) {
+	ca := canonical(t, a)
+	cb := canonical(t, b)
+	if !reflect.DeepEqual(ca, cb) {
 		t.Errorf("%s: incremental build diverged from full rebuild\nlen(symbols): inc=%d full=%d\nMaxMtime: inc=%d full=%d",
 			label, len(a.Symbols), len(b.Symbols), a.MaxMtime, b.MaxMtime)
 	}
@@ -79,6 +82,8 @@ func TestBuildWithOptionsIncrementalEquivalence(t *testing.T) {
 		[]byte("package a\n\nfunc Two() int { return One() }\n\nfunc TwoExtra() {}\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	mutTime := time.Now().Add(2 * time.Second)
+	_ = os.Chtimes(filepath.Join(root, "a", "two.go"), mutTime, mutTime)
 	if err := os.WriteFile(filepath.Join(root, "b", "four.go"),
 		[]byte("package b\n\nfunc Four() int { return 4 }\n"), 0o644); err != nil {
 		t.Fatal(err)
@@ -145,6 +150,8 @@ func TestBuildWithOptionsSerialPathEquivalence(t *testing.T) {
 		[]byte("package a\n\nfunc One() int { return 1 }\n\nfunc Another() {}\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	mutTime := time.Now().Add(2 * time.Second)
+	_ = os.Chtimes(filepath.Join(root, "a", "one.go"), mutTime, mutTime)
 	inc, err := BuildWithOptions(root, WithPriorIndex(prior))
 	if err != nil {
 		t.Fatal(err)
