@@ -270,6 +270,7 @@ type flags struct {
 	addr           string
 	enterprise     bool
 	projects       []string
+	terseCode      bool
 }
 
 func parseFlags(args []string) (flags, []string, error) {
@@ -330,6 +331,8 @@ func parseFlags(args []string) (flags, []string, error) {
 			f.status = true
 		case "--strict":
 			f.strict = true
+		case "--terse-code", "-terse-code":
+			f.terseCode = true
 		case "--reset":
 			f.reset = true
 		case "--sarif":

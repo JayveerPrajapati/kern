@@ -193,6 +193,11 @@ func (s *Server) acceptLoop() {
 		if err != nil {
 			return // listener closed
 		}
+		// Security check: ensure peer UID matches process UID on Unix domain sockets
+		if !checkPeerCredentials(conn) {
+			conn.Close()
+			continue
+		}
 		c := &clientConn{c: conn, buf: make(chan []byte, perClientBuffer)}
 		s.mu.Lock()
 		if s.closed {

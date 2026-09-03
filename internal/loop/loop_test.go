@@ -1,6 +1,7 @@
 package loop
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -606,3 +607,27 @@ func TestSafetyBudgetPause(t *testing.T) {
 		t.Fatalf("expected the loop to stop early after the budget was exceeded, got %d stages", len(res.Stages))
 	}
 }
+
+func TestLoopRunContextCancellation(t *testing.T) {
+	lp, err := NewLoop(LoopConfig{
+		Root:  loopFixture(t),
+		Level: L2,
+	})
+	if err != nil {
+		t.Fatalf("NewLoop: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // Cancel immediately
+
+	res, err := lp.RunContext(ctx, "cancelled intent", func(stage, intent string, wt *execution.Worktree, r *Result) (string, error) {
+		return "", nil
+	})
+	if err == nil {
+		t.Fatal("expected error on cancelled context, got nil")
+	}
+	if res == nil || len(res.Stages) == 0 || res.Stages[0].Status != "cancelled" {
+		t.Fatalf("expected stage to be cancelled, got: %+v", res)
+	}
+}
+

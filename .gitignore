@@ -44,38 +44,6 @@ index.html
 .kern/
 .continue/
 .windsurf/
-!internal/app/testdata/fixtures/user_service/.kern/
-!internal/app/testdata/fixtures/user_service/.kern/boundaries.json
-.opencode/node_modules/
-.opencode/package-lock.json
-.cortexkit/
-.blueprint/
-.kern-restore-*
-# Committed test fixture binary leaked build-machine paths; rebuild from source
-internal/app/testdata/fixtures/user_service/user.service.fixture
-CLAUDE.md
-GEMINI.md
-.github/copilot-instructions.md
-.github/hooks/
-TODO.md
-
-# local build artifacts
-/bench
-.aider*
-
-# Deepwork session state (git-local, OpenCode-readable)
-.slim/deepwork/
-
-# --- kern generated (agent wiring, machine-specific) ---
-# Re-run `kern setup` to refresh. Unignore a line to commit shared config.
-.mcp.json
-.claude/
-.cursor/
-.gemini/
-.kiro/
-.kern/
-.continue/
-.windsurf/
 .opencode/node_modules/
 .opencode/package-lock.json
 .cortexkit/

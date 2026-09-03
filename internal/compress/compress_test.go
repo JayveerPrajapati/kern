@@ -178,3 +178,30 @@ func TestCompressLogClusterKeepsUniqueErrors(t *testing.T) {
 		t.Fatalf("expected all 3 distinct lines, got %d:\n%s", c, got)
 	}
 }
+
+func TestCompressLogFoldStackFrames(t *testing.T) {
+	log := strings.Join([]string{
+		"2024-01-01 10:00:00 ERROR panic in handler",
+		"goroutine 1 [running]:",
+		"main.main()",
+		"\t/workspace/cmd/billing/main.go:42",
+		"net/http.(*conn).serve()",
+		"\t/usr/local/go/src/net/http/server.go:2000",
+		"net/http.serverHandler.ServeHTTP()",
+		"\t/usr/local/go/src/net/http/server.go:2800",
+		"runtime.main()",
+		"\t/usr/local/go/src/runtime/proc.go:250",
+		"runtime.goexit()",
+		"\t/usr/local/go/src/runtime/asm_amd64.s:1590",
+		"main.init()",
+		"\t/workspace/cmd/billing/main.go:10",
+	}, "\n")
+
+	got := CompressLog(log, Options{MaxLines: 200})
+	if !strings.Contains(got, "external frames folded") {
+		t.Fatalf("expected external frames folded placeholder, got:\n%s", got)
+	}
+	if !strings.Contains(got, "main.main()") || !strings.Contains(got, "main.init()") {
+		t.Fatalf("expected top and bottom app frames preserved, got:\n%s", got)
+	}
+}

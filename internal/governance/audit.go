@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/JayveerPrajapati/kern/internal/domain"
@@ -53,12 +54,14 @@ type AuditEntry struct {
 // AuditLog records governance decisions in memory. It optionally persists each
 // entry to a storage.Store with a content-hash chain for tamper detection.
 type AuditLog struct {
-	mu        sync.Mutex
-	entries   []AuditEntry
-	seq       int
-	store     storage.Store // optional persistence; nil = in-memory only
-	hashChain string        // hash of the previous entry (tamper detection)
-	lockPath  string        // cross-process advisory lock file ("" = legacy, unlocked)
+	mu         sync.Mutex
+	entries    []AuditEntry
+	seq        int
+	atomicSeq  int64         // atomic sequence counter for high-concurrency RecordParallel
+	store      storage.Store // optional persistence; nil = in-memory only
+	hashChain  string        // hash of the previous entry (tamper detection)
+	lockPath   string        // cross-process advisory lock file ("" = legacy, unlocked)
+	merkleTree *MerkleTree   // incremental Merkle tree for parallel, lock-free audit verification
 }
 
 // NewAuditLog creates a new in-memory audit log.
@@ -240,6 +243,9 @@ func (l *AuditLog) Record(entry AuditEntry) {
 		entry.ID = fmt.Sprintf("audit-%d", l.seq)
 	}
 	l.entries = append(l.entries, entry)
+	if l.merkleTree != nil {
+		l.merkleTree.Append(hashLeaf(entry))
+	}
 
 	if l.store != nil {
 		l.persist(entry)
@@ -474,4 +480,215 @@ func (l *AuditLog) VerifyChainReport() (firstBroken, verified int) {
 func (l *AuditLog) VerifyChain() bool {
 	firstBroken, _ := l.VerifyChainReport()
 	return firstBroken < 0
+}
+
+// MerkleTree is an incremental Merkle Tree for parallel, tamper-evident audit logging.
+type MerkleTree struct {
+	mu     sync.RWMutex
+	leaves []string
+	levels [][]string // levels[0] is leaves; levels[d] stores pairwise completed nodes
+	root   string
+}
+
+// NewMerkleTree initializes an empty incremental Merkle tree.
+func NewMerkleTree() *MerkleTree {
+	return &MerkleTree{
+		levels: make([][]string, 0),
+	}
+}
+
+// hashLeaf computes the leaf SHA-256 hash for an AuditEntry.
+func hashLeaf(e AuditEntry) string {
+	h := sha256.New()
+	fmt.Fprintf(h, "leaf|%s|%s|%s|%s|%v|%v|%v|%s|%s", e.ID, e.AgentID, e.Action, e.Resource, e.Timestamp.UnixNano(), e.Risk, e.Approved, e.Result, e.TaskID)
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// hashNode computes the parent SHA-256 hash from left and right child hashes.
+func hashNode(left, right string) string {
+	h := sha256.New()
+	h.Write([]byte(left + ":" + right))
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// computeMerkleRoot computes the root hash from a slice of leaf hashes.
+func computeMerkleRoot(leaves []string) string {
+	if len(leaves) == 0 {
+		return ""
+	}
+	current := make([]string, len(leaves))
+	copy(current, leaves)
+	for len(current) > 1 {
+		var next []string
+		for i := 0; i < len(current); i += 2 {
+			if i+1 < len(current) {
+				next = append(next, hashNode(current[i], current[i+1]))
+			} else {
+				next = append(next, hashNode(current[i], current[i]))
+			}
+		}
+		current = next
+	}
+	return current[0]
+}
+
+// Append inserts a leaf hash into the incremental Merkle tree in O(log N) time
+// and updates the cached tree root.
+func (m *MerkleTree) Append(leaf string) string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.leaves = append(m.leaves, leaf)
+	if len(m.levels) == 0 {
+		m.levels = append(m.levels, nil)
+	}
+
+	level := 0
+	m.levels[level] = append(m.levels[level], leaf)
+
+	// Propagate completed pairs up the levels (amortized O(1))
+	for len(m.levels[level])%2 == 0 {
+		idx := len(m.levels[level])
+		parent := hashNode(m.levels[level][idx-2], m.levels[level][idx-1])
+		level++
+		if level >= len(m.levels) {
+			m.levels = append(m.levels, nil)
+		}
+		m.levels[level] = append(m.levels[level], parent)
+	}
+
+	// Roll up unpaired branch nodes to compute the root in O(log N)
+	m.root = m.computeRootFromLevelsLocked()
+	return m.root
+}
+
+// computeRootFromLevelsLocked folds any trailing odd (unpaired) nodes across tree levels.
+func (m *MerkleTree) computeRootFromLevelsLocked() string {
+	n := len(m.leaves)
+	if n == 0 {
+		return ""
+	}
+	if n == 1 {
+		return m.leaves[0]
+	}
+
+	var folded string
+	hasFolded := false
+	top := len(m.levels) - 1
+
+	for d := 0; d < top; d++ {
+		lvl := m.levels[d]
+		if len(lvl)%2 == 1 {
+			unpaired := lvl[len(lvl)-1]
+			if !hasFolded {
+				folded = hashNode(unpaired, unpaired)
+				hasFolded = true
+			} else {
+				folded = hashNode(unpaired, folded)
+			}
+		} else if hasFolded {
+			folded = hashNode(folded, folded)
+		}
+	}
+
+	topNode := m.levels[top][len(m.levels[top])-1]
+	if !hasFolded {
+		return topNode
+	}
+	return hashNode(topNode, folded)
+}
+
+// Root returns the current Merkle root hash in O(1) time.
+func (m *MerkleTree) Root() string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.root
+}
+
+// Leaves returns a copy of all leaf hashes in the Merkle tree.
+func (m *MerkleTree) Leaves() []string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	cp := make([]string, len(m.leaves))
+	copy(cp, m.leaves)
+	return cp
+}
+
+// MerkleRoot returns the current Merkle tree root hash for the audit log.
+func (l *AuditLog) MerkleRoot() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.merkleTree == nil {
+		l.initMerkleTreeLocked()
+	}
+	return l.merkleTree.Root()
+}
+
+// VerifyMerkle verifies the tree-root integrity of all entries in the audit log.
+func (l *AuditLog) VerifyMerkle() bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if len(l.entries) == 0 {
+		return true
+	}
+	var leaves []string
+	for _, e := range l.entries {
+		leaves = append(leaves, hashLeaf(e))
+	}
+	expected := computeMerkleRoot(leaves)
+	if l.merkleTree == nil {
+		l.initMerkleTreeLocked()
+	}
+	return expected == l.merkleTree.Root()
+}
+
+func (l *AuditLog) initMerkleTreeLocked() {
+	l.merkleTree = NewMerkleTree()
+	for _, e := range l.entries {
+		l.merkleTree.Append(hashLeaf(e))
+	}
+}
+
+// nextSeq allocates a sequence number atomically without holding l.mu.
+func (l *AuditLog) nextSeq() int64 {
+	for {
+		cur := atomic.LoadInt64(&l.atomicSeq)
+		lSeq := int64(l.seq)
+		base := cur
+		if lSeq > base {
+			base = lSeq
+		}
+		next := base + 1
+		if atomic.CompareAndSwapInt64(&l.atomicSeq, cur, next) {
+			return next
+		}
+	}
+}
+
+// RecordParallel allows concurrent agents to commit audit entries in parallel,
+// offloading CPU-intensive leaf hashing outside the mutex critical section,
+// and rolling entries into the incremental Merkle tree without lock bottlenecks.
+func (l *AuditLog) RecordParallel(entry AuditEntry) string {
+	if entry.Timestamp.IsZero() {
+		entry.Timestamp = time.Now()
+	}
+	if entry.ID == "" {
+		seq := l.nextSeq()
+		entry.ID = fmt.Sprintf("audit-%d", seq)
+	}
+
+	// Compute leaf hash outside the lock in parallel across calling goroutines.
+	leaf := hashLeaf(entry)
+
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	if l.merkleTree == nil {
+		l.initMerkleTreeLocked()
+	}
+	root := l.merkleTree.Append(leaf)
+	entry.Hash = computeAuditHash(entry, l.hashChain)
+	l.hashChain = entry.Hash
+	l.entries = append(l.entries, entry)
+	return root
 }

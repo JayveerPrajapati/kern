@@ -218,6 +218,8 @@ type Bus struct {
 	// event (ID + OccurredAt + Kind + payload) is appended as a JSON line so a
 	// later bus can replay the history.
 	persistPath string
+
+	sem chan struct{} // bounded worker semaphore for handler dispatch
 }
 
 type subscription struct {
@@ -244,7 +246,12 @@ const defaultIdempotencyCap = 10000
 // duplicates side effects. Call EnableIdempotency(cap) afterward to change the
 // remembered-ID capacity, or pass cap 0 for an unbounded set.
 func New() *Bus {
-	return &Bus{max: 100, seen: make(map[string]struct{}), idemCap: defaultIdempotencyCap}
+	return &Bus{
+		max:     100,
+		seen:    make(map[string]struct{}),
+		idemCap: defaultIdempotencyCap,
+		sem:     make(chan struct{}, 128),
+	}
 }
 
 // Subscribe registers a handler for a kind (empty kind = all events) and
@@ -360,6 +367,14 @@ func (b *Bus) Publish(ev Event) {
 	for _, h := range targets {
 		go func(handler func(Event), e Event) {
 			defer b.wg.Done()
+			if b.sem != nil {
+				select {
+				case b.sem <- struct{}{}:
+					defer func() { <-b.sem }()
+				default:
+					// Proceed without blocking when saturated to avoid deadlocks on re-entrant calls
+				}
+			}
 			b.deliverWithRetry(handler, e)
 		}(h, ev)
 	}

@@ -242,6 +242,14 @@ func (l *Loop) autonomyScore() AutonomyScore {
 // Stages the autonomy level does not permit are skipped (never jumped). The
 // loop runs in a sandbox worktree and never mutates the live repository.
 func (l *Loop) Run(intent string, step StepFunc) (*Result, error) {
+	return l.RunContext(context.Background(), intent, step)
+}
+
+// RunContext executes the closed loop with context cancellation and deadline support.
+func (l *Loop) RunContext(ctx context.Context, intent string, step StepFunc) (*Result, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	res := &Result{Intent: intent, Level: l.cfg.Level}
 	if step == nil {
 		if l.cfg.Coder != nil || l.cfg.Planner != nil {
@@ -264,6 +272,10 @@ func (l *Loop) Run(intent string, step StepFunc) (*Result, error) {
 	}
 
 	for _, st := range []string{stageIntent, stageRemember, stagePlan, stageCode, stageVerify, stageProtect, stageDeploy, stageObserve, stageLearn} {
+		if err := ctx.Err(); err != nil {
+			res.Stages = append(res.Stages, StageResult{Stage: st, Status: "cancelled", Output: err.Error()})
+			return res, err
+		}
 		if !l.cfg.Level.AllowsStageWithProofs(st, l.cfg.Proofs) {
 			res.Stages = append(res.Stages, StageResult{Stage: st, Status: "skipped:below-autonomy"})
 			continue

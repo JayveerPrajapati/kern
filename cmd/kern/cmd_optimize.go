@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"github.com/JayveerPrajapati/kern/internal/budget"
 	"github.com/JayveerPrajapati/kern/internal/code"
+	kernctx "github.com/JayveerPrajapati/kern/internal/context"
 	"github.com/JayveerPrajapati/kern/internal/optimize"
 	"github.com/JayveerPrajapati/kern/internal/semcache"
 	"github.com/JayveerPrajapati/kern/internal/stats"
@@ -107,6 +108,9 @@ func runCompact(rest []string) {
 			fatalUsage("%v", terr)
 		}
 		tier = t
+	}
+	if f.terseCode {
+		content = kernctx.PruneCode(file, content, true)
 	}
 	fmt.Println(code.RenderTier(file, content, tier))
 

@@ -841,3 +841,109 @@ func TestFreshLogChainsFromChainTail(t *testing.T) {
 		t.Fatalf("VerifyChainReport() = (%d, %d), want (-1, 3) across fresh-writer boundary", brk, verified)
 	}
 }
+
+func TestMerkleTreeParallelAuditLogging(t *testing.T) {
+	log := NewAuditLog()
+
+	// Simulate 10 parallel agents concurrently recording audit entries
+	const numAgents = 10
+	const entriesPerAgent = 20
+	var wg sync.WaitGroup
+	wg.Add(numAgents)
+
+	for a := 0; a < numAgents; a++ {
+		agentID := fmt.Sprintf("agent-%d", a)
+		go func(ag string) {
+			defer wg.Done()
+			for i := 0; i < entriesPerAgent; i++ {
+				e := AuditEntry{
+					AgentID:  ag,
+					Action:   "tool_call",
+					Resource: fmt.Sprintf("resource-%d", i),
+					Risk:     domain.Risk{Level: domain.RiskLow},
+					Result:   "allowed",
+					TaskID:   "task-parallel",
+				}
+				root := log.RecordParallel(e)
+				if root == "" {
+					t.Errorf("expected non-empty Merkle root")
+				}
+			}
+		}(agentID)
+	}
+	wg.Wait()
+
+	all := log.All()
+	if len(all) != numAgents*entriesPerAgent {
+		t.Fatalf("expected %d entries, got %d", numAgents*entriesPerAgent, len(all))
+	}
+
+	// Verify Merkle tree root integrity
+	if !log.VerifyMerkle() {
+		t.Fatal("VerifyMerkle() = false for parallel-recorded entries, want true")
+	}
+
+	root := log.MerkleRoot()
+	if root == "" {
+		t.Fatal("expected valid Merkle root")
+	}
+
+	// Tamper test: tamper with one entry and verify integrity check fails
+	tampered := NewAuditLog()
+	for _, e := range all {
+		tampered.Record(e)
+	}
+	if !tampered.VerifyMerkle() {
+		t.Fatal("expected untampered log to verify")
+	}
+	// Tamper with one entry
+	tampered.entries[5].Action = "tampered_action"
+	if tampered.VerifyMerkle() {
+		t.Fatal("expected tampered log to fail VerifyMerkle()")
+	}
+}
+
+func TestIncrementalMerkleTreeEquivalence(t *testing.T) {
+	// Verify that incremental tree root matches computeMerkleRoot for every N up to 256
+	tree := NewMerkleTree()
+	var leaves []string
+	for i := 1; i <= 256; i++ {
+		leaf := fmt.Sprintf("leaf-%d-hash", i)
+		leaves = append(leaves, leaf)
+		tree.Append(leaf)
+
+		want := computeMerkleRoot(leaves)
+		got := tree.Root()
+		if got != want {
+			t.Fatalf("N=%d: tree.Root() = %s, want computeMerkleRoot = %s", i, got, want)
+		}
+	}
+}
+
+func BenchmarkIncrementalMerkleAppend(b *testing.B) {
+	tree := NewMerkleTree()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		leaf := fmt.Sprintf("leaf-%d", i)
+		tree.Append(leaf)
+	}
+}
+
+func BenchmarkRecordParallelContention(b *testing.B) {
+	log := NewAuditLog()
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			e := AuditEntry{
+				AgentID:  "bench-agent",
+				Action:   "tool_call",
+				Resource: "bench-res",
+				Risk:     domain.Risk{Level: domain.RiskLow},
+				Result:   "allowed",
+			}
+			log.RecordParallel(e)
+		}
+	})
+}
+
+

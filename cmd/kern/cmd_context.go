@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/JayveerPrajapati/kern/internal/code"
+	kernctx "github.com/JayveerPrajapati/kern/internal/context"
 	"github.com/JayveerPrajapati/kern/internal/doctor"
 	"github.com/JayveerPrajapati/kern/internal/eventbus"
 	"github.com/JayveerPrajapati/kern/internal/governance"
@@ -232,6 +233,13 @@ func runContext(rest []string) {
 	ctxText := ix.Context(symbol, lines)
 	if ctxText == "" {
 		fatalNoSymbol(symbol, ix)
+	}
+	if f.terseCode {
+		path := symbol + ".go"
+		if def, ok := ix.ResolveName(symbol); ok && def.File != "" {
+			path = def.File
+		}
+		ctxText = string(kernctx.PruneCode(path, []byte(ctxText), true))
 	}
 	fmt.Println(ctxText)
 

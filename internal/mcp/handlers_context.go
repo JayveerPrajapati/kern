@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"github.com/JayveerPrajapati/kern/internal/brief"
 	"github.com/JayveerPrajapati/kern/internal/code"
+	kernctx "github.com/JayveerPrajapati/kern/internal/context"
 	"github.com/JayveerPrajapati/kern/internal/intel"
 	"github.com/JayveerPrajapati/kern/internal/pack"
 	"os"
@@ -39,6 +40,9 @@ func (s *Server) handleCompact(ctx context.Context, args map[string]any) (string
 				return "", terr
 			}
 			tier = t
+		}
+		if argBool(args, "terse_code") || argBool(args, "terse") {
+			content = kernctx.PruneCode(abs, content, true)
 		}
 		return code.RenderTier(abs, content, tier), nil
 

@@ -1,6 +1,7 @@
 package intel
 
 import (
+	"context"
 	"fmt"
 	"os/exec"
 	"sort"
@@ -29,6 +30,14 @@ type ChurnReport struct {
 // git log semantics: an empty range means the last 200 commits (raised from 30,
 // which was too short to surface real churn signal).
 func Churn(root, from, to string) (*ChurnReport, error) {
+	return ChurnContext(context.Background(), root, from, to)
+}
+
+// ChurnContext counts commits with context cancellation and deadline support.
+func ChurnContext(ctx context.Context, root, from, to string) (*ChurnReport, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	args := []string{"-C", root, "log", "--name-only", "--pretty=format:"}
 	if from != "" || to != "" {
 		if to == "" {
@@ -38,7 +47,7 @@ func Churn(root, from, to string) (*ChurnReport, error) {
 	} else {
 		args = append(args, "-n", "200")
 	}
-	out, err := exec.Command("git", args...).Output()
+	out, err := exec.CommandContext(ctx, "git", args...).Output()
 	if err != nil {
 		return nil, &GitError{Op: "git log --name-only", Err: err}
 	}
