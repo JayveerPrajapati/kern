@@ -643,4 +643,3 @@ func TestFirewallConcurrentCheckAndApprove(t *testing.T) {
 
 	wg.Wait()
 }
-
