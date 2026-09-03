@@ -167,7 +167,11 @@ func TestWireGlobalIdempotent(t *testing.T) {
 }
 
 func TestWireGlobalSkipsWhenNotInstalled(t *testing.T) {
-	dir := withTempHome(t, false) // no .claude, no opencode config
+	// Isolate both the home dir AND XDG_CONFIG_HOME: globalPluginPath reads
+	// XDG_CONFIG_HOME first, so without controlling it the ambient value
+	// (e.g. /home/runner/.config in CI, where a kern.ts may already exist)
+	// would make the plugin "installed" and skip the assertion below.
+	dir := withTempHome(t, true) // no .claude, no opencode config
 	st := WireGlobal(nil)
 	// The universal ~/AGENTS.md is always written.
 	if !st[0].Installed {
