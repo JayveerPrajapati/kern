@@ -183,10 +183,17 @@ func TestRootlessAbsolutePathRejected(t *testing.T) {
 	if !strings.Contains(msg, "absolute path requires root argument") {
 		t.Fatalf("expected absolute-path rejection, got %q", msg)
 	}
-	// Providing a root confines the path to the workspace and still works.
+// Providing a root confines the path to the workspace and still works.
 	out := mcpAssertOK(t, "kern_compact_file", map[string]any{"root": root, "path": "app.go"})
 	if !strings.Contains(out, "Greet") {
 		t.Fatalf("expected app.go summary with root, got %q", out)
+	}
+}
+
+func TestRootlessRelativePathEscapesRejected(t *testing.T) {
+	msg := mcpToolError(t, "kern_compact_file", map[string]any{"path": "../../escaped.go"})
+	if !strings.Contains(msg, "escapes project root") {
+		t.Fatalf("expected path escape rejection, got %q", msg)
 	}
 }
 

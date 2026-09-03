@@ -60,6 +60,9 @@ func Load(root string) *Matcher {
 			}
 			return nil
 		}
+		if name == ".git" || name == ".kern" {
+			return nil
+		}
 		if name != ".gitignore" && name != ".kernignore" {
 			return nil
 		}
@@ -87,7 +90,16 @@ func Load(root string) *Matcher {
 }
 
 // vcsDirs are never descended into, matching kern's hardcoded defaults.
-var vcsDirs = map[string]bool{".git": true, ".hg": true, ".svn": true, ".kern": true}
+var vcsDirs = map[string]bool{
+	".git": true, ".hg": true, ".svn": true, ".kern": true,
+	"node_modules": true, "vendor": true, "dist": true, "build": true,
+	"out": true, "target": true, ".next": true, "__pycache__": true,
+	".venv": true, ".cache": true, ".idea": true, "bin": true,
+	".mvn": true, "coverage": true, "tmp": true,
+	".opencode": true, ".claude": true, ".cursor": true, ".gemini": true,
+	".kiro": true, ".codex": true, ".copilot": true, ".codeium": true,
+	".qwen": true, ".qoder": true, "graphify-out": true,
+}
 
 // parseLine compiles one ignore line into a rule. Returns ok=false for blank
 // lines and comments. Trailing CR is stripped so CRLF ignore files work.

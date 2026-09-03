@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 // testGit runs a git command in dir via the package's runGit helper, failing
@@ -140,6 +141,8 @@ func TestFreshnessProof_NilIdentity(t *testing.T) {
 		[]byte("package main\n\nfunc A() {}\n\nfunc B() {}\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	mutTime := time.Now().Add(time.Second)
+	_ = os.Chtimes(filepath.Join(dir, "main.go"), mutTime, mutTime)
 	if !ix.Stale() {
 		t.Error("Stale() must be true when Identity is nil (fail-closed)")
 	}

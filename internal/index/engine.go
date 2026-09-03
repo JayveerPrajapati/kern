@@ -523,6 +523,9 @@ func buildSerial(abs string, cfg *buildConfig) (*Index, error) {
 			}
 			return nil
 		}
+		if d.Name() == ".git" || d.Name() == ".kern" {
+			return nil
+		}
 		rel, rerr := filepath.Rel(abs, path)
 		if rerr != nil {
 			return err
@@ -532,6 +535,10 @@ func buildSerial(abs string, cfg *buildConfig) (*Index, error) {
 			return nil
 		}
 		if !quickExt(rel) && filepath.Ext(rel) != "" {
+			return nil
+		}
+		// Skip non-regular files (FIFOs, sockets, device nodes) to avoid blocking reads.
+		if !d.Type().IsRegular() {
 			return nil
 		}
 		// Skip files larger than maxFileBytes before reading them so huge
@@ -632,6 +639,9 @@ func buildParallel(abs string, cfg *buildConfig) (*Index, error) {
 			}
 			return nil
 		}
+		if d.Name() == ".git" || d.Name() == ".kern" {
+			return nil
+		}
 		rel, rerr := filepath.Rel(abs, path)
 		if rerr != nil {
 			return nil
@@ -641,6 +651,10 @@ func buildParallel(abs string, cfg *buildConfig) (*Index, error) {
 			return nil
 		}
 		if !quickExt(rel) && filepath.Ext(rel) != "" {
+			return nil
+		}
+		// Skip non-regular files (FIFOs, sockets, device nodes) to avoid blocking reads.
+		if !d.Type().IsRegular() {
 			return nil
 		}
 		// Skip files larger than maxFileBytes before reading them so huge

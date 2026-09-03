@@ -3,6 +3,7 @@ package code
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -66,5 +67,33 @@ func TestProjectMapSkipsIgnored(t *testing.T) {
 	}
 	if len(p.Files) != 2 {
 		t.Fatalf("expected 2 files, got %d (%+v)", len(p.Files), p.Files)
+	}
+}
+
+func TestReadFileSizeGuard(t *testing.T) {
+	dir := t.TempDir()
+	normal := filepath.Join(dir, "normal.go")
+	if err := os.WriteFile(normal, []byte("package main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	content, err := ReadFile(normal)
+	if err != nil || len(content) == 0 {
+		t.Fatalf("expected successful read, got %v", err)
+	}
+
+	huge := filepath.Join(dir, "huge.bin")
+	f, err := os.Create(huge)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Truncate(MaxReadFileBytes + 1024); err != nil {
+		f.Close()
+		t.Fatal(err)
+	}
+	f.Close()
+
+	_, err = ReadFile(huge)
+	if err == nil || !strings.Contains(err.Error(), "exceeds maximum size") {
+		t.Fatalf("expected size error for huge file, got %v", err)
 	}
 }
