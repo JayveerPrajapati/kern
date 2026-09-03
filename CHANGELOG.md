@@ -5,6 +5,7 @@ All notable changes to kern are documented here. Format follows
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+## [0.9.2] - 2026-09-03
 
 ### Added
 
