@@ -125,9 +125,13 @@ func mkStale(root string) error {
 // exceeds the OS limit (macOS sun_path is 104 bytes) transparently bind
 // under a hashed temp path, and Start/Dial agree on it.
 func TestSocketPathFallback(t *testing.T) {
+	// Build a root deep enough that its canonical socket path exceeds the
+	// OS bind limit regardless of t.TempDir() length (e.g. short /tmp on
+	// Linux vs long /var/folders on macOS). Padding until 12 levels exceed
+	// it keeps the test deterministic on every host.
 	deep := filepath.Join(t.TempDir(), strings.Repeat("d/", 12)+"workspace")
-	if len(DefaultPath(deep)) <= 100 {
-		t.Fatalf("test root not deep enough: %d bytes", len(DefaultPath(deep)))
+	for len(DefaultPath(deep)) <= maxUnixSocketPath {
+		deep = filepath.Join(deep, "dd")
 	}
 	p := SocketPath(deep)
 	if p == DefaultPath(deep) {
