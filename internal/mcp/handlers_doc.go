@@ -173,13 +173,16 @@ func (s *Server) handleCommitmsg(ctx context.Context, args map[string]any) (stri
 			return "", fmt.Errorf("invalid range %q: must not start with -", rng)
 		}
 		if staged == "true" || staged == "1" {
-			out, err = exec.Command("git", "-C", root, "diff", "--cached").Output()
+			out, err = exec.CommandContext(ctx, "git", "-C", root, "diff", "--cached").Output()
 		} else if rng != "" {
-			out, err = exec.Command("git", "-C", root, "diff", "--unified=0", rng).Output()
+			out, err = exec.CommandContext(ctx, "git", "-C", root, "diff", "--unified=0", rng).Output()
 		} else {
-			out, err = exec.Command("git", "-C", root, "diff", "HEAD").Output()
-			if err != nil {
-				out, err = exec.Command("git", "-C", root, "diff").Output()
+			out, err = exec.CommandContext(ctx, "git", "-C", root, "diff", "--cached").Output()
+			if err != nil || len(strings.TrimSpace(string(out))) == 0 {
+				out, err = exec.CommandContext(ctx, "git", "-C", root, "diff", "HEAD").Output()
+				if err != nil || len(strings.TrimSpace(string(out))) == 0 {
+					out, err = exec.CommandContext(ctx, "git", "-C", root, "diff").Output()
+				}
 			}
 		}
 		if err != nil {

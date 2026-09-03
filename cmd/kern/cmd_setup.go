@@ -487,9 +487,13 @@ func runCommitmsg(rest []string) {
 	} else if f.range_ != "" {
 		out, err = gitDiffC(root, "diff", "--unified=0", f.range_)
 	} else {
-		out, err = gitDiffC(root, "diff", "HEAD")
-		if err != nil {
-			out, err = gitDiffC(root, "diff")
+		// If changes are staged, prioritize the staged commit diff
+		out, err = gitDiffC(root, "diff", "--cached")
+		if err != nil || len(strings.TrimSpace(string(out))) == 0 {
+			out, err = gitDiffC(root, "diff", "HEAD")
+			if err != nil || len(strings.TrimSpace(string(out))) == 0 {
+				out, err = gitDiffC(root, "diff")
+			}
 		}
 	}
 	if err != nil {

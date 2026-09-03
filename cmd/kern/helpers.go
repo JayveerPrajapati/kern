@@ -50,8 +50,13 @@ func mcpHTTPAddr(args []string, f flags) string {
 }
 
 // readStdin returns the full piped stdin, rejecting input larger than
-// maxStdinBytes instead of buffering it all.
+// maxStdinBytes instead of buffering it all. If stdin is a character device
+// (interactive terminal) rather than a pipe/redirect, it returns nil immediately
+// to prevent indefinite blocking.
 func readStdin() ([]byte, error) {
+	if fi, err := os.Stdin.Stat(); err == nil && (fi.Mode()&os.ModeCharDevice) != 0 {
+		return nil, nil
+	}
 	b, err := io.ReadAll(io.LimitReader(os.Stdin, maxStdinBytes+1))
 	if err != nil {
 		return nil, err

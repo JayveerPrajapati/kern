@@ -420,10 +420,32 @@ func scopeOf(files []fileChange) string {
 	if len(common) > 0 && strings.Contains(common[len(common)-1], ".") {
 		common = common[:len(common)-1]
 	}
+	generic := map[string]bool{"src": true, "internal": true, "pkg": true, "cmd": true, "lib": true, "app": true}
 	if len(common) == 0 {
+		// Fallback: pick the primary package directory from the file with the most changed lines
+		bestFile := files[0]
+		maxLines := len(bestFile.added) + len(bestFile.removed)
+		for _, f := range files[1:] {
+			if lines := len(f.added) + len(f.removed); lines > maxLines {
+				maxLines = lines
+				bestFile = f
+			}
+		}
+		parts := strings.Split(filepathSlash(bestFile.path), "/")
+		if len(parts) > 1 {
+			dirs := parts[:len(parts)-1]
+			for len(dirs) > 0 && generic[dirs[0]] {
+				dirs = dirs[1:]
+			}
+			if len(dirs) > 0 {
+				if len(dirs) > 2 {
+					dirs = dirs[len(dirs)-2:]
+				}
+				return strings.Join(dirs, "/")
+			}
+		}
 		return ""
 	}
-	generic := map[string]bool{"src": true, "internal": true, "pkg": true, "cmd": true, "lib": true, "app": true}
 	dirs := common
 	for len(dirs) > 0 && generic[dirs[0]] {
 		dirs = dirs[1:]
@@ -442,21 +464,40 @@ func scopeOf(files []fileChange) string {
 // skipping Go test/benchmark/example functions; else the first
 // function/method identifier, else the first identifier token.
 func subjectNoun(files []fileChange) string {
+	// 1. Exported declarations take highest precedence
 	for _, f := range files {
 		for _, l := range f.added {
-			if n, ok := declOf(l); ok && !isTestFunc(n) {
+			if n, ok := declOf(l); ok && isExported(n) && !isTestFunc(n) {
 				return strings.ToLower(n)
 			}
 		}
 	}
+	// 2. Added call or method identifiers
 	for _, f := range files {
 		for _, l := range f.added {
 			trimmed := strings.TrimSpace(l)
 			if trimmed == "" {
 				continue
 			}
-			if id := declIdent(trimmed); id != "" {
+			if id := declIdent(trimmed); id != "" && !isStopWord(id) {
 				return strings.ToLower(id)
+			}
+		}
+	}
+	// 3. Action phrases (e.g. "add support", "prevent blocking", "optimize performance")
+	for _, f := range files {
+		words := tokenizeWords(strings.Join(f.added, " "))
+		for i := 0; i < len(words); i++ {
+			if isChangeWord(words[i]) && i+1 < len(words) && !isStopWord(words[i+1]) {
+				return words[i] + " " + words[i+1]
+			}
+		}
+	}
+	// 4. Any added declaration
+	for _, f := range files {
+		for _, l := range f.added {
+			if n, ok := declOf(l); ok && !isTestFunc(n) {
+				return strings.ToLower(n)
 			}
 		}
 	}
@@ -564,8 +605,27 @@ var stopWords = map[string]bool{
 	"if": true, "not": true, "no": true, "do": true, "var": true, "const": true,
 	"func": true, "return": true, "package": true, "import": true, "nil": true,
 	"err": true, "error": true, "bool": true, "int": true, "string": true,
+	"defer": true, "select": true, "make": true, "append": true, "delete": true,
+	"len": true, "cap": true, "close": true, "panic": true, "recover": true,
+	"struct": true, "interface": true, "chan": true, "map": true, "type": true,
+	"case": true, "default": true, "switch": true, "goto": true, "break": true,
+	"continue": true, "fallthrough": true, "range": true, "true": true, "false": true,
+	"iota": true, "byte": true, "rune": true, "uint": true, "uint8": true,
+	"uint16": true, "uint32": true, "uint64": true, "int8": true, "int16": true,
+	"int32": true, "int64": true, "float32": true, "float64": true, "any": true,
+	"fmt": true, "log": true, "time": true, "sync": true, "context": true,
+	"lock": true, "unlock": true, "rlock": true, "runlock": true,
+	"git": true, "gitdiff": true, "gitdiffc": true, "exec": true, "command": true, "fatal": true,
+	"stat": true, "mode": true, "trim": true, "trimspace": true, "trimprefix": true, "trimsuffix": true,
+	"split": true, "join": true, "contains": true, "hasprefix": true, "hassuffix": true,
+	"read": true, "write": true, "readall": true, "output": true,
 }
 
-func isStopWord(w string) bool { return stopWords[w] }
+func isStopWord(w string) bool {
+	if len(w) <= 2 {
+		return true
+	}
+	return stopWords[w]
+}
 
 func filepathSlash(p string) string { return strings.ReplaceAll(p, "\\", "/") }
