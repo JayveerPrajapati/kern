@@ -2,6 +2,7 @@ name: ci
 on:
   push:
     branches: [main]
+  pull_request:
 permissions:
   contents: read
 jobs:
@@ -13,6 +14,16 @@ jobs:
         with:
           go-version-file: go.mod
           cache: false
+      - name: Install gitleaks
+        run: |
+          go install github.com/zricethezav/gitleaks/v8@latest
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+      - name: Set up Node for jscpd
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Install jscpd
+        run: npm install -g jscpd
       - name: Vet
         run: go vet ./...
       - name: Format
@@ -28,6 +39,8 @@ jobs:
           go build -buildvcs=false -o "$RUNNER_TEMP/kern" ./cmd/kern
           go build -buildvcs=false -o "$RUNNER_TEMP/kern-mcp" ./cmd/kern-mcp
           go build -buildvcs=false -o "$RUNNER_TEMP/kern-server" ./cmd/kern-server
+          go build -buildvcs=false -o "$RUNNER_TEMP/blueprint" ./cmd/blueprint
+          go build -buildvcs=false -o "$RUNNER_TEMP/blueprint-mcp" ./cmd/blueprint-mcp
       # `make release` and release.yml build with -tags sqlite; make sure that
       # configuration compiles end-to-end in CI too (output to /dev/null since
       # we only need to verify it compiles, not cache the binary).
@@ -36,6 +49,8 @@ jobs:
           go build -buildvcs=false -tags sqlite -o /dev/null ./cmd/kern
           go build -buildvcs=false -tags sqlite -o /dev/null ./cmd/kern-mcp
           go build -buildvcs=false -tags sqlite -o /dev/null ./cmd/kern-server
+          go build -buildvcs=false -tags sqlite -o /dev/null ./cmd/blueprint
+          go build -buildvcs=false -tags sqlite -o /dev/null ./cmd/blueprint-mcp
       # Race detector over the concurrency-sensitive packages (covers the
       # agent registry / in-flight tool / lock lifecycle races). Scoped to
       # keep the full -race ./... suite from slowing CI. The -timeout is sized

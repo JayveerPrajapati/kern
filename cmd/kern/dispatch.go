@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"os"
 	"strings"
+
+	bpcli "github.com/JayveerPrajapati/kern/internal/blueprint/cli"
 )
 
 // resolveCommandAndFlags extracts the subcommand and its remaining arguments
@@ -33,6 +35,10 @@ var commandHelp = map[string]string{
 	"optimize":          "compress a prompt/log/output",
 	"preview":           "compress a prompt/log/output",
 	"compact":           "symbolic file summary",
+	"check":             "validate staged changes against policy (boundaries, secrets, tests)",
+	"fix":               "validate agent-proposed fixes in an isolated worktree",
+	"ci":                "CI change-governance validation (base vs head)",
+	"verify-receipt":    "verify a tamper-evident CI receipt",
 	"project":           "project map",
 	"pack":              "paste-ready project bundle",
 	"log":               "compress noisy logs",
@@ -413,6 +419,18 @@ func dispatchCommand(cmd string, rest []string) int {
 	case "doc_search":
 		runDocSearch(rest)
 		return 0
+
+	case "check":
+		return bpcli.RunCheck(rest)
+
+	case "fix":
+		return bpcli.RunFix(rest)
+
+	case "ci":
+		return bpcli.RunCI(rest)
+
+	case "verify-receipt":
+		return bpcli.RunVerifyReceipt(rest)
 
 	case "fw", "frameworks":
 		runFw(rest)

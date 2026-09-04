@@ -1,0 +1,45 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/JayveerPrajapati/blueprint/schema/findings-schema.json",
+  "title": "Blueprint Finding - shared findings format",
+  "description": "The shared findings format across blueprint and kern. ADDITIVE EVOLUTION: producers add fields only (never rename or remove); consumers must ignore unknown fields. Redaction invariant: a finding with redacted=true must not contain secret material anywhere in its text fields.",
+  "type": "object",
+  "required": ["rule_id", "severity", "category", "message"],
+  "properties": {
+    "rule_id": { "type": "string" },
+    "severity": { "type": "string", "enum": ["block", "error", "warn", "info"] },
+    "category": {
+      "type": "string",
+      "enum": ["architecture", "secret", "duplication", "tests", "build", "resilience", "policy", "performance"]
+    },
+    "file": { "type": "string" },
+    "line": { "type": "integer" },
+    "column": { "type": "integer" },
+    "message": { "type": "string" },
+    "explanation": { "type": "string" },
+    "suggested_fix": { "type": "string" },
+    "evidence": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["kind", "description"],
+        "properties": {
+          "kind": { "type": "string" },
+          "description": { "type": "string" },
+          "location": { "type": "string" }
+        },
+        "additionalProperties": true
+      }
+    },
+    "redacted": { "type": "boolean" },
+    "suppressed": { "type": "boolean" },
+    "suppression_reason": { "type": "string" },
+    "owner": { "type": "string" },
+    "rule_version": { "type": "string" },
+    "kern_version": { "type": "string" },
+    "index_freshness": { "type": "string", "enum": ["fresh", "stale"] },
+    "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+    "scope": { "type": "string", "enum": ["file", "repo"] }
+  },
+  "additionalProperties": true
+}

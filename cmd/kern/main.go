@@ -39,6 +39,10 @@ Usage:
   kern compact <file>                             symbolic summary of a file
   kern project [root]                             compact project map
   kern pack [root] [--max-tokens N] [--out FILE]  single paste-ready file: tree + instructions + contents
+  kern check [--staged] [--repo DIR] [--source agent|ide|human]  validate staged changes against policy
+  kern fix [--repo DIR] [--file FILE] [--content ...]             validate agent-proposed fixes in an isolated worktree
+  kern ci [--repo DIR] [--base main] [--head HEAD]                CI change-governance validation (base vs head)
+  kern verify-receipt [--repo DIR]                                verify a tamper-evident CI receipt
   kern build "<command>" [--dir DIR]              run build, compact output
   kern log <file|->                                 compress a log file
   kern index [root] [--status] [--json]           build/refresh the AST index; --status reports cached

@@ -4,6 +4,10 @@ dist/
 /kern
 /kern-server
 /kern-mcp
+/blueprint
+/blueprint-mcp
+.blueprint/
+**/.blueprint/
 
 # Node/plugin
 node_modules/

@@ -18,6 +18,7 @@ require (
 	github.com/tree-sitter/tree-sitter-rust v0.24.2
 	github.com/tree-sitter/tree-sitter-typescript v0.23.2
 	golang.org/x/sys v0.19.0
+	gopkg.in/yaml.v3 v3.0.1
 	modernc.org/sqlite v1.30.1
 )
 
@@ -36,4 +37,3 @@ require (
 	modernc.org/strutil v1.2.0 // indirect
 	modernc.org/token v1.1.0 // indirect
 )
-
