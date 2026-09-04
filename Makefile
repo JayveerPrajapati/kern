@@ -12,8 +12,6 @@ build:
 	go build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(BIN)/kern ./cmd/kern
 	go build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(BIN)/kern-mcp ./cmd/kern-mcp
 	go build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(BIN)/kern-server ./cmd/kern-server
-	go build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(BIN)/blueprint ./cmd/blueprint
-	go build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(BIN)/blueprint-mcp ./cmd/blueprint-mcp
 
 # build-treesitter builds with tree-sitter support (requires CGO and Go 1.23+).
 # Uses inotifywait/fswatch for file events and tree-sitter for precise parsing.
@@ -45,7 +43,7 @@ bench:
 
 install: build
 	mkdir -p $${HOME}/.local/bin
-	cp $(BIN)/kern $(BIN)/kern-mcp $(BIN)/kern-server $(BIN)/blueprint $(BIN)/blueprint-mcp $${HOME}/.local/bin/
+	cp $(BIN)/kern $(BIN)/kern-mcp $(BIN)/kern-server $${HOME}/.local/bin/
 
 # opencode hooks: MCP config + auto-discovered plugin + agent rules
 hooks: build

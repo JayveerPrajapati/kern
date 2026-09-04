@@ -79,8 +79,8 @@ powershell -ExecutionPolicy Bypass -c "irm https://raw.githubusercontent.com/Jay
 
 | Method | Command | Notes |
 |---|---|---|
-| **go install** | `go install ./cmd/...` or `go install github.com/JayveerPrajapati/kern/cmd/kern@latest` | Core engine, servers, and governance binaries to `$(go env GOPATH)/bin` |
-| **from source** | `make build` → `bin/kern`, `bin/kern-mcp`, `bin/kern-server`, `bin/blueprint`, `bin/blueprint-mcp` | Requires Go 1.23+ |
+| **go install** | `go install github.com/JayveerPrajapati/kern/cmd/kern@latest && go install github.com/JayveerPrajapati/kern/cmd/kern-mcp@latest && go install github.com/JayveerPrajapati/kern/cmd/kern-server@latest` | All three binaries to `$(go env GOPATH)/bin` |
+| **from source** | `make build` → `bin/kern`, `bin/kern-mcp`, `bin/kern-server` | Requires Go 1.23+ |
 
 <sub>`install.sh` (macOS/Linux) and `install.ps1` (Windows) honor `KERN_VERSION`
 (pin a release) and `KERN_INSTALL_DIR` (default `~/.local/bin`); they fall back

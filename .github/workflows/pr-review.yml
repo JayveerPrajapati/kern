@@ -26,6 +26,38 @@ jobs:
           go-version-file: go.mod
           cache: false
 
+      - name: Install gitleaks
+        run: |
+          curl -sSfL https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz | sudo tar -xz -C /usr/local/bin gitleaks
+          sudo chmod +x /usr/local/bin/gitleaks
+
+      - name: Set up Node for jscpd
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install jscpd
+        run: |
+          sudo npm install -g jscpd
+          if ! command -v jscpd &> /dev/null; then
+            sudo ln -sf "$(npm config get prefix)/bin/jscpd" /usr/local/bin/jscpd
+          fi
+
+      - name: Install kern and blueprint
+        run: |
+          go install ./cmd/kern ./cmd/blueprint ./cmd/blueprint-mcp
+          sudo cp "$(go env GOPATH)/bin/kern" /usr/local/bin/kern || true
+          sudo cp "$(go env GOPATH)/bin/blueprint" /usr/local/bin/blueprint || true
+          sudo cp "$(go env GOPATH)/bin/blueprint-mcp" /usr/local/bin/blueprint-mcp || true
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      - name: Verify tool availability
+        run: |
+          which gitleaks && gitleaks version
+          which jscpd && jscpd --version
+          which kern && kern version
+          which blueprint && blueprint version
+
       - name: Vet and test
         run: |
           go vet ./...
