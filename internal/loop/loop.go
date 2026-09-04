@@ -145,10 +145,10 @@ type Result struct {
 	Remembered      []domain.Memory // memories recalled in the remember stage
 	Protected       bool            // true when the protect/approval gate ran and granted
 	Learned         *domain.Memory
-	BudgetPaused    bool            // true when the safety budget was exceeded and the loop PAUSED (kept for back-compat)
-	Paused          bool            // true when the loop PAUSED for any reason
-	PauseReason     string          // reason the loop paused: "budget", "risk_exceeded", "approval", or any reason returned by LoopConfig.PauseTrigger
-	RepairAttempts  int             // number of auto-repair cycles executed
+	BudgetPaused    bool             // true when the safety budget was exceeded and the loop PAUSED (kept for back-compat)
+	Paused          bool             // true when the loop PAUSED for any reason
+	PauseReason     string           // reason the loop paused: "budget", "risk_exceeded", "approval", or any reason returned by LoopConfig.PauseTrigger
+	RepairAttempts  int              // number of auto-repair cycles executed
 	RepairContracts []RepairContract // active or resolved repair contracts
 }
 

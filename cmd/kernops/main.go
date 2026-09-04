@@ -154,4 +154,3 @@ func runTriage(args []string) int {
 	}
 	return 0
 }
-
