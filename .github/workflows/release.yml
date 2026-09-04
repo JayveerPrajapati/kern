@@ -17,12 +17,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
-        with:
-          go-version-file: go.mod
-          cache: true
+      - uses: ./.github/actions/bootstrap
 
       - name: Changelog entry exists for tag
         run: |
@@ -33,12 +28,11 @@ jobs:
             exit 1
           fi
 
-      - uses: ./.github/actions/setup-tools
+      # bootstrap above already installs the tool stack (gitleaks/jscpd/kern),
+      # so no separate setup-tools step is needed here.
 
-      - name: Vet and test
-        run: |
-          go vet ./...
-          go test -short -timeout 10m ./...
+      # Shared quality gate: vet + gofmt + short test suite.
+      - uses: ./.github/actions/quality
 
   review:
     name: kern code review
@@ -46,16 +40,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      # Full history required: the review action diffs the release tag against
+      # origin/main. Go cache is disabled so the tagged commit is built from a
+      # clean module cache (no stale deps from an unrelated PR).
+      - uses: ./.github/actions/bootstrap
         with:
-          # The action diffs the release tag against origin/main, so full
-          # history is required.
-          fetch-depth: 0
-
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
-        with:
-          go-version-file: go.mod
-          cache: false
+          fetch-depth: "0"
+          go-cache: "false"
 
       - name: Build kern from checkout
         run: |
@@ -89,12 +80,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+      - uses: ./.github/actions/bootstrap
         with:
-          go-version-file: go.mod
-          cache: true
+          install-kern: "false"
 
       - name: Set target variables
         id: vars
@@ -117,14 +105,34 @@ jobs:
           dir="${{ steps.vars.outputs.dir }}"
           mkdir -p "$dir"
           GOOS="$os" GOARCH="$arch" CGO_ENABLED=0 \
-            go build -buildvcs=false -tags sqlite -ldflags "-s -w -X main.version=${{ steps.vars.outputs.tag }}" \
+            go build -buildvcs=false -trimpath -tags sqlite -ldflags "-s -w -X main.version=${{ steps.vars.outputs.tag }}" \
             -o "$dir/kern" ./cmd/kern
           GOOS="$os" GOARCH="$arch" CGO_ENABLED=0 \
-            go build -buildvcs=false -tags sqlite -ldflags "-s -w" \
+            go build -buildvcs=false -trimpath -tags sqlite -ldflags "-s -w" \
             -o "$dir/kern-mcp" ./cmd/kern-mcp
           GOOS="$os" GOARCH="$arch" CGO_ENABLED=0 \
-            go build -buildvcs=false -tags sqlite -ldflags "-s -w" \
+            go build -buildvcs=false -trimpath -tags sqlite -ldflags "-s -w" \
             -o "$dir/kern-server" ./cmd/kern-server
+
+      # Shrink the binaries with UPX (best compression). Significant savings:
+      # the Go runtime + three cmd binaries land ~50% smaller once packed.
+      # UPX is skipped for windows (cross-compressing .exe from the linux
+      # runner is fragile). The `kern` binary is smoke-tested with its `version`
+      # subcommand after compression; the MCP/stdio binaries (kern-mcp,
+      # kern-server) are verified structurally with `file` because they read
+      # stdin and have no non-interactive `version` subcommand. A broken
+      # compression still fails the job before SHA256SUMS is generated.
+      - name: Compress binaries with UPX (non-windows)
+        if: steps.vars.outputs.os != 'windows'
+        shell: bash
+        run: |
+          sudo apt-get install -y -qq upx-ucl >/dev/null 2>&1 || sudo apt-get install -y -qq upx >/dev/null 2>&1
+          dir="${{ steps.vars.outputs.dir }}"
+          upx --best --no-lzma "$dir/kern" && "$dir/kern" version >/dev/null
+          upx --best --no-lzma "$dir/kern-mcp" && file "$dir/kern-mcp" | grep -qi "ELF"
+          upx --best --no-lzma "$dir/kern-server" && file "$dir/kern-server" | grep -qi "ELF"
+          echo "compressed sizes:"
+          du -h "$dir/kern" "$dir/kern-mcp" "$dir/kern-server"
 
       - name: Package (tar.gz, or zip for windows)
         shell: bash
@@ -185,15 +193,32 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           tag="${{ steps.release.outputs.tag }}"
-          cat > /tmp/release-notes.md <<EOF
-          See [README](https://github.com/${{ github.repository }}/blob/main/README.md) for install options:
-          - \`curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/main/install.sh | sh\`
-          - \`go install github.com/${{ github.repository }}/cmd/kern@$tag\`
-          - \`brew install kern\` — from the tap repo (auto-published by this workflow). Formula also attached as \`kern.rb\`.
-
-          Assets include a \`SHA256SUMS\` file (\`install.sh\` verifies against it) and
-          a filled-in Homebrew formula for the tap repo.
-          EOF
+          version="${tag#v}"
+          # Release notes come from the CHANGELOG entry for this tag (the test
+          # job above already failed the run if the section is missing), so the
+          # notes never drift from the changelog. A compact install blurb is
+          # prepended; it is shared with the README's install options.
+          # Using index() (string match, not regex) so the tag "0.9.5" matches
+          # the "## [0.9.5] - date" header no matter how "[" is interpreted.
+          # Printing stops at the next "## " section header (single source of
+          # truth: the CHANGELOG).
+          {
+            echo "## Install"
+            echo
+            echo '- `curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/main/install.sh | sh`'
+            echo "- \`go install github.com/${{ github.repository }}/cmd/kern@$tag\`"
+            echo '- `brew install kern` — from the tap repo (auto-published by this workflow); formula attached as `kern.rb`.'
+            echo
+            echo 'Assets include a `SHA256SUMS` file (`install.sh` verifies against it).'
+            echo
+            awk -v ver="[$version]" '
+              /^## / {
+                if (f) exit;
+                if (index($0, ver)==4) { f=1; next }
+              }
+              f { print }
+            ' CHANGELOG.md
+          } > /tmp/release-notes.md
           gh release create "$tag" dist/kern-*.tar.gz dist/kern-*.zip dist/SHA256SUMS kern.rb \
             --notes-file /tmp/release-notes.md \
             --draft=false
@@ -206,8 +231,13 @@ jobs:
       # Requires a PAT with `repo` scope (GITHUB_TOKEN cannot push to another
       # repo) stored as the `TAP_PUBLISH_TOKEN` repository secret. The tap owner
       # defaults to the repo owner; override with the `TAP_OWNER` repo variable.
-      - name: Publish Homebrew tap
+      #
+      # continue-on-error: the GitHub release itself is already created above;
+      # a tap sync failure (missing secret, tap repo not bootstrapped, push
+      # rejected) must never fail the release run.
+      - name: Publish Homebrew tap (best-effort, never blocks the release)
         if: ${{ env.TAP_PUBLISH_TOKEN != '' }}
+        continue-on-error: true
         env:
           TAP_TOKEN: ${{ secrets.TAP_PUBLISH_TOKEN }}
           TAP_OWNER: ${{ vars.TAP_OWNER }}

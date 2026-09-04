@@ -1,0 +1,40 @@
+name: Bootstrap
+description: >-
+  Shared CI bootstrap: checkout + Go toolchain + the optional tool stack
+  (gitleaks, jscpd, kern, blueprint). Replaces the checkout/setup-go/setup-tools
+  block that was copy-pasted into every workflow job. Composite action so it
+  runs inline in the caller's job (unlike a reusable workflow, which runs in
+  its own job and cannot share the Go build cache or $GITHUB_PATH with the
+  steps that follow). DRY: toolchain/tool bumps land in one place.
+
+inputs:
+  fetch-depth:
+    description: git fetch depth for checkout (0 = full history; needed by review/release/ops jobs that diff against main).
+    default: "1"
+  go-version-file:
+    description: Path to the go.mod used to pin the Go toolchain.
+    default: go.mod
+  install-kern:
+    description: Whether setup-tools should install and verify the tool stack (gitleaks/jscpd/kern/blueprint).
+    default: "true"
+  go-cache:
+    description: Whether setup-go should use the GitHub Actions Go module cache.
+    default: "true"
+
+runs:
+  using: composite
+  steps:
+    - name: Checkout
+      uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      with:
+        fetch-depth: ${{ inputs.fetch-depth }}
+
+    - name: Set up Go
+      uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+      with:
+        go-version-file: ${{ inputs.go-version-file }}
+        cache: ${{ inputs.go-cache }}
+
+    - name: Set up tools (gitleaks, jscpd, kern, blueprint)
+      if: inputs.install-kern == 'true'
+      uses: ./.github/actions/setup-tools

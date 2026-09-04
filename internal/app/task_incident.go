@@ -4,7 +4,6 @@ package app
 
 import (
 	"fmt"
-	"os"
 	"github.com/JayveerPrajapati/kern/internal/agent"
 	"github.com/JayveerPrajapati/kern/internal/domain"
 	"github.com/JayveerPrajapati/kern/internal/eventbus"
@@ -12,6 +11,7 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/learning"
 	"github.com/JayveerPrajapati/kern/internal/modernization"
 	"github.com/JayveerPrajapati/kern/internal/runtime"
+	"os"
 	"time"
 )
 

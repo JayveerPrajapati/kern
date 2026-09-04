@@ -11,6 +11,7 @@ import (
 
 	"github.com/JayveerPrajapati/kern/internal/blueprint/mcp"
 	blueprintversion "github.com/JayveerPrajapati/kern/internal/blueprint/version"
+	kernmcp "github.com/JayveerPrajapati/kern/internal/mcp"
 )
 
 func main() {
@@ -247,12 +248,7 @@ func gatePathAllowMissing(allowed []string, p string) error {
 // allowed root. The root itself is resolved first so both sides are compared
 // on their real locations.
 func withinRoot(root, resolved string) bool {
-	r, err := filepath.EvalSymlinks(root)
-	if err != nil {
-		r = root
-	}
-	rel, err := filepath.Rel(r, resolved)
-	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+	return kernmcp.RootContains(root, resolved)
 }
 
 // workspaceRoots returns the absolute workspace roots the MCP server may

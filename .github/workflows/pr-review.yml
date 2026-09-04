@@ -17,25 +17,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      # Full history is required: the review action diffs against the base ref.
+      - uses: ./.github/actions/bootstrap
         with:
-          # The action diffs against the base ref, so full history is required.
-          fetch-depth: 0
+          fetch-depth: "0"
 
-      # The gate is the same reusable action consumers import — this repo
-      # dogfoods it. `kern-bin` points at a binary built from this checkout so
-      # PRs that change kern itself are reviewed with the proposed code.
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
-        with:
-          go-version-file: go.mod
-          cache: true
-
-      - uses: ./.github/actions/setup-tools
-
-      - name: Vet and test
-        run: |
-          go vet ./...
-          go test -short -timeout 10m ./...
+      # Shared quality gate: vet + gofmt + short test suite.
+      - uses: ./.github/actions/quality
 
       - name: Build kern from checkout
         run: go build -buildvcs=false -o "$RUNNER_TEMP/kern" ./cmd/kern
