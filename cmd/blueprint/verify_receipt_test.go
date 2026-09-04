@@ -460,3 +460,67 @@ func TestVerifyReceipt_LatestNotesBlockedCIRun(t *testing.T) {
 		t.Fatalf("json note = %q, want %q", note, wantNote)
 	}
 }
+
+func TestVerifyReceipt_SARIF_InToto_CheckDiff(t *testing.T) {
+	kernPath := requireKernPath(t)
+	binPath := buildBlueprint(t)
+	dir := g11Repo(t,
+		map[string]string{
+			"pkg/service.go": "package pkg\nfunc Run() {}\n",
+		},
+		map[string]string{
+			"pkg/clean.go": "package pkg\nfunc Clean() {}\n",
+		},
+	)
+
+	_, stderr, exitCode, _ := runCICommand(t, binPath, dir, kernPath)
+	if exitCode != 0 {
+		t.Fatalf("ci exit=%d want 0; stderr:\n%s", exitCode, stderr)
+	}
+	id := receiptIDFromOutput(t, stderr)
+
+	// 1. Test --sarif export
+	sarifOut, _, code := runVerifyReceiptInDirSplit(t, binPath, dir, dir, id, "--sarif")
+	if code != 0 {
+		t.Fatalf("verify-receipt --sarif exit=%d want 0; output:\n%s", code, sarifOut)
+	}
+	var sarifDoc map[string]any
+	if err := json.Unmarshal([]byte(sarifOut), &sarifDoc); err != nil {
+		t.Fatalf("failed to parse SARIF JSON: %v; output:\n%s", err, sarifOut)
+	}
+	if sarifDoc["version"] != "2.1.0" {
+		t.Fatalf("expected SARIF 2.1.0, got: %v", sarifDoc["version"])
+	}
+
+	// 2. Test --in-toto export
+	inTotoOut, _, code := runVerifyReceiptInDirSplit(t, binPath, dir, dir, id, "--in-toto")
+	if code != 0 {
+		t.Fatalf("verify-receipt --in-toto exit=%d want 0; output:\n%s", code, inTotoOut)
+	}
+	var inTotoDoc map[string]any
+	if err := json.Unmarshal([]byte(inTotoOut), &inTotoDoc); err != nil {
+		t.Fatalf("failed to parse in-toto JSON: %v; output:\n%s", err, inTotoOut)
+	}
+	if inTotoDoc["_type"] != "https://in-toto.io/Statement/v0.1" {
+		t.Fatalf("expected in-toto statement, got: %v", inTotoDoc["_type"])
+	}
+
+	// 3. Test --check-diff on clean repository
+	g11Git(t, dir, "checkout", "feature")
+	checkDiffOut, _, code := runVerifyReceiptInDirSplit(t, binPath, dir, dir, id, "--check-diff")
+	if code != 0 {
+		t.Fatalf("verify-receipt --check-diff exit=%d want 0; output:\n%s", code, checkDiffOut)
+	}
+
+	// 4. Test --check-diff detects tamper when tracked file is mutated after receipt
+	g11Write(t, dir, "pkg/service.go", "package pkg\nfunc Run() { panic(\"injected\") }\n")
+	tamperOut, tamperErr, code := runVerifyReceiptInDirSplit(t, binPath, dir, dir, id, "--check-diff")
+	if code != 2 {
+		t.Fatalf("expected exit 2 on tampered working tree, got exit=%d; output:\n%s\nstderr:\n%s", code, tamperOut, tamperErr)
+	}
+	if !strings.Contains(tamperErr, "tamper detected") && !strings.Contains(tamperOut, "tamper detected") {
+		t.Fatalf("expected 'tamper detected' in output, got out=%q err=%q", tamperOut, tamperErr)
+	}
+}
+
+

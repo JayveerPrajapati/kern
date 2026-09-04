@@ -255,6 +255,7 @@ remote providers only if you set `KERN_LLM_PROVIDER`).
 | **Safety tooling** | PII masking, secret scanning, hallucination verification (`file:line` claims), snapshot sandbox, self-healing test fixes, JSON-schema validation |
 | **Multi-repo search** | `kern repos add` registers repos; `kern search --repos` / `--semantic` searches across all of them |
 | **Zero-dependency single binary** | Go stdlib only by default; opt-in tree-sitter (14 grammars) and SQLite WAL + FTS5 via build tags |
+| **Governed Autonomy (KernOps)** | 5-stage lifecycle ($L_0$–$L_5$) in ephemeral git worktree sandboxes, 30-gate immune system ($G_0$–$G_{29}$), machine-actionable repair contracts, Auto-SRE incident triage, and tamper-evident SLSA/in-toto v0.2 + SARIF 2.1.0 attestations |
 
 <details>
 <summary><strong>How auto-syncing works — why the index is never stale</strong></summary>
@@ -422,7 +423,9 @@ kern guard check [root] [--file F] [--range a..b] [--json|--sarif] [--threshold 
 kern check [--staged|--repo R] [--format F]          run change-firewall gates (secrets, boundaries, duplication)
 kern fix [--file F] [--content C] [--repo R]         validate fix in isolated git worktree; auto-repair loop
 kern ci --base <sha> --head <sha> [--repo R]         pre-merge CI gate; emits tamper-evident receipt
-kern verify-receipt <id> [--repo R]                  verify cryptographic provenance of CI receipt
+kern verify-receipt <id> [--sarif] [--in-toto] [--check-diff]   verify receipt signature, export SARIF/in-toto, detect git tamper
+kern ops "<intent>" [--level L0-L5] [--non-interactive] [--json]   KernOps terminal cockpit: governed execution in ephemeral sandboxes
+kern ops triage --log <path|-> [--non-interactive] [--json]         Auto-SRE incident triage: squeeze log, AST correlation, sandbox repro, auto-repair
 kern fw [root] [--catalog]                       framework detection
 kern verify <file|-> [root]                     hallucination check: file:line claims; `kern verify <types>` (build,test,security,arch,deps) runs the verification engine
 kern validate [root]                             run the project's build/test, compact

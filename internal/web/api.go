@@ -4,15 +4,18 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/JayveerPrajapati/kern/internal/agent"
 	"github.com/JayveerPrajapati/kern/internal/agents"
 	"github.com/JayveerPrajapati/kern/internal/app"
 	"github.com/JayveerPrajapati/kern/internal/domain"
+	"github.com/JayveerPrajapati/kern/internal/eventbus"
 	"github.com/JayveerPrajapati/kern/internal/governance"
 	"github.com/JayveerPrajapati/kern/internal/learning"
 	"github.com/JayveerPrajapati/kern/internal/loop"
@@ -929,4 +932,52 @@ func (a *App) handleV1Audit(w http.ResponseWriter, r *http.Request) {
 		Audit:     auditEntries,
 		Approvals: pendingApprovals,
 	})
+}
+
+// handleV1EventsStream provides a JSON-lines Server-Sent Events (SSE) stream for real-time telemetry (KernOps Phase 2).
+func (a *App) handleV1EventsStream(w http.ResponseWriter, r *http.Request) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeError(w, http.StatusInternalServerError, "streaming unsupported")
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	if a.bus == nil {
+		fmt.Fprintf(w, "event: error\ndata: {\"error\":\"event bus not configured\"}\n\n")
+		flusher.Flush()
+		return
+	}
+
+	ch := make(chan eventbus.Event, 64)
+	unsub := a.bus.Subscribe("", func(ev eventbus.Event) {
+		select {
+		case ch <- ev:
+		default:
+			// Dropped if client is slow
+		}
+	})
+	defer unsub()
+
+	fmt.Fprintf(w, "event: connected\ndata: {\"status\":\"connected\",\"timestamp\":%d}\n\n", time.Now().Unix())
+	flusher.Flush()
+
+	ctx := r.Context()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case ev := <-ch:
+			data, err := json.Marshal(ev)
+			if err != nil {
+				continue
+			}
+			fmt.Fprintf(w, "event: %s\ndata: %s\n\n", ev.Kind, string(data))
+			flusher.Flush()
+		}
+	}
 }

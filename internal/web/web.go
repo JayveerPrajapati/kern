@@ -296,6 +296,7 @@ func New(root string) (*App, error) {
 	mux.HandleFunc("/v1/approvals/pending", a.handleApprovalsPending)
 	mux.HandleFunc("/v1/approve", a.handleApprovalApprove)
 	mux.HandleFunc("/v1/reject", a.handleApprovalReject)
+	mux.HandleFunc("/v1/events/stream", a.handleV1EventsStream)
 	mux.HandleFunc("/task/", a.handleTaskDetail)
 	mux.HandleFunc("/agents", a.handleAgents)
 	mux.HandleFunc("/tasks", a.handleTasks)
