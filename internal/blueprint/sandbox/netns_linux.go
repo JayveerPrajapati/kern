@@ -58,7 +58,7 @@ func probeNetworkIsolation() bool {
 	if err := cmd.Start(); err != nil {
 		return false
 	}
-	cmd.Wait()
+	_ = cmd.Wait()
 	return true
 }
 

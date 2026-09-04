@@ -80,11 +80,11 @@ func FixedByEdges(fixes map[string]string) []domain.Edge {
 	var edges []domain.Edge
 	for _, incID := range ids {
 		fixID := fixes[incID]
-		target := fixID
+		var target string
 		if len(fixID) == 40 {
-			target = "commit:" + fixID // SHA → commit node
+			target = "commit:" + fixID // SHA — commit node
 		} else {
-			target = "pr:" + fixID // PR number → PR node
+			target = "pr:" + fixID // PR number — PR node
 		}
 		edges = append(edges, domain.Edge{
 			From: "incident:" + incID,

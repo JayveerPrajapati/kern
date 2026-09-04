@@ -47,14 +47,6 @@ func isTempOrMissingRoot(root string) bool {
 	return false
 }
 
-// pluralY returns "y" for 1, "ies" otherwise — used for "entry/entries".
-func pluralY(n int) string {
-	if n == 1 {
-		return "y"
-	}
-	return "ies"
-}
-
 func runPrecache(rest []string) {
 	f, args, err := parseFlags(rest)
 	if err != nil {

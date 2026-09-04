@@ -152,7 +152,6 @@ func hunkNewRange(line string) (start, count int, ok bool) {
 	if end := strings.IndexByte(rest, ' '); end >= 0 {
 		rest = rest[:end]
 	}
-	start = 1
 	if p := strings.SplitN(rest, ",", 2); len(p) == 1 {
 		start, _ = strconv.Atoi(p[0])
 		count = 1

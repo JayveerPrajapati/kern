@@ -126,7 +126,9 @@ func (w *ApprovalWorkflow) Approve(approvalID, approver string) (domain.Approval
 	a.DecidedAt = &now
 	w.pending[approvalID] = a
 	if w.store != nil {
-		_, _ = w.store.Decide(approvalID, approver, true, "")
+		if _, err := w.store.Decide(approvalID, approver, true, ""); err != nil {
+			return a, fmt.Errorf("governance: persist approval %q: %w", approvalID, err)
+		}
 	}
 	return a, nil
 }
@@ -150,7 +152,9 @@ func (w *ApprovalWorkflow) Reject(approvalID, approver, reason string) (domain.A
 	a.DecidedAt = &now
 	w.pending[approvalID] = a
 	if w.store != nil {
-		_, _ = w.store.Decide(approvalID, approver, false, reason)
+		if _, err := w.store.Decide(approvalID, approver, false, reason); err != nil {
+			return a, fmt.Errorf("governance: persist approval %q: %w", approvalID, err)
+		}
 	}
 	return a, nil
 }

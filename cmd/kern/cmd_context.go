@@ -267,7 +267,11 @@ func runLock(rest []string) {
 		emitLockEvent(root, string(eventbus.LockContended), scope, map[string]any{"holder_pid": pid})
 		fatal("lock %q is held (pid %d): %v", scope, pid, err)
 	}
-	defer lk.Release()
+	defer func() {
+		if rerr := lk.Release(); rerr != nil {
+			fmt.Fprintf(os.Stderr, "kern: warning: could not release lock %q: %v\n", scope, rerr)
+		}
+	}()
 	emitLockEvent(root, string(eventbus.LockAcquired), scope, map[string]any{"pid": os.Getpid()})
 	if f.hold {
 		// Non-blocking mode for tool/plugin callers: acquire, report, and

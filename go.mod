@@ -1,6 +1,6 @@
 module github.com/JayveerPrajapati/kern
 
-go 1.23
+go 1.23.0
 
 require (
 	github.com/UserNobody14/tree-sitter-dart v0.0.0-20260707040301-be07cf7118d3
@@ -17,7 +17,7 @@ require (
 	github.com/tree-sitter/tree-sitter-ruby v0.23.1
 	github.com/tree-sitter/tree-sitter-rust v0.24.2
 	github.com/tree-sitter/tree-sitter-typescript v0.23.2
-	golang.org/x/sys v0.19.0
+	golang.org/x/sys v0.32.0
 	gopkg.in/yaml.v3 v3.0.1
 	modernc.org/sqlite v1.30.1
 )

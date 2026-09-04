@@ -74,7 +74,11 @@ func (c *Check) Run(ctx context.Context, req domain.ChangeRequest) (domain.Check
 	if err := os.Chdir(req.RepositoryRoot); err != nil {
 		return c.warnResult([]domain.Finding{c.warnFinding(fmt.Sprintf("scenario could not run: %v", err))}), nil
 	}
-	defer os.Chdir(oldWD)
+	defer func() {
+		if cdErr := os.Chdir(oldWD); cdErr != nil {
+			fmt.Fprintf(os.Stderr, "resilience check: could not restore working directory %q: %v\n", oldWD, cdErr)
+		}
+	}()
 
 	sb := repoSandbox{root: req.RepositoryRoot, timeout: c.sandboxTimeout}
 	var findings []domain.Finding

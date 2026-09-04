@@ -57,11 +57,11 @@ func (s *Server) handleBuddy(ctx context.Context, args map[string]any) (string, 
 			root = cwd
 		}
 		// Warm the index in the background so later calls render the fast path.
-		go func() {
-			if err := brief.Warm(root); err != nil {
-				// best-effort: the digest still renders without index sections
-			}
-		}()
+	go func() {
+		if werr := brief.Warm(root); werr != nil {
+			fmt.Fprintf(os.Stderr, "kern: buddy: could not warm index for %q: %v\n", root, werr)
+		}
+	}()
 		out, err := brief.Build(root)
 		if err != nil {
 			return "", err

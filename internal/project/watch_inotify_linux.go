@@ -104,14 +104,14 @@ func (w *inotifyWatcher) reRegister(root string) {
 	// Drop watches for dirs and files that disappeared.
 	for wd, p := range w.dirs {
 		if _, err := os.Stat(p); err != nil {
-			syscall.InotifyRmWatch(w.fd, uint32(wd))
-			delete(w.dirs, wd)
+		_, _ = syscall.InotifyRmWatch(w.fd, uint32(wd))
+		delete(w.dirs, wd)
 		}
 	}
 	for wd, p := range w.files {
 		if _, err := os.Stat(p); err != nil {
-			syscall.InotifyRmWatch(w.fd, uint32(wd))
-			delete(w.files, wd)
+		_, _ = syscall.InotifyRmWatch(w.fd, uint32(wd))
+		delete(w.files, wd)
 		}
 	}
 }

@@ -239,6 +239,11 @@ type Bus struct {
 	retryBackoff time.Duration
 	deadLetter   []*deadLetterSub
 
+	// handlerTimeout bounds each individual handler invocation so a single
+	// slow/stuck subscriber cannot hold a delivery slot (semaphore or
+	// WaitGroup) indefinitely. <= 0 disables the timeout (default).
+	handlerTimeout time.Duration
+
 	// P4.5 persisted replay: when persistPath is non-empty, every published
 	// event (ID + OccurredAt + Kind + payload) is appended as a JSON line so a
 	// later bus can replay the history.
@@ -410,11 +415,11 @@ func (b *Bus) Publish(ev Event) {
 // (or disabled) the event is routed to the dead-letter queue (P4.4).
 func (b *Bus) deliverWithRetry(h Handler, e Event) {
 	b.mu.Lock()
-	max, backoff := b.retryMax, b.retryBackoff
+	max, backoff, timeout := b.retryMax, b.retryBackoff, b.handlerTimeout
 	b.mu.Unlock()
 
 	for attempt := 0; ; attempt++ {
-		if !runSafe(h, e) {
+		if !b.runSafeTimeout(h, e, timeout) {
 			if attempt < max {
 				time.Sleep(backoff)
 				continue
@@ -438,6 +443,31 @@ func runSafe(h Handler, e Event) (ok bool) {
 	}()
 	h(e)
 	return true
+}
+
+// runSafeTimeout invokes h, recovering panics, and enforces an optional
+// per-handler execution timeout. timeout <= 0 runs the handler to completion
+// (the pre-existing unbounded behavior). With a positive timeout, a handler
+// that exceeds it is abandoned: the caller's dispatch goroutine is released
+// with a warning so a slow subscriber cannot hold a delivery slot (worker
+// semaphore or WaitGroup counter) forever. The abandoned handler goroutine
+// itself cannot be interrupted (the Handler signature has no context), so it
+// lingers in the background, but it no longer occupies a delivery slot.
+func (b *Bus) runSafeTimeout(h Handler, e Event, timeout time.Duration) (ok bool) {
+	if timeout <= 0 {
+		return runSafe(h, e)
+	}
+	done := make(chan bool, 1)
+	go func() {
+		done <- runSafe(h, e)
+	}()
+	select {
+	case ok = <-done:
+		return ok
+	case <-time.After(timeout):
+		log.Printf("eventbus: subscriber exceeded %s timeout, abandoning handler", timeout)
+		return false
+	}
 }
 
 // rememberLocked records an event ID for idempotency, evicting the oldest when
@@ -466,6 +496,7 @@ func (b *Bus) enqueueDeadLetter(e Event) {
 			targets = append(targets, dl.handle)
 		}
 	}
+	timeout := b.handlerTimeout
 	b.mu.Unlock()
 
 	if len(targets) == 0 {
@@ -475,7 +506,7 @@ func (b *Bus) enqueueDeadLetter(e Event) {
 	for _, h := range targets {
 		go func(hd Handler, ev Event) {
 			defer b.wg.Done()
-			_ = runSafe(hd, ev)
+			_ = b.runSafeTimeout(hd, ev, timeout)
 		}(h, e)
 	}
 }
@@ -543,6 +574,22 @@ func (b *Bus) SetRetryPolicy(maxRetries int, backoff time.Duration) {
 	}
 	b.retryMax = maxRetries
 	b.retryBackoff = backoff
+}
+
+// SetHandlerTimeout sets a per-handler execution timeout. A handler that runs
+// longer than d is abandoned (its dispatch goroutine is released with a
+// warning) so one slow/stuck subscriber cannot hold a delivery slot (worker
+// semaphore or WaitGroup counter) indefinitely — the goroutine leak the busy
+// event bus famously suffers when a subscriber blocks forever. d <= 0
+// disables the timeout (the default), preserving the pre-existing unbounded
+// delivery behavior.
+func (b *Bus) SetHandlerTimeout(d time.Duration) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if d < 0 {
+		d = 0
+	}
+	b.handlerTimeout = d
 }
 
 // SubscribeDeadLetter registers a handler that receives every event whose

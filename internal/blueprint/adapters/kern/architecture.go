@@ -720,7 +720,7 @@ func (c *ArchitectureCheck) projectedImportFindings(req domain.ChangeRequest, fr
 // trees are skipped.
 func sourceDirs(root string) map[string]bool {
 	dirs := map[string]bool{}
-	filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+	_ = filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return nil
 		}

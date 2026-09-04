@@ -43,6 +43,9 @@ class Kern < Formula
   depends_on "go" => :build
 
   def install
+    # Pin the Go toolchain to a known-good release that satisfies go.mod's
+    # `go 1.23` directive; Homebrew's go shim honors HOMEBREW_GO_VERSION.
+    ENV["HOMEBREW_GO_VERSION"] = "1.23"
     system "go", "build", "-buildvcs=false", "-tags", "sqlite", "-ldflags", "-X main.version=#{version}", "-o", "kern", "./cmd/kern"
     system "go", "build", "-buildvcs=false", "-tags", "sqlite", "-ldflags", "-X main.version=#{version}", "-o", "kern-mcp", "./cmd/kern-mcp"
     system "go", "build", "-buildvcs=false", "-tags", "sqlite", "-ldflags", "-X main.version=#{version}", "-o", "kern-server", "./cmd/kern-server"

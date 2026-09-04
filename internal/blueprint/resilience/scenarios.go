@@ -96,7 +96,7 @@ func (h *HTTPFault) Prepare(ctx context.Context) error {
 		w.WriteHeader(h.status)
 	})
 	h.server = &http.Server{Handler: mux}
-	go h.server.Serve(listener)
+	go func() { _ = h.server.Serve(listener) }()
 	return nil
 }
 
@@ -136,7 +136,7 @@ func (h *HTTPFault) Cleanup(ctx context.Context) error {
 	if h.server != nil {
 		ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 		defer cancel()
-		h.server.Shutdown(ctx)
+		_ = h.server.Shutdown(ctx)
 		h.server = nil
 	}
 	return nil
@@ -319,11 +319,11 @@ func (m *MalformedJSON) Prepare(ctx context.Context) error {
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		// Deliberately malformed JSON (missing closing brace).
-		w.Write([]byte(`{"key": "value"`))
+		_, _ = w.Write([]byte(`{"key": "value"`))
 	})
 
 	m.server = &http.Server{Handler: mux}
-	go m.server.Serve(listener)
+	go func() { _ = m.server.Serve(listener) }()
 	return nil
 }
 
@@ -343,7 +343,7 @@ func (m *MalformedJSON) Cleanup(ctx context.Context) error {
 	if m.server != nil {
 		ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 		defer cancel()
-		m.server.Shutdown(ctx)
+		_ = m.server.Shutdown(ctx)
 		m.server = nil
 	}
 	return nil
@@ -552,7 +552,7 @@ func DetectRepoInfo(root string) RepoInfo {
 // (shell ecosystem detection). Test/hidden/vendor trees are skipped.
 func hasShellScripts(root string) bool {
 	found := false
-	filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+	_ = filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
 		if err != nil || info.IsDir() {
 			if info != nil && info.IsDir() {
 				name := info.Name()
@@ -591,7 +591,7 @@ func parseModulePath(goMod string) string {
 func detectGoImports(root string) []string {
 	imports := map[string]bool{}
 	// Walk .go files and extract import paths.
-	filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+	_ = filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
 		if err != nil || info.IsDir() {
 			if info != nil && info.IsDir() {
 				name := info.Name()
@@ -649,7 +649,7 @@ func detectGoImports(root string) []string {
 
 func hasGoTests(root string) bool {
 	found := false
-	filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+	_ = filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
 		if err != nil || info.IsDir() {
 			return nil
 		}

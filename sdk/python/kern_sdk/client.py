@@ -160,3 +160,39 @@ class Client:
             raise ValueError("deploy() requires a task_id")
         from urllib.parse import quote
         return self._post(f"/v1/tasks/{quote(task_id, safe='')}/deploy", {"version": version})
+
+    def approvals_pending(self) -> dict:
+        """Return the pending approval roster (GET /v1/approvals/pending)."""
+        return self._get("/v1/approvals/pending")
+
+    def incidents(self) -> dict:
+        """Return a flattened summary of persisted incidents (GET /v1/incidents)."""
+        return self._get("/v1/incidents")
+
+    def incident(self, incident_id: str) -> dict:
+        """Return a single incident by ID (GET /v1/incidents/{id})."""
+        if not incident_id:
+            raise ValueError("incident() requires an incident_id")
+        from urllib.parse import quote
+        return self._get(f"/v1/incidents/{quote(incident_id, safe='')}")
+
+    def events_stream(self):
+        """Yield parsed "data:" payloads from the SSE stream (GET /v1/events/stream).
+
+        A blocking generator: each yield is the JSON-decoded data line of an SSE
+        frame (or the raw string when it is not valid JSON). Callers iterate it in
+        a background thread and consume until it ends (on connection close).
+        """
+        from urllib.request import Request
+        url = self.base + "/v1/events/stream"
+        req = Request(url, method="GET", headers={"Accept": "text/event-stream"})
+        with urlopen(req, timeout=self.timeout) as resp:
+            for line in resp:
+                line = line.decode("utf-8", errors="replace").strip()
+                if line.startswith("data:"):
+                    payload = line[len("data:"):].strip()
+                    if payload:
+                        try:
+                            yield json.loads(payload)
+                        except Exception:
+                            yield payload

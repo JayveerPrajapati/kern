@@ -195,9 +195,6 @@ func Check(root string) []Status {
 func Wire(root string, agents []string, detect bool) []Status {
 	detected := DetectAgents(root)
 	explicit := agents // snapshot: explicit --agents list, if any
-	if detect && len(agents) == 0 {
-		agents = detected
-	}
 	bin := PortableMCPCommand()
 	// repoEnabled gates project-scope files: explicit list wins; else
 	// detected agents (when detect); else all.

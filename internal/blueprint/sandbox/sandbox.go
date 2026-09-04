@@ -259,11 +259,11 @@ func createWorktree(repoRoot string) (string, func(), error) {
 		// Remove the worktree registration from the main repo.
 		rmCmd := exec.Command("git", "worktree", "remove", "--force", worktreePath)
 		rmCmd.Dir = repoRoot
-		rmCmd.Run() // best-effort
-		// Also prune stale worktree metadata.
-		pruneCmd := exec.Command("git", "worktree", "prune")
-		pruneCmd.Dir = repoRoot
-		pruneCmd.Run()
+	_ = rmCmd.Run() // best-effort
+	// Also prune stale worktree metadata.
+	pruneCmd := exec.Command("git", "worktree", "prune")
+	pruneCmd.Dir = repoRoot
+	_ = pruneCmd.Run()
 		// Remove the temp dir.
 		os.RemoveAll(tmpDir)
 	}

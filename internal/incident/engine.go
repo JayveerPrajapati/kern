@@ -318,7 +318,7 @@ func (e *Engine) ApplyAndVerifyFix(inc *domain.Incident, apply func(workDir stri
 	if err != nil {
 		return "", fmt.Errorf("worktree: %w", err)
 	}
-	defer wt.Cleanup()
+	defer func() { _ = wt.Cleanup() }()
 
 	if err := apply(wt.Dir()); err != nil {
 		return "", fmt.Errorf("apply fix: %w", err)

@@ -450,18 +450,22 @@ func (s *Server) serveOrgAPI(w http.ResponseWriter, r *http.Request) {
 func (s *Server) serveOrgAudit(w http.ResponseWriter, r *http.Request) {
 	entries := s.orgAudit.All()
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]any{
+	if err := json.NewEncoder(w).Encode(map[string]any{
 		"entries": entries,
 		"count":   len(entries),
-	})
+	}); err != nil {
+		http.Error(w, "could not encode response", http.StatusInternalServerError)
+	}
 }
 
 func (s *Server) serveOrgPolicies(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]any{
+	if err := json.NewEncoder(w).Encode(map[string]any{
 		"policies": s.policies,
 		"count":    len(s.policies),
-	})
+	}); err != nil {
+		http.Error(w, "could not encode response", http.StatusInternalServerError)
+	}
 }
 
 func (s *Server) serveOrgProjects(w http.ResponseWriter, r *http.Request) {
@@ -476,10 +480,12 @@ func (s *Server) serveOrgProjects(w http.ResponseWriter, r *http.Request) {
 		info = append(info, projectInfo{Name: p.Name})
 	}
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]any{
+	if err := json.NewEncoder(w).Encode(map[string]any{
 		"projects": info,
 		"count":    len(info),
-	})
+	}); err != nil {
+		http.Error(w, "could not encode response", http.StatusInternalServerError)
+	}
 }
 
 // serveOrgRepositories lists the repositories (projects) registered at the
@@ -495,10 +501,12 @@ func (s *Server) serveOrgRepositories(w http.ResponseWriter, r *http.Request) {
 		info = append(info, repoInfo{Name: p.Name})
 	}
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]any{
+	if err := json.NewEncoder(w).Encode(map[string]any{
 		"repositories": info,
 		"count":        len(info),
-	})
+	}); err != nil {
+		http.Error(w, "could not encode response", http.StatusInternalServerError)
+	}
 }
 
 // serveOrgArchitecture aggregates the architecture report across every project
@@ -528,10 +536,12 @@ func (s *Server) serveOrgArchitecture(w http.ResponseWriter, r *http.Request) {
 		out = append(out, projectArch{Project: p.project.Name, Violations: viol, OK: arch.OK})
 	}
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]any{
+	if err := json.NewEncoder(w).Encode(map[string]any{
 		"architecture": out,
 		"count":        len(out),
-	})
+	}); err != nil {
+		http.Error(w, "could not encode response", http.StatusInternalServerError)
+	}
 }
 
 // serveOrgMemory serves the org-level memory store.

@@ -143,8 +143,8 @@ func verifyMCP(root string) error {
 	}
 	// MCP servers are long-lived; always reap the spawned process.
 	defer func() {
-		proc.Process.Kill()
-		proc.Wait()
+		_ = proc.Process.Kill()
+		_ = proc.Wait()
 	}()
 
 	req := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"kern-setup-check","version":"1"}}}`
@@ -290,7 +290,6 @@ func runFw(rest []string) {
 		args = args[1:]
 		if len(args) > 0 {
 			filter = args[0]
-			args = args[1:]
 		}
 		langs := fw.Langs()
 		if filter != "" {
