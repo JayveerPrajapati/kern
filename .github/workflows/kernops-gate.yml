@@ -50,9 +50,10 @@ jobs:
           go build -o /usr/local/bin/kernops ./cmd/kernops
 
       - name: Run Governed Change Firewall (Gates G0-G29)
+        id: firewall
         run: |
           BASE_SHA="${{ github.event.pull_request.base.sha }}"
-          if [ -z "$BASE_SHA" ]; then
+          if [ -z "$BASE_SHA" ] || ! git rev-parse --verify "$BASE_SHA" >/dev/null 2>&1; then
             BASE_SHA="HEAD~1"
           fi
           HEAD_SHA="${{ github.sha }}"
@@ -81,9 +82,12 @@ jobs:
 
       - name: Archive Compliance Attestation Receipt
         uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: kernops-attestation-receipt
+          if-no-files-found: ignore
           path: |
             kernops-report.sarif
             kernops-attestation.json
+            blueprint-result.json
             .blueprint/receipts/

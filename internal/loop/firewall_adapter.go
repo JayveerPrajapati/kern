@@ -25,7 +25,7 @@ import (
 type RepairContract struct {
 	TaskID       string `json:"task_id"`
 	Iteration    int    `json:"iteration"`
-	GateID       string `json:"gate_id"`       // e.g. "G1_SECRETS", "G2_BOUNDARIES", "G6_DUPLICATION", "G8_SANDBOX_TESTS", "G24_APPROVAL"
+	GateID       string `json:"gate_id"`       // gate identifier (e.g. G1, G2, G6, G8, G24)
 	CheckType    string `json:"check_type"`    // e.g. "boundary", "secret", "duplication", "tests", "approval"
 	IsActionable bool   `json:"is_actionable"` // true
 	TargetFile   string `json:"target_file"`   // e.g. "internal/auth/middleware.go"
