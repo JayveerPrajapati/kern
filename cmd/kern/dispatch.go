@@ -32,6 +32,8 @@ func resolveCommandAndFlags() (cmd string, rest []string) {
 // printCommandHelp for `kern <cmd> --help`. Aliases share their primary
 // command's description.
 var commandHelp = map[string]string{
+	"ops":               "governed autonomous engineering cockpit",
+	"kernops":           "governed autonomous engineering cockpit",
 	"optimize":          "compress a prompt/log/output",
 	"preview":           "compress a prompt/log/output",
 	"compact":           "symbolic file summary",
@@ -333,6 +335,9 @@ func dispatchCommand(cmd string, rest []string) int {
 	case "workflow":
 		runWorkflow(rest)
 		return 0
+
+	case "ops", "kernops":
+		return runOps(rest)
 
 	case "loop", "autonomy":
 		runLoop(cmd, rest)

@@ -95,6 +95,8 @@ back to the built-in — but never skip kern when it's available.
 | Run a command / script       | `kern_exec`                           | `bash`        |
 | Validate staged / policy     | `kern check`                          | manual lint   |
 | Auto-repair in sandbox       | `kern fix`                            | manual fix    |
+| Governed autonomy / Cockpit  | `kern ops` / `kernops`                | manual chain  |
+| Auto-SRE incident triage     | `kern ops triage --log <path>`        | manual triage |
 | Pre-merge CI / receipts      | `kern ci` / `kern verify-receipt`     | CI checks     |
 | Commit                       | `kern_commitmsg`                      | git CLI       |
 | Search (task/bug/error)      | `kern_probe`                          | grep + read   |
@@ -177,6 +179,9 @@ context-optimization tools above.
 - `kern_approve` — resolve a governance approval gate (approve/reject pending approvals)
 - `kern_audit` — return the tamper-evident governance audit log for the project
 - `kern check` / `kern fix` / `kern ci` / `kern verify-receipt` — native change-firewall gates G0–G29 (secrets, boundaries, duplication), sandboxed repair loop, and cryptographic CI receipts
+- `kern ops` / `kernops` — KernOps terminal cockpit orchestrating the 5-stage governed execution lifecycle in isolated ephemeral git worktrees
+- `kern ops triage` / `kernops triage` — Auto-SRE incident triage: compresses raw logs, correlates stack traces to AST symbols, writes reproduction unit test in worktree sandbox, and drives auto-repair loop
+- `kern verify-receipt --sarif|--in-toto|--check-diff` — export SARIF 2.1.0 and in-toto v0.2 supply-chain attestations, verify PR diff integrity against cryptographic receipt signatures
 
 **Engineering memory & agents:**
 - `kern_memory` / `kern_memory_add` / `kern_memory_list` / `kern_memory_recall` / `kern_learn` — project brain: store / list / recall lessons, extract patterns

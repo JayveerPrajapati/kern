@@ -47,6 +47,9 @@ func runVerifyReceipt(args []string) int {
 	repoRoot := fs.String("repo", "", "repository root (default: current directory)")
 	receiptID := fs.String("receipt-id", "", "receipt id to verify (default: latest receipt)")
 	jsonOut := fs.Bool("json", false, "emit JSON instead of human-readable text")
+	sarifOut := fs.Bool("sarif", false, "emit SARIF 2.1.0 JSON report")
+	inTotoOut := fs.Bool("in-toto", false, "emit in-toto v0.2 supply-chain attestation statement")
+	checkDiff := fs.Bool("check-diff", false, "verify PR git revision / diff matches receipt fingerprint")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -171,6 +174,38 @@ func runVerifyReceipt(args []string) int {
 			// do not fail — the local chain binding above already validated.
 			fmt.Fprintf(os.Stderr, "WARN: %v\n", err)
 		}
+	}
+
+	// 6. Diff integrity check: verify PR git state / diff has not been tampered with
+	if *checkDiff {
+		if err := receipt.VerifyDiffIntegrity(r, absRoot); err != nil {
+			if *jsonOut {
+				emitVerifyReceiptJSON(nil, err.Error())
+			} else {
+				fmt.Fprintf(os.Stderr, "Receipt %s INVALID: %v\n", r.ReceiptID, err)
+			}
+			return 2
+		}
+	}
+
+	if *sarifOut {
+		data, err := receipt.RenderSARIF(r, nil)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Receipt %s: SARIF export failed: %v\n", r.ReceiptID, err)
+			return 2
+		}
+		os.Stdout.Write(data)
+		return 0
+	}
+
+	if *inTotoOut {
+		data, err := receipt.RenderInToto(r)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Receipt %s: in-toto export failed: %v\n", r.ReceiptID, err)
+			return 2
+		}
+		os.Stdout.Write(data)
+		return 0
 	}
 
 	// Best-effort staleness note for the implicit "latest receipt" path: with

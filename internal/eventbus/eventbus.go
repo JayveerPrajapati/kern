@@ -156,6 +156,31 @@ const (
 	TaskApprovalRequested Kind = "task.approval_requested"
 	// TaskApproved indicates a task's approval gate was granted.
 	TaskApproved Kind = "task.approved"
+
+	// KernOps lifecycle events (Phase 2):
+	// PlanFormed indicates an execution plan was formed.
+	PlanFormed Kind = "plan.formed"
+	// SandboxReady indicates an isolated worktree sandbox was provisioned.
+	SandboxReady Kind = "sandbox.ready"
+	// GateEvaluated indicates a Blueprint gate (G0-G29) was evaluated.
+	GateEvaluated Kind = "gate.evaluated"
+	// RepairAttempt indicates a closed-loop repair cycle was triggered.
+	RepairAttempt Kind = "loop.repair_attempt"
+	// FirewallPassed indicates the change cleared the Blueprint firewall.
+	FirewallPassed Kind = "loop.firewall_passed"
+	// ComplianceReceiptEmitted indicates a cryptographic receipt was signed and saved.
+	ComplianceReceiptEmitted Kind = "compliance.receipt_emitted"
+)
+
+// KernOps named event kind aliases (KernOps spec Section 5):
+const (
+	EventTaskStarted       = TaskStarted
+	EventPlanFormed        = PlanFormed
+	EventSandboxReady      = SandboxReady
+	EventGateEvaluated     = GateEvaluated
+	EventRepairAttempt     = RepairAttempt
+	EventApprovalRequested = ApprovalRequested
+	EventTaskCompleted     = TaskCompleted
 )
 
 // Event is a single typed system event.

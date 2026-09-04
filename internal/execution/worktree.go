@@ -17,6 +17,7 @@ import (
 type Worktree struct {
 	srcRoot string // original project root
 	workDir string // isolated copy root
+	cleaner func() // optional custom cleaner (e.g. for git worktree removal)
 }
 
 // NewWorktree creates an isolated copy of the project, reusing sandbox.Snapshot
@@ -27,6 +28,15 @@ func NewWorktree(srcRoot string) (*Worktree, error) {
 		return nil, fmt.Errorf("copy worktree: %w", err)
 	}
 	return &Worktree{srcRoot: srcRoot, workDir: snap.Tmp()}, nil
+}
+
+// NewWorktreeWithCleaner creates a Worktree with a custom working directory and cleaner callback.
+func NewWorktreeWithCleaner(srcRoot, workDir string, cleaner func()) *Worktree {
+	return &Worktree{
+		srcRoot: srcRoot,
+		workDir: workDir,
+		cleaner: cleaner,
+	}
 }
 
 // Dir returns the worktree's working directory.
@@ -265,10 +275,16 @@ func pathEscapes(line string) bool {
 	return false
 }
 
-// Cleanup removes the worktree directory.
+// Cleanup removes the worktree directory and runs custom cleanup if present.
 func (w *Worktree) Cleanup() error {
-	if w == nil || w.workDir == "" {
+	if w == nil {
 		return nil
 	}
-	return os.RemoveAll(w.workDir)
+	if w.cleaner != nil {
+		w.cleaner()
+	}
+	if w.workDir != "" {
+		return os.RemoveAll(w.workDir)
+	}
+	return nil
 }
