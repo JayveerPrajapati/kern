@@ -61,4 +61,3 @@ main.process()
 		t.Errorf("expected exit code 0 for clean triage run, got %d", code)
 	}
 }
-

@@ -29,4 +29,3 @@ func TestKernOpsBinaryBuildsAndRuns(t *testing.T) {
 		t.Fatalf("expected help output from kernops triage")
 	}
 }
-

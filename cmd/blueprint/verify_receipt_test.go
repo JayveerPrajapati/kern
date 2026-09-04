@@ -522,5 +522,3 @@ func TestVerifyReceipt_SARIF_InToto_CheckDiff(t *testing.T) {
 		t.Fatalf("expected 'tamper detected' in output, got out=%q err=%q", tamperOut, tamperErr)
 	}
 }
-
-
