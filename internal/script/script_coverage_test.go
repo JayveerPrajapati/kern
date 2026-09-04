@@ -91,7 +91,7 @@ func TestRunScript_RustCompile(t *testing.T) {
 	// probe catches that case and skips rather than letting RunScript fail.
 	dir := t.TempDir()
 	probe := filepath.Join(dir, "probe.rs")
-	os.WriteFile(probe, []byte("fn main() {}\n"), 0o644)
+	_ = os.WriteFile(probe, []byte("fn main() {}\n"), 0o644)
 	probeCmd := exec.Command("rustc", probe, "-o", filepath.Join(dir, "probe"), "--edition", "2021")
 	probeCmd.Env = sandboxEnv(dir)
 	probeCmd.Dir = dir

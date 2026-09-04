@@ -256,7 +256,7 @@ func TestSimilarityBenchmarkBlockingPath(t *testing.T) {
 		default:
 			r.result, tn = "TN", tn+1
 		}
-		rows = append(rows, r)
+		_ = append(rows, r)
 		t.Logf("%-34s score %.3f -> block-eligible, jscpd confirms=%-5v -> %s", bc.name, score, confirmed, r.result)
 	}
 

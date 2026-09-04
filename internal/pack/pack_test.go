@@ -361,7 +361,8 @@ func TestPackOrderIsPathHashStable(t *testing.T) {
 		}
 	}
 	// sha256(path) is stable: same path always hashes the same way.
-	if pathHash("a.go") != pathHash("a.go") {
+	first := pathHash("a.go")
+	if pathHash("a.go") != first {
 		t.Fatalf("pathHash must be deterministic")
 	}
 }

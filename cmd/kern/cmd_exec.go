@@ -10,6 +10,7 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/optimize"
 	"github.com/JayveerPrajapati/kern/internal/sandbox"
 	"github.com/JayveerPrajapati/kern/internal/script"
+	"github.com/JayveerPrajapati/kern/internal/strutil"
 	"github.com/JayveerPrajapati/kern/internal/validate"
 	"os"
 	"strings"
@@ -188,7 +189,7 @@ func runUdiff(rest []string) {
 			root = "."
 		}
 		ix, _ := index.Load(root)
-		u := kdiff.Compact(args[0], args[1], splitLines(string(ab)), splitLines(string(bb)), kdiff.IndexSpanResolver(ix))
+		u := kdiff.Compact(args[0], args[1], strutil.Lines(string(ab)), strutil.Lines(string(bb)), kdiff.IndexSpanResolver(ix))
 		if u == "" {
 			fmt.Println("files identical")
 			return
@@ -196,7 +197,7 @@ func runUdiff(rest []string) {
 		fmt.Print(u)
 		return
 	}
-	u := kdiff.Unified(args[0], args[1], splitLines(string(ab)), splitLines(string(bb)))
+	u := kdiff.Unified(args[0], args[1], strutil.Lines(string(ab)), strutil.Lines(string(bb)))
 	if u == "" {
 		fmt.Println("files identical")
 		return

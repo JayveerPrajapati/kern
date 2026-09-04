@@ -1,6 +1,6 @@
 module github.com/JayveerPrajapati/kern
 
-go 1.23.0
+go 1.25.13
 
 require (
 	github.com/UserNobody14/tree-sitter-dart v0.0.0-20260707040301-be07cf7118d3

@@ -242,6 +242,7 @@ func extractForeign(rel string, src []byte, lang string) ([]Symbol, map[string][
 	// call edges precisely; entry points (routes, annotations) still come from
 	// the regex entry rules, so merge them in to keep routes searchable.
 	imports := foreignImports(src, lang)
+	//nolint:staticcheck // SA4023: tree-sitter branch only reachable with -tags treesitter
 	if syms, calls, inherits, pkg, err := tsExtract(rel, src, lang); err == nil {
 		if pkg != nil {
 			pkg.Imports = imports

@@ -8,8 +8,8 @@ import (
 
 func TestExtractSQLTables(t *testing.T) {
 	dir := t.TempDir()
-	os.MkdirAll(filepath.Join(dir, "migrations"), 0755)
-	os.WriteFile(filepath.Join(dir, "migrations", "001.sql"), []byte(`
+	_ = os.MkdirAll(filepath.Join(dir, "migrations"), 0755)
+	_ = os.WriteFile(filepath.Join(dir, "migrations", "001.sql"), []byte(`
 CREATE TABLE users (id INT PRIMARY KEY, name VARCHAR(255));
 CREATE TABLE orders (id INT PRIMARY KEY, user_id INT);
 `), 0644)

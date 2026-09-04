@@ -9,6 +9,7 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/optimize"
 	"github.com/JayveerPrajapati/kern/internal/semcache"
 	"github.com/JayveerPrajapati/kern/internal/stats"
+	"github.com/JayveerPrajapati/kern/internal/strutil"
 	"github.com/JayveerPrajapati/kern/internal/terse"
 	"github.com/JayveerPrajapati/kern/internal/tokenize"
 	"os"
@@ -202,7 +203,7 @@ func runBudget(rest []string) {
 	after := tokenize.Count(out)
 	// Always state the applied budget so a silent default (4000 when --max is
 	// omitted) can never be mistaken for a requested cap.
-	fmt.Fprintf(os.Stderr, "kern: %d -> %d tokens (saved %d, %.1f%%, budget %d)\n", before, after, before-after, pct(before, after), maxTokens)
+	fmt.Fprintf(os.Stderr, "kern: %d -> %d tokens (saved %d, %.1f%%, budget %d)\n", before, after, before-after, strutil.Pct(before, after), maxTokens)
 	fmt.Println(out)
 
 }
@@ -243,7 +244,7 @@ func runTerse(rest []string) {
 	out, dropped := terse.Compress(text)
 	before := tokenize.Count(text)
 	after := tokenize.Count(out)
-	fmt.Fprintf(os.Stderr, "kern: %d -> %d tokens (saved %d, %.1f%%, %d filler lines dropped)\n", before, after, before-after, pct(before, after), dropped)
+	fmt.Fprintf(os.Stderr, "kern: %d -> %d tokens (saved %d, %.1f%%, %d filler lines dropped)\n", before, after, before-after, strutil.Pct(before, after), dropped)
 	fmt.Println(out)
 
 }

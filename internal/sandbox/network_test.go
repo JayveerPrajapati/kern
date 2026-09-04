@@ -1,6 +1,7 @@
 package sandbox
 
 import (
+	"context"
 	"runtime"
 	"strings"
 	"testing"
@@ -52,7 +53,7 @@ func TestRunRecordsNetworkPolicy(t *testing.T) {
 		t.Skip("echo is a shell builtin on windows")
 	}
 	root := t.TempDir()
-	res := Run(nil, root, "echo", []string{"dial tcp: connection refused"}, time.Second)
+	res := Run(context.TODO(), root, "echo", []string{"dial tcp: connection refused"}, time.Second)
 	if res.Network == nil {
 		t.Fatal("Run must record a network policy (G-3)")
 	}

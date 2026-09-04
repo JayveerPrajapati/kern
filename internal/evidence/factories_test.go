@@ -165,7 +165,8 @@ func TestFromPolicyDenied(t *testing.T) {
 
 func TestDigestIsStable(t *testing.T) {
 	const content = "some deterministic evidence content"
-	if Digest(content) != Digest(content) {
+	first := Digest(content)
+	if Digest(content) != first {
 		t.Error("Digest must be stable for identical content")
 	}
 	if Digest(content) == Digest(content+"!") {

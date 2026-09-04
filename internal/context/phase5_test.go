@@ -81,9 +81,6 @@ func TestLeaseManagerLifecycle(t *testing.T) {
 	if lm.Active("i1") {
 		t.Error("i1 should be released")
 	}
-	if !lm.Renew("missing", time.Hour) {
-		// expect false for missing — but method returns bool; assert
-	}
 	if lm.Renew("missing", time.Hour) {
 		t.Error("renew missing should be false")
 	}

@@ -220,8 +220,8 @@ func TestGovernanceEndpoint(t *testing.T) {
 	if len(body.Policies) == 0 {
 		t.Fatal("policies is empty, want non-empty from DefaultPolicies")
 	}
-	if len(body.ApprovalsPending) < 0 {
-		t.Fatalf("approvals_pending = %d, want >= 0", len(body.ApprovalsPending))
+	if len(body.ApprovalsPending) != 0 {
+		t.Fatalf("approvals_pending = %d, want empty", len(body.ApprovalsPending))
 	}
 }
 

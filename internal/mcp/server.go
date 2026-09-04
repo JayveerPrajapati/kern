@@ -16,9 +16,10 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/optimize"
 	"github.com/JayveerPrajapati/kern/internal/project"
 	"github.com/JayveerPrajapati/kern/internal/stats"
+	"github.com/JayveerPrajapati/kern/internal/strutil"
 	"github.com/JayveerPrajapati/kern/internal/tokenize"
+	"github.com/JayveerPrajapati/kern/internal/verify"
 	"io"
-	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -563,11 +564,14 @@ func realPath(p string) (string, error) {
 // verify.WithinAbs it also rejects an absolute rel path (e.g. a different
 // drive root on Windows).
 func within(parent, child string) bool {
+	if !verify.WithinAbs(parent, child) {
+		return false
+	}
 	rel, err := filepath.Rel(parent, child)
 	if err != nil {
 		return false
 	}
-	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && !filepath.IsAbs(rel)
+	return !filepath.IsAbs(rel)
 }
 
 type rpcRequest struct {
@@ -1351,22 +1355,12 @@ func (s *Server) changedContext(ctx context.Context, args map[string]any) ([]int
 	return changes, ix, nil
 }
 
-func pct(before, after int) float64 {
-	if before <= 0 {
-		return 0
-	}
-	return float64(before-after) / float64(before) * 100
-}
-
+// truncateMCP truncates s to n bytes with a visible continuation marker.
 func truncateMCP(s string, n int) string {
 	if len(s) <= n {
 		return s
 	}
 	return s[:n] + "\n... (truncated)"
-}
-
-func splitLines(s string) []string {
-	return strings.Split(strings.TrimRight(s, "\n"), "\n")
 }
 
 // sessionFor returns the project session for root, creating and caching one
@@ -1633,47 +1627,33 @@ func clip(s string, n int) string {
 	return s[:n] + "…"
 }
 
+// hasSlugChar reports whether s contains at least one character a slug keeps,
+// so sanitizeDocName can reject names that would collapse to nothing.
+func hasSlugChar(s string) bool {
+	for _, r := range s {
+		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' {
+			return true
+		}
+	}
+	return false
+}
+
 // sanitizeDocName constrains a doc name to a safe cache filename:
 // lowercase alphanumerics and dashes only. Path separators, dot-dot and
 // other punctuation are replaced (or collapse to nothing), so a name can
 // never escape the cache root via ../ or produce a bogus index key.
-// Empty input yields an error.
+// Empty input (or a name with no slug-able characters) yields an error.
 func sanitizeDocName(name string) (string, error) {
-	name = strings.TrimSpace(name)
-	var b strings.Builder
-	lastDash := false
-	for _, r := range name {
-		switch {
-		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
-			b.WriteRune(r)
-			lastDash = false
-		case r >= 'A' && r <= 'Z':
-			b.WriteRune(r + ('a' - 'A'))
-			lastDash = false
-		case !lastDash:
-			b.WriteByte('-')
-			lastDash = true
-		}
+	if !hasSlugChar(name) {
+		return "", fmt.Errorf("invalid doc name %q", name)
 	}
-	if out := strings.Trim(b.String(), "-"); out != "" {
-		return out, nil
-	}
-	return "", fmt.Errorf("invalid doc name %q", name)
+	return strutil.Slug(name), nil
 }
 
 // docSearchSlug derives a filesystem-safe doc name from a URL, e.g.
 // https://react.dev/reference/usestate -> react-dev-reference-usestate.
 func docSearchSlug(rawURL string) string {
-	u, err := url.Parse(rawURL)
-	if err != nil {
-		return "doc"
-	}
-	name := u.Hostname() + u.Path
-	name = strings.TrimSuffix(name, "/")
-	if out, err := sanitizeDocName(name); err == nil {
-		return out
-	}
-	return "doc"
+	return strutil.DocSlug(rawURL)
 }
 
 func renderStats(daysStr, session string) (string, error) {

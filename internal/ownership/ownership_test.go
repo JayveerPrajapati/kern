@@ -61,7 +61,7 @@ func TestParseFromRepo(t *testing.T) {
 	if err := os.MkdirAll(ghDir, 0755); err != nil {
 		t.Fatal(err)
 	}
-	os.WriteFile(filepath.Join(ghDir, "CODEOWNERS"), []byte("* @team-a\n"), 0644)
+	_ = os.WriteFile(filepath.Join(ghDir, "CODEOWNERS"), []byte("* @team-a\n"), 0644)
 
 	m, err := ParseFromRepo(dir)
 	if err != nil {

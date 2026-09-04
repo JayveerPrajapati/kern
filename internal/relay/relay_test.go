@@ -178,7 +178,7 @@ func TestSocketPathFallback(t *testing.T) {
 	}
 	defer c.Close()
 	s.Broadcast(eventbus.Event{Kind: eventbus.LockAcquired, Subject: "deep"})
-	c.conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_ = c.conn.SetReadDeadline(time.Now().Add(2 * time.Second))
 	got := broadcastUntil(t, s, c, eventbus.Event{Kind: eventbus.LockAcquired, Subject: "deep"})
 	if got.Subject != "deep" {
 		t.Errorf("Next on fallback path got %+v", got)

@@ -126,7 +126,7 @@ func fileHasLine(root, file string, line int) bool {
 		path = filepath.Join(root, file)
 	}
 	if filepath.IsAbs(path) {
-		if root == "" || !withinAbs(root, path) {
+		if root == "" || !WithinAbs(root, path) {
 			return false
 		}
 	}
@@ -137,10 +137,10 @@ func fileHasLine(root, file string, line int) bool {
 	return line <= strings.Count(string(b), "\n")+1
 }
 
-// withinAbs reports whether child (absolute) stays inside parent (absolute).
+// WithinAbs reports whether child (absolute) stays inside parent (absolute).
 // Unlike mcp's within, it does not reject an absolute rel (e.g. another drive
 // root), which mcp's variant guards against.
-func withinAbs(parent, child string) bool {
+func WithinAbs(parent, child string) bool {
 	rel, err := filepath.Rel(parent, child)
 	if err != nil {
 		return false

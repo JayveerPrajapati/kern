@@ -181,7 +181,7 @@ func main() {
 
 func TestExtractIgnoresVendorDirs(t *testing.T) {
 	dir := t.TempDir()
-	os.MkdirAll(filepath.Join(dir, "node_modules"), 0755)
+	_ = os.MkdirAll(filepath.Join(dir, "node_modules"), 0755)
 	os.WriteFile(filepath.Join(dir, "node_modules", "app.js"), []byte(`
 app.get("/hidden", handler);
 `), 0644)
