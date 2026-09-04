@@ -79,6 +79,24 @@ func runVerifyReceipt(args []string) int {
 	}
 	if err != nil {
 		if errors.Is(err, receipt.ErrNotFound) {
+			if *sarifOut {
+				data, sErr := renderFallbackSARIF(absRoot)
+				if sErr != nil {
+					fmt.Fprintf(os.Stderr, "blueprint: SARIF fallback failed: %v\n", sErr)
+					return 2
+				}
+				os.Stdout.Write(data)
+				return 0
+			}
+			if *inTotoOut {
+				data, iErr := renderFallbackInToto(absRoot)
+				if iErr != nil {
+					fmt.Fprintf(os.Stderr, "blueprint: in-toto fallback failed: %v\n", iErr)
+					return 2
+				}
+				os.Stdout.Write(data)
+				return 0
+			}
 			if *jsonOut {
 				emitVerifyReceiptJSON(nil, "receipt not found")
 			} else {
@@ -189,7 +207,8 @@ func runVerifyReceipt(args []string) int {
 	}
 
 	if *sarifOut {
-		data, err := receipt.RenderSARIF(r, nil)
+		findings := loadArtifactFindings(absRoot)
+		data, err := receipt.RenderSARIF(r, findings)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Receipt %s: SARIF export failed: %v\n", r.ReceiptID, err)
 			return 2
@@ -416,4 +435,100 @@ func emitVerifyReceiptJSON(r *receipt.Receipt, verifyErr string, notes ...string
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
 	_ = enc.Encode(out)
+}
+
+type artifactSummary struct {
+	Repo          string `json:"repo"`
+	Base          string `json:"base"`
+	Head          string `json:"head"`
+	Status        string `json:"status"`
+	ExitCode      int    `json:"exit_code"`
+	FindingsCount int    `json:"findings_count"`
+	Findings      []struct {
+		RuleID   string `json:"rule_id"`
+		Severity string `json:"severity"`
+		Category string `json:"category"`
+		File     string `json:"file"`
+		Line     int    `json:"line"`
+		Message  string `json:"message"`
+	} `json:"findings"`
+}
+
+func loadArtifactFindings(absRoot string) []domain.Finding {
+	p := filepath.Join(absRoot, ciArtifactDefaultFile)
+	b, err := os.ReadFile(p)
+	if err != nil {
+		b, err = os.ReadFile(ciArtifactDefaultFile)
+		if err != nil {
+			return nil
+		}
+	}
+	var art artifactSummary
+	if err := json.Unmarshal(b, &art); err != nil {
+		return nil
+	}
+	var findings []domain.Finding
+	for _, f := range art.Findings {
+		findings = append(findings, domain.Finding{
+			RuleID:   f.RuleID,
+			Severity: domain.Severity(f.Severity),
+			Category: domain.Category(f.Category),
+			File:     f.File,
+			Line:     f.Line,
+			Message:  f.Message,
+		})
+	}
+	return findings
+}
+
+func renderFallbackSARIF(absRoot string) ([]byte, error) {
+	findings := loadArtifactFindings(absRoot)
+	p := filepath.Join(absRoot, ciArtifactDefaultFile)
+	b, err := os.ReadFile(p)
+	if err != nil {
+		b, _ = os.ReadFile(ciArtifactDefaultFile)
+	}
+	var art artifactSummary
+	if len(b) > 0 {
+		_ = json.Unmarshal(b, &art)
+	}
+	rec := &receipt.Receipt{
+		ReceiptID:     "unsealed",
+		RepoRoot:      absRoot,
+		BaseRevision:  art.Base,
+		HeadRevision:  art.Head,
+		Status:        art.Status,
+		FindingsCount: len(findings),
+	}
+	if rec.Status == "" {
+		rec.Status = "UNKNOWN"
+	}
+	return receipt.RenderSARIF(rec, findings)
+}
+
+func renderFallbackInToto(absRoot string) ([]byte, error) {
+	p := filepath.Join(absRoot, ciArtifactDefaultFile)
+	b, err := os.ReadFile(p)
+	if err != nil {
+		b, _ = os.ReadFile(ciArtifactDefaultFile)
+	}
+	var art artifactSummary
+	if len(b) > 0 {
+		_ = json.Unmarshal(b, &art)
+	}
+	rec := &receipt.Receipt{
+		ReceiptID:     "unsealed",
+		RepoRoot:      absRoot,
+		BaseRevision:  art.Base,
+		HeadRevision:  art.Head,
+		Status:        art.Status,
+		ExitCode:      art.ExitCode,
+		FindingsCount: art.FindingsCount,
+		GeneratedAt:   time.Now().UTC(),
+		GeneratedBy:   "kernops/fallback",
+	}
+	if rec.Status == "" {
+		rec.Status = "UNKNOWN"
+	}
+	return receipt.RenderInToto(rec)
 }
