@@ -93,6 +93,9 @@ back to the built-in — but never skip kern when it's available.
 | Search the web / docs        | `kern_doc_fetch` → `kern_doc_search`  | `webfetch`    |
 | Build / test / lint          | `kern_run_build`                      | `bash`        |
 | Run a command / script       | `kern_exec`                           | `bash`        |
+| Validate staged / policy     | `kern check`                          | manual lint   |
+| Auto-repair in sandbox       | `kern fix`                            | manual fix    |
+| Pre-merge CI / receipts      | `kern ci` / `kern verify-receipt`     | CI checks     |
 | Commit                       | `kern_commitmsg`                      | git CLI       |
 | Search (task/bug/error)      | `kern_probe`                          | grep + read   |
 | Orchestrate a whole task     | `kern_run`                            | manual chain  |
@@ -173,6 +176,7 @@ context-optimization tools above.
 - `kern_safe_delete` / `kern_rename` — safe symbol deletion / structural rename
 - `kern_approve` — resolve a governance approval gate (approve/reject pending approvals)
 - `kern_audit` — return the tamper-evident governance audit log for the project
+- `kern check` / `kern fix` / `kern ci` / `kern verify-receipt` — native change-firewall gates G0–G29 (secrets, boundaries, duplication), sandboxed repair loop, and cryptographic CI receipts
 
 **Engineering memory & agents:**
 - `kern_memory` / `kern_memory_add` / `kern_memory_list` / `kern_memory_recall` / `kern_learn` — project brain: store / list / recall lessons, extract patterns

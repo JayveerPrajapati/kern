@@ -79,8 +79,8 @@ powershell -ExecutionPolicy Bypass -c "irm https://raw.githubusercontent.com/Jay
 
 | Method | Command | Notes |
 |---|---|---|
-| **go install** | `go install github.com/JayveerPrajapati/kern/cmd/kern@latest && go install github.com/JayveerPrajapati/kern/cmd/kern-mcp@latest && go install github.com/JayveerPrajapati/kern/cmd/kern-server@latest` | All three binaries to `$(go env GOPATH)/bin` |
-| **from source** | `make build` → `bin/kern`, `bin/kern-mcp`, `bin/kern-server` | Requires Go 1.23+ |
+| **go install** | `go install ./cmd/...` or `go install github.com/JayveerPrajapati/kern/cmd/kern@latest` | Core engine, servers, and governance binaries to `$(go env GOPATH)/bin` |
+| **from source** | `make build` → `bin/kern`, `bin/kern-mcp`, `bin/kern-server`, `bin/blueprint`, `bin/blueprint-mcp` | Requires Go 1.23+ |
 
 <sub>`install.sh` (macOS/Linux) and `install.ps1` (Windows) honor `KERN_VERSION`
 (pin a release) and `KERN_INSTALL_DIR` (default `~/.local/bin`); they fall back
@@ -419,6 +419,10 @@ kern lsp [root]                                     LSP over stdio: hover/defini
 kern guard init [root]                              scaffold .kern/boundaries.json
 kern guard check [root] [--file F] [--range a..b] [--json|--sarif] [--threshold N]
                                 reject boundary violations (exit 2 when count > N)
+kern check [--staged|--repo R] [--format F]          run change-firewall gates (secrets, boundaries, duplication)
+kern fix [--file F] [--content C] [--repo R]         validate fix in isolated git worktree; auto-repair loop
+kern ci --base <sha> --head <sha> [--repo R]         pre-merge CI gate; emits tamper-evident receipt
+kern verify-receipt <id> [--repo R]                  verify cryptographic provenance of CI receipt
 kern fw [root] [--catalog]                       framework detection
 kern verify <file|-> [root]                     hallucination check: file:line claims; `kern verify <types>` (build,test,security,arch,deps) runs the verification engine
 kern validate [root]                             run the project's build/test, compact
