@@ -263,3 +263,48 @@ func TestSuggestRulesDefensive(t *testing.T) {
 		t.Errorf("expected database approval suggestion, got %+v", suggests)
 	}
 }
+
+// TestLoadConstitutionListWithColons verifies that list items containing colons
+// (e.g. package:func, URLs, or file:line) are parsed properly without creating bogus rules.
+func TestLoadConstitutionListWithColons(t *testing.T) {
+	dir := t.TempDir()
+	kernDir := filepath.Join(dir, ".kern")
+	os.MkdirAll(kernDir, 0o755)
+	yaml := `rules:
+  - id: custom-deps
+    type: MUST_NOT
+    category: architecture
+    description: "custom dependency restrictions"
+    cannot_depend_on:
+      - service:auth
+      - github.com/foo/bar:v1.0.0
+  - id: second-rule
+    type: MUST
+    category: security
+    description: "second rule"
+`
+	os.WriteFile(filepath.Join(kernDir, "constitution.yaml"), []byte(yaml), 0o644)
+
+	c, err := LoadConstitution(dir)
+	if err != nil {
+		t.Fatalf("LoadConstitution: %v", err)
+	}
+	if len(c.Rules) != 2 {
+		t.Fatalf("expected 2 rules, got %d", len(c.Rules))
+	}
+	if c.Rules[0].ID != "custom-deps" {
+		t.Errorf("rule 0 ID = %q, want custom-deps", c.Rules[0].ID)
+	}
+	expectedDeps := []string{"service:auth", "github.com/foo/bar:v1.0.0"}
+	if len(c.Rules[0].CannotDependOn) != len(expectedDeps) {
+		t.Fatalf("expected %d deps, got %d: %v", len(expectedDeps), len(c.Rules[0].CannotDependOn), c.Rules[0].CannotDependOn)
+	}
+	for i, d := range expectedDeps {
+		if c.Rules[0].CannotDependOn[i] != d {
+			t.Errorf("dep %d = %q, want %q", i, c.Rules[0].CannotDependOn[i], d)
+		}
+	}
+	if c.Rules[1].ID != "second-rule" {
+		t.Errorf("rule 1 ID = %q, want second-rule", c.Rules[1].ID)
+	}
+}

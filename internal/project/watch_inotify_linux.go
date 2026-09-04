@@ -181,18 +181,28 @@ func (w *inotifyWatcher) loop(root string) {
 		var paths []string
 		for off := 0; off+syscall.SizeofInotifyEvent <= n; {
 			ev := (*syscall.InotifyEvent)(unsafe.Pointer(&buf[off]))
+			eventLen := int(ev.Len)
+			if eventLen < 0 {
+				break
+			}
 			if ev.Mask&(syscall.IN_MODIFY|syscall.IN_CREATE|syscall.IN_DELETE|
 				syscall.IN_MOVED_TO|syscall.IN_MOVED_FROM|syscall.IN_CLOSE_WRITE) != 0 {
 				fired = true
-				nameLen := int(ev.Len)
+				nameLen := eventLen
 				if nameLen > n-off-syscall.SizeofInotifyEvent {
 					nameLen = n - off - syscall.SizeofInotifyEvent
 				}
-				if p := w.eventPath(ev, buf[off+syscall.SizeofInotifyEvent:off+syscall.SizeofInotifyEvent+nameLen]); p != "" {
-					paths = append(paths, p)
+				if nameLen > 0 {
+					if p := w.eventPath(ev, buf[off+syscall.SizeofInotifyEvent:off+syscall.SizeofInotifyEvent+nameLen]); p != "" {
+						paths = append(paths, p)
+					}
 				}
 			}
-			off += syscall.SizeofInotifyEvent + int(ev.Len)
+			advance := syscall.SizeofInotifyEvent + eventLen
+			if advance <= 0 {
+				break
+			}
+			off += advance
 		}
 		if fired {
 			for _, p := range paths {

@@ -423,11 +423,22 @@ func (s *Server) WithPreToolHook(fn func(name string, args map[string]any) error
 	return s
 }
 
+// defaultConcurrency returns the worker concurrency limit for the server.
+// Configurable via KERN_MCP_CONCURRENCY (default 32, minimum 8).
+func defaultConcurrency() int {
+	if v := os.Getenv("KERN_MCP_CONCURRENCY"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 8 {
+			return n
+		}
+	}
+	return 32
+}
+
 // NewServer returns a *Server wired to the given reader/writer.
 func NewServer(in io.Reader, out io.Writer) *Server {
 	sc := bufio.NewScanner(in)
 	sc.Buffer(make([]byte, 64<<20), 64<<20)
-	s := &Server{in: in, out: out, sem: make(chan struct{}, 8), locks: map[string]*lock.Lock{}, inflight: map[string]context.CancelFunc{}, sessions: map[string]*project.Session{}, transport: "stdio", roots: defaultWorkspaceRoots(), gate: confinementGate(), commits: map[string]string{}, allowlist: parseAllowlist()}
+	s := &Server{in: in, out: out, sem: make(chan struct{}, defaultConcurrency()), locks: map[string]*lock.Lock{}, inflight: map[string]context.CancelFunc{}, sessions: map[string]*project.Session{}, transport: "stdio", roots: defaultWorkspaceRoots(), gate: confinementGate(), commits: map[string]string{}, allowlist: parseAllowlist()}
 	// P0.1: register the built-in default agent so calls without an explicit
 	// agent_id are governed (cwd-scoped) instead of raw. KERN_MCP_PERMISSIVE=1
 	// remains the explicit opt-out that restores raw mode.
@@ -745,7 +756,7 @@ func (s *Server) workspaceRoots() []string {
 
 func (s *Server) Serve() error {
 	if s.sem == nil {
-		s.sem = make(chan struct{}, 8)
+		s.sem = make(chan struct{}, defaultConcurrency())
 	}
 	var wg sync.WaitGroup
 	defer wg.Wait() // drain in-flight tool calls before returning on EOF

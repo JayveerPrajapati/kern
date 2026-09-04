@@ -231,18 +231,11 @@ func canon(m map[string]string, name string) string {
 	return name
 }
 
-// localCallees returns the callees of sym that resolve to in-project symbols,
-// filtering out stdlib / third-party calls. Package-qualified callees are
-// normalised to the canonical in-project symbol name so graph traversals never
-// dead-end on "pkg.Fn" while the symbol is indexed as "Fn".
-func localCallees(ix *index.Index, sym string) []string {
-	return localCalleesWith(ix, sym, localNames(ix))
-}
-
-// localCalleesWith is localCallees with a precomputed local-name set. Callers
-// that iterate over the whole symbol table MUST hoist localNames(ix) out of
-// their loop and pass it here — recomputing it per symbol is O(len(Symbols))
-// inside an O(len(Symbols)) loop, i.e. quadratic time on large repos.
+// localCalleesWith returns the callees of sym that resolve to in-project
+// symbols, using a precomputed local-name set. Callers that iterate over the
+// whole symbol table MUST hoist localNames(ix) out of their loop and pass it
+// here — recomputing it per symbol is O(len(Symbols)) inside an O(len(Symbols))
+// loop, i.e. quadratic time on large repos.
 func localCalleesWith(ix *index.Index, sym string, local map[string]bool) []string {
 	var out []string
 	for _, c := range ix.Calls[sym] {

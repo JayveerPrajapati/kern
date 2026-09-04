@@ -36,7 +36,7 @@ func ServeHTTP(addr string) error {
 // listener shuts down gracefully and in-flight tools are cancelled.
 func ServeHTTPContext(ctx context.Context, addr string) error {
 	srv := &Server{
-		sem:       make(chan struct{}, 8),
+		sem:       make(chan struct{}, defaultConcurrency()),
 		locks:     map[string]*lock.Lock{},
 		inflight:  map[string]context.CancelFunc{},
 		sessions:  map[string]*project.Session{},
