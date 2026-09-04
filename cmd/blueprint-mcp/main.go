@@ -123,17 +123,9 @@ func confineArgsNested(roots []string, args map[string]any, allowMissing bool) e
 	return nil
 }
 
-// confineSlice applies confineArgs to every map element of a nested array and
-// recurses into nested arrays, so files[].path and deeper structures are
-// confined the same way as top-level path arguments.
-func confineSlice(roots []string, vals []any) error {
-	return confineSliceNested(roots, vals, false)
-}
-
-// confineSliceNested is confineSlice with the allowMissing flag threaded
-// through (see confineArgsNested): it applies confineArgsNested to every map
-// element of a nested array and recurses into nested arrays, carrying the flag
-// so the files subtree keeps permitting not-yet-written paths.
+// confineSliceNested applies confineArgsNested to every map element of a
+// nested array and recurses into nested arrays, carrying the allowMissing
+// flag so the files subtree keeps permitting not-yet-written paths.
 func confineSliceNested(roots []string, vals []any, allowMissing bool) error {
 	for _, v := range vals {
 		switch item := v.(type) {

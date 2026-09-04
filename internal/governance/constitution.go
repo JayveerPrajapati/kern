@@ -94,11 +94,14 @@ func parseConstitution(text string) (*domain.Constitution, error) {
 			current.Provenance = val
 		case "cannot_depend_on", "require_tests":
 			// Parse list items on subsequent indented lines.
-			list := parseListLines(lines, i+1)
+			list, nextI := parseListLines(lines, i+1)
 			if key == "cannot_depend_on" {
 				current.CannotDependOn = list
 			} else {
 				current.RequireTests = list
+			}
+			if nextI > i+1 {
+				i = nextI - 1
 			}
 		}
 	}
@@ -109,26 +112,33 @@ func parseConstitution(text string) (*domain.Constitution, error) {
 }
 
 // parseListLines reads subsequent "- value" lines starting from startIndex.
-// Stops when it encounters a line that is a new rule entry (contains ":")
+// Stops when it encounters a line that is a new rule entry (e.g. "- id: foo")
 // or a non-list, non-empty line.
-func parseListLines(lines []string, startIndex int) []string {
+func parseListLines(lines []string, startIndex int) ([]string, int) {
 	var result []string
-	for j := startIndex; j < len(lines); j++ {
-		t := strings.TrimSpace(lines[j])
+	j := startIndex
+	for ; j < len(lines); j++ {
+		raw := lines[j]
+		t := strings.TrimSpace(raw)
+		if t == "" || strings.HasPrefix(t, "#") {
+			continue
+		}
 		if strings.HasPrefix(t, "- ") {
-			// If the item contains ":", it's a new rule entry (e.g. "- id: foo"),
-			// not a list item. Stop.
-			if strings.Contains(t[2:], ":") {
+			content := strings.TrimSpace(t[2:])
+			// If it's a new rule definition like "- id: ...", stop.
+			if strings.HasPrefix(content, "id:") {
 				break
 			}
-			result = append(result, strings.TrimSpace(t[2:]))
-		} else if t == "" || strings.HasPrefix(t, "#") {
-			continue
+			indent := len(raw) - len(strings.TrimLeft(raw, " \t"))
+			if indent <= 2 && strings.Contains(content, ":") {
+				break
+			}
+			result = append(result, content)
 		} else {
 			break // end of list
 		}
 	}
-	return result
+	return result, j
 }
 
 // ValidatePlan checks a plan against the constitution. Returns a PlanValidation
