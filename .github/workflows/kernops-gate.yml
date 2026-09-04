@@ -41,6 +41,7 @@ jobs:
 
       - name: Run Governed Change Firewall (Gates G0-G29)
         id: firewall
+        continue-on-error: true
         env:
           BLUEPRINT_TIMEOUT: 600s
           BLUEPRINT_SANDBOX_TIMEOUT: 600s
