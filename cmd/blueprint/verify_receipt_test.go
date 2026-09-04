@@ -19,22 +19,7 @@ import (
 // id]` and returns (combined output, exit code).
 func runVerifyReceiptCmd(t *testing.T, binPath, dir, id string) (string, int) {
 	t.Helper()
-	args := []string{"verify-receipt", "--repo", dir}
-	if id != "" {
-		args = append(args, "--receipt-id", id)
-	}
-	cmd := exec.Command(binPath, args...)
-	cmd.Env = append(os.Environ(), "KERN_BINARY="+os.Getenv("KERN_BINARY"))
-	out, err := cmd.CombinedOutput()
-	code := 0
-	if err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			code = exitErr.ExitCode()
-		} else {
-			t.Fatalf("run blueprint verify-receipt: %v\n%s", err, out)
-		}
-	}
-	return string(out), code
+	return runVerifyReceiptInDir(t, binPath, dir, dir, id)
 }
 
 // runVerifyReceiptInDir runs `blueprint verify-receipt --repo dir` with the
@@ -43,24 +28,8 @@ func runVerifyReceiptCmd(t *testing.T, binPath, dir, id string) (string, int) {
 // output, exit code). extra args (e.g. --json) are appended verbatim.
 func runVerifyReceiptInDir(t *testing.T, binPath, dir, workDir, id string, extra ...string) (string, int) {
 	t.Helper()
-	args := []string{"verify-receipt", "--repo", dir}
-	if id != "" {
-		args = append(args, "--receipt-id", id)
-	}
-	args = append(args, extra...)
-	cmd := exec.Command(binPath, args...)
-	cmd.Dir = workDir
-	cmd.Env = append(os.Environ(), "KERN_BINARY="+os.Getenv("KERN_BINARY"))
-	out, err := cmd.CombinedOutput()
-	code := 0
-	if err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			code = exitErr.ExitCode()
-		} else {
-			t.Fatalf("run blueprint verify-receipt: %v\n%s", err, out)
-		}
-	}
-	return string(out), code
+	out, errOut, code := runVerifyReceiptInDirSplit(t, binPath, dir, workDir, id, extra...)
+	return out + errOut, code
 }
 
 // runVerifyReceiptInDirSplit is like runVerifyReceiptInDir but returns stdout
