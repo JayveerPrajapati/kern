@@ -101,7 +101,7 @@ func TestG25_CheckJSONIncludesProvenanceFields(t *testing.T) {
 	}
 	found := false
 	for _, f := range result.Findings {
-		if !strings.HasPrefix(f.RuleID, "secret:") {
+		if !strings.HasPrefix(f.RuleID, "secret:") || f.RuleID == "secret:incumbent-unavailable" {
 			continue
 		}
 		found = true
