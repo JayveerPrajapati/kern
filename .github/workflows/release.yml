@@ -17,7 +17,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: ./.github/actions/bootstrap
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+          cache: true
 
       - name: Changelog entry exists for tag
         run: |
@@ -28,11 +33,12 @@ jobs:
             exit 1
           fi
 
-      # bootstrap above already installs the tool stack (gitleaks/jscpd/kern),
-      # so no separate setup-tools step is needed here.
+      - uses: ./.github/actions/setup-tools
 
-      # Shared quality gate: vet + gofmt + short test suite.
-      - uses: ./.github/actions/quality
+      - name: Vet and test
+        run: |
+          go vet ./...
+          go test -short -timeout 10m ./...
 
   review:
     name: kern code review
@@ -40,13 +46,16 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      # Full history required: the review action diffs the release tag against
-      # origin/main. Go cache is disabled so the tagged commit is built from a
-      # clean module cache (no stale deps from an unrelated PR).
-      - uses: ./.github/actions/bootstrap
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          fetch-depth: "0"
-          go-cache: "false"
+          # The action diffs the release tag against origin/main, so full
+          # history is required.
+          fetch-depth: 0
+
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+          cache: false
 
       - name: Build kern from checkout
         run: |
@@ -80,9 +89,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: ./.github/actions/bootstrap
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
-          install-kern: "false"
+          go-version-file: go.mod
+          cache: true
 
       - name: Set target variables
         id: vars
@@ -129,8 +141,8 @@ jobs:
           sudo apt-get install -y -qq upx-ucl >/dev/null 2>&1 || sudo apt-get install -y -qq upx >/dev/null 2>&1
           dir="${{ steps.vars.outputs.dir }}"
           upx --best --no-lzma "$dir/kern" && "$dir/kern" version >/dev/null
-          upx --best --no-lzma "$dir/kern-mcp" && file "$dir/kern-mcp" | grep -qi "ELF"
           upx --best --no-lzma "$dir/kern-server" && file "$dir/kern-server" | grep -qi "ELF"
+          upx --best --no-lzma "$dir/kern-mcp" && file "$dir/kern-mcp" | grep -qi "ELF"
           echo "compressed sizes:"
           du -h "$dir/kern" "$dir/kern-mcp" "$dir/kern-server"
 
@@ -203,21 +215,17 @@ jobs:
           # Printing stops at the next "## " section header (single source of
           # truth: the CHANGELOG).
           {
-            echo "## Install"
-            echo
             echo '- `curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/main/install.sh | sh`'
             echo "- \`go install github.com/${{ github.repository }}/cmd/kern@$tag\`"
             echo '- `brew install kern` — from the tap repo (auto-published by this workflow); formula attached as `kern.rb`.'
-            echo
             echo 'Assets include a `SHA256SUMS` file (`install.sh` verifies against it).'
-            echo
             awk -v ver="[$version]" '
               /^## / {
                 if (f) exit;
                 if (index($0, ver)==4) { f=1; next }
               }
               f { print }
-            ' CHANGELOG.md
+            '
           } > /tmp/release-notes.md
           gh release create "$tag" dist/kern-*.tar.gz dist/kern-*.zip dist/SHA256SUMS kern.rb \
             --notes-file /tmp/release-notes.md \
@@ -231,7 +239,6 @@ jobs:
       # Requires a PAT with `repo` scope (GITHUB_TOKEN cannot push to another
       # repo) stored as the `TAP_PUBLISH_TOKEN` repository secret. The tap owner
       # defaults to the repo owner; override with the `TAP_OWNER` repo variable.
-      #
       # continue-on-error: the GitHub release itself is already created above;
       # a tap sync failure (missing secret, tap repo not bootstrapped, push
       # rejected) must never fail the release run.
