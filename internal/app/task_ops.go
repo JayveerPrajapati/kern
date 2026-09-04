@@ -55,7 +55,7 @@ func (s *TaskService) Execute(patch string) (*agent.Task, string, error) {
 		s.fail(t, err.Error())
 		return t, "", err
 	}
-	defer wt.Cleanup()
+	defer func() { _ = wt.Cleanup() }()
 
 	if err := wt.Apply(patch); err != nil {
 		s.fail(t, "apply: "+err.Error())
@@ -130,7 +130,7 @@ func (s *TaskService) ExecuteAndVerify(patch string, verifyTypes []string) (*age
 		s.fail(t, err.Error())
 		return t, "", verification.VerificationResult{}, err
 	}
-	defer wt.Cleanup()
+	defer func() { _ = wt.Cleanup() }()
 
 	if err := wt.Apply(patch); err != nil {
 		s.fail(t, "apply: "+err.Error())

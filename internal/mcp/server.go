@@ -88,10 +88,11 @@ func ToolNames() []string {
 	return out
 }
 
-// toolAllowlist reads the KERN_TOOLS allowlist from the environment. A
+// parseAllowlist reads the KERN_TOOLS allowlist from the environment. A
 // comma-separated list restricts which tools the server exposes and executes;
-// unset or empty means everything is allowed.
-func toolAllowlist() []string {
+// unset or empty means everything is allowed. The result is parsed once at
+// server construction and cached on the Server, not re-read on every dispatch.
+func parseAllowlist() []string {
 	v := strings.TrimSpace(os.Getenv("KERN_TOOLS"))
 	if v == "" {
 		return nil
@@ -163,11 +164,11 @@ func phaseToolAllowed(t Tool, phase string) bool {
 }
 
 // toolAllowed reports whether name passes the KERN_TOOLS allowlist. toolsList
-// is the (already filtered or full) registered catalog; a nil allowlist
+// is the (already filtered or full) registered catalog; a nil/empty allowlist
 // allows everything, otherwise name must appear in both the allowlist and
-// the catalog.
-func toolAllowed(toolsList []Tool, name string) bool {
-	allowed := toolAllowlist()
+// the catalog. The allowlist slice is passed in (already cached on the
+// Server) rather than re-read from the environment on every call.
+func toolAllowed(toolsList []Tool, allowed []string, name string) bool {
 	if len(allowed) == 0 {
 		return true
 	}
@@ -282,7 +283,7 @@ func (s *Server) filteredTools() []Tool {
 			}
 		}
 	}
-	allowed := toolAllowlist()
+	allowed := s.allowlist
 	// KERN_MCP_FULL=1 → advertise the full catalog (with KERN_TOOLS filter).
 	if fullCatalog() {
 		out := make([]Tool, 0, len(tools))
@@ -364,6 +365,7 @@ type Server struct {
 	mu       sync.Mutex
 	toolsMu  sync.Mutex
 	filtered []Tool // cached KERN_TOOLS-filtered tool list (nil = not computed)
+	allowlist []string // parsed KERN_TOOLS allowlist, cached once at init (nil = allow all)
 	locks    map[string]*lock.Lock
 	inflight map[string]context.CancelFunc
 	sessions map[string]*project.Session
@@ -425,7 +427,7 @@ func (s *Server) WithPreToolHook(fn func(name string, args map[string]any) error
 func NewServer(in io.Reader, out io.Writer) *Server {
 	sc := bufio.NewScanner(in)
 	sc.Buffer(make([]byte, 64<<20), 64<<20)
-	s := &Server{in: in, out: out, sem: make(chan struct{}, 8), locks: map[string]*lock.Lock{}, inflight: map[string]context.CancelFunc{}, sessions: map[string]*project.Session{}, transport: "stdio", roots: defaultWorkspaceRoots(), gate: confinementGate(), commits: map[string]string{}}
+	s := &Server{in: in, out: out, sem: make(chan struct{}, 8), locks: map[string]*lock.Lock{}, inflight: map[string]context.CancelFunc{}, sessions: map[string]*project.Session{}, transport: "stdio", roots: defaultWorkspaceRoots(), gate: confinementGate(), commits: map[string]string{}, allowlist: parseAllowlist()}
 	// P0.1: register the built-in default agent so calls without an explicit
 	// agent_id are governed (cwd-scoped) instead of raw. KERN_MCP_PERMISSIVE=1
 	// remains the explicit opt-out that restores raw mode.
@@ -1265,19 +1267,19 @@ func (s *Server) precheckTool(name string, args map[string]any) (string, error) 
 	// (filtered) set: kern_meta's NL router reaches every sub-tool handler
 	// internally even when the sub-tool is not advertised, and an explicit
 	// KERN_TOOLS allowlist still gates execution here.
-	if !toolAllowed(tools, name) {
+	if !toolAllowed(tools, s.allowlist, name) {
 		// Tool fallback: when a tool is blocked by the KERN_TOOLS
 		// allowlist, route to its policy-approved alternative if one exists and
 		// IS allowed, so a restricted deployment still gets an equivalent
 		// result instead of a hard failure. Fail closed when no allowed
 		// alternative exists.
 		if alt := app.FallbackFor(name); alt != "" {
-			if toolAllowed(tools, alt) {
+			if toolAllowed(tools, s.allowlist, alt) {
 				name = alt
 			}
 		}
 		// Fail closed only when no allowed alternative exists.
-		if !toolAllowed(tools, name) {
+		if !toolAllowed(tools, s.allowlist, name) {
 			return "", fmt.Errorf("tool %q is not allowed (KERN_TOOLS allowlist)", name)
 		}
 	}

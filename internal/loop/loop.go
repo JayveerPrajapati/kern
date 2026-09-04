@@ -286,7 +286,7 @@ func (l *Loop) RunContext(ctx context.Context, intent string, step StepFunc) (*R
 	if err != nil {
 		return nil, err
 	}
-	defer wt.Cleanup()
+	defer func() { _ = wt.Cleanup() }()
 
 	if paused, _ := l.preflight(intent, res); paused {
 		return res, nil

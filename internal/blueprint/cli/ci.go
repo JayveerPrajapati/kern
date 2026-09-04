@@ -575,7 +575,9 @@ type CIFinding struct {
 func emitCIResult(artifact CIArtifact, artifactFile string, noHuman bool, jsonToStdout bool) {
 	// Always write the JSON artifact file.
 	b, _ := json.MarshalIndent(artifact, "", "  ")
-	os.WriteFile(artifactFile, b, 0o644)
+	if werr := os.WriteFile(artifactFile, b, 0o644); werr != nil {
+		fmt.Fprintf(os.Stderr, "blueprint: ci: could not write artifact %q: %v\n", artifactFile, werr)
+	}
 
 	// Optionally emit JSON to stdout.
 	if jsonToStdout {

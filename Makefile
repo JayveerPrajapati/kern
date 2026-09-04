@@ -1,6 +1,7 @@
 BIN := bin
 VERSION ?= dev
 LDFLAGS := -X main.version=$(VERSION)
+RELEASE_LDFLAGS := -s -w -X main.version=$(VERSION)
 GOFLAGS := -buildvcs=false
 
 .PHONY: all build build-treesitter test test-race vet lint bench install hooks release dist mcpb clean clean-artifacts
@@ -62,17 +63,22 @@ release: clean
 		set -- $$target; os=$$1; arch=$$2; \
 		echo "==> building kern-$$os-$$arch"; \
 		mkdir -p $(BIN)/kern-$$os-$$arch; \
-		GOOS=$$os GOARCH=$$arch go build -tags sqlite $(GOFLAGS) -ldflags "-X main.version=$(VERSION)" -o $(BIN)/kern-$$os-$$arch/kern ./cmd/kern; \
-		GOOS=$$os GOARCH=$$arch go build -tags sqlite $(GOFLAGS) -ldflags "-X main.version=$(VERSION)" -o $(BIN)/kern-$$os-$$arch/kern-mcp ./cmd/kern-mcp; \
-		GOOS=$$os GOARCH=$$arch go build -tags sqlite $(GOFLAGS) -ldflags "-X main.version=$(VERSION)" -o $(BIN)/kern-$$os-$$arch/kern-server ./cmd/kern-server; \
+		GOOS=$$os GOARCH=$$arch go build -tags sqlite $(GOFLAGS) -ldflags "$(RELEASE_LDFLAGS)" -o $(BIN)/kern-$$os-$$arch/kern ./cmd/kern; \
+		GOOS=$$os GOARCH=$$arch go build -tags sqlite $(GOFLAGS) -ldflags "$(RELEASE_LDFLAGS)" -o $(BIN)/kern-$$os-$$arch/kern-mcp ./cmd/kern-mcp; \
+		GOOS=$$os GOARCH=$$arch go build -tags sqlite $(GOFLAGS) -ldflags "$(RELEASE_LDFLAGS)" -o $(BIN)/kern-$$os-$$arch/kern-server ./cmd/kern-server; \
 		tar -C $(BIN) -czf $(BIN)/kern-$$os-$$arch.tar.gz kern-$$os-$$arch/; \
 		rm -rf $(BIN)/kern-$$os-$$arch; \
 	done; \
 	mkdir -p $(BIN)/kern-windows-amd64; \
-	GOOS=windows GOARCH=amd64 go build -tags sqlite $(GOFLAGS) -ldflags "-X main.version=$(VERSION)" -o $(BIN)/kern-windows-amd64/kern.exe ./cmd/kern; \
-	GOOS=windows GOARCH=amd64 go build -tags sqlite $(GOFLAGS) -ldflags "-X main.version=$(VERSION)" -o $(BIN)/kern-windows-amd64/kern-mcp.exe ./cmd/kern-mcp; \
-	GOOS=windows GOARCH=amd64 go build -tags sqlite $(GOFLAGS) -ldflags "-X main.version=$(VERSION)" -o $(BIN)/kern-windows-amd64/kern-server.exe ./cmd/kern-server; \
+	GOOS=windows GOARCH=amd64 go build -tags sqlite $(GOFLAGS) -ldflags "$(RELEASE_LDFLAGS)" -o $(BIN)/kern-windows-amd64/kern.exe ./cmd/kern; \
+	GOOS=windows GOARCH=amd64 go build -tags sqlite $(GOFLAGS) -ldflags "$(RELEASE_LDFLAGS)" -o $(BIN)/kern-windows-amd64/kern-mcp.exe ./cmd/kern-mcp; \
+	GOOS=windows GOARCH=amd64 go build -tags sqlite $(GOFLAGS) -ldflags "$(RELEASE_LDFLAGS)" -o $(BIN)/kern-windows-amd64/kern-server.exe ./cmd/kern-server; \
 	cd $(BIN) && zip -q -r kern-windows-amd64.zip kern-windows-amd64/ && rm -rf kern-windows-amd64
+	mkdir -p $(BIN)/kern-windows-arm64; \
+	GOOS=windows GOARCH=arm64 go build -tags sqlite $(GOFLAGS) -ldflags "$(RELEASE_LDFLAGS)" -o $(BIN)/kern-windows-arm64/kern.exe ./cmd/kern; \
+	GOOS=windows GOARCH=arm64 go build -tags sqlite $(GOFLAGS) -ldflags "$(RELEASE_LDFLAGS)" -o $(BIN)/kern-windows-arm64/kern-mcp.exe ./cmd/kern-mcp; \
+	GOOS=windows GOARCH=arm64 go build -tags sqlite $(GOFLAGS) -ldflags "$(RELEASE_LDFLAGS)" -o $(BIN)/kern-windows-arm64/kern-server.exe ./cmd/kern-server; \
+	cd $(BIN) && zip -q -r kern-windows-arm64.zip kern-windows-arm64/ && rm -rf kern-windows-arm64
 	@echo "release assets in $(BIN):"; ls $(BIN)/*.tar.gz $(BIN)/*.zip
 
 dist: release

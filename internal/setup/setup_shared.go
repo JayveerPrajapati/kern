@@ -76,7 +76,7 @@ func DetectAgents(root string) []string {
 
 func isAgentPresent(root string, d agentDetector) bool {
 	for _, p := range d.paths {
-		path := p
+		var path string
 		if strings.HasPrefix(p, "~") {
 			path = homeJoin(strings.TrimPrefix(p, "~"))
 		} else {

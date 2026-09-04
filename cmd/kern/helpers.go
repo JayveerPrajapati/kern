@@ -71,7 +71,6 @@ func readStdin() ([]byte, error) {
 // riskChangeCLI and simulateChangeCLI have been migrated to internal/app.Platform.
 // The CLI now calls app.New(root) + p.Analyze/Risk/WhatIf/Verify so the
 // orchestration is shared with MCP and REST instead of duplicated here.
-func unusedHelpersSentinel() {}
 
 // renderTeamText builds the standard specialist team via agents.StandardTeam
 // and renders the roster plus current task states. Read-only and deterministic.
@@ -530,11 +529,6 @@ func clipText(s string, n int) string {
 		return s
 	}
 	return strings.TrimSpace(s[:n]) + "…"
-}
-
-func fileExists(p string) bool {
-	info, err := os.Stat(p)
-	return err == nil && !info.IsDir()
 }
 
 func isDir(p string) bool {

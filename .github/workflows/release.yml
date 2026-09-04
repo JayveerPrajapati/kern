@@ -1,5 +1,4 @@
 name: release
-
 on:
   push:
     tags:
@@ -8,14 +7,19 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: release-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     name: vet + test
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version-file: go.mod
           cache: true
@@ -29,37 +33,7 @@ jobs:
             exit 1
           fi
 
-      - name: Install gitleaks
-        run: |
-          curl -sSfL https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz | sudo tar -xz -C /usr/local/bin gitleaks
-          sudo chmod +x /usr/local/bin/gitleaks
-
-      - name: Set up Node for jscpd
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-
-      - name: Install jscpd
-        run: |
-          sudo npm install -g jscpd
-          if ! command -v jscpd &> /dev/null; then
-            sudo ln -sf "$(npm config get prefix)/bin/jscpd" /usr/local/bin/jscpd
-          fi
-
-      - name: Install kern and blueprint
-        run: |
-          go install ./cmd/kern ./cmd/blueprint ./cmd/blueprint-mcp
-          sudo cp "$(go env GOPATH)/bin/kern" /usr/local/bin/kern || true
-          sudo cp "$(go env GOPATH)/bin/blueprint" /usr/local/bin/blueprint || true
-          sudo cp "$(go env GOPATH)/bin/blueprint-mcp" /usr/local/bin/blueprint-mcp || true
-          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
-
-      - name: Verify tool availability
-        run: |
-          which gitleaks && gitleaks version
-          which jscpd && jscpd --version
-          which kern && kern version
-          which blueprint && blueprint version
+      - uses: ./.github/actions/setup-tools
 
       - name: Vet and test
         run: |
@@ -70,14 +44,15 @@ jobs:
     name: kern code review
     needs: test
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           # The action diffs the release tag against origin/main, so full
           # history is required.
           fetch-depth: 0
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version-file: go.mod
           cache: false
@@ -91,7 +66,7 @@ jobs:
       # on PRs, so a release is reviewed against main before it ships. `comment`
       # is disabled because a tag push has no pull request to comment on; the
       # review + risk + boundary-guard analysis still runs and the verdict is
-      # surfaced in the workflow run.
+      # surfaced in the job summary.
       - uses: ./.github/actions/kern-review
         with:
           base-ref: origin/main
@@ -101,8 +76,7 @@ jobs:
 
   build:
     name: build ${{ matrix.target }}
-    needs: test
-    runs-on: ubuntu-latest
+    needs: [test, review]
     strategy:
       matrix:
         target:
@@ -111,10 +85,13 @@ jobs:
           - darwin/amd64
           - darwin/arm64
           - windows/amd64
+          - windows/arm64
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version-file: go.mod
           cache: true
@@ -123,6 +100,7 @@ jobs:
         id: vars
         shell: bash
         run: |
+          MATRIX_TARGET="${{ matrix.target }}"
           os="${MATRIX_TARGET%/*}"
           arch="${MATRIX_TARGET#*/}"
           tag="${GITHUB_REF#refs/tags/}"
@@ -130,8 +108,6 @@ jobs:
           echo "arch=$arch" >> "$GITHUB_OUTPUT"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "dir=kern-$os-$arch" >> "$GITHUB_OUTPUT"
-        env:
-          MATRIX_TARGET: ${{ matrix.target }}
 
       - name: Build
         shell: bash
@@ -141,31 +117,30 @@ jobs:
           dir="${{ steps.vars.outputs.dir }}"
           mkdir -p "$dir"
           GOOS="$os" GOARCH="$arch" CGO_ENABLED=0 \
-            go build -buildvcs=false -tags sqlite -ldflags "-X main.version=${{ steps.vars.outputs.tag }}" \
+            go build -buildvcs=false -tags sqlite -ldflags "-s -w -X main.version=${{ steps.vars.outputs.tag }}" \
             -o "$dir/kern" ./cmd/kern
           GOOS="$os" GOARCH="$arch" CGO_ENABLED=0 \
-            go build -buildvcs=false -tags sqlite -ldflags "-X main.version=${{ steps.vars.outputs.tag }}" \
+            go build -buildvcs=false -tags sqlite -ldflags "-s -w" \
             -o "$dir/kern-mcp" ./cmd/kern-mcp
           GOOS="$os" GOARCH="$arch" CGO_ENABLED=0 \
-            go build -buildvcs=false -tags sqlite -ldflags "-X main.version=${{ steps.vars.outputs.tag }}" \
+            go build -buildvcs=false -tags sqlite -ldflags "-s -w" \
             -o "$dir/kern-server" ./cmd/kern-server
 
       - name: Package (tar.gz, or zip for windows)
         shell: bash
         run: |
           os="${{ steps.vars.outputs.os }}"
-          arch="${{ steps.vars.outputs.arch }}"
           dir="${{ steps.vars.outputs.dir }}"
           if [ "$os" = "windows" ]; then
             mv "$dir/kern" "$dir/kern.exe"
             mv "$dir/kern-mcp" "$dir/kern-mcp.exe"
             mv "$dir/kern-server" "$dir/kern-server.exe"
-            zip -q -r "kern-$os-$arch.zip" "$dir"
+            (cd "$dir" && zip -r "../${dir}.zip" .)
           else
-            tar -czf "kern-$os-$arch.tar.gz" "$dir"
+            tar -czf "${dir}.tar.gz" -C "$dir" .
           fi
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: "kern-${{ steps.vars.outputs.os }}-${{ steps.vars.outputs.arch }}"
           path: |
@@ -176,18 +151,20 @@ jobs:
     name: publish release
     needs: build
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           path: dist
           merge-multiple: true
 
       - name: Generate checksums and brew formula
-        shell: bash
+        id: release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          set -euo pipefail
           tag="${GITHUB_REF#refs/tags/}"
           # The source archive Homebrew will build from; its sha256 goes in the formula.
           curl -fsSL "https://github.com/${{ github.repository }}/archive/refs/tags/${tag}.tar.gz" -o source.tar.gz
@@ -207,7 +184,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          tag="${GITHUB_REF#refs/tags/}"
+          tag="${{ steps.release.outputs.tag }}"
           cat > /tmp/release-notes.md <<EOF
           See [README](https://github.com/${{ github.repository }}/blob/main/README.md) for install options:
           - \`curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/main/install.sh | sh\`
@@ -218,7 +195,6 @@ jobs:
           a filled-in Homebrew formula for the tap repo.
           EOF
           gh release create "$tag" dist/kern-*.tar.gz dist/kern-*.zip dist/SHA256SUMS kern.rb \
-            --title "$tag" \
             --notes-file /tmp/release-notes.md \
             --draft=false
 
@@ -227,7 +203,6 @@ jobs:
       # publish-tap.sh by hand. The tap repo (github.com/<owner>/homebrew-tap)
       # must exist once (created via `scripts/publish-tap.sh` or manually); after
       # that this step updates Formula/kern.rb on each tag push.
-      #
       # Requires a PAT with `repo` scope (GITHUB_TOKEN cannot push to another
       # repo) stored as the `TAP_PUBLISH_TOKEN` repository secret. The tap owner
       # defaults to the repo owner; override with the `TAP_OWNER` repo variable.
@@ -236,22 +211,19 @@ jobs:
         env:
           TAP_TOKEN: ${{ secrets.TAP_PUBLISH_TOKEN }}
           TAP_OWNER: ${{ vars.TAP_OWNER }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          set -euo pipefail
-          tag="${GITHUB_REF#refs/tags/}"
+          tag="${{ steps.release.outputs.tag }}"
           owner="${TAP_OWNER:-${{ github.repository_owner }}}"
           echo "==> publishing kern ${tag} to tap ${owner}/homebrew-tap"
           git clone "https://${TAP_TOKEN}@github.com/${owner}/homebrew-tap.git" tap
           mkdir -p tap/Formula
           cp kern.rb tap/Formula/kern.rb
-          cd tap
-          git add Formula/kern.rb
-          if git diff --cached --quiet; then
+          git -C tap add Formula/kern.rb
+          if git -C tap diff --cached --quiet; then
             echo "==> formula unchanged, nothing to push"
             exit 0
           fi
-          git -c "user.name=${owner}" -c "user.email=${owner}@users.noreply.github.com" \
+          git -C tap -c "user.name=${owner}" -c "user.email=${owner}@users.noreply.github.com" \
             commit -m "kern ${tag}: update formula"
-          git push
+          git -C tap push origin HEAD:master
           echo "==> done: brew tap ${owner}/tap && brew install kern"

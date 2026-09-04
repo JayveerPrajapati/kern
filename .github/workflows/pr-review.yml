@@ -7,13 +7,17 @@ on:
 permissions:
   contents: read
   pull-requests: write
-  issues: write
+
+concurrency:
+  group: pr-review-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   review:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           # The action diffs against the base ref, so full history is required.
           fetch-depth: 0
@@ -21,42 +25,12 @@ jobs:
       # The gate is the same reusable action consumers import — this repo
       # dogfoods it. `kern-bin` points at a binary built from this checkout so
       # PRs that change kern itself are reviewed with the proposed code.
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version-file: go.mod
-          cache: false
+          cache: true
 
-      - name: Install gitleaks
-        run: |
-          curl -sSfL https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz | sudo tar -xz -C /usr/local/bin gitleaks
-          sudo chmod +x /usr/local/bin/gitleaks
-
-      - name: Set up Node for jscpd
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-
-      - name: Install jscpd
-        run: |
-          sudo npm install -g jscpd
-          if ! command -v jscpd &> /dev/null; then
-            sudo ln -sf "$(npm config get prefix)/bin/jscpd" /usr/local/bin/jscpd
-          fi
-
-      - name: Install kern and blueprint
-        run: |
-          go install ./cmd/kern ./cmd/blueprint ./cmd/blueprint-mcp
-          sudo cp "$(go env GOPATH)/bin/kern" /usr/local/bin/kern || true
-          sudo cp "$(go env GOPATH)/bin/blueprint" /usr/local/bin/blueprint || true
-          sudo cp "$(go env GOPATH)/bin/blueprint-mcp" /usr/local/bin/blueprint-mcp || true
-          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
-
-      - name: Verify tool availability
-        run: |
-          which gitleaks && gitleaks version
-          which jscpd && jscpd --version
-          which kern && kern version
-          which blueprint && blueprint version
+      - uses: ./.github/actions/setup-tools
 
       - name: Vet and test
         run: |

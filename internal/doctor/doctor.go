@@ -158,9 +158,8 @@ func checkIndex(root string) Finding {
 			}
 		}
 	}
-	detail := fmt.Sprintf("%d cached project indexes", n)
 	if ix, err := index.Load(root); err == nil && ix != nil {
-		detail = fmt.Sprintf("%d symbols, %d files, %d cached projects", len(ix.Symbols), len(ix.FileHashes), n)
+		detail := fmt.Sprintf("%d symbols, %d files, %d cached projects", len(ix.Symbols), len(ix.FileHashes), n)
 		return Finding{Check: "index", Level: "ok", Detail: detail}
 	}
 	// No cached index: report whether the tree even has indexable sources,

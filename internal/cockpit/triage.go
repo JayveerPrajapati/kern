@@ -182,7 +182,7 @@ func RunTriage(ctx context.Context, cfg TriageConfig) (*TriageReport, error) {
 		report.Error = fmt.Sprintf("failed to spawn sandbox: %v", err)
 		return report, err
 	}
-	defer wt.Cleanup()
+	defer func() { _ = wt.Cleanup() }()
 
 	// 4. Create and verify failing reproduction test
 	var reproFile string

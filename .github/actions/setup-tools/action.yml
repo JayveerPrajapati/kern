@@ -1,0 +1,61 @@
+name: Setup CI Tools
+description: >-
+  Installs and verifies the shared toolchain used across CI workflows:
+  gitleaks (checksum-verified), jscpd, kern, and blueprint-mcp.
+
+inputs:
+  gitleaks-version:
+    description: gitleaks release tag (without v prefix)
+    default: "8.30.1"
+  gitleaks-checksum:
+    description: SHA-256 checksum for the gitleaks tarball
+    default: "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
+  install-kern:
+    description: Whether to build and install kern + blueprint binaries
+    default: "true"
+  node-version:
+    description: Node.js version for jscpd
+    default: "20"
+
+runs:
+  using: composite
+  steps:
+    - name: Install gitleaks (checksum-verified)
+      shell: bash
+      run: |
+        curl -sSfL -o gitleaks.tgz \
+          "https://github.com/gitleaks/gitleaks/releases/download/v${{ inputs.gitleaks-version }}/gitleaks_${{ inputs.gitleaks-version }}_linux_x64.tar.gz"
+        echo "${{ inputs.gitleaks-checksum }}  gitleaks.tgz" | sha256sum -c -
+        sudo tar -xz -C /usr/local/bin -f gitleaks.tgz gitleaks
+        sudo chmod +x /usr/local/bin/gitleaks
+
+    - name: Set up Node for jscpd
+      uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+      with:
+        node-version: ${{ inputs.node-version }}
+
+    - name: Install jscpd
+      shell: bash
+      run: |
+        sudo npm install -g jscpd
+        if ! command -v jscpd &> /dev/null; then
+          sudo ln -sf "$(npm config get prefix)/bin/jscpd" /usr/local/bin/jscpd
+        fi
+
+    - name: Install kern and blueprint
+      if: inputs.install-kern == 'true'
+      shell: bash
+      run: |
+        go install ./cmd/kern ./cmd/blueprint ./cmd/blueprint-mcp
+        sudo cp "$(go env GOPATH)/bin/kern" /usr/local/bin/kern || true
+        sudo cp "$(go env GOPATH)/bin/blueprint" /usr/local/bin/blueprint || true
+        sudo cp "$(go env GOPATH)/bin/blueprint-mcp" /usr/local/bin/blueprint-mcp || true
+        echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+    - name: Verify tool availability
+      shell: bash
+      run: |
+        which gitleaks && gitleaks version
+        which jscpd && jscpd --version
+        which kern && kern version
+        which blueprint && blueprint version

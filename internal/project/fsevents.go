@@ -130,13 +130,13 @@ func (fw *fileWatcher) run(ctx context.Context, name string, args []string, root
 				return
 			}
 			path = strings.TrimSpace(line)
-		} else {
-			path, err := reader.ReadString(0)
-			if err != nil {
-				return
-			}
-			path = strings.Trim(path, "\x00")
+	} else {
+		buf, err := reader.ReadString(0)
+		if err != nil {
+			return
 		}
+		path = strings.Trim(buf, "\x00")
+	}
 		if path == "" {
 			continue
 		}

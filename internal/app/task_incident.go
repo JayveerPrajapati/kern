@@ -4,6 +4,7 @@ package app
 
 import (
 	"fmt"
+	"os"
 	"github.com/JayveerPrajapati/kern/internal/agent"
 	"github.com/JayveerPrajapati/kern/internal/domain"
 	"github.com/JayveerPrajapati/kern/internal/eventbus"
@@ -47,10 +48,6 @@ func (s *TaskService) Correlate(alert domain.Alert) (*agent.Task, runtime.Correl
 	}
 	s.publish(eventbus.TaskUpdated, t.ID, map[string]string{"state": "ANALYZING"})
 
-	src := s.platform.RuntimeSource()
-	if src == nil {
-		src = runtime.NewStore()
-	}
 	// Use the single shared correlation service so this lane reasons
 	// over the same source/window as investigate/deploy/observe.
 	chain := s.correlator().CorrelateChain(alert)
@@ -285,7 +282,9 @@ func (s *TaskService) Learn(threshold int) (*agent.Task, []learning.Pattern, str
 
 	// Promote surfaced patterns to memory.
 	for _, p := range surfaced {
-		extractor.Remember(p)
+		if _, rerr := extractor.Remember(p); rerr != nil {
+			fmt.Fprintf(os.Stderr, "kern: learn: could not remember pattern: %v\n", rerr)
+		}
 	}
 
 	if err := t.Complete(t.Output); err != nil {
