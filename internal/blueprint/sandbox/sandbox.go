@@ -89,10 +89,21 @@ func WithMatrix(matrix []MatrixTarget) ConfigOption {
 	return func(c *Config) { c.Matrix = matrix }
 }
 
+// WithTimeout sets the execution timeout.
+func WithTimeout(d time.Duration) ConfigOption {
+	return func(c *Config) { c.Timeout = d }
+}
+
 // DefaultConfig returns safe defaults: 120s timeout, 1MiB output cap.
 func DefaultConfig() Config {
+	timeout := 120 * time.Second
+	if env := os.Getenv("BLUEPRINT_SANDBOX_TIMEOUT"); env != "" {
+		if d, err := time.ParseDuration(env); err == nil && d > 0 {
+			timeout = d
+		}
+	}
 	return Config{
-		Timeout:        120 * time.Second,
+		Timeout:        timeout,
 		MaxOutputBytes: 1 << 20, // 1 MiB
 	}
 }

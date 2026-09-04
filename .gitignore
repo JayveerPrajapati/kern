@@ -6,8 +6,8 @@ dist/
 /kern-mcp
 /blueprint
 /blueprint-mcp
-.blueprint/
-**/.blueprint/
+.blueprint/*
+!.blueprint/config.yaml
 
 # Node/plugin
 node_modules/

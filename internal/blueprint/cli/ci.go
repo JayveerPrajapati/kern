@@ -210,12 +210,36 @@ func runValidationPipeline(valRoot, absRoot string, changes []domain.FileChange,
 	// finding on every run — noise that breaks the clean-PR zero-findings
 	// contract. Gate the request on platform support so CI stays deterministic;
 	// callers who want the explicit finding signal can opt in directly.
-	var sandboxCheck service.Check
+	var testOpts []sandbox.ConfigOption
 	if sandbox.NetworkIsolationAvailable() {
-		sandboxCheck = sandbox.NewDefaultCheck(sandbox.WithNetworkIsolation())
-	} else {
-		sandboxCheck = sandbox.NewDefaultCheck()
+		testOpts = append(testOpts, sandbox.WithNetworkIsolation())
 	}
+	if cfg != nil {
+		if cfg.File.Sandbox.TimeoutSeconds > 0 {
+			testOpts = append(testOpts, sandbox.WithTimeout(time.Duration(cfg.File.Sandbox.TimeoutSeconds)*time.Second))
+		}
+		if len(cfg.File.Sandbox.Matrix) > 0 {
+			matrix := make([]sandbox.MatrixTarget, 0, len(cfg.File.Sandbox.Matrix))
+			for _, m := range cfg.File.Sandbox.Matrix {
+				target := sandbox.MatrixTarget{
+					Name: m.Name,
+					Dir:  m.Dir,
+				}
+				if m.Build != "" {
+					target.Build = sandbox.SplitCommand(m.Build)
+				}
+				if m.Test != "" {
+					target.Test = sandbox.SplitCommand(m.Test)
+				}
+				if m.Command != "" {
+					target.Command = sandbox.SplitCommand(m.Command)
+				}
+				matrix = append(matrix, target)
+			}
+			testOpts = append(testOpts, sandbox.WithMatrix(matrix))
+		}
+	}
+	sandboxCheck := sandbox.NewDefaultCheck(testOpts...)
 	// The audit trail lives in the real repository (.blueprint/audit/), not
 	// the throwaway worktree, so CI audit records persist and P1.4 receipts
 	// stay verifiable after the worktree is cleaned up. The records still
