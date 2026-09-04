@@ -6,6 +6,22 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Unified Change Governance Engine (`internal/blueprint`)**: Merged sibling `blueprint` engine natively into `kern`, integrating all 21 packages and 30 phase gates ($G_0$–$G_{29}$) without breaking contracts.
+- **First-Class Subcommands**: Wired `kern check`, `kern fix`, `kern ci`, and `kern verify-receipt` directly into `cmd/kern` CLI.
+- **Drop-in Compatibility Wrappers**: Provided `cmd/blueprint` and `cmd/blueprint-mcp` entry points to preserve backward compatibility for existing scripts and hooks.
+- **KernOps Governed Autonomous Platform Plan**: Added `docs/architecture/kernops-plan.md` specifying the architecture, Option 2 standalone repository layout (`/workspace/kernops`), self-healing repair contracts, and implementation roadmap.
+
+### CI & Tooling
+
+- **Toolchain Availability in `/usr/local/bin`**:
+  - Pinned and extracted official static `gitleaks` v8.30.1 directly into `/usr/local/bin/gitleaks` in GitHub Actions.
+  - Globally installed `jscpd` and linked into `/usr/local/bin/jscpd`, preventing 120s `npx` network download timeouts in headless runners.
+  - Pre-installed `kern`, `blueprint`, and `blueprint-mcp` to `/usr/local/bin` ahead of test execution.
+  - Added a proactive `Verify tool availability` step in `.github/workflows/ci.yml`.
+- **Test Robustness**: Enhanced `cmd/blueprint/g25_test.go` to ignore environment-level fallback warnings (`secret:incumbent-unavailable`) during file-level provenance validation.
+
 ## [0.9.5] - 2026-09-03
 
 ### Security
