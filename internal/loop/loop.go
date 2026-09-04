@@ -821,19 +821,26 @@ func (l *Loop) surfacePatterns(ex *learning.Extractor) error {
 // inject arbitrary content into the lesson or episodic records.
 func sanitizeIntent(intent string) string {
 	const maxLen = 200
-	s := strings.Map(func(r rune) rune {
-		switch {
-		case r == '\n' || r == '\r':
-			return ' '
-		case r < 0x20 || r == 0x7f: // control characters
-			return -1
-		default:
-			return r
+	var b strings.Builder
+	b.Grow(len(intent))
+	space := false
+	for _, r := range intent {
+		if r == '\n' || r == '\r' || r == '\t' || r == ' ' {
+			if !space && b.Len() > 0 {
+				b.WriteByte(' ')
+				space = true
+			}
+		} else if r >= 0x20 && r != 0x7f {
+			b.WriteRune(r)
+			space = false
 		}
-	}, intent)
-	s = strings.Join(strings.Fields(s), " ")
-	if len(s) > maxLen {
-		s = s[:maxLen]
+		if b.Len() >= maxLen {
+			break
+		}
 	}
-	return s
+	res := strings.TrimSpace(b.String())
+	if len(res) > maxLen {
+		return res[:maxLen]
+	}
+	return res
 }
