@@ -81,9 +81,7 @@ func TestEfficiencyDuration(t *testing.T) {
 
 func TestEfficiencyReportInsufficient(t *testing.T) {
 	task := agent.NewTask("CODE_CHANGE", "empty")
-	if err := task.Transition(domain.TaskFailed); err == nil {
-		// failure outcome when failed
-	}
+	_ = task.Transition(domain.TaskFailed)
 	task.ContextPacket = &domain.ContextPacket{TokenCount: 500} // no facts
 	r := BuildEfficiencyReport(task)
 	if r.Quality.Sufficiency != "insufficient" {

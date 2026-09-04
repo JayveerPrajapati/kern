@@ -10,6 +10,7 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/fetch"
 	"github.com/JayveerPrajapati/kern/internal/llm"
 	"github.com/JayveerPrajapati/kern/internal/runtime"
+	"github.com/JayveerPrajapati/kern/internal/strutil"
 	"os"
 	"strings"
 )
@@ -156,7 +157,7 @@ func runDocs(rest []string) {
 		if name == "" {
 			name = slugName(rawURL)
 		} else {
-			name = sanitizeDocName(name)
+			name = strutil.Slug(name)
 		}
 		if err := os.MkdirAll(cache.Path("data", "docs-fetch"), 0o755); err != nil {
 			fatal("%v", err)

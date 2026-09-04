@@ -10,6 +10,7 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/pii"
 	"github.com/JayveerPrajapati/kern/internal/sandbox"
 	"github.com/JayveerPrajapati/kern/internal/script"
+	"github.com/JayveerPrajapati/kern/internal/strutil"
 	"github.com/JayveerPrajapati/kern/internal/validate"
 	"os"
 	"strconv"
@@ -127,9 +128,9 @@ func (s *Server) handleDiffFiles(ctx context.Context, args map[string]any) (stri
 			// annotated with the enclosing symbol when the index resolves it.
 			// A failed index load just means no span annotations.
 			ix, _ := s.loadIndex(ctx, root)
-			u = diff.Compact(a, b, splitLines(string(ab)), splitLines(string(bb)), diff.IndexSpanResolver(ix))
+			u = diff.Compact(a, b, strutil.Lines(string(ab)), strutil.Lines(string(bb)), diff.IndexSpanResolver(ix))
 		} else {
-			u = diff.Unified(a, b, splitLines(string(ab)), splitLines(string(bb)))
+			u = diff.Unified(a, b, strutil.Lines(string(ab)), strutil.Lines(string(bb)))
 		}
 		if u == "" {
 			return "files identical", nil

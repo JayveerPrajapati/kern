@@ -6,6 +6,7 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/budget"
 	"github.com/JayveerPrajapati/kern/internal/optimize"
 	"github.com/JayveerPrajapati/kern/internal/semcache"
+	"github.com/JayveerPrajapati/kern/internal/strutil"
 	"github.com/JayveerPrajapati/kern/internal/swap"
 	"github.com/JayveerPrajapati/kern/internal/terse"
 	"github.com/JayveerPrajapati/kern/internal/tokenize"
@@ -129,7 +130,7 @@ func (s *Server) handleOptimizeOutput(ctx context.Context, args map[string]any) 
 		before := tokenize.Count(text)
 		after := tokenize.Count(out)
 		return fmt.Sprintf("%d -> %d tokens (saved %d, %.1f%%, %d filler lines dropped)\n\n%s",
-			before, after, before-after, pct(before, after), dropped, out), nil
+			before, after, before-after, strutil.Pct(before, after), dropped, out), nil
 
 	}
 }
@@ -216,7 +217,7 @@ func (s *Server) handleContextBudget(ctx context.Context, args map[string]any) (
 		out := budget.FitCode(text, maxTokens)
 		before := tokenize.Count(text)
 		after := tokenize.Count(out)
-		return fmt.Sprintf("%d -> %d tokens (saved %d, %.1f%%)\n\n%s", before, after, before-after, pct(before, after), out), nil
+		return fmt.Sprintf("%d -> %d tokens (saved %d, %.1f%%)\n\n%s", before, after, before-after, strutil.Pct(before, after), out), nil
 
 	}
 }

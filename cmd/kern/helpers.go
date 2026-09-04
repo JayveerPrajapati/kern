@@ -14,8 +14,8 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/metrics"
 	"github.com/JayveerPrajapati/kern/internal/optimize"
 	"github.com/JayveerPrajapati/kern/internal/schema"
+	"github.com/JayveerPrajapati/kern/internal/strutil"
 	"io"
-	"net/url"
 	"os"
 	"os/exec"
 	"strings"
@@ -426,13 +426,6 @@ func loadSchema(spec string) (*schema.Schema, error) {
 	return schema.Parse(string(b))
 }
 
-func pct(before, after int) float64 {
-	if before <= 0 {
-		return 0
-	}
-	return float64(before-after) / float64(before) * 100
-}
-
 // hasSemantic reports whether any indexed doc carries a dense embedding.
 func hasSemantic(ix *docsearch.Index) bool {
 	for _, d := range ix.Docs {
@@ -441,13 +434,6 @@ func hasSemantic(ix *docsearch.Index) bool {
 		}
 	}
 	return false
-}
-
-func splitLines(s string) []string {
-	// Normalize Windows CRLF to LF so every line is stripped of its trailing
-	// \r, then split on \n. TrimRight on the whole string alone would leave
-	// the \r on all but the final line.
-	return strings.Split(strings.ReplaceAll(s, "\r\n", "\n"), "\n")
 }
 
 // gitDiff runs a git diff subcommand in the current directory and returns its
@@ -490,38 +476,7 @@ func shortHash() string {
 // slugName derives a filesystem-safe document name from a URL, e.g.
 // https://react.dev/reference/usestate -> react.dev-reference-usestate.
 func slugName(rawURL string) string {
-	u, err := url.Parse(rawURL)
-	if err != nil {
-		return "doc"
-	}
-	name := u.Hostname() + u.Path
-	name = strings.TrimSuffix(name, "/")
-	return sanitizeDocName(name)
-}
-
-// sanitizeDocName constrains a doc name to a safe cache filename:
-// lowercase alphanumerics and dashes only, so path separators, "../" or
-// absolute paths can never escape the cache root. Falls back to "doc".
-func sanitizeDocName(name string) string {
-	var b strings.Builder
-	lastDash := false
-	for _, r := range strings.TrimSpace(name) {
-		if r >= 'a' && r <= 'z' || r >= '0' && r <= '9' {
-			b.WriteRune(r)
-			lastDash = false
-		} else if r >= 'A' && r <= 'Z' {
-			b.WriteRune(r + ('a' - 'A'))
-			lastDash = false
-		} else if !lastDash {
-			b.WriteByte('-')
-			lastDash = true
-		}
-	}
-	out := strings.Trim(b.String(), "-")
-	if out == "" {
-		return "doc"
-	}
-	return out
+	return strutil.DocSlug(rawURL)
 }
 
 func clipText(s string, n int) string {

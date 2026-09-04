@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/JayveerPrajapati/kern/internal/optimize"
+	"github.com/JayveerPrajapati/kern/internal/strutil"
 )
 
 func mcpProject(t *testing.T) string {
@@ -66,7 +67,7 @@ func TestHelpersPctArgStringTruncate(t *testing.T) {
 	if strconv.Itoa(42) != "42" {
 		t.Fatalf("strconv.Itoa(42) = %q", strconv.Itoa(42))
 	}
-	if pct(100, 25) != 75 || pct(0, 1) != 0 {
+	if strutil.Pct(100, 25) != 75 || strutil.Pct(0, 1) != 0 {
 		t.Fatal("pct wrong")
 	}
 	if argString(map[string]any{"k": " v "}, "k") != "v" {
