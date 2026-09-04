@@ -152,11 +152,29 @@ func (g *Gate) gatePath(key, p string) error {
 		return fmt.Errorf("path %q for %q cannot be resolved", p, key)
 	}
 	for _, root := range g.roots {
-		if within(symlinkOrSelf(root), resolved) {
+		if RootContains(root, resolved) {
 			return nil // inside an allowed root
 		}
 	}
 	return fmt.Errorf("path outside allowed roots: %s=%q (allowed: %s)", key, p, strings.Join(g.roots, ", "))
+}
+
+// RootContains reports whether the symlink-resolved path resolved lies inside
+// the given root. The root itself is resolved first (falling back to the raw
+// root when it cannot be resolved yet) so both sides are compared on their
+// real locations — a symlink inside a root that points outside is denied, and
+// a root reached through a symlink (e.g. /var -> /private/var on macOS) still
+// matches its real children. This is the single shared containment primitive
+// used by both kern's MCP gate and Blueprint's MCP gate (DRY): Blueprint's
+// validate-proposed flow additionally handles not-yet-on-disk paths, but every
+// on-disk containment decision funnels through this one function.
+func RootContains(root, resolved string) bool {
+	r, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		r = root
+	}
+	rel, err := filepath.Rel(r, resolved)
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 // symlinkOrSelf resolves p's real location, falling back to p itself when the

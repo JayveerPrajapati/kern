@@ -217,10 +217,10 @@ func decodeEntities(s string) string {
 		}
 		var cp int64
 		switch {
-	case g[1] != "":
-		_, _ = fmt.Sscanf(g[1], "%x", &cp)
-	case g[2] != "":
-		_, _ = fmt.Sscanf(g[2], "%d", &cp)
+		case g[1] != "":
+			_, _ = fmt.Sscanf(g[1], "%x", &cp)
+		case g[2] != "":
+			_, _ = fmt.Sscanf(g[2], "%d", &cp)
 		default:
 			if v, ok := namedEntities[g[3]]; ok {
 				return v

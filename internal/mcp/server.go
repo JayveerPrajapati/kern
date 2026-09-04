@@ -360,15 +360,15 @@ func strProp(desc string) map[string]any {
 
 // Server handles MCP requests over a stdio stream or HTTP.
 type Server struct {
-	in       io.Reader // raw stdio reader, used to rebuild the scanner after an oversized line
-	out      io.Writer
-	mu       sync.Mutex
-	toolsMu  sync.Mutex
-	filtered []Tool // cached KERN_TOOLS-filtered tool list (nil = not computed)
+	in        io.Reader // raw stdio reader, used to rebuild the scanner after an oversized line
+	out       io.Writer
+	mu        sync.Mutex
+	toolsMu   sync.Mutex
+	filtered  []Tool   // cached KERN_TOOLS-filtered tool list (nil = not computed)
 	allowlist []string // parsed KERN_TOOLS allowlist, cached once at init (nil = allow all)
-	locks    map[string]*lock.Lock
-	inflight map[string]context.CancelFunc
-	sessions map[string]*project.Session
+	locks     map[string]*lock.Lock
+	inflight  map[string]context.CancelFunc
+	sessions  map[string]*project.Session
 	// platforms caches one application Platform per project root, keyed to
 	// the exact index instance it was built from. High-level handlers used to
 	// rebuild the whole Platform (call graph + 4 twin extractors, each a full

@@ -1,0 +1,23 @@
+name: Quality gates
+description: >-
+  Shared Go quality gate: go vet and the short test suite. Replaces the
+  copy-pasted "Vet and test" block that appears in the ci, release, and
+  pr-review workflows. Kept as a composite action so it runs inline in the
+  caller's job (sharing the Go build cache set up by the bootstrap action).
+  The gofmt/Format check is intentionally NOT part of this shared action:
+  it lives only in ci.yml where it already ran, so adding it here would
+  introduce a new failure mode (unformatted files failing a release or a
+  PR review) that the release/pr-review workflows never had. Extra gates
+  (sqlite/treesitter builds, race detector, MCP parity) also stay in ci.yml
+  because only that workflow runs them.
+
+runs:
+  using: composite
+  steps:
+    - name: Vet
+      shell: bash
+      run: go vet ./...
+
+    - name: Test
+      shell: bash
+      run: go test -short -timeout 10m ./...

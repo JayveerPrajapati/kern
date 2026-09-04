@@ -35,9 +35,7 @@ import (
 var version = "dev"
 
 func init() {
-	if version == "dev" {
-		version = kversion.Version
-	}
+	version = kversion.Adopt(version)
 }
 
 func main() {
