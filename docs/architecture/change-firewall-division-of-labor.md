@@ -41,13 +41,17 @@ surfaces of one capability, not two tools doing the same thing.
    - pre-write, via MCP `blueprint_validate_proposed` (content not yet on
      disk — the seam where agent intent meets file content),
    - pre-commit, via the hook (`blueprint check --staged`),
-   - pre-merge, via `blueprint ci` (full `base..head` diff),
-   - or as a repair loop, via `blueprint fix` (proposed fixes validated in an
+   - pre-merge, via `blueprint ci` or `kern ci` (full `base..head` diff),
+   - or as a repair loop, via `blueprint fix` or `kern fix` (proposed fixes validated in an
      isolated worktree).
-3. **Shared intelligence.** Blueprint never reimplements analysis: it
+3. **Unified in-tree layout.** Blueprint is natively integrated into Kern under
+   `internal/blueprint/`. In addition to compatibility binaries (`cmd/blueprint`,
+   `cmd/blueprint-mcp`), its governance commands are first-class subcommands on
+   Kern: `kern check`, `kern fix`, `kern ci`, and `kern verify-receipt`.
+4. **Shared intelligence.** Blueprint never reimplements analysis: it
    consumes kern's `guard` / `sec` / `fingerprint` oracles under a versioned
    JSON contract (`schema_version`), fail-closed on mismatch.
-4. **Confinement.** Both tools confine agent-supplied paths: kern via
+5. **Confinement.** Both tools confine agent-supplied paths: kern via
    `KERN_ROOTS` + `KERN_MCP_ROOTS` (pre-tool gate), blueprint via
    `BLUEPRINT_ROOTS` (pre-tool gate with nested path coverage).
 
