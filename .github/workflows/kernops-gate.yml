@@ -51,6 +51,10 @@ jobs:
 
       - name: Run Governed Change Firewall (Gates G0-G29)
         id: firewall
+        env:
+          BLUEPRINT_TIMEOUT: 600s
+          BLUEPRINT_SANDBOX_TIMEOUT: 600s
+          BLUEPRINT_SANDBOX_TEST: "go test -short ./internal/blueprint/receipt/... ./internal/cockpit/... ./internal/loop/..."
         run: |
           BASE_SHA="${{ github.event.pull_request.base.sha }}"
           if [ -z "$BASE_SHA" ] || ! git rev-parse --verify "$BASE_SHA" >/dev/null 2>&1; then

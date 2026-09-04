@@ -121,11 +121,19 @@ func (c Check) Run(ctx context.Context, req domain.ChangeRequest) (result domain
 
 	targets := c.config.Matrix
 	if len(targets) == 0 {
+		buildCmd := []string{"go", "build", "./..."}
+		if env := os.Getenv("BLUEPRINT_SANDBOX_BUILD"); env != "" {
+			buildCmd = SplitCommand(env)
+		}
+		testCmd := []string{"go", "test", "-short", "./..."}
+		if env := os.Getenv("BLUEPRINT_SANDBOX_TEST"); env != "" {
+			testCmd = SplitCommand(env)
+		}
 		targets = []MatrixTarget{{
 			Name:  "go",
 			Dir:   ".",
-			Build: []string{"go", "build", "./..."},
-			Test:  []string{"go", "test", "./..."},
+			Build: buildCmd,
+			Test:  testCmd,
 		}}
 	}
 

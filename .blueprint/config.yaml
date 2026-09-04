@@ -1,0 +1,20 @@
+version: 1
+mode: enforce
+
+policies:
+  architecture: block
+  secrets: block
+  duplication: warn
+  tests: block
+  resilience: warn
+  approval: block
+execution:
+  timeout_seconds: 300
+
+sandbox:
+  timeout_seconds: 300
+  matrix:
+    - name: go
+      dir: .
+      build: go build ./cmd/...
+      test: go test ./internal/blueprint/receipt/... ./internal/cockpit/... ./internal/loop/...

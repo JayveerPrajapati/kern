@@ -7,7 +7,9 @@ package service
 import (
 	"context"
 	"fmt"
+	"os"
 	"sort"
+	"strconv"
 	"time"
 
 	"github.com/JayveerPrajapati/kern/internal/blueprint/audit"
@@ -474,8 +476,18 @@ func (s *BlueprintService) sinceMs(start time.Time) int64 {
 }
 
 func (c Config) timeoutDuration() time.Duration {
+	for _, key := range []string{"BLUEPRINT_TIMEOUT", "BLUEPRINT_CI_TIMEOUT"} {
+		if val := os.Getenv(key); val != "" {
+			if d, err := time.ParseDuration(val); err == nil && d > 0 {
+				return d
+			}
+			if secs, err := strconv.Atoi(val); err == nil && secs > 0 {
+				return time.Duration(secs) * time.Second
+			}
+		}
+	}
 	if c.TimeoutSec <= 0 {
-		return 0
+		return 300 * time.Second
 	}
 	return time.Duration(c.TimeoutSec) * time.Second
 }
