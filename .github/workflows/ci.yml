@@ -92,6 +92,7 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+      - uses: ./.github/actions/setup-tools
       - name: Run tests with coverage
         run: go test -short -timeout 10m -coverprofile=coverage.out -covermode=atomic ./...
       - name: Upload coverage to Codecov

@@ -95,8 +95,9 @@ func (h *HTTPFault) Prepare(ctx context.Context) error {
 		}
 		w.WriteHeader(h.status)
 	})
-	h.server = &http.Server{Handler: mux}
-	go func() { _ = h.server.Serve(listener) }()
+	srv := &http.Server{Handler: mux}
+	h.server = srv
+	go func() { _ = srv.Serve(listener) }()
 	return nil
 }
 
@@ -322,8 +323,9 @@ func (m *MalformedJSON) Prepare(ctx context.Context) error {
 		_, _ = w.Write([]byte(`{"key": "value"`))
 	})
 
-	m.server = &http.Server{Handler: mux}
-	go func() { _ = m.server.Serve(listener) }()
+	srv := &http.Server{Handler: mux}
+	m.server = srv
+	go func() { _ = srv.Serve(listener) }()
 	return nil
 }
 
