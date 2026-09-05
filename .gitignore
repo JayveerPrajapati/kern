@@ -6,6 +6,7 @@ dist/
 /kern-mcp
 /blueprint
 /blueprint-mcp
+blueprint-result.json
 .blueprint/*
 !.blueprint/config.yaml
 
