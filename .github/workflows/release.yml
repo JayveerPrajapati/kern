@@ -128,14 +128,16 @@ jobs:
 
       # Shrink the binaries with UPX (best compression). Significant savings:
       # the Go runtime + three cmd binaries land ~50% smaller once packed.
-      # UPX is skipped for windows (cross-compressing .exe from the linux
-      # runner is fragile). The `kern` binary is smoke-tested with its `version`
-      # subcommand after compression; the MCP/stdio binaries (kern-mcp,
-      # kern-server) are verified structurally with `file` because they read
-      # stdin and have no non-interactive `version` subcommand. A broken
-      # compression still fails the job before SHA256SUMS is generated.
-      - name: Compress binaries with UPX (non-windows)
-        if: steps.vars.outputs.os != 'windows'
+      # UPX runs only for linux targets: windows .exe cross-compression from
+      # the linux runner is fragile, and UPX refuses macOS/Mach-O binaries
+      # without --force-macos (and even then the packed binary can be broken).
+      # The `kern` binary is smoke-tested with its `version` subcommand after
+      # compression; the MCP/stdio binaries (kern-mcp, kern-server) are verified
+      # structurally with `file` because they read stdin and have no
+      # non-interactive `version` subcommand. A broken compression still fails
+      # the job before SHA256SUMS is generated.
+      - name: Compress binaries with UPX (linux only)
+        if: steps.vars.outputs.os == 'linux'
         shell: bash
         run: |
           sudo apt-get install -y -qq upx-ucl >/dev/null 2>&1 || sudo apt-get install -y -qq upx >/dev/null 2>&1

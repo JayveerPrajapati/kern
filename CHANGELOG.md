@@ -22,7 +22,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   - Added a proactive `Verify tool availability` step in `.github/workflows/ci.yml`.
 - **Test Robustness**: Enhanced `cmd/blueprint/g25_test.go` to ignore environment-level fallback warnings (`secret:incumbent-unavailable`) during file-level provenance validation.
 
-## [0.9.5.1] - 2026-09-05
+## [0.9.5.2] - 2026-09-05
 
 ### Security
 
