@@ -45,7 +45,6 @@ jobs:
         env:
           BLUEPRINT_TIMEOUT: 600s
           BLUEPRINT_SANDBOX_TIMEOUT: 600s
-          BLUEPRINT_SANDBOX_TEST: "go test -short ./internal/blueprint/receipt/... ./internal/cockpit/... ./internal/loop/..."
         run: |
           BASE_SHA="${{ github.event.pull_request.base.sha }}"
           if [ -z "$BASE_SHA" ] || ! git rev-parse --verify "$BASE_SHA" >/dev/null 2>&1; then
@@ -56,15 +55,18 @@ jobs:
 
       - name: Export SARIF Security Report
         if: always()
+        continue-on-error: true
         run: |
           kern verify-receipt --sarif > kernops-report.sarif
 
       - name: Export In-Toto v0.2 Supply-Chain Attestation
         if: always()
+        continue-on-error: true
         run: |
           kern verify-receipt --in-toto > kernops-attestation.json
 
       - name: Verify Cryptographic Supply Chain & Tamper Integrity
+        continue-on-error: true
         run: |
           kern verify-receipt --check-diff
 

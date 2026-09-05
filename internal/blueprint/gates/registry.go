@@ -218,7 +218,7 @@ var Registry = []Gate{
 		TestFile:    "internal/blueprint/adapters/kern/g7_test.go",
 		TestFuncs: []string{
 			"TestG7_ArchitectureRepairLoop",
-			"TestG7_SecretRepairLoop",
+			"TestG7_SecretRepairLoop", // #gitleaks:allow test function name
 			"TestG7_MCPRepairLoop",
 			"TestG7_FeedbackContractAudit",
 			"TestG7_VagueResponseRejected",
@@ -372,7 +372,7 @@ var Registry = []Gate{
 			"TestG15_ProposedSecretBlocked",
 			"TestG15_ProposedCleanPass",
 			"TestG15_ProposedMalformedArgs",
-			"TestG15_ProposedSecretScanUsesContent",
+			"TestG15_ProposedSecretScanUsesContent", // #gitleaks:allow test function name
 			"TestG15_ProposedDuplicationWarn",
 		},
 		Package: "mcp",
