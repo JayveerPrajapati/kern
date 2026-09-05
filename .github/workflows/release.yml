@@ -140,7 +140,18 @@ jobs:
         run: |
           sudo apt-get install -y -qq upx-ucl >/dev/null 2>&1 || sudo apt-get install -y -qq upx >/dev/null 2>&1
           dir="${{ steps.vars.outputs.dir }}"
-          upx --best --no-lzma "$dir/kern" && "$dir/kern" version >/dev/null
+          upx --best --no-lzma "$dir/kern"
+          # Only smoke-test by executing when the built binary can run on this
+          # runner (GOOS/GOARCH == host). Cross-compiled binaries (e.g. an
+          # arm64 build on the amd64 ubuntu runner) execute fine at build time
+          # but fail with "Exec format error" at runtime; UPX must not try to
+          # run those, only structurally verify them with `file`.
+          if [ "${{ steps.vars.outputs.os }}" = "linux" ] && \
+             [ "${{ steps.vars.outputs.arch }}" = "$(uname -m | sed 's/x86_64/amd64/')" ]; then
+            "$dir/kern" version >/dev/null
+          else
+            file "$dir/kern" | grep -qi "ELF"
+          fi
           upx --best --no-lzma "$dir/kern-server" && file "$dir/kern-server" | grep -qi "ELF"
           upx --best --no-lzma "$dir/kern-mcp" && file "$dir/kern-mcp" | grep -qi "ELF"
           echo "compressed sizes:"
