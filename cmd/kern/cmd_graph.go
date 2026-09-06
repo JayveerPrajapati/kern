@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"github.com/JayveerPrajapati/kern/internal/app"
@@ -622,7 +623,7 @@ func runCochange(rest []string) {
 		}
 	}
 	from, to := splitRange(f.range_)
-	report, err := intel.CoChange(root, from, to)
+	report, err := intel.CoChangeContext(context.Background(), root, from, to)
 	if err != nil {
 		fatal("%v", err)
 	}
@@ -769,9 +770,20 @@ func runTrace(rest []string) {
 	} else {
 		b, err := os.ReadFile(sourceName)
 		if err != nil {
-			fatal("%v", err)
+			if os.IsNotExist(err) && intel.LooksLikeTrace(sourceName) {
+				// Not a path — inline trace text such as
+				// `kern trace "path/file.py:24 selectSlice"` (report A6).
+				src = sourceName
+				sourceName = "inline"
+			} else {
+				if os.IsNotExist(err) {
+					fatal("trace: file not found: %s (pass a path, `-` for stdin, or inline trace text)", sourceName)
+				}
+				fatal("%v", err)
+			}
+		} else {
+			src = string(b)
 		}
-		src = string(b)
 	}
 	root := "."
 	if len(args) > 1 {

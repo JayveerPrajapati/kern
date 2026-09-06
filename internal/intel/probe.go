@@ -51,6 +51,10 @@ func Probe(ix *index.Index, task string, maxTokens int) *ProbeReport {
 	}
 	candidates := map[string]bool{}
 	for _, w := range identRe.FindAllString(task, -1) {
+		low := strings.ToLower(w)
+		if stopWords[low] && !strings.Contains(w, ".") && !strings.Contains(w, "_") && !isCamelCase(w) {
+			continue
+		}
 		if r, ok := Resolve(ix, w); ok {
 			candidates[r] = true
 		}
@@ -224,6 +228,25 @@ var stopWords = map[string]bool{
 	"task": true, "todo": true, "feature": true, "change": true,
 	"add": true, "remove": true, "update": true, "create": true, "delete": true,
 	"get": true, "set": true, "new": true, "old": true,
+	"find": true, "found": true, "search": true, "check": true, "call": true,
+	"calls": true, "see": true, "try": true, "tries": true, "run": true, "runs": true,
+	"want": true, "wants": true, "make": true, "makes": true, "know": true, "give": true,
+	"show": true, "shows": true, "like": true, "work": true, "works": true,
+}
+
+func isCamelCase(s string) bool {
+	hasLower := false
+	hasUpperAfterLower := false
+	for i, r := range s {
+		if r >= 'a' && r <= 'z' {
+			hasLower = true
+		} else if r >= 'A' && r <= 'Z' {
+			if i > 0 {
+				hasUpperAfterLower = true
+			}
+		}
+	}
+	return hasLower && hasUpperAfterLower
 }
 
 // extractKeywords pulls meaningful keywords from a natural-language task

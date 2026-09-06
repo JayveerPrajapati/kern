@@ -177,6 +177,34 @@ func TestProbeNoAnchors(t *testing.T) {
 	}
 }
 
+func TestProbeFiltersStopwords(t *testing.T) {
+	ix := &index.Index{
+		Symbols: []index.Symbol{
+			{Kind: "func", Name: "find", File: "find.go", Line: 10},
+			{Kind: "func", Name: "when", File: "when.go", Line: 20},
+			{Kind: "func", Name: "UserService", File: "user.go", Line: 30},
+		},
+		Calls:   map[string][]string{},
+		Callers: map[string][]string{},
+	}
+	r := Probe(ix, "When the system tries to find a user, UserService should handle it", 4000)
+	for _, a := range r.Anchors {
+		if a.Name == "when" || a.Name == "find" {
+			t.Errorf("stopword %q should not be anchored in probe report", a.Name)
+		}
+	}
+	foundUserService := false
+	for _, a := range r.Anchors {
+		if a.Name == "UserService" {
+			foundUserService = true
+			break
+		}
+	}
+	if !foundUserService {
+		t.Errorf("expected UserService to be anchored, got %+v", r.Anchors)
+	}
+}
+
 // Probe fuzzy fallback regression: when a natural-language task contains no
 // exact identifiers, the probe should still resolve via keyword matching
 // against symbol names. "decommission a network service" should match
@@ -254,6 +282,60 @@ func TestTraceUnresolved(t *testing.T) {
 	r := Trace(ix, "fmt.Println(1)\nos.Exit(0)\n", "", 0)
 	if len(r.Hot) != 0 {
 		t.Errorf("stdlib-only trace should resolve nothing, got %+v", r.Hot)
+	}
+}
+
+// TestTracePlainFileLineFormat (report A6): a plain "path/file:line symbol"
+// trace line must resolve the trailing symbol against the index, and inline
+// trace text (multi-line or with a file:line prefix) must be recognized as
+// trace content rather than a path.
+func TestTracePlainFileLineFormat(t *testing.T) {
+	dir := writeTree(t, map[string]string{
+		"lib/lib.go":       srcLib,
+		"client/client.go": srcClient,
+	})
+	ix, err := index.Build(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := Trace(ix, "lib/lib.go:41 Public\nclient/client.go:7 Caller\n", "inline", 0)
+	if r.Frames != 2 {
+		t.Fatalf("frames = %d, want 2", r.Frames)
+	}
+	want := map[string]bool{"Public": true, "Caller": true}
+	for _, h := range r.Hot {
+		if !want[h.Symbol] {
+			t.Errorf("unexpected hot symbol %q", h.Symbol)
+		}
+		delete(want, h.Symbol)
+	}
+	if len(want) != 0 {
+		t.Errorf("file:line symbols did not resolve: missing %v", want)
+	}
+
+	if !LooksLikeTrace("path/file.py:24 funcname") {
+		t.Error("single file:line name line should look like inline trace text")
+	}
+	if !LooksLikeTrace("line1\nline2\n") {
+		t.Error("multi-line text should look like inline trace text")
+	}
+	if LooksLikeTrace("trace.out") {
+		t.Error("a bare filename must not look like inline trace text")
+	}
+}
+
+// TestRenderTraceFormatHint: an unresolved trace returns a format hint listing
+// the accepted input shapes (report A6).
+func TestRenderTraceFormatHint(t *testing.T) {
+	dir := writeTree(t, map[string]string{"lib/lib.go": srcLib})
+	ix, err := index.Build(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := Trace(ix, "path/file.py:24 missingSymbol", "inline", 0)
+	out := RenderTrace(r)
+	if !strings.Contains(out, "accepted formats") {
+		t.Errorf("unresolved trace should carry a format hint, got: %q", out)
 	}
 }
 

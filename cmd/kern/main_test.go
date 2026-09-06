@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/JayveerPrajapati/kern/internal/domain"
 )
 
 // loopCliFixture writes a tiny single-package Go module so the loop's
@@ -109,3 +111,80 @@ func TestRunWorkflowCLI(t *testing.T) {
 		}
 	}
 }
+
+// TestReadStdinNonTTY (report A15 regression) pins the v0.9.5.2 fix: reading
+// stdin must never block on a character device (interactive terminal), return
+// real piped content for a regular file, and respect the size cap.
+func TestReadStdinNonTTY(t *testing.T) {
+	old := os.Stdin
+	t.Cleanup(func() { os.Stdin = old })
+
+	// A pipe (non-TTY) delivers content.
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.WriteString("chore: fix pipe input\n")
+	w.Close()
+	os.Stdin = r
+	b, err := readStdin()
+	if err != nil {
+		t.Fatalf("readStdin(pipe): %v", err)
+	}
+	if string(b) != "chore: fix pipe input\n" {
+		t.Errorf("readStdin(pipe) = %q", b)
+	}
+	r.Close()
+
+	// An empty regular file reads as empty (non-TTY, no hang).
+	empty := filepath.Join(t.TempDir(), "empty")
+	if err := os.WriteFile(empty, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.Open(empty)
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdin = f
+	if b, err := readStdin(); err != nil || len(b) != 0 {
+		t.Fatalf("readStdin(empty file) = %q, %v; want empty, nil", b, err)
+	}
+	f.Close()
+
+	// A character device (/dev/null on POSIX) must return immediately with
+	// nil content — this is the interactive-terminal case that used to hang
+	// until v0.9.5.2.
+	devNull, err := os.Open(os.DevNull)
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdin = devNull
+	if b, err := readStdin(); err != nil || b != nil {
+		t.Fatalf("readStdin(char device) = %q, %v; want nil, nil (no blocking)", b, err)
+	}
+	devNull.Close()
+}
+
+func TestRunCompactAbsolutePathInCwd(t *testing.T) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	abs := filepath.Join(cwd, "main.go")
+	runCompact([]string{abs})
+}
+
+func TestRenderStatelessPlanNetNewFeature(t *testing.T) {
+	pkt := domain.ContextPacket{
+		Symbols: []domain.Symbol{{Name: "RandomTest"}},
+		Files:   []domain.File{{Path: "foo_test.go"}},
+	}
+	rendered := renderStatelessPlan("Add REST endpoint for consumer lag", pkt)
+	if strings.Contains(rendered, "RandomTest") || strings.Contains(rendered, "foo_test.go") {
+		t.Errorf("rendered plan should not contain random test components for net-new feature, got:\n%s", rendered)
+	}
+	if !strings.Contains(rendered, "Scope: net-new feature") {
+		t.Errorf("expected net-new feature scope, got:\n%s", rendered)
+	}
+}
+
