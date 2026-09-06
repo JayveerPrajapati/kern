@@ -72,8 +72,15 @@ func TestFetchCapsBody(t *testing.T) {
 		_, _ = w.Write([]byte(strings.Repeat("a", 1000)))
 	}))
 	defer srv.Close()
-	if _, err := Fetch(srv.URL, 100); err == nil {
-		t.Fatal("expected size-cap error")
+	res, err := Fetch(srv.URL, 100)
+	if err != nil {
+		t.Fatalf("unexpected error on large body: %v", err)
+	}
+	if !res.Truncated {
+		t.Fatal("expected Truncated=true")
+	}
+	if len(res.Text) < 100 {
+		t.Fatalf("expected text length >= 100, got %d", len(res.Text))
 	}
 }
 

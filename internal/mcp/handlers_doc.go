@@ -133,6 +133,9 @@ func (s *Server) handleDocFetch(ctx context.Context, args map[string]any) (strin
 			return "", err
 		}
 		var b strings.Builder
+		if res.Truncated {
+			fmt.Fprintf(&b, "[Warning: document was truncated at size limit]\n\n")
+		}
 		fmt.Fprintf(&b, "fetched %s -> fetch/%s.md (%d chars, %d chunks indexed into %s)\n\n", rawURL, name, len(res.Text), added, root)
 		if res.Title != "" {
 			fmt.Fprintf(&b, "# %s\n\n", res.Title)
