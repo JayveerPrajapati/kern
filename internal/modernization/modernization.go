@@ -115,10 +115,8 @@ func (a *Analyzer) Analyze() (*ExtractionPlan, error) {
 
 	// symbol full-name -> owning community ID, and community ID -> display name.
 	symToCtx := map[string]string{}
-	idToName := map[string]string{}
+	idToName := deriveContextNames(communities)
 	for _, c := range communities {
-		name := contextName(c)
-		idToName[c.ID] = name
 		for _, s := range c.Symbols {
 			symToCtx[s] = c.ID
 		}
@@ -127,7 +125,7 @@ func (a *Analyzer) Analyze() (*ExtractionPlan, error) {
 	// 2. Compute cohesion and cross-context deps per community.
 	contexts := make([]BoundedContext, len(communities))
 	for i, c := range communities {
-		contexts[i] = buildContext(a.ix, c)
+		contexts[i] = buildContext(a.ix, c, idToName[c.ID])
 	}
 
 	// 3. Bridges between contexts (reuses intel.Bridges, which finds symbols
@@ -173,7 +171,7 @@ func (a *Analyzer) Analyze() (*ExtractionPlan, error) {
 		Contexts: contexts,
 		Bridges:  bridges,
 		Phases:   phases,
-		Summary:  buildSummary(contexts, bridges, order),
+		Summary:  buildSummary(contexts, bridges, order, a.ix),
 	}, nil
 }
 
@@ -185,7 +183,7 @@ func safetyScore(ctx BoundedContext, churn map[string]float64) float64 {
 }
 
 // buildContext computes the metrics of one bounded context from its community.
-func buildContext(ix *index.Index, c intel.Community) BoundedContext {
+func buildContext(ix *index.Index, c intel.Community, name string) BoundedContext {
 	set := map[string]bool{}
 	for _, s := range c.Symbols {
 		set[s] = true
@@ -197,7 +195,7 @@ func buildContext(ix *index.Index, c intel.Community) BoundedContext {
 	}
 	outgoing, incoming := crossDeps(ix, set)
 	return BoundedContext{
-		Name:         contextName(c),
+		Name:         name,
 		Symbols:      append([]string(nil), c.Symbols...),
 		FileCount:    contextFileCount(ix, c.Symbols),
 		Cohesion:     cohesion,
@@ -253,8 +251,67 @@ func contextOutDeps(ix *index.Index, set map[string]bool) []string {
 	return out
 }
 
-// contextName derives a stable name from the dominant package directory.
-func contextName(c intel.Community) string {
+// deriveContextNames computes unique, descriptive names for all communities.
+// When multiple communities share the same base package name (e.g. "wrapper" or "impl"),
+// it disambiguates them using parent package directory and community hub symbol.
+func deriveContextNames(communities []intel.Community) map[string]string {
+	result := make(map[string]string, len(communities))
+	if len(communities) == 0 {
+		return result
+	}
+
+	// 1. Initial base name per community.
+	baseNames := make(map[string]string, len(communities))
+	nameFreq := make(map[string]int)
+	for _, c := range communities {
+		name := defaultContextName(c)
+		baseNames[c.ID] = name
+		nameFreq[name]++
+	}
+
+	// 2. Identify duplicates and disambiguate.
+	for _, c := range communities {
+		name := baseNames[c.ID]
+		if nameFreq[name] <= 1 {
+			result[c.ID] = name
+			continue
+		}
+
+		// Try parent path prefix if available: e.g. "auth/wrapper" instead of "wrapper"
+		cand := name
+		if len(c.Packages) > 0 {
+			pkg := filepath.ToSlash(c.Packages[0])
+			parts := strings.Split(strings.Trim(pkg, "/"), "/")
+			if len(parts) >= 2 {
+				cand = parts[len(parts)-2] + "/" + parts[len(parts)-1]
+			}
+		}
+		// If hub symbol is available, add it
+		if c.Hub != "" {
+			hub := c.Hub
+			if idx := strings.LastIndexAny(hub, "./"); idx >= 0 {
+				hub = hub[idx+1:]
+			}
+			cand = fmt.Sprintf("%s (%s)", cand, hub)
+		}
+		result[c.ID] = cand
+	}
+
+	// 3. Final safety deduplication pass: ensure strict uniqueness
+	used := make(map[string]int)
+	for _, c := range communities {
+		name := result[c.ID]
+		used[name]++
+		if used[name] > 1 {
+			result[c.ID] = fmt.Sprintf("%s-%d", name, used[name])
+		}
+	}
+
+	return result
+}
+
+// defaultContextName derives a candidate name from the dominant package directory.
+func defaultContextName(c intel.Community) string {
 	if len(c.Packages) > 0 {
 		base := c.Packages[0]
 		if i := strings.LastIndexAny(base, "/\\"); i >= 0 {
@@ -265,6 +322,11 @@ func contextName(c intel.Community) string {
 		}
 	}
 	return c.ID
+}
+
+// contextName derives a stable name from the dominant package directory.
+func contextName(c intel.Community) string {
+	return defaultContextName(c)
 }
 
 // internalDges counts call edges internal to the set vs edges crossing its
@@ -457,13 +519,13 @@ func phaseRisk(bridgeCount int) string {
 }
 
 // buildSummary produces a human-readable plan summary.
-func buildSummary(contexts []BoundedContext, bridges []Bridge, order []int) string {
+func buildSummary(contexts []BoundedContext, bridges []Bridge, order []int, ix *index.Index) string {
 	if len(order) == 0 {
 		return "Detected 0 bounded contexts. The monolith is already atomic."
 	}
 	first := contexts[order[0]].Name
 	last := contexts[order[len(order)-1]].Name
-	symbols, files := totalExtent(contexts)
+	symbols, files := totalExtent(contexts, ix)
 	return fmt.Sprintf(
 		"Detected %d bounded contexts with %d coupling bridges. Recommended %d-phase extraction: "+
 			"phase 1 (lowest risk) extracts %s, phase %d (highest risk) extracts %s. "+
@@ -472,12 +534,15 @@ func buildSummary(contexts []BoundedContext, bridges []Bridge, order []int) stri
 }
 
 // totalExtent sums symbols and distinct files across all contexts.
-func totalExtent(contexts []BoundedContext) (symbols, files int) {
+func totalExtent(contexts []BoundedContext, ix *index.Index) (symbols, files int) {
 	fileSet := map[string]bool{}
+	fileOf := fileOfSymbol(ix)
 	for _, ctx := range contexts {
 		symbols += len(ctx.Symbols)
 		for _, sym := range ctx.Symbols {
-			fileSet[sym] = true
+			if f := fileOf[sym]; f != "" {
+				fileSet[f] = true
+			}
 		}
 	}
 	return symbols, len(fileSet)
