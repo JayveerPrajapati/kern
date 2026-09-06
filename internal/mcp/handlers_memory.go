@@ -28,6 +28,18 @@ func (s *Server) handleMemoryAdd(ctx context.Context, args map[string]any) (stri
 	}
 }
 
+func memoryListText(entries []memory.Entry) string {
+	var b strings.Builder
+	for _, e := range entries {
+		marker := ""
+		if e.Source == "auto" {
+			marker = "[auto] "
+		}
+		fmt.Fprintf(&b, "%s  %s%s\n", e.Time.UTC().Format("2006-01-02 15:04"), marker, e.Text)
+	}
+	return strings.TrimSuffix(b.String(), "\n")
+}
+
 func (s *Server) handleMemoryList(ctx context.Context, args map[string]any) (string, error) {
 	{
 		root := argString(args, "root")
@@ -35,11 +47,7 @@ func (s *Server) handleMemoryList(ctx context.Context, args map[string]any) (str
 			cwd, _ := os.Getwd()
 			root = cwd
 		}
-		var b strings.Builder
-		for _, e := range memory.List(root) {
-			fmt.Fprintf(&b, "%s  %s\n", e.Time.UTC().Format("2006-01-02 15:04"), e.Text)
-		}
-		return strings.TrimSuffix(b.String(), "\n"), nil
+		return memoryListText(memory.List(root)), nil
 
 	}
 }
@@ -93,11 +101,7 @@ func (s *Server) handleMemory(ctx context.Context, args map[string]any) (string,
 			}
 			return "remembered.", nil
 		case "list":
-			var b strings.Builder
-			for _, e := range memory.List(root) {
-				fmt.Fprintf(&b, "%s  %s\n", e.Time.UTC().Format("2006-01-02 15:04"), e.Text)
-			}
-			return strings.TrimSuffix(b.String(), "\n"), nil
+			return memoryListText(memory.List(root)), nil
 		case "recall":
 			prompt := argString(args, "prompt")
 			if prompt == "" {

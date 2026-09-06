@@ -22,6 +22,9 @@ func RunGraph(args []string) int { return runGraph(args) }
 // RunInstall executes `blueprint install`.
 func RunInstall(args []string) int { return runInstall(args) }
 
+// RunInstallHook executes `blueprint install hook`.
+func RunInstallHook(args []string) int { return runInstallHook(args) }
+
 // RunWatch executes `blueprint watch`.
 func RunWatch(args []string) int { return runWatch(args) }
 

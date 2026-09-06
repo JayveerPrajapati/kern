@@ -807,8 +807,11 @@ async function runPayload(args: string[], timeoutMs?: number, preserveExit = fal
         async execute(args) {
           const flags: string[] = ["trace"]
           if (args.limit) flags.push("--limit", String(args.limit))
-          if (args.root) flags.push(args.root)
-          return withTempFile("trace.input.txt", args.trace, (file) => run([...flags, file]))
+          return withTempFile("trace.input.txt", args.trace, (file) => {
+            const rest: string[] = [...flags, file]
+            if (args.root) rest.push(args.root)
+            return run(rest)
+          })
         },
       }),
       kern_lock: tool({
@@ -1449,9 +1452,11 @@ async function runPayload(args: string[], timeoutMs?: number, preserveExit = fal
           root: tool.schema.string().optional(),
         },
         async execute(args) {
-          const flags: string[] = ["verify"]
-          if (args.root) flags.push(args.root)
-          return withTempFile("verify-input.txt", args.text, (file) => run([...flags, file]))
+          return withTempFile("verify-input.txt", args.text, (file) => {
+            const rest: string[] = ["verify", file]
+            if (args.root) rest.push(args.root)
+            return run(rest)
+          })
         },
       }),
       kern_check_draft: tool({

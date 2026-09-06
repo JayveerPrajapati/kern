@@ -120,3 +120,25 @@ func TestDedupe(t *testing.T) {
 		t.Fatalf("expected 3 unique, got %v", got)
 	}
 }
+
+// TestCallEdgesIsDirectedEdgeSum (report A10): the buddy digest's "Call edges"
+// must be the total directed caller→callee edge count, not the number of
+// distinct callers — it must agree with `kern onboard`'s metric. A caller
+// with two callees contributes two edges.
+func TestCallEdgesIsDirectedEdgeSum(t *testing.T) {
+	ix := &index.Index{
+		Calls: map[string][]string{
+			"main":  {"shared", "helper"},
+			"f1":    {"shared"},
+			"f2":    {"shared"},
+			"shared": {"deep"},
+		},
+	}
+	if got := callEdges(ix); got != 5 {
+		t.Fatalf("callEdges = %d, want 5 (4 caller keys but 5 directed edges)", got)
+	}
+	out := indexSection(ix)
+	if !strings.Contains(out, "Call edges: 5") {
+		t.Errorf("indexSection should report 5 call edges, got %q", out)
+	}
+}

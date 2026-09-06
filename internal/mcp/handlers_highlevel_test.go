@@ -132,3 +132,38 @@ func TestHandleMeta_PhaseArg(t *testing.T) {
 		t.Errorf("expected phase hint in response, got: %s", out)
 	}
 }
+
+// TestClassifyMetaRequest_Flow routes flow questions to a graph answer
+// (report A9): a flow query with no extractable symbol must reach
+// kern_entry_points, and one naming a CamelCase symbol must reach kern_walk —
+// never the flat kern_search fallback.
+func TestClassifyMetaRequest_Flow(t *testing.T) {
+	cases := []classifyCase{
+		{"flow_no_symbol", "how does the bundle upload flow work end to end?", "kern_entry_points", nil},
+		{"flow_sym", "how does the UploadBundle flow work end to end?", "kern_walk", map[string]string{"symbol": "UploadBundle", "depth": "4"}},
+		{"workflow_no_symbol", "explain the deployment workflow pipeline", "kern_entry_points", nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tool, args := classifyMetaRequest(tc.request)
+			if tool != tc.wantTool {
+				t.Fatalf("classifyMetaRequest(%q) = %q, want %q", tc.request, tool, tc.wantTool)
+			}
+			for k, want := range tc.wantArgs {
+				if got := args[k]; got != want {
+					t.Errorf("args[%s] = %q, want %q", k, got, want)
+				}
+			}
+		})
+	}
+}
+
+// TestClassifyMetaRequest_ImpactKeepsVerbThreshold pins A8 at the routing
+// layer: the impact route still routes on "what breaks" regardless of the
+// stoplist, and leaves symbol selection to the downstream resolver.
+func TestClassifyMetaRequest_ImpactBreaksVerb(t *testing.T) {
+	tool, _ := classifyMetaRequest("what breaks if I remove the translate function from cmaas_controller?")
+	if tool != "kern_impact" {
+		t.Fatalf("classifyMetaRequest = %q, want kern_impact", tool)
+	}
+}

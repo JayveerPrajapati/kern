@@ -43,7 +43,7 @@ func runMemory(rest []string) {
 			return
 		case "list":
 			for _, e := range memory.List(root) {
-				fmt.Printf("%s  %s\n", e.Time.UTC().Format("2006-01-02 15:04"), e.Text)
+				fmt.Printf("%s  %s%s\n", e.Time.UTC().Format("2006-01-02 15:04"), label(e.Source), e.Text)
 			}
 			return
 		case "recall":
@@ -55,7 +55,7 @@ func runMemory(rest []string) {
 				k = 5
 			}
 			for _, e := range memory.Recall(root, args[1], k) {
-				fmt.Printf("%s  %s\n", e.Time.UTC().Format("2006-01-02 15:04"), e.Text)
+				fmt.Printf("%s  %s%s\n", e.Time.UTC().Format("2006-01-02 15:04"), label(e.Source), e.Text)
 			}
 			return
 		}
@@ -68,7 +68,7 @@ func runMemory(rest []string) {
 		return
 	}
 	for _, e := range memory.List(root) {
-		fmt.Printf("%s  %s\n", e.Time.UTC().Format("2006-01-02 15:04"), e.Text)
+		fmt.Printf("%s  %s%s\n", e.Time.UTC().Format("2006-01-02 15:04"), label(e.Source), e.Text)
 	}
 
 }
@@ -90,7 +90,17 @@ func runRecall(rest []string) {
 		k = 5
 	}
 	for _, e := range memory.Recall(root, args[0], k) {
-		fmt.Printf("%s  %s\n", e.Time.UTC().Format("2006-01-02 15:04"), e.Text)
+		fmt.Printf("%s  %s%s\n", e.Time.UTC().Format("2006-01-02 15:04"), label(e.Source), e.Text)
 	}
 
+}
+
+// label prefixes an auto-captured entry (raw prompt/tool outcome) so `kern
+// memory list` visibly distinguishes automatic session captures from deliberate
+// lessons (report A17).
+func label(source string) string {
+	if source == "auto" {
+		return "[auto] "
+	}
+	return ""
 }

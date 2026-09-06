@@ -40,6 +40,26 @@ func TestParseLevel(t *testing.T) {
 	}
 }
 
+// TestAutonomyUnsetSentinel verifies the unset sentinel can never collide
+// with a valid level: ParseLevel must never return it, and L0 (the zero
+// value) must remain a distinct, valid read-only level.
+func TestAutonomyUnsetSentinel(t *testing.T) {
+	if _, err := ParseLevel("L0"); err != nil {
+		t.Fatalf("ParseLevel(L0): %v", err)
+	}
+	if _, err := ParseLevel("-1"); err == nil {
+		t.Fatal("ParseLevel(-1) must error, otherwise the sentinel collides with a parseable level")
+	}
+	if L0 == AutonomyUnset {
+		t.Fatal("L0 must not equal the unset sentinel")
+	}
+	for _, l := range []Autonomy{L0, L1, L2, L3, L4, L5} {
+		if l == AutonomyUnset {
+			t.Fatalf("level %s collides with the unset sentinel", l)
+		}
+	}
+}
+
 func TestAutonomyGating(t *testing.T) {
 	// L0: analysis only. Code/deploy/learn/protect skipped.
 	if L0.AllowsStage(stageCode) || L0.AllowsStage(stageDeploy) || L0.AllowsStage(stageLearn) || L0.AllowsStage(stageProtect) {
@@ -628,5 +648,70 @@ func TestLoopRunContextCancellation(t *testing.T) {
 	}
 	if res == nil || len(res.Stages) == 0 || res.Stages[0].Status != "cancelled" {
 		t.Fatalf("expected stage to be cancelled, got: %+v", res)
+	}
+}
+
+// TestVerifyReadOnlyLoopAdvisory (report A13, MED): a repo that carries
+// pre-existing hardcoded-secret findings makes the verification verdict FAIL.
+// At read-only levels (L0/L1) the loop makes no changes, so that FAIL can only
+// reflect repo hygiene, never the task's change surface — the run must succeed
+// and surface the summary as an advisory (Result.VerifyAdvisory) instead of
+// aborting. At a write level (L2+) the same repo still hard-fails the verify
+// stage.
+func TestVerifyReadOnlyLoopAdvisory(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "go.mod"), []byte("module advisory\n\ngo 1.20\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "main.go"), []byte("package main\nfunc main() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Hardcoded Stripe-live key — sec.Scan flags it as a critical finding, so
+	// the verification verdict is FAIL on this repo surface.
+	if err := os.WriteFile(filepath.Join(root, "secret.go"), []byte("package main\nvar apiKey = \"sk-live-1234567890abcdef12345678\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, level := range []Autonomy{L0, L1} {
+		// The learn stage runs from L1 upward, so wire a memory store.
+		lp, err := NewLoop(LoopConfig{Root: root, Level: level, Mem: memory.NewMemoryStore(t.TempDir())})
+		if err != nil {
+			t.Fatalf("NewLoop(L%s): %v", level, err)
+		}
+		res, runErr := lp.Run("summarize the slice selection algorithms", nil)
+		if runErr != nil {
+			t.Fatalf("L%s run failed on pre-existing repo hygiene: %v", level, runErr)
+		}
+		if res.VerifyAdvisory == "" {
+			t.Fatalf("L%s run: expected a verify advisory for pre-existing findings", level)
+		}
+		if !strings.Contains(res.VerifyAdvisory, "security") {
+			t.Fatalf("L%s advisory should mention the security scan: %q", level, res.VerifyAdvisory)
+		}
+		verifyStatus := ""
+		for _, st := range res.Stages {
+			if st.Stage == stageVerify {
+				verifyStatus = st.Status
+			}
+		}
+		if verifyStatus != "ok" {
+			t.Fatalf("L%s verify stage status = %q, want ok (advisory)", level, verifyStatus)
+		}
+	}
+
+	// Write levels must still fail: the verify now gates the loop's changes.
+	lp, err := NewLoop(LoopConfig{Root: root, Level: L2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := lp.Run("refactor main", nil)
+	if err == nil {
+		t.Fatal("L2 run should fail verification on the pre-existing secret")
+	}
+	if !strings.Contains(err.Error(), "verify:") {
+		t.Fatalf("L2 error = %v, want a verify failure", err)
+	}
+	if res != nil && res.VerifyAdvisory != "" {
+		t.Fatal("L2 run must not produce a read-only advisory")
 	}
 }

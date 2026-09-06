@@ -171,13 +171,16 @@ func runCI(args []string) int {
 	// failures are never cached; see persistVerdict).
 	persistVerdict(bypassCache, kernVersion, cacheDir, cacheKey, result)
 
-	// Step 6: Emit artifact + summary.
+	// Step 6: Tamper-evident receipt (P1.4) for PASS/WARN validations only
+	// (see sealReceipt). Sealed BEFORE the artifact is emitted so the
+	// artifact can cite the receipt id, letting `kern verify-receipt
+	// <artifact.json>` verify the emission. Best-effort: a failed receipt
+	// write must never fail CI (opens with an empty ReceiptID).
+	artifact.ReceiptID = sealReceipt(fl.receiptFlag, result, absRoot, fl.baseRef, fl.headRef, auditWriter)
+
+	// Step 7: Emit artifact + summary.
 	finishCIArtifact(&artifact, result, cfg, start, cacheKey)
 	emitCIResult(artifact, fl.artifactFile, fl.noHuman, fl.jsonOut)
-
-	// Step 7: Tamper-evident receipt (P1.4) for PASS/WARN validations only
-	// (see sealReceipt). Best-effort: a failed receipt write must never fail CI.
-	sealReceipt(fl.receiptFlag, result, absRoot, fl.baseRef, fl.headRef, auditWriter)
 
 	return ciExitCode(result, fl.strictLatency)
 }
@@ -342,17 +345,18 @@ func validateInWorktree(repoRoot, head string) (valRoot string, cleanup func(), 
 // the merge-time enforcement artifact verified by `blueprint verify-receipt`.
 // Only successful validations get a receipt — a failed validation is its own
 // evidence and must not be sealed. Best-effort: a failed receipt write must
-// never fail CI.
-func sealReceipt(enabled bool, result domain.ValidationResult, absRoot, baseRef, headRef string, auditWriter *audit.Writer) {
+// never fail CI. Returns the sealed receipt id ("" when none was sealed).
+func sealReceipt(enabled bool, result domain.ValidationResult, absRoot, baseRef, headRef string, auditWriter *audit.Writer) string {
 	if !enabled || (result.Status != domain.StatusPass && result.Status != domain.StatusWarn) {
-		return
+		return ""
 	}
 	rec := receipt.Generate(result, absRoot, baseRef, headRef, auditWriter.LastHash(), auditWriter.LastKernChainHash())
 	if err := receipt.NewStore(absRoot).Save(rec); err != nil {
 		fmt.Fprintf(os.Stderr, "blueprint: warning: cannot save receipt: %v\n", err)
-	} else {
-		fmt.Fprintf(os.Stderr, "Receipt %s generated at .blueprint/receipts/%s.json. Verify with: blueprint verify-receipt %s\n", rec.ReceiptID, rec.ReceiptID, rec.ReceiptID)
+		return ""
 	}
+	fmt.Fprintf(os.Stderr, "Receipt %s generated at .blueprint/receipts/%s.json. Verify with: blueprint verify-receipt %s\n", rec.ReceiptID, rec.ReceiptID, rec.ReceiptID)
+	return rec.ReceiptID
 }
 
 // verifyRevisions checks that the base and head revisions exist before any
@@ -536,6 +540,11 @@ type CIArtifact struct {
 	CacheStatus string `json:"cache_status,omitempty"`
 	// CacheKey is the SHA-256 input fingerprint that addressed this verdict.
 	CacheKey string `json:"cache_key,omitempty"`
+	// ReceiptID is the correlation id of the tamper-evident receipt sealed for
+	// this run (PASS/WARN only), so `kern verify-receipt <artifact.json>` can
+	// verify the emission end-to-end. Empty on BLOCK/ERROR runs (no receipt
+	// is sealed for those) and when the receipt write itself failed.
+	ReceiptID string `json:"receipt_id,omitempty"`
 }
 
 // CICheck is one check's breakdown in the CI artifact (P2-3): name, enforced

@@ -1,10 +1,13 @@
 package intel
 
 import (
+	"context"
 	"fmt"
 	"os/exec"
 	"sort"
 	"strings"
+
+	"github.com/JayveerPrajapati/kern/internal/code"
 )
 
 // CoChangeEntry is one file with its co-change partners: files that changed in
@@ -36,6 +39,16 @@ type CoChangeReport struct {
 // almost every file with a commit count of 1). The report is built from
 // commit metadata only (no call graph), so it works even where indexing fails.
 func CoChange(root, from, to string) (*CoChangeReport, error) {
+	return CoChangeContext(context.Background(), root, from, to)
+}
+
+// CoChangeContext computes co-change coupling from git history with context
+// cancellation and deadline support, so deep vendor-heavy ranges can be bounded
+// by the caller instead of hanging (report A5).
+func CoChangeContext(ctx context.Context, root, from, to string) (*CoChangeReport, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	args := []string{"-C", root, "log", "--name-only", "--pretty=format:"}
 	if from != "" || to != "" {
 		if to == "" {
@@ -45,7 +58,7 @@ func CoChange(root, from, to string) (*CoChangeReport, error) {
 	} else {
 		args = append(args, "-n", "200")
 	}
-	out, err := exec.Command("git", args...).Output()
+	out, err := exec.CommandContext(ctx, "git", args...).Output()
 	if err != nil {
 		return nil, &GitError{Op: "git log --name-only", Err: err}
 	}
@@ -54,12 +67,14 @@ func CoChange(root, from, to string) (*CoChangeReport, error) {
 	counts := map[string]int{}              // commits per file
 	partners := map[string]map[string]int{} // file -> partner -> co-change count
 	for _, files := range commitFiles {
-		// Dedupe files within a commit (a rename appears once).
+		// Dedupe files within a commit (a rename appears once) and skip
+		// VCS/build/vendor-dir noise so the coupling map stays real-source
+		// only (report A5).
 		uniq := make([]string, 0, len(files))
 		uset := map[string]bool{}
 		for _, f := range files {
 			f = strings.TrimSpace(f)
-			if f == "" || uset[f] {
+			if f == "" || uset[f] || code.ShouldIgnore(f) {
 				continue
 			}
 			uset[f] = true

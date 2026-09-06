@@ -158,10 +158,15 @@ func (c *ArchitectureCheck) degradedWarnFinding(req domain.ChangeRequest) (domai
 	// kern's LoadBoundaries, which yields an empty rule set for a missing
 	// file). But architecture that is not evaluated must be visible, so a
 	// non-empty change surfaces a WARN finding instead of a bare SKIP.
+	// kern's index directory is gitignored, so a validation run in a
+	// detached-worktree sandbox (e.g. CI at a non-HEAD ref) will not contain
+	// it even when the source repo has a fresh index — distinguish that case
+	// from "boundaries were never declared" (report A4).
 	if _, err := os.Stat(filepath.Join(req.RepositoryRoot, ".kern")); err != nil {
 		if len(stagedFilePaths(req)) == 0 {
 			return domain.CheckResult{Name: c.Name(), Status: domain.StatusSkip, Skipped: true}, true
 		}
+		msg, expl, fix := archNoKernDetail(req.RepositoryRoot)
 		return domain.CheckResult{
 			Name:   c.Name(),
 			Status: domain.StatusWarn,
@@ -169,9 +174,9 @@ func (c *ArchitectureCheck) degradedWarnFinding(req domain.ChangeRequest) (domai
 				RuleID:       "architecture:not-enforced",
 				Severity:     domain.SeverityWarn,
 				Category:     domain.CategoryArchitecture,
-				Message:      "no .kern/ index present in this repository; architecture boundaries are not evaluated, so this change is not checked against any boundary rules",
-				Explanation:  "A missing .kern/ directory means no architecture boundaries have been declared (kern has never been run in this repo). Without the index, the guard check cannot detect boundary violations, so a change that would otherwise be blocked could pass silently.",
-				SuggestedFix: "Declare boundaries with `kern init` (or commit a .kern/boundaries.json) so this change is evaluated against real boundary rules, then re-run the check.",
+				Message:      msg,
+				Explanation:  expl,
+				SuggestedFix: fix,
 				RuleVersion:  "1",
 				Confidence:   1.0,
 				Scope:        "repo",
@@ -179,6 +184,36 @@ func (c *ArchitectureCheck) degradedWarnFinding(req domain.ChangeRequest) (domai
 		}, true
 	}
 	return domain.CheckResult{}, false
+}
+
+// archNoKernDetail builds the architecture:not-enforced message for a repo
+// (or validation sandbox) with no .kern/ at the evaluated path. When the git
+// worktree list shows the source repo keeps a .kern/ index elsewhere (kern's
+// index is gitignored, so a detached-worktree CI sandbox cannot see it), the
+// WARN is phrased as "sandbox cannot see the index" rather than "kern has
+// never been run here" (report A4).
+func archNoKernDetail(evalRoot string) (msg, explanation, fix string) {
+	noIndexAtAll := true
+	if out, err := exec.Command("git", "-C", evalRoot, "worktree", "list", "--porcelain").Output(); err == nil {
+		for _, line := range strings.Split(string(out), "\n") {
+			if !strings.HasPrefix(line, "worktree ") {
+				continue
+			}
+			p := strings.TrimSpace(strings.TrimPrefix(line, "worktree "))
+			if _, err := os.Stat(filepath.Join(p, ".kern")); err == nil {
+				noIndexAtAll = false
+				break
+			}
+		}
+	}
+	if noIndexAtAll {
+		return "no .kern/ index present in this repository; architecture boundaries are not evaluated, so this change is not checked against any boundary rules",
+			"No .kern/ means no architecture boundaries have been declared for this repository. Without the index, the guard check cannot detect boundary violations, so a change that would otherwise be blocked could pass silently.",
+			"Declare boundaries with `kern guard init` (writes .kern/boundaries.json) or commit a .kern/boundaries.json, then re-run the check."
+	}
+	return "the repository has a .kern/ index, but this validation sandbox cannot see it; architecture boundaries were not enforced for this change",
+		"The .kern/ index exists in the repository's git worktree(s), but this validation ran in an isolated sandbox (e.g. a detached-worktree CI run) where the gitignored index is absent. The change was therefore NOT checked against the declared boundary rules — it is not proof that boundaries are clean.",
+		"Commit boundaries into the repo so sandboxes can enforce them (kern guard init writes .kern/boundaries.json; make sure it is tracked, while .kern/the-index itself stays gitignored), or run the check against the indexed working tree."
 }
 
 // ensureFreshIndex rebuilds the kern index only when it is stale and returns

@@ -102,7 +102,7 @@ clean:
 # at the repo root by ad-hoc builds (go build without -o, go test -c, pip
 # imports). All targets are gitignored, so this only reclaims disk space.
 clean-artifacts:
-	rm -f kern kern-mcp kern-server blueprint blueprint-mcp
+	rm -f kern kern-mcp kern-server kernops
 	rm -f *.test
 	rm -f bench
 	rm -rf __pycache__

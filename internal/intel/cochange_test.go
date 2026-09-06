@@ -95,3 +95,35 @@ func TestRenderCoChange(t *testing.T) {
 		t.Error("empty-range header missing")
 	}
 }
+
+// TestCoChangeExcludesIgnored (report A5): vendored files must not appear in
+// the co-change coupling map or as partners.
+func TestCoChangeExcludesIgnored(t *testing.T) {
+	root := newVendorGitRepo(t)
+	report, err := CoChange(root, "", "")
+	if err != nil {
+		t.Fatalf("CoChange: %v", err)
+	}
+	for _, e := range report.Entries {
+		if e.File == "vendor/dep.go" || strings.Contains(e.File, "vendor/") {
+			t.Errorf("vendor file leaked into co-change report: %q", e.File)
+		}
+		for _, p := range e.Partners {
+			if strings.Contains(p, "vendor/") {
+				t.Errorf("vendor partner leaked for %q: %q", e.File, p)
+			}
+		}
+	}
+	var a *CoChangeEntry
+	for i := range report.Entries {
+		if report.Entries[i].File == "a.go" {
+			a = &report.Entries[i]
+		}
+	}
+	if a == nil {
+		t.Fatalf("a.go entry missing, entries=%v", report.Entries)
+	}
+	if a.PartnerCounts["vendor/dep.go"] != 0 {
+		t.Errorf("a.go must not list vendor/dep.go as a partner: %v", a.PartnerCounts)
+	}
+}

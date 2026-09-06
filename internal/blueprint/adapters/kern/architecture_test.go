@@ -338,6 +338,55 @@ func TestArchitectureCheckMissingIndex(t *testing.T) {
 	}
 }
 
+// TestArchitectureCheckSandboxIndexInvisible (report A4): kern's .kern index
+// is gitignored, so a validation run in a detached-worktree sandbox (CI at a
+// non-HEAD ref) cannot see it even though the source repo has a fresh index.
+// The not-enforced WARN must then say "the sandbox cannot see the index"
+// rather than "kern has never been run in this repo".
+func TestArchitectureCheckSandboxIndexInvisible(t *testing.T) {
+	src := t.TempDir()
+	runGit(t, src, "init", "-q")
+	runGit(t, src, "config", "user.email", "t@t")
+	runGit(t, src, "config", "user.name", "t")
+	writeGoFile(t, src, "main.go", "package main\n\nfunc main() {}\n")
+	runGit(t, src, "add", ".")
+	runGit(t, src, "commit", "-qm", "init")
+	// The source repo keeps a fresh (gitignored) index.
+	writeBoundaries(t, src, `{}`)
+
+	wt := filepath.Join(t.TempDir(), "wt")
+	runGit(t, src, "worktree", "add", "-q", "--detach", wt)
+	if _, err := os.Stat(filepath.Join(wt, ".kern")); !os.IsNotExist(err) {
+		t.Fatalf("detached worktree unexpectedly contains .kern (it is gitignored): %v", err)
+	}
+
+	client := &KernClient{binaryPath: "kern", runner: fakeRunner("", "", 0, nil)}
+	chk := NewArchitectureCheck(client)
+	cr, err := chk.Run(context.Background(), domain.ChangeRequest{
+		RepositoryRoot: wt,
+		Files:          []domain.FileChange{{Path: "main.go", Op: domain.OpWrite}},
+	})
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	if cr.Status != domain.StatusWarn {
+		t.Fatalf("Status = %q, want %q", cr.Status, domain.StatusWarn)
+	}
+	f := cr.Findings[0]
+	if f.RuleID != "architecture:not-enforced" {
+		t.Fatalf("RuleID = %q, want architecture:not-enforced", f.RuleID)
+	}
+	if !strings.Contains(f.Message, "sandbox") {
+		t.Errorf("Message should say the sandbox cannot see the index, got: %q", f.Message)
+	}
+	if strings.Contains(f.Explanation, "never been run") {
+		t.Errorf("Explanation misattributes the missing sandbox index to the repo, got: %q", f.Explanation)
+	}
+	if !strings.Contains(f.SuggestedFix, "kern guard init") {
+		t.Errorf("SuggestedFix should name `kern guard init`, got: %q", f.SuggestedFix)
+	}
+}
+
 // TestArchitectureCheckMissingIndexEmptyChange: an empty change (no files to
 // check) must not surface the not-enforced warning — there is no signal to
 // warn about, so the check keeps the old clean SKIP. (service.Validate

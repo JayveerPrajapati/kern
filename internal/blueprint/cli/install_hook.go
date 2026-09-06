@@ -69,7 +69,7 @@ func installSingleHook(gitDir, hookName, checkFlags, desc string) error {
 	// Check if a hook already exists and is NOT our hook.
 	if existing, err := os.ReadFile(hookPath); err == nil {
 		if !isBlueprintHook(existing) {
-			return fmt.Errorf("a %s hook already exists at %s\n  To overwrite, remove it first: rm %s\n  Then re-run: blueprint install hook %s", hookName, hookPath, hookPath, hookName)
+			return fmt.Errorf("a %s hook already exists at %s\n  To overwrite, remove it first: rm %s\n  Then re-run: kern install hook %s", hookName, hookPath, hookPath, hookName)
 		}
 	}
 
@@ -79,9 +79,12 @@ func installSingleHook(gitDir, hookName, checkFlags, desc string) error {
 	}
 
 	hookContent := fmt.Sprintf("#!/bin/sh\n"+
-		"# Blueprint %s hook — thin adapter to `blueprint check %s`\n"+
-		"# Installed by `blueprint install hook`.\n"+
-		"exec blueprint check %s --format=terminal\n", hookName, checkFlags, checkFlags)
+		"# Blueprint %s hook — change-governance adapter to `kern check %s`\n"+
+		"# Installed by `kern check install` (Blueprint CLI, merged into kern).\n"+
+		"# Blueprint operations live inside kern (kern check / kern ci / kern sec);\n"+
+		"# there is no separate blueprint binary to keep in sync. KERN_BINARY\n"+
+		"# overrides the kern executable when it is not on PATH.\n"+
+		"exec \"${KERN_BINARY:-kern}\" check %s --format=terminal\n", hookName, checkFlags, checkFlags)
 
 	if err := os.WriteFile(hookPath, []byte(hookContent), 0o755); err != nil {
 		return fmt.Errorf("cannot write hook: %w", err)
@@ -92,7 +95,7 @@ func installSingleHook(gitDir, hookName, checkFlags, desc string) error {
 	}
 
 	fmt.Printf("Installed %s hook at %s\n", hookName, hookPath)
-	fmt.Printf("The hook runs `blueprint check %s` on %s.\n", checkFlags, desc)
+	fmt.Printf("The hook runs `kern check %s` on %s.\n", checkFlags, desc)
 	return nil
 }
 
@@ -155,10 +158,14 @@ func commonGitDir(gitDir string) string {
 }
 
 // isBlueprintHook returns true if the existing hook content was installed by
-// Blueprint (contains the Blueprint marker comment).
+// Blueprint change governance: either a legacy hook written by the standalone
+// `blueprint install hook`, or the current merged form written by
+// `kern install hook` (content contains a "kern <name> hook" governance
+// marker). Any other pre-existing hook is left untouched.
 func isBlueprintHook(content []byte) bool {
 	return bytes.Contains(content, []byte("Blueprint pre-commit hook")) ||
 		bytes.Contains(content, []byte("Blueprint pre-push hook")) ||
+		(bytes.Contains(content, []byte("change-governance")) && bytes.Contains(content, []byte("hook")) && bytes.Contains(content, []byte("kern"))) ||
 		(bytes.Contains(content, []byte("Blueprint")) && bytes.Contains(content, []byte("hook")))
 }
 

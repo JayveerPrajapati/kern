@@ -10,6 +10,12 @@ import (
 // of the closed loop; levels are explicit and never jumped.
 type Autonomy int
 
+// AutonomyUnset marks an unconfigured autonomy level. It is never a valid
+// level returned by ParseLevel (L0..L5 are 0..5), so callers can distinguish
+// "the caller did not specify a level" from an explicit L0 (which is the zero
+// value 0 and therefore would otherwise collide with Go's zero-value default).
+const AutonomyUnset Autonomy = -1
+
 const (
 	L0 Autonomy = iota // read-only analysis
 	L1                 // recommendations

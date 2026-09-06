@@ -168,3 +168,63 @@ func TestTestGaps(t *testing.T) {
 }
 
 var _ = index.Index{}
+
+// newVendorGitRepo returns a git repo history that churns both a real source
+// file and a vendored file, so ignore-exclusion has something to filter.
+func newVendorGitRepo(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
+	execGit(t, root, "init", "-q", "-b", "main")
+	execGit(t, root, "config", "user.email", "test@example.com")
+	execGit(t, root, "config", "user.name", "Test")
+	write := func(rel, content string) {
+		p := filepath.Join(root, rel)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("a.go", "package x\n")
+	execGit(t, root, "add", "a.go")
+	execGit(t, root, "commit", "-q", "-m", "commit 1")
+
+	write("vendor/dep.go", "package dep\n")
+	execGit(t, root, "add", ".")
+	execGit(t, root, "commit", "-q", "-m", "commit 2")
+
+	write("a.go", "package x\nfunc A() {}\n")
+	execGit(t, root, "add", ".")
+	execGit(t, root, "commit", "-q", "-m", "commit 3")
+
+	write("vendor/dep.go", "package dep\nfunc D() {}\n")
+	execGit(t, root, "add", ".")
+	execGit(t, root, "commit", "-q", "-m", "commit 4")
+	return root
+}
+
+// TestChurnExcludesIgnored (report A5): vendored files must not appear in the
+// churn report, even when they churn more than the real source.
+func TestChurnExcludesIgnored(t *testing.T) {
+	root := newVendorGitRepo(t)
+	report, err := Churn(root, "", "")
+	if err != nil {
+		t.Fatalf("Churn: %v", err)
+	}
+	if report.Commits < 3 {
+		t.Fatalf("expected >= 3 commits, got %d", report.Commits)
+	}
+	found := false
+	for _, e := range report.Entries {
+		if e.File == "vendor/dep.go" || strings.Contains(e.File, "vendor/") {
+			t.Errorf("vendor file leaked into churn report: %q", e.File)
+		}
+		if e.File == "a.go" && e.Commits >= 2 {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("a.go should still churn, entries=%v", report.Entries)
+	}
+}

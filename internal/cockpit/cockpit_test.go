@@ -83,3 +83,85 @@ func TestCockpitRunnerNonInteractive(t *testing.T) {
 		t.Errorf("expected success log, got: %s", output)
 	}
 }
+
+// TestCockpitRunnerHonorsExplicitLevels protects against the L0 sentinel bug
+// (A1): an explicitly requested L0 (the zero value) must not be silently
+// upgraded to the default L3. Every level L0..L5 must pass through unchanged.
+func TestCockpitRunnerHonorsExplicitLevels(t *testing.T) {
+	for _, level := range []loop.Autonomy{loop.L0, loop.L1, loop.L2, loop.L3, loop.L4, loop.L5} {
+		t.Run(level.String(), func(t *testing.T) {
+			var buf bytes.Buffer
+			cfg := RunnerConfig{
+				RepoRoot:       t.TempDir(),
+				TaskPrompt:     "probe",
+				AutonomyLevel:  level,
+				NonInteractive: true,
+				Output:         &buf,
+				StepOverride: func(stage, intent string, wt *execution.Worktree, res *loop.Result) (string, error) {
+					return "done", nil
+				},
+			}
+			runner := NewRunner(cfg)
+			state, err := runner.Run(context.Background())
+			if err != nil {
+				t.Fatalf("Runner.Run: %v", err)
+			}
+			if state.AutonomyLevel != level.String() {
+				t.Errorf("AutonomyLevel = %q, want %q (explicit level must not be upgraded)", state.AutonomyLevel, level.String())
+			}
+			if !strings.Contains(buf.String(), "(Level: "+level.String()+")") {
+				t.Errorf("expected run log to honor level %s, got: %s", level.String(), buf.String())
+			}
+		})
+	}
+}
+
+// TestCockpitRunnerDefaultsToL3 verifies the sentinel (unset) level still
+// resolves to L3, preserving the documented default for callers who do not
+// pin an explicit level. An explicit L0 must NOT take this path (the zero
+// value is read-only L0, and the sentinel is what triggers the L3 default).
+func TestCockpitRunnerDefaultsToL3(t *testing.T) {
+	var buf bytes.Buffer
+	cfg := RunnerConfig{
+		RepoRoot:       t.TempDir(),
+		TaskPrompt:     "probe",
+		AutonomyLevel:  loop.AutonomyUnset,
+		NonInteractive: true,
+		Output:         &buf,
+		StepOverride: func(stage, intent string, wt *execution.Worktree, res *loop.Result) (string, error) {
+			return "done", nil
+		},
+	}
+	runner := NewRunner(cfg)
+	state, err := runner.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Runner.Run: %v", err)
+	}
+	if state.AutonomyLevel != loop.L3.String() {
+		t.Errorf("AutonomyLevel = %q, want default L3 for unset level", state.AutonomyLevel)
+	}
+}
+
+// TestCockpitZeroValueIsReadOnly guards the safe-default invariant: a fully
+// zero-value RunnerConfig (AutonomyLevel unset by the caller) must resolve to
+// read-only L0, never an un-pinned level that mutates the workspace.
+func TestCockpitZeroValueIsReadOnly(t *testing.T) {
+	var buf bytes.Buffer
+	cfg := RunnerConfig{
+		RepoRoot:       t.TempDir(),
+		TaskPrompt:     "probe",
+		NonInteractive: true,
+		Output:         &buf,
+		StepOverride: func(stage, intent string, wt *execution.Worktree, res *loop.Result) (string, error) {
+			return "done", nil
+		},
+	}
+	runner := NewRunner(cfg)
+	state, err := runner.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Runner.Run: %v", err)
+	}
+	if state.AutonomyLevel != loop.L0.String() {
+		t.Errorf("AutonomyLevel = %q, want read-only L0 for zero-value RunnerConfig", state.AutonomyLevel)
+	}
+}

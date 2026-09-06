@@ -53,16 +53,36 @@ func executeCockpitCLI(args []string, stdout, stderr io.Writer) int {
 		fs.PrintDefaults()
 		return 2
 	}
+	for _, arg := range rest {
+		if strings.HasPrefix(arg, "-") && arg != "-" {
+			fmt.Fprintf(stderr, "kern ops: unexpected flag %q after the task intent; place all flags before the intent\n", arg)
+			fmt.Fprintf(stderr, "Usage: kern ops [flags] <task-intent>\n")
+			return 2
+		}
+	}
 
 	absRepo, err := filepath.Abs(*repoFlag)
 	if err != nil {
 		absRepo = *repoFlag
 	}
 
-	autonomyLevel, err := loop.ParseLevel(*levelFlag)
-	if err != nil {
-		fmt.Fprintf(stderr, "kern ops: invalid autonomy level %q: %v\n", *levelFlag, err)
-		return 2
+	// Only an explicitly supplied -level flag pins the level. When the flag is
+	// omitted, pass the AutonomyUnset sentinel so the runner applies its documented
+	// L3 default — comparing against zero would otherwise collide with an explicit
+	// L0 (the zero value = Autonomy(0)).
+	autonomyLevel := loop.AutonomyUnset
+	levelSet := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "level" {
+			levelSet = true
+		}
+	})
+	if levelSet {
+		autonomyLevel, err = loop.ParseLevel(*levelFlag)
+		if err != nil {
+			fmt.Fprintf(stderr, "kern ops: invalid autonomy level %q: %v\n", *levelFlag, err)
+			return 2
+		}
 	}
 
 	cfg := RunnerConfig{

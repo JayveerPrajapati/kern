@@ -457,6 +457,15 @@ Runtimes resolve from PATH (python3/python, node/bun/deno, bash/sh, perl,
 ruby, php, lua, julia, R, go, rust). Runs in a fresh temp dir with a hard
 timeout (10s default) and a stdout byte cap — only stdout is returned.
 
+The script runs with a sanitized environment (HOME/XDG pointed into the temp
+dir, secrets stripped) and, when the platform's unprivileged user namespaces
+allow it, in a private network namespace so network egress is blocked. On
+platforms where that isolation is unavailable (e.g. macOS, some containers)
+`kern exec` **fails closed**: it refuses to run unisolated rather than
+silently degrading to full network egress. A local operator can explicitly
+opt out of the isolation requirement per-machine with
+`export KERN_ALLOW_UNISOLATED=1` (alias: `KERN_ALLOW_NET=1`).
+
 Host command execution is gated by a governance firewall (fail-closed): set
 `KERN_ALLOW_EXEC=1` or allowlist tools via `KERN_TOOLS` to opt in. `kern build`
 and `kern validate` share the same gate.
@@ -512,6 +521,19 @@ build higher-level workflows on the index and graph: analyzing a proposed
 change against the whole system, planning the change, estimating blast
 radius, verifying claims, and recovering from incidents — deterministic and
 local, like everything else in kern.
+
+**Caller/edge counts are projections, and they are consistent by design.**
+All tools count *distinct* direct callers of a symbol (a symbol called twice
+from the same caller counts once), but each surface projects over a
+slightly different lens: `kern hubs`/`kern explore` count distinct caller
+symbols from the intel index (`prodCallers` excludes test-only callers);
+`kern impact`/`kern_impact` count distinct caller nodes in the
+package-scoped intelligence graph, and `--precision strict` drops
+inferred/ambiguous call edges (so a strict impact can report fewer callers
+than `kern explore` on the same symbol). `kern buddy` and `kern onboard`
+both report **total directed call edges** (each caller→callee pair), not the
+number of callers. Treat counts as relative signal, and prefer
+`kern explore`/`kern graph --html` when a single number decides a review.
 
 The design loop: **UNDERSTAND → REMEMBER → REASON → PLAN → ACT → VERIFY →
 PROTECT → OBSERVE → LEARN ↺**. The governing principles:

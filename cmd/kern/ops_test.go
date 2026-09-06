@@ -32,6 +32,36 @@ func TestRunOps(t *testing.T) {
 	}
 }
 
+// TestRunOpsRejectsFlagsAfterIntent guards against flags placed after the
+// task intent being silently swallowed into the task prompt (A14). They must
+// be rejected with a usage error instead.
+func TestRunOpsRejectsFlagsAfterIntent(t *testing.T) {
+	tmp := t.TempDir()
+	if code := runOps([]string{
+		"--repo", tmp,
+		"--non-interactive",
+		"estimate impact of removing GetMySQLDB",
+		"--level", "L0",
+		"-json",
+	}); code != 2 {
+		t.Errorf("expected exit code 2 for flags after intent, got %d", code)
+	}
+}
+
+// TestRunOpsHonorsExplicitL0Guard verifies an explicit -level L0 is honored
+// (A1) and is not silently upgraded to the default L3.
+func TestRunOpsHonorsExplicitL0Guard(t *testing.T) {
+	tmp := t.TempDir()
+	if code := runOps([]string{
+		"--repo", tmp,
+		"--non-interactive",
+		"--level", "L0",
+		"probe",
+	}); code != 0 {
+		t.Errorf("expected exit code 0 for L0 read-only run, got %d", code)
+	}
+}
+
 func TestRunOpsTriage(t *testing.T) {
 	tmp := t.TempDir()
 
