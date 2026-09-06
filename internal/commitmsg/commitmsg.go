@@ -7,6 +7,8 @@ package commitmsg
 import (
 	"strconv"
 	"strings"
+
+	"github.com/JayveerPrajapati/kern/internal/code"
 )
 
 // Message is a generated commit message.
@@ -81,6 +83,17 @@ type fileChange struct {
 // deterministic message. An empty or unparseable diff yields a chore subject.
 func Generate(diffText string) Message {
 	files := parseDiff(diffText)
+	// Exclude VCS/build/vendor-dir noise (vendor/, dist/, ...) so a
+	// vendor-heavy diff cannot drown the message in boilerplate (report A5).
+	if len(files) > 0 {
+		clean := files[:0]
+		for _, f := range files {
+			if !code.ShouldIgnore(f.path) {
+				clean = append(clean, f)
+			}
+		}
+		files = clean
+	}
 	if len(files) == 0 {
 		return Message{Type: "chore", Subject: "chore: update"}
 	}
