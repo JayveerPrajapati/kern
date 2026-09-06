@@ -1538,6 +1538,291 @@ kern_entry_points: tool({
           return runPayload(flags, args.timeout)
         },
       }),
+      kern_health: tool({
+        description:
+          "Returns a real-time health and self-observability snapshot of the kern MCP server: index freshness, symbol counts, cache hit-rate, audit chain length, active tools, and in-flight operations. Enables AI agents to self-diagnose server state and avoid blind retries.",
+        args: {
+          root: tool.schema.string().optional(),
+        },
+        async execute(args) {
+          const flags: string[] = ["health"]
+          if (args.root) flags.push("--root", args.root)
+          return run(flags)
+        },
+      }),
+      kern_compose: tool({
+        description:
+          "Executes an ordered pipeline of kern tools in a single RPC round-trip, passing intermediate outputs to downstream steps using $variable bindings. Drastically reduces agent latency and token overhead for multi-step workflows.",
+        args: {
+          pipeline: tool.schema.any(),
+          timeout: tool.schema.string().optional(),
+          root: tool.schema.string().optional(),
+        },
+        async execute(args) {
+          const flags: string[] = ["compose"]
+          if (typeof args.pipeline === "string") {
+            flags.push("--pipeline", args.pipeline)
+          } else {
+            flags.push("--pipeline", JSON.stringify(args.pipeline))
+          }
+          if (args.timeout) flags.push("--timeout", String(args.timeout))
+          if (args.root) flags.push("--root", args.root)
+          return run(flags)
+        },
+      }),
+      kern_pre_edit: tool({
+        description:
+          "Predicts the blast radius, direct callers, untested dependencies, and boundary risks of modifying a specific file or symbol BEFORE changes are made. Saves agents from making risky changes or incurring expensive rollback cycles.",
+        args: {
+          file: tool.schema.string().optional(),
+          lines: tool.schema.string().optional(),
+          symbol: tool.schema.string().optional(),
+          root: tool.schema.string().optional(),
+        },
+        async execute(args) {
+          const flags: string[] = ["pre-edit"]
+          if (args.file) flags.push("--file", args.file)
+          if (args.lines) flags.push("--lines", args.lines)
+          if (args.symbol) flags.push("--symbol", args.symbol)
+          if (args.root) flags.push("--root", args.root)
+          return run(flags)
+        },
+      }),
+      kern_prompt_fill: tool({
+        description:
+          "Dynamically renders standardized, token-efficient agent prompts with auto-injected project layout and memory lessons. Prevents agents from wasting tokens on repetitive prompt boilerplate.",
+        args: {
+          template: tool.schema.string(),
+          task: tool.schema.string().optional(),
+          file: tool.schema.string().optional(),
+          slots: tool.schema.any().optional(),
+          inject_memory: tool.schema.string().optional(),
+          root: tool.schema.string().optional(),
+        },
+        async execute(args) {
+          const flags: string[] = ["prompt-fill", "--template", args.template]
+          if (args.task) flags.push("--task", args.task)
+          if (args.file) flags.push("--file", args.file)
+          if (args.inject_memory) flags.push("--inject-memory", args.inject_memory)
+          if (args.root) flags.push("--root", args.root)
+          return run(flags)
+        },
+      }),
+      kern_semantic_diff: tool({
+        description:
+          "Computes a functional AST-level symbol diff instead of raw line noise: surfaces modified functions, changed signatures, and newly impacted callers between commits or working tree.",
+        args: {
+          from: tool.schema.string().optional(),
+          to: tool.schema.string().optional(),
+          range: tool.schema.string().optional(),
+          root: tool.schema.string().optional(),
+        },
+        async execute(args) {
+          const flags: string[] = ["semantic-diff"]
+          if (args.from) flags.push("--from", args.from)
+          if (args.to) flags.push("--to", args.to)
+          if (args.range) flags.push("--range", args.range)
+          if (args.root) flags.push("--root", args.root)
+          return run(flags)
+        },
+      }),
+      kern_evidence_anchor: tool({
+        description:
+          "Validates code claims or citations (symbol, file:line), corrects line drift, and generates a tamper-evident SHA-256 evidence certificate for zero-hallucination code claims.",
+        args: {
+          claim: tool.schema.string().optional(),
+          file: tool.schema.string().optional(),
+          line: tool.schema.string().optional(),
+          symbol: tool.schema.string().optional(),
+          root: tool.schema.string().optional(),
+        },
+        async execute(args) {
+          const flags: string[] = ["evidence-anchor"]
+          if (args.claim) flags.push("--claim", args.claim)
+          if (args.file) flags.push("--file", args.file)
+          if (args.line) flags.push("--line", String(args.line))
+          if (args.symbol) flags.push("--symbol", args.symbol)
+          if (args.root) flags.push("--root", args.root)
+          return run(flags)
+        },
+      }),
+      kern_context_watch: tool({
+        description:
+          "Monitors and audits rolling agent context, detects bloated log/code dumps, and recommends concrete deterministic compression actions to prevent context window overflow.",
+        args: {
+          text: tool.schema.string(),
+          budget: tool.schema.string().optional(),
+          format: tool.schema.string().optional(),
+        },
+        async execute(args) {
+          const flags: string[] = ["context-watch"]
+          if (args.budget) flags.push("--budget", String(args.budget))
+          if (args.format) flags.push("--format", args.format)
+          return withTempFile("context-watch.txt", args.text, (file) => {
+            const rest: string[] = [...flags, "--text", args.text]
+            return run(rest)
+          })
+        },
+      }),
+      kern_agent_fingerprint: tool({
+        description:
+          "Hashes and evaluates an agent's tool-call pattern from the audit trail to detect repetitive loops, anomalous tool polarization, or behavioral drift.",
+        args: {
+          agent_id: tool.schema.string().optional(),
+          format: tool.schema.string().optional(),
+        },
+        async execute(args) {
+          const flags: string[] = ["agent-fingerprint"]
+          if (args.agent_id) flags.push("--agent", args.agent_id)
+          if (args.format) flags.push("--format", args.format)
+          return run(flags)
+        },
+      }),
+      kern_explain: tool({
+        description:
+          "Synthesizes an end-to-end architectural narrative for a symbol or file: purpose, callers, callees, interfaces, and testing posture in a single call.",
+        args: {
+          target: tool.schema.string(),
+          root: tool.schema.string().optional(),
+        },
+        async execute(args) {
+          const flags: string[] = ["explain", args.target]
+          if (args.root) flags.push("--root", args.root)
+          return run(flags)
+        },
+      }),
+      kern_cross_repo_impact: tool({
+        description:
+          "Evaluates multi-repository blast radius: detects contract breaking changes, shared symbol dependencies, and cross-repo interface divergences.",
+        args: {
+          target_symbol: tool.schema.string(),
+          linked_repos: tool.schema.any().optional(),
+          root: tool.schema.string().optional(),
+        },
+        async execute(args) {
+          const flags: string[] = ["cross-repo-impact", args.target_symbol]
+          if (Array.isArray(args.linked_repos)) {
+            for (const r of args.linked_repos) {
+              flags.push("--repo", String(r))
+            }
+          }
+          if (args.root) flags.push("--root", args.root)
+          return run(flags)
+        },
+      }),
+      kern_memory_ranked: tool({
+        description:
+          "Retrieves past project lessons weighted by keyword relevance and exponential time decay (half-life), ensuring stale memories don't obscure fresh lessons.",
+        args: {
+          prompt: tool.schema.string(),
+          k: tool.schema.string().optional(),
+          half_life_days: tool.schema.string().optional(),
+          root: tool.schema.string().optional(),
+        },
+        async execute(args) {
+          const flags: string[] = ["memory-ranked", args.prompt]
+          if (args.k) flags.push("-k", String(args.k))
+          if (args.half_life_days) flags.push("--half-life", String(args.half_life_days))
+          if (args.root) flags.push("--root", args.root)
+          return run(flags)
+        },
+      }),
+      kern_policy_dsl: tool({
+        description:
+          "Evaluates diffs, changed files, and imported libraries against declarative policy-as-code rules (banned packages, protected paths, max diff size).",
+        args: {
+          policy: tool.schema.string().optional(),
+          files: tool.schema.any().optional(),
+          diff: tool.schema.string().optional(),
+          imports: tool.schema.any().optional(),
+          root: tool.schema.string().optional(),
+        },
+        async execute(args) {
+          const flags: string[] = ["policy-dsl"]
+          if (args.policy) flags.push("--policy", args.policy)
+          if (args.diff) flags.push("--diff", args.diff)
+          if (Array.isArray(args.files)) {
+            for (const f of args.files) {
+              flags.push("--file", String(f))
+            }
+          }
+          if (args.root) flags.push("--root", args.root)
+          return run(flags)
+        },
+      }),
+      kern_agent_coordination: tool({
+        description:
+          "Workspace coordination protocol for multi-agent teams: register handoffs, claim/release exclusive resource locks, and query inbox tasks.",
+        args: {
+          action: tool.schema.string().optional(),
+          agent_id: tool.schema.string().optional(),
+          from_agent: tool.schema.string().optional(),
+          to_agent: tool.schema.string().optional(),
+          task_id: tool.schema.string().optional(),
+          resource: tool.schema.string().optional(),
+          ttl_seconds: tool.schema.string().optional(),
+          notes: tool.schema.string().optional(),
+          payload: tool.schema.any().optional(),
+          root: tool.schema.string().optional(),
+        },
+        async execute(args) {
+          const flags: string[] = ["agent-coordination"]
+          if (args.action) flags.push("--action", args.action)
+          if (args.agent_id) flags.push("--agent", args.agent_id)
+          if (args.from_agent) flags.push("--from", args.from_agent)
+          if (args.to_agent) flags.push("--to", args.to_agent)
+          if (args.task_id) flags.push("--task", args.task_id)
+          if (args.resource) flags.push("--resource", args.resource)
+          if (args.ttl_seconds) flags.push("--ttl", String(args.ttl_seconds))
+          if (args.notes) flags.push("--notes", args.notes)
+          if (args.root) flags.push("--root", args.root)
+          return run(flags)
+        },
+      }),
+      kern_agent_role_rbac: tool({
+        description:
+          "Enforces identity-based role access control (RBAC): restricts sensitive tools (exec, delete, fix) based on agent roles (junior_dev, reviewer, auditor, admin).",
+        args: {
+          action: tool.schema.string().optional(),
+          agent_id: tool.schema.string().optional(),
+          role: tool.schema.string().optional(),
+          tool: tool.schema.string().optional(),
+          root: tool.schema.string().optional(),
+        },
+        async execute(args) {
+          const flags: string[] = ["agent-role-rbac"]
+          if (args.action) flags.push("--action", args.action)
+          if (args.agent_id) flags.push("--agent", args.agent_id)
+          if (args.role) flags.push("--role", args.role)
+          if (args.tool) flags.push("--tool", args.tool)
+          if (args.root) flags.push("--root", args.root)
+          return run(flags)
+        },
+      }),
+      kern_stream: tool({
+        description:
+          "Inspects streaming status, partitions large responses into token-friendly chunks, and manages progress notification channels for long-running operations.",
+        args: {
+          action: tool.schema.string().optional(),
+          channel: tool.schema.string().optional(),
+          payload: tool.schema.string().optional(),
+          chunk_size: tool.schema.string().optional(),
+          progress_token: tool.schema.string().optional(),
+          percent: tool.schema.string().optional(),
+          message: tool.schema.string().optional(),
+        },
+        async execute(args) {
+          const flags: string[] = ["stream"]
+          if (args.action) flags.push("--action", args.action)
+          if (args.channel) flags.push("--channel", args.channel)
+          if (args.payload) flags.push("--payload", args.payload)
+          if (args.chunk_size) flags.push("--chunk-size", String(args.chunk_size))
+          if (args.progress_token) flags.push("--progress-token", args.progress_token)
+          if (args.percent) flags.push("--percent", String(args.percent))
+          if (args.message) flags.push("--message", args.message)
+          return run(flags)
+        },
+      }),
       // --- Shadow built-ins: route read/grep/glob/bash to kern transparently ---
       // A plugin tool with the same name as a built-in takes precedence, so the
       // agent's "read the file" call hits kern_compact_file under the hood. If

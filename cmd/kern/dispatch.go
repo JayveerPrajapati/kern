@@ -152,6 +152,21 @@ var commandHelp = map[string]string{
 	"lsp":               "run the LSP server over stdio",
 	"serve":             "run the web console",
 	"web":               "run the web console",
+	"health":            "MCP server health and index freshness",
+	"compose":           "multi-tool pipeline runner",
+	"pre-edit":          "predictive blast-radius and edit risk",
+	"prompt-fill":       "dynamic prompt template compilation",
+	"semantic-diff":     "AST functional symbol diff",
+	"evidence-anchor":   "verify citations and cryptographic proof",
+	"context-watch":     "context token budget bloat audit",
+	"agent-fingerprint": "agent loop and drift detection",
+	"explain":           "architectural narrative synthesis",
+	"cross-repo-impact": "cross-repo blast radius",
+	"memory-ranked":     "decay-weighted memory retrieval",
+	"policy-dsl":        "policy-as-code evaluation",
+	"agent-coordination": "multi-agent handoffs and claims",
+	"agent-role-rbac":   "role-based tool access control",
+	"stream":            "chunking and stream progress",
 	"version":           "print version",
 }
 
@@ -193,6 +208,17 @@ var mcpCLIAlias = map[string]string{
 	"kern_what_if":           "what-if",
 	"kern_check_draft":       "check-draft",
 	"kern_taint":             "taint",
+	"kern_pre_edit":          "pre-edit",
+	"kern_prompt_fill":       "prompt-fill",
+	"kern_semantic_diff":     "semantic-diff",
+	"kern_evidence_anchor":   "evidence-anchor",
+	"kern_context_watch":     "context-watch",
+	"kern_agent_fingerprint": "agent-fingerprint",
+	"kern_cross_repo_impact": "cross-repo-impact",
+	"kern_memory_ranked":     "memory-ranked",
+	"kern_policy_dsl":        "policy-dsl",
+	"kern_agent_coordination": "agent-coordination",
+	"kern_agent_role_rbac":   "agent-role-rbac",
 }
 
 // printCommandHelp prints the one-line help for a subcommand and exits 0.
@@ -694,6 +720,66 @@ func dispatchCommand(cmd string, rest []string) int {
 			fatal("do: %v", err)
 		}
 		fmt.Print(out)
+		return 0
+
+	case "health":
+		runHealth(rest)
+		return 0
+
+	case "compose":
+		runCompose(rest)
+		return 0
+
+	case "pre_edit", "pre-edit":
+		runPreEdit(rest)
+		return 0
+
+	case "prompt_fill", "prompt-fill":
+		runPromptFill(rest)
+		return 0
+
+	case "semantic_diff", "semantic-diff":
+		runSemanticDiff(rest)
+		return 0
+
+	case "evidence_anchor", "evidence-anchor":
+		runEvidenceAnchor(rest)
+		return 0
+
+	case "context_watch", "context-watch":
+		runContextWatch(rest)
+		return 0
+
+	case "agent_fingerprint", "agent-fingerprint":
+		runAgentFingerprint(rest)
+		return 0
+
+	case "explain":
+		runExplain(rest)
+		return 0
+
+	case "cross_repo_impact", "cross-repo-impact":
+		runCrossRepoImpact(rest)
+		return 0
+
+	case "memory_ranked", "memory-ranked":
+		runMemoryRanked(rest)
+		return 0
+
+	case "policy_dsl", "policy-dsl":
+		runPolicyDSL(rest)
+		return 0
+
+	case "agent_coordination", "agent-coordination":
+		runAgentCoordination(rest)
+		return 0
+
+	case "agent_role_rbac", "agent-role-rbac":
+		runAgentRoleRBAC(rest)
+		return 0
+
+	case "stream":
+		runStream(rest)
 		return 0
 
 	case "cache":

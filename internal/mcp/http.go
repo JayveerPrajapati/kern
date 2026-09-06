@@ -52,6 +52,15 @@ func ServeHTTPContext(ctx context.Context, addr string) error {
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/mcp", srv.handleHTTP)
+	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		res, err := srv.handleHealth(r.Context(), nil)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, res+"\n")
+	})
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		_, _ = io.WriteString(w, "kern MCP server over HTTP\n\nPOST /mcp with a JSON-RPC body (e.g. initialize, tools/list, tools/call, prompts/list, prompts/get).\n")

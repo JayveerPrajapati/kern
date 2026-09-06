@@ -607,6 +607,41 @@ func TestGitignoreGenerated(t *testing.T) {
 	}
 }
 
+func TestWireLocalGitExclude(t *testing.T) {
+	dir := t.TempDir()
+	// Test on non-git dir: should fail cleanly
+	st := wireLocalGitExclude(dir)
+	if st.Installed {
+		t.Fatal("expected not installed for non-git dir")
+	}
+
+	// Create a simulated .git directory
+	gitDir := filepath.Join(dir, ".git")
+	os.MkdirAll(filepath.Join(gitDir, "info"), 0o755)
+
+	st = wireLocalGitExclude(dir)
+	if !st.Installed {
+		t.Fatalf("expected installed, got error: %s", st.Note)
+	}
+
+	excludePath := filepath.Join(gitDir, "info", "exclude")
+	b, err := os.ReadFile(excludePath)
+	if err != nil {
+		t.Fatalf("failed to read exclude: %v", err)
+	}
+	if !strings.Contains(string(b), ".kern/") {
+		t.Fatalf("expected .kern/ in exclude, got:\n%s", string(b))
+	}
+
+	// Idempotent: second run does not duplicate
+	before := string(b)
+	wireLocalGitExclude(dir)
+	b, _ = os.ReadFile(excludePath)
+	if string(b) != before {
+		t.Fatal("exclude duplicated on re-run")
+	}
+}
+
 func TestWireCursorRules(t *testing.T) {
 	dir := t.TempDir()
 	st := wireCursorRules(dir)

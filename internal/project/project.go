@@ -121,6 +121,14 @@ func (s *Session) Index() (*index.Index, error) {
 // staleCooldown is how long to trust a "fresh" result before re-checking disk.
 const staleCooldown = 1 * time.Second
 
+// CachedIndex returns the current in-memory index pointer and whether it is present.
+// It does not trigger a disk rebuild or file-walk, making it ideal for non-blocking health checks.
+func (s *Session) CachedIndex() (*index.Index, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.ix, s.ix != nil && !s.stale
+}
+
 // Invalidate drops the cached index so the next Index() call rebuilds it.
 // Called by the file-event watcher when source files change.
 func (s *Session) Invalidate() {

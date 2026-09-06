@@ -117,7 +117,7 @@ var adapters = []adapter{
 	{name: "vscode", path: projectConfig(".vscode", "mcp.json"), key: "servers", entry: stdioEntry, scope: "repo"},
 	{name: "cursor", path: homeConfig(".cursor", "mcp.json"), key: "mcpServers", entry: stdioEntry, scope: "global"},
 	{name: "gemini", path: homeConfig(".gemini", "settings.json"), key: "mcpServers", entry: stdioEntry, scope: "global"},
-	{name: "antigravity", path: globalConfig(".gemini", "antigravity", "mcp_config.json"), key: "mcpServers", entry: stdioEntry, scope: "global"},
+	{name: "antigravity", path: homeConfig(".gemini", "config", "mcp_config.json"), key: "mcpServers", entry: stdioEntry, scope: "global"},
 	{name: "qwen", path: homeConfig(".qwen", "settings.json"), key: "mcpServers", entry: stdioEntry, scope: "global"},
 	{name: "qoder", path: homeConfig(".qoder", "mcp.json"), key: "mcpServers", entry: stdioEntry, scope: "global"},
 	{name: "kiro", path: homeConfig(".kiro", "settings", "mcp.json"), key: "mcpServers", entry: stdioEntry, scope: "global"},
@@ -178,6 +178,8 @@ func Check(root string) []Status {
 	}
 
 	out = append(out, fileStatus(filepath.Join(root, ".gitignore"), "gitignore (generated block)"))
+	out = append(out, fileStatus(filepath.Join(root, ".git", "info", "exclude"), "git local exclude"))
+	out = append(out, fileStatus(globalConfig("git", "ignore")(""), "git global ignore"))
 	out = append(out, checkWrapperFreshness()...)
 	return out
 }
@@ -299,6 +301,9 @@ func Wire(root string, agents []string, detect bool) []Status {
 		out = append(out, wireQoderHooks(root))
 	}
 	out = append(out, gitignoreGenerated(root))
+	out = append(out, wireLocalGitExclude(root))
+	out = append(out, wireGlobalGitignore())
+	out = append(out, wireEditorExclusions()...)
 
 	// Wire kern-first instruction files for every detected platform that
 	// has an instruction file. This is independent of the explicit agents

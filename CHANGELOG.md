@@ -6,6 +6,29 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **AI Agent Intelligence & Token Optimization Suite (15 new MCP tools, expanding catalog to 101 tools)**:
+  - **Phase 1 (Observability & Orchestration)**:
+    - `kern_health`: Real-time MCP server and index health diagnostics snapshot (status, freshness, metrics, cache hit rate, audit depth) eliminating blind retries. Also wired to HTTP `GET /health`.
+    - `kern_compose`: Executes ordered deterministic multi-tool pipelines with `$var` variable interpolation and configurable error policies in 1 RPC, eliminating round-trip latency and token overhead.
+    - `kern_pre_edit`: Pre-edit blast radius and structural safety checks evaluating callers, transitive impacts, untested hotspots, and risk ratings before files are modified.
+    - `kern_prompt_fill`: Dynamic standardized prompt template compilation with auto-injected project architecture maps, token budgets, and lessons from project memory.
+  - **Phase 2 (Context Intelligence & Safety)**:
+    - `kern_semantic_diff`: AST-level functional symbol diff highlighting modified functions, changed signatures, and newly impacted callers instead of raw line diffs.
+    - `kern_evidence_anchor`: Zero-hallucination citation verification confirming file:line and symbol existence, self-healing line drift, and issuing cryptographic SHA-256 evidence certificates.
+    - `kern_context_watch`: Proactive rolling conversation token audit detecting code/log bloat and recommending concrete deterministic compaction commands.
+    - `kern_agent_fingerprint`: Tool-call pattern hashing and audit analysis detecting agent infinite loops, tool polarization, and behavioral drift.
+  - **Phase 3 (Architecture, Multi-Repo & Governance)**:
+    - `kern_explain`: Graph-backed architectural narrator synthesizing declaration details, callers, outbound dependencies, and test posture in a single call.
+    - `kern_cross_repo_impact`: Multi-repository blast-radius analyzer detecting breaking contract changes and external call sites across linked repositories.
+    - `kern_memory_ranked`: Decay-weighted and keyword-overlap memory retrieval using exponential time decay ($e^{-\lambda \Delta t}$), ensuring fresh lessons take precedence over stale patterns.
+    - `kern_policy_dsl`: Declarative Policy-as-Code evaluation engine checking git diffs, changed files, and imported libraries against declarative rules.
+    - `kern_agent_coordination`: Workspace coordination protocol for multi-agent teams providing structured task handoffs, exclusive resource locking with TTL, and agent inboxes.
+    - `kern_agent_role_rbac`: Identity-based role authorization matrix (`junior_dev`, `reviewer`, `auditor`, `developer`, `architect`, `admin`) preventing unauthorized execution or unreviewed deletions.
+    - `kern_stream`: Streaming & chunking transport scaffold with response partitioning and progress token notifications.
+- **MCP Dispatch Parity**: Full 1:1 parity enforced between `internal/mcp/tools.go` and `internal/mcp/dispatch.go`, covered by `TestDispatchParityWithRegistration`.
+
 ## [0.9.6] - 2026-09-06
 
 ### Added

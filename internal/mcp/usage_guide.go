@@ -7,7 +7,7 @@ func Guide() string {
 	return `# kern MCP — Tool Usage Guide
 
 ## Phase-aware tool selection
-Don't memorize 86 tools. Identify your phase (explore / plan / edit / verify),
+Don't memorize 101 tools. Identify your phase (explore / plan / edit / verify),
 use the phase shortlist below, and let kern_meta route within it. Set
 KERN_MCP_PHASE=<phase> at server start to filter the advertised tool list to
 that phase's shortlist plus the always-on meta/cross utilities; kern_meta
@@ -15,24 +15,26 @@ itself is always available and routes to any sub-tool regardless of the phase.
 
 ### explore — read / discover
 kern_search, kern_explore, kern_context, kern_project_map, kern_graph,
-kern_code_graph, kern_arch, kern_probe
+kern_code_graph, kern_arch, kern_probe, kern_explain
 
 ### plan — analyze / simulate
 kern_analyze, kern_plan, kern_impact, kern_what_if, kern_pack, kern_trace,
-kern_usage_guide
+kern_cross_repo_impact, kern_usage_guide
 
 ### edit — mutate / execute
 kern_run, kern_execute, kern_exec, kern_run_build, kern_rename, kern_safe_delete,
-kern_commitmsg, kern_guard_check
+kern_commitmsg, kern_guard_check, kern_pre_edit, kern_compose
 
 ### verify — check / validate
 kern_verify, kern_validate, kern_review, kern_security, kern_changes,
-kern_schema_validate, kern_diff_files
+kern_schema_validate, kern_diff_files, kern_evidence_anchor, kern_policy_dsl
 
 Always available regardless of phase (meta/cross): kern_meta, kern_search,
 kern_context, kern_run, kern_optimize_prompt, kern_optimize_log, kern_mask_pii,
 kern_doc_search, kern_memory_*, kern_stats, kern_onboard, kern_incident,
-kern_workflow, kern_loop.
+kern_workflow, kern_loop, kern_health, kern_prompt_fill, kern_semantic_diff,
+kern_context_watch, kern_agent_fingerprint, kern_agent_coordination,
+kern_agent_role_rbac, kern_stream.
 
 ## Performance tiers
 Most tools are index-backed and return in well under 100ms. The tiers below

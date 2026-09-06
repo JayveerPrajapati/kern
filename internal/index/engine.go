@@ -180,6 +180,10 @@ func (ix *Index) Save() error {
 	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 		return err
 	}
+	// Ensure the local repository ignores .kern via .git/info/exclude without
+	// dirtying or requiring a tracked .gitignore file.
+	ensureGitExclude(ix.Root)
+
 	// Unique temp file avoids the race where two processes both write to
 	// p + ".tmp" and one truncates the other's bytes before rename.
 	f, err := os.CreateTemp(filepath.Dir(p), ".kern-index-*.tmp")
@@ -200,6 +204,57 @@ func (ix *Index) Save() error {
 		return err
 	}
 	return os.Rename(tmpPath, p)
+}
+
+// ensureGitExclude guarantees that <root>/.git/info/exclude includes .kern/
+// so that whenever kern indexes any repository, git never tracks or shows
+// .kern in git status, without creating any git diffs in client/shared repos.
+func ensureGitExclude(root string) {
+	if root == "" {
+		return
+	}
+	gitDir := filepath.Join(root, ".git")
+	fi, err := os.Stat(gitDir)
+	if err != nil {
+		return
+	}
+	var infoDir string
+	if fi.IsDir() {
+		infoDir = filepath.Join(gitDir, "info")
+	} else {
+		// Could be a worktree or submodule pointing to a gitdir file:
+		// "gitdir: /path/to/.git/worktrees/name"
+		b, err := os.ReadFile(gitDir)
+		if err != nil {
+			return
+		}
+		line := strings.TrimSpace(string(b))
+		if strings.HasPrefix(line, "gitdir:") {
+			target := strings.TrimSpace(strings.TrimPrefix(line, "gitdir:"))
+			if !filepath.IsAbs(target) {
+				target = filepath.Join(root, target)
+			}
+			infoDir = filepath.Join(target, "info")
+		} else {
+			return
+		}
+	}
+	_ = os.MkdirAll(infoDir, 0o755)
+	excludePath := filepath.Join(infoDir, "exclude")
+	b, _ := os.ReadFile(excludePath)
+	content := string(b)
+	for _, line := range strings.Split(content, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == ".kern" || trimmed == ".kern/" {
+			return // already excluded
+		}
+	}
+	separator := "\n"
+	if len(content) == 0 || strings.HasSuffix(content, "\n") {
+		separator = ""
+	}
+	newContent := content + separator + "# kern local exclude\n.kern/\n"
+	_ = os.WriteFile(excludePath, []byte(newContent), 0o644)
 }
 
 // Load reads the index for root. Returns nil if absent.

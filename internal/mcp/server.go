@@ -123,7 +123,7 @@ func singleTool() bool {
 
 // fullCatalog reports whether to advertise the full tool catalog via
 // KERN_MCP_FULL=1. By default only the minimal defaultTools surface is
-// advertised; this opts back in to the full 86-tool catalog for power users
+// advertised; this opts back in to the full 101-tool catalog for power users
 // and direct sub-tool callers. Phase-aware routing (KERN_MCP_PHASE) still
 // filters the advertised list within the full catalog.
 func fullCatalog() bool {
@@ -239,7 +239,7 @@ var highLevelTools = map[string]bool{
 }
 
 // defaultTools is the minimal surface advertised by default. The full
-// 86-tool catalog is gated behind KERN_MCP_FULL=1, and phase-aware routing
+// 101-tool catalog is gated behind KERN_MCP_FULL=1, and phase-aware routing
 // (KERN_MCP_PHASE) filters either surface down to the active phase's
 // shortlist. kern_meta's NL router
 // still reaches every sub-tool handler internally regardless of what is
