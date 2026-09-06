@@ -191,6 +191,22 @@ func TestRootlessAbsolutePathRejected(t *testing.T) {
 	}
 }
 
+func TestRootlessAbsolutePathInsideCwdAllowed(t *testing.T) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Path within cwd (e.g. server.go)
+	absPath := filepath.Join(cwd, "server.go")
+	if _, err := os.Stat(absPath); err != nil {
+		t.Skip("server.go not found in cwd")
+	}
+	out := mcpAssertOK(t, "kern_compact_file", map[string]any{"path": absPath})
+	if len(out) == 0 {
+		t.Fatal("expected non-empty summary for server.go")
+	}
+}
+
 func TestRootlessRelativePathEscapesRejected(t *testing.T) {
 	msg := mcpToolError(t, "kern_compact_file", map[string]any{"path": "../../escaped.go"})
 	if !strings.Contains(msg, "escapes project root") {

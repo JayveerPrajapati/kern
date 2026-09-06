@@ -157,3 +157,24 @@ func TestStripPromptFluffNeverReturnsEmpty(t *testing.T) {
 		}
 	}
 }
+
+func TestCompressConversationalFiller(t *testing.T) {
+	// K-16: polite filler phrases must be stripped
+	in := "Certainly! Great question.\nBasically, the system works by caching queries.\nIn summary: everything is fine."
+	out, dropped := Compress(in)
+	if dropped < 2 {
+		t.Errorf("expected >=2 dropped lines, got %d", dropped)
+	}
+	want := "The system works by caching queries."
+	if strings.TrimSpace(out) != want {
+		t.Errorf("Compress = %q, want %q", out, want)
+	}
+
+	// Single-line pure filler
+	single := "Absolutely! I would be happy to help you with that."
+	outSingle, droppedSingle := Compress(single)
+	if droppedSingle != 1 || strings.TrimSpace(outSingle) != "" {
+		t.Errorf("Compress single pure filler = %q (dropped %d), want empty (dropped 1)", outSingle, droppedSingle)
+	}
+}
+

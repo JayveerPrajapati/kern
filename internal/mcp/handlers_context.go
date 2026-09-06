@@ -20,6 +20,18 @@ func (s *Server) handleCompact(ctx context.Context, args map[string]any) (string
 			return "", fmt.Errorf("path is required")
 		}
 		root := argString(args, "root")
+		if root == "" && filepath.IsAbs(path) {
+			if cwd, err := os.Getwd(); err == nil && within(cwd, path) {
+				root = cwd
+			} else {
+				for _, r := range s.roots {
+					if r != "/" && within(r, path) {
+						root = r
+						break
+					}
+				}
+			}
+		}
 		abs, err := rootedPath(root, path)
 		if err != nil {
 			return "", err

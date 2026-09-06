@@ -85,8 +85,18 @@ func runCompact(rest []string) {
 	// Without an explicit --root, reject absolute paths and parent-relative
 	// ("..") paths outright.
 	if f.root == "" {
-		if filepath.IsAbs(file) || strings.Contains(file, "..") {
-			fatal("refusing to read %q: absolute or parent-relative paths require --root", file)
+		if filepath.IsAbs(file) {
+			cwd, err := os.Getwd()
+			if err != nil {
+				fatal("%v", err)
+			}
+			resolved, err := confineToRoot(cwd, file)
+			if err != nil {
+				fatal("refusing to read %q: absolute path outside current working directory requires --root", file)
+			}
+			file = resolved
+		} else if strings.Contains(file, "..") {
+			fatal("refusing to read %q: parent-relative paths require --root", file)
 		}
 	} else {
 		resolved, err := confineToRoot(f.root, file)
