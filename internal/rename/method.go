@@ -31,11 +31,16 @@ func RenameMethod(ix *index.Index, oldName, newName string, r *Report) (*Report,
 	}
 
 	// Locate the definition(s): method symbols with this receiver type + name.
+	var nonGoFile, nonGoLang string
 	for _, s := range ix.Symbols {
-		if s.Lang != "go" || s.Receiver != typeName || s.Name != methodName {
-			continue
+		if (s.Receiver == typeName || strings.HasSuffix(s.Receiver, "."+typeName)) && s.Name == methodName {
+			if s.Lang != "go" {
+				nonGoFile = s.File
+				nonGoLang = s.Lang
+				continue
+			}
+			r.Defs = append(r.Defs, Loc{File: s.File, Line: s.Line, Col: 1})
 		}
-		r.Defs = append(r.Defs, Loc{File: s.File, Line: s.Line, Col: 1})
 	}
 	sort.Slice(r.Defs, func(i, j int) bool {
 		if r.Defs[i].File != r.Defs[j].File {
@@ -44,6 +49,9 @@ func RenameMethod(ix *index.Index, oldName, newName string, r *Report) (*Report,
 		return r.Defs[i].Line < r.Defs[j].Line
 	})
 	if len(r.Defs) == 0 {
+		if nonGoFile != "" {
+			return nil, &ErrNotSupported{Reason: "method " + oldName + " is defined in a non-Go file (" + nonGoFile + ", " + nonGoLang + "); rename is only supported for Go symbols"}
+		}
 		return nil, fmt.Errorf("method %q not found in the index (run kern index first)", oldName)
 	}
 

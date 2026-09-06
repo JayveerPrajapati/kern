@@ -33,14 +33,31 @@ var DefaultPatterns = []Pattern{
 	{Label: "GITHUB_PAT", RE: regexp.MustCompile(`\bgithub_pat_[A-Za-z0-9_]{60,}\b`)},
 	{Label: "SLACK", RE: regexp.MustCompile(`\bxox[baprs]-[A-Za-z0-9-]{10,}\b`)},
 	{Label: "STRIPE", RE: regexp.MustCompile(`\bsk_(?:live|test)_[A-Za-z0-9]{20,}\b`)},
+	// STRIPE_DASH: sk-live-…/sk-test-… dash forms (Stripe publishable secret
+	// prefixes also use dashes). The bare sk-… dash prefixes are covered by
+	// OPENAI/OPENAI_SHORT; this catches the pill‑shaped live/test variants.
+	{Label: "STRIPE_DASH", RE: regexp.MustCompile(`\bsk-(?:live|test)-[A-Za-z0-9]{16,}\b`)},
 	{Label: "OPENAI", RE: regexp.MustCompile(`\bsk-(?:proj-[A-Za-z0-9-]{20,}|[A-Za-z0-9]{20,})\b`)},
 	{Label: "OPENAI_SHORT", RE: regexp.MustCompile(`\bsk-[A-Za-z0-9]{10,19}\b`)},
-	{Label: "JWT", RE: regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b`)},
+	{Label: "VAULT", RE: regexp.MustCompile(`\b(?:hvs|hvb|hvr|s)\.[A-Za-z0-9_-]{16,}\b`)},
+	{Label: "JWT", RE: regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}(?:\.[A-Za-z0-9_=-]+)?\b`)},
 	{Label: "BEARER", RE: regexp.MustCompile(`\bBearer\s+[A-Za-z0-9._~+/=-]{20,}\b`)},
 	{Label: "KEY", RE: regexp.MustCompile(`(?i)\b(?:api[_\s-]?key|apikey|auth[_\s-]?token|access[_\s-]?token|refresh[_\s-]?token|client[_\s-]?secret|private[_\s-]?key|app[_\s-]?secret|consumer[_\s-]?(?:key|secret))["']?\s*[=:]\s*["']?(?:[A-Za-z0-9_/\-+=]{12,}["']|[A-Za-z0-9_/\-+=]*[0-9][A-Za-z0-9_/\-+=]*)`)},
-	{Label: "PASSWORD", RE: regexp.MustCompile(`(?i)\b(?:password|passwd|pwd)["']?\s*[=:]\s*["']?(?:[A-Za-z0-9_/\-+=@!]{6,}["']|[A-Za-z0-9_/\-+=@!]*[0-9][A-Za-z0-9_/\-+=@!]*)`)},
+	{Label: "PASSWORD", RE: regexp.MustCompile(`(?i)\b(?:password|passwd|pwd)["']?(?:\s*[=:]\s*|\s+)["']?(?:[A-Za-z0-9_/\-+=@!#$^*~]{6,}["']|[A-Za-z0-9_/\-+=@!#$^*~]*[0-9][A-Za-z0-9_/\-+=@!#$^*~]*)`)},
 	{Label: "TOKEN", RE: regexp.MustCompile(`(?i)\b(?:token|secret)["']?\s*[=:]\s*["']?(?:[A-Za-z0-9_/\-+=]{16,}["']|[A-Za-z0-9_/\-+=]*[0-9][A-Za-z0-9_/\-+=]*)`)},
 	{Label: "URL_CRED", RE: regexp.MustCompile(`\b[a-zA-Z][a-zA-Z0-9+.-]*://[^/\s:@]+:[^/\s@]+@`)},
+	// URL_CRED (scheme-less): DSN/userinfo forms without a scheme, e.g.
+	// "root:supersecret@tcp(db.internal.example.com:3306)" or
+	// "user:pass@mysql-host". The colon is excluded from the password class so
+	// log time-stamps and duration strings ("07:30:00@lvl") stay untouched;
+	// the optional ('host:port') group consumes driver-DSN hosts.
+	{Label: "URL_CRED", RE: regexp.MustCompile(`\b[A-Za-z0-9._%+-]+:[^@\s:]{3,}@[A-Za-z0-9][A-Za-z0-9.-]*(?::\d{1,5})?(?:\([^)]*\))?`)},
+	// HEX: generic long hex runs (≥32 chars) — API keys, auth tokens and
+	// SHA-uppercase signatures are frequently emitted as bare hex. Guarded by
+	// word boundaries so it never bites mid-token. Deliberately wide for the
+	// "prep logs for a remote LLM" use-case: a 128-bit+ hex string in context
+	// is more likely a credential than prose.
+	{Label: "HEX", RE: regexp.MustCompile(`\b[0-9a-fA-F]{32,}\b`)},
 	{Label: "IP", RE: regexp.MustCompile(`\b(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\b`)},
 	{Label: "IPV6", RE: regexp.MustCompile(`(?i)\b(?:[0-9a-fA-F]{1,4}(?::[0-9a-fA-F]{1,4}){0,6}::[0-9a-fA-F]{1,4}(?::[0-9a-fA-F]{1,4}){0,6}|::[0-9a-fA-F]{1,4}(?::[0-9a-fA-F]{1,4}){0,6}|[0-9a-fA-F]{1,4}(?::[0-9a-fA-F]{1,4}){1,6}::)\b`)},
 	{Label: "EMAIL", RE: regexp.MustCompile(`\b[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+\b`)},
