@@ -128,9 +128,9 @@ func TestDedupe(t *testing.T) {
 func TestCallEdgesIsDirectedEdgeSum(t *testing.T) {
 	ix := &index.Index{
 		Calls: map[string][]string{
-			"main":  {"shared", "helper"},
-			"f1":    {"shared"},
-			"f2":    {"shared"},
+			"main":   {"shared", "helper"},
+			"f1":     {"shared"},
+			"f2":     {"shared"},
 			"shared": {"deep"},
 		},
 	}

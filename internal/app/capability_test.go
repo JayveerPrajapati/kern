@@ -127,7 +127,6 @@ func TestAssemblePlanNetNewFeature(t *testing.T) {
 	}
 }
 
-
 func TestToolDecisionTraceRecorder(t *testing.T) {
 	rec := NewToolDecisionTraceRecorder()
 	if rec.Len() != 0 {

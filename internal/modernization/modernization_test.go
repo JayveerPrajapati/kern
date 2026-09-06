@@ -357,4 +357,3 @@ func TestModernizationDisambiguateNames(t *testing.T) {
 		t.Errorf("expected hub in comm-2 name, got %q", names["comm-2"])
 	}
 }
-

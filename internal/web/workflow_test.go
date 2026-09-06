@@ -154,8 +154,8 @@ func TestV1IncidentInvestigateEndpoint(t *testing.T) {
 	if body.Incident.ID == "" {
 		t.Fatal("incident id missing")
 	}
-	if body.Incident.Status != string(domain.IncidentRootCauseFound) {
-		t.Fatalf("incident status = %q, want ROOT_CAUSE_FOUND", body.Incident.Status)
+	if body.Incident.Status != string(domain.IncidentInvestigating) {
+		t.Fatalf("incident status = %q, want INVESTIGATING", body.Incident.Status)
 	}
 	if body.AffectedService != "checkout" {
 		t.Fatalf("affected_service = %q, want checkout", body.AffectedService)
