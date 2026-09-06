@@ -187,4 +187,3 @@ func TestRenderStatelessPlanNetNewFeature(t *testing.T) {
 		t.Errorf("expected net-new feature scope, got:\n%s", rendered)
 	}
 }
-

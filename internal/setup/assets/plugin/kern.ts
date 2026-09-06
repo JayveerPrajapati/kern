@@ -1452,8 +1452,9 @@ async function runPayload(args: string[], timeoutMs?: number, preserveExit = fal
           root: tool.schema.string().optional(),
         },
         async execute(args) {
+          const flags: string[] = ["verify"]
           return withTempFile("verify-input.txt", args.text, (file) => {
-            const rest: string[] = ["verify", file]
+            const rest: string[] = [...flags, file]
             if (args.root) rest.push(args.root)
             return run(rest)
           })

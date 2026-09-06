@@ -391,7 +391,7 @@ var toolStartRe = regexp.MustCompile(`kern_[a-zA-Z0-9_]+:\s*tool\(`)
 
 // flagsFirstSubRe matches `const flags: string[] = ["sub", ...]` — the common
 // pattern where a tool builds its argument vector before run().
-var flagsFirstSubRe = regexp.MustCompile(`const flags: string\[\] = \["([^"]+)"`)
+var flagsFirstSubRe = regexp.MustCompile(`const (?:flags|rest): string\[\] = \["([^"]+)"`)
 
 // runFirstSubRe matches `run(["sub", ...])` for tools that dispatch directly.
 var runFirstSubRe = regexp.MustCompile(`run\(\["([^"]+)"`)

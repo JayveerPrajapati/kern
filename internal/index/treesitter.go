@@ -325,6 +325,8 @@ func collectInheritance(node *sitter.Node, src []byte, defs []Symbol, lang strin
 	collectNamesDeep = func(n *sitter.Node) []string {
 		var out []string
 		switch n.Kind() {
+		case "type_arguments", "type_parameters":
+			return nil
 		case "identifier", "type_identifier", "constant", "name", "namespace_name",
 			"class_name", "scoped_identifier", "qualified_identifier":
 			return []string{string(src[n.StartByte():n.EndByte()])}

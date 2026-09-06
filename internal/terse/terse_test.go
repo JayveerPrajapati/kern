@@ -177,4 +177,3 @@ func TestCompressConversationalFiller(t *testing.T) {
 		t.Errorf("Compress single pure filler = %q (dropped %d), want empty (dropped 1)", outSingle, droppedSingle)
 	}
 }
-
