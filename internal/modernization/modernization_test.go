@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/JayveerPrajapati/kern/internal/index"
+	"github.com/JayveerPrajapati/kern/internal/intel"
 )
 
 // writeTree writes a fixture module and returns its root directory.
@@ -295,3 +296,65 @@ func TestContextDependenciesAndOwnershipPopulated(t *testing.T) {
 		}
 	}
 }
+
+func TestModernizationTotalExtent(t *testing.T) {
+	ix := &index.Index{
+		Symbols: []index.Symbol{
+			{Name: "fn1", File: "pkg/a.go"},
+			{Name: "fn2", File: "pkg/a.go"},
+			{Name: "fn3", File: "pkg/b.go"},
+		},
+	}
+	contexts := []BoundedContext{
+		{
+			Name:    "ctx1",
+			Symbols: []string{"fn1", "fn2", "fn3"},
+		},
+	}
+	symbols, files := totalExtent(contexts, ix)
+	if symbols != 3 {
+		t.Errorf("expected 3 symbols, got %d", symbols)
+	}
+	if files != 2 {
+		t.Errorf("expected 2 distinct files, got %d", files)
+	}
+}
+
+func TestModernizationDisambiguateNames(t *testing.T) {
+	comms := []intel.Community{
+		{
+			ID:       "comm-1",
+			Packages: []string{"services/auth/wrapper"},
+			Hub:      "TokenValidator",
+		},
+		{
+			ID:       "comm-2",
+			Packages: []string{"services/http/wrapper"},
+			Hub:      "CorsFilter",
+		},
+		{
+			ID:       "comm-3",
+			Packages: []string{"services/http/wrapper"},
+			Hub:      "AuthFilter",
+		},
+		{
+			ID:       "comm-4",
+			Packages: []string{"services/unique"},
+		},
+	}
+
+	names := deriveContextNames(comms)
+	if names["comm-4"] != "unique" {
+		t.Errorf("expected unique name 'unique', got %q", names["comm-4"])
+	}
+	if names["comm-1"] == names["comm-2"] || names["comm-2"] == names["comm-3"] || names["comm-1"] == names["comm-3"] {
+		t.Errorf("expected unique names for duplicate wrapper packages: %v", names)
+	}
+	if !strings.Contains(names["comm-1"], "auth/wrapper") {
+		t.Errorf("expected parent path in comm-1 name, got %q", names["comm-1"])
+	}
+	if !strings.Contains(names["comm-2"], "CorsFilter") {
+		t.Errorf("expected hub in comm-2 name, got %q", names["comm-2"])
+	}
+}
+
