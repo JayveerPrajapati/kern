@@ -99,7 +99,7 @@ func Rename(ix *index.Index, oldName, newName string) (*Report, error) {
 			continue
 		}
 		if d.Lang != "go" {
-			return nil, &ErrNotSupported{Reason: "symbol " + oldName + " is defined in a non-Go file (" + d.File + "); v1 renames Go symbols only"}
+			return nil, &ErrNotSupported{Reason: "symbol " + oldName + " is defined in a non-Go file (" + d.File + "); rename is only supported for Go symbols"}
 		}
 		r.Defs = append(r.Defs, Loc{File: d.File, Line: d.Line, Col: 1})
 	}

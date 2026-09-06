@@ -328,3 +328,93 @@ func TestMaskNormalBase64NotMasked(t *testing.T) {
 		t.Errorf("expected zero replacements for normal base64, got %d", res.Replaced)
 	}
 }
+
+// TestMaskMixedSecretsA7 (report A7, MED): sk-… dash keys, scheme-less DSN
+// credentials, emails, phones and IPs in one blob must ALL be masked. Before
+// the fix, "sk-live-9f8a7b6c5d4e3f2a1b0c" and "root:supersecret@tcp(host:port)"
+// leaked past the URL_CRED (scheme-only) and sk_/sk- (underscore / bare) rules.
+// MaskAll is used because the report's repro (preparing logs for a remote LLM)
+// also masks the private 10.0.0.42 address.
+func TestMaskMixedSecretsA7(t *testing.T) {
+	in := "Server started with API key sk-live-9f8a7b6c5d4e3f2a1b0c DB at root:supersecret@tcp(db.internal.example.com:3306) admin@example.com 555-123-4567 IP 10.0.0.42"
+	res := MaskAll(in)
+	for _, leak := range []string{
+		"sk-live-9f8a7b6c5d4e3f2a1b0c",
+		"root:supersecret",
+		"supersecret@tcp",
+		"admin@example.com",
+		"555-123-4567",
+		"10.0.0.42",
+	} {
+		if strings.Contains(res.Text, leak) {
+			t.Errorf("secret leaked: %q in %q", leak, res.Text)
+		}
+	}
+	for _, want := range []string{
+		"[MASKED_STRIPE_DASH_1]",
+		"[MASKED_URL_CRED_1]",
+		"[MASKED_EMAIL_1]",
+		"[MASKED_PHONE_1]",
+	} {
+		if !strings.Contains(res.Text, want) {
+			t.Errorf("expected %s in %q", want, res.Text)
+		}
+	}
+	// Round-trip: unmasking restores the original blob.
+	if back := res.Unmask(res.Text); back != in {
+		t.Errorf("round-trip failed: got %q want %q", back, in)
+	}
+}
+
+// TestMaskSchemeLessDSN (A7): a plain-text long hex token and a scheme-less
+// user:pass@host DSN in prose are masked; an ordinary "host:port" reference
+// and a bare sk- username are NOT false positives.
+func TestMaskSchemeLessDSN(t *testing.T) {
+	cases := []struct {
+		in   string
+		want []string
+	}{
+		{"db at root:hunter2secret@db.internal:3306 keep", []string{"root:hunter2secret@db.internal:3306"}},
+		{"token 9f8a7b6c5d4e3f2a1b0c9d8e7f6a5b4c3d2e1f0a9b8c7d6e5f4a3b2c1d0e9f8a seen", []string{"9f8a7b6c5d4e3f2a1b0c9d8e7f6a5b4c3d2e1f0a9b8c7d6e5f4a3b2c1d0e9f8a"}},
+	}
+	for _, c := range cases {
+		res := Mask(c.in)
+		for _, leak := range c.want {
+			if strings.Contains(res.Text, leak) {
+				t.Errorf("secret leaked: %q in %q", leak, res.Text)
+			}
+		}
+		if res.Replaced == 0 {
+			t.Errorf("expected replacements for %q, got none", c.in)
+		}
+	}
+	// False positives must stay unmasked.
+	clean := []string{
+		"connect to db.internal.example.com:3306 to start",
+		"user sk-admin updated the policy",
+		"time=07:30:00 elapsed=0:00:12 level=info",
+	}
+	for _, c := range clean {
+		res := Mask(c)
+		if res.Text != c {
+			t.Errorf("clean text modified: %q -> %q", c, res.Text)
+		}
+	}
+}
+
+func TestMaskInlinePasswordAndVaultTokens(t *testing.T) {
+	in := "Input with password Sup3rSecret!, hvs.CAESB1234567890abcdef_ghi and user test@corp.example.com"
+	res := Mask(in)
+	if strings.Contains(res.Text, "Sup3rSecret!") {
+		t.Errorf("inline password leaked: %q", res.Text)
+	}
+	if strings.Contains(res.Text, "hvs.CAESB") {
+		t.Errorf("vault token leaked: %q", res.Text)
+	}
+	if res.ByLabel["PASSWORD"] == 0 {
+		t.Errorf("PASSWORD label not detected: %+v", res.ByLabel)
+	}
+	if res.ByLabel["VAULT"] == 0 {
+		t.Errorf("VAULT label not detected: %+v", res.ByLabel)
+	}
+}

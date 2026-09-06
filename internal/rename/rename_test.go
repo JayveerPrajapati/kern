@@ -324,6 +324,17 @@ func TestRenameUnsupportedAndMissing(t *testing.T) {
 	if _, err := Rename(ix, "Adder", "for"); err == nil {
 		t.Errorf("keyword as new name should be refused")
 	}
+
+	ixJava := &index.Index{
+		Symbols: []index.Symbol{
+			{Kind: "method", Name: "isEmpty", Receiver: "GraphUtils", File: "GraphUtils.java", Lang: "java"},
+		},
+	}
+	if _, err := Rename(ixJava, "GraphUtils.isEmpty", "isNullOrEmpty"); err == nil {
+		t.Errorf("expected error for Java method rename")
+	} else if !strings.Contains(err.Error(), "only supported for Go") {
+		t.Errorf("expected 'only supported for Go', got %v", err)
+	}
 }
 
 func TestRenameMethodWithProvenReceiver(t *testing.T) {
