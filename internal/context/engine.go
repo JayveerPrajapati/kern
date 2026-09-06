@@ -778,19 +778,45 @@ func (e *Engine) resolveNode(name string) (domain.Node, bool) {
 			return n, true
 		}
 	}
+	// 1b. Exact qualified match against the graph's Symbol metadata.
+	for _, n := range e.graph.Nodes {
+		if n.Symbol != nil && n.Symbol.Qualified == name {
+			return n, true
+		}
+	}
 	// 2. Simple name match (Symbol.Name == name).
 	for _, n := range e.graph.Nodes {
 		if n.Symbol != nil && n.Symbol.Name == name {
 			return n, true
 		}
 	}
-	// 3. Qualified-name tail: "Type.Method" → try "Method" as simple name.
+	// 3. Dotted "Type.Method": match receivers to the qualifier, so an
+	// overloaded or package-qualified method never degrades to a random
+	// same-named method in another class.
 	if dot := strings.LastIndex(name, "."); dot >= 0 && dot < len(name)-1 {
-		tail := name[dot+1:]
+		qualifier, method := name[:dot], name[dot+1:]
+		var suffixMatch, nestedMatch domain.Node
+		var haveSuffix, haveNested bool
 		for _, n := range e.graph.Nodes {
-			if n.Symbol != nil && n.Symbol.Name == tail {
-				return n, true
+			if n.Symbol == nil || n.Symbol.Name != method || n.Symbol.Receiver == "" {
+				continue
 			}
+			switch {
+			case n.Symbol.Receiver == qualifier:
+				return n, true
+			case strings.HasSuffix(n.Symbol.Receiver, "."+qualifier):
+				if !haveSuffix {
+					suffixMatch, haveSuffix = n, true
+				}
+			case strings.Contains(qualifier, ".") && strings.HasSuffix(qualifier, "."+n.Symbol.Receiver) && !haveNested:
+				nestedMatch, haveNested = n, true
+			}
+		}
+		if haveSuffix {
+			return suffixMatch, true
+		}
+		if haveNested {
+			return nestedMatch, true
 		}
 	}
 	return domain.Node{}, false

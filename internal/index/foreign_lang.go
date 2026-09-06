@@ -545,14 +545,15 @@ func scanInheritsRegex(f *ffile, declLine, bodyEnd int, typeName, lang string, i
 		}
 	}
 	fullHeader := strings.Join(header, " ")
+	cleanHeader := stripGenerics(fullHeader)
 
 	var bases []string
 	switch lang {
 	case "java":
-		if m := reJavaExtends.FindStringSubmatch(fullHeader); m != nil {
+		if m := reJavaExtends.FindStringSubmatch(cleanHeader); m != nil {
 			bases = append(bases, "extends:"+baseName(m[1]))
 		}
-		if m := reJavaImplements.FindStringSubmatch(fullHeader); m != nil {
+		if m := reJavaImplements.FindStringSubmatch(cleanHeader); m != nil {
 			for _, b := range strings.Split(m[1], ",") {
 				b = strings.TrimSpace(b)
 				if b != "" {
@@ -561,10 +562,10 @@ func scanInheritsRegex(f *ffile, declLine, bodyEnd int, typeName, lang string, i
 			}
 		}
 	case "typescript", "javascript":
-		if m := reTSExtends.FindStringSubmatch(fullHeader); m != nil {
+		if m := reTSExtends.FindStringSubmatch(cleanHeader); m != nil {
 			bases = append(bases, "extends:"+baseName(m[1]))
 		}
-		if m := reTSImplements.FindStringSubmatch(fullHeader); m != nil {
+		if m := reTSImplements.FindStringSubmatch(cleanHeader); m != nil {
 			for _, b := range strings.Split(m[1], ",") {
 				b = strings.TrimSpace(b)
 				if b != "" {
@@ -586,7 +587,7 @@ func scanInheritsRegex(f *ffile, declLine, bodyEnd int, typeName, lang string, i
 			bases = append(bases, "extends:"+baseName(m[1]))
 		}
 	case "csharp":
-		if m := reCSharpBase.FindStringSubmatch(fullHeader); m != nil {
+		if m := reCSharpBase.FindStringSubmatch(cleanHeader); m != nil {
 			for _, b := range strings.Split(m[1], ",") {
 				b = strings.TrimSpace(b)
 				if b != "" {
@@ -619,4 +620,26 @@ func baseName(qualified string) string {
 		return qualified[i+1:]
 	}
 	return qualified
+}
+
+// stripGenerics removes <...> generic type parameters from a declaration header,
+// handling nested angle brackets, so inheritance regexes match clean identifier chains.
+func stripGenerics(s string) string {
+	var b strings.Builder
+	depth := 0
+	for _, r := range s {
+		switch r {
+		case '<':
+			depth++
+		case '>':
+			if depth > 0 {
+				depth--
+			}
+		default:
+			if depth == 0 {
+				b.WriteRune(r)
+			}
+		}
+	}
+	return b.String()
 }

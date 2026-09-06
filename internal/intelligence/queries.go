@@ -127,8 +127,58 @@ func (g *Graph) resolveNodeID(ref string) (string, bool) {
 	case 1:
 		return ids[0], true // unique simple name
 	default:
+		// Ambiguous simple name: prefer an exact qualified match, else a
+		// receiver match for "Type.Method" references, so overloaded or
+		// package-qualified methods do not resolve to an arbitrary node.
+		qualifier := ""
+		if i := strings.LastIndexByte(ref, '.'); i >= 0 {
+			qualifier = ref[:i]
+		}
+		var suffix, nested string
+		var haveSuffix, haveNested bool
+		for _, id := range ids {
+			n, ok := g.byID[id]
+			if !ok || n.Symbol == nil {
+				continue
+			}
+			if n.Symbol.Qualified == ref {
+				return id, true
+			}
+			if qualifier != "" && n.Symbol.Receiver != "" {
+				switch {
+				case n.Symbol.Receiver == qualifier:
+					return id, true
+				case strings.HasSuffix(n.Symbol.Receiver, "."+qualifier):
+					if !haveSuffix {
+						suffix, haveSuffix = id, true
+					}
+				case booleanNested(qualifier, n.Symbol.Receiver):
+					if !haveNested {
+						nested, haveNested = id, true
+					}
+				}
+			}
+		}
+		if haveSuffix {
+			return suffix, true
+		}
+		if haveNested {
+			return nested, true
+		}
 		return ref, false // ambiguous: same name on multiple nodes
 	}
+}
+
+// resolveSymbol maps a user-provided symbol to its canonical node ID. It handles
+// bare names ("Func"), package-scoped names ("pkg.Func"), and method names
+// ("Type.Method"). When the input doesn't match a node ID directly, the name is
+// matched against node names, resolving to the unique node when unambiguous.
+// Resolvable reports whether ref maps to a node in the graph (a bare symbol
+// name, package-scoped name, or method name that uniquely resolves). Used to
+// verify natural-language extraction against the real index (report A8).
+func (g *Graph) Resolvable(ref string) bool {
+	_, ok := g.resolveNodeID(ref)
+	return ok
 }
 
 // resolveSymbol maps a user-provided symbol to its canonical node ID. It handles
@@ -470,4 +520,18 @@ func (g *Graph) WhatTestsCoverPrecise(symbol string, strict bool) []domain.Node 
 		out = append(out, n)
 	}
 	return out
+}
+
+// booleanNested reports whether a dotted qualifier refers to a (possibly
+// nested) receiver: the qualifier is more-qualified than the bare receiver
+// and its last segment is the receiver itself (e.g. "Outer.Inner" for a
+// receiver "Inner"). Mirrors index.ResolveDottedMethod's tier 3.
+func booleanNested(qualifier, receiver string) bool {
+	if !strings.Contains(qualifier, ".") || receiver == "" {
+		return false
+	}
+	if i := strings.LastIndexByte(qualifier, '.'); i >= 0 {
+		return qualifier[i+1:] == receiver
+	}
+	return false
 }

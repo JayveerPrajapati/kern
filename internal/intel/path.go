@@ -23,6 +23,15 @@ func Resolve(ix *index.Index, name string) (string, bool) {
 			return c, true
 		}
 	}
+	// Method-qualified ("Type.Method" or "pkg.Type.Method"): resolve against
+	// receiver names, not bare method names, so an overloaded or
+	// package-qualified receiver never degrades to a random same-named method
+	// (or zero results) when the exact FullName is not in the index.
+	if dot := strings.LastIndex(name, "."); dot >= 0 && dot+1 < len(name) {
+		if matches := ix.ResolveDottedMethod(name[:dot], name[dot+1:]); len(matches) > 0 {
+			return matches[0].FullName(), true
+		}
+	}
 	// Raw callee form ("index.Build"): the trailing part is the symbol.
 	if s := simpleName(name); s != name && symbolByName(ix, s) {
 		return s, true

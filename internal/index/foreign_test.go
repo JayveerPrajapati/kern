@@ -1027,3 +1027,40 @@ public class Config {
 		t.Errorf("pkg.Imports = %v, want the vault package", pkg.Imports)
 	}
 }
+
+func TestExtractForeignJavaInheritsGenerics(t *testing.T) {
+	src := `package com.inn.rcp;
+
+public class EntityEvent<T> extends BaseEvent<T> implements Serializable, Comparable<EntityEvent<T>> {
+    private String id;
+}
+`
+	syms, _, inherits, _, err := extractForeign("EntityEvent.java", []byte(src), "java")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(syms) == 0 {
+		t.Fatal("expected symbols from java file")
+	}
+	edges := inherits["EntityEvent"]
+	if len(edges) != 3 {
+		t.Fatalf("expected 3 inheritance edges for EntityEvent, got %+v", edges)
+	}
+	foundExtends := false
+	foundSerializable := false
+	foundComparable := false
+	for _, e := range edges {
+		if e == "extends:BaseEvent" {
+			foundExtends = true
+		}
+		if e == "implements:Serializable" {
+			foundSerializable = true
+		}
+		if e == "implements:Comparable" {
+			foundComparable = true
+		}
+	}
+	if !foundExtends || !foundSerializable || !foundComparable {
+		t.Errorf("missing expected edges, got %v", edges)
+	}
+}

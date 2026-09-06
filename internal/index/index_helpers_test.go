@@ -272,3 +272,50 @@ func TestLoadFileRoundTrip(t *testing.T) {
 		t.Error("expected error for missing file")
 	}
 }
+
+func TestResolveNameDottedMethod(t *testing.T) {
+	ix := New("/tmp")
+	ix.Symbols = []Symbol{
+		{Kind: "method", Name: "build", Receiver: "EntityEvent", File: "com/inn/rcp/EntityEvent.java", Line: 1, Lang: "java"},
+		{Kind: "method", Name: "build", Receiver: "com.inn.rcp.ResponseWrapperFactory", File: "com/inn/rcp/ResponseWrapperFactory.java", Line: 1, Lang: "java"},
+		{Kind: "method", Name: "build", Receiver: "GraphUtils", File: "com/inn/rcp/GraphUtils.java", Line: 1, Lang: "java"},
+		{Kind: "func", Name: "OtherFn", File: "x.go", Line: 1, Lang: "go"},
+	}
+	ix.buildSymbolIndex()
+
+	cases := []struct {
+		query string
+		want  string // expected resolved FullName; "" => not found
+	}{
+		{"ResponseWrapperFactory.build", "com.inn.rcp.ResponseWrapperFactory.build"},
+		{"com.inn.rcp.ResponseWrapperFactory.build", "com.inn.rcp.ResponseWrapperFactory.build"},
+		{"EntityEvent.build", "EntityEvent.build"},
+		{"GraphUtils.build", "GraphUtils.build"},
+		{"NoSuchClass.build", ""},
+		{"build", "EntityEvent.build"}, // bare name: deterministic first match
+	}
+	for _, c := range cases {
+		got, ok := resolveName(ix, c.query)
+		if c.want == "" {
+			if ok {
+				t.Errorf("resolveName(%q) unexpectedly resolved to %q", c.query, got.FullName())
+			}
+			continue
+		}
+		if !ok || got.FullName() != c.want {
+			t.Errorf("resolveName(%q) = %q, %v; want %q", c.query, got.FullName(), ok, c.want)
+		}
+	}
+}
+
+func TestResolveDottedMethodNestedClass(t *testing.T) {
+	ix := New("/tmp")
+	ix.Symbols = []Symbol{
+		{Kind: "method", Name: "build", Receiver: "Inner", File: "com/inn/rcp/Outer.java", Line: 1, Lang: "java"},
+	}
+	ix.buildSymbolIndex()
+	// A more-qualified query for a nested class still resolves.
+	if s, ok := resolveName(ix, "Outer.Inner.build"); !ok || s.FullName() != "Inner.build" {
+		t.Errorf("resolveName(Outer.Inner.build) = %q, %v; want Inner.build", s.FullName(), ok)
+	}
+}

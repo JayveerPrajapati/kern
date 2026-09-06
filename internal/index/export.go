@@ -320,25 +320,70 @@ func (ix *Index) TokenSavingsForNeighborhood(g GraphResult) TokenStats {
 // resolveName finds a definition for a call target name. Exact matches win;
 // a package-qualified target like "index.Build" falls back to the bare name
 // ("Build") so call sites still resolve to real definitions.
+// ResolveDottedMethod resolves a dotted method reference ("Type.Method" or
+// "pkg.Type.Method") to the method symbols whose receiver matches the
+// qualifier. The index may key a Java method's FullName as
+// "com.inn.rcp.ResponseWrapperFactory.build" while the user types
+// "ResponseWrapperFactory.build", and overloads all share one FullName, so an
+// exact map lookup cannot disambiguate. Matching tiers:
+//
+//  1. receiver equals the qualifier exactly ("ResponseWrapperFactory.build")
+//  2. receiver is package-qualified and ends in the qualifier
+//     ("com.inn.rcp.ResponseWrapperFactory.build")
+//  3. the qualifier is more-qualified than the receiver (nested classes:
+//     "Outer.Inner.build" where the receiver is "Inner")
+//
+// Overloads are all returned (in index order); callers that need one symbol
+// pick the first deterministically. Returns nil when no receiver matches.
+func (ix *Index) ResolveDottedMethod(qualifier, method string) []Symbol {
+	var exact, suffix, nested []Symbol
+	for _, s := range ix.symbolsFor(method) {
+		if s.Receiver == "" {
+			continue
+		}
+		switch {
+		case s.Receiver == qualifier:
+			exact = append(exact, s)
+		case strings.HasSuffix(s.Receiver, "."+qualifier):
+			suffix = append(suffix, s)
+		case strings.Contains(qualifier, ".") && baseName(qualifier) == s.Receiver:
+			nested = append(nested, s)
+		}
+	}
+	switch {
+	case len(exact) > 0:
+		return exact
+	case len(suffix) > 0:
+		return suffix
+	default:
+		return nested
+	}
+}
+
 func resolveName(ix *Index, name string) (Symbol, bool) {
 	if defs := ix.symbolsFor(name); len(defs) > 0 {
 		return defs[0], true
 	}
 	if i := strings.LastIndex(name, "."); i >= 0 && i+1 < len(name) {
-		if defs := ix.symbolsFor(name[i+1:]); len(defs) > 0 {
-			// Prefer the definition that lives under the package named by the
-			// qualifier (e.g. "index.Load" should resolve to the index package,
-			// not whatever Load the symbol order happens to list first). Fall
-			// back to the first bare-name match for call sites.
-			if i > 0 {
-				pkg := name[:i]
-				for _, d := range defs {
-					if filepath.Base(filepath.Dir(d.File)) == pkg {
-						return d, true
-					}
+		qualifier, method := name[:i], name[i+1:]
+		// Class.method: match receivers to the qualifier deterministically so
+		// an overloaded or package-qualified method name never falls through
+		// to an arbitrary same-named symbol in another class.
+		if matches := ix.ResolveDottedMethod(qualifier, method); len(matches) > 0 {
+			return matches[0], true
+		}
+		// Package-qualified Go target ("index.Load"): match the qualifier to
+		// the directory that actually defines the bare-name symbol. Unlike the
+		// receiver path above, this is a directory match, not a receiver
+		// match; when neither qualifies, a dotted name resolves to nothing
+		// rather than an arbitrary same-named symbol (report K-01).
+		if defs := ix.symbolsFor(method); len(defs) > 0 {
+			pkg := qualifier
+			for _, d := range defs {
+				if filepath.Base(filepath.Dir(d.File)) == pkg {
+					return d, true
 				}
 			}
-			return defs[0], true
 		}
 	}
 	return Symbol{}, false

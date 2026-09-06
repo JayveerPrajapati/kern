@@ -224,3 +224,35 @@ func TestPrints(t *testing.T) {
 		t.Errorf("Println should be uncovered, got %d uncovered", cov.Uncovered)
 	}
 }
+
+func TestResolveDottedMethod(t *testing.T) {
+	ix := index.New("/tmp")
+	ix.Symbols = []index.Symbol{
+		{Kind: "method", Name: "build", Receiver: "EntityEvent", File: "com/inn/rcp/EntityEvent.java", Line: 1, Lang: "java"},
+		{Kind: "method", Name: "build", Receiver: "com.inn.rcp.ResponseWrapperFactory", File: "com/inn/rcp/ResponseWrapperFactory.java", Line: 1, Lang: "java"},
+		{Kind: "method", Name: "build", Receiver: "com.inn.rcp.GraphUtils", File: "com/inn/rcp/GraphUtils.java", Line: 1, Lang: "java"},
+		{Kind: "func", Name: "OtherFn", File: "x.go", Line: 1, Lang: "go"},
+	}
+
+	cases := []struct {
+		query string
+		want  string
+	}{
+		{"ResponseWrapperFactory.build", "com.inn.rcp.ResponseWrapperFactory.build"},
+		{"com.inn.rcp.ResponseWrapperFactory.build", "com.inn.rcp.ResponseWrapperFactory.build"},
+		{"EntityEvent.build", "EntityEvent.build"},
+		{"NoSuchClass.build", ""},
+	}
+	for _, c := range cases {
+		got, ok := Resolve(ix, c.query)
+		if c.want == "" {
+			if ok {
+				t.Errorf("Resolve(%q) unexpectedly resolved to %q", c.query, got)
+			}
+			continue
+		}
+		if !ok || got != c.want {
+			t.Errorf("Resolve(%q) = %q, %v; want %q", c.query, got, ok, c.want)
+		}
+	}
+}
