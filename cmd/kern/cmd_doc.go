@@ -47,6 +47,9 @@ func runDocFetch(rest []string) {
 	if err != nil {
 		fatal("%v", err)
 	}
+	if res.Truncated {
+		fmt.Fprintf(os.Stderr, "warning: document exceeded limit, truncated to %d bytes\n", len(res.Text))
+	}
 	fmt.Printf("fetched %s (%d bytes, %d chunks indexed into %s doc index)\n", name, len(res.Text), added, root)
 	if res.Title != "" {
 		fmt.Printf("# %s\n\n", res.Title)

@@ -29,8 +29,9 @@ const (
 
 // Result is the fetched and cleaned document.
 type Result struct {
-	Title string // <title> for HTML, otherwise ""
-	Text  string // cleaned text (HTML stripped)
+	Title     string // <title> for HTML, otherwise ""
+	Text      string // cleaned text (HTML stripped)
+	Truncated bool   // true if body was truncated due to size limit
 }
 
 var (
@@ -105,18 +106,27 @@ func Fetch(rawURL string, maxBytes int) (*Result, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read failed: %w", err)
 	}
+	truncated := false
 	if len(body) > maxBytes {
-		return nil, fmt.Errorf("body exceeds %d bytes", maxBytes)
+		body = body[:maxBytes]
+		truncated = true
 	}
 
 	ctype := resp.Header.Get("Content-Type")
 	if !strings.Contains(ctype, "text/") && !strings.Contains(ctype, "html") && ctype != "" {
 		return nil, fmt.Errorf("unexpected content type %q", ctype)
 	}
+	var res *Result
 	if strings.Contains(ctype, "html") {
-		return htmlToText(body), nil
+		res = htmlToText(body)
+	} else {
+		res = &Result{Text: string(body)}
 	}
-	return &Result{Text: string(body)}, nil
+	res.Truncated = truncated
+	if truncated {
+		res.Text += fmt.Sprintf("\n\n[Warning: document truncated at %d bytes limit]", maxBytes)
+	}
+	return res, nil
 }
 
 // htmlToText strips HTML to readable plain text: <script>/<style> blocks are
