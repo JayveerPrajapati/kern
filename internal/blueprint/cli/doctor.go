@@ -119,6 +119,10 @@ type doctorCheck struct {
 // so an environment cannot ship with a shrunken gate set without knowing it.
 var kernDependentGates = []string{"G2", "G3", "G5", "G7", "G12", "G13", "G27"}
 
+// KernDependentGates returns the gate IDs whose tests require a reachable kern
+// binary. Exposed for the legacy cmd/blueprint compatibility shim's tests.
+func KernDependentGates() []string { return kernDependentGates }
+
 // runDoctorChecks runs the preflight checks in order:
 //
 //  1. kern-binary   (env)    — binary resolvable via NewKernClient

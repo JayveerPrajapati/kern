@@ -6,7 +6,14 @@ import (
 	"os/exec"
 	"sort"
 	"strings"
+
+	"github.com/JayveerPrajapati/kern/internal/code"
 )
+
+// riskCap bounds the files risk-scored against the call graph. With vendor
+// noise excluded the real source set is small; the cap is defensive so deep
+// history walks on pathological repos cannot blow up ChurnContext (report A5).
+const riskCap = 300
 
 // ChurnEntry is one file with its change-frequency stats.
 type ChurnEntry struct {
@@ -52,6 +59,13 @@ func ChurnContext(ctx context.Context, root, from, to string) (*ChurnReport, err
 		return nil, &GitError{Op: "git log --name-only", Err: err}
 	}
 	counts, commits := parseLog(string(out))
+	// Exclude VCS/build/vendor-dir noise (vendor/, dist/, build/, ...) so deep
+	// vendor-heavy history walks report real source churn only (report A5).
+	for f := range counts {
+		if code.ShouldIgnore(f) {
+			delete(counts, f)
+		}
+	}
 	entries := make([]ChurnEntry, 0, len(counts))
 	for f, n := range counts {
 		entries = append(entries, ChurnEntry{File: f, Commits: n})
@@ -74,7 +88,14 @@ func ChurnContext(ctx context.Context, root, from, to string) (*ChurnReport, err
 		}
 	}
 	if ix, err := ReadIndex(root); err == nil {
-		report := AnalyzeChanges(ix, filesOf(entries))
+		// Risk-score at most riskCap entries: the churn ranking already
+		// prompted the review; scoring every historical file (which is what
+		// made deep ranges hang) adds no signal (report A5).
+		scored := entries
+		if len(scored) > riskCap {
+			scored = scored[:riskCap]
+		}
+		report := AnalyzeChanges(ix, filesOf(scored))
 		risks := map[string]float64{}
 		for _, c := range report.Changes {
 			risks[c.File] = c.Risk

@@ -24,10 +24,15 @@ const maxEntries = 50
 // package-level rather than a field on Store.
 var mu sync.Mutex
 
-// Entry is a single recorded lesson.
+// Entry is a single recorded lesson. Source distinguishes deliberate lessons
+// ("", set by kern remember / kern_memory_add) from automatic session captures
+// ("auto", written by the hooks/plugin conversation capture). Auto entries are
+// labeled on list and excluded from recall by default (see Recall) so raw
+// prompts never leak back into an LLM context (report A17).
 type Entry struct {
-	Time time.Time `json:"time"`
-	Text string    `json:"text"`
+	Time   time.Time `json:"time"`
+	Text   string    `json:"text"`
+	Source string    `json:"source,omitempty"`
 }
 
 // Store is a project's lesson list.
@@ -54,18 +59,53 @@ func Load(root string) Store {
 	if s.Entries == nil {
 		s.Entries = []Entry{}
 	}
+	// Migration: entries written before Source existed carry no field. Backfill
+	// the auto label for the conversation-capture prefixes so legacy raw
+	// prompts are not silently treated as agent lessons.
+	for i := range s.Entries {
+		if s.Entries[i].Source == "" && isAutoCapture(s.Entries[i].Text) {
+			s.Entries[i].Source = "auto"
+		}
+	}
 	return s
 }
 
-// Add appends a lesson, dropping the oldest entries beyond maxEntries.
+// isAutoCapture reports whether a lesson text matches an automatic session
+// capture (raw prompts, tool outcomes, sanitized change snapshots) rather than
+// an explicitly remembered lesson.
+func isAutoCapture(text string) bool {
+	return strings.HasPrefix(text, "User: ") ||
+		strings.HasPrefix(text, "Edited ") ||
+		strings.HasPrefix(text, "Command failed: ") ||
+		strings.HasPrefix(text, "latest change:")
+}
+
+// Add appends a lesson, dropping the oldest entries beyond maxEntries. A
+// conversation-capture text is tagged Source "auto" (see isAutoCapture) so it
+// is labeled and excluded from recall regardless of which entry point wrote it
+// (CLI, MCP, or the opencode/hook plugin).
 func Add(root, lesson string) error {
+	source := ""
+	if isAutoCapture(lesson) {
+		source = "auto"
+	}
+	return addWithSource(root, lesson, source)
+}
+
+// AddAuto appends an explicitly automatic capture (raw prompt, tool outcome)
+// tagged Source "auto". Use it from session-capture code paths.
+func AddAuto(root, lesson string) error {
+	return addWithSource(root, lesson, "auto")
+}
+
+func addWithSource(root, lesson, source string) error {
 	if strings.TrimSpace(lesson) == "" {
 		return nil
 	}
 	mu.Lock()
 	defer mu.Unlock()
 	s := Load(root)
-	s.Entries = append(s.Entries, Entry{Time: time.Now().UTC(), Text: lesson})
+	s.Entries = append(s.Entries, Entry{Time: time.Now().UTC(), Text: lesson, Source: source})
 	if len(s.Entries) > maxEntries {
 		s.Entries = s.Entries[len(s.Entries)-maxEntries:]
 	}
@@ -134,6 +174,11 @@ func Recall(root, prompt string, k int) []Entry {
 	}
 	var pool []scored
 	for _, e := range List(root) {
+		// Auto captures (raw prompts, tool outcomes) are never recalled: they
+		// can carry PII and are session context, not project lessons (A17).
+		if e.Source == "auto" {
+			continue
+		}
 		etoks := tokens(e.Text)
 		if len(etoks) == 0 {
 			continue

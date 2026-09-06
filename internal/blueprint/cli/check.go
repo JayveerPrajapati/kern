@@ -485,6 +485,10 @@ func discoverStagedChanges(repoRoot string) ([]domain.FileChange, error) {
 	return changes, nil
 }
 
+// SplitDiffBlocks exposes splitDiffBlocks for the legacy cmd/blueprint
+// compatibility shim's tests.
+func SplitDiffBlocks(diff string) map[string]string { return splitDiffBlocks(diff) }
+
 // splitDiffBlocks splits a combined `git diff` output into per-file blocks
 // keyed by the file's new path. Blocks start on lines beginning with
 // `diff --git `. The path is taken from the `+++ b/<path>` line when present
@@ -556,10 +560,20 @@ func diffSidePath(val, prefix string) string {
 	return val
 }
 
+// IsBinaryDiffBlock exposes isBinaryDiffBlock for the legacy cmd/blueprint
+// compatibility shim's tests.
+func IsBinaryDiffBlock(block string) bool { return isBinaryDiffBlock(block) }
+
 // isBinaryDiffBlock reports whether a diff block describes a binary change
 // (git emits "Binary files a/... and b/... differ" with no hunks).
 func isBinaryDiffBlock(block string) bool {
 	return strings.Contains(block, "Binary files ")
+}
+
+// ParseDiffLineNumbers exposes parseDiffLineNumbers for the legacy
+// cmd/blueprint compatibility shim's tests.
+func ParseDiffLineNumbers(diff string) (added, removed []string) {
+	return parseDiffLineNumbers(diff)
 }
 
 // parseDiffLineNumbers parses `@@ -a,b +c,d @@` hunk headers from a unified

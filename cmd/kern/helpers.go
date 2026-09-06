@@ -132,6 +132,9 @@ func runLoopCLI(root, levelStr, intent string) (string, error) {
 	}
 	fmt.Fprintf(&b, "deployed: %v\n", res.Deployed)
 	fmt.Fprintf(&b, "observed-healthy: %v\n", res.ObservedHealthy)
+	if res.VerifyAdvisory != "" {
+		fmt.Fprintf(&b, "verify-advisory: %s\n", res.VerifyAdvisory)
+	}
 	if res.Learned != nil {
 		fmt.Fprintf(&b, "learned: %s\n", res.Learned.ID)
 	}

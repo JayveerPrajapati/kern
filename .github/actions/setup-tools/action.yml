@@ -1,7 +1,9 @@
 name: Setup CI Tools
 description: >-
   Installs and verifies the shared toolchain used across CI workflows:
-  gitleaks (checksum-verified), jscpd, kern, and blueprint-mcp.
+  gitleaks (checksum-verified), jscpd, and kern (which now includes the
+  Blueprint change-governance gates formerly shipped as standalone
+  blueprint / blueprint-mcp binaries).
 
 inputs:
   gitleaks-version:
@@ -11,7 +13,7 @@ inputs:
     description: SHA-256 checksum for the gitleaks tarball
     default: "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
   install-kern:
-    description: Whether to build and install kern + blueprint binaries
+    description: Whether to build and install the kern binary
     default: "true"
   node-version:
     description: Node.js version for jscpd
@@ -42,14 +44,12 @@ runs:
           sudo ln -sf "$(npm config get prefix)/bin/jscpd" /usr/local/bin/jscpd
         fi
 
-    - name: Install kern and blueprint
+    - name: Install kern
       if: inputs.install-kern == 'true'
       shell: bash
       run: |
-        go install ./cmd/kern ./cmd/blueprint ./cmd/blueprint-mcp
+        go install ./cmd/kern
         sudo cp "$(go env GOPATH)/bin/kern" /usr/local/bin/kern || true
-        sudo cp "$(go env GOPATH)/bin/blueprint" /usr/local/bin/blueprint || true
-        sudo cp "$(go env GOPATH)/bin/blueprint-mcp" /usr/local/bin/blueprint-mcp || true
         echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
 
     - name: Verify tool availability
@@ -58,4 +58,5 @@ runs:
         which gitleaks && gitleaks version
         which jscpd && jscpd --version
         which kern && kern version
-        which blueprint && blueprint version
+        kern check --help >/dev/null 2>&1 || true
+        kern ci --help >/dev/null 2>&1 || true

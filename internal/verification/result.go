@@ -7,6 +7,8 @@
 package verification
 
 import (
+	"fmt"
+	"strings"
 	"time"
 
 	"github.com/JayveerPrajapati/kern/internal/domain"
@@ -191,4 +193,58 @@ type CIResult struct {
 	Status  string `json:"status,omitempty"` // "success", "failure", "in_progress", "queued", "skipped"
 	URL     string `json:"url,omitempty"`
 	Summary string `json:"summary,omitempty"`
+}
+
+// RenderCompact renders a VerificationResult as a short verdict plus one line
+// per executed sub-check. Used where a FAIL verdict must still surface the
+// typed verdict and per-check status instead of a bare error (report A11).
+func RenderCompact(v VerificationResult) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "verdict: %s\n", v.Verdict)
+	if v.Summary != "" {
+		fmt.Fprintf(&b, "summary: %s\n", v.Summary)
+	}
+	line := func(name, status, detail string) {
+		if status == "" {
+			status = map[bool]string{true: "OK", false: "FAIL"}[detail == ""]
+		}
+		if detail != "" {
+			b.WriteString(name + ": " + status + " " + detail + "\n")
+		} else {
+			b.WriteString(name + ": " + status + "\n")
+		}
+	}
+	if v.Build != nil {
+		line("build", okStatus(v.Build.OK), fmt.Sprintf("(%s)", v.Build.Duration))
+	}
+	if v.UnitTests != nil {
+		line("tests", okStatus(v.UnitTests.OK), fmt.Sprintf("passed=%d failed=%d skipped=%d (%s)", v.UnitTests.Passed, v.UnitTests.Failed, v.UnitTests.Skipped, v.UnitTests.Duration))
+	}
+	if v.Integration != nil {
+		line("integration", okStatus(v.Integration.OK), fmt.Sprintf("passed=%d failed=%d skipped=%d (%s)", v.Integration.Passed, v.Integration.Failed, v.Integration.Skipped, v.Integration.Duration))
+	}
+	if v.Security != nil {
+		detail := fmt.Sprintf("findings=%d critical=%d high=%d low=%d", v.Security.Count, v.Security.Critical, v.Security.High, v.Security.Low)
+		if v.Security.Error != "" {
+			detail += " error=" + v.Security.Error
+		}
+		line("security", okStatus(v.Security.OK), detail)
+	}
+	if v.Architecture != nil {
+		line("architecture", okStatus(v.Architecture.OK), fmt.Sprintf("violations=%d warnings=%d", len(v.Architecture.Violations), len(v.Architecture.Warnings)))
+	}
+	if v.Dependency != nil {
+		line("dependency", okStatus(v.Dependency.OK), fmt.Sprintf("nodes=%d edges=%d findings=%d", v.Dependency.GraphNodes, v.Dependency.GraphEdges, len(v.Dependency.Findings)))
+	}
+	if v.StaticAnalysis != nil {
+		line("static-analysis", okStatus(v.StaticAnalysis.OK), fmt.Sprintf("tool=%s findings=%d", v.StaticAnalysis.Tool, len(v.StaticAnalysis.Findings)))
+	}
+	if v.E2ETests != nil {
+		line("e2e", okStatus(v.E2ETests.OK), fmt.Sprintf("passed=%d failed=%d skipped=%d", v.E2ETests.Passed, v.E2ETests.Failed, v.E2ETests.Skipped))
+	}
+	return strings.TrimSuffix(b.String(), "\n")
+}
+
+func okStatus(ok bool) string {
+	return map[bool]string{true: "OK", false: "FAIL"}[ok]
 }

@@ -45,9 +45,12 @@ surfaces of one capability, not two tools doing the same thing.
    - or as a repair loop, via `blueprint fix` or `kern fix` (proposed fixes validated in an
      isolated worktree).
 3. **Unified in-tree layout.** Blueprint is natively integrated into Kern under
-   `internal/blueprint/`. In addition to compatibility binaries (`cmd/blueprint`,
-   `cmd/blueprint-mcp`), its governance commands are first-class subcommands on
-   Kern: `kern check`, `kern fix`, `kern ci`, and `kern verify-receipt`.
+   `internal/blueprint/`. The `cmd/blueprint` and `cmd/blueprint-mcp` binaries
+   are legacy shims kept only for backward compatibility — they forward to the
+   same `internal/blueprint/cli` implementation and are no longer built or
+   installed by CI, the Makefile, or `kern setup`. The first-class surface is
+   Kern's own subcommands: `kern check`, `kern fix`, `kern ci`, and
+   `kern verify-receipt`.
 4. **Shared intelligence.** Blueprint never reimplements analysis: it
    consumes kern's `guard` / `sec` / `fingerprint` oracles under a versioned
    JSON contract (`schema_version`), fail-closed on mismatch.

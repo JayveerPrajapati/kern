@@ -50,6 +50,12 @@ func Build(root string) (string, error) {
 	if entries := memory.List(root); len(entries) > 0 {
 		tail.WriteString("## Project memory (from past sessions)\n")
 		for _, e := range entries {
+			// Auto captures (raw prompts, tool outcomes) are session context,
+			// not project lessons — never inject them into a session digest
+			// (report A17).
+			if e.Source == "auto" {
+				continue
+			}
 			text := e.Text
 			if len(text) > 400 {
 				text = text[:400] + "…"
@@ -124,6 +130,17 @@ func Warm(root string) error {
 	return ix.Save()
 }
 
+// callEdges returns the total number of directed caller→callee edges in an
+// index. Concurrent with `kern onboard`'s metric (report A10): a symbol that
+// calls three helpers contributes three edges, not one row.
+func callEdges(ix *index.Index) int {
+	n := 0
+	for _, callees := range ix.Calls {
+		n += len(callees)
+	}
+	return n
+}
+
 func indexSection(ix *index.Index) string {
 	var b strings.Builder
 	b.WriteString("## Index\n")
@@ -132,7 +149,7 @@ func indexSection(ix *index.Index) string {
 		b.WriteString("Languages: " + strings.Join(langs, ", ") + "\n")
 	}
 	fmt.Fprintf(&b, "Symbols: %d · Call edges: %d · Files indexed: %d\n",
-		len(ix.Symbols), len(ix.Calls), len(ix.FileHashes))
+		len(ix.Symbols), callEdges(ix), len(ix.FileHashes))
 
 	kindCount := map[string]int{}
 	for _, s := range ix.Symbols {
@@ -244,12 +261,13 @@ const (
 // architectureSection adds the community/coupling overview so the onboarding
 // digest doubles as architecture discovery. Skipped for huge graphs.
 func architectureSection(ix *index.Index) string {
-	if len(ix.Calls) == 0 {
+	edges := callEdges(ix)
+	if edges == 0 {
 		return ""
 	}
-	if len(ix.Symbols) > archGateSymbols || len(ix.Calls) > archGateEdges {
+	if len(ix.Symbols) > archGateSymbols || edges > archGateEdges {
 		return fmt.Sprintf("## Architecture\n(skipped — %d symbols / %d call edges exceed the digest's analysis gate; use `kern graph --html` for the interactive explorer)\n\n",
-			len(ix.Symbols), len(ix.Calls))
+			len(ix.Symbols), edges)
 	}
 	arch := intel.AnalyzeArchitecture(ix)
 	if len(arch.Communities) == 0 && len(arch.Coupling) == 0 {

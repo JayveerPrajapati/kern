@@ -178,6 +178,7 @@ func Check(root string) []Status {
 	}
 
 	out = append(out, fileStatus(filepath.Join(root, ".gitignore"), "gitignore (generated block)"))
+	out = append(out, checkWrapperFreshness()...)
 	return out
 }
 

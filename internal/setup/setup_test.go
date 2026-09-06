@@ -185,6 +185,7 @@ func TestWirePeerAgentRules(t *testing.T) {
 func TestCheckReports(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("HOME", t.TempDir())
+	t.Setenv("PATH", t.TempDir()) // no host-installed wrappers leak into the check
 	dir := t.TempDir()
 	sts := Check(dir)
 	if len(sts) == 0 {

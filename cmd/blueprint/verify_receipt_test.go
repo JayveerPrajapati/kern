@@ -196,6 +196,86 @@ func TestVerifyReceipt_EndToEnd(t *testing.T) {
 	}
 }
 
+// TestVerifyReceipt_ArtifactFile (P1.4): `verify-receipt <file>` accepts the
+// CI artifact JSON that `blueprint ci --artifact-file` wrote and verifies the
+// correlated receipt (PASS/WARN run). An artifact from a BLOCK run — no
+// receipt is sealed for those (see sealReceipt) — exits 3 with an actionable
+// explanation instead of a bare "Receipt not found".
+func TestVerifyReceipt_ArtifactFile(t *testing.T) {
+	kernPath := requireKernPath(t)
+	binPath := buildBlueprint(t)
+	dir := g11Repo(t,
+		map[string]string{
+			"db/db.go":   "package db\nfunc Query() {}\n",
+			"web/web.go": "package web\nfunc Handle() {}\n",
+		},
+		map[string]string{"web/clean.go": "package web\nfunc Clean() {}\n"},
+	)
+
+	// 1. PASS run → receipt sealed and the artifact it wrote cites it.
+	_, stderr, exitCode, artifact := runCICommand(t, binPath, dir, kernPath)
+	if exitCode != 0 {
+		t.Fatalf("ci exit=%d want 0 (PASS); stderr:\n%s", exitCode, stderr)
+	}
+	if artifact.ReceiptID == "" {
+		t.Fatalf("artifact.ReceiptID empty on a PASS run; stderr:\n%s", stderr)
+	}
+	if id := receiptIDFromOutput(t, stderr); id != artifact.ReceiptID {
+		t.Fatalf("artifact receipt_id %q != announced %q", artifact.ReceiptID, id)
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".blueprint", "receipts", artifact.ReceiptID+".json")); err != nil {
+		t.Fatalf("correlated receipt not on disk: %v", err)
+	}
+
+	// 2. Verify the artifact file by path → VALID, exit 0.
+	artifactPath := filepath.Join(t.TempDir(), "result.json")
+	data, err := json.Marshal(artifact)
+	if err != nil {
+		t.Fatalf("marshal artifact: %v", err)
+	}
+	if err := os.WriteFile(artifactPath, data, 0o644); err != nil {
+		t.Fatalf("write artifact file: %v", err)
+	}
+	out, code := runVerifyReceiptInDir(t, binPath, dir, dir, "", artifactPath)
+	if code != 0 {
+		t.Fatalf("verify-receipt <artifact> exit=%d want 0; output:\n%s", code, out)
+	}
+	if !strings.Contains(out, "VALID") || !strings.Contains(out, "Signature verified") {
+		t.Fatalf("verify-receipt <artifact> output missing VALID markers:\n%s", out)
+	}
+
+	// 3. BLOCK run → artifact carries no receipt_id → verifying the file exits
+	// 3 with the explanation.
+	badDir := g11Repo(t,
+		map[string]string{
+			"db/db.go":   "package db\nfunc Query() {}\n",
+			"web/web.go": "package web\nfunc Handle() {}\n",
+		},
+		map[string]string{"web/bad.go": "package web\nimport \"example.com/repo/db\"\nfunc Bad() { db.Query() }\n"},
+	)
+	_, _, blockCode, artifact := runCICommand(t, binPath, badDir, kernPath)
+	if blockCode != 1 {
+		t.Fatalf("violating ci exit=%d want 1 (BLOCK)", blockCode)
+	}
+	if artifact.ReceiptID != "" {
+		t.Fatalf("BLOCK artifact unexpectedly cites receipt %q", artifact.ReceiptID)
+	}
+	artifactPath = filepath.Join(t.TempDir(), "blocked.json")
+	if data, err = json.Marshal(artifact); err != nil {
+		t.Fatalf("marshal blocked artifact: %v", err)
+	}
+	if err := os.WriteFile(artifactPath, data, 0o644); err != nil {
+		t.Fatalf("write blocked artifact: %v", err)
+	}
+	out, code = runVerifyReceiptInDir(t, binPath, badDir, badDir, "", artifactPath)
+	if code != 3 {
+		t.Fatalf("verify-receipt <blocked artifact> exit=%d want 3; output:\n%s", code, out)
+	}
+	if !strings.Contains(out, "not a receipt") || !strings.Contains(out, "sealed for PASS/WARN") {
+		t.Fatalf("verify-receipt <blocked artifact> missing PASS/WARN explanation:\n%s", out)
+	}
+}
+
 // TestVerifyReceipt_NoReceipt: a repo without receipts reports exit 3 (not
 // found) — the "receipt required for merge" gate fails closed.
 func TestVerifyReceipt_NoReceipt(t *testing.T) {

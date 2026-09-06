@@ -162,6 +162,12 @@ func stripKernPolicies(policyValue string) string {
 	return strings.Join(kept, ",")
 }
 
+// BuildWatchChecks is the exported entry point for the watch checks builder,
+// used by the legacy cmd/blueprint shim's test suite.
+func BuildWatchChecks(policy string, client *kern.KernClient) ([]service.Check, error) {
+	return buildWatchChecks(policy, client)
+}
+
 // buildWatchChecks maps a comma-separated --policy value to the check list
 // that `blueprint check` runs for those policies. An empty policy means the
 // default set (architecture,secrets). Recognized policy names:
@@ -215,6 +221,12 @@ func buildWatchChecks(policy string, client *kern.KernClient) ([]service.Check, 
 // through service.New(checks, WithPolicy(engine)): suppressions, mode
 // warn/off, owner stamping, and source overrides are applied exactly as in
 // `blueprint check`. The verdict is advisory.
+// ValidateBatch is the exported entry point for the canonical watch validation
+// pipeline, used by the legacy cmd/blueprint shim's test suite.
+func ValidateBatch(ctx context.Context, root string, checks []service.Check, engine *policy.Engine, events []watcher.Event) (hadBlock bool, findings []domain.Finding) {
+	return validateBatch(ctx, root, checks, engine, events)
+}
+
 func validateBatch(ctx context.Context, root string, checks []service.Check, engine *policy.Engine, events []watcher.Event) (hadBlock bool, findings []domain.Finding) {
 	if len(events) == 0 {
 		return false, nil

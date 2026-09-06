@@ -35,15 +35,13 @@ jobs:
           go build -buildvcs=false -o "$RUNNER_TEMP/kern" ./cmd/kern
           go build -buildvcs=false -o "$RUNNER_TEMP/kern-mcp" ./cmd/kern-mcp
           go build -buildvcs=false -o "$RUNNER_TEMP/kern-server" ./cmd/kern-server
-          go build -buildvcs=false -o "$RUNNER_TEMP/blueprint" ./cmd/blueprint
-          go build -buildvcs=false -o "$RUNNER_TEMP/blueprint-mcp" ./cmd/blueprint-mcp
+          go build -buildvcs=false -o "$RUNNER_TEMP/kernops" ./cmd/kernops
       - name: Build all binaries (sqlite tags)
         run: |
           go build -buildvcs=false -tags sqlite -o /dev/null ./cmd/kern
           go build -buildvcs=false -tags sqlite -o /dev/null ./cmd/kern-mcp
           go build -buildvcs=false -tags sqlite -o /dev/null ./cmd/kern-server
-          go build -buildvcs=false -tags sqlite -o /dev/null ./cmd/blueprint
-          go build -buildvcs=false -tags sqlite -o /dev/null ./cmd/blueprint-mcp
+          go build -buildvcs=false -tags sqlite -o /dev/null ./cmd/kernops
       # Race detector over the concurrency-sensitive packages (covers the
       # agent registry / in-flight tool / lock lifecycle races). Scoped to
       # keep the full -race ./... suite from slowing CI. The -timeout is sized

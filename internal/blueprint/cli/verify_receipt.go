@@ -69,13 +69,49 @@ func runVerifyReceipt(args []string) int {
 		return 2
 	}
 
-	// Load the receipt: by explicit id, or the most recent one.
-	store := receipt.NewStore(absRoot)
+	// Load the receipt: by explicit id, the most recent one, or a positional
+	// JSON file (a receipt, or the CI artifact `kern ci --artifact-file`
+	// wrote — see loadReceiptFile).
+	explicitID := *receiptID != "" || len(fs.Args()) > 0
 	var r *receipt.Receipt
-	if *receiptID != "" {
-		r, err = store.Get(*receiptID)
+	if files := fs.Args(); len(files) > 0 {
+		var effRoot string
+		r, effRoot, err = loadReceiptFile(files[0], absRoot)
+		if err != nil {
+			if errors.Is(err, errReceiptNotSealed) {
+				if *jsonOut {
+					emitVerifyReceiptJSON(nil, err.Error())
+				} else {
+					fmt.Fprintf(os.Stderr, "%s\n", err.Error())
+				}
+				return 3
+			}
+			if errors.Is(err, receipt.ErrNotFound) {
+				msg := fmt.Sprintf("Receipt not found: %v", err)
+				if *jsonOut {
+					emitVerifyReceiptJSON(nil, msg)
+				} else {
+					fmt.Fprintln(os.Stderr, msg)
+				}
+				return 3
+			}
+			if *jsonOut {
+				emitVerifyReceiptJSON(nil, err.Error())
+			} else {
+				fmt.Fprintf(os.Stderr, "Receipt INVALID: %v\n", err)
+			}
+			return 2
+		}
+		if effRoot != "" {
+			absRoot = effRoot
+		}
 	} else {
-		r, err = store.Latest()
+		store := receipt.NewStore(absRoot)
+		if *receiptID != "" {
+			r, err = store.Get(*receiptID)
+		} else {
+			r, err = store.Latest()
+		}
 	}
 	if err != nil {
 		if errors.Is(err, receipt.ErrNotFound) {
@@ -234,7 +270,7 @@ func runVerifyReceipt(args []string) int {
 	// user must be told. Advisory only: any read/parse failure skips silently
 	// and the note never changes the verification result or exit code.
 	note := ""
-	if *receiptID == "" {
+	if !explicitID {
 		note = ciStalenessNote(r.ReceiptID)
 	}
 	if *jsonOut {
@@ -254,6 +290,72 @@ func runVerifyReceipt(args []string) int {
 // process working directory, so the staleness read mirrors the same
 // cwd-relative resolution.
 const ciArtifactDefaultFile = "blueprint-result.json"
+
+// errReceiptNotSealed marks a CI artifact that carries no receipt id because
+// the run it records never reached PASS/WARN (receipts are only sealed for
+// successful runs). Maps to exit 3 ("no receipt") with an actionable message.
+var errReceiptNotSealed = errors.New("no receipt was sealed")
+
+// loadReceiptFile resolves a positional JSON file passed to `verify-receipt`.
+// Two shapes share the filename space:
+//
+//   - a receipt (schema_version + receipt_id + signature): returned as-is for
+//     full verification, with the receipt's own RepoRoot as the effective root
+//     so the audit chain is re-read from the repository that sealed it;
+//   - a CI artifact written by `kern ci --artifact-file` (repo + status +
+//     exit_code): when it cites a receipt_id (PASS/WARN runs), the correlated
+//     receipt is loaded from the artifact's repo and its base/head are
+//     cross-checked against the artifact; when no receipt was sealed, an
+//     errReceiptNotSealed explaining why is returned.
+//
+// A file that is neither shape returns a descriptive error.
+func loadReceiptFile(path, fallbackRoot string) (*receipt.Receipt, string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, "", fmt.Errorf("%w: cannot read %q: %v", receipt.ErrNotFound, path, err)
+	}
+	var r receipt.Receipt
+	if err := json.Unmarshal(data, &r); err == nil && r.ReceiptID != "" && r.Signature != "" {
+		root := r.RepoRoot
+		if root == "" {
+			root = fallbackRoot
+		}
+		return &r, root, nil
+	}
+	var artifact struct {
+		Repo      string `json:"repo"`
+		Base      string `json:"base"`
+		Head      string `json:"head"`
+		Status    string `json:"status"`
+		ExitCode  int    `json:"exit_code"`
+		ReceiptID string `json:"receipt_id"`
+	}
+	if err := json.Unmarshal(data, &artifact); err == nil && artifact.Status != "" {
+		if artifact.ReceiptID == "" {
+			return nil, "", fmt.Errorf("%w: this file is a %s CI artifact, not a receipt — receipts are only sealed for PASS/WARN runs. Re-run `kern ci` on a passing change, or verify a receipt JSON from .blueprint/receipts/", errReceiptNotSealed, artifact.Status)
+		}
+		// Prefer the artifact's own repo root (ci stamps Repo=absRoot) so the
+		// correlated receipt is found even when the caller verifies the file
+		// from outside the repository; fall back to the --repo/cwd root.
+		root := fallbackRoot
+		if artifact.Repo != "" {
+			if _, statErr := os.Stat(filepath.Join(artifact.Repo, ".blueprint")); statErr == nil {
+				root = artifact.Repo
+			}
+		}
+		store := receipt.NewStore(root)
+		rec, gerr := store.Get(artifact.ReceiptID)
+		if gerr != nil {
+			return nil, "", fmt.Errorf("artifact references receipt %s but it cannot be verified: %v", artifact.ReceiptID, gerr)
+		}
+		if (artifact.Base != "" && rec.BaseRevision != artifact.Base) || (artifact.Head != "" && rec.HeadRevision != artifact.Head) {
+			return nil, "", fmt.Errorf("artifact base/head (%s..%s) do not match receipt %s (%s..%s) — tampered artifact",
+				artifact.Base, artifact.Head, artifact.ReceiptID, rec.BaseRevision, rec.HeadRevision)
+		}
+		return rec, root, nil
+	}
+	return nil, "", fmt.Errorf("cannot verify %q: file is neither a receipt (missing signature+receipt_id) nor a CI artifact (missing status)", path)
+}
 
 // ciStalenessNote returns a best-effort advisory for the implicit
 // "latest receipt" verification path (no --receipt-id). The most recent
@@ -290,6 +392,12 @@ var (
 	// audit query failed, so the cross-link cannot be checked. The caller
 	// warns and continues (exit 0) — the local chain binding is authoritative.
 	errKernChainCheckSkipped = errors.New("kern chain check skipped")
+	// ErrKernChainHashNotFound is the exported form of the HARD-failure
+	// sentinel, for the legacy cmd/blueprint compatibility shim's tests.
+	ErrKernChainHashNotFound = errKernChainHashNotFound
+	// ErrKernChainCheckSkipped is the exported form of the SOFT-failure
+	// sentinel, for the legacy cmd/blueprint compatibility shim's tests.
+	ErrKernChainCheckSkipped = errKernChainCheckSkipped
 )
 
 // kernChainHashVerifyTimeout bounds the `kern audit` subprocess. Best-effort
@@ -319,6 +427,12 @@ var kernChainHashVerifyTimeout = 15 * time.Second
 //     run — kern requires the root dir to exist even to list a chain), so
 //     the cross-link cannot be conclusively checked: the caller must warn
 //     and continue (best-effort).
+func VerifyKernChainHash(repo string, expectedHash string) error {
+	return verifyKernChainHash(repo, expectedHash)
+}
+
+// VerifyKernChainHash exposes verifyKernChainHash for the legacy cmd/blueprint
+// compatibility shim's tests.
 func verifyKernChainHash(repo string, expectedHash string) error {
 	if expectedHash == "" {
 		return nil // nothing to check

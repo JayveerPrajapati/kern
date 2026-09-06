@@ -38,7 +38,18 @@ var (
 	qualifiedRe = regexp.MustCompile(`[A-Za-z0-9_/.*()\[\]]+\.[A-Za-z_][A-Za-z0-9_]*`)
 	callSiteRe  = regexp.MustCompile(`[A-Za-z_][A-Za-z0-9_]*\(`)
 	tokenRe     = regexp.MustCompile(`[A-Za-z_][A-Za-z0-9_]*`)
+	// fileLineRe matches a plain "path:line symbol …" trace line — e.g.
+	// "path/file.py:24 funcname" or "lib/posix.go:123 getpid(map)" — where the
+	// symbol is the word immediately after the file:line prefix (report A6).
+	fileLineRe = regexp.MustCompile(`(?m)^\s*[^\s:]+:\d+\s+([A-Za-z_][A-Za-z0-9_]*)`)
 )
+
+// LooksLikeTrace reports whether text looks like inline trace content rather
+// than a file path: a multi-line trace, or a single line with a file:line
+// prefix (report A6: `kern trace "path/file.py:24 funcname"`).
+func LooksLikeTrace(text string) bool {
+	return strings.Contains(text, "\n") || fileLineRe.MatchString(text)
+}
 
 // Trace overlays a runtime trace (pprof -top text, a crash stack trace, or a
 // plain list of function names) onto the index: it extracts candidate symbol
@@ -119,7 +130,8 @@ func Trace(ix *index.Index, src, sourceName string, limit int) *TraceReport {
 
 // traceCandidates extracts candidate symbol names from one trace line: the
 // trailing identifier of a qualified name, bare identifiers followed by '('
-// (call sites), and lines that are a single identifier.
+// (call sites), the symbol after a plain "file:line " prefix, and lines that
+// are a single identifier.
 func traceCandidates(line string) []string {
 	var out []string
 	for _, m := range qualifiedRe.FindAllString(line, -1) {
@@ -129,6 +141,11 @@ func traceCandidates(line string) []string {
 	}
 	for _, m := range callSiteRe.FindAllString(line, -1) {
 		out = append(out, strings.TrimSuffix(m, "("))
+	}
+	// "path/file.py:24 funcname" — the trailing word after the file:line
+	// prefix is the symbol (report A6).
+	if m := fileLineRe.FindStringSubmatch(line); m != nil && len(m) > 1 {
+		out = append(out, m[1])
 	}
 	if !strings.ContainsAny(line, " .") && tokenRe.MatchString(line) {
 		out = append(out, tokenRe.FindString(line))
@@ -145,7 +162,12 @@ func RenderTrace(r *TraceReport) string {
 	}
 	fmt.Fprintf(&b, "%s: %d frames, %d project symbols hot\n\n", head, r.Frames, r.Resolved)
 	if len(r.Hot) == 0 {
-		b.WriteString("  (no frames resolved to project symbols — check the trace format)\n")
+		b.WriteString("  (no frames resolved to project symbols)\n")
+		b.WriteString("  accepted formats: a pprof -top dump, a crash stack trace, a plain function list,\n")
+		b.WriteString("  or `path/file:line symbol` lines such as `internals/slice.go:41 selectSlice.`\n")
+		b.WriteString("  Symbols are matched against this project's index; stdlib/third-party-only traces\n")
+		b.WriteString("  resolve nothing by design. Pass trace text via stdin (`kern trace -`) or, when\n")
+		b.WriteString("  it is not a file path, inline.\n")
 		return b.String()
 	}
 	for _, h := range r.Hot {

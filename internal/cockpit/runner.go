@@ -40,7 +40,7 @@ func NewRunner(cfg RunnerConfig) *Runner {
 	if cfg.Output == nil {
 		cfg.Output = os.Stdout
 	}
-	if cfg.AutonomyLevel == 0 {
+	if cfg.AutonomyLevel == loop.AutonomyUnset {
 		cfg.AutonomyLevel = loop.L3
 	}
 

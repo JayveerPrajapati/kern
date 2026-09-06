@@ -11,6 +11,7 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/loop"
 	"github.com/JayveerPrajapati/kern/internal/pii"
 	"github.com/JayveerPrajapati/kern/internal/runtime"
+	"github.com/JayveerPrajapati/kern/internal/verification"
 	"github.com/JayveerPrajapati/kern/internal/whatif"
 	"strings"
 	"time"
@@ -134,6 +135,15 @@ func (s *Server) handleVerify(ctx context.Context, args map[string]any) (string,
 		ts := app.NewTaskService(p, nil).WithPRProvider(app.AutoPRProvider())
 		t, v, err := ts.Verify(types)
 		if err != nil {
+			// A FAIL verdict is a valid verification outcome, not an MCP
+			// error: surface the typed verdict and per-check status so the
+			// caller sees what failed (report A11) instead of a bare error.
+			if v.Verdict != "" || v.Build != nil || v.UnitTests != nil || v.Security != nil || v.Architecture != nil || v.Dependency != nil {
+				var vb strings.Builder
+				fmt.Fprintln(&vb, pii.Mask(verification.RenderCompact(v)).Text)
+				fmt.Fprintf(&vb, "\n[task: %s — state: %s]\n", t.ID, t.State)
+				return vb.String(), nil
+			}
 			return "", err
 		}
 		var vb strings.Builder
@@ -738,6 +748,17 @@ func classifyGovernanceTools(low, request string) (string, map[string]any, bool)
 // symbol from the request when one is present and falling back to kern_search.
 func classifyGraphTools(low, request string) (string, map[string]any, bool) {
 	switch {
+	// Flow questions ("how does the bundle upload flow work end to end?")
+	// name a process, not a single symbol: walk the dependency tree from the
+	// named symbol when one is extractable, otherwise answer with the
+	// system's entry points (handlers/routes) instead of falling through to a
+	// flat kern_search list (report A9).
+	case strings.Contains(low, "flow") || strings.Contains(low, "workflow") || strings.Contains(low, "pipeline") || strings.Contains(low, "end to end") || strings.Contains(low, "end-to-end"):
+		tool, args := withSymbol(request, low, "kern_walk", "kern_entry_points", map[string]any{})
+		if tool == "kern_walk" {
+			args["depth"] = "4"
+		}
+		return tool, args, true
 	case strings.Contains(low, "how does") || strings.Contains(low, "understand") || strings.Contains(low, "explain"):
 		tool, args := withSymbol(request, low, "kern_explore", "kern_search", map[string]any{})
 		return tool, args, true
@@ -879,6 +900,9 @@ func (s *Server) handleMeta(ctx context.Context, args map[string]any) (string, e
 		result, err = s.handleContext(ctx, subArgs)
 	case "kern_path":
 		result, err = s.handlePath(ctx, subArgs)
+	case "kern_walk":
+		// kern_walk is served by the near/walk handler in the tool registry.
+		result, err = s.handleNear(ctx, subArgs)
 	case "kern_arch":
 		result, err = s.handleArch(ctx, subArgs)
 	case "kern_communities":

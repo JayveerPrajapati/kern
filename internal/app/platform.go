@@ -444,7 +444,10 @@ func (p *Platform) Verify(types []string) verification.VerificationResult {
 // resolveSymbol normalizes a change description into a bare symbol name. If
 // the input contains whitespace it is treated as a natural-language
 // description and a symbol is extracted via whatif.ExtractSymbols; otherwise
-// it is used as-is.
+// it is used as-is. When multiple candidates are extracted, the first that
+// actually resolves in the index wins, so prose such as "what breaks if I
+// remove the translate function from cmaas_controller?" lands on `translate`,
+// not on the lead verb `breaks` (report A8).
 func (p *Platform) resolveSymbol(change string) (string, error) {
 	if !strings.ContainsAny(change, " \t") {
 		return change, nil
@@ -452,6 +455,20 @@ func (p *Platform) resolveSymbol(change string) (string, error) {
 	cands := whatif.ExtractSymbols(change)
 	if len(cands) == 0 {
 		return "", fmt.Errorf("could not identify a symbol in the change description. Pass a bare symbol name (e.g. 'GetMySQLDB') or include a qualified name (e.g. 'pkg.Symbol') in the description.")
+	}
+	// Prefer the first candidate that exists in the graph; keep extraction
+	// order as the tiebreaker.
+	if p.graph != nil {
+		for _, c := range cands {
+			if p.graph.Resolvable(c) {
+				return c, nil
+			}
+		}
+		// None resolve in this project's index — fail with a hint instead of
+		// analysing a word from prose and reporting a misleading 0-caller
+		// impact (report A8).
+		return "", fmt.Errorf("no symbol named %q was found in this project's index (candidates: %s). Pass a concrete exported name (e.g. %q) or a qualified name (e.g. 'pkg.Symbol').",
+			cands[0], strings.Join(cands, ", "), cands[0])
 	}
 	return cands[0], nil
 }

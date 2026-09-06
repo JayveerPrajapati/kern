@@ -9,12 +9,12 @@
 # `git commit --amend --no-edit` ritual to re-run the check on a fresh cache.
 #
 # This adapter prunes stale entries (sha256 mismatch or vanished file) BEFORE
-# invoking blueprint, so every run starts from a fresh cache for exactly the
+# invoking kern, so every run starts from a fresh cache for exactly the
 # files that changed. Behavior otherwise matches the thin adapter installed by
-# `blueprint install hook`: exit code is blueprint's own (0 PASS, 1 BLOCK,
+# `kern install hook`: exit code is kern check's own (0 PASS, 1 BLOCK,
 # 2 tool error, 3 config, 4 unsupported).
 #
-# Usage: scripts/blueprint-precommit.sh [blueprint args...]
+# Usage: scripts/blueprint-precommit.sh [kern check args...]
 # Install as the pre-commit hook (or have the hook exec this script).
 
 set -u
@@ -79,10 +79,10 @@ except BaseException:
         pass
     raise
 
-sys.stderr.write("blueprint: pruned %d stale fingerprint entries (%s)\n"
+sys.stderr.write("kern check: pruned %d stale fingerprint entries (%s)\n"
                  % (len(changed), ", ".join(changed)))
 PYEOF
   fi
 fi
 
-exec blueprint check --staged --format=terminal "$@"
+exec kern check --staged --format=terminal "$@"

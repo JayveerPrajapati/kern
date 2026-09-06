@@ -40,6 +40,10 @@ var commandHelp = map[string]string{
 	"check":             "validate staged changes against policy (boundaries, secrets, tests)",
 	"fix":               "validate agent-proposed fixes in an isolated worktree",
 	"ci":                "CI change-governance validation (base vs head)",
+	"install":           "install Blueprint change-governance git hooks (pre-commit/pre-push)",
+	"metrics":           "show local change-governance validation metrics",
+	"request-approval":  "request human approval for a high-risk change (two-person rule)",
+	"reject":            "reject a pending approval request: reject <id> [--reason ...]",
 	"verify-receipt":    "verify a tamper-evident CI receipt",
 	"project":           "project map",
 	"pack":              "paste-ready project bundle",
@@ -431,11 +435,26 @@ func dispatchCommand(cmd string, rest []string) int {
 	case "fix":
 		return bpcli.RunFix(rest)
 
-	case "ci":
-		return bpcli.RunCI(rest)
+	case "metrics":
+		return bpcli.RunMetrics(rest)
+
+	case "request-approval":
+		return bpcli.RunRequestApproval(rest)
+
+	case "reject":
+		return bpcli.RunApprovalDecision("reject", rest)
 
 	case "verify-receipt":
 		return bpcli.RunVerifyReceipt(rest)
+
+	case "ci":
+		return bpcli.RunCI(rest)
+
+	case "install":
+		// Blueprint change-governance git hooks (pre-commit/pre-push). The
+		// Blueprint CLI lives inside kern (kern check / kern ci / kern sec),
+		// so `kern install hook` replaces the standalone `blueprint install hook`.
+		return bpcli.RunInstall(rest)
 
 	case "fw", "frameworks":
 		runFw(rest)

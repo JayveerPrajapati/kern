@@ -150,6 +150,12 @@ type Result struct {
 	PauseReason     string           // reason the loop paused: "budget", "risk_exceeded", "approval", or any reason returned by LoopConfig.PauseTrigger
 	RepairAttempts  int              // number of auto-repair cycles executed
 	RepairContracts []RepairContract // active or resolved repair contracts
+	// VerifyAdvisory carries the raw verification summary when a read-only
+	// loop (L0/L1) saw a FAIL that only reflects pre-existing repo hygiene
+	// (hardcoded secrets, stale boundaries, a broken build) rather than the
+	// task's own change surface (report A13). The run does not fail; the
+	// advisory is published so callers can report the repo's posture.
+	VerifyAdvisory string
 }
 
 // Loop drives the continuous closed loop.
@@ -478,7 +484,19 @@ func (l *Loop) runStage(ctx context.Context, st, intent string, step StepFunc, w
 			v := verification.NewEngine(wt.Dir()).Verify([]string{"build", "test", "security", "architecture", "dependency"})
 			out = v.Summary
 			if v.Verdict != verification.VerdictPass {
-				err = errors.New("verify: " + v.Summary)
+				// L0/L1 are read-only (autonomy.go): the loop makes no code
+				// changes, so a FAIL can only reflect the repository's own
+				// pre-existing state — hardcoded-secret findings, stale
+				// boundaries, an already-broken build — never the task's
+				// change surface (report A13). Surface it as informational
+				// rather than failing a read-only analysis run. Write levels
+				// (L2+) verify the loop's own changes and must hard-fail.
+				if l.cfg.Level <= L1 {
+					out = v.Summary + " (informational: pre-existing repo hygiene, not the task surface; read-only loop)"
+					res.VerifyAdvisory = v.Summary
+				} else {
+					err = errors.New("verify: " + v.Summary)
+				}
 			}
 		}
 	case stageDeploy:

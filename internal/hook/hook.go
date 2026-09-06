@@ -68,7 +68,10 @@ func remember(root, lesson string, rateLimit bool) error {
 		_ = os.WriteFile(stamp, []byte("1"), 0o644)
 		_ = os.WriteFile(last, []byte(lesson), 0o644)
 	}
-	return memory.Add(root, lesson)
+	// Session captures are tagged auto (distinct from deliberate lessons): they
+	// are labeled on `kern memory list` and excluded from recall so raw prompts
+	// never leak into a later LLM context (report A17).
+	return memory.AddAuto(root, lesson)
 }
 
 // compress runs kern's log compressor on text and returns the compacted
