@@ -70,10 +70,10 @@ var cfamKw = kwSet("if", "else", "for", "while", "switch", "return", "sizeof", "
 	"public", "private", "protected", "this")
 
 var java = []declRule{
-	{kind: "class", re: regexp.MustCompile(`^\s*(?:public|private|protected|abstract|final|sealed)?\s*class\s+([A-Za-z_]\w*)`)},
-	{kind: "interface", re: regexp.MustCompile(`^\s*(?:public|private|protected|abstract)?\s*interface\s+([A-Za-z_]\w*)`)},
-	{kind: "enum", re: regexp.MustCompile(`^\s*(?:public|private|protected)?\s*enum\s+([A-Za-z_]\w*)`)},
-	{kind: "record", re: regexp.MustCompile(`^\s*(?:public|private|protected|final)?\s*record\s+([A-Za-z_]\w*)`)},
+	{kind: "class", re: regexp.MustCompile(`^\s*(?:(?:public|private|protected|abstract|final|sealed|static)\s+)*class\s+([A-Za-z_]\w*)`)},
+	{kind: "interface", re: regexp.MustCompile(`^\s*(?:(?:public|private|protected|abstract|static|sealed)\s+)*interface\s+([A-Za-z_]\w*)`)},
+	{kind: "enum", re: regexp.MustCompile(`^\s*(?:(?:public|private|protected|sealed|static)\s+)*enum\s+([A-Za-z_]\w*)`)},
+	{kind: "record", re: regexp.MustCompile(`^\s*(?:(?:public|private|protected|final|sealed|static)\s+)*record\s+([A-Za-z_]\w*)`)},
 	// Method with body (ending with {) — class methods and default interface methods.
 	{kind: "method", isDef: true, re: regexp.MustCompile(`^\s*(?:(?:public|private|protected|static|final|abstract|synchronized|native|default|strictfp)\s+)*[A-Za-z_][\w<>\[\].,?\s]*?\s+([A-Za-z_]\w*)\s*\([^;{}]*\)\s*(?:throws\s+[\w.,\s]+)?\{`)},
 	// Interface method declaration (ending with ;) — abstract methods without body.
