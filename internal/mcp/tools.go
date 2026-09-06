@@ -1,5 +1,5 @@
 // Tool registration table — the single source of truth for the kern MCP
-// catalog (86 tools at HEAD). Kept in its own file so the registration table
+// catalog (101 tools at HEAD). Kept in its own file so the registration table
 // does not bury the server core (dispatch, transports, filtering) in
 // server.go; the G-11 "expensive tier" plan keeps per-domain extraction as a
 // follow-up. The catalog parity invariants (plugin <-> MCP, docs <-> MCP)
@@ -864,4 +864,186 @@ var tools = []Tool{
 			"root": strProp("Project root (defaults to current directory)"),
 		}, nil),
 	},
+	{
+		Name:        "kern_health",
+		Phase:       "cross",
+		Description: "Returns a real-time health and self-observability snapshot of the kern MCP server: index freshness, symbol counts, cache hit-rate, audit chain length, active tools, and in-flight operations. Enables AI agents to self-diagnose server state and avoid blind retries.",
+		InputSchema: schema(map[string]any{
+			"root": strProp("Project root to check index freshness for (defaults to workspace root)"),
+		}, nil),
+	},
+	{
+		Name:        "kern_compose",
+		Phase:       "cross",
+		Description: "Executes an ordered pipeline of kern tools in a single RPC round-trip, passing intermediate outputs to downstream steps using $variable bindings. Drastically reduces agent latency and token overhead for multi-step workflows.",
+		InputSchema: schema(map[string]any{
+			"pipeline": map[string]any{
+				"type":        "array",
+				"description": "List of pipeline steps: [{tool: 'tool_name', args: {...}, bind: 'var_name', on_error: 'stop|skip|continue'}]",
+				"items": map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"tool":     strProp("Tool name to execute, e.g. kern_search, kern_impact, kern_context"),
+						"args":     map[string]any{"type": "object", "description": "Arguments to pass to the tool; supports $varname interpolation"},
+						"bind":     strProp("Optional variable name to store the tool output in for downstream steps"),
+						"on_error": strProp("Behavior on error: 'stop' (default), 'skip', or 'continue'"),
+					},
+					"required": []string{"tool"},
+				},
+			},
+			"timeout": strProp("Per-step timeout in seconds (default 60)"),
+		}, []string{"pipeline"}),
+	},
+	{
+		Name:        "kern_pre_edit",
+		Phase:       "plan",
+		Description: "Predicts the blast radius, direct callers, untested dependencies, and boundary risks of modifying a specific file or symbol BEFORE changes are made. Saves agents from making risky changes or incurring expensive rollback cycles.",
+		InputSchema: schema(map[string]any{
+			"file":   strProp("Relative or absolute path to the file to be edited"),
+			"lines":  strProp("Optional line or line range being edited, e.g. '45-90' or '120'"),
+			"symbol": strProp("Optional specific symbol name targeted for modification"),
+			"root":   strProp("Project root directory (defaults to current directory)"),
+		}, nil),
+	},
+	{
+		Name:        "kern_prompt_fill",
+		Phase:       "cross",
+		Description: "Dynamically renders standardized, token-efficient agent prompts with auto-injected project layout and memory lessons. Prevents agents from wasting tokens on repetitive prompt boilerplate.",
+		InputSchema: schema(map[string]any{
+			"template":      strProp("Template name to fill, e.g. 'debug', 'code-review', 'fix-bug', 'explain', 'write-tests', 'onboard'"),
+			"task":          strProp("Task or error description to inject"),
+			"file":          strProp("Optional target file path to inject into the template"),
+			"slots":         map[string]any{"type": "object", "description": "Optional custom key-value slot overrides"},
+			"inject_memory": strProp("Whether to auto-inject relevant lessons from project brain (default true if task provided)"),
+			"root":          strProp("Project root directory (defaults to current directory)"),
+		}, []string{"template"}),
+	},
+	{
+		Name:        "kern_semantic_diff",
+		Phase:       "cross",
+		Description: "Computes a functional AST-level symbol diff instead of raw line noise: surfaces modified functions, changed signatures, and newly impacted callers between commits or working tree.",
+		InputSchema: schema(map[string]any{
+			"from":  strProp("Starting git revision (defaults to HEAD)"),
+			"to":    strProp("Ending git revision or leave empty for working tree"),
+			"range": strProp("Optional git range, e.g. 'HEAD~1..HEAD'"),
+			"root":  strProp("Project root directory (defaults to current directory)"),
+		}, nil),
+	},
+	{
+		Name:        "kern_evidence_anchor",
+		Phase:       "verify",
+		Description: "Validates code claims or citations (symbol, file:line), corrects line drift, and generates a tamper-evident SHA-256 evidence certificate for zero-hallucination code claims.",
+		InputSchema: schema(map[string]any{
+			"claim":  strProp("Claim or citation to verify, e.g. 'internal/index/engine.go:45' or 'NewServer'"),
+			"file":   strProp("Optional file path of the cited reference"),
+			"line":   strProp("Optional 1-based line number of the cited reference"),
+			"symbol": strProp("Optional symbol name of the cited reference"),
+			"root":   strProp("Project root directory (defaults to current directory)"),
+		}, nil),
+	},
+	{
+		Name:        "kern_context_watch",
+		Phase:       "cross",
+		Description: "Monitors and audits rolling agent context, detects bloated log/code dumps, and recommends concrete deterministic compression actions to prevent context window overflow.",
+		InputSchema: schema(map[string]any{
+			"text":    strProp("Active conversation context or candidate tool output to audit"),
+			"budget":  strProp("Session token budget limit (default 32000)"),
+			"format":  strProp("Output format: 'text' (default) or 'json'"),
+		}, []string{"text"}),
+	},
+	{
+		Name:        "kern_agent_fingerprint",
+		Phase:       "cross",
+		Description: "Hashes and evaluates an agent's tool-call pattern from the audit trail to detect repetitive loops, anomalous tool polarization, or behavioral drift.",
+		InputSchema: schema(map[string]any{
+			"agent_id": strProp("Agent identifier to analyze (defaults to current agent)"),
+			"format":   strProp("Output format: 'text' (default) or 'json'"),
+		}, nil),
+	},
+	{
+		Name:        "kern_explain",
+		Phase:       "explore",
+		Description: "Synthesizes an end-to-end architectural narrative for a symbol or file: purpose, callers, callees, interfaces, and testing posture in a single call.",
+		InputSchema: schema(map[string]any{
+			"target": strProp("Target symbol name or relative file path to explain"),
+			"root":   strProp("Project root directory (defaults to current directory)"),
+		}, []string{"target"}),
+	},
+	{
+		Name:        "kern_cross_repo_impact",
+		Phase:       "plan",
+		Description: "Evaluates multi-repository blast radius: detects contract breaking changes, shared symbol dependencies, and cross-repo interface divergences.",
+		InputSchema: schema(map[string]any{
+			"target_symbol": strProp("Exported symbol or interface undergoing changes"),
+			"linked_repos":  map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Array of paths to linked repositories or microservices to scan"},
+			"root":          strProp("Project root directory (defaults to current directory)"),
+		}, []string{"target_symbol"}),
+	},
+	{
+		Name:        "kern_memory_ranked",
+		Phase:       "cross",
+		Description: "Retrieves past project lessons weighted by keyword relevance and exponential time decay (half-life), ensuring stale memories don't obscure fresh lessons.",
+		InputSchema: schema(map[string]any{
+			"prompt":         strProp("Current task prompt or error context to find lessons for"),
+			"k":              strProp("Maximum number of ranked lessons to return (default 5)"),
+			"half_life_days": strProp("Decay half-life in days (default 7.0)"),
+			"root":           strProp("Project root directory (defaults to current directory)"),
+		}, []string{"prompt"}),
+	},
+	{
+		Name:        "kern_policy_dsl",
+		Phase:       "verify",
+		Description: "Evaluates diffs, changed files, and imported libraries against declarative policy-as-code rules (banned packages, protected paths, max diff size).",
+		InputSchema: schema(map[string]any{
+			"policy":  strProp("Optional inline YAML/JSON policy rules or path to policy file"),
+			"files":   map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "List of files being changed or checked"},
+			"diff":    strProp("Optional unified git diff to scan for banned patterns/imports"),
+			"imports": map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Optional list of package imports to evaluate"},
+			"root":    strProp("Project root directory (defaults to current directory)"),
+		}, nil),
+	},
+	{
+		Name:        "kern_agent_coordination",
+		Phase:       "cross",
+		Description: "Workspace coordination protocol for multi-agent teams: register handoffs, claim/release exclusive resource locks, and query inbox tasks.",
+		InputSchema: schema(map[string]any{
+			"action":      strProp("Action to perform: 'handoff', 'claim', 'release', 'inbox', 'status'"),
+			"agent_id":    strProp("Calling agent identifier"),
+			"from_agent":  strProp("Source agent ID for handoff"),
+			"to_agent":    strProp("Destination agent ID (or '*' for broadcast)"),
+			"task_id":     strProp("Task identifier"),
+			"resource":    strProp("Resource name to claim or release"),
+			"ttl_seconds": strProp("Time-to-live in seconds for resource claims (default 300)"),
+			"notes":       strProp("Handoff notes or completion description"),
+			"payload":     map[string]any{"type": "object", "description": "Structured state payload passed in handoff"},
+			"root":        strProp("Project root directory (defaults to current directory)"),
+		}, nil),
+	},
+	{
+		Name:        "kern_agent_role_rbac",
+		Phase:       "cross",
+		Description: "Enforces identity-based role access control (RBAC): restricts sensitive tools (exec, delete, fix) based on agent roles (junior_dev, reviewer, auditor, admin).",
+		InputSchema: schema(map[string]any{
+			"action":   strProp("Action: 'evaluate' (default), 'roles', 'assign', 'check'"),
+			"agent_id": strProp("Agent identifier"),
+			"role":     strProp("Role name (e.g. 'admin', 'architect', 'developer', 'junior_dev', 'reviewer', 'auditor')"),
+			"tool":     strProp("Tool name being requested to evaluate"),
+			"root":     strProp("Project root directory (defaults to current directory)"),
+		}, nil),
+	},
+	{
+		Name:        "kern_stream",
+		Phase:       "cross",
+		Description: "Inspects streaming status, partitions large responses into token-friendly chunks, and manages progress notification channels for long-running operations.",
+		InputSchema: schema(map[string]any{
+			"action":         strProp("Action: 'status' (default), 'chunk', 'channels', 'emit'"),
+			"channel":        strProp("Stream channel name"),
+			"payload":        strProp("Payload string to partition into chunks"),
+			"chunk_size":     strProp("Maximum character size per chunk (default 1000)"),
+			"progress_token": strProp("Client-supplied progress token for notification dispatch"),
+			"percent":        strProp("Progress percentage (0-100)"),
+			"message":        strProp("Progress message text"),
+		}, nil),
+	},
 }
+

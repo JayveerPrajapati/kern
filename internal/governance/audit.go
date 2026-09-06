@@ -401,6 +401,13 @@ func computeAuditHash(e AuditEntry, prevHash string) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
+// Len returns the total number of audit entries in memory.
+func (l *AuditLog) Len() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return len(l.entries)
+}
+
 // All returns all audit entries in insertion order.
 func (l *AuditLog) All() []AuditEntry {
 	l.mu.Lock()

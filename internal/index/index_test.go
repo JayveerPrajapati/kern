@@ -653,3 +653,34 @@ deploy
 		t.Fatal("expected func main from extensionless python script")
 	}
 }
+
+func TestSaveEnsuresGitExclude(t *testing.T) {
+	dir := writeTree(t, map[string]string{
+		"main.go": `package main
+func main() {}
+`,
+	})
+	// Simulate a git repository with .git/info
+	gitInfo := filepath.Join(dir, ".git", "info")
+	if err := os.MkdirAll(gitInfo, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	ix, err := Build(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ix.Save(); err != nil {
+		t.Fatal(err)
+	}
+
+	excludePath := filepath.Join(gitInfo, "exclude")
+	b, err := os.ReadFile(excludePath)
+	if err != nil {
+		t.Fatalf("failed to read .git/info/exclude: %v", err)
+	}
+	if !strings.Contains(string(b), ".kern/") {
+		t.Fatalf("expected .kern/ in .git/info/exclude, got: %s", string(b))
+	}
+}
+

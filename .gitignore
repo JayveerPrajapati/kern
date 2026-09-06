@@ -55,5 +55,6 @@ index.html
 CLAUDE.md
 GEMINI.md
 .github/copilot-instructions.md
+.agents/rules/kern.md
 .github/hooks/
 # --- end kern generated ---

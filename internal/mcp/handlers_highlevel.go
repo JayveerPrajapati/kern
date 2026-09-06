@@ -694,6 +694,20 @@ func classifyWorkflowTools(low, request string) (string, map[string]any, bool) {
 		return "kern_verify_output", map[string]any{"text": extractAfterColon(request, low)}, true
 	case strings.Contains(low, "verify"):
 		return "kern_verify", map[string]any{}, true
+	case strings.Contains(low, "architecture narrat") || strings.Contains(low, "narrat") || (strings.Contains(low, "explain") && strings.Contains(low, "architecture")):
+		return "kern_explain", map[string]any{"target": extractSymbol(request, low)}, true
+	case strings.Contains(low, "cross repo") || strings.Contains(low, "multi repo"):
+		return "kern_cross_repo_impact", map[string]any{"target_symbol": extractSymbol(request, low)}, true
+	case strings.Contains(low, "ranked memor") || strings.Contains(low, "decay memor"):
+		return "kern_memory_ranked", map[string]any{"prompt": request}, true
+	case strings.Contains(low, "policy dsl") || strings.Contains(low, "evaluate policy"):
+		return "kern_policy_dsl", map[string]any{}, true
+	case strings.Contains(low, "agent coordination") || (strings.Contains(low, "coordination") && strings.Contains(low, "agent")):
+		return "kern_agent_coordination", map[string]any{"action": "status"}, true
+	case strings.Contains(low, "rbac") || strings.Contains(low, "agent role"):
+		return "kern_agent_role_rbac", map[string]any{"action": "roles"}, true
+	case strings.Contains(low, "stream chunk") || (strings.Contains(low, "stream") && strings.Contains(low, "transport")):
+		return "kern_stream", map[string]any{"action": "status"}, true
 	}
 	return "", nil, false
 }
@@ -798,6 +812,8 @@ func classifyProjectTools(low, request string) (string, map[string]any, bool) {
 		return "kern_compact_file", map[string]any{}, true
 	case strings.Contains(low, "buddy") || strings.Contains(low, "onboard") || strings.Contains(low, "getting started"):
 		return "kern_buddy", map[string]any{}, true
+	case strings.Contains(low, "health") || strings.Contains(low, "status") || strings.Contains(low, "self-check") || strings.Contains(low, "diagnose"):
+		return "kern_health", map[string]any{}, true
 	case strings.Contains(low, "stats") || strings.Contains(low, "savings") || strings.Contains(low, "token count"):
 		return "kern_stats", map[string]any{}, true
 	case strings.Contains(low, "commit message") || strings.Contains(low, "commitmsg"):
@@ -987,6 +1003,36 @@ func (s *Server) handleMeta(ctx context.Context, args map[string]any) (string, e
 		result, err = s.handleModernize(ctx, subArgs)
 	case "kern_authorize_context":
 		result, err = s.handleAuthorizeContext(ctx, subArgs)
+	case "kern_health":
+		result, err = s.handleHealth(ctx, subArgs)
+	case "kern_compose":
+		result, err = s.handleCompose(ctx, subArgs)
+	case "kern_pre_edit":
+		result, err = s.handlePreEdit(ctx, subArgs)
+	case "kern_prompt_fill":
+		result, err = s.handlePromptFill(ctx, subArgs)
+	case "kern_semantic_diff":
+		result, err = s.handleSemanticDiff(ctx, subArgs)
+	case "kern_evidence_anchor":
+		result, err = s.handleEvidenceAnchor(ctx, subArgs)
+	case "kern_context_watch":
+		result, err = s.handleContextWatch(ctx, subArgs)
+	case "kern_agent_fingerprint":
+		result, err = s.handleAgentFingerprint(ctx, subArgs)
+	case "kern_explain":
+		result, err = s.handleExplain(ctx, subArgs)
+	case "kern_cross_repo_impact":
+		result, err = s.handleCrossRepoImpact(ctx, subArgs)
+	case "kern_memory_ranked":
+		result, err = s.handleMemoryRanked(ctx, subArgs)
+	case "kern_policy_dsl":
+		result, err = s.handlePolicyDSL(ctx, subArgs)
+	case "kern_agent_coordination":
+		result, err = s.handleAgentCoordination(ctx, subArgs)
+	case "kern_agent_role_rbac":
+		result, err = s.handleAgentRoleRBAC(ctx, subArgs)
+	case "kern_stream":
+		result, err = s.handleStream(ctx, subArgs)
 	default:
 		// Fallback: search
 		subArgs["query"] = request

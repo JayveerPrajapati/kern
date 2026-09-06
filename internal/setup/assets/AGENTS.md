@@ -8,7 +8,7 @@ prebuilt symbol index instead of re-reading files.
 
 ## The kern_meta tool (preferred entry point)
 
-Instead of choosing among 86 individual `kern_*` tools, call the single
+Instead of choosing among 101 individual `kern_*` tools, call the single
 **`kern_meta`** tool with a natural-language request. Kern classifies the
 request and runs the right tool(s) internally — you get the same result
 without having to know which tool fits. Think in phases: explore (read/discover),
@@ -93,6 +93,21 @@ back to the built-in — but never skip kern when it's available.
 | Search the web / docs        | `kern_doc_fetch` → `kern_doc_search`  | `webfetch`    |
 | Build / test / lint          | `kern_run_build`                      | `bash`        |
 | Run a command / script       | `kern_exec`                           | `bash`        |
+| Check health & index freshness | `kern_health`                       | blind retries |
+| Chain multi-tool pipelines   | `kern_compose`                        | sequential RPCs |
+| Pre-edit blast radius & risk | `kern_pre_edit`                       | unverified edits |
+| Dynamic prompt templating    | `kern_prompt_fill`                    | prompt bloat  |
+| AST functional diff          | `kern_semantic_diff`                  | `git diff`    |
+| Verify citations & proofs    | `kern_evidence_anchor`                | hallucination |
+| Monitor token budget bloat   | `kern_context_watch`                  | context overflow |
+| Detect loops & agent drift   | `kern_agent_fingerprint`              | stuck loops   |
+| Architecture narrative       | `kern_explain`                        | 5+ queries    |
+| Cross-repo blast radius      | `kern_cross_repo_impact`              | multi-repo grep |
+| Decay-ranked memory retrieval| `kern_memory_ranked`                  | stale recall  |
+| Policy-as-code evaluation    | `kern_policy_dsl`                     | manual checks |
+| Multi-agent handoff & claims | `kern_agent_coordination`             | clobbered state |
+| Role-based access control    | `kern_agent_role_rbac`                | privileged tool leaks |
+| Stream chunking & progress   | `kern_stream`                         | monolithic payload |
 | Validate staged / policy     | `kern check`                          | manual lint   |
 | Auto-repair in sandbox       | `kern fix`                            | manual fix    |
 | Governed autonomy / Cockpit  | `kern ops` / `kernops`                | manual chain  |
@@ -132,7 +147,7 @@ re-explore or re-parse files that the index already covers.
 
 ## Full capability catalog
 
-`kern` ships 86 `kern_*` MCP tools across these domains. If you are unsure
+`kern` ships 101 `kern_*` MCP tools across these domains. If you are unsure
 which tool fits, call `kern_usage_guide` (categorized guide with performance
 tiers) or `kern_agents` (specialist roster) first to enumerate options. Reach
 into these groups for the "full capabilities" — do not limit yourself to the
@@ -149,6 +164,8 @@ context-optimization tools above.
   pipeline.
 - `kern_workflow` — select and coordinate the agent team for an intent,
   driving steps to the human approval gate (resume via `kern_approve`)
+- `kern_compose` — compose and execute deterministic multi-tool pipelines with variable interpolation in a single RPC
+- `kern_health` — real-time MCP server health, index freshness, metrics, cache hit rate, and audit chain depth
 
 **Context optimization (the local focus):**
 - `kern_optimize_prompt` / `kern_optimize_log` / `kern_optimize_output` — compress prompts/logs/replies
@@ -156,6 +173,9 @@ context-optimization tools above.
 - `kern_context` / `kern_context_budget` — minimal source slices sized to a token budget
 - `kern_semcache` / `kern_stats` — inspect the semantic cache / report token savings
 - `kern_schema_validate` — validate JSON against a schema deterministically
+- `kern_context_watch` — monitor conversation context for bloat and recommend proactive token compaction
+- `kern_prompt_fill` — dynamic prompt template compilation with auto-injected project layout and memory slices
+- `kern_stream` — response partitioning into token-friendly chunks and progress notifications
 
 **Code intelligence & graph (understand the codebase):**
 - `kern_code_graph` / `kern_graph` / `kern_explore` / `kern_near` / `kern_walk` — call graphs, adjacency, blast radius, dependency trees
@@ -165,15 +185,21 @@ context-optimization tools above.
 - `kern_hubs` / `kern_bridges` / `kern_dead` / `kern_larges` — hotspots, cross-package coupling, dead code, god functions
 - `kern_churn` / `kern_cochange` / `kern_changes` / `kern_review` — change-frequency risk, co-change coupling, diff impact, review context
 - `kern_test_gaps` / `kern_trace` / `kern_precache` — test coverage, runtime impact overlay, warm caches
+- `kern_explain` — graph-backed architectural narrator synthesizing declaration, callers, callees, and tests in one call
+- `kern_cross_repo_impact` — multi-repository blast radius and contract compatibility verification
+- `kern_semantic_diff` — AST-level functional symbol diff surfacing modified signatures and impacted callers
 
 **Plan / analyze / change safely:**
 - `kern_analyze` / `kern_plan` / `kern_what_if` / `kern_impact` — ADR-0006 workflows: analyze a change, plan implementation, simulate impact, blast radius
+- `kern_pre_edit` — predictive pre-edit blast radius, untested hotspot detection, and safety risk evaluation
 - `kern_verify` / `kern_validate` / `kern_execute` / `kern_heal` — verify a change / auto-validate / execute in sandbox / self-correct
-- `kern_verify_output` — hallucination check: confirm file:line/symbol/route references in agent output against the real source tree
+- `kern_verify_output` / `kern_evidence_anchor` — hallucination checks and cryptographic SHA-256 evidence certificates
 
 **Security / safety / governance:**
 - `kern_security` — scan for secrets, SQL injection, weak crypto, unsafe deserialization
 - `kern_mask_pii` — mask PII before sending anything remote
+- `kern_policy_dsl` — evaluate git diffs, changed files, and imports against declarative policy rules
+- `kern_agent_role_rbac` — identity-based role access control restricting sensitive tools by agent role
 - `kern_guard_check` / `kern_sandbox` / `kern_exec` / `kern_lock` / `kern_unlock` / `kern_lock_status` — architectural guardrails, sandboxed exec, workspace locks
 - `kern_safe_delete` / `kern_rename` — safe symbol deletion / structural rename
 - `kern_approve` — resolve a governance approval gate (approve/reject pending approvals)
@@ -185,6 +211,9 @@ context-optimization tools above.
 
 **Engineering memory & agents:**
 - `kern_memory` / `kern_memory_add` / `kern_memory_list` / `kern_memory_recall` / `kern_learn` — project brain: store / list / recall lessons, extract patterns
+- `kern_memory_ranked` — decay-weighted and frequency-ranked memory retrieval with half-life scoring
+- `kern_agent_coordination` — multi-agent workspace coordination: structured handoffs, resource claims with TTL, and agent inboxes
+- `kern_agent_fingerprint` — tool-call sequence hashing, loop detection, and behavioral drift monitoring
 - `kern_agents` — specialist team roster
 - `kern_incident` / `kern_correlate` / `kern_modernize` — incident investigation / alert-to-evidence chain / monolith modernization
 

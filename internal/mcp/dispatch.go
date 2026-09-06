@@ -29,7 +29,10 @@ func simple(h func(s *Server, ctx context.Context, args map[string]any) (string,
 
 // dispatchTable routes every registered kern_* tool to its handler. Keys must
 // stay in lockstep with the tools registration table.
-var dispatchTable = map[string]dispatchFunc{
+var dispatchTable map[string]dispatchFunc
+
+func init() {
+	dispatchTable = map[string]dispatchFunc{
 	"kern_meta":              simple((*Server).handleMeta),
 	"kern_optimize_prompt":   simple((*Server).handleOptimizePrompt),
 	"kern_memory_add":        simple((*Server).handleMemoryAdd),
@@ -116,6 +119,22 @@ var dispatchTable = map[string]dispatchFunc{
 	"kern_correlate":         simple((*Server).handleCorrelate),
 	"kern_learn":             simple((*Server).handleLearn),
 	"kern_modernize":         simple((*Server).handleModernize),
+	"kern_health":            simple((*Server).handleHealth),
+	"kern_compose":           simple((*Server).handleCompose),
+	"kern_pre_edit":          simple((*Server).handlePreEdit),
+	"kern_prompt_fill":       simple((*Server).handlePromptFill),
+	"kern_semantic_diff":     simple((*Server).handleSemanticDiff),
+	"kern_evidence_anchor":   simple((*Server).handleEvidenceAnchor),
+	"kern_context_watch":     simple((*Server).handleContextWatch),
+	"kern_agent_fingerprint": simple((*Server).handleAgentFingerprint),
+	"kern_explain":           simple((*Server).handleExplain),
+	"kern_cross_repo_impact": simple((*Server).handleCrossRepoImpact),
+	"kern_memory_ranked":     simple((*Server).handleMemoryRanked),
+	"kern_policy_dsl":        simple((*Server).handlePolicyDSL),
+	"kern_agent_coordination": simple((*Server).handleAgentCoordination),
+	"kern_agent_role_rbac":   simple((*Server).handleAgentRoleRBAC),
+	"kern_stream":            simple((*Server).handleStream),
+	}
 }
 
 // dispatchTool routes a prechecked tool name to its handler. Every registered
@@ -129,3 +148,13 @@ func (s *Server) dispatchTool(ctx context.Context, id string, name string, args 
 	}
 	return h(s, ctx, id, args)
 }
+
+// CallTool executes any registered MCP tool by name with the given argument map.
+func (s *Server) CallTool(ctx context.Context, name string, args map[string]any) (string, error) {
+	if args == nil {
+		args = map[string]any{}
+	}
+	return s.dispatchTool(ctx, "cli", name, args)
+}
+
+

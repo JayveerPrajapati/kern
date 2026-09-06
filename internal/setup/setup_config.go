@@ -64,7 +64,9 @@ func mergeJSON(path, key string, entry map[string]any) error {
 	switch {
 	case err == nil:
 		cleaned := stripJSONC(data)
-		if err := json.Unmarshal(cleaned, &m); err != nil {
+		if len(strings.TrimSpace(string(cleaned))) == 0 {
+			m = map[string]any{}
+		} else if err := json.Unmarshal(cleaned, &m); err != nil {
 			return fmt.Errorf("%s is not valid JSON: %w", path, err)
 		}
 	case errors.Is(err, os.ErrNotExist):

@@ -53,6 +53,7 @@ func OpenSQLite(root string) (*SQLiteStore, error) {
 	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 		return nil, err
 	}
+	ensureGitExclude(root)
 	dsn := fmt.Sprintf("file:%s?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=temp_store(MEMORY)&_pragma=cache_size(-20000)", p)
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
