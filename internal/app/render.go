@@ -290,6 +290,8 @@ func renderIncidentText(inc *domain.Incident) string {
 	}
 	if inc.RootCause != nil {
 		fmt.Fprintf(&b, "Root cause: %s\n", inc.RootCause.Summary)
+	} else {
+		b.WriteString("Root cause: none identified\n")
 	}
 	return b.String()
 }

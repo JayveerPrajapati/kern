@@ -55,9 +55,9 @@ func main() {}
 	eng.RootCause(inc)
 
 	// Correlation must complete even with no evidence, but must not assert a
-	// high-confidence root cause from nothing.
-	if inc.Status != domain.IncidentRootCauseFound {
-		t.Fatalf("status = %s, want ROOT_CAUSE_FOUND (pipeline completes)", inc.Status)
+	// high-confidence root cause from nothing; status remains INVESTIGATING.
+	if inc.Status != domain.IncidentInvestigating {
+		t.Fatalf("status = %s, want INVESTIGATING when no root cause found", inc.Status)
 	}
 	if inc.RootCause != nil {
 		t.Errorf("root cause asserted with no evidence: %+v", inc.RootCause)
