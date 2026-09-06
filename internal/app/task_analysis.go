@@ -412,17 +412,29 @@ func (s *TaskService) assemblePlan(intent string, pkt domain.ContextPacket) doma
 	}
 
 	// Affected components: symbols + files from the context packet.
-	for _, sym := range pkt.Symbols {
-		plan.AffectedComponents = append(plan.AffectedComponents, sym.Name)
-	}
-	for _, f := range pkt.Files {
-		plan.AffectedComponents = append(plan.AffectedComponents, f.Path)
+	// When the intent describes a net-new feature (e.g. "Add...", "Create..."),
+	// do not report unrelated symbols or files as affected components.
+	if whatif.IsNetNewFeature(intent) {
+		plan.Scope = "net-new feature (no existing components affected)"
+	} else {
+		for _, sym := range pkt.Symbols {
+			plan.AffectedComponents = append(plan.AffectedComponents, sym.Name)
+		}
+		for _, f := range pkt.Files {
+			plan.AffectedComponents = append(plan.AffectedComponents, f.Path)
+		}
 	}
 
 	// Implementation steps: deterministic scaffolding from the required
 	// validation list (build, test, security, architecture) plus the impact
 	// shape.
-	plan.ImplementationSteps = append(plan.ImplementationSteps, "Implement the change in the affected components above.")
+	if whatif.IsNetNewFeature(intent) {
+		plan.ImplementationSteps = append(plan.ImplementationSteps, "Implement the new feature according to specifications.")
+	} else if len(plan.AffectedComponents) > 0 {
+		plan.ImplementationSteps = append(plan.ImplementationSteps, "Implement the change in the affected components above.")
+	} else {
+		plan.ImplementationSteps = append(plan.ImplementationSteps, "Implement the requested change.")
+	}
 	for _, v := range pkt.RequiredValidation {
 		switch v {
 		case "build":

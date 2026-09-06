@@ -8,6 +8,7 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/eventbus"
 	"github.com/JayveerPrajapati/kern/internal/intel"
 	"github.com/JayveerPrajapati/kern/internal/ownership"
+	"github.com/JayveerPrajapati/kern/internal/verification"
 	"github.com/JayveerPrajapati/kern/internal/verify"
 	"github.com/JayveerPrajapati/kern/internal/whatif"
 	"os"
@@ -303,6 +304,12 @@ func runVerify(rest []string) {
 		ts := app.NewTaskService(p, nil).WithPRProvider(app.AutoPRProvider())
 		_, v, err := ts.Verify(types)
 		if err != nil {
+			// A FAIL verdict is a valid outcome: surface the typed verdict and
+			// per-check status (report A11) instead of a bare error.
+			if v.Verdict != "" || v.Build != nil || v.UnitTests != nil || v.Security != nil || v.Architecture != nil || v.Dependency != nil {
+				fmt.Println(verification.RenderCompact(v))
+				os.Exit(1)
+			}
 			fatal("%v", err)
 		}
 		if f.json {
@@ -556,7 +563,11 @@ func renderStatelessPlan(change string, pkt domain.ContextPacket) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "PLAN\n")
 	fmt.Fprintf(&b, "Objective: %s\n", change)
-	fmt.Fprintf(&b, "Scope: %d symbols, %d files\n", len(pkt.Symbols), len(pkt.Files))
+	if whatif.IsNetNewFeature(change) {
+		fmt.Fprintf(&b, "Scope: net-new feature (no existing components affected)\n")
+	} else {
+		fmt.Fprintf(&b, "Scope: %d symbols, %d files\n", len(pkt.Symbols), len(pkt.Files))
+	}
 	risk := "low"
 	for _, r := range pkt.Risks {
 		if r.Level == domain.RiskCritical || r.Level == domain.RiskHigh {
@@ -568,15 +579,23 @@ func renderStatelessPlan(change string, pkt domain.ContextPacket) string {
 		}
 	}
 	fmt.Fprintf(&b, "Risk: %s\n", risk)
-	fmt.Fprintf(&b, "Affected components:\n")
-	for _, sym := range pkt.Symbols {
-		fmt.Fprintf(&b, "  - %s\n", sym.Name)
-	}
-	for _, f := range pkt.Files {
-		fmt.Fprintf(&b, "  - %s\n", f.Path)
+	if !whatif.IsNetNewFeature(change) {
+		fmt.Fprintf(&b, "Affected components:\n")
+		for _, sym := range pkt.Symbols {
+			fmt.Fprintf(&b, "  - %s\n", sym.Name)
+		}
+		for _, f := range pkt.Files {
+			fmt.Fprintf(&b, "  - %s\n", f.Path)
+		}
 	}
 	fmt.Fprintf(&b, "Implementation steps:\n")
-	fmt.Fprintf(&b, "  1. Implement the change in the affected components above.\n")
+	if whatif.IsNetNewFeature(change) {
+		fmt.Fprintf(&b, "  1. Implement the new feature according to specifications.\n")
+	} else if len(pkt.Symbols)+len(pkt.Files) > 0 {
+		fmt.Fprintf(&b, "  1. Implement the change in the affected components above.\n")
+	} else {
+		fmt.Fprintf(&b, "  1. Implement the requested change.\n")
+	}
 	for _, v := range pkt.RequiredValidation {
 		fmt.Fprintf(&b, "  - %s\n", v)
 	}

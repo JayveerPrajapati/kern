@@ -112,6 +112,22 @@ func TestDeterministicPlan(t *testing.T) {
 	}
 }
 
+func TestAssemblePlanNetNewFeature(t *testing.T) {
+	ts := &TaskService{}
+	pkt := domain.ContextPacket{
+		Symbols: []domain.Symbol{{Name: "RandomTestClass"}},
+		Files:   []domain.File{{Path: "src/test/RandomTestClass.java"}},
+	}
+	plan := ts.assemblePlan("Add REST endpoint for consumer lag", pkt)
+	if len(plan.AffectedComponents) != 0 {
+		t.Errorf("expected 0 affected components for net-new feature, got %v", plan.AffectedComponents)
+	}
+	if !strings.Contains(plan.Scope, "net-new") {
+		t.Errorf("expected net-new in Scope, got %q", plan.Scope)
+	}
+}
+
+
 func TestToolDecisionTraceRecorder(t *testing.T) {
 	rec := NewToolDecisionTraceRecorder()
 	if rec.Len() != 0 {

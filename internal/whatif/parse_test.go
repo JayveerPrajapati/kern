@@ -2,6 +2,7 @@ package whatif
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -68,5 +69,57 @@ func TestExtractSymbols(t *testing.T) {
 				t.Errorf("ExtractSymbols(%q) = %v, want %v", tc.in, got, tc.want)
 			}
 		})
+	}
+}
+
+// TestExtractSymbolsSkipsInflectedLeadVerbs (report A8): a prose query that
+// opens with an inflected change-verb ("what breaks if I remove the translate
+// function from cmaas_controller?") must never surface "breaks" (or "removes")
+// ahead of the real symbol that follows it.
+func TestExtractSymbolsSkipsInflectedLeadVerbs(t *testing.T) {
+	cands := ExtractSymbols("what breaks if I remove the translate function from cmaas_controller?")
+	if len(cands) == 0 || cands[0] != "translate" {
+		t.Fatalf("ExtractSymbols = %v, want leading candidate %q", cands, "translate")
+	}
+	for _, bad := range []string{"breaks", "breaks", "remove", "removes"} {
+		for _, c := range cands {
+			if c == bad {
+				t.Errorf("stoplisted verb %q leaked into candidates %v", bad, cands)
+			}
+		}
+	}
+}
+
+func TestIsNetNewFeature(t *testing.T) {
+	cases := []struct {
+		intent string
+		want   bool
+	}{
+		{"Add REST endpoint for consumer lag", true},
+		{"Create new notification service", true},
+		{"Introduce kafka retry topic", true},
+		{"implement dead letter queue", true},
+		{"new telemetry pipeline", true},
+		{"build healthcheck endpoint", true},
+		{"Refactor ResponseWrapperFactory.build", false},
+		{"Remove GetMySQLDB", false},
+		{"Fix null pointer in processSingle", false},
+	}
+	for _, tc := range cases {
+		got := IsNetNewFeature(tc.intent)
+		if got != tc.want {
+			t.Errorf("IsNetNewFeature(%q) = %v, want %v", tc.intent, got, tc.want)
+		}
+	}
+}
+
+func TestExtractSymbolsNetNewFeatureStopwords(t *testing.T) {
+	cands := ExtractSymbols("Add REST endpoint for consumer lag")
+	for _, bad := range []string{"rest", "endpoint", "api", "lag"} {
+		for _, c := range cands {
+			if strings.EqualFold(c, bad) {
+				t.Errorf("stoplisted word %q leaked into candidates %v", bad, cands)
+			}
+		}
 	}
 }

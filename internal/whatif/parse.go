@@ -88,6 +88,14 @@ func ExtractSymbols(change string) []string {
 		"refactor", "remove", "change", "add", "delete", "update", "split",
 		"move", "create", "introduce", "modify", "replace", "rewrite",
 		"rename", "extract", "inline", "simplify", "clean", "fix", "break",
+		// Inflected change-verbs: 3rd-person / past forms of the verbs above
+		// headline prose ("what breaks if I remove X") and must never outrank
+		// a real symbol that follows them (report A8).
+		"refactors", "removes", "removed", "changes", "changed", "adds",
+		"added", "deletes", "deleted", "updates", "updated", "renames",
+		"renamed", "moves", "moved", "extracts", "simplifies", "split",
+		"splits", "breaks", "fixes", "fixed", "modifies", "replaces",
+		"replaced", "rewrites", "introduces", "creates",
 		"method", "function", "file", "symbol", "code", "line", "lines",
 		"class", "struct", "type", "interface", "module", "package",
 		"variable", "constant", "field", "property", "parameter", "argument",
@@ -108,6 +116,7 @@ func ExtractSymbols(change string) []string {
 		"just", "prose", "here", "there", "symbols", "connections",
 		"directory", "folder", "path", "root", "source", "config",
 		"service", "handler", "client", "server", "response", "request",
+		"endpoint", "endpoints", "api", "apis", "rest", "lag",
 	} {
 		stop[strings.ToLower(w)] = true
 	}
@@ -167,6 +176,22 @@ func ExtractSymbols(change string) []string {
 func hasLetter(s string) bool {
 	for _, r := range s {
 		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') {
+			return true
+		}
+	}
+	return false
+}
+
+// IsNetNewFeature reports whether a natural-language change intent appears to
+// describe a net-new capability (e.g. "Add ...", "Create ...", "Introduce ...")
+// rather than an alteration to an existing symbol.
+func IsNetNewFeature(intent string) bool {
+	lower := strings.ToLower(strings.TrimSpace(intent))
+	prefixes := []string{
+		"add ", "create ", "introduce ", "implement ", "new ", "build ",
+	}
+	for _, p := range prefixes {
+		if strings.HasPrefix(lower, p) {
 			return true
 		}
 	}
