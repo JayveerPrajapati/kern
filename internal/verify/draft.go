@@ -8,6 +8,7 @@ import (
 	"go/token"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -32,27 +33,13 @@ var goBuiltins = map[string]bool{
 
 // CheckDraft validates a draft code snippet against the project index.
 // Go code (lang "" or "go") is parsed with go/parser and checked
-// structurally; other languages get the conservative checks only
-// (unknown_import for relative paths). Deterministic — no LLM.
-//
-// Checks performed for Go:
-//   - parse errors (single parse_error finding; checking stops),
-//   - relative imports that do not resolve to a real directory under root,
-//   - calls to simple identifiers that are neither declared in the draft, nor
-//     Go builtins, nor present in the index symbol table,
-//   - selector calls on an import alias whose target method is not found in
-//     the indexed package (packages unknown to the index, e.g. stdlib, are
-//     skipped silently).
-//
-// Known conservative limitations (v1): a call to a symbol declared in a
-// sibling file of the same package that is not in the index is reported as
-// unknown_symbol — an accepted false positive, since the draft is validated
-// standalone against the index. Function-local scope is not tracked (all
-// declared names form one set), so a call to another function's local is a
-// false negative, not a false positive. Non-Go languages return no findings:
-// the structural checks are Go-only in v1.
+// structurally; Java code is checked for unresolved call targets;
+// other languages get conservative checks only. Deterministic — no LLM.
 func CheckDraft(ix *index.Index, root string, code []byte, lang string) []DraftFinding {
-	// Non-Go languages are skipped conservatively (v1 is Go-only).
+	if lang == "java" || (lang == "" && looksLikeJava(code)) {
+		return checkJavaDraft(ix, root, code)
+	}
+	// Non-Go languages other than Java are skipped conservatively.
 	if lang != "" && lang != "go" {
 		return nil
 	}
@@ -281,3 +268,215 @@ func indexPackageSymbols(ix *index.Index, importPath string) ([]index.Symbol, bo
 	}
 	return out, true
 }
+
+var javaBuiltinKeywords = map[string]bool{
+	"if": true, "for": true, "while": true, "switch": true, "catch": true,
+	"synchronized": true, "super": true, "this": true, "new": true,
+	"return": true, "throw": true, "assert": true, "try": true,
+}
+
+var javaObjectMethods = map[string]bool{
+	"equals": true, "hashCode": true, "toString": true, "getClass": true,
+	"wait": true, "notify": true, "notifyAll": true, "clone": true, "finalize": true,
+}
+
+var javaExternalPrefixes = []string{
+	"java.", "javax.", "jakarta.", "org.springframework.", "org.slf4j.",
+	"org.junit.", "org.mockito.", "org.apache.", "com.google.", "com.fasterxml.",
+	"io.micrometer.", "io.netty.", "io.swagger.", "lombok.", "org.hibernate.",
+	"System.", "Arrays.", "Collections.", "Objects.", "Math.", "String.",
+	"Integer.", "Long.", "Boolean.", "Double.", "Float.", "Thread.",
+	"Optional.", "Stream.", "List.", "Set.", "Map.", "Assert.", "Assertions.",
+}
+
+func isExternalJavaPrefix(p string) bool {
+	for _, ext := range javaExternalPrefixes {
+		if p == strings.TrimSuffix(ext, ".") || strings.HasPrefix(p, ext) {
+			return true
+		}
+	}
+	return false
+}
+
+func looksLikeJava(code []byte) bool {
+	s := string(code)
+	if strings.Contains(s, "package ") && strings.Contains(s, ";") {
+		return true
+	}
+	if strings.Contains(s, "public class ") || strings.Contains(s, "private class ") {
+		return true
+	}
+	if strings.Contains(s, "class ") && strings.Contains(s, "{") && strings.Contains(s, ";") {
+		return true
+	}
+	if strings.Contains(s, "import java.") || strings.Contains(s, "import javax.") || strings.Contains(s, "import org.") || strings.Contains(s, "import com.") {
+		return true
+	}
+	if strings.Contains(s, "public static void main") || strings.Contains(s, "System.out.") {
+		return true
+	}
+	return false
+}
+
+func checkJavaDraft(ix *index.Index, root string, code []byte) []DraftFinding {
+	var findings []DraftFinding
+	lines := strings.Split(string(code), "\n")
+
+	locals := map[string]bool{}
+	draftMethods := map[string]bool{}
+
+	reClass := regexp.MustCompile(`\b(?:class|interface|enum|record)\s+([A-Za-z_$][\w$]*)`)
+	reMethod := regexp.MustCompile(`(?:public|protected|private|static|final|\s)*\b(?:[A-Za-z_$][\w$]*|<[^>]+>|\[\]|\s)+\s+([A-Za-z_$][\w$]*)\s*\([^)]*\)\s*\{?`)
+	reVar := regexp.MustCompile(`\b([A-Za-z_$][\w$]*(?:<[^>]*>)?)\s+([A-Za-z_$][\w$]*)\s*(?:=|;|,|\))`)
+	reCall := regexp.MustCompile(`\b([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\s*\(`)
+
+	// First pass: collect local declarations
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "//") || strings.HasPrefix(trimmed, "/*") || strings.HasPrefix(trimmed, "*") {
+			continue
+		}
+		if m := reClass.FindStringSubmatch(trimmed); m != nil {
+			locals[m[1]] = true
+		}
+		if m := reMethod.FindStringSubmatch(trimmed); m != nil {
+			draftMethods[m[1]] = true
+		}
+		for _, m := range reVar.FindAllStringSubmatch(trimmed, -1) {
+			locals[m[2]] = true
+		}
+	}
+
+	// Second pass: inspect calls
+	for lineIdx, line := range lines {
+		lineNum := lineIdx + 1
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "//") || strings.HasPrefix(trimmed, "/*") || strings.HasPrefix(trimmed, "*") {
+			continue
+		}
+		cleanLine := stripStrings(trimmed)
+
+		for _, m := range reCall.FindAllStringSubmatch(cleanLine, -1) {
+			full := m[1]
+			if javaBuiltinKeywords[full] {
+				continue
+			}
+
+			if strings.Contains(full, ".") {
+				lastDot := strings.LastIndex(full, ".")
+				receiver := full[:lastDot]
+				method := full[lastDot+1:]
+
+				if javaBuiltinKeywords[method] || javaObjectMethods[method] {
+					continue
+				}
+				if isExternalJavaPrefix(receiver) {
+					continue
+				}
+				if receiver == "this" || receiver == "super" {
+					if draftMethods[method] {
+						continue
+					}
+				}
+				if locals[receiver] {
+					continue
+				}
+
+				if ix != nil {
+					// 1. Dotted method lookup (receiver match)
+					if defs := ix.ResolveDottedMethod(receiver, method); len(defs) > 0 {
+						continue
+					}
+					// 2. Exact or qualified symbol lookup
+					if _, ok := ix.ResolveName(full); ok {
+						continue
+					}
+					if _, ok := ix.FindSymbol(full); ok {
+						continue
+					}
+					// 3. If receiver is a known class in index, check if method exists on it
+					if sym, ok := ix.FindSymbol(receiver); ok {
+						foundMethod := false
+						for _, s := range ix.Symbols {
+							if s.Name == method && (s.Receiver == sym.Name || s.Receiver == receiver) {
+								foundMethod = true
+								break
+							}
+						}
+						if foundMethod {
+							continue
+						}
+					}
+				} else {
+					if !strings.Contains(receiver, ".") {
+						continue
+					}
+				}
+
+				findings = append(findings, DraftFinding{
+					Line:    lineNum,
+					Kind:    "unknown_symbol",
+					Message: fmt.Sprintf("call to unknown symbol %q", full),
+				})
+			} else {
+				if javaBuiltinKeywords[full] || javaObjectMethods[full] {
+					continue
+				}
+				if draftMethods[full] || locals[full] {
+					continue
+				}
+				if ix != nil {
+					if indexHasSymbol(ix, full) {
+						continue
+					}
+					found := false
+					for _, s := range ix.Symbols {
+						if s.Name == full {
+							found = true
+							break
+						}
+					}
+					if found {
+						continue
+					}
+				} else {
+					continue
+				}
+				findings = append(findings, DraftFinding{
+					Line:    lineNum,
+					Kind:    "unknown_symbol",
+					Message: fmt.Sprintf("call to unknown symbol %q", full),
+				})
+			}
+		}
+	}
+
+	return findings
+}
+
+func stripStrings(s string) string {
+	var b strings.Builder
+	inQuote := false
+	var quoteChar rune
+	escaped := false
+	for _, r := range s {
+		if inQuote {
+			if escaped {
+				escaped = false
+			} else if r == '\\' {
+				escaped = true
+			} else if r == quoteChar {
+				inQuote = false
+			}
+		} else {
+			if r == '"' || r == '\'' {
+				inQuote = true
+				quoteChar = r
+			} else {
+				b.WriteRune(r)
+			}
+		}
+	}
+	return b.String()
+}
+

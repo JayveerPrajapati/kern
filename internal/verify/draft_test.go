@@ -157,3 +157,61 @@ func main() {
 		}
 	}
 }
+
+func TestCheckDraftJavaUnresolvedCall(t *testing.T) {
+	ix, root := build(t, map[string]string{
+		"com/inn/rcp/RealClass.java": "package com.inn.rcp;\npublic class RealClass {\n    public static void real() {}\n}\n",
+	})
+	code := `package com.inn.rcp;
+
+public class MyDraft {
+    public void execute() {
+        com.inn.rcp.does.not.Exist.doSomething();
+    }
+}
+`
+	findings := CheckDraft(ix, root, []byte(code), "java")
+	if len(findings) != 1 {
+		t.Fatalf("expected 1 finding for unresolvable Java call, got %+v", findings)
+	}
+	f := findings[0]
+	if f.Kind != "unknown_symbol" {
+		t.Errorf("expected unknown_symbol, got %q", f.Kind)
+	}
+	if f.Line != 5 {
+		t.Errorf("expected line 5, got %d", f.Line)
+	}
+	if !strings.Contains(f.Message, "com.inn.rcp.does.not.Exist.doSomething") {
+		t.Errorf("message should mention target: %q", f.Message)
+	}
+
+	// Also verify auto-detection when lang is empty string
+	findingsAuto := CheckDraft(ix, root, []byte(code), "")
+	if len(findingsAuto) != 1 {
+		t.Fatalf("expected 1 finding with empty lang auto-detection, got %+v", findingsAuto)
+	}
+}
+
+func TestCheckDraftJavaCleanCall(t *testing.T) {
+	ix, root := build(t, map[string]string{
+		"com/inn/rcp/RealService.java": "package com.inn.rcp;\npublic class RealService {\n    public static void serve() {}\n}\n",
+	})
+	code := `package com.inn.rcp;
+
+import java.util.List;
+
+public class MyDraft {
+    private void localHelper() {}
+
+    public void execute() {
+        RealService.serve();
+        localHelper();
+        System.out.println("done");
+    }
+}
+`
+	findings := CheckDraft(ix, root, []byte(code), "java")
+	if len(findings) != 0 {
+		t.Fatalf("expected clean draft, got %+v", findings)
+	}
+}

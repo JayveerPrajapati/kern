@@ -68,7 +68,8 @@ func Verify(ix *index.Index, root, text string) Report {
 
 	for _, m := range fileLineRe.FindAllStringSubmatch(text, -1) {
 		file, line := m[1], atoi(m[2])
-		add(FileRef, file+":"+m[2], fileHasLine(root, file, line), "file+line present in source")
+		ok, detail := checkFileLine(ix, root, file, line)
+		add(FileRef, file+":"+m[2], ok, detail)
 	}
 
 	fileMap := map[string]string{}
@@ -114,27 +115,69 @@ func Verify(ix *index.Index, root, text string) Report {
 	return rep
 }
 
+// checkFileLine validates whether file exists in root (or ix) and line is within bounds.
+func checkFileLine(ix *index.Index, root, file string, line int) (bool, string) {
+	if line < 1 {
+		return false, fmt.Sprintf("invalid line number %d", line)
+	}
+	if root == "" && ix != nil && ix.Root != "" {
+		root = ix.Root
+	}
+	path := file
+	if filepath.IsAbs(file) {
+		if root == "" || !WithinAbs(root, file) {
+			return false, "file outside root / inaccessible"
+		}
+		path = file
+	} else if root != "" {
+		path = filepath.Join(root, file)
+	}
+
+	// If direct path doesn't exist, try resolving via index file list (e.g. bare filename).
+	if _, err := os.Stat(path); err != nil && ix != nil {
+		target := file
+		if filepath.IsAbs(file) && root != "" {
+			if rel, err := filepath.Rel(root, file); err == nil {
+				target = rel
+			}
+		}
+		var matched string
+		for f := range ix.FileHashes {
+			if f == target || filepath.Base(f) == target || strings.HasSuffix(f, "/"+target) {
+				matched = f
+				break
+			}
+		}
+		if matched == "" {
+			for _, s := range ix.Symbols {
+				if s.File == target || filepath.Base(s.File) == target || strings.HasSuffix(s.File, "/"+target) {
+					matched = s.File
+					break
+				}
+			}
+		}
+		if matched != "" && root != "" {
+			path = filepath.Join(root, matched)
+		}
+	}
+
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return false, "file not found in source tree"
+	}
+	totalLines := strings.Count(string(b), "\n") + 1
+	if line > totalLines {
+		return false, fmt.Sprintf("line %d exceeds file length (%d lines)", line, totalLines)
+	}
+	return true, "file+line present in source"
+}
+
 // fileHasLine reports whether file exists in root and line is within bounds.
 // Absolute file refs are only honored when they stay inside root, so
 // untrusted text can never probe arbitrary machine paths.
 func fileHasLine(root, file string, line int) bool {
-	if line < 1 {
-		return false
-	}
-	path := file
-	if root != "" && !filepath.IsAbs(file) {
-		path = filepath.Join(root, file)
-	}
-	if filepath.IsAbs(path) {
-		if root == "" || !WithinAbs(root, path) {
-			return false
-		}
-	}
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return false
-	}
-	return line <= strings.Count(string(b), "\n")+1
+	ok, _ := checkFileLine(nil, root, file, line)
+	return ok
 }
 
 // WithinAbs reports whether child (absolute) stays inside parent (absolute).
