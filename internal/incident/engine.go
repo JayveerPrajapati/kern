@@ -301,7 +301,24 @@ func (e *Engine) RootCause(inc *domain.Incident) {
 		}
 		break
 	}
-	inc.Status = domain.IncidentRootCauseFound
+	if inc.RootCause != nil {
+		inc.Status = domain.IncidentRootCauseFound
+	} else {
+		inc.Status = domain.IncidentInvestigating
+		if len(inc.Hypotheses) == 0 {
+			inc.Hypotheses = []domain.Hypothesis{{
+				Statement:  "Insufficient evidence: no runtime snapshot or corroborating error events provided",
+				Source:     "engine",
+				Confidence: domain.ClaimHypothesis,
+				Score:      0.0,
+				Evidence: []domain.Evidence{{
+					Type:    domain.EvidenceRuntime,
+					Source:  "engine",
+					Content: "no runtime snapshot provided",
+				}},
+			}}
+		}
+	}
 	inc.UpdatedAt = time.Now()
 	e.publish(eventbus.Event{Kind: eventbus.IncidentUpdated, Subject: inc.ID, Payload: map[string]string{"status": string(inc.Status)}})
 }
