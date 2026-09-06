@@ -56,7 +56,14 @@ var fillerExact = map[string]bool{
 	"here's what you":       true,
 	"here is what you":      true,
 	"in summary":            true,
+	"in summary:":           true,
 	"in conclusion":         true,
+	"in conclusion:":        true,
+	"here's the thing":      true,
+	"here's the thing:":     true,
+	"here is the thing":     true,
+	"here is the thing:":    true,
+	"it turns out that":     true,
 	"bottom line":           true,
 	"i hope":                true,
 	"i hope this":           true,
@@ -80,6 +87,20 @@ var fillerExact = map[string]bool{
 // hedgePrefixes mark a line as expendable filler when it *starts* with one of
 // these (case-insensitive).
 var fillerPrefixes = []string{
+	"so, basically",
+	"in summary,",
+	"in summary:",
+	"in conclusion,",
+	"in conclusion:",
+	"it turns out that",
+	"here's the thing:",
+	"here's the thing,",
+	"here is the thing:",
+	"here is the thing,",
+	"i'd be happy to",
+	"i would be happy to",
+	"i'd be glad to",
+	"i would be glad to",
 	"let me know if",
 	"let me know what",
 	"feel free to",
@@ -205,6 +226,10 @@ func Compress(text string) (string, int) {
 		// line like "Sure! The dispatch is in server.go. Hope that helps!"
 		// keeps its payload while losing the filler.
 		stripped := stripInlineFiller(clean)
+		if stripped == "" {
+			dropped++
+			continue
+		}
 		out = append(out, raw[:len(trimmed)-len(clean)]+stripped)
 	}
 
@@ -394,6 +419,26 @@ var inlineFillerPhrases = []string{
 	"really ", // "really good" → "good"
 	"very ",   // "very fast" → "fast"
 	"sure! ", "sure, ", "sure ",
+	"absolutely! ", "absolutely, ", "absolutely ",
+	"certainly! ",
+	"of course! ",
+	"great question! ", "great question, ", "great question. ",
+	"good question! ", "good question, ", "good question. ",
+	"in summary, ", "in summary: ",
+	"in conclusion, ", "in conclusion: ",
+	"it turns out that, ", "it turns out that ",
+	"here's the thing: ", "here's the thing, ",
+	"here is the thing: ", "here is the thing, ",
+	"essentially, ", "essentially ",
+	"actually, ", "actually ",
+	"i would be happy to help you with that. ",
+	"i would be happy to help you with that.",
+	"i would be happy to help with that. ",
+	"i would be happy to help with that.",
+	"i'd be happy to help with that. ",
+	"i'd be happy to help with that.",
+	"i would be happy to help", "i would be happy to ",
+	"i would be glad to help", "i would be glad to ",
 	"i'd be happy to help you with that. ",
 	"i'd be happy to help you with that.",
 	"i'd be happy to help", "i'd be happy to ",
@@ -524,7 +569,8 @@ var fillerWord = map[string]bool{
 	"i": true, "i'm": true, "i've": true, "i'd": true, "we": true, "we're": true,
 	"about": true, "from": true, "that": true, "these": true,
 	"those": true, "some": true, "any": true, "more": true, "helping": true,
-	"code": true,
+	"code": true, "basically": true, "essentially": true, "actually": true,
+	"thing": true, "turns": true, "summary": true, "conclusion": true,
 }
 
 // fillerAck are single-word lines that are unambiguous acknowledgements
@@ -549,7 +595,7 @@ func isFillerWords(s string) bool {
 	words := strings.FieldsFunc(strings.ToLower(s), func(r rune) bool {
 		return r == ' ' || r == ',' || r == '!' || r == '?' || r == '.' || r == '"'
 	})
-	if len(words) == 0 || len(words) > 6 {
+	if len(words) == 0 || len(words) > 16 {
 		return false
 	}
 	clean := func(tok string) string { return strings.Trim(tok, "'-") }
@@ -597,7 +643,20 @@ func isFiller(s string) bool {
 // carriesPayload keeps lines that look like code, identifiers, paths, error
 // messages or structured content — never drop these.
 func carriesPayload(s string) bool {
-	if strings.Contains(s, ":") || strings.Contains(s, "=") {
+	t := strings.TrimSpace(s)
+	lower := strings.ToLower(t)
+	// Conversational pleasantries or summary headings with colon do not carry technical payload
+	if strings.HasPrefix(lower, "bottom line:") ||
+		strings.HasPrefix(lower, "in summary:") ||
+		strings.HasPrefix(lower, "in conclusion:") ||
+		strings.HasPrefix(lower, "here's the thing:") ||
+		strings.HasPrefix(lower, "here is the thing:") ||
+		strings.HasPrefix(lower, "note:") ||
+		strings.HasPrefix(lower, "please note:") ||
+		strings.HasPrefix(lower, "fyi:") ||
+		strings.HasPrefix(lower, "btw:") {
+		// skip colon check
+	} else if strings.Contains(s, ":") || strings.Contains(s, "=") {
 		return true
 	}
 	if strings.Contains(s, "(") || strings.Contains(s, ")") {
@@ -610,8 +669,8 @@ func carriesPayload(s string) bool {
 		return true
 	}
 	// Leading bullets/dashes/numbers: list items are content.
-	t := strings.TrimLeft(s, " \t-*•0123456789.")
-	if t != "" && len(t) != len(s) && (t == "" || !strings.HasPrefix(t, " ")) {
+	trimmedList := strings.TrimLeft(s, " \t-*•0123456789.")
+	if trimmedList != "" && len(trimmedList) != len(s) && (trimmedList == "" || !strings.HasPrefix(trimmedList, " ")) {
 		return true
 	}
 	if len(s) > 120 {
