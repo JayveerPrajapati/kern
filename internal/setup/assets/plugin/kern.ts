@@ -1823,6 +1823,92 @@ kern_entry_points: tool({
           return run(flags)
         },
       }),
+      kern_ast_transform: tool({
+        description:
+          "Executes deterministic AST-level transformations on code: scaffolding interface method stubs, adding struct fields, or inserting methods without fragile whitespace or regex diff errors.",
+        args: {
+          action: tool.schema.string().optional(),
+          file: tool.schema.string().optional(),
+          code: tool.schema.string().optional(),
+          target_symbol: tool.schema.string().optional(),
+          interface_name: tool.schema.string().optional(),
+          receiver_name: tool.schema.string().optional(),
+          receiver_type: tool.schema.string().optional(),
+          field_name: tool.schema.string().optional(),
+          field_type: tool.schema.string().optional(),
+          field_tag: tool.schema.string().optional(),
+          method_signature: tool.schema.string().optional(),
+          method_body: tool.schema.string().optional(),
+          apply: tool.schema.boolean().optional(),
+          format: tool.schema.string().optional(),
+          root: tool.schema.string().optional(),
+        },
+        async execute(args) {
+          const flags: string[] = ["ast-transform"]
+          if (args.action) flags.push("--action", args.action)
+          if (args.file) flags.push("--file", args.file)
+          if (args.target_symbol) flags.push("--target", args.target_symbol)
+          if (args.interface_name) flags.push("--interface", args.interface_name)
+          if (args.field_name) flags.push("--field", args.field_name)
+          if (args.field_type) flags.push("--field-type", args.field_type)
+          if (args.field_tag) flags.push("--tag", args.field_tag)
+          if (args.method_signature) flags.push("--sig", args.method_signature)
+          if (args.method_body) flags.push("--body", args.method_body)
+          if (args.apply) flags.push("--apply")
+          if (args.root) flags.push("--root", args.root)
+          return run(flags)
+        },
+      }),
+      kern_semantic_merge: tool({
+        description:
+          "Performs AST-aware 3-way code merge between base, local, and remote versions. Resolves non-overlapping struct fields, methods, imports, and declarations cleanly, and flags precise semantic conflicts.",
+        args: {
+          file: tool.schema.string().optional(),
+          base: tool.schema.string().optional(),
+          local: tool.schema.string().optional(),
+          remote: tool.schema.string().optional(),
+          base_file: tool.schema.string().optional(),
+          local_file: tool.schema.string().optional(),
+          remote_file: tool.schema.string().optional(),
+          apply: tool.schema.boolean().optional(),
+          format: tool.schema.string().optional(),
+          root: tool.schema.string().optional(),
+        },
+        async execute(args) {
+          const flags: string[] = ["semantic-merge"]
+          if (args.file) flags.push("--file", args.file)
+          if (args.base) flags.push("--base", args.base)
+          if (args.local) flags.push("--local", args.local)
+          if (args.remote) flags.push("--remote", args.remote)
+          if (args.apply) flags.push("--apply")
+          if (args.format === "json") flags.push("--json")
+          if (args.root) flags.push("--root", args.root)
+          return run(flags)
+        },
+      }),
+      kern_synthesize_test: tool({
+        description:
+          "Automatically synthesizes comprehensive table-driven unit tests, parameter fixtures, and boundary invariants for untested functions or methods based on AST signatures.",
+        args: {
+          target: tool.schema.string().optional(),
+          file: tool.schema.string().optional(),
+          code: tool.schema.string().optional(),
+          auto_gap: tool.schema.boolean().optional(),
+          apply: tool.schema.boolean().optional(),
+          format: tool.schema.string().optional(),
+          root: tool.schema.string().optional(),
+        },
+        async execute(args) {
+          const flags: string[] = ["synthesize-test"]
+          if (args.target) flags.push("--target", args.target)
+          if (args.file) flags.push("--file", args.file)
+          if (args.auto_gap) flags.push("--auto-gap")
+          if (args.apply) flags.push("--apply")
+          if (args.format === "json") flags.push("--json")
+          if (args.root) flags.push("--root", args.root)
+          return run(flags)
+        },
+      }),
       // --- Shadow built-ins: route read/grep/glob/bash to kern transparently ---
       // A plugin tool with the same name as a built-in takes precedence, so the
       // agent's "read the file" call hits kern_compact_file under the hood. If

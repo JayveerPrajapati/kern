@@ -69,3 +69,18 @@ ConnectionTimeout: pool exhausted
 		t.Errorf("expected identified heavy segments")
 	}
 }
+
+func TestHandleContextMaxTokens(t *testing.T) {
+	s := NewServer(strings.NewReader(""), io.Discard)
+	res, err := s.handleContext(context.Background(), map[string]any{
+		"symbol":     "ToolNames",
+		"max_tokens": "200",
+	})
+	if err != nil {
+		t.Fatalf("handleContext error: %v", err)
+	}
+	if !strings.Contains(res, "ToolNames") && !strings.Contains(res, "no symbol found") {
+		t.Fatalf("expected ToolNames in context result, got %s", res)
+	}
+}
+

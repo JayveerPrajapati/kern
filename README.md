@@ -27,7 +27,7 @@ Already installed? Run `kern doctor` to verify everything is wired.
 
 <br>
 
-**Phase-aware MCP routing (11 high-level tools by default, 101 in full mode) · 90+ CLI commands · 17 indexed languages (Go + Java resolved; 15 at heuristic precision — skipped under `--precision strict`; build with `-tags treesitter` for AST) · 100% local**
+**Phase-aware MCP routing (11 high-level tools by default, 104 in full mode) · 90+ CLI commands · 17 indexed languages (Go + Java resolved; 15 at heuristic precision — skipped under `--precision strict`; build with `-tags treesitter` for AST) · 100% local**
 
 </div>
 
@@ -344,7 +344,7 @@ codebase's stack is answered in one call.
    with WAL journaling and FTS5 full-text search for concurrent access.
 
 3. **Analysis** — 90+ CLI commands and the MCP tool catalog (11 high-level
-   tools by default, 101 in full mode) read the same index:
+   tools by default, 104 in full mode) read the same index:
    call graphs, blast radius, change impact, hotspots, dead code, path
    finding, architecture communities, coverage gaps — all dependency-free,
    all deterministic.
@@ -488,12 +488,12 @@ another code-intelligence MCP. Three properties set it apart:
   enforces architecture boundaries; phase-aware routing keeps agents focused
   instead of overwhelmed — 4 phases (explore/plan/edit/verify), each with a
   focused shortlist. Set `KERN_MCP_PHASE=explore` to filter the advertised
-  tools; the full 101-tool catalog stays behind `KERN_MCP_FULL=1`.
+  tools; the full 104-tool catalog stays behind `KERN_MCP_FULL=1`.
   Most MCP servers expose capability with no policy layer.
 
 When running as an MCP server (`kern-mcp`), kern exposes an **11-tool
 high-level surface by default** (routed through `kern_meta`), with the full
-**toolset (101 tools)** behind `KERN_MCP_FULL=1` for advanced use — and
+**toolset (104 tools)** behind `KERN_MCP_FULL=1` for advanced use — and
 phase-aware routing (`KERN_MCP_PHASE=explore|plan|edit|verify`) as the
 default way to keep the advertised list focused. They map 1:1 to the CLI
 commands, so opencode, Claude Code, Codex, Cursor and 8 more agents get the
@@ -505,7 +505,7 @@ engine over MCP:
 | **Code graph & Intel** | `kern_ast_search`, `kern_fts_search`, `kern_search`, `kern_repo_search`, `kern_code_graph`, `kern_graph`, `kern_inherits`, `kern_context`, `kern_near`, `kern_walk`, `kern_path`, `kern_probe`, `kern_explore`, `kern_why`, `kern_frameworks`, `kern_entry_points`, `kern_communities`, `kern_explain`, `kern_cross_repo_impact`, `kern_semantic_diff` |
 | **Change & review** | `kern_changes`, `kern_review`, `kern_churn`, `kern_trace`, `kern_hubs`, `kern_bridges`, `kern_arch`, `kern_dead`, `kern_larges`, `kern_test_gaps`, `kern_cochange` |
 | **Safety & Governance** | `kern_mask_pii`, `kern_security`, `kern_safe_delete`, `kern_verify_output`, `kern_guard_check`, `kern_schema_validate`, `kern_sandbox`, `kern_pre_edit`, `kern_evidence_anchor`, `kern_policy_dsl`, `kern_agent_role_rbac` |
-| **Automation & Multi-Agent** | `kern_run_build`, `kern_validate`, `kern_heal`, `kern_exec`, `kern_execute`, `kern_rename`, `kern_diff_files`, `kern_commitmsg`, `kern_doc_fetch`, `kern_doc_index`, `kern_doc_search`, `kern_precache`, `kern_memory_add`, `kern_memory_list`, `kern_memory_recall`, `kern_memory`, `kern_memory_ranked`, `kern_lock`, `kern_unlock`, `kern_lock_status`, `kern_semcache`, `kern_stats`, `kern_usage_guide`, `kern_buddy`, `kern_health`, `kern_compose`, `kern_agent_coordination`, `kern_agent_fingerprint` |
+| **Automation & Multi-Agent** | `kern_run_build`, `kern_validate`, `kern_heal`, `kern_exec`, `kern_execute`, `kern_rename`, `kern_diff_files`, `kern_commitmsg`, `kern_doc_fetch`, `kern_doc_index`, `kern_doc_search`, `kern_precache`, `kern_memory_add`, `kern_memory_list`, `kern_memory_recall`, `kern_memory`, `kern_memory_ranked`, `kern_lock`, `kern_unlock`, `kern_lock_status`, `kern_semcache`, `kern_stats`, `kern_usage_guide`, `kern_buddy`, `kern_health`, `kern_compose`, `kern_agent_coordination`, `kern_agent_fingerprint`, `kern_ast_transform`, `kern_semantic_merge`, `kern_synthesize_test` |
 | **High-level workflow** | `kern_analyze`, `kern_plan`, `kern_impact`, `kern_what_if`, `kern_verify`, `kern_incident`, `kern_agents`, `kern_loop`, `kern_correlate`, `kern_learn`, `kern_modernize` |
 
 <sub>Tools are available both over stdio (any MCP client) and the Streamable
@@ -688,7 +688,7 @@ native hooks for agents whose hook APIs allow it:
 | **Codex** | `[mcp_servers.kern]` in `~/.codex/config.toml` | — (no output-rewrite hook API) |
 | **JSON adapters** | `continue`, `windsurf`, `zed`, `vscode`, `antigravity`, `qwen`, `qoder`, `kiro`, `copilot` (VS Code), `copilot-cli` | — (no hook API) |
 
-All agents receive the same MCP surface (11 high-level tools by default, 101
+All agents receive the same MCP surface (11 high-level tools by default, 104
 in full mode, phase-filtered via `KERN_MCP_PHASE`) and the same `AGENTS.md` rules. Output
 compression + session memory run natively where the platform's hook API allows
 in-place output replacement (opencode, Claude Code, Gemini); agents without

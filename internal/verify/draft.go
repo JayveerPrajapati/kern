@@ -1,6 +1,8 @@
 package verify
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"go/ast"
 	"go/parser"
@@ -39,7 +41,16 @@ func CheckDraft(ix *index.Index, root string, code []byte, lang string) []DraftF
 	if lang == "java" || (lang == "" && looksLikeJava(code)) {
 		return checkJavaDraft(ix, root, code)
 	}
-	// Non-Go languages other than Java are skipped conservatively.
+	if lang == "python" || lang == "py" || (lang == "" && looksLikePython(code)) {
+		return checkPythonDraft(ix, root, code)
+	}
+	if lang == "typescript" || lang == "ts" || lang == "javascript" || lang == "js" || (lang == "" && looksLikeJS(code)) {
+		return checkJSDraft(ix, root, code)
+	}
+	if lang == "json" || (lang == "" && looksLikeJSON(code)) {
+		return checkJSONDraft(code)
+	}
+	// Non-Go languages other than the above are skipped conservatively.
 	if lang != "" && lang != "go" {
 		return nil
 	}
@@ -479,3 +490,242 @@ func stripStrings(s string) string {
 	}
 	return b.String()
 }
+
+func looksLikePython(code []byte) bool {
+	s := string(code)
+	if strings.Contains(s, "def ") && strings.Contains(s, ":") {
+		return true
+	}
+	if strings.Contains(s, "import ") && (strings.Contains(s, "from ") || strings.Contains(s, "__name__")) {
+		return true
+	}
+	if strings.Contains(s, "elif ") || strings.Contains(s, "except ") {
+		return true
+	}
+	return false
+}
+
+func looksLikeJS(code []byte) bool {
+	s := string(code)
+	if (strings.Contains(s, "const ") || strings.Contains(s, "let ") || strings.Contains(s, "function ")) &&
+		(strings.Contains(s, "=>") || strings.Contains(s, "export ") || strings.Contains(s, "import ") || strings.Contains(s, "require(")) {
+		return true
+	}
+	return false
+}
+
+func looksLikeJSON(code []byte) bool {
+	s := strings.TrimSpace(string(code))
+	return (strings.HasPrefix(s, "{") && strings.HasSuffix(s, "}")) ||
+		(strings.HasPrefix(s, "[") && strings.HasSuffix(s, "]"))
+}
+
+func checkJSONDraft(code []byte) []DraftFinding {
+	var v any
+	err := json.Unmarshal(code, &v)
+	if err == nil {
+		return nil
+	}
+	line := 1
+	if synErr, ok := err.(*json.SyntaxError); ok {
+		line = bytes.Count(code[:synErr.Offset], []byte("\n")) + 1
+	}
+	return []DraftFinding{{
+		Line:    line,
+		Kind:    "parse_error",
+		Message: err.Error(),
+	}}
+}
+
+type bracketItem struct {
+	r    rune
+	line int
+}
+
+func checkBracketBalance(code []byte, commentPrefix string, blockCommentStart string, blockCommentEnd string) []DraftFinding {
+	var findings []DraftFinding
+	var stack []bracketItem
+	lines := strings.Split(string(code), "\n")
+	inBlockComment := false
+
+	for lineIdx, line := range lines {
+		lineNum := lineIdx + 1
+		inQuote := false
+		var quoteChar rune
+		escaped := false
+
+		runes := []rune(line)
+		for i := 0; i < len(runes); i++ {
+			r := runes[i]
+
+			if inBlockComment {
+				if blockCommentEnd != "" && i+len(blockCommentEnd) <= len(runes) && string(runes[i:i+len(blockCommentEnd)]) == blockCommentEnd {
+					inBlockComment = false
+					i += len(blockCommentEnd) - 1
+				}
+				continue
+			}
+
+			if inQuote {
+				if escaped {
+					escaped = false
+				} else if r == '\\' {
+					escaped = true
+				} else if r == quoteChar {
+					inQuote = false
+				}
+				continue
+			}
+
+			if blockCommentStart != "" && i+len(blockCommentStart) <= len(runes) && string(runes[i:i+len(blockCommentStart)]) == blockCommentStart {
+				inBlockComment = true
+				i += len(blockCommentStart) - 1
+				continue
+			}
+
+			if commentPrefix != "" && i+len(commentPrefix) <= len(runes) && string(runes[i:i+len(commentPrefix)]) == commentPrefix {
+				break // rest of line is comment
+			}
+
+			if r == '"' || r == '\'' || r == '`' {
+				inQuote = true
+				quoteChar = r
+				continue
+			}
+
+			if r == '(' || r == '[' || r == '{' {
+				stack = append(stack, bracketItem{r: r, line: lineNum})
+			} else if r == ')' || r == ']' || r == '}' {
+				if len(stack) == 0 {
+					findings = append(findings, DraftFinding{
+						Line:    lineNum,
+						Kind:    "parse_error",
+						Message: fmt.Sprintf("unmatched closing bracket '%c'", r),
+					})
+					return findings
+				}
+				top := stack[len(stack)-1]
+				stack = stack[:len(stack)-1]
+				if (r == ')' && top.r != '(') || (r == ']' && top.r != '[') || (r == '}' && top.r != '{') {
+					findings = append(findings, DraftFinding{
+						Line:    lineNum,
+						Kind:    "parse_error",
+						Message: fmt.Sprintf("mismatched bracket '%c', expected match for '%c' from line %d", r, top.r, top.line),
+					})
+					return findings
+				}
+			}
+		}
+	}
+
+	if len(stack) > 0 {
+		top := stack[len(stack)-1]
+		findings = append(findings, DraftFinding{
+			Line:    top.line,
+			Kind:    "parse_error",
+			Message: fmt.Sprintf("unclosed bracket '%c'", top.r),
+		})
+	}
+	return findings
+}
+
+func checkPythonDraft(ix *index.Index, root string, code []byte) []DraftFinding {
+	var findings []DraftFinding
+	bracketFindings := checkBracketBalance(code, "#", `"""`, `"""`)
+	if len(bracketFindings) > 0 {
+		return bracketFindings
+	}
+
+	lines := strings.Split(string(code), "\n")
+	reRelImport := regexp.MustCompile(`^\s*from\s+(\.+[a-zA-Z0-9_.]*)\s+import`)
+	reColonHeader := regexp.MustCompile(`^\s*(?:def\s+[a-zA-Z_]\w*\s*\(.*?\)|class\s+[a-zA-Z_]\w*(?:\(.*?\))?|if\s+.*|elif\s+.*|while\s+.*|for\s+.*|with\s+.*)\s*$`)
+
+	for lineIdx, line := range lines {
+		lineNum := lineIdx + 1
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+
+		if m := reRelImport.FindStringSubmatch(trimmed); m != nil && root != "" {
+			relDots := m[1]
+			relPath := strings.ReplaceAll(relDots, ".", "/")
+			fullPath := filepath.Join(root, relPath)
+			if _, err := os.Stat(fullPath); err != nil {
+				if _, err2 := os.Stat(fullPath + ".py"); err2 != nil {
+					if _, err3 := os.Stat(filepath.Join(fullPath, "__init__.py")); err3 != nil {
+						findings = append(findings, DraftFinding{
+							Line:    lineNum,
+							Kind:    "unknown_import",
+							Message: fmt.Sprintf("relative import %q does not exist under root", relDots),
+						})
+					}
+				}
+			}
+		}
+
+		if reColonHeader.MatchString(trimmed) && !strings.HasSuffix(trimmed, ":") {
+			findings = append(findings, DraftFinding{
+				Line:    lineNum,
+				Kind:    "parse_error",
+				Message: fmt.Sprintf("expected ':' at end of header: %q", trimmed),
+			})
+		}
+	}
+	return findings
+}
+
+func checkJSDraft(ix *index.Index, root string, code []byte) []DraftFinding {
+	var findings []DraftFinding
+	bracketFindings := checkBracketBalance(code, "//", "/*", "*/")
+	if len(bracketFindings) > 0 {
+		return bracketFindings
+	}
+
+	lines := strings.Split(string(code), "\n")
+	reRelImport := regexp.MustCompile(`(?:import\s+.*?from\s+['"](\.[^'"]+)['"]|require\(['"](\.[^'"]+)['"]\))`)
+
+	for lineIdx, line := range lines {
+		lineNum := lineIdx + 1
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "//") || strings.HasPrefix(trimmed, "/*") {
+			continue
+		}
+
+		if m := reRelImport.FindStringSubmatch(trimmed); m != nil && root != "" {
+			rel := m[1]
+			if rel == "" && len(m) > 2 {
+				rel = m[2]
+			}
+			if rel != "" && strings.HasPrefix(rel, ".") {
+				base := filepath.Join(root, rel)
+				candidates := []string{
+					base,
+					base + ".ts",
+					base + ".tsx",
+					base + ".js",
+					base + ".jsx",
+					base + ".mjs",
+					filepath.Join(base, "index.ts"),
+					filepath.Join(base, "index.js"),
+				}
+				found := false
+				for _, c := range candidates {
+					if _, err := os.Stat(c); err == nil {
+						found = true
+						break
+					}
+				}
+				if !found {
+					findings = append(findings, DraftFinding{
+						Line:    lineNum,
+						Kind:    "unknown_import",
+						Message: fmt.Sprintf("relative import %q does not exist under root", rel),
+					})
+				}
+			}
+		}
+	}
+	return findings
+}
+

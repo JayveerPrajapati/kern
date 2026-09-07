@@ -41,7 +41,7 @@ func TestFilteredToolsDefaultMinimal(t *testing.T) {
 }
 
 // TestFilteredToolsFullCatalog verifies KERN_MCP_FULL=1 opts back in to the
-// full 86-tool catalog.
+// full 101-tool catalog.
 func TestFilteredToolsFullCatalog(t *testing.T) {
 	clearMCPSurfaceEnv(t)
 	t.Setenv("KERN_MCP_FULL", "1")

@@ -39,3 +39,15 @@ func TestDispatchParityWithRegistration(t *testing.T) {
 		t.Errorf("dispatch/registration mismatch: %d dispatched vs %d registered", len(dispatched), len(registered))
 	}
 }
+
+// TestCatalogCount verifies that the total registered MCP tools match the canonical catalog size.
+func TestCatalogCount(t *testing.T) {
+	names := ToolNames()
+	if len(names) != len(tools) {
+		t.Fatalf("ToolNames() count %d != tools table count %d", len(names), len(tools))
+	}
+	if len(names) < 104 {
+		t.Fatalf("MCP tool catalog has shrunk below expected 104 tools: got %d", len(names))
+	}
+}
+

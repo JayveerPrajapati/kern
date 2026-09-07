@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/JayveerPrajapati/kern/internal/budget"
 	kernctx "github.com/JayveerPrajapati/kern/internal/context"
 	"github.com/JayveerPrajapati/kern/internal/fw"
 	"github.com/JayveerPrajapati/kern/internal/index"
@@ -363,6 +364,11 @@ func (s *Server) handleContext(ctx context.Context, args map[string]any) (string
 				path = def.File
 			}
 			body = string(kernctx.PruneCode(path, []byte(body), true))
+		}
+		if v := argString(args, "max_tokens"); v != "" {
+			if maxTok, err := atoiArg(v, 0); err == nil && maxTok > 0 {
+				body = budget.FitCode(body, maxTok)
+			}
 		}
 		return body + s.freshnessFooter(args, ix), nil
 	}
