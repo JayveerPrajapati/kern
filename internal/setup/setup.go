@@ -177,6 +177,7 @@ func Check(root string) []Status {
 		}
 	}
 
+	out = append(out, checkSkills(root)...)
 	out = append(out, fileStatus(filepath.Join(root, ".gitignore"), "gitignore (generated block)"))
 	out = append(out, fileStatus(filepath.Join(root, ".git", "info", "exclude"), "git local exclude"))
 	out = append(out, fileStatus(globalConfig("git", "ignore")(""), "git global ignore"))
@@ -304,6 +305,9 @@ func Wire(root string, agents []string, detect bool) []Status {
 	out = append(out, wireLocalGitExclude(root))
 	out = append(out, wireGlobalGitignore())
 	out = append(out, wireEditorExclusions()...)
+
+	out = append(out, wireProjectSkills(root)...)
+	out = append(out, wireGlobalSkills()...)
 
 	// Wire kern-first instruction files for every detected platform that
 	// has an instruction file. This is independent of the explicit agents

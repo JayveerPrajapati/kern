@@ -11,6 +11,7 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/loop"
 	"github.com/JayveerPrajapati/kern/internal/pii"
 	"github.com/JayveerPrajapati/kern/internal/runtime"
+	"github.com/JayveerPrajapati/kern/internal/skills"
 	"github.com/JayveerPrajapati/kern/internal/verification"
 	"github.com/JayveerPrajapati/kern/internal/whatif"
 	"strings"
@@ -826,6 +827,15 @@ func classifyProjectTools(low, request string) (string, map[string]any, bool) {
 		return "kern_run_build", map[string]any{}, true
 	case strings.Contains(low, "exec") || strings.Contains(low, "run script") || strings.Contains(low, "run code"):
 		return "kern_exec", map[string]any{}, true
+	case strings.Contains(low, "skill") || strings.Contains(low, "playbook") || strings.Contains(low, "runbook"):
+		skillName := ""
+		for _, name := range skills.SkillNames {
+			if strings.Contains(low, name) || strings.Contains(low, strings.TrimPrefix(name, "kern-")) {
+				skillName = name
+				break
+			}
+		}
+		return "kern_skills", map[string]any{"skill": skillName}, true
 	case strings.Contains(low, "safe delete") || strings.Contains(low, "delete symbol") || strings.Contains(low, "can i delete"):
 		tool, args := withSymbol(request, low, "kern_safe_delete", "", map[string]any{})
 		return tool, args, true
@@ -1033,6 +1043,8 @@ func (s *Server) handleMeta(ctx context.Context, args map[string]any) (string, e
 		result, err = s.handleAgentRoleRBAC(ctx, subArgs)
 	case "kern_stream":
 		result, err = s.handleStream(ctx, subArgs)
+	case "kern_skills":
+		result, err = s.handleSkills(ctx, subArgs)
 	default:
 		// Fallback: search
 		subArgs["query"] = request
@@ -1047,4 +1059,32 @@ func (s *Server) handleMeta(ctx context.Context, args map[string]any) (string, e
 		out += fmt.Sprintf("\n[phase hint: %s — set KERN_MCP_PHASE=%s to filter the advertised tool list]", phase, phase)
 	}
 	return out, nil
+}
+
+func (s *Server) handleSkills(ctx context.Context, args map[string]any) (string, error) {
+	skill := strings.TrimSpace(argString(args, "skill"))
+	if skill != "" {
+		data, err := skills.ReadSkill(skill)
+		if err == nil {
+			return string(data), nil
+		}
+		if data, err := skills.ReadSkill("kern-" + skill); err == nil {
+			return string(data), nil
+		}
+	}
+
+	var sb strings.Builder
+	sb.WriteString("# Kern Bundled Agent Skills\n\n")
+	sb.WriteString("The following workflow runbooks are installed and ready for agents:\n\n")
+	for _, name := range skills.SkillNames {
+		data, err := skills.ReadSkill(name)
+		if err != nil {
+			continue
+		}
+		desc, _ := skills.ExtractDescriptionAndBody(data)
+		sb.WriteString(fmt.Sprintf("- **%s**: %s\n", name, desc))
+	}
+	sb.WriteString("\nTo view a specific runbook, request: 'show skill <name>' (e.g. 'show skill kern-safe-change').\n")
+	sb.WriteString("Each skill also includes executable helper scripts under its scripts/ directory.\n")
+	return sb.String(), nil
 }
