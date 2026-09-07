@@ -62,7 +62,27 @@ func (s *Server) handlePromptFill(ctx context.Context, args map[string]any) (str
 	// Render the template
 	rendered, err := prompt.Render(templateName, slots)
 	if err != nil {
-		return "", fmt.Errorf("render template: %w", err)
+		// If templateName is an inline template (contains slots or multi-word text),
+		// allow rendering it directly by replacing placeholders.
+		if strings.Contains(templateName, "{{") || strings.Contains(templateName, "\n") || strings.Contains(templateName, " ") {
+			rendered = templateName
+			for _, k := range []string{"ROOT", "MAP", "FILE", "SYMBOLS", "LANG", "TASK"} {
+				if _, ok := slots[k]; !ok {
+					slots[k] = "(n/a)"
+				}
+			}
+			for k, val := range slots {
+				rendered = strings.ReplaceAll(rendered, "{{"+k+"}}", val)
+			}
+			err = nil
+		} else {
+			// Surface the available template names so a mistyped template is
+			// self-diagnosing instead of a bare "unknown template" error.
+			if templates, lerr := prompt.List(); lerr == nil {
+				return "", fmt.Errorf("render template: %v (available templates: %s)", err, strings.Join(templates, ", "))
+			}
+			return "", fmt.Errorf("render template: %w", err)
+		}
 	}
 
 	// Auto-inject relevant memory lessons if requested or if task is present

@@ -70,17 +70,18 @@ ConnectionTimeout: pool exhausted
 	}
 }
 
-func TestHandleContextMaxTokens(t *testing.T) {
+func TestHandleContextSuggestions(t *testing.T) {
 	s := NewServer(strings.NewReader(""), io.Discard)
+	s.roots = []string{kernRepoRoot}
 	res, err := s.handleContext(context.Background(), map[string]any{
-		"symbol":     "ToolNames",
-		"max_tokens": "200",
+		"root":   kernRepoRoot,
+		"symbol": "handlePrompt",
 	})
 	if err != nil {
 		t.Fatalf("handleContext error: %v", err)
 	}
-	if !strings.Contains(res, "ToolNames") && !strings.Contains(res, "no symbol found") {
-		t.Fatalf("expected ToolNames in context result, got %s", res)
+	if !strings.Contains(res, "Did you mean:") {
+		t.Errorf("expected Did you mean suggestions in context result, got %s", res)
 	}
 }
 

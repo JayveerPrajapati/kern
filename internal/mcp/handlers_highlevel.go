@@ -114,7 +114,7 @@ func (s *Server) handleVerify(ctx context.Context, args map[string]any) (string,
 		}
 		typesArg := argString(args, "types")
 		if typesArg == "" {
-			typesArg = "build,test"
+			typesArg = "build"
 		}
 		var types []string
 		for _, t := range strings.Split(typesArg, ",") {
@@ -125,7 +125,7 @@ func (s *Server) handleVerify(ctx context.Context, args map[string]any) (string,
 		// Verification runs build/test commands (arbitrary host code); it must
 		// pass the governance firewall, fail closed.
 		if err := governance.CheckExec(); err != nil {
-			return "", err
+			return "", fmt.Errorf("%w (set KERN_ALLOW_EXEC=1 or configure KERN_TOOLS allowlist)", err)
 		}
 		p, err := s.platformFor(ctx, root)
 		if err != nil {

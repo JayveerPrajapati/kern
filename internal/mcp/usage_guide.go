@@ -7,7 +7,7 @@ func Guide() string {
 	return `# kern MCP — Tool Usage Guide
 
 ## Phase-aware tool selection
-Don't memorize 101 tools. Identify your phase (explore / plan / edit / verify),
+Don't memorize 104 tools. Identify your phase (explore / plan / edit / verify),
 use the phase shortlist below, and let kern_meta route within it. Set
 KERN_MCP_PHASE=<phase> at server start to filter the advertised tool list to
 that phase's shortlist plus the always-on meta/cross utilities; kern_meta
@@ -27,14 +27,15 @@ kern_commitmsg, kern_guard_check, kern_pre_edit, kern_compose
 
 ### verify — check / validate
 kern_verify, kern_validate, kern_review, kern_security, kern_changes,
-kern_schema_validate, kern_diff_files, kern_evidence_anchor, kern_policy_dsl
+kern_schema_validate, kern_diff_files, kern_evidence_anchor, kern_policy_dsl,
+kern_authorize_context
 
 Always available regardless of phase (meta/cross): kern_meta, kern_search,
 kern_context, kern_run, kern_optimize_prompt, kern_optimize_log, kern_mask_pii,
 kern_doc_search, kern_memory_*, kern_stats, kern_onboard, kern_incident,
 kern_workflow, kern_loop, kern_health, kern_prompt_fill, kern_semantic_diff,
 kern_context_watch, kern_agent_fingerprint, kern_agent_coordination,
-kern_agent_role_rbac, kern_stream.
+kern_agent_role_rbac, kern_authorize_context, kern_stream.
 
 ## Performance tiers
 Most tools are index-backed and return in well under 100ms. The tiers below
@@ -151,10 +152,19 @@ chosen option to size the real edit — both before you run kern_execute.
   its definition source, its callers and what it calls. Use instead of reading
   an entire file. It is the low-level primitive the other graph tools build on
   and is useful inside any workflow when you need a symbol's true shape before
-  you plan or edit around it.
+  you plan or edit around it. Note: it resolves an indexed symbol name only —
+  for a natural-language query use kern_search (or kern_meta) to find the
+  symbol first, then slim it down with kern_context.
 
 ## Pitfalls
 - kern_walk/kern_near default depth is 2; depth 0 returns only the root symbol.
+- kern_context/symbol takes an indexed symbol name, not arbitrary prose or a
+  file path: spell it as the index knows it (e.g. 'NewServer' or 'User.Login'). When an exact match is not found, kern_context offers candidate symbol suggestions from the index automatically. For a free-text query use kern_search first to resolve the exact name, then kern_context.
+- kern_validate and kern_verify run the project's real build/test commands, so
+  they are governed and fail closed: without KERN_ALLOW_EXEC=1 (or an exec
+  tool named in KERN_TOOLS) they refuse to run rather than executing ungoverned
+  host commands. kern_verify defaults to 'build' for fast sub-second validation without timeouts; pass 'build,test' when you want the full test suite run.
+- kern_prompt_fill accepts predefined template names (e.g. 'debug', 'explain', 'code-review') or custom inline prompt strings with {{SLOT}} interpolation.
 - kern_changes with a range needs git; a bare file= list avoids it.
 - kern_repo_search only searches repos you registered (kern repos add).
 - kern_doc_index only indexes .md/.txt/.rst/.adoc/.org files, skips vendor.

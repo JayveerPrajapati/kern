@@ -37,7 +37,11 @@ var DefaultPatterns = []Pattern{
 	// prefixes also use dashes). The bare sk-… dash prefixes are covered by
 	// OPENAI/OPENAI_SHORT; this catches the pill‑shaped live/test variants.
 	{Label: "STRIPE_DASH", RE: regexp.MustCompile(`\bsk-(?:live|test)-[A-Za-z0-9]{16,}\b`)},
-	{Label: "OPENAI", RE: regexp.MustCompile(`\bsk-(?:proj-[A-Za-z0-9-]{20,}|[A-Za-z0-9]{20,})\b`)},
+	// OPENAI: sk-… keys. The proj- variant carries a unique prefix (only
+	// OpenAI emits sk-proj-) so it needs no length guardrail beyond a short
+	// tail; truncated keys in logs/fixtures (sk-proj-abc…{,12}) are secrets all
+	// the same. The plain sk-… variant keeps the 20+ floor to stay out of prose.
+	{Label: "OPENAI", RE: regexp.MustCompile(`\bsk-(?:proj-[A-Za-z0-9_-]{6,}|[A-Za-z0-9]{20,})\b`)},
 	{Label: "OPENAI_SHORT", RE: regexp.MustCompile(`\bsk-[A-Za-z0-9]{10,19}\b`)},
 	{Label: "VAULT", RE: regexp.MustCompile(`\b(?:hvs|hvb|hvr|s)\.[A-Za-z0-9_-]{16,}\b`)},
 	{Label: "JWT", RE: regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}(?:\.[A-Za-z0-9_=-]+)?\b`)},

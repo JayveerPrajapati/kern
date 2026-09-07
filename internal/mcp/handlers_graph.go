@@ -340,10 +340,37 @@ func (s *Server) handleContext(ctx context.Context, args map[string]any) (string
 			// filter it so no denied name leaks through the source slice.
 			body = gov.filterContextFooter(ix, body)
 			def, found := ix.ResolveName(symbol)
-			if !found || !gov.nameAllowed(ix, def.FullName()) {
-				// Denied or absent — identical non-leaking response (the agent
-				// cannot tell "denied" from "does not exist"), governed
-				// provenance with an empty symbol set and the authorizing rule.
+			if !found {
+				suggestions := ix.Search(symbol, 5)
+				if len(suggestions) == 0 {
+					suggestions = ix.Search("*" + symbol + "*", 5)
+				}
+				var names []string
+				seen := make(map[string]bool)
+				for _, sym := range suggestions {
+					fullName := sym.FullName()
+					if fullName == "" || seen[fullName] {
+						continue
+					}
+					if !gov.nameAllowed(ix, fullName) {
+						continue
+					}
+					seen[fullName] = true
+					names = append(names, fullName)
+					if len(names) >= 5 {
+						break
+					}
+				}
+				s.stampProvenance(ctx, s.governedProvenance(ix, gov.policySource, gov.proof, nil))
+				if len(names) > 0 {
+					return fmt.Sprintf("no symbol found: %s. Did you mean: %s? (Use kern_search for ranked search)%s", symbol, strings.Join(names, ", "), s.freshnessFooter(args, ix)), nil
+				}
+				return "no symbol found: " + symbol + s.freshnessFooter(args, ix), nil
+			}
+			if !gov.nameAllowed(ix, def.FullName()) {
+				// Denied: identical non-leaking response (the agent cannot tell
+				// "denied" from "does not exist"), governed provenance with an
+				// empty symbol set and the authorizing rule.
 				s.stampProvenance(ctx, s.governedProvenance(ix, gov.policySource, gov.proof, nil))
 				return "no symbol found: " + symbol, nil
 			}
@@ -356,6 +383,29 @@ func (s *Server) handleContext(ctx context.Context, args map[string]any) (string
 			s.stampProvenance(ctx, s.rawProvenance(ix, syms))
 		}
 		if body == "" {
+			suggestions := ix.Search(symbol, 5)
+			if len(suggestions) == 0 {
+				suggestions = ix.Search("*" + symbol + "*", 5)
+			}
+			var names []string
+			seen := make(map[string]bool)
+			for _, sym := range suggestions {
+				fullName := sym.FullName()
+				if fullName == "" || seen[fullName] {
+					continue
+				}
+				if gov != nil && !gov.nameAllowed(ix, fullName) {
+					continue
+				}
+				seen[fullName] = true
+				names = append(names, fullName)
+				if len(names) >= 5 {
+					break
+				}
+			}
+			if len(names) > 0 {
+				return fmt.Sprintf("no symbol found: %s. Did you mean: %s? (Use kern_search for ranked search)%s", symbol, strings.Join(names, ", "), s.freshnessFooter(args, ix)), nil
+			}
 			return "no symbol found: " + symbol + s.freshnessFooter(args, ix), nil
 		}
 		if argBool(args, "terse_code") || argBool(args, "terse") {

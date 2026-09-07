@@ -80,6 +80,7 @@ func TestMaskKeys(t *testing.T) {
 		{"AKIAIOSFODNN7EXAMPLE", "AWS"},
 		{"ghp_abcdefghijklmnopqrstuvwxyz1234567890", "GITHUB"},
 		{"sk-proj-4f8a2b9c1d0e3f5a7b8c9d0e1f2a3b4c5d6e7f8a", "OPENAI"},
+		{"sk-proj-abc_123-xyz_78901234567890abcdefghijklmnopqrst", "OPENAI"},
 		{"xoxb-1234567890123-1234567890123-abc", "SLACK"},
 		{"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxIn0.abc1234567", "JWT"},
 		{`api_key = "abcd1234efgh5678ijkl9012"`, "KEY"},
@@ -236,6 +237,24 @@ func TestMaskShortOpenAIKey(t *testing.T) {
 	}
 	if res.ByLabel["OPENAI_SHORT"] != 1 {
 		t.Errorf("expected OPENAI_SHORT finding, got %+v", res.ByLabel)
+	}
+}
+
+func TestMaskShortOpenAIProjectKey(t *testing.T) {
+	// Truncated/short sk-proj- keys (<20 chars after proj-) must still be
+	// caught: the prefix is uniquely OpenAI, so a short tail is a secret too.
+	for _, in := range []string{
+		"key is sk-proj-AbCdef123 rest",
+		"key is sk-proj-abc-123 rest",
+		"key is sk-proj-123456789012345 rest",
+	} {
+		res := Mask(in)
+		if strings.Contains(res.Text, "sk-proj-") {
+			t.Errorf("short sk-proj- key not masked: %q -> %q", in, res.Text)
+		}
+		if res.ByLabel["OPENAI"] != 1 {
+			t.Errorf("expected OPENAI finding for %q, got %+v", in, res.ByLabel)
+		}
 	}
 }
 

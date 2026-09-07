@@ -54,4 +54,18 @@ func TestHandlePromptFill(t *testing.T) {
 	if errMissing == nil {
 		t.Error("expected error when template argument is empty")
 	}
+
+	// Test 4: Inline template string
+	resInline, errInline := s.handlePromptFill(context.Background(), map[string]any{
+		"root":     kernRepoRoot,
+		"template": "Hello agent! Please solve: {{TASK}} in file {{FILE}}",
+		"task":     "fix nil pointer dereference",
+		"file":     "main.go",
+	})
+	if errInline != nil {
+		t.Fatalf("handlePromptFill with inline template error: %v", errInline)
+	}
+	if !strings.Contains(resInline, "Hello agent! Please solve: fix nil pointer dereference in file main.go") {
+		t.Errorf("inline template not properly interpolated: %s", resInline)
+	}
 }
