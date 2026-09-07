@@ -62,6 +62,7 @@ func WireGlobal(agents []string) []Status {
 	if enabled("opencode") {
 		out = append(out, copyGlobalPlugin())
 	}
+	out = append(out, wireGlobalSkills()...)
 	return out
 }
 
