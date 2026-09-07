@@ -6,6 +6,7 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/app"
 	"github.com/JayveerPrajapati/kern/internal/domain"
 	"github.com/JayveerPrajapati/kern/internal/eventbus"
+	"github.com/JayveerPrajapati/kern/internal/governance"
 	"github.com/JayveerPrajapati/kern/internal/intel"
 	"github.com/JayveerPrajapati/kern/internal/ownership"
 	"github.com/JayveerPrajapati/kern/internal/verification"
@@ -296,6 +297,13 @@ func runVerify(rest []string) {
 			if t = strings.TrimSpace(t); t != "" {
 				types = append(types, t)
 			}
+		}
+		// Verification runs build/test commands (arbitrary host code); it must
+		// pass the governance firewall, fail closed (same gate as kern_validate
+		// and the MCP kern_verify tool). Without KERN_ALLOW_EXEC=1 (or an exec
+		// tool in the KERN_TOOLS allowlist) the high-level form is refused.
+		if err := governance.CheckExec(); err != nil {
+			fatal("%v", err)
 		}
 		p, perr := app.New(root)
 		if perr != nil {

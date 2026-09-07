@@ -714,7 +714,7 @@ var tools = []Tool{
 		Description: "HIGH-LEVEL (ADR-0006): verify a change with the unified verification engine — build, unit tests, security, architecture, dependency. Returns the typed verdict (PASS/FAIL/WARN) and per-check summary.",
 		InputSchema: schema(map[string]any{
 			"root":  strProp("Project root (defaults to current directory)"),
-			"types": strProp("Comma-separated checks: build,test,security,architecture,dependency (default 'build,test')"),
+			"types": strProp("Comma-separated checks: build,test,security,architecture,dependency (default 'build'; pass 'build,test' for full test suite)"),
 		}, nil),
 	},
 	{
