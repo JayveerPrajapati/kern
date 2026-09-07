@@ -50,4 +50,3 @@ func TestCatalogCount(t *testing.T) {
 		t.Fatalf("MCP tool catalog has shrunk below expected 104 tools: got %d", len(names))
 	}
 }
-

@@ -40,6 +40,7 @@ Already installed? Run `kern doctor` to verify everything is wired.
 - [Framework-aware Entry Points](#framework-aware-entry-points)
 - [Quick Start](#quick-start)
 - [How It Works](#how-it-works)
+- [Agent Skills & Runbooks](#agent-skills--runbooks)
 - [CLI Reference](#cli-reference)
 - [MCP Tools](#mcp-tools)
 - [Telemetry & Privacy](#telemetry--privacy)
@@ -355,9 +356,30 @@ codebase's stack is answered in one call.
 
 ---
 
+## Agent Skills & Runbooks
+
+kern ships bundled agent skills adhering to the open Agent Skills standard (`SKILL.md` + executable helper scripts). These runbooks guide coding agents through high-impact workflows without guesswork:
+
+| Skill | Focus & Capabilities | Helper Script |
+|---|---|---|
+| **`kern-investigate`** | Codebase exploration, symbol discovery, call-graph hierarchy, and blast-radius simulation using kern's prebuilt index instead of slow file reads and greps. | `./scripts/inspect.sh <symbol>` |
+| **`kern-safe-change`** | Predictive pre-edit safety checks, change-firewall validation ($G_0$–$G_{29}$), sandboxed auto-repair loop, and cryptographic CI receipts. | `./scripts/pre_check.sh <target>` |
+| **`kern-incident-triage`** | Auto-SRE production crash & error triage: deduplicates & compresses logs, correlates stack traces to AST symbols, writes reproduction unit tests in sandbox, and drives auto-repair. | `./scripts/triage.sh <path_to_log>` |
+
+### Managing Skills
+
+```bash
+kern skills                # list all bundled agent skills
+kern skills show <name>    # display detailed markdown runbook for a skill
+kern skills install        # install/sync skills into .agents/skills and global agent directories
+```
+
+---
+
 ## CLI Reference
 
 ```bash
+kern skills (list|show <name>|install)            bundled agent runbooks and automation scripts
 kern optimize <prompt> [--attach FILE] [--session ID] [--model NAME] [--llm MODEL]
 kern preview  <prompt> [--attach FILE]          (dry-run, no stats recorded)
 kern compact <file>                             symbolic summary of a file
@@ -435,6 +457,24 @@ kern team [--root ROOT]                      build the standard specialist team;
 kern risk <change> [--root ROOT]             deterministic risk report for a proposed change
 kern bridges [root] [--limit N] [--json]     cross-package bridge detection (coupling points)
 kern sandbox "<command>"                         run with filesystem snapshot + rollback; every run reports its network policy (posture + network-error hits from output)
+kern pre-edit <file|symbol>                       predictive blast-radius, untested hotspot detection
+kern compose <pipeline.json>                      multi-tool deterministic pipeline runner
+kern prompt-fill <template>                       compile dynamic prompt with injected project context
+kern semantic-diff <file-a> <file-b>              AST-level functional diff of modified symbols
+kern evidence-anchor <claims.json>                SHA-256 evidence certificate verification
+kern context-watch                                conversation context bloat monitor & compaction
+kern agent-fingerprint                            agent tool sequence hashing and loop detection
+kern explain <symbol>                             graph-backed architectural narrative synthesis
+kern cross-repo-impact <symbol> --repos <paths>   multi-repo contract compatibility and blast radius
+kern memory-ranked <query>                        decay-weighted memory recall with half-life scoring
+kern policy-dsl --rules <policy.json>             declarative policy-as-code evaluation
+kern agent-coordination (claim|release|list)      multi-agent workspace claims with TTL and handoffs
+kern agent-role-rbac                              role-based tool access control
+kern stream                                       response token chunking and streaming
+kern ast-transform <file> [--add-field|...]       deterministic AST-level transformations
+kern semantic-merge <base> <ours> <theirs>        AST-aware 3-way semantic merge
+kern synthesize-test <symbol> [file]              synthesize table-driven unit tests from signatures
+kern health                                       MCP server health and index freshness report
 kern schema ...                                  JSON-schema validation
 kern docs index/search/fetch                     local docs index for doc search
 kern version                                     print the installed version

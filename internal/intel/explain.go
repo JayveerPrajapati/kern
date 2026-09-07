@@ -11,16 +11,16 @@ import (
 
 // Explanation summarizes how a symbol, subsystem, or workflow works end-to-end.
 type Explanation struct {
-	Subject        string   `json:"subject"`
-	Kind           string   `json:"kind"` // "symbol" | "subsystem" | "workflow"
-	Definition     string   `json:"definition,omitempty"`
-	File           string   `json:"file,omitempty"`
-	Line           int      `json:"line,omitempty"`
-	Subsystem      string   `json:"subsystem,omitempty"`
-	DirectCallers  []string `json:"direct_callers,omitempty"`
-	Callees        []string `json:"callees,omitempty"`
-	ExecutionFlow  []string `json:"execution_flow,omitempty"`
-	Summary        string   `json:"summary"`
+	Subject       string   `json:"subject"`
+	Kind          string   `json:"kind"` // "symbol" | "subsystem" | "workflow"
+	Definition    string   `json:"definition,omitempty"`
+	File          string   `json:"file,omitempty"`
+	Line          int      `json:"line,omitempty"`
+	Subsystem     string   `json:"subsystem,omitempty"`
+	DirectCallers []string `json:"direct_callers,omitempty"`
+	Callees       []string `json:"callees,omitempty"`
+	ExecutionFlow []string `json:"execution_flow,omitempty"`
+	Summary       string   `json:"summary"`
 }
 
 // Explain produces an end-to-end architectural and call-flow explanation of subject.

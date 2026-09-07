@@ -343,7 +343,7 @@ func (s *Server) handleContext(ctx context.Context, args map[string]any) (string
 			if !found {
 				suggestions := ix.Search(symbol, 5)
 				if len(suggestions) == 0 {
-					suggestions = ix.Search("*" + symbol + "*", 5)
+					suggestions = ix.Search("*"+symbol+"*", 5)
 				}
 				var names []string
 				seen := make(map[string]bool)
@@ -385,7 +385,7 @@ func (s *Server) handleContext(ctx context.Context, args map[string]any) (string
 		if body == "" {
 			suggestions := ix.Search(symbol, 5)
 			if len(suggestions) == 0 {
-				suggestions = ix.Search("*" + symbol + "*", 5)
+				suggestions = ix.Search("*"+symbol+"*", 5)
 			}
 			var names []string
 			seen := make(map[string]bool)

@@ -13,16 +13,16 @@ import (
 
 // AgentFingerprintReport summarizes an agent's behavioral pattern based on its tool call sequence.
 type AgentFingerprintReport struct {
-	AgentID          string   `json:"agent_id"`
-	TotalCalls       int      `json:"total_calls"`
-	FingerprintHash  string   `json:"fingerprint_hash"`
-	LoopDetected     bool     `json:"loop_detected"`
-	RepetitiveCount  int      `json:"repetitive_calls_count"`
-	DominantTool     string   `json:"dominant_tool"`
+	AgentID          string         `json:"agent_id"`
+	TotalCalls       int            `json:"total_calls"`
+	FingerprintHash  string         `json:"fingerprint_hash"`
+	LoopDetected     bool           `json:"loop_detected"`
+	RepetitiveCount  int            `json:"repetitive_calls_count"`
+	DominantTool     string         `json:"dominant_tool"`
 	ToolDistribution map[string]int `json:"tool_distribution"`
-	CallSequence     []string `json:"call_sequence_recent"`
-	HealthStatus     string   `json:"health_status"` // "NORMAL" | "LOOPING" | "DEGRADED"
-	Recommendation   string   `json:"recommendation"`
+	CallSequence     []string       `json:"call_sequence_recent"`
+	HealthStatus     string         `json:"health_status"` // "NORMAL" | "LOOPING" | "DEGRADED"
+	Recommendation   string         `json:"recommendation"`
 }
 
 // handleAgentFingerprint hashes and analyzes an agent's tool-call sequence from the

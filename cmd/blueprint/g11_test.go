@@ -19,6 +19,7 @@ func g11Repo(t *testing.T, mainFiles, featureFiles map[string]string) string {
 	g11Git(t, dir, "init", "-q", "-b", "main")
 	g11Git(t, dir, "config", "user.email", "t@t")
 	g11Git(t, dir, "config", "user.name", "t")
+	g11Git(t, dir, "config", "core.excludesfile", "/dev/null")
 	g11Write(t, dir, "go.mod", "module example.com/repo\n\ngo 1.23\n")
 	// .blueprint/metrics.json (local metrics) and .kern/index.json (the kern
 	// index cache) are generated local data: CI runs create them and they must
@@ -31,6 +32,7 @@ func g11Repo(t *testing.T, mainFiles, featureFiles map[string]string) string {
 		g11Write(t, dir, path, content)
 	}
 	g11Git(t, dir, "add", "-A")
+	g11Git(t, dir, "add", "-f", ".kern/boundaries.json")
 	g11Git(t, dir, "commit", "-qm", "base")
 	// Create feature branch.
 	g11Git(t, dir, "checkout", "-b", "feature")

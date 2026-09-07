@@ -481,4 +481,3 @@ func runSynthesizeTest(rest []string) {
 	}
 	runMCPTool("kern_synthesize_test", args)
 }
-

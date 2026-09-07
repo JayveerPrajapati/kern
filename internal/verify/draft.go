@@ -728,4 +728,3 @@ func checkJSDraft(ix *index.Index, root string, code []byte) []DraftFinding {
 	}
 	return findings
 }
-

@@ -683,4 +683,3 @@ func main() {}
 		t.Fatalf("expected .kern/ in .git/info/exclude, got: %s", string(b))
 	}
 }
-
