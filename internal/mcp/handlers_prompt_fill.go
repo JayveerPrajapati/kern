@@ -74,7 +74,6 @@ func (s *Server) handlePromptFill(ctx context.Context, args map[string]any) (str
 			for k, val := range slots {
 				rendered = strings.ReplaceAll(rendered, "{{"+k+"}}", val)
 			}
-			err = nil
 		} else {
 			// Surface the available template names so a mistyped template is
 			// self-diagnosing instead of a bare "unknown template" error.
