@@ -1,5 +1,5 @@
 // Tool registration table — the single source of truth for the kern MCP
-// catalog (101 tools at HEAD). Kept in its own file so the registration table
+// catalog (102 tools at HEAD). Kept in its own file so the registration table
 // does not bury the server core (dispatch, transports, filtering) in
 // server.go; the G-11 "expensive tier" plan keeps per-domain extraction as a
 // follow-up. The catalog parity invariants (plugin <-> MCP, docs <-> MCP)
@@ -403,6 +403,7 @@ var tools = []Tool{
 			"agent_id":       strProp("Agent identity for governed mode (P1.2): enables authorized-context filtering — results are scoped to what this agent may read. Omit for raw (ungoverned) mode."),
 			"task":           strProp("Task ID for governed mode; pairs with agent_id to scope authorization to the task paths."),
 			"scope":          map[string]any{"type": "object", "description": "Optional task scope object {paths, denied_paths, services, envs, artifacts} for governed mode."},
+			"max_tokens":     strProp("Optional token budget cap. When provided, automatically fits the slice within this limit using deterministic budget compaction."),
 			"with_freshness": strProp("When 'true', append a ---freshness-proof--- footer with the index's content-addressed freshness proof"),
 		}, []string{"symbol"}),
 	},
@@ -1045,5 +1046,59 @@ var tools = []Tool{
 			"message":        strProp("Progress message text"),
 		}, nil),
 	},
+	{
+		Name:        "kern_ast_transform",
+		Phase:       "edit",
+		Description: "Executes deterministic AST-level transformations on code: scaffolding interface method stubs, adding struct fields, or inserting methods without fragile whitespace or regex diff errors.",
+		InputSchema: schema(map[string]any{
+			"action":           strProp("Action: 'implement_interface' (default), 'add_field', 'add_method'"),
+			"file":             strProp("Path to target source file"),
+			"code":             strProp("Raw code snippet if file is not provided"),
+			"target_symbol":    strProp("Target struct or type name (e.g. 'Server')"),
+			"interface_name":   strProp("Interface to implement (e.g. 'io.Reader', 'http.Handler')"),
+			"receiver_name":    strProp("Receiver variable name (e.g. 's')"),
+			"receiver_type":    strProp("Receiver type name (e.g. '*Server')"),
+			"field_name":       strProp("For add_field: field name"),
+			"field_type":       strProp("For add_field: field type"),
+			"field_tag":        strProp("For add_field: struct tag"),
+			"method_signature": strProp("For add_method: method signature"),
+			"method_body":      strProp("For add_method: method body"),
+			"apply":            strProp("If true, writes changes directly to file"),
+			"format":           strProp("Output format: 'text' (default) or 'json'"),
+			"root":             strProp("Project root directory"),
+		}, nil),
+	},
+	{
+		Name:        "kern_semantic_merge",
+		Phase:       "edit",
+		Description: "Performs AST-aware 3-way code merge between base, local, and remote versions. Resolves non-overlapping struct fields, methods, imports, and declarations cleanly, and flags precise semantic conflicts.",
+		InputSchema: schema(map[string]any{
+			"file":        strProp("Target file path"),
+			"base":        strProp("Base version code or file path"),
+			"local":       strProp("Local version code or file path"),
+			"remote":      strProp("Remote version code or file path"),
+			"base_file":   strProp("Optional file path for base version"),
+			"local_file":  strProp("Optional file path for local version"),
+			"remote_file": strProp("Optional file path for remote version"),
+			"apply":       strProp("If true and clean, writes merged result to target file (default false)"),
+			"format":      strProp("Output format: 'text' (default) or 'json'"),
+			"root":        strProp("Project root directory"),
+		}, nil),
+	},
+	{
+		Name:        "kern_synthesize_test",
+		Phase:       "verify",
+		Description: "Automatically synthesizes comprehensive table-driven unit tests, parameter fixtures, and boundary invariants for untested functions or methods based on AST signatures.",
+		InputSchema: schema(map[string]any{
+			"target":   strProp("Target function or method name (e.g. 'Compute', 'Worker.Process')"),
+			"file":     strProp("Target source file path"),
+			"code":     strProp("Raw source code snippet if file is not provided"),
+			"auto_gap": strProp("If true and target is empty, picks top untested hotspot from index"),
+			"apply":    strProp("If true, writes synthesized test to <file>_test.go directly"),
+			"format":   strProp("Output format: 'text' (default) or 'json'"),
+			"root":     strProp("Project root directory"),
+		}, nil),
+	},
 }
+
 

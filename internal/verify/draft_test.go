@@ -215,3 +215,54 @@ public class MyDraft {
 		t.Fatalf("expected clean draft, got %+v", findings)
 	}
 }
+
+func TestCheckDraftPythonSyntax(t *testing.T) {
+	ix, root := build(t, map[string]string{})
+
+	// Unclosed bracket
+	badBracket := "def foo():\n    x = [1, 2, 3\n    return x\n"
+	f1 := CheckDraft(ix, root, []byte(badBracket), "python")
+	if len(f1) == 0 || f1[0].Kind != "parse_error" {
+		t.Fatalf("expected parse_error for unclosed bracket, got %+v", f1)
+	}
+
+	// Missing colon
+	badColon := "def foo()\n    return 42\n"
+	f2 := CheckDraft(ix, root, []byte(badColon), "python")
+	if len(f2) == 0 || f2[0].Kind != "parse_error" {
+		t.Fatalf("expected parse_error for missing colon, got %+v", f2)
+	}
+}
+
+func TestCheckDraftJSSyntax(t *testing.T) {
+	ix, root := build(t, map[string]string{})
+
+	// Unclosed brace
+	badBrace := "function test() {\n  const a = 1;\n"
+	f1 := CheckDraft(ix, root, []byte(badBrace), "typescript")
+	if len(f1) == 0 || f1[0].Kind != "parse_error" {
+		t.Fatalf("expected parse_error for unclosed brace, got %+v", f1)
+	}
+
+	// Missing relative import
+	badImport := "import { foo } from './nonexistent/module';\n"
+	f2 := CheckDraft(ix, root, []byte(badImport), "typescript")
+	if len(f2) == 0 || f2[0].Kind != "unknown_import" {
+		t.Fatalf("expected unknown_import for missing relative module, got %+v", f2)
+	}
+}
+
+func TestCheckDraftJSONSyntax(t *testing.T) {
+	badJSON := `{"name": "kern", "invalid": }`
+	f := CheckDraft(nil, "", []byte(badJSON), "json")
+	if len(f) == 0 || f[0].Kind != "parse_error" {
+		t.Fatalf("expected parse_error for bad json, got %+v", f)
+	}
+
+	cleanJSON := `{"name": "kern", "valid": true}`
+	f2 := CheckDraft(nil, "", []byte(cleanJSON), "json")
+	if len(f2) != 0 {
+		t.Fatalf("expected 0 findings for clean json, got %+v", f2)
+	}
+}
+

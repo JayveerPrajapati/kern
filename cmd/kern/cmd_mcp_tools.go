@@ -386,3 +386,99 @@ func runStream(rest []string) {
 	}
 	runMCPTool("kern_stream", args)
 }
+
+func runAstTransform(rest []string) {
+	fs := flag.NewFlagSet("ast-transform", flag.ContinueOnError)
+	action := fs.String("action", "implement_interface", "action: implement_interface, add_field, add_method")
+	file := fs.String("file", "", "target file path")
+	target := fs.String("target", "", "target symbol/struct name")
+	iface := fs.String("interface", "", "interface to implement")
+	field := fs.String("field", "", "field name")
+	fieldType := fs.String("field-type", "", "field type")
+	tag := fs.String("tag", "", "struct field tag")
+	sig := fs.String("sig", "", "method signature")
+	body := fs.String("body", "", "method body")
+	apply := fs.Bool("apply", false, "apply edits to file")
+	root := fs.String("root", ".", "project root")
+	_ = fs.Parse(rest)
+
+	act := *action
+	if len(fs.Args()) > 0 {
+		act = fs.Args()[0]
+	}
+
+	args := map[string]any{
+		"action":           act,
+		"file":             *file,
+		"target_symbol":    *target,
+		"interface_name":   *iface,
+		"field_name":       *field,
+		"field_type":       *fieldType,
+		"field_tag":        *tag,
+		"method_signature": *sig,
+		"method_body":      *body,
+		"apply":            *apply,
+		"root":             *root,
+	}
+	runMCPTool("kern_ast_transform", args)
+}
+
+func runSemanticMerge(rest []string) {
+	fs := flag.NewFlagSet("semantic-merge", flag.ContinueOnError)
+	file := fs.String("file", "", "target file path")
+	base := fs.String("base", "", "base version code or file path")
+	local := fs.String("local", "", "local version code or file path")
+	remote := fs.String("remote", "", "remote version code or file path")
+	apply := fs.Bool("apply", false, "apply clean merge to file")
+	jsonOut := fs.Bool("json", false, "output JSON format")
+	root := fs.String("root", ".", "project root")
+	_ = fs.Parse(rest)
+
+	format := "text"
+	if *jsonOut {
+		format = "json"
+	}
+
+	args := map[string]any{
+		"file":   *file,
+		"base":   *base,
+		"local":  *local,
+		"remote": *remote,
+		"apply":  *apply,
+		"format": format,
+		"root":   *root,
+	}
+	runMCPTool("kern_semantic_merge", args)
+}
+
+func runSynthesizeTest(rest []string) {
+	fs := flag.NewFlagSet("synthesize-test", flag.ContinueOnError)
+	target := fs.String("target", "", "target function or method name")
+	file := fs.String("file", "", "target file path")
+	autoGap := fs.Bool("auto-gap", false, "auto-select top untested hotspot")
+	apply := fs.Bool("apply", false, "write synthesized test to test file")
+	jsonOut := fs.Bool("json", false, "output JSON format")
+	root := fs.String("root", ".", "project root")
+	_ = fs.Parse(rest)
+
+	tgt := *target
+	if tgt == "" && len(fs.Args()) > 0 {
+		tgt = fs.Args()[0]
+	}
+
+	format := "text"
+	if *jsonOut {
+		format = "json"
+	}
+
+	args := map[string]any{
+		"target":   tgt,
+		"file":     *file,
+		"auto_gap": *autoGap,
+		"apply":    *apply,
+		"format":   format,
+		"root":     *root,
+	}
+	runMCPTool("kern_synthesize_test", args)
+}
+

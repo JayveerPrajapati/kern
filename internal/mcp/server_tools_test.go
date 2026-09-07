@@ -919,7 +919,7 @@ func TestPackSandboxOverrideThroughMCP(t *testing.T) {
 }
 
 func TestKernToolsAllowlistFiltersListAndCalls(t *testing.T) {
-	// Full catalog so the allowlist intersects the complete 86-tool set
+	// Full catalog so the allowlist intersects the complete 101-tool set
 	// (kern_usage_guide is not part of the default minimal surface).
 	t.Setenv("KERN_MCP_FULL", "1")
 	t.Setenv("KERN_TOOLS", "kern_search, kern_usage_guide")

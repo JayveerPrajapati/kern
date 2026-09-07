@@ -134,6 +134,9 @@ func init() {
 	"kern_agent_coordination": simple((*Server).handleAgentCoordination),
 	"kern_agent_role_rbac":   simple((*Server).handleAgentRoleRBAC),
 	"kern_stream":            simple((*Server).handleStream),
+	"kern_ast_transform":     simple((*Server).handleAstTransform),
+	"kern_semantic_merge":    simple((*Server).handleSemanticMerge),
+	"kern_synthesize_test":   simple((*Server).handleSynthesizeTest),
 	}
 }
 

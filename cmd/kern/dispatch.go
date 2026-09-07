@@ -63,6 +63,9 @@ var commandHelp = map[string]string{
 	"index":             "(re)build the symbol index",
 	"watch":             "watch & reindex",
 	"ast":               "AST symbol search",
+	"ast-transform":     "deterministic AST-level transformations and scaffolding",
+	"semantic-merge":    "AST-aware 3-way semantic merge and conflict detection",
+	"synthesize-test":   "automatically synthesize table-driven unit tests from AST signatures",
 	"search":            "ranked symbol search",
 	"repos":             "multi-repo search",
 	"fts":               "FTS5 search",
@@ -219,6 +222,9 @@ var mcpCLIAlias = map[string]string{
 	"kern_policy_dsl":        "policy-dsl",
 	"kern_agent_coordination": "agent-coordination",
 	"kern_agent_role_rbac":   "agent-role-rbac",
+	"kern_ast_transform":     "ast-transform",
+	"kern_semantic_merge":    "semantic-merge",
+	"kern_synthesize_test":   "synthesize-test",
 }
 
 // printCommandHelp prints the one-line help for a subcommand and exits 0.
@@ -780,6 +786,18 @@ func dispatchCommand(cmd string, rest []string) int {
 
 	case "stream":
 		runStream(rest)
+		return 0
+
+	case "ast_transform", "ast-transform":
+		runAstTransform(rest)
+		return 0
+
+	case "semantic_merge", "semantic-merge":
+		runSemanticMerge(rest)
+		return 0
+
+	case "synthesize_test", "synthesize-test":
+		runSynthesizeTest(rest)
 		return 0
 
 	case "cache":

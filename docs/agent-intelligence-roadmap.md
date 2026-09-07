@@ -25,6 +25,11 @@ Branch: `feat/agent-intelligence-pack`
 | **F-13** | `kern_memory_ranked` | Context & Memory | 🟢 Low / Long-term | ✅ Completed | Access-frequency and decay-weighted memory retrieval |
 | **F-14** | `kern_explain` | Architecture & NL | 🟢 Low / Long-term | ✅ Completed | Graph-backed end-to-end narrative explainer in a single call |
 | **F-15** | `kern_agent_role_rbac` | Security | 🟢 Low / Long-term | ✅ Completed | Identity-based role permissions (e.g. junior agents denied exec/sandbox) |
+| **F-16** | `kern_diagnostics` | Safety / Verification | 🔴 High | ✅ Completed | Multi-language draft pre-flight: Go, Java, Python, TS/JS, JSON syntax & import validation |
+| **F-17** | `kern_context_budget_slice` | Token Optimization | 🔴 High | ✅ Completed | Dynamic `max_tokens` context slicing: fits symbol & call-graph slices strictly into token budget |
+| **F-18** | `kern_ast_transform` | Code Intelligence | 🟡 Medium | ✅ Completed | AST-level semantic mutation & patch engine (interface stubs, safe symbol propagation) |
+| **F-19** | `kern_semantic_merge` | Multi-Agent / Collaboration | 🟡 Medium | 📋 Planned | AST-aware 3-way merge arbiter resolving non-conflicting parallel agent edits |
+| **F-20** | `kern_synthesize_test` | Test Intelligence | 🟢 Low / Long-term | 📋 Planned | Deterministic test harness & invariant synthesizer using call-graph types & existing fixtures |
 
 ---
 
@@ -164,6 +169,56 @@ Branch: `feat/agent-intelligence-pack`
 
 ---
 
+## 📌 Phase 4: Autonomous Coding Agent Substrate (Next Frontier)
+
+### 16. `kern_diagnostics` (Multi-Language Pre-flight Draft Diagnostics) - ✅ Done
+- **Goal:** Provide sub-second syntax, bracket balance, block header, and relative import validation for draft code before writing to disk, avoiding slow, failing build cycles.
+- **Specification:**
+  - Integrated into `verify.CheckDraft` & `kern_check_draft` (Phase: `edit` / `verify`)
+  - Multi-language coverage: Go (AST parse & undeclared symbols), Java (unresolved method calls), Python (bracket balance, header colon enforcement, relative import validation), TypeScript/JavaScript (brace/bracket balance, module resolution), JSON (syntax error line offset).
+- **Inputs:** `code` (string), `lang` (optional string), `root` (optional string)
+- **Outputs:** List of `DraftFinding` objects with line number, finding kind (`parse_error`, `unknown_import`, `unknown_symbol`), and actionable error messages.
+
+### 17. `kern_context_budget_slice` (Dynamic Context-Budget Slicing) - ✅ Done
+- **Goal:** Allow agents to pass strict token limits to symbol and call-graph retrieval, guaranteeing context slices fit within narrow conversation limits.
+- **Specification:**
+  - Extended MCP tool: `kern_context` with `max_tokens` argument (Phase: `explore`)
+  - Uses `budget.FitCode` to deterministically compact and cap source slices and caller lists to the requested token ceiling.
+- **Inputs:** `symbol`, `max_tokens` (optional int), `lines`, `root`
+- **Outputs:** Minimal symbol definition, callers, and callees fitted strictly within `max_tokens`.
+
+### 18. `kern_ast_transform` (AST-Level Semantic Mutation & Patch Engine) - ✅ Done
+- **Goal:** Replace fragile text search-and-replace with AST-guided transformations (e.g. interface implementation scaffolding, parameter additions propagated across call-sites).
+- **Specification:**
+  - MCP tool: `kern_ast_transform` (Phase: `edit`)
+  - Safe AST mutations without whitespace diff failures.
+  - CLI command: `kern ast-transform`
+  - Engine: `internal/transform`
+- **Inputs:** `file`, `action` ("implement_interface", "add_field", "add_method"), `target_symbol`, `interface_name`, `field_name`, `field_type`, `apply`
+- **Outputs:** Clean AST-transformed code diff or file content.
+
+### 19. `kern_semantic_merge` (Semantic 3-Way Merge Arbiter) - ✅ Done
+- **Goal:** Enable multi-agent teams to edit overlapping files on concurrent branches by performing AST-aware merges rather than failing on line-based git conflicts.
+- **Specification:**
+  - MCP tool: `kern_semantic_merge` (Phase: `edit`)
+  - CLI command: `kern semantic-merge`
+  - Engine: `internal/diff` (`SemanticMerge3Way`) & `internal/mcp/handlers_merge.go`
+  - Merges non-overlapping AST declarations (struct fields, methods, functions, and imports) cleanly without conflict markers, and produces structured conflict diagnostics when overlapping AST symbols are modified incompatibly.
+- **Inputs:** `file`, `base`, `local`, `remote`, `base_file`, `local_file`, `remote_file`, `apply`, `format`, `root`
+- **Outputs:** `clean` boolean, `merged_code`, list of `conflicts`, and unified diff.
+
+### 20. `kern_synthesize_test` (Deterministic Test Harness & Invariant Synthesizer) - ✅ Done
+- **Goal:** Automatically synthesize comprehensive unit tests, table-driven test cases, parameter fixtures, and boundary invariants for untested functions based on AST signatures and untested hotspots.
+- **Specification:**
+  - MCP tool: `kern_synthesize_test` (Phase: `verify`)
+  - CLI command: `kern synthesize-test`
+  - Engine: `internal/synthtest` (`Synthesize`) & `internal/mcp/handlers_synthtest.go`
+  - Inspects AST signatures (parameters, return types, receiver pointer/value semantics, error returns) or automatically selects uncovered hotspots (`auto_gap=true` via `intel.TestGaps`), scaffolds idiomatic table-driven test suites, asserts error and deep value equivalence, and cleanly creates or appends to `*_test.go` files without overwriting existing tests.
+- **Inputs:** `target`, `file`, `code`, `auto_gap`, `apply`, `format`, `root`
+- **Outputs:** `target_symbol`, `target_file`, `test_file`, `test_function`, `test_code`, `diff`, `applied`, and synthesized test `cases`.
+
+---
+
 ## 📈 Tracking & Verification Log
 
 - [x] Branch created: `feat/agent-intelligence-pack`
@@ -183,3 +238,9 @@ Branch: `feat/agent-intelligence-pack`
 - [x] Task 13: Implement `kern_agent_coordination` (multi-agent handoff & resource locking, tests)
 - [x] Task 14: Implement `kern_agent_role_rbac` (role-based access control matrix, tests)
 - [x] Task 15: Implement `kern_stream` (chunking & progress notification transport, tests)
+- [x] Task 16: Multi-language draft pre-flight diagnostics (`internal/verify/draft.go`, Python, TS/JS, JSON)
+- [x] Task 17: Dynamic `max_tokens` budget capping on `kern_context` (`internal/mcp/handlers_graph.go`)
+- [x] Task 18: Implement `kern_ast_transform` for deterministic AST patch generation
+- [x] Task 19: Implement `kern_semantic_merge` for AST-aware multi-agent branch merges
+- [x] Task 20: Implement `kern_synthesize_test` for automated unit test scaffolding
+
