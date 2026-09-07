@@ -47,6 +47,9 @@ func CrossRepoImpact(subject string, limit int) (*CrossRepoImpactReport, error) 
 	total := 0
 
 	for _, repo := range reg.Repos {
+		if total >= limit {
+			break
+		}
 		ix, err := ReadIndex(repo.Root)
 		if err != nil || ix == nil {
 			continue
@@ -55,6 +58,9 @@ func CrossRepoImpact(subject string, limit int) (*CrossRepoImpactReport, error) 
 		// Check if subject is called directly
 		callers := ix.CallersOf(subject)
 		for _, c := range callers {
+			if total >= limit {
+				break
+			}
 			sym, ok := ix.ResolveName(c)
 			file, line := "", 0
 			if ok {
@@ -70,8 +76,15 @@ func CrossRepoImpact(subject string, limit int) (*CrossRepoImpactReport, error) 
 			total++
 		}
 
+		if total >= limit {
+			break
+		}
+
 		// Also check calls map for qualified forms (e.g. pkg.Subject)
 		for callerName, calleeList := range ix.Calls {
+			if total >= limit {
+				break
+			}
 			for _, callee := range calleeList {
 				if callee == subject || strings.HasSuffix(callee, "."+subject) {
 					// Check if already in breakdown
@@ -96,6 +109,9 @@ func CrossRepoImpact(subject string, limit int) (*CrossRepoImpactReport, error) 
 							Line:   line,
 						})
 						total++
+						if total >= limit {
+							break
+						}
 					}
 				}
 			}

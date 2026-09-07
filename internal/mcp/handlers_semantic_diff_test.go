@@ -32,9 +32,14 @@ func TestHandleSemanticDiff(t *testing.T) {
 		"range": "HEAD~1..HEAD",
 	})
 	if err != nil {
-		t.Fatalf("handleSemanticDiff range error: %v", err)
-	}
-	if !strings.Contains(resRange, "SEMANTIC DIFF:") {
-		t.Errorf("missing header in range response: %s", resRange)
+		if strings.Contains(err.Error(), "exit status 128") {
+			t.Skipf("skipping range test: shallow clone or no HEAD~1 available: %v", err)
+		} else {
+			t.Fatalf("handleSemanticDiff range error: %v", err)
+		}
+	} else {
+		if !strings.Contains(resRange, "SEMANTIC DIFF:") {
+			t.Errorf("missing header in range response: %s", resRange)
+		}
 	}
 }
