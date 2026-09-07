@@ -84,4 +84,3 @@ func TestHandleContextSuggestions(t *testing.T) {
 		t.Errorf("expected Did you mean suggestions in context result, got %s", res)
 	}
 }
-

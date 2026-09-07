@@ -265,4 +265,3 @@ func TestCheckDraftJSONSyntax(t *testing.T) {
 		t.Fatalf("expected 0 findings for clean json, got %+v", f2)
 	}
 }
-

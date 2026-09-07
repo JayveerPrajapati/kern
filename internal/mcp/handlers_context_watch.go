@@ -22,13 +22,13 @@ type ContextWatchAnalysis struct {
 
 // HeavySegment represents a segment of text or tool output that is consuming excessive context.
 type HeavySegment struct {
-	Index          int    `json:"index"`
-	Kind           string `json:"kind"` // "code" | "log" | "prose"
-	Tokens         int    `json:"tokens"`
+	Index          int     `json:"index"`
+	Kind           string  `json:"kind"` // "code" | "log" | "prose"
+	Tokens         int     `json:"tokens"`
 	PctOfTotal     float64 `json:"pct_of_total"`
-	SuggestedTool  string `json:"suggested_tool"`
-	EstimatedGain  int    `json:"estimated_gain_tokens"`
-	SnippetPreview string `json:"snippet_preview"`
+	SuggestedTool  string  `json:"suggested_tool"`
+	EstimatedGain  int     `json:"estimated_gain_tokens"`
+	SnippetPreview string  `json:"snippet_preview"`
 }
 
 // handleContextWatch analyzes an agent's active context or conversational history,

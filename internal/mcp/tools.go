@@ -947,9 +947,9 @@ var tools = []Tool{
 		Phase:       "cross",
 		Description: "Monitors and audits rolling agent context, detects bloated log/code dumps, and recommends concrete deterministic compression actions to prevent context window overflow.",
 		InputSchema: schema(map[string]any{
-			"text":    strProp("Active conversation context or candidate tool output to audit"),
-			"budget":  strProp("Session token budget limit (default 32000)"),
-			"format":  strProp("Output format: 'text' (default) or 'json'"),
+			"text":   strProp("Active conversation context or candidate tool output to audit"),
+			"budget": strProp("Session token budget limit (default 32000)"),
+			"format": strProp("Output format: 'text' (default) or 'json'"),
 		}, []string{"text"}),
 	},
 	{
@@ -1100,5 +1100,3 @@ var tools = []Tool{
 		}, nil),
 	},
 }
-
-

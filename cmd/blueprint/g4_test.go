@@ -89,6 +89,7 @@ func g4GitRepo(t *testing.T, dir string) {
 	g4RunGit(t, dir, "init", "-q")
 	g4RunGit(t, dir, "config", "user.email", "t@t")
 	g4RunGit(t, dir, "config", "user.name", "t")
+	g4RunGit(t, dir, "config", "core.excludesfile", "/dev/null")
 }
 
 func g4RunGit(t *testing.T, dir string, args ...string) {
