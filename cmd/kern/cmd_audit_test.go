@@ -249,3 +249,43 @@ func corruptAuditHash(t *testing.T, store storage.Store, key string) error {
 	}
 	return store.Put(context.Background(), key, data)
 }
+
+// TestRunAuditWarnsOnTamperedChain locks validation W-3: the audit viewer
+// verifies the tamper-evident hash chain and warns on stderr when persisted
+// records were modified, instead of presenting forged entries as genuine.
+func TestRunAuditWarnsOnTamperedChain(t *testing.T) {
+	root := t.TempDir()
+	ts := time.Now().UTC()
+	for i, id := range []string{"t-view-1", "t-view-2"} {
+		appendAuditEntryJSON(t, root, map[string]any{
+			"ID": id, "Timestamp": ts.Add(time.Duration(i) * time.Second).Format(time.RFC3339),
+			"AgentID": "tester", "Action": "tool_call", "Resource": "kern_search", "Result": "allowed",
+		})
+	}
+	var stderr string
+	captureStdout(t, func() {
+		stderr = captureStderr(t, func() { runAudit([]string{"--root", root}) })
+	})
+	if strings.Contains(stderr, "tamper chain verification FAILED") {
+		t.Fatalf("intact chain must not warn, got:\n%s", stderr)
+	}
+	// Tamper with the first historical record (simulate forged history).
+	chainPath := filepath.Join(root, ".kern", "audit", "chain.jsonl")
+	data, err := os.ReadFile(chainPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tampered := strings.Replace(string(data), `"allowed"`, `"forged"`, 1)
+	if tampered == string(data) {
+		t.Fatal("tamper substitution found nothing to rewrite")
+	}
+	if err := os.WriteFile(chainPath, []byte(tampered), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	captureStdout(t, func() {
+		stderr = captureStderr(t, func() { runAudit([]string{"--root", root}) })
+	})
+	if !strings.Contains(stderr, "tamper chain verification FAILED") {
+		t.Fatalf("tampered chain must warn on stderr, got:\n%s", stderr)
+	}
+}

@@ -10,6 +10,7 @@ import (
 
 func TestHandleContextWatch(t *testing.T) {
 	s := NewServer(strings.NewReader(""), io.Discard)
+	defer s.Close() // drain sessions (watcher + background index saves) before t.TempDir cleanup
 
 	// Simulated heavy context containing logs and code
 	heavyLog := `2026-09-06T12:00:00Z ERROR [database] connection timed out after 30s
@@ -72,10 +73,12 @@ ConnectionTimeout: pool exhausted
 
 func TestHandleContextSuggestions(t *testing.T) {
 	s := NewServer(strings.NewReader(""), io.Discard)
-	s.roots = []string{kernRepoRoot}
+	defer s.Close() // drain sessions (watcher + background index saves) before t.TempDir cleanup
+	root := fixtureRoot(t)
+	s.roots = []string{root}
 	res, err := s.handleContext(context.Background(), map[string]any{
-		"root":   kernRepoRoot,
-		"symbol": "handlePrompt",
+		"root":   root,
+		"symbol": "NewServ", // prefix of NewServer — suggestions expected
 	})
 	if err != nil {
 		t.Fatalf("handleContext error: %v", err)

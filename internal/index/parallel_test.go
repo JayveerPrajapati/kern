@@ -120,10 +120,13 @@ func TestBuildParallelSkipSemantics(t *testing.T) {
 	if err := os.Symlink(filepath.Join(dir, "does-not-exist.go"), filepath.Join(dir, "unreadable.go")); err != nil {
 		t.Fatal(err)
 	}
-	// An oversized file (larger than maxFileBytes): skipped before reading by
-	// both builds.
+	// An oversized file (larger than the adaptive maxFileBytes limit resolved
+	// from this machine's resources): skipped before reading by both builds.
+	// The limit is machine-derived (resources.go), so resolve it rather than
+	// hardcoding the 10 MiB floor.
 	huge := filepath.Join(dir, "huge.go")
-	if err := os.WriteFile(huge, []byte(strings.Repeat("x", maxFileBytes+1)), 0o644); err != nil {
+	tuns := resolveTunables(&buildConfig{}, resolveResources())
+	if err := os.WriteFile(huge, []byte(strings.Repeat("x", int(tuns.maxFileBytes)+1)), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	serial, err := buildSerial(dir, &buildConfig{})

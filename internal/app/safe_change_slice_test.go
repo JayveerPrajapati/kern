@@ -143,7 +143,7 @@ func runSafeChangeSlice(t *testing.T, root, intent string, iter int) map[string]
 		t.Fatalf("%s transition WAITING_FOR_APPROVAL: %v", label, err)
 	}
 	aw := governance.NewApprovalWorkflow()
-	approval := aw.Request(task.ID, "test", "execute change")
+	approval, _ := aw.Request(task.ID, "test", "execute change")
 	if approval.ID == "" {
 		t.Fatal(label + ": approval ID empty")
 	}

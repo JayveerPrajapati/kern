@@ -233,3 +233,63 @@ func TestResetClearsAll(t *testing.T) {
 		t.Errorf("product success not cleared: %+v", s)
 	}
 }
+
+// TestRecordCappedAtMaxSamples: every duration slice in the Recorder is
+// bounded at maxSamples (ring-buffer semantics), so long-lived server and MCP
+// processes cannot grow memory without bound. The newest samples are always
+// retained, the oldest are dropped, and the Snapshot output shape is
+// unchanged — only growth is capped. B11.
+func TestRecordCappedAtMaxSamples(t *testing.T) {
+	r := New()
+	n := maxSamples + 50
+	for i := 0; i < n; i++ {
+		d := time.Duration(i+1) * time.Millisecond
+		r.RecordIndexBuild(d)
+		r.RecordGraphQuery(d)
+		r.RecordContextRetrieval(d)
+		r.RecordMemoryRecall(d)
+		r.RecordPolicyEval(d)
+		r.RecordToolCall(d)
+		r.RecordVerification(d)
+		r.RecordLLMLatency(d)
+	}
+
+	r.mu.Lock()
+	slices := map[string][]time.Duration{
+		"indexBuilds":      r.indexBuilds,
+		"graphQueries":     r.graphQueries,
+		"contextRetrieval": r.contextRetrieval,
+		"memoryRecall":     r.memoryRecall,
+		"policyEval":       r.policyEval,
+		"toolCalls":        r.toolCalls,
+		"verification":     r.verification,
+		"llmLatency":       r.llmLatency,
+	}
+	r.mu.Unlock()
+
+	for name, got := range slices {
+		if len(got) != maxSamples {
+			t.Errorf("%s len = %d, want %d (capped at maxSamples)", name, len(got), maxSamples)
+			continue
+		}
+		wantNewest := time.Duration(n) * time.Millisecond
+		if got[len(got)-1] != wantNewest {
+			t.Errorf("%s newest = %v, want %v (newest must be retained)", name, got[len(got)-1], wantNewest)
+		}
+		wantOldest := time.Duration(n-maxSamples+1) * time.Millisecond
+		if got[0] != wantOldest {
+			t.Errorf("%s oldest retained = %v, want %v (oldest must be dropped)", name, got[0], wantOldest)
+		}
+	}
+
+	// Snapshot shape is unchanged and reflects the capped window.
+	s := r.Snapshot()
+	if s.IndexBuildCount != maxSamples {
+		t.Errorf("IndexBuildCount = %d, want %d", s.IndexBuildCount, maxSamples)
+	}
+	// Average of the retained window: durations (n-maxSamples+1)..n ms.
+	wantAvg := float64(n-maxSamples+1+n) / 2
+	if delta := abs(s.IndexBuildAvgMs - wantAvg); delta > 0.01 {
+		t.Errorf("IndexBuildAvgMs = %.2f, want ~%.2f (window of newest %d)", s.IndexBuildAvgMs, wantAvg, maxSamples)
+	}
+}

@@ -2,6 +2,7 @@ package verification
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -607,5 +608,90 @@ func BenchmarkSum(b *testing.B) {
 	}
 	if res.Verdict == VerdictFail {
 		t.Error("advisory performance must not fail the verdict")
+	}
+}
+
+// TestVerifyTestsConfigOverride verifies the C2 polyglot override: the
+// verify.test key in .kern/config.json replaces the detected test command,
+// so non-Go projects (or unusual layouts) are verifiable without code
+// changes.
+func TestVerifyTestsConfigOverride(t *testing.T) {
+	root := verifyFixture(t)
+	dir := filepath.Join(root, ".kern")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(`{"verify": {"test": "go test -v ./..."}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	e := NewEngine(root)
+	tr := e.VerifyTests()
+	if tr == nil {
+		t.Fatal("nil test result")
+	}
+	if !tr.OK {
+		t.Errorf("override command should pass: %s", trunc(tr.Output))
+	}
+	if tr.Package != "go test -v ./..." {
+		t.Errorf("Package = %q; want the override command string", tr.Package)
+	}
+	if tr.Passed == 0 {
+		t.Error("expected the go test -v output to be parsed for counts")
+	}
+}
+
+// TestVerifyTestsNpmNoScriptSkips guards the npm false-fail: a package.json
+// without a "test" script must report a clean skip, not a failing suite.
+func TestVerifyTestsNpmNoScriptSkips(t *testing.T) {
+	if _, err := exec.LookPath("npm"); err != nil {
+		t.Skip("npm not on PATH")
+	}
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "package.json"), []byte(`{"name": "x", "scripts": {"build": "node index.js"}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	e := NewEngine(root)
+	tr := e.VerifyTests()
+	if tr == nil {
+		t.Fatal("nil test result")
+	}
+	if !tr.OK {
+		t.Fatalf("no test script must be a clean skip, not a FAIL: %s", trunc(tr.Output))
+	}
+	if !strings.Contains(tr.Output, "no test script") {
+		t.Errorf("output should explain the skip: %s", trunc(tr.Output))
+	}
+}
+
+// TestSplitVerifyCommand pins the C2 command-resolution contract: a flat
+// override string splits on whitespace into executable + args, and an empty
+// override yields nothing (the caller falls back to its default command).
+func TestSplitVerifyCommand(t *testing.T) {
+	cases := []struct {
+		in       string
+		wantBin  string
+		wantArgs []string
+	}{
+		{in: "", wantBin: "", wantArgs: nil},
+		{in: "   ", wantBin: "", wantArgs: nil},
+		{in: "go", wantBin: "go", wantArgs: nil},
+		{in: "go test ./...", wantBin: "go", wantArgs: []string{"test", "./..."}},
+		{in: "npm test --silent", wantBin: "npm", wantArgs: []string{"test", "--silent"}},
+		{in: "python3 -m pytest -x", wantBin: "python3", wantArgs: []string{"-m", "pytest", "-x"}},
+	}
+	for _, tc := range cases {
+		bin, args := splitVerifyCommand(tc.in)
+		if bin != tc.wantBin {
+			t.Errorf("splitVerifyCommand(%q) bin = %q, want %q", tc.in, bin, tc.wantBin)
+		}
+		if len(args) != len(tc.wantArgs) {
+			t.Errorf("splitVerifyCommand(%q) args = %v, want %v", tc.in, args, tc.wantArgs)
+			continue
+		}
+		for i := range args {
+			if args[i] != tc.wantArgs[i] {
+				t.Errorf("splitVerifyCommand(%q) args[%d] = %q, want %q", tc.in, i, args[i], tc.wantArgs[i])
+			}
+		}
 	}
 }

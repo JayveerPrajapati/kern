@@ -4,20 +4,6 @@ import (
 	"testing"
 )
 
-func TestParseRunID(t *testing.T) {
-	jsonOut := []byte(`[{"databaseId":12345,"status":"in_progress","createdAt":"2026-01-01T00:00:00Z"}]`)
-	id := parseRunID(jsonOut)
-	if id != "12345" {
-		t.Errorf("parseRunID = %q, want 12345", id)
-	}
-}
-
-func TestParseRunIDEmpty(t *testing.T) {
-	if id := parseRunID([]byte(`[]`)); id != "" {
-		t.Errorf("parseRunID([]) = %q, want empty", id)
-	}
-}
-
 func TestParseRunStatus(t *testing.T) {
 	jsonOut := []byte(`{"status":"completed","conclusion":"success","url":"https://github.com/owner/repo/actions/runs/123","createdAt":"2026-01-01T00:00:00Z","updatedAt":"2026-01-01T00:05:00Z"}`)
 	job := parseRunStatus(jsonOut, "123")

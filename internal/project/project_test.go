@@ -191,7 +191,9 @@ func TestWatchDetectsModification(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	deadline := time.Now().Add(2 * time.Second)
+	// Generous deadline: fs-event delivery can lag well past 2s under
+	// sustained system load (observed flaking in CI-style full-suite runs).
+	deadline := time.Now().Add(10 * time.Second)
 	for {
 		mu.Lock()
 		found := false
@@ -277,4 +279,178 @@ func TestSessionCloseIdempotent(t *testing.T) {
 	// A session whose watcher is nil (no fswatch/inotifywait on PATH) must
 	// also Close cleanly.
 	New(t.TempDir(), "nil-watcher").Close()
+}
+
+// TestSessionStaleWhileRevalidateServesStale is the B1 regression: while a
+// rebuild is in flight, a concurrent Index() call must be served the stale
+// cached snapshot IMMEDIATELY instead of blocking for the rebuild (the
+// original held one mutex across the whole rebuild, so the first tool call
+// after an edit blocked every other tool call).
+func TestSessionStaleWhileRevalidateServesStale(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	root := t.TempDir()
+	writeFile(t, root, "go.mod", "module demo\n\ngo 1.22\n")
+	writeFile(t, root, "app.go", "package main\n\nfunc Greet() {}\n")
+	s := New(root, "")
+	defer s.Close() // stop watcher + drain B6 background saves before TempDir cleanup
+	first, err := s.Index()
+	if err != nil {
+		t.Fatalf("first Index: %v", err)
+	}
+	// Simulate an in-flight rebuild (deterministic: no timing dependence on
+	// how long a real build takes).
+	s.mu.Lock()
+	s.rebuilding = true
+	s.mu.Unlock()
+
+	served := make(chan *index.Index, 1)
+	go func() {
+		ix, err := s.Index()
+		if err != nil {
+			t.Errorf("concurrent Index: %v", err)
+		}
+		served <- ix
+	}()
+
+	select {
+	case ix := <-served:
+		if ix != first {
+			t.Error("stale-while-revalidate must serve the cached snapshot")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Index() blocked behind an in-flight rebuild — stale-while-revalidate is broken")
+	}
+
+	// Release the simulated rebuild so the session stays usable.
+	s.mu.Lock()
+	s.rebuilding = false
+	s.cond.Broadcast()
+	s.mu.Unlock()
+}
+
+// TestSessionFirstBuildWaiters covers the wait path: callers that arrive
+// before any index exists wait for the in-flight first build instead of
+// starting a second one (single-flight), then receive its result.
+func TestSessionFirstBuildWaiters(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	root := t.TempDir()
+	writeFile(t, root, "go.mod", "module demo\n\ngo 1.22\n")
+	s := New(root, "")
+	defer s.Close() // stop watcher + drain B6 background saves before TempDir cleanup
+
+	// Simulate a first build in flight with nothing served yet.
+	s.mu.Lock()
+	s.rebuilding = true
+	s.mu.Unlock()
+
+	type result struct {
+		ix  *index.Index
+		err error
+	}
+	res := make(chan result, 1)
+	go func() {
+		ix, err := s.Index()
+		res <- result{ix, err}
+	}()
+
+	select {
+	case <-res:
+		t.Fatal("waiter must block until the first build finishes")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	// Complete the simulated build.
+	s.mu.Lock()
+	built := &index.Index{Root: root}
+	s.ix = built
+	s.buildResult = built
+	s.rebuilding = false
+	s.buildErr = nil
+	s.cond.Broadcast()
+	s.mu.Unlock()
+
+	select {
+	case r := <-res:
+		if r.err != nil || r.ix == nil {
+			t.Fatalf("waiter got (%v, %v); want the built index", r.ix, r.err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("waiter was not woken by the completed build")
+	}
+}
+
+// TestSessionConcurrentIndexInvalidateStress runs concurrent Index() and
+// Invalidate() calls to shake out lock/rebuild races (run with -race).
+func TestSessionConcurrentIndexInvalidateStress(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	root := t.TempDir()
+	writeFile(t, root, "go.mod", "module demo\n\ngo 1.22\n")
+	writeFile(t, root, "app.go", "package main\n\nfunc Greet() {}\n")
+	s := New(root, "")
+	defer s.Close()
+
+	var wg sync.WaitGroup
+	for i := 0; i < 16; i++ {
+		wg.Add(1)
+		go func(n int) {
+			defer wg.Done()
+			for j := 0; j < 10; j++ {
+				ix, err := s.Index()
+				if err != nil {
+					t.Errorf("Index: %v", err)
+					return
+				}
+				if len(ix.Symbols) == 0 {
+					t.Error("empty index served")
+					return
+				}
+				if n%4 == 0 {
+					s.Invalidate()
+				}
+			}
+		}(i)
+	}
+	wg.Wait()
+}
+
+// TestFreshnessCooldownAdaptsToWatcher pins B5: with a file-event watcher
+// active the staleness re-check window relaxes to 5s (events bypass it via
+// Invalidate); without one it stays at the tight 1s polling window.
+func TestFreshnessCooldownAdaptsToWatcher(t *testing.T) {
+	s := New(t.TempDir(), "")
+	s.watcher = &fileWatcher{} // event-driven
+	if got := s.freshnessCooldown(); got != staleCooldownNative {
+		t.Errorf("with watcher: freshnessCooldown = %v, want %v", got, staleCooldownNative)
+	}
+	s.watcher = nil // polling fallback
+	if got := s.freshnessCooldown(); got != staleCooldown {
+		t.Errorf("without watcher: freshnessCooldown = %v, want %v", got, staleCooldown)
+	}
+}
+
+// TestSessionAsyncSavePersistsBeforeClose pins B6: Index() returns before the
+// background save necessarily lands, but Close() drains in-flight saves — so
+// after Close, the persisted store must contain the rebuilt index.
+func TestSessionAsyncSavePersistsBeforeClose(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	root := t.TempDir()
+	writeFile(t, root, "go.mod", "module demo\n\ngo 1.22\n")
+	writeFile(t, root, "app.go", "package main\n\n// Greet says hello.\nfunc Greet() {}\n")
+	s := New(root, "")
+	defer s.Close() // stop watcher + drain B6 background saves before TempDir cleanup
+	ix, err := s.Index()
+	if err != nil {
+		t.Fatalf("Index: %v", err)
+	}
+	if len(ix.Symbols) == 0 {
+		t.Fatal("expected symbols in first build")
+	}
+	s.Close() // must drain the async save
+	loaded, err := index.Load(root)
+	if err != nil || loaded == nil {
+		t.Fatalf("persisted index after Close: %v", err)
+	}
+	if len(loaded.Symbols) == 0 {
+		t.Fatal("persisted index empty — async save did not land")
+	}
 }

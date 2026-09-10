@@ -158,3 +158,72 @@ func TestEvidenceVerify_ParseError(t *testing.T) {
 		t.Fatalf("verify exit code = %d, want 1 for a parse error", code)
 	}
 }
+
+// TestEvidenceVerify_TrustAnchor pins the security-audit closure at the CLI:
+// a signed bundle verified WITHOUT --expect-fingerprint must print an explicit
+// SELF-ATTESTED warning (verified against the bundle-embedded key only); with
+// a matching --expect-fingerprint it must print the ANCHORED confirmation; a
+// mismatching fingerprint must fail with exit 2, exactly as before.
+func TestEvidenceVerify_TrustAnchor(t *testing.T) {
+	dir := evidenceFixture(t)
+	outPath := filepath.Join(t.TempDir(), "evidence-signed.json")
+	if code := runEvidence([]string{"export", "--root", dir, "--agent-id", "default", "--task", "T-1", "--sign", "--out", outPath}); code != 0 {
+		t.Fatalf("signed export exit code = %d, want 0", code)
+	}
+	data, err := os.ReadFile(outPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", outPath, err)
+	}
+	var b struct {
+		Signature struct {
+			KeyFingerprint string `json:"key_fingerprint"`
+		} `json:"signature"`
+	}
+	if err := json.Unmarshal(data, &b); err != nil {
+		t.Fatalf("unmarshal signed bundle: %v", err)
+	}
+	if b.Signature.KeyFingerprint == "" {
+		t.Fatal("signed bundle has no key_fingerprint")
+	}
+	fp := b.Signature.KeyFingerprint
+
+	// No expected fingerprint: the signature is valid but explicitly
+	// SELF-ATTESTED.
+	var out string
+	code := -1
+	out = captureStdout(t, func() {
+		code = runEvidence([]string{"verify", "--file", outPath})
+	})
+	if code != 0 {
+		t.Fatalf("self-attested verify exit code = %d, want 0 (stderr above)", code)
+	}
+	if !strings.Contains(out, "SELF-ATTESTED") {
+		t.Errorf("self-attested verify output missing SELF-ATTESTED warning: %s", out)
+	}
+	if strings.Contains(out, "ANCHORED") {
+		t.Errorf("self-attested verify output wrongly claims ANCHORED: %s", out)
+	}
+
+	// Matching expected fingerprint: the key identity is anchored.
+	out = captureStdout(t, func() {
+		code = runEvidence([]string{"verify", "--file", outPath, "--expect-fingerprint", fp})
+	})
+	if code != 0 {
+		t.Fatalf("anchored verify exit code = %d, want 0 (stderr above)", code)
+	}
+	if !strings.Contains(out, "ANCHORED") {
+		t.Errorf("anchored verify output missing ANCHORED confirmation: %s", out)
+	}
+	if strings.Contains(out, "SELF-ATTESTED") {
+		t.Errorf("anchored verify output wrongly claims SELF-ATTESTED: %s", out)
+	}
+
+	// Mismatching expected fingerprint: fails as before (exit 2).
+	wrong := strings.Repeat("0", len(fp))
+	if wrong == fp {
+		wrong = strings.Repeat("1", len(fp))
+	}
+	if code := runEvidence([]string{"verify", "--file", outPath, "--expect-fingerprint", wrong}); code != 2 {
+		t.Fatalf("mismatched-anchor verify exit code = %d, want 2", code)
+	}
+}

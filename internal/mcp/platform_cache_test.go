@@ -8,9 +8,11 @@ import (
 	"testing"
 )
 
-// fixtureRoot builds a tiny single-package module in a temp dir so platform
-// construction is fast and deterministic (no re-indexing of the whole repo).
-func fixtureRoot(t *testing.T) string {
+// platformCacheRoot builds a tiny single-package module in a temp dir so
+// platform construction is fast and deterministic (no re-indexing of the
+// whole repo). (Distinct from fixtureRoot, which builds the multi-package
+// testfixture repo for handler tests that need real symbols + git.)
+func platformCacheRoot(t *testing.T) string {
 	t.Helper()
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, "go.mod"), []byte("module fixture\n\ngo 1.20\n"), 0o644); err != nil {
@@ -29,7 +31,8 @@ func fixtureRoot(t *testing.T) string {
 // instances.
 func TestPlatformForCachesPerRoot(t *testing.T) {
 	s := NewServer(bytes.NewReader(nil), &bytes.Buffer{})
-	root := fixtureRoot(t)
+	defer s.Close() // drain sessions (watcher + background index saves) before t.TempDir cleanup
+	root := platformCacheRoot(t)
 
 	p1, err := s.platformFor(context.Background(), root)
 	if err != nil {
@@ -46,7 +49,7 @@ func TestPlatformForCachesPerRoot(t *testing.T) {
 		t.Fatal("platformFor returned a DIFFERENT Platform instance for the same root — cache not effective")
 	}
 
-	other := fixtureRoot(t)
+	other := platformCacheRoot(t)
 	p3, err := s.platformFor(context.Background(), other)
 	if err != nil {
 		t.Fatalf("platformFor #3 (other root): %v", err)
@@ -63,7 +66,8 @@ func TestPlatformForCachesPerRoot(t *testing.T) {
 // rebuilt (different instance).
 func TestPlatformForRebuildsOnNewIndex(t *testing.T) {
 	s := NewServer(bytes.NewReader(nil), &bytes.Buffer{})
-	root := fixtureRoot(t)
+	defer s.Close() // drain sessions (watcher + background index saves) before t.TempDir cleanup
+	root := platformCacheRoot(t)
 
 	p1, err := s.platformFor(context.Background(), root)
 	if err != nil {

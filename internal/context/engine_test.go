@@ -32,11 +32,11 @@ func fakeIndex() *index.Index {
 			{Kind: "func", Name: "HandleUsers", File: "svc/handlers.go", Line: 1, Lang: "go", Entry: true, Framework: "net-http", Route: "/users"},
 			sym("func", "TestFoo", "svc/foo_test.go", 1),
 		},
-		Calls: map[string][]string{
-			"Foo":         {"Bar", "Baz"},
-			"Bar":         {"Baz"},
-			"HandleUsers": {"Foo"},
-			"TestFoo":     {"HandleUsers"},
+		Calls: map[string][]index.CallEdge{
+			"Foo":         {index.CallEdge{Target: "Bar", Confidence: index.ConfidenceHigh}, index.CallEdge{Target: "Baz", Confidence: index.ConfidenceHigh}},
+			"Bar":         {index.CallEdge{Target: "Baz", Confidence: index.ConfidenceHigh}},
+			"HandleUsers": {index.CallEdge{Target: "Foo", Confidence: index.ConfidenceHigh}},
+			"TestFoo":     {index.CallEdge{Target: "HandleUsers", Confidence: index.ConfidenceHigh}},
 		},
 		Callers: map[string][]string{
 			"Bar":         {"Foo"},
@@ -51,7 +51,7 @@ func fakeIndex() *index.Index {
 			"Animal": {"Baz"},
 		},
 		Pkgs: map[string]*index.Pkg{
-			"svc": {Name: "svc", Path: "svc", Imports: []string{"net/http"}, Files: []string{"svc/handlers.go"}, Lang: "go"},
+			"svc": {Name: "svc", Path: "svc", Imports: []index.ImportEdge{{Path: "net/http", Confidence: index.ConfidenceHigh}}, Files: []string{"svc/handlers.go"}, Lang: "go"},
 		},
 		UpdatedAt: time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC),
 	}

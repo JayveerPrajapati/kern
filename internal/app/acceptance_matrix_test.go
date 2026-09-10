@@ -54,6 +54,7 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/domain"
 	"github.com/JayveerPrajapati/kern/internal/governance"
 	"github.com/JayveerPrajapati/kern/internal/memory"
+	"github.com/JayveerPrajapati/kern/internal/testfixture"
 	"github.com/JayveerPrajapati/kern/internal/whatif"
 )
 
@@ -69,7 +70,7 @@ var (
 func matrixPlatform(t *testing.T) *TaskService {
 	t.Helper()
 	matrixOnce.Do(func() {
-		p, err := NewWithIndex("../..", sharedTestRepoIndex(t))
+		p, err := New(testfixture.Repo(t))
 		if err != nil {
 			matrixPlatErr = err
 			return

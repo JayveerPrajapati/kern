@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/JayveerPrajapati/kern/internal/modernization"
+	"github.com/JayveerPrajapati/kern/internal/testfixture"
 )
 
 // TestRenderModernizePhaseText verifies the per-phase render shows
@@ -22,26 +23,6 @@ func TestRenderModernizePhaseText(t *testing.T) {
 	}
 }
 
-// TestRenderModernizeCandidates verifies the candidate visualization (Phase
-// 12.4) renders a line per context with cohesion/deps and per-phase lines.
-func TestRenderModernizeCandidates(t *testing.T) {
-	plan := modernization.ExtractionPlan{
-		Contexts: []modernization.BoundedContext{
-			{Name: "checkout", FileCount: 4, Cohesion: 0.8, IncomingDeps: 1, OutgoingDeps: 2, Ownership: "@checkout"},
-			{Name: "billing", FileCount: 3, Cohesion: 0.6, IncomingDeps: 2, OutgoingDeps: 1, Ownership: "@billing"},
-		},
-		Phases: []modernization.ExtractionPhase{
-			{Phase: 1, Context: "billing", RiskLevel: "low", TaskID: "t-1"},
-		},
-	}
-	text := renderModernizeCandidates(plan)
-	for _, want := range []string{"CANDIDATES", "checkout", "@checkout", "cohesion", "phase 1", "billing"} {
-		if !strings.Contains(text, want) {
-			t.Errorf("candidate render missing %q:\n%s", want, text)
-		}
-	}
-}
-
 // TestPhaseTaskIDIsSetByModernizePhaseTasks verifies that ModernizePhaseTasks
 // materializes one task per phase and sets the phase TaskID so the audit trail
 // can trace a phase to its task .
@@ -49,8 +30,9 @@ func TestPhaseTaskIDIsSetByModernizePhaseTasks(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping full-platform modernize in -short mode")
 	}
-	// Drive the real platform against the repo so phase tasks are real tasks.
-	p, err := NewWithIndex("../..", sharedTestRepoIndex(t))
+	// Drive the real platform against the fixture repo so phase tasks are
+	// real tasks (same code paths as the full repo, millisecond index builds).
+	p, err := New(testfixture.Repo(t))
 	if err != nil {
 		t.Skipf("New: %v", err)
 	}

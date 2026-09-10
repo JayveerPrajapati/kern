@@ -403,7 +403,10 @@ var shellScenarioIDs = []string{"shell:unhandled-exit", "shell:unset-variable", 
 // TestG9_ShellScenariosRegistered verifies the shell scenarios ship as
 // built-ins alongside the Go ones, with the expected ids and ecosystem.
 func TestG9_ShellScenariosRegistered(t *testing.T) {
-	builtins := DefaultScenarios()
+	builtins, err := DefaultScenarios()
+	if err != nil {
+		t.Fatalf("DefaultScenarios: %v", err)
+	}
 	got := map[string]bool{}
 	for _, s := range builtins {
 		if sh, ok := s.(*ShellScenario); ok {
@@ -423,7 +426,11 @@ func TestG9_ShellScenariosRegistered(t *testing.T) {
 	}
 	// Registry round-trip: register and fetch each shell scenario.
 	reg := NewRegistry()
-	for _, s := range DefaultScenarios() {
+	builtins, err = DefaultScenarios()
+	if err != nil {
+		t.Fatalf("DefaultScenarios: %v", err)
+	}
+	for _, s := range builtins {
 		reg.Register(s)
 	}
 	for _, id := range shellScenarioIDs {
@@ -443,7 +450,11 @@ func TestG9_ShellScenarioDetectsFailure(t *testing.T) {
 		"shell:missing-error-handling": "missing error handling",
 	}
 	sb := testSandbox{}
-	for _, s := range DefaultScenarios() {
+	builtins, err := DefaultScenarios()
+	if err != nil {
+		t.Fatalf("DefaultScenarios: %v", err)
+	}
+	for _, s := range builtins {
 		sh, ok := s.(*ShellScenario)
 		if !ok {
 			continue

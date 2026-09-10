@@ -184,7 +184,7 @@ func TestProbeFiltersStopwords(t *testing.T) {
 			{Kind: "func", Name: "when", File: "when.go", Line: 20},
 			{Kind: "func", Name: "UserService", File: "user.go", Line: 30},
 		},
-		Calls:   map[string][]string{},
+		Calls:   map[string][]index.CallEdge{},
 		Callers: map[string][]string{},
 	}
 	r := Probe(ix, "When the system tries to find a user, UserService should handle it", 4000)
@@ -217,7 +217,7 @@ func TestProbeFuzzyKeywordFallback(t *testing.T) {
 			{Kind: "func", Name: "ServiceRegistry", File: "registry.go", Line: 30},
 			{Kind: "func", Name: "unrelated", File: "other.go", Line: 40},
 		},
-		Calls:   map[string][]string{},
+		Calls:   map[string][]index.CallEdge{},
 		Callers: map[string][]string{},
 	}
 	r := Probe(ix, "decommission a network service", 4000)

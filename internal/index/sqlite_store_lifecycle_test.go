@@ -169,7 +169,7 @@ func TestReopenExisting(t *testing.T) {
 		t.Errorf("symbol count = %d, want %d", len(got.Symbols), len(ix.Symbols))
 	}
 	for k, v := range ix.Calls {
-		if !equalStrings(got.Calls[k], v) {
+		if !equalCallEdges(got.Calls[k], v) {
 			t.Errorf("Calls[%q] = %v, want %v", k, got.Calls[k], v)
 		}
 	}

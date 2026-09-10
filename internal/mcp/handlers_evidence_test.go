@@ -10,12 +10,15 @@ import (
 
 func TestHandleEvidenceAnchor(t *testing.T) {
 	s := NewServer(strings.NewReader(""), io.Discard)
-	s.roots = []string{kernRepoRoot}
+	defer s.Close() // drain sessions (watcher + background index saves) before t.TempDir cleanup
+	root := fixtureRoot(t)
+	s.roots = []string{root}
 
 	// Test 1: Verify known symbol (NewServer)
 	resSym, err := s.handleEvidenceAnchor(context.Background(), map[string]any{
-		"root":   kernRepoRoot,
+		"root":   root,
 		"symbol": "NewServer",
+		"format": "json",
 	})
 	if err != nil {
 		t.Fatalf("handleEvidenceAnchor symbol error: %v", err)
@@ -37,8 +40,9 @@ func TestHandleEvidenceAnchor(t *testing.T) {
 
 	// Test 2: Verify file and line claim (claim string)
 	resClaim, err := s.handleEvidenceAnchor(context.Background(), map[string]any{
-		"root":  kernRepoRoot,
-		"claim": "internal/mcp/http.go:20",
+		"root":   root,
+		"claim":  "web/handler.go:9",
+		"format": "json",
 	})
 	if err != nil {
 		t.Fatalf("handleEvidenceAnchor claim error: %v", err)
@@ -56,8 +60,9 @@ func TestHandleEvidenceAnchor(t *testing.T) {
 
 	// Test 3: Non-existent symbol
 	resMissing, err := s.handleEvidenceAnchor(context.Background(), map[string]any{
-		"root":   kernRepoRoot,
+		"root":   root,
 		"symbol": "NonExistentFakeFunction_99999",
+		"format": "json",
 	})
 	if err != nil {
 		t.Fatalf("unexpected error for missing symbol: %v", err)
@@ -66,5 +71,22 @@ func TestHandleEvidenceAnchor(t *testing.T) {
 	_ = json.Unmarshal([]byte(resMissing), &proofMissing)
 	if proofMissing.Verified {
 		t.Errorf("expected verified=false for fake symbol")
+	}
+
+	// D4: compact text is the default and carries the key facts.
+	resCompact, err := s.handleEvidenceAnchor(context.Background(), map[string]any{
+		"root":   root,
+		"symbol": "NewServer",
+	})
+	if err != nil {
+		t.Fatalf("handleEvidenceAnchor compact error: %v", err)
+	}
+	for _, want := range []string{"evidence: evidence-sha256:", "verified: true", "symbol: NewServer at ", "verification: Symbol NewServer resolved"} {
+		if !strings.Contains(resCompact, want) {
+			t.Errorf("compact evidence output missing %q in:\n%s", want, resCompact)
+		}
+	}
+	if strings.Contains(resCompact, `"EvidenceID"`) {
+		t.Errorf("compact evidence output must not be JSON:\n%s", resCompact)
 	}
 }

@@ -1,6 +1,7 @@
 package governance
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/JayveerPrajapati/kern/internal/domain"
@@ -289,5 +290,71 @@ func TestTaskScopeValidatePatch(t *testing.T) {
 	// An unrestricted scope allows any patch (backward compatible).
 	if err := (domain.TaskScope{TaskID: "t2"}).ValidatePatch(bad); err != nil {
 		t.Errorf("ValidatePatch(unrestricted scope) unexpected error: %v", err)
+	}
+}
+
+// TestToolGatewayNilFirewallBudgetOnly verifies that a gateway constructed
+// without a firewall (NewToolGateway(nil)) enforces ONLY the safety-budget
+// dimension: the firewall gate is skipped (no agent/policy to deny), the
+// boundary still applies, and the budget still denies when exceeded. This is
+// the budget-only configuration the MCP server wires at its tool-call choke
+// point (per-call firewalls are built separately there).
+func TestToolGatewayNilFirewallBudgetOnly(t *testing.T) {
+	gw := NewToolGateway(nil)
+	boundary := domain.TaskBoundary{TaskID: "t1"}
+	budget := &domain.SafetyBudget{MaxToolCalls: 2}
+
+	// Under budget: allowed, no error (firewall skipped despite no agents).
+	allowed, risk, _, err := gw.Evaluate("agent-1", "t1", "some/file.go", "call", boundary, budget)
+	if !allowed {
+		t.Fatalf("nil-firewall gateway should allow under-budget calls, got allowed=%v err=%v", allowed, err)
+	}
+	if risk.Blocked {
+		t.Fatalf("under-budget call must not be blocked, risk=%+v", risk)
+	}
+	if err != nil {
+		t.Fatalf("under-budget call returned unexpected error: %v", err)
+	}
+
+	// Exceed the budget: denied with a structured error.
+	budget.TrackToolCall()
+	budget.TrackToolCall()
+	allowed, _, _, err = gw.Evaluate("agent-1", "t1", "some/file.go", "call", boundary, budget)
+	if allowed {
+		t.Fatal("nil-firewall gateway must deny when budget is exceeded")
+	}
+	if err == nil {
+		t.Fatal("budget-exceeded call must return an error")
+	}
+	if !strings.Contains(err.Error(), "safety budget exceeded") {
+		t.Fatalf("denial error should name the budget, got: %v", err)
+	}
+
+	// The boundary gate still applies with a nil firewall.
+	blocked := domain.TaskBoundary{TaskID: "t1", DeniedPaths: []string{"secrets/"}}
+	if allowed, _, _, err := gw.Evaluate("agent-1", "t1", "secrets/key.txt", "call", blocked, budget); allowed || err == nil {
+		t.Fatalf("boundary gate must still deny with a nil firewall: allowed=%v err=%v", allowed, err)
+	}
+}
+
+// TestToolGatewayNilFirewallEvaluateScoped verifies the scoped entry is also
+// nil-firewall-safe: only the scope/path and budget gates apply.
+func TestToolGatewayNilFirewallEvaluateScoped(t *testing.T) {
+	gw := NewToolGateway(nil)
+	budget := &domain.SafetyBudget{MaxToolCalls: 1}
+	scope := domain.TaskScope{TaskID: "t1"}
+
+	res := gw.EvaluateScoped("agent-1", "t1", "some/file.go", "call", "development", scope, budget)
+	if res.Decision != domain.DecisionAllowed || !res.Allowed {
+		t.Fatalf("nil-firewall scoped gateway should allow under-budget calls, got %+v", res)
+	}
+
+	budget.TrackToolCall() // 1 >= 1: exceeded
+	res = gw.EvaluateScoped("agent-1", "t1", "some/file.go", "call", "development", scope, budget)
+	if res.Decision != domain.DecisionPaused {
+		t.Fatalf("scoped gateway must PAUSE when budget is exceeded, got %+v", res)
+	}
+	if res.Deny == nil || !strings.Contains(res.Deny.Reason, "safety budget exceeded") {
+		t.Fatalf("denial should carry an explain-deny budget reason, got %+v", res.Deny)
 	}
 }

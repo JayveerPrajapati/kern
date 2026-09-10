@@ -56,7 +56,7 @@ func Clean() {}
 		t.Fatal("ImportsByFile must be non-nil after Build")
 	}
 	webImports := ix.ImportsByFile["web/web.go"]
-	if len(webImports) != 1 || webImports[0] != "example.com/repo/db" {
+	if len(webImports) != 1 || webImports[0].Path != "example.com/repo/db" {
 		t.Errorf("web/web.go imports = %v, want [example.com/repo/db]", webImports)
 	}
 	clean, ok := ix.ImportsByFile["web/clean.go"]
@@ -68,7 +68,7 @@ func Clean() {}
 	}
 	// Package-aggregated imports must remain intact for JSON consumers
 	// (e.g. blueprint's java import coverage warning reads packages[].imports).
-	if got := ix.Pkgs["web"].Imports; len(got) != 1 || got[0] != "example.com/repo/db" {
+	if got := ix.Pkgs["web"].Imports; len(got) != 1 || got[0].Path != "example.com/repo/db" {
 		t.Errorf("Pkgs[web].Imports = %v, want [example.com/repo/db]", got)
 	}
 }

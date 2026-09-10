@@ -2,6 +2,7 @@ package sec
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -412,5 +413,34 @@ sendAlert(adminEmail);`)
 	}
 	if !found {
 		t.Fatal("expected hardcoded email to be flagged in real code")
+	}
+}
+
+// TestScanTreeRecordsUnreadableFile: an unreadable file must surface as a
+// warning finding, not silently vanish from a "clean" scan. A15.
+func TestScanTreeRecordsUnreadableFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "app.go")
+	if err := os.WriteFile(path, []byte("package app\n"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if err := os.Chmod(path, 0o000); err != nil {
+		t.Skipf("chmod: %v", err)
+	}
+	findings, err := Scan(dir)
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	var found bool
+	for _, f := range findings {
+		if f.Rule == "unreadable-file" {
+			found = true
+			if f.Severity != "warning" {
+				t.Errorf("severity = %q, want warning", f.Severity)
+			}
+		}
+	}
+	if !found {
+		t.Error("no unreadable-file finding for a chmod-000 source file")
 	}
 }

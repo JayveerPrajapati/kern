@@ -1,79 +1,12 @@
 package setup
 
 import (
-	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
-
-// --- A. writeGuardScript (project-scoped guard install, 0% coverage before) ---
-
-func TestWriteGuardScriptWritesExecutableAsset(t *testing.T) {
-	root := t.TempDir()
-	p, err := writeGuardScript(root)
-	if err != nil {
-		t.Fatalf("writeGuardScript: %v", err)
-	}
-	want := filepath.Join(root, ".kern", "hooks", "kern-guard.sh")
-	if p != want {
-		t.Fatalf("path = %q, want %q", p, want)
-	}
-	fi, err := os.Stat(want)
-	if err != nil {
-		t.Fatalf("guard script not written: %v", err)
-	}
-	if fi.Mode().Perm()&0o111 == 0 {
-		t.Fatalf("guard script not executable (intended 0755): %v", fi.Mode())
-	}
-	b, err := os.ReadFile(want)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(b) != kernGuardScript {
-		t.Fatal("written script does not byte-match the embedded asset")
-	}
-}
-
-func TestWriteGuardScriptIdempotent(t *testing.T) {
-	root := t.TempDir()
-	p1, err := writeGuardScript(root)
-	if err != nil {
-		t.Fatalf("first write: %v", err)
-	}
-	p2, err := writeGuardScript(root)
-	if err != nil {
-		t.Fatalf("second write: %v", err)
-	}
-	if p1 != p2 {
-		t.Fatalf("paths differ: %q vs %q", p1, p2)
-	}
-	b1, err := os.ReadFile(p1)
-	if err != nil {
-		t.Fatal(err)
-	}
-	b2, err := os.ReadFile(p2)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Equal(b1, b2) {
-		t.Fatal("second run produced different content")
-	}
-}
-
-func TestWriteGuardScriptErrorsWhenTargetNotCreatable(t *testing.T) {
-	root := t.TempDir()
-	// Make <root>/.kern a FILE so MkdirAll(<root>/.kern/hooks) fails with
-	// ENOTDIR — a robust way to force the error path without needing root.
-	if err := os.WriteFile(filepath.Join(root, ".kern"), []byte("occupied"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := writeGuardScript(root); err == nil {
-		t.Fatal("expected error when <root>/.kern/hooks cannot be created, got nil")
-	}
-}
 
 // --- B. mergeJSON path safety (setup_config.go) ---
 

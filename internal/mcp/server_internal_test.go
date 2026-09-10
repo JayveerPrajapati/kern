@@ -160,3 +160,35 @@ func TestIsFilesystemRoot(t *testing.T) {
 		t.Fatal("a temp dir must not be a filesystem root")
 	}
 }
+
+// TestArgBool pins the permissive arg-parsing contract shared by every
+// tool handler that reads boolean flags (9 callers): missing/nil keys are
+// false, real bools pass through, strings accept true/1 (trimmed), numbers
+// are truthy on non-zero, and any other type is false.
+func TestArgBool(t *testing.T) {
+	cases := []struct {
+		name string
+		args map[string]any
+		key  string
+		want bool
+	}{
+		{name: "missing key", args: map[string]any{}, key: "verbose", want: false},
+		{name: "nil value", args: map[string]any{"verbose": nil}, key: "verbose", want: false},
+		{name: "bool true", args: map[string]any{"verbose": true}, key: "verbose", want: true},
+		{name: "bool false", args: map[string]any{"verbose": false}, key: "verbose", want: false},
+		{name: "string true", args: map[string]any{"verbose": "true"}, key: "verbose", want: true},
+		{name: "string one", args: map[string]any{"verbose": "1"}, key: "verbose", want: true},
+		{name: "string trimmed", args: map[string]any{"verbose": "  true  "}, key: "verbose", want: true},
+		{name: "string false", args: map[string]any{"verbose": "false"}, key: "verbose", want: false},
+		{name: "string zero", args: map[string]any{"verbose": "0"}, key: "verbose", want: false},
+		{name: "number non-zero", args: map[string]any{"verbose": 1.0}, key: "verbose", want: true},
+		{name: "number zero", args: map[string]any{"verbose": 0.0}, key: "verbose", want: false},
+		{name: "unexpected type", args: map[string]any{"verbose": []string{"x"}}, key: "verbose", want: false},
+		{name: "unexpected int", args: map[string]any{"verbose": 1}, key: "verbose", want: false},
+	}
+	for _, tc := range cases {
+		if got := argBool(tc.args, tc.key); got != tc.want {
+			t.Errorf("%s: argBool(%v, %q) = %v, want %v", tc.name, tc.args, tc.key, got, tc.want)
+		}
+	}
+}

@@ -20,7 +20,7 @@ func riskIndex() *index.Index {
 			sym("func", "Helper", "main.go", 1),
 			sym("func", "Login", "auth/login.go", 1),
 		},
-		Calls:     map[string][]string{},
+		Calls:     map[string][]index.CallEdge{},
 		Callers:   map[string][]string{},
 		Pkgs:      map[string]*index.Pkg{},
 		UpdatedAt: time.Now(),

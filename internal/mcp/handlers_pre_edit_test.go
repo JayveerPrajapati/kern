@@ -9,12 +9,14 @@ import (
 
 func TestHandlePreEdit(t *testing.T) {
 	s := NewServer(strings.NewReader(""), io.Discard)
-	s.roots = []string{kernRepoRoot}
+	defer s.Close() // drain sessions (watcher + background index saves) before t.TempDir cleanup
+	root := fixtureRoot(t)
+	s.roots = []string{root}
 
 	// Test 1: Query by file
 	res, err := s.handlePreEdit(context.Background(), map[string]any{
-		"root": kernRepoRoot,
-		"file": "internal/index/engine.go",
+		"root": root,
+		"file": "web/server.go",
 	})
 	if err != nil {
 		t.Fatalf("handlePreEdit error: %v", err)
@@ -31,7 +33,7 @@ func TestHandlePreEdit(t *testing.T) {
 
 	// Test 2: Query by symbol
 	resSym, err := s.handlePreEdit(context.Background(), map[string]any{
-		"root":   kernRepoRoot,
+		"root":   root,
 		"symbol": "NewServer",
 	})
 	if err != nil {
@@ -43,7 +45,7 @@ func TestHandlePreEdit(t *testing.T) {
 
 	// Test 3: Missing required arguments
 	_, errEmpty := s.handlePreEdit(context.Background(), map[string]any{
-		"root": kernRepoRoot,
+		"root": root,
 	})
 	if errEmpty == nil {
 		t.Error("expected error when both file and symbol are empty")

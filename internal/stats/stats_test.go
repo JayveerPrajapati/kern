@@ -225,3 +225,47 @@ func TestSummarizeBoundaryDay(t *testing.T) {
 		t.Fatalf("expected only the N-1-days-old entry in a 7-day window, got %d", sum.Operations)
 	}
 }
+
+func TestNewRecorderCreatesWorkingRecorder(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+
+	r, err := NewRecorder()
+	if err != nil {
+		t.Fatalf("NewRecorder: %v", err)
+	}
+	if r == nil || r.dir == "" {
+		t.Fatalf("NewRecorder returned unusable recorder: %+v", r)
+	}
+
+	if err := r.Record(Entry{
+		Session:      "test-session",
+		Operation:    OpOptimizePrompt,
+		Model:        "local",
+		BeforeTokens: 100,
+		AfterTokens:  75,
+	}); err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+
+	sum, err := r.Summarize(7, "test-session")
+	if err != nil {
+		t.Fatalf("Summarize: %v", err)
+	}
+	if sum.Operations != 1 || sum.BeforeTotal != 100 || sum.AfterTotal != 75 {
+		t.Fatalf("summary missing recorded entry: %+v", sum)
+	}
+	if sum.SavedTotal != 25 || sum.SavedPct != 25 {
+		t.Fatalf("saved totals wrong: %+v", sum)
+	}
+}
+
+func TestZeroValueRecorderSummarizeDoesNotPanic(t *testing.T) {
+	var r Recorder // zero value: empty dir
+	sum, err := r.Summarize(7, "")
+	if err == nil {
+		t.Fatal("Summarize on zero-value recorder with empty dir: want error, got nil")
+	}
+	if sum == nil || sum.Operations != 0 {
+		t.Fatalf("want empty summary, got %+v", sum)
+	}
+}

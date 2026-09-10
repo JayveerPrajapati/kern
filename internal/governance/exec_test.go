@@ -219,9 +219,11 @@ func TestParseToolAllowlist(t *testing.T) {
 		want []string
 	}{
 		{"", []string{}},
-		{"a,b,c", []string{"a", "b", "c"}},
-		{" a , b ,, c ", []string{"a", "b", "c"}},
+		{"a,b,c", []string{"kern_a", "kern_b", "kern_c"}},
+		{" a , b ,, c ", []string{"kern_a", "kern_b", "kern_c"}},
 		{",,,", []string{}},
+		// CLI aliases and MCP names normalize to the same canonical spelling.
+		{"exec,kern_exec", []string{"kern_exec", "kern_exec"}},
 	}
 	for _, c := range cases {
 		got := parseToolAllowlist(c.in)
@@ -250,5 +252,48 @@ func TestContainsString(t *testing.T) {
 	}
 	if containsString(nil, "x") {
 		t.Error("containsString(nil) should be false")
+	}
+}
+
+// TestCheckExecCLIAliasAllowlist locks validation I-3: KERN_TOOLS entries may
+// use CLI subcommand names ("exec", "sandbox", "execute") as aliases for the
+// canonical MCP tool names — the gate normalizes both spellings, so CLI-driven
+// automation is not footgunned by the naming asymmetry.
+func TestCheckExecCLIAliasAllowlist(t *testing.T) {
+	t.Setenv("KERN_TOOLS", "exec")
+	if err := CheckExec("kern_exec"); err != nil {
+		t.Fatalf("CLI alias 'exec' must allow kern_exec: %v", err)
+	}
+	if err := CheckExec(); err != nil {
+		t.Fatalf("CLI alias 'exec' must satisfy the any-exec-tool gate: %v", err)
+	}
+	// Mixed styles must behave identically to their MCP-style spelling.
+	t.Setenv("KERN_TOOLS", "sandbox,kern_search")
+	if err := CheckExec("kern_sandbox"); err != nil {
+		t.Fatalf("mixed alias allowlist must allow kern_sandbox: %v", err)
+	}
+	if err := CheckExec("kern_exec"); err == nil {
+		t.Fatal("kern_exec must still be refused when only sandbox is allowed")
+	}
+	// A non-exec CLI alias must NOT re-enable exec (fail-closed preserved).
+	t.Setenv("KERN_TOOLS", "validate,search")
+	if err := CheckExec(); err == nil {
+		t.Fatal("non-exec aliases must not re-enable execution")
+	}
+}
+
+// TestNormalizeToolName pins the alias mapping itself.
+func TestNormalizeToolName(t *testing.T) {
+	for in, want := range map[string]string{
+		"exec":      "kern_exec",
+		"kern_exec": "kern_exec",
+		"search":    "kern_search",
+		"":          "",
+		"kern_":     "kern_",
+		"kernAudit": "kern_kernAudit",
+	} {
+		if got := NormalizeToolName(in); got != want {
+			t.Errorf("NormalizeToolName(%q) = %q, want %q", in, got, want)
+		}
 	}
 }

@@ -24,11 +24,11 @@ x.baz(1, 2);
 	}
 	got := calls["Sample.run"]
 	for _, want := range []string{"Foo.bar", "Foo.baz"} {
-		if !contains(got, want) {
+		if !contains(CallEdgeTargets(got), want) {
 			t.Errorf("calls[Sample.run] = %v; want it to contain %s (resolved)", got, want)
 		}
 	}
-	if contains(got, "x.bar") || contains(got, "x.baz") {
+	if contains(CallEdgeTargets(got), "x.bar") || contains(CallEdgeTargets(got), "x.baz") {
 		t.Errorf("calls[Sample.run] = %v; must not contain unresolved x.bar/x.baz", got)
 	}
 }
@@ -47,7 +47,7 @@ y.bar();
 		t.Fatal(err)
 	}
 	got := calls["Sample.run"]
-	if !contains(got, "Unknown.bar") && !contains(got, "y.bar") {
+	if !contains(CallEdgeTargets(got), "Unknown.bar") && !contains(CallEdgeTargets(got), "y.bar") {
 		t.Errorf("calls[Sample.run] = %v; want either Unknown.bar or the bare y.bar", got)
 	}
 }
@@ -76,7 +76,7 @@ public void doThing() {}
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !contains(ix.Calls["App.run"], "Helper.doThing") {
+	if !contains(CallEdgeTargets(ix.Calls["App.run"]), "Helper.doThing") {
 		t.Errorf("Calls[App.run] = %v; want it to contain Helper.doThing (resolved cross-file edge)", ix.Calls["App.run"])
 	}
 	if !contains(ix.Callers["Helper.doThing"], "App.run") {

@@ -3,14 +3,18 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/JayveerPrajapati/kern/internal/config"
 	"github.com/JayveerPrajapati/kern/internal/docsearch"
 	"github.com/JayveerPrajapati/kern/internal/lock"
 	"github.com/JayveerPrajapati/kern/internal/project"
@@ -30,6 +34,8 @@ func newHTTPServer() *Server {
 		roots:     defaultWorkspaceRoots(),
 		gate:      NewGateFromEnv(),
 		commits:   map[string]string{},
+		watchStop: make(chan struct{}),
+		watchDone: make(chan struct{}),
 	}
 }
 
@@ -307,14 +313,15 @@ func TestHandleHTTPIndexToolNoPanic(t *testing.T) {
 	if testing.Short() {
 		t.Skip("builds full index; skipped with -short")
 	}
+	root := fixtureRoot(t)
 	// Point the workspace at a real repo so kern_search loads an index, and
 	// align the KERN_MCP_ROOTS gate with the same root (the gate fails closed
 	// to the process cwd when unset).
-	t.Setenv("KERN_ROOTS", kernRepoRoot)
-	t.Setenv("KERN_MCP_ROOTS", kernRepoRoot)
+	t.Setenv("KERN_ROOTS", root)
+	t.Setenv("KERN_MCP_ROOTS", root)
 	s := newHTTPServer()
 
-	body := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"kern_search","arguments":{"root":"` + kernRepoRoot + `","query":"TaskService","limit":1}}}`
+	body := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"kern_search","arguments":{"root":"` + root + `","query":"NewServer","limit":1}}}`
 	rr := doHTTP(t, s, http.MethodPost, "application/json", body, nil)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d (body: %s)", rr.Code, rr.Body.String())
@@ -329,5 +336,99 @@ func TestHandleHTTPIndexToolNoPanic(t *testing.T) {
 	// The provenance stamp must include a commit (this exact path panicked).
 	if !strings.Contains(rr.Body.String(), "commit ") {
 		t.Fatalf("expected provenance commit stamp, got: %s", rr.Body.String())
+	}
+}
+
+// TestDaemonModeServesMultipleClients (C5 daemon mode): one long-lived
+// MCP-over-HTTP daemon serves N clients with ONE shared in-memory index —
+// the "10 agents, one repo: the index updates once, memory stays flat"
+// story. Two clients initialize and call kern_search against the same daemon
+// process and receive consistent results from the same session.
+func TestDaemonModeServesMultipleClients(t *testing.T) {
+	root := mcpProject(t)
+	// The daemon's confinement gate fails closed to the process cwd; scope it
+	// to the fixture so the daemon is allowed to serve its own workspace. The
+	// config package caches per-root values (a prior test may have cached the
+	// unset env), so Reset is required to pick the env up.
+	t.Setenv("KERN_MCP_ROOTS", root)
+	t.Setenv("KERN_ROOTS", root) // the daemon's workspace: it serves ITS repo
+	config.Reset()
+
+	// Pick a free loopback port (listen+close+reuse; standard test pattern).
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := ln.Addr().String()
+	ln.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = ServeHTTPContext(ctx, addr) }() // daemon lives with the test
+
+	client := &http.Client{Timeout: 2 * time.Second}
+	// Wait for readiness.
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		resp, err := client.Get("http://" + addr + "/health")
+		if err == nil {
+			io.Copy(io.Discard, resp.Body)
+			resp.Body.Close()
+			if resp.StatusCode == http.StatusOK {
+				break
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("daemon never became ready")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	rpc := func(id int, method, params string) map[string]any {
+		t.Helper()
+		body := fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"method":%q,"params":{%s}}`, id, method, params)
+		req, err := http.NewRequest(http.MethodPost, "http://"+addr+"/mcp", strings.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Accept", "application/json, text/event-stream")
+		req.Header.Set("MCP-Protocol-Version", "2025-06-18")
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatalf("rpc %d %s: %v", id, method, err)
+		}
+		defer resp.Body.Close()
+		raw, _ := io.ReadAll(resp.Body)
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("rpc %d %s: status %d: %s", id, method, resp.StatusCode, raw)
+		}
+		var out map[string]any
+		if err := json.Unmarshal(raw, &out); err != nil {
+			t.Fatalf("rpc %d %s: decode: %v (%s)", id, method, err, raw)
+		}
+		if e, ok := out["error"].(map[string]any); ok {
+			t.Fatalf("rpc %d %s error: %v", id, method, e)
+		}
+		return out
+	}
+
+	// Two clients initialize against the same daemon.
+	for _, id := range []int{1, 2} {
+		res := rpc(id, "initialize", `"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"daemon-test-client"}`)
+		_ = res
+	}
+
+	// Both call kern_search on the shared index; results must agree.
+	params := fmt.Sprintf(`"name":"kern_search","arguments":{"query":"Greet","root":%q}`, root)
+	outA := rpc(3, "tools/call", params)
+	outB := rpc(4, "tools/call", params)
+	textA := outA["result"].(map[string]any)["content"]
+	textB := outB["result"].(map[string]any)["content"]
+	if !strings.Contains(fmt.Sprint(textA), "Greet") {
+		t.Fatalf("client A search did not find Greet: %v", textA)
+	}
+	if fmt.Sprint(textA) != fmt.Sprint(textB) {
+		t.Fatalf("clients disagree on the shared index:\nA: %v\nB: %v", textA, textB)
 	}
 }

@@ -117,7 +117,7 @@ func TestEnginePipeline(t *testing.T) {
 	}
 
 	// Human approval gate for the production change.
-	ap := eng.RequestApproval(inc, "sre", "apply fix to production")
+	ap, _ := eng.RequestApproval(inc, "sre", "apply fix to production")
 	if ap.ID == "" {
 		t.Fatal("expected a pending approval")
 	}

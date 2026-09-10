@@ -2,7 +2,10 @@ package mcp
 
 import (
 	"context"
+	"encoding/json"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -93,6 +96,10 @@ func TestClassifyMetaRequest_Branches(t *testing.T) {
 		{"commitmsg", "generate a commit message", "kern_commitmsg", nil},
 		{"explore_qualified_symbol", "how does Server.dispatch work", "kern_explore", map[string]string{"symbol": "Server.dispatch"}},
 		{"implementation_plan_falls_back", "show me the implementation plan", "kern_search", nil},
+		// F-1: CLI/subcommand questions must not fall into the graph router's
+		// "entry points" fallback — they are symbol searches.
+		{"cli_dispatch_question", "how does CLI command dispatch work in this repo?", "kern_search", nil},
+		{"cli_change_still_impact", "what breaks if I change the CLI dispatch table", "kern_impact", nil},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -158,6 +165,42 @@ func TestClassifyMetaRequest_Flow(t *testing.T) {
 	}
 }
 
+// TestClassifyMetaRequest_Retrieval pins the P1/P2/P3 retrieval routing:
+// retrieve/resolve/handle requests land on kern_retrieve/kern_resolve, and
+// the plan-context phrases land on kern_plan_context. The retrieval router is
+// consulted first, so "retrieve context for X" beats the graph router's
+// "context for", while "handler" (a substring of "handle") stays on
+// kern_entry_points and plain "plan" stays on kern_plan.
+func TestClassifyMetaRequest_Retrieval(t *testing.T) {
+	cases := []classifyCase{
+		{"retrieve_query", "retrieve the context for Greet", "kern_retrieve", map[string]string{"query": "retrieve the context for Greet", "level": "l1"}},
+		{"retrieve_plain", "retrieve nearby symbols", "kern_retrieve", map[string]string{"level": "l1"}},
+		{"handle_word", "handle the Count symbol", "kern_retrieve", map[string]string{"level": "l1"}},
+		{"resolve_handle_id", "resolve handle abc123", "kern_resolve", map[string]string{"handle": "abc123"}},
+		{"resolve_id", "resolve a1b2c3d4", "kern_resolve", map[string]string{"handle": "a1b2c3d4"}},
+		{"plan_context", "plan context for adding a route", "kern_plan_context", nil},
+		{"context_plan", "context plan for the change", "kern_plan_context", nil},
+		{"explain_context", "explain context for NewServer", "kern_plan_context", nil},
+		{"planner", "use the planner to size the context", "kern_plan_context", nil},
+		// Regression guards: existing routes must win where they should.
+		{"handler_keeps_entry_points", "find the login handler", "kern_entry_points", nil},
+		{"plan_keeps_kern_plan", "plan adding a greet function", "kern_plan", nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tool, args := classifyMetaRequest(tc.request)
+			if tool != tc.wantTool {
+				t.Fatalf("classifyMetaRequest(%q) = %q, want %q", tc.request, tool, tc.wantTool)
+			}
+			for k, want := range tc.wantArgs {
+				if got := args[k]; got != want {
+					t.Errorf("args[%s] = %q, want %q", k, got, want)
+				}
+			}
+		})
+	}
+}
+
 // TestClassifyMetaRequest_ImpactKeepsVerbThreshold pins A8 at the routing
 // layer: the impact route still routes on "what breaks" regardless of the
 // stoplist, and leaves symbol selection to the downstream resolver.
@@ -165,5 +208,186 @@ func TestClassifyMetaRequest_ImpactBreaksVerb(t *testing.T) {
 	tool, _ := classifyMetaRequest("what breaks if I remove the translate function from cmaas_controller?")
 	if tool != "kern_impact" {
 		t.Fatalf("classifyMetaRequest = %q, want kern_impact", tool)
+	}
+}
+
+// TestHandleRiskRequiresChange pins the D3 kern_risk contract up front: the
+// change argument is mandatory and is rejected before any platform/index
+// work happens, so a bare server can serve the error.
+func TestHandleRiskRequiresChange(t *testing.T) {
+	s := newTestServer()
+	_, err := s.handleRisk(context.Background(), map[string]any{"root": "."})
+	if err == nil || !strings.Contains(err.Error(), "change is required") {
+		t.Fatalf("missing change: got err %v, want rejection with 'change is required'", err)
+	}
+}
+
+// TestHandleRiskServesRiskAssessment drives the D3 happy path end to end:
+// handleRisk resolves the root through the session index, builds the
+// platform, and returns the rendered governance risk assessment prefixed
+// with "RISK for: <change>".
+func TestHandleRiskServesRiskAssessment(t *testing.T) {
+	root := provenanceProject(t)
+	s := NewServer(strings.NewReader(""), io.Discard)
+	// Drain the session's background index save before TempDir cleanup so the
+	// .kern persistence goroutine cannot race the RemoveAll (pre-existing
+	// flake: "TempDir RemoveAll cleanup: directory not empty").
+	defer s.Close()
+	out, err := s.handleRisk(context.Background(), map[string]any{"root": root, "change": "Greet"})
+	if err != nil {
+		t.Fatalf("handleRisk: %v", err)
+	}
+	if !strings.HasPrefix(out, "RISK for: Greet\n") {
+		t.Errorf("handleRisk output = %q, want prefix %q", out, "RISK for: Greet\n")
+	}
+	if !strings.Contains(out, "no risks identified") && !strings.Contains(out, "factor:") {
+		t.Errorf("handleRisk output = %q, want a rendered risk assessment (factors or explicit no-risk)", out)
+	}
+}
+
+// TestHandleAnalyzeLens drives the P1-002 lens arg through kern_analyze: a
+// valid lens succeeds with the ANALYSIS prefix and task line; an unknown lens
+// is rejected with a clear error.
+func TestHandleAnalyzeLens(t *testing.T) {
+	root := provenanceProject(t)
+	s := NewServer(strings.NewReader(""), io.Discard)
+	defer s.Close()
+	out, err := s.handleAnalyze(context.Background(), map[string]any{"root": root, "change": "Greet", "lens": "security"})
+	if err != nil {
+		t.Fatalf("handleAnalyze with lens: %v", err)
+	}
+	if !strings.HasPrefix(out, "ANALYSIS for: Greet\n") {
+		t.Errorf("output = %q, want ANALYSIS prefix", out)
+	}
+	if !strings.Contains(out, "[task: ") {
+		t.Errorf("output should carry the task line, got %q", out)
+	}
+
+	if _, err := s.handleAnalyze(context.Background(), map[string]any{"root": root, "change": "Greet", "lens": "bogus"}); err == nil || !strings.Contains(err.Error(), "unknown lens") {
+		t.Errorf("unknown lens: err = %v, want rejection with 'unknown lens'", err)
+	}
+}
+
+// TestHandleAnalyzeProfile drives the P1-005 profile arg through kern_analyze:
+// machine-json wraps the full analysis output in a JSON envelope; an unknown
+// profile is rejected; no profile arg leaves the output byte-identical.
+// (The wrapped content is NOT byte-compared against the base run: each
+// handleAnalyze call creates a fresh Task, so the [task: <id>] line differs
+// between runs — the invariant is the ANALYSIS prefix + task line inside the
+// envelope.)
+func TestHandleAnalyzeProfile(t *testing.T) {
+	root := provenanceProject(t)
+	s := NewServer(strings.NewReader(""), io.Discard)
+	defer s.Close()
+
+	base, err := s.handleAnalyze(context.Background(), map[string]any{"root": root, "change": "Greet"})
+	if err != nil {
+		t.Fatalf("handleAnalyze: %v", err)
+	}
+	if !strings.HasPrefix(base, "ANALYSIS for: Greet\n") {
+		t.Fatalf("base output = %q, want ANALYSIS prefix", base)
+	}
+
+	js, err := s.handleAnalyze(context.Background(), map[string]any{"root": root, "change": "Greet", "profile": "machine-json"})
+	if err != nil {
+		t.Fatalf("handleAnalyze machine-json: %v", err)
+	}
+	var m struct {
+		Profile string `json:"profile"`
+		Format  string `json:"format"`
+		Content string `json:"content"`
+	}
+	if err := json.Unmarshal([]byte(js), &m); err != nil {
+		t.Fatalf("machine-json output not valid JSON: %v\n%s", err, js)
+	}
+	if m.Profile != "machine-json" || m.Format != "json" {
+		t.Errorf("decoded profile=%q format=%q; want machine-json/json", m.Profile, m.Format)
+	}
+	if !strings.HasPrefix(m.Content, "ANALYSIS for: Greet\n") {
+		t.Errorf("wrapped content should carry the ANALYSIS prefix, got %q", m.Content)
+	}
+	if !strings.Contains(m.Content, "[task: ") {
+		t.Errorf("wrapped content should carry the task line, got %q", m.Content)
+	}
+
+	if _, err := s.handleAnalyze(context.Background(), map[string]any{"root": root, "change": "Greet", "profile": "bogus"}); err == nil || !strings.Contains(err.Error(), "unknown profile") {
+		t.Errorf("unknown profile: err = %v, want rejection with 'unknown profile'", err)
+	}
+}
+
+// TestHandleAnalyzeProfileAndLensCombined proves the lens and profile args
+// compose: with both set, the lensed analysis is wrapped in the machine-json
+// envelope (the lens re-ranks facts inside the ANALYSIS content; the profile
+// shapes the whole response).
+func TestHandleAnalyzeProfileAndLensCombined(t *testing.T) {
+	root := provenanceProject(t)
+	s := NewServer(strings.NewReader(""), io.Discard)
+	defer s.Close()
+	js, err := s.handleAnalyze(context.Background(), map[string]any{"root": root, "change": "Greet", "lens": "security", "profile": "machine-json"})
+	if err != nil {
+		t.Fatalf("combined lens+profile: %v", err)
+	}
+	var m struct {
+		Profile string `json:"profile"`
+		Content string `json:"content"`
+	}
+	if err := json.Unmarshal([]byte(js), &m); err != nil {
+		t.Fatalf("combined output not valid JSON: %v\n%s", err, js)
+	}
+	if m.Profile != "machine-json" {
+		t.Errorf("profile = %q, want machine-json", m.Profile)
+	}
+	if !strings.Contains(m.Content, "ANALYSIS for: Greet") {
+		t.Errorf("content should carry the analysis, got %q", m.Content)
+	}
+	if !strings.Contains(m.Content, "[task: ") {
+		t.Errorf("content should carry the task line, got %q", m.Content)
+	}
+}
+
+// TestHandleSkillsUserDir asserts that user skills under <root>/.kern/skills
+// are listed (marked "(user)") and readable by name, alongside the embedded
+// skills. A missing .kern/skills keeps the output identical to today.
+func TestHandleSkillsUserDir(t *testing.T) {
+	root := t.TempDir()
+	skillDir := filepath.Join(root, ".kern", "skills", "demo")
+	if err := os.MkdirAll(skillDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	skillMD := "---\nname: demo\ndescription: Demo user skill\n---\nBody of the demo user skill.\n"
+	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte(skillMD), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s := NewServer(strings.NewReader(""), io.Discard)
+
+	out, err := s.handleSkills(context.Background(), map[string]any{"root": root})
+	if err != nil {
+		t.Fatalf("handleSkills list: %v", err)
+	}
+	if !strings.Contains(out, "- **demo** (user): Demo user skill") {
+		t.Errorf("listing missing user skill entry, got:\n%s", out)
+	}
+	if !strings.Contains(out, "kern-safe-change") {
+		t.Errorf("embedded skills missing from listing, got:\n%s", out)
+	}
+
+	body, err := s.handleSkills(context.Background(), map[string]any{"root": root, "skill": "demo"})
+	if err != nil {
+		t.Fatalf("handleSkills read: %v", err)
+	}
+	if !strings.Contains(body, "Body of the demo user skill.") {
+		t.Errorf("reading demo did not return its body, got %q", body)
+	}
+
+	// Without .kern/skills the embedded-only listing is unchanged.
+	empty, err := s.handleSkills(context.Background(), map[string]any{"root": t.TempDir()})
+	if err != nil {
+		t.Fatalf("handleSkills list (no user dir): %v", err)
+	}
+	if strings.Contains(empty, "(user)") {
+		t.Errorf("empty user dir must not emit user entries, got:\n%s", empty)
+	}
+	if !strings.Contains(empty, "# Kern Bundled Agent Skills") {
+		t.Errorf("embedded listing header missing, got:\n%s", empty)
 	}
 }

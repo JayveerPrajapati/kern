@@ -16,6 +16,7 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/governance"
 	"github.com/JayveerPrajapati/kern/internal/memory"
 	"github.com/JayveerPrajapati/kern/internal/runtime"
+	"github.com/JayveerPrajapati/kern/internal/testfixture"
 	"github.com/JayveerPrajapati/kern/internal/verification"
 	"github.com/JayveerPrajapati/kern/internal/webhook"
 	"github.com/JayveerPrajapati/kern/internal/whatif"
@@ -35,9 +36,9 @@ func TestVerticalSlice1AnalyzePlanImpactVerifyPR(t *testing.T) {
 	if testing.Short() {
 		t.Skip("slow e2e (>30s); skipped with -short")
 	}
-	root := "../.."
+	root := testfixture.Repo(t)
 
-	p, err := NewWithIndex(root, sharedTestRepoIndex(t))
+	p, err := New(root)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -187,9 +188,9 @@ func TestVerticalSlice3WhatIfScenario(t *testing.T) {
 	if testing.Short() {
 		t.Skip("slow e2e; skipped with -short")
 	}
-	root := "../.."
+	root := testfixture.Repo(t)
 
-	p, err := NewWithIndex(root, sharedTestRepoIndex(t))
+	p, err := New(root)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -235,9 +236,9 @@ func TestTaskServiceAgentIdentity(t *testing.T) {
 	if testing.Short() {
 		t.Skip("slow e2e (>30s); skipped with -short")
 	}
-	root := "../.."
+	root := testfixture.Repo(t)
 
-	p, err := NewWithIndex(root, sharedTestRepoIndex(t))
+	p, err := New(root)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -275,9 +276,9 @@ func TestArtifactImmutability(t *testing.T) {
 	if testing.Short() {
 		t.Skip("slow e2e (>30s); skipped with -short")
 	}
-	root := "../.."
+	root := testfixture.Repo(t)
 
-	p, err := NewWithIndex(root, sharedTestRepoIndex(t))
+	p, err := New(root)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -315,9 +316,9 @@ func TestDeployApprovalGate(t *testing.T) {
 	if testing.Short() {
 		t.Skip("slow e2e; skipped with -short")
 	}
-	root := "../.."
+	root := testfixture.Repo(t)
 
-	p, err := NewWithIndex(root, sharedTestRepoIndex(t))
+	p, err := New(root)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -368,9 +369,9 @@ func TestDeployNoopSkipsApprovalGate(t *testing.T) {
 	if testing.Short() {
 		t.Skip("slow e2e; skipped with -short")
 	}
-	root := "../.."
+	root := testfixture.Repo(t)
 
-	p, err := NewWithIndex(root, sharedTestRepoIndex(t))
+	p, err := New(root)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -433,9 +434,9 @@ func TestVerticalSlice2IncidentCorrelateRootCause(t *testing.T) {
 	if testing.Short() {
 		t.Skip("slow e2e; skipped with -short")
 	}
-	root := "../.."
+	root := testfixture.Repo(t)
 
-	p, err := NewWithIndex(root, sharedTestRepoIndex(t))
+	p, err := New(root)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -632,8 +633,8 @@ func TestFullLifecycle20StepVerticalSlice(t *testing.T) {
 	// (step 7) is a green path in this test.
 	t.Setenv("KERN_ALLOW_EXEC", "1")
 
-	root := "../.."
-	p, err := NewWithIndex(root, sharedTestRepoIndex(t))
+	root := testfixture.Repo(t)
+	p, err := New(root)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -718,7 +719,7 @@ func TestFullLifecycle20StepVerticalSlice(t *testing.T) {
 		t.Fatalf("step8 transition WAITING_FOR_APPROVAL: %v", err)
 	}
 	aw := governance.NewApprovalWorkflow()
-	approval := aw.Request(task.ID, "test", "execute")
+	approval, _ := aw.Request(task.ID, "test", "execute")
 	if approval.ID == "" {
 		t.Fatal("step8: approval ID is empty")
 	}

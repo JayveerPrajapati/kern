@@ -9,14 +9,16 @@ import (
 
 func TestHandlePromptFill(t *testing.T) {
 	s := NewServer(strings.NewReader(""), io.Discard)
-	s.roots = []string{kernRepoRoot}
+	defer s.Close() // drain sessions (watcher + background index saves) before t.TempDir cleanup
+	root := fixtureRoot(t)
+	s.roots = []string{root}
 
 	// Test 1: Render debug template with task description
 	res, err := s.handlePromptFill(context.Background(), map[string]any{
-		"root":     kernRepoRoot,
+		"root":     root,
 		"template": "debug",
 		"task":     "panic in handleHTTP on bad payload",
-		"file":     "internal/mcp/http.go",
+		"file":     "web/server.go",
 	})
 	if err != nil {
 		t.Fatalf("handlePromptFill error: %v", err)
@@ -28,13 +30,13 @@ func TestHandlePromptFill(t *testing.T) {
 	if !strings.Contains(res, "panic in handleHTTP on bad payload") {
 		t.Errorf("missing task in rendered prompt: %s", res)
 	}
-	if !strings.Contains(res, "internal/mcp/http.go") {
+	if !strings.Contains(res, "web/server.go") {
 		t.Errorf("missing file in rendered prompt: %s", res)
 	}
 
 	// Test 2: Custom slots
 	resCustom, err := s.handlePromptFill(context.Background(), map[string]any{
-		"root":     kernRepoRoot,
+		"root":     root,
 		"template": "explain",
 		"slots": map[string]any{
 			"TASK": "Explain the architecture of kern",
@@ -49,7 +51,7 @@ func TestHandlePromptFill(t *testing.T) {
 
 	// Test 3: Missing template
 	_, errMissing := s.handlePromptFill(context.Background(), map[string]any{
-		"root": kernRepoRoot,
+		"root": root,
 	})
 	if errMissing == nil {
 		t.Error("expected error when template argument is empty")
@@ -57,7 +59,7 @@ func TestHandlePromptFill(t *testing.T) {
 
 	// Test 4: Inline template string
 	resInline, errInline := s.handlePromptFill(context.Background(), map[string]any{
-		"root":     kernRepoRoot,
+		"root":     root,
 		"template": "Hello agent! Please solve: {{TASK}} in file {{FILE}}",
 		"task":     "fix nil pointer dereference",
 		"file":     "main.go",

@@ -1,8 +1,10 @@
 package evidence
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/JayveerPrajapati/kern/internal/governance"
@@ -294,5 +296,41 @@ func TestComputeBundleHashDeterministic(t *testing.T) {
 	b2 := *b1
 	if got := computeBundleHash(&b2); got != b1.BundleHash {
 		t.Errorf("recomputed hash %q != BundleHash %q", got, b1.BundleHash)
+	}
+}
+
+// TestExplain renders the plain-language summary (C4): it must state the
+// bundle id, the authorization decision, the freshness verdict, and the
+// verify one-liner, with nil sections handled defensively.
+func TestExplain(t *testing.T) {
+	root := t.TempDir()
+	ix, err := index.Build(root)
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	b, err := Generate(root, "agent-1", "task-9", ix)
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	text := b.Explain()
+	for _, want := range []string{"Evidence bundle ", "issued to agent agent-1 for task task-9", "What this proves:", "kern evidence verify --file"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("Explain missing %q in:\n%s", want, text)
+		}
+	}
+	// Round-trips through Parse+Verify and explains identically.
+	data, err := json.Marshal(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := Parse(data)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if parsed.BundleID != b.BundleID {
+		t.Errorf("round-trip bundle id = %q, want %q", parsed.BundleID, b.BundleID)
+	}
+	if parsed.Explain() == "" {
+		t.Error("parsed bundle Explain() is empty")
 	}
 }

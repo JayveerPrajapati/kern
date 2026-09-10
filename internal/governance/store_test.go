@@ -149,8 +149,11 @@ func TestFileStoreLoadMissingFile(t *testing.T) {
 func TestPersistedWorkflowRestoresPendingAfterRestart(t *testing.T) {
 	root := t.TempDir()
 	w := NewPersistedApprovalWorkflow(root)
-	a := w.RequestWithBinding("task-1", "agent-1", "deploy to prod",
+	a, err := w.RequestWithBinding("task-1", "agent-1", "deploy to prod",
 		domain.RiskHigh, []string{"policy-1"}, []string{"ev-1"}, "art-1")
+	if err != nil {
+		t.Fatalf("RequestWithBinding: %v", err)
+	}
 
 	// A plain FileStore on the same root (what `kern approve` / the web UI
 	// reads) must observe the workflow's write immediately.
@@ -365,14 +368,14 @@ func TestPersistedWorkflowPrunesOnMutation(t *testing.T) {
 
 	var id string
 	for i := 0; i < maxResolvedApprovals+20; i++ {
-		a := w.Request(fmt.Sprintf("task-%03d", i), "agent", "deploy")
+		a, _ := w.Request(fmt.Sprintf("task-%03d", i), "agent", "deploy")
 		id = a.ID
 		if _, err := w.Approve(a.ID, "human"); err != nil {
 			t.Fatalf("Approve %s: %v", a.ID, err)
 		}
 	}
 	// One more pending approval that must survive.
-	p := w.Request("task-pending", "agent", "deploy")
+	p, _ := w.Request("task-pending", "agent", "deploy")
 
 	got, err := NewFileStore(root).Load()
 	if err != nil {
@@ -387,5 +390,50 @@ func TestPersistedWorkflowPrunesOnMutation(t *testing.T) {
 	}
 	if _, err := w.Get(id); err != nil {
 		t.Errorf("most recent resolved approval lost: %v", err)
+	}
+}
+
+// TestNewFileStoreCorruptFileFailsClosed guards the A1 fix: a corrupt
+// approvals.json must NOT be silently treated as an empty store (which a
+// later save would overwrite, destroying the pending approvals it holds).
+// The construction-time load error is surfaced via LoadError and every
+// operation fails closed until the file is repaired.
+func TestNewFileStoreCorruptFileFailsClosed(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, ".kern", "approvals.json")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(`{"not":"an array"`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	s := NewFileStore(root)
+	if err := s.LoadError(); err == nil {
+		t.Fatal("want LoadError to report the corrupt file")
+	}
+	// Reads must fail closed, not return an empty list.
+	if _, err := s.Load(); err == nil {
+		t.Fatal("want Load to fail on a corrupt file")
+	}
+	if _, err := s.Pending(); err == nil {
+		t.Fatal("want Pending to fail on a corrupt file")
+	}
+	// Writes must fail closed so the corrupt file is not overwritten.
+	if err := s.AddPending(domain.Approval{ID: "appr-x"}); err == nil {
+		t.Fatal("want AddPending to fail on a corrupt file")
+	}
+
+	// Repairing the file restores operation (the error is advisory, every op
+	// re-reads the file).
+	if err := os.WriteFile(path, []byte(`[]`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.Load()
+	if err != nil {
+		t.Fatalf("Load after repair: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("want empty store after repair, got %+v", got)
 	}
 }

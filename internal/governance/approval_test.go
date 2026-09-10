@@ -1,6 +1,8 @@
 package governance
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -16,7 +18,7 @@ func TestNewApprovalWorkflowEmpty(t *testing.T) {
 
 func TestRequestCreatesPending(t *testing.T) {
 	w := NewApprovalWorkflow()
-	a := w.Request("task-1", "coder-1", "deploy to prod")
+	a, _ := w.Request("task-1", "coder-1", "deploy to prod")
 	if a.ID == "" {
 		t.Error("approval should have an ID")
 	}
@@ -39,8 +41,8 @@ func TestRequestCreatesPending(t *testing.T) {
 
 func TestRequestIDsUnique(t *testing.T) {
 	w := NewApprovalWorkflow()
-	a1 := w.Request("t1", "c", "x")
-	a2 := w.Request("t2", "c", "y")
+	a1, _ := w.Request("t1", "c", "x")
+	a2, _ := w.Request("t2", "c", "y")
 	if a1.ID == a2.ID {
 		t.Errorf("request IDs should be unique, both = %q", a1.ID)
 	}
@@ -48,7 +50,7 @@ func TestRequestIDsUnique(t *testing.T) {
 
 func TestApprove(t *testing.T) {
 	w := NewApprovalWorkflow()
-	a := w.Request("task-1", "coder-1", "deploy")
+	a, _ := w.Request("task-1", "coder-1", "deploy")
 	got, err := w.Approve(a.ID, "human-1")
 	if err != nil {
 		t.Fatalf("Approve: %v", err)
@@ -74,7 +76,7 @@ func TestApprove(t *testing.T) {
 
 func TestReject(t *testing.T) {
 	w := NewApprovalWorkflow()
-	a := w.Request("task-1", "coder-1", "deploy")
+	a, _ := w.Request("task-1", "coder-1", "deploy")
 	got, err := w.Reject(a.ID, "human-1", "not ready")
 	if err != nil {
 		t.Fatalf("Reject: %v", err)
@@ -108,7 +110,7 @@ func TestDecideUnknownErrors(t *testing.T) {
 
 func TestDecideNonPendingErrors(t *testing.T) {
 	w := NewApprovalWorkflow()
-	a := w.Request("task", "coder", "deploy")
+	a, _ := w.Request("task", "coder", "deploy")
 	if _, err := w.Approve(a.ID, "human"); err != nil {
 		t.Fatalf("first approve: %v", err)
 	}
@@ -124,9 +126,9 @@ func TestDecideNonPendingErrors(t *testing.T) {
 
 func TestPendingReturnsOnlyPending(t *testing.T) {
 	w := NewApprovalWorkflow()
-	a1 := w.Request("t1", "coder", "x")
-	a2 := w.Request("t2", "coder", "y")
-	a3 := w.Request("t3", "coder", "z")
+	a1, _ := w.Request("t1", "coder", "x")
+	a2, _ := w.Request("t2", "coder", "y")
+	a3, _ := w.Request("t3", "coder", "z")
 	if _, err := w.Approve(a1.ID, "human"); err != nil {
 		t.Fatalf("approve a1: %v", err)
 	}
@@ -151,7 +153,8 @@ func TestPendingSortedByID(t *testing.T) {
 	// regardless of insertion order by requesting in a scrambled set.
 	ids := make(map[string]bool)
 	for i := 0; i < 5; i++ {
-		ids[w.Request("t", "c", "").ID] = true
+		a, _ := w.Request("t", "c", "")
+		ids[a.ID] = true
 	}
 	pending := w.Pending()
 	if len(pending) != 5 {
@@ -196,7 +199,7 @@ func TestApproveRejectUnknown(t *testing.T) {
 
 func TestDoubleDecideRejected(t *testing.T) {
 	w := NewApprovalWorkflow()
-	a := w.Request("task-1", "coder", "deploy")
+	a, _ := w.Request("task-1", "coder", "deploy")
 	if _, err := w.Approve(a.ID, "human"); err != nil {
 		t.Fatalf("first approve: %v", err)
 	}
@@ -205,5 +208,101 @@ func TestDoubleDecideRejected(t *testing.T) {
 	}
 	if _, err := w.Reject(a.ID, "human", "x"); err == nil {
 		t.Error("reject on decided approval should error")
+	}
+}
+
+// TestFallbackApprovalIDUniqueAndFormatted: the non-crypto fallback must
+// produce distinct, correctly-shaped IDs across sequences (never a constant).
+func TestFallbackApprovalIDUniqueAndFormatted(t *testing.T) {
+	seen := map[string]bool{}
+	for i := uint64(1); i <= 1000; i++ {
+		id := fallbackApprovalID(i)
+		if !strings.HasPrefix(id, "appr-") || len(id) != len("appr-")+16 {
+			t.Fatalf("fallbackApprovalID(%d) = %q, want appr-<16 hex>", i, id)
+		}
+		if seen[id] {
+			t.Fatalf("fallbackApprovalID(%d) collides with an earlier ID", i)
+		}
+		seen[id] = true
+	}
+}
+
+// TestApproveRollsBackOnPersistFailure: when the backing store cannot
+// persist a decision, the in-memory approval must stay pending (resumable),
+// not half-decided. A14.
+func TestApproveRollsBackOnPersistFailure(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory permissions")
+	}
+	root := t.TempDir()
+	w := NewPersistedApprovalWorkflow(root)
+	a, _ := w.Request("task-1", "coder-1", "deploy")
+	storeDir := filepath.Join(root, ".kern")
+	if err := os.Chmod(storeDir, 0o500); err != nil {
+		t.Skipf("chmod: %v", err)
+	}
+	defer func() { _ = os.Chmod(storeDir, 0o700) }()
+
+	if _, err := w.Approve(a.ID, "human-1"); err == nil {
+		t.Fatal("Approve() = nil with an unwritable store, want error")
+	}
+	got := w.pending[a.ID]
+	if got.Status != "pending" {
+		t.Errorf("after failed Approve, Status = %q, want pending (rolled back)", got.Status)
+	}
+	if got.Approver != "" || got.DecidedAt != nil {
+		t.Errorf("after failed Approve, Approver/DecidedAt not rolled back: %+v", got)
+	}
+
+	// Same rollback for Reject: status pending again, reason restored.
+	if _, err := w.Reject(a.ID, "human-2", "not now"); err == nil {
+		t.Fatal("Reject() = nil with an unwritable store, want error")
+	}
+	got = w.pending[a.ID]
+	if got.Status != "pending" || got.Reason != "deploy" {
+		t.Errorf("after failed Reject, Status/Reason = %q/%q, want pending/deploy", got.Status, got.Reason)
+	}
+
+	// Restore write access: the approval must still be resumable.
+	if err := os.Chmod(storeDir, 0o700); err != nil {
+		t.Fatalf("chmod restore: %v", err)
+	}
+	if _, err := w.Reject(a.ID, "human-2", "not now"); err != nil {
+		t.Fatalf("Reject after restore: %v", err)
+	}
+	if w.pending[a.ID].Status != "rejected" {
+		t.Errorf("after successful Reject, Status = %q, want rejected", w.pending[a.ID].Status)
+	}
+}
+
+// TestRequestSurfacesPersistFailure: when the backing store cannot persist a
+// new approval, Request/RequestWithBinding must surface the failure (not
+// log-and-continue) so the caller can fail closed instead of parking an
+// un-reviewable gate that no other process can see or approve. A13.
+func TestRequestSurfacesPersistFailure(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory permissions")
+	}
+	root := t.TempDir()
+	w := NewPersistedApprovalWorkflow(root)
+	storeDir := filepath.Join(root, ".kern")
+	if err := os.Chmod(storeDir, 0o500); err != nil {
+		t.Skipf("chmod: %v", err)
+	}
+	defer func() { _ = os.Chmod(storeDir, 0o700) }()
+
+	if _, err := w.Request("task-1", "coder-1", "deploy"); err == nil {
+		t.Fatal("Request() = nil with an unwritable store, want persist error")
+	}
+	if _, err := w.RequestWithBinding("task-2", "coder-2", "deploy", domain.RiskHigh, nil, nil, ""); err == nil {
+		t.Fatal("RequestWithBinding() = nil with an unwritable store, want persist error")
+	}
+
+	// Restore write access: requests succeed again.
+	if err := os.Chmod(storeDir, 0o700); err != nil {
+		t.Fatalf("chmod back: %v", err)
+	}
+	if _, err := w.Request("task-3", "coder-3", "deploy"); err != nil {
+		t.Errorf("Request() after restoring write access: %v", err)
 	}
 }
