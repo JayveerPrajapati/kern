@@ -23,10 +23,16 @@ const MinKernVersion = "v0.9.0"
 const KernModulePath = "github.com/JayveerPrajapati/kern/cmd/kern@latest"
 
 // ParseVersion parses a version string like "v0.9.0", "0.9.0", or "dev"
-// into major, minor, patch integers. Returns an error for unparseable
-// versions (e.g. "dev").
+// into major, minor, patch integers. Pre-release / build suffixes are
+// stripped before parsing ("v0.9.7-local" -> 0.9.7, "1.0.0-rc1+meta" ->
+// 1.0.0) because a suffixed build of X.Y.Z still satisfies a >= X.Y.Z
+// minimum-version gate. Returns an error for unparseable versions
+// (e.g. "dev").
 func ParseVersion(v string) (major, minor, patch int, err error) {
 	v = strings.TrimPrefix(v, "v")
+	if i := strings.IndexAny(v, "-+"); i >= 0 {
+		v = v[:i]
+	}
 	parts := strings.Split(v, ".")
 	if len(parts) < 3 {
 		return 0, 0, 0, fmt.Errorf("version %q: expected major.minor.patch", v)

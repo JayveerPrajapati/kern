@@ -109,14 +109,11 @@ func (a *App) handleGovernanceMetrics(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if a.firewall != nil {
-		for _, e := range a.firewall.AuditLog().All() {
-			switch e.Result {
-			case "blocked", "denied":
-				snap.BlocksCount++
-			case "approved":
-				snap.OverridesCount++
-			}
-		}
+		// B8: O(1) lifetime counters instead of scanning the full audit log
+		// (which is also retention-capped in memory now).
+		l := a.firewall.AuditLog()
+		snap.BlocksCount = int(l.BlocksCount())
+		snap.OverridesCount = int(l.OverridesCount())
 	}
 
 	if rep, err := a.buildArchitecture(); err == nil && rep != nil {
@@ -544,6 +541,22 @@ func injectBody(r *http.Request, extra map[string]interface{}) *http.Request {
 	return nr
 }
 
+// handleV1Incidents serves the incident list (GET /v1/incidents) — the A9
+// route the Python SDK's incidents() method calls. It mirrors the
+// dashboard's /api/incidents shape ({"items": [...]}).
+func (a *App) handleV1Incidents(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	items, err := a.buildIncidents()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{"items": items})
+}
+
 // handleV1Incident serves a single incident by ID (GET /v1/incidents/{id}). The
 // reserved "investigate" segment is delegated to handleV1IncidentInvestigate so
 // both routes coexist.
@@ -907,17 +920,23 @@ func (a *App) handleV1Audit(w http.ResponseWriter, r *http.Request) {
 			arts = list
 		}
 	}
-	// Gather governance audit entries for this task (Invariant 4).
+	// Gather governance audit entries for this task (Invariant 4). The
+	// service layer reads the tamper-evident audit trail so the console and
+	// the CLI/MCP surface the same records.
 	var auditEntries []governance.AuditEntry
-	if a.firewall != nil {
-		auditEntries = a.firewall.AuditLog().FilterByTask(taskID)
+	if a.svc != nil {
+		if entries, err := a.svc.Governance.Audit(r.Context(), a.root, taskID); err == nil {
+			auditEntries = entries
+		}
 	}
 	// Gather pending approvals for this task.
 	var pendingApprovals []domain.Approval
-	if a.approvals != nil {
-		for _, ap := range a.approvals.Pending() {
-			if ap.TaskID == taskID {
-				pendingApprovals = append(pendingApprovals, ap)
+	if a.svc != nil {
+		if pending, err := a.svc.Governance.PendingApprovals(r.Context(), a.root); err == nil {
+			for _, ap := range pending {
+				if ap.TaskID == taskID {
+					pendingApprovals = append(pendingApprovals, ap)
+				}
 			}
 		}
 	}
@@ -980,4 +999,25 @@ func (a *App) handleV1EventsStream(w http.ResponseWriter, r *http.Request) {
 			flusher.Flush()
 		}
 	}
+}
+
+// handleRuntimeJSON serves the production-intelligence snapshot: which
+// runtime source is wired (status: source, poll interval, per-service
+// profiles) plus the code-vs-runtime route drift. Same shapes as
+// `kern runtime status|drift --json` (shared runtime.StatusSnapshot /
+// DriftSnapshot builders), so the CLI, MCP, and web surfaces cannot drift.
+func (a *App) handleRuntimeJSON(w http.ResponseWriter, r *http.Request) {
+	src := runtime.LoadSource(a.root)
+	snap := runtime.StatusSnapshot(src)
+	_, ix := a.freshGraph()
+	var codeRoutes []string
+	if ix != nil {
+		for _, sym := range ix.Symbols {
+			if sym.Route != "" {
+				codeRoutes = append(codeRoutes, sym.Route)
+			}
+		}
+	}
+	snap["drift"] = runtime.DriftSnapshot(src, codeRoutes)
+	writeJSON(w, http.StatusOK, snap)
 }

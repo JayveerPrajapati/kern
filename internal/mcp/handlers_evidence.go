@@ -157,6 +157,32 @@ func (s *Server) handleEvidenceAnchor(ctx context.Context, args map[string]any) 
 	fmt.Fprintf(h, "%s|%s|%d|%v|%s", proof.File, proof.Symbol, proof.Line, proof.Verified, ix.Root)
 	proof.EvidenceID = "evidence-sha256:" + hex.EncodeToString(h.Sum(nil))[:16]
 
-	out, _ := json.MarshalIndent(proof, "", "  ")
-	return string(out), nil
+	// D4: compact text summary by default; full JSON behind format=json.
+	if strings.ToLower(argString(args, "format")) == "json" {
+		out, _ := json.MarshalIndent(proof, "", "  ")
+		return string(out), nil
+	}
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "evidence: %s\n", proof.EvidenceID)
+	fmt.Fprintf(&sb, "verified: %v\n", proof.Verified)
+	if proof.Target != "" {
+		fmt.Fprintf(&sb, "target: %s\n", proof.Target)
+	}
+	if proof.Symbol != "" {
+		fmt.Fprintf(&sb, "symbol: %s at %s:%d\n", proof.Symbol, proof.File, proof.Line)
+	}
+	if proof.LineDrift != 0 {
+		fmt.Fprintf(&sb, "line drift: %d\n", proof.LineDrift)
+	}
+	if proof.Verification != "" {
+		fmt.Fprintf(&sb, "verification: %s\n", proof.Verification)
+	}
+	if proof.Snippet != "" {
+		cap := 200
+		if len(proof.Snippet) > cap {
+			proof.Snippet = proof.Snippet[:cap] + "..."
+		}
+		fmt.Fprintf(&sb, "snippet: %s\n", proof.Snippet)
+	}
+	return sb.String(), nil
 }

@@ -473,14 +473,16 @@ run_migrations
 // DefaultScenarios returns the built-in scenarios as fresh instances. Each
 // call allocates new scenario objects because scenarios are stateful (the Go
 // HTTP scenarios hold the running fault server between Prepare and Cleanup).
-func DefaultScenarios() []Scenario {
+// A misconfigured built-in returns an error instead of panicking so a tool
+// call can never crash the host process.
+func DefaultScenarios() ([]Scenario, error) {
 	timeout, err := NewHTTPFault("go:http-timeout", 200, 30, "/")
 	if err != nil {
-		panic("resilience: built-in scenario misconfiguration: " + err.Error())
+		return nil, fmt.Errorf("resilience: built-in scenario misconfiguration: %w", err)
 	}
 	five, err := NewHTTPFault("go:http-500", 500, 0, "/")
 	if err != nil {
-		panic("resilience: built-in scenario misconfiguration: " + err.Error())
+		return nil, fmt.Errorf("resilience: built-in scenario misconfiguration: %w", err)
 	}
 	// Shell scenarios (B5, second ecosystem) are stateless, but they follow
 	// the same fresh-instance contract for symmetry.
@@ -492,7 +494,7 @@ func DefaultScenarios() []Scenario {
 		"trap",
 	)
 	if err != nil {
-		panic("resilience: built-in scenario misconfiguration: " + err.Error())
+		return nil, fmt.Errorf("resilience: built-in scenario misconfiguration: %w", err)
 	}
 	shellUnsetVariable, err := NewShellScenario(
 		"shell:unset-variable",
@@ -502,7 +504,7 @@ func DefaultScenarios() []Scenario {
 		"DEPLOY_TARGET=",
 	)
 	if err != nil {
-		panic("resilience: built-in scenario misconfiguration: " + err.Error())
+		return nil, fmt.Errorf("resilience: built-in scenario misconfiguration: %w", err)
 	}
 	shellMissingErrorHandling, err := NewShellScenario(
 		"shell:missing-error-handling",
@@ -512,9 +514,9 @@ func DefaultScenarios() []Scenario {
 		"$?",
 	)
 	if err != nil {
-		panic("resilience: built-in scenario misconfiguration: " + err.Error())
+		return nil, fmt.Errorf("resilience: built-in scenario misconfiguration: %w", err)
 	}
-	return []Scenario{timeout, five, shellUnhandledExit, shellUnsetVariable, shellMissingErrorHandling}
+	return []Scenario{timeout, five, shellUnhandledExit, shellUnsetVariable, shellMissingErrorHandling}, nil
 }
 
 // --- Helpers ---

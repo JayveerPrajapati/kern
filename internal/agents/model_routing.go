@@ -1,9 +1,9 @@
 package agents
 
 import (
-	"os"
 	"time"
 
+	"github.com/JayveerPrajapati/kern/internal/config"
 	"github.com/JayveerPrajapati/kern/internal/domain"
 )
 
@@ -19,16 +19,18 @@ import (
 // KERN_MODEL_REVIEWER, KERN_MODEL_SECURITY, KERN_MODEL_TESTER, KERN_MODEL_SRE.
 // A role-specific var takes precedence over KERN_MODEL_DEFAULT, which in turn
 // takes precedence over the hardcoded defaults computed from risk/complexity.
+// The same per-role overrides can be declared in .kern/config.json under
+// llm.model_roles ({"planner": "...", ...}); env vars still win per role.
 func RouteModel(role Role, risk domain.RiskLevel, complexity string) domain.ModelRoutingDecision {
 	decision := routeModelBase(risk, complexity)
-	if env := os.Getenv(modelEnvVar(role)); env != "" {
-		decision.Model = env
-		decision.Reason = "role-specific KERN_MODEL_* override"
+	if v := config.String("", modelEnvVar(role), modelRolesKey(role), ""); v != "" {
+		decision.Model = v
+		decision.Reason = "role-specific model override (env or config)"
 		return decision
 	}
-	if env := os.Getenv("KERN_MODEL_DEFAULT"); env != "" {
-		decision.Model = env
-		decision.Reason = "KERN_MODEL_DEFAULT override"
+	if v := config.String("", "KERN_MODEL_DEFAULT", "llm.model_roles.default", ""); v != "" {
+		decision.Model = v
+		decision.Reason = "default model override (env or config)"
 		return decision
 	}
 	return decision
@@ -58,19 +60,30 @@ func modelEnvVar(role Role) string {
 	}
 }
 
-// ModelOverride returns the role-specific model override from the environment
-// (KERN_MODEL_<ROLE>, falling back to KERN_MODEL_DEFAULT), or "" when no
-// override is set. Production agent entry points (coder/planner) use this to
-// let operators steer the model per role without forcing a provider-specific
-// hardcoded default. It is the production-facing entry point for model routing:
-// unlike RouteModel/RouteModelForTask, it does NOT fall back to a hardcoded
-// heuristic default, so an unset override leaves the provider's own default
-// in effect (provider-neutral).
-func ModelOverride(role Role) string {
-	if env := os.Getenv(modelEnvVar(role)); env != "" {
-		return env
+// modelRolesKey returns the config-file key for a role's model override:
+// "llm.model_roles.<role>", or "llm.model_roles.default" for roles without a
+// dedicated slot (mirroring modelEnvVar's KERN_MODEL_DEFAULT fallback).
+func modelRolesKey(role Role) string {
+	if modelEnvVar(role) == "KERN_MODEL_DEFAULT" {
+		return "llm.model_roles.default"
 	}
-	return os.Getenv("KERN_MODEL_DEFAULT")
+	return "llm.model_roles." + string(role)
+}
+
+// ModelOverride returns the role-specific model override from the environment
+// or .kern/config.json (llm.model_roles.<role>, falling back to
+// llm.model_roles.default), or "" when no override is set. Production agent
+// entry points (coder/planner) use this to let operators steer the model per
+// role without forcing a provider-specific hardcoded default. It is the
+// production-facing entry point for model routing: unlike
+// RouteModel/RouteModelForTask, it does NOT fall back to a hardcoded heuristic
+// default, so an unset override leaves the provider's own default in effect
+// (provider-neutral).
+func ModelOverride(role Role) string {
+	if v := config.String("", modelEnvVar(role), modelRolesKey(role), ""); v != "" {
+		return v
+	}
+	return config.String("", "KERN_MODEL_DEFAULT", "llm.model_roles.default", "")
 }
 
 // routeModelBase computes the deterministic default model selection from risk
@@ -149,15 +162,15 @@ func routeModelWithFactors(base domain.ModelRoutingDecision, f domain.RoutingFac
 // adjustments and honors the same env overrides as RouteModel.
 func RouteModelForTask(role Role, risk domain.RiskLevel, complexity string, f domain.RoutingFactors) domain.ModelRoutingDecision {
 	decision := routeModelWithFactors(routeModelBase(risk, complexity), f)
-	// Honor env overrides (same precedence as RouteModel).
-	if env := os.Getenv(modelEnvVar(role)); env != "" {
-		decision.Model = env
-		decision.Reason = "role-specific KERN_MODEL_* override"
+	// Honor env/config overrides (same precedence as RouteModel).
+	if v := config.String("", modelEnvVar(role), modelRolesKey(role), ""); v != "" {
+		decision.Model = v
+		decision.Reason = "role-specific model override (env or config)"
 		return decision
 	}
-	if env := os.Getenv("KERN_MODEL_DEFAULT"); env != "" {
-		decision.Model = env
-		decision.Reason = "KERN_MODEL_DEFAULT override"
+	if v := config.String("", "KERN_MODEL_DEFAULT", "llm.model_roles.default", ""); v != "" {
+		decision.Model = v
+		decision.Reason = "default model override (env or config)"
 		return decision
 	}
 	return decision

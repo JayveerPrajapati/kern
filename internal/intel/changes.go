@@ -108,8 +108,8 @@ func AnalyzeChangesRanged(ix *index.Index, changes []FileChange) *ChangesReport 
 			}
 			// A changed symbol that calls into a hub broadcasts its change
 			// through every caller of the hub.
-			for _, c := range ix.Calls[s] {
-				if hubs[c] {
+			for _, ce := range ix.Calls[s] {
+				if hubs[ce.Target] {
 					risk += 0.5
 					break
 				}
@@ -302,10 +302,39 @@ func Review(ix *index.Index, files []string, maxTokens int) string {
 	return ReviewRanged(ix, changes, maxTokens)
 }
 
+// ReviewWithRuntime renders Review with a runtime overlay. overlays render
+// one extra line per changed file (e.g. runtime.Overlay(src) from the
+// internal/runtime package) — the overlay seam keeps intel free of a runtime
+// dependency.
+func ReviewWithRuntime(ix *index.Index, files []string, maxTokens int, overlays ...func(file string) string) string {
+	changes := make([]FileChange, len(files))
+	for i, f := range files {
+		changes[i] = FileChange{File: f}
+	}
+	return ReviewRanged(ix, changes, maxTokens, overlays...)
+}
+
 // ReviewRanged is the line-aware variant of Review: symbol impact is scoped to
 // the added-line ranges of the diff, and each changed symbol is shown with its
-// file:line span.
-func ReviewRanged(ix *index.Index, changes []FileChange, maxTokens int) string {
+// file:line span. Optional overlays render one extra line per changed file
+// after the blast-radius line (e.g. a runtime profile line); existing call
+// sites are unaffected.
+func ReviewRanged(ix *index.Index, changes []FileChange, maxTokens int, overlays ...func(file string) string) string {
+	return reviewRanged(ix, changes, maxTokens, overlays)
+}
+
+// ReviewRangedWithLens renders ReviewRanged with a review-lens header line
+// prepended: "lens: <name> (<priorities>)\n" followed by the standard body.
+// The lens is passed as its already-resolved name plus the pre-rendered
+// priorities string so intel stays free of a lenses dependency (lenses ->
+// domain -> intel would close an import cycle); callers resolve the lens and
+// render priorities via lenses.Resolve / lenses.RenderPriorities. Output is
+// byte-identical to prepending the header to ReviewRanged's result.
+func ReviewRangedWithLens(ix *index.Index, changes []FileChange, maxTokens int, lensName, priorities string, overlays ...func(file string) string) string {
+	return fmt.Sprintf("lens: %s (%s)\n", lensName, priorities) + reviewRanged(ix, changes, maxTokens, overlays)
+}
+
+func reviewRanged(ix *index.Index, changes []FileChange, maxTokens int, overlays []func(file string) string) string {
 	if maxTokens <= 0 {
 		maxTokens = 8000
 	}
@@ -325,6 +354,11 @@ func ReviewRanged(ix *index.Index, changes []FileChange, maxTokens int) string {
 			b.WriteString(" · CROSS-PACKAGE")
 		}
 		b.WriteString("\n")
+		for _, overlay := range overlays {
+			if line := overlay(c.File); line != "" {
+				b.WriteString(line)
+			}
+		}
 		spans := symbolSpans(ix, c.File, c.Symbols)
 		for _, s := range c.Symbols {
 			where := ""

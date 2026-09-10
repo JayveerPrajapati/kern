@@ -19,17 +19,21 @@ package script
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
 	goruntime "runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/JayveerPrajapati/kern/internal/governance"
 	"github.com/JayveerPrajapati/kern/internal/processgroup"
 )
 
@@ -87,6 +91,15 @@ type Run struct {
 	// opted in via KERN_ALLOW_NO_ISOLATE=1 — otherwise it is silently ignored
 	// and isolation is kept (an arbitrary agent call can never drop isolation).
 	NoIsolate bool
+	// Egress lists operator/caller-supplied egress targets ("host:port") this
+	// script may contact. They are semantically identical to `# egress:` /
+	// `// egress:` comment declarations: on unisolated runs the deny-by-default
+	// gate is satisfied by structured OR comment declarations (union — both
+	// apply), every structured target is policy-checked via CheckEgressResource,
+	// and an entry that is not a valid "host:port" refuses the run with an
+	// error naming the offending value. Optional; callers that don't set it are
+	// unaffected.
+	Egress []string
 }
 
 // Result is the outcome of one script execution.
@@ -132,9 +145,103 @@ func networkNS() []string {
 // allowUnisolated reports whether the local operator has explicitly opted in
 // to running scripts without network isolation (KERN_ALLOW_UNISOLATED=1, or
 // the pre-existing alias KERN_ALLOW_NET=1). Only the operator's environment
-// can set this — an arbitrary agent call never can.
+// can set this — an arbitrary agent call never can. Parsing is strict: only
+// the literal value "1" opts in; any other value ("0", "true", "yes", ...)
+// is treated as unset.
 func allowUnisolated() bool {
-	return os.Getenv("KERN_ALLOW_UNISOLATED") != "" || os.Getenv("KERN_ALLOW_NET") != ""
+	return os.Getenv("KERN_ALLOW_UNISOLATED") == "1" || os.Getenv("KERN_ALLOW_NET") == "1"
+}
+
+// parseEgressTargets scans script source for egress declaration lines —
+// "# egress:" (shell/Python-family) and "// egress:" (JS/TS-family) comments,
+// exact case-sensitive prefix, any leading whitespace allowed — and returns
+// the trimmed non-empty target values in order of appearance.
+func parseEgressTargets(code string) []string {
+	var targets []string
+	for _, line := range strings.Split(code, "\n") {
+		trimmed := strings.TrimSpace(line)
+		var target string
+		switch {
+		case strings.HasPrefix(trimmed, "# egress:"):
+			target = strings.TrimSpace(strings.TrimPrefix(trimmed, "# egress:"))
+		case strings.HasPrefix(trimmed, "// egress:"):
+			target = strings.TrimSpace(strings.TrimPrefix(trimmed, "// egress:"))
+		}
+		if target != "" {
+			targets = append(targets, target)
+		}
+	}
+	return targets
+}
+
+// networkCallRe matches network-shaped operations across languages. It is a
+// deliberately conservative heuristic (deny-by-default): a match does not
+// prove the script reaches the network, but the heuristic must not let real
+// egress slip through the unisolated gate. Bare command names (curl, wget,
+// ssh, ...) are matched on word boundaries; API forms (http.Get, net.Dial,
+// fetch, requests., urllib, ...) match their dotted/parameter shapes.
+var networkCallRe = regexp.MustCompile(
+	`(?i)\b(curl|wget|nc|netcat|ssh|scp|socket|fetch|axios|node-fetch|httpx|aiohttp|urllib|HttpClient|Invoke-WebRequest|Invoke-RestMethod)\b` +
+		`|net/http|net\.Dial|http\.(Get|Post|NewRequest|Client)|requests\.`)
+
+// containsNetworkCall reports whether code contains a network-shaped
+// operation. Used by the egress gate to deny-by-default: an unisolated script
+// that performs network operations must declare its egress targets.
+func containsNetworkCall(code string) bool {
+	return networkCallRe.MatchString(code)
+}
+
+// egressGate enforces the egress policy on unisolated runs. When the run is
+// network-isolated the netns blocks egress anyway, so no check is needed.
+// Unisolated runs are deny-by-default: a script whose code performs
+// network-shaped operations must declare at least one egress target —
+// either a structured Run.Egress entry or a "# egress:" (or "// egress:")
+// comment — otherwise the run is refused. Structured and comment
+// declarations are merged (union: both apply) and every declared target is
+// checked against the operator's KERN_EGRESS_POLICY (default local-only —
+// fail closed); any denied target refuses the run. A structured entry that
+// is not a valid "host:port" is refused with an error naming the offending
+// value (comment declarations keep their existing lenient handling).
+func egressGate(code string, structured []string, isolated bool) error {
+	if isolated {
+		return nil
+	}
+	var targets []string
+	for _, target := range structured {
+		t := strings.TrimSpace(target)
+		if t == "" {
+			continue
+		}
+		if !validEgressTarget(t) {
+			return fmt.Errorf("invalid egress target %q: expected \"host:port\" (e.g. \"api.example.com:443\"); fix or remove the egress declaration", t)
+		}
+		targets = append(targets, t)
+	}
+	targets = append(targets, parseEgressTargets(code)...)
+	if len(targets) == 0 && containsNetworkCall(code) {
+		return errors.New("script performs network operations but declares no egress targets; add `# egress: host:port` (or `// egress:`) declarations, pass the egress argument, or run isolated")
+	}
+	rule := governance.EgressRule{Policy: governance.EgressPolicyFromEnv()}
+	for _, target := range targets {
+		if dec := governance.CheckEgressResource(rule, target); !dec.Allowed {
+			return fmt.Errorf("egress policy %q denies target %q (%s; fail-closed); set KERN_EGRESS_POLICY=external-redacted (or external-approved) to allow", rule.Policy, target, dec.Reason)
+		}
+	}
+	return nil
+}
+
+// validEgressTarget reports whether target is a well-formed "host:port"
+// egress declaration: a non-empty host and a numeric port in 1..65535
+// (IPv6 addresses bracketed as usual for net.SplitHostPort). Empty and
+// missing-port values fail so callers get a clear error naming the offending
+// structured declaration instead of a generic policy denial.
+func validEgressTarget(target string) bool {
+	host, port, err := net.SplitHostPort(target)
+	if err != nil || host == "" {
+		return false
+	}
+	n, err := strconv.Atoi(port)
+	return err == nil && n >= 1 && n <= 65535
 }
 
 // NetworkIsolationAvailable reports whether script runs can be network-isolated
@@ -237,8 +344,9 @@ func RunScript(r Run) *Result {
 
 	// Defense in depth: an arbitrary agent call must never be able to drop
 	// isolation and inherit os.Environ(). Only the local operator's explicit
-	// KERN_ALLOW_NO_ISOLATE=1 flag makes NoIsolate effective.
-	if r.NoIsolate && os.Getenv("KERN_ALLOW_NO_ISOLATE") == "" {
+	// KERN_ALLOW_NO_ISOLATE=1 flag makes NoIsolate effective; any other value
+	// ("0", "true", ...) is treated as unset.
+	if r.NoIsolate && os.Getenv("KERN_ALLOW_NO_ISOLATE") != "1" {
 		r.NoIsolate = false
 	}
 	var ns []string
@@ -258,9 +366,19 @@ func RunScript(r Run) *Result {
 			return res
 		}
 	}
+	// Egress gate: declared "# egress:" targets (and structured Run.Egress
+	// entries) are enforced on unisolated runs (a netns blocks egress
+	// regardless). Fail closed under the operator's KERN_EGRESS_POLICY — the
+	// NoIsolate path is gated too, since it runs with full network access.
+	if err := egressGate(code, r.Egress, res.Isolated); err != nil {
+		res.Err = err
+		return res
+	}
 	env := sandboxEnv(dir)
 	if r.NoIsolate {
-		env = os.Environ()
+		// Unisolated runs may inherit the operator's full environment, so
+		// secret-carrying vars are stripped before spawn.
+		env = governance.StripSecrets(os.Environ(), governance.DefaultSecretFilter())
 	}
 
 	// wrap prepends the unshare network namespace when available.

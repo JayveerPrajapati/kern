@@ -67,179 +67,200 @@ func (s *Server) handleAgentCoordination(ctx context.Context, args map[string]an
 
 	switch action {
 	case "handoff":
-		from := argString(args, "from_agent")
-		if from == "" {
-			from = agentID
-		}
-		if from == "" {
-			return "", fmt.Errorf("kern_agent_coordination: 'from_agent' or 'agent_id' required for handoff")
-		}
-		to := argString(args, "to_agent")
-		if to == "" {
-			to = "*"
-		}
-		taskID := argString(args, "task_id")
-		if taskID == "" {
-			taskID = fmt.Sprintf("task-%d", time.Now().UnixNano()%100000)
-		}
-
-		var payload map[string]any
-		if p, ok := args["payload"].(map[string]any); ok {
-			payload = p
-		}
-
-		handoff := AgentHandoff{
-			ID:        fmt.Sprintf("hf-%d", time.Now().UnixNano()%100000),
-			FromAgent: from,
-			ToAgent:   to,
-			TaskID:    taskID,
-			CreatedAt: now,
-			Notes:     argString(args, "notes"),
-			Payload:   payload,
-			Status:    "pending",
-		}
-		activeHandoffs[root] = append(activeHandoffs[root], handoff)
-
-		dir := filepath.Join(root, ".kern", "coordination")
-		_ = os.MkdirAll(dir, 0o755)
-		if b, err := json.MarshalIndent(handoff, "", "  "); err == nil {
-			_ = os.WriteFile(filepath.Join(dir, handoff.ID+".json"), b, 0o644)
-		}
-
-		if format == "json" {
-			data, _ := json.MarshalIndent(map[string]any{
-				"status":  "created",
-				"handoff": handoff,
-			}, "", "  ")
-			return string(data), nil
-		}
-		return fmt.Sprintf("✅ Handoff %s registered: %s ➡️ %s (Task: %s)\nNotes: %s", handoff.ID, from, to, taskID, handoff.Notes), nil
-
+		return s.coordHandoff(root, now, agentID, format, args)
 	case "claim":
-		if agentID == "" {
-			return "", fmt.Errorf("kern_agent_coordination: 'agent_id' is required to claim resource")
-		}
-		resource := argString(args, "resource")
-		if resource == "" {
-			return "", fmt.Errorf("kern_agent_coordination: 'resource' is required to claim")
-		}
-
-		if existing, exists := activeClaims[root][resource]; exists {
-			if existing.AgentID != agentID && now.Before(existing.ExpiresAt) {
-				msg := fmt.Sprintf("❌ Resource %q is already claimed by agent %q (expires in %ds)", resource, existing.AgentID, int(existing.ExpiresAt.Sub(now).Seconds()))
-				if format == "json" {
-					data, _ := json.MarshalIndent(map[string]any{
-						"claimed":      false,
-						"conflict":     true,
-						"held_by":      existing.AgentID,
-						"expires_in_s": int(existing.ExpiresAt.Sub(now).Seconds()),
-						"message":      msg,
-					}, "", "  ")
-					return string(data), nil
-				}
-				return msg, nil
-			}
-		}
-
-		ttl := 300
-		if ttlStr := argString(args, "ttl_seconds"); ttlStr != "" {
-			if n, err := strconv.Atoi(ttlStr); err == nil && n > 0 {
-				ttl = n
-			}
-		} else if n, ok := args["ttl_seconds"].(float64); ok && n > 0 {
-			ttl = int(n)
-		}
-
-		expiresAt := now.Add(time.Duration(ttl) * time.Second)
-		claim := ResourceClaim{
-			Resource:  resource,
-			AgentID:   agentID,
-			ClaimedAt: now,
-			ExpiresAt: expiresAt,
-		}
-		activeClaims[root][resource] = claim
-
-		if format == "json" {
-			data, _ := json.MarshalIndent(map[string]any{
-				"claimed":    true,
-				"resource":   resource,
-				"agent_id":   agentID,
-				"ttl_s":      ttl,
-				"expires_at": expiresAt.Format(time.RFC3339),
-			}, "", "  ")
-			return string(data), nil
-		}
-		return fmt.Sprintf("🔒 Resource %q successfully claimed by %q for %ds", resource, agentID, ttl), nil
-
+		return s.coordClaim(root, now, agentID, format, args)
 	case "release":
-		resource := argString(args, "resource")
-		if resource == "" {
-			return "", fmt.Errorf("kern_agent_coordination: 'resource' is required to release")
-		}
-		existing, exists := activeClaims[root][resource]
-		if !exists {
-			return fmt.Sprintf("Resource %q was not claimed.", resource), nil
-		}
-		if agentID != "" && existing.AgentID != agentID {
-			return "", fmt.Errorf("kern_agent_coordination: cannot release resource %q held by %q (caller is %q)", resource, existing.AgentID, agentID)
-		}
-		delete(activeClaims[root], resource)
-		return fmt.Sprintf("🔓 Resource %q released successfully", resource), nil
-
+		return s.coordRelease(root, agentID, args)
 	case "inbox":
-		var myHandoffs []AgentHandoff
-		for _, h := range activeHandoffs[root] {
-			if agentID == "" || h.ToAgent == agentID || h.ToAgent == "*" {
-				myHandoffs = append(myHandoffs, h)
-			}
-		}
-		if format == "json" {
-			data, _ := json.MarshalIndent(map[string]any{
-				"agent_id": agentID,
-				"count":    len(myHandoffs),
-				"handoffs": myHandoffs,
-			}, "", "  ")
-			return string(data), nil
-		}
-		var sb strings.Builder
-		sb.WriteString(fmt.Sprintf("## Agent %q Inbox (%d pending)\n\n", agentID, len(myHandoffs)))
-		for _, h := range myHandoffs {
-			sb.WriteString(fmt.Sprintf("- **%s** (%s ➡️ %s | %s): %s\n", h.ID, h.FromAgent, h.ToAgent, h.TaskID, h.Notes))
-		}
-		return sb.String(), nil
-
-	case "status":
-		fallthrough
+		return s.coordInbox(root, agentID, format)
+	case "status", "":
+		return s.coordStatus(root, now, format)
 	default:
-		var claimList []ResourceClaim
-		for _, c := range activeClaims[root] {
-			claimList = append(claimList, c)
-		}
-		if format == "json" {
-			data, _ := json.MarshalIndent(map[string]any{
-				"claims":   claimList,
-				"handoffs": activeHandoffs[root],
-			}, "", "  ")
-			return string(data), nil
-		}
-		var sb strings.Builder
-		sb.WriteString("## Multi-Agent Workspace Coordination\n\n")
-		sb.WriteString(fmt.Sprintf("**Active Claims:** %d | **Total Handoffs:** %d\n\n", len(claimList), len(activeHandoffs[root])))
-		if len(claimList) > 0 {
-			sb.WriteString("### 🔒 Claimed Resources\n")
-			for _, c := range claimList {
-				sb.WriteString(fmt.Sprintf("- `%s`: held by agent `%s` (expires in %ds)\n",
-					c.Resource, c.AgentID, int(c.ExpiresAt.Sub(now).Seconds())))
-			}
-			sb.WriteString("\n")
-		}
-		if len(activeHandoffs[root]) > 0 {
-			sb.WriteString("### 📬 Active Handoffs\n")
-			for _, h := range activeHandoffs[root] {
-				sb.WriteString(fmt.Sprintf("- **%s** (%s ➡️ %s): %s [%s]\n",
-					h.ID, h.FromAgent, h.ToAgent, h.Notes, h.Status))
-			}
-		}
-		return sb.String(), nil
+		return s.coordStatus(root, now, format)
 	}
+}
+
+func (s *Server) coordHandoff(root string, now time.Time, agentID, format string, args map[string]any) (string, error) {
+
+	from := argString(args, "from_agent")
+	if from == "" {
+		from = agentID
+	}
+	if from == "" {
+		return "", fmt.Errorf("kern_agent_coordination: 'from_agent' or 'agent_id' required for handoff")
+	}
+	to := argString(args, "to_agent")
+	if to == "" {
+		to = "*"
+	}
+	taskID := argString(args, "task_id")
+	if taskID == "" {
+		taskID = fmt.Sprintf("task-%d", time.Now().UnixNano()%100000)
+	}
+
+	var payload map[string]any
+	if p, ok := args["payload"].(map[string]any); ok {
+		payload = p
+	}
+
+	handoff := AgentHandoff{
+		ID:        fmt.Sprintf("hf-%d", time.Now().UnixNano()%100000),
+		FromAgent: from,
+		ToAgent:   to,
+		TaskID:    taskID,
+		CreatedAt: now,
+		Notes:     argString(args, "notes"),
+		Payload:   payload,
+		Status:    "pending",
+	}
+	activeHandoffs[root] = append(activeHandoffs[root], handoff)
+
+	dir := filepath.Join(root, ".kern", "coordination")
+	_ = os.MkdirAll(dir, 0o755)
+	if b, err := json.MarshalIndent(handoff, "", "  "); err == nil {
+		_ = os.WriteFile(filepath.Join(dir, handoff.ID+".json"), b, 0o644)
+	}
+
+	if format == "json" {
+		data, _ := json.MarshalIndent(map[string]any{
+			"status":  "created",
+			"handoff": handoff,
+		}, "", "  ")
+		return string(data), nil
+	}
+	return fmt.Sprintf("✅ Handoff %s registered: %s ➡️ %s (Task: %s)\nNotes: %s", handoff.ID, from, to, taskID, handoff.Notes), nil
+}
+
+func (s *Server) coordClaim(root string, now time.Time, agentID, format string, args map[string]any) (string, error) {
+
+	if agentID == "" {
+		return "", fmt.Errorf("kern_agent_coordination: 'agent_id' is required to claim resource")
+	}
+	resource := argString(args, "resource")
+	if resource == "" {
+		return "", fmt.Errorf("kern_agent_coordination: 'resource' is required to claim")
+	}
+
+	if existing, exists := activeClaims[root][resource]; exists {
+		if existing.AgentID != agentID && now.Before(existing.ExpiresAt) {
+			msg := fmt.Sprintf("❌ Resource %q is already claimed by agent %q (expires in %ds)", resource, existing.AgentID, int(existing.ExpiresAt.Sub(now).Seconds()))
+			if format == "json" {
+				data, _ := json.MarshalIndent(map[string]any{
+					"claimed":      false,
+					"conflict":     true,
+					"held_by":      existing.AgentID,
+					"expires_in_s": int(existing.ExpiresAt.Sub(now).Seconds()),
+					"message":      msg,
+				}, "", "  ")
+				return string(data), nil
+			}
+			return msg, nil
+		}
+	}
+
+	ttl := 300
+	if ttlStr := argString(args, "ttl_seconds"); ttlStr != "" {
+		if n, err := strconv.Atoi(ttlStr); err == nil && n > 0 {
+			ttl = n
+		}
+	} else if n, ok := args["ttl_seconds"].(float64); ok && n > 0 {
+		ttl = int(n)
+	}
+
+	expiresAt := now.Add(time.Duration(ttl) * time.Second)
+	claim := ResourceClaim{
+		Resource:  resource,
+		AgentID:   agentID,
+		ClaimedAt: now,
+		ExpiresAt: expiresAt,
+	}
+	activeClaims[root][resource] = claim
+
+	if format == "json" {
+		data, _ := json.MarshalIndent(map[string]any{
+			"claimed":    true,
+			"resource":   resource,
+			"agent_id":   agentID,
+			"ttl_s":      ttl,
+			"expires_at": expiresAt.Format(time.RFC3339),
+		}, "", "  ")
+		return string(data), nil
+	}
+	return fmt.Sprintf("🔒 Resource %q successfully claimed by %q for %ds", resource, agentID, ttl), nil
+}
+
+func (s *Server) coordRelease(root, agentID string, args map[string]any) (string, error) {
+
+	resource := argString(args, "resource")
+	if resource == "" {
+		return "", fmt.Errorf("kern_agent_coordination: 'resource' is required to release")
+	}
+	existing, exists := activeClaims[root][resource]
+	if !exists {
+		return fmt.Sprintf("Resource %q was not claimed.", resource), nil
+	}
+	if agentID != "" && existing.AgentID != agentID {
+		return "", fmt.Errorf("kern_agent_coordination: cannot release resource %q held by %q (caller is %q)", resource, existing.AgentID, agentID)
+	}
+	delete(activeClaims[root], resource)
+	return fmt.Sprintf("🔓 Resource %q released successfully", resource), nil
+}
+
+func (s *Server) coordInbox(root, agentID, format string) (string, error) {
+
+	var myHandoffs []AgentHandoff
+	for _, h := range activeHandoffs[root] {
+		if agentID == "" || h.ToAgent == agentID || h.ToAgent == "*" {
+			myHandoffs = append(myHandoffs, h)
+		}
+	}
+	if format == "json" {
+		data, _ := json.MarshalIndent(map[string]any{
+			"agent_id": agentID,
+			"count":    len(myHandoffs),
+			"handoffs": myHandoffs,
+		}, "", "  ")
+		return string(data), nil
+	}
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("## Agent %q Inbox (%d pending)\n\n", agentID, len(myHandoffs)))
+	for _, h := range myHandoffs {
+		sb.WriteString(fmt.Sprintf("- **%s** (%s ➡️ %s | %s): %s\n", h.ID, h.FromAgent, h.ToAgent, h.TaskID, h.Notes))
+	}
+	return sb.String(), nil
+}
+
+func (s *Server) coordStatus(root string, now time.Time, format string) (string, error) {
+
+	var claimList []ResourceClaim
+	for _, c := range activeClaims[root] {
+		claimList = append(claimList, c)
+	}
+	if format == "json" {
+		data, _ := json.MarshalIndent(map[string]any{
+			"claims":   claimList,
+			"handoffs": activeHandoffs[root],
+		}, "", "  ")
+		return string(data), nil
+	}
+	var sb strings.Builder
+	sb.WriteString("## Multi-Agent Workspace Coordination\n\n")
+	sb.WriteString(fmt.Sprintf("**Active Claims:** %d | **Total Handoffs:** %d\n\n", len(claimList), len(activeHandoffs[root])))
+	if len(claimList) > 0 {
+		sb.WriteString("### 🔒 Claimed Resources\n")
+		for _, c := range claimList {
+			sb.WriteString(fmt.Sprintf("- `%s`: held by agent `%s` (expires in %ds)\n",
+				c.Resource, c.AgentID, int(c.ExpiresAt.Sub(now).Seconds())))
+		}
+		sb.WriteString("\n")
+	}
+	if len(activeHandoffs[root]) > 0 {
+		sb.WriteString("### 📬 Active Handoffs\n")
+		for _, h := range activeHandoffs[root] {
+			sb.WriteString(fmt.Sprintf("- **%s** (%s ➡️ %s): %s [%s]\n",
+				h.ID, h.FromAgent, h.ToAgent, h.Notes, h.Status))
+		}
+	}
+	return sb.String(), nil
 }

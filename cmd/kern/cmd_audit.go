@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	stdlog "log"
@@ -8,7 +9,6 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/JayveerPrajapati/kern/internal/app"
 	kctx "github.com/JayveerPrajapati/kern/internal/context"
 	"github.com/JayveerPrajapati/kern/internal/governance"
 	"github.com/JayveerPrajapati/kern/internal/storage"
@@ -41,25 +41,14 @@ func runAudit(rest []string) {
 		root = "."
 	}
 
-	p, err := app.New(root)
-	if err != nil {
-		fatal("%v", err)
-	}
-	ts := app.NewTaskService(p, nil)
-
 	taskID := ""
 	if len(args) > 0 {
 		taskID = args[0]
 	}
 
-	var entries []governance.AuditEntry
-	if taskID != "" {
-		entries, err = ts.AuditEntriesForTask(taskID)
-	} else {
-		entries, err = ts.AuditEntries()
-	}
+	entries, err := svc.Governance.Audit(context.Background(), root, taskID)
 	if err != nil {
-		fatal("%v", err)
+		fatal("Audit: %v", err)
 	}
 
 	if len(entries) == 0 {
@@ -70,7 +59,27 @@ func runAudit(rest []string) {
 		}
 		return
 	}
-
+	// Verify the tamper-evident hash chain before displaying records: the
+	// viewer must not present forged entries as genuine (validation W-3).
+	// Same semantics as the platform startup check (internal/app/platform.go)
+	// and the hard gate in `kern evidence verify`; this is a warning, not a
+	// refusal — `kern audit repair` and `kern evidence verify` remain the
+	// explicit remediation commands.
+	if auditDir := filepath.Join(root, ".kern", "audit"); isDir(auditDir) {
+		l := governance.NewAuditLog().
+			WithStore(storage.NewLog(auditDir)).
+			WithLockPath(filepath.Join(auditDir, ".lock"))
+		if _, err := l.Replay(); err == nil {
+			all := l.All()
+			if brk, verified := l.VerifyChainReport(); brk >= 0 {
+				if verified == 0 {
+					fmt.Fprintf(os.Stderr, "WARNING: audit log chain verification could not verify ANY entries (0 of %d) — this indicates either a legacy version migration or a full-chain rewrite; if this is not a known upgrade, investigate before trusting governance records (kern audit repair / kern evidence verify)\n", len(all))
+				} else {
+					fmt.Fprintf(os.Stderr, "WARNING: audit log tamper chain verification FAILED at entry %d of %d — governance records may have been modified; investigate before trusting them (kern audit repair / kern evidence verify)\n", brk+1, len(all))
+				}
+			}
+		}
+	}
 	if f.json {
 		printJSON(entries)
 		return

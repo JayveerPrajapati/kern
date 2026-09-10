@@ -1,6 +1,14 @@
 package domain
 
-import "time"
+import (
+	"fmt"
+	"time"
+)
+
+// EnvelopeVersionV1 is the current context envelope version. Packets at or
+// below this version are understood by every consumer; higher versions are
+// rejected by Validate until a Migrate path lands.
+const EnvelopeVersionV1 = 1
 
 // ContextPacket is the assembled context for a task, combining graph + memory
 // + evidence + architecture + git + risk into one structured response. It
@@ -26,4 +34,25 @@ type ContextPacket struct {
 	// claims. It is nil when no conflicts/staleness were detected —
 	// a nil report means the packet may be treated as internally consistent.
 	Consistency *ConsistencyReport
+	// EnvelopeVersion is the context envelope version. Zero means the packet
+	// predates versioning and is treated as V1 by Validate.
+	EnvelopeVersion int `json:"envelope_version,omitempty"`
+	// SchemaVersion is the human-readable schema identifier for the envelope
+	// (e.g. "1.0.0"). It is set only when the emitter provides one.
+	SchemaVersion string `json:"schema_version,omitempty"`
+}
+
+// Validate reports whether the packet's envelope version is supported. A zero
+// EnvelopeVersion is treated as V1 (pre-versioning packets).
+func (p *ContextPacket) Validate() error {
+	if p.EnvelopeVersion > EnvelopeVersionV1 {
+		return fmt.Errorf("unsupported envelope version %d (latest: %d)", p.EnvelopeVersion, EnvelopeVersionV1)
+	}
+	return nil
+}
+
+// Migrate upgrades the packet to the latest envelope version. V1 is current:
+// it returns nil without mutation.
+func (p *ContextPacket) Migrate() error {
+	return nil
 }

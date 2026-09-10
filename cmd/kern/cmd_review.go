@@ -3,12 +3,18 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/JayveerPrajapati/kern/internal/agent"
 	"github.com/JayveerPrajapati/kern/internal/app"
 	"github.com/JayveerPrajapati/kern/internal/domain"
+	"github.com/JayveerPrajapati/kern/internal/eval"
 	"github.com/JayveerPrajapati/kern/internal/eventbus"
 	"github.com/JayveerPrajapati/kern/internal/governance"
 	"github.com/JayveerPrajapati/kern/internal/intel"
+	"github.com/JayveerPrajapati/kern/internal/lenses"
 	"github.com/JayveerPrajapati/kern/internal/ownership"
+	"github.com/JayveerPrajapati/kern/internal/profiles"
+	"github.com/JayveerPrajapati/kern/internal/runtime"
+	"github.com/JayveerPrajapati/kern/internal/skills"
 	"github.com/JayveerPrajapati/kern/internal/verification"
 	"github.com/JayveerPrajapati/kern/internal/verify"
 	"github.com/JayveerPrajapati/kern/internal/whatif"
@@ -29,16 +35,25 @@ func runAnalyze(cmd string, rest []string) {
 	if len(args) < 1 || args[0] == "" {
 		fatalUsage("usage: kern %s <change> [--root ROOT]", cmd)
 	}
+	// --lens/--profile are only honored for kern analyze: AnalyzeWithLens
+	// re-ranks packet facts via TaskService, and plan/risk have no lens or
+	// profile surface. Reject them loudly instead of silently dropping.
+	if cmd != "analyze" && (f.lens != "" || f.profile != "") {
+		fatal("--lens/--profile are only supported for kern analyze")
+	}
 	change := args[0]
 	p, err := app.New(root)
 	if err != nil {
-		fatal("%v", err)
+		fatal("Analyze: %v", err)
 	}
 	// When --task is set, create an authoritative Task record that tracks the
 	// full lifecycle (context packet, risks, evidence) and can be queried via
 	// `kern task <id>`. Without --task, the analysis runs stateless (the fast
 	// backward-compatible path).
-	if f.task != "" {
+	if f.task != "" || f.lens != "" {
+		// --lens requires the taskful path: AnalyzeWithLens re-ranks the
+		// packet facts via TaskService, which the stateless p.Analyze path
+		// cannot do.
 		ts := app.NewTaskService(p, eventbus.New()).WithPRProvider(app.AutoPRProvider())
 		if cmd == "plan" {
 			// Kern plan produces a structured domain.Plan via the
@@ -46,26 +61,42 @@ func runAnalyze(cmd string, rest []string) {
 			// architecture → plan artifact).
 			t, plan, text, err := ts.Plan(change)
 			if err != nil {
-				fatal("%v", err)
+				fatal("Analyze: %v", err)
 			}
 			fmt.Println("PLAN for: " + change)
 			fmt.Print(text)
 			fmt.Printf("\n[task: %s — state: %s — %d steps, risk=%s]\n", t.ID, t.State, len(plan.ImplementationSteps), plan.Risk)
 			return
 		}
-		t, text, err := ts.Analyze(change)
+		var t *agent.Task
+		var text string
+		if f.lens != "" {
+			t, text, err = ts.AnalyzeWithLens(change, f.lens)
+		} else {
+			t, text, err = ts.Analyze(change)
+		}
 		if err != nil {
-			fatal("%v", err)
+			fatal("Analyze: %v", err)
+		}
+		// --profile (analyze only): shape how the analysis is presented
+		// without changing the evidence (deterministic, no LLM).
+		if f.profile != "" {
+			pf, ok := profiles.NewRegistryWithBuiltins().Select(f.profile)
+			if !ok {
+				fatal("unknown profile %q", f.profile)
+			}
+			text = profiles.ApplyProfile(pf, text)
 		}
 		fmt.Println("ANALYSIS for: " + change)
 		fmt.Print(text)
 		fmt.Printf("\n[task: %s — state: %s]\n", t.ID, t.State)
+		return
 	}
 	if cmd == "plan" {
 		// Stateless plan path: run analyze then assemble a plan inline.
 		pkt, _, err := p.Analyze(change)
 		if err != nil {
-			fatal("%v", err)
+			fatal("Analyze: %v", err)
 		}
 		fmt.Println("PLAN for: " + change)
 		fmt.Print(renderStatelessPlan(change, pkt))
@@ -73,7 +104,16 @@ func runAnalyze(cmd string, rest []string) {
 	}
 	_, text, err := p.Analyze(change)
 	if err != nil {
-		fatal("%v", err)
+		fatal("Analyze: %v", err)
+	}
+	// --profile (analyze only): shape how the analysis is presented
+	// without changing the evidence (deterministic, no LLM).
+	if f.profile != "" {
+		pf, ok := profiles.NewRegistryWithBuiltins().Select(f.profile)
+		if !ok {
+			fatal("unknown profile %q", f.profile)
+		}
+		text = profiles.ApplyProfile(pf, text)
 	}
 	fmt.Println("ANALYSIS for: " + change)
 	fmt.Print(text)
@@ -95,11 +135,11 @@ func runRisk(rest []string) {
 	change := args[0]
 	p, err := app.New(root)
 	if err != nil {
-		fatal("%v", err)
+		fatal("Risk: %v", err)
 	}
 	_, text, err := p.Risk(change)
 	if err != nil {
-		fatal("%v", err)
+		fatal("Risk: %v", err)
 	}
 	fmt.Print(text)
 
@@ -136,12 +176,12 @@ func runExecute(rest []string) {
 	// execution.NewWorktree + manual verify path.
 	p, err := app.New(root)
 	if err != nil {
-		fatal("%v", err)
+		fatal("Execute: %v", err)
 	}
 	ts := app.NewTaskService(p, eventbus.New()).WithAgentID("cli").WithPRProvider(app.AutoPRProvider())
 	t, diff, v, err := ts.ExecuteAndVerify(string(pb), []string{"build"})
 	if err != nil {
-		fatal("%v", err)
+		fatal("Execute: %v", err)
 	}
 	fmt.Printf("verdict: %s\n", v.Verdict)
 	fmt.Printf("summary: %s\n", v.Summary)
@@ -172,12 +212,12 @@ func runWhatIf(cmd string, rest []string) {
 	}
 	p, err := app.New(root)
 	if err != nil {
-		fatal("%v", err)
+		fatal("WhatIf: %v", err)
 	}
 	ts := app.NewTaskService(p, nil).WithPRProvider(app.AutoPRProvider())
 	t, text, err := ts.WhatIf(whatif.ChangeKind(kind), change, newTarget)
 	if err != nil {
-		fatal("%v", err)
+		fatal("WhatIf: %v", err)
 	}
 	if f.json {
 		printJSON(map[string]any{
@@ -208,7 +248,7 @@ func runImpact(rest []string) {
 	change := args[0]
 	p, err := app.New(root)
 	if err != nil {
-		fatal("%v", err)
+		fatal("Impact: %v", err)
 	}
 	// Kern impact now produces the 11-question deterministic ImpactReport
 	// via TaskService.Impact (graph-driven, no LLM). The what-if kind/new-target
@@ -223,7 +263,7 @@ func runImpact(rest []string) {
 	}
 	t, rep, text, err := ts.Impact(change, impactOpts...)
 	if err != nil {
-		fatal("%v", err)
+		fatal("Impact: %v", err)
 	}
 	// Annotate impact output with owning teams (CODEOWNERS), best-effort: a
 	// missing CODEOWNERS or parse failure yields no teams, not a failure.
@@ -284,6 +324,163 @@ func runVerify(rest []string) {
 	if root == "" {
 		root = "."
 	}
+	// Silent-orchestrator verification modes (tracker: CLI flags spec
+	// Enhancements). Exactly one mode per invocation — mixing them is a usage
+	// error, not a best-effort union.
+	modes := 0
+	if f.verifyPipeline {
+		modes++
+	}
+	if f.verifySilent {
+		modes++
+	}
+	if f.verifyTokenReduction {
+		modes++
+	}
+	if f.evalDir != "" {
+		modes++
+	}
+	if f.skillDir != "" {
+		modes++
+	}
+	if f.scanPath != "" {
+		modes++
+	}
+	if modes > 1 {
+		fatal("use only one of --verify-pipeline/--verify-silent/--verify-token-reduction/--eval/--skill/--scan")
+	}
+	// Optional positional symbol for the Verify* helpers: `kern verify
+	// --verify-pipeline <symbol>` targets one symbol; without it the helpers
+	// run on "" and report the failed step (still exit 0, degraded).
+	symbol := ""
+	if len(args) > 0 {
+		symbol = args[0]
+	}
+	switch {
+	case f.verifyPipeline:
+		// End-to-end silent-orchestration run: index → context envelope →
+		// deterministic planner → progressive-disclosure retrieval → host
+		// injection/extraction into a temp copy of the repo.
+		rep := verification.VerifyFullPipeline(root, symbol)
+		if f.json {
+			printJSON(rep)
+			return
+		}
+		fmt.Printf("envelope_valid: %t\n", rep.EnvelopeValid)
+		fmt.Printf("plan_produced: %t\n", rep.PlanProduced)
+		fmt.Printf("handles_resolved: %t\n", rep.HandlesResolved)
+		fmt.Printf("injected: %t\n", rep.Injected)
+		fmt.Printf("extracted: %t\n", rep.Extracted)
+		fmt.Printf("silent: %t\n", rep.Silent)
+		fmt.Printf("token_reduction: %.2f\n", rep.TokenReduction)
+		fmt.Printf("evidence_retained: %.2f\n", rep.EvidenceRetained)
+		for _, s := range rep.Steps {
+			fmt.Printf("  - %s\n", s)
+		}
+		return
+	case f.verifySilent:
+		// Kern-invisibility check: the rendered pipeline must not leak
+		// kern-internal markers to a user/LLM.
+		ok, reasons := verification.VerifySilentOrchestration(root, symbol)
+		if f.json {
+			printJSON(map[string]any{"ok": ok, "reasons": reasons})
+			return
+		}
+		if ok {
+			fmt.Println("silent orchestration: PASS")
+		} else {
+			fmt.Println("silent orchestration: FAIL")
+		}
+		for _, r := range reasons {
+			fmt.Printf("  - %s\n", r)
+		}
+		return
+	case f.verifyTokenReduction:
+		// Token-reduction proof without critical-evidence loss via the eval
+		// harness (baseline = full packet, candidate = ~50% budget fit).
+		res, err := verification.VerifyTokenReduction(root, symbol)
+		if err != nil {
+			fatal("VerifyTokenReduction: %v", err)
+		}
+		if f.json {
+			printJSON(res)
+			return
+		}
+		fmt.Printf("score: %.2f\n", res.Score)
+		fmt.Printf("token_reduction: %.2f\n", res.TokenReduction)
+		fmt.Printf("evidence_retention: %.2f\n", res.EvidenceRetention)
+		fmt.Printf("error_rate: %.2f\n", res.ErrorRate)
+		fmt.Printf("reproducible: %t\n", res.Reproducible)
+		fmt.Printf("samples: %d\n", len(res.Samples))
+		return
+	case f.evalDir != "":
+		// --eval DIR: run the deterministic eval harness over user-supplied
+		// baseline/candidate samples (one JSON file per sample).
+		samples, err := eval.LoadSamplesFromDir(f.evalDir)
+		if err != nil {
+			fatal("Eval: %v", err)
+		}
+		// Standard rubric (the eval package's own tests use the same
+		// assertions): at least half the critical evidence must survive and
+		// at most half the samples may fail.
+		h := eval.NewEvalHarness(samples, 0, []eval.Assertion{
+			eval.AssertEvidenceRetention(0.5),
+			eval.AssertErrorRate(0.5),
+		})
+		res := h.Run()
+		if f.json {
+			printJSON(res)
+			return
+		}
+		fmt.Printf("score: %.2f\n", res.Score)
+		fmt.Printf("token_reduction: %.2f\n", res.TokenReduction)
+		fmt.Printf("evidence_retention: %.2f\n", res.EvidenceRetention)
+		fmt.Printf("error_rate: %.2f\n", res.ErrorRate)
+		fmt.Printf("reproducible: %t\n", res.Reproducible)
+		fmt.Printf("samples: %d\n", len(res.Samples))
+		return
+	case f.skillDir != "":
+		// --skill DIR: validate every portable skill (each immediate
+		// subdirectory containing a SKILL.md). The Skill struct carries no
+		// signature field, so only ValidateSkill applies.
+		skillList, err := skills.LoadSkillsFromDir(f.skillDir)
+		if err != nil {
+			fatal("Skills: %v", err)
+		}
+		valid := []string{}
+		invalid := []string{}
+		for _, s := range skillList {
+			if verr := skills.ValidateSkill(s); verr != nil {
+				fmt.Printf("skill %s: INVALID: %v\n", s.Name, verr)
+				invalid = append(invalid, fmt.Sprintf("%s: %v", s.Name, verr))
+				continue
+			}
+			fmt.Printf("skill %s (%s): valid\n", s.Name, s.Source)
+			valid = append(valid, s.Name)
+		}
+		if f.json {
+			printJSON(map[string]any{"valid": valid, "invalid": invalid})
+		}
+		return
+	case f.scanPath != "":
+		// Path-aware silent scan: check every indexed symbol whose file
+		// matches the scan path (exact file or directory prefix) for
+		// silent-orchestration marker leaks.
+		rep, err := verification.ScanSilent(root, f.scanPath, 0)
+		if err != nil {
+			fatal("Scan: %v", err)
+		}
+		if f.json {
+			printJSON(rep)
+			return
+		}
+		fmt.Printf("silent scan: %s — %d/%d symbols clean, %d violations\n", rep.Path, rep.Silent, rep.Symbols, rep.Violations)
+		for _, fi := range rep.Findings {
+			fmt.Printf("  - %s (%s): %s\n", fi.Symbol, fi.File, strings.Join(fi.Reasons, "; "))
+		}
+		fmt.Printf("- scanned %d symbols (limit 200)\n", rep.Symbols)
+		return
+	}
 	// Two forms share this subcommand. The high-level form is
 	// `kern verify <types>` (or `kern verify` with no positional, defaulting
 	// to build,test); the classic claims form is `kern verify <file|-> [root]`.
@@ -303,11 +500,11 @@ func runVerify(rest []string) {
 		// and the MCP kern_verify tool). Without KERN_ALLOW_EXEC=1 (or an exec
 		// tool in the KERN_TOOLS allowlist) the high-level form is refused.
 		if err := governance.CheckExec(); err != nil {
-			fatal("%v", err)
+			fatal("Verify: %v", err)
 		}
 		p, perr := app.New(root)
 		if perr != nil {
-			fatal("%v", perr)
+			fatal("%v — run kern index to rebuild it", perr)
 		}
 		ts := app.NewTaskService(p, nil).WithPRProvider(app.AutoPRProvider())
 		_, v, err := ts.Verify(types)
@@ -316,9 +513,9 @@ func runVerify(rest []string) {
 			// per-check status (report A11) instead of a bare error.
 			if v.Verdict != "" || v.Build != nil || v.UnitTests != nil || v.Security != nil || v.Architecture != nil || v.Dependency != nil {
 				fmt.Println(verification.RenderCompact(v))
-				os.Exit(1)
+				fatal("verification FAILED — see report above; fix failing checks and rerun kern verify")
 			}
-			fatal("%v", err)
+			fatal("Verify: %v", err)
 		}
 		if f.json {
 			printJSON(v)
@@ -398,7 +595,7 @@ func runVerify(rest []string) {
 		b, err = os.ReadFile(in)
 	}
 	if err != nil {
-		fatal("%v", err)
+		fatal("Verify: %v", err)
 	}
 	if len(strings.TrimSpace(string(b))) == 0 {
 		fatal("no claims to verify: %q is empty (pass a file of agent output or '-' for stdin)", in)
@@ -444,7 +641,7 @@ func runCheckDraft(rest []string) {
 		b, err = os.ReadFile(in)
 	}
 	if err != nil {
-		fatal("%v", err)
+		fatal("CheckDraft: %v", err)
 	}
 	ix, ierr := loadOrBuild(root)
 	if ierr != nil {
@@ -475,7 +672,7 @@ func runChanges(cmd string, rest []string) {
 	}
 	ix, err := intel.ReadIndex(root)
 	if err != nil {
-		fatal("%v", err)
+		fatal("Changes: %v", err)
 	}
 	var changes []intel.FileChange
 	if f.file != "" {
@@ -488,7 +685,7 @@ func runChanges(cmd string, rest []string) {
 		from, to := splitRange(f.range_)
 		changes, err = intel.FilesForRangeL(root, from, to)
 		if err != nil {
-			fatal("%v", err)
+			fatal("Changes: %v", err)
 		}
 	}
 	if len(changes) == 0 {
@@ -513,7 +710,35 @@ func runChanges(cmd string, rest []string) {
 			}
 			return
 		}
-		fmt.Println(intel.ReviewRanged(ix, changes, f.max))
+		// --runtime overlays each changed file with its service profile
+		// (directory base name matched against runtime service names).
+		var out string
+		if f.runtime {
+			out = intel.ReviewRanged(ix, changes, f.max, runtime.Overlay(runtime.LoadSource(root)))
+		} else {
+			out = intel.ReviewRanged(ix, changes, f.max)
+		}
+		// Review lens (mirrors the kern_review MCP tool): a named lens
+		// prepends its evidence-priority line so the caller knows which
+		// review posture the context is sized for. No lens arg -> output
+		// unchanged.
+		if f.lens != "" {
+			l, err := lenses.Resolve(f.lens)
+			if err != nil {
+				fatal("%v", err)
+			}
+			out = fmt.Sprintf("lens: %s (%s)\n", l.Name, lenses.RenderPriorities(l)) + out
+		}
+		// --profile shapes how the review is presented without changing the
+		// findings (deterministic, no LLM).
+		if f.profile != "" {
+			p, ok := profiles.NewRegistryWithUserProfiles(root).Select(f.profile)
+			if !ok {
+				fatal("unknown profile %q", f.profile)
+			}
+			out = profiles.ApplyProfile(p, out)
+		}
+		fmt.Println(out)
 		if report.TotalRisk > 0 {
 			fmt.Fprintf(os.Stderr, "kern: %d changed file(s) with risk (total %.1f); exit 1\n", len(report.Changes), report.TotalRisk)
 			panic(exitError{code: 1})
@@ -641,12 +866,12 @@ func runCorrelate(rest []string) {
 	}
 	p, err := app.New(root)
 	if err != nil {
-		fatal("%v", err)
+		fatal("Correlate: %v", err)
 	}
 	ts := app.NewTaskService(p, eventbus.New()).WithPRProvider(app.AutoPRProvider())
 	t, _, text, err := ts.Correlate(al)
 	if err != nil {
-		fatal("%v", err)
+		fatal("Correlate: %v", err)
 	}
 	fmt.Print(text)
 	fmt.Printf("\n[task: %s — state: %s]\n", t.ID, t.State)
@@ -669,12 +894,12 @@ func runLearn(rest []string) {
 	}
 	p, err := app.New(root)
 	if err != nil {
-		fatal("%v", err)
+		fatal("Learn: %v", err)
 	}
 	ts := app.NewTaskService(p, eventbus.New()).WithPRProvider(app.AutoPRProvider())
 	t, _, text, err := ts.Learn(threshold)
 	if err != nil {
-		fatal("%v", err)
+		fatal("Learn: %v", err)
 	}
 	fmt.Print(text)
 	fmt.Printf("\n[task: %s — state: %s]\n", t.ID, t.State)
@@ -691,12 +916,12 @@ func runModernize(rest []string) {
 	}
 	p, err := app.New(root)
 	if err != nil {
-		fatal("%v", err)
+		fatal("Modernize: %v", err)
 	}
 	ts := app.NewTaskService(p, eventbus.New()).WithPRProvider(app.AutoPRProvider())
 	t, _, text, err := ts.Modernize()
 	if err != nil {
-		fatal("%v", err)
+		fatal("Modernize: %v", err)
 	}
 	fmt.Print(text)
 	fmt.Printf("\n[task: %s — state: %s]\n", t.ID, t.State)
@@ -720,12 +945,12 @@ func runRun(rest []string) {
 	intent := args[0]
 	p, err := app.New(root)
 	if err != nil {
-		fatal("%v", err)
+		fatal("Run: %v", err)
 	}
 	ts := app.NewTaskService(p, eventbus.New()).WithPRProvider(app.AutoPRProvider())
 	result, err := ts.Run(intent)
 	if err != nil {
-		fatal("%v", err)
+		fatal("Run: %v", err)
 	}
 	fmt.Printf("RUN for: %s\n", intent)
 	fmt.Printf("  task:      %s\n", result.TaskID)

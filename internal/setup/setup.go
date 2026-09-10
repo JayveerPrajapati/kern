@@ -142,6 +142,9 @@ func Check(root string) []Status {
 		fileStatus(filepath.Join(root, "AGENTS.md"), "AGENTS.md rules"),
 		fileStatus(globalOpencodePath(), "opencode (global config)"),
 	}
+	for _, p := range GlobalPluginPaths() {
+		out = append(out, fileStatus(p, "opencode plugin (global)"))
+	}
 	allAdapters, customErrs := effectiveAdapters(root)
 	for _, err := range customErrs {
 		out = append(out, Status{Agent: "custom adapters", Note: err.Error()})
@@ -249,6 +252,7 @@ func Wire(root string, agents []string, detect bool) []Status {
 	}
 	if globalEnabled("opencode") {
 		out = append(out, wireGlobal(GlobalMCPCommand()))
+		out = append(out, wireGlobalPlugin())
 	}
 	if globalEnabled("claude") {
 		out = append(out, wireClaude(bin))
@@ -308,6 +312,7 @@ func Wire(root string, agents []string, detect bool) []Status {
 
 	out = append(out, wireProjectSkills(root)...)
 	out = append(out, wireGlobalSkills()...)
+	out = append(out, ensureKernConfig(root))
 
 	// Wire kern-first instruction files for every detected platform that
 	// has an instruction file. This is independent of the explicit agents
@@ -317,6 +322,26 @@ func Wire(root string, agents []string, detect bool) []Status {
 	out = append(out, wireInstructions(root, detected)...)
 
 	return out
+}
+
+// ensureKernConfig scaffolds the project's own .kern config directory:
+// .kern/skills (where user skills live) and .kern/profiles.json (user output
+// profiles). Existing artifacts are never overwritten — setup only fills in
+// what is missing. .kern/ is covered by the local git exclude, so this never
+// dirties the tracked tree.
+func ensureKernConfig(root string) Status {
+	dir := filepath.Join(root, ".kern", "skills")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return Status{Agent: "kern config", Path: filepath.Join(root, ".kern"), Note: err.Error()}
+	}
+	profilesPath := filepath.Join(root, ".kern", "profiles.json")
+	if _, err := os.Stat(profilesPath); err == nil {
+		return Status{Agent: "kern config", Installed: true, Path: profilesPath, Note: ".kern/profiles.json already present"}
+	}
+	if err := os.WriteFile(profilesPath, []byte("[]"), 0o600); err != nil {
+		return Status{Agent: "kern config", Path: profilesPath, Note: err.Error()}
+	}
+	return Status{Agent: "kern config", Installed: true, Path: profilesPath, Note: "scaffolded .kern/profiles.json"}
 }
 
 func wireAdapter(a adapter, root, bin string) Status {

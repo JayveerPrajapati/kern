@@ -22,6 +22,11 @@ type Command struct {
 	Name string // human-readable label, e.g. "go test"
 	Cmd  string
 	Args []string
+	// Kind categorizes the command: "build" (compile/assemble), "test"
+	// (run the project's test suite), or "lint" (static analysis). Used by
+	// DetectKind so verification can pick, e.g., the test command while
+	// VerifyBuild keeps the build command.
+	Kind string
 }
 
 // Detect inspects the project root and returns the best validation command.
@@ -33,18 +38,63 @@ func Detect(root string) (*Command, error) {
 		if _, err := exec.LookPath(c.Cmd); err != nil {
 			if alt := alias(c.Cmd); alt != "" {
 				if _, err2 := exec.LookPath(alt); err2 == nil {
-					c = &Command{Name: c.Name, Cmd: alt, Args: c.Args}
+					c = &Command{Name: c.Name, Cmd: alt, Args: c.Args, Kind: kindOf(c)}
 					return c, nil
 				}
 			}
 			continue
 		}
+		c.Kind = kindOf(c)
 		return c, nil
 	}
 	if len(candidates) == 0 {
 		return nil, fmt.Errorf("no supported project type detected in %s", root)
 	}
 	return nil, fmt.Errorf("required tooling not found in PATH for %s", root)
+}
+
+// DetectKind inspects the project root and returns the best command of the
+// given kind ("build", "test", or "lint"). It shares Detect's candidate list
+// and PATH filtering, so a Go module yields "go test" for kind "test" while
+// an npm project yields "npm test" — verification sub-checks no longer have
+// to hard-code Go commands. Returns the same errors as Detect when nothing
+// is detected.
+func DetectKind(root, kind string) (*Command, error) {
+	candidates := detectCandidates(root)
+	for _, c := range candidates {
+		if kindOf(c) != kind {
+			continue
+		}
+		if _, err := exec.LookPath(c.Cmd); err != nil {
+			if alt := alias(c.Cmd); alt != "" {
+				if _, err2 := exec.LookPath(alt); err2 == nil {
+					return &Command{Name: c.Name, Cmd: alt, Args: c.Args, Kind: kind}, nil
+				}
+			}
+			continue
+		}
+		c.Kind = kind
+		return c, nil
+	}
+	if len(candidates) == 0 {
+		return nil, fmt.Errorf("no supported project type detected in %s", root)
+	}
+	return nil, fmt.Errorf("no %s command detected in %s", kind, root)
+}
+
+// kindOf classifies a candidate by its name label: test-suite runners are
+// "test", static analyzers (vet/lint) are "lint", everything else compiles
+// or checks syntax and is "build".
+func kindOf(c *Command) string {
+	n := strings.ToLower(c.Name)
+	switch {
+	case strings.Contains(n, "test"), strings.Contains(n, "pytest"), strings.Contains(n, "rake"):
+		return "test"
+	case strings.Contains(n, "vet"), strings.Contains(n, "lint"):
+		return "lint"
+	default:
+		return "build"
+	}
 }
 
 // alias maps a canonical binary name to a common platform alternate when the

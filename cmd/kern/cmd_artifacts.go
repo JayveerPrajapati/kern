@@ -19,7 +19,7 @@ func runArtifacts(rest []string) {
 
 	p, err := app.New(root)
 	if err != nil {
-		fatal("%v", err)
+		fatal("Artifacts: %v", err)
 	}
 	ts := app.NewTaskService(p, eventbus.New()).WithPRProvider(app.AutoPRProvider())
 
@@ -28,7 +28,11 @@ func runArtifacts(rest []string) {
 		taskID := args[0]
 		arts, err := ts.Artifacts().GetByTask(taskID)
 		if err != nil {
-			fatal("%v", err)
+			fatal("Artifacts: %v", err)
+		}
+		if f.json {
+			printJSON(arts)
+			return
 		}
 		if len(arts) == 0 {
 			fmt.Printf("no artifacts for task %s\n", taskID)
@@ -54,7 +58,11 @@ func runArtifacts(rest []string) {
 	// List all artifacts.
 	arts, err := ts.Artifacts().List()
 	if err != nil {
-		fatal("%v", err)
+		fatal("Artifacts: %v", err)
+	}
+	if f.json {
+		printJSON(arts)
+		return
 	}
 	if len(arts) == 0 {
 		fmt.Println("no artifacts")

@@ -91,14 +91,37 @@ func aggregateHash(fileHashes map[string]string) string {
 // treeOID returns the git tree object ID of the CURRENT WORKING TREE at root,
 // or "" when root is not a git worktree (or git is unavailable).
 //
-// A plain `git write-tree` only reflects the staged index, so an unstaged
-// edit — exactly what `git apply` produces, mtime included — would be
-// invisible to it, and the mtime-preserving-edit regression this identity
-// exists to catch would sail through as "fresh". Instead we point
-// GIT_INDEX_FILE at a throwaway index, stage the working tree into it, and
-// write-tree from that. The repo's real index is never touched; the only side
-// effect is a dangling tree/blob in the object database, which git gc reaps.
+// Fast path: when nothing changed outside the excluded tool-state dirs, the
+// current tree object is exactly HEAD's tree object — two cheap queries (a
+// porcelain status and a rev-parse), no staging and no object writes. The
+// pathspec exclusion set mirrors the slow path's staging set, so both paths
+// produce OIDs over the same files.
+//
+// Slow path (tree dirty, or status unavailable): a plain `git write-tree`
+// only reflects the staged index, so an unstaged edit — exactly what
+// `git apply` produces, mtime included — would be invisible to it, and the
+// mtime-preserving-edit regression this identity exists to catch would sail
+// through as "fresh". Instead we point GIT_INDEX_FILE at a throwaway index,
+// stage the working tree into it, and write-tree from that. The repo's real
+// index is never touched; the only side effect is a dangling tree/blob in
+// the object database, which git gc reaps.
+//
+// .kern and .blueprint are excluded from BOTH paths: they hold untracked
+// tool state (index.json, audit logs, approvals) that is never part of the
+// code identity. Without the exclusion, every blueprint audit append would
+// change the tree OID, mark the source index stale, and force a rebuild —
+// and because Save() writes .kern/index.json AFTER Build has captured the
+// identity, leaving it in the tree would defeat the TreeOID fast path
+// entirely on fresh repos.
 func treeOID(root string) string {
+	// Fast path: porcelain-clean outside the excluded dirs means staging the
+	// working tree (slow path) would produce exactly HEAD's tree object.
+	if out, err := runGit(root, "status", "--porcelain", "--", ".", ":(exclude).kern", ":(exclude).blueprint"); err == nil && out == "" {
+		if head, err := runGit(root, "rev-parse", "HEAD^{tree}"); err == nil && head != "" {
+			return head
+		}
+	}
+
 	tmp, err := os.CreateTemp("", "kern-treeoid-*")
 	if err != nil {
 		return ""
@@ -120,16 +143,14 @@ func treeOID(root string) string {
 	// Stage the whole working tree into the throwaway index. --ignore-errors
 	// tolerates unreadable/locked files; .gitignore is honored exactly as the
 	// index's own ignore policy honors it for gitignored paths. The .kern
-	// directory is excluded explicitly: it is never indexed (ignoreDirs), and
-	// because Save() writes .kern/index.json AFTER Build has captured the
-	// identity, leaving it in the tree would make the check-time OID differ
-	// from the build-time OID on every fresh repo, permanently defeating the
-	// TreeOID fast path.
-	add := exec.CommandContext(ctx, "git", "-C", root, "add", "-A", "--ignore-errors", "--", ".", ":(exclude).kern")
+	// and .blueprint directories are excluded explicitly, matching the fast
+	// path's comparison set (see the doc comment above).
+	add := exec.CommandContext(ctx, "git", "-C", root, "add", "-A", "--ignore-errors", "--", ".", ":(exclude).kern", ":(exclude).blueprint")
 	add.Env = env
 	if err := add.Run(); err != nil {
 		return ""
 	}
+
 	cmd := exec.CommandContext(ctx, "git", "-C", root, "write-tree")
 	cmd.Env = env
 	out, err := cmd.Output()

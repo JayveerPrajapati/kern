@@ -56,19 +56,6 @@ func Why(ix *index.Index, symbol string) (WhyInfo, bool) {
 	return info, true
 }
 
-func uniqueSorted(in []string) []string {
-	seen := map[string]bool{}
-	var out []string
-	for _, s := range in {
-		if seen[s] {
-			continue
-		}
-		seen[s] = true
-		out = append(out, s)
-	}
-	return out
-}
-
 // docComment returns the contiguous comment block directly above a symbol's
 // definition line (the doc reference), empty if none. Line comments are
 // collected verbatim; block comments have their /* */ markers and leading "*"

@@ -1,10 +1,9 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"time"
-
-	"github.com/JayveerPrajapati/kern/internal/app"
 )
 
 // runApprove implements `kern approve [id] [--reject --reason "..." --approver "..."]`.
@@ -19,18 +18,13 @@ func runApprove(rest []string) {
 	if root == "" {
 		root = "."
 	}
-
-	p, err := app.New(root)
-	if err != nil {
-		fatal("%v", err)
-	}
-	ts := app.NewTaskService(p, nil)
+	ctx := context.Background()
 
 	if len(args) < 1 || args[0] == "" {
 		// List pending approvals.
-		pending, err := ts.PendingApprovals()
+		pending, err := svc.Governance.PendingApprovals(ctx, root)
 		if err != nil {
-			fatal("%v", err)
+			fatal("approve: %v", err)
 		}
 		if len(pending) == 0 {
 			fmt.Println("no pending approvals")
@@ -54,15 +48,15 @@ func runApprove(rest []string) {
 	}
 
 	if f.reject {
-		_, err := ts.ResolveApproval(id, approver, false, f.reason)
+		_, err := svc.Governance.Approve(ctx, root, id, approver, false, f.reason)
 		if err != nil {
-			fatal("%v", err)
+			fatal("approve: %v — check kern audit %s for state", err, id)
 		}
 		fmt.Printf("rejected: %s (by %s)\n", id, approver)
 	} else {
-		a, err := ts.ResolveApproval(id, approver, true, f.reason)
+		a, err := svc.Governance.Approve(ctx, root, id, approver, true, f.reason)
 		if err != nil {
-			fatal("%v", err)
+			fatal("approve: %v — check kern audit %s for state", err, id)
 		}
 		fmt.Printf("approved: %s\n", a.ID)
 		fmt.Printf("  task: %s\n", a.TaskID)

@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"strings"
-	"time"
 
 	"github.com/JayveerPrajapati/kern/internal/blueprint/domain"
 )
@@ -308,13 +307,4 @@ func truncateForEvidence(s string, maxChars int) string {
 		return s
 	}
 	return s[:maxChars] + "\n... (truncated)"
-}
-
-// timeoutContext returns a context with the sandbox timeout, or the parent
-// context if no timeout is set.
-func timeoutContext(ctx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
-	if timeout == 0 {
-		return ctx, func() {}
-	}
-	return context.WithTimeout(ctx, timeout)
 }

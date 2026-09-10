@@ -19,8 +19,8 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/prprovider"
 	"github.com/JayveerPrajapati/kern/internal/runtime"
 	"github.com/JayveerPrajapati/kern/internal/storage"
+	"log"
 	"path/filepath"
-	"strings"
 	"sync"
 	"time"
 )
@@ -55,6 +55,12 @@ type TaskService struct {
 	// reaches a terminal task state.
 	workflowRuns map[string]*workflowRun
 	wfMu         sync.Mutex
+	// auditLog is the unified tamper-evident governance audit chain. Every
+	// task state transition writes a task-lifecycle entry into it (AUD-11);
+	// the write is best-effort and never blocks the transition. A nil log
+	// (no wiring) is a no-op for back-compat. Defaults to the platform
+	// firewall's audit log when the platform carries one.
+	auditLog *governance.AuditLog
 }
 
 // workflowRun pairs a task with its driving workflow engine.
@@ -83,7 +89,24 @@ func NewTaskService(p *Platform, bus *eventbus.Bus) *TaskService {
 		deployer:     deployment.NewDeployerFromEnv(),
 		scopes:       map[string]domain.TaskScope{},
 		workflowRuns: map[string]*workflowRun{},
+		// AUD-11: default to the platform's unified audit chain so task
+		// transitions land in the same tamper-evident log the firewall
+		// writes. Nil-safe: a platform without a firewall (test literals)
+		// yields a nil log = no-op.
+		auditLog: platformAuditLog(p),
 	}
+}
+
+// platformAuditLog returns the platform's unified audit log, or nil when the
+// platform is nil or carries no firewall (nil = transition auditing no-op).
+func platformAuditLog(p *Platform) *governance.AuditLog {
+	if p == nil {
+		return nil
+	}
+	if fw := p.Firewall(); fw != nil {
+		return fw.AuditLog()
+	}
+	return nil
 }
 
 // WithDeployer sets the deployer used by the Deploy method. If not called, the
@@ -107,6 +130,64 @@ func (s *TaskService) WithAgentID(id string) *TaskService {
 		s.agentID = id
 	}
 	return s
+}
+
+// WithAuditLog overrides the unified tamper-evident audit chain task
+// transitions are recorded into. NewTaskService defaults it to the platform
+// firewall's audit log; passing nil restores the no-op mode (transitions are
+// not audited), which is the back-compat behavior for services wired without
+// an audit log.
+func (s *TaskService) WithAuditLog(a *governance.AuditLog) *TaskService {
+	s.auditLog = a
+	return s
+}
+
+// transition advances the task to next and records the transition in the
+// unified tamper-evident governance audit chain (AUD-11). It replaces direct
+// t.Transition call sites so every lifecycle state change is audited exactly
+// once, alongside the existing eventbus event and snapshot/artifact writes.
+//
+// FAILURE SEMANTICS (deliberate): the audit write is best-effort and NEVER
+// rolls back or blocks the state transition. Task liveness is prioritized — a
+// missing chain entry is detectable via the audit trail / chain repair, while
+// a blocked task is not acceptable. A failed audit write is logged loudly so
+// it surfaces in server logs.
+func (s *TaskService) transition(t *agent.Task, next domain.TaskState) error {
+	from := t.State
+	if err := t.Transition(next); err != nil {
+		return err
+	}
+	s.auditTransition(t, from, next)
+	return nil
+}
+
+// auditTransition writes a task-lifecycle entry into the unified audit chain.
+// A nil audit log (no wiring) is a no-op. Entry shape matches the
+// governance.AuditEntry API used by firewall writers; the transition is
+// recorded as an allowed task-lifecycle event carrying task ID, from → to
+// state, agent and timestamp.
+func (s *TaskService) auditTransition(t *agent.Task, from, to domain.TaskState) {
+	if s.auditLog == nil {
+		return // back-compat: no audit log wired = no-op
+	}
+	entry := governance.AuditEntry{
+		AgentID:   s.agentID,
+		TaskID:    t.ID,
+		Action:    "task.transition",
+		Resource:  "task:" + t.ID,
+		Result:    "allowed",
+		Approved:  true,
+		Policy:    "task-lifecycle",
+		Reason:    fmt.Sprintf("%s -> %s (agent %s)", from, to, s.agentID),
+		Timestamp: time.Now(),
+	}
+	if err := s.auditLog.AppendExternal(entry); err != nil {
+		// Loud, non-blocking: the transition already happened and must not
+		// be rolled back because the audit trail could not be written (a
+		// missing chain entry is detectable via chain repair; a blocked task
+		// is not).
+		log.Printf("kern app: task %s transition %s -> %s NOT recorded in audit chain (agent %s): %v", t.ID, from, to, s.agentID, err)
+	}
 }
 
 // WithTraceRecorder attaches a tool-decision trace recorder. When
@@ -449,7 +530,7 @@ func (s *TaskService) runLoop(intent string, level loop.Autonomy, autonomous boo
 	if err != nil {
 		return nil, nil, err
 	}
-	if err := t.Transition(domain.TaskAnalyzing); err != nil {
+	if err := s.transition(t, domain.TaskAnalyzing); err != nil {
 		s.fail(t, err.Error())
 		return t, nil, err
 	}
@@ -465,6 +546,7 @@ func (s *TaskService) runLoop(intent string, level loop.Autonomy, autonomous boo
 	if autonomous {
 		cfg.Coder = coder.New(agent.OllamaProvider())
 		cfg.Planner = planner.New(agent.OllamaProvider())
+		cfg.Context = s.platform.CodeContext
 	}
 	l, err := loop.NewLoop(cfg)
 	if err != nil {
@@ -510,10 +592,10 @@ func (s *TaskService) runLoop(intent string, level loop.Autonomy, autonomous boo
 
 // SetTaskScope attaches the unified task scope (paths + envs) to a task. It is
 // the single boundary that task-scoped confinement applies: the same
-// TaskScope gates path access at the Execute boundary (TaskScope.ValidatePatch),
-// env-gated actions through the governance firewall, and any explicit
-// per-resource check through authorizeResource. Interfaces set it once when a
-// task is scoped; unset tasks fall back to an allow-all scope (deny nothing).
+// TaskScope gates path access at the Execute boundary (TaskScope.ValidatePatch)
+// and env-gated actions through the governance firewall. Interfaces set it
+// once when a task is scoped; unset tasks fall back to an allow-all scope
+// (deny nothing).
 func (s *TaskService) SetTaskScope(taskID string, scope domain.TaskScope) {
 	s.scopesMu.Lock()
 	defer s.scopesMu.Unlock()
@@ -526,8 +608,8 @@ func (s *TaskService) SetTaskScope(taskID string, scope domain.TaskScope) {
 // TaskScope returns the unified scope registered for a task, or an allow-all
 // scope when none was set. It is the single authoritative scope the service
 // carries for a task; confinement is enforced where task-scoped actions occur
-// (the Execute patch boundary, the governance firewall for env-gated actions,
-// and authorizeResource for explicit per-resource checks).
+// (the Execute patch boundary and the governance firewall for env-gated
+// actions).
 func (s *TaskService) TaskScope(taskID string) domain.TaskScope {
 	s.scopesMu.RLock()
 	defer s.scopesMu.RUnlock()
@@ -538,49 +620,6 @@ func (s *TaskService) TaskScope(taskID string) domain.TaskScope {
 		return sc
 	}
 	return domain.TaskScope{TaskID: taskID}
-}
-
-// authorizeResource is the unified task-scope confinement primitive: it takes
-// the task's SAME TaskScope and applies it uniformly regardless of the
-// resource kind — context, memory, artifact, or runtime. A value outside the
-// task's path/environment scope is denied for context, memory, artifacts, AND
-// runtime alike: there is exactly one boundary, not four.
-//
-// It is NOT currently invoked on the resource-access paths. Task-scoped path
-// confinement at the app layer is enforced through the SAME TaskScope by
-// TaskScope.ValidatePatch in Execute/ExecuteAndVerify (every file a patch
-// touches is checked against CheckPath before it is applied), and the
-// environment dimension is enforced by the governance firewall in
-// Deploy/PolicyPrecheck, which remain the primary gate for governance-level
-// actions. The memory and runtime lanes (MemoryRecall, Correlate,
-// InvestigateIncident, RemediateIncident) do not take a caller-supplied
-// resource value, so they are not task-scoped resource accesses. authorizeResource
-// is reserved as the explicit per-resource checkpoint for callers that DO
-// access a resource by path/value within a task context.
-// resourceKind is informational ("context", "memory", "artifact", "runtime")
-// for provenance and auditing; the denial decision is uniform because it is
-// derived from the task scope alone.
-func (s *TaskService) authorizeResource(ctx context.Context, taskID, resourceKind, action, value string) (bool, string) {
-	scope := s.TaskScope(taskID)
-	if !scope.CheckPath(value) {
-		return false, "resource " + value + " is outside the task scope for " + resourceKind
-	}
-	// Environment is a uniform policy dimension too: an action that requires a
-	// forbidden environment is denied across every resource kind.
-	if env, ok := actionEnv(action); ok && !scope.CheckEnv(env) {
-		return false, "environment " + env + " is outside the task scope for " + resourceKind
-	}
-	return true, ""
-}
-
-// actionEnv extracts an environment from an action when the action encodes one
-// (e.g. "read:production"), so the unified boundary can enforce the env gate on
-// any resource kind.
-func actionEnv(action string) (string, bool) {
-	if i := strings.IndexByte(action, ':'); i > 0 && i < len(action)-1 {
-		return action[i+1:], true
-	}
-	return "", false
 }
 
 // Cancel transitions a task to CANCELLED with a reason. The task is persisted

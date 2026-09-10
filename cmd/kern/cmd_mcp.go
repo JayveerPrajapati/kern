@@ -20,7 +20,10 @@ func runMCP(rest []string) {
 	if httpAddr != "" {
 		ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer cancel()
-		if err := mcp.ServeHTTPContext(ctx, httpAddr); err != nil {
+		// TLS is optional: --tls-cert/--tls-key flags win, KERN_MCP_TLS_CERT /
+		// KERN_MCP_TLS_KEY env vars fill in what the flags leave empty.
+		tlsCfg := mcp.TLSOptions(f.tlsCert, f.tlsKey)
+		if err := mcp.ServeHTTPContextWithTLS(ctx, httpAddr, tlsCfg); err != nil {
 			// Route through the exitError sentinel so main() persists
 			// metrics before the real exit (same exit code 1 as before).
 			panic(exitError{code: 1})

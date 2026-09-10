@@ -1,10 +1,9 @@
 package context
 
 import (
-	"os"
-	"strconv"
 	"time"
 
+	"github.com/JayveerPrajapati/kern/internal/config"
 	"github.com/JayveerPrajapati/kern/internal/domain"
 )
 
@@ -14,27 +13,26 @@ import (
 const defaultCostPerToken = 0.00001
 
 // costPerToken holds an explicit runtime override (see SetCostPerToken).
-// When unset, the effective rate is re-derived from the KERN_COST_PER_TOKEN
-// environment variable each time it is needed, so operators (or tests using
-// t.Setenv) can change it without a code change.
+// When unset, the effective rate is re-derived from KERN_COST_PER_TOKEN (or
+// cost_per_token in .kern/config.json) each time it is needed, so operators
+// (or tests using t.Setenv) can change it without a code change.
 var (
 	costPerToken    float64
 	costPerTokenSet bool
 )
 
 // effectiveCostPerToken returns the $/token rate used to estimate spend: an
-// explicit override if one was set, else the KERN_COST_PER_TOKEN env var
-// (parsed as a float64 >= 0), else defaultCostPerToken.
+// explicit override if one was set, else KERN_COST_PER_TOKEN / cost_per_token
+// (env > file; parsed as a float64 >= 0), else defaultCostPerToken.
 func effectiveCostPerToken() float64 {
 	if costPerTokenSet {
 		return costPerToken
 	}
-	if v := os.Getenv("KERN_COST_PER_TOKEN"); v != "" {
-		if rate, err := strconv.ParseFloat(v, 64); err == nil && rate >= 0 {
-			return rate
-		}
+	rate := config.Float64("", "KERN_COST_PER_TOKEN", "cost_per_token", defaultCostPerToken)
+	if rate < 0 {
+		return defaultCostPerToken
 	}
-	return defaultCostPerToken
+	return rate
 }
 
 // SetCostPerToken overrides the $ per token rate used to estimate spend.

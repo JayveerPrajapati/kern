@@ -196,7 +196,7 @@ func runBuddy(rest []string) {
 	}
 	out, err := brief.Build(root)
 	if err != nil {
-		fatal("%v", err)
+		fatal("buddy: %v", err)
 	}
 	fmt.Println(out)
 
@@ -281,6 +281,14 @@ func runOnboard(rest []string) {
 	fmt.Printf("AGENTS.md:  %s\n", wired)
 	fmt.Printf("next:       explore with kern_explore / kern_code_graph, or kern buddy for a session digest\n")
 
+	// A4: onboard previously folded failures into the status strings above
+	// and still exited 0, so scripts and CI could not detect a failed
+	// onboarding. Fail closed instead.
+	failed := strings.HasPrefix(registered, "error:") || strings.Contains(registered, "save error") || strings.HasPrefix(indexed, "error:")
+	if failed {
+		fmt.Fprintln(os.Stderr, "\nonboard: one or more steps failed — run `kern doctor` to diagnose, or `kern index` to rebuild the index")
+		os.Exit(1)
+	}
 }
 
 func runFw(rest []string) {
@@ -321,7 +329,7 @@ func runFw(rest []string) {
 	}
 	det, err := fw.Detect(root)
 	if err != nil {
-		fatal("%v", err)
+		fatal("fw: %v", err)
 	}
 	fmt.Println(fw.Render(det))
 
@@ -348,7 +356,7 @@ func runEntryPoints(rest []string) {
 	}
 	ix, err := loadOrBuild(root)
 	if err != nil {
-		fatal("%v", err)
+		fatal("entry-points: %v", err)
 	}
 	var re *regexp.Regexp
 	if f.pattern != "" {
@@ -402,18 +410,18 @@ func runHook(rest []string) {
 	switch sub {
 	case "install":
 		if err := hooks.Install("."); err != nil {
-			fatal("%v", err)
+			fatal("hooks install: %v", err)
 		}
 		fmt.Println("post-commit hook installed (compresses each commit diff into project memory).")
 	case "diff":
 		out, err := hooks.Diff(from, to)
 		if err != nil {
-			fatal("%v", err)
+			fatal("hooks diff: %v", err)
 		}
 		fmt.Println(out)
 	case "store":
 		if err := hooks.Store(".", from, to); err != nil {
-			fatal("%v", err)
+			fatal("hooks store: %v", err)
 		}
 		fmt.Println("diff stored in project memory.")
 	case "claude-post", "claude-prompt", "gemini-after", "gemini-prompt":
@@ -427,23 +435,23 @@ func runHook(rest []string) {
 		}
 		in, err := readStdin()
 		if err != nil {
-			fatal("%v", err)
+			fatal("hooks: %v", err)
 		}
 		switch sub {
 		case "claude-post":
 			out, err := hook.ClaudePost(root, in)
 			if err != nil {
-				fatal("%v", err)
+				fatal("hooks claude-post: %v", err)
 			}
 			fmt.Println(out)
 		case "claude-prompt":
 			if err := hook.ClaudePrompt(root, in); err != nil {
-				fatal("%v", err)
+				fatal("hooks claude-prompt: %v", err)
 			}
 		case "gemini-after":
 			repl, err := hook.GeminiAfter(root, in)
 			if err != nil {
-				fatal("%v", err)
+				fatal("hooks gemini-after: %v", err)
 			}
 			if repl != "" {
 				// Gemini: exit code 2 + stderr text hides the real tool
@@ -453,7 +461,7 @@ func runHook(rest []string) {
 			}
 		case "gemini-prompt":
 			if err := hook.GeminiPrompt(root, in); err != nil {
-				fatal("%v", err)
+				fatal("hooks gemini-prompt: %v", err)
 			}
 		}
 	default:
@@ -496,7 +504,7 @@ func runCommitmsg(rest []string) {
 		}
 	}
 	if err != nil {
-		fatal("%v", err)
+		fatal("commitmsg: %v", err)
 	}
 	msg := commitmsg.Generate(string(out))
 	if f.subject {
@@ -519,7 +527,7 @@ func runCommit(rest []string) {
 	}
 	diffOut, err := gitDiff("diff --cached")
 	if err != nil {
-		fatal("%v", err)
+		fatal("commit: %v", err)
 	}
 	if len(strings.TrimSpace(string(diffOut))) == 0 {
 		fatal("nothing staged to commit (use --all to stage tracked+untracked changes)")
@@ -543,9 +551,9 @@ func runCommit(rest []string) {
 	if body != "" {
 		full += "\n\n" + body
 	}
-	out, err := gitCommit(full)
+	_, err = gitCommit(full)
 	if err != nil {
-		fatal("commit failed: %v\n%s", err, out)
+		fatal("commit failed: %v — see output above", err)
 	}
 	short := shortHash()
 	fmt.Printf("committed %s %s\n", short, subject)

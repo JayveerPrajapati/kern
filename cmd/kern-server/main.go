@@ -12,10 +12,10 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 	"time"
 
+	"github.com/JayveerPrajapati/kern/internal/config"
 	"github.com/JayveerPrajapati/kern/internal/enterprise"
 	"github.com/JayveerPrajapati/kern/internal/eventbus"
 	kversion "github.com/JayveerPrajapati/kern/internal/version"
@@ -61,21 +61,17 @@ func main() {
 	}
 
 	// Wire the app's event bus to outbound webhooks configured via
-	// KERN_WEBHOOKS="name=url,name2=url2". A bare URL (no "name=") uses the
-	// URL's host as the hook name.
+	// KERN_WEBHOOKS="name=url,name2=url2" (or webhooks in .kern/config.json).
+	// A bare URL (no "name=") uses the URL's host as the hook name.
 	hooks := webhook.New()
-	for _, raw := range strings.Split(os.Getenv("KERN_WEBHOOKS"), ",") {
-		raw = strings.TrimSpace(raw)
-		if raw == "" {
-			continue
-		}
-		name, u := "", raw
-		if i := strings.Index(raw, "="); i > 0 {
-			name, u = strings.TrimSpace(raw[:i]), strings.TrimSpace(raw[i+1:])
-		} else if parsed, perr := url.Parse(raw); perr == nil && parsed.Host != "" {
-			name = parsed.Host
-		} else {
-			name = raw
+	for name, u := range config.StringMap("", "KERN_WEBHOOKS", "webhooks", nil) {
+		// A bare URL is keyed by itself; derive the hook name from its host.
+		if name == u {
+			if parsed, perr := url.Parse(u); perr == nil && parsed.Host != "" {
+				name = parsed.Host
+			} else {
+				name = u
+			}
 		}
 		if err := hooks.Add(name, u); err != nil {
 			log.Printf("kern-server: skipping webhook %q: %v", name, err)
@@ -104,27 +100,18 @@ func main() {
 }
 
 // runEnterprise starts kern-server in multi-project enterprise mode. Projects
-// are read from KERN_ENTERPRISE_PROJECTS="name=path,name2=path2". A bare path
-// (no "name=") uses the path as the project name.
+// are read from KERN_ENTERPRISE_PROJECTS="name=path,name2=path2" (or
+// enterprise.projects in .kern/config.json). A bare path (no "name=") uses
+// the path as the project name.
 func runEnterprise(addr string) {
 	srv := enterprise.New()
-	projects := os.Getenv("KERN_ENTERPRISE_PROJECTS")
-	for _, raw := range strings.Split(projects, ",") {
-		raw = strings.TrimSpace(raw)
-		if raw == "" {
-			continue
-		}
-		name, path := raw, raw
-		if i := strings.Index(raw, "="); i > 0 {
-			name = strings.TrimSpace(raw[:i])
-			path = strings.TrimSpace(raw[i+1:])
-		}
+	for name, path := range config.StringMap("", "KERN_ENTERPRISE_PROJECTS", "enterprise.projects", nil) {
 		if err := srv.Register(name, path); err != nil {
 			log.Printf("kern-server: skipping project %q: %v", name, err)
 		}
 	}
 	if len(srv.Projects()) == 0 {
-		fmt.Fprintln(os.Stderr, "kern-server: enterprise mode requires KERN_ENTERPRISE_PROJECTS=name=path,...")
+		fmt.Fprintln(os.Stderr, "kern-server: enterprise mode requires projects (KERN_ENTERPRISE_PROJECTS or enterprise.projects in .kern/config.json)")
 		os.Exit(1)
 	}
 	// Fail-closed: enterprise mode serves the full digital twin of every project

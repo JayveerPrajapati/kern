@@ -23,9 +23,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
-	"time"
 
 	"github.com/JayveerPrajapati/kern/internal/context"
 	"github.com/JayveerPrajapati/kern/internal/domain"
@@ -474,47 +474,11 @@ func (p *Platform) resolveSymbol(change string) (string, error) {
 }
 
 // loadRuntimeSource returns the runtime source used for correlation/incident.
-// Live production adapters take precedence: if any of the env vars
-// KERN_PROMETHEUS_URL, KERN_OTEL_URL, or KERN_K8S_API are set, a live polling
-// adapter for the first configured endpoint is returned and the
-// .kern/runtime.json snapshot is ignored. Otherwise it loads
-// .kern/runtime.json when present; nil-safe otherwise.
+// Resolution lives in runtime.LoadSource (env/config live adapters first,
+// then the .kern/runtime.json snapshot) so the CLI (kern runtime status,
+// kern review --runtime) and the platform share one resolution path.
 func loadRuntimeSource(root string) runtime.Source {
-	interval := runtimePollInterval()
-
-	if url := os.Getenv("KERN_PROMETHEUS_URL"); url != "" {
-		return runtime.NewLivePrometheusSource(url, interval)
-	}
-	if url := os.Getenv("KERN_OTEL_URL"); url != "" {
-		return runtime.NewLiveOtelSource(url, interval)
-	}
-	if api := os.Getenv("KERN_K8S_API"); api != "" {
-		return runtime.NewLiveKubernetesSource(
-			api,
-			os.Getenv("KERN_K8S_TOKEN"),
-			os.Getenv("KERN_K8S_NAMESPACE"),
-			interval,
-		)
-	}
-
-	st, err := runtime.LoadJSON(filepath.Join(root, ".kern", "runtime.json"))
-	if err != nil {
-		return nil
-	}
-	return st
-}
-
-// runtimePollInterval returns the live-adapter poll interval from
-// KERN_POLL_INTERVAL (a Go duration string, default 30s). Invalid values fall
-// back to the default.
-func runtimePollInterval() time.Duration {
-	const def = 30 * time.Second
-	if s := os.Getenv("KERN_POLL_INTERVAL"); s != "" {
-		if d, err := time.ParseDuration(s); err == nil && d > 0 {
-			return d
-		}
-	}
-	return def
+	return runtime.LoadSource(root)
 }
 
 // loadBoundaryProvider surfaces .kern/boundaries.json rules as governance
@@ -535,4 +499,135 @@ func loadBoundaryProvider(root string) func() []domain.Policy {
 		}
 		return out
 	}
+}
+
+// CodeContext bounds: the grounding bundle never exceeds these, so the
+// coder prompt stays well within model context on large repos.
+const (
+	codeContextMaxFiles      = 8
+	codeContextMaxFileBytes  = 12 * 1024
+	codeContextMaxImpactSyms = 20
+)
+
+// planFileMention matches file paths a plan text may name (source files and
+// common config formats). The caller filters candidates against the repo.
+var planFileMention = regexp.MustCompile(`[\w./~-]+\.(go|py|ts|tsx|js|jsx|java|rs|rb|php|cs|c|cpp|h|hpp|kt|swift|scala|sh|sql|proto)`)
+
+// CodeContext assembles the grounded project context for the autonomous
+// coder (C1): the contents of the files most relevant to the intent — the
+// blast-radius files of any symbols the intent or plan mention, plus files
+// the plan names explicitly — and the impact set of those symbols (what
+// depends on them). Best-effort by design: an intent that resolves to no
+// symbol and a plan naming no existing file yields empty context, and the
+// coder runs ungrounded (intent + plan only) as before.
+func (p *Platform) CodeContext(intent, plan string) (string, error) {
+	// 1. Candidate symbols mentioned in the intent or plan text.
+	var syms []string
+	seenSym := map[string]bool{}
+	for _, text := range []string{intent, plan} {
+		for _, c := range whatif.ExtractSymbols(text) {
+			if !seenSym[c] {
+				seenSym[c] = true
+				syms = append(syms, c)
+			}
+		}
+	}
+
+	// 2. Files: plan-named paths first (the strongest signal — the planner
+	// names what to touch), then the blast radius of each resolved symbol.
+	fileSet := map[string]bool{}
+	var planFiles, blastFiles []string
+	addPlanFile := func(f string) {
+		if f != "" && !fileSet[f] {
+			fileSet[f] = true
+			planFiles = append(planFiles, f)
+		}
+	}
+	addBlastFile := func(f string) {
+		if f != "" && !fileSet[f] {
+			fileSet[f] = true
+			blastFiles = append(blastFiles, f)
+		}
+	}
+	var impact []string
+	for _, s := range syms {
+		id, err := p.resolveSymbol(s)
+		if err != nil {
+			continue
+		}
+		addBlastFile(p.graphNodeFile(id))
+		for _, n := range p.graph.WhatDependsOn(id) {
+			if n.Symbol != nil {
+				addBlastFile(n.Symbol.File)
+			}
+			if len(impact) < codeContextMaxImpactSyms && n.ID != id {
+				impact = append(impact, n.ID)
+			}
+		}
+	}
+	for _, m := range planFileMention.FindAllString(plan, -1) {
+		if st, err := os.Stat(filepath.Join(p.root, m)); err == nil && !st.IsDir() {
+			addPlanFile(m)
+		}
+	}
+	fileList := append(planFiles, blastFiles...)
+
+	// 3. Render the bundle (ordered: symbol blast first, plan mentions last).
+	if len(fileList) == 0 {
+		return "", nil
+	}
+	if len(fileList) > codeContextMaxFiles {
+		fileList = fileList[:codeContextMaxFiles]
+	}
+	var b strings.Builder
+	if len(impact) > 0 {
+		fmt.Fprintf(&b, "Impact set (symbols that depend on the changed roots; a change may break them): %s\n\n",
+			strings.Join(impact, ", "))
+	}
+	for _, f := range fileList {
+		data, err := os.ReadFile(filepath.Join(p.root, f))
+		if err != nil {
+			continue // unreadable (binary, permissions): skip, do not fail
+		}
+		if len(data) > codeContextMaxFileBytes {
+			data = append(data[:codeContextMaxFileBytes], []byte("\n... (truncated)")...)
+		}
+		fmt.Fprintf(&b, "<context-file path=%q>\n%s\n</context-file>\n\n", f, string(data))
+	}
+	return b.String(), nil
+}
+
+// graphNodeFile returns the defining file of the graph node for the given
+// reference, or "" when no such node exists. The reference may be a bare
+// symbol name ("NewFileStore" — how resolveSymbol returns it) or a
+// package-scoped node ID ("internal/governance.NewFileStore"); both forms
+// are matched against the node ID and the symbol's qualified name.
+func (p *Platform) graphNodeFile(ref string) string {
+	for _, n := range p.graph.Nodes {
+		if n.ID == ref {
+			if n.Symbol != nil {
+				return n.Symbol.File
+			}
+			if n.File != nil {
+				return n.File.Path
+			}
+			return ""
+		}
+		if n.Symbol != nil && n.Symbol.Qualified == ref && n.Symbol.File != "" {
+			// A bare qualified form can match several same-named symbols in
+			// different packages; only return when unambiguous.
+			dup := false
+			for _, m := range p.graph.Nodes {
+				if m.ID != n.ID && m.Symbol != nil && m.Symbol.Qualified == ref {
+					dup = true
+					break
+				}
+			}
+			if !dup {
+				return n.Symbol.File
+			}
+			return ""
+		}
+	}
+	return ""
 }

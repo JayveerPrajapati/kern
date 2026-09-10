@@ -42,45 +42,35 @@ import (
 // Exit codes: 0 = valid, 2 = tampered receipt or broken audit chain, 3 =
 // receipt not found.
 func runVerifyReceipt(args []string) int {
-	fs := flag.NewFlagSet("verify-receipt", flag.ContinueOnError)
-	fs.SetOutput(os.Stderr)
-	repoRoot := fs.String("repo", "", "repository root (default: current directory)")
-	receiptID := fs.String("receipt-id", "", "receipt id to verify (default: latest receipt)")
-	jsonOut := fs.Bool("json", false, "emit JSON instead of human-readable text")
-	sarifOut := fs.Bool("sarif", false, "emit SARIF 2.1.0 JSON report")
-	inTotoOut := fs.Bool("in-toto", false, "emit in-toto v0.2 supply-chain attestation statement")
-	checkDiff := fs.Bool("check-diff", false, "verify PR git revision / diff matches receipt fingerprint")
-	if err := fs.Parse(args); err != nil {
+	fs, err := parseVerifyReceiptFlags(args)
+	if err != nil {
 		return 2
 	}
+	repoRoot := fs.Lookup("repo").Value.(flag.Getter).Get().(string)
+	receiptID := fs.Lookup("receipt-id").Value.(flag.Getter).Get().(string)
+	jsonOut := fs.Lookup("json").Value.(flag.Getter).Get().(bool)
+	sarifOut := fs.Lookup("sarif").Value.(flag.Getter).Get().(bool)
+	inTotoOut := fs.Lookup("in-toto").Value.(flag.Getter).Get().(bool)
+	checkDiff := fs.Lookup("check-diff").Value.(flag.Getter).Get().(bool)
 
-	root := *repoRoot
-	if root == "" {
-		cwd, err := os.Getwd()
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "blueprint: cannot determine working directory: %v\n", err)
-			return 2
-		}
-		root = cwd
-	}
-	absRoot, err := filepath.Abs(root)
+	absRoot, err := resolveReceiptRoot(repoRoot)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "blueprint: invalid repository path %q: %v\n", root, err)
+		fmt.Fprintf(os.Stderr, "%s\n", err)
 		return 2
 	}
 
 	// Load the receipt: by explicit id, the most recent one, or a positional
 	// JSON file (a receipt, or the CI artifact `kern ci --artifact-file`
 	// wrote — see loadReceiptFile).
-	explicitID := *receiptID != "" || len(fs.Args()) > 0
+	explicitID := receiptID != "" || len(fs.Args()) > 0
 	var r *receipt.Receipt
 	if files := fs.Args(); len(files) > 0 {
 		var effRoot string
 		r, effRoot, err = loadReceiptFile(files[0], absRoot)
 		if err != nil {
 			if errors.Is(err, errReceiptNotSealed) {
-				if *jsonOut {
-					emitVerifyReceiptJSON(nil, err.Error())
+				if jsonOut {
+					renderReceiptJSON(nil, err.Error())
 				} else {
 					fmt.Fprintf(os.Stderr, "%s\n", err.Error())
 				}
@@ -88,15 +78,15 @@ func runVerifyReceipt(args []string) int {
 			}
 			if errors.Is(err, receipt.ErrNotFound) {
 				msg := fmt.Sprintf("Receipt not found: %v", err)
-				if *jsonOut {
-					emitVerifyReceiptJSON(nil, msg)
+				if jsonOut {
+					renderReceiptJSON(nil, msg)
 				} else {
 					fmt.Fprintln(os.Stderr, msg)
 				}
 				return 3
 			}
-			if *jsonOut {
-				emitVerifyReceiptJSON(nil, err.Error())
+			if jsonOut {
+				renderReceiptJSON(nil, err.Error())
 			} else {
 				fmt.Fprintf(os.Stderr, "Receipt INVALID: %v\n", err)
 			}
@@ -107,42 +97,36 @@ func runVerifyReceipt(args []string) int {
 		}
 	} else {
 		store := receipt.NewStore(absRoot)
-		if *receiptID != "" {
-			r, err = store.Get(*receiptID)
+		if receiptID != "" {
+			r, err = store.Get(receiptID)
 		} else {
 			r, err = store.Latest()
 		}
 	}
 	if err != nil {
 		if errors.Is(err, receipt.ErrNotFound) {
-			if *sarifOut {
-				data, sErr := renderFallbackSARIF(absRoot)
-				if sErr != nil {
-					fmt.Fprintf(os.Stderr, "blueprint: SARIF fallback failed: %v\n", sErr)
+			if sarifOut {
+				if rerr := renderReceiptSARIF(absRoot, nil); rerr != nil {
 					return 2
 				}
-				os.Stdout.Write(data)
 				return 0
 			}
-			if *inTotoOut {
-				data, iErr := renderFallbackInToto(absRoot)
-				if iErr != nil {
-					fmt.Fprintf(os.Stderr, "blueprint: in-toto fallback failed: %v\n", iErr)
+			if inTotoOut {
+				if rerr := renderReceiptInToto(absRoot, nil); rerr != nil {
 					return 2
 				}
-				os.Stdout.Write(data)
 				return 0
 			}
-			if *jsonOut {
-				emitVerifyReceiptJSON(nil, "receipt not found")
+			if jsonOut {
+				renderReceiptJSON(nil, "receipt not found")
 			} else {
 				fmt.Fprintf(os.Stderr, "Receipt not found.\n")
 			}
 			return 3
 		}
 		// A receipt exists but fails verification (tampered) or is unreadable.
-		if *jsonOut {
-			emitVerifyReceiptJSON(nil, err.Error())
+		if jsonOut {
+			renderReceiptJSON(nil, err.Error())
 		} else {
 			fmt.Fprintf(os.Stderr, "Receipt INVALID: %v\n", err)
 		}
@@ -151,8 +135,8 @@ func runVerifyReceipt(args []string) int {
 
 	// 1. Receipt self-integrity: signature + schema version.
 	if err := r.Verify(); err != nil {
-		if *jsonOut {
-			emitVerifyReceiptJSON(nil, err.Error())
+		if jsonOut {
+			renderReceiptJSON(nil, err.Error())
 		} else {
 			fmt.Fprintf(os.Stderr, "Receipt %s INVALID: %v\n", r.ReceiptID, err)
 		}
@@ -164,8 +148,8 @@ func runVerifyReceipt(args []string) int {
 	// stamped AuditChainHash "" and must fail closed.
 	if r.AuditChainHash == "" {
 		msg := "receipt has no audit chain binding (empty chain hash)"
-		if *jsonOut {
-			emitVerifyReceiptJSON(nil, msg)
+		if jsonOut {
+			renderReceiptJSON(nil, msg)
 		} else {
 			fmt.Fprintf(os.Stderr, "Receipt %s INVALID: %s\n", r.ReceiptID, msg)
 		}
@@ -176,8 +160,8 @@ func runVerifyReceipt(args []string) int {
 	auditWriter := audit.NewWriter(filepath.Join(absRoot, ".blueprint", "audit", "audit.jsonl"))
 	lastHash, err := auditWriter.VerifyChain()
 	if err != nil {
-		if *jsonOut {
-			emitVerifyReceiptJSON(nil, "audit chain broken: "+err.Error())
+		if jsonOut {
+			renderReceiptJSON(nil, "audit chain broken: "+err.Error())
 		} else {
 			fmt.Fprintf(os.Stderr, "Receipt %s INVALID: audit chain broken: %v\n", r.ReceiptID, err)
 		}
@@ -192,8 +176,8 @@ func runVerifyReceipt(args []string) int {
 	// validates.
 	found, err := auditWriter.ChainContainsHash(r.AuditChainHash)
 	if err != nil {
-		if *jsonOut {
-			emitVerifyReceiptJSON(nil, "audit chain unreadable: "+err.Error())
+		if jsonOut {
+			renderReceiptJSON(nil, "audit chain unreadable: "+err.Error())
 		} else {
 			fmt.Fprintf(os.Stderr, "Receipt %s INVALID: audit chain unreadable: %v\n", r.ReceiptID, err)
 		}
@@ -201,8 +185,8 @@ func runVerifyReceipt(args []string) int {
 	}
 	if !found {
 		msg := fmt.Sprintf("audit_chain_hash %q not found in audit chain (chain last hash %q)", r.AuditChainHash, lastHash)
-		if *jsonOut {
-			emitVerifyReceiptJSON(nil, msg)
+		if jsonOut {
+			renderReceiptJSON(nil, msg)
 		} else {
 			fmt.Fprintf(os.Stderr, "Receipt %s INVALID: %s\n", r.ReceiptID, msg)
 		}
@@ -217,8 +201,8 @@ func runVerifyReceipt(args []string) int {
 	if r.KernChainHash != "" {
 		if err := verifyKernChainHash(absRoot, r.KernChainHash); err != nil {
 			if errors.Is(err, errKernChainHashNotFound) {
-				if *jsonOut {
-					emitVerifyReceiptJSON(nil, err.Error())
+				if jsonOut {
+					renderReceiptJSON(nil, err.Error())
 				} else {
 					fmt.Fprintf(os.Stderr, "Receipt %s INVALID: %s\n", r.ReceiptID, err)
 				}
@@ -231,10 +215,10 @@ func runVerifyReceipt(args []string) int {
 	}
 
 	// 6. Diff integrity check: verify PR git state / diff has not been tampered with
-	if *checkDiff {
+	if checkDiff {
 		if err := receipt.VerifyDiffIntegrity(r, absRoot); err != nil {
-			if *jsonOut {
-				emitVerifyReceiptJSON(nil, err.Error())
+			if jsonOut {
+				renderReceiptJSON(nil, err.Error())
 			} else {
 				fmt.Fprintf(os.Stderr, "Receipt %s INVALID: %v\n", r.ReceiptID, err)
 			}
@@ -242,24 +226,17 @@ func runVerifyReceipt(args []string) int {
 		}
 	}
 
-	if *sarifOut {
-		findings := loadArtifactFindings(absRoot)
-		data, err := receipt.RenderSARIF(r, findings)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Receipt %s: SARIF export failed: %v\n", r.ReceiptID, err)
+	if sarifOut {
+		if rerr := renderReceiptSARIF(absRoot, r); rerr != nil {
 			return 2
 		}
-		os.Stdout.Write(data)
 		return 0
 	}
 
-	if *inTotoOut {
-		data, err := receipt.RenderInToto(r)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Receipt %s: in-toto export failed: %v\n", r.ReceiptID, err)
+	if inTotoOut {
+		if rerr := renderReceiptInToto(absRoot, r); rerr != nil {
 			return 2
 		}
-		os.Stdout.Write(data)
 		return 0
 	}
 
@@ -273,8 +250,8 @@ func runVerifyReceipt(args []string) int {
 	if !explicitID {
 		note = ciStalenessNote(r.ReceiptID)
 	}
-	if *jsonOut {
-		emitVerifyReceiptJSON(r, "", note)
+	if jsonOut {
+		renderReceiptJSON(r, "", note)
 	} else {
 		fmt.Printf("Receipt %s VALID. Status: %s. Base: %s Head: %s. Audit chain intact (%d records). Signature verified.\n",
 			r.ReceiptID, r.Status, r.BaseRevision, r.HeadRevision, auditWriter.RecordCount())
@@ -283,6 +260,99 @@ func runVerifyReceipt(args []string) int {
 		}
 	}
 	return 0
+}
+
+// parseVerifyReceiptFlags builds the verify-receipt flag set, parses args,
+// and returns the parsed FlagSet so callers can read fs.Args() and flag
+// values via fs.Lookup. Parse errors are reported on stderr by the flag
+// package itself (fs.SetOutput(os.Stderr)) and returned to the caller.
+func parseVerifyReceiptFlags(args []string) (*flag.FlagSet, error) {
+	fs := flag.NewFlagSet("verify-receipt", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	fs.String("repo", "", "repository root (default: current directory)")
+	fs.String("receipt-id", "", "receipt id to verify (default: latest receipt)")
+	fs.Bool("json", false, "emit JSON instead of human-readable text")
+	fs.Bool("sarif", false, "emit SARIF 2.1.0 JSON report")
+	fs.Bool("in-toto", false, "emit in-toto v0.2 supply-chain attestation statement")
+	fs.Bool("check-diff", false, "verify PR git revision / diff matches receipt fingerprint")
+	if err := fs.Parse(args); err != nil {
+		return nil, err
+	}
+	return fs, nil
+}
+
+// resolveReceiptRoot resolves the --repo value (or the current working
+// directory when empty) to an absolute repository root.
+func resolveReceiptRoot(root string) (string, error) {
+	if root == "" {
+		cwd, err := os.Getwd()
+		if err != nil {
+			return "", fmt.Errorf("blueprint: cannot determine working directory: %v", err)
+		}
+		root = cwd
+	}
+	absRoot, err := filepath.Abs(root)
+	if err != nil {
+		return "", fmt.Errorf("blueprint: invalid repository path %q: %v", root, err)
+	}
+	return absRoot, nil
+}
+
+// renderReceiptJSON is the single funnel for JSON emission from
+// runVerifyReceipt: it wraps every emitVerifyReceiptJSON call so the JSON
+// output path is centralized. The caller keeps the `if jsonOut` guard so the
+// exact guard semantics are preserved (JSON is only emitted when the json
+// flag is set); this helper guarantees every JSON path renders through one
+// place.
+func renderReceiptJSON(r *receipt.Receipt, verifyErr string, notes ...string) {
+	emitVerifyReceiptJSON(r, verifyErr, notes...)
+}
+
+// renderReceiptSARIF emits the SARIF 2.1.0 report. When r is nil (the
+// receipt-not-found path) it falls back to renderFallbackSARIF; otherwise it
+// renders the receipt with its artifact findings. Errors are reported on
+// stderr and returned; the caller maps them to the exit code.
+func renderReceiptSARIF(absRoot string, r *receipt.Receipt) error {
+	if r == nil {
+		data, err := renderFallbackSARIF(absRoot)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "blueprint: SARIF fallback failed: %v\n", err)
+			return err
+		}
+		os.Stdout.Write(data)
+		return nil
+	}
+	findings := loadArtifactFindings(absRoot)
+	data, err := receipt.RenderSARIF(r, findings)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Receipt %s: SARIF export failed: %v\n", r.ReceiptID, err)
+		return err
+	}
+	os.Stdout.Write(data)
+	return nil
+}
+
+// renderReceiptInToto emits the in-toto v0.2 supply-chain attestation
+// statement. When r is nil (the receipt-not-found path) it falls back to
+// renderFallbackInToto; otherwise it renders the receipt. Errors are reported
+// on stderr and returned; the caller maps them to the exit code.
+func renderReceiptInToto(absRoot string, r *receipt.Receipt) error {
+	if r == nil {
+		data, err := renderFallbackInToto(absRoot)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "blueprint: in-toto fallback failed: %v\n", err)
+			return err
+		}
+		os.Stdout.Write(data)
+		return nil
+	}
+	data, err := receipt.RenderInToto(r)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Receipt %s: in-toto export failed: %v\n", r.ReceiptID, err)
+		return err
+	}
+	os.Stdout.Write(data)
+	return nil
 }
 
 // ciArtifactDefaultFile mirrors `blueprint ci`'s default --artifact-file value

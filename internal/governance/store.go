@@ -4,6 +4,7 @@ package governance
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -34,6 +35,11 @@ const maxResolvedApprovals = 100
 type FileStore struct {
 	mu   sync.RWMutex // serializes save/load against concurrent in-process writers
 	path string
+	// loadErr records a failure of the construction-time prime load (a missing
+	// file is not an error). It is advisory: every operation re-reads the file
+	// and fails closed on its own while it is unreadable, and recovers
+	// automatically once the file is repaired.
+	loadErr error
 }
 
 // NewFileStore creates a FileStore at <root>/.kern/approvals.json. The directory
@@ -49,8 +55,24 @@ func NewFileStore(root string) *FileStore {
 	// the store observes cross-process writes), but loading here surfaces a
 	// corrupt file early and satisfies restore-on-startup for read-only
 	// callers. A missing file is not an error.
-	_, _ = s.loadLocked()
+	if _, err := s.loadLocked(); err != nil {
+		// Fail loudly instead of silently treating the store as empty: a
+		// corrupt file that is later saved over would destroy the pending
+		// approvals it contains. Every operation re-reads the file and fails
+		// closed with the same error until the file is repaired.
+		s.loadErr = err
+		log.Printf("kern governance: approval store %s failed to load: %v (reads and writes will fail until it is repaired)", s.path, err)
+	}
 	return s
+}
+
+// LoadError returns the error from the construction-time prime load, if any.
+// A missing file is not an error. Callers can use it to fail fast on a corrupt
+// store instead of discovering the failure on the first read/write.
+func (s *FileStore) LoadError() error {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.loadErr
 }
 
 // loadLocked is the lock-free read core. Caller must hold s.mu (read or write).

@@ -39,6 +39,16 @@ type Graph struct {
 	byID      map[string]domain.Node
 	nameIndex map[string][]string
 	indexOnce sync.Once
+
+	// nodePkg maps symbol node ID -> its package path, and pkgImports maps
+	// package path -> the import paths it declares (from the graph's
+	// "imports" edges). Together they let resolveImportQualified link a
+	// qualified callee reference ("index.Load") — whose simple name alone is
+	// ambiguous — to the unique same-named symbol in the imported package,
+	// restoring cross-package edges the plain resolver drops. Built lazily
+	// alongside byID/nameIndex.
+	nodePkg    map[string]string
+	pkgImports map[string][]string
 }
 
 // FromIndex builds a canonical domain.Graph from a v1 index.Index: every symbol
@@ -117,8 +127,8 @@ func FromIndex(ix *index.Index) Graph {
 
 	// Call edges: caller -> callee.
 	for from, tos := range ix.Calls {
-		for _, to := range tos {
-			g.Edges = append(g.Edges, domain.Edge{From: from, To: to, Kind: "calls"})
+		for _, ce := range tos {
+			g.Edges = append(g.Edges, domain.Edge{From: from, To: ce.Target, Kind: "calls"})
 		}
 	}
 
@@ -136,7 +146,7 @@ func FromIndex(ix *index.Index) Graph {
 	// Import edges: package -> imported package.
 	for path, pkg := range ix.Pkgs {
 		for _, imp := range pkg.Imports {
-			g.Edges = append(g.Edges, domain.Edge{From: path, To: imp, Kind: "imports"})
+			g.Edges = append(g.Edges, domain.Edge{From: path, To: imp.Path, Kind: "imports"})
 		}
 	}
 

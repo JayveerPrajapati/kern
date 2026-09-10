@@ -443,8 +443,10 @@ func InjectRegression(ctx context.Context, root, service, regressionFile string,
 }
 
 // RequestApproval opens a human-approval gate for a production fix. It returns
-// the pending approval (default requirement for production changes).
-func (e *Engine) RequestApproval(inc *domain.Incident, requester, reason string) domain.Approval {
+// the pending approval (default requirement for production changes) and an
+// error when the approval could not be persisted, so the caller can fail
+// closed rather than park a fix at an un-reviewable gate.
+func (e *Engine) RequestApproval(inc *domain.Incident, requester, reason string) (domain.Approval, error) {
 	return e.appr.Request(inc.ID, requester, reason)
 }
 

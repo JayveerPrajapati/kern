@@ -1,8 +1,8 @@
 package main
 
 import (
+	"context"
 	"fmt"
-	"github.com/JayveerPrajapati/kern/internal/memory"
 	"strings"
 )
 
@@ -11,8 +11,8 @@ func runRemember(rest []string) {
 	if lesson == "" {
 		fatalUsage("usage: kern remember <lesson>")
 	}
-	if err := memory.Add(".", lesson); err != nil {
-		fatal("%v", err)
+	if err := svc.Memory.Add(context.Background(), ".", lesson); err != nil {
+		fatal("Remember: %v", err)
 	}
 	fmt.Println("remembered.")
 
@@ -27,6 +27,7 @@ func runMemory(rest []string) {
 	if root == "" {
 		root = "."
 	}
+	ctx := context.Background()
 	// Sub-dispatch on the first positional: `kern memory add|list|recall ...`.
 	// Otherwise preserve the classic forms (`kern memory` = list, `--clear`).
 	if len(args) > 0 {
@@ -36,13 +37,21 @@ func runMemory(rest []string) {
 			if lesson == "" {
 				fatalUsage("usage: kern memory add <lesson>")
 			}
-			if err := memory.Add(root, lesson); err != nil {
-				fatal("%v", err)
+			if err := svc.Memory.Add(ctx, root, lesson); err != nil {
+				fatal("Memory: %v", err)
 			}
 			fmt.Println("remembered.")
 			return
 		case "list":
-			for _, e := range memory.List(root) {
+			entries, err := svc.Memory.List(ctx, root)
+			if err != nil {
+				fatal("Memory: %v", err)
+			}
+			if f.json {
+				printJSON(entries)
+				return
+			}
+			for _, e := range entries {
 				fmt.Printf("%s  %s%s\n", e.Time.UTC().Format("2006-01-02 15:04"), label(e.Source), e.Text)
 			}
 			return
@@ -54,20 +63,36 @@ func runMemory(rest []string) {
 			if k <= 0 {
 				k = 5
 			}
-			for _, e := range memory.Recall(root, args[1], k) {
+			entries, err := svc.Memory.Recall(ctx, root, args[1], k)
+			if err != nil {
+				fatal("Memory: %v", err)
+			}
+			if f.json {
+				printJSON(entries)
+				return
+			}
+			for _, e := range entries {
 				fmt.Printf("%s  %s%s\n", e.Time.UTC().Format("2006-01-02 15:04"), label(e.Source), e.Text)
 			}
 			return
 		}
 	}
 	if f.clear {
-		if err := memory.Clear(root); err != nil {
-			fatal("%v", err)
+		if err := svc.Memory.Clear(ctx, root); err != nil {
+			fatal("Memory: %v", err)
 		}
 		fmt.Println("project memory cleared.")
 		return
 	}
-	for _, e := range memory.List(root) {
+	entries, err := svc.Memory.List(ctx, root)
+	if err != nil {
+		fatal("Memory: %v", err)
+	}
+	if f.json {
+		printJSON(entries)
+		return
+	}
+	for _, e := range entries {
 		fmt.Printf("%s  %s%s\n", e.Time.UTC().Format("2006-01-02 15:04"), label(e.Source), e.Text)
 	}
 
@@ -89,7 +114,11 @@ func runRecall(rest []string) {
 	if k <= 0 {
 		k = 5
 	}
-	for _, e := range memory.Recall(root, args[0], k) {
+	entries, err := svc.Memory.Recall(context.Background(), root, args[0], k)
+	if err != nil {
+		fatal("Recall: %v", err)
+	}
+	for _, e := range entries {
 		fmt.Printf("%s  %s%s\n", e.Time.UTC().Format("2006-01-02 15:04"), label(e.Source), e.Text)
 	}
 

@@ -2,15 +2,18 @@ package mcp
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 
+	"github.com/JayveerPrajapati/kern/internal/governance"
 	"github.com/JayveerPrajapati/kern/internal/lock"
 	"github.com/JayveerPrajapati/kern/internal/project"
 )
@@ -24,6 +27,66 @@ var supportedProtocolVersions = map[string]bool{
 	"2025-06-18": true,
 }
 
+// TLSConfig holds the certificate and key file paths used to serve the HTTP
+// MCP transport over TLS. Both fields must be set for TLS to be enabled.
+//
+// TLS is optional and opt-in: a nil *TLSConfig keeps the server on plain HTTP
+// (the historical behavior), so existing deployments are unchanged. When TLS
+// is enabled the listener still binds to loopback only (localhostAddr) and the
+// loopback Origin check still applies — TLS here protects the transport
+// against loopback sniffing and is the building block for exposing it through
+// a local TLS-terminating proxy.
+type TLSConfig struct {
+	CertFile string // path to the PEM-encoded TLS certificate (chain)
+	KeyFile  string // path to the PEM-encoded TLS private key
+}
+
+// Valid reports whether the config is complete enough to serve TLS. A config
+// with exactly one of CertFile/KeyFile set is invalid: silently serving plain
+// HTTP in that state would be a security downgrade, so callers fail fast
+// instead.
+func (c *TLSConfig) Valid() bool {
+	return c != nil && c.CertFile != "" && c.KeyFile != ""
+}
+
+// TLSOptionsFromEnv returns the TLS config derived from the KERN_MCP_TLS_CERT
+// and KERN_MCP_TLS_KEY environment variables. It returns nil when neither
+// variable is set (plain HTTP). When exactly one is set the returned config is
+// incomplete and Valid() reports false, so callers can fail fast instead of
+// serving a half-configured listener.
+//
+// Environment variables:
+//   - KERN_MCP_TLS_CERT — path to the PEM-encoded TLS certificate file
+//   - KERN_MCP_TLS_KEY  — path to the PEM-encoded TLS private key file
+func TLSOptionsFromEnv() *TLSConfig {
+	cert, key := os.Getenv("KERN_MCP_TLS_CERT"), os.Getenv("KERN_MCP_TLS_KEY")
+	if cert == "" && key == "" {
+		return nil
+	}
+	return &TLSConfig{CertFile: cert, KeyFile: key}
+}
+
+// TLSOptions returns the effective TLS config for the HTTP transport. Explicit
+// command-line flag values win; the KERN_MCP_TLS_CERT / KERN_MCP_TLS_KEY
+// environment variables fill in whichever field the flags leave empty. A nil
+// result means plain HTTP.
+func TLSOptions(certFlag, keyFlag string) *TLSConfig {
+	env := TLSOptionsFromEnv()
+	cert, key := certFlag, keyFlag
+	if env != nil {
+		if cert == "" {
+			cert = env.CertFile
+		}
+		if key == "" {
+			key = env.KeyFile
+		}
+	}
+	if cert == "" && key == "" {
+		return nil
+	}
+	return &TLSConfig{CertFile: cert, KeyFile: key}
+}
+
 // ServeHTTP runs the MCP server over HTTP using the Streamable HTTP transport:
 // clients POST JSON-RPC messages to /mcp and receive a plain JSON response
 // (SSE is not supported). The listener binds to localhost and rejects requests
@@ -32,9 +95,33 @@ func ServeHTTP(addr string) error {
 	return ServeHTTPContext(context.Background(), addr)
 }
 
+// ServeHTTPWithTLS is ServeHTTP with TLS enabled: the listener serves HTTPS
+// using the certificate and key referenced by tlsCfg. A nil tlsCfg serves
+// plain HTTP (same as ServeHTTP); an incomplete config (only one of CertFile /
+// KeyFile set) returns an error instead of silently downgrading to plaintext.
+func ServeHTTPWithTLS(addr string, tlsCfg *TLSConfig) error {
+	return ServeHTTPContextWithTLS(context.Background(), addr, tlsCfg)
+}
+
 // ServeHTTPContext is ServeHTTP with a shutdown context: when ctx is done the
-// listener shuts down gracefully and in-flight tools are cancelled.
+// listener shuts down gracefully and in-flight tools are cancelled. TLS is
+// configured through the KERN_MCP_TLS_CERT / KERN_MCP_TLS_KEY environment
+// variables; see ServeHTTPContextWithTLS for the explicit-config variant.
 func ServeHTTPContext(ctx context.Context, addr string) error {
+	return ServeHTTPContextWithTLS(ctx, addr, nil)
+}
+
+// ServeHTTPContextWithTLS is ServeHTTPContext with an explicit TLS config. When
+// tlsCfg is nil the listener serves plain HTTP (backward compatible). When
+// tlsCfg is set and Valid(), the listener serves HTTPS with the given
+// certificate and key files. A non-nil but incomplete tlsCfg (only one of
+// CertFile/KeyFile set) returns an error before any listener starts: silently
+// falling back to plaintext when the operator asked for TLS would be a
+// security downgrade.
+func ServeHTTPContextWithTLS(ctx context.Context, addr string, tlsCfg *TLSConfig) error {
+	if tlsCfg != nil && !tlsCfg.Valid() {
+		return fmt.Errorf("kern-mcp TLS config incomplete: both certificate and key files are required (cert=%q key=%q)", tlsCfg.CertFile, tlsCfg.KeyFile)
+	}
 	srv := &Server{
 		sem:       make(chan struct{}, defaultConcurrency()),
 		locks:     map[string]*lock.Lock{},
@@ -44,12 +131,22 @@ func ServeHTTPContext(ctx context.Context, addr string) error {
 		roots:     defaultWorkspaceRoots(),
 		gate:      confinementGate(),
 		commits:   map[string]string{},
+		watchStop: make(chan struct{}),
+		watchDone: make(chan struct{}),
 	}
+	// Same as NewServer: register the built-in default agent so calls without
+	// an explicit agent_id are governed (workspace-scoped) instead of denied.
+	governance.EnsureDefaultAgent()
 	// Same default-on confinement as the stdio path: the KERN_MCP_ROOTS gate
 	// runs as the pre-tool-use hook, and KERN_MCP_NO_CONFINE=1 opts out.
 	if srv.gate != nil {
 		srv.preTool = srv.gate.Check
 	}
+	// Implicit background index watch: rebuild stale workspace-root indexes
+	// between tool calls so the first call after an edit finds a warm index.
+	// Disabled by KERN_MCP_WATCH=0; KERN_MCP_WATCH_INTERVAL sets the poll.
+	// The watcher stops on ctx cancellation or srv.Close() below.
+	srv.StartBackgroundWatch(ctx, watchIntervalFromEnv())
 	mux := http.NewServeMux()
 	mux.HandleFunc("/mcp", srv.handleHTTP)
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
@@ -82,12 +179,24 @@ func ServeHTTPContext(ctx context.Context, addr string) error {
 		WriteTimeout: 60 * time.Second,
 		IdleTimeout:  60 * time.Second,
 	}
+	if tlsCfg != nil {
+		// TLS is opt-in: when configured, enforce a floor of TLS 1.2 so an
+		// operator cannot accidentally serve a transport with legacy ciphers.
+		hs.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS12}
+	}
 	done := make(chan error, 1)
 	go func() {
+		if tlsCfg != nil {
+			done <- hs.ListenAndServeTLS(tlsCfg.CertFile, tlsCfg.KeyFile)
+			return
+		}
 		done <- hs.ListenAndServe()
 	}()
 	select {
 	case err := <-done:
+		// Stop the background watch so its goroutine never leaks on the
+		// listener-error path (the ctx.Done path already calls Close).
+		srv.Close()
 		if err == http.ErrServerClosed {
 			return nil
 		}

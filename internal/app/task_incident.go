@@ -42,7 +42,7 @@ func (s *TaskService) Correlate(alert domain.Alert) (*agent.Task, runtime.Correl
 	if err != nil {
 		return nil, runtime.CorrelationChain{}, "", err
 	}
-	if err := t.Transition(domain.TaskAnalyzing); err != nil {
+	if err := s.transition(t, domain.TaskAnalyzing); err != nil {
 		s.fail(t, err.Error())
 		return t, runtime.CorrelationChain{}, "", err
 	}
@@ -86,7 +86,7 @@ func (s *TaskService) InvestigateIncident(alert domain.Alert) (*agent.Task, *dom
 	if err != nil {
 		return nil, nil, "", err
 	}
-	if err := t.Transition(domain.TaskAnalyzing); err != nil {
+	if err := s.transition(t, domain.TaskAnalyzing); err != nil {
 		s.fail(t, err.Error())
 		return t, nil, "", err
 	}
@@ -160,7 +160,7 @@ func (s *TaskService) RemediateIncident(alert domain.Alert, apply func(workDir s
 	if err != nil {
 		return nil, nil, "", err
 	}
-	if err := t.Transition(domain.TaskAnalyzing); err != nil {
+	if err := s.transition(t, domain.TaskAnalyzing); err != nil {
 		s.fail(t, err.Error())
 		return t, nil, "", err
 	}
@@ -190,7 +190,11 @@ func (s *TaskService) RemediateIncident(alert domain.Alert, apply func(workDir s
 	eng.RootCause(inc)
 
 	// 11.4 — approval gate: a production remediation requires human approval.
-	ap := eng.RequestApproval(inc, s.agentID, "remediate production incident")
+	ap, err := eng.RequestApproval(inc, s.agentID, "remediate production incident")
+	if err != nil {
+		s.fail(t, "approval: "+err.Error())
+		return t, inc, "", err
+	}
 	if _, err := eng.Approve(ap.ID, approver); err != nil {
 		s.fail(t, "approval: "+err.Error())
 		return t, inc, "", err
@@ -248,7 +252,7 @@ func (s *TaskService) Learn(threshold int) (*agent.Task, []learning.Pattern, str
 	if err != nil {
 		return nil, nil, "", err
 	}
-	if err := t.Transition(domain.TaskAnalyzing); err != nil {
+	if err := s.transition(t, domain.TaskAnalyzing); err != nil {
 		s.fail(t, err.Error())
 		return t, nil, "", err
 	}
@@ -308,7 +312,7 @@ func (s *TaskService) Modernize() (*agent.Task, modernization.ExtractionPlan, st
 	if err != nil {
 		return nil, modernization.ExtractionPlan{}, "", err
 	}
-	if err := t.Transition(domain.TaskAnalyzing); err != nil {
+	if err := s.transition(t, domain.TaskAnalyzing); err != nil {
 		s.fail(t, err.Error())
 		return t, modernization.ExtractionPlan{}, "", err
 	}
@@ -382,7 +386,7 @@ func (s *TaskService) ModernizePhaseTasks(plan modernization.ExtractionPlan, par
 		// phase back to the plan that produced it .
 		pt.ParentID = parentTaskID
 		phase.TaskID = pt.ID
-		if err := pt.Transition(domain.TaskCompleted); err == nil {
+		if err := s.transition(pt, domain.TaskCompleted); err == nil {
 			pt.Output = renderModernizePhaseText(*phase)
 			s.persist(pt)
 		}

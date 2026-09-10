@@ -237,7 +237,8 @@ func contextOutDeps(ix *index.Index, set map[string]bool) []string {
 	outSeen := map[string]bool{}
 	for from, tos := range ix.Calls {
 		fromIn := set[from]
-		for _, to := range tos {
+		for _, ce := range tos {
+			to := ce.Target
 			if fromIn && !set[to] {
 				outSeen[to] = true
 			}
@@ -324,17 +325,13 @@ func defaultContextName(c intel.Community) string {
 	return c.ID
 }
 
-// contextName derives a stable name from the dominant package directory.
-func contextName(c intel.Community) string {
-	return defaultContextName(c)
-}
-
 // internalDges counts call edges internal to the set vs edges crossing its
 // boundary (one endpoint inside, one outside).
 func internalDges(ix *index.Index, set map[string]bool) (internal, cross int) {
 	for from, tos := range ix.Calls {
 		fromIn := set[from]
-		for _, to := range tos {
+		for _, ce := range tos {
+			to := ce.Target
 			toIn := set[to]
 			if fromIn && toIn {
 				internal++
@@ -353,7 +350,8 @@ func crossDeps(ix *index.Index, set map[string]bool) (outgoing, incoming int) {
 	inSeen := map[string]bool{}
 	for from, tos := range ix.Calls {
 		fromIn := set[from]
-		for _, to := range tos {
+		for _, ce := range tos {
+			to := ce.Target
 			toIn := set[to]
 			if fromIn && !toIn && !outSeen[to] {
 				outSeen[to] = true

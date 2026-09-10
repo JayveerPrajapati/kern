@@ -4,6 +4,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/JayveerPrajapati/kern/internal/domain"
 )
@@ -12,35 +14,11 @@ import (
 // unbounded traversal. The v1 call graph of a real project is far shallower.
 const maxHops = 50
 
-// buildAdjacency derives, for the "calls" edges only, the outgoing map
-// (caller -> callees) and incoming map (callee -> callers). Edge endpoints are
-// canonicalized to node IDs: node IDs are package-scoped ("pkg.Func"), while
-// index edges reference callees either by their qualified name ("pkg.Func"),
-// by an import alias ("db.Func"), or by a bare name ("Func") for in-package
-// calls. resolveNodeID tries the exact ID first, then resolves a reference to a
-// unique node by its simple name. Neighbour lists are sorted for deterministic
-// query results.
-// buildAdjacency derives, for the "calls" edges only, the outgoing map
-// (caller -> callees) and incoming map (callee -> callers), trusting all
-// edges. Strict callers use buildAdjacencyOpt(true).
-//
-// NOTE — edge endpoint quirk: raw call edges reference the callee by a
-// QUALIFIED name (e.g. "db.Do") while graph node IDs are bare symbol names
-// ("Do"). This function canonicalizes endpoints via resolveNodeID so its
-// maps key on node IDs; but a qualified endpoint with no matching node is
-// passed through unresolved (canonical keeps the raw string), and consumers
-// that map results back through nodesForIDs silently DROP unresolvable IDs.
-// Code that must not lose cross-package callees should traverse the raw
-// domain.Edge endpoints (as internal/context/rules.go does) instead of the
-// adjacency maps or the node query helpers.
-func (g *Graph) buildAdjacency() (outgoing, incoming map[string][]string) {
-	return g.buildAdjacencyOpt(false)
-}
-
-// buildAdjacencyOpt is buildAdjacency with a precision mode. When strict is
-// true, "calls" edges whose caller node's language is not "resolved"-precision
-// (per the index's PrecisionByLang) are dropped, so strict consumers report
-// those callers as unknown instead of trusting heuristic cross-file guesses.
+// buildAdjacencyOpt builds the adjacency map with a precision mode. When
+// strict is true, "calls" edges whose caller node's language is not
+// "resolved"-precision (per the index's PrecisionByLang) are dropped, so
+// strict consumers report those callers as unknown instead of trusting
+// heuristic cross-file guesses.
 func (g *Graph) buildAdjacencyOpt(strict bool) (outgoing, incoming map[string][]string) {
 	outgoing = map[string][]string{}
 	incoming = map[string][]string{}
@@ -53,23 +31,32 @@ func (g *Graph) buildAdjacencyOpt(strict bool) (outgoing, incoming map[string][]
 			}
 		}
 	}
-	canonical := func(id string) string {
+	canonical := func(id string) (string, bool) {
 		if r, ok := g.resolveNodeID(id); ok {
-			return r
+			return r, true
 		}
-		return id
+		return id, false
 	}
 	for _, e := range g.Edges {
 		if e.Kind != "calls" {
 			continue
 		}
-		from := canonical(e.From)
+		from, _ := canonical(e.From)
 		if strict {
 			if p := g.precisionByLang[langByID[from]]; p != "resolved" {
 				continue
 			}
 		}
-		to := canonical(e.To)
+		to, ok := canonical(e.To)
+		if !ok {
+			// Cross-package callee recorded as an import-qualified
+			// reference ("index.Load") whose simple name alone is
+			// ambiguous. Link it via the caller's package imports so the
+			// edge is not silently dropped from blast-radius traversals.
+			if rid, linked := g.resolveImportQualified(e.To, from); linked {
+				to = rid
+			}
+		}
 		outgoing[from] = append(outgoing[from], to)
 		incoming[to] = append(incoming[to], from)
 	}
@@ -93,6 +80,25 @@ func (g *Graph) initIndex() {
 			g.byID[n.ID] = n
 			if n.Symbol != nil {
 				g.nameIndex[n.Symbol.Name] = append(g.nameIndex[n.Symbol.Name], n.ID)
+			}
+		}
+		g.nodePkg = make(map[string]string)
+		g.pkgImports = make(map[string][]string)
+		for _, n := range g.Nodes {
+			if n.Symbol == nil || n.Symbol.Qualified == "" {
+				continue
+			}
+			// Node IDs are "<pkg>.<Qualified>" (package-scoped); stripping the
+			// known symbol suffix recovers the package path. A node whose ID
+			// equals its Qualified is a root-package symbol (no prefix) and
+			// gets no package entry — import linking simply never applies.
+			if pkg := strings.TrimSuffix(n.ID, "."+n.Symbol.Qualified); pkg != n.ID {
+				g.nodePkg[n.ID] = pkg
+			}
+		}
+		for _, e := range g.Edges {
+			if e.Kind == "imports" {
+				g.pkgImports[e.From] = append(g.pkgImports[e.From], e.To)
 			}
 		}
 	})
@@ -190,6 +196,90 @@ func (g *Graph) resolveSymbol(symbol string) string {
 		return id
 	}
 	return symbol
+}
+
+// resolveImportQualified links a qualified callee reference that
+// resolveNodeID cannot match (the simple name exists in several packages)
+// to the unique same-named symbol in a package the CALLING symbol's package
+// imports, when the reference's qualifier matches that import's final path
+// segment. This mirrors how Go resolves "index.Load" in source, so it
+// restores cross-package edges the plain resolver drops without ever
+// forging a link: a qualifier that matches no import (a local variable or
+// type receiver, e.g. "info.Name" or "Builder.String") stays unresolved, as
+// does a qualifier matching multiple candidate packages.
+func (g *Graph) resolveImportQualified(ref, callerID string) (string, bool) {
+	g.initIndex()
+	i := strings.LastIndexByte(ref, '.')
+	if i <= 0 || i >= len(ref)-1 {
+		return "", false
+	}
+	qual, name := ref[:i], ref[i+1:]
+	// Package qualifiers are conventionally lowercase; an uppercase
+	// qualifier is almost always a type or variable receiver, which the
+	// caller's imports cannot disambiguate.
+	if r, _ := utf8.DecodeRuneInString(qual); unicode.IsUpper(r) {
+		return "", false
+	}
+	callerPkg, ok := g.nodePkg[callerID]
+	if !ok || callerPkg == "" {
+		return "", false
+	}
+	imports := g.pkgImports[callerPkg]
+	if len(imports) == 0 {
+		return "", false
+	}
+	var found string
+	for _, id := range g.nameIndex[name] {
+		localPkg := g.nodePkg[id]
+		if localPkg == "" {
+			continue
+		}
+		if importMatchesQualifier(imports, qual, localPkg) {
+			if found != "" {
+				return "", false // ambiguous across imported packages
+			}
+			found = id
+		}
+	}
+	return found, found != ""
+}
+
+// importMatchesQualifier reports whether localPkg is the package an import
+// with final path segment qual refers to: the import path equals the local
+// package path or ends with it (the graph keys packages by repo-relative
+// path while imports are recorded as full import strings).
+func importMatchesQualifier(imports []string, qual, localPkg string) bool {
+	for _, imp := range imports {
+		imp = strings.Trim(imp, `"' `)
+		if imp == "" {
+			continue
+		}
+		seg := imp[strings.LastIndexByte(imp, '/')+1:]
+		if seg != qual {
+			continue
+		}
+		if imp == localPkg || strings.HasSuffix(imp, "/"+localPkg) {
+			return true
+		}
+	}
+	return false
+}
+
+// ResolveEdgeEndpoint resolves a raw "calls" edge endpoint as recorded by
+// the index (bare name, qualified name, or import-alias form) to its
+// canonical node ID, so raw-edge consumers (the context engine, what-if)
+// no longer drop cross-package callees whose simple name is ambiguous.
+// callerRef is the endpoint on the other side of the edge (the caller for
+// a To endpoint); its package imports provide the disambiguation context.
+func (g *Graph) ResolveEdgeEndpoint(ref, callerRef string) (string, bool) {
+	if id, ok := g.resolveNodeID(ref); ok {
+		return id, true
+	}
+	callerID, ok := g.resolveNodeID(callerRef)
+	if !ok {
+		return "", false
+	}
+	return g.resolveImportQualified(ref, callerID)
 }
 
 // nodesForIDs returns the nodes whose IDs appear in ids, in the given order,

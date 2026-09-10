@@ -13,6 +13,25 @@ import (
 //go:embed assets/plugin/kern.ts
 var pluginFS embed.FS
 
+// PluginAsset returns the embedded canonical opencode plugin source.
+// Exported so doctor can byte-compare installed copies against it without
+// duplicating the embed.
+func PluginAsset() ([]byte, error) {
+	return pluginFS.ReadFile("assets/plugin/kern.ts")
+}
+
+// GlobalPluginPaths returns every location the opencode plugin may be loaded
+// from on this machine: the XDG config path (~/.config/opencode) and the
+// config-root path (~/.opencode — opencode 1.18.x loads plugins from the
+// config root, not the XDG dir; a stale copy there silently wins).
+func GlobalPluginPaths() []string {
+	paths := []string{globalPluginPath()}
+	if h, err := os.UserHomeDir(); err == nil {
+		paths = append(paths, filepath.Join(h, ".opencode", "plugins", "kern.ts"))
+	}
+	return paths
+}
+
 //go:embed assets/AGENTS.md
 var rulesFS embed.FS
 

@@ -48,7 +48,7 @@ var tsJavaTypeKinds = map[string]bool{
 // local-type maps, mirroring the regex path's collectJavaLocalTypes +
 // resolveJavaCallee pair. It must be called after collectCalls has filled
 // calls (keyed by receiver-qualified function name) and only for Java trees.
-func resolveJavaCalls(root *sitter.Node, src []byte, calls map[string][]string) {
+func resolveJavaCalls(root *sitter.Node, src []byte, calls map[string][]CallEdge) {
 	var walk func(n *sitter.Node, fn string, lt map[string]string)
 	walk = func(n *sitter.Node, fn string, lt map[string]string) {
 		k := n.Kind()
@@ -158,7 +158,7 @@ func tsJavaAddLocal(lt map[string]string, decl *sitter.Node, src []byte) {
 
 // tsJavaResolveInvocation rewrites one method_invocation's recorded callee in
 // the calls map using the enclosing method's local types.
-func tsJavaResolveInvocation(n *sitter.Node, src []byte, fn string, lt map[string]string, calls map[string][]string) {
+func tsJavaResolveInvocation(n *sitter.Node, src []byte, fn string, lt map[string]string, calls map[string][]CallEdge) {
 	obj := n.ChildByFieldName("object")
 	if obj == nil {
 		return
@@ -196,7 +196,7 @@ func tsJavaResolveInvocation(n *sitter.Node, src []byte, fn string, lt map[strin
 // tsJavaReplaceCallee replaces every occurrence of oldCallee with newCallee in
 // calls[fn]; if newCallee is already present the old entries are dropped
 // instead (dedupe). It is a no-op when oldCallee is not recorded.
-func tsJavaReplaceCallee(calls map[string][]string, fn, oldCallee, newCallee string) {
+func tsJavaReplaceCallee(calls map[string][]CallEdge, fn, oldCallee, newCallee string) {
 	if oldCallee == newCallee {
 		return
 	}
@@ -206,16 +206,18 @@ func tsJavaReplaceCallee(calls map[string][]string, fn, oldCallee, newCallee str
 	}
 	hasNew := false
 	for _, c := range list {
-		if c == newCallee {
+		if c.Target == newCallee {
 			hasNew = true
 			break
 		}
 	}
 	out := list[:0]
 	for _, c := range list {
-		if c == oldCallee {
+		if c.Target == oldCallee {
 			if !hasNew {
-				out = append(out, newCallee)
+				// Receiver-var / chained-call resolution is type inference,
+				// not a direct syntactic binding: MEDIUM.
+				out = append(out, CallEdge{Target: newCallee, Confidence: ConfidenceMedium})
 			}
 			continue
 		}

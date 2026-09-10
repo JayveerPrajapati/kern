@@ -142,7 +142,14 @@ func buildFileMap(ix *index.Index) map[string]string {
 	m := map[string]string{}
 	for _, s := range ix.Symbols {
 		if s.File != "" {
-			m[s.FullName()] = s.File
+			full := s.FullName()
+			// Duplicate names (a production func plus a same-named test
+			// helper) must resolve to the PRODUCTION file: a test-file def
+			// shadowing a live caller misclassifies it as test-only and
+			// reports the symbol safe to delete.
+			if cur, ok := m[full]; !ok || (isTestFile(cur) && !isTestFile(s.File)) {
+				m[full] = s.File
+			}
 		}
 	}
 	return m
@@ -238,7 +245,8 @@ func canon(m map[string]string, name string) string {
 // loop, i.e. quadratic time on large repos.
 func localCalleesWith(ix *index.Index, sym string, local map[string]bool) []string {
 	var out []string
-	for _, c := range ix.Calls[sym] {
+	for _, ce := range ix.Calls[sym] {
+		c := ce.Target
 		if c == sym {
 			continue
 		}

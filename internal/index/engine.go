@@ -3,6 +3,7 @@ package index
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -23,25 +24,15 @@ import (
 
 // indexVersion is bumped whenever the persisted index schema changes, so
 // stale caches are rebuilt automatically instead of serving zero-value fields.
-const indexVersion = 11
-
-// maxFileBytes is the largest file the index will read into memory and scan.
-// Larger files (e.g. generated .json, bundled .min.js) are skipped to avoid
-// loading huge blobs into RAM and regex-parsing them.
-const maxFileBytes = 10 * 1024 * 1024
-
-// parallelMinJobs is the smallest job count worth a worker pool. Below it,
-// pool + ordered-merge overhead exceeds the per-file parse cost, so
-// buildParallel applies jobs serially instead (byte-identical result).
-const parallelMinJobs = 256
+const indexVersion = 13
 
 // Index is the in-memory representation of a project's AST index.
 type Index struct {
-	Root    string              `json:"root"`
-	Version int                 `json:"version"`
-	Symbols []Symbol            `json:"symbols"`
-	Calls   map[string][]string `json:"calls"`
-	Callers map[string][]string `json:"callers"`
+	Root    string                `json:"root"`
+	Version int                   `json:"version"`
+	Symbols []Symbol              `json:"symbols"`
+	Calls   map[string][]CallEdge `json:"calls"`
+	Callers map[string][]string   `json:"callers"`
 	// AliasCallers maps a bare name to callers of dotted callees with that bare
 	// name ("Println" -> callers of "fmt.Println"); it never contributes callers
 	// to a resolved local symbol.
@@ -58,9 +49,9 @@ type Index struct {
 	// file actually imports a forbidden package. Populated by Build/extract;
 	// absent in indexes written by older kern (guard then no-ops the
 	// import-level check per file, fail-open).
-	ImportsByFile  map[string][]string `json:"imports_by_file,omitempty"`
-	FileHashes     map[string]string   `json:"file_hashes"`
-	GeneratedFiles map[string]bool     `json:"generated_files,omitempty"`
+	ImportsByFile  map[string][]ImportEdge `json:"imports_by_file,omitempty"`
+	FileHashes     map[string]string       `json:"file_hashes"`
+	GeneratedFiles map[string]bool         `json:"generated_files,omitempty"`
 	// Communities maps a symbol full name to its community label, populated by
 	// the SQLite store's Load and by CommunityLabels on demand.
 	Communities map[string]string `json:"communities,omitempty"`
@@ -98,12 +89,12 @@ func New(root string) *Index {
 	ix := &Index{
 		Root:            root,
 		Version:         indexVersion,
-		Calls:           map[string][]string{},
+		Calls:           map[string][]CallEdge{},
 		Callers:         map[string][]string{},
 		Inherits:        map[string][]string{},
 		InheritedBy:     map[string][]string{},
 		Pkgs:            map[string]*Pkg{},
-		ImportsByFile:   map[string][]string{},
+		ImportsByFile:   map[string][]ImportEdge{},
 		FileHashes:      map[string]string{},
 		GeneratedFiles:  map[string]bool{},
 		Communities:     map[string]string{},
@@ -119,7 +110,7 @@ func New(root string) *Index {
 // downstream code writes to them. Safe to call on an already-initialized index.
 func (ix *Index) initMaps() {
 	if ix.Calls == nil {
-		ix.Calls = map[string][]string{}
+		ix.Calls = map[string][]CallEdge{}
 	}
 	if ix.Callers == nil {
 		ix.Callers = map[string][]string{}
@@ -134,7 +125,7 @@ func (ix *Index) initMaps() {
 		ix.Pkgs = map[string]*Pkg{}
 	}
 	if ix.ImportsByFile == nil {
-		ix.ImportsByFile = map[string][]string{}
+		ix.ImportsByFile = map[string][]ImportEdge{}
 	}
 	if ix.FileHashes == nil {
 		ix.FileHashes = map[string]string{}
@@ -171,12 +162,20 @@ func StorePath(root string) string {
 // concurrent reader never observes a partially-written index. The temp file
 // is uniquely named (not a fixed .tmp path) so concurrent writers (watch
 // daemon + CLI) don't race on the same temp file and corrupt the index.
+// Save additionally refuses to overwrite an on-disk index whose schema
+// version is NEWER than this index's: a long-lived daemon or watcher started
+// with an older binary holds its own in-memory index and would otherwise
+// silently clobber a newer index.json written by a current binary — the
+// indexVersion guard only runs at load time, not at save time.
 func (ix *Index) Save() error {
 	data, err := json.Marshal(ix)
 	if err != nil {
 		return err
 	}
 	p := StorePath(ix.Root)
+	if v := onDiskVersion(p); v > ix.Version {
+		return fmt.Errorf("refusing to overwrite index schema v%d with v%d: the on-disk index was written by a newer kern — restart this process so it loads the newer index", v, ix.Version)
+	}
 	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 		return err
 	}
@@ -205,6 +204,39 @@ func (ix *Index) Save() error {
 	}
 	return os.Rename(tmpPath, p)
 }
+
+// onDiskVersion reads the "version" field of a persisted index without
+// decoding the whole (potentially multi-MB) file. The field appears as the
+// second member of the object (struct field order: Root, Version, ...), so
+// scanning the first 4KB is deterministic for kern-written files. Returns 0
+// when the file is absent, unreadable, or the field cannot be found — the
+// Save guard then no-ops, preserving current behavior.
+func onDiskVersion(p string) int {
+	f, err := os.Open(p)
+	if err != nil {
+		return 0
+	}
+	defer f.Close()
+	buf := make([]byte, 4096)
+	n, _ := io.ReadFull(f, buf)
+	if n == 0 {
+		return 0
+	}
+	m := versionFieldRe.FindSubmatch(buf[:n])
+	if m == nil {
+		return 0
+	}
+	v, err := strconv.Atoi(string(m[1]))
+	if err != nil {
+		return 0
+	}
+	return v
+}
+
+// versionFieldRe matches the index's schema version member. A literal
+// `"version":` cannot occur inside the Root string (paths cannot contain
+// quotes), so the first match is the real field.
+var versionFieldRe = regexp.MustCompile(`"version"\s*:\s*(\d+)`)
 
 // ensureGitExclude guarantees that <root>/.git/info/exclude includes .kern/
 // so that whenever kern indexes any repository, git never tracks or shows
@@ -393,6 +425,12 @@ var ignoreDirs = map[string]bool{
 	".next": true, "__pycache__": true, ".venv": true, ".cache": true,
 	".idea": true, "bin": true, ".mvn": true, "coverage": true, "tmp": true,
 	".kern": true,
+	// .blueprint holds blueprint's tool state (audit logs, approval requests,
+	// metrics.json) which is rewritten on every check invocation. It is never
+	// project source; leaving it indexable made every blueprint check flip the
+	// index's content root (metrics.json is a .json source-extension file) and
+	// forced a full index rebuild per invocation.
+	".blueprint": true,
 	// Agent/tooling config dirs: generated wiring (MCP endpoints, hooks,
 	// rules) that is machine-specific and never project source.
 	".opencode": true, ".claude": true, ".cursor": true, ".gemini": true,
@@ -428,9 +466,18 @@ type BuildOption func(*buildConfig)
 
 // buildConfig carries the options resolved for one build run. reused is
 // written by build workers (atomically) to count prior-result reuse.
+//
+// workers and maxBytes are the resource-adaptive tunables. Zero means "use
+// the machine-derived default" (see resources.go); a non-zero explicit
+// option always wins over the adaptive default.
 type buildConfig struct {
 	prior  *Index
 	reused atomic.Int64
+	// workers is the parse/scan worker pool size (0 = adaptive default).
+	workers int
+	// maxBytes is the largest file the index will read and scan
+	// (0 = adaptive default).
+	maxBytes int64
 }
 
 // WithPriorIndex reuses per-file parse results from a prior index of the
@@ -442,6 +489,22 @@ type buildConfig struct {
 // detection behave identically.
 func WithPriorIndex(prior *Index) BuildOption {
 	return func(c *buildConfig) { c.prior = prior }
+}
+
+// WithWorkers sets the parse/scan worker pool size for parallel builds. A
+// non-positive value (or omitting the option) selects the machine-derived
+// default: min(clamp(NumCPU, 1, 32), total RAM / 512 MiB). An explicit
+// value always wins over the adaptive default.
+func WithWorkers(n int) BuildOption {
+	return func(c *buildConfig) { c.workers = n }
+}
+
+// WithMaxFileBytes sets the largest file (in bytes) the index will read and
+// scan; larger files are skipped. A non-positive value (or omitting the
+// option) selects the memory-scaled default (10 MiB floor, 64 MiB cap). An
+// explicit value always wins over the adaptive default.
+func WithMaxFileBytes(n int64) BuildOption {
+	return func(c *buildConfig) { c.maxBytes = n }
 }
 
 // Build walks root and produces a full AST index (all files parsed).
@@ -535,7 +598,13 @@ func copyPkg(p *Pkg) *Pkg {
 	}
 	c := *p
 	c.Files = append([]string(nil), p.Files...)
-	c.Imports = append([]string(nil), p.Imports...)
+	c.Imports = append([]ImportEdge(nil), p.Imports...)
+	if p.StructFields != nil {
+		c.StructFields = make(map[string]string, len(p.StructFields))
+		for k, v := range p.StructFields {
+			c.StructFields[k] = v
+		}
+	}
 	return &c
 }
 
@@ -549,28 +618,24 @@ func fileModTimeNanos(d fs.DirEntry) int64 {
 	return 0
 }
 
-// buildSerial is the original single-threaded build: it walks root, parses
-// every source file in lexical walk order and assembles the index. It is the
-// byte-for-byte reference behavior that buildParallel must reproduce (its
-// output is what kern's freshness/identity proofs compare against).
-func buildSerial(abs string, cfg *buildConfig) (*Index, error) {
-	ix := New(abs)
-	// Load .gitignore + .kernignore patterns so gitignored directories
-	// (e.g. graphify-out/, dist/, large generated trees) are skipped during
-	// the index walk. Without this, the index scans every file on disk
-	// regardless of .gitignore, producing huge symbol counts and slow builds.
-	ign := ignore.Load(abs)
-	err := filepath.WalkDir(abs, func(path string, d fs.DirEntry, err error) error {
+// walkIndexable walks root applying the index's file-selection policy —
+// ignoreDirs, .gitignore/.kernignore patterns, quickExt, regular-file and
+// maxFileBytes caps — and calls fn for every accepted file in lexical walk
+// order. It is the single source of truth for which files an index covers,
+// shared by buildSerial, buildParallel and Update so the incremental path
+// never diverges from a full rebuild on skip rules.
+func walkIndexable(root string, ign *ignore.Matcher, maxBytes int64, fn func(rel, path string, mtime int64) error) error {
+	return filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
 		if d.IsDir() {
-			if path != abs && ignoreDirs[d.Name()] {
+			if path != root && ignoreDirs[d.Name()] {
 				return filepath.SkipDir
 			}
 			// Honor .gitignore/.kernignore directory patterns.
-			if path != abs {
-				if rel, rerr := filepath.Rel(abs, path); rerr == nil {
+			if path != root {
+				if rel, rerr := filepath.Rel(root, path); rerr == nil {
 					if ign.Ignored(filepath.ToSlash(rel)) {
 						return filepath.SkipDir
 					}
@@ -581,9 +646,9 @@ func buildSerial(abs string, cfg *buildConfig) (*Index, error) {
 		if d.Name() == ".git" || d.Name() == ".kern" {
 			return nil
 		}
-		rel, rerr := filepath.Rel(abs, path)
+		rel, rerr := filepath.Rel(root, path)
 		if rerr != nil {
-			return err
+			return nil
 		}
 		// Honor .gitignore/.kernignore file patterns.
 		if ign.Ignored(filepath.ToSlash(rel)) {
@@ -596,12 +661,31 @@ func buildSerial(abs string, cfg *buildConfig) (*Index, error) {
 		if !d.Type().IsRegular() {
 			return nil
 		}
-		// Skip files larger than maxFileBytes before reading them so huge
+		// Skip files larger than maxBytes before reading them so huge
 		// generated/bundled files never get loaded into memory or scanned.
-		if info, ierr := d.Info(); ierr == nil && info.Size() > maxFileBytes {
+		if info, ierr := d.Info(); ierr == nil && info.Size() > maxBytes {
 			return nil
 		}
-		if r, ok := reuseByMtime(cfg.prior, rel, fileModTimeNanos(d)); ok {
+		return fn(rel, path, fileModTimeNanos(d))
+	})
+}
+
+// buildSerial is the original single-threaded build: it walks root, parses
+// every source file in lexical walk order and assembles the index. It is the
+// byte-for-byte reference behavior that buildParallel must reproduce (its
+// output is what kern's freshness/identity proofs compare against).
+func buildSerial(abs string, cfg *buildConfig) (*Index, error) {
+	ix := New(abs)
+	// Resolve resource-adaptive tunables once per build (workers/maxBytes
+	// fall back to machine-derived defaults unless the caller set them).
+	t := resolveTunables(cfg, resolveResources())
+	// Load .gitignore + .kernignore patterns so gitignored directories
+	// (e.g. graphify-out/, dist/, large generated trees) are skipped during
+	// the index walk. Without this, the index scans every file on disk
+	// regardless of .gitignore, producing huge symbol counts and slow builds.
+	ign := ignore.Load(abs)
+	err := walkIndexable(abs, ign, t.maxFileBytes, func(rel, path string, mtime int64) error {
+		if r, ok := reuseByMtime(cfg.prior, rel, mtime); ok {
 			cfg.reused.Add(1)
 			ix.applyFileResult(r)
 			return nil
@@ -615,7 +699,7 @@ func buildSerial(abs string, cfg *buildConfig) (*Index, error) {
 		if !isIndexable(rel, src) {
 			return nil
 		}
-		ix.applyFileResult(reuseOrCompute(cfg.prior, rel, src, fileModTimeNanos(d), &cfg.reused))
+		ix.applyFileResult(reuseOrCompute(cfg.prior, rel, src, mtime, &cfg.reused))
 		return nil
 	})
 	if err != nil {
@@ -638,6 +722,15 @@ func buildSerial(abs string, cfg *buildConfig) (*Index, error) {
 	return ix, nil
 }
 
+// reorderWindow bounds how far ahead of the merge cursor buildParallel's
+// workers may claim jobs (B7). Results received out of order must be buffered
+// until the head of the run arrives; without the window, a single slow file at
+// the head of the walk would make the pending map hold O(files) results
+// (roughly 2x index peak memory). With the window, pending stays bounded by
+// reorderWindow plus in-flight workers. Output stays byte-identical: the merge
+// still applies results strictly in seq order.
+const reorderWindow = 1024
+
 // fileJob is one accepted file discovered by buildParallel's phase-1 walk.
 // seq follows the lexical walk order; the merge loop replays results in seq
 // order so the merged index matches buildSerial byte for byte.
@@ -650,12 +743,14 @@ type fileJob struct {
 
 // buildParallel assembles the same index as buildSerial but parallelizes the
 // expensive per-file work (ReadFile, hashing, language detection, AST
-// extraction) across runtime.GOMAXPROCS(0) workers:
+// extraction) across a resource-adaptive worker pool — by default
+// min(clamp(NumCPU, 1, 32), total RAM / 512 MiB) workers, overridable with
+// WithWorkers; see resources.go:
 //
 //  1. Phase 1 walks the tree serially, applying the exact same skip policy as
-//     the serial build (ignoreDirs, ignore patterns, quickExt, maxFileBytes)
-//     and collecting one job per accepted file in lexical walk order. No file
-//     contents are read here.
+//     the serial build (ignoreDirs, ignore patterns, quickExt, adaptive
+//     maxFileBytes) and collecting one job per accepted file in lexical walk
+//     order. No file contents are read here.
 //  2. Phase 2 runs a fixed pool of worker goroutines. Workers only claim job
 //     indices via an atomic counter and produce fileResults — they never touch
 //     the index. This is the central safety property of the parallel build.
@@ -668,56 +763,21 @@ type fileJob struct {
 // so any ordering divergence would defeat them.
 func buildParallel(abs string, cfg *buildConfig) (*Index, error) {
 	ix := New(abs)
+	// Resolve resource-adaptive tunables once per build. The serial and
+	// parallel paths resolve the same profile, so their file-selection
+	// policy and merge behavior stay byte-identical.
+	t := resolveTunables(cfg, resolveResources())
 	// Load .gitignore + .kernignore patterns so gitignored directories
 	// (e.g. graphify-out/, dist/, large generated trees) are skipped during
 	// the index walk. Without this, the index scans every file on disk
 	// regardless of .gitignore, producing huge symbol counts and slow builds.
 	ign := ignore.Load(abs)
 
-	// Phase 1: serial walk collecting jobs.
+	// Phase 1: serial walk collecting jobs. The walk applies the exact same
+	// skip policy as the serial build via the shared walkIndexable.
 	var jobs []fileJob
-	err := filepath.WalkDir(abs, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if d.IsDir() {
-			if path != abs && ignoreDirs[d.Name()] {
-				return filepath.SkipDir
-			}
-			// Honor .gitignore/.kernignore directory patterns.
-			if path != abs {
-				if rel, rerr := filepath.Rel(abs, path); rerr == nil {
-					if ign.Ignored(filepath.ToSlash(rel)) {
-						return filepath.SkipDir
-					}
-				}
-			}
-			return nil
-		}
-		if d.Name() == ".git" || d.Name() == ".kern" {
-			return nil
-		}
-		rel, rerr := filepath.Rel(abs, path)
-		if rerr != nil {
-			return nil
-		}
-		// Honor .gitignore/.kernignore file patterns.
-		if ign.Ignored(filepath.ToSlash(rel)) {
-			return nil
-		}
-		if !quickExt(rel) && filepath.Ext(rel) != "" {
-			return nil
-		}
-		// Skip non-regular files (FIFOs, sockets, device nodes) to avoid blocking reads.
-		if !d.Type().IsRegular() {
-			return nil
-		}
-		// Skip files larger than maxFileBytes before reading them so huge
-		// generated/bundled files never get loaded into memory or scanned.
-		if info, ierr := d.Info(); ierr == nil && info.Size() > maxFileBytes {
-			return nil
-		}
-		jobs = append(jobs, fileJob{seq: len(jobs), rel: rel, path: path, mtime: fileModTimeNanos(d)})
+	err := walkIndexable(abs, ign, t.maxFileBytes, func(rel, path string, mtime int64) error {
+		jobs = append(jobs, fileJob{seq: len(jobs), rel: rel, path: path, mtime: mtime})
 		return nil
 	})
 	if err != nil {
@@ -728,7 +788,7 @@ func buildParallel(abs string, cfg *buildConfig) (*Index, error) {
 	// mutation happens only in the main goroutine's merge loop below.
 	// Small trees: pool + ordered-merge overhead exceeds the parse cost, so
 	// apply jobs serially in lexical order (byte-identical to the pool path).
-	if len(jobs) < parallelMinJobs {
+	if len(jobs) < t.parallelMin {
 		for _, j := range jobs {
 			if r, ok := reuseByMtime(cfg.prior, j.rel, j.mtime); ok {
 				cfg.reused.Add(1)
@@ -745,18 +805,31 @@ func buildParallel(abs string, cfg *buildConfig) (*Index, error) {
 			ix.applyFileResult(reuseOrCompute(cfg.prior, j.rel, src, j.mtime, &cfg.reused))
 		}
 	} else {
-		workers := runtime.GOMAXPROCS(0)
-		if workers < 1 {
-			workers = 1
-		}
-		results := make(chan fileResult, workers)
+		workers := t.workers
+		results := make(chan fileResult, t.resultBuf)
 		var wg sync.WaitGroup
 		var next int64
+		// applied tracks the merge cursor: the next seq the merge loop will
+		// apply. Workers may claim jobs at most reorderWindow ahead of it, so
+		// the reorder buffer stays bounded (B7).
+		var applied atomic.Int64
 		for w := 0; w < workers; w++ {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
 				for {
+					claim := atomic.LoadInt64(&next)
+					if claim >= int64(len(jobs)) {
+						return
+					}
+					if claim >= applied.Load()+reorderWindow {
+						// The reorder window is full — the merge cursor is
+						// waiting on a slow head-of-line file. Back off; the
+						// merge loop keeps draining results and will advance
+						// the window once the head arrives.
+						runtime.Gosched()
+						continue
+					}
 					idx := atomic.AddInt64(&next, 1) - 1
 					if idx >= int64(len(jobs)) {
 						return
@@ -809,6 +882,7 @@ func buildParallel(abs string, cfg *buildConfig) (*Index, error) {
 				delete(pending, nextSeq)
 				nextSeq++
 			}
+			applied.Store(int64(nextSeq))
 		}
 	}
 	ix.UpdatedAt = time.Now().UTC()
@@ -869,7 +943,7 @@ type fileResult struct {
 	mtime     int64
 	generated bool
 	syms      []Symbol
-	calls     map[string][]string
+	calls     map[string][]CallEdge
 	inherits  map[string][]string
 	pkg       *Pkg
 	// parseErr marks a Go file whose extraction failed: its hash is still
@@ -960,9 +1034,25 @@ func (ix *Index) applyFileResult(r fileResult) {
 			// Merge imports from every file of the package, not just the first
 			// indexed one. Without this, guard's import-level boundary check
 			// only ever sees the first file's imports.
+			// Merge imports from every file of the package, not just the first
+			// indexed one. Without this, guard's import-level boundary check
+			// only ever sees the first file's imports. Dedupe by path so the
+			// same import observed in several files keeps its first confidence
+			// rather than duplicating the edge.
 			for _, imp := range r.pkg.Imports {
-				if !slices.Contains(existing.Imports, imp) {
+				if !slices.ContainsFunc(existing.Imports, func(e ImportEdge) bool { return e.Path == imp.Path }) {
 					existing.Imports = append(existing.Imports, imp)
+				}
+			}
+			// Merge struct-field types so the merge-time callee rewrite can
+			// complete receiver-field chains whose struct is declared in a
+			// different file than the call.
+			for k, v := range r.pkg.StructFields {
+				if existing.StructFields == nil {
+					existing.StructFields = map[string]string{}
+				}
+				if _, dup := existing.StructFields[k]; !dup {
+					existing.StructFields[k] = v
 				}
 			}
 		} else {
@@ -976,18 +1066,26 @@ func (ix *Index) applyFileResult(r fileResult) {
 		// get an (empty) entry, so guard can distinguish "indexed file without
 		// imports" from "imports_by_file without index format" (old indexes).
 		for _, file := range r.pkg.Files {
-			// append([]string{}, pkg.Imports...) keeps a non-nil empty slice for
-			// files with no imports so they serialize as [] (not null) in index.json.
-			ix.ImportsByFile[file] = append([]string{}, r.pkg.Imports...)
+			// append([]ImportEdge{}, pkg.Imports...) keeps a non-nil empty slice
+			// for files with no imports so they serialize as [] (not null) in
+			// index.json.
+			ix.ImportsByFile[file] = append([]ImportEdge{}, r.pkg.Imports...)
 		}
 	}
 }
 
 func (ix *Index) computeCallers() {
+	// Resolve constructor-inferred callee qualifiers now that the full
+	// package symbol set is merged (per-file extraction cannot see
+	// cross-file constructors): "New.M" -> "Index.M" and
+	// "Server.newGov.M" -> "Gov.M". Conservative — single-return
+	// constructors whose return type is an actual declared type only.
+	ix.rewriteConstructorCallees()
 	ix.Callers = map[string][]string{}
 	ix.AliasCallers = map[string][]string{}
 	for caller, callees := range ix.Calls {
-		for _, c := range callees {
+		for _, ce := range callees {
+			c := ce.Target
 			if c == caller {
 				continue
 			}
@@ -1055,7 +1153,8 @@ func (ix *Index) addDispatchEdges() {
 	// to each implementer's method of the same name.
 	added := map[string]bool{} // dedupe key "caller->virtualCallee"
 	for caller, callees := range ix.Calls {
-		for _, c := range callees {
+		for _, ce := range callees {
+			c := ce.Target
 			// Parse "Receiver.method" to find the receiver and method name.
 			dot := strings.LastIndex(c, ".")
 			if dot < 0 || dot == 0 {
@@ -1082,7 +1181,9 @@ func (ix *Index) addDispatchEdges() {
 					continue
 				}
 				added[key] = true
-				ix.Calls[caller] = append(ix.Calls[caller], virtualCallee)
+				// Virtual dispatch edges are inferred through the inheritance
+				// graph, not stated in source: LOW.
+				ix.Calls[caller] = append(ix.Calls[caller], CallEdge{Target: virtualCallee, Confidence: ConfidenceLow})
 				ix.Callers[virtualCallee] = append(ix.Callers[virtualCallee], caller)
 			}
 		}
@@ -1090,7 +1191,7 @@ func (ix *Index) addDispatchEdges() {
 
 	// Dedupe after adding virtual edges.
 	for k := range ix.Calls {
-		ix.Calls[k] = dedupeSorted(ix.Calls[k])
+		ix.Calls[k] = dedupeCallEdges(ix.Calls[k])
 	}
 	for k := range ix.Callers {
 		ix.Callers[k] = dedupeSorted(ix.Callers[k])
@@ -1105,6 +1206,26 @@ func dedupeSorted(in []string) []string {
 			out = append(out, s)
 		}
 	}
+	return out
+}
+
+// dedupeCallEdges dedupes a call-edge slice by target (keeping the first
+// occurrence's confidence) and sorts by target, so the Calls map stays in the
+// deterministic order the finalize passes rely on.
+func dedupeCallEdges(in []CallEdge) []CallEdge {
+	if len(in) < 2 {
+		return in
+	}
+	seen := make(map[string]bool, len(in))
+	out := in[:0]
+	for _, e := range in {
+		if seen[e.Target] {
+			continue
+		}
+		seen[e.Target] = true
+		out = append(out, e)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Target < out[j].Target })
 	return out
 }
 
@@ -1233,7 +1354,7 @@ func (ix *Index) CallersOf(symbol string) []string {
 
 // CallSites returns the call edges of a symbol (what it calls).
 func (ix *Index) CallSites(symbol string) []string {
-	return ix.Calls[symbol]
+	return CallEdgeTargets(ix.Calls[symbol])
 }
 
 // simpleKey returns the part of a recorded callee key after the last '.'
@@ -1287,7 +1408,7 @@ func (ix *Index) CallersOfName(name string) []string {
 
 // CallsFor returns deduplicated callees recorded under the exact key of s.
 func (ix *Index) CallsFor(s Symbol) []string {
-	return dedupeSorted(ix.Calls[s.FullName()])
+	return dedupeSorted(CallEdgeTargets(ix.Calls[s.FullName()]))
 }
 
 // edgeKeys returns the map keys under which a symbol's inheritance edges may
@@ -1431,4 +1552,127 @@ func (ix *Index) Context(symbol string, linesAround int) string {
 		result += "\n\n" + summary
 	}
 	return result
+}
+
+// rewriteConstructorCallees rewrites callee qualifiers that are constructor
+// names into the constructor's single return type. Two shapes:
+//
+//	"New.applyFileResult"   -> "Index.applyFileResult"   (func constructor)
+//	"s.newGov.Filter"       -> "Gov.Filter"              (method constructor
+//	                                                      via a multi-value
+//	                                                      receiver-var assign)
+//
+// The rewrite is conservative: it fires only when the constructor's FIRST
+// return names an actual type symbol declared in the project (Go convention
+// puts the error last, so "gov, err := ..." maps through Returns[0]).
+// Unambiguous method names only (a duplicated method name skips the rewrite).
+// Runs before the Callers inversion in every build path (buildSerial,
+// buildParallel, Update all call computeCallers).
+func (ix *Index) rewriteConstructorCallees() {
+	if len(ix.Symbols) == 0 {
+		return
+	}
+	ctorRet := map[string]string{} // func name -> first return type
+	methodRet := map[string]string{}
+	methodDup := map[string]bool{}
+	types := map[string]bool{}
+	for _, s := range ix.Symbols {
+		switch s.Kind {
+		case "func":
+			// The FIRST return is the constructed value; Go convention puts
+			// the error last ("gov, err := ..."). The types[] check at
+			// rewrite time keeps this honest.
+			if len(s.Returns) >= 1 {
+				ctorRet[s.Name] = s.Returns[0]
+			}
+		case "method":
+			if len(s.Returns) >= 1 {
+				if _, dup := methodRet[s.Name]; dup {
+					methodDup[s.Name] = true
+					continue
+				}
+				methodRet[s.Name] = s.Returns[0]
+			}
+		case "type", "struct", "interface":
+			types[s.Name] = true
+		}
+	}
+	// Package-merged struct field types ("App.taskSvc" -> "TaskService"),
+	// collected from every file of every package.
+	fieldTypes := map[string]string{}
+	for _, p := range ix.Pkgs {
+		for k, v := range p.StructFields {
+			if _, dup := fieldTypes[k]; !dup {
+				fieldTypes[k] = v
+			}
+		}
+	}
+	rewrite := func(c string) string {
+		i := strings.LastIndexByte(c, '.')
+		if i <= 0 || i == len(c)-1 {
+			return c
+		}
+		q, m := c[:i], c[i+1:]
+		// Func constructor: "New.M".
+		if r, ok := ctorRet[q]; ok && types[r] {
+			return r + "." + m
+		}
+		// Method constructor via receiver-var chain: "s.newGov.M" —
+		// the last qualifier segment names the method.
+		if j := strings.LastIndexByte(q, '.'); j >= 0 {
+			qs := q[j+1:]
+			if r, ok := methodRet[qs]; ok && !methodDup[qs] && types[r] {
+				return r + "." + m
+			}
+		}
+		// Receiver-field chain: "App.taskSvc.Deploy" — the extractor
+		// resolved the receiver variable's type ("a" -> App) but the struct
+		// may be declared in another file, so the field -> type link is only
+		// visible here. Walk the longest matching "Struct.field" prefix and
+		// rewrite to the field's type; iterate so multi-level chains
+		// ("App.svc.client.M") resolve fully. Fires only when the field's
+		// type is a type declared in the project (conservative, mirrors the
+		// constructor rewrite).
+		for {
+			segs := strings.Split(c, ".")
+			if len(segs) < 3 {
+				break
+			}
+			rewritten := false
+			for k := 1; k < len(segs)-1; k++ {
+				key := strings.Join(segs[:k+1], ".")
+				if r, ok := fieldTypes[key]; ok && types[r] {
+					c = r + "." + strings.Join(segs[k+1:], ".")
+					rewritten = true
+					break
+				}
+			}
+			if !rewritten {
+				break
+			}
+		}
+		return c
+	}
+	for caller, callees := range ix.Calls {
+		for i, ce := range callees {
+			ix.Calls[caller][i].Target = rewrite(ce.Target)
+		}
+	}
+}
+
+// CallersIncludingAliases returns every recorded caller for a symbol's full
+// name: the canonical callers plus simple-name aliases (edges the extractor
+// recorded under a receiver-qualified or package-qualified callee form, e.g.
+// "New.applyFileResult" when a constructor-inferred receiver variable is
+// resolved to the constructor's name). Deletion/dead-code analysis must use
+// this: MISSING a caller is the dangerous direction, and over-reporting only
+// errs toward "unsafe to delete", never toward "safe".
+func (ix *Index) CallersIncludingAliases(full string) []string {
+	out := append([]string(nil), ix.Callers[full]...)
+	if simple := simpleKey(full); simple != full {
+		out = append(out, ix.AliasCallers[simple]...)
+	} else {
+		out = append(out, ix.AliasCallers[full]...)
+	}
+	return dedupeSorted(out)
 }

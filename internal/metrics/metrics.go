@@ -14,6 +14,13 @@ import (
 	"time"
 )
 
+// maxSamples bounds each duration slice in the Recorder so long-lived server
+// and MCP processes do not grow memory without bound. Once a slice reaches
+// this size, the oldest sample is dropped on each new Record (ring-buffer
+// semantics) and the newest samples are retained, so Snapshot aggregates
+// always reflect the most recent window.
+const maxSamples = 1000
+
 // Recorder collects timing and count metrics across kern operations.
 // It is thread-safe. A nil Recorder is safe to call (all methods are
 // no-ops), so callers can use `var r *Recorder` without nil checks.
@@ -56,6 +63,18 @@ func New() *Recorder {
 	return &Recorder{}
 }
 
+// appendCapped appends d to the duration slice, bounding its length at
+// maxSamples: once the cap is reached the oldest sample is dropped so the
+// slice never grows without bound. The newest entries are always retained.
+func appendCapped(slice []time.Duration, d time.Duration) []time.Duration {
+	if len(slice) >= maxSamples {
+		copy(slice, slice[1:])
+		slice[len(slice)-1] = d
+		return slice
+	}
+	return append(slice, d)
+}
+
 // defaultRecorder is the process-wide shared Recorder. It is lazy-initialized
 // on first use. Callers that need their own isolated Recorder can use New()
 // instead. All Record* methods on the Default are safe to call from any
@@ -86,7 +105,7 @@ func (r *Recorder) RecordIndexBuild(d time.Duration) {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.indexBuilds = append(r.indexBuilds, d)
+	r.indexBuilds = appendCapped(r.indexBuilds, d)
 }
 
 // RecordGraphQuery records a graph query duration.
@@ -96,7 +115,7 @@ func (r *Recorder) RecordGraphQuery(d time.Duration) {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.graphQueries = append(r.graphQueries, d)
+	r.graphQueries = appendCapped(r.graphQueries, d)
 }
 
 // RecordContextRetrieval records a context retrieval duration.
@@ -106,7 +125,7 @@ func (r *Recorder) RecordContextRetrieval(d time.Duration) {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.contextRetrieval = append(r.contextRetrieval, d)
+	r.contextRetrieval = appendCapped(r.contextRetrieval, d)
 }
 
 // RecordMemoryRecall records a memory recall duration.
@@ -116,7 +135,7 @@ func (r *Recorder) RecordMemoryRecall(d time.Duration) {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.memoryRecall = append(r.memoryRecall, d)
+	r.memoryRecall = appendCapped(r.memoryRecall, d)
 }
 
 // RecordPolicyEval records a policy evaluation duration.
@@ -126,7 +145,7 @@ func (r *Recorder) RecordPolicyEval(d time.Duration) {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.policyEval = append(r.policyEval, d)
+	r.policyEval = appendCapped(r.policyEval, d)
 }
 
 // RecordToolCall records a tool call duration.
@@ -136,7 +155,7 @@ func (r *Recorder) RecordToolCall(d time.Duration) {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.toolCalls = append(r.toolCalls, d)
+	r.toolCalls = appendCapped(r.toolCalls, d)
 	r.toolCallCount++
 }
 
@@ -147,7 +166,7 @@ func (r *Recorder) RecordVerification(d time.Duration) {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.verification = append(r.verification, d)
+	r.verification = appendCapped(r.verification, d)
 }
 
 // RecordCacheHit records a cache hit.
@@ -199,7 +218,7 @@ func (r *Recorder) RecordLLMLatency(d time.Duration) {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.llmLatency = append(r.llmLatency, d)
+	r.llmLatency = appendCapped(r.llmLatency, d)
 }
 
 // RecordIndexing records an indexing operation.

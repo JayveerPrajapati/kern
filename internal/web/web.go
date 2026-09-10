@@ -16,7 +16,6 @@ import (
 	"html/template"
 	"log"
 	"net/http"
-	"os"
 	"path/filepath"
 	"sync"
 	"time"
@@ -31,17 +30,23 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/memory"
 	"github.com/JayveerPrajapati/kern/internal/metrics"
 	"github.com/JayveerPrajapati/kern/internal/relay"
+	"github.com/JayveerPrajapati/kern/internal/service"
 	"github.com/JayveerPrajapati/kern/internal/verification"
 )
 
 // App holds the project root and the derived console state.
 // It delegates routing to an embedded http.ServeMux via ServeHTTP.
 type App struct {
-	root      string
-	mux       *http.ServeMux
-	ix        *index.Index
-	graph     *intelligence.Graph
-	platform  *app.Platform
+	root     string
+	mux      *http.ServeMux
+	ix       *index.Index
+	graph    *intelligence.Graph
+	platform *app.Platform
+	// svc is the delivery-mechanism-independent service layer. Handlers
+	// delegate core operations (index, graph, memory, governance, security)
+	// to it instead of importing the internal engines directly, so the same
+	// business logic serves CLI, MCP and web identically.
+	svc       *service.Services
 	ver       *verification.Engine // prebuilt verification engine (shares a.ix)
 	archIndex *index.Index         // shared index for architecture validation
 	memories  *memory.MemoryStore
@@ -96,6 +101,12 @@ type App struct {
 	graphMu    sync.RWMutex
 	graphVer   int
 	staleUntil time.Time
+	// rebuilding marks an in-flight background graph rebuild (B10): the
+	// single-flight claim is taken under graphMu, then the rebuild runs OFF
+	// the lock so concurrent requests are never blocked by it. Callers that
+	// arrive while a rebuild is in flight are served the stale snapshot
+	// immediately (stale-while-revalidate, same policy as project.Session).
+	rebuilding bool
 }
 
 // staleCooldown is how long a "fresh" verdict from index.Stale() is trusted
@@ -129,6 +140,7 @@ func New(root string) (*App, error) {
 		ix:            ix,
 		graph:         &g,
 		platform:      platform,
+		svc:           service.New(),
 		memories:      platform.Memory(),
 		inter:         incident.NewStore(root),
 		firewall:      platform.Firewall(),
@@ -167,96 +179,111 @@ func New(root string) (*App, error) {
 	// a.ix / a.graph and are safe for concurrent handler use.
 	a.ver = platform.VerificationEngine()
 	a.archIndex = a.ix
+	if err := a.loadTemplates(); err != nil {
+		return nil, err
+	}
+	a.registerRoutes()
+	return a, nil
+}
+
+// loadTemplates parses every embedded dashboard template once at startup.
+func (a *App) loadTemplates() error {
 	tmpl, err := parseDashboardTemplate()
 	if err != nil {
-		return nil, err
+		return err
 	}
 	a.dashboardT = tmpl
 
 	taskDetailTmpl, err := parseTaskDetailTemplate()
 	if err != nil {
-		return nil, fmt.Errorf("parse task detail template: %w", err)
+		return fmt.Errorf("parse task detail template: %w", err)
 	}
 	a.taskDetailT = taskDetailTmpl
 
 	agentsTmpl, err := parseAgentsTemplate()
 	if err != nil {
-		return nil, fmt.Errorf("parse agents template: %w", err)
+		return fmt.Errorf("parse agents template: %w", err)
 	}
 	a.agentsT = agentsTmpl
 
 	tasksTmpl, err := parseTasksTemplate()
 	if err != nil {
-		return nil, fmt.Errorf("parse tasks template: %w", err)
+		return fmt.Errorf("parse tasks template: %w", err)
 	}
 	a.tasksT = tasksTmpl
 
 	approvalsTmpl, err := parseApprovalsTemplate()
 	if err != nil {
-		return nil, fmt.Errorf("parse approvals template: %w", err)
+		return fmt.Errorf("parse approvals template: %w", err)
 	}
 	a.approvalsT = approvalsTmpl
 
 	risksTmpl, err := parseRisksTemplate()
 	if err != nil {
-		return nil, fmt.Errorf("parse risks template: %w", err)
+		return fmt.Errorf("parse risks template: %w", err)
 	}
 	a.risksT = risksTmpl
 
 	artifactsTmpl, err := parseArtifactsTemplate()
 	if err != nil {
-		return nil, fmt.Errorf("parse artifacts template: %w", err)
+		return fmt.Errorf("parse artifacts template: %w", err)
 	}
 	a.artifactsT = artifactsTmpl
 
 	auditTmpl, err := parseAuditTemplate()
 	if err != nil {
-		return nil, fmt.Errorf("parse audit template: %w", err)
+		return fmt.Errorf("parse audit template: %w", err)
 	}
 	a.auditT = auditTmpl
 
 	systemMapTmpl, err := parseSystemMapTemplate()
 	if err != nil {
-		return nil, fmt.Errorf("parse system map template: %w", err)
+		return fmt.Errorf("parse system map template: %w", err)
 	}
 	a.systemMapT = systemMapTmpl
 
 	incidentsTmpl, err := parseIncidentsTemplate()
 	if err != nil {
-		return nil, fmt.Errorf("parse incidents template: %w", err)
+		return fmt.Errorf("parse incidents template: %w", err)
 	}
 	a.incidentsT = incidentsTmpl
 
 	efficiencyTmpl, err := parseEfficiencyTemplate()
 	if err != nil {
-		return nil, fmt.Errorf("parse efficiency template: %w", err)
+		return fmt.Errorf("parse efficiency template: %w", err)
 	}
 	a.efficiencyT = efficiencyTmpl
 
 	graphTmpl, err := parseGraphTemplate()
 	if err != nil {
-		return nil, fmt.Errorf("parse graph template: %w", err)
+		return fmt.Errorf("parse graph template: %w", err)
 	}
 	a.graphT = graphTmpl
 
 	memoryTmpl, err := parseMemoryTemplate()
 	if err != nil {
-		return nil, fmt.Errorf("parse memory template: %w", err)
+		return fmt.Errorf("parse memory template: %w", err)
 	}
 	a.memoryT = memoryTmpl
 
 	architectureTmpl, err := parseArchitectureTemplate()
 	if err != nil {
-		return nil, fmt.Errorf("parse architecture template: %w", err)
+		return fmt.Errorf("parse architecture template: %w", err)
 	}
 	a.architectureT = architectureTmpl
 
 	evalTmpl, err := parseEvalTemplate()
 	if err != nil {
-		return nil, fmt.Errorf("parse eval template: %w", err)
+		return fmt.Errorf("parse eval template: %w", err)
 	}
 	a.evalT = evalTmpl
 
+	return nil
+}
+
+// registerRoutes wires every HTTP route onto the app mux. The route
+// table lives here so New() stays readable as the console grows.
+func (a *App) registerRoutes() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", a.handleIndex)
 	mux.HandleFunc("/api/overview", a.handleOverview)
@@ -267,6 +294,7 @@ func New(root string) (*App, error) {
 	mux.HandleFunc("/api/governance", a.handleGovernance)
 	mux.HandleFunc("/api/governance/metrics", a.handleGovernanceMetrics)
 	mux.HandleFunc("/api/performance", a.handlePerformance)
+	mux.HandleFunc("/api/runtime", a.handleRuntimeJSON)
 	mux.HandleFunc("/api/approvals/pending", a.handleApprovalsPending)
 	mux.HandleFunc("/api/approvals/approve", a.handleApprovalApprove)
 	mux.HandleFunc("/api/approvals/reject", a.handleApprovalReject)
@@ -282,6 +310,7 @@ func New(root string) (*App, error) {
 	mux.HandleFunc("/v1/risk", a.handleV1Risk)
 	mux.HandleFunc("/v1/agents", a.handleV1Agents)
 	mux.HandleFunc("/v1/loop", a.handleV1Loop)
+	mux.HandleFunc("/v1/incidents", a.handleV1Incidents)
 	mux.HandleFunc("/v1/incidents/investigate", a.handleV1IncidentInvestigate)
 	mux.HandleFunc("/v1/incidents/", a.handleV1Incident)
 	mux.HandleFunc("/v1/correlate", a.handleV1Correlate)
@@ -317,7 +346,6 @@ func New(root string) (*App, error) {
 	mux.HandleFunc("/api/system-map", a.handleSystemMapJSON)
 	mux.HandleFunc("/api/efficiency", a.handleEfficiencyJSON)
 	a.mux = mux
-	return a, nil
 }
 
 // ServeHTTP routes requests through the registered mux. For request methods
@@ -334,11 +362,15 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // freshGraph returns the current knowledge graph and index, rebuilding both if
 // the project has changed since the last build. Staleness is detected via the
-// index package's Stale() (file set + content-hash check). The rebuild runs at
-// most once per stale project, not once per request: a fast mtime/count gate
-// inside Stale() short-circuits most calls. Concurrent requests that all observe
-// staleness serialize on graphMu so only one of them performs the rebuild; the
-// rest wait and return the freshly swapped state.
+// index package's Stale() (file set + content-hash check), rate-limited by
+// staleCooldown so burst requests pay zero disk walks.
+//
+// B10 — stale-while-revalidate: the rebuild is claimed under the write lock
+// but runs OFF it (single-flight), so the first request after an edit no
+// longer blocks ALL web API requests for the full rebuild (30-90s on large
+// repos). The triggering caller waits for the fresh index; concurrent callers
+// are served the stale snapshot immediately. The fresh state is swapped in
+// atomically under the write lock.
 func (a *App) freshGraph() (*intelligence.Graph, *index.Index) {
 	a.graphMu.RLock()
 	if time.Now().Before(a.staleUntil) {
@@ -354,15 +386,32 @@ func (a *App) freshGraph() (*intelligence.Graph, *index.Index) {
 	}
 	a.graphMu.RUnlock()
 
+	// Stale. Claim the rebuild under the write lock (single-flight), then run
+	// it OFF the lock so no request is ever blocked by the reindex.
 	a.graphMu.Lock()
-	defer a.graphMu.Unlock()
-	// Re-check under the write lock: another request may have already rebuilt
-	// while we were waiting for the write lock.
-	if !a.ix.Stale() {
-		a.staleUntil = time.Now().Add(staleCooldown)
-		return a.graph, a.ix
+	if a.rebuilding {
+		// Another rebuild is in flight: serve the stale snapshot now; it
+		// atomically swaps in the fresh graph when it finishes.
+		g, ix := a.graph, a.ix
+		a.graphMu.Unlock()
+		return g, ix
 	}
-	if nix, err := a.rebuildIndex(); err == nil {
+	if !a.ix.Stale() {
+		// Another caller rebuilt while we waited for the write lock.
+		a.staleUntil = time.Now().Add(staleCooldown)
+		g, ix := a.graph, a.ix
+		a.graphMu.Unlock()
+		return g, ix
+	}
+	a.rebuilding = true
+	a.graphMu.Unlock()
+
+	// Rebuild off the lock: concurrent requests are served the stale graph
+	// meanwhile (see the a.rebuilding branch above).
+	nix, err := a.rebuildIndex()
+
+	a.graphMu.Lock()
+	if err == nil && nix != nil {
 		a.ix = nix
 		ng := intelligence.FromIndex(nix)
 		a.graph = &ng
@@ -375,18 +424,23 @@ func (a *App) freshGraph() (*intelligence.Graph, *index.Index) {
 		}
 		a.graphVer++
 	}
+	a.rebuilding = false
 	a.staleUntil = time.Now().Add(staleCooldown)
-	return a.graph, a.ix
+	g, ix := a.graph, a.ix
+	a.graphMu.Unlock()
+	return g, ix
 }
 
-// rebuildIndex builds a fresh index for a.root. With KERN_INCREMENTAL=1 it
-// reuses the current index's per-file parse results for unchanged files —
-// parsing dominates rebuild time on large trees — while remaining
-// equivalent to a full rebuild (same symbols, hashes, and MaxMtime). The
-// swap semantics in freshGraph are unchanged either way.
+// rebuildIndex builds a fresh index for a.root. It prefers an incremental
+// Update (re-parsing only changed files, reusing symbols/edges of unchanged
+// ones — the same policy as the session's rebuild) whenever the current index
+// is usable as the prior, falling back to a full Build on any Update failure.
+// The swap semantics in freshGraph are unchanged either way.
 func (a *App) rebuildIndex() (*index.Index, error) {
-	if os.Getenv("KERN_INCREMENTAL") == "1" {
-		return index.BuildWithOptions(a.root, index.WithPriorIndex(a.ix))
+	if a.ix != nil {
+		if uix, uerr := index.Update(a.root, a.ix); uerr == nil && uix != nil {
+			return uix, nil
+		}
 	}
 	return index.Build(a.root)
 }

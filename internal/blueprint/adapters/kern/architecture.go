@@ -10,9 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
-	"strconv"
 	"strings"
-	"time"
 
 	"github.com/JayveerPrajapati/kern/internal/blueprint/domain"
 )
@@ -379,8 +377,8 @@ func (c *ArchitectureCheck) buildGuardFindings(req domain.ChangeRequest, violati
 			Severity:       domain.SeverityWarn,
 			Category:       domain.CategoryArchitecture,
 			Message:        msg,
-			Explanation:    "The guard check runs against the installed kern binary's index. This kern build does not extract Java imports, so Java-only boundary violations would not be reported as blocks.",
-			SuggestedFix:   "Upgrade the kern binary to a build that extracts Java import edges, then re-run the check.",
+			Explanation:    "The guard check runs against the installed kern binary's index, which extracts Java imports (per-file import edges) in addition to call edges, so Java boundary crossings are reported; matching is precise on full package paths (see importMatches).",
+			SuggestedFix:   "Boundary rules match on full package paths; a Java import only violates a rule when its package path is the exact suffix of the forbidden directory.",
 			RuleVersion:    "1",
 			IndexFreshness: freshness,
 			Confidence:     1.0,
@@ -513,67 +511,6 @@ func indexVerdict(status map[string]any) string {
 		return "unknown"
 	}
 	return v
-}
-
-// Deprecated: P0.2 replaced this with KernClient.IndexStatus (kern's
-// content-addressed FreshnessProof). Retained for reference; do not call.
-//
-// indexIsStale reports whether the kern index at <root>/.kern/index.json is
-// stale relative to the change being validated, meaning it must be rebuilt
-// before the guard check so symbol edges reflect current file content (e.g. a
-// newly-added import).
-//
-// Freshness heuristic (best-effort):
-//   - A missing index.json is always stale.
-//   - The HEAD commit timestamp (git log -1 --format=%ct) is compared to the
-//     index mtime: a commit that landed after the index was built means the
-//     index cannot reflect it.
-//   - Every file in req.Files (repo-relative, joined with root) whose mtime is
-//     newer than the index makes it stale. Stat errors are ignored.
-//   - In strict mode, every path in tracked is checked the same way.
-//
-// Limitation: operations that change file content without updating mtimes
-// (e.g. `git apply` preserving mtimes) can leave a stale index undetected; an
-// explicit `kern index` still refreshes it.
-func indexIsStale(root string, req domain.ChangeRequest, tracked []string) (bool, error) {
-	idxPath := filepath.Join(root, ".kern", "index.json")
-	idxInfo, err := os.Stat(idxPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return true, nil // no index -> must build
-		}
-		return false, err
-	}
-	tIdx := idxInfo.ModTime()
-
-	// HEAD commit time: any commit newer than the index invalidates it.
-	if out, err := exec.Command("git", "-C", root, "log", "-1", "--format=%ct").Output(); err == nil {
-		if ct, cerr := strconv.ParseInt(strings.TrimSpace(string(out)), 10, 64); cerr == nil {
-			if time.Unix(ct, 0).After(tIdx) {
-				return true, nil
-			}
-		}
-	}
-
-	// Changed files: a file newer than the index may carry new symbols/imports.
-	for _, f := range req.Files {
-		if fi, serr := os.Stat(filepath.Join(root, f.Path)); serr == nil {
-			if fi.ModTime().After(tIdx) {
-				return true, nil
-			}
-		}
-	}
-
-	// Strict mode also checks every tracked file.
-	for _, p := range tracked {
-		if fi, serr := os.Stat(filepath.Join(root, p)); serr == nil {
-			if fi.ModTime().After(tIdx) {
-				return true, nil
-			}
-		}
-	}
-
-	return false, nil
 }
 
 // gitTrackedFiles returns all files tracked by git in the repo root, via

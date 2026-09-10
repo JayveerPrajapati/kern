@@ -80,6 +80,13 @@ type LoopConfig struct {
 	// the default code-stage handler, used when the caller's StepFunc is nil.
 	Coder *coder.Agent
 
+	// Context optionally grounds the coder: it assembles project context
+	// (relevant file contents + impact set) for an intent and plan, which the
+	// code stage passes to the coder's prompt. Nil or an error keeps the
+	// coder ungrounded (intent + plan only). Best-effort by design: context
+	// assembly must never fail the code stage.
+	Context func(intent, plan string) (string, error)
+
 	// Planner optionally wires the LLM-driven planner (internal/planner) as
 	// the default plan-stage handler, used when the caller's StepFunc is nil.
 	// When both Planner and Coder are set, the loop uses LLM-driven plan→code
@@ -522,7 +529,11 @@ func (l *Loop) runStage(ctx context.Context, st, intent string, step StepFunc, w
 			l.publish(eventbus.Event{Kind: eventbus.DeploymentFailed, Subject: l.cfg.Service, Payload: map[string]string{"service": l.cfg.Service, "error": derr.Error()}})
 			l.publish(eventbus.Event{Kind: eventbus.DeploymentRolledBack, Subject: l.cfg.Service, Payload: map[string]string{"service": l.cfg.Service, "error": derr.Error()}})
 		} else if !dres.Success {
-			err = errors.New("deploy failed: " + dres.Output)
+			if cause := firstNonEmptyLine(dres.Output); cause != "" {
+				err = fmt.Errorf("deploy: %s — see deploy output above", cause)
+			} else {
+				err = errors.New("deploy: deployer reported failure with no output")
+			}
 			res.Deployed = false
 			out = dres.Output
 			l.publish(eventbus.Event{Kind: eventbus.DeploymentFailed, Subject: l.cfg.Service, Payload: map[string]string{"service": l.cfg.Service, "error": dres.Output}})
@@ -652,7 +663,17 @@ func (l *Loop) coderStep() StepFunc {
 				break
 			}
 		}
-		result, err := l.cfg.Coder.Code(intent, plan, wt)
+		// Ground the coder with project context (relevant file contents +
+		// impact set) when an assembler is wired. Best-effort: an assembly
+		// error degrades to the ungrounded prompt rather than failing the
+		// stage.
+		codeContext := ""
+		if l.cfg.Context != nil {
+			if ctxStr, cerr := l.cfg.Context(intent, plan); cerr == nil {
+				codeContext = ctxStr
+			}
+		}
+		result, err := l.cfg.Coder.Code(intent, plan, codeContext, wt)
 		if err != nil {
 			if err == coder.ErrNoProvider {
 				return "coder: no LLM provider configured", err
@@ -663,7 +684,7 @@ func (l *Loop) coderStep() StepFunc {
 			res.Diff = result.Diff
 			return fmt.Sprintf("coder: passed in %d round(s) (%.2fs)", len(result.Rounds), result.TotalTime.Seconds()), nil
 		}
-		return fmt.Sprintf("coder: %d round(s), verification did not pass", len(result.Rounds)), fmt.Errorf("coder: verification failed")
+		return fmt.Sprintf("coder: verification did not pass after %d round(s)", len(result.Rounds)), fmt.Errorf("coder: verification did not pass after %d round(s) — fix the failing test/build", len(result.Rounds))
 	}
 }
 
@@ -716,7 +737,10 @@ func (l *Loop) requestApproval(intent string) (domain.Approval, error) {
 	// Create a human-in-the-loop approval for the change. The ID is carried
 	// through so operators can correlate the decision back to the originating
 	// action via the workflow.
-	ap := l.cfg.Appr.Request(intent, "loop", "deploy verified change")
+	ap, err := l.cfg.Appr.Request(intent, "loop", "deploy verified change")
+	if err != nil {
+		return ap, fmt.Errorf("loop: approval could not be persisted: %w", err)
+	}
 	// Fail-closed: re-read the approval to pick up any decision already made.
 	cur, err := l.cfg.Appr.Get(ap.ID)
 	if err != nil {
@@ -861,4 +885,15 @@ func sanitizeIntent(intent string) string {
 		return res[:maxLen]
 	}
 	return res
+}
+
+// firstNonEmptyLine returns the first non-empty, trimmed line of s, for use as
+// a one-line cause in an error message instead of a raw multi-line dump.
+func firstNonEmptyLine(s string) string {
+	for _, ln := range strings.Split(s, "\n") {
+		if t := strings.TrimSpace(ln); t != "" {
+			return t
+		}
+	}
+	return strings.TrimSpace(s)
 }

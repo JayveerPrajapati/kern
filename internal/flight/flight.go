@@ -13,7 +13,9 @@ import (
 	"fmt"
 	"log"
 	"path/filepath"
+	"slices"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -202,6 +204,131 @@ func (r *Recorder) Filter(agentID, taskID, status string) []Record {
 	return out
 }
 
+// TaskSummary aggregates one task's flight trail: how many records it has,
+// when it was first and last active, and which statuses its records carry.
+type TaskSummary struct {
+	TaskID   string    `json:"task_id"`
+	Count    int       `json:"count"`
+	First    time.Time `json:"first"`
+	Last     time.Time `json:"last"`
+	Statuses []string  `json:"statuses"`
+}
+
+// Tasks groups every known record by TaskID — the task-id to trail linkage.
+// Records with no TaskID form the "" group. The result is ordered by most
+// recently active task first, then by task id.
+func (r *Recorder) Tasks() ([]TaskSummary, error) {
+	records, err := r.List()
+	if err != nil {
+		return nil, err
+	}
+	grouped := map[string]*TaskSummary{}
+	for _, rec := range records {
+		ts, ok := grouped[rec.TaskID]
+		if !ok {
+			ts = &TaskSummary{TaskID: rec.TaskID}
+			grouped[rec.TaskID] = ts
+		}
+		ts.Count++
+		if ts.First.IsZero() || rec.Timestamp.Before(ts.First) {
+			ts.First = rec.Timestamp
+		}
+		if rec.Timestamp.After(ts.Last) {
+			ts.Last = rec.Timestamp
+		}
+		if rec.Status != "" && !slices.Contains(ts.Statuses, rec.Status) {
+			ts.Statuses = append(ts.Statuses, rec.Status)
+		}
+	}
+	out := make([]TaskSummary, 0, len(grouped))
+	for _, ts := range grouped {
+		sort.Strings(ts.Statuses)
+		out = append(out, *ts)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if !out[i].Last.Equal(out[j].Last) {
+			return out[i].Last.After(out[j].Last)
+		}
+		return out[i].TaskID < out[j].TaskID
+	})
+	return out, nil
+}
+
+// GC enforces retention on the persisted flight store. A task's trail is
+// retained when it is active within olderThan of now, OR (when keepTasks > 0)
+// it is among the keepTasks most recently active tasks; every record of every
+// other task is deleted. Trails are never partially truncated — retention is
+// per task, so `kern flight show` always replays a complete trail. Records
+// deleted from the store are also purged from the in-memory buffer so List
+// cannot resurrect them. Returns the number of records deleted.
+func (r *Recorder) GC(keepTasks int, olderThan time.Duration) (int, error) {
+	records, err := r.List()
+	if err != nil {
+		return 0, err
+	}
+	if len(records) == 0 {
+		return 0, nil
+	}
+	now := time.Now().UTC()
+	cutoff := now.Add(-olderThan)
+	byTask := map[string][]Record{}
+	for _, rec := range records {
+		byTask[rec.TaskID] = append(byTask[rec.TaskID], rec)
+	}
+	lasts := make([]struct {
+		taskID string
+		last   time.Time
+	}, 0, len(byTask))
+	for taskID, recs := range byTask {
+		last := recs[0].Timestamp
+		for _, rec := range recs[1:] {
+			if rec.Timestamp.After(last) {
+				last = rec.Timestamp
+			}
+		}
+		lasts = append(lasts, struct {
+			taskID string
+			last   time.Time
+		}{taskID, last})
+	}
+	sort.Slice(lasts, func(i, j int) bool { return lasts[i].last.After(lasts[j].last) })
+	keep := map[string]bool{}
+	for _, t := range lasts {
+		if olderThan > 0 && t.last.After(cutoff) {
+			keep[t.taskID] = true
+			continue
+		}
+		if keepTasks > 0 && len(keep) < keepTasks {
+			keep[t.taskID] = true
+		}
+	}
+	var deleted int
+	for taskID, recs := range byTask {
+		if keep[taskID] {
+			continue
+		}
+		for _, rec := range recs {
+			if err := r.store.Delete(context.Background(), rec.ID); err != nil {
+				return deleted, err
+			}
+			deleted++
+		}
+	}
+	if deleted > 0 {
+		r.mu.Lock()
+		purged := r.buffer[:0]
+		for _, rec := range r.buffer {
+			if !keep[rec.TaskID] {
+				continue
+			}
+			purged = append(purged, rec)
+		}
+		r.buffer = purged
+		r.mu.Unlock()
+	}
+	return deleted, nil
+}
+
 // query returns every record for taskID whose Action matches one of the given
 // action types, in chronological order (oldest first, then by ID for
 // determinism). If actions is empty, every record for the task matches.
@@ -298,4 +425,36 @@ func (r *Recorder) WhatOutcome(taskID string) []Record {
 // full audit trail. Answers Workflow E: "what happened end-to-end?"
 func (r *Recorder) WhatHappened(taskID string) []Record {
 	return r.query(taskID)
+}
+
+// TrailText renders the full audit trail for taskID as human-readable text:
+// every record in chronological order with its action, status, context,
+// arguments, result, and approval flag. It is the canonical reader rendering
+// shared by `kern flight show` and the kern_flight MCP tool. Nil-safe.
+func (r *Recorder) TrailText(taskID string) string {
+	recs := r.query(taskID)
+	if len(recs) == 0 {
+		return "no flight records for task " + taskID
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "flight trail for task %s (%d records)\n", taskID, len(recs))
+	for _, rec := range recs {
+		fmt.Fprintf(&b, "\n[%s] %s by %s\n", rec.Timestamp.Format(time.RFC3339), rec.Action, rec.AgentID)
+		if rec.Context != "" {
+			fmt.Fprintf(&b, "  context: %s\n", rec.Context)
+		}
+		if rec.Arguments != "" {
+			fmt.Fprintf(&b, "  arguments: %s\n", rec.Arguments)
+		}
+		if rec.Result != "" {
+			fmt.Fprintf(&b, "  result: %s\n", rec.Result)
+		}
+		if rec.Status != "" {
+			fmt.Fprintf(&b, "  status: %s\n", rec.Status)
+		}
+		if rec.Approved {
+			fmt.Fprintf(&b, "  approved: yes\n")
+		}
+	}
+	return b.String()
 }

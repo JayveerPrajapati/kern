@@ -28,7 +28,8 @@ func (ix *Index) CommunityLabels() map[string]string {
 	nodes := []string{}
 	for _, s := range ix.Symbols {
 		caller := s.FullName()
-		for _, c := range ix.Calls[caller] {
+		for _, ce := range ix.Calls[caller] {
+			c := ce.Target
 			if c == caller {
 				continue
 			}

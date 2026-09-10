@@ -1,10 +1,12 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/JayveerPrajapati/kern/internal/index"
 	"github.com/JayveerPrajapati/kern/internal/intel"
-	"github.com/JayveerPrajapati/kern/internal/pii"
+	"github.com/JayveerPrajapati/kern/internal/remove"
 	"github.com/JayveerPrajapati/kern/internal/rename"
 	"github.com/JayveerPrajapati/kern/internal/sec"
 	"os"
@@ -21,7 +23,7 @@ func runSchema(rest []string) {
 	}
 	sc, err := loadSchema(f.schema)
 	if err != nil {
-		fatal("%v", err)
+		fatal("schema: %v", err)
 	}
 	var b []byte
 	if len(args) > 0 && args[0] == "-" {
@@ -32,7 +34,7 @@ func runSchema(rest []string) {
 		b, err = readStdin()
 	}
 	if err != nil {
-		fatal("%v", err)
+		fatal("schema: %v", err)
 	}
 	violations := sc.Validate(b)
 	if len(violations) == 0 {
@@ -66,9 +68,12 @@ func runMask(rest []string) {
 		b = []byte(in)
 	}
 	if err != nil {
-		fatal("%v", err)
+		fatal("mask: %v", err)
 	}
-	res := pii.MaskAllCustom(string(b), pii.DefaultPatterns, splitNames(f.names))
+	res, merr := svc.Security.Mask(context.Background(), string(b), splitNames(f.names))
+	if merr != nil {
+		fatal("mask: %v", merr)
+	}
 	fmt.Print(res.Text)
 	if res.Replaced > 0 {
 		fmt.Fprintf(os.Stderr, "\nkern: masked %d secrets: ", res.Replaced)
@@ -99,21 +104,21 @@ func runSec(rest []string) {
 	if f.severity != "" {
 		allow = strings.Split(f.severity, ",")
 	}
-	findings, serr := sec.Scan(root)
+	findings, serr := svc.Security.Scan(context.Background(), root)
 	if serr != nil {
 		fatal("kern sec: %v", serr)
 	}
-	findings = sec.FilterBySeverity(findings, allow)
+	findings = svc.Security.FilterBySeverity(findings, allow)
 	counts := sec.Counts(findings)
 	if f.json {
 		if err := json.NewEncoder(os.Stdout).Encode(map[string]any{
 			"schema_version": kernJSONContractVersion,
 			"findings":       findings,
 		}); err != nil {
-			fatal("%v", err)
+			fatal("sec: %v", err)
 		}
 	} else {
-		fmt.Print(sec.Render(findings, max))
+		fmt.Print(svc.Security.Render(findings, max))
 		fmt.Fprintf(os.Stderr, "kern sec: %d findings (%d error, %d warning, %d info)\n",
 			len(findings), counts["error"], counts["warning"], counts["info"])
 	}
@@ -222,7 +227,7 @@ func runDelete(rest []string) {
 		fatalUsage("flags: %v", err)
 	}
 	if len(args) < 1 {
-		fatalUsage("usage: kern delete <symbol> [root] [--json]")
+		fatalUsage("usage: kern delete <symbol> [root] [--apply] [--json]")
 	}
 	sym := args[0]
 	root := f.root
@@ -234,7 +239,11 @@ func runDelete(rest []string) {
 	}
 	ix, err := loadOrBuild(root)
 	if err != nil {
-		fatal("%v", err)
+		fatal("delete: %v", err)
+	}
+	if f.apply {
+		runDeleteApply(root, ix, sym, f.json)
+		return
 	}
 	r := intel.DeleteCheck(ix, sym)
 	if f.json {
@@ -248,6 +257,26 @@ func runDelete(rest []string) {
 		panic(exitError{code: 1})
 	}
 
+}
+
+// runDeleteApply commits the deletion when the gate sanctions it: the
+// symbol's declaration and its test-only callers are removed, backed up
+// under .kern/rename-backup/ (rename.Apply's transactional machinery), and
+// the index rebuilds automatically on the next load.
+func runDeleteApply(root string, ix *index.Index, sym string, asJSON bool) {
+	plan, err := remove.Plan(ix, sym)
+	if err != nil {
+		fatal("delete: %v", err)
+	}
+	n, err := rename.Apply(root, plan)
+	if err != nil {
+		fatal("delete --apply: %v (all files restored)", err)
+	}
+	if asJSON {
+		printJSON(plan)
+		return
+	}
+	fmt.Printf("kern delete: %d edit(s) applied; backup at %s; index will rebuild automatically\n", n, plan.Backup)
 }
 
 func runRename(rest []string) {
@@ -268,11 +297,11 @@ func runRename(rest []string) {
 	}
 	ix, err := loadOrBuild(root)
 	if err != nil {
-		fatal("%v", err)
+		fatal("rename: %v", err)
 	}
 	rep, err := rename.Rename(ix, oldName, newName)
 	if err != nil {
-		fatal("%v", err)
+		fatal("rename: %v", err)
 	}
 	if f.json {
 		printJSON(rep)

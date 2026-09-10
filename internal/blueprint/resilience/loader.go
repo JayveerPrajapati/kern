@@ -42,7 +42,11 @@ func Load(repoRoot string) ([]Scenario, error) {
 
 	// Scenario ids are unique across ALL scenarios: built-ins + YAML.
 	seen := map[string]bool{}
-	for _, s := range DefaultScenarios() {
+	builtins, err := DefaultScenarios()
+	if err != nil {
+		return nil, err
+	}
+	for _, s := range builtins {
 		seen[s.ID()] = true
 	}
 
@@ -69,7 +73,11 @@ func LoadAll(repoRoot string) ([]Scenario, error) {
 	if err != nil {
 		return nil, err
 	}
-	return append(DefaultScenarios(), declared...), nil
+	builtins, err := DefaultScenarios()
+	if err != nil {
+		return nil, err
+	}
+	return append(builtins, declared...), nil
 }
 
 // parseScenariosFile parses and validates one scenarios YAML document. seen

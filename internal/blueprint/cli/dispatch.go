@@ -31,6 +31,9 @@ func RunWatch(args []string) int { return runWatch(args) }
 // RunMetrics executes `blueprint metrics`.
 func RunMetrics(args []string) int { return runMetrics(args) }
 
+// RunDiffGate executes `kern diff-gate`.
+func RunDiffGate(args []string) int { return runDiffGate(args) }
+
 // RunRequestApproval executes `blueprint request-approval` / `kern request-approval`.
 func RunRequestApproval(args []string) int { return runRequestApproval(args) }
 

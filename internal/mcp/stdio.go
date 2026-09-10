@@ -26,6 +26,11 @@ var ErrDrainTimeout = errors.New("mcp: in-flight tool calls did not drain within
 func ServeStdio(srv *Server) error {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
+	// Implicit background index watch: rebuild stale workspace-root indexes
+	// between tool calls so the first call after an edit finds a warm index.
+	// Disabled by KERN_MCP_WATCH=0; KERN_MCP_WATCH_INTERVAL sets the poll.
+	// The watcher stops on ctx cancellation (signal) or srv.Close() below.
+	srv.StartBackgroundWatch(ctx, watchIntervalFromEnv())
 	// Closing os.Stdin from another goroutine does not reliably unblock the
 	// scanner's read, so Serve() alone may never return after a signal.
 	// The drain goroutine therefore owns the exit decision after a signal:

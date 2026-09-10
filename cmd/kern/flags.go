@@ -11,85 +11,104 @@ import (
 // and its parser in their own file (SRP/OCP) means adding a flag never
 // requires touching main.go — subcommands and the dispatcher stay decoupled.
 type flags struct {
-	attach         string
-	session        string
-	model          string
-	days           int
-	json           bool
-	dir            string
-	csv            bool
-	llm            string
-	bpe            bool
-	root           string
-	level          string
-	check          bool
-	verify         bool
-	detect         bool
-	global         bool
-	apply          bool
-	agents         string
-	file           string
-	task           string
-	agentID        string
-	mermaid        bool
-	all            bool
-	clear          bool
-	max            int
-	limit          int
-	lines          int
-	depth          int
-	range_         string
-	commits        int
-	thresholds     string
-	graphml        bool
-	html           bool
-	out            string
-	repos          bool
-	mask           bool
-	names          string
-	cache          bool
-	schema         string
-	cmd            string
-	timeout        int
-	timeoutSet     bool
-	fewshot        bool
-	mode           string
-	once           bool
-	interval       int
-	http           string
-	hold           bool
-	sarif          bool
-	threshold      int
-	severity       string
-	semantic       bool
-	lang           string
-	stdin          string
-	noinstructions bool
-	maxTokens      int
-	maxFiles       int
-	tier           string
-	precision      string
-	fold           bool
-	staged         bool
-	compact        bool
-	subject        bool
-	message        string
-	dryRun         bool
-	reset          bool
-	name           string
-	pattern        string
-	full           bool
-	generate       bool
-	help           bool
-	approver       string
-	reject         bool
-	reason         string
-	status         bool
-	strict         bool
-	addr           string
-	enterprise     bool
-	projects       []string
-	terseCode      bool
+	attach               string
+	session              string
+	model                string
+	days                 int
+	json                 bool
+	dir                  string
+	csv                  bool
+	llm                  string
+	bpe                  bool
+	root                 string
+	level                string
+	taskType             string
+	check                bool
+	verify               bool
+	detect               bool
+	global               bool
+	apply                bool
+	runtime              bool
+	agents               string
+	file                 string
+	task                 string
+	budget               int
+	hostUninstall        bool
+	agentID              string
+	mermaid              bool
+	all                  bool
+	clear                bool
+	max                  int
+	limit                int
+	lines                int
+	depth                int
+	range_               string
+	commits              int
+	thresholds           string
+	graphml              bool
+	html                 bool
+	out                  string
+	repos                bool
+	mask                 bool
+	names                string
+	cache                bool
+	schema               string
+	cmd                  string
+	timeout              int
+	timeoutSet           bool
+	fewshot              bool
+	mode                 string
+	once                 bool
+	interval             int
+	http                 string
+	tlsCert              string
+	tlsKey               string
+	hold                 bool
+	sarif                bool
+	threshold            int
+	severity             string
+	semantic             bool
+	lang                 string
+	stdin                string
+	noinstructions       bool
+	maxTokens            int
+	maxFiles             int
+	tier                 string
+	precision            string
+	fold                 bool
+	staged               bool
+	compact              bool
+	subject              bool
+	message              string
+	dryRun               bool
+	reset                bool
+	name                 string
+	pattern              string
+	query                string
+	symbol               string
+	change               string
+	fresh                bool
+	full                 bool
+	generate             bool
+	help                 bool
+	approver             string
+	reject               bool
+	reason               string
+	version              string
+	status               bool
+	strict               bool
+	addr                 string
+	enterprise           bool
+	projects             []string
+	terseCode            bool
+	lens                 string
+	profile              string
+	evalDir              string
+	skillDir             string
+	verifyPipeline       bool
+	verifySilent         bool
+	verifyTokenReduction bool
+	scanPath             string
 }
 
 func parseFlags(args []string) (flags, []string, error) {
@@ -112,38 +131,44 @@ func parseFlags(args []string) (flags, []string, error) {
 		}
 		*dst = n
 	}
+
+	// take advances the parser past the current token and returns the next
+	// one; ok=false at end of args (the historical behavior: a trailing
+	// value flag is silently ignored).
+	take := func(i *int) (string, bool) {
+		*i++
+		if *i < len(args) {
+			return args[*i], true
+		}
+		return "", false
+	}
+	// setStr consumes the value of a string flag.
+	setStr := func(i *int, dst *string) {
+		if v, ok := take(i); ok {
+			*dst = v
+		}
+	}
+	// setIntFlag consumes the value of an int flag through setInt (error
+	// sticky via parseErr).
+	setIntFlag := func(i *int, dst *int, name string) {
+		if v, ok := take(i); ok {
+			setInt(dst, v, name)
+		}
+	}
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
 		case "--attach":
-			i++
-			if i < len(args) {
-				f.attach = args[i]
-			}
+			setStr(&i, &f.attach)
 		case "--session":
-			i++
-			if i < len(args) {
-				f.session = args[i]
-			}
+			setStr(&i, &f.session)
 		case "--model":
-			i++
-			if i < len(args) {
-				f.model = args[i]
-			}
+			setStr(&i, &f.model)
 		case "--days":
-			i++
-			if i < len(args) {
-				setInt(&f.days, args[i], "--days")
-			}
+			setIntFlag(&i, &f.days, "--days")
 		case "--dir":
-			i++
-			if i < len(args) {
-				f.dir = args[i]
-			}
+			setStr(&i, &f.dir)
 		case "--llm":
-			i++
-			if i < len(args) {
-				f.llm = args[i]
-			}
+			setStr(&i, &f.llm)
 		case "--json":
 			f.json = true
 		case "--status":
@@ -157,81 +182,79 @@ func parseFlags(args []string) (flags, []string, error) {
 		case "--sarif":
 			f.sarif = true
 		case "--threshold":
-			i++
-			if i < len(args) {
-				setInt(&f.threshold, args[i], "--threshold")
-			}
+			setIntFlag(&i, &f.threshold, "--threshold")
 		case "--commits":
-			i++
-			if i < len(args) {
-				setInt(&f.commits, args[i], "--commits")
-			}
+			setIntFlag(&i, &f.commits, "--commits")
 		case "--thresholds":
-			i++
-			if i < len(args) {
-				f.thresholds = args[i]
-			}
+			setStr(&i, &f.thresholds)
 		case "--csv":
 			f.csv = true
 		case "--bpe":
 			f.bpe = true
 		case "--root":
-			i++
-			if i < len(args) {
-				f.root = args[i]
-			}
+			setStr(&i, &f.root)
 		case "--addr":
-			i++
-			if i < len(args) {
-				f.addr = args[i]
-			}
+			setStr(&i, &f.addr)
 		case "--enterprise":
 			f.enterprise = true
 		case "--project":
-			i++
-			if i < len(args) {
-				f.projects = append(f.projects, args[i])
+			if v, ok := take(&i); ok {
+				f.projects = append(f.projects, v)
 			}
 		case "--pattern":
-			i++
-			if i < len(args) {
-				f.pattern = args[i]
-			}
+			setStr(&i, &f.pattern)
+		case "--query":
+			setStr(&i, &f.query)
+		case "--symbol":
+			setStr(&i, &f.symbol)
+		case "--change":
+			setStr(&i, &f.change)
+		case "--fresh":
+			f.fresh = true
 		case "--level":
-			i++
-			if i < len(args) {
-				f.level = args[i]
-			}
+			setStr(&i, &f.level)
+		case "--task-type":
+			setStr(&i, &f.taskType)
+		case "--lens":
+			setStr(&i, &f.lens)
+		case "--profile":
+			setStr(&i, &f.profile)
+		case "--eval":
+			setStr(&i, &f.evalDir)
+		case "--skill":
+			setStr(&i, &f.skillDir)
 		case "--check":
 			f.check = true
 		case "--verify":
 			f.verify = true
+		case "--verify-pipeline":
+			f.verifyPipeline = true
+		case "--verify-silent":
+			f.verifySilent = true
+		case "--verify-token-reduction":
+			f.verifyTokenReduction = true
+		case "--scan":
+			setStr(&i, &f.scanPath)
 		case "--detect":
 			f.detect = true
 		case "--global":
 			f.global = true
 		case "--apply":
 			f.apply = true
+		case "--runtime":
+			f.runtime = true
 		case "--agents":
-			i++
-			if i < len(args) {
-				f.agents = args[i]
-			}
+			setStr(&i, &f.agents)
 		case "--file":
-			i++
-			if i < len(args) {
-				f.file = args[i]
-			}
+			setStr(&i, &f.file)
 		case "--task":
-			i++
-			if i < len(args) {
-				f.task = args[i]
-			}
+			setStr(&i, &f.task)
+		case "--budget":
+			setIntFlag(&i, &f.budget, "--budget")
+		case "--uninstall":
+			f.hostUninstall = true
 		case "--agent-id":
-			i++
-			if i < len(args) {
-				f.agentID = args[i]
-			}
+			setStr(&i, &f.agentID)
 		case "--mermaid":
 			f.mermaid = true
 		case "--repos":
@@ -239,20 +262,11 @@ func parseFlags(args []string) (flags, []string, error) {
 		case "--mask":
 			f.mask = true
 		case "--names":
-			i++
-			if i < len(args) {
-				f.names = args[i]
-			}
+			setStr(&i, &f.names)
 		case "--schema":
-			i++
-			if i < len(args) {
-				f.schema = args[i]
-			}
+			setStr(&i, &f.schema)
 		case "--cmd":
-			i++
-			if i < len(args) {
-				f.cmd = args[i]
-			}
+			setStr(&i, &f.cmd)
 		case "--timeout":
 			i++
 			if i < len(args) {
@@ -264,24 +278,19 @@ func parseFlags(args []string) (flags, []string, error) {
 		case "--fewshot":
 			f.fewshot = true
 		case "--mode":
-			i++
-			if i < len(args) {
-				f.mode = args[i]
-			}
+			setStr(&i, &f.mode)
 		case "--once":
 			f.once = true
 		case "--semantic":
 			f.semantic = true
 		case "--interval":
-			i++
-			if i < len(args) {
-				setInt(&f.interval, args[i], "--interval")
-			}
+			setIntFlag(&i, &f.interval, "--interval")
 		case "--http":
-			i++
-			if i < len(args) {
-				f.http = args[i]
-			}
+			setStr(&i, &f.http)
+		case "--tls-cert":
+			setStr(&i, &f.tlsCert)
+		case "--tls-key":
+			setStr(&i, &f.tlsKey)
 		case "--hold":
 			f.hold = true
 		case "--graphml":
@@ -289,10 +298,7 @@ func parseFlags(args []string) (flags, []string, error) {
 		case "--html":
 			f.html = true
 		case "--out":
-			i++
-			if i < len(args) {
-				f.out = args[i]
-			}
+			setStr(&i, &f.out)
 		case "--compact":
 			f.compact = true
 		case "--all":
@@ -300,69 +306,33 @@ func parseFlags(args []string) (flags, []string, error) {
 		case "--clear":
 			f.clear = true
 		case "--max":
-			i++
-			if i < len(args) {
-				setInt(&f.max, args[i], "--max")
-			}
+			setIntFlag(&i, &f.max, "--max")
 		case "--limit":
-			i++
-			if i < len(args) {
-				setInt(&f.limit, args[i], "--limit")
-			}
+			setIntFlag(&i, &f.limit, "--limit")
 		case "--range":
-			i++
-			if i < len(args) {
-				f.range_ = args[i]
-			}
+			setStr(&i, &f.range_)
 		case "--lines":
-			i++
-			if i < len(args) {
-				setInt(&f.lines, args[i], "--lines")
-			}
+			setIntFlag(&i, &f.lines, "--lines")
 		case "--depth":
-			i++
-			if i < len(args) {
-				setInt(&f.depth, args[i], "--depth")
-			}
+			setIntFlag(&i, &f.depth, "--depth")
 		case "--full":
 			f.full = true
 		case "--severity":
-			i++
-			if i < len(args) {
-				f.severity = args[i]
-			}
+			setStr(&i, &f.severity)
 		case "--lang":
-			i++
-			if i < len(args) {
-				f.lang = args[i]
-			}
+			setStr(&i, &f.lang)
 		case "--stdin":
-			i++
-			if i < len(args) {
-				f.stdin = args[i]
-			}
+			setStr(&i, &f.stdin)
 		case "--no-instructions":
 			f.noinstructions = true
 		case "--max-tokens":
-			i++
-			if i < len(args) {
-				setInt(&f.maxTokens, args[i], "--max-tokens")
-			}
+			setIntFlag(&i, &f.maxTokens, "--max-tokens")
 		case "--max-files":
-			i++
-			if i < len(args) {
-				setInt(&f.maxFiles, args[i], "--max-files")
-			}
+			setIntFlag(&i, &f.maxFiles, "--max-files")
 		case "--tier":
-			i++
-			if i < len(args) {
-				f.tier = args[i]
-			}
+			setStr(&i, &f.tier)
 		case "--precision":
-			i++
-			if i < len(args) {
-				f.precision = args[i]
-			}
+			setStr(&i, &f.precision)
 		case "--fold":
 			f.fold = true
 		case "--generate":
@@ -372,29 +342,19 @@ func parseFlags(args []string) (flags, []string, error) {
 		case "--subject":
 			f.subject = true
 		case "--message":
-			i++
-			if i < len(args) {
-				f.message = args[i]
-			}
+			setStr(&i, &f.message)
 		case "--name":
-			i++
-			if i < len(args) {
-				f.name = args[i]
-			}
+			setStr(&i, &f.name)
 		case "--dry-run":
 			f.dryRun = true
 		case "--approver":
-			i++
-			if i < len(args) {
-				f.approver = args[i]
-			}
+			setStr(&i, &f.approver)
+		case "--version":
+			setStr(&i, &f.version)
 		case "--reject":
 			f.reject = true
 		case "--reason":
-			i++
-			if i < len(args) {
-				f.reason = args[i]
-			}
+			setStr(&i, &f.reason)
 		case "--help", "-h":
 			f.help = true
 		default:

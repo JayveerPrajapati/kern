@@ -59,8 +59,9 @@ func NewLog(dir string) *LogStore {
 }
 
 // Put appends one JSON line {"k":key,"v":value} to <dir>/chain.jsonl in O(1).
-// A stale legacy per-key file for the same key is removed first so the fresh
-// chain line is not shadowed by old data on Get/List.
+// A stale legacy per-key file for the same key is removed only AFTER the
+// append succeeds, so a failed write never destroys the prior value (the
+// legacy shadow still holds it and the caller can retry).
 func (s *LogStore) Put(ctx context.Context, key string, value json.RawMessage) error {
 	if err := validateKey(key); err != nil {
 		return err
@@ -68,9 +69,6 @@ func (s *LogStore) Put(ctx context.Context, key string, value json.RawMessage) e
 	if err := os.MkdirAll(s.dir, 0o755); err != nil {
 		return err
 	}
-	// Drop a stale legacy shadow so the new line is authoritative.
-	_ = os.Remove(filepath.Join(s.dir, key+".json"))
-
 	f, err := os.OpenFile(filepath.Join(s.dir, chainFile), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		return err
@@ -82,6 +80,15 @@ func (s *LogStore) Put(ctx context.Context, key string, value json.RawMessage) e
 	}
 	line = append(line, '\n')
 	if _, err := f.Write(line); err != nil {
+		// The chain write failed: the legacy shadow (still present) preserves
+		// the prior value, and the caller can retry.
+		return err
+	}
+	// The write succeeded; drop a stale legacy shadow so a reader (which
+	// prefers the per-key file) cannot observe an outdated value. A failed
+	// removal is surfaced — the shadow would silently win over the fresh
+	// chain line.
+	if err := os.Remove(filepath.Join(s.dir, key+".json")); err != nil && !os.IsNotExist(err) {
 		return err
 	}
 	return nil
@@ -136,6 +143,12 @@ func (s *LogStore) getChain(ctx context.Context, key string) (json.RawMessage, e
 
 // List returns every stored entry: legacy per-key .json files first in
 // LocalStore order (sorted by key), then chain.jsonl lines in file order.
+// Keys rewritten over the store's life (Put appends a line per write but only
+// removes the legacy FILE; a key may also exist as both a file and a line
+// from the mixed-version window) appear once, matching Get semantics: the
+// legacy file shadows chain lines, and the LAST line wins among chain writes.
+// Without the dedupe, every consumer that expects one value per key (the
+// audit tamper chain walks List in order) breaks on rewritten keys.
 func (s *LogStore) List(ctx context.Context) ([]Entry, error) {
 	legacy, err := s.listLegacy(ctx)
 	if err != nil {
@@ -145,9 +158,31 @@ func (s *LogStore) List(ctx context.Context) ([]Entry, error) {
 	if err != nil {
 		return nil, err
 	}
+	seen := make(map[string]bool, len(legacy)+len(chain))
 	out := make([]Entry, 0, len(legacy)+len(chain))
-	out = append(out, legacy...)
-	return append(out, chain...), nil
+	for _, e := range legacy {
+		if seen[e.Key] {
+			continue // unreachable: one file per key
+		}
+		seen[e.Key] = true
+		out = append(out, e)
+	}
+	// Chain lines: keep the LAST write per key (append order = write order).
+	last := make(map[string]int, len(chain))
+	for i, e := range chain {
+		last[e.Key] = i
+	}
+	for i, e := range chain {
+		if seen[e.Key] {
+			continue // the legacy file shadows every chain line for this key
+		}
+		if last[e.Key] != i {
+			continue // an older write of the same key
+		}
+		seen[e.Key] = true
+		out = append(out, e)
+	}
+	return out, nil
 }
 
 // listLegacy returns the per-key .json files (LocalStore format), sorted by
@@ -241,6 +276,57 @@ func (s *LogStore) Delete(ctx context.Context, key string) error {
 		return err
 	}
 	return os.Rename(tmp, path)
+}
+
+// RewriteAll atomically replaces the ENTIRE store content with exactly the
+// given entries: chain.jsonl is rewritten with one line per entry (temp
+// file + rename, the same atomicity as Delete) and every legacy per-key
+// .json file for those keys is removed. Entries not in the list are dropped
+// (stale duplicate lines, corrupt records), which is exactly what a chain
+// repair needs: the repaired entries become the store's sole content.
+// Callers must serialize concurrent writers (e.g. the audit log's
+// cross-process lock) so the rename does not orphan in-flight appends.
+func (s *LogStore) RewriteAll(ctx context.Context, entries []Entry) error {
+	if err := os.MkdirAll(s.dir, 0o755); err != nil {
+		return err
+	}
+	var out []byte
+	for _, e := range entries {
+		if err := validateKey(e.Key); err != nil {
+			return err
+		}
+		line, err := json.Marshal(chainLine{K: e.Key, V: e.Value})
+		if err != nil {
+			return err
+		}
+		out = append(out, line...)
+		out = append(out, '\n')
+	}
+	tmp := filepath.Join(s.dir, chainFile+".tmp")
+	if err := os.WriteFile(tmp, out, 0o600); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, filepath.Join(s.dir, chainFile)); err != nil {
+		return err
+	}
+	// The rewrite replaces the store's ENTIRE content: every legacy per-key
+	// .json file must go (in-list keys are now chain lines; keys not in the
+	// list were dropped and a leftover file would resurrect them, since List
+	// puts files first).
+	des, err := os.ReadDir(s.dir)
+	if err != nil {
+		return err
+	}
+	for _, de := range des {
+		name := de.Name()
+		if de.IsDir() || !strings.HasSuffix(name, ".json") || strings.HasSuffix(name, ".tmp") {
+			continue
+		}
+		if err := os.Remove(filepath.Join(s.dir, name)); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+	}
+	return nil
 }
 
 // LastEntry returns the most recently appended entry: the last complete

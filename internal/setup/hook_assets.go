@@ -22,13 +22,6 @@ func writeGuardScriptTo(dir string) (string, error) {
 	return p, nil
 }
 
-// writeGuardScript writes the kern-guard hook script to <root>/.kern/hooks/kern-guard.sh
-// and returns its absolute path. Project-scoped agents (Claude, Gemini, Cursor,
-// Copilot) install the guard into the project root.
-func writeGuardScript(root string) (string, error) {
-	return writeGuardScriptTo(filepath.Join(root, ".kern", "hooks"))
-}
-
 // writeGuardScriptGlobal writes the kern-guard hook script to
 // <home>/.kern/hooks/kern-guard.sh (where <home> is os.UserHomeDir) and returns
 // its absolute path. Home-based agents (Qwen, Qoder, Codex) reference this

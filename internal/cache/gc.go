@@ -15,6 +15,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/JayveerPrajapati/kern/internal/config"
 )
 
 // minArchiveBytes is the floor below which a plain .json file is not worth
@@ -94,14 +96,15 @@ func Maintain(dir string, archiveAfter, evictAfter time.Duration, dryRun bool) (
 	return archived, evicted, nil
 }
 
-// MaintainDefaults runs Maintain on dir with the durations from the
+// MaintainDefaults runs Maintain on dir with the durations from
 // KERN_CACHE_ARCHIVE_DAYS (default 7) and KERN_CACHE_TTL_DAYS (default 30,
-// the eviction age) environment variables, parsed as days (float ok).
-// A value <= 0 disables that pass; unknown/garbage values fall back to the
-// default. With dryRun the pass counts without mutating.
+// the eviction age) — or cache.archive_days / cache.ttl_days in
+// .kern/config.json — parsed as days (float ok). A value <= 0 disables that
+// pass; unknown/garbage values fall back to the default. With dryRun the pass
+// counts without mutating.
 func MaintainDefaults(dir string, dryRun bool) (archived, evicted int, err error) {
-	archiveAfter := daysFromEnv("KERN_CACHE_ARCHIVE_DAYS", 7)
-	evictAfter := daysFromEnv("KERN_CACHE_TTL_DAYS", 30)
+	archiveAfter := daysFromConfig("KERN_CACHE_ARCHIVE_DAYS", "cache.archive_days", 7)
+	evictAfter := daysFromConfig("KERN_CACHE_TTL_DAYS", "cache.ttl_days", 30)
 	return Maintain(dir, archiveAfter, evictAfter, dryRun)
 }
 
@@ -187,18 +190,12 @@ func gzipFile(path string) error {
 	return os.Remove(path)
 }
 
-// daysFromEnv parses a days-as-float environment variable into a duration.
-// Unset or garbage values fall back to def; a parsed value <= 0 disables the
-// pass (returns 0). KERN_CACHE_* knobs (G-7).
-func daysFromEnv(name string, def float64) time.Duration {
-	raw := os.Getenv(name)
-	if raw == "" {
-		return durationFromDays(def)
-	}
-	v, err := strconv.ParseFloat(raw, 64)
-	if err != nil {
-		return durationFromDays(def) // garbage → default
-	}
+// daysFromConfig parses a days-as-float config value (env var or
+// .kern/config.json key) into a duration. Unset or garbage values fall back
+// to def; a parsed value <= 0 disables the pass (returns 0). KERN_CACHE_*
+// knobs (G-7).
+func daysFromConfig(envName, key string, def float64) time.Duration {
+	v := config.Float64("", envName, key, def)
 	if v <= 0 {
 		return 0 // explicit disable
 	}

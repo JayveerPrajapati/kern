@@ -260,6 +260,13 @@ func renderImpactText(r domain.ImpactReport) string {
 			fmt.Fprintf(&b, "  - %s\n", a)
 		}
 	}
+	// A change target that resolved to nothing (no callers, no callees, no
+	// tests) is almost always an ambiguous or unindexed symbol, not a truly
+	// isolated leaf. Warn instead of silently reporting "low risk" (F-2).
+	if len(r.WhoCalls) == 0 && len(r.WhatItCalls) == 0 && len(r.TestsCover) == 0 {
+		fmt.Fprintf(&b, "\nWARN: no callers, callees, or tests resolved for %q — the change target may be ambiguous or not indexed.\n", r.Target)
+		fmt.Fprintf(&b, "      Qualify the symbol (e.g. Server.dispatch) or run kern_search to confirm the exact name, then re-run.\n")
+	}
 	return b.String()
 }
 
@@ -345,30 +352,6 @@ func renderModernizePhaseText(phase modernization.ExtractionPhase) string {
 	fmt.Fprintf(&b, "Risk: %s | Blast radius: %d symbols\n", phase.RiskLevel, phase.BlastRadius)
 	if phase.TaskID != "" {
 		fmt.Fprintf(&b, "Task: %s\n", phase.TaskID)
-	}
-	return b.String()
-}
-
-// renderModernizeCandidates renders the extraction plan as a compact candidate
-// visualization : one line per candidate context, annotated with
-// ownership, cohesion, and dependency direction, so a human can scan the
-// extraction surface at a glance.
-func renderModernizeCandidates(plan modernization.ExtractionPlan) string {
-	var b strings.Builder
-	b.WriteString("MODERNIZATION CANDIDATES\n")
-	for _, ctx := range plan.Contexts {
-		fmt.Fprintf(&b, "[%s] files=%d cohesion=%.2f in=%d out=%d",
-			ctx.Name, ctx.FileCount, ctx.Cohesion, ctx.IncomingDeps, ctx.OutgoingDeps)
-		if ctx.Ownership != "" {
-			fmt.Fprintf(&b, " owner=%s", ctx.Ownership)
-		}
-		if len(ctx.Dependencies) > 0 {
-			fmt.Fprintf(&b, " deps=%d", len(ctx.Dependencies))
-		}
-		b.WriteString("\n")
-	}
-	for _, phase := range plan.Phases {
-		fmt.Fprintf(&b, "phase %d -> %s (risk=%s, task=%s)\n", phase.Phase, phase.Context, phase.RiskLevel, phase.TaskID)
 	}
 	return b.String()
 }

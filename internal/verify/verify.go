@@ -172,14 +172,6 @@ func checkFileLine(ix *index.Index, root, file string, line int) (bool, string) 
 	return true, "file+line present in source"
 }
 
-// fileHasLine reports whether file exists in root and line is within bounds.
-// Absolute file refs are only honored when they stay inside root, so
-// untrusted text can never probe arbitrary machine paths.
-func fileHasLine(root, file string, line int) bool {
-	ok, _ := checkFileLine(nil, root, file, line)
-	return ok
-}
-
 // WithinAbs reports whether child (absolute) stays inside parent (absolute).
 // Unlike mcp's within, it does not reject an absolute rel (e.g. another drive
 // root), which mcp's variant guards against.

@@ -92,7 +92,7 @@ func Bridges(ix *index.Index, limit int) []Bridge {
 		if isTestFile(s.File) || (s.Kind != "func" && s.Kind != "method") {
 			continue
 		}
-		callers := prodCallers(ix, s.FullName())
+		callers := prodCallersWithFileMap(ix, s.FullName(), fileMap)
 		dirs := map[string]bool{}
 		for _, c := range callers {
 			if d := dirOf(fileMap, c); d != "" {

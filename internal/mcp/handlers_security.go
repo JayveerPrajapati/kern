@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/JayveerPrajapati/kern/internal/intel"
-	"github.com/JayveerPrajapati/kern/internal/pii"
 	"github.com/JayveerPrajapati/kern/internal/relay"
 	jsonschema "github.com/JayveerPrajapati/kern/internal/schema"
 	"github.com/JayveerPrajapati/kern/internal/sec"
@@ -27,7 +26,10 @@ func (s *Server) handleMaskPII(ctx context.Context, args map[string]any) (string
 				names = append(names, n)
 			}
 		}
-		res := pii.MaskAllCustom(text, pii.DefaultPatterns, names)
+		res, err := s.svc.Security.Mask(ctx, text, names)
+		if err != nil {
+			return "", err
+		}
 		var parts []string
 		for k, v := range res.ByLabel {
 			parts = append(parts, fmt.Sprintf("%s %d", k, v))
@@ -62,11 +64,11 @@ func (s *Server) handleSecurity(ctx context.Context, args map[string]any) (strin
 				max = n
 			}
 		}
-		findings, serr := sec.Scan(root)
+		findings, serr := s.svc.Security.Scan(ctx, root)
 		if serr != nil {
 			return "", fmt.Errorf("security scan failed: %w", serr)
 		}
-		findings = sec.FilterBySeverity(findings, allow)
+		findings = s.svc.Security.FilterBySeverity(findings, allow)
 		if argString(args, "format") == "json" {
 			var b strings.Builder
 			if err := json.NewEncoder(&b).Encode(findings); err != nil {
@@ -77,7 +79,7 @@ func (s *Server) handleSecurity(ctx context.Context, args map[string]any) (strin
 		if len(findings) == 0 {
 			return "no security findings", nil
 		}
-		out := sec.Render(findings, max)
+		out := s.svc.Security.Render(findings, max)
 		counts := sec.Counts(findings)
 		out += fmt.Sprintf("[kern] %d findings: %d error, %d warning, %d info\n",
 			len(findings), counts["error"], counts["warning"], counts["info"])

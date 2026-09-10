@@ -84,12 +84,20 @@ Usage:
   kern sec [root] [--severity error,warning,info] [--max N] [--json]
                                                  security scan: hardcoded secrets, dynamic SQL, command
                                                  injection, weak crypto, unsafe deserialization (exit 1 on errors)
-  kern delete <symbol> [root] [--json]           safe-delete check: callers (prod vs test), exported/entry
-                                                 point, SAFE/NOT SAFE verdict (exit 1 when unsafe)
+  kern delete <symbol> [root] [--apply] [--json]   safe-delete check: callers (prod vs test), exported/entry
+                                                 point, SAFE/NOT SAFE verdict (exit 1 when unsafe);
+                                                 --apply removes the symbol + its test-only callers
+                                                 (backed up under .kern/rename-backup/, rollback on failure)
   kern rename <old> <new> [root] [--apply] [--json]
                                                  structural rename (Go, AST-precise): previews every
                                                  definition/reference first; --apply commits with backups
                                                  under .kern/rename-backup/ and transactional rollback
+  kern flight (list|show <task-id>|tasks|gc) [root] [--json]
+                                                 replay agent flight records (list|show); tasks lists
+                                                 task trails; gc enforces retention (--keep-tasks, --older-than)
+  kern runtime (status|drift) [root] [--json]    production intelligence: status = wired adapter + service
+                                                 profiles (discovery wizard when none); drift = runtime
+                                                 routes vs code routes; kern review --runtime overlays them
    kern docs <query> [root] [--limit N]            local vector search over documents (md/txt/rst)
    kern docs index [root] [--semantic]             pre-index documents; --semantic adds Ollama embeddings;
                                                    kern docs clear resets

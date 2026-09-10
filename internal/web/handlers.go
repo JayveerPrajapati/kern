@@ -2,6 +2,8 @@ package web
 
 import (
 	"encoding/json"
+	"fmt"
+	"log"
 	"net/http"
 	"net/url"
 	"strings"
@@ -174,11 +176,18 @@ func (a *App) handleApprovalApprove(w http.ResponseWriter, r *http.Request) {
 		// store so a UI approve still resolves it.
 		if a.fileApprovals != nil {
 			if _, ferr := a.fileApprovals.Decide(req.ID, req.Approver, true, ""); ferr != nil {
-				writeError(w, http.StatusInternalServerError, err.Error())
+				writeError(w, http.StatusInternalServerError, fmt.Sprintf("approval %q not found in the in-memory workflow (%v) and the file store rejected the decision: %v", req.ID, err, ferr))
 				return
 			}
 			if a.firewall != nil {
-				_ = a.firewall.ApproveAction(req.ID, req.Approver)
+				if aerr := a.firewall.ApproveAction(req.ID, req.Approver); aerr != nil {
+					// The durable decision was recorded in the file store above;
+					// this failure only means the in-process firewall gate was
+					// not notified (e.g. the approval predates this process, so
+					// its in-memory workflow does not know it). Surface it so the
+					// operator knows the gate may stay blocked.
+					log.Printf("web approve %s: decision recorded in the file store, but propagating to the in-process firewall failed: %v", req.ID, aerr)
+				}
 			}
 			a.bus.Publish(eventbus.Event{Kind: eventbus.ApprovalGranted, Source: "web", Subject: req.ID})
 			writeJSON(w, http.StatusOK, map[string]string{"id": req.ID, "status": "approved"})
@@ -189,13 +198,23 @@ func (a *App) handleApprovalApprove(w http.ResponseWriter, r *http.Request) {
 	}
 	// Also record the decision in the persistent store so the workflow engine
 	// (which reads the file store for its gates) observes it on resume.
+	// Approve above already persisted the decision through the workflow's own
+	// store; a failure of this belt-and-braces write does not invalidate it,
+	// but it must not be silent either.
 	if a.fileApprovals != nil {
-		_, _ = a.fileApprovals.Decide(req.ID, req.Approver, true, "")
+		if _, derr := a.fileApprovals.Decide(req.ID, req.Approver, true, ""); derr != nil {
+			log.Printf("web approve %s: decision persisted by the workflow, but the file-store confirmation write failed: %v", req.ID, derr)
+		}
 	}
 	// Propagate the approval to the firewall so the governance gate's
 	// approvedKeys map is populated and a subsequent Check passes.
 	if a.firewall != nil {
-		_ = a.firewall.ApproveAction(req.ID, req.Approver)
+		if aerr := a.firewall.ApproveAction(req.ID, req.Approver); aerr != nil {
+			// The decision is durably recorded; this only means the in-process
+			// gate was not notified. Surface it so the operator knows a
+			// subsequent Check may stay blocked.
+			log.Printf("web approve %s: decision recorded, but propagating to the in-process firewall failed (the governance gate may stay blocked): %v", req.ID, aerr)
+		}
 		// Invariant 4/6: record the approval with the approver's identity and
 		// the task ID so the audit trail is queryable by task.
 		a.firewall.AuditLog().Record(governance.AuditEntry{
@@ -227,7 +246,7 @@ func (a *App) handleApprovalReject(w http.ResponseWriter, r *http.Request) {
 		// Fall back to the persistent store (workflow-engine gates live there).
 		if a.fileApprovals != nil {
 			if _, ferr := a.fileApprovals.Decide(req.ID, req.Approver, false, "rejected via console"); ferr != nil {
-				writeError(w, http.StatusInternalServerError, err.Error())
+				writeError(w, http.StatusInternalServerError, fmt.Sprintf("approval %q not found in the in-memory workflow (%v) and the file store rejected the decision: %v", req.ID, err, ferr))
 				return
 			}
 			a.bus.Publish(eventbus.Event{Kind: eventbus.ApprovalRejected, Source: "web", Subject: req.ID})
@@ -238,9 +257,12 @@ func (a *App) handleApprovalReject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Record the rejection in the persistent store too, so any gate reading
-	// the file store observes it.
+	// the file store observes it. Reject above already persisted the decision
+	// through the workflow's own store; a failure here must not be silent.
 	if a.fileApprovals != nil {
-		_, _ = a.fileApprovals.Decide(req.ID, req.Approver, false, "rejected via console")
+		if _, derr := a.fileApprovals.Decide(req.ID, req.Approver, false, "rejected via console"); derr != nil {
+			log.Printf("web reject %s: decision persisted by the workflow, but the file-store confirmation write failed: %v", req.ID, derr)
+		}
 	}
 	// Invariant 4/6: record the rejection with the approver's identity.
 	if a.firewall != nil {

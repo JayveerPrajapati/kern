@@ -103,6 +103,18 @@ const (
 	ClaimRecommendation ClaimType = "RECOMMENDATION" // suggested action
 )
 
+// ClaimStatus classifies HOW a claim was obtained — orthogonal to ClaimType,
+// which classifies what KIND of claim it is. Zero value ("") = unclassified.
+type ClaimStatus string
+
+const (
+	ClaimStatusObserved        ClaimStatus = "observed"         // directly observed from local evidence
+	ClaimStatusVerifiedDerived ClaimStatus = "verified_derived" // deterministically derived from verified evidence
+	ClaimStatusReported        ClaimStatus = "reported"         // reported by an external source
+	ClaimStatusInferred        ClaimStatus = "inferred"         // inferred — lower confidence
+	ClaimStatusStale           ClaimStatus = "stale"            // past its freshness horizon
+)
+
 // CorrelationConfidence is the confidence of a single correlation link or the
 // overall correlation contract. A link is FACTUAL when it is
 // backed by direct runtime evidence, INFERRED when it is derived from indirect
@@ -124,8 +136,9 @@ type Claim struct {
 	Source     string     // what produced this claim (tool name, agent ID)
 	Provenance string     // how the claim was derived
 	Timestamp  time.Time
-	Scope      string  // what the claim applies to (symbol, file, service)
-	Confidence float64 // 0.0-1.0, where applicable
+	Scope      string      // what the claim applies to (symbol, file, service)
+	Confidence float64     // 0.0-1.0, where applicable
+	Status     ClaimStatus `json:"status,omitempty"` // how the claim was obtained ("" = unclassified)
 }
 
 // HasEvidence reports whether the claim carries at least one piece of

@@ -85,6 +85,11 @@ func compress(text string) string {
 	if err != nil || res.Output == "" || res.Output == text {
 		return ""
 	}
+	if len(text)-len(res.Output) < 100 {
+		// Sub-100-char savings are noise, not context relief (F-5): return
+		// the compressed text without the footer.
+		return res.Output
+	}
 	return "[kern] compressed " + compact(len(text)) + " -> " + compact(len(res.Output)) + " chars\n" + res.Output
 }
 

@@ -128,7 +128,7 @@ func renderCommunities(ix *index.Index, label map[string]string) []Community {
 			if fileMap[s] == "" {
 				continue
 			}
-			if n := len(prodCallers(ix, s)); n > best {
+			if n := len(prodCallersWithFileMap(ix, s, fileMap)); n > best {
 				best = n
 				hub = s
 			}

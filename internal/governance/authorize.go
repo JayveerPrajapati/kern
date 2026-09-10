@@ -233,8 +233,8 @@ func filterEdges(ix *index.Index, allowed map[string]bool) []EdgeRef {
 		if !allowed[from] {
 			continue
 		}
-		for _, to := range callees {
-			edges = append(edges, EdgeRef{From: from, To: to})
+		for _, ce := range callees {
+			edges = append(edges, EdgeRef{From: from, To: ce.Target})
 		}
 	}
 	sort.Slice(edges, func(i, j int) bool {

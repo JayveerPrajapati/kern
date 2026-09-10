@@ -4,16 +4,19 @@ package app
 
 import (
 	"fmt"
+	"strings"
+	"time"
+
 	"github.com/JayveerPrajapati/kern/internal/agent"
+	"github.com/JayveerPrajapati/kern/internal/context"
 	"github.com/JayveerPrajapati/kern/internal/domain"
 	"github.com/JayveerPrajapati/kern/internal/eventbus"
 	"github.com/JayveerPrajapati/kern/internal/governance"
 	"github.com/JayveerPrajapati/kern/internal/intelligence"
+	"github.com/JayveerPrajapati/kern/internal/lenses"
 	"github.com/JayveerPrajapati/kern/internal/memory"
 	"github.com/JayveerPrajapati/kern/internal/verification"
 	"github.com/JayveerPrajapati/kern/internal/whatif"
-	"strings"
-	"time"
 )
 
 // Analyze creates a Task for the intent, runs the context engine, and attaches
@@ -41,7 +44,7 @@ func (s *TaskService) analyzeTask(t *agent.Task, change string) (*agent.Task, st
 // is false, the task is left in ANALYZING state (not completed) so a caller
 // like Plan can continue the lifecycle (ANALYZING → PLANNING).
 func (s *TaskService) analyzeTaskOpts(t *agent.Task, change string, complete bool) (*agent.Task, string, error) {
-	if err := t.Transition(domain.TaskAnalyzing); err != nil {
+	if err := s.transition(t, domain.TaskAnalyzing); err != nil {
 		s.fail(t, err.Error())
 		return t, "", err
 	}
@@ -100,6 +103,87 @@ func (s *TaskService) analyzeTaskOpts(t *agent.Task, change string, complete boo
 	return t, text, nil
 }
 
+// AnalyzeWithLens is Analyze with a review lens: the context packet's facts
+// are re-ranked by the lens priorities before rendering and task attachment.
+func (s *TaskService) AnalyzeWithLens(intent, lensName string) (*agent.Task, string, error) {
+	t, err := s.Create(intent)
+	if err != nil {
+		return nil, "", err
+	}
+	return s.analyzeTaskWithLens(t, intent, lensName)
+}
+
+// analyzeTaskWithLens drives a Task through the ANALYZING state, runs the
+// context engine, re-ranks the packet facts by the review lens priorities,
+// re-renders the packet, and completes the Task. It mirrors analyzeTaskOpts;
+// the only difference is the lens-ordered facts.
+func (s *TaskService) analyzeTaskWithLens(t *agent.Task, change, lensName string) (*agent.Task, string, error) {
+	l, err := lenses.Resolve(lensName)
+	if err != nil {
+		s.fail(t, err.Error())
+		return t, "", err
+	}
+	if err := s.transition(t, domain.TaskAnalyzing); err != nil {
+		s.fail(t, err.Error())
+		return t, "", err
+	}
+	s.publish(eventbus.TaskUpdated, t.ID, map[string]string{"state": "ANALYZING"})
+
+	pkt, _, err := s.platform.Analyze(change)
+	if err != nil {
+		s.fail(t, err.Error())
+		return t, "", err
+	}
+
+	// Re-rank the packet facts by the review lens before rendering and
+	// attachment: the lens makes the evidence a reviewer cares about surface
+	// first in the analysis output.
+	pkt.Facts = lenses.ApplyLens(l, pkt.Facts)
+	text := context.RenderText(pkt)
+
+	// Attach lifecycle results to the Task (mirrors analyzeTaskOpts).
+	t.ContextPacket = &pkt
+	t.Risks = pkt.Risks
+	// Attach the context engine's evidence-backed claims to the Task so the
+	// analysis is persisted with its evidence trail (lens-ordered).
+	t.Evidence = append(t.Evidence, pkt.Facts...)
+	t.Output = text
+	t.AddStep(agent.Step{
+		Action:     "analyze",
+		AgentID:    "context-engine",
+		StartedAt:  t.UpdatedAt,
+		FinishedAt: time.Now(),
+		Result:     fmt.Sprintf("context packet: %d symbols, %d risks (lens %s)", len(pkt.Symbols), len(pkt.Risks), lensName),
+		Status:     "success",
+	})
+
+	// Emit risk.calculated so the bus carries each identified risk to
+	// webhooks/audit ( event standardization).
+	for _, r := range pkt.Risks {
+		s.publish(eventbus.RiskCalculated, t.ID, map[string]string{
+			"level":      string(r.Level),
+			"mitigation": r.Mitigation,
+		})
+	}
+
+	// Record the ContextPacket as the root artifact of the chain.
+	s.recordArtifact(domain.ArtifactContextPacket, t.ID, "context-engine",
+		"context packet: "+change, "", "context:analyze")
+	// Record the AnalysisReport artifact (P10.4) linked as a child of the
+	// context packet so the analysis is a typed, traceable artifact in the chain.
+	s.recordArtifact(domain.ArtifactAnalysisReport, t.ID, "context-engine",
+		"analysis: "+change,
+		s.lastArtifactID(t.ID, domain.ArtifactContextPacket), "context:analyze")
+
+	if err := t.Complete(text); err != nil {
+		s.fail(t, err.Error())
+		return t, "", err
+	}
+	s.persist(t)
+	s.publish(eventbus.TaskCompleted, t.ID, map[string]string{"state": "COMPLETED"})
+	return t, text, nil
+}
+
 // WhatIf creates a Task, simulates the change, attaches the Impact to the Task,
 // and completes it. Returns the Task and the rendered impact text.
 func (s *TaskService) WhatIf(kind whatif.ChangeKind, change, newTarget string) (*agent.Task, string, error) {
@@ -107,7 +191,7 @@ func (s *TaskService) WhatIf(kind whatif.ChangeKind, change, newTarget string) (
 	if err != nil {
 		return nil, "", err
 	}
-	if err := t.Transition(domain.TaskAnalyzing); err != nil {
+	if err := s.transition(t, domain.TaskAnalyzing); err != nil {
 		s.fail(t, err.Error())
 		return t, "", err
 	}
@@ -190,7 +274,7 @@ func (s *TaskService) Plan(intent string) (*agent.Task, domain.Plan, string, err
 	}
 
 	// Stage 2: plan (ANALYZING → PLANNING).
-	if err := t.Transition(domain.TaskPlanning); err != nil {
+	if err := s.transition(t, domain.TaskPlanning); err != nil {
 		s.fail(t, err.Error())
 		return t, domain.Plan{}, "", err
 	}
@@ -274,7 +358,7 @@ func (s *TaskService) Impact(change string, opts ...ImpactOption) (*agent.Task, 
 	if err != nil {
 		return nil, domain.ImpactReport{}, "", err
 	}
-	if err := t.Transition(domain.TaskAnalyzing); err != nil {
+	if err := s.transition(t, domain.TaskAnalyzing); err != nil {
 		s.fail(t, err.Error())
 		return t, domain.ImpactReport{}, "", err
 	}
@@ -490,7 +574,7 @@ func (s *TaskService) Verify(types []string) (*agent.Task, verification.Verifica
 	if err != nil {
 		return nil, verification.VerificationResult{}, err
 	}
-	if err := t.Transition(domain.TaskVerifying); err != nil {
+	if err := s.transition(t, domain.TaskVerifying); err != nil {
 		s.fail(t, err.Error())
 		return t, verification.VerificationResult{}, err
 	}

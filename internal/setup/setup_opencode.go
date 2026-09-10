@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 func wireMCPJSON(root, bin string) Status {
@@ -76,6 +77,54 @@ func wirePlugin(root string) Status {
 		return Status{Agent: "opencode-plugin", Path: path, Note: err.Error()}
 	}
 	return Status{Agent: "opencode-plugin", Installed: true, Path: path, Note: "plugin installed"}
+}
+
+// wireGlobalPlugin installs the opencode plugin into every global plugin
+// location (GlobalPluginPaths: ~/.config/opencode/plugins and ~/.opencode/
+// plugins). opencode 1.18.x loads plugins from the config root
+// (~/.opencode/plugins), where a stale copy silently wins over the project
+// one — installing both keeps every copy in sync with the embedded asset.
+// Uses the same compare-and-write semantics as wirePlugin: copies identical
+// to the embedded asset are left alone and user-customized copies are never
+// overwritten.
+func wireGlobalPlugin() Status {
+	src, err := pluginFS.ReadFile("assets/plugin/kern.ts")
+	if err != nil {
+		return Status{Agent: "opencode-plugin-global", Note: err.Error()}
+	}
+	var notes []string
+	installed := false
+	for _, path := range GlobalPluginPaths() {
+		if cur, rerr := os.ReadFile(path); rerr == nil {
+			if bytes.Equal(cur, src) {
+				notes = append(notes, tildePath(path)+" current")
+				installed = true
+				continue
+			}
+			notes = append(notes, tildePath(path)+" customized — left untouched")
+			continue
+		}
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			notes = append(notes, tildePath(path)+": "+err.Error())
+			continue
+		}
+		if err := os.WriteFile(path, src, 0o644); err != nil {
+			notes = append(notes, tildePath(path)+": "+err.Error())
+			continue
+		}
+		notes = append(notes, tildePath(path)+" installed")
+		installed = true
+	}
+	return Status{Agent: "opencode-plugin-global", Installed: installed, Note: strings.Join(notes, "; ")}
+}
+
+// tildePath renders an absolute path with the home directory abbreviated as
+// "~" for human-readable status notes.
+func tildePath(p string) string {
+	if h, err := os.UserHomeDir(); err == nil && strings.HasPrefix(p, h) {
+		return filepath.Join("~", strings.TrimPrefix(p, h))
+	}
+	return p
 }
 
 // hostRuleFiles are the per-agent rule files that peer agents read directly

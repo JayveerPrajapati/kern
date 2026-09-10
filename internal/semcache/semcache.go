@@ -48,10 +48,25 @@ type entry struct {
 	Sig   []uint32 `json:"sig"`   // shingle signature (sorted)
 }
 
-var (
-	mu      sync.Mutex
-	indexes = map[string][]entry{}
-)
+// nsState bundles a namespace's stripe lock with its in-memory index. Each
+// namespace is guarded by its own lock, so Lookup/Store on different
+// namespaces never serialize on each other (the old single process-wide mu
+// held the lock across blocking disk I/O). The index lives inside the lock
+// value so the shared map is only touched by lockFor's LoadOrStore, never
+// concurrently by namespace critical sections.
+type nsState struct {
+	mu sync.Mutex
+	es []entry
+}
+
+// nsLocks is the striped lock map: namespace -> *nsState.
+var nsLocks sync.Map
+
+// lockFor returns the per-namespace lock state, creating it on first use.
+func lockFor(ns string) *nsState {
+	st, _ := nsLocks.LoadOrStore(ns, &nsState{})
+	return st.(*nsState)
+}
 
 // truncate bounds the raw input stored in an index entry to MaxInputLen bytes,
 // without splitting a UTF-8 rune. The full shingle signature is computed and
@@ -191,13 +206,13 @@ func Similarity(a, b string) float64 {
 	return float64(inter) / float64(union)
 }
 
-func loadIndex(ns string) ([]entry, error) {
-	if es, ok := indexes[ns]; ok {
-		return es, nil
+func (st *nsState) loadIndex(ns string) ([]entry, error) {
+	if st.es != nil {
+		return st.es, nil
 	}
 	var es []entry
 	if err := cache.Load("sem/"+ns+"-index", &es); err == nil && len(es) > 0 {
-		indexes[ns] = es
+		st.es = es
 		return es, nil
 	}
 	return nil, nil
@@ -225,24 +240,60 @@ func saveIndex(ns string, es []entry) error {
 // Store records input -> v under namespace for future fuzzy hits. Entries are
 // appended and the index is capped at MaxEntries (oldest dropped first).
 func Store(ns, input string, v any) error {
-	mu.Lock()
-	defer mu.Unlock()
-	es, err := loadIndex(ns)
+	st := lockFor(ns)
+	key := "sem/" + ns + "/" + cache.Hash([]byte(input))
+
+	// Bookkeeping decision under the namespace lock: load the index and
+	// determine whether an identical input is already present.
+	st.mu.Lock()
+	es, err := st.loadIndex(ns)
 	if err != nil {
+		st.mu.Unlock()
 		return err
 	}
-	key := "sem/" + ns + "/" + cache.Hash([]byte(input))
+	replace := -1
+	for i := range es {
+		if es[i].Key == key {
+			replace = i
+			break
+		}
+	}
+	st.mu.Unlock()
+
+	// Payload write happens OUTSIDE the lock so one namespace's disk I/O
+	// never blocks another (or itself). The index is only updated after the
+	// payload is on disk, preserving the old invariant that an index entry
+	// always has a readable payload.
 	if err := cache.Store(key, v); err != nil {
 		return err
 	}
-	// Replace an identical input if already present.
+
+	// Re-acquire for index bookkeeping: the index may have changed while the
+	// payload was being written, so reload it before mutating.
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	es, _ = st.loadIndex(ns)
+	if replace >= 0 && replace < len(es) && es[replace].Key == key {
+		// Replace an identical input if still present (unchanged semantics).
+		es[replace] = entry{Key: key, Input: truncate(input), Sig: shingles(input)}
+		if err := saveIndex(ns, es); err != nil {
+			return err
+		}
+		st.es = es
+		return nil
+	}
+	// Otherwise append (or update if the same key arrived concurrently).
+	found := false
 	for i := range es {
 		if es[i].Key == key {
 			es[i] = entry{Key: key, Input: truncate(input), Sig: shingles(input)}
-			return saveIndex(ns, es)
+			found = true
+			break
 		}
 	}
-	es = append(es, entry{Key: key, Input: truncate(input), Sig: shingles(input)})
+	if !found {
+		es = append(es, entry{Key: key, Input: truncate(input), Sig: shingles(input)})
+	}
 	if len(es) > MaxEntries {
 		evicted := es[:len(es)-MaxEntries]
 		es = es[len(es)-MaxEntries:]
@@ -254,7 +305,7 @@ func Store(ns, input string, v any) error {
 	if err := saveIndex(ns, es); err != nil {
 		return err
 	}
-	indexes[ns] = es
+	st.es = es
 	return nil
 }
 
@@ -263,14 +314,19 @@ func Store(ns, input string, v any) error {
 // the similarity, and true. Thresholds: ShortThreshold for short inputs, else
 // DefaultThreshold (overridable via thr when > 0).
 func Lookup(ns, input string, v any, thr float64) (matched string, sim float64, hit bool, err error) {
-	mu.Lock()
-	defer mu.Unlock()
-	es, err := loadIndex(ns)
+	st := lockFor(ns)
+
+	// Index/entry bookkeeping under the namespace lock: load the index, find
+	// the best candidate, and copy out what the payload read needs.
+	st.mu.Lock()
+	es, err := st.loadIndex(ns)
 	if err != nil {
+		st.mu.Unlock()
 		return "", 0, false, err
 	}
 	sq := shingles(input)
 	if len(sq) == 0 {
+		st.mu.Unlock()
 		return "", 0, false, nil
 	}
 	cut := thr
@@ -290,14 +346,25 @@ func Lookup(ns, input string, v any, thr float64) (matched string, sim float64, 
 		}
 	}
 	if bestE == nil || best < cut {
+		st.mu.Unlock()
 		return "", 0, false, nil
 	}
-	if err := cache.Load(bestE.Key, v); err != nil {
-		// Payload gone but index entry remains; drop it.
-		prune(ns, bestE.Key)
+	// Copy the payload key + matched input, then release the lock: the
+	// payload cache.Load below is blocking disk I/O and must not run under
+	// any lock (the whole point of the striped design).
+	key := bestE.Key
+	in := bestE.Input
+	st.mu.Unlock()
+
+	if err := cache.Load(key, v); err != nil {
+		// Payload gone but index entry remains; drop it. Re-acquire the
+		// namespace lock for the index mutation.
+		st.mu.Lock()
+		st.prune(ns, key)
+		st.mu.Unlock()
 		return "", 0, false, nil
 	}
-	return bestE.Input, best, true, nil
+	return in, best, true, nil
 }
 
 // jaccard is Similarity's set comparison on pre-computed signatures.
@@ -326,8 +393,10 @@ func jaccard(a, b []uint32) float64 {
 	return float64(inter) / float64(union)
 }
 
-func prune(ns, key string) {
-	es, _ := loadIndex(ns)
+// prune drops key from ns's index and persists the result. Callers must hold
+// the namespace lock.
+func (st *nsState) prune(ns, key string) {
+	es, _ := st.loadIndex(ns)
 	kept := es[:0]
 	for _, e := range es {
 		if e.Key != key {
@@ -335,15 +404,16 @@ func prune(ns, key string) {
 		}
 	}
 	_ = saveIndex(ns, kept)
-	indexes[ns] = kept
+	st.es = kept
 }
 
 // Entries reports the current index size and the stored inputs (most recent
 // first) for a namespace.
 func Entries(ns string) ([]string, error) {
-	mu.Lock()
-	defer mu.Unlock()
-	es, err := loadIndex(ns)
+	st := lockFor(ns)
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	es, err := st.loadIndex(ns)
 	if err != nil {
 		return nil, err
 	}
@@ -358,30 +428,42 @@ func Entries(ns string) ([]string, error) {
 // ns is empty. In-memory state is only updated after the on-disk removal
 // succeeds, so a failure cannot leave memory and disk out of sync.
 func Clear(ns string) error {
-	mu.Lock()
-	defer mu.Unlock()
 	if ns == "" {
+		// Reset every known namespace's in-memory index under its own lock,
+		// then wipe the on-disk tree. An in-flight operation that already
+		// passed its payload I/O may re-create an index file afterwards; that
+		// mirrors a concurrent Store racing Clear and is equally benign.
+		var states []*nsState
+		nsLocks.Range(func(_, v any) bool {
+			states = append(states, v.(*nsState))
+			return true
+		})
+		for _, st := range states {
+			st.mu.Lock()
+			st.es = nil
+			st.mu.Unlock()
+		}
 		if err := os.RemoveAll(cache.Path("data", "sem")); err != nil {
 			return err
 		}
-		indexes = map[string][]entry{}
 		return nil
 	}
-	es, _ := loadIndex(ns)
+	st := lockFor(ns)
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	es, _ := st.loadIndex(ns)
 	for _, e := range es {
 		_ = os.Remove(cache.Path("data", e.Key+".json"))
 	}
 	if err := os.Remove(cache.Path("data", "sem", ns+"-index.json")); err != nil && !os.IsNotExist(err) {
 		return err
 	}
-	delete(indexes, ns)
+	st.es = nil
 	return nil
 }
 
 // Stats returns the number of entries per namespace that have an on-disk index.
 func Stats() (map[string]int, error) {
-	mu.Lock()
-	defer mu.Unlock()
 	out := map[string]int{}
 	dir := cache.Path("data", "sem")
 	files, err := os.ReadDir(dir)

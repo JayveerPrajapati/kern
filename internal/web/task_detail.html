@@ -29,6 +29,13 @@ li { margin:2px 0; }
 .bad { color:var(--bad); }
 .badge { display:inline-block; padding:1px 7px; border-radius:10px; font-size:11px; background:var(--panel2); border:1px solid var(--border); }
 .back-link { color:var(--accent); text-decoration:none; font-size:12px; }
+.deploy-row { display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-top:12px; }
+.deploy-row label { color:var(--muted); font-size:12px; }
+.deploy-row input { font:inherit; font-size:12px; padding:3px 8px; border-radius:6px; border:1px solid var(--border); background:var(--bg); color:var(--fg); width:150px; }
+.deploy-row input:focus { outline:none; border-color:var(--accent); }
+button.deploy { font:inherit; font-size:11px; padding:3px 10px; border-radius:6px; border:1px solid var(--good); cursor:pointer; color:var(--good); background:var(--panel2); }
+button.deploy:disabled { cursor:default; opacity:.6; }
+.deploy-msg { margin:8px 0 0; font-size:12px; }
 </style>
 </head>
 <body>
@@ -179,6 +186,12 @@ li { margin:2px 0; }
       <tr><th>Status</th><td>{{.DeploymentStatus}}</td></tr>
     </table>
     {{else}}<p class="muted">Not deployed.</p>{{end}}
+    <form class="deploy-row" id="deploy-form">
+      <label for="deploy-version">Version (optional)</label>
+      <input id="deploy-version" type="text" placeholder="version (optional)" autocomplete="off">
+      <button class="deploy" id="deploy-btn" type="submit">Deploy</button>
+    </form>
+    <p class="deploy-msg" id="deploy-msg" hidden></p>
   </section>
 
   <!-- Field 13: Production outcome -->
@@ -189,5 +202,65 @@ li { margin:2px 0; }
     {{else}}<p class="muted">Not observed.</p>{{end}}
   </section>
 </main>
+<script>
+(function () {
+  "use strict";
+  var form = document.getElementById("deploy-form");
+  if (!form) return;
+  var input = document.getElementById("deploy-version");
+  var btn = document.getElementById("deploy-btn");
+  var msg = document.getElementById("deploy-msg");
+  var taskID = "{{.TaskID}}";
+
+  function show(text, cls) {
+    msg.textContent = text;
+    msg.className = "deploy-msg " + cls;
+    msg.hidden = false;
+  }
+
+  function reset() {
+    btn.disabled = false;
+    btn.textContent = "Deploy";
+  }
+
+  form.addEventListener("submit", function (ev) {
+    ev.preventDefault();
+    msg.hidden = true;
+    btn.disabled = true;
+    btn.textContent = "Deploying\u2026";
+    fetch("/v1/tasks/" + encodeURIComponent(taskID) + "/deploy", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ version: input.value.trim() })
+    }).then(function (res) {
+      if (res.ok) {
+        location.reload();
+        return;
+      }
+      return res.text().then(function (text) {
+        var serverMsg = text;
+        try {
+          var parsed = JSON.parse(text);
+          if (parsed && parsed.error) serverMsg = parsed.error;
+        } catch (e) { /* plain-text body */ }
+        if (res.status === 403) {
+          var m = serverMsg.match(/approval required:?\s*(\S+)/i);
+          if (m) {
+            show("Deploy is pending human approval \u2014 resolve it with: kern approve " + m[1], "warn");
+          } else {
+            show("Deploy is pending human approval \u2014 resolve it from the Approvals page.", "warn");
+          }
+        } else {
+          show(serverMsg || "deploy failed: HTTP " + res.status, "bad");
+        }
+        reset();
+      });
+    }).catch(function () {
+      show("deploy failed: network error", "bad");
+      reset();
+    });
+  });
+})();
+</script>
 </body>
 </html>

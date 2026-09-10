@@ -8,6 +8,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/JayveerPrajapati/kern/internal/app"
+	"github.com/JayveerPrajapati/kern/internal/config"
+	"github.com/JayveerPrajapati/kern/internal/domain"
 	"github.com/JayveerPrajapati/kern/internal/governance"
 	"github.com/JayveerPrajapati/kern/internal/index"
 	"github.com/JayveerPrajapati/kern/internal/intel"
@@ -15,6 +17,7 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/metrics"
 	"github.com/JayveerPrajapati/kern/internal/optimize"
 	"github.com/JayveerPrajapati/kern/internal/project"
+	"github.com/JayveerPrajapati/kern/internal/service"
 	"github.com/JayveerPrajapati/kern/internal/stats"
 	"github.com/JayveerPrajapati/kern/internal/strutil"
 	"github.com/JayveerPrajapati/kern/internal/tokenize"
@@ -59,6 +62,18 @@ type Tool struct {
 	// utilities) are always advertised regardless of the active phase; an
 	// empty phase means the tool is not phase-filtered.
 	Phase string `json:"phase,omitempty"`
+	// RiskLevel tags the tool with the risk it carries when called (low,
+	// medium, high or critical; see Risk* constants). low = read-only,
+	// medium = contained state mutation or analysis, high = security-sensitive
+	// or destructive, critical = arbitrary command execution or deployment.
+	// Governed clients use this to gate tool access (P0-004).
+	RiskLevel string `json:"riskLevel,omitempty"`
+	// SchemaVersion tags the tool's input/output contract with a semantic
+	// version (P2-003). Every registration carries it; a bump signals
+	// clients that tool contracts changed and they should re-validate
+	// before calling. Governed clients use this for versioned tool
+	// contracts, negotiating during initialize (see negotiateSchemaVersion).
+	SchemaVersion string `json:"schemaVersion,omitempty"`
 }
 
 // Agent phases for phase-aware tool routing (P1.2). Each phase exposes a
@@ -73,6 +88,82 @@ const (
 	PhaseMeta    = "meta"
 	PhaseCross   = "cross"
 )
+
+// Tool risk levels for risk-aware tool metadata (P0-004). RiskLevel tags each
+// registered tool with the blast radius of calling it: RiskLow for read-only
+// tools, RiskMedium for contained state mutation or analysis, RiskHigh for
+// security-sensitive or destructive operations, and RiskCritical for arbitrary
+// command execution or deployment. Governed clients can gate tool access on
+// these levels; every tool in the catalog must carry one.
+const (
+	RiskLow      = "low"
+	RiskMedium   = "medium"
+	RiskHigh     = "high"
+	RiskCritical = "critical"
+)
+
+// Tool schema versions for versioned tool contracts (P2-003). SchemaVersion
+// tags every registered tool with the version of its input/output contract;
+// clients negotiate the schema version they speak during initialize and the
+// server honors a supported request verbatim (falling back to the current
+// catalog version otherwise). Bump SchemaVersionCurrent — and register the
+// new value in supportedSchemaVersions — whenever a tool's contract changes.
+const (
+	// SchemaVersionV1 is the initial tool schema contract version: every
+	// tool registration carries it, and all input/response shapes are
+	// stable within it.
+	SchemaVersionV1 = "1.0.0"
+
+	// SchemaVersionCurrent is the schema version the server serves by
+	// default and the version new tool registrations must carry.
+	SchemaVersionCurrent = SchemaVersionV1
+)
+
+// supportedSchemaVersions lists every tool schema contract version the
+// server can serve. A client that negotiates one of these versions gets
+// tool contracts that match its expectations exactly.
+var supportedSchemaVersions = map[string]bool{
+	SchemaVersionV1: true,
+}
+
+// validSchemaVersion reports whether v is a well-formed tool schema version:
+// a semantic version of the form major.minor.patch (e.g. "1.0.0"), all three
+// components present and numeric. Negotiation compares versions lexically, so
+// a malformed version would mis-order and is rejected up front.
+func validSchemaVersion(v string) bool {
+	if v == "" {
+		return false
+	}
+	parts := strings.Split(v, ".")
+	if len(parts) != 3 {
+		return false
+	}
+	for _, p := range parts {
+		if p == "" {
+			return false
+		}
+		for _, c := range p {
+			if c < '0' || c > '9' {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// negotiateSchemaVersion picks the schema version the server serves to a
+// client that requested v during initialize (P2-003). The rule mirrors
+// protocol version negotiation: a supported request is honored verbatim,
+// while an empty or unsupported request falls back to the current catalog
+// version. A client that asks for a version this server cannot serve detects
+// the fallback by comparing the initialize response's schemaVersion with what
+// it asked for.
+func negotiateSchemaVersion(requested string) string {
+	if supportedSchemaVersions[requested] {
+		return requested
+	}
+	return SchemaVersionCurrent
+}
 
 // NOTE: KERN_MCP_PHASE filters tool ADVERTISEMENT only (tools/list responses),
 // not tool EXECUTION (tools/call). A client that knows a tool name can call it
@@ -101,7 +192,11 @@ func parseAllowlist() []string {
 	var out []string
 	for _, n := range strings.Split(v, ",") {
 		if n = strings.TrimSpace(n); n != "" {
-			out = append(out, n)
+			// CLI subcommand aliases ("exec", "search") normalize to
+			// canonical MCP tool names ("kern_exec", "kern_search") so
+			// KERN_TOOLS behaves identically whether the operator writes
+			// CLI-style or MCP-style names.
+			out = append(out, governance.NormalizeToolName(n))
 		}
 	}
 	return out
@@ -123,7 +218,7 @@ func singleTool() bool {
 
 // fullCatalog reports whether to advertise the full tool catalog via
 // KERN_MCP_FULL=1. By default only the minimal defaultTools surface is
-// advertised; this opts back in to the full 101-tool catalog for power users
+// advertised; this opts back in to the full catalog for power users
 // and direct sub-tool callers. Phase-aware routing (KERN_MCP_PHASE) still
 // filters the advertised list within the full catalog.
 func fullCatalog() bool {
@@ -239,7 +334,7 @@ var highLevelTools = map[string]bool{
 }
 
 // defaultTools is the minimal surface advertised by default. The full
-// 101-tool catalog is gated behind KERN_MCP_FULL=1, and phase-aware routing
+// full catalog is gated behind KERN_MCP_FULL=1, and phase-aware routing
 // (KERN_MCP_PHASE) filters either surface down to the active phase's
 // shortlist. kern_meta's NL router
 // still reaches every sub-tool handler internally regardless of what is
@@ -270,6 +365,18 @@ var defaultTools = map[string]bool{
 // the active phase's tools plus the always-on meta/cross tools; an unset or
 // invalid phase advertises the whole tier surface. It lazily reads the env
 // once per server lifetime and caches the result.
+// schemaVersionFor returns the tool schema contract version this connection
+// negotiated during initialize (P2-003), defaulting to the current catalog
+// version when no handshake happened yet.
+func (s *Server) schemaVersionFor() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.schemaVersion == "" {
+		return SchemaVersionCurrent
+	}
+	return s.schemaVersion
+}
+
 func (s *Server) filteredTools() []Tool {
 	s.toolsMu.Lock()
 	defer s.toolsMu.Unlock()
@@ -359,6 +466,17 @@ func strProp(desc string) map[string]any {
 	return map[string]any{"type": "string", "description": desc}
 }
 
+// enumProp is a string property constrained to a closed vocabulary whose
+// values the server validates (or dispatches on) — e.g. kern_meta's phase
+// (explore|plan|edit|verify) and the whatif/impact change kinds. Declaring
+// the enum lets strict MCP clients constrain generation at the source
+// instead of discovering valid values by trial and error. Use it ONLY for
+// genuinely closed vocabularies: open-ended params (free-form presets,
+// registry-extensible names, language overrides) must stay strProp.
+func enumProp(desc string, values ...string) map[string]any {
+	return map[string]any{"type": "string", "description": desc, "enum": values}
+}
+
 // Server handles MCP requests over a stdio stream or HTTP.
 type Server struct {
 	in        io.Reader // raw stdio reader, used to rebuild the scanner after an oversized line
@@ -370,6 +488,11 @@ type Server struct {
 	locks     map[string]*lock.Lock
 	inflight  map[string]context.CancelFunc
 	sessions  map[string]*project.Session
+	// svc is the delivery-mechanism-independent service layer. Handlers
+	// delegate core operations (index, graph, memory, governance, security)
+	// to it instead of importing the internal engines directly, so the same
+	// business logic serves CLI, MCP and web identically.
+	svc *service.Services
 	// platforms caches one application Platform per project root, keyed to
 	// the exact index instance it was built from. High-level handlers used to
 	// rebuild the whole Platform (call graph + 4 twin extractors, each a full
@@ -378,6 +501,12 @@ type Server struct {
 	// rebuild (new instance pointer).
 	platforms map[string]*platformEntry
 	transport string // "stdio" (default) or "http"
+	// schemaVersion is the tool schema contract version (P2-003) negotiated
+	// during initialize: the client's requested version when supported,
+	// else SchemaVersionCurrent. Empty until the first initialize; getters
+	// fall back to SchemaVersionCurrent so tools/list is still correct when
+	// a client skips the handshake.
+	schemaVersion string
 	// sem bounds how many tool calls may build an index concurrently (each
 	// call can construct a full project index). Acquired before a tools/call
 	// goroutine is spawned and released when it finishes.
@@ -411,6 +540,38 @@ type Server struct {
 	// isError=true, no side effects). A nil hook preserves the default
 	// behavior exactly — callers that never set it see zero change.
 	preTool func(name string, args map[string]any) error
+	// gateway enforces the safety-budget dimension of ToolGateway at the
+	// tool-call choke point (precheckTool): every tools/call — direct and
+	// compose steps alike — is tracked against budget before dispatch, and
+	// denied with a structured error once the budget is exceeded. It is
+	// budget-only by construction (NewToolGateway(nil): per-call firewalls
+	// are built separately in newGovernor, so no firewall is held here). A
+	// nil gateway is a safe no-op — callers that never wire one (or that
+	// explicitly opt out via WithToolGateway(nil, nil)) see byte-for-byte
+	// legacy behavior. budget is the gateway's working budget; nil disables
+	// budget enforcement too.
+	gateway *governance.ToolGateway
+	budget  *domain.SafetyBudget
+	// budgetMu serializes budget accounting in precheckTool. tools/call
+	// requests are dispatched concurrently (Serve spawns one goroutine per
+	// call), and domain.SafetyBudget's counters are not internally
+	// synchronized, so the check-then-track critical section must be guarded
+	// here. Under contention the mutex still guarantees at most MaxToolCalls
+	// successful dispatches.
+	budgetMu sync.Mutex
+	// Background index watch: an implicit poll loop that rebuilds stale
+	// workspace-root indexes between tool calls via the same on-demand path
+	// (project.Session.Index). watchStop is closed by Close to halt the loop;
+	// watchDone is closed by the loop when it exits; watchWG tracks in-flight
+	// rebuilds so Close can drain one; watchMu/watchBusy implement
+	// single-flight. See StartBackgroundWatch.
+	watchStop    chan struct{}
+	watchDone    chan struct{}
+	watchOnce    sync.Once
+	watchStarted sync.Once
+	watchWG      sync.WaitGroup
+	watchMu      sync.Mutex
+	watchBusy    bool
 }
 
 // WithPreToolHook registers a pre-tool-use hook. NewServer wires the
@@ -422,6 +583,91 @@ type Server struct {
 func (s *Server) WithPreToolHook(fn func(name string, args map[string]any) error) *Server {
 	s.preTool = fn
 	return s
+}
+
+// WithToolGateway wires (or overrides) the safety-budget ToolGateway used at
+// the tool-call choke point. A nil gateway plus a nil budget restores the
+// default no-op mode (byte-for-byte legacy behavior). When gw is non-nil and
+// budget is nil, the conservative domain.DefaultSafetyBudget() is used; a
+// budget configured via KERN_SAFETY_BUDGET_* at construction is replaced by
+// the one passed here. The gateway is budget-only by design (NewToolGateway
+// with a nil firewall): per-call firewalls are built in newGovernor, so no
+// global firewall state is held.
+func (s *Server) WithToolGateway(gw *governance.ToolGateway, budget *domain.SafetyBudget) *Server {
+	s.gateway = gw
+	if gw != nil && budget == nil {
+		d := domain.DefaultSafetyBudget()
+		budget = &d
+	}
+	s.budget = budget
+	return s
+}
+
+// safetyBudgetFromEnv builds the MCP safety budget from KERN_SAFETY_BUDGET_*
+// environment overrides, falling back to the conservative
+// domain.DefaultSafetyBudget() for every dimension that is unset or
+// unparseable (a malformed override must never widen a limit). Supported:
+// KERN_SAFETY_BUDGET_MAX_TOOL_CALLS, _MAX_FILES, _MAX_TOKENS,
+// _MAX_EXTERNAL_CALLS, _MAX_COST, _MAX_RUNTIME_SECONDS, _MAX_RISK.
+// safetyBudgetEnvSet reports whether the operator opted into the MCP
+// safety budget by setting any KERN_SAFETY_BUDGET_* variable.
+func safetyBudgetEnvSet() bool {
+	for _, name := range []string{
+		"KERN_SAFETY_BUDGET_MAX_TOOL_CALLS",
+		"KERN_SAFETY_BUDGET_MAX_FILES",
+		"KERN_SAFETY_BUDGET_MAX_TOKENS",
+		"KERN_SAFETY_BUDGET_MAX_EXTERNAL_CALLS",
+		"KERN_SAFETY_BUDGET_MAX_COST",
+		"KERN_SAFETY_BUDGET_MAX_RUNTIME_SECONDS",
+		"KERN_SAFETY_BUDGET_MAX_RISK",
+	} {
+		if os.Getenv(name) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func safetyBudgetFromEnv() *domain.SafetyBudget {
+	d := domain.DefaultSafetyBudget()
+	b := &d
+	if v := os.Getenv("KERN_SAFETY_BUDGET_MAX_TOOL_CALLS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			b.MaxToolCalls = n
+		}
+	}
+	if v := os.Getenv("KERN_SAFETY_BUDGET_MAX_FILES"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			b.MaxFiles = n
+		}
+	}
+	if v := os.Getenv("KERN_SAFETY_BUDGET_MAX_TOKENS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			b.MaxTokens = n
+		}
+	}
+	if v := os.Getenv("KERN_SAFETY_BUDGET_MAX_EXTERNAL_CALLS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			b.MaxExternalCalls = n
+		}
+	}
+	if v := os.Getenv("KERN_SAFETY_BUDGET_MAX_COST"); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil && f >= 0 {
+			b.MaxCost = f
+		}
+	}
+	if v := os.Getenv("KERN_SAFETY_BUDGET_MAX_RUNTIME_SECONDS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			b.MaxRuntime = time.Duration(n) * time.Second
+		}
+	}
+	if v := os.Getenv("KERN_SAFETY_BUDGET_MAX_RISK"); v != "" {
+		switch strings.ToUpper(strings.TrimSpace(v)) {
+		case string(domain.RiskLow), string(domain.RiskMedium), string(domain.RiskHigh), string(domain.RiskCritical):
+			b.MaxRisk = domain.RiskLevel(strings.ToUpper(strings.TrimSpace(v)))
+		}
+	}
+	return b
 }
 
 // defaultConcurrency returns the worker concurrency limit for the server.
@@ -439,11 +685,23 @@ func defaultConcurrency() int {
 func NewServer(in io.Reader, out io.Writer) *Server {
 	sc := bufio.NewScanner(in)
 	sc.Buffer(make([]byte, 64<<20), 64<<20)
-	s := &Server{in: in, out: out, sem: make(chan struct{}, defaultConcurrency()), locks: map[string]*lock.Lock{}, inflight: map[string]context.CancelFunc{}, sessions: map[string]*project.Session{}, transport: "stdio", roots: defaultWorkspaceRoots(), gate: confinementGate(), commits: map[string]string{}, allowlist: parseAllowlist()}
+	s := &Server{in: in, out: out, sem: make(chan struct{}, defaultConcurrency()), locks: map[string]*lock.Lock{}, inflight: map[string]context.CancelFunc{}, sessions: map[string]*project.Session{}, svc: service.New(), transport: "stdio", roots: defaultWorkspaceRoots(), gate: confinementGate(), commits: map[string]string{}, allowlist: parseAllowlist(), watchStop: make(chan struct{}), watchDone: make(chan struct{})}
 	// P0.1: register the built-in default agent so calls without an explicit
 	// agent_id are governed (cwd-scoped) instead of raw. KERN_MCP_PERMISSIVE=1
 	// remains the explicit opt-out that restores raw mode.
 	governance.EnsureDefaultAgent()
+	// AUD-10: the safety-budget ToolGateway is wired at construction only
+	// when the operator opts in via at least one KERN_SAFETY_BUDGET_* env var.
+	// Without opt-in the server stays budget-free (byte-for-byte legacy
+	// behavior): per-task budgets are already enforced inside the loop, and a
+	// process-wide cap would deny legitimate calls in long-lived sessions.
+	// The gateway is budget-only (NewToolGateway(nil) — per-call firewalls are
+	// built in newGovernor). WithToolGateway can wire, tune, or disable it
+	// programmatically (nil = no-op).
+	if safetyBudgetEnvSet() {
+		s.gateway = governance.NewToolGateway(nil)
+		s.budget = safetyBudgetFromEnv()
+	}
 	// Confinement is default-on: the KERN_MCP_ROOTS gate runs as the
 	// pre-tool-use hook, so a tool call whose path-typed arguments resolve
 	// outside the allowed roots is denied before any handler side effect runs.
@@ -467,16 +725,17 @@ func confinementGate() *Gate {
 	return NewGateFromEnv()
 }
 
-// defaultWorkspaceRoots returns the roots tools may target: KERN_ROOTS when
-// set, else the startup directory. Every tool root/dir is confined to these.
+// defaultWorkspaceRoots returns the roots tools may target: KERN_ROOTS (or
+// mcp.roots in .kern/config.json) when set, else the startup directory. Every
+// tool root/dir is confined to these.
 func defaultWorkspaceRoots() []string {
 	var roots []string
-	if env := os.Getenv("KERN_ROOTS"); env != "" {
-		for _, r := range strings.FieldsFunc(env, func(r rune) bool { return r == ':' || r == ',' }) {
-			r = strings.TrimSpace(r)
-			if r != "" {
-				roots = append(roots, resolveAbs(r))
-			}
+	for _, r := range config.StringsSplit("", "KERN_ROOTS", "mcp.roots", nil, func(s string) []string {
+		return strings.FieldsFunc(s, func(r rune) bool { return r == ':' || r == ',' })
+	}) {
+		r = strings.TrimSpace(r)
+		if r != "" {
+			roots = append(roots, resolveAbs(r))
 		}
 	}
 	if len(roots) == 0 {
@@ -838,13 +1097,17 @@ func (s *Server) safeDispatch(req rpcRequest) (r any) {
 }
 
 // Close stops all background file watchers associated with this server's
-// sessions. It is safe to call multiple times.
+// sessions and halts the implicit background index watch, draining an
+// in-flight rebuild for up to 5s. It is safe to call multiple times.
 func (s *Server) Close() {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	for _, sess := range s.sessions {
 		sess.Close()
 	}
+	s.mu.Unlock()
+	// Stop the background index watch: no rebuild may start after this point,
+	// and an in-flight rebuild is drained briefly (see stopWatch).
+	s.stopWatch()
 }
 
 // dispatch computes the JSON-RPC response for a request. A nil return means
@@ -865,13 +1128,13 @@ func (s *Server) dispatch(req rpcRequest) any {
 		}
 		if json.Unmarshal(req.Params, &p) == nil {
 			if err := s.gate.Check(p.Name, p.Arguments); err != nil {
-				return map[string]any{
-					"jsonrpc": "2.0", "id": req.ID,
-					"result": map[string]any{
-						"content": []any{map[string]any{"type": "text", "text": "pre-tool-use denied: " + err.Error()}},
-						"isError": true,
-					},
+				denied := "pre-tool-use denied: " + err.Error()
+				result := map[string]any{
+					"content": []any{map[string]any{"type": "text", "text": denied}},
+					"isError": true,
 				}
+				attachTokenMetadata(result, p.Name, p.Arguments, denied)
+				return map[string]any{"jsonrpc": "2.0", "id": req.ID, "result": result}
 			}
 		}
 	}
@@ -917,16 +1180,26 @@ func (s *Server) dispatch(req rpcRequest) any {
 		version := protocolVersion
 		var initParams struct {
 			ProtocolVersion string `json:"protocolVersion"`
+			SchemaVersion   string `json:"schemaVersion"`
 		}
 		if json.Unmarshal(req.Params, &initParams) == nil && supportedProtocolVersions[initParams.ProtocolVersion] {
 			version = initParams.ProtocolVersion
 		}
+		// Negotiate the tool schema contract version (P2-003): honor a supported
+		// client request verbatim, else serve the current catalog version. The
+		// negotiated value is stored so tools/list can advertise the version the
+		// client actually speaks.
+		schemaVersion := negotiateSchemaVersion(initParams.SchemaVersion)
+		s.mu.Lock()
+		s.schemaVersion = schemaVersion
+		s.mu.Unlock()
 		return map[string]any{
 			"jsonrpc": "2.0", "id": req.ID,
 			"result": map[string]any{
 				"protocolVersion": version,
 				"capabilities":    caps,
 				"serverInfo":      map[string]any{"name": serverName, "version": serverVersion},
+				"schemaVersion":   schemaVersion,
 			},
 		}
 	case "notifications/initialized":
@@ -934,7 +1207,7 @@ func (s *Server) dispatch(req rpcRequest) any {
 	case "ping":
 		return map[string]any{"jsonrpc": "2.0", "id": req.ID, "result": map[string]any{}}
 	case "tools/list":
-		return map[string]any{"jsonrpc": "2.0", "id": req.ID, "result": map[string]any{"tools": s.filteredTools()}}
+		return map[string]any{"jsonrpc": "2.0", "id": req.ID, "result": map[string]any{"tools": s.filteredTools(), "schemaVersion": s.schemaVersionFor()}}
 	case "tools/call":
 		return s.toolCallResponse(req.ID, req.Params)
 	case "prompts/list":
@@ -989,13 +1262,13 @@ func (s *Server) toolCallResponse(id json.RawMessage, params json.RawMessage) an
 	// agent sees why the call was blocked.
 	if s.preTool != nil {
 		if err := s.preTool(p.Name, p.Arguments); err != nil {
-			return map[string]any{
-				"jsonrpc": "2.0", "id": id,
-				"result": map[string]any{
-					"content": []any{map[string]any{"type": "text", "text": fmt.Sprintf("pre-tool-use denied: %s", err)}},
-					"isError": true,
-				},
+			denied := fmt.Sprintf("pre-tool-use denied: %s", err)
+			result := map[string]any{
+				"content": []any{map[string]any{"type": "text", "text": denied}},
+				"isError": true,
 			}
+			attachTokenMetadata(result, p.Name, p.Arguments, denied)
+			return map[string]any{"jsonrpc": "2.0", "id": id, "result": result}
 		}
 	}
 	// A generous 30-minute per-call ceiling so a hung subprocess (an
@@ -1063,6 +1336,18 @@ func (s *Server) toolCallResponse(id json.RawMessage, params json.RawMessage) an
 		result["provenance"] = scope.prov
 		result["content"] = []any{map[string]any{"type": "text", "text": text + "\n" + s.provenanceSummary(scope.ix, scope.prov)}}
 	}
+	// Structured token metadata (P1-006): the request tokens were counted
+	// before processing; count the final response text (provenance summary
+	// included) after and stamp the ledger on the result.
+	out := text
+	if content, ok := result["content"].([]any); ok && len(content) > 0 {
+		if first, ok := content[0].(map[string]any); ok {
+			if t, ok := first["text"].(string); ok {
+				out = t
+			}
+		}
+	}
+	attachTokenMetadata(result, p.Name, p.Arguments, out)
 	return map[string]any{"jsonrpc": "2.0", "id": id, "result": result}
 }
 
@@ -1189,6 +1474,39 @@ func argString(args map[string]any, key string) string {
 	return strings.TrimSpace(fmt.Sprintf("%v", v))
 }
 
+// argStrings reads an optional array-of-strings tool argument. Accepts a
+// []any / []string (MCP JSON arrays) and, for lenient clients that pass
+// everything as a single string, a comma- or whitespace-separated list.
+// Values are trimmed and empty entries dropped; missing/nil returns nil.
+func argStrings(args map[string]any, key string) []string {
+	v, ok := args[key]
+	if !ok || v == nil {
+		return nil
+	}
+	var out []string
+	switch t := v.(type) {
+	case []string:
+		for _, s := range t {
+			if s = strings.TrimSpace(s); s != "" {
+				out = append(out, s)
+			}
+		}
+	case []any:
+		for _, e := range t {
+			if s := strings.TrimSpace(fmt.Sprintf("%v", e)); s != "" {
+				out = append(out, s)
+			}
+		}
+	case string:
+		for _, s := range strings.FieldsFunc(t, func(r rune) bool { return r == ',' || r == ' ' || r == '\n' || r == '\t' }) {
+			if s = strings.TrimSpace(s); s != "" {
+				out = append(out, s)
+			}
+		}
+	}
+	return out
+}
+
 // argBool reads an optional boolean tool argument. Accepts native bools and
 // the strings "true"/"1" (MCP clients often pass everything as strings).
 func argBool(args map[string]any, key string) bool {
@@ -1305,6 +1623,30 @@ func (s *Server) precheckTool(name string, args map[string]any) (string, error) 
 		if err := validateRoot(root); err != nil {
 			return "", err
 		}
+	}
+	// AUD-10: track every tool call against the safety budget through the
+	// ToolGateway. A nil gateway or nil budget is a safe no-op (back-compat).
+	// The budget gate runs after allowlist/root validation so blocked calls
+	// never consume budget; when the budget is already exceeded the call is
+	// denied with a structured error before any handler side effect runs.
+	// Evaluate's boundary is empty (the tool name is the resource) and its
+	// firewall is nil (per-call firewalls live in newGovernor), so only the
+	// budget dimension is enforced here.
+	if s.gateway != nil && s.budget != nil {
+		s.budgetMu.Lock()
+		defer s.budgetMu.Unlock()
+		agentID := argString(args, "agent_id")
+		if agentID == "" {
+			agentID = governance.DefaultAgentID
+		}
+		if _, _, _, gerr := s.gateway.Evaluate(agentID, argString(args, "task"), name, "call", domain.TaskBoundary{}, s.budget); gerr != nil {
+			// Surface the budget reason verbatim in the structured denial.
+			if _, reason := s.budget.Exceeded(); reason != "" {
+				return "", fmt.Errorf("safety budget exceeded: %s — tool call denied", reason)
+			}
+			return "", fmt.Errorf("tool call denied by safety gateway: %s", gerr)
+		}
+		s.budget.TrackToolCall()
 	}
 	return name, nil
 }
@@ -1673,9 +2015,4 @@ func renderStats(daysStr, session string) (string, error) {
 	}
 	return fmt.Sprintf("operations=%d before=%d after=%d saved=%d (%.1f%%) cost_saved=$%.4f",
 		sum.Operations, sum.BeforeTotal, sum.AfterTotal, sum.SavedTotal, sum.SavedPct, sum.CostSaved), nil
-}
-
-// ensureRecorder wires the shared stats recorder used by optimize operations.
-func ensureRecorder() error {
-	return optimize.EnsureRecorder()
 }

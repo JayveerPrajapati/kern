@@ -5,7 +5,8 @@ package cache
 import (
 	"os"
 	"path/filepath"
-	"syscall"
+
+	"github.com/JayveerPrajapati/kern/internal/flock"
 )
 
 // fileLockImpl is the platform-specific lock handle. On Unix it is an open
@@ -22,12 +23,8 @@ func acquireFileLock(path string) (fileLockImpl, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fileLockImpl{}, err
 	}
-	f, err := os.OpenFile(path+".lock", os.O_CREATE|os.O_RDWR, 0o600)
+	f, err := flock.Lock(path + ".lock")
 	if err != nil {
-		return fileLockImpl{}, err
-	}
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
-		f.Close()
 		return fileLockImpl{}, err
 	}
 	return fileLockImpl{f: f}, nil
@@ -38,6 +35,5 @@ func (l fileLockImpl) release() {
 	if l.f == nil {
 		return
 	}
-	_ = syscall.Flock(int(l.f.Fd()), syscall.LOCK_UN)
-	_ = l.f.Close()
+	_ = flock.Release(l.f)
 }

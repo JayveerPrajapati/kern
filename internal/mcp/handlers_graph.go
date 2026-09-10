@@ -9,7 +9,10 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/fw"
 	"github.com/JayveerPrajapati/kern/internal/index"
 	"github.com/JayveerPrajapati/kern/internal/intel"
+	"github.com/JayveerPrajapati/kern/internal/lenses"
 	"github.com/JayveerPrajapati/kern/internal/llm"
+	"github.com/JayveerPrajapati/kern/internal/profiles"
+	"github.com/JayveerPrajapati/kern/internal/retrieval"
 	"os"
 	"regexp"
 	"strconv"
@@ -309,6 +312,48 @@ func (s *Server) freshnessFooter(args map[string]any, ix *index.Index) string {
 	return "\n---freshness-proof---\n" + string(data)
 }
 
+// parseLevelArg maps the string form of a disclosure level ("l1"|"l2"|"l3",
+// case-insensitive) to the retrieval.Level constants. It serves the optional
+// level arg on kern_context/kern_explore/kern_probe; the retrieval tools use
+// parseRetrieveLevel (same semantics, different error wording kept for their
+// existing contract).
+func parseLevelArg(v string) (retrieval.Level, error) {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "l1":
+		return retrieval.L1, nil
+	case "l2":
+		return retrieval.L2, nil
+	case "l3":
+		return retrieval.L3, nil
+	default:
+		return 0, fmt.Errorf("unknown level %q (valid: l1, l2, l3)", v)
+	}
+}
+
+// renderRetrieval renders a retrieval result through the same governance +
+// provenance pipeline as kern_retrieve/kern_resolve: authorize, filter L1
+// items by scope, stamp provenance, then render with the freshness footer.
+func (s *Server) renderRetrieval(ctx context.Context, args map[string]any, ix *index.Index, res *retrieval.Result) (string, error) {
+	gov, err := s.newGovernor(ctx, args, ix)
+	if err != nil {
+		s.stampProvenance(ctx, s.governedProvenance(ix, gov.policySource, gov.proof, nil))
+		return "", err
+	}
+	if gov != nil {
+		var kept []retrieval.L1Item
+		for _, it := range res.Items {
+			if gov.allowed[it.Name] {
+				kept = append(kept, it)
+			}
+		}
+		res.Items = kept
+		s.stampProvenance(ctx, s.governedProvenance(ix, gov.policySource, gov.proof, symbolProvenances(ix, retrieveItemNames(res.Items))))
+	} else {
+		s.stampProvenance(ctx, s.rawProvenance(ix, symbolProvenances(ix, retrieveItemNames(res.Items))))
+	}
+	return retrieval.Render(res) + s.freshnessFooter(args, ix), nil
+}
+
 func (s *Server) handleContext(ctx context.Context, args map[string]any) (string, error) {
 	{
 		symbol := argString(args, "symbol")
@@ -326,6 +371,51 @@ func (s *Server) handleContext(ctx context.Context, args map[string]any) (string
 				return "", err
 			}
 			lines = n
+		}
+		// Optional handle/level args (P2 tracker): a resolved retrieval handle
+		// renders its L2 neighborhood, and a disclosure level renders the
+		// L1/L2/L3 view of the symbol instead of the default context slice.
+		// Mutually exclusive; both default to the context slice.
+		handle := argString(args, "handle")
+		level := argString(args, "level")
+		if handle != "" && level != "" {
+			return "", fmt.Errorf("use only one of handle/level")
+		}
+		if handle != "" {
+			// Mirror kern_resolve: exact registry resolve, then a prefix
+			// fallback so a handle copied verbatim from kern_retrieve output
+			// (which renders an 8-char prefix) resolves. Handles are
+			// staleness-checked by the registry at register time; an expired
+			// handle fails the resolve and must be re-retrieved.
+			h, ok := retrieval.DefaultRegistry.Resolve(handle)
+			if !ok {
+				for _, cand := range retrieval.DefaultRegistry.List() {
+					if strings.HasPrefix(cand.ID, handle) {
+						h = cand
+						ok = true
+						break
+					}
+				}
+			}
+			if !ok {
+				return "", fmt.Errorf("unknown handle %q (handles expire with the registry; re-run kern_retrieve)", handle)
+			}
+			res, err := retrieval.Retrieve(ix, retrieval.Options{Symbol: h.Name, Level: retrieval.L2})
+			if err != nil {
+				return "", err
+			}
+			return s.renderRetrieval(ctx, args, ix, res)
+		}
+		if level != "" {
+			lvl, err := parseLevelArg(level)
+			if err != nil {
+				return "", err
+			}
+			res, err := retrieval.Retrieve(ix, retrieval.Options{Query: symbol, Symbol: symbol, Level: lvl})
+			if err != nil {
+				return "", err
+			}
+			return s.renderRetrieval(ctx, args, ix, res)
 		}
 		gov, err := s.newGovernor(ctx, args, ix)
 		if err != nil {
@@ -382,6 +472,12 @@ func (s *Server) handleContext(ctx context.Context, args map[string]any) (string
 			}
 			s.stampProvenance(ctx, s.rawProvenance(ix, syms))
 		}
+		// Disambiguation note: several packages can define the same symbol
+		// name (e.g. "main"); surface which one this slice came from so a
+		// wrong-package resolve is spotted immediately (F-3).
+		if def, ok := ix.ResolveName(symbol); ok && body != "" {
+			body = fmt.Sprintf("# resolved %s -> %s:%d\n%s", symbol, def.File, def.Line, body)
+		}
 		if body == "" {
 			suggestions := ix.Search(symbol, 5)
 			if len(suggestions) == 0 {
@@ -419,6 +515,20 @@ func (s *Server) handleContext(ctx context.Context, args map[string]any) (string
 			if maxTok, err := atoiArg(v, 0); err == nil && maxTok > 0 {
 				body = budget.FitCode(body, maxTok)
 			}
+		}
+		if lensName := argString(args, "lens"); lensName != "" {
+			l, err := lenses.Resolve(lensName)
+			if err != nil {
+				return "", err
+			}
+			body = fmt.Sprintf("lens: %s (%s)\n", l.Name, lenses.RenderPriorities(l)) + body
+		}
+		if profileName := argString(args, "profile"); profileName != "" {
+			p, ok := profiles.NewRegistryWithUserProfiles(ix.Root).Select(profileName)
+			if !ok {
+				return "", fmt.Errorf("unknown profile %q", profileName)
+			}
+			body = profiles.ApplyProfile(p, body)
 		}
 		return body + s.freshnessFooter(args, ix), nil
 	}
@@ -666,6 +776,20 @@ func (s *Server) handleExplore(ctx context.Context, args map[string]any) (string
 			}
 			maxNodes = n
 		}
+		// Optional level arg (P2 tracker): render the symbol through the
+		// retrieval levels (L1 names, L2 neighborhood, L3 source) instead of
+		// the explore report. Same semantics as kern_retrieve.
+		if level := argString(args, "level"); level != "" {
+			lvl, err := parseLevelArg(level)
+			if err != nil {
+				return "", err
+			}
+			res, err := retrieval.Retrieve(ix, retrieval.Options{Query: symbol, Symbol: symbol, Level: lvl})
+			if err != nil {
+				return "", err
+			}
+			return s.renderRetrieval(ctx, args, ix, res)
+		}
 		rep, err := intel.Explore(ix, symbol, depth, maxNodes)
 		if err != nil {
 			return "", err
@@ -820,6 +944,27 @@ func (s *Server) handleProbe(ctx context.Context, args map[string]any) (string, 
 			maxTokens = n
 		}
 		report := intel.Probe(ix, task, maxTokens)
+		// Optional level arg (P2 tracker): render the primary probed symbol
+		// through the retrieval levels (L1 names, L2 neighborhood, L3 source)
+		// instead of the probe report.
+		if level := argString(args, "level"); level != "" {
+			lvl, err := parseLevelArg(level)
+			if err != nil {
+				return "", err
+			}
+			if len(report.Anchors) == 0 {
+				return "", fmt.Errorf("no symbol resolved from task %q", task)
+			}
+			sym := report.Anchors[0].Resolved
+			if sym == "" {
+				sym = report.Anchors[0].Name
+			}
+			res, err := retrieval.Retrieve(ix, retrieval.Options{Query: sym, Symbol: sym, Level: lvl})
+			if err != nil {
+				return "", err
+			}
+			return s.renderRetrieval(ctx, args, ix, res)
+		}
 		text := intel.RenderProbe(report)
 		if report.Truncated {
 			text = intel.FitProbe(text, maxTokens)

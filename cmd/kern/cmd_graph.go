@@ -32,12 +32,12 @@ func runGraph(rest []string) {
 		}
 		ix, err := loadOrBuild(root)
 		if err != nil {
-			fatal("%v", err)
+			fatal("Graph: %v", err)
 		}
 		out := ix.WholeGraph(f.limit).GraphHTML()
 		if f.out != "" {
 			if err := os.WriteFile(f.out, []byte(out), 0o644); err != nil {
-				fatal("%v", err)
+				fatal("Graph: %v", err)
 			}
 			fmt.Printf("wrote %s (%d bytes)\n", f.out, len(out))
 			return
@@ -55,15 +55,15 @@ func runGraph(rest []string) {
 	}
 	ix, err := loadOrBuild(root)
 	if err != nil {
-		fatal("%v", err)
+		fatal("Graph: %v", err)
 	}
 	if f.mermaid {
 		fmt.Println(ix.Mermaid(symbol))
 		return
 	}
 	if f.json || f.graphml || f.html {
-		g, ok := ix.Neighborhood(symbol)
-		if !ok {
+		g, gerr := svc.Graph.Neighborhood(context.Background(), root, symbol)
+		if gerr != nil {
 			fatalNoSymbol(symbol, ix)
 		}
 		var out string
@@ -77,7 +77,7 @@ func runGraph(rest []string) {
 		}
 		if f.out != "" {
 			if err := os.WriteFile(f.out, []byte(out), 0o644); err != nil {
-				fatal("%v", err)
+				fatal("Graph: %v", err)
 			}
 			fmt.Printf("wrote %s (%d bytes)\n", f.out, len(out))
 			return
@@ -88,13 +88,13 @@ func runGraph(rest []string) {
 	if f.maxTokens > 0 {
 		out, err := intel.GraphCtx(ix, symbol, f.maxTokens)
 		if err != nil {
-			fatal("%v", err)
+			fatal("Graph: %v", err)
 		}
 		fmt.Println(out)
 		return
 	}
-	out := ix.Graph(symbol)
-	if strings.Contains(out, "no symbol found") {
+	out, gerr := svc.Graph.Graph(context.Background(), root, symbol)
+	if gerr != nil || strings.Contains(out, "no symbol found") {
 		fatalNoSymbol(symbol, ix)
 	}
 	fmt.Println(out)
@@ -119,7 +119,7 @@ func runInherits(rest []string) {
 	}
 	ix, err := loadOrBuild(root)
 	if err != nil {
-		fatal("%v", err)
+		fatal("Inherits: %v", err)
 	}
 	sym, ok := ix.FindSymbol(symbol)
 	if !ok {
@@ -167,17 +167,17 @@ func runWhy(rest []string) {
 	}
 	ix, err := loadOrBuild(root)
 	if err != nil {
-		fatal("%v", err)
+		fatal("Why: %v", err)
 	}
-	info, ok := intel.Why(ix, symbol)
-	if !ok {
+	info, werr := svc.Graph.Why(context.Background(), root, symbol)
+	if werr != nil {
 		fatalNoSymbol(symbol, ix)
 	}
 	if f.json {
 		printJSON(info)
 		return
 	}
-	fmt.Println(intel.FormatWhy(info))
+	fmt.Println(intel.FormatWhy(*info))
 
 }
 
@@ -195,7 +195,7 @@ func runWiki(rest []string) {
 	}
 	ix, err := loadOrBuild(root)
 	if err != nil {
-		fatal("%v", err)
+		fatal("Wiki: %v", err)
 	}
 	outDir := f.out
 	if outDir == "" {
@@ -203,7 +203,7 @@ func runWiki(rest []string) {
 	}
 	written, err := intel.WikiExport(ix, outDir)
 	if err != nil {
-		fatal("%v", err)
+		fatal("Wiki: %v", err)
 	}
 	fmt.Printf("wrote %d pages to %s\n", len(written), outDir)
 
@@ -223,7 +223,7 @@ func runHubs(rest []string) {
 	}
 	ix, err := intel.ReadIndex(root)
 	if err != nil {
-		fatal("%v", err)
+		fatal("Hubs: %v", err)
 	}
 	limit := f.limit
 	if limit <= 0 {
@@ -256,7 +256,7 @@ func runBridges(rest []string) {
 	}
 	ix, err := intel.ReadIndex(root)
 	if err != nil {
-		fatal("%v", err)
+		fatal("Bridges: %v", err)
 	}
 	limit := f.limit
 	if limit <= 0 {
@@ -284,7 +284,7 @@ func runTestgaps(rest []string) {
 	}
 	ix, err := intel.ReadIndex(root)
 	if err != nil {
-		fatal("%v", err)
+		fatal("Testgaps: %v", err)
 	}
 	cov := intel.AnalyzeCoverage(ix)
 	if f.json {
@@ -312,7 +312,7 @@ func runFlows(rest []string) {
 	}
 	ix, err := intel.ReadIndex(root)
 	if err != nil {
-		fatal("%v", err)
+		fatal("Flows: %v", err)
 	}
 	flows := intel.Flows(ix, f.limit, 12)
 	if f.json {
@@ -337,7 +337,7 @@ func runEntries(rest []string) {
 	}
 	ix, err := intel.ReadIndex(root)
 	if err != nil {
-		fatal("%v", err)
+		fatal("Entries: %v", err)
 	}
 	limit := f.limit
 	if limit <= 0 {
@@ -393,7 +393,7 @@ func runCommunities(rest []string) {
 	}
 	ix, err := intel.ReadIndex(root)
 	if err != nil {
-		fatal("%v", err)
+		fatal("Communities: %v", err)
 	}
 	comms := intel.Communities(ix)
 	if f.limit > 0 && len(comms) > f.limit {
@@ -428,18 +428,17 @@ func runPath(rest []string) {
 	}
 	ix, err := intel.ReadIndex(root)
 	if err != nil {
-		fatal("%v", err)
+		fatal("Path: %v", err)
 	}
-	from, okFrom := intel.Resolve(ix, args[0])
-	to, okTo := intel.Resolve(ix, args[1])
-	if !okFrom {
-		fatal("unknown symbol: %s", args[0])
+	// Validation and path computation go through the service layer; the CLI
+	// keeps only rendering (and resolved-name labels for JSON output).
+	path, perr := svc.Graph.Path(context.Background(), root, args[0], args[1])
+	if perr != nil {
+		fatal("Path: %v", perr)
 	}
-	if !okTo {
-		fatal("unknown symbol: %s", args[1])
-	}
-	path := intel.ShortestPath(ix, from, to)
 	if f.json {
+		from, _ := intel.Resolve(ix, args[0])
+		to, _ := intel.Resolve(ix, args[1])
 		printJSON(map[string]any{
 			"from": from, "to": to,
 			"path": path,
@@ -464,7 +463,7 @@ func runDead(rest []string) {
 	}
 	ix, err := intel.ReadIndex(root)
 	if err != nil {
-		fatal("%v", err)
+		fatal("Dead: %v", err)
 	}
 	dead := intel.DeadCode(ix)
 	if f.limit > 0 && len(dead) > f.limit {
@@ -492,7 +491,7 @@ func runLarges(rest []string) {
 	}
 	ix, err := intel.ReadIndex(root)
 	if err != nil {
-		fatal("%v", err)
+		fatal("Larges: %v", err)
 	}
 	minLines := f.lines
 	if minLines <= 0 {
@@ -521,7 +520,7 @@ func runArch(rest []string) {
 	}
 	ix, err := intel.ReadIndex(root)
 	if err != nil {
-		fatal("%v", err)
+		fatal("Arch: %v", err)
 	}
 	a := intel.AnalyzeArchitecture(ix)
 	if f.json {
@@ -550,7 +549,7 @@ func runTwin(rest []string) {
 	}
 	p, err := app.New(root)
 	if err != nil {
-		fatal("%v", err)
+		fatal("Twin: %v", err)
 	}
 	g := p.Graph()
 
@@ -600,7 +599,7 @@ func runChurn(rest []string) {
 	from, to := splitRange(f.range_)
 	report, err := intel.Churn(root, from, to)
 	if err != nil {
-		fatal("%v", err)
+		fatal("Churn: %v", err)
 	}
 	if f.json {
 		printJSON(report)
@@ -625,7 +624,7 @@ func runCochange(rest []string) {
 	from, to := splitRange(f.range_)
 	report, err := intel.CoChangeContext(context.Background(), root, from, to)
 	if err != nil {
-		fatal("%v", err)
+		fatal("Cochange: %v", err)
 	}
 	if f.json {
 		printJSON(report)
@@ -652,7 +651,7 @@ func runExplore(rest []string) {
 	}
 	ix, err := intel.ReadIndex(root)
 	if err != nil {
-		fatal("%v", err)
+		fatal("Explore: %v", err)
 	}
 	depth := f.depth
 	if depth < 0 {
@@ -664,7 +663,7 @@ func runExplore(rest []string) {
 	}
 	rep, err := intel.Explore(ix, args[0], depth, maxN)
 	if err != nil {
-		fatal("%v", err)
+		fatal("Explore: %v", err)
 	}
 	if f.json {
 		printJSON(rep)
@@ -691,7 +690,7 @@ func runNear(rest []string) {
 	}
 	ix, err := intel.ReadIndex(root)
 	if err != nil {
-		fatal("%v", err)
+		fatal("Near: %v", err)
 	}
 	depth := f.depth
 	if depth < 0 {
@@ -708,7 +707,7 @@ func runNear(rest []string) {
 	}
 	nodes, err := intel.Near(ix, args[0], depth, maxN)
 	if err != nil {
-		fatal("%v", err)
+		fatal("Near: %v", err)
 	}
 	if f.json {
 		printJSON(map[string]any{"depth": depth, "max_nodes": maxN, "nodes": nodes})
@@ -732,7 +731,7 @@ func runProbe(rest []string) {
 	}
 	ix, err := intel.ReadIndex(root)
 	if err != nil {
-		fatal("%v", err)
+		fatal("Probe: %v", err)
 	}
 	maxTokens := f.max
 	if maxTokens <= 0 {
@@ -764,7 +763,7 @@ func runTrace(rest []string) {
 	if sourceName == "-" {
 		b, err := readStdin()
 		if err != nil {
-			fatal("%v", err)
+			fatal("Trace: %v", err)
 		}
 		src = string(b)
 	} else {
@@ -779,7 +778,7 @@ func runTrace(rest []string) {
 				if os.IsNotExist(err) {
 					fatal("trace: file not found: %s (pass a path, `-` for stdin, or inline trace text)", sourceName)
 				}
-				fatal("%v", err)
+				fatal("Trace: %v", err)
 			}
 		} else {
 			src = string(b)
@@ -791,7 +790,7 @@ func runTrace(rest []string) {
 	}
 	ix, err := intel.ReadIndex(root)
 	if err != nil {
-		fatal("%v", err)
+		fatal("Trace: %v", err)
 	}
 	report := intel.Trace(ix, src, sourceName, f.limit)
 	if f.json {

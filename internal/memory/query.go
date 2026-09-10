@@ -43,7 +43,18 @@ type Query struct {
 // Recall returns the memories matching the query, ranked by relevance.
 // Filters are applied by field, then remaining memories are scored by
 // MatchScore, sorted by score then recency, and truncated to Limit.
+//
+// This is the un-governed read path (no agent identity, no audit). Governed
+// consumers use AuthorizedRecall, which checks read permission and records
+// the recall in the audit trail.
 func (s *MemoryStore) Recall(query Query) ([]domain.Memory, error) {
+	return s.recall(query, "", false)
+}
+
+// recall is the shared implementation behind Recall and AuthorizedRecall.
+// When audit is true the operation is recorded in the audit trail under
+// agentID (governed recall).
+func (s *MemoryStore) recall(query Query, agentID string, audit bool) ([]domain.Memory, error) {
 	start := time.Now()
 	ms := s.load()
 	var out []domain.Memory
@@ -119,6 +130,14 @@ func (s *MemoryStore) Recall(query Query) ([]domain.Memory, error) {
 		out = out[:query.Limit]
 	}
 	metrics.Default().RecordMemoryRecall(time.Since(start))
+	if audit {
+		s.recordAudit(AuditEvent{
+			AgentID:   agentID,
+			Operation: OpRecall,
+			Root:      s.root,
+			Allowed:   true,
+		})
+	}
 	return out, nil
 }
 

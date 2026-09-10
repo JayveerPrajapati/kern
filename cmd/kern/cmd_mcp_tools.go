@@ -8,18 +8,26 @@ import (
 	"io"
 	"os"
 	"strings"
+	"time"
 
+	"github.com/JayveerPrajapati/kern/internal/index"
 	"github.com/JayveerPrajapati/kern/internal/mcp"
 )
 
 func runMCPTool(toolName string, args map[string]any) {
-	srv := mcp.NewServer(os.Stdin, os.Stdout)
-	out, err := srv.CallTool(context.Background(), toolName, args)
+	out, err := callTool(toolName, args)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "kern %s: %v\n", toolName, err)
+		fmt.Fprintf(os.Stderr, "kern %s: %v — see kern doctor for diagnostics\n", toolName, err)
 		panic(exitError{code: 1})
 	}
 	fmt.Println(out)
+}
+
+// callTool invokes an MCP tool against a fresh in-process server and returns
+// its raw output.
+func callTool(toolName string, args map[string]any) (string, error) {
+	srv := mcp.NewServer(os.Stdin, os.Stdout)
+	return srv.CallTool(context.Background(), toolName, args)
 }
 
 func readStdinIfPipe() string {
@@ -35,7 +43,49 @@ func runHealth(rest []string) {
 	fs := flag.NewFlagSet("health", flag.ContinueOnError)
 	root := fs.String("root", ".", "project root")
 	_ = fs.Parse(rest)
-	runMCPTool("kern_health", map[string]any{"root": *root})
+	out, err := callTool("kern_health", map[string]any{"root": *root})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "kern health: %v — see kern doctor for diagnostics\n", err)
+		panic(exitError{code: 1})
+	}
+	// The session view answers "what does this process know" (empty on a
+	// fresh CLI invocation). Supplement it with the persisted-index view so
+	// `kern health` answers the question users actually ask: "how fresh is
+	// my on-disk index?".
+	var snap map[string]any
+	if err := json.Unmarshal([]byte(out), &snap); err == nil {
+		snap["disk_index"] = diskIndexView(*root)
+		data, err := json.MarshalIndent(snap, "", "  ")
+		if err == nil {
+			fmt.Println(string(data))
+			return
+		}
+	}
+	fmt.Println(out)
+}
+
+// diskIndexView summarizes the persisted index.json for a root, or nil when
+// none exists yet (a normal first-run state). Unreadable or
+// schema-mismatched indexes are reported as "rebuild required" — never as
+// silent zeroes.
+func diskIndexView(root string) map[string]any {
+	if _, err := os.Stat(index.StorePath(root)); err != nil {
+		return nil // nothing persisted yet
+	}
+	ix, err := index.Load(root)
+	if err != nil {
+		return map[string]any{"root": root, "version": 0, "rebuild_required": err.Error()}
+	}
+	if ix == nil {
+		return nil
+	}
+	return map[string]any{
+		"root":       root,
+		"version":    ix.Version,
+		"symbols":    len(ix.Symbols),
+		"files":      len(ix.FileHashes),
+		"updated_at": ix.UpdatedAt.Format(time.RFC3339),
+	}
 }
 
 func runCompose(rest []string) {

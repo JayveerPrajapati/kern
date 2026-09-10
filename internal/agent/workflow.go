@@ -356,7 +356,10 @@ func (e *WorkflowEngine) Run(rootTask *Task, stepHandler func(action string, tas
 				if err := rootTask.Transition(domain.TaskWaitingApproval); err != nil {
 					return rootTask, err
 				}
-				req := e.approvals.Request(rootTask.ID, rootTask.CreatedBy, step.Action)
+				req, err := e.approvals.Request(rootTask.ID, rootTask.CreatedBy, step.Action)
+				if err != nil {
+					return rootTask, fmt.Errorf("agent: task %s approval gate could not be persisted: %w", rootTask.ID, err)
+				}
 				if e.store != nil {
 					_ = e.store.AddPending(req)
 				}
