@@ -91,6 +91,7 @@ func TestHelpersPctArgStringTruncate(t *testing.T) {
 func TestLoadOrBuildIndexCacheHit(t *testing.T) {
 	root := mcpProject(t)
 	s := NewServer(strings.NewReader(""), &bytes.Buffer{})
+	defer s.Close()
 	ix1, err := s.loadIndex(context.Background(), root)
 	if err != nil {
 		t.Fatal(err)
