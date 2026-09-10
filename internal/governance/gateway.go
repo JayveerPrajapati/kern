@@ -40,11 +40,11 @@ func (g *ToolGateway) Evaluate(agentID, taskID, resource, action string, boundar
 	// firewall because per-call firewalls are built separately there, and the
 	// budget is the only dimension it enforces. Existing callers that pass a
 	// real firewall are unaffected.
-	var allowed bool
 	var risk domain.Risk
 	var approval *domain.Approval
 	if g.firewall != nil {
 		var fwErr error
+		var allowed bool
 		allowed, risk, approval, fwErr = g.firewall.Check(agentID, resource, action)
 		if fwErr != nil {
 			g.logAudit(taskID, "DENY", fwErr.Error())
@@ -54,8 +54,6 @@ func (g *ToolGateway) Evaluate(agentID, taskID, resource, action string, boundar
 			g.logAudit(taskID, "DENY", "firewall policy denied")
 			return false, risk, nil, fmt.Errorf("tool gateway: firewall policy denied for agent=%s resource=%s action=%s", agentID, resource, action)
 		}
-	} else {
-		allowed = true
 	}
 
 	// 3. Safety budget check.
@@ -136,11 +134,11 @@ func (g *ToolGateway) EvaluateScopedFull(agentID, taskID, resource, action, serv
 	}
 	// Firewall policy gate. A nil firewall makes the gateway budget-only
 	// (skip the policy gate); see Evaluate for the rationale.
-	var allowed bool
 	var risk domain.Risk
 	var approval *domain.Approval
 	if g.firewall != nil {
 		var fwErr error
+		var allowed bool
 		allowed, risk, approval, fwErr = g.firewall.Check(agentID, resource, action)
 		if fwErr != nil || !allowed {
 			reason := "firewall policy denied"
@@ -155,8 +153,6 @@ func (g *ToolGateway) EvaluateScopedFull(agentID, taskID, resource, action, serv
 			g.logAudit(taskID, "DENY", reason)
 			return domain.GatewayResult{Decision: domain.DecisionDenied, Risk: risk, Approval: approval, Deny: deny, Budget: budget}
 		}
-	} else {
-		allowed = true
 	}
 	// Budget gate -> PAUSE.
 	if budget != nil {
