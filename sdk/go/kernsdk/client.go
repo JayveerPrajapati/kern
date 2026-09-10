@@ -276,3 +276,44 @@ func (c *Client) Deploy(ctx context.Context, taskID, version string) (map[string
 	err := c.post(ctx, "/v1/tasks/"+url.PathEscape(taskID)+"/deploy", map[string]string{"version": version}, &out)
 	return out, err
 }
+
+// ApprovalsPending returns the pending approval roster (GET /v1/approvals/pending).
+func (c *Client) ApprovalsPending(ctx context.Context) ([]any, error) {
+	var out []any
+	err := c.get(ctx, "/v1/approvals/pending", &out)
+	return out, err
+}
+
+// Incidents returns a flattened summary of persisted incidents (GET /v1/incidents).
+func (c *Client) Incidents(ctx context.Context) (map[string]any, error) {
+	var out map[string]any
+	err := c.get(ctx, "/v1/incidents", &out)
+	return out, err
+}
+
+// Incident returns a single incident by ID (GET /v1/incidents/{id}).
+func (c *Client) Incident(ctx context.Context, id string) (map[string]any, error) {
+	var out map[string]any
+	err := c.get(ctx, "/v1/incidents/"+url.PathEscape(id), &out)
+	return out, err
+}
+
+// EventsStream opens the live event stream (GET /v1/events/stream) and
+// returns the raw SSE response body. The caller reads and parses the
+// "data:" lines itself and must Close the body when done.
+func (c *Client) EventsStream(ctx context.Context) (io.ReadCloser, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.BaseURL+"/v1/events/stream", nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Accept", "text/event-stream")
+	resp, err := c.HTTP.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		resp.Body.Close()
+		return nil, &Err{Status: resp.StatusCode, Body: "events stream"}
+	}
+	return resp.Body, nil
+}

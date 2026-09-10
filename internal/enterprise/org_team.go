@@ -24,6 +24,9 @@ type OrgTeam struct {
 // duplicate ID is rejected, and any reference to an unknown project name or
 // unknown agent ID errors rather than being silently accepted.
 func (s *Server) CreateTeam(team OrgTeam) error {
+	if !s.orgFeatures().TeamRegistry {
+		return fmt.Errorf("enterprise: team registry disabled by profile %q", s.profile)
+	}
 	if team.ID == "" {
 		return fmt.Errorf("enterprise: team ID must not be empty")
 	}
@@ -59,8 +62,12 @@ func (s *Server) Team(id string) (*OrgTeam, bool) {
 	return t, ok
 }
 
-// Teams returns all teams, sorted by ID.
+// Teams returns all teams, sorted by ID. Returns nil when the org-level
+// profile disables TeamRegistry.
 func (s *Server) Teams() []OrgTeam {
+	if !s.orgFeatures().TeamRegistry {
+		return nil
+	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	ids := make([]string, 0, len(s.teamRegistry))

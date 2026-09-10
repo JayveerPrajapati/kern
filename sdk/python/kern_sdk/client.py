@@ -59,6 +59,10 @@ class Client:
 
     # --- API methods ---
 
+    def health(self) -> dict:
+        """Check the server health (GET /api/health)."""
+        return self._get("/api/health")
+
     def analyze(self, change: str) -> dict:
         return self._post("/v1/analyze", {"change": change})
 

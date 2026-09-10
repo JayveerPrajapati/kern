@@ -80,6 +80,15 @@ test("memoryAdd uses defaults", async () => {
   });
 });
 
+test("health GETs /api/health", async () => {
+  const calls = mockFetch({ status: "ok" });
+  const c = new Client("http://test:8090");
+  const out = await c.health();
+  assert.deepEqual(out, { status: "ok" });
+  assert.equal(calls[0].url, "http://test:8090/api/health");
+  assert.equal(calls[0].init.method, "GET");
+});
+
 test("task GETs encoded id from /v1/tasks/{id}", async () => {
   const calls = mockFetch({});
   const c = new Client("http://test:8090");
@@ -144,4 +153,50 @@ test("connection failure raises KernError", async () => {
     () => c.memoryList(),
     (e) => e instanceof KernError && /connection error/.test(e.message)
   );
+});
+test("approvalsPending gets /v1/approvals/pending", async () => {
+  const calls = mockFetch({ items: [] });
+  const c = new Client("http://test:8090");
+  const out = await c.approvalsPending();
+  assert.deepEqual(out, { items: [] });
+  assert.equal(calls[0].url, "http://test:8090/v1/approvals/pending");
+  assert.equal(calls[0].init.method, "GET");
+});
+
+test("incidents gets /v1/incidents", async () => {
+  const calls = mockFetch({ items: [] });
+  const c = new Client("http://test:8090");
+  const out = await c.incidents();
+  assert.deepEqual(out, { items: [] });
+  assert.equal(calls[0].url, "http://test:8090/v1/incidents");
+});
+
+test("incident gets /v1/incidents/{id} and requires an id", async () => {
+  const calls = mockFetch({ ID: "inc-1" });
+  const c = new Client("http://test:8090");
+  const out = await c.incident("inc-1");
+  assert.equal(out.ID, "inc-1");
+  assert.equal(calls[0].url, "http://test:8090/v1/incidents/inc-1");
+  assert.throws(() => c.incident(""), (e) => e instanceof KernError && /incidentId/.test(e.message));
+});
+
+test("eventsStream yields parsed SSE data payloads", async () => {
+  const frames = 'event: ping\ndata: {"kind":"x","n":1}\n\ndata: plain-text\n\n';
+  const stream = new ReadableStream({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode(frames));
+      controller.close();
+    },
+  });
+  global.fetch = async () => ({
+    ok: true,
+    status: 200,
+    statusText: "OK",
+    body: stream,
+    text: async () => "",
+  });
+  const c = new Client("http://test:8090");
+  const out = [];
+  for await (const p of c.eventsStream()) out.push(p);
+  assert.deepEqual(out, [{ kind: "x", n: 1 }, "plain-text"]);
 });

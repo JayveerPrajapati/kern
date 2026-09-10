@@ -6,8 +6,11 @@
 package enterprise
 
 import (
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
+	"html"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -28,8 +31,9 @@ import (
 
 // Project is a registered project in enterprise mode.
 type Project struct {
-	Name string // human-friendly project name (unique within the org)
-	Root string // absolute path to the project root
+	Name    string  // human-friendly project name (unique within the org)
+	Root    string  // absolute path to the project root
+	Profile Profile // effective enterprise profile (set at registration)
 }
 
 // Server is the multi-project enterprise server. It wraps multiple
@@ -45,6 +49,8 @@ type Server struct {
 	orgMemory    *memory.MemoryStore                  // shared org-level memory
 	orgAgents    map[string]*governance.AgentIdentity // shared org-level agent registry
 	teamRegistry map[string]*OrgTeam                  // org-level team registry
+	profile      Profile                              // org-level default profile
+	profileCfg   ProfileConfig                        // org-level profile configuration
 }
 
 type projectState struct {
@@ -53,21 +59,31 @@ type projectState struct {
 	appErr   error    // build error (cached)
 	lastUsed time.Time
 	memory   *memory.MemoryStore // per-project memory store (scoped to project root)
+	building bool                // B4: one off-lock builder per project
+	cond     *sync.Cond          // B4: single-flight waiters (L: s.mu)
 }
 
 // New creates an enterprise server with no projects. Use Register to add
 // projects and WithOrgAudit/WithOrgBus/WithPolicies to configure org-level
 // shared state.
 func New() *Server {
-	return &Server{
+	s := &Server{
 		projects:     map[string]*projectState{},
 		orgAudit:     governance.NewAuditLog(),
 		orgBus:       eventbus.New(),
 		policies:     governance.DefaultPolicies(),
-		orgMemory:    memory.NewMemoryStore(""), // in-memory org-level store (no root)
+		orgMemory:    memory.WithEnvGovernance(memory.NewMemoryStore(""), ""), // org-level store (no root; governed when KERN_MEMORY_GOVERNANCE is set)
 		orgAgents:    map[string]*governance.AgentIdentity{},
 		teamRegistry: map[string]*OrgTeam{},
+		profile:      DefaultProfile,
+		profileCfg:   ProfileConfig{Profile: DefaultProfile},
 	}
+	// Opt-in deployment-time profile selection via KERN_ENTERPRISE_PROFILE.
+	if p, ok := ParseProfile(os.Getenv(enterpriseProfileEnv)); ok {
+		s.profile = p
+		s.profileCfg.Profile = p
+	}
+	return s
 }
 
 // WithOrgAudit sets a custom org-level audit log (e.g. one backed by
@@ -97,10 +113,24 @@ func (s *Server) WithStore(store storage.Store) *Server {
 	return s
 }
 
-// Register adds a project to the enterprise server. The project's web.App
-// is built lazily on first request. Returns an error if the name is
-// already registered or the root is invalid.
+// Register adds a project to the enterprise server using the org-level
+// default profile. The project's web.App is built lazily on first request.
+// Returns an error if the name is already registered, the root is invalid, or
+// the profile's limits reject the registration.
 func (s *Server) Register(name, root string) error {
+	return s.RegisterWithProfile(name, root, s.profile)
+}
+
+// RegisterWithProfile adds a project to the enterprise server under an
+// explicit profile, overriding the org-level default for that project. The
+// project's web.App is built lazily on first request. Returns an error if the
+// name is already registered, the root is invalid, the profile is unknown, or
+// the profile's limits reject the registration (e.g. ProfileBasic allows a
+// single project).
+func (s *Server) RegisterWithProfile(name, root string, p Profile) error {
+	if !p.Valid() {
+		return fmt.Errorf("enterprise: unknown profile %q", p)
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if _, exists := s.projects[name]; exists {
@@ -110,8 +140,25 @@ func (s *Server) Register(name, root string) error {
 	if err != nil {
 		return fmt.Errorf("enterprise: invalid root %q: %w", root, err)
 	}
+	// Registration limits come from the stricter of the org-level effective
+	// configuration (default profile + overrides) and the explicit profile:
+	// the org contract bounds every project, and a per-project profile can
+	// only tighten it.
+	orgFeats, pFeats := s.profileCfg.Effective(), p.Features()
+	multiProject := orgFeats.MultiProject && pFeats.MultiProject
+	maxProjects := orgFeats.MaxProjects
+	if pFeats.MaxProjects > 0 && (maxProjects == 0 || pFeats.MaxProjects < maxProjects) {
+		maxProjects = pFeats.MaxProjects
+	}
+	if !multiProject && len(s.projects) > 0 {
+		return fmt.Errorf("enterprise: profile %q supports at most one project", p)
+	}
+	if maxProjects > 0 && len(s.projects) >= maxProjects {
+		return fmt.Errorf("enterprise: profile %q allows at most %d projects", p, maxProjects)
+	}
 	s.projects[name] = &projectState{
-		project: Project{Name: name, Root: absRoot},
+		project: Project{Name: name, Root: absRoot, Profile: p},
+		cond:    sync.NewCond(&s.mu),
 	}
 	return nil
 }
@@ -150,28 +197,65 @@ func (s *Server) Projects() []Project {
 // can be rebuilt on next access. This bounds memory growth for orgs with many
 // registered projects.
 func (s *Server) appFor(name string) (*web.App, error) {
+	// B4: the web.New build (30-90s on large repos) runs OFF the org-wide
+	// mutex so one project's cold build never blocks every other tenant.
+	// Single-flight per project: concurrent callers for the same project
+	// wait on its condition variable for the in-flight builder's result.
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	ps, exists := s.projects[name]
 	if !exists {
+		s.mu.Unlock()
 		return nil, fmt.Errorf("enterprise: project %q not registered", name)
 	}
 	// Touch recency on every access so LRU eviction reflects true usage.
 	ps.lastUsed = time.Now()
 	if ps.app != nil || ps.appErr != nil {
-		return ps.app, ps.appErr
+		app, err := ps.app, ps.appErr
+		s.mu.Unlock()
+		return app, err
+	}
+	if ps.building {
+		for ps.building {
+			ps.cond.Wait()
+		}
+		app, err := ps.app, ps.appErr
+		s.mu.Unlock()
+		return app, err
 	}
 	// Cache miss: if at the app cap, evict the LRU cached app to make room.
 	if s.cachedCount() >= s.maxProjects() {
 		s.evictLRU()
 	}
-	app, err := web.New(ps.project.Root)
+	ps.building = true
+	root := ps.project.Root
+	s.mu.Unlock()
+
+	app, err := web.New(root)
+
+	s.mu.Lock()
+	ps.building = false
 	ps.app = app
 	ps.appErr = err
 	if err == nil {
-		ps.memory = memory.NewMemoryStore(ps.project.Root)
+		ps.memory = memory.WithEnvGovernance(memory.NewMemoryStore(ps.project.Root), ps.project.Root)
 	}
+	ps.cond.Broadcast()
+	s.mu.Unlock()
 	return app, err
+}
+
+// appForCached returns the cached web.App for name without triggering a
+// build (B4): aggregate endpoints must never serialize N full rebuilds inside
+// a single request. The bool reports whether an app is cached.
+func (s *Server) appForCached(name string) (*web.App, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	ps, exists := s.projects[name]
+	if !exists || ps.app == nil {
+		return nil, false
+	}
+	ps.lastUsed = time.Now()
+	return ps.app, true
 }
 
 // defaultMaxProjects is the default cap on cached web.App instances. It bounds
@@ -180,19 +264,23 @@ func (s *Server) appFor(name string) (*web.App, error) {
 // access). Configurable via KERN_ENTERPRISE_MAX_PROJECTS.
 const defaultMaxProjects = 16
 
-// maxProjects returns the configured cap on cached web.App instances, read from
-// KERN_ENTERPRISE_MAX_PROJECTS (default 16). Invalid or non-positive values fall
-// back to the default.
+// maxProjects returns the configured cap on cached web.App instances. The
+// KERN_ENTERPRISE_MAX_PROJECTS env var wins when set; otherwise the org-level
+// profile's MaxCachedApps applies (ProfileAdvanced raises it to 64); the
+// default is 16. Invalid or non-positive values fall back to the default.
 func (s *Server) maxProjects() int {
 	v := os.Getenv("KERN_ENTERPRISE_MAX_PROJECTS")
-	if v == "" {
+	if v != "" {
+		n, err := strconv.Atoi(v)
+		if err == nil && n >= 1 {
+			return n
+		}
 		return defaultMaxProjects
 	}
-	n, err := strconv.Atoi(v)
-	if err != nil || n < 1 {
-		return defaultMaxProjects
+	if n := s.orgFeatures().MaxCachedApps; n > 0 {
+		return n
 	}
-	return n
+	return defaultMaxProjects
 }
 
 // cachedCount returns how many projects currently hold a built web.App.
@@ -245,28 +333,136 @@ func (s *Server) projectMemory(name string) *memory.MemoryStore {
 	if ps.memory != nil {
 		return ps.memory
 	}
-	ps.memory = memory.NewMemoryStore(ps.project.Root)
+	ps.memory = memory.WithEnvGovernance(memory.NewMemoryStore(ps.project.Root), ps.project.Root)
 	return ps.memory
 }
 
-// OrgAudit returns the shared org-level audit log.
-func (s *Server) OrgAudit() *governance.AuditLog { return s.orgAudit }
+// OrgAudit returns the shared org-level audit log, or nil when the org-level
+// profile disables OrgAudit (e.g. ProfileBasic).
+func (s *Server) OrgAudit() *governance.AuditLog {
+	if !s.orgFeatures().OrgAudit {
+		return nil
+	}
+	return s.orgAudit
+}
 
-// OrgBus returns the shared org-level event bus.
-func (s *Server) OrgBus() *eventbus.Bus { return s.orgBus }
+// OrgBus returns the shared org-level event bus, or nil when the org-level
+// profile disables OrgBus (e.g. ProfileBasic).
+func (s *Server) OrgBus() *eventbus.Bus {
+	if !s.orgFeatures().OrgBus {
+		return nil
+	}
+	return s.orgBus
+}
 
 // Store returns the shared org-level storage backend (nil if unset).
 func (s *Server) Store() storage.Store { return s.store }
 
+// Profile returns the org-level default profile. Projects registered through
+// Register inherit it; RegisterWithProfile overrides it per project.
+func (s *Server) Profile() Profile {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.profile
+}
+
+// ProfileConfig returns the org-level profile configuration, including any
+// resource overrides set via WithProfileConfig.
+func (s *Server) ProfileConfig() ProfileConfig {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.profileCfg
+}
+
+// WithProfile sets the org-level default profile applied to projects
+// registered through Register. An unknown profile is ignored. Returns the
+// server for chaining.
+func (s *Server) WithProfile(p Profile) *Server {
+	if !p.Valid() {
+		return s
+	}
+	s.mu.Lock()
+	s.profile = p
+	s.profileCfg.Profile = p
+	s.mu.Unlock()
+	return s
+}
+
+// WithProfileConfig sets the org-level profile configuration: a profile plus
+// optional resource overrides (MaxProjects, MaxCachedApps, AuditRetention).
+// An unknown profile is ignored; an empty Profile keeps the current one.
+// Returns the server for chaining.
+func (s *Server) WithProfileConfig(c ProfileConfig) *Server {
+	if c.Profile != "" && !c.Profile.Valid() {
+		return s
+	}
+	s.mu.Lock()
+	if c.Profile == "" {
+		c.Profile = s.profile
+	}
+	s.profile = c.Profile
+	s.profileCfg = c
+	s.mu.Unlock()
+	return s
+}
+
+// Features returns the org-level feature set for the server's default
+// profile, with configuration overrides applied.
+func (s *Server) Features() FeatureSet {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.profileCfg.Effective()
+}
+
+// orgFeatures returns the org-level feature set without acquiring the lock.
+// Profiles are configured at setup time (before serving), so a lock-free read
+// is safe; use this from code paths that already hold s.mu.
+func (s *Server) orgFeatures() FeatureSet { return s.profileCfg.Effective() }
+
+// ProjectProfile returns the effective profile for a project: its explicit
+// profile when registered via RegisterWithProfile, otherwise the org-level
+// default. The bool reports whether the project is registered.
+func (s *Server) ProjectProfile(name string) (Profile, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	ps, exists := s.projects[name]
+	if !exists {
+		return "", false
+	}
+	if ps.project.Profile != "" {
+		return ps.project.Profile, true
+	}
+	return s.profile, true
+}
+
+// ProjectFeatures returns the effective feature set for a project's profile.
+// The bool reports whether the project is registered.
+func (s *Server) ProjectFeatures(name string) (FeatureSet, bool) {
+	p, ok := s.ProjectProfile(name)
+	if !ok {
+		return FeatureSet{}, false
+	}
+	return p.Features(), true
+}
+
 // OrgMemory returns the shared org-level memory store. Memories
 // written here are visible across all projects — e.g. a lesson learned in the
 // payments service is recallable when working on the orders service.
-func (s *Server) OrgMemory() *memory.MemoryStore { return s.orgMemory }
+func (s *Server) OrgMemory() *memory.MemoryStore {
+	if !s.orgFeatures().OrgMemory {
+		return nil
+	}
+	return s.orgMemory
+}
 
 // RegisterAgent registers an agent identity at the org level. The
 // agent's permissions apply across all projects. Returns an error if an agent
-// with the same ID is already registered.
+// with the same ID is already registered, or if the org-level profile
+// disables AgentRegistry (e.g. ProfileBasic).
 func (s *Server) RegisterAgent(a *governance.AgentIdentity) error {
+	if !s.orgFeatures().AgentRegistry {
+		return fmt.Errorf("enterprise: agent registry disabled by profile %q", s.profile)
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if _, exists := s.orgAgents[a.ID]; exists {
@@ -277,7 +473,11 @@ func (s *Server) RegisterAgent(a *governance.AgentIdentity) error {
 }
 
 // Agents returns all registered org-level agent identities, sorted by ID.
+// Returns nil when the org-level profile disables AgentRegistry.
 func (s *Server) Agents() []*governance.AgentIdentity {
+	if !s.orgFeatures().AgentRegistry {
+		return nil
+	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	ids := make([]string, 0, len(s.orgAgents))
@@ -320,8 +520,12 @@ func (s *Server) OrgTasks() map[string][]map[string]any {
 
 // OrgSearch performs cross-project symbol search. It delegates to
 // intel.SearchRepos, which searches across all repos registered in the kern
-// multi-repo registry. Returns nil when no repos are registered.
+// multi-repo registry. Returns nil when no repos are registered or when the
+// org-level profile disables CrossProjectSearch.
 func (s *Server) OrgSearch(query string, limit int) []intel.RepoHit {
+	if !s.orgFeatures().CrossProjectSearch {
+		return nil
+	}
 	if limit <= 0 {
 		limit = 20
 	}
@@ -349,7 +553,15 @@ func (s *Server) requireAuth(w http.ResponseWriter, r *http.Request) bool {
 	}
 	const prefix = "Bearer "
 	h := r.Header.Get("Authorization")
-	if !strings.HasPrefix(h, prefix) || strings.TrimSpace(strings.TrimPrefix(h, prefix)) != token {
+	if !strings.HasPrefix(h, prefix) {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return false
+	}
+	provided := strings.TrimSpace(strings.TrimPrefix(h, prefix))
+	// Constant-time compare so token timing does not leak length/prefix
+	// information. ConstantTimeCompare returns 0 on length mismatch, which
+	// is fine here: the fail-closed 401 is the same either way.
+	if subtle.ConstantTimeCompare([]byte(provided), []byte(token)) != 1 {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return false
 	}
@@ -391,19 +603,98 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	app.ServeHTTP(w, r)
 }
 
-// serveOrgDashboard serves a simple HTML listing of all projects.
+// serveOrgDashboard serves the org admin page: a server-rendered overview of
+// the org's registered projects, agents, and teams plus a footer nav to the
+// org JSON endpoints. Only the cheap accessors (Projects, Agents, Teams) are
+// called — no per-project appFor builds and no reindexing, so the page stays
+// fast regardless of how many projects are registered.
 func (s *Server) serveOrgDashboard(w http.ResponseWriter, r *http.Request) {
-	projects := s.Projects()
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	fmt.Fprintf(w, "<!DOCTYPE html><html><head><title>Kern Enterprise</title></head><body>")
-	fmt.Fprintf(w, "<h1>Kern Enterprise</h1>")
-	fmt.Fprintf(w, "<h2>Projects (%d)</h2><ul>", len(projects))
-	for _, p := range projects {
-		fmt.Fprintf(w, `<li><a href="/%s/">%s</a></li>`, p.Name, p.Name)
+	orgAdminHTML(w, s.Projects(), s.Agents(), s.Teams())
+}
+
+// orgAdminCSS is the inline stylesheet for the org admin page. It follows the
+// web console's design family (internal/web/dashboard.html): dark background,
+// panel sections, muted table headers, monospace code accents. Fully
+// self-contained — no external assets, no JavaScript.
+const orgAdminCSS = `:root { --bg:#0f1115; --panel:#171a21; --panel2:#1c2029; --fg:#e6e8ee; --muted:#9aa3b2; --accent:#4f8cff; --border:#262b36; }
+* { box-sizing:border-box; }
+body { margin:0; background:var(--bg); color:var(--fg); font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif; }
+header { padding:16px 28px; border-bottom:1px solid var(--border); background:var(--panel); }
+header h1 { margin:0; font-size:20px; }
+header p { margin:4px 0 0; color:var(--muted); font-size:12px; }
+main { padding:20px 28px; display:grid; grid-template-columns:repeat(auto-fit,minmax(420px,1fr)); gap:16px; }
+section.panel { background:var(--panel); border:1px solid var(--border); border-radius:8px; padding:16px; }
+section.panel.wide { grid-column:1/-1; }
+section.panel h2 { margin:0 0 12px; font-size:15px; text-transform:uppercase; letter-spacing:.04em; color:var(--muted); }
+table { width:100%; border-collapse:collapse; font-size:12px; }
+th,td { text-align:left; padding:6px 8px; border-bottom:1px solid var(--border); vertical-align:top; }
+th { color:var(--muted); font-weight:600; }
+a { color:var(--accent); text-decoration:none; }
+a:hover { text-decoration:underline; }
+code { font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; font-size:11px; color:var(--muted); }
+.muted { color:var(--muted); }
+footer { padding:14px 28px; border-top:1px solid var(--border); background:var(--panel); }
+footer nav { display:flex; gap:4px; flex-wrap:wrap; align-items:center; }
+footer a { color:var(--muted); text-decoration:none; font-size:12px; padding:6px 12px; border-radius:6px; }
+footer a:hover { color:var(--fg); background:var(--panel2); }
+footer .hint { color:var(--muted); font-size:11px; margin-left:8px; }`
+
+// orgAdminHTML writes the org admin page to w: a header with org-wide counts,
+// then Projects, Agents, and Teams tables, then a footer nav linking the org
+// JSON endpoints. Names, roots, and IDs come from user registration input,
+// so every interpolation is HTML-escaped.
+func orgAdminHTML(w io.Writer, projects []Project, agents []*governance.AgentIdentity, teams []OrgTeam) {
+	var b strings.Builder
+	b.WriteString(`<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Kern Enterprise</title><style>`)
+	b.WriteString(orgAdminCSS)
+	b.WriteString(`</style></head><body>`)
+	fmt.Fprintf(&b, `<header><div class="brand"><h1>Kern Enterprise</h1><p>Org admin &mdash; %d project(s), %d agent(s), %d team(s)</p></div></header>`, len(projects), len(agents), len(teams))
+	b.WriteString(`<main>`)
+
+	// Projects: full-width table (roots are long paths) with per-project
+	// console links.
+	fmt.Fprintf(&b, `<section class="panel wide"><h2>Projects (%d)</h2><table><tr><th>Name</th><th>Root</th></tr>`, len(projects))
+	if len(projects) == 0 {
+		b.WriteString(`<tr><td colspan="2" class="muted">no projects registered</td></tr>`)
 	}
-	fmt.Fprintf(w, "</ul>")
-	fmt.Fprintf(w, `<p><a href="/org/audit">Org Audit</a> | <a href="/org/policies">Org Policies</a> | <a href="/org/memory">Org Memory</a> | <a href="/org/tasks">Org Tasks</a> | <a href="/org/search?q=New">Org Search</a> | <a href="/org/agents">Org Agents</a> | <a href="/org/teams">Org Teams</a></p>`)
-	fmt.Fprintf(w, "</body></html>")
+	for _, p := range projects {
+		fmt.Fprintf(&b, `<tr><td><a href="/%s/">%s</a></td><td><code>%s</code></td></tr>`,
+			html.EscapeString(p.Name), html.EscapeString(p.Name), html.EscapeString(p.Root))
+	}
+	b.WriteString(`</table></section>`)
+
+	// Agents: org-level agent registry, sorted by ID (Agents() sorts).
+	fmt.Fprintf(&b, `<section class="panel"><h2>Agents (%d)</h2><table><tr><th>ID</th><th>Name</th><th>Type</th></tr>`, len(agents))
+	if len(agents) == 0 {
+		b.WriteString(`<tr><td colspan="3" class="muted">no agents registered</td></tr>`)
+	}
+	for _, a := range agents {
+		fmt.Fprintf(&b, `<tr><td><code>%s</code></td><td>%s</td><td>%s</td></tr>`,
+			html.EscapeString(a.ID), html.EscapeString(a.Name), html.EscapeString(a.Type))
+	}
+	b.WriteString(`</table></section>`)
+
+	// Teams: members and projects comma-joined inline.
+	fmt.Fprintf(&b, `<section class="panel"><h2>Teams (%d)</h2><table><tr><th>ID</th><th>Name</th><th>Members</th><th>Projects</th></tr>`, len(teams))
+	if len(teams) == 0 {
+		b.WriteString(`<tr><td colspan="4" class="muted">no teams registered</td></tr>`)
+	}
+	for _, t := range teams {
+		fmt.Fprintf(&b, `<tr><td><code>%s</code></td><td>%s</td><td>%s</td><td>%s</td></tr>`,
+			html.EscapeString(t.ID), html.EscapeString(t.Name),
+			html.EscapeString(strings.Join(t.Members, ", ")),
+			html.EscapeString(strings.Join(t.Projects, ", ")))
+	}
+	b.WriteString(`</table></section>`)
+
+	// Footer nav: links to the org JSON endpoints.
+	b.WriteString(`</main><footer><nav>`)
+	b.WriteString(`<a href="/org/audit">Org Audit</a><a href="/org/policies">Org Policies</a><a href="/org/memory">Org Memory</a><a href="/org/tasks">Org Tasks</a><a href="/org/search?q=New">Org Search</a><a href="/org/agents">Org Agents</a><a href="/org/teams">Org Teams</a>`)
+	b.WriteString(`<span class="hint">JSON endpoints</span>`)
+	b.WriteString(`</nav></footer></body></html>`)
+
+	w.Write([]byte(b.String()))
 }
 
 // serveOrgAPI serves org-level API endpoints.
@@ -519,10 +810,23 @@ func (s *Server) serveOrgArchitecture(w http.ResponseWriter, r *http.Request) {
 		Violations []string `json:"violations"`
 		OK         bool     `json:"ok"`
 	}
-	out := make([]projectArch, 0, len(s.projects))
+	s.mu.Lock()
+	names := make([]string, 0, len(s.projects))
 	for _, p := range s.projects {
-		app, err := s.appFor(p.project.Name)
-		if err != nil {
+		names = append(names, p.project.Name)
+	}
+	s.mu.Unlock()
+
+	// B4: the aggregate answers from CACHED apps only — a cold org must not
+	// serialize up to 16 full rebuilds inside one request. Uncached projects
+	// are counted as "pending" and warmed in the background (bounded to two
+	// concurrent builds so a cold start cannot OOM the server).
+	out := make([]projectArch, 0, len(names))
+	pending := 0
+	for _, name := range names {
+		app, ok := s.appForCached(name)
+		if !ok {
+			pending++
 			continue
 		}
 		arch, aerr := app.ArchitectureReport()
@@ -533,12 +837,29 @@ func (s *Server) serveOrgArchitecture(w http.ResponseWriter, r *http.Request) {
 		for _, v := range arch.Violations {
 			viol = append(viol, v.Symbol)
 		}
-		out = append(out, projectArch{Project: p.project.Name, Violations: viol, OK: arch.OK})
+		out = append(out, projectArch{Project: name, Violations: viol, OK: arch.OK})
 	}
+
+	// Async warm: kick off background builds for the uncached projects so the
+	// next request finds them ready. Fire-and-forget; errors are cached on
+	// the project state and surfaced by appFor.
+	sem := make(chan struct{}, 2)
+	for _, name := range names {
+		if _, ok := s.appForCached(name); ok {
+			continue
+		}
+		go func(n string) {
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			_, _ = s.appFor(n)
+		}(name)
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(map[string]any{
 		"architecture": out,
 		"count":        len(out),
+		"pending":      pending,
 	}); err != nil {
 		http.Error(w, "could not encode response", http.StatusInternalServerError)
 	}
@@ -646,6 +967,12 @@ func (s *Server) serveOrgAgents(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "enterprise: agent id is required", http.StatusBadRequest)
 			return
 		}
+		// Org-registered agents must never carry enforcement permissions: the
+		// JSON body may include an arbitrary Permissions slice that is inert
+		// today but would become a firewall grant if orgAgents were ever wired
+		// into Firewall.WithAgents. Strip it before registering; only
+		// id/name/type are accepted from the body.
+		agent.Permissions = nil
 		if err := s.RegisterAgent(&agent); err != nil {
 			http.Error(w, err.Error(), http.StatusConflict)
 			return

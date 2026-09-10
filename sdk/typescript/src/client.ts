@@ -82,6 +82,10 @@ export class Client {
 
   // --- API methods ---
 
+  health(): Promise<any> {
+    return this.get("/api/health");
+  }
+
   analyze(change: string): Promise<AnalyzeResult> {
     return this.post("/v1/analyze", { change });
   }
@@ -196,5 +200,73 @@ export class Client {
       throw new KernError("deploy() requires a taskId");
     }
     return this.post(`/v1/tasks/${encodeURIComponent(taskId)}/deploy`, { version });
+  }
+
+  approvalsPending(): Promise<any> {
+    return this.get("/v1/approvals/pending");
+  }
+
+  incidents(): Promise<any> {
+    return this.get("/v1/incidents");
+  }
+
+  incident(incidentId: string): Promise<any> {
+    if (!incidentId) {
+      throw new KernError("incident() requires an incidentId");
+    }
+    return this.get(`/v1/incidents/${encodeURIComponent(incidentId)}`);
+  }
+
+  /**
+   * Opens the live event stream (GET /v1/events/stream) and yields each
+   * SSE "data:" payload as JSON (or the raw string when it is not valid
+   * JSON). The generator ends when the server closes the stream.
+   */
+  async *eventsStream(): AsyncGenerator<any> {
+    const url = this.base + "/v1/events/stream";
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), this.timeout);
+    let resp: Response;
+    try {
+      resp = await fetch(url, {
+        method: "GET",
+        headers: { Accept: "text/event-stream" },
+        signal: controller.signal,
+      });
+      clearTimeout(timer);
+    } catch (e) {
+      clearTimeout(timer);
+      if (e instanceof Error && e.name === "AbortError") {
+        throw new KernError(`request timeout after ${this.timeout}ms`);
+      }
+      throw new KernError(`connection error: ${e instanceof Error ? e.message : String(e)}`);
+    }
+    if (!resp.ok) {
+      throw new KernError(`${resp.status} ${resp.statusText}`, resp.status);
+    }
+    if (!resp.body) {
+      throw new KernError("events stream: no response body");
+    }
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = "";
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      let idx: number;
+      while ((idx = buf.indexOf("\n")) >= 0) {
+        const line = buf.slice(0, idx).trim();
+        buf = buf.slice(idx + 1);
+        if (!line.startsWith("data:")) continue;
+        const payload = line.slice(5).trim();
+        if (!payload) continue;
+        try {
+          yield JSON.parse(payload);
+        } catch {
+          yield payload;
+        }
+      }
+    }
   }
 }
