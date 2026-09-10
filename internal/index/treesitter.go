@@ -151,7 +151,7 @@ func tsLanguageFor(lang, rel string) (string, bool) {
 }
 
 // tsExtractor uses tree-sitter to extract symbols, calls and inheritance.
-func tsExtract(rel string, src []byte, lang string) ([]Symbol, map[string][]string, map[string][]string, *Pkg, error) {
+func tsExtract(rel string, src []byte, lang string) ([]Symbol, map[string][]CallEdge, map[string][]string, *Pkg, error) {
 	tsLangID, ok := tsLanguageFor(lang, rel)
 	if !ok {
 		return nil, nil, nil, nil, fmt.Errorf("no tree-sitter grammar for %s", lang)
@@ -175,7 +175,7 @@ func tsExtract(rel string, src []byte, lang string) ([]Symbol, map[string][]stri
 		return nil, nil, nil, nil, fmt.Errorf("parse has errors")
 	}
 
-	calls := map[string][]string{}
+	calls := map[string][]CallEdge{}
 
 	// First pass: collect all definitions
 	defs := collectDefinitions(root, src, rel, lang)
@@ -230,11 +230,19 @@ func collectDefinitions(node *sitter.Node, src []byte, file, lang string) []Symb
 					End:  int(end.Row) + 1,
 					Lang: lang,
 				}
+				// Direct declarations score HIGH. CSS id selectors mapped to "const"
+				// are a loose heuristic: LOW. Arrow functions promoted from const/var
+				// are an inferred kind: MEDIUM (set below).
+				sym.Confidence = ConfidenceHigh
+				if symKind == "const" && kind == "id_selector" {
+					sym.Confidence = ConfidenceLow
+				}
 				// JS/TS arrow functions assigned via const/let/var read as
 				// function definitions, matching the regex path.
 				if symKind == "const" || symKind == "var" {
 					if hasDescendantKind(n, "arrow_function") {
 						sym.Kind = "func"
+						sym.Confidence = ConfidenceMedium
 					}
 				}
 				// C++ out-of-class definitions carry a qualified name
@@ -268,7 +276,7 @@ func collectDefinitions(node *sitter.Node, src []byte, file, lang string) []Symb
 }
 
 // collectCalls walks the AST and extracts call edges.
-func collectCalls(node *sitter.Node, src []byte, defs []Symbol, calls map[string][]string) {
+func collectCalls(node *sitter.Node, src []byte, defs []Symbol, calls map[string][]CallEdge) {
 	// Build a set of locally-defined symbol names so calls to them are always
 	// kept even when the regex keyword heuristic would not match.
 	nameSet := make(map[string]bool)
@@ -297,7 +305,15 @@ func collectCalls(node *sitter.Node, src []byte, defs []Symbol, calls map[string
 				if caller := findEnclosingFunction(n, src); caller != "" {
 					if _, ok := nameSet[callee]; ok || !isKeywordCall(callee) {
 						if callee != caller {
-							calls[caller] = append(calls[caller], callee)
+							// Calls to a locally-defined symbol are direct
+							// syntactic edges: HIGH. Unresolved targets (not
+							// in the local definition set) are name-based
+							// guesses that may be external or dynamic: MEDIUM.
+							conf := ConfidenceHigh
+							if _, ok := nameSet[callee]; !ok {
+								conf = ConfidenceMedium
+							}
+							calls[caller] = append(calls[caller], CallEdge{Target: callee, Confidence: conf})
 						}
 					}
 				}

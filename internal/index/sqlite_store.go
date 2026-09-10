@@ -117,9 +117,10 @@ CREATE TABLE IF NOT EXISTS symbols (
 CREATE INDEX IF NOT EXISTS idx_symbols_name ON symbols(name);
 CREATE INDEX IF NOT EXISTS idx_symbols_file ON symbols(file);
 CREATE TABLE IF NOT EXISTS calls (
-	caller TEXT NOT NULL,
-	callee TEXT NOT NULL,
-	kind   TEXT NOT NULL DEFAULT ''
+	caller     TEXT NOT NULL,
+	callee     TEXT NOT NULL,
+	kind       TEXT NOT NULL DEFAULT '',
+	confidence TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_calls_callee ON calls(callee);
 CREATE INDEX IF NOT EXISTS idx_calls_caller ON calls(caller);
@@ -166,6 +167,13 @@ CREATE VIRTUAL TABLE IF NOT EXISTS symbols_fts USING fts5(
 	// written by v7 need the column added (legal with a constant default).
 	if !storeHasColumn(s.db, "calls", "kind") {
 		if _, err := s.db.Exec("ALTER TABLE calls ADD COLUMN kind TEXT NOT NULL DEFAULT ''"); err != nil {
+			return err
+		}
+	}
+	// v13 migration: call edges carry a confidence score. Older stores lack
+	// the column; rows then default to MEDIUM on load (parseConfidence).
+	if !storeHasColumn(s.db, "calls", "confidence") {
+		if _, err := s.db.Exec("ALTER TABLE calls ADD COLUMN confidence TEXT NOT NULL DEFAULT ''"); err != nil {
 			return err
 		}
 	}
@@ -254,14 +262,14 @@ func (s *SQLiteStore) Save(ix *Index) error {
 	if _, err := tx.Exec("DELETE FROM callers"); err != nil {
 		return err
 	}
-	stmtCalls, err := tx.Prepare("INSERT INTO calls(caller,callee,kind) VALUES(?,?,?)")
+	stmtCalls, err := tx.Prepare("INSERT INTO calls(caller,callee,kind,confidence) VALUES(?,?,?,?)")
 	if err != nil {
 		return err
 	}
 	defer stmtCalls.Close()
 	for caller, callees := range ix.Calls {
-		for _, c := range callees {
-			if _, err := stmtCalls.Exec(caller, c, "call"); err != nil {
+		for _, ce := range callees {
+			if _, err := stmtCalls.Exec(caller, ce.Target, "call", string(ce.Confidence)); err != nil {
 				return err
 			}
 		}
@@ -445,18 +453,18 @@ func (s *SQLiteStore) Load() (*Index, error) {
 		return nil, err
 	}
 
-	ix.Calls = map[string][]string{}
-	crows, err := s.db.Query("SELECT caller,callee FROM calls")
+	ix.Calls = map[string][]CallEdge{}
+	crows, err := s.db.Query("SELECT caller,callee,confidence FROM calls")
 	if err != nil {
 		return nil, err
 	}
 	defer crows.Close()
 	for crows.Next() {
-		var caller, callee string
-		if err := crows.Scan(&caller, &callee); err != nil {
+		var caller, callee, confidence string
+		if err := crows.Scan(&caller, &callee, &confidence); err != nil {
 			return nil, err
 		}
-		ix.Calls[caller] = append(ix.Calls[caller], callee)
+		ix.Calls[caller] = append(ix.Calls[caller], CallEdge{Target: callee, Confidence: parseConfidence(confidence)})
 	}
 	if err := crows.Err(); err != nil {
 		return nil, err
@@ -536,7 +544,7 @@ func (s *SQLiteStore) Load() (*Index, error) {
 	if err := pr.Err(); err != nil {
 		return nil, err
 	}
-	ix.ImportsByFile = map[string][]string{}
+	ix.ImportsByFile = map[string][]ImportEdge{}
 	fir, err := s.db.Query("SELECT file,imports FROM file_imports")
 	if err != nil {
 		return nil, err
@@ -546,7 +554,7 @@ func (s *SQLiteStore) Load() (*Index, error) {
 		if err := fir.Scan(&file, &imports); err != nil {
 			return nil, err
 		}
-		var imps []string
+		var imps []ImportEdge
 		if err := json.Unmarshal([]byte(imports), &imps); err != nil {
 			return nil, fmt.Errorf("decode imports for %s: %w", file, err)
 		}

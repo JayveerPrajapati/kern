@@ -113,13 +113,10 @@ func runLoopCLI(root, levelStr, intent string) (string, error) {
 	}
 	p, err := app.New(root)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("could not load project: %w — run kern index first", err)
 	}
 	ts := app.NewTaskService(p, nil).WithPRProvider(app.AutoPRProvider())
 	_, res, err := ts.RunLoop(intent, level)
-	if err != nil {
-		return "", err
-	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "intent: %s\n", res.Intent)
 	fmt.Fprintf(&b, "level: %s\n", res.Level)
@@ -137,6 +134,9 @@ func runLoopCLI(root, levelStr, intent string) (string, error) {
 	}
 	if res.Learned != nil {
 		fmt.Fprintf(&b, "learned: %s\n", res.Learned.ID)
+	}
+	if err != nil {
+		return b.String(), loopFailureMessage(res, err)
 	}
 	return b.String(), nil
 }
@@ -165,7 +165,7 @@ func runDo(root, levelStr, intent string) (string, error) {
 	}
 	p, err := app.New(root)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("could not load project: %w — run kern index first", err)
 	}
 	ts := app.NewTaskService(p, nil).WithPRProvider(app.AutoPRProvider())
 	_, res, err := ts.RunDo(intent, level)
@@ -188,9 +188,29 @@ func runDo(root, levelStr, intent string) (string, error) {
 		fmt.Fprintf(&b, "learned: %s\n", res.Learned.ID)
 	}
 	if err != nil {
-		fmt.Fprintf(&b, "error: %v\n", err)
+		return b.String(), loopFailureMessage(res, err)
 	}
 	return b.String(), nil
+}
+
+// loopFailureMessage converts a failed loop run into a one-line cause that
+// names the failing stage. The loop records stage errors in the timeline (and
+// returns the error alongside the result); naming the stage tells the user
+// which autonomy gate to lower instead of dumping a bare error.
+func loopFailureMessage(res *loop.Result, err error) error {
+	if res == nil {
+		return err
+	}
+	stage := ""
+	for _, st := range res.Stages {
+		if strings.HasPrefix(st.Status, "error") {
+			stage = st.Stage
+		}
+	}
+	if stage == "" {
+		return err
+	}
+	return fmt.Errorf("loop stage %q failed: %v — rerun with --level L0 to diagnose", stage, err)
 }
 
 // runWorkflowCLI runs an intent through the agent team ( exit gate) and
@@ -355,9 +375,24 @@ func splitRange(r string) (string, string) {
 func printJSON(v any) {
 	b, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
-		fatal("%v", err)
+		fatal("printJSON: %v", err)
 	}
 	fmt.Println(string(b))
+}
+
+// printSavingsFooter writes the canonical savings banner as the last
+// human-readable line of an optimization command: the percentage saved, the
+// number of tokens removed, and the estimated USD saved at the given
+// cost-per-token rate (callers pass context.CostPerToken(), which honors the
+// KERN_COST_PER_TOKEN override and defaults to 1e-5 $/token). It prints
+// nothing when no tokens were actually saved.
+func printSavingsFooter(w io.Writer, beforeTokens, afterTokens int, costPerToken float64) {
+	saved := beforeTokens - afterTokens
+	if saved <= 0 {
+		return
+	}
+	fmt.Fprintf(w, "[%.0f%% ──> %d tokens ──> $%.4f]\n",
+		strutil.Pct(beforeTokens, afterTokens), saved, float64(saved)*costPerToken)
 }
 
 func projectLangs() string {

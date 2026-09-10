@@ -2,8 +2,13 @@ package mcp
 
 import (
 	"context"
-	"github.com/JayveerPrajapati/kern/internal/intel"
+	"fmt"
 	"strings"
+
+	"github.com/JayveerPrajapati/kern/internal/intel"
+	"github.com/JayveerPrajapati/kern/internal/lenses"
+	"github.com/JayveerPrajapati/kern/internal/profiles"
+	"github.com/JayveerPrajapati/kern/internal/runtime"
 )
 
 func (s *Server) handleChanges(ctx context.Context, args map[string]any) (string, error) {
@@ -31,7 +36,38 @@ func (s *Server) handleReview(ctx context.Context, args map[string]any) (string,
 			}
 			maxTokens = n
 		}
-		return intel.ReviewRanged(ix, changes, maxTokens), nil
+		// The runtime-aware review gate: when a runtime source is wired for
+		// the project, each changed file gets its service profile overlay
+		// (rps/error rate, FLAG above the threshold). No source -> identical
+		// output to before.
+		overlays := []func(file string) string(nil)
+		if src := runtime.LoadSource(ix.Root); src != nil {
+			overlays = append(overlays, runtime.Overlay(src))
+		}
+		var out string
+		// Review lens (P1-002): a named lens prepends its evidence-priority
+		// line so the caller knows which review posture the context is sized
+		// for. No lens arg -> byte-identical output. Combined names
+		// ("security+maintainability", "security,maintainability") resolve to
+		// a merged preset via lenses.Resolve; the header now lives inside
+		// intel.ReviewRangedWithLens.
+		if lensName := argString(args, "lens"); lensName != "" {
+			l, err := lenses.Resolve(lensName)
+			if err != nil {
+				return "", err
+			}
+			out = intel.ReviewRangedWithLens(ix, changes, maxTokens, l.Name, lenses.RenderPriorities(l), overlays...)
+		} else {
+			out = intel.ReviewRanged(ix, changes, maxTokens, overlays...)
+		}
+		if profileName := argString(args, "profile"); profileName != "" {
+			p, ok := profiles.NewRegistryWithUserProfiles(ix.Root).Select(profileName)
+			if !ok {
+				return "", fmt.Errorf("unknown profile %q", profileName)
+			}
+			out = profiles.ApplyProfile(p, out)
+		}
+		return out, nil
 
 	}
 }

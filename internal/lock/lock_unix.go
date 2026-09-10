@@ -4,12 +4,14 @@ package lock
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
-	"syscall"
 	"time"
+
+	"github.com/JayveerPrajapati/kern/internal/flock"
 )
 
 // Acquire takes a non-blocking advisory lock on scope. When the lock is already
@@ -24,12 +26,8 @@ func Acquire(root, scope string) (*Lock, error) {
 		return nil, err
 	}
 	p := pathFor(root, scope)
-	f, err := os.OpenFile(p, os.O_CREATE|os.O_RDWR, 0o644)
+	f, err := flock.TryLock(p)
 	if err != nil {
-		return nil, err
-	}
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
-		f.Close()
 		if hook := ContentionHook; hook != nil {
 			hook(scope, holderPID(p))
 		}
@@ -37,8 +35,14 @@ func Acquire(root, scope string) (*Lock, error) {
 	}
 	h := holder{Scope: scope, PID: os.Getpid(), AcquiredAt: time.Now().UTC()}
 	if data, err := json.Marshal(h); err == nil {
-		_ = f.Truncate(0)
-		_, _ = f.WriteAt(data, 0)
+		if err := f.Truncate(0); err != nil {
+			_ = flock.Release(f) // releases the flock
+			return nil, fmt.Errorf("lock %s: stamp truncate: %w", p, err)
+		}
+		if _, err := f.WriteAt(data, 0); err != nil {
+			_ = flock.Release(f) // releases the flock
+			return nil, fmt.Errorf("lock %s: stamp write: %w", p, err)
+		}
 	}
 	return &Lock{f: f, path: p, Scope: scope, Root: root}, nil
 }
@@ -49,8 +53,7 @@ func (l *Lock) Release() error {
 	if l == nil || l.f == nil {
 		return nil
 	}
-	_ = syscall.Flock(int(l.f.Fd()), syscall.LOCK_UN)
-	err := l.f.Close()
+	err := flock.Release(l.f)
 	l.f = nil
 	return err
 }
@@ -62,15 +65,11 @@ func Held(root, scope string) (bool, int, error) {
 	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 		return false, 0, err
 	}
-	f, err := os.OpenFile(p, os.O_CREATE|os.O_RDWR, 0o644)
+	f, err := flock.TryLock(p)
 	if err != nil {
-		return false, 0, err
-	}
-	defer f.Close()
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		return true, holderPID(p), nil
 	}
-	_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+	_ = flock.Release(f)
 	return false, 0, nil
 }
 
@@ -91,14 +90,11 @@ func List(root string) ([]Status, error) {
 		}
 		p := filepath.Join(dir(root), e.Name())
 		s := Status{Scope: strings.TrimSuffix(e.Name(), ".lock"), Path: p}
-		if f, err := os.OpenFile(p, os.O_RDWR, 0); err == nil {
-			s.PID, s.AcquiredAt = readHolder(p)
-			if syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB) != nil {
-				s.Held = true
-			} else {
-				_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
-			}
-			f.Close()
+		s.PID, s.AcquiredAt = readHolder(p)
+		if f, err := flock.TryLock(p); err == nil {
+			_ = flock.Release(f)
+		} else {
+			s.Held = true
 		}
 		if !s.Held {
 			// The stored PID belongs to the last holder, which may have died.

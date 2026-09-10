@@ -1,6 +1,9 @@
 // Command kern-mcp runs the kern MCP server over stdio (default) or HTTP
 // (--http ADDR). The HTTP transport is Streamable HTTP style: POST JSON-RPC
-// messages to /mcp and read the response body.
+// messages to /mcp and read the response body. TLS is optional: pass
+// --tls-cert/--tls-key (or set KERN_MCP_TLS_CERT/KERN_MCP_TLS_KEY) to serve
+// HTTPS instead of plain HTTP; without them the server falls back to plain
+// HTTP on loopback.
 // SIGINT/SIGTERM trigger a graceful shutdown: in-flight tool calls are
 // cancelled (their child processes killed), held locks are released, and the
 // server stops reading input. This keeps slow tools from hanging the process
@@ -35,13 +38,16 @@ func init() {
 
 func main() {
 	httpAddr := flag.String("http", "", "serve MCP over HTTP on this address (e.g. :8080) instead of stdio")
+	tlsCert := flag.String("tls-cert", "", "TLS certificate file (PEM) for the HTTP transport; env KERN_MCP_TLS_CERT")
+	tlsKey := flag.String("tls-key", "", "TLS private key file (PEM) for the HTTP transport; env KERN_MCP_TLS_KEY")
 	flag.Parse()
 	mcp.SetServerVersion(version)
 	_ = optimize.EnsureRecorder()
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	if *httpAddr != "" {
-		if err := mcp.ServeHTTPContext(ctx, *httpAddr); err != nil {
+		tlsCfg := mcp.TLSOptions(*tlsCert, *tlsKey)
+		if err := mcp.ServeHTTPContextWithTLS(ctx, *httpAddr, tlsCfg); err != nil {
 			os.Exit(1)
 		}
 		return

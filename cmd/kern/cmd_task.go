@@ -61,7 +61,7 @@ func runTask(rest []string) {
 
 	p, err := app.New(root)
 	if err != nil {
-		fatal("%v", err)
+		fatal("could not load project: %v — run kern index first", err)
 	}
 	ts := app.NewTaskService(p, eventbus.New()).WithPRProvider(app.AutoPRProvider())
 	t, ok := ts.Get(id)
@@ -119,12 +119,12 @@ func runTask(rest []string) {
 func runTaskResume(root, id string) {
 	p, err := app.New(root)
 	if err != nil {
-		fatal("%v", err)
+		fatal("could not load project: %v — run kern index first", err)
 	}
 	ts := app.NewTaskService(p, eventbus.New())
 	t, err := ts.Resume(id)
 	if err != nil {
-		fatal("%v", err)
+		fatal("resume: %v", err)
 	}
 	fmt.Printf("resumed task %s: state=%s\n", t.ID, t.State)
 }
@@ -135,7 +135,7 @@ func runTaskResume(root, id string) {
 func runTaskReplay(root, id string) {
 	p, err := app.New(root)
 	if err != nil {
-		fatal("%v", err)
+		fatal("could not load project: %v — run kern index first", err)
 	}
 	ts := app.NewTaskService(p, eventbus.New())
 	if ts.Snapshots() == nil {
@@ -159,14 +159,14 @@ func runTaskReplay(root, id string) {
 
 	rec, err := ts.ReplayTask(id, repoVersion, model, configHash)
 	if err != nil {
-		fatal("%v", err)
+		fatal("replay: %v", err)
 	}
 	fmt.Printf("replay record: task_id=%s repo_version=%s model=%s config_hash=%s replayed_at=%s\n",
 		rec.TaskID, rec.RepoVersion, rec.Model, rec.ConfigHash, rec.ReplayedAt.Format("2006-01-02 15:04:05"))
 
 	history, err := ts.Snapshots().History(id)
 	if err != nil {
-		fatal("%v", err)
+		fatal("history: %v", err)
 	}
 	if len(history) == 0 {
 		fmt.Printf("no snapshots for task %s\n", id)
@@ -182,11 +182,11 @@ func runTaskReplay(root, id string) {
 func runTaskCancel(root, id string) {
 	p, err := app.New(root)
 	if err != nil {
-		fatal("%v", err)
+		fatal("could not load project: %v — run kern index first", err)
 	}
 	ts := app.NewTaskService(p, eventbus.New())
 	if err := ts.Cancel(id, "user requested"); err != nil {
-		fatal("%v", err)
+		fatal("cancel: %v", err)
 	}
 	fmt.Printf("cancelled task %s\n", id)
 }
@@ -195,11 +195,11 @@ func runTaskCancel(root, id string) {
 func runTaskPause(root, id string) {
 	p, err := app.New(root)
 	if err != nil {
-		fatal("%v", err)
+		fatal("could not load project: %v — run kern index first", err)
 	}
 	ts := app.NewTaskService(p, eventbus.New())
 	if err := ts.Pause(id, "user requested"); err != nil {
-		fatal("%v", err)
+		fatal("pause: %v", err)
 	}
 	fmt.Printf("paused task %s\n", id)
 }
@@ -209,7 +209,7 @@ func runTaskPause(root, id string) {
 func runTaskEfficiency(root, id string) {
 	p, err := app.New(root)
 	if err != nil {
-		fatal("%v", err)
+		fatal("could not load project: %v — run kern index first", err)
 	}
 	ts := app.NewTaskService(p, eventbus.New())
 	t, ok := ts.Get(id)
@@ -244,12 +244,12 @@ func runEfficiency(rest []string) {
 func runTaskRetry(root, id string) {
 	p, err := app.New(root)
 	if err != nil {
-		fatal("%v", err)
+		fatal("could not load project: %v — run kern index first", err)
 	}
 	ts := app.NewTaskService(p, eventbus.New())
 	t, err := ts.Retry(id)
 	if err != nil {
-		fatal("%v", err)
+		fatal("retry: %v", err)
 	}
 	fmt.Printf("retried task %s: state=%s\n", t.ID, t.State)
 }

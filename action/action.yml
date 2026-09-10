@@ -153,6 +153,16 @@ runs:
           echo "guard_violations=false" >> "$GITHUB_OUTPUT"
         fi
 
+    - name: Export evidence bundle
+      id: evidence
+      shell: 'bash'
+      env:
+        ROOT: '${{ inputs.root }}'
+      run: |
+        ROOT_DIR="${ROOT:-.}"
+        kern evidence export --root "$ROOT_DIR" --out kern-evidence.json --sign >/dev/null 2>&1 || true
+        kern evidence explain --file kern-evidence.json > kern-evidence.md 2>/dev/null || true
+
     - name: Assemble review comment
       id: assemble
       shell: 'bash'
@@ -167,6 +177,11 @@ runs:
           echo
           echo "## Boundary guard"
           cat kern-guard.txt 2>/dev/null
+          if [ -s kern-evidence.md ]; then
+            echo
+            echo "## Evidence (tamper-sealed)"
+            cat kern-evidence.md 2>/dev/null
+          fi
         } > kern-comment.md
         echo "comment<<EOF" >> "$GITHUB_OUTPUT"
         cat kern-comment.md >> "$GITHUB_OUTPUT"

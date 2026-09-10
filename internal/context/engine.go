@@ -58,6 +58,14 @@ type Engine struct {
 	// WithFreshnessScoring(true) to enable it.
 	freshnessScoring bool
 
+	// clearance is the optional security clearance (0-3) applied on the main
+	// retrieval path (AUD-13). When 0 (the default), retrieval uses the legacy
+	// un-governed memory.Recall exactly as before. When >0, retrieval goes
+	// through memory.AuthorizedRecall, which excludes memories whose
+	// classification level exceeds this clearance and, when governance is
+	// attached to the memory store, enforces read permission + audit.
+	clearance int
+
 	// nodesByIDCache caches the node ID -> node lookup, built once on first use.
 	// The graph is fixed at Engine construction, so the cache never goes stale.
 	nodesByIDOnce  sync.Once
@@ -110,6 +118,30 @@ func (e *Engine) WithMaxTokens(n int) *Engine {
 func (e *Engine) WithFreshnessScoring(enabled bool) *Engine {
 	e.freshnessScoring = enabled
 	return e
+}
+
+// WithClearance sets the optional security clearance for the engine's main
+// retrieval path (AUD-13). The level is the numeric clearance from the memory
+// domain: 0 = unclassified, 1 = internal, 2 = confidential, 3 = restricted.
+// When set (>0), memory retrieval goes through the authorization-filtered path
+// (memory.AuthorizedRecall) so memories classified above this clearance are
+// excluded from the assembled packet. A clearance of 0 (the default) keeps the
+// legacy plain-Recall behavior exactly as before (full backward compatibility).
+// It returns e for chaining.
+func (e *Engine) WithClearance(level int) *Engine {
+	e.clearance = level
+	return e
+}
+
+// recall retrieves memory for the packet. When a clearance is set on the
+// engine (AUD-13), it goes through the governed, clearance-filtered path
+// (memory.AuthorizedRecall); otherwise it uses the legacy plain Recall, so
+// behavior is unchanged for existing callers.
+func (e *Engine) recall(q memory.Query) ([]domain.Memory, error) {
+	if e.clearance > 0 {
+		return e.memory.AuthorizedRecall(q, engineAgent, e.clearance)
+	}
+	return e.memory.Recall(q)
 }
 
 // AnalyzeChange produces a ContextPacket for a proposed change to the given
@@ -267,10 +299,10 @@ func (e *Engine) assemble(task, scope string, roots []domain.Symbol) domain.Cont
 	}
 
 	if e.memory != nil {
-		if mem, err := e.memory.Recall(memory.Query{Scope: scope, Limit: 10}); err == nil {
+		if mem, err := e.recall(memory.Query{Scope: scope, Limit: 10}); err == nil {
 			pkt.Memory = mem
 		}
-		if inc, err := e.memory.Recall(memory.Query{Type: domain.MemoryIncident, Scope: scope, Limit: 5}); err == nil {
+		if inc, err := e.recall(memory.Query{Type: domain.MemoryIncident, Scope: scope, Limit: 5}); err == nil {
 			pkt.Incidents = inc
 		}
 	}
@@ -367,6 +399,12 @@ func (e *Engine) symbolSet(byID map[string]domain.Node, roots []domain.Symbol) [
 		add(r)
 		// Direct callees (depth 1): edges out of the root symbol.
 		for _, to := range e.directCallees(r.Qualified) {
+			// Cross-package callees are recorded by import-qualified
+			// reference whose simple name can be ambiguous; resolve via the
+			// caller's imports instead of dropping the edge (A3).
+			if rid, ok := e.graph.ResolveEdgeEndpoint(to, r.Qualified); ok {
+				to = rid
+			}
 			if n, ok := byID[to]; ok && n.Symbol != nil {
 				add(*n.Symbol)
 			}
@@ -412,15 +450,35 @@ func (e *Engine) dependencyEdges(scope string, roots []domain.Symbol) []domain.E
 	seen := map[string]bool{}
 	var out []domain.Edge
 	for _, edge := range e.graph.Edges {
-		if !region[edge.From] || !region[edge.To] {
+		from, to := edge.From, edge.To
+		if edge.Kind == "calls" {
+			// Normalize endpoints to node IDs before the region check:
+			// cross-package callees are recorded by import-qualified
+			// reference whose simple name can be ambiguous, and the raw
+			// endpoint would miss the region set even though the resolved
+			// node is inside it (A3).
+			if !region[from] {
+				if rid, ok := e.graph.ResolveEdgeEndpoint(from, from); ok {
+					from = rid
+				}
+			}
+			if !region[to] {
+				if rid, ok := e.graph.ResolveEdgeEndpoint(to, from); ok {
+					to = rid
+				}
+			}
+		}
+		if !region[from] || !region[to] {
 			continue
 		}
-		key := edge.From + "|" + edge.To + "|" + edge.Kind
+		key := from + "|" + to + "|" + edge.Kind
 		if seen[key] {
 			continue
 		}
 		seen[key] = true
-		out = append(out, edge)
+		norm := edge
+		norm.From, norm.To = from, to
+		out = append(out, norm)
 	}
 	return out
 }

@@ -28,10 +28,17 @@ const maxTypedEntries = 200
 // (memory.json -> ememory.json) so v1 behavior is untouched.
 // mu serializes the load→mutate→save cycle so concurrent writers cannot clobber
 // each other's updates.
+//
+// gov is the optional governance layer (access control, audit trail,
+// retention). It is nil for legacy stores created with NewMemoryStore and is
+// attached with WithGovernance; it is guarded by govMu so it can be read
+// while s.mu is held without deadlocking.
 type MemoryStore struct {
-	root string
-	path string
-	mu   sync.Mutex
+	root  string
+	path  string
+	mu    sync.Mutex
+	govMu sync.Mutex
+	gov   *Governance
 }
 
 // NewStore returns a typed memory store for the given project root.
@@ -70,6 +77,12 @@ func (s *MemoryStore) load() []domain.Memory {
 }
 
 func (s *MemoryStore) save(ms []domain.Memory) error {
+	// Governance: when retention is enabled, every write enforces
+	// expiry/archive/trim so stale memories are dropped as soon as the store
+	// is next touched. Explicit sweeps (ApplyRetention) report the counts.
+	if gov := s.govSnapshot(); gov != nil && gov.Retention.Enabled {
+		ms, _ = gov.Retention.Apply(ms, time.Now().UTC())
+	}
 	if err := os.MkdirAll(filepath.Dir(s.path), 0o755); err != nil {
 		return err
 	}
@@ -99,9 +112,19 @@ func (s *MemoryStore) save(ms []domain.Memory) error {
 
 // Add stores a new typed memory entry. Returns the entry with ID and
 // timestamps set.
+//
+// With governance attached, the writer is identified by m.Source ("human"
+// when empty) and must hold write permission.
 func (s *MemoryStore) Add(m domain.Memory) (domain.Memory, error) {
 	if strings.TrimSpace(m.Content) == "" {
 		return m, nil
+	}
+	agent := m.Source
+	if agent == "" {
+		agent = "human"
+	}
+	if err := s.authorize(agent, PermissionWrite); err != nil {
+		return domain.Memory{}, err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -127,6 +150,14 @@ func (s *MemoryStore) Add(m domain.Memory) (domain.Memory, error) {
 	if err := s.save(ms); err != nil {
 		return domain.Memory{}, err
 	}
+	s.recordAudit(AuditEvent{
+		AgentID:   agent,
+		Operation: OpAdd,
+		MemoryID:  m.ID,
+		Type:      m.Type,
+		Scope:     m.Scope,
+		Allowed:   true,
+	})
 	return m, nil
 }
 
@@ -134,9 +165,19 @@ func (s *MemoryStore) Add(m domain.Memory) (domain.Memory, error) {
 // promotes a new one to current ( memory supersession). This makes
 // the newest memory authoritative while retaining the older one for audit.
 // The new memory may be an existing entry (promote) or a fresh one (replace).
+//
+// With governance attached, the writer is identified by newMemory.Source
+// ("human" when empty) and must hold write permission.
 func (s *MemoryStore) Supersede(newMemory domain.Memory) (domain.Memory, error) {
 	if strings.TrimSpace(newMemory.Content) == "" {
 		return domain.Memory{}, nil
+	}
+	agent := newMemory.Source
+	if agent == "" {
+		agent = "human"
+	}
+	if err := s.authorize(agent, PermissionWrite); err != nil {
+		return domain.Memory{}, err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -167,6 +208,14 @@ func (s *MemoryStore) Supersede(newMemory domain.Memory) (domain.Memory, error) 
 	if err := s.save(out); err != nil {
 		return domain.Memory{}, err
 	}
+	s.recordAudit(AuditEvent{
+		AgentID:   agent,
+		Operation: OpSupersede,
+		MemoryID:  newMemory.ID,
+		Type:      newMemory.Type,
+		Scope:     newMemory.Scope,
+		Allowed:   true,
+	})
 	return newMemory, nil
 }
 
@@ -191,7 +240,12 @@ func (s *MemoryStore) CurrentMemories(memType domain.MemoryType) ([]domain.Memor
 
 // MarkHistorical retires a memory to the historical state ,
 // removing it from the authoritative set without deleting it.
+// With governance attached, the actor is "human" and must hold write
+// permission.
 func (s *MemoryStore) MarkHistorical(id string) error {
+	if err := s.authorize("human", PermissionWrite); err != nil {
+		return err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	ms := s.load()
@@ -206,7 +260,17 @@ func (s *MemoryStore) MarkHistorical(id string) error {
 	if !updated {
 		return os.ErrNotExist
 	}
-	return s.save(ms)
+	if err := s.save(ms); err != nil {
+		return err
+	}
+	s.recordAudit(AuditEvent{
+		AgentID:   "human",
+		Operation: OpUpdate,
+		MemoryID:  id,
+		Allowed:   true,
+		Reason:    "mark-historical",
+	})
+	return nil
 }
 
 // List returns all memories, optionally filtered by type. If memType is empty,
@@ -234,8 +298,12 @@ func (s *MemoryStore) Get(id string) (domain.Memory, error) {
 	return domain.Memory{}, os.ErrNotExist
 }
 
-// Delete removes a memory by ID.
+// Delete removes a memory by ID. With governance attached, the actor is
+// "human" and must hold delete permission.
 func (s *MemoryStore) Delete(id string) error {
+	if err := s.authorize("human", PermissionDelete); err != nil {
+		return err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	ms := s.load()
@@ -248,11 +316,24 @@ func (s *MemoryStore) Delete(id string) error {
 	if len(kept) == len(ms) {
 		return os.ErrNotExist
 	}
-	return s.save(kept)
+	if err := s.save(kept); err != nil {
+		return err
+	}
+	s.recordAudit(AuditEvent{
+		AgentID:   "human",
+		Operation: OpDelete,
+		MemoryID:  id,
+		Allowed:   true,
+	})
+	return nil
 }
 
-// Update modifies an existing memory's content/tags.
+// Update modifies an existing memory's content/tags. With governance
+// attached, the actor is "human" and must hold write permission.
 func (s *MemoryStore) Update(id string, content string, tags []string) (domain.Memory, error) {
+	if err := s.authorize("human", PermissionWrite); err != nil {
+		return domain.Memory{}, err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	ms := s.load()
@@ -270,6 +351,14 @@ func (s *MemoryStore) Update(id string, content string, tags []string) (domain.M
 		if err := s.save(ms); err != nil {
 			return domain.Memory{}, err
 		}
+		s.recordAudit(AuditEvent{
+			AgentID:   "human",
+			Operation: OpUpdate,
+			MemoryID:  id,
+			Type:      ms[i].Type,
+			Scope:     ms[i].Scope,
+			Allowed:   true,
+		})
 		return ms[i], nil
 	}
 	return domain.Memory{}, os.ErrNotExist
@@ -297,9 +386,13 @@ func newID(content string, ms []domain.Memory) string {
 // "" (unclassified) = 0, "public" = 0, "internal" = 1,
 // "confidential" = 2, "restricted" = 3
 // A caller with clearance N can read memories with classification <= N.
-// agentID is reserved for future per-agent attribution/auditing.
+// With governance attached, agentID must hold read permission; the recall is
+// recorded in the audit trail.
 func (s *MemoryStore) AuthorizedRecall(q Query, agentID string, clearance int) ([]domain.Memory, error) {
-	mems, err := s.Recall(q)
+	if err := s.authorize(agentID, PermissionRead); err != nil {
+		return nil, err
+	}
+	mems, err := s.recall(q, agentID, true)
 	if err != nil {
 		return nil, err
 	}

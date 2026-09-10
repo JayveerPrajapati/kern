@@ -18,8 +18,10 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/governance"
 	"github.com/JayveerPrajapati/kern/internal/index"
 	"github.com/JayveerPrajapati/kern/internal/intel"
+	"github.com/JayveerPrajapati/kern/internal/lenses"
 	"github.com/JayveerPrajapati/kern/internal/lock"
 	"github.com/JayveerPrajapati/kern/internal/pack"
+	"github.com/JayveerPrajapati/kern/internal/profiles"
 	"github.com/JayveerPrajapati/kern/internal/prompt"
 	"github.com/JayveerPrajapati/kern/internal/relay"
 	"github.com/JayveerPrajapati/kern/internal/swap"
@@ -42,7 +44,7 @@ func runProject(rest []string) {
 	}
 	p, err := code.BuildProject(root, f.maxFiles, 200)
 	if err != nil {
-		fatal("%v", err)
+		fatal("Project: %v", err)
 	}
 	fmt.Println(p.Render())
 
@@ -73,7 +75,7 @@ func runPack(rest []string) {
 		Tier:             tier,
 	})
 	if err != nil {
-		fatal("%v", err)
+		fatal("Pack: %v", err)
 	}
 	out := b.Render()
 	if f.out != "" {
@@ -98,7 +100,7 @@ func runPrompt(rest []string) {
 	if args[0] == "list" || args[0] == "--help" || args[0] == "-h" {
 		names, err := prompt.List()
 		if err != nil {
-			fatal("%v", err)
+			fatal("Prompt: %v", err)
 		}
 		if args[0] != "list" {
 			fmt.Println("usage: kern prompt <template> [--file PATH] [--task TEXT]")
@@ -131,7 +133,7 @@ func runPrompt(rest []string) {
 	}
 	out, err := prompt.Render(args[0], vars)
 	if err != nil {
-		fatal("%v", err)
+		fatal("Prompt: %v", err)
 	}
 	if f.schema != "" {
 		sc, serr := loadSchema(f.schema)
@@ -166,7 +168,7 @@ func runSwap(rest []string) {
 		b, err = readStdin()
 	}
 	if err != nil {
-		fatal("%v", err)
+		fatal("Swap: %v", err)
 	}
 	text := string(b)
 	switch f.mode {
@@ -223,7 +225,7 @@ func runContext(rest []string) {
 	}
 	ix, err := loadOrBuild(root)
 	if err != nil {
-		fatal("%v", err)
+		fatal("Context: %v", err)
 	}
 	// Honor --lines instead of parsing it as the symbol.
 	lines := f.lines
@@ -234,12 +236,40 @@ func runContext(rest []string) {
 	if ctxText == "" {
 		fatalNoSymbol(symbol, ix)
 	}
+	// Disambiguation note (F-3, mirrors the kern_context MCP tool): several
+	// packages can define the same symbol name (e.g. "main"); surface which
+	// one this slice came from so a wrong-package resolve is spotted
+	// immediately instead of silently reading the wrong package.
+	if def, ok := ix.ResolveName(symbol); ok {
+		ctxText = fmt.Sprintf("# resolved %s -> %s:%d\n%s", symbol, def.File, def.Line, ctxText)
+	}
 	if f.terseCode {
 		path := symbol + ".go"
 		if def, ok := ix.ResolveName(symbol); ok && def.File != "" {
 			path = def.File
 		}
 		ctxText = string(kernctx.PruneCode(path, []byte(ctxText), true))
+	}
+	// Review lens (mirrors the kern_context MCP tool): the lens is a HEADER
+	// ANNOTATION, not a re-ranking — it prepends the evidence-priority line
+	// so the caller knows which review posture the context is sized for. No
+	// lens arg -> output unchanged.
+	if f.lens != "" {
+		l, err := lenses.Resolve(f.lens)
+		if err != nil {
+			fatal("%v", err)
+		}
+		ctxText = fmt.Sprintf("lens: %s (%s)\n", l.Name, lenses.RenderPriorities(l)) + ctxText
+	}
+	// --profile shapes how the context is presented without changing the
+	// evidence (deterministic, no LLM). Applied after the lens header,
+	// matching the MCP ordering.
+	if f.profile != "" {
+		p, ok := profiles.NewRegistryWithUserProfiles(root).Select(f.profile)
+		if !ok {
+			fatal("unknown profile %q", f.profile)
+		}
+		ctxText = profiles.ApplyProfile(p, ctxText)
 	}
 	fmt.Println(ctxText)
 
@@ -305,7 +335,7 @@ func runUnlock(rest []string) {
 		root = args[1]
 	}
 	if err := lock.Remove(root, args[0]); err != nil {
-		fatal("%v", err)
+		fatal("Unlock: %v", err)
 	}
 	emitLockEvent(root, string(eventbus.LockReleased), args[0], nil)
 	fmt.Printf("lock removed: %s\n", args[0])
@@ -323,7 +353,7 @@ func runStatus(rest []string) {
 	}
 	sts, err := lock.List(root)
 	if err != nil {
-		fatal("%v", err)
+		fatal("Status: %v", err)
 	}
 	if f.json {
 		printJSON(map[string]any{"locks": sts})
@@ -368,17 +398,17 @@ func runGuard(rest []string) {
 	switch sub {
 	case "init":
 		if err := intel.InitBoundaries(root); err != nil {
-			fatal("%v", err)
+			fatal("Guard: %v", err)
 		}
 		fmt.Printf("wrote %s (edit it to declare boundary rules)\n", intel.DefaultBoundariesPath(root))
 	case "check":
 		ix, err := intel.ReadIndex(root)
 		if err != nil {
-			fatal("%v", err)
+			fatal("Guard: %v", err)
 		}
 		b, err := intel.LoadBoundaries(root)
 		if err != nil {
-			fatal("%v", err)
+			fatal("Guard: %v", err)
 		}
 		var files []string
 		if f.file != "" {
@@ -557,7 +587,7 @@ func guardAuthzVerdict(agentID, task string, ix *index.Index, files []string) (m
 	}
 	resp, err := governance.AuthorizeContext(req, ix, fw)
 	if err != nil && err != governance.ErrUnauthorized {
-		fatal("%v", err)
+		fatal("guardAuthzVerdict: %v", err)
 	}
 
 	decision := "denied"

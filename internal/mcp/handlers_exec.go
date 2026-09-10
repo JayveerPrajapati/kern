@@ -302,7 +302,7 @@ func (s *Server) handleExec(ctx context.Context, args map[string]any) (string, e
 		// no_isolate (full env + network) is only honored when the operator has
 		// explicitly set KERN_ALLOW_NO_ISOLATE=1; otherwise it is ignored.
 		noIsolate := argString(args, "no_isolate") == "true" || argString(args, "no_isolate") == "1"
-		if noIsolate && os.Getenv("KERN_ALLOW_NO_ISOLATE") == "" {
+		if noIsolate && os.Getenv("KERN_ALLOW_NO_ISOLATE") != "1" {
 			noIsolate = false
 		}
 		run := script.Run{
@@ -310,6 +310,7 @@ func (s *Server) handleExec(ctx context.Context, args map[string]any) (string, e
 			Code:      argString(args, "code"),
 			Stdin:     argString(args, "stdin"),
 			NoIsolate: noIsolate,
+			Egress:    argStrings(args, "egress"),
 		}
 		if v := argString(args, "timeout"); v != "" {
 			sec, err := strconv.Atoi(v)

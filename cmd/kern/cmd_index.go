@@ -97,94 +97,37 @@ func runIndex(rest []string) {
 	// index's health without rebuilding anything, so CI and agents can gate
 	// on freshness cheaply.
 	if f.status {
-		status := indexStatus(root, f.strict)
+		status, serr := svc.Index.Status(context.Background(), root, f.strict)
+		if serr != nil {
+			fatal("Index: %v", serr)
+		}
 		if f.json {
 			printJSON(status)
 			return
 		}
-		if status["built"].(bool) {
+		if status.Built {
 			fmt.Printf("index: BUILT (%d symbols, %d files, %d packages, version %d)\n",
-				status["symbols"], status["files"], status["packages"], status["version"])
-			fmt.Printf("  languages: %s\n", status["languages"])
-			fmt.Printf("  stale: %v\n", status["stale"])
-			fmt.Printf("  store: %s\n", status["store"])
+				status.Symbols, status.Files, status.Packages, status.Version)
+			fmt.Printf("  languages: %s\n", status.Languages)
+			fmt.Printf("  stale: %v\n", status.Stale)
+			fmt.Printf("  store: %s\n", status.Store)
 		} else {
 			fmt.Printf("index: NOT BUILT for %s\n", root)
 		}
 		return
 	}
-	ix, err := index.Build(root)
+	ix, err := svc.Index.Build(context.Background(), root)
 	if err != nil {
-		fatal("%v", err)
-	}
-	if err := ix.Save(); err != nil {
-		fatal("%v", err)
+		fatal("Index: %v", err)
 	}
 	store := index.StorePath(root)
 	if index.SQLiteEnabled() {
-		if err := index.SaveSQLite(root, ix); err != nil {
-			fatal("%v", err)
-		}
 		store = index.SQLitePath(root)
 	}
 	fmt.Printf("indexed %d symbols in %d files (%d packages) -> %s\n",
 		len(ix.Symbols), len(ix.FileHashes), len(ix.Pkgs), store)
 	fmt.Printf("languages: %s\n", strings.Join(ix.Languages(), ", "))
 
-}
-
-// indexStatus reports the cached index's state for `kern index --status`.
-// Read-only: it never builds or saves an index. The returned map is
-// JSON-ready so callers can render text or pass it straight to printJSON.
-// strict selects FreshnessProofStrict (full content re-hash) over the default
-// fast FreshnessProof (git tree-OID compare).
-func indexStatus(root string, strict bool) map[string]any {
-	status := map[string]any{
-		"schema_version":      "2",
-		"root":                root,
-		"built":               false,
-		"symbols":             0,
-		"files":               0,
-		"packages":            0,
-		"version":             0,
-		"stale":               true,
-		"languages":           []string{},
-		"store":               "",
-		"precision_by_lang":   map[string]string{},
-		"tree_sitter_enabled": index.TreesitterEnabled(),
-	}
-	ix, err := index.Load(root)
-	if err != nil || ix == nil {
-		return status
-	}
-	status["built"] = true
-	status["symbols"] = len(ix.Symbols)
-	status["files"] = len(ix.FileHashes)
-	status["packages"] = len(ix.Pkgs)
-	status["version"] = ix.Version
-	status["stale"] = ix.Stale()
-	status["languages"] = ix.Languages()
-	store := index.StorePath(root)
-	if index.SQLiteEnabled() {
-		store = index.SQLitePath(root)
-	}
-	status["store"] = store
-	// Per-language edge-precision tier (resolved/ast/heuristic) from the
-	// index itself, so consumers (blueprint, CI, humans) can see which
-	// languages are skipped under --precision strict without building.
-	status["precision_by_lang"] = ix.PrecisionByLang
-	// Content-addressed freshness proof: the contract the blueprint fixer
-	// codes against. --strict forces a full content re-hash instead of the
-	// git tree-OID fast path.
-	proof := ix.FreshnessProof(root)
-	if strict {
-		proof = ix.FreshnessProofStrict(root)
-	}
-	status["freshness_proof"] = proof
-	if ix.Identity != nil {
-		status["index_identity"] = *ix.Identity
-	}
-	return status
 }
 
 func runWatch(rest []string) {
@@ -207,7 +150,7 @@ func runWatch(rest []string) {
 		fmt.Fprintf(os.Stderr, "[kern] watch error: %v\n", err)
 	})
 	if err != nil && err != context.Canceled {
-		fatal("%v", err)
+		fatal("Watch: %v", err)
 	}
 
 }
@@ -232,7 +175,7 @@ func runAst(rest []string) {
 	if f.all && root == "" {
 		files, err := os.ReadDir(cache.Path("index"))
 		if err != nil {
-			fatal("%v", err)
+			fatal("Ast: %v", err)
 		}
 		searched := 0
 		skipped := 0
@@ -277,7 +220,7 @@ func runAst(rest []string) {
 	}
 	ix, err := loadOrBuild(root)
 	if err != nil {
-		fatal("%v", err)
+		fatal("Ast: %v", err)
 	}
 	for _, m := range ix.Search(pattern, 50) {
 		fmt.Printf("%-10s %-7s %-24s %s:%d\n", m.Kind, m.Lang, m.FullName(), m.File, m.Line)
@@ -289,7 +232,7 @@ func runRepos(rest []string) {
 	if len(rest) == 0 || rest[0] == "list" {
 		reg, err := intel.LoadRepos()
 		if err != nil {
-			fatal("%v", err)
+			fatal("Repos: %v", err)
 		}
 		if len(reg.Repos) == 0 {
 			fmt.Println("no repos registered (kern repos add <path> [name])")
@@ -311,13 +254,13 @@ func runRepos(rest []string) {
 		}
 		reg, err := intel.LoadRepos()
 		if err != nil {
-			fatal("%v", err)
+			fatal("Repos: %v", err)
 		}
 		if err := reg.Add(rest[1], name); err != nil {
-			fatal("%v", err)
+			fatal("Repos: %v", err)
 		}
 		if err := reg.Save(); err != nil {
-			fatal("%v", err)
+			fatal("Repos: %v", err)
 		}
 		added, _ := reg.Get(name)
 		if name == "" {
@@ -330,13 +273,13 @@ func runRepos(rest []string) {
 		}
 		reg, err := intel.LoadRepos()
 		if err != nil {
-			fatal("%v", err)
+			fatal("Repos: %v", err)
 		}
 		if !reg.Remove(rest[1]) {
 			fatal("no repo named: %s", rest[1])
 		}
 		if err := reg.Save(); err != nil {
-			fatal("%v", err)
+			fatal("Repos: %v", err)
 		}
 		fmt.Printf("removed %s\n", rest[1])
 	default:
@@ -380,7 +323,7 @@ func runSearch(rest []string) {
 	}
 	ix, err := loadOrBuild(root)
 	if err != nil {
-		fatal("%v", err)
+		fatal("Search: %v", err)
 	}
 	var matches []index.Symbol
 	if f.semantic {
@@ -427,7 +370,7 @@ func runFts(rest []string) {
 	}
 	matches, err := index.FTS5Search(root, args[0], limit)
 	if err != nil {
-		fatal("%v", err)
+		fatal("Fts: %v", err)
 	}
 	if f.json {
 		printJSON(matches)

@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log"
 	"sort"
 	"strconv"
 	"strings"
@@ -49,6 +50,12 @@ type AuditEntry struct {
 	// It is optional (absent for legacy entries) and consumed by `kern audit
 	// append` to mark blocked context stale (in-memory invalidation, P0.4).
 	ValidationOutcome *ValidationOutcome `json:"ValidationOutcome,omitempty"`
+	// Policy identifies the policy that made the decision ("firewall",
+	// "permission", "egress", ...). Optional; absent for legacy entries.
+	Policy string `json:"Policy,omitempty"`
+	// Reason is the human-readable justification for the decision. Optional;
+	// absent for legacy entries.
+	Reason string `json:"Reason,omitempty"`
 }
 
 // AuditLog records governance decisions in memory. It optionally persists each
@@ -62,7 +69,22 @@ type AuditLog struct {
 	hashChain  string        // hash of the previous entry (tamper detection)
 	lockPath   string        // cross-process advisory lock file ("" = legacy, unlocked)
 	merkleTree *MerkleTree   // incremental Merkle tree for parallel, lock-free audit verification
+
+	// Retention (B8): the in-memory log is capped at maxAuditEntries so a
+	// long-running process (the web console, the MCP server) cannot grow it
+	// without bound and the per-request All() scan stays cheap. The persisted
+	// chain (when a store is attached) is never trimmed — Replay() reloads
+	// it — and the counters below keep lifetime totals so governance metrics
+	// stay O(1) regardless of the cap. Guarded by mu.
+	totalRecords int64
+	blocks       int64 // Result "blocked" or "denied"
+	overrides    int64 // Result "approved"
 }
+
+// maxAuditEntries caps the in-memory audit log (B8). Older entries are
+// dropped from memory but remain on disk when a store is attached; with no
+// store the cap trades very old in-memory history for bounded memory.
+const maxAuditEntries = 5000
 
 // NewAuditLog creates a new in-memory audit log.
 func NewAuditLog() *AuditLog {
@@ -250,6 +272,50 @@ func (l *AuditLog) Record(entry AuditEntry) {
 	if l.store != nil {
 		l.persist(entry)
 	}
+	l.noteResultAndTrimLocked(entry)
+}
+
+// noteResultAndTrimLocked updates the lifetime result counters for the
+// just-appended entry and enforces the in-memory retention cap. The caller
+// must hold l.mu. The most recently appended entry is never trimmed, so the
+// write-back of ID/Hash in persist is safe whenever this runs after it.
+func (l *AuditLog) noteResultAndTrimLocked(entry AuditEntry) {
+	l.totalRecords++
+	switch entry.Result {
+	case "blocked", "denied":
+		l.blocks++
+	case "approved":
+		l.overrides++
+	}
+	if len(l.entries) > maxAuditEntries {
+		kept := l.entries[len(l.entries)-maxAuditEntries:]
+		// In-place copy over the (larger) backing array; All() keeps
+		// returning the same slice header semantics.
+		l.entries = append(l.entries[:0], kept...)
+	}
+}
+
+// TotalRecords returns the lifetime number of recorded entries. Unlike Len(),
+// it does not decrease when the retention cap trims old entries from memory.
+func (l *AuditLog) TotalRecords() int64 {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.totalRecords
+}
+
+// BlocksCount returns the lifetime number of blocked/denied results — the
+// O(1) replacement for scanning All() in governance metrics.
+func (l *AuditLog) BlocksCount() int64 {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.blocks
+}
+
+// OverridesCount returns the lifetime number of approved results.
+func (l *AuditLog) OverridesCount() int64 {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.overrides
 }
 
 // persist computes the tamper-evident hash chain and writes the entry to the
@@ -284,8 +350,10 @@ func (l *AuditLog) persist(entry AuditEntry) {
 	}
 	key := "audit-" + entry.ID
 	if err := l.store.Put(context.Background(), key, data); err != nil {
-		// Log-and-skip: persistence failure must not crash the audit log.
-		_ = err
+		// Log-and-skip: persistence failure must not crash the audit log,
+		// but the loss must not be silent either — the entry survives only
+		// in memory until the next Replay.
+		log.Printf("kern governance: audit entry %s kept in memory only (store write failed: %v)", entry.ID, err)
 	}
 }
 
@@ -321,6 +389,7 @@ func (l *AuditLog) AppendExternal(entry AuditEntry) error {
 	entry.Hash = computeAuditHash(entry, l.hashChain)
 	l.entries = append(l.entries, entry)
 	l.hashChain = entry.Hash
+	l.noteResultAndTrimLocked(entry)
 
 	if l.store != nil {
 		data, err := json.Marshal(entry)
@@ -366,10 +435,46 @@ func (l *AuditLog) RepairChain() (int, error) {
 	entries, maxSeq := l.storedEntriesLocked()
 	prev := ""
 	n := 0
+	modified := make([]bool, len(entries))
 	for i, e := range entries {
 		want := computeAuditHash(e, prev)
-		if e.Hash != want {
+		// An entry that verifies under either formula (modern, or the
+		// pre-P0.4 legacy formula) is intact — leave it untouched so repair
+		// stays minimal (only genuinely broken links are re-chained).
+		if e.Hash != want && e.Hash != computeAuditHashLegacy(e, prev) {
 			e.Hash = want
+			modified[i] = true
+			n++
+		}
+		prev = e.Hash
+		entries[i] = e
+	}
+
+	// Persist: when the store supports an atomic full rewrite (LogStore),
+	// write the repaired entry list as the store's sole content. A per-entry
+	// Put would APPEND a new chain.jsonl line per repaired key without
+	// removing prior lines for that key, leaving duplicate entries that
+	// break every subsequent chain walk.
+	type rewriter interface {
+		RewriteAll(context.Context, []storage.Entry) error
+	}
+	if rw, ok := l.store.(rewriter); ok {
+		out := make([]storage.Entry, 0, len(entries))
+		for _, e := range entries {
+			data, err := json.Marshal(e)
+			if err != nil {
+				return n, fmt.Errorf("repair chain: marshal entry %s: %w", e.ID, err)
+			}
+			out = append(out, storage.Entry{Key: "audit-" + e.ID, Value: data})
+		}
+		if err := rw.RewriteAll(context.Background(), out); err != nil {
+			return n, fmt.Errorf("repair chain: rewrite store: %w", err)
+		}
+	} else {
+		for i, e := range entries {
+			if !modified[i] {
+				continue
+			}
 			data, err := json.Marshal(e)
 			if err != nil {
 				return n, fmt.Errorf("repair chain: marshal entry %s: %w", e.ID, err)
@@ -378,10 +483,7 @@ func (l *AuditLog) RepairChain() (int, error) {
 			if err := l.store.Put(context.Background(), key, data); err != nil {
 				return n, fmt.Errorf("repair chain: persist entry %s: %w", e.ID, err)
 			}
-			n++
 		}
-		prev = e.Hash
-		entries[i] = e
 	}
 
 	l.entries = entries
@@ -398,6 +500,14 @@ func (l *AuditLog) RepairChain() (int, error) {
 func computeAuditHash(e AuditEntry, prevHash string) string {
 	h := sha256.New()
 	fmt.Fprintf(h, "%s|%s|%s|%s|%s|%v|%v|%v|%s|%s", prevHash, e.ID, e.AgentID, e.Action, e.Resource, e.Timestamp.UnixNano(), e.Risk, e.Approved, e.Result, e.TaskID)
+	if e.ValidationOutcome != nil {
+		// The tamper chain must cover the full entry: ValidationOutcome is
+		// part of a persisted entry, so it must be covered too, or it could
+		// be modified without breaking VerifyChain. Entries with a nil
+		// ValidationOutcome hash byte-identically to the pre-P0.4 format, so
+		// chains recorded by older versions still verify.
+		fmt.Fprintf(h, "|%s|%d|%s|%s|%d", e.ValidationOutcome.Status, e.ValidationOutcome.ExitCode, strings.Join(e.ValidationOutcome.BlockedFiles, ","), e.ValidationOutcome.CorrelationID, e.ValidationOutcome.Findings)
+	}
 	return hex.EncodeToString(h.Sum(nil))
 }
 
@@ -470,8 +580,19 @@ func (l *AuditLog) VerifyChainReport() (firstBroken, verified int) {
 	var prevHash string
 	for _, e := range l.entries {
 		if e.Hash != computeAuditHash(e, prevHash) {
-			if firstBroken < 0 {
-				firstBroken = verified
+			// Pre-P0.4 transition window: entries with a non-nil
+			// ValidationOutcome were persisted by the in-transition binary
+			// BEFORE ValidationOutcome was folded into the hash, so their
+			// stored hashes use the legacy formula. The legacy formula
+			// covers a strict subset of the modern fields, so accepting it
+			// verifies exactly what was verifiable when the entry was
+			// written — nothing that was ever protected is weakened.
+			if e.Hash != computeAuditHashLegacy(e, prevHash) {
+				if firstBroken < 0 {
+					firstBroken = verified
+				}
+			} else {
+				verified++
 			}
 		} else {
 			verified++
@@ -479,6 +600,17 @@ func (l *AuditLog) VerifyChainReport() (firstBroken, verified int) {
 		prevHash = e.Hash
 	}
 	return firstBroken, verified
+}
+
+// computeAuditHashLegacy recomputes an entry hash WITHOUT the
+// ValidationOutcome clause — the formula used by binaries before P0.4
+// extended the chain to cover it. Used only as a verification fallback for
+// entries persisted during that transition window (their stored hash cannot
+// match the modern formula by construction).
+func computeAuditHashLegacy(e AuditEntry, prevHash string) string {
+	h := sha256.New()
+	fmt.Fprintf(h, "%s|%s|%s|%s|%s|%v|%v|%v|%s|%s", prevHash, e.ID, e.AgentID, e.Action, e.Resource, e.Timestamp.UnixNano(), e.Risk, e.Approved, e.Result, e.TaskID)
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 // VerifyChain reports whether the audit log's hash chain is intact (no entries
@@ -697,5 +829,6 @@ func (l *AuditLog) RecordParallel(entry AuditEntry) string {
 	entry.Hash = computeAuditHash(entry, l.hashChain)
 	l.hashChain = entry.Hash
 	l.entries = append(l.entries, entry)
+	l.noteResultAndTrimLocked(entry)
 	return root
 }

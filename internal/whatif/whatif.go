@@ -103,11 +103,9 @@ func Simulate(g *intelligence.Graph, c Change) Impact {
 		return Impact{Change: c, Risk: "low", Isolated: true}
 	}
 	imp := Impact{Change: c}
-
 	byID := map[string]domain.Node{}
 	affected := map[string]bool{}
 	files := map[string]bool{}
-
 	// graphByID indexes the canonical graph so a target symbol (which may be
 	// referenced for AddSymbol/ChangeSignature/RemoveDependency) can be located
 	// independently of the affected set.
@@ -115,7 +113,6 @@ func Simulate(g *intelligence.Graph, c Change) Impact {
 	for _, n := range g.Nodes {
 		graphByID[n.ID] = n
 	}
-
 	collect := func(ns []domain.Node) {
 		for _, n := range ns {
 			if n.ID == "" {
@@ -131,169 +128,79 @@ func Simulate(g *intelligence.Graph, c Change) Impact {
 		}
 	}
 	addNode := func(n domain.Node) { collect([]domain.Node{n}) }
-
 	// Step 2 — traverse the graph to build the affected set, which depends on
-	// the kind of change being simulated.
+	// the kind of change being simulated. Each kind delegates to a strategy.
 	createsCycle := false
+	st := simState{g: g, graphByID: graphByID, collect: collect, addNode: addNode}
 	switch c.Kind {
 	case AddSymbol:
-		// A brand-new symbol has no dependents yet; it is isolated.
-		// Files = the target's containing file when it resolves in the graph.
-		if n, ok := graphByID[c.Target]; ok {
-			addNode(n)
-		}
+		simulateAddSymbol(st, c)
 	case ChangeSignature:
-		// Callers of the symbol may break. affected = transitively what
-		// depends on the target (same shape as RemoveSymbol), and Files also
-		// includes the symbol's own file.
-		collect(g.WhatDependsOn(c.Target))
-		if n, ok := graphByID[c.Target]; ok {
-			addNode(n)
-		}
+		simulateChangeSignature(st, c)
 	case AddDependency:
-		// Adding a dependency does not break existing dependents unless it
-		// creates a cycle (Target now depends on NewTarget while NewTarget
-		// already transitively depends on Target).
-		if c.NewTarget != "" {
-			for _, dn := range g.WhatDoesXDependOn(c.NewTarget) {
-				if dn.ID == c.Target {
-					createsCycle = true
-					break
-				}
-			}
-		}
+		createsCycle = simulateAddDependency(st, c)
 	case RemoveDependency:
-		// The symbol whose dependency was removed may itself break.
-		if n, ok := graphByID[c.Target]; ok {
-			addNode(n)
-		}
+		simulateAddSymbol(st, c)
 	case RenameSymbol:
-		// The symbol still exists after the rename, but every caller must be
-		// updated to the new name. affected = callers + the symbol itself.
-		collect(g.WhatDependsOn(c.Target))
-		if n, ok := graphByID[c.Target]; ok {
-			addNode(n)
-		}
+		simulateChangeSignature(st, c)
 	case SplitService, MoveModule, ChangeInfra:
-		// Higher-level operations that cannot be fully simulated from the call
-		// graph alone (they need twin/context data). Surface the code-graph
-		// impact of the named symbol/module and note the limitation in Summary.
-		imp.Summary = fmt.Sprintf("high-level change type '%s' requires twin/context data for full simulation; showing code-graph impact only", c.Kind)
-		collect(g.WhatDependsOn(c.Target))
-		if n, ok := graphByID[c.Target]; ok {
-			addNode(n)
-		}
+		imp.Summary = simulateRequiresTwin(st, c)
 	default:
-		// RemoveSymbol / ChangeDependency — everything that depends on the
-		// changed symbol. For ChangeDependency, changing what a target depends
-		// on does not affect the new target's other callers, so the affected
-		// set must NOT include WhatDependsOn(c.NewTarget).
-		collect(g.WhatDependsOn(c.Target))
+		simulateDefault(st, c)
 	}
-
 	for id := range affected {
 		imp.Affected = append(imp.Affected, id)
 	}
 	sort.Strings(imp.Affected)
-
 	for f := range files {
 		imp.Files = append(imp.Files, f)
 	}
 	sort.Strings(imp.Files)
-
 	for _, n := range g.WhatServicesAffected(c.Target) {
 		if nm := nodeName(n); nm != "" {
 			imp.Services = append(imp.Services, nm)
 		}
 	}
 	sort.Strings(imp.Services)
-
 	for _, n := range g.WhatTestsCover(c.Target) {
 		if nm := nodeName(n); nm != "" {
 			imp.Tests = append(imp.Tests, nm)
 		}
 	}
 	sort.Strings(imp.Tests)
-
 	// Broken call sites: for signature/rename changes, every direct caller of
 	// the target breaks because it must be updated to the new signature/name.
 	// Collected from the raw "calls" edges into the target (excluding self
 	// edges); transitive dependents that do not call the target directly are
 	// not broken call sites.
-	brokenCallers := map[string]bool{}
+	imp.BrokenCallSites = []string{}
 	if c.Kind == ChangeSignature || c.Kind == RenameSymbol {
-		for _, e := range g.Edges {
-			if e.Kind == "calls" && e.To == c.Target && e.From != c.Target {
-				brokenCallers[e.From] = true
-			}
-		}
+		imp.BrokenCallSites = computeBrokenCallSites(g, c.Target)
 	}
-	imp.BrokenCallSites = sortedKeys(brokenCallers)
-
 	// Untested affected: the symbols the change touches that have no covering
 	// tests. The checked set is the target plus its direct callers (for
 	// signature/rename) or the target plus the transitively affected set
 	// (otherwise). It is capped at 25 symbols to bound the WhatTestsCover
 	// traversal cost. Unresolvable names are skipped.
-	untestedCandidates := map[string]bool{c.Target: true}
-	if c.Kind == ChangeSignature || c.Kind == RenameSymbol {
-		for _, id := range imp.BrokenCallSites {
-			untestedCandidates[id] = true
-		}
-	} else {
-		for _, id := range imp.Affected {
-			untestedCandidates[id] = true
-		}
-	}
-	checked := sortedKeys(untestedCandidates)
-	capped := len(checked) > 25
-	if capped {
-		checked = checked[:25]
-	}
-	untested := map[string]bool{}
-	for _, sym := range checked {
-		if _, ok := graphByID[sym]; !ok {
-			continue // unresolvable name — skip
-		}
-		if len(g.WhatTestsCover(sym)) == 0 {
-			untested[sym] = true
-		}
-	}
-	imp.UntestedAffected = sortedKeys(untested)
-
+	untestedAffected, capped, untestedCandidates := computeUntestedAffected(st, c, imp)
+	imp.UntestedAffected = untestedAffected
 	// Databases reachable from the changed symbol.
 	imp.Databases = databasesAffected(g, c.Target)
 	sort.Strings(imp.Databases)
-
 	// The architecture/historical/runtime evidence dimensions are populated by
 	// callers with external data; whatif itself leaves them empty.
 	imp.ArchitectureViolations = []string{}
 	imp.HistoricalEvidence = []string{}
 	imp.RuntimeEvidence = []string{}
 	imp.Method = "graph-traversal"
-
 	// Deterministic risk heuristic.
-	imp.Isolated = len(imp.Affected) == 0
-	switch {
-	case createsCycle:
-		imp.Risk = "high"
-	case len(imp.Services) > 0 || len(imp.Affected) > 10:
-		imp.Risk = "high"
-	case len(imp.Affected) > 0:
-		imp.Risk = "medium"
-	default:
-		imp.Risk = "low"
-	}
-
+	assessRisk(&imp, createsCycle)
 	// Lower-risk alternatives.
 	imp.Alternatives = alternatives(c)
-
 	// Mitigations.
 	imp.Mitigations = mitigations(c, imp)
-
 	// Confidence in the estimate.
 	imp.Confidence = confidence(c, imp)
-
 	imp.Recommendation = recommend(c, imp)
 	imp.Claims = []domain.Claim{recommendationClaim(c, imp)}
 	// Typed claims for the new deterministic dimensions: broken direct call
@@ -327,6 +234,132 @@ func Simulate(g *intelligence.Graph, c Change) Impact {
 	imp.Facts = facts(c, imp)
 	imp.Limitations = limitations(c, imp)
 	return imp
+}
+
+// simState bundles the graph access and the affected-set registration
+// closures shared by the per-kind simulation strategies.
+type simState struct {
+	g         *intelligence.Graph
+	graphByID map[string]domain.Node
+	collect   func([]domain.Node)
+	addNode   func(domain.Node)
+}
+
+// simulateAddSymbol handles AddSymbol and RemoveDependency. A brand-new
+// symbol has no dependents yet, so it is isolated; when a dependency is
+// removed, only the symbol whose dependency was removed may break. In both
+// cases the affected set is just the target when it resolves in the graph.
+func simulateAddSymbol(s simState, c Change) {
+	if n, ok := s.graphByID[c.Target]; ok {
+		s.addNode(n)
+	}
+}
+
+// simulateChangeSignature handles ChangeSignature and RenameSymbol. Callers
+// of the symbol may break, so affected = transitively what depends on the
+// target (same shape as RemoveSymbol), and Files also includes the symbol's
+// own file.
+func simulateChangeSignature(s simState, c Change) {
+	s.collect(s.g.WhatDependsOn(c.Target))
+	if n, ok := s.graphByID[c.Target]; ok {
+		s.addNode(n)
+	}
+}
+
+// simulateAddDependency handles AddDependency. Adding a dependency does not
+// break existing dependents unless it creates a cycle (Target now depends on
+// NewTarget while NewTarget already transitively depends on Target).
+func simulateAddDependency(s simState, c Change) bool {
+	if c.NewTarget != "" {
+		for _, dn := range s.g.WhatDoesXDependOn(c.NewTarget) {
+			if dn.ID == c.Target {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// simulateRequiresTwin handles SplitService/MoveModule/ChangeInfra — the
+// higher-level operations that cannot be fully simulated from the call graph
+// alone (they need twin/context data). It surfaces the code-graph impact of
+// the named symbol/module and returns the limitation noted in Summary.
+func simulateRequiresTwin(s simState, c Change) string {
+	s.collect(s.g.WhatDependsOn(c.Target))
+	if n, ok := s.graphByID[c.Target]; ok {
+		s.addNode(n)
+	}
+	return fmt.Sprintf("high-level change type '%s' requires twin/context data for full simulation; showing code-graph impact only", c.Kind)
+}
+
+// simulateDefault handles RemoveSymbol / ChangeDependency — everything that
+// depends on the changed symbol. For ChangeDependency, changing what a target
+// depends on does not affect the new target's other callers, so the affected
+// set must NOT include WhatDependsOn(c.NewTarget).
+func simulateDefault(s simState, c Change) {
+	s.collect(s.g.WhatDependsOn(c.Target))
+}
+
+// computeBrokenCallSites returns the direct callers of target, collected from
+// the raw "calls" edges into the target (excluding self edges). Transitive
+// dependents that do not call the target directly are not broken call sites.
+func computeBrokenCallSites(g *intelligence.Graph, target string) []string {
+	brokenCallers := map[string]bool{}
+	for _, e := range g.Edges {
+		if e.Kind == "calls" && e.To == target && e.From != target {
+			brokenCallers[e.From] = true
+		}
+	}
+	return sortedKeys(brokenCallers)
+}
+
+// computeUntestedAffected returns the affected symbols that have no covering
+// tests, whether the candidate scan was capped at 25, and the candidate set
+// that was scanned (its size feeds the capped Claims message). Candidates are
+// the target plus its direct callers (for signature/rename) or the target
+// plus the transitively affected set (otherwise). Unresolvable names are
+// skipped.
+func computeUntestedAffected(s simState, c Change, imp Impact) ([]string, bool, map[string]bool) {
+	untestedCandidates := map[string]bool{c.Target: true}
+	if c.Kind == ChangeSignature || c.Kind == RenameSymbol {
+		for _, id := range imp.BrokenCallSites {
+			untestedCandidates[id] = true
+		}
+	} else {
+		for _, id := range imp.Affected {
+			untestedCandidates[id] = true
+		}
+	}
+	checked := sortedKeys(untestedCandidates)
+	capped := len(checked) > 25
+	if capped {
+		checked = checked[:25]
+	}
+	untested := map[string]bool{}
+	for _, sym := range checked {
+		if _, ok := s.graphByID[sym]; !ok {
+			continue // unresolvable name — skip
+		}
+		if len(s.g.WhatTestsCover(sym)) == 0 {
+			untested[sym] = true
+		}
+	}
+	return sortedKeys(untested), capped, untestedCandidates
+}
+
+// assessRisk sets the isolated flag and the deterministic risk ladder.
+func assessRisk(imp *Impact, createsCycle bool) {
+	imp.Isolated = len(imp.Affected) == 0
+	switch {
+	case createsCycle:
+		imp.Risk = "high"
+	case len(imp.Services) > 0 || len(imp.Affected) > 10:
+		imp.Risk = "high"
+	case len(imp.Affected) > 0:
+		imp.Risk = "medium"
+	default:
+		imp.Risk = "low"
+	}
 }
 
 // sortedKeys returns the map's keys sorted ascending, deduplicated by the map.

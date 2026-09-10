@@ -60,7 +60,7 @@ func runOptimize(cmd string, rest []string) {
 	}
 	res, err := optimize.Prompt(prompt, attach, optimize.Options{Session: f.session, Model: f.model, Source: "cli", LLM: f.llm, Mask: f.mask, MaskNames: splitNames(f.names), Cache: f.cache, FewShot: f.fewshot})
 	if err != nil {
-		fatal("%v", err)
+		fatal("optimize: %v", err)
 	}
 	fmt.Println(res.Output)
 	if res.FromCache {
@@ -88,7 +88,7 @@ func runCompact(rest []string) {
 		if filepath.IsAbs(file) {
 			cwd, err := os.Getwd()
 			if err != nil {
-				fatal("%v", err)
+				fatal("compact: %v", err)
 			}
 			resolved, err := confineToRoot(cwd, file)
 			if err != nil {
@@ -101,13 +101,13 @@ func runCompact(rest []string) {
 	} else {
 		resolved, err := confineToRoot(f.root, file)
 		if err != nil {
-			fatal("%v", err)
+			fatal("compact: %v", err)
 		}
 		file = resolved
 	}
 	content, err := code.ReadFile(file)
 	if err != nil {
-		fatal("%v", err)
+		fatal("compact: %v", err)
 	}
 	// The default tier preserves the historical behavior: a symbolic summary.
 	// --tier full returns the whole file and --tier folded returns signatures
@@ -153,22 +153,22 @@ func runLog(rest []string) {
 	if len(rest) < 1 || rest[0] == "-" {
 		b, err = readStdin()
 		if err != nil {
-			fatal("%v", err)
+			fatal("log: %v", err)
 		}
 	} else {
 		b, err = os.ReadFile(rest[0])
 		if err != nil {
-			fatal("%v", err)
+			fatal("log: %v", err)
 		}
 	}
 	wireRecorder()
 	res, err := optimize.Log(string(b), optimize.Options{})
 	if err != nil {
-		fatal("%v", err)
+		fatal("log: %v", err)
 	}
 	fmt.Println(res.Output)
 	fmt.Fprintf(os.Stderr, "kern: %d -> %d tokens (saved %d, %.1f%%)\n", res.BeforeTokens, res.AfterTokens, res.SavedTokens, res.SavedPercent)
-
+	printSavingsFooter(os.Stderr, res.BeforeTokens, res.AfterTokens, kernctx.CostPerToken())
 }
 
 func runTokens(rest []string) {
@@ -197,7 +197,7 @@ func runBudget(rest []string) {
 	if text == "" {
 		b, err := readStdin()
 		if err != nil {
-			fatal("%v", err)
+			fatal("budget: %v", err)
 		}
 		text = string(b)
 	}
@@ -215,7 +215,7 @@ func runBudget(rest []string) {
 	// omitted) can never be mistaken for a requested cap.
 	fmt.Fprintf(os.Stderr, "kern: %d -> %d tokens (saved %d, %.1f%%, budget %d)\n", before, after, before-after, strutil.Pct(before, after), maxTokens)
 	fmt.Println(out)
-
+	printSavingsFooter(os.Stderr, before, after, kernctx.CostPerToken())
 }
 
 func runTerse(rest []string) {
@@ -228,13 +228,13 @@ func runTerse(rest []string) {
 		if args[0] == "-" {
 			b, err := readStdin()
 			if err != nil {
-				fatal("%v", err)
+				fatal("terse: %v", err)
 			}
 			text = string(b)
 		} else if fi, err := os.Stat(args[0]); err == nil && !fi.IsDir() {
 			b, err := os.ReadFile(args[0])
 			if err != nil {
-				fatal("%v", err)
+				fatal("terse: %v", err)
 			}
 			text = string(b)
 		} else {
@@ -244,7 +244,7 @@ func runTerse(rest []string) {
 	if text == "" {
 		b, err := readStdin()
 		if err != nil {
-			fatal("%v", err)
+			fatal("terse: %v", err)
 		}
 		text = string(b)
 	}
@@ -256,7 +256,7 @@ func runTerse(rest []string) {
 	after := tokenize.Count(out)
 	fmt.Fprintf(os.Stderr, "kern: %d -> %d tokens (saved %d, %.1f%%, %d filler lines dropped)\n", before, after, before-after, strutil.Pct(before, after), dropped)
 	fmt.Println(out)
-
+	printSavingsFooter(os.Stderr, before, after, kernctx.CostPerToken())
 }
 
 func runSemcache(rest []string) {
@@ -276,7 +276,7 @@ func runSemcache(rest []string) {
 			ns = args[0]
 		}
 		if err := semcache.Clear(ns); err != nil {
-			fatal("%v", err)
+			fatal("semcache: %v", err)
 		}
 		if f.json {
 			printJSON(map[string]any{"cleared": ns})
@@ -294,7 +294,7 @@ func runSemcache(rest []string) {
 		ns := args[0]
 		entries, err := semcache.Entries(ns)
 		if err != nil {
-			fatal("%v", err)
+			fatal("semcache: %v", err)
 		}
 		if len(entries) == 0 {
 			fmt.Printf("semcache %q: empty\n", ns)
@@ -312,7 +312,7 @@ func runSemcache(rest []string) {
 	default:
 		st, err := semcache.Stats()
 		if err != nil {
-			fatal("%v", err)
+			fatal("semcache: %v", err)
 		}
 		if f.json {
 			printJSON(map[string]any{"namespaces": st})
@@ -343,7 +343,7 @@ func runStats(cmd string, rest []string) {
 	_ = args
 	rec, err := stats.NewRecorder()
 	if err != nil {
-		fatal("%v", err)
+		fatal("stats: %v", err)
 	}
 	if cmd == "diff" {
 		limit := 20
@@ -352,7 +352,7 @@ func runStats(cmd string, rest []string) {
 		}
 		entries, err := rec.Entries(limit)
 		if err != nil {
-			fatal("%v", err)
+			fatal("stats: %v", err)
 		}
 		if f.limit <= 0 && len(entries) >= limit {
 			// The default 20-entry cap is silent by design only if it does not
@@ -376,7 +376,7 @@ func runStats(cmd string, rest []string) {
 	if cmd == "export" && f.csv {
 		entries, err := rec.Entries(100000)
 		if err != nil {
-			fatal("%v", err)
+			fatal("stats: %v", err)
 		}
 		w := csv.NewWriter(os.Stdout)
 		_ = w.Write([]string{"time", "operation", "source", "session", "model", "before_tokens", "after_tokens", "saved_tokens", "cost_saved_usd"})
@@ -392,7 +392,7 @@ func runStats(cmd string, rest []string) {
 	}
 	sum, err := rec.Summarize(f.days, f.session)
 	if err != nil {
-		fatal("%v", err)
+		fatal("stats: %v", err)
 	}
 	if f.json {
 		out := struct {

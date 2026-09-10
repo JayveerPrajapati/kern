@@ -16,6 +16,8 @@ import (
 	"os"
 	"strings"
 	"sync"
+
+	"github.com/JayveerPrajapati/kern/internal/config"
 )
 
 // Kind describes the rough content type, which affects density assumptions.
@@ -102,14 +104,14 @@ func (e Estimator) countKind(s string, k Kind) int {
 // Default-counter selection.
 //
 // The default is the Estimator. Callers can swap in an exact tokenizer
-// with SetDefault, or let the environment decide (InitFromEnv, or the
+// with SetDefault, or let the environment/config decide (InitFromEnv, or the
 // lazy resolution performed by the first Count call):
 //
-//	KERN_TOKENIZER = estimator | bpe | cl100k | o200k
+//	KERN_TOKENIZER (or tokenizer in .kern/config.json) = estimator | bpe | cl100k | o200k
 //	    (aliases: cl100k_base, o200k_base)
-//	KERN_MODEL     = model name; gpt-4o*/o1*/o3* select o200k,
-//	                 gpt-4*/gpt-3.5* select cl100k, anything else keeps
-//	                 the estimator
+//	KERN_MODEL (or llm.model in .kern/config.json) = model name;
+//	    gpt-4o*/o1*/o3* select o200k, gpt-4*/gpt-3.5* select cl100k,
+//	    anything else keeps the estimator
 //
 // KERN_TOKENIZER wins over KERN_MODEL. An unknown value or a failed
 // table load falls back to the Estimator with a one-line warning.
@@ -172,7 +174,7 @@ func ResetDefault() {
 
 func resolveFromEnv() Counter {
 	est := Estimator{Kind: KindGeneric}
-	if v := strings.TrimSpace(os.Getenv("KERN_TOKENIZER")); v != "" {
+	if v := strings.TrimSpace(config.String("", "KERN_TOKENIZER", "tokenizer", "")); v != "" {
 		switch strings.ToLower(v) {
 		case "estimator":
 			return est
@@ -195,7 +197,7 @@ func resolveFromEnv() Counter {
 		}
 		return est
 	}
-	model := strings.ToLower(os.Getenv("KERN_MODEL"))
+	model := strings.ToLower(config.String("", "KERN_MODEL", "llm.model", ""))
 	if model == "" {
 		return est
 	}

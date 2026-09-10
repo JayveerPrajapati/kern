@@ -8,6 +8,7 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/heal"
 	"github.com/JayveerPrajapati/kern/internal/index"
 	"github.com/JayveerPrajapati/kern/internal/optimize"
+	"github.com/JayveerPrajapati/kern/internal/pii"
 	"github.com/JayveerPrajapati/kern/internal/sandbox"
 	"github.com/JayveerPrajapati/kern/internal/script"
 	"github.com/JayveerPrajapati/kern/internal/strutil"
@@ -29,7 +30,7 @@ func runBuild(rest []string) {
 	// Building runs arbitrary host commands; it must pass the governance
 	// firewall, fail closed (same gate as the MCP tools).
 	if err := governance.CheckExec(); err != nil {
-		fatal("%v", err)
+		fatal("Build: %v", err)
 	}
 	wireRecorder()
 	ctx := context.Background()
@@ -44,7 +45,7 @@ func runBuild(rest []string) {
 		// output (usually the actual compile/test error) before exiting, and
 		// point at the timeout knob instead of a bare error.
 		fmt.Print(res.Output)
-		fatal("\nkern build: command failed (raise with --timeout N; --timeout 0 = no limit)")
+		fatal("build: command failed (raise with --timeout N; --timeout 0 = no limit)")
 	}
 	fmt.Println(res.Output)
 
@@ -65,7 +66,7 @@ func runValidate(rest []string) {
 	// Validation runs the detected or user-supplied command (arbitrary host
 	// code); it must pass the governance firewall, fail closed.
 	if err := governance.CheckExec(); err != nil {
-		fatal("%v", err)
+		fatal("Validate: %v", err)
 	}
 	var c *validate.Command
 	if f.cmd != "" {
@@ -78,7 +79,7 @@ func runValidate(rest []string) {
 		var err error
 		c, err = validate.Detect(root)
 		if err != nil {
-			fatal("%v", err)
+			fatal("Validate: %v", err)
 		}
 	}
 	if f.json {
@@ -98,6 +99,7 @@ func runValidate(rest []string) {
 			"output":      res.Output,
 		})
 		if !res.OK {
+			fmt.Fprintln(os.Stderr, "kern: sandbox command failed — see the JSON result above")
 			panic(exitError{code: 1})
 		}
 		return
@@ -204,7 +206,7 @@ func runUdiff(rest []string) {
 	}
 	if f.out != "" {
 		if err := os.WriteFile(f.out, []byte(u), 0o644); err != nil {
-			fatal("%v", err)
+			fatal("Udiff: %v", err)
 		}
 		fmt.Printf("wrote diff to %s\n", f.out)
 		return
@@ -259,7 +261,7 @@ func runSandbox(rest []string) {
 	// Sandboxed commands execute arbitrary host code; they must pass the
 	// governance firewall, fail closed.
 	if err := governance.CheckExec(); err != nil {
-		fatal("%v", err)
+		fatal("Sandbox: %v", err)
 	}
 	if f.json {
 		res := sandbox.Run(context.Background(), root, cmdParts[0], cmdParts[1:], toolTimeout(f))
@@ -322,7 +324,7 @@ func runExec(rest []string) {
 	// Executing a script runs arbitrary code; it must pass the governance
 	// firewall, fail closed (same gate as the MCP kern_exec tool).
 	if err := governance.CheckExec(); err != nil {
-		fatal("%v", err)
+		fatal("Exec: %v", err)
 	}
 	// Script source: positional args win. A lone "-" or a piped stdin
 	// reads the script from stdin; a path to an existing file runs that
@@ -333,7 +335,7 @@ func runExec(rest []string) {
 	case len(args) > 0 && args[0] == "-":
 		b, err := readStdin()
 		if err != nil {
-			fatal("%v", err)
+			fatal("Exec: %v", err)
 		}
 		code = string(b)
 	case len(args) > 0:
@@ -376,18 +378,37 @@ func runExec(rest []string) {
 		if f.stdin == "-" {
 			b, err := readStdin()
 			if err != nil {
-				fatal("%v", err)
+				fatal("Exec: %v", err)
 			}
 			run.Stdin = string(b)
 		} else {
 			b, err := os.ReadFile(f.stdin)
 			if err != nil {
-				fatal("%v", err)
+				fatal("Exec: %v", err)
 			}
 			run.Stdin = string(b)
 		}
 	}
 	res := script.RunScript(run)
+	// Mask secrets/PII in script output before it reaches the terminal or
+	// JSON — same posture as the MCP kern_exec tool (internal/mcp/
+	// handlers_exec.go masks res.Stdout before returning). Without this,
+	// CLI-driven automation piping `kern exec` output into prompts/contexts
+	// silently lost the masking guarantee the MCP surface provides.
+	masked := 0
+	if res.Stdout != "" {
+		m := pii.Mask(res.Stdout)
+		res.Stdout = m.Text
+		masked += m.Replaced
+	}
+	if res.Stderr != "" {
+		m := pii.Mask(res.Stderr)
+		res.Stderr = m.Text
+		masked += m.Replaced
+	}
+	if masked > 0 {
+		fmt.Fprintf(os.Stderr, "kern exec: masked %d secret(s) in script output (kern mask for details)\n", masked)
+	}
 	if f.json {
 		printJSON(res)
 		if res.Err != nil {

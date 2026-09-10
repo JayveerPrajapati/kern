@@ -69,9 +69,11 @@ var entryRules = map[string][]entryRule{
 	},
 }
 
-// entrySym builds a standalone framework entry-point symbol.
+// entrySym builds a standalone framework entry-point symbol. Entry points are
+// detected through regex route/annotation heuristics rather than declarations,
+// so they carry LOW confidence.
 func entrySym(rel, lang, framework, name, route string, line int) Symbol {
-	return Symbol{Kind: "entry", Name: name, Entry: true, Framework: framework, Route: route, File: rel, Line: line, Lang: lang}
+	return Symbol{Kind: "entry", Name: name, Entry: true, Framework: framework, Route: route, File: rel, Line: line, Lang: lang, Confidence: ConfidenceLow}
 }
 
 func groupAt(m []string, g int) string {

@@ -339,7 +339,10 @@ func (s *TaskService) defaultWorkflowStep() func(action string, t *agent.Task) (
 // stageOutcome renders a deterministic outcome for a specialist role stage from
 // the task's real analyzed data (plan steps, affected components, risks,
 // required validations). It is the coordination-level execution for stages
-// whose heavy creative machinery lives in the closed loop.
+// whose heavy creative machinery lives in the closed loop. The rendered
+// outcome is a SIMULATION — the stage's real work does not run here (the
+// closed loop and its StepFuncs execute it) — so every string is labeled
+// "simulated:" to never read as if the specialist actually executed.
 func (s *TaskService) stageOutcome(action string, t *agent.Task) string {
 	var steps, components, tests, risks int
 	if t.Plan != nil {
@@ -350,22 +353,22 @@ func (s *TaskService) stageOutcome(action string, t *agent.Task) string {
 	risks = len(t.Risks)
 	switch action {
 	case "code":
-		return fmt.Sprintf("code stage by coder: implement plan — %d steps across %d affected components", steps, components)
+		return fmt.Sprintf("simulated code stage by coder: implement plan — %d steps across %d affected components (real execution happens via kern do / the closed loop)", steps, components)
 	case "verify":
-		return fmt.Sprintf("verify stage by reviewer: run %d required validations (go build ./... + tests)", tests)
+		return fmt.Sprintf("simulated verify stage by reviewer: %d required validations would run (go build ./... + tests); real execution happens via kern do / the closed loop", tests)
 	case "pr":
-		return fmt.Sprintf("pr stage by reviewer: open pull request for the change (%s)", s.prProvider)
+		return fmt.Sprintf("simulated pr stage by reviewer: a pull request would be opened for the change (%s)", s.prProvider)
 	case "review":
-		return fmt.Sprintf("review stage by reviewer: review change against %d risks and %d affected components", risks, components)
+		return fmt.Sprintf("simulated review stage by reviewer: review change against %d risks and %d affected components", risks, components)
 	case "security":
-		return fmt.Sprintf("security stage by security: scan change for %d identified risks", risks)
+		return fmt.Sprintf("simulated security stage by security: scan change for %d identified risks", risks)
 	case "test":
-		return fmt.Sprintf("test stage by tester: run %d required tests for the change", tests)
+		return fmt.Sprintf("simulated test stage by tester: %d required tests would run for the change", tests)
 	case "sre":
-		return fmt.Sprintf("sre stage by sre: assess deployability of %d affected components", components)
+		return fmt.Sprintf("simulated sre stage by sre: assess deployability of %d affected components", components)
 	case "architect":
-		return fmt.Sprintf("architect stage by architect: design change across %d affected components", components)
+		return fmt.Sprintf("simulated architect stage by architect: design change across %d affected components", components)
 	default:
-		return fmt.Sprintf("%s stage: executed by specialist", action)
+		return fmt.Sprintf("simulated %s stage: executed by specialist", action)
 	}
 }

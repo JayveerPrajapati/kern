@@ -3,8 +3,7 @@
 package governance
 
 import (
-	"os"
-	"syscall"
+	"github.com/JayveerPrajapati/kern/internal/flock"
 )
 
 // lockAuditFile acquires a blocking advisory lock on the audit store's lock
@@ -13,13 +12,9 @@ import (
 // (flock releases automatically on close) and must be called exactly once
 // after the critical section.
 func lockAuditFile(path string) (unlock func(), err error) {
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+	f, err := flock.Lock(path)
 	if err != nil {
 		return nil, err
 	}
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
-		f.Close()
-		return nil, err
-	}
-	return func() { f.Close() }, nil
+	return func() { _ = flock.Release(f) }, nil
 }

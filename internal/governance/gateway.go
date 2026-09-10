@@ -35,15 +35,27 @@ func (g *ToolGateway) Evaluate(agentID, taskID, resource, action string, boundar
 		return false, domain.Risk{Level: domain.RiskCritical, Blocked: true}, nil, err
 	}
 
-	// 2. Firewall policy check.
-	allowed, risk, approval, fwErr := g.firewall.Check(agentID, resource, action)
-	if fwErr != nil {
-		g.logAudit(taskID, "DENY", fwErr.Error())
-		return false, risk, nil, fmt.Errorf("tool gateway: firewall denied: %w", fwErr)
-	}
-	if !allowed {
-		g.logAudit(taskID, "DENY", "firewall policy denied")
-		return false, risk, nil, fmt.Errorf("tool gateway: firewall policy denied for agent=%s resource=%s action=%s", agentID, resource, action)
+	// 2. Firewall policy check. A nil firewall makes the gateway budget-only
+	// (skip the policy gate): the MCP choke point wires a gateway without a
+	// firewall because per-call firewalls are built separately there, and the
+	// budget is the only dimension it enforces. Existing callers that pass a
+	// real firewall are unaffected.
+	var allowed bool
+	var risk domain.Risk
+	var approval *domain.Approval
+	if g.firewall != nil {
+		var fwErr error
+		allowed, risk, approval, fwErr = g.firewall.Check(agentID, resource, action)
+		if fwErr != nil {
+			g.logAudit(taskID, "DENY", fwErr.Error())
+			return false, risk, nil, fmt.Errorf("tool gateway: firewall denied: %w", fwErr)
+		}
+		if !allowed {
+			g.logAudit(taskID, "DENY", "firewall policy denied")
+			return false, risk, nil, fmt.Errorf("tool gateway: firewall policy denied for agent=%s resource=%s action=%s", agentID, resource, action)
+		}
+	} else {
+		allowed = true
 	}
 
 	// 3. Safety budget check.
@@ -122,20 +134,29 @@ func (g *ToolGateway) EvaluateScopedFull(agentID, taskID, resource, action, serv
 		g.logAudit(taskID, "DENY", deny.Reason)
 		return domain.GatewayResult{Decision: domain.DecisionDenied, Risk: deny.Risk, Deny: deny, Budget: budget}
 	}
-	// Firewall policy gate.
-	allowed, risk, approval, fwErr := g.firewall.Check(agentID, resource, action)
-	if fwErr != nil || !allowed {
-		reason := "firewall policy denied"
-		if fwErr != nil {
-			reason = fwErr.Error()
+	// Firewall policy gate. A nil firewall makes the gateway budget-only
+	// (skip the policy gate); see Evaluate for the rationale.
+	var allowed bool
+	var risk domain.Risk
+	var approval *domain.Approval
+	if g.firewall != nil {
+		var fwErr error
+		allowed, risk, approval, fwErr = g.firewall.Check(agentID, resource, action)
+		if fwErr != nil || !allowed {
+			reason := "firewall policy denied"
+			if fwErr != nil {
+				reason = fwErr.Error()
+			}
+			deny := &domain.DenyReason{
+				Stage: "firewall", AgentID: agentID, TaskID: taskID, Resource: resource, Action: action,
+				Reason: reason, Risk: risk, RequiredApproval: approval,
+				Policy: "firewall.permission", SafeAlternative: "request the required permission or obtain approval",
+			}
+			g.logAudit(taskID, "DENY", reason)
+			return domain.GatewayResult{Decision: domain.DecisionDenied, Risk: risk, Approval: approval, Deny: deny, Budget: budget}
 		}
-		deny := &domain.DenyReason{
-			Stage: "firewall", AgentID: agentID, TaskID: taskID, Resource: resource, Action: action,
-			Reason: reason, Risk: risk, RequiredApproval: approval,
-			Policy: "firewall.permission", SafeAlternative: "request the required permission or obtain approval",
-		}
-		g.logAudit(taskID, "DENY", reason)
-		return domain.GatewayResult{Decision: domain.DecisionDenied, Risk: risk, Approval: approval, Deny: deny, Budget: budget}
+	} else {
+		allowed = true
 	}
 	// Budget gate -> PAUSE.
 	if budget != nil {

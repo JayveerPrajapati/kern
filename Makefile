@@ -45,6 +45,15 @@ bench:
 install: build
 	mkdir -p $${HOME}/.local/bin
 	cp $(BIN)/kern $(BIN)/kern-mcp $(BIN)/kern-server $${HOME}/.local/bin/
+# macOS Gatekeeper SIGKILLs adhoc-signed binaries carrying the
+# com.apple.provenance xattr on first launch (exit 137, empty output).
+# Re-sign after copy and strip both quarantine and provenance xattrs so
+# agents can launch kern-mcp without a Gatekeeper kill.
+ifeq ($(shell uname -s),Darwin)
+	codesign --force --sign - $${HOME}/.local/bin/kern $${HOME}/.local/bin/kern-mcp $${HOME}/.local/bin/kern-server 2>/dev/null || true
+	xattr -dr com.apple.quarantine $${HOME}/.local/bin/kern $${HOME}/.local/bin/kern-mcp $${HOME}/.local/bin/kern-server 2>/dev/null || true
+	xattr -dr com.apple.provenance $${HOME}/.local/bin/kern $${HOME}/.local/bin/kern-mcp $${HOME}/.local/bin/kern-server 2>/dev/null || true
+endif
 
 # opencode hooks: MCP config + auto-discovered plugin + agent rules
 hooks: build
@@ -66,19 +75,19 @@ release: clean
 		GOOS=$$os GOARCH=$$arch go build -tags sqlite $(GOFLAGS) -ldflags "$(RELEASE_LDFLAGS)" -o $(BIN)/kern-$$os-$$arch/kern ./cmd/kern; \
 		GOOS=$$os GOARCH=$$arch go build -tags sqlite $(GOFLAGS) -ldflags "$(RELEASE_LDFLAGS)" -o $(BIN)/kern-$$os-$$arch/kern-mcp ./cmd/kern-mcp; \
 		GOOS=$$os GOARCH=$$arch go build -tags sqlite $(GOFLAGS) -ldflags "$(RELEASE_LDFLAGS)" -o $(BIN)/kern-$$os-$$arch/kern-server ./cmd/kern-server; \
-		tar -C $(BIN) -czf $(BIN)/kern-$$os-$$arch.tar.gz kern-$$os-$$arch/; \
+		tar -C $(BIN)/kern-$$os-$$arch -czf $(BIN)/kern-$$os-$$arch.tar.gz .; \
 		rm -rf $(BIN)/kern-$$os-$$arch; \
 	done; \
 	mkdir -p $(BIN)/kern-windows-amd64; \
 	GOOS=windows GOARCH=amd64 go build -tags sqlite $(GOFLAGS) -ldflags "$(RELEASE_LDFLAGS)" -o $(BIN)/kern-windows-amd64/kern.exe ./cmd/kern; \
 	GOOS=windows GOARCH=amd64 go build -tags sqlite $(GOFLAGS) -ldflags "$(RELEASE_LDFLAGS)" -o $(BIN)/kern-windows-amd64/kern-mcp.exe ./cmd/kern-mcp; \
 	GOOS=windows GOARCH=amd64 go build -tags sqlite $(GOFLAGS) -ldflags "$(RELEASE_LDFLAGS)" -o $(BIN)/kern-windows-amd64/kern-server.exe ./cmd/kern-server; \
-	cd $(BIN) && zip -q -r kern-windows-amd64.zip kern-windows-amd64/ && rm -rf kern-windows-amd64
+	cd $(BIN)/kern-windows-amd64 && zip -q -r ../kern-windows-amd64.zip . && cd .. && rm -rf kern-windows-amd64
 	mkdir -p $(BIN)/kern-windows-arm64; \
 	GOOS=windows GOARCH=arm64 go build -tags sqlite $(GOFLAGS) -ldflags "$(RELEASE_LDFLAGS)" -o $(BIN)/kern-windows-arm64/kern.exe ./cmd/kern; \
 	GOOS=windows GOARCH=arm64 go build -tags sqlite $(GOFLAGS) -ldflags "$(RELEASE_LDFLAGS)" -o $(BIN)/kern-windows-arm64/kern-mcp.exe ./cmd/kern-mcp; \
 	GOOS=windows GOARCH=arm64 go build -tags sqlite $(GOFLAGS) -ldflags "$(RELEASE_LDFLAGS)" -o $(BIN)/kern-windows-arm64/kern-server.exe ./cmd/kern-server; \
-	cd $(BIN) && zip -q -r kern-windows-arm64.zip kern-windows-arm64/ && rm -rf kern-windows-arm64
+	cd $(BIN)/kern-windows-arm64 && zip -q -r ../kern-windows-arm64.zip . && cd .. && rm -rf kern-windows-arm64
 	@echo "release assets in $(BIN):"; ls $(BIN)/*.tar.gz $(BIN)/*.zip
 
 dist: release

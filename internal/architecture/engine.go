@@ -228,8 +228,8 @@ func collectEdges(ix *index.Index, files []string) []edge {
 		fromDir := filepath.Dir(f)
 		for _, s := range ix.SymbolsByFile[f] {
 			full := s.FullName()
-			for _, c := range ix.Calls[full] {
-				resolved := resolveCallee(meta, c)
+			for _, ce := range ix.Calls[full] {
+				resolved := resolveCallee(meta, ce.Target)
 				if resolved == "" || resolved == full {
 					continue
 				}
@@ -252,7 +252,7 @@ func collectEdges(ix *index.Index, files []string) []edge {
 					if toDir == "" || toDir == fromDir {
 						continue
 					}
-					if importMatches(imp, toDir) {
+					if importMatches(imp.Path, toDir) {
 						add(fromDir, toDir, f, toDir+"/", "", 0)
 					}
 				}

@@ -2,6 +2,7 @@ package verification
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io/fs"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"github.com/JayveerPrajapati/kern/internal/ci"
+	"github.com/JayveerPrajapati/kern/internal/config"
 	"github.com/JayveerPrajapati/kern/internal/eventbus"
 	"github.com/JayveerPrajapati/kern/internal/evidence"
 	"github.com/JayveerPrajapati/kern/internal/index"
@@ -207,10 +209,20 @@ func (e *Engine) Verify(types []string) VerificationResult {
 // VerifyBuild runs the build verification (wraps v1 validate/validate).
 func (e *Engine) VerifyBuild() *BuildResult {
 	res := &BuildResult{}
-	cmd, err := validate.Detect(e.root)
-	if err != nil {
-		res.Output = err.Error()
-		return res
+	// Polyglot (C2): the build command comes from per-language detection
+	// (validate.Detect) and can be overridden with `verify.build` in
+	// .kern/config.json (or KERN_VERIFY_BUILD) as a shell command string.
+	var cmd *validate.Command
+	if override := config.String(e.root, "KERN_VERIFY_BUILD", "verify.build", ""); override != "" {
+		c, a := splitVerifyCommand(override)
+		cmd = &validate.Command{Name: override, Cmd: c, Args: a, Kind: "build"}
+	} else {
+		detected, err := validate.Detect(e.root)
+		if err != nil {
+			res.Output = err.Error()
+			return res
+		}
+		cmd = detected
 	}
 	vr := validate.Run(context.Background(), e.root, cmd, buildTimeout)
 	res.Output = vr.Output
@@ -255,11 +267,38 @@ func (e *Engine) VerifyCI() CIResult {
 	return res
 }
 
-// VerifyTests runs test verification via the sandbox execution layer
-// (`go test ./...`) and parses the verbose output into counts.
+// VerifyTests runs test verification via the sandbox execution layer and
+// parses the verbose output into counts. Polyglot (C2): the test command is
+// resolved from the project type (validate.DetectKind) instead of hard-coding
+// `go test`, and can be overridden with `verify.test` in .kern/config.json
+// (or KERN_VERIFY_TEST) as a shell command string. PASS/FAIL/SKIP counts are
+// only parsed for `go test -v` output; other runners report OK from the exit
+// status.
 func (e *Engine) VerifyTests() *TestResult {
 	res := &TestResult{Package: "./..."}
-	sr := sandbox.Run(context.Background(), e.root, "go", []string{"test", "-v", "./..."}, testTimeout)
+	cmd, args := "go", []string{"test", "-v", "./..."}
+	if override := config.String(e.root, "KERN_VERIFY_TEST", "verify.test", ""); override != "" {
+		cmd, args = splitVerifyCommand(override)
+		res.Package = override
+	} else if c, err := validate.DetectKind(e.root, "test"); err == nil {
+		if c.Cmd == "go" {
+			// Keep -v so the PASS/FAIL/SKIP count parsing below works.
+			args = []string{"test", "-v", "./..."}
+		} else {
+			cmd, args = c.Cmd, c.Args
+		}
+		res.Package = c.Name
+		// npm test fails outright when package.json has no "test" script —
+		// that is an absent suite, not a failing one. Report a clean skip
+		// instead of a false FAIL.
+		if c.Cmd == "npm" && !npmHasTestScript(e.root) {
+			res.OK = true
+			res.Output = "skipped: package.json has no test script"
+			res.Claims = append(res.Claims, evidence.FromTestResult(res.Package, res.OK, res.Output))
+			return res
+		}
+	}
+	sr := sandbox.Run(context.Background(), e.root, cmd, args, testTimeout)
 	res.Output = sr.Output
 	res.Duration = sr.Duration
 	res.OK = sr.OK
@@ -315,7 +354,20 @@ func (e *Engine) VerifyE2ETests() *E2ETestResult {
 // (a line of vet output) makes OK false.
 func (e *Engine) VerifyStaticAnalysis() *StaticAnalysisResult {
 	res := &StaticAnalysisResult{Tool: "go vet"}
-	sr := sandbox.Run(context.Background(), e.root, "go", []string{"vet", "./..."}, testTimeout)
+	// Polyglot (C2): static analysis defaults to `go vet` for Go modules and
+	// is otherwise opt-in via `verify.lint` in .kern/config.json (or
+	// KERN_VERIFY_LINT) — ecosystem linters that need project setup (npm
+	// run lint, golangci-lint) would false-fail when unconfigured, so they
+	// are never auto-detected.
+	cmd, args := "go", []string{"vet", "./..."}
+	if override := config.String(e.root, "KERN_VERIFY_LINT", "verify.lint", ""); override != "" {
+		cmd, args = splitVerifyCommand(override)
+		res.Tool = override
+	} else if c, err := validate.DetectKind(e.root, "lint"); err == nil && c.Cmd == "go" {
+		cmd, args = c.Cmd, c.Args
+		res.Tool = c.Name
+	}
+	sr := sandbox.Run(context.Background(), e.root, cmd, args, testTimeout)
 	res.Output = sr.Output
 	res.Duration = sr.Duration
 	for _, line := range strings.Split(sr.Output, "\n") {
@@ -368,6 +420,35 @@ func (e *Engine) VerifyPerformance() *PerformanceResult {
 
 // hasE2ETests scans root for Go test files carrying the "e2e" build constraint
 // or an e2e test suffix. It drives the VerifyE2ETests nil/not-run behavior.
+// splitVerifyCommand splits a user-supplied verify override (from
+// .kern/config.json or its env twin) into a binary and arguments on
+// whitespace. Quoting is not supported — the override is a flat command
+// string like "npm test --silent".
+func splitVerifyCommand(s string) (string, []string) {
+	fields := strings.Fields(s)
+	if len(fields) == 0 {
+		return "", nil
+	}
+	return fields[0], fields[1:]
+}
+
+// npmHasTestScript reports whether the package.json at root declares a
+// "test" script. npm test exits non-zero when the script is absent, which
+// would report an absent suite as a failing one.
+func npmHasTestScript(root string) bool {
+	data, err := os.ReadFile(filepath.Join(root, "package.json"))
+	if err != nil {
+		return false
+	}
+	var pkg struct {
+		Scripts map[string]string `json:"scripts"`
+	}
+	if err := json.Unmarshal(data, &pkg); err != nil {
+		return false
+	}
+	return pkg.Scripts["test"] != ""
+}
+
 func hasE2ETests(root string) bool {
 	found := false
 	_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
@@ -569,8 +650,8 @@ func (e *Engine) VerifyDependency(target string) *DependencyResult {
 	edges := 0
 	for src, callees := range ix.Calls {
 		nodes[src] = true
-		for _, c := range callees {
-			nodes[c] = true
+		for _, ce := range callees {
+			nodes[ce.Target] = true
 			edges++
 		}
 	}

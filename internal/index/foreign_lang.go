@@ -193,10 +193,10 @@ var (
 // syntax is a simple single-line statement (currently Java). Go imports are
 // extracted by goast.go; other languages are not yet covered. Returns nil
 // when the language has no import extraction.
-func foreignImports(src []byte, lang string) []string {
+func foreignImports(src []byte, lang string) []ImportEdge {
 	switch lang {
 	case "java":
-		var out []string
+		var out []ImportEdge
 		for _, ln := range bytes.Split(src, []byte("\n")) {
 			m := reJavaImport.FindSubmatch(ln)
 			if m == nil {
@@ -205,7 +205,9 @@ func foreignImports(src []byte, lang string) []string {
 			line := string(ln)
 			isStatic := strings.HasPrefix(strings.TrimSpace(line), "import static")
 			if pkg := javaPackagePath(string(m[1]), isStatic); pkg != "" {
-				out = append(out, pkg)
+				// Java import statements are single-line, anchored and
+				// comment-stripped: as reliable as the Go AST imports.
+				out = append(out, ImportEdge{Path: pkg, Confidence: ConfidenceHigh})
 			}
 		}
 		if len(out) == 0 {
@@ -237,7 +239,7 @@ func javaPackagePath(full string, isStatic bool) string {
 	return full
 }
 
-func extractForeign(rel string, src []byte, lang string) ([]Symbol, map[string][]string, map[string][]string, *Pkg, error) {
+func extractForeign(rel string, src []byte, lang string) ([]Symbol, map[string][]CallEdge, map[string][]string, *Pkg, error) {
 	// Try tree-sitter first if available. Tree-sitter handles definitions and
 	// call edges precisely; entry points (routes, annotations) still come from
 	// the regex entry rules, so merge them in to keep routes searchable.
@@ -278,7 +280,7 @@ func extractForeign(rel string, src []byte, lang string) ([]Symbol, map[string][
 		return nil, nil, nil, nil, nil
 	}
 	f := analyze(src, spec)
-	calls := map[string][]string{}
+	calls := map[string][]CallEdge{}
 	inherits := map[string][]string{}
 	var syms []Symbol
 	var types []typeDecl
@@ -300,11 +302,12 @@ func extractForeign(rel string, src []byte, lang string) ([]Symbol, map[string][
 		}
 		name := m[len(m)-1]
 		sym := Symbol{
-			Kind: rule.kind,
-			Name: name,
-			File: rel,
-			Line: i + 1,
-			Lang: lang,
+			Kind:       rule.kind,
+			Name:       name,
+			File:       rel,
+			Line:       i + 1,
+			Lang:       lang,
+			Confidence: ConfidenceHigh,
 		}
 		bodyEnd := bodyEndFor(i, f, spec)
 		if bodyEnd > 0 {
@@ -428,7 +431,7 @@ func enclosingType(line int, types []typeDecl) string {
 	return ""
 }
 
-func scanCalls(f *ffile, i int, owner string, calls map[string][]string, spec *langSpec) {
+func scanCalls(f *ffile, i int, owner string, calls map[string][]CallEdge, spec *langSpec) {
 	scanCallsInner(f, i, owner, calls, spec, nil)
 }
 
@@ -436,11 +439,11 @@ func scanCalls(f *ffile, i int, owner string, calls map[string][]string, spec *l
 // per-method local-types map before recording: v.method(...) is recorded as
 // Type.method(...) when v is a known local of type Type. It drives Java's
 // "resolved" precision tier (see java_resolve.go).
-func scanCallsResolved(f *ffile, i int, owner string, calls map[string][]string, spec *langSpec, lt map[string]string) {
+func scanCallsResolved(f *ffile, i int, owner string, calls map[string][]CallEdge, spec *langSpec, lt map[string]string) {
 	scanCallsInner(f, i, owner, calls, spec, lt)
 }
 
-func scanCallsInner(f *ffile, i int, owner string, calls map[string][]string, spec *langSpec, lt map[string]string) {
+func scanCallsInner(f *ffile, i int, owner string, calls map[string][]CallEdge, spec *langSpec, lt map[string]string) {
 	trimmed := strings.TrimSpace(f.lines[i])
 	if trimmed == "" || f.com[i] {
 		return
@@ -479,17 +482,20 @@ func scanCallsInner(f *ffile, i int, owner string, calls map[string][]string, sp
 		if len(full) > 80 {
 			full = full[:80]
 		}
-		calls[owner] = append(calls[owner], full)
+		// Regex-extracted calls are name-heuristic: the pattern can match
+		// inside strings/edge cases, and callees are never type-resolved
+		// except through the Java local-types tier. MEDIUM either way.
+		calls[owner] = append(calls[owner], CallEdge{Target: full, Confidence: ConfidenceMedium})
 	}
 }
 
-func dedupeCalls(calls map[string][]string) {
+func dedupeCalls(calls map[string][]CallEdge) {
 	for k, v := range calls {
 		seen := map[string]bool{}
 		out := v[:0]
 		for _, c := range v {
-			if !seen[c] {
-				seen[c] = true
+			if !seen[c.Target] {
+				seen[c.Target] = true
 				out = append(out, c)
 			}
 		}

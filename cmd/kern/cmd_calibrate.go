@@ -35,6 +35,6 @@ func runCalibrate(rest []string) {
 	}
 
 	if err := calibrate.Run(root, f.commits, thr, os.Stdout); err != nil {
-		fatal("%v", err)
+		fatal("Calibrate: %v", err)
 	}
 }

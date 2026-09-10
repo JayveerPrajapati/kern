@@ -12,9 +12,10 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"strconv"
 	"strings"
 	"time"
+
+	"github.com/JayveerPrajapati/kern/internal/config"
 )
 
 // maxOutputBytes caps captured command output (8 KiB) so a chatty deploy tool
@@ -138,20 +139,19 @@ func (d *ShellDeployer) Deploy(ctx context.Context, req DeployRequest) (DeployRe
 	return res, nil
 }
 
-// NewDeployerFromEnv resolves a deployer from the environment. If
-// KERN_DEPLOY_COMMAND is set it returns a ShellDeployer (with an optional
-// KERN_DEPLOY_TIMEOUT in seconds); otherwise it returns the NoopDeployer so v1
-// behavior is preserved when nothing is wired.
+// NewDeployerFromEnv resolves a deployer from the environment or
+// .kern/config.json. If KERN_DEPLOY_COMMAND (deploy.command) is set it returns
+// a ShellDeployer (with an optional KERN_DEPLOY_TIMEOUT / deploy.timeout Go
+// duration, default 5m); otherwise it returns the NoopDeployer so v1 behavior
+// is preserved when nothing is wired.
 func NewDeployerFromEnv() Deployer {
-	cmd := os.Getenv("KERN_DEPLOY_COMMAND")
+	cmd := config.String("", "KERN_DEPLOY_COMMAND", "deploy.command", "")
 	if strings.TrimSpace(cmd) == "" {
 		return NoopDeployer{}
 	}
 	sd := &ShellDeployer{Command: cmd, Timeout: defaultTimeout}
-	if v := os.Getenv("KERN_DEPLOY_TIMEOUT"); v != "" {
-		if secs, err := strconv.Atoi(v); err == nil && secs > 0 {
-			sd.Timeout = time.Duration(secs) * time.Second
-		}
+	if d := config.Duration("", "KERN_DEPLOY_TIMEOUT", "deploy.timeout", defaultTimeout); d > 0 {
+		sd.Timeout = d
 	}
 	return sd
 }

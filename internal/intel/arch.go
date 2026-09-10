@@ -75,7 +75,7 @@ func AnalyzeArchitecture(ix *index.Index) Architecture {
 			if d := dirOf(fileMap, s); d != "" {
 				packages[d] = true
 			}
-			if n := len(prodCallers(ix, s)); n > best {
+			if n := len(prodCallersWithFileMap(ix, s, fileMap)); n > best {
 				best = n
 				hub = s
 			}

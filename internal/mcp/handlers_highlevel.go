@@ -10,11 +10,15 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/governance"
 	"github.com/JayveerPrajapati/kern/internal/loop"
 	"github.com/JayveerPrajapati/kern/internal/pii"
+	"github.com/JayveerPrajapati/kern/internal/profiles"
 	"github.com/JayveerPrajapati/kern/internal/runtime"
 	"github.com/JayveerPrajapati/kern/internal/skills"
 	"github.com/JayveerPrajapati/kern/internal/verification"
 	"github.com/JayveerPrajapati/kern/internal/whatif"
+	"path/filepath"
+	"regexp"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -37,11 +41,25 @@ func (s *Server) handleAnalyze(ctx context.Context, args map[string]any) (string
 		// (context packet, risks, evidence) is persisted. The task ID is
 		// appended to the output so the caller can reference it later.
 		ts := app.NewTaskService(p, nil).WithPRProvider(app.AutoPRProvider())
-		t, text, err := ts.Analyze(change)
+		var t *agent.Task
+		var text string
+		if lensName := argString(args, "lens"); lensName != "" {
+			t, text, err = ts.AnalyzeWithLens(change, lensName)
+		} else {
+			t, text, err = ts.Analyze(change)
+		}
 		if err != nil {
 			return "", err
 		}
-		return "ANALYSIS for: " + change + "\n" + text + fmt.Sprintf("\n[task: %s — state: %s]\n", t.ID, t.State), nil
+		out := "ANALYSIS for: " + change + "\n" + text + fmt.Sprintf("\n[task: %s — state: %s]\n", t.ID, t.State)
+		if profileName := argString(args, "profile"); profileName != "" {
+			p, ok := profiles.NewRegistryWithUserProfiles(root).Select(profileName)
+			if !ok {
+				return "", fmt.Errorf("unknown profile %q", profileName)
+			}
+			out = profiles.ApplyProfile(p, out)
+		}
+		return out, nil
 
 	}
 }
@@ -247,6 +265,33 @@ func (s *Server) handleImpact(ctx context.Context, args map[string]any) (string,
 	}
 }
 
+// handleRisk serves kern_risk: the governance risk assessment for a proposed
+// change — the same TaskService.Risk behind the CLI `kern risk` command and
+// REST POST /v1/risk, so all three surfaces agree (D3: the tool was the only
+// missing sibling of kern_impact / kern_what_if).
+func (s *Server) handleRisk(ctx context.Context, args map[string]any) (string, error) {
+	{
+		root := argString(args, "root")
+		if root == "" {
+			root = "."
+		}
+		change := argString(args, "change")
+		if change == "" {
+			return "", fmt.Errorf("change is required")
+		}
+		p, err := s.platformFor(ctx, root)
+		if err != nil {
+			return "", err
+		}
+		ts := app.NewTaskService(p, nil).WithPRProvider(app.AutoPRProvider())
+		_, text, err := ts.Risk(change)
+		if err != nil {
+			return "", err
+		}
+		return "RISK for: " + change + "\n" + text, nil
+	}
+}
+
 func (s *Server) handleAgents(ctx context.Context, args map[string]any) (string, error) {
 	{
 		root := resolveRoot(argString(args, "root"))
@@ -298,6 +343,57 @@ func (s *Server) handleLoop(ctx context.Context, args map[string]any) (string, e
 		}
 		ts := app.NewTaskService(p, nil).WithPRProvider(app.AutoPRProvider())
 		t, res, err := ts.RunLoop(intent, level)
+		if err != nil {
+			return "", err
+		}
+		var lb strings.Builder
+		fmt.Fprintf(&lb, "intent: %s\n", res.Intent)
+		fmt.Fprintf(&lb, "level: %s\n", res.Level)
+		for _, st := range res.Stages {
+			fmt.Fprintf(&lb, "%s: %s", st.Stage, st.Status)
+			if st.Output != "" {
+				fmt.Fprintf(&lb, " (%s)", st.Output)
+			}
+			fmt.Fprintln(&lb)
+		}
+		fmt.Fprintf(&lb, "deployed: %v\n", res.Deployed)
+		fmt.Fprintf(&lb, "observed-healthy: %v\n", res.ObservedHealthy)
+		if res.Learned != nil {
+			fmt.Fprintf(&lb, "learned: %s\n", res.Learned.ID)
+		}
+		fmt.Fprintf(&lb, "\n[task: %s — state: %s]\n", t.ID, t.State)
+		return lb.String(), nil
+
+	}
+}
+
+// handleDo is the MCP counterpart of `kern do`: the autonomous "Implement X"
+// closed loop. Unlike kern_loop (read-only no-op stages), it wires the LLM
+// coder + planner (provider-neutral factory, default local Ollama) as the
+// default stage handlers, so an agent can drive
+// understand→remember→plan→code→verify→protect→observe→learn from a single
+// call. Default level L2 (sandbox code); L4 adds deploy-with-approval.
+func (s *Server) handleDo(ctx context.Context, args map[string]any) (string, error) {
+	{
+		root := resolveRoot(argString(args, "root"))
+		intent := argString(args, "intent")
+		if intent == "" {
+			return "", fmt.Errorf("intent is required")
+		}
+		level := loop.L2
+		if lvl := argString(args, "level"); lvl != "" {
+			parsed, err := loop.ParseLevel(lvl)
+			if err != nil {
+				return "", err
+			}
+			level = parsed
+		}
+		p, err := s.platformFor(ctx, root)
+		if err != nil {
+			return "", err
+		}
+		ts := app.NewTaskService(p, nil).WithPRProvider(app.AutoPRProvider())
+		t, res, err := ts.RunDo(intent, level)
 		if err != nil {
 			return "", err
 		}
@@ -487,14 +583,9 @@ func (s *Server) handleModernize(ctx context.Context, args map[string]any) (stri
 func (s *Server) handleAudit(ctx context.Context, args map[string]any) (string, error) {
 	{
 		root := resolveRoot(argString(args, "root"))
-		p, err := s.platformFor(ctx, root)
-		if err != nil {
-			return "", err
-		}
-		ts := app.NewTaskService(p, nil)
 		// Backs the AUDIT intent: surface every firewall decision/approval from
 		// the tamper-evident audit log. Render mirrors the `kern audit` CLI.
-		entries, err := ts.AuditEntries()
+		entries, err := s.svc.Governance.Audit(ctx, root, "")
 		if err != nil {
 			return "", err
 		}
@@ -527,11 +618,6 @@ func (s *Server) handleAudit(ctx context.Context, args map[string]any) (string, 
 
 func (s *Server) handleApprove(ctx context.Context, args map[string]any) (string, error) {
 	root := resolveRoot(argString(args, "root"))
-	p, err := s.platformFor(ctx, root)
-	if err != nil {
-		return "", err
-	}
-	ts := app.NewTaskService(p, nil)
 
 	id := argString(args, "id")
 	approver := argString(args, "approver")
@@ -541,7 +627,7 @@ func (s *Server) handleApprove(ctx context.Context, args map[string]any) (string
 
 	if id == "" {
 		// List pending approvals — mirrors `kern approve` with no args.
-		pending, err := ts.PendingApprovals()
+		pending, err := s.svc.Governance.PendingApprovals(ctx, root)
 		if err != nil {
 			return "", err
 		}
@@ -563,7 +649,7 @@ func (s *Server) handleApprove(ctx context.Context, args map[string]any) (string
 	reject := argString(args, "reject") == "true"
 	reason := argString(args, "reason")
 
-	a, err := ts.ResolveApproval(id, approver, !reject, reason)
+	a, err := s.svc.Governance.Approve(ctx, root, id, approver, !reject, reason)
 	if err != nil {
 		return "", err
 	}
@@ -655,20 +741,37 @@ func withSymbol(request, low, tool, fallback string, args map[string]any) (strin
 	return tool, args
 }
 
+// wordReCache caches compiled word-boundary regexes per keyword.
+var wordReCache sync.Map
+
+// hasWord reports whether kw occurs in s as a standalone word, so camelCase
+// symbol names (buildSecurityProperties) cannot hijack keyword routing.
+func hasWord(s, kw string) bool {
+	if kw == "" {
+		return false
+	}
+	if v, ok := wordReCache.Load(kw); ok {
+		return v.(*regexp.Regexp).MatchString(s)
+	}
+	re := regexp.MustCompile("\\b" + regexp.QuoteMeta(kw) + "\\b")
+	wordReCache.Store(kw, re)
+	return re.MatchString(s)
+}
+
 // classifyOptimizeTools routes the safety/PII and prompt/log compress cases.
 func classifyOptimizeTools(low, request string) (string, map[string]any, bool) {
 	switch {
-	case strings.Contains(low, "mask") && (strings.Contains(low, "secret") || strings.Contains(low, "pii")):
+	case hasWord(low, "mask") && (hasWord(low, "secret") || hasWord(low, "pii")):
 		return "kern_mask_pii", map[string]any{"text": extractAfterColon(request, low)}, true
-	case strings.Contains(low, "compress") && strings.Contains(low, "log"):
+	case hasWord(low, "compress") && hasWord(low, "log"):
 		return "kern_optimize_log", map[string]any{"log": extractAfterColon(request, low)}, true
-	case strings.Contains(low, "compress") && (strings.Contains(low, "output") || strings.Contains(low, "response") || strings.Contains(low, "reply")):
+	case hasWord(low, "compress") && (hasWord(low, "output") || hasWord(low, "response") || hasWord(low, "reply")):
 		return "kern_optimize_output", map[string]any{"text": extractAfterColon(request, low)}, true
-	case strings.Contains(low, "compress") && strings.Contains(low, "prompt"):
+	case hasWord(low, "compress") && hasWord(low, "prompt"):
 		return "kern_optimize_prompt", map[string]any{"prompt": extractAfterColon(request, low)}, true
-	case strings.Contains(low, "security") || strings.Contains(low, "scan") && strings.Contains(low, "vulnerab"):
+	case hasWord(low, "security") || hasWord(low, "scan") && strings.Contains(low, "vulnerab"):
 		return "kern_security", map[string]any{}, true
-	case strings.Contains(low, "schema") || strings.Contains(low, "validate json"):
+	case hasWord(low, "schema") || strings.Contains(low, "validate json"):
 		return "kern_schema_validate", map[string]any{}, true
 	}
 	return "", nil, false
@@ -677,25 +780,25 @@ func classifyOptimizeTools(low, request string) (string, map[string]any, bool) {
 // classifyWorkflowTools routes the high-level orchestration cases.
 func classifyWorkflowTools(low, request string) (string, map[string]any, bool) {
 	switch {
-	case strings.Contains(low, "what if") || strings.Contains(low, "simulate") || strings.Contains(low, "remove symbol"):
+	case strings.Contains(low, "what if") || hasWord(low, "simulate") || strings.Contains(low, "remove symbol"):
 		return "kern_what_if", map[string]any{"change": request}, true
-	case strings.Contains(low, "what breaks") || strings.Contains(low, "impact") || (strings.Contains(low, "change") && !strings.Contains(low, "analyze")):
+	case strings.Contains(low, "what breaks") || hasWord(low, "impact") || (hasWord(low, "change") && !hasWord(low, "analyze")):
 		return "kern_impact", map[string]any{"change": request}, true
-	case strings.Contains(low, "analyze") || strings.Contains(low, "propose"):
+	case hasWord(low, "analyze") || hasWord(low, "propose"):
 		return "kern_analyze", map[string]any{"change": request}, true
-	case strings.Contains(low, "plan") && !strings.Contains(low, "implementation plan"):
+	case hasWord(low, "plan") && !strings.Contains(low, "implementation plan"):
 		return "kern_plan", map[string]any{"change": request}, true
-	case strings.Contains(low, "incident"):
+	case hasWord(low, "incident"):
 		return "kern_incident", map[string]any{}, true
-	case strings.Contains(low, "correlate"):
+	case hasWord(low, "correlate"):
 		return "kern_correlate", map[string]any{}, true
 	case strings.Contains(low, "modernize"):
 		return "kern_modernize", map[string]any{}, true
-	case strings.Contains(low, "verify") && strings.Contains(low, "claim"):
+	case hasWord(low, "verify") && strings.Contains(low, "claim"):
 		return "kern_verify_output", map[string]any{"text": extractAfterColon(request, low)}, true
-	case strings.Contains(low, "verify"):
+	case hasWord(low, "verify"):
 		return "kern_verify", map[string]any{}, true
-	case strings.Contains(low, "architecture narrat") || strings.Contains(low, "narrat") || (strings.Contains(low, "explain") && strings.Contains(low, "architecture")):
+	case strings.Contains(low, "architecture narrat") || strings.Contains(low, "narrat") || (hasWord(low, "explain") && hasWord(low, "architecture")):
 		return "kern_explain", map[string]any{"target": extractSymbol(request, low)}, true
 	case strings.Contains(low, "cross repo") || strings.Contains(low, "multi repo"):
 		return "kern_cross_repo_impact", map[string]any{"target_symbol": extractSymbol(request, low)}, true
@@ -703,11 +806,11 @@ func classifyWorkflowTools(low, request string) (string, map[string]any, bool) {
 		return "kern_memory_ranked", map[string]any{"prompt": request}, true
 	case strings.Contains(low, "policy dsl") || strings.Contains(low, "evaluate policy"):
 		return "kern_policy_dsl", map[string]any{}, true
-	case strings.Contains(low, "agent coordination") || (strings.Contains(low, "coordination") && strings.Contains(low, "agent")):
+	case strings.Contains(low, "agent coordination") || (hasWord(low, "coordination") && strings.Contains(low, "agent")):
 		return "kern_agent_coordination", map[string]any{"action": "status"}, true
 	case strings.Contains(low, "rbac") || strings.Contains(low, "agent role"):
 		return "kern_agent_role_rbac", map[string]any{"action": "roles"}, true
-	case strings.Contains(low, "stream chunk") || (strings.Contains(low, "stream") && strings.Contains(low, "transport")):
+	case strings.Contains(low, "stream chunk") || (hasWord(low, "stream") && hasWord(low, "transport")):
 		return "kern_stream", map[string]any{"action": "status"}, true
 	}
 	return "", nil, false
@@ -716,31 +819,31 @@ func classifyWorkflowTools(low, request string) (string, map[string]any, bool) {
 // classifyArchTools routes the architecture/subsystem inspection cases.
 func classifyArchTools(low, request string) (string, map[string]any, bool) {
 	switch {
-	case strings.Contains(low, "architecture") || strings.Contains(low, "overview") || strings.Contains(low, "subsystem"):
+	case hasWord(low, "architecture") || hasWord(low, "overview") || hasWord(low, "subsystem"):
 		return "kern_arch", map[string]any{}, true
-	case strings.Contains(low, "communit") || strings.Contains(low, "cluster"):
+	case strings.Contains(low, "communit") || hasWord(low, "cluster"):
 		return "kern_communities", map[string]any{}, true
-	case strings.Contains(low, "hub") || strings.Contains(low, "hotspot") || strings.Contains(low, "most depended"):
+	case hasWord(low, "hub") || hasWord(low, "hotspot") || strings.Contains(low, "most depended"):
 		return "kern_hubs", map[string]any{}, true
-	case strings.Contains(low, "bridge") || strings.Contains(low, "coupling"):
+	case hasWord(low, "bridge") || hasWord(low, "coupling"):
 		return "kern_bridges", map[string]any{}, true
-	case strings.Contains(low, "dead code") || strings.Contains(low, "unused"):
+	case strings.Contains(low, "dead code") || hasWord(low, "unused"):
 		return "kern_dead", map[string]any{}, true
-	case strings.Contains(low, "largest") || strings.Contains(low, "god function") || strings.Contains(low, "biggest"):
+	case hasWord(low, "largest") || strings.Contains(low, "god function") || hasWord(low, "biggest"):
 		return "kern_larges", map[string]any{}, true
-	case strings.Contains(low, "test gap") || strings.Contains(low, "coverage"):
+	case strings.Contains(low, "test gap") || hasWord(low, "coverage"):
 		return "kern_test_gaps", map[string]any{}, true
-	case strings.Contains(low, "entry point") || strings.Contains(low, "handler") || strings.Contains(low, "route"):
+	case strings.Contains(low, "entry point") || hasWord(low, "handler") || hasWord(low, "route"):
 		return "kern_entry_points", map[string]any{}, true
-	case strings.Contains(low, "framework") || strings.Contains(low, "library") || strings.Contains(low, "detect stack"):
+	case hasWord(low, "framework") || hasWord(low, "library") || strings.Contains(low, "detect stack"):
 		return "kern_frameworks", map[string]any{}, true
-	case strings.Contains(low, "churn") || strings.Contains(low, "changed most"):
+	case hasWord(low, "churn") || strings.Contains(low, "changed most"):
 		return "kern_churn", map[string]any{}, true
 	case strings.Contains(low, "cochange") || strings.Contains(low, "co-change") || strings.Contains(low, "lockstep"):
 		return "kern_cochange", map[string]any{}, true
-	case strings.Contains(low, "diff") && (strings.Contains(low, "file") || strings.Contains(low, "compare")):
+	case hasWord(low, "diff") && (strings.Contains(low, "file") || hasWord(low, "compare")):
 		return "kern_diff_files", map[string]any{}, true
-	case strings.Contains(low, "review") || strings.Contains(low, "pr "):
+	case hasWord(low, "review") || strings.Contains(low, "pr "):
 		return "kern_review", map[string]any{}, true
 	}
 	return "", nil, false
@@ -751,7 +854,7 @@ func classifyArchTools(low, request string) (string, map[string]any, bool) {
 // cases to preserve the original switch's precedence.
 func classifyGovernanceTools(low, request string) (string, map[string]any, bool) {
 	switch {
-	case strings.Contains(low, "authorize") || strings.Contains(low, "authorized") ||
+	case hasWord(low, "authorize") || hasWord(low, "authorized") ||
 		strings.Contains(low, "allowed to see") || strings.Contains(low, "permitted") ||
 		strings.Contains(low, "what can i"):
 		return "kern_authorize_context", map[string]any{"task": request}, true
@@ -774,29 +877,29 @@ func classifyGraphTools(low, request string) (string, map[string]any, bool) {
 			args["depth"] = "4"
 		}
 		return tool, args, true
-	case strings.Contains(low, "how does") || strings.Contains(low, "understand") || strings.Contains(low, "explain"):
+	case strings.Contains(low, "how does") || hasWord(low, "understand") || hasWord(low, "explain"):
 		tool, args := withSymbol(request, low, "kern_explore", "kern_search", map[string]any{})
 		return tool, args, true
 	case strings.Contains(low, "why does") || strings.Contains(low, "why is") || strings.Contains(low, "rationale"):
 		tool, args := withSymbol(request, low, "kern_why", "kern_search", map[string]any{})
 		return tool, args, true
-	case strings.Contains(low, "callers") || strings.Contains(low, "who calls") || strings.Contains(low, "call graph"):
+	case hasWord(low, "callers") || strings.Contains(low, "who calls") || strings.Contains(low, "call graph"):
 		tool, args := withSymbol(request, low, "kern_code_graph", "kern_search", map[string]any{})
 		return tool, args, true
-	case strings.Contains(low, "inherit") || strings.Contains(low, "hierarchy") || strings.Contains(low, "extends") || strings.Contains(low, "implements"):
+	case strings.Contains(low, "inherit") || hasWord(low, "hierarchy") || hasWord(low, "extends") || hasWord(low, "implements"):
 		tool, args := withSymbol(request, low, "kern_inherits", "kern_search", map[string]any{})
 		return tool, args, true
 	case strings.Contains(low, "path from") || strings.Contains(low, "call path") || strings.Contains(low, "shortest path"):
 		return "kern_path", map[string]any{}, true
-	case strings.Contains(low, "near") || strings.Contains(low, "depends on") || strings.Contains(low, "neighborhood"):
+	case hasWord(low, "near") || strings.Contains(low, "depends on") || strings.Contains(low, "neighborhood"):
 		tool, args := withSymbol(request, low, "kern_near", "kern_search", map[string]any{})
 		return tool, args, true
 	case strings.Contains(low, "context for") || strings.Contains(low, "source slice") || strings.Contains(low, "source for"):
 		tool, args := withSymbol(request, low, "kern_context", "kern_search", map[string]any{})
 		return tool, args, true
-	case strings.Contains(low, "trace") && (strings.Contains(low, "stack") || strings.Contains(low, "pprof")):
+	case hasWord(low, "trace") && (strings.Contains(low, "stack") || strings.Contains(low, "pprof")):
 		return "kern_trace", map[string]any{}, true
-	case strings.Contains(low, "probe") || strings.Contains(low, "what does this touch"):
+	case hasWord(low, "probe") || strings.Contains(low, "what does this touch"):
 		return "kern_probe", map[string]any{"task": request}, true
 	}
 	return "", nil, false
@@ -805,29 +908,29 @@ func classifyGraphTools(low, request string) (string, map[string]any, bool) {
 // classifyProjectTools routes the project-level utility cases.
 func classifyProjectTools(low, request string) (string, map[string]any, bool) {
 	switch {
-	case strings.Contains(low, "project map") || strings.Contains(low, "layout") || strings.Contains(low, "structure") && strings.Contains(low, "project"):
+	case strings.Contains(low, "project map") || hasWord(low, "layout") || hasWord(low, "structure") && hasWord(low, "project"):
 		return "kern_project_map", map[string]any{}, true
 	case strings.Contains(low, "pack") || strings.Contains(low, "bundle"):
 		return "kern_pack", map[string]any{}, true
-	case strings.Contains(low, "compact") && strings.Contains(low, "file"):
+	case hasWord(low, "compact") && strings.Contains(low, "file"):
 		return "kern_compact_file", map[string]any{}, true
-	case strings.Contains(low, "buddy") || strings.Contains(low, "onboard") || strings.Contains(low, "getting started"):
+	case hasWord(low, "buddy") || hasWord(low, "onboard") || strings.Contains(low, "getting started"):
 		return "kern_buddy", map[string]any{}, true
-	case strings.Contains(low, "health") || strings.Contains(low, "status") || strings.Contains(low, "self-check") || strings.Contains(low, "diagnose"):
+	case hasWord(low, "health") || hasWord(low, "status") || strings.Contains(low, "self-check") || strings.Contains(low, "diagnose"):
 		return "kern_health", map[string]any{}, true
-	case strings.Contains(low, "stats") || strings.Contains(low, "savings") || strings.Contains(low, "token count"):
+	case hasWord(low, "stats") || hasWord(low, "savings") || strings.Contains(low, "token count"):
 		return "kern_stats", map[string]any{}, true
 	case strings.Contains(low, "commit message") || strings.Contains(low, "commitmsg"):
 		return "kern_commitmsg", map[string]any{}, true
-	case strings.Contains(low, "memory") || strings.Contains(low, "remember") || strings.Contains(low, "lesson"):
+	case hasWord(low, "memory") || hasWord(low, "remember") || hasWord(low, "lesson"):
 		return "kern_memory_recall", map[string]any{"prompt": request}, true
-	case strings.Contains(low, "docs") || strings.Contains(low, "documentation"):
+	case hasWord(low, "docs") || hasWord(low, "documentation"):
 		return "kern_doc_search", map[string]any{"query": request}, true
-	case strings.Contains(low, "build") || strings.Contains(low, "test") || strings.Contains(low, "lint"):
+	case hasWord(low, "build") || hasWord(low, "test") || hasWord(low, "lint"):
 		return "kern_run_build", map[string]any{}, true
-	case strings.Contains(low, "exec") || strings.Contains(low, "run script") || strings.Contains(low, "run code"):
+	case hasWord(low, "exec") || strings.Contains(low, "run script") || strings.Contains(low, "run code"):
 		return "kern_exec", map[string]any{}, true
-	case strings.Contains(low, "skill") || strings.Contains(low, "playbook") || strings.Contains(low, "runbook"):
+	case hasWord(low, "skill") || hasWord(low, "playbook") || strings.Contains(low, "runbook"):
 		skillName := ""
 		for _, name := range skills.SkillNames {
 			if strings.Contains(low, name) || strings.Contains(low, strings.TrimPrefix(name, "kern-")) {
@@ -845,6 +948,43 @@ func classifyProjectTools(low, request string) (string, map[string]any, bool) {
 	return "", nil, false
 }
 
+// classifyRetrievalTools routes the progressive-disclosure retrieval cases
+// (P1/P2/P3 tracker): kern_retrieve, kern_resolve and kern_plan_context. It
+// is consulted BEFORE the workflow/arch/graph routers so "plan context",
+// "retrieve ..." and "resolve ..." requests beat the broader "plan"/"handler"
+// keywords those routers claim. "handle" is matched only as a standalone word
+// (never inside "handler", which stays kern_entry_points).
+func classifyRetrievalTools(low, request string) (string, map[string]any, bool) {
+	switch {
+	case strings.Contains(low, "resolve"):
+		// "resolve handle <id>" / "resolve <id>": extract the trailing token
+		// as the handle; without one, pass the request through so the handler
+		// rejects it with its own "handle is required" error.
+		id := ""
+		rest := low
+		if i := strings.Index(rest, "resolve"); i >= 0 {
+			rest = strings.TrimSpace(rest[i+len("resolve"):])
+		}
+		if j := strings.Index(rest, "handle"); j >= 0 {
+			rest = strings.TrimSpace(rest[j+len("handle"):])
+		}
+		if fields := strings.Fields(rest); len(fields) > 0 {
+			id = fields[0]
+		}
+		if id == "" {
+			id = request
+		}
+		return "kern_resolve", map[string]any{"handle": id}, true
+	case (strings.Contains(low, "retrieve") || strings.Contains(low, "handle")) && !hasWord(low, "handler"):
+		// NL requests name symbols, not structured handles, so land on the
+		// L1 name/token-cost list for the whole request as the query.
+		return "kern_retrieve", map[string]any{"query": request, "level": "l1"}, true
+	case strings.Contains(low, "context plan") || strings.Contains(low, "plan context") || strings.Contains(low, "explain context") || strings.Contains(low, "planner"):
+		return "kern_plan_context", map[string]any{"change": request}, true
+	}
+	return "", nil, false
+}
+
 // classifyMetaRequest maps a natural-language request to the kern_* tool name
 // that best answers it, using deterministic keyword matching. It returns the
 // chosen tool name plus the derived arguments to pass to that tool's handler.
@@ -853,12 +993,28 @@ func classifyMetaRequest(request string) (string, map[string]any) {
 	// The sub-routers are consulted in the same order as the original
 	// monolithic switch (safety/optimize -> workflows -> architecture ->
 	// governance -> symbol graph -> project), so classification outcomes are
-	// unchanged; anything unmatched still falls back to kern_search.
+	// unchanged; anything unmatched still falls back to kern_search. The
+	// retrieval router is consulted FIRST so its specific phrases (plan
+	// context, retrieve/resolve) beat the broader workflow/arch keywords.
+	if t, a, ok := classifyRetrievalTools(low, request); ok {
+		return t, a
+	}
 	if t, a, ok := classifyOptimizeTools(low, request); ok {
 		return t, a
 	}
 	if t, a, ok := classifyWorkflowTools(low, request); ok {
 		return t, a
+	}
+	// CLI/subcommand questions ("how does CLI command dispatch work?") are
+	// symbol searches, not architecture "entry point" questions — guard them
+	// before the graph router can fall back to kern_entry_points (report F-1).
+	// Workflow verbs (impact/analyze/plan) already won above, so "what breaks
+	// if I change the CLI dispatch table" still routes to kern_impact; and a
+	// dotted qualified symbol (Server.dispatch) skips this guard so
+	// "how does Server.dispatch work" still routes to kern_explore.
+	if (strings.Contains(low, "cli") || strings.Contains(low, "subcommand") || strings.Contains(low, "command dispatch")) &&
+		!strings.Contains(low, ".") {
+		return "kern_search", map[string]any{"query": request}
 	}
 	if t, a, ok := classifyArchTools(low, request); ok {
 		return t, a
@@ -957,6 +1113,12 @@ func (s *Server) handleMeta(ctx context.Context, args map[string]any) (string, e
 		result, err = s.handleTrace(ctx, subArgs)
 	case "kern_probe":
 		result, err = s.handleProbe(ctx, subArgs)
+	case "kern_retrieve":
+		result, err = s.handleRetrieve(ctx, subArgs)
+	case "kern_resolve":
+		result, err = s.handleResolve(ctx, subArgs)
+	case "kern_plan_context":
+		result, err = s.handlePlanContext(ctx, subArgs)
 	case "kern_mask_pii":
 		result, err = s.handleMaskPII(ctx, subArgs)
 	case "kern_security":
@@ -1063,13 +1225,29 @@ func (s *Server) handleMeta(ctx context.Context, args map[string]any) (string, e
 
 func (s *Server) handleSkills(ctx context.Context, args map[string]any) (string, error) {
 	skill := strings.TrimSpace(argString(args, "skill"))
+	// User skills live in <root>/.kern/skills (same root source as the
+	// handleAnalyze profile block). A missing dir yields no user skills and
+	// keeps the output byte-identical to the embedded-only listing.
+	root := argString(args, "root")
+	if root == "" {
+		root = "."
+	}
+	userSkills, userErr := skills.LoadSkillsFromDir(filepath.Join(root, ".kern", "skills"))
 	if skill != "" {
-		data, err := skills.ReadSkill(skill)
-		if err == nil {
+		if data, err := skills.ReadSkill(skill); err == nil {
 			return string(data), nil
 		}
 		if data, err := skills.ReadSkill("kern-" + skill); err == nil {
 			return string(data), nil
+		}
+		// Not an embedded skill: look in the user dir for a skill whose Name
+		// (or directory — identical in LoadSkillsFromDir) matches.
+		if userErr == nil {
+			for _, us := range userSkills {
+				if us.Name == skill || us.Name == "kern-"+skill {
+					return us.Body, nil
+				}
+			}
 		}
 	}
 
@@ -1086,5 +1264,11 @@ func (s *Server) handleSkills(ctx context.Context, args map[string]any) (string,
 	}
 	sb.WriteString("\nTo view a specific runbook, request: 'show skill <name>' (e.g. 'show skill kern-safe-change').\n")
 	sb.WriteString("Each skill also includes executable helper scripts under its scripts/ directory.\n")
+	if userErr == nil && len(userSkills) > 0 {
+		sb.WriteString("\n# User Skills\n\n")
+		for _, us := range userSkills {
+			sb.WriteString(fmt.Sprintf("- **%s** (user): %s\n", us.Name, us.Description))
+		}
+	}
 	return sb.String(), nil
 }

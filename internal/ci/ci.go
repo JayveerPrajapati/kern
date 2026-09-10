@@ -150,21 +150,6 @@ func (a *GitHubActionsAdapter) checkAvailable() error {
 	return nil
 }
 
-// parseRunID extracts the databaseId from a `gh run list --json` output.
-// Uses encoding/json for correct parsing.
-func parseRunID(jsonOut []byte) string {
-	type runEntry struct {
-		DatabaseID int    `json:"databaseId"`
-		Status     string `json:"status"`
-		CreatedAt  string `json:"createdAt"`
-	}
-	var runs []runEntry
-	if err := json.Unmarshal(jsonOut, &runs); err != nil || len(runs) == 0 {
-		return ""
-	}
-	return fmt.Sprintf("%d", runs[0].DatabaseID)
-}
-
 // parseRunIDForRef extracts the databaseId of the newest run whose
 // headBranch matches ref from a `gh run list --json` output (which is sorted
 // newest-first). Returns "" when no run for the ref is present. This avoids

@@ -3,22 +3,29 @@
 package doctor
 
 import (
+	"bytes"
 	"context"
+	"crypto/md5"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	goruntime "runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/JayveerPrajapati/kern/internal/cache"
 	"github.com/JayveerPrajapati/kern/internal/index"
 	"github.com/JayveerPrajapati/kern/internal/llm"
+	"github.com/JayveerPrajapati/kern/internal/runtime"
 	"github.com/JayveerPrajapati/kern/internal/script"
 	"github.com/JayveerPrajapati/kern/internal/setup"
 	"github.com/JayveerPrajapati/kern/internal/stats"
+	"github.com/JayveerPrajapati/kern/internal/version"
 )
 
 // Finding is a single diagnostic result.
@@ -32,15 +39,20 @@ type Finding struct {
 func Run(root string) []Finding {
 	var out []Finding
 	out = append(out, checkBinary())
+	out = append(out, checkVersion())
 	out = append(out, checkCapabilities())
 	out = append(out, checkPath())
 	out = append(out, checkExec())
 	out = append(out, checkNetworkIsolation())
 	out = append(out, checkEnv())
+	out = append(out, checkConfig(root))
+	out = append(out, checkCache())
 	out = append(out, checkWiring(root)...)
+	out = append(out, checkPluginSync()...)
 	out = append(out, checkIndex(root))
 	out = append(out, checkIndexFreshness(root))
 	out = append(out, checkPrecision(root))
+	out = append(out, checkRuntime(root))
 	out = append(out, checkOllama())
 	out = append(out, checkStats())
 	return out
@@ -119,20 +131,141 @@ func checkNetworkIsolation() Finding {
 }
 
 func checkEnv() Finding {
-	var parts []string
+	// D5: echo every KERN_* variable (sorted, redacted values stay intact —
+	// these are config toggles, not secrets) and validate the known ones.
+	var kernVars []string
+	for _, kv := range os.Environ() {
+		if strings.HasPrefix(kv, "KERN_") {
+			kernVars = append(kernVars, kv)
+		}
+	}
+	sort.Strings(kernVars)
+
+	var warns []string
+	for _, kv := range kernVars {
+		k, v, _ := strings.Cut(kv, "=")
+		switch {
+		case k == "KERN_LLM_PROVIDER":
+			if v != "" && v != "ollama" && v != "openai" && v != "anthropic" && v != "google" {
+				warns = append(warns, k+"="+v+" (unknown provider)")
+			}
+		case k == "KERN_MCP_WATCH":
+			if v != "0" && v != "1" {
+				warns = append(warns, k+"="+v+" (want 0|1)")
+			}
+		case k == "KERN_MCP_WATCH_INTERVAL":
+			if n, err := strconv.Atoi(v); err != nil || n <= 0 {
+				warns = append(warns, k+"="+v+" (want a positive integer)")
+			}
+		case k == "KERN_ALLOW_EXEC" || k == "KERN_ALLOW_DEPLOY" || k == "KERN_ALLOW_UNISOLATED" || k == "KERN_ALLOW_NET" || k == "KERN_REQUIRE_BINARY":
+			if v != "1" {
+				warns = append(warns, k+"="+v+" (fail-closed toggle: want 1)")
+			}
+		}
+	}
+
+	extra := ""
 	if x := os.Getenv("XDG_CACHE_HOME"); x != "" {
-		parts = append(parts, "XDG_CACHE_HOME="+x)
+		extra = "XDG_CACHE_HOME=" + x
 	}
-	if m := os.Getenv("KERN_MODEL"); m != "" {
-		parts = append(parts, "KERN_MODEL="+m)
+	if o := os.Getenv("OLLAMA_HOST"); o != "" {
+		if extra != "" {
+			extra += " · "
+		}
+		extra += "OLLAMA_HOST=" + o
 	}
-	if h := os.Getenv("OLLAMA_HOST"); h != "" {
-		parts = append(parts, "OLLAMA_HOST="+h)
+
+	detail := strings.Join(kernVars, " · ")
+	if detail == "" {
+		detail = "no KERN_* variables set"
 	}
-	if len(parts) == 0 {
-		return Finding{Check: "env", Level: "ok", Detail: "defaults in use"}
+	if extra != "" {
+		detail += " · " + extra
 	}
-	return Finding{Check: "env", Level: "ok", Detail: strings.Join(parts, " · ")}
+	lvl := "ok"
+	if len(warns) > 0 {
+		lvl = "warn"
+		detail += " | " + strings.Join(warns, " | ")
+	}
+	return Finding{Check: "env", Level: lvl, Detail: detail}
+}
+
+// checkVersion reports the binary version stamp and runtime. An unstamped
+// ("dev") build is a warn: release workflows stamp via version.Adopt.
+func checkVersion() Finding {
+	v := version.Version
+	lvl := "ok"
+	if v == "dev" || v == "" {
+		lvl = "warn"
+	}
+	return Finding{
+		Check:  "version",
+		Level:  lvl,
+		Detail: fmt.Sprintf("kern %s · %s · %s/%s", v, goruntime.Version(), goruntime.GOOS, goruntime.GOARCH),
+	}
+}
+
+// checkConfig validates .kern/config.json: a present-but-malformed file is a
+// fail (it silently degrades every config lookup to defaults), and known
+// verify.* keys must be strings.
+func checkConfig(root string) Finding {
+	path := filepath.Join(root, ".kern", "config.json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return Finding{Check: "config", Level: "ok", Detail: "no .kern/config.json (defaults)"}
+		}
+		return Finding{Check: "config", Level: "fail", Detail: err.Error()}
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return Finding{Check: "config", Level: "fail", Detail: fmt.Sprintf("%s: %v", path, err)}
+	}
+	var warns []string
+	// verify.* keys live under the nested "verify" object (config package
+	// resolves dot-separated paths like "verify.build").
+	var verify map[string]any
+	if v, ok := raw["verify"]; ok {
+		verify, _ = v.(map[string]any)
+	}
+	for _, k := range []string{"build", "test", "lint"} {
+		if v, ok := verify[k]; ok {
+			if _, isStr := v.(string); !isStr {
+				warns = append(warns, "verify."+k+" must be a string")
+			}
+		}
+	}
+	if len(warns) > 0 {
+		return Finding{Check: "config", Level: "warn", Detail: strings.Join(warns, "; ")}
+	}
+	return Finding{Check: "config", Level: "ok", Detail: path + " (valid JSON)"}
+}
+
+// checkCache scans the kern cache directory for corruption markers: any
+// zero-byte JSON file (a truncated write) is a fail, and the total file count
+// is reported so operators can see how much cache has accumulated.
+func checkCache() Finding {
+	dir := cache.Dir()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return Finding{Check: "cache", Level: "ok", Detail: "no cache directory yet"}
+	}
+	var files, zeroJSON int
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		files++
+		if strings.HasSuffix(e.Name(), ".json") && e.Type().IsRegular() {
+			if info, ierr := e.Info(); ierr == nil && info.Size() == 0 {
+				zeroJSON++
+			}
+		}
+	}
+	if zeroJSON > 0 {
+		return Finding{Check: "cache", Level: "fail", Detail: fmt.Sprintf("%d zero-byte JSON files under %s — truncated writes; consider clearing the cache", zeroJSON, dir)}
+	}
+	return Finding{Check: "cache", Level: "ok", Detail: fmt.Sprintf("%d files under %s", files, dir)}
 }
 
 func checkWiring(root string) []Finding {
@@ -144,6 +277,40 @@ func checkWiring(root string) []Finding {
 			lvl = "warn"
 		}
 		out = append(out, Finding{Check: s.Agent, Level: lvl, Detail: s.Note})
+	}
+	return out
+}
+
+// checkPluginSync (D1): the opencode plugin exists in four places that must
+// stay byte-identical (project .opencode/plugins, the embedded asset, and the
+// two global copies). A stale user copy silently wins over the fixed one —
+// opencode 1.18.x loads from ~/.opencode/plugins — so compare every installed
+// global copy against the embedded canonical asset and report drift.
+func checkPluginSync() []Finding {
+	src, err := setup.PluginAsset()
+	if err != nil {
+		return nil // asset unreadable: nothing to compare against
+	}
+	var out []Finding
+	compared := 0
+	for _, p := range setup.GlobalPluginPaths() {
+		if _, serr := os.Stat(p); serr != nil {
+			continue // not installed here — installation is the wiring check's job
+		}
+		compared++
+		cur, rerr := os.ReadFile(p)
+		if rerr != nil {
+			out = append(out, Finding{Check: "opencode-plugin-sync", Level: "warn", Detail: p + ": unreadable: " + rerr.Error()})
+			continue
+		}
+		if !bytes.Equal(cur, src) {
+			out = append(out, Finding{Check: "opencode-plugin-sync", Level: "warn",
+				Detail: fmt.Sprintf("%s: stale copy (md5 %x, embedded is %x) — run: kern setup --global, then restart opencode", p, md5.Sum(cur), md5.Sum(src))})
+		}
+	}
+	if compared > 0 && len(out) == 0 {
+		out = append(out, Finding{Check: "opencode-plugin-sync", Level: "ok",
+			Detail: fmt.Sprintf("%d installed plugin copy(ies) match the embedded asset", compared)})
 	}
 	return out
 }
@@ -228,6 +395,38 @@ func checkPrecision(root string) Finding {
 	}
 	return Finding{Check: "precision", Level: "ok",
 		Detail: fmt.Sprintf("all %d languages at resolved precision (Go + Java)", resolvedCount)}
+}
+
+// checkRuntime reports the production-intelligence wiring: the wired adapter
+// (env/config live source or .kern/runtime.json snapshot), its poll interval,
+// and its telemetry health (event/error counts). No source is a warn with the
+// enable hint, mirroring `kern runtime status` — the doctor surfaces the
+// runtime dimension where users already look for diagnostics.
+func checkRuntime(root string) Finding {
+	src := runtime.LoadSource(root)
+	if src == nil {
+		return Finding{
+			Check:  "runtime",
+			Level:  "warn",
+			Detail: "no runtime source; set KERN_PROMETHEUS_URL / KERN_OTEL_URL / KERN_K8S_API, or provide .kern/runtime.json",
+		}
+	}
+	profiles := runtime.ServiceProfiles(src)
+	events, errors := 0, 0
+	for _, p := range profiles {
+		events += p.Events
+		errors += p.Errors
+	}
+	lvl := "ok"
+	if errors > 0 {
+		lvl = "warn"
+	}
+	detail := fmt.Sprintf("%s (poll %s): %d events, %d errors, %d deployments, %d commits, %d service(s)",
+		src.Name(), runtime.PollInterval(), events, errors, len(src.Deployments("")), len(src.Commits()), len(profiles))
+	if errors > 0 {
+		detail += " — production errors present"
+	}
+	return Finding{Check: "runtime", Level: lvl, Detail: detail}
 }
 
 func checkOllama() Finding {

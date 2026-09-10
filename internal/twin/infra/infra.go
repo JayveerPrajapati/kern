@@ -35,6 +35,10 @@ func (e *Extractor) Extract() ([]domain.Node, []domain.Edge, error) {
 		base := d.Name()
 		ext := filepath.Ext(path)
 		switch {
+		case base == "Chart.yaml":
+			// Helm charts must win over the generic .yaml k8s case below.
+			n := e.extractHelmChart(path)
+			nodes = append(nodes, n...)
 		case base == "docker-compose.yml" || base == "docker-compose.yaml" || strings.HasPrefix(base, "docker-compose."):
 			n, ed := e.extractDockerCompose(path)
 			nodes, edges = append(nodes, n...), append(edges, ed...)
@@ -44,9 +48,6 @@ func (e *Extractor) Extract() ([]domain.Node, []domain.Edge, error) {
 		case ext == ".yaml" || ext == ".yml":
 			n, ed := e.extractK8s(path)
 			nodes, edges = append(nodes, n...), append(edges, ed...)
-		case base == "Chart.yaml":
-			n := e.extractHelmChart(path)
-			nodes = append(nodes, n...)
 		}
 		return nil
 	})

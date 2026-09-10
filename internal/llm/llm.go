@@ -14,6 +14,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/JayveerPrajapati/kern/internal/config"
 )
 
 const (
@@ -31,11 +33,12 @@ type Client struct {
 	HTTP  *http.Client
 }
 
-// New builds a client. The model comes from the argument, else KERN_MODEL,
-// else DefaultModel. The base URL comes from OLLAMA_HOST, else localhost.
+// New builds a client. The model comes from the argument, else KERN_MODEL (or
+// llm.model in .kern/config.json), else DefaultModel. The base URL comes from
+// OLLAMA_HOST, else localhost.
 func New(model string) *Client {
 	if model == "" {
-		model = os.Getenv("KERN_MODEL")
+		model = config.String("", "KERN_MODEL", "llm.model", "")
 	}
 	if model == "" {
 		model = DefaultModel
@@ -139,10 +142,10 @@ func (c *Client) Complete(system, user string) (string, error) {
 	return out.Response, nil
 }
 
-// EmbedModel resolves the embedding model: the argument, else KERN_EMBED_MODEL,
-// else DefaultEmbedModel.
+// EmbedModel resolves the embedding model: the argument, else KERN_EMBED_MODEL
+// (or llm.embed_model in .kern/config.json), else DefaultEmbedModel.
 func EmbedModel() string {
-	m := os.Getenv("KERN_EMBED_MODEL")
+	m := config.String("", "KERN_EMBED_MODEL", "llm.embed_model", "")
 	if m == "" {
 		m = DefaultEmbedModel
 	}

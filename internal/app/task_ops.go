@@ -4,6 +4,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"github.com/JayveerPrajapati/kern/internal/agent"
 	"github.com/JayveerPrajapati/kern/internal/deployment"
@@ -44,7 +45,7 @@ func (s *TaskService) Execute(patch string) (*agent.Task, string, error) {
 		return t, "", err
 	}
 
-	if err := t.Transition(domain.TaskExecuting); err != nil {
+	if err := s.transition(t, domain.TaskExecuting); err != nil {
 		s.fail(t, err.Error())
 		return t, "", err
 	}
@@ -119,7 +120,7 @@ func (s *TaskService) ExecuteAndVerify(patch string, verifyTypes []string) (*age
 		return t, "", verification.VerificationResult{}, err
 	}
 
-	if err := t.Transition(domain.TaskExecuting); err != nil {
+	if err := s.transition(t, domain.TaskExecuting); err != nil {
 		s.fail(t, err.Error())
 		return t, "", verification.VerificationResult{}, err
 	}
@@ -173,8 +174,9 @@ func (s *TaskService) ExecuteAndVerify(patch string, verifyTypes []string) (*age
 		s.publish(eventbus.TaskCompleted, t.ID, map[string]string{"state": "COMPLETED"})
 		return t, diff, vres, nil
 	}
-	s.fail(t, "verification failed: "+vres.Summary)
-	return t, diff, vres, fmt.Errorf("verification failed: %s", vres.Summary)
+	verr := verificationFailure(vres)
+	s.fail(t, verr.Error())
+	return t, diff, vres, verr
 }
 
 // verifyInWorktree runs verification on the given worktree dir and records the
@@ -215,7 +217,7 @@ func (s *TaskService) VerifyTask(taskID string, worktreeDir string, types []stri
 		types = []string{"build", "test"}
 	}
 
-	if err := t.Transition(domain.TaskVerifying); err != nil {
+	if err := s.transition(t, domain.TaskVerifying); err != nil {
 		s.fail(t, err.Error())
 		return t, verification.VerificationResult{}, err
 	}
@@ -242,14 +244,15 @@ func (s *TaskService) VerifyTask(taskID string, worktreeDir string, types []stri
 
 	// Transition based on the verdict.
 	if res.Verdict == verification.VerdictPass || res.Verdict == verification.VerdictPassWithWarning {
-		if err := t.Transition(domain.TaskReadyForPR); err != nil {
+		if err := s.transition(t, domain.TaskReadyForPR); err != nil {
 			s.fail(t, err.Error())
 			return t, res, err
 		}
 		s.publish(eventbus.TaskUpdated, t.ID, map[string]string{"state": "READY_FOR_PR"})
 	} else {
-		s.fail(t, "verification failed: "+res.Summary)
-		return t, res, fmt.Errorf("verification failed: %s", res.Summary)
+		verr := verificationFailure(res)
+		s.fail(t, verr.Error())
+		return t, res, verr
 	}
 
 	s.persist(t)
@@ -328,7 +331,7 @@ func (s *TaskService) CreatePR(taskID string, branch string) (*agent.Task, strin
 		fmt.Sprintf("PR: %s — branch %s", t.Intent, branch),
 		s.lastArtifactID(t.ID, domain.ArtifactVerificationReport), "pr:render")
 
-	if err := t.Transition(domain.TaskPRCreated); err != nil {
+	if err := s.transition(t, domain.TaskPRCreated); err != nil {
 		s.fail(t, err.Error())
 		return t, body, err
 	}
@@ -396,7 +399,7 @@ func (s *TaskService) Deploy(taskID string, version string) (*agent.Task, error)
 		}
 	}
 
-	if err := t.Transition(domain.TaskDeploying); err != nil {
+	if err := s.transition(t, domain.TaskDeploying); err != nil {
 		s.fail(t, err.Error())
 		return t, err
 	}
@@ -450,7 +453,7 @@ func (s *TaskService) Observe(taskID string) (*agent.Task, error) {
 	if !ok {
 		return nil, fmt.Errorf("task not found: %s", taskID)
 	}
-	if err := t.Transition(domain.TaskObserving); err != nil {
+	if err := s.transition(t, domain.TaskObserving); err != nil {
 		s.fail(t, err.Error())
 		return t, err
 	}
@@ -589,4 +592,55 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return s[:n] + "…"
+}
+
+// verificationFailure names the first failing check and the first line of the
+// summary, turning a bare multi-line summary dump into a single-sentence cause
+// (e.g. "verification failed: build: go build ./... failed").
+func verificationFailure(res verification.VerificationResult) error {
+	check := failingCheckName(&res)
+	line := summaryFirstLine(res.Summary)
+	switch {
+	case check != "" && line != "":
+		return fmt.Errorf("verification failed: %s: %s", check, line)
+	case check != "":
+		return fmt.Errorf("verification failed: %s", check)
+	case line != "":
+		return fmt.Errorf("verification failed: %s", line)
+	default:
+		return errors.New("verification failed")
+	}
+}
+
+// failingCheckName returns the name of the first check that failed, or "".
+func failingCheckName(res *verification.VerificationResult) string {
+	switch {
+	case res.Build != nil && !res.Build.OK:
+		return "build"
+	case res.UnitTests != nil && !res.UnitTests.OK:
+		return "unit tests"
+	case res.Integration != nil && !res.Integration.OK:
+		return "integration tests"
+	case res.Security != nil && !res.Security.OK:
+		return "security"
+	case res.Architecture != nil && !res.Architecture.OK:
+		return "architecture"
+	case res.Dependency != nil && !res.Dependency.OK:
+		return "dependency"
+	case res.E2ETests != nil && !res.E2ETests.OK:
+		return "e2e tests"
+	case res.StaticAnalysis != nil && !res.StaticAnalysis.OK:
+		return "static analysis"
+	}
+	return ""
+}
+
+// summaryFirstLine returns the first non-empty, trimmed line of a summary.
+func summaryFirstLine(s string) string {
+	for _, ln := range strings.Split(s, "\n") {
+		if t := strings.TrimSpace(ln); t != "" {
+			return t
+		}
+	}
+	return strings.TrimSpace(s)
 }

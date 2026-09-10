@@ -6,6 +6,7 @@ package sec
 
 import (
 	"bytes"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -437,9 +438,15 @@ func Scan(root string) ([]Finding, error) {
 		}
 		src, serr := os.ReadFile(path)
 		if serr != nil {
-			// Skip unreadable files (binaries, broken symlinks, permission
-			// denied) and continue the walk instead of aborting the entire
-			// scan. A single unreadable file must not fail the whole check.
+			// An unreadable file must not silently vanish from the scan: a
+			// "clean" verdict would then hide an unscanned file. Record it as
+			// a warning so it surfaces without failing the whole check.
+			findings = append(findings, Finding{
+				File:     rel,
+				Rule:     "unreadable-file",
+				Severity: "warning",
+				Message:  fmt.Sprintf("file could not be read and was skipped: %v", serr),
+			})
 			return nil
 		}
 		// Skip minified JavaScript bundles (vendored libraries in static/

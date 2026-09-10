@@ -179,6 +179,155 @@ async function readFallback(filePath: string): Promise<string> {
   }
 }
 
+// Phase metadata for phase-aware tool filtering (mirrors the MCP catalog's
+// Tool.Phase in internal/mcp/tools.go). "meta" and "cross" tools are always
+// advertised; the four agent phases (explore|plan|edit|verify) advertise only
+// their own tools when KERN_MCP_PHASE is set. KERN_TOOLS narrows to an
+// explicit allowlist; KERN_MCP_SINGLE_TOOL=1 reduces the surface to kern_meta.
+const TOOL_PHASES: Record<string, string> = {
+  kern_agent_coordination: "cross",
+  kern_agent_fingerprint: "cross",
+  kern_agent_role_rbac: "cross",
+  kern_agents: "cross",
+  kern_analyze: "plan",
+  kern_approve: "edit",
+  kern_arch: "explore",
+  kern_ast_search: "explore",
+  kern_ast_transform: "edit",
+  kern_audit: "verify",
+  kern_authorize_context: "cross",
+  kern_bridges: "explore",
+  kern_buddy: "explore",
+  kern_changes: "verify",
+  kern_check_draft: "verify",
+  kern_churn: "explore",
+  kern_cochange: "explore",
+  kern_code_graph: "explore",
+  kern_commitmsg: "edit",
+  kern_communities: "explore",
+  kern_compact_file: "explore",
+  kern_compose: "cross",
+  kern_context: "explore",
+  kern_context_budget: "plan",
+  kern_context_envelope: "explore",
+  kern_context_watch: "cross",
+  kern_correlate: "cross",
+  kern_cross_repo_impact: "plan",
+  kern_dead: "explore",
+  kern_deploy: "edit",
+  kern_diff_files: "verify",
+  kern_do: "cross",
+  kern_doc_fetch: "cross",
+  kern_doc_index: "cross",
+  kern_doc_search: "cross",
+  kern_entry_points: "explore",
+  kern_evidence: "verify",
+  kern_evidence_anchor: "verify",
+  kern_exec: "edit",
+  kern_execute: "edit",
+  kern_explain: "explore",
+  kern_explore: "explore",
+  kern_flight: "cross",
+  kern_frameworks: "explore",
+  kern_fts_search: "explore",
+  kern_graph: "explore",
+  kern_guard_check: "edit",
+  kern_heal: "edit",
+  kern_health: "cross",
+  kern_hubs: "explore",
+  kern_impact: "plan",
+  kern_incident: "cross",
+  kern_inherits: "explore",
+  kern_larges: "explore",
+  kern_learn: "cross",
+  kern_lock: "edit",
+  kern_lock_status: "edit",
+  kern_loop: "cross",
+  kern_mask_pii: "cross",
+  kern_memory: "cross",
+  kern_memory_add: "cross",
+  kern_memory_list: "cross",
+  kern_memory_ranked: "cross",
+  kern_memory_recall: "cross",
+  kern_meta: "meta",
+  kern_modernize: "cross",
+  kern_near: "explore",
+  kern_onboard: "cross",
+  kern_optimize_log: "cross",
+  kern_optimize_output: "cross",
+  kern_optimize_prompt: "cross",
+  kern_org_agents: "cross",
+  kern_org_audit: "cross",
+  kern_org_memory: "cross",
+  kern_org_projects: "cross",
+  kern_org_search: "cross",
+  kern_org_tasks: "cross",
+  kern_org_teams: "cross",
+  kern_pack: "plan",
+  kern_path: "explore",
+  kern_plan: "plan",
+  kern_plan_context: "plan",
+  kern_policy_dsl: "verify",
+  kern_pre_edit: "plan",
+  kern_precache: "verify",
+  kern_probe: "explore",
+  kern_project_map: "explore",
+  kern_prompt_fill: "cross",
+  kern_rename: "edit",
+  kern_repo_search: "explore",
+  kern_resolve: "explore",
+  kern_retrieve: "explore",
+  kern_review: "verify",
+  kern_risk: "plan",
+  kern_run: "cross",
+  kern_run_build: "edit",
+  kern_runtime: "explore",
+  kern_safe_delete: "edit",
+  kern_sandbox: "edit",
+  kern_schema_validate: "verify",
+  kern_search: "explore",
+  kern_security: "verify",
+  kern_semantic_diff: "cross",
+  kern_semantic_merge: "edit",
+  kern_semcache: "cross",
+  kern_stats: "cross",
+  kern_stream: "cross",
+  kern_swap: "plan",
+  kern_synthesize_test: "verify",
+  kern_taint: "verify",
+  kern_test_gaps: "plan",
+  kern_trace: "plan",
+  kern_unlock: "edit",
+  kern_usage_guide: "plan",
+  kern_validate: "verify",
+  kern_verify: "verify",
+  kern_verify_output: "verify",
+  kern_walk: "explore",
+  kern_what_if: "plan",
+  kern_why: "explore",
+  kern_workflow: "cross",
+}
+// filterToolSurface applies the same advertisement rules as the MCP server's
+// filteredTools(): phase filter (meta/cross always shown), then the KERN_TOOLS
+// allowlist. Like the server, this only shapes what the agent SEES — it is
+// not a security boundary (kern_meta can still route to unadvertised tools).
+function filterToolSurface<T extends Record<string, unknown>>(tools: T): Partial<T> {
+  const phase = (process.env.KERN_MCP_PHASE || "").trim().toLowerCase()
+  const allowlist = (process.env.KERN_TOOLS || "")
+    .split(",").map((s) => s.trim()).filter(Boolean)
+  const single = process.env.KERN_MCP_SINGLE_TOOL === "1"
+  const valid = new Set(["explore", "plan", "edit", "verify"])
+  const active = valid.has(phase) ? phase : ""
+  const out: Record<string, unknown> = {}
+  for (const [name, def] of Object.entries(tools)) {
+    if (single && name !== "kern_meta") continue
+    const p = TOOL_PHASES[name] ?? ""
+    if (active && p !== "meta" && p !== "cross" && p !== active) continue
+    if (allowlist.length > 0 && !allowlist.includes(name)) continue
+    out[name] = def
+  }
+  return out
+}
 export default (async ({ directory, $ }) => {
   const bin = kernBin(directory)
 
@@ -275,7 +424,7 @@ async function runPayload(args: string[], timeoutMs?: number, preserveExit = fal
   }
 
   return {
-    tool: {
+    tool: filterToolSurface({
       kern_optimize_prompt: tool({
         description:
           "Compress and clean a raw prompt before sending it to an LLM. Returns the optimized prompt plus token savings. Use this to reduce context cost for large or noisy prompts.",
@@ -366,7 +515,36 @@ async function runPayload(args: string[], timeoutMs?: number, preserveExit = fal
           return runPayload([...flags, args.command], args.timeout)
         },
       }),
-      kern_optimize_log: tool({
+      kern_deploy: tool({
+description:
+"Deploy a task through TaskService.Deploy so the governance firewall, the human-approval gate (real deploys require approval), and lifecycle events all apply — the same path as `kern deploy <task-id>` and POST /v1/tasks/{id}/deploy. Returns the updated task state and deployment ref.",
+args: {
+task_id: tool.schema.string(),
+version: tool.schema.string().optional(),
+root: tool.schema.string().optional(),
+},
+async execute(args) {
+const flags: string[] = ["deploy", args.task_id]
+if (args.version) flags.push("--version", args.version)
+if (args.root) flags.push("--root", args.root)
+return run(flags)
+},
+}),
+kern_runtime: tool({
+description:
+"Production-intelligence snapshot: kern_runtime with action=status reports which runtime source is wired (live adapter via KERN_PROMETHEUS_URL/KERN_OTEL_URL/KERN_K8S_API or .kern/runtime.json) plus per-service profiles (events/errors/error rate); action=drift compares runtime routes against code-declared routes (template-aware). JSON output, mirroring `kern runtime status|drift --json`.",
+args: {
+action: tool.schema.string().optional(),
+root: tool.schema.string().optional(),
+},
+async execute(args) {
+const flags: string[] = ["runtime", args.action === "drift" ? "drift" : "status"]
+if (args.root) flags.push("--root", args.root)
+flags.push("--json")
+return run(flags)
+},
+}),
+kern_optimize_log: tool({
         description:
           "Strip noise from log output: keeps errors, warnings, stack traces and build failures, removes timestamps and chatter. Use before pasting logs into context.",
         args: { log: tool.schema.string() },
@@ -796,6 +974,89 @@ async function runPayload(args: string[], timeoutMs?: number, preserveExit = fal
           return run(flags)
         },
       }),
+      kern_retrieve: tool({
+        description:
+          "Retrieve context at progressive disclosure levels (L1=index summary, L2=neighborhood, L3=source) with stable handles.",
+        args: {
+          query: tool.schema.string().optional(),
+          symbol: tool.schema.string().optional(),
+          level: tool.schema.string().optional(),
+          root: tool.schema.string().optional(),
+          limit: tool.schema.number().optional(),
+          depth: tool.schema.number().optional(),
+          max_nodes: tool.schema.number().optional(),
+          lines: tool.schema.number().optional(),
+          max_tokens: tool.schema.number().optional(),
+          with_freshness: tool.schema.boolean().optional(),
+        },
+        async execute(args) {
+          const flags: string[] = ["retrieve"]
+          if (args.query) flags.push("--query", args.query)
+          if (args.symbol) flags.push("--symbol", args.symbol)
+          if (args.level) flags.push("--level", args.level)
+          if (args.limit !== undefined) flags.push("--limit", String(args.limit))
+          if (args.depth !== undefined) flags.push("--depth", String(args.depth))
+          if (args.max_nodes !== undefined) flags.push("--max", String(args.max_nodes))
+          if (args.lines !== undefined) flags.push("--lines", String(args.lines))
+          if (args.max_tokens !== undefined) flags.push("--max-tokens", String(args.max_tokens))
+          if (args.with_freshness) flags.push("--fresh")
+          if (args.root) flags.push(args.root)
+          return run(flags)
+        },
+      }),
+      kern_resolve: tool({
+        description:
+          "Resolve a handle ID from kern_retrieve to L2 or L3 content, validating staleness via content hash.",
+        args: {
+          handle: tool.schema.string(),
+          level: tool.schema.string().optional(),
+          root: tool.schema.string().optional(),
+          max_tokens: tool.schema.number().optional(),
+          with_freshness: tool.schema.boolean().optional(),
+        },
+        async execute(args) {
+          const flags: string[] = ["resolve", args.handle]
+          if (args.level) flags.push("--level", args.level)
+          if (args.max_tokens !== undefined) flags.push("--max-tokens", String(args.max_tokens))
+          if (args.with_freshness) flags.push("--fresh")
+          if (args.root) flags.push(args.root)
+          return run(flags)
+        },
+      }),
+      kern_context_envelope: tool({
+        description:
+          "Return the assembled context envelope (domain.ContextPacket) as machine-readable JSON with schema versioning. Use when a client needs the structured packet, not rendered text.",
+        args: {
+          change: tool.schema.string(),
+          root: tool.schema.string().optional(),
+          max_tokens: tool.schema.number().optional(),
+          with_freshness: tool.schema.boolean().optional(),
+        },
+        async execute(args) {
+          const flags: string[] = ["context-envelope", args.change]
+          if (args.max_tokens !== undefined) flags.push("--max-tokens", String(args.max_tokens))
+          if (args.with_freshness) flags.push("--fresh")
+          if (args.root) flags.push(args.root)
+          return run(flags)
+        },
+      }),
+      kern_plan_context: tool({
+        description:
+          "Deterministically plan which context to include for a change: classify the task type, score evidence classes by policy, and fit the selection to a token budget. Explainable — use json=true for the structured plan.",
+        args: {
+          change: tool.schema.string(),
+          root: tool.schema.string().optional(),
+          budget: tool.schema.number().optional(),
+          json: tool.schema.boolean().optional(),
+        },
+        async execute(args) {
+          const flags: string[] = ["explain-context", args.change]
+          if (args.budget !== undefined) flags.push("--budget", String(args.budget))
+          if (args.json) flags.push("--json")
+          if (args.root) flags.push(args.root)
+          return run(flags)
+        },
+      }),
       kern_trace: tool({
         description:
           "Runtime-impact overlay: parse a pprof -top dump, a crash stack trace, or a plain list of function names and map the hot symbols onto the call graph — file:line, blast radius, test coverage and risk. Use to see what a hot path touches at runtime.",
@@ -912,17 +1173,17 @@ async function runPayload(args: string[], timeoutMs?: number, preserveExit = fal
       kern_memory_recall: tool({
         description:
           "Recall the up-to-k most relevant past lessons for a prompt by keyword overlap. Returns only lessons whose tokens match; deterministic and local.",
-        args: {
-          prompt: tool.schema.string(),
-          root: tool.schema.string().optional(),
-          k: tool.schema.number().optional(),
-        },
-        async execute(args) {
-          const flags: string[] = ["recall", args.prompt]
-          if (args.k) flags.push("--limit", String(args.k))
-          if (args.root) flags.push(args.root)
-          return run(flags)
-        },
+args: {
+prompt: tool.schema.string(),
+root: tool.schema.string().optional(),
+limit: tool.schema.number().optional(),
+},
+async execute(args) {
+const flags: string[] = ["recall", args.prompt]
+if (args.limit) flags.push("--limit", String(args.limit))
+if (args.root) flags.push(args.root)
+return run(flags)
+},
       }),
       kern_mask_pii: tool({
         description:
@@ -1255,6 +1516,34 @@ async function runPayload(args: string[], timeoutMs?: number, preserveExit = fal
           return run(flags)
         },
       }),
+      kern_risk: tool({
+        description:
+          "HIGH-LEVEL: the governance risk assessment for a proposed change — the same engine behind `kern risk` (CLI) and POST /v1/risk (REST): the context engine's risk claims (level, score, factors), firewall check result (allowed/blocked, approval requirement), and required validations. Read-only.",
+        args: {
+          root: tool.schema.string().optional(),
+          change: tool.schema.string(),
+        },
+        async execute(args) {
+          const flags: string[] = ["risk"]
+          if (args.root) flags.push("--root", args.root)
+          flags.push(args.change)
+          return run(flags)
+        },
+      }),
+      kern_flight: tool({
+        description:
+          "Replay the AI flight recorder (Workflow E observability): the full recorded trail for one task — every stage, tool call, decision, approval, and outcome, in chronological order. Read-only; answers 'what did the agent do, why, and what happened?'. Records live under <root>/.kern/flight.",
+        args: {
+          root: tool.schema.string().optional(),
+          task: tool.schema.string(),
+        },
+        async execute(args) {
+          const flags: string[] = ["flight", "show"]
+          if (args.root) flags.push("--root", args.root)
+          flags.push(args.task)
+          return run(flags)
+        },
+      }),
       kern_memory: tool({
         description:
           "HIGH-LEVEL (Workflow E): manage engineering memory — add a lesson, list stored lessons, or recall the most relevant lessons for a prompt.",
@@ -1294,6 +1583,21 @@ async function runPayload(args: string[], timeoutMs?: number, preserveExit = fal
         },
         async execute(args) {
           const flags: string[] = ["loop", args.intent]
+          if (args.level) flags.push("--level", args.level)
+          if (args.root) flags.push("--root", args.root)
+          return run(flags)
+        },
+      }),
+      kern_do: tool({
+        description:
+          "HIGH-LEVEL (Workflow E): the autonomous 'Implement X' closed loop (understand→remember→plan→code→verify→protect→observe→learn) — the MCP counterpart of `kern do`. Unlike kern_loop's read-only no-op stages, this wires the LLM coder and planner (provider-neutral factory, default local Ollama) as the default stage handlers, grounded with project context (relevant files + impact set) and verified with the polyglot verification engine. Default level L2 (sandboxed code changes); L3 adds PR creation, L4 deploy-with-approval.",
+        args: {
+          root: tool.schema.string().optional(),
+          intent: tool.schema.string(),
+          level: tool.schema.string().optional(),
+        },
+        async execute(args) {
+          const flags: string[] = ["do", args.intent]
           if (args.level) flags.push("--level", args.level)
           if (args.root) flags.push("--root", args.root)
           return run(flags)
@@ -1643,6 +1947,156 @@ kern_entry_points: tool({
           if (args.line) flags.push("--line", String(args.line))
           if (args.symbol) flags.push("--symbol", args.symbol)
           if (args.root) flags.push("--root", args.root)
+          return run(flags)
+        },
+      }),
+      kern_evidence: tool({
+        description:
+          "Signed-evidence read path: kern_evidence with action=verify validates an evidence bundle (args.file or args.url — fetched without cloning) and reports tamper-seal status, signature status, audit-chain replay and, when args.expect_fingerprint is given, the fingerprint trust-anchor match; action=explain renders the bundle in plain language; action=export builds a bundle from the project's evidence store for args.task_id (or the current state) and returns its path + id. Mirrors `kern evidence export|verify|explain`.",
+        args: {
+          action: tool.schema.string().optional(),
+          file: tool.schema.string().optional(),
+          url: tool.schema.string().optional(),
+          task_id: tool.schema.string().optional(),
+          expect_fingerprint: tool.schema.string().optional(),
+          root: tool.schema.string().optional(),
+        },
+        async execute(args) {
+          const flags: string[] = ["evidence", args.action === "explain" ? "explain" : args.action === "export" ? "export" : "verify"]
+          if (args.file) flags.push("--file", args.file)
+          if (args.url) flags.push("--url", args.url)
+          if (args.task_id) flags.push("--task", args.task_id)
+          if (args.expect_fingerprint) flags.push("--expect-fingerprint", args.expect_fingerprint)
+          if (args.root) flags.push("--root", args.root)
+          return run(flags)
+        },
+      }),
+      kern_org_projects: tool({
+        description:
+          "Enterprise org admin: list registered projects (C11). Returns {projects:[{name,root}],count}.",
+        args: {
+          root: tool.schema.string().optional(),
+          projects: tool.schema.string().optional(),
+        },
+        async execute(args) {
+          const flags: string[] = ["org", "projects"]
+          if (args.root) flags.push("--root", args.root)
+          if (args.projects) args.projects.split(",").forEach((pair: string) => { const p = pair.trim(); if (p) flags.push("--project", p) })
+          return run(flags)
+        },
+      }),
+      kern_org_agents: tool({
+        description:
+          "Enterprise org admin: register or list agent identities (C11). action=list returns {agents:[{id,name,type}],count}; action=register creates an agent from id/name (type defaults to 'default') and returns the created agent.",
+        args: {
+          action: tool.schema.string().optional(),
+          id: tool.schema.string().optional(),
+          name: tool.schema.string().optional(),
+          type: tool.schema.string().optional(),
+          root: tool.schema.string().optional(),
+          projects: tool.schema.string().optional(),
+        },
+        async execute(args) {
+          const flags: string[] = ["org", "agents", args.action === "register" ? "register" : "list"]
+          if (args.action === "register") {
+            if (args.id) flags.push(args.id)
+            if (args.name) flags.push(args.name)
+            if (args.type) flags.push("--type", args.type)
+          }
+          if (args.root) flags.push("--root", args.root)
+          if (args.projects) args.projects.split(",").forEach((pair: string) => { const p = pair.trim(); if (p) flags.push("--project", p) })
+          return run(flags)
+        },
+      }),
+      kern_org_teams: tool({
+        description:
+          "Enterprise org admin: manage teams that group agents and own projects (C11). action=list|show|create|remove — create takes id/name plus optional projects (team project names) and members (agent IDs); show/remove take id.",
+        args: {
+          action: tool.schema.string().optional(),
+          id: tool.schema.string().optional(),
+          name: tool.schema.string().optional(),
+          projects: tool.schema.string().optional(),
+          members: tool.schema.string().optional(),
+          root: tool.schema.string().optional(),
+        },
+        async execute(args) {
+          const action = args.action || "list"
+          const flags: string[] = ["org", "teams", action]
+          if (action === "show" || action === "remove") {
+            if (args.id) flags.push(args.id)
+          }
+          if (action === "create") {
+            if (args.id) flags.push(args.id)
+            if (args.name) flags.push(args.name)
+            if (args.projects) flags.push("--projects", args.projects)
+            if (args.members) flags.push("--members", args.members)
+          }
+          if (args.root) flags.push("--root", args.root)
+          return run(flags)
+        },
+      }),
+      kern_org_memory: tool({
+        description:
+          "Enterprise org admin: org-level shared memory visible across all projects (C11). action=list returns {memories:[{id,content,type}],count}; action=add stores a memory from content with optional type.",
+        args: {
+          action: tool.schema.string().optional(),
+          content: tool.schema.string().optional(),
+          type: tool.schema.string().optional(),
+          root: tool.schema.string().optional(),
+          projects: tool.schema.string().optional(),
+        },
+        async execute(args) {
+          const flags: string[] = ["org", "memory", args.action === "add" ? "add" : "list"]
+          if (args.action === "add") {
+            if (args.content) flags.push(args.content)
+            if (args.type) flags.push("--type", args.type)
+          }
+          if (args.root) flags.push("--root", args.root)
+          if (args.projects) args.projects.split(",").forEach((pair: string) => { const p = pair.trim(); if (p) flags.push("--project", p) })
+          return run(flags)
+        },
+      }),
+      kern_org_tasks: tool({
+        description:
+          "Enterprise org admin: aggregate task visibility (C11). Returns {projects:{name:[{id,state,intent,type}]},total}.",
+        args: {
+          root: tool.schema.string().optional(),
+          projects: tool.schema.string().optional(),
+        },
+        async execute(args) {
+          const flags: string[] = ["org", "tasks"]
+          if (args.root) flags.push("--root", args.root)
+          if (args.projects) args.projects.split(",").forEach((pair: string) => { const p = pair.trim(); if (p) flags.push("--project", p) })
+          return run(flags)
+        },
+      }),
+      kern_org_search: tool({
+        description:
+          "Enterprise org admin: cross-project symbol search (C11). Requires q; returns {hits:[{repo,root,symbol,score}],count}.",
+        args: {
+          q: tool.schema.string().optional(),
+          root: tool.schema.string().optional(),
+          projects: tool.schema.string().optional(),
+        },
+        async execute(args) {
+          const flags: string[] = ["org", "search"]
+          if (args.q) flags.push(args.q)
+          if (args.root) flags.push("--root", args.root)
+          if (args.projects) args.projects.split(",").forEach((pair: string) => { const p = pair.trim(); if (p) flags.push("--project", p) })
+          return run(flags)
+        },
+      }),
+      kern_org_audit: tool({
+        description:
+          "Enterprise org admin: org-level audit log (C11). Returns {entries:[...],count} with AuditEntry's raw JSON field names.",
+        args: {
+          root: tool.schema.string().optional(),
+          projects: tool.schema.string().optional(),
+        },
+        async execute(args) {
+          const flags: string[] = ["org", "audit"]
+          if (args.root) flags.push("--root", args.root)
+          if (args.projects) args.projects.split(",").forEach((pair: string) => { const p = pair.trim(); if (p) flags.push("--project", p) })
           return run(flags)
         },
       }),
@@ -2040,7 +2494,7 @@ kern_entry_points: tool({
           }
         },
       }),
-    },
+    }),
 
     // Auto-compress large tool outputs before they enter context.
     "tool.execute.after": async (input, output) => {

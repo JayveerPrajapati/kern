@@ -30,7 +30,9 @@ func (s *Server) handleDocSearch(ctx context.Context, args map[string]any) (stri
 			if err != nil {
 				return "", err
 			}
-			_ = ix.Save()
+			if err := ix.Save(); err != nil {
+				return "", err
+			}
 		}
 		k := 5
 		if v := argString(args, "k"); v != "" {
@@ -97,7 +99,9 @@ func (s *Server) handleDocIndex(ctx context.Context, args map[string]any) (strin
 		if err != nil {
 			return "", err
 		}
-		_ = ix.Save()
+		if err := ix.Save(); err != nil {
+			return "", err
+		}
 		return "indexed " + strconv.Itoa(len(ix.Docs)) + " chunks from " + root, nil
 	}
 }

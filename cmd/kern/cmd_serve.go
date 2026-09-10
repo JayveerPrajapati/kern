@@ -79,7 +79,9 @@ func runServe(rest []string) {
 		}
 		log.Printf("kern serve: single-project mode on %s (root: %s)", addr, root)
 	}
-	log.Fatal(http.ListenAndServe(addr, h))
+	if err := http.ListenAndServe(addr, h); err != nil {
+		fatal("serve failed: %v — is the port in use? (change with --addr)", err)
+	}
 }
 
 // buildServeHandler constructs the HTTP handler from serve args.

@@ -8,14 +8,15 @@ import (
 	"path/filepath"
 
 	"github.com/JayveerPrajapati/kern/internal/evidence"
+	"github.com/JayveerPrajapati/kern/internal/fetch"
 	"github.com/JayveerPrajapati/kern/internal/governance"
 	"github.com/JayveerPrajapati/kern/internal/storage"
 )
 
-// runEvidence handles evidence export and verify subcommands.
+// runEvidence handles evidence export, verify, and explain subcommands.
 func runEvidence(args []string) int {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "kern evidence: subcommand required (export|verify)")
+		fmt.Fprintln(os.Stderr, "kern evidence: subcommand required (export|verify|explain)")
 		return 1
 	}
 	switch args[0] {
@@ -23,8 +24,10 @@ func runEvidence(args []string) int {
 		return runEvidenceExport(args[1:])
 	case "verify":
 		return runEvidenceVerify(args[1:])
+	case "explain":
+		return runEvidenceExplain(args[1:])
 	default:
-		fmt.Fprintf(os.Stderr, "kern evidence: unknown subcommand %q (export|verify)\n", args[0])
+		fmt.Fprintf(os.Stderr, "kern evidence: unknown subcommand %q (export|verify|explain)\n", args[0])
 		return 1
 	}
 }
@@ -38,6 +41,7 @@ func runEvidenceExport(rest []string) int {
 		task    = fs.String("task", "", "task ID the authorization is scoped to")
 		out     = fs.String("out", "-", "output path (\"-\" = stdout)")
 		jsonOut = fs.Bool("json", true, "emit JSON (the only form; default true)")
+		sign    = fs.Bool("sign", false, "sign the bundle with the project key (.kern/keys/, created on first use)")
 	)
 	if err := fs.Parse(rest); err != nil {
 		return 1
@@ -54,6 +58,18 @@ func runEvidenceExport(rest []string) int {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "kern evidence export: %v\n", err)
 		return 1
+	}
+
+	if *sign {
+		kp, err := evidence.LoadOrCreateKeys(*root)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "kern evidence export: %v\n", err)
+			return 1
+		}
+		if err := b.Sign(kp); err != nil {
+			fmt.Fprintf(os.Stderr, "kern evidence export: %v\n", err)
+			return 1
+		}
 	}
 
 	data, err := json.MarshalIndent(b, "", "  ")
@@ -75,35 +91,34 @@ func runEvidenceExport(rest []string) int {
 		fmt.Fprintf(os.Stderr, "kern evidence export: write %s: %v\n", *out, err)
 		return 1
 	}
-	fmt.Printf("wrote evidence bundle %s to %s\n", b.BundleID, *out)
+	fmt.Printf("wrote evidence bundle %s to %s", b.BundleID, *out)
+	if *sign {
+		fmt.Printf(" (signed with key %s)", b.Signature.KeyFingerprint)
+	}
+	fmt.Println()
 	return 0
 }
 
 // runEvidenceVerify validates an evidence bundle's seal and audit chain.
+// The bundle can come from a local file, stdin, or --url (verified without
+// cloning the repo — C4); the audit-chain replay needs the repo on disk and
+// is skipped for URL bundles unless --root is given.
 func runEvidenceVerify(rest []string) int {
 	fs := flag.NewFlagSet("evidence verify", flag.ContinueOnError)
 	var (
-		file = fs.String("file", "", "bundle JSON file (default: read from stdin)")
-		root = fs.String("root", "", "repo root to verify the audit chain against (default: bundle's repo_root)")
+		file     = fs.String("file", "", "bundle JSON file (default: read from stdin)")
+		url      = fs.String("url", "", "bundle URL to fetch and verify without cloning")
+		root     = fs.String("root", "", "repo root to verify the audit chain against (default: bundle's repo_root)")
+		expectFP = fs.String("expect-fingerprint", "", "require the bundle to be signed by this key fingerprint (the trust anchor)")
 	)
 	if err := fs.Parse(rest); err != nil {
 		return 1
 	}
 
-	var data []byte
-	var err error
-	if *file != "" {
-		data, err = os.ReadFile(*file)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "kern evidence verify: read %s: %v\n", *file, err)
-			return 1
-		}
-	} else {
-		data, err = readStdin()
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "kern evidence verify: read stdin: %v\n", err)
-			return 1
-		}
+	data, err := evidenceSource(*file, *url)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "kern evidence verify: %v\n", err)
+		return 1
 	}
 
 	b, err := evidence.Parse(data)
@@ -112,15 +127,40 @@ func runEvidenceVerify(rest []string) int {
 		return 1
 	}
 
-	if err := b.Verify(); err != nil {
+	// Key identity (C4): VerifyWithAnchor validates the signature against the
+	// embedded key and, when --expect-fingerprint is given, anchors it to the
+	// caller-supplied trust anchor (an unsigned bundle never satisfies it).
+	// The result makes the trust basis explicit in the output: without an
+	// expected fingerprint, a valid signature is SELF-ATTESTED — verified
+	// against the bundle-embedded key only, which a self-consistent attacker
+	// can satisfy.
+	vres, err := b.VerifyWithAnchor(*expectFP)
+	if err != nil {
 		fmt.Fprintf(os.Stderr, "kern evidence verify: %v\n", err)
 		return 2
+	}
+	switch vres.TrustAnchor {
+	case evidence.TrustAnchorAnchored:
+		fmt.Printf("signature: valid, key %s ANCHORED — matches the expected fingerprint %s\n",
+			b.Signature.KeyFingerprint, vres.ExpectedFingerprint)
+	case evidence.TrustAnchorSelfAttested:
+		fmt.Printf("signature: valid (SELF-ATTESTED — verified against the bundle-embedded key %s only; supply --expect-fingerprint to anchor trust)\n",
+			b.Signature.KeyFingerprint)
+	default:
+		fmt.Println("signature: unsigned (digest-only seal)")
 	}
 
 	// Verify the audit chain the bundle claims, against the on-disk trail.
 	repoRoot := b.RepoRoot
 	if *root != "" {
 		repoRoot = *root
+	}
+	if *url != "" && *root == "" {
+		// URL bundle with no local repo: the seal is verified above; the
+		// on-disk chain replay requires a clone, so report what holds.
+		fmt.Printf("Bundle %s VALID (seal). Schema v%d. Audit chain NOT replayed (no local repo — pass --root to replay).\n",
+			b.BundleID, b.SchemaVersion)
+		return 0
 	}
 	store := storage.NewLog(filepath.Join(repoRoot, ".kern", "audit"))
 	log := governance.NewAuditLog().WithStore(store)
@@ -173,4 +213,55 @@ func shortHash8(h string) string {
 		return h
 	}
 	return h[:8]
+}
+
+// evidenceSource loads a bundle from --file, --url, or stdin.
+func evidenceSource(file, url string) ([]byte, error) {
+	if url != "" {
+		res, err := fetch.Fetch(url, 0)
+		if err != nil {
+			return nil, fmt.Errorf("fetch %s: %w", url, err)
+		}
+		if res.Truncated {
+			return nil, fmt.Errorf("fetch %s: bundle exceeded the fetch size cap", url)
+		}
+		return []byte(res.Text), nil
+	}
+	if file != "" {
+		data, err := os.ReadFile(file)
+		if err != nil {
+			return nil, fmt.Errorf("read %s: %w", file, err)
+		}
+		return data, nil
+	}
+	return readStdin()
+}
+
+// runEvidenceExplain renders a bundle in plain language: what it proves and
+// how to verify it (C4 reviewer-side trust). Source: --file, --url, or stdin.
+func runEvidenceExplain(rest []string) int {
+	fs := flag.NewFlagSet("evidence explain", flag.ContinueOnError)
+	var (
+		file = fs.String("file", "", "bundle JSON file (default: read from stdin)")
+		url  = fs.String("url", "", "bundle URL to fetch and explain without cloning")
+	)
+	if err := fs.Parse(rest); err != nil {
+		return 1
+	}
+	data, err := evidenceSource(*file, *url)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "kern evidence explain: %v\n", err)
+		return 1
+	}
+	b, err := evidence.Parse(data)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "kern evidence explain: %v\n", err)
+		return 1
+	}
+	if err := b.Verify(); err != nil {
+		fmt.Fprintf(os.Stderr, "kern evidence explain: bundle failed verification: %v\n", err)
+		return 2
+	}
+	fmt.Print(b.Explain())
+	return 0
 }

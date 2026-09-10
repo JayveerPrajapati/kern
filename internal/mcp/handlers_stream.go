@@ -86,13 +86,18 @@ func (s *Server) handleStream(ctx context.Context, args map[string]any) (string,
 			}
 		}
 
-		data, _ := json.MarshalIndent(map[string]any{
-			"total_chunks": len(chunks),
-			"total_chars":  len(runes),
-			"chunk_size":   chunkSize,
-			"chunks":       desc,
-		}, "", "  ")
-		return string(data), nil
+		// D4: compact text summary by default; full chunk descriptors behind
+		// format=json.
+		if strings.ToLower(argString(args, "format")) == "json" {
+			data, _ := json.MarshalIndent(map[string]any{
+				"total_chunks": len(chunks),
+				"total_chars":  len(runes),
+				"chunk_size":   chunkSize,
+				"chunks":       desc,
+			}, "", "  ")
+			return string(data), nil
+		}
+		return fmt.Sprintf("sent %d chunks (%d chars, chunk size %d)", len(chunks), len(runes), chunkSize), nil
 
 	case "emit":
 		channel := argString(args, "channel")

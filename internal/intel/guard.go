@@ -161,7 +161,8 @@ func CheckBoundariesPrecise(ix *index.Index, b *Boundaries, files []string, stri
 		syms := ix.SymbolsByFile[f]
 		for _, s := range syms {
 			full := s.FullName()
-			for _, c := range ix.Calls[full] {
+			for _, ce := range ix.Calls[full] {
+				c := ce.Target
 				if strict {
 					// Strict precision: an edge whose caller language is not fully
 					// resolved ("resolved" tier) is unknown, not guessable, so it
@@ -210,7 +211,7 @@ func CheckBoundariesPrecise(ix *index.Index, b *Boundaries, files []string, stri
 				if toDir == "" || toDir == fromDir {
 					continue
 				}
-				if importMatches(imp, toDir) {
+				if importMatches(imp.Path, toDir) {
 					if rule := verdict(b.Rules, fromDir, toDir); rule != nil {
 						violations = append(violations, Violation{
 							CallerFile: f,
@@ -291,15 +292,17 @@ func importMatches(importPath, dir string) bool {
 	if importPath == "" || dir == "" {
 		return false
 	}
+	// Go-style (slash) imports: the module-relative package dir is a suffix of
+	// the full import path ("github.com/x/y/internal/z" <-> "internal/z").
 	if strings.HasSuffix(importPath, "/"+dir) || importPath == dir {
 		return true
 	}
-	if strings.HasSuffix(importPath, "/"+filepath.Base(dir)) {
-		return true
-	}
+	// Java-style (dotted) imports: the package path is a suffix of the source
+	// directory ("com.inn.rcp.foo" <-> ".../java/com/inn/rcp/foo"). The full
+	// package path is required; basename-only matches cross shared suffixes.
 	if strings.Contains(importPath, ".") {
 		slash := strings.ReplaceAll(importPath, ".", "/")
-		return slash == dir || strings.HasSuffix(slash, "/"+dir) || strings.HasSuffix(slash, "/"+filepath.Base(dir))
+		return slash == dir || strings.HasSuffix(dir, "/"+slash)
 	}
 	return false
 }
@@ -311,11 +314,28 @@ func resolveCallee(ix *index.Index, meta map[string]index.Symbol, name string) s
 	if _, ok := meta[name]; ok {
 		return name
 	}
-	simple := simpleName(name)
+	i := strings.LastIndexByte(name, '.')
+	if i <= 0 {
+		// Bare callees must be exact indexed symbols; name-only resolution
+		// across the whole index fabricates cross-package edges.
+		return ""
+	}
+	qual, simple := name[:i], name[i+1:]
+	if qual == "" || simple == "" {
+		return ""
+	}
+	// Resolve "qualifier.simple" only when the qualifier scopes the symbol:
+	// a matching receiver (Type.method) or package/directory basename
+	// (pkg.Func); the exact qualified name is handled above.
 	var best string
 	for full, s := range meta {
-		if s.Name == simple && (best == "" || full < best) {
-			best = full
+		if s.Name != simple {
+			continue
+		}
+		if s.Receiver == qual || filepath.Base(filepath.Dir(s.File)) == qual {
+			if best == "" || full < best {
+				best = full
+			}
 		}
 	}
 	return best

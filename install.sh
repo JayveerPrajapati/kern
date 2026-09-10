@@ -92,6 +92,7 @@ go_install() {
     if [ "$(uname -s)" = "Darwin" ]; then
       if command -v xattr >/dev/null 2>&1; then
         xattr -dr com.apple.quarantine "$PREFIX/kern" "$PREFIX/kern-mcp" "$PREFIX/kern-server" 2>/dev/null || true
+        xattr -dr com.apple.provenance "$PREFIX/kern" "$PREFIX/kern-mcp" "$PREFIX/kern-server" 2>/dev/null || true
       fi
       if command -v codesign >/dev/null 2>&1; then
         codesign --force --sign - "$PREFIX/kern" "$PREFIX/kern-mcp" "$PREFIX/kern-server" 2>/dev/null || true
@@ -210,9 +211,22 @@ main() {
   else
     tar -xzf "$tmpdir/${file}" -C "$tmpdir"
   fi
-  cp "$tmpdir/kern-${platform}/kern${exe}" "$PREFIX/kern${exe}"
-  cp "$tmpdir/kern-${platform}/kern-mcp${exe}" "$PREFIX/kern-mcp${exe}"
-  cp "$tmpdir/kern-${platform}/kern-server${exe}" "$PREFIX/kern-server${exe}"
+  # Release archives have used two layouts: <=v0.9.4 packaged a
+  # kern-<os>-<arch>/ subdirectory; >=v0.9.5.2 (CI commit 2deb68f) ships the
+  # binaries at the archive root. Detect which one we extracted so the
+  # installer works against both old and new releases.
+  src="$tmpdir"
+  if [ -f "$tmpdir/kern-${platform}/kern${exe}" ]; then
+    src="$tmpdir/kern-${platform}"
+  fi
+  if [ ! -f "$src/kern${exe}" ] || [ ! -f "$src/kern-mcp${exe}" ] || [ ! -f "$src/kern-server${exe}" ]; then
+    echo "kern: extracted ${file} but expected binaries not found (looked in $src)" >&2
+    echo "kern: aborting install — refusing to report success with nothing copied." >&2
+    exit 1
+  fi
+  cp "$src/kern${exe}" "$PREFIX/kern${exe}"
+  cp "$src/kern-mcp${exe}" "$PREFIX/kern-mcp${exe}"
+  cp "$src/kern-server${exe}" "$PREFIX/kern-server${exe}"
   chmod +x "$PREFIX/kern${exe}" "$PREFIX/kern-mcp${exe}" "$PREFIX/kern-server${exe}"
 
   # macOS Gatekeeper kills unsigned binaries with SIGKILL (exit 137) even
@@ -222,13 +236,15 @@ main() {
     codesign --force --sign - "$PREFIX/kern" "$PREFIX/kern-mcp" "$PREFIX/kern-server"
   fi
   # macOS quarantine: the downloaded tarball carries the com.apple.quarantine
-  # xattr, which Gatekeeper propagates onto the extracted copies. codesign alone
-  # does NOT clear it, so the freshly-installed kern-mcp would still be killed
-  # on first agent launch (exit 137). Removing the xattr is required for a
-  # release install to actually run. Best-effort (xattr may not exist on all
-  # platforms / filesystems).
+  # xattr, which Gatekeeper propagates onto the extracted copies; macOS 15+
+  # additionally stamps extracted/installed binaries with com.apple.provenance.
+  # codesign alone does NOT clear them, so the freshly-installed kern-mcp would
+  # still be killed on first agent launch (exit 137). Removing both xattrs is
+  # required for a release install to actually run. Best-effort (xattr may not
+  # exist on all platforms / filesystems).
   if [ "${platform%-*}" = "darwin" ] && command -v xattr >/dev/null 2>&1; then
     xattr -dr com.apple.quarantine "$PREFIX/kern" "$PREFIX/kern-mcp" "$PREFIX/kern-server" 2>/dev/null || true
+    xattr -dr com.apple.provenance "$PREFIX/kern" "$PREFIX/kern-mcp" "$PREFIX/kern-server" 2>/dev/null || true
   fi
 
   echo "installed: $PREFIX/kern${exe} ($tag)"

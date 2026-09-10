@@ -19,6 +19,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/JayveerPrajapati/kern/internal/governance"
 	"github.com/JayveerPrajapati/kern/internal/processgroup"
 )
 
@@ -134,7 +135,7 @@ func sanitizedEnv() []string {
 }
 
 // SkipDirs are never copied into a snapshot.
-var SkipDirs = map[string]bool{".git": true, ".hg": true, ".svn": true, "node_modules": true, "vendor": true, "dist": true, "build": true, ".kern": true, ".blueprint": true, "bin": true, "graphify-out": true}
+var SkipDirs = map[string]bool{".git": true, ".hg": true, ".svn": true, "node_modules": true, "vendor": true, "dist": true, "build": true, "target": true, "out": true, ".gradle": true, ".venv": true, "__pycache__": true, ".next": true, ".turbo": true, ".kern": true, ".blueprint": true, "bin": true, "graphify-out": true}
 
 // Snap is a point-in-time copy of a tree used for rollback.
 type Snap struct {
@@ -156,8 +157,12 @@ func Snapshot(root string) (*Snap, error) {
 	s := &Snap{root: root, tmp: tmp, skipped: map[string]bool{}, skippedSize: map[string]int64{}, dirs: map[string]bool{}}
 	var bytes int64
 	capBytes := snapshotCap()
+	var walkErrs []string
 	err = filepath.WalkDir(root, func(p string, d fs.DirEntry, werr error) error {
 		if werr != nil {
+			// Record unreadable paths and keep walking; surface them after
+			// the walk so a truncated copy never fails silently later.
+			walkErrs = append(walkErrs, fmt.Sprintf("%s: %v", p, werr))
 			return nil
 		}
 		rel, rerr := filepath.Rel(root, p)
@@ -214,6 +219,10 @@ func Snapshot(root string) (*Snap, error) {
 	if err != nil {
 		os.RemoveAll(tmp)
 		return nil, err
+	}
+	if len(walkErrs) > 0 {
+		os.RemoveAll(tmp)
+		return nil, fmt.Errorf("snapshot copy incomplete: %d unreadable path(s), first: %s", len(walkErrs), walkErrs[0])
 	}
 	return s, nil
 }
@@ -538,7 +547,9 @@ func Run(parent context.Context, root string, cmdName string, args []string, tim
 	// Sanitize the environment so sandboxed commands cannot read or exfiltrate
 	// secrets (API keys, tokens) from the operator's environment. Only a
 	// whitelist of build/locale-safe vars is passed through.
-	c.Env = sanitizedEnv()
+	// The allowlist already drops secrets; StripSecrets is defense-in-depth so
+	// any future allowlist additions cannot reintroduce secret-named vars.
+	c.Env = governance.StripSecrets(sanitizedEnv(), governance.DefaultSecretFilter())
 	// Run the command in its own process group so that on timeout the whole
 	// group (the command and any grandchildren it spawns) is killed, not just
 	// the direct child.

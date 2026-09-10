@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/JayveerPrajapati/kern/internal/config"
 	"github.com/JayveerPrajapati/kern/internal/governance"
 )
 
@@ -23,16 +24,17 @@ type Gate struct {
 	enabled bool
 }
 
-// NewGateFromEnv builds a Gate from the KERN_MCP_ROOTS environment variable: a
-// comma-separated list of directories. Entries are trimmed of surrounding
-// spaces and empty entries are skipped. Roots are expected absolute; a
-// relative entry is resolved against the process working directory
-// (documented behavior). When the variable is unset or names no usable roots,
-// the gate defaults to the process working directory — the gate is always
-// enabled unless KERN_MCP_PERMISSIVE=1 opts out of confinement.
+// NewGateFromEnv builds a Gate from the KERN_MCP_ROOTS environment variable
+// (or mcp.roots in .kern/config.json): a comma-separated list of directories.
+// Entries are trimmed of surrounding spaces and empty entries are skipped.
+// Roots are expected absolute; a relative entry is resolved against the
+// process working directory (documented behavior). When nothing is configured
+// or no usable roots are named, the gate defaults to the process working
+// directory — the gate is always enabled unless KERN_MCP_PERMISSIVE=1 opts
+// out of confinement.
 func NewGateFromEnv() *Gate {
 	g := &Gate{}
-	for _, r := range strings.Split(os.Getenv("KERN_MCP_ROOTS"), ",") {
+	for _, r := range config.Strings("", "KERN_MCP_ROOTS", "mcp.roots", nil) {
 		r = strings.TrimSpace(r)
 		if r == "" {
 			continue

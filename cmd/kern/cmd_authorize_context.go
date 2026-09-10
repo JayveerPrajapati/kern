@@ -43,7 +43,7 @@ func runAuthorizeContext(rest []string) {
 
 	ix, err := loadOrBuild(*root)
 	if err != nil {
-		fatal("%v", err)
+		fatal("AuthorizeContext: %v", err)
 	}
 
 	// Build a per-call firewall and register the resolved agent into it.
@@ -68,7 +68,7 @@ func runAuthorizeContext(rest []string) {
 	}
 	resp, err := governance.AuthorizeContext(req, ix, fw)
 	if err != nil && err != governance.ErrUnauthorized {
-		fatal("%v", err)
+		fatal("AuthorizeContext: %v", err)
 	}
 
 	if *jsonOut {

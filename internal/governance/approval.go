@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/JayveerPrajapati/kern/internal/domain"
@@ -66,8 +67,11 @@ func NewPersistedApprovalWorkflowFromStore(s *FileStore) *ApprovalWorkflow {
 // Request creates a pending approval for a task. The approval ID is a
 // cryptographically random hex string so it cannot be guessed or enumerated,
 // and the TaskID is carried through so callers can correlate decisions back to
-// the originating action.
-func (w *ApprovalWorkflow) Request(taskID, requester, reason string) domain.Approval {
+// the originating action. When the workflow is persistence-backed and the
+// approval cannot be written to the store, an error is returned so the caller
+// can fail closed instead of parking an approval no other process can see or
+// approve (the approval still exists in this process's memory).
+func (w *ApprovalWorkflow) Request(taskID, requester, reason string) (domain.Approval, error) {
 	a := domain.Approval{
 		ID:          randomApprovalID(),
 		TaskID:      taskID,
@@ -79,10 +83,18 @@ func (w *ApprovalWorkflow) Request(taskID, requester, reason string) domain.Appr
 	w.mu.Lock()
 	w.pending[a.ID] = a
 	if w.store != nil {
-		_ = w.store.AddPending(a)
+		if perr := w.store.AddPending(a); perr != nil {
+			w.mu.Unlock()
+			// The approval still exists in this process's memory, but no other
+			// process (CLI `kern approve`, the workflow engine, the web
+			// console) can see it until persistence recovers. Surface the
+			// failure so the caller can fail closed instead of silently
+			// parking an un-reviewable gate.
+			return a, fmt.Errorf("governance: approval %q could not be persisted (it is visible in this process only): %w", a.ID, perr)
+		}
 	}
 	w.mu.Unlock()
-	return a
+	return a, nil
 }
 
 // RequestWithBinding creates a pending approval with the full binding
@@ -92,9 +104,14 @@ func (w *ApprovalWorkflow) Request(taskID, requester, reason string) domain.Appr
 // approval self-describing for audit — an auditor can reconstruct WHY the
 // approval was requested and WHAT it authorized, not just that it was.
 // The persisted copy is upserted with the full binding so a restarted process
-// restores the complete record, not the base fields only.
-func (w *ApprovalWorkflow) RequestWithBinding(taskID, requester, reason string, riskLevel domain.RiskLevel, policyIDs, evidenceRefs []string, artifactID string) domain.Approval {
-	a := w.Request(taskID, requester, reason)
+// restores the complete record, not the base fields only. Like Request, it
+// returns an error when the approval cannot be persisted, so the caller can
+// fail closed instead of parking an approval no other process can see.
+func (w *ApprovalWorkflow) RequestWithBinding(taskID, requester, reason string, riskLevel domain.RiskLevel, policyIDs, evidenceRefs []string, artifactID string) (domain.Approval, error) {
+	a, err := w.Request(taskID, requester, reason)
+	if err != nil {
+		return a, err
+	}
 	a.RiskLevel = riskLevel
 	a.PolicyIDs = policyIDs
 	a.EvidenceRefs = evidenceRefs
@@ -102,10 +119,13 @@ func (w *ApprovalWorkflow) RequestWithBinding(taskID, requester, reason string, 
 	w.mu.Lock()
 	w.pending[a.ID] = a
 	if w.store != nil {
-		_ = w.store.AddPending(a)
+		if perr := w.store.AddPending(a); perr != nil {
+			w.mu.Unlock()
+			return a, fmt.Errorf("governance: approval %q could not be persisted (it is visible in this process only): %w", a.ID, perr)
+		}
 	}
 	w.mu.Unlock()
-	return a
+	return a, nil
 }
 
 // Approve marks an approval as approved. It returns an error if the approval
@@ -127,6 +147,13 @@ func (w *ApprovalWorkflow) Approve(approvalID, approver string) (domain.Approval
 	w.pending[approvalID] = a
 	if w.store != nil {
 		if _, err := w.store.Decide(approvalID, approver, true, ""); err != nil {
+			// Persistence failed: roll the in-memory approval back to pending
+			// so it stays resumable (a half-decided approval would be
+			// permanently unusable — not pending, not durable).
+			a.Status = "pending"
+			a.Approver = ""
+			a.DecidedAt = nil
+			w.pending[approvalID] = a
 			return a, fmt.Errorf("governance: persist approval %q: %w", approvalID, err)
 		}
 	}
@@ -145,6 +172,7 @@ func (w *ApprovalWorkflow) Reject(approvalID, approver, reason string) (domain.A
 	if a.Status != "pending" {
 		return a, fmt.Errorf("governance: approval %q is %s, not pending", approvalID, a.Status)
 	}
+	origReason := a.Reason
 	a.Status = "rejected"
 	a.Approver = approver
 	a.Reason = reason
@@ -153,6 +181,14 @@ func (w *ApprovalWorkflow) Reject(approvalID, approver, reason string) (domain.A
 	w.pending[approvalID] = a
 	if w.store != nil {
 		if _, err := w.store.Decide(approvalID, approver, false, reason); err != nil {
+			// Persistence failed: roll the in-memory approval back to pending
+			// so it stays resumable (a half-decided approval would be
+			// permanently unusable — not pending, not durable).
+			a.Status = "pending"
+			a.Approver = ""
+			a.Reason = origReason
+			a.DecidedAt = nil
+			w.pending[approvalID] = a
 			return a, fmt.Errorf("governance: persist approval %q: %w", approvalID, err)
 		}
 	}
@@ -186,15 +222,30 @@ func (w *ApprovalWorkflow) Pending() []domain.Approval {
 	return out
 }
 
+// approvalIDFallbackSeq is the monotonic sequence backing the non-crypto
+// approval-ID fallback, so IDs stay unique even within the same nanosecond.
+var approvalIDFallbackSeq atomic.Uint64
+
+// fallbackApprovalID builds an approval ID from a monotonic sequence when
+// crypto/rand is unavailable. Timestamp high bits + sequence low bits are
+// collision-free within a process — even for calls in the same nanosecond —
+// and never a constant (a constant would map every approval to one pending
+// entry, letting one approval authorize a different action).
+func fallbackApprovalID(seq uint64) string {
+	n := (uint64(time.Now().UnixNano()) & 0xFFFFFFFF00000000) | (seq & 0xFFFFFFFF)
+	return fmt.Sprintf("appr-%016x", n)
+}
+
 // randomApprovalID returns a cryptographically random approval ID of the form
 // "appr-<hex>", using 8 random bytes (16 hex chars). crypto/rand guarantees the
 // ID is unpredictable, so pending approvals cannot be guessed or enumerated.
 func randomApprovalID() string {
 	var b [8]byte
 	if _, err := rand.Read(b[:]); err != nil {
-		// crypto/rand should never fail on supported platforms; fall back to
-		// zero bytes (still a valid, unique-enough ID shape) rather than panic.
-		return "appr-0000000000000000"
+		// crypto/rand should never fail on supported platforms; fall back to a
+		// time + atomic-sequence-seeded ID (unique per process, never a
+		// constant) rather than panic or collide.
+		return fallbackApprovalID(approvalIDFallbackSeq.Add(1))
 	}
 	return "appr-" + hex.EncodeToString(b[:])
 }

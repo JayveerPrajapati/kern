@@ -86,7 +86,10 @@ func DeleteCheck(ix *index.Index, sym string) DeleteReport {
 	r.EntryPoint = isEntryPoint(sym)
 
 	fileMap := buildFileMap(ix)
-	for _, c := range ix.Callers[sym] {
+	// CallersIncludingAliases merges simple-name aliases so receiver-qualified
+	// edges (constructor-inferred receiver vars: "New.M") can never hide a
+	// live caller. Over-reporting errs toward "unsafe", never toward "safe".
+	for _, c := range ix.CallersIncludingAliases(sym) {
 		if f := fileMap[c]; f == "" || !isTestFile(f) {
 			r.Callers = append(r.Callers, c)
 		} else {

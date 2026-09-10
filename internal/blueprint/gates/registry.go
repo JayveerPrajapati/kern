@@ -1,5 +1,5 @@
 // Package gates is the authoritative registry of Blueprint's phase gates
-// (G0-G29). A gate is a capability milestone backed by at least one test that
+// (G0-G35). A gate is a capability milestone backed by at least one test that
 // proves the capability. The registry is compiled into the binary (NOT a
 // manifest file), so `blueprint doctor --json` reads it with no file I/O and
 // it can never drift from the code that ships it.
@@ -41,8 +41,8 @@ type Gate struct {
 	Package string
 }
 
-// Registry is the complete, ordered list of all 30 phase gates, G0 through
-// G29. It is the single source of truth for gate inventory; docs/gates.md is
+// Registry is the complete, ordered list of all 36 phase gates, G0 through
+// G35. It is the single source of truth for gate inventory; docs/gates.md is
 // generated from it by hand and must stay in sync (the orphan test checks the
 // test-file mapping, and TestRegistryShape pins the count and IDs).
 var Registry = []Gate{
@@ -580,5 +580,76 @@ var Registry = []Gate{
 			"TestSourceNotInRequireForSourcesPasses",
 		},
 		Package: "main",
+	},
+	{
+		ID:          "G30",
+		Name:        "Diff gate: gofmt",
+		Verifies:    "diff-gate format:gofmt flags unformatted changed .go files (advisory WARN; gofmt -l is deterministic)",
+		Enforcement: "warn",
+		TestFile:    "internal/blueprint/checks/diffgate/diffgate_test.go",
+		TestFuncs: []string{
+			"TestG30_GofmtUnformattedFile",
+			"TestG30_GofmtCleanFile",
+		},
+		Package: "diffgate",
+	},
+	{
+		ID:          "G31",
+		Name:        "Diff gate: vulnerabilities",
+		Verifies:    "diff-gate vulnerability:sec maps the in-house sec scanner onto the changed set (error→BLOCK, warning→WARN, info→INFO)",
+		Enforcement: "warn",
+		TestFile:    "internal/blueprint/checks/diffgate/diffgate_test.go",
+		TestFuncs: []string{
+			"TestG31_SecScanWeakCryptoWarns",
+			"TestG31_SecScanInjectionBlocks",
+		},
+		Package: "diffgate",
+	},
+	{
+		ID:          "G32",
+		Name:        "Diff gate: schema drift",
+		Verifies:    "diff-gate schema:drift fingerprints the MCP tool catalog (name/phase/risk/InputSchema sha256) and detects baseline drift; --init-baseline round-trips",
+		Enforcement: "warn",
+		TestFile:    "internal/blueprint/checks/diffgate/diffgate_test.go",
+		TestFuncs: []string{
+			"TestG32_SchemaBaselineRoundTrip",
+			"TestG32_SchemaDriftDetected",
+		},
+		Package: "diffgate",
+	},
+	{
+		ID:          "G33",
+		Name:        "Diff gate: unsafe execution",
+		Verifies:    "diff-gate exec:unsafe flags changed non-test .go files importing os/exec, calling exec.Command, or containing sh -c (advisory WARN)",
+		Enforcement: "warn",
+		TestFile:    "internal/blueprint/checks/diffgate/diffgate_test.go",
+		TestFuncs: []string{
+			"TestG33_ExecUnsafeDetected",
+			"TestG33_TestFileNotFlagged",
+		},
+		Package: "diffgate",
+	},
+	{
+		ID:          "G34",
+		Name:        "Diff gate: changelog",
+		Verifies:    "diff-gate changelog:missing warns on non-doc source changes without a CHANGELOG.md entry (advisory WARN)",
+		Enforcement: "warn",
+		TestFile:    "internal/blueprint/checks/diffgate/diffgate_test.go",
+		TestFuncs: []string{
+			"TestG34_ChangelogMissing",
+			"TestG34_ChangelogPresent",
+		},
+		Package: "diffgate",
+	},
+	{
+		ID:          "G35",
+		Name:        "Diff gate: MCP catalog drift",
+		Verifies:    "diff-gate catalog:drift BLOCKs when the opencode plugin tool set diverges from the MCP catalog (real drift guard)",
+		Enforcement: "block",
+		TestFile:    "internal/mcp/catalog_drift_test.go",
+		TestFuncs: []string{
+			"TestG35_CatalogDriftRealRepo",
+		},
+		Package: "mcp",
 	},
 }

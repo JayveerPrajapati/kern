@@ -6,8 +6,9 @@ import (
 	"io"
 	"net"
 	"net/url"
-	"os"
 	"strings"
+
+	"github.com/JayveerPrajapati/kern/internal/config"
 )
 
 // Options configures a single generation call across every provider. It is
@@ -71,10 +72,11 @@ func CompressVia(ctx context.Context, p Provider, prompt string, opts Options) (
 	return p.Generate(ctx, CompressInstruction, prompt, opts)
 }
 
-// providerName returns the provider selected by KERN_LLM_PROVIDER (default
-// "ollama"). It is the single place that maps an env var to a vendor.
+// providerName returns the provider selected by KERN_LLM_PROVIDER (or
+// llm.provider in .kern/config.json; default "ollama"). It is the single
+// place that maps the config to a vendor.
 func providerName() string {
-	if n := os.Getenv("KERN_LLM_PROVIDER"); n != "" {
+	if n := config.String("", "KERN_LLM_PROVIDER", "llm.provider", "ollama"); n != "" {
 		return strings.ToLower(n)
 	}
 	return "ollama"

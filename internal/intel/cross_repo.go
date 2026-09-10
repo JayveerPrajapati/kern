@@ -85,7 +85,8 @@ func CrossRepoImpact(subject string, limit int) (*CrossRepoImpactReport, error) 
 			if total >= limit {
 				break
 			}
-			for _, callee := range calleeList {
+			for _, ce := range calleeList {
+				callee := ce.Target
 				if callee == subject || strings.HasSuffix(callee, "."+subject) {
 					// Check if already in breakdown
 					already := false

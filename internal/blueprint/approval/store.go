@@ -9,6 +9,7 @@ package approval
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -27,6 +28,11 @@ const (
 	StatusRejected Status = "rejected"
 	StatusExpired  Status = "expired"
 )
+
+// maxApprovalLogLines caps the JSONL log length: once the log exceeds this
+// many records, append compacts it to the latest record per ID so the file
+// stays bounded (Get/List re-parse it on every access).
+const maxApprovalLogLines = 5000
 
 // Request is one approval request. Each decision (Create/Approve/Reject)
 // appends a full Request record; the record with the latest CreatedAt for an
@@ -152,7 +158,7 @@ func (s *Store) decide(id string, status Status, approver, reason string) error 
 }
 
 // append writes one JSONL record under a mutex so interleaved decisions stay
-// ordered.
+// ordered, then compacts the log when it exceeds maxApprovalLogLines.
 func (s *Store) append(req Request) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -163,13 +169,56 @@ func (s *Store) append(req Request) error {
 	if err != nil {
 		return fmt.Errorf("approval store: open: %w", err)
 	}
-	defer f.Close()
 	line, err := json.Marshal(req)
 	if err != nil {
+		f.Close()
 		return fmt.Errorf("approval store: marshal: %w", err)
 	}
 	if _, err := f.Write(append(line, '\n')); err != nil {
+		f.Close()
 		return fmt.Errorf("approval store: write: %w", err)
+	}
+	f.Close()
+	return s.compactLocked()
+}
+
+// compactLocked bounds the log: when it exceeds maxApprovalLogLines, the file
+// is rewritten keeping only the latest record per ID (last write wins, file
+// order preserved), so the log cannot grow unboundedly and Get/List never
+// re-parse an ever-growing file. A cheap byte-level line count short-circuits
+// the common (below-threshold) case, so appends stay cheap. The caller must
+// hold s.mu.
+func (s *Store) compactLocked() error {
+	data, err := os.ReadFile(s.path)
+	if err != nil {
+		return err
+	}
+	if bytes.Count(data, []byte{'\n'}) <= maxApprovalLogLines {
+		return nil
+	}
+	recs, err := s.readAllLocked()
+	if err != nil {
+		return err
+	}
+	latest := make(map[string]Request)
+	order := make([]string, 0, len(recs))
+	for i := range recs {
+		if _, seen := latest[recs[i].ID]; !seen {
+			order = append(order, recs[i].ID)
+		}
+		latest[recs[i].ID] = recs[i]
+	}
+	var b strings.Builder
+	for _, id := range order {
+		line, err := json.Marshal(latest[id])
+		if err != nil {
+			return fmt.Errorf("approval store: compact marshal: %w", err)
+		}
+		b.Write(line)
+		b.WriteByte('\n')
+	}
+	if err := os.WriteFile(s.path, []byte(b.String()), 0o644); err != nil {
+		return fmt.Errorf("approval store: compact: %w", err)
 	}
 	return nil
 }
@@ -178,6 +227,12 @@ func (s *Store) append(req Request) error {
 func (s *Store) readAll() ([]Request, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.readAllLocked()
+}
+
+// readAllLocked parses every record in the log without taking the lock; the
+// caller must hold s.mu (used by append's compaction, which already holds it).
+func (s *Store) readAllLocked() ([]Request, error) {
 	f, err := os.Open(s.path)
 	if os.IsNotExist(err) {
 		return nil, nil

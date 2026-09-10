@@ -85,7 +85,8 @@ type State struct {
 	Error           string
 }
 
-// NewInitialState creates an empty State initialized with all 30 Blueprint gates.
+// NewInitialState creates an empty State initialized with all registered
+// Blueprint gates (see internal/blueprint/gates.Registry).
 func NewInitialState(taskID, intent, repoRoot string) *State {
 	s := &State{
 		TaskID:        taskID,

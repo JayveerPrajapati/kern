@@ -8,6 +8,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/JayveerPrajapati/kern/internal/config"
 	"github.com/JayveerPrajapati/kern/internal/domain"
 )
 
@@ -66,8 +67,9 @@ func execAllowlistGate(tool string) error {
 	allowlist := parseToolAllowlist(os.Getenv("KERN_TOOLS"))
 
 	// 1. Empty-allowlist gate: an unset KERN_TOOLS means "all tools allowed",
-	// which must not implicitly allow host command execution.
-	if len(allowlist) == 0 && os.Getenv("KERN_ALLOW_EXEC") == "" {
+	// which must not implicitly allow host command execution. Strict parsing:
+	// only KERN_ALLOW_EXEC=1 opts in; any other value is treated as unset.
+	if len(allowlist) == 0 && os.Getenv("KERN_ALLOW_EXEC") != "1" {
 		return errors.New("command execution blocked: no KERN_TOOLS allowlist is set and KERN_ALLOW_EXEC is not enabled; refusing to run ungoverned host commands (set KERN_ALLOW_EXEC=1 to opt in, or list the tool in KERN_TOOLS)")
 	}
 
@@ -78,7 +80,7 @@ func execAllowlistGate(tool string) error {
 				return fmt.Errorf("command execution blocked: tool %q is not in the KERN_TOOLS allowlist", tool)
 			}
 		} else if !containsAnyString(allowlist, execToolNames...) {
-			return fmt.Errorf("command execution blocked: KERN_TOOLS allowlist does not name any exec tool (%s)", strings.Join(execToolNames, ", "))
+			return fmt.Errorf("command execution blocked: KERN_TOOLS allowlist does not name any exec tool (%s — CLI aliases exec, sandbox, execute are accepted too)", strings.Join(execToolNames, ", "))
 		}
 	}
 	return nil
@@ -129,7 +131,10 @@ func RequestExecApproval(wf *ApprovalWorkflow, toolName ...string) (*domain.Appr
 		// a HIGH/CRITICAL command without a human approval path.
 		return nil, risk, fmt.Errorf("governance: command execution requires human approval (risk level %s, score %.2f) but no approval workflow is configured; failing closed", risk.Level, risk.Score)
 	}
-	ap := wf.Request(TaskKey(execAgentID, "command", "execute"), execAgentID, risk.Mitigation)
+	ap, err := wf.Request(TaskKey(execAgentID, "command", "execute"), execAgentID, risk.Mitigation)
+	if err != nil {
+		return nil, risk, fmt.Errorf("governance: command execution requires human approval, but the approval could not be persisted: %w", err)
+	}
 	return &ap, risk, nil
 }
 
@@ -153,11 +158,12 @@ func ResumeExecApproval(wf *ApprovalWorkflow, approvalID string) error {
 
 // execPolicies returns the risk policies for the exec firewall: the defaults
 // plus a command.execute policy whose severity is operator-configurable via
-// KERN_EXEC_RISK (default MEDIUM; HIGH or CRITICAL makes command.execute
-// require human approval). An unrecognized value defaults to MEDIUM.
+// KERN_EXEC_RISK (or exec.risk in .kern/config.json; default MEDIUM; HIGH or
+// CRITICAL makes command.execute require human approval). An unrecognized
+// value defaults to MEDIUM.
 func execPolicies() []domain.Policy {
 	level := "MEDIUM"
-	if v := strings.ToUpper(strings.TrimSpace(os.Getenv("KERN_EXEC_RISK"))); v != "" {
+	if v := strings.ToUpper(strings.TrimSpace(config.String("", "KERN_EXEC_RISK", "exec.risk", ""))); v != "" {
 		switch v {
 		case "LOW", "MEDIUM", "HIGH", "CRITICAL":
 			level = v
@@ -174,15 +180,28 @@ func execPolicies() []domain.Policy {
 }
 
 // parseToolAllowlist parses a comma-separated tool allowlist (KERN_TOOLS),
-// trimming whitespace and dropping empty entries.
+// trimming whitespace and dropping empty entries. CLI subcommand aliases are
+// normalized to their canonical MCP tool names ("exec" → "kern_exec") so an
+// operator writing CLI-style names gets the same behavior as MCP-style ones.
 func parseToolAllowlist(v string) []string {
 	var out []string
 	for _, n := range strings.Split(v, ",") {
 		if n = strings.TrimSpace(n); n != "" {
-			out = append(out, n)
+			out = append(out, NormalizeToolName(n))
 		}
 	}
 	return out
+}
+
+// NormalizeToolName maps a CLI subcommand alias to its canonical MCP tool
+// name: a bare name gains the "kern_" prefix ("exec" → "kern_exec"). Names
+// already carrying the prefix pass through unchanged. Every MCP tool is
+// kern_-prefixed, so the mapping cannot collide with a real tool name.
+func NormalizeToolName(name string) string {
+	if name != "" && !strings.HasPrefix(name, "kern_") {
+		return "kern_" + name
+	}
+	return name
 }
 
 // containsString reports whether s appears in list (exact match).

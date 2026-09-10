@@ -29,7 +29,7 @@ func runDocFetch(rest []string) {
 	}
 	res, err := fetch.Fetch(rawURL, 0)
 	if err != nil {
-		fatal("%v", err)
+		fatal("doc fetch: %v", err)
 	}
 	name := f.name
 	if name == "" {
@@ -38,14 +38,14 @@ func runDocFetch(rest []string) {
 		name = strutil.Slug(name)
 	}
 	if err := os.MkdirAll(cache.Path("data", "docs-fetch"), 0o755); err != nil {
-		fatal("%v", err)
+		fatal("doc fetch: %v", err)
 	}
 	if err := os.WriteFile(cache.Path("data", "docs-fetch", name+".md"), []byte(res.Text), 0o600); err != nil {
-		fatal("%v", err)
+		fatal("doc fetch: %v", err)
 	}
 	added, err := docsearch.MergeFetched(root, name, res.Text)
 	if err != nil {
-		fatal("%v", err)
+		fatal("doc fetch: %v", err)
 	}
 	if res.Truncated {
 		fmt.Fprintf(os.Stderr, "warning: document exceeded limit, truncated to %d bytes\n", len(res.Text))
@@ -81,9 +81,11 @@ func runDocSearch(rest []string) {
 		var err error
 		ix, err = docsearch.IndexDir(root)
 		if err != nil {
-			fatal("%v", err)
+			fatal("doc search: %v", err)
 		}
-		_ = ix.Save()
+		if err := ix.Save(); err != nil {
+			fatal("doc search: %v", err)
+		}
 	}
 	// If the persisted index carries dense vectors, re-attach the local
 	// embedder so queries fuse the semantic signal too.

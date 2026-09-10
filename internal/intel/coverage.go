@@ -48,8 +48,8 @@ func coveredSet(ix *index.Index) map[string]bool {
 	for len(queue) > 0 {
 		cur := queue[0]
 		queue = queue[1:]
-		for _, callee := range ix.Calls[cur] {
-			mark(callee)
+		for _, ce := range ix.Calls[cur] {
+			mark(ce.Target)
 		}
 	}
 	return covered
@@ -64,6 +64,9 @@ func isCovered(covered map[string]bool, name string) bool {
 // AnalyzeCoverage computes overall coverage and the untested hotspots.
 func AnalyzeCoverage(ix *index.Index) *Coverage {
 	covered := coveredSet(ix)
+	// Hoisted once: building the file map per symbol below would be
+	// O(len(Symbols)^2) on large repos.
+	fileMap := buildFileMap(ix)
 	var total, coveredN int
 	var candidates []Gap
 	for _, s := range ix.Symbols {
@@ -76,7 +79,7 @@ func AnalyzeCoverage(ix *index.Index) *Coverage {
 			coveredN++
 			continue
 		}
-		if n := len(prodCallers(ix, name)); n > 0 {
+		if n := len(prodCallersWithFileMap(ix, name, fileMap)); n > 0 {
 			candidates = append(candidates, Gap{
 				Symbol: name, Kind: s.Kind, File: s.File, Line: s.Line, Callers: n,
 			})

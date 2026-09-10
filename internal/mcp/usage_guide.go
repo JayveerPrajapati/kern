@@ -7,7 +7,7 @@ func Guide() string {
 	return `# kern MCP — Tool Usage Guide
 
 ## Phase-aware tool selection
-Don't memorize 104 tools. Identify your phase (explore / plan / edit / verify),
+Don't memorize the whole catalog. Identify your phase (explore / plan / edit / verify),
 use the phase shortlist below, and let kern_meta route within it. Set
 KERN_MCP_PHASE=<phase> at server start to filter the advertised tool list to
 that phase's shortlist plus the always-on meta/cross utilities; kern_meta
@@ -33,7 +33,7 @@ kern_authorize_context
 Always available regardless of phase (meta/cross): kern_meta, kern_search,
 kern_context, kern_run, kern_optimize_prompt, kern_optimize_log, kern_mask_pii,
 kern_doc_search, kern_memory_*, kern_stats, kern_onboard, kern_incident,
-kern_workflow, kern_loop, kern_health, kern_prompt_fill, kern_semantic_diff,
+kern_workflow, kern_loop, kern_do, kern_health, kern_prompt_fill, kern_semantic_diff,
 kern_context_watch, kern_agent_fingerprint, kern_agent_coordination,
 kern_agent_role_rbac, kern_authorize_context, kern_stream.
 
@@ -132,6 +132,11 @@ need the roadmap) — each step is useful on its own.
   for a change you intend to make: affected symbols/files/services/tests,
   deterministic risk and typed claims. Read-only. Use when you actually plan to
   edit, not just speculate.
+- **kern_risk(change)** — the governance risk assessment for a proposed
+  change: the context engine's risk claims (level, score, factors), the
+  firewall check result (allowed/blocked, approval requirement), and required
+  validations. Read-only; the same engine behind the 'kern risk' CLI command
+  and POST /v1/risk.
 
 Chain: kern_what_if to explore the option space first, then kern_impact on the
 chosen option to size the real edit — both before you run kern_execute.
@@ -146,6 +151,13 @@ chosen option to size the real edit — both before you run kern_execute.
   / learned outcome. The autonomy level (L0-L5, default L0 read-only) gates
   which stages actually run. Use for an end-to-end intent, from analysis to
   deployment, without micromanaging each stage.
+- **kern_do(intent, [level])** — the autonomous "Implement X" closed loop:
+  unlike kern_loop's read-only no-op stages, this wires the LLM coder and
+  planner (default local Ollama via the provider-neutral factory) as the
+  default stage handlers, grounded with project context (relevant files +
+  impact set) and verified with the polyglot verification engine. Default
+  level L2 (sandboxed code changes); L3 adds PR creation, L4
+  deploy-with-approval. This is the MCP counterpart of the CLI 'kern do' command.
 
 ### Shared context: kern_context
 - **kern_context(symbol)** — the minimal relevant source slice for a symbol:

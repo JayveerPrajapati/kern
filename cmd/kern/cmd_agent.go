@@ -26,7 +26,7 @@ func runTeam(rest []string) {
 	}
 	text, err := renderTeamText(root)
 	if err != nil {
-		fatal("%v", err)
+		fatal("team: %v", err)
 	}
 	fmt.Print(text)
 
@@ -45,7 +45,7 @@ func runWorkflow(rest []string) {
 	if f.task != "" {
 		text, err := runWorkflowResumeCLI(root, f.task)
 		if err != nil {
-			fatal("%v", err)
+			fatal("workflow resume: %v", err)
 		}
 		fmt.Print(text)
 		return
@@ -56,7 +56,7 @@ func runWorkflow(rest []string) {
 	}
 	text, err := runWorkflowCLI(root, intent)
 	if err != nil {
-		fatal("%v", err)
+		fatal("workflow: %v", err)
 	}
 	fmt.Print(text)
 }
@@ -76,7 +76,8 @@ func runLoop(cmd string, rest []string) {
 	intent := args[0]
 	text, err := runLoopCLI(root, f.level, intent)
 	if err != nil {
-		fatal("%v", err)
+		fmt.Print(text)
+		fatal("Loop: %v", err)
 	}
 	fmt.Print(text)
 
@@ -101,7 +102,7 @@ func runIncident(rest []string) {
 	// Route through TaskService.InvestigateIncident for the full lifecycle.
 	p, err := app.New(root)
 	if err != nil {
-		fatal("%v", err)
+		fatal("could not load project: %v — run kern index first", err)
 	}
 	if len(args) > 1 && args[1] != "" {
 		store, err := runtime.ParseSnapshot([]byte(args[1]))
@@ -113,7 +114,7 @@ func runIncident(rest []string) {
 	ts := app.NewTaskService(p, nil).WithPRProvider(app.AutoPRProvider())
 	t, inc, text, err := ts.InvestigateIncident(al)
 	if err != nil {
-		fatal("%v", err)
+		fatal("incident: %v", err)
 	}
 	fmt.Print(text)
 	fmt.Printf("[task: %s — state: %s — incident: %s]\n", t.ID, t.State, inc.ID)
@@ -152,7 +153,7 @@ func runDocs(rest []string) {
 		}
 		res, err := fetch.Fetch(rawURL, 0)
 		if err != nil {
-			fatal("%v", err)
+			fatal("docs fetch: %v", err)
 		}
 		if name == "" {
 			name = slugName(rawURL)
@@ -160,14 +161,14 @@ func runDocs(rest []string) {
 			name = strutil.Slug(name)
 		}
 		if err := os.MkdirAll(cache.Path("data", "docs-fetch"), 0o755); err != nil {
-			fatal("%v", err)
+			fatal("docs fetch: %v", err)
 		}
 		if err := os.WriteFile(cache.Path("data", "docs-fetch", name+".md"), []byte(res.Text), 0o600); err != nil {
-			fatal("%v", err)
+			fatal("docs fetch: %v", err)
 		}
 		added, err := docsearch.MergeFetched(root, name, res.Text)
 		if err != nil {
-			fatal("%v", err)
+			fatal("docs fetch: %v", err)
 		}
 		if f.semantic {
 			client := llm.NewEmbedder()
@@ -213,10 +214,10 @@ func runDocs(rest []string) {
 			ix, err = docsearch.IndexDir(root)
 		}
 		if err != nil {
-			fatal("%v", err)
+			fatal("docs index: %v", err)
 		}
 		if err := ix.Save(); err != nil {
-			fatal("%v", err)
+			fatal("docs index: %v", err)
 		}
 		fmt.Printf("indexed %d chunks from %s\n", len(ix.Docs), root)
 	} else if sub == "clear" {
@@ -232,9 +233,11 @@ func runDocs(rest []string) {
 			var err error
 			ix, err = docsearch.IndexDir(root)
 			if err != nil {
-				fatal("%v", err)
+				fatal("docs index: %v", err)
 			}
-			_ = ix.Save()
+			if err := ix.Save(); err != nil {
+				fatal("docs index: %v", err)
+			}
 		}
 		// If the persisted index carries dense vectors, re-attach the
 		// local embedder so queries fuse the semantic signal too.

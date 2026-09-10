@@ -220,11 +220,15 @@ func (ix *Index) WholeGraph(limit int) GraphResult {
 	g := GraphResult{}
 	for _, c := range cands {
 		id := c.s.FullName()
-		for _, callee := range ix.Calls[id] {
+		for _, ce := range ix.Calls[id] {
+			callee := ce.Target
 			if _, ok := byID[callee]; !ok {
 				continue
 			}
-			conf := edgeConfidence(ix, c.s.File, callee)
+			// Prefer the parser's per-edge confidence (H/M/L) over the
+			// resolution heuristic; lowercased to the internal tiers the
+			// confidenceLabel switch expects.
+			conf := strings.ToLower(ce.Confidence.String())
 			g.Edges = append(g.Edges, GraphEdge{
 				From: id, To: callee,
 				Confidence:      conf,
