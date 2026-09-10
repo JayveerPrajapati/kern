@@ -1,0 +1,31 @@
+name: Feature request
+description: Suggest a new feature or improvement for kern
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to suggest a feature! Please describe the problem you are trying to solve so we can understand the motivation.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem statement
+      description: What problem are you trying to solve? Why is this feature needed?
+      placeholder: "Describe the problem this feature would solve."
+    validations:
+      required: true
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed solution
+      description: How do you propose we solve the problem?
+      placeholder: "Describe your proposed solution."
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Any alternative approaches you considered or already tried.
+    validations:
+      required: false
