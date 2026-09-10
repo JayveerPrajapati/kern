@@ -93,3 +93,61 @@ func TestRegistryAllSorted(t *testing.T) {
 		t.Fatalf("All() = %q,%q,%q, want a,b,c", all[0].ID, all[1].ID, all[2].ID)
 	}
 }
+
+func TestRegistryListTasksEmpty(t *testing.T) {
+	r := NewRegistry()
+	got := r.ListTasks()
+	if got == nil {
+		t.Fatal("ListTasks on empty registry: want non-nil empty slice")
+	}
+	if len(got) != 0 {
+		t.Fatalf("ListTasks on empty registry len = %d, want 0", len(got))
+	}
+}
+
+func TestRegistryListTasksReturnsSubmitted(t *testing.T) {
+	r := NewRegistry()
+	task := &Task{
+		Task: domain.Task{
+			ID:    "t-42",
+			Type:  "code",
+			State: domain.TaskCreated,
+			Input: "write tests",
+		},
+		AgentID: "a1",
+		Project: "kern",
+	}
+	if err := r.SubmitTask(task); err != nil {
+		t.Fatalf("SubmitTask: %v", err)
+	}
+
+	tasks := r.ListTasks()
+	if len(tasks) != 1 {
+		t.Fatalf("ListTasks len = %d, want 1", len(tasks))
+	}
+	got := tasks[0]
+	if got.ID != "t-42" || got.Type != "code" || got.Input != "write tests" {
+		t.Fatalf("ListTasks[0] domain fields wrong: %+v", got)
+	}
+	if got.AgentID != "a1" || got.Project != "kern" {
+		t.Fatalf("ListTasks[0] runtime fields wrong: %+v", got)
+	}
+}
+
+func TestRegistryListTasksSortedByID(t *testing.T) {
+	r := NewRegistry()
+	for _, id := range []string{"t-3", "t-1", "t-2"} {
+		if err := r.SubmitTask(&Task{Task: domain.Task{ID: id, Type: "plan", Input: "x"}}); err != nil {
+			t.Fatalf("SubmitTask(%s): %v", id, err)
+		}
+	}
+	tasks := r.ListTasks()
+	if len(tasks) != 3 {
+		t.Fatalf("ListTasks len = %d, want 3", len(tasks))
+	}
+	for i, want := range []string{"t-1", "t-2", "t-3"} {
+		if tasks[i].ID != want {
+			t.Fatalf("ListTasks[%d] = %q, want %q (sorted by ID)", i, tasks[i].ID, want)
+		}
+	}
+}

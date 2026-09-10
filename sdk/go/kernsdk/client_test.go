@@ -2,6 +2,8 @@ package kernsdk
 
 import (
 	"context"
+	"io"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -107,6 +109,54 @@ func TestGoSDKAgainstControlPlane(t *testing.T) {
 	specs, _ := agents["specialists"].([]any)
 	if len(specs) == 0 {
 		t.Errorf("Agents returned empty roster: %v", agents)
+	}
+
+	// Approvals pending roster (D2).
+	ap, err := c.ApprovalsPending(ctx)
+	if err != nil {
+		t.Fatalf("ApprovalsPending: %v", err)
+	}
+	if ap == nil {
+		t.Error("ApprovalsPending returned nil")
+	}
+
+	// Incidents list (D2).
+	inc, err := c.Incidents(ctx)
+	if err != nil {
+		t.Fatalf("Incidents: %v", err)
+	}
+	if inc == nil {
+		t.Error("Incidents returned nil")
+	}
+
+	// Single incident by id (D2): create one through the same REST surface,
+	// then fetch it back.
+	var created map[string]any
+	if err := c.do(ctx, http.MethodPost, "/api/incidents", map[string]string{
+		"title": "sdk test incident", "severity": "error", "status": "OPEN", "affected_service": "checkout",
+	}, &created); err != nil {
+		t.Fatalf("create incident: %v", err)
+	}
+	id, _ := created["ID"].(string)
+	if id == "" {
+		t.Fatalf("created incident missing ID: %v", created)
+	}
+	one, err := c.Incident(ctx, id)
+	if err != nil {
+		t.Fatalf("Incident(%s): %v", id, err)
+	}
+	if one == nil {
+		t.Error("Incident returned nil")
+	}
+
+	// Events stream opens and carries at least the SSE headers (D2).
+	body, err := c.EventsStream(ctx)
+	if err != nil {
+		t.Fatalf("EventsStream: %v", err)
+	}
+	defer body.Close()
+	if _, err := body.Read(make([]byte, 128)); err != nil && err != io.EOF {
+		t.Fatalf("EventsStream read: %v", err)
 	}
 }
 

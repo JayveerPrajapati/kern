@@ -1,8 +1,6 @@
 package main
 
 import (
-	"os"
-	"regexp"
 	"strings"
 	"testing"
 
@@ -13,21 +11,12 @@ import (
 // dispatch.go (multi-label cases like `case "analyze", "plan":` included).
 func dispatchCaseLabels(t *testing.T) map[string]bool {
 	t.Helper()
-	src, err := os.ReadFile("dispatch.go")
-	if err != nil {
-		t.Fatalf("read dispatch.go: %v", err)
-	}
+	// The fused commandTable is the single source of truth for dispatchable
+	// commands (the old switch-based dispatch was regex-parsed here; a
+	// table lookup is compile-time reality).
 	labels := map[string]bool{}
-	labelRe := regexp.MustCompile(`case\s+(.+):`)
-	quoteRe := regexp.MustCompile(`"([a-zA-Z0-9_\-]+)"`)
-	for _, line := range strings.Split(string(src), "\n") {
-		m := labelRe.FindStringSubmatch(strings.TrimSpace(line))
-		if m == nil {
-			continue
-		}
-		for _, q := range quoteRe.FindAllStringSubmatch(m[1], -1) {
-			labels[q[1]] = true
-		}
+	for name := range commandTable {
+		labels[name] = true
 	}
 	return labels
 }
@@ -62,6 +51,39 @@ func TestMCPToolsReachableFromCLI(t *testing.T) {
 	for tool := range mcpCLIAlias {
 		if !names[tool] {
 			t.Errorf("mcpCLIAlias entry %s is not a registered MCP tool", tool)
+		}
+	}
+}
+
+// TestDispatchCommandCheapRoutes pins the dispatcher contract for the
+// side-effect-free commands (E3 test-first): version variants exit 0, and an
+// unknown command exits 2 after printing usage.
+func TestDispatchCommandCheapRoutes(t *testing.T) {
+	for _, cmd := range []string{"version", "--version", "-v"} {
+		if code := dispatchCommand(cmd, nil); code != 0 {
+			t.Errorf("dispatchCommand(%q) = %d, want 0", cmd, code)
+		}
+	}
+	if code := dispatchCommand("guide", nil); code != 0 {
+		t.Errorf("dispatchCommand(guide) = %d, want 0", code)
+	}
+}
+
+// TestDispatchCommandUnknownExits2: an unrecognized command is a hard error
+// (usage + exit 2), not a silent success — the fail-closed CLI contract.
+func TestDispatchCommandUnknownExits2(t *testing.T) {
+	if code := dispatchCommand("definitely-not-a-command", nil); code != 2 {
+		t.Errorf("dispatchCommand(unknown) = %d, want 2", code)
+	}
+}
+
+// TestDispatchCommandHelpStyleFlags: help-style invocations must not panic
+// and must exit cleanly (0) — they are routed through the same dispatcher.
+func TestDispatchCommandHelpStyleFlags(t *testing.T) {
+	for _, cmd := range []string{"--help", "-h", "help"} {
+		code := dispatchCommand(cmd, nil)
+		if code != 0 && code != 2 {
+			t.Errorf("dispatchCommand(%q) = %d, want 0 or 2 (no panic)", cmd, code)
 		}
 	}
 }

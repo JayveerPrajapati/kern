@@ -145,7 +145,8 @@ func get(t *testing.T, app *App, path string) *httptest.ResponseRecorder {
 // seedApproval requests a pending approval on the App's approval workflow and
 // returns its ID.
 func seedApproval(a *App, requester, reason string) string {
-	return a.approvals.Request("task-1", requester, reason).ID
+	ap, _ := a.approvals.Request("task-1", requester, reason)
+	return ap.ID
 }
 
 // postJSON issues a POST with the given JSON body and returns the recorder.
@@ -413,4 +414,81 @@ func ruleNames(ps []domain.Policy) []string {
 		out[i] = p.Name
 	}
 	return out
+}
+
+// TestV1IncidentsListRoute is the A9 regression: the Python SDK's
+// incidents() calls GET /v1/incidents, which previously did not exist (404).
+func TestV1IncidentsListRoute(t *testing.T) {
+	app := newTestApp(t)
+	rec := get(t, app, "/v1/incidents")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /v1/incidents = %d; want 200", rec.Code)
+	}
+	var body struct {
+		Items []map[string]any `json:"items"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("response is not {\"items\": [...]}: %v", err)
+	}
+	// POST is not allowed on the list route (dashboard POST /api/incidents
+	// remains the write path).
+	rec = postJSON(t, app, "/v1/incidents", `{}`)
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Errorf("POST /v1/incidents = %d; want 405", rec.Code)
+	}
+}
+
+// TestWriteErrorMasksServerErrors pins the writeError contract for 5xx: the
+// internal detail must never leak to the client — the message is logged and
+// replaced with "internal error".
+func TestWriteErrorMasksServerErrors(t *testing.T) {
+	rec := httptest.NewRecorder()
+	writeError(rec, http.StatusInternalServerError, "db connection refused: secret creds")
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500", rec.Code)
+	}
+	var body map[string]string
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	if body["error"] != "internal error" {
+		t.Errorf("5xx error = %q, want masked %q", body["error"], "internal error")
+	}
+}
+
+// TestWriteErrorPreservesClientErrors pins the 4xx branch: the message is
+// passed through verbatim so callers (404s, 400s) can tell clients why.
+func TestWriteErrorPreservesClientErrors(t *testing.T) {
+	rec := httptest.NewRecorder()
+	writeError(rec, http.StatusNotFound, "no such incident")
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", rec.Code)
+	}
+	var body map[string]string
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	if body["error"] != "no such incident" {
+		t.Errorf("4xx error = %q, want verbatim %q", body["error"], "no such incident")
+	}
+}
+
+// TestRuntimeEndpoint serves the production-intelligence snapshot with the
+// same shapes as `kern runtime status|drift --json` (wired, drift, services).
+func TestRuntimeEndpoint(t *testing.T) {
+	app := newEmptyApp(t)
+	rec := get(t, app, "/api/runtime")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	var snap map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &snap); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if _, ok := snap["wired"]; !ok {
+		t.Error("runtime snapshot missing wired key")
+	}
+	if _, ok := snap["drift"]; !ok {
+		t.Error("runtime snapshot missing drift key")
+	}
 }

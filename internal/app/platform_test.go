@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/JayveerPrajapati/kern/internal/runtime"
+	"github.com/JayveerPrajapati/kern/internal/testfixture"
 	"github.com/JayveerPrajapati/kern/internal/whatif"
 )
 
@@ -22,9 +23,9 @@ func TestPlatformAnalyzeWhatIfVerify(t *testing.T) {
 	if testing.Short() {
 		t.Skip("slow e2e (>30s); skipped with -short")
 	}
-	root := "../.."
+	root := testfixture.Repo(t)
 
-	p, err := NewWithIndex(root, sharedTestRepoIndex(t))
+	p, err := New(root)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -77,9 +78,9 @@ func TestWhatIfRuntimeEvidence(t *testing.T) {
 	if testing.Short() {
 		t.Skip("slow e2e (>30s); skipped with -short")
 	}
-	root := "../.."
+	root := testfixture.Repo(t)
 
-	p, err := NewWithIndex(root, sharedTestRepoIndex(t))
+	p, err := New(root)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -130,9 +131,9 @@ func TestPlatformNewWithGraph(t *testing.T) {
 	if testing.Short() {
 		t.Skip("builds full index; skipped with -short")
 	}
-	root := "../.."
+	root := testfixture.Repo(t)
 
-	p, err := NewWithIndex(root, sharedTestRepoIndex(t))
+	p, err := New(root)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -159,4 +160,56 @@ func TestPlatformNewWithGraph(t *testing.T) {
 	if p.VerificationEngine() == nil {
 		t.Error("VerificationEngine() returned nil")
 	}
+}
+
+// TestCodeContextGroundsCoder verifies the C1 grounding assembler: an
+// intent naming a real symbol yields a context bundle that contains the
+// symbol's own file content and its blast-radius files, and a nonsense
+// intent yields empty context (the coder runs ungrounded, as before).
+func TestCodeContextGroundsCoder(t *testing.T) {
+	p, err := New(testfixture.Repo(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctxStr, err := p.CodeContext("refactor the NewServer function in web/server.go to handle corruption", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ctxStr == "" {
+		t.Fatal("expected non-empty context for a symbol-named intent")
+	}
+	if !strings.Contains(ctxStr, "<context-file") {
+		t.Error("context should include file contents")
+	}
+	if !strings.Contains(ctxStr, "NewServer") {
+		t.Error("context should mention the target symbol")
+	}
+	if !strings.Contains(ctxStr, "Impact set") {
+		t.Error("context should include the impact set")
+	}
+
+	// A nonsense intent with no plan resolves nothing: empty, not an error.
+	empty, err := p.CodeContext("zzz nonexistent qwerty", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if empty != "" {
+		t.Errorf("nonsense intent should yield empty context, got %d bytes", len(empty))
+	}
+
+	// A plan naming real files grounds even when the intent names no symbol.
+	planCtx, err := p.CodeContext("improve things", "1. Read go.mod.\n2. Edit web/server.go carefully.")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(planCtx, "web/server.go") {
+		t.Errorf("plan-named file should be included in context: %s", headStr(planCtx, 200))
+	}
+}
+
+func headStr(s string, n int) string {
+	if len(s) > n {
+		return s[:n] + "..."
+	}
+	return s
 }

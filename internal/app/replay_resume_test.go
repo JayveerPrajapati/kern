@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/JayveerPrajapati/kern/internal/domain"
+	"github.com/JayveerPrajapati/kern/internal/testfixture"
 )
 
 // TestReplayTaskMetadata verifies replay metadata (repo version,
@@ -13,7 +14,7 @@ func TestReplayTaskMetadata(t *testing.T) {
 	if testing.Short() {
 		t.Skip("slow e2e; skipped with -short")
 	}
-	p, err := NewWithIndex("../..", sharedTestRepoIndex(t))
+	p, err := New(testfixture.Repo(t))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -48,7 +49,7 @@ func TestRunCompare(t *testing.T) {
 	if testing.Short() {
 		t.Skip("slow e2e; skipped with -short")
 	}
-	p, err := NewWithIndex("../..", sharedTestRepoIndex(t))
+	p, err := New(testfixture.Repo(t))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -81,7 +82,7 @@ func TestResumeReconstructsContext(t *testing.T) {
 	if testing.Short() {
 		t.Skip("slow e2e; skipped with -short")
 	}
-	p, err := NewWithIndex("../..", sharedTestRepoIndex(t))
+	p, err := New(testfixture.Repo(t))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -122,7 +123,7 @@ func TestResumeReconstructsRichSnapshotContext(t *testing.T) {
 	if testing.Short() {
 		t.Skip("slow e2e; skipped with -short")
 	}
-	p, err := NewWithIndex("../..", sharedTestRepoIndex(t))
+	p, err := New(testfixture.Repo(t))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -169,7 +170,7 @@ func TestReplayTaskRecordsMetadataAndReplayRecord(t *testing.T) {
 	if testing.Short() {
 		t.Skip("slow e2e; skipped with -short")
 	}
-	p, err := NewWithIndex("../..", sharedTestRepoIndex(t))
+	p, err := New(testfixture.Repo(t))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -217,7 +218,7 @@ func TestRunComparePopulatesRichDimensions(t *testing.T) {
 	if testing.Short() {
 		t.Skip("slow e2e; skipped with -short")
 	}
-	p, err := NewWithIndex("../..", sharedTestRepoIndex(t))
+	p, err := New(testfixture.Repo(t))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}

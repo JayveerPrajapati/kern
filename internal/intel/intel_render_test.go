@@ -66,6 +66,66 @@ func TestRenderChangesAndReview(t *testing.T) {
 	}
 }
 
+// TestReviewRangedOverlaySeam pins the optional-overlay contract: an overlay
+// renders one extra line per changed file after the blast-radius line, and
+// the plain ReviewRanged call site is unaffected (no overlay line).
+func TestReviewRangedOverlaySeam(t *testing.T) {
+	root := buildTestProject(t)
+	ix := buildIndex(t, root)
+	changes := []FileChange{{File: "app.go"}}
+	plain := ReviewRanged(ix, changes, 4000)
+	if strings.Contains(plain, "runtime:") {
+		t.Fatalf("plain review contains an overlay line:\n%s", plain)
+	}
+	withOverlay := ReviewRanged(ix, changes, 4000, func(file string) string {
+		if file == "app.go" {
+			return "runtime: svc \"demo\" · 2 events · 0.0% errors\n"
+		}
+		return ""
+	})
+	if !strings.Contains(withOverlay, `runtime: svc "demo" · 2 events · 0.0% errors`) {
+		t.Fatalf("overlay line missing from review:\n%s", withOverlay)
+	}
+	// Multiple overlays render in order.
+	multi := ReviewRanged(ix, changes, 4000,
+		func(file string) string { return "first\n" },
+		func(file string) string { return "second\n" },
+	)
+	if !strings.Contains(multi, "first\n") || !strings.Contains(multi, "second\n") {
+		t.Fatalf("multi-overlay review missing lines:\n%s", multi)
+	}
+}
+
+// TestReviewRangedWithLens pins the lensed review contract: the output is the
+// standard ReviewRanged body with exactly one "lens: <name> (<priorities>)\n"
+// header line prepended (the header the MCP kern_review handler emits), and
+// the lensed variant carries overlays through unchanged.
+func TestReviewRangedWithLens(t *testing.T) {
+	root := buildTestProject(t)
+	ix := buildIndex(t, root)
+	changes := []FileChange{{File: "app.go"}}
+	plain := ReviewRanged(ix, changes, 4000)
+	priorities := "policy=1.00, runtime=0.80, graph=0.60, git=0.50, test=0.40, build=0.30, memory=0.20"
+	header := "lens: security (" + priorities + ")"
+	lensed := ReviewRangedWithLens(ix, changes, 4000, "security", priorities)
+	if lensed != header+"\n"+plain {
+		t.Fatalf("lensed review != header + plain review:\n--- lensed ---\n%s\n--- plain ---\n%s", lensed, plain)
+	}
+	if strings.Count(lensed, "lens: security (") != 1 {
+		t.Fatalf("lensed review should have exactly one lens header line:\n%s", lensed)
+	}
+	// Overlays flow through the lensed variant unchanged.
+	lensedOverlay := ReviewRangedWithLens(ix, changes, 4000, "security", priorities,
+		func(file string) string { return "runtime: svc \"demo\" · 2 events · 0.0% errors\n" },
+	)
+	if !strings.Contains(lensedOverlay, "runtime: svc \"demo\"") {
+		t.Fatalf("lensed review missing overlay line:\n%s", lensedOverlay)
+	}
+	if !strings.HasPrefix(lensedOverlay, header+"\n") {
+		t.Fatalf("lensed overlay review missing header prefix:\n%s", lensedOverlay)
+	}
+}
+
 func TestRenderCommunities(t *testing.T) {
 	root := buildTestProject(t)
 	ix := buildIndex(t, root)

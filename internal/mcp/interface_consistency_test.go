@@ -10,16 +10,13 @@ import (
 
 	"github.com/JayveerPrajapati/kern/internal/app"
 	"github.com/JayveerPrajapati/kern/internal/domain"
+	"github.com/JayveerPrajapati/kern/internal/testfixture"
 	web "github.com/JayveerPrajapati/kern/internal/web"
 )
 
-// kernRepoRoot is the repository root as seen from this package's test cwd.
-// go test runs with cwd = internal/mcp, so "../.." points at the kern repo root.
-const kernRepoRoot = "../.."
-
-// crossAnalyzeChange is a real symbol that exists in the kern repo, so the
+// crossAnalyzeChange is a real symbol that exists in the fixture repo, so the
 // built index yields a genuine domain result rather than an empty graph.
-const crossAnalyzeChange = "NewTaskService"
+const crossAnalyzeChange = "NewServer"
 
 // taskRefRe captures the "[task: <id> — state: <state>]" trailer that the
 // kern_analyze handler appends to its rendered output.
@@ -61,14 +58,14 @@ func restAnalyze(t *testing.T, a *web.App, change string) (taskID, text string) 
 	return resp.TaskID, resp.Text
 }
 
-// freshTaskService builds a brand-new TaskService rooted at kernRepoRoot, the
+// freshTaskService builds a brand-new TaskService rooted at root, the
 // way a fresh interface instance would, so we can verify tasks created by the
 // MCP/REST legs are queryable through the shared authoritative task store.
-func freshTaskService(t *testing.T) *app.TaskService {
+func freshTaskService(t *testing.T, root string) *app.TaskService {
 	t.Helper()
-	p, err := app.New(kernRepoRoot)
+	p, err := app.New(root)
 	if err != nil {
-		t.Fatalf("app.New(%q): %v", kernRepoRoot, err)
+		t.Fatalf("app.New(%q): %v", root, err)
 	}
 	return app.NewTaskService(p, nil)
 }
@@ -81,13 +78,14 @@ func TestCrossInterfaceAnalyzeConsistency(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping cross-interface index build in -short mode")
 	}
+	root := testfixture.Repo(t)
 
 	// --- MCP leg: real kern_analyze JSON-RPC handler ---
 	// max_output=0 disables the MCP output sandbox: this gate asserts the
 	// [task: ...] trailer survives end-to-end, and the analyze body legitimately
 	// grows with the repo's test surface (the "tests covering" evidence list).
 	resp := serveOne(t, writeReq("tools/call", 1,
-		`{"name":"kern_analyze","arguments":{"root":"`+kernRepoRoot+`","change":"`+crossAnalyzeChange+`","max_output":0}}`))
+		`{"name":"kern_analyze","arguments":{"root":"`+root+`","change":"`+crossAnalyzeChange+`","max_output":0}}`))
 	text, isErr := toolResultText(t, resp)
 	if isErr {
 		t.Fatalf("MCP kern_analyze returned an error: %s", text)
@@ -104,9 +102,9 @@ func TestCrossInterfaceAnalyzeConsistency(t *testing.T) {
 	}
 
 	// --- REST leg: real /v1/analyze handler on web.App ---
-	a, err := web.New(kernRepoRoot)
+	a, err := web.New(root)
 	if err != nil {
-		t.Fatalf("web.New(%q): %v", kernRepoRoot, err)
+		t.Fatalf("web.New(%q): %v", root, err)
 	}
 	webID, webText := restAnalyze(t, a, crossAnalyzeChange)
 	if webID == "" {
@@ -125,7 +123,7 @@ func TestCrossInterfaceAnalyzeConsistency(t *testing.T) {
 	// that BOTH created tasks are queryable via a fresh TaskService rooted at
 	// the same project — i.e. both persisted to the shared store keyed by root
 	// — and that both reached the COMPLETED terminal state.
-	svc := freshTaskService(t)
+	svc := freshTaskService(t, root)
 	for name, id := range map[string]string{"mcp": mcpID, "web": webID} {
 		task, ok := svc.Get(id)
 		if !ok {
@@ -149,9 +147,10 @@ func TestCrossInterfaceMatchesCLIServicePath(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping CLI service-path index build in -short mode")
 	}
-	p, err := app.New(kernRepoRoot)
+	root := testfixture.Repo(t)
+	p, err := app.New(root)
 	if err != nil {
-		t.Fatalf("app.New(%q): %v", kernRepoRoot, err)
+		t.Fatalf("app.New(%q): %v", root, err)
 	}
 	// Construct exactly as cmd_review.go:40 does (eventbus omitted below is a
 	// per-instance detail; the TaskService/store wiring is identical).
@@ -182,6 +181,7 @@ func TestCrossInterfaceIncidentConsistency(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping cross-interface incident index build in -short mode")
 	}
+	root := testfixture.Repo(t)
 	alert := `{"id":"checkout-500","severity":"error","message":"checkout 500s","service":"checkout","source":"prometheus"}`
 
 	// --- MCP leg: real kern_incident JSON-RPC handler. The alert argument is a
@@ -192,7 +192,7 @@ func TestCrossInterfaceIncidentConsistency(t *testing.T) {
 		t.Fatalf("marshal alert arg: %v", err)
 	}
 	resp := serveOne(t, writeReq("tools/call", 1,
-		`{"name":"kern_incident","arguments":{"root":"`+kernRepoRoot+`","alert":`+string(alertArg)+`}}`))
+		`{"name":"kern_incident","arguments":{"root":"`+root+`","alert":`+string(alertArg)+`}}`))
 	text, isErr := toolResultText(t, resp)
 	if isErr {
 		t.Fatalf("MCP kern_incident returned an error: %s", text)
@@ -206,9 +206,9 @@ func TestCrossInterfaceIncidentConsistency(t *testing.T) {
 	}
 
 	// --- REST leg: real /v1/incidents/investigate handler on web.App ---
-	a, err := web.New(kernRepoRoot)
+	a, err := web.New(root)
 	if err != nil {
-		t.Fatalf("web.New(%q): %v", kernRepoRoot, err)
+		t.Fatalf("web.New(%q): %v", root, err)
 	}
 	body, err := json.Marshal(map[string]any{"alert": json.RawMessage(alert)})
 	if err != nil {
@@ -232,7 +232,7 @@ func TestCrossInterfaceIncidentConsistency(t *testing.T) {
 	}
 
 	// --- Equivalence: both persisted to the shared store, both authoritative ---
-	svc := freshTaskService(t)
+	svc := freshTaskService(t, root)
 	if task, ok := svc.Get(mcpID); !ok {
 		t.Fatalf("MCP incident task %q not queryable via the shared task store", mcpID)
 	} else if task.State != domain.TaskCompleted {

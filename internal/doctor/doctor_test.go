@@ -8,6 +8,7 @@ import (
 
 	"github.com/JayveerPrajapati/kern/internal/index"
 	"github.com/JayveerPrajapati/kern/internal/script"
+	"github.com/JayveerPrajapati/kern/internal/setup"
 )
 
 func TestRunReturnsFindings(t *testing.T) {
@@ -183,5 +184,205 @@ func writeFixtureFile(t *testing.T, root, name, content string) {
 	t.Helper()
 	if err := os.WriteFile(filepath.Join(root, name), []byte(content), 0o644); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// TestCheckPluginSyncDrift verifies the D1 doctor check: an installed plugin
+// copy that differs from the embedded asset is reported as a warning, and a
+// matching copy reports ok. It writes to a temp HOME/XDG so the machine's real
+// plugin files are not touched.
+func TestCheckPluginSyncDrift(t *testing.T) {
+	if _, err := setup.PluginAsset(); err != nil {
+		t.Skipf("embedded plugin asset unavailable: %v", err)
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+
+	// No copies installed: no findings (installation is the wiring check's job).
+	if got := checkPluginSync(); len(got) != 0 {
+		t.Errorf("no installed copies should yield no findings, got %+v", got)
+	}
+
+	// Matching copy → ok.
+	p := filepath.Join(home, ".config", "opencode", "plugins", "kern.ts")
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	src, _ := setup.PluginAsset()
+	if err := os.WriteFile(p, src, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got := checkPluginSync()
+	if len(got) != 1 || got[0].Level != "ok" {
+		t.Errorf("matching copy should be ok, got %+v", got)
+	}
+
+	// Stale copy → warn with the fix hint.
+	if err := os.WriteFile(p, []byte("// stale copy\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got = checkPluginSync()
+	if len(got) != 1 || got[0].Level != "warn" {
+		t.Fatalf("stale copy should warn, got %+v", got)
+	}
+	if !strings.Contains(got[0].Detail, "kern setup --global") {
+		t.Errorf("warning should include the fix hint: %s", got[0].Detail)
+	}
+}
+
+// D5: .kern/config.json validity — malformed is a fail (it silently degrades
+// every config lookup to defaults), valid is ok, and known verify.* keys with
+// non-string values warn.
+func TestCheckConfig(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+
+	root := t.TempDir()
+	f := checkConfig(root)
+	if f.Level != "ok" || !strings.Contains(f.Detail, "no .kern/config.json") {
+		t.Errorf("missing config = %+v, want ok/no-file", f)
+	}
+
+	dir := filepath.Join(root, ".kern")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(`{"verify":{"test": 42}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f = checkConfig(root)
+	if f.Level != "warn" || !strings.Contains(f.Detail, "verify.test must be a string") {
+		t.Errorf("wrong-type key = %+v, want warn", f)
+	}
+
+	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(`{"verify":{"build":"npm run build"},"verify":{"test":"go test ./..."}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f = checkConfig(root)
+	if f.Level != "ok" {
+		t.Errorf("valid config = %+v, want ok", f)
+	}
+
+	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(`{"verify": {`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f = checkConfig(root)
+	if f.Level != "fail" {
+		t.Errorf("malformed config = %+v, want fail", f)
+	}
+}
+
+// D5: env check echoes every KERN_* var and validates the known ones.
+func TestCheckEnvEchoesAndValidates(t *testing.T) {
+	t.Setenv("KERN_LLM_PROVIDER", "bogus")
+	t.Setenv("KERN_MCP_WATCH_INTERVAL", "not-a-number")
+	t.Setenv("KERN_ALLOW_EXEC", "1")
+	t.Setenv("KERN_MODEL", "qwen2.5-coder")
+	f := checkEnv()
+	if f.Level != "warn" {
+		t.Fatalf("invalid env = %+v, want warn", f)
+	}
+	for _, want := range []string{"KERN_LLM_PROVIDER=bogus (unknown provider)", "KERN_MCP_WATCH_INTERVAL=not-a-number (want a positive integer)", "KERN_MODEL=qwen2.5-coder"} {
+		if !strings.Contains(f.Detail, want) {
+			t.Errorf("env detail missing %q in:\n%s", want, f.Detail)
+		}
+	}
+	// KERN_ALLOW_EXEC=1 must NOT be flagged.
+	if strings.Contains(f.Detail, "KERN_ALLOW_EXEC=1 (fail-closed") {
+		t.Errorf("valid toggle flagged: %s", f.Detail)
+	}
+
+	t.Setenv("KERN_LLM_PROVIDER", "ollama")
+	t.Setenv("KERN_MCP_WATCH_INTERVAL", "5")
+	f = checkEnv()
+	if f.Level != "ok" {
+		t.Errorf("valid env = %+v, want ok", f)
+	}
+}
+
+// D5: cache scan flags zero-byte JSON files as corruption markers.
+func TestCheckCacheDetectsZeroByteJSON(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDG_CACHE_HOME", dir)
+	cachePath := filepath.Join(dir, "kern") // cache.Dir derives from XDG_CACHE_HOME
+	if err := os.MkdirAll(cachePath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cachePath, "a.json"), []byte(`{}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cachePath, "truncated.json"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f := checkCache()
+	if f.Level != "fail" || !strings.Contains(f.Detail, "zero-byte") {
+		t.Errorf("zero-byte json = %+v, want fail", f)
+	}
+	_ = os.Remove(filepath.Join(cachePath, "truncated.json"))
+	f = checkCache()
+	if f.Level != "ok" {
+		t.Errorf("clean cache = %+v, want ok", f)
+	}
+}
+
+// D5: version reports the stamp; an unstamped dev build warns.
+func TestCheckVersion(t *testing.T) {
+	f := checkVersion()
+	if f.Check != "version" || f.Detail == "" {
+		t.Fatalf("version = %+v", f)
+	}
+	if !strings.Contains(f.Detail, "kern ") || !strings.Contains(f.Detail, "go") {
+		t.Errorf("version detail = %q, want kern <v> · go<ver> · os/arch", f.Detail)
+	}
+	if f.Level != "ok" && f.Level != "warn" {
+		t.Errorf("version level = %q, want ok|warn", f.Level)
+	}
+}
+
+// TestCheckRuntime pins the production-intelligence diagnostic: no source
+// warns with the enable hint; a wired local snapshot reports its telemetry
+// counts, and one with errors warns.
+func TestCheckRuntime(t *testing.T) {
+	root := t.TempDir()
+	t.Chdir(root) // isolate from any cwd-level env/config
+
+	f := checkRuntime(root)
+	if f.Check != "runtime" || f.Level != "warn" {
+		t.Fatalf("no-source finding = %+v, want runtime/warn", f)
+	}
+	if !strings.Contains(f.Detail, "KERN_PROMETHEUS_URL") {
+		t.Fatalf("no-source detail missing enable hint: %q", f.Detail)
+	}
+
+	if err := os.MkdirAll(filepath.Join(root, ".kern"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	clean := `{"events":[{"id":"e1","type":"metric","service":"app","severity":"info","message":"rps=1"}]}`
+	if err := os.WriteFile(filepath.Join(root, ".kern", "runtime.json"), []byte(clean), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f = checkRuntime(root)
+	if f.Level != "ok" {
+		t.Fatalf("clean-source finding = %+v, want ok", f)
+	}
+	for _, want := range []string{"local", "1 events", "0 errors", "1 service"} {
+		if !strings.Contains(f.Detail, want) {
+			t.Errorf("clean detail missing %q in:\n%s", want, f.Detail)
+		}
+	}
+
+	withErrors := `{"events":[
+		{"id":"e1","type":"metric","service":"app","severity":"info","message":"rps=1"},
+		{"id":"e2","type":"error","service":"app","severity":"error","message":"boom"}
+	]}`
+	if err := os.WriteFile(filepath.Join(root, ".kern", "runtime.json"), []byte(withErrors), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f = checkRuntime(root)
+	if f.Level != "warn" {
+		t.Fatalf("error-source finding = %+v, want warn", f)
+	}
+	if !strings.Contains(f.Detail, "production errors present") {
+		t.Fatalf("error detail missing marker: %q", f.Detail)
 	}
 }

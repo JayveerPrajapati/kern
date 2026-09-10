@@ -1,6 +1,7 @@
 package approval
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -225,5 +226,65 @@ func TestCorruptLineErrors(t *testing.T) {
 	f.Close()
 	if _, err := s.Get("apr-x"); err == nil || !strings.Contains(err.Error(), s.Path()) {
 		t.Fatalf("Get over corrupt log must surface the store error naming the log, got %v", err)
+	}
+}
+
+func TestApprovalLogCappedAtThreshold(t *testing.T) {
+	s := newTestStore(t)
+
+	// Fill the log up to the threshold with distinct IDs; no compaction yet.
+	for i := 0; i < maxApprovalLogLines; i++ {
+		req := pendingRequest(fmt.Sprintf("cap-%d", i))
+		req.Intent = fmt.Sprintf("intent-%d", i)
+		if err := s.Create(req); err != nil {
+			t.Fatalf("Create %d: %v", i, err)
+		}
+	}
+	data, err := os.ReadFile(s.Path())
+	if err != nil {
+		t.Fatalf("read log: %v", err)
+	}
+	if got := strings.Count(string(data), "\n"); got != maxApprovalLogLines {
+		t.Fatalf("log has %d lines before crossing, want %d", got, maxApprovalLogLines)
+	}
+
+	// Append one more record reusing an existing ID: the log crosses the
+	// threshold and compaction rewrites it to the latest record per ID.
+	dup := pendingRequest("cap-0")
+	dup.Intent = "final"
+	if err := s.Create(dup); err != nil {
+		t.Fatalf("Create (crossing record): %v", err)
+	}
+
+	// The log is bounded: after compaction the file holds each ID exactly
+	// once, so the duplicate is gone.
+	data, err = os.ReadFile(s.Path())
+	if err != nil {
+		t.Fatalf("read log: %v", err)
+	}
+	lines := strings.Count(string(data), "\n")
+	if lines > maxApprovalLogLines {
+		t.Fatalf("log has %d lines, want <= %d after compaction", lines, maxApprovalLogLines)
+	}
+	if lines != maxApprovalLogLines {
+		t.Errorf("log has %d lines, want %d (older duplicates compacted)", lines, maxApprovalLogLines)
+	}
+
+	// The latest record per ID survives (last write wins).
+	got, err := s.Get("cap-0")
+	if err != nil {
+		t.Fatalf("Get(cap-0): %v", err)
+	}
+	if got.Intent != "final" {
+		t.Errorf("latest record lost: Intent = %q, want final", got.Intent)
+	}
+
+	// Unrelated records are untouched by the compaction.
+	other, err := s.Get("cap-1")
+	if err != nil {
+		t.Fatalf("Get(cap-1): %v", err)
+	}
+	if other.Intent != "intent-1" {
+		t.Errorf("cap-1 modified by compaction: Intent = %q, want intent-1", other.Intent)
 	}
 }

@@ -63,10 +63,10 @@ function after() {
 	if s := findSym(syms, "after"); s == nil {
 		t.Fatalf("expected function after after line comment containing /*, got %+v", syms)
 	}
-	if !contains(calls["real"], "helper") {
+	if !contains(CallEdgeTargets(calls["real"]), "helper") {
 		t.Fatalf("expected real to call helper, got %v", calls["real"])
 	}
-	if !contains(calls["after"], "real") {
+	if !contains(CallEdgeTargets(calls["after"]), "real") {
 		t.Fatalf("expected after to call real, got %v", calls["after"])
 	}
 }
@@ -84,7 +84,7 @@ def helper():
 	if s := findSym(syms, "work"); s == nil {
 		t.Fatalf("expected func work after mixed-delimiter line, got %+v", syms)
 	}
-	if !contains(calls["work"], "helper") {
+	if !contains(CallEdgeTargets(calls["work"]), "helper") {
 		t.Fatalf("expected work to call helper, got %v", calls["work"])
 	}
 }
@@ -100,7 +100,7 @@ function load(u) {
 }
 `
 	_, calls, _, _, _ := extractForeign("app.js", []byte(src), "javascript")
-	if !contains(calls["fetch"], "load") {
+	if !contains(CallEdgeTargets(calls["fetch"]), "load") {
 		t.Fatalf("expected fetch to call load, got %v", calls["fetch"])
 	}
 }
@@ -136,13 +136,13 @@ func TestPythonExtract(t *testing.T) {
 	if s := findSym(syms, "main"); s == nil || s.Kind != "func" {
 		t.Fatalf("expected func main, got %+v", s)
 	}
-	if !contains(calls["User.login"], "validate") {
+	if !contains(CallEdgeTargets(calls["User.login"]), "validate") {
 		t.Fatalf("expected User.login to call validate, got %v", calls["User.login"])
 	}
-	if !contains(calls["main"], "greet") {
+	if !contains(CallEdgeTargets(calls["main"]), "greet") {
 		t.Fatalf("expected main to call greet, got %v", calls["main"])
 	}
-	if !contains(calls["main"], "User") {
+	if !contains(CallEdgeTargets(calls["main"]), "User") {
 		t.Fatalf("expected main to reference User, got %v", calls["main"])
 	}
 }
@@ -168,7 +168,7 @@ def helper():
 	if s := findSym(syms, "helper"); s == nil || s.Kind != "func" {
 		t.Fatalf("expected func helper, got %+v", syms)
 	}
-	if !contains(calls["work"], "helper") {
+	if !contains(CallEdgeTargets(calls["work"]), "helper") {
 		t.Fatalf("expected work to call helper, got %v", calls["work"])
 	}
 }
@@ -229,13 +229,13 @@ func TestJavascriptExtract(t *testing.T) {
 	if s := findSym(syms, "helper"); s == nil || s.Kind != "func" {
 		t.Fatalf("expected func helper, got %+v", s)
 	}
-	if !contains(calls["Store.total"], "items") {
+	if !contains(CallEdgeTargets(calls["Store.total"]), "items") {
 		t.Fatalf("expected Store.total to call items, got %v", calls["Store.total"])
 	}
-	if !contains(calls["Store.push"], "add") {
+	if !contains(CallEdgeTargets(calls["Store.push"]), "add") {
 		t.Fatalf("expected Store.push to call add, got %v", calls["Store.push"])
 	}
-	if !contains(calls["helper"], "Store") || !contains(calls["helper"], "square") {
+	if !contains(CallEdgeTargets(calls["helper"]), "Store") || !contains(CallEdgeTargets(calls["helper"]), "square") {
 		t.Fatalf("expected helper to call Store and square, got %v", calls["helper"])
 	}
 }
@@ -287,7 +287,7 @@ func TestTypescriptExtract(t *testing.T) {
 	if s := findSym(syms, "Circle.area"); s == nil || s.Kind != "method" || s.Receiver != "Circle" {
 		t.Fatalf("expected method Circle.area, got %+v", s)
 	}
-	if !contains(calls["Circle.area"], "radius") {
+	if !contains(CallEdgeTargets(calls["Circle.area"]), "radius") {
 		t.Fatalf("expected Circle.area to call radius, got %v", calls["Circle.area"])
 	}
 }
@@ -343,7 +343,7 @@ func TestRustExtract(t *testing.T) {
 	if s := findSym(syms, "main"); s == nil || s.Kind != "func" {
 		t.Fatalf("expected func main, got %+v", s)
 	}
-	if !contains(calls["Point.dist"], "new") {
+	if !contains(CallEdgeTargets(calls["Point.dist"]), "new") {
 		t.Fatalf("expected Point.dist to call new, got %v", calls["Point.dist"])
 	}
 }
@@ -399,10 +399,10 @@ func TestCppExtract(t *testing.T) {
 	if s := findSym(syms, "main"); s == nil || s.Kind != "func" {
 		t.Fatalf("expected func main, got %+v", s)
 	}
-	if !contains(calls["Shape.area"], "calc") {
+	if !contains(CallEdgeTargets(calls["Shape.area"]), "calc") {
 		t.Fatalf("expected Shape.area to call calc, got %v", calls["Shape.area"])
 	}
-	if !contains(calls["main"], "s.draw") {
+	if !contains(CallEdgeTargets(calls["main"]), "s.draw") {
 		t.Fatalf("expected main to call s.draw, got %v", calls["main"])
 	}
 }
@@ -455,10 +455,10 @@ func TestJavaExtract(t *testing.T) {
 	if s := findSym(syms, "Helper.run"); s == nil || s.Kind != "method" {
 		t.Fatalf("expected method Helper.run, got %+v", s)
 	}
-	if !contains(calls["App.main"], "App") || !contains(calls["App.main"], "System.out.println") {
+	if !contains(CallEdgeTargets(calls["App.main"]), "App") || !contains(CallEdgeTargets(calls["App.main"]), "System.out.println") {
 		t.Fatalf("expected App.main calls, got %v", calls["App.main"])
 	}
-	if !contains(calls["Helper.run"], "util.log") {
+	if !contains(CallEdgeTargets(calls["Helper.run"]), "util.log") {
 		t.Fatalf("expected Helper.run to call util.log, got %v", calls["Helper.run"])
 	}
 }
@@ -505,10 +505,10 @@ func TestRubyExtract(t *testing.T) {
 	if s := findSym(syms, "main"); s == nil || s.Kind != "func" {
 		t.Fatalf("expected func main, got %+v", s)
 	}
-	if !contains(calls["User.validate"], "check") {
+	if !contains(CallEdgeTargets(calls["User.validate"]), "check") {
 		t.Fatalf("expected User.validate to call check, got %v", calls["User.validate"])
 	}
-	if !contains(calls["main"], "User.new") || !contains(calls["main"], "Util.log") {
+	if !contains(CallEdgeTargets(calls["main"]), "User.new") || !contains(CallEdgeTargets(calls["main"]), "Util.log") {
 		t.Fatalf("expected main calls, got %v", calls["main"])
 	}
 }
@@ -866,7 +866,7 @@ function helper() {
 	if s := findSym(syms, "Foo.method"); s == nil || s.Kind != "method" || s.Receiver != "Foo" {
 		t.Fatalf("expected method Foo.method, got %+v", s)
 	}
-	if !contains(calls["Foo.method"], "helper") {
+	if !contains(CallEdgeTargets(calls["Foo.method"]), "helper") {
 		t.Fatalf("expected Foo.method to call helper, got %v", calls["Foo.method"])
 	}
 }
@@ -899,7 +899,7 @@ auto main() -> int {
 	if s := findSym(syms, "main"); s == nil || s.Kind != "func" {
 		t.Fatalf("expected func main, got %+v", s)
 	}
-	if !contains(calls["Shape.perimeter"], "calc") {
+	if !contains(CallEdgeTargets(calls["Shape.perimeter"]), "calc") {
 		t.Fatalf("expected Shape.perimeter to call calc, got %v", calls["Shape.perimeter"])
 	}
 }
@@ -917,7 +917,7 @@ function bar() { return 1 }
 	if s := findSym(syms, "bar"); s == nil || s.Kind != "func" {
 		t.Fatalf("expected func bar, got %+v", s)
 	}
-	if !contains(calls["foo"], "bar") {
+	if !contains(CallEdgeTargets(calls["foo"]), "bar") {
 		t.Fatalf("expected foo to call bar on same-line body, got %v", calls["foo"])
 	}
 }
@@ -932,10 +932,10 @@ function inner(cb) { cb() }
 function used() { return 1 }
 `
 	_, calls, _, _, _ := extractForeign("app.js", []byte(src), "javascript")
-	if !contains(calls["outer"], "inner") {
+	if !contains(CallEdgeTargets(calls["outer"]), "inner") {
 		t.Fatalf("expected outer to call inner, got %v", calls["outer"])
 	}
-	if !contains(calls["outer"], "used") {
+	if !contains(CallEdgeTargets(calls["outer"]), "used") {
 		t.Fatalf("expected outer to call used (on decl line), got %v", calls["outer"])
 	}
 }
@@ -961,7 +961,7 @@ end
 	if s := findSym(syms, "real"); s == nil || s.Kind != "func" {
 		t.Fatalf("expected func real after heredoc, got %+v", syms)
 	}
-	if !contains(calls["real"], "helper") {
+	if !contains(CallEdgeTargets(calls["real"]), "helper") {
 		t.Fatalf("expected real to call helper, got %v", calls["real"])
 	}
 }
@@ -989,8 +989,8 @@ public class Config {
 		t.Fatalf("expected %d imports, got %d: %v", len(want), len(imports), imports)
 	}
 	for i, w := range want {
-		if imports[i] != w {
-			t.Errorf("import[%d] = %q, want %q", i, imports[i], w)
+		if imports[i].Path != w {
+			t.Errorf("import[%d] = %q, want %q", i, imports[i].Path, w)
 		}
 	}
 }
@@ -1023,7 +1023,7 @@ public class Config {
 	if pkg == nil {
 		t.Fatal("expected a package")
 	}
-	if len(pkg.Imports) != 1 || pkg.Imports[0] != "com.rakuten.rcp.cloudadapter.commons.vault" {
+	if len(pkg.Imports) != 1 || pkg.Imports[0].Path != "com.rakuten.rcp.cloudadapter.commons.vault" {
 		t.Errorf("pkg.Imports = %v, want the vault package", pkg.Imports)
 	}
 }

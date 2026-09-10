@@ -313,3 +313,154 @@ func TestLogStoreUnsafeKey(t *testing.T) {
 		}
 	}
 }
+
+// TestLogStorePutFailureKeepsShadow: when the chain append fails, the legacy
+// per-key shadow (holding the prior value) must survive — the old code
+// deleted it before the write, losing the value on failure. A11.
+func TestLogStorePutFailureKeepsShadow(t *testing.T) {
+	dir := t.TempDir()
+	s := NewLog(dir)
+	ctx := context.Background()
+	key := "audit-audit-1"
+	old := json.RawMessage(`{"n":1}`)
+	// Legacy per-key shadow holding the prior value.
+	if err := os.WriteFile(filepath.Join(dir, key+".json"), old, 0o600); err != nil {
+		t.Fatalf("write shadow: %v", err)
+	}
+	// Break the chain append: a directory at the chain path makes the
+	// O_APPEND open fail.
+	if err := os.MkdirAll(filepath.Join(dir, chainFile), 0o755); err != nil {
+		t.Fatalf("mkdir chain: %v", err)
+	}
+	if err := s.Put(ctx, key, json.RawMessage(`{"n":2}`)); err == nil {
+		t.Fatal("Put() = nil with an unopenable chain, want error")
+	}
+	// The prior value must still be readable through the shadow.
+	got, err := s.Get(ctx, key)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if string(got) != string(old) {
+		t.Errorf("Get = %s, want the prior value %s preserved", got, old)
+	}
+}
+
+// TestLogStoreListDedupesRewrittenKeys: Put appends a chain line per write,
+// so a key rewritten N times has N lines in chain.jsonl. List must report
+// the key once (the LAST write — append order is write order), matching the
+// value Get returns. Without the dedupe, consumers that expect one value per
+// key (the audit tamper chain) break on every rewritten key.
+func TestLogStoreListDedupesRewrittenKeys(t *testing.T) {
+	ctx := context.Background()
+	s := NewLog(t.TempDir())
+
+	_ = s.Put(ctx, "k1", []byte(`{"v":1}`))
+	_ = s.Put(ctx, "k2", []byte(`{"v":2}`))
+	_ = s.Put(ctx, "k1", []byte(`{"v":"revised"}`)) // rewrite k1
+
+	list, err := s.List(ctx)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(list) != 2 {
+		t.Fatalf("List = %d entries, want 2 (k1 deduped)", len(list))
+	}
+	for _, e := range list {
+		got, err := s.Get(ctx, e.Key)
+		if err != nil {
+			t.Fatalf("Get(%s): %v", e.Key, err)
+		}
+		if string(got) != string(e.Value) {
+			t.Errorf("List value for %s = %s, want the Get value %s", e.Key, e.Value, got)
+		}
+	}
+	// The LAST write of k1 must be the one reported.
+	var k1 Entry
+	for _, e := range list {
+		if e.Key == "k1" {
+			k1 = e
+		}
+	}
+	if string(k1.Value) != `{"v":"revised"}` {
+		t.Errorf("k1 value = %s, want the last write", k1.Value)
+	}
+}
+
+// TestLogStoreListFileShadowsLines: a key present BOTH as a legacy per-key
+// file and as chain lines (mixed-version window) is reported once, with the
+// FILE version winning — Get semantics.
+func TestLogStoreListFileShadowsLines(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	s := NewLog(dir)
+
+	_ = s.Put(ctx, "k1", []byte(`"chain-old"`))
+	// Simulate a legacy file: an older binary wrote k1 as a per-key file
+	// without removing the chain line (the pre-lock race window).
+	_ = os.WriteFile(filepath.Join(dir, "k1.json"), []byte(`"file-version"`), 0o600)
+
+	list, err := s.List(ctx)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(list) != 1 {
+		t.Fatalf("List = %d entries, want 1 (file shadows lines)", len(list))
+	}
+	if string(list[0].Value) != `"file-version"` {
+		t.Errorf("List value = %s, want the file version", list[0].Value)
+	}
+	got, err := s.Get(ctx, "k1")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if string(got) != `"file-version"` {
+		t.Errorf("Get = %s, want the file version", got)
+	}
+}
+
+// TestLogStoreRewriteAll: the repair path replaces the ENTIRE store content
+// with exactly the given entries — one chain line per key, no legacy files,
+// no stale duplicate lines.
+func TestLogStoreRewriteAll(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	s := NewLog(dir)
+
+	_ = s.Put(ctx, "k1", []byte(`"old-1"`))
+	_ = s.Put(ctx, "k2", []byte(`"old-2"`))
+	_ = s.Put(ctx, "k1", []byte(`"old-1b"`)) // stale duplicate line for k1
+	_ = os.WriteFile(filepath.Join(dir, "k3.json"), []byte(`"legacy-file-3"`), 0o600)
+
+	entries := []Entry{
+		{Key: "k1", Value: json.RawMessage(`"new-1"`)},
+		{Key: "k2", Value: json.RawMessage(`"new-2"`)},
+	}
+	if err := s.RewriteAll(ctx, entries); err != nil {
+		t.Fatalf("RewriteAll: %v", err)
+	}
+
+	list, err := s.List(ctx)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(list) != 2 {
+		t.Fatalf("List = %d entries, want exactly 2 (k3 dropped, k1 deduped)", len(list))
+	}
+	byKey := map[string]string{}
+	for _, e := range list {
+		byKey[e.Key] = string(e.Value)
+	}
+	if byKey["k1"] != `"new-1"` || byKey["k2"] != `"new-2"` {
+		t.Errorf("after rewrite: %v", byKey)
+	}
+	if _, err := s.Get(ctx, "k3"); err == nil {
+		t.Error("Get(k3) succeeded after RewriteAll dropped it, want ErrNotFound")
+	}
+	// No legacy files remain: the whole store is chain lines now.
+	des, _ := os.ReadDir(dir)
+	for _, de := range des {
+		if strings.HasSuffix(de.Name(), ".json") {
+			t.Errorf("legacy file %s survived RewriteAll", de.Name())
+		}
+	}
+}

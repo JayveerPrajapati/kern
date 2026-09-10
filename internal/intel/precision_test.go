@@ -164,7 +164,7 @@ public class App {
 		t.Fatalf("PrecisionByLang[java] = %q; want resolved", p)
 	}
 	// Sanity: the index bound the call across files by type name.
-	if !sliceContains(ix.Calls["App.run"], "Helper.doThing") {
+	if !sliceContains(index.CallEdgeTargets(ix.Calls["App.run"]), "Helper.doThing") {
 		t.Fatalf("Calls[App.run] = %v; want resolved Helper.doThing edge", ix.Calls["App.run"])
 	}
 	b := &Boundaries{Rules: []BoundaryRule{{From: "api", To: "core", Action: "forbid"}}}

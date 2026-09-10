@@ -112,7 +112,7 @@ func TestSafeChangeProducesAllArtifacts(t *testing.T) {
 
 	// --- Policy evaluation: governance firewall + audit log ---
 	aw := governance.NewApprovalWorkflow()
-	appr := aw.Request(task.ID, "test", "deploy")
+	appr, _ := aw.Request(task.ID, "test", "deploy")
 	if appr.ID == "" {
 		t.Fatal("approval ID is empty")
 	}

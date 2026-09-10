@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/JayveerPrajapati/kern/internal/domain"
+	"github.com/JayveerPrajapati/kern/internal/testfixture"
 	"github.com/JayveerPrajapati/kern/internal/whatif"
 )
 
@@ -20,15 +21,15 @@ func TestInterfaceConsistencySharedAnalysis(t *testing.T) {
 	if testing.Short() {
 		t.Skip("slow e2e (indexes repo); skipped with -short")
 	}
-	root := "../.."
+	root := testfixture.Repo(t)
 
-	p, err := NewWithIndex(root, sharedTestRepoIndex(t))
+	p, err := New(root)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
 	ts := NewTaskService(p, nil).WithAgentID("test")
 
-	change := "CompileIntent" // a real symbol in the kern repo
+	change := testfixture.Symbol("server") // a real symbol in the fixture repo
 
 	// --- Analysis workflow through the shared service ---
 	t.Run("analyze", func(t *testing.T) {
@@ -119,15 +120,15 @@ func TestServiceContracts(t *testing.T) {
 	if testing.Short() {
 		t.Skip("slow e2e (indexes repo); skipped with -short")
 	}
-	root := "../.."
+	root := testfixture.Repo(t)
 
-	p, err := NewWithIndex(root, sharedTestRepoIndex(t))
+	p, err := New(root)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
 	ts := NewTaskService(p, nil).WithAgentID("test")
 
-	change := "CompileIntent" // a real symbol in the kern repo
+	change := testfixture.Symbol("server")
 
 	if ts.Firewall() == nil {
 		t.Error("Firewall() returned nil; Policy service not wired")

@@ -380,11 +380,11 @@ func allInstalled(sts []Status, agent string) bool {
 // dispatches. A typo'd subcommand in the plugin would otherwise sail through
 // the name-only parity test; here the token must resolve to a real case.
 
-// cliTopLevelCaseRe matches a top-level `case "name"[, "alias"...]:` inside the
-// `switch cmd` block. Top-level cases are indented with exactly one tab, which
-// excludes the nested sub-dispatch switches (memory, hook, docs, guard, repos,
-// semcache).
-var cliTopLevelCaseRe = regexp.MustCompile(`(?m)^\tcase\s+([^:]+):`)
+// cliTableEntryRe matches a `"name": {run: ...}` entry in the commandTable
+// map (cmd/kern/dispatch_table.go) — the E3 dispatch-table refactor fused the
+// old `switch cmd` into commandTable, so the parity source of truth moved from
+// dispatch.go case labels to table keys.
+var cliTableEntryRe = regexp.MustCompile(`(?m)^\s*"([^"]+)":\s*\{run:`)
 
 // toolStartRe finds each kern_xxx tool definition; used to delimit tool bodies.
 var toolStartRe = regexp.MustCompile(`kern_[a-zA-Z0-9_]+:\s*tool\(`)
@@ -402,23 +402,16 @@ var runFirstSubRe = regexp.MustCompile(`run\(\["([^"]+)"`)
 var runPayloadFirstSubRe = regexp.MustCompile(`runPayload\(\["([^"]+)"`)
 
 // cliSubcommands returns the set of top-level subcommands handled by the kern
-// CLI (the `case "<name>"` labels of the `switch cmd` in cmd/kern/dispatch.go).
+// CLI (the keys of commandTable in cmd/kern/dispatch_table.go).
 func cliSubcommands(t *testing.T) map[string]bool {
 	t.Helper()
-	b, err := os.ReadFile(filepath.Join("..", "..", "cmd", "kern", "dispatch.go"))
+	b, err := os.ReadFile(filepath.Join("..", "..", "cmd", "kern", "dispatch_table.go"))
 	if err != nil {
-		t.Fatalf("read cmd/kern/dispatch.go: %v", err)
+		t.Fatalf("read cmd/kern/dispatch_table.go: %v", err)
 	}
 	set := map[string]bool{}
-	for _, m := range cliTopLevelCaseRe.FindAllStringSubmatch(string(b), -1) {
-		// m[1] is e.g. `"version", "--version", "-v"` — collect every label.
-		for _, l := range strings.Split(m[1], ",") {
-			l = strings.TrimSpace(l)
-			if l == "" || len(l) < 3 || l[0] != '"' || l[len(l)-1] != '"' {
-				continue
-			}
-			set[l[1:len(l)-1]] = true
-		}
+	for _, m := range cliTableEntryRe.FindAllStringSubmatch(string(b), -1) {
+		set[m[1]] = true
 	}
 	return set
 }
@@ -803,5 +796,32 @@ func TestAGENTSMdParity(t *testing.T) {
 	}
 	if !bytes.Equal(emb, repo) {
 		t.Error("internal/setup/assets/AGENTS.md drifted from AGENTS.md — run: cp AGENTS.md internal/setup/assets/AGENTS.md")
+	}
+}
+
+func TestWireScaffoldsKernConfig(t *testing.T) {
+	dir := t.TempDir()
+	Wire(dir, nil, false)
+
+	profilesPath := filepath.Join(dir, ".kern", "profiles.json")
+	b, err := os.ReadFile(profilesPath)
+	if err != nil {
+		t.Fatalf("missing .kern/profiles.json: %v", err)
+	}
+	if string(b) != "[]" {
+		t.Fatalf("profiles.json = %q, want []", b)
+	}
+	if fi, err := os.Stat(filepath.Join(dir, ".kern", "skills")); err != nil || !fi.IsDir() {
+		t.Fatalf(".kern/skills missing or not a dir: %v", err)
+	}
+
+	// An existing profiles.json is never overwritten.
+	if err := os.WriteFile(profilesPath, []byte(`[{"name":"mine"}]`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	Wire(dir, nil, false)
+	b2, _ := os.ReadFile(profilesPath)
+	if string(b2) != `[{"name":"mine"}]` {
+		t.Fatalf("profiles.json was overwritten: %q", b2)
 	}
 }

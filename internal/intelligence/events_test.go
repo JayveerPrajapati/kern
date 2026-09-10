@@ -26,10 +26,10 @@ func eventIndex() *index.Index {
 			sym("type", "PaymentTopic", "pay/topic.go", 1),
 			sym("func", "ConsumeOrders", "pay/consume.go", 1),
 		},
-		Calls: map[string][]string{
-			"OrderService":  {"OrderCreatedEvent"},
-			"ConsumeOrders": {"PaymentTopic", "OrderCreatedEvent"},
-			"Utility":       {"OrderService"},
+		Calls: map[string][]index.CallEdge{
+			"OrderService":  {index.CallEdge{Target: "OrderCreatedEvent", Confidence: index.ConfidenceHigh}},
+			"ConsumeOrders": {index.CallEdge{Target: "PaymentTopic", Confidence: index.ConfidenceHigh}, index.CallEdge{Target: "OrderCreatedEvent", Confidence: index.ConfidenceHigh}},
+			"Utility":       {index.CallEdge{Target: "OrderService", Confidence: index.ConfidenceHigh}},
 		},
 		Callers: map[string][]string{
 			"OrderCreatedEvent": {"OrderService", "ConsumeOrders"},

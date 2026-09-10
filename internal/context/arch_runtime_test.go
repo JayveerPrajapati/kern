@@ -20,8 +20,8 @@ func boundaryIndex() *index.Index {
 			sym("func", "WebHandler", "web/handler.go", 1),
 			sym("func", "DBStore", "db/store.go", 1),
 		},
-		Calls: map[string][]string{
-			"WebHandler": {"DBStore"},
+		Calls: map[string][]index.CallEdge{
+			"WebHandler": {index.CallEdge{Target: "DBStore", Confidence: index.ConfidenceHigh}},
 		},
 		Callers: map[string][]string{
 			"DBStore": {"WebHandler"},

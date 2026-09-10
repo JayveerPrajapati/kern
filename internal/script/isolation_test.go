@@ -140,14 +140,17 @@ func TestFailsClosedOverrideViaNetAlias(t *testing.T) {
 
 // TestNoIsolateAllowedWithOptIn asserts that the local operator's explicit
 // KERN_ALLOW_NO_ISOLATE=1 does make NoIsolate effective (F2 opt-in path).
+// The probe var is deliberately NOT secret-named: P0-006 strips secret-carrying
+// vars even in the NoIsolate path (defense-in-depth), so the env-inheritance
+// claim is verified with a benign var.
 func TestNoIsolateAllowedWithOptIn(t *testing.T) {
 	if !runtimeInstalled("bash") {
 		t.Skip("bash not installed")
 	}
-	t.Setenv("SUPERSECRET", "s3cr3t")
+	t.Setenv("KERN_PROBE_VAR", "s3cr3t")
 	t.Setenv("KERN_ALLOW_NO_ISOLATE", "1")
 
-	res := RunScript(Run{Lang: "bash", Code: `echo "SECRET=$SUPERSECRET"`, NoIsolate: true})
+	res := RunScript(Run{Lang: "bash", Code: `echo "PROBE=$KERN_PROBE_VAR"`, NoIsolate: true})
 	if res.Err != nil {
 		t.Fatalf("run failed: %v (%s)", res.Err, res.Stderr)
 	}

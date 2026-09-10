@@ -76,7 +76,8 @@ func writeFile(t *testing.T, dir, relpath, content string) {
 	}
 }
 
-// requireKernBinary skips if no kern binary.
+// requireKernBinary skips if no kern binary (fails instead when
+// KERN_REQUIRE_BINARY=1, set by CI's E2E gate).
 func requireKernBinary(t *testing.T) *kern.KernClient {
 	t.Helper()
 	binaryPath := os.Getenv("KERN_BINARY")
@@ -86,10 +87,16 @@ func requireKernBinary(t *testing.T) *kern.KernClient {
 		}
 	}
 	if binaryPath == "" {
+		if os.Getenv("KERN_REQUIRE_BINARY") == "1" {
+			t.Fatal("KERN_REQUIRE_BINARY=1 but KERN_BINARY not set and kern not in PATH")
+		}
 		t.Skip("KERN_BINARY not set and kern not in PATH")
 	}
 	client, err := kern.NewKernClient(kern.WithBinary(binaryPath))
 	if err != nil {
+		if os.Getenv("KERN_REQUIRE_BINARY") == "1" {
+			t.Fatalf("KERN_REQUIRE_BINARY=1 but cannot create kern client: %v", err)
+		}
 		t.Skipf("cannot create kern client: %v", err)
 	}
 	return client

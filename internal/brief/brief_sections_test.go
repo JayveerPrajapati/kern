@@ -49,7 +49,7 @@ func TestIndexSectionHubsAndEntries(t *testing.T) {
 			{Kind: "func", Name: "f2", File: "a.go", Line: 3},
 			{Kind: "func", Name: "main", File: "a.go", Line: 4},
 		},
-		Calls:      map[string][]string{"f1": {"shared"}, "f2": {"shared"}, "main": {"shared"}},
+		Calls:      map[string][]index.CallEdge{"f1": {index.CallEdge{Target: "shared", Confidence: index.ConfidenceHigh}}, "f2": {index.CallEdge{Target: "shared", Confidence: index.ConfidenceHigh}}, "main": {index.CallEdge{Target: "shared", Confidence: index.ConfidenceHigh}}},
 		Callers:    map[string][]string{"shared": {"f1", "f2", "main"}},
 		FileHashes: map[string]string{"a.go": "h"},
 	}
@@ -94,7 +94,7 @@ func TestArchitectureSectionEmptyNoCalls(t *testing.T) {
 func TestArchitectureSectionGatedLargeGraph(t *testing.T) {
 	// A graph above the gate must skip community detection (minutes on big
 	// repos) and render the skip note instead.
-	ix := &index.Index{Calls: map[string][]string{"main": {"helper"}}}
+	ix := &index.Index{Calls: map[string][]index.CallEdge{"main": {index.CallEdge{Target: "helper", Confidence: index.ConfidenceHigh}}}}
 	for i := 0; i < archGateSymbols+1; i++ {
 		ix.Symbols = append(ix.Symbols, index.Symbol{
 			Kind: "func", Name: "f", File: "x.go", Line: i + 1,
@@ -127,11 +127,11 @@ func TestDedupe(t *testing.T) {
 // with two callees contributes two edges.
 func TestCallEdgesIsDirectedEdgeSum(t *testing.T) {
 	ix := &index.Index{
-		Calls: map[string][]string{
-			"main":   {"shared", "helper"},
-			"f1":     {"shared"},
-			"f2":     {"shared"},
-			"shared": {"deep"},
+		Calls: map[string][]index.CallEdge{
+			"main":   {index.CallEdge{Target: "shared", Confidence: index.ConfidenceHigh}, index.CallEdge{Target: "helper", Confidence: index.ConfidenceHigh}},
+			"f1":     {index.CallEdge{Target: "shared", Confidence: index.ConfidenceHigh}},
+			"f2":     {index.CallEdge{Target: "shared", Confidence: index.ConfidenceHigh}},
+			"shared": {index.CallEdge{Target: "deep", Confidence: index.ConfidenceHigh}},
 		},
 	}
 	if got := callEdges(ix); got != 5 {

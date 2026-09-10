@@ -1,6 +1,8 @@
 package flight
 
 import (
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 )
@@ -273,5 +275,136 @@ func TestLifecycleSequenceRecordsNewActionTypes(t *testing.T) {
 	}
 	if got := r.WhatChanged("task-lifecycle"); len(got) != 1 {
 		t.Errorf("WhatChanged = %d, want 1 (file_changed)", len(got))
+	}
+}
+
+func TestTrailText(t *testing.T) {
+	r := New(t.TempDir())
+	base := time.Now().Add(-10 * time.Minute).UTC()
+	for i, rec := range []Record{
+		{AgentID: "agentA", TaskID: "task1", Action: "task_started", Context: "fix the N+1", Status: "ok", Timestamp: base},
+		{AgentID: "agentA", TaskID: "task1", Action: "tool_called", Arguments: "kern_search n+1", Result: "3 symbols", Status: "ok", Timestamp: base.Add(time.Minute)},
+		{AgentID: "agentA", TaskID: "task1", Action: "change_accepted", Status: "ok", Approved: true, Timestamp: base.Add(2 * time.Minute)},
+		{AgentID: "agentA", TaskID: "other", Action: "task_started", Status: "ok", Timestamp: base.Add(3 * time.Minute)},
+	} {
+		if _, err := r.Record(rec); err != nil {
+			t.Fatalf("Record %d: %v", i, err)
+		}
+	}
+	// TrailText must be scoped to the task and chronological (not List order).
+	got := r.TrailText("task1")
+	for _, want := range []string{"flight trail for task task1 (3 records)", "task_started by agentA", "tool_called by agentA", "kern_search n+1", "approved: yes"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("TrailText missing %q in:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "other") {
+		t.Errorf("TrailText leaked another task's records:\n%s", got)
+	}
+	if got := r.TrailText("nope"); !strings.Contains(got, "no flight records for task nope") {
+		t.Errorf("TrailText unknown task = %q, want no-records message", got)
+	}
+}
+
+// TestTasksGroupsTrailsByTask pins the task-id to trail linkage: Tasks()
+// aggregates every record by TaskID with count, first/last activity, and
+// distinct statuses, ordered most recently active first.
+func TestTasksGroupsTrailsByTask(t *testing.T) {
+	dir := t.TempDir()
+	rec := New(dir)
+	now := time.Now().UTC()
+	recs := []Record{
+		{ID: "f-1", AgentID: "a1", TaskID: "t-old", Action: "task_started", Timestamp: now.Add(-2 * time.Hour)},
+		{ID: "f-2", AgentID: "a1", TaskID: "t-old", Action: "tool_called", Timestamp: now.Add(-2 * time.Hour).Add(time.Minute), Status: "ok"},
+		{ID: "f-3", AgentID: "a2", TaskID: "t-new", Action: "task_started", Timestamp: now.Add(-time.Minute), Status: "ok"},
+		{ID: "f-4", AgentID: "a2", TaskID: "", Action: "tool_called", Timestamp: now, Status: "error"},
+	}
+	for _, r := range recs {
+		if _, err := rec.Record(r); err != nil {
+			t.Fatal(err)
+		}
+	}
+	sums, err := rec.Tasks()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sums) != 3 {
+		t.Fatalf("Tasks() = %d summaries, want 3", len(sums))
+	}
+	// Newest last-activity first: "" (now), t-new (-1m), t-old (-2h).
+	if sums[0].TaskID != "" || sums[1].TaskID != "t-new" || sums[2].TaskID != "t-old" {
+		t.Fatalf("Tasks() order = %+v, want [\"\" t-new t-old]", sums)
+	}
+	old := sums[2]
+	if old.Count != 2 || !old.First.Equal(now.Add(-2*time.Hour)) || !old.Last.Equal(now.Add(-2*time.Hour).Add(time.Minute)) {
+		t.Fatalf("t-old summary = %+v, want count 2, first -2h, last -2h+1m", old)
+	}
+	if len(old.Statuses) != 1 || old.Statuses[0] != "ok" {
+		t.Fatalf("t-old statuses = %v, want [ok]", old.Statuses)
+	}
+}
+
+// TestGCRetainsRecentTrailsAndPurgesBuffer pins retention: trails of tasks
+// neither among the keepTasks most recently active nor active within
+// olderThan are deleted from the store AND the in-memory buffer (so List
+// cannot resurrect them), and surviving trails are never truncated.
+func TestGCRetainsRecentTrailsAndPurgesBuffer(t *testing.T) {
+	dir := t.TempDir()
+	rec := New(dir)
+	now := time.Now().UTC()
+	for i, task := range []string{"t-old", "t-mid", "t-new"} {
+		// t-old is the oldest (-2h), t-new the newest (now) — the timestamps
+		// make t-new the most recently active task.
+		if _, err := rec.Record(Record{ID: fmt.Sprintf("f-%d-1", i), TaskID: task, Timestamp: now.Add(-time.Duration(2-i) * time.Hour)}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := rec.Record(Record{ID: fmt.Sprintf("f-%d-2", i), TaskID: task, Timestamp: now.Add(-time.Duration(2-i) * time.Hour).Add(time.Minute)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Keep only the 1 most recently active task (t-new): t-old and t-mid
+	// trails must be deleted (4 records), the t-new trail must survive whole.
+	deleted, err := rec.GC(1, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if deleted != 4 {
+		t.Fatalf("GC deleted %d records, want 4", deleted)
+	}
+	recs, err := rec.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(recs) != 2 {
+		t.Fatalf("List() after GC = %d records, want 2 (t-new trail intact, buffer not resurrecting)", len(recs))
+	}
+	for _, r := range recs {
+		if r.TaskID != "t-new" {
+			t.Fatalf("List() after GC contains task %q, want only t-new", r.TaskID)
+		}
+	}
+	// Age gate: a fresh store, keep only tasks active within the last 90
+	// minutes -> t-mid (-1h) survives, t-old (-2h) does not.
+	dir2 := t.TempDir()
+	rec2 := New(dir2)
+	if _, err := rec2.Record(Record{ID: "g-1", TaskID: "t-old", Timestamp: now.Add(-2 * time.Hour)}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := rec2.Record(Record{ID: "g-2", TaskID: "t-mid", Timestamp: now.Add(-time.Hour)}); err != nil {
+		t.Fatal(err)
+	}
+	deleted, err = rec2.GC(0, 90*time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if deleted != 1 {
+		t.Fatalf("age-gated GC deleted %d records, want 1", deleted)
+	}
+	recs, err = rec2.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(recs) != 1 || recs[0].TaskID != "t-mid" {
+		t.Fatalf("age-gated List() = %+v, want only t-mid", recs)
 	}
 }

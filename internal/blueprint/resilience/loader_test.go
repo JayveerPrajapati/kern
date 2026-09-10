@@ -203,8 +203,14 @@ func TestLoadAll(t *testing.T) {
 // TestDefaultScenariosFresh ensures LoadAll returns fresh instances so
 // concurrent/sequential checks never share fault-server state.
 func TestDefaultScenariosFresh(t *testing.T) {
-	a := DefaultScenarios()
-	b := DefaultScenarios()
+	a, err := DefaultScenarios()
+	if err != nil {
+		t.Fatalf("DefaultScenarios: %v", err)
+	}
+	b, err := DefaultScenarios()
+	if err != nil {
+		t.Fatalf("DefaultScenarios: %v", err)
+	}
 	if len(a) != 5 || len(b) != 5 {
 		t.Fatalf("DefaultScenarios() = %d, %d; want 5, 5", len(a), len(b))
 	}

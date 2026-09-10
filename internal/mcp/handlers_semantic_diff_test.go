@@ -9,11 +9,13 @@ import (
 
 func TestHandleSemanticDiff(t *testing.T) {
 	s := NewServer(strings.NewReader(""), io.Discard)
-	s.roots = []string{kernRepoRoot}
+	defer s.Close() // drain sessions (watcher + background index saves) before t.TempDir cleanup
+	root := fixtureRoot(t)
+	s.roots = []string{root}
 
 	// Test 1: Compare HEAD against working tree (or HEAD~1..HEAD)
 	res, err := s.handleSemanticDiff(context.Background(), map[string]any{
-		"root": kernRepoRoot,
+		"root": root,
 	})
 	if err != nil {
 		t.Fatalf("handleSemanticDiff error: %v", err)
@@ -28,7 +30,7 @@ func TestHandleSemanticDiff(t *testing.T) {
 
 	// Test 2: Range comparison
 	resRange, err := s.handleSemanticDiff(context.Background(), map[string]any{
-		"root":  kernRepoRoot,
+		"root":  root,
 		"range": "HEAD~1..HEAD",
 	})
 	if err != nil {

@@ -115,7 +115,7 @@ func TestBuildWithOptionsIncrementalEquivalence(t *testing.T) {
 	// new build's merges back into the live prior).
 	for path, pkg := range prior.Pkgs {
 		for _, imp := range pkg.Imports {
-			if path == "b" && imp == "a" && len(pkg.Files) < 2 {
+			if path == "b" && imp.Path == "a" && len(pkg.Files) < 2 {
 				t.Errorf("prior Pkgs[%s] mutated by incremental build: %+v", path, pkg)
 			}
 		}

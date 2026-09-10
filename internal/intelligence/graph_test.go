@@ -30,12 +30,12 @@ func fakeIndex() *index.Index {
 			{Kind: "func", Name: "HandleUsers", File: "svc/handlers.go", Line: 1, Lang: "go", Entry: true, Framework: "net-http", Route: "/users"},
 			sym("func", "TestFoo", "svc/foo_test.go", 1),
 		},
-		Calls: map[string][]string{
-			"Foo":         {"Bar", "Baz"},
-			"Bar":         {"Baz"},
-			"Baz":         {"Foo"},
-			"HandleUsers": {"Foo"},
-			"TestFoo":     {"HandleUsers"},
+		Calls: map[string][]index.CallEdge{
+			"Foo":         {index.CallEdge{Target: "Bar", Confidence: index.ConfidenceHigh}, index.CallEdge{Target: "Baz", Confidence: index.ConfidenceHigh}},
+			"Bar":         {index.CallEdge{Target: "Baz", Confidence: index.ConfidenceHigh}},
+			"Baz":         {index.CallEdge{Target: "Foo", Confidence: index.ConfidenceHigh}},
+			"HandleUsers": {index.CallEdge{Target: "Foo", Confidence: index.ConfidenceHigh}},
+			"TestFoo":     {index.CallEdge{Target: "HandleUsers", Confidence: index.ConfidenceHigh}},
 		},
 		Callers: map[string][]string{
 			"Bar":         {"Foo"},
@@ -50,7 +50,7 @@ func fakeIndex() *index.Index {
 			"Animal": {"Baz"},
 		},
 		Pkgs: map[string]*index.Pkg{
-			"svc": {Name: "svc", Path: "svc", Imports: []string{"net/http"}, Files: []string{"svc/handlers.go"}, Lang: "go"},
+			"svc": {Name: "svc", Path: "svc", Imports: []index.ImportEdge{{Path: "net/http", Confidence: index.ConfidenceHigh}}, Files: []string{"svc/handlers.go"}, Lang: "go"},
 		},
 		UpdatedAt: time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC),
 	}
@@ -166,7 +166,7 @@ func TestCycleSafety(t *testing.T) {
 	ix := &index.Index{
 		Root:      "/cycle",
 		Symbols:   []index.Symbol{sym("func", "A", "a.go", 1), sym("func", "B", "b.go", 1)},
-		Calls:     map[string][]string{"A": {"B"}, "B": {"A"}},
+		Calls:     map[string][]index.CallEdge{"A": {index.CallEdge{Target: "B", Confidence: index.ConfidenceHigh}}, "B": {index.CallEdge{Target: "A", Confidence: index.ConfidenceHigh}}},
 		Callers:   map[string][]string{"A": {"B"}, "B": {"A"}},
 		UpdatedAt: time.Now(),
 	}
@@ -234,7 +234,7 @@ func fakeIndex2() *index.Index {
 	return &index.Index{
 		Root:    "/fake2",
 		Symbols: []index.Symbol{sym("func", "Compute", "svc/calc.go", 1)},
-		Calls:   map[string][]string{"Compute": {}},
+		Calls:   map[string][]index.CallEdge{"Compute": {}},
 		Callers: map[string][]string{},
 		Pkgs:    map[string]*index.Pkg{},
 	}
@@ -257,8 +257,8 @@ func TestSameNamedSymbolsDoNotCollide(t *testing.T) {
 			sym("func", "Save", "db/save.go", 1),
 			sym("func", "Save", "api/save.go", 1),
 		},
-		Calls: map[string][]string{
-			"Save": {"db.Save"}, // db.Save calls api.Save
+		Calls: map[string][]index.CallEdge{
+			"Save": {index.CallEdge{Target: "db.Save", Confidence: index.ConfidenceHigh}}, // db.Save calls api.Save
 		},
 		Pkgs: map[string]*index.Pkg{
 			"db":  {Name: "db", Path: "db", Files: []string{"db/save.go"}},

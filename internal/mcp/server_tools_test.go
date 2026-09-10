@@ -12,7 +12,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/JayveerPrajapati/kern/internal/optimize"
 	"github.com/JayveerPrajapati/kern/internal/strutil"
 )
 
@@ -102,26 +101,6 @@ func TestLoadOrBuildIndexCacheHit(t *testing.T) {
 	}
 	if len(ix2.Symbols) != len(ix1.Symbols) {
 		t.Fatalf("cache-hit index mismatch: %d vs %d", len(ix2.Symbols), len(ix1.Symbols))
-	}
-}
-
-func TestEnsureRecorderAndRenderStats(t *testing.T) {
-	t.Setenv("XDG_CACHE_HOME", t.TempDir())
-	if err := ensureRecorder(); err != nil {
-		t.Fatal(err)
-	}
-	if optimize.Recorder == nil {
-		t.Fatal("optimize.Recorder not wired by ensureRecorder")
-	}
-	out, err := renderStats("7", "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(out, "operations=") {
-		t.Fatalf("bad stats render: %q", out)
-	}
-	if _, err := renderStats("notanumber", ""); err == nil {
-		t.Fatal("expected error for invalid days")
 	}
 }
 
@@ -381,7 +360,6 @@ func TestPromptGetViaMCP(t *testing.T) {
 
 func TestKernStatsViaMCP(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
-	_ = ensureRecorder()
 	mcpAssertOK(t, "kern_stats", nil)
 }
 
@@ -462,21 +440,26 @@ func TestMemoryToolsViaMCP(t *testing.T) {
 	if !strings.Contains(full, "deploy tags") {
 		t.Fatalf("expected lesson in list, got %q", full)
 	}
-	hit := mcpAssertOK(t, "kern_memory_recall", map[string]any{"root": root, "prompt": "how are deploy tags released?", "k": "3"})
+	hit := mcpAssertOK(t, "kern_memory_recall", map[string]any{"root": root, "prompt": "how are deploy tags released?", "limit": "3"})
 	if !strings.Contains(hit, "deploy tags") {
 		t.Fatalf("expected recall hit, got %q", hit)
+	}
+	// backward-compat alias: pre-rename prompts pass the limit as "k"
+	aliasHit := mcpAssertOK(t, "kern_memory_recall", map[string]any{"root": root, "prompt": "how are deploy tags released?", "k": "3"})
+	if !strings.Contains(aliasHit, "deploy tags") {
+		t.Fatalf("expected recall hit via legacy k alias, got %q", aliasHit)
 	}
 	miss := mcpAssertOK(t, "kern_memory_recall", map[string]any{"root": root, "prompt": "xyzzy plugh unrelated"})
 	if miss != "" {
 		t.Fatalf("expected empty recall for unrelated prompt, got %q", miss)
 	}
-	badK := mcpToolError(t, "kern_memory_recall", map[string]any{"root": root, "prompt": "how are deploy tags released?", "k": "bogus"})
+	badK := mcpToolError(t, "kern_memory_recall", map[string]any{"root": root, "prompt": "how are deploy tags released?", "limit": "bogus"})
 	if !strings.Contains(badK, "invalid integer") {
-		t.Fatalf("expected parse error for malformed k, got %q", badK)
+		t.Fatalf("expected parse error for malformed limit, got %q", badK)
 	}
-	zeroK := mcpAssertOK(t, "kern_memory_recall", map[string]any{"root": root, "prompt": "how are deploy tags released?", "k": "0"})
+	zeroK := mcpAssertOK(t, "kern_memory_recall", map[string]any{"root": root, "prompt": "how are deploy tags released?", "limit": "0"})
 	if !strings.Contains(zeroK, "deploy tags") {
-		t.Fatalf("expected recall hit with clamped k, got %q", zeroK)
+		t.Fatalf("expected recall hit with clamped limit, got %q", zeroK)
 	}
 	mcpToolError(t, "kern_memory_add", nil)
 	mcpToolError(t, "kern_memory_recall", nil)

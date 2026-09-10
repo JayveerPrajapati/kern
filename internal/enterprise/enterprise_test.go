@@ -7,9 +7,11 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/JayveerPrajapati/kern/internal/domain"
 	"github.com/JayveerPrajapati/kern/internal/governance"
+	"github.com/JayveerPrajapati/kern/internal/web"
 )
 
 const testToken = "test-enterprise-token"
@@ -320,35 +322,114 @@ func TestServeHTTPOrgRepositories(t *testing.T) {
 	}
 }
 
-// TestServeHTTPOrgArchitecture verifies the "architecture" org-level
-// route aggregates per-project architecture reports.
+// TestServeHTTPOrgArchitecture verifies the "architecture" org-level route
+// (B4): a cold org answers immediately from cached apps with the uncached
+// projects reported as "pending" (no serial rebuilds inside the request),
+// and the background warm fills the cache so the next request aggregates.
 func TestServeHTTPOrgArchitecture(t *testing.T) {
 	s := New()
 	if err := s.Register("proj-a", t.TempDir()); err != nil {
 		t.Fatal(err)
 	}
+	type archBody struct {
+		Architecture []struct {
+			Project    string   `json:"project"`
+			Violations []string `json:"violations"`
+			OK         bool     `json:"ok"`
+		} `json:"architecture"`
+		Count   int `json:"count"`
+		Pending int `json:"pending"`
+	}
+
+	// Cold start: nothing cached yet → pending, no serial build in the request.
 	req := authedRequest(t, "GET", "/org/architecture")
 	rr := httptest.NewRecorder()
 	s.ServeHTTP(rr, req)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200: %s", rr.Code, rr.Body.String())
 	}
-	var body struct {
-		Architecture []struct {
-			Project    string   `json:"project"`
-			Violations []string `json:"violations"`
-			OK         bool     `json:"ok"`
-		} `json:"architecture"`
-		Count int `json:"count"`
-	}
+	var body archBody
 	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if body.Count < 1 {
-		t.Errorf("count = %d, want >= 1", body.Count)
+	if body.Count != 0 || body.Pending != 1 {
+		t.Fatalf("cold start = count %d pending %d, want 0/1 (no serial builds)", body.Count, body.Pending)
 	}
-	if len(body.Architecture) == 0 || body.Architecture[0].Project == "" {
+
+	// The async warm must fill the cache shortly after.
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		if _, ok := s.appForCached("proj-a"); ok {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("async warm never built proj-a")
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	// Second request aggregates the warmed project.
+	rr = httptest.NewRecorder()
+	s.ServeHTTP(rr, authedRequest(t, "GET", "/org/architecture"))
+	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.Count < 1 || body.Pending != 0 {
+		t.Fatalf("after warm = count %d pending %d, want count>=1 pending 0", body.Count, body.Pending)
+	}
+	if len(body.Architecture) == 0 || body.Architecture[0].Project != "proj-a" {
 		t.Errorf("architecture aggregation missing project name: %+v", body.Architecture)
+	}
+}
+
+// TestAppForOffLockSingleFlight pins B4: concurrent appFor calls on a fresh
+// project share one build result — no duplicate web.New and no deadlock with
+// the org-wide mutex released during the build.
+func TestAppForOffLockSingleFlight(t *testing.T) {
+	s := New()
+	if err := s.Register("proj-a", t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	const callers = 8
+	results := make(chan *web.App, callers)
+	errs := make(chan error, callers)
+	for i := 0; i < callers; i++ {
+		go func() {
+			app, err := s.appFor("proj-a")
+			errs <- err
+			results <- app
+		}()
+	}
+	for i := 0; i < callers; i++ {
+		if err := <-errs; err != nil {
+			t.Fatalf("appFor: %v", err)
+		}
+	}
+	first := <-results
+	for i := 1; i < callers; i++ {
+		if got := <-results; got != first {
+			t.Fatalf("concurrent appFor returned different apps (call %d)", i)
+		}
+	}
+}
+
+// TestAppForCachedDoesNotBuild pins the cached-only accessor: it must never
+// trigger a build, and must return the cached app pointer once built.
+func TestAppForCachedDoesNotBuild(t *testing.T) {
+	s := New()
+	if err := s.Register("proj-a", t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	if app, ok := s.appForCached("proj-a"); ok || app != nil {
+		t.Fatalf("appForCached on cold project = (%v, %v), want (nil, false)", app, ok)
+	}
+	built, err := s.appFor("proj-a")
+	if err != nil {
+		t.Fatalf("appFor: %v", err)
+	}
+	cached, ok := s.appForCached("proj-a")
+	if !ok || cached != built {
+		t.Fatalf("appForCached after build = (%v, %v), want the built app", cached, ok)
 	}
 }
 
@@ -510,6 +591,11 @@ func TestServeOrgAgentsPostRegister(t *testing.T) {
 	}
 	if got.Count != 1 || len(got.Agents) != 1 || got.Agents[0].ID != "agent-1" {
 		t.Fatalf("after POST, agents = %+v, want 1 agent with ID agent-1", got)
+	}
+	// Client-supplied permissions must be stripped at registration (AUD-08):
+	// org-registered agents never carry enforcement permissions.
+	if len(got.Agents[0].Permissions) != 0 {
+		t.Errorf("registered agent retained client-supplied permissions: %+v", got.Agents[0].Permissions)
 	}
 
 	// Duplicate POST → 409.

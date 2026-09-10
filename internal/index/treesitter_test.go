@@ -80,7 +80,8 @@ class Service:
 		t.Errorf("run receiver = %q; want Service", run.Receiver)
 	}
 	found := false
-	for _, c := range calls["Service.run"] {
+	for _, ce := range calls["Service.run"] {
+		c := ce.Target
 		if c == "helper" {
 			found = true
 		}
@@ -113,7 +114,8 @@ backup() {
 		t.Errorf("expected deploy func, got %v", syms)
 	}
 	found := false
-	for _, c := range calls["backup"] {
+	for _, ce := range calls["backup"] {
+		c := ce.Target
 		if c == "deploy" {
 			found = true
 		}
@@ -253,7 +255,8 @@ String greet(String who) => "hi " + who;
 		t.Errorf("expected main to have calls, got %v", calls)
 	}
 	gotCall := false
-	for _, c := range calls["main"] {
+	for _, ce := range calls["main"] {
+		c := ce.Target
 		if c == "meow" || c == "greet" || c == "Cat" {
 			gotCall = true
 		}
@@ -261,4 +264,77 @@ String greet(String who) => "hi " + who;
 	if !gotCall {
 		t.Errorf("expected main to call meow/greet/Cat, got %v", calls["main"])
 	}
+}
+
+// TestTreeSitterSymbolAndCallConfidence verifies the tree-sitter extractor
+// attaches confidence: direct declarations HIGH, calls to local definitions
+// HIGH, unresolved targets MEDIUM.
+func TestTreeSitterSymbolAndCallConfidence(t *testing.T) {
+	src := `function localHelper() {
+	return 1;
+}
+
+export function main() {
+	localHelper();
+	externalCall();
+}
+
+export class Service {
+	run() {
+		return main();
+	}
+}
+`
+	syms, calls, _, _, err := tsExtract("app.ts", []byte(src), "typescript")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range syms {
+		if s.Confidence != ConfidenceHigh {
+			t.Errorf("symbol %s confidence = %q, want HIGH", s.FullName(), s.Confidence)
+		}
+	}
+	// main -> localHelper is a call to a locally-defined symbol: HIGH.
+	// main -> externalCall is unresolved: MEDIUM.
+	found := false
+	for _, ce := range calls["main"] {
+		if ce.Target == "localHelper" {
+			found = true
+			if ce.Confidence != ConfidenceHigh {
+				t.Errorf("main->localHelper confidence = %q, want HIGH", ce.Confidence)
+			}
+		}
+		if ce.Target == "externalCall" && ce.Confidence != ConfidenceMedium {
+			t.Errorf("main->externalCall confidence = %q, want MEDIUM (unresolved)", ce.Confidence)
+		}
+	}
+	if !found {
+		t.Errorf("expected main->localHelper edge, got %v", CallEdgeTargets(calls["main"]))
+	}
+}
+
+// TestTreeSitterArrowFunctionMediumConfidence: a const holding an arrow
+// function is promoted to a func symbol — an inferred kind, so MEDIUM.
+func TestTreeSitterArrowFunctionMediumConfidence(t *testing.T) {
+	src := `const greet = (name) => "hi " + name;
+export function run() {
+	return greet("x");
+}
+`
+	syms, _, _, _, err := tsExtract("app.js", []byte(src), "javascript")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range syms {
+		if s.Name == "greet" {
+			if s.Kind != "func" {
+				t.Errorf("greet kind = %q, want func (promoted from const)", s.Kind)
+			}
+			if s.Confidence != ConfidenceMedium {
+				t.Errorf("greet confidence = %q, want MEDIUM (inferred kind)", s.Confidence)
+			}
+			return
+		}
+	}
+	t.Error("expected promoted arrow-function symbol greet")
 }

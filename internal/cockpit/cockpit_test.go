@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/JayveerPrajapati/kern/internal/blueprint/gates"
 	"github.com/JayveerPrajapati/kern/internal/execution"
 	"github.com/JayveerPrajapati/kern/internal/loop"
 )
@@ -15,8 +16,11 @@ func TestCockpitInitialState(t *testing.T) {
 	if s.TaskID != "task_1" {
 		t.Errorf("expected task_1, got %s", s.TaskID)
 	}
-	if len(s.Gates) != 30 {
-		t.Errorf("expected 30 gates registered, got %d", len(s.Gates))
+	// Derived from the authoritative registry (NewInitialState iterates
+	// gates.Registry), so the assertion can never drift from the registered
+	// gate count again.
+	if len(s.Gates) != len(gates.Registry) {
+		t.Errorf("expected %d gates registered, got %d", len(gates.Registry), len(s.Gates))
 	}
 	if len(s.Phases) != len(OrderedPhases) {
 		t.Errorf("expected %d phases, got %d", len(OrderedPhases), len(s.Phases))

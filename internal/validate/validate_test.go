@@ -108,3 +108,50 @@ func TestDetectGoProjectRuns(t *testing.T) {
 		t.Fatalf("go vet failed: %s", res.Output)
 	}
 }
+
+// TestDetectKind verifies kind-filtered detection: a Go module resolves the
+// test kind to `go test` (not the higher-priority build command), an npm
+// project to `npm test`, and an empty directory errors.
+func TestDetectKind(t *testing.T) {
+	// The kern repo itself is a Go module.
+	c, err := DetectKind("../..", "test")
+	if err != nil {
+		t.Fatalf("DetectKind(test) on go module: %v", err)
+	}
+	if c.Cmd != "go" || c.Kind != "test" {
+		t.Fatalf("DetectKind(test) = %+v; want go test", c)
+	}
+	b, err := DetectKind("../..", "build")
+	if err != nil {
+		t.Fatalf("DetectKind(build) on go module: %v", err)
+	}
+	if b.Cmd != "go" || b.Kind != "build" {
+		t.Fatalf("DetectKind(build) = %+v; want go build", b)
+	}
+	l, err := DetectKind("../..", "lint")
+	if err != nil {
+		t.Fatalf("DetectKind(lint) on go module: %v", err)
+	}
+	if l.Cmd != "go" || l.Kind != "lint" {
+		t.Fatalf("DetectKind(lint) = %+v; want go vet", l)
+	}
+
+	// npm project.
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "package.json"), []byte(`{"name":"x"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := DetectKind(root, "test"); err != nil {
+		t.Skipf("npm not on PATH: %v", err)
+	}
+	c, err = DetectKind(root, "test")
+	if err != nil || c.Cmd != "npm" || c.Kind != "test" {
+		t.Fatalf("DetectKind(test) on npm project = (%+v, %v); want npm test", c, err)
+	}
+
+	// Empty directory: nothing detected.
+	empty := t.TempDir()
+	if _, err := DetectKind(empty, "test"); err == nil {
+		t.Fatal("DetectKind on empty dir should error")
+	}
+}

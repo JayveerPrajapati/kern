@@ -1,6 +1,8 @@
 package index
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -43,10 +45,10 @@ func TestCommunityLabelsExcludesExternalCallees(t *testing.T) {
 			// would have let "List.of" resolve to this and become a node.
 			{Kind: "func", Name: "of", File: "factory.go", Line: 1},
 		},
-		Calls: map[string][]string{
-			"processData":   {"validateInput", "formatOutput", "Date", "List.of"},
-			"validateInput": {"of"},
-			"formatOutput":  {"processData"},
+		Calls: map[string][]CallEdge{
+			"processData":   {CallEdge{Target: "validateInput", Confidence: ConfidenceHigh}, CallEdge{Target: "formatOutput", Confidence: ConfidenceHigh}, CallEdge{Target: "Date", Confidence: ConfidenceHigh}, CallEdge{Target: "List.of", Confidence: ConfidenceHigh}},
+			"validateInput": {CallEdge{Target: "of", Confidence: ConfidenceHigh}},
+			"formatOutput":  {CallEdge{Target: "processData", Confidence: ConfidenceHigh}},
 		},
 	}
 	labels := ix.CommunityLabels()
@@ -79,8 +81,8 @@ func TestAddDispatchEdgesResolvesInterfaceCalls(t *testing.T) {
 			{Kind: "class", Name: "Controller", File: "Controller.java", Line: 1},
 			{Kind: "method", Name: "handleRequest", Receiver: "Controller", File: "Controller.java", Line: 5},
 		},
-		Calls: map[string][]string{
-			"Controller.handleRequest": {"NotificationService.send"},
+		Calls: map[string][]CallEdge{
+			"Controller.handleRequest": {CallEdge{Target: "NotificationService.send", Confidence: ConfidenceHigh}},
 		},
 		Inherits: map[string][]string{
 			"EmailServiceImpl": {"implements:NotificationService"},
@@ -97,11 +99,11 @@ func TestAddDispatchEdgesResolvesInterfaceCalls(t *testing.T) {
 	callees := ix.Calls["Controller.handleRequest"]
 	hasEmail := false
 	hasSMS := false
-	for _, c := range callees {
-		if c == "EmailServiceImpl.send" {
+	for _, ce := range callees {
+		if ce.Target == "EmailServiceImpl.send" {
 			hasEmail = true
 		}
-		if c == "SMSServiceImpl.send" {
+		if ce.Target == "SMSServiceImpl.send" {
 			hasSMS = true
 		}
 	}
@@ -118,5 +120,122 @@ func TestAddDispatchEdgesResolvesInterfaceCalls(t *testing.T) {
 	}
 	if !containsStr(ix.Callers["SMSServiceImpl.send"], "Controller.handleRequest") {
 		t.Errorf("SMSServiceImpl.send should have Controller.handleRequest as a caller")
+	}
+}
+
+// TestCallersIncludingAliases pins the constructor-inferred-receiver case:
+// `s := New(); s.M()` is recorded as "New.M" (the constructor name stands in
+// for the receiver type), so the canonical Callers map misses the caller and
+// only the simple-name alias has it. The merged accessor must find it — the
+// deletion/dead-code safety net.
+func TestCallersIncludingAliases(t *testing.T) {
+	// An UNDEFINED constructor (no symbol, nowhere declared) cannot be
+	// rewritten by the merge pass: the edge stays qualified on the variable
+	// name ("mystery.M") and only the alias layer has it — the net
+	// CallersIncludingAliases must still find the caller.
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "s.go"), []byte(`package s
+
+type S struct{}
+
+func (s *S) M() {}
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "use.go"), []byte(`package s
+
+func Use() {
+	x := mystery()
+	x.M()
+}
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ix, err := Build(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The canonical map must NOT see the caller under the method's full name
+	// (unresolvable receiver), while the merged view must.
+	if got := ix.Callers["S.M"]; len(got) != 0 {
+		t.Fatalf("canonical Callers[S.M] = %v, want empty (unresolvable receiver)", got)
+	}
+	got := ix.CallersIncludingAliases("S.M")
+	if len(got) != 1 || got[0] != "Use" {
+		t.Fatalf("CallersIncludingAliases(S.M) = %v, want [Use]", got)
+	}
+	// A symbol with no aliases behaves identically to the canonical lookup.
+	if got := ix.CallersIncludingAliases("Nonexistent"); len(got) != 0 {
+		t.Fatalf("CallersIncludingAliases(Nonexistent) = %v, want empty", got)
+	}
+}
+
+// TestConstructorReturnTypeInferred pins the source fix: with the constructor
+// in the SAME file as the call, `x := New(...)` infers the real receiver type
+// and the edge lands in the canonical Callers map under the method's full
+// name — no alias needed.
+func TestConstructorReturnTypeInferred(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "lib.go"), []byte(`package lib
+
+type S struct{}
+
+func New() *S { return &S{} }
+
+func (s *S) M() {}
+
+func Use() {
+	x := New()
+	x.M()
+}
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ix, err := Build(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := ix.Callers["S.M"]
+	if len(got) != 1 || got[0] != "Use" {
+		t.Fatalf("canonical Callers[S.M] = %v, want [Use] (same-file constructor resolved to the return type)", got)
+	}
+}
+
+// TestMultiValueReceiverVarResolved pins the final lens class: a receiver
+// variable from a MULTI-VALUE method-constructor assign
+// ("gov, err := s.newGov(...)") must resolve through the merge-time rewrite
+// to the real receiver type ("Gov.Filter"), so canonical Callers sees the
+// caller even when the constructor is declared in a different file.
+func TestMultiValueReceiverVarResolved(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "ctor.go"), []byte(`package lib
+
+type Gov struct{}
+
+type Server struct{}
+
+func (s *Server) newGov() (*Gov, error) { return &Gov{}, nil }
+
+func (g *Gov) Filter() {}
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "use.go"), []byte(`package lib
+
+func Use(s *Server) {
+	g, err := s.newGov()
+	_ = err
+	g.Filter()
+}
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ix, err := Build(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := ix.Callers["Gov.Filter"]
+	if len(got) != 1 || got[0] != "Use" {
+		t.Fatalf("canonical Callers[Gov.Filter] = %v, want [Use] (multi-value receiver var resolved via constructor return type)", got)
 	}
 }

@@ -76,7 +76,9 @@ func TestWatchStops(t *testing.T) {
 	stop := make(chan struct{})
 	ch := Watch(root, 20*time.Millisecond, stop)
 	reports := 0
-	timeout := time.After(2 * time.Second)
+	// Generous deadline: fs-event delivery can lag well past 2s under
+	// sustained system load (observed flaking in CI-style full-suite runs).
+	timeout := time.After(10 * time.Second)
 loop:
 	for {
 		select {

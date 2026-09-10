@@ -80,6 +80,17 @@ type g27Entry struct {
 	Result    string    `json:"Result"`
 	Hash      string    `json:"Hash"`
 	TaskID    string    `json:"TaskID"`
+	// ValidationOutcome mirrors kern's P0.4 field (exported Go field names
+	// as JSON keys). Absent for legacy entries.
+	ValidationOutcome *g27ValidationOutcome `json:"ValidationOutcome,omitempty"`
+}
+
+type g27ValidationOutcome struct {
+	Status        string   `json:"Status"`
+	ExitCode      int      `json:"ExitCode"`
+	BlockedFiles  []string `json:"BlockedFiles"`
+	CorrelationID string   `json:"CorrelationID"`
+	Findings      int      `json:"Findings"`
 }
 
 type g27Risk struct {
@@ -93,11 +104,18 @@ type g27Risk struct {
 
 // g27Hash is the test-side reimplementation of kern's computeAuditHash:
 // sha256 over prevHash|ID|AgentID|Action|Resource|Timestamp.UnixNano|Risk|
-// Approved|Result|TaskID. Used to verify chain integrity without importing
-// the kern module (blueprint must stay a standalone module).
+// Approved|Result|TaskID, plus — when the entry carries a P0.4
+// ValidationOutcome — |Status|ExitCode|BlockedFiles|CorrelationID|Findings
+// (matching kern's A10 tamper-chain coverage). Used to verify chain
+// integrity without importing the kern module (blueprint must stay a
+// standalone module).
 func g27Hash(e g27Entry, prev string) string {
 	h := sha256.New()
 	fmt.Fprintf(h, "%s|%s|%s|%s|%s|%v|%v|%v|%s|%s", prev, e.ID, e.AgentID, e.Action, e.Resource, e.Timestamp.UnixNano(), e.Risk, e.Approved, e.Result, e.TaskID)
+	if e.ValidationOutcome != nil {
+		vo := e.ValidationOutcome
+		fmt.Fprintf(h, "|%s|%d|%s|%s|%d", vo.Status, vo.ExitCode, strings.Join(vo.BlockedFiles, ","), vo.CorrelationID, vo.Findings)
+	}
 	return hex.EncodeToString(h.Sum(nil))
 }
 

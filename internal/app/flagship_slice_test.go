@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/JayveerPrajapati/kern/internal/testfixture"
 	"github.com/JayveerPrajapati/kern/internal/whatif"
 )
 
@@ -81,14 +82,18 @@ func (m *lifecycleMetrics) lifecycleStages() []string { return m.order }
 // on-disk fixture through the analyze→plan→impact→risk→execute→verify→PR
 // lifecycle, asserting the required artifacts (P10.1/P10.2/P10.4) and recording
 // per-stage efficiency metrics (P10.6).
+//
+// The lifecycle runs against the small testfixture repo (same code paths as
+// the real repo, millisecond index builds) so the e2e assertions run in
+// seconds instead of minutes.
 func TestFlagshipVerticalSlice(t *testing.T) {
 	if testing.Short() {
-		t.Skip("slow e2e (>30s); skipped with -short")
+		t.Skip("slow e2e; skipped with -short")
 	}
 	f := loadFixture(t)
-	root := "../.."
+	root := testfixture.Repo(t)
 
-	p, err := NewWithIndex(root, sharedTestRepoIndex(t))
+	p, err := New(root)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -167,8 +172,8 @@ func TestSevenFailureDrill(t *testing.T) {
 	if testing.Short() {
 		t.Skip("slow e2e; skipped with -short")
 	}
-	root := "../.."
-	p, err := NewWithIndex(root, sharedTestRepoIndex(t))
+	root := testfixture.Repo(t)
+	p, err := New(root)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}

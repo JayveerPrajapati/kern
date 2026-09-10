@@ -92,6 +92,47 @@ func (s *server) Serve() string { return "ok" }
 	}
 }
 
+// TestDeadCodeFieldReceiverMethodNotReported pins the field-receiver lens
+// fix: a live method invoked through a struct field
+// ("a.taskSvc.Deploy" -> "TaskService.Deploy") must never be listed dead.
+// Before the fix the callee stayed unresolved, the canonical Callers map was
+// empty, and kern dead flagged the method as a false positive.
+func TestDeadCodeFieldReceiverMethodNotReported(t *testing.T) {
+	dir := writeTree(t, map[string]string{
+		"app/app.go": `package app
+
+type TaskService struct{}
+
+func (t *TaskService) Deploy() {}
+`,
+		"app/use.go": `package app
+
+type App struct {
+	taskSvc TaskService
+}
+
+func Use(a *App) {
+	a.taskSvc.Deploy()
+}
+`,
+	})
+	ix, err := index.Build(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dead := DeadCode(ix)
+	for _, d := range dead {
+		if d.Name == "TaskService.Deploy" {
+			t.Fatalf("TaskService.Deploy reported dead, but Use calls it via the taskSvc field (callees: %v)", ix.Calls["Use"])
+		}
+	}
+	// Sanity: the edge really landed in the canonical map (the lens fix, not
+	// an empty index, is what kept it out of the dead report).
+	if got := ix.Callers["TaskService.Deploy"]; len(got) != 1 || got[0] != "Use" {
+		t.Fatalf("canonical Callers[TaskService.Deploy] = %v, want [Use]", got)
+	}
+}
+
 func TestRenderDeadSurfacesConfidence(t *testing.T) {
 	dir := writeTree(t, map[string]string{
 		"lib/lib.go": `package lib

@@ -10,12 +10,20 @@ import (
 	"testing"
 )
 
+// kernRequired reports whether the environment demands a resolvable kern
+// binary. CI sets KERN_REQUIRE_BINARY=1 so binary-availability skips FAIL
+// instead of silently passing the gate.
+func kernRequired() bool { return os.Getenv("KERN_REQUIRE_BINARY") == "1" }
+
 // g5RequireKern skips if the kern binary isn't available.
 func g5RequireKern(t *testing.T) {
 	t.Helper()
 	if os.Getenv("KERN_BINARY") == "" {
 		// Try default path
 		if _, err := exec.LookPath("kern"); err != nil {
+			if kernRequired() {
+				t.Fatalf("KERN_REQUIRE_BINARY=1 but kern binary not available (set KERN_BINARY): %v", err)
+			}
 			t.Skipf("kern binary not available (set KERN_BINARY): %v", err)
 		}
 	}
@@ -33,12 +41,18 @@ func g5RequireFingerprint(t *testing.T) {
 	if kernBin == "" {
 		p, err := exec.LookPath("kern")
 		if err != nil {
+			if kernRequired() {
+				t.Fatalf("KERN_REQUIRE_BINARY=1 but kern binary not available (set KERN_BINARY): %v", err)
+			}
 			t.Skipf("kern binary not available (set KERN_BINARY): %v", err)
 		}
 		kernBin = p
 	}
 	out, err := exec.Command(kernBin, "--help").CombinedOutput()
 	if err != nil {
+		if kernRequired() {
+			t.Fatalf("KERN_REQUIRE_BINARY=1 but `kern --help` failed: %v", err)
+		}
 		t.Skipf("kern --help failed (%v); skipping fingerprint-backed assertions", err)
 	}
 	if !strings.Contains(string(out), "fingerprint") {

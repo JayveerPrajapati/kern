@@ -73,7 +73,7 @@ func TestMVP3GateEndToEnd(t *testing.T) {
 	fixVerified := inc.Verification != "" && strings.Contains(inc.Verification, "PASS")
 
 	t.Log("[6/8] Human approval gate (production change)…")
-	ap := eng.RequestApproval(inc, "sre", "apply verified fix to production")
+	ap, _ := eng.RequestApproval(inc, "sre", "apply verified fix to production")
 	approved := false
 	if ap.ID != "" {
 		if _, err := eng.Approve(ap.ID, "oncall-human"); err == nil {

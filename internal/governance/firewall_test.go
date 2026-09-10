@@ -643,3 +643,80 @@ func TestFirewallConcurrentCheckAndApprove(t *testing.T) {
 
 	wg.Wait()
 }
+
+// TestTaskKeyRoundTripWithPipeInResource asserts the composite task key
+// round-trips losslessly when a component contains the '|' separator
+// (AUD-07): compose escapes, split unescapes, and the encoded key differs
+// from the naive concatenation.
+func TestTaskKeyRoundTripWithPipeInResource(t *testing.T) {
+	cases := []struct {
+		agentID, resource, action string
+	}{
+		{"agent-1", "db|prod|primary", "write"},
+		{"agent|1", "src", "write"},
+		{"agent-1", "src", "write|merge"},
+		{"agent-1", "a|b|c|d", "run"},
+		{"plain", "plain", "plain"},
+		{"agent-1", "100%|raw", "write"},
+	}
+	for _, tc := range cases {
+		key := TaskKey(tc.agentID, tc.resource, tc.action)
+		gotA, gotR, gotAct := splitTaskKey(key)
+		if gotA != tc.agentID || gotR != tc.resource || gotAct != tc.action {
+			t.Errorf("splitTaskKey(TaskKey(%q,%q,%q)=%q) = (%q,%q,%q), want (%q,%q,%q)",
+				tc.agentID, tc.resource, tc.action, key, gotA, gotR, gotAct, tc.agentID, tc.resource, tc.action)
+		}
+		if key == tc.agentID+"|"+tc.resource+"|"+tc.action && strings.Contains(key, "%") {
+			t.Errorf("TaskKey(%q,%q,%q) = %q: expected escaping, got raw concatenation", tc.agentID, tc.resource, tc.action, key)
+		}
+	}
+	// The composite key must remain unique per triple (enforcement identity).
+	if TaskKey("a", "b|c", "d") == TaskKey("a", "b", "c|d") {
+		t.Error("distinct triples collided on the same composite key")
+	}
+}
+
+// TestApproveActionAttributesPipeResource exercises the full approval path
+// with a resource containing '|' (AUD-07): ApproveAction must attribute the
+// audit record to the right agent/action/unescaped resource, and enforcement
+// must still pass on the full composite key.
+func TestApproveActionAttributesPipeResource(t *testing.T) {
+	agent := NewAgent("agent-pipe", "Pipe Agent", "coder", []Permission{{Resource: "db|prod|primary", Action: "write"}})
+	f := NewFirewall().WithAgents(agent)
+	f.WithPolicies([]domain.Policy{
+		{ID: "p1", Name: "high_pipe", Rule: "HIGH db|prod|primary.write", Scope: "db|prod|primary", Enabled: true},
+	})
+
+	allowed, _, approval, err := f.Check("agent-pipe", "db|prod|primary", "write")
+	if err != nil {
+		t.Fatalf("initial Check: %v", err)
+	}
+	if allowed || approval == nil {
+		t.Fatalf("expected denied + pending approval, got allowed=%v approval=%v", allowed, approval)
+	}
+
+	if err := f.ApproveAction(approval.ID, "human-1"); err != nil {
+		t.Fatalf("ApproveAction: %v", err)
+	}
+
+	// The audit record must carry the unescaped resource and the right agent/action.
+	var found bool
+	for _, e := range f.AuditLog().All() {
+		if e.AgentID == "agent-pipe" && e.Action == "write" && e.Resource == "db|prod|primary" && e.Approved {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("audit log missing approved entry for pipe resource, got %+v", f.AuditLog().All())
+	}
+
+	// Enforcement uses the full composite key: the re-check passes without a
+	// new approval, proving the escaped key round-tripped through the store.
+	allowed2, _, approval2, err := f.Check("agent-pipe", "db|prod|primary", "write")
+	if err != nil {
+		t.Fatalf("re-check after approve: %v", err)
+	}
+	if !allowed2 || approval2 != nil {
+		t.Errorf("re-check after approval should be allowed with no new approval, allowed=%v approval2=%+v", allowed2, approval2)
+	}
+}

@@ -287,7 +287,7 @@ func TestCommunitiesGatedLargeRepo(t *testing.T) {
 }
 
 func TestAnalyzeArchitectureGatedLargeRepo(t *testing.T) {
-	ix := &index.Index{Calls: map[string][]string{"main": {"helper"}}}
+	ix := &index.Index{Calls: map[string][]index.CallEdge{"main": {index.CallEdge{Target: "helper", Confidence: index.ConfidenceHigh}}}}
 	for i := 0; i < index.MaxCommunitySymbols+1; i++ {
 		ix.Symbols = append(ix.Symbols, index.Symbol{
 			Kind: "func", Name: "f", File: "x.go", Line: i + 1,

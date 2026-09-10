@@ -2,6 +2,8 @@ package governance
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -173,6 +175,45 @@ func TestTamperBreaksChain(t *testing.T) {
 	all[1].AgentID = "evil-agent"
 	if l.VerifyChain() {
 		t.Error("VerifyChain() = true after tampering with an entry, want false")
+	}
+}
+
+// TestVerifyChainLegacyValidationOutcomeHash reproduces the 2026-08-31
+// transition window: a binary that persisted ValidationOutcome but did not
+// yet include it in the hash chain wrote entries whose stored hashes use the
+// legacy formula. VerifyChain must accept those entries (the legacy formula
+// covered a strict subset of fields), while still catching tampering.
+func TestVerifyChainLegacyValidationOutcomeHash(t *testing.T) {
+	dir := t.TempDir()
+	store := storage.NewLocal(dir)
+
+	l := NewAuditLog().WithStore(store)
+	l.Record(entry("", "a"))
+	l.Record(entry("", "b"))
+	l.Record(entry("", "c"))
+	if !l.VerifyChain() {
+		t.Fatal("chain should be intact before rewriting entry 1's hash")
+	}
+
+	// Rewrite the middle entry's hash with the legacy formula, as the
+	// in-transition binary would have persisted it.
+	all := l.All()
+	all[1].ValidationOutcome = &ValidationOutcome{Status: "WARN", ExitCode: 0,
+		BlockedFiles: []string{"internal/app/platform.go"}, CorrelationID: "bp-1", Findings: 52}
+	all[1].Hash = computeAuditHashLegacy(all[1], all[0].Hash)
+	if !l.VerifyChain() {
+		t.Fatal("VerifyChain() = false for legacy-formula entry with ValidationOutcome, want true")
+	}
+	// The chain after it still links via stored hashes.
+	all[2].Hash = computeAuditHash(all[2], all[1].Hash)
+	if !l.VerifyChain() {
+		t.Fatal("VerifyChain() = false after relinking successor, want true")
+	}
+
+	// Tampering with the legacy entry's covered fields must still break.
+	all[1].AgentID = "evil-agent"
+	if l.VerifyChain() {
+		t.Error("VerifyChain() = true after tampering with legacy entry, want false")
 	}
 }
 
@@ -944,4 +985,148 @@ func BenchmarkRecordParallelContention(b *testing.B) {
 			log.RecordParallel(e)
 		}
 	})
+}
+
+// TestAuditRetentionCapAndCounters verifies the B8 retention fix: the
+// in-memory log is capped at maxAuditEntries while lifetime counters keep
+// the true totals (so the web console's governance metrics stay O(1) and
+// correct even after trimming).
+func TestAuditRetentionCapAndCounters(t *testing.T) {
+	l := NewAuditLog()
+	for i := 0; i < maxAuditEntries+2500; i++ {
+		switch i % 3 {
+		case 0:
+			l.Record(AuditEntry{Action: "write", Result: "blocked"})
+		case 1:
+			l.Record(AuditEntry{Action: "write", Result: "approved"})
+		default:
+			l.Record(AuditEntry{Action: "write", Result: "allowed"})
+		}
+	}
+	if got := l.Len(); got != maxAuditEntries {
+		t.Errorf("Len() = %d; want the retention cap %d", got, maxAuditEntries)
+	}
+	if got := l.TotalRecords(); got != int64(maxAuditEntries+2500) {
+		t.Errorf("TotalRecords() = %d; want %d (lifetime, not the capped view)", got, maxAuditEntries+2500)
+	}
+	// blocked: every 3rd of the total → floor((7500+2)/3)... exact split of 7500: i%3==0 → 2500.
+	if got := l.BlocksCount(); got != 2500 {
+		t.Errorf("BlocksCount() = %d; want 2500", got)
+	}
+	if got := l.OverridesCount(); got != 2500 {
+		t.Errorf("OverridesCount() = %d; want 2500", got)
+	}
+	// The most recent entries survive; the oldest were trimmed.
+	all := l.All()
+	if len(all) == 0 || all[len(all)-1].ID == "" {
+		t.Error("recent entries must survive the trim")
+	}
+}
+
+// TestAuditHashNilOutcomeMatchesLegacyFormat: entries without a validation
+// outcome must hash byte-identically to the pre-P0.4 format, so chains
+// recorded by older versions still verify; with an outcome the hash must
+// differ (the field is now covered by the tamper chain).
+func TestAuditHashNilOutcomeMatchesLegacyFormat(t *testing.T) {
+	e := entry("", "x")
+	if got, want := computeAuditHash(e, "prev"), legacyAuditHash(e, "prev"); got != want {
+		t.Errorf("nil-ValidationOutcome hash = %s, want legacy format %s", got, want)
+	}
+	e.ValidationOutcome = &ValidationOutcome{Status: "BLOCK", ExitCode: 1, BlockedFiles: []string{"a.go"}, CorrelationID: "c1", Findings: 2}
+	if got, want := computeAuditHash(e, "prev"), legacyAuditHash(e, "prev"); got == want {
+		t.Error("hash with ValidationOutcome equals the legacy hash, want different")
+	}
+}
+
+// legacyAuditHash replicates the pre-P0.4 tamper-hash format (the old
+// computeAuditHash body) so the byte-compat contract is pinned in the test.
+func legacyAuditHash(e AuditEntry, prevHash string) string {
+	h := sha256.New()
+	fmt.Fprintf(h, "%s|%s|%s|%s|%s|%v|%v|%v|%s|%s", prevHash, e.ID, e.AgentID, e.Action, e.Resource, e.Timestamp.UnixNano(), e.Risk, e.Approved, e.Result, e.TaskID)
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// TestTamperBreaksChainForValidationOutcome: the tamper chain must cover
+// ValidationOutcome — modifying it in a persisted entry must break
+// VerifyChain (it did not before A10).
+func TestTamperBreaksChainForValidationOutcome(t *testing.T) {
+	dir := t.TempDir()
+	store := storage.NewLocal(dir)
+	l := NewAuditLog().WithStore(store)
+	e := externalEntry()
+	e.ValidationOutcome = &ValidationOutcome{Status: "BLOCK", ExitCode: 1, BlockedFiles: []string{"a.go"}, CorrelationID: "c1", Findings: 2}
+	if err := l.AppendExternal(e); err != nil {
+		t.Fatalf("AppendExternal: %v", err)
+	}
+	if !l.VerifyChain() {
+		t.Fatal("chain with a ValidationOutcome should verify intact")
+	}
+	all := l.All()
+	all[0].ValidationOutcome.Status = "PASS"
+	if l.VerifyChain() {
+		t.Error("VerifyChain() = true after tampering with ValidationOutcome, want false")
+	}
+}
+
+// TestRepairChainLogStoreNoDuplicates: repairing a LogStore-backed log (the
+// production store since the mixed LocalStore→LogStore window) must rewrite
+// the store atomically. A per-entry Put would APPEND a new chain line per
+// repaired key without removing the prior line, leaving duplicate entries
+// that break every later chain walk — the 2026-09-02 race-repair regression.
+func TestRepairChainLogStoreNoDuplicates(t *testing.T) {
+	dir := t.TempDir()
+	store := storage.NewLog(dir)
+	lock := filepath.Join(dir, ".lock")
+
+	l := NewAuditLog().WithStore(store).WithLockPath(lock)
+	l.Record(entry("", "a"))
+	l.Record(entry("", "b"))
+	l.Record(entry("", "c"))
+	l.Record(entry("", "d"))
+
+	// Corrupt the second entry's stored hash in the persisted store.
+	corrupted := l.All()[1]
+	corrupted.Hash = strings.Repeat("0", 64)
+	data, err := json.Marshal(corrupted)
+	if err != nil {
+		t.Fatalf("marshal corrupted entry: %v", err)
+	}
+	if err := store.Put(context.Background(), "audit-"+corrupted.ID, data); err != nil {
+		t.Fatalf("Put corrupted entry: %v", err)
+	}
+
+	fresh := NewAuditLog().WithStore(store).WithLockPath(lock)
+	if _, err := fresh.Replay(); err != nil {
+		t.Fatalf("Replay(): %v", err)
+	}
+	n, err := fresh.RepairChain()
+	if err != nil {
+		t.Fatalf("RepairChain(): %v", err)
+	}
+	if n < 1 {
+		t.Fatalf("RepairChain() = %d, want >= 1", n)
+	}
+
+	// The repaired store must hold exactly one entry per key and verify.
+	check := NewAuditLog().WithStore(storage.NewLog(dir))
+	if _, err := check.Replay(); err != nil {
+		t.Fatalf("Replay(): %v", err)
+	}
+	if got := len(check.All()); got != 4 {
+		t.Fatalf("after repair, log holds %d entries, want 4 (no duplicates)", got)
+	}
+	if brk, verified := check.VerifyChainReport(); brk != -1 || verified != 4 {
+		t.Fatalf("VerifyChainReport() = (%d, %d), want (-1, 4)", brk, verified)
+	}
+
+	// Recording a new entry after repair must chain cleanly off the repaired
+	// head (no orphaned appends from a stale in-memory chain).
+	check.Record(entry("", "e"))
+	check2 := NewAuditLog().WithStore(storage.NewLog(dir))
+	if _, err := check2.Replay(); err != nil {
+		t.Fatalf("Replay() after post-repair record: %v", err)
+	}
+	if brk, verified := check2.VerifyChainReport(); brk != -1 || verified != 5 {
+		t.Fatalf("post-repair record: VerifyChainReport() = (%d, %d), want (-1, 5)", brk, verified)
+	}
 }

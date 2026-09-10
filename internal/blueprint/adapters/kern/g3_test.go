@@ -3,17 +3,23 @@ package kern
 import (
 	"context"
 	"encoding/json"
+	"os"
 	"strings"
 	"testing"
 
 	"github.com/JayveerPrajapati/kern/internal/blueprint/domain"
 )
 
-// requireKern skips if the kern binary isn't available.
+// requireKern skips if the kern binary isn't available (fails instead when
+// KERN_REQUIRE_BINARY=1, set by CI's E2E gate so an unresolvable binary can
+// never silently pass).
 func requireKern(t *testing.T) *KernClient {
 	t.Helper()
 	client, err := NewKernClient()
 	if err != nil {
+		if os.Getenv("KERN_REQUIRE_BINARY") == "1" {
+			t.Fatalf("KERN_REQUIRE_BINARY=1 but kern binary not available: %v", err)
+		}
 		t.Skipf("kern binary not available: %v", err)
 	}
 	return client

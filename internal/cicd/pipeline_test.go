@@ -2,6 +2,8 @@ package cicd
 
 import (
 	"testing"
+
+	"github.com/JayveerPrajapati/kern/internal/testfixture"
 )
 
 func TestPipelineReadOnlyAnalyzePlan(t *testing.T) {
@@ -9,7 +11,7 @@ func TestPipelineReadOnlyAnalyzePlan(t *testing.T) {
 		t.Skip("slow e2e (>30s); skipped with -short")
 	}
 	// Read-only analyze+plan should work without governance gates.
-	p, err := New("../..")
+	p, err := New(testfixture.Repo(t))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -36,7 +38,7 @@ func TestPipelinePatchExecutionGovernanceGate(t *testing.T) {
 	// Pin the env explicitly so an ambient KERN_ALLOW_EXEC=1 in the caller's
 	// shell cannot flip this test (it must assert the denied path).
 	t.Setenv("KERN_ALLOW_EXEC", "")
-	p, err := New("../..")
+	p, err := New(testfixture.Repo(t))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -70,7 +72,7 @@ func TestPipelineExecutionGateApproved(t *testing.T) {
 	// the gate wiring here — the actual worktree build/verify may fail on the
 	// sandbox 100MiB cap, which is unrelated to the CI/CD governance wiring.
 	t.Setenv("KERN_ALLOW_EXEC", "1")
-	p, err := New("../..")
+	p, err := New(testfixture.Repo(t))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}

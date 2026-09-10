@@ -35,7 +35,7 @@ func TestSQLiteRoundTrip(t *testing.T) {
 		t.Errorf("caller-map count = %d; want %d", len(got.Calls), len(ix.Calls))
 	}
 	for k, v := range ix.Calls {
-		if !equalStrings(got.Calls[k], v) {
+		if !equalCallEdges(got.Calls[k], v) {
 			t.Errorf("Calls[%q] = %v; want %v", k, got.Calls[k], v)
 		}
 	}
@@ -55,7 +55,7 @@ func TestSQLiteRoundTrip(t *testing.T) {
 		}
 	}
 	for f, want := range ix.ImportsByFile {
-		if !equalStrings(got.ImportsByFile[f], want) {
+		if !equalImportEdges(got.ImportsByFile[f], want) {
 			t.Errorf("ImportsByFile[%q] = %v; want %v", f, got.ImportsByFile[f], want)
 		}
 	}
@@ -207,6 +207,30 @@ func TestFTS5HostileQueries(t *testing.T) {
 }
 
 func equalStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func equalCallEdges(a, b []CallEdge) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func equalImportEdges(a, b []ImportEdge) bool {
 	if len(a) != len(b) {
 		return false
 	}

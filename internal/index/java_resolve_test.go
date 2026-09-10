@@ -107,11 +107,11 @@ func TestJavaCalleeResolution(t *testing.T) {
 	}
 	got := calls["Sample.run"]
 	for _, want := range []string{"Foo.bar", "Foo.baz"} {
-		if !contains(got, want) {
+		if !contains(CallEdgeTargets(got), want) {
 			t.Errorf("calls[Sample.run] = %v; want it to contain %s (resolved)", got, want)
 		}
 	}
-	if contains(got, "x.bar") || contains(got, "x.baz") {
+	if contains(CallEdgeTargets(got), "x.bar") || contains(CallEdgeTargets(got), "x.baz") {
 		t.Errorf("calls[Sample.run] = %v; must not contain unresolved x.bar/x.baz", got)
 	}
 }
@@ -142,7 +142,7 @@ public class Helper {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !contains(ix.Calls["App.run"], "Helper.doThing") {
+	if !contains(CallEdgeTargets(ix.Calls["App.run"]), "Helper.doThing") {
 		t.Errorf("Calls[App.run] = %v; want it to contain Helper.doThing (resolved cross-file edge)", ix.Calls["App.run"])
 	}
 	if !contains(ix.Callers["Helper.doThing"], "App.run") {
@@ -168,13 +168,13 @@ func TestJavaUnresolvedCallee(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := calls["Unresolved.run"]
-	if contains(got, "Helper.doThing") {
+	if contains(CallEdgeTargets(got), "Helper.doThing") {
 		t.Errorf("calls[Unresolved.run] = %v; var-declared receiver must NOT resolve to Helper.doThing", got)
 	}
-	if !contains(got, "thing.doThing") {
+	if !contains(CallEdgeTargets(got), "thing.doThing") {
 		t.Errorf("calls[Unresolved.run] = %v; want the unresolved thing.doThing preserved as-is", got)
 	}
-	if !contains(got, "getHelper") || !contains(got, "doThing") {
+	if !contains(CallEdgeTargets(got), "getHelper") || !contains(CallEdgeTargets(got), "doThing") {
 		t.Errorf("calls[Unresolved.run] = %v; chained call must stay bare (getHelper / doThing)", got)
 	}
 }
