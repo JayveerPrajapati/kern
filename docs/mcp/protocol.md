@@ -76,7 +76,7 @@ Response:
     "prompts":{"listChanged":false},
     "streamableHttpCapabilities":{"sse":false}
   },
-  "serverInfo":{"name":"kern","version":"0.9.7"}
+  "serverInfo":{"name":"kern","version":"0.9.8"}
 }}
 ```
 
