@@ -64,8 +64,9 @@ func TestPathLockDifferentPathsDoNotBlock(t *testing.T) {
 func TestPathLockRoundTrip(t *testing.T) {
 	mu := PathLock(filepath.Join(t.TempDir(), "rt.json"))
 	mu.Lock()
+	pathHeld := mu != nil
 	mu.Unlock()
-	if !probeLock(t, mu, time.Second) {
+	if !pathHeld || !probeLock(t, mu, time.Second) {
 		t.Fatal("mutex not reacquirable after Unlock")
 	}
 }
