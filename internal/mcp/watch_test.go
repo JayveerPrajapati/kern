@@ -175,6 +175,7 @@ func TestWatchIntervalFromEnv(t *testing.T) {
 // one.
 func TestWatchElectionDefersToLockHolder(t *testing.T) {
 	s := newTestServer()
+	defer s.Close()
 	root := t.TempDir()
 	s.roots = []string{root}
 	holder, err := lock.Acquire(root, "index-watch")
@@ -186,6 +187,7 @@ func TestWatchElectionDefersToLockHolder(t *testing.T) {
 	// The rebuild must be skipped entirely: no index may be built for the
 	// root while another process owns the rebuild.
 	s.maybeRebuildIndexes()
+	s.watchWG.Wait()
 	if _, built := s.indexedRoots.Load(root); built {
 		t.Fatalf("rebuild ran despite the election lock being held by another process")
 	}
@@ -195,16 +197,12 @@ func TestWatchElectionDefersToLockHolder(t *testing.T) {
 // holder the watch rebuilds the root and records it as warmed.
 func TestWatchElectionRunsWhenFree(t *testing.T) {
 	s := newTestServer()
+	defer s.Close()
 	root := t.TempDir()
 	s.roots = []string{root}
 	s.maybeRebuildIndexes()
-	// Wait for the rebuild goroutine to finish.
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
-		if _, built := s.indexedRoots.Load(root); built {
-			return
-		}
-		time.Sleep(50 * time.Millisecond)
+	s.watchWG.Wait()
+	if _, built := s.indexedRoots.Load(root); !built {
+		t.Fatalf("rebuild did not run for root %s", root)
 	}
-	t.Fatalf("rebuild did not run for root %s", root)
 }

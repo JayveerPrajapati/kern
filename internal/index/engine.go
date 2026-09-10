@@ -1199,10 +1199,15 @@ func (ix *Index) addDispatchEdges() {
 }
 
 func dedupeSorted(in []string) []string {
-	sort.Strings(in)
-	out := in[:0]
-	for i, s := range in {
-		if i == 0 || s != in[i-1] {
+	if len(in) == 0 {
+		return nil
+	}
+	cp := make([]string, len(in))
+	copy(cp, in)
+	sort.Strings(cp)
+	out := cp[:0]
+	for i, s := range cp {
+		if i == 0 || s != cp[i-1] {
 			out = append(out, s)
 		}
 	}
