@@ -1,0 +1,10 @@
+Hey team, quick one from me.
+
+Could someone please take a look at my PR when they get a chance? No rush at
+all, totally understand everyone is busy. It touches internal/compress and
+internal/budget, and it adds a new function called FitCode that fits source
+code into a token budget while preserving function signatures. There's a
+unit test in budget_test.go covering the case where a signature must be
+kept. The build passes and all short tests are green.
+
+If you see anything wrong, just let me know. Thanks a million!

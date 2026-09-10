@@ -1,0 +1,73 @@
+package authsvc
+
+import (
+	"crypto/sha256"
+	"errors"
+	"time"
+)
+
+// User is a registered account.
+type User struct {
+	ID           string
+	Email        string
+	PasswordHash []byte
+}
+
+// UserStore is the persistence port for users.
+type UserStore interface {
+	FindByEmail(email string) (*User, error)
+	Save(u *User) error
+}
+
+// AuthService owns registration and login flows.
+type AuthService struct {
+	store    UserStore
+	tokenTTL time.Duration
+}
+
+// NewAuthService wires a store and a token lifetime into a service.
+func NewAuthService(store UserStore, ttl time.Duration) *AuthService {
+	return &AuthService{store: store, tokenTTL: ttl}
+}
+
+// Register creates a user and persists it.
+func (s *AuthService) Register(email, password string) (*User, error) {
+	if len(password) < 8 {
+		return nil, errors.New("password too short")
+	}
+	u := &User{ID: newID(), Email: email, PasswordHash: HashPassword(password)}
+	return u, s.store.Save(u)
+}
+
+// Login verifies credentials and returns a token.
+func (s *AuthService) Login(email, password string) (string, error) {
+	u, err := s.store.FindByEmail(email)
+	if err != nil {
+		return "", err
+	}
+	if !VerifyPassword(u, password) {
+		return "", errors.New("invalid credentials")
+	}
+	return IssueToken(u, s.tokenTTL), nil
+}
+
+// HashPassword derives a SHA-256 digest of a password.
+func HashPassword(password string) []byte {
+	h := sha256.Sum256([]byte(password))
+	return h[:]
+}
+
+// VerifyPassword compares a password against a stored hash.
+func VerifyPassword(u *User, password string) bool {
+	h := sha256.Sum256([]byte(password))
+	return string(h[:]) == string(u.PasswordHash)
+}
+
+// IssueToken issues a token for a user.
+func IssueToken(u *User, ttl time.Duration) string {
+	return "token:" + u.ID
+}
+
+func newID() string {
+	return "usr_" + time.Now().Format("20060102150405")
+}

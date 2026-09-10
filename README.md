@@ -27,7 +27,7 @@ Already installed? Run `kern doctor` to verify everything is wired.
 
 <br>
 
-**Phase-aware MCP routing (11 high-level tools by default, 104 in full mode) · 90+ CLI commands · 17 indexed languages (Go + Java resolved; 15 at heuristic precision — skipped under `--precision strict`; build with `-tags treesitter` for AST) · 100% local**
+**Phase-aware MCP routing (11 high-level tools by default, 121 in full mode) · 90+ CLI commands · 17 indexed languages (Go + Java resolved; 15 at heuristic precision — skipped under `--precision strict`; build with `-tags treesitter` for AST) · 100% local**
 
 </div>
 
@@ -345,7 +345,7 @@ codebase's stack is answered in one call.
    with WAL journaling and FTS5 full-text search for concurrent access.
 
 3. **Analysis** — 90+ CLI commands and the MCP tool catalog (11 high-level
-   tools by default, 104 in full mode) read the same index:
+   tools by default, 121 in full mode) read the same index:
    call graphs, blast radius, change impact, hotspots, dead code, path
    finding, architecture communities, coverage gaps — all dependency-free,
    all deterministic.
@@ -424,8 +424,14 @@ kern doctor [root]                              diagnostics report
 kern mask [file|-] [--names a,b,c]              mask secrets/PII locally
 kern sec [root] [--severity ...] [--max N] [--json]   security scan (exit 1 on errors)
 kern taint [root] [--file F] [--range a..b] [--generate]   taint-lite scan; --range scopes to files changed in a git range; --generate emits test scaffolds (Go + pytest)
-kern delete <symbol> [root] [--json]            safe-delete check (exit 1 when unsafe)
+kern delete <symbol> [root] [--apply] [--json]   safe-delete check (exit 1 when unsafe); --apply removes
+                                                the symbol + its test-only callers (backed up, rollback)
 kern rename <old> <new> [root] [--apply] [--json]    structural rename (AST-scoped)
+kern flight (list|show <task-id>|tasks|gc) [root]    replay agent flight records; tasks = trail linkage;
+                                                gc = retention (--keep-tasks N, --older-than 30d)
+kern runtime (status|drift) [root] [--json]      production intelligence: status = wired adapter + service
+                                                profiles (discovery wizard when none); drift = runtime
+                                                routes vs code routes; kern review --runtime overlays them
 kern guide                                          categorized tool usage guide (performance tiers)
 kern udiff <file-a> <file-b> [--out patch]          unified line diff between two files (pure Go)
 kern hook install / hook diff [range] / hook store [range]
@@ -528,12 +534,12 @@ another code-intelligence MCP. Three properties set it apart:
   enforces architecture boundaries; phase-aware routing keeps agents focused
   instead of overwhelmed — 4 phases (explore/plan/edit/verify), each with a
   focused shortlist. Set `KERN_MCP_PHASE=explore` to filter the advertised
-  tools; the full 104-tool catalog stays behind `KERN_MCP_FULL=1`.
+  tools; the full 121-tool catalog stays behind `KERN_MCP_FULL=1`.
   Most MCP servers expose capability with no policy layer.
 
 When running as an MCP server (`kern-mcp`), kern exposes an **11-tool
 high-level surface by default** (routed through `kern_meta`), with the full
-**toolset (104 tools)** behind `KERN_MCP_FULL=1` for advanced use — and
+**toolset (121 tools)** behind `KERN_MCP_FULL=1` for advanced use — and
 phase-aware routing (`KERN_MCP_PHASE=explore|plan|edit|verify`) as the
 default way to keep the advertised list focused. They map 1:1 to the CLI
 commands, so opencode, Claude Code, Codex, Cursor and 8 more agents get the
@@ -551,6 +557,25 @@ engine over MCP:
 <sub>Tools are available both over stdio (any MCP client) and the Streamable
 HTTP transport with an Origin allow-list (loopback only; empty origins are
 accepted for non-browser clients).</sub>
+
+**Optional TLS for the HTTP transport.** `kern-mcp --http` serves plain HTTP
+on loopback by default. To serve HTTPS instead, pass `--tls-cert` and
+`--tls-key` (PEM files), or set `KERN_MCP_TLS_CERT` and `KERN_MCP_TLS_KEY`
+(flags win, env fills the gap). TLS is optional and backward compatible: with
+no cert/key configured the server falls back to plain HTTP. A config with
+only one of the two files set is rejected — it never silently downgrades to
+plaintext. Example:
+
+```sh
+kern-mcp --http :8080 --tls-cert /path/to/cert.pem --tls-key /path/to/key.pem
+# or
+KERN_MCP_TLS_CERT=/path/to/cert.pem KERN_MCP_TLS_KEY=/path/to/key.pem kern-mcp --http :8080
+```
+
+The listener stays loopback-only even with TLS enabled; the loopback Origin
+check still applies. TLS here protects against loopback sniffing and is the
+building block for exposing the transport through a local TLS-terminating
+proxy.
 
 ### High-level analysis & workflow tools
 
@@ -620,7 +645,7 @@ code unless a human opt-in exists. The matrix:
 |---|---|---|
 | **CLI** (`kern ...`) | local process, no daemon, no listening socket | - |
 | **MCP stdio** (`kern mcp`) | local pipe; path args confined to cwd (**fail-closed**) | `KERN_MCP_PERMISSIVE=1` restores raw mode; `KERN_MCP_ROOTS` pins explicit roots |
-| **MCP HTTP** (`kern-mcp --http`) | **loopback-only** - a non-loopback bind is refused (kern-mcp exposes RCE-capable tools) | run behind your own authenticated proxy if remote access is required |
+| **MCP HTTP** (`kern-mcp --http`) | **loopback-only** - a non-loopback bind is refused (kern-mcp exposes RCE-capable tools) | run behind your own authenticated proxy if remote access is required; optional **TLS** via `--tls-cert/--tls-key` or `KERN_MCP_TLS_CERT`/`KERN_MCP_TLS_KEY` |
 | **MCP exec tools** (`kern_exec`/`kern_sandbox`/`kern_execute`) | **denied** unless allowlisted | `KERN_ALLOW_EXEC=1` or `KERN_TOOLS` allowlist |
 | **Script/sandbox isolation** | isolated by default; `no_isolate` ignored, network blocked | `KERN_ALLOW_NO_ISOLATE=1`, `KERN_ALLOW_NET=1` |
 | **kern-server (local mode)** | binds `127.0.0.1:8090` by default, **no auth** - localhost only | change `-addr` at your own risk; put a proxy in front for remote |
@@ -691,6 +716,36 @@ incrementally on staleness: unchanged files (mtime fast path, then
 content-hash check) reuse the previous index's per-file parse results
 instead of re-parsing. Rebuilds stay equivalent to full rebuilds; the
 flag only changes how the new index is computed.
+- **`.kern/config.json`** (optional) — one config path for operator knobs,
+  resolved as **env var > `.kern/config.json` > built-in default**, per
+  project root. JSON, stdlib-only, parsed once per root; a malformed file
+  prints one warning and falls back to defaults. `kern config` prints every
+  effective value and its source; `kern config --json` emits the same as JSON.
+  ```json
+  {
+    "llm": { "provider": "ollama", "model": "llama3.2",
+             "model_roles": {"planner": "gpt-4o"} },
+    "tokenizer": "estimator",
+    "cost_per_token": 0.00001,
+    "cache": { "archive_days": 7, "ttl_days": 30 },
+    "runtime": { "poll_interval": "30s", "prometheus_url": "", "otel_url": "",
+                 "k8s": { "api": "", "namespace": "" } },
+    "deploy": { "command": "", "timeout": "5m" },
+    "exec": { "risk": "MEDIUM" },
+    "mcp": { "roots": [] },
+    "webhooks": {},
+    "enterprise": { "projects": {} }
+  }
+  ```
+  Every key also honors its historical env var (`KERN_MODEL`, `KERN_EXEC_RISK`,
+  `KERN_WEBHOOKS`, `KERN_ROOTS`, …), which always wins. **Secrets and safety
+  toggles stay env-only** and are never read from the file: `KERN_AUTH_TOKEN`,
+  `KERN_GITHUB_TOKEN`, `KERN_K8S_TOKEN`, OpenAI/Anthropic/Gemini keys,
+  `KERN_ALLOW_*`, `KERN_MCP_PERMISSIVE`, `KERN_MCP_NO_CONFINE`, `KERN_TOOLS`,
+  `KERN_MCP_FULL/PHASE/SINGLE_TOOL/HIGH_LEVEL_ONLY/AUDIT_DIR`,
+  `KERN_MCP_TLS_CERT`/`KERN_MCP_TLS_KEY` (optional TLS for the HTTP MCP transport),
+  `KERN_ALLOW_LOOPBACK_FETCH`, `KERN_INDEX_SERIAL`, `KERN_MCP_WATCH*`, sandbox
+  isolation knobs, and installer vars.
 What it skips out of the box: dependency/build/cache directories
 (`node_modules`, `vendor`, `dist`, `target`, `.venv`, …), anything in
 `.gitignore` (root and nested), generated files (path conventions or a
@@ -728,7 +783,7 @@ native hooks for agents whose hook APIs allow it:
 | **Codex** | `[mcp_servers.kern]` in `~/.codex/config.toml` | — (no output-rewrite hook API) |
 | **JSON adapters** | `continue`, `windsurf`, `zed`, `vscode`, `antigravity`, `qwen`, `qoder`, `kiro`, `copilot` (VS Code), `copilot-cli` | — (no hook API) |
 
-All agents receive the same MCP surface (11 high-level tools by default, 104
+All agents receive the same MCP surface (11 high-level tools by default, 121
 in full mode, phase-filtered via `KERN_MCP_PHASE`) and the same `AGENTS.md` rules. Output
 compression + session memory run natively where the platform's hook API allows
 in-place output replacement (opencode, Claude Code, Gemini); agents without

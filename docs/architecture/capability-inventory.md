@@ -17,7 +17,7 @@ For each major capability: package / CLI / MCP / API / inputs / outputs / events
 | Sandbox/exec | `sandbox`+`execution` | `kern exec` | yes | /v1/execute |
 | Verification | `verification` | `kern verify` | yes | /v1/verify |
 | Loop / autonomy | `loop` | `kern loop`/`kern do` | yes | /v1/loop |
-| Agent runtime | `agent`+`agents` | `kern agent` | yes | /v1/agents |
+| Agent runtime | `agent`+`agents` | `kern agent-coordination`, `kern agent-fingerprint`, `kern agent-role-rbac` (MCP aliases; no `kern agent(s)` CLI) | yes | /v1/agents |
 | Incident | `incident` | `kern incident` | yes | /v1/incidents |
 | Modernization | `modernization` | `kern modernize` | yes | /v1/modernize |
 | Runtime correl. | `runtime` | — | yes | /v1/correlate |

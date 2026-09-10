@@ -1,0 +1,60 @@
+{
+  "version": 1,
+  "tokenizer": "internal/tokenize.Count (deterministic offline BPE; stdlib-only)",
+  "measured_on": "2026-09-09",
+  "tier_definitions": {
+    "tier1": "Must survive: errors, failure messages, stack-frame payloads, unique technical identifiers, paths, config values.",
+    "tier2": "Should survive: warnings, unique operational events.",
+    "tier3": "Watch: structural markers whose loss is acceptable (e.g. goroutine headers) — retained for regression visibility only."
+  },
+  "fixtures": [
+    {
+      "id": "build-failure",
+      "path": "logs/build-failure.log.txt",
+      "kind": "log",
+      "tokens_in": 119,
+      "tiers": {
+        "tier1": ["undefined: context", "undefined: WithTimeout", "undefined: pool", "runner.go:42", "make: *** [build] Error 2"],
+        "tier2": [],
+        "tier3": ["goroutine 42"]
+      },
+      "gates": { "min_tier1_retention": 0.95, "min_savings": 0.15 }
+    },
+    {
+      "id": "chatty-server",
+      "path": "logs/chatty-server.log.txt",
+      "kind": "log",
+      "tokens_in": 180,
+      "tiers": {
+        "tier1": ["failed to dial redis", "circuit breaker OPEN"],
+        "tier2": ["slow query took 512ms"],
+        "tier3": ["config.yml"]
+      },
+      "gates": { "min_tier1_retention": 0.95, "min_savings": 0.15 }
+    },
+    {
+      "id": "verbose-prompt",
+      "path": "prompts/verbose-prompt.md.txt",
+      "kind": "prompt",
+      "tokens_in": 185,
+      "tiers": {
+        "tier1": ["runner.go:42", "config.yml", "max_conns=20"],
+        "tier2": ["goroutine 12"],
+        "tier3": []
+      },
+      "gates": { "min_tier1_retention": 0.95, "min_savings": 0.03 }
+    },
+    {
+      "id": "code-review",
+      "path": "prompts/code-review-request.md.txt",
+      "kind": "prompt",
+      "tokens_in": 129,
+      "tiers": {
+        "tier1": ["FitCode", "budget_test.go", "internal/compress", "internal/budget"],
+        "tier2": [],
+        "tier3": []
+      },
+      "gates": { "min_tier1_retention": 0.95, "min_savings": 0.03 }
+    }
+  ]
+}

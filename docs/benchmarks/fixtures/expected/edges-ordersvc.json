@@ -1,0 +1,12 @@
+{
+  "fixture": "code/ordersvc.go.txt",
+  "kind": "code",
+  "edge_count": 4,
+  "edges": [
+    { "from": "PlaceOrder", "to": "ValidateOrder" },
+    { "from": "PlaceOrder", "to": "ApplyDiscount" },
+    { "from": "PlaceOrder", "to": "OrderRepository.Save" },
+    { "from": "ByCustomer", "to": "OrderRepository.ByCustomer" }
+  ],
+  "derivation": "Direct call sites hand-audited in the fixture source on 2026-09-09. Stdlib calls (errors.New) are excluded. Interface-method calls are qualified with the interface type. An edge counts as retained when both endpoint names survive compression."
+}

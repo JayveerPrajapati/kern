@@ -1,0 +1,19 @@
+Hi there! I hope you're doing well today! :)
+
+I was just wondering — and please don't feel any pressure at all — if you
+might be able to help me out with a small thing when you have a moment.
+
+So basically, the issue is that my service is returning 500 errors and I'm
+not really sure what's going on. I think it might be related to the database
+pool, but honestly I could be totally wrong about that. If you have any
+thoughts, that would be amazing!
+
+Anyway, here's the stack trace from the logs:
+
+goroutine 12 [running]:
+  internal/example.(*Runner).Run(0xc0000b8000)
+  	/Users/dev/kern/internal/example/runner.go:42 +0x1a8
+
+And the config I'm using is at /etc/kern/config.yml with max_conns=20.
+
+Thanks so much in advance!! You're the best! 🙏

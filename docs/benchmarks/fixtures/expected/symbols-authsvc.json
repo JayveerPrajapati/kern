@@ -1,0 +1,14 @@
+{
+  "fixture": "code/authsvc.go.txt",
+  "kind": "code",
+  "package": "authsvc",
+  "symbols": {
+    "types": ["User", "UserStore", "AuthService"],
+    "functions": ["NewAuthService", "Register", "Login", "HashPassword", "VerifyPassword", "IssueToken"],
+    "interface_methods": ["FindByEmail", "Save"]
+  },
+  "symbol_count": 11,
+  "tokens_in": 437,
+  "note": "symbol_count is the number of unique names (types + functions + methods + interface methods, deduplicated). Unexported helpers (e.g. newID) are excluded from recall but appear in the edge list.",
+  "derivation": "Hand-audited against the fixture source on 2026-09-09. Every top-level type, top-level function, method, and interface method counts once."
+}

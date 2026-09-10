@@ -1,0 +1,14 @@
+{
+  "fixture": "code/ordersvc.go.txt",
+  "kind": "code",
+  "package": "ordersvc",
+  "symbols": {
+    "types": ["Order", "OrderLine", "OrderRepository", "OrderService"],
+    "functions": ["NewOrderService", "PlaceOrder", "ValidateOrder", "ApplyDiscount", "ByCustomer"],
+    "interface_methods": ["Save", "ByID", "ByCustomer"]
+  },
+  "symbol_count": 11,
+  "tokens_in": 475,
+  "note": "symbol_count is the number of unique names (types + functions + methods + interface methods, deduplicated). Unexported helpers are excluded from recall but may appear in the edge list.",
+  "derivation": "Hand-audited against the fixture source on 2026-09-09. Every top-level type, top-level function, method, and interface method counts once."
+}
