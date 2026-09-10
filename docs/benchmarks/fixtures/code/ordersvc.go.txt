@@ -1,0 +1,82 @@
+package ordersvc
+
+import (
+	"context"
+	"errors"
+	"time"
+)
+
+// Order is the core domain entity for the ordering service.
+type Order struct {
+	ID        string
+	Customer  string
+	Lines     []OrderLine
+	CreatedAt time.Time
+}
+
+// OrderLine is a single line item on an order.
+type OrderLine struct {
+	SKU      string
+	Quantity int
+	UnitCost int
+}
+
+// OrderRepository persists orders. It is the port for the storage adapter.
+type OrderRepository interface {
+	Save(ctx context.Context, o *Order) error
+	ByID(ctx context.Context, id string) (*Order, error)
+	ByCustomer(ctx context.Context, customer string) ([]*Order, error)
+}
+
+// OrderService applies business rules on top of the repository.
+type OrderService struct {
+	repo OrderRepository
+}
+
+// NewOrderService wires a repository into a service.
+func NewOrderService(repo OrderRepository) *OrderService {
+	return &OrderService{repo: repo}
+}
+
+// PlaceOrder validates, discounts, and persists an order.
+func (s *OrderService) PlaceOrder(ctx context.Context, o *Order) error {
+	if err := ValidateOrder(o); err != nil {
+		return err
+	}
+	ApplyDiscount(o)
+	return s.repo.Save(ctx, o)
+}
+
+// ValidateOrder rejects nil orders, empty orders, and non-positive quantities.
+func ValidateOrder(o *Order) error {
+	if o == nil {
+		return errors.New("order is nil")
+	}
+	if len(o.Lines) == 0 {
+		return errors.New("order has no lines")
+	}
+	for _, line := range o.Lines {
+		if line.Quantity <= 0 {
+			return errors.New("order has non-positive quantity")
+		}
+	}
+	return nil
+}
+
+// ApplyDiscount applies a 10% discount to orders over $100.
+func ApplyDiscount(o *Order) {
+	total := 0
+	for _, line := range o.Lines {
+		total += line.Quantity * line.UnitCost
+	}
+	if total > 100 {
+		for i := range o.Lines {
+			o.Lines[i].UnitCost = o.Lines[i].UnitCost * 9 / 10
+		}
+	}
+}
+
+// ByCustomer fetches all orders placed by a customer.
+func (s *OrderService) ByCustomer(ctx context.Context, customer string) ([]*Order, error) {
+	return s.repo.ByCustomer(ctx, customer)
+}

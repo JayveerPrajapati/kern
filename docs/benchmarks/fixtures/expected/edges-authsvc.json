@@ -1,0 +1,14 @@
+{
+  "fixture": "code/authsvc.go.txt",
+  "kind": "code",
+  "edge_count": 6,
+  "edges": [
+    { "from": "Register", "to": "HashPassword" },
+    { "from": "Register", "to": "newID" },
+    { "from": "Register", "to": "UserStore.Save" },
+    { "from": "Login", "to": "UserStore.FindByEmail" },
+    { "from": "Login", "to": "VerifyPassword" },
+    { "from": "Login", "to": "IssueToken" }
+  ],
+  "derivation": "Direct call sites hand-audited in the fixture source on 2026-09-09. Stdlib calls (errors.New, sha256.Sum256, time.Now) are excluded. Interface-method calls are qualified with the interface type. Unexported helpers (newID) are included here even though they are excluded from symbol recall. An edge counts as retained when both endpoint names survive compression."
+}

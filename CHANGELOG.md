@@ -5,6 +5,50 @@ All notable changes to kern are documented here. Format follows
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+- **Review Packs, Council & Diff Gate (silent-orchestrator P2)**:
+- `kern review-pack` (KERN-P2-001): immutable deterministic review packet — commit + dirty-state hash, task, planner-selected evidence with reasons, relevant symbols with call paths, changed code, tests, project constraints, observed claims, unverified assumptions, and exact per-section token counts. Pack sealed with a content hash (GeneratedAt excluded as provenance metadata); identical builds over identical state produce byte-identical JSON. `internal/reviewpack`.
+- `kern review-consensus` (KERN-P2-002): normalizes review packs into a consensus/divergence report — consensus, divergence, minority positions, supporting evidence, unsupported claims, assumptions, decision drivers, and next verification — without treating majority vote as truth. Claims match across packs by canonicalized statement; identical inputs yield identical reports. `internal/council`.
+- `kern diff-gate` (KERN-P2-003): deterministic diff gate over the working-tree diff — 8 checks (formatting, vulnerabilities, secrets via the blueprint G3 adapter, tests via G8, schema drift with a `.kern/diff-gate/tool-schemas.json` baseline, unsafe execution additions, missing changelog, MCP catalog↔plugin drift). Advisory by default (exit 0 on warnings), `--blocking` for protected CI, `--timeout` runtime cap, structured JSON verdicts; new blueprint gates G30–G35.
+- **Index & Code Intelligence**:
+- Parser confidence scores (schema v13): every parsed symbol, call edge and import relationship now carries a HIGH/MEDIUM/LOW confidence rating from the parser (explicit declarations and direct calls = HIGH; type-inference-resolved calls and regex-extracted edges = MEDIUM; regex-derived entry points and virtual dispatch edges = LOW). `Index.Calls` becomes `[]CallEdge{Target, Confidence}`, `Pkg.Imports`/`ImportsByFile` become `[]ImportEdge{Path, Confidence}`, and graph exports surface per-edge confidence (EXTRACTED/INFERRED/AMBIGUOUS). Callers and the `CallSites`/`CallsFor` string views are preserved for compatibility; the JSON and SQLite stores persist the scores (SQLite gains a `calls.confidence` column with a v13 migration), and old v12 caches rebuild automatically.
+
+## [0.9.8] - 2026-09-09
+
+- **Index & Code Intelligence**:
+  - Incremental re-index: `index.Update` re-parses only changed files while reusing the prior build's per-file results, with a `Update`-specific merge that keeps every derived map consistent (identity, freshness, precision, communities).
+  - Resource-adaptive tuning: index builds now size worker pools, file caps and batch sizes from detected CPU count and RAM, with `KERN_INDEX_*` overrides; large-memory machines index faster without OOM risk.
+  - **Dead-code lens trust (two fixes)**:
+    - Constructor-inferred receiver edges (`x := New(); x.M()` recorded as `New.M`) no longer hide live callers: `kern dead` / `kern delete` resolve them via same-file return-type inference, multi-value assigns, merge-time callee rewriting, and alias-merged delete checks. All 8 symbols a previous audit flagged "safe to delete" were confirmed live.
+    - Field-access receiver chains (`a.taskSvc.Deploy(...)`): the index now records struct field types (`Pkg.StructFields`, schema v12) and resolves receiver-field calls to the field's type at merge time — `kern dead` no longer flags live methods as "uncertain", while foreign/undeclared field types are never forged into canonical callers.
+  - Blast radius links import-qualified cross-package callees (e.g. `db.Do` → local symbol) in impact/what-if/context analysis, closing the cross-package under-reporting gap.
+  - O(n²) fileMap rebuilds eliminated in Bridges/Architecture/Coverage/Communities (hoisted per query).
+  - Bounded reorder buffer in parallel builds (memory capped at 1024 pending results, byte-identical output) and asynchronous index saves (persisted copy always complete at process exit).
+- **Autonomous Loop & Verification**:
+  - The coder is now grounded: `kern do` assembles plan-named files + blast-radius context into the coder prompt, applies per-file search/replace edits, and feeds apply failures back with the actual file head.
+  - Polyglot verification: test/lint/build commands resolve from detected frameworks (Go/Node/Rust/Python) with `.kern/config.json` overrides, replacing the hard-coded `go build`/`go test`.
+  - `kern_do` MCP tool (catalog 105): the closed loop is now reachable from MCP (default L2, sandboxed).
+- **Governance & Safety (fail-closed hardening)**:
+  - Swallowed approval/audit write errors surfaced in web handlers, governance store and audit log; approval/audit stores fail closed on corrupt files (never silently-empty).
+  - CI: new full (non-short) E2E job for internal/{app,cicd,mcp} + blueprint gate; blueprint gates now FAIL (not skip) when the kern binary is absent (`KERN_REQUIRE_BINARY=1`).
+  - `kern onboard` exits non-zero on register/index failure; simulated loop stage outcomes are labeled `simulated:`; library panic paths on tool routes return errors instead; lock/unlock errors surface; ignored `ix.Save()` results handled loudly; audit log gains a 5000-entry retention cap with O(1) governance metrics.
+  - `GET /v1/incidents` list route added (the Python SDK's `incidents()` previously 404'd).
+- **MCP & CLI**:
+  - `kern_risk` MCP tool added — the missing impact/what-if sibling (catalog 106).
+  - Flight recorder reader: `kern flight list` / `kern flight show <task-id>` replay every stage of an autonomous run; `kern_flight` MCP tool (catalog 107).
+  - HTTP daemon fix: the `kern mcp --http` path now registers the default agent (governed tools were denied); daemon E2E proves flat-memory multi-client operation with shared-index leadership election (flock, per-root).
+  - `kern doctor` gains 4 checks: config-file validity, cache corruption (zero-byte JSON), binary version, and full `KERN_*` env echo with validation.
+  - Niche MCP tools (`kern_evidence_anchor`, `kern_stream`) compact by default with JSON behind `format=json`; all remaining bare `fatal("%v")` calls labeled with their command.
+- **Performance**:
+  - Session index rebuilds are stale-while-revalidate: one caller rebuilds, concurrent callers are served the previous index immediately (single-flight, -race clean).
+  - Enterprise mode: per-project single-flight builds off the org-wide mutex; `serveOrgArchitecture` answers from cached apps and async-warms up to 2 builds concurrently (no cold-start OOM).
+- **Evidence & Trust**:
+  - `kern evidence explain` renders plain-language "what this proves" summaries; `kern evidence verify --url` verifies bundles without cloning (sealed fetch + optional local chain replay).
+  - CI action exports an evidence bundle and appends a tamper-sealed Evidence section to PR comments.
+- **SDKs & Docs**:
+  - TypeScript and Go SDKs reach parity with Python: `approvalsPending()`, `incidents()`, `incident(id)`, `eventsStream()`.
+  - ADR-0002 through ADR-0005 locked in: per-repo `.kern/` storage identity, name-qualified symbol identity, external-agent-first coder contract, `internal/governance` as the long-term policy core.
+- **Tests & Tooling**:
+  - Blueprint CLI coverage 0 → 6 tests; real cross-process flock tests (PID-liveness for election); twin/data + twin/infra coverage (incl. a Helm chart dispatch-order bug fix); test-first contracts pinned for `parseFlags` and `dispatchCommand`.
 
 ## [0.9.7] - 2026-09-07
 

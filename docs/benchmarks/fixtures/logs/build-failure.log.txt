@@ -1,0 +1,12 @@
+$ go build ./...
+# github.com/JayveerPrajapati/kern/internal/example
+internal/example/runner.go:42:11: undefined: context
+internal/example/runner.go:44:9: undefined: WithTimeout
+internal/example/db.go:18:5: undefined: pool
+internal/example/runner.go:42:11: undefined: context
+goroutine 42 [running]:
+  internal/example.(*Runner).Run(0xc0000b8000)
+  	/Users/dev/kern/internal/example/runner.go:42 +0x1a8
+  main.main()
+  	/Users/dev/kern/cmd/kern/main.go:120 +0x4e
+make: *** [build] Error 2

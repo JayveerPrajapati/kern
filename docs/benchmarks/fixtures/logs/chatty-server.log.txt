@@ -1,0 +1,11 @@
+2026-09-09T10:00:01Z INFO  starting server on :8080
+2026-09-09T10:00:01Z INFO  loaded config from /etc/kern/config.yml
+2026-09-09T10:00:02Z INFO  request GET /health 200 1ms
+2026-09-09T10:00:02Z INFO  request GET /health 200 1ms
+2026-09-09T10:00:03Z INFO  request GET /health 200 1ms
+2026-09-09T10:00:03Z WARN  slow query took 512ms SELECT * FROM orders WHERE customer_id = 42
+2026-09-09T10:00:04Z ERROR failed to dial redis: dial tcp 127.0.0.1:6379: connection refused
+2026-09-09T10:00:04Z INFO  retrying redis connection in 1s
+2026-09-09T10:00:05Z INFO  request GET /health 200 1ms
+2026-09-09T10:00:05Z INFO  request POST /api/v1/orders 201 23ms
+2026-09-09T10:00:06Z ERROR redis unavailable, failing open: circuit breaker OPEN

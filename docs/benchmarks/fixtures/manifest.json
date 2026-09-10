@@ -1,0 +1,60 @@
+{
+  "suite": "semantic-retention",
+  "version": "1.0.0",
+  "purpose": "Measure how much meaning survives kern's context optimization: retention, not just reduction.",
+  "dimensions": ["context_window_efficiency", "symbol_recall", "call_graph_fidelity", "token_savings"],
+  "tokenizer": "internal/tokenize.Count",
+  "operators": {
+    "log": "internal/compress.CompressLog",
+    "prompt": "internal/compress.CompressPrompt",
+    "code": "internal/budget.FitCode",
+    "lossless": "internal/budget.FitLossless",
+    "terse": "internal/terse.Compress"
+  },
+  "fixtures": [
+    {
+      "id": "ordersvc",
+      "path": "code/ordersvc.go.txt",
+      "kind": "code",
+      "dimensions": ["symbol_recall", "call_graph_fidelity"],
+      "expected_symbols": "expected/symbols-ordersvc.json",
+      "expected_edges": "expected/edges-ordersvc.json"
+    },
+    {
+      "id": "authsvc",
+      "path": "code/authsvc.go.txt",
+      "kind": "code",
+      "dimensions": ["symbol_recall", "call_graph_fidelity"],
+      "expected_symbols": "expected/symbols-authsvc.json",
+      "expected_edges": "expected/edges-authsvc.json"
+    },
+    {
+      "id": "build-failure",
+      "path": "logs/build-failure.log.txt",
+      "kind": "log",
+      "dimensions": ["context_window_efficiency", "token_savings"],
+      "expected_retention": "expected/retention.json"
+    },
+    {
+      "id": "chatty-server",
+      "path": "logs/chatty-server.log.txt",
+      "kind": "log",
+      "dimensions": ["context_window_efficiency", "token_savings"],
+      "expected_retention": "expected/retention.json"
+    },
+    {
+      "id": "verbose-prompt",
+      "path": "prompts/verbose-prompt.md.txt",
+      "kind": "prompt",
+      "dimensions": ["context_window_efficiency", "token_savings"],
+      "expected_retention": "expected/retention.json"
+    },
+    {
+      "id": "code-review",
+      "path": "prompts/code-review-request.md.txt",
+      "kind": "prompt",
+      "dimensions": ["context_window_efficiency", "token_savings"],
+      "expected_retention": "expected/retention.json"
+    }
+  ]
+}

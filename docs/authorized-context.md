@@ -186,6 +186,20 @@ built per call — the MCP server holds no global firewall state — and an
 unregistered agent is denied at the authentication stage by the primitive
 itself.
 
+### Phase filtering is advertisement-only, not a security boundary
+
+`KERN_MCP_PHASE` (and the default minimal tool surface) filters the
+`tools/list` **advertisement** only: it decides which tool names an agent
+sees in the catalog. It does **not** restrict what can actually be invoked.
+Every `tools/call` request is validated against the **full catalog** plus the
+`KERN_TOOLS` allowlist, and the check is fail-closed — a tool not explicitly
+allowed by `KERN_TOOLS` is refused regardless of which phase surface
+advertised it. Phase filtering is therefore a UX / context-management
+mechanism (keep the advertised surface small so agents are not overwhelmed by
+the catalog), **not** a security boundary. The enforcement boundary for what
+may be called is `KERN_TOOLS`; treat any security expectation about phase
+filtering as out of scope.
+
 ## `kern_meta` routing
 
 `kern_meta`'s NL router (`internal/mcp/handlers_highlevel.go`) classifies

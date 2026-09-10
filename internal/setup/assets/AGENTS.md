@@ -8,7 +8,7 @@ prebuilt symbol index instead of re-reading files.
 
 ## The kern_meta tool (preferred entry point)
 
-Instead of choosing among 104 individual `kern_*` tools, call the single
+Instead of choosing among 121 individual `kern_*` tools, call the single
 **`kern_meta`** tool with a natural-language request. Kern classifies the
 request and runs the right tool(s) internally — you get the same result
 without having to know which tool fits. Think in phases: explore (read/discover),
@@ -65,11 +65,18 @@ is to use kern directly.
    first. Only fall back to `read` if you need the verbatim full text (rare).
 2. **Do I need to list/explore a repo?** → call `kern_project_map`, NOT `glob`.
 3. **Do I need to grep for a pattern?** → call `kern_ast_search` (code) or
-   `kern_doc_search` (docs), NOT `grep`.
+   `kern_doc_search` (docs), NOT `grep`. Note: on hosts that route grep
+   transparently (opencode), the built-in `grep` IS kern's AST symbol search —
+   patterns are symbol queries, NOT regex. For regex grep use bash
+   `grep -rn <pattern>` (or raw=true) or the kern CLI `kern ast <pattern>`.
 4. **Do I need to understand a symbol (callers/callees)?** → call
    `kern_code_graph` or `kern_explore`, NOT `read` + `grep`.
 5. **Do I need to build/test/lint?** → call `kern_run_build`, NOT `bash`.
-6. **Do I need to run a command?** → call `kern_exec`, NOT `bash`.
+6. **Do I need to run a command?** → call `kern_exec`, NOT `bash`. Note:
+   on macOS (no unprivileged-userns network isolation) `kern_exec` FAILS
+   CLOSED by design; the refusal names the override —
+   `KERN_ALLOW_UNISOLATED=1` (or `KERN_ALLOW_NET=1`). Expect it, don't
+   retry blindly.
 7. **Do I need to search the web/docs?** → call `kern_doc_fetch` then
    `kern_doc_search`, NOT `webfetch`/`websearch`. Pre-index docs with
    `kern_doc_index` (optional, for semantic search via local Ollama).
@@ -147,7 +154,7 @@ re-explore or re-parse files that the index already covers.
 
 ## Full capability catalog
 
-`kern` ships 104 `kern_*` MCP tools across these domains. If you are unsure
+`kern` ships 121 `kern_*` MCP tools across these domains. If you are unsure
 which tool fits, call `kern_usage_guide` (categorized guide with performance
 tiers) or `kern_agents` (specialist roster) first to enumerate options. Reach
 into these groups for the "full capabilities" — do not limit yourself to the
