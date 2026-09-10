@@ -170,7 +170,10 @@ func ParsePrometheus(data []byte) ([]Event, error) {
 }
 
 // parsePrometheusLine parses a single metric line. Returns ok=false for
-// malformed lines (no panic).
+// malformed lines (no panic). Every label of the metric is recorded
+// verbatim in Attributes (route/path/method/status/...), so runtime-aware
+// consumers (drift detection, review overlays) can aggregate at
+// route granularity without vendor coupling.
 func parsePrometheusLine(line string) (Event, bool) {
 	fields := strings.Fields(line)
 	if len(fields) < 2 {
@@ -180,11 +183,13 @@ func parsePrometheusLine(line string) (Event, bool) {
 
 	name := head
 	service := ""
+	var attrs map[string]string
 	if i := strings.Index(head, "{"); i >= 0 {
 		name = head[:i]
 		if m := promServiceRe.FindStringSubmatch(head); len(m) == 2 {
 			service = m[1]
 		}
+		attrs = promLabels(head[i+1 : len(head)-1])
 	}
 
 	ts := time.Now()
@@ -195,13 +200,48 @@ func parsePrometheusLine(line string) (Event, bool) {
 	}
 
 	ev := Event{
-		Type:      EventMetric,
-		Service:   service,
-		Severity:  "info",
-		Message:   name + "=" + valStr,
-		Timestamp: ts,
+		Type:       EventMetric,
+		Service:    service,
+		Severity:   "info",
+		Message:    name + "=" + valStr,
+		Timestamp:  ts,
+		Attributes: attrs,
 	}
 	return ev, true
+}
+
+// promLabels parses the label set between the braces of a Prometheus metric
+// ("route=\"/api/x\",method=\"GET\"") into a map. Values are unquoted;
+// labels without a value (bool metrics) map to "1" (Prometheus semantics).
+// Malformed fragments are skipped rather than failing the whole line.
+func promLabels(s string) map[string]string {
+	if strings.TrimSpace(s) == "" {
+		return nil
+	}
+	out := map[string]string{}
+	for _, part := range strings.Split(s, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		kv := strings.SplitN(part, "=", 2)
+		key := strings.TrimSpace(kv[0])
+		if key == "" {
+			continue
+		}
+		val := "1" // bool metric labels have no value (Prometheus semantics)
+		if len(kv) == 2 {
+			val = strings.TrimSpace(kv[1])
+			if len(val) >= 2 && val[0] == '"' && val[len(val)-1] == '"' {
+				val = val[1 : len(val)-1]
+			}
+		}
+		out[key] = val
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // PrometheusSource parses a Prometheus text-exposition payload into a Source.

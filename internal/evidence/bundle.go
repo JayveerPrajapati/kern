@@ -9,18 +9,22 @@
 // persisted audit chain (the authorization log) and a SHA-256 hash of the
 // whole bundle for tamper evidence.
 //
-// Tamper-evidence is SHA-256 hash-chaining, NOT cryptographic signing.
-// Key-based signing (x509/Ed25519) is a documented future item.
+// Tamper-evidence is SHA-256 hash-chaining plus an optional ed25519 project
+// signature (C4 key identity): the signature section vouches for the seal
+// with the project key under <root>/.kern/keys/, and the algorithm field
+// leaves the seam for external PKI (sigstore / GitHub attestation).
 package evidence
 
 import (
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/JayveerPrajapati/kern/internal/governance"
@@ -48,12 +52,33 @@ type Bundle struct {
 	Freshness     *FreshnessSection     `json:"freshness"`
 	Lineage       *LineageSection       `json:"lineage,omitempty"`
 
+	// Trust chain (optional): claim-to-evidence links for the claims this
+	// bundle vouches for. Absent (nil) for bundles without claim evidence.
+	TrustChain *TrustChainSection `json:"trust_chain,omitempty"`
+
 	// Audit chain snapshot (the authorization log):
 	AuditTrail     []AuditEntrySnapshot `json:"audit_trail"`
 	AuditChainHash string               `json:"audit_chain_hash"` // last hash in the chain
 
 	// Tamper-evidence:
 	BundleHash string `json:"bundle_hash"` // sha256 of everything above
+
+	// Key identity (C4): optional ed25519 signature over the canonical JSON
+	// of the bundle with the signature section cleared. Absent for
+	// digest-only bundles (verification then rests on the seal alone).
+	Signature *SignatureSection `json:"signature,omitempty"`
+}
+
+// SignatureSection binds a bundle to the project key that produced it. The
+// Algorithm field is the seam for future external PKI (sigstore / GitHub
+// attestation): only "ed25519" is implemented today. PublicKey is embedded
+// so verification is self-contained (no key distribution); the fingerprint
+// is the human trust anchor a reviewer checks against an out-of-band key.
+type SignatureSection struct {
+	Algorithm      string `json:"algorithm"`
+	KeyFingerprint string `json:"key_fingerprint"`
+	PublicKey      string `json:"public_key"` // base64 ed25519 public key
+	Value          string `json:"value"`      // base64 ed25519 signature
 }
 
 // AuthorizationSection captures an authorization decision and its auditable
@@ -265,7 +290,75 @@ func (b *Bundle) Verify() error {
 	if got := computeBundleHash(b); got != b.BundleHash {
 		return errors.New("evidence: bundle hash mismatch — content tampered or bundle_hash altered")
 	}
+	// Key identity (C4): when the bundle carries a signature, it must verify
+	// against the embedded public key over the canonical bundle bytes.
+	// Digest-only bundles (no signature section) are unchanged.
+	if b.Signature != nil {
+		if b.Signature.Algorithm != "ed25519" {
+			return fmt.Errorf("evidence: unsupported signature algorithm %q", b.Signature.Algorithm)
+		}
+		if b.Signature.Value == "" || b.Signature.PublicKey == "" {
+			return errors.New("evidence: signature section is incomplete")
+		}
+		pub, err := base64.StdEncoding.DecodeString(b.Signature.PublicKey)
+		if err != nil {
+			return fmt.Errorf("evidence: decode signature public key: %w", err)
+		}
+		sig, err := base64.StdEncoding.DecodeString(b.Signature.Value)
+		if err != nil {
+			return fmt.Errorf("evidence: decode signature: %w", err)
+		}
+		if !VerifySignature(pub, canonicalSignedPayload(b), sig) {
+			return errors.New("evidence: signature mismatch — bundle modified after signing or signature forged")
+		}
+		if b.Signature.KeyFingerprint != fingerprint(pub) {
+			return errors.New("evidence: key fingerprint does not match the embedded public key")
+		}
+	}
+	// Trust chain (optional): when the bundle carries one, it must be
+	// internally consistent (every link resolves to a listed claim's
+	// evidence digest).
+	if b.TrustChain != nil {
+		if err := VerifyTrustChain(b.TrustChain); err != nil {
+			return err
+		}
+	}
 	return nil
+}
+
+// Sign binds the bundle to the project key: the payload is the canonical
+// JSON of the bundle with the signature section cleared (so verification is
+// deterministic), and the resulting signature is embedded in the section.
+// Signing never re-seals: the BundleHash was computed at Generate time and
+// is part of the signed payload, so the signature also vouches for the seal.
+func (b *Bundle) Sign(kp *KeyPair) error {
+	if b == nil || kp == nil {
+		return errors.New("evidence: nil bundle or key")
+	}
+	payload := canonicalSignedPayload(b)
+	sig := kp.Sign(payload)
+	b.Signature = &SignatureSection{
+		Algorithm:      "ed25519",
+		KeyFingerprint: kp.Fingerprint,
+		PublicKey:      base64.StdEncoding.EncodeToString(kp.PublicKey),
+		Value:          base64.StdEncoding.EncodeToString(sig),
+	}
+	return nil
+}
+
+// canonicalSignedPayload marshals the bundle with the signature section
+// cleared — the deterministic bytes a signature covers.
+func canonicalSignedPayload(b *Bundle) []byte {
+	if b == nil {
+		return nil
+	}
+	cpy := *b
+	cpy.Signature = nil
+	data, err := json.Marshal(&cpy)
+	if err != nil {
+		return nil
+	}
+	return data
 }
 
 // Parse decodes a bundle from its JSON wire form.
@@ -278,15 +371,19 @@ func Parse(data []byte) (*Bundle, error) {
 }
 
 // computeBundleHash is the bundle's tamper-evidence seal: SHA-256 over the
-// canonical JSON of the bundle with BundleHash cleared. Marshal output is
-// deterministic (the bundle contains no maps, so no map-iteration ordering),
-// which makes the hash reproducible across runs and verifiers.
+// canonical JSON of the bundle with BundleHash and the Signature section
+// cleared. The signature is added AFTER sealing, so it must not be part of
+// the hash it vouches for — the signed payload (canonicalSignedPayload)
+// covers the same bytes plus the intact BundleHash. Marshal output is
+// deterministic (the bundle contains no maps, so no map-iteration
+// ordering), which makes the hash reproducible across runs and verifiers.
 func computeBundleHash(b *Bundle) string {
 	if b == nil {
 		return ""
 	}
 	cpy := *b
 	cpy.BundleHash = ""
+	cpy.Signature = nil
 	data, err := json.Marshal(&cpy)
 	if err != nil {
 		// Cannot happen for this type set (no unsupported values); fail the
@@ -309,4 +406,71 @@ func newBundleID() string {
 	b[6] = (b[6] & 0x0f) | 0x40 // version 4
 	b[8] = (b[8] & 0x3f) | 0x80 // variant 10
 	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
+}
+
+// Explain renders the bundle in plain language — what claims it seals, who it
+// was issued to, what the pillars say, and the one-liner a reviewer runs to
+// verify it (C4 reviewer-side trust). Nil sections are skipped defensively.
+func (b *Bundle) Explain() string {
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "Evidence bundle %s (schema v%d, generated %s)\n",
+		b.BundleID, b.SchemaVersion, b.GeneratedAt.Format(time.RFC3339))
+	if b.AgentID != "" || b.TaskID != "" {
+		fmt.Fprintf(&sb, "issued to agent %s for task %s\n", b.AgentID, b.TaskID)
+	}
+	if b.RepoRoot != "" {
+		fmt.Fprintf(&sb, "repo: %s\n", b.RepoRoot)
+	}
+	if b.Authorization != nil {
+		decision := "denied"
+		if b.Authorization.Proof.Decision.Allowed {
+			decision = "allowed"
+		}
+		scope := b.Authorization.Scope
+		fmt.Fprintf(&sb, "authorization: %s — %d symbols, %d edges in scope (policy: %s)%s\n",
+			decision, len(scope.Symbols), len(scope.Edges), scope.PolicySource,
+			map[bool]string{true: " [reconstructed]", false: ""}[b.Authorization.Reconstructed])
+	}
+	if b.Freshness != nil {
+		fmt.Fprintf(&sb, "freshness: %s (index v%s)\n", b.Freshness.Proof.Verdict, b.Freshness.IndexVersion)
+	}
+	if b.Lineage != nil {
+		fmt.Fprintf(&sb, "lineage: %d symbols, %d edges (task %s)\n", len(b.Lineage.Symbols), len(b.Lineage.Edges), b.Lineage.Task)
+	}
+	fmt.Fprintf(&sb, "audit chain: %d entries, last hash %s\n", len(b.AuditTrail), shortHash(b.AuditChainHash))
+	fmt.Fprintf(&sb, "tamper seal: bundle hash %s\n", shortHash(b.BundleHash))
+	if b.Signature != nil {
+		fmt.Fprintf(&sb, "key identity: signed with %s key %s (project key under .kern/keys/)\n",
+			b.Signature.Algorithm, b.Signature.KeyFingerprint)
+	} else {
+		sb.WriteString("key identity: unsigned (digest-only seal)\n")
+	}
+
+	var sb2 strings.Builder
+	sb2.WriteString("What this proves: ")
+	if b.Authorization != nil && b.Authorization.Proof.Decision.Allowed {
+		fmt.Fprintf(&sb2, "the agent was authorized to touch exactly the %d in-scope symbols at %s; ", len(b.Authorization.Scope.Symbols), b.GeneratedAt.Format(time.RFC3339))
+	}
+	if b.Freshness != nil {
+		fmt.Fprintf(&sb2, "the index was %s at export; ", b.Freshness.Proof.Verdict)
+	}
+	if b.AuditChainHash != "" {
+		fmt.Fprintf(&sb2, "and the audit chain is intact through %s.\n", shortHash(b.AuditChainHash))
+	} else {
+		sb2.WriteString("and no audit entries were recorded.\n")
+	}
+	fmt.Fprintf(&sb2, "Verify: kern evidence verify --file <bundle.json> [--root <repo>]\n")
+	if b.BundleHash != "" {
+		fmt.Fprintf(&sb2, "Seal: sha256 %s\n", b.BundleHash)
+	}
+	sb.WriteString(sb2.String())
+	return sb.String()
+}
+
+// shortHash abbreviates a hex digest for display (first 12 chars).
+func shortHash(h string) string {
+	if len(h) <= 12 {
+		return h
+	}
+	return h[:12] + "…"
 }

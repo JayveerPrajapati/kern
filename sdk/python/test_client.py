@@ -23,6 +23,12 @@ class ClientTest(unittest.TestCase):
         req = m.call_args.args[0]
         return out, req
 
+    def test_health(self):
+        out, req = self._call(self.client.health)
+        self.assertEqual(out, {"ok": True})
+        self.assertEqual(req.method, "GET")
+        self.assertEqual(req.full_url, "http://test:8090/api/health")
+
     def test_analyze(self):
         out, req = self._call(self.client.analyze, "change x")
         self.assertEqual(out, {"ok": True})
