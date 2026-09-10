@@ -1199,8 +1199,11 @@ func (ix *Index) addDispatchEdges() {
 }
 
 func dedupeSorted(in []string) []string {
-	if len(in) == 0 {
+	if in == nil {
 		return nil
+	}
+	if len(in) == 0 {
+		return in
 	}
 	cp := make([]string, len(in))
 	copy(cp, in)
