@@ -10,50 +10,12 @@ concurrency:
   cancel-in-progress: true
 jobs:
   test:
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          fetch-depth: 0
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
-        with:
-          go-version-file: go.mod
-          cache: true
-      - uses: ./.github/actions/setup-tools
-
-      - name: Vet
-        run: go vet ./...
-      - name: Format
-        run: test -z "$(gofmt -l .)" || { echo "gofmt needed on:"; gofmt -l .; exit 1; }
-      - name: Test
-        run: go test -short -timeout 10m ./...
-      - name: Test (sqlite tags)
-        run: go test -tags sqlite ./internal/index/... ./internal/doctor/...
-      - name: Test (treesitter tags)
-        run: CGO_ENABLED=1 go test -tags treesitter ./internal/index/... ./internal/doctor/...
-      - name: Build all binaries
-        run: |
-          go build -buildvcs=false -o "$RUNNER_TEMP/kern" ./cmd/kern
-          go build -buildvcs=false -o "$RUNNER_TEMP/kern-mcp" ./cmd/kern-mcp
-          go build -buildvcs=false -o "$RUNNER_TEMP/kern-server" ./cmd/kern-server
-          go build -buildvcs=false -o "$RUNNER_TEMP/kernops" ./cmd/kernops
-      - name: Build all binaries (sqlite tags)
-        run: |
-          go build -buildvcs=false -tags sqlite -o /dev/null ./cmd/kern
-          go build -buildvcs=false -tags sqlite -o /dev/null ./cmd/kern-mcp
-          go build -buildvcs=false -tags sqlite -o /dev/null ./cmd/kern-server
-          go build -buildvcs=false -tags sqlite -o /dev/null ./cmd/kernops
-      # Race detector over the concurrency-sensitive packages (covers the
-      # agent registry / in-flight tool / lock lifecycle races). Scoped to
-      # keep the full -race ./... suite from slowing CI. The -timeout is sized
-      # for the race run: internal/app alone is ~3min without -race and
-      # exceeds the default 10m cap under instrumentation.
-      - name: Test (race detector)
-        run: go test -short -race -timeout 10m ./internal/governance/... ./internal/mcp/... ./internal/app/... ./internal/web/...
-      - name: MCP catalog parity
-        run: go test ./internal/setup/ -run TestPluginMatchesMCPCatalog -count=1
-
+    # Reusable workflow (test.yml has `on: workflow_call`). A workflow .yml can
+    # ONLY be referenced at job level — a step-level `uses:` of it fails on
+    # GitHub with "unable to resolve action". Caller jobs support only
+    # needs/if/permissions/strategy/concurrency/uses/with/secrets — no
+    # runs-on/steps/timeout-minutes (the 30m timeout lives inside test.yml).
+    uses: ./.github/workflows/test.yml
   lint:
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -103,3 +65,35 @@ jobs:
           files: coverage.out
           fail_ci_if_error: false
           token: ${{ secrets.CODECOV_TOKEN }}
+  # A2: full (non-short) E2E gate. The primary `test` job runs -short, which
+  # skips ~25 test functions (the 20-step vertical slice, acceptance matrix,
+  # replay/resume, 3/4 cicd governance-gate tests, all MCP
+  # interface-consistency tests) — the exact mechanism that let the
+  # VersionAtLeast bug ship unnoticed. This job runs those suites for real,
+  # with the kern binary built from this checkout and KERN_REQUIRE_BINARY=1
+  # so any test that would skip on a missing binary FAILS instead of
+  # silently passing.
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: ./.github/actions/setup-tools
+      - name: Build kern from checkout
+        run: go build -buildvcs=false -o "$RUNNER_TEMP/kern" ./cmd/kern
+      - name: Full E2E suite (non-short) — app, cicd, mcp
+        run: go test -timeout 30m ./internal/app/... ./internal/cicd/... ./internal/mcp/...
+        env:
+          KERN_BINARY: ${{ runner.temp }}/kern
+          KERN_REQUIRE_BINARY: "1"
+      - name: Full blueprint suite (non-short)
+        run: go test -timeout 30m ./internal/blueprint/...
+        env:
+          KERN_BINARY: ${{ runner.temp }}/kern
+          KERN_REQUIRE_BINARY: "1"

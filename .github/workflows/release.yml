@@ -12,18 +12,12 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  test:
-    name: vet + test
+  changelog:
+    name: changelog entry exists for tag
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
-        with:
-          go-version-file: go.mod
-          cache: true
-
       - name: Changelog entry exists for tag
         run: |
           tag="${GITHUB_REF#refs/tags/}"
@@ -32,17 +26,17 @@ jobs:
             echo "::error::CHANGELOG.md has no '## [${version}]' section for tag ${tag} — add one (Keep a Changelog) before releasing."
             exit 1
           fi
-
-      - uses: ./.github/actions/setup-tools
-
-      - name: Vet and test
-        run: |
-          go vet ./...
-          go test -short -timeout 10m ./...
-
+  test:
+    # Reusable workflow (test.yml has `on: workflow_call`). A workflow .yml
+    # can ONLY be referenced at job level — a step-level `uses:` of it fails
+    # on GitHub with "unable to resolve action". Caller jobs support only
+    # needs/if/permissions/strategy/concurrency/uses/with/secrets — no
+    # runs-on/steps/timeout-minutes (the 30m timeout lives inside test.yml).
+    name: vet + test
+    uses: ./.github/workflows/test.yml
   review:
     name: kern code review
-    needs: test
+    needs: [test, changelog]
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -76,7 +70,7 @@ jobs:
 
   build:
     name: build ${{ matrix.target }}
-    needs: [test, review]
+    needs: [test, changelog, review]
     strategy:
       matrix:
         target:
@@ -120,10 +114,10 @@ jobs:
             go build -buildvcs=false -trimpath -tags sqlite -ldflags "-s -w -X main.version=${{ steps.vars.outputs.tag }}" \
             -o "$dir/kern" ./cmd/kern
           GOOS="$os" GOARCH="$arch" CGO_ENABLED=0 \
-            go build -buildvcs=false -trimpath -tags sqlite -ldflags "-s -w" \
+            go build -buildvcs=false -trimpath -tags sqlite -ldflags "-s -w -X main.version=${{ steps.vars.outputs.tag }}" \
             -o "$dir/kern-mcp" ./cmd/kern-mcp
           GOOS="$os" GOARCH="$arch" CGO_ENABLED=0 \
-            go build -buildvcs=false -trimpath -tags sqlite -ldflags "-s -w" \
+            go build -buildvcs=false -trimpath -tags sqlite -ldflags "-s -w -X main.version=${{ steps.vars.outputs.tag }}" \
             -o "$dir/kern-server" ./cmd/kern-server
 
       # Shrink the binaries with UPX (best compression). Significant savings:
@@ -185,6 +179,12 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    env:
+      # Optional GPG signing secrets (see docs/security/signed-releases.md).
+      # When GPG_PRIVATE_KEY is unset every signing step below is skipped and
+      # the release ships SHA256SUMS-only (checksum integrity, no authenticity).
+      GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+      GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
@@ -213,6 +213,61 @@ jobs:
           echo "tag=${tag}" >> "$GITHUB_OUTPUT"
           echo "sha=${sha}" >> "$GITHUB_OUTPUT"
 
+      # --- GPG signing (optional but recommended) ---------------------------
+      # Signs SHA256SUMS and every release binary with the project's GPG key.
+      # Entirely optional: if the GPG_PRIVATE_KEY secret is not configured the
+      # steps below are skipped and the release is published unsigned (SHA256
+      # checksums still apply). Key generation + secret setup are documented
+      # in docs/security/signed-releases.md.
+      - name: Sign release assets with GPG (optional)
+        id: sign
+        if: ${{ env.GPG_PRIVATE_KEY != '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Import the base64-encoded private key into the ephemeral keyring.
+          echo "${GPG_PRIVATE_KEY}" | base64 --decode | gpg --batch --yes --import
+          # Resolve the fingerprint of the primary secret key.
+          fp="$(gpg --batch --list-secret-keys --with-colons | awk -F: '/^fpr:/{print $10; exit}')"
+          echo "signing with key ${fp}"
+          # Export the public key so users can verify without a keyserver.
+          gpg --batch --yes --armor --export "${fp}" > dist/SHA256SUMS.asc
+          # Detached, armored signature over the checksums file (covers every
+          # binary plus the source archive hash).
+          gpg --batch --yes --pinentry-mode loopback --passphrase "${GPG_PASSPHRASE}" \
+            --armor --detach-sign --output dist/SHA256SUMS.sig dist/SHA256SUMS
+          # And a signature per binary asset.
+          for f in dist/kern-*.tar.gz dist/kern-*.zip; do
+            gpg --batch --yes --pinentry-mode loopback --passphrase "${GPG_PASSPHRASE}" \
+              --armor --detach-sign --output "${f}.sig" "${f}"
+          done
+          echo "signed=true" >> "$GITHUB_OUTPUT"
+      # Self-check: re-verify every signature we just produced before it ships.
+      # A failed verification fails the job, so a broken signature can never be
+      # uploaded to the release.
+      - name: Verify GPG signatures (optional)
+        if: ${{ env.GPG_PRIVATE_KEY != '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gpg --batch --verify dist/SHA256SUMS.sig dist/SHA256SUMS
+          for f in dist/kern-*.tar.gz dist/kern-*.zip; do
+            gpg --batch --verify "${f}.sig" "${f}"
+          done
+          echo "all release signatures verified"
+      # Attach the signatures + public key to the release once it exists. Runs
+      # only when signing happened (the step above set signed=true).
+      - name: Upload GPG signatures to release (optional)
+        if: ${{ steps.sign.outputs.signed == 'true' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          tag="${{ steps.release.outputs.tag }}"
+          gh release upload "$tag" \
+            dist/SHA256SUMS.sig dist/SHA256SUMS.asc dist/kern-*.sig \
+            --clobber
+
       - name: Create release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -232,6 +287,9 @@ jobs:
             echo "- \`go install github.com/${{ github.repository }}/cmd/kern@$tag\`"
             echo '- `brew install kern` — from the tap repo (auto-published by this workflow); formula attached as `kern.rb`.'
             echo 'Assets include a `SHA256SUMS` file (`install.sh` verifies against it).'
+            if [ -n "${GPG_PRIVATE_KEY:-}" ]; then
+              echo '- Assets are GPG-signed: `SHA256SUMS.sig` (detached signature) + `SHA256SUMS.asc` (public key). See `docs/security/signed-releases.md`.'
+            fi
             awk -v ver="[$version]" '
               /^## / {
                 if (f) exit;

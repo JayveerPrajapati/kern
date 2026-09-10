@@ -30,13 +30,6 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - uses: ./.github/actions/setup-tools
-
-      - name: Vet and test
-        run: |
-          go vet ./...
-          go test -short -timeout 10m ./...
-
       - name: Build kern from checkout
         run: go build -buildvcs=false -o "$RUNNER_TEMP/kern" ./cmd/kern
 
