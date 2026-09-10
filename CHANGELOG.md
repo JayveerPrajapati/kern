@@ -5,14 +5,22 @@ All notable changes to kern are documented here. Format follows
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
-- **Review Packs, Council & Diff Gate (silent-orchestrator P2)**:
-- `kern review-pack` (KERN-P2-001): immutable deterministic review packet — commit + dirty-state hash, task, planner-selected evidence with reasons, relevant symbols with call paths, changed code, tests, project constraints, observed claims, unverified assumptions, and exact per-section token counts. Pack sealed with a content hash (GeneratedAt excluded as provenance metadata); identical builds over identical state produce byte-identical JSON. `internal/reviewpack`.
-- `kern review-consensus` (KERN-P2-002): normalizes review packs into a consensus/divergence report — consensus, divergence, minority positions, supporting evidence, unsupported claims, assumptions, decision drivers, and next verification — without treating majority vote as truth. Claims match across packs by canonicalized statement; identical inputs yield identical reports. `internal/council`.
-- `kern diff-gate` (KERN-P2-003): deterministic diff gate over the working-tree diff — 8 checks (formatting, vulnerabilities, secrets via the blueprint G3 adapter, tests via G8, schema drift with a `.kern/diff-gate/tool-schemas.json` baseline, unsafe execution additions, missing changelog, MCP catalog↔plugin drift). Advisory by default (exit 0 on warnings), `--blocking` for protected CI, `--timeout` runtime cap, structured JSON verdicts; new blueprint gates G30–G35.
-- **Index & Code Intelligence**:
-- Parser confidence scores (schema v13): every parsed symbol, call edge and import relationship now carries a HIGH/MEDIUM/LOW confidence rating from the parser (explicit declarations and direct calls = HIGH; type-inference-resolved calls and regex-extracted edges = MEDIUM; regex-derived entry points and virtual dispatch edges = LOW). `Index.Calls` becomes `[]CallEdge{Target, Confidence}`, `Pkg.Imports`/`ImportsByFile` become `[]ImportEdge{Path, Confidence}`, and graph exports surface per-edge confidence (EXTRACTED/INFERRED/AMBIGUOUS). Callers and the `CallSites`/`CallsFor` string views are preserved for compatibility; the JSON and SQLite stores persist the scores (SQLite gains a `calls.confidence` column with a v13 migration), and old v12 caches rebuild automatically.
 
-## [0.9.8] - 2026-09-09
+## [0.9.8] - 2026-09-10
+
+- **Review Packs, Council & Diff Gate (silent-orchestrator P2)**:
+  - `kern review-pack` (KERN-P2-001): immutable deterministic review packet — commit + dirty-state hash, task, planner-selected evidence with reasons, relevant symbols with call paths, changed code, tests, project constraints, observed claims, unverified assumptions, and exact per-section token counts. Pack sealed with a content hash; identical builds over identical state produce byte-identical JSON. `internal/reviewpack`.
+  - `kern review-consensus` (KERN-P2-002): normalizes review packs into a consensus/divergence report — consensus, divergence, minority positions, supporting evidence, unsupported claims, assumptions, decision drivers, and next verification — without treating majority vote as truth. `internal/council`.
+  - `kern diff-gate` (KERN-P2-003): deterministic diff gate over the working-tree diff — 8 checks (formatting, vulnerabilities, secrets via the blueprint G3 adapter, tests via G8, schema drift, unsafe execution additions, missing changelog, MCP catalog↔plugin drift). Structured JSON verdicts; new blueprint gates G30–G35.
+- **Enterprise & Org Admin**:
+  - `kern org` CLI and `kern_org_*` MCP tools: organization-level multi-repo indexing, project registry, aggregated metrics, and team dashboard (`internal/enterprise`).
+- **Runtime Drift Detection & Governance**:
+  - `kern runtime` CLI and `kern_runtime` MCP tool: route drift detection comparing observed runtime routes with static AST code declarations (`internal/runtime`).
+  - Safety-budget gateway, audit task transitions, GC pinning, and context clearance (`internal/governance`).
+  - Security hardening: deny-by-default network egress gate with `KERN_ALLOW_*` verification and macOS fail-closed execution safety.
+- **Index & Code Intelligence**:
+  - Parser confidence scores (schema v13): every parsed symbol, call edge, and import relationship carries a HIGH/MEDIUM/LOW confidence rating.
+
 
 - **Index & Code Intelligence**:
   - Incremental re-index: `index.Update` re-parses only changed files while reusing the prior build's per-file results, with a `Update`-specific merge that keeps every derived map consistent (identity, freshness, precision, communities).
