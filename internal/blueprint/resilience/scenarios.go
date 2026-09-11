@@ -106,9 +106,14 @@ func (h *HTTPFault) Prepare(ctx context.Context) error {
 // graceful handling, then executes it with `go test -run <TestName> -timeout
 // 10s`. The generated file is removed before returning.
 func (h *HTTPFault) Run(ctx context.Context, target Sandbox) Result {
+	dir := "."
+	if rs, ok := target.(interface{ Root() string }); ok && rs.Root() != "" {
+		dir = rs.Root()
+	}
 	fileName, testName := h.generatedTestNames()
-	content := h.generatedTest(testName)
-	if err := os.WriteFile(fileName, []byte(content), 0o644); err != nil {
+	filePath := filepath.Join(dir, fileName)
+	content := h.generatedTest(dir, testName)
+	if err := os.WriteFile(filePath, []byte(content), 0o644); err != nil {
 		return Result{
 			ScenarioID:    h.ID(),
 			Passed:        false,
@@ -118,9 +123,9 @@ func (h *HTTPFault) Run(ctx context.Context, target Sandbox) Result {
 			Detail:        fmt.Sprintf("could not write resilience test: %v", err),
 		}
 	}
-	defer os.Remove(fileName)
+	defer os.Remove(filePath)
 
-	res := target.Run(ctx, ".", []string{"go", "test", "./...", "-run", testName, "-timeout", "10s"})
+	res := target.Run(ctx, dir, []string{"go", "test", "./...", "-run", testName, "-timeout", "10s"})
 	return Result{
 		ScenarioID:    h.ID(),
 		Passed:        res.Ok,
@@ -156,8 +161,8 @@ func (h *HTTPFault) generatedTestNames() (string, string) {
 // handling per the G9 pattern: the client must surface the fault (as an error
 // or as the declared non-2xx status); treating the fault response as success
 // is a failure.
-func (h *HTTPFault) generatedTest(testName string) string {
-	pkg := detectRootPackage(".")
+func (h *HTTPFault) generatedTest(root, testName string) string {
+	pkg := detectRootPackage(root)
 	url := h.serverAddr + h.effectivePath()
 	return fmt.Sprintf(`package %s
 
@@ -330,7 +335,11 @@ func (m *MalformedJSON) Prepare(ctx context.Context) error {
 }
 
 func (m *MalformedJSON) Run(ctx context.Context, target Sandbox) Result {
-	res := target.Run(ctx, ".", []string{"go", "test", "./...", "-run", "TestResilienceMalformedJSON"})
+	dir := "."
+	if rs, ok := target.(interface{ Root() string }); ok && rs.Root() != "" {
+		dir = rs.Root()
+	}
+	res := target.Run(ctx, dir, []string{"go", "test", "./...", "-run", "TestResilienceMalformedJSON"})
 	return Result{
 		ScenarioID:    m.ID(),
 		Passed:        res.Ok,

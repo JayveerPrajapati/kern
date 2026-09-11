@@ -13,7 +13,6 @@ package resilience
 import (
 	"context"
 	"fmt"
-	"os"
 	"os/exec"
 	"time"
 
@@ -64,22 +63,6 @@ func (c *Check) Run(ctx context.Context, req domain.ChangeRequest) (domain.Check
 		return domain.CheckResult{Name: c.Name(), Status: domain.StatusPass}, nil
 	}
 
-	// Scenarios write their generated test file relative to the working
-	// directory and the sandbox resolves "." to the repo root, so run them
-	// with the repository root as the current directory (restored on return).
-	oldWD, err := os.Getwd()
-	if err != nil {
-		return c.warnResult([]domain.Finding{c.warnFinding(fmt.Sprintf("could not determine working directory: %v", err))}), nil
-	}
-	if err := os.Chdir(req.RepositoryRoot); err != nil {
-		return c.warnResult([]domain.Finding{c.warnFinding(fmt.Sprintf("scenario could not run: %v", err))}), nil
-	}
-	defer func() {
-		if cdErr := os.Chdir(oldWD); cdErr != nil {
-			fmt.Fprintf(os.Stderr, "resilience check: could not restore working directory %q: %v\n", oldWD, cdErr)
-		}
-	}()
-
 	sb := repoSandbox{root: req.RepositoryRoot, timeout: c.sandboxTimeout}
 	var findings []domain.Finding
 	for _, s := range applicable {
@@ -127,6 +110,10 @@ func (c *Check) warnResult(findings []domain.Finding) domain.CheckResult {
 type repoSandbox struct {
 	root    string
 	timeout time.Duration
+}
+
+func (s repoSandbox) Root() string {
+	return s.root
 }
 
 func (s repoSandbox) Run(ctx context.Context, repoRoot string, command []string) scenarios.SandboxResult {

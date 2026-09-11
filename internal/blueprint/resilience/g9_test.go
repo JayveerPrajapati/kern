@@ -17,7 +17,12 @@ import (
 // isolation as the real sandbox (Phase 8), but inlined here to avoid a circular
 // dependency on the sandbox package.
 type testSandbox struct {
+	root    string
 	timeout time.Duration
+}
+
+func (ts testSandbox) Root() string {
+	return ts.root
 }
 
 func (ts testSandbox) Run(ctx context.Context, repoRoot string, command []string) SandboxResult {
@@ -595,8 +600,13 @@ func TestG9_ShellApplicabilityAndDetection(t *testing.T) {
 // --- testSandboxWithEnv: testSandbox with extra env vars ---
 
 type testSandboxWithEnv struct {
+	root    string
 	timeout time.Duration
 	env     []string
+}
+
+func (ts testSandboxWithEnv) Root() string {
+	return ts.root
 }
 
 func (ts testSandboxWithEnv) Run(ctx context.Context, repoRoot string, command []string) SandboxResult {
