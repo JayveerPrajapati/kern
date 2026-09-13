@@ -57,6 +57,11 @@ func ParseVersion(v string) (major, minor, patch int, err error) {
 // version), which are current-source builds like "dev".
 var commitHashRe = regexp.MustCompile(`^[0-9a-f]{7,40}$`)
 
+// channelSuffixRe matches the trailing parenthesized build-channel suffix
+// that `kern version` appends for unstamped source builds ("e2f1762 (dev)"
+// in cmd/kern/cmd_meta.go).
+var channelSuffixRe = regexp.MustCompile(`\s+\([^)]*\)$`)
+
 // VersionAtLeast reports whether installed is >= required. Both are compared
 // as major.minor.patch. The sentinel "dev" and commit-hash stamps (checkout
 // builds without a release tag) are treated as satisfying any minimum: they
@@ -64,6 +69,10 @@ var commitHashRe = regexp.MustCompile(`^[0-9a-f]{7,40}$`)
 // the required version. Any other unparseable version is treated as below
 // any parsed version (conservative: triggers upgrade).
 func VersionAtLeast(installed, required string) bool {
+	// Strip the `kern version` channel suffix first: an unstamped source
+	// build reports "<hash> (dev)", which is a current-source checkout
+	// build and must satisfy the minimum like "dev" and bare hashes.
+	installed = channelSuffixRe.ReplaceAllString(installed, "")
 	if installed == "dev" || commitHashRe.MatchString(installed) {
 		return true
 	}
