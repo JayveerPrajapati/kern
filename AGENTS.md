@@ -23,9 +23,9 @@ Examples:
 - `kern_meta(request="mask secrets in: ...")` → runs `kern_mask_pii`
 - `kern_meta(request="find the NewServer function")` → runs `kern_search`
 
-Prefer `kern_meta` as your default. By default only a minimal 11-tool surface
-is advertised (the high-level task-oriented entry points plus `kern_meta`);
-set `KERN_MCP_FULL=1` to expose the full catalog to agents,
+Prefer `kern_meta` as your default. By default (`KERN_MCP_FULL=0` or unset), only a minimal 11-tool surface
+is advertised (the high-level task-oriented entry points plus `kern_meta`) to keep context windows minimal and fast;
+set `KERN_MCP_FULL=1` if you or your environment require exposing the entire 136-tool catalog directly,
 `KERN_MCP_PHASE=explore|plan|edit|verify` to filter the advertised list to a
 phase's shortlist (plus the always-on meta/cross tools), and
 `KERN_MCP_SINGLE_TOOL=1` to expose ONLY `kern_meta` (useful when an agent is
@@ -50,14 +50,18 @@ leak out-of-scope code. It is part of the default tool surface (no
 - `kern_meta` NL routing: "authorize", "authorized", "allowed to see", "permitted", "what can i" — e.g. "what can I touch in this repo for the refactor task"
 - Full reference: `docs/authorized-context.md`
 
-## Kern-first policy (ENFORCED)
+## Kern-first policy (ENFORCED & AUTONOMOUS)
 
 **You MUST call a `kern_*` tool before any built-in `read`, `grep`, `glob`,
-or `bash` for the tasks below.** On hosts that support pre-tool hooks
-(Claude Code, Cursor, Gemini, Copilot, Qwen, Qoder, Codex), calling a built-in
-instead of the kern equivalent will be BLOCKED with a redirect. On opencode,
-the built-in is transparently routed to kern. So the path of least resistance
-is to use kern directly.
+or `bash` for the tasks below. Do NOT wait for the user to tell you to use kern.**
+As an autonomous AI agent in this repository, you are expected to proactively
+invoke `kern_meta` or the respective `kern_*` tools for any codebase exploration,
+search, architectural analysis, test, or verification.
+
+On hosts that support pre-tool hooks (Claude Code, Cursor, Gemini, Copilot, Qwen,
+Qoder, Codex), calling a built-in instead of the kern equivalent will be BLOCKED
+with a redirect. On opencode, the built-in is transparently routed to kern. So the
+path of least resistance is to use kern directly.
 
 ### Decision procedure (follow this BEFORE reaching for a built-in)
 
