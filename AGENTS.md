@@ -159,3 +159,20 @@ cache, or to preview whether two inputs are similar enough to hit.
 
 Report token savings when asked: use `kern_stats`. This shows before/after
 tokens and estimated cost saved.
+
+
+## Engineering principles (standing rules)
+
+- **Model-visible ⟺ logged**: anything that reaches a model request must be
+  reconstructable from the session log; a new model-visible input requires a
+  session event. kern's evidence/audit chain + flight recorder are the log.
+- **Registrations are effects**: every tool/event registration goes through
+  the owning context and returns a disposer; never register by side effect.
+- **Monotonic SCHEMA_VERSION**: durable `.kern/` formats bump a monotonic
+  schema version and migrate forward; never move, overwrite, or delete
+  committed generations in place.
+- **Capability seam = Service Definition / Provider / Consumer**: a seam is
+  complete only with all three roles (template: `intel` / `llm` / `runtime`);
+  split roles only when they evolve independently.
+- **Misconfiguration fails loud**: a missing referent errors at load or the
+  earliest resolvable point; never silently skip it.

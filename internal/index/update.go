@@ -201,20 +201,20 @@ func Update(root string, prev *Index) (*Index, error) {
 					if idx >= int64(len(jobs)) {
 						return
 					}
-results <- updateComputeFile(prev, jobs[idx], callsByFile, inheritsByFile)
-			}
+					results <- updateComputeFile(prev, jobs[idx], callsByFile, inheritsByFile)
+				}
+			}()
+		}
+		go func() {
+			wg.Wait()
+			close(results)
 		}()
-	}
-	go func() {
-		wg.Wait()
-		close(results)
-	}()
 
-	// Phase 3: serial ordered merge in the main goroutine — the ONLY
-	// goroutine that mutates ix. Results are replayed in lexical (seq)
-	// order, preserving the apply order that keeps the merged index
-	// byte-identical to the serial path.
-	pending := map[int]updateResult{}
+		// Phase 3: serial ordered merge in the main goroutine — the ONLY
+		// goroutine that mutates ix. Results are replayed in lexical (seq)
+		// order, preserving the apply order that keeps the merged index
+		// byte-identical to the serial path.
+		pending := map[int]updateResult{}
 		nextSeq := 0
 		for ur := range results {
 			pending[ur.r.seq] = ur
@@ -260,14 +260,19 @@ results <- updateComputeFile(prev, jobs[idx], callsByFile, inheritsByFile)
 
 	ix.UpdatedAt = time.Now().UTC()
 	ix.buildSymbolIndex()
-	// Dangling-edge cleanup must run before computeCallers: it prunes the
-	// Calls map, and Callers/AliasCallers are derived from it afterwards.
+	// Dangling-edge cleanup must run before promoteLowEdges and
+	// computeCallers: it prunes the Calls map, and the reconciliation pass
+	// and Callers/AliasCallers are derived from it afterwards.
 	dropDanglingCalls(ix, prev, copied)
+	ix.promoteLowEdges()
 	ix.computeCallers()
 	ix.addDispatchEdges()
 	ix.measureCallResolution()
 	ix.resolveEntries()
 	ix.reindexByFile()
+	// CG-P1-9: build the prose→symbol inverted vocab after the symbol table is
+	// final so LookupProse can serve miss-chain candidates without re-walking it.
+	ix.buildProseVocab()
 	ix.computePrecisionByLang()
 	// Content-addressed identity: FileHashes and MaxMtime are final, so the
 	// freshness proofs compare identically to a full rebuild. The git half of

@@ -241,7 +241,7 @@ func ApplyActions(items []domain.ContextItem, actions []domain.GCAction) (active
 		case domain.GCCompress:
 			item.State = domain.ContextActive
 			// In a full implementation, compress would truncate the content.
-			// For now, we keep it but mark it as compressed.
+			// Kept but marked compressed so the compaction decision is reversible.
 			active = append(active, item)
 		case domain.GCDemote:
 			item.State = domain.ContextWarm

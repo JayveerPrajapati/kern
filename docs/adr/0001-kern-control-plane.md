@@ -24,4 +24,4 @@ Kern must evolve from a local context/code-intelligence/MCP system into a contro
 - Local-first operation preserved (invariant 12).
 
 ## Status of this document
-Companion to docs/architecture/{current-state,target-state,gap-analysis,capability-inventory,domain-model,workflow-model}.md and docs/roadmap.md.
+Companion to the Kern 2.0 control-plane doc set, which lives outside the repo under `support_docs/kern_docs/` (architecture/current-state, target-state, gap-analysis, capability-inventory, domain-model, workflow-model, roadmap).

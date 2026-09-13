@@ -3,7 +3,7 @@
      The catalog:doc gate (G36) fails when this file is stale or a tool is missing. -->
 # MCP Tool Catalog
 
-Every model-facing tool the kern MCP server registers (`kern_*`). 127 tools.
+Every model-facing tool the kern MCP server registers (`kern_*`). 131 tools.
 
 | Tool | Phase | Risk | Description |
 |---|---|---|---|
@@ -37,6 +37,7 @@ Every model-facing tool the kern MCP server registers (`kern_*`). 127 tools.
 | `kern_context_watch` | cross | low | Monitors and audits rolling agent context, detects bloated log/code dumps, and recommends concrete deterministic compression actions to prevent context window overflow. |
 | `kern_correlate` | cross | medium | HIGH-LEVEL: correlate a production alert against the runtime to produce a deep evidence chain (alert→service→deployment→commit→symbol→task/pr/agent). Deterministic — derived from runtime source and git history, not LLM. |
 | `kern_cross_repo_impact` | plan | medium | Evaluates multi-repository blast radius: detects contract breaking changes, shared symbol dependencies, and cross-repo interface divergences. |
+| `kern_cycles` | explore | low | Package-level import cycles via Tarjan SCC over the project-local import graph (project packages only, third-party imports ignored). Returns the deterministic cycle list with file:line evidence — answers in one call what previously took many grep round trips. |
 | `kern_dead` | explore | low | Dead-code detection: symbols nothing in the project calls. Private names are dead for certain; public names may be external API. Sorted by size so the biggest cleanup wins show first. Callers reached through function values or interface dispatch are invisible to the index and are reported as dead — confirm before removing. |
 | `kern_deploy` | edit | critical | Deploy a task through TaskService.Deploy so the governance firewall, the human-approval gate (real deploys require approval), and lifecycle events all apply — the same path as `kern deploy <task-id>` and POST /v1/tasks/{id}/deploy. Returns the updated task state and deployment ref. |
 | `kern_diff_files` | verify | low | Delta streaming (#13): compute a unified line diff between two files (or two versions of the same file) using pure Go. Returns the full patch, or a note when files are identical. Feed the output back to the model as a compact edit description. |
@@ -90,7 +91,7 @@ Every model-facing tool the kern MCP server registers (`kern_*`). 127 tools.
 | `kern_org_search` | cross | low | Enterprise org admin: cross-project symbol search (C11). Requires q; returns {hits:[{repo,root,symbol,score}],count}. |
 | `kern_org_tasks` | cross | low | Enterprise org admin: aggregate task visibility (C11). Returns {projects:{name:[{id,state,intent,type}]},total}. |
 | `kern_org_teams` | cross | medium | Enterprise org admin: manage teams that group agents and own projects (C11). action=list|show|create|remove — create takes id/name plus optional projects (team project names) and members (agent IDs); show/remove take id. |
-| `kern_pack` | plan | low | Pack a whole project into one paste-ready bundle: project instructions, a directory tree with per-file token counts, and file contents, sized to fit max_tokens. Use when an agent needs the full working picture (source to edit against), not just a map. Files are ordered by sha256 of their relative path so re-packs of the same tree are byte-identical (LLM prompt-cache friendly). Set fold=true to pack signatures with bodies elided. |
+| `kern_pack` | plan | low | Pack a whole project into one paste-ready bundle: project instructions, a directory tree with per-file token counts, and file contents, sized to fit max_tokens. Use when an agent needs the full working picture (source to edit against), not just a map. Files are ordered by sha256 of their relative path so re-packs of the same tree are byte-identical (LLM prompt-cache friendly). Set fold=true to pack signatures with bodies elided. Graph mode: set graph=true to pack the call-graph snapshot instead — adjacency, one-line per-symbol signatures, and a per-file SHA-256 fingerprint — at roughly 1-5% of the raw file token cost for handoff/review; the receiver verifies freshness and hydrates source lazily via kern_context per symbol. When graph=true, symbol selects that symbol's neighbourhood (empty = whole graph); symbol is ignored when graph is false (files mode is unaffected). |
 | `kern_path` | explore | low | Shortest call path between two symbols, following in-project call edges in either direction. Traces how two things connect without reading files. |
 | `kern_plan` | plan | medium | HIGH-LEVEL (ADR-0006): produce an implementation plan for a proposed change — affected files, dependencies, risks and required validation. Deterministic plan over the analysis; no LLM required. |
 | `kern_plan_context` | plan | low | Deterministically plan which context to include for a change: classify the task type, score evidence classes by policy, and fit the selection to a token budget. Explainable — use json=true for the structured plan. |
@@ -100,6 +101,7 @@ Every model-facing tool the kern MCP server registers (`kern_*`). 127 tools.
 | `kern_probe` | explore | low | Query-driven micro-context router: given a task (bug report, prompt, error text), extract the symbol names it mentions, resolve them against the index, and return a budget-capped bundle of definitions, callers, callees and tests. The graph is the retrieval index, never the payload. |
 | `kern_project_map` | explore | low | Return a compressed map of a whole project: every source file with its symbols and line counts. Use instead of listing/reading every file in a repo. |
 | `kern_prompt_fill` | cross | low | Dynamically renders standardized, token-efficient agent prompts with auto-injected project layout and memory lessons. Prevents agents from wasting tokens on repetitive prompt boilerplate. |
+| `kern_prose` | explore | low | Prose-word to symbol candidate lookup for the NL router miss-chain: maps plain-English words ('middleware', 'retry') to candidate symbols via the build-time inverted vocab, so agents skip the miss-chain (kern_search miss -> kern_ast_search miss). Each hit is a symbol full name plus the number of query words that matched it; multi-word queries rank symbols matching more words first. |
 | `kern_rename` | edit | high | Structural symbol rename on the AST index (P0-5): previews every definition/reference for a Go package-level symbol (types, funcs, vars, consts) with file:line:col edits, then applies them transactionally when apply=true. Edits come from a real go/ast parse, so strings, comments, struct-field names, composite-literal keys, import aliases and the package clause are never touched; cross-package references (pkg.Symbol) are handled for exported symbols. Before applying, every touched file is backed up under <root>/.kern/rename-backup/ and a mid-flight failure restores all files. Method rename and non-Go symbols are refused. Returns the preview (or apply result) as text. |
 | `kern_repo_search` | explore | low | Ranked free-text symbol search across every repo in the kern multi-repo registry (kern repos add). Returns matches tagged with their repo name, best hits first. Set semantic=true to re-rank pooled results by Ollama dense embeddings. |
 | `kern_resolve` | explore | low | Resolve a handle ID from kern_retrieve to L2 or L3 content, validating staleness via content hash. |
@@ -118,8 +120,10 @@ Every model-facing tool the kern MCP server registers (`kern_*`). 127 tools.
 | `kern_semantic_merge` | edit | high | Performs AST-aware 3-way code merge between base, local, and remote versions. Resolves non-overlapping struct fields, methods, imports, and declarations cleanly, and flags precise semantic conflicts. |
 | `kern_semcache` | cross | medium | Inspect and manage the semantic cache that serves similar (not just identical) prior queries instantly. Actions: 'stats' (default) lists entries per namespace (prompt/log), 'list' shows the stored inputs of a namespace, 'clear' wipes it (or all), 'similarity' reports the Jaccard overlap of two inputs so you can predict whether a near-duplicate will hit. Use to verify or reset the fuzzy layer. |
 | `kern_skill` | explore | low | Catalog or load the bundled agent skills (kern-investigate, kern-safe-change, kern-incident-triage). catalog (default) lists every skill with its description; load returns the full SKILL.md runbook for a named skill so the model can follow the repo's own operating procedures. |
+| `kern_snapshot` | explore | low | Canonical versioned graph snapshot for cross-agent handoff: whole-repo or per-symbol subgraph plus the build-time IndexIdentity fingerprint (content root, git tree/commit) and per-file SHA-256 hashes. action=create builds a snapshot (output is the versioned GraphSnapshot JSON); action=verify checks a snapshot file against a root and returns the freshness verdict (fresh/stale/unknown) with the fingerprint. A receiving agent can trust or distrust the graph without any other kern state. |
 | `kern_stats` | cross | low | Return before/after token savings and cost estimates from kern optimizations, optionally filtered to today or a session. |
 | `kern_stream` | cross | low | Inspects streaming status, partitions large responses into token-friendly chunks, and manages progress notification channels for long-running operations. |
+| `kern_surprising` | explore | low | Surprising connections (#): cross-community call edges ranked by community distance x rarity, deduped against known bridges. Deterministic; surfaces unexpected coupling an onboarding digest should point at. |
 | `kern_swap` | plan | low | Budget swapping (#18): in a context document, replace fenced code blocks tagged `lang:path` with per-file symbolic signatures to fit a token budget, or expand `lang:path:summary` blocks back to full file contents. Returns the budget-fitted document. |
 | `kern_synthesize_test` | verify | medium | Automatically synthesizes comprehensive table-driven unit tests, parameter fixtures, and boundary invariants for untested functions or methods based on AST signatures. |
 | `kern_taint` | verify | high | Taint-lite analysis: flag security sinks (SQL injection, command injection, unsafe deserialization, Python eval/exec/subprocess/pickle/yaml sinks) whose containing function is transitively called by a framework entry point (Symbol.Entry) or whose file contains source expressions (request params, bodies, CLI args). With generate=true, emits a deterministic test scaffold per tainted sink (go test for Go sinks, pytest for Python sinks, G-4) for LLM-assisted fill. The optional range argument scopes findings to files changed in a 'from..to' git range ('..' = working tree). Deterministic, bounded BFS. |
@@ -345,6 +349,13 @@ Every model-facing tool the kern MCP server registers (`kern_*`). 127 tools.
 - Description: Evaluates multi-repository blast radius: detects contract breaking changes, shared symbol dependencies, and cross-repo interface divergences.
 - Input parameters: `linked_repos`, `root`, `target_symbol`
 
+## `kern_cycles`
+
+- Phase: `explore`
+- Risk: `low`
+- Description: Package-level import cycles via Tarjan SCC over the project-local import graph (project packages only, third-party imports ignored). Returns the deterministic cycle list with file:line evidence — answers in one call what previously took many grep round trips.
+- Input parameters: `json`, `root`
+
 ## `kern_dead`
 
 - Phase: `explore`
@@ -441,7 +452,7 @@ Every model-facing tool the kern MCP server registers (`kern_*`). 127 tools.
 - Phase: `explore`
 - Risk: `low`
 - Description: Single-call explore (#2): return a symbol's verbatim source, direct call flow (callers + callees) and transitive blast radius (with affected files) in one shot. The primitive that replaces three separate calls (graph/near/path) for 'what touches this and how'. Pass depth=N to cap the blast radius to N hops and max=N to cap node count.
-- Input parameters: `agent_id`, `depth`, `max`, `root`, `scope`, `symbol`, `task`, `with_freshness`
+- Input parameters: `agent_id`, `depth`, `max`, `max_tokens`, `min_confidence`, `root`, `scope`, `symbol`, `task`, `with_freshness`
 
 ## `kern_flight`
 
@@ -469,7 +480,7 @@ Every model-facing tool the kern MCP server registers (`kern_*`). 127 tools.
 - Phase: `explore`
 - Risk: `low`
 - Description: One-call graph context: token-budgeted names-only adjacency for a symbol — callers first (the direction that matters for impact), then callees, every edge tagged EXTRACTED/INFERRED/AMBIGUOUS, plus community membership. Calls to interface methods carry dispatch hints listing the concrete implementations they can reach. Parity with code-review-graph's minimal_context: the minimal caller-first answer sized to the context window, no source text.
-- Input parameters: `agent_id`, `max_tokens`, `root`, `scope`, `symbol`, `task`, `with_freshness`
+- Input parameters: `agent_id`, `max_tokens`, `min_confidence`, `root`, `scope`, `symbol`, `task`, `with_freshness`
 
 ## `kern_guard_check`
 
@@ -720,15 +731,15 @@ Every model-facing tool the kern MCP server registers (`kern_*`). 127 tools.
 
 - Phase: `plan`
 - Risk: `low`
-- Description: Pack a whole project into one paste-ready bundle: project instructions, a directory tree with per-file token counts, and file contents, sized to fit max_tokens. Use when an agent needs the full working picture (source to edit against), not just a map. Files are ordered by sha256 of their relative path so re-packs of the same tree are byte-identical (LLM prompt-cache friendly). Set fold=true to pack signatures with bodies elided.
-- Input parameters: `fold`, `format`, `instructions`, `max_tokens`, `root`, `tier`
+- Description: Pack a whole project into one paste-ready bundle: project instructions, a directory tree with per-file token counts, and file contents, sized to fit max_tokens. Use when an agent needs the full working picture (source to edit against), not just a map. Files are ordered by sha256 of their relative path so re-packs of the same tree are byte-identical (LLM prompt-cache friendly). Set fold=true to pack signatures with bodies elided. Graph mode: set graph=true to pack the call-graph snapshot instead — adjacency, one-line per-symbol signatures, and a per-file SHA-256 fingerprint — at roughly 1-5% of the raw file token cost for handoff/review; the receiver verifies freshness and hydrates source lazily via kern_context per symbol. When graph=true, symbol selects that symbol's neighbourhood (empty = whole graph); symbol is ignored when graph is false (files mode is unaffected).
+- Input parameters: `fold`, `format`, `graph`, `instructions`, `max_tokens`, `root`, `symbol`, `tier`
 
 ## `kern_path`
 
 - Phase: `explore`
 - Risk: `low`
 - Description: Shortest call path between two symbols, following in-project call edges in either direction. Traces how two things connect without reading files.
-- Input parameters: `from`, `root`, `to`
+- Input parameters: `from`, `min_confidence`, `root`, `to`
 
 ## `kern_plan`
 
@@ -770,7 +781,7 @@ Every model-facing tool the kern MCP server registers (`kern_*`). 127 tools.
 - Phase: `explore`
 - Risk: `low`
 - Description: Query-driven micro-context router: given a task (bug report, prompt, error text), extract the symbol names it mentions, resolve them against the index, and return a budget-capped bundle of definitions, callers, callees and tests. The graph is the retrieval index, never the payload.
-- Input parameters: `max_tokens`, `root`, `task`
+- Input parameters: `max_tokens`, `min_confidence`, `root`, `task`
 
 ## `kern_project_map`
 
@@ -785,6 +796,13 @@ Every model-facing tool the kern MCP server registers (`kern_*`). 127 tools.
 - Risk: `low`
 - Description: Dynamically renders standardized, token-efficient agent prompts with auto-injected project layout and memory lessons. Prevents agents from wasting tokens on repetitive prompt boilerplate.
 - Input parameters: `file`, `inject_memory`, `root`, `slots`, `task`, `template`
+
+## `kern_prose`
+
+- Phase: `explore`
+- Risk: `low`
+- Description: Prose-word to symbol candidate lookup for the NL router miss-chain: maps plain-English words ('middleware', 'retry') to candidate symbols via the build-time inverted vocab, so agents skip the miss-chain (kern_search miss -> kern_ast_search miss). Each hit is a symbol full name plus the number of query words that matched it; multi-word queries rank symbols matching more words first.
+- Input parameters: `limit`, `query`, `root`
 
 ## `kern_rename`
 
@@ -912,6 +930,13 @@ Every model-facing tool the kern MCP server registers (`kern_*`). 127 tools.
 - Description: Catalog or load the bundled agent skills (kern-investigate, kern-safe-change, kern-incident-triage). catalog (default) lists every skill with its description; load returns the full SKILL.md runbook for a named skill so the model can follow the repo's own operating procedures.
 - Input parameters: `action`, `skill`
 
+## `kern_snapshot`
+
+- Phase: `explore`
+- Risk: `low`
+- Description: Canonical versioned graph snapshot for cross-agent handoff: whole-repo or per-symbol subgraph plus the build-time IndexIdentity fingerprint (content root, git tree/commit) and per-file SHA-256 hashes. action=create builds a snapshot (output is the versioned GraphSnapshot JSON); action=verify checks a snapshot file against a root and returns the freshness verdict (fresh/stale/unknown) with the fingerprint. A receiving agent can trust or distrust the graph without any other kern state.
+- Input parameters: `action`, `file`, `limit`, `root`, `symbol`
+
 ## `kern_stats`
 
 - Phase: `cross`
@@ -925,6 +950,13 @@ Every model-facing tool the kern MCP server registers (`kern_*`). 127 tools.
 - Risk: `low`
 - Description: Inspects streaming status, partitions large responses into token-friendly chunks, and manages progress notification channels for long-running operations.
 - Input parameters: `action`, `channel`, `chunk_size`, `message`, `payload`, `percent`, `progress_token`
+
+## `kern_surprising`
+
+- Phase: `explore`
+- Risk: `low`
+- Description: Surprising connections (#): cross-community call edges ranked by community distance x rarity, deduped against known bridges. Deterministic; surfaces unexpected coupling an onboarding digest should point at.
+- Input parameters: `limit`, `root`
 
 ## `kern_swap`
 
@@ -1015,7 +1047,7 @@ Every model-facing tool the kern MCP server registers (`kern_*`). 127 tools.
 - Phase: `explore`
 - Risk: `low`
 - Description: Rationale and doc-reference report for a symbol: its doc comment, who depends on it and why (each caller's own doc line), and its in/out edge counts. Use to answer 'why does this exist and who needs it'.
-- Input parameters: `root`, `symbol`
+- Input parameters: `min_confidence`, `root`, `symbol`
 
 ## `kern_workflow`
 

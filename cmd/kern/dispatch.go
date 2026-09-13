@@ -40,6 +40,10 @@ func resolveCommandAndFlags() (cmd string, rest []string) {
 var mcpCLIAlias = map[string]string{
 	"kern_agents":             "team",
 	"kern_llm_providers":      "agents",
+	"kern_validate_staged":    "diff-gate",
+	"kern_validate_proposed":  "validate-proposed",
+	"kern_explain_finding":    "explain-finding",
+	"kern_repair_guidance":    "repair-guidance",
 	"kern_ast_search":         "ast",
 	"kern_authorize_context":  "authorize-context",
 	"kern_code_graph":         "graph",
