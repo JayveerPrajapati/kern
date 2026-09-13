@@ -4,10 +4,10 @@ import "testing"
 
 // TestPrecisionByLangPopulated verifies Build records the edge-precision tier
 // per language: Go is fully resolved (go/ast cross-file binding resolution),
-// Java is "resolved" in the regex build via local-type tracking + callee
-// resolution (v.method() -> Type.method() binds cross-file; "ast" under the
-// tree-sitter build, whose call edges are still receiver-var heuristics), and
-// other foreign languages are "ast" under the tree-sitter build or
+// Java is "resolved" in both builds via per-method local-type tracking +
+// callee resolution (v.method() -> Type.method() binds cross-file — the
+// regex path in foreign_lang.go, the tree-sitter path in treesitter_java.go),
+// and other foreign languages are "ast" under the tree-sitter build or
 // "heuristic" (regex) otherwise.
 func TestPrecisionByLangPopulated(t *testing.T) {
 	dir := writeTree(t, map[string]string{
@@ -44,9 +44,6 @@ public class App {
 		t.Errorf("PrecisionByLang[go] = %q; want resolved", got)
 	}
 	wantJava := "resolved"
-	if treesitterEnabled() {
-		wantJava = "ast"
-	}
 	if got := ix.PrecisionByLang["java"]; got != wantJava {
 		t.Errorf("PrecisionByLang[java] = %q; want %s", got, wantJava)
 	}

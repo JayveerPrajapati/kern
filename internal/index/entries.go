@@ -314,8 +314,11 @@ func extractEntries(f *ffile, spec *langSpec, types []typeDecl, syms []Symbol, r
 }
 
 var httpVerbs = map[string]bool{
+	// All-caps (gin/echo) and title-case (chi r.Get, fiber app.Get) forms.
 	"GET": true, "POST": true, "PUT": true, "PATCH": true, "DELETE": true,
 	"HEAD": true, "OPTIONS": true, "USE": true, "ALL": true, "CONNECT": true, "TRACE": true,
+	"Get": true, "Post": true, "Put": true, "Patch": true, "Delete": true,
+	"Head": true, "Options": true, "Use": true, "All": true, "Connect": true, "Trace": true,
 }
 
 // extractGoEntries finds HTTP entry points in a Go file: http.Handle/HandleFunc

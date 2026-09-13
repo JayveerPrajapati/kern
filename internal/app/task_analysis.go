@@ -457,11 +457,42 @@ func classifyCriticality(g *intelligence.Graph, target string, strict bool, rep 
 	}
 }
 
+// impactCitedFiles returns the files the impact report cites: the target's
+// defining file, the defining file of every symbol named in the report, and
+// the context packet's files. StalenessBanner spot-checks exactly these so
+// the impact answer can warn when it cites drifted line numbers.
+func (s *TaskService) impactCitedFiles(t *agent.Task, rep *domain.ImpactReport) []string {
+	var files []string
+	add := func(ref string) {
+		if f := s.platform.graphNodeFile(ref); f != "" {
+			files = append(files, f)
+		}
+	}
+	add(rep.Target)
+	for _, groups := range [][]string{rep.WhoCalls, rep.WhatItCalls, rep.ServicesDepend, rep.APIsAffected, rep.EventsAffected, rep.TestsCover} {
+		for _, ref := range groups {
+			add(ref)
+		}
+	}
+	if t.ContextPacket != nil {
+		for _, f := range t.ContextPacket.Files {
+			if f.Path != "" {
+				files = append(files, f.Path)
+			}
+		}
+	}
+	return files
+}
+
 // finalizeImpact stamps the completed ImpactReport onto the Task, records the
 // report artifact, and completes the Task lifecycle (ANALYZING → COMPLETED).
 func (s *TaskService) finalizeImpact(t *agent.Task, rep *domain.ImpactReport) (*agent.Task, domain.ImpactReport, string, error) {
 	t.Impact = rep
-	t.Output = renderImpactText(*rep)
+	out := renderImpactText(*rep)
+	if banner := s.platform.Index().StalenessBanner(s.impactCitedFiles(t, rep)); banner != "" {
+		out = banner + "\n\n" + out
+	}
+	t.Output = out
 	t.AddStep(agent.Step{
 		Action:     "impact",
 		AgentID:    "graph-engine",

@@ -61,7 +61,21 @@ type Index struct {
 	// name-heuristic cross-file), "heuristic" (regex). Drives --precision strict.
 	PrecisionByLang map[string]string   `json:"precision_by_lang,omitempty"`
 	SymbolsByFile   map[string][]Symbol `json:"-"`
-	UpdatedAt       time.Time           `json:"updated_at"`
+	// PromotedLowEdges / UnresolvedLowEdges are the finalize-time
+	// reconciliation counters (CG-P0-5): call edges whose target resolved
+	// against the completed symbol table and was promoted from LOW to
+	// MEDIUM, and LOW edges that remain genuinely unresolved. Surfaced in
+	// kern_health; zero on indexes built before the pass existed.
+	PromotedLowEdges   int `json:"promoted_low_edges,omitempty"`
+	UnresolvedLowEdges int `json:"unresolved_low_edges,omitempty"`
+	// ProseVocab is the build-time inverted word→symbol table (CG-P1-9):
+	// each prose word ("middleware", "retry") maps to the full names of
+	// symbols whose name or defining directory matches that word. Built by
+	// buildProseVocab in every finalize sequence and served by LookupProse;
+	// nil on indexes built before this feature — lookup must handle nil
+	// gracefully.
+	ProseVocab map[string][]string `json:"prose_vocab,omitempty"`
+	UpdatedAt  time.Time           `json:"updated_at"`
 	// MaxMtime is the largest file modification time (Unix nanos) at build time.
 	// Stale() uses it as a cheap generation gate before the exact hash check.
 	MaxMtime int64 `json:"max_mtime,omitempty"`
@@ -707,10 +721,14 @@ func buildSerial(abs string, cfg *buildConfig) (*Index, error) {
 	}
 	ix.UpdatedAt = time.Now().UTC()
 	ix.buildSymbolIndex()
+	ix.promoteLowEdges()
 	ix.computeCallers()
 	ix.addDispatchEdges()
 	ix.resolveEntries()
 	ix.reindexByFile()
+	// CG-P1-9: build the prose→symbol inverted vocab after the symbol table is
+	// final so LookupProse can serve miss-chain candidates without re-walking it.
+	ix.buildProseVocab()
 	// Record the edge-precision tier per language so strict call-edge following
 	// (kern guard/impact --precision strict) can skip edges whose caller
 	// language is not fully resolved instead of guessing at their meaning.
@@ -887,10 +905,14 @@ func buildParallel(abs string, cfg *buildConfig) (*Index, error) {
 	}
 	ix.UpdatedAt = time.Now().UTC()
 	ix.buildSymbolIndex()
+	ix.promoteLowEdges()
 	ix.computeCallers()
 	ix.addDispatchEdges()
 	ix.resolveEntries()
 	ix.reindexByFile()
+	// CG-P1-9: build the prose→symbol inverted vocab after the symbol table is
+	// final so LookupProse can serve miss-chain candidates without re-walking it.
+	ix.buildProseVocab()
 	// Record the edge-precision tier per language so strict call-edge following
 	// (kern guard/impact --precision strict) can skip edges whose caller
 	// language is not fully resolved instead of guessing at their meaning.
@@ -906,23 +928,16 @@ func buildParallel(abs string, cfg *buildConfig) (*Index, error) {
 // language present in the index. go/ast and Java resolve cross-file bindings
 // ("resolved"): Go via go/ast, Java via per-method local-type tracking +
 // callee resolution (java_resolve.go: v.method() -> Type.method() binds
-// against symbols cross-file). Java's regex extractor reaches "resolved"; under
-// the tree-sitter build call edges are still receiver-var heuristics, so the
-// tier stays "ast" there to keep strict precision honest. Other foreign
-// languages are "ast" under the tree-sitter build and "heuristic" (regex)
-// otherwise.
+// against symbols cross-file) in BOTH extractor paths — the regex extractor
+// (foreign_lang.go) and the tree-sitter build (treesitter_java.go
+// resolveJavaCalls, added 2026-09-10). Other foreign languages are "ast"
+// under the tree-sitter build and "heuristic" (regex) otherwise.
 func (ix *Index) computePrecisionByLang() {
 	ix.PrecisionByLang = map[string]string{}
 	for _, lang := range ix.Languages() {
 		switch lang {
-		case "go":
+		case "go", "java":
 			ix.PrecisionByLang[lang] = "resolved"
-		case "java":
-			if treesitterEnabled() {
-				ix.PrecisionByLang[lang] = "ast"
-			} else {
-				ix.PrecisionByLang[lang] = "resolved"
-			}
 		default:
 			if treesitterEnabled() {
 				ix.PrecisionByLang[lang] = "ast"
@@ -1217,24 +1232,43 @@ func dedupeSorted(in []string) []string {
 	return out
 }
 
-// dedupeCallEdges dedupes a call-edge slice by target (keeping the first
-// occurrence's confidence) and sorts by target, so the Calls map stays in the
-// deterministic order the finalize passes rely on.
+// dedupeCallEdges dedupes a call-edge slice by target keeping the
+// HIGHEST-confidence representative (CG-P1-6). A first-wins dedupe let an
+// edge recorded LOW before it was re-resolved stay LOW forever; promotion
+// can also merge distinct target forms ("db.Open" and "Open") into one key,
+// and the highest confidence is the honest verdict for that key. Ties keep
+// the first occurrence, preserving input order determinism. The output is
+// sorted by target, so the Calls map stays in the deterministic order the
+// finalize passes rely on.
 func dedupeCallEdges(in []CallEdge) []CallEdge {
 	if len(in) < 2 {
 		return in
 	}
-	seen := make(map[string]bool, len(in))
-	out := in[:0]
+	best := map[string]CallEdge{}
 	for _, e := range in {
-		if seen[e.Target] {
-			continue
+		if prev, ok := best[e.Target]; !ok || confRank(e.Confidence) > confRank(prev.Confidence) {
+			best[e.Target] = e
 		}
-		seen[e.Target] = true
+	}
+	out := make([]CallEdge, 0, len(best))
+	for _, e := range best {
 		out = append(out, e)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Target < out[j].Target })
 	return out
+}
+
+// confRank orders the confidence tiers so the best representative wins:
+// HIGH(3) > MEDIUM(2) > LOW(1). An empty confidence ranks LOW.
+func confRank(c Confidence) int {
+	switch c {
+	case ConfidenceHigh:
+		return 3
+	case ConfidenceMedium:
+		return 2
+	default:
+		return 1
+	}
 }
 
 // symbolsFor returns every symbol whose bare or full name matches. Build
@@ -1533,7 +1567,14 @@ func (ix *Index) Context(symbol string, linesAround int) string {
 	if start < 1 {
 		start = 1
 	}
+	// Function-aware extent (CG-P0-3): every extractor records the symbol's
+	// syntactic end line (go/ast, tree-sitter node ranges, regex brace
+	// heuristics), so the window extends at least to the definition's end —
+	// a truncated body is never served when the full one is known.
 	end := d.Line + linesAround
+	if d.End > d.Line && d.End > end {
+		end = d.End
+	}
 	if end > len(all) {
 		end = len(all)
 	}

@@ -25,6 +25,13 @@ func TestDiffGateServiceVerdicts(t *testing.T) {
 	})
 	dir := t.TempDir()
 
+	// Write a fresh catalog doc so catalog:doc (G36) passes; without it the
+	// check BLOCKs on the missing docs/tool-catalog.md and the advisory-exit
+	// assertion below would fail.
+	if _, err := diffgate.WriteCatalogDoc(dir); err != nil {
+		t.Fatalf("write catalog doc: %v", err)
+	}
+
 	// Unformatted Go source → format:gofmt WARN finding.
 	if err := os.WriteFile(filepath.Join(dir, "main.go"), []byte("package main\nfunc main(){\n}\n"), 0o644); err != nil {
 		t.Fatalf("write main.go: %v", err)

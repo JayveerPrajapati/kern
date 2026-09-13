@@ -162,11 +162,67 @@ type Change struct {
 	File string     `json:"file"`
 }
 
+// Adaptive poll-interval thresholds for Watch. Small change sets (fewer than
+// adaptSmall files) poll at the base interval so follow-up edits are picked up
+// quickly; larger change sets back off by one scale unit per hundred changed
+// files (adaptScalePerHundred), capped at adaptMaxScale, because the rebuild
+// that follows a big change set is itself expensive; an idle tree decays back
+// toward the base interval. All thresholds are integer counts of changed files
+// per poll cycle.
+const (
+	adaptSmall           = 20
+	adaptScalePerHundred = 1
+	adaptMaxScale        = 8
+)
+
+// adaptiveInterval returns the interval for the NEXT Watch poll cycle given
+// the base interval, the number of changes detected in the last cycle
+// (lastChanges), and the interval that last cycle used (lastInterval).
+//
+//   - no changes (lastChanges == 0): decay toward base — if lastInterval is
+//     above base because a large change set backed off, halve it toward base;
+//     once at (or below) base, poll at base.
+//   - small change sets (0 < lastChanges <= adaptSmall): poll at base, a fast
+//     follow-up after small edits.
+//   - large change sets (lastChanges > adaptSmall): back off to
+//     base * scale where scale = 1 + lastChanges/adaptScalePerHundred, capped
+//     at adaptMaxScale.
+//
+// Pure and deterministic: the same inputs always yield the same interval, so
+// Watch's polling cadence is fully predictable from the change history.
+func adaptiveInterval(base time.Duration, lastChanges int, lastInterval time.Duration) time.Duration {
+	if lastChanges <= 0 {
+		if lastInterval > base {
+			half := lastInterval / 2
+			if half < base {
+				return base
+			}
+			return half
+		}
+		return base
+	}
+	if lastChanges <= adaptSmall {
+		return base
+	}
+	// One scale unit per hundred changed files: 100 changes -> scale 2,
+	// 1000 -> 11, capped at adaptMaxScale.
+	scale := 1 + (lastChanges/100)*adaptScalePerHundred
+	if scale > adaptMaxScale {
+		scale = adaptMaxScale
+	}
+	return base * time.Duration(scale)
+}
+
 // Watch polls root every interval and rebuilds + saves the index whenever the
 // set of Go files or their content changes. onChange is called with the
 // detected changes and the fresh index. onError receives every non-fatal
 // failure (scan, build, or save) so a long-running watcher can surface
 // problems instead of silently dropping them.
+//
+// The poll interval is adaptive (see adaptiveInterval): it stays at the base
+// interval after no or small change sets and backs off — up to
+// adaptMaxScale × base — after large change sets, decaying back toward base
+// as the tree settles.
 func Watch(ctx context.Context, root string, interval time.Duration, onChange func(changes []Change, ix *Index), onError func(err error)) error {
 	abs, err := filepath.Abs(root)
 	if err != nil {
@@ -177,6 +233,10 @@ func Watch(ctx context.Context, root string, interval time.Duration, onChange fu
 	if ix, err := Load(root); err == nil && ix != nil {
 		prev = ix.FileHashes
 	}
+	// wait tracks the interval the previous poll cycle used, starting at the
+	// base interval and recomputed per cycle by adaptiveInterval so the
+	// polling cadence reacts to the change history.
+	wait := interval
 	for {
 		cur, err := indexableHashes(root, ignore.Load(root))
 		if err != nil {
@@ -186,7 +246,7 @@ func Watch(ctx context.Context, root string, interval time.Duration, onChange fu
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
-			case <-time.After(interval):
+			case <-time.After(wait):
 			}
 			continue
 		}
@@ -208,10 +268,11 @@ func Watch(ctx context.Context, root string, interval time.Duration, onChange fu
 				prev = cur
 			}
 		}
+		wait = adaptiveInterval(interval, len(changes), wait)
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-time.After(interval):
+		case <-time.After(wait):
 		}
 	}
 }
@@ -234,6 +295,12 @@ func diff(prev, cur map[string]string) []Change {
 	sort.Slice(changes, func(i, j int) bool { return changes[i].File < changes[j].File })
 	return changes
 }
+
+// CatchUpMaxChanges is the incremental-vs-full reconcile policy: diffs at or
+// below this many changed files are applied incrementally (index.Update);
+// larger diffs rebuild (index.Build). Shared by service.LoadOrBuild and
+// project.Session.rebuildIndex.
+const CatchUpMaxChanges = 200
 
 // FileHashes returns a map of relative file path to content hash for every
 // indexable source file under root. Exported for watcher implementations that

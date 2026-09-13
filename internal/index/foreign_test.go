@@ -1,6 +1,8 @@
 package index
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -1062,5 +1064,40 @@ public class EntityEvent<T> extends BaseEvent<T> implements Serializable, Compar
 	}
 	if !foundExtends || !foundSerializable || !foundComparable {
 		t.Errorf("missing expected edges, got %v", edges)
+	}
+}
+
+// TestSingleLineFuncBodyDoesNotSwallowFile pins V8: a single-line JS/TS
+// function ("export function useAuth() { return {...} }") used to get the
+// whole file as its body range, attributing every later call to it and
+// producing spurious cross-edges (useAuth -> useInfiniteData). The body of
+// a self-contained decl line is the line itself.
+func TestSingleLineFuncBodyDoesNotSwallowFile(t *testing.T) {
+	dir := t.TempDir()
+	src := `export function useAuth() { return { user: 1 } }
+export function useInfiniteData<T>(url: string) { return { data: [] as T[] } }
+export function Page() {
+  const auth = useAuth()
+  const data = useInfiniteData<UserDto>("/api/users")
+  return { auth, data }
+}
+`
+	if err := os.WriteFile(filepath.Join(dir, "app.ts"), []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ix, err := Build(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Page calls both; the single-line functions call nothing (no spurious
+	// cross-edges).
+	if got := ix.Callers["useAuth"]; len(got) != 1 || got[0] != "Page" {
+		t.Fatalf("Callers[useAuth] = %v, want [Page] (no spurious callers)", got)
+	}
+	if got := ix.Callers["useInfiniteData"]; len(got) != 1 || got[0] != "Page" {
+		t.Fatalf("Callers[useInfiniteData] = %v, want [Page]", got)
+	}
+	if got := ix.Calls["useAuth"]; len(got) != 0 {
+		t.Fatalf("useAuth callees = %v, want none (spurious cross-edges)", got)
 	}
 }

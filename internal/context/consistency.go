@@ -67,11 +67,19 @@ func CheckConsistency(claims []domain.Claim) domain.ConsistencyReport {
 		bySubject[subject] = append(bySubject[subject], c)
 	}
 
-	// For each subject, check for cross-source contradictions.
+	// Aggregate per-subject outcomes order-independently: bySubject is a map
+	// (random iteration order), so the overall Result must never depend on the
+	// order subjects happen to be visited. Conflict dominates, then stale, then
+	// none. A packet whose subjects are all singleton groups (never examined
+	// for conflicts) stays UNKNOWN, matching prior behavior.
+	anyConflict := false
+	anyStale := false
+	examined := false
 	for subject, group := range bySubject {
 		if len(group) < 2 {
 			continue
 		}
+		examined = true
 		conflicted := false
 		for i := 0; i < len(group); i++ {
 			for j := i + 1; j < len(group); j++ {
@@ -114,18 +122,20 @@ func CheckConsistency(claims []domain.Claim) domain.ConsistencyReport {
 			}
 		}
 		if conflicted {
-			report.Result = domain.ConflictPresent
-		} else {
-			report.Result = domain.ConflictNone
-			// If the agreeing subject's evidence is stale, mark it.
-			if isGroupStale(group, now) {
-				report.StaleSubjects = append(report.StaleSubjects, subject)
-				report.Result = domain.ConflictStale
-			}
+			anyConflict = true
+		} else if isGroupStale(group, now) {
+			report.StaleSubjects = append(report.StaleSubjects, subject)
+			anyStale = true
 		}
 	}
-
-	if len(bySubject) == 0 {
+	switch {
+	case anyConflict:
+		report.Result = domain.ConflictPresent
+	case anyStale:
+		report.Result = domain.ConflictStale
+	case examined:
+		report.Result = domain.ConflictNone
+	default:
 		report.Result = domain.ConflictUnknown
 	}
 	return report

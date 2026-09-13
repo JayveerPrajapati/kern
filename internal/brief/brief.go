@@ -45,6 +45,7 @@ func Build(root string) (string, error) {
 	if ix != nil {
 		tail.WriteString(indexSection(ix))
 		tail.WriteString(architectureSection(ix))
+		tail.WriteString(surprisingSection(ix))
 	}
 	statsSection(&tail)
 	if entries := memory.List(root); len(entries) > 0 {
@@ -75,6 +76,24 @@ func Build(root string) (string, error) {
 	}
 	b.WriteString(tail.String())
 	return b.String(), nil
+}
+
+// surprisingSection lists the top cross-community couplings that are not
+// known bridges — the "what should I look at" onboarding signal. Omitted
+// entirely when there is nothing surprising, to keep the digest budget.
+func surprisingSection(ix *index.Index) string {
+	edges := intel.SurprisingConnections(ix, 5)
+	if len(edges) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("## Surprising connections\n")
+	for _, e := range edges {
+		fmt.Fprintf(&b, "- %s → %s (communities %q → %q, %d edge(s), %s:%d)\n",
+			e.Caller, e.Callee, e.CallerCommunity, e.CalleeCommunity, e.Edges, e.File, e.Line)
+	}
+	b.WriteString("\n")
+	return b.String()
 }
 
 // digestBudget caps the whole briefing so it fits inside the MCP output

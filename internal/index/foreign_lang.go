@@ -270,7 +270,19 @@ func extractForeign(rel string, src []byte, lang string) ([]Symbol, map[string][
 		return syms, calls, inherits, pkg, nil
 	}
 
-	// Fallback to regex-based extraction
+	// Fallback to regex-based extraction.
+	return extractForeignRegex(rel, src, lang)
+}
+
+// extractForeignRegex is the pure regex/heuristic extractor for foreign
+// languages — the default path when tree-sitter is not compiled in. It is
+// split out of extractForeign so the parity gate (internal/index/parity_test.go,
+// -tags treesitter) can compare it directly against tsExtract on the shared
+// fixture corpus: both extractors must agree on symbol sets, edge sets and
+// confidences, with only documented tolerances where regex legitimately
+// degrades.
+func extractForeignRegex(rel string, src []byte, lang string) ([]Symbol, map[string][]CallEdge, map[string][]string, *Pkg, error) {
+	imports := foreignImports(src, lang)
 	src = sfcScript(rel, src)
 	if len(bytes.TrimSpace(src)) == 0 {
 		return nil, nil, nil, nil, nil
@@ -398,6 +410,16 @@ func bodyEndFor(i int, f *ffile, spec *langSpec) int {
 		return len(f.lines)
 	}
 	base := f.preD[i]
+	// A self-contained declaration line — balanced braces with an opening
+	// brace on the line itself (single-line JS/TS functions like
+	// "export function useAuth() { return {...} }") — has no separate
+	// body: the depth scan below would otherwise mistake a LATER line's
+	// opening brace (postD > base) for this symbol's body and swallow the
+	// rest of the file, attributing every subsequent call to every
+	// earlier single-line function (V8 spurious edges).
+	if f.postD[i] == base && strings.Contains(f.clean[i], "{") {
+		return i + 1
+	}
 	// The body opens when depth first exceeds base. If the opening brace is
 	// on the declaration line itself (postD[i] > base), the body starts
 	// here. Otherwise the brace may be on a subsequent line (e.g.

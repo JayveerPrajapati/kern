@@ -3,7 +3,7 @@ package eval
 
 // Assertion is one deterministic check over an EvalResult.
 type Assertion struct {
-	Type     string  // "token_reduction" | "evidence_retention" | "error_rate"
+	Type     string  // "token_reduction" | "evidence_retention" | "error_rate" | "omission_rate"
 	Expected float64 // threshold
 	Actual   float64 // filled by the harness at run time
 	Pass     bool    // filled by the harness at run time
@@ -26,6 +26,12 @@ func AssertErrorRate(maxErrorRate float64) Assertion {
 	return Assertion{Type: "error_rate", Expected: maxErrorRate}
 }
 
+// AssertOmissionRate requires at most maxOmissionRate (0-1) of the critical
+// evidence to be dropped by the candidate (1 - EvidenceRetention).
+func AssertOmissionRate(maxOmissionRate float64) Assertion {
+	return Assertion{Type: "omission_rate", Expected: maxOmissionRate}
+}
+
 // evaluate fills Actual and Pass against an aggregate result. Pass relations:
 // token_reduction: Actual >= Expected; evidence_retention: Actual >= Expected;
 // error_rate: Actual <= Expected. Unknown Type: Pass=false.
@@ -39,6 +45,9 @@ func (a *Assertion) evaluate(r EvalResult) {
 		a.Pass = a.Actual >= a.Expected
 	case "error_rate":
 		a.Actual = r.ErrorRate
+		a.Pass = a.Actual <= a.Expected
+	case "omission_rate":
+		a.Actual = r.OmissionRate
 		a.Pass = a.Actual <= a.Expected
 	default:
 		a.Pass = false

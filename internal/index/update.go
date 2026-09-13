@@ -4,7 +4,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -25,6 +27,11 @@ import (
 //   - deleted files (in prev, absent on disk) drop their symbols and every
 //     edge sourced from them.
 //
+// The per-file work is parallelized with buildParallel's collect → pool →
+// ordered-replay structure: a phase-1 walk collects jobs, a worker pool
+// computes each file's result, and a single goroutine replays them in lexical
+// order — byte-identical to the serial path (small trees bypass the pool with
+// the same parallelMin logic).
 // After the merge, call edges whose target symbol no longer exists (a local
 // callee deleted by this update) are dropped, matching raw callee endpoints
 // against raw symbol names and qualified aliases — never resolved through
@@ -125,51 +132,109 @@ func Update(root string, prev *Index) (*Index, error) {
 		}
 	}
 
-	var reusedCount atomic.Int64
+	// Kick off the git identity observations (tree OID + commit) BEFORE the
+	// walk so the ~0.5s git staging dance overlaps with the change-detection
+	// walk instead of running after it; joined once FileHashes are final.
+	gitID := startIdentityGit(abs)
+
+	// Phase 1: serial walk collecting jobs. walkIndexable stays the single
+	// source of truth for file selection — the callback only captures the
+	// (rel, path, mtime, seq) tuple, mirroring buildParallel; no file contents
+	// are read here.
+	var jobs []fileJob
 	err = walkIndexable(abs, ign, t.maxFileBytes, func(rel, path string, mtime int64) error {
-		// Fast path: in-memory prior with an unchanged mtime — skip the
-		// read + hash entirely (same trust model as Build's reuseByMtime).
-		if r, ok := reuseByMtime(prev, rel, mtime); ok {
-			recordCopied(r.calls)
-			ix.applyFileResult(r)
-			reusedCount.Add(1)
-			return nil
-		}
-		src, serr := os.ReadFile(path)
-		if serr != nil {
-			// Skip unreadable files (e.g. broken symlinks) instead of aborting
-			// the whole update. Matches the build's behavior.
-			return nil
-		}
-		if !isIndexable(rel, src) {
-			return nil
-		}
-		if ph, ok := prev.FileHashes[rel]; ok && ph == cache.Hash(src) {
-			// Unchanged since prev was built: reuse its contribution
-			// verbatim instead of re-parsing.
-			if r, ok := prev.fileResults[rel]; ok {
-				r.mtime = mtime
-				r.pkg = copyPkg(r.pkg)
-				recordCopied(r.calls)
-				ix.applyFileResult(r)
-				reusedCount.Add(1)
-				return nil
-			}
-			// Loaded from disk (no per-file parse results survive
-			// serialization): reconstruct the per-file contribution from
-			// prev's merged maps.
-			r := reconstructFileResult(prev, rel, ph, mtime, callsByFile, inheritsByFile)
-			recordCopied(r.calls)
-			ix.applyFileResult(r)
-			reusedCount.Add(1)
-			return nil
-		}
-		// Changed or new file: the same per-file extraction path Build uses.
-		ix.applyFileResult(computeFileResult(rel, src, mtime))
+		jobs = append(jobs, fileJob{seq: len(jobs), rel: rel, path: path, mtime: mtime})
 		return nil
 	})
 	if err != nil {
 		return nil, err
+	}
+
+	// Phase 2: per-file change detection in a worker pool — the same
+	// collect → pool → ordered-replay structure as buildParallel. Workers are
+	// pure: updateComputeFile never touches ix and only reads prev (prev's
+	// maps are not written until replay completes), so the expensive
+	// read/hash/parse overlaps across cores. Small trees bypass the pool with
+	// buildParallel's parallelMin logic.
+	var reusedCount atomic.Int64
+	if len(jobs) < t.parallelMin {
+		// Small tree: apply jobs serially in lexical order — byte-identical
+		// to the pool path, exactly like buildParallel's bypass.
+		for _, j := range jobs {
+			ur := updateComputeFile(prev, j, callsByFile, inheritsByFile)
+			if ur.r.readErr || ur.r.skip {
+				continue
+			}
+			if ur.reused {
+				recordCopied(ur.r.calls)
+				reusedCount.Add(1)
+			}
+			ix.applyFileResult(ur.r)
+		}
+	} else {
+		workers := t.workers
+		results := make(chan updateResult, t.resultBuf)
+		var wg sync.WaitGroup
+		var next int64
+		// applied tracks the merge cursor: the next seq the merge loop will
+		// apply. Workers may claim jobs at most reorderWindow ahead of it, so
+		// the reorder buffer stays bounded (B7).
+		var applied atomic.Int64
+		for w := 0; w < workers; w++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for {
+					claim := atomic.LoadInt64(&next)
+					if claim >= int64(len(jobs)) {
+						return
+					}
+					if claim >= applied.Load()+reorderWindow {
+						// The reorder window is full — the merge cursor is
+						// waiting on a slow head-of-line file. Back off; the
+						// merge loop keeps draining results and will advance
+						// the window once the head arrives.
+						runtime.Gosched()
+						continue
+					}
+					idx := atomic.AddInt64(&next, 1) - 1
+					if idx >= int64(len(jobs)) {
+						return
+					}
+					results <- updateComputeFile(prev, jobs[idx], callsByFile, inheritsByFile)
+				}
+			}()
+		}
+		go func() {
+			wg.Wait()
+			close(results)
+		}()
+
+		// Phase 3: serial ordered merge in the main goroutine — the ONLY
+		// goroutine that mutates ix. Results are replayed in lexical (seq)
+		// order, preserving the apply order that keeps the merged index
+		// byte-identical to the serial path.
+		pending := map[int]updateResult{}
+		nextSeq := 0
+		for ur := range results {
+			pending[ur.r.seq] = ur
+			for {
+				ur2, ok := pending[nextSeq]
+				if !ok {
+					break
+				}
+				if !ur2.r.readErr && !ur2.r.skip {
+					if ur2.reused {
+						recordCopied(ur2.r.calls)
+						reusedCount.Add(1)
+					}
+					ix.applyFileResult(ur2.r)
+				}
+				delete(pending, nextSeq)
+				nextSeq++
+			}
+			applied.Store(int64(nextSeq))
+		}
 	}
 
 	// Owners with no defining symbol are pathological (a Build-consistent
@@ -195,20 +260,82 @@ func Update(root string, prev *Index) (*Index, error) {
 
 	ix.UpdatedAt = time.Now().UTC()
 	ix.buildSymbolIndex()
-	// Dangling-edge cleanup must run before computeCallers: it prunes the
-	// Calls map, and Callers/AliasCallers are derived from it afterwards.
+	// Dangling-edge cleanup must run before promoteLowEdges and
+	// computeCallers: it prunes the Calls map, and the reconciliation pass
+	// and Callers/AliasCallers are derived from it afterwards.
 	dropDanglingCalls(ix, prev, copied)
+	ix.promoteLowEdges()
 	ix.computeCallers()
 	ix.addDispatchEdges()
 	ix.resolveEntries()
 	ix.reindexByFile()
+	// CG-P1-9: build the prose→symbol inverted vocab after the symbol table is
+	// final so LookupProse can serve miss-chain candidates without re-walking it.
+	ix.buildProseVocab()
 	ix.computePrecisionByLang()
 	// Content-addressed identity: FileHashes and MaxMtime are final, so the
-	// freshness proofs compare identically to a full rebuild.
-	ix.Identity = buildIdentity(abs, ix.FileHashes, ix.UpdatedAt)
+	// freshness proofs compare identically to a full rebuild. The git half of
+	// the identity was captured concurrently with the walk (startIdentityGit
+	// below).
+	ix.Identity = gitID.joinIdentity(ix.FileHashes, ix.UpdatedAt)
 	ix.reusedResults = int(reusedCount.Load())
 	metrics.Default().RecordIndexBuild(time.Since(start))
 	return ix, nil
+}
+
+// updateResult carries one file's change-detection outcome: the computed
+// fileResult plus whether it was reused verbatim from prev. Only reused
+// results are added to the copied-edge set for dangling cleanup — freshly
+// extracted edges always reflect the current source.
+type updateResult struct {
+	r      fileResult
+	reused bool
+}
+
+// updateComputeFile does the per-file change-detection work Update's walk
+// used to do inline: the reuseByMtime fast path, the content-hash match vs
+// prev.FileHashes (verbatim reuse via prev.fileResults, or reconstruction
+// from prev's merged maps for a loaded prior), or a fresh computeFileResult.
+// It is a pure function of (prev, job, callsByFile, inheritsByFile) — it
+// never touches ix and never writes to prev — so it is safe to run
+// concurrently in the worker pool. prev.FileHashes and prev.fileResults are
+// only read here; nothing writes them until replay completes.
+func updateComputeFile(prev *Index, j fileJob, callsByFile map[string]map[string][]CallEdge, inheritsByFile map[string]map[string][]string) updateResult {
+	// Fast path: in-memory prior with an unchanged mtime — skip the read +
+	// hash entirely (same trust model as Build's reuseByMtime).
+	if r, ok := reuseByMtime(prev, j.rel, j.mtime); ok {
+		r.seq = j.seq
+		return updateResult{r: r, reused: true}
+	}
+	src, serr := os.ReadFile(j.path)
+	if serr != nil {
+		// Skip unreadable files (e.g. broken symlinks) instead of aborting
+		// the whole update; the replay skips readErr results exactly like
+		// buildParallel's merge loop.
+		return updateResult{r: fileResult{seq: j.seq, rel: j.rel, readErr: true}}
+	}
+	if !isIndexable(j.rel, src) {
+		return updateResult{r: fileResult{seq: j.seq, rel: j.rel, skip: true}}
+	}
+	if ph, ok := prev.FileHashes[j.rel]; ok && ph == cache.Hash(src) {
+		// Unchanged since prev was built: reuse its contribution verbatim
+		// instead of re-parsing.
+		if r, ok := prev.fileResults[j.rel]; ok {
+			r.mtime = j.mtime
+			r.seq = j.seq
+			r.pkg = copyPkg(r.pkg)
+			return updateResult{r: r, reused: true}
+		}
+		// Loaded from disk (no per-file parse results survive serialization):
+		// reconstruct the per-file contribution from prev's merged maps.
+		r := reconstructFileResult(prev, j.rel, ph, j.mtime, callsByFile, inheritsByFile)
+		r.seq = j.seq
+		return updateResult{r: r, reused: true}
+	}
+	// Changed or new file: the same per-file extraction path Build uses.
+	r := computeFileResult(j.rel, src, j.mtime)
+	r.seq = j.seq
+	return updateResult{r: r}
 }
 
 // reconstructFileResult rebuilds the per-file contribution of an unchanged
@@ -247,6 +374,18 @@ func reconstructFileResult(prev *Index, rel, hash string, mtime int64, callsByFi
 		if pkg != nil {
 			r.pkg.Name = pkg.Name
 			r.pkg.Lang = pkg.Lang
+			// Per-file struct-field attribution is not serialized, so an
+			// unchanged file's struct fields survive only through the
+			// package-merged map. Carry it forward, or every incremental
+			// update on a disk-loaded prior silently strips StructFields
+			// (the receiver-field callee rewrite then degrades and the dead
+			// lens re-flags live field-access calls).
+			if pkg.StructFields != nil {
+				r.pkg.StructFields = make(map[string]string, len(pkg.StructFields))
+				for k, v := range pkg.StructFields {
+					r.pkg.StructFields[k] = v
+				}
+			}
 		}
 	}
 	return r

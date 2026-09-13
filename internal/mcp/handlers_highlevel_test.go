@@ -391,3 +391,60 @@ func TestHandleSkillsUserDir(t *testing.T) {
 		t.Errorf("embedded listing header missing, got:\n%s", empty)
 	}
 }
+
+func TestClassifyMetaRequest_NoteRoutes(t *testing.T) {
+	cases := []struct{ in, wantTool, wantAction string }{
+		{"validate the notes tree", "kern_note", "validate"},
+		{"are the decision notes valid?", "kern_note", "validate"},
+		{"list the decision notes", "kern_note", "list"},
+		{"show the note inventory", "kern_note", "list"},
+	}
+	for _, c := range cases {
+		tool, args := classifyMetaRequest(c.in)
+		if tool != c.wantTool {
+			t.Errorf("%q -> tool %q, want %q", c.in, tool, c.wantTool)
+			continue
+		}
+		if got := args["action"]; got != c.wantAction {
+			t.Errorf("%q -> action %q, want %q", c.in, got, c.wantAction)
+		}
+	}
+}
+
+func TestClassifyMetaRequest_SkillRoutes(t *testing.T) {
+	tool, args := classifyMetaRequest("list the agent skills")
+	if tool != "kern_skill" || args["action"] != "catalog" {
+		t.Errorf("skill list -> %q %v, want kern_skill catalog", tool, args)
+	}
+}
+
+func TestClassifyMetaRequest_SkillLoadRoutes(t *testing.T) {
+	cases := []struct{ in, wantTool, wantSkill string }{
+		// Bare "safe change" without skill language deliberately stays
+		// kern_impact (impact analysis is the better answer than loading the
+		// runbook); explicit skill language routes to kern_skill load.
+		{"how do i make a safe change here", "kern_impact", ""},
+		{"use the incident triage skill", "kern_skill", "kern-incident-triage"},
+		{"show me the kern-safe-change runbook", "kern_skill", "kern-safe-change"},
+		{"what skills exist", "kern_skill", ""}, // generic -> catalog
+	}
+	for _, c := range cases {
+		tool, args := classifyMetaRequest(c.in)
+		if tool != c.wantTool {
+			t.Errorf("%q -> tool %q, want %q", c.in, tool, c.wantTool)
+			continue
+		}
+		if c.wantTool != "kern_skill" {
+			continue
+		}
+		if c.wantSkill == "" {
+			if args["action"] != "catalog" {
+				t.Errorf("%q -> action %v, want catalog", c.in, args["action"])
+			}
+			continue
+		}
+		if args["action"] != "load" || args["skill"] != c.wantSkill {
+			t.Errorf("%q -> %v, want load %s", c.in, args, c.wantSkill)
+		}
+	}
+}

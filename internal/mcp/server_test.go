@@ -96,6 +96,27 @@ func TestInitialize(t *testing.T) {
 	}
 }
 
+// TestInitializeInstructions pins the one-paragraph instructions field of the
+// initialize result (P2: initialize instructions). MCP hosts surface this text
+// to users and agents, so its presence and a grounding keyword are asserted to
+// guard against accidental removal.
+func TestInitializeInstructions(t *testing.T) {
+	resp := serveOne(t, writeReq("initialize", 1, `{"capabilities":{}}`))
+	res := resp["result"].(map[string]any)
+	instr, ok := res["instructions"].(string)
+	if !ok {
+		t.Fatalf("initialize result has no instructions string: %v", res["instructions"])
+	}
+	if instr == "" {
+		t.Fatal("initialize instructions must be non-empty")
+	}
+	for _, kw := range []string{"local", "deterministic"} {
+		if !strings.Contains(instr, kw) {
+			t.Errorf("initialize instructions should mention %q, got: %s", kw, instr)
+		}
+	}
+}
+
 func TestSetServerVersionPropagates(t *testing.T) {
 	SetServerVersion("9.9.9-test")
 	defer SetServerVersion("dev")

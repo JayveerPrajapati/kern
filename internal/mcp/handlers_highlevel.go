@@ -15,7 +15,6 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/skills"
 	"github.com/JayveerPrajapati/kern/internal/verification"
 	"github.com/JayveerPrajapati/kern/internal/whatif"
-	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
@@ -823,6 +822,12 @@ func classifyArchTools(low, request string) (string, map[string]any, bool) {
 		return "kern_arch", map[string]any{}, true
 	case strings.Contains(low, "communit") || hasWord(low, "cluster"):
 		return "kern_communities", map[string]any{}, true
+	case strings.Contains(low, "surprising") || strings.Contains(low, "surprise") || strings.Contains(low, "unexpected connection"):
+		return "kern_surprising", map[string]any{}, true
+	case strings.Contains(low, "snapshot"):
+		return "kern_snapshot", map[string]any{}, true
+	case strings.Contains(low, "cycle") || strings.Contains(low, "import graph") || strings.Contains(low, "circular"):
+		return "kern_cycles", map[string]any{}, true
 	case hasWord(low, "hub") || hasWord(low, "hotspot") || strings.Contains(low, "most depended"):
 		return "kern_hubs", map[string]any{}, true
 	case hasWord(low, "bridge") || hasWord(low, "coupling"):
@@ -899,10 +904,14 @@ func classifyGraphTools(low, request string) (string, map[string]any, bool) {
 		return tool, args, true
 	case hasWord(low, "trace") && (strings.Contains(low, "stack") || strings.Contains(low, "pprof")):
 		return "kern_trace", map[string]any{}, true
-	case hasWord(low, "probe") || strings.Contains(low, "what does this touch"):
-		return "kern_probe", map[string]any{"task": request}, true
-	}
-	return "", nil, false
+case hasWord(low, "probe") || strings.Contains(low, "what does this touch"):
+	return "kern_probe", map[string]any{"task": request}, true
+case strings.Contains(low, "prose") || strings.Contains(low, "vocab") || strings.Contains(low, "spelling"):
+	// CG-P1-9: prose-word → symbol candidate lookup; kept after the more
+	// specific symbol questions so "explain the vocab" still explores.
+	return "kern_prose", map[string]any{"query": request}, true
+}
+return "", nil, false
 }
 
 // classifyProjectTools routes the project-level utility cases.
@@ -930,15 +939,9 @@ func classifyProjectTools(low, request string) (string, map[string]any, bool) {
 		return "kern_run_build", map[string]any{}, true
 	case hasWord(low, "exec") || strings.Contains(low, "run script") || strings.Contains(low, "run code"):
 		return "kern_exec", map[string]any{}, true
-	case hasWord(low, "skill") || hasWord(low, "playbook") || strings.Contains(low, "runbook"):
-		skillName := ""
-		for _, name := range skills.SkillNames {
-			if strings.Contains(low, name) || strings.Contains(low, strings.TrimPrefix(name, "kern-")) {
-				skillName = name
-				break
-			}
-		}
-		return "kern_skills", map[string]any{"skill": skillName}, true
+	case strings.Contains(low, "safe delete") || strings.Contains(low, "delete symbol") || strings.Contains(low, "can i delete"):
+		tool, args := withSymbol(request, low, "kern_safe_delete", "", map[string]any{})
+		return tool, args, true
 	case strings.Contains(low, "safe delete") || strings.Contains(low, "delete symbol") || strings.Contains(low, "can i delete"):
 		tool, args := withSymbol(request, low, "kern_safe_delete", "", map[string]any{})
 		return tool, args, true
@@ -981,6 +984,14 @@ func classifyRetrievalTools(low, request string) (string, map[string]any, bool) 
 		return "kern_retrieve", map[string]any{"query": request, "level": "l1"}, true
 	case strings.Contains(low, "context plan") || strings.Contains(low, "plan context") || strings.Contains(low, "explain context") || strings.Contains(low, "planner"):
 		return "kern_plan_context", map[string]any{"change": request}, true
+	case strings.Contains(low, "orchestrate") || strings.Contains(low, "silent context") || strings.Contains(low, "context pipeline"):
+		return "kern_orchestrate", map[string]any{"intent": request}, true
+	case strings.Contains(low, "agent skills") || strings.Contains(low, "list skills") || strings.Contains(low, "load skill") || strings.Contains(low, "skill runbook"):
+		return "kern_skill", map[string]any{"action": "catalog"}, true
+	case strings.Contains(low, "validate note") || (strings.Contains(low, "notes") && strings.Contains(low, "valid")):
+		return "kern_note", map[string]any{"action": "validate"}, true
+	case (strings.Contains(low, "list") && strings.Contains(low, "notes")) || strings.Contains(low, "note inventory"):
+		return "kern_note", map[string]any{"action": "list"}, true
 	}
 	return "", nil, false
 }
@@ -988,6 +999,41 @@ func classifyRetrievalTools(low, request string) (string, map[string]any, bool) 
 // classifyMetaRequest maps a natural-language request to the kern_* tool name
 // that best answers it, using deterministic keyword matching. It returns the
 // chosen tool name plus the derived arguments to pass to that tool's handler.
+// classifySkillTools routes explicit skill-language queries (runbook,
+// playbook, a literal skill name, or "skill" with load/use/show intent) to
+// kern_skill before the workflow router can claim them. Semantic phrases
+// WITHOUT skill language deliberately stay un-routed: "make a safe change"
+// -> kern_impact and "triage this incident" -> kern_incident are better
+// answers than loading the runbook.
+func classifySkillTools(low, request string) (string, map[string]any, bool) {
+	if strings.Contains(low, "runbook") || strings.Contains(low, "playbook") {
+		name := ""
+		for _, n := range skills.SkillNames {
+			if strings.Contains(low, n) || strings.Contains(low, strings.TrimPrefix(n, "kern-")) {
+				name = n
+				break
+			}
+		}
+		if name != "" {
+			return "kern_skill", map[string]any{"action": "load", "skill": name}, true
+		}
+		return "kern_skill", map[string]any{"action": "catalog"}, true
+	}
+	if strings.Contains(low, "incident triage") {
+		return "kern_skill", map[string]any{"action": "load", "skill": "kern-incident-triage"}, true
+	}
+	if strings.Contains(low, "safe change") && (strings.Contains(low, "skill") || strings.Contains(low, "runbook") || strings.Contains(low, "playbook")) {
+		return "kern_skill", map[string]any{"action": "load", "skill": "kern-safe-change"}, true
+	}
+	if strings.Contains(low, "what skills") || strings.Contains(low, "available skills") {
+		return "kern_skill", map[string]any{"action": "catalog"}, true
+	}
+	if hasWord(low, "skill") && (strings.Contains(low, "load") || strings.Contains(low, "use") || strings.Contains(low, "show") || strings.Contains(low, "list")) {
+		return "kern_skill", map[string]any{"action": "catalog"}, true
+	}
+	return "", nil, false
+}
+
 func classifyMetaRequest(request string) (string, map[string]any) {
 	low := strings.ToLower(request)
 	// The sub-routers are consulted in the same order as the original
@@ -997,6 +1043,9 @@ func classifyMetaRequest(request string) (string, map[string]any) {
 	// retrieval router is consulted FIRST so its specific phrases (plan
 	// context, retrieve/resolve) beat the broader workflow/arch keywords.
 	if t, a, ok := classifyRetrievalTools(low, request); ok {
+		return t, a
+	}
+	if t, a, ok := classifySkillTools(low, request); ok {
 		return t, a
 	}
 	if t, a, ok := classifyOptimizeTools(low, request); ok {
@@ -1065,10 +1114,12 @@ func (s *Server) handleMeta(ctx context.Context, args map[string]any) (string, e
 	// func(ctx, args) (string, error) and live on *Server.
 	var result string
 	var err error
-	switch tool {
-	case "kern_search":
-		result, err = s.handleSearch(ctx, subArgs)
-	case "kern_explore":
+switch tool {
+case "kern_search":
+	result, err = s.handleSearch(ctx, subArgs)
+case "kern_prose":
+	result, err = s.handleProse(ctx, subArgs)
+case "kern_explore":
 		result, err = s.handleExplore(ctx, subArgs)
 	case "kern_code_graph":
 		result, err = s.handleCodeGraph(ctx, subArgs)
@@ -1095,6 +1146,12 @@ func (s *Server) handleMeta(ctx context.Context, args map[string]any) (string, e
 		result, err = s.handleBridges(ctx, subArgs)
 	case "kern_dead":
 		result, err = s.handleDead(ctx, subArgs)
+	case "kern_cycles":
+		result, err = s.handleCycles(ctx, subArgs)
+	case "kern_surprising":
+		result, err = s.handleSurprising(ctx, subArgs)
+	case "kern_snapshot":
+		result, err = s.handleSnapshot(ctx, subArgs)
 	case "kern_larges":
 		result, err = s.handleLarges(ctx, subArgs)
 	case "kern_test_gaps":
@@ -1205,8 +1262,10 @@ func (s *Server) handleMeta(ctx context.Context, args map[string]any) (string, e
 		result, err = s.handleAgentRoleRBAC(ctx, subArgs)
 	case "kern_stream":
 		result, err = s.handleStream(ctx, subArgs)
-	case "kern_skills":
-		result, err = s.handleSkills(ctx, subArgs)
+	case "kern_skill":
+		result, err = s.handleSkill(ctx, subArgs)
+	case "kern_note":
+		result, err = s.handleNote(ctx, subArgs)
 	default:
 		// Fallback: search
 		subArgs["query"] = request
@@ -1221,54 +1280,4 @@ func (s *Server) handleMeta(ctx context.Context, args map[string]any) (string, e
 		out += fmt.Sprintf("\n[phase hint: %s — set KERN_MCP_PHASE=%s to filter the advertised tool list]", phase, phase)
 	}
 	return out, nil
-}
-
-func (s *Server) handleSkills(ctx context.Context, args map[string]any) (string, error) {
-	skill := strings.TrimSpace(argString(args, "skill"))
-	// User skills live in <root>/.kern/skills (same root source as the
-	// handleAnalyze profile block). A missing dir yields no user skills and
-	// keeps the output byte-identical to the embedded-only listing.
-	root := argString(args, "root")
-	if root == "" {
-		root = "."
-	}
-	userSkills, userErr := skills.LoadSkillsFromDir(filepath.Join(root, ".kern", "skills"))
-	if skill != "" {
-		if data, err := skills.ReadSkill(skill); err == nil {
-			return string(data), nil
-		}
-		if data, err := skills.ReadSkill("kern-" + skill); err == nil {
-			return string(data), nil
-		}
-		// Not an embedded skill: look in the user dir for a skill whose Name
-		// (or directory — identical in LoadSkillsFromDir) matches.
-		if userErr == nil {
-			for _, us := range userSkills {
-				if us.Name == skill || us.Name == "kern-"+skill {
-					return us.Body, nil
-				}
-			}
-		}
-	}
-
-	var sb strings.Builder
-	sb.WriteString("# Kern Bundled Agent Skills\n\n")
-	sb.WriteString("The following workflow runbooks are installed and ready for agents:\n\n")
-	for _, name := range skills.SkillNames {
-		data, err := skills.ReadSkill(name)
-		if err != nil {
-			continue
-		}
-		desc, _ := skills.ExtractDescriptionAndBody(data)
-		sb.WriteString(fmt.Sprintf("- **%s**: %s\n", name, desc))
-	}
-	sb.WriteString("\nTo view a specific runbook, request: 'show skill <name>' (e.g. 'show skill kern-safe-change').\n")
-	sb.WriteString("Each skill also includes executable helper scripts under its scripts/ directory.\n")
-	if userErr == nil && len(userSkills) > 0 {
-		sb.WriteString("\n# User Skills\n\n")
-		for _, us := range userSkills {
-			sb.WriteString(fmt.Sprintf("- **%s** (user): %s\n", us.Name, us.Description))
-		}
-	}
-	return sb.String(), nil
 }

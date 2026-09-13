@@ -27,7 +27,7 @@ Already installed? Run `kern doctor` to verify everything is wired.
 
 <br>
 
-**Phase-aware MCP routing (11 high-level tools by default, 121 in full mode) · 90+ CLI commands · 17 indexed languages (Go + Java resolved; 15 at heuristic precision — skipped under `--precision strict`; build with `-tags treesitter` for AST) · 100% local**
+**Phase-aware MCP routing (11 high-level tools by default, 131 in full mode) · 90+ CLI commands · 17 indexed languages (Go + Java resolved; 15 at heuristic precision — skipped under `--precision strict`; build with `-tags treesitter` for AST) · 100% local**
 
 </div>
 
@@ -345,7 +345,7 @@ codebase's stack is answered in one call.
    with WAL journaling and FTS5 full-text search for concurrent access.
 
 3. **Analysis** — 90+ CLI commands and the MCP tool catalog (11 high-level
-   tools by default, 121 in full mode) read the same index:
+   tools by default, 131 in full mode) read the same index:
    call graphs, blast radius, change impact, hotspots, dead code, path
    finding, architecture communities, coverage gaps — all dependency-free,
    all deterministic.
@@ -534,12 +534,12 @@ another code-intelligence MCP. Three properties set it apart:
   enforces architecture boundaries; phase-aware routing keeps agents focused
   instead of overwhelmed — 4 phases (explore/plan/edit/verify), each with a
   focused shortlist. Set `KERN_MCP_PHASE=explore` to filter the advertised
-  tools; the full 121-tool catalog stays behind `KERN_MCP_FULL=1`.
+  tools; the full 131-tool catalog stays behind `KERN_MCP_FULL=1`.
   Most MCP servers expose capability with no policy layer.
 
 When running as an MCP server (`kern-mcp`), kern exposes an **11-tool
 high-level surface by default** (routed through `kern_meta`), with the full
-**toolset (121 tools)** behind `KERN_MCP_FULL=1` for advanced use — and
+**toolset (131 tools)** behind `KERN_MCP_FULL=1` for advanced use — and
 phase-aware routing (`KERN_MCP_PHASE=explore|plan|edit|verify`) as the
 default way to keep the advertised list focused. They map 1:1 to the CLI
 commands, so opencode, Claude Code, Codex, Cursor and 8 more agents get the
@@ -648,7 +648,7 @@ code unless a human opt-in exists. The matrix:
 | **MCP HTTP** (`kern-mcp --http`) | **loopback-only** - a non-loopback bind is refused (kern-mcp exposes RCE-capable tools) | run behind your own authenticated proxy if remote access is required; optional **TLS** via `--tls-cert/--tls-key` or `KERN_MCP_TLS_CERT`/`KERN_MCP_TLS_KEY` |
 | **MCP exec tools** (`kern_exec`/`kern_sandbox`/`kern_execute`) | **denied** unless allowlisted | `KERN_ALLOW_EXEC=1` or `KERN_TOOLS` allowlist |
 | **Script/sandbox isolation** | isolated by default; `no_isolate` ignored, network blocked | `KERN_ALLOW_NO_ISOLATE=1`, `KERN_ALLOW_NET=1` |
-| **kern-server (local mode)** | binds `127.0.0.1:8090` by default, **no auth** - localhost only | change `-addr` at your own risk; put a proxy in front for remote |
+| **kern-server (local mode)** | binds `128.0.0.1:8090` by default, **no auth** - localhost only | change `-addr` at your own risk; put a proxy in front for remote |
 | **kern-server (enterprise mode)** | **fail-closed**: refuses to serve (503) without `KERN_AUTH_TOKEN`; per-project isolation | `-enterprise` + `KERN_ENTERPRISE_PROJECTS` |
 | **Deploy** (`ShellDeployer`) | **fail-closed**: refuses to run unless explicitly enabled | `KERN_ALLOW_DEPLOY=1` (+ optional `KERN_DEPLOY_COMMAND`) |
 | **Remote LLM providers** | never contacted by default | `--llm` + `KERN_LLM_PROVIDER=anthropic|openai|google`; prompts masked first |
@@ -783,7 +783,7 @@ native hooks for agents whose hook APIs allow it:
 | **Codex** | `[mcp_servers.kern]` in `~/.codex/config.toml` | — (no output-rewrite hook API) |
 | **JSON adapters** | `continue`, `windsurf`, `zed`, `vscode`, `antigravity`, `qwen`, `qoder`, `kiro`, `copilot` (VS Code), `copilot-cli` | — (no hook API) |
 
-All agents receive the same MCP surface (11 high-level tools by default, 121
+All agents receive the same MCP surface (11 high-level tools by default, 131
 in full mode, phase-filtered via `KERN_MCP_PHASE`) and the same `AGENTS.md` rules. Output
 compression + session memory run natively where the platform's hook API allows
 in-place output replacement (opencode, Claude Code, Gemini); agents without

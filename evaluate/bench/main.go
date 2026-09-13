@@ -734,6 +734,213 @@ func taskClassMetrics() []classMetrics {
 	return out
 }
 
+// ---------------------------------------------------------------------------
+// Session metrics — deterministic session-simulation KPI (CodeGraph-P2).
+//
+// KPI: TOTAL tokens per completed task, not per-response size. Two retrieval
+// strategies resolve the same scripted question; both pay residual-context
+// rent, because every new request re-sends the conversation prefix. The model
+// is pure constants + arithmetic (no LLM, no timing, no randomness), so
+// identical runs produce identical tables.
+//
+// Levels mirror kern_retrieve's progressive disclosure:
+//   L1 = index summary, L2 = neighborhood, L3 = source.
+// Strategy A resolves the question in 4-6 small steps with 2 level upgrades;
+// strategy B resolves it with 2 large direct full-context calls. Per-step
+// payload sizes are fixed constants chosen to be representative of each
+// level's output size.
+//
+// Model: step k's request carries payload_k PLUS the accumulated conversation
+// prefix (the payloads of steps 1..k-1, re-sent verbatim). So
+//   request_k    = payload_k + prefix_k,  prefix_k = sum(payload_i, i<k)
+//   prefix rent  = sum(prefix_k)          (the residual-context rent column)
+//   total tokens = sum(request_k) = sum(payload) + prefix rent
+// ---------------------------------------------------------------------------
+
+// Session level payload constants (deterministic, representative token sizes).
+const (
+	sessionL1     = 120  // L1 index summary payload (tokens)
+	sessionL2     = 400  // L2 neighborhood payload (tokens)
+	sessionL3     = 1800 // L3 source payload (tokens)
+	sessionDirect = 3200 // direct full-context call payload (tokens)
+)
+
+// sessionStep is one scripted retrieval step: a level and its payload size.
+type sessionStep struct {
+	level   string // "L1", "L2", "L3" or "direct"
+	payload int    // tokens this step sends
+}
+
+// sessionPlan is one scripted question over an existing fixture corpus.
+type sessionPlan struct {
+	task    string        // the scripted question
+	fixture string        // existing fixture corpus the question targets
+	a       []sessionStep // strategy A: progressive disclosure (L1 -> L3)
+	b       []sessionStep // strategy B: direct tools
+}
+
+// sessionMetricsRow is the per (task, strategy) simulation result.
+type sessionMetricsRow struct {
+	task          string
+	strategy      string
+	steps         int
+	payloadTokens int     // sum of per-step payloads
+	prefixRent    int     // sum of re-sent prefixes (residual-context rent)
+	totalTokens   int     // payloadTokens + prefixRent = total tokens per completed task
+	deltaPct      float64 // (B - A) / A * 100; 0 when not applicable (A row)
+	hasDelta      bool
+}
+
+// sessionPlans are the 3 scripted questions the harness simulates. Every plan
+// reuses an existing fixture corpus (no new corpus). Strategy A always runs
+// 4-6 steps with exactly 2 level upgrades; strategy B always runs 2 direct
+// steps of the direct-tool payload.
+var sessionPlans = []sessionPlan{
+	{
+		task:    "trace what a POST /users request touches (medium monolith)",
+		fixture: "medium monolith",
+		a: []sessionStep{
+			{level: "L1", payload: sessionL1}, {level: "L2", payload: sessionL2},
+			{level: "L3", payload: sessionL3}, {level: "L3", payload: sessionL3},
+			{level: "L3", payload: sessionL3}, {level: "L3", payload: sessionL3},
+		},
+		b: []sessionStep{{level: "direct", payload: sessionDirect}, {level: "direct", payload: sessionDirect}},
+	},
+	{
+		task:    "what breaks if symbol X changes (large monorepo)",
+		fixture: "large monorepo",
+		a: []sessionStep{
+			{level: "L1", payload: sessionL1}, {level: "L2", payload: sessionL2},
+			{level: "L3", payload: sessionL3}, {level: "L3", payload: sessionL3},
+			{level: "L3", payload: sessionL3},
+		},
+		b: []sessionStep{{level: "direct", payload: sessionDirect}, {level: "direct", payload: sessionDirect}},
+	},
+	{
+		task:    "why does X exist and who needs it (multi-language repository)",
+		fixture: "multi-language repository",
+		a: []sessionStep{
+			{level: "L1", payload: sessionL1}, {level: "L2", payload: sessionL2},
+			{level: "L2", payload: sessionL2}, {level: "L2", payload: sessionL2},
+			{level: "L3", payload: sessionL3},
+		},
+		b: []sessionStep{{level: "direct", payload: sessionDirect}, {level: "direct", payload: sessionDirect}},
+	},
+}
+
+// sessionStepCosts returns, for each step k, the total tokens its request
+// carries: payload_k plus the re-sent conversation prefix (the sum of the
+// payloads of steps 1..k-1). This is the residual-context rent model: every
+// new request re-sends everything before it.
+func sessionStepCosts(steps []sessionStep) []int {
+	costs := make([]int, len(steps))
+	prefix := 0
+	for i, s := range steps {
+		costs[i] = prefix + s.payload
+		prefix += s.payload
+	}
+	return costs
+}
+
+// computeStrategy reduces a step plan to its aggregate row.
+func computeStrategy(task, strategy string, steps []sessionStep) sessionMetricsRow {
+	r := sessionMetricsRow{task: task, strategy: strategy, steps: len(steps)}
+	for _, c := range sessionStepCosts(steps) {
+		r.totalTokens += c
+	}
+	for _, s := range steps {
+		r.payloadTokens += s.payload
+	}
+	r.prefixRent = r.totalTokens - r.payloadTokens
+	return r
+}
+
+// simulateSession runs both strategies over one scripted plan and computes
+// the delta% (B vs A) on strategy B's row (positive = B costs more than A).
+// Pure and deterministic: constants and arithmetic only.
+func simulateSession(p sessionPlan) (sessionMetricsRow, sessionMetricsRow) {
+	a := computeStrategy(p.task, "progressive disclosure (A)", p.a)
+	b := computeStrategy(p.task, "direct tools (B)", p.b)
+	if a.totalTokens > 0 {
+		b.deltaPct = float64(b.totalTokens-a.totalTokens) / float64(a.totalTokens) * 100
+		b.hasDelta = true
+	}
+	return a, b
+}
+
+// runSessionMetrics simulates every scripted plan, A row then B row per plan.
+func runSessionMetrics() []sessionMetricsRow {
+	var rows []sessionMetricsRow
+	for _, p := range sessionPlans {
+		a, b := simulateSession(p)
+		rows = append(rows, a, b)
+	}
+	return rows
+}
+
+// reportSessionMetrics prints the "## session metrics" table plus the
+// one-line KPI takeaway. Informational: always returns no gate failures.
+func reportSessionMetrics() []string {
+	fmt.Println("| task | strategy | steps | payload tokens | prefix rent (sum of re-sent prefixes) | total tokens per completed task | delta% (B vs A) |")
+	fmt.Println("|---|---|---|---|---|---|---|")
+	for _, p := range sessionPlans {
+		a, b := simulateSession(p)
+		printSessionRow(a)
+		printSessionRow(b)
+	}
+	fmt.Println()
+	fmt.Println(sessionTakeawayLine())
+	return nil
+}
+
+// printSessionRow prints one (task, strategy) row. The delta% column is only
+// meaningful on strategy B rows (B vs A); A rows show an em dash.
+func printSessionRow(r sessionMetricsRow) {
+	delta := "—"
+	if r.hasDelta {
+		delta = fmt.Sprintf("%.1f%%", r.deltaPct)
+	}
+	fmt.Printf("| %s | %s | %d | %d | %d | %d | %s |\n",
+		r.task, r.strategy, r.steps, r.payloadTokens, r.prefixRent, r.totalTokens, delta)
+}
+
+// sessionTakeawayLine builds the KPI takeaway from the same deterministic
+// simulation as the table, so the paragraph can never drift from the rows:
+// which strategy minimizes TOTAL tokens per completed task, and the
+// residual-context share (rent / total) — the "rent" failure mode.
+func sessionTakeawayLine() string {
+	var aTotal, bTotal, aRent int
+	worstShare := 0.0
+	worstTask := ""
+	for _, p := range sessionPlans {
+		a, b := simulateSession(p)
+		aTotal += a.totalTokens
+		aRent += a.prefixRent
+		bTotal += b.totalTokens
+		if a.totalTokens > 0 {
+			share := float64(a.prefixRent) / float64(a.totalTokens) * 100
+			if share > worstShare {
+				worstShare = share
+				worstTask = p.task
+			}
+		}
+	}
+	delta := 0.0
+	if aTotal > 0 {
+		delta = float64(bTotal-aTotal) / float64(aTotal) * 100
+	}
+	winner := "direct tools (B)"
+	if aTotal < bTotal {
+		winner = "progressive disclosure (A)"
+	}
+	rentShare := 0.0
+	if aTotal > 0 {
+		rentShare = float64(aRent) / float64(aTotal) * 100
+	}
+	return fmt.Sprintf("_Takeaway: %s minimizes TOTAL tokens per completed task across the %d scripted sessions (%d vs %d; %.1f%% B vs A). Residual-context rent is %d tokens (%.1f%% of A's total) and reaches %.1f%% in the longest session (%q) — the progressive-disclosure prefix re-send failure mode. KPI: total tokens per completed task, not per-response size._",
+		winner, len(sessionPlans), bTotal, aTotal, delta, aRent, rentShare, worstShare, worstTask)
+}
+
 func main() {
 	root := flag.String("root", ".", "project root whose docs the recall test indexes")
 	flag.Parse()
@@ -774,6 +981,16 @@ func main() {
 	fmt.Println()
 	gates = append(gates, reportClassMetrics()...)
 	fmt.Println()
+
+	// Session-simulation KPI: total tokens per completed task for
+	// progressive-disclosure (L1/L2/L3) vs direct-tool retrieval over
+	// scripted questions on the existing fixture corpus. Informational —
+	// no hard gate on this table.
+	fmt.Println("## session metrics")
+	fmt.Println()
+	gates = append(gates, reportSessionMetrics()...)
+	fmt.Println()
+
 	// Tokenizer accuracy: exact counters (cl100k/o200k) must reproduce
 	// reference counts; estimator drift is reported for transparency.
 	fmt.Println("## tokenizer accuracy")

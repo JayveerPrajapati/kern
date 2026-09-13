@@ -1,0 +1,5 @@
+{
+  "name": "fix-task-skill-assisted",
+  "intent": "fix the flaky dispatch test",
+  "critical_evidence": ["dispatch"]
+}

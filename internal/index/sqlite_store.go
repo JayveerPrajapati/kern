@@ -4,6 +4,7 @@ package index
 
 import (
 	"database/sql"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -27,9 +28,10 @@ func SQLiteEnabled() bool { return sqliteEnabled() }
 // WAL journal mode. It mirrors the JSON cache but adds true multi-process
 // read/write concurrency and an FTS5 full-text index over symbols.
 type SQLiteStore struct {
-	db   *sql.DB
-	root string
-	path string
+	db     *sql.DB
+	root   string
+	path   string
+	closed bool // set by Close; makes the WAL valve a no-op afterwards
 }
 
 // sqliteDBPath returns the on-disk location for the SQLite store of root.
@@ -61,12 +63,20 @@ func OpenSQLite(root string) (*SQLiteStore, error) {
 	}
 	// WAL for concurrent access; busy_timeout so writers wait instead of
 	// failing when another process holds the write lock momentarily.
+	//
+	// wal_autocheckpoint=0 defers SQLite's default autocheckpoint (1000
+	// pages) so WAL growth is managed by the valve below. Bulk builds write
+	// inside a single transaction and are checkpointed by the valve at the
+	// transaction boundary; the valve targets the incremental
+	// watch-daemon/MCP write pattern, where the coarse 1000-page default
+	// would otherwise checkpoint on every commit of a long-lived process.
 	for _, pragma := range []string{
 		"PRAGMA journal_mode=WAL;",
 		"PRAGMA synchronous=NORMAL;",
 		"PRAGMA busy_timeout=5000;",
 		"PRAGMA temp_store=MEMORY;",
 		"PRAGMA cache_size=-20000;",
+		"PRAGMA wal_autocheckpoint=0;",
 	} {
 		if _, err := db.Exec(pragma); err != nil {
 			db.Close()
@@ -88,6 +98,7 @@ func (s *SQLiteStore) Close() error {
 	if s == nil || s.db == nil {
 		return nil
 	}
+	s.closed = true
 	return s.db.Close()
 }
 
@@ -200,6 +211,95 @@ func storeHasColumn(db *sql.DB, table, col string) bool {
 		}
 	}
 	return false
+}
+
+// WAL valve: bounds the write-ahead log for the incremental
+// watch-daemon/MCP write pattern (many small writes over a long-lived
+// process). wal_autocheckpoint is disabled at open, so SQLite's default
+// 1000-page autocheckpoint never fires on its own; the valve below
+// checkpoints only once the WAL crosses walTrigger, and PASSIVE never
+// blocks readers or writers. Bulk builds wrap the whole index in one
+// transaction and are checkpointed by the valve at that transaction
+// boundary; the valve targets the incremental pattern, where the coarse
+// default would otherwise checkpoint on every commit.
+const (
+	// walSoftCap is the target ceiling for the WAL: 8 MiB. That is far
+	// below the 100 MiB sandbox snapshot cap and the JSON index scale, so
+	// the WAL stays a small fraction of the store.
+	walSoftCap = 8 << 20 // 8 MiB
+	// walTrigger is the size at which maybeCheckpoint fires a passive
+	// checkpoint: 2 x walSoftCap. Crossing it is rare (only after a burst
+	// of incremental writes), which is what keeps the per-write check cheap.
+	walTrigger = 2 * walSoftCap // 16 MiB
+)
+
+// walLiveFrames returns the number of uncheckpointed WAL frames by reading
+// the WAL-index header in the -shm file (mxFrame at offset 16 minus
+// nBackfill at offset 96; layout per https://www.sqlite.org/walformat.html,
+// frozen since SQLite 3.7.0). modernc.org/sqlite does not expose
+// PRAGMA wal_pages/wal_size, so this is the only side-effect-free live-WAL
+// probe the store has. It returns a negative value when the file is missing
+// or unreadable, which callers treat as "checkpoint to be safe".
+func walLiveFrames(storePath string) int64 {
+	f, err := os.Open(storePath + "-shm")
+	if err != nil {
+		return -1
+	}
+	defer f.Close()
+	var hdr [100]byte
+	if _, err := f.ReadAt(hdr[:], 0); err != nil {
+		return -1
+	}
+	mx := int64(binary.LittleEndian.Uint32(hdr[16:20]))
+	nb := int64(binary.LittleEndian.Uint32(hdr[96:100]))
+	if mx < nb {
+		return -1 // torn read (concurrent checkpoint): treat as unreadable
+	}
+	return mx - nb
+}
+
+// maybeCheckpoint runs a passive WAL checkpoint once the write-ahead log
+// exceeds walTrigger (2 x walSoftCap). It is called at the end of every
+// mutating operation, after the write commits.
+//
+// PASSIVE checkpoints as much as it can without blocking readers or
+// writers; when another connection (e.g. a separate watch-daemon or MCP
+// process) holds a read lock it returns busy and defers the flush to the
+// next write — that is the backpressure mechanism, and the threshold
+// guarantees the check itself is rare. A nil or already-closed store is a
+// no-op.
+func (s *SQLiteStore) maybeCheckpoint() error {
+	if s == nil || s.db == nil || s.closed {
+		return nil
+	}
+	// Cheap disk gate: the live WAL can exceed walTrigger only once the WAL
+	// file's high-water size reaches it (SQLite never truncates the -wal
+	// file while the store is open), so a small file proves the WAL is
+	// small too — no shm read, no DB round trip on the common path.
+	st, err := os.Stat(s.path + "-wal")
+	if err != nil {
+		return nil // no WAL file yet (fresh store)
+	}
+	if st.Size() < walTrigger {
+		return nil
+	}
+	// The file is big, but it may be a high-water mark with a small live
+	// WAL (all frames already backfilled). Measure before checkpointing so
+	// the flush stays rare.
+	if frames := walLiveFrames(s.path); frames >= 0 {
+		var pageSize int64
+		if err := s.db.QueryRow("PRAGMA page_size").Scan(&pageSize); err != nil {
+			return err
+		}
+		if frames*pageSize <= walTrigger {
+			return nil
+		}
+	}
+	// Live WAL crossed the trigger (or could not be measured — fail safe
+	// toward a bounded WAL). PASSIVE never blocks; a busy result means
+	// another connection holds the WAL and the next write re-checks.
+	_, err = s.db.Exec("PRAGMA wal_checkpoint(PASSIVE)")
+	return err
 }
 
 // Save persists the index to SQLite in one transaction. It is safe to call
@@ -388,7 +488,14 @@ func (s *SQLiteStore) Save(ix *Index) error {
 		}
 	}
 
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	// WAL valve: the write committed; checkpoint once the WAL has crossed
+	// walTrigger. This is the single post-write valve point — Save is the
+	// store's only mutating operation, so nothing is missed and the check
+	// is never inside a per-row loop.
+	return s.maybeCheckpoint()
 }
 
 // Load reads the index back from SQLite. Returns (nil, nil) when no store

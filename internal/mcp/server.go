@@ -39,6 +39,12 @@ const (
 	serverName      = "kern"
 )
 
+// instructions is the human-readable one-paragraph description of kern's
+// capabilities returned in the MCP initialize result. MCP hosts surface it
+// to users and agents. It is deliberately grounded (no hype), omits a hard
+// tool count (the catalog grows), and describes what the tools actually do.
+const instructions = "kern is a fully local-first code context engine. It makes no network calls and requires no API keys: every tool runs against a prebuilt, per-project symbol index. Its tools are deterministic code-intelligence answers — no LLM in the loop — covering symbol lookup, call graphs, impact and blast radius analysis, freshness proofs, governance and approvals, and evidence bundles. Results carry provenance such as file:line references, confidence, and freshness, so they can be independently verified."
+
 // serverVersion is stamped at build time via -ldflags "-X main.version=...";
 // the binary entry points forward it through SetServerVersion. Defaults to
 // "dev" when built without ldflags so initialize still reports something sane.
@@ -1200,6 +1206,7 @@ func (s *Server) dispatch(req rpcRequest) any {
 				"capabilities":    caps,
 				"serverInfo":      map[string]any{"name": serverName, "version": serverVersion},
 				"schemaVersion":   schemaVersion,
+				"instructions":    instructions,
 			},
 		}
 	case "notifications/initialized":

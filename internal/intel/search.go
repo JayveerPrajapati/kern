@@ -201,6 +201,11 @@ func RankedSearch(ix *index.Index, query string, limit int) []index.Symbol {
 	if len(words) == 0 {
 		return nil
 	}
+	// V7b: a query is code-intent when it names code-ish concepts — the
+	// deterministic signal that headings should be demoted and code kinds
+	// promoted. Doc queries ("what is the architecture", "how does X
+	// work") keep the plain ranking.
+	codeIntent := isCodeIntentQuery(query)
 	segCache := map[string][]string{}
 	type hit struct {
 		s     index.Symbol
@@ -229,6 +234,16 @@ func RankedSearch(ix *index.Index, query string, limit int) []index.Symbol {
 		}
 		if matched == len(words) {
 			score += 150 // matches every token: boost strongly
+		}
+		if codeIntent {
+			// V7b: for code-oriented queries, code symbols must beat prose
+			// headings ("What Is Conduit?" matches query words trivially
+			// and drowns the actual API surface).
+			if isCodeKind(s.Kind) {
+				score += 25
+			} else if s.Kind == "heading" {
+				score -= 20
+			}
 		}
 		if ix.IsGenerated(s.File) {
 			score -= 60 // demote generated stubs below real implementations
@@ -327,4 +342,67 @@ func segmentFolded(w string, segs []string) bool {
 		}
 	}
 	return false
+}
+
+// isCodeKind reports whether a symbol kind is executable/type code rather
+// than prose content (headings, entries, properties).
+func isCodeKind(kind string) bool {
+	switch kind {
+	case "func", "method", "class", "struct", "interface", "type", "enum",
+		"trait", "union", "const", "var", "module", "impl":
+		return true
+	}
+	return false
+}
+
+// isCodeIntentQuery heuristically detects code-oriented search queries
+// ("how is the api server wired", "find the login handler") vs doc queries
+// ("what is the architecture"). Deterministic keyword matching — no LLM.
+func isCodeIntentQuery(q string) bool {
+	lq := strings.ToLower(q)
+	for _, kw := range []string{
+		"api", "function", "method", "handler", "server", "symbol", "class",
+		"endpoint", "wired", "service", "code", "interface", "struct", "bug",
+		"error", "crash", "call", "caller", "implement", "route", "config",
+	} {
+		if strings.Contains(lq, kw) {
+			return true
+		}
+	}
+	return false
+}
+
+// CollapseModuleDuplicates de-duplicates search results whose full name and
+// kind are identical but which live in DIFFERENT top-level module
+// directories (V7d: multi-module repos like Maven parents surface the same
+// class once per module — correct but noisy). The first occurrence per
+// module is kept; the second return value counts collapsed entries so
+// renderers can annotate the total.
+func CollapseModuleDuplicates(syms []index.Symbol) ([]index.Symbol, int) {
+	seen := map[string]string{} // fullname+kind -> module root
+	kept := make([]index.Symbol, 0, len(syms))
+	collapsed := 0
+	for _, s := range syms {
+		module := moduleRoot(s.File)
+		key := s.FullName() + "|" + s.Kind
+		if prev, dup := seen[key]; dup && prev != module {
+			collapsed++
+			continue
+		}
+		if _, dup := seen[key]; !dup {
+			seen[key] = module
+		}
+		kept = append(kept, s)
+	}
+	return kept, collapsed
+}
+
+// moduleRoot returns the top-level directory a file lives in, or the whole
+// path when there is none (e.g. "main.go").
+func moduleRoot(file string) string {
+	i := strings.IndexByte(file, '/')
+	if i < 0 {
+		return file
+	}
+	return file[:i]
 }

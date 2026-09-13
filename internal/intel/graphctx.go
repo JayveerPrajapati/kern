@@ -11,10 +11,24 @@ import (
 )
 
 const (
-	// GraphCtxDefaultTokens is the default token budget for a names-only
-	// graph context. 400 tokens fits a few dozen adjacency rows — the
-	// minimal caller-first answer, not the source text.
+	// GraphCtxDefaultTokens is the BASE token budget for a names-only graph
+	// context: the budget a root with no resolvable adjacency (or an
+	// unresolvable/interface-method root) receives. 400 tokens fits a few
+	// dozen adjacency rows — the minimal caller-first answer, not the source
+	// text. Callers that do not want the fixed base should default to
+	// AdaptiveGraphCtxTokens instead.
 	GraphCtxDefaultTokens = 400
+	// GraphCtxPerNeighborTokens is the deterministic per-neighbor budget
+	// AdaptiveGraphCtxTokens adds to the base for each resolvable caller or
+	// callee row. A neighbor row is ~10–25 tokens
+	// ("name [EXTRACTED] — file:line"); 20 is the deterministic midpoint
+	// estimate.
+	GraphCtxPerNeighborTokens = 20
+	// GraphCtxMaxTokens caps the adaptive budget so a pathological hub cannot
+	// blow the caller's context. A 2000-token names-only answer covers ~90+
+	// adjacency rows — plenty for even the largest hub — and bounds
+	// worst-case answers.
+	GraphCtxMaxTokens = 2000
 	// maxCommunityMembers caps the community member list shown beside the
 	// root symbol so a huge cluster cannot blow the budget.
 	maxCommunityMembers = 20
@@ -27,6 +41,42 @@ const (
 // listing the concrete implementations the call could reach. maxTokens <= 0
 // means no budget cap.
 func GraphCtx(ix *index.Index, symbol string, maxTokens int) (string, error) {
+	return GraphCtxMin(ix, symbol, maxTokens, "")
+}
+
+// AdaptiveGraphCtxTokens is the adaptive DEFAULT budget for a names-only
+// graph context, scaled to the root symbol's adjacency degree (section-15
+// item-3): a hub with a hundred callers needs ~20 tokens per neighbor row to
+// list them all, while a leaf over-serves nothing at the base. The formula is
+//
+//	budget = min(GraphCtxMaxTokens, GraphCtxDefaultTokens + degree*GraphCtxPerNeighborTokens)
+//
+// where degree = len(callers) + len(callees) of the RESOLVED symbol, read
+// from the raw index maps (ix.Callers / ix.Calls, exact key — both deduped at
+// finalize, so len() equals the row count the adjacency renderer shows).
+// Unresolvable roots — including interface-method call targets, which have no
+// symbol of their own — fall back to the base GraphCtxDefaultTokens.
+// Deterministic: the same index and symbol always yield the same budget.
+func AdaptiveGraphCtxTokens(ix *index.Index, symbol string) int {
+	resolved, ok := Resolve(ix, symbol)
+	if !ok {
+		// Unresolvable root (including "Receiver.Method" interface call
+		// targets): no adjacency to scale by, so the base budget applies.
+		return GraphCtxDefaultTokens
+	}
+	degree := len(ix.Callers[resolved]) + len(ix.CallSites(resolved))
+	budget := GraphCtxDefaultTokens + degree*GraphCtxPerNeighborTokens
+	if budget > GraphCtxMaxTokens {
+		return GraphCtxMaxTokens
+	}
+	return budget
+}
+
+// GraphCtxMin is GraphCtx with a minimum-confidence filter: adjacency rows
+// whose provenance label ranks below the threshold (see MinConfidenceFilter)
+// are pruned from the answer, so agents stop chasing AMBIGUOUS phantom
+// references in their graph context. An empty threshold keeps every edge.
+func GraphCtxMin(ix *index.Index, symbol string, maxTokens int, minConf string) (string, error) {
 	if symbol == "" {
 		return "", fmt.Errorf("symbol is required")
 	}
@@ -36,15 +86,15 @@ func GraphCtx(ix *index.Index, symbol string, maxTokens int) (string, error) {
 		// index records the receiver-qualified call target, not a definition.
 		// Answer with the dispatch it can take instead of failing.
 		if recv, meth, isIface := graphInterfaceMethod(ix, symbol); isIface {
-			return graphInterfaceMethodCtx(ix, symbol, recv, meth, maxTokens)
+			return graphInterfaceMethodCtxMin(ix, symbol, recv, meth, maxTokens, minConf)
 		}
 		return "", fmt.Errorf("unknown symbol: %s", symbol)
 	}
-	g, ok := ix.Neighborhood(resolved)
+g, ok := ix.Neighborhood(resolved)
 	if !ok {
 		return "", fmt.Errorf("unknown symbol: %s", symbol)
 	}
-
+	passes := MinConfidenceFilter(minConf)
 	var b strings.Builder
 	if def := graphDefNode(g, resolved); def != nil {
 		b.WriteString(fmt.Sprintf("graph %s (%s) — %s:%d\n", def.Name, def.Kind, def.File, def.Line))
@@ -59,6 +109,9 @@ func GraphCtx(ix *index.Index, symbol string, maxTokens int) (string, error) {
 	if len(callers) > 0 {
 		b.WriteString(fmt.Sprintf("callers (%d):\n", len(callers)))
 		for _, row := range callers {
+			if !passes(row.conf) {
+				continue
+			}
 			b.WriteString("  " + row.String() + "\n")
 		}
 	}
@@ -67,6 +120,9 @@ func GraphCtx(ix *index.Index, symbol string, maxTokens int) (string, error) {
 	if len(callees) > 0 {
 		b.WriteString(fmt.Sprintf("callees (%d):\n", len(callees)))
 		for _, row := range callees {
+			if !passes(row.conf) {
+				continue
+			}
 			b.WriteString("  " + row.String() + "\n")
 			if impls := graphDispatchImpls(ix, row.name); len(impls) > 0 {
 				b.WriteString("    dispatch (INFERRED): " + strings.Join(impls, ", ") + "\n")
@@ -82,26 +138,45 @@ func GraphCtx(ix *index.Index, symbol string, maxTokens int) (string, error) {
 		b.WriteString(fmt.Sprintf("community (%d members): %s\n", len(members), strings.Join(shown, ", ")))
 	}
 
-	text := strings.TrimSpace(b.String())
+text := strings.TrimSpace(b.String())
+	if banner := ix.StalenessBanner(graphCtxFiles(g)); banner != "" {
+		text = banner + "\n\n" + text
+	}
 	if maxTokens > 0 {
 		text = budget.Fit(text, maxTokens)
 	}
 	return text, nil
 }
 
+// graphCtxFiles returns the files cited by a Neighborhood response: the
+// definition file of every node (the root and its neighbors). These are the
+// lines a consumer will quote, so they are the ones worth spot-checking.
+func graphCtxFiles(g index.GraphResult) []string {
+	files := make([]string, 0, len(g.Nodes))
+	for _, n := range g.Nodes {
+		if n.File != "" {
+			files = append(files, n.File)
+		}
+	}
+	return files
+}
 // graphInterfaceMethodCtx renders the context for an interface method root:
 // its dispatch targets (the concrete implementations the call sites can reach)
 // and its callers (the call sites themselves). There is no definition line —
 // interface methods are not symbols.
-func graphInterfaceMethodCtx(ix *index.Index, symbol, recv, meth string, maxTokens int) (string, error) {
+func graphInterfaceMethodCtxMin(ix *index.Index, symbol, recv, meth string, maxTokens int, minConf string) (string, error) {
 	var b strings.Builder
 	b.WriteString(fmt.Sprintf("graph %s (interface method)\n", symbol))
 	if impls := graphDispatchImpls(ix, symbol); len(impls) > 0 {
 		b.WriteString("  dispatch (INFERRED): " + strings.Join(impls, ", ") + "\n")
 	}
+	passes := MinConfidenceFilter(minConf)
 	if callers := graphInterfaceCallers(ix, symbol); len(callers) > 0 {
 		b.WriteString(fmt.Sprintf("callers (%d):\n", len(callers)))
 		for _, row := range callers {
+			if !passes(row.conf) {
+				continue
+			}
 			b.WriteString("  " + row.String() + "\n")
 		}
 	}
@@ -113,13 +188,32 @@ func graphInterfaceMethodCtx(ix *index.Index, symbol, recv, meth string, maxToke
 		b.WriteString(fmt.Sprintf("community (%d members): %s\n", len(members), strings.Join(shown, ", ")))
 	}
 
-	text := strings.TrimSpace(b.String())
+text := strings.TrimSpace(b.String())
+	if banner := ix.StalenessBanner(graphIfaceFiles(ix, symbol, recv)); banner != "" {
+		text = banner + "\n\n" + text
+	}
 	if maxTokens > 0 {
 		text = budget.Fit(text, maxTokens)
 	}
 	return text, nil
 }
 
+// graphIfaceFiles returns the files cited by an interface-method response:
+// the receiver's own file plus the defining file of every call site (the
+// callers listed are quoted with their file:line, so those files must be
+// spot-checked too).
+func graphIfaceFiles(ix *index.Index, symbol, recv string) []string {
+	var files []string
+	if s, ok := ix.FindSymbol(recv); ok && s.File != "" {
+		files = append(files, s.File)
+	}
+	for _, c := range ix.Callers[symbol] {
+		if d, ok := ix.ResolveName(c); ok && d.File != "" {
+			files = append(files, d.File)
+		}
+	}
+	return files
+}
 // graphInterfaceCallers returns the call sites of an interface method as
 // adjacency rows. The targets have no symbol, so every edge is INFERRED and
 // file:line comes from the caller's own definition.

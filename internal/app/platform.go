@@ -293,6 +293,15 @@ func (p *Platform) analyzeChangeResolvable(change string) (domain.ContextPacket,
 	return domain.ContextPacket{}, err
 }
 
+// Orchestrate runs the silent context pipeline (classify -> assemble -> select
+// evidence -> budget -> stamp envelope -> escalation handle) over an intent and
+// returns the deterministic result. opts.Budget <= 0 uses the task policy's
+// default token budget; opts.Mode overrides the policy family with a named
+// context mode. Backs kern_orchestrate (MCP) and kern orchestrate (CLI).
+func (p *Platform) Orchestrate(intent string, opts context.OrchestrateOptions) (*context.OrchestrateResult, error) {
+	return p.ctx.Orchestrate(intent, opts)
+}
+
 // Risk runs the context engine against a proposed change and returns a focused
 // risk view (level, factors, mitigation) rather than the full packet. Backs
 // kern risk (CLI) and POST /v1/risk (REST).

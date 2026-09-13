@@ -62,6 +62,17 @@ const (
 	RiskCalculated Kind = "risk.calculated"
 	// PlanProduced indicates an execution plan was produced.
 	PlanProduced Kind = "plan.produced"
+	// TaskReceived indicates a silent-pipeline run began (orchestrate).
+	TaskReceived Kind = "task.received"
+	// TaskClassified indicates an intent was classified into a task type.
+	TaskClassified Kind = "task.classified"
+	// EvidenceSelected indicates planner-selected evidence was produced.
+	EvidenceSelected Kind = "evidence.selected"
+	// BudgetApplied indicates the selection was fitted to a token budget.
+	BudgetApplied Kind = "budget.applied"
+	// ContextDelivered indicates the context envelope was produced and is
+	// ready for silent injection.
+	ContextDelivered Kind = "context.delivered"
 	// CodeProduced indicates code was generated.
 	CodeProduced Kind = "code.produced"
 	// TestRunCompleted indicates a test run finished.

@@ -246,6 +246,17 @@ func (s *Server) handleWhy(ctx context.Context, args map[string]any) (string, er
 		if !ok {
 			return "no symbol found: " + symbol, nil
 		}
+		if minConf := argString(args, "min_confidence"); minConf != "" {
+			passes := intel.MinConfidenceFilter(minConf)
+			kept := info.Callers[:0]
+			for _, c := range info.Callers {
+				if passes(intel.EdgeConfidenceLabel(ix, c.Name, info.Symbol.FullName())) {
+					kept = append(kept, c)
+				}
+			}
+			info.Callers = kept
+			info.InEdges = len(kept)
+		}
 		return intel.FormatWhy(info), nil
 
 	}
@@ -552,8 +563,24 @@ func (s *Server) handlePath(ctx context.Context, args map[string]any) (string, e
 		if !okTo {
 			return "", fmt.Errorf("unknown symbol: %s", to)
 		}
-		return intel.RenderPath(ix, intel.ShortestPath(ix, from, to)), nil
+		minConf := argString(args, "min_confidence")
+		return intel.RenderPath(ix, intel.ShortestPathMin(ix, from, to, minConf)), nil
 
+	}
+}
+
+func (s *Server) handleCycles(ctx context.Context, args map[string]any) (string, error) {
+	{
+		ix, err := s.loadIndex(ctx, argString(args, "root"))
+		if err != nil {
+			return "", err
+		}
+		cycles := intel.ImportCycles(ix)
+		if argString(args, "json") == "true" {
+			b, _ := json.MarshalIndent(map[string]any{"cycles": cycles, "count": len(cycles)}, "", "  ")
+			return string(b), nil
+		}
+		return intel.RenderCycles(cycles), nil
 	}
 }
 
@@ -622,6 +649,83 @@ func (s *Server) handleArch(ctx context.Context, args map[string]any) (string, e
 	}
 }
 
+func (s *Server) handleSurprising(ctx context.Context, args map[string]any) (string, error) {
+	{
+		ix, err := s.loadIndex(ctx, argString(args, "root"))
+		if err != nil {
+			return "", err
+		}
+		limit := 15
+		if v := argString(args, "limit"); v != "" {
+			n, err := atoiArg(v, limit)
+			if err != nil {
+				return "", err
+			}
+			limit = n
+		}
+		return intel.RenderSurprising(intel.SurprisingConnections(ix, limit)), nil
+	}
+}
+func (s *Server) handleSnapshot(ctx context.Context, args map[string]any) (string, error) {
+	{
+		root := argString(args, "root")
+		switch argString(args, "action") {
+		case "create":
+			ix, err := s.loadIndex(ctx, root)
+			if err != nil {
+				return "", err
+			}
+			mode := "whole"
+			if sym := argString(args, "symbol"); sym != "" {
+				mode = "subgraph"
+			}
+			limit := 0
+			if v := argString(args, "limit"); v != "" {
+				n, err := atoiArg(v, limit)
+				if err != nil {
+					return "", err
+				}
+				limit = n
+			}
+			snap, err := ix.Snapshot(mode, argString(args, "symbol"), limit)
+			if err != nil {
+				return "", err
+			}
+			b, err := json.MarshalIndent(snap, "", "  ")
+			if err != nil {
+				return "", err
+			}
+			return string(b), nil
+		case "verify":
+			file := argString(args, "file")
+			if file == "" {
+				return "", fmt.Errorf("snapshot verify: file argument is required")
+			}
+			snap, err := index.LoadSnapshot(file)
+			if err != nil {
+				return "", err
+			}
+			strict := argBool(args, "strict")
+			verdict, err := index.VerifySnapshot(resolveRoot(root), snap, strict)
+			if err != nil {
+				return "", err
+			}
+			b, _ := json.MarshalIndent(map[string]any{
+				"verdict":        string(verdict),
+				"content_root":   snap.Identity.ContentRoot,
+				"built_at":       snap.Identity.BuiltAt,
+				"checked_files":  len(snap.Files),
+				"tree_oid":       snap.Identity.TreeOID,
+				"git_commit":     snap.Identity.GitCommit,
+				"schema_version": snap.SchemaVersion,
+				"strict":         strict,
+			}, "", "  ")
+			return string(b), nil
+		default:
+			return "", fmt.Errorf("snapshot: action %q not supported (want \"create\" or \"verify\")", argString(args, "action"))
+		}
+	}
+}
 func (s *Server) handleCommunities(ctx context.Context, args map[string]any) (string, error) {
 	{
 		ix, err := s.loadIndex(ctx, argString(args, "root"))
@@ -715,7 +819,10 @@ func (s *Server) handleGraph(ctx context.Context, args map[string]any) (string, 
 		if err != nil {
 			return "", err
 		}
-		maxTokens := intel.GraphCtxDefaultTokens
+		// Absent max_tokens → adaptive default scaled to the symbol's
+		// adjacency degree (section-15-item-3); an explicit max_tokens
+		// (including "0" = no cap) wins untouched.
+		maxTokens := intel.AdaptiveGraphCtxTokens(ix, symbol)
 		if v := argString(args, "max_tokens"); v != "" {
 			n, err := atoiArg(v, maxTokens)
 			if err != nil {
@@ -728,7 +835,7 @@ func (s *Server) handleGraph(ctx context.Context, args map[string]any) (string, 
 			s.stampProvenance(ctx, s.governedProvenance(ix, gov.policySource, gov.proof, nil))
 			return "", err
 		}
-		out, err := intel.GraphCtx(ix, symbol, maxTokens)
+		out, err := intel.GraphCtxMin(ix, symbol, maxTokens, argString(args, "min_confidence"))
 		if err != nil {
 			if gov != nil {
 				s.stampProvenance(ctx, s.governedProvenance(ix, gov.policySource, gov.proof, nil))
@@ -790,7 +897,15 @@ func (s *Server) handleExplore(ctx context.Context, args map[string]any) (string
 			}
 			return s.renderRetrieval(ctx, args, ix, res)
 		}
-		rep, err := intel.Explore(ix, symbol, depth, maxNodes)
+		maxTokens := 0
+		if v := argString(args, "max_tokens"); v != "" {
+			n, err := atoiArg(v, maxTokens)
+			if err != nil {
+				return "", err
+			}
+			maxTokens = n
+		}
+		rep, err := intel.ExploreBudgeted(ix, symbol, depth, maxNodes, argString(args, "min_confidence"), maxTokens)
 		if err != nil {
 			return "", err
 		}
@@ -944,6 +1059,28 @@ func (s *Server) handleProbe(ctx context.Context, args map[string]any) (string, 
 			maxTokens = n
 		}
 		report := intel.Probe(ix, task, maxTokens)
+		// min_confidence prunes AMBIGUOUS anchors' call rows so the probe
+		// bundle never leads an agent to chase phantom references.
+		if minConf := argString(args, "min_confidence"); minConf != "" {
+			passes := intel.MinConfidenceFilter(minConf)
+			for i := range report.Anchors {
+				a := &report.Anchors[i]
+				keptCallers := a.Callers[:0]
+				for _, c := range a.Callers {
+					if passes(intel.EdgeConfidenceLabel(ix, c, a.Resolved)) {
+						keptCallers = append(keptCallers, c)
+					}
+				}
+				a.Callers = keptCallers
+				keptCallees := a.Callees[:0]
+				for _, c := range a.Callees {
+					if passes(intel.EdgeConfidenceLabel(ix, a.Resolved, c)) {
+						keptCallees = append(keptCallees, c)
+					}
+				}
+				a.Callees = keptCallees
+			}
+		}
 		// Optional level arg (P2 tracker): render the primary probed symbol
 		// through the retrieval levels (L1 names, L2 neighborhood, L3 source)
 		// instead of the probe report.

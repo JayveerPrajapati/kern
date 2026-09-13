@@ -2,6 +2,7 @@ package project
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -446,11 +447,151 @@ func TestSessionAsyncSavePersistsBeforeClose(t *testing.T) {
 		t.Fatal("expected symbols in first build")
 	}
 	s.Close() // must drain the async save
-	loaded, err := index.Load(root)
-	if err != nil || loaded == nil {
-		t.Fatalf("persisted index after Close: %v", err)
+	// Load through the store the session actually persists to: under the
+	// sqlite tag the session writes the SQLite store only (the JSON cache
+	// is the fallback for builds without the tag), so index.Load (JSON)
+	// would report nothing there. LoadSQLite returns (nil, nil) when the
+	// store does not exist yet.
+	var loaded *index.Index
+	var lerr error
+	if index.SQLiteEnabled() {
+		loaded, lerr = index.LoadSQLite(root)
+	} else {
+		loaded, lerr = index.Load(root)
+	}
+	if lerr != nil || loaded == nil {
+		t.Fatalf("persisted index after Close: %v", lerr)
 	}
 	if len(loaded.Symbols) == 0 {
 		t.Fatal("persisted index empty — async save did not land")
+	}
+}
+
+// hasSymbol reports whether ix contains a symbol with the given name.
+func hasSymbol(ix *index.Index, name string) bool {
+	for _, s := range ix.Symbols {
+		if s.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+// hashesMatchTree asserts that ix.FileHashes equals the current FileHashes of
+// the tree — the observable freshness contract both the incremental Update
+// path and the full-Build fallback must satisfy.
+func hashesMatchTree(t *testing.T, ix *index.Index, root string) {
+	t.Helper()
+	cur, err := index.FileHashes(root)
+	if err != nil {
+		t.Fatalf("FileHashes: %v", err)
+	}
+	if len(ix.FileHashes) != len(cur) {
+		t.Errorf("index has %d files, tree has %d", len(ix.FileHashes), len(cur))
+	}
+	for f, h := range cur {
+		if ix.FileHashes[f] != h {
+			t.Errorf("FileHashes[%s] = %q, want %q", f, ix.FileHashes[f], h)
+		}
+	}
+}
+
+// TestSessionRebuildSmallDiffUsesIncrementalUpdate: with a persisted previous
+// index and ONE file changed, Session.Index() reconciles via the incremental
+// index.Update path. The diff path is observable: unchanged files are reused
+// (ReusedResults >= 1), which a full Build would never report, and the
+// reconciled index reflects the change and matches the tree.
+func TestSessionRebuildSmallDiffUsesIncrementalUpdate(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	root := t.TempDir()
+	writeFile(t, root, "go.mod", "module demo\n\ngo 1.22\n")
+	writeFile(t, root, "a.go", "package demo\n\nfunc A() {}\n")
+	writeFile(t, root, "b.go", "package demo\n\nfunc B() {}\n")
+	// Persist a previous index deterministically (synchronous Save) so
+	// rebuildIndex loads it as the incremental-Update base from the store.
+	prev, err := index.Build(root)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if err := prev.Save(); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	// Modify ONE file: add function B2.
+	writeFile(t, root, "b.go", "package demo\n\nfunc B() {}\n\nfunc B2() {}\n")
+	s := New(root, "")
+	defer s.Close() // stop watcher + drain B6 background saves before TempDir cleanup
+	ix, err := s.Index()
+	if err != nil {
+		t.Fatalf("Index: %v", err)
+	}
+	if !hasSymbol(ix, "B2") {
+		t.Fatal("small-diff reconcile missing newly added symbol B2")
+	}
+	// The incremental Update path was used: the unchanged a.go (and go.mod)
+	// were reused from the persisted prev. A full Build would reuse nothing.
+	if got := ix.ReusedResults(); got < 1 {
+		t.Errorf("ReusedResults = %d, want >= 1 (small-diff reconcile must reuse unchanged files)", got)
+	}
+	// Correctness: the reconciled index matches the current tree.
+	hashesMatchTree(t, ix, root)
+}
+
+// TestSessionRebuildLargeDiffBacksOffToFullBuild: when the change set exceeds
+// index.CatchUpMaxChanges, rebuildIndex skips the incremental Update (which
+// would re-parse nearly every file) and falls back to a full Build — the
+// returned index must still be correct and fresh.
+func TestSessionRebuildLargeDiffBacksOffToFullBuild(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	const n = index.CatchUpMaxChanges + 10 // 210 files: every one modified below
+	root := t.TempDir()
+	writeFile(t, root, "go.mod", "module demo\n\ngo 1.22\n")
+	if err := os.MkdirAll(filepath.Join(root, "pkg"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < n; i++ {
+		writeFile(t, root, filepath.Join("pkg", fmt.Sprintf("f%03d.go", i)),
+			fmt.Sprintf("package pkg\n\nfunc F%d() {}\n", i))
+	}
+	// Persist a previous index deterministically (synchronous Save).
+	prev, err := index.Build(root)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if err := prev.Save(); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	// Modify EVERY file (add one symbol each) so the change set is n > 200.
+	for i := 0; i < n; i++ {
+		writeFile(t, root, filepath.Join("pkg", fmt.Sprintf("f%03d.go", i)),
+			fmt.Sprintf("package pkg\n\nfunc F%d() {}\n\nfunc G%d() {}\n", i, i))
+	}
+	// Prove the scenario is above the back-off threshold: the persisted prev
+	// loads (so rebuildIndex had an Update base) and the tree diff exceeds it.
+	loaded, err := index.Load(root)
+	if err != nil || loaded == nil {
+		t.Fatalf("expected persisted prev to load, got (%v, %v)", loaded, err)
+	}
+	cur, err := index.FileHashes(root)
+	if err != nil {
+		t.Fatalf("FileHashes: %v", err)
+	}
+	if changes := len(index.Diff(loaded.FileHashes, cur)); changes <= index.CatchUpMaxChanges {
+		t.Fatalf("fixture diff = %d, want > %d (back-off must actually trigger)", changes, index.CatchUpMaxChanges)
+	}
+	s := New(root, "")
+	defer s.Close() // stop watcher + drain B6 background saves before TempDir cleanup
+	ix, err := s.Index()
+	if err != nil {
+		t.Fatalf("Index: %v", err)
+	}
+	// Correctness: the back-off must not break freshness — the new symbols
+	// from every modified file are present and the index matches the tree.
+	if !hasSymbol(ix, "G0") || !hasSymbol(ix, fmt.Sprintf("G%d", n-1)) {
+		t.Error("large-diff back-off result missing newly added symbols")
+	}
+	hashesMatchTree(t, ix, root)
+	// Consistent with the full-Build fallback: a clean Build reuses nothing.
+	if got := ix.ReusedResults(); got != 0 {
+		t.Errorf("ReusedResults = %d, want 0 on the large-diff back-off (full Build reuses nothing)", got)
 	}
 }

@@ -38,12 +38,14 @@ import (
 // the provider is unset, the drift checks SKIP (they cannot compare).
 
 // ToolInfo is the minimal, neutral contract surface the drift checks read
-// from the MCP catalog: name, phase, risk level, and the tool's input schema.
+// from the MCP catalog: name, phase, risk level, the tool's input schema,
+// and its model-facing description.
 type ToolInfo struct {
 	Name        string
 	Phase       string
 	RiskLevel   string
 	InputSchema map[string]any
+	Description string
 }
 
 // catalogProvider is the registered source of the live MCP tool catalog.

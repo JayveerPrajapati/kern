@@ -282,8 +282,16 @@ func FitToBudget(sels []Selection, budget int) ([]Selection, bool) {
 // version (EnvelopeVersionV1 + SchemaVersion "1.0.0" when empty). A budget
 // <= 0 uses the policy's MaxTokens.
 func PlanPacket(pkt *domain.ContextPacket, intent string, budget int) *Plan {
-	tt := ClassifyTask(intent)
-	policy := PolicyFor(tt)
+	return PlanPacketWithPolicy(pkt, intent, PolicyFor(ClassifyTask(intent)), budget)
+}
+
+// PlanPacketWithPolicy is PlanPacket with an explicit policy: it scores the
+// packet's evidence against the given policy, fits to budget, and stamps the
+// envelope version. A budget <= 0 uses the policy's MaxTokens. The plan's
+// TaskType is the policy's type (a caller that overrides the policy — e.g.
+// via a context mode — passes the policy whose type it wants reported).
+func PlanPacketWithPolicy(pkt *domain.ContextPacket, intent string, policy TaskPolicy, budget int) *Plan {
+	tt := policy.Type
 	b := budget
 	if b <= 0 {
 		b = policy.MaxTokens

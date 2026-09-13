@@ -4,6 +4,7 @@ go 1.25.13
 
 require (
 	github.com/UserNobody14/tree-sitter-dart v0.0.0-20260707040301-be07cf7118d3
+	github.com/ledongthuc/pdf v0.0.0-20260907135840-6c8c28e0e8a0
 	github.com/tree-sitter/go-tree-sitter v0.25.0
 	github.com/tree-sitter/tree-sitter-bash v0.25.1
 	github.com/tree-sitter/tree-sitter-c v0.24.2
