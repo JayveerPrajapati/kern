@@ -275,8 +275,8 @@ func toolAllowed(toolsList []Tool, allowed []string, name string) bool {
 		return true
 	}
 	inCatalog := false
-	for _, t := range toolsList {
-		if t.Name == name {
+	for i := range toolsList {
+		if toolsList[i].Name == name {
 			inCatalog = true
 			break
 		}
@@ -284,8 +284,8 @@ func toolAllowed(toolsList []Tool, allowed []string, name string) bool {
 	if !inCatalog {
 		return false
 	}
-	for _, a := range allowed {
-		if a == name {
+	for i := range allowed {
+		if allowed[i] == name {
 			return true
 		}
 	}
@@ -859,7 +859,10 @@ func (s *Server) write(v any) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	_, err = s.out.Write(append(data, '\n'))
+	if _, err = s.out.Write(data); err != nil {
+		return err
+	}
+	_, err = s.out.Write([]byte{'\n'})
 	return err
 }
 

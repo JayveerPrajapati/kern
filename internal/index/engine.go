@@ -333,6 +333,7 @@ func Load(root string) (*Index, error) {
 	}
 	ix.initMaps()
 	ix.reindexByFile()
+	ix.buildSymbolIndex()
 	metrics.Default().RecordCacheHit()
 	return ix, nil
 }

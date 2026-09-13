@@ -139,41 +139,34 @@ func shingles(text string) []uint32 {
 			set[fnv32Bigram(words[i], words[i+1])] = struct{}{}
 		}
 	}
-	if len(set) > MaxShingles {
-		// Deterministic sample: keep the smallest MaxShingles hashes.
-		sorted := make([]uint32, 0, len(set))
-		for h := range set {
-			sorted = append(sorted, h)
-		}
-		sort.Slice(sorted, func(i, j int) bool { return sorted[i] < sorted[j] })
-		sorted = sorted[:MaxShingles]
-		set = make(map[uint32]struct{}, len(sorted))
-		for _, h := range sorted {
-			set[h] = struct{}{}
-		}
-	}
 	out := make([]uint32, 0, len(set))
 	for h := range set {
 		out = append(out, h)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	if len(out) > MaxShingles {
+		out = out[:MaxShingles]
+	}
 	return out
 }
 
 func tokenizeWords(text string) []string {
 	var words []string
-	for _, f := range strings.Fields(strings.ToLower(text)) {
-		f = strings.Map(func(r rune) rune {
-			if r >= 'a' && r <= 'z' || r >= '0' && r <= '9' {
-				return r
+	var b strings.Builder
+	for _, r := range text {
+		if r >= 'A' && r <= 'Z' {
+			b.WriteByte(byte(r + ('a' - 'A')))
+		} else if r >= 'a' && r <= 'z' || r >= '0' && r <= '9' {
+			b.WriteByte(byte(r))
+		} else {
+			if b.Len() >= 2 {
+				words = append(words, b.String())
 			}
-			return ' '
-		}, f)
-		for _, w := range strings.Fields(f) {
-			if len(w) >= 2 {
-				words = append(words, w)
-			}
+			b.Reset()
 		}
+	}
+	if b.Len() >= 2 {
+		words = append(words, b.String())
 	}
 	return words
 }

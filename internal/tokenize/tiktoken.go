@@ -129,9 +129,9 @@ func findSpecial(s string, specials []string) (int, int) {
 func (t *TiktokenCounter) countText(s string) int {
 	total := 0
 	if t.o200k {
-		o200kWords(s, func(w []byte) { total += t.countWord(w) })
+		o200kWords(s, func(w string) { total += t.countWord(w) })
 	} else {
-		cl100kWords(s, func(w []byte) { total += t.countWord(w) })
+		cl100kWords(s, func(w string) { total += t.countWord(w) })
 	}
 	return total
 }
@@ -139,13 +139,18 @@ func (t *TiktokenCounter) countText(s string) int {
 // countWord reduces one pre-token by repeatedly merging the adjacent
 // pair whose byte concatenation has the lowest rank (the tiktoken
 // byte_pair_merge algorithm). Returns the resulting piece count.
-func (t *TiktokenCounter) countWord(w []byte) int {
+func (t *TiktokenCounter) countWord(w string) int {
 	n := len(w)
 	if n <= 1 {
 		return n
 	}
-	// parts[i]:pieces[i+1] is piece i; pieces = len(parts)-1.
-	parts := make([]int32, n+1)
+	var stackParts [32]int32
+	var parts []int32
+	if n+1 <= len(stackParts) {
+		parts = stackParts[:n+1]
+	} else {
+		parts = make([]int32, n+1)
+	}
 	for i := range parts {
 		parts[i] = int32(i)
 	}
@@ -153,7 +158,7 @@ func (t *TiktokenCounter) countWord(w []byte) int {
 		bestRank := int(^uint(0) >> 1)
 		bestIdx := -1
 		for i := 0; i+2 < len(parts); i++ {
-			if r, ok := t.vocab[string(w[parts[i]:parts[i+2]])]; ok && r < bestRank {
+			if r, ok := t.vocab[w[parts[i]:parts[i+2]]]; ok && r < bestRank {
 				bestRank, bestIdx = r, i
 			}
 		}
@@ -218,7 +223,7 @@ func loadVocab(gz []byte) (map[string]int, error) {
 //
 //	'(?i:[sdmt]|ll|ve|re)|[^\r\n\p{L}\p{N}]?+\p{L}++|\p{N}{1,3}+|
 //	 ?[^\s\p{L}\p{N}]++[\r\n]*+|\s++$|\s*[\r\n]|\s+(?!\S)|\s
-func cl100kWords(s string, fn func(word []byte)) {
+func cl100kWords(s string, fn func(word string)) {
 	for len(s) > 0 {
 		n := cl100kWord(s)
 		if n <= 0 { // unreachable: every rune matches some branch
@@ -229,7 +234,7 @@ func cl100kWords(s string, fn func(word []byte)) {
 			_ = r
 			n = sz
 		}
-		fn([]byte(s[:n]))
+		fn(s[:n])
 		s = s[n:]
 	}
 }
@@ -334,7 +339,7 @@ func cl100kSpace(s string) int {
 
 // o200kWords splits s per the o200k_base pattern (7 branches; see
 // o200kWord for the citation).
-func o200kWords(s string, fn func(word []byte)) {
+func o200kWords(s string, fn func(word string)) {
 	for len(s) > 0 {
 		n := o200kWord(s)
 		if n <= 0 {
@@ -345,7 +350,7 @@ func o200kWords(s string, fn func(word []byte)) {
 			_ = r
 			n = sz
 		}
-		fn([]byte(s[:n]))
+		fn(s[:n])
 		s = s[n:]
 	}
 }
