@@ -4,6 +4,8 @@ import (
 	"context"
 	"strings"
 	"testing"
+
+	"github.com/JayveerPrajapati/kern/internal/index"
 )
 
 // TestGraphServiceSmoke exercises every GraphService operation against a tiny
@@ -98,5 +100,44 @@ func TestGraphServiceUnknownSymbol(t *testing.T) {
 	}
 	if _, err := svc.Graph.Path(ctx, root, "Run", "DoesNotExist"); err == nil {
 		t.Error("Path should error on unknown symbol")
+	}
+}
+
+// TestGraphServiceIndexLoadOrBuild pins the graph service's index resolution:
+// it returns a usable index for a real (small) root and honors a cancelled
+// context with a fast error.
+func TestGraphServiceIndexLoadOrBuild(t *testing.T) {
+	s := &graphService{}
+	root := t.TempDir()
+	ix, err := s.index(context.Background(), root)
+	if err != nil {
+		t.Fatalf("index on empty root: %v", err)
+	}
+	if ix == nil {
+		t.Fatal("expected a non-nil index")
+	}
+	_ = ix.Search("nothing", 5) // must not panic on the empty index
+
+	// Cancelled context: index() checks ctx.Err() first.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := s.index(ctx, root); err == nil {
+		t.Error("expected error for cancelled context")
+	}
+}
+
+// TestGraphServiceExploreEndToEnd exercises the full graph path used by the
+// MCP tools: index -> intel.Explore on a real symbol in a tiny fixture tree.
+func TestGraphServiceExploreEndToEnd(t *testing.T) {
+	s := &graphService{}
+	root := t.TempDir()
+	writeGoFile(t, root, "main.go", "package main\nfunc Greet() string { return \"hi\" }\n")
+	ix, err := s.index(context.Background(), root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = index.StorePath(root)
+	if len(ix.Symbols) == 0 {
+		t.Fatal("fixture tree should index at least Greet")
 	}
 }

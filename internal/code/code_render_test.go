@@ -200,3 +200,18 @@ func TestProjectRenderWithCacheHit(t *testing.T) {
 func containsStr(s, sub string) bool {
 	return len(s) >= len(sub) && (strings.Contains(s, sub))
 }
+
+// TestShouldIgnoreExcludesWalkArtifacts pins the project-walk exclusion
+// contract for repository-relative paths.
+func TestShouldIgnoreExcludesWalkArtifacts(t *testing.T) {
+	for _, rel := range []string{".git/config", "node_modules/x/index.js", "dist/bundle.js", "build/out", "vendor/pkg", "package-lock.json", ".kern/index.json", ".DS_Store", "coverage/out.txt"} {
+		if !ShouldIgnore(rel) {
+			t.Errorf("ShouldIgnore(%q) = false, want true", rel)
+		}
+	}
+	for _, rel := range []string{"main.go", "internal/app/task.go", "README.md", "docs/guide.md"} {
+		if ShouldIgnore(rel) {
+			t.Errorf("ShouldIgnore(%q) = true, want false", rel)
+		}
+	}
+}
