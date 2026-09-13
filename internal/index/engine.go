@@ -332,8 +332,18 @@ func Load(root string) (*Index, error) {
 // Stale reports whether a source file was added, removed, or edited since the
 // index was built, so intel never serves out-of-date call graphs. The
 // authoritative verdict comes from FreshnessProof (git tree OID, falling back
-// to a content re-hash); the stat gate is kept only to reject cheaply on a
-// file-count change.
+// to a content re-hash).
+//
+// An earlier version kept a stat-only count gate here (walked-file count vs
+// len(FileHashes)) as a cheap pre-rejection. It was removed: the two counts
+// are not comparable — the build walk admits quickExt files that never enter
+// FileHashes (e.g. LICENSE, Makefile, content-unindexable .md), so on any
+// repo containing such files the gate reported stale PERMANENTLY, forcing
+// every Stale() caller (guard check, LoadOrBuild, web console, Session) down
+// a needless full update path and defeating web's staleCooldown. A genuine
+// count change (file added/removed) always changes the content root too, so
+// the proof alone decides — the gate saved latency only on indexes that were
+// stale anyway, and every caller rebuilds immediately after a stale verdict.
 func (ix *Index) Stale() bool {
 	if ix == nil || len(ix.FileHashes) == 0 {
 		return true
@@ -342,21 +352,6 @@ func (ix *Index) Stale() bool {
 	// fall back to the pre-identity content-hash comparison.
 	if ix.Identity == nil {
 		return ix.legacyStale()
-	}
-	// Load ignore patterns so gitignored files are excluded from the staleness
-	// decision, matching the file set Build indexed. Without this, a gitignored
-	// file would keep the gate/hash counts different from FileHashes and Stale
-	// would report true forever, defeating the cache.
-	ign := ignore.Load(ix.Root)
-	// Cheap rejection: a different indexable-file count proves files were
-	// added or removed — no git round-trip needed. An mtime mismatch alone is
-	// deliberately NOT rejected: touching a file changes its mtime without
-	// changing its content, so only the git/content check below can decide
-	// those cases (and an mtime-preserving edit must never be served fresh).
-	if ix.MaxMtime > 0 {
-		if _, count, err := indexableMaxMtime(ix.Root, ign); err == nil && count != len(ix.FileHashes) {
-			return true
-		}
 	}
 	return ix.FreshnessProof(ix.Root).Stale()
 }
@@ -690,6 +685,10 @@ func walkIndexable(root string, ign *ignore.Matcher, maxBytes int64, fn func(rel
 // output is what kern's freshness/identity proofs compare against).
 func buildSerial(abs string, cfg *buildConfig) (*Index, error) {
 	ix := New(abs)
+	// Kick off the git identity observations (tree OID + commit) BEFORE the
+	// walk so the ~0.5s git staging dance overlaps with the file walk instead
+	// of running after it; joined once FileHashes are final below.
+	gitID := startIdentityGit(abs)
 	// Resolve resource-adaptive tunables once per build (workers/maxBytes
 	// fall back to machine-derived defaults unless the caller set them).
 	t := resolveTunables(cfg, resolveResources())
@@ -735,8 +734,9 @@ func buildSerial(abs string, cfg *buildConfig) (*Index, error) {
 	ix.computePrecisionByLang()
 	// Content-addressed identity: the file walk is complete, so FileHashes and
 	// MaxMtime are final. The identity is what FreshnessProof later compares
-	// the live tree against; persisted by Save().
-	ix.Identity = buildIdentity(abs, ix.FileHashes, ix.UpdatedAt)
+	// the live tree against; persisted by Save(). The git half of the identity
+	// was captured concurrently with the walk (startIdentityGit above).
+	ix.Identity = gitID.joinIdentity(ix.FileHashes, ix.UpdatedAt)
 	return ix, nil
 }
 
@@ -781,6 +781,10 @@ type fileJob struct {
 // so any ordering divergence would defeat them.
 func buildParallel(abs string, cfg *buildConfig) (*Index, error) {
 	ix := New(abs)
+	// Kick off the git identity observations (tree OID + commit) BEFORE the
+	// walk so the ~0.5s git staging dance overlaps with the file walk instead
+	// of running after it; joined once FileHashes are final below.
+	gitID := startIdentityGit(abs)
 	// Resolve resource-adaptive tunables once per build. The serial and
 	// parallel paths resolve the same profile, so their file-selection
 	// policy and merge behavior stay byte-identical.
@@ -919,8 +923,9 @@ func buildParallel(abs string, cfg *buildConfig) (*Index, error) {
 	ix.computePrecisionByLang()
 	// Content-addressed identity: the file walk is complete, so FileHashes and
 	// MaxMtime are final. The identity is what FreshnessProof later compares
-	// the live tree against; persisted by Save().
-	ix.Identity = buildIdentity(abs, ix.FileHashes, ix.UpdatedAt)
+	// the live tree against; persisted by Save(). The git half of the identity
+	// was captured concurrently with the walk (startIdentityGit above).
+	ix.Identity = gitID.joinIdentity(ix.FileHashes, ix.UpdatedAt)
 	return ix, nil
 }
 

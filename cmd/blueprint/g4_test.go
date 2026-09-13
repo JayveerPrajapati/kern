@@ -159,6 +159,9 @@ func TestG4_CleanCommit(t *testing.T) {
 
 // G4-2: architecture violation
 func TestG4_ArchitectureViolation(t *testing.T) {
+	if testing.Short() {
+		t.Skip("E2E gate test — full pipeline; runs in nightly non-short suite")
+	}
 	_ = requireKernPath(t)
 	bin := g4BuildBinary(t)
 	dir := t.TempDir()
@@ -205,6 +208,9 @@ func TestG4_SecretViolation(t *testing.T) {
 
 // G4-4: multiple findings (architecture + secret)
 func TestG4_MultipleFindings(t *testing.T) {
+	if testing.Short() {
+		t.Skip("E2E gate test — full pipeline; runs in nightly non-short suite")
+	}
 	_ = requireKernPath(t)
 	bin := g4BuildBinary(t)
 	dir := t.TempDir()
@@ -228,6 +234,9 @@ func TestG4_MultipleFindings(t *testing.T) {
 
 // G4-5: staged file differs from working tree
 func TestG4_StagedDiffersFromWorkingTree(t *testing.T) {
+	if testing.Short() {
+		t.Skip("E2E gate test — full pipeline; runs in nightly non-short suite")
+	}
 	bin := g4BuildBinary(t)
 	dir := t.TempDir()
 	g4GitRepo(t, dir)
@@ -250,6 +259,9 @@ func TestG4_StagedDiffersFromWorkingTree(t *testing.T) {
 
 // G4-6: deleted file
 func TestG4_DeletedFile(t *testing.T) {
+	if testing.Short() {
+		t.Skip("E2E gate test — full pipeline; runs in nightly non-short suite")
+	}
 	bin := g4BuildBinary(t)
 	dir := t.TempDir()
 	g4GitRepo(t, dir)
@@ -269,6 +281,9 @@ func TestG4_DeletedFile(t *testing.T) {
 
 // G4-7: rename
 func TestG4_Rename(t *testing.T) {
+	if testing.Short() {
+		t.Skip("E2E gate test — full pipeline; runs in nightly non-short suite")
+	}
 	bin := g4BuildBinary(t)
 	dir := t.TempDir()
 	g4GitRepo(t, dir)
@@ -287,6 +302,9 @@ func TestG4_Rename(t *testing.T) {
 
 // G4-8: binary file
 func TestG4_BinaryFile(t *testing.T) {
+	if testing.Short() {
+		t.Skip("E2E gate test — full pipeline; runs in nightly non-short suite")
+	}
 	bin := g4BuildBinary(t)
 	dir := t.TempDir()
 	g4GitRepo(t, dir)
@@ -310,6 +328,9 @@ func TestG4_BinaryFile(t *testing.T) {
 
 // G4-9: empty commit (no staged changes)
 func TestG4_EmptyCommit(t *testing.T) {
+	if testing.Short() {
+		t.Skip("E2E gate test — full pipeline; runs in nightly non-short suite")
+	}
 	bin := g4BuildBinary(t)
 	dir := t.TempDir()
 	g4GitRepo(t, dir)
@@ -326,6 +347,9 @@ func TestG4_EmptyCommit(t *testing.T) {
 
 // G4-10: hook failure (blueprint binary errors out)
 func TestG4_HookFailure(t *testing.T) {
+	if testing.Short() {
+		t.Skip("E2E gate test — full pipeline; runs in nightly non-short suite")
+	}
 	bin := g4BuildBinary(t)
 	dir := t.TempDir()
 	g4GitRepo(t, dir)
@@ -339,6 +363,9 @@ func TestG4_HookFailure(t *testing.T) {
 
 // G4-11: Blueprint binary unavailable (simulate by pointing to a nonexistent binary)
 func TestG4_BlueprintBinaryUnavailable(t *testing.T) {
+	if testing.Short() {
+		t.Skip("E2E gate test — full pipeline; runs in nightly non-short suite")
+	}
 	// Use a fake binary path that doesn't exist.
 	fakeBin := "/nonexistent/blueprint"
 	dir := t.TempDir()
@@ -359,6 +386,9 @@ func TestG4_BlueprintBinaryUnavailable(t *testing.T) {
 // documented behavior (spec Rule 3, line 861). We install the hook, create a
 // violation, and verify --no-verify lets it through.
 func TestG4_ExplicitBypassDocumented(t *testing.T) {
+	if testing.Short() {
+		t.Skip("E2E gate test — full pipeline; runs in nightly non-short suite")
+	}
 	bin := g4BuildBinary(t)
 	dir := t.TempDir()
 	g4GitRepo(t, dir)
@@ -433,6 +463,9 @@ func TestG4_ExplicitBypassDocumented(t *testing.T) {
 
 // G4-bonus: install hook is idempotent
 func TestG4_InstallHookIdempotent(t *testing.T) {
+	if testing.Short() {
+		t.Skip("E2E gate test — full pipeline; runs in nightly non-short suite")
+	}
 	bin := g4BuildBinary(t)
 	dir := t.TempDir()
 	g4GitRepo(t, dir)
@@ -454,6 +487,9 @@ func TestG4_InstallHookIdempotent(t *testing.T) {
 
 // G4-bonus: install hook refuses to overwrite foreign hook
 func TestG4_InstallHookRefusesForeign(t *testing.T) {
+	if testing.Short() {
+		t.Skip("E2E gate test — full pipeline; runs in nightly non-short suite")
+	}
 	bin := g4BuildBinary(t)
 	dir := t.TempDir()
 	g4GitRepo(t, dir)
@@ -481,6 +517,9 @@ func TestG4_InstallHookRefusesForeign(t *testing.T) {
 
 // G4-bonus: JSON format works
 func TestG4_JSONFormat(t *testing.T) {
+	if testing.Short() {
+		t.Skip("E2E gate test — full pipeline; runs in nightly non-short suite")
+	}
 	bin := g4BuildBinary(t)
 	dir := t.TempDir()
 	g4GitRepo(t, dir)

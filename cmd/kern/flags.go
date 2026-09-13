@@ -101,6 +101,7 @@ type flags struct {
 	version              string
 	status               bool
 	strict               bool
+	update               bool
 	addr                 string
 	enterprise           bool
 	projects             []string
@@ -179,6 +180,8 @@ func parseFlags(args []string) (flags, []string, error) {
 			f.status = true
 		case "--strict":
 			f.strict = true
+		case "--update":
+			f.update = true
 		case "--terse-code", "-terse-code":
 			f.terseCode = true
 		case "--reset":

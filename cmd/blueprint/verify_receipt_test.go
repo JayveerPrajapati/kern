@@ -76,6 +76,9 @@ func receiptIDFromOutput(t *testing.T, out string) string {
 // (exit 2); a bogus id reports not-found (exit 3); a tampered audit chain
 // invalidates the receipt (exit 2).
 func TestVerifyReceipt_EndToEnd(t *testing.T) {
+	if testing.Short() {
+		t.Skip("E2E gate test — full pipeline; runs in nightly non-short suite")
+	}
 	kernPath := requireKernPath(t)
 	binPath := buildBlueprint(t)
 	dir := g11Repo(t,
@@ -202,6 +205,9 @@ func TestVerifyReceipt_EndToEnd(t *testing.T) {
 // receipt is sealed for those (see sealReceipt) — exits 3 with an actionable
 // explanation instead of a bare "Receipt not found".
 func TestVerifyReceipt_ArtifactFile(t *testing.T) {
+	if testing.Short() {
+		t.Skip("E2E gate test — full pipeline; runs in nightly non-short suite")
+	}
 	kernPath := requireKernPath(t)
 	binPath := buildBlueprint(t)
 	dir := g11Repo(t,
@@ -279,6 +285,9 @@ func TestVerifyReceipt_ArtifactFile(t *testing.T) {
 // TestVerifyReceipt_NoReceipt: a repo without receipts reports exit 3 (not
 // found) — the "receipt required for merge" gate fails closed.
 func TestVerifyReceipt_NoReceipt(t *testing.T) {
+	if testing.Short() {
+		t.Skip("E2E gate test — full pipeline; runs in nightly non-short suite")
+	}
 	binPath := buildBlueprint(t)
 	dir := g11Repo(t,
 		map[string]string{"web/web.go": "package web\nfunc Handle() {}\n"},
@@ -299,6 +308,9 @@ func TestVerifyReceipt_NoReceipt(t *testing.T) {
 // seal time) must fail closed with exit 2. An empty binding is NOT a valid
 // binding — before this fix `"" != ""` evaluated false and the receipt passed.
 func TestVerifyReceipt_EmptyChainHashRejected(t *testing.T) {
+	if testing.Short() {
+		t.Skip("E2E gate test — full pipeline; runs in nightly non-short suite")
+	}
 	binPath := buildBlueprint(t)
 	dir := g11Repo(t,
 		map[string]string{"web/web.go": "package web\nfunc Handle() {}\n"},
@@ -416,6 +428,9 @@ func TestVerifyKernChainHash(t *testing.T) {
 // or a non-BLOCK/ERROR status yields no note, and the verification result and
 // exit code (0) never change. An explicit --receipt-id also suppresses it.
 func TestVerifyReceipt_LatestNotesBlockedCIRun(t *testing.T) {
+	if testing.Short() {
+		t.Skip("E2E gate test — full pipeline; runs in nightly non-short suite")
+	}
 	kernPath := requireKernPath(t)
 	binPath := buildBlueprint(t)
 	dir := g11Repo(t,
@@ -511,6 +526,9 @@ func TestVerifyReceipt_LatestNotesBlockedCIRun(t *testing.T) {
 }
 
 func TestVerifyReceipt_SARIF_InToto_CheckDiff(t *testing.T) {
+	if testing.Short() {
+		t.Skip("E2E gate test — full pipeline; runs in nightly non-short suite")
+	}
 	kernPath := requireKernPath(t)
 	binPath := buildBlueprint(t)
 	dir := g11Repo(t,

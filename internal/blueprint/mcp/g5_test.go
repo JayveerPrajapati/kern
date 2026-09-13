@@ -125,6 +125,9 @@ func g5ParseResult(t *testing.T, tr ToolResult) map[string]interface{} {
 
 // G5-1: valid file write
 func TestG5_ValidFileWrite(t *testing.T) {
+	if testing.Short() {
+		t.Skip("E2E gate test — full pipeline; runs in nightly non-short suite")
+	}
 	g5RequireKern(t)
 	dir := g5Repo(t)
 	// Stage a clean change.
@@ -141,6 +144,9 @@ func TestG5_ValidFileWrite(t *testing.T) {
 
 // G5-2: architecture violation
 func TestG5_ArchitectureViolation(t *testing.T) {
+	if testing.Short() {
+		t.Skip("E2E gate test — full pipeline; runs in nightly non-short suite")
+	}
 	g5RequireKern(t)
 	dir := g5Repo(t)
 	// Stage a violating file.
@@ -157,6 +163,9 @@ func TestG5_ArchitectureViolation(t *testing.T) {
 
 // G5-3: secret insertion
 func TestG5_SecretInsertion(t *testing.T) {
+	if testing.Short() {
+		t.Skip("E2E gate test — full pipeline; runs in nightly non-short suite")
+	}
 	g5RequireKern(t)
 	dir := g5Repo(t)
 	// Stage a file with a secret.
@@ -173,6 +182,9 @@ func TestG5_SecretInsertion(t *testing.T) {
 
 // G5-4: multi-file change
 func TestG5_MultiFileChange(t *testing.T) {
+	if testing.Short() {
+		t.Skip("E2E gate test — full pipeline; runs in nightly non-short suite")
+	}
 	g5RequireKern(t)
 	dir := g5Repo(t)
 	// Stage two clean files.
@@ -203,6 +215,9 @@ func TestG5_MultiFileChange(t *testing.T) {
 // severity=block finding whose rule is not duplication:confirmed-block.
 // Mirrors TestG15_ProposedDuplicationWarn's fixture but through git staging.
 func TestG5_StagedDuplicationWarn(t *testing.T) {
+	if testing.Short() {
+		t.Skip("E2E gate test — full pipeline; runs in nightly non-short suite")
+	}
 	g5RequireKern(t)
 	g5RequireFingerprint(t)
 	dir := g5Repo(t)
@@ -265,6 +280,9 @@ func TestG5_StagedDuplicationWarn(t *testing.T) {
 
 // G5-5: failed tool execution (kern binary unavailable)
 func TestG5_FailedToolExecution(t *testing.T) {
+	if testing.Short() {
+		t.Skip("E2E gate test — full pipeline; runs in nightly non-short suite")
+	}
 	// Force kern binary to be unfindable by clearing PATH for the subprocess.
 	// We can't easily do this with the direct handler call, so test via the
 	// server over stdio with a repo that has no .kern dir.
@@ -308,6 +326,9 @@ func TestG5_OversizedPayload(t *testing.T) {
 
 // G5-8: missing repository context
 func TestG5_MissingRepoContext(t *testing.T) {
+	if testing.Short() {
+		t.Skip("E2E gate test — full pipeline; runs in nightly non-short suite")
+	}
 	// Call with empty repo — should use cwd or error gracefully.
 	tr := g5CallValidateStaged(t, json.RawMessage(`{}`))
 	// Either succeeds (if cwd is a git repo) or errors — both acceptable.
@@ -317,6 +338,9 @@ func TestG5_MissingRepoContext(t *testing.T) {
 
 // G5-9: agent identity missing/unknown
 func TestG5_AgentIdentityMissing(t *testing.T) {
+	if testing.Short() {
+		t.Skip("E2E gate test — full pipeline; runs in nightly non-short suite")
+	}
 	g5RequireKern(t)
 	dir := g5Repo(t)
 	g5Stage(t, dir, "web/extra.go", "package web\nfunc Extra() {}\n")
@@ -331,6 +355,9 @@ func TestG5_AgentIdentityMissing(t *testing.T) {
 
 // G5-10: blocked response is machine-readable
 func TestG5_BlockedResponseMachineReadable(t *testing.T) {
+	if testing.Short() {
+		t.Skip("E2E gate test — full pipeline; runs in nightly non-short suite")
+	}
 	g5RequireKern(t)
 	dir := g5Repo(t)
 	g5Stage(t, dir, "web/bad.go", "package web\nimport \"example.com/repo/db\"\nfunc Bad() { db.Query() }\n")
@@ -373,6 +400,9 @@ func TestG5_BlockedResponseMachineReadable(t *testing.T) {
 // G5-11: verify the agent can use the result to repair and retry
 // (explain finding tool produces actionable guidance)
 func TestG5_RepairAndRetry(t *testing.T) {
+	if testing.Short() {
+		t.Skip("E2E gate test — full pipeline; runs in nightly non-short suite")
+	}
 	g5RequireKern(t)
 	dir := g5Repo(t)
 	g5Stage(t, dir, "web/bad.go", "package web\nimport \"example.com/repo/db\"\nfunc Bad() { db.Query() }\n")
@@ -403,6 +433,9 @@ func TestG5_RepairAndRetry(t *testing.T) {
 
 // G5-12: end-to-end MCP server over stdio (tools/call dispatch)
 func TestG5_ServerEndToEnd(t *testing.T) {
+	if testing.Short() {
+		t.Skip("E2E gate test — full pipeline; runs in nightly non-short suite")
+	}
 	g5RequireKern(t)
 	dir := g5Repo(t)
 	g5Stage(t, dir, "web/bad.go", "package web\nimport \"example.com/repo/db\"\nfunc Bad() { db.Query() }\n")

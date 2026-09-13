@@ -217,77 +217,73 @@ func archNoKernDetail(evalRoot string) (msg, explanation, fix string) {
 // ensureFreshIndex rebuilds the kern index only when it is stale and returns
 // the index freshness verdict ("fresh"/"rebuilt") for provenance stamping on
 // every finding. P0.2: staleness is kern's authoritative content-addressed
-// verdict (`kern index status --json`), not an mtime heuristic — operations
-// that preserve mtimes (e.g. `git apply`) can no longer hide a stale index.
-// --strict forces kern to recompute content_root over every file, so
-// untracked proposed-new files are counted too. A stale index is rebuilt once
-// and re-verified; a rebuild that does NOT converge is an ERROR (done=true),
-// never a silent pass on a potentially-misleading index.
+// verdict, not an mtime heuristic — operations that preserve mtimes (e.g.
+// `git apply`) can no longer hide a stale index (git hashes content, so a
+// content edit flips the tree OID even when the mtime is untouched).
+// A stale index is rebuilt once and re-verified; a rebuild that does NOT
+// converge is an ERROR (done=true), never a silent pass on a
+// potentially-misleading index.
+//
+// Phase 2 consolidation: the default path is ONE subprocess —
+// `kern index ensure-fresh --json` (EnsureFreshIndex) — which performs the
+// whole probe → update → re-verify sequence internally: a cheap NON-strict
+// git tree-OID stale check (no content walk), an incremental update (or full
+// build when no index loads) when stale, a strict post-save re-verify from
+// disk as the trust anchor, a loose re-verify when strict cannot converge
+// (strict counts unparseable files a build skips), and a fail-closed "stale"
+// result on non-convergence. This replaces the former 3-4 subprocess sequence
+// (status --strict → update → status --strict → status) that cost ~2.6s per
+// pre-commit `kern check` invocation. The pre-update probe's strictness was
+// deliberately redundant — the post-update strict re-verify is the real
+// observation.
+//
+// The BLUEPRINT_ALLOW_STALE_REBUILD=1 env branch is unchanged: an explicit
+// opt-in that rebuilds once and trusts the result without re-verifying
+// convergence.
 func (c *ArchitectureCheck) ensureFreshIndex(ctx context.Context, req domain.ChangeRequest) (freshness string, result domain.CheckResult, done bool) {
-	idxStatus, err := c.client.IndexStatus(ctx, req.RepositoryRoot, true)
-	if err != nil {
-		return "", domain.CheckResult{Name: c.Name(), Status: domain.StatusError, Error: "kern index status unavailable: " + err.Error()}, true
-	}
-	if indexVerdict(idxStatus) == "fresh" {
-		// Already current — no rebuild, proceed straight to the guard check.
-		return "fresh", domain.CheckResult{}, false
-	}
 	if os.Getenv("BLUEPRINT_ALLOW_STALE_REBUILD") == "1" {
 		// Explicit opt-in to the legacy rebuild-and-continue behavior: rebuild
 		// once and trust the result without re-verifying convergence.
-		if _, _, err := c.client.IndexBuild(ctx, req.RepositoryRoot); err != nil {
+		if _, _, err := c.client.IndexUpdate(ctx, req.RepositoryRoot); err != nil {
 			return "", domain.CheckResult{Name: c.Name(), Status: domain.StatusError, Error: "stale index and rebuild failed: " + err.Error()}, true
 		}
 		log.Printf("blueprint: BLUEPRINT_ALLOW_STALE_REBUILD=1: rebuilt stale kern index without re-verification (explicit risk opt-in)")
 		return "rebuilt", domain.CheckResult{}, false
 	}
-	// Default path: rebuild once, then re-verify against kern's verdict.
-	if _, _, err := c.client.IndexBuild(ctx, req.RepositoryRoot); err != nil {
-		return "", domain.CheckResult{Name: c.Name(), Status: domain.StatusError, Error: "stale index and rebuild failed: " + err.Error()}, true
-	}
-	recheck, err := c.client.IndexStatus(ctx, req.RepositoryRoot, true)
+	// Default path (P2-4 consolidation): ONE subprocess —
+	// `kern index ensure-fresh --json` — loads the cached index, cheaply
+	// checks staleness (git tree-OID compare, no content walk), updates (or
+	// full-builds) when stale, strictly re-verifies from disk, and fails
+	// closed when the rebuild does not converge. The pre-update probe's
+	// strictness was deliberately redundant: the post-update strict
+	// re-verify is the trust anchor. This replaces the former
+	// probe → IndexUpdate → re-verify-strict → re-verify-loose sequence
+	// (3-4 subprocesses, ~2.6s) with a single subprocess.
+	freshness, err := c.client.EnsureFreshIndex(ctx, req.RepositoryRoot)
 	if err != nil {
-		return "", domain.CheckResult{Name: c.Name(), Status: domain.StatusError, Error: "kern index status unavailable: " + err.Error()}, true
+		if freshness == "stale" {
+			// Stale-non-converging: refuse to pass on a potentially-misleading
+			// index. StatusError is the signal; the finding carries the detail.
+			return "", domain.CheckResult{
+				Name:   c.Name(),
+				Status: domain.StatusError,
+				Findings: []domain.Finding{{
+					RuleID:         "architecture:index-stale",
+					Severity:       domain.SeverityError,
+					Category:       domain.CategoryArchitecture,
+					Message:        "kern index is stale and did not converge after rebuild",
+					Explanation:    "A stale index can hide architecture boundary violations. The rebuild did not produce a fresh index, indicating concurrent edits or index corruption. The check refuses to pass on a potentially-misleading index.",
+					SuggestedFix:   "Run `kern index` manually, ensure no concurrent edits, then re-run blueprint.",
+					RuleVersion:    "1",
+					IndexFreshness: "stale",
+					Confidence:     1.0,
+					Scope:          "repo",
+				}},
+			}, true
+		}
+		return "", domain.CheckResult{Name: c.Name(), Status: domain.StatusError, Error: "kern index ensure-fresh: " + err.Error()}, true
 	}
-	if indexVerdict(recheck) == "fresh" {
-		return "rebuilt", domain.CheckResult{}, false
-	}
-	// The strict verdict recomputes content_root over EVERY file on disk,
-	// while `kern index .` records content for the parseable source set only.
-	// A repo containing an unparseable file (e.g. a deliberately
-	// compile-breaking fixture) therefore never converges under strict — the
-	// build skips the file, strict status counts it. Falling back to the
-	// non-strict verdict before giving up is safe: non-strict freshness is
-	// anchored to the git tree (tree_oid), which is exactly the content the
-	// guard check evaluates. Only when BOTH verdicts are stale do we refuse
-	// to pass on a potentially-misleading index.
-	loose, err := c.client.IndexStatus(ctx, req.RepositoryRoot, false)
-	if err != nil {
-		return "", domain.CheckResult{Name: c.Name(), Status: domain.StatusError, Error: "kern index status unavailable: " + err.Error()}, true
-	}
-	if indexVerdict(loose) == "fresh" {
-		// Strict won't converge, but the tracked tree is fully indexed —
-		// proceed with the rebuilt index.
-		return "rebuilt", domain.CheckResult{}, false
-	}
-	// Stale-non-converging: refuse to pass on a potentially-misleading index.
-	// StatusError is the signal; the finding carries the detail.
-	return "", domain.CheckResult{
-		Name:   c.Name(),
-		Status: domain.StatusError,
-		Findings: []domain.Finding{{
-			RuleID:         "architecture:index-stale",
-			Severity:       domain.SeverityError,
-			Category:       domain.CategoryArchitecture,
-			Message:        "kern index is stale and did not converge after rebuild",
-			Explanation:    "A stale index can hide architecture boundary violations. The rebuild did not produce a fresh index, indicating concurrent edits or index corruption. The check refuses to pass on a potentially-misleading index.",
-			SuggestedFix:   "Run `kern index` manually, ensure no concurrent edits, then re-run blueprint.",
-			RuleVersion:    "1",
-			IndexFreshness: "stale",
-			Confidence:     1.0,
-			Scope:          "repo",
-		}},
-	}, true
+	return freshness, domain.CheckResult{}, false
 }
 
 // authzVerdict asks kern for the change's authorization verdict when it
@@ -493,24 +489,6 @@ func stagedFilePaths(req domain.ChangeRequest) []string {
 		files = append(files, f.Path)
 	}
 	return files
-}
-
-// indexVerdict extracts the freshness verdict from a `kern index --status
-// --json` payload (KernClient.IndexStatus). The verdict is authoritative:
-// "fresh" means the index reflects current content; anything else — "stale",
-// "unknown", or a missing freshness_proof (built:false, i.e. no index) — is
-// treated as stale (fail-closed: an index whose freshness cannot be proven
-// must not be trusted). The caller compares against "fresh" exactly.
-func indexVerdict(status map[string]any) string {
-	proof, ok := status["freshness_proof"].(map[string]any)
-	if !ok {
-		return "unknown"
-	}
-	v, _ := proof["verdict"].(string)
-	if v == "" {
-		return "unknown"
-	}
-	return v
 }
 
 // gitTrackedFiles returns all files tracked by git in the repo root, via

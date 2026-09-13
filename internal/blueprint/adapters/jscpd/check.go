@@ -123,6 +123,14 @@ type Check struct {
 	version    string // cached `jscpd --version` output
 	versionSet bool
 
+	// fast skips Pass 2 (the jscpd binary run over the mirrored repo) and
+	// keeps only the in-house advisory findings, appending one informational
+	// note that the full two-pass duplication check runs in CI. Fast mode is
+	// advisory-only by construction: it can never produce a BLOCK, because
+	// the two-pass confirmation is the only BLOCK source. It never changes
+	// the behavior of the fallback path (binary unavailable).
+	fast bool
+
 	// confirmFn is the Pass-2 confirmation oracle for block-eligible in-house
 	// candidates. nil (default) correlates against the actual jscpd clone
 	// report; tests and benchmarks inject a mock so they never depend on the
@@ -163,6 +171,17 @@ func WithConfirmer(fn func(filePair [2]string) bool) Option {
 	return func(c *Check) { c.confirmFn = fn }
 }
 
+// WithFast enables fast mode: Pass 2 (the real jscpd binary scan of a full
+// repo mirror — the dominant cost of this check) is skipped entirely, and
+// Run keeps only the in-house advisory findings plus one informational note
+// that the full two-pass duplication check runs in CI. Fast mode is
+// advisory-only: it skips ADVISORY pass-2 work, so it can never turn a BLOCK
+// into a pass (no BLOCK is possible without pass-2 confirmation), and it
+// never affects the fallback path when the jscpd binary is unavailable.
+func WithFast(fast bool) Option {
+	return func(c *Check) { c.fast = fast }
+}
+
 // NewCheck constructs a jscpd-backed duplication check. client is used only
 // for the in-house fallback when the jscpd binary is unavailable (may be nil).
 func NewCheck(client *kern.KernClient, opts ...Option) *Check {
@@ -187,7 +206,9 @@ func (c *Check) Name() string { return "duplication:jscpd" }
 // clones that involve a changed file are reported (new-change principle —
 // pre-existing repo-internal duplication is not this change's signal). When
 // the jscpd binary is unavailable, Run degrades to the in-house structural
-// check and flags the fallback with a WARN finding.
+// check and flags the fallback with a WARN finding. In fast mode (WithFast),
+// Pass 2 is skipped: only the in-house advisory findings are returned, plus
+// one informational note that the full two-pass check runs in CI.
 func (c *Check) Run(ctx context.Context, req domain.ChangeRequest) (domain.CheckResult, error) {
 	if req.RepositoryRoot == "" {
 		return domain.CheckResult{Name: c.Name(), Status: domain.StatusError, Error: "repository root required"}, nil
@@ -210,6 +231,37 @@ func (c *Check) Run(ctx context.Context, req domain.ChangeRequest) (domain.Check
 	advisory, changed := c.inHouseTriage(ctx, req)
 	if len(changed) == 0 {
 		return domain.CheckResult{Name: c.Name(), Status: domain.StatusPass}, nil
+	}
+
+	// Fast mode (WithFast / `kern check --fast` / KERN_CHECK_FAST=1): skip
+	// Pass 2 entirely — no repo mirror, no jscpd binary run (the dominant
+	// cost of this check). The result carries only the in-house advisory
+	// findings (WARN at most) plus one informational note that the full
+	// two-pass duplication check runs in CI. This is advisory-only by
+	// construction: Pass 2 is the only source of a BLOCK (two-pass
+	// confirmation), so fast mode never turns a BLOCK into a pass, and the
+	// jscpd-binary-unavailable fallback path above is untouched.
+	if c.fast {
+		out := append([]domain.Finding(nil), advisory...)
+		status := domain.StatusPass
+		if len(out) > 0 {
+			status = domain.StatusWarn
+		}
+		out = append(out, domain.Finding{
+			RuleID:      "duplication:fast-mode",
+			Severity:    domain.SeverityInfo,
+			Category:    domain.CategoryDuplication,
+			Message:     "fast mode: full two-pass duplication check skipped (in-house advisory findings only)",
+			Explanation: "Fast mode (--fast / KERN_CHECK_FAST=1) skips Pass 2 of the duplication check — the jscpd scan of the mirrored repo — to keep pre-commit hooks fast. The full two-pass check (including jscpd clone confirmation) runs in CI: run `kern check --staged` without --fast, or set KERN_CHECK_FAST=0, for the complete scan locally.",
+			RuleVersion: "1",
+			Confidence:  1.0,
+			Scope:       "repo",
+			Evidence: []domain.Evidence{{
+				Kind:        "fast-mode",
+				Description: "Pass 2 (jscpd mirror scan) skipped; full two-pass duplication check runs in CI",
+			}},
+		})
+		return domain.CheckResult{Name: c.Name(), Status: status, Findings: dedupe(out)}, nil
 	}
 
 	// Mirror the existing repo tree (the comparison corpus) plus the changed

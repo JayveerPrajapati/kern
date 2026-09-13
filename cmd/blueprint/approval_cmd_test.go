@@ -73,6 +73,9 @@ func gateStatus(t *testing.T, res approvalResult) string {
 // approve -> check with --approval-id passes. It also covers reject and the
 // error paths (unknown id, already decided).
 func TestP13_ApprovalGateE2E(t *testing.T) {
+	if testing.Short() {
+		t.Skip("E2E gate test — full pipeline; runs in nightly non-short suite")
+	}
 	_ = requireKernPath(t)
 	bin := g4BuildBinary(t)
 	dir := t.TempDir()
@@ -193,6 +196,9 @@ func TestP13_ApprovalGateE2E(t *testing.T) {
 // TestP13_HumanSourceNotGated verifies the default policy does not gate human
 // changes (humans are the approvers).
 func TestP13_HumanSourceNotGated(t *testing.T) {
+	if testing.Short() {
+		t.Skip("E2E gate test — full pipeline; runs in nightly non-short suite")
+	}
 	_ = requireKernPath(t)
 	bin := g4BuildBinary(t)
 	dir := t.TempDir()

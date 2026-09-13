@@ -140,6 +140,9 @@ func TestG11_CleanPR(t *testing.T) {
 
 // G11-2: policy violation PR — should BLOCK.
 func TestG11_PolicyViolationPR(t *testing.T) {
+	if testing.Short() {
+		t.Skip("E2E gate test — full pipeline; runs in nightly non-short suite")
+	}
 	kernPath := requireKernPath(t)
 	binPath := buildBlueprint(t)
 	dir := g11Repo(t,
@@ -171,6 +174,9 @@ func TestG11_PolicyViolationPR(t *testing.T) {
 // G11-3: stale config — missing .blueprint/config.yaml should still work
 // (defaults), but a malformed config should ERROR.
 func TestG11_StaleConfig(t *testing.T) {
+	if testing.Short() {
+		t.Skip("E2E gate test — full pipeline; runs in nightly non-short suite")
+	}
 	kernPath := requireKernPath(t)
 	binPath := buildBlueprint(t)
 
@@ -198,6 +204,9 @@ func TestG11_StaleConfig(t *testing.T) {
 
 // G11-4: missing Blueprint binary — when kern binary is unavailable.
 func TestG11_MissingBinary(t *testing.T) {
+	if testing.Short() {
+		t.Skip("E2E gate test — full pipeline; runs in nightly non-short suite")
+	}
 	binPath := buildBlueprint(t)
 	dir := g11Repo(t,
 		map[string]string{
@@ -243,6 +252,9 @@ func TestG11_MissingBinary(t *testing.T) {
 // G11-5: deterministic result across clean runners — running CI twice on the
 // same repo should produce identical artifacts (modulo timestamps and duration).
 func TestG11_DeterministicAcrossRuns(t *testing.T) {
+	if testing.Short() {
+		t.Skip("E2E gate test — full pipeline; runs in nightly non-short suite")
+	}
 	kernPath := requireKernPath(t)
 	binPath := buildBlueprint(t)
 	dir := g11Repo(t,
@@ -293,6 +305,9 @@ func TestG11_DeterministicAcrossRuns(t *testing.T) {
 
 // G11-6: JSON artifact output — the --json flag should emit JSON to stdout.
 func TestG11_JSONArtifactOutput(t *testing.T) {
+	if testing.Short() {
+		t.Skip("E2E gate test — full pipeline; runs in nightly non-short suite")
+	}
 	kernPath := requireKernPath(t)
 	binPath := buildBlueprint(t)
 	dir := g11Repo(t,
@@ -324,6 +339,9 @@ func TestG11_JSONArtifactOutput(t *testing.T) {
 // G11-7: human-readable summary — without --no-human, stderr should contain
 // a readable summary.
 func TestG11_HumanReadableSummary(t *testing.T) {
+	if testing.Short() {
+		t.Skip("E2E gate test — full pipeline; runs in nightly non-short suite")
+	}
 	kernPath := requireKernPath(t)
 	binPath := buildBlueprint(t)
 	dir := g11Repo(t,
@@ -359,6 +377,9 @@ func TestG11_HumanReadableSummary(t *testing.T) {
 // G11-bonus: no local daemon state — CI should work even with no .kern index
 // present (it builds its own).
 func TestG11_NoLocalDaemonState(t *testing.T) {
+	if testing.Short() {
+		t.Skip("E2E gate test — full pipeline; runs in nightly non-short suite")
+	}
 	kernPath := requireKernPath(t)
 	binPath := buildBlueprint(t)
 	dir := g11Repo(t,
@@ -387,6 +408,9 @@ func TestG11_NoLocalDaemonState(t *testing.T) {
 
 // G11-bonus: empty PR (no changes) should PASS.
 func TestG11_EmptyPR(t *testing.T) {
+	if testing.Short() {
+		t.Skip("E2E gate test — full pipeline; runs in nightly non-short suite")
+	}
 	kernPath := requireKernPath(t)
 	binPath := buildBlueprint(t)
 	dir := g11Repo(t,
@@ -411,6 +435,9 @@ func TestG11_EmptyPR(t *testing.T) {
 // worktree and never mutate the user's working tree: no checkout of the real
 // repo, no leftover worktrees, same branch, clean status.
 func TestG11_HeadRefWorktreeNoMutation(t *testing.T) {
+	if testing.Short() {
+		t.Skip("E2E gate test — full pipeline; runs in nightly non-short suite")
+	}
 	kernPath := requireKernPath(t)
 	binPath := buildBlueprint(t)
 	dir := g11Repo(t,

@@ -14,6 +14,9 @@ import (
 // kern_version (probed by the service, best-effort), index_freshness "fresh"
 // (the CI worktree builds a fresh index), confidence 1.0, scope "file".
 func TestG25_CIArtifactCarriesProvenanceFields(t *testing.T) {
+	if testing.Short() {
+		t.Skip("E2E gate test — full pipeline; runs in nightly non-short suite")
+	}
 	kernPath := requireKernPath(t)
 	binPath := buildBlueprint(t)
 	dir := g11Repo(t,
@@ -69,6 +72,9 @@ func TestG25_CIArtifactCarriesProvenanceFields(t *testing.T) {
 // --format=json is passed explicitly because g4BlueprintCheck pins
 // --format=terminal as a base arg (flag last-wins overrides it).
 func TestG25_CheckJSONIncludesProvenanceFields(t *testing.T) {
+	if testing.Short() {
+		t.Skip("E2E gate test — full pipeline; runs in nightly non-short suite")
+	}
 	_ = requireKernPath(t) // gate needs real kern
 	bin := g4BuildBinary(t)
 	dir := t.TempDir()

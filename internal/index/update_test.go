@@ -1,6 +1,7 @@
 package index
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -367,4 +368,128 @@ func TestUpdateLoadedPriorSkipsIgnoredFiles(t *testing.T) {
 	if strings.Contains(inc2.Identity.ContentRoot, "leaked") {
 		t.Error("ignored file leaked into content identity")
 	}
+}
+
+// updateParallelTree writes a deterministic multi-package fixture sized to
+// cross Update's parallelMin threshold (>= parallelMinFloor files, and below
+// the large-profile parallelMin the tests use for the serial side), mirroring
+// parallelTestTree's shape: each package imports and calls the previous one,
+// plus foreign-language files, so Symbols, Calls, Inherits, Pkg import
+// merging, ImportsByFile and GeneratedFiles all flow through the pool's
+// ordered replay.
+func updateParallelTree(t *testing.T) string {
+	t.Helper()
+	files := map[string]string{}
+	for p := 0; p < 56; p++ {
+		pkg := fmt.Sprintf("pkg%d", p)
+		imports := ""
+		if p > 0 {
+			imports = fmt.Sprintf("\nimport \"pkg%d\"\n", p-1)
+		}
+		for f := 0; f < 5; f++ {
+			callee := `"x"`
+			if p > 0 {
+				callee = fmt.Sprintf("pkg%d.Func%d()", p-1, f)
+			}
+			body := fmt.Sprintf(`package %s
+%s
+func Func%d() string {
+	return Helper%d()
+}
+
+func Helper%d() string {
+	return %s
+}
+
+type T%d struct{ V int }
+
+func (t T%d) Method%d() int { return t.V + %d }
+`, pkg, imports, f, f, f, callee, f, f, f, f)
+			files[filepath.Join(pkg, fmt.Sprintf("file%d.go", f))] = body
+		}
+	}
+	files["scripts/util.py"] = "def helper():\n    return 1\n\n\ndef run():\n    return helper()\n"
+	files["scripts/app.js"] = "function helper() { return 1; }\nfunction run() { return helper(); }\n"
+	return writeTree(t, files)
+}
+
+// updateMutateTree applies the change mix a real incremental refresh sees:
+// one edited file (new symbol via re-parse), one new file, one deleted file
+// whose cross-package callees dangle into the copied-edge set, and one
+// touched-but-unchanged file (new mtime, same content — the content-hash
+// match path).
+func updateMutateTree(t *testing.T, root string) {
+	t.Helper()
+	writeFileAt(t, root, "pkg55/file0.go", "package pkg55\n\nfunc Func0() string { return Helper0() }\n\nfunc Helper0() string {\n\treturn \"x\"\n}\n\nfunc NewFunc() {}\n")
+	writeFileAt(t, root, "pkg55/newfile.go", "package pkg55\n\nfunc Added() {}\n")
+	if err := os.Remove(filepath.Join(root, "pkg0", "file2.go")); err != nil {
+		t.Fatal(err)
+	}
+	// Touch pkg10/file0.go with identical content: new mtime, same hash.
+	orig, err := os.ReadFile(filepath.Join(root, "pkg10", "file0.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "pkg10", "file0.go"), orig, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestUpdateParallelMatchesSerial: the pool path must reproduce the serial
+// path byte for byte. prev comes from a full Build; the same prev and the
+// same (mutated) tree feed one Update forced onto the serial path (a
+// large-worker profile whose parallelMin exceeds the file count) and one
+// forced onto the pool path (a small-worker profile whose parallelMin the
+// file count clears). The only difference between the two calls is the
+// machine profile, hence the path taken — the same fakeResources technique
+// resources_test.go uses to pin adaptive behavior.
+func TestUpdateParallelMatchesSerial(t *testing.T) {
+	root := updateParallelTree(t)
+	fakeResources(t, 4, 8<<30) // small worker pool: parallelMin 256 <= 282 files
+	prior, err := Build(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	updateMutateTree(t, root)
+
+	// Serial path: parallelMin 1024 > 282 files, so the pool is bypassed.
+	fakeResources(t, 64, 8<<30)
+	serial, err := Update(root, prior)
+	if err != nil {
+		t.Fatalf("serial-path Update: %v", err)
+	}
+	if len(serial.Symbols) == 0 {
+		t.Fatal("fixture produced no symbols")
+	}
+
+	// Pool path: same prev, same tree, different profile.
+	fakeResources(t, 4, 8<<30)
+	parallel, err := Update(root, prior)
+	if err != nil {
+		t.Fatalf("pool-path Update: %v", err)
+	}
+	assertIndexesByteIdentical(t, serial, parallel)
+}
+
+// TestUpdateDeterministicRepeat: two pool-path Updates from the same prev and
+// tree must be byte-identical (modulo wall-clock timestamps), like
+// TestBuildParallelDeterministicRepeat.
+func TestUpdateDeterministicRepeat(t *testing.T) {
+	root := updateParallelTree(t)
+	fakeResources(t, 4, 8<<30) // pool path: parallelMin 256 <= 282 files
+	prior, err := Build(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	updateMutateTree(t, root)
+
+	a, err := Update(root, prior)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := Update(root, prior)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertIndexesByteIdentical(t, a, b)
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -210,7 +211,8 @@ func runCheckAgainstFixture(t *testing.T, f DupFixture) domain.CheckResult {
 func assertBucket(t *testing.T, res domain.CheckResult, expectedBucket string) {
 	t.Helper()
 	if expectedBucket == "ignore" {
-		// "ignore" means no finding should be produced (similarity < 0.60).
+		// "ignore" means no finding should be produced (similarity below
+		// DetectionThreshold, or a tiny function below the size floor).
 		if len(res.Findings) > 0 {
 			for _, f := range res.Findings {
 				if bucketStr := extractBucket(f); bucketStr != "ignore" {
@@ -747,7 +749,9 @@ func DoRetry(req *Request) error {
 // Confidence equals the structural similarity score that triggered it (P2-4),
 // and that rule_version/scope are stamped. The exact-duplicate fixture's
 // similarity is echoed in the message ("similarity %.2f"), so the test parses
-// it back out and asserts Confidence matches exactly.
+// it back out and asserts Confidence matches within the message's rounding
+// precision (the raw score is a float sum, e.g. 0.9999999999999999 for an
+// exact match, while the message rounds to "1.00").
 func TestG21_ConfidenceEqualsSimilarityScore(t *testing.T) {
 	f := ExactDuplicate(t)
 	res := runCheckAgainstFixture(t, f)
@@ -777,7 +781,7 @@ func TestG21_ConfidenceEqualsSimilarityScore(t *testing.T) {
 	if _, err := fmt.Sscanf(found.Message[i+len(marker):], "%f", &want); err != nil {
 		t.Fatalf("parse similarity from %q: %v", found.Message[i+len(marker):], err)
 	}
-	if found.Confidence != want {
-		t.Errorf("Confidence = %v, want %v (must equal the similarity score)", found.Confidence, want)
+	if math.Abs(found.Confidence-want) > 0.005 {
+		t.Errorf("Confidence = %v, want %v (must equal the similarity score within message rounding)", found.Confidence, want)
 	}
 }

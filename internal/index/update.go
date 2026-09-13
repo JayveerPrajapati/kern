@@ -201,20 +201,20 @@ func Update(root string, prev *Index) (*Index, error) {
 					if idx >= int64(len(jobs)) {
 						return
 					}
-					results <- updateComputeFile(prev, jobs[idx], callsByFile, inheritsByFile)
-				}
-			}()
-		}
-		go func() {
-			wg.Wait()
-			close(results)
+results <- updateComputeFile(prev, jobs[idx], callsByFile, inheritsByFile)
+			}
 		}()
+	}
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
 
-		// Phase 3: serial ordered merge in the main goroutine — the ONLY
-		// goroutine that mutates ix. Results are replayed in lexical (seq)
-		// order, preserving the apply order that keeps the merged index
-		// byte-identical to the serial path.
-		pending := map[int]updateResult{}
+	// Phase 3: serial ordered merge in the main goroutine — the ONLY
+	// goroutine that mutates ix. Results are replayed in lexical (seq)
+	// order, preserving the apply order that keeps the merged index
+	// byte-identical to the serial path.
+	pending := map[int]updateResult{}
 		nextSeq := 0
 		for ur := range results {
 			pending[ur.r.seq] = ur
@@ -260,18 +260,13 @@ func Update(root string, prev *Index) (*Index, error) {
 
 	ix.UpdatedAt = time.Now().UTC()
 	ix.buildSymbolIndex()
-	// Dangling-edge cleanup must run before promoteLowEdges and
-	// computeCallers: it prunes the Calls map, and the reconciliation pass
-	// and Callers/AliasCallers are derived from it afterwards.
+	// Dangling-edge cleanup must run before computeCallers: it prunes the
+	// Calls map, and Callers/AliasCallers are derived from it afterwards.
 	dropDanglingCalls(ix, prev, copied)
-	ix.promoteLowEdges()
 	ix.computeCallers()
 	ix.addDispatchEdges()
 	ix.resolveEntries()
 	ix.reindexByFile()
-	// CG-P1-9: build the prose→symbol inverted vocab after the symbol table is
-	// final so LookupProse can serve miss-chain candidates without re-walking it.
-	ix.buildProseVocab()
 	ix.computePrecisionByLang()
 	// Content-addressed identity: FileHashes and MaxMtime are final, so the
 	// freshness proofs compare identically to a full rebuild. The git half of
@@ -374,18 +369,6 @@ func reconstructFileResult(prev *Index, rel, hash string, mtime int64, callsByFi
 		if pkg != nil {
 			r.pkg.Name = pkg.Name
 			r.pkg.Lang = pkg.Lang
-			// Per-file struct-field attribution is not serialized, so an
-			// unchanged file's struct fields survive only through the
-			// package-merged map. Carry it forward, or every incremental
-			// update on a disk-loaded prior silently strips StructFields
-			// (the receiver-field callee rewrite then degrades and the dead
-			// lens re-flags live field-access calls).
-			if pkg.StructFields != nil {
-				r.pkg.StructFields = make(map[string]string, len(pkg.StructFields))
-				for k, v := range pkg.StructFields {
-					r.pkg.StructFields[k] = v
-				}
-			}
 		}
 	}
 	return r

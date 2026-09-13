@@ -133,6 +133,9 @@ func TestG22_CleanFix(t *testing.T) {
 // BLOCKED (exit 1) and the output never echoes the snippet (redaction
 // invariant — the diff section is omitted when findings remain).
 func TestG22_FixBlockedBySecret(t *testing.T) {
+	if testing.Short() {
+		t.Skip("E2E gate test — full pipeline; runs in nightly non-short suite")
+	}
 	kernPath := requireKernPath(t)
 	binPath := g4BuildBinary(t)
 	dir := g22FixRepo(t)
@@ -165,6 +168,9 @@ func TestG22_FixBlockedBySecret(t *testing.T) {
 // TestG22_Confinement: a --file path that escapes the repo is rejected with a
 // tool error (exit 2) before any worktree is created or mutated.
 func TestG22_Confinement(t *testing.T) {
+	if testing.Short() {
+		t.Skip("E2E gate test — full pipeline; runs in nightly non-short suite")
+	}
 	kernPath := requireKernPath(t)
 	binPath := g4BuildBinary(t)
 	dir := g22FixRepo(t)
@@ -192,6 +198,9 @@ func TestG22_Confinement(t *testing.T) {
 // TestG22_NotARepo: --repo pointing at a directory without .git is a tool
 // error (exit 2).
 func TestG22_NotARepo(t *testing.T) {
+	if testing.Short() {
+		t.Skip("E2E gate test — full pipeline; runs in nightly non-short suite")
+	}
 	kernPath := requireKernPath(t)
 	binPath := g4BuildBinary(t)
 	dir := t.TempDir() // no git init
@@ -210,6 +219,9 @@ func TestG22_NotARepo(t *testing.T) {
 // TestG22_WorktreeCleanedUp: after a run, no sandbox worktree remains
 // registered in the repo (the sandbox cleanup works).
 func TestG22_WorktreeCleanedUp(t *testing.T) {
+	if testing.Short() {
+		t.Skip("E2E gate test — full pipeline; runs in nightly non-short suite")
+	}
 	kernPath := requireKernPath(t)
 	binPath := g4BuildBinary(t)
 	dir := g22FixRepo(t)
@@ -233,6 +245,9 @@ func TestG22_WorktreeCleanedUp(t *testing.T) {
 // TestG22_JsonShape: --json output parses and contains the checks, findings,
 // and diffs keys.
 func TestG22_JsonShape(t *testing.T) {
+	if testing.Short() {
+		t.Skip("E2E gate test — full pipeline; runs in nightly non-short suite")
+	}
 	kernPath := requireKernPath(t)
 	binPath := g4BuildBinary(t)
 	dir := g22FixRepo(t)
@@ -272,6 +287,9 @@ func TestG22_JsonShape(t *testing.T) {
 // TestG22_NoFiles: an invocation without any --file/--content pair is a usage
 // error (exit 2).
 func TestG22_NoFiles(t *testing.T) {
+	if testing.Short() {
+		t.Skip("E2E gate test — full pipeline; runs in nightly non-short suite")
+	}
 	kernPath := requireKernPath(t)
 	binPath := g4BuildBinary(t)
 	dir := g22FixRepo(t)
@@ -291,6 +309,9 @@ func TestG22_NoFiles(t *testing.T) {
 // fixExitCode) — and prints the clarifying note explaining that contract. The
 // note is also carried into --json output as the additive "note" field.
 func TestG22_WarnOnlyExitsOneWithNote(t *testing.T) {
+	if testing.Short() {
+		t.Skip("E2E gate test — full pipeline; runs in nightly non-short suite")
+	}
 	kernPath := requireKernPath(t)
 	binPath := g4BuildBinary(t)
 

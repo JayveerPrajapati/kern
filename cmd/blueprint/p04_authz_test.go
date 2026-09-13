@@ -63,6 +63,9 @@ func p04CheckRepo(t *testing.T) string {
 // TestCheck_AgentIDFlag_PopulatesAgentID: `--agent-id myagent` flows into the
 // ChangeRequest (observed via the audit record's agent_id).
 func TestCheck_AgentIDFlag_PopulatesAgentID(t *testing.T) {
+	if testing.Short() {
+		t.Skip("E2E gate test — full pipeline; runs in nightly non-short suite")
+	}
 	bin := g4BuildBinary(t)
 	dir := p04CheckRepo(t)
 
@@ -79,6 +82,9 @@ func TestCheck_AgentIDFlag_PopulatesAgentID(t *testing.T) {
 // TestCheck_AgentSourceDefaultsToAgent: `--source agent` without --agent-id
 // defaults the identity to "agent" so agent-sourced changes always carry one.
 func TestCheck_AgentSourceDefaultsToAgent(t *testing.T) {
+	if testing.Short() {
+		t.Skip("E2E gate test — full pipeline; runs in nightly non-short suite")
+	}
 	bin := g4BuildBinary(t)
 	dir := p04CheckRepo(t)
 
@@ -95,6 +101,9 @@ func TestCheck_AgentSourceDefaultsToAgent(t *testing.T) {
 // TestCheck_AgentIDEnvVar: BLUEPRINT_AGENT_ID is the fallback for
 // agent-sourced changes without an explicit --agent-id.
 func TestCheck_AgentIDEnvVar(t *testing.T) {
+	if testing.Short() {
+		t.Skip("E2E gate test — full pipeline; runs in nightly non-short suite")
+	}
 	bin := g4BuildBinary(t)
 	dir := p04CheckRepo(t)
 
@@ -111,6 +120,9 @@ func TestCheck_AgentIDEnvVar(t *testing.T) {
 // TestCheck_HumanSourceNoAgentID: non-agent sources carry no identity, so the
 // authz gate stays off and the audit record omits agent_id.
 func TestCheck_HumanSourceNoAgentID(t *testing.T) {
+	if testing.Short() {
+		t.Skip("E2E gate test — full pipeline; runs in nightly non-short suite")
+	}
 	bin := g4BuildBinary(t)
 	dir := p04CheckRepo(t)
 

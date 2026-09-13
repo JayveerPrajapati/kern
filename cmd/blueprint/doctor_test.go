@@ -50,6 +50,9 @@ func g17HealthyRepo(t *testing.T) string {
 
 // G17-1: healthy environment → exit 0 with "verdict: 0".
 func TestG17_Healthy(t *testing.T) {
+	if testing.Short() {
+		t.Skip("E2E gate test — full pipeline; runs in nightly non-short suite")
+	}
 	bin := g4BuildBinary(t)
 	kernPath := requireKernPath(t)
 	dir := g17HealthyRepo(t)
@@ -67,6 +70,9 @@ func TestG17_Healthy(t *testing.T) {
 // errors on a bad KERN_BINARY (resolveKernBinary returns an error without
 // falling back to PATH), so this never depends on the real kern binary.
 func TestG17_MissingKern(t *testing.T) {
+	if testing.Short() {
+		t.Skip("E2E gate test — full pipeline; runs in nightly non-short suite")
+	}
 	bin := g4BuildBinary(t)
 	dir := g17HealthyRepo(t)
 
@@ -86,6 +92,9 @@ func TestG17_MissingKern(t *testing.T) {
 // G17-3: broken .blueprint/config.yaml → exit 3 (config error), even though
 // the environment (kern) is healthy.
 func TestG17_InvalidConfig(t *testing.T) {
+	if testing.Short() {
+		t.Skip("E2E gate test — full pipeline; runs in nightly non-short suite")
+	}
 	bin := g4BuildBinary(t)
 	kernPath := requireKernPath(t)
 	dir := t.TempDir()
@@ -103,6 +112,9 @@ func TestG17_InvalidConfig(t *testing.T) {
 
 // G17-4: malformed .kern/boundaries.json → exit 3 (config error).
 func TestG17_InvalidBoundaries(t *testing.T) {
+	if testing.Short() {
+		t.Skip("E2E gate test — full pipeline; runs in nightly non-short suite")
+	}
 	bin := g4BuildBinary(t)
 	kernPath := requireKernPath(t)
 	dir := t.TempDir()
@@ -120,6 +132,9 @@ func TestG17_InvalidBoundaries(t *testing.T) {
 
 // G17-5: no .kern dir → exit 0 with a boundaries warning (not an error).
 func TestG17_NoBoundariesWarns(t *testing.T) {
+	if testing.Short() {
+		t.Skip("E2E gate test — full pipeline; runs in nightly non-short suite")
+	}
 	bin := g4BuildBinary(t)
 	kernPath := requireKernPath(t)
 	dir := t.TempDir()
@@ -139,6 +154,9 @@ func TestG17_NoBoundariesWarns(t *testing.T) {
 
 // G17-6: --json output shape — verdict 0 and all six expected check names.
 func TestG17_JSONShape(t *testing.T) {
+	if testing.Short() {
+		t.Skip("E2E gate test — full pipeline; runs in nightly non-short suite")
+	}
 	bin := g4BuildBinary(t)
 	kernPath := requireKernPath(t)
 	dir := g17HealthyRepo(t)
@@ -221,6 +239,9 @@ func writeAuditRecords(t *testing.T, dir string, n int) {
 // TestDoctor_AuditChainIntact (P1.4): a repo with a valid audit chain reports
 // the audit-chain check as OK and keeps the doctor verdict at 0.
 func TestDoctor_AuditChainIntact(t *testing.T) {
+	if testing.Short() {
+		t.Skip("E2E gate test — full pipeline; runs in nightly non-short suite")
+	}
 	bin := g4BuildBinary(t)
 	kernPath := requireKernPath(t)
 	dir := g17HealthyRepo(t)
@@ -240,6 +261,9 @@ func TestDoctor_AuditChainIntact(t *testing.T) {
 // 3 (config-class error). This holds regardless of kern availability (a
 // config error outranks any env error).
 func TestDoctor_AuditChainBroken(t *testing.T) {
+	if testing.Short() {
+		t.Skip("E2E gate test — full pipeline; runs in nightly non-short suite")
+	}
 	bin := g4BuildBinary(t)
 	dir := g17HealthyRepo(t)
 	writeAuditRecords(t, dir, 2)
@@ -276,6 +300,9 @@ func TestDoctor_AuditChainBroken(t *testing.T) {
 // missing the check warns with the exact skip set (so an environment cannot
 // silently ship with a shrunken gate set); when kern is present it reports ok.
 func TestDoctor_KernGatesVisibility(t *testing.T) {
+	if testing.Short() {
+		t.Skip("E2E gate test — full pipeline; runs in nightly non-short suite")
+	}
 	t.Run("missing kern warns with gate list", func(t *testing.T) {
 		bin := g4BuildBinary(t)
 		dir := g17HealthyRepo(t)

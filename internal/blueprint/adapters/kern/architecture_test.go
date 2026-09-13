@@ -14,12 +14,13 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/blueprint/policy"
 )
 
-// freshStatusJSON is the canned `kern index --status --json` payload returned
-// for the `index status` probe by fakeRunner/recordingRunner: a FRESH index
-// (verdict "fresh"), so ArchitectureCheck proceeds straight to the guard check
-// without rebuilding.
-const freshStatusJSON = `{
+// freshEnsureJSON is the canned `kern index ensure-fresh --json` payload
+// returned for the `index ensure-fresh` call by fakeRunner/recordingRunner: a
+// FRESH index (freshness "fresh", verdict "fresh"), so ArchitectureCheck
+// proceeds straight to the guard check without rebuilding.
+const freshEnsureJSON = `{
 	"schema_version": "2",
+	"freshness": "fresh",
 	"built": true,
 	"stale": false,
 	"freshness_proof": {
@@ -31,61 +32,72 @@ const freshStatusJSON = `{
 	"index_identity": {"tree_oid": "c29d4b1", "content_root": "ff02913c", "built_at": "2026-08-29T19:01:58Z"}
 }`
 
-// staleStatusJSON is the canned payload for a STALE index: the rebuild path
-// (and, when it stays stale, the stale-non-converging ERROR path).
-const staleStatusJSON = `{
+// rebuiltEnsureJSON is the canned payload for a STALE index that converged
+// after the ensure-fresh rebuild: freshness "rebuilt" with the post-rebuild
+// strict re-verify verdict "fresh" (the trust anchor).
+const rebuiltEnsureJSON = `{
 	"schema_version": "2",
+	"freshness": "rebuilt",
+	"built": true,
+	"stale": false,
+	"freshness_proof": {
+		"verdict": "fresh",
+		"recorded": {"tree_oid": "9a2e7c4", "content_root": "b41d07e2", "built_at": "2026-08-29T19:02:33Z"},
+		"current": {"tree_oid": "c29d4b1", "content_root": "ff02913c", "built_at": "2026-08-29T19:02:58Z"},
+		"checked_at": "2026-08-29T19:02:58Z"
+	},
+	"index_identity": {"tree_oid": "c29d4b1", "content_root": "ff02913c", "built_at": "2026-08-29T19:02:58Z"}
+}`
+
+// staleEnsureJSON is the canned payload for an index that stayed stale after
+// the ensure-fresh rebuild (non-convergence): freshness "stale" and verdict
+// "stale" — the fail-closed result that must ERROR the check.
+const staleEnsureJSON = `{
+	"schema_version": "2",
+	"freshness": "stale",
 	"built": true,
 	"stale": true,
 	"freshness_proof": {
 		"verdict": "stale",
-		"recorded": {"tree_oid": "c29d4b1", "content_root": "ff02913c", "built_at": "2026-08-29T19:01:58Z"},
+		"recorded": {"tree_oid": "9a2e7c4", "content_root": "b41d07e2", "built_at": "2026-08-29T19:02:33Z"},
 		"current": {"tree_oid": "9a2e7c4", "content_root": "b41d07e2", "built_at": "2026-08-29T19:02:33Z"},
 		"checked_at": "2026-08-29T19:02:33Z"
 	},
-	"index_identity": {"tree_oid": "c29d4b1", "content_root": "ff02913c", "built_at": "2026-08-29T19:01:58Z"}
+	"index_identity": {"tree_oid": "9a2e7c4", "content_root": "b41d07e2", "built_at": "2026-08-29T19:01:58Z"}
 }`
 
-// noIndexStatusJSON is the canned payload for built:false (no index): both
-// freshness_proof and index_identity are omitted, so the verdict is "unknown"
-// and the check treats the index as stale (fail-closed).
-const noIndexStatusJSON = `{"schema_version": "2", "built": false, "stale": true}`
+// noIndexEnsureJSON is the canned payload for built:false (no index before
+// the ensure-fresh run): the check rebuilds, so the outcome is freshness
+// "rebuilt"; built stays false to preserve the no-index semantics that drove
+// the old rebuild-on-built:false behavior.
+const noIndexEnsureJSON = `{"schema_version": "2", "freshness": "rebuilt", "built": false, "stale": true}`
 
 // fakeRunner builds a commandRunner that returns canned output for guard/sec
-// calls, success (exit 0) for `kern index .` build calls, and a FRESH status
-// payload for `kern index status --json` probes. The index success path is
-// required because ArchitectureCheck refreshes the index before guarding
-// (Phase 2 new-change principle); without it, the canned exit code would
-// error the index call before the guard runs.
+// calls and a FRESH ensure-fresh payload for `kern index ensure-fresh --json`
+// calls. The index success path is required because ArchitectureCheck runs the
+// consolidated ensure-fresh subprocess before guarding (Phase 2 new-change
+// principle); without it, the canned exit code would error the index call
+// before the guard runs.
 func fakeRunner(stdout, stderr string, exitCode int, err error) commandRunner {
 	return func(ctx context.Context, name string, args []string, workdir string) (string, string, int, error) {
-		if len(args) > 0 && args[0] == "index" {
-			if len(args) > 1 && args[1] == "--status" {
-				return freshStatusJSON, "", 0, nil
-			}
-			return "", "", 0, nil
+		if len(args) > 0 && args[0] == "index" && len(args) > 1 && args[1] == "ensure-fresh" {
+			return freshEnsureJSON, "", 0, nil
 		}
 		return stdout, stderr, exitCode, err
 	}
 }
 
-// recordingRunner behaves like fakeRunner but additionally records the first
-// argument (command name, e.g. "index", "guard") of every invocation into
-// cmds, so tests can assert whether an index BUILD was issued. The always-on
-// `index status` probe is NOT recorded: it is a read, and recording it would
-// drown out the signal tests assert on (was a rebuild issued / did guard run).
+// recordingRunner behaves like fakeRunner but additionally records the joined
+// arguments of every invocation into cmds, so tests can assert whether an
+// index ensure-fresh call was issued and that no separate --status/--update
+// calls remain under the consolidated contract.
 func recordingRunner(stdout, stderr string, exitCode int, err error, cmds *[]string) commandRunner {
 	return func(ctx context.Context, name string, args []string, workdir string) (string, string, int, error) {
 		if len(args) > 0 {
-			if !(args[0] == "index" && len(args) > 1 && args[1] == "--status") {
-				*cmds = append(*cmds, args[0])
-			}
+			*cmds = append(*cmds, strings.Join(args, " "))
 		}
-		if len(args) > 0 && args[0] == "index" {
-			if len(args) > 1 && args[1] == "--status" {
-				return freshStatusJSON, "", 0, nil
-			}
-			return "", "", 0, nil
+		if len(args) > 0 && args[0] == "index" && len(args) > 1 && args[1] == "ensure-fresh" {
+			return freshEnsureJSON, "", 0, nil
 		}
 		return stdout, stderr, exitCode, err
 	}
@@ -223,8 +235,8 @@ func TestArchitectureCheckRunsInRepoRoot(t *testing.T) {
 		runner: func(ctx context.Context, name string, args []string, workdir string) (string, string, int, error) {
 			gotWorkdir = workdir
 			gotArgs = append([]string(nil), args...)
-			if len(args) > 0 && args[0] == "index" && len(args) > 1 && args[1] == "--status" {
-				return freshStatusJSON, "", 0, nil
+			if len(args) > 0 && args[0] == "index" && len(args) > 1 && args[1] == "ensure-fresh" {
+				return freshEnsureJSON, "", 0, nil
 			}
 			return `{"schema_version":2,"violations": null}`, "", 0, nil
 		},
@@ -627,8 +639,9 @@ func TestArchitectureCheckBlockBeatsWarning(t *testing.T) {
 	}
 }
 
-// TestArchitectureCheckSkipsRebuildWhenFresh: with a fresh index (kern verdict
-// "fresh"), Run must NOT rebuild the index.
+// TestArchitectureCheckSkipsRebuildWhenFresh: with a fresh index (ensure-fresh
+// verdict "fresh"), Run must NOT rebuild the index — exactly ONE ensure-fresh
+// invocation per Run, and no separate --status/--update subprocesses.
 func TestArchitectureCheckSkipsRebuildWhenFresh(t *testing.T) {
 	root := repoRoot(t)
 	var cmds []string
@@ -644,50 +657,58 @@ func TestArchitectureCheckSkipsRebuildWhenFresh(t *testing.T) {
 	if _, err := chk.Run(context.Background(), req); err != nil {
 		t.Fatalf("second Run returned error: %v", err)
 	}
+	// The consolidated contract: ONE `index ensure-fresh` per Run; no separate
+	// --status probe and no --update rebuild remain.
+	ensureCalls := 0
 	for _, c := range cmds {
-		if c == "index" {
-			t.Fatalf("index build issued despite fresh index; commands: %v", cmds)
+		if strings.Contains(c, "--status") || strings.Contains(c, "--update") {
+			t.Fatalf("separate status/update call issued under the consolidated contract; commands: %v", cmds)
+		}
+		if strings.HasPrefix(c, "index ") {
+			ensureCalls++
 		}
 	}
-	if len(cmds) != 2 {
-		t.Fatalf("expected exactly 2 guard commands, got %v", cmds)
+	if ensureCalls != 2 {
+		t.Fatalf("index ensure-fresh calls = %d, want exactly 2 (one per Run); commands: %v", ensureCalls, cmds)
+	}
+	if len(cmds) != 4 {
+		t.Fatalf("expected 4 commands (2 ensure-fresh + 2 guard), got %v", cmds)
 	}
 }
 
-// statusRunner builds a commandRunner for ArchitectureCheck tests. The FIRST
-// `index status` probe returns firstStatus ("" => freshStatusJSON); every later
-// probe returns freshStatusJSON. `kern index .` builds succeed and are
-// recorded into builds (nil disables recording). All other calls (guard/sec)
-// return canned stdout with exitCode. It models an index whose staleness is
-// decided by kern's verdict and, when stale, converges after one rebuild.
-func statusRunner(firstStatus, stdout string, exitCode int, builds *[]string) commandRunner {
-	statusCalls := 0
+// ensureFreshRunner builds a commandRunner for ArchitectureCheck tests. The
+// FIRST `index ensure-fresh` call returns firstEnsure ("" => freshEnsureJSON);
+// every later call returns freshEnsureJSON. Every ensure-fresh invocation is
+// recorded into calls (nil disables recording). All other calls (guard/sec)
+// return canned stdout with exitCode. It models an index whose freshness is
+// decided by the consolidated ensure-fresh subprocess and, when stale,
+// converges after one rebuild.
+func ensureFreshRunner(firstEnsure, stdout string, exitCode int, calls *[]string) commandRunner {
+	ensureCalls := 0
 	return func(ctx context.Context, name string, args []string, workdir string) (string, string, int, error) {
-		if len(args) > 0 && args[0] == "index" {
-			if len(args) > 1 && args[1] == "--status" {
-				statusCalls++
-				if statusCalls == 1 && firstStatus != "" {
-					return firstStatus, "", 0, nil
-				}
-				return freshStatusJSON, "", 0, nil
+		if len(args) > 0 && args[0] == "index" && len(args) > 1 && args[1] == "ensure-fresh" {
+			ensureCalls++
+			if calls != nil {
+				*calls = append(*calls, "index")
 			}
-			if builds != nil {
-				*builds = append(*builds, "index")
+			if ensureCalls == 1 && firstEnsure != "" {
+				return firstEnsure, "", 0, nil
 			}
-			return "", "", 0, nil
+			return freshEnsureJSON, "", 0, nil
 		}
 		return stdout, "", exitCode, nil
 	}
 }
 
-// TestArchitectureCheckRebuildsWhenStale: when kern reports the index stale
-// (verdict "stale"), Run issues exactly one `kern index .` build, re-verifies,
+// TestArchitectureCheckRebuildsWhenStale: when the ensure-fresh subprocess
+// reports a stale index that converges after its internal rebuild (freshness
+// "rebuilt", verdict "fresh"), Run issues exactly ONE ensure-fresh invocation
 // and passes once the index converges.
 func TestArchitectureCheckRebuildsWhenStale(t *testing.T) {
 	t.Setenv("BLUEPRINT_ALLOW_STALE_REBUILD", "")
 	root := repoRoot(t)
-	var builds []string
-	client := &KernClient{binaryPath: "kern", runner: statusRunner(staleStatusJSON, `{"schema_version":2,"violations": null}`, 0, &builds)}
+	var calls []string
+	client := &KernClient{binaryPath: "kern", runner: ensureFreshRunner(rebuiltEnsureJSON, `{"schema_version":2,"violations": null}`, 0, &calls)}
 	chk := NewArchitectureCheck(client)
 	cr, err := chk.Run(context.Background(), domain.ChangeRequest{
 		RepositoryRoot: root,
@@ -699,20 +720,19 @@ func TestArchitectureCheckRebuildsWhenStale(t *testing.T) {
 	if cr.Status != domain.StatusPass {
 		t.Fatalf("Status = %q, want %q (converged rebuild passes)", cr.Status, domain.StatusPass)
 	}
-	if len(builds) != 1 {
-		t.Fatalf("index builds = %d, want exactly 1 (stale -> rebuild -> fresh); commands: %v", len(builds), builds)
+	if len(calls) != 1 {
+		t.Fatalf("index ensure-fresh calls = %d, want exactly 1 (stale -> rebuilt -> fresh); calls: %v", len(calls), calls)
 	}
 }
 
-// TestArchitectureCheckRebuildsWhenNoIndex: kern reports built:false (no
-// index), so freshness_proof is omitted and the verdict is "unknown" — the
-// check treats that as stale (fail-closed) and must build the index before
-// the guard check.
+// TestArchitectureCheckRebuildsWhenNoIndex: the ensure-fresh subprocess
+// reports freshness "rebuilt" for a built:false (no index) state — the check
+// must pass after the ensure-fresh rebuild, exactly one invocation.
 func TestArchitectureCheckRebuildsWhenNoIndex(t *testing.T) {
 	t.Setenv("BLUEPRINT_ALLOW_STALE_REBUILD", "")
 	root := repoRoot(t)
-	var builds []string
-	client := &KernClient{binaryPath: "kern", runner: statusRunner(noIndexStatusJSON, `{"schema_version":2,"violations": null}`, 0, &builds)}
+	var calls []string
+	client := &KernClient{binaryPath: "kern", runner: ensureFreshRunner(noIndexEnsureJSON, `{"schema_version":2,"violations": null}`, 0, &calls)}
 	chk := NewArchitectureCheck(client)
 	cr, err := chk.Run(context.Background(), domain.ChangeRequest{
 		RepositoryRoot: root,
@@ -724,8 +744,8 @@ func TestArchitectureCheckRebuildsWhenNoIndex(t *testing.T) {
 	if cr.Status != domain.StatusPass {
 		t.Fatalf("Status = %q, want %q (built:false -> rebuild -> fresh)", cr.Status, domain.StatusPass)
 	}
-	if len(builds) != 1 {
-		t.Fatalf("index builds = %d, want exactly 1; commands: %v", len(builds), builds)
+	if len(calls) != 1 {
+		t.Fatalf("index ensure-fresh calls = %d, want exactly 1; calls: %v", len(calls), calls)
 	}
 }
 
@@ -860,24 +880,21 @@ func TestArchitectureCheckRuleVersionConfidenceFreshness(t *testing.T) {
 	}
 }
 
-// TestArchitectureCheck_StaleIndexErrors (P0.2 DoD): when kern reports the
-// index stale and a rebuild does NOT converge (verdict stays "stale" on both
-// probes), the check must ERROR with an architecture:index-stale finding
-// carrying IndexFreshness "stale" — it must never silently pass on a
-// potentially-misleading index.
+// TestArchitectureCheck_StaleIndexErrors (P0.2 DoD): when the ensure-fresh
+// subprocess reports the index stale and a rebuild does NOT converge
+// (freshness "stale", exit 2), the check must ERROR with an
+// architecture:index-stale finding carrying IndexFreshness "stale" — it must
+// never silently pass on a potentially-misleading index.
 func TestArchitectureCheck_StaleIndexErrors(t *testing.T) {
 	t.Setenv("BLUEPRINT_ALLOW_STALE_REBUILD", "")
 	root := repoRoot(t)
 	client := &KernClient{
 		binaryPath: "kern",
 		runner: func(ctx context.Context, name string, args []string, workdir string) (string, string, int, error) {
-			if len(args) > 0 && args[0] == "index" {
-				if len(args) > 1 && args[1] == "--status" {
-					// Both the pre-rebuild probe AND the post-rebuild
-					// re-verification report stale: the rebuild never converges.
-					return staleStatusJSON, "", 0, nil
-				}
-				return "", "", 0, nil // `kern index .` build succeeds
+			if len(args) > 0 && args[0] == "index" && len(args) > 1 && args[1] == "ensure-fresh" {
+				// Non-convergence: the ensure-fresh subprocess reports stale
+				// and exits 2 (fail-closed); the JSON is still printed.
+				return staleEnsureJSON, "", 2, nil
 			}
 			return `{"schema_version":2,"violations": null}`, "", 0, nil
 		},
@@ -919,21 +936,12 @@ func TestArchitectureCheck_StaleIndexRebuildsThenPasses(t *testing.T) {
 	root := repoRoot(t)
 	guardOut := `{"schema_version":2,"violations": null}`
 	guardExit := 0
-	statusCalls := 0
 	client := &KernClient{
 		binaryPath: "kern",
 		runner: func(ctx context.Context, name string, args []string, workdir string) (string, string, int, error) {
-			if len(args) > 0 && args[0] == "index" {
-				if len(args) > 1 && args[1] == "--status" {
-					// Probes alternate stale/fresh: each Run's first probe is
-					// stale, the post-rebuild re-verification is fresh.
-					statusCalls++
-					if statusCalls%2 == 1 {
-						return staleStatusJSON, "", 0, nil
-					}
-					return freshStatusJSON, "", 0, nil
-				}
-				return "", "", 0, nil
+			if len(args) > 0 && args[0] == "index" && len(args) > 1 && args[1] == "ensure-fresh" {
+				// Stale index that converges after the ensure-fresh rebuild.
+				return rebuiltEnsureJSON, "", 0, nil
 			}
 			return guardOut, "", guardExit, nil
 		},
@@ -1271,18 +1279,15 @@ func TestArchitectureCheck_NilClient_Degraded(t *testing.T) {
 // a probe failure degrades to a visible WARN (authz:verdict-error) without
 // gating the boundary check.
 
-// authzRunner answers the always-on `index status` probe with a FRESH index
-// and dispatches guard invocations by whether they carry --agent-id: authz
-// probes (with --agent-id) return authzOut/authzExit, boundary checks
+// authzRunner answers the always-on `index ensure-fresh` call with a FRESH
+// index and dispatches guard invocations by whether they carry --agent-id:
+// authz probes (with --agent-id) return authzOut/authzExit, boundary checks
 // (without) return guardOut and increment *guardCalls. This lets tests assert
 // both the authz verdict path AND whether the boundary check ran at all.
 func authzRunner(authzOut, guardOut string, authzExit int, guardCalls *int) commandRunner {
 	return func(ctx context.Context, name string, args []string, workdir string) (string, string, int, error) {
-		if len(args) > 0 && args[0] == "index" {
-			if len(args) > 1 && args[1] == "--status" {
-				return freshStatusJSON, "", 0, nil
-			}
-			return "", "", 0, nil
+		if len(args) > 0 && args[0] == "index" && len(args) > 1 && args[1] == "ensure-fresh" {
+			return freshEnsureJSON, "", 0, nil
 		}
 		if len(args) > 0 && args[0] == "guard" {
 			for _, a := range args {

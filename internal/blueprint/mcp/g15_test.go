@@ -37,6 +37,9 @@ func g15ParseResult(t *testing.T, tr ToolResult) map[string]interface{} {
 // secret must produce a BLOCK with a redacted finding — the token string must
 // not appear anywhere in the serialized result.
 func TestG15_ProposedSecretBlocked(t *testing.T) {
+	if testing.Short() {
+		t.Skip("E2E gate test — full pipeline; runs in nightly non-short suite")
+	}
 	g5RequireKern(t)
 	g5RequireFingerprint(t)
 	dir := g5Repo(t)
@@ -83,6 +86,9 @@ func TestG15_ProposedSecretBlocked(t *testing.T) {
 
 // TestG15_ProposedCleanPass: clean proposed content passes.
 func TestG15_ProposedCleanPass(t *testing.T) {
+	if testing.Short() {
+		t.Skip("E2E gate test — full pipeline; runs in nightly non-short suite")
+	}
 	g5RequireKern(t)
 	g5RequireFingerprint(t)
 	dir := g5Repo(t)
@@ -158,6 +164,9 @@ func TestG15_ProposedMalformedArgs(t *testing.T) {
 // the proposed Content carries a secret — the content scan (not the disk scan)
 // must catch it and block.
 func TestG15_ProposedSecretScanUsesContent(t *testing.T) {
+	if testing.Short() {
+		t.Skip("E2E gate test — full pipeline; runs in nightly non-short suite")
+	}
 	g5RequireKern(t)
 	g5RequireFingerprint(t)
 	dir := g5Repo(t)
@@ -201,6 +210,9 @@ func TestG15_ProposedSecretScanUsesContent(t *testing.T) {
 // happen is a BLOCK that is not a two-pass confirmed finding, or a
 // severity=block finding whose rule is not duplication:confirmed-block.
 func TestG15_ProposedDuplicationWarn(t *testing.T) {
+	if testing.Short() {
+		t.Skip("E2E gate test — full pipeline; runs in nightly non-short suite")
+	}
 	g5RequireKern(t)
 	g5RequireFingerprint(t)
 	dir := g5Repo(t)

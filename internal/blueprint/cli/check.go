@@ -36,6 +36,10 @@ import (
 //
 //	--staged        Explicitly check staged (git diff --cached) changes.
 //	                (This is the default behavior; the flag is for hook clarity.)
+//	--fast          Fast mode: skip the jscpd two-pass duplication scan
+//	                (advisory in-house findings only; the full two-pass check
+//	                runs in CI). Also enabled by KERN_CHECK_FAST=1. Additive —
+//	                without it the check is exactly as before.
 //	--format=mode   Output format: "json" or "terminal" (default: terminal).
 //	--json          Shorthand for --format=json.
 //	--repo=PATH     Repository root (default: current directory).
@@ -134,7 +138,12 @@ func runCheck(args []string) int {
 		return code
 	}
 
-	checks := buildCheckList(cfg, client, fl.runResilience, fl.runTests, fl.isolateNetwork, fl.allowUnisolated, absRoot)
+	// Fast mode is additive: --fast or KERN_CHECK_FAST=1 (either activates
+	// it). It skips the jscpd two-pass scan (advisory in-house findings only)
+	// so the pre-commit hook stays fast; without either, behavior is exactly
+	// as before.
+	fast := fl.fast || os.Getenv("KERN_CHECK_FAST") == "1"
+	checks := buildCheckList(cfg, client, fl.runResilience, fl.runTests, fl.isolateNetwork, fl.allowUnisolated, absRoot, fast)
 
 	opts := []service.Option{
 		service.WithConfig(cfg.Service),
@@ -166,6 +175,7 @@ type checkFlags struct {
 	jsonOut         bool
 	format          string
 	staged          bool
+	fast            bool
 	repoRoot        string
 	source          string
 	runResilience   bool
@@ -190,6 +200,7 @@ func parseCheckFlags(args []string) (checkFlags, int) {
 	jsonOut := fs.Bool("json", false, "shorthand for --format=json")
 	format := fs.String("format", "", "output format: json|terminal (default: terminal)")
 	staged := fs.Bool("staged", false, "check staged changes (git diff --cached); this is the default")
+	fast := fs.Bool("fast", false, "fast mode: skip the jscpd two-pass duplication scan (advisory in-house findings only; full check runs in CI). Also enabled by KERN_CHECK_FAST=1")
 	repoRoot := fs.String("repo", "", "repository root (default: current directory)")
 	source := fs.String("source", "human", "change source: agent|ide|human|refactor|dep-bot|ci")
 	runResilience := fs.Bool("resilience", false, "also run resilience (fault-injection) scenarios (opt-in; slow; WARN-only)")
@@ -211,6 +222,7 @@ func parseCheckFlags(args []string) (checkFlags, int) {
 		jsonOut:         *jsonOut,
 		format:          *format,
 		staged:          *staged,
+		fast:            *fast,
 		repoRoot:        *repoRoot,
 		source:          *source,
 		runResilience:   *runResilience,
@@ -329,7 +341,7 @@ func newKernClientOrDegraded(requireKern, jsonMode bool) (client *kern.KernClien
 // blocks; the build/test check blocks on failure per the tests policy and
 // opts into network isolation on request (Linux: true isolation; other
 // platforms: fail closed unless --allow-unisolated explicitly overrides).
-func buildCheckList(cfg *policy.LoadedConfig, client *kern.KernClient, runResilience, runTests, isolateNetwork, allowUnisolated bool, absRoot string) []service.Check {
+func buildCheckList(cfg *policy.LoadedConfig, client *kern.KernClient, runResilience, runTests, isolateNetwork, allowUnisolated bool, absRoot string, fast bool) []service.Check {
 	checks := []service.Check{}
 	if cfg.File.Approval.IsEnabled() {
 		checks = append(checks, approvalcheck.NewCheck(approval.NewStore(absRoot), risk.LoadConfig(cfg.File.Approval)))
@@ -341,7 +353,7 @@ func buildCheckList(cfg *policy.LoadedConfig, client *kern.KernClient, runResili
 		// check (kern sec / structural fingerprints) when its binary is
 		// absent, flagged with a WARN finding.
 		gitleaks.NewCheck(client),
-		jscpd.NewCheck(client),
+		jscpd.NewCheck(client, jscpd.WithFast(fast)),
 	)
 	if runResilience {
 		checks = append(checks, resiliencecheck.NewCheck())

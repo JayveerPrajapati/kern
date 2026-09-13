@@ -32,6 +32,9 @@ func latencyBudgetRepo(t *testing.T) string {
 // artifact carries the performance:latency-budget finding, the per-check
 // breakdown (name/status/duration_ms), and latency_budget_ms.
 func TestG24_CIArtifactCarriesLatencyFindingAndChecks(t *testing.T) {
+	if testing.Short() {
+		t.Skip("E2E gate test — full pipeline; runs in nightly non-short suite")
+	}
 	kernPath := requireKernPath(t)
 	binPath := buildBlueprint(t)
 	dir := latencyBudgetRepo(t)
@@ -73,6 +76,9 @@ func TestG24_CIArtifactCarriesLatencyFindingAndChecks(t *testing.T) {
 // upgrades the WARN-only latency finding to a hard CI failure (exit 1) while
 // the artifact still carries the finding and the per-check breakdown.
 func TestG24_StrictLatencyHardFails(t *testing.T) {
+	if testing.Short() {
+		t.Skip("E2E gate test — full pipeline; runs in nightly non-short suite")
+	}
 	kernPath := requireKernPath(t)
 	binPath := buildBlueprint(t)
 	dir := latencyBudgetRepo(t)
@@ -99,6 +105,9 @@ func TestG24_StrictLatencyHardFails(t *testing.T) {
 // (`blueprint check --staged`): the latency finding renders as a WARN and the
 // exit stays 0 — the hook must never block on latency.
 func TestG24_CheckHookNeverBlocksOnLatency(t *testing.T) {
+	if testing.Short() {
+		t.Skip("E2E gate test — full pipeline; runs in nightly non-short suite")
+	}
 	_ = requireKernPath(t)
 	bin := g4BuildBinary(t)
 	dir := t.TempDir()
@@ -127,6 +136,9 @@ func TestG24_CheckHookNeverBlocksOnLatency(t *testing.T) {
 // budget the ci artifact carries no performance finding and latency_budget_ms
 // stays 0.
 func TestG24_CINoBudgetNoLatencyFinding(t *testing.T) {
+	if testing.Short() {
+		t.Skip("E2E gate test — full pipeline; runs in nightly non-short suite")
+	}
 	kernPath := requireKernPath(t)
 	binPath := buildBlueprint(t)
 	dir := g11Repo(t,

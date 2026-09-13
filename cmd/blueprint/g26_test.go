@@ -22,6 +22,9 @@ import (
 // sandbox worktree is built at HEAD), plus one clean staged change so the
 // validation pipeline has a change set to run on.
 func TestG26_SandboxTestsOptIn(t *testing.T) {
+	if testing.Short() {
+		t.Skip("E2E gate test — full pipeline; runs in nightly non-short suite")
+	}
 	bin := g4BuildBinary(t)
 	dir := t.TempDir()
 	g4GitRepo(t, dir)
