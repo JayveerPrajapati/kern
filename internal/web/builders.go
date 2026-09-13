@@ -246,6 +246,9 @@ type governanceAuditEntry struct {
 
 // buildApprovals extracts the pending-approval projection list.
 func (a *App) buildApprovals() []domainApproval {
+	if a.approvals == nil {
+		return []domainApproval{}
+	}
 	approvals := make([]domainApproval, 0, len(a.approvals.Pending()))
 	for _, ap := range a.approvals.Pending() {
 		approvals = append(approvals, domainApproval{

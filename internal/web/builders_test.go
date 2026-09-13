@@ -2,9 +2,12 @@ package web
 
 import (
 	"testing"
+	"time"
 
+	"github.com/JayveerPrajapati/kern/internal/agent"
 	"github.com/JayveerPrajapati/kern/internal/domain"
 	"github.com/JayveerPrajapati/kern/internal/incident"
+	"github.com/JayveerPrajapati/kern/internal/memory"
 )
 
 // TestBuildIncidentsEmptyStore pins the empty-store path: no incidents and no
@@ -60,5 +63,60 @@ func TestBuildIncidentsMapsFields(t *testing.T) {
 	}
 	if first.UpdatedAt.IsZero() || second.UpdatedAt.IsZero() {
 		t.Errorf("UpdatedAt not stamped: first=%v second=%v", first.UpdatedAt, second.UpdatedAt)
+	}
+}
+
+// TestBuildMemoryEmpty pins the empty-store path for the memory builder.
+func TestBuildMemoryEmpty(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	a := &App{memories: memory.NewMemoryStore(t.TempDir())}
+	got := a.buildMemory()
+	if got.Items == nil || len(got.Items) != 0 {
+		t.Fatalf("buildMemory(empty) = %#v, want empty slice", got)
+	}
+}
+
+// TestBuildMemoryMapsFields pins the memory field mapping (ID/Type/Content/
+// Source/Scope/Tags/Status/CreatedAt/UpdatedAt) for a stored memory.
+func TestBuildMemoryMapsFields(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	store := memory.NewMemoryStore(t.TempDir())
+	base := time.Now().UTC().Add(-time.Hour)
+	if _, err := store.Add(domain.Memory{ID: "m1", Type: "lesson", Content: "the fix", Source: "session", Scope: "repo", Tags: []string{"a"}, CreatedAt: base, UpdatedAt: base}); err != nil {
+		t.Fatalf("seed memory: %v", err)
+	}
+	a := &App{memories: store}
+	got := a.buildMemory()
+	if len(got.Items) != 1 {
+		t.Fatalf("buildMemory = %d items, want 1", len(got.Items))
+	}
+	m := got.Items[0]
+	if m.ID != "m1" || m.Type != "lesson" || m.Content != "the fix" || m.Source != "session" || m.Scope != "repo" || len(m.Tags) != 1 || m.Tags[0] != "a" || m.Status != "current" {
+		t.Errorf("memory mapping mismatch: %+v", m)
+	}
+}
+
+// TestBuildTasksEmpty pins the empty-task path for the efficiency table.
+func TestBuildTasksEmpty(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	reg := agent.NewRegistry()
+	a := &App{tasks: reg}
+	got, err := a.buildTasks()
+	if err != nil {
+		t.Fatalf("buildTasks(empty) error: %v", err)
+	}
+	if got == nil || len(got.Tasks) != 0 {
+		t.Fatalf("buildTasks(empty) = %#v, want empty tasks", got)
+	}
+}
+
+// TestBuildApprovalsNilGates pins the nil-guard: an App without approval
+// stores returns an empty list instead of panicking.
+func TestBuildApprovalsNilGates(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	a := &App{}
+	got := a.buildApprovals()
+	if got == nil || len(got) != 0 {
+		t.Fatalf("buildApprovals(nil gates) = %#v, want empty", got)
 	}
 }
