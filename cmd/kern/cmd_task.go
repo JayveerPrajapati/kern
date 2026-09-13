@@ -3,11 +3,12 @@ package main
 import (
 	"crypto/sha256"
 	"fmt"
-	"os"
-	"strings"
-
+	"github.com/JayveerPrajapati/kern/internal/agent"
 	"github.com/JayveerPrajapati/kern/internal/app"
 	"github.com/JayveerPrajapati/kern/internal/eventbus"
+	"os"
+	"sort"
+	"strings"
 )
 
 // runTask implements `kern task <id>` — the human-facing control surface for
@@ -31,9 +32,10 @@ func runTask(rest []string) {
 		fatalUsage("       kern task replay <id> [--root ROOT]")
 		fatalUsage("       kern task pause <id> [--root ROOT]")
 		fatalUsage("       kern task efficiency <id> [--root ROOT]")
+		fatalUsage("       kern task list [--root ROOT]")
 	}
 
-	// Subcommands: resume, replay, cancel, retry, pause, efficiency.
+	// Subcommands: resume, replay, cancel, retry, pause, efficiency, list.
 	if len(args) >= 2 {
 		switch args[0] {
 		case "resume":
@@ -54,7 +56,16 @@ func runTask(rest []string) {
 		case "efficiency":
 			runTaskEfficiency(root, args[1])
 			return
+		case "list":
+			runTaskList(root)
+			return
 		}
+	}
+	// `kern task list` (no id): list every known task instead of treating
+	// "list" as a task id (F-028).
+	if args[0] == "list" {
+		runTaskList(root)
+		return
 	}
 
 	id := args[0]
@@ -252,4 +263,69 @@ func runTaskRetry(root, id string) {
 		fatal("retry: %v", err)
 	}
 	fmt.Printf("retried task %s: state=%s\n", t.ID, t.State)
+}
+
+// runTasks implements `kern tasks` — the discovery surface for task state
+// (F-028). It lists every task known to the task store with
+// id/state/intent/updated columns, complementing the `kern task <id>` detail
+// command. `kern task list` routes here too.
+func runTasks(rest []string) {
+	f, args, err := parseFlags(rest)
+	if err != nil {
+		fatalUsage("flags: %v", err)
+	}
+	root := f.root
+	if root == "" {
+		root = "."
+	}
+	if len(args) > 0 {
+		fatalUsage("usage: kern tasks [--root ROOT]")
+	}
+	runTaskList(root)
+}
+
+// runTaskList renders the task list. It uses the same TaskService the
+// `kern task <id>` detail command reads: the in-memory registry first, then
+// the persisted store (so tasks from prior sessions are listed, exactly as
+// the detail command can retrieve them). Registry and store are merged by ID
+// and sorted for deterministic output.
+func runTaskList(root string) {
+	p, err := app.New(root)
+	if err != nil {
+		fatal("could not load project: %v — run kern index first", err)
+	}
+	ts := app.NewTaskService(p, eventbus.New()).WithPRProvider(app.AutoPRProvider())
+	seen := map[string]*agent.Task{}
+	var all []*agent.Task
+	for _, t := range ts.List() {
+		seen[t.ID] = t
+		all = append(all, t)
+	}
+	if st := ts.Store(); st != nil {
+		if persisted, lerr := st.List(); lerr == nil {
+			for i := range persisted {
+				t := &persisted[i]
+				if _, dup := seen[t.ID]; !dup {
+					seen[t.ID] = t
+					all = append(all, t)
+				}
+			}
+		}
+	}
+	sort.Slice(all, func(i, j int) bool { return all[i].ID < all[j].ID })
+	if len(all) == 0 {
+		fmt.Println("no tasks")
+		return
+	}
+	fmt.Printf("%-18s %-14s %-36s %s\n", "ID", "STATE", "INTENT", "UPDATED")
+	for _, t := range all {
+		intent := t.Intent
+		if intent == "" {
+			intent = t.Type
+		}
+		if len(intent) > 36 {
+			intent = intent[:33] + "..."
+		}
+		fmt.Printf("%-18s %-14s %-36s %s\n", t.ID, t.State, intent, t.UpdatedAt.Format("2006-01-02 15:04:05"))
+	}
 }

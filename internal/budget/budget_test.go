@@ -1,6 +1,7 @@
 package budget
 
 import (
+	"fmt"
 	"strconv"
 	"strings"
 	"testing"
@@ -136,5 +137,50 @@ func TestFitCodeDeterministic(t *testing.T) {
 	second := FitCode(text, 120)
 	if first != second {
 		t.Fatalf("FitCode must be deterministic:\nfirst:\n%s\nsecond:\n%s", first, second)
+	}
+}
+
+func TestFitProportionalKeepsProportionalHead(t *testing.T) {
+	// 200 tokens of content; budget 100 -> ~half kept, never empty.
+	var sb strings.Builder
+	for i := 0; i < 200; i++ {
+		fmt.Fprintf(&sb, "word%d ", i)
+	}
+	text := sb.String()
+	got := FitProportional(text, 100)
+	if got == "" {
+		t.Fatal("FitProportional must not return empty for non-empty input")
+	}
+	if tokenize.Count(got) > 100 {
+		t.Errorf("FitProportional exceeded budget: %d > 100", tokenize.Count(got))
+	}
+	if tokenize.Count(got) < 30 {
+		t.Errorf("FitProportional collapsed the document: %d tokens (want ~50)", tokenize.Count(got))
+	}
+	// The head (the leading words) must survive.
+	if !strings.HasPrefix(got, "word0 ") {
+		t.Errorf("head not preserved: %q", got[:min(12, len(got))])
+	}
+}
+
+func TestFitProportionalSmallInput(t *testing.T) {
+	if got := FitProportional("hello world", 100); got != "hello world" {
+		t.Errorf("under-budget input should pass through, got %q", got)
+	}
+	if got := FitProportional("", 10); got != "" {
+		t.Errorf("empty input should stay empty, got %q", got)
+	}
+}
+
+func TestFitProportionalDenseSingleLine(t *testing.T) {
+	// The NS-3 shape: one dense line that Fit (line-oriented) would collapse
+	// to nothing meaningful. FitProportional must keep a proportional head.
+	long := strings.Repeat("data ", 500) // ~2500 tokens-ish
+	got := FitProportional(long, 1000)
+	if tokenize.Count(got) > 1000 {
+		t.Errorf("budget exceeded: %d", tokenize.Count(got))
+	}
+	if tokenize.Count(got) < 400 {
+		t.Errorf("dense line collapsed: %d tokens (want ~1000)", tokenize.Count(got))
 	}
 }

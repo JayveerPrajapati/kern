@@ -200,3 +200,47 @@ test("eventsStream yields parsed SSE data payloads", async () => {
   for await (const p of c.eventsStream()) out.push(p);
   assert.deepEqual(out, [{ kind: "x", n: 1 }, "plain-text"]);
 });
+
+test("eventsStream yields SSE data payloads (F-032 parity)", async () => {
+  const stream = new ReadableStream({
+    start(controller) {
+      controller.enqueue(
+        new TextEncoder().encode('data: {"id":1}\n\ndata: hello\n'),
+      );
+      controller.close();
+    },
+  });
+  const calls = [];
+  global.fetch = async (url, init) => {
+    calls.push({ url, init });
+    return { ok: true, status: 200, statusText: "OK", body: stream };
+  };
+  const c = new Client("http://test:8090", 10000);
+  const out = [];
+  for await (const p of c.eventsStream()) {
+    out.push(p);
+  }
+  assert.equal(calls[0].url, "http://test:8090/v1/events/stream");
+  assert.equal(calls[0].init.method, "GET");
+  assert.equal(calls[0].init.headers.Accept, "text/event-stream");
+  // JSON payloads decode; non-JSON payloads pass through as raw strings.
+  assert.deepEqual(out, [{ id: 1 }, "hello"]);
+});
+
+test("eventsStream rejects non-2xx with KernError", async () => {
+  global.fetch = async () => ({
+    ok: false,
+    status: 500,
+    statusText: "boom",
+    text: async () => "{}",
+  });
+  const c = new Client("http://test:8090", 10000);
+  await assert.rejects(
+    async () => {
+      for await (const _ of c.eventsStream()) {
+        /* consume */
+      }
+    },
+    (e) => e instanceof KernError && e.status === 500,
+  );
+});

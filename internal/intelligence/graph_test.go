@@ -280,3 +280,34 @@ func TestSameNamedSymbolsDoNotCollide(t *testing.T) {
 		t.Errorf("unexpected bare node %q; node IDs must be package-scoped", "Save")
 	}
 }
+func TestWhatDoesXDependOnNamesKeepsUnresolvedCallees(t *testing.T) {
+	// e2e round 2, P0-1: a method whose callees are all external (fmt.Println
+	// etc.) reported "What it calls: 0" via WhatDoesXDependOnPrecise -
+	// nodesForIDs drops reached-but-unresolved IDs - while `kern why` showed
+	// the raw index edges. The names view must keep them.
+	ix := &index.Index{
+		Root: "/ext",
+		Symbols: []index.Symbol{
+			sym("func", "Foo", "a.go", 1),
+			sym("func", "Bar", "b.go", 1),
+		},
+		Calls: map[string][]index.CallEdge{
+			"Foo": {
+				index.CallEdge{Target: "Bar", Confidence: index.ConfidenceHigh},
+				index.CallEdge{Target: "fmt.Println", Confidence: index.ConfidenceHigh},
+			},
+		},
+		Callers:   map[string][]string{"Bar": {"Foo"}, "fmt.Println": {"Foo"}},
+		UpdatedAt: time.Now(),
+	}
+	g := FromIndex(ix)
+	got := g.WhatDoesXDependOnNames("Foo", false)
+	if len(got) != 2 || !contains(got, "Bar") || !contains(got, "fmt.Println") {
+		t.Fatalf("WhatDoesXDependOnNames(Foo) = %v, want [Bar fmt.Println]", got)
+	}
+	// The node-based query intentionally still drops the unresolved target
+	// (callers must be indexed symbols); names is the raw edge view.
+	if ids := names(g.WhatDoesXDependOn("Foo")); len(ids) != 1 || ids[0] != "Bar" {
+		t.Fatalf("WhatDoesXDependOn(Foo) = %v, want [Bar]", ids)
+	}
+}

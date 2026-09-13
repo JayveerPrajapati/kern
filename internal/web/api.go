@@ -40,6 +40,26 @@ type v1PlanResponse struct {
 	TaskID string      `json:"task_id,omitempty"`
 }
 
+// symbolErrorStatus maps a symbol-resolution failure to its HTTP status
+// (F-030): 404 when the change names a symbol that does not exist in the
+// project's index (the message carries real candidates), 400 when no symbol
+// could be identified at all. Zero means the error is not a resolution
+// failure and should stay a 500. Without this, writeError masks these
+// descriptive errors into a bare "internal error".
+func symbolErrorStatus(err error) int {
+	if err == nil {
+		return 0
+	}
+	msg := err.Error()
+	switch {
+	case strings.Contains(msg, "no symbol named"):
+		return http.StatusNotFound
+	case strings.Contains(msg, "could not identify a symbol"):
+		return http.StatusBadRequest
+	}
+	return 0
+}
+
 // handleV1Analyze analyzes a proposed change via the TaskService so an
 // authoritative Task record is created, the lifecycle is recorded, and the
 // context packet is attached. POST only. routes through TaskService
@@ -59,6 +79,10 @@ func (a *App) handleV1Analyze(w http.ResponseWriter, r *http.Request) {
 	}
 	t, text, err := a.taskSvc.Analyze(req.Change)
 	if err != nil {
+		if st := symbolErrorStatus(err); st != 0 {
+			writeError(w, st, err.Error())
+			return
+		}
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -141,6 +165,10 @@ func (a *App) handleV1Plan(w http.ResponseWriter, r *http.Request) {
 	}
 	t, plan, text, err := a.taskSvc.Plan(req.Change)
 	if err != nil {
+		if st := symbolErrorStatus(err); st != 0 {
+			writeError(w, st, err.Error())
+			return
+		}
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -170,6 +198,10 @@ func (a *App) handleV1WhatIf(w http.ResponseWriter, r *http.Request) {
 	}
 	t, _, err := a.taskSvc.WhatIf(kind, req.Change, req.NewTarget)
 	if err != nil {
+		if st := symbolErrorStatus(err); st != 0 {
+			writeError(w, st, err.Error())
+			return
+		}
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -200,6 +232,10 @@ func (a *App) handleV1Impact(w http.ResponseWriter, r *http.Request) {
 	}
 	t, rep, _, err := a.taskSvc.Impact(req.Change)
 	if err != nil {
+		if st := symbolErrorStatus(err); st != 0 {
+			writeError(w, st, err.Error())
+			return
+		}
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -335,15 +371,31 @@ func (a *App) handleV1Graph(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 	}
+	nodeID := entity
+	if node == nil {
+		// F-031: the trailing segment may be a symbol NAME ("FindUser") rather
+		// than a node ID ("pkg.FindUser"). Resolve it through the prebuilt
+		// graph engine (never build a new index) and return the neighborhood
+		// of the resolved node; unknown entities keep the 404.
+		if id, ok := g.ResolveNodeID(entity); ok {
+			nodeID = id
+			for i := range g.Nodes {
+				if g.Nodes[i].ID == id {
+					node = &g.Nodes[i]
+					break
+				}
+			}
+		}
+	}
 	if node == nil {
 		writeError(w, http.StatusNotFound, "entity not found")
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"node":         *node,
-		"who_calls":    g.WhoCalls(entity),
-		"depends_on":   g.WhatDependsOn(entity),
-		"depends_upon": g.WhatDoesXDependOn(entity),
+		"who_calls":    g.WhoCalls(nodeID),
+		"depends_on":   g.WhatDependsOn(nodeID),
+		"depends_upon": g.WhatDoesXDependOn(nodeID),
 	})
 }
 
@@ -391,6 +443,10 @@ func (a *App) handleV1Risk(w http.ResponseWriter, r *http.Request) {
 	a.freshGraph()
 	pkt, _, err := a.taskSvc.Risk(req.Change)
 	if err != nil {
+		if st := symbolErrorStatus(err); st != 0 {
+			writeError(w, st, err.Error())
+			return
+		}
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}

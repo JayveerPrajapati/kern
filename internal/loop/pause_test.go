@@ -40,6 +40,7 @@ func TestLoopPausesOnRiskExceeded(t *testing.T) {
 // TestLoopRiskCeilingRespectsAssessorNil verifies that without an AssessRisk the
 // risk gate never trips (preserves prior behavior).
 func TestLoopRiskCeilingRespectsAssessorNil(t *testing.T) {
+	t.Setenv("KERN_ALLOW_UNISOLATED", "1") // fail-closed gate: opt into unisolated runs on hosts without netns (darwin)
 	lp, err := NewLoop(LoopConfig{Root: loopFixture(t), Level: L4, Mem: memory.NewMemoryStore(t.TempDir())})
 	if err != nil {
 		t.Fatalf("NewLoop: %v", err)

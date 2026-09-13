@@ -240,6 +240,32 @@ func RunInWorktree(ctx context.Context, worktreePath, subDir string, command []s
 
 // createWorktree creates a detached git worktree of repoRoot at a temp path.
 // Returns the worktree path and a cleanup function.
+// applyStagedDiff applies repoRoot's staged diff (HEAD -> index) to the
+// sandbox worktree, so build/test commands validate the tree the commit
+// would produce rather than the last committed tree (createWorktree checks
+// out HEAD only). Nothing staged is a no-op. Fail-closed: any git error
+// aborts with a non-nil error — the caller reports ERROR and never runs
+// commands against a partial application.
+func applyStagedDiff(repoRoot, worktreePath string) error {
+	diff := exec.Command("git", "diff", "--cached", "--binary", "HEAD")
+	diff.Dir = repoRoot
+	var buf bytes.Buffer
+	diff.Stdout = &buf
+	if err := diff.Run(); err != nil {
+		return fmt.Errorf("git diff --cached HEAD: %w", err)
+	}
+	if buf.Len() == 0 {
+		return nil
+	}
+	apply := exec.Command("git", "apply", "--binary", "-")
+	apply.Dir = worktreePath
+	apply.Stdin = &buf
+	if out, err := apply.CombinedOutput(); err != nil {
+		return fmt.Errorf("git apply: %w: %s", err, truncateForEvidence(string(out), 200))
+	}
+	return nil
+}
+
 func createWorktree(repoRoot string) (string, func(), error) {
 	tmpDir, err := os.MkdirTemp("", "blueprint-sandbox-")
 	if err != nil {

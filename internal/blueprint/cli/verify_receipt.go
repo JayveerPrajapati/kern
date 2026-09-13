@@ -355,11 +355,12 @@ func renderReceiptInToto(absRoot string, r *receipt.Receipt) error {
 	return nil
 }
 
-// ciArtifactDefaultFile mirrors `blueprint ci`'s default --artifact-file value
-// (see parseCIFlags). ci writes the artifact with os.WriteFile relative to the
-// process working directory, so the staleness read mirrors the same
-// cwd-relative resolution.
-const ciArtifactDefaultFile = "blueprint-result.json"
+// ciArtifactDefaultFile mirrors `kern ci`'s default --artifact-file value
+// (see defaultCIArtifactFile in ci.go): repo-root-relative under .kern/.
+// ci writes the artifact with os.WriteFile relative to the process working
+// directory, so the staleness read mirrors the same cwd-relative resolution
+// (running `kern ci` / `kern verify-receipt` from the repo root).
+const ciArtifactDefaultFile = ".kern/blueprint-result.json"
 
 // errReceiptNotSealed marks a CI artifact that carries no receipt id because
 // the run it records never reached PASS/WARN (receipts are only sealed for

@@ -189,7 +189,16 @@ func (s *TaskService) RunWorkflow(intent string, stepHandler func(action string,
 		return out, nil
 	}
 
-	return eng.Run(t, wrapped)
+	// Record the lifecycle transitions the engine drives (it advances the
+	// state machine internally, bypassing the service-level audit hook), so a
+	// gated run's lifecycle is reconstructable from the audit chain.
+	from := t.State
+	stepCount := len(t.Steps)
+	res, err := eng.Run(t, wrapped)
+	if res != nil {
+		s.auditWorkflowLifecycle(res, from, stepCount)
+	}
+	return res, err
 }
 
 // engineForTask builds (or rebuilds) the WorkflowEngine that drives a task's
@@ -265,15 +274,123 @@ func (s *TaskService) runStoredWorkflow(taskID string) (*agent.Task, error) {
 }
 
 // runWorkflow runs an engine against a task, evicting the run once the task
-// reaches a terminal state.
+// reaches a terminal state, and records the task-lifecycle transitions the
+// engine drove in the audit chain (AUD-11: the engine advances the state
+// machine internally, bypassing the TaskService.transition audit hook).
 func (s *TaskService) runWorkflow(t *agent.Task, eng *agent.WorkflowEngine) (*agent.Task, error) {
+	from := t.State
+	stepCount := len(t.Steps)
 	res, err := eng.Run(t, s.defaultWorkflowStep())
 	if res != nil && res.Terminal() {
 		s.wfMu.Lock()
 		delete(s.workflowRuns, res.ID)
 		s.wfMu.Unlock()
 	}
+	if res != nil {
+		s.auditWorkflowLifecycle(res, from, stepCount)
+	}
 	return res, err
+}
+
+// taskLifecycle mirrors the workflow engine's canonical code-change state
+// chain (internal/agent canonicalLifecycle). The engine walks it in order when
+// a workflow step targets a state beyond the current one; the app layer
+// re-records the walked transitions after a run because the engine's direct
+// Task.Transition calls bypass the service-level audit hook.
+var taskLifecycle = []domain.TaskState{
+	domain.TaskCreated,
+	domain.TaskAnalyzing,
+	domain.TaskPlanning,
+	domain.TaskWaitingApproval,
+	domain.TaskApproved,
+	domain.TaskExecuting,
+	domain.TaskVerifying,
+	domain.TaskReadyForPR,
+	domain.TaskPRCreated,
+	domain.TaskDeploying,
+	domain.TaskObserving,
+	domain.TaskCompleted,
+}
+
+// workflowActionTargets mirrors the engine's taskStateForAction map
+// (internal/agent/workflow.go): each workflow step action drives the task to
+// its target state, walking the canonical lifecycle through every intermediate
+// state. Kept in lockstep so the app layer can reconstruct exactly which
+// transitions a run drove.
+var workflowActionTargets = map[string]domain.TaskState{
+	"request": domain.TaskCreated,
+	"analyze": domain.TaskAnalyzing,
+	"plan":    domain.TaskPlanning,
+	"code":    domain.TaskExecuting,
+	"verify":  domain.TaskVerifying,
+	"pr":      domain.TaskPRCreated,
+	"deploy":  domain.TaskDeploying,
+	"observe": domain.TaskObserving,
+}
+
+// lifecycleIndex returns the position of a state on the canonical lifecycle.
+func lifecycleIndex(s domain.TaskState) (int, bool) {
+	for i, st := range taskLifecycle {
+		if st == s {
+			return i, true
+		}
+	}
+	return 0, false
+}
+
+// auditWorkflowLifecycle records the exact task-lifecycle transitions the
+// workflow engine drove between the pre-run state `from` and the task's
+// post-run state, reconstructing them from the steps the run executed (the
+// engine advances the state machine internally without the service-level audit
+// hook). Each executable step's action targets a canonical state that the
+// engine walks to through every intermediate; a step with no target (the human
+// "approve" gate) leaves the state parked. A final state the engine reached by
+// a direct jump (Complete/Fail) is recorded as a single direct transition, so
+// the chain never invents transitions that did not happen. A nil audit log (no
+// wiring) is a no-op, matching auditTransition.
+func (s *TaskService) auditWorkflowLifecycle(t *agent.Task, from domain.TaskState, firstNewStep int) {
+	if s.auditLog == nil || t == nil {
+		return
+	}
+	to := t.State
+	if from == to {
+		return
+	}
+	prev := from
+	for _, st := range t.Steps {
+		if st.Index < firstNewStep+1 {
+			continue // a step from an earlier run of this task
+		}
+		target, ok := workflowActionTargets[st.Action]
+		if !ok {
+			continue // the human approval gate drives no target state
+		}
+		prev = s.auditLifecycleWalk(t, prev, target)
+	}
+	if prev != to {
+		s.auditTransition(t, prev, to)
+	}
+}
+
+// auditLifecycleWalk records the canonical transitions from prev to target
+// (each intermediate included), returning the final reached state. A state off
+// the canonical chain (recoverable BLOCKED/FAILED) or a backwards move is a
+// single direct transition, matching the engine's driveToState fallback.
+func (s *TaskService) auditLifecycleWalk(t *agent.Task, prev, target domain.TaskState) domain.TaskState {
+	if prev == target {
+		return prev
+	}
+	pi, pOk := lifecycleIndex(prev)
+	ti, tOk := lifecycleIndex(target)
+	if pOk && tOk && pi < ti {
+		for _, next := range taskLifecycle[pi+1 : ti+1] {
+			s.auditTransition(t, prev, next)
+			prev = next
+		}
+		return prev
+	}
+	s.auditTransition(t, prev, target)
+	return target
 }
 
 // CompleteApproval resolves a pending human-approval gate on any in-flight

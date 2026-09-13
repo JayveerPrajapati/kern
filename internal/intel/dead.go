@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/JayveerPrajapati/kern/internal/index"
 )
@@ -115,12 +116,17 @@ func DeadCode(ix *index.Index) []DeadSymbol {
 }
 
 // isPublic reports whether a name follows the exported-name convention
-// (leading uppercase, matching Go and most languages' export rules).
+// (leading uppercase, matching Go and most languages' export rules). The
+// first rune is decoded properly (utf8.DecodeRuneInString), NOT taken from
+// name[0]: a multi-byte UTF-8 first character would otherwise classify by a
+// single continuation byte (e.g. lowercase "éclair" starts with byte 0xC3,
+// which as a rune is uppercase 'Ã'), inverting the verdict for unexported
+// non-ASCII identifiers.
 func isPublic(name string) bool {
 	if name == "" {
 		return false
 	}
-	r := rune(name[0])
+	r, _ := utf8.DecodeRuneInString(name)
 	return unicode.IsUpper(r)
 }
 

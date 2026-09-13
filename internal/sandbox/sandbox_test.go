@@ -63,6 +63,7 @@ func TestRestoreKeepsFilesOverSizeCap(t *testing.T) {
 }
 
 func TestRunRestoresOnFailure(t *testing.T) {
+	t.Setenv("KERN_ALLOW_UNISOLATED", "1") // fail-closed gate: opt into unisolated runs on hosts without netns (darwin)
 	root := t.TempDir()
 	_ = os.WriteFile(filepath.Join(root, "data.txt"), []byte("pristine"), 0o644)
 	res := Run(context.Background(), root, "sh", []string{"-c", "echo changed > data.txt; exit 1"}, 10*time.Second)
@@ -79,6 +80,7 @@ func TestRunRestoresOnFailure(t *testing.T) {
 }
 
 func TestRunKeepsOnSuccess(t *testing.T) {
+	t.Setenv("KERN_ALLOW_UNISOLATED", "1") // fail-closed gate: opt into unisolated runs on hosts without netns (darwin)
 	root := t.TempDir()
 	_ = os.WriteFile(filepath.Join(root, "data.txt"), []byte("pristine"), 0o644)
 	res := Run(context.Background(), root, "sh", []string{"-c", "echo changed > data.txt; exit 0"}, 10*time.Second)
@@ -95,6 +97,7 @@ func TestRunKeepsOnSuccess(t *testing.T) {
 }
 
 func TestRunMissingCommand(t *testing.T) {
+	t.Setenv("KERN_ALLOW_UNISOLATED", "1") // fail-closed gate: opt into unisolated runs on hosts without netns (darwin)
 	res := Run(context.Background(), t.TempDir(), "definitely-not-a-real-binary-xyz", nil, 10*time.Second)
 	if res.OK {
 		t.Fatal("expected failure")
@@ -243,6 +246,7 @@ func TestSnapshotSkipsLargeFiles(t *testing.T) {
 // BEFORE attempting rollback, and the change is left in place for the caller
 // to decide on.
 func TestRunWarnsOnModifiedSkippedFile(t *testing.T) {
+	t.Setenv("KERN_ALLOW_UNISOLATED", "1") // fail-closed gate: opt into unisolated runs on hosts without netns (darwin)
 	root := t.TempDir()
 	big := make([]byte, maxSnapshotBytes+1)
 	_ = os.WriteFile(filepath.Join(root, "big.dat"), big, 0o644)
@@ -330,6 +334,7 @@ func TestRollbackRestoresSkippedFileFailsClearly(t *testing.T) {
 }
 
 func TestRunManifestCreatedModified(t *testing.T) {
+	t.Setenv("KERN_ALLOW_UNISOLATED", "1") // fail-closed gate: opt into unisolated runs on hosts without netns (darwin)
 	root := t.TempDir()
 	_ = os.WriteFile(filepath.Join(root, "a.go"), []byte("package a\n"), 0o644)
 	res := Run(context.Background(), root, "sh", []string{"-c", "echo x > b.go && echo y >> a.go"}, 10*time.Second)
@@ -368,6 +373,7 @@ func TestRunManifestCreatedModified(t *testing.T) {
 }
 
 func TestRunManifestDeleted(t *testing.T) {
+	t.Setenv("KERN_ALLOW_UNISOLATED", "1") // fail-closed gate: opt into unisolated runs on hosts without netns (darwin)
 	root := t.TempDir()
 	_ = os.WriteFile(filepath.Join(root, "a.go"), []byte("package a\n"), 0o644)
 	res := Run(context.Background(), root, "sh", []string{"-c", "rm a.go"}, 10*time.Second)
@@ -392,6 +398,7 @@ func TestRunManifestDeleted(t *testing.T) {
 }
 
 func TestRunManifestOnFailureRollbackAudit(t *testing.T) {
+	t.Setenv("KERN_ALLOW_UNISOLATED", "1") // fail-closed gate: opt into unisolated runs on hosts without netns (darwin)
 	root := t.TempDir()
 	res := Run(context.Background(), root, "sh", []string{"-c", "echo x > c.go; exit 1"}, 10*time.Second)
 	if res.OK {
@@ -412,6 +419,7 @@ func TestRunManifestOnFailureRollbackAudit(t *testing.T) {
 }
 
 func TestRunManifestEmptyWhenNoChanges(t *testing.T) {
+	t.Setenv("KERN_ALLOW_UNISOLATED", "1") // fail-closed gate: opt into unisolated runs on hosts without netns (darwin)
 	root := t.TempDir()
 	_ = os.WriteFile(filepath.Join(root, "a.go"), []byte("package a\n"), 0o644)
 	res := Run(context.Background(), root, "sh", []string{"-c", "true"}, 10*time.Second)

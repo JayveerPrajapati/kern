@@ -3,6 +3,8 @@ package web
 import (
 	"encoding/json"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -80,5 +82,109 @@ func TestV1TaskNotFound(t *testing.T) {
 	}
 	if body.Error == "" {
 		t.Fatal("error message is empty")
+	}
+}
+
+// TestV1AnalyzeMissingSymbol (F-030): POST /v1/analyze with a change naming a
+// symbol that does not exist in the index must return 404 with the real
+// message and candidate hints in the body — not a masked 500 "internal error"
+// (writeError hides 5xx messages).
+func TestV1AnalyzeMissingSymbol(t *testing.T) {
+	app := newTestApp(t)
+	rec := postJSON(t, app, "/v1/analyze", `{"change":"Add a SaveUser function to the service layer"}`)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404 (body: %s)", rec.Code, rec.Body.String())
+	}
+	var body map[string]string
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v (body: %s)", err, rec.Body.String())
+	}
+	if !strings.Contains(body["error"], "no symbol named") {
+		t.Fatalf("body must carry the real message, got: %s", rec.Body.String())
+	}
+	if !strings.Contains(body["error"], "candidates") {
+		t.Fatalf("body must carry candidate hints, got: %s", rec.Body.String())
+	}
+}
+
+// TestV1AnalyzeNoSymbolIdentified (F-030): a change with no identifiable
+// symbol at all is a client error (400), not a 500.
+func TestV1AnalyzeNoSymbolIdentified(t *testing.T) {
+	app := newTestApp(t)
+	rec := postJSON(t, app, "/v1/analyze", `{"change":"!!! ??? ###"}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (body: %s)", rec.Code, rec.Body.String())
+	}
+	var body map[string]string
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v (body: %s)", err, rec.Body.String())
+	}
+	if !strings.Contains(body["error"], "could not identify a symbol") {
+		t.Fatalf("body must carry the real message, got: %s", rec.Body.String())
+	}
+}
+
+// TestV1AnalyzeValidSymbolStill200 (F-030): the 200 path is unchanged — a
+// change naming a real indexed symbol resolves normally.
+func TestV1AnalyzeValidSymbolStill200(t *testing.T) {
+	app := newTestApp(t)
+	rec := postJSON(t, app, "/v1/analyze", `{"change":"helper"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body: %s)", rec.Code, rec.Body.String())
+	}
+}
+
+// TestV1GraphSymbolNameResolution (F-031): GET /v1/graph/{entity} must resolve
+// a bare SYMBOL NAME ("FindUser") to its prebuilt graph node — node IDs are
+// package-qualified ("pkg.FindUser"), so an exact-ID-only lookup 404'd every
+// indexed symbol. Unknown entities keep the 404.
+func TestV1GraphSymbolNameResolution(t *testing.T) {
+	root := t.TempDir()
+	files := map[string]string{
+		"go.mod":                      "module example.com/demo\n\ngo 1.20\n",
+		"internal/repo/repo.go":       "package repo\n\nfunc Query(id int) string { return \"u\" }\n",
+		"internal/service/service.go": "package service\n\nimport \"example.com/demo/internal/repo\"\n\nfunc FindUser(id int) string {\n\treturn repo.Query(id)\n}\n",
+	}
+	for rel, content := range files {
+		p := filepath.Join(root, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	app, err := New(root)
+	if err != nil {
+		t.Fatalf("web.New: %v", err)
+	}
+	rec := get(t, app, "/v1/graph/FindUser")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body: %s)", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Node struct {
+			ID     string `json:"id"`
+			Kind   string `json:"kind"`
+			Symbol *struct {
+				Name string `json:"name"`
+			} `json:"symbol"`
+		} `json:"node"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v (body: %s)", err, rec.Body.String())
+	}
+	if body.Node.Kind != "symbol" || body.Node.Symbol == nil || body.Node.Symbol.Name != "FindUser" {
+		t.Fatalf("expected FindUser symbol node, got %+v", body.Node)
+	}
+}
+
+// TestV1GraphUnknownEntityStill404 (F-031): a name that resolves to no node
+// keeps the 404 contract.
+func TestV1GraphUnknownEntityStill404(t *testing.T) {
+	app := newTestApp(t)
+	rec := get(t, app, "/v1/graph/NoSuchEntityAnywhere")
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404 (body: %s)", rec.Code, rec.Body.String())
 	}
 }

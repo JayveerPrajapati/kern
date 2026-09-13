@@ -15,6 +15,14 @@ func wireClaude(bin string) Status {
 	if err != nil {
 		return Status{Agent: "claude", Skipped: true, Note: "claude not on PATH — project .mcp.json still covers Claude Code"}
 	}
+	// Idempotency: `claude mcp add` fails with "MCP server kern already exists
+	// in local config" when kern is already registered, which turned a second
+	// `kern setup` run into a hard error (exit 1). Detect the existing
+	// registration deterministically from the local config file and skip the
+	// add instead of letting claude error.
+	if claudeHasKern() {
+		return Status{Agent: "claude", Installed: true, Path: path, Note: "kern MCP already registered in claude config"}
+	}
 	cmd := exec.Command(path, "mcp", "add", "kern", "--", bin)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return Status{Agent: "claude", Path: path, Note: fmt.Sprintf("claude mcp add failed: %s", strings.TrimSpace(string(out)))}
@@ -22,12 +30,24 @@ func wireClaude(bin string) Status {
 	return Status{Agent: "claude", Installed: true, Path: path, Note: "claude mcp add ok"}
 }
 
+// claudeHasKern reports whether the kern MCP server is already registered in
+// the local claude config (~/.claude.json). This is the deterministic local
+// check that keeps claude wiring idempotent: `claude mcp add` errors on a
+// duplicate registration, so setup must detect it first and skip instead.
+func claudeHasKern() bool {
+	b, err := os.ReadFile(claudeConfigPath())
+	if err != nil {
+		return false
+	}
+	return strings.Contains(string(b), `"kern"`)
+}
+
 func claudeStatus() Status {
 	path, err := exec.LookPath("claude")
 	if err != nil {
 		return Status{Agent: "claude", Note: "not installed"}
 	}
-	if b, err := os.ReadFile(claudeConfigPath()); err == nil && strings.Contains(string(b), `"kern"`) {
+	if claudeHasKern() {
 		return Status{Agent: "claude", Installed: true, Path: path, Note: "kern MCP registered (project or user scope)"}
 	}
 	return Status{Agent: "claude", Path: path, Note: "claude available — run kern setup to add kern MCP"}

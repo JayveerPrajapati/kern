@@ -25,10 +25,10 @@ type Lifecycle string
 var Lifecycles = []Lifecycle{Proposed, Implemented, Rejected, Archived}
 
 const (
-	Proposed     Lifecycle = "proposed"
-	Implemented  Lifecycle = "implemented"
-	Rejected     Lifecycle = "rejected"
-	Archived     Lifecycle = "archived"
+	Proposed    Lifecycle = "proposed"
+	Implemented Lifecycle = "implemented"
+	Rejected    Lifecycle = "rejected"
+	Archived    Lifecycle = "archived"
 )
 
 // Class is the kind of decision a note records; the folder set is closed.

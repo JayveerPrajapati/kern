@@ -187,6 +187,14 @@ func (g *Graph) Resolvable(ref string) bool {
 	return ok
 }
 
+// ResolveNodeID maps a user-provided entity reference to its canonical node ID
+// (bare name, package-scoped name, or method name). It is the exported form of
+// resolveNodeID so web handlers can look up graph entities by symbol name
+// without building a fresh index (F-031).
+func (g *Graph) ResolveNodeID(ref string) (string, bool) {
+	return g.resolveNodeID(ref)
+}
+
 // resolveSymbol maps a user-provided symbol to its canonical node ID. It handles
 // bare names ("Func"), package-scoped names ("pkg.Func"), and method names
 // ("Type.Method"). When the input doesn't match a node ID directly, the name is
@@ -369,6 +377,32 @@ func (g *Graph) WhatDoesXDependOnPrecise(symbol string, strict bool) []domain.No
 	outgoing, _ := g.buildAdjacencyOpt(strict)
 	reach := transitive(g.resolveSymbol(symbol), outgoing, maxHops)
 	return nodesForIDs(g.nodesByID(), reach)
+}
+
+// WhatDoesXDependOnNames returns the symbols the given symbol depends on
+// as renderable names, preserving callees that do not resolve to indexed
+// nodes (import-qualified stdlib calls like "fmt.Println") instead of
+// silently dropping them: a method whose every callee is external reported
+// "What it calls: 0" via the node-based query while `kern why` showed the
+// raw edges (e2e round 2, P0-1). Resolved IDs map to node names; unresolved
+// IDs are returned verbatim so impact reports stop under-reporting.
+func (g *Graph) WhatDoesXDependOnNames(symbol string, strict bool) []string {
+	outgoing, _ := g.buildAdjacencyOpt(strict)
+	reach := transitive(g.resolveSymbol(symbol), outgoing, maxHops)
+	byID := g.nodesByID()
+	out := make([]string, 0, len(reach))
+	for _, id := range reach {
+		if n, ok := byID[id]; ok && n.Symbol != nil {
+			if n.Symbol.Qualified != "" {
+				out = append(out, n.Symbol.Qualified)
+			} else {
+				out = append(out, n.Symbol.Name)
+			}
+			continue
+		}
+		out = append(out, id)
+	}
+	return out
 }
 
 // WhatAPIsAffected returns the API entry-point nodes affected by a change to

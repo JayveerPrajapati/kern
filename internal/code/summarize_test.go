@@ -38,6 +38,55 @@ const (
 	}
 }
 
+// TestSummarizeGoConstVarDecls guards F-005: single-line const/var declarations
+// must appear in the symbolic summary (security blind spot — a const holding a
+// secret key was previously invisible to `kern compact`).
+func TestSummarizeGoConstVarDecls(t *testing.T) {
+	src := `package main
+
+const apiKey = "sk-live-123"
+
+var baseURL = "https://example.com"
+
+const (
+	Max = 10
+)
+
+var (
+	Min = 1
+)
+
+func Query() {}
+`
+	sum := Summarize("repo.go", []byte(src), 100)
+	byName := map[string]Symbol{}
+	for _, s := range sum.Symbols {
+		byName[s.Name] = s
+	}
+	for name, kind := range map[string]string{
+		"apiKey":  "const",
+		"baseURL": "var",
+		"Max":     "const",
+		"Min":     "var",
+	} {
+		s, ok := byName[name]
+		if !ok {
+			t.Fatalf("expected symbol %q in summary, got %+v", name, sum.Symbols)
+		}
+		if s.Kind != kind {
+			t.Fatalf("expected %q kind %q, got %q (line %d)", name, kind, s.Kind, s.Line)
+		}
+		if s.Line <= 0 {
+			t.Fatalf("expected %q to carry a line number, got %d", name, s.Line)
+		}
+	}
+	// The secret value must NOT leak into the summary — name/kind/line only.
+	rendered := sum.Render()
+	if strings.Contains(rendered, "sk-live-123") {
+		t.Fatalf("secret value leaked into symbolic summary:\n%s", rendered)
+	}
+}
+
 func TestSummarizeUnknownLang(t *testing.T) {
 	sum := Summarize("notes.txt", []byte("hello"), 100)
 	if sum.Language != "" || len(sum.Symbols) != 0 {

@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -19,6 +20,11 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/lock"
 	"github.com/JayveerPrajapati/kern/internal/project"
 )
+
+// ageRE matches the relative-age stamp ("built 3s ago") embedded in index
+// provenance text. The stamp ticks between two RPCs, so tests comparing
+// response text across calls must normalize it first.
+var ageRE = regexp.MustCompile(`built \d+s ago`)
 
 func newHTTPServer() *Server {
 	// Mirrors the production ServeHTTPContext constructor: every map/channel
@@ -428,7 +434,16 @@ func TestDaemonModeServesMultipleClients(t *testing.T) {
 	if !strings.Contains(fmt.Sprint(textA), "Greet") {
 		t.Fatalf("client A search did not find Greet: %v", textA)
 	}
-	if fmt.Sprint(textA) != fmt.Sprint(textB) {
+	// The shared index is provenance-stamped with a RELATIVE age ("built
+	// 0s ago") that ticks between the two RPCs; comparing raw text makes
+	// the assertion flake whenever the calls straddle a second boundary.
+	// Normalize the age before comparing so the check asserts what it
+	// means to: both clients see the same shared index (same symbols,
+	// counts, commit), not the same rendering instant.
+	norm := func(v any) string {
+		return ageRE.ReplaceAllString(fmt.Sprint(v), "built Ns ago")
+	}
+	if norm(textA) != norm(textB) {
 		t.Fatalf("clients disagree on the shared index:\nA: %v\nB: %v", textA, textB)
 	}
 }

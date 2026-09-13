@@ -117,6 +117,22 @@ func (c Check) Run(ctx context.Context, req domain.ChangeRequest) (result domain
 		}, nil
 	}
 	defer cleanup()
+	// The check validates the CHANGE, not just the committed tree:
+	// createWorktree checks out HEAD only, so without applying the staged
+	// diff a staged change that breaks tests would pass whenever HEAD is
+	// green, and a HEAD-only regression would block an innocent staged
+	// change under a misleading "staged changes cause test failures"
+	// message. Applying the staged diff (HEAD -> index) makes the worktree
+	// match the tree the commit would produce; nothing staged is a no-op
+	// (plain HEAD validation, the old behavior). Fail-closed: an apply
+	// error is an ERROR, never a partial application.
+	if serr := applyStagedDiff(req.RepositoryRoot, worktreePath); serr != nil {
+		return domain.CheckResult{
+			Name:   c.Name(),
+			Status: domain.StatusError,
+			Error:  fmt.Sprintf("apply staged changes: %v", serr),
+		}, nil
+	}
 
 	targets := c.config.Matrix
 	if len(targets) == 0 {
@@ -175,9 +191,9 @@ func (c Check) Run(ctx context.Context, req domain.ChangeRequest) (result domain
 					}},
 				}
 				if buildResult.Stderr != "" {
-					finding.Evidence[0].Description = truncateForEvidence(buildResult.Stderr, 500)
+					finding.Evidence[0].Description = failureDigest(buildResult.Stderr, 2000)
 				} else if buildResult.Stdout != "" {
-					finding.Evidence[0].Description = truncateForEvidence(buildResult.Stdout, 500)
+					finding.Evidence[0].Description = failureDigest(buildResult.Stdout, 2000)
 				}
 				return domain.CheckResult{
 					Name:     c.Name(),
@@ -225,9 +241,9 @@ func (c Check) Run(ctx context.Context, req domain.ChangeRequest) (result domain
 					}},
 				}
 				if testResult.Stderr != "" {
-					finding.Evidence[0].Description = truncateForEvidence(testResult.Stderr, 500)
+					finding.Evidence[0].Description = failureDigest(testResult.Stderr, 2000)
 				} else if testResult.Stdout != "" {
-					finding.Evidence[0].Description = truncateForEvidence(testResult.Stdout, 500)
+					finding.Evidence[0].Description = failureDigest(testResult.Stdout, 2000)
 				}
 				return domain.CheckResult{
 					Name:     c.Name(),
@@ -275,9 +291,9 @@ func (c Check) Run(ctx context.Context, req domain.ChangeRequest) (result domain
 					}},
 				}
 				if cmdResult.Stderr != "" {
-					finding.Evidence[0].Description = truncateForEvidence(cmdResult.Stderr, 500)
+					finding.Evidence[0].Description = failureDigest(cmdResult.Stderr, 2000)
 				} else if cmdResult.Stdout != "" {
-					finding.Evidence[0].Description = truncateForEvidence(cmdResult.Stdout, 500)
+					finding.Evidence[0].Description = failureDigest(cmdResult.Stdout, 2000)
 				}
 				return domain.CheckResult{
 					Name:     c.Name(),
@@ -299,12 +315,56 @@ func SplitCommand(cmd string) []string {
 	return strings.Fields(cmd)
 }
 
-// truncateForEvidence truncates a string to maxChars for inclusion in finding
-// evidence, appending a truncation marker if needed.
+// truncateForEvidence keeps the HEAD and TAIL of s (roughly maxChars total)
+// for inclusion in finding evidence. Build/test tools stream failure output
+// at unpredictable positions: go test emits a failing package's detail at
+// the moment that package completes (fast packages land near the head, slow
+// ones near the tail) and the final FAIL verdict last; go build emits the
+// compile error mid-output then the final FAIL. Head-only hid the verdict
+// and late failures; tail-only hid early ones (both observed live while
+// diagnosing a BLOCK whose 500-char head-truncated evidence contained only
+// "flowchart LR..." chatter from a passing test).
 func truncateForEvidence(s string, maxChars int) string {
 	s = strings.TrimSpace(s)
 	if len(s) <= maxChars {
 		return s
 	}
-	return s[:maxChars] + "\n... (truncated)"
+	head := maxChars / 4
+	tail := maxChars * 3 / 4
+	elided := len(s) - head - tail
+	if elided < 0 {
+		elided = 0
+	}
+	return s[:head] + fmt.Sprintf("\n... (%d bytes elided) ...\n", elided) + s[len(s)-tail:]
+}
+
+// failureDigest builds finding evidence from the failure-significant lines
+// of build/test output: go test's "--- FAIL: Test" markers, its "FAIL" and
+// "FAIL\t<package>" summary lines, "panic:" lines, and go's diagnostic
+// "<file>.go:<line>: message" lines (which also carry t.Error/t.Fatal
+// detail, prefixed with the _test.go location). Output position is
+// unpredictable in multi-package runs (packages stream as they complete),
+// so plain truncation cannot reliably capture them; when no
+// failure-significant line is found, it falls back to truncateForEvidence.
+func failureDigest(s string, maxChars int) string {
+	var picked []string
+	for _, ln := range strings.Split(s, "\n") {
+		ln = strings.TrimRight(ln, "\r")
+		if ln == "" || strings.HasPrefix(ln, "ok  ") {
+			continue
+		}
+		if strings.HasPrefix(ln, "--- FAIL") || strings.HasPrefix(ln, "FAIL") ||
+			strings.HasPrefix(ln, "panic:") ||
+			(strings.Contains(ln, ".go:") && strings.Contains(ln, ": ")) {
+			picked = append(picked, ln)
+		}
+	}
+	if len(picked) == 0 {
+		return truncateForEvidence(s, maxChars)
+	}
+	digest := strings.Join(picked, "\n")
+	if len(digest) > maxChars {
+		return digest[:maxChars] + fmt.Sprintf("\n... (%d more failure lines elided)", len(picked))
+	}
+	return digest
 }

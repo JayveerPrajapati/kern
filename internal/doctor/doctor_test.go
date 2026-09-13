@@ -386,3 +386,23 @@ func TestCheckRuntime(t *testing.T) {
 		t.Fatalf("error detail missing marker: %q", f.Detail)
 	}
 }
+
+func TestCheckExecDetectsSIGKILL(t *testing.T) {
+	// Regression (e2e 2026-09-13): a binary killed by SIGKILL at exec
+	// (macOS Gatekeeper) reported the generic "failed to run: signal:
+	// killed" instead of the actionable re-sign guidance, because the
+	// ExitCode()==137 check never fires for a direct signal death
+	// (ExitCode is -1; the 137 form only appears shell-wrapped).
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "selfkill")
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\nkill -9 $$\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	f := checkExec(bin)
+	if f.Level != "fail" {
+		t.Fatalf("expected fail level for SIGKILLed binary, got %+v", f)
+	}
+	if !strings.Contains(f.Detail, "SIGKILL") || !strings.Contains(f.Detail, "re-sign") {
+		t.Fatalf("expected Gatekeeper re-sign guidance in detail, got %q", f.Detail)
+	}
+}

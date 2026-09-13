@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"time"
+
+	"github.com/JayveerPrajapati/kern/internal/app"
 )
 
 // runApprove implements `kern approve [id] [--reject --reason "..." --approver "..."]`.
@@ -47,20 +49,33 @@ func runApprove(rest []string) {
 		approver = "cli-user"
 	}
 
+	// Resolve through the app layer: the decision is persisted to the shared
+	// approval store AND, when it gates a task parked at WAITING_FOR_APPROVAL,
+	// the task is advanced to its approval-resolved state (so `kern task`
+	// reflects the decision) and recorded in the audit chain. The workflow
+	// engine still resumes and drives the remaining steps (F-026).
+	p, err := app.New(root)
+	if err != nil {
+		fatal("approve: could not load project: %v — run kern index first", err)
+	}
+	ts := app.NewTaskService(p, nil).WithAgentID(approver)
+
+	a, err := ts.ResolveApprovalForTask(id, approver, !f.reject, f.reason)
+	if err != nil {
+		fatal("approve: %v — check kern audit %s for state", err, id)
+	}
 	if f.reject {
-		_, err := svc.Governance.Approve(ctx, root, id, approver, false, f.reason)
-		if err != nil {
-			fatal("approve: %v — check kern audit %s for state", err, id)
+		fmt.Printf("rejected: %s (by %s)\n", a.ID, approver)
+		if a.TaskID != "" {
+			fmt.Printf("  task: %s marked REJECTED\n", a.TaskID)
 		}
-		fmt.Printf("rejected: %s (by %s)\n", id, approver)
-	} else {
-		a, err := svc.Governance.Approve(ctx, root, id, approver, true, f.reason)
-		if err != nil {
-			fatal("approve: %v — check kern audit %s for state", err, id)
-		}
-		fmt.Printf("approved: %s\n", a.ID)
-		fmt.Printf("  task: %s\n", a.TaskID)
-		fmt.Printf("  approver: %s\n", a.Approver)
-		fmt.Printf("  decided: %s\n", a.DecidedAt.Format(time.RFC3339))
+		return
+	}
+	fmt.Printf("approved: %s\n", a.ID)
+	fmt.Printf("  task: %s\n", a.TaskID)
+	fmt.Printf("  approver: %s\n", a.Approver)
+	fmt.Printf("  decided: %s\n", a.DecidedAt.Format(time.RFC3339))
+	if a.TaskID != "" {
+		fmt.Printf("  resume: kern workflow --task %s\n", a.TaskID)
 	}
 }

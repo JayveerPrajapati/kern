@@ -386,10 +386,11 @@ func (s *TaskService) collectGraphImpact(g *intelligence.Graph, target string, s
 	for _, n := range g.WhoCallsPrecise(target, strict) {
 		rep.WhoCalls = append(rep.WhoCalls, nodeName(n))
 	}
-	// 2. What does it call?
-	for _, n := range g.WhatDoesXDependOnPrecise(target, strict) {
-		rep.WhatItCalls = append(rep.WhatItCalls, nodeName(n))
-	}
+	// 2. What does it call? Names, not nodes, so callees that do not resolve
+	// to indexed nodes (e.g. "fmt.Println") survive instead of emptying the
+	// section - methods that only call external code reported "What it
+	// calls: 0" while `kern why` showed the edges (e2e round 2, P0-1).
+	rep.WhatItCalls = append(rep.WhatItCalls, g.WhatDoesXDependOnNames(target, strict)...)
 	// 3. What services depend on it?
 	for _, n := range g.WhatServicesAffectedPrecise(target, strict) {
 		rep.ServicesDepend = append(rep.ServicesDepend, nodeName(n))

@@ -493,3 +493,82 @@ func TestUpdateDeterministicRepeat(t *testing.T) {
 	}
 	assertIndexesByteIdentical(t, a, b)
 }
+
+// TestUpdatePreservesStructFieldsOnLoadedPrior pins the receiver-field schema
+// across incremental updates of a disk-loaded prior: reconstructFileResult
+// must carry prev's package-merged StructFields forward (per-file attribution
+// is not serialized), or every update strips them and the field-access callee
+// rewrite ("App.taskSvc.Deploy" -> "TaskService.Deploy") silently degrades.
+// Regression for the stale-index class that made kern dead re-flag live
+// field-access method calls (verified 2026-09-11: httpClient.roundTrip was
+// reported certainly dead after watcher-driven updates emptied StructFields).
+func TestUpdatePreservesStructFieldsOnLoadedPrior(t *testing.T) {
+	root := t.TempDir()
+	writeFileAt(t, root, "a/app.go", `package a
+
+type App struct {
+	TaskSvc *TaskService
+	Client  *HTTPClient
+}
+
+type TaskService struct{ ID string }
+type HTTPClient struct{ Base string }
+`)
+	writeFileAt(t, root, "a/use.go", `package a
+
+func Use(a *App) { a.TaskSvc.Run() }
+
+func (t *TaskService) Run() {}
+func (h *HTTPClient) Get() {}
+`)
+	prior, err := Build(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(prior.Pkgs["a"].StructFields) == 0 {
+		t.Fatal("fixture: Build must record struct fields")
+	}
+	if err := prior.Save(); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := Load(root)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(loaded.Pkgs["a"].StructFields) == 0 {
+		t.Fatal("fixture: loaded prior must carry struct fields")
+	}
+
+	// Touch an unrelated file so the update actually re-runs the
+	// reconstruction path for the unchanged struct-bearing file.
+	writeFileAt(t, root, "a/use.go", `package a
+
+func Use(a *App) { a.TaskSvc.Run() }
+
+func (t *TaskService) Run() {}
+func (h *HTTPClient) Get() {}
+func (h *HTTPClient) Post() {}
+`)
+	inc, err := Update(root, loaded)
+	if err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	full, err := Build(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(inc.Pkgs["a"].StructFields) != len(full.Pkgs["a"].StructFields) {
+		t.Errorf("Update stripped struct fields: inc=%d full=%d\ninc=%v\nfull=%v",
+			len(inc.Pkgs["a"].StructFields), len(full.Pkgs["a"].StructFields),
+			inc.Pkgs["a"].StructFields, full.Pkgs["a"].StructFields)
+	}
+	for k, v := range full.Pkgs["a"].StructFields {
+		if inc.Pkgs["a"].StructFields[k] != v {
+			t.Errorf("struct field %q diverged: inc=%q full=%q", k, inc.Pkgs["a"].StructFields[k], v)
+		}
+	}
+	// The rewrite chain must still resolve the field-access callee.
+	if got := inc.Callers["TaskService.Run"]; !containsStr(got, "Use") {
+		t.Errorf("field-access caller lost after Update: TaskService.Run callers = %v, want Use", got)
+	}
+}

@@ -201,6 +201,7 @@ func tsExtract(rel string, src []byte, lang string) ([]Symbol, map[string][]Call
 		Lang:  lang,
 	}
 
+	calls = attributeTopLevelCalls(rel, src, lang, defs, calls)
 	return defs, calls, inherits, pkg, nil
 }
 

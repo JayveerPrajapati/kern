@@ -376,7 +376,8 @@ func TestRootConfinementBlocksRunBuildDir(t *testing.T) {
 // post-run impact manifest (created/modified/deleted lines + summary) when the
 // command changes the tree.
 func TestSandboxManifestViaMCP(t *testing.T) {
-	t.Setenv("KERN_ALLOW_EXEC", "1") // kern_sandbox is a governed exec surface
+	t.Setenv("KERN_ALLOW_EXEC", "1")       // kern_sandbox is a governed exec surface
+	t.Setenv("KERN_ALLOW_UNISOLATED", "1") // fail-closed gate: opt into unisolated runs on hosts without netns (darwin)
 	root := mcpProject(t)
 	out := mcpLastOK(t, "kern_sandbox", map[string]any{"root": root, "command": "sh -c 'echo x > created.go && echo y >> app.go'"})
 	if !strings.Contains(out, "=== sandbox impact manifest ===") {

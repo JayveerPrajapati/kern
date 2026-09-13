@@ -265,6 +265,7 @@ results <- updateComputeFile(prev, jobs[idx], callsByFile, inheritsByFile)
 	dropDanglingCalls(ix, prev, copied)
 	ix.computeCallers()
 	ix.addDispatchEdges()
+	ix.measureCallResolution()
 	ix.resolveEntries()
 	ix.reindexByFile()
 	ix.computePrecisionByLang()
@@ -369,6 +370,27 @@ func reconstructFileResult(prev *Index, rel, hash string, mtime int64, callsByFi
 		if pkg != nil {
 			r.pkg.Name = pkg.Name
 			r.pkg.Lang = pkg.Lang
+			// Per-file struct-field attribution is not serialized, so an
+			// unchanged file's struct fields survive only through the
+			// package-merged map. Carry it forward, or every incremental
+			// update on a disk-loaded prior silently strips StructFields
+			// (the receiver-field callee rewrite then degrades and the dead
+			// lens re-flags live field-access calls).
+			if pkg.StructFields != nil {
+				r.pkg.StructFields = make(map[string]string, len(pkg.StructFields))
+				for k, v := range pkg.StructFields {
+					r.pkg.StructFields[k] = v
+				}
+			}
+			// Same carry-forward for constructor return types: without it an
+			// incremental update on a disk-loaded prior silently strips
+			// Constructors and the cross-package constructor rewrite degrades.
+			if pkg.Constructors != nil {
+				r.pkg.Constructors = make(map[string]string, len(pkg.Constructors))
+				for k, v := range pkg.Constructors {
+					r.pkg.Constructors[k] = v
+				}
+			}
 		}
 	}
 	return r

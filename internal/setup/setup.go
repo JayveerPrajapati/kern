@@ -119,10 +119,10 @@ var adapters = []adapter{
 	{name: "gemini", path: homeConfig(".gemini", "settings.json"), key: "mcpServers", entry: stdioEntry, scope: "global"},
 	{name: "antigravity", path: homeConfig(".gemini", "config", "mcp_config.json"), key: "mcpServers", entry: stdioEntry, scope: "global"},
 	{name: "qwen", path: homeConfig(".qwen", "settings.json"), key: "mcpServers", entry: stdioEntry, scope: "global"},
-	{name: "qoder", path: homeConfig(".qoder", "mcp.json"), key: "mcpServers", entry: stdioEntry, scope: "global"},
+	{name: "qoder", path: homeConfig(".qoder", "settings.json"), key: "mcpServers", entry: stdioEntry, scope: "global"},
 	{name: "kiro", path: homeConfig(".kiro", "settings", "mcp.json"), key: "mcpServers", entry: stdioEntry, scope: "global"},
 	{name: "copilot", path: projectConfig(".vscode", "mcp.json"), key: "servers", entry: stdioEntry, scope: "repo"},
-	{name: "copilot-cli", path: globalConfig(".copilot", "mcp-config.json"), key: "mcpServers", entry: stdioEntry, scope: "global"},
+	{name: "copilot", path: homeConfig(".copilot", "mcp-config.json"), key: "mcpServers", entry: stdioEntry, scope: "global"},
 }
 
 func stdioEntry(bin string) map[string]any {

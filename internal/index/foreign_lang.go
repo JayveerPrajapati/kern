@@ -377,7 +377,58 @@ func extractForeignRegex(rel string, src []byte, lang string) ([]Symbol, map[str
 		Lang:    lang,
 		Imports: imports,
 	}
+	calls = attributeTopLevelCalls(rel, src, lang, syms, calls)
 	return syms, calls, inherits, pkg, nil
+}
+
+// attributeTopLevelCalls records calls that occur OUTSIDE any symbol body -
+// top-level statements and anonymous callbacks such as
+// el.addEventListener("evt", () => handler()) - with the file itself as the
+// caller, keyed "file:<rel>". That key matches the graph's file-node ID
+// exactly, so caller traversals (WhoCalls, WhatDependsOn, what-if) resolve
+// it instead of reporting the callee as isolated: without this edge,
+// removing a handler wired only via an event callback was called "isolated:
+// safe to proceed" on the app's only fetch path (e2e round 2, P0-2).
+// Shared by the regex and tree-sitter extractors so the parity gate stays
+// balanced: both sides gain identical file-owned edges.
+func attributeTopLevelCalls(rel string, src []byte, lang string, syms []Symbol, calls map[string][]CallEdge) map[string][]CallEdge {
+	spec := specs[lang]
+	if spec == nil || calls == nil {
+		return calls
+	}
+	src = sfcScript(rel, src)
+	if len(bytes.TrimSpace(src)) == 0 {
+		return calls
+	}
+	f := analyze(src, spec)
+	n := len(f.lines)
+	covered := make([]bool, n)
+	for _, s := range syms {
+		// Only def-like symbols (the kinds whose bodies the main scan loop
+		// attributes calls to) cover lines. A top-level const's brace-depth
+		// End can swallow following callback lines; those must stay
+		// unattributed so the file owns their calls.
+		if s.File != rel || s.End < s.Line || (s.Kind != "func" && s.Kind != "method") {
+			continue
+		}
+		for j := s.Line - 1; j < s.End && j < n; j++ {
+			covered[j] = true
+		}
+	}
+	owner := "file:" + rel
+	for j := 0; j < n; j++ {
+		if covered[j] || f.blank[j] || f.com[j] || strings.TrimSpace(f.clean[j]) == "" {
+			continue
+		}
+		// Type declaration lines ("class Child(Greeter):") are not statements:
+		// their parenthesized bases must not read as file-owned calls.
+		if rule, _ := matchRule(f.lines[j], spec); rule != nil && typeKinds[rule.kind] {
+			continue
+		}
+		scanCalls(f, j, owner, calls, spec)
+	}
+	dedupeCalls(calls)
+	return calls
 }
 
 func matchRule(line string, spec *langSpec) (*declRule, []string) {
@@ -482,6 +533,11 @@ func scanCallsInner(f *ffile, i int, owner string, calls map[string][]CallEdge, 
 	for _, m := range callRe.FindAllStringSubmatch(f.clean[i], -1) {
 		first := m[1]
 		full := strings.TrimSpace(strings.TrimSuffix(m[0], "("))
+		// callRe tolerates generic type arguments between the callee and the
+		// paren (useInfiniteData<UserDto>(...)); drop the <...> part so the
+		// recorded callee is the bare name and resolves like a non-generic
+		// call. No-op for plain calls.
+		full = stripGenerics(full)
 		if spec.kw[first] {
 			if !strings.Contains(full, ".") {
 				continue

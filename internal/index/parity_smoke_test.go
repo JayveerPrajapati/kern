@@ -48,12 +48,12 @@ func TestRegexExtractorBaselineOverCorpus(t *testing.T) {
 		"testfixture/fixtures.py": {
 			symbols: 9,
 			edges: map[string]int{
-				"make_greeter":   2,
+				"make_greeter":     2,
 				"Greeter.__init__": 1,
-				"Greeter.greet":  1,
-				"Greeter.loud":   3,
-				"Child.greet":    1,
-				"top_level":      4,
+				"Greeter.greet":    1,
+				"Greeter.loud":     3,
+				"Child.greet":      1,
+				"top_level":        4,
 			},
 		},
 		"testfixture/fixtures.ts": {

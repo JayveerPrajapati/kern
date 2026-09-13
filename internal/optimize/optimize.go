@@ -31,6 +31,11 @@ type Result struct {
 	AfterTokens  int
 	SavedTokens  int
 	SavedPercent float64
+	// LLMSkipped is set when an LLM compression stage was requested but could
+	// not run (provider unreachable/unconfigured); the deterministic fallback
+	// output was returned instead. Surfaced so degradation is never silent.
+	LLMSkipped string
+
 	// FromCache is set when the result was served from the local response
 	// cache instead of recomputing (or calling the LLM).
 	FromCache bool
@@ -236,19 +241,26 @@ func promptUncached(prompt string, attachedLog string, opts Options) (Result, er
 		}
 	}
 	out := compress.CompressPrompt(prompt)
+	var llmSkipped string
 	if opts.LLM != "" {
 		// Provider-neutral compression: the factory selects the vendor via
 		// KERN_LLM_PROVIDER (default Ollama), and opts.LLM overrides the model.
-		if p, perr := llm.NewProvider(); perr == nil {
-			if llmOut, err := llm.CompressVia(context.Background(), p, prompt, llm.Options{Model: opts.LLM}); err == nil && llmOut != "" {
-				out = llmOut
-			}
+		p, perr := llm.NewProvider()
+		if perr != nil {
+			llmSkipped = fmt.Sprintf("LLM compression unavailable (%v) — returned deterministic output unchanged", perr)
+		} else if llmOut, err := llm.CompressVia(context.Background(), p, prompt, llm.Options{Model: opts.LLM}); err != nil {
+			llmSkipped = fmt.Sprintf("LLM compression failed (%v) — returned deterministic output unchanged", err)
+		} else if llmOut == "" {
+			llmSkipped = "LLM compression returned empty output — returned deterministic output unchanged"
+		} else {
+			out = llmOut
 		}
 	}
 	if mask {
 		out = masked.Unmask(out)
 	}
 	res := finish(raw, out, tokenize.KindGeneric)
+	res.LLMSkipped = llmSkipped
 	record(stats.OpOptimizePrompt, opts, res)
 	return res, nil
 }

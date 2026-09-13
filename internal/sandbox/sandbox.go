@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	goruntime "runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -135,7 +136,7 @@ func sanitizedEnv() []string {
 }
 
 // SkipDirs are never copied into a snapshot.
-var SkipDirs = map[string]bool{".git": true, ".hg": true, ".svn": true, "node_modules": true, "vendor": true, "dist": true, "build": true, "target": true, "out": true, ".gradle": true, ".venv": true, "__pycache__": true, ".next": true, ".turbo": true, ".kern": true, ".blueprint": true, "bin": true, "graphify-out": true}
+var SkipDirs = map[string]bool{".git": true, ".hg": true, ".svn": true, "node_modules": true, "vendor": true, "dist": true, "build": true, "target": true, "out": true, ".gradle": true, ".venv": true, "venv": true, "__pypackages__": true, "__pycache__": true, ".next": true, ".turbo": true, ".kern": true, ".blueprint": true, "bin": true, "graphify-out": true}
 
 // Snap is a point-in-time copy of a tree used for rollback.
 type Snap struct {
@@ -528,6 +529,24 @@ func Run(parent context.Context, root string, cmdName string, args []string, tim
 	}
 	res := &Result{}
 	start := time.Now()
+	// Governance fail-closed gate (same contract as `kern exec` /
+	// internal/script): sandboxed commands run arbitrary host code and must
+	// never silently degrade to full network egress. The snapshot sandbox
+	// does not (and cannot) isolate the command's network, so on hosts
+	// without network isolation the run is REFUSED unless the local operator
+	// explicitly opted in via KERN_ALLOW_UNISOLATED=1 (or the pre-existing
+	// alias KERN_ALLOW_NET=1). The gate mirrors internal/script's deny-by-
+	// default egress gate; internal consumers (execution worktrees, the
+	// verification engine, MCP kern_sandbox) surface res.Err verbatim, so
+	// they fail closed with the same clear error instead of degrading.
+	if !networkIsolationAvailable() && !netEscapeHatchSet() {
+		res.Network = &NetworkPolicy{Isolated: false, NetnsAvail: false, AllowNetEnv: false}
+		res.Err = fmt.Errorf("network isolation not available on this platform (%s); refusing to run unisolated (fail-closed)\n"+
+			"  to override and run without network isolation, set: export KERN_ALLOW_UNISOLATED=1 (or KERN_ALLOW_NET=1)\n"+
+			"  to enable network isolation on Linux, run: sysctl -w kernel.unprivileged_userns_clone=1 (or use a Linux VM/container)", goruntime.GOOS)
+		res.Duration = time.Since(start)
+		return res
+	}
 	snap, err := Snapshot(root)
 	if err != nil {
 		res.Err = fmt.Errorf("snapshot: %w", err)

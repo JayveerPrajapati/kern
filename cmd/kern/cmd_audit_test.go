@@ -289,3 +289,35 @@ func TestRunAuditWarnsOnTamperedChain(t *testing.T) {
 		t.Fatalf("tampered chain must warn on stderr, got:\n%s", stderr)
 	}
 }
+
+// TestAuditRenderSurfacesExternalAppendFields verifies F-027: an externally
+// appended entry carrying the friendly event/by/note JSON keys renders its
+// content in the audit table (AGENT/ACTION/RESULT) instead of a row with
+// blank columns.
+func TestAuditRenderSurfacesExternalAppendFields(t *testing.T) {
+	root := t.TempDir()
+	stdout, _ := appendAuditEntryJSON(t, root, map[string]any{
+		"Timestamp": time.Now().Format(time.RFC3339),
+		"event":     "deploy",
+		"by":        "ops-bot",
+		"note":      "rolled out v2 to staging",
+		"task":      "t-ext-1",
+	})
+	if !strings.Contains(stdout, "appended ") {
+		t.Fatalf("expected appended line, got %q", stdout)
+	}
+
+	out := captureStdout(t, func() { runAudit([]string{"--root", root}) })
+	if !strings.Contains(out, "ops-bot") {
+		t.Errorf("rendered audit does not surface AGENT from the appended entry, got:\n%s", out)
+	}
+	if !strings.Contains(out, "deploy") {
+		t.Errorf("rendered audit does not surface ACTION from the appended entry, got:\n%s", out)
+	}
+	if !strings.Contains(out, "rolled out v2 to staging") {
+		t.Errorf("rendered audit does not surface the note from the appended entry, got:\n%s", out)
+	}
+	if !strings.Contains(out, "t-ext-1") {
+		t.Errorf("rendered audit does not surface the task reference from the appended entry, got:\n%s", out)
+	}
+}

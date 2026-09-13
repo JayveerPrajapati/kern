@@ -68,6 +68,14 @@ type Index struct {
 	// kern_health; zero on indexes built before the pass existed.
 	PromotedLowEdges   int `json:"promoted_low_edges,omitempty"`
 	UnresolvedLowEdges int `json:"unresolved_low_edges,omitempty"`
+	// CallResolution counts distinct call targets and how many of them fail
+	// to resolve against the symbol table. Surfaced in `kern index
+	// --status`: a high unresolved share on a real repo is usually external
+	// stdlib/vendor targets or untyped dynamic-language receivers, which is
+	// expected and correct — the number exists so the honest per-repo
+	// resolution rate is visible and regressions are provable. Zero on
+	// indexes built before this pass existed.
+	CallResolution CallResStats `json:"call_resolution,omitempty"`
 	// ProseVocab is the build-time inverted word→symbol table (CG-P1-9):
 	// each prose word ("middleware", "retry") maps to the full names of
 	// symbols whose name or defining directory matches that word. Built by
@@ -431,7 +439,8 @@ func (ix *Index) Languages() []string {
 var ignoreDirs = map[string]bool{
 	".git": true, ".hg": true, ".svn": true, "node_modules": true,
 	"vendor": true, "dist": true, "build": true, "out": true, "target": true,
-	".next": true, "__pycache__": true, ".venv": true, ".cache": true,
+	".next": true, "__pycache__": true, ".venv": true, "venv": true,
+	"__pypackages__": true, ".cache": true,
 	".idea": true, "bin": true, ".mvn": true, "coverage": true, "tmp": true,
 	".kern": true,
 	// .blueprint holds blueprint's tool state (audit logs, approval requests,
@@ -445,6 +454,10 @@ var ignoreDirs = map[string]bool{
 	".opencode": true, ".claude": true, ".cursor": true, ".gemini": true,
 	".kiro": true, ".codex": true, ".copilot": true, ".codeium": true,
 	".qwen": true, ".qoder": true,
+	// Additional surfaces `kern setup` writes into projects: .agents rules,
+	// .continue/.windsurf configs and .vscode/mcp.json (MCP registry with
+	// machine-local paths).
+	".agents": true, ".continue": true, ".windsurf": true, ".vscode": true,
 	// Generated graph/artifact dumps from the graphify skill and similar
 	// tools: multi-MB JSON/HTML that is never project source and can hang
 	// the foreign-language parser on large graphs (51MB+ graph.json files).
@@ -614,6 +627,12 @@ func copyPkg(p *Pkg) *Pkg {
 			c.StructFields[k] = v
 		}
 	}
+	if p.Constructors != nil {
+		c.Constructors = make(map[string]string, len(p.Constructors))
+		for k, v := range p.Constructors {
+			c.Constructors[k] = v
+		}
+	}
 	return &c
 }
 
@@ -723,6 +742,7 @@ func buildSerial(abs string, cfg *buildConfig) (*Index, error) {
 	ix.promoteLowEdges()
 	ix.computeCallers()
 	ix.addDispatchEdges()
+	ix.measureCallResolution()
 	ix.resolveEntries()
 	ix.reindexByFile()
 	// CG-P1-9: build the prose→symbol inverted vocab after the symbol table is
@@ -912,6 +932,7 @@ func buildParallel(abs string, cfg *buildConfig) (*Index, error) {
 	ix.promoteLowEdges()
 	ix.computeCallers()
 	ix.addDispatchEdges()
+	ix.measureCallResolution()
 	ix.resolveEntries()
 	ix.reindexByFile()
 	// CG-P1-9: build the prose→symbol inverted vocab after the symbol table is
@@ -1075,6 +1096,17 @@ func (ix *Index) applyFileResult(r fileResult) {
 					existing.StructFields[k] = v
 				}
 			}
+			// Merge constructor return types so the merge-time callee rewrite can
+			// complete constructor-assigned receiver chains whose constructor is
+			// declared in a different package than the call.
+			for k, v := range r.pkg.Constructors {
+				if existing.Constructors == nil {
+					existing.Constructors = map[string]string{}
+				}
+				if _, dup := existing.Constructors[k]; !dup {
+					existing.Constructors[k] = v
+				}
+			}
 		} else {
 			ix.Pkgs[r.pkg.Path] = r.pkg
 		}
@@ -1092,6 +1124,32 @@ func (ix *Index) applyFileResult(r fileResult) {
 			ix.ImportsByFile[file] = append([]ImportEdge{}, r.pkg.Imports...)
 		}
 	}
+}
+
+// CallResStats counts distinct call targets and how many are unresolved.
+type CallResStats struct {
+	Total      int `json:"total"`
+	Unresolved int `json:"unresolved"`
+}
+
+// measureCallResolution counts distinct callee targets and how many fail
+// resolveName. Runs after computeCallers in every finalize/load sequence so
+// `kern index --status` can report the honest per-repo resolution rate.
+func (ix *Index) measureCallResolution() {
+	seen := map[string]struct{}{}
+	var unres int
+	for _, callees := range ix.Calls {
+		for _, ce := range callees {
+			if _, dup := seen[ce.Target]; dup {
+				continue
+			}
+			seen[ce.Target] = struct{}{}
+			if _, ok := resolveName(ix, ce.Target); !ok {
+				unres++
+			}
+		}
+	}
+	ix.CallResolution = CallResStats{Total: len(seen), Unresolved: unres}
 }
 
 func (ix *Index) computeCallers() {
@@ -1194,6 +1252,14 @@ func (ix *Index) addDispatchEdges() {
 			for _, impl := range implementers {
 				virtualCallee := impl + "." + method
 				if !symSet[virtualCallee] {
+					continue
+				}
+				// A self virtual-dispatch edge (the caller is itself the
+				// implementer) is noise: computeCallers skips self-edges, so
+				// recording one here made the build-time Callers map differ
+				// from the recomputed one on every load path (JSON↔SQLite
+				// parity), for an edge no traversal wants.
+				if virtualCallee == caller {
 					continue
 				}
 				key := caller + "->" + virtualCallee
@@ -1661,6 +1727,23 @@ func (ix *Index) rewriteConstructorCallees() {
 			}
 		}
 	}
+	// Package-merged constructor return types ("api.NewHandlers" ->
+	// "Handlers"), keyed by both the package name and the import-path base
+	// so calls resolve whether the source alias matched the package name
+	// or the directory.
+	ctorQual := map[string]string{}
+	for _, p := range ix.Pkgs {
+		for k, v := range p.Constructors {
+			if _, dup := ctorQual[p.Name+"."+k]; !dup {
+				ctorQual[p.Name+"."+k] = v
+			}
+			if base := filepath.Base(p.Path); base != p.Name && base != "" {
+				if _, dup := ctorQual[base+"."+k]; !dup {
+					ctorQual[base+"."+k] = v
+				}
+			}
+		}
+	}
 	rewrite := func(c string) string {
 		i := strings.LastIndexByte(c, '.')
 		if i <= 0 || i == len(c)-1 {
@@ -1669,6 +1752,15 @@ func (ix *Index) rewriteConstructorCallees() {
 		q, m := c[:i], c[i+1:]
 		// Func constructor: "New.M".
 		if r, ok := ctorRet[q]; ok && types[r] {
+			return r + "." + m
+		}
+		// Cross-package constructor-assigned receiver: "api.NewHandlers.Routes"
+		// — the extractor resolved the receiver variable to the constructor's
+		// qualified name (its return type is unknown outside the package), but
+		// the package-merged Constructors map completes it here. Fires only
+		// when the constructor's first return names a type declared in the
+		// project (conservative, mirrors the other rewrites).
+		if r, ok := ctorQual[q]; ok && types[r] {
 			return r + "." + m
 		}
 		// Method constructor via receiver-var chain: "s.newGov.M" —

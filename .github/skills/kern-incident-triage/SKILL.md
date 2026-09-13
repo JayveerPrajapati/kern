@@ -4,6 +4,8 @@ description: >-
   Triage runtime crashes, errors, or production logs by compressing logs, correlating stack traces to AST symbols, creating reproduction tests, and auto-repairing.
 ---
 
+<!-- canonical source: internal/skills/assets/kern-incident-triage/SKILL.md; copies must stay identical — run kern setup to sync -->
+
 # Kern Auto-SRE Incident Triage Runbook
 
 Use this skill when investigating production incidents, analyzing stack traces, debugging failing tests, or resolving error logs.
@@ -35,10 +37,14 @@ Run the Auto-SRE triage command pointing to the error log:
 ```bash
 kern ops triage --log /path/to/incident.log
 ```
-Or with specific options:
-```bash
-kern ops triage --log /path/to/incident.log --reproduce --worktree
-```
+Available flags:
+- `--log <path>` — path to the raw log / stack trace file, or `-` for stdin
+- `--repo <root>` — repository root path (default `.`)
+- `--non-interactive` — run in headless mode
+- `--auto-approve` — automatically grant approvals for CI runs
+- `--json` — emit the triage report as JSON
+
+Reproduction test synthesis and isolated-worktree fixes are automatic (not flag-gated): every `kern ops triage` run writes a minimal failing unit test in an ephemeral Git worktree sandbox.
 
 What `kern ops triage` performs automatically:
 1. **Deduplication**: Clusters duplicate stack traces into unique failure signatures.

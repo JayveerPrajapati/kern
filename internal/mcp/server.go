@@ -1028,7 +1028,19 @@ func (s *Server) Serve() error {
 		s.sem = make(chan struct{}, defaultConcurrency())
 	}
 	var wg sync.WaitGroup
-	defer wg.Wait() // drain in-flight tool calls before returning on EOF
+	// EOF or a write error ends the server: drain in-flight tool calls
+	// first (a tool call may be the one queuing a background index save),
+	// then Close() so the sessions' background index saves (saveWG) and
+	// file watchers are drained before Serve returns. Without this, a
+	// caller that tears down its workspace right after Serve returns —
+	// e.g. a test removing its t.TempDir — races the late persister
+	// writes ("unlinkat .kern: directory not empty"). Close is
+	// idempotent, so the explicit Close() in the CLI shutdown paths is
+	// unaffected.
+	defer func() {
+		wg.Wait()
+		s.Close()
+	}()
 	// newScanner rebuilds the stdio line scanner. A scanner cannot be reused
 	// after it hits bufio.ErrTooLong, so it is recreated from the raw reader.
 	newScanner := func() *bufio.Scanner {

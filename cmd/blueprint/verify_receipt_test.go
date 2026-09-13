@@ -24,7 +24,7 @@ func runVerifyReceiptCmd(t *testing.T, binPath, dir, id string) (string, int) {
 
 // runVerifyReceiptInDir runs `blueprint verify-receipt --repo dir` with the
 // process working directory set to workDir (mirroring where `blueprint ci`
-// writes its default blueprint-result.json artifact) and returns (combined
+// writes its default .kern/blueprint-result.json artifact) and returns (combined
 // output, exit code). extra args (e.g. --json) are appended verbatim.
 func runVerifyReceiptInDir(t *testing.T, binPath, dir, workDir, id string, extra ...string) (string, int) {
 	t.Helper()
@@ -99,7 +99,7 @@ func TestVerifyReceipt_EndToEnd(t *testing.T) {
 	if artifact.Status != "PASS" {
 		t.Fatalf("ci status = %s, want PASS", artifact.Status)
 	}
-	if !strings.Contains(stderr, "Receipt ") || !strings.Contains(stderr, "Verify with: blueprint verify-receipt") {
+	if !strings.Contains(stderr, "Receipt ") || !strings.Contains(stderr, "Verify with: kern verify-receipt") {
 		t.Fatalf("ci output missing receipt announcement:\n%s", stderr)
 	}
 	id := receiptIDFromOutput(t, stderr)
@@ -453,9 +453,12 @@ func TestVerifyReceipt_LatestNotesBlockedCIRun(t *testing.T) {
 
 	// A later red `blueprint ci` run (BLOCK) seals no receipt — simulate its
 	// artifact at the default location ci writes it (cwd-relative
-	// blueprint-result.json).
+	// .kern/blueprint-result.json).
 	workDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(workDir, "blueprint-result.json"), []byte(`{"status":"BLOCK"}`), 0o644); err != nil {
+	if err := os.MkdirAll(filepath.Join(workDir, ".kern"), 0o755); err != nil {
+		t.Fatalf("mkdir .kern: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(workDir, ".kern", "blueprint-result.json"), []byte(`{"status":"BLOCK"}`), 0o644); err != nil {
 		t.Fatalf("write blocked ci artifact: %v", err)
 	}
 
@@ -470,7 +473,7 @@ func TestVerifyReceipt_LatestNotesBlockedCIRun(t *testing.T) {
 	}
 
 	// An ERROR artifact also notes.
-	if err := os.WriteFile(filepath.Join(workDir, "blueprint-result.json"), []byte(`{"status":"ERROR"}`), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(workDir, ".kern", "blueprint-result.json"), []byte(`{"status":"ERROR"}`), 0o644); err != nil {
 		t.Fatalf("write errored ci artifact: %v", err)
 	}
 	out, code = runVerifyReceiptInDir(t, binPath, dir, workDir, "")
@@ -505,7 +508,7 @@ func TestVerifyReceipt_LatestNotesBlockedCIRun(t *testing.T) {
 	// stdout (best-effort kern WARN lines go to stderr), so parse stdout.
 	// Restore the BLOCK artifact first — the earlier ERROR sub-case overwrote
 	// it, and the note must match the artifact that is actually present.
-	if err := os.WriteFile(filepath.Join(workDir, "blueprint-result.json"), []byte(`{"status":"BLOCK"}`), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(workDir, ".kern", "blueprint-result.json"), []byte(`{"status":"BLOCK"}`), 0o644); err != nil {
 		t.Fatalf("rewrite blocked ci artifact: %v", err)
 	}
 	outJSON, _, code := runVerifyReceiptInDirSplit(t, binPath, dir, workDir, "", "--json")

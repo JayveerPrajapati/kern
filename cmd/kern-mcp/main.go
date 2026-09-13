@@ -13,6 +13,7 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"os"
 	"os/signal"
 	"syscall"
@@ -40,7 +41,17 @@ func main() {
 	httpAddr := flag.String("http", "", "serve MCP over HTTP on this address (e.g. :8080) instead of stdio")
 	tlsCert := flag.String("tls-cert", "", "TLS certificate file (PEM) for the HTTP transport; env KERN_MCP_TLS_CERT")
 	tlsKey := flag.String("tls-key", "", "TLS private key file (PEM) for the HTTP transport; env KERN_MCP_TLS_KEY")
+	longVer := flag.Bool("version", false, "print version and exit")
+	shortVer := flag.Bool("v", false, "shorthand for -version")
 	flag.Parse()
+	// Same contract as the other binaries (blueprint-mcp precedent,
+	// f778aff): -v/--version/version all print the ldflags-stamped
+	// version and exit 0, so doctor's version-parity probe and shell
+	// scripts can read it without starting the stdio server.
+	if *longVer || *shortVer || (flag.NArg() > 0 && flag.Arg(0) == "version") {
+		fmt.Println("kern-mcp " + version)
+		return
+	}
 	mcp.SetServerVersion(version)
 	_ = optimize.EnsureRecorder()
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

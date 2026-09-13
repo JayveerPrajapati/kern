@@ -38,6 +38,7 @@ func TestNewExecutor(t *testing.T) {
 }
 
 func TestExecuteEcho(t *testing.T) {
+	t.Setenv("KERN_ALLOW_UNISOLATED", "1") // fail-closed gate: opt into unisolated runs on hosts without netns (darwin)
 	dir := t.TempDir()
 	ex := NewExecutor(dir)
 	res := ex.Execute("echo", []string{"hello-kern"}, 10*time.Second)
@@ -65,6 +66,7 @@ func TestExecuteEcho(t *testing.T) {
 // TestExecuteGovernanceDenies: a configured executor gate refuses a disallowed
 // command before it runs (fail closed).
 func TestExecuteGovernanceDenies(t *testing.T) {
+	t.Setenv("KERN_ALLOW_UNISOLATED", "1") // fail-closed gate: opt into unisolated runs on hosts without netns (darwin)
 	dir := newTempProject(t, "")
 	marker := filepath.Join(dir, "marker.txt")
 
@@ -94,6 +96,7 @@ func TestExecuteGovernanceDenies(t *testing.T) {
 // TestExecuteGovernanceAllows: a configured gate that approves a command lets
 // it run normally.
 func TestExecuteGovernanceAllows(t *testing.T) {
+	t.Setenv("KERN_ALLOW_UNISOLATED", "1") // fail-closed gate: opt into unisolated runs on hosts without netns (darwin)
 	dir := t.TempDir()
 	ex := NewExecutor(dir).WithGovernance(func(command string, args []string) error {
 		return nil
@@ -108,6 +111,7 @@ func TestExecuteGovernanceAllows(t *testing.T) {
 }
 
 func TestExecuteFailureRollsBack(t *testing.T) {
+	t.Setenv("KERN_ALLOW_UNISOLATED", "1") // fail-closed gate: opt into unisolated runs on hosts without netns (darwin)
 	dir := newTempProject(t, "")
 	marker := filepath.Join(dir, "marker.txt")
 
@@ -132,6 +136,7 @@ func TestExecuteFailureRollsBack(t *testing.T) {
 }
 
 func TestExecuteBuildGoProject(t *testing.T) {
+	t.Setenv("KERN_ALLOW_UNISOLATED", "1") // fail-closed gate: opt into unisolated runs on hosts without netns (darwin)
 	dir := newTempProject(t, "")
 	ex := NewExecutor(dir)
 	res := ex.ExecuteBuild(30 * time.Second)
@@ -148,6 +153,7 @@ func TestExecuteBuildGoProject(t *testing.T) {
 }
 
 func TestExecuteBuildNoCommand(t *testing.T) {
+	t.Setenv("KERN_ALLOW_UNISOLATED", "1") // fail-closed gate: opt into unisolated runs on hosts without netns (darwin)
 	// A dir with neither go.mod nor Makefile => clean detection error.
 	dir := t.TempDir()
 	ex := NewExecutor(dir)
@@ -165,6 +171,7 @@ func TestExecuteBuildNoCommand(t *testing.T) {
 }
 
 func TestExecuteTestsGoProject(t *testing.T) {
+	t.Setenv("KERN_ALLOW_UNISOLATED", "1") // fail-closed gate: opt into unisolated runs on hosts without netns (darwin)
 	dir := newTempProject(t, "package main\nimport \"testing\"\nfunc TestAlwaysPass(t *testing.T) {}\n")
 	ex := NewExecutor(dir)
 	res := ex.ExecuteTests(30 * time.Second)
@@ -178,6 +185,7 @@ func TestExecuteTestsGoProject(t *testing.T) {
 }
 
 func TestExecuteTestsNoCommand(t *testing.T) {
+	t.Setenv("KERN_ALLOW_UNISOLATED", "1") // fail-closed gate: opt into unisolated runs on hosts without netns (darwin)
 	dir := t.TempDir()
 	ex := NewExecutor(dir)
 	res := ex.ExecuteTests(10 * time.Second)

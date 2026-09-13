@@ -10,6 +10,7 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/blueprint/adapters/kern"
 	"github.com/JayveerPrajapati/kern/internal/blueprint/checks/diffgate"
 	"github.com/JayveerPrajapati/kern/internal/blueprint/domain"
+	"github.com/JayveerPrajapati/kern/internal/blueprint/policy"
 	"github.com/JayveerPrajapati/kern/internal/blueprint/sandbox"
 	"github.com/JayveerPrajapati/kern/internal/blueprint/service"
 )
@@ -54,10 +55,32 @@ func runDiffGate(args []string) int {
 		Files:          changes,
 	}
 
-	checks := buildDiffGateCheckList(absRoot, fl.initBaseline, fl.noTests, fl.jsonOut)
+	// Load .blueprint/config.yaml ONCE for the whole gate: the sandbox
+	// check's timeout/matrix wiring AND the whole-run context budget. The
+	// --timeout flag (when explicitly passed) overrides; when it is not,
+	// the config's execution.timeout_seconds is the default budget so a
+	// configured sandbox timeout (300s here) can never be silently cut off
+	// by this gate's old hard-coded 120s default — the same wiring-drift
+	// class as the check-vs-ci timeout bug (27e4559), one level up.
+	var cfg *policy.LoadedConfig
+	if loaded, lerr := policy.Load(absRoot); lerr == nil {
+		cfg = loaded
+	} else {
+		fmt.Fprintf(os.Stderr, "diff-gate: warning: cannot load .blueprint/config.yaml (%v); running with defaults\n", lerr)
+	}
+
+	checks := buildDiffGateCheckList(absRoot, cfg, fl.initBaseline, fl.noTests, fl.jsonOut)
 	svc := service.New(checks)
 
-	ctx, cancel := context.WithTimeout(context.Background(), timeoutDuration(fl.timeoutSec))
+	timeoutSec := fl.timeoutSec
+	if timeoutSec <= 0 {
+		if cfg != nil && cfg.Service.TimeoutSec > 0 {
+			timeoutSec = cfg.Service.TimeoutSec
+		} else {
+			timeoutSec = 120
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeoutDuration(timeoutSec))
 	defer cancel()
 	result := svc.Validate(ctx, req)
 	result = applyBlocking(result, fl.blocking)
@@ -89,7 +112,7 @@ func parseDiffGateFlags(args []string) (diffGateFlags, int) {
 	fs := flag.NewFlagSet("diff-gate", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	root := fs.String("root", ".", "repository root (default: .)")
-	timeoutSec := fs.Int("timeout", 120, "max runtime in seconds for the whole validation")
+	timeoutSec := fs.Int("timeout", 0, "max runtime in seconds for the whole validation (0 = use .blueprint/config.yaml execution.timeout_seconds, else 120)")
 	blocking := fs.Bool("blocking", false, "elevate WARN findings to BLOCK (exit 1) for protected CI")
 	jsonOut := fs.Bool("json", false, "emit structured JSON verdicts")
 	initBaseline := fs.Bool("init-baseline", false, "write the MCP tool-schema baseline and report PASS")
@@ -116,7 +139,7 @@ func parseDiffGateFlags(args []string) (diffGateFlags, int) {
 // engine. The secret check requires the kern client; in degraded mode (binary
 // absent) it is omitted rather than panicking. tests:build-test is skipped
 // under --no-tests.
-func buildDiffGateCheckList(absRoot string, initBaseline, noTests, jsonOut bool) []service.Check {
+func buildDiffGateCheckList(absRoot string, cfg *policy.LoadedConfig, initBaseline, noTests, jsonOut bool) []service.Check {
 	checks := []service.Check{
 		diffgate.NewGofmtCheck(),
 		diffgate.NewVulnCheck(),
@@ -133,7 +156,15 @@ func buildDiffGateCheckList(absRoot string, initBaseline, noTests, jsonOut bool)
 		checks = append(checks, kern.NewSecretCheck(client))
 	}
 	if !noTests {
-		checks = append(checks, sandbox.NewDefaultCheck())
+		// Same config wiring as `kern check`/`kern ci` (sandboxOptsFromConfig)
+		// so this gate honors sandbox.timeout_seconds and the configured
+		// matrix too. cfg was loaded once in runDiffGate (nil only when the
+		// config is unreadable — warning already printed there).
+		var testOpts []sandbox.ConfigOption
+		if cfg != nil {
+			testOpts = append(testOpts, sandboxOptsFromConfig(cfg.File)...)
+		}
+		checks = append(checks, sandbox.NewDefaultCheck(testOpts...))
 	}
 	return checks
 }

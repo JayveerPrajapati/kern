@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/JayveerPrajapati/kern/internal/code"
+	"github.com/JayveerPrajapati/kern/internal/index"
 )
 
 // riskCap bounds the files risk-scored against the call graph. With vendor
@@ -87,7 +88,21 @@ func ChurnContext(ctx context.Context, root, from, to string) (*ChurnReport, err
 			entries[i].InWorkingTree = set[entries[i].File]
 		}
 	}
-	if ix, err := ReadIndex(root); err == nil {
+	// Risk-score the top entries against the persisted index snapshot.
+	// ReadIndex is deliberately NOT used here: it re-verifies freshness on
+	// every call, and on a working tree with uncommitted edits that means a
+	// git tree-OID walk plus an incremental re-index and an ~8MB index save
+	// per invocation — turning a sub-second churn report into a multi-second
+	// one (report A5: kern churn was ~7.8s on the kern repo). Churn is a
+	// git-history metric; the call-graph risk overlay is best-effort (it is
+	// skipped entirely when indexing fails), so the last persisted snapshot
+	// is the right trade. When no snapshot exists at all, fall back to
+	// ReadIndex so the very first run still builds one.
+	ix, lerr := index.Load(root)
+	if lerr != nil {
+		ix, lerr = ReadIndex(root)
+	}
+	if lerr == nil {
 		// Risk-score at most riskCap entries: the churn ranking already
 		// prompted the review; scoring every historical file (which is what
 		// made deep ranges hang) adds no signal (report A5).

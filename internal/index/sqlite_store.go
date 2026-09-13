@@ -155,7 +155,9 @@ CREATE TABLE IF NOT EXISTS packages (
 	name    TEXT NOT NULL DEFAULT '',
 	lang    TEXT NOT NULL DEFAULT '',
 	imports TEXT NOT NULL DEFAULT '[]',
-	files   TEXT NOT NULL DEFAULT '[]'
+	files   TEXT NOT NULL DEFAULT '[]',
+	struct_fields TEXT NOT NULL DEFAULT '{}',
+constructors TEXT NOT NULL DEFAULT '{}'
 );
 CREATE TABLE IF NOT EXISTS file_imports (
 	file    TEXT PRIMARY KEY,
@@ -185,6 +187,25 @@ CREATE VIRTUAL TABLE IF NOT EXISTS symbols_fts USING fts5(
 	// the column; rows then default to MEDIUM on load (parseConfidence).
 	if !storeHasColumn(s.db, "calls", "confidence") {
 		if _, err := s.db.Exec("ALTER TABLE calls ADD COLUMN confidence TEXT NOT NULL DEFAULT ''"); err != nil {
+			return err
+		}
+	}
+	// v13 migration: packages carry StructFields, needed so a load-time
+	// computeCallers reproduces the build-time rewriteConstructorCallees
+	// results (receiver-field call chains). Older stores lack the column;
+	// rows then default to no struct fields, exactly the pre-column behavior.
+	if !storeHasColumn(s.db, "packages", "struct_fields") {
+		if _, err := s.db.Exec("ALTER TABLE packages ADD COLUMN struct_fields TEXT NOT NULL DEFAULT '{}'"); err != nil {
+			return err
+		}
+	}
+	// v13 migration: packages carry Constructors, needed so a load-time
+	// computeCallers reproduces the build-time rewriteConstructorCallees
+	// results (cross-package constructor-assigned receiver chains). Older
+	// stores lack the column; rows then default to no constructors, exactly
+	// the pre-column behavior.
+	if !storeHasColumn(s.db, "packages", "constructors") {
+		if _, err := s.db.Exec("ALTER TABLE packages ADD COLUMN constructors TEXT NOT NULL DEFAULT '{}'"); err != nil {
 			return err
 		}
 	}
@@ -431,9 +452,17 @@ func (s *SQLiteStore) Save(ix *Index) error {
 		if err != nil {
 			return fmt.Errorf("marshal files for %s: %w", path, err)
 		}
+		structFields, err := json.Marshal(pkg.StructFields)
+		if err != nil {
+			return fmt.Errorf("marshal struct fields for %s: %w", path, err)
+		}
+		constructors, err := json.Marshal(pkg.Constructors)
+		if err != nil {
+			return fmt.Errorf("marshal constructors for %s: %w", path, err)
+		}
 		if _, err := tx.Exec(
-			"INSERT INTO packages(path,name,lang,imports,files) VALUES(?,?,?,?,?) ON CONFLICT(path) DO UPDATE SET name=excluded.name, lang=excluded.lang, imports=excluded.imports, files=excluded.files",
-			path, pkg.Name, pkg.Lang, string(imports), string(files)); err != nil {
+			"INSERT INTO packages(path,name,lang,imports,files,struct_fields,constructors) VALUES(?,?,?,?,?,?,?) ON CONFLICT(path) DO UPDATE SET name=excluded.name, lang=excluded.lang, imports=excluded.imports, files=excluded.files, struct_fields=excluded.struct_fields, constructors=excluded.constructors",
+			path, pkg.Name, pkg.Lang, string(imports), string(files), string(structFields), string(constructors)); err != nil {
 			return err
 		}
 	}
@@ -578,21 +607,11 @@ func (s *SQLiteStore) Load() (*Index, error) {
 	}
 
 	ix.Callers = map[string][]string{}
-	rr, err := s.db.Query("SELECT callee,caller FROM callers")
-	if err != nil {
-		return nil, err
-	}
-	defer rr.Close()
-	for rr.Next() {
-		var callee, caller string
-		if err := rr.Scan(&callee, &caller); err != nil {
-			return nil, err
-		}
-		ix.Callers[callee] = append(ix.Callers[callee], caller)
-	}
-	if err := rr.Err(); err != nil {
-		return nil, err
-	}
+	// The callers TABLE is deliberately not read: computeCallers below
+	// rebuilds ix.Callers (plus AliasCallers and InheritedBy) from the
+	// calls/inherits rows, unconditionally replacing the map, so reading the
+	// persisted copy back was dead work — a full table scan whose result was
+	// discarded.
 
 	ix.Inherits = map[string][]string{}
 	ir, err := s.db.Query("SELECT subtype,base FROM inherits")
@@ -629,14 +648,14 @@ func (s *SQLiteStore) Load() (*Index, error) {
 	}
 
 	ix.Pkgs = map[string]*Pkg{}
-	pr, err := s.db.Query("SELECT path,name,lang,imports,files FROM packages")
+	pr, err := s.db.Query("SELECT path,name,lang,imports,files,struct_fields,constructors FROM packages")
 	if err != nil {
 		return nil, err
 	}
 	defer pr.Close()
 	for pr.Next() {
-		var path, name, lang, imports, files string
-		if err := pr.Scan(&path, &name, &lang, &imports, &files); err != nil {
+		var path, name, lang, imports, files, structFields, constructors string
+		if err := pr.Scan(&path, &name, &lang, &imports, &files, &structFields, &constructors); err != nil {
 			return nil, err
 		}
 		pkg := &Pkg{Name: name, Path: path, Lang: lang}
@@ -645,6 +664,19 @@ func (s *SQLiteStore) Load() (*Index, error) {
 		}
 		if err := json.Unmarshal([]byte(files), &pkg.Files); err != nil {
 			return nil, fmt.Errorf("decode files for %s: %w", path, err)
+		}
+		// StructFields is required for the load-time computeCallers to
+		// reproduce the build-time rewriteConstructorCallees results; older
+		// stores default to '{}' which decodes to the same empty map the
+		// pre-column load produced.
+		if err := json.Unmarshal([]byte(structFields), &pkg.StructFields); err != nil {
+			return nil, fmt.Errorf("decode struct fields for %s: %w", path, err)
+		}
+		// Constructors feeds the same rewrite for cross-package
+		// constructor-assigned receiver chains; '{}' decodes to the same
+		// empty map the pre-column load produced.
+		if err := json.Unmarshal([]byte(constructors), &pkg.Constructors); err != nil {
+			return nil, fmt.Errorf("decode constructors for %s: %w", path, err)
 		}
 		ix.Pkgs[path] = pkg
 	}
@@ -693,7 +725,15 @@ func (s *SQLiteStore) Load() (*Index, error) {
 		return nil, err
 	}
 
+	// computeCallers resolves each dotted call edge via symbolsFor, which is
+	// a linear scan over every symbol unless buildSymbolIndex has run. Every
+	// other finalize path (Build, Update) pairs the two; without this call a
+	// load of ~13k symbols with ~30k edges degraded to O(edges x symbols) —
+	// measured at ~6.8s on the kern repo, ~100x the JSON load of the same
+	// data. buildSymbolIndex is O(symbols) and pays for itself immediately.
+	ix.buildSymbolIndex()
 	ix.computeCallers()
+	ix.measureCallResolution()
 	ix.reindexByFile()
 	return ix, nil
 }

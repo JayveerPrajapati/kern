@@ -13,6 +13,7 @@ import (
 
 	"github.com/JayveerPrajapati/kern/internal/cache"
 	"github.com/JayveerPrajapati/kern/internal/domain"
+	"github.com/JayveerPrajapati/kern/internal/storage"
 )
 
 // maxResolvedApprovals bounds the number of decided (approved/rejected)
@@ -190,7 +191,57 @@ func (s *FileStore) Decide(approvalID, approver string, approved bool, reason st
 	if decided.ID == "" {
 		return domain.Approval{}, fmt.Errorf("approval not found: %s", approvalID)
 	}
+	// The decision is a governance-relevant event: record it in the project's
+	// tamper-evident audit chain (the same store `kern audit` reads) so an
+	// approval's approve/reject, agent, approval ID, and gated task are
+	// reconstructable end-to-end. Best-effort: a failed audit write must not
+	// fail the decision (the decision is persisted in approvals.json; a
+	// missing chain entry is detectable via `kern audit repair`).
+	s.recordAudit(decided, approver, approved, reason)
 	return decided, nil
+}
+
+// recordAudit appends an approval decision to the project's shared audit
+// chain. The entry carries the decision, the approver, the approval ID, and
+// the gated task so `kern audit` / `kern audit <task-id>` surface it. The
+// write is best-effort and never fails the caller.
+func (s *FileStore) recordAudit(a domain.Approval, approver string, approved bool, reason string) {
+	action := "reject"
+	result := "denied"
+	if approved {
+		action = "approve"
+		result = "approved"
+	}
+	if reason == "" {
+		reason = fmt.Sprintf("%s by %s", result, approver)
+	}
+	entry := AuditEntry{
+		AgentID:   approver,
+		TaskID:    a.TaskID,
+		Action:    action,
+		Resource:  "approval:" + a.ID,
+		Approved:  approved,
+		Result:    result,
+		Policy:    "approval",
+		Reason:    reason,
+		Timestamp: time.Now(),
+	}
+	if err := s.auditLog().AppendExternal(entry); err != nil {
+		// Loud, non-blocking: the decision already happened and must not be
+		// rolled back because the audit trail could not be written (a missing
+		// chain entry is detectable via chain repair; a half-written approval
+		// is not).
+		log.Printf("kern governance: approval %s %s by %s NOT recorded in audit chain: %v", a.ID, result, approver, err)
+	}
+}
+
+// auditLog returns the project's shared tamper-evident audit log, rebuilt per
+// call so every store instance observes the true persisted chain head.
+func (s *FileStore) auditLog() *AuditLog {
+	auditDir := filepath.Join(filepath.Dir(filepath.Dir(s.path)), ".kern", "audit")
+	return NewAuditLog().
+		WithStore(storage.NewLog(auditDir)).
+		WithLockPath(filepath.Join(auditDir, ".lock"))
 }
 
 // Pending returns only approvals with Status "pending", sorted by RequestedAt.

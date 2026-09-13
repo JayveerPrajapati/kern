@@ -221,11 +221,24 @@ export class Client {
    * Opens the live event stream (GET /v1/events/stream) and yields each
    * SSE "data:" payload as JSON (or the raw string when it is not valid
    * JSON). The generator ends when the server closes the stream.
+   *
+   * Timeout semantics mirror the Python SDK's events_stream: the socket
+   * timeout is an IDLE timeout — the timer resets on every received chunk,
+   * so a long-lived stream survives; only a connection that stalls for
+   * `this.timeout` ms aborts. (A total-duration abort would kill every
+   * real stream after ~10s.)
    */
   async *eventsStream(): AsyncGenerator<any> {
     const url = this.base + "/v1/events/stream";
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), this.timeout);
+    let timer: ReturnType<typeof setTimeout> = setTimeout(
+      () => controller.abort(),
+      this.timeout,
+    );
+    const resetIdle = () => {
+      clearTimeout(timer);
+      timer = setTimeout(() => controller.abort(), this.timeout);
+    };
     let resp: Response;
     try {
       resp = await fetch(url, {
@@ -233,40 +246,51 @@ export class Client {
         headers: { Accept: "text/event-stream" },
         signal: controller.signal,
       });
-      clearTimeout(timer);
     } catch (e) {
       clearTimeout(timer);
       if (e instanceof Error && e.name === "AbortError") {
-        throw new KernError(`request timeout after ${this.timeout}ms`);
+        throw new KernError(`connection timeout after ${this.timeout}ms`);
       }
       throw new KernError(`connection error: ${e instanceof Error ? e.message : String(e)}`);
     }
     if (!resp.ok) {
+      clearTimeout(timer);
       throw new KernError(`${resp.status} ${resp.statusText}`, resp.status);
     }
     if (!resp.body) {
+      clearTimeout(timer);
       throw new KernError("events stream: no response body");
     }
     const reader = resp.body.getReader();
     const decoder = new TextDecoder();
     let buf = "";
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buf += decoder.decode(value, { stream: true });
-      let idx: number;
-      while ((idx = buf.indexOf("\n")) >= 0) {
-        const line = buf.slice(0, idx).trim();
-        buf = buf.slice(idx + 1);
-        if (!line.startsWith("data:")) continue;
-        const payload = line.slice(5).trim();
-        if (!payload) continue;
-        try {
-          yield JSON.parse(payload);
-        } catch {
-          yield payload;
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        resetIdle();
+        buf += decoder.decode(value, { stream: true });
+        let idx: number;
+        while ((idx = buf.indexOf("\n")) >= 0) {
+          const line = buf.slice(0, idx).trim();
+          buf = buf.slice(idx + 1);
+          if (!line.startsWith("data:")) continue;
+          const payload = line.slice(5).trim();
+          if (!payload) continue;
+          try {
+            yield JSON.parse(payload);
+          } catch {
+            yield payload;
+          }
         }
       }
+    } catch (e) {
+      if (e instanceof Error && e.name === "AbortError") {
+        throw new KernError(`events stream idle timeout after ${this.timeout}ms`);
+      }
+      throw e;
+    } finally {
+      clearTimeout(timer);
     }
   }
 }

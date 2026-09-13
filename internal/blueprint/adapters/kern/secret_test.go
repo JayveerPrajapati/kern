@@ -462,3 +462,78 @@ func TestSecretCheckRuleVersionConfidence(t *testing.T) {
 		t.Errorf("Scope = %q, want \"file\"", f.Scope)
 	}
 }
+
+// TestKernSecretCheckAddedLineFilter (F-018 followup): the in-house kern
+// scanner must apply the same added-line filter as the gitleaks adapter — a
+// modified file carries a pre-existing secret on an unchanged line; the diff
+// hunks (FileChange.Added) list only the genuinely added lines. The check
+// reports the added-line finding and must NOT re-report the pre-existing
+// secret on an unchanged line as part of this change.
+func TestKernSecretCheckAddedLineFilter(t *testing.T) {
+	const out = `{"schema_version":2,"findings":[
+{"file":"config.go","line":5,"rule":"hardcoded-secret","severity":"error","message":"hardcoded secret: KEY","snippet":"pre-existing"},
+{"file":"config.go","line":12,"rule":"hardcoded-secret","severity":"error","message":"hardcoded secret: TOKEN","snippet":"new"}
+]}`
+	client := &KernClient{binaryPath: "kern", runner: fakeRunner(out, "", 1, nil)}
+	chk := NewSecretCheck(client)
+	root := repoRoot(t)
+	// Disk content carries BOTH secrets (line 5 pre-existing, line 12 added).
+	if err := os.WriteFile(filepath.Join(root, "config.go"), []byte("line1\nline2\nline3\nline4\nconst AWSKey = \"AKIA1234567890ABCDEF\"\nline6\nline7\nline8\nline9\nline10\nline11\nconst tok = \"ghp_16C7e42F292c6912E7710c838347Ae178B4a\"\n"), 0o644); err != nil {
+		t.Fatalf("write config.go: %v", err)
+	}
+	cr, err := chk.Run(context.Background(), domain.ChangeRequest{
+		RepositoryRoot: root,
+		Files: []domain.FileChange{{
+			Path:  "config.go",
+			Op:    domain.OpEdit,
+			Added: []string{"12"}, // only line 12 is a genuinely added line
+		}},
+	})
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	if cr.Status != domain.StatusBlock {
+		t.Fatalf("Status = %q, want %q (the added line carries a secret)", cr.Status, domain.StatusBlock)
+	}
+	if len(cr.Findings) != 1 {
+		t.Fatalf("Findings = %d, want 1 (only the added line; the pre-existing line-5 secret must not be attributed to this change)", len(cr.Findings))
+	}
+	f := cr.Findings[0]
+	if f.Line != 12 {
+		t.Errorf("Finding.Line = %d, want 12 (the actual added line)", f.Line)
+	}
+	if f.File != "config.go" {
+		t.Errorf("Finding.File = %q, want config.go", f.File)
+	}
+}
+
+// TestKernSecretCheckAddedLineNoHunks (F-018 followup): without hunk data
+// (no FileChange.Added) the whole-file semantics are preserved — every
+// finding in the file reports (proposals and CI diffs carry no Added lines).
+func TestKernSecretCheckAddedLineNoHunks(t *testing.T) {
+	const out = `{"schema_version":2,"findings":[
+{"file":"config.go","line":5,"rule":"hardcoded-secret","severity":"error","message":"hardcoded secret: KEY","snippet":"pre-existing"}
+]}`
+	client := &KernClient{binaryPath: "kern", runner: fakeRunner(out, "", 1, nil)}
+	chk := NewSecretCheck(client)
+	root := repoRoot(t)
+	if err := os.WriteFile(filepath.Join(root, "config.go"), []byte("line1\nline2\nline3\nline4\nconst AWSKey = \"AKIA1234567890ABCDEF\"\n"), 0o644); err != nil {
+		t.Fatalf("write config.go: %v", err)
+	}
+	cr, err := chk.Run(context.Background(), domain.ChangeRequest{
+		RepositoryRoot: root,
+		Files: []domain.FileChange{{
+			Path: "config.go",
+			Op:   domain.OpEdit,
+		}},
+	})
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	if len(cr.Findings) != 1 {
+		t.Fatalf("Findings = %d, want 1 (no Added hunks keeps whole-file semantics)", len(cr.Findings))
+	}
+	if cr.Findings[0].Line != 5 {
+		t.Errorf("Finding.Line = %d, want 5", cr.Findings[0].Line)
+	}
+}

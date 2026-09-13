@@ -193,3 +193,72 @@ func TestVerifyNonExistentFileLineReportedMissing(t *testing.T) {
 		t.Fatalf("expected 'exceeds file length' in detail, got %q", overflowCheck.Detail)
 	}
 }
+
+// F-017: natural-language call-graph claims ("X is called from Y" / "X calls
+// Y") are parsed and verified against the indexed call edges, not ignored.
+func TestVerifyCallClaimCalledFrom(t *testing.T) {
+	ix, root := build(t, map[string]string{
+		"go.mod":                      "module example.com/demo\n\ngo 1.20\n",
+		"internal/repo/repo.go":       "package repo\n\nfunc Query(id int) string { return \"u\" }\n",
+		"internal/service/service.go": "package service\n\nimport \"example.com/demo/internal/repo\"\n\nfunc FindUser(id int) string {\n\treturn repo.Query(id)\n}\n\nfunc LegacyPrint() string { return \"legacy\" }\n",
+	})
+	text := "repo.Query is called from service.FindUser"
+	rep := Sorted(Verify(ix, root, text))
+	c := findCheck(rep, Call, "repo.Query <- service.FindUser")
+	if c == nil {
+		t.Fatalf("expected call check for %q, got %+v", "repo.Query <- service.FindUser", rep.Checks)
+	}
+	if !c.Found {
+		t.Fatalf("call claim should be confirmed, got %+v", c)
+	}
+}
+
+func TestVerifyCallClaimCalls(t *testing.T) {
+	ix, root := build(t, map[string]string{
+		"go.mod":                      "module example.com/demo\n\ngo 1.20\n",
+		"internal/repo/repo.go":       "package repo\n\nfunc Query(id int) string { return \"u\" }\n",
+		"internal/service/service.go": "package service\n\nimport \"example.com/demo/internal/repo\"\n\nfunc FindUser(id int) string {\n\treturn repo.Query(id)\n}\n",
+	})
+	text := "service.FindUser calls repo.Query"
+	rep := Sorted(Verify(ix, root, text))
+	c := findCheck(rep, Call, "service.FindUser -> repo.Query")
+	if c == nil {
+		t.Fatalf("expected call check for %q, got %+v", "service.FindUser -> repo.Query", rep.Checks)
+	}
+	if !c.Found {
+		t.Fatalf("call claim should be confirmed, got %+v", c)
+	}
+}
+
+// F-017: a false call claim must be reported as MISS and flip the report.
+func TestVerifyCallClaimMissing(t *testing.T) {
+	ix, root := build(t, map[string]string{
+		"go.mod":                      "module example.com/demo\n\ngo 1.20\n",
+		"internal/repo/repo.go":       "package repo\n\nfunc Query(id int) string { return \"u\" }\n",
+		"internal/service/service.go": "package service\n\nimport \"example.com/demo/internal/repo\"\n\nfunc FindUser(id int) string {\n\treturn repo.Query(id)\n}\n\nfunc LegacyPrint() string { return \"legacy\" }\n",
+	})
+	text := "repo.Query is called from LegacyPrint"
+	rep := Sorted(Verify(ix, root, text))
+	c := findCheck(rep, Call, "repo.Query <- LegacyPrint")
+	if c == nil {
+		t.Fatalf("expected call check, got %+v", rep.Checks)
+	}
+	if c.Found {
+		t.Fatalf("false call claim must be MISS, got %+v", c)
+	}
+	if rep.OK {
+		t.Fatal("report with a missing call claim must not be OK")
+	}
+}
+
+// F-017: without an index the claim is unverifiable (MISS, not a crash).
+func TestVerifyCallClaimNilIndex(t *testing.T) {
+	rep := Sorted(Verify(nil, "", "repo.Query is called from service.FindUser"))
+	c := findCheck(rep, Call, "repo.Query <- service.FindUser")
+	if c == nil {
+		t.Fatalf("expected call check, got %+v", rep.Checks)
+	}
+	if c.Found {
+		t.Fatal("call claim without index must be unverifiable")
+	}
+}

@@ -87,3 +87,27 @@ func TestDispatchCommandHelpStyleFlags(t *testing.T) {
 		}
 	}
 }
+
+// TestEveryCommandHasUsage (F-034): every commandTable entry must carry a
+// non-empty multi-line usage string (synopsis + real flags) so `kern <cmd>
+// --help` never prints a bare one-liner.
+func TestEveryCommandHasUsage(t *testing.T) {
+	if len(commandTable) < 170 {
+		t.Fatalf("commandTable has %d entries, want >= 170", len(commandTable))
+	}
+	for name, e := range commandTable {
+		if strings.TrimSpace(e.usage) == "" {
+			t.Errorf("command %q has empty usage (one-line help stub)", name)
+			continue
+		}
+		// The usage must be multi-line (synopsis + options) or a full
+		// sentence for flag-less commands — never a single bare line that
+		// merely repeats the help text.
+		if !strings.Contains(e.usage, "\n") && !strings.Contains(e.usage, "usage: ") {
+			t.Errorf("command %q usage is a single bare line: %q", name, e.usage)
+		}
+		if strings.TrimSpace(e.usage) == e.help {
+			t.Errorf("command %q usage merely repeats the one-liner help", name)
+		}
+	}
+}

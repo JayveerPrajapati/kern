@@ -4,13 +4,48 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"runtime/debug"
 	"strings"
 
 	"github.com/JayveerPrajapati/kern/internal/mcp"
 )
 
 func runVersion(rest []string) {
-	fmt.Printf("kern %s\n", version)
+	v := version
+	if v == "dev" {
+		// Unstamped source build (plain `go build`, no Makefile ldflags):
+		// report the VCS revision the toolchain embedded at build time, or
+		// fall back to the checkout's HEAD so `kern version` never prints a
+		// bare "dev" for a binary built from a git clone.
+		if rev := buildInfoRevision(); rev != "" {
+			// The toolchain embeds the full 40-char revision; keep the
+			// conventional 7-char short form the Makefile stamps.
+			if len(rev) == 40 {
+				rev = rev[:7]
+			}
+			v = rev + " (dev)"
+		} else if h := shortHash(); h != "" {
+			v = h + " (dev)"
+		}
+	}
+	fmt.Printf("kern %s\n", v)
+}
+
+// buildInfoRevision returns the git revision embedded by the Go toolchain
+// (vcs.revision build setting) when the binary was built from a git
+// checkout, or "" when absent (e.g. `go install pkg@version` from the module
+// cache, or a release tarball build).
+func buildInfoRevision() string {
+	bi, ok := debug.ReadBuildInfo()
+	if !ok {
+		return ""
+	}
+	for _, s := range bi.Settings {
+		if s.Key == "vcs.revision" {
+			return s.Value
+		}
+	}
+	return ""
 }
 
 func runGuide(rest []string) {

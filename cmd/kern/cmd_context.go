@@ -42,6 +42,12 @@ func runProject(rest []string) {
 	if len(args) > 0 {
 		root = args[0]
 	}
+	if _, err := os.Stat(root); err != nil {
+		// A missing/typo root (e.g. `kern project map` treating
+		// "map" as a root) must fail loud, not render "Project:
+		// map (0 files)" with exit 0 (e2e round 2).
+		fatal("Project: %v", err)
+	}
 	p, err := code.BuildProject(root, f.maxFiles, 200)
 	if err != nil {
 		fatal("Project: %v", err)
@@ -118,7 +124,6 @@ func runPackGraph(root string, f flags) {
 	}
 }
 
-
 func runPrompt(rest []string) {
 	f, args, err := parseFlags(rest)
 	if err != nil {
@@ -163,6 +168,12 @@ func runPrompt(rest []string) {
 	}
 	out, err := prompt.Render(args[0], vars)
 	if err != nil {
+		// F-024: a bare "unknown template" error leaves the user with no
+		// idea how to proceed. Enrich it with the available template names
+		// and the --file escape hatch for custom templates.
+		if strings.Contains(err.Error(), "unknown template") {
+			fatal("Prompt: %s", promptUnknownTemplateHint(args[0]))
+		}
 		fatal("Prompt: %v", err)
 	}
 	if f.schema != "" {
@@ -177,6 +188,23 @@ func runPrompt(rest []string) {
 	}
 	fmt.Print(out)
 
+}
+
+// promptUnknownTemplateHint builds a self-diagnosing error for an unknown
+// template name (F-024): it lists the bundled template names (the same set
+// `kern prompt list` shows) and points at --file PATH for custom templates,
+// so the user is not left staring at a bare "unknown template" error.
+func promptUnknownTemplateHint(name string) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "unknown template %q\n", name)
+	if names, err := prompt.List(); err == nil && len(names) > 0 {
+		fmt.Fprintln(&b, "available templates (kern prompt list):")
+		for _, n := range names {
+			fmt.Fprintf(&b, "  %s\n", n)
+		}
+	}
+	fmt.Fprintln(&b, "tip: pass --file PATH to render a custom template file, or run `kern prompt list`")
+	return b.String()
 }
 
 func runSwap(rest []string) {
@@ -216,7 +244,7 @@ func runSwap(rest []string) {
 
 }
 
-func runDoctor(rest []string) {
+func runDoctor(rest []string) int {
 	f, args, err := parseFlags(rest)
 	if err != nil {
 		fatalUsage("flags: %v", err)
@@ -231,10 +259,25 @@ func runDoctor(rest []string) {
 	findings := doctor.Run(root)
 	if f.json {
 		printJSON(findings)
-		return
+		return doctorExitCode(findings)
 	}
 	fmt.Println(doctor.Render(root, findings))
 
+	return doctorExitCode(findings)
+}
+
+// doctorExitCode maps fail-level findings to a non-zero exit so scripts
+// and CI can use `kern doctor` as a gate: warn-only runs exit 0, any
+// [fail] exits 1 - matching the human-readable verdict line instead of
+// contradicting it (e2e round 2: every lane saw "verdict: failures"
+// with exit 0).
+func doctorExitCode(findings []doctor.Finding) int {
+	for _, f := range findings {
+		if f.Level == "fail" {
+			return 1
+		}
+	}
+	return 0
 }
 
 func runContext(rest []string) {
@@ -496,13 +539,13 @@ func runGuard(rest []string) {
 			panic(exitError{code: 2})
 		}
 
-strict := f.precision == "strict"
-	violations, skipped := intel.CheckBoundariesPrecise(ix, b, files, strict)
-	// G-P0-2 guard gate: a changed file whose package participates in an
-	// import cycle is a WARN (never a violation — the exit code stays
-	// driven by boundary violations alone), surfaced in both output modes.
-	cycleWarnings := intel.ImportCycleWarnings(ix, files)
-	// @pure mutability assertions are opt-in via "pure": true in
+		strict := f.precision == "strict"
+		violations, skipped := intel.CheckBoundariesPrecise(ix, b, files, strict)
+		// G-P0-2 guard gate: a changed file whose package participates in an
+		// import cycle is a WARN (never a violation — the exit code stays
+		// driven by boundary violations alone), surfaced in both output modes.
+		cycleWarnings := intel.ImportCycleWarnings(ix, files)
+		// @pure mutability assertions are opt-in via "pure": true in
 		// .kern/boundaries.json. A nil ruleset (missing file) has no Pure flag,
 		// so the check is naturally skipped when the guard is not configured.
 		if b != nil && b.Pure {
@@ -517,26 +560,26 @@ strict := f.precision == "strict"
 				"violations":      violations,
 				"freshness_proof": freshness,
 			}
-// Only surface skipped edges when strict mode actually skipped
-		// some, so default-mode JSON output is unchanged.
-		if len(skipped) > 0 {
-			out["skipped_edges"] = skipped
-		}
-		if len(cycleWarnings) > 0 {
-			out["cycle_warnings"] = cycleWarnings
-		}
-		// The authz_verdict is emitted only when --agent-id/--task were
-		// supplied (backward compat: old callers see no new key).
-		if authzVerdict != nil {
-			out["authz_verdict"] = authzVerdict
-		}
-		printJSON(out)
-	default:
-		fmt.Println(intel.RenderViolations(violations))
-		for _, w := range cycleWarnings {
-			fmt.Printf("WARN: %s (touched by this diff)\n", w)
-		}
-		if len(skipped) > 0 {
+			// Only surface skipped edges when strict mode actually skipped
+			// some, so default-mode JSON output is unchanged.
+			if len(skipped) > 0 {
+				out["skipped_edges"] = skipped
+			}
+			if len(cycleWarnings) > 0 {
+				out["cycle_warnings"] = cycleWarnings
+			}
+			// The authz_verdict is emitted only when --agent-id/--task were
+			// supplied (backward compat: old callers see no new key).
+			if authzVerdict != nil {
+				out["authz_verdict"] = authzVerdict
+			}
+			printJSON(out)
+		default:
+			fmt.Println(intel.RenderViolations(violations))
+			for _, w := range cycleWarnings {
+				fmt.Printf("WARN: %s (touched by this diff)\n", w)
+			}
+			if len(skipped) > 0 {
 				// A missing boundaries file is not a silent pass: make the gap
 				// visible as a clear WARN (a warning, never a violation — the
 				// exit code stays driven by violations alone).

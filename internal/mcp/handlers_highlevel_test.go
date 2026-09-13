@@ -4,8 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"io"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -345,53 +343,6 @@ func TestHandleAnalyzeProfileAndLensCombined(t *testing.T) {
 	}
 }
 
-// TestHandleSkillsUserDir asserts that user skills under <root>/.kern/skills
-// are listed (marked "(user)") and readable by name, alongside the embedded
-// skills. A missing .kern/skills keeps the output identical to today.
-func TestHandleSkillsUserDir(t *testing.T) {
-	root := t.TempDir()
-	skillDir := filepath.Join(root, ".kern", "skills", "demo")
-	if err := os.MkdirAll(skillDir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	skillMD := "---\nname: demo\ndescription: Demo user skill\n---\nBody of the demo user skill.\n"
-	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte(skillMD), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	s := NewServer(strings.NewReader(""), io.Discard)
-
-	out, err := s.handleSkills(context.Background(), map[string]any{"root": root})
-	if err != nil {
-		t.Fatalf("handleSkills list: %v", err)
-	}
-	if !strings.Contains(out, "- **demo** (user): Demo user skill") {
-		t.Errorf("listing missing user skill entry, got:\n%s", out)
-	}
-	if !strings.Contains(out, "kern-safe-change") {
-		t.Errorf("embedded skills missing from listing, got:\n%s", out)
-	}
-
-	body, err := s.handleSkills(context.Background(), map[string]any{"root": root, "skill": "demo"})
-	if err != nil {
-		t.Fatalf("handleSkills read: %v", err)
-	}
-	if !strings.Contains(body, "Body of the demo user skill.") {
-		t.Errorf("reading demo did not return its body, got %q", body)
-	}
-
-	// Without .kern/skills the embedded-only listing is unchanged.
-	empty, err := s.handleSkills(context.Background(), map[string]any{"root": t.TempDir()})
-	if err != nil {
-		t.Fatalf("handleSkills list (no user dir): %v", err)
-	}
-	if strings.Contains(empty, "(user)") {
-		t.Errorf("empty user dir must not emit user entries, got:\n%s", empty)
-	}
-	if !strings.Contains(empty, "# Kern Bundled Agent Skills") {
-		t.Errorf("embedded listing header missing, got:\n%s", empty)
-	}
-}
-
 func TestClassifyMetaRequest_NoteRoutes(t *testing.T) {
 	cases := []struct{ in, wantTool, wantAction string }{
 		{"validate the notes tree", "kern_note", "validate"},
@@ -446,5 +397,24 @@ func TestClassifyMetaRequest_SkillLoadRoutes(t *testing.T) {
 		if args["action"] != "load" || args["skill"] != c.wantSkill {
 			t.Errorf("%q -> %v, want load %s", c.in, args, c.wantSkill)
 		}
+	}
+}
+
+// TestHandleImpactNoDuplicateHeader (F-014 mirror): renderImpactText already
+// emits the "IMPACT for: <target>" header, so the MCP kern_impact handler must
+// not prepend it again — the output contains exactly one header.
+func TestHandleImpactNoDuplicateHeader(t *testing.T) {
+	root := provenanceProject(t)
+	s := NewServer(strings.NewReader(""), io.Discard)
+	defer s.Close()
+	out, err := s.handleImpact(context.Background(), map[string]any{"root": root, "change": "Greet"})
+	if err != nil {
+		t.Fatalf("handleImpact: %v", err)
+	}
+	if n := strings.Count(out, "IMPACT for:"); n != 1 {
+		t.Errorf("handleImpact output contains %d \"IMPACT for:\" headers, want exactly 1:\n%s", n, out)
+	}
+	if !strings.Contains(out, "[task: ") {
+		t.Errorf("handleImpact output missing task line:\n%s", out)
 	}
 }

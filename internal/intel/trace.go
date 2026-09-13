@@ -90,6 +90,10 @@ func Trace(ix *index.Index, src, sourceName string, limit int) *TraceReport {
 		}
 	}
 	covered := coveredSet(ix)
+	// Hoist the symbol->file map: the risk loop below calls prodCallers per
+	// hot symbol, and rebuilding it per symbol is O(len(Symbols)) inside an
+	// O(hot) loop (quadratic on large repos).
+	fileMap := buildFileMap(ix)
 
 	var hot []TraceHot
 	for sym, hits := range counts {
@@ -102,7 +106,7 @@ func Trace(ix *index.Index, src, sourceName string, limit int) *TraceReport {
 		if reach, _ := BlastRadius(ix, []string{sym}); len(reach) > 1 {
 			h.Blast = len(reach) - 1
 		}
-		h.Risk = 1.0 + math.Log2(float64(len(prodCallers(ix, sym))+1))
+		h.Risk = 1.0 + math.Log2(float64(len(prodCallersWithFileMap(ix, sym, fileMap))+1))
 		h.Tested = isCovered(covered, sym)
 		hot = append(hot, h)
 	}

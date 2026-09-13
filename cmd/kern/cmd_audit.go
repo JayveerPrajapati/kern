@@ -91,19 +91,43 @@ func runAudit(rest []string) {
 		if e.Approved {
 			approved = "yes"
 		}
+		// Surface every field an entry carries: external appends often set
+		// only some fields (e.g. event/by/note), so fall back along the
+		// field chain instead of printing blank columns (F-027).
+		agent := e.AgentID
+		if agent == "" {
+			agent = e.Policy
+		}
+		action := e.Action
+		resource := e.Resource
+		if resource == "" {
+			resource = e.TaskID
+		}
 		result := e.Result
+		if result == "" {
+			result = e.Reason
+		}
 		if len(result) > 40 {
 			result = result[:37] + "..."
 		}
 		fmt.Printf("%-22s %-14s %-12s %-20s %-8s %s\n",
 			e.Timestamp.Format("2006-01-02 15:04:05"),
-			e.AgentID,
-			e.Action,
-			e.Resource,
+			cellOrDash(agent),
+			cellOrDash(action),
+			cellOrDash(resource),
 			approved,
-			result,
+			cellOrDash(result),
 		)
 	}
+}
+
+// cellOrDash renders an empty table cell as "-" so an entry never shows as a
+// fully blank row.
+func cellOrDash(s string) string {
+	if s == "" {
+		return "-"
+	}
+	return s
 }
 
 // runAuditAppend links an external entry into the tamper-evident audit chain.
@@ -121,6 +145,7 @@ func runAuditAppend(rest []string) {
 	}
 
 	var entry governance.AuditEntry
+	var raw map[string]any
 	switch {
 	case f.file != "":
 		data, err := os.ReadFile(f.file)
@@ -130,6 +155,7 @@ func runAuditAppend(rest []string) {
 		if err := json.Unmarshal(data, &entry); err != nil {
 			fatalUsage("audit append: invalid AuditEntry JSON in %s: %v", f.file, err)
 		}
+		_ = json.Unmarshal(data, &raw) // best-effort: alias keys below are optional
 	default:
 		data, err := readStdin()
 		if err != nil {
@@ -138,7 +164,13 @@ func runAuditAppend(rest []string) {
 		if err := json.Unmarshal(data, &entry); err != nil {
 			fatalUsage("audit append: invalid AuditEntry JSON on stdin: %v", err)
 		}
+		_ = json.Unmarshal(data, &raw) // best-effort: alias keys below are optional
 	}
+	// Accept the friendly keys external writers commonly use (event/by/note)
+	// alongside the canonical AuditEntry fields, so an appended entry carries
+	// its content into the table render instead of appearing as blank columns
+	// (F-027).
+	applyAuditEntryAliases(&entry, raw)
 
 	auditDir := filepath.Join(root, ".kern", "audit")
 	store := storage.NewLog(auditDir)
@@ -168,6 +200,46 @@ func runAuditAppend(rest []string) {
 	all := log.All()
 	last := all[len(all)-1]
 	fmt.Printf("appended %s (hash %s)\n", last.ID, last.Hash)
+}
+
+// applyAuditEntryAliases maps the human-friendly JSON keys external writers
+// commonly use onto the canonical AuditEntry fields, only filling fields the
+// entry does not already carry. Keys recognized: event → Action, by → AgentID,
+// note → Reason, resource → Resource, result → Result, task → TaskID.
+func applyAuditEntryAliases(e *governance.AuditEntry, raw map[string]any) {
+	if e == nil {
+		return
+	}
+	if e.Action == "" {
+		if v, ok := raw["event"].(string); ok {
+			e.Action = v
+		}
+	}
+	if e.AgentID == "" {
+		if v, ok := raw["by"].(string); ok {
+			e.AgentID = v
+		}
+	}
+	if e.Reason == "" {
+		if v, ok := raw["note"].(string); ok {
+			e.Reason = v
+		}
+	}
+	if e.Resource == "" {
+		if v, ok := raw["resource"].(string); ok {
+			e.Resource = v
+		}
+	}
+	if e.Result == "" {
+		if v, ok := raw["result"].(string); ok {
+			e.Result = v
+		}
+	}
+	if e.TaskID == "" {
+		if v, ok := raw["task"].(string); ok {
+			e.TaskID = v
+		}
+	}
 }
 
 // runAuditRepair re-chains persisted audit entries from the first broken

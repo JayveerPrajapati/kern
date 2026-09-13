@@ -27,6 +27,12 @@ import (
 	blueprintversion "github.com/JayveerPrajapati/kern/internal/blueprint/version"
 )
 
+// defaultCIArtifactFile is the default --artifact-file path, relative to the
+// repo root. It lives under .kern/ (kern's gitignored state dir) so the CI
+// artifact never pollutes `git add -A` and the validation gates never re-scan
+// kern's own output (which embeds prior findings) — a self-inflicted BLOCK.
+const defaultCIArtifactFile = ".kern/blueprint-result.json"
+
 // ciFlags carries the parsed `blueprint ci` command-line flags.
 type ciFlags struct {
 	repoRoot      string
@@ -52,7 +58,7 @@ func parseCIFlags(args []string) (ciFlags, int) {
 	baseRef := fs.String("base", "main", "base revision (branch/tag/sha)")
 	headRef := fs.String("head", "HEAD", "proposed revision (branch/tag/sha)")
 	jsonOut := fs.Bool("json", false, "emit JSON artifact (always emitted to --artifact-file regardless)")
-	artifactFile := fs.String("artifact-file", "blueprint-result.json", "path to write JSON artifact")
+	artifactFile := fs.String("artifact-file", defaultCIArtifactFile, "path to write JSON artifact (default: .kern/blueprint-result.json)")
 	noHuman := fs.Bool("no-human", false, "suppress human-readable summary on stderr")
 	strictLatency := fs.Bool("strict-latency", false, "treat the WARN-only latency budget finding as a hard failure (exit 1)")
 	noCache := fs.Bool("no-cache", false, "bypass the verdict cache and force a full re-validation (BLUEPRINT_NO_CACHE=1 also works)")
@@ -105,7 +111,17 @@ func runCI(args []string) int {
 	if code != 0 {
 		return code
 	}
-
+	// The default artifact is repo-root-relative (see defaultCIArtifactFile);
+	// resolve it against the repo root so `ci --repo DIR` from any directory
+	// writes into that repo's .kern/, not the caller's cwd.
+	if fl.artifactFile == defaultCIArtifactFile {
+		fl.artifactFile = filepath.Join(absRoot, defaultCIArtifactFile)
+	}
+	// F-023c is intentionally NOT applied by ci: ci validates committed
+	// state and must never mutate the tree it is validating (writing a
+	// tracked .gitignore would itself trip verify-receipt --check-diff).
+	// The local first-run gitignore happens in `kern check`; the canonical
+	// fix belongs in internal/setup's gitignore block (orchestrator note).
 	start := time.Now()
 	artifact := CIArtifact{
 		Repo:    absRoot,
@@ -166,7 +182,16 @@ func runCI(args []string) int {
 
 	// Step 5: Run the validation pipeline (same engine as local).
 	result, auditWriter := runValidationPipeline(valRoot, absRoot, changes, client, kernVersion, cfg)
-
+	// A no-op validation (empty diff, e.g. `ci --base HEAD --head HEAD`)
+	// is audit-free by design (G1: the service's NOOP early-return writes
+	// no record). CI explicitly requested a tamper-evident receipt, and a
+	// receipt must bind to a real audit-chain endpoint (H3/H4) or
+	// `kern verify-receipt` rejects it. Record the no-op run in the chain
+	// before sealing so the receipt carries a genuine binding. This is
+	// ci-level policy; the service's NOOP contract is untouched.
+	if len(changes) == 0 {
+		writeCINoopAuditRecord(auditWriter, result, absRoot)
+	}
 	// Persist the verdict for keyless replay on identical future runs (tool
 	// failures are never cached; see persistVerdict).
 	persistVerdict(bypassCache, kernVersion, cacheDir, cacheKey, result)
@@ -217,30 +242,11 @@ func runValidationPipeline(valRoot, absRoot string, changes []domain.FileChange,
 	if sandbox.NetworkIsolationAvailable() {
 		testOpts = append(testOpts, sandbox.WithNetworkIsolation())
 	}
+	// Timeout + polyglot matrix from .blueprint/config.yaml — one shared
+	// helper for check/ci/diff-gate (see sandboxOptsFromConfig for why this
+	// wiring must not be re-inlined per command).
 	if cfg != nil {
-		if cfg.File.Sandbox.TimeoutSeconds > 0 {
-			testOpts = append(testOpts, sandbox.WithTimeout(time.Duration(cfg.File.Sandbox.TimeoutSeconds)*time.Second))
-		}
-		if len(cfg.File.Sandbox.Matrix) > 0 {
-			matrix := make([]sandbox.MatrixTarget, 0, len(cfg.File.Sandbox.Matrix))
-			for _, m := range cfg.File.Sandbox.Matrix {
-				target := sandbox.MatrixTarget{
-					Name: m.Name,
-					Dir:  m.Dir,
-				}
-				if m.Build != "" {
-					target.Build = sandbox.SplitCommand(m.Build)
-				}
-				if m.Test != "" {
-					target.Test = sandbox.SplitCommand(m.Test)
-				}
-				if m.Command != "" {
-					target.Command = sandbox.SplitCommand(m.Command)
-				}
-				matrix = append(matrix, target)
-			}
-			testOpts = append(testOpts, sandbox.WithMatrix(matrix))
-		}
+		testOpts = append(testOpts, sandboxOptsFromConfig(cfg.File)...)
 	}
 	sandboxCheck := sandbox.NewDefaultCheck(testOpts...)
 	// The audit trail lives in the real repository (.blueprint/audit/), not
@@ -339,6 +345,40 @@ func validateInWorktree(repoRoot, head string) (valRoot string, cleanup func(), 
 	return wtDir, cleanup, nil
 }
 
+// writeCINoopAuditRecord records a no-op CI validation in the audit chain.
+// The service's NOOP early-return (empty file set) deliberately writes no
+// audit record (G1/P1-1). A ci receipt sealed without a chain binding would
+// be rejected by `kern verify-receipt` (H4: empty audit_chain_hash), so ci
+// appends the no-op run's own record before sealing. Best-effort like every
+// audit write: a failed write leaves the receipt unbound and
+// verify-receipt still fails closed on it.
+func writeCINoopAuditRecord(w *audit.Writer, result domain.ValidationResult, repoRoot string) {
+	if w == nil {
+		return
+	}
+	rec := audit.Record{
+		CorrelationID: result.CorrelationID,
+		Timestamp:     time.Now().UTC(),
+		Source:        domain.SourceCI,
+		AgentID:       "ci",
+		Operation:     domain.OpCommit,
+		RepoRoot:      repoRoot,
+		Status:        result.Status,
+		ExitCode:      result.ExitCode,
+		Summary: audit.SummaryMeta{
+			Total:    result.Summary.Total,
+			Errors:   result.Summary.Errors,
+			Warnings: result.Summary.Warnings,
+			Blocks:   result.Summary.Blocks,
+			Skipped:  result.Summary.Skipped,
+		},
+		Findings:      []audit.FindingMeta{},
+		DurationMs:    result.DurationMs,
+		ChecksSkipped: result.ChecksSkipped,
+	}
+	_ = w.Write(rec)
+}
+
 // sealReceipt generates and saves the tamper-evident receipt (P1.4) for a
 // PASS/WARN validation. The receipt binds the validation hash, the local
 // audit-chain endpoint (LastHash), and kern's chain hash (when linked); it is
@@ -355,7 +395,7 @@ func sealReceipt(enabled bool, result domain.ValidationResult, absRoot, baseRef,
 		fmt.Fprintf(os.Stderr, "blueprint: warning: cannot save receipt: %v\n", err)
 		return ""
 	}
-	fmt.Fprintf(os.Stderr, "Receipt %s generated at .blueprint/receipts/%s.json. Verify with: blueprint verify-receipt %s\n", rec.ReceiptID, rec.ReceiptID, rec.ReceiptID)
+	fmt.Fprintf(os.Stderr, "Receipt %s generated at .blueprint/receipts/%s.json. Verify with: kern verify-receipt %s\n", rec.ReceiptID, rec.ReceiptID, rec.ReceiptID)
 	return rec.ReceiptID
 }
 
@@ -647,6 +687,13 @@ func discoverDiffChanges(repoRoot, base, head string) ([]domain.FileChange, erro
 			continue
 		}
 		status, path := parts[0], parts[1]
+		// Never treat kern/blueprint runtime artifacts (the CI artifact, audit
+		// trail, receipts, verdict/fingerprint caches) as diffed user changes:
+		// they are generated local state, and scanning them re-validates the
+		// tool's own output — a self-inflicted BLOCK (F-020).
+		if isBlueprintRuntimeArtifact(path) {
+			continue
+		}
 		op := domain.OpWrite
 		switch {
 		case strings.HasPrefix(status, "D"):

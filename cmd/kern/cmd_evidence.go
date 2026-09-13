@@ -114,7 +114,12 @@ func runEvidenceVerify(rest []string) int {
 	if err := fs.Parse(rest); err != nil {
 		return 1
 	}
-
+	// F-012: accept the bundle path as a positional argument as well as
+	// --file, so `kern evidence verify /tmp/b.json` behaves exactly like
+	// `kern evidence verify --file /tmp/b.json` (and stdin when absent).
+	if *file == "" && len(fs.Args()) > 0 {
+		*file = fs.Args()[0]
+	}
 	data, err := evidenceSource(*file, *url)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "kern evidence verify: %v\n", err)
@@ -247,6 +252,11 @@ func runEvidenceExplain(rest []string) int {
 	)
 	if err := fs.Parse(rest); err != nil {
 		return 1
+	}
+	// F-012: accept the bundle path as a positional argument as well as
+	// --file (same plumbing as evidence verify).
+	if *file == "" && len(fs.Args()) > 0 {
+		*file = fs.Args()[0]
 	}
 	data, err := evidenceSource(*file, *url)
 	if err != nil {

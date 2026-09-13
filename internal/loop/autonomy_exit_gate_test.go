@@ -27,6 +27,7 @@ func (failingDeployer) Deploy(ctx context.Context, req deployment.DeployRequest)
 // SECURITY, ROLLBACK, BUDGET, and POLICY-BYPASS tests. Each sub-test exercises
 // one dimension at the loop level so a regression in any guard is caught here.
 func TestAutonomyExitGate(t *testing.T) {
+	t.Setenv("KERN_ALLOW_UNISOLATED", "1") // fail-closed gate: opt into unisolated runs on hosts without netns (darwin)
 	t.Run("failure_surfaces_error", func(t *testing.T) {
 		// A stage that fails must surface the error and stop — no silent
 		// success, no deployment.

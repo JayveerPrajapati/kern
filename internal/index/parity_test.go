@@ -55,11 +55,11 @@ var tsOnlySymbols = map[string]map[string]string{
 // same-line bodies legitimately carry calls (function foo() { return bar() }).
 var regexExtraEdges = map[string]map[string]map[string]bool{
 	"java": {
-		"Fixtures.helper":    {"helper": true},
-		"Fixtures.main":      {"main": true},
-		"Greeter.Greeter":    {"Greeter": true},
-		"Greeter.greet":      {"greet": true},
-		"Greeter.loud":       {"loud": true},
+		"Fixtures.helper": {"helper": true},
+		"Fixtures.main":   {"main": true},
+		"Greeter.Greeter": {"Greeter": true},
+		"Greeter.greet":   {"greet": true},
+		"Greeter.loud":    {"loud": true},
 	},
 	"python": {
 		"Greeter.__init__": {"__init__": true},

@@ -151,6 +151,11 @@ func TestRunLLMNoFileBlocks(t *testing.T) {
 func TestRunLLMUnreachable(t *testing.T) {
 	root := newBrokenGoProject(t)
 	t.Setenv("OLLAMA_HOST", "http://127.0.0.1:1")
+	// Pin the provider to ollama: with the auto chain, an unreachable ollama
+	// would fall through to the locally-installed agent CLIs (claude/
+	// opencode/...) and make this hermetic test depend on the machine's
+	// agent installs and login state.
+	t.Setenv("KERN_LLM_PROVIDER", "ollama")
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 
 	res := Run(context.Background(), root, "task", "", 1, 60*time.Second)

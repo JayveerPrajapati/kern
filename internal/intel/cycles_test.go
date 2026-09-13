@@ -51,7 +51,7 @@ func TestImportCyclesSelfImport(t *testing.T) {
 // TestImportCyclesAcyclic: a clean dependency chain reports no cycles.
 func TestImportCyclesAcyclic(t *testing.T) {
 	dir := writeTree(t, map[string]string{
-		"lib/lib.go": "package lib\n\nfunc Public() {}\n",
+		"lib/lib.go":       "package lib\n\nfunc Public() {}\n",
 		"client/client.go": "package client\n\nimport \"demo/lib\"\n\nfunc Use() { lib.Public() }\n",
 	})
 	ix := buildIndex(t, dir)
@@ -84,8 +84,8 @@ func TestRenderCycles(t *testing.T) {
 // cycles (the config -> agents/context test-only edge case).
 func TestImportCyclesIgnoresTestFiles(t *testing.T) {
 	dir := writeTree(t, map[string]string{
-		"lib/lib.go":  "package lib\n\nfunc Public() {}\n",
-		"app/app.go":  "package app\n\nimport \"demo/lib\"\n\nfunc Use() { lib.Public() }\n",
+		"lib/lib.go":      "package lib\n\nfunc Public() {}\n",
+		"app/app.go":      "package app\n\nimport \"demo/lib\"\n\nfunc Use() { lib.Public() }\n",
 		"app/app_test.go": "package app\n\nimport \"demo/lib\"\n\nfunc TestX() {}\n",
 		"lib/lib_test.go": "package lib\n\nimport \"demo/app\"\n\nfunc TestY() {}\n",
 	})
@@ -100,11 +100,11 @@ func TestImportCyclesIgnoresTestFiles(t *testing.T) {
 // "blueprint" directory.
 func TestImportCyclesLongestMatch(t *testing.T) {
 	dir := writeTree(t, map[string]string{
-		"blueprint/root.go":    "package blueprint\n\nfunc R() {}\n",
-		"blueprint/service/s.go": "package service\n\nfunc S() {}\n",
+		"blueprint/root.go":           "package blueprint\n\nfunc R() {}\n",
+		"blueprint/service/s.go":      "package service\n\nfunc S() {}\n",
 		"blueprint/service/s_test.go": "package service\n\nimport \"demo/blueprint\"\n\nfunc TestS() {}\n",
-		"app/app.go": "package app\n\nimport \"demo/blueprint/service\"\n\nfunc Use() { service.S() }\n",
-		"blueprint/root_imp.go": "package blueprint\n\nimport \"demo/blueprint/service\"\n\nfunc R2() { service.S() }\n",
+		"app/app.go":                  "package app\n\nimport \"demo/blueprint/service\"\n\nfunc Use() { service.S() }\n",
+		"blueprint/root_imp.go":       "package blueprint\n\nimport \"demo/blueprint/service\"\n\nfunc R2() { service.S() }\n",
 	})
 	ix := buildIndex(t, dir)
 	g, _ := packageImportGraph(ix)

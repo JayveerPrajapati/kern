@@ -12,6 +12,7 @@ import (
 // pause the run with a caller-chosen reason on a given stage, while a nil
 // PauseTrigger never triggers (backward compatible).
 func TestPauseTriggerHookPauses(t *testing.T) {
+	t.Setenv("KERN_ALLOW_UNISOLATED", "1") // fail-closed gate: opt into unisolated runs on hosts without netns (darwin)
 	// A PauseTrigger that pauses on the "code" stage with reason "scope_change".
 	lp, err := NewLoop(LoopConfig{
 		Root:  loopFixture(t),

@@ -8,18 +8,18 @@ package context
 type Mode struct {
 	Name           string   `json:"name"`
 	TaskType       TaskType `json:"task_type"`
-	Lens           string   `json:"lens,omitempty"`           // review lens name ("" = none)
+	Lens           string   `json:"lens,omitempty"`            // review lens name ("" = none)
 	RetrievalLevel string   `json:"retrieval_level,omitempty"` // l1|l2|l3 override ("" = policy default)
 	Budget         int      `json:"budget,omitempty"`          // token budget override (0 = policy default)
 }
 
 // Built-in mode names (spec's five context modes).
 const (
-	ModeFix         = "fix"
-	ModeReview      = "review"
+	ModeFix          = "fix"
+	ModeReview       = "review"
 	ModeArchitecture = "architecture"
-	ModeIncident    = "incident"
-	ModeExplain     = "explain"
+	ModeIncident     = "incident"
+	ModeExplain      = "explain"
 )
 
 // DefaultModes returns the five built-in modes in deterministic order:

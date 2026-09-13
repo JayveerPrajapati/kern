@@ -24,15 +24,27 @@ var ignoreDirs = map[string]bool{
 	".git": true, ".hg": true, ".svn": true, "node_modules": true,
 	"vendor": true, "dist": true, "build": true, "out": true, "target": true,
 	".next": true, "__pycache__": true, ".venv": true, "venv": true,
-	".cache": true, ".idea": true, ".vscode": true, "bin": true,
+	"__pypackages__": true,
+	".cache":         true, ".idea": true, ".vscode": true, "bin": true,
 	".mvn": true, "coverage": true, "tmp": true, ".terraform": true,
 	".kern": true,
+	// Agent/tooling wiring dirs - same set the index walker excludes
+	// (internal/index/engine.go ignoreDirs) plus extra surfaces kern setup
+	// writes (.agents rules, .continue, .windsurf, .vscode/mcp.json).
+	// Without these, kern generated plugin/MCP/rules files dominated
+	// pack/buddy/project output on small wired repos (V4).
+	".blueprint": true, ".opencode": true, ".claude": true, ".cursor": true,
+	".gemini": true, ".kiro": true, ".codex": true, ".copilot": true,
+	".codeium": true, ".qwen": true, ".qoder": true, ".agents": true,
+	".continue": true, ".windsurf": true, "graphify-out": true,
 }
 
 var ignoreFiles = map[string]bool{
 	"package-lock.json": true, "yarn.lock": true, "pnpm-lock.yaml": true,
 	"go.sum": true, "Cargo.lock": true, "Pipfile.lock": true, "poetry.lock": true,
 	"Gemfile.lock": true, ".DS_Store": true, "*.min.js": true, "*.min.css": true,
+	// kern setup writes the root .mcp.json MCP registry (machine-specific).
+	".mcp.json": true,
 }
 
 // BuildProject walks root and returns a compact project summary, using the

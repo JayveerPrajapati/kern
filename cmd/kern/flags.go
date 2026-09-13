@@ -92,6 +92,8 @@ type flags struct {
 	symbol               string
 	change               string
 	fresh                bool
+	from                 string
+	to                   string
 	full                 bool
 	generate             bool
 	help                 bool
@@ -102,6 +104,7 @@ type flags struct {
 	status               bool
 	strict               bool
 	update               bool
+	force                bool
 	addr                 string
 	enterprise           bool
 	projects             []string
@@ -182,6 +185,8 @@ func parseFlags(args []string) (flags, []string, error) {
 			f.strict = true
 		case "--update":
 			f.update = true
+		case "--force":
+			f.force = true
 		case "--terse-code", "-terse-code":
 			f.terseCode = true
 		case "--reset":
@@ -328,6 +333,10 @@ func parseFlags(args []string) (flags, []string, error) {
 			setIntFlag(&i, &f.depth, "--depth")
 		case "--full":
 			f.full = true
+		case "--from":
+			setStr(&i, &f.from)
+		case "--to":
+			setStr(&i, &f.to)
 		case "--severity":
 			setStr(&i, &f.severity)
 		case "--lang":
@@ -342,10 +351,10 @@ func parseFlags(args []string) (flags, []string, error) {
 			setIntFlag(&i, &f.maxFiles, "--max-files")
 		case "--tier":
 			setStr(&i, &f.tier)
-case "--precision":
-		setStr(&i, &f.precision)
-	case "--min-confidence":
-		setStr(&i, &f.minConfidence)
+		case "--precision":
+			setStr(&i, &f.precision)
+		case "--min-confidence":
+			setStr(&i, &f.minConfidence)
 		case "--fold":
 			f.fold = true
 		case "--graph":

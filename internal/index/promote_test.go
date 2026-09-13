@@ -111,7 +111,7 @@ func TestPromoteLowEdgesCountsUnresolved(t *testing.T) {
 // (subsumes the keep-best-confidence dedupe fix).
 func TestPromoteLowEdgesDedupeKeepsBestConfidence(t *testing.T) {
 	dir := writeTree(t, map[string]string{
-		"db/db.go": "package db\n\nfunc Open() {}\n",
+		"db/db.go":   "package db\n\nfunc Open() {}\n",
 		"app/app.go": "package app\n\nfunc Start() {}\n",
 	})
 	ix, err := Build(dir)

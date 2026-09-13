@@ -377,3 +377,26 @@ func TestIndexSkipsPDFByDefault(t *testing.T) {
 		t.Fatal("expected the .md doc to be indexed")
 	}
 }
+
+func TestIndexSkipsIndexIgnoredDirs(t *testing.T) {
+	// e2e round 2, P1: docs search used a private skip list, so .venv
+	// (scipy test data) and graphify-out (generated GRAPH_REPORT.md)
+	// dominated search results. The walk must mirror the index's
+	// ignore list (index.IgnoredDir).
+	root := t.TempDir()
+	writeDoc(t, root, "readme.md", "real project documentation\n")
+	writeDoc(t, root, "venv/scipy-data.md", "scipy test data documentation\n")
+	writeDoc(t, root, ".venv/lib.md", "virtualenv library notes\n")
+	writeDoc(t, root, "graphify-out/GRAPH_REPORT.md", "generated graph report\n")
+	writeDoc(t, root, "bin/tool.md", "binary dir notes\n")
+	writeDoc(t, root, "__pycache__/cache.md", "pycache notes\n")
+	ix, err := IndexDir(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, d := range ix.Docs {
+		if d.Chunk.File != "readme.md" {
+			t.Errorf("indexed document from ignored dir: %s", d.Chunk.File)
+		}
+	}
+}

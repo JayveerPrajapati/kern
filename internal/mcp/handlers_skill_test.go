@@ -3,6 +3,8 @@ package mcp
 import (
 	"context"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -69,5 +71,49 @@ func TestSkillUnknownAction(t *testing.T) {
 	_, err := s.handleSkill(context.Background(), map[string]any{"action": "explode"})
 	if err == nil {
 		t.Fatal("expected error for unknown action")
+	}
+}
+
+// TestSkillLoadUserDirFallback covers the user-skill fallback on the live
+// kern_skill path (previously only exercised by the removed dead handler
+// handleSkills): a skill under <root>/.kern/skills is loadable by name and
+// catalog output carries the "(user)" marker.
+func TestSkillLoadUserDirFallback(t *testing.T) {
+	root := t.TempDir()
+	skillDir := filepath.Join(root, ".kern", "skills", "demo")
+	if err := os.MkdirAll(skillDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	skillMD := "---\nname: demo\ndescription: Demo user skill\n---\nBody of the demo user skill.\n"
+	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte(skillMD), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s := NewServer(strings.NewReader(""), io.Discard)
+
+	body, err := s.handleSkill(context.Background(), map[string]any{"action": "load", "skill": "demo", "root": root})
+	if err != nil {
+		t.Fatalf("load user skill: %v", err)
+	}
+	if !strings.Contains(body, "Body of the demo user skill.") {
+		t.Errorf("load did not return the user skill body, got %q", body)
+	}
+
+	// Catalog is embedded-only; the user-skill marker must not leak into it.
+	catalog, err := s.handleSkill(context.Background(), map[string]any{"action": "catalog", "root": root})
+	if err != nil {
+		t.Fatalf("catalog: %v", err)
+	}
+	if strings.Contains(catalog, "(user)") {
+		t.Errorf("catalog must not emit user entries, got:\n%s", catalog)
+	}
+	if !strings.Contains(catalog, "kern-safe-change") {
+		t.Errorf("embedded skills missing from catalog, got:\n%s", catalog)
+	}
+
+	// Missing .kern/skills directory: load falls back gracefully to embedded,
+	// unknown name errors.
+	unknown, err := s.handleSkill(context.Background(), map[string]any{"action": "load", "skill": "demo", "root": t.TempDir()})
+	if err == nil || unknown != "" {
+		t.Errorf("unknown user skill on empty dir: err=%v out=%q, want error", err, unknown)
 	}
 }

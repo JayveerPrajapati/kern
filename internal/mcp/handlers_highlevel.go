@@ -260,7 +260,10 @@ func (s *Server) handleImpact(ctx context.Context, args map[string]any) (string,
 		if err != nil {
 			return "", err
 		}
-		return "IMPACT for: " + change + "\n" + text + fmt.Sprintf("\n[task: %s — state: %s]\n", t.ID, t.State), nil
+		// renderImpactText already emits the "IMPACT for: <target>" header (the
+		// impact renderer is shared with the CLI and REST surfaces), so prepending
+		// it here produced a duplicated header (mirror of the CLI-side F-014 fix).
+		return text + fmt.Sprintf("\n[task: %s — state: %s]\n", t.ID, t.State), nil
 	}
 }
 
@@ -648,13 +651,31 @@ func (s *Server) handleApprove(ctx context.Context, args map[string]any) (string
 	reject := argString(args, "reject") == "true"
 	reason := argString(args, "reason")
 
-	a, err := s.svc.Governance.Approve(ctx, root, id, approver, !reject, reason)
+	// Route the decision through the app layer (TaskService), mirroring
+	// `kern approve`: the decision is persisted to the shared approval store
+	// AND, when it gates a task parked at WAITING_FOR_APPROVAL, the task is
+	// advanced to its approval-resolved state with the gate-crossing
+	// transition recorded in the audit chain (F-026). An approval with no
+	// gated task attached takes the plain decide path unchanged
+	// (ResolveApprovalForTask leaves non-gated approvals untouched beyond
+	// persisting the decision).
+	p, err := s.platformFor(ctx, root)
+	if err != nil {
+		return "", err
+	}
+	ts := app.NewTaskService(p, nil).WithAgentID(approver)
+	a, err := ts.ResolveApprovalForTask(id, approver, !reject, reason)
 	if err != nil {
 		return "", err
 	}
 
 	if reject {
-		return fmt.Sprintf("rejected: %s (by %s)", a.ID, approver), nil
+		var rb strings.Builder
+		fmt.Fprintf(&rb, "rejected: %s (by %s)", a.ID, approver)
+		if a.TaskID != "" {
+			fmt.Fprintf(&rb, "\n  task: %s marked REJECTED", a.TaskID)
+		}
+		return rb.String(), nil
 	}
 
 	var sb strings.Builder
@@ -663,6 +684,9 @@ func (s *Server) handleApprove(ctx context.Context, args map[string]any) (string
 	fmt.Fprintf(&sb, "  approver: %s\n", a.Approver)
 	if a.DecidedAt != nil {
 		fmt.Fprintf(&sb, "  decided: %s\n", a.DecidedAt.Format(time.RFC3339))
+	}
+	if a.TaskID != "" {
+		fmt.Fprintf(&sb, "  resume: kern workflow --task %s\n", a.TaskID)
 	}
 	return sb.String(), nil
 }
@@ -904,14 +928,14 @@ func classifyGraphTools(low, request string) (string, map[string]any, bool) {
 		return tool, args, true
 	case hasWord(low, "trace") && (strings.Contains(low, "stack") || strings.Contains(low, "pprof")):
 		return "kern_trace", map[string]any{}, true
-case hasWord(low, "probe") || strings.Contains(low, "what does this touch"):
-	return "kern_probe", map[string]any{"task": request}, true
-case strings.Contains(low, "prose") || strings.Contains(low, "vocab") || strings.Contains(low, "spelling"):
-	// CG-P1-9: prose-word → symbol candidate lookup; kept after the more
-	// specific symbol questions so "explain the vocab" still explores.
-	return "kern_prose", map[string]any{"query": request}, true
-}
-return "", nil, false
+	case hasWord(low, "probe") || strings.Contains(low, "what does this touch"):
+		return "kern_probe", map[string]any{"task": request}, true
+	case strings.Contains(low, "prose") || strings.Contains(low, "vocab") || strings.Contains(low, "spelling"):
+		// CG-P1-9: prose-word → symbol candidate lookup; kept after the more
+		// specific symbol questions so "explain the vocab" still explores.
+		return "kern_prose", map[string]any{"query": request}, true
+	}
+	return "", nil, false
 }
 
 // classifyProjectTools routes the project-level utility cases.
@@ -1114,12 +1138,12 @@ func (s *Server) handleMeta(ctx context.Context, args map[string]any) (string, e
 	// func(ctx, args) (string, error) and live on *Server.
 	var result string
 	var err error
-switch tool {
-case "kern_search":
-	result, err = s.handleSearch(ctx, subArgs)
-case "kern_prose":
-	result, err = s.handleProse(ctx, subArgs)
-case "kern_explore":
+	switch tool {
+	case "kern_search":
+		result, err = s.handleSearch(ctx, subArgs)
+	case "kern_prose":
+		result, err = s.handleProse(ctx, subArgs)
+	case "kern_explore":
 		result, err = s.handleExplore(ctx, subArgs)
 	case "kern_code_graph":
 		result, err = s.handleCodeGraph(ctx, subArgs)

@@ -42,19 +42,39 @@ func readStdinIfPipe() string {
 func runHealth(rest []string) {
 	fs := flag.NewFlagSet("health", flag.ContinueOnError)
 	root := fs.String("root", ".", "project root")
+	jsonFlag := fs.Bool("json", false, "emit JSON (health always emits JSON; flag kept for symmetry)")
+	_ = jsonFlag
 	_ = fs.Parse(rest)
 	out, err := callTool("kern_health", map[string]any{"root": *root})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "kern health: %v — see kern doctor for diagnostics\n", err)
 		panic(exitError{code: 1})
 	}
-	// The session view answers "what does this process know" (empty on a
-	// fresh CLI invocation). Supplement it with the persisted-index view so
-	// `kern health` answers the question users actually ask: "how fresh is
-	// my on-disk index?".
+	// The MCP kern_health "index" block reflects the in-process server's
+	// session cache, which a fresh CLI invocation NEVER loads: on a fresh
+	// process it always reports fresh=false / symbols=0 / files=0 even when
+	// the on-disk index is healthy, misleading users into rebuilding. Make
+	// the DISK index the authoritative "index" block and relabel the
+	// in-memory view so nobody mistakes it for the persisted state.
 	var snap map[string]any
 	if err := json.Unmarshal([]byte(out), &snap); err == nil {
-		snap["disk_index"] = diskIndexView(*root)
+		if memIdx, ok := snap["index"].(map[string]any); ok {
+			memIdx["note"] = "in-memory MCP server session index (not loaded by the CLI; see the disk 'index' block)"
+			snap["mcp_memory_index"] = memIdx
+		}
+		disk := diskIndexView(*root)
+		if disk == nil {
+			// No persisted index yet: say so explicitly instead of zeroes.
+			disk = map[string]any{
+				"root":    *root,
+				"built":   false,
+				"fresh":   false,
+				"symbols": 0,
+				"files":   0,
+				"note":    "no persisted index — run `kern index` to build one",
+			}
+		}
+		snap["index"] = disk
 		data, err := json.MarshalIndent(snap, "", "  ")
 		if err == nil {
 			fmt.Println(string(data))
@@ -67,23 +87,48 @@ func runHealth(rest []string) {
 // diskIndexView summarizes the persisted index.json for a root, or nil when
 // none exists yet (a normal first-run state). Unreadable or
 // schema-mismatched indexes are reported as "rebuild required" — never as
-// silent zeroes.
+// silent zeroes. The freshness verdict uses the same decision `kern index
+// --status` makes: the cheap git tree-OID probe when decisive, and the loose
+// content proof otherwise (non-git worktree, legacy index without a tree
+// OID). It is the authoritative `index` block of `kern health`.
 func diskIndexView(root string) map[string]any {
 	if _, err := os.Stat(index.StorePath(root)); err != nil {
 		return nil // nothing persisted yet
 	}
 	ix, err := index.Load(root)
 	if err != nil {
-		return map[string]any{"root": root, "version": 0, "rebuild_required": err.Error()}
+		return map[string]any{"root": root, "version": 0, "built": false, "fresh": false, "stale": true, "rebuild_required": err.Error()}
 	}
 	if ix == nil {
 		return nil
 	}
+	verdict := "unknown"
+	if fresh, decided, _ := ix.TreeOIDProbe(root); decided {
+		if fresh {
+			verdict = "fresh"
+		} else {
+			verdict = "stale"
+		}
+	} else {
+		switch ix.FreshnessProof(root).Verdict {
+		case index.FreshnessFresh:
+			verdict = "fresh"
+		case index.FreshnessStale:
+			verdict = "stale"
+		}
+	}
 	return map[string]any{
 		"root":       root,
+		"built":      true,
+		"fresh":      verdict == "fresh",
+		"stale":      verdict != "fresh",
+		"verdict":    verdict,
 		"version":    ix.Version,
 		"symbols":    len(ix.Symbols),
 		"files":      len(ix.FileHashes),
+		"packages":   len(ix.Pkgs),
+		"languages":  ix.Languages(),
+		"store":      index.StorePath(root),
 		"updated_at": ix.UpdatedAt.Format(time.RFC3339),
 	}
 }

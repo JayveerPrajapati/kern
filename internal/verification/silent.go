@@ -134,7 +134,13 @@ func VerifyFullPipeline(root, symbol string) FullPipelineReport {
 // silentMarkers are the kern-internal strings whose presence in the rendered
 // pipeline output (or the input change text) makes the orchestration
 // non-silent.
-var silentMarkers = []string{".kern/", "kern_", "internal/", "MCP"}
+// silentMarkers are the kern-specific plumbing strings whose presence in the
+// rendered pipeline output (or the input change text) makes the orchestration
+// non-silent. Bare Go conventions ("internal/", "MCP") are deliberately NOT
+// markers: nearly every Go project uses an internal/ directory and MCP is the
+// protocol name, so flagging them would make every repo non-silent on its own
+// file paths (north-star NS-1).
+var silentMarkers = []string{".kern/", "kern_"}
 
 // checkSilentMarkers reports every silent-orchestration marker found in the
 // rendered pipeline text or in the input symbol/change text itself (a marker
@@ -266,7 +272,12 @@ func VerifyTokenReduction(root, symbol string) (eval.EvalResult, error) {
 	if half <= 0 {
 		half = 1
 	}
-	candidate := budget.Fit(baseline, half)
+	// Proportional head cut, not the line-oriented log fitter: Fit collapses
+	// dense packet renders to their first line (reduction ~1.00, evidence
+	// dropped), which destroys the compression proof instead of showing it
+	// (north-star NS-3). FitProportional keeps the leading budget-proportional
+	// portion, so the header (which carries both critical fragments) survives.
+	candidate := budget.FitProportional(baseline, half)
 	h := eval.NewEvalHarness([]eval.Sample{{
 		Name:             "silent-token-reduction",
 		Baseline:         baseline,
@@ -346,9 +357,23 @@ func copyTreeToTemp(root string) (string, error) {
 		if rel == "." {
 			return nil
 		}
+		// kern runtime state (index, coordination, eventbus socket) is not
+		// target-repo content; copying it fails on the events.sock socket and
+		// bloats the temp tree (north-star NS-2). Skip the whole .kern/ dir.
+		if rel == ".kern" || strings.HasPrefix(rel, ".kern"+string(os.PathSeparator)) {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
 		target := filepath.Join(dst, rel)
 		if d.IsDir() {
 			return os.MkdirAll(target, 0o755)
+		}
+		// Sockets, FIFOs, and devices cannot be copied as files (e.g.
+		// .kern/events.sock); skip every non-regular entry.
+		if !d.Type().IsRegular() {
+			return nil
 		}
 		data, rerr := os.ReadFile(p)
 		if rerr != nil {

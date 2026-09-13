@@ -825,3 +825,173 @@ func TestWireScaffoldsKernConfig(t *testing.T) {
 		t.Fatalf("profiles.json was overwritten: %q", b2)
 	}
 }
+
+// TestGitignoreGeneratedBlueprintRuntime (F-023c): the generated .gitignore
+// block must carry the .blueprint/ RUNTIME entries (audit, receipts, caches,
+// metrics) but never ".blueprint/" wholesale, and must not ignore the user
+// config files (config.yaml, suppressions.yaml, owners.yaml).
+func TestGitignoreGeneratedBlueprintRuntime(t *testing.T) {
+	dir := t.TempDir()
+	st := gitignoreGenerated(dir)
+	if !st.Installed {
+		t.Fatalf("gitignore update failed: %s", st.Note)
+	}
+	b, err := os.ReadFile(filepath.Join(dir, ".gitignore"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(b)
+	for _, want := range []string{
+		".blueprint/audit/",
+		".blueprint/receipts/",
+		".blueprint/verdict-cache/",
+		".blueprint/fingerprint-cache/",
+		".blueprint/metrics.json",
+		".kern/",
+	} {
+		if !strings.Contains(content, want) {
+			t.Errorf(".gitignore missing %q:\n%s", want, content)
+		}
+	}
+	// No wholesale .blueprint/ ignore and no config-file ignores.
+	for _, banned := range []string{
+		"\n.blueprint/\n",
+		"config.yaml",
+		"suppressions.yaml",
+		"owners.yaml",
+	} {
+		if strings.Contains(content, banned) {
+			t.Errorf(".gitignore must not contain %q (user config stays committable):\n%s", banned, content)
+		}
+	}
+	// Idempotent re-run.
+	before := content
+	gitignoreGenerated(dir)
+	b, _ = os.ReadFile(filepath.Join(dir, ".gitignore"))
+	if string(b) != before {
+		t.Fatal("gitignore block changed on re-run")
+	}
+	if got := strings.Count(string(b), ".blueprint/audit/"); got != 1 {
+		t.Fatalf("blueprint audit entry appears %d times, want 1", got)
+	}
+}
+
+// TestWireGlobalGitignoreBlueprintRuntime (F-023c): the global git ignore must
+// carry .kern/ plus the blueprint runtime entries, must be idempotent on
+// re-run, and must not ignore blueprint config files.
+func TestWireGlobalGitignoreBlueprintRuntime(t *testing.T) {
+	dir := withTempHome(t, true) // XDG_CONFIG_HOME -> dir/.config
+	if err := os.MkdirAll(filepath.Join(dir, ".config", "git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	st := wireGlobalGitignore()
+	if !st.Installed {
+		t.Fatalf("global gitignore failed: %s", st.Note)
+	}
+	ignorePath := filepath.Join(dir, ".config", "git", "ignore")
+	b, err := os.ReadFile(ignorePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(b)
+	for _, want := range append([]string{".kern/"}, blueprintRuntimeEntries...) {
+		if !strings.Contains(content, want) {
+			t.Errorf("global git ignore missing %q:\n%s", want, content)
+		}
+	}
+	for _, banned := range []string{"config.yaml", "suppressions.yaml", "owners.yaml"} {
+		if strings.Contains(content, banned) {
+			t.Errorf("global git ignore must not contain %q:\n%s", banned, content)
+		}
+	}
+	// Idempotent re-run: nothing added, status says already configured.
+	before := content
+	st2 := wireGlobalGitignore()
+	b, _ = os.ReadFile(ignorePath)
+	if string(b) != before {
+		t.Fatal("global git ignore changed on re-run")
+	}
+	if st2.Note != "global git ignore already configured" {
+		t.Fatalf("re-run note = %q, want already-configured", st2.Note)
+	}
+}
+
+// TestWireCopilotWritesMCPConfig verifies the alignment fix: `kern setup
+// --agents copilot` must wire BOTH the global preToolUse hook
+// (~/.copilot/hooks/kern-pretooluse.json) AND the MCP server config at the
+// reference path ~/.copilot/mcp-config.json (mcpServers.kern, command from
+// PortableMCPCommand). Previously the global MCP adapter was gated under a
+// separate "copilot-cli" name and resolved via XDG (~/.config/.copilot), so an
+// explicit --agents copilot run left ~/.copilot with hooks only.
+func TestWireCopilotWritesMCPConfig(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(dir, "config")) // must NOT receive mcp-config.json
+
+	sts := Wire(dir, []string{"copilot"}, false)
+
+	// The global MCP config must land directly under HOME, not XDG.
+	mcpPath := filepath.Join(dir, ".copilot", "mcp-config.json")
+	b, err := os.ReadFile(mcpPath)
+	if err != nil {
+		t.Fatalf("copilot mcp-config.json not written at %s (statuses: %+v): %v", mcpPath, sts, err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(b, &m); err != nil {
+		t.Fatalf("copilot mcp-config.json not valid JSON: %v\n%s", err, b)
+	}
+	servers, _ := m["mcpServers"].(map[string]any)
+	kern, _ := servers["kern"].(map[string]any)
+	if kern == nil {
+		t.Fatalf("mcpServers.kern missing from copilot mcp-config.json:\n%s", b)
+	}
+	if kern["command"] != PortableMCPCommand() {
+		t.Errorf("mcpServers.kern command = %v, want %q", kern["command"], PortableMCPCommand())
+	}
+
+	// Hooks must still be wired, and the MCP config must NOT go to XDG.
+	if _, err := os.Stat(filepath.Join(dir, ".copilot", "hooks", "kern-pretooluse.json")); err != nil {
+		t.Errorf("copilot hooks not written: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "config", ".copilot", "mcp-config.json")); err == nil {
+		t.Error("copilot mcp-config.json must not be written under XDG_CONFIG_HOME")
+	}
+}
+
+// TestWireQoderWritesMCPSettings verifies the alignment fix: qoder's hook
+// config lives in ~/.qoder/settings.json, so the mcpServers entry must land in
+// the SAME file (matching qwen's ~/.qwen/settings.json wiring) instead of a
+// separate ~/.qoder/mcp.json. After Wire, settings.json must contain both the
+// PreToolUse guard hook and mcpServers.kern.
+func TestWireQoderWritesMCPSettings(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(dir, "config"))
+
+	sts := Wire(dir, []string{"qoder"}, false)
+
+	path := filepath.Join(dir, ".qoder", "settings.json")
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("qoder settings.json not written at %s (statuses: %+v): %v", path, sts, err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(b, &m); err != nil {
+		t.Fatalf("qoder settings.json not valid JSON: %v\n%s", err, b)
+	}
+	servers, _ := m["mcpServers"].(map[string]any)
+	if _, ok := servers["kern"].(map[string]any); !ok {
+		t.Fatalf("mcpServers.kern missing from qoder settings.json:\n%s", b)
+	}
+	hooks, _ := m["hooks"].(map[string]any)
+	pre, _ := hooks["PreToolUse"].([]any)
+	if len(pre) == 0 {
+		t.Fatalf("qoder PreToolUse hook missing from settings.json:\n%s", b)
+	}
+	if !strings.Contains(string(b), "kern-guard.sh") {
+		t.Fatalf("qoder settings.json does not reference kern-guard.sh:\n%s", b)
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".qoder", "mcp.json")); err == nil {
+		t.Error("qoder mcpServers must live in settings.json, not a separate mcp.json")
+	}
+}

@@ -67,6 +67,9 @@ func runOptimize(cmd string, rest []string) {
 		fmt.Fprintf(os.Stderr, "kern: served from cache\n")
 	}
 	fmt.Fprintf(os.Stderr, "kern: %d -> %d tokens (saved %d, %.1f%%)\n", res.BeforeTokens, res.AfterTokens, res.SavedTokens, res.SavedPercent)
+	if res.LLMSkipped != "" {
+		fmt.Fprintf(os.Stderr, "kern: warning: %s\n", res.LLMSkipped)
+	}
 
 }
 
@@ -168,6 +171,9 @@ func runLog(rest []string) {
 	}
 	fmt.Println(res.Output)
 	fmt.Fprintf(os.Stderr, "kern: %d -> %d tokens (saved %d, %.1f%%)\n", res.BeforeTokens, res.AfterTokens, res.SavedTokens, res.SavedPercent)
+	if res.LLMSkipped != "" {
+		fmt.Fprintf(os.Stderr, "kern: warning: %s\n", res.LLMSkipped)
+	}
 	printSavingsFooter(os.Stderr, res.BeforeTokens, res.AfterTokens, kernctx.CostPerToken())
 }
 

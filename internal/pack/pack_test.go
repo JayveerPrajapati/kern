@@ -95,6 +95,27 @@ func TestBuildSkipsIgnoredAndBinary(t *testing.T) {
 	}
 }
 
+func TestBuildSkipsAgentWiringDirs(t *testing.T) {
+	// V4: kern setup writes its plugin/MCP/rules into .opencode/, .claude/,
+	// .vscode/, .agents/ — machine-specific generated wiring that must not
+	// dominate pack output on small wired repos.
+	root := writeTree(t, map[string]string{
+		"main.go":                   "package main\n",
+		".opencode/plugins/kern.ts": "export const plugin = 1;\n",
+		".claude/settings.json":     "{\"mcp\":{}}\n",
+		".vscode/mcp.json":          "{\"servers\":{}}\n",
+		".agents/rules/kern.md":     "# rules\n",
+		".mcp.json":                 "{\"mcpServers\":{}}\n",
+	})
+	b, err := Build(root, Options{Root: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(b.Files) != 1 || b.Files[0].Path != "main.go" {
+		t.Fatalf("expected only main.go, got %+v", b.Files)
+	}
+}
+
 func TestBuildHonorsGitignoreAndKernignore(t *testing.T) {
 	root := writeTree(t, map[string]string{
 		"main.go":          "package main\n",
