@@ -27,7 +27,7 @@ Already installed? Run `kern doctor` to verify everything is wired.
 
 <br>
 
-**Phase-aware MCP routing (11 high-level tools by default, 131 in full mode) · 90+ CLI commands · 17 indexed languages (see [Supported Languages](#supported-languages)) · 100% local**
+**Phase-aware MCP routing (11 high-level tools by default, 136 in full mode) · 90+ CLI commands · 17 indexed languages (see [Supported Languages](#supported-languages)) · 100% local**
 
 </div>
 
@@ -513,7 +513,7 @@ codebase's stack is answered in one call.
    `~/.cache/kern/` (per project). `-tags sqlite` switches to a SQLite store
    with WAL journaling and FTS5 full-text search for concurrent access.
 3. **Analysis** — 90+ CLI commands and the MCP tool catalog (11 high-level
-   tools by default, 131 in full mode) read the same index:
+   tools by default, 136 in full mode) read the same index:
    call graphs, blast radius, change impact, hotspots, dead code, path
    finding, architecture communities, coverage gaps — all dependency-free,
    all deterministic.
@@ -581,15 +581,15 @@ another code-intelligence MCP. Three properties set it apart:
   enforces architecture boundaries; phase-aware routing keeps agents focused
   instead of overwhelmed — 4 phases (explore/plan/edit/verify), each with a
   focused shortlist. Set `KERN_MCP_PHASE=explore` to filter the advertised
-  tools; the full 131-tool catalog stays behind `KERN_MCP_FULL=1`.
+  tools; the full 136-tool catalog stays behind `KERN_MCP_FULL=1`.
   Most MCP servers expose capability with no policy layer.
 
 When running as an MCP server (`kern-mcp`), kern exposes an **11-tool
 high-level surface by default** (routed through `kern_meta`), with the full
-**toolset (131 tools)** behind `KERN_MCP_FULL=1` for advanced use — and
+**toolset (136 tools)** behind `KERN_MCP_FULL=1` for advanced use — and
 phase-aware routing (`KERN_MCP_PHASE=explore|plan|edit|verify`) as the
 default way to keep the advertised list focused. The same catalog is exposed
-as `kern_*` MCP tools — 11 high-level tools by default, 131 in full mode —
+as `kern_*` MCP tools — 11 high-level tools by default, 136 in full mode —
 mapped 1:1 to the CLI commands, so opencode, Claude Code, Codex, Cursor and
 every other wired agent get the engine over MCP. The complete, generated
 catalog (every `kern_*` tool with its phase, cost tier and description) lives
@@ -749,7 +749,7 @@ allow it:
 | **Codex** | `[mcp_servers.kern]` in `~/.codex/config.toml` | `~/.codex/hooks.json` — `PreToolUse` hook blocks Bash and suggests kern's MCP equivalents via the kern-guard script, gated by `[features] codex_hooks = true` in `~/.codex/config.toml` |
 | **JSON adapters** | 12 configs: `continue`, `windsurf`, `zed`, `vscode`, `antigravity`, `qwen`, `qoder`, `kiro`, `copilot` (VS Code `.vscode/mcp.json` + CLI `~/.copilot/mcp-config.json`), plus `cursor`/`gemini` (rows above) | — (no hook API) |
 
-All agents receive the same MCP surface (11 high-level tools by default, 131
+All agents receive the same MCP surface (11 high-level tools by default, 136
 in full mode, phase-filtered via `KERN_MCP_PHASE`) and the same `AGENTS.md` rules. Output
 compression + session memory run natively where the platform's hook API allows
 in-place output replacement (opencode, Claude Code, Gemini, Codex); agents
@@ -828,7 +828,7 @@ can accept the CGO dependency.
 Deep-dives and references live alongside this README:
 
 - [`docs/cli-reference.md`](docs/cli-reference.md) — the full CLI reference (90+ commands).
-- [`docs/tool-catalog.md`](docs/tool-catalog.md) — the complete generated MCP tool catalog (131 tools).
+- [`docs/tool-catalog.md`](docs/tool-catalog.md) — the complete generated MCP tool catalog (136 tools).
 - [`docs/configuration.md`](docs/configuration.md) — the configuration env-var and file catalog.
 - [`docs/privacy.md`](docs/privacy.md) — telemetry & privacy deep-dive.
 - [`docs/authorized-context.md`](docs/authorized-context.md) — the authorized-context primitive (agent identity + task scope).
