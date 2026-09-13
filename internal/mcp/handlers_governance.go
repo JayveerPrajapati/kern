@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/JayveerPrajapati/kern/internal/governance"
+	"github.com/JayveerPrajapati/kern/internal/intel"
 	"github.com/JayveerPrajapati/kern/internal/lock"
 	"github.com/JayveerPrajapati/kern/internal/rename"
 	"os"
@@ -150,6 +151,13 @@ func (s *Server) handleRename(ctx context.Context, args map[string]any) (string,
 			return "", err
 		}
 		if argString(args, "apply") == "true" || argString(args, "apply") == "1" {
+			// P2 mutation gate: applying rewrites every reference; HIGH
+			// verdict blocks unless force is set.
+			if !argBool(args, "force") {
+				if msg := intel.AssessEditRisk(ix, "", oldName).Refusal("rename apply of " + oldName); msg != "" {
+					return "", fmt.Errorf("%s", msg)
+				}
+			}
 			if _, err := rename.Apply(root, rep); err != nil {
 				return "", fmt.Errorf("apply failed (files restored): %w", err)
 			}

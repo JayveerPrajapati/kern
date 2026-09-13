@@ -71,7 +71,6 @@ GEMINI.md
 # --- end kern generated ---
 
 # --- blueprint runtime state (kern generated) ---
-**/.blueprint/
 .blueprint/audit/
 .blueprint/receipts/
 .blueprint/verdict-cache/

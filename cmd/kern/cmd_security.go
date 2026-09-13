@@ -100,7 +100,9 @@ func runSec(rest []string) {
 		}
 	}
 	max := f.max
-	var allow []string
+	// Default gate is error-only: warnings/info are triage material, not CI
+	// failures. Pass --severity explicitly to widen the lens.
+	allow := []string{"error"}
 	if f.severity != "" {
 		allow = strings.Split(f.severity, ",")
 	}
@@ -242,7 +244,7 @@ func runDelete(rest []string) {
 		fatal("delete: %v", err)
 	}
 	if f.apply {
-		runDeleteApply(root, ix, sym, f.json)
+		runDeleteApply(root, ix, sym, f.json, f.force)
 		return
 	}
 	r := intel.DeleteCheck(ix, sym)
@@ -262,8 +264,14 @@ func runDelete(rest []string) {
 // runDeleteApply commits the deletion when the gate sanctions it: the
 // symbol's declaration and its test-only callers are removed, backed up
 // under .kern/rename-backup/ (rename.Apply's transactional machinery), and
-// the index rebuilds automatically on the next load.
-func runDeleteApply(root string, ix *index.Index, sym string, asJSON bool) {
+// the index rebuilds automatically on the next load. A HIGH pre-edit
+// verdict blocks unless force is set.
+func runDeleteApply(root string, ix *index.Index, sym string, asJSON bool, force bool) {
+	if !force {
+		if msg := intel.AssessEditRisk(ix, "", sym).Refusal(fmt.Sprintf("delete --apply of %s", sym)); msg != "" {
+			fatal("%s", msg)
+		}
+	}
 	plan, err := remove.Plan(ix, sym)
 	if err != nil {
 		fatal("delete: %v", err)
@@ -309,6 +317,13 @@ func runRename(rest []string) {
 	}
 	fmt.Println(rename.Render(rep))
 	if f.apply {
+		// P2 mutation gate: applying a rename rewrites every reference. A
+		// HIGH pre-edit verdict blocks unless explicitly forced.
+		if !f.force {
+			if msg := intel.AssessEditRisk(ix, "", oldName).Refusal(fmt.Sprintf("rename --apply of %s", oldName)); msg != "" {
+				fatal("%s", msg)
+			}
+		}
 		if _, err := rename.Apply(root, rep); err != nil {
 			fatal("apply failed (files restored): %v", err)
 		}

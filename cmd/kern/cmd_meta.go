@@ -80,7 +80,7 @@ classifies the request and runs the right tool internally. Examples:
   kern meta "how does dispatch work"
   kern meta "find the NewServer function"
   kern meta "what breaks if I change dispatch"
-  kern meta "compress this log: ERROR: foo"`)
+  kern meta "compress this log: ERROR: dispatchCommand failed"`)
 			return
 		default:
 			if request == "" {

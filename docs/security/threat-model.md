@@ -2,7 +2,7 @@
 
 **Status:** Living document — update when attack surface or mitigations change
 **Scope:** kern, a local, deterministic code-intelligence engine for AI coding agents
-**Last reviewed:** 2026-09-09
+**Last reviewed:** 2026-09-13
 
 ---
 
@@ -113,7 +113,7 @@ By default kern makes **no** network calls. Opt-in network surfaces:
 |---|---|
 | Dependencies | Third-party Go modules compiled into the binary |
 | Build artifacts | Tampering with a released binary or its receipts |
-| Release signing | No GPG signing of releases today (see Residual Risks) |
+| Release signing | Optional GPG signing supported when release secrets are configured (see `docs/security/signed-releases.md`) |
 | Receipt verification | `kern verify-receipt` validates SARIF / in-toto attestations and the local audit-chain hash (`internal/blueprint/cli/verify_receipt.go`, `internal/blueprint/receipt/`) |
 
 ---
@@ -298,7 +298,7 @@ The MCP client (the AI agent host) is **semi-trusted**:
 | # | Risk | Notes |
 |---|---|---|
 | 1 | **Plaintext HTTP by default** | The HTTP MCP transport serves plaintext on loopback by default; TLS is optional (`--tls-cert`/`--tls-key` or `KERN_MCP_TLS_CERT`/`KERN_MCP_TLS_KEY`). Loopback-only binding + Origin checks mitigate, but a local attacker who can sniff loopback traffic or trick a browser into connecting to `127.0.0.1` gets unauthenticated access. Operators who need the transport outside loopback should enable TLS and put it behind an authenticated proxy; `kern-server` is the supported path for network access. |
-| 2 | **No GPG signing of releases** | Binary integrity relies on the build/release process and the receipt verification (`kern verify-receipt`, in-toto/SARIF attestations). There is no cryptographic release signing today. |
+| 2 | **Optional GPG signing** | Release binaries support optional GPG detached signatures when signing keys are configured (`docs/security/signed-releases.md`); binary integrity is verified via `kern verify-receipt` and in-toto/SARIF attestations. |
 | 3 | **Exec tools are powerful** | `kern_exec` / `kern_sandbox` / `kern_execute` run arbitrary host commands as the invoking user. They are opt-in (allowlist + `KERN_ALLOW_EXEC`), fail closed, and can be approval-gated at `HIGH`/`CRITICAL` risk, but a misconfigured `KERN_ALLOW_EXEC=1` + `KERN_EXEC_RISK=LOW` deployment hands an attacker code execution. Operators should keep exec risk at `MEDIUM` or above and review approval requests. |
 | 4 | **Sandbox size limits** | The 100 MiB per-file snapshot cap means very large files are not snapshotted; if such a file is modified or deleted by a run, rollback cannot restore it and refuses loudly. The cap is configurable via `KERN_SANDBOX_MAX_SNAPSHOT_BYTES`, but a raised cap increases memory pressure. |
 | 5 | **Symlink races (TOCTOU)** | Confinement resolves symlinks at check time; a symlink swapped between check and use is not covered. This is the standard TOCTOU limitation and is accepted for a local tool. |

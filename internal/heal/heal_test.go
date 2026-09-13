@@ -88,6 +88,20 @@ func TestFailingFilesExtractsValidPaths(t *testing.T) {
 	}
 }
 
+// TestFailingFilesSkipsPackageHeaders pins the go-build header case: the
+// `# demo` package line must not fuse with the following file:line (the
+// path class excludes newlines), or repair targets — and the P2 gate that
+// reads them — go blind on ordinary build failures.
+func TestFailingFilesSkipsPackageHeaders(t *testing.T) {
+	root := t.TempDir()
+	_ = os.WriteFile(filepath.Join(root, "hub.go"), []byte("x"), 0o644)
+	files := failingFiles(root, "# demo\n./hub.go:3:25: undefined: undefinedName\n")
+	if len(files) != 1 || files[0] != "hub.go" {
+		t.Fatalf("expected hub.go past the package header, got %+v", files)
+	}
+}
+
+
 // TestFailingFilesNeverProbesOutsideRoot verifies absolute paths and ".."
 // escapes in tool output are ignored: untrusted output must not become a
 // filesystem oracle .

@@ -142,7 +142,7 @@ func runHeal(rest []string) {
 		iters = 3
 	}
 	fmt.Printf("kern: heal %s (cmd=%s, rounds=%d)\n", root, f.llm, iters)
-	res := heal.Run(context.Background(), root, task, f.llm, iters, toolTimeout(f))
+	res := heal.Run(context.Background(), root, task, f.llm, iters, toolTimeout(f), f.force)
 	if res.Err != nil {
 		fatal("%v", res.Err)
 	}
@@ -264,7 +264,7 @@ func runSandbox(rest []string) {
 		fatal("Sandbox: %v", err)
 	}
 	if f.json {
-		res := sandbox.Run(context.Background(), root, cmdParts[0], cmdParts[1:], toolTimeout(f))
+		res := sandbox.RunGuarded(context.Background(), root, cmdParts[0], cmdParts[1:], toolTimeout(f), f.force)
 		errStr := ""
 		if res.Err != nil {
 			errStr = res.Err.Error()
@@ -285,7 +285,7 @@ func runSandbox(rest []string) {
 		return
 	}
 	fmt.Printf("kern: sandbox run in %s: %s\n", root, strings.Join(cmdParts, " "))
-	res := sandbox.Run(context.Background(), root, cmdParts[0], cmdParts[1:], toolTimeout(f))
+	res := sandbox.RunGuarded(context.Background(), root, cmdParts[0], cmdParts[1:], toolTimeout(f), f.force)
 	fmt.Print(res.Output)
 	if res.Network != nil {
 		fmt.Printf("kern: network: %s\n", res.Network.Summary())

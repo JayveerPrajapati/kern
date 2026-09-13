@@ -329,6 +329,7 @@ func (p *Platform) WhatIf(kind whatif.ChangeKind, change, newTarget string) (wha
 	// and runtime evidence dimensions. Populate them from the platform's own
 	// deterministic sources so the impact is complete.
 	populateWhatIfEvidence(p, &imp, target)
+	imp.Evidence = intel.AnchorLine(p.ix, target)
 	return imp, renderWhatIfText(kind, change, target, imp), nil
 }
 

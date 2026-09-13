@@ -93,21 +93,28 @@ func providerName() string {
 // is touched only when a provider method is invoked.
 func NewProvider() (Provider, error) {
 	switch providerName() {
+	case "mcp", "host", "sampling":
+		return NewMCPProvider(), nil
 	case "openai", "openrouter", "groq", "litellm", "vllm", "azure":
 		return NewOpenAIProvider()
 	case "anthropic":
 		return NewAnthropicProvider()
 	case "google", "gemini":
 		return NewGoogleProvider()
-	case "claude", "codex", "gemini-cli", "qwen":
+	case "claude", "codex", "gemini-cli", "qwen", "agy", "antigravity":
 		return NewLocalCliProvider(strings.TrimSuffix(providerName(), "-cli")), nil
 	case "auto":
-		// auto: Ollama first, then any locally-wired agent CLI (claude,
-		// codex, gemini, qwen) that is installed — so LLM-dependent
-		// features work on machines without Ollama but with a wired
-		// local agent. Construction never touches the network; a dead
-		// Ollama fails fast at Generate time and the chain moves on.
-		chain := []Provider{NewOllamaProvider()}
+		// auto: active MCP host sampler (when connected), then Ollama, then
+		// any locally-wired agent CLI (claude, opencode, codex, gemini, qwen,
+		// agy, antigravity) that is installed — so LLM-dependent features
+		// work seamlessly with host agent model delegation or local fallback.
+		// Construction never touches the network; a dead Ollama fails fast
+		// at Generate time and the chain moves on.
+		var chain []Provider
+		if HasHostSampler() {
+			chain = append(chain, NewMCPProvider())
+		}
+		chain = append(chain, NewOllamaProvider())
 		for _, name := range AvailableLocalAgents() {
 			chain = append(chain, NewLocalCliProvider(name))
 		}
@@ -135,6 +142,9 @@ func MaskRequired() bool {
 	}
 	if _, isLocal := p.(*LocalCliProvider); isLocal {
 		return false // agent CLIs run on this machine
+	}
+	if _, isMCP := p.(*MCPProvider); isMCP {
+		return false // MCP host agent runs in the operator's active session
 	}
 	return true
 }

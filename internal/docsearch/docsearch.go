@@ -353,7 +353,9 @@ func (ix *Index) Search(query string, k int) []Score {
 		if sq, err := emb.EmbedText(query); err == nil {
 			for _, d := range ix.Docs {
 				if len(d.Semantic) > 0 {
-					dense = append(dense, Score{Doc: d, Sim: denseCosine(sq, d.Semantic)})
+					if sim := denseCosine(sq, d.Semantic); sim > 0.1 {
+						dense = append(dense, Score{Doc: d, Sim: sim})
+					}
 				}
 			}
 		}
@@ -361,7 +363,9 @@ func (ix *Index) Search(query string, k int) []Score {
 
 	var cosine []Score
 	for _, d := range ix.Docs {
-		cosine = append(cosine, Score{Doc: d, Sim: Cosine(q, d.Vec)})
+		if sim := Cosine(q, d.Vec); sim >= 0.20 {
+			cosine = append(cosine, Score{Doc: d, Sim: sim})
+		}
 	}
 	sort.Slice(cosine, func(i, j int) bool {
 		if cosine[i].Sim != cosine[j].Sim {

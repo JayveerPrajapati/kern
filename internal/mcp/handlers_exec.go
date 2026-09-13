@@ -48,7 +48,7 @@ func (s *Server) handleSandbox(ctx context.Context, id string, args map[string]a
 				timeout = time.Duration(sec) * time.Second
 			}
 		}
-		res := sandbox.Run(ctx, root, parts[0], parts[1:], timeout)
+		res := sandbox.RunGuarded(ctx, root, parts[0], parts[1:], timeout, argBool(args, "force"))
 		var b strings.Builder
 		if res.OK {
 			fmt.Fprintf(&b, "status: PASS (%s), changes kept\n", res.Duration.Round(time.Millisecond))
@@ -178,7 +178,7 @@ func (s *Server) handleHeal(ctx context.Context, id string, args map[string]any)
 		}
 		stop := s.startProgress(ctx, id, "kern_heal")
 		defer stop()
-		res := heal.Run(ctx, root, task, model, rounds, timeout)
+		res := heal.Run(ctx, root, task, model, rounds, timeout, argBool(args, "force"))
 		var b strings.Builder
 		if res.Validated {
 			fmt.Fprintf(&b, "status: healed OK after %d round(s)\n", res.Iterations)

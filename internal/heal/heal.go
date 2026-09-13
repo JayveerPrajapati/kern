@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"github.com/JayveerPrajapati/kern/internal/diff"
+	"github.com/JayveerPrajapati/kern/internal/index"
+	"github.com/JayveerPrajapati/kern/internal/intel"
 	"github.com/JayveerPrajapati/kern/internal/llm"
 	"github.com/JayveerPrajapati/kern/internal/sandbox"
 	"github.com/JayveerPrajapati/kern/internal/validate"
@@ -96,7 +98,13 @@ func Apply(root string, reps []Replacement) error {
 // correction attempts. Original tree is untouched; the diff is computed
 // against the live files so the user can review and apply. ctx cancels the
 // loop (validation runs are aborted) when the caller aborts.
-func Run(ctx context.Context, root, task, model string, maxRounds int, timeout time.Duration) *Result {
+//
+// force overrides the P2 mutation gate: each round's repair targets are
+// assessed with the shared pre-edit verdict, and a HIGH verdict refuses the
+// round unless force is set. The live tree is never written either way — the
+// gate keeps the loop from burning LLM rounds on (and proposing) hub-wide
+// rewrites the operator has not sanctioned.
+func Run(ctx context.Context, root, task, model string, maxRounds int, timeout time.Duration, force bool) *Result {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -135,6 +143,14 @@ func Run(ctx context.Context, root, task, model string, maxRounds int, timeout t
 		return res
 	}
 	iter := 0
+	// Gate index, loaded once: repairs land in the snapshot while the live
+	// tree (and therefore this index) stays fixed across rounds.
+	var gateIx *index.Index
+	if !force {
+		if ix, ierr := intel.ReadIndex(root); ierr == nil {
+			gateIx = ix
+		}
+	}
 	for iter < maxRounds {
 		iter++
 		if ctx.Err() != nil {
@@ -144,6 +160,17 @@ func Run(ctx context.Context, root, task, model string, maxRounds int, timeout t
 			return res
 		}
 		failPaths := failingFiles(root, base.Output)
+		// P2 mutation gate: refuse to draft hub-wide rewrites without
+		// sanction. The live tree is untouched either way — the gate fires
+		// before any LLM round is spent.
+		if gateIx != nil && len(failPaths) > 0 {
+			if msg := intel.AssessEditFiles(gateIx, failPaths).Refusal("heal"); msg != "" {
+				res.Err = fmt.Errorf("%s", msg)
+				res.Iterations = iter - 1
+				res.Duration = time.Since(start)
+				return res
+			}
+		}
 		var b strings.Builder
 		b.WriteString("TASK: " + task + "\n\n")
 		b.WriteString("VALIDATION COMMAND: " + c.Cmd + " " + strings.Join(c.Args, " ") + "\n\n")
@@ -207,7 +234,7 @@ func Run(ctx context.Context, root, task, model string, maxRounds int, timeout t
 	return res
 }
 
-var failLineRe = regexp.MustCompile(`(?m)^([^\s:][^:]+):(\d+)(?::\d+)?[: ]`)
+var failLineRe = regexp.MustCompile(`(?m)^([^\s:\n][^:\n]+):(\d+)(?::\d+)?[: ]`)
 
 // failingFiles extracts relative file paths from compiler/test output and
 // keeps only those that exist under root. Paths are resolved against root

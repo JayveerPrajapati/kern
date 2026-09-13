@@ -31,6 +31,7 @@ type ExploreReport struct {
 	NearestDepth map[string]int    `json:"nearest_depth,omitempty"`
 	StaleBanner  string            `json:"stale_banner,omitempty"`
 	Stats        *index.TokenStats `json:"stats,omitempty"`
+	Evidence     string            `json:"evidence,omitempty"` // P2 anchor: file:line + certificate for the subject
 }
 
 // Explore returns verbatim source, the direct call flow (callers and callees),
@@ -38,6 +39,21 @@ type ExploreReport struct {
 // means unlimited.
 func Explore(ix *index.Index, symbol string, depth, maxNodes int) (*ExploreReport, error) {
 	return ExploreMin(ix, symbol, depth, maxNodes, "")
+}
+
+// DefaultExploreBounds maps unset explore bounds to the P2-8 promotion
+// defaults: depth 2 hops, 30 radius nodes. Negative depth means unset;
+// non-positive maxNodes means unset (0 is the flags zero value, so an
+// explicit --max 0 also takes the default — pass a large N for uncapped,
+// or --depth 0 for an uncapped radius which the negative check preserves).
+func DefaultExploreBounds(depth, maxNodes int) (int, int) {
+	if depth < 0 {
+		depth = 2
+	}
+	if maxNodes <= 0 {
+		maxNodes = 30
+	}
+	return depth, maxNodes
 }
 
 // ExploreMin is Explore with a minimum-confidence filter: callers and callees
@@ -77,6 +93,7 @@ func ExploreBudgeted(ix *index.Index, symbol string, depth, maxNodes int, minCon
 		Resolved:   resolved,
 		Definition: d,
 		Source:     ix.Context(resolved, 0),
+		Evidence:   AnchorLine(ix, resolved),
 	}
 	passes := MinConfidenceFilter(minConf)
 	seenCallers := map[string]bool{}
@@ -161,6 +178,16 @@ func ExploreBudgeted(ix *index.Index, symbol string, depth, maxNodes int, minCon
 // A nil/zero budget leaves everything verbatim and records no stats.
 func (rep *ExploreReport) fitBudget(ix *index.Index, maxTokens int, calleeSyms []index.Symbol) {
 	if maxTokens <= 0 {
+		// Unbudgeted path keeps verbatim source, but the savings panel is
+		// always populated (P2-8): the answer states its own token cost
+		// even when nothing is folded.
+		n := tokenize.Count(rep.Source)
+		rep.Stats = &index.TokenStats{
+			FullContext:   n,
+			CompactTokens: n,
+			SavingsPct:    0,
+			Source:        "explore",
+		}
 		return
 	}
 	rawSource := rep.Source
@@ -255,12 +282,24 @@ func RenderExplore(r *ExploreReport) string {
 		b.WriteString(skel)
 		b.WriteString("\n")
 	}
-	if r.Stats != nil {
+	if r.Stats != nil && r.Stats.Summary() != "" {
 		b.WriteString("\n")
 		b.WriteString(r.Stats.Summary())
 		b.WriteString("\n")
 	}
+	if r.Evidence != "" {
+		b.WriteString("\n")
+		b.WriteString(r.Evidence)
+		b.WriteString("\n")
+	}
 	return strings.TrimSuffix(b.String(), "\n")
+}
+
+// RenderExploreExplain renders the report plus the why-rationale section —
+// what the symbol is, who depends on it and why (see FormatWhy). One call
+// answers what touches this, how, and why it exists (P2-8 --explain).
+func RenderExploreExplain(r *ExploreReport, info WhyInfo) string {
+	return RenderExplore(r) + "\n\n== why ==\n" + FormatWhy(info)
 }
 
 func joinLines(in []string) string {

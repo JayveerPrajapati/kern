@@ -830,13 +830,14 @@ Generate a deterministic conventional-commit message (type, scope, subject, per-
 - **Risk level:** critical
 - **Required:** `command`
 
-Run a risky command inside a snapshot of the project (#15): on non-zero exit the tree is rolled back exactly (files restored, new files removed). Success keeps changes. Use before destructive operations, migrations, or agent-applied edits. Gated by the command-execution governance firewall (KERN_ALLOW_EXEC / KERN_TOOLS) and command output is PII/secret-masked before return.
+Run a risky command inside a snapshot of the project (#15): on non-zero exit the tree is rolled back exactly (files restored, new files removed). Success keeps changes unless they touch HIGH-risk files, in which case the tree is likewise restored unless force=true. Use before destructive operations, migrations, or agent-applied edits. Gated by the command-execution governance firewall (KERN_ALLOW_EXEC / KERN_TOOLS) and command output is PII/secret-masked before return.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `root` | string | no | Project root to snapshot and run in (defaults to current directory) |
 | `command` | string | yes | Full command to run, e.g. \"make migrate\" or \"sh -c 'npm test'\" (shell words, not a shell string) |
 | `timeout` | string | no | Timeout in seconds (default 120) |
+| `force` | string | no | If true, keep changes even when touched files carry a HIGH pre-edit verdict (default restores) |
 
 ### `kern_heal`
 
@@ -853,6 +854,7 @@ Self-correction loop (#9): run validation; on failure ask a local Ollama model t
 | `model` | string | no | Ollama model (default KERN_MODEL or llama3.2) |
 | `max_rounds` | string | no | Correction attempts (default 3) |
 | `timeout` | string | no | Validation timeout in seconds (default 121) |
+| `force` | string | no | If true, attempt repairs even when the failing files carry a HIGH pre-edit verdict (default refuses) |
 
 ### `kern_run_build`
 
@@ -934,6 +936,7 @@ Structural symbol rename on the AST index (P0-5): previews every definition/refe
 | `symbol` | string | yes | Symbol to rename (package-level Go name, e.g. Widget) |
 | `new_name` | string | yes | New identifier |
 | `apply` | string | no | If true, commit the rename (with backups + rollback); otherwise return the preview only |
+| `force` | string | no | If true, apply even when the symbol carries a HIGH pre-edit verdict (default refuses) |
 
 ### `kern_exec`
 

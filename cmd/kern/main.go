@@ -35,7 +35,7 @@ Usage:
   kern compact <file>                             symbolic summary of a file
   kern project [root]                             compact project map
   kern pack [root] [--max-tokens N] [--out FILE]  single paste-ready file: tree + instructions + contents
-kern pack --graph [--symbol X] [--out FILE]      graph-snapshot pack: adjacency + signatures + fingerprint (~1-5 pct of file tokens)
+  kern pack --graph [--symbol dispatchCommand] [--out FILE]  graph-snapshot pack: adjacency + signatures + fingerprint (~1-5 pct of file tokens)
   kern check [--staged] [--repo DIR] [--source agent|ide|human]  validate staged changes against policy
   kern fix [--repo DIR] [--file FILE] [--content ...]             validate agent-proposed fixes in an isolated worktree
   kern ci [--repo DIR] [--base main] [--head HEAD]                CI change-governance validation (base vs head)
@@ -184,6 +184,7 @@ kern twin [root] [--root ROOT]                  digital twin knowledge graph: no
    kern commit [--staged] [--all] [--message TEXT] [--dry-run]   stage + commit with a generated conventional message
    kern version                                    show version
   kern guide                                      categorized tool usage guide (performance tiers)
+  kern completion <bash|zsh|fish>                 generate shell completion scripts
   kern hook <install|diff|store|claude-post|claude-prompt|gemini-after|gemini-prompt>   git hooks (install/diff/store) or agent hooks (read hook JSON on stdin)
   kern mcp                                        run MCP server on stdio
   kern meta "<request>"                           single entry point: describe what you need, kern picks the tool

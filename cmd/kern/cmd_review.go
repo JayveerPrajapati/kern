@@ -374,7 +374,13 @@ func annotateImpactCallees(text, target, root string) string {
 			inCalls = false // next section
 			continue
 		}
-		name := simpleSymName(strings.TrimSpace(trimmed[2:]))
+		entry := strings.TrimSpace(trimmed[2:])
+		// P1-4: skip renderer summary lines (stdlib collapse, "+N more") so
+		// they are never mislabeled as transitive callees.
+		if strings.HasPrefix(entry, "stdlib:") || strings.Contains(entry, "use --json for full list") {
+			continue
+		}
+		name := simpleSymName(entry)
 		if direct[name] {
 			lines[i] = ln + " (direct)"
 		} else {
@@ -441,6 +447,7 @@ func runVerify(rest []string) {
 		// injection/extraction into a temp copy of the repo.
 		rep := verification.VerifyFullPipeline(root, symbol)
 		if f.json {
+			rep.Version = version
 			printJSON(rep)
 			return
 		}
@@ -468,6 +475,7 @@ func runVerify(rest []string) {
 			}
 			if f.json {
 				printJSON(map[string]any{
+					"version":    version,
 					"scanned":    rep.Symbols,
 					"silent":     rep.Silent,
 					"violations": rep.Violations,
@@ -487,7 +495,7 @@ func runVerify(rest []string) {
 		}
 		ok, reasons := verification.VerifySilentOrchestration(root, symbol)
 		if f.json {
-			printJSON(map[string]any{"ok": ok, "reasons": reasons})
+			printJSON(map[string]any{"version": version, "ok": ok, "reasons": reasons})
 			return
 		}
 		if ok {
@@ -507,6 +515,7 @@ func runVerify(rest []string) {
 			fatal("VerifyTokenReduction: %v", err)
 		}
 		if f.json {
+			res.Version = version
 			printJSON(res)
 			return
 		}
@@ -533,6 +542,7 @@ func runVerify(rest []string) {
 		})
 		res := h.Run()
 		if f.json {
+			res.Version = version
 			printJSON(res)
 			return
 		}
@@ -563,7 +573,8 @@ func runVerify(rest []string) {
 			valid = append(valid, s.Name)
 		}
 		if f.json {
-			printJSON(map[string]any{"valid": valid, "invalid": invalid})
+			printJSON(map[string]any{"version": version, "valid": valid, "invalid": invalid})
+			return
 		}
 		return
 	case f.scanPath != "":
@@ -575,6 +586,7 @@ func runVerify(rest []string) {
 			fatal("Scan: %v", err)
 		}
 		if f.json {
+			rep.Version = version
 			printJSON(rep)
 			return
 		}
@@ -588,9 +600,13 @@ func runVerify(rest []string) {
 	// Two forms share this subcommand. The high-level form is
 	// `kern verify <types>` (or `kern verify` with no positional, defaulting
 	// to build,test); the classic claims form is `kern verify <file|-> [root]`.
-	if len(args) == 0 || isVerifyTypes(args[0]) {
+	// `--types` is accepted as an explicit alias for the positional form so
+	// CLI matches the MCP `kern_verify(types=...)` surface.
+	if f.types != "" || len(args) == 0 || isVerifyTypes(args[0]) {
 		typesArg := "build,test"
-		if len(args) > 0 && args[0] != "" {
+		if f.types != "" {
+			typesArg = f.types
+		} else if len(args) > 0 && args[0] != "" {
 			typesArg = args[0]
 		}
 		var types []string
@@ -622,6 +638,7 @@ func runVerify(rest []string) {
 			fatal("Verify: %v", err)
 		}
 		if f.json {
+			v.Version = version
 			printJSON(v)
 			return
 		}
@@ -710,6 +727,7 @@ func runVerify(rest []string) {
 	}
 	rep := verify.Sorted(verify.Verify(ix, root, string(b)))
 	if f.json {
+		rep.Version = version
 		printJSON(rep)
 		return
 	}

@@ -71,7 +71,7 @@ kern changes / review / hubs / testgaps / entries / flows / communities / path /
                                 change impact and code-intelligence analyses
 kern fts "<query>" [root] [--limit N]               full-text search over the SQLite index
                                 (requires -tags sqlite)
-kern cache (dir|entries|size|maintain) [root] [--dry-run]   cache GC: gzip-archive dormant entries, TTL-evict stale ones
+kern cache [root] [--dry-run]                           cache GC: gzip-archive dormant entries, TTL-evict stale ones
 kern lsp [root]                                     LSP over stdio: hover/definition/references from the index
 kern guard init [root]                              scaffold .kern/boundaries.json
 kern guard check [root] [--file F] [--range a..b] [--json|--sarif] [--threshold N]
@@ -83,34 +83,34 @@ kern verify-receipt <id> [--sarif] [--in-toto] [--check-diff]   verify receipt s
 kern ops "<intent>" [--level L0-L5] [--non-interactive] [--json]   KernOps terminal cockpit: governed execution in ephemeral sandboxes
 kern ops triage --log <path|-> [--non-interactive] [--json]         Auto-SRE incident triage: squeeze log, AST correlation, sandbox repro, auto-repair
 kern fw [root] [--catalog]                       framework detection
-kern verify <file|-> [root]                     hallucination check: file:line claims; `kern verify <types>` (build,test,security,arch,deps) runs the verification engine
+kern verify [<types>|<file|->] [root] [--types T]   hallucination check for file claims, or unified verification engine (types: build,test,security,architecture,dependency)
 kern validate [root]                             run the project's build/test, compact
-kern heal "<task>" [--model MODEL] [--rounds N]  snapshot-based LLM auto-fix
+kern heal "<task>" [--llm MODEL] [--max N] [--force]  snapshot-based LLM auto-fix
 kern analyze <change> [--root ROOT]          analyze a proposed change against the whole system (ADR)
 kern team [--root ROOT]                      build the standard specialist team; list roles + task states
 kern risk <change> [--root ROOT]             deterministic risk report for a proposed change
 kern bridges [root] [--limit N] [--json]     cross-package bridge detection (coupling points)
 kern sandbox "<command>"                         run with filesystem snapshot + rollback; every run reports its network policy (posture + network-error hits from output)
 kern pre-edit <file|symbol>                       predictive blast-radius, untested hotspot detection
-kern compose <pipeline.json>                      multi-tool deterministic pipeline runner
+kern compose '<pipeline-json>'                    multi-tool deterministic pipeline runner (inline JSON)
 kern prompt-fill <template>                       compile dynamic prompt with injected project context
 kern semantic-diff <file-a> <file-b>              AST-level functional diff of modified symbols
-kern evidence-anchor <claims.json>                SHA-256 evidence certificate verification
+kern evidence-anchor "<claim-text>"               SHA-256 evidence certificate verification for claim
 kern context-watch                                conversation context bloat monitor & compaction
 kern agent-fingerprint                            agent tool sequence hashing and loop detection
 kern explain <symbol>                             graph-backed architectural narrative synthesis
-kern cross-repo-impact <symbol> --repos <paths>   multi-repo contract compatibility and blast radius
+kern cross-repo-impact <symbol> --repo <path>...  multi-repo contract compatibility and blast radius
 kern memory-ranked <query>                        decay-weighted memory recall with half-life scoring
-kern policy-dsl --rules <policy.json>             declarative policy-as-code evaluation
+kern policy-dsl --policy <policy.json>            declarative policy-as-code evaluation
 kern agent-coordination (claim|release|list)      multi-agent workspace claims with TTL and handoffs
 kern agent-role-rbac                              role-based tool access control
 kern stream                                       response token chunking and streaming
 kern ast-transform <file> [--add-field|...]       deterministic AST-level transformations
-kern semantic-merge <base> <ours> <theirs>        AST-aware 3-way semantic merge
-kern synthesize-test <symbol> [file]              synthesize table-driven unit tests from signatures
+kern semantic-merge --base <b> --local <l> --remote <r>   AST-aware 3-way semantic merge
+kern synthesize-test <symbol> [--file <path>]     synthesize table-driven unit tests from signatures
 kern health                                       MCP server health and index freshness report
 kern schema ...                                  JSON-schema validation
-kern docs index/search/fetch                     local docs index for doc search
+kern docs index/clear/fetch                       local docs index (index|clear|fetch)
 kern version                                     print the installed version
 kern serve [--root PATH] [--addr ADDR] [--enterprise] [--project NAME=PATH]...
                                                 start the REST API + dashboard server
@@ -154,7 +154,7 @@ kern exec --list                                    # runtimes installed here
 
 Runtimes resolve from PATH (python3/python, node/bun/deno, bash/sh, perl,
 ruby, php, lua, julia, R, go, rust). Runs in a fresh temp dir with a hard
-timeout (10s default) and a stdout byte cap — only stdout is returned.
+timeout (15s default) and a stdout byte cap — only stdout is returned.
 
 The script runs with a sanitized environment (HOME/XDG pointed into the temp
 dir, secrets stripped) and, when the platform's unprivileged user namespaces

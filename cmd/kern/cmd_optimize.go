@@ -126,8 +126,11 @@ func runCompact(rest []string) {
 	if f.terseCode {
 		content = kernctx.PruneCode(file, content, true)
 	}
-	fmt.Println(code.RenderTier(file, content, tier))
-
+	rendered := code.RenderTier(file, content, tier)
+	fmt.Println(rendered)
+	before := tokenize.Count(string(content))
+	after := tokenize.Count(rendered)
+	printSavingsFooter(os.Stderr, before, after, kernctx.CostPerToken())
 }
 
 // confineToRoot resolves file so it stays lexically inside root, mirroring the

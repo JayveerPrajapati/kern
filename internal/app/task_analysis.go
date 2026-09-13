@@ -12,6 +12,7 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/domain"
 	"github.com/JayveerPrajapati/kern/internal/eventbus"
 	"github.com/JayveerPrajapati/kern/internal/governance"
+	"github.com/JayveerPrajapati/kern/internal/intel"
 	"github.com/JayveerPrajapati/kern/internal/intelligence"
 	"github.com/JayveerPrajapati/kern/internal/lenses"
 	"github.com/JayveerPrajapati/kern/internal/memory"
@@ -390,7 +391,32 @@ func (s *TaskService) collectGraphImpact(g *intelligence.Graph, target string, s
 	// to indexed nodes (e.g. "fmt.Println") survive instead of emptying the
 	// section - methods that only call external code reported "What it
 	// calls: 0" while `kern why` showed the edges (e2e round 2, P0-1).
-	rep.WhatItCalls = append(rep.WhatItCalls, g.WhatDoesXDependOnNames(target, strict)...)
+	// P1-4: order direct (1-hop) callees first, then transitive-only ones.
+	// The full transitive set is preserved for --json; the text renderer
+	// truncates with "+N more" and collapses stdlib. Direct-first keeps the
+	// actionable entries visible after truncation on hubs like loadOrBuild
+	// (1 direct + 1273 transitive).
+	{
+		all := g.WhatDoesXDependOnNames(target, strict)
+		direct := g.DirectDependsOnNames(target, strict)
+		isDirect := make(map[string]bool, len(direct))
+		for _, d := range direct {
+			isDirect[d] = true
+		}
+		seen := make(map[string]bool, len(all))
+		for _, d := range direct {
+			if !seen[d] {
+				seen[d] = true
+				rep.WhatItCalls = append(rep.WhatItCalls, d)
+			}
+		}
+		for _, c := range all {
+			if !isDirect[c] && !seen[c] {
+				seen[c] = true
+				rep.WhatItCalls = append(rep.WhatItCalls, c)
+			}
+		}
+	}
 	// 3. What services depend on it?
 	for _, n := range g.WhatServicesAffectedPrecise(target, strict) {
 		rep.ServicesDepend = append(rep.ServicesDepend, nodeName(n))
@@ -489,6 +515,7 @@ func (s *TaskService) impactCitedFiles(t *agent.Task, rep *domain.ImpactReport) 
 // report artifact, and completes the Task lifecycle (ANALYZING → COMPLETED).
 func (s *TaskService) finalizeImpact(t *agent.Task, rep *domain.ImpactReport) (*agent.Task, domain.ImpactReport, string, error) {
 	t.Impact = rep
+	rep.Evidence = intel.AnchorLine(s.platform.Index(), rep.Target)
 	out := renderImpactText(*rep)
 	if banner := s.platform.Index().StalenessBanner(s.impactCitedFiles(t, rep)); banner != "" {
 		out = banner + "\n\n" + out

@@ -9,9 +9,9 @@ there's nothing to wire per language. What exists:
   forbidden dependency crossings (e.g. a frontend importing a backend DB
   model); `kern guard` (or `kern_guard_check`) rejects a diff before it
   touches the filesystem. `kern guard init` writes a starter file.
-- **`.kern/docs/`** (optional) — local doc index. `kern docs index` (or
+- **Doc search index** (optional) — `kern docs index` (or
   `kern_doc_index(semantic=true)`) embeds project docs with a local Ollama
-  model for real-meaning `kern_doc_search`.
+  model for real-meaning `kern_doc_search`, stored in user cache.
 - **`.kern/agents.json`** (optional) — custom agent wiring. Declare
   forked/private agents as JSON (`name`, config `path` with `~`/`$VAR`
   expansion, servers `key`, `entry` shape `stdio`|`cmd`, `scope`
@@ -46,15 +46,10 @@ The estimator stays the default so historical numbers remain comparable;
 counts. `KERN_CACHE_ARCHIVE_DAYS` (default 7) and `KERN_CACHE_TTL_DAYS`
 (default 30) drive the cache garbage collector: entries untouched past
 the archive age are gzip-compressed in place, and past the TTL they are
-evicted (`kern cache maintain [--dry-run]` runs it on demand; it also
+evicted (`kern cache [root] [--dry-run]` runs it on demand; it also
 runs automatically, at most once an hour). `KERN_MCP_AUDIT_DIR` overrides
 where the MCP server persists its tool-call audit chain (default
 `<project>/.kern/audit`).
-`KERN_INCREMENTAL=1` makes the web console rebuild its index
-incrementally on staleness: unchanged files (mtime fast path, then
-content-hash check) reuse the previous index's per-file parse results
-instead of re-parsing. Rebuilds stay equivalent to full rebuilds; the
-flag only changes how the new index is computed.
 - **`.kern/config.json`** (optional) — one config path for operator knobs,
   resolved as **env var > `.kern/config.json` > built-in default**, per
   project root. JSON, stdlib-only, parsed once per root; a malformed file

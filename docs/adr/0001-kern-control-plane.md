@@ -2,7 +2,7 @@
 
 > **Note:** This ADR describes kern's aspirational north-star architecture. The currently delivered scope is narrower — see the [README](../../README.md) for what's shipped today. The "control plane" framing here is the long-term direction, not the current state.
 
-- **Status:** Accepted
+- **Status:** Proposed (North-Star Architecture)
 - **Date:** 2026-08-23
 - **Driver:** KERN 2.0 CANONICAL END-TO-END BUILD SPEC V3
 

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/JayveerPrajapati/kern/internal/app"
+	kernctx "github.com/JayveerPrajapati/kern/internal/context"
 	"github.com/JayveerPrajapati/kern/internal/intel"
 	"os"
 	"path/filepath"
@@ -708,7 +709,7 @@ func runExplore(rest []string) {
 		fatalUsage("flags: %v", err)
 	}
 	if len(args) < 1 {
-		fatalUsage("usage: kern explore <symbol> [root] [--depth N] [--max N]")
+		fatalUsage("usage: kern explore <symbol> [root] [--depth N] [--max N] [--explain]")
 	}
 	root := f.root
 	if root == "" {
@@ -721,14 +722,9 @@ func runExplore(rest []string) {
 	if err != nil {
 		fatal("Explore: %v", err)
 	}
-	depth := f.depth
-	if depth < 0 {
-		depth = 0
-	}
-	maxN := f.max
-	if maxN < 0 {
-		maxN = 0
-	}
+	// P2-8 promotion defaults: a bounded answer (2 hops, 30 nodes) unless
+	// the caller asks otherwise. --depth 0 keeps the uncapped radius.
+	depth, maxN := intel.DefaultExploreBounds(f.depth, f.max)
 	rep, err := intel.ExploreBudgeted(ix, args[0], depth, maxN, f.minConfidence, f.maxTokens)
 	if err != nil {
 		// Unknown symbols get the same did-you-mean suggestions as the graph
@@ -743,8 +739,16 @@ func runExplore(rest []string) {
 		printJSON(rep)
 		return
 	}
-	fmt.Println(intel.RenderExplore(rep))
-
+	out := intel.RenderExplore(rep)
+	if f.explain {
+		if info, ok := intel.Why(ix, args[0]); ok {
+			out = intel.RenderExploreExplain(rep, info)
+		}
+	}
+	fmt.Println(out)
+	if rep.Stats != nil {
+		printSavingsFooter(os.Stderr, rep.Stats.FullContext, rep.Stats.CompactTokens, kernctx.CostPerToken())
+	}
 }
 
 func runNear(rest []string) {

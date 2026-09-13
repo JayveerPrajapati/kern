@@ -25,6 +25,7 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/prompt"
 	"github.com/JayveerPrajapati/kern/internal/relay"
 	"github.com/JayveerPrajapati/kern/internal/swap"
+	"github.com/JayveerPrajapati/kern/internal/tokenize"
 )
 
 // kernJSONContractVersion is the schema version for machine-readable JSON output.
@@ -345,7 +346,17 @@ func runContext(rest []string) {
 		ctxText = profiles.ApplyProfile(p, ctxText)
 	}
 	fmt.Println(ctxText)
-
+	if def, ok := ix.ResolveName(symbol); ok && def.File != "" {
+		filePath := def.File
+		if !filepath.IsAbs(filePath) {
+			filePath = filepath.Join(root, filePath)
+		}
+		if fileContent, rerr := code.ReadFile(filePath); rerr == nil {
+			before := tokenize.Count(string(fileContent))
+			after := tokenize.Count(ctxText)
+			printSavingsFooter(os.Stderr, before, after, kernctx.CostPerToken())
+		}
+	}
 }
 
 func runLock(rest []string) {

@@ -867,7 +867,7 @@ func (s *Server) handleExplore(ctx context.Context, args map[string]any) (string
 		if err != nil {
 			return "", err
 		}
-		depth := 0
+		depth := 2
 		if v := argString(args, "depth"); v != "" {
 			n, err := atoiArg(v, depth)
 			if err != nil {
@@ -875,7 +875,7 @@ func (s *Server) handleExplore(ctx context.Context, args map[string]any) (string
 			}
 			depth = n
 		}
-		maxNodes := 0
+		maxNodes := 30
 		if v := argString(args, "max"); v != "" {
 			n, err := atoiArg(v, maxNodes)
 			if err != nil {
@@ -942,7 +942,33 @@ func (s *Server) handleExplore(ctx context.Context, args map[string]any) (string
 			names = append(names, rep.BlastRadius...)
 			s.stampProvenance(ctx, s.rawProvenance(ix, symbolProvenances(ix, names)))
 		}
-		return intel.RenderExplore(rep) + s.freshnessFooter(args, ix), nil
+		rendered := intel.RenderExplore(rep)
+		if argString(args, "explain") == "true" {
+			if info, ok := intel.Why(ix, symbol); ok {
+				if gov != nil {
+					// Governed mode: the rationale names callers, so it
+					// gets the same scope filter as the report itself.
+					names := make([]string, 0, len(info.Callers))
+					for _, c := range info.Callers {
+						names = append(names, c.Name)
+					}
+					keep := map[string]bool{}
+					for _, n := range gov.filterQualified(ix, names, false) {
+						keep[n] = true
+					}
+					kept := info.Callers[:0]
+					for _, c := range info.Callers {
+						if keep[c.Name] {
+							kept = append(kept, c)
+						}
+					}
+					info.Callers = kept
+					info.InEdges = len(kept)
+				}
+				rendered = intel.RenderExploreExplain(rep, info)
+			}
+		}
+		return rendered + s.freshnessFooter(args, ix), nil
 	}
 }
 func (s *Server) handleFtsSearch(ctx context.Context, args map[string]any) (string, error) {

@@ -20,7 +20,13 @@ func (s *Server) handleLLMProviders(ctx context.Context, args map[string]any) (s
 	}
 	probe, _ := args["probe"].(bool)
 	var b strings.Builder
-	fmt.Fprintf(&b, "provider: %s (auto chain: ollama → %s)\n", llm.ProviderName(), strings.Join(llm.AvailableLocalAgents(), " → "))
+	chainNames := []string{}
+	if llm.HasHostSampler() {
+		chainNames = append(chainNames, "host")
+	}
+	chainNames = append(chainNames, "ollama")
+	chainNames = append(chainNames, llm.AvailableLocalAgents()...)
+	fmt.Fprintf(&b, "provider: %s (auto chain: %s)\n", llm.ProviderName(), strings.Join(chainNames, " → "))
 
 	// LLM providers first (the priority question), then wired agents.
 	write := func(name, kind, status, note string) {
@@ -29,8 +35,14 @@ func (s *Server) handleLLMProviders(ctx context.Context, args map[string]any) (s
 		}
 		fmt.Fprintf(&b, "%-12s %-13s %s\n", name, kind, status)
 	}
-	for _, name := range append([]string{"ollama"}, llm.AvailableLocalAgents()...) {
+	for _, name := range chainNames {
 		switch name {
+		case "host":
+			if llm.HasHostSampler() {
+				write(name, "llm-provider", "ok", "active MCP host sampling connected")
+			} else {
+				write(name, "llm-provider", "unreachable", "no MCP host sampling registered")
+			}
 		case "ollama":
 			c := llm.New("")
 			if c.Available() {

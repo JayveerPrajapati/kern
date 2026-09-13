@@ -2,6 +2,7 @@ package app
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/JayveerPrajapati/kern/internal/domain"
@@ -58,6 +59,9 @@ func renderWhatIfText(kind whatif.ChangeKind, change, target string, imp whatif.
 	}
 	fmt.Fprintf(&b, "risk: %s\n", imp.Risk)
 	fmt.Fprintf(&b, "recommendation: %s\n", imp.Recommendation)
+	if imp.Evidence != "" {
+		fmt.Fprintf(&b, "%s\n", imp.Evidence)
+	}
 	for _, c := range imp.Claims {
 		fmt.Fprintf(&b, "claim[%s] %s (%.1f): %s\n", c.Type, c.Provenance, c.Confidence, c.Statement)
 	}
@@ -213,6 +217,121 @@ func nodeName(n domain.Node) string {
 	return n.ID
 }
 
+// maxImpactListItems caps how many entries of any impact section the text
+// renderer prints. Counts stay exact; overflow collapses to a "+N more (use
+// --json for full list)" line, mirroring the concise what-if style (P1-4).
+// Full data is preserved in ImpactReport for --json / MCP / REST.
+const maxImpactListItems = 20
+
+// stdlibPkgs is the Go standard-library top-level package set used to collapse
+// transitive stdlib fan-out in "What it calls" (P1-4: loadOrBuild fanned to
+// 1274 entries incl. strings.*/os.*/fmt.*). Only these exact first-segment
+// names collapse; internal packages (index, app, domain, ...) are never in
+// this set so project calls are always shown in full.
+var stdlibPkgs = map[string]bool{
+	"archive": true, "bufio": true, "bytes": true, "cmp": true, "compress": true,
+	"container": true, "context": true, "crypto": true, "database": true,
+	"debug": true, "embed": true, "encoding": true, "errors": true, "expvar": true,
+	"flag": true, "fmt": true, "go": true, "hash": true, "html": true,
+	"image": true, "io": true, "iter": true, "log": true, "maps": true,
+	"math": true, "mime": true, "net": true, "os": true, "path": true,
+	"plugin": true, "reflect": true, "regexp": true, "runtime": true,
+	"slices": true, "sort": true, "strconv": true, "strings": true, "sync": true,
+	"syscall": true, "testing": true, "text": true, "time": true,
+	"unicode": true, "unsafe": true,
+	// Common stdlib-adjacent / runtime packages that pollute transitive
+	// fan-out the same way (atomic, filepath, base64, ast, token, etc.).
+	"atomic": true, "filepath": true, "base64": true, "ast": true, "token": true,
+	"parser": true, "scanner": true, "strconv2": true, "hex": true, "json": true,
+	"url": true, "http": true, "exec": true, "signal": true, "sitter": true,
+}
+
+// stdlibPkgOf reports the stdlib package prefix of a callee name ("strings"
+// for "strings.Contains", "base64" for "base64.StdEncoding.AppendDecode").
+// It returns false for project calls and bare names without a qualifier.
+func stdlibPkgOf(name string) (string, bool) {
+	i := strings.Index(name, ".")
+	if i <= 0 {
+		return "", false
+	}
+	pkg := name[:i]
+	// Strip a receiver-style qualifier ("AuditLog.mu.Lock" -> not stdlib:
+	// "AuditLog" is not in the set, so this correctly returns false).
+	if stdlibPkgs[pkg] {
+		return pkg, true
+	}
+	return "", false
+}
+
+// renderImpactList prints at most maxImpactListItems entries, then a "+N more"
+// overflow line. Counts in the section header stay exact.
+func renderImpactList(b *strings.Builder, items []string) {
+	shown := items
+	if len(items) > maxImpactListItems {
+		shown = items[:maxImpactListItems]
+	}
+	for _, c := range shown {
+		fmt.Fprintf(b, "  - %s\n", c)
+	}
+	if len(items) > len(shown) {
+		fmt.Fprintf(b, "  ... +%d more (use --json for full list)\n", len(items)-len(shown))
+	}
+}
+
+// renderWhatItCalls prints project calls first (already direct-first ordered
+// by collectGraphImpact), collapsing stdlib fan-out into one summary line so
+// hubs like loadOrBuild drop from 1274 lines to <25. Full lists stay in --json.
+func renderWhatItCalls(b *strings.Builder, items []string) {
+	var proj []string
+	stdlibByPkg := map[string]int{}
+	stdlibTotal := 0
+	for _, c := range items {
+		if pkg, ok := stdlibPkgOf(c); ok {
+			stdlibByPkg[pkg]++
+			stdlibTotal++
+		} else {
+			proj = append(proj, c)
+		}
+	}
+	shown := proj
+	hiddenProj := 0
+	if len(proj) > maxImpactListItems {
+		shown = proj[:maxImpactListItems]
+		hiddenProj = len(proj) - len(shown)
+	}
+	for _, c := range shown {
+		fmt.Fprintf(b, "  - %s\n", c)
+	}
+	if stdlibTotal > 0 {
+		type kv struct {
+			k string
+			v int
+		}
+		var tops []kv
+		for k, v := range stdlibByPkg {
+			tops = append(tops, kv{k, v})
+		}
+		sort.Slice(tops, func(i, j int) bool {
+			if tops[i].v != tops[j].v {
+				return tops[i].v > tops[j].v
+			}
+			return tops[i].k < tops[j].k
+		})
+		n := 5
+		if len(tops) < n {
+			n = len(tops)
+		}
+		parts := make([]string, 0, n)
+		for _, kv := range tops[:n] {
+			parts = append(parts, fmt.Sprintf("%s (%d)", kv.k, kv.v))
+		}
+		fmt.Fprintf(b, "  - stdlib: %d calls collapsed (%s)\n", stdlibTotal, strings.Join(parts, ", "))
+	}
+	if hiddenProj > 0 {
+		fmt.Fprintf(b, "  ... +%d more project calls (use --json for full list)\n", hiddenProj)
+	}
+}
+
 // renderImpactText renders a domain.ImpactReport as the text output for kern
 // impact (CLI), kern_impact (MCP), and POST /v1/impact (REST). The 11 spec
 // questions are rendered as labelled sections.
@@ -221,44 +340,26 @@ func renderImpactText(r domain.ImpactReport) string {
 	fmt.Fprintf(&b, "IMPACT for: %s\n", r.Target)
 	fmt.Fprintf(&b, "Risk: %s\n", r.Risk)
 	fmt.Fprintf(&b, "What calls this: %d\n", len(r.WhoCalls))
-	for _, c := range r.WhoCalls {
-		fmt.Fprintf(&b, "  - %s\n", c)
-	}
+	renderImpactList(&b, r.WhoCalls)
 	fmt.Fprintf(&b, "What it calls: %d\n", len(r.WhatItCalls))
-	for _, c := range r.WhatItCalls {
-		fmt.Fprintf(&b, "  - %s\n", c)
-	}
+	renderWhatItCalls(&b, r.WhatItCalls)
 	fmt.Fprintf(&b, "Services that depend on it: %d\n", len(r.ServicesDepend))
-	for _, s := range r.ServicesDepend {
-		fmt.Fprintf(&b, "  - %s\n", s)
-	}
+	renderImpactList(&b, r.ServicesDepend)
 	fmt.Fprintf(&b, "APIs affected: %d\n", len(r.APIsAffected))
-	for _, a := range r.APIsAffected {
-		fmt.Fprintf(&b, "  - %s\n", a)
-	}
+	renderImpactList(&b, r.APIsAffected)
 	fmt.Fprintf(&b, "Data stores affected: %d\n", len(r.DataStoresAffected))
-	for _, d := range r.DataStoresAffected {
-		fmt.Fprintf(&b, "  - %s\n", d)
-	}
+	renderImpactList(&b, r.DataStoresAffected)
 	fmt.Fprintf(&b, "Events affected: %d\n", len(r.EventsAffected))
-	for _, e := range r.EventsAffected {
-		fmt.Fprintf(&b, "  - %s\n", e)
-	}
+	renderImpactList(&b, r.EventsAffected)
 	fmt.Fprintf(&b, "Tests that cover it: %d\n", len(r.TestsCover))
-	for _, t := range r.TestsCover {
-		fmt.Fprintf(&b, "  - %s\n", t)
-	}
+	renderImpactList(&b, r.TestsCover)
 	if len(r.IncidentsRelated) > 0 {
 		fmt.Fprintf(&b, "Incidents related: %d\n", len(r.IncidentsRelated))
-		for _, i := range r.IncidentsRelated {
-			fmt.Fprintf(&b, "  - %s\n", i)
-		}
+		renderImpactList(&b, r.IncidentsRelated)
 	}
 	if len(r.ArchitectureRules) > 0 {
 		fmt.Fprintf(&b, "Architecture rules: %d\n", len(r.ArchitectureRules))
-		for _, a := range r.ArchitectureRules {
-			fmt.Fprintf(&b, "  - %s\n", a)
-		}
+		renderImpactList(&b, r.ArchitectureRules)
 	}
 	// A change target that resolved to nothing (no callers, no callees, no
 	// tests) is almost always an ambiguous or unindexed symbol, not a truly
@@ -266,6 +367,9 @@ func renderImpactText(r domain.ImpactReport) string {
 	if len(r.WhoCalls) == 0 && len(r.WhatItCalls) == 0 && len(r.TestsCover) == 0 {
 		fmt.Fprintf(&b, "\nWARN: no callers, callees, or tests resolved for %q — the change target may be ambiguous or not indexed.\n", r.Target)
 		fmt.Fprintf(&b, "      Qualify the symbol (e.g. Server.dispatch) or run kern_search to confirm the exact name, then re-run.\n")
+	}
+	if r.Evidence != "" {
+		fmt.Fprintf(&b, "\n%s\n", r.Evidence)
 	}
 	return b.String()
 }

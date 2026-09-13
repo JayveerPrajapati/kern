@@ -17,6 +17,15 @@ type LargeSymbol struct {
 	Lines int    `json:"lines"`
 }
 
+// isBundledAsset reports whether rel lives under an assets/ directory: files
+// embedded via go:embed and shipped outward to other projects (editor plugin
+// bundles, instruction packs). They are vendored copies, not the repo's own
+// implementation, so ranking them as tech debt is noise — e.g. a 2892-line
+// plugin bundle outranking every hand-written function.
+func isBundledAsset(rel string) bool {
+	return strings.Contains("/"+strings.ToLower(rel)+"/", "/assets/")
+}
+
 // LargeFunctions returns the largest function/method-like declarations in the
 // index, sorted by size descending. minLines is the exclusive floor (size >=
 // minLines qualifies); only function/method kinds are considered.
@@ -24,6 +33,11 @@ func LargeFunctions(ix *index.Index, minLines int) []LargeSymbol {
 	var out []LargeSymbol
 	for _, s := range ix.Symbols {
 		if isTestFile(s.File) {
+			continue
+		}
+		// Tool-generated scaffolding and bundled embed copies are not
+		// hand-written source: sizing them as debt buries real hotspots.
+		if ix.IsGenerated(s.File) || isBundledAsset(s.File) {
 			continue
 		}
 		if s.Kind != "func" && s.Kind != "method" {

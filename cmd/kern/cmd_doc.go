@@ -8,6 +8,8 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/cache"
 	"github.com/JayveerPrajapati/kern/internal/docsearch"
 	"github.com/JayveerPrajapati/kern/internal/fetch"
+	"github.com/JayveerPrajapati/kern/internal/index"
+	"github.com/JayveerPrajapati/kern/internal/intel"
 	"github.com/JayveerPrajapati/kern/internal/llm"
 	"github.com/JayveerPrajapati/kern/internal/strutil"
 )
@@ -96,16 +98,52 @@ func runDocSearch(rest []string) {
 		}
 	}
 	results := ix.Search(query, k)
-	if len(results) == 0 {
+
+	var codeMatches []index.Symbol
+	if len(results) == 0 || (len(results) > 0 && results[0].Sim <= 1.0) {
+		if codeIx, err := loadOrBuild(root); err == nil && codeIx != nil {
+			codeMatches = intel.RankedSearch(codeIx, query, k)
+		}
+	}
+
+	if len(results) == 0 && len(codeMatches) == 0 {
 		fmt.Println("no matching document fragments")
 		return
 	}
-	for i, r := range results {
-		fmt.Printf("#%d score=%.3f %s:%d\n", i+1, r.Sim, r.Doc.Chunk.File, r.Doc.Chunk.Start)
-		body := strings.ReplaceAll(r.Doc.Chunk.Text, "\n", " ")
-		if len(body) > 300 {
-			body = body[:300] + "…"
+
+	if len(results) > 0 && len(codeMatches) > 0 {
+		fmt.Println("## Documentation")
+		for i, r := range results {
+			fmt.Printf("#%d score=%.3f %s:%d\n", i+1, r.Sim, r.Doc.Chunk.File, r.Doc.Chunk.Start)
+			body := strings.ReplaceAll(r.Doc.Chunk.Text, "\n", " ")
+			if len(body) > 300 {
+				body = body[:300] + "…"
+			}
+			fmt.Printf("  %s\n", body)
 		}
-		fmt.Printf("  %s\n", body)
+		fmt.Println("\n## Code")
+		for _, m := range codeMatches {
+			fmt.Printf("%-10s %-7s %-24s %s:%d\n", m.Kind, m.Lang, m.FullName(), m.File, m.Line)
+		}
+		return
+	}
+
+	if len(results) > 0 {
+		for i, r := range results {
+			fmt.Printf("#%d score=%.3f %s:%d\n", i+1, r.Sim, r.Doc.Chunk.File, r.Doc.Chunk.Start)
+			body := strings.ReplaceAll(r.Doc.Chunk.Text, "\n", " ")
+			if len(body) > 300 {
+				body = body[:300] + "…"
+			}
+			fmt.Printf("  %s\n", body)
+		}
+		return
+	}
+
+	if len(codeMatches) > 0 {
+		fmt.Println("## Code")
+		for _, m := range codeMatches {
+			fmt.Printf("%-10s %-7s %-24s %s:%d\n", m.Kind, m.Lang, m.FullName(), m.File, m.Line)
+		}
 	}
 }

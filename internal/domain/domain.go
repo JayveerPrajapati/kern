@@ -442,4 +442,5 @@ type ImpactReport struct {
 	IncidentsRelated   []string // which incidents are related
 	ArchitectureRules  []string // which architecture rules apply
 	Risk               string   // low | medium | high (from criticality)
+	Evidence           string   // P2 anchor for the target (file:line + certificate)
 }

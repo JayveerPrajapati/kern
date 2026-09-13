@@ -8,6 +8,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io/fs"
 	"log"
@@ -21,6 +22,8 @@ import (
 	"time"
 
 	"github.com/JayveerPrajapati/kern/internal/governance"
+	"github.com/JayveerPrajapati/kern/internal/index"
+	"github.com/JayveerPrajapati/kern/internal/intel"
 	"github.com/JayveerPrajapati/kern/internal/processgroup"
 )
 
@@ -524,6 +527,20 @@ type Result struct {
 // kept and Restored stays false. parent cancels the run (and triggers a
 // restore) when it is cancelled; a nil parent uses context.Background().
 func Run(parent context.Context, root string, cmdName string, args []string, timeout time.Duration) *Result {
+	return runGuarded(parent, root, cmdName, args, timeout, false)
+}
+
+// RunGuarded is Run with the P2 pre-edit verdict gate: when the command
+// succeeds but its impact manifest touches HIGH-risk files, the tree is
+// restored unless force is set — fail-closed, mirroring the existing
+// restore-on-failure contract. Only user-facing edges (CLI kern sandbox,
+// MCP kern_sandbox) use it; internal automation (execution worktrees, the
+// verification engine) keeps the ungated Run.
+func RunGuarded(parent context.Context, root string, cmdName string, args []string, timeout time.Duration, force bool) *Result {
+	return runGuarded(parent, root, cmdName, args, timeout, force)
+}
+
+func runGuarded(parent context.Context, root string, cmdName string, args []string, timeout time.Duration, force bool) *Result {
 	if parent == nil {
 		parent = context.Background()
 	}
@@ -558,7 +575,17 @@ func Run(parent context.Context, root string, cmdName string, args []string, tim
 	// Surface skipped (over-cap) files immediately so callers know upfront
 	// which files are not restore-protected by this snapshot.
 	res.SkippedFiles = snap.skippedOverCap
-
+	// Pre-image for the P2 verdict gate, captured before exec (guarded runs
+	// only): the success-path assessment must see the tree as it was, with
+	// deleted symbols still indexed. A load failure skips the gate
+	// (fail-open on infra); the network gate above already fails closed on
+	// its own threat.
+	var gateIx *index.Index
+	if !force {
+		if ix, ierr := intel.ReadIndex(root); ierr == nil {
+			gateIx = ix
+		}
+	}
 	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
 	c := exec.CommandContext(ctx, cmdName, args...)
@@ -627,6 +654,35 @@ func Run(parent context.Context, root string, cmdName string, args []string, tim
 		res.OK = false
 		res.Duration = time.Since(start)
 		return res
+	}
+	// P2 verdict gate on the success path: a command that ran clean but
+	// rewrote hub files keeps its changes only with sanction. Assessed
+	// against the pre-run index (captured before exec): after the run,
+	// modified files would re-parse and deleted files would vanish from
+	// any fresh index, so only the pre-image sees the true blast radius.
+	if !force && len(res.Manifest) > 0 && gateIx != nil {
+		var paths []string
+		for _, c := range res.Manifest {
+			paths = append(paths, c.Path)
+		}
+		if msg := intel.AssessEditFiles(gateIx, paths).Refusal("sandbox keep"); msg != "" {
+			if changed := snap.changedSkipped(); len(changed) > 0 {
+				res.Err = fmt.Errorf("%s (additionally unrestorable: %q exceeded the snapshot cap, original contents unavailable)", msg, strings.Join(changed, ", "))
+				res.OK = false
+				res.Restored = false
+				res.Duration = time.Since(start)
+				return res
+			}
+			if rerr := snap.Restore(); rerr != nil {
+				res.Err = fmt.Errorf("%s (restore also failed: %v)", msg, rerr)
+			} else {
+				res.Err = errors.New(msg)
+			}
+			res.OK = false
+			res.Restored = true
+			res.Duration = time.Since(start)
+			return res
+		}
 	}
 	res.OK = true
 	res.Duration = time.Since(start)

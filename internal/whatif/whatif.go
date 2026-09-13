@@ -93,6 +93,9 @@ type Impact struct {
 	// Limitations are the pipeline/evidence gaps that bound the impact estimate
 	// (missing runtime/historical evidence, or change kinds that need twin data).
 	Limitations []string `json:"limitations,omitempty"`
+	// Evidence is the P2 anchor for the change target (file:line +
+	// certificate), populated by the platform layer which owns the index.
+	Evidence string `json:"evidence,omitempty"`
 }
 
 // Simulate applies the change to the graph (in memory) and returns the impact.

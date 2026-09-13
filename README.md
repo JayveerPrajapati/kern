@@ -895,8 +895,8 @@ kern's delivered scope is a local code-intelligence and governance engine. The
 north-star vision extends further — these are explicitly **future** and not yet
 shipped:
 
-- **ModelProvider abstraction** — pluggable LLM backends (OpenAI, Anthropic,
-  Google) beyond the current Ollama-only path.
+- **ModelProvider abstraction** — **shipped**: pluggable LLM backends (OpenAI, Anthropic,
+  Google, MCP host model delegation, local agent CLIs, Ollama) via `internal/llm` and `KERN_LLM_PROVIDER`.
 - **Additional surfaces** — IDE integrations and a Kubernetes operator are
   still future. REST API, typed Go SDK, outbound webhooks, and the HTML
   dashboard are **shipped**: start them with `kern serve` (single-project

@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
 
@@ -86,9 +85,12 @@ func (s *Server) handlePreEdit(ctx context.Context, args map[string]any) (string
 		}
 	}
 
-	// Analyze callers and blast radius
-	directCallers := make(map[string]bool)
-	transitiveCallers := make(map[string]bool)
+	// Analyze callers and blast radius through the shared P2 verdict so the
+	// report and every mutation gate assess identically.
+	verdict := intel.AssessTargets(ix, targetSymbols)
+	directList := verdict.Direct
+	transitiveList := verdict.Transitive
+	risk := verdict.Risk
 	untestedSymbols := make(map[string]bool)
 
 	// Load coverage to check test gaps
@@ -96,30 +98,6 @@ func (s *Server) handlePreEdit(ctx context.Context, args map[string]any) (string
 	testCoverageMap := make(map[string]bool)
 	for _, g := range cov.HotGaps {
 		untestedSymbols[g.Symbol] = true
-	}
-
-	for _, sym := range targetSymbols {
-		fullName := sym.FullName()
-		callers := ix.CallersOf(fullName)
-		for _, c := range callers {
-			directCallers[c] = true
-			transitiveCallers[c] = true
-			// 2nd degree callers
-			for _, c2 := range ix.CallersOf(c) {
-				transitiveCallers[c2] = true
-			}
-		}
-	}
-
-	directList := sortedMapKeys(directCallers)
-	transitiveList := sortedMapKeys(transitiveCallers)
-
-	// Assess Risk
-	risk := "LOW"
-	if len(directList) > 10 || len(transitiveList) > 25 {
-		risk = "HIGH"
-	} else if len(directList) > 3 || len(transitiveList) > 8 {
-		risk = "MEDIUM"
 	}
 
 	// Check boundary rules if present
@@ -190,13 +168,4 @@ func (s *Server) handlePreEdit(ctx context.Context, args map[string]any) (string
 
 	_ = testCoverageMap
 	return strings.TrimSpace(b.String()), nil
-}
-
-func sortedMapKeys(m map[string]bool) []string {
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	return keys
 }

@@ -24,6 +24,10 @@ type Hub struct {
 	Calls    int     `json:"calls"`
 	Score    int     `json:"score"`
 	Weighted float64 `json:"weighted,omitempty"`
+	// bare is the unqualified FullName (the index Callers/Calls key). It is
+	// unexported so JSON output is unchanged; hubSet uses it to keep bare
+	// lookups working for risk scoring (P1-5).
+	bare string
 }
 
 // Bridge is a symbol whose callers span multiple packages — a coupling
@@ -47,6 +51,13 @@ func hubSet(ix *index.Index) map[string]bool {
 	out := map[string]bool{}
 	for _, h := range ranked[:max(len(ranked)/10, min(len(ranked), 5))] {
 		out[h.Symbol] = true
+		// P1-5: hub symbols for ambiguous names are package-qualified
+		// (internal/cache.Load), but risk scoring looks hubs up by bare
+		// FullName and call-edge target. Keep the bare key so existing
+		// lookups keep working (conservative: any same-named hub flags).
+		if h.bare != "" && h.bare != h.Symbol {
+			out[h.bare] = true
+		}
 	}
 	return out
 }
@@ -61,21 +72,33 @@ func Hubs(ix *index.Index, limit int) []Hub {
 	var hubs []Hub
 	local := localNames(ix)
 	fileMap := buildFileMap(ix)
+	pkgByFile := packagePathByFile(ix)
+	dups := dupFullNames(ix)
+	units := defUnits(ix, pkgByFile, dups)
+	byName := unitsByName(units)
+	// Caller splits are computed once per ambiguous name, not once per unit.
+	splits := map[string]map[string][]string{}
 	commSize := communitySizes(ix)
-	for _, s := range ix.Symbols {
-		if isTestFile(s.File) || (s.Kind != "func" && s.Kind != "method") {
+	for _, u := range units {
+		if isTestFile(u.file) || (u.sym.Kind != "func" && u.sym.Kind != "method") {
 			continue
 		}
-		callers := len(prodCallersWithFileMap(ix, s.FullName(), fileMap))
-		calls := len(localCalleesWith(ix, s.FullName(), local))
-		if callers == 0 && calls == 0 {
+		callers := hubUnitCallers(ix, fileMap, dups, byName, splits, u)
+		// NOTE (P1-5): outgoing calls stay aggregated by bare name —
+		// ix.Calls merges every same-named definition's callees with no
+		// per-file provenance, so per-definition calls cannot be recovered
+		// at this layer. Caller counts (the bridge/hub signal that matters)
+		// are honestly split; calls may over-count for ambiguous names.
+		calls := len(localCalleesWith(ix, u.name, local))
+		if len(callers) == 0 && calls == 0 {
 			continue
 		}
-		raw := callers*2 + calls
+		raw := len(callers)*2 + calls
 		hubs = append(hubs, Hub{
-			Symbol: s.FullName(), Kind: s.Kind, File: s.File, Line: s.Line,
-			Callers: callers, Calls: calls, Score: raw,
-			Weighted: weightedHubScore(raw, s.FullName(), ix.Communities, commSize),
+			Symbol: u.qual, Kind: u.sym.Kind, File: u.file, Line: u.sym.Line,
+			Callers: len(callers), Calls: calls, Score: raw,
+			Weighted: weightedHubScore(raw, u.name, ix.Communities, commSize),
+			bare:     u.name,
 		})
 	}
 	sort.Slice(hubs, func(i, j int) bool {
@@ -142,12 +165,17 @@ func Bridges(ix *index.Index, limit int) []Bridge {
 		limit = 15
 	}
 	fileMap := buildFileMap(ix)
+	pkgByFile := packagePathByFile(ix)
+	dups := dupFullNames(ix)
+	units := defUnits(ix, pkgByFile, dups)
+	byName := unitsByName(units)
+	splits := map[string]map[string][]string{}
 	var bridges []Bridge
-	for _, s := range ix.Symbols {
-		if isTestFile(s.File) || (s.Kind != "func" && s.Kind != "method") {
+	for _, u := range units {
+		if isTestFile(u.file) || (u.sym.Kind != "func" && u.sym.Kind != "method") {
 			continue
 		}
-		callers := prodCallersWithFileMap(ix, s.FullName(), fileMap)
+		callers := hubUnitCallers(ix, fileMap, dups, byName, splits, u)
 		dirs := map[string]bool{}
 		for _, c := range callers {
 			if d := dirOf(fileMap, c); d != "" {
@@ -163,7 +191,7 @@ func Bridges(ix *index.Index, limit int) []Bridge {
 		}
 		sort.Strings(pkgs)
 		bridges = append(bridges, Bridge{
-			Symbol: s.FullName(), File: s.File, Callers: len(callers), Packages: pkgs,
+			Symbol: u.qual, File: u.file, Callers: len(callers), Packages: pkgs,
 		})
 	}
 	sort.Slice(bridges, func(i, j int) bool {

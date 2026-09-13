@@ -65,13 +65,27 @@ func runAgents(rest []string) {
 		})
 	}
 
-	// 2. LLM provider chain: Ollama + agent CLIs, in auto priority order.
+	// 2. LLM provider chain: Host (if connected) + Ollama + agent CLIs, in auto priority order.
 	provider := llm.ProviderName()
-	chainNames := []string{"ollama"}
+	var chainNames []string
+	if llm.HasHostSampler() {
+		chainNames = append(chainNames, "host")
+	}
+	chainNames = append(chainNames, "ollama")
 	chainNames = append(chainNames, llm.AvailableLocalAgents()...)
 	for _, name := range chainNames {
 		r := agentReport{Name: name, Kind: "llm-provider"}
 		switch name {
+		case "host":
+			if llm.HasHostSampler() {
+				r.Installed = true
+				r.Healthy = "ok"
+				r.Note = "active MCP host sampling connected"
+			} else {
+				r.Installed = false
+				r.Healthy = "unreachable"
+				r.Note = "no MCP host sampling registered"
+			}
 		case "ollama":
 			c := llm.New("")
 			if c.Available() {
@@ -107,7 +121,12 @@ func runAgents(rest []string) {
 			start := time.Now()
 			var out string
 			var perr error
-			if r.Name == "ollama" {
+			if r.Name == "host" {
+				prov := llm.NewMCPProvider()
+				ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+				out, perr = prov.Generate(ctx, "", "Reply with exactly: OK", llm.Options{})
+				cancel()
+			} else if r.Name == "ollama" {
 				prov, perr0 := llm.NewProvider()
 				if perr0 != nil {
 					perr = perr0
@@ -143,7 +162,7 @@ func runAgents(rest []string) {
 		printJSON(reports)
 		return
 	}
-	fmt.Printf("provider: %s (auto chain: ollama → %s)\n", provider, strings.Join(llm.AvailableLocalAgents(), " → "))
+	fmt.Printf("provider: %s (auto chain: %s)\n", provider, strings.Join(chainNames, " → "))
 	for _, r := range reports {
 		status := r.Healthy
 		if status == "" {

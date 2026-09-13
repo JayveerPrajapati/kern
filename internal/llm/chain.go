@@ -117,6 +117,9 @@ func (c *ChainProvider) AllLocal() bool {
 		case *LocalCliProvider:
 			// agent CLIs run on this machine (pp intentionally unused)
 			_ = pp
+		case *MCPProvider:
+			// MCP host agent runs in the operator's active session
+			_ = pp
 		default:
 			return false
 		}
@@ -126,6 +129,8 @@ func (c *ChainProvider) AllLocal() bool {
 
 func providerNameOf(p Provider) string {
 	switch pp := p.(type) {
+	case *MCPProvider:
+		return "host"
 	case *OllamaProvider:
 		return "ollama"
 	case *LocalCliProvider:

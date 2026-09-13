@@ -36,6 +36,7 @@ type SampleResult struct {
 // style of internal/app/benchmark.go's BaselineComparison (deterministic,
 // JSON-tagged where useful).
 type EvalResult struct {
+	Version           string         `json:"version,omitempty"`
 	Score             float64        `json:"score"`                // 0-100 quality: 100*(0.5*EvidenceRetention + 0.5*(1-ErrorRate))
 	TokenReduction    float64        `json:"token_reduction"`      // 1 - ΣcandidateTokens/ΣbaselineTokens (0 when Σbaseline=0)
 	EvidenceRetention float64        `json:"evidence_retention"`   // Σretained/Σtotal (1.0 when Σtotal=0)

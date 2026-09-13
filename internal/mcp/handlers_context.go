@@ -6,11 +6,13 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/brief"
 	"github.com/JayveerPrajapati/kern/internal/code"
 	kernctx "github.com/JayveerPrajapati/kern/internal/context"
+	"github.com/JayveerPrajapati/kern/internal/index"
 	"github.com/JayveerPrajapati/kern/internal/intel"
 	"github.com/JayveerPrajapati/kern/internal/pack"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 func (s *Server) handleCompact(ctx context.Context, args map[string]any) (string, error) {
@@ -124,7 +126,11 @@ func (s *Server) handleOnboard(ctx context.Context, args map[string]any) (string
 		// 2. Ensure the index is built/refreshed (loadIndex auto-builds if
 		// stale or missing — do NOT build manually here).
 		indexed := ""
+		timing := ""
+		t0 := time.Now()
+		prev, _ := index.Load(abs)
 		ix, ierr := s.loadIndex(ctx, abs)
+		elapsed := time.Since(t0)
 		if ierr != nil {
 			indexed = "error: " + ierr.Error()
 		} else {
@@ -132,7 +138,16 @@ func (s *Server) handleOnboard(ctx context.Context, args map[string]any) (string
 			for _, callees := range ix.Calls {
 				edges += len(callees)
 			}
+			staleFiles := 0
+			if prev == nil {
+				staleFiles = len(ix.FileHashes)
+			} else if ix.ReusedResults() > 0 {
+				staleFiles = len(ix.FileHashes) - ix.ReusedResults()
+			} else if prev.Stale() {
+				staleFiles = len(ix.FileHashes)
+			}
 			indexed = fmt.Sprintf("%d symbols, %d call edges, %d files", len(ix.Symbols), edges, len(ix.FileHashes))
+			timing = fmt.Sprintf("stale files: %d, rebuild: %.1fs", staleFiles, elapsed.Seconds())
 		}
 
 		// 3. AGENTS.md wiring, only if the file is missing. setup.Wire cannot
@@ -149,6 +164,9 @@ func (s *Server) handleOnboard(ctx context.Context, args map[string]any) (string
 		fmt.Fprintf(&lb, "root:       %s\n", abs)
 		fmt.Fprintf(&lb, "registered: %s\n", registered)
 		fmt.Fprintf(&lb, "indexed:    %s\n", indexed)
+		if timing != "" {
+			fmt.Fprintf(&lb, "timing:     %s\n", timing)
+		}
 		fmt.Fprintf(&lb, "AGENTS.md:  %s\n", wired)
 		fmt.Fprintf(&lb, "next:       explore the repo with kern_explore / kern_code_graph, or run kern_buddy for a session digest\n")
 		return lb.String(), nil
