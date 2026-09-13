@@ -44,6 +44,9 @@ kern pack --graph [--symbol X] [--out FILE]      graph-snapshot pack: adjacency 
   kern log <file|->                                 compress a log file
   kern index [root] [--status] [--json]           build/refresh the AST index; --status reports cached
                                                 index health (symbols/files/stale) without rebuilding
+  kern index ensure-fresh [root] [--json]        probe freshness, update/rebuild when stale, strictly
+                                                re-verify; exits 2 when the index does not converge
+                                                (freshness + status JSON in one subprocess)
   kern watch [root]                               daemon: auto re-index on change
   kern ast <pattern> [--all]                      AST symbol search (wildcards, kind prefixes; --all: search ALL cached projects)
   kern search <query> [--limit N] [--repos] [--json] [--semantic]

@@ -75,6 +75,9 @@ func p12LastAuditRecord(t *testing.T, dir string) map[string]interface{} {
 // gets it recorded on the audit Record, citing the context authorization that
 // informed the change decision.
 func TestP12_ValidateProposedCarriesGovernedProvenance(t *testing.T) {
+	if testing.Short() {
+		t.Skip("E2E gate test — full pipeline; runs in nightly non-short suite")
+	}
 	g5RequireKern(t)
 	dir := g5Repo(t)
 
@@ -114,6 +117,9 @@ func TestP12_ValidateProposedCarriesGovernedProvenance(t *testing.T) {
 // TestP12_ValidateProposedAcceptsRawProvenance: raw-mode provenance (mode=
 // "raw", no authorizing_rule) is accepted and recorded without error.
 func TestP12_ValidateProposedAcceptsRawProvenance(t *testing.T) {
+	if testing.Short() {
+		t.Skip("E2E gate test — full pipeline; runs in nightly non-short suite")
+	}
 	g5RequireKern(t)
 	dir := g5Repo(t)
 
@@ -154,6 +160,9 @@ func TestP12_ValidateProposedAcceptsRawProvenance(t *testing.T) {
 // provenance:schema-version finding (status at most WARN, never BLOCK/ERROR)
 // and the provenance is still recorded.
 func TestP12_ValidateProposedSchemaSkewWarns(t *testing.T) {
+	if testing.Short() {
+		t.Skip("E2E gate test — full pipeline; runs in nightly non-short suite")
+	}
 	g5RequireKern(t)
 	dir := g5Repo(t)
 
@@ -207,6 +216,9 @@ func TestP12_ValidateProposedSchemaSkewWarns(t *testing.T) {
 // TestP12_ValidateProposedWithoutProvenance: no context_provenance in the
 // payload → the audit record simply omits it (existing flows unchanged).
 func TestP12_ValidateProposedWithoutProvenance(t *testing.T) {
+	if testing.Short() {
+		t.Skip("E2E gate test — full pipeline; runs in nightly non-short suite")
+	}
 	g5RequireKern(t)
 	dir := g5Repo(t)
 

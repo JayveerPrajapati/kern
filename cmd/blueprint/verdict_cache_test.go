@@ -78,6 +78,9 @@ func runCICommandEnv(t *testing.T, binPath, repoDir, kernPath string, env []stri
 // the first run's verdict from the cache: same exit code, same findings, a
 // "hit" marker on the artifact, and zero kern subprocess invocations.
 func TestCIVerdictCacheHit(t *testing.T) {
+	if testing.Short() {
+		t.Skip("E2E gate test — full pipeline; runs in nightly non-short suite")
+	}
 	kernPath := requireKernPath(t)
 	binPath := buildBlueprint(t)
 	logPath := filepath.Join(t.TempDir(), "kern.log")
@@ -145,6 +148,9 @@ func TestCIVerdictCacheHit(t *testing.T) {
 // the feature branch, and runs CI again: the changed content must change the
 // cache key and force a full re-validation.
 func TestCIVerdictCacheMissOnChange(t *testing.T) {
+	if testing.Short() {
+		t.Skip("E2E gate test — full pipeline; runs in nightly non-short suite")
+	}
 	kernPath := requireKernPath(t)
 	binPath := buildBlueprint(t)
 	logPath := filepath.Join(t.TempDir(), "kern.log")
@@ -192,6 +198,9 @@ func TestCIVerdictCacheMissOnChange(t *testing.T) {
 // runs CI again: the policy hash is part of the cache key, so the second run
 // must miss. Reverting the config must hit again.
 func TestCIVerdictCacheMissOnPolicyChange(t *testing.T) {
+	if testing.Short() {
+		t.Skip("E2E gate test — full pipeline; runs in nightly non-short suite")
+	}
 	kernPath := requireKernPath(t)
 	binPath := buildBlueprint(t)
 	logPath := filepath.Join(t.TempDir(), "kern.log")
@@ -246,6 +255,9 @@ func TestCIVerdictCacheMissOnPolicyChange(t *testing.T) {
 // the cache must not be read (no "hit" marker), a fresh validation must run,
 // and the cache must not be written.
 func TestCIVerdictCacheBypass(t *testing.T) {
+	if testing.Short() {
+		t.Skip("E2E gate test — full pipeline; runs in nightly non-short suite")
+	}
 	kernPath := requireKernPath(t)
 	binPath := buildBlueprint(t)
 	logPath := filepath.Join(t.TempDir(), "kern.log")
@@ -292,6 +304,9 @@ func TestCIVerdictCacheBypass(t *testing.T) {
 // TestCIVerdictCacheBypassEnv is TestCIVerdictCacheBypass via the
 // BLUEPRINT_NO_CACHE=1 environment variable instead of the flag.
 func TestCIVerdictCacheBypassEnv(t *testing.T) {
+	if testing.Short() {
+		t.Skip("E2E gate test — full pipeline; runs in nightly non-short suite")
+	}
 	kernPath := requireKernPath(t)
 	binPath := buildBlueprint(t)
 	logPath := filepath.Join(t.TempDir(), "kern.log")

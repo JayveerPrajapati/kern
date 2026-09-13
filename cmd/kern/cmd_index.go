@@ -81,10 +81,47 @@ func runPrecache(rest []string) {
 
 }
 
+// runEnsureFresh implements `kern index ensure-fresh [root] [--json]`: the
+// consolidated freshness subcommand (Phase 2). In ONE invocation it loads the
+// cached index, cheaply checks staleness via the git tree OID (no content
+// walk), updates (or full-builds) when stale, strictly re-verifies from disk,
+// and reports the outcome — replacing the former probe → update → re-verify →
+// loose-check subprocess sequence (~2.6s) with a single process. It exits 2
+// when the index is stale and did not converge after a rebuild (fail-closed);
+// the JSON is still printed so callers can inspect the proof.
+func runEnsureFresh(jsonOut bool, root string) {
+	res, err := svc.Index.EnsureFresh(context.Background(), root)
+	if err != nil {
+		fatal("Index: %v", err)
+	}
+	if jsonOut {
+		printJSON(res)
+	} else {
+		fmt.Printf("index: %s (%d symbols, %d files, %d packages, version %d)\n",
+			res.Freshness, res.Symbols, res.Files, res.Packages, res.Version)
+	}
+	if res.Freshness == "stale" {
+		// Fail-closed: a stale non-converged index must not be trusted. The
+		// JSON was printed above; the non-zero exit is the signal.
+		panic(exitError{code: 2})
+	}
+}
+
 func runIndex(rest []string) {
 	f, args, err := parseFlags(rest)
 	if err != nil {
 		fatalUsage("flags: %v", err)
+	}
+	if len(args) > 0 && args[0] == "ensure-fresh" {
+		root := f.root
+		if root == "" {
+			root = "."
+			if len(args) > 1 {
+				root = args[1]
+			}
+		}
+		runEnsureFresh(f.json, root)
+		return
 	}
 	root := f.root
 	if root == "" {
@@ -114,6 +151,49 @@ func runIndex(rest []string) {
 		} else {
 			fmt.Printf("index: NOT BUILT for %s\n", root)
 		}
+		return
+	}
+	// `kern index --update [root]` incrementally refreshes the persisted
+	// index: load the cached index, and when it is stale run index.Update
+	// (re-parses ONLY changed/new files; symbols and edges of unchanged files
+	// are copied verbatim — the same update-over-build pattern project.go and
+	// LoadOrBuild use). A stale index is NOT invalidated wholesale by a small
+	// commit: a 2-file change re-parses 2 files. Falls back to a full build
+	// when no previous index loads or Update fails. The plain `kern index`
+	// command (below) remains the explicit full rebuild.
+	if f.update {
+		// Always run the incremental update when a previous index loads —
+		// Update's own walk detects changed files content-addressed (same
+		// trust model as Build), so a separate Stale() proof gate here would
+		// re-derive the same staleness decision only to discard it on the
+		// stale path (measured ~1.1s of redundant tree walk + git staging per
+		// pre-commit `kern check` invocation). On a fresh tree Update copies
+		// every file's result verbatim and reports it as reused; correctness
+		// is unchanged because Update is content-based end to end.
+		prev, lerr := index.Load(root)
+		var ix *index.Index
+		if lerr == nil && prev != nil {
+			if uix, uerr := index.Update(root, prev); uerr == nil && uix != nil {
+				ix = uix
+			}
+		}
+		if ix == nil {
+			// No loadable previous index, or Update failed: full build.
+			var berr error
+			ix, berr = svc.Index.Build(context.Background(), root)
+			if berr != nil {
+				fatal("Index: %v", berr)
+			}
+			return
+		}
+		if serr := ix.Save(); serr != nil {
+			fatal("Index: persist updated index: %v", serr)
+		}
+		if index.SQLiteEnabled() {
+			_ = index.SaveSQLite(root, ix)
+		}
+		fmt.Printf("index updated: %d symbols in %d files (%d packages, %d reused) -> %s\n",
+			len(ix.Symbols), len(ix.FileHashes), len(ix.Pkgs), ix.ReusedResults(), index.StorePath(root))
 		return
 	}
 	ix, err := svc.Index.Build(context.Background(), root)
@@ -386,3 +466,9 @@ func runFts(rest []string) {
 	}
 
 }
+
+
+
+
+
+

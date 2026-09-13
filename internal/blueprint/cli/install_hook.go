@@ -15,8 +15,16 @@ func runInstallHook(args []string) int {
 
 Install git hooks for Blueprint change governance:
   pre-commit  Fast staged validation on every commit (default)
-  pre-push    Deep validation including sandbox tests and resilience before push
-  all         Install both pre-commit and pre-push hooks`)
+  pre-push    Blocking staged validation (secrets, architecture, duplication) before push
+  all         Install both pre-commit and pre-push hooks
+
+The deep validation suites (tests:build-test sandbox run, resilience
+scenarios) are NOT part of either hook: they run in CI on every PR
+(ci.yml: go test -short ./... plus the full non-short blueprint suite,
+including the resilience gates) and deeply in blueprint-nightly.yml.
+Measured on a 2-file staged change: --tests adds ~135s and --resilience
+~120s to the hook, while the blocking legs (secret+architecture+
+duplication) complete in ~5s.`)
 		return 0
 	}
 
@@ -44,8 +52,23 @@ Install git hooks for Blueprint change governance:
 		return 2
 	}
 
+	// The pre-commit hook runs in fast mode: the jscpd two-pass duplication
+	// scan (the slowest leg) is skipped in favor of advisory in-house findings,
+	// so the hook stays ~2s. The full two-pass check runs in CI (or locally
+	// with `kern check --staged` without --fast).
+	//
+	// The pre-push hook keeps every BLOCKING leg (secrets, architecture,
+	// approval, full two-pass duplication) but drops the deep suites:
+	// --tests (tests:build-test, measured ~135s on a 2-file change) and
+	// --resilience (resilience:scenarios, ~120s, advisory findings) are
+	// enforced by CI on every PR instead (ci.yml runs go test -short ./...
+	// plus the full non-short blueprint suite; blueprint-nightly.yml adds
+	// the nightly deep pass). Fail-closed semantics are unchanged: the
+	// hook still propagates kern check's exit code, and every blocking
+	// check that runs in the hook still blocks the push; only work that CI
+	// re-enforces was deferred.
 	if target == "pre-commit" || target == "all" {
-		if err := installSingleHook(gitDir, "pre-commit", "--staged", "every commit"); err != nil {
+		if err := installSingleHook(gitDir, "pre-commit", "--staged --fast", "every commit"); err != nil {
 			fmt.Fprintf(os.Stderr, "blueprint: %v\n", err)
 			return 2
 		}
@@ -53,11 +76,12 @@ Install git hooks for Blueprint change governance:
 	}
 
 	if target == "pre-push" || target == "all" {
-		if err := installSingleHook(gitDir, "pre-push", "--staged --tests --resilience", "every git push"); err != nil {
+		if err := installSingleHook(gitDir, "pre-push", "--staged", "every git push"); err != nil {
 			fmt.Fprintf(os.Stderr, "blueprint: %v\n", err)
 			return 2
 		}
 		fmt.Println("To bypass pre-push: git push --no-verify")
+		fmt.Println("Deep suites (tests, resilience) run in CI on every PR and nightly (blueprint-nightly.yml).")
 	}
 
 	return 0

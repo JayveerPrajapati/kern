@@ -419,6 +419,39 @@ func (c *KernClient) IndexBuild(ctx context.Context, workdir string) (stdout str
 	return out, code, nil
 }
 
+// IndexUpdate runs `kern index --update <root>` in workdir: an INCREMENTAL
+// refresh of the persisted index. kern loads the cached .kern/index.json and,
+// when stale, runs index.Update — re-parsing only changed/new files and
+// copying symbols/edges of unchanged files verbatim — so a small commit does
+// not invalidate the whole index (a 2-file change re-parses 2 files, not the
+// repo). It falls back to a full build when no previous index exists or the
+// incremental update fails, and saves the result before returning. The result
+// is equivalent to a full rebuild, so freshness verdicts (index status)
+// behave identically after it returns.
+//
+// An installed kern that predates `index --update` rejects the flag with a
+// non-zero exit; IndexUpdate then degrades to the legacy explicit full
+// rebuild (`kern index .`) — strictly more work, but the same fresh-index
+// result. ensureFreshIndex's re-verify-and-fail-closed contract still applies
+// to whatever this method returns, so the degradation can never turn a stale
+// index into a silent pass.
+func (c *KernClient) IndexUpdate(ctx context.Context, workdir string) (stdout string, exitCode int, err error) {
+	out, errOut, code, runErr := c.runner(ctx, c.binaryPath, []string{"index", "--update", "."}, workdir)
+	if runErr == nil && code == 0 {
+		return out, code, nil
+	}
+	// Older kern: `index --update` is an unknown flag (non-zero exit). Fall
+	// back to the full rebuild command so the guard still works unmodified.
+	out, errOut, code, runErr = c.runner(ctx, c.binaryPath, []string{"index", "."}, workdir)
+	if runErr != nil {
+		return out, code, fmt.Errorf("kern index --update: %w", runErr)
+	}
+	if code != 0 {
+		return out, code, fmt.Errorf("kern index --update (legacy `kern index .` fallback) failed (exit %d): %s", code, strings.TrimSpace(errOut))
+	}
+	return out, code, nil
+}
+
 // IndexStatus calls `kern index --status --json [--strict]` in root and
 // returns the parsed status payload. strict=true requests the
 // untracked-file-aware freshness proof: kern recomputes content_root over
@@ -451,6 +484,57 @@ func (c *KernClient) IndexStatus(ctx context.Context, root string, strict bool) 
 		return nil, fmt.Errorf("kern index status: schema_version %q, want 2", v)
 	}
 	return status, nil
+}
+
+// EnsureFreshIndex runs `kern index ensure-fresh --json` in root and returns
+// the freshness verdict ("fresh" | "rebuilt"). This is the Phase 2
+// consolidation of the former probe(strict) → update → re-verify(strict) →
+// loose-check subprocess sequence into ONE invocation: kern loads the cached
+// index, cheaply checks staleness via the git tree OID (no content walk),
+// updates (or full-builds when no index loads) when stale, re-verifies
+// strictly from disk, and fails closed when the rebuild does not converge.
+//
+// Exit code 2 is a RESULT, not an error: kern exits 2 exactly when the index
+// is stale and did not converge, and still prints the JSON payload. A launch
+// failure, any other exit code, an unparseable payload, a schema_version
+// skew, or a "stale" verdict all fail closed and return an error — a
+// non-converged index must never be reported as usable. On the stale path the
+// returned freshness is still "stale" so callers can distinguish
+// non-convergence (emit an architecture:index-stale finding) from a tool
+// failure.
+func (c *KernClient) EnsureFreshIndex(ctx context.Context, root string) (freshness string, err error) {
+	out, errOut, code, runErr := c.runner(ctx, c.binaryPath, []string{"index", "ensure-fresh", "--json"}, root)
+	if runErr != nil {
+		return "", fmt.Errorf("kern index ensure-fresh: %w", runErr)
+	}
+	if code != 0 && code != 2 {
+		return "", fmt.Errorf("kern index ensure-fresh failed (exit %d): %s", code, strings.TrimSpace(errOut))
+	}
+	var payload struct {
+		SchemaVersion  string         `json:"schema_version"`
+		Freshness      string         `json:"freshness"`
+		FreshnessProof map[string]any `json:"freshness_proof"`
+	}
+	if err := json.Unmarshal([]byte(out), &payload); err != nil {
+		return "", fmt.Errorf("kern index ensure-fresh: parse output: %w", err)
+	}
+	if payload.SchemaVersion != "2" {
+		return "", fmt.Errorf("kern index ensure-fresh: schema_version %q, want 2", payload.SchemaVersion)
+	}
+	verdict := ""
+	if v, ok := payload.FreshnessProof["verdict"].(string); ok {
+		verdict = v
+	}
+	switch payload.Freshness {
+	case "fresh", "rebuilt":
+		if verdict != "" && verdict != "fresh" {
+			return "", fmt.Errorf("kern index ensure-fresh: freshness %q but verdict %q — index did not converge", payload.Freshness, verdict)
+		}
+		return payload.Freshness, nil
+	default:
+		// "stale" (or an unknown value): fail closed.
+		return payload.Freshness, fmt.Errorf("kern index ensure-fresh: index did not converge after rebuild (freshness %q, verdict %q)", payload.Freshness, verdict)
+	}
 }
 
 // SecScan runs `kern sec --json <path>` in workdir and returns the parsed

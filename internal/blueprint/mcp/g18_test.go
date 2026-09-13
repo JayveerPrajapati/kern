@@ -28,6 +28,9 @@ func g18WriteConfig(t *testing.T, dir, content string) {
 // must downgrade the raw BLOCK secret finding to WARN through the staged
 // handler. With the evaluator detached (pre-P0-5) this returned the raw BLOCK.
 func TestG18_PolicyAppliedViaMCP_WarnMode(t *testing.T) {
+	if testing.Short() {
+		t.Skip("E2E gate test — full pipeline; runs in nightly non-short suite")
+	}
 	g5RequireKern(t)
 	dir := g5Repo(t)
 	g18WriteConfig(t, dir, "version: 1\nmode: warn\npolicies:\n  secrets: block\n")
@@ -57,6 +60,9 @@ func TestG18_PolicyAppliedViaMCP_WarnMode(t *testing.T) {
 // duplication finding that would WARN by default, but the agent
 // override forces the check's status to SKIP.
 func TestG18_PolicyAppliedViaMCP_SourceOverride(t *testing.T) {
+	if testing.Short() {
+		t.Skip("E2E gate test — full pipeline; runs in nightly non-short suite")
+	}
 	g5RequireKern(t)
 	g5RequireFingerprint(t)
 	dir := g5Repo(t)
@@ -105,6 +111,9 @@ func TestG18_PolicyAppliedViaMCP_SourceOverride(t *testing.T) {
 // (secrets: block) apply — a staged secret must still BLOCK. Guards against
 // the policy wiring over-downgrading enforcement.
 func TestG18_PolicyDefaultStillBlocks(t *testing.T) {
+	if testing.Short() {
+		t.Skip("E2E gate test — full pipeline; runs in nightly non-short suite")
+	}
 	g5RequireKern(t)
 	dir := g5Repo(t)
 	// No .blueprint/config.yaml: DefaultConfig -> secrets block.

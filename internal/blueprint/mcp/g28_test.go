@@ -22,6 +22,9 @@ import (
 // ArchitectureCheck.Run), so the repaired import edges are visible to
 // re-validation without an explicit rebuild.
 func TestG28_RepairLoopEndToEnd(t *testing.T) {
+	if testing.Short() {
+		t.Skip("E2E gate test — full pipeline; runs in nightly non-short suite")
+	}
 	g5RequireKern(t)
 	dir := g5Repo(t)
 
@@ -112,6 +115,9 @@ func TestG28_RepairLoopEndToEnd(t *testing.T) {
 // tools/call surface with a sample finding and asserts the structured repair
 // contract.
 func TestG28_ToolListIncludesRepairGuidance(t *testing.T) {
+	if testing.Short() {
+		t.Skip("E2E gate test — full pipeline; runs in nightly non-short suite")
+	}
 	// Build the blueprint-mcp binary.
 	binPath := filepath.Join(t.TempDir(), "blueprint-mcp")
 	cmd := exec.Command("go", "build", "-buildvcs=false", "-o", binPath, "./cmd/blueprint-mcp")

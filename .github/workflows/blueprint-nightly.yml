@@ -1,0 +1,43 @@
+name: blueprint-nightly
+# Nightly full-depth governance suite. The per-push ci.yml runs the gate
+# tests in -short (fast unit + smoke keepers only — see the testing.Short()
+# skips in cmd/blueprint and internal/blueprint/mcp), so the heavy E2E gate
+# suite and the repo-wide two-pass duplication/architecture debt report live
+# here instead, on GitHub's larger runners.
+on:
+  schedule:
+    - cron: '0 2 * * *' # daily, 02:00 UTC
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: blueprint-nightly-${{ github.workflow }}
+  cancel-in-progress: true
+jobs:
+  full-gate-suite:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: ./.github/actions/setup-tools
+      # Full non-short suite: every G/P gate test, the resilience suite, and
+      # the mcp leg tests (G5/G15/G18/G28/P12). -p 2 matches the e2e job's
+      # memory profile; the suite spawns real kern/gitleaks/jscpd children.
+      - name: Full blueprint gate suite (non-short)
+        run: go test -p 2 -count=1 -timeout 60m ./cmd/blueprint/... ./internal/blueprint/...
+      # Repo-wide governance debt report: the FULL two-pass duplication
+      # check (jscpd over the whole tree) and all-repo architecture findings
+      # — the checks the pre-commit hook deliberately skips via --fast.
+      # Informational: pre-existing debt does not fail the nightly; new
+      # blocks surface on PRs via kernops-gate-style review, not here.
+      - name: Repo-wide debt report (full two-pass, no --fast)
+        run: |
+          go build -buildvcs=false -o "$RUNNER_TEMP/kern" ./cmd/kern
+          KERN_BINARY="$RUNNER_TEMP/kern" "$RUNNER_TEMP/kern" check --format=terminal || \
+            echo "::warning::kern check reported findings (see report above)"

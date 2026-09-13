@@ -6,7 +6,9 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/JayveerPrajapati/kern/internal/cache"
@@ -105,8 +107,55 @@ func HasIndexableSources(root string) bool {
 // map, which could wrongly mark an edited tree as unchanged. The ignore
 // matcher mirrors Build's file-selection policy so gitignored files never
 // appear in the manifest.
+// indexableHashes walks root and returns the content hash of every indexable
+// file (path -> SHA-256), the same file selection Build uses. File reads and
+// hashes are distributed over a worker pool: a few thousand small files cost
+// hundreds of milliseconds sequentially, and the result is a map, so
+// parallelism changes nothing observable. Directory traversal, extension and
+// ignore filtering stay on the walking goroutine so the ignore.Matcher and
+// the deterministic walk order are single-threaded; workers only read and
+// hash accepted files. Any read error aborts the hash set (first error wins,
+// same contract as the sequential version).
 func indexableHashes(root string, ign *ignore.Matcher) (map[string]string, error) {
 	cur := map[string]string{}
+	var (
+		mu   sync.Mutex
+		ferr error
+	)
+	workers := runtime.NumCPU()
+	if workers < 1 {
+		workers = 1
+	}
+	if workers > 8 {
+		workers = 8
+	}
+	type job struct{ path, rel string }
+	jobs := make(chan job)
+	var wg sync.WaitGroup
+	wg.Add(workers)
+	for i := 0; i < workers; i++ {
+		go func() {
+			defer wg.Done()
+			for j := range jobs {
+				data, derr := readFile(j.path)
+				if derr != nil {
+					mu.Lock()
+					if ferr == nil {
+						ferr = derr
+					}
+					mu.Unlock()
+					continue
+				}
+				if !isIndexable(j.rel, data) {
+					continue
+				}
+				h := cache.Hash(data)
+				mu.Lock()
+				cur[j.rel] = h
+				mu.Unlock()
+			}
+		}()
+	}
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -131,18 +180,16 @@ func indexableHashes(root string, ign *ignore.Matcher) (map[string]string, error
 		if ign != nil && ign.Ignored(filepath.ToSlash(rel)) {
 			return nil
 		}
-		data, derr := readFile(path)
-		if derr != nil {
-			return derr
-		}
-		if !isIndexable(rel, data) {
-			return nil
-		}
-		cur[rel] = cache.Hash(data)
+		jobs <- job{path: path, rel: rel}
 		return nil
 	})
+	close(jobs)
+	wg.Wait()
 	if err != nil {
 		return nil, err
+	}
+	if ferr != nil {
+		return nil, ferr
 	}
 	return cur, nil
 }

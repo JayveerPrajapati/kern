@@ -44,6 +44,9 @@ type metricsStats struct {
 // TestMetrics_JSON verifies `blueprint metrics --repo <dir> --json` emits a
 // valid JSON document with the expected metric fields on stdout.
 func TestMetrics_JSON(t *testing.T) {
+	if testing.Short() {
+		t.Skip("E2E gate test — full pipeline; runs in nightly non-short suite")
+	}
 	bin := g4BuildBinary(t)
 	dir := t.TempDir()
 
@@ -68,6 +71,9 @@ func TestMetrics_JSON(t *testing.T) {
 // TestMetrics_Terminal verifies `blueprint metrics --repo <dir>` emits a
 // human-readable report on stdout and exits 0.
 func TestMetrics_Terminal(t *testing.T) {
+	if testing.Short() {
+		t.Skip("E2E gate test — full pipeline; runs in nightly non-short suite")
+	}
 	bin := g4BuildBinary(t)
 	dir := t.TempDir()
 
@@ -88,6 +94,9 @@ func TestMetrics_Terminal(t *testing.T) {
 // TestMetrics_NoRepo verifies a non-repo path (one where .blueprint cannot be
 // a directory) is an operational error: exit 2.
 func TestMetrics_NoRepo(t *testing.T) {
+	if testing.Short() {
+		t.Skip("E2E gate test — full pipeline; runs in nightly non-short suite")
+	}
 	bin := g4BuildBinary(t)
 	// A regular FILE as the repo root: .blueprint under it cannot be a
 	// directory, so the metrics file cannot be read → exit 2.
@@ -108,6 +117,9 @@ func TestMetrics_NoRepo(t *testing.T) {
 // TestMetrics_Reset verifies `blueprint metrics --repo <dir> --reset` clears
 // accumulated metrics: it writes a fresh zeroed metrics file and exits 0.
 func TestMetrics_Reset(t *testing.T) {
+	if testing.Short() {
+		t.Skip("E2E gate test — full pipeline; runs in nightly non-short suite")
+	}
 	bin := g4BuildBinary(t)
 	dir := t.TempDir()
 

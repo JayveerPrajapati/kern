@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/JayveerPrajapati/kern/internal/ignore"
@@ -57,15 +58,46 @@ func (p FreshnessProof) Stale() bool { return p.Verdict != FreshnessFresh }
 // ContentRoot is always populated; TreeOID/GitCommit are best-effort and
 // empty when root is not a git worktree or git is unavailable.
 func buildIdentity(root string, fileHashes map[string]string, builtAt time.Time) *IndexIdentity {
-	id := &IndexIdentity{
+	g := startIdentityGit(root)
+	return g.joinIdentity(fileHashes, builtAt)
+}
+
+// identityGit holds the walk-independent git observations of an index
+// identity (tree OID, commit). StartIdentityGit launches them on a
+// background goroutine so Build/Update can overlap the (slow) git staging
+// dance with their file walk; joinIdentity waits and assembles the final
+// identity once FileHashes are final.
+type identityGit struct {
+	wg     sync.WaitGroup
+	oid    string
+	commit string
+}
+
+// startIdentityGit begins observing root's git identity concurrently. Call
+// joinIdentity when the build/update walk has finished.
+func startIdentityGit(root string) *identityGit {
+	g := &identityGit{}
+	g.wg.Add(1)
+	go func() {
+		defer g.wg.Done()
+		g.oid = treeOID(root)
+		if out, err := runGit(root, "rev-parse", "--short", "HEAD"); err == nil {
+			g.commit = out
+		}
+	}()
+	return g
+}
+
+// joinIdentity waits for the git observations and returns the assembled
+// identity. fileHashes/builtAt must be final (the walk complete).
+func (g *identityGit) joinIdentity(fileHashes map[string]string, builtAt time.Time) *IndexIdentity {
+	g.wg.Wait()
+	return &IndexIdentity{
 		ContentRoot: aggregateHash(fileHashes),
 		BuiltAt:     builtAt,
+		TreeOID:     g.oid,
+		GitCommit:   g.commit,
 	}
-	id.TreeOID = treeOID(root)
-	if out, err := runGit(root, "rev-parse", "--short", "HEAD"); err == nil {
-		id.GitCommit = out
-	}
-	return id
 }
 
 // aggregateHash is a flat content fingerprint: SHA-256 over sorted "path=hash"
@@ -94,8 +126,10 @@ func aggregateHash(fileHashes map[string]string) string {
 // Fast path: when nothing changed outside the excluded tool-state dirs, the
 // current tree object is exactly HEAD's tree object — two cheap queries (a
 // porcelain status and a rev-parse), no staging and no object writes. The
-// pathspec exclusion set mirrors the slow path's staging set, so both paths
-// produce OIDs over the same files.
+// porcelain pathspecs exclude BOTH .kern and .blueprint; status is read-only
+// and does not error on a pathspec that names an ignored path, so the .kern
+// pathspec is safe here even though the `git add` form of it is fatal in the
+// slow path (see below). The two paths describe the same file set.
 //
 // Slow path (tree dirty, or status unavailable): a plain `git write-tree`
 // only reflects the staged index, so an unstaged edit — exactly what
@@ -106,13 +140,29 @@ func aggregateHash(fileHashes map[string]string) string {
 // index is never touched; the only side effect is a dangling tree/blob in
 // the object database, which git gc reaps.
 //
-// .kern and .blueprint are excluded from BOTH paths: they hold untracked
-// tool state (index.json, audit logs, approvals) that is never part of the
-// code identity. Without the exclusion, every blueprint audit append would
-// change the tree OID, mark the source index stale, and force a rebuild —
-// and because Save() writes .kern/index.json AFTER Build has captured the
-// identity, leaving it in the tree would defeat the TreeOID fast path
-// entirely on fresh repos.
+// .kern and .blueprint hold untracked tool state (index.json, audit logs,
+// approvals) that is never part of the code identity. Without excluding them,
+// every blueprint audit append would change the tree OID, mark the source
+// index stale, and force a rebuild — and because Save() writes
+// .kern/index.json AFTER Build has captured the identity, leaving it in the
+// tree would defeat the TreeOID fast path entirely on fresh repos. The two
+// are excluded differently because of a git quirk:
+//
+//   - .blueprint is NOT gitignored (verified: `git check-ignore .blueprint`
+//     reports not ignored), so it must be excluded by an explicit pathspec
+//     in BOTH paths.
+//   - .kern IS gitignored by convention — kern's own setup wires `.kern/`
+//     into the repo's ignore rules (.git/info/exclude via ensureGitExclude
+//     on Save, or a tracked .gitignore in manual setups) — so `git add -A`
+//     auto-skips it. The slow path MUST NOT exclude it by pathspec: `git
+//     add` exits 1 with "The following paths are ignored by one of your
+//     .gitignore files: .kern" when a pathspec names an existing ignored
+//     path, and --ignore-errors does not suppress that, so the whole slow
+//     path aborts and treeOID returns "" — silently disabling the tree-OID
+//     identity in every repo that has a .kern directory (the live defect
+//     this comment documents). Gitignored paths need no pathspec; the fast
+//     path keeps the .kern pathspec only because porcelain status tolerates
+//     it.
 func treeOID(root string) string {
 	// Fast path: porcelain-clean outside the excluded dirs means staging the
 	// working tree (slow path) would produce exactly HEAD's tree object.
@@ -141,11 +191,13 @@ func treeOID(root string) string {
 	env := append(os.Environ(), "GIT_INDEX_FILE="+idxPath)
 
 	// Stage the whole working tree into the throwaway index. --ignore-errors
-	// tolerates unreadable/locked files; .gitignore is honored exactly as the
-	// index's own ignore policy honors it for gitignored paths. The .kern
-	// and .blueprint directories are excluded explicitly, matching the fast
-	// path's comparison set (see the doc comment above).
-	add := exec.CommandContext(ctx, "git", "-C", root, "add", "-A", "--ignore-errors", "--", ".", ":(exclude).kern", ":(exclude).blueprint")
+	// tolerates unreadable/locked files; git's ignore rules are honored
+	// exactly as the index's own ignore policy honors them for gitignored
+	// paths. .blueprint is excluded by an explicit pathspec (it is NOT
+	// gitignored); .kern is excluded by git's own ignore rules instead — a
+	// pathspec naming it makes `git add` exit 1, aborting the entire slow
+	// path (see the doc comment above for the full explanation).
+	add := exec.CommandContext(ctx, "git", "-C", root, "add", "-A", "--ignore-errors", "--", ".", ":(exclude).blueprint")
 	add.Env = env
 	if err := add.Run(); err != nil {
 		return ""
@@ -205,12 +257,78 @@ func (ix *Index) FreshnessProof(root string) FreshnessProof {
 // outside the git tree, .kernignore-only exclusions, dirty smudge/clean
 // filters — at the cost of a tree walk. `kern index --status --strict` uses
 // this.
+//
+// Provenance contract: the verdict comes SOLELY from the content walk. The
+// git commit is observed concurrently as provenance only; Current.TreeOID is
+// LAZY — it is computed ONLY when the walk FAILS and git must be trusted as
+// the fallback (recorded vs current tree OID compare). On a successful walk
+// Current.TreeOID stays "" and is omitted from the emitted JSON (omitempty),
+// so the strict re-verify path never pays for the git tree-OID slow path
+// (which stages the whole working tree into a throwaway index). Recorded
+// TreeOID is unaffected: it is still recorded at build time, and the warm
+// TreeOIDProbe freshness check depends on it.
 func (ix *Index) FreshnessProofStrict(root string) FreshnessProof {
-	proof, ok := ix.freshnessBaseline(root)
-	if !ok {
-		return proof // unknown
+	proof := FreshnessProof{CheckedAt: time.Now().UTC()}
+	if ix == nil || ix.Identity == nil {
+		proof.Verdict = FreshnessUnknown
+		return proof
 	}
-	return ix.finishFreshness(root, proof)
+	proof.Recorded = *ix.Identity
+	var (
+		wg      sync.WaitGroup
+		commit  string
+		cur     map[string]string
+		walkErr error
+	)
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		// Git commit is provenance only; the verdict never depends on it.
+		if out, err := runGit(root, "rev-parse", "--short", "HEAD"); err == nil {
+			commit = out
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		cur, walkErr = indexableHashes(root, ignore.Load(root))
+	}()
+	wg.Wait()
+	proof.Current = IndexIdentity{BuiltAt: time.Now().UTC(), GitCommit: commit}
+	if walkErr != nil {
+		// Walk failed: compute the tree OID lazily and trust git when it
+		// vouches for the tree (recorded == current OID).
+		proof.Current.TreeOID = treeOID(root)
+		if proof.Recorded.TreeOID != "" && proof.Recorded.TreeOID == proof.Current.TreeOID {
+			proof.Verdict = FreshnessFresh // trust git
+			return proof
+		}
+		proof.Verdict = FreshnessUnknown
+		return proof
+	}
+	proof.Current.ContentRoot = aggregateHash(cur)
+	if proof.Current.ContentRoot == proof.Recorded.ContentRoot {
+		proof.Verdict = FreshnessFresh
+		return proof
+	}
+	proof.Verdict = FreshnessStale
+	return proof
+}
+
+// StaleWithProof runs the Stale() decision and returns the freshness proof it
+// was based on, so callers that need both the verdict and the proof (e.g.
+// `kern guard check`, whose JSON output carries the provenance) make ONE
+// observation pass instead of computing the proof twice. The boolean is
+// exactly what Stale() returns.
+func (ix *Index) StaleWithProof(root string) (bool, FreshnessProof) {
+	if ix == nil || len(ix.FileHashes) == 0 {
+		return true, FreshnessProof{CheckedAt: time.Now().UTC(), Verdict: FreshnessUnknown}
+	}
+	if ix.Identity == nil {
+		// Same defensive legacy path as Stale(); no proof baseline exists.
+		return ix.legacyStale(), FreshnessProof{CheckedAt: time.Now().UTC(), Verdict: FreshnessUnknown}
+	}
+	proof := ix.FreshnessProof(ix.Root)
+	return proof.Stale(), proof
 }
 
 // freshnessBaseline fills the proof's Recorded/Current identities and reports

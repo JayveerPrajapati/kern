@@ -9,6 +9,9 @@ import (
 // runs the resilience check on a fixture with .blueprint/scenarios/ and that
 // the default fast check set (without the flag) does not.
 func TestG23_ResilienceCheckWiring(t *testing.T) {
+	if testing.Short() {
+		t.Skip("E2E gate test — full pipeline; runs in nightly non-short suite")
+	}
 	_ = requireKernPath(t) // skip when kern is not reachable (gate needs it)
 	bin := g4BuildBinary(t)
 	dir := t.TempDir()
@@ -78,6 +81,9 @@ func main() {}
 // TestG23_ResilienceCheckWiringInvalidYAML verifies that a malformed scenarios
 // file degrades to a WARN (never a hard error / block) under --resilience.
 func TestG23_ResilienceCheckWiringInvalidYAML(t *testing.T) {
+	if testing.Short() {
+		t.Skip("E2E gate test — full pipeline; runs in nightly non-short suite")
+	}
 	_ = requireKernPath(t)
 	bin := g4BuildBinary(t)
 	dir := t.TempDir()

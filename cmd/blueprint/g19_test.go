@@ -12,6 +12,9 @@ import (
 // The audit write lives inside the service, so the CLI adapter is covered
 // without any CLI-specific audit code (P1-1).
 func TestG19_CLICheckWritesAudit(t *testing.T) {
+	if testing.Short() {
+		t.Skip("E2E gate test — full pipeline; runs in nightly non-short suite")
+	}
 	bin := g4BuildBinary(t)
 	dir := t.TempDir()
 	g4GitRepo(t, dir)
@@ -56,6 +59,9 @@ func TestG19_CLICheckWritesAudit(t *testing.T) {
 // output notes it and the audit record lists resilience in checks_skipped
 // (P2-2). The skip must never be a silent omission.
 func TestP22_CLICheckNotesResilienceNotRun(t *testing.T) {
+	if testing.Short() {
+		t.Skip("E2E gate test — full pipeline; runs in nightly non-short suite")
+	}
 	bin := g4BuildBinary(t)
 	dir := t.TempDir()
 	g4GitRepo(t, dir)

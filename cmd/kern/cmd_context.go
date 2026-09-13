@@ -432,7 +432,12 @@ func runGuard(rest []string) {
 		}
 		fmt.Printf("wrote %s (edit it to declare boundary rules)\n", intel.DefaultBoundariesPath(root))
 	case "check":
-		ix, err := intel.ReadIndex(root)
+		// ReadIndexWithProof returns the freshness proof ReadIndex's staleness
+		// decision was based on (or the post-update observation), so the JSON
+		// output below does not re-observe the tree a second time — the old
+		// explicit ix.FreshnessProof(root) recomputed the same walk/git dance
+		// (~0.5-0.8s on a medium repo) purely for provenance output.
+		ix, freshness, err := intel.ReadIndexWithProof(root)
 		if err != nil {
 			fatal("Guard: %v", err)
 		}
@@ -482,7 +487,7 @@ func runGuard(rest []string) {
 				printJSON(map[string]any{
 					"schema_version":  kernJSONContractVersion,
 					"violations":      []intel.Violation{}, // boundary check skipped
-					"freshness_proof": ix.FreshnessProof(root),
+					"freshness_proof": freshness,
 					"authz_verdict":   authzVerdict,
 				})
 			} else {
@@ -510,7 +515,7 @@ strict := f.precision == "strict"
 			out := map[string]any{
 				"schema_version":  kernJSONContractVersion,
 				"violations":      violations,
-				"freshness_proof": ix.FreshnessProof(root),
+				"freshness_proof": freshness,
 			}
 // Only surface skipped edges when strict mode actually skipped
 		// some, so default-mode JSON output is unchanged.

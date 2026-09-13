@@ -342,13 +342,43 @@ func AffectedFiles(ix *index.Index, symbols []string) []string {
 // it is absent, the on-disk version is incompatible, or any source file has
 // been added/removed/edited since the index was built (content-hash manifest).
 func ReadIndex(root string) (*index.Index, error) {
-	if ix, err := index.Load(root); err == nil && ix != nil && !ix.Stale() {
-		return ix, nil
+	ix, _, err := ReadIndexWithProof(root)
+	return ix, err
+}
+
+// ReadIndexWithProof is ReadIndex plus the freshness proof of the index it
+// returns: the staleness decision ReadIndex already makes internally, or a
+// re-observation after an incremental update, so callers that need both (e.g.
+// `kern guard check`, whose JSON output carries the provenance) observe the
+// tree ONCE instead of twice. The returned proof reflects the returned index:
+// fresh on the fresh path, and post-update on the update path.
+func ReadIndexWithProof(root string) (*index.Index, index.FreshnessProof, error) {
+	prev, lerr := index.Load(root)
+	if lerr == nil && prev != nil {
+		stale, proof := prev.StaleWithProof(root)
+		if !stale {
+			return prev, proof, nil
+		}
+		// A loadable-but-stale index is refreshed INCREMENTALLY (index.Update
+		// re-parses only changed/new files and copies symbols/edges of unchanged
+		// files verbatim — the same update-over-build pattern LoadOrBuild and
+		// project.Session.rebuildIndex use). Previously this fell straight to a
+		// full index.Build, so every commit (even a 2-file one) invalidated the
+		// whole index and forced a full re-parse on the next `kern guard check`.
+		// Update produces an index equivalent to a full rebuild, so freshness
+		// proofs and staleness detection behave identically; any Update failure
+		// falls back to the full Build.
+		if ix, err := index.Update(root, prev); err == nil && ix != nil {
+			_ = ix.Save()
+			// Post-update proof: observe the tree the served index claims to
+			// reflect (expected: fresh — Update records the current identity).
+			return ix, ix.FreshnessProof(root), nil
+		}
 	}
 	ix, err := index.Build(root)
 	if err != nil {
-		return nil, err
+		return nil, index.FreshnessProof{}, err
 	}
 	_ = ix.Save()
-	return ix, nil
+	return ix, ix.FreshnessProof(root), nil
 }

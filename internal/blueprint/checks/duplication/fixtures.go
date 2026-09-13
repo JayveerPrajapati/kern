@@ -158,8 +158,8 @@ func AttemptRetry(r *Request) error {
 		RepoDir:        dir,
 		NewFile:        "billing/retry.go",
 		ExistingFile:   "shared/retry.go",
-		ExpectedBucket: "block-candidate",
-		Description:    "same logic, all identifiers renamed (function, params, locals, helper, error message); kern pipeline scores this 0.585 (renamed calls drop the called-symbol overlap), just under the 0.60 threshold",
+		ExpectedBucket: "ignore",
+		Description:    "same logic, all identifiers renamed (function, params, locals, helper, error message); kern pipeline scores this 0.760 — below the 0.95 warning-budget threshold, so it is deliberately not printed as an advisory",
 	}
 }
 
@@ -221,8 +221,8 @@ func RetryRequest(req *Request) error {
 		RepoDir:        dir,
 		NewFile:        "checkout/retry.go",
 		ExistingFile:   "shared/retry.go",
-		ExpectedBucket: "warning",
-		Description:    "same algorithm with minor structural refactors (range loop, inline if, extracted delay); kern pipeline scores 0.820",
+		ExpectedBucket: "block-candidate",
+		Description:    "same algorithm with minor structural refactors (range loop, inline if, extracted delay); kern pipeline scores 0.975 — above the 0.95 warning-budget threshold, so it is the only non-identical duplicate still detected",
 	}
 }
 
@@ -287,8 +287,8 @@ func RetryRequest(req *Request) error {
 		RepoDir:        dir,
 		NewFile:        "gateway/retry.go",
 		ExistingFile:   "shared/retry.go",
-		ExpectedBucket: "informational",
-		Description:    "same signature, genuinely different algorithm (exponential vs linear backoff); kern pipeline scores 0.779",
+		ExpectedBucket: "ignore",
+		Description:    "same signature, genuinely different algorithm (exponential vs linear backoff); kern pipeline scores 0.909 — below the 0.95 warning-budget threshold, so the structural false positive is no longer printed",
 	}
 }
 
@@ -338,8 +338,8 @@ func RetryWithLog(req *shared.Request) error {
 		RepoDir:        dir,
 		NewFile:        "api/retry.go",
 		ExistingFile:   "shared/retry.go",
-		ExpectedBucket: "warning",
-		Description:    "new function is a thin wrapper that delegates to the existing function; kern pipeline scores 0.416 (different called symbols, small size)",
+		ExpectedBucket: "ignore",
+		Description:    "new function is a thin wrapper that delegates to the existing function; the 2-statement wrapper is below the MinCandidateStatements size floor, so Similarity returns 0 — tiny helpers are never duplication candidates",
 	}
 }
 
@@ -429,7 +429,7 @@ func (a *Account) SetEmail(v string) { a.email = v }
 		RepoDir:        dir,
 		NewFile:        "users/model.go",
 		ExistingFile:   "shared/model.go",
-		ExpectedBucket: "informational",
-		Description:    "generated getter/setter boilerplate, structurally similar by nature; kern pipeline scores 0.540 (small-func penalty)",
+		ExpectedBucket: "ignore",
+		Description:    "generated getter/setter boilerplate, structurally similar by nature; the 1-statement accessors are below the MinCandidateStatements size floor, so Similarity returns 0 — boilerplate accessors are never duplication candidates",
 	}
 }

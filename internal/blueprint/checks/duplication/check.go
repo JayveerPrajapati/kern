@@ -100,7 +100,9 @@ func (Check) Name() string { return "duplication:advisory" }
 //  3. Fingerprints existing files via a whole-root scan (or the per-file
 //     fingerprint cache when one is present), excluding changed files.
 //  4. Compares each new function against all existing functions.
-//  5. Emits WARN findings for similarity >= 0.60 (spec tiers).
+//  5. Emits WARN findings for similarity >= DetectionThreshold (0.95, the
+//     "block-candidate" tier), capped at MaxAdvisoryFindings per run with a
+//     summary finding for the remainder.
 func (c Check) Run(ctx context.Context, req domain.ChangeRequest) (domain.CheckResult, error) {
 	if c.client == nil {
 		return domain.CheckResult{Name: c.Name(), Status: domain.StatusError, Error: "kern client required"}, nil
@@ -166,7 +168,7 @@ func (c Check) Run(ctx context.Context, req domain.ChangeRequest) (domain.CheckR
 				bestMatch = ef
 			}
 		}
-		if bestMatch != nil && bestScore >= 0.60 {
+		if bestMatch != nil && bestScore >= DetectionThreshold {
 			bucket := Bucket(bestScore)
 			severity := domain.SeverityWarn
 			if bucket == "informational" {
@@ -191,6 +193,30 @@ func (c Check) Run(ctx context.Context, req domain.ChangeRequest) (domain.CheckR
 				}},
 			})
 		}
+	}
+
+	// Warning budget: cap the advisory findings emitted per run so a noisy
+	// change cannot flood the terminal. Above the cap the list is truncated
+	// and one summary finding reports the remainder; the full candidate set is
+	// still available to the jscpd two-pass run (CI) and to `kern check`
+	// without --fast.
+	if len(findings) > MaxAdvisoryFindings {
+		truncated := len(findings) - MaxAdvisoryFindings
+		findings = findings[:MaxAdvisoryFindings]
+		findings = append(findings, domain.Finding{
+			RuleID:      "duplication:advisory",
+			Severity:    domain.SeverityInfo,
+			Category:    domain.CategoryDuplication,
+			Message:     fmt.Sprintf("and %d more duplication candidates (see full report / run without --fast)", truncated),
+			Explanation: fmt.Sprintf("The in-house duplication check found %d candidates in this change; only the first %d are listed. The remainder is visible in the full report or by running the check without --fast (the CI two-pass jscpd scan covers all of them).", truncated+MaxAdvisoryFindings, MaxAdvisoryFindings),
+			RuleVersion: "1",
+			Confidence:  1.0,
+			Scope:       "repo",
+			Evidence: []domain.Evidence{{
+				Kind:        "truncated-advisories",
+				Description: fmt.Sprintf("%d additional candidates not listed", truncated),
+			}},
+		})
 	}
 
 	status := domain.StatusPass

@@ -34,9 +34,11 @@ var benchmarkCases = []benchmarkCase{
 	{"generated-boilerplate", false, 0.540, []string{"users/model.go"}, []string{"shared/model.go"}},
 }
 
-// detectionThreshold is the score at/above which the check emits a finding
-// (spec tiers: >= 0.60 → informational/warning/block-candidate).
-const detectionThreshold = 0.60
+// detectionThreshold is the score at/above which the check emits a finding.
+// It mirrors similarity.DetectionThreshold (0.95 — the "block-candidate"
+// tier): the 0.60/0.85 tiers printed noise the in-house oracle cannot back
+// (benchmark precision 0.50 at 0.60), so they are no longer emitted.
+const detectionThreshold = DetectionThreshold
 
 // fixtureFingerprints converts the fingerprint records for the given files
 // into duplication Fingerprints (the same conversion fingerprintFromRecord
@@ -79,11 +81,13 @@ func bestSimilarity(newFps, existingFps []Fingerprint) float64 {
 }
 
 // TestSimilarityBenchmark measures the in-house structural duplication oracle
-// (Similarity at the 0.60 detection threshold) against the 7-fixture G6
+// (Similarity at the DetectionThreshold = 0.95) against the 7-fixture G6
 // corpus and asserts each fixture's score plus the aggregate
 // precision/recall/FPR. This is the ADVISORY (triage) path of the two-pass
-// model (P1.1): high recall is its job, so its 0.50 precision is expected and
-// documented. The BLOCKING path is pinned separately by
+// model (P1.1): the warning budget (0.95 threshold + small-function size
+// floor) deliberately trades recall for precision — only near-identical
+// true duplicates are printed, so advisory output stops being noise. The
+// BLOCKING path is pinned separately by
 // TestSimilarityBenchmarkBlockingPath. This is a correctness regression
 // guard, not a perf benchmark. Run with -v for the human-readable summary
 // table:
@@ -94,14 +98,18 @@ func TestSimilarityBenchmark(t *testing.T) {
 	// 2026-08-29 from fixtureFingerprintRecords (real kern output including
 	// control-flow counts). They supersede the historical scores in
 	// fixtures.go, which predate control-flow counts in the record.
+	// wrapper-around-existing (0.517) and generated-boilerplate (0.680) now
+	// score 0.000: the small-function size floor (MinCandidateStatements=5)
+	// ignores their 1-2 statement helpers outright, so they are clean
+	// true negatives instead of noisy false positives.
 	expectedScore := map[string]float64{
 		"exact-duplicate":                 1.000,
 		"renamed-duplicate":               0.760,
 		"slightly-refactored-duplicate":   0.975,
 		"different-but-similar-algorithm": 0.909,
-		"wrapper-around-existing":         0.517,
+		"wrapper-around-existing":         0.000,
 		"unrelated-same-signature":        0.659,
-		"generated-boilerplate":           0.680,
+		"generated-boilerplate":           0.000,
 	}
 	const scoreTolerance = 0.01
 
@@ -137,14 +145,15 @@ func TestSimilarityBenchmark(t *testing.T) {
 		rows = append(rows, r)
 
 		// Regression guard: the fixture's score must match the pinned value.
-		if want := expectedScore[bc.name]; want == 0 {
+		want, ok := expectedScore[bc.name]
+		if !ok {
 			t.Errorf("%s: no pinned expected score", bc.name)
 		} else if d := score - want; d < -scoreTolerance || d > scoreTolerance {
 			t.Errorf("%s: similarity = %.3f, want %.3f (±%.2f)", bc.name, score, want, scoreTolerance)
 		}
 	}
 
-	// Aggregate metrics at the 0.60 threshold.
+	// Aggregate metrics at the DetectionThreshold (0.95).
 	precision := 0.0
 	if tp+fp > 0 {
 		precision = float64(tp) / float64(tp+fp)
@@ -168,7 +177,7 @@ func TestSimilarityBenchmark(t *testing.T) {
 		t.Errorf("FPR %.2f out of [0.0, 1.0]", fpr)
 	}
 
-	t.Log("--- Duplication Oracle Benchmark (threshold 0.60) ---")
+	t.Log("--- Duplication Oracle Benchmark (threshold 0.95) ---")
 	t.Logf("%-34s %-8s %-10s %-6s %s", "fixture", "score", "bucket", "truth", "result")
 	for _, r := range rows {
 		truth := "DUP"
@@ -184,14 +193,18 @@ func TestSimilarityBenchmark(t *testing.T) {
 	t.Log("--- metrics ---")
 	t.Logf("TP=%d FN=%d FP=%d TN=%d", tp, fn, fp, tn)
 	t.Logf("precision=%.2f recall=%.2f FPR=%.2f", precision, recall, fpr)
-	t.Logf("targets: precision >=0.50, recall >=0.75")
+	t.Logf("targets: precision >=0.50, recall >=0.50")
 
 	// Assert the aggregate counts exactly: these are the benchmark results
 	// that justify the advisory-only posture (see docs/duplication-benchmark.md).
-	if tp != 3 || fn != 0 || fp != 3 || tn != 1 {
-		t.Errorf("confusion matrix = TP:%d FN:%d FP:%d TN:%d, want TP:3 FN:0 FP:3 TN:1", tp, fn, fp, tn)
+	// At the 0.95 threshold plus the small-function size floor, only the
+	// near-identical true duplicates (exact, slightly-refactored) are
+	// detected: renamed (0.760) and the structural false positives are no
+	// longer printed, so precision is 1.00 and the false-positive rate is 0.
+	if tp != 2 || fn != 1 || fp != 0 || tn != 4 {
+		t.Errorf("confusion matrix = TP:%d FN:%d FP:%d TN:%d, want TP:2 FN:1 FP:0 TN:4", tp, fn, fp, tn)
 	}
-	if fmt.Sprintf("%.2f", precision) != "0.50" || fmt.Sprintf("%.2f", recall) != "1.00" || fmt.Sprintf("%.2f", fpr) != "0.75" {
+	if fmt.Sprintf("%.2f", precision) != "1.00" || fmt.Sprintf("%.2f", recall) != "0.67" || fmt.Sprintf("%.2f", fpr) != "0.00" {
 		t.Errorf("metrics = precision:%.2f recall:%.2f FPR:%.2f, want 0.50/1.00/0.75", precision, recall, fpr)
 	}
 }

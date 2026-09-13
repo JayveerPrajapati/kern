@@ -17,30 +17,26 @@ import (
 //
 // Identifier names are intentionally NOT compared (spec line 1049).
 //
-// Small-function penalty: functions with very few statements (≤3) are
-// inherently structurally similar (getters, setters, trivial wrappers) and
-// produce false positives. Their score is discounted to avoid noise.
+// Size floor: functions below MinCandidateStatements (~5 lines / ~10 tokens)
+// are ignored outright — getters, setters, one-liners and trivial wrappers
+// are structurally similar to any other tiny helper by nature, not by
+// duplication, and they were the dominant source of advisory noise (e.g. a
+// 2-line clip vs headStr pair scoring 1.00). This replaces the former
+// ≤3-statement discount: the floor is absolute, so tiny helpers are never
+// candidates.
 func Similarity(a, b Fingerprint) float64 {
+	// Size floor: if either side is a tiny function, the pair is not a
+	// duplication candidate regardless of how similar their shapes look.
+	if a.StatementCount < MinCandidateStatements || b.StatementCount < MinCandidateStatements {
+		return 0
+	}
+
 	sigScore := signatureSimilarity(a, b)
 	cfScore := controlFlowSimilarity(a, b)
 	callScore := calledSymbolsSimilarity(a, b)
 	sizeScore := sizeSimilarity(a, b)
 
 	raw := 0.20*sigScore + 0.35*cfScore + 0.30*callScore + 0.15*sizeScore
-
-	// Small-function penalty: if both functions have ≤3 statements, discount
-	// the score. Trivial functions (getters, setters, one-liners) are
-	// structurally similar by nature, not by duplication.
-	minStmts := a.StatementCount
-	if b.StatementCount < minStmts {
-		minStmts = b.StatementCount
-	}
-	if minStmts <= 3 {
-		// Discount by up to 30% for the smallest functions, scaling linearly.
-		// 0 statements → 0.7x, 3 statements → 1.0x (no penalty).
-		discount := 0.7 + 0.1*float64(minStmts)
-		raw *= discount
-	}
 
 	return raw
 }
@@ -177,17 +173,40 @@ func Bucket(score float64) string {
 }
 
 // DetectionThreshold is the minimum similarity at/above which the in-house
-// check emits an advisory finding (spec tiers: >= 0.60). Findings at this
-// level are advisory WARN only — the triage layer of the two-pass model.
-const DetectionThreshold = 0.60
+// check emits an advisory finding. Raised from the spec's 0.60 tier to 0.95
+// (the "block-candidate" tier): the 0.60/0.85 tiers are below the precision
+// the in-house oracle can back (benchmark precision 0.50 at 0.60), so they
+// only printed noise (e.g. "clip vs headStr similarity 1.00"). Findings at
+// this level are advisory WARN only — the triage layer of the two-pass model.
+// Because DetectionThreshold sits above BlockCandidateThreshold, every
+// emitted advisory is automatically block-eligible; the 0.60-0.95 band is
+// deliberately not printed (the full jscpd two-pass run in CI still scans it).
+const DetectionThreshold = 0.95
+
+// MinCandidateStatements is the size floor for duplication candidates: a
+// function below this statement count (~5 lines / ~10 tokens, a Go statement
+// averages about two tokens) is a tiny helper (getter, setter, one-line
+// wrapper, trivial guard) that is structurally similar to any other tiny
+// helper by nature, not by duplication. Similarity returns 0 for any pair
+// where either side is below the floor, so tiny helpers never become
+// candidates or produce advisory noise.
+const MinCandidateStatements = 5
+
+// MaxAdvisoryFindings caps how many in-house advisory findings a single check
+// run emits. Above the cap the findings are truncated and one summary finding
+// reports how many more candidates exist (the full set is visible in a
+// non-fast run or the CI duplication report).
+const MaxAdvisoryFindings = 20
 
 // BlockCandidateThreshold is the similarity ABOVE which an in-house finding
 // is a block-eligible candidate in the two-pass triage model (orchestrated by
 // adapters/jscpd): candidates at this level MAY escalate to BLOCK, but only
 // when jscpd independently confirms a clone in the same file pair. It sits
 // above the 0.85 "warning" tier so only near-certain structural matches are
-// candidates, and it is intentionally distinct from Bucket's inactive
-// "> 0.95 block-candidate" placeholder tier.
+// candidates. With DetectionThreshold (0.95) raised above it, every advisory
+// the in-house check actually prints is already above this gate; the constant
+// remains the eligibility line for direct Similarity callers and the
+// blocking-path benchmark.
 const BlockCandidateThreshold = 0.90
 
 // BlockEligible reports whether a similarity score is a block-eligible

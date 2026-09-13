@@ -46,6 +46,9 @@ func TestG0_OwnershipDocsExist(t *testing.T) {
 // (spec Section 6): 2 = tool/runtime/configuration error (usage), 3 = invalid
 // Blueprint configuration, 4 = unsupported operation or environment.
 func TestG0_ExitCodeContract(t *testing.T) {
+	if testing.Short() {
+		t.Skip("E2E gate test — full pipeline; runs in nightly non-short suite")
+	}
 	binPath := buildBlueprintBinary(t)
 
 	// No args → usage (exit 2).

@@ -220,9 +220,10 @@ func TestJSCPDFallbackInHouseErrorPreserved(t *testing.T) {
 // twoPassFakeRunner serves kern fingerprint records that make the in-house
 // check emit a high-confidence (>0.90) structural finding between a changed
 // file (new.go) and an existing file (existing.go): the DoRetry/RetryRequest
-// records are structurally identical (score 1.0), while send/send scores 0.68
-// (small-function penalty) — a standard advisory. Whole-root scans walk the
-// workdir; scoped scans serve the requested files.
+// records are structurally identical (score 1.0). The send/send pair (1
+// statement each) is below the MinCandidateStatements size floor, so it
+// scores 0 and produces no advisory — only DoRetry remains a candidate.
+// Whole-root scans walk the workdir; scoped scans serve the requested files.
 func twoPassFakeRunner() kern.CommandRunner {
 	retryMain := []string{"errors.New(1)", "send(1)", "time.Sleep(1)"}
 	rec := func(file, fn, sig string, params, rets int, calls []string, lits, stmts, line int, cf kern.ControlFlow) kern.FingerprintRecord {
@@ -407,8 +408,8 @@ func TestJSCPDTwoPassNotConfirmedStaysAdvisory(t *testing.T) {
 	if cr.Status != domain.StatusWarn {
 		t.Fatalf("Status = %q, want %q (unconfirmed candidate stays advisory WARN)", cr.Status, domain.StatusWarn)
 	}
-	if len(cr.Findings) != 2 {
-		t.Fatalf("Findings = %d, want 2 (DoRetry 1.0 + send 0.68 advisories)", len(cr.Findings))
+	if len(cr.Findings) != 1 {
+		t.Fatalf("Findings = %d, want 1 (DoRetry 1.0 advisory only; send/send is below the size floor)", len(cr.Findings))
 	}
 	for _, f := range cr.Findings {
 		if f.RuleID != "duplication:advisory" {
@@ -417,9 +418,10 @@ func TestJSCPDTwoPassNotConfirmedStaysAdvisory(t *testing.T) {
 		if f.Severity == domain.SeverityBlock {
 			t.Errorf("Severity = %q, never blocks without jscpd confirmation", f.Severity)
 		}
-		// Advisories are WARN, or INFO for the informational bucket (0.60-0.85).
-		if f.Severity != domain.SeverityWarn && f.Severity != domain.SeverityInfo {
-			t.Errorf("Severity = %q, want warn or info", f.Severity)
+		// Advisories are WARN (the 0.95 warning-budget threshold only emits
+		// the block-candidate tier; the informational bucket is never printed).
+		if f.Severity != domain.SeverityWarn {
+			t.Errorf("Severity = %q, want warn", f.Severity)
 		}
 	}
 }
@@ -454,8 +456,8 @@ func TestJSCPDTwoPassMockConfirmer(t *testing.T) {
 		if cr.Status != domain.StatusWarn {
 			t.Fatalf("Status = %q, want %q (mock rejects the pair, nothing escalates)", cr.Status, domain.StatusWarn)
 		}
-		// Non-escalated pair: BOTH signals are kept — advisory (DoRetry 1.0,
-		// send 0.68) and the jscpd clone.
+		// Non-escalated pair: BOTH signals are kept — the advisory (DoRetry
+		// 1.0; send/send is below the size floor) and the jscpd clone.
 		var advisory, clone int
 		for _, f := range cr.Findings {
 			switch f.RuleID {
@@ -465,8 +467,8 @@ func TestJSCPDTwoPassMockConfirmer(t *testing.T) {
 				clone++
 			}
 		}
-		if advisory != 2 || clone != 1 {
-			t.Errorf("findings = %d advisory + %d clone, want 2 advisory + 1 clone", advisory, clone)
+		if advisory != 1 || clone != 1 {
+			t.Errorf("findings = %d advisory + %d clone, want 1 advisory + 1 clone", advisory, clone)
 		}
 	})
 }
@@ -499,7 +501,66 @@ func TestJSCPDFallbackAdvisoryStaysWarn(t *testing.T) {
 			fallback++
 		}
 	}
-	if advisory != 2 || fallback != 1 {
-		t.Errorf("findings = %d advisory + %d fallback, want 2 advisory + 1 fallback", advisory, fallback)
+	if advisory != 1 || fallback != 1 {
+		t.Errorf("findings = %d advisory + %d fallback, want 1 advisory + 1 fallback", advisory, fallback)
+	}
+}
+
+// TestJSCPDFastModeSkipsPassTwo: WithFast(true) skips Pass 2 (the jscpd
+// binary run over the mirrored repo — the dominant cost) entirely. Only the
+// in-house advisory finding plus one informational fast-mode note are
+// returned; the advisory keeps the status WARN and nothing can escalate to
+// BLOCK (pass-2 confirmation is the only BLOCK source).
+func TestJSCPDFastModeSkipsPassTwo(t *testing.T) {
+	// A reportJSON that would fail the parse if pass 2 ran proves the runner
+	// is never invoked.
+	chk := twoPassCheck(t, "not json", WithFast(true))
+	cr, err := chk.Run(context.Background(), twoPassRequest(twoPassRepo(t)))
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	if cr.Status != domain.StatusWarn {
+		t.Fatalf("Status = %q, want %q (DoRetry advisory keeps it WARN)", cr.Status, domain.StatusWarn)
+	}
+	var advisory, note int
+	for _, f := range cr.Findings {
+		switch f.RuleID {
+		case "duplication:advisory":
+			advisory++
+			if f.Severity == domain.SeverityBlock {
+				t.Errorf("advisory Severity = %q, fast mode never blocks (no pass-2 confirmation)", f.Severity)
+			}
+		case "duplication:fast-mode":
+			note++
+			if f.Severity != domain.SeverityInfo {
+				t.Errorf("fast-mode note Severity = %q, want info", f.Severity)
+			}
+			if !strings.Contains(f.Explanation, "CI") {
+				t.Errorf("fast-mode note = %q, want mention that the full two-pass check runs in CI", f.Explanation)
+			}
+		}
+	}
+	if advisory != 1 || note != 1 {
+		t.Errorf("findings = %d advisory + %d fast-mode note, want 1 + 1", advisory, note)
+	}
+}
+
+// TestJSCPDFastModeCleanChangePasses: fast mode on a change with no in-house
+// advisories passes (PASS + the informational fast-mode note), never WARNs on
+// the note alone.
+func TestJSCPDFastModeCleanChangePasses(t *testing.T) {
+	chk := NewCheck(nil, WithBinary("jscpd"), WithFast(true))
+	cr, err := chk.Run(context.Background(), domain.ChangeRequest{
+		RepositoryRoot: t.TempDir(),
+		Files:          []domain.FileChange{{Path: "sub1/a.js", Op: domain.OpWrite, Content: "x"}},
+	})
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	if cr.Status != domain.StatusPass {
+		t.Fatalf("Status = %q, want %q (no advisories + info note stays PASS)", cr.Status, domain.StatusPass)
+	}
+	if len(cr.Findings) != 1 || cr.Findings[0].RuleID != "duplication:fast-mode" {
+		t.Fatalf("Findings = %+v, want exactly the fast-mode note", cr.Findings)
 	}
 }
