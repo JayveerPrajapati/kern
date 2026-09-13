@@ -46,6 +46,7 @@ type flags struct {
 	commits              int
 	thresholds           string
 	graphml              bool
+	cypher               bool
 	html                 bool
 	out                  string
 	repos                bool
@@ -58,6 +59,7 @@ type flags struct {
 	timeoutSet           bool
 	fewshot              bool
 	mode                 string
+	withSkill            string
 	once                 bool
 	interval             int
 	http                 string
@@ -74,7 +76,9 @@ type flags struct {
 	maxTokens            int
 	maxFiles             int
 	tier                 string
+	graph                bool
 	precision            string
+	minConfidence        string
 	fold                 bool
 	staged               bool
 	compact              bool
@@ -279,6 +283,8 @@ func parseFlags(args []string) (flags, []string, error) {
 			f.fewshot = true
 		case "--mode":
 			setStr(&i, &f.mode)
+		case "--with-skill":
+			setStr(&i, &f.withSkill)
 		case "--once":
 			f.once = true
 		case "--semantic":
@@ -295,6 +301,8 @@ func parseFlags(args []string) (flags, []string, error) {
 			f.hold = true
 		case "--graphml":
 			f.graphml = true
+		case "--cypher":
+			f.cypher = true
 		case "--html":
 			f.html = true
 		case "--out":
@@ -331,10 +339,14 @@ func parseFlags(args []string) (flags, []string, error) {
 			setIntFlag(&i, &f.maxFiles, "--max-files")
 		case "--tier":
 			setStr(&i, &f.tier)
-		case "--precision":
-			setStr(&i, &f.precision)
+case "--precision":
+		setStr(&i, &f.precision)
+	case "--min-confidence":
+		setStr(&i, &f.minConfidence)
 		case "--fold":
 			f.fold = true
+		case "--graph":
+			f.graph = true
 		case "--generate":
 			f.generate = true
 		case "--staged":

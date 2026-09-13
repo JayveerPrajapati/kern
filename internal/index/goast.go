@@ -146,6 +146,9 @@ func extract(rel string, src []byte) ([]Symbol, map[string][]CallEdge, map[strin
 			returns := returnTypeNames(d.Type.Results)
 			syms = append(syms, Symbol{Kind: kind, Name: name, Receiver: recv, File: rel, Line: fset.Position(d.Pos()).Line, End: fset.Position(d.End()).Line, Params: params, Returns: returns, Lang: "go", Confidence: ConfidenceHigh})
 			addCalls(full, d)
+			// Router-table registrations are not syntactic calls; synthesize the
+			// dispatch hop so path/impact/probe traverse the framework boundary.
+			synthesizeDispatchEdges(full, d.Body, calls)
 		case *ast.GenDecl:
 			for _, spec := range d.Specs {
 				switch s := spec.(type) {

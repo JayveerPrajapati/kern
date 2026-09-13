@@ -29,8 +29,20 @@ func TestNewProviderDefaultOllama(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewProvider: %v", err)
 	}
-	if _, ok := p.(*OllamaProvider); !ok {
-		t.Fatalf("default provider = %T, want *OllamaProvider", p)
+	// The default is the auto chain: Ollama first, then locally-wired agent
+	// CLIs. The type assertion below must accept either the plain Ollama
+	// provider or a chain whose first element is Ollama.
+	switch pp := p.(type) {
+	case *OllamaProvider:
+	case *ChainProvider:
+		if len(pp.Providers()) == 0 {
+			t.Fatalf("auto chain is empty")
+		}
+		if _, ok := pp.Providers()[0].(*OllamaProvider); !ok {
+			t.Fatalf("auto chain first provider = %T, want *OllamaProvider", pp.Providers()[0])
+		}
+	default:
+		t.Fatalf("default provider = %T, want *OllamaProvider or auto chain", p)
 	}
 	got, err := p.Generate(context.Background(), "sys", "user payload", Options{})
 	if err != nil {

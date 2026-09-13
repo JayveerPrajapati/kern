@@ -177,7 +177,9 @@ func (s *Session) Index() (*index.Index, error) {
 // disk). Prefer an incremental Update over a full Build whenever a previous
 // index loads cleanly from a store: Update re-parses only changed files,
 // reusing symbols and edges of unchanged ones. Any Update failure (or no
-// loadable previous index) falls back to a full Build. The explicit
+// loadable previous index) falls back to a full Build, as does a change set
+// larger than index.CatchUpMaxChanges — over a near-whole-tree diff Update is
+// more expensive than a clean Build (the CG-P1-7 policy). The explicit
 // `kern index` CLI command is unaffected (it calls index.Build directly).
 func (s *Session) rebuildIndex(root string) (*index.Index, error) {
 	var prev *index.Index
@@ -203,8 +205,19 @@ func (s *Session) rebuildIndex(root string) (*index.Index, error) {
 	}
 	var ix *index.Index
 	if prev != nil {
-		if uix, uerr := index.Update(root, prev); uerr == nil && uix != nil {
-			ix = uix
+		// Large change sets make incremental Update more expensive than a
+		// clean Build — Update would re-parse nearly every file — so skip it
+		// and rebuild (the CG-P1-7 policy).
+		cur, herr := index.FileHashes(root)
+		if herr != nil {
+			// Unprovable freshness (scan error): fail closed with a full
+			// rebuild rather than incrementally updating a possibly-stale prev.
+			cur = nil
+		}
+		if cur != nil && len(index.Diff(prev.FileHashes, cur)) <= index.CatchUpMaxChanges {
+			if uix, uerr := index.Update(root, prev); uerr == nil && uix != nil {
+				ix = uix
+			}
 		}
 	}
 	if ix == nil {

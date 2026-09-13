@@ -20,7 +20,6 @@ func (s *Server) handleHealth(ctx context.Context, args map[string]any) (string,
 			root = roots[0]
 		}
 	}
-
 	snap := metrics.Default().Snapshot()
 
 	// Index health & freshness
@@ -28,6 +27,9 @@ func (s *Server) handleHealth(ctx context.Context, args map[string]any) (string,
 	indexSymbols := 0
 	indexFiles := 0
 	indexFresh := false
+	indexReused := 0
+	indexLowPromoted := 0
+	indexLowUnresolved := 0
 	if root != "" {
 		sess := s.sessionFor(root)
 		if sess != nil {
@@ -38,6 +40,9 @@ func (s *Server) handleHealth(ctx context.Context, args map[string]any) (string,
 				}
 				indexSymbols = len(ix.Symbols)
 				indexFiles = len(ix.FileHashes)
+				indexReused = ix.ReusedResults()
+				indexLowPromoted = ix.PromotedLowEdges
+				indexLowUnresolved = ix.UnresolvedLowEdges
 			}
 		}
 	}
@@ -60,13 +65,16 @@ func (s *Server) handleHealth(ctx context.Context, args map[string]any) (string,
 	result := map[string]any{
 		"status": "ok",
 		"index": map[string]any{
-			"root":         root,
-			"fresh":        indexFresh,
-			"age":          indexAge,
-			"symbols":      indexSymbols,
-			"files":        indexFiles,
-			"builds_count": snap.IndexBuildCount,
-			"build_avg_ms": snap.IndexBuildAvgMs,
+			"root":                 root,
+			"fresh":                indexFresh,
+			"age":                  indexAge,
+			"symbols":              indexSymbols,
+			"files":                indexFiles,
+			"reused_results":       indexReused,
+			"promoted_low_edges":   indexLowPromoted,
+			"unresolved_low_edges": indexLowUnresolved,
+			"builds_count":         snap.IndexBuildCount,
+			"build_avg_ms":         snap.IndexBuildAvgMs,
 		},
 		"tools": map[string]any{
 			"registered": len(tools),

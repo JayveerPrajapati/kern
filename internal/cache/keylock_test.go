@@ -8,19 +8,22 @@ import (
 )
 
 // probeLock reports whether mu is free: it attempts to lock in a goroutine and
-// reports whether the lock was acquired within timeout, unlocking when it was.
-// If the lock is held, the probe goroutine stays blocked until the holder
-// releases (at which point it acquires and unlocks itself).
+// reports whether the lock was acquired within timeout. The probe goroutine
+// ALWAYS releases the mutex (deferred unlock) — a probe whose timeout fires
+// must not leave the mutex held by a leaked goroutine, or every later probe
+// on the same mutex would block forever (the observed flake: the negative
+// probe's goroutine won the lock after the holder released and never
+// unlocked, so the positive probe timed out).
 func probeLock(t *testing.T, mu *sync.Mutex, timeout time.Duration) bool {
 	t.Helper()
-	done := make(chan struct{})
+	acquired := make(chan struct{})
 	go func() {
 		mu.Lock()
-		close(done)
+		defer mu.Unlock()
+		close(acquired)
 	}()
 	select {
-	case <-done:
-		mu.Unlock()
+	case <-acquired:
 		return true
 	case <-time.After(timeout):
 		return false
@@ -40,8 +43,10 @@ func TestPathLockSamePathSerializes(t *testing.T) {
 		t.Fatal("second lock on the same path acquired while the first was held")
 	}
 	a.Unlock()
-
-	if !probeLock(t, b, time.Second) {
+	// Generous window: under a fully-loaded CI machine the woken probe
+	// goroutine can take a while to be scheduled; the assertion itself is
+	// what matters, not the latency.
+	if !probeLock(t, b, 10*time.Second) {
 		t.Fatal("second lock on the same path did not acquire after the first released")
 	}
 }

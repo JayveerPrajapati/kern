@@ -352,3 +352,28 @@ func TestReembedFetchAttachesDenseVectors(t *testing.T) {
 		t.Fatalf("unknown fetch name should reembed nothing: n=%d err=%v", nn, err)
 	}
 }
+
+// TestIndexSkipsPDFByDefault pins the tag-gating behavior: without -tags pdf,
+// the default build's extRe does not include .pdf, so a PDF file must NOT be
+// indexed. The pdf decoder (pdf.go) is only compiled in with -tags pdf.
+func TestIndexSkipsPDFByDefault(t *testing.T) {
+	root := t.TempDir()
+	writeDoc(t, root, "notes.md", "regular markdown notes about the system here\n")
+	writeDoc(t, root, "paper.pdf", "this is not real pdf binary data, but it must not be indexed anyway\n")
+	ix, err := IndexDir(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundMarkdown := false
+	for _, d := range ix.Docs {
+		if strings.HasSuffix(d.Chunk.File, ".pdf") {
+			t.Fatalf("pdf file indexed without -tags pdf: %s", d.Chunk.File)
+		}
+		if strings.HasPrefix(d.Chunk.File, "notes") {
+			foundMarkdown = true
+		}
+	}
+	if !foundMarkdown {
+		t.Fatal("expected the .md doc to be indexed")
+	}
+}

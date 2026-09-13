@@ -110,17 +110,17 @@ func collectTestFiles(t *testing.T, root string) map[string]string {
 	return files
 }
 
-// TestRegistryShape pins the registry contract: exactly 36 gates, IDs G0-G35
+// TestRegistryShape pins the registry contract: exactly 40 gates, IDs G0-G39
 // in order with no gaps or duplicates, and every field populated.
 func TestRegistryShape(t *testing.T) {
-	if len(Registry) != 36 {
-		t.Fatalf("Registry has %d entries, want 36 (G0-G35)", len(Registry))
+	if len(Registry) != 40 {
+		t.Fatalf("Registry has %d entries, want 40 (G0-G39)", len(Registry))
 	}
 	seen := make(map[string]bool, len(Registry))
 	for i, g := range Registry {
 		wantID := "G" + itoa(i)
 		if g.ID != wantID {
-			t.Errorf("Registry[%d].ID = %q, want %q (gates must be G0-G35 in order)", i, g.ID, wantID)
+			t.Errorf("Registry[%d].ID = %q, want %q (gates must be G0-G39 in order)", i, g.ID, wantID)
 		}
 		if seen[g.ID] {
 			t.Errorf("duplicate gate ID %q", g.ID)

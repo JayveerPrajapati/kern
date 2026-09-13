@@ -237,7 +237,7 @@ func TestWikiExport(t *testing.T) {
 	root := buildTestProject(t)
 	ix := buildIndex(t, root)
 	outDir := t.TempDir()
-	files, err := WikiExport(ix, outDir)
+	files, err := WikiExport(ix, outDir, false)
 	if err != nil {
 		t.Fatal(err)
 	}

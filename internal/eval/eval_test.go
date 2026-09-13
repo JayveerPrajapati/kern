@@ -1,6 +1,7 @@
 package eval
 
 import (
+	"math"
 	"strings"
 	"testing"
 )
@@ -29,6 +30,30 @@ func TestRunEvidenceRetention(t *testing.T) {
 	}
 	if res.Samples[0].EvidenceRetained != 2 || res.Samples[0].EvidenceTotal != 3 {
 		t.Errorf("sample retained/total = %d/%d, want 2/3", res.Samples[0].EvidenceRetained, res.Samples[0].EvidenceTotal)
+	}
+	// OmissionRate is the inverse of retention: the fraction of critical
+	// evidence the candidate dropped (1 - 2/3 in float arithmetic).
+	if math.Abs(res.OmissionRate-(1.0/3.0)) > 1e-9 {
+		t.Errorf("OmissionRate = %v, want ~%v", res.OmissionRate, 1.0/3.0)
+	}
+}
+
+func TestAssertOmissionRate(t *testing.T) {
+	h := NewEvalHarness([]Sample{
+		{Name: "s1", Baseline: "a b c", Candidate: "a c", CriticalEvidence: []string{"a", "b", "c"}},
+	}, 0, []Assertion{
+		AssertOmissionRate(0.5), // 1/3 omitted -> pass
+		AssertOmissionRate(0.2), // 1/3 omitted -> fail
+	})
+	res := h.Run()
+	if len(res.Rubric) != 2 {
+		t.Fatalf("rubric = %d assertions, want 2", len(res.Rubric))
+	}
+	if !res.Rubric[0].Pass {
+		t.Errorf("AssertOmissionRate(0.5): want pass (omission 1/3 <= 0.5)")
+	}
+	if res.Rubric[1].Pass {
+		t.Errorf("AssertOmissionRate(0.2): want fail (omission 1/3 > 0.2)")
 	}
 }
 

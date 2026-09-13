@@ -6,8 +6,9 @@
 <style>
   body { font-family: system-ui, sans-serif; margin: 0; background: #0f172a; color: #e2e8f0; }
   #top { padding: 10px 16px; border-bottom: 1px solid #334155; display: flex; gap: 16px; align-items: baseline; }
-  #top h1 { font-size: 15px; margin: 0; }
-  #top .sub { color: #94a3b8; font-size: 12px; }
+#top h1 { font-size: 15px; margin: 0; }
+#top .sub { color: #94a3b8; font-size: 12px; }
+#stale { background:#451a03; color:#fbbf24; border-bottom:1px solid #b45309; padding:6px 16px; font-size:12px; }
   #legend { font-size: 11px; color: #94a3b8; }
   #legend span { margin-right: 10px; }
 .low-edge { stroke: #dc2626; stroke-dasharray: 5,4; }
@@ -31,6 +32,7 @@
 {{.TokenStats}}
 <input id="search" type="text" placeholder="filter symbols\u2026">
 <div id="legend"><span style="color:#22c55e">\u2500\u25b6 EXTRACTED (same pkg)</span><span style="color:#f59e0b">\u2500\u25b6 INFERRED (cross pkg)</span><span style="color:#dc2626">\u2500\u2500\u25b6 AMBIGUOUS (unresolved)</span></div></div>
+{{if .StaleBanner}}<div id="stale" title="index is out of date; rebuild with kern index">⚠️ {{.StaleBanner}}</div>{{end}}
 <div id="wrap"><svg id="svg" viewBox="0 0 1000 600"></svg><div id="side"></div></div>
 <script>
 const g = {{.JSON}};

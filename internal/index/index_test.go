@@ -290,7 +290,7 @@ func TestWholeGraphHTMLWholeBranch(t *testing.T) {
 		t.Fatal(err)
 	}
 	g := ix.WholeGraph(0)
-	html := g.GraphHTML()
+	html := g.GraphHTML(ix)
 	for _, want := range []string{"const whole = (g.root === '')", `filter symbols`, "whole repo (", "band-label", "wholeDraw"} {
 		if !strings.Contains(html, want) {
 			t.Errorf("whole-repo HTML missing %q", want)
@@ -301,7 +301,7 @@ func TestWholeGraphHTMLWholeBranch(t *testing.T) {
 	if !ok {
 		t.Fatal("no neighborhood for greet")
 	}
-	nh := ng.GraphHTML()
+	nh := ng.GraphHTML(ix)
 	if !strings.Contains(nh, "const whole = (g.root === '')") {
 		t.Error("neighborhood HTML must embed the whole-repo flag")
 	}

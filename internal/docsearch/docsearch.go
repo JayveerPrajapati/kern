@@ -64,6 +64,11 @@ type Score struct {
 
 var extRe = regexp.MustCompile(`\.(md|markdown|txt|rst|adoc|asciidoc|org)$`)
 
+// readDocFile is overridden by build-tagged decoders (see pdf.go, -tags pdf)
+// to extract text from binary document formats. Default: raw read — text
+// files only.
+var readDocFile = func(path string) ([]byte, error) { return os.ReadFile(path) }
+
 // Resource bounds mirror internal/fw/detect.go: cap per-file size and the
 // total number of files indexed so a large corpus can't exhaust heap, and cap
 // the size of externally fetched pages before chunking.
@@ -121,7 +126,7 @@ func IndexDir(root string) (*Index, error) {
 			return nil
 		}
 		fileCount++
-		b, err := os.ReadFile(path)
+		b, err := readDocFile(path)
 		if err != nil {
 			return nil
 		}

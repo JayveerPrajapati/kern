@@ -124,6 +124,10 @@ func buildDiffGateCheckList(absRoot string, initBaseline, noTests, jsonOut bool)
 		diffgate.NewExecUnsafeCheck(),
 		diffgate.NewChangelogCheck(),
 		diffgate.NewCatalogDriftCheck(absRoot),
+		diffgate.NewCatalogDocCheck(absRoot),
+		diffgate.NewNoteFormatCheck(absRoot),
+		diffgate.NewNoteMissingCheck(),
+		diffgate.NewDocBudgetCheck(absRoot),
 	}
 	if client, _, code := newKernClientOrDegraded(false, jsonOut); code == 0 && client != nil {
 		checks = append(checks, kern.NewSecretCheck(client))

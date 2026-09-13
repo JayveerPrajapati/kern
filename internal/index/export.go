@@ -127,7 +127,7 @@ func (ix *Index) Neighborhood(symbol string) (GraphResult, bool) {
 	}
 	for _, c := range ix.CallersFor(root) {
 		byID[c] = mergeNode(byID[c], GraphNode{ID: c, Name: c, Role: "caller"})
-		conf := edgeConfidence(ix, root.File, c)
+		conf := edgeConfidenceFor(ix, c, rootID, root.File)
 		g.Edges = append(g.Edges, GraphEdge{
 			From: c, To: rootID,
 			Confidence:      conf,
@@ -136,7 +136,7 @@ func (ix *Index) Neighborhood(symbol string) (GraphResult, bool) {
 	}
 	for _, c := range ix.CallsFor(root) {
 		byID[c] = mergeNode(byID[c], GraphNode{ID: c, Name: c, Role: "callee"})
-		conf := edgeConfidence(ix, root.File, c)
+		conf := edgeConfidenceFor(ix, rootID, c, root.File)
 		g.Edges = append(g.Edges, GraphEdge{
 			From: rootID, To: c,
 			Confidence:      conf,
@@ -393,6 +393,27 @@ func resolveName(ix *Index, name string) (Symbol, bool) {
 	return Symbol{}, false
 }
 
+// edgeConfidenceFor returns the parser's per-edge confidence (high/medium/
+// low) for a call from owner to target, matching WholeGraph's preference for
+// CallEdge.Confidence over the resolution heuristic. The edge is looked up in
+// the Calls map exactly as recorded (Target forms are the map's values, so an
+// exact key match is authoritative). When the edge is absent from the map —
+// caller entries synthesized outside per-symbol call lists, or a
+// receiver-qualified form — it falls back to the directory heuristic via
+// edgeConfidence, with fromFile resolving the owner's own file when possible.
+func edgeConfidenceFor(ix *Index, owner, target, fallbackFile string) string {
+	for _, e := range ix.Calls[owner] {
+		if e.Target == target {
+			return strings.ToLower(e.Confidence.String())
+		}
+	}
+	fromFile := fallbackFile
+	if d, ok := resolveName(ix, owner); ok && d.File != "" {
+		fromFile = d.File
+	}
+	return edgeConfidence(ix, fromFile, target)
+}
+
 // edgeConfidence reports how reliably an edge from `fromFile` to `to` was
 // derived: "high" for same-package resolved calls, "medium" for cross-package
 // resolved calls, "low" for unresolved references.
@@ -405,6 +426,12 @@ func edgeConfidence(ix *Index, fromFile, name string) string {
 		return confHigh
 	}
 	return confMedium
+}
+
+// EdgeConfidenceHeuristic is the exported form of edgeConfidence for the
+// intel renderers' fallback path (an edge with no recorded parser confidence).
+func EdgeConfidenceHeuristic(ix *Index, fromFile, name string) string {
+	return edgeConfidence(ix, fromFile, name)
 }
 
 // samePackageDir reports whether two source files live in the same directory
@@ -469,8 +496,46 @@ func (g GraphResult) GraphGraphML() string {
 			fmt.Fprintf(&b, "    <edge source=%q target=%q>\n      <data key=\"confidence\">%s</data>\n      <data key=\"confidence_label\">%s</data>\n    </edge>\n", e.From, e.To, xmlEsc(e.Confidence), xmlEsc(e.ConfidenceLabel))
 		}
 	}
-	b.WriteString("  </graph>\n</graphml>\n")
+b.WriteString("  </graph>\n</graphml>\n")
 	return b.String()
+}
+
+// GraphCypher exports the neighbourhood as Cypher statements for Neo4j
+// interoperability (file interop only — no server push, consistent with
+// kern's local-first design). Output is byte-deterministic for identical
+// input: nodes are emitted sorted by full name, edges sorted by
+// (source, target). Edge confidence reuses the GraphML path's internal
+// high/medium/low tier mapping (GraphEdge.Confidence); GraphEdge carries no
+// synthetic-edge provenance, so none is reflected here either.
+func (g GraphResult) GraphCypher() string {
+	var b strings.Builder
+	b.WriteString("// Cypher export for Neo4j interoperability (file interop only — no server push).\n")
+	nodes := append([]GraphNode(nil), g.Nodes...)
+	sort.SliceStable(nodes, func(i, j int) bool { return nodes[i].Name < nodes[j].Name })
+	for _, n := range nodes {
+		fmt.Fprintf(&b, "CREATE (:Symbol {name: \"%s\", kind: \"%s\", file: \"%s\", line: %d});\n",
+			cypherEsc(n.Name), cypherEsc(n.Kind), cypherEsc(n.File), n.Line)
+	}
+	edges := append([]GraphEdge(nil), g.Edges...)
+	sort.SliceStable(edges, func(i, j int) bool {
+		if edges[i].From != edges[j].From {
+			return edges[i].From < edges[j].From
+		}
+		return edges[i].To < edges[j].To
+	})
+	for _, e := range edges {
+		fmt.Fprintf(&b, "MATCH (a:Symbol {name: \"%s\"}), (b:Symbol {name: \"%s\"}) CREATE (a)-[:CALLS {confidence: \"%s\"}]->(b);\n",
+			cypherEsc(e.From), cypherEsc(e.To), cypherEsc(e.Confidence))
+	}
+	return b.String()
+}
+
+// cypherEsc escapes a string for a double-quoted Cypher string literal.
+// Within double quotes Cypher treats only backslash and double-quote
+// specially, so those are the only characters escaped.
+func cypherEsc(s string) string {
+	r := strings.NewReplacer(`\`, `\\`, `"`, `\"`)
+	return r.Replace(s)
 }
 
 func xmlEsc(s string) string {
@@ -495,10 +560,11 @@ func tokenStatsPanel(s TokenStats) string {
 // graphHTMLData holds the interpolated values injected into export_graph.html.
 // All values are pre-escaped by the caller; text/template inserts them verbatim.
 type graphHTMLData struct {
-	JSON       string
-	Title      string
-	TokenStats string
-	Colors     string
+	JSON        string
+	Title       string
+	TokenStats  string
+	Colors      string
+	StaleBanner string
 }
 
 // kindColorJSON renders the kind->color legend as a JSON object string. The key
@@ -525,8 +591,10 @@ func kindColorJSON() string {
 // neighbourhood. No external dependencies; the data is embedded as JSON and
 // rendered with inline JavaScript. When Root is empty it renders the
 // whole-repo mode: symbols grouped into community (or package) bands, with a
-// search box to filter them.
-func (g GraphResult) GraphHTML() string {
+// search box to filter them. When any of the files backing the rendered nodes
+// changed on disk since the index was built, a staleness banner is shown
+// below the top bar (P1-7).
+func (g GraphResult) GraphHTML(ix *Index) string {
 	data, err := json.Marshal(g)
 	if err != nil {
 		data = []byte(fmt.Sprintf(`{"error":%q}`, err.Error()))
@@ -536,12 +604,23 @@ func (g GraphResult) GraphHTML() string {
 	if title == "" {
 		title = fmt.Sprintf("whole repo (%d symbols, %d edges)", len(g.Nodes), len(g.Edges))
 	}
+	// Cite the files backing the rendered nodes so the staleness gate can
+	// spot-check them against the hashes recorded at build time.
+	seen := map[string]bool{}
+	var files []string
+	for _, n := range g.Nodes {
+		if n.File != "" && !seen[n.File] {
+			seen[n.File] = true
+			files = append(files, n.File)
+		}
+	}
 	var b strings.Builder
 	if err := graphHTMLTmpl.Execute(&b, graphHTMLData{
-		JSON:       string(data),
-		Title:      html.EscapeString(title),
-		TokenStats: tokenStatsPanel(g.Stats),
-		Colors:     kindColorJSON(),
+		JSON:        string(data),
+		Title:       html.EscapeString(title),
+		TokenStats:  tokenStatsPanel(g.Stats),
+		Colors:      kindColorJSON(),
+		StaleBanner: ix.StalenessBanner(files),
 	}); err != nil {
 		return fmt.Sprintf(`{"error":%q}`, err.Error())
 	}

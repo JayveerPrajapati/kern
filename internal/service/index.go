@@ -102,7 +102,47 @@ func (s *indexService) LoadOrBuild(ctx context.Context, root string) (*index.Ind
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	return index.LoadOrBuild(resolveRoot(root))
+	root = resolveRoot(root)
+	// Connect-time catch-up: a cached index is never thrown away wholesale.
+	// One hash-diff decides the cheapest reconciliation — serve the cache
+	// when it already matches the tree, apply an incremental Update when the
+	// change set is small, and only fall back to a full Build for a large
+	// change set (where Update would re-parse nearly everything) or when no
+	// cache exists at all.
+	if ix, err := index.Load(root); err == nil && ix != nil {
+		cur, herr := index.FileHashes(root)
+		if herr != nil {
+			// Unprovable freshness (scan error): fail closed with a full
+			// rebuild rather than serving a possibly stale cache.
+			cur = nil
+		}
+		if cur != nil {
+			changes := len(index.Diff(ix.FileHashes, cur))
+			if changes == 0 {
+				// The cached index already matches the current tree: serve it
+				// untouched.
+				return ix, nil
+			}
+			if changes <= index.CatchUpMaxChanges {
+				// Small change set: incremental catch-up re-parses only the
+				// changed files. Persist like `kern index` so Status/Load observe
+				// the refresh in other processes.
+				if uix, uerr := index.Update(root, ix); uerr == nil && uix != nil {
+					_ = uix.Save()
+					return uix, nil
+				}
+				// Update failed (unloadable prev, parse error): fall through to
+				// the full Build below.
+			}
+		}
+	}
+	// No loadable previous index, an unprovable scan, or a change set too
+	// large for a cheap catch-up: full build.
+	ix, err := s.Build(ctx, root)
+	if err != nil {
+		return nil, err
+	}
+	return ix, nil
 }
 
 func (s *indexService) Status(ctx context.Context, root string, strict bool) (*IndexStatus, error) {

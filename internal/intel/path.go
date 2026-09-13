@@ -65,9 +65,18 @@ func symbolByName(ix *index.Index, full string) bool {
 // the two are not connected. The path is deterministic and hops stay within
 // the project-local call graph.
 func ShortestPath(ix *index.Index, from, to string) []string {
+	return ShortestPathMin(ix, from, to, "")
+}
+
+// ShortestPathMin is ShortestPath with a minimum-confidence filter: edges
+// whose provenance label ranks below the threshold (see MinConfidenceFilter)
+// are excluded from the search graph, so a returned path never hops through
+// AMBIGUOUS phantom references. An empty threshold searches every edge.
+func ShortestPathMin(ix *index.Index, from, to string, minConf string) []string {
 	if from == "" || to == "" {
 		return nil
 	}
+	passes := MinConfidenceFilter(minConf)
 	adj := map[string][]string{}
 	names := canonicalNames(ix)
 	local := localNames(ix)
@@ -76,6 +85,9 @@ func ShortestPath(ix *index.Index, from, to string) []string {
 		for _, c := range localCalleesWith(ix, caller, local) {
 			c = canon(names, c) // receiver-instance form -> canonical method FullName
 			if c == caller {
+				continue
+			}
+			if !passes(EdgeConfidenceLabel(ix, caller, c)) {
 				continue
 			}
 			if !contains(adj[caller], c) {
@@ -132,8 +144,9 @@ type PathHop struct {
 	Line   int    `json:"line,omitempty"`
 }
 
-// RenderPath returns a compact chain like "A -> B -> C" with file:line for
-// every hop.
+// RenderPath returns a compact chain like "A -> B -> C" with file:line and
+// the provenance label of every hop's edge ([EXTRACTED]/[INFERRED]/
+// [AMBIGUOUS]), so each step of the answer is FACT/INFERENCE-classifiable.
 func RenderPath(ix *index.Index, path []string) string {
 	if len(path) == 0 {
 		return "no path found (symbols are not connected through project-local calls)"
@@ -149,8 +162,15 @@ func RenderPath(ix *index.Index, path []string) string {
 		if i == 0 {
 			b.WriteString(hop)
 		} else {
+			prev := path[i-1]
 			b.WriteString("\n   \u2192 ")
 			b.WriteString(hop)
+			if label := EdgeConfidenceLabel(ix, prev, hop); label != "" {
+				b.WriteString(" [" + label + "]")
+			}
+			if synth := EdgeSynthLabel(ix, prev, hop); synth != "" {
+				b.WriteString(" (SYNTHESIZED: " + synth + ")")
+			}
 		}
 		if l := loc[hop]; l != "" {
 			b.WriteString("  ")

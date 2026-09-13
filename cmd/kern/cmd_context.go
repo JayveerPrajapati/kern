@@ -69,6 +69,10 @@ func runPack(rest []string) {
 		}
 		tier = t
 	}
+	if f.graph {
+		runPackGraph(root, f)
+		return
+	}
 	b, err := pack.Build(root, pack.Options{
 		MaxTokens:        f.maxTokens,
 		SkipInstructions: f.noinstructions,
@@ -86,8 +90,34 @@ func runPack(rest []string) {
 	} else {
 		fmt.Print(out)
 	}
-
 }
+
+// runPackGraph implements the --graph branch of `kern pack`: load-or-build
+// the index, render the graph-snapshot pack (whole graph, or the neighbourhood
+// of --symbol when set), and print it or write it to --out like files mode.
+func runPackGraph(root string, f flags) {
+	gb, err := pack.BuildGraph(root, pack.Options{
+		MaxTokens:   f.maxTokens,
+		GraphSymbol: f.symbol,
+	})
+	if err != nil {
+		fatal("Pack: %v", err)
+	}
+	out := gb.Render()
+	if f.out != "" {
+		if werr := os.WriteFile(f.out, []byte(out), 0o644); werr != nil {
+			fatal("%v", werr)
+		}
+		mode := "whole graph"
+		if gb.Symbol != "" {
+			mode = "subgraph " + gb.Symbol
+		}
+		fmt.Printf("kern: packed graph %s (%d symbols, %d tokens) to %s\n", mode, len(gb.Nodes), gb.TotalTokens, f.out)
+	} else {
+		fmt.Print(out)
+	}
+}
+
 
 func runPrompt(rest []string) {
 	f, args, err := parseFlags(rest)
@@ -461,9 +491,13 @@ func runGuard(rest []string) {
 			panic(exitError{code: 2})
 		}
 
-		strict := f.precision == "strict"
-		violations, skipped := intel.CheckBoundariesPrecise(ix, b, files, strict)
-		// @pure mutability assertions are opt-in via "pure": true in
+strict := f.precision == "strict"
+	violations, skipped := intel.CheckBoundariesPrecise(ix, b, files, strict)
+	// G-P0-2 guard gate: a changed file whose package participates in an
+	// import cycle is a WARN (never a violation — the exit code stays
+	// driven by boundary violations alone), surfaced in both output modes.
+	cycleWarnings := intel.ImportCycleWarnings(ix, files)
+	// @pure mutability assertions are opt-in via "pure": true in
 		// .kern/boundaries.json. A nil ruleset (missing file) has no Pure flag,
 		// so the check is naturally skipped when the guard is not configured.
 		if b != nil && b.Pure {
@@ -478,20 +512,26 @@ func runGuard(rest []string) {
 				"violations":      violations,
 				"freshness_proof": ix.FreshnessProof(root),
 			}
-			// Only surface skipped edges when strict mode actually skipped
-			// some, so default-mode JSON output is unchanged.
-			if len(skipped) > 0 {
-				out["skipped_edges"] = skipped
-			}
-			// The authz_verdict is emitted only when --agent-id/--task were
-			// supplied (backward compat: old callers see no new key).
-			if authzVerdict != nil {
-				out["authz_verdict"] = authzVerdict
-			}
-			printJSON(out)
-		default:
-			fmt.Println(intel.RenderViolations(violations))
-			if len(skipped) > 0 {
+// Only surface skipped edges when strict mode actually skipped
+		// some, so default-mode JSON output is unchanged.
+		if len(skipped) > 0 {
+			out["skipped_edges"] = skipped
+		}
+		if len(cycleWarnings) > 0 {
+			out["cycle_warnings"] = cycleWarnings
+		}
+		// The authz_verdict is emitted only when --agent-id/--task were
+		// supplied (backward compat: old callers see no new key).
+		if authzVerdict != nil {
+			out["authz_verdict"] = authzVerdict
+		}
+		printJSON(out)
+	default:
+		fmt.Println(intel.RenderViolations(violations))
+		for _, w := range cycleWarnings {
+			fmt.Printf("WARN: %s (touched by this diff)\n", w)
+		}
+		if len(skipped) > 0 {
 				// A missing boundaries file is not a silent pass: make the gap
 				// visible as a clear WARN (a warning, never a violation — the
 				// exit code stays driven by violations alone).

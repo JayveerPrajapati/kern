@@ -10,12 +10,15 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/index"
 )
 
-// CallerRef is one caller of a symbol plus a one-line rationale.
+// CallerRef is one caller of a symbol plus a one-line rationale and the
+// provenance label of the caller→symbol edge
+// (EXTRACTED/INFERRED/AMBIGUOUS).
 type CallerRef struct {
-	Name      string `json:"name"`
-	File      string `json:"file,omitempty"`
-	Line      int    `json:"line,omitempty"`
-	Rationale string `json:"rationale,omitempty"`
+	Name       string `json:"name"`
+	File       string `json:"file,omitempty"`
+	Line       int    `json:"line,omitempty"`
+	Rationale  string `json:"rationale,omitempty"`
+	Confidence string `json:"confidence,omitempty"` // EXTRACTED/INFERRED/AMBIGUOUS
 }
 
 // WhyInfo is the rationale and doc-reference report for a symbol.
@@ -42,7 +45,7 @@ func Why(ix *index.Index, symbol string) (WhyInfo, bool) {
 	}
 	callers := ix.CallersFor(d)
 	for _, c := range callers {
-		ref := CallerRef{Name: c}
+		ref := CallerRef{Name: c, Confidence: EdgeConfidenceLabel(ix, c, d.FullName())}
 		if def, ok := ix.ResolveName(c); ok {
 			ref.File, ref.Line = def.File, def.Line
 			ref.Rationale = firstDocLine(ix.Root, def.File, def.Line)
@@ -171,7 +174,11 @@ func FormatWhy(info WhyInfo) string {
 	if len(info.Callers) > 0 {
 		b.WriteString("\nwho depends on it and why:\n")
 		for _, c := range info.Callers {
-			fmt.Fprintf(&b, "  %-28s %s:%d  %s\n", c.Name, c.File, c.Line, c.Rationale)
+			tag := ""
+			if c.Confidence != "" {
+				tag = " [" + c.Confidence + "]"
+			}
+			fmt.Fprintf(&b, "  %-28s %s:%d%s  %s\n", c.Name, c.File, c.Line, tag, c.Rationale)
 		}
 	} else {
 		b.WriteString("\nno callers in the index\n")

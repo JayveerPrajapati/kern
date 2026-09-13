@@ -35,6 +35,7 @@ Usage:
   kern compact <file>                             symbolic summary of a file
   kern project [root]                             compact project map
   kern pack [root] [--max-tokens N] [--out FILE]  single paste-ready file: tree + instructions + contents
+kern pack --graph [--symbol X] [--out FILE]      graph-snapshot pack: adjacency + signatures + fingerprint (~1-5 pct of file tokens)
   kern check [--staged] [--repo DIR] [--source agent|ide|human]  validate staged changes against policy
   kern fix [--repo DIR] [--file FILE] [--content ...]             validate agent-proposed fixes in an isolated worktree
   kern ci [--repo DIR] [--base main] [--head HEAD]                CI change-governance validation (base vs head)
@@ -54,7 +55,7 @@ Usage:
   kern inherits <symbol> [root] [--json]           supertypes + subtypes (extends/implements/embeds)
   kern context <symbolRegex> [--lines N]          minimal source slice for a symbol
   kern why <symbol> [--json]                      rationale: doc comment + who depends on it and why
-  kern wiki [root] [--out DIR]                    export a markdown wiki (one page per package)
+  kern wiki [root] [--out DIR] [--obsidian]       export a markdown wiki (one page per package; --obsidian: wikilinks + frontmatter)
   kern stats [--days N] [--session ID] [--json]
   kern semcache [stats|clear [NS]|list <NS>|sim <A> <B>]   semantic cache inspection (similar query -> instant)
   kern diff [--session ID]                        recent before/after entries

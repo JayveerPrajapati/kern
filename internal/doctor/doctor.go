@@ -11,7 +11,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"regexp"
 	"path/filepath"
 	goruntime "runtime"
 	"sort"
@@ -227,22 +226,12 @@ func checkParity(root string) Finding {
 	if v == head || strings.HasPrefix(head, v) {
 		return Finding{Check: "parity", Level: "ok", Detail: fmt.Sprintf("binary build %s matches repo HEAD %s", v, head)}
 	}
-	// A release tag build (vX.Y.Z) is a legitimate artifact built from a
-	// tagged commit; the parity check cannot map the tag to a HEAD hash, so
-	// tag-shaped stamps are accepted rather than falsely reported stale.
-	if tagRe.MatchString(v) {
-		return Finding{Check: "parity", Level: "ok", Detail: fmt.Sprintf("binary is a release build (%s); repo HEAD is %s", v, head)}
-	}
 	return Finding{
 		Check:  "parity",
 		Level:  "warn",
 		Detail: fmt.Sprintf("binary build %s differs from repo HEAD %s — installed binary is stale; rebuild and reinstall", v, head),
 	}
 }
-
-// tagRe matches release-tag version stamps (vX.Y.Z), which are accepted by
-// the parity check because a tag build cannot be mapped to a HEAD hash.
-var tagRe = regexp.MustCompile(`^v\d+\.\d+\.\d+`)
 
 // gitHead returns the repo HEAD commit short hash, or "" when root is not a
 // git checkout.
@@ -440,7 +429,7 @@ func checkPrecision(root string) Finding {
 	}
 	if index.TreesitterEnabled() {
 		return Finding{Check: "precision", Level: "ok",
-			Detail: fmt.Sprintf("all %d languages at AST-or-better precision (tree-sitter build)", resolvedCount+astCount)}
+			Detail: fmt.Sprintf("all %d languages at AST-or-better precision (tree-sitter build; %d resolved)", resolvedCount+astCount, resolvedCount)}
 	}
 	return Finding{Check: "precision", Level: "ok",
 		Detail: fmt.Sprintf("all %d languages at resolved precision (Go + Java)", resolvedCount)}
@@ -483,7 +472,13 @@ func checkOllama() Finding {
 	if c.Available() {
 		return Finding{Check: "ollama", Level: "ok", Detail: c.Base + " reachable, model " + c.Model}
 	}
-	return Finding{Check: "ollama", Level: "warn", Detail: c.Base + " not reachable (optional; deterministic compression still works)"}
+	// Ollama down: report which locally-wired agent CLIs can serve as the
+	// LLM provider instead (the auto chain in llm.NewProvider).
+	agents := llm.AvailableLocalAgents()
+	if len(agents) > 0 {
+		return Finding{Check: "ollama", Level: "warn", Detail: c.Base + " not reachable; LLM calls fall back to local agent CLI(s): " + strings.Join(agents, ", ")}
+	}
+	return Finding{Check: "ollama", Level: "warn", Detail: c.Base + " not reachable and no agent CLI installed (claude/codex/gemini/qwen); deterministic compression still works"}
 }
 
 func checkStats() Finding {

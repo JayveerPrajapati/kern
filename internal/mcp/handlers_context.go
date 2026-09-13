@@ -214,6 +214,18 @@ func (s *Server) handlePack(ctx context.Context, args map[string]any) (string, e
 			}
 			opts.Tier = t
 		}
+		// Graph mode: pack the call-graph snapshot (adjacency + signatures +
+		// fingerprint) instead of file contents. symbol selects the subgraph;
+		// an empty symbol packs the whole graph. symbol is ignored when
+		// graph=false (files mode is unaffected, documented in the tool def).
+		if argString(args, "graph") == "true" {
+			opts.GraphSymbol = argString(args, "symbol")
+			gb, err := pack.BuildGraph(root, opts)
+			if err != nil {
+				return "", err
+			}
+			return gb.Render(), nil
+		}
 		b, err := pack.Build(root, opts)
 		if err != nil {
 			return "", err

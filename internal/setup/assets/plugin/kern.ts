@@ -350,6 +350,8 @@ export default (async ({ directory, $ }) => {
       )
     })
 
+  const truthy = (v?: string): boolean => v === "true" || v === "1"
+
   const run = async (args: string[], timeoutMs?: number): Promise<string> => {
     // Bun's shell escapes each interpolated array element as one argument.
     // The ceiling is the agent's requested budget (or the 2-minute default);
@@ -423,6 +425,73 @@ async function runPayload(args: string[], timeoutMs?: number, preserveExit = fal
     }
   }
 
+  // --- Silent context injection (DeepSeek harness spec, Phase C) ---
+  // Before the model's FIRST response of a session, append a planner-selected
+  // context envelope to the system prompt: classify the user's intent,
+  // assemble the context packet, select evidence by the task policy, fit it
+  // to a token budget, and deliver the compact result. Injected once per
+  // session so ordinary turns never pay the orchestration latency. FAIL-
+  // CLOSED: any error, timeout, or missing binary skips injection entirely —
+  // the host call is never blocked and the user never sees orchestration.
+  // Disable with KERN_SILENT_INJECT=0.
+  const INJECT_ENABLED = process.env.KERN_SILENT_INJECT !== "0"
+  // Fully silent mode: KERN_SILENT=1 strips every visible [kern] marker from
+  // tool output and injected context (north-star NS-5). Default is the
+  // transparent mode (markers shown).
+  const SILENT_MODE = process.env.KERN_SILENT === "1"
+  const INJECT_MAX_WAIT_MS = 3000 // hard ceiling: a miss is fine, a stall is not
+  const INJECT_MIN_TEXT = 12 // skip trivial chatter
+  const envelopeCache = new Map<string, string>() // normalized text -> rendered block
+  const injectedSessions = new Set<string>() // sessions that already got their envelope
+  let currentMessageText = "" // text of the latest chat.message (for system.transform)
+  let envelopeFlight: { text: string; promise: Promise<string | null> } | null = null
+
+  async function orchestrateEnvelope(text: string): Promise<string | null> {
+    try {
+      const out = await runPayload(["orchestrate", text])
+      if (!out) return null
+      const parsed = JSON.parse(out)
+      const plan = parsed.plan ?? {}
+      const sels: any[] = (plan.selections ?? []).slice(0, 6)
+      const head = SILENT_MODE
+        ? `[context · ${parsed.task_type ?? "unknown"}] v${parsed.envelope_version}/${parsed.schema_version} · budget ${parsed.budget} · ${parsed.token_count} tokens${parsed.truncated ? " (truncated)" : ""}`
+        : `[kern context · ${parsed.task_type ?? "unknown"}] envelope v${parsed.envelope_version}/${parsed.schema_version} · budget ${parsed.budget} · ${parsed.token_count} tokens${parsed.truncated ? " (truncated)" : ""} · handle ${String(parsed.handle?.id ?? "").slice(0, 16)}`
+      const body = sels.map((s: any) => `- [${s.type ?? "?"} x${s.weight ?? "?"}] ${s.content ?? ""}`).join("\n")
+      return body ? `${head}\n${body}` : head
+    } catch {
+      return null
+    }
+  }
+
+  // envelopeFor returns the rendered envelope for a message, from cache or a
+  // single in-flight computation under the hard ceiling. Always resolves
+  // (null on any failure); concurrent callers for the same text share one
+  // computation.
+  function envelopeFor(text: string): Promise<string | null> {
+    if (!INJECT_ENABLED || !text || text.length < INJECT_MIN_TEXT) return Promise.resolve(null)
+    const cached = envelopeCache.get(text)
+    if (cached !== undefined) return Promise.resolve(cached)
+    if (envelopeFlight && envelopeFlight.text === text) return envelopeFlight.promise
+    const promise = withTimeout(orchestrateEnvelope(text), INJECT_MAX_WAIT_MS).then(
+      (block) => {
+        envelopeFlight = null
+        if (block) {
+          envelopeCache.set(text, block)
+          if (envelopeCache.size > 8) envelopeCache.clear() // bounded cache
+        }
+        return block
+      },
+      () => {
+        // Timeout/error: clear the flight so the next message can retry, and
+        // report a miss — injection is always fail-closed.
+        envelopeFlight = null
+        return null
+      },
+    )
+    envelopeFlight = { text, promise }
+    return promise
+  }
+
   return {
     tool: filterToolSurface({
       kern_optimize_prompt: tool({
@@ -459,7 +528,7 @@ async function runPayload(args: string[], timeoutMs?: number, preserveExit = fal
           "Return a compressed map of a whole project: every source file with its symbols and line counts. Use instead of listing/reading every file in a repo.",
         args: {
           root: tool.schema.string().optional(),
-          max_files: tool.schema.number().optional(),
+          max_files: tool.schema.string().optional(),
         },
         async execute(args) {
           const flags: string[] = ["project"]
@@ -482,19 +551,26 @@ async function runPayload(args: string[], timeoutMs?: number, preserveExit = fal
           return run(flags)
         },
       }),
+      // CLI:
+      //   kern pack [root] [--max-tokens N] [--out FILE]
+      //   kern pack --graph [--symbol X] [--out FILE]
       kern_pack: tool({
         description:
-          "Pack a whole project into one paste-ready bundle: project instructions, a directory tree with per-file token counts, and file contents, sized to fit a token budget. Use when an agent needs the full source to edit against, not just a map.",
+          "Pack a whole project into one paste-ready bundle: project instructions, a directory tree with per-file token counts, and file contents, sized to fit a token budget. Use when an agent needs the full source to edit against, not just a map. Set graph=true to pack the call-graph snapshot instead (adjacency + signatures + per-file SHA-256 fingerprint, ~1-5% of the raw token cost); symbol selects a subgraph (empty = whole graph), ignored when graph=false.",
         args: {
           root: tool.schema.string().optional(),
-          max_tokens: tool.schema.number().optional(),
-          no_instructions: tool.schema.boolean().optional(),
+          max_tokens: tool.schema.string().optional(),
+          no_instructions: tool.schema.string().optional(),
           out: tool.schema.string().optional(),
+          graph: tool.schema.string().optional(),
+          symbol: tool.schema.string().optional(),
         },
         async execute(args) {
           const flags: string[] = ["pack"]
-          flags.push("--max-tokens", String(args.max_tokens ?? 8000))
-          if (args.no_instructions) flags.push("--no-instructions")
+          flags.push("--max-tokens", String(args.max_tokens || 8000))
+          if (truthy(args.no_instructions)) flags.push("--no-instructions")
+          if (truthy(args.graph)) flags.push("--graph")
+          if (args.symbol) flags.push("--symbol", args.symbol)
           if (args.out) flags.push("--out", args.out)
           flags.push(args.root ?? ".")
           return run(flags)
@@ -506,7 +582,7 @@ async function runPayload(args: string[], timeoutMs?: number, preserveExit = fal
         args: {
           command: tool.schema.string(),
           dir: tool.schema.string().optional(),
-          timeout: tool.schema.number().optional(),
+          timeout: tool.schema.string().optional(),
         },
         async execute(args) {
           const flags: string[] = ["build"]
@@ -564,15 +640,15 @@ kern_optimize_log: tool({
         description:
           "Return before/after token savings and cost estimates from kern optimizations, optionally filtered to today or a session.",
         args: {
-          days: tool.schema.number().optional(),
+          days: tool.schema.string().optional(),
           session: tool.schema.string().optional(),
-          json: tool.schema.boolean().optional(),
+          json: tool.schema.string().optional(),
         },
         async execute(args) {
           const flags: string[] = ["stats"]
           if (args.days) flags.push("--days", String(args.days))
           if (args.session) flags.push("--session", args.session)
-          if (args.json) flags.push("--json")
+          if (truthy(args.json)) flags.push("--json")
           return run(flags)
         },
       }),
@@ -603,14 +679,14 @@ kern_optimize_log: tool({
           root: tool.schema.string().optional(),
           range: tool.schema.string().optional(),
           file: tool.schema.string().optional(),
-          json: tool.schema.boolean().optional(),
+          json: tool.schema.string().optional(),
         },
         async execute(args) {
           const flags: string[] = ["changes"]
           if (args.root) flags.push(args.root)
           if (args.range) flags.push("--range", args.range)
           if (args.file) flags.push("--file", args.file)
-          if (args.json) flags.push("--json")
+          if (truthy(args.json)) flags.push("--json")
           return runPayload(flags)
         },
       }),
@@ -621,7 +697,7 @@ kern_optimize_log: tool({
           root: tool.schema.string().optional(),
           range: tool.schema.string().optional(),
           file: tool.schema.string().optional(),
-          max_tokens: tool.schema.number().optional(),
+          max_tokens: tool.schema.string().optional(),
         },
         async execute(args) {
           const flags: string[] = ["review"]
@@ -637,7 +713,7 @@ kern_optimize_log: tool({
           "Architectural hotspots: the most depended-on symbols (hubs) and cross-package bridges where a change in one subsystem can break another.",
         args: {
           root: tool.schema.string().optional(),
-          limit: tool.schema.number().optional(),
+          limit: tool.schema.string().optional(),
         },
         async execute(args) {
           const flags: string[] = ["hubs"]
@@ -651,7 +727,7 @@ kern_optimize_log: tool({
           "Test-coverage analysis from the call graph: what percent of callable symbols are exercised by tests, plus untested hotspots (called by many, covered by none).",
         args: {
           root: tool.schema.string().optional(),
-          limit: tool.schema.number().optional(),
+          limit: tool.schema.string().optional(),
         },
         async execute(args) {
           const flags: string[] = ["testgaps"]
@@ -674,12 +750,26 @@ kern_optimize_log: tool({
           return run(flags)
         },
       }),
+      kern_cycles: tool({
+        description:
+          "Package-level import cycles via Tarjan SCC over the project-local import graph (project packages only, third-party imports ignored). Returns the deterministic cycle list with file:line evidence.",
+        args: {
+          root: tool.schema.string().optional(),
+          json: tool.schema.string().optional(),
+        },
+        async execute(args) {
+          const flags: string[] = ["cycles"]
+          if (args.root) flags.push(args.root)
+          if (args.json) flags.push("--json")
+          return run(flags)
+        },
+      }),
       kern_dead: tool({
         description:
           "Dead-code detection: symbols nothing in the project calls. Private names are dead for certain; public names may be external API. Sorted by size so the biggest cleanup wins show first. Callers reached through function values or interface dispatch are invisible to the index and are reported as dead — confirm before removing.",
         args: {
           root: tool.schema.string().optional(),
-          limit: tool.schema.number().optional(),
+          limit: tool.schema.string().optional(),
         },
         async execute(args) {
           const flags: string[] = ["dead"]
@@ -693,8 +783,8 @@ kern_optimize_log: tool({
           "Find the largest function/method declarations by source lines. Use to locate god functions that beg for refactoring.",
         args: {
           root: tool.schema.string().optional(),
-          min_lines: tool.schema.number().optional(),
-          limit: tool.schema.number().optional(),
+          min_lines: tool.schema.string().optional(),
+          limit: tool.schema.string().optional(),
         },
         async execute(args) {
           const flags: string[] = ["larges"]
@@ -721,7 +811,7 @@ kern_optimize_log: tool({
           "Call-graph communities (label propagation): which symbols cluster together as subsystems, with each cluster's size and hub. Use to name the architecture's parts before refactoring.",
         args: {
           root: tool.schema.string().optional(),
-          limit: tool.schema.number().optional(),
+          limit: tool.schema.string().optional(),
         },
         async execute(args) {
           const flags: string[] = ["communities"]
@@ -749,8 +839,8 @@ kern_optimize_log: tool({
           "Single-call explore: a symbol's verbatim source, direct call flow (callers + callees) and transitive blast radius (with affected files) in one shot. Replaces three separate calls for 'what touches this and how'.",
         args: {
           symbol: tool.schema.string(),
-          depth: tool.schema.number().optional(),
-          max: tool.schema.number().optional(),
+          depth: tool.schema.string().optional(),
+          max: tool.schema.string().optional(),
           root: tool.schema.string().optional(),
         },
         async execute(args) {
@@ -766,7 +856,7 @@ kern_optimize_log: tool({
           "Bridge detection: symbols called from two or more distinct packages/directories — the coupling points where a change in one subsystem can break another.",
         args: {
           root: tool.schema.string().optional(),
-          limit: tool.schema.number().optional(),
+          limit: tool.schema.string().optional(),
         },
         async execute(args) {
           const flags: string[] = ["bridges"]
@@ -781,7 +871,7 @@ kern_optimize_log: tool({
         args: {
           root: tool.schema.string().optional(),
           range: tool.schema.string().optional(),
-          limit: tool.schema.number().optional(),
+          limit: tool.schema.string().optional(),
         },
         async execute(args) {
           const flags: string[] = ["cochange"]
@@ -797,7 +887,7 @@ kern_optimize_log: tool({
         args: {
           query: tool.schema.string(),
           root: tool.schema.string().optional(),
-          limit: tool.schema.number().optional(),
+          limit: tool.schema.string().optional(),
         },
         async execute(args) {
           const flags: string[] = ["fts", args.query]
@@ -811,8 +901,8 @@ kern_optimize_log: tool({
           "Dependency-tree expansion: every symbol within N hops of a symbol, in both directions (callers + callees), budget-capped. The graph-guided traversal primitive that replaces blind grep — e.g. 'everything two degrees from this database model' in one call.",
         args: {
           symbol: tool.schema.string(),
-          depth: tool.schema.number().optional(),
-          max: tool.schema.number().optional(),
+          depth: tool.schema.string().optional(),
+          max: tool.schema.string().optional(),
           root: tool.schema.string().optional(),
         },
         async execute(args) {
@@ -828,7 +918,7 @@ kern_optimize_log: tool({
           "One-call graph context: token-budgeted names-only adjacency for a symbol — callers first (the direction that matters for impact), then callees, every edge tagged EXTRACTED/INFERRED/AMBIGUOUS, plus community membership. Calls to interface methods carry dispatch hints listing the concrete implementations they can reach.",
         args: {
           symbol: tool.schema.string(),
-          max_tokens: tool.schema.number().optional(),
+          max_tokens: tool.schema.string().optional(),
           root: tool.schema.string().optional(),
         },
         async execute(args) {
@@ -857,7 +947,7 @@ kern_optimize_log: tool({
         args: {
           query: tool.schema.string(),
           root: tool.schema.string().optional(),
-          limit: tool.schema.number().optional(),
+          limit: tool.schema.string().optional(),
         },
         async execute(args) {
           const flags: string[] = ["search", args.query]
@@ -871,7 +961,7 @@ kern_optimize_log: tool({
           "Ranked free-text symbol search across every repo in the kern multi-repo registry (kern repos add). Returns matches tagged with their repo name, best hits first.",
         args: {
           query: tool.schema.string(),
-          limit: tool.schema.number().optional(),
+          limit: tool.schema.string().optional(),
         },
         async execute(args) {
           const flags: string[] = ["search", args.query, "--repos"]
@@ -936,7 +1026,7 @@ kern_optimize_log: tool({
           "Fit text into a token budget: deduplicate lines, keep the head plus important lines (errors, stack frames), then trim. Use to manage a crowded context window before adding more content.",
         args: {
           text: tool.schema.string(),
-          max_tokens: tool.schema.number().optional(),
+          max_tokens: tool.schema.string().optional(),
         },
         async execute(args) {
           const flags: string[] = ["budget", args.text]
@@ -949,7 +1039,7 @@ kern_optimize_log: tool({
           "Graph-guided walk: the /walk-graph primitive. Returns an indented parent-child dependency tree of every symbol up to N hops away from a function, across files, with file:line per node. Use instead of grepping or reading whole files to locate code.",
         args: {
           symbol: tool.schema.string(),
-          depth: tool.schema.number().optional(),
+          depth: tool.schema.string().optional(),
           root: tool.schema.string().optional(),
         },
         async execute(args) {
@@ -965,7 +1055,7 @@ kern_optimize_log: tool({
         args: {
           task: tool.schema.string(),
           root: tool.schema.string().optional(),
-          max_tokens: tool.schema.number().optional(),
+          max_tokens: tool.schema.string().optional(),
         },
         async execute(args) {
           const flags: string[] = ["probe", args.task]
@@ -982,12 +1072,12 @@ kern_optimize_log: tool({
           symbol: tool.schema.string().optional(),
           level: tool.schema.string().optional(),
           root: tool.schema.string().optional(),
-          limit: tool.schema.number().optional(),
-          depth: tool.schema.number().optional(),
-          max_nodes: tool.schema.number().optional(),
-          lines: tool.schema.number().optional(),
-          max_tokens: tool.schema.number().optional(),
-          with_freshness: tool.schema.boolean().optional(),
+          limit: tool.schema.string().optional(),
+          depth: tool.schema.string().optional(),
+          max_nodes: tool.schema.string().optional(),
+          lines: tool.schema.string().optional(),
+          max_tokens: tool.schema.string().optional(),
+          with_freshness: tool.schema.string().optional(),
         },
         async execute(args) {
           const flags: string[] = ["retrieve"]
@@ -999,7 +1089,7 @@ kern_optimize_log: tool({
           if (args.max_nodes !== undefined) flags.push("--max", String(args.max_nodes))
           if (args.lines !== undefined) flags.push("--lines", String(args.lines))
           if (args.max_tokens !== undefined) flags.push("--max-tokens", String(args.max_tokens))
-          if (args.with_freshness) flags.push("--fresh")
+          if (truthy(args.with_freshness)) flags.push("--fresh")
           if (args.root) flags.push(args.root)
           return run(flags)
         },
@@ -1011,14 +1101,14 @@ kern_optimize_log: tool({
           handle: tool.schema.string(),
           level: tool.schema.string().optional(),
           root: tool.schema.string().optional(),
-          max_tokens: tool.schema.number().optional(),
-          with_freshness: tool.schema.boolean().optional(),
+          max_tokens: tool.schema.string().optional(),
+          with_freshness: tool.schema.string().optional(),
         },
         async execute(args) {
           const flags: string[] = ["resolve", args.handle]
           if (args.level) flags.push("--level", args.level)
           if (args.max_tokens !== undefined) flags.push("--max-tokens", String(args.max_tokens))
-          if (args.with_freshness) flags.push("--fresh")
+          if (truthy(args.with_freshness)) flags.push("--fresh")
           if (args.root) flags.push(args.root)
           return run(flags)
         },
@@ -1029,13 +1119,13 @@ kern_optimize_log: tool({
         args: {
           change: tool.schema.string(),
           root: tool.schema.string().optional(),
-          max_tokens: tool.schema.number().optional(),
-          with_freshness: tool.schema.boolean().optional(),
+          max_tokens: tool.schema.string().optional(),
+          with_freshness: tool.schema.string().optional(),
         },
         async execute(args) {
           const flags: string[] = ["context-envelope", args.change]
           if (args.max_tokens !== undefined) flags.push("--max-tokens", String(args.max_tokens))
-          if (args.with_freshness) flags.push("--fresh")
+          if (truthy(args.with_freshness)) flags.push("--fresh")
           if (args.root) flags.push(args.root)
           return run(flags)
         },
@@ -1046,14 +1136,123 @@ kern_optimize_log: tool({
         args: {
           change: tool.schema.string(),
           root: tool.schema.string().optional(),
-          budget: tool.schema.number().optional(),
-          json: tool.schema.boolean().optional(),
+          budget: tool.schema.string().optional(),
+          json: tool.schema.string().optional(),
         },
         async execute(args) {
           const flags: string[] = ["explain-context", args.change]
           if (args.budget !== undefined) flags.push("--budget", String(args.budget))
-          if (args.json) flags.push("--json")
+          if (truthy(args.json)) flags.push("--json")
           if (args.root) flags.push(args.root)
+          return run(flags)
+        },
+      }),
+      kern_orchestrate: tool({
+        description:
+          "Run the silent context pipeline over an intent: classify the task type, assemble the context packet, select evidence by the task policy, fit it to a token budget, stamp the context envelope, and return a content-hash-sealed escalation handle — all deterministically and in one call.",
+        args: {
+          intent: tool.schema.string(),
+          root: tool.schema.string().optional(),
+          budget: tool.schema.string().optional(),
+          mode: tool.schema.string().optional(),
+          skill: tool.schema.string().optional(),
+        },
+        async execute(args) {
+          const flags: string[] = ["orchestrate", args.intent]
+          if (args.budget !== undefined) flags.push("--max-tokens", String(args.budget))
+          if (args.mode) flags.push("--mode", args.mode)
+          if (args.skill) flags.push("--with-skill", args.skill)
+          if (args.root) flags.push(args.root)
+          return run(flags)
+        },
+      }),
+      kern_skill: tool({
+        description:
+          "Catalog or load the bundled agent skills: catalog (default) lists every skill with its description; load returns a named skill's full runbook.",
+        args: {
+          action: tool.schema.string().optional(),
+          skill: tool.schema.string().optional(),
+        },
+        async execute(args) {
+          const flags: string[] = ["skills"]
+          if (args.action === "load" && args.skill) flags.push("show", args.skill)
+          return run(flags)
+        },
+      }),
+
+      kern_agent_message: tool({
+        description:
+          "Send a message to an agent's coordination inbox (wraps the coordination handoff primitive with the model as default sender). The target agent observes the directive via kern_agent_coordination action=inbox.",
+        args: {
+          to_agent: tool.schema.string(),
+          notes: tool.schema.string(),
+          from_agent: tool.schema.string().optional(),
+          task_id: tool.schema.string().optional(),
+        },
+        async execute(args) {
+          const flags: string[] = ["agent-message", "--to", args.to_agent]
+          if (args.from_agent) flags.push("--from", args.from_agent)
+          if (args.task_id) flags.push("--task", args.task_id)
+          flags.push(args.notes)
+          return run(flags)
+        },
+      }),
+      kern_agent_interrupt: tool({
+        description:
+          "Cancel a running task by ID through the TaskService: the task transitions to CANCELLED with a reason, is persisted, and a task.updated event is published.",
+        args: {
+          task_id: tool.schema.string(),
+          reason: tool.schema.string().optional(),
+        },
+        async execute(args) {
+          const flags: string[] = ["agent-interrupt", args.task_id]
+          if (args.reason) flags.push(args.reason)
+          return run(flags)
+        },
+      }),
+
+      kern_mcp_call: tool({
+        description:
+          "Bridge a tool from an external MCP server configured via kern mcp-client add (config .kern/mcp-servers.json). Pass the raw wire tool name or the public name (mcp__<server>__<tool>).",
+        args: {
+          server: tool.schema.string(),
+          tool: tool.schema.string(),
+          arguments: tool.schema.string().optional(),
+        },
+        async execute(args) {
+          const flags: string[] = ["mcp-client", "call", args.server, args.tool]
+          if (args.arguments) flags.push(args.arguments)
+          return run(flags)
+        },
+      }),
+
+      kern_note: tool({
+        description:
+          "Governed decision records: new creates a gate-conformant note skeleton; status moves a note between lifecycle folders (rejected needs a reason); validate reports format violations; list inventories the tree.",
+        args: {
+          action: tool.schema.string().optional(),
+          title: tool.schema.string().optional(),
+          class: tool.schema.string().optional(),
+          lifecycle: tool.schema.string().optional(),
+          file: tool.schema.string().optional(),
+          reason: tool.schema.string().optional(),
+          date: tool.schema.string().optional(),
+        },
+        async execute(args) {
+          const flags: string[] = ["note", args.action ?? "list"]
+          if (args.action === "new") {
+            if (args.title) flags.push(args.title)
+            if (args.class) flags.push("--class", args.class)
+            if (args.lifecycle) flags.push("--lifecycle", args.lifecycle)
+            if (args.date) flags.push("--date", args.date)
+          } else if (args.action === "status") {
+            if (args.file) flags.push(args.file)
+            const target = args.set ?? args.lifecycle
+            if (target) flags.push("--set", target)
+            if (args.reason) flags.push(args.reason)
+          } else if (args.action === "validate") {
+            flags.push("--root", ".")
+          }
           return run(flags)
         },
       }),
@@ -1063,7 +1262,7 @@ kern_optimize_log: tool({
         args: {
           trace: tool.schema.string(),
           root: tool.schema.string().optional(),
-          limit: tool.schema.number().optional(),
+          limit: tool.schema.string().optional(),
         },
         async execute(args) {
           const flags: string[] = ["trace"]
@@ -1176,7 +1375,7 @@ kern_optimize_log: tool({
 args: {
 prompt: tool.schema.string(),
 root: tool.schema.string().optional(),
-limit: tool.schema.number().optional(),
+limit: tool.schema.string().optional(),
 },
 async execute(args) {
 const flags: string[] = ["recall", args.prompt]
@@ -1204,7 +1403,7 @@ return run(flags)
         args: {
           root: tool.schema.string().optional(),
           severity: tool.schema.string().optional(),
-          max: tool.schema.number().optional(),
+          max: tool.schema.string().optional(),
           format: tool.schema.string().optional(),
         },
         async execute(args) {
@@ -1238,13 +1437,13 @@ return run(flags)
           symbol: tool.schema.string(),
           new_name: tool.schema.string(),
           root: tool.schema.string().optional(),
-          apply: tool.schema.boolean().optional(),
+          apply: tool.schema.string().optional(),
           format: tool.schema.string().optional(),
         },
         async execute(args) {
           const flags: string[] = ["rename", args.symbol, args.new_name]
           if (args.root) flags.push(args.root)
-          if (args.apply) flags.push("--apply")
+          if (truthy(args.apply)) flags.push("--apply")
           if (args.format === "json") flags.push("--json")
           return run(flags)
         },
@@ -1255,8 +1454,8 @@ return run(flags)
         args: {
           code: tool.schema.string(),
           lang: tool.schema.string().optional(),
-          timeout: tool.schema.number().optional(),
-          max: tool.schema.number().optional(),
+          timeout: tool.schema.string().optional(),
+          max: tool.schema.string().optional(),
           stdin: tool.schema.string().optional(),
         },
         async execute(args) {
@@ -1278,7 +1477,7 @@ return run(flags)
           "Local search over a project's documents (markdown, text, rst, adoc). Chunks docs locally with deterministic n-gram hashing and returns only the most relevant fragments. Use instead of pasting whole documents into context.",        args: {
           query: tool.schema.string(),
           root: tool.schema.string().optional(),
-          k: tool.schema.number().optional(),
+          k: tool.schema.string().optional(),
         },
         async execute(args) {
           const flags: string[] = ["docs", args.query]
@@ -1292,12 +1491,12 @@ return run(flags)
           "Pre-index a project's documents for kern_doc_search. Run once after documents change; searches auto-index on first use. Pass semantic=true to also embed chunks with a local Ollama embedding model (KERN_EMBED_MODEL, default nomic-embed-text); queries then fuse a real-meaning dense signal with the deterministic n-gram vectors and BM25.",
         args: {
           root: tool.schema.string().optional(),
-          semantic: tool.schema.boolean().optional(),
+          semantic: tool.schema.string().optional(),
         },
         async execute(args) {
           const flags: string[] = ["docs", "index"]
           if (args.root) flags.push(args.root)
-          if (args.semantic) flags.push("--semantic")
+          if (truthy(args.semantic)) flags.push("--semantic")
           return run(flags)
         },
       }),
@@ -1308,13 +1507,13 @@ return run(flags)
           url: tool.schema.string(),
           root: tool.schema.string().optional(),
           name: tool.schema.string().optional(),
-          semantic: tool.schema.boolean().optional(),
+          semantic: tool.schema.string().optional(),
         },
         async execute(args) {
           const flags: string[] = ["docs", "fetch", args.url]
           if (args.name) flags.push(args.name)
           if (args.root) flags.push(args.root)
-          if (args.semantic) flags.push("--semantic")
+          if (truthy(args.semantic)) flags.push("--semantic")
           return run(flags)
         },
       }),
@@ -1323,12 +1522,12 @@ return run(flags)
           "Generate a deterministic conventional-commit message (type, scope, subject, per-file body) from the git diff — rule-based, no LLM, no network; the same diff always yields the same message. Use when a commit needs a starting message the human can tweak.",
         args: {
           root: tool.schema.string().optional(),
-          staged: tool.schema.boolean().optional(),
+          staged: tool.schema.string().optional(),
           range: tool.schema.string().optional(),
         },
         async execute(args) {
           const flags: string[] = ["commitmsg"]
-          if (args.staged) flags.push("--staged")
+          if (truthy(args.staged)) flags.push("--staged")
           if (args.range) flags.push("--range", args.range)
           return run(flags)
         },
@@ -1352,7 +1551,7 @@ return run(flags)
           text: tool.schema.string(),
           root: tool.schema.string().optional(),
           mode: tool.schema.string().optional(),
-          max_tokens: tool.schema.number().optional(),
+          max_tokens: tool.schema.string().optional(),
         },
         async execute(args) {
           const flags: string[] = ["swap"]
@@ -1380,8 +1579,8 @@ return run(flags)
           root: tool.schema.string().optional(),
           task: tool.schema.string().optional(),
           model: tool.schema.string().optional(),
-          max_rounds: tool.schema.number().optional(),
-          timeout: tool.schema.number().optional(),
+          max_rounds: tool.schema.string().optional(),
+          timeout: tool.schema.string().optional(),
         },
         async execute(args) {
           const flags: string[] = ["heal"]
@@ -1399,7 +1598,7 @@ return run(flags)
         args: {
           root: tool.schema.string().optional(),
           command: tool.schema.string().optional(),
-          timeout: tool.schema.number().optional(),
+          timeout: tool.schema.string().optional(),
         },
         async execute(args) {
           const flags: string[] = ["validate"]
@@ -1573,7 +1772,79 @@ return run(flags)
           return run(flags)
         },
       }),
-      kern_loop: tool({
+      kern_validate_staged: tool({
+description:
+"Blueprint change firewall: validate the STAGED diff (git diff --cached) against policy (boundaries, secrets, duplication, architecture). Returns per-gate PASS/BLOCK findings. Use before committing.",
+args: {
+root: tool.schema.string().optional(),
+source: tool.schema.string().optional(),
+},
+async execute(args) {
+const flags: string[] = ["diff-gate"]
+if (args.root) flags.push("--root", args.root)
+if (args.source) flags.push("--source", args.source)
+return run(flags)
+},
+}),
+kern_validate_proposed: tool({
+description:
+"Blueprint change firewall: validate a PROPOSED change (not yet on disk) against policy — files is a JSON array of {path, content, op}. Returns per-gate PASS/BLOCK findings.",
+args: {
+root: tool.schema.string().optional(),
+source: tool.schema.string().optional(),
+files: tool.schema.string().optional(),
+},
+async execute(args) {
+const flags: string[] = ["validate-proposed"]
+if (args.root) flags.push("--root", args.root)
+if (args.source) flags.push("--source", args.source)
+if (args.files) flags.push("--files", args.files)
+return run(flags)
+},
+}),
+kern_explain_finding: tool({
+description:
+"Blueprint change firewall: explain a gate finding (rule id, severity, category, file, line, message) in plain language.",
+args: {
+root: tool.schema.string().optional(),
+finding: tool.schema.string().optional(),
+},
+async execute(args) {
+const flags: string[] = ["explain-finding"]
+if (args.root) flags.push("--root", args.root)
+if (args.finding) flags.push("--finding", args.finding)
+return run(flags)
+},
+}),
+kern_repair_guidance: tool({
+description:
+"Blueprint change firewall: repair guidance for a gate finding — suggested fix and rule reference.",
+args: {
+root: tool.schema.string().optional(),
+finding: tool.schema.string().optional(),
+},
+async execute(args) {
+const flags: string[] = ["repair-guidance"]
+if (args.root) flags.push("--root", args.root)
+if (args.finding) flags.push("--finding", args.finding)
+return run(flags)
+},
+}),
+kern_llm_providers: tool({
+description:
+"List the LLM provider chain in priority order (Ollama first, then locally-wired agent CLIs: claude, opencode, codex, gemini, qwen). With probe=true, live-tests each installed provider with a trivial prompt and reports who actually answers — the priority pick when Ollama is absent. Full wired-agent history: kern agents (CLI) and kern doctor.",
+args: {
+root: tool.schema.string().optional(),
+probe: tool.schema.boolean().optional(),
+},
+async execute(args) {
+const flags: string[] = ["agents"]
+if (args.root) flags.push("--root", args.root)
+if (args.probe) flags.push("--probe")
+return run(flags)
+},
+}),
+kern_loop: tool({
         description:
           "HIGH-LEVEL (Workflow E): run the closed autonomy loop against an intent string and return the stage timeline plus the deployed / observed-healthy / learned outcome. The autonomy level (L0-L5, default L0 read-only) gates which stages run.",
         args: {
@@ -1788,12 +2059,12 @@ return run(flags)
         args: {
           root: tool.schema.string().optional(),
           file: tool.schema.string().optional(),
-          generate: tool.schema.boolean().optional(),
+          generate: tool.schema.string().optional(),
         },
         async execute(args) {
           const flags: string[] = ["taint"]
           if (args.file) flags.push("--file", args.file)
-          if (args.generate) flags.push("--generate")
+          if (truthy(args.generate)) flags.push("--generate")
           if (args.root) flags.push(args.root)
           return run(flags)
         },
@@ -1803,7 +2074,7 @@ kern_entry_points: tool({
           "List framework entry points found in the index: handlers, controllers and route targets. Use to know what endpoints a codebase exposes.",
         args: {
           root: tool.schema.string().optional(),
-          limit: tool.schema.number().optional(),
+          limit: tool.schema.string().optional(),
         },
         async execute(args) {
           const flags: string[] = ["entries"]
@@ -1830,7 +2101,7 @@ kern_entry_points: tool({
         args: {
           command: tool.schema.string(),
           root: tool.schema.string().optional(),
-          timeout: tool.schema.number().optional(),
+          timeout: tool.schema.string().optional(),
         },
         async execute(args) {
           const parts = args.command.trim().split(/\s+/).filter(Boolean)
@@ -2253,7 +2524,67 @@ kern_entry_points: tool({
           return run(flags)
         },
       }),
-      kern_stream: tool({
+      kern_surprising: tool({
+        description:
+          "Surprising connections: cross-community call edges ranked by community distance x rarity, deduped against known bridges. Deterministic; surfaces unexpected coupling an onboarding digest should point at.",
+        args: {
+          root: tool.schema.string().optional(),
+          limit: tool.schema.string().optional(),
+        },
+        async execute(args) {
+          const flags: string[] = ["surprising"]
+          if (args.root) flags.push(args.root)
+          if (args.limit) flags.push("--limit", String(args.limit))
+          return run(flags)
+        },
+      }),
+      // CLI:
+      //   kern snapshot [root] [--symbol X] [--out FILE]
+      //   kern snapshot verify <file> [--strict]
+      kern_snapshot: tool({
+        description:
+          "Canonical versioned graph snapshot for cross-agent handoff: whole-repo or per-symbol subgraph plus the build-time IndexIdentity fingerprint (content root, git tree/commit) and per-file SHA-256 hashes. action=create builds a snapshot (output is the versioned GraphSnapshot JSON); action=verify checks a snapshot file against a root and returns the freshness verdict (fresh/stale/unknown) with the fingerprint.",
+        args: {
+          action: tool.schema.string().optional(),
+          root: tool.schema.string().optional(),
+          symbol: tool.schema.string().optional(),
+          limit: tool.schema.string().optional(),
+          file: tool.schema.string().optional(),
+        },
+        async execute(args) {
+          const flags: string[] = ["snapshot"]
+          if (args.action === "verify") {
+            flags.push("verify")
+            if (args.file) flags.push(args.file)
+            if (args.root) flags.push(args.root)
+            if (args.strict) flags.push("--strict")
+            return run(flags)
+          }
+          if (args.root) flags.push(args.root)
+          if (args.symbol) flags.push("--symbol", args.symbol)
+          if (args.limit) flags.push("--limit", String(args.limit))
+if (args.out) flags.push("--out", args.out)
+return run(flags)
+},
+}),
+// CLI:
+//   kern prose <words> [root] [--limit N]
+kern_prose: tool({
+description:
+"Prose-word to symbol candidate lookup for the NL router miss-chain: maps plain-English words ('middleware', 'retry') to candidate symbols via the build-time inverted vocab, so agents skip the miss-chain (kern_search miss -> kern_ast_search miss). Each hit is a symbol full name plus the number of query words that matched it; multi-word queries rank symbols matching more words first.",
+args: {
+query: tool.schema.string(),
+root: tool.schema.string().optional(),
+limit: tool.schema.string().optional(),
+},
+async execute(args) {
+const flags: string[] = ["prose", args.query]
+if (args.root) flags.push(args.root)
+if (args.limit) flags.push("--limit", String(args.limit))
+return run(flags)
+},
+}),
+kern_stream: tool({
         description:
           "Inspects streaming status, partitions large responses into token-friendly chunks, and manages progress notification channels for long-running operations.",
         args: {
@@ -2293,7 +2624,7 @@ kern_entry_points: tool({
           field_tag: tool.schema.string().optional(),
           method_signature: tool.schema.string().optional(),
           method_body: tool.schema.string().optional(),
-          apply: tool.schema.boolean().optional(),
+          apply: tool.schema.string().optional(),
           format: tool.schema.string().optional(),
           root: tool.schema.string().optional(),
         },
@@ -2308,7 +2639,7 @@ kern_entry_points: tool({
           if (args.field_tag) flags.push("--tag", args.field_tag)
           if (args.method_signature) flags.push("--sig", args.method_signature)
           if (args.method_body) flags.push("--body", args.method_body)
-          if (args.apply) flags.push("--apply")
+          if (truthy(args.apply)) flags.push("--apply")
           if (args.root) flags.push("--root", args.root)
           return run(flags)
         },
@@ -2324,7 +2655,7 @@ kern_entry_points: tool({
           base_file: tool.schema.string().optional(),
           local_file: tool.schema.string().optional(),
           remote_file: tool.schema.string().optional(),
-          apply: tool.schema.boolean().optional(),
+          apply: tool.schema.string().optional(),
           format: tool.schema.string().optional(),
           root: tool.schema.string().optional(),
         },
@@ -2334,7 +2665,7 @@ kern_entry_points: tool({
           if (args.base) flags.push("--base", args.base)
           if (args.local) flags.push("--local", args.local)
           if (args.remote) flags.push("--remote", args.remote)
-          if (args.apply) flags.push("--apply")
+          if (truthy(args.apply)) flags.push("--apply")
           if (args.format === "json") flags.push("--json")
           if (args.root) flags.push("--root", args.root)
           return run(flags)
@@ -2347,8 +2678,8 @@ kern_entry_points: tool({
           target: tool.schema.string().optional(),
           file: tool.schema.string().optional(),
           code: tool.schema.string().optional(),
-          auto_gap: tool.schema.boolean().optional(),
-          apply: tool.schema.boolean().optional(),
+          auto_gap: tool.schema.string().optional(),
+          apply: tool.schema.string().optional(),
           format: tool.schema.string().optional(),
           root: tool.schema.string().optional(),
         },
@@ -2356,8 +2687,8 @@ kern_entry_points: tool({
           const flags: string[] = ["synthesize-test"]
           if (args.target) flags.push("--target", args.target)
           if (args.file) flags.push("--file", args.file)
-          if (args.auto_gap) flags.push("--auto-gap")
-          if (args.apply) flags.push("--apply")
+          if (truthy(args.auto_gap)) flags.push("--auto-gap")
+          if (truthy(args.apply)) flags.push("--apply")
           if (args.format === "json") flags.push("--json")
           if (args.root) flags.push("--root", args.root)
           return run(flags)
@@ -2375,10 +2706,10 @@ kern_entry_points: tool({
           "Read a file. Routes to kern_compact_file (symbolic summary) by default for large codebases; set full=true for verbatim content. Falls back to raw read if kern is unavailable.",
         args: {
           filePath: tool.schema.string(),
-          full: tool.schema.boolean().optional(),
+          full: tool.schema.string().optional(),
         },
         async execute(args) {
-          if (args.full) {
+          if (truthy(args.full)) {
             // Explicit verbatim request — read directly, no kern.
             return readFallback(args.filePath)
           }
@@ -2396,10 +2727,10 @@ kern_entry_points: tool({
         args: {
           pattern: tool.schema.string(),
           path: tool.schema.string().optional(),
-          raw: tool.schema.boolean().optional(),
+          raw: tool.schema.string().optional(),
         },
         async execute(args) {
-          if (args.raw) {
+          if (truthy(args.raw)) {
             return globFallback(args.pattern, args.path ?? ".")
           }
           // A glob pattern with metacharacters can't be expressed by the kern
@@ -2422,11 +2753,11 @@ kern_entry_points: tool({
           pattern: tool.schema.string(),
           path: tool.schema.string().optional(),
           include: tool.schema.string().optional(),
-          docs: tool.schema.boolean().optional(),
-          raw: tool.schema.boolean().optional(),
+          docs: tool.schema.string().optional(),
+          raw: tool.schema.string().optional(),
         },
         async execute(args) {
-          if (args.raw) {
+          if (truthy(args.raw)) {
             return grepFallback(args.pattern, args.path, args.include)
           }
           if (args.include) {
@@ -2435,7 +2766,7 @@ kern_entry_points: tool({
             return grepFallback(args.pattern, args.path, args.include)
           }
           try {
-            if (args.docs) {
+            if (truthy(args.docs)) {
               const flags: string[] = ["docs", args.pattern]
               if (args.path) flags.push("--root", args.path)
               return await run(flags)
@@ -2455,13 +2786,13 @@ kern_entry_points: tool({
         args: {
           command: tool.schema.string(),
           workdir: tool.schema.string().optional(),
-          timeout: tool.schema.number().optional(),
-          raw: tool.schema.boolean().optional(),
+          timeout: tool.schema.string().optional(),
+          raw: tool.schema.string().optional(),
         },
         async execute(args) {
           const cmd = args.command.trim()
           if (cmd === "") return "error: empty command"
-          if (args.raw) {
+          if (truthy(args.raw)) {
             return runRaw(args.command, args.workdir, args.timeout)
           }
           // kern build runs any command (sh -c) in the project dir, gated by
@@ -2524,7 +2855,9 @@ kern_entry_points: tool({
       try {
         const compressed = await withTempFile("tool-output.txt", text, (file) => run(["log", file]))
         if (!compressed || compressed.trim() === "") return
-        output.output = `[kern] compressed ${text.length} -> ${compressed.length} chars\n${compressed}`
+        output.output = SILENT_MODE
+          ? compressed
+          : `[kern] compressed ${text.length} -> ${compressed.length} chars\n${compressed}`
       } catch {
         // Never break tool execution on optimizer failure.
       }
@@ -2534,8 +2867,9 @@ kern_entry_points: tool({
     // survives compaction. Only brief, substantive prompts are recorded;
     // questions, tiny messages, repeated prompts and rapid-fire chatter are
     // skipped so project memory isn't flooded (that would evict real lessons).
-    "chat.message": async (_input, output) => {
+    "chat.message": async (input, output) => {
       try {
+        const sessionID = (input as any)?.sessionID ?? ""
         const parts: any[] = (output.parts as any[]) ?? []
         let text = ""
         for (const p of parts) {
@@ -2543,6 +2877,13 @@ kern_entry_points: tool({
           else if (typeof p.content === "string") text += p.content
         }
         text = text.trim()
+        // Silent injection (Phase C): remember the current message text and
+        // precompute its context envelope so the system.transform hook can
+        // append it before the model's first response of the session.
+        currentMessageText = text
+        if (INJECT_ENABLED && sessionID && !injectedSessions.has(sessionID) && text.length >= INJECT_MIN_TEXT) {
+          void envelopeFor(text)
+        }
         if (!text || text.length < 16 || text.length > 600) return
         if (text.endsWith("?")) return
         const lower = text.toLowerCase()
@@ -2552,6 +2893,31 @@ kern_entry_points: tool({
         lastChatAt = now
         lastChatText = text
         await remember(`User: ${text}`, 200)
+      } catch {
+        /* swallow */
+      }
+    },
+
+    // Silent context injection (Phase C): append the planner-selected context
+    // envelope to the system prompt before the model's FIRST response of the
+    // session. The message text comes from currentMessageText (set by
+    // chat.message before the model request is built); the envelope is served
+    // from the precomputed cache or the single in-flight computation. Fail-
+    // closed: a miss, timeout, or error injects nothing and never blocks the
+    // host call. The session set + dedupe guard keep the block from being
+    // appended more than once across the turn's model requests.
+    "experimental.chat.system.transform": async (input, output) => {
+      try {
+        if (!INJECT_ENABLED) return
+        const sessionID = (input as any)?.sessionID ?? ""
+        if (!sessionID || injectedSessions.has(sessionID)) return
+        const text = currentMessageText
+        if (!text || text.length < INJECT_MIN_TEXT) return
+        const block = await envelopeFor(text)
+        if (!block) return
+        if ((output.system ?? []).some((s) => s.startsWith("[kern context"))) return
+        output.system = [...(output.system ?? []), block]
+        injectedSessions.add(sessionID)
       } catch {
         /* swallow */
       }

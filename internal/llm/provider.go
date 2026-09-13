@@ -72,14 +72,18 @@ func CompressVia(ctx context.Context, p Provider, prompt string, opts Options) (
 	return p.Generate(ctx, CompressInstruction, prompt, opts)
 }
 
+// ProviderName returns the provider selected by KERN_LLM_PROVIDER ("auto"
+// when unset) — the label `kern agents` prints for the active selection.
+func ProviderName() string { return providerName() }
+
 // providerName returns the provider selected by KERN_LLM_PROVIDER (or
 // llm.provider in .kern/config.json; default "ollama"). It is the single
 // place that maps the config to a vendor.
 func providerName() string {
-	if n := config.String("", "KERN_LLM_PROVIDER", "llm.provider", "ollama"); n != "" {
+	if n := config.String("", "KERN_LLM_PROVIDER", "llm.provider", "auto"); n != "" {
 		return strings.ToLower(n)
 	}
-	return "ollama"
+	return "auto"
 }
 
 // NewProvider builds the provider selected by KERN_LLM_PROVIDER
@@ -95,6 +99,19 @@ func NewProvider() (Provider, error) {
 		return NewAnthropicProvider()
 	case "google", "gemini":
 		return NewGoogleProvider()
+	case "claude", "codex", "gemini-cli", "qwen":
+		return NewLocalCliProvider(strings.TrimSuffix(providerName(), "-cli")), nil
+	case "auto":
+		// auto: Ollama first, then any locally-wired agent CLI (claude,
+		// codex, gemini, qwen) that is installed — so LLM-dependent
+		// features work on machines without Ollama but with a wired
+		// local agent. Construction never touches the network; a dead
+		// Ollama fails fast at Generate time and the chain moves on.
+		chain := []Provider{NewOllamaProvider()}
+		for _, name := range AvailableLocalAgents() {
+			chain = append(chain, NewLocalCliProvider(name))
+		}
+		return NewChainProvider(chain...), nil
 	default:
 		return NewOllamaProvider(), nil
 	}
@@ -110,8 +127,14 @@ func MaskRequired() bool {
 	if err != nil {
 		return false
 	}
+	if chain, ok := p.(*ChainProvider); ok {
+		return !chain.AllLocal()
+	}
 	if _, isOllama := p.(*OllamaProvider); isOllama {
 		return !isLocalHost(New("").Base)
+	}
+	if _, isLocal := p.(*LocalCliProvider); isLocal {
+		return false // agent CLIs run on this machine
 	}
 	return true
 }

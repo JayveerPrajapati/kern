@@ -33,8 +33,9 @@ var reJavaTryResource = regexp.MustCompile(`^\s*try\s*\(\s*(?:final\s+)?((?:[A-Z
 // reJavaParam matches a single method parameter after normalization
 // (annotations, final, varargs and array brackets stripped): "Type name",
 // "List<String> items", "com.example.Foo x". Group 1 is the declared type,
-// group 2 the parameter name.
-var reJavaParam = regexp.MustCompile(`^((?:[A-Za-z_$][\w$]*\.)*[A-Za-z_$][\w$]*(?:<[^>]*>)?)\s+([A-Za-z_$][\w$]+)$`)
+// group 2 the parameter name. The name class uses * (not +): single-letter
+// parameters ("Store s", "Type1 a") are idiomatic Java and must resolve.
+var reJavaParam = regexp.MustCompile(`^((?:[A-Za-z_$][\w$]*\.)*[A-Za-z_$][\w$]*(?:<[^>]*>)?)\s+([A-Za-z_$][\w$]*)$`)
 
 // javaInferredTypes are type-position tokens that do not name a type: "var"
 // (Java 10+ local type inference) and contextual keywords that can precede an

@@ -18,6 +18,7 @@ type Sample struct {
 	Baseline         string   // baseline context/output text
 	Candidate        string   // candidate context/output text
 	CriticalEvidence []string // fragments that MUST survive in the candidate
+	Intent           string   // pipeline mode: when set, generate the candidate via kern orchestrate
 }
 
 // SampleResult is the per-sample outcome of a run.
@@ -38,7 +39,9 @@ type EvalResult struct {
 	Score             float64        `json:"score"`              // 0-100 quality: 100*(0.5*EvidenceRetention + 0.5*(1-ErrorRate))
 	TokenReduction    float64        `json:"token_reduction"`    // 1 - ΣcandidateTokens/ΣbaselineTokens (0 when Σbaseline=0)
 	EvidenceRetention float64        `json:"evidence_retention"` // Σretained/Σtotal (1.0 when Σtotal=0)
+	OmissionRate      float64        `json:"omission_rate"`      // 1 - EvidenceRetention: fraction of critical evidence dropped
 	ErrorRate         float64        `json:"error_rate"`         // failed samples / total (0 when no samples)
+	LatencyMs         int64          `json:"latency_ms,omitempty"` // end-to-end candidate-generation time (set by the CLI, not Run)
 	Reproducible      bool           `json:"reproducible"`       // echoed from the harness
 	Samples           []SampleResult `json:"samples"`
 	Rubric            []Assertion    `json:"rubric"` // copies with Pass filled by Run
@@ -109,6 +112,7 @@ func (h *EvalHarness) Run() EvalResult {
 	} else {
 		res.EvidenceRetention = float64(sumRet) / float64(sumTotal)
 	}
+	res.OmissionRate = 1 - res.EvidenceRetention
 	if len(h.Samples) == 0 {
 		res.ErrorRate = 0
 	} else {

@@ -1,0 +1,20 @@
+{
+  "rules": [
+    {"path": "AGENTS.md", "max_words": 2900},
+    {"path": "README.md", "max_words": 6000},
+    {"path": "docs/authorized-context.md", "max_words": 1900},
+    {"path": "docs/memory-governance.md", "max_words": 1000},
+    {"path": "docs/evidence-bundle-schema.md", "max_words": 700},
+    {"path": "docs/diff-gate.md", "max_words": 600},
+    {"path": "docs/context-envelope.md", "max_words": 350},
+    {"path": "docs/progressive-disclosure.md", "max_words": 450},
+    {"path": "docs/review-lenses.md", "max_words": 450},
+    {"path": "docs/review-pack.md", "max_words": 500},
+    {"path": "docs/consensus-divergence.md", "max_words": 400},
+    {"path": "docs/privacy.md", "max_words": 550},
+    {"path": "docs/mcp/README.md", "max_words": 550},
+    {"path": "docs/benchmarks/README.md", "max_words": 500},
+    {"path": "docs/adr/0001-kern-control-plane.md", "max_words": 400},
+    {"path": "docs/adr/0006-multi-repo-identity.md", "max_words": 800}
+  ]
+}

@@ -343,6 +343,11 @@ func runSearch(rest []string) {
 		printJSON(matches)
 		return
 	}
+	// V7d: collapse same-name symbols duplicated across sibling modules.
+	matches, collapsed := intel.CollapseModuleDuplicates(matches)
+	if collapsed > 0 {
+		fmt.Fprintf(os.Stderr, "kern: %d duplicate(s) across sibling modules collapsed\n", collapsed)
+	}
 	for _, m := range matches {
 		fmt.Printf("%-10s %-7s %-24s %s:%d\n", m.Kind, m.Lang, m.FullName(), m.File, m.Line)
 	}

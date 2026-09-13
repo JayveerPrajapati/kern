@@ -56,6 +56,11 @@ type Options struct {
 	MaxFileBytes     int       // per-file content cap (default 512KiB)
 	SkipInstructions bool      // default: include root-level docs as instructions
 	Tier             code.Tier // content tier applied per file: TierFull (default), TierFolded or TierSummary
+	// GraphSymbol is the graph-mode discriminator: non-empty selects the
+	// graph pack (BuildGraph) rooted at that symbol's neighbourhood; empty
+	// means whole-graph mode in BuildGraph. Build (files mode) never reads
+	// it, so the zero value keeps files mode fully backward-compatible.
+	GraphSymbol string
 }
 
 // instructionNames are root-level docs packed verbatim as project

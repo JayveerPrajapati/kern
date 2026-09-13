@@ -18,7 +18,7 @@ func runGraph(rest []string) {
 		fatalUsage("flags: %v", err)
 	}
 	if len(args) < 1 && !f.html {
-		fatalUsage("usage: kern graph <symbol> [root] [--mermaid] [--json] [--graphml] [--html] [--out FILE] [--max-tokens N] [--limit N]")
+		fatalUsage("usage: kern graph <symbol> [root] [--mermaid] [--json] [--graphml] [--cypher] [--html] [--out FILE] [--max-tokens N] [--limit N]")
 	}
 	if len(args) < 1 {
 		// Whole-repo explorer: kern graph --html [root] [--limit N]
@@ -34,7 +34,8 @@ func runGraph(rest []string) {
 		if err != nil {
 			fatal("Graph: %v", err)
 		}
-		out := ix.WholeGraph(f.limit).GraphHTML()
+		g := ix.WholeGraph(f.limit)
+	out := g.GraphHTML(ix)
 		if f.out != "" {
 			if err := os.WriteFile(f.out, []byte(out), 0o644); err != nil {
 				fatal("Graph: %v", err)
@@ -61,7 +62,7 @@ func runGraph(rest []string) {
 		fmt.Println(ix.Mermaid(symbol))
 		return
 	}
-	if f.json || f.graphml || f.html {
+	if f.json || f.graphml || f.cypher || f.html {
 		g, gerr := svc.Graph.Neighborhood(context.Background(), root, symbol)
 		if gerr != nil {
 			fatalNoSymbol(symbol, ix)
@@ -72,8 +73,10 @@ func runGraph(rest []string) {
 			out = g.GraphJSON()
 		case f.graphml:
 			out = g.GraphGraphML()
+		case f.cypher:
+			out = g.GraphCypher()
 		default:
-			out = g.GraphHTML()
+			out = g.GraphHTML(ix)
 		}
 		if f.out != "" {
 			if err := os.WriteFile(f.out, []byte(out), 0o644); err != nil {
@@ -86,7 +89,7 @@ func runGraph(rest []string) {
 		return
 	}
 	if f.maxTokens > 0 {
-		out, err := intel.GraphCtx(ix, symbol, f.maxTokens)
+		out, err := intel.GraphCtxMin(ix, symbol, f.maxTokens, f.minConfidence)
 		if err != nil {
 			fatal("Graph: %v", err)
 		}
@@ -177,12 +180,36 @@ func runWhy(rest []string) {
 		printJSON(info)
 		return
 	}
+	// --min-confidence prunes caller rows whose provenance ranks below the
+	// threshold, so the answer lists only FACT/INFERENCE-grade dependents.
+	if f.minConfidence != "" && info != nil {
+		passes := intel.MinConfidenceFilter(f.minConfidence)
+		kept := info.Callers[:0]
+		for _, c := range info.Callers {
+			if passes(intel.EdgeConfidenceLabel(ix, c.Name, info.Symbol.FullName())) {
+				kept = append(kept, c)
+			}
+		}
+		info.Callers = kept
+		info.InEdges = len(kept)
+	}
 	fmt.Println(intel.FormatWhy(*info))
 
 }
 
 func runWiki(rest []string) {
-	f, args, err := parseFlags(rest)
+	// --obsidian is wiki-only, so it is stripped here (bare bool, like the
+	// sibling --json/--html flags) rather than added to the shared flag set.
+	obsidian := false
+	wikiArgs := make([]string, 0, len(rest))
+	for _, a := range rest {
+		if a == "--obsidian" {
+			obsidian = true
+			continue
+		}
+		wikiArgs = append(wikiArgs, a)
+	}
+	f, args, err := parseFlags(wikiArgs)
 	if err != nil {
 		fatalUsage("flags: %v", err)
 	}
@@ -201,7 +228,7 @@ func runWiki(rest []string) {
 	if outDir == "" {
 		outDir = filepath.Join(root, ".kern", "wiki")
 	}
-	written, err := intel.WikiExport(ix, outDir)
+	written, err := intel.WikiExport(ix, outDir, obsidian)
 	if err != nil {
 		fatal("Wiki: %v", err)
 	}
@@ -431,8 +458,21 @@ func runPath(rest []string) {
 		fatal("Path: %v", err)
 	}
 	// Validation and path computation go through the service layer; the CLI
-	// keeps only rendering (and resolved-name labels for JSON output).
-	path, perr := svc.Graph.Path(context.Background(), root, args[0], args[1])
+	// keeps only rendering (and resolved-name labels for JSON output). The
+	// --min-confidence filter bypasses the service for the filtered search
+	// (ShortestPathMin prunes AMBIGUOUS edges from the search graph).
+	var path []string
+	var perr error
+	if f.minConfidence != "" {
+		from, _ := intel.Resolve(ix, args[0])
+		to, _ := intel.Resolve(ix, args[1])
+		path = intel.ShortestPathMin(ix, from, to, f.minConfidence)
+		if path == nil {
+			perr = fmt.Errorf("no path found between %s and %s", args[0], args[1])
+		}
+	} else {
+		path, perr = svc.Graph.Path(context.Background(), root, args[0], args[1])
+	}
 	if perr != nil {
 		fatal("Path: %v", perr)
 	}
@@ -661,7 +701,7 @@ func runExplore(rest []string) {
 	if maxN < 0 {
 		maxN = 0
 	}
-	rep, err := intel.Explore(ix, args[0], depth, maxN)
+	rep, err := intel.ExploreBudgeted(ix, args[0], depth, maxN, f.minConfidence, f.maxTokens)
 	if err != nil {
 		fatal("Explore: %v", err)
 	}
@@ -717,6 +757,54 @@ func runNear(rest []string) {
 
 }
 
+func runCycles(rest []string) {
+	f, args, err := parseFlags(rest)
+	if err != nil {
+		fatalUsage("flags: %v", err)
+	}
+	root := f.root
+	if root == "" {
+		root = "."
+		if len(args) > 0 {
+			root = args[0]
+		}
+	}
+	ix, err := intel.ReadIndex(root)
+	if err != nil {
+		fatal("Cycles: %v", err)
+	}
+	cycles := intel.ImportCycles(ix)
+	if f.json {
+		printJSON(map[string]any{"cycles": cycles, "count": len(cycles)})
+		return
+	}
+	fmt.Println(intel.RenderCycles(cycles))
+}
+
+func runSurprising(rest []string) {
+	f, args, err := parseFlags(rest)
+	if err != nil {
+		fatalUsage("flags: %v", err)
+	}
+	root := f.root
+	if root == "" {
+		root = "."
+	}
+	if len(args) > 0 {
+		root = args[0]
+	}
+	ix, err := intel.ReadIndex(root)
+	if err != nil {
+		fatal("Surprising: %v", err)
+	}
+	edges := intel.SurprisingConnections(ix, f.limit)
+	if f.json {
+		printJSON(map[string]any{"connections": edges, "count": len(edges)})
+		return
+	}
+	fmt.Println(intel.RenderSurprising(edges))
+}
+
 func runProbe(rest []string) {
 	f, args, err := parseFlags(rest)
 	if err != nil {
@@ -738,6 +826,29 @@ func runProbe(rest []string) {
 		maxTokens = 4000
 	}
 	report := intel.Probe(ix, args[0], maxTokens)
+	// --min-confidence prunes AMBIGUOUS anchors' call rows so the probe
+	// bundle never leads an agent to chase phantom references.
+	if f.minConfidence != "" {
+		passes := intel.MinConfidenceFilter(f.minConfidence)
+		for i := range report.Anchors {
+			a := &report.Anchors[i]
+			keep := func(in []string, conf func(string) string) []string {
+				out := in[:0]
+				for _, c := range in {
+					if passes(conf(c)) {
+						out = append(out, c)
+					}
+				}
+				return out
+			}
+			a.Callers = keep(a.Callers, func(c string) string {
+				return intel.EdgeConfidenceLabel(ix, c, a.Resolved)
+			})
+			a.Callees = keep(a.Callees, func(c string) string {
+				return intel.EdgeConfidenceLabel(ix, a.Resolved, c)
+			})
+		}
+	}
 	if f.json {
 		printJSON(report)
 		return

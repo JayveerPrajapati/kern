@@ -16,8 +16,9 @@ import (
 type Type string
 
 const (
-	TypeSymbol Type = "symbol"
-	TypeFile   Type = "file"
+	TypeSymbol   Type = "symbol"
+	TypeFile     Type = "file"
+	TypeEnvelope Type = "envelope" // a silent-pipeline context envelope render
 )
 
 // Handle is a stable identity for a retrievable unit (symbol or file) at a

@@ -1,6 +1,7 @@
 package intel
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -165,5 +166,110 @@ func TestGraphCtxConcreteMethodHasNoDispatch(t *testing.T) {
 	}
 	if strings.Contains(out, "dispatch (INFERRED)") {
 		t.Fatalf("concrete method must not carry dispatch hints, got %q", out)
+	}
+}
+
+// buildDegreeProject returns a project with symbols of known, distinct
+// adjacency degrees for AdaptiveGraphCtxTokens: Leaf (0 neighbors), Small (1
+// caller), Mid (3 callers), and Hub (90 callers).
+func buildDegreeProject(t *testing.T) string {
+	t.Helper()
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	root := t.TempDir()
+	_ = os.WriteFile(filepath.Join(root, "go.mod"), []byte("module demo\n\ngo 1.22\n"), 0o644)
+	var b strings.Builder
+	b.WriteString("package main\n\n")
+	b.WriteString("// Leaf has no callers and calls nothing.\nfunc Leaf() {}\n\n")
+	b.WriteString("// Small has exactly one caller.\nfunc smallCaller() { Small() }\nfunc Small() {}\n\n")
+	b.WriteString("// Mid has exactly three callers.\n")
+	for i := 1; i <= 3; i++ {
+		fmt.Fprintf(&b, "func midCaller%d() { Mid() }\n", i)
+	}
+	b.WriteString("func Mid() {}\n\n")
+	b.WriteString("// Hub has ninety callers (well past the 400-token base budget).\n")
+	for i := 1; i <= 90; i++ {
+		fmt.Fprintf(&b, "func hubCaller%02d() { Hub() }\n", i)
+	}
+	b.WriteString("func Hub() {}\n")
+	_ = os.WriteFile(filepath.Join(root, "degree.go"), []byte(b.String()), 0o644)
+	return root
+}
+
+// TestAdaptiveGraphCtxTokensLeaf: a leaf with no resolvable adjacency gets
+// exactly the base budget — over-serving nothing, under-serving nothing.
+func TestAdaptiveGraphCtxTokensLeaf(t *testing.T) {
+	root := buildDegreeProject(t)
+	ix := buildIndex(t, root)
+	if got := AdaptiveGraphCtxTokens(ix, "Leaf"); got != GraphCtxDefaultTokens {
+		t.Fatalf("Leaf: got %d, want base %d", got, GraphCtxDefaultTokens)
+	}
+}
+
+// TestAdaptiveGraphCtxTokensSmall: one neighbor row scales the base by exactly
+// one per-neighbor unit (within the spec's 400 < budget < 440 window).
+func TestAdaptiveGraphCtxTokensSmall(t *testing.T) {
+	root := buildDegreeProject(t)
+	ix := buildIndex(t, root)
+	want := GraphCtxDefaultTokens + 1*GraphCtxPerNeighborTokens
+	if got := AdaptiveGraphCtxTokens(ix, "Small"); got != want {
+		t.Fatalf("Small: got %d, want %d", got, want)
+	}
+}
+
+// TestAdaptiveGraphCtxTokensMid: a mid-degree symbol scales exactly with its
+// neighbor count.
+func TestAdaptiveGraphCtxTokensMid(t *testing.T) {
+	root := buildDegreeProject(t)
+	ix := buildIndex(t, root)
+	want := GraphCtxDefaultTokens + 3*GraphCtxPerNeighborTokens
+	if got := AdaptiveGraphCtxTokens(ix, "Mid"); got != want {
+		t.Fatalf("Mid: got %d, want %d", got, want)
+	}
+}
+
+// TestAdaptiveGraphCtxTokensHubCapped: a 90-caller hub scales past the base
+// and is pinned at exactly the cap.
+func TestAdaptiveGraphCtxTokensHubCapped(t *testing.T) {
+	root := buildDegreeProject(t)
+	ix := buildIndex(t, root)
+	got := AdaptiveGraphCtxTokens(ix, "Hub")
+	if got <= GraphCtxDefaultTokens {
+		t.Fatalf("Hub: got %d, want above base %d", got, GraphCtxDefaultTokens)
+	}
+	if got != GraphCtxMaxTokens {
+		t.Fatalf("Hub: got %d, want cap %d", got, GraphCtxMaxTokens)
+	}
+}
+
+// TestAdaptiveGraphCtxTokensUnresolvable: an unknown root falls back to the
+// base budget.
+func TestAdaptiveGraphCtxTokensUnresolvable(t *testing.T) {
+	root := buildDegreeProject(t)
+	ix := buildIndex(t, root)
+	if got := AdaptiveGraphCtxTokens(ix, "Nope"); got != GraphCtxDefaultTokens {
+		t.Fatalf("unresolvable: got %d, want %d", got, GraphCtxDefaultTokens)
+	}
+}
+
+// TestAdaptiveGraphCtxTokensInterfaceMethodRoot: an interface-method call
+// target has no symbol of its own, so it gets the base budget.
+func TestAdaptiveGraphCtxTokensInterfaceMethodRoot(t *testing.T) {
+	root := buildInterfaceProject(t)
+	ix := buildIndex(t, root)
+	if got := AdaptiveGraphCtxTokens(ix, "Store.Fetch"); got != GraphCtxDefaultTokens {
+		t.Fatalf("interface-method root: got %d, want %d", got, GraphCtxDefaultTokens)
+	}
+}
+
+// TestAdaptiveGraphCtxTokensDeterministic: the same index and symbol always
+// yield the same budget.
+func TestAdaptiveGraphCtxTokensDeterministic(t *testing.T) {
+	root := buildDegreeProject(t)
+	ix := buildIndex(t, root)
+	first := AdaptiveGraphCtxTokens(ix, "Hub")
+	for i := 0; i < 3; i++ {
+		if got := AdaptiveGraphCtxTokens(ix, "Hub"); got != first {
+			t.Fatalf("nondeterministic: %d then %d", first, got)
+		}
 	}
 }

@@ -17,6 +17,7 @@ func init() {
 				Phase:       t.Phase,
 				RiskLevel:   t.RiskLevel,
 				InputSchema: t.InputSchema,
+				Description: t.Description,
 			})
 		}
 		return out

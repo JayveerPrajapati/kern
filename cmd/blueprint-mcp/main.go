@@ -22,6 +22,13 @@ func main() {
 		case "-h", "--help", "help":
 			usage(os.Stdout)
 			return
+		case "-v", "--version", "version":
+			// Same stamping contract as the other binaries: the build
+			// stamps main.version / internal/version.Version via ldflags
+			// (adopted by internal/blueprint/version), so kern doctor's
+			// version-parity probe can read it.
+			fmt.Printf("blueprint-mcp %s\n", blueprintversion.Version)
+			return
 		}
 		if strings.HasPrefix(os.Args[1], "-") {
 			fmt.Fprintf(os.Stderr, "blueprint-mcp: unknown flag %q\n\n", os.Args[1])

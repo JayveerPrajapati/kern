@@ -6,6 +6,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -62,6 +64,46 @@ func TestHandleHealthTool(t *testing.T) {
 	}
 	if auditLen, ok := govMap["audit_chain_length"].(float64); !ok || auditLen < 1 {
 		t.Errorf("governance.audit_chain_length = %v, expected >= 1", govMap["audit_chain_length"])
+	}
+}
+
+// TestHandleHealthReportsLowEdgeCounters: the index section of the health
+// snapshot carries the finalize-time LOW-edge reconciliation counters
+// (CG-P0-5), so an agent can see at a glance how many phantom references the
+// index admits.
+func TestHandleHealthReportsLowEdgeCounters(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "a.go"), []byte("package a\n\nfunc A() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s := NewServer(strings.NewReader(""), io.Discard)
+	s.roots = []string{dir}
+	ix, err := s.loadIndex(context.Background(), dir)
+	if err != nil {
+		t.Fatalf("loadIndex: %v", err)
+	}
+	// The counters are recorded on the index by the build finalize; the
+	// handler must surface them in the snapshot regardless of their value.
+	if ix.PromotedLowEdges < 0 || ix.UnresolvedLowEdges < 0 {
+		t.Fatal("build should record non-negative reconciliation counters")
+	}
+	out, err := s.handleHealth(context.Background(), map[string]any{"root": dir})
+	if err != nil {
+		t.Fatalf("handleHealth: %v", err)
+	}
+	var data map[string]any
+	if err := json.Unmarshal([]byte(out), &data); err != nil {
+		t.Fatalf("unmarshal health JSON: %v", err)
+	}
+	idx, ok := data["index"].(map[string]any)
+	if !ok {
+		t.Fatalf("missing index section: %v", data)
+	}
+	if _, ok := idx["promoted_low_edges"]; !ok {
+		t.Errorf("index section missing promoted_low_edges: %v", idx)
+	}
+	if _, ok := idx["unresolved_low_edges"]; !ok {
+		t.Errorf("index section missing unresolved_low_edges: %v", idx)
 	}
 }
 

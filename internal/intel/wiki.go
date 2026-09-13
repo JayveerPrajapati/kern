@@ -12,8 +12,10 @@ import (
 
 // WikiExport writes a markdown wiki into outDir: an index README plus one page
 // per package directory listing every symbol with its kind, signature, doc
-// comment, source location, and callers. Returns the paths written.
-func WikiExport(ix *index.Index, outDir string) ([]string, error) {
+// comment, source location, and callers. When obsidian is set, pages carry
+// Obsidian-style YAML frontmatter and caller references are rendered as
+// [[wikilinks]]; the README index page is unchanged. Returns the paths written.
+func WikiExport(ix *index.Index, outDir string, obsidian bool) ([]string, error) {
 	if err := os.MkdirAll(outDir, 0o755); err != nil {
 		return nil, err
 	}
@@ -47,7 +49,7 @@ func WikiExport(ix *index.Index, outDir string) ([]string, error) {
 			return syms[i].FullName() < syms[j].FullName()
 		})
 		total += len(syms)
-		page, err := wikiPage(ix, d, syms)
+		page, err := wikiPage(ix, d, syms, obsidian)
 		if err != nil {
 			return nil, err
 		}
@@ -85,9 +87,20 @@ func wikiSlug(dir string) string {
 	return s
 }
 
-func wikiPage(ix *index.Index, dir string, syms []index.Symbol) (string, error) {
+// wikiPage renders the markdown page for one package directory. When obsidian
+// is true the page is prefixed with Obsidian-style YAML frontmatter and caller
+// references are rendered as Obsidian [[wikilinks]]; when false the output is
+// the plain markdown format.
+func wikiPage(ix *index.Index, dir string, syms []index.Symbol, obsidian bool) (string, error) {
 	var b strings.Builder
+	if obsidian {
+		b.WriteString(obsidianFrontmatter(ix, dir, syms))
+	}
 	fmt.Fprintf(&b, "# package %s\n\nSymbols: %d\n\n", dir, len(syms))
+	var fileMap map[string]string
+	if obsidian {
+		fileMap = buildFileMap(ix)
+	}
 	for _, s := range syms {
 		doc := docComment(ix.Root, s.File, s.Line)
 		fmt.Fprintf(&b, "## %s %s\n\n", s.Kind, s.FullName())
@@ -100,9 +113,57 @@ func wikiPage(ix *index.Index, dir string, syms []index.Symbol) (string, error) 
 			fmt.Fprintf(&b, "- params: `%s`\n", strings.Join(s.Params, ", "))
 		}
 		if callers := ix.CallersFor(s); len(callers) > 0 {
-			fmt.Fprintf(&b, "- callers (%d): %s\n", len(callers), strings.Join(callers, ", "))
+			refs := callers
+			if obsidian {
+				refs = obsidianLinks(ix, fileMap, callers)
+			}
+			fmt.Fprintf(&b, "- callers (%d): %s\n", len(callers), strings.Join(refs, ", "))
 		}
 		b.WriteString("\n")
 	}
 	return b.String(), nil
+}
+
+// obsidianFrontmatter returns the Obsidian-style YAML frontmatter for a page:
+// title and file name the package dir, community is the first non-empty
+// community label among the page's symbols ("none" when none has one), and
+// hub reports whether any symbol in the dir ranks as a hub.
+func obsidianFrontmatter(ix *index.Index, dir string, syms []index.Symbol) string {
+	labels := ix.CommunityLabels()
+	label := "none"
+	for _, s := range syms {
+		if l := labels[s.FullName()]; l != "" {
+			label = l
+			break
+		}
+	}
+	hubs := hubSet(ix)
+	hub := false
+	for _, s := range syms {
+		if hubs[s.FullName()] {
+			hub = true
+			break
+		}
+	}
+	return fmt.Sprintf("---\ntitle: %s\ncommunity: %s\nfile: %s\nhub: %t\n---\n\n", dir, label, dir, hub)
+}
+
+// obsidianLinks renders caller references as Obsidian wikilinks
+// "[[<page-slug>|<name>]]" when the referenced symbol has a resolvable
+// definition file; references without a resolvable file stay plain names.
+func obsidianLinks(ix *index.Index, fileMap map[string]string, names []string) []string {
+	out := make([]string, len(names))
+	for i, n := range names {
+		file, ok := fileMap[n]
+		if !ok || file == "" {
+			out[i] = n
+			continue
+		}
+		d := filepath.Dir(file)
+		if d == "." {
+			d = filepath.Base(ix.Root)
+		}
+		out[i] = fmt.Sprintf("[[%s|%s]]", wikiSlug(d), n)
+	}
+	return out
 }

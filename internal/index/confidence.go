@@ -46,6 +46,12 @@ func parseConfidence(s string) Confidence {
 type CallEdge struct {
 	Target     string     `json:"target"`
 	Confidence Confidence `json:"confidence"`
+	// Synth marks edges synthesized from framework dispatch registrations
+	// (router tables, callback wiring) rather than syntactic calls:
+	// "router:net-http", "router:chi", "router:http-route". Synthesized
+	// edges must stay distinguishable from AST-extracted ones (typed-claims
+	// principle) — agents render them as SYNTHESIZED, never as EXTRACTED.
+	Synth string `json:"synth,omitempty"`
 }
 
 // ImportEdge is one parsed import relationship, carrying the parser's

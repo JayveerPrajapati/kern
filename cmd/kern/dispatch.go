@@ -39,6 +39,11 @@ func resolveCommandAndFlags() (cmd string, rest []string) {
 // that every alias target is a real dispatch case.
 var mcpCLIAlias = map[string]string{
 	"kern_agents":             "team",
+	"kern_llm_providers":      "agents",
+	"kern_validate_staged":    "diff-gate",
+	"kern_validate_proposed":  "validate-proposed",
+	"kern_explain_finding":    "explain-finding",
+	"kern_repair_guidance":    "repair-guidance",
 	"kern_ast_search":         "ast",
 	"kern_authorize_context":  "authorize-context",
 	"kern_code_graph":         "graph",
@@ -46,6 +51,12 @@ var mcpCLIAlias = map[string]string{
 	"kern_context_budget":     "budget",
 	"kern_context_envelope":   "context-envelope",
 	"kern_plan_context":       "explain-context",
+	"kern_orchestrate":        "orchestrate",
+	"kern_skill":              "skills",
+	"kern_agent_message":      "agent-message",
+	"kern_agent_interrupt":    "agent-interrupt",
+	"kern_mcp_call":           "mcp-client",
+	"kern_note":               "note",
 	"kern_diff_files":         "udiff",
 	"kern_doc_index":          "docs",
 	"kern_entry_points":       "entries",
@@ -100,6 +111,9 @@ var mcpCLIAlias = map[string]string{
 func printCommandHelp(cmd string) {
 	if e, ok := commandTable[cmd]; ok && e.help != "" {
 		fmt.Printf("kern %s — %s\n", cmd, e.help)
+		if e.usage != "" {
+			fmt.Println(e.usage)
+		}
 		os.Exit(0)
 	}
 	usage()
