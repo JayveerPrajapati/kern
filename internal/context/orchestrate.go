@@ -64,17 +64,17 @@ type EnvelopeHandle struct {
 // escalation handle. Deterministic: the same intent, repo state, and budget
 // produce the same result (and the same event sequence) across runs.
 type OrchestrateResult struct {
-	TaskType        TaskType          `json:"task_type"`
-	Mode            string            `json:"mode,omitempty"` // context-mode preset used ("" = classified)
-	Skill           string            `json:"skill,omitempty"` // bundled skill whose runbook was appended ("" = none)
-	Plan            *Plan             `json:"plan"`
-	EnvelopeVersion int               `json:"envelope_version"`
-	SchemaVersion   string            `json:"schema_version"`
-	Budget          int               `json:"budget"`
-	TokenCount      int               `json:"token_count"` // delivered render: plan.TotalTokens (budget-fitted)
-	Truncated       bool              `json:"truncated"`
-	FittedText      string            `json:"fitted_text,omitempty"`
-	Handle          *EnvelopeHandle   `json:"handle"`
+	TaskType        TaskType           `json:"task_type"`
+	Mode            string             `json:"mode,omitempty"`  // context-mode preset used ("" = classified)
+	Skill           string             `json:"skill,omitempty"` // bundled skill whose runbook was appended ("" = none)
+	Plan            *Plan              `json:"plan"`
+	EnvelopeVersion int                `json:"envelope_version"`
+	SchemaVersion   string             `json:"schema_version"`
+	Budget          int                `json:"budget"`
+	TokenCount      int                `json:"token_count"` // delivered render: plan.TotalTokens (budget-fitted)
+	Truncated       bool               `json:"truncated"`
+	FittedText      string             `json:"fitted_text,omitempty"`
+	Handle          *EnvelopeHandle    `json:"handle"`
 	Events          []OrchestrateStage `json:"events"` // stages emitted, in order
 }
 
@@ -225,8 +225,8 @@ func (e *Engine) Orchestrate(intent string, opts OrchestrateOptions) (*Orchestra
 		// FittedText is the authoritative delivered render: RenderPlan plus
 		// the skill section when one was requested (pkt.FittedText is empty
 		// for many task types, so it cannot be the deliverable).
-		FittedText:      rendered,
-		Handle:          h,
-		Events:          events,
+		FittedText: rendered,
+		Handle:     h,
+		Events:     events,
 	}, nil
 }

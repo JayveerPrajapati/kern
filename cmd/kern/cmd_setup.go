@@ -10,6 +10,7 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/fw"
 	"github.com/JayveerPrajapati/kern/internal/hook"
 	"github.com/JayveerPrajapati/kern/internal/hooks"
+	"github.com/JayveerPrajapati/kern/internal/index"
 	"github.com/JayveerPrajapati/kern/internal/intel"
 	"github.com/JayveerPrajapati/kern/internal/setup"
 	"io"
@@ -17,6 +18,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 )
@@ -331,8 +333,78 @@ func runFw(rest []string) {
 	if err != nil {
 		fatal("fw: %v", err)
 	}
+	det = withGoStdlib(root, det)
 	fmt.Println(fw.Render(det))
 
+}
+
+// withGoStdlib guarantees a Go project reports the Go language itself, not
+// just the frameworks layered on top of it (F-010: `kern frameworks` said
+// "No known frameworks detected" for a plain Go module whose go.mod has no
+// framework dependencies). A Go module without gin/echo/grpc/... still runs
+// on the standard library, so it gets a "Go (stdlib)" baseline entry
+// alongside any framework entries the catalog already found. Signal-less
+// projects keep the pre-existing "No known frameworks detected" message.
+func withGoStdlib(root string, det []fw.Detected) []fw.Detected {
+	for _, d := range det {
+		if d.ID == "go-stdlib" {
+			return det
+		}
+	}
+	if !isGoProject(root) {
+		return det
+	}
+	out := append([]fw.Detected(nil), det...)
+	out = append(out, fw.Detected{
+		Framework: fw.Framework{
+			ID:      "go-stdlib",
+			Name:    "Go (stdlib)",
+			Lang:    "go",
+			Summary: "Go standard library: modules and programs with no third-party framework.",
+		},
+		Signals: []string{"go.mod / *.go"},
+	})
+	// Match fw.Detect's ordering contract (lang, then name) so Render
+	// groups languages cleanly even when a Go framework was also detected.
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Lang != out[j].Lang {
+			return out[i].Lang < out[j].Lang
+		}
+		return out[i].Name < out[j].Name
+	})
+	return out
+}
+
+// isGoProject reports whether root contains Go source: a go.mod manifest or
+// .go files. The walk is bounded and skips the same baseline dirs the fw
+// detector skips (VCS, dependency, build output) so node_modules/vendor trees
+// cannot masquerade as Go projects.
+func isGoProject(root string) bool {
+	if st, err := os.Stat(filepath.Join(root, "go.mod")); err == nil && !st.IsDir() {
+		return true
+	}
+	const depth = 3
+	skip := map[string]bool{".git": true, ".hg": true, ".svn": true, "node_modules": true, "vendor": true, "dist": true, "build": true, "out": true, "bin": true, ".venv": true, "__pycache__": true, ".kern": true, "target": true}
+	found := false
+	filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil || found {
+			return nil
+		}
+		if d.IsDir() {
+			if path != root {
+				rel, _ := filepath.Rel(root, path)
+				if skip[rel] || strings.Count(rel, string(filepath.Separator)) >= depth {
+					return filepath.SkipDir
+				}
+			}
+			return nil
+		}
+		if strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "go.mod") {
+			found = true
+		}
+		return nil
+	})
+	return found
 }
 
 // runEntryPoints lists framework-detected entry points (handlers, controllers,
@@ -366,18 +438,36 @@ func runEntryPoints(rest []string) {
 		}
 	}
 	n := 0
+	pkgOf := map[string]string{} // file -> package name
+	for _, p := range ix.Pkgs {
+		for _, f := range p.Files {
+			if _, ok := pkgOf[f]; !ok {
+				pkgOf[f] = p.Name
+			}
+		}
+	}
 	for _, s := range ix.Symbols {
-		if !s.Entry || s.Framework == "" {
-			continue
-		}
-		if re != nil && !re.MatchString(s.Name) && (s.Route == "" || !re.MatchString(s.Route)) {
-			continue
-		}
-		route := s.Route
-		if route == "" {
+		framework := ""
+		route := ""
+		if s.Entry && s.Framework != "" {
+			// Framework-tagged entry point (handler, route, controller).
+			framework = s.Framework
+			route = s.Route
+		} else if fwID, ok := goNativeEntry(s, pkgOf); ok {
+			// Language-native entry point: Go main (package main) and init
+			// funcs are entry points even when no framework tagged them
+			// (F-009: `kern entry-points` reported none on a plain Go
+			// module). Listed alongside framework-tagged entries.
+			framework = fwID
 			route = "-"
 		}
-		fmt.Printf("%s %s %s %s:%d\n", s.Framework, s.FullName(), route, s.File, s.Line)
+		if framework == "" {
+			continue
+		}
+		if re != nil && !re.MatchString(s.Name) && (route == "" || !re.MatchString(route)) {
+			continue
+		}
+		fmt.Printf("%s %s %s %s:%d\n", framework, s.FullName(), route, s.File, s.Line)
 		n++
 		if n >= limit {
 			break
@@ -386,6 +476,24 @@ func runEntryPoints(rest []string) {
 	if n == 0 {
 		fmt.Println("no framework entry points in index (run kern index to populate)")
 	}
+}
+
+// goNativeEntry reports whether a Go symbol is a language-native entry point
+// and the framework label to display for it. Go's own entry points are `main`
+// (only meaningful in a package named main) and `init` funcs (run once per
+// package at startup); both are entry points even when no framework tags
+// them. pkgOf maps a source file to its package name.
+func goNativeEntry(s index.Symbol, pkgOf map[string]string) (string, bool) {
+	if s.Kind != "func" || !strings.HasSuffix(s.File, ".go") {
+		return "", false
+	}
+	switch s.Name {
+	case "main":
+		return "go", pkgOf[s.File] == "main"
+	case "init":
+		return "go", true
+	}
+	return "", false
 }
 
 func runHook(rest []string) {

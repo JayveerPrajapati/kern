@@ -7,6 +7,24 @@ import (
 	"testing"
 )
 
+func TestScanFileChecksumFirstLineNoPanic(t *testing.T) {
+	// Regression (e2e 2026-09-13, SliceManagerDeps): a 64-hex checksum on
+	// the FIRST line of a file — checksum manifests list the hash first —
+	// made isDocumentedChecksum compute src[:-1] and panic with
+	// "slice bounds out of range [:-1]".
+	src := []byte(strings.Repeat("ab", 32) + "  release.tar.gz\n")
+	findings := ScanFile("docs/checksums.txt", src) // must not panic
+	for _, f := range findings {
+		if f.Rule != "hardcoded-secret" && f.Rule != "" {
+			t.Errorf("unexpected rule for first-line checksum: %+v", f)
+		}
+	}
+	// Sanity: an empty file (the other e2e trigger shape) stays clean.
+	if got := ScanFile("docs/empty.txt", nil); len(got) != 0 {
+		t.Errorf("expected no findings for empty file, got %+v", got)
+	}
+}
+
 func TestScanFileFindsHardcodedSecret(t *testing.T) {
 	src := []byte(`package main
 
@@ -442,5 +460,183 @@ func TestScanTreeRecordsUnreadableFile(t *testing.T) {
 	}
 	if !found {
 		t.Error("no unreadable-file finding for a chmod-000 source file")
+	}
+}
+
+// F-016: non-source doc files (.md/.txt/.rst) must not report informational
+// EMAIL/IP/URL_CRED prose matches — example emails, localhost binds and
+// scheme-less userinfo examples are documentation, not committed credentials.
+func TestDocFileProseSecretsSuppressed(t *testing.T) {
+	src := []byte(`# README
+
+The server binds 128.0.0.1:8090 by default.
+Contact kern@example.org for help.
+See https://user:pass@example.com/api for the legacy endpoint.
+Masking accepts the sk-live-…/sk-test-… dash-form prefixes.
+`)
+	findings := ScanFile("README.md", src)
+	for _, f := range findings {
+		if f.Rule == "hardcoded-secret" {
+			t.Fatalf("doc prose EMAIL/IP/URL_CRED must be suppressed, got %+v", f)
+		}
+	}
+}
+
+// F-016: a REAL secret pasted into a doc file must still be reported — the
+// doc filter only drops the informational EMAIL/IP/URL_CRED classes.
+func TestDocFileRealSecretStillCaught(t *testing.T) {
+	src := []byte("# Notes\n\nAPI key: sk-abcdefghijklmnopqrstuvwxyz1234567890\n")
+	findings := ScanFile("NOTES.md", src)
+	found := false
+	for _, f := range findings {
+		if f.Rule == "hardcoded-secret" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("real secret in a doc file must still be caught, got %+v", findings)
+	}
+}
+
+// F-016: RFC 2606 documentation-domain emails (example.com/.org/.net) are
+// placeholders by construction, even in source files (test helpers, config
+// examples). Real domains are unaffected (see TestEmailFlaggedInRealCode).
+func TestExampleDomainEmailSuppressed(t *testing.T) {
+	src := []byte(`git(t, dir, "config", "user.email", "testfixture@example.com")
+const contact = "ops@example.org"
+`)
+	findings := ScanFile("fixture.go", src)
+	for _, f := range findings {
+		if f.Rule == "hardcoded-secret" {
+			t.Fatalf("example-domain email must not be flagged, got %+v", f)
+		}
+	}
+}
+
+// F-016: rule-identifier literals (RuleID: "secret:...") are the scanner's
+// own taxonomy, not credentials.
+func TestRuleIDLiteralSuppressed(t *testing.T) {
+	src := []byte(`res.Findings = append(res.Findings, domain.Finding{
+	RuleID:      "secret:incumbent-unavailable",
+	Severity:    domain.SeverityWarn,
+})`)
+	findings := ScanFile("check.go", src)
+	for _, f := range findings {
+		if f.Rule == "hardcoded-secret" {
+			t.Fatalf("RuleID literal must not be flagged, got %+v", f)
+		}
+	}
+}
+
+// F-016: code-eval matches inside quoted string literals are rule-description
+// text ("yaml.load without an explicit Loader="), not dynamic code. Real
+// unquoted eval/yaml.load calls must still be caught.
+func TestCodeEvalQuotedDescriptionSuppressed(t *testing.T) {
+	desc := []byte(`add("py-yaml-load", SeverityError, "yaml.load without an explicit Loader= (unsafe by default)")
+return "pickle.loads"
+`)
+	for _, f := range ScanFile("rules.go", desc) {
+		if f.Rule == "code-eval" {
+			t.Fatalf("quoted code-eval description must not be flagged, got %+v", f)
+		}
+	}
+
+	real := []byte("data := yaml.load(userInput)\n")
+	found := false
+	for _, f := range ScanFile("app.go", real) {
+		if f.Rule == "code-eval" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("unquoted yaml.load call must still be flagged as code-eval")
+	}
+}
+
+// e2e round 2 (P1): package-lock.json "resolved" registry URLs were flagged
+// URL_CRED: the scheme-less DSN regex read https as the username and
+// //registry.npmjs.org/ (up to the scoped package's @) as the password.
+func TestLockfileRegistryURLSuppressed(t *testing.T) {
+	src := []byte(`"resolved": "https://registry.npmjs.org/@babel/code-frame/-/code-frame-7.29.0.tgz",
+"integrity": "sha512-abc"
+`)
+	for _, f := range ScanFile("package-lock.json", src) {
+		if f.Rule == "hardcoded-secret" {
+			t.Fatalf("registry URL must not be flagged, got %+v", f)
+		}
+	}
+}
+
+// Real scheme-less DSNs must still be flagged after the lockfile fix.
+func TestSchemelessDSNStillCaught(t *testing.T) {
+	src := []byte("const dsn = postgres:secretpw@db.internal:5432/proc\n")
+	var caught bool
+	for _, f := range ScanFile("config.go", src) {
+		if f.Rule == "hardcoded-secret" && strings.Contains(f.Message, "URL_CRED") {
+			caught = true
+		}
+	}
+	if !caught {
+		t.Fatal("scheme-less DSN with password must still be flagged")
+	}
+}
+
+// e2e round 2 (P1): browser User-Agent versions (Chrome/124.0.0.0) and
+// long decimal chains read as IPv4 addresses.
+func TestVersionContextIPSuppressed(t *testing.T) {
+	src := []byte("ua := \"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36\"\n" +
+		"version := 1.2.3.4.5\n")
+	for _, f := range ScanFile("ua.go", src) {
+		if f.Rule == "hardcoded-secret" && strings.Contains(f.Message, "secret: IP") {
+			t.Fatalf("version-context IP must not be flagged, got %+v", f)
+		}
+	}
+}
+
+// A public IP in real code must still be flagged.
+func TestRealIPStillCaught(t *testing.T) {
+	src := []byte("upstream := 8.8.8.8:53\n")
+	findings := ScanFile("net.go", src)
+	var caught bool
+	for _, f := range findings {
+		if f.Rule == "hardcoded-secret" && strings.Contains(f.Message, "secret: IP") {
+			caught = true
+		}
+	}
+	if !caught {
+		t.Fatalf("public IP must still be flagged, findings: %+v", findings)
+	}
+}
+
+// SVG files are graphics: dotted numbers there are path coordinates,
+// never network addresses.
+func TestSVGPathIPSuppressed(t *testing.T) {
+	src := []byte("<svg><path d=\"M12.5.3.4 L1.2.3.4 5.6.7.8\"/></svg>\n")
+	for _, f := range ScanFile("icon.svg", src) {
+		if f.Rule == "hardcoded-secret" {
+			t.Fatalf("SVG path coordinates must not be flagged, got %+v", f)
+		}
+	}
+}
+
+// Google Fonts CSS URLs put a font weight after "@" (family=Inter:wght@300)
+// which reads as user:pass@host with an all-digit host - never a real one.
+func TestGoogleFontsCSSURLSuppressed(t *testing.T) {
+	src := []byte("href=\"https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap\"\n")
+	for _, f := range ScanFile("index.html", src) {
+		if f.Rule == "hardcoded-secret" && strings.Contains(f.Message, "URL_CRED") {
+			t.Fatalf("Google Fonts CSS URL must not be flagged, got %+v", f)
+		}
+	}
+}
+
+// Lockfile deprecation notices cite author emails (isaacs@izs.me in glob's),
+// which are npm registry metadata, not credentials.
+func TestLockfileAuthorEmailSuppressed(t *testing.T) {
+	src := []byte("\"deprecated\": \"Old versions of glob are not supported, and contain widely publicized security vulnerabilities. isaacs@izs.me\"\n")
+	for _, f := range ScanFile("package-lock.json", src) {
+		if f.Rule == "hardcoded-secret" && strings.Contains(f.Message, "EMAIL") {
+			t.Fatalf("lockfile author email must not be flagged, got %+v", f)
+		}
 	}
 }

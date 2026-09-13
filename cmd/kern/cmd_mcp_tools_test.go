@@ -55,6 +55,68 @@ func TestDiskIndexViewReportsRebuildRequired(t *testing.T) {
 	}
 }
 
+// TestRunHealthIndexBlockIsDiskAuthoritative pins F-002: `kern health` (and
+// `kern health --json`) must report the DISK index as the authoritative
+// "index" block — built=true with the persisted symbol/file counts and a
+// real freshness verdict — NOT the in-memory MCP session view, which is
+// always empty (fresh=false/symbols=0/files=0) on a fresh CLI invocation.
+// The in-memory view is relabeled mcp_memory_index with an explicit note so
+// it cannot be mistaken for persisted state.
+func TestRunHealthIndexBlockIsDiskAuthoritative(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	root := jsonCliFixture(t)
+	// Build a real on-disk index first (cold).
+	runIndex([]string{root, "--json"})
+
+	out := captureStdout(t, func() { runHealth([]string{"--root", root, "--json"}) })
+	m := assertValidJSON(t, out)
+	idx, ok := m["index"].(map[string]any)
+	if !ok {
+		t.Fatalf("health output missing index block: %v", m)
+	}
+	if idx["built"] != true {
+		t.Fatalf("index.built = %v, want true (disk index authoritative): %v", idx["built"], m)
+	}
+	if s, ok := idx["symbols"].(float64); !ok || s < 1 {
+		t.Fatalf("index.symbols = %v, want >= 1 (disk counts, not the in-memory 0): %v", idx["symbols"], m)
+	}
+	if f, ok := idx["files"].(float64); !ok || f < 1 {
+		t.Fatalf("index.files = %v, want >= 1 (disk counts): %v", idx["files"], m)
+	}
+	if idx["fresh"] != true {
+		t.Fatalf("index.fresh = %v, want true right after build: %v", idx["fresh"], m)
+	}
+	// The in-memory view must be relabeled, with an explicit note.
+	mem, ok := m["mcp_memory_index"].(map[string]any)
+	if !ok {
+		t.Fatalf("health output missing relabeled mcp_memory_index block: %v", m)
+	}
+	if note, ok := mem["note"].(string); !ok || note == "" {
+		t.Fatalf("mcp_memory_index.note missing: %v", mem)
+	}
+}
+
+// TestRunHealthNoIndexReportsNotBuilt pins the first-run shape: with no
+// persisted index, the health "index" block says so explicitly (built=false
+// with a note) instead of echoing the in-memory zero block.
+func TestRunHealthNoIndexReportsNotBuilt(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	root := t.TempDir()
+
+	out := captureStdout(t, func() { runHealth([]string{"--root", root}) })
+	m := assertValidJSON(t, out)
+	idx, ok := m["index"].(map[string]any)
+	if !ok {
+		t.Fatalf("health output missing index block: %v", m)
+	}
+	if idx["built"] != false || idx["symbols"] != float64(0) {
+		t.Fatalf("index block = %v, want built=false/symbols=0", idx)
+	}
+	if _, ok := idx["note"].(string); !ok {
+		t.Fatalf("index block missing note: %v", idx)
+	}
+}
+
 // TestRunMCPToolSuccess pins the success path: runMCPTool prints the tool's
 // output to stdout. kern_schema_validate is deterministic and local (no
 // network, no index build), so it is a stable, cheap probe.

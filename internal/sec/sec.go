@@ -125,6 +125,16 @@ func init() {
 	})
 }
 
+// isLockfile reports whether rel is a generated dependency lockfile whose
+// contents are registry metadata, not hand-written code.
+func isLockfile(rel string) bool {
+	switch filepath.Base(rel) {
+	case "package-lock.json", "npm-shrinkwrap.json", "yarn.lock", "pnpm-lock.yaml":
+		return true
+	}
+	return false
+}
+
 // ScanFile runs every rule against one source file. rel is a root-relative
 // path used only for reporting.
 func ScanFile(rel string, src []byte) []Finding {
@@ -134,6 +144,24 @@ func ScanFile(rel string, src []byte) []Finding {
 			if pii.IsNonSecretIP(r.Label, string(src[idx[0]:idx[1]])) {
 				continue
 			}
+			// Software versions and SVG path coordinates read as IPv4
+			// octets: browser User-Agents put the version right after a
+			// "/" (Chrome/124.0.0.0), SVG coordinate chains continue past
+			// the match (12.5.3.4.6), and inside .svg files a dotted
+			// number is a path command argument, never a network address.
+			// None are secrets (e2e round 2: on TradingApp 632/638
+			// findings were this class).
+			if r.Label == "IP" {
+				if idx[0] > 0 && src[idx[0]-1] == '/' {
+					continue
+				}
+				if idx[1] < len(src) && src[idx[1]] == '.' && idx[1]+1 < len(src) && src[idx[1]+1] >= '0' && src[idx[1]+1] <= '9' {
+					continue
+				}
+				if strings.HasSuffix(rel, ".svg") {
+					continue
+				}
+			}
 			// PHONE is PII, not a credential: mask it in prompts, but do not
 			// report it as a hardcoded secret.
 			if r.Label == "PHONE" {
@@ -141,16 +169,55 @@ func ScanFile(rel string, src []byte) []Finding {
 			}
 			// CDNs use pkg@version URLs (e.g. boxicons@2.1.4) whose "@2.1.4"
 			// suffix matches the EMAIL pattern. A domain part that is a
-			// semantic-version string is not an email address.
+			// semantic-version string is not an email address. Likewise, RFC
+			// 2606 documentation domains (example.com/.org/.net) are
+			// placeholders by construction — e.g. testfixture@example.com in
+			// a git-config test helper — never real credentials (F-016).
 			if r.Label == "EMAIL" {
-				hit := string(src[idx[0]:idx[1]])
-				if at := strings.IndexByte(hit, '@'); at >= 0 && pii.IsVersionLike(hit[at+1:]) {
+				// Lockfiles are generated registry metadata: the only
+				// emails in them are author/maintainer contacts from npm
+				// (e.g. glob's deprecation notice citing isaacs@izs.me),
+				// never credentials. URL_CRED stays live there -
+				// private-registry tokens in resolved URLs are a real
+				// leak class.
+				if isLockfile(rel) {
 					continue
 				}
+				hit := string(src[idx[0]:idx[1]])
+				if at := strings.IndexByte(hit, '@'); at >= 0 {
+					domain := hit[at+1:]
+					if pii.IsVersionLike(domain) || isExampleDomain(domain) {
+						continue
+					}
+				}
+			}
+			// Rule-identifier literals (RuleID: "secret:incumbent-unavailable")
+			// are the scanner's own taxonomy, not credentials: a detector that
+			// flags its own rule IDs is noise (F-016).
+			if isRuleIDLiteral(src, idx[0]) {
+				continue
+			}
+			// code-eval description strings ("yaml.load without an explicit
+			// Loader=", "assert pickle.loads(...)") mention the pattern but do
+			// not execute it — matches inside quoted literals are rule
+			// documentation, not dynamic code (F-016).
+			if r.ID == "code-eval" && isInQuotedString(src, idx[0]) {
+				continue
 			}
 			// Deterministic false-positive filters: a scanner that flags its
 			// own detector regexes or schema introspection is noise.
 			if isRegexLiteral(src, idx[0]) {
+				continue
+			}
+			// GitHub Actions SHA pins ("uses: owner/repo@<40-hex>") are a
+			// supply-chain best practice, not secrets; and a 64-hex action
+			// input whose description line names it a checksum (e.g. the
+			// gitleaks tarball SHA-256) is a documented checksum, not a
+			// credential.
+			if r.Label == "HEX" && isGhActionsShaPin(src, idx[0], idx[1]) {
+				continue
+			}
+			if r.Label == "HEX" && isDocumentedChecksum(src, idx[0], idx[1]) {
 				continue
 			}
 			// Skip matches inside source-code comment lines (// or # after
@@ -189,6 +256,20 @@ func ScanFile(rel string, src []byte) []Finding {
 			})
 		}
 	}
+	// Documentation prose (F-016): markdown/txt/rst files legitimately contain
+	// example emails, localhost bind addresses and scheme-less userinfo URLs
+	// (e.g. "kern-server binds 128.0.0.1:8090", "sk-live-… dash-form" masking
+	// examples). These informational EMAIL/IP/IPV6/URL_CRED matches are not
+	// committed credentials; skip them in non-source doc files only.
+	if isDocFile(rel) {
+		kept := findings[:0]
+		for _, f := range findings {
+			if !isDocProseSecret(f) {
+				kept = append(kept, f)
+			}
+		}
+		findings = kept
+	}
 	sort.Slice(findings, func(i, j int) bool {
 		if findings[i].File != findings[j].File {
 			return findings[i].File < findings[j].File
@@ -225,6 +306,92 @@ func isCommentLine(src []byte, pos int) bool {
 	lineStart := bytes.LastIndexByte(src[:pos], '\n') + 1
 	trimmed := bytes.TrimLeft(src[lineStart:pos], " \t")
 	return bytes.HasPrefix(trimmed, []byte("//")) || bytes.HasPrefix(trimmed, []byte("#"))
+}
+
+// lineBounds returns the [start,end) byte offsets of the line containing pos.
+func lineBounds(src []byte, pos int) (int, int) {
+	start := bytes.LastIndexByte(src[:pos], '\n') + 1
+	end := bytes.IndexByte(src[pos:], '\n')
+	if end < 0 {
+		end = len(src)
+	} else {
+		end += pos
+	}
+	return start, end
+}
+
+// isExampleDomain reports whether a host is an RFC 2606 documentation domain
+// (example.com / example.org / example.net or a subdomain). Addresses on these
+// domains are placeholders by construction (testfixture@example.com in a test
+// helper, kern@example.org in docs) — never real credentials (F-016).
+func isExampleDomain(host string) bool {
+	h := strings.ToLower(strings.TrimSuffix(host, "."))
+	return h == "example.com" || h == "example.org" || h == "example.net" ||
+		strings.HasSuffix(h, ".example.com") ||
+		strings.HasSuffix(h, ".example.org") ||
+		strings.HasSuffix(h, ".example.net")
+}
+
+// isRuleIDLiteral reports whether the match at pos is the quoted value of a
+// rule-identifier field (RuleID / rule_id): the scanner's own taxonomy, not a
+// credential (F-016).
+func isRuleIDLiteral(src []byte, pos int) bool {
+	start, end := lineBounds(src, pos)
+	line := src[start:end]
+	if !bytes.Contains(line, []byte("RuleID")) && !bytes.Contains(line, []byte("rule_id")) {
+		return false
+	}
+	// The matched text must sit inside a quote pair on that line.
+	for i := start; i < pos; i++ {
+		switch src[i] {
+		case '"', '\'', '`':
+			return true
+		}
+	}
+	return false
+}
+
+// isInQuotedString reports whether pos sits inside a quoted string literal on
+// its line (odd number of quote characters before it; escapes ignored — good
+// enough for line-scoped scans). Rule description strings that merely mention
+// a pattern ("yaml.load without an explicit Loader=") are documentation, not
+// dynamic code (F-016).
+func isInQuotedString(src []byte, pos int) bool {
+	start, _ := lineBounds(src, pos)
+	quotes := 0
+	for i := start; i < pos; i++ {
+		switch src[i] {
+		case '"', '\'', '`':
+			quotes++
+		}
+	}
+	return quotes%2 == 1
+}
+
+// isDocFile reports whether a root-relative path is a non-source documentation
+// file (.md/.markdown/.mdx/.txt/.rst/.adoc). Doc prose legitimately contains
+// example emails, localhost binds and userinfo-URL examples (F-016).
+func isDocFile(rel string) bool {
+	switch strings.ToLower(filepath.Ext(rel)) {
+	case ".md", ".markdown", ".mdx", ".txt", ".rst", ".adoc":
+		return true
+	}
+	return false
+}
+
+// isDocProseSecret reports whether a finding is the informational
+// EMAIL/IP/IPV6/URL_CRED class that documentation prose legitimately contains.
+// Real-secret labels (GENERIC, API_KEY, TOKEN, HEX, ...) are untouched, so a
+// genuine key pasted into a README is still reported (F-016).
+func isDocProseSecret(f Finding) bool {
+	if f.Rule != "hardcoded-secret" {
+		return false
+	}
+	switch strings.TrimPrefix(f.Message, "hardcoded secret: ") {
+	case "EMAIL", "IP", "IPV6", "URL_CRED":
+		return true
+	}
+	return false
 }
 
 // isInertEmailContext reports whether an EMAIL match at src[start:end] sits in
@@ -635,4 +802,45 @@ func snippet(src []byte, start, end int) string {
 		s = s[:117] + "..."
 	}
 	return s
+}
+
+// ghActionsPinRe matches a GitHub Actions SHA-pinned action reference:
+// "uses: owner/repo[/subpath]@<40-hex>". The hex is a commit id
+// (supply-chain pin), never a secret.
+var ghActionsPinRe = regexp.MustCompile(`uses:\s+\S+@[0-9a-f]{40}\b`)
+
+// isGhActionsShaPin reports whether a 40-hex match is the SHA pin of a
+// GitHub Actions action reference on the same line.
+func isGhActionsShaPin(src []byte, start, end int) bool {
+	if end-start != 40 {
+		return false
+	}
+	lineStart := bytes.LastIndexByte(src[:start], '\n') + 1
+	lineEnd := bytes.IndexByte(src[end:], '\n')
+	if lineEnd < 0 {
+		lineEnd = len(src)
+	} else {
+		lineEnd += end
+	}
+	return ghActionsPinRe.Match(src[lineStart:lineEnd])
+}
+
+// isDocumentedChecksum reports whether a 64-hex match is an action input
+// default whose preceding description line names it a checksum (e.g. a
+// tool tarball SHA-256) — a documented integrity value, not a credential.
+func isDocumentedChecksum(src []byte, start, end int) bool {
+	if end-start != 64 {
+		return false
+	}
+	lineStart := bytes.LastIndexByte(src[:start], '\n') + 1
+	if lineStart <= 0 {
+		// Match sits on the first line of the file: there is no
+		// preceding description line to consult (checksum manifests
+		// list the hash first). Guard the prev-line slice below,
+		// which would otherwise compute src[:-1] and panic.
+		return false
+	}
+	prevStart := bytes.LastIndexByte(src[:lineStart-1], '\n') + 1
+	prev := src[prevStart:lineStart]
+	return bytes.Contains(prev, []byte("checksum")) || bytes.Contains(prev, []byte("SHA-256"))
 }

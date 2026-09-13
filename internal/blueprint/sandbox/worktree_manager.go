@@ -5,6 +5,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
+	"time"
 
 	"github.com/JayveerPrajapati/kern/internal/execution"
 )
@@ -24,6 +26,19 @@ func NewWorktreeManager(repoRoot string) *WorktreeManager {
 	}
 }
 
+// staleWorktreeAge is how old an unregistered worktree copy must be before GC
+// removes it. Loop/check runs keep their worktree only for the duration of
+// the run; anything older that is not a registered git worktree is abandoned
+// (interrupted run, crashed process) and safe to delete.
+const staleWorktreeAge = 24 * time.Hour
+
+// registeredWorktreeMaxAge is how old a REGISTERED worktree must be
+// before GC force-removes it. Registered worktrees are normally active,
+// but a killed process leaves git metadata behind forever (the worktree
+// stays in `git worktree list` with no live owner). No loop/check run
+// legitimately lives this long, so older entries are abandoned.
+const registeredWorktreeMaxAge = 7 * 24 * time.Hour
+
 // RepoRoot returns the repository root managed by this WorktreeManager.
 func (m *WorktreeManager) RepoRoot() string {
 	return m.repoRoot
@@ -37,6 +52,9 @@ func (m *WorktreeManager) Create(taskID string) (string, func(), error) {
 	}
 	cleanTaskID := filepath.Base(taskID)
 	targetDir := filepath.Join(m.baseDir, cleanTaskID)
+	// Sweep abandoned worktree copies from previous interrupted runs before
+	// creating a new one (V3: stale snapshots accumulated in user repos).
+	m.GC(staleWorktreeAge)
 
 	// Ensure parent directories exist
 	if err := os.MkdirAll(filepath.Dir(targetDir), 0o755); err != nil {
@@ -76,4 +94,94 @@ func (m *WorktreeManager) CreateExecutionWorktree(taskID string) (*execution.Wor
 		return execution.NewWorktree(m.repoRoot)
 	}
 	return execution.NewWorktreeWithCleaner(m.repoRoot, path, cleanup), nil
+}
+
+// GC removes abandoned worktree copies under baseDir: entries older than
+// maxAge that are NOT registered git worktrees are deleted, then
+// `git worktree prune` runs to drop their metadata. Fresh copies and
+// registered (active) worktrees are never touched.
+func (m *WorktreeManager) GC(maxAge time.Duration) ([]string, error) {
+	entries, err := os.ReadDir(m.baseDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	active := m.registeredWorktrees()
+	cutoff := time.Now().Add(-maxAge)
+	var removed []string
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		p := filepath.Join(m.baseDir, e.Name())
+		info, ierr := e.Info()
+		if ierr != nil {
+			continue
+		}
+		if info.ModTime().After(cutoff) {
+			continue
+		}
+		// Normalize symlinked roots (/var -> /private/var on macOS) so the
+		// git worktree list comparison is path-identical.
+		registered := false
+		if rp, err := filepath.EvalSymlinks(p); err == nil {
+			registered = active[rp]
+		}
+		if !registered {
+			registered = active[p]
+		}
+		if registered {
+			// Registered worktrees are normally active; only entries older
+			// than registeredWorktreeMaxAge are abandoned copies left by a
+			// killed process — force-remove them through git so the
+			// metadata does not linger.
+			regCutoff := time.Now().Add(-registeredWorktreeMaxAge)
+			if !info.ModTime().Before(regCutoff) {
+				continue
+			}
+			rm := exec.Command("git", "worktree", "remove", "--force", p)
+			rm.Dir = m.repoRoot
+			if rm.Run() != nil {
+				continue // still in use or git unhappy — leave it
+			}
+			if err := os.RemoveAll(p); err == nil {
+				removed = append(removed, p)
+			}
+			continue
+		}
+		if err := os.RemoveAll(p); err == nil {
+			removed = append(removed, p)
+		}
+	}
+	if len(removed) > 0 {
+		pruneCmd := exec.Command("git", "worktree", "prune")
+		pruneCmd.Dir = m.repoRoot
+		_ = pruneCmd.Run()
+	}
+	return removed, nil
+}
+
+// registeredWorktrees returns the absolute paths git currently has checked
+// out as worktrees (git worktree list --porcelain). Active worktrees are
+// never candidates for GC, regardless of age.
+func (m *WorktreeManager) registeredWorktrees() map[string]bool {
+	out := map[string]bool{}
+	cmd := exec.Command("git", "worktree", "list", "--porcelain")
+	cmd.Dir = m.repoRoot
+	b, err := cmd.CombinedOutput()
+	if err != nil {
+		return out
+	}
+	for _, line := range strings.Split(string(b), "\n") {
+		if strings.HasPrefix(line, "worktree ") {
+			p := strings.TrimSpace(strings.TrimPrefix(line, "worktree "))
+			if rp, err := filepath.EvalSymlinks(p); err == nil {
+				p = rp
+			}
+			out[p] = true
+		}
+	}
+	return out
 }

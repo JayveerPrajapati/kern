@@ -67,6 +67,15 @@ type Pkg struct {
 	// written by older kern: the rewrite then no-ops and the chain stays
 	// alias-only, exactly as before.
 	StructFields map[string]string `json:"struct_fields,omitempty"`
+	// Constructors maps a package-level function name to its FIRST declared
+	// return type name (bare, pointer stripped) — e.g. "NewHandlers" ->
+	// "Handlers". Collected per file, merged per package across files. The
+	// merge-time callee rewrite (rewriteConstructorCallees) uses it to
+	// complete constructor-assigned receiver chains ("api.NewHandlers.Routes"
+	// -> "Handlers.Routes") when the constructor is declared in a different
+	// package than the call. Absent in indexes written by older kern: the
+	// rewrite then no-ops and the chain stays unresolved, exactly as before.
+	Constructors map[string]string `json:"constructors,omitempty"`
 }
 
 // extract parses a single Go file and returns its symbols, call edges and
@@ -219,7 +228,7 @@ func extract(rel string, src []byte) ([]Symbol, map[string][]CallEdge, map[strin
 		}
 	}
 
-	pkg := &Pkg{Name: f.Name.Name, Path: filepath.Dir(rel), Files: []string{rel}, Lang: "go", StructFields: sf}
+	pkg := &Pkg{Name: f.Name.Name, Path: filepath.Dir(rel), Files: []string{rel}, Lang: "go", StructFields: sf, Constructors: retTypes}
 	for _, imp := range f.Imports {
 		if imp.Path != nil {
 			pkg.Imports = append(pkg.Imports, ImportEdge{Path: strings.Trim(imp.Path.Value, `"`), Confidence: ConfidenceHigh})
@@ -266,6 +275,23 @@ func calleeName(fun ast.Expr) string {
 		return calleeName(t.X)
 	case *ast.ParenExpr:
 		return calleeName(t.X)
+	case *ast.CallExpr:
+		// Chained calls like json.NewEncoder(w).Encode(x): the outer call's
+		// fun is a SelectorExpr whose X is the inner call. Recurse into the
+		// inner call's function so the callee is "NewEncoder.Encode" rather
+		// than the bare ".Encode" that previously made every chained call
+		// unresolvable and cluttered the graph with ".Method" targets.
+		return calleeName(t.Fun)
+	case *ast.TypeAssertExpr:
+		return calleeName(t.X)
+	case *ast.StarExpr:
+		return calleeName(t.X)
+	case *ast.UnaryExpr:
+		return calleeName(t.X)
+	case *ast.CompositeLit:
+		// Method call on a composite literal: jwt.MapClaims{...}.Encode() —
+		// the receiver is the literal's type expression.
+		return calleeName(t.Type)
 	}
 	return ""
 }

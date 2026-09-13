@@ -13,7 +13,15 @@ func runProse(rest []string) int {
 		fatalUsage("flags: %v", err)
 	}
 	if len(args) < 1 {
-		fatalUsage("usage: kern prose <words> [root] [--limit N]")
+		fatalUsage("prose: missing <words> argument\n\n" +
+			"usage: kern prose \"<words>\" [root] [--limit N]\n\n" +
+			"<words> is a natural-language phrase (in quotes) that is mapped, via the\n" +
+			"build-time inverted vocab, to the symbol candidates whose tokens match\n" +
+			"best. One hit is printed per line as `<symbol> (<N> words matched)`.\n\n" +
+			"examples:\n" +
+			"  kern prose \"save user\"          # find symbols about saving users\n" +
+			"  kern prose \"dispatch request\" --limit 5\n" +
+			"  kern prose \"token budget\" ./some/repo")
 	}
 	query := args[0]
 	root := f.root

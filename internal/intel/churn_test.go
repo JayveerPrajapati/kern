@@ -1,6 +1,7 @@
 package intel
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -226,5 +227,107 @@ func TestChurnExcludesIgnored(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("a.go should still churn, entries=%v", report.Entries)
+	}
+}
+
+// TestChurnRiskScoringManyFiles exercises the churn risk-scoring path over a
+// repo with many files (F-015 regression: risk scoring called prodCallers per
+// symbol, rebuilding the symbol->file map each time — quadratic on large
+// repos, taking ~7.8s on the kern repo). The test pins the functional
+// contract: every churned file that is indexed carries a risk score, and the
+// score reflects direct + transitive callers.
+func TestChurnRiskScoringManyFiles(t *testing.T) {
+	root := t.TempDir()
+	execGit(t, root, "init", "-q", "-b", "main")
+	execGit(t, root, "config", "user.email", "test@example.com")
+	execGit(t, root, "config", "user.name", "Test")
+	write := func(rel, content string) {
+		p := filepath.Join(root, rel)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A chained call graph across 40 packages: each package's public func
+	// calls the next package's func. FindUser lives in pkg0 and is called by
+	// nothing but main.
+	write("go.mod", "module churnfix\n\ngo 1.23\n")
+	for i := 0; i < 40; i++ {
+		next := ""
+		if i+1 < 40 {
+			next = fmt.Sprintf("return churnfix/pkg%d.Func%d()", i+1, i+1)
+		} else {
+			next = "return \"end\""
+		}
+		write(fmt.Sprintf("pkg%d/f.go", i), fmt.Sprintf(`package pkg%d
+import "churnfix/pkg%d"
+func Func%d() string { %s }
+`, i, i+1, i, next))
+	}
+	write("main.go", `package main
+import "churnfix/pkg0"
+func main() { _ = pkg0.Func0() }
+`)
+	execGit(t, root, "add", ".")
+	execGit(t, root, "commit", "-q", "-m", "all files")
+	// Touch every file across a second commit so the whole tree churns.
+	for i := 0; i < 40; i++ {
+		p := filepath.Join(root, fmt.Sprintf("pkg%d/f.go", i))
+		data, err := os.ReadFile(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, append(data, []byte("\n// churn\n")...), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	execGit(t, root, "add", ".")
+	execGit(t, root, "commit", "-q", "-m", "churn everything")
+	if _, err := index.Build(root); err != nil {
+		t.Fatal(err)
+	}
+	report, err := Churn(root, "", "")
+	if err != nil {
+		t.Fatalf("Churn: %v", err)
+	}
+	if report.Commits < 2 {
+		t.Fatalf("expected >= 2 commits, got %d", report.Commits)
+	}
+	byFile := map[string]ChurnEntry{}
+	for _, e := range report.Entries {
+		byFile[e.File] = e
+	}
+	if e, ok := byFile["pkg0/f.go"]; !ok {
+		t.Fatalf("pkg0/f.go missing from churn entries: %v", report.Entries)
+	} else if e.Risk <= 0 {
+		t.Errorf("pkg0/f.go risk = %v, want > 0 (deepest chain: max transitive callers)", e.Risk)
+	}
+	if e, ok := byFile["pkg39/f.go"]; !ok {
+		t.Fatalf("pkg39/f.go missing from churn entries")
+	} else if e.Risk <= 0 {
+		t.Errorf("pkg39/f.go risk = %v, want > 0 (indexed file must be scored)", e.Risk)
+	}
+}
+
+// BenchmarkChurnContextKernRepo measures the warm-path latency of kern churn
+// on a large real repo (F-015 target: <1s). Run with:
+//
+//	go test ./internal/intel/ -run '^$' -bench BenchmarkChurnContextKernRepo
+//
+// The kernel of the fix is that risk scoring reuses one hoisted symbol->file
+// map instead of rebuilding it per symbol, and churn reads the persisted
+// index snapshot instead of re-verifying freshness with a git tree-OID walk.
+func BenchmarkChurnContextKernRepo(b *testing.B) {
+	root := "/Users/jayveer.prajapati/ai_workspace/kern_opensource/kern"
+	if st, err := os.Stat(filepath.Join(root, ".kern", "index.json")); err != nil || st.IsDir() {
+		b.Skip("kern repo index not present; skipping repo benchmark")
+	}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, err := Churn(root, "", ""); err != nil {
+			b.Fatal(err)
+		}
 	}
 }

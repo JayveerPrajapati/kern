@@ -183,6 +183,7 @@ func TestRunValidateJSON(t *testing.T) {
 
 func TestRunSandboxJSON(t *testing.T) {
 	t.Setenv("KERN_ALLOW_EXEC", "1")
+	t.Setenv("KERN_ALLOW_UNISOLATED", "1") // fail-closed gate: opt into unisolated runs on hosts without netns (darwin)
 	root := jsonCliFixture(t)
 	// kern flags must precede the `--` separator; everything after it is the
 	// sandboxed command, verbatim (shell flags like -c included).
@@ -200,6 +201,7 @@ func TestRunSandboxJSON(t *testing.T) {
 // shell flag after the separator must not be rejected as an unknown kern flag.
 func TestRunSandboxSeparatorSplitsBeforeFlags(t *testing.T) {
 	t.Setenv("KERN_ALLOW_EXEC", "1")
+	t.Setenv("KERN_ALLOW_UNISOLATED", "1") // fail-closed gate: opt into unisolated runs on hosts without netns (darwin)
 	root := jsonCliFixture(t)
 	out := captureStdout(t, func() { runSandbox([]string{root, "--", "sh", "-c", "exit 0"}) })
 	if !strings.Contains(out, "kern: succeeded") {

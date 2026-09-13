@@ -67,3 +67,17 @@ func TestVersionAtLeast(t *testing.T) {
 		})
 	}
 }
+
+func TestVersionAtLeastCommitHashStamp(t *testing.T) {
+	// Default `make build` stamps the HEAD short hash; checkout builds must
+	// satisfy the minimum like "dev" (not report "too old").
+	for _, v := range []string{"ccdaae1", "a1b2c3d", "0123456789abcdef0123456789abcdef01234567"} {
+		if !VersionAtLeast(v, MinKernVersion) {
+			t.Errorf("commit-hash stamp %q must satisfy minimum %s", v, MinKernVersion)
+		}
+	}
+	// Release tags still compare normally.
+	if VersionAtLeast("v0.8.0", MinKernVersion) {
+		t.Error("v0.8.0 must be below v0.9.0")
+	}
+}

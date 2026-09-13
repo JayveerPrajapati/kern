@@ -61,6 +61,11 @@ type IndexStatus struct {
 	IndexIdentity     *index.IndexIdentity `json:"index_identity,omitempty"`
 	TreeSitterEnabled bool                 `json:"tree_sitter_enabled"`
 	SQLite            bool                 `json:"sqlite_enabled"`
+	// CallResolution reports distinct callee targets vs how many fail to
+	// resolve (external stdlib/vendor and untyped dynamic-language targets
+	// are expected and correct to stay unresolved). Zero on indexes built
+	// before the pass existed.
+	CallResolution index.CallResStats `json:"call_resolution,omitempty"`
 }
 
 // WatchEvent carries one re-index result from IndexService.Watch.
@@ -192,6 +197,7 @@ func (s *indexService) Status(ctx context.Context, root string, strict bool) (*I
 	status.Files = len(ix.FileHashes)
 	status.Packages = len(ix.Pkgs)
 	status.Version = ix.Version
+	status.CallResolution = ix.CallResolution
 	// Single proof computation. This used to derive the staleness decision
 	// up to three times — ix.Stale() computes a FreshnessProof internally,
 	// then the proof was computed again, then --strict recomputed it strictly

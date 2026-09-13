@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -104,6 +105,9 @@ func runCheck(args []string) int {
 	if code != 0 {
 		return code
 	}
+	// F-023c: keep `git status` clean after the first run — gitignore the
+	// runtime state this command is about to write. Best-effort.
+	ensureBlueprintRuntimeGitignored(absRoot)
 
 	cfg, err := policy.Load(absRoot)
 	if err != nil {
@@ -366,27 +370,10 @@ func buildCheckList(cfg *policy.LoadedConfig, client *kern.KernClient, runResili
 		if allowUnisolated {
 			testOpts = append(testOpts, sandbox.WithAllowUnisolated())
 		}
-		// Wire the polyglot sandbox matrix from .blueprint/config.yaml if present.
-		if len(cfg.File.Sandbox.Matrix) > 0 {
-			matrix := make([]sandbox.MatrixTarget, 0, len(cfg.File.Sandbox.Matrix))
-			for _, m := range cfg.File.Sandbox.Matrix {
-				target := sandbox.MatrixTarget{
-					Name: m.Name,
-					Dir:  m.Dir,
-				}
-				if m.Build != "" {
-					target.Build = sandbox.SplitCommand(m.Build)
-				}
-				if m.Test != "" {
-					target.Test = sandbox.SplitCommand(m.Test)
-				}
-				if m.Command != "" {
-					target.Command = sandbox.SplitCommand(m.Command)
-				}
-				matrix = append(matrix, target)
-			}
-			testOpts = append(testOpts, sandbox.WithMatrix(matrix))
-		}
+		// Timeout + polyglot matrix from .blueprint/config.yaml — one shared
+		// helper for check/ci/diff-gate (see sandboxOptsFromConfig for why
+		// this wiring must not be re-inlined per command).
+		testOpts = append(testOpts, sandboxOptsFromConfig(cfg.File)...)
 		checks = append(checks, sandbox.NewDefaultCheck(testOpts...))
 	}
 	return checks
@@ -452,6 +439,13 @@ func discoverStagedChanges(repoRoot string) ([]domain.FileChange, error) {
 		statusCode := parts[0]
 		filePath := parts[1]
 
+		// Never treat kern/blueprint runtime artifacts (the CI artifact, audit
+		// trail, receipts, verdict/fingerprint caches) as staged user changes:
+		// they are generated local state, and scanning them re-validates the
+		// tool's own output (F-020).
+		if isBlueprintRuntimeArtifact(filePath) {
+			continue
+		}
 		fc := domain.FileChange{Path: filePath}
 
 		// Map git status code to Operation.
@@ -570,6 +564,98 @@ func diffSidePath(val, prefix string) string {
 		val = val[2:]
 	}
 	return val
+}
+
+// blueprintRuntimeArtifacts are the local runtime-state paths blueprint and
+// kern write while validating (kern's .kern/ state and blueprint's cache dirs
+// are gitignored; the audit/receipt/verdict-cache/fingerprint-cache dirs and
+// metrics.json are never meant to be committed). They must never be treated
+// as user changes: the CI artifact embeds prior findings and the verdict
+// cache embeds scanned content, so scanning them makes the gates self-inflict
+// BLOCKs on the tool's own output (F-020). User-authored configuration
+// (.blueprint/config.yaml, suppressions.yaml, owners.yaml,
+// .kern/boundaries.json) is intentionally NOT excluded — it is the declared
+// repository configuration and must be validated like any other change.
+var blueprintRuntimeArtifacts = []string{
+	".blueprint/audit/",
+	".blueprint/receipts/",
+	".blueprint/verdict-cache/",
+	".blueprint/fingerprint-cache/",
+	".blueprint/metrics.json",
+	".kern/blueprint-result.json",
+}
+
+// isBlueprintRuntimeArtifact reports whether a repo-relative path is a kern
+// or blueprint runtime artifact (never a user change).
+func isBlueprintRuntimeArtifact(path string) bool {
+	p := filepath.ToSlash(path)
+	for _, a := range blueprintRuntimeArtifacts {
+		if strings.HasPrefix(p, a) {
+			return true
+		}
+	}
+	return false
+}
+
+// blueprintGitignoreMarker marks the block of blueprint runtime-state entries
+// this package owns in the repo's .gitignore (mirroring internal/setup's
+// kern-generated block pattern). Re-running overwrites the block, so new
+// entries added in an upgrade are picked up.
+const blueprintGitignoreMarker = "# --- blueprint runtime state (kern generated) ---"
+
+// ensureBlueprintRuntimeGitignored best-effort appends the blueprint runtime
+// state paths to the repo's .gitignore (F-023c), so the first ci/check run
+// does not leave `git status` / `git add -A` polluted with generated state.
+// User-authored configuration (.blueprint/config.yaml, suppressions.yaml,
+// owners.yaml, .kern/boundaries.json) is intentionally NOT ignored — it is
+// the declared repository configuration and must stay committable. Any
+// failure is silent: the runtime dirs are also excluded from validation by
+// isBlueprintRuntimeArtifact, so a missing ignore entry is cosmetic only.
+func ensureBlueprintRuntimeGitignored(root string) {
+	path := filepath.Join(root, ".gitignore")
+	data, err := os.ReadFile(path)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return
+	}
+	closeMarker := "# --- end blueprint runtime state ---"
+	block := "\n" + blueprintGitignoreMarker + "\n" +
+		".blueprint/audit/\n" +
+		".blueprint/receipts/\n" +
+		".blueprint/verdict-cache/\n" +
+		".blueprint/fingerprint-cache/\n" +
+		".blueprint/metrics.json\n" +
+		closeMarker + "\n"
+	cleaned := removeMarkedBlock(string(data), blueprintGitignoreMarker, closeMarker)
+	out := strings.TrimRight(cleaned, "\n")
+	if out != "" {
+		out += "\n"
+	}
+	out += block
+	if err := os.WriteFile(path, []byte(out), 0o644); err != nil {
+		return
+	}
+}
+
+// removeMarkedBlock removes the region between startMarker and endMarker
+// (inclusive of both marker lines), leaving surrounding content intact.
+func removeMarkedBlock(data, startMarker, endMarker string) string {
+	start := strings.Index(data, startMarker)
+	if start < 0 {
+		return data
+	}
+	end := strings.Index(data[start:], endMarker)
+	if end < 0 {
+		return data
+	}
+	end += start + len(endMarker)
+	// Also drop the trailing newline after the end marker so the rebuilt
+	// block does not accumulate blank lines.
+	if end+1 < len(data) && data[end] == '\n' {
+		end++
+	} else if end+1 < len(data) && data[end+1] == '\n' {
+		end++
+	}
+	return data[:start] + data[end:]
 }
 
 // IsBinaryDiffBlock exposes isBinaryDiffBlock for the legacy cmd/blueprint

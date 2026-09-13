@@ -15,6 +15,7 @@ import (
 // TestLoopPublishesEvents verifies the closed loop publishes deployment,
 // observe and lesson events when a bus is attached.
 func TestLoopPublishesEvents(t *testing.T) {
+	t.Setenv("KERN_ALLOW_UNISOLATED", "1") // fail-closed gate: opt into unisolated runs on hosts without netns (darwin)
 	root := loopFixture(t)
 
 	// Production mutation is disabled by default (KERN_ALLOW_DEPLOY).

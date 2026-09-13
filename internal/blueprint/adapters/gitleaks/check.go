@@ -24,6 +24,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/JayveerPrajapati/kern/internal/blueprint/adapters/kern"
@@ -145,9 +146,26 @@ func (c *Check) Run(ctx context.Context, req domain.ChangeRequest) (domain.Check
 	defer os.RemoveAll(scanDir)
 
 	changedSet := make(map[string]bool, len(req.Files))
+	// addedLinesByFile maps a changed file to the exact NEW-file line numbers
+	// its diff hunks introduce (domain.FileChange.Added, populated by the
+	// staged/CI diff hunk parser). When present, findings are only reported
+	// for those lines (F-018): a secret that pre-dates the change in a
+	// modified file is not part of this change and must not be attributed to
+	// it. Files without hunk data (Content-provided proposals, CI diffs)
+	// keep the whole-content semantics: every finding in the file reports.
+	addedLinesByFile := make(map[string]map[int]bool)
 	for _, fc := range req.Files {
 		if fc.Op == domain.OpDelete {
 			continue
+		}
+		if len(fc.Added) > 0 {
+			lines := make(map[int]bool, len(fc.Added))
+			for _, ls := range fc.Added {
+				if n, err := strconv.Atoi(ls); err == nil {
+					lines[n] = true
+				}
+			}
+			addedLinesByFile[normalizePath(fc.Path)] = lines
 		}
 
 		// Confine changed paths to the temp dir: reject anything that would
@@ -227,6 +245,12 @@ func (c *Check) Run(ctx context.Context, req domain.ChangeRequest) (domain.Check
 
 		// New-change principle: only report secrets in changed files.
 		if !changedSet[file] {
+			continue
+		}
+		// F-018: when the diff hunks for this file are known, only report
+		// secrets on lines the change actually ADDS. A pre-existing secret on
+		// an unchanged line of a modified file is not this change's finding.
+		if added, ok := addedLinesByFile[file]; ok && !added[gf.StartLine] {
 			continue
 		}
 

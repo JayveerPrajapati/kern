@@ -5,6 +5,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/JayveerPrajapati/kern/internal/agent"
+	"github.com/JayveerPrajapati/kern/internal/app"
 	"github.com/JayveerPrajapati/kern/internal/domain"
 	"github.com/JayveerPrajapati/kern/internal/governance"
 )
@@ -96,5 +98,75 @@ func TestApproveToolNotFound(t *testing.T) {
 	}
 	if !strings.Contains(text, "not found") {
 		t.Fatalf("error text should mention 'not found': %s", text)
+	}
+}
+
+// TestApproveToolAdvancesGatedTask pins the approve-surface symmetry fix
+// (F-026): a kern_approve on a workflow approval must advance the gated task
+// parked at WAITING_FOR_APPROVAL exactly like `kern approve` does — the task
+// state flips immediately, the tool result carries the CLI's resume hint, and
+// the gate-crossing transition lands in the audit chain. Before the fix the
+// MCP surface only decided the approval, leaving the task parked.
+func TestApproveToolAdvancesGatedTask(t *testing.T) {
+	root := mcpProject(t)
+
+	// Run the workflow through the app layer; it must park at the human
+	// approval gate with a persisted approval (same setup as the app-level
+	// and web tests).
+	p, err := app.New(root)
+	if err != nil {
+		t.Fatalf("app.New: %v", err)
+	}
+	ts := app.NewTaskService(p, nil).WithAgentID("test")
+	task, err := ts.RunWorkflowDefault("Greet")
+	if err == nil {
+		t.Fatal("RunWorkflowDefault should require human approval before execution")
+	}
+	approvalID := agent.ApprovalID(err)
+	if approvalID == "" {
+		t.Fatalf("no approval ID surfaced from the approval gate: %v", err)
+	}
+	if task.State != domain.TaskWaitingApproval {
+		t.Fatalf("state = %q, want WAITING_FOR_APPROVAL", task.State)
+	}
+
+	// Approve through the MCP tool (default approver "mcp-user").
+	out := mcpLastOK(t, "kern_approve", map[string]any{"root": root, "id": approvalID})
+	if !strings.Contains(out, "approved: "+approvalID) {
+		t.Fatalf("approve output missing 'approved: %s':\n%s", approvalID, out)
+	}
+	if !strings.Contains(out, "mcp-user") {
+		t.Fatalf("approve output missing default approver 'mcp-user':\n%s", out)
+	}
+	// The CLI's resume hint must be present because a gated task was advanced.
+	if !strings.Contains(out, "resume: kern workflow --task "+task.ID) {
+		t.Fatalf("approve output missing resume hint for task %s:\n%s", task.ID, out)
+	}
+
+	// A fresh service (simulating `kern task`) must see the advanced state.
+	fresh := app.NewTaskService(p, nil)
+	got, ok := fresh.Get(task.ID)
+	if !ok {
+		t.Fatalf("task %s not found in the persisted store", task.ID)
+	}
+	if got.State != domain.TaskApproved {
+		t.Fatalf("state = %q, want APPROVED after MCP approve", got.State)
+	}
+
+	// F-025: the gate-crossing transition must be in the persisted audit chain.
+	entries, err := fresh.AuditEntriesForTask(task.ID)
+	if err != nil {
+		t.Fatalf("AuditEntriesForTask: %v", err)
+	}
+	var crossed *governance.AuditEntry
+	for i := range entries {
+		if entries[i].Action == "task.transition" &&
+			strings.Contains(entries[i].Reason, string(domain.TaskWaitingApproval)) &&
+			strings.Contains(entries[i].Reason, string(domain.TaskApproved)) {
+			crossed = &entries[i]
+		}
+	}
+	if crossed == nil {
+		t.Fatalf("no WAITING_FOR_APPROVAL -> APPROVED audit entry; entries: %+v", entries)
 	}
 }

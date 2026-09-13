@@ -79,7 +79,11 @@ func AnalyzeChangesRanged(ix *index.Index, changes []FileChange) *ChangesReport 
 		var callers, transitive int
 		seenCaller := map[string]bool{}
 		for _, s := range changed {
-			for _, c := range prodCallers(ix, s) {
+			// fileMap is hoisted once above; prodCallers would rebuild it per
+			// symbol (O(len(Symbols)) inside this loop — quadratic on large
+			// repos). prodCallersWithFileMap reuses the hoisted map (report A5:
+			// kern churn took ~7.8s on the kern repo because of this).
+			for _, c := range prodCallersWithFileMap(ix, s, fileMap) {
 				if !seenCaller[c] {
 					seenCaller[c] = true
 					callers++
@@ -339,6 +343,9 @@ func reviewRanged(ix *index.Index, changes []FileChange, maxTokens int, overlays
 		maxTokens = 8000
 	}
 	report := AnalyzeChangesRanged(ix, changes)
+	// Hoist the symbol->file map: reviewRanged calls prodCallers per changed
+	// symbol below, and rebuilding it per symbol is quadratic on large repos.
+	fileMap := buildFileMap(ix)
 	var b strings.Builder
 	fmt.Fprintf(&b, "# kern review\n\n%s\n\n", report.Summary)
 
@@ -365,7 +372,7 @@ func reviewRanged(ix *index.Index, changes []FileChange, maxTokens int, overlays
 			if r, ok := spans[s]; ok {
 				where = fmt.Sprintf("  (%s:%d-%d)", c.File, r.Start, r.End)
 			}
-			callers := dedupe(prodCallers(ix, s))
+			callers := dedupe(prodCallersWithFileMap(ix, s, fileMap))
 			if len(callers) > 0 {
 				fmt.Fprintf(&b, "  %s%s callers: %s\n", s, where, strings.Join(callers[:min(len(callers), 8)], ", "))
 			} else {

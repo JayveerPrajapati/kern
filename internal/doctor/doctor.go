@@ -9,13 +9,16 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	goruntime "runtime"
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/JayveerPrajapati/kern/internal/cache"
@@ -43,11 +46,12 @@ func Run(root string) []Finding {
 	out = append(out, checkParity(root))
 	out = append(out, checkCapabilities())
 	out = append(out, checkPath())
-	out = append(out, checkExec())
+	out = append(out, checkExec(setup.Bin()))
 	out = append(out, checkNetworkIsolation())
 	out = append(out, checkEnv())
 	out = append(out, checkConfig(root))
 	out = append(out, checkCache())
+	out = append(out, checkSandboxes(root))
 	out = append(out, checkWiring(root)...)
 	out = append(out, checkPluginSync()...)
 	out = append(out, checkIndex(root))
@@ -94,19 +98,20 @@ func checkPath() Finding {
 
 // checkExec actually runs the binary instead of trusting os.Stat. On macOS an
 // unsigned/ad-hoc-broken binary passes os.Stat but is killed by Gatekeeper
-// with SIGKILL (exit 137); executing it surfaces that immediately. kern-mcp
-// has no subcommands, so -h is used: it prints usage and exits 0 without
-// reading stdin.
-func checkExec() Finding {
-	bin := setup.Bin()
+// with SIGKILL; executing it surfaces that immediately (killedBySIGKILL
+// decodes both the direct signal-death form and the shell-wrapped 137 form).
+// -h is used as the probe because it prints usage and exits 0 without
+// reading stdin — and works on older binaries that predate the -version
+// flag.
+func checkExec(bin string) Finding {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, bin, "-h")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		var ee *exec.ExitError
-		if errors.As(err, &ee) && ee.ExitCode() == 137 {
-			return Finding{Check: "binary-exec", Level: "fail", Detail: bin + " was killed with SIGKILL (exit 137) — on macOS this is Gatekeeper/codesign; re-sign with `codesign --force --sign -` or reinstall"}
+		if errors.As(err, &ee) && killedBySIGKILL(ee) {
+			return Finding{Check: "binary-exec", Level: "fail", Detail: bin + " was killed with SIGKILL — on macOS this is Gatekeeper/codesign; re-sign with `codesign --force --sign -` or reinstall"}
 		}
 		return Finding{Check: "binary-exec", Level: "fail", Detail: bin + " failed to run: " + err.Error()}
 	}
@@ -115,6 +120,19 @@ func checkExec() Finding {
 		detail = "binary responds"
 	}
 	return Finding{Check: "binary-exec", Level: "ok", Detail: bin + " runs (" + detail + ")"}
+}
+
+// killedBySIGKILL reports whether the command died from SIGKILL. A direct
+// exec sees a signal death as ExitCode -1 with err "signal: killed" — the
+// 137 exit form only appears when a shell wraps the child. Both point at
+// Gatekeeper (macOS) or an OOM kill, so check the WaitStatus signal, not
+// just the exit code.
+func killedBySIGKILL(ee *exec.ExitError) bool {
+	if ee.ExitCode() == 137 {
+		return true
+	}
+	ws, ok := ee.Sys().(syscall.WaitStatus)
+	return ok && ws.Signaled() && ws.Signal() == syscall.SIGKILL
 }
 
 // checkNetworkIsolation reports whether script runs can be network-isolated on
@@ -319,7 +337,55 @@ func checkWiring(root string) []Finding {
 	return out
 }
 
-// checkPluginSync (D1): the opencode plugin exists in four places that must
+// checkSandboxes reports the .kern/sandboxes worktree footprint: how many
+// worktree copies exist, their total size, and whether any are stale
+// (older than 24h — abandoned leftovers of interrupted loop/check runs).
+// kern loop's worktree manager GCs stale copies automatically on the next
+// run; this surfaces the state so operators can clean manually.
+func checkSandboxes(root string) Finding {
+	dir := filepath.Join(root, ".kern", "sandboxes")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return Finding{Check: "sandboxes", Level: "ok", Detail: "no sandbox worktrees"}
+		}
+		return Finding{Check: "sandboxes", Level: "ok", Detail: dir + " unreadable"}
+	}
+	var dirs, bytes int64
+	var stale int
+	cutoff := time.Now().Add(-24 * time.Hour)
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		dirs++
+		info, ierr := e.Info()
+		if ierr == nil && info.ModTime().Before(cutoff) {
+			stale++
+		}
+		p := filepath.Join(dir, e.Name())
+		_ = filepath.WalkDir(p, func(_ string, d fs.DirEntry, werr error) error {
+			if werr != nil {
+				return nil
+			}
+			if !d.IsDir() {
+				if fi, eerr := d.Info(); eerr == nil {
+					bytes += fi.Size()
+				}
+			}
+			return nil
+		})
+	}
+	detail := fmt.Sprintf("%d worktree(s), %.1f MB under %s", dirs, float64(bytes)/(1<<20), dir)
+	if stale > 0 || bytes > 100<<20 {
+		level := "warn"
+		if stale > 0 {
+			detail += fmt.Sprintf("; %d stale (abandoned by an interrupted run — cleaned automatically on the next kern loop)", stale)
+		}
+		return Finding{Check: "sandboxes", Level: level, Detail: detail}
+	}
+	return Finding{Check: "sandboxes", Level: "ok", Detail: detail}
+} // checkPluginSync (D1): the opencode plugin exists in four places that must
 // stay byte-identical (project .opencode/plugins, the embedded asset, and the
 // two global copies). A stale user copy silently wins over the fixed one —
 // opencode 1.18.x loads from ~/.opencode/plugins — so compare every installed

@@ -254,6 +254,28 @@ func (c *SecretCheck) scanDisk(ctx context.Context, req domain.ChangeRequest, di
 	for _, fc := range diskFiles {
 		diskSet[normalizePath(fc.Path)] = true
 	}
+	// addedLinesByFile maps a changed file to the exact NEW-file line numbers
+	// its diff hunks introduce (domain.FileChange.Added, populated by the
+	// staged/CI diff hunk parser). When present, findings are only reported
+	// for those lines (F-018): a secret that pre-dates the change in a
+	// modified file is not part of this change and must not be attributed to
+	// it. Files without hunk data (Content-provided proposals, CI diffs)
+	// keep the whole-file semantics: every finding in the file reports.
+	addedLinesByFile := make(map[string]map[int]bool)
+	for _, fc := range diskFiles {
+		if fc.Op == domain.OpDelete {
+			continue
+		}
+		if len(fc.Added) > 0 {
+			lines := make(map[int]bool, len(fc.Added))
+			for _, ls := range fc.Added {
+				if n, err := strconv.Atoi(ls); err == nil {
+					lines[n] = true
+				}
+			}
+			addedLinesByFile[normalizePath(fc.Path)] = lines
+		}
+	}
 
 	var findings []domain.Finding
 	for _, sf := range cachedFindings {
@@ -268,6 +290,13 @@ func (c *SecretCheck) scanDisk(ctx context.Context, req domain.ChangeRequest, di
 		// version was already scanned above (avoids double-reporting when a
 		// file exists on disk AND has proposed content).
 		if excludeSet[normFile] {
+			continue
+		}
+
+		// F-018: when the diff hunks for this file are known, only report
+		// secrets on lines the change actually ADDS. A pre-existing secret on
+		// an unchanged line of a modified file is not this change's finding.
+		if added, ok := addedLinesByFile[normFile]; ok && !added[sf.Line] {
 			continue
 		}
 

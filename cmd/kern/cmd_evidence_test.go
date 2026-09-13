@@ -227,3 +227,48 @@ func TestEvidenceVerify_TrustAnchor(t *testing.T) {
 		t.Fatalf("mismatched-anchor verify exit code = %d, want 2", code)
 	}
 }
+
+// TestEvidenceVerify_PositionalFile (F-012): `kern evidence verify <path>`
+// must read the bundle from the positional file argument exactly like
+// `--file <path>`. Before the fix the positional was ignored, so verify fell
+// through to (empty) stdin and died with `parse bundle: unexpected end of
+// JSON input`.
+func TestEvidenceVerify_PositionalFile(t *testing.T) {
+	dir := evidenceFixture(t)
+	outPath := filepath.Join(t.TempDir(), "evidence.json")
+	if code := runEvidence([]string{"export", "--root", dir, "--agent-id", "default", "--task", "T-1", "--out", outPath}); code != 0 {
+		t.Fatalf("export exit code = %d, want 0", code)
+	}
+	var out string
+	code := -1
+	out = captureStdout(t, func() {
+		code = runEvidence([]string{"verify", outPath})
+	})
+	if code != 0 {
+		t.Fatalf("verify positional-file exit code = %d, want 0 (stderr above)", code)
+	}
+	if !strings.Contains(out, "VALID") {
+		t.Errorf("verify positional-file output does not say VALID: %s", out)
+	}
+}
+
+// TestEvidenceExplain_PositionalFile (F-012): the same positional-file
+// plumbing applies to `kern evidence explain <path>`.
+func TestEvidenceExplain_PositionalFile(t *testing.T) {
+	dir := evidenceFixture(t)
+	outPath := filepath.Join(t.TempDir(), "evidence.json")
+	if code := runEvidence([]string{"export", "--root", dir, "--agent-id", "default", "--task", "T-1", "--out", outPath}); code != 0 {
+		t.Fatalf("export exit code = %d, want 0", code)
+	}
+	var out string
+	code := -1
+	out = captureStdout(t, func() {
+		code = runEvidence([]string{"explain", outPath})
+	})
+	if code != 0 {
+		t.Fatalf("explain positional-file exit code = %d, want 0 (stderr above)", code)
+	}
+	if strings.TrimSpace(out) == "" {
+		t.Error("explain positional-file produced no output")
+	}
+}

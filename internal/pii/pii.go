@@ -43,7 +43,7 @@ var DefaultPatterns = []Pattern{
 	// the same. The plain sk-… variant keeps the 20+ floor to stay out of prose.
 	{Label: "OPENAI", RE: regexp.MustCompile(`\bsk-(?:proj-[A-Za-z0-9_-]{6,}|[A-Za-z0-9]{20,})\b`)},
 	{Label: "OPENAI_SHORT", RE: regexp.MustCompile(`\bsk-[A-Za-z0-9]{10,19}\b`)},
-	{Label: "VAULT", RE: regexp.MustCompile(`\b(?:hvs|hvb|hvr|s)\.[A-Za-z0-9_-]{16,}\b`)},
+	{Label: "VAULT", RE: regexp.MustCompile(`\b(?:hvs|hvb|hvr)\.[A-Za-z0-9_-]{16,}\b|\bs\.[0-9a-f]{16,}\b`)},
 	{Label: "JWT", RE: regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}(?:\.[A-Za-z0-9_=-]+)?\b`)},
 	{Label: "BEARER", RE: regexp.MustCompile(`\bBearer\s+[A-Za-z0-9._~+/=-]{20,}\b`)},
 	{Label: "KEY", RE: regexp.MustCompile(`(?i)\b(?:api[_\s-]?key|apikey|auth[_\s-]?token|access[_\s-]?token|refresh[_\s-]?token|client[_\s-]?secret|private[_\s-]?key|app[_\s-]?secret|consumer[_\s-]?(?:key|secret))["']?\s*[=:]\s*["']?(?:[A-Za-z0-9_/\-+=]{12,}["']|[A-Za-z0-9_/\-+=]*[0-9][A-Za-z0-9_/\-+=]*)`)},
@@ -55,7 +55,7 @@ var DefaultPatterns = []Pattern{
 	// "user:pass@mysql-host". The colon is excluded from the password class so
 	// log time-stamps and duration strings ("07:30:00@lvl") stay untouched;
 	// the optional ('host:port') group consumes driver-DSN hosts.
-	{Label: "URL_CRED", RE: regexp.MustCompile(`\b[A-Za-z0-9._%+-]+:[^@\s:]{3,}@[A-Za-z0-9][A-Za-z0-9.-]*(?::\d{1,5})?(?:\([^)]*\))?`)},
+	{Label: "URL_CRED", RE: regexp.MustCompile(`\b[A-Za-z0-9._%+-]+:[^@\s:/]{3,}@[A-Za-z0-9.-]*[A-Za-z.][A-Za-z0-9.-]*(?::\d{1,5})?(?:\([^)]*\))?`)},
 	// HEX: generic long hex runs (≥32 chars) — API keys, auth tokens and
 	// SHA-uppercase signatures are frequently emitted as bare hex. Guarded by
 	// word boundaries so it never bites mid-token. Deliberately wide for the

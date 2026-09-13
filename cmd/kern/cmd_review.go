@@ -9,6 +9,7 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/eval"
 	"github.com/JayveerPrajapati/kern/internal/eventbus"
 	"github.com/JayveerPrajapati/kern/internal/governance"
+	"github.com/JayveerPrajapati/kern/internal/index"
 	"github.com/JayveerPrajapati/kern/internal/intel"
 	"github.com/JayveerPrajapati/kern/internal/lenses"
 	"github.com/JayveerPrajapati/kern/internal/ownership"
@@ -42,6 +43,12 @@ func runAnalyze(cmd string, rest []string) {
 		fatal("--lens/--profile are only supported for kern analyze")
 	}
 	change := args[0]
+	// V5: the deterministic analyze/plan path resolves <change> as an exact
+	// symbol name. NL prose belongs to the kern run intent pipeline — route
+	// loudly instead of failing later with a confusing "no symbol named" error.
+	if strings.ContainsAny(change, " \t") {
+		fatal("kern %s resolves <change> as a SYMBOL name (e.g. pkg.Func or Type.Method).\nFor natural-language change descriptions use: kern run \"%s\"", cmd, change)
+	}
 	p, err := app.New(root)
 	if err != nil {
 		fatal("Analyze: %v", err)
@@ -61,6 +68,9 @@ func runAnalyze(cmd string, rest []string) {
 			// architecture → plan artifact).
 			t, plan, text, err := ts.Plan(change)
 			if err != nil {
+				if planSymbolDegrade(change, root, err) {
+					return
+				}
 				fatal("Analyze: %v", err)
 			}
 			fmt.Println("PLAN for: " + change)
@@ -96,6 +106,9 @@ func runAnalyze(cmd string, rest []string) {
 		// Stateless plan path: run analyze then assemble a plan inline.
 		pkt, _, err := p.Analyze(change)
 		if err != nil {
+			if planSymbolDegrade(change, root, err) {
+				return
+			}
 			fatal("Analyze: %v", err)
 		}
 		fmt.Println("PLAN for: " + change)
@@ -304,8 +317,13 @@ func runImpact(rest []string) {
 		})
 		return
 	}
-	fmt.Print("IMPACT for: " + change + "\n")
-	fmt.Print(text)
+	// renderImpactText already emits the "IMPACT for: <target>" header (the
+	// impact renderer is shared with the MCP and REST surfaces), so printing it
+	// here again produced a duplicated header (F-014). The transitive callees in
+	// the "What it calls" section are relabeled against the index's direct call
+	// edges so transitive entries are no longer indistinguishable from direct
+	// ones.
+	fmt.Print(annotateImpactCallees(text, change, root))
 	if f.precision == "strict" {
 		fmt.Println("precision: strict — call edges from non-resolved languages were skipped (unknown)")
 	}
@@ -313,6 +331,66 @@ func runImpact(rest []string) {
 		fmt.Println("Affected teams: " + strings.Join(teams, ", "))
 	}
 	fmt.Printf("\n[task: %s — state: %s — risk=%s]\n", t.ID, t.State, rep.Risk)
+}
+
+// annotateImpactCallees relabels the "What it calls" section of a rendered
+// impact report, marking each entry "(direct)" or "(transitive)" using the
+// index's direct call edges (F-014: the report listed transitive callees of
+// the target — callees of callees — alongside direct ones with no way to tell
+// them apart). The text is returned unchanged when the index is unavailable
+// or the target has no recorded call edges, so the annotation never degrades
+// the report.
+func annotateImpactCallees(text, target, root string) string {
+	ix, err := index.Load(root)
+	if err != nil {
+		return text
+	}
+	direct := map[string]bool{}
+	for _, ce := range ix.Calls[target] {
+		direct[simpleSymName(ce.Target)] = true
+	}
+	if len(direct) == 0 {
+		// The target may be typed qualified while the index keys it by the
+		// simple name (or vice versa); retry with the bare name.
+		for _, ce := range ix.Calls[simpleSymName(target)] {
+			direct[simpleSymName(ce.Target)] = true
+		}
+	}
+	if len(direct) == 0 {
+		return text
+	}
+	lines := strings.Split(text, "\n")
+	inCalls := false
+	for i, ln := range lines {
+		trimmed := strings.TrimSpace(ln)
+		if strings.HasPrefix(trimmed, "What it calls:") {
+			inCalls = true
+			continue
+		}
+		if !inCalls {
+			continue
+		}
+		if !strings.HasPrefix(trimmed, "- ") {
+			inCalls = false // next section
+			continue
+		}
+		name := simpleSymName(strings.TrimSpace(trimmed[2:]))
+		if direct[name] {
+			lines[i] = ln + " (direct)"
+		} else {
+			lines[i] = ln + " (transitive)"
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+// simpleSymName returns the part of a name after the last '.', so qualified
+// ("repo.Query") and bare ("Query") spellings compare equal.
+func simpleSymName(name string) string {
+	if i := strings.LastIndexByte(name, '.'); i >= 0 {
+		return name[i+1:]
+	}
+	return name
 }
 
 func runVerify(rest []string) {
@@ -380,7 +458,33 @@ func runVerify(rest []string) {
 		return
 	case f.verifySilent:
 		// Kern-invisibility check: the rendered pipeline must not leak
-		// kern-internal markers to a user/LLM.
+		// kern-internal markers to a user/LLM. Without a target symbol,
+		// report the pass rate over a deterministic sample of core symbols
+		// instead of a guaranteed failure (north-star NS-4).
+		if symbol == "" {
+			rep, err := verification.ScanSilent(root, "internal", 100)
+			if err != nil {
+				fatal("silent scan: %v", err)
+			}
+			if f.json {
+				printJSON(map[string]any{
+					"scanned":    rep.Symbols,
+					"silent":     rep.Silent,
+					"violations": rep.Violations,
+					"findings":   rep.Findings,
+				})
+				return
+			}
+			rate := 0.0
+			if rep.Symbols > 0 {
+				rate = float64(rep.Silent) / float64(rep.Symbols)
+			}
+			fmt.Printf("silent orchestration: %d/%d symbols silent (%.0f%%)\n", rep.Silent, rep.Symbols, rate*100)
+			for _, fnd := range rep.Findings {
+				fmt.Printf("  - %s (%s): %s\n", fnd.Symbol, fnd.File, strings.Join(fnd.Reasons, "; "))
+			}
+			return
+		}
 		ok, reasons := verification.VerifySilentOrchestration(root, symbol)
 		if f.json {
 			printJSON(map[string]any{"ok": ok, "reasons": reasons})
@@ -786,6 +890,34 @@ func parseChangeKind(change string) whatif.ChangeKind {
 	default:
 		return whatif.RemoveSymbol
 	}
+}
+
+// planSymbolDegrade handles a plan that could not resolve the free-text
+// change to a concrete symbol (F-013). The planner is symbol-index-bound:
+// instead of a bare `no symbol named "X"` error we degrade gracefully with an
+// actionable message — close symbol candidates from the index (when any
+// exist) and a pointer to `kern search` so the caller can find the concrete
+// symbol and re-run `kern plan <symbol>`. Deterministic, no LLM. Returns
+// false when the error is not a symbol-resolution miss, so the caller
+// surfaces the original error unchanged.
+func planSymbolDegrade(change, root string, err error) bool {
+	msg := err.Error()
+	if !strings.Contains(msg, "no symbol named") && !strings.Contains(msg, "could not identify a symbol") {
+		return false
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "no matching symbol for %q — kern plan plans against concrete symbols in the index\n", change)
+	if ix, ierr := loadOrBuild(root); ierr == nil {
+		if cands := intel.RankedSearch(ix, change, 8); len(cands) > 0 {
+			b.WriteString("close candidates:\n")
+			for _, c := range cands {
+				fmt.Fprintf(&b, "  %-10s %-7s %-24s %s:%d\n", c.Kind, c.Lang, c.FullName(), c.File, c.Line)
+			}
+		}
+	}
+	fmt.Fprintf(&b, "hint: run `kern search %q` to find the concrete symbol, then re-run `kern plan <symbol>`", change)
+	fatal("%s", b.String())
+	return true
 }
 
 // renderStatelessPlan renders a domain.Plan-shaped text from a context packet

@@ -49,11 +49,11 @@ func TestServerValidate(t *testing.T) {
 		}
 	}
 	bad := []Server{
-		{Transport: "stdio", Command: "x"},          // no name
+		{Transport: "stdio", Command: "x"},                               // no name
 		{Name: "too long name here x", Transport: "stdio", Command: "x"}, // name > 32 / invalid chars
-		{Name: "a", Transport: "stdio"},              // no command
-		{Name: "a", Transport: "streamable-http"},    // no url
-		{Name: "a", Transport: "bogus", Command: "x"}, // bad transport
+		{Name: "a", Transport: "stdio"},                                  // no command
+		{Name: "a", Transport: "streamable-http"},                        // no url
+		{Name: "a", Transport: "bogus", Command: "x"},                    // bad transport
 	}
 	for _, s := range bad {
 		if err := s.Validate(); err == nil {

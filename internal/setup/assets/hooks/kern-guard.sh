@@ -30,7 +30,7 @@ case "$(printf '%s' "$tool" | tr '[:upper:]' '[:lower:]')" in
     reason="Use kern_compact_file (symbolic summary, faster) or kern_context (source slice) instead of the built-in read. Call kern_compact_file with {\"path\":\"<filepath>\"}. Set KERN_ENFORCE=0 to disable this guard."
     ;;
   grep|grep_file)
-    reason="Use kern_ast_search (code symbols) or kern_doc_search (docs) instead of the built-in grep. Call kern_ast_search with {\"pattern\":\"<regex>\"}. Set KERN_ENFORCE=0 to disable this guard."
+    reason="Use kern_ast_search (code symbols) or kern_doc_search (docs) instead of the built-in grep. kern ast/grep patterns are SYMBOL queries, not regex: call kern_ast_search with a symbol-name pattern like {\"pattern\":\"funcName\"} or {\"pattern\":\"type *Name*\"}. For true regex search use bash: grep -rn <pattern> (or raw=true). Set KERN_ENFORCE=0 to disable this guard."
     ;;
   glob|list|list_files)
     reason="Use kern_project_map (compressed symbol map) instead of the built-in glob. Call kern_project_map with {\"root\":\".\"}. Set KERN_ENFORCE=0 to disable this guard."

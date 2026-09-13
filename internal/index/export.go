@@ -496,7 +496,7 @@ func (g GraphResult) GraphGraphML() string {
 			fmt.Fprintf(&b, "    <edge source=%q target=%q>\n      <data key=\"confidence\">%s</data>\n      <data key=\"confidence_label\">%s</data>\n    </edge>\n", e.From, e.To, xmlEsc(e.Confidence), xmlEsc(e.ConfidenceLabel))
 		}
 	}
-b.WriteString("  </graph>\n</graphml>\n")
+	b.WriteString("  </graph>\n</graphml>\n")
 	return b.String()
 }
 

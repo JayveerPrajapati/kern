@@ -163,13 +163,27 @@ func aggregateHash(fileHashes map[string]string) string {
 //     this comment documents). Gitignored paths need no pathspec; the fast
 //     path keeps the .kern pathspec only because porcelain status tolerates
 //     it.
-func treeOID(root string) string {
-	// Fast path: porcelain-clean outside the excluded dirs means staging the
-	// working tree (slow path) would produce exactly HEAD's tree object.
+//
+// treeOIDFast is the cheap half of treeOID: two git queries (porcelain
+// status + rev-parse), no staging, no object writes. It returns HEAD's tree
+// OID when the working tree is porcelain-clean outside the excluded
+// tool-state dirs, and "" when the tree is dirty, root is not a worktree,
+// or git is unavailable. Callers on a hot path use this first and only pay
+// for the full staging form when they truly need a decisive OID.
+func treeOIDFast(root string) string {
 	if out, err := runGit(root, "status", "--porcelain", "--", ".", ":(exclude).kern", ":(exclude).blueprint"); err == nil && out == "" {
 		if head, err := runGit(root, "rev-parse", "HEAD^{tree}"); err == nil && head != "" {
 			return head
 		}
+	}
+	return ""
+}
+
+func treeOID(root string) string {
+	// Fast path: porcelain-clean outside the excluded dirs means staging the
+	// working tree (slow path) would produce exactly HEAD's tree object.
+	if oid := treeOIDFast(root); oid != "" {
+		return oid
 	}
 
 	tmp, err := os.CreateTemp("", "kern-treeoid-*")
@@ -342,7 +356,17 @@ func (ix *Index) freshnessBaseline(root string) (FreshnessProof, bool) {
 	}
 	proof.Recorded = *ix.Identity
 	cur := IndexIdentity{BuiltAt: time.Now().UTC()}
-	cur.TreeOID = treeOID(root)
+	// Cheap OID only: treeOIDFast is two git queries on a clean tree and ""
+	// on a dirty one. The full treeOID's slow path stages the ENTIRE working
+	// tree into a throwaway index (git add -A), which costs hundreds of ms —
+	// and on a dirty tree the resulting OID differs from the recorded one
+	// anyway, so the verdict falls through to the content walk and the staged
+	// OID is discarded. That made every staleness check on a dirty tree (the
+	// common case while developing) pay the staging for nothing. The decisive
+	// OID is computed lazily by finishFreshness only when the walk FAILS and
+	// git must be trusted as the fallback (same laziness contract as
+	// FreshnessProofStrict).
+	cur.TreeOID = treeOIDFast(root)
 	if out, err := runGit(root, "rev-parse", "--short", "HEAD"); err == nil {
 		cur.GitCommit = out
 	}
@@ -356,6 +380,13 @@ func (ix *Index) freshnessBaseline(root string) (FreshnessProof, bool) {
 func (ix *Index) finishFreshness(root string, proof FreshnessProof) FreshnessProof {
 	cur, err := indexableHashes(root, ignore.Load(root))
 	if err != nil {
+		// The walk failed and freshnessBaseline left Current.TreeOID lazy
+		// (empty on dirty/unavailable trees): only now is the expensive
+		// full staging form of the OID worth computing, because git is the
+		// only remaining witness.
+		if proof.Current.TreeOID == "" {
+			proof.Current.TreeOID = treeOID(root)
+		}
 		if proof.Recorded.TreeOID != "" && proof.Recorded.TreeOID == proof.Current.TreeOID {
 			proof.Verdict = FreshnessFresh // trust git
 			return proof

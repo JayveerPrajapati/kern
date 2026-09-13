@@ -250,3 +250,83 @@ func TestGitleaksFallbackInHouseErrorPreserved(t *testing.T) {
 		t.Errorf("Status = %q, want %q (in-house ERROR preserved)", cr.Status, domain.StatusError)
 	}
 }
+
+// TestGitleaksCheckAddedLineFilter (F-018): a modified file carries a
+// pre-existing secret on an unchanged line; the diff hunks (FileChange.Added)
+// list only the genuinely added lines. The check must attribute the finding
+// to the actual added line and must NOT re-report the pre-existing secret on
+// an unchanged line as part of this change.
+func TestGitleaksCheckAddedLineFilter(t *testing.T) {
+	report := `[
+{
+"RuleID": "generic-api-key",
+"Description": "pre-existing secret on an unchanged line",
+"StartLine": 5,
+"EndLine": 5,
+"StartColumn": 8,
+"EndColumn": 38,
+"Match": "AWSKey = \"AKIA1234567890ABCDEF\"",
+"Secret": "AKIA1234567890ABCDEF",
+"File": "{{WORKDIR}}/config.go",
+"SymlinkFile": "",
+"Commit": "",
+"Entropy": 4.08,
+"Author": "",
+"Email": "",
+"Date": "",
+"Message": "",
+"Tags": [],
+"Fingerprint": "f1"
+},
+{
+"RuleID": "github-pat",
+"Description": "new token on an added line",
+"StartLine": 12,
+"EndLine": 12,
+"StartColumn": 8,
+"EndColumn": 48,
+"Match": "tok = \"ghp_16C7e42F292c6912E7710c838347Ae178B4a\"",
+"Secret": "ghp_16C7e42F292c6912E7710c838347Ae178B4a",
+"File": "{{WORKDIR}}/config.go",
+"SymlinkFile": "",
+"Commit": "",
+"Entropy": 4.08,
+"Author": "",
+"Email": "",
+"Date": "",
+"Message": "",
+"Tags": [],
+"Fingerprint": "f2"
+}
+]`
+	chk := NewCheck(nil, WithBinary("gitleaks"), WithRunner(fakeGitleaksRunner(report)))
+	root := t.TempDir()
+	// Disk content carries BOTH secrets (line 5 pre-existing, line 12 added).
+	if err := os.WriteFile(filepath.Join(root, "config.go"), []byte("line1\nline2\nline3\nline4\nconst AWSKey = \"AKIA1234567890ABCDEF\"\nline6\nline7\nline8\nline9\nline10\nline11\nconst tok = \"ghp_16C7e42F292c6912E7710c838347Ae178B4a\"\n"), 0o644); err != nil {
+		t.Fatalf("write config.go: %v", err)
+	}
+	cr, err := chk.Run(context.Background(), domain.ChangeRequest{
+		RepositoryRoot: root,
+		Files: []domain.FileChange{{
+			Path:  "config.go",
+			Op:    domain.OpEdit,
+			Added: []string{"12"}, // only line 12 is a genuinely added line
+		}},
+	})
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	if cr.Status != domain.StatusBlock {
+		t.Fatalf("Status = %q, want %q (the added line carries a secret)", cr.Status, domain.StatusBlock)
+	}
+	if len(cr.Findings) != 1 {
+		t.Fatalf("Findings = %d, want 1 (only the added line; the pre-existing line-5 secret must not be attributed to this change)", len(cr.Findings))
+	}
+	f := cr.Findings[0]
+	if f.Line != 12 {
+		t.Errorf("Finding.Line = %d, want 12 (the actual added line)", f.Line)
+	}
+	if !strings.Contains(f.RuleID, "github-pat") {
+		t.Errorf("Finding.RuleID = %q, want the github-pat rule of the added line", f.RuleID)
+	}
+}

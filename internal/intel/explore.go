@@ -15,22 +15,22 @@ import (
 // ExploreReport is the single-call result for a symbol: verbatim source,
 // call flow (callers + callees), and blast radius (transitive callers).
 type ExploreReport struct {
-	Symbol         string            `json:"symbol"`
-	Resolved       string            `json:"resolved,omitempty"`
-	Definition     index.Symbol      `json:"definition"`
-	Source         string            `json:"source"`
-	Callers        []string          `json:"callers"`
-	Callees        []string          `json:"callees"`
-	CallerConf     map[string]string `json:"caller_conf,omitempty"` // caller → EXTRACTED/INFERRED/AMBIGUOUS
-	CalleeConf     map[string]string `json:"callee_conf,omitempty"` // callee → EXTRACTED/INFERRED/AMBIGUOUS
-	CallerSynth    map[string]string `json:"caller_synth,omitempty"` // caller → router:chi (SYNTHESIZED dispatch)
-	CalleeSynth    map[string]string `json:"callee_synth,omitempty"` // callee → router:chi
-	CalleeSkels    []string          `json:"callee_skels,omitempty"` // folded callee bodies, budget-permitting
-	BlastRadius    []string          `json:"blast_radius"`
-	BlastFiles     []string          `json:"blast_files"`
-	NearestDepth   map[string]int    `json:"nearest_depth,omitempty"`
-	StaleBanner    string            `json:"stale_banner,omitempty"`
-	Stats          *index.TokenStats `json:"stats,omitempty"`
+	Symbol       string            `json:"symbol"`
+	Resolved     string            `json:"resolved,omitempty"`
+	Definition   index.Symbol      `json:"definition"`
+	Source       string            `json:"source"`
+	Callers      []string          `json:"callers"`
+	Callees      []string          `json:"callees"`
+	CallerConf   map[string]string `json:"caller_conf,omitempty"`  // caller → EXTRACTED/INFERRED/AMBIGUOUS
+	CalleeConf   map[string]string `json:"callee_conf,omitempty"`  // callee → EXTRACTED/INFERRED/AMBIGUOUS
+	CallerSynth  map[string]string `json:"caller_synth,omitempty"` // caller → router:chi (SYNTHESIZED dispatch)
+	CalleeSynth  map[string]string `json:"callee_synth,omitempty"` // callee → router:chi
+	CalleeSkels  []string          `json:"callee_skels,omitempty"` // folded callee bodies, budget-permitting
+	BlastRadius  []string          `json:"blast_radius"`
+	BlastFiles   []string          `json:"blast_files"`
+	NearestDepth map[string]int    `json:"nearest_depth,omitempty"`
+	StaleBanner  string            `json:"stale_banner,omitempty"`
+	Stats        *index.TokenStats `json:"stats,omitempty"`
 }
 
 // Explore returns verbatim source, the direct call flow (callers and callees),

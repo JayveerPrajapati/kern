@@ -90,7 +90,7 @@ func GraphCtxMin(ix *index.Index, symbol string, maxTokens int, minConf string) 
 		}
 		return "", fmt.Errorf("unknown symbol: %s", symbol)
 	}
-g, ok := ix.Neighborhood(resolved)
+	g, ok := ix.Neighborhood(resolved)
 	if !ok {
 		return "", fmt.Errorf("unknown symbol: %s", symbol)
 	}
@@ -138,7 +138,7 @@ g, ok := ix.Neighborhood(resolved)
 		b.WriteString(fmt.Sprintf("community (%d members): %s\n", len(members), strings.Join(shown, ", ")))
 	}
 
-text := strings.TrimSpace(b.String())
+	text := strings.TrimSpace(b.String())
 	if banner := ix.StalenessBanner(graphCtxFiles(g)); banner != "" {
 		text = banner + "\n\n" + text
 	}
@@ -160,6 +160,7 @@ func graphCtxFiles(g index.GraphResult) []string {
 	}
 	return files
 }
+
 // graphInterfaceMethodCtx renders the context for an interface method root:
 // its dispatch targets (the concrete implementations the call sites can reach)
 // and its callers (the call sites themselves). There is no definition line —
@@ -188,7 +189,7 @@ func graphInterfaceMethodCtxMin(ix *index.Index, symbol, recv, meth string, maxT
 		b.WriteString(fmt.Sprintf("community (%d members): %s\n", len(members), strings.Join(shown, ", ")))
 	}
 
-text := strings.TrimSpace(b.String())
+	text := strings.TrimSpace(b.String())
 	if banner := ix.StalenessBanner(graphIfaceFiles(ix, symbol, recv)); banner != "" {
 		text = banner + "\n\n" + text
 	}
@@ -214,6 +215,7 @@ func graphIfaceFiles(ix *index.Index, symbol, recv string) []string {
 	}
 	return files
 }
+
 // graphInterfaceCallers returns the call sites of an interface method as
 // adjacency rows. The targets have no symbol, so every edge is INFERRED and
 // file:line comes from the caller's own definition.

@@ -308,7 +308,7 @@ func TestG22_NoFiles(t *testing.T) {
 // remaining finding (WARN or BLOCK) forces the repair loop to iterate (see
 // fixExitCode) — and prints the clarifying note explaining that contract. The
 // note is also carried into --json output as the additive "note" field.
-func TestG22_WarnOnlyExitsOneWithNote(t *testing.T) {
+func TestG22_WarnOnlyExitsZeroWithNote(t *testing.T) {
 	if testing.Short() {
 		t.Skip("E2E gate test — full pipeline; runs in nightly non-short suite")
 	}
@@ -326,29 +326,31 @@ func TestG22_WarnOnlyExitsOneWithNote(t *testing.T) {
 	g4RunGit(t, dir, "add", "-A")
 	g4RunGit(t, dir, "commit", "-qm", "init")
 
-	const wantNote = "note: fix exits 1 while ANY finding remains (WARN or BLOCK); iterate the repair loop until the fix verifies clean (exit 0)"
+	const wantNote = "note: WARN-only informational findings do not block the fix (exit 0); exit 1 is reserved for BLOCK findings \u2014 iterate the repair loop until the fix verifies clean"
 
-	// Text mode: a NEW file with clean content → WARN-only result, exit 1 (the
-	// repair loop must iterate) and the note line in the output.
+	// Text mode: a NEW file with clean content on an unindexed repo → WARN-only
+	// result (architecture:not-enforced), exit 0 (F-021): informational WARN
+	// findings must not block a fix that verifies clean otherwise, and the note
+	// line is printed.
 	out, code := g22RunFix(t, binPath, dir, kernPath,
 		"--file", "extra.go",
 		"--content", "package extra\nfunc X() {}\n")
-	if code != 1 {
-		t.Fatalf("exit code = %d, want 1 (WARN finding still blocks the loop); output:\n%s", code, out)
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0 (WARN-only must not block); output:\n%s", code, out)
 	}
 	if !strings.Contains(out, "WARN") {
 		t.Fatalf("output missing WARN verdict:\n%s", out)
 	}
 	if !strings.Contains(out, wantNote) {
-		t.Fatalf("output missing the warn-exit note %q:\n%s", wantNote, out)
+		t.Fatalf("output missing the warn note %q:\n%s", wantNote, out)
 	}
 
-	// JSON mode: additive "note" field with the same text, status WARN, exit 1.
+	// JSON mode: additive "note" field with the same text, status WARN, exit 0.
 	out, code = g22RunFix(t, binPath, dir, kernPath, "--json",
 		"--file", "extra.go",
 		"--content", "package extra\nfunc X() {}\n")
-	if code != 1 {
-		t.Fatalf("json exit code = %d, want 1; output:\n%s", code, out)
+	if code != 0 {
+		t.Fatalf("json exit code = %d, want 0; output:\n%s", code, out)
 	}
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal([]byte(out), &raw); err != nil {
@@ -357,8 +359,8 @@ func TestG22_WarnOnlyExitsOneWithNote(t *testing.T) {
 	if got := string(raw["status"]); got != `"WARN"` {
 		t.Fatalf("json status = %s, want \"WARN\"; output:\n%s", got, out)
 	}
-	if got := string(raw["exit_code"]); got != "1" {
-		t.Fatalf("json exit_code = %s, want 1; output:\n%s", got, out)
+	if got := string(raw["exit_code"]); got != "0" {
+		t.Fatalf("json exit_code = %s, want 0; output:\n%s", got, out)
 	}
 	var note string
 	if err := json.Unmarshal(raw["note"], &note); err != nil {

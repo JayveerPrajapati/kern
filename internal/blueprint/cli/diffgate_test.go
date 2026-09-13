@@ -53,7 +53,7 @@ func TestDiffGateServiceVerdicts(t *testing.T) {
 
 	// noTests=true keeps the run fast and deterministic (no sandbox build);
 	// the secret check is added only when a kern binary resolves.
-	checks := buildDiffGateCheckList(dir, false, true, false)
+	checks := buildDiffGateCheckList(dir, nil, false, true, false)
 	svc := service.New(checks)
 	result := svc.Validate(context.Background(), req)
 
@@ -107,8 +107,8 @@ func TestDiffGateParseFlags(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("parse code = %d, want 0", code)
 	}
-	if fl2.root != "." || fl2.timeoutSec != 120 || fl2.blocking || fl2.jsonOut || fl2.noTests || fl2.initBaseline {
-		t.Errorf("default flags = %+v, want root=. timeout=120 advisory text-only", fl2)
+	if fl2.root != "." || fl2.timeoutSec != 0 || fl2.blocking || fl2.jsonOut || fl2.noTests || fl2.initBaseline {
+		t.Errorf("default flags = %+v, want root=. timeout=0 (auto: config execution.timeout_seconds, else 120) advisory text-only", fl2)
 	}
 	// Unknown flag → usage error (2).
 	if _, code := parseDiffGateFlags([]string{"--bogus"}); code != 2 {

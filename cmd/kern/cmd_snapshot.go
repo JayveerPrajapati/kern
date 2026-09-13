@@ -4,16 +4,35 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/JayveerPrajapati/kern/internal/index"
 )
 
 // runSnapshot implements `kern snapshot [root] [--out FILE] [--symbol X]
-// [--limit N]`: load-or-build the index, render a canonical versioned graph
-// snapshot (whole-repo, or the neighbourhood of --symbol), print a one-line
-// summary, then emit the snapshot JSON to stdout or --out.
+// [--limit N] [--verify FILE]`: load-or-build the index, render a canonical
+// versioned graph snapshot (whole-repo, or the neighbourhood of --symbol),
+// print a one-line summary, then emit the snapshot JSON to stdout or --out.
+// `--verify FILE` (F-008) loads a previously written snapshot and checks it
+// against the current repo, mirroring the MCP kern_snapshot action=verify
+// handler instead of silently treating the snapshot file as a repo root.
 func runSnapshot(rest []string) int {
+	// --verify is a value-carrying flag here (the global parser treats it as a
+	// bool), so intercept it before parseFlags and route to the verify path,
+	// preserving any surrounding flags (--strict, --root ...).
+	for i := 0; i < len(rest); i++ {
+		if rest[i] == "--verify" {
+			if i+1 >= len(rest) || strings.HasPrefix(rest[i+1], "-") {
+				fatalUsage("usage: kern snapshot --verify <file> [--strict]")
+			}
+			vrest := make([]string, 0, len(rest))
+			vrest = append(vrest, rest[i+1])     // snapshot file (positional 0)
+			vrest = append(vrest, rest[:i]...)   // flags before --verify
+			vrest = append(vrest, rest[i+2:]...) // flags after the file
+			return runSnapshotVerify(vrest)
+		}
+	}
 	f, args, err := parseFlags(rest)
 	if err != nil {
 		fatalUsage("flags: %v", err)
@@ -24,6 +43,12 @@ func runSnapshot(rest []string) int {
 	}
 	if len(args) > 0 {
 		root = args[0]
+	}
+	// F-008 guard: a positional path that names a file (not a directory) is
+	// almost certainly a snapshot JSON meant for --verify. Refuse it with a
+	// clear error instead of building an empty fresh snapshot over it.
+	if fi, statErr := os.Stat(root); statErr == nil && !fi.IsDir() {
+		fatalUsage("usage: kern snapshot [root] [--out FILE] [--symbol X] [--limit N] [--verify <file>]\n  %q is a file, not a repo root. To verify a snapshot against the current repo, run:\n  kern snapshot --verify %s", root, root)
 	}
 	ix, err := loadOrBuild(root)
 	if err != nil {
@@ -85,8 +110,9 @@ func runSnapshotVerify(rest []string) int {
 	if err != nil {
 		fatal2("Snapshot verify: %v", err)
 	}
-	fmt.Printf("verdict: %s (content_root=%s, built_at=%s)\n",
-		verdict, snap.Identity.ContentRoot, snap.Identity.BuiltAt.Format(time.RFC3339))
+	fmt.Printf("verdict: %s (content_root=%s, built_at=%s, files=%d, tree_oid=%s, schema=%d, strict=%v)\n",
+		verdict, snap.Identity.ContentRoot, snap.Identity.BuiltAt.Format(time.RFC3339),
+		len(snap.Files), snap.Identity.TreeOID, snap.SchemaVersion, f.strict)
 	switch verdict {
 	case index.FreshnessFresh:
 		return 0

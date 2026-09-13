@@ -18,6 +18,7 @@ import (
 	"sync"
 
 	"github.com/JayveerPrajapati/kern/internal/cache"
+	"github.com/JayveerPrajapati/kern/internal/index"
 )
 
 // Chunk is one contiguous fragment of a source document.
@@ -105,8 +106,13 @@ func IndexDir(root string) (*Index, error) {
 		}
 		if d.IsDir() {
 			// Never skip the root itself: "." would match the hidden-dir
-			// rule and silently skip the whole tree.
-			if path != root && (strings.HasPrefix(d.Name(), ".") || d.Name() == "node_modules" || d.Name() == "vendor" || d.Name() == "target" || d.Name() == "build" || d.Name() == "dist" || d.Name() == "out") {
+			// rule and silently skip the whole tree. Reuse the index's
+			// directory-ignore list so docs search and the symbol index
+			// agree on what is project source: a private skip list here
+			// let .venv and graphify-out dominate search results (e2e
+			// round 2, P1 docs-search finding: top hits were scipy test
+			// data from venv and generated GRAPH_REPORT.md).
+			if path != root && (strings.HasPrefix(d.Name(), ".") || index.IgnoredDir(d.Name())) {
 				return filepath.SkipDir
 			}
 			return nil

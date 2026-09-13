@@ -198,11 +198,11 @@ func runEvalCompare(f flags, args []string) {
 	rb.LatencyMs = latB
 
 	type comparison struct {
-		ModeA string         `json:"mode_a"`
-		ModeB string         `json:"mode_b"`
-		A     eval.EvalResult `json:"a"`
-		B     eval.EvalResult `json:"b"`
-		Winner string        `json:"winner"` // "a" | "b" | "tie"
+		ModeA  string          `json:"mode_a"`
+		ModeB  string          `json:"mode_b"`
+		A      eval.EvalResult `json:"a"`
+		B      eval.EvalResult `json:"b"`
+		Winner string          `json:"winner"` // "a" | "b" | "tie"
 	}
 	cmp := comparison{ModeA: modeA, ModeB: modeB, A: ra, B: rb}
 	switch {

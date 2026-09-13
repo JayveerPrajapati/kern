@@ -29,8 +29,8 @@ var skipDirs = map[string]bool{
 }
 
 type archRow struct {
-	dir    string
-	cap    int
+	dir     string
+	cap     int
 	imports map[string]bool // allowed kern-internal top-2 segments
 }
 

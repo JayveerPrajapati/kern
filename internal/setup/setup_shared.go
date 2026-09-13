@@ -68,7 +68,7 @@ var agentDetectors = []agentDetector{
 	{agent: "windsurf", paths: []string{".windsurfrc", ".codeium/windsurf/mcp_config.json"}, binary: ""},
 	{agent: "zed", paths: []string{"~/.config/zed/settings.json"}, binary: ""},
 	{agent: "qwen", paths: []string{"~/.qwen/settings.json"}, binary: ""},
-	{agent: "qoder", paths: []string{"~/.qoder/mcp.json"}, binary: ""},
+	{agent: "qoder", paths: []string{"~/.qoder/settings.json", "~/.qoder/mcp.json"}, binary: ""},
 	{agent: "kiro", paths: []string{".kiro/settings/mcp.json"}, binary: ""},
 }
 
@@ -247,6 +247,20 @@ func wireRulesFile(root, name string) Status {
 // gitignoreMarker identifies the block of generated entries this package owns.
 const gitignoreMarker = "# --- kern generated (agent wiring, machine-specific) ---"
 
+// blueprintRuntimeEntries are the .blueprint/ runtime artifacts that must be
+// git-ignored: audit trails, receipts, verdict/fingerprint caches and the
+// metrics file are machine-local by nature. The .blueprint/ directory itself
+// and its config files (config.yaml, suppressions.yaml, owners.yaml) are user
+// config and must stay committable, so only these specific paths are ignored,
+// never ".blueprint/" wholesale (F-023c).
+var blueprintRuntimeEntries = []string{
+	".blueprint/audit/",
+	".blueprint/receipts/",
+	".blueprint/verdict-cache/",
+	".blueprint/fingerprint-cache/",
+	".blueprint/metrics.json",
+}
+
 // gitignoreGenerated writes the setup-generated project files to .gitignore.
 // Machine-specific configs (absolute binary paths in .mcp.json, .claude/,
 // .cursor/, .kiro/ hooks) must never be committed; uncommitted copies would
@@ -282,7 +296,7 @@ GEMINI.md
 .github/copilot-instructions.md
 .agents/rules/kern.md
 .github/hooks/
-` + closeMarker + "\n"
+` + strings.Join(blueprintRuntimeEntries, "\n") + "\n" + closeMarker + "\n"
 	cleaned := removeMarkedBlock(string(data), gitignoreMarker, closeMarker)
 	out := strings.TrimRight(cleaned, "\n")
 	if out != "" {
@@ -295,8 +309,11 @@ GEMINI.md
 	return Status{Agent: "gitignore", Installed: true, Path: path, Note: "generated entries written to .gitignore"}
 }
 
-// wireGlobalGitignore ensures that ~/.config/git/ignore (or the custom core.excludesfile)
-// contains .kern/ so that git machine-wide ignores .kern/ across ALL repositories.
+// wireGlobalGitignore ensures that ~/.config/git/ignore (or the custom
+// core.excludesfile) contains .kern/ and the blueprint runtime entries so that
+// git machine-wide ignores them across ALL repositories. Only the runtime
+// paths are added — .blueprint/ config (config.yaml, suppressions.yaml,
+// owners.yaml) stays committable (F-023c).
 func wireGlobalGitignore() Status {
 	ignorePath := globalConfig("git", "ignore")("")
 	data, err := os.ReadFile(ignorePath)
@@ -304,11 +321,18 @@ func wireGlobalGitignore() Status {
 		return Status{Agent: "global-gitignore", Path: ignorePath, Note: err.Error()}
 	}
 	content := string(data)
+	present := map[string]bool{}
 	for _, line := range strings.Split(content, "\n") {
-		trimmed := strings.TrimSpace(line)
-		if trimmed == ".kern" || trimmed == ".kern/" {
-			return Status{Agent: "global-gitignore", Installed: true, Path: ignorePath, Note: "global git ignore already configured"}
+		present[strings.TrimSpace(line)] = true
+	}
+	var missing []string
+	for _, entry := range append([]string{".kern/"}, blueprintRuntimeEntries...) {
+		if !present[entry] {
+			missing = append(missing, entry)
 		}
+	}
+	if len(missing) == 0 {
+		return Status{Agent: "global-gitignore", Installed: true, Path: ignorePath, Note: "global git ignore already configured"}
 	}
 	if err := os.MkdirAll(filepath.Dir(ignorePath), 0o755); err != nil {
 		return Status{Agent: "global-gitignore", Path: ignorePath, Note: err.Error()}
@@ -317,11 +341,11 @@ func wireGlobalGitignore() Status {
 	if len(content) == 0 || strings.HasSuffix(content, "\n") {
 		separator = ""
 	}
-	newContent := content + separator + "# kern global exclude (prevents accidental git commits across all repos)\n.kern/\n"
+	newContent := content + separator + "# kern global exclude (prevents accidental git commits across all repos)\n" + strings.Join(missing, "\n") + "\n"
 	if err := os.WriteFile(ignorePath, []byte(newContent), 0o644); err != nil {
 		return Status{Agent: "global-gitignore", Path: ignorePath, Note: err.Error()}
 	}
-	return Status{Agent: "global-gitignore", Installed: true, Path: ignorePath, Note: "added .kern/ to global git ignore"}
+	return Status{Agent: "global-gitignore", Installed: true, Path: ignorePath, Note: "added " + strings.Join(missing, ", ") + " to global git ignore"}
 }
 
 // wireLocalGitExclude ensures that <root>/.git/info/exclude contains .kern/ so that

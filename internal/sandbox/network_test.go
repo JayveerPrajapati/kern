@@ -49,6 +49,7 @@ func TestAssessNetworkCapsAndDedupes(t *testing.T) {
 }
 
 func TestRunRecordsNetworkPolicy(t *testing.T) {
+	t.Setenv("KERN_ALLOW_UNISOLATED", "1") // fail-closed gate: opt into unisolated runs on hosts without netns (darwin)
 	if runtime.GOOS == "windows" {
 		t.Skip("echo is a shell builtin on windows")
 	}
@@ -62,5 +63,35 @@ func TestRunRecordsNetworkPolicy(t *testing.T) {
 	}
 	if res.Network.Isolated {
 		t.Fatal("sandbox.Run must report Isolated=false honestly")
+	}
+}
+
+// TestRunFailsClosedWithoutIsolation (F-022): on hosts without network
+// isolation the sandbox must REFUSE to run unless the local operator opted in
+// via KERN_ALLOW_UNISOLATED=1 / KERN_ALLOW_NET=1 — the same fail-closed gate
+// `kern exec` enforces (internal/script). The error must name the override
+// env vars so the caller knows how to proceed.
+func TestRunFailsClosedWithoutIsolation(t *testing.T) {
+	if networkIsolationAvailable() {
+		t.Skip("host provides network isolation; the fail-closed branch is not reachable")
+	}
+	t.Setenv("KERN_ALLOW_UNISOLATED", "")
+	t.Setenv("KERN_ALLOW_NET", "")
+	root := t.TempDir()
+	res := Run(context.Background(), root, "echo", []string{"hi"}, time.Second)
+	if res.Err == nil {
+		t.Fatalf("expected fail-closed error; run executed unisolated")
+	}
+	if !strings.Contains(res.Err.Error(), "KERN_ALLOW_UNISOLATED") || !strings.Contains(res.Err.Error(), "KERN_ALLOW_NET") {
+		t.Fatalf("error must name the override env vars, got: %v", res.Err)
+	}
+	if res.OK {
+		t.Fatal("a refused run must not report OK")
+	}
+	// The operator's explicit opt-in lets the run proceed (env-only sandbox).
+	t.Setenv("KERN_ALLOW_UNISOLATED", "1")
+	res = Run(context.Background(), root, "echo", []string{"hi"}, time.Second)
+	if res.Err != nil && !strings.Contains(res.Err.Error(), "network isolation not available") {
+		t.Fatalf("unexpected error after opt-in: %v", res.Err)
 	}
 }

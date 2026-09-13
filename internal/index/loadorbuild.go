@@ -11,9 +11,10 @@ package index
 //
 // Stale indexes are refreshed incrementally via Update whenever a previous
 // index loads cleanly (Update re-parses only changed files); any failure
-// falls back to a full Build. The explicit `kern index` command bypasses
-// this helper entirely (cmd_index.go calls Build directly), so an explicit
-// command always means a full rebuild.
+// falls back to a full Build. The explicit `kern index` command skips a
+// rebuild when its fresh-skip check proves the persisted index current and
+// only calls Build directly when the index is missing/stale or --force is
+// given (cmd_index.go).
 func LoadOrBuild(root string) (*Index, error) {
 	var prev *Index
 	if ix, err := Load(root); err == nil && ix != nil {

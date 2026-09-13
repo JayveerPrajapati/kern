@@ -4,6 +4,8 @@ description: >-
   Investigate symbols, architecture, dependencies, or blast radius in a repository using kern's prebuilt index instead of slow file reads and greps.
 ---
 
+<!-- canonical source: internal/skills/assets/kern-investigate/SKILL.md; copies must stay identical — run kern setup to sync -->
+
 # Kern Codebase Investigation Runbook
 
 Use this skill when exploring an unfamiliar codebase, tracing call paths, analyzing dependencies, or checking what might break before making changes.

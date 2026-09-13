@@ -5,6 +5,7 @@ package version
 
 import (
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
 )
@@ -52,14 +53,18 @@ func ParseVersion(v string) (major, minor, patch int, err error) {
 	return major, minor, patch, nil
 }
 
+// commitHashRe matches git short/full hash stamps (the default `make build`
+// version), which are current-source builds like "dev".
+var commitHashRe = regexp.MustCompile(`^[0-9a-f]{7,40}$`)
+
 // VersionAtLeast reports whether installed is >= required. Both are compared
-// as major.minor.patch. The sentinel "dev" (a build without ldflags version
-// injection, e.g. from `go install pkg@latest`) is treated as satisfying any
-// minimum: it is built from the latest source and is therefore by definition
-// at or above the required version. Any other unparseable version is treated
-// as 低于 any parsed version (conservative: triggers upgrade).
+// as major.minor.patch. The sentinel "dev" and commit-hash stamps (checkout
+// builds without a release tag) are treated as satisfying any minimum: they
+// are built from current source and are therefore by definition at or above
+// the required version. Any other unparseable version is treated as below
+// any parsed version (conservative: triggers upgrade).
 func VersionAtLeast(installed, required string) bool {
-	if installed == "dev" {
+	if installed == "dev" || commitHashRe.MatchString(installed) {
 		return true
 	}
 	imajor, iminor, ipatch, iErr := ParseVersion(installed)

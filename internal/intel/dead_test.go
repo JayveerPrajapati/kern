@@ -156,3 +156,75 @@ func inner() string { return "y" }
 		t.Errorf("expected an interface-dispatch caveat, got:\n%s", out)
 	}
 }
+
+// TestDeadVisibilityGoRules pins the exported/unexported classification used
+// by the dead-code summary (F-007). Go exports a name only when its first
+// character is an uppercase letter; anything else — lowercase first letter,
+// underscore prefix — is unexported and must be counted as private, and the
+// verdict must be "certain" (no other package can reach it via interface
+// dispatch).
+func TestDeadVisibilityGoRules(t *testing.T) {
+	dir := writeTree(t, map[string]string{
+		"lib/lib.go": `package lib
+func Public() string { return "x" }
+func legacyPrint() string { return "y" }
+func _hidden() string { return "z" }
+`,
+	})
+	ix, err := index.Build(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]bool{}
+	conf := map[string]string{}
+	for _, d := range DeadCode(ix) {
+		got[d.Name] = d.Public
+		conf[d.Name] = d.Confidence
+	}
+	if !got["Public"] {
+		t.Errorf("Public: exported name must be classified public-API")
+	}
+	if conf["Public"] != ConfidenceProbable {
+		t.Errorf("Public: confidence = %q, want %q (exported = maybe external API)", conf["Public"], ConfidenceProbable)
+	}
+	if got["legacyPrint"] {
+		t.Errorf("legacyPrint: lowercase first letter is unexported in Go, must be classified private")
+	}
+	if conf["legacyPrint"] != ConfidenceCertain {
+		t.Errorf("legacyPrint: confidence = %q, want %q (private = dead for certain)", conf["legacyPrint"], ConfidenceCertain)
+	}
+	if got["_hidden"] {
+		t.Errorf("_hidden: underscore prefix is unexported in Go, must be classified private")
+	}
+	// The summary line must count the unexported symbols as private.
+	out := RenderDead(DeadCode(ix))
+	if !strings.Contains(out, "summary: 3 dead symbols (2 private, 1 public-API)") {
+		t.Errorf("summary misclassifies visibility, got:\n%s", out)
+	}
+}
+
+// TestIsPublicDecodesFirstRune pins the UTF-8 handling of the visibility
+// check: classification must use the FIRST RUNE, not the first byte. Before
+// the fix, rune(name[0]) on a multi-byte first character classified by a
+// continuation byte (0xC3 = 'Ã', uppercase), inverting the verdict for
+// unexported non-ASCII identifiers like "éclair".
+func TestIsPublicDecodesFirstRune(t *testing.T) {
+	cases := []struct {
+		name string
+		want bool
+	}{
+		{"", false},
+		{"Public", true},
+		{"legacyPrint", false},
+		{"_hidden", false},
+		{"Éclair", true},  // U+00C9 uppercase — exported
+		{"éclair", false}, // U+00E9 lowercase — unexported; pre-fix misclassified as public
+		{"Привет", true},  // Cyrillic uppercase
+		{"привет", false}, // Cyrillic lowercase
+	}
+	for _, c := range cases {
+		if got := isPublic(c.name); got != c.want {
+			t.Errorf("isPublic(%q) = %v, want %v", c.name, got, c.want)
+		}
+	}
+}

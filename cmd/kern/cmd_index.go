@@ -99,6 +99,12 @@ func runEnsureFresh(jsonOut bool, root string) {
 	} else {
 		fmt.Printf("index: %s (%d symbols, %d files, %d packages, version %d)\n",
 			res.Freshness, res.Symbols, res.Files, res.Packages, res.Version)
+		if res.CallResolution.Total > 0 {
+			pct := 100 * res.CallResolution.Unresolved / res.CallResolution.Total
+			fmt.Printf("  call resolution: %d/%d callees (%d%% unresolved)\n",
+				res.CallResolution.Total-res.CallResolution.Unresolved,
+				res.CallResolution.Total, pct)
+		}
 	}
 	if res.Freshness == "stale" {
 		// Fail-closed: a stale non-converged index must not be trusted. The
@@ -148,6 +154,12 @@ func runIndex(rest []string) {
 			fmt.Printf("  languages: %s\n", status.Languages)
 			fmt.Printf("  stale: %v\n", status.Stale)
 			fmt.Printf("  store: %s\n", status.Store)
+			if status.CallResolution.Total > 0 {
+				pct := 100 * status.CallResolution.Unresolved / status.CallResolution.Total
+				fmt.Printf("  call resolution: %d/%d callees (%d%% unresolved)\n",
+					status.CallResolution.Total-status.CallResolution.Unresolved,
+					status.CallResolution.Total, pct)
+			}
 		} else {
 			fmt.Printf("index: NOT BUILT for %s\n", root)
 		}
@@ -178,12 +190,19 @@ func runIndex(rest []string) {
 			}
 		}
 		if ix == nil {
-			// No loadable previous index, or Update failed: full build.
+			// No loadable previous index, or Update failed: full build
+			// (svc.Index.Build persists the result itself).
 			var berr error
 			ix, berr = svc.Index.Build(context.Background(), root)
 			if berr != nil {
 				fatal("Index: %v", berr)
 			}
+			if f.json {
+				printJSON(indexJSONSummary(ix, "fresh", "updated", root))
+				return
+			}
+			fmt.Printf("index updated: %d symbols in %d files (%d packages, %d reused) -> %s\n",
+				len(ix.Symbols), len(ix.FileHashes), len(ix.Pkgs), ix.ReusedResults(), index.StorePath(root))
 			return
 		}
 		if serr := ix.Save(); serr != nil {
@@ -192,13 +211,41 @@ func runIndex(rest []string) {
 		if index.SQLiteEnabled() {
 			_ = index.SaveSQLite(root, ix)
 		}
+		if f.json {
+			sum := indexJSONSummary(ix, "fresh", "updated", root)
+			sum.Reused = ix.ReusedResults()
+			printJSON(sum)
+			return
+		}
 		fmt.Printf("index updated: %d symbols in %d files (%d packages, %d reused) -> %s\n",
 			len(ix.Symbols), len(ix.FileHashes), len(ix.Pkgs), ix.ReusedResults(), index.StorePath(root))
 		return
 	}
+	// Plain `kern index [root]` (no --status/--update/ensure-fresh): build
+	// only when the persisted index is missing or stale. A fresh index is
+	// reported as-is with its symbol counts and the command exits without
+	// re-parsing anything — the historical always-rebuild behavior made the
+	// command useless as a cache-hit no-op and wasted a full tree parse on
+	// every invocation. `kern index --force` restores the unconditional
+	// rebuild for scripts that depend on it.
+	if !f.force {
+		if prev, lerr := index.Load(root); lerr == nil && prev != nil && indexIsFresh(root, prev) {
+			if f.json {
+				printJSON(indexJSONSummary(prev, "fresh", "skipped", root))
+				return
+			}
+			fmt.Printf("index: FRESH (%d symbols, %d files, %d packages, version %d) — index is up to date; use `kern index --force` to rebuild\n",
+				len(prev.Symbols), len(prev.FileHashes), len(prev.Pkgs), prev.Version)
+			return
+		}
+	}
 	ix, err := svc.Index.Build(context.Background(), root)
 	if err != nil {
 		fatal("Index: %v", err)
+	}
+	if f.json {
+		printJSON(indexJSONSummary(ix, "rebuilt", "rebuilt", root))
+		return
 	}
 	store := index.StorePath(root)
 	if index.SQLiteEnabled() {
@@ -208,6 +255,68 @@ func runIndex(rest []string) {
 		len(ix.Symbols), len(ix.FileHashes), len(ix.Pkgs), store)
 	fmt.Printf("languages: %s\n", strings.Join(ix.Languages(), ", "))
 
+}
+
+// indexIsFresh reports whether the persisted index for root is fresh enough
+// to skip a rebuild, mirroring the LoadOrBuild / `kern index --status`
+// freshness decision: the cheap git tree-OID probe when it is decisive, and
+// the loose content proof otherwise (non-git worktree or a legacy index
+// without a recorded tree OID). A nil or missing index is never fresh.
+func indexIsFresh(root string, ix *index.Index) bool {
+	if ix == nil {
+		return false
+	}
+	fresh, decided, _ := ix.TreeOIDProbe(root)
+	if decided {
+		return fresh
+	}
+	return ix.FreshnessProof(root).Verdict == index.FreshnessFresh
+}
+
+// indexJSONSummary is the `kern index --json` payload: a valid JSON summary
+// of the index operation, mirroring the top-level fields `kern index
+// ensure-fresh --json` emits (a "freshness" verdict plus the IndexStatus
+// shape: symbols/files/packages/version/languages/store).
+type indexJSONResult struct {
+	Freshness string   `json:"freshness"`
+	Action    string   `json:"action"`
+	Root      string   `json:"root"`
+	Built     bool     `json:"built"`
+	Symbols   int      `json:"symbols"`
+	Files     int      `json:"files"`
+	Packages  int      `json:"packages"`
+	Version   int      `json:"version"`
+	Stale     bool     `json:"stale"`
+	Languages []string `json:"languages"`
+	Store     string   `json:"store"`
+	// CallResolution is the honest per-repo call-target resolution rate
+	// (distinct callees that fail to resolve against the symbol table).
+	// Zero on indexes built before the pass existed.
+	CallResolution index.CallResStats `json:"call_resolution,omitempty"`
+	// Reused is how many per-file parse results were copied verbatim from the
+	// previous index during an incremental `--update` (0 for a full build).
+	Reused int `json:"reused,omitempty"`
+}
+
+func indexJSONSummary(ix *index.Index, freshness, action, root string) indexJSONResult {
+	store := index.StorePath(root)
+	if index.SQLiteEnabled() {
+		store = index.SQLitePath(root)
+	}
+	return indexJSONResult{
+		Freshness:      freshness,
+		Action:         action,
+		Root:           root,
+		Built:          true,
+		Symbols:        len(ix.Symbols),
+		Files:          len(ix.FileHashes),
+		Packages:       len(ix.Pkgs),
+		Version:        ix.Version,
+		Stale:          freshness != "fresh",
+		Languages:      ix.Languages(),
+		Store:          store,
+		CallResolution: ix.CallResolution,
+	}
 }
 
 func runWatch(rest []string) {
@@ -302,7 +411,14 @@ func runAst(rest []string) {
 	if err != nil {
 		fatal("Ast: %v", err)
 	}
-	for _, m := range ix.Search(pattern, 50) {
+	// V7: a bare token is a prefix query — "clean" must find clean_jsonc_mcp_file,
+	// not demand an exact full-name match (wildcards still do exact-anchored
+	// matching as before).
+	matches := ix.Search(pattern, 50)
+	if len(matches) == 0 && !strings.Contains(pattern, "*") {
+		matches = ix.Search(pattern+"*", 50)
+	}
+	for _, m := range matches {
 		fmt.Printf("%-10s %-7s %-24s %s:%d\n", m.Kind, m.Lang, m.FullName(), m.File, m.Line)
 	}
 
@@ -325,7 +441,7 @@ func runRepos(rest []string) {
 	}
 	switch rest[0] {
 	case "add":
-		if len(rest) < 2 {
+		if len(rest) < 2 || len(rest) > 3 {
 			fatalUsage("usage: kern repos add <path> [name]")
 		}
 		name := ""
@@ -348,7 +464,7 @@ func runRepos(rest []string) {
 		}
 		fmt.Printf("added %s -> %s\n", added.Name, added.Root)
 	case "remove":
-		if len(rest) < 2 {
+		if len(rest) < 2 || len(rest) > 2 {
 			fatalUsage("usage: kern repos remove <name>")
 		}
 		reg, err := intel.LoadRepos()
@@ -362,12 +478,38 @@ func runRepos(rest []string) {
 			fatal("Repos: %v", err)
 		}
 		fmt.Printf("removed %s\n", rest[1])
+	case "search":
+		// `kern repos search <query> [--limit N]` — the CLI surface for the
+		// cross-repo search that otherwise exists only as the kern_repo_search
+		// MCP tool. Mirrors the MCP handler's rendering (intel.FormatRepoHits,
+		// "<repo> <kind> <lang> <symbol> <file>:<line>") and defaults to 20 hits.
+		f, args, err := parseFlags(rest[1:])
+		if err != nil {
+			fatalUsage("flags: %v", err)
+		}
+		if len(args) < 1 {
+			fatalUsage("usage: kern repos search <query> [--limit N]")
+		}
+		// F-006 style: all positional words form ONE query (joined with spaces).
+		query := strings.Join(args, " ")
+		limit := f.limit
+		if limit <= 0 {
+			limit = 20
+		}
+		hits := intel.SearchRepos(query, limit)
+		if len(hits) == 0 {
+			if reg, lerr := intel.LoadRepos(); lerr != nil || len(reg.Repos) == 0 {
+				fmt.Println("no repos registered (kern repos add <path> [name])")
+				return
+			}
+			fmt.Printf("no symbols matched across repos: %s\n", query)
+			return
+		}
+		fmt.Println(intel.FormatRepoHits(hits))
 	default:
-		fatalUsage("usage: kern repos (list|add <path> [name]|remove <name>)")
+		fatalUsage("usage: kern repos (list|add <path> [name]|search <query>|remove <name>)")
 	}
-
 }
-
 func runSearch(rest []string) {
 	f, args, err := parseFlags(rest)
 	if err != nil {
@@ -376,12 +518,19 @@ func runSearch(rest []string) {
 	if len(args) < 1 {
 		fatalUsage("usage: kern search <query> [root] [--limit N] [--repos] [--json] [--semantic]")
 	}
-	query := args[0]
+	// F-006: all positional words form ONE query (joined with spaces), so
+	// `kern search user service` searches for "user service" instead of
+	// treating the 2nd token as a repo root and failing with lstat ENOENT.
+	// The trailing positional root is honored ONLY when it names an existing
+	// directory (`kern search FindUser /some/repo` keeps working); to scope
+	// the search by a path that is not an existing directory, use --root.
+	query := strings.Join(args, " ")
 	root := f.root
 	if root == "" {
 		root = "."
-		if len(args) > 1 {
-			root = args[1]
+		if len(args) > 1 && isDir(args[len(args)-1]) {
+			root = args[len(args)-1]
+			query = strings.Join(args[:len(args)-1], " ")
 		}
 	}
 	limit := f.limit
@@ -466,9 +615,3 @@ func runFts(rest []string) {
 	}
 
 }
-
-
-
-
-
-

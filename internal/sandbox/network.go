@@ -1,10 +1,14 @@
 package sandbox
 
 import (
+	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"runtime"
 	"strings"
+	"sync"
+	"time"
 )
 
 // NetworkPolicy records the network posture of a sandboxed run — the network
@@ -73,6 +77,34 @@ func assessNetwork(output string) *NetworkPolicy {
 		}
 	}
 	return p
+}
+
+// netIsolationProbe caches the unshare availability probe: whether this host
+// can run a command in a private network namespace is a per-host fact that
+// does not change during a process lifetime. Mirrors internal/script's probe
+// so `kern sandbox` and `kern exec` make the same fail-closed decision.
+var (
+	netProbeOnce   sync.Once
+	netIsolationOK bool
+)
+
+// networkIsolationAvailable reports whether this host can provide network
+// isolation for a sandboxed run (unprivileged user + network namespaces via
+// `unshare --user --map-root-user --net`). Linux with unprivileged userns
+// enabled: yes; macOS/Windows: no (no unprivileged user namespaces).
+func networkIsolationAvailable() bool {
+	netProbeOnce.Do(func() {
+		bin, err := exec.LookPath("unshare")
+		if err != nil {
+			return
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		if err := exec.CommandContext(ctx, bin, "--user", "--map-root-user", "--net", "true").Run(); err == nil {
+			netIsolationOK = true
+		}
+	})
+	return netIsolationOK
 }
 
 // netEscapeHatchSet reports whether either escape-hatch env var is enabled.

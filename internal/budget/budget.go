@@ -178,3 +178,35 @@ func FitLossless(text string) string {
 	}
 	return strings.Join(kept, "\n")
 }
+
+// FitProportional compresses text to fit within maxTokens by keeping the
+// leading portion of the document proportional to the budget — unlike Fit,
+// which is line-oriented and collapses dense single-line renders (e.g.
+// context-packet text) down to the first line. Never returns empty for
+// non-empty input, and never exceeds maxTokens (a rune-safe ratio loop
+// guarantees the ceiling).
+func FitProportional(text string, maxTokens int) string {
+	if text == "" || maxTokens <= 0 {
+		return ""
+	}
+	if tokenize.Count(text) <= maxTokens {
+		return text
+	}
+	// Byte-ratio approximation of where the token budget lands, then a
+	// rune-safe ratio loop that converges on the exact ceiling.
+	for tokenize.Count(text) > maxTokens {
+		n := len(text)
+		target := int(float64(n) * float64(maxTokens) / float64(tokenize.Count(text)))
+		if target >= n {
+			target = n - 1
+		}
+		if target < 0 {
+			target = 0
+		}
+		for target > 0 && !utf8.RuneStart(text[target]) {
+			target--
+		}
+		text = text[:target]
+	}
+	return text
+}

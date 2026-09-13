@@ -234,8 +234,13 @@ var (
 	// heredocStartRe matches a Ruby heredoc opener like <<~HEREDOC, <<-TERM,
 	// or <<TERM, capturing the terminator identifier (group 1).
 	heredocStartRe = regexp.MustCompile(`<<(-?~?)([A-Za-z_]\w*)`)
-	// callRe matches callee chains like foo(, obj.method(, a.b.c(.
-	callRe = regexp.MustCompile(`\b([A-Za-z_$][A-Za-z0-9_$]*)(?:\.[A-Za-z_$][A-Za-z0-9_$]*)*\s*\(`)
+	// callRe matches callee chains like foo(, obj.method(, a.b.c(. The
+	// optional <...> group tolerates generic type arguments between the
+	// callee chain and the paren (TS/JS/Java/C#/C++: foo<Bar>(x));
+	// scanCallsInner strips it so the recorded callee is the bare name.
+	// Requiring the < to touch the name keeps comparison-heavy non-generic
+	// languages (a < b > (c)) on the exact previous behavior.
+	callRe = regexp.MustCompile(`\b([A-Za-z_$][A-Za-z0-9_$]*)(?:\.[A-Za-z_$][A-Za-z0-9_$]*)*(?:<[^()\n]*>)?\s*\(`)
 )
 
 // typeKinds are declaration kinds that define a type (never a call site).

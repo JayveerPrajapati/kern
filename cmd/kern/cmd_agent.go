@@ -32,6 +32,23 @@ func runTeam(rest []string) {
 
 }
 
+// runAgent implements `kern agent ...`. Agent control surfaces such as
+// message and interrupt are MCP-tool surfaces (kern_agent_message /
+// kern_agent_interrupt); the CLI mirrors exist as `kern agent-message` and
+// `kern agent-interrupt`. Invoking `kern agent message ...` gets a graceful,
+// specific hint instead of the raw unknown-command usage dump (F-029).
+func runAgent(rest []string) {
+	if len(rest) == 0 {
+		fatalUsage("usage: kern agent <message|interrupt> [args] — agent control is an MCP-tool surface; use the kern_agent_message / kern_agent_interrupt MCP tools, or the CLI mirrors 'kern agent-message' / 'kern agent-interrupt'")
+	}
+	switch rest[0] {
+	case "message", "interrupt":
+		fatal("'kern agent %s' is an MCP-tool surface — use the kern_agent_%s MCP tool, or the CLI mirror 'kern agent-%s'", rest[0], rest[0], rest[0])
+	default:
+		fatalUsage("unknown 'kern agent %s' — agent control surfaces (message/interrupt) are MCP-tool surfaces; use the kern_agent_message / kern_agent_interrupt MCP tools, or the CLI mirrors 'kern agent-message' / 'kern agent-interrupt'", rest[0])
+	}
+}
+
 // runWorkflow runs an intent through the agent team workflow.
 func runWorkflow(rest []string) {
 	f, args, err := parseFlags(rest)

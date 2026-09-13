@@ -35,7 +35,7 @@ func runGraph(rest []string) {
 			fatal("Graph: %v", err)
 		}
 		g := ix.WholeGraph(f.limit)
-	out := g.GraphHTML(ix)
+		out := g.GraphHTML(ix)
 		if f.out != "" {
 			if err := os.WriteFile(f.out, []byte(out), 0o644); err != nil {
 				fatal("Graph: %v", err)
@@ -380,14 +380,33 @@ func runEntries(rest []string) {
 	var entries []entry
 	var b strings.Builder
 	n := 0
+	pkgOf := map[string]string{} // file -> package name
+	for _, p := range ix.Pkgs {
+		for _, f := range p.Files {
+			if _, ok := pkgOf[f]; !ok {
+				pkgOf[f] = p.Name
+			}
+		}
+	}
 	for _, s := range ix.Symbols {
-		if !s.Entry || s.Framework == "" {
+		framework := ""
+		route := ""
+		if s.Entry && s.Framework != "" {
+			framework = s.Framework
+			route = s.Route
+		} else if fwID, ok := goNativeEntry(s, pkgOf); ok {
+			// Language-native entry points (Go main/init) alongside the
+			// framework-tagged ones (F-009).
+			framework = fwID
+			route = "-"
+		}
+		if framework == "" {
 			continue
 		}
 		if f.json {
-			entries = append(entries, entry{s.Framework, s.FullName(), s.Route, s.File, s.Line})
+			entries = append(entries, entry{framework, s.FullName(), route, s.File, s.Line})
 		} else {
-			fmt.Fprintf(&b, "%s %s %s %s:%d\n", s.Framework, s.FullName(), s.Route, s.File, s.Line)
+			fmt.Fprintf(&b, "%s %s %s %s:%d\n", framework, s.FullName(), route, s.File, s.Line)
 		}
 		n++
 		if n >= limit {
@@ -442,9 +461,18 @@ func runPath(rest []string) {
 	if err != nil {
 		fatalUsage("flags: %v", err)
 	}
-	// Require both symbols; the root is optional and passed last.
-	if len(args) < 2 {
-		fatalUsage("usage: kern path <from-symbol> <to-symbol> [root]")
+	// F-033: --from/--to are flag aliases for the positional form
+	// `kern path <from-symbol> <to-symbol> [root]`; the positional form
+	// remains supported. The root is optional in both forms.
+	from, to := f.from, f.to
+	if from == "" && to == "" {
+		// Positional form: kern path <from-symbol> <to-symbol> [root]
+		if len(args) < 2 {
+			fatalUsage("usage: kern path <from-symbol> <to-symbol> [root]  (or --from S --to S)")
+		}
+		from, to = args[0], args[1]
+	} else if from == "" || to == "" {
+		fatalUsage("usage: kern path --from <from-symbol> --to <to-symbol> [root]  (both flags required together)")
 	}
 	root := f.root
 	if root == "" {
@@ -464,23 +492,23 @@ func runPath(rest []string) {
 	var path []string
 	var perr error
 	if f.minConfidence != "" {
-		from, _ := intel.Resolve(ix, args[0])
-		to, _ := intel.Resolve(ix, args[1])
-		path = intel.ShortestPathMin(ix, from, to, f.minConfidence)
+		fromSym, _ := intel.Resolve(ix, from)
+		toSym, _ := intel.Resolve(ix, to)
+		path = intel.ShortestPathMin(ix, fromSym, toSym, f.minConfidence)
 		if path == nil {
-			perr = fmt.Errorf("no path found between %s and %s", args[0], args[1])
+			perr = fmt.Errorf("no path found between %s and %s", from, to)
 		}
 	} else {
-		path, perr = svc.Graph.Path(context.Background(), root, args[0], args[1])
+		path, perr = svc.Graph.Path(context.Background(), root, from, to)
 	}
 	if perr != nil {
 		fatal("Path: %v", perr)
 	}
 	if f.json {
-		from, _ := intel.Resolve(ix, args[0])
-		to, _ := intel.Resolve(ix, args[1])
+		fromSym, _ := intel.Resolve(ix, from)
+		toSym, _ := intel.Resolve(ix, to)
 		printJSON(map[string]any{
-			"from": from, "to": to,
+			"from": fromSym, "to": toSym,
 			"path": path,
 		})
 		return
@@ -703,6 +731,12 @@ func runExplore(rest []string) {
 	}
 	rep, err := intel.ExploreBudgeted(ix, args[0], depth, maxN, f.minConfidence, f.maxTokens)
 	if err != nil {
+		// Unknown symbols get the same did-you-mean suggestions as the graph
+		// path (fatalNoSymbol); other Explore failures (e.g. a resolved symbol
+		// with no definition) keep their specific message.
+		if strings.Contains(err.Error(), "unknown symbol") {
+			fatalNoSymbol(args[0], ix)
+		}
 		fatal("Explore: %v", err)
 	}
 	if f.json {

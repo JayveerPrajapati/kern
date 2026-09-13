@@ -1,8 +1,10 @@
 ---
 name: kern-safe-change
 description: >-
-  Safely mutate, refactor, or edit code in the repository with pre-edit blast radius checks, firewall gate validation (G0-G29), auto-repair, and cryptographic CI receipts.
+  Safely mutate, refactor, or edit code in the repository with pre-edit blast radius checks, firewall gate validation (G0-G39), auto-repair, and cryptographic CI receipts.
 ---
+
+<!-- canonical source: internal/skills/assets/kern-safe-change/SKILL.md; copies must stay identical — run kern setup to sync -->
 
 # Kern Safe Change & Refactor Runbook
 
@@ -40,7 +42,7 @@ Perform the necessary code modifications:
 
 ## Step 3: Run the Native Change-Firewall (`kern check`)
 
-Verify staged changes against native change-firewall gates G0–G29 (secrets, architectural boundaries, circular imports, duplication):
+Verify staged changes against native change-firewall gates G0–G39 (G3 secret detection, G2 architecture/boundary enforcement, G6 duplication):
 
 ```bash
 kern check
@@ -51,7 +53,7 @@ kern check --json
 ```
 
 If any gate fails:
-- Review the specific violated gate (e.g., G0 secret detection, G4 boundary breach, G12 interface drift).
+- Review the specific violated gate (e.g., G3 secret detection, G2 boundary breach, G30 gofmt drift).
 
 ---
 

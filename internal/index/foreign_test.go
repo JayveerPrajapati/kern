@@ -294,6 +294,49 @@ func TestTypescriptExtract(t *testing.T) {
 	}
 }
 
+// TestTypescriptGenericCallEdge is a regression test for generic calls like
+// useInfiniteData<UserDto>(fn): the <...> type arguments must not leak into
+// the extracted callee name, or the edge fails to resolve to the generic
+// function declaration.
+func TestTypescriptGenericCallEdge(t *testing.T) {
+	src := `function useInfiniteData<T>(fn: () => Promise<T>) {}
+function App() {
+const { items, loadMore } = useInfiniteData<UserDto>(fetchUsersPage)
+return items
+}
+`
+	syms, calls, _, _, err := extractForeign("app.tsx", []byte(src), "typescript")
+	if err != nil {
+		t.Fatalf("extractForeign: %v", err)
+	}
+	if s := findSym(syms, "useInfiniteData"); s == nil {
+		t.Fatalf("expected func useInfiniteData, got %v", findSym(syms, "useInfiniteData"))
+	}
+	if s := findSym(syms, "App"); s == nil {
+		t.Fatalf("expected func App, got %v", findSym(syms, "App"))
+	}
+	if !contains(CallEdgeTargets(calls["App"]), "useInfiniteData") {
+		t.Fatalf("expected App to call useInfiniteData, got %v", calls["App"])
+	}
+	if contains(CallEdgeTargets(calls["App"]), "UserDto") {
+		t.Fatalf("generic type argument must not be recorded as the callee, got %v", calls["App"])
+	}
+	// JavaScript shares the same call matcher, so it inherits the fix.
+	jsSrc := `function useInfiniteData() {}
+function App() {
+const r = useInfiniteData(fetchUsersPage)
+return r
+}
+`
+	_, jsCalls, _, _, err := extractForeign("app.js", []byte(jsSrc), "javascript")
+	if err != nil {
+		t.Fatalf("extractForeign(js): %v", err)
+	}
+	if !contains(CallEdgeTargets(jsCalls["App"]), "useInfiniteData") {
+		t.Fatalf("expected js App to call useInfiniteData, got %v", jsCalls["App"])
+	}
+}
+
 const rsSrc = `pub struct Point {
     x: i32,
     y: i32,
@@ -1099,5 +1142,28 @@ export function Page() {
 	}
 	if got := ix.Calls["useAuth"]; len(got) != 0 {
 		t.Fatalf("useAuth callees = %v, want none (spurious cross-edges)", got)
+	}
+}
+
+func TestTopLevelCallbackCallsAttributedToFile(t *testing.T) {
+	// e2e round 2, P0-2: a handler wired only via an anonymous event
+	// callback had NO caller edge, so what-if called removing it "isolated:
+	// safe to proceed". Top-level calls must be attributed to the file
+	// node ("file:<rel>" caller key) so caller traversals resolve.
+	src := []byte(`const btn = document.getElementById("go");
+btn.addEventListener("click", () => {
+	runReport();
+});
+function runReport() { fetch("/api"); }
+`)
+	_, calls, _, _, _ := extractForeign("report.js", src, "javascript")
+	var found bool
+	for _, ce := range calls["file:report.js"] {
+		if ce.Target == "runReport" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected file:report.js -> runReport call edge, got %v", calls)
 	}
 }

@@ -71,7 +71,9 @@ func wirePlugin(root string) Status {
 		if bytes.Equal(cur, src) {
 			return Status{Agent: "opencode-plugin", Installed: true, Path: path, Note: "plugin already current"}
 		}
-		return Status{Agent: "opencode-plugin", Path: path, Note: "plugin is customized — left untouched"}
+		// Customized copies are intentionally left untouched; the plugin IS
+		// deployed, so this is a note, not a setup failure.
+		return Status{Agent: "opencode-plugin", Installed: true, Path: path, Note: "plugin is customized — left untouched"}
 	}
 	if err := os.WriteFile(path, src, 0o644); err != nil {
 		return Status{Agent: "opencode-plugin", Path: path, Note: err.Error()}
@@ -101,7 +103,9 @@ func wireGlobalPlugin() Status {
 				installed = true
 				continue
 			}
+			// Customized copy present: deployed, deliberately not overwritten.
 			notes = append(notes, tildePath(path)+" customized — left untouched")
+			installed = true
 			continue
 		}
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {

@@ -31,8 +31,16 @@ func TestInstallHook_PrePushAndAll(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read pre-push hook: %v", err)
 	}
-	if !strings.Contains(string(data), "--tests") || !strings.Contains(string(data), "--resilience") {
-		t.Errorf("pre-push hook missing --tests or --resilience: %s", string(data))
+	// The pre-push hook keeps every BLOCKING leg (secrets, architecture,
+	// approval, full two-pass duplication) but defers the deep suites
+	// (tests:build-test, resilience:scenarios) to CI, which re-enforces
+	// them on every PR and nightly (blueprint-nightly.yml). See
+	// internal/blueprint/cli/install_hook.go for the rationale + timings.
+	if !strings.Contains(string(data), "check --staged --format=terminal") {
+		t.Errorf("pre-push hook missing blocking `kern check --staged` invocation: %s", string(data))
+	}
+	if strings.Contains(string(data), "--tests") || strings.Contains(string(data), "--resilience") {
+		t.Errorf("pre-push hook must defer --tests/--resilience to CI, not run them: %s", string(data))
 	}
 
 	// 2. Install all

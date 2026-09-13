@@ -44,7 +44,7 @@ both are capped, not hidden.
 | `internal/deployment` | 165 | 300 | `internal/config` |
 | `internal/diff` | 728 | 1100 |  |
 | `internal/docbudget` | 121 | 200 |  |
-| `internal/docsearch` | 742 | 1200 | `internal/cache` |
+| `internal/docsearch` | 742 | 1200 | `internal/cache` `internal/index` |
 | `internal/doctor` | 534 | 900 | `internal/cache` `internal/index` `internal/llm` `internal/runtime` `internal/script` `internal/setup` `internal/stats` `internal/version` |
 | `internal/domain` | 2132 | 3200 | `internal/index` `internal/intel` `internal/sec` |
 | `internal/enterprise` | 1461 | 2200 | `internal/domain` `internal/eventbus` `internal/governance` `internal/intel` `internal/memory` `internal/storage` `internal/web` |

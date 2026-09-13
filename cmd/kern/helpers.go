@@ -331,21 +331,43 @@ func suggestSymbols(ix *index.Index, query string) []string {
 	if ix == nil || query == "" {
 		return nil
 	}
-	q := strings.ToLower(query)
+	// V10: share the MCP server's candidate logic (handlers_graph.go) so the
+	// CLI's "did you mean" set matches kern_explore/kern_graph: anchored
+	// Search first, wildcard-substring fallback, deduped by full name.
+	suggestions := ix.Search(query, 10)
+	if len(suggestions) == 0 {
+		suggestions = ix.Search("*"+query+"*", 10)
+	}
+	if len(suggestions) == 0 {
+		// Last resort: the legacy 3-char-prefix heuristic (typo tolerance)
+		// when even the substring search finds nothing.
+		q := strings.ToLower(query)
+		seen := map[string]bool{}
+		for _, s := range ix.Symbols {
+			full := s.FullName()
+			if full == "" || seen[full] {
+				continue
+			}
+			if len(q) >= 3 && strings.HasPrefix(strings.ToLower(full), q[:3]) {
+				seen[full] = true
+				suggestions = append(suggestions, s)
+				if len(suggestions) >= 5 {
+					break
+				}
+			}
+		}
+	}
 	seen := map[string]bool{}
 	var out []string
-	for _, s := range ix.Symbols {
-		name := s.Name
-		if seen[name] {
+	for _, s := range suggestions {
+		full := s.FullName()
+		if full == "" || seen[full] {
 			continue
 		}
-		lname := strings.ToLower(name)
-		if strings.Contains(lname, q) || (len(q) >= 3 && strings.HasPrefix(lname, q[:3])) {
-			seen[name] = true
-			out = append(out, name)
-			if len(out) >= 5 {
-				break
-			}
+		seen[full] = true
+		out = append(out, full)
+		if len(out) >= 5 {
+			break
 		}
 	}
 	return out

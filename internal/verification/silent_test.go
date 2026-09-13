@@ -246,3 +246,51 @@ func TestVerifyTokenReduction(t *testing.T) {
 		t.Errorf("EvidenceRetention = %v, want 1.0", res.EvidenceRetention)
 	}
 }
+
+func TestCopyTreeToTempSkipsSocketAndKernDir(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "main.go"), []byte("package demo\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// A socket entry — the .kern/events.sock shape that killed the pipeline.
+	sock := filepath.Join(root, "events.sock")
+	if err := os.WriteFile(sock, []byte("not-a-socket-content"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Runtime state that must not be copied into the temp tree.
+	if err := os.MkdirAll(filepath.Join(root, ".kern"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".kern", "index.json"), []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".kern", "events.sock"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	dst, err := copyTreeToTemp(root)
+	if err != nil {
+		t.Fatalf("copyTreeToTemp with socket entries: %v", err)
+	}
+	defer os.RemoveAll(dst)
+
+	if _, err := os.Stat(filepath.Join(dst, "main.go")); err != nil {
+		t.Errorf("regular file must be copied: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(dst, ".kern")); !os.IsNotExist(err) {
+		t.Errorf(".kern must be skipped, Lstat err = %v", err)
+	}
+}
+
+func TestCheckSilentMarkersScopedToKernPlumbing(t *testing.T) {
+	// A rendered packet that mentions Go conventions (internal/ dir, MCP
+	// protocol) must be silent — only kern-specific plumbing markers count.
+	rendered := "file: internal/mcp/server.go\nprotocol: MCP\nprovenance: .kern/evidence\n"
+	if v := checkSilentMarkers(rendered, "NewServer"); len(v) != 1 || v[0] != ".kern/" {
+		t.Errorf("want only the .kern/ marker, got %v", v)
+	}
+	// kern_ tool-name plumbing still flags.
+	if v := checkSilentMarkers("uses kern_orchestrate", "NewServer"); len(v) != 1 || v[0] != "kern_" {
+		t.Errorf("want the kern_ marker, got %v", v)
+	}
+}

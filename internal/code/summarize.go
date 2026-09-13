@@ -40,7 +40,9 @@ var patterns = map[string][]struct {
 		{regexp.MustCompile(`^func\s+`), regexp.MustCompile(`^func\s+(?:\([^)]*\)\s*)?([A-Za-z_]\w*)(?:\s*\(|\s*\{|\s+[A-Za-z_])`)},
 		{regexp.MustCompile(`^type\s+`), regexp.MustCompile(`^type\s+([A-Za-z_]\w*)`)},
 		{regexp.MustCompile(`^const\s*\(`), nil},
+		{regexp.MustCompile(`^const\s+[A-Za-z_]\w*\s*=`), regexp.MustCompile(`^const\s+([A-Za-z_]\w*)\s*=`)},
 		{regexp.MustCompile(`^var\s*\(`), nil},
+		{regexp.MustCompile(`^var\s+[A-Za-z_]\w*\s*=`), regexp.MustCompile(`^var\s+([A-Za-z_]\w*)\s*=`)},
 		{regexp.MustCompile(`^package\s+`), regexp.MustCompile(`^package\s+([A-Za-z_]\w*)`)},
 	},
 	"python": {
@@ -82,6 +84,14 @@ var patterns = map[string][]struct {
 		{regexp.MustCompile(`^#[A-Za-z_-]`), regexp.MustCompile(`^#([A-Za-z_-][\w-]*)`)},
 	},
 }
+
+// goBlockOpenRE matches the opener of a const/var declaration block. The block
+// members are captured as individual const/var symbols (F-005) so a secret
+// declared inside a block is not hidden from the symbolic summary.
+var goBlockOpenRE = regexp.MustCompile(`^(const|var)\s*\($`)
+
+// goBlockMemberRE matches a single declaration line inside a const/var block.
+var goBlockMemberRE = regexp.MustCompile(`^([A-Za-z_]\w*)\s*=`)
 
 // DetectLanguage returns the language key for a file extension.
 func DetectLanguage(path string) string {
@@ -136,10 +146,28 @@ func Summarize(path string, content []byte, maxSymbols int) Summary {
 	if lang == "" || len(patterns[lang]) == 0 {
 		return sum
 	}
+	blockKind := "" // "const"/"var" while inside a Go declaration block (F-005).
 	for i, line := range lines {
 		trimmed := strings.TrimSpace(line)
 		if trimmed == "" {
 			continue
+		}
+		if lang == "go" && blockKind != "" {
+			if trimmed == ")" {
+				blockKind = ""
+				continue
+			}
+			if m := goBlockMemberRE.FindStringSubmatch(trimmed); m != nil {
+				sum.Symbols = append(sum.Symbols, Symbol{Kind: blockKind, Name: m[1], Line: i + 1})
+				continue
+			}
+			continue
+		}
+		if lang == "go" {
+			if m := goBlockOpenRE.FindStringSubmatch(trimmed); m != nil {
+				blockKind = m[1]
+				// Fall through: the pattern loop records the block opener itself.
+			}
 		}
 		for _, p := range patterns[lang] {
 			if p.kind.MatchString(trimmed) {
@@ -147,7 +175,11 @@ func Summarize(path string, content []byte, maxSymbols int) Summary {
 					sum.Symbols = append(sum.Symbols, Symbol{Kind: "block", Name: trimmed, Line: i + 1})
 				} else if m := p.name.FindStringSubmatch(line); m != nil {
 					kind := "decl"
-					if strings.HasPrefix(trimmed, "func") || strings.Contains(trimmed, "function") {
+					if strings.HasPrefix(trimmed, "const") {
+						kind = "const"
+					} else if strings.HasPrefix(trimmed, "var") {
+						kind = "var"
+					} else if strings.HasPrefix(trimmed, "func") || strings.Contains(trimmed, "function") {
 						kind = "func"
 					} else if strings.Contains(trimmed, "class") || strings.Contains(trimmed, "struct") || strings.Contains(trimmed, "type") {
 						kind = "type"

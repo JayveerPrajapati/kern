@@ -172,11 +172,14 @@ func (a *App) handleApprovalApprove(w http.ResponseWriter, r *http.Request) {
 	updated, err := a.approvals.Approve(req.ID, req.Approver)
 	if err != nil {
 		// The approval may be a workflow-engine gate persisted only in the
-		// file store (not this in-memory workflow): fall back to the file
-		// store so a UI approve still resolves it.
-		if a.fileApprovals != nil {
-			if _, ferr := a.fileApprovals.Decide(req.ID, req.Approver, true, ""); ferr != nil {
-				writeError(w, http.StatusInternalServerError, fmt.Sprintf("approval %q not found in the in-memory workflow (%v) and the file store rejected the decision: %v", req.ID, err, ferr))
+		// file store (not this in-memory workflow): fall back to the
+		// persistent store so a UI approve still resolves it. Routing through
+		// the app-layer TaskService both persists the decision AND advances a
+		// gated task parked at WAITING_FOR_APPROVAL (F-026, mirroring
+		// `kern approve`).
+		if a.taskSvc != nil {
+			if _, ferr := a.taskSvc.ResolveApprovalForTask(req.ID, req.Approver, true, ""); ferr != nil {
+				writeError(w, http.StatusInternalServerError, fmt.Sprintf("approval %q not found in the in-memory workflow (%v) and the decision could not be recorded: %v", req.ID, err, ferr))
 				return
 			}
 			if a.firewall != nil {
@@ -197,13 +200,16 @@ func (a *App) handleApprovalApprove(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Also record the decision in the persistent store so the workflow engine
-	// (which reads the file store for its gates) observes it on resume.
-	// Approve above already persisted the decision through the workflow's own
-	// store; a failure of this belt-and-braces write does not invalidate it,
-	// but it must not be silent either.
-	if a.fileApprovals != nil {
-		if _, derr := a.fileApprovals.Decide(req.ID, req.Approver, true, ""); derr != nil {
-			log.Printf("web approve %s: decision persisted by the workflow, but the file-store confirmation write failed: %v", req.ID, derr)
+	// (which reads the file store for its gates) observes it on resume, and
+	// advance a gated task parked at WAITING_FOR_APPROVAL (F-026). Routing
+	// through the app-layer TaskService makes the web approve behave like
+	// `kern approve` / kern_approve. Approve above already persisted the
+	// decision through the workflow's own store; a failure of this
+	// belt-and-braces write does not invalidate it, but it must not be silent
+	// either.
+	if a.taskSvc != nil {
+		if _, derr := a.taskSvc.ResolveApprovalForTask(req.ID, req.Approver, true, ""); derr != nil {
+			log.Printf("web approve %s: decision persisted by the workflow, but the persistent-store confirmation write failed: %v", req.ID, derr)
 		}
 	}
 	// Propagate the approval to the firewall so the governance gate's
@@ -244,9 +250,12 @@ func (a *App) handleApprovalReject(w http.ResponseWriter, r *http.Request) {
 	updated, err := a.approvals.Reject(req.ID, req.Approver, "rejected via console")
 	if err != nil {
 		// Fall back to the persistent store (workflow-engine gates live there).
-		if a.fileApprovals != nil {
-			if _, ferr := a.fileApprovals.Decide(req.ID, req.Approver, false, "rejected via console"); ferr != nil {
-				writeError(w, http.StatusInternalServerError, fmt.Sprintf("approval %q not found in the in-memory workflow (%v) and the file store rejected the decision: %v", req.ID, err, ferr))
+		// Routing through the app-layer TaskService both persists the decision
+		// AND advances a gated task parked at WAITING_FOR_APPROVAL to REJECTED
+		// (F-026, mirroring `kern approve --reject`).
+		if a.taskSvc != nil {
+			if _, ferr := a.taskSvc.ResolveApprovalForTask(req.ID, req.Approver, false, "rejected via console"); ferr != nil {
+				writeError(w, http.StatusInternalServerError, fmt.Sprintf("approval %q not found in the in-memory workflow (%v) and the decision could not be recorded: %v", req.ID, err, ferr))
 				return
 			}
 			a.bus.Publish(eventbus.Event{Kind: eventbus.ApprovalRejected, Source: "web", Subject: req.ID})
@@ -257,11 +266,15 @@ func (a *App) handleApprovalReject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Record the rejection in the persistent store too, so any gate reading
-	// the file store observes it. Reject above already persisted the decision
-	// through the workflow's own store; a failure here must not be silent.
-	if a.fileApprovals != nil {
-		if _, derr := a.fileApprovals.Decide(req.ID, req.Approver, false, "rejected via console"); derr != nil {
-			log.Printf("web reject %s: decision persisted by the workflow, but the file-store confirmation write failed: %v", req.ID, derr)
+	// the file store observes it, and advance a gated task parked at
+	// WAITING_FOR_APPROVAL to REJECTED (F-026). Routing through the
+	// app-layer TaskService makes the web reject behave like
+	// `kern approve --reject` / kern_approve reject=true. Reject above
+	// already persisted the decision through the workflow's own store; a
+	// failure here must not be silent.
+	if a.taskSvc != nil {
+		if _, derr := a.taskSvc.ResolveApprovalForTask(req.ID, req.Approver, false, "rejected via console"); derr != nil {
+			log.Printf("web reject %s: decision persisted by the workflow, but the persistent-store confirmation write failed: %v", req.ID, derr)
 		}
 	}
 	// Invariant 4/6: record the rejection with the approver's identity.

@@ -42,8 +42,10 @@ kern pack --graph [--symbol X] [--out FILE]      graph-snapshot pack: adjacency 
   kern verify-receipt [--repo DIR] [FILE]                       verify a tamper-evident CI receipt (or its CI artifact)
   kern build "<command>" [--dir DIR]              run build, compact output
   kern log <file|->                                 compress a log file
-  kern index [root] [--status] [--json]           build/refresh the AST index; --status reports cached
-                                                index health (symbols/files/stale) without rebuilding
+  kern index [root] [--status] [--json] [--force] build/refresh the AST index (skips the rebuild when
+                                                the persisted index is fresh; --status reports cached
+                                                index health (symbols/files/stale) without rebuilding;
+                                                --force rebuilds unconditionally)
   kern index ensure-fresh [root] [--json]        probe freshness, update/rebuild when stale, strictly
                                                 re-verify; exits 2 when the index does not converge
                                                 (freshness + status JSON in one subprocess)
@@ -185,8 +187,8 @@ kern twin [root] [--root ROOT]                  digital twin knowledge graph: no
   kern hook <install|diff|store|claude-post|claude-prompt|gemini-after|gemini-prompt>   git hooks (install/diff/store) or agent hooks (read hook JSON on stdin)
   kern mcp                                        run MCP server on stdio
   kern meta "<request>"                           single entry point: describe what you need, kern picks the tool
-   kern analyze <change> [--root ROOT]       analyze a proposed change against the whole system
-   kern plan <change> [--root ROOT]          implementation plan for a proposed change
+   kern analyze <symbol> [--root ROOT]       analyze a proposed change (symbol-based; for natural-language changes use: kern run "<change>")
+   kern plan <symbol> [--root ROOT]          implementation plan for a proposed change (symbol-based; NL: kern run "<change>")
    kern modernize [--root ROOT]              phased monolith modernization plan
    kern execute <patch|patch-file> [--root]  apply a diff in an isolated worktree and verify build
    kern verify <types> [--root ROOT]         unified verification engine (types: build,test,security,architecture,dependency; default build,test)

@@ -222,6 +222,7 @@ func TestLearnWritesEpisodicAndLesson(t *testing.T) {
 }
 
 func TestPhase15LoopEndToEnd(t *testing.T) {
+	t.Setenv("KERN_ALLOW_UNISOLATED", "1") // fail-closed gate: opt into unisolated runs on hosts without netns (darwin)
 	root := loopFixture(t)
 
 	// Production mutation is disabled by default (KERN_ALLOW_DEPLOY).
@@ -334,6 +335,7 @@ func TestPhase15LoopEndToEnd(t *testing.T) {
 // proofs are satisfied they are permitted. This closes the prior gap where
 // the L5 proof machinery (AllowsStageWithProofs/L5Proofs) was dead code.
 func TestL5ProofGate(t *testing.T) {
+	t.Setenv("KERN_ALLOW_UNISOLATED", "1") // fail-closed gate: opt into unisolated runs on hosts without netns (darwin)
 	root := loopFixture(t)
 
 	// 1) L5 with nil proofs: write stages must be skipped (fail closed).
@@ -436,6 +438,7 @@ func TestRememberStage(t *testing.T) {
 // is not explicitly approved: a freshly-created "pending" approval must block
 // the deploy (Bug #2), not let it proceed.
 func TestProtectStage(t *testing.T) {
+	t.Setenv("KERN_ALLOW_UNISOLATED", "1") // fail-closed gate: opt into unisolated runs on hosts without netns (darwin)
 	appr := governance.NewApprovalWorkflow()
 	src := runtime.NewStore()
 	now := time.Now().Truncate(time.Second)
@@ -515,6 +518,7 @@ const coderCommentPatch = "```diff\n" +
 // at an autonomy level that permits the code stage (L2). The code stage must
 // run, surface a coder-produced output, and yield a non-empty diff.
 func TestLoopUsesCoderWhenStepNil(t *testing.T) {
+	t.Setenv("KERN_ALLOW_UNISOLATED", "1") // fail-closed gate: opt into unisolated runs on hosts without netns (darwin)
 	prov := &fakeProvider{responses: []string{coderCommentPatch}}
 	a := coder.New(prov)
 

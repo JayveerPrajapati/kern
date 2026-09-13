@@ -54,10 +54,11 @@ type proposal struct {
 //	--content=STRING   Proposed content for the preceding --file (repeatable).
 //	--json             Emit a structured JSON result instead of terminal text.
 //
-// Exit codes (documented contract): 0 = fix verifies clean (no findings);
-// 1 = findings remain (fix blocked); 2 = tool error (kern missing, bad or
-// escaping paths, not a git repo, worktree failure); 3 = invalid Blueprint
-// configuration.
+// Exit codes (documented contract): 0 = fix verifies clean (WARN-only
+// informational findings such as architecture:not-enforced also exit 0);
+// 1 = BLOCK findings remain (fix blocked — iterate the repair loop);
+// 2 = tool error (kern missing, bad or escaping paths, not a git repo,
+// worktree failure); 3 = invalid Blueprint configuration.
 func runFix(args []string) int {
 	fs := flag.NewFlagSet("fix", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
@@ -145,8 +146,9 @@ func runFix(args []string) int {
 		return 2
 	}
 
-	// Exit-code mapping for fix: ANY finding (WARN or BLOCK per policy) means
-	// the fix is blocked and the loop must iterate (see fixExitCode).
+	// Exit-code mapping for fix: only BLOCK findings block the loop; WARN-only
+	// informational findings (architecture:not-enforced, provenance skew) exit 0
+	// (see fixExitCode).
 	exitCode := fixExitCode(result)
 	return renderFixOutput(result, exitCode, absRoot, worktree, proposals, jsonMode)
 }
@@ -292,16 +294,20 @@ func runFixPipeline(absRoot, worktree string, cfg *policy.LoadedConfig, proposal
 }
 
 // fixExitCode maps a ValidationResult to the fix exit code (per the
-// documented contract): the pipeline's own WARN => 0 is NOT reused — for the
-// repair loop ANY finding (WARN or BLOCK per policy) means the fix is blocked
-// and the loop must iterate. PASS and SKIP-only runs verify clean.
+// documented contract): BLOCK findings mean the fix is blocked and the loop
+// must iterate (exit 1); WARN-only findings are informational and exit 0,
+// matching the `check` / `ci` contract. PASS and SKIP-only runs verify
+// clean. StatusError is a tool failure (exit 2).
 func fixExitCode(result domain.ValidationResult) int {
 	switch {
 	case result.Status == domain.StatusError:
 		return 2
-	case len(result.Findings) > 0:
+	case result.Status == domain.StatusBlock:
 		return 1
 	default:
+		// WARN (and PASS/SKIP) are not violation exits: informational
+		// findings such as architecture:not-enforced ("no .kern/ index")
+		// must not block a fix that verifies clean otherwise.
 		return 0
 	}
 }
@@ -404,18 +410,18 @@ func diffForFile(repoRoot, worktree, rel string) (string, bool, error) {
 }
 
 // fixWarnNote is the clarifying line printed (text mode) / carried as the
-// additive "note" field (--json mode) when a fix run exits 1 with a WARN-only
-// result. The exit-code contract (see fixExitCode) is deliberate: ANY
-// remaining finding — WARN or BLOCK — means the fix is blocked and the repair
-// loop must iterate; fix deliberately does NOT reuse the pipeline's own
-// WARN => 0 mapping.
-const fixWarnNote = "note: fix exits 1 while ANY finding remains (WARN or BLOCK); iterate the repair loop until the fix verifies clean (exit 0)"
+// additive "note" field (--json mode) when a fix run finishes with a WARN-only
+// finding. Informational findings (architecture:not-enforced, provenance
+// skew, latency budget) must not block a fix that verifies clean otherwise:
+// like `check` / `ci`, WARN exits 0; only BLOCK findings (real violations)
+// exit 1 and require iterating the repair loop.
+const fixWarnNote = "note: WARN-only informational findings do not block the fix (exit 0); exit 1 is reserved for BLOCK findings — iterate the repair loop until the fix verifies clean"
 
 // emitFixText renders the terminal output: check.go-style per-check lines,
 // the findings list, and (for clean fixes) the Diff section.
 func emitFixText(result domain.ValidationResult, exitCode int, diffs []fixDiff, showDiffs bool) {
 	fmt.Printf("blueprint: %s (exit %d)\n", result.Status, exitCode)
-	if exitCode == 1 && result.Status == domain.StatusWarn {
+	if result.Status == domain.StatusWarn {
 		fmt.Println(fixWarnNote)
 	}
 	fmt.Printf("correlation: %s\n", result.CorrelationID)
@@ -463,7 +469,7 @@ func emitFixJSON(result domain.ValidationResult, exitCode int, diffs []fixDiff, 
 		Diffs:         diffs,
 		DiffOmitted:   diffOmitted,
 	}
-	if exitCode == 1 && result.Status == domain.StatusWarn {
+	if result.Status == domain.StatusWarn {
 		out.Note = fixWarnNote
 	}
 	enc := json.NewEncoder(os.Stdout)
