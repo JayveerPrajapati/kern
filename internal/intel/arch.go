@@ -56,6 +56,10 @@ func AnalyzeArchitecture(ix *index.Index) Architecture {
 	}
 	labels, nodes := labelPropagation(ix)
 	fileMap := buildFileMap(ix)
+	pkgByFile := packagePathByFile(ix)
+	dups := dupFullNames(ix)
+	byName := unitsByName(defUnits(ix, pkgByFile, dups))
+	splits := map[string]map[string][]string{}
 
 	groups := map[string][]string{}
 	for _, n := range nodes {
@@ -75,9 +79,12 @@ func AnalyzeArchitecture(ix *index.Index) Architecture {
 			if d := dirOf(fileMap, s); d != "" {
 				packages[d] = true
 			}
-			if n := len(prodCallersWithFileMap(ix, s, fileMap)); n > best {
+			// P1-5: ambiguous names resolve to their strongest definition
+			// unit (package-qualified display); unique names are unchanged.
+			hubName, n := bestUnitCallers(ix, fileMap, dups, byName, splits, s)
+			if n > best {
 				best = n
-				hub = s
+				hub = hubName
 			}
 		}
 		var pkgs []string

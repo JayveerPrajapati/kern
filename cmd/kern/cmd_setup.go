@@ -252,7 +252,11 @@ func runOnboard(rest []string) {
 
 	// Build/refresh the index (loads a fresh cached one if present).
 	indexed := ""
+	timing := ""
+	t0 := time.Now()
+	prev, _ := index.Load(abs)
 	ix, ierr := loadOrBuild(abs)
+	elapsed := time.Since(t0)
 	if ierr != nil {
 		indexed = "error: " + ierr.Error()
 	} else {
@@ -260,7 +264,16 @@ func runOnboard(rest []string) {
 		for _, callees := range ix.Calls {
 			edges += len(callees)
 		}
+		staleFiles := 0
+		if prev == nil {
+			staleFiles = len(ix.FileHashes)
+		} else if ix.ReusedResults() > 0 {
+			staleFiles = len(ix.FileHashes) - ix.ReusedResults()
+		} else if prev.Stale() {
+			staleFiles = len(ix.FileHashes)
+		}
 		indexed = fmt.Sprintf("%d symbols, %d call edges, %d files", len(ix.Symbols), edges, len(ix.FileHashes))
+		timing = fmt.Sprintf("stale files: %d, rebuild: %.1fs", staleFiles, elapsed.Seconds())
 	}
 
 	// AGENTS.md wiring, only if the file is missing.
@@ -280,6 +293,9 @@ func runOnboard(rest []string) {
 	fmt.Printf("root:       %s\n", abs)
 	fmt.Printf("registered: %s\n", registered)
 	fmt.Printf("indexed:    %s\n", indexed)
+	if timing != "" {
+		fmt.Printf("timing:     %s\n", timing)
+	}
 	fmt.Printf("AGENTS.md:  %s\n", wired)
 	fmt.Printf("next:       explore with kern_explore / kern_code_graph, or kern buddy for a session digest\n")
 

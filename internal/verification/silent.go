@@ -27,6 +27,7 @@ import (
 
 // FullPipelineReport summarizes an end-to-end silent-orchestration run.
 type FullPipelineReport struct {
+	Version          string `json:"version,omitempty"`
 	EnvelopeValid    bool
 	PlanProduced     bool
 	HandlesResolved  bool
@@ -183,6 +184,7 @@ type SilentFinding struct {
 
 // SilentScanReport summarizes a path-aware silent-orchestration scan.
 type SilentScanReport struct {
+	Version    string `json:"version,omitempty"`
 	Path       string
 	Symbols    int
 	Silent     int

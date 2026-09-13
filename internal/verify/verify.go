@@ -39,7 +39,8 @@ type Check struct {
 
 // Report is the outcome of verifying a text.
 type Report struct {
-	Checks []Check
+	Version string `json:"version,omitempty"`
+	Checks  []Check
 	// Missing lists the references that could not be confirmed.
 	Missing []string
 	OK      bool

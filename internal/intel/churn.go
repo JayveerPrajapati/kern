@@ -22,6 +22,7 @@ type ChurnEntry struct {
 	Commits       int     `json:"commits"`
 	InWorkingTree bool    `json:"in_working_tree,omitempty"`
 	Risk          float64 `json:"risk,omitempty"` // 0 when the file is not indexed
+	GuardRule     string  `json:"guard_rule,omitempty"`
 }
 
 // ChurnReport is the change-frequency view: which files churn most, whether
@@ -117,6 +118,9 @@ func ChurnContext(ctx context.Context, root, from, to string) (*ChurnReport, err
 		}
 		for i := range entries {
 			entries[i].Risk = risks[entries[i].File]
+			if entries[i].Risk > 0 || entries[i].InWorkingTree {
+				entries[i].GuardRule = "pol-source-write"
+			}
 		}
 	}
 
@@ -171,6 +175,7 @@ func RenderChurn(r *ChurnReport) string {
 		head = fmt.Sprintf("change churn in %s..%s (%d commits, %d files)", r.From, r.To, r.Commits, r.Files)
 	}
 	b.WriteString(head + ":\n")
+	hasGuard := false
 	for _, e := range r.Entries {
 		flags := ""
 		if e.InWorkingTree {
@@ -179,7 +184,14 @@ func RenderChurn(r *ChurnReport) string {
 		if e.Risk > 0 {
 			flags += fmt.Sprintf("  risk %.1f", e.Risk)
 		}
+		if e.GuardRule != "" {
+			flags += fmt.Sprintf("  guard:%s", e.GuardRule)
+			hasGuard = true
+		}
 		fmt.Fprintf(&b, "  %3d×  %-48s%s\n", e.Commits, e.File, flags)
+	}
+	if hasGuard {
+		b.WriteString("\nguardrail: high-churn source modifications governed by rule pol-source-write\n")
 	}
 	return strings.TrimSuffix(b.String(), "\n")
 }

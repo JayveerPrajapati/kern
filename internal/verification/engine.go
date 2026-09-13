@@ -22,6 +22,7 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/sandbox"
 	"github.com/JayveerPrajapati/kern/internal/sec"
 	"github.com/JayveerPrajapati/kern/internal/validate"
+	"github.com/JayveerPrajapati/kern/internal/version"
 )
 
 // Timeouts for the sub-process verifications. They are generous enough to let
@@ -100,7 +101,7 @@ func (e *Engine) Verify(types []string) VerificationResult {
 	defer func() { metrics.Default().RecordVerification(time.Since(start)) }()
 
 	now := time.Now()
-	res := VerificationResult{GeneratedAt: now}
+	res := VerificationResult{GeneratedAt: now, Version: version.Version}
 	e.publish(eventbus.VerificationStarted, &res)
 
 	run := map[string]bool{}

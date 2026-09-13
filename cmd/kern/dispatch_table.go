@@ -40,6 +40,9 @@ var commandTable = map[string]commandEntry{
 		runGuide(rest)
 		return 0
 	}, help: "usage guide", usage: "usage: kern guide [flags]"},
+	"completion": {run: func(cmd string, rest []string) int {
+		return runCompletion(rest)
+	}, help: "generate shell completion scripts", usage: "usage: kern completion <bash|zsh|fish>\n  supported shells: bash, zsh, fish"},
 	"optimize": {run: func(cmd string, rest []string) int {
 		runOptimize(cmd, rest)
 		return 0
@@ -111,7 +114,7 @@ var commandTable = map[string]commandEntry{
 	"heal": {run: func(cmd string, rest []string) int {
 		runHeal(rest)
 		return 0
-	}, help: "self-correct failing files", usage: "usage: kern heal [flags]\n  options:\n    --llm              LLM backend name\n    --task"},
+	}, help: "self-correct failing files", usage: "usage: kern heal [flags]\n  options:\n    --force            override the HIGH-risk repair gate\n    --llm              LLM backend name\n    --task"},
 	"udiff": {run: func(cmd string, rest []string) int {
 		runUdiff(rest)
 		return 0
@@ -119,7 +122,7 @@ var commandTable = map[string]commandEntry{
 	"sandbox": {run: func(cmd string, rest []string) int {
 		runSandbox(rest)
 		return 0
-	}, help: "run a command with snapshot rollback", usage: "usage: kern sandbox [root] -- <command...>\n  options:\n    --json             emit JSON output"},
+	}, help: "run a command with snapshot rollback", usage: "usage: kern sandbox [root] -- <command...>\n  options:\n    --force            keep changes even when touched files carry a HIGH pre-edit verdict\n    --json             emit JSON output"},
 	"swap": {run: func(cmd string, rest []string) int {
 		runSwap(rest)
 		return 0
@@ -275,7 +278,7 @@ var commandTable = map[string]commandEntry{
 	"verify": {run: func(cmd string, rest []string) int {
 		runVerify(rest)
 		return 0
-	}, help: "verify a change", usage: "usage: kern verify [flags]\n  options:\n    --eval             evaluate a directory of cases\n    --json             emit JSON output\n    --root             project root (default: .)\n    --scan             scan path\n    --skill            skill directory\n    --verify-pipeline  silent-orchestrator pipeline verify\n    --verify-silent    silent verify\n    --verify-token-reduction token-reduction verify"},
+	}, help: "verify a change", usage: "usage: kern verify [<types>|<file|->] [flags]\n  high-level: kern verify [build,test,security,architecture,dependency] [--types X] (default build,test; needs KERN_ALLOW_EXEC=1)\n  claims: kern verify <file|-> [root]\n  options:\n    --types            explicit check types (alias for positional <types>; matches MCP kern_verify)\n    --eval             evaluate a directory of cases\n    --json             emit JSON output\n    --root             project root (default: .)\n    --scan             scan path\n    --skill            skill directory\n    --verify-pipeline  silent-orchestrator pipeline verify\n    --verify-silent    silent verify\n    --verify-token-reduction token-reduction verify"},
 	"check-draft": {run: func(cmd string, rest []string) int {
 		runCheckDraft(rest)
 		return 0
@@ -446,15 +449,15 @@ var commandTable = map[string]commandEntry{
 	"sec": {run: func(cmd string, rest []string) int {
 		runSec(rest)
 		return 0
-	}, help: "security scan", usage: "usage: kern sec [flags]\n  options:\n    --json             emit JSON output\n    --root             project root (default: .)\n    --severity         severity filter (comma-separated)"},
+	}, help: "security scan", usage: "usage: kern sec [flags]\n  options:\n    --json             emit JSON output\n    --root             project root (default: .)\n    --severity         severity filter (comma-separated, default error)"},
 	"delete": {run: func(cmd string, rest []string) int {
 		runDelete(rest)
 		return 0
-	}, help: "safe symbol deletion", usage: "usage: kern delete <symbol> [root] [--apply] [--json]\n  options:\n    --apply            apply the change\n    --json             emit JSON output\n    --root             project root (default: .)"},
+	}, help: "safe symbol deletion", usage: "usage: kern delete <symbol> [root] [--apply] [--json]\n  options:\n    --apply            apply the change (HIGH pre-edit verdict blocks without --force)\n    --force            override the HIGH-risk mutation gate\n    --json             emit JSON output\n    --root             project root (default: .)"},
 	"rename": {run: func(cmd string, rest []string) int {
 		runRename(rest)
 		return 0
-	}, help: "structural rename", usage: "usage: kern rename <old> <new> [root] [--apply] [--json]\n  options:\n    --apply            apply the change\n    --json             emit JSON output\n    --root             project root (default: .)"},
+	}, help: "structural rename", usage: "usage: kern rename <old> <new> [root] [--apply] [--json]\n  options:\n    --apply            apply the change (HIGH pre-edit verdict blocks without --force)\n    --force            override the HIGH-risk mutation gate\n    --json             emit JSON output\n    --root             project root (default: .)"},
 	"watch": {run: func(cmd string, rest []string) int {
 		runWatch(rest)
 		return 0
@@ -572,7 +575,7 @@ var commandTable = map[string]commandEntry{
 	"explore": {run: func(cmd string, rest []string) int {
 		runExplore(rest)
 		return 0
-	}, help: "symbol source + blast radius", usage: "usage: kern explore <symbol> [root] [--depth N] [--max N]\n  options:\n    --depth            traversal depth\n    --json             emit JSON output\n    --max              maximum count/threshold\n    --min-confidence   minimum confidence\n    --root             project root (default: .)"},
+	}, help: "symbol source + blast radius", usage: "usage: kern explore <symbol> [root] [--depth N] [--max N] [--explain]\n  options:\n    --depth            traversal depth (default 2, 0 = uncapped)\n    --explain          append the why-rationale section (what it is, who depends on it and why)\n    --json             emit JSON output\n    --max              maximum count/threshold (default 30)\n    --min-confidence   minimum confidence\n    --root             project root (default: .)"},
 	"fts": {run: func(cmd string, rest []string) int {
 		runFts(rest)
 		return 0
@@ -727,7 +730,7 @@ var commandTable = map[string]commandEntry{
 	"compose": {run: func(cmd string, rest []string) int {
 		runCompose(rest)
 		return 0
-	}, help: "multi-tool pipeline runner", usage: "usage: kern compose --pipeline '[{\"tool\": \"kern_search\", \"args\": {\"query\": \"foo\"}}]'\n  options:\n    --pipeline JSON  deterministic multi-tool pipeline spec with variable interpolation"},
+	}, help: "multi-tool pipeline runner", usage: "usage: kern compose --pipeline '[{\"tool\": \"kern_search\", \"args\": {\"query\": \"Index.Search\"}}]'\n  options:\n    --pipeline JSON  deterministic multi-tool pipeline spec with variable interpolation"},
 	"pre_edit": {run: func(cmd string, rest []string) int {
 		runPreEdit(rest)
 		return 0

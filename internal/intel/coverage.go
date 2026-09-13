@@ -73,6 +73,12 @@ func AnalyzeCoverage(ix *index.Index) *Coverage {
 		if isTestFile(s.File) || (s.Kind != "func" && s.Kind != "method") {
 			continue
 		}
+		if s.Kind == "func" && s.Name == "main" {
+			// Entry points are invoked by the runtime, never by callers
+			// under test: ranking every func main as an "untested hotspot"
+			// is noise.
+			continue
+		}
 		name := s.FullName()
 		total++
 		if isCovered(covered, name) {

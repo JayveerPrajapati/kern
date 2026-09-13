@@ -311,3 +311,40 @@ func TestWhatDoesXDependOnNamesKeepsUnresolvedCallees(t *testing.T) {
 		t.Fatalf("WhatDoesXDependOn(Foo) = %v, want [Bar]", ids)
 	}
 }
+
+// TestDirectDependsOnNamesIsOneHop pins P1-4: the direct view returns only
+// 1-hop callees (Bar + unresolved fmt.Println), not the transitive closure,
+// so impact reports can order direct calls first.
+func TestDirectDependsOnNamesIsOneHop(t *testing.T) {
+	ix := &index.Index{
+		Root: "/ext",
+		Symbols: []index.Symbol{
+			sym("func", "Foo", "a.go", 1),
+			sym("func", "Bar", "b.go", 1),
+			sym("func", "Baz", "c.go", 1),
+		},
+		Calls: map[string][]index.CallEdge{
+			"Foo": {
+				index.CallEdge{Target: "Bar", Confidence: index.ConfidenceHigh},
+				index.CallEdge{Target: "fmt.Println", Confidence: index.ConfidenceHigh},
+			},
+			"Bar": {
+				index.CallEdge{Target: "Baz", Confidence: index.ConfidenceHigh},
+			},
+		},
+		Callers:   map[string][]string{"Bar": {"Foo"}, "fmt.Println": {"Foo"}, "Baz": {"Bar"}},
+		UpdatedAt: time.Now(),
+	}
+	g := FromIndex(ix)
+	direct := g.DirectDependsOnNames("Foo", false)
+	if len(direct) != 2 || !contains(direct, "Bar") || !contains(direct, "fmt.Println") {
+		t.Fatalf("DirectDependsOnNames(Foo) = %v, want [Bar fmt.Println]", direct)
+	}
+	if contains(direct, "Baz") {
+		t.Fatalf("DirectDependsOnNames(Foo) = %v, must not include transitive Baz", direct)
+	}
+	// Transitive view still includes Baz (unchanged behavior for --json).
+	if all := g.WhatDoesXDependOnNames("Foo", false); !contains(all, "Baz") {
+		t.Fatalf("WhatDoesXDependOnNames(Foo) = %v, want transitive Baz preserved", all)
+	}
+}

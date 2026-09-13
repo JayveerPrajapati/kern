@@ -799,6 +799,67 @@ func TestAGENTSMdParity(t *testing.T) {
 	}
 }
 
+// TestSkillCopiesParity asserts that all copies of each skill playbook across
+// .agents/skills, .github/skills, .opencode/skills, and internal/skills/assets
+// stay byte-identical.
+func TestSkillCopiesParity(t *testing.T) {
+	skills := []string{"kern-investigate", "kern-safe-change", "kern-incident-triage"}
+	roots := []string{
+		filepath.Join("..", "..", ".agents", "skills"),
+		filepath.Join("..", "..", ".github", "skills"),
+		filepath.Join("..", "..", ".opencode", "skills"),
+		filepath.Join("..", "..", "internal", "skills", "assets"),
+	}
+
+	for _, s := range skills {
+		var canonical []byte
+		var canonicalPath string
+		for _, r := range roots {
+			p := filepath.Join(r, s, "SKILL.md")
+			data, err := os.ReadFile(p)
+			if err != nil {
+				t.Fatalf("read %s: %v", p, err)
+			}
+			if canonical == nil {
+				canonical = data
+				canonicalPath = p
+			} else if !bytes.Equal(canonical, data) {
+				t.Errorf("%s drifted from %s — run: kern setup to sync", p, canonicalPath)
+			}
+		}
+	}
+}
+
+// TestMCPDocumentationCountsParity asserts that tool counts mentioned in
+// docs/mcp/* and docs/mcp-client.md match the live registered catalog count.
+func TestMCPDocumentationCountsParity(t *testing.T) {
+	countStr := strconv.Itoa(len(mcp.ToolNames()))
+
+	docFiles := []string{
+		filepath.Join("..", "..", "docs", "mcp-client.md"),
+		filepath.Join("..", "..", "docs", "mcp", "README.md"),
+		filepath.Join("..", "..", "docs", "mcp", "versioning.md"),
+		filepath.Join("..", "..", "docs", "mcp", "protocol.md"),
+	}
+
+	for _, f := range docFiles {
+		data, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatalf("read %s: %v", f, err)
+		}
+		text := string(data)
+		if !strings.Contains(text, countStr) {
+			t.Errorf("%s does not mention live tool count %s", f, countStr)
+		}
+		// Stale counts must not be present
+		for _, stale := range []string{"121", "127"} {
+			if strings.Contains(text, stale+" tool") || strings.Contains(text, stale+" `kern_*`") || strings.Contains(text, stale+"-tool") {
+				t.Errorf("%s contains stale tool count %s", f, stale)
+			}
+		}
+	}
+}
+
 func TestWireScaffoldsKernConfig(t *testing.T) {
 	dir := t.TempDir()
 	Wire(dir, nil, false)

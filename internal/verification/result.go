@@ -35,6 +35,7 @@ const (
 
 // VerificationResult is the unified verification output.
 type VerificationResult struct {
+	Version      string `json:"version,omitempty"`
 	TaskID       string
 	Target       string // symbol/file/service being verified
 	Build        *BuildResult

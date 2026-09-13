@@ -237,11 +237,12 @@ var tools = []Tool{
 		SchemaVersion: SchemaVersionV1,
 		Phase:         "edit",
 		RiskLevel:     "critical",
-		Description:   "Run a risky command inside a snapshot of the project (#15): on non-zero exit the tree is rolled back exactly (files restored, new files removed). Success keeps changes. Use before destructive operations, migrations, or agent-applied edits. Gated by the command-execution governance firewall (KERN_ALLOW_EXEC / KERN_TOOLS) and command output is PII/secret-masked before return.",
+		Description:   "Run a risky command inside a snapshot of the project (#15): on non-zero exit the tree is rolled back exactly (files restored, new files removed). Success keeps changes unless they touch HIGH-risk files, in which case the tree is likewise restored unless force=true. Use before destructive operations, migrations, or agent-applied edits. Gated by the command-execution governance firewall (KERN_ALLOW_EXEC / KERN_TOOLS) and command output is PII/secret-masked before return.",
 		InputSchema: schema(map[string]any{
 			"root":    strProp("Project root to snapshot and run in (defaults to current directory)"),
 			"command": strProp("Full command to run, e.g. \"make migrate\" or \"sh -c 'npm test'\" (shell words, not a shell string)"),
 			"timeout": strProp("Timeout in seconds (default 120)"),
+			"force":   strProp("If true, keep changes even when touched files carry a HIGH pre-edit verdict (default restores)"),
 		}, []string{"command"}),
 	},
 	{
@@ -268,6 +269,7 @@ var tools = []Tool{
 			"model":      strProp("Ollama model (default KERN_MODEL or llama3.2)"),
 			"max_rounds": strProp("Correction attempts (default 3)"),
 			"timeout":    strProp("Validation timeout in seconds (default 120)"),
+			"force":      strProp("If true, attempt repairs even when the failing files carry a HIGH pre-edit verdict (default refuses)"),
 		}, nil),
 	},
 	{
@@ -951,6 +953,7 @@ var tools = []Tool{
 			"symbol":   strProp("Symbol to rename (package-level Go name, e.g. Widget)"),
 			"new_name": strProp("New identifier"),
 			"apply":    strProp("If true, commit the rename (with backups + rollback); otherwise return the preview only"),
+			"force":    strProp("If true, apply even when the symbol carries a HIGH pre-edit verdict (default refuses)"),
 		}, []string{"symbol", "new_name"}),
 	},
 	{
@@ -979,8 +982,9 @@ var tools = []Tool{
 		InputSchema: schema(map[string]any{
 			"symbol":         strProp("Symbol name (e.g. 'greet' or 'User.Login')"),
 			"root":           strProp("Project root (defaults to current directory)"),
-			"depth":          strProp("Cap blast radius to N hops from the symbol (default 0 = unlimited)"),
-			"max":            strProp("Maximum blast-radius symbols to return (default 0 = unlimited)"),
+			"depth":          strProp("Cap blast radius to N hops from the symbol (default 2, 0 = unlimited)"),
+			"max":            strProp("Maximum blast-radius symbols to return (default 30)"),
+			"explain":        strProp("When 'true', append the why-rationale section (what the symbol is, who depends on it and why)"),
 			"agent_id":       strProp("Agent identity for governed mode (P1.2): enables authorized-context filtering — results are scoped to what this agent may read. Omit for raw (ungoverned) mode."),
 			"task":           strProp("Task ID for governed mode; pairs with agent_id to scope authorization to the task paths."),
 			"scope":          map[string]any{"type": "object", "description": "Optional task scope object {paths, denied_paths, services, envs, artifacts} for governed mode."},

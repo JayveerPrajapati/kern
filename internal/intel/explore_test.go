@@ -95,3 +95,67 @@ func TestRenderExplore(t *testing.T) {
 		}
 	}
 }
+
+// TestDefaultExploreBounds pins the P2-8 promotion defaults: unset bounds
+// (the flags zero values) resolve to 2 hops / 30 nodes, while an explicit
+// --depth 0 keeps the uncapped radius.
+func TestDefaultExploreBounds(t *testing.T) {
+	for _, tc := range []struct{ depth, max, wantD, wantM int }{
+		{-1, 0, 2, 30},
+		{0, 0, 0, 30},
+		{1, 10, 1, 10},
+		{3, 0, 3, 30},
+		{-1, 200, 2, 200},
+	} {
+		if d, m := DefaultExploreBounds(tc.depth, tc.max); d != tc.wantD || m != tc.wantM {
+			t.Errorf("DefaultExploreBounds(%d,%d) = (%d,%d), want (%d,%d)",
+				tc.depth, tc.max, d, m, tc.wantD, tc.wantM)
+		}
+	}
+}
+
+// TestExploreAlwaysPopulatesStats pins P2-8 "always show tokens-saved": the
+// savings panel is populated even on the unbudgeted verbatim path (0% saved
+// is stated, not omitted).
+func TestExploreAlwaysPopulatesStats(t *testing.T) {
+	dir := writeTree(t, map[string]string{"lib/lib.go": srcLib})
+	ix := buildIndex(t, dir)
+	rep, err := Explore(ix, "Public", 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.Stats == nil {
+		t.Fatal("unbudgeted explore must still populate TokenStats")
+	}
+	if rep.Stats.FullContext <= 0 || rep.Stats.CompactTokens != rep.Stats.FullContext || rep.Stats.SavingsPct != 0 {
+		t.Errorf("verbatim stats must be full==compact with 0%% saved, got %+v", rep.Stats)
+	}
+	if out := RenderExplore(rep); !strings.Contains(out, "tokens: explore") {
+		t.Errorf("render missing always-on savings panel:\n%s", out)
+	}
+}
+
+// TestRenderExploreExplain pins P2-8 --explain: the report plus the
+// why-rationale section in one call.
+func TestRenderExploreExplain(t *testing.T) {
+	dir := writeTree(t, map[string]string{
+		"lib/lib.go":       srcLib,
+		"client/client.go": srcClient,
+		"lib/lib_test.go":  srcTest,
+	})
+	ix := buildIndex(t, dir)
+	rep, err := Explore(ix, "Public", 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, ok := Why(ix, "Public")
+	if !ok {
+		t.Fatal("Why(Public) failed")
+	}
+	out := RenderExploreExplain(rep, info)
+	for _, want := range []string{"== why ==", "who depends on it and why", "Public"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("explain render missing %q:\n%s", want, out)
+		}
+	}
+}

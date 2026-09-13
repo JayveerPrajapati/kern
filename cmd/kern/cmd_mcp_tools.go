@@ -75,6 +75,7 @@ func runHealth(rest []string) {
 			}
 		}
 		snap["index"] = disk
+		snap["version"] = version
 		data, err := json.MarshalIndent(snap, "", "  ")
 		if err == nil {
 			fmt.Println(string(data))
@@ -148,7 +149,7 @@ func runCompose(rest []string) {
 		raw = readStdinIfPipe()
 	}
 	if raw == "" {
-		fmt.Fprintln(os.Stderr, `usage: kern compose --pipeline '[{"tool": "kern_search", "args": {"query": "foo"}}]'`)
+		fmt.Fprintln(os.Stderr, `usage: kern compose --pipeline '[{"tool": "kern_search", "args": {"query": "Index.Search"}}]'`)
 		panic(exitError{code: 2})
 	}
 	var steps any

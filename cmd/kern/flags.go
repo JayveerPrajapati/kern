@@ -80,6 +80,7 @@ type flags struct {
 	precision            string
 	minConfidence        string
 	fold                 bool
+	explain              bool
 	staged               bool
 	compact              bool
 	subject              bool
@@ -117,6 +118,7 @@ type flags struct {
 	verifySilent         bool
 	verifyTokenReduction bool
 	scanPath             string
+	types                string
 }
 
 func parseFlags(args []string) (flags, []string, error) {
@@ -247,6 +249,8 @@ func parseFlags(args []string) (flags, []string, error) {
 			f.verifyTokenReduction = true
 		case "--scan":
 			setStr(&i, &f.scanPath)
+		case "--types":
+			setStr(&i, &f.types)
 		case "--detect":
 			f.detect = true
 		case "--global":
@@ -357,6 +361,8 @@ func parseFlags(args []string) (flags, []string, error) {
 			setStr(&i, &f.minConfidence)
 		case "--fold":
 			f.fold = true
+		case "--explain":
+			f.explain = true
 		case "--graph":
 			f.graph = true
 		case "--generate":

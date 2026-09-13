@@ -245,6 +245,12 @@ func ScanFile(rel string, src []byte) []Finding {
 			if r.ID == "sql-injection" && isPragmaTableInfo(src, idx[0]) {
 				continue
 			}
+			// Struct literals and stdlib conversions are construction, not
+			// leaks: `PrivateKey: ed25519.PrivateKey(priv)` holds no
+			// credential literal.
+			if r.ID == "hardcoded-secret" && isQualifiedCodeValue(src, idx[0], idx[1]) {
+				continue
+			}
 			line := lineAt(src, idx[0])
 			findings = append(findings, Finding{
 				File:     rel,
@@ -279,6 +285,21 @@ func ScanFile(rel string, src []byte) []Finding {
 		}
 		return findings[i].Rule < findings[j].Rule
 	})
+	// Line-scoped contract: two matches of one rule on one line (e.g. two
+	// md5.Sum calls in a single Sprintf) are a single finding, not two.
+	// The message (pii label) is part of the key: one line can hold two
+	// genuinely different secrets (URL_CRED + KEY), which must both stay.
+	deduped := findings[:0]
+	for i, f := range findings {
+		if i > 0 {
+			prev := findings[i-1]
+			if f.File == prev.File && f.Line == prev.Line && f.Rule == prev.Rule && f.Message == prev.Message {
+				continue
+			}
+		}
+		deduped = append(deduped, f)
+	}
+	findings = deduped
 	return findings
 }
 
@@ -503,6 +524,38 @@ func isPragmaTableInfo(src []byte, pos int) bool {
 // paren, another concat or the end — never a call, method or field access.
 var rePragmaConcat = regexp.MustCompile(`\s*\+\s*[a-zA-Z_][a-zA-Z0-9_]*\s*(?:\)|"|'|\+|\s*$)`)
 
+// isQualifiedCodeValue reports whether a hardcoded-secret match's value is a
+// code expression rather than a credential literal. The match spans
+// `name<sep>value`; when the value is an unquoted identifier that continues
+// into a package qualifier (`ed25519.PrivateKey(priv)`) or a call, it is
+// construction/composition, never a committed secret. Quoted strings and
+// opaque unquoted tokens (secret123, sk-live-...) still match: the filter
+// only fires on ident-followed-by-dot-or-paren. Conservative by design —
+// anything else keeps the finding.
+func isQualifiedCodeValue(src []byte, start, end int) bool {
+	m := src[start:end]
+	sep := bytes.LastIndexAny(m, "=:")
+	if sep < 0 {
+		return false
+	}
+	v := bytes.TrimSpace(m[sep+1:])
+	if len(v) == 0 {
+		return false
+	}
+	if v[0] == '"' || v[0] == '\'' || v[0] == '`' {
+		return false
+	}
+	if v[0] != '_' && (v[0] < 'a' || v[0] > 'z') && (v[0] < 'A' || v[0] > 'Z') {
+		return false
+	}
+	// The value regex classes exclude '.' and '(', so a qualified/call value
+	// always ends the match mid-expression: peek what follows in src.
+	if end < len(src) && (src[end] == '.' || src[end] == '(') {
+		return true
+	}
+	return false
+}
+
 // isTestFile reports whether a file is a test fixture, matching the naming
 // conventions across the indexed languages: *_test.go, foo_test.py,
 // auth.test.js, *Test.java (JUnit/Maven), *Spec.java (Spock), test_*.py
@@ -528,20 +581,29 @@ func isTestFile(rel string) bool {
 	if strings.HasPrefix(base, "test_") {
 		return true
 	}
-	// Directory-based test detection: files under /test/ or /tests/ paths
-	// (Maven's src/test/java, Go's test dirs, etc.).
-	lower := strings.ToLower(rel)
-	if strings.Contains(lower, "/test/") || strings.Contains(lower, "/tests/") {
-		return true
+	// Directory-based test and fixture detection: files under test or
+	// fixture directory paths (Maven's src/test/java, Go's test dirs,
+	// testfixture(s) helpers, fixtures/ asset dirs).
+	// (Note: testdata/ is handled by caller allowlists such as Blueprint G3).
+	dirPart := filepath.ToSlash(filepath.Dir(rel))
+	if dirPart != "." && dirPart != "" {
+		slashedDir := "/" + strings.ToLower(dirPart) + "/"
+		for _, dir := range []string{"/test/", "/tests/", "/testfixture/", "/testfixtures/", "/fixture/", "/fixtures/"} {
+			if strings.Contains(slashedDir, dir) {
+				return true
+			}
+		}
 	}
 	return false
 }
 
 // maxLineLength returns the length of the longest line in src. Minified JS
 // bundles pack entire libraries into single lines exceeding thousands of
-// characters; legitimate source rarely exceeds 200.
+// bytes (e.g. bundle.min.js with 100k+ chars on line 1). Scanning these
+// causes exponential regex backtracking that freezes the scan.
 func maxLineLength(src []byte) int {
-	max, cur := 0, 0
+	max := 0
+	cur := 0
 	for _, b := range src {
 		cur++
 		if b == '\n' {

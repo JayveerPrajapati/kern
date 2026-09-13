@@ -63,7 +63,8 @@ func (s *Server) handleHealth(ctx context.Context, args map[string]any) (string,
 	}
 
 	result := map[string]any{
-		"status": "ok",
+		"status":  "ok",
+		"version": serverVersion,
 		"index": map[string]any{
 			"root":                 root,
 			"fresh":                indexFresh,

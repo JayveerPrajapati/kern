@@ -539,12 +539,20 @@ func runSearch(rest []string) {
 	}
 	if f.repos {
 		hits := intel.SearchRepos(query, limit)
-		if len(hits) == 0 {
-			fmt.Printf("no symbols matched across repos: %s\n", query)
+		if f.json {
+			if hits == nil {
+				hits = []intel.RepoHit{}
+			}
+			printJSON(map[string]any{
+				"version": version,
+				"query":   query,
+				"results": hits,
+				"total":   len(hits),
+			})
 			return
 		}
-		if f.json {
-			printJSON(hits)
+		if len(hits) == 0 {
+			fmt.Printf("no symbols matched across repos: %s\n", query)
 			return
 		}
 		fmt.Println(intel.FormatRepoHits(hits))
@@ -564,12 +572,20 @@ func runSearch(rest []string) {
 	} else {
 		matches = intel.RankedSearch(ix, query, limit)
 	}
-	if len(matches) == 0 {
-		fmt.Printf("no symbols matched: %s\n", query)
+	if f.json {
+		if matches == nil {
+			matches = []index.Symbol{}
+		}
+		printJSON(map[string]any{
+			"version": version,
+			"query":   query,
+			"results": matches,
+			"total":   len(matches),
+		})
 		return
 	}
-	if f.json {
-		printJSON(matches)
+	if len(matches) == 0 {
+		fmt.Printf("no symbols matched: %s\n", query)
 		return
 	}
 	// V7d: collapse same-name symbols duplicated across sibling modules.

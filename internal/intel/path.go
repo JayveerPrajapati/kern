@@ -76,6 +76,9 @@ func ShortestPathMin(ix *index.Index, from, to string, minConf string) []string 
 	if from == "" || to == "" {
 		return nil
 	}
+	if from == to {
+		return []string{from}
+	}
 	passes := MinConfidenceFilter(minConf)
 	adj := map[string][]string{}
 	names := canonicalNames(ix)
@@ -98,28 +101,61 @@ func ShortestPathMin(ix *index.Index, from, to string, minConf string) []string 
 			}
 		}
 	}
-	if from == to {
-		return []string{from}
+
+	type queueItem struct {
+		node string
+		dist int
 	}
+
+	dist := map[string]int{from: 0}
 	prev := map[string]string{}
-	visited := map[string]bool{from: true}
-	queue := []string{from}
-	for len(queue) > 0 {
-		cur := queue[0]
-		queue = queue[1:]
-		for _, nb := range adj[cur] {
+	visited := map[string]bool{}
+	pq := []queueItem{{node: from, dist: 0}}
+
+	for len(pq) > 0 {
+		minIdx := 0
+		for i := 1; i < len(pq); i++ {
+			if pq[i].dist < pq[minIdx].dist {
+				minIdx = i
+			}
+		}
+		cur := pq[minIdx]
+		pq = append(pq[:minIdx], pq[minIdx+1:]...)
+
+		if visited[cur.node] {
+			continue
+		}
+		visited[cur.node] = true
+
+		if cur.node == to {
+			return rebuildPath(prev, from, to)
+		}
+
+		for _, nb := range adj[cur.node] {
 			if visited[nb] {
 				continue
 			}
-			visited[nb] = true
-			prev[nb] = cur
-			if nb == to {
-				return rebuildPath(prev, from, to)
+			cost := edgeWeight(EdgeConfidenceLabel(ix, cur.node, nb))
+			newDist := cur.dist + cost
+			if d, ok := dist[nb]; !ok || newDist < d {
+				dist[nb] = newDist
+				prev[nb] = cur.node
+				pq = append(pq, queueItem{node: nb, dist: newDist})
 			}
-			queue = append(queue, nb)
 		}
 	}
 	return nil
+}
+
+func edgeWeight(label string) int {
+	switch label {
+	case confExtracted:
+		return 1
+	case confInferred:
+		return 10
+	default:
+		return 25
+	}
 }
 
 func rebuildPath(prev map[string]string, from, to string) []string {
@@ -144,6 +180,38 @@ type PathHop struct {
 	Line   int    `json:"line,omitempty"`
 }
 
+func findSymbolLoc(ix *index.Index, hop string, adjacent ...string) string {
+	var candidates []index.Symbol
+	for _, s := range ix.Symbols {
+		if s.FullName() == hop || s.Name == hop {
+			candidates = append(candidates, s)
+		}
+	}
+	if len(candidates) == 0 {
+		return ""
+	}
+	if len(candidates) == 1 {
+		return fmt.Sprintf("%s:%d", candidates[0].File, candidates[0].Line)
+	}
+	for _, cand := range candidates {
+		for _, ce := range ix.Calls[cand.FullName()] {
+			for _, adj := range adjacent {
+				if ce.Target == adj || simpleName(ce.Target) == simpleName(adj) {
+					return fmt.Sprintf("%s:%d", cand.File, cand.Line)
+				}
+			}
+		}
+		for _, caller := range ix.Callers[cand.FullName()] {
+			for _, adj := range adjacent {
+				if caller == adj || simpleName(caller) == simpleName(adj) {
+					return fmt.Sprintf("%s:%d", cand.File, cand.Line)
+				}
+			}
+		}
+	}
+	return fmt.Sprintf("%s:%d", candidates[0].File, candidates[0].Line)
+}
+
 // RenderPath returns a compact chain like "A -> B -> C" with file:line and
 // the provenance label of every hop's edge ([EXTRACTED]/[INFERRED]/
 // [AMBIGUOUS]), so each step of the answer is FACT/INFERENCE-classifiable.
@@ -151,14 +219,16 @@ func RenderPath(ix *index.Index, path []string) string {
 	if len(path) == 0 {
 		return "no path found (symbols are not connected through project-local calls)"
 	}
-	loc := map[string]string{}
-	for _, s := range ix.Symbols {
-		if _, ok := loc[s.FullName()]; !ok {
-			loc[s.FullName()] = fmt.Sprintf("%s:%d", s.File, s.Line)
-		}
-	}
 	var b strings.Builder
 	for i, hop := range path {
+		var adjacent []string
+		if i > 0 {
+			adjacent = append(adjacent, path[i-1])
+		}
+		if i < len(path)-1 {
+			adjacent = append(adjacent, path[i+1])
+		}
+
 		if i == 0 {
 			b.WriteString(hop)
 		} else {
@@ -172,7 +242,7 @@ func RenderPath(ix *index.Index, path []string) string {
 				b.WriteString(" (SYNTHESIZED: " + synth + ")")
 			}
 		}
-		if l := loc[hop]; l != "" {
+		if l := findSymbolLoc(ix, hop, adjacent...); l != "" {
 			b.WriteString("  ")
 			b.WriteString(l)
 		}

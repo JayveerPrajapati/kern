@@ -405,6 +405,34 @@ func (g *Graph) WhatDoesXDependOnNames(symbol string, strict bool) []string {
 	return out
 }
 
+// DirectDependsOnNames returns the 1-hop callees of symbol as renderable names,
+// using the same resolved-or-verbatim mapping as WhatDoesXDependOnNames. It
+// exists so impact reports can list direct calls first, then transitive-only
+// callees, instead of an undifferentiated alphabetical dump (P1-4).
+func (g *Graph) DirectDependsOnNames(symbol string, strict bool) []string {
+	outgoing, _ := g.buildAdjacencyOpt(strict)
+	start := g.resolveSymbol(symbol)
+	byID := g.nodesByID()
+	seen := map[string]bool{}
+	var out []string
+	for _, id := range outgoing[start] {
+		name := id
+		if n, ok := byID[id]; ok && n.Symbol != nil {
+			if n.Symbol.Qualified != "" {
+				name = n.Symbol.Qualified
+			} else {
+				name = n.Symbol.Name
+			}
+		}
+		if !seen[name] {
+			seen[name] = true
+			out = append(out, name)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
 // WhatAPIsAffected returns the API entry-point nodes affected by a change to
 // the given symbol: every node transitively depending on it that is a framework
 // entry point, plus the symbol itself when it is one.

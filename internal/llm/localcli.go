@@ -28,11 +28,13 @@ type LocalCliProvider struct {
 // the final argument; each agent's print-mode flag selects non-interactive
 // text output.
 var localCliAgents = map[string]func(bin string) []string{
-	"claude":   func(bin string) []string { return []string{bin, "-p", "--output-format", "text"} },
-	"opencode": func(bin string) []string { return []string{bin, "run"} },
-	"codex":    func(bin string) []string { return []string{bin, "exec", "--skip-git-repo-check"} },
-	"gemini":   func(bin string) []string { return []string{bin, "-p"} },
-	"qwen":     func(bin string) []string { return []string{bin, "-p"} },
+	"claude":      func(bin string) []string { return []string{bin, "-p", "--output-format", "text"} },
+	"opencode":    func(bin string) []string { return []string{bin, "run"} },
+	"codex":       func(bin string) []string { return []string{bin, "exec", "--skip-git-repo-check"} },
+	"gemini":      func(bin string) []string { return []string{bin, "-p"} },
+	"qwen":        func(bin string) []string { return []string{bin, "-p"} },
+	"agy":         func(bin string) []string { return []string{bin, "run"} },
+	"antigravity": func(bin string) []string { return []string{bin, "run"} },
 }
 
 // cliTimeout returns the per-call timeout for CLI providers
@@ -47,7 +49,7 @@ func cliTimeout() time.Duration {
 }
 
 // NewLocalCliProvider returns a provider that shells out to the named agent
-// CLI (claude|opencode|codex|gemini|qwen). It never errors: a provider whose binary is
+// CLI (claude|opencode|codex|gemini|qwen|agy|antigravity). It never errors: a provider whose binary is
 // missing fails loudly at Generate time with an actionable message. Binary
 // presence is probed once per call so PATH changes take effect.
 func NewLocalCliProvider(name string) *LocalCliProvider {
@@ -60,12 +62,12 @@ func NewLocalCliProvider(name string) *LocalCliProvider {
 }
 
 // AvailableLocalAgents lists the locally-installed agent CLIs that can serve
-// as LLM providers (claude, opencode, codex, gemini, qwen), in preference
-// order. Opencode is a first-class coding agent alongside Claude Code; its
+// as LLM providers (claude, opencode, codex, gemini, qwen, agy, antigravity), in preference
+// order. Opencode and agy are first-class coding agents alongside Claude Code; their
 // `run` command is non-interactive and prints the model's answer.
 func AvailableLocalAgents() []string {
 	var out []string
-	for _, name := range []string{"claude", "opencode", "codex", "gemini", "qwen"} {
+	for _, name := range []string{"claude", "opencode", "codex", "gemini", "qwen", "agy", "antigravity"} {
 		if p, err := exec.LookPath(name); err == nil && p != "" {
 			out = append(out, name)
 		}

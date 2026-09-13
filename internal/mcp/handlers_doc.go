@@ -7,6 +7,8 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/commitmsg"
 	"github.com/JayveerPrajapati/kern/internal/docsearch"
 	"github.com/JayveerPrajapati/kern/internal/fetch"
+	"github.com/JayveerPrajapati/kern/internal/index"
+	"github.com/JayveerPrajapati/kern/internal/intel"
 	"github.com/JayveerPrajapati/kern/internal/llm"
 	"github.com/JayveerPrajapati/kern/internal/precache"
 	"os"
@@ -58,19 +60,86 @@ func (s *Server) handleDocSearch(ctx context.Context, args map[string]any) (stri
 			}
 		}
 		results := ix.Search(query, k)
-		if len(results) == 0 {
-			return "no matching document fragments", nil
-		}
-		var b strings.Builder
-		for i, r := range results {
-			fmt.Fprintf(&b, "#%d score=%.3f %s:%d\n", i+1, r.Sim, r.Doc.Chunk.File, r.Doc.Chunk.Start)
-			b.WriteString(r.Doc.Chunk.Text)
-			if i < len(results)-1 {
-				b.WriteString("\n\n")
+
+		var codeMatches []index.Symbol
+		var codeIx *index.Index
+		if len(results) == 0 || (len(results) > 0 && results[0].Sim <= 1.0) {
+			if cix, err := s.loadIndex(ctx, root); err == nil && cix != nil {
+				codeIx = cix
+				codeMatches = intel.RankedSearch(cix, query, k)
+				if gov, err := s.newGovernor(ctx, args, cix); err == nil && gov != nil {
+					var kept []index.Symbol
+					for _, m := range codeMatches {
+						if gov.allowed[m.FullName()] {
+							kept = append(kept, m)
+						}
+					}
+					codeMatches = kept
+				}
 			}
 		}
-		return b.String(), nil
 
+		if len(results) == 0 && len(codeMatches) == 0 {
+			return "no matching document fragments", nil
+		}
+
+		var b strings.Builder
+		if len(results) > 0 && len(codeMatches) > 0 {
+			b.WriteString("## Documentation\n")
+			for i, r := range results {
+				fmt.Fprintf(&b, "#%d score=%.3f %s:%d\n", i+1, r.Sim, r.Doc.Chunk.File, r.Doc.Chunk.Start)
+				b.WriteString(r.Doc.Chunk.Text)
+				if i < len(results)-1 {
+					b.WriteString("\n\n")
+				}
+			}
+			b.WriteString("\n\n## Code\n")
+			for _, m := range codeMatches {
+				b.WriteString(m.Kind)
+				b.WriteString(" ")
+				b.WriteString(m.FullName())
+				b.WriteString(" ")
+				b.WriteString(m.File)
+				b.WriteString(":")
+				b.WriteString(strconv.Itoa(m.Line))
+				if codeIx != nil && codeIx.IsGenerated(m.File) {
+					b.WriteString(" (generated)")
+				}
+				b.WriteString("\n")
+			}
+			return strings.TrimSuffix(b.String(), "\n"), nil
+		}
+
+		if len(results) > 0 {
+			for i, r := range results {
+				fmt.Fprintf(&b, "#%d score=%.3f %s:%d\n", i+1, r.Sim, r.Doc.Chunk.File, r.Doc.Chunk.Start)
+				b.WriteString(r.Doc.Chunk.Text)
+				if i < len(results)-1 {
+					b.WriteString("\n\n")
+				}
+			}
+			return b.String(), nil
+		}
+
+		if len(codeMatches) > 0 {
+			b.WriteString("## Code\n")
+			for _, m := range codeMatches {
+				b.WriteString(m.Kind)
+				b.WriteString(" ")
+				b.WriteString(m.FullName())
+				b.WriteString(" ")
+				b.WriteString(m.File)
+				b.WriteString(":")
+				b.WriteString(strconv.Itoa(m.Line))
+				if codeIx != nil && codeIx.IsGenerated(m.File) {
+					b.WriteString(" (generated)")
+				}
+				b.WriteString("\n")
+			}
+			return strings.TrimSuffix(b.String(), "\n"), nil
+		}
+
+		return "", nil
 	}
 }
 
