@@ -3,7 +3,7 @@
      The catalog:doc gate (G36) fails when this file is stale or a tool is missing. -->
 # MCP Tool Catalog
 
-Every model-facing tool the kern MCP server registers (`kern_*`). 131 tools.
+Every model-facing tool the kern MCP server registers (`kern_*`). 136 tools.
 
 | Tool | Phase | Risk | Description |
 |---|---|---|---|
@@ -51,6 +51,7 @@ Every model-facing tool the kern MCP server registers (`kern_*`). 131 tools.
 | `kern_exec` | edit | critical | Run code in an isolated local runtime and return ONLY stdout — the 'Think in Code' surface. Language is selected by --lang or a shebang line; runtimes are resolved from PATH (python3, node, go, bash, perl, ruby, php, lua, julia, R, bun, deno, rust, ...). The script runs in a fresh temp dir with a hard timeout (default 10s, override timeout=N), a stdout byte cap (default 16KiB, override max=N), and a sanitized environment (HOME/XDG pointed into the sandbox, secrets stripped). Isolation is enforced: the script runs in a private network namespace when the platform supports it, and the run refuses to execute if network isolation is unavailable (never silently runs with full network). stderr is never mixed into stdout and is only surfaced on failure. On platforms where private network namespaces are unavailable (e.g. macOS, some containers) the run refuses to execute — it fails closed instead of degrading to full network egress — unless the local operator sets KERN_ALLOW_UNISOLATED=1 (alias KERN_ALLOW_NET=1). Use it to compute things (math, data munging, JSON transforms) without polluting context. |
 | `kern_execute` | edit | critical | HIGH-LEVEL (ADR-0006): execute a change inside an isolated sandbox worktree (autonomy L2). Applies the given unified diff, verifies it builds, and returns the resulting diff. Never mutates the live repository. |
 | `kern_explain` | explore | low | Synthesizes an end-to-end architectural narrative for a symbol or file: purpose, callers, callees, interfaces, and testing posture in a single call. |
+| `kern_explain_finding` | verify | low | Blueprint change firewall: explain a single gate finding (rule id, severity, category, file, line, message, evidence) in plain language — why it was raised and what the rule checks. Merged from the standalone blueprint-mcp server. |
 | `kern_explore` | explore | low | Single-call explore (#2): return a symbol's verbatim source, direct call flow (callers + callees) and transitive blast radius (with affected files) in one shot. The primitive that replaces three separate calls (graph/near/path) for 'what touches this and how'. Pass depth=N to cap the blast radius to N hops and max=N to cap node count. |
 | `kern_flight` | cross | low | Replay the AI flight recorder (Workflow E observability): the full recorded trail for one task — every stage, tool call, decision, approval, and outcome, in chronological order. Read-only; answers 'what did the agent do, why, and what happened?'. Records live under <root>/.kern/flight. |
 | `kern_frameworks` | explore | low | Detect the frameworks and libraries a project uses (Spring, Rails, Django, Express, gin, etc.) by scanning manifests and source markers. Use to know what stack the codebase is on. |
@@ -65,6 +66,7 @@ Every model-facing tool the kern MCP server registers (`kern_*`). 131 tools.
 | `kern_inherits` | explore | low | Return the inheritance edges of a symbol: its supertypes (extends/implements/embeds) and subtypes (what extends/implements/embeds it). Use to see class hierarchies without reading whole files. |
 | `kern_larges` | explore | low | Find the largest function/method declarations by source lines. Use to locate god functions that beg for refactoring. |
 | `kern_learn` | cross | medium | HIGH-LEVEL: extract recurring patterns from engineering memory and surface those above a threshold. Patterns are promoted to memory (evidence-based). Deterministic — the LLM may explain but does not create patterns. |
+| `kern_llm_providers` | cross | low | List the LLM provider chain in priority order (Ollama first, then locally-wired agent CLIs: claude, opencode, codex, gemini, qwen). With probe=true, live-tests each installed provider with a trivial prompt and reports who actually answers — the priority pick when Ollama is absent. The full wired-agent history is available via kern agents (CLI) and kern doctor. |
 | `kern_lock` | edit | medium | Acquire an advisory workspace lock on a scope (flock-based). Held by this server until kern_unlock. Lets concurrent agents coordinate before touching shared files. Errors when the scope is already held. |
 | `kern_lock_status` | edit | low | List workspace locks with whether each is held and by which PID. Use to see what other agents are working on. |
 | `kern_loop` | cross | high | HIGH-LEVEL (Workflow E): run the closed autonomy loop against an intent string and return the stage timeline plus the deployed / observed-healthy / learned outcome. The autonomy level (L0-L5, default L0 read-only) gates which stages run; the AI stages use the deterministic no-op step by default and are pluggable via the loop's StepFunc mechanism. |
@@ -103,6 +105,7 @@ Every model-facing tool the kern MCP server registers (`kern_*`). 131 tools.
 | `kern_prompt_fill` | cross | low | Dynamically renders standardized, token-efficient agent prompts with auto-injected project layout and memory lessons. Prevents agents from wasting tokens on repetitive prompt boilerplate. |
 | `kern_prose` | explore | low | Prose-word to symbol candidate lookup for the NL router miss-chain: maps plain-English words ('middleware', 'retry') to candidate symbols via the build-time inverted vocab, so agents skip the miss-chain (kern_search miss -> kern_ast_search miss). Each hit is a symbol full name plus the number of query words that matched it; multi-word queries rank symbols matching more words first. |
 | `kern_rename` | edit | high | Structural symbol rename on the AST index (P0-5): previews every definition/reference for a Go package-level symbol (types, funcs, vars, consts) with file:line:col edits, then applies them transactionally when apply=true. Edits come from a real go/ast parse, so strings, comments, struct-field names, composite-literal keys, import aliases and the package clause are never touched; cross-package references (pkg.Symbol) are handled for exported symbols. Before applying, every touched file is backed up under <root>/.kern/rename-backup/ and a mid-flight failure restores all files. Method rename and non-Go symbols are refused. Returns the preview (or apply result) as text. |
+| `kern_repair_guidance` | verify | low | Blueprint change firewall: repair guidance for a gate finding — concrete suggested fix, suppression guidance, and the rule reference. Merged from the standalone blueprint-mcp server. |
 | `kern_repo_search` | explore | low | Ranked free-text symbol search across every repo in the kern multi-repo registry (kern repos add). Returns matches tagged with their repo name, best hits first. Set semantic=true to re-rank pooled results by Ollama dense embeddings. |
 | `kern_resolve` | explore | low | Resolve a handle ID from kern_retrieve to L2 or L3 content, validating staleness via content hash. |
 | `kern_retrieve` | explore | low | Retrieve context at progressive disclosure levels (L1=index summary, L2=neighborhood, L3=source) with stable handles; task_type selects the level from the planner policy (documentation=l1, refactor=l3, else l2). |
@@ -132,6 +135,8 @@ Every model-facing tool the kern MCP server registers (`kern_*`). 131 tools.
 | `kern_unlock` | edit | medium | Release a workspace lock previously acquired via kern_lock. |
 | `kern_usage_guide` | plan | low | Categorized usage guide for every kern MCP tool with performance tiers (fast/moderate/expensive), recommended workflows, and pitfalls. Consult this first when deciding which tool fits a task. |
 | `kern_validate` | verify | high | Auto-validation (#7): detect the project's language-appropriate build/test/syntax command and run it. Returns exit status, truncated output and duration. Use after editing code to gate correctness before final answers. |
+| `kern_validate_proposed` | verify | high | Blueprint change firewall: validate a PROPOSED change (not yet on disk) against policy — files is an array of {path, content, op} for the would-be diff. Returns per-gate PASS/BLOCK findings. Merged from the standalone blueprint-mcp server. |
+| `kern_validate_staged` | verify | high | Blueprint change firewall: validate the STAGED diff (git diff --cached) against policy (boundaries, secrets, duplication, architecture). Returns per-gate PASS/BLOCK findings with rule ids and files. Merged from the standalone blueprint-mcp server. Use before committing. |
 | `kern_verify` | verify | medium | HIGH-LEVEL (ADR-0006): verify a change with the unified verification engine — build, unit tests, security, architecture, dependency. Returns the typed verdict (PASS/FAIL/WARN) and per-check summary. |
 | `kern_verify_output` | verify | low | Hallucination check: extract file:line, symbol-name and route references from an agent's output text and confirm each against the real source tree and index. Returns ok/MISS verdicts for every reference. |
 | `kern_walk` | explore | low | Graph-guided walk: the /walk-graph primitive. Returns an indented parent-child dependency tree of every symbol up to N hops away from a symbol, across files, with file:line per node. Alias of kern_near with a tree-oriented description; use instead of grepping or reading whole files to locate code. |
@@ -447,6 +452,13 @@ Every model-facing tool the kern MCP server registers (`kern_*`). 131 tools.
 - Description: Synthesizes an end-to-end architectural narrative for a symbol or file: purpose, callers, callees, interfaces, and testing posture in a single call.
 - Input parameters: `root`, `target`
 
+## `kern_explain_finding`
+
+- Phase: `verify`
+- Risk: `low`
+- Description: Blueprint change firewall: explain a single gate finding (rule id, severity, category, file, line, message, evidence) in plain language — why it was raised and what the rule checks. Merged from the standalone blueprint-mcp server.
+- Input parameters: `finding`, `root`
+
 ## `kern_explore`
 
 - Phase: `explore`
@@ -544,6 +556,13 @@ Every model-facing tool the kern MCP server registers (`kern_*`). 131 tools.
 - Risk: `medium`
 - Description: HIGH-LEVEL: extract recurring patterns from engineering memory and surface those above a threshold. Patterns are promoted to memory (evidence-based). Deterministic — the LLM may explain but does not create patterns.
 - Input parameters: `root`, `threshold`
+
+## `kern_llm_providers`
+
+- Phase: `cross`
+- Risk: `low`
+- Description: List the LLM provider chain in priority order (Ollama first, then locally-wired agent CLIs: claude, opencode, codex, gemini, qwen). With probe=true, live-tests each installed provider with a trivial prompt and reports who actually answers — the priority pick when Ollama is absent. The full wired-agent history is available via kern agents (CLI) and kern doctor.
+- Input parameters: `probe`, `root`
 
 ## `kern_lock`
 
@@ -811,6 +830,13 @@ Every model-facing tool the kern MCP server registers (`kern_*`). 131 tools.
 - Description: Structural symbol rename on the AST index (P0-5): previews every definition/reference for a Go package-level symbol (types, funcs, vars, consts) with file:line:col edits, then applies them transactionally when apply=true. Edits come from a real go/ast parse, so strings, comments, struct-field names, composite-literal keys, import aliases and the package clause are never touched; cross-package references (pkg.Symbol) are handled for exported symbols. Before applying, every touched file is backed up under <root>/.kern/rename-backup/ and a mid-flight failure restores all files. Method rename and non-Go symbols are refused. Returns the preview (or apply result) as text.
 - Input parameters: `apply`, `new_name`, `root`, `symbol`
 
+## `kern_repair_guidance`
+
+- Phase: `verify`
+- Risk: `low`
+- Description: Blueprint change firewall: repair guidance for a gate finding — concrete suggested fix, suppression guidance, and the rule reference. Merged from the standalone blueprint-mcp server.
+- Input parameters: `finding`, `root`
+
 ## `kern_repo_search`
 
 - Phase: `explore`
@@ -1013,6 +1039,20 @@ Every model-facing tool the kern MCP server registers (`kern_*`). 131 tools.
 - Risk: `high`
 - Description: Auto-validation (#7): detect the project's language-appropriate build/test/syntax command and run it. Returns exit status, truncated output and duration. Use after editing code to gate correctness before final answers.
 - Input parameters: `command`, `root`, `timeout`
+
+## `kern_validate_proposed`
+
+- Phase: `verify`
+- Risk: `high`
+- Description: Blueprint change firewall: validate a PROPOSED change (not yet on disk) against policy — files is an array of {path, content, op} for the would-be diff. Returns per-gate PASS/BLOCK findings. Merged from the standalone blueprint-mcp server.
+- Input parameters: `files`, `root`, `source`
+
+## `kern_validate_staged`
+
+- Phase: `verify`
+- Risk: `high`
+- Description: Blueprint change firewall: validate the STAGED diff (git diff --cached) against policy (boundaries, secrets, duplication, architecture). Returns per-gate PASS/BLOCK findings with rule ids and files. Merged from the standalone blueprint-mcp server. Use before committing.
+- Input parameters: `root`, `source`
 
 ## `kern_verify`
 
