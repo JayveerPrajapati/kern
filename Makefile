@@ -1,7 +1,11 @@
 BIN := bin
-VERSION ?= dev
-LDFLAGS := -X main.version=$(VERSION)
-RELEASE_LDFLAGS := -s -w -X main.version=$(VERSION)
+# Default VERSION to the repo HEAD short hash so every `make build` produces
+# a parity-checkable binary (north-star NS-7); an explicit VERSION (release
+# tag) overrides it. Both the legacy main.version and the shared
+# internal/version.Version are stamped.
+VERSION ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo dev)
+LDFLAGS := -X main.version=$(VERSION) -X github.com/JayveerPrajapati/kern/internal/version.Version=$(VERSION)
+RELEASE_LDFLAGS := -s -w -X main.version=$(VERSION) -X github.com/JayveerPrajapati/kern/internal/version.Version=$(VERSION)
 GOFLAGS := -buildvcs=false
 
 .PHONY: all build build-treesitter test test-race vet lint bench install hooks release dist mcpb clean clean-artifacts

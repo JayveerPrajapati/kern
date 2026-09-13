@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"regexp"
 	"path/filepath"
 	goruntime "runtime"
 	"sort"
@@ -40,6 +41,7 @@ func Run(root string) []Finding {
 	var out []Finding
 	out = append(out, checkBinary())
 	out = append(out, checkVersion())
+	out = append(out, checkParity(root))
 	out = append(out, checkCapabilities())
 	out = append(out, checkPath())
 	out = append(out, checkExec())
@@ -203,6 +205,53 @@ func checkVersion() Finding {
 		Level:  lvl,
 		Detail: fmt.Sprintf("kern %s · %s · %s/%s", v, goruntime.Version(), goruntime.GOOS, goruntime.GOARCH),
 	}
+}
+
+// checkParity detects a stale installed binary: when the binary is stamped
+// with a build commit, it must match the repo HEAD it is run against
+// (north-star NS-7). An unstamped ("dev") build cannot prove parity and
+// reports the stamping incantation instead of failing.
+func checkParity(root string) Finding {
+	v := version.Version
+	if v == "dev" || v == "" {
+		return Finding{
+			Check:  "parity",
+			Level:  "warn",
+			Detail: "unstamped binary (version=dev): build with -ldflags \"-X github.com/JayveerPrajapati/kern/internal/version.Version=$(git rev-parse HEAD)\" to enable build-vs-repo parity",
+		}
+	}
+	head := gitHead(root)
+	if head == "" {
+		return Finding{Check: "parity", Level: "warn", Detail: fmt.Sprintf("binary stamped %s but %s is not a git checkout — cannot compare", v, root)}
+	}
+	if v == head || strings.HasPrefix(head, v) {
+		return Finding{Check: "parity", Level: "ok", Detail: fmt.Sprintf("binary build %s matches repo HEAD %s", v, head)}
+	}
+	// A release tag build (vX.Y.Z) is a legitimate artifact built from a
+	// tagged commit; the parity check cannot map the tag to a HEAD hash, so
+	// tag-shaped stamps are accepted rather than falsely reported stale.
+	if tagRe.MatchString(v) {
+		return Finding{Check: "parity", Level: "ok", Detail: fmt.Sprintf("binary is a release build (%s); repo HEAD is %s", v, head)}
+	}
+	return Finding{
+		Check:  "parity",
+		Level:  "warn",
+		Detail: fmt.Sprintf("binary build %s differs from repo HEAD %s — installed binary is stale; rebuild and reinstall", v, head),
+	}
+}
+
+// tagRe matches release-tag version stamps (vX.Y.Z), which are accepted by
+// the parity check because a tag build cannot be mapped to a HEAD hash.
+var tagRe = regexp.MustCompile(`^v\d+\.\d+\.\d+`)
+
+// gitHead returns the repo HEAD commit short hash, or "" when root is not a
+// git checkout.
+func gitHead(root string) string {
+	out, err := exec.Command("git", "-C", root, "rev-parse", "--short", "HEAD").Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
 }
 
 // checkConfig validates .kern/config.json: a present-but-malformed file is a
