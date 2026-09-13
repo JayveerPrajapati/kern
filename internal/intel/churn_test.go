@@ -320,7 +320,26 @@ func main() { _ = pkg0.Func0() }
 // map instead of rebuilding it per symbol, and churn reads the persisted
 // index snapshot instead of re-verifying freshness with a git tree-OID walk.
 func BenchmarkChurnContextKernRepo(b *testing.B) {
-	root := "/Users/jayveer.prajapati/ai_workspace/kern_opensource/kern"
+	root := os.Getenv("KERN_BENCH_ROOT")
+	if root == "" {
+		if wd, err := os.Getwd(); err == nil {
+			cand := wd
+			for i := 0; i < 5; i++ {
+				if st, err := os.Stat(filepath.Join(cand, ".kern", "index.json")); err == nil && !st.IsDir() {
+					root = cand
+					break
+				}
+				parent := filepath.Dir(cand)
+				if parent == cand {
+					break
+				}
+				cand = parent
+			}
+		}
+	}
+	if root == "" {
+		b.Skip("kern repo index not present; set KERN_BENCH_ROOT to run benchmark")
+	}
 	if st, err := os.Stat(filepath.Join(root, ".kern", "index.json")); err != nil || st.IsDir() {
 		b.Skip("kern repo index not present; skipping repo benchmark")
 	}
