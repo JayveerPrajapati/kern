@@ -244,12 +244,22 @@ func checkParity(root string) Finding {
 	if v == head || strings.HasPrefix(head, v) {
 		return Finding{Check: "parity", Level: "ok", Detail: fmt.Sprintf("binary build %s matches repo HEAD %s", v, head)}
 	}
+	// A release tag build (vX.Y.Z) is a legitimate artifact built from a
+	// tagged commit; the parity check cannot map the tag to a HEAD hash, so
+	// tag-shaped stamps are accepted rather than falsely reported stale.
+	if tagRe.MatchString(v) {
+		return Finding{Check: "parity", Level: "ok", Detail: fmt.Sprintf("binary is a release build (%s); repo HEAD is %s", v, head)}
+	}
 	return Finding{
 		Check:  "parity",
 		Level:  "warn",
 		Detail: fmt.Sprintf("binary build %s differs from repo HEAD %s — installed binary is stale; rebuild and reinstall", v, head),
 	}
 }
+
+// tagRe matches release-tag version stamps (vX.Y.Z), which are accepted by
+// the parity check because a tag build cannot be mapped to a HEAD hash.
+var tagRe = regexp.MustCompile(`^v\d+\.\d+\.\d+`)
 
 // gitHead returns the repo HEAD commit short hash, or "" when root is not a
 // git checkout.

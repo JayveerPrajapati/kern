@@ -576,19 +576,26 @@ async function runPayload(args: string[], timeoutMs?: number, preserveExit = fal
           return run(flags)
         },
       }),
+      // CLI:
+      //   kern pack [root] [--max-tokens N] [--out FILE]
+      //   kern pack --graph [--symbol X] [--out FILE]
       kern_pack: tool({
         description:
-          "Pack a whole project into one paste-ready bundle: project instructions, a directory tree with per-file token counts, and file contents, sized to fit a token budget. Use when an agent needs the full source to edit against, not just a map.",
+          "Pack a whole project into one paste-ready bundle: project instructions, a directory tree with per-file token counts, and file contents, sized to fit a token budget. Use when an agent needs the full source to edit against, not just a map. Set graph=true to pack the call-graph snapshot instead (adjacency + signatures + per-file SHA-256 fingerprint, ~1-5% of the raw token cost); symbol selects a subgraph (empty = whole graph), ignored when graph=false.",
         args: {
           root: tool.schema.string().optional(),
           max_tokens: tool.schema.string().optional(),
           no_instructions: tool.schema.string().optional(),
           out: tool.schema.string().optional(),
+          graph: tool.schema.string().optional(),
+          symbol: tool.schema.string().optional(),
         },
         async execute(args) {
           const flags: string[] = ["pack"]
           flags.push("--max-tokens", String(args.max_tokens || 8000))
           if (truthy(args.no_instructions)) flags.push("--no-instructions")
+          if (truthy(args.graph)) flags.push("--graph")
+          if (args.symbol) flags.push("--symbol", args.symbol)
           if (args.out) flags.push("--out", args.out)
           flags.push(args.root ?? ".")
           return run(flags)
@@ -765,6 +772,20 @@ kern_optimize_log: tool({
         async execute(args) {
           const flags: string[] = ["path", args.from, args.to]
           if (args.root) flags.push(args.root)
+          return run(flags)
+        },
+      }),
+      kern_cycles: tool({
+        description:
+          "Package-level import cycles via Tarjan SCC over the project-local import graph (project packages only, third-party imports ignored). Returns the deterministic cycle list with file:line evidence.",
+        args: {
+          root: tool.schema.string().optional(),
+          json: tool.schema.string().optional(),
+        },
+        async execute(args) {
+          const flags: string[] = ["cycles"]
+          if (args.root) flags.push(args.root)
+          if (args.json) flags.push("--json")
           return run(flags)
         },
       }),
@@ -1776,7 +1797,79 @@ return run(flags)
           return run(flags)
         },
       }),
-      kern_loop: tool({
+      kern_validate_staged: tool({
+description:
+"Blueprint change firewall: validate the STAGED diff (git diff --cached) against policy (boundaries, secrets, duplication, architecture). Returns per-gate PASS/BLOCK findings. Use before committing.",
+args: {
+root: tool.schema.string().optional(),
+source: tool.schema.string().optional(),
+},
+async execute(args) {
+const flags: string[] = ["diff-gate"]
+if (args.root) flags.push("--root", args.root)
+if (args.source) flags.push("--source", args.source)
+return run(flags)
+},
+}),
+kern_validate_proposed: tool({
+description:
+"Blueprint change firewall: validate a PROPOSED change (not yet on disk) against policy — files is a JSON array of {path, content, op}. Returns per-gate PASS/BLOCK findings.",
+args: {
+root: tool.schema.string().optional(),
+source: tool.schema.string().optional(),
+files: tool.schema.string().optional(),
+},
+async execute(args) {
+const flags: string[] = ["validate-proposed"]
+if (args.root) flags.push("--root", args.root)
+if (args.source) flags.push("--source", args.source)
+if (args.files) flags.push("--files", args.files)
+return run(flags)
+},
+}),
+kern_explain_finding: tool({
+description:
+"Blueprint change firewall: explain a gate finding (rule id, severity, category, file, line, message) in plain language.",
+args: {
+root: tool.schema.string().optional(),
+finding: tool.schema.string().optional(),
+},
+async execute(args) {
+const flags: string[] = ["explain-finding"]
+if (args.root) flags.push("--root", args.root)
+if (args.finding) flags.push("--finding", args.finding)
+return run(flags)
+},
+}),
+kern_repair_guidance: tool({
+description:
+"Blueprint change firewall: repair guidance for a gate finding — suggested fix and rule reference.",
+args: {
+root: tool.schema.string().optional(),
+finding: tool.schema.string().optional(),
+},
+async execute(args) {
+const flags: string[] = ["repair-guidance"]
+if (args.root) flags.push("--root", args.root)
+if (args.finding) flags.push("--finding", args.finding)
+return run(flags)
+},
+}),
+kern_llm_providers: tool({
+description:
+"List the LLM provider chain in priority order (Ollama first, then locally-wired agent CLIs: claude, opencode, codex, gemini, qwen). With probe=true, live-tests each installed provider with a trivial prompt and reports who actually answers — the priority pick when Ollama is absent. Full wired-agent history: kern agents (CLI) and kern doctor.",
+args: {
+root: tool.schema.string().optional(),
+probe: tool.schema.boolean().optional(),
+},
+async execute(args) {
+const flags: string[] = ["agents"]
+if (args.root) flags.push("--root", args.root)
+if (args.probe) flags.push("--probe")
+return run(flags)
+},
+}),
+kern_loop: tool({
         description:
           "HIGH-LEVEL (Workflow E): run the closed autonomy loop against an intent string and return the stage timeline plus the deployed / observed-healthy / learned outcome. The autonomy level (L0-L5, default L0 read-only) gates which stages run.",
         args: {
@@ -2456,7 +2549,67 @@ kern_entry_points: tool({
           return run(flags)
         },
       }),
-      kern_stream: tool({
+      kern_surprising: tool({
+        description:
+          "Surprising connections: cross-community call edges ranked by community distance x rarity, deduped against known bridges. Deterministic; surfaces unexpected coupling an onboarding digest should point at.",
+        args: {
+          root: tool.schema.string().optional(),
+          limit: tool.schema.string().optional(),
+        },
+        async execute(args) {
+          const flags: string[] = ["surprising"]
+          if (args.root) flags.push(args.root)
+          if (args.limit) flags.push("--limit", String(args.limit))
+          return run(flags)
+        },
+      }),
+      // CLI:
+      //   kern snapshot [root] [--symbol X] [--out FILE]
+      //   kern snapshot verify <file> [--strict]
+      kern_snapshot: tool({
+        description:
+          "Canonical versioned graph snapshot for cross-agent handoff: whole-repo or per-symbol subgraph plus the build-time IndexIdentity fingerprint (content root, git tree/commit) and per-file SHA-256 hashes. action=create builds a snapshot (output is the versioned GraphSnapshot JSON); action=verify checks a snapshot file against a root and returns the freshness verdict (fresh/stale/unknown) with the fingerprint.",
+        args: {
+          action: tool.schema.string().optional(),
+          root: tool.schema.string().optional(),
+          symbol: tool.schema.string().optional(),
+          limit: tool.schema.string().optional(),
+          file: tool.schema.string().optional(),
+        },
+        async execute(args) {
+          const flags: string[] = ["snapshot"]
+          if (args.action === "verify") {
+            flags.push("verify")
+            if (args.file) flags.push(args.file)
+            if (args.root) flags.push(args.root)
+            if (args.strict) flags.push("--strict")
+            return run(flags)
+          }
+          if (args.root) flags.push(args.root)
+          if (args.symbol) flags.push("--symbol", args.symbol)
+          if (args.limit) flags.push("--limit", String(args.limit))
+if (args.out) flags.push("--out", args.out)
+return run(flags)
+},
+}),
+// CLI:
+//   kern prose <words> [root] [--limit N]
+kern_prose: tool({
+description:
+"Prose-word to symbol candidate lookup for the NL router miss-chain: maps plain-English words ('middleware', 'retry') to candidate symbols via the build-time inverted vocab, so agents skip the miss-chain (kern_search miss -> kern_ast_search miss). Each hit is a symbol full name plus the number of query words that matched it; multi-word queries rank symbols matching more words first.",
+args: {
+query: tool.schema.string(),
+root: tool.schema.string().optional(),
+limit: tool.schema.string().optional(),
+},
+async execute(args) {
+const flags: string[] = ["prose", args.query]
+if (args.root) flags.push(args.root)
+if (args.limit) flags.push("--limit", String(args.limit))
+return run(flags)
+},
+}),
+kern_stream: tool({
         description:
           "Inspects streaming status, partitions large responses into token-friendly chunks, and manages progress notification channels for long-running operations.",
         args: {

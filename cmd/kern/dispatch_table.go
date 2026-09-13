@@ -96,6 +96,18 @@ var commandTable = map[string]commandEntry{
 		runValidate(rest)
 		return 0
 	}, help: "auto-validate", usage: "usage: kern validate [flags]\n  options:\n    --cmd              command string\n    --json             emit JSON output\n    --root             project root (default: .)"},
+	"validate-proposed": {run: func(cmd string, rest []string) int {
+		runValidateProposed(rest)
+		return 0
+	}, help: "blueprint gate on a proposed (not-on-disk) change", usage: "usage: kern validate-proposed --files <json> [--root ROOT] [--source SRC]\n  options:\n    --files            JSON array of proposed changes [{\"path\",\"content\",\"op\"}]\n    --root             repository root (default: .)\n    --source           agent identity (default: agent)"},
+	"explain-finding": {run: func(cmd string, rest []string) int {
+		runExplainFinding(rest)
+		return 0
+	}, help: "plain-language explanation of a blueprint gate finding", usage: "usage: kern explain-finding --finding <json> [--root ROOT]"},
+	"repair-guidance": {run: func(cmd string, rest []string) int {
+		runRepairGuidance(rest)
+		return 0
+	}, help: "repair guidance for a blueprint gate finding", usage: "usage: kern repair-guidance --finding <json> [--root ROOT]"},
 	"heal": {run: func(cmd string, rest []string) int {
 		runHeal(rest)
 		return 0
@@ -147,6 +159,10 @@ var commandTable = map[string]commandEntry{
 	"doctor": {run: func(cmd string, rest []string) int {
 		return runDoctor(rest)
 	}, help: "self-diagnostics", usage: "usage: kern doctor [flags]\n  options:\n    --json             emit JSON output\n    --root             project root (default: .)"},
+	"agents": {run: func(cmd string, rest []string) int {
+		runAgents(rest)
+		return 0
+	}, help: "wired agents + LLM provider priority", usage: "usage: kern agents [--probe] [--json] [--root ROOT]\n  options:\n    --probe            live-test each installed LLM provider (may take minutes)\n    --json             emit JSON\n    --root             project root (default: .)"},
 	"calibrate": {run: func(cmd string, rest []string) int {
 		runCalibrate(rest)
 		return 0

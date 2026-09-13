@@ -29,7 +29,7 @@ type Artifact struct {
 }
 
 // CollectArtifacts scans the given directory for interesting artifacts.
-// For now: looks for .diff/.patch/.log/.txt/.json files that are small (<1MB)
+// Matches .diff/.patch/.log/.txt/.json files smaller than 1MB.
 // and returns them as Artifact structs.
 func CollectArtifacts(dir string) ([]Artifact, error) {
 	var arts []Artifact
