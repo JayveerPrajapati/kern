@@ -48,7 +48,7 @@ bench:
 
 install: build
 	mkdir -p $${HOME}/.local/bin
-	cp $(BIN)/kern $(BIN)/kern-mcp $(BIN)/kern-server $${HOME}/.local/bin/
+	install -m 755 $(BIN)/kern $(BIN)/kern-mcp $(BIN)/kern-server $${HOME}/.local/bin/
 # macOS Gatekeeper SIGKILLs adhoc-signed binaries carrying the
 # com.apple.provenance xattr on first launch (exit 137, empty output).
 # Re-sign after copy and strip both quarantine and provenance xattrs so
