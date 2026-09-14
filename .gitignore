@@ -53,13 +53,6 @@ docs/agent-intelligence-roadmap.md
 
 
 
-# --- blueprint runtime state (kern generated) ---
-.blueprint/audit/
-.blueprint/receipts/
-.blueprint/verdict-cache/
-.blueprint/fingerprint-cache/
-.blueprint/metrics.json
-# --- end blueprint runtime state ---
 
 # --- kern generated (agent wiring, machine-specific) ---
 # Re-run `kern setup` to refresh. Unignore a line to commit shared config.
@@ -85,3 +78,11 @@ GEMINI.md
 .blueprint/fingerprint-cache/
 .blueprint/metrics.json
 # --- end kern generated ---
+
+# --- blueprint runtime state (kern generated) ---
+.blueprint/audit/
+.blueprint/receipts/
+.blueprint/verdict-cache/
+.blueprint/fingerprint-cache/
+.blueprint/metrics.json
+# --- end blueprint runtime state ---

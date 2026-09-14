@@ -39,3 +39,30 @@ func TestRenderCompactSurfacesFailVerdict(t *testing.T) {
 		t.Errorf("RenderCompact must not fabricate a PASS verdict:\n%s", out)
 	}
 }
+
+func TestRenderCompactSecurityFindingDetails(t *testing.T) {
+	v := VerificationResult{
+		Verdict: VerdictPassWithWarning,
+		Summary: "security: 1 finding",
+		Security: &SecurityResult{
+			OK:    true,
+			Count: 1,
+			Low:   1,
+			Findings: []Finding{
+				{
+					File:     "auth/login.go",
+					Line:     42,
+					Severity: "info",
+					Rule:     "ip-leak",
+					Message:  "unencrypted IP reference",
+				},
+			},
+		},
+	}
+	out := RenderCompact(v)
+	want := "auth/login.go:42 [info] ip-leak: unencrypted IP reference"
+	if !strings.Contains(out, want) {
+		t.Errorf("RenderCompact missing finding detail %q in:\n%s", want, out)
+	}
+}
+

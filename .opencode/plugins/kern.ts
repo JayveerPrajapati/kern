@@ -1779,7 +1779,7 @@ return run(flags)
           const flags: string[] = ["verify"]
           if (args.root) flags.push("--root", args.root)
           if (args.types) flags.push(args.types)
-          return run(flags)
+          return runPayload(flags)
         },
       }),
       kern_incident: tool({

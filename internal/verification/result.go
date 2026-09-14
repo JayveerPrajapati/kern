@@ -230,6 +230,13 @@ func RenderCompact(v VerificationResult) string {
 			detail += " error=" + v.Security.Error
 		}
 		line("security", okStatus(v.Security.OK), detail)
+		for i, fd := range v.Security.Findings {
+			if i >= 10 {
+				b.WriteString(fmt.Sprintf("  ... and %d more findings\n", len(v.Security.Findings)-10))
+				break
+			}
+			b.WriteString(fmt.Sprintf("  - %s:%d [%s] %s: %s\n", fd.File, fd.Line, fd.Severity, fd.Rule, fd.Message))
+		}
 	}
 	if v.Architecture != nil {
 		line("architecture", okStatus(v.Architecture.OK), fmt.Sprintf("violations=%d warnings=%d", len(v.Architecture.Violations), len(v.Architecture.Warnings)))

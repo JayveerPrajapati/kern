@@ -430,8 +430,13 @@ func (s *TaskService) collectGraphImpact(g *intelligence.Graph, target string, s
 		rep.EventsAffected = append(rep.EventsAffected, nodeName(n))
 	}
 	// 6. Which tests cover it?
+	seenTests := make(map[string]bool)
 	for _, n := range g.WhatTestsCoverPrecise(target, strict) {
-		rep.TestsCover = append(rep.TestsCover, nodeName(n))
+		name := nodeName(n)
+		if name != "" && !seenTests[name] {
+			seenTests[name] = true
+			rep.TestsCover = append(rep.TestsCover, name)
+		}
 	}
 	return rep
 }
@@ -456,7 +461,16 @@ func (s *TaskService) gatherRuntimeEvidence(rep *domain.ImpactReport, target str
 	}
 	// Which architecture rules apply?
 	for _, p := range pkt.ArchitectureRules {
-		rep.ArchitectureRules = append(rep.ArchitectureRules, p.ID)
+		name := p.ID
+		if name == "" {
+			name = p.Name
+		}
+		if name == "" {
+			name = p.Description
+		}
+		if name != "" {
+			rep.ArchitectureRules = append(rep.ArchitectureRules, name)
+		}
 	}
 }
 

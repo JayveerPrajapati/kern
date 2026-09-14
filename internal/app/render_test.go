@@ -160,3 +160,40 @@ func TestRenderWhatIfAppendsEvidence(t *testing.T) {
 		t.Fatalf("expected anchor line, got:\n%s", out)
 	}
 }
+
+func TestNodeNameSymbolQualification(t *testing.T) {
+	node1 := domain.Node{
+		Symbol: &domain.Symbol{
+			Name:     "setUp",
+			Receiver: "UserServiceTest",
+		},
+	}
+	if got := nodeName(node1); got != "UserServiceTest.setUp" {
+		t.Errorf("nodeName(node1) = %q, want %q", got, "UserServiceTest.setUp")
+	}
+
+	node2 := domain.Node{
+		Symbol: &domain.Symbol{
+			Name: "setUp",
+			File: "src/test/java/AuthTest.java",
+		},
+	}
+	if got := nodeName(node2); got != "AuthTest.java:setUp" {
+		t.Errorf("nodeName(node2) = %q, want %q", got, "AuthTest.java:setUp")
+	}
+}
+
+func TestRenderImpactArchitectureRules(t *testing.T) {
+	out := renderImpactText(domain.ImpactReport{
+		Target:            "UserService",
+		WhoCalls:          []string{"Controller"},
+		ArchitectureRules: []string{"no-circular-deps", "layer-isolation"},
+	})
+	if !strings.Contains(out, "Architecture rules: 2") {
+		t.Fatalf("expected Architecture rules count 2, got:\n%s", out)
+	}
+	if !strings.Contains(out, "- no-circular-deps") || !strings.Contains(out, "- layer-isolation") {
+		t.Fatalf("missing expected architecture rule names in:\n%s", out)
+	}
+}
+
