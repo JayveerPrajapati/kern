@@ -3,11 +3,17 @@
   "mcp": {
     "kern": {
       "command": [
-        "kern-mcp"
+        "kern-mcp",
+        "--project",
+        "notification-producer=/Users/jayveer.prajapati/workspace/notification-producer",
+        "--project",
+        "commissiong-notification=/Users/jayveer.prajapati/workspace/commissiong-notification"
       ],
       "enabled": true,
       "environment": {
-        "KERN_ALLOW_EXEC": "1"
+        "KERN_ALLOW_EXEC": "1",
+        "KERN_MCP_ROOTS": "/Users/jayveer.prajapati/workspace/notification-producer,/Users/jayveer.prajapati/workspace/commissiong-notification",
+        "KERN_ROOTS": "/Users/jayveer.prajapati/workspace/notification-producer,/Users/jayveer.prajapati/workspace/commissiong-notification"
       },
       "type": "local"
     }

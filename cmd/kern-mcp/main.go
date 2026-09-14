@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"github.com/JayveerPrajapati/kern/internal/mcp"
@@ -37,13 +38,42 @@ func init() {
 	version = kversion.Adopt(version)
 }
 
+type stringList []string
+
+func (s *stringList) String() string {
+	return strings.Join(*s, ", ")
+}
+
+func (s *stringList) Set(val string) error {
+	*s = append(*s, val)
+	return nil
+}
+
 func main() {
+	var projects stringList
+	flag.Var(&projects, "project", "register a project (NAME=PATH, repeatable)")
 	httpAddr := flag.String("http", "", "serve MCP over HTTP on this address (e.g. :8080) instead of stdio")
 	tlsCert := flag.String("tls-cert", "", "TLS certificate file (PEM) for the HTTP transport; env KERN_MCP_TLS_CERT")
 	tlsKey := flag.String("tls-key", "", "TLS private key file (PEM) for the HTTP transport; env KERN_MCP_TLS_KEY")
 	longVer := flag.Bool("version", false, "print version and exit")
 	shortVer := flag.Bool("v", false, "shorthand for -version")
 	flag.Parse()
+	if len(projects) > 0 {
+		var roots []string
+		for _, p := range projects {
+			_, root, ok := strings.Cut(p, "=")
+			if !ok || root == "" {
+				root = p
+			}
+			roots = append(roots, root)
+		}
+		existing := os.Getenv("KERN_MCP_ROOTS")
+		if existing != "" {
+			roots = append(roots, strings.Split(existing, ",")...)
+		}
+		os.Setenv("KERN_MCP_ROOTS", strings.Join(roots, ","))
+		os.Setenv("KERN_ROOTS", strings.Join(roots, ","))
+	}
 	// Same contract as the other binaries (blueprint-mcp precedent,
 	// f778aff): -v/--version/version all print the ldflags-stamped
 	// version and exit 0, so doctor's version-parity probe and shell
