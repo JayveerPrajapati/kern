@@ -11,7 +11,6 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/domain"
 )
 
-
 // writeTree writes the given relative-path->content map under dir.
 func writeTree(t *testing.T, dir string, files map[string]string) {
 	t.Helper()

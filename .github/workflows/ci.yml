@@ -88,12 +88,12 @@ jobs:
       - name: Build kern from checkout
         run: go build -buildvcs=false -o "$RUNNER_TEMP/kern" ./cmd/kern
       - name: Full E2E suite (non-short) — app, cicd, mcp
-        run: go test -p 2 -timeout 30m ./internal/app/... ./internal/cicd/... ./internal/mcp/...
+        run: go test -p 1 -timeout 30m ./internal/app/... ./internal/cicd/... ./internal/mcp/...
         env:
           KERN_BINARY: ${{ runner.temp }}/kern
           KERN_REQUIRE_BINARY: "1"
       - name: Full blueprint suite (non-short)
-        run: go test -p 2 -timeout 30m ./internal/blueprint/...
+        run: go test -p 1 -timeout 30m ./internal/blueprint/...
         env:
           KERN_BINARY: ${{ runner.temp }}/kern
           KERN_REQUIRE_BINARY: "1"

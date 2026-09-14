@@ -55,7 +55,6 @@ type FreshnessProof struct {
 // must not be trusted.
 func (p FreshnessProof) Stale() bool { return p.Verdict != FreshnessFresh }
 
-
 // identityGit holds the walk-independent git observations of an index
 // identity (tree OID, commit). StartIdentityGit launches them on a
 // background goroutine so Build/Update can overlap the (slow) git staging

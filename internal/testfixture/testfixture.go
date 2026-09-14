@@ -159,7 +159,6 @@ func Repo(t *testing.T) string {
 	return dir
 }
 
-
 // Symbol returns a fixture symbol of the given kind, so tests can reference
 // a stable target without hard-coding the fixture contents twice. kind is
 // one of "server", "user", "db". Returns "" for unknown kinds.

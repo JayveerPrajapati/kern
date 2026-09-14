@@ -32,7 +32,6 @@ type Report struct {
 	SourceMiss  bool // root does not exist or is empty
 }
 
-
 // Per-pass warm budgets bound how much work a single Warm pass can do so a
 // huge file or a very large tree cannot cause unbounded memory/CPU/IO spikes.
 // These mirror the per-file size and per-pass count caps used in fw.Detect.

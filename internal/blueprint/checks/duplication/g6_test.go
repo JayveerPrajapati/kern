@@ -206,7 +206,6 @@ func runCheckAgainstFixture(t *testing.T, f DupFixture) domain.CheckResult {
 	return res
 }
 
-
 func extractBucket(f domain.Finding) string {
 	for _, e := range f.Evidence {
 		if desc := e.Description; desc != "" {

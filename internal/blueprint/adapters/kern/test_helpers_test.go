@@ -75,4 +75,3 @@ func runBlueprintCheck(t *testing.T, binPath, repo string, extraArgs ...string) 
 	}
 	return string(out), code
 }
-

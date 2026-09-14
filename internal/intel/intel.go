@@ -168,7 +168,6 @@ func dirOf(fileMap map[string]string, sym string) string {
 	return d
 }
 
-
 // prodCallersWithFileMap is prodCallers with a precomputed file map. Callers
 // that iterate over the whole symbol table MUST hoist buildFileMap(ix) out of
 // their loop — building it per symbol is O(len(Symbols)) inside an
