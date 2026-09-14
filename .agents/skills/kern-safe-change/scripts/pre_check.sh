@@ -9,7 +9,7 @@ if [ -n "$TARGET" ]; then
   echo ""
 fi
 
-echo "=== 2. Running Change-Firewall Gates (G0-G29) ==="
+echo "=== 2. Running Change-Firewall Gates (G0-G39) ==="
 kern check || {
   echo ""
   echo "[!] Gates failed. Run 'kern fix' to trigger auto-repair in sandbox."

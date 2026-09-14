@@ -33,8 +33,7 @@ type Gap struct {
 func coveredSet(ix *index.Index) map[string]bool {
 	covered := map[string]bool{}
 	queue := []string{}
-	var mark func(name string)
-	mark = func(name string) {
+	mark := func(name string) {
 		if !covered[name] {
 			covered[name] = true
 			queue = append(queue, name)

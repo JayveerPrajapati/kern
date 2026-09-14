@@ -333,7 +333,7 @@ func httpGet(client *http.Client, url string) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("live source: GET %s: %w", url, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		return nil, fmt.Errorf("live source: %s returned %d: %s", url, resp.StatusCode, string(body))
@@ -353,7 +353,7 @@ func httpGetAuth(client *http.Client, url, token string) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("live source: GET %s: %w", url, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		return nil, fmt.Errorf("live source: %s returned %d: %s", url, resp.StatusCode, string(body))

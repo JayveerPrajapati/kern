@@ -1,3 +1,4 @@
+// Package transform provides source-level AST rewrites and structural transformations.
 package transform
 
 import (

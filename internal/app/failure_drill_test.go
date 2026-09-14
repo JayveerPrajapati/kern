@@ -120,7 +120,7 @@ func TestFailureDrillAgentTimeout(t *testing.T) {
 	svc, bus := newTestTaskService(t)
 	tk := agent.NewTask("code", "x")
 	_ = tk.Start("bot-1")
-	svc.registry.SubmitTask(tk)
+	_ = svc.registry.SubmitTask(tk)
 
 	if err := svc.Timeout(tk.ID); err != nil {
 		t.Fatalf("Timeout: %v", err)

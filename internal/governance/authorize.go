@@ -307,12 +307,12 @@ func buildProof(req Request, ix *index.Index, agent *AgentIdentity, decision dom
 // fingerprints; mutating the scope symbols changes it.
 func fingerprint(ix *index.Index, decision domain.GatewayResult, policySource string, symbols []SymbolRef) string {
 	h := sha256.New()
-	fmt.Fprintf(h, "root=%s\n", ix.Root)
-	fmt.Fprintf(h, "index_updated=%s\n", ix.UpdatedAt.UTC().Format(time.RFC3339Nano))
-	fmt.Fprintf(h, "policy_source=%s\n", policySource)
-	fmt.Fprintf(h, "allowed=%t\n", decision.Allowed)
+	_, _ = fmt.Fprintf(h, "root=%s\n", ix.Root)
+	_, _ = fmt.Fprintf(h, "index_updated=%s\n", ix.UpdatedAt.UTC().Format(time.RFC3339Nano))
+	_, _ = fmt.Fprintf(h, "policy_source=%s\n", policySource)
+	_, _ = fmt.Fprintf(h, "allowed=%t\n", decision.Allowed)
 	if decision.Deny != nil {
-		fmt.Fprintf(h, "deny_stage=%s\n", decision.Deny.Stage)
+		_, _ = fmt.Fprintf(h, "deny_stage=%s\n", decision.Deny.Stage)
 	}
 	names := make([]string, 0, len(symbols))
 	for _, s := range symbols {
@@ -320,7 +320,7 @@ func fingerprint(ix *index.Index, decision domain.GatewayResult, policySource st
 	}
 	sort.Strings(names)
 	for _, n := range names {
-		fmt.Fprintf(h, "symbol=%s\n", n)
+		_, _ = fmt.Fprintf(h, "symbol=%s\n", n)
 	}
 	return hex.EncodeToString(h.Sum(nil))
 }

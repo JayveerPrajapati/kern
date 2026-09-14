@@ -38,7 +38,7 @@ func Parse(codeownersPath, root string) (*Map, error) {
 		}
 		return nil, err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	m := &Map{root: root}
 	scanner := bufio.NewScanner(f)

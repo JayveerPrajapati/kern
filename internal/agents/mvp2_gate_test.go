@@ -79,12 +79,14 @@ func TestMVP2GateEndToEnd(t *testing.T) {
 
 	t.Log("[3/8] Setting up memory + governance...")
 	store := memory.NewMemoryStore(root)
-	store.Add(domain.Memory{
+	if _, err := store.Add(domain.Memory{
 		Type:    domain.MemoryConstraint,
 		Content: "helper must return the string 'h'",
 		Scope:   "main",
 		Tags:    []string{"gatefixture", "helper"},
-	})
+	}); err != nil {
+		t.Fatal(err)
+	}
 	fw := governance.NewFirewall()
 	fw.WithAgents(governance.NewAgent("planner", "Planner", "planner", []governance.Permission{
 		{Resource: "source", Action: "read"},
@@ -106,7 +108,7 @@ func TestMVP2GateEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewWorktree: %v", err)
 	}
-	defer wt.Cleanup()
+	defer func() { _ = wt.Cleanup() }()
 
 	t.Log("[6/8] Running workflow...")
 	engine := agent.NewWorkflowEngine(runtime, approvals)

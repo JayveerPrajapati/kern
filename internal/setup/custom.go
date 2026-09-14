@@ -25,6 +25,7 @@
 // so an incorrect builtin path can be corrected locally without a kern
 // release. Malformed custom files never abort the rest of setup: they
 // surface as error Status rows while all other wiring proceeds.
+
 package setup
 
 import (

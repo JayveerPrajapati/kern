@@ -255,11 +255,12 @@ func runMutationTest(rest []string) {
 
 	for _, m := range report.Mutants {
 		statusIcon := "🔍"
-		if m.Status == "killed" {
+		switch m.Status {
+		case "killed":
 			statusIcon = "✅ KILLED"
-		} else if m.Status == "survived" {
+		case "survived":
 			statusIcon = "🚨 SURVIVED (TEST GAP)"
-		} else if m.Status == "compile_error" {
+		case "compile_error":
 			statusIcon = "⚠️ COMPILE ERROR"
 		}
 
@@ -274,24 +275,20 @@ func runFragility(rest []string) {
 	if err != nil {
 		fatalUsage("flags: %v", err)
 	}
-	root := f.root
-	if root == "" {
-		root = "."
+	root := "."
+	if len(args) > 0 {
+		root = args[0]
 	}
-	target := f.target
-	if target == "" && len(args) > 0 {
-		target = args[0]
+	if f.root != "" {
+		root = f.root
 	}
 
 	report, err := fragility.Analyze(context.Background(), fragility.Options{
-		Root:     root,
-		Target:   target,
-		Limit:    f.limit,
-		Commits:  f.commits,
-		MinFixes: f.minFixes,
+		Root:  root,
+		Limit: 20,
 	})
 	if err != nil {
-		fatal("fragility: %v", err)
+		fatal("fragility analysis: %v", err)
 	}
 
 	if f.json {
@@ -299,8 +296,10 @@ func runFragility(rest []string) {
 		return
 	}
 
-	fmt.Printf("=== Causal Defect & Fragility Hotspot Memory (%d commits evaluated, %d bug fixes identified) ===\n\n",
-		report.EvaluatedCommits, report.DefectCommitsCount)
+	fmt.Println("=== KernOps Fragility & Defect-Churn Map ===")
+	fmt.Printf("Repository Root:   %s\n", root)
+	fmt.Printf("Analyzed Commits:  %d\n", report.EvaluatedCommits)
+	fmt.Printf("Hotspots Found:    %d\n\n", len(report.Hotspots))
 
 	if len(report.Hotspots) == 0 {
 		fmt.Println("No fragility hotspots identified matching criteria.")
@@ -309,11 +308,12 @@ func runFragility(rest []string) {
 
 	for i, h := range report.Hotspots {
 		riskBadge := "🟢 LOW"
-		if h.RiskLevel == "CRITICAL" {
+		switch h.RiskLevel {
+		case "CRITICAL":
 			riskBadge = "🔥 CRITICAL RISK"
-		} else if h.RiskLevel == "HIGH" {
+		case "HIGH":
 			riskBadge = "🚨 HIGH RISK"
-		} else if h.RiskLevel == "MEDIUM" {
+		case "MEDIUM":
 			riskBadge = "⚠️ MEDIUM RISK"
 		}
 

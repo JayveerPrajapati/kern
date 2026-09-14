@@ -694,7 +694,7 @@ func orgAdminHTML(w io.Writer, projects []Project, agents []*governance.AgentIde
 	b.WriteString(`<span class="hint">JSON endpoints</span>`)
 	b.WriteString(`</nav></footer></body></html>`)
 
-	w.Write([]byte(b.String()))
+	_, _ = w.Write([]byte(b.String()))
 }
 
 // serveOrgAPI serves org-level API endpoints.
@@ -889,7 +889,7 @@ func (s *Server) serveOrgMemory(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{
+		_ = json.NewEncoder(w).Encode(map[string]any{
 			"memories": memories,
 			"count":    len(memories),
 		})
@@ -905,7 +905,7 @@ func (s *Server) serveOrgMemory(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(saved)
+		_ = json.NewEncoder(w).Encode(saved)
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
@@ -920,7 +920,7 @@ func (s *Server) serveOrgTasks(w http.ResponseWriter, r *http.Request) {
 		total += len(list)
 	}
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]any{
+	_ = json.NewEncoder(w).Encode(map[string]any{
 		"projects": tasks,
 		"total":    total,
 	})
@@ -936,7 +936,7 @@ func (s *Server) serveOrgSearch(w http.ResponseWriter, r *http.Request) {
 	}
 	hits := s.OrgSearch(q, 20)
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]any{
+	_ = json.NewEncoder(w).Encode(map[string]any{
 		"hits":  hits,
 		"count": len(hits),
 	})
@@ -953,7 +953,7 @@ func (s *Server) serveOrgAgents(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet:
 		agents := s.Agents()
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{
+		_ = json.NewEncoder(w).Encode(map[string]any{
 			"agents": agents,
 			"count":  len(agents),
 		})
@@ -979,7 +979,7 @@ func (s *Server) serveOrgAgents(w http.ResponseWriter, r *http.Request) {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
-		json.NewEncoder(w).Encode(agent)
+		_ = json.NewEncoder(w).Encode(agent)
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
@@ -995,7 +995,7 @@ func (s *Server) serveOrgTeams(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet:
 		teams := s.Teams()
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{
+		_ = json.NewEncoder(w).Encode(map[string]any{
 			"teams": teams,
 			"count": len(teams),
 		})
@@ -1011,7 +1011,7 @@ func (s *Server) serveOrgTeams(w http.ResponseWriter, r *http.Request) {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
-		json.NewEncoder(w).Encode(team)
+		_ = json.NewEncoder(w).Encode(team)
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
@@ -1029,7 +1029,7 @@ func (s *Server) serveOrgTeam(w http.ResponseWriter, r *http.Request, id string)
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(team)
+		_ = json.NewEncoder(w).Encode(team)
 	case http.MethodDelete:
 		if err := s.RemoveTeam(id); err != nil {
 			http.Error(w, err.Error(), http.StatusNotFound)
@@ -1058,7 +1058,7 @@ func (s *Server) serveOrgAgentTeams(w http.ResponseWriter, r *http.Request, agen
 	}
 	teams := s.AgentTeams(agentID)
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]any{
+	_ = json.NewEncoder(w).Encode(map[string]any{
 		"agent": agentID,
 		"teams": teams,
 		"count": len(teams),

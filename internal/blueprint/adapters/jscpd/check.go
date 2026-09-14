@@ -270,7 +270,7 @@ func (c *Check) Run(ctx context.Context, req domain.ChangeRequest) (domain.Check
 	if err != nil {
 		return domain.CheckResult{Name: c.Name(), Status: domain.StatusError, Error: err.Error()}, nil
 	}
-	defer os.RemoveAll(scanDir)
+	defer func() { _ = os.RemoveAll(scanDir) }()
 
 	// Run jscpd against the mirror and parse its JSON report (fail closed on
 	// malformed output, G14 contract).
@@ -278,7 +278,7 @@ func (c *Check) Run(ctx context.Context, req domain.ChangeRequest) (domain.Check
 	if err != nil {
 		return domain.CheckResult{Name: c.Name(), Status: domain.StatusError, Error: err.Error()}, nil
 	}
-	defer os.RemoveAll(reportDir)
+	defer func() { _ = os.RemoveAll(reportDir) }()
 
 	// Pass 2 — correlate block-eligible candidates with jscpd clones (see
 	// correlatePassTwo).
@@ -753,7 +753,7 @@ func copyFile(src, dst string) error {
 	if err != nil {
 		return err
 	}
-	defer in.Close()
+	defer func() { _ = in.Close() }()
 	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 		return err
 	}

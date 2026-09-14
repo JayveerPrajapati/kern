@@ -17,14 +17,14 @@ func TestWorktreeManager(t *testing.T) {
 		t.Skipf("git init not available: %v (%s)", err, string(out))
 	}
 	// Configure git author
-	exec.Command("git", "-C", tmp, "config", "user.email", "test@example.com").Run()
-	exec.Command("git", "-C", tmp, "config", "user.name", "Test").Run()
+	_ = exec.Command("git", "-C", tmp, "config", "user.email", "test@example.com").Run()
+	_ = exec.Command("git", "-C", tmp, "config", "user.name", "Test").Run()
 
 	// Create an initial commit
 	if err := os.WriteFile(filepath.Join(tmp, "README.md"), []byte("# Test Repo\n"), 0o644); err != nil {
 		t.Fatalf("write file: %v", err)
 	}
-	exec.Command("git", "-C", tmp, "add", ".").Run()
+	_ = exec.Command("git", "-C", tmp, "add", ".").Run()
 	cmdCommit := exec.Command("git", "-C", tmp, "commit", "-m", "initial commit")
 	if out, err := cmdCommit.CombinedOutput(); err != nil {
 		t.Fatalf("git commit failed: %v (%s)", err, string(out))
@@ -68,13 +68,13 @@ func TestWorktreeManagerGC(t *testing.T) {
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Skipf("git init not available: %v (%s)", err, string(out))
 	}
-	exec.Command("git", "-C", tmp, "config", "user.email", "test@example.com").Run()
-	exec.Command("git", "-C", tmp, "config", "user.name", "Test").Run()
+	_ = exec.Command("git", "-C", tmp, "config", "user.email", "test@example.com").Run()
+	_ = exec.Command("git", "-C", tmp, "config", "user.name", "Test").Run()
 	if err := os.WriteFile(filepath.Join(tmp, "README.md"), []byte("# Test Repo\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	exec.Command("git", "-C", tmp, "add", ".").Run()
-	exec.Command("git", "-C", tmp, "commit", "-m", "initial commit").Run()
+	_ = exec.Command("git", "-C", tmp, "add", ".").Run()
+	_ = exec.Command("git", "-C", tmp, "commit", "-m", "initial commit").Run()
 
 	mgr := NewWorktreeManager(tmp)
 	base := filepath.Join(tmp, ".kern", "sandboxes")

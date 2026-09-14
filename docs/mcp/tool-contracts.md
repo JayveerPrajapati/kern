@@ -8,9 +8,9 @@ This page is the authoritative reference for every tool the kern MCP server expo
 
 | Metric | Value |
 |---|---|
-| Total tools | 121 |
-| Phases | explore (32), plan (14), edit (16), verify (16), meta (1), cross (42) |
-| Risk levels | low (72), medium (30), high (14), critical (5) |
+| Total tools | 143 |
+| Phases | explore (40), plan (16), edit (22), verify (21), meta (1), cross (43) |
+| Risk levels | low (86), medium (33), high (19), critical (5) |
 
 ## Full catalog (summary)
 

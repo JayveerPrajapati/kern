@@ -11,7 +11,7 @@ import (
 
 func TestExtractGinRoutes(t *testing.T) {
 	dir := t.TempDir()
-	os.WriteFile(filepath.Join(dir, "main.go"), []byte(`
+	_ = os.WriteFile(filepath.Join(dir, "main.go"), []byte(`
 package main
 func main() {
 	r.GET("/users", listUsers)
@@ -57,7 +57,7 @@ func main() {
 
 func TestExtractExpressRoutes(t *testing.T) {
 	dir := t.TempDir()
-	os.WriteFile(filepath.Join(dir, "app.js"), []byte(`
+	_ = os.WriteFile(filepath.Join(dir, "app.js"), []byte(`
 const express = require('express');
 const app = express();
 app.get("/users", listUsers);
@@ -95,7 +95,7 @@ app.put('/users/:id', updateUser);
 
 func TestExtractFlaskRoutes(t *testing.T) {
 	dir := t.TempDir()
-	os.WriteFile(filepath.Join(dir, "app.py"), []byte(`
+	_ = os.WriteFile(filepath.Join(dir, "app.py"), []byte(`
 from flask import Flask
 app = Flask(__name__)
 
@@ -123,7 +123,7 @@ def get_user(id):
 
 func TestExtractFastAPIRoutes(t *testing.T) {
 	dir := t.TempDir()
-	os.WriteFile(filepath.Join(dir, "main.py"), []byte(`
+	_ = os.WriteFile(filepath.Join(dir, "main.py"), []byte(`
 from fastapi import FastAPI
 app = FastAPI()
 
@@ -154,7 +154,7 @@ def create_item():
 
 func TestExtractNetHTTPRoutes(t *testing.T) {
 	dir := t.TempDir()
-	os.WriteFile(filepath.Join(dir, "main.go"), []byte(`
+	_ = os.WriteFile(filepath.Join(dir, "main.go"), []byte(`
 package main
 import "net/http"
 func main() {
@@ -182,10 +182,10 @@ func main() {
 func TestExtractIgnoresVendorDirs(t *testing.T) {
 	dir := t.TempDir()
 	_ = os.MkdirAll(filepath.Join(dir, "node_modules"), 0755)
-	os.WriteFile(filepath.Join(dir, "node_modules", "app.js"), []byte(`
+	_ = os.WriteFile(filepath.Join(dir, "node_modules", "app.js"), []byte(`
 app.get("/hidden", handler);
 `), 0644)
-	os.WriteFile(filepath.Join(dir, "app.js"), []byte(`
+	_ = os.WriteFile(filepath.Join(dir, "app.js"), []byte(`
 app.get("/visible", handler);
 `), 0644)
 

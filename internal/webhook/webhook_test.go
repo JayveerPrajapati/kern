@@ -65,9 +65,15 @@ func TestAddRejectsDuplicateName(t *testing.T) {
 
 func TestRemoveAndURLs(t *testing.T) {
 	c := New()
-	c.Add("b", "https://b.example/x")
-	c.Add("a", "https://a.example/y")
-	c.Add("c", "https://c.example/z")
+	if err := c.Add("b", "https://b.example/x"); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Add("a", "https://a.example/y"); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Add("c", "https://c.example/z"); err != nil {
+		t.Fatal(err)
+	}
 	got := c.URLs()
 	if len(got) != 3 {
 		t.Fatalf("URLs len = %d, want 3", len(got))

@@ -95,18 +95,6 @@ func noteNew(args []string) {
 	fmt.Printf("created %s\n", rel)
 }
 
-// restWords returns the trailing positional words of args (the title).
-func restWords(args []string) []string {
-	var out []string
-	for _, a := range args {
-		if strings.HasPrefix(a, "-") {
-			continue
-		}
-		out = append(out, a)
-	}
-	return out
-}
-
 func noteList(args []string) {
 	root := "."
 	for i := 0; i < len(args); i++ {

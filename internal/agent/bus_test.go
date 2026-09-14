@@ -91,9 +91,9 @@ func TestWorkflowEnginePublishesLifecycleEvents(t *testing.T) {
 	})
 
 	reg := NewRegistry()
-	reg.Register(Agent{Agent: domain.Agent{ID: "planner", Type: "planner"}})
-	reg.Register(Agent{Agent: domain.Agent{ID: "coder", Type: "coder"}})
-	reg.Register(Agent{Agent: domain.Agent{ID: "reviewer", Type: "reviewer"}})
+	_ = reg.Register(Agent{Agent: domain.Agent{ID: "planner", Type: "planner"}})
+	_ = reg.Register(Agent{Agent: domain.Agent{ID: "coder", Type: "coder"}})
+	_ = reg.Register(Agent{Agent: domain.Agent{ID: "reviewer", Type: "reviewer"}})
 
 	eng := NewWorkflowEngine(reg, governance.NewApprovalWorkflow()).WithBus(bus)
 

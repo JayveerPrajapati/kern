@@ -449,7 +449,7 @@ func runCommunities(rest []string) {
 	if f.json {
 		// Default JSON output is a compact summary (sample + size + hub +
 		// packages); --full restores the legacy verbose symbol list.
-		os.Stdout.Write(intel.MarshalCommunities(comms, f.full))
+		_, _ = os.Stdout.Write(intel.MarshalCommunities(comms, f.full))
 		fmt.Println()
 		return
 	}

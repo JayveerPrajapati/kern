@@ -1,4 +1,5 @@
 // Package risk provides deterministic risk scoring over domain.Policy rules.
+
 package governance
 
 import (
@@ -160,7 +161,7 @@ func policyMatchFor(p domain.Policy, resource, action string) (domain.RiskLevel,
 // to re-derive it.
 func (r *RiskAssessor) AssessAction(resource, action string) domain.Risk {
 	best := domain.RiskLow
-	var bestRank riskLevel = riskLow
+	bestRank := riskLow
 	factors := []string{}
 	mitigation := ""
 

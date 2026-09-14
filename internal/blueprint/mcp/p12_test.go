@@ -51,7 +51,7 @@ func p12LastAuditRecord(t *testing.T, dir string) map[string]interface{} {
 	if err != nil {
 		t.Fatalf("open audit file: %v", err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	var rec map[string]interface{}
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 1024*1024), 1024*1024)

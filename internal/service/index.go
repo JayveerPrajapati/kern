@@ -306,10 +306,8 @@ func (s *indexService) EnsureFresh(ctx context.Context, root string) (*EnsureFre
 	}
 	if ix == nil {
 		// No loadable previous index, or Update failed: full build.
-		var berr error
-		ix, berr = s.Build(ctx, root)
-		if berr != nil {
-			return nil, fmt.Errorf("ensure-fresh: build: %w", berr)
+		if _, err := s.Build(ctx, root); err != nil {
+			return nil, fmt.Errorf("ensure-fresh: build: %w", err)
 		}
 	} else {
 		if serr := ix.Save(); serr != nil {

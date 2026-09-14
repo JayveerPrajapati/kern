@@ -436,13 +436,13 @@ func (c *KernClient) IndexBuild(ctx context.Context, workdir string) (stdout str
 // to whatever this method returns, so the degradation can never turn a stale
 // index into a silent pass.
 func (c *KernClient) IndexUpdate(ctx context.Context, workdir string) (stdout string, exitCode int, err error) {
-	out, errOut, code, runErr := c.runner(ctx, c.binaryPath, []string{"index", "--update", "."}, workdir)
+	out, _, code, runErr := c.runner(ctx, c.binaryPath, []string{"index", "--update", "."}, workdir)
 	if runErr == nil && code == 0 {
 		return out, code, nil
 	}
 	// Older kern: `index --update` is an unknown flag (non-zero exit). Fall
 	// back to the full rebuild command so the guard still works unmodified.
-	out, errOut, code, runErr = c.runner(ctx, c.binaryPath, []string{"index", "."}, workdir)
+	out, errOut, code, runErr := c.runner(ctx, c.binaryPath, []string{"index", "."}, workdir)
 	if runErr != nil {
 		return out, code, fmt.Errorf("kern index --update: %w", runErr)
 	}

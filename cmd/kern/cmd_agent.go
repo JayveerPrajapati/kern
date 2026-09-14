@@ -214,7 +214,8 @@ func runDocs(rest []string) {
 	if f.root != "" {
 		root = f.root
 	}
-	if sub == "index" {
+	switch sub {
+	case "index":
 		var ix *docsearch.Index
 		var err error
 		if f.semantic {
@@ -237,11 +238,11 @@ func runDocs(rest []string) {
 			fatal("docs index: %v", err)
 		}
 		fmt.Printf("indexed %d chunks from %s\n", len(ix.Docs), root)
-	} else if sub == "clear" {
+	case "clear":
 		_ = os.RemoveAll(cache.Path("data", "docs"))
 		_ = os.RemoveAll(cache.Path("data", "docs-fetch"))
 		fmt.Println("cleared document index and fetched-doc cache")
-	} else {
+	default:
 		if query == "" {
 			fatalUsage("usage: kern docs <query> [root] [--root ROOT] [--limit N] | kern docs index [root] [--semantic] | kern docs clear")
 		}

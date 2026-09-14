@@ -665,7 +665,7 @@ func (b *Bus) appendPersist(ev Event) error {
 		log.Printf("eventbus: persist open error: %v", err)
 		return err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	if _, err := f.Write(append(line, '\n')); err != nil {
 		log.Printf("eventbus: persist write error: %v", err)
 		return err

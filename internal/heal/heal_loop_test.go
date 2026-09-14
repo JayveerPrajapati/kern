@@ -56,7 +56,7 @@ func mockOllama(t *testing.T, generateBody string) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/tags" {
-			w.Write([]byte(`{"models":[]}`))
+			_, _ = w.Write([]byte(`{"models":[]}`))
 			return
 		}
 		if r.URL.Path != "/api/generate" {

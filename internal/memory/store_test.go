@@ -153,7 +153,7 @@ func TestStoreUpdate(t *testing.T) {
 func TestStoreRecallByText(t *testing.T) {
 	s := newTestStore(t)
 	for _, m := range sampleMemories() {
-		s.Add(m)
+		_, _ = s.Add(m)
 	}
 	got, err := s.Recall(Query{Text: "redis session token"})
 	if err != nil {
@@ -170,7 +170,7 @@ func TestStoreRecallByText(t *testing.T) {
 func TestStoreRecallByType(t *testing.T) {
 	s := newTestStore(t)
 	for _, m := range sampleMemories() {
-		s.Add(m)
+		_, _ = s.Add(m)
 	}
 	got, _ := s.Recall(Query{Type: domain.MemoryIncident})
 	if len(got) != 1 || got[0].Type != domain.MemoryIncident {
@@ -181,7 +181,7 @@ func TestStoreRecallByType(t *testing.T) {
 func TestStoreRecallByScope(t *testing.T) {
 	s := newTestStore(t)
 	for _, m := range sampleMemories() {
-		s.Add(m)
+		_, _ = s.Add(m)
 	}
 	got, _ := s.Recall(Query{Scope: "service:BillingService"})
 	// Query.Scope currently only filters exact scope equality is not applied
@@ -194,7 +194,7 @@ func TestStoreRecallByScope(t *testing.T) {
 func TestStoreRecallByService(t *testing.T) {
 	s := newTestStore(t)
 	for _, m := range sampleMemories() {
-		s.Add(m)
+		_, _ = s.Add(m)
 	}
 	got, _ := s.Recall(Query{Service: "PaymentService"})
 	if len(got) != 1 || got[0].Scope != "service:PaymentService" {
@@ -210,7 +210,7 @@ func TestStoreRecallByService(t *testing.T) {
 func TestStoreRecallByIncident(t *testing.T) {
 	s := newTestStore(t)
 	for _, m := range sampleMemories() {
-		s.Add(m)
+		_, _ = s.Add(m)
 	}
 	got, _ := s.Recall(Query{Incident: "INC-123"})
 	if len(got) != 1 || got[0].Scope != "incident:INC-123" {
@@ -221,7 +221,7 @@ func TestStoreRecallByIncident(t *testing.T) {
 func TestStoreRecallByTags(t *testing.T) {
 	s := newTestStore(t)
 	for _, m := range sampleMemories() {
-		s.Add(m)
+		_, _ = s.Add(m)
 	}
 	got, _ := s.Recall(Query{Tags: []string{"redis"}})
 	if len(got) != 1 || got[0].Tags[0] != "redis" {
@@ -232,7 +232,7 @@ func TestStoreRecallByTags(t *testing.T) {
 func TestStoreRecallLimit(t *testing.T) {
 	s := newTestStore(t)
 	for _, m := range sampleMemories() {
-		s.Add(m)
+		_, _ = s.Add(m)
 	}
 	got, _ := s.Recall(Query{Limit: 2})
 	if len(got) != 2 {
@@ -242,8 +242,8 @@ func TestStoreRecallLimit(t *testing.T) {
 
 func TestStoreRecallBySubject(t *testing.T) {
 	s := newTestStore(t)
-	s.Add(domain.Memory{Type: domain.MemorySemantic, Content: "charge flow caches in redis", Subject: "PaymentService", Provenance: "loop:learn", RelatedEntities: []string{"symbol:Charge", "task:T-42"}})
-	s.Add(domain.Memory{Type: domain.MemorySemantic, Content: "billing keys carry tenant prefix", Subject: "BillingService", Provenance: "human"})
+	_, _ = s.Add(domain.Memory{Type: domain.MemorySemantic, Content: "charge flow caches in redis", Subject: "PaymentService", Provenance: "loop:learn", RelatedEntities: []string{"symbol:Charge", "task:T-42"}})
+	_, _ = s.Add(domain.Memory{Type: domain.MemorySemantic, Content: "billing keys carry tenant prefix", Subject: "BillingService", Provenance: "human"})
 
 	got, err := s.Recall(Query{Subject: "PaymentService"})
 	if err != nil {
@@ -256,8 +256,8 @@ func TestStoreRecallBySubject(t *testing.T) {
 
 func TestStoreRecallByRelatedEntities(t *testing.T) {
 	s := newTestStore(t)
-	s.Add(domain.Memory{Type: domain.MemorySemantic, Content: "auth flow", Subject: "AuthService", RelatedEntities: []string{"symbol:Login", "pr:12"}})
-	s.Add(domain.Memory{Type: domain.MemorySemantic, Content: "billing flow", Subject: "BillingService", RelatedEntities: []string{"symbol:Charge"}})
+	_, _ = s.Add(domain.Memory{Type: domain.MemorySemantic, Content: "auth flow", Subject: "AuthService", RelatedEntities: []string{"symbol:Login", "pr:12"}})
+	_, _ = s.Add(domain.Memory{Type: domain.MemorySemantic, Content: "billing flow", Subject: "BillingService", RelatedEntities: []string{"symbol:Charge"}})
 
 	got, err := s.Recall(Query{RelatedEntities: []string{"PR:12"}})
 	if err != nil {
@@ -270,8 +270,8 @@ func TestStoreRecallByRelatedEntities(t *testing.T) {
 
 func TestStoreRecallByProvenance(t *testing.T) {
 	s := newTestStore(t)
-	s.Add(domain.Memory{Type: domain.MemorySemantic, Content: "learned in loop", Provenance: "loop:learn"})
-	s.Add(domain.Memory{Type: domain.MemorySemantic, Content: "told by human", Provenance: "human"})
+	_, _ = s.Add(domain.Memory{Type: domain.MemorySemantic, Content: "learned in loop", Provenance: "loop:learn"})
+	_, _ = s.Add(domain.Memory{Type: domain.MemorySemantic, Content: "told by human", Provenance: "human"})
 
 	got, err := s.Recall(Query{Provenance: "human"})
 	if err != nil {
@@ -293,7 +293,7 @@ func TestMatchScoreSubjectBoost(t *testing.T) {
 func TestStoreRecallDeterministic(t *testing.T) {
 	s := newTestStore(t)
 	for _, m := range sampleMemories() {
-		s.Add(m)
+		_, _ = s.Add(m)
 	}
 	a, _ := s.Recall(Query{Text: "payment"})
 	b, _ := s.Recall(Query{Text: "payment"})
@@ -394,8 +394,8 @@ func TestStoreFileNamesSeparateOnDisk(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	root := t.TempDir()
 	ms := NewMemoryStore(root)
-	ms.Add(domain.Memory{Type: domain.MemorySemantic, Content: "typed"})
-	Add(root, "lesson")
+	_, _ = ms.Add(domain.Memory{Type: domain.MemorySemantic, Content: "typed"})
+	_ = Add(root, "lesson")
 
 	// Distinct filepaths, both present on disk.
 	if s, err := os.Stat(ms.path); err != nil || s.IsDir() {
@@ -411,10 +411,10 @@ func TestStoreFileNamesSeparateOnDisk(t *testing.T) {
 
 func TestAuthorizedRecallFiltersByClassification(t *testing.T) {
 	s := NewMemoryStore(t.TempDir())
-	s.Add(domain.Memory{ID: "m1", Content: "public memo", Classification: "public"})
-	s.Add(domain.Memory{ID: "m2", Content: "internal memo", Classification: "internal"})
-	s.Add(domain.Memory{ID: "m3", Content: "confidential memo", Classification: "confidential"})
-	s.Add(domain.Memory{ID: "m4", Content: "restricted memo", Classification: "restricted"})
+	_, _ = s.Add(domain.Memory{ID: "m1", Content: "public memo", Classification: "public"})
+	_, _ = s.Add(domain.Memory{ID: "m2", Content: "internal memo", Classification: "internal"})
+	_, _ = s.Add(domain.Memory{ID: "m3", Content: "confidential memo", Classification: "confidential"})
+	_, _ = s.Add(domain.Memory{ID: "m4", Content: "restricted memo", Classification: "restricted"})
 
 	// Clearance 0 (public): should see only public + unclassified
 	got, _ := s.AuthorizedRecall(Query{}, "agent-low", 0)

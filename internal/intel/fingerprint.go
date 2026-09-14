@@ -6,6 +6,7 @@
 // (normalized to arity), literal counts and statement counts. They feed
 // probabilistic similarity comparisons (blueprint's duplication thresholds) and
 // are NEVER a gate on their own.
+
 package intel
 
 import (

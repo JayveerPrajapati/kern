@@ -41,7 +41,7 @@ type MemoryStore struct {
 	gov   *Governance
 }
 
-// NewStore returns a typed memory store for the given project root.
+// NewMemoryStore returns a typed memory store for the given project root.
 // Storage path: <cache_dir>/ememory/<project_hash>.json (separate from v1).
 func NewMemoryStore(root string) *MemoryStore {
 	abs, err := filepath.Abs(root)
@@ -95,16 +95,16 @@ func (s *MemoryStore) save(ms []domain.Memory) error {
 		return err
 	}
 	if _, err := tmp.Write(b); err != nil {
-		tmp.Close()
-		os.Remove(tmp.Name())
+		_ = tmp.Close()
+		_ = os.Remove(tmp.Name())
 		return err
 	}
 	if err := tmp.Close(); err != nil {
-		os.Remove(tmp.Name())
+		_ = os.Remove(tmp.Name())
 		return err
 	}
 	if err := os.Chmod(tmp.Name(), 0o600); err != nil {
-		os.Remove(tmp.Name())
+		_ = os.Remove(tmp.Name())
 		return err
 	}
 	return os.Rename(tmp.Name(), s.path)

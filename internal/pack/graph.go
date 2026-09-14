@@ -3,6 +3,7 @@
 // the per-file SHA-256 fingerprint — at roughly 1-5% of the raw file token
 // cost for a subgraph. The receiver verifies freshness and hydrates source
 // lazily via kern_context, only for the symbols it actually touches.
+
 package pack
 
 import (

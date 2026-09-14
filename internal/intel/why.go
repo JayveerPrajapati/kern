@@ -140,7 +140,7 @@ func sourceLines(root, file string, from, to int) []string {
 	if err != nil {
 		return nil
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	if from < 1 {
 		from = 1
 	}

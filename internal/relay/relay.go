@@ -107,7 +107,7 @@ func Start(root string) (*Server, error) {
 		// Either a live server owns the socket (probe it) or a stale
 		// file from a crashed owner is in the way (remove and retry).
 		if conn, perr := net.DialTimeout("unix", path, dialProbeTimeout); perr == nil {
-			conn.Close()
+			_ = conn.Close()
 			return nil, fmt.Errorf("%w: %s", ErrSocketInUse, path)
 		}
 		if rerr := os.Remove(path); rerr != nil {
@@ -161,7 +161,7 @@ func (s *Server) Broadcast(e eventbus.Event) {
 			// Slow client: drop it rather than stall the bus.
 			delete(s.clients, c)
 			close(c.buf)
-			go c.c.Close()
+			go func() { _ = c.c.Close() }()
 		}
 	}
 }
@@ -178,7 +178,7 @@ func (s *Server) Close() {
 	for c := range s.clients {
 		delete(s.clients, c)
 		close(c.buf)
-		c.c.Close()
+		_ = c.c.Close()
 	}
 	s.mu.Unlock()
 	if s.ln != nil {
@@ -195,14 +195,14 @@ func (s *Server) acceptLoop() {
 		}
 		// Security check: ensure peer UID matches process UID on Unix domain sockets
 		if !checkPeerCredentials(conn) {
-			conn.Close()
+			_ = conn.Close()
 			continue
 		}
 		c := &clientConn{c: conn, buf: make(chan []byte, perClientBuffer)}
 		s.mu.Lock()
 		if s.closed {
 			s.mu.Unlock()
-			conn.Close()
+			_ = conn.Close()
 			return
 		}
 		s.clients[c] = struct{}{}
@@ -338,7 +338,7 @@ func PublishPersisted(root string, events []eventbus.Event) {
 	if err != nil {
 		return // no live owner; the durable leg already ran
 	}
-	defer c.Close()
+	defer func() { _ = c.Close() }()
 	for _, e := range events {
 		if c.Emit(e) != nil {
 			return

@@ -212,7 +212,7 @@ func buildWatchChecks(policy string, client *kern.KernClient) ([]service.Check, 
 	return checks, nil
 }
 
-// validateBatch runs the canonical validation pipeline (spec Rule 1) over one
+// ValidateBatch runs the canonical validation pipeline (spec Rule 1) over one
 // debounced event batch and reports whether any finding has SeverityBlock,
 // plus all findings. It prints nothing; the caller emits the output.
 //

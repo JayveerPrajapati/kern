@@ -147,8 +147,6 @@ func encodeMessage(t *testing.T, id json.RawMessage, method string, params any) 
 	return frame(body)
 }
 
-// tDeref is a tiny indirection so encodeMessage keeps its signature honest.
-func tDeref(t *testing.T) *testing.T { return t }
 
 // ---- frame round-trip ----
 

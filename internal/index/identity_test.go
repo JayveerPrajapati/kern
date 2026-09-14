@@ -219,11 +219,11 @@ func TestTreeOID_DirtyTreeSlowPath(t *testing.T) {
 		t.Fatal(err)
 	}
 	idxPath := tmp.Name()
-	tmp.Close()
+	_ = tmp.Close()
 	if err := os.Remove(idxPath); err != nil {
 		t.Fatal(err)
 	}
-	defer os.Remove(idxPath)
+	defer func() { _ = os.Remove(idxPath) }()
 	env := append(os.Environ(), "GIT_INDEX_FILE="+idxPath)
 	add := exec.Command("git", "-C", dir, "add", "-A", "--ignore-errors", "--", ".", ":(exclude).blueprint")
 	add.Env = env
@@ -305,11 +305,11 @@ func TestTreeOID_SlowPathWithGitignoredKern(t *testing.T) {
 		t.Fatal(err)
 	}
 	idxPath := tmp.Name()
-	tmp.Close()
+	_ = tmp.Close()
 	if err := os.Remove(idxPath); err != nil {
 		t.Fatal(err)
 	}
-	defer os.Remove(idxPath)
+	defer func() { _ = os.Remove(idxPath) }()
 	env := append(os.Environ(), "GIT_INDEX_FILE="+idxPath)
 	add := exec.Command("git", "-C", dir, "add", "-A", "--ignore-errors", "--", ".", ":(exclude).blueprint")
 	add.Env = env

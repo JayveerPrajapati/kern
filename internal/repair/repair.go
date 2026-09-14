@@ -1,3 +1,4 @@
+// Package repair provides automated AST-level fixes for common compilation errors and lints.
 package repair
 
 import (

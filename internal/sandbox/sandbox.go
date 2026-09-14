@@ -221,11 +221,11 @@ func Snapshot(root string) (*Snap, error) {
 		return os.WriteFile(filepath.Join(tmp, rel), data, 0o644)
 	})
 	if err != nil {
-		os.RemoveAll(tmp)
+		_ = os.RemoveAll(tmp)
 		return nil, err
 	}
 	if len(walkErrs) > 0 {
-		os.RemoveAll(tmp)
+		_ = os.RemoveAll(tmp)
 		return nil, fmt.Errorf("snapshot copy incomplete: %d unreadable path(s), first: %s", len(walkErrs), walkErrs[0])
 	}
 	return s, nil
@@ -467,15 +467,15 @@ func writeAtomic(path string, data []byte) error {
 	_, werr := tmp.Write(data)
 	cerr := tmp.Close()
 	if werr != nil {
-		os.Remove(tmpName)
+		_ = os.Remove(tmpName)
 		return werr
 	}
 	if cerr != nil {
-		os.Remove(tmpName)
+		_ = os.Remove(tmpName)
 		return cerr
 	}
 	if err := os.Rename(tmpName, path); err != nil {
-		os.Remove(tmpName)
+		_ = os.Remove(tmpName)
 		return err
 	}
 	return nil
@@ -484,7 +484,7 @@ func writeAtomic(path string, data []byte) error {
 // Close removes the temp snapshot.
 func (s *Snap) Close() {
 	if s != nil && s.tmp != "" {
-		os.RemoveAll(s.tmp)
+		_ = os.RemoveAll(s.tmp)
 	}
 }
 

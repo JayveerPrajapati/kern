@@ -3,6 +3,7 @@
 // set of symbols and call edges the agent is permitted to read, together with
 // an auditable authorization proof. It is the product spine every governed
 // retrieval tool hangs off.
+
 package governance
 
 import (

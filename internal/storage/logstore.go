@@ -73,7 +73,7 @@ func (s *LogStore) Put(ctx context.Context, key string, value json.RawMessage) e
 	if err != nil {
 		return err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	line, err := json.Marshal(chainLine{K: key, V: value})
 	if err != nil {
 		return err
@@ -119,7 +119,7 @@ func (s *LogStore) getChain(ctx context.Context, key string) (json.RawMessage, e
 		}
 		return nil, err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	var found json.RawMessage
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
@@ -221,7 +221,7 @@ func (s *LogStore) listChain(ctx context.Context) ([]Entry, error) {
 		}
 		return nil, err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	var out []Entry
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
@@ -358,7 +358,7 @@ func (s *LogStore) lastChainLine(ctx context.Context) (Entry, bool, error) {
 		}
 		return Entry{}, false, err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	fi, err := f.Stat()
 	if err != nil {
 		return Entry{}, false, err

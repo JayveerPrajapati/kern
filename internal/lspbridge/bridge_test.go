@@ -250,7 +250,7 @@ while True:
 	if err != nil {
 		t.Fatalf("StartClient: %v", err)
 	}
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
 	// 1. Definition
 	defs, err := client.Definition(ctx, testFile, 1, 5)

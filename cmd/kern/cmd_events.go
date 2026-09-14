@@ -122,7 +122,7 @@ func runEventsWatch(args []string) int {
 		fmt.Fprintf(os.Stderr, "kern events watch: no relay at %s (start `kern events serve` or kern-server)\n", relay.SocketPath(f.root))
 		return 1
 	}
-	defer c.Close()
+	defer func() { _ = c.Close() }()
 	for {
 		e, err := c.Next()
 		if err != nil {
@@ -164,7 +164,7 @@ func runEventsEmit(args []string) int {
 		fmt.Fprintf(os.Stderr, "kern events emit: no relay at %s (start `kern events serve` or kern-server)\n", relay.SocketPath(f.root))
 		return 1
 	}
-	defer c.Close()
+	defer func() { _ = c.Close() }()
 	if err := c.Emit(eventbus.Event{
 		Kind:    eventbus.Kind(kind),
 		Source:  "cli",
@@ -213,7 +213,7 @@ func emitLockEvent(root, kind, scope string, payload map[string]any) {
 	if err != nil {
 		return
 	}
-	defer c.Close()
+	defer func() { _ = c.Close() }()
 	_ = c.Emit(eventbus.Event{
 		Kind:    eventbus.Kind(kind),
 		Source:  "cli",

@@ -317,8 +317,12 @@ func TestApprovalApproveMethodGuard(t *testing.T) {
 func newEmptyApp(t *testing.T) *App {
 	t.Helper()
 	root := t.TempDir()
-	os.WriteFile(filepath.Join(root, "go.mod"), []byte("module consoleempty\n\ngo 1.20\n"), 0o644)
-	os.WriteFile(filepath.Join(root, "main.go"), []byte("package main\n\nfunc main() {}\n"), 0o644)
+	if err := os.WriteFile(filepath.Join(root, "go.mod"), []byte("module consoleempty\n\ngo 1.20\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "main.go"), []byte("package main\n\nfunc main() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	app, err := New(root)
 	if err != nil {
 		t.Fatalf("web.New: %v", err)

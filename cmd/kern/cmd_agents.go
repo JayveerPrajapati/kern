@@ -121,19 +121,20 @@ func runAgents(rest []string) {
 			start := time.Now()
 			var out string
 			var perr error
-			if r.Name == "host" {
+			switch r.Name {
+			case "host":
 				prov := llm.NewMCPProvider()
 				ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 				out, perr = prov.Generate(ctx, "", "Reply with exactly: OK", llm.Options{})
 				cancel()
-			} else if r.Name == "ollama" {
+			case "ollama":
 				prov, perr0 := llm.NewProvider()
 				if perr0 != nil {
 					perr = perr0
 				} else {
 					out, perr = prov.Generate(context.Background(), "", "Reply with exactly: OK", llm.Options{})
 				}
-			} else {
+			default:
 				prov := llm.NewLocalCliProvider(r.Name)
 				ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 				out, perr = prov.Generate(ctx, "", "Reply with exactly: OK", llm.Options{})

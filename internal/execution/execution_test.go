@@ -218,7 +218,7 @@ func TestNewWorktreeCopiesAndSkips(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewWorktree: %v", err)
 	}
-	defer w.Cleanup()
+	defer func() { _ = w.Cleanup() }()
 
 	if w.Dir() == "" || w.Dir() == src {
 		t.Fatalf("Dir() = %q, want a distinct temp copy", w.Dir())
@@ -264,7 +264,7 @@ func TestWorktreeDiffSkipsSkippedDirs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewWorktree: %v", err)
 	}
-	defer w.Cleanup()
+	defer func() { _ = w.Cleanup() }()
 
 	// Make a real change so the diff is non-empty.
 	mod := filepath.Join(w.Dir(), "main.go")
@@ -292,7 +292,7 @@ func TestWorktreeApplyRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer w1.Cleanup()
+	defer func() { _ = w1.Cleanup() }()
 
 	// Make changes inside the first worktree: add a new file and modify an
 	// existing one, so the round trip exercises both the "a/<rel>" and
@@ -322,7 +322,7 @@ func TestWorktreeApplyRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer w2.Cleanup()
+	defer func() { _ = w2.Cleanup() }()
 
 	if err := w2.Apply(diff); err != nil {
 		t.Fatalf("Apply: %v", err)
@@ -351,7 +351,7 @@ func TestWorktreeApplyInvalidPatch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer w.Cleanup()
+	defer func() { _ = w.Cleanup() }()
 
 	if err := w.Apply("this is not a patch\n"); err == nil {
 		t.Fatal("Apply accepted a garbage patch, want an error")

@@ -157,7 +157,7 @@ func gzipFile(path string) error {
 	if err != nil {
 		return err
 	}
-	defer in.Close()
+	defer func() { _ = in.Close() }()
 	info, err := in.Stat()
 	if err != nil {
 		return err
@@ -167,15 +167,15 @@ func gzipFile(path string) error {
 		return err
 	}
 	tmpName := tmp.Name()
-	defer os.Remove(tmpName)
+	defer func() { _ = os.Remove(tmpName) }()
 	zw := gzip.NewWriter(tmp)
 	if _, err := io.Copy(zw, in); err != nil {
-		zw.Close()
-		tmp.Close()
+		_ = zw.Close()
+		_ = tmp.Close()
 		return err
 	}
 	if err := zw.Close(); err != nil {
-		tmp.Close()
+		_ = tmp.Close()
 		return err
 	}
 	if err := tmp.Close(); err != nil {

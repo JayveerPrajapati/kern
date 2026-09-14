@@ -223,7 +223,7 @@ func TestCorruptLineErrors(t *testing.T) {
 	if _, err := f.WriteString("{not-json}\n"); err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	f.Close()
+	_ = f.Close()
 	if _, err := s.Get("apr-x"); err == nil || !strings.Contains(err.Error(), s.Path()) {
 		t.Fatalf("Get over corrupt log must surface the store error naming the log, got %v", err)
 	}

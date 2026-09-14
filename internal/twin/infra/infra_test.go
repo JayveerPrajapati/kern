@@ -8,7 +8,7 @@ import (
 
 func TestExtractDockerCompose(t *testing.T) {
 	dir := t.TempDir()
-	os.WriteFile(filepath.Join(dir, "docker-compose.yml"), []byte(`
+	_ = os.WriteFile(filepath.Join(dir, "docker-compose.yml"), []byte(`
 services:
   postgres:
     image: postgres:15
@@ -27,7 +27,7 @@ services:
 
 func TestExtractTerraform(t *testing.T) {
 	dir := t.TempDir()
-	os.WriteFile(filepath.Join(dir, "main.tf"), []byte(`
+	_ = os.WriteFile(filepath.Join(dir, "main.tf"), []byte(`
 resource "aws_instance" "web" { ami = "ami-12345" }
 resource "aws_db_instance" "database" { engine = "postgres" }
 `), 0644)
@@ -43,7 +43,7 @@ resource "aws_db_instance" "database" { engine = "postgres" }
 
 func TestExtractK8sManifest(t *testing.T) {
 	dir := t.TempDir()
-	os.WriteFile(filepath.Join(dir, "deployment.yaml"), []byte(`
+	_ = os.WriteFile(filepath.Join(dir, "deployment.yaml"), []byte(`
 apiVersion: apps/v1
 kind: Deployment
 metadata:

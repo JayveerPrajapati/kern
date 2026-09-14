@@ -189,7 +189,7 @@ func TestG9_InjectedTimeoutActuallyInjected(t *testing.T) {
 	if err := scenario.Prepare(ctx); err != nil {
 		t.Fatalf("Prepare: %v", err)
 	}
-	defer scenario.Cleanup(ctx)
+	defer func() { _ = scenario.Cleanup(ctx) }()
 
 	if scenario.serverAddr == "" {
 		t.Fatal("serverAddr not set after Prepare")
@@ -201,11 +201,11 @@ func TestG9_InjectedTimeoutActuallyInjected(t *testing.T) {
 	if err != nil {
 		t.Fatalf("cannot connect to fault server: %v", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	// Send an HTTP request — the server should not respond within 2s.
-	conn.Write([]byte("GET / HTTP/1.0\r\n\r\n"))
+	_, _ = conn.Write([]byte("GET / HTTP/1.0\r\n\r\n"))
 	buf := make([]byte, 1024)
-	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
 	_, err = conn.Read(buf)
 	elapsed := time.Since(start)
 	if err == nil {
@@ -229,7 +229,7 @@ func TestG9_ResilientImplPasses(t *testing.T) {
 	if err := scenario.Prepare(ctx); err != nil {
 		t.Fatalf("Prepare: %v", err)
 	}
-	defer scenario.Cleanup(ctx)
+	defer func() { _ = scenario.Cleanup(ctx) }()
 
 	// Run the test with the fault server URL set.
 	sb := testSandboxWithEnv{timeout: 15 * time.Second, env: []string{"FAULT_SERVER_URL=" + scenario.serverAddr}}
@@ -251,7 +251,7 @@ func TestG9_NonResilientImplFails(t *testing.T) {
 	if err := scenario.Prepare(ctx); err != nil {
 		t.Fatalf("Prepare: %v", err)
 	}
-	defer scenario.Cleanup(ctx)
+	defer func() { _ = scenario.Cleanup(ctx) }()
 
 	// Run with a short sandbox timeout — the non-resilient code will hang.
 	sb := testSandboxWithEnv{timeout: 8 * time.Second, env: []string{"FAULT_SERVER_URL=" + scenario.serverAddr}}
@@ -273,7 +273,7 @@ func TestG9_FailuresRepeatable(t *testing.T) {
 	if err := scenario.Prepare(ctx); err != nil {
 		t.Fatalf("Prepare: %v", err)
 	}
-	defer scenario.Cleanup(ctx)
+	defer func() { _ = scenario.Cleanup(ctx) }()
 
 	sb := testSandboxWithEnv{timeout: 8 * time.Second, env: []string{"FAULT_SERVER_URL=" + scenario.serverAddr}}
 
@@ -293,7 +293,7 @@ func TestG9_NoNetworkLeakage(t *testing.T) {
 	if err := scenario.Prepare(ctx); err != nil {
 		t.Fatalf("Prepare: %v", err)
 	}
-	defer scenario.Cleanup(ctx)
+	defer func() { _ = scenario.Cleanup(ctx) }()
 
 	// The fault server should only listen on 127.0.0.1 (localhost).
 	addr := strings.TrimPrefix(scenario.serverAddr, "http://")
@@ -310,7 +310,7 @@ func TestG9_NoNetworkLeakage(t *testing.T) {
 	if err != nil {
 		t.Logf("note: cannot test 0.0.0.0 binding: %v", err)
 	} else {
-		ln.Close()
+		_ = ln.Close()
 	}
 }
 
@@ -333,7 +333,7 @@ func TestG9_CleanupGuaranteed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("server not listening after Prepare: %v", err)
 	}
-	conn.Close()
+	_ = conn.Close()
 
 	// Cleanup.
 	if err := scenario.Cleanup(ctx); err != nil {

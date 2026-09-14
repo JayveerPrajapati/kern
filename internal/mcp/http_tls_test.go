@@ -166,7 +166,7 @@ func TestServeHTTPContextWithTLSServesHTTPS(t *testing.T) {
 		t.Fatal(err)
 	}
 	addr := ln.Addr().String()
-	ln.Close()
+	_ = ln.Close()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -192,8 +192,8 @@ func TestServeHTTPContextWithTLSServesHTTPS(t *testing.T) {
 	for time.Now().Before(deadline) {
 		resp, err := client.Get("https://" + addr + "/health")
 		if err == nil {
-			io.Copy(io.Discard, resp.Body)
-			resp.Body.Close()
+			_, _ = io.Copy(io.Discard, resp.Body)
+			_ = resp.Body.Close()
 			if resp.StatusCode == http.StatusOK {
 				healthy = true
 				break
@@ -217,7 +217,7 @@ func TestServeHTTPContextWithTLSServesHTTPS(t *testing.T) {
 	if err != nil {
 		t.Fatalf("initialize over TLS: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	raw, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("initialize over TLS: status %d: %s", resp.StatusCode, raw)
@@ -237,7 +237,7 @@ func TestServeHTTPContextWithTLSPlainHTTPWhenNil(t *testing.T) {
 		t.Fatal(err)
 	}
 	addr := ln.Addr().String()
-	ln.Close()
+	_ = ln.Close()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -249,8 +249,8 @@ func TestServeHTTPContextWithTLSPlainHTTPWhenNil(t *testing.T) {
 	for time.Now().Before(deadline) {
 		resp, err := client.Get("http://" + addr + "/health")
 		if err == nil {
-			io.Copy(io.Discard, resp.Body)
-			resp.Body.Close()
+			_, _ = io.Copy(io.Discard, resp.Body)
+			_ = resp.Body.Close()
 			if resp.StatusCode == http.StatusOK {
 				healthy = true
 				break

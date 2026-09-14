@@ -52,14 +52,6 @@ func (s *TaskStore) loadLocked() ([]Task, error) {
 	return list, nil
 }
 
-// save writes the task list atomically using a unique temp file per write so
-// concurrent saves never collide on the same path.
-func (s *TaskStore) save(list []Task) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.saveLocked(list)
-}
-
 // saveLocked is the unlocked inner writer; callers must hold s.mu.
 func (s *TaskStore) saveLocked(list []Task) error {
 	if err := os.MkdirAll(filepath.Dir(s.path), 0o755); err != nil {
@@ -75,17 +67,17 @@ func (s *TaskStore) saveLocked(list []Task) error {
 	}
 	name := tmp.Name()
 	if _, err := tmp.Write(b); err != nil {
-		tmp.Close()
-		os.Remove(name)
+		_ = tmp.Close()
+		_ = os.Remove(name)
 		return err
 	}
 	if err := tmp.Chmod(0o600); err != nil {
-		tmp.Close()
-		os.Remove(name)
+		_ = tmp.Close()
+		_ = os.Remove(name)
 		return err
 	}
 	if err := tmp.Close(); err != nil {
-		os.Remove(name)
+		_ = os.Remove(name)
 		return err
 	}
 	return os.Rename(name, s.path)

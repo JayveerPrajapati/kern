@@ -19,7 +19,6 @@ import (
 // machine and the agent's own auth/session is reused.
 type LocalCliProvider struct {
 	name    string
-	binary  string // resolved absolute path ("" when not installed)
 	argsFor func(prompt string) []string
 	timeout time.Duration
 }

@@ -329,11 +329,6 @@ func (s *TaskService) Plan(intent string) (*agent.Task, domain.Plan, string, err
 	return t, plan, t.Output, nil
 }
 
-// Impact creates a Task for the change, runs the 11 deterministic graph
-// queries from the spec, and attaches the ImpactReport to the Task.
-// The Task transitions CREATED → ANALYZING → (COMPLETED or FAILED). Returns
-// the Task, the ImpactReport, and a rendered text summary.
-// This realizes the : the impact
 // ImpactOption customizes an Impact computation.
 type ImpactOption func(*impactOptions)
 
@@ -348,6 +343,11 @@ func ImpactStrict() ImpactOption {
 	return func(o *impactOptions) { o.strict = true }
 }
 
+// Impact creates a Task for the change, runs the 11 deterministic graph
+// queries from the spec, and attaches the ImpactReport to the Task.
+// The Task transitions CREATED → ANALYZING → (COMPLETED or FAILED). Returns
+// the Task, the ImpactReport, and a rendered text summary.
+// This realizes the impact analysis contract: the impact
 // report is the deterministic source — the LLM may explain it, but the data
 // comes from the knowledge graph, not an LLM guess.
 func (s *TaskService) Impact(change string, opts ...ImpactOption) (*agent.Task, domain.ImpactReport, string, error) {

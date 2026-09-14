@@ -251,7 +251,6 @@ func tarjanSCCs(graph map[string][]string) [][]string {
 				case unvisited:
 					frames = append(frames, frame{node: w})
 					recursed = true
-					break
 				case active:
 					if index[w] < lowlink[n] {
 						lowlink[n] = index[w]

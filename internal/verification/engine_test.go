@@ -11,16 +11,6 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/domain"
 )
 
-// repoRoot returns the repository root that the verification package lives in
-// (the parent of this package's directory).
-func repoRoot(t *testing.T) string {
-	t.Helper()
-	wd, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("getwd: %v", err)
-	}
-	return filepath.Dir(wd)
-}
 
 // writeTree writes the given relative-path->content map under dir.
 func writeTree(t *testing.T, dir string, files map[string]string) {

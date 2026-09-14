@@ -14,13 +14,8 @@ version: "2"
 #     that are registered or reached dynamically (plugins, CLI tables)
 linters:
   default: standard
-  disable:
-    - unused
-    - errcheck
   settings:
     staticcheck:
       checks:
         - "all"
-        - "-S*"
-        - "-ST*"
         - "-QF*"

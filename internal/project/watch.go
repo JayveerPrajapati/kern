@@ -70,8 +70,7 @@ func Watch(ctx context.Context, root string, pollInterval time.Duration, onChang
 		extends   int
 		rebuildMu sync.Mutex
 	)
-	var rebuild func()
-	rebuild = func() {
+	rebuild := func() {
 		rebuildMu.Lock()
 		defer rebuildMu.Unlock()
 		cur, err := index.FileHashes(root)

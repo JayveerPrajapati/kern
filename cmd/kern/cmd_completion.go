@@ -44,7 +44,7 @@ func generateBashCompletion(w io.Writer) {
 	for _, c := range cmds {
 		names = append(names, c.Name)
 	}
-	fmt.Fprintf(w, `# bash completion for kern
+	_, _ = fmt.Fprintf(w, `# bash completion for kern
 _kern() {
     local cur prev
     cur="${COMP_WORDS[COMP_CWORD]}"
@@ -70,7 +70,7 @@ func generateZshCompletion(w io.Writer) {
 		}
 		b.WriteString(fmt.Sprintf("        '%s:%s'\n", c.Name, help))
 	}
-	fmt.Fprintf(w, `#compdef kern
+	_, _ = fmt.Fprintf(w, `#compdef kern
 _kern() {
     local -a commands
     commands=(
@@ -91,7 +91,7 @@ func generateFishCompletion(w io.Writer) {
 		}
 		b.WriteString(fmt.Sprintf("complete -c kern -n \"__fish_use_subcommand\" -a \"%s\" -d \"%s\"\n", c.Name, help))
 	}
-	fmt.Fprintf(w, `# fish completion for kern
+	_, _ = fmt.Fprintf(w, `# fish completion for kern
 complete -c kern -f
 %s`, b.String())
 }

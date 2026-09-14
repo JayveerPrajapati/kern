@@ -555,7 +555,7 @@ func serveSequential(t *testing.T, reqs ...string) []map[string]any {
 		}
 		resps = append(resps, waitForResponse(t, out, req))
 	}
-	pw.Close()
+	_ = pw.Close()
 	if err := <-done; err != nil {
 		t.Fatalf("Serve: %v", err)
 	}

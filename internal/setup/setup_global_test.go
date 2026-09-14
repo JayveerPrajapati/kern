@@ -80,7 +80,7 @@ func withTempHome(t *testing.T, xdg bool) string {
 		if err := os.Setenv("XDG_CONFIG_HOME", filepath.Join(dir, ".config")); err != nil {
 			t.Fatal(err)
 		}
-		t.Cleanup(func() { os.Setenv("XDG_CONFIG_HOME", oldXDG) })
+		t.Cleanup(func() { _ = os.Setenv("XDG_CONFIG_HOME", oldXDG) })
 	}
 	return dir
 }

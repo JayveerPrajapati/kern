@@ -136,10 +136,10 @@ func TestReadFileSizeGuard(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := f.Truncate(MaxReadFileBytes + 1024); err != nil {
-		f.Close()
+		_ = f.Close()
 		t.Fatal(err)
 	}
-	f.Close()
+	_ = f.Close()
 
 	_, err = ReadFile(huge)
 	if err == nil || !strings.Contains(err.Error(), "exceeds maximum size") {

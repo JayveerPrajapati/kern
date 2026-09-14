@@ -217,7 +217,7 @@ func TestG12_ColdVsWarmIndex(t *testing.T) {
 	// Cold: remove index before each run.
 	var coldLatencies []time.Duration
 	for i := 0; i < 3; i++ {
-		os.RemoveAll(filepath.Join(dir, ".kern", "index.json"))
+		_ = os.RemoveAll(filepath.Join(dir, ".kern", "index.json"))
 		diffFiles := getDiffFiles(dir)
 		if len(diffFiles) == 0 {
 			// Create a staged change.
@@ -229,7 +229,7 @@ func TestG12_ColdVsWarmIndex(t *testing.T) {
 	}
 
 	// Warm: index exists.
-	client.IndexBuild(context.Background(), dir)
+	_, _, _ = client.IndexBuild(context.Background(), dir)
 	var warmLatencies []time.Duration
 	for i := 0; i < 3; i++ {
 		warmLatencies = append(warmLatencies, runValidation(t, client, dir, getDiffFiles(dir)))
@@ -326,11 +326,15 @@ func TestG12_MetricsReset(t *testing.T) {
 	m1 := New()
 	m1.RecordValidation("PASS", 50*time.Millisecond)
 	m1.RecordValidation("BLOCK", 100*time.Millisecond)
-	m1.Save(path)
+	if err := m1.Save(path); err != nil {
+		t.Fatal(err)
+	}
 
 	// Reset.
 	m2 := New()
-	m2.Save(path)
+	if err := m2.Save(path); err != nil {
+		t.Fatal(err)
+	}
 
 	// Load and verify empty.
 	m3, _ := Load(path)

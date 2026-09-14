@@ -24,7 +24,7 @@ func TestAnchorLineFormat(t *testing.T) {
 	ix := anchorFixture()
 	got := AnchorLine(ix, "Hub")
 	h := sha256.New()
-	fmt.Fprintf(h, "%s|%s|%d|%v|%s", "hub/hub.go", "Hub", 10, true, ix.Root)
+	_, _ = fmt.Fprintf(h, "%s|%s|%d|%v|%s", "hub/hub.go", "Hub", 10, true, ix.Root)
 	want := fmt.Sprintf("evidence: hub/hub.go:10 %s", "evidence-sha256:"+hex.EncodeToString(h.Sum(nil))[:16])
 	if got != want {
 		t.Errorf("AnchorLine = %q, want %q", got, want)

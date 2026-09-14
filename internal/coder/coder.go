@@ -338,10 +338,7 @@ type fileEdit struct {
 func extractEdits(response string) []fileEdit {
 	trimTag := func(s string) string {
 		s = strings.TrimPrefix(s, "\n")
-		if strings.HasSuffix(s, "\n") {
-			s = s[:len(s)-1]
-		}
-		return s
+		return strings.TrimSuffix(s, "\n")
 	}
 	var edits []fileEdit
 	rest := response

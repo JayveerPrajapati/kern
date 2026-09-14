@@ -177,8 +177,8 @@ func ServeHTTPContextWithTLS(ctx context.Context, addr string, tlsCfg *TLSConfig
 			return fmt.Errorf("listen unix socket %s: %w", sockPath, err)
 		}
 		_ = os.Chmod(sockPath, 0o600)
-		defer os.Remove(sockPath)
-		defer uln.Close()
+		defer func() { _ = os.Remove(sockPath) }()
+		defer func() { _ = uln.Close() }()
 		ln = uln
 	} else {
 		bindAddr, err := localhostAddr(addr)
@@ -189,7 +189,7 @@ func ServeHTTPContextWithTLS(ctx context.Context, addr string, tlsCfg *TLSConfig
 		if err != nil {
 			return err
 		}
-		defer tln.Close()
+		defer func() { _ = tln.Close() }()
 		ln = tln
 	}
 
@@ -327,7 +327,7 @@ func (s *Server) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Cache-Control", "no-store")
 		if _, err := w.Write(append(data, '\n')); err != nil {
-			fmt.Fprintf(w, "write: %v", err)
+			_, _ = fmt.Fprintf(w, "write: %v", err)
 		}
 		return
 	}

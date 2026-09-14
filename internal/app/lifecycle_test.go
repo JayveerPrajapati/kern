@@ -49,7 +49,7 @@ func payloadAction(ev eventbus.Event) string {
 func TestTaskServiceCancelPublishesEvent(t *testing.T) {
 	svc, bus := newTestTaskService(t)
 	tk := agent.NewTask("code", "x")
-	svc.registry.SubmitTask(tk)
+	_ = svc.registry.SubmitTask(tk)
 
 	if err := svc.Cancel(tk.ID, "user requested"); err != nil {
 		t.Fatalf("Cancel: %v", err)
@@ -82,7 +82,7 @@ func TestTaskServiceRetryPublishesEvent(t *testing.T) {
 	tk := agent.NewTask("code", "x")
 	_ = tk.Start("bot-1")
 	_ = tk.Fail("boom")
-	svc.registry.SubmitTask(tk)
+	_ = svc.registry.SubmitTask(tk)
 
 	if _, err := svc.Retry(tk.ID); err != nil {
 		t.Fatalf("Retry: %v", err)
@@ -110,7 +110,7 @@ func TestTaskServiceResumePublishesEvent(t *testing.T) {
 	_ = tk.Start("bot-1")
 	_ = tk.Transition(domain.TaskPlanning)
 	_ = tk.Block("waiting")
-	svc.registry.SubmitTask(tk)
+	_ = svc.registry.SubmitTask(tk)
 
 	if _, err := svc.Resume(tk.ID); err != nil {
 		t.Fatalf("Resume: %v", err)
@@ -139,7 +139,7 @@ func TestTaskServiceRollbackPublishesEvent(t *testing.T) {
 	} {
 		_ = tk.Transition(s)
 	}
-	svc.registry.SubmitTask(tk)
+	_ = svc.registry.SubmitTask(tk)
 
 	if err := svc.Rollback(tk.ID, "bad deploy"); err != nil {
 		t.Fatalf("Rollback: %v", err)
@@ -161,7 +161,7 @@ func TestTaskServiceHumanTakeoverPublishesEvent(t *testing.T) {
 	svc, bus := newTestTaskService(t)
 	tk := agent.NewTask("code", "x")
 	_ = tk.Start("bot-1")
-	svc.registry.SubmitTask(tk)
+	_ = svc.registry.SubmitTask(tk)
 
 	if err := svc.HumanTakeover(tk.ID, "human-1"); err != nil {
 		t.Fatalf("HumanTakeover: %v", err)
@@ -187,7 +187,7 @@ func TestTaskServiceReturnToAgentPublishesEvent(t *testing.T) {
 	svc, bus := newTestTaskService(t)
 	tk := agent.NewTask("code", "x")
 	_ = tk.Start("bot-1")
-	svc.registry.SubmitTask(tk)
+	_ = svc.registry.SubmitTask(tk)
 
 	if err := svc.HumanTakeover(tk.ID, "human-1"); err != nil {
 		t.Fatalf("HumanTakeover: %v", err)
@@ -219,7 +219,7 @@ func TestTaskServiceTimeoutPublishesEvent(t *testing.T) {
 	svc, bus := newTestTaskService(t)
 	tk := agent.NewTask("code", "x")
 	_ = tk.Start("bot-1")
-	svc.registry.SubmitTask(tk)
+	_ = svc.registry.SubmitTask(tk)
 
 	if err := svc.Timeout(tk.ID); err != nil {
 		t.Fatalf("Timeout: %v", err)
@@ -241,7 +241,7 @@ func TestPublishIdempotentAtAppLayer(t *testing.T) {
 	// Two distinct transitions produce distinct events (different payloads).
 	tk := agent.NewTask("code", "x")
 	_ = tk.Start("bot-1")
-	svc.registry.SubmitTask(tk)
+	_ = svc.registry.SubmitTask(tk)
 	if err := svc.Timeout(tk.ID); err != nil {
 		t.Fatalf("Timeout: %v", err)
 	}

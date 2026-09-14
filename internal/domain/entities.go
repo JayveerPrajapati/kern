@@ -1,6 +1,7 @@
 // This file holds canonical domain entities. Like the rest of this package,
 // these are pure types: storage-agnostic, provider-independent, and free of
 // MCP, CLI, REST, or SDK specifics.
+
 package domain
 
 import (

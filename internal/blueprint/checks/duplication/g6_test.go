@@ -206,34 +206,6 @@ func runCheckAgainstFixture(t *testing.T, f DupFixture) domain.CheckResult {
 	return res
 }
 
-// assertBucket verifies the check produced a finding with the expected
-// similarity bucket (extracted from the evidence description).
-func assertBucket(t *testing.T, res domain.CheckResult, expectedBucket string) {
-	t.Helper()
-	if expectedBucket == "ignore" {
-		// "ignore" means no finding should be produced (similarity below
-		// DetectionThreshold, or a tiny function below the size floor).
-		if len(res.Findings) > 0 {
-			for _, f := range res.Findings {
-				if bucketStr := extractBucket(f); bucketStr != "ignore" {
-					t.Errorf("expected no finding (ignore), got bucket=%s: %s", bucketStr, f.Message)
-				}
-			}
-		}
-		return
-	}
-	// Non-ignore buckets: must have at least one finding matching the bucket.
-	for _, f := range res.Findings {
-		if extractBucket(f) == expectedBucket {
-			return // found a matching finding
-		}
-	}
-	if len(res.Findings) == 0 {
-		t.Fatalf("expected finding with bucket %q, got none", expectedBucket)
-	}
-	t.Fatalf("expected finding with bucket %q; got %d findings with buckets: %v",
-		expectedBucket, len(res.Findings), allBuckets(res.Findings))
-}
 
 func extractBucket(f domain.Finding) string {
 	for _, e := range f.Evidence {

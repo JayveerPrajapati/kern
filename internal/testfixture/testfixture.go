@@ -17,7 +17,7 @@ import (
 	"testing"
 )
 
-// Fixture module path. Intentionally short so analysis output stays readable.
+// ModulePath is the fixture module path. Intentionally short so analysis output stays readable.
 const ModulePath = "example.com/fixture"
 
 // Files is the fixture source tree: a tiny Go module with two packages
@@ -159,14 +159,6 @@ func Repo(t *testing.T) string {
 	return dir
 }
 
-// git runs a git command in dir, failing the test on error.
-func git(t *testing.T, dir string, args ...string) {
-	t.Helper()
-	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("testfixture: git %v: %v\n%s", args, err, out)
-	}
-}
 
 // Symbol returns a fixture symbol of the given kind, so tests can reference
 // a stable target without hard-coding the fixture contents twice. kind is

@@ -198,14 +198,14 @@ func (w *Writer) Write(r Record) error {
 		return err
 	}
 	if _, err := f.Write(append(final, '\n')); err != nil {
-		f.Close()
+		_ = f.Close()
 		return err
 	}
 	// fsync before releasing the flock (H7): the line must be durable on disk
 	// before another process (or a crash) observes the chain tail, otherwise a
 	// crash mid-append could leave a partial line that breaks VerifyChain.
 	if err := f.Sync(); err != nil {
-		f.Close()
+		_ = f.Close()
 		return err
 	}
 	if err := f.Close(); err != nil {
@@ -249,7 +249,7 @@ func (w *Writer) readTailHash() string {
 	if err != nil {
 		return ""
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	fi, err := f.Stat()
 	if err != nil {
 		return ""
@@ -290,7 +290,7 @@ func (w *Writer) readFullLastHash() string {
 	if err != nil {
 		return ""
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
 	last := ""

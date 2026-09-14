@@ -92,7 +92,7 @@ func TestSQLiteCallsKindColumn(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	if !storeHasColumn(store.db, "calls", "kind") {
 		t.Fatal("calls table missing kind column")
 	}
@@ -260,7 +260,7 @@ func TestSQLitePointQueries(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	// 1. LookupSymbol
 	sym, err := store.LookupSymbol("greet")

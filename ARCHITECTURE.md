@@ -55,9 +55,9 @@ both are capped, not hidden.
 | `internal/fetch` | 245 | 400 |  |
 | `internal/flight` | 460 | 700 | `internal/storage` |
 | `internal/flock` | 105 | 200 |  |
-| `internal/fw` | 800 | 1300 | `internal/ignore` |
+| `internal/fw` | 800 | 1300 | `internal/ignore` `internal/index` |
 | `internal/governance` | 3669 | 5600 | `internal/cache` `internal/config` `internal/domain` `internal/eventbus` `internal/flock` `internal/index` `internal/metrics` `internal/storage` |
-| `internal/heal` | 252 | 400 | `internal/diff` `internal/llm` `internal/sandbox` `internal/validate` |
+| `internal/heal` | 252 | 400 | `internal/diff` `internal/index` `internal/intel` `internal/llm` `internal/sandbox` `internal/validate` |
 | `internal/hook` | 330 | 500 | `internal/memory` `internal/optimize` |
 | `internal/hooks` | 159 | 300 | `internal/memory` |
 | `internal/host` | 389 | 600 | `internal/domain` |
@@ -72,7 +72,7 @@ both are capped, not hidden.
 | `internal/lock` | 367 | 600 | `internal/flock` |
 | `internal/loop` | 1700 | 2600 | `internal/blueprint` `internal/coder` `internal/deployment` `internal/domain` `internal/eventbus` `internal/execution` `internal/flight` `internal/governance` `internal/incident` `internal/learning` `internal/memory` `internal/planner` `internal/runtime` `internal/verification` |
 | `internal/lsp` | 658 | 1000 | `internal/index` |
-| `internal/mcp` | 13775 | 20700 | `internal/agent` `internal/blueprint` `internal/app` `internal/brief` `internal/budget` `internal/cache` `internal/code` `internal/commitmsg` `internal/config` `internal/diff` `internal/docsearch` `internal/domain` `internal/enterprise` `internal/evidence` `internal/fetch` `internal/flight` `internal/fw` `internal/governance` `internal/heal` `internal/index` `internal/intel` `internal/lenses` `internal/llm` `internal/lock` `internal/loop` `internal/mcpclient` `internal/memory` `internal/metrics` `internal/note` `internal/optimize` `internal/pack` `internal/pii` `internal/precache` `internal/profiles` `internal/project` `internal/prompt` `internal/relay` `internal/rename` `internal/retrieval` `internal/runtime` `internal/sandbox` `internal/script` `internal/sec` `internal/semcache` `internal/service` `internal/skills` `internal/stats` `internal/storage` `internal/strutil` `internal/swap` `internal/synthtest` `internal/terse` `internal/tokenize` `internal/transform` `internal/validate` `internal/verification` `internal/verify` `internal/whatif` |
+| `internal/mcp` | 13775 | 20700 | `internal/agent` `internal/blueprint` `internal/app` `internal/brief` `internal/budget` `internal/cache` `internal/code` `internal/commitmsg` `internal/config` `internal/diff` `internal/docsearch` `internal/domain` `internal/enterprise` `internal/evidence` `internal/fetch` `internal/fit` `internal/flight` `internal/fragility` `internal/fw` `internal/governance` `internal/heal` `internal/index` `internal/intel` `internal/lenses` `internal/llm` `internal/lock` `internal/loop` `internal/lspbridge` `internal/mcpclient` `internal/memory` `internal/metrics` `internal/mutation` `internal/note` `internal/optimize` `internal/pack` `internal/pii` `internal/precache` `internal/profiles` `internal/project` `internal/prompt` `internal/refactor` `internal/relay` `internal/rename` `internal/repair` `internal/retrieval` `internal/runtime` `internal/sandbox` `internal/script` `internal/sec` `internal/semcache` `internal/service` `internal/skills` `internal/stats` `internal/storage` `internal/strutil` `internal/swap` `internal/synthtest` `internal/terse` `internal/tokenize` `internal/transform` `internal/validate` `internal/verification` `internal/verify` `internal/whatif` |
 | `internal/mcpclient` | 487 | 800 |  |
 | `internal/memory` | 1871 | 2900 | `internal/cache` `internal/domain` `internal/metrics` `internal/storage` |
 | `internal/metrics` | 715 | 1100 |  |
@@ -95,7 +95,7 @@ both are capped, not hidden.
 | `internal/retrieval` | 541 | 900 | `internal/budget` `internal/context` `internal/evidence` `internal/index` `internal/intel` `internal/tokenize` |
 | `internal/reviewpack` | 535 | 900 | `internal/domain` `internal/index` `internal/intel` `internal/lenses` `internal/tokenize` |
 | `internal/runtime` | 1944 | 3000 | `internal/config` `internal/domain` |
-| `internal/sandbox` | 737 | 1200 | `internal/governance` `internal/processgroup` |
+| `internal/sandbox` | 737 | 1200 | `internal/governance` `internal/index` `internal/intel` `internal/processgroup` |
 | `internal/schema` | 252 | 400 |  |
 | `internal/script` | 659 | 1000 | `internal/governance` `internal/processgroup` |
 | `internal/sdk` | 279 | 500 | `internal/domain` |
@@ -114,7 +114,7 @@ both are capped, not hidden.
 | `internal/transform` | 364 | 600 | `internal/diff` `internal/index` |
 | `internal/twin` | 1221 | 1900 | `internal/domain` `internal/index` `internal/intelligence` `internal/runtime` |
 | `internal/validate` | 422 | 700 | `internal/index` `internal/processgroup` |
-| `internal/verification` | 1768 | 2700 | `internal/budget` `internal/ci` `internal/config` `internal/context` `internal/domain` `internal/eval` `internal/eventbus` `internal/evidence` `internal/governance` `internal/host` `internal/index` `internal/intel` `internal/intelligence` `internal/memory` `internal/metrics` `internal/retrieval` `internal/sandbox` `internal/sec` `internal/tokenize` `internal/validate` |
+| `internal/verification` | 1768 | 2700 | `internal/budget` `internal/ci` `internal/config` `internal/context` `internal/domain` `internal/eval` `internal/eventbus` `internal/evidence` `internal/governance` `internal/host` `internal/index` `internal/intel` `internal/intelligence` `internal/memory` `internal/metrics` `internal/retrieval` `internal/sandbox` `internal/sec` `internal/tokenize` `internal/validate` `internal/version` |
 | `internal/verify` | 1056 | 1600 | `internal/index` |
 | `internal/version` | 26 | 100 |  |
 | `internal/web` | 3108 | 4700 | `internal/agent` `internal/agents` `internal/app` `internal/architecture` `internal/domain` `internal/eventbus` `internal/governance` `internal/incident` `internal/index` `internal/intel` `internal/intelligence` `internal/learning` `internal/loop` `internal/memory` `internal/metrics` `internal/modernization` `internal/relay` `internal/runtime` `internal/service` `internal/verification` `internal/whatif` |

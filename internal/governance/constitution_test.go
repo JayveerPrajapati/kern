@@ -25,7 +25,7 @@ func TestLoadConstitutionMissingFile(t *testing.T) {
 func TestLoadConstitution(t *testing.T) {
 	dir := t.TempDir()
 	kernDir := filepath.Join(dir, ".kern")
-	os.MkdirAll(kernDir, 0o755)
+	_ = os.MkdirAll(kernDir, 0o755)
 	yaml := `rules:
   - id: no-payments-deps
     type: MUST_NOT
@@ -50,7 +50,7 @@ func TestLoadConstitution(t *testing.T) {
     require_tests:
       - integration_test
 `
-	os.WriteFile(filepath.Join(kernDir, "constitution.yaml"), []byte(yaml), 0o644)
+	_ = os.WriteFile(filepath.Join(kernDir, "constitution.yaml"), []byte(yaml), 0o644)
 
 	c, err := LoadConstitution(dir)
 	if err != nil {
@@ -269,7 +269,7 @@ func TestSuggestRulesDefensive(t *testing.T) {
 func TestLoadConstitutionListWithColons(t *testing.T) {
 	dir := t.TempDir()
 	kernDir := filepath.Join(dir, ".kern")
-	os.MkdirAll(kernDir, 0o755)
+	_ = os.MkdirAll(kernDir, 0o755)
 	yaml := `rules:
   - id: custom-deps
     type: MUST_NOT
@@ -283,7 +283,7 @@ func TestLoadConstitutionListWithColons(t *testing.T) {
     category: security
     description: "second rule"
 `
-	os.WriteFile(filepath.Join(kernDir, "constitution.yaml"), []byte(yaml), 0o644)
+	_ = os.WriteFile(filepath.Join(kernDir, "constitution.yaml"), []byte(yaml), 0o644)
 
 	c, err := LoadConstitution(dir)
 	if err != nil {

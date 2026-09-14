@@ -117,9 +117,9 @@ func nonCallSkipSet(f *ast.File) map[*ast.Ident]bool {
 // outside a call position. Only non-test files count: a test-only reference
 // (like a test-only call) is not enough to keep a symbol out of dead-code or
 // the safe-to-delete set, because deleting the tests is part of the change.
-func (ri *nonCallRefIndex) productionFiles(name string) []string {
+func (r *nonCallRefIndex) productionFiles(name string) []string {
 	var out []string
-	for f := range ri.byName[name] {
+	for f := range r.byName[name] {
 		if !isTestFile(f) {
 			out = append(out, f)
 		}
@@ -134,13 +134,3 @@ func (r *nonCallRefIndex) referencedOutsideCall(name string) bool {
 	return len(r.productionFiles(name)) > 0
 }
 
-// files returns every indexed file (test or not) that references name outside a
-// call position.
-func (r *nonCallRefIndex) files(name string) []string {
-	var out []string
-	for f := range r.byName[name] {
-		out = append(out, f)
-	}
-	sort.Strings(out)
-	return out
-}

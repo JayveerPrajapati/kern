@@ -97,7 +97,7 @@ func Fetch(rawURL string, maxBytes int) (*Result, error) {
 	if err != nil {
 		return nil, fmt.Errorf("fetch failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("fetch failed: %s", resp.Status)
 	}

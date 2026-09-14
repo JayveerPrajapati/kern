@@ -1023,7 +1023,7 @@ func (a *App) handleV1EventsStream(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 
 	if a.bus == nil {
-		fmt.Fprintf(w, "event: error\ndata: {\"error\":\"event bus not configured\"}\n\n")
+		_, _ = fmt.Fprintf(w, "event: error\ndata: {\"error\":\"event bus not configured\"}\n\n")
 		flusher.Flush()
 		return
 	}
@@ -1038,7 +1038,7 @@ func (a *App) handleV1EventsStream(w http.ResponseWriter, r *http.Request) {
 	})
 	defer unsub()
 
-	fmt.Fprintf(w, "event: connected\ndata: {\"status\":\"connected\",\"timestamp\":%d}\n\n", time.Now().Unix())
+	_, _ = fmt.Fprintf(w, "event: connected\ndata: {\"status\":\"connected\",\"timestamp\":%d}\n\n", time.Now().Unix())
 	flusher.Flush()
 
 	ctx := r.Context()
@@ -1051,7 +1051,7 @@ func (a *App) handleV1EventsStream(w http.ResponseWriter, r *http.Request) {
 			if err != nil {
 				continue
 			}
-			fmt.Fprintf(w, "event: %s\ndata: %s\n\n", ev.Kind, string(data))
+			_, _ = fmt.Fprintf(w, "event: %s\ndata: %s\n\n", ev.Kind, string(data))
 			flusher.Flush()
 		}
 	}

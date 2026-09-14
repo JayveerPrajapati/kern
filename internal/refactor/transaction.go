@@ -1,3 +1,4 @@
+// Package refactor provides atomic multi-file refactoring and rollback transactions.
 package refactor
 
 import (
@@ -61,7 +62,7 @@ func ExecuteTransaction(ctx context.Context, req TransactionRequest) (*Transacti
 	if err != nil {
 		return nil, fmt.Errorf("create sandbox: %w", err)
 	}
-	defer os.RemoveAll(sandboxDir)
+	defer func() { _ = os.RemoveAll(sandboxDir) }()
 
 	// Copy repository contents to sandbox (respecting basic files)
 	if err := copyWorktree(absRoot, sandboxDir); err != nil {

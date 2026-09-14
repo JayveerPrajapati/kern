@@ -209,7 +209,7 @@ func Bridges(ix *index.Index, limit int) []Bridge {
 	return bridges
 }
 
-// Render returns a compact human-readable hubs report.
+// RenderHubs returns a compact human-readable hubs report.
 func RenderHubs(hubs []Hub) string {
 	var b strings.Builder
 	b.WriteString("hub symbols (most depended-on):\n")

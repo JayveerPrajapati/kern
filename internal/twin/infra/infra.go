@@ -60,7 +60,7 @@ func (e *Extractor) extractDockerCompose(path string) ([]domain.Node, []domain.E
 	if err != nil {
 		return nil, nil
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	var nodes []domain.Node
 	var edges []domain.Edge
@@ -106,7 +106,7 @@ func (e *Extractor) extractK8s(path string) ([]domain.Node, []domain.Edge) {
 	if err != nil {
 		return nil, nil
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	var nodes []domain.Node
 	var edges []domain.Edge
@@ -144,7 +144,7 @@ func (e *Extractor) extractTerraform(path string) ([]domain.Node, []domain.Edge)
 	if err != nil {
 		return nil, nil
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	var nodes []domain.Node
 	var edges []domain.Edge
@@ -183,7 +183,7 @@ func (e *Extractor) extractHelmChart(path string) []domain.Node {
 	if err != nil {
 		return nil
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	scanner := bufio.NewScanner(f)
 	for scanner.Scan() {
 		line := scanner.Text()

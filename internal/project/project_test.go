@@ -141,7 +141,7 @@ func TestWatchPollFallback(t *testing.T) {
 	var got []string
 	done := make(chan struct{})
 	go func() {
-		Watch(ctx, dir, 50*time.Millisecond, func(changes []index.Change, ix *index.Index) {
+		_ = Watch(ctx, dir, 50*time.Millisecond, func(changes []index.Change, ix *index.Index) {
 			mu.Lock()
 			for _, c := range changes {
 				got = append(got, string(c.Kind)+":"+c.File)
@@ -179,13 +179,15 @@ func TestWatchDetectsModification(t *testing.T) {
 
 	var mu sync.Mutex
 	var got []string
-	go Watch(ctx, dir, 50*time.Millisecond, func(changes []index.Change, ix *index.Index) {
-		mu.Lock()
-		for _, c := range changes {
-			got = append(got, string(c.Kind)+":"+c.File)
-		}
-		mu.Unlock()
-	}, nil)
+	go func() {
+		_ = Watch(ctx, dir, 50*time.Millisecond, func(changes []index.Change, ix *index.Index) {
+			mu.Lock()
+			for _, c := range changes {
+				got = append(got, string(c.Kind)+":"+c.File)
+			}
+			mu.Unlock()
+		}, nil)
+	}()
 
 	time.Sleep(300 * time.Millisecond)
 	if err := os.WriteFile(path, []byte("package main\n\nfunc hello() {}\nfunc bye() {}\n"), 0o644); err != nil {
@@ -229,16 +231,18 @@ func TestWatchRebuildsAreSerialized(t *testing.T) {
 	var mu sync.Mutex
 	var changeCount int
 	var done = make(chan struct{})
-	go Watch(ctx, dir, 20*time.Millisecond, func(changes []index.Change, ix *index.Index) {
-		mu.Lock()
-		changeCount++
-		mu.Unlock()
-		select {
-		case <-done:
-		default:
-			close(done)
-		}
-	}, nil)
+	go func() {
+		_ = Watch(ctx, dir, 20*time.Millisecond, func(changes []index.Change, ix *index.Index) {
+			mu.Lock()
+			changeCount++
+			mu.Unlock()
+			select {
+			case <-done:
+			default:
+				close(done)
+			}
+		}, nil)
+	}()
 	<-done
 }
 

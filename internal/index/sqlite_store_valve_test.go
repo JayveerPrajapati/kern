@@ -62,7 +62,7 @@ func TestWALValveBoundedGrowth(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OpenSQLite: %v", err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 
 	ix := valveTestIndex(dir, 6000)
 	pageSize := valvePageSize(t, s)
@@ -106,7 +106,7 @@ func TestWALValveDataIntegrity(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OpenSQLite: %v", err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 
 	ix := valveTestIndex(dir, 6000)
 	const saves = 12
@@ -168,7 +168,7 @@ func TestWALValveSmallWritesNoGrowth(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OpenSQLite: %v", err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 
 	small := valveTestIndex(dir, 50)
 	pageSize := valvePageSize(t, s)

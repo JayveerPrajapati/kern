@@ -54,7 +54,7 @@ func TestConfinementGate_SiblingPathNotConfused(t *testing.T) {
 	if err := os.MkdirAll(sibling, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { os.RemoveAll(sibling) })
+	t.Cleanup(func() { _ = os.RemoveAll(sibling) })
 
 	if err := gate("blueprint_validate_staged", map[string]any{"repo": sibling}); err == nil {
 		t.Fatal("prefix-sibling path must be denied")

@@ -6,6 +6,7 @@
 // attached, persisted under "memory-audit-<seq>" keys so the trail survives
 // restarts. Persistence is best-effort: a failed write degrades the trail to
 // in-memory but never fails the memory operation being audited.
+
 package memory
 
 import (

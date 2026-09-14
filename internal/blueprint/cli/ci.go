@@ -331,10 +331,10 @@ func validateInWorktree(repoRoot, head string) (valRoot string, cleanup func(), 
 		return "", nil, fmt.Errorf("cannot create worktree dir: %w", err)
 	}
 	// git worktree add requires a non-existing (or empty) path.
-	os.RemoveAll(wtDir)
+	_ = os.RemoveAll(wtDir)
 	cmd := exec.Command("git", "-C", repoRoot, "worktree", "add", "--detach", wtDir, head)
 	if out, err := cmd.CombinedOutput(); err != nil {
-		os.RemoveAll(wtDir)
+		_ = os.RemoveAll(wtDir)
 		return "", nil, fmt.Errorf("cannot create worktree for head %s: %v", head, strings.TrimSpace(string(out)))
 	}
 	// Best-effort cleanup: remove the throwaway worktree and its directory.

@@ -275,7 +275,7 @@ func workspaceRoots() []string {
 
 // usage prints the blueprint-mcp help text to w.
 func usage(w *os.File) {
-	fmt.Fprintln(w, `blueprint-mcp — Blueprint MCP server (stdio)
+	_, _ = fmt.Fprintln(w, `blueprint-mcp — Blueprint MCP server (stdio)
 
 Runs a minimal MCP server over stdin/stdout that exposes Blueprint's
 validation tools (validate-staged, validate-proposed, explain-finding, repair-guidance) to agents.

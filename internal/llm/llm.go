@@ -65,7 +65,7 @@ func (c *Client) Available() bool {
 	if err != nil {
 		return false
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	return resp.StatusCode == http.StatusOK
 }
 
@@ -89,7 +89,7 @@ func (c *Client) Compress(prompt string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("ollama status %d", resp.StatusCode)
 	}
@@ -125,7 +125,7 @@ func (c *Client) Complete(system, user string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("ollama status %d", resp.StatusCode)
 	}
@@ -190,7 +190,7 @@ func (c *Client) EmbedText(ctx context.Context, text string) ([]float32, error) 
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("ollama embed status %d", resp.StatusCode)
 	}
@@ -215,7 +215,7 @@ func (c *Client) tags() ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("ollama status %d", resp.StatusCode)
 	}

@@ -319,8 +319,8 @@ func renderReceiptSARIF(absRoot string, r *receipt.Receipt) error {
 			fmt.Fprintf(os.Stderr, "blueprint: SARIF fallback failed: %v\n", err)
 			return err
 		}
-		os.Stdout.Write(data)
-		return nil
+		_, err = os.Stdout.Write(data)
+		return err
 	}
 	findings := loadArtifactFindings(absRoot)
 	data, err := receipt.RenderSARIF(r, findings)
@@ -328,8 +328,8 @@ func renderReceiptSARIF(absRoot string, r *receipt.Receipt) error {
 		fmt.Fprintf(os.Stderr, "Receipt %s: SARIF export failed: %v\n", r.ReceiptID, err)
 		return err
 	}
-	os.Stdout.Write(data)
-	return nil
+	_, err = os.Stdout.Write(data)
+	return err
 }
 
 // renderReceiptInToto emits the in-toto v0.2 supply-chain attestation
@@ -343,16 +343,16 @@ func renderReceiptInToto(absRoot string, r *receipt.Receipt) error {
 			fmt.Fprintf(os.Stderr, "blueprint: in-toto fallback failed: %v\n", err)
 			return err
 		}
-		os.Stdout.Write(data)
-		return nil
+		_, err = os.Stdout.Write(data)
+		return err
 	}
 	data, err := receipt.RenderInToto(r)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Receipt %s: in-toto export failed: %v\n", r.ReceiptID, err)
 		return err
 	}
-	os.Stdout.Write(data)
-	return nil
+	_, err = os.Stdout.Write(data)
+	return err
 }
 
 // ciArtifactDefaultFile mirrors `kern ci`'s default --artifact-file value
@@ -476,7 +476,7 @@ var (
 // tests can shorten the window.
 var kernChainHashVerifyTimeout = 15 * time.Second
 
-// verifyKernChainHash checks that expectedHash appears in kern's audit trail
+// VerifyKernChainHash checks that expectedHash appears in kern's audit trail
 // by running `kern audit --root <root> --json` (H5). Resolution order mirrors
 // adapters/kern and audit/kern_link.go: KERN_BINARY, $PATH, then
 // ../kern/bin/kern.

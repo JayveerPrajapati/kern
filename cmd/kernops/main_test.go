@@ -13,7 +13,7 @@ func TestKernOpsBinaryBuildsAndRuns(t *testing.T) {
 	if out, err := buildCmd.CombinedOutput(); err != nil {
 		t.Fatalf("build failed: %v\n%s", err, string(out))
 	}
-	defer os.Remove(tmpBin)
+	defer func() { _ = os.Remove(tmpBin) }()
 
 	// Run with --help
 	cmd := exec.Command(tmpBin, "-help")

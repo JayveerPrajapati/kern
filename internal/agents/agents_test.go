@@ -91,8 +91,12 @@ func TestSpecialistRegistry(t *testing.T) {
 	}
 
 	// ByRole returns sorted specialists.
-	reg.Register(NewSpecialist(RoleTester, "tester-b"))
-	reg.Register(NewSpecialist(RoleTester, "tester-a"))
+	if err := reg.Register(NewSpecialist(RoleTester, "tester-b")); err != nil {
+		t.Fatal(err)
+	}
+	if err := reg.Register(NewSpecialist(RoleTester, "tester-a")); err != nil {
+		t.Fatal(err)
+	}
 	testers := reg.ByRole(RoleTester)
 	if len(testers) != 2 {
 		t.Fatalf("ByRole(tester) = %d, want 2", len(testers))
@@ -256,8 +260,12 @@ func TestPipelineApproval(t *testing.T) {
 func TestPipelineMissingSpecialist(t *testing.T) {
 	// Team missing the tester role => pipeline fails at the test stage.
 	team := NewSpecialistRegistry()
-	team.Register(NewSpecialist(RolePlanner, "planner"))
-	team.Register(NewSpecialist(RoleCoder, "coder"))
+	if err := team.Register(NewSpecialist(RolePlanner, "planner")); err != nil {
+		t.Fatal(err)
+	}
+	if err := team.Register(NewSpecialist(RoleCoder, "coder")); err != nil {
+		t.Fatal(err)
+	}
 	p := NewPipeline(team, agent.NewRegistry(), nil)
 
 	task := agent.NewTask("code", "implement X")

@@ -30,7 +30,7 @@ func TestAvailableFalseWhenUnreachable(t *testing.T) {
 func TestCompressUsesServer(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/tags" {
-			w.Write([]byte(`{"models":[]}`))
+			_, _ = w.Write([]byte(`{"models":[]}`))
 			return
 		}
 		if r.URL.Path != "/api/generate" {
@@ -52,7 +52,7 @@ func TestCompressUsesServer(t *testing.T) {
 		if !strings.Contains(body["prompt"].(string), "hello kern") {
 			t.Fatalf("prompt missing input text")
 		}
-		w.Write([]byte(`{"response":"hello"}`))
+		_, _ = w.Write([]byte(`{"response":"hello"}`))
 	}))
 	defer srv.Close()
 
@@ -69,7 +69,7 @@ func TestCompressUsesServer(t *testing.T) {
 
 func TestCompressEmptyResponse(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(`{"response":"   "}`))
+		_, _ = w.Write([]byte(`{"response":"   "}`))
 	}))
 	defer srv.Close()
 
@@ -105,7 +105,7 @@ func mockOllama(t *testing.T, generate func(w http.ResponseWriter, r *http.Reque
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/tags" {
-			w.Write([]byte(`{"models":[]}`))
+			_, _ = w.Write([]byte(`{"models":[]}`))
 			return
 		}
 		generate(w, r)
@@ -134,7 +134,7 @@ func TestCompleteUsesServer(t *testing.T) {
 		if !strings.Contains(prompt, "user payload") {
 			t.Fatalf("prompt missing user part")
 		}
-		w.Write([]byte(`{"response":"fix: done"}`))
+		_, _ = w.Write([]byte(`{"response":"fix: done"}`))
 	})
 	defer srv.Close()
 
@@ -152,7 +152,7 @@ func TestCompleteUsesServer(t *testing.T) {
 func TestCompleteEmptyResponseAndStatus(t *testing.T) {
 	for _, respBody := range []string{"   ", ""} {
 		srv := mockOllama(t, func(w http.ResponseWriter, _ *http.Request) {
-			w.Write([]byte(`{"response":"` + respBody + `"}`))
+			_, _ = w.Write([]byte(`{"response":"` + respBody + `"}`))
 		})
 		c := New("")
 		c.Base = srv.URL

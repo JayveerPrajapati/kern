@@ -25,7 +25,7 @@ func TestAcquireReleaseRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("re-acquire after release should succeed, got %v", err)
 	}
-	defer lk2.Release()
+	defer func() { _ = lk2.Release() }()
 }
 
 func TestHeldReflectsLock(t *testing.T) {
@@ -41,7 +41,7 @@ func TestHeldReflectsLock(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer lk.Release()
+	defer func() { _ = lk.Release() }()
 	held, pid, err := Held(root, "checkout")
 	if err != nil {
 		t.Fatal(err)
@@ -64,7 +64,9 @@ func TestListShowsScopes(t *testing.T) {
 	if len(sts) != 1 || sts[0].Scope != "checkout" || !sts[0].Held {
 		t.Fatalf("expected checkout HELD, got %+v", sts)
 	}
-	lk.Release()
+	if err := lk.Release(); err != nil {
+		t.Fatal(err)
+	}
 	sts, err = List(root)
 	if err != nil {
 		t.Fatal(err)
@@ -83,7 +85,9 @@ func TestRemoveRefusesHeldAndCleansStale(t *testing.T) {
 	if err := Remove(root, "gate"); err == nil {
 		t.Fatal("remove must refuse a held lock")
 	}
-	lk.Release()
+	if err := lk.Release(); err != nil {
+		t.Fatal(err)
+	}
 	if err := Remove(root, "gate"); err != nil {
 		t.Fatalf("remove stale lock should succeed, got %v", err)
 	}
@@ -105,8 +109,8 @@ func TestCrossProcessFlock(t *testing.T) {
 		t.Fatalf("start child: %v", err)
 	}
 	t.Cleanup(func() {
-		child.Process.Kill()
-		child.Wait()
+		_ = child.Process.Kill()
+		_ = child.Wait()
 	})
 
 	// Wait until the child actually holds the lock.
@@ -156,7 +160,7 @@ func TestLockHolderChildProcess(t *testing.T) {
 	if err != nil {
 		os.Exit(3)
 	}
-	defer l.Release()
+	defer func() { _ = l.Release() }()
 	// Hold until killed. A long timer sleep (not select {}) so the runtime's
 	// deadlock detector does not panic the child before the parent kills it.
 	time.Sleep(24 * time.Hour)

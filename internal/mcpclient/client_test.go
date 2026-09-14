@@ -150,7 +150,7 @@ func TestDialUnixEchoServer(t *testing.T) {
 	if err != nil {
 		t.Skipf("unix sockets not supported or failed: %v", err)
 	}
-	defer ln.Close()
+	defer func() { _ = ln.Close() }()
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/mcp", func(w http.ResponseWriter, r *http.Request) {
@@ -183,7 +183,7 @@ func TestDialUnixEchoServer(t *testing.T) {
 
 	srv := &http.Server{Handler: mux}
 	go func() { _ = srv.Serve(ln) }()
-	defer srv.Close()
+	defer func() { _ = srv.Close() }()
 
 	server := Server{
 		Name:      "echo_uds",

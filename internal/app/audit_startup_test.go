@@ -23,9 +23,9 @@ func captureStderr(t *testing.T, fn func()) string {
 	os.Stderr = w
 	fn()
 	// Close the write end so the read end sees EOF, then restore stderr.
-	w.Close()
+	_ = w.Close()
 	out, _ := io.ReadAll(r)
-	r.Close()
+	_ = r.Close()
 	os.Stderr = old
 	return string(out)
 }

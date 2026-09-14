@@ -74,7 +74,7 @@ func (c *Client) do(ctx context.Context, method, path string, body any, out any)
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	raw, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return err
@@ -312,7 +312,7 @@ func (c *Client) EventsStream(ctx context.Context) (io.ReadCloser, error) {
 		return nil, err
 	}
 	if resp.StatusCode != http.StatusOK {
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		return nil, &Err{Status: resp.StatusCode, Body: "events stream"}
 	}
 	return resp.Body, nil

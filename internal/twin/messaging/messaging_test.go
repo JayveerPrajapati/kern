@@ -6,16 +6,23 @@ import (
 	"testing"
 )
 
+func writeFile(t *testing.T, path string, content []byte) {
+	t.Helper()
+	if err := os.WriteFile(path, content, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestExtractKafkaTopics(t *testing.T) {
 	dir := t.TempDir()
-	os.WriteFile(filepath.Join(dir, "producer.go"), []byte(`
+	writeFile(t, filepath.Join(dir, "producer.go"), []byte(`
 package main
 msg := &sarama.ProducerMessage{Topic: "orders", Value: sarama.ByteEncoder(data)}
-`), 0644)
-	os.WriteFile(filepath.Join(dir, "consumer.go"), []byte(`
+`))
+	writeFile(t, filepath.Join(dir, "consumer.go"), []byte(`
 package main
 consumer := &sarama.ConsumerGroup{Topics: []string{"orders", "payments"}}
-`), 0644)
+`))
 
 	e := New(dir)
 	nodes, edges, err := e.Extract()
@@ -44,18 +51,18 @@ consumer := &sarama.ConsumerGroup{Topics: []string{"orders", "payments"}}
 
 func TestExtractRabbitMQQueues(t *testing.T) {
 	dir := t.TempDir()
-	os.WriteFile(filepath.Join(dir, "producer.go"), []byte(`
+	writeFile(t, filepath.Join(dir, "producer.go"), []byte(`
 package main
 ch.Publish("", "task_queue", false, false, amqp.Publishing{})
-`), 0644)
-	os.WriteFile(filepath.Join(dir, "consumer.go"), []byte(`
+`))
+	writeFile(t, filepath.Join(dir, "consumer.go"), []byte(`
 package main
 msgs, _ := ch.Consume("task_queue", "", true, false, false, false, nil)
-`), 0644)
-	os.WriteFile(filepath.Join(dir, "pika.py"), []byte(`
+`))
+	writeFile(t, filepath.Join(dir, "pika.py"), []byte(`
 import pika
 channel.queue_declare(queue="task_queue")
-`), 0644)
+`))
 
 	e := New(dir)
 	nodes, edges, err := e.Extract()
@@ -90,14 +97,14 @@ channel.queue_declare(queue="task_queue")
 
 func TestExtractRedisPubSub(t *testing.T) {
 	dir := t.TempDir()
-	os.WriteFile(filepath.Join(dir, "pub.go"), []byte(`
+	writeFile(t, filepath.Join(dir, "pub.go"), []byte(`
 package main
 client.Publish("notifications", payload)
-`), 0644)
-	os.WriteFile(filepath.Join(dir, "sub.go"), []byte(`
+`))
+	writeFile(t, filepath.Join(dir, "sub.go"), []byte(`
 package main
 client.Subscribe("notifications")
-`), 0644)
+`))
 
 	e := New(dir)
 	nodes, edges, err := e.Extract()

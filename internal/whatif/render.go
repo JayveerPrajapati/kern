@@ -22,7 +22,7 @@ func SimulateRender(root string, kind ChangeKind, change, newTarget string) (str
 	if strings.ContainsAny(change, " \t") {
 		cands := ExtractSymbols(change)
 		if len(cands) == 0 {
-			return "", fmt.Errorf("what-if: could not identify a symbol in the change description. Pass a bare symbol name (e.g. 'GetMySQLDB') or include a qualified name (e.g. 'pkg.Symbol') in the description.")
+			return "", fmt.Errorf("what-if: could not identify a symbol in the change description: pass a bare symbol name (e.g. 'GetMySQLDB') or include a qualified name (e.g. 'pkg.Symbol') in the description")
 		}
 		target = cands[0]
 	}

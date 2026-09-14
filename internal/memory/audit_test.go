@@ -38,7 +38,9 @@ func TestAuditTrailRecordsAndAssignsFields(t *testing.T) {
 func TestAuditTrailRecentNewestFirst(t *testing.T) {
 	trail := NewAuditTrail()
 	for i := 0; i < 5; i++ {
-		trail.Record(AuditEvent{AgentID: "a", Operation: OpAdd})
+		if err := trail.Record(AuditEvent{AgentID: "a", Operation: OpAdd}); err != nil {
+			t.Fatal(err)
+		}
 	}
 	recent := trail.Recent(2)
 	if len(recent) != 2 {
@@ -51,9 +53,15 @@ func TestAuditTrailRecentNewestFirst(t *testing.T) {
 
 func TestAuditTrailFilter(t *testing.T) {
 	trail := NewAuditTrail()
-	trail.Record(AuditEvent{AgentID: "agent-1", Operation: OpAdd})
-	trail.Record(AuditEvent{AgentID: "agent-2", Operation: OpRecall})
-	trail.Record(AuditEvent{AgentID: "agent-1", Operation: OpDelete})
+	if err := trail.Record(AuditEvent{AgentID: "agent-1", Operation: OpAdd}); err != nil {
+		t.Fatal(err)
+	}
+	if err := trail.Record(AuditEvent{AgentID: "agent-2", Operation: OpRecall}); err != nil {
+		t.Fatal(err)
+	}
+	if err := trail.Record(AuditEvent{AgentID: "agent-1", Operation: OpDelete}); err != nil {
+		t.Fatal(err)
+	}
 
 	if got := trail.FilterByAgent("agent-1"); len(got) != 2 {
 		t.Fatalf("agent-1 events: got %d, want 2", len(got))
@@ -70,8 +78,12 @@ func TestAuditTrailPersistsAcrossInstances(t *testing.T) {
 	dir := t.TempDir()
 
 	trail1 := NewAuditTrail().WithDir(dir)
-	trail1.Record(AuditEvent{AgentID: "agent-1", Operation: OpAdd, MemoryID: "m1"})
-	trail1.Record(AuditEvent{AgentID: "agent-2", Operation: OpDelete, MemoryID: "m2"})
+	if err := trail1.Record(AuditEvent{AgentID: "agent-1", Operation: OpAdd, MemoryID: "m1"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := trail1.Record(AuditEvent{AgentID: "agent-2", Operation: OpDelete, MemoryID: "m2"}); err != nil {
+		t.Fatal(err)
+	}
 
 	// A fresh trail over the same directory replays persisted events.
 	trail2 := NewAuditTrail().WithDir(dir)
@@ -91,7 +103,9 @@ func TestAuditTrailPersistsAcrossInstances(t *testing.T) {
 func TestAuditTrailInMemoryCap(t *testing.T) {
 	trail := NewAuditTrail()
 	for i := 0; i < maxAuditEvents+50; i++ {
-		trail.Record(AuditEvent{AgentID: "a", Operation: OpAdd})
+		if err := trail.Record(AuditEvent{AgentID: "a", Operation: OpAdd}); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if got := trail.Count(); got != maxAuditEvents {
 		t.Fatalf("in-memory cap: got %d, want %d", got, maxAuditEvents)

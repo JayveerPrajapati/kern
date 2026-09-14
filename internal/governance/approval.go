@@ -1,5 +1,6 @@
 // Package approval provides the human-in-the-loop approval workflow used to
 // gate HIGH/CRITICAL risk actions.
+
 package governance
 
 import (

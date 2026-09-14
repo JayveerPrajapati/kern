@@ -148,7 +148,7 @@ func traceCandidates(line string) []string {
 	}
 	// "path/file.py:24 funcname" — the trailing word after the file:line
 	// prefix is the symbol (report A6).
-	if m := fileLineRe.FindStringSubmatch(line); m != nil && len(m) > 1 {
+	if m := fileLineRe.FindStringSubmatch(line); len(m) > 1 {
 		out = append(out, m[1])
 	}
 	if !strings.ContainsAny(line, " .") && tokenRe.MatchString(line) {

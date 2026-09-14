@@ -171,14 +171,14 @@ func (s *Store) append(req Request) error {
 	}
 	line, err := json.Marshal(req)
 	if err != nil {
-		f.Close()
+		_ = f.Close()
 		return fmt.Errorf("approval store: marshal: %w", err)
 	}
 	if _, err := f.Write(append(line, '\n')); err != nil {
-		f.Close()
+		_ = f.Close()
 		return fmt.Errorf("approval store: write: %w", err)
 	}
-	f.Close()
+	_ = f.Close()
 	return s.compactLocked()
 }
 
@@ -240,7 +240,7 @@ func (s *Store) readAllLocked() ([]Request, error) {
 	if err != nil {
 		return nil, fmt.Errorf("approval store: open: %w", err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	var recs []Request
 	sc := bufio.NewScanner(f)
 	line := 0

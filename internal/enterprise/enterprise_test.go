@@ -45,7 +45,7 @@ func TestRegisterAndProjects(t *testing.T) {
 
 func TestRegisterDuplicate(t *testing.T) {
 	s := New()
-	s.Register("p", t.TempDir())
+	_ = s.Register("p", t.TempDir())
 	if err := s.Register("p", t.TempDir()); err == nil {
 		t.Error("expected error for duplicate registration")
 	}
@@ -53,7 +53,7 @@ func TestRegisterDuplicate(t *testing.T) {
 
 func TestUnregister(t *testing.T) {
 	s := New()
-	s.Register("p", t.TempDir())
+	_ = s.Register("p", t.TempDir())
 	if err := s.Unregister("p"); err != nil {
 		t.Fatal(err)
 	}
@@ -64,7 +64,7 @@ func TestUnregister(t *testing.T) {
 
 func TestServeHTTPOrgDashboard(t *testing.T) {
 	s := New()
-	s.Register("proj-a", t.TempDir())
+	_ = s.Register("proj-a", t.TempDir())
 	req := authedRequest(t, "GET", "/")
 	rr := httptest.NewRecorder()
 	s.ServeHTTP(rr, req)
@@ -81,7 +81,7 @@ func TestServeHTTPOrgDashboard(t *testing.T) {
 
 func TestServeHTTPOrgProjectsAPI(t *testing.T) {
 	s := New()
-	s.Register("proj-a", t.TempDir())
+	_ = s.Register("proj-a", t.TempDir())
 	req := authedRequest(t, "GET", "/org/projects")
 	rr := httptest.NewRecorder()
 	s.ServeHTTP(rr, req)
@@ -273,7 +273,7 @@ func TestRegisterAgentDuplicate(t *testing.T) {
 
 func TestOrgDashboardLinksNewEndpoints(t *testing.T) {
 	s := New()
-	s.Register("proj-a", t.TempDir())
+	_ = s.Register("proj-a", t.TempDir())
 	req := authedRequest(t, "GET", "/")
 	rr := httptest.NewRecorder()
 	s.ServeHTTP(rr, req)
@@ -490,7 +490,7 @@ func TestProjectMemoryIsolation(t *testing.T) {
 
 func TestServeOrgMemoryProjectParam(t *testing.T) {
 	s := New()
-	s.Register("proj-a", t.TempDir())
+	_ = s.Register("proj-a", t.TempDir())
 
 	t.Run("unknown project returns 404", func(t *testing.T) {
 		req := authedRequest(t, "GET", "/org/memory?project=nope")

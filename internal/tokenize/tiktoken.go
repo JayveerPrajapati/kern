@@ -14,6 +14,7 @@
 // The pre-tokenizers are hand-rolled scanners (stdlib-only) because the
 // reference patterns use possessive quantifiers and lookaheads that
 // Go's RE2 regexp engine does not support.
+
 package tokenize
 
 import (

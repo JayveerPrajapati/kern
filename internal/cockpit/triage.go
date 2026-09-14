@@ -90,7 +90,7 @@ func RunTriage(ctx context.Context, cfg TriageConfig) (*TriageReport, error) {
 	}
 
 	if cfg.NonInteractive {
-		fmt.Fprintf(cfg.Output, "[KERNOPS TRIAGE] Starting incident diagnosis for %s\n", taskID)
+		_, _ = fmt.Fprintf(cfg.Output, "[KERNOPS TRIAGE] Starting incident diagnosis for %s\n", taskID)
 	}
 
 	// 1. Compress raw log
@@ -105,7 +105,7 @@ func RunTriage(ctx context.Context, cfg TriageConfig) (*TriageReport, error) {
 	}
 
 	if cfg.NonInteractive {
-		fmt.Fprintf(cfg.Output, "[KERNOPS TRIAGE] Squeezed logs: %d -> %d tokens (%.1f%% reduction)\n",
+		_, _ = fmt.Fprintf(cfg.Output, "[KERNOPS TRIAGE] Squeezed logs: %d -> %d tokens (%.1f%% reduction)\n",
 			report.OriginalTokens, report.CompressedTokens, report.TokensSavedPct)
 	}
 
@@ -171,7 +171,7 @@ func RunTriage(ctx context.Context, cfg TriageConfig) (*TriageReport, error) {
 	}
 
 	if cfg.NonInteractive {
-		fmt.Fprintf(cfg.Output, "[KERNOPS TRIAGE] Correlated root cause: %q across %d files\n",
+		_, _ = fmt.Fprintf(cfg.Output, "[KERNOPS TRIAGE] Correlated root cause: %q across %d files\n",
 			report.ErrorMessage, len(report.CorrelatedFiles))
 	}
 
@@ -222,7 +222,7 @@ func TestTriageReproduction(t *testing.T) {
 		if runErr != nil {
 			report.InitialReproFailed = true
 			if cfg.NonInteractive {
-				fmt.Fprintf(cfg.Output, "[KERNOPS TRIAGE] Reproduction test successfully captured incident fault.\n")
+				_, _ = fmt.Fprintf(cfg.Output, "[KERNOPS TRIAGE] Reproduction test successfully captured incident fault.\n")
 			}
 		}
 	}
@@ -282,7 +282,7 @@ func TestTriageReproduction(t *testing.T) {
 
 	report.Success = report.GatesPassed
 	if cfg.NonInteractive {
-		fmt.Fprintf(cfg.Output, "[KERNOPS TRIAGE] SUCCESS: Incident auto-repaired. Diff captured. Receipt: %s\n", report.ReceiptID)
+		_, _ = fmt.Fprintf(cfg.Output, "[KERNOPS TRIAGE] SUCCESS: Incident auto-repaired. Diff captured. Receipt: %s\n", report.ReceiptID)
 	}
 
 	return report, nil

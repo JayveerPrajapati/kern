@@ -92,12 +92,14 @@ func TestMVP1GateAnalyzeChange(t *testing.T) {
 	t.Log("[3/6] Setting up engineering memory store...")
 	start = time.Now()
 	store := memory.NewMemoryStore(root)
-	store.Add(domain.Memory{
+	if _, err := store.Add(domain.Memory{
 		Type:    domain.MemoryDecision,
 		Content: "helper must compose base() to stay consistent with callers",
 		Scope:   "helper",
 		Tags:    []string{"gatefixture", "helper"},
-	})
+	}); err != nil {
+		t.Fatal(err)
+	}
 	t.Logf("      Memory store ready, seeded 1 entry (%.1fs)", time.Since(start).Seconds())
 
 	// Step 4: Set up governance firewall with a context-engine agent.

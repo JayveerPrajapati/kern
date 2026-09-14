@@ -1,5 +1,6 @@
 // Package audit provides the tamper-evident in-memory audit log of every
 // governance decision.
+
 package governance
 
 import (
@@ -94,22 +95,22 @@ func NewAuditLog() *AuditLog {
 // WithStore attaches a storage.Store for persistence. When set, every recorded
 // entry is persisted with a content hash linking it to the previous entry,
 // creating a tamper-evident chain. When nil (default), the log is in-memory only.
-func (a *AuditLog) WithStore(s storage.Store) *AuditLog {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	a.store = s
-	return a
+func (l *AuditLog) WithStore(s storage.Store) *AuditLog {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.store = s
+	return l
 }
 
 // WithLockPath attaches a blocking advisory-lock file path used to serialize
 // persisted writes across processes. When empty (default), no cross-process
 // lock is taken (legacy behavior). Lock the same path for every process
 // writing the same store (Record, AppendExternal, RepairChain).
-func (a *AuditLog) WithLockPath(path string) *AuditLog {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	a.lockPath = path
-	return a
+func (l *AuditLog) WithLockPath(path string) *AuditLog {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.lockPath = path
+	return l
 }
 
 // storedEntriesLocked lists + numeric-sorts persisted entries (skipping
@@ -499,14 +500,14 @@ func (l *AuditLog) RepairChain() (int, error) {
 // chain: modifying any entry invalidates all subsequent hashes.
 func computeAuditHash(e AuditEntry, prevHash string) string {
 	h := sha256.New()
-	fmt.Fprintf(h, "%s|%s|%s|%s|%s|%v|%v|%v|%s|%s", prevHash, e.ID, e.AgentID, e.Action, e.Resource, e.Timestamp.UnixNano(), e.Risk, e.Approved, e.Result, e.TaskID)
+	_, _ = fmt.Fprintf(h, "%s|%s|%s|%s|%s|%v|%v|%v|%s|%s", prevHash, e.ID, e.AgentID, e.Action, e.Resource, e.Timestamp.UnixNano(), e.Risk, e.Approved, e.Result, e.TaskID)
 	if e.ValidationOutcome != nil {
 		// The tamper chain must cover the full entry: ValidationOutcome is
 		// part of a persisted entry, so it must be covered too, or it could
 		// be modified without breaking VerifyChain. Entries with a nil
 		// ValidationOutcome hash byte-identically to the pre-P0.4 format, so
 		// chains recorded by older versions still verify.
-		fmt.Fprintf(h, "|%s|%d|%s|%s|%d", e.ValidationOutcome.Status, e.ValidationOutcome.ExitCode, strings.Join(e.ValidationOutcome.BlockedFiles, ","), e.ValidationOutcome.CorrelationID, e.ValidationOutcome.Findings)
+		_, _ = fmt.Fprintf(h, "|%s|%d|%s|%s|%d", e.ValidationOutcome.Status, e.ValidationOutcome.ExitCode, strings.Join(e.ValidationOutcome.BlockedFiles, ","), e.ValidationOutcome.CorrelationID, e.ValidationOutcome.Findings)
 	}
 	return hex.EncodeToString(h.Sum(nil))
 }
@@ -609,7 +610,7 @@ func (l *AuditLog) VerifyChainReport() (firstBroken, verified int) {
 // match the modern formula by construction).
 func computeAuditHashLegacy(e AuditEntry, prevHash string) string {
 	h := sha256.New()
-	fmt.Fprintf(h, "%s|%s|%s|%s|%s|%v|%v|%v|%s|%s", prevHash, e.ID, e.AgentID, e.Action, e.Resource, e.Timestamp.UnixNano(), e.Risk, e.Approved, e.Result, e.TaskID)
+	_, _ = fmt.Fprintf(h, "%s|%s|%s|%s|%s|%v|%v|%v|%s|%s", prevHash, e.ID, e.AgentID, e.Action, e.Resource, e.Timestamp.UnixNano(), e.Risk, e.Approved, e.Result, e.TaskID)
 	return hex.EncodeToString(h.Sum(nil))
 }
 
@@ -639,7 +640,7 @@ func NewMerkleTree() *MerkleTree {
 // hashLeaf computes the leaf SHA-256 hash for an AuditEntry.
 func hashLeaf(e AuditEntry) string {
 	h := sha256.New()
-	fmt.Fprintf(h, "leaf|%s|%s|%s|%s|%v|%v|%v|%s|%s", e.ID, e.AgentID, e.Action, e.Resource, e.Timestamp.UnixNano(), e.Risk, e.Approved, e.Result, e.TaskID)
+	_, _ = fmt.Fprintf(h, "leaf|%s|%s|%s|%s|%v|%v|%v|%s|%s", e.ID, e.AgentID, e.Action, e.Resource, e.Timestamp.UnixNano(), e.Risk, e.Approved, e.Result, e.TaskID)
 	return hex.EncodeToString(h.Sum(nil))
 }
 

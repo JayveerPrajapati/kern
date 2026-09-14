@@ -139,9 +139,7 @@ func mergeHookGroups(path string, groups map[string]any) error {
 		// fresh ones. This replaces stale hooks from a prior setup run instead
 		// of skipping when a kern hook is already present.
 		filtered := filterKernHooks(existing)
-		for _, g := range group.([]any) {
-			filtered = append(filtered, g)
-		}
+		filtered = append(filtered, group.([]any)...)
 		hooks[event] = filtered
 		changed = true
 	}

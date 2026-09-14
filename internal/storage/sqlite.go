@@ -30,7 +30,7 @@ func OpenSQLite(path string) (*sql.DB, error) {
 
 	for _, pragma := range SQLitePragmas {
 		if _, err := db.Exec(pragma); err != nil {
-			db.Close()
+			_ = db.Close()
 			return nil, fmt.Errorf("exec pragma %s: %w", pragma, err)
 		}
 	}

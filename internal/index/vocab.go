@@ -3,6 +3,7 @@
 // The Index.ProseVocab field is declared in engine.go's Index struct (Go
 // structs cannot be extended across files); this file owns the build, the
 // lookup, and the cap that keeps common words from blowing up the index.
+
 package index
 
 import (

@@ -181,7 +181,7 @@ func ruleProvenance(rule domain.ConstitutionRule) string {
 	}
 }
 
-// SuggestRules proposes NEW constitution rules that would prevent the
+// RuleSuggestion proposes NEW constitution rules that would prevent the
 // violations found in a validation, or harden against common risk patterns in
 // the plan (P8.5). Suggestions are NON-ACTIVATING: they never modify the loaded
 // constitution — they only advise a human/governance owner what to add. Each

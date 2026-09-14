@@ -801,10 +801,7 @@ func isConfigFile(rel string) bool {
 	}
 	// Spring Boot's application.properties / application.yml by name.
 	base := strings.ToLower(filepath.Base(rel))
-	if strings.HasPrefix(base, "application") {
-		return true
-	}
-	return false
+	return strings.HasPrefix(base, "application")
 }
 
 // isPythonFile reports whether the file is a Python source file, which
