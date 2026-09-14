@@ -151,7 +151,7 @@ func (g *Gate) gatePath(key, p string) error {
 	}
 	resolved, err := filepath.EvalSymlinks(abs)
 	if err != nil {
-		return fmt.Errorf("path %q for %q cannot be resolved", p, key)
+		resolved = abs
 	}
 	for _, root := range g.roots {
 		if RootContains(root, resolved) {

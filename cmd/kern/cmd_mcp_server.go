@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"github.com/JayveerPrajapati/kern/internal/mcp"
@@ -15,6 +16,22 @@ func runMCP(rest []string) {
 		fatalUsage("flags: %v", err)
 	}
 	httpAddr := mcpHTTPAddr(args, f)
+	if len(f.projects) > 0 {
+		var roots []string
+		for _, p := range f.projects {
+			_, root, ok := strings.Cut(p, "=")
+			if !ok || root == "" {
+				root = p
+			}
+			roots = append(roots, root)
+		}
+		existing := os.Getenv("KERN_MCP_ROOTS")
+		if existing != "" {
+			roots = append(roots, strings.Split(existing, ",")...)
+		}
+		os.Setenv("KERN_MCP_ROOTS", strings.Join(roots, ","))
+		os.Setenv("KERN_ROOTS", strings.Join(roots, ","))
+	}
 	wireRecorder()
 	mcp.SetServerVersion(version)
 	if httpAddr != "" {
