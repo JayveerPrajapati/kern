@@ -133,4 +133,3 @@ func (r *nonCallRefIndex) productionFiles(name string) []string {
 func (r *nonCallRefIndex) referencedOutsideCall(name string) bool {
 	return len(r.productionFiles(name)) > 0
 }
-

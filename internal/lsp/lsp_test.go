@@ -147,7 +147,6 @@ func encodeMessage(t *testing.T, id json.RawMessage, method string, params any) 
 	return frame(body)
 }
 
-
 // ---- frame round-trip ----
 
 func TestFrameRoundTrip(t *testing.T) {

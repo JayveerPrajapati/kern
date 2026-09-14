@@ -101,7 +101,6 @@ func surprisingSection(ix *index.Index) string {
 // fixed sections leave. The full map stays available via kern_project_map.
 const digestBudget = 21 << 10
 
-
 // renderProjectMap renders the project map, dropping whole file summaries
 // past the byte budget (never cutting mid-file) with a pointer to the full
 // map tool.

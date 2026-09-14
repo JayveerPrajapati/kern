@@ -9,7 +9,6 @@ import (
 	"testing"
 )
 
-
 func toolsCallJSON(t *testing.T, id int, name string, args map[string]any) string {
 	t.Helper()
 	a, err := json.Marshal(args)
