@@ -859,4 +859,32 @@ var commandTable = map[string]commandEntry{
 		runConfig(rest)
 		return 0
 	}, help: "show effective configuration (env > .kern/config.json > default)", usage: "usage: kern config [flags]\n  options:\n    --json             emit JSON output\n    --root             project root (default: .)"},
+	"fit-context": {run: func(cmd string, rest []string) int {
+		runFitContext(rest)
+		return 0
+	}, help: "adaptive context-window token compressor using tiered AST folding", usage: "usage: kern fit-context [flags]\n  options:\n    --file             comma-separated target files\n    --symbol           comma-separated symbol names\n    --query            relevance search query\n    --max-tokens       token budget (default 8000)\n    --root             project root (default: .)\n    --json             emit result as JSON"},
+	"refactor-transaction": {run: func(cmd string, rest []string) int {
+		runRefactorTransaction(rest)
+		return 0
+	}, help: "multi-file transactional AST refactoring engine with sandbox compilation and rollback", usage: "usage: kern refactor-transaction [flags]\n  options:\n    --edits            JSON array of [{path, content}]\n    --cmd              custom compilation command\n    --apply            commit changes on success (dry-run without)\n    --root             project root (default: .)\n    --json             emit result as JSON"},
+	"repair-diagnostics": {run: func(cmd string, rest []string) int {
+		runRepairDiagnostics(rest)
+		return 0
+	}, help: "deterministic compiler-error-to-AST auto-repair engine", usage: "usage: kern repair-diagnostics [flags]\n  options:\n    --compiler-output  compiler diagnostic error text\n    --apply            write fixes directly to disk\n    --root             project root (default: .)\n    --json             emit result as JSON"},
+	"lsp-bridge": {run: func(cmd string, rest []string) int {
+		runLSPBridge(rest)
+		return 0
+	}, help: "zero-weight LSP client bridge to local language servers (gopls, pyright, vtsls, etc.)", usage: "usage: kern lsp-bridge [flags]\n  options:\n    --file             target source file path\n    --line             1-based line number\n    --column           1-based column number\n    --action           definition|hover|references|symbols|servers\n    --server-cmd       custom language server command\n    --root             project root (default: .)\n    --json             emit result as JSON"},
+	"fw-trace": {run: func(cmd string, rest []string) int {
+		runFWTrace(rest)
+		return 0
+	}, help: "trace framework execution flow (route -> middleware -> handler -> DI service -> DB model)", usage: "usage: kern fw-trace [filter] [--root DIR] [--json]\n  options:\n    --root             project root (default: .)\n    --json             emit result as JSON"},
+	"mutate": {run: func(cmd string, rest []string) int {
+		runMutationTest(rest)
+		return 0
+	}, help: "lightweight AST mutation testing to catch test suite gaps and surviving mutants", usage: "usage: kern mutate [flags]\n  options:\n    --files            comma-separated target files\n    --max              maximum mutants to evaluate (default 20)\n    --dry-run          list mutants without running test suite\n    --cmd              custom test command\n    --root             project root (default: .)\n    --json             emit result as JSON"},
+	"fragility": {run: func(cmd string, rest []string) int {
+		runFragility(rest)
+		return 0
+	}, help: "correlate git defect/fix commit history with AST call graph to identify fragility hotspots", usage: "usage: kern fragility [target] [flags]\n  options:\n    --target           target file or symbol filter\n    --commits          commits history depth (default: 60)\n    --min-fixes        minimum bug fixes threshold\n    --limit            max hotspots to display\n    --root             project root (default: .)\n    --json             emit result as JSON"},
 }

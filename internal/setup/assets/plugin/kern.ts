@@ -227,8 +227,11 @@ const TOOL_PHASES: Record<string, string> = {
   kern_execute: "edit",
   kern_explain: "explore",
   kern_explore: "explore",
+  kern_fit_context: "plan",
   kern_flight: "cross",
+  kern_fragility_hotspots: "plan",
   kern_frameworks: "explore",
+  kern_fw_trace: "explore",
   kern_fts_search: "explore",
   kern_graph: "explore",
   kern_guard_check: "edit",
@@ -243,6 +246,7 @@ const TOOL_PHASES: Record<string, string> = {
   kern_lock: "edit",
   kern_lock_status: "edit",
   kern_loop: "cross",
+  kern_lsp_bridge: "explore",
   kern_mask_pii: "cross",
   kern_memory: "cross",
   kern_memory_add: "cross",
@@ -251,6 +255,7 @@ const TOOL_PHASES: Record<string, string> = {
   kern_memory_recall: "cross",
   kern_meta: "meta",
   kern_modernize: "cross",
+  kern_mutation_test: "verify",
   kern_near: "explore",
   kern_onboard: "cross",
   kern_optimize_log: "cross",
@@ -273,7 +278,9 @@ const TOOL_PHASES: Record<string, string> = {
   kern_probe: "explore",
   kern_project_map: "explore",
   kern_prompt_fill: "cross",
+  kern_refactor_transaction: "edit",
   kern_rename: "edit",
+  kern_repair_diagnostics: "edit",
   kern_repo_search: "explore",
   kern_resolve: "explore",
   kern_retrieve: "explore",
@@ -548,6 +555,28 @@ async function runPayload(args: string[], timeoutMs?: number, preserveExit = fal
           return run(["compact", args.path])
         },
       }),
+      kern_fit_context: tool({
+        description:
+          "Adaptive token compressor: fits targeted source files, symbols, or queries into any specified token budget using tiered AST folding (Full Source -> Signatures + Docstrings -> Symbolic Summary). Prevents context truncation panics while maximizing code fidelity.",
+        args: {
+          root: tool.schema.string().optional(),
+          max_tokens: tool.schema.string().optional(),
+          files: tool.schema.string().optional(),
+          symbols: tool.schema.string().optional(),
+          query: tool.schema.string().optional(),
+          format: tool.schema.string().optional(),
+        },
+        async execute(args) {
+          const flags: string[] = ["fit-context"]
+          if (args.max_tokens) flags.push("--max-tokens", String(args.max_tokens))
+          if (args.files) flags.push("--files", args.files)
+          if (args.symbols) flags.push("--symbols", args.symbols)
+          if (args.query) flags.push("--query", args.query)
+          if (args.format) flags.push("--format", args.format)
+          if (args.root) flags.push("--root", args.root)
+          return run(flags)
+        },
+      }),
       kern_project_map: tool({
         description:
           "Return a compressed map of a whole project: every source file with its symbols and line counts. Use instead of listing/reading every file in a repo.",
@@ -761,6 +790,28 @@ kern_optimize_log: tool({
           return run(flags)
         },
       }),
+      kern_mutation_test: tool({
+        description:
+          "Lightweight Mutation Testing for Test Gaps: inverts conditions, flips booleans, and applies boundary shifts to verify test suite regression sensitivity and pinpoint surviving mutants (false-positive tests).",
+        args: {
+          root: tool.schema.string().optional(),
+          files: tool.schema.string().optional(),
+          max_mutants: tool.schema.string().optional(),
+          dry_run: tool.schema.string().optional(),
+          test_command: tool.schema.string().optional(),
+          format: tool.schema.string().optional(),
+        },
+        async execute(args) {
+          const flags: string[] = ["mutate"]
+          if (args.files) flags.push("--files", args.files)
+          if (args.max_mutants) flags.push("--max", String(args.max_mutants))
+          if (args.dry_run) flags.push("--dry-run")
+          if (args.test_command) flags.push("--cmd", args.test_command)
+          if (args.format) flags.push("--format", args.format)
+          if (args.root) flags.push("--root", args.root)
+          return run(flags)
+        },
+      }),
       kern_path: tool({
         description:
           "Shortest call path between two symbols, following in-project call edges in either direction. Traces how two things connect without reading files.",
@@ -859,6 +910,26 @@ kern_optimize_log: tool({
           return run(flags)
         },
       }),
+      kern_fragility_hotspots: tool({
+        description:
+          "Causal Defect & Fragility Hotspot Memory: correlates git defect/fix commit history with the AST symbol call graph to compute causal fragility hotspot ratings and warn before mutating high-risk components.",
+        args: {
+          root: tool.schema.string().optional(),
+          target: tool.schema.string().optional(),
+          limit: tool.schema.string().optional(),
+          commits: tool.schema.string().optional(),
+          min_fixes: tool.schema.string().optional(),
+        },
+        async execute(args) {
+          const flags: string[] = ["fragility"]
+          if (args.target) flags.push("--target", args.target)
+          if (args.limit) flags.push("--limit", String(args.limit))
+          if (args.commits) flags.push("--commits", String(args.commits))
+          if (args.min_fixes) flags.push("--min-fixes", String(args.min_fixes))
+          if (args.root) flags.push("--root", args.root)
+          return run(flags)
+        },
+      }),
       kern_explore: tool({
         description:
           "Single-call explore: a symbol's verbatim source, direct call flow (callers + callees) and transitive blast radius (with affected files) in one shot. Replaces three separate calls for 'what touches this and how'.",
@@ -887,6 +958,29 @@ kern_optimize_log: tool({
           const flags: string[] = ["bridges"]
           if (args.root) flags.push(args.root)
           if (args.limit !== undefined) flags.push("--limit", String(args.limit))
+          return run(flags)
+        },
+      }),
+      kern_lsp_bridge: tool({
+        description:
+          "Zero-Weight LSP Client Bridge: queries local language servers (gopls, pyright, vtsls, rust-analyzer, clangd, etc.) for exact compiler-grade type definitions, hover documentation, cross-file references, and document symbols without bundling language runtimes into kern.",
+        args: {
+          file: tool.schema.string(),
+          line: tool.schema.string().optional(),
+          column: tool.schema.string().optional(),
+          action: tool.schema.string().optional(),
+          server_cmd: tool.schema.string().optional(),
+          root: tool.schema.string().optional(),
+          format: tool.schema.string().optional(),
+        },
+        async execute(args) {
+          const flags: string[] = ["lsp-bridge", "--file", args.file]
+          if (args.line) flags.push("--line", String(args.line))
+          if (args.column) flags.push("--column", String(args.column))
+          if (args.action) flags.push("--action", args.action)
+          if (args.server_cmd) flags.push("--server-cmd", args.server_cmd)
+          if (args.format) flags.push("--format", args.format)
+          if (args.root) flags.push("--root", args.root)
           return run(flags)
         },
       }),
@@ -2120,6 +2214,22 @@ kern_entry_points: tool({
           return run(flags)
         },
       }),
+      kern_fw_trace: tool({
+        description:
+          "Deep Framework Dependency Injection & Route Tracing: maps end-to-end framework execution pipelines (Route -> Middleware -> Handler DTO -> Injected Service -> DB Model) across Gin, Express, FastAPI, Spring Boot, and NestJS.",
+        args: {
+          root: tool.schema.string().optional(),
+          filter: tool.schema.string().optional(),
+          format: tool.schema.string().optional(),
+        },
+        async execute(args) {
+          const flags: string[] = ["fw-trace"]
+          if (args.filter) flags.push("--filter", args.filter)
+          if (args.format) flags.push("--format", args.format)
+          if (args.root) flags.push("--root", args.root)
+          return run(flags)
+        },
+      }),
       kern_sandbox: tool({
         description:
           "Run a risky command inside the project with a filesystem snapshot: if the command fails, the tree is restored to the pre-run snapshot; if it passes, changes are kept. Use for destructive or uncertain operations.",
@@ -2204,6 +2314,41 @@ kern_entry_points: tool({
           if (args.task) flags.push("--task", args.task)
           if (args.file) flags.push("--file", args.file)
           if (args.inject_memory) flags.push("--inject-memory", args.inject_memory)
+          if (args.root) flags.push("--root", args.root)
+          return run(flags)
+        },
+      }),
+      kern_refactor_transaction: tool({
+        description:
+          "Multi-File Transactional AST Refactoring Engine: evaluates batch multi-file modifications in an isolated sandbox worktree with automated compilation verification. Guarantees atomic rollback on compilation errors with 0 broken multi-file refactor commits.",
+        args: {
+          edits: tool.schema.any(),
+          root: tool.schema.string().optional(),
+          compile_command: tool.schema.string().optional(),
+          apply: tool.schema.string().optional(),
+          format: tool.schema.string().optional(),
+        },
+        async execute(args) {
+          const flags: string[] = ["refactor-transaction"]
+          if (args.edits) flags.push("--edits", typeof args.edits === "string" ? args.edits : JSON.stringify(args.edits))
+          if (args.compile_command) flags.push("--compile-command", args.compile_command)
+          if (args.apply) flags.push("--apply", args.apply)
+          if (args.format) flags.push("--format", args.format)
+          if (args.root) flags.push("--root", args.root)
+          return run(flags)
+        },
+      }),
+      kern_repair_diagnostics: tool({
+        description:
+          "Compiler-Error-to-AST Auto-Repair Engine: deterministically fixes trivial syntax, unused imports, missing standard library imports, and unused variables from compiler diagnostics in <1ms without LLM latency or token waste.",
+        args: {
+          compiler_output: tool.schema.string(),
+          root: tool.schema.string().optional(),
+          apply: tool.schema.string().optional(),
+        },
+        async execute(args) {
+          const flags: string[] = ["repair-diagnostics", "--compiler-output", args.compiler_output]
+          if (args.apply) flags.push("--apply", args.apply)
           if (args.root) flags.push("--root", args.root)
           return run(flags)
         },

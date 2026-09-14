@@ -21,14 +21,14 @@ kern is the explicit, user-invoked `kern_doc_fetch`.
 
 | Document | Contents |
 |---|---|
-| [`tool-contracts.md`](tool-contracts.md) | The authoritative catalog of all 136 MCP tools: name, phase, risk level, description, parameters, required parameters, and JSON-RPC usage examples. |
+| [`tool-contracts.md`](tool-contracts.md) | The authoritative catalog of all 143 MCP tools: name, phase, risk level, description, parameters, required parameters, and JSON-RPC usage examples. |
 | [`protocol.md`](protocol.md) | The wire protocol: transports (stdio / HTTP), JSON-RPC methods, capabilities, error handling, governance gates, and shutdown behavior. |
 | [`versioning.md`](versioning.md) | Versioning policy: supported MCP protocol versions, server version reporting, tool-catalog stability rules, and how clients should negotiate. |
 
 ## Catalog at a glance
 
-- **136 tools** across six phases: explore (38), plan (14), edit (20), verify (20),
-  meta (1), cross (43).
+- **143 tools** across six phases: explore, plan, edit, verify,
+  meta, cross.
 - **Risk levels** on every tool: low (82), medium (31), high (18), critical (5) —
   governed clients gate tool access on these.
 - Every tool is tagged with its agent **phase**; phase-aware servers advertise only the

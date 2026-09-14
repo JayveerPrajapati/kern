@@ -344,6 +344,21 @@ var tools = []Tool{
 		}, []string{"path"}),
 	},
 	{
+		Name:          "kern_fit_context",
+		SchemaVersion: SchemaVersionV1,
+		Phase:         "plan",
+		RiskLevel:     "low",
+		Description:   "Adaptive token compressor: fits targeted source files, symbols, or queries into any specified token budget using tiered AST folding (Full Source -> Signatures + Docstrings -> Symbolic Summary). Prevents context truncation panics while maximizing code fidelity.",
+		InputSchema: schema(map[string]any{
+			"root":       strProp("Project root directory"),
+			"max_tokens": strProp("Token budget (default 8000, e.g. 4000, 8000, 32000, 128000)"),
+			"files":      strProp("Comma-separated list of target files"),
+			"symbols":    strProp("Comma-separated list of target symbol names"),
+			"query":      strProp("Optional query to find and include relevant symbols"),
+			"format":     strProp("'text' (default) or 'json'"),
+		}, nil),
+	},
+	{
 		Name:          "kern_project_map",
 		SchemaVersion: SchemaVersionV1,
 		Phase:         "explore",
@@ -458,6 +473,18 @@ var tools = []Tool{
 		Description:   "Detect the frameworks and libraries a project uses (Spring, Rails, Django, Express, gin, etc.) by scanning manifests and source markers. Use to know what stack the codebase is on.",
 		InputSchema: schema(map[string]any{
 			"root": strProp("Project root (defaults to current directory)"),
+		}, nil),
+	},
+	{
+		Name:          "kern_fw_trace",
+		SchemaVersion: SchemaVersionV1,
+		Phase:         "explore",
+		RiskLevel:     "low",
+		Description:   "Deep Framework Dependency Injection & Route Tracing: maps end-to-end framework execution pipelines (Route -> Middleware -> Handler DTO -> Injected Service -> DB Model) across Gin, Express, FastAPI, Spring Boot, and NestJS.",
+		InputSchema: schema(map[string]any{
+			"root":   strProp("Project root directory (defaults to current directory)"),
+			"filter": strProp("Optional keyword or path filter to match specific routes/handlers"),
+			"format": strProp("'text' (default) or 'json'"),
 		}, nil),
 	},
 	{
@@ -612,6 +639,21 @@ var tools = []Tool{
 		}, nil),
 	},
 	{
+		Name:          "kern_mutation_test",
+		SchemaVersion: SchemaVersionV1,
+		Phase:         "verify",
+		RiskLevel:     "medium",
+		Description:   "Lightweight Mutation Testing for Test Gaps: inverts conditions, flips booleans, and applies boundary shifts to verify test suite regression sensitivity and pinpoint surviving mutants (false-positive tests).",
+		InputSchema: schema(map[string]any{
+			"root":         strProp("Project root directory (defaults to current directory)"),
+			"files":        strProp("Comma-separated list of target files to mutate (default: all project files)"),
+			"max_mutants":  strProp("Maximum number of mutants to evaluate (default 20)"),
+			"dry_run":      strProp("'true' to list potential mutants without executing test suite, 'false' (default) to run evaluation"),
+			"test_command": strProp("Optional custom test command (default: go test ./<pkg> -count=1)"),
+			"format":       strProp("'text' (default) or 'json'"),
+		}, nil),
+	},
+	{
 		Name:          "kern_path",
 		SchemaVersion: SchemaVersionV1,
 		Phase:         "explore",
@@ -688,6 +730,21 @@ var tools = []Tool{
 		InputSchema: schema(map[string]any{
 			"root":  strProp("Project root (defaults to current directory)"),
 			"range": strProp("Git range like 'HEAD~10..HEAD' (default last 30 commits)"),
+		}, nil),
+	},
+	{
+		Name:          "kern_fragility_hotspots",
+		SchemaVersion: SchemaVersionV1,
+		Phase:         "plan",
+		RiskLevel:     "low",
+		Description:   "Causal Defect & Fragility Hotspot Analysis: correlates historical git defect/fix commits with the AST symbol call graph to calculate fragility scores and proactively flag regression-prone components before edits are made.",
+		InputSchema: schema(map[string]any{
+			"root":      strProp("Project root directory (defaults to current directory)"),
+			"target":    strProp("Optional specific file or symbol name to query"),
+			"limit":     strProp("Max hotspots to return (default 15)"),
+			"commits":   strProp("Commit history depth to evaluate (default 100)"),
+			"min_fixes": strProp("Minimum defect fix commits required to qualify (default 1)"),
+			"format":    strProp("'text' (default) or 'json'"),
 		}, nil),
 	},
 	{
@@ -1032,6 +1089,22 @@ var tools = []Tool{
 			"root":  strProp("Project root (defaults to current directory)"),
 			"limit": strProp("Max bridges to return (default 15)"),
 		}, nil),
+	},
+	{
+		Name:          "kern_lsp_bridge",
+		SchemaVersion: SchemaVersionV1,
+		Phase:         "explore",
+		RiskLevel:     "low",
+		Description:   "Zero-Weight LSP Client Bridge: queries local language servers (gopls, pyright, vtsls, rust-analyzer, clangd, etc.) for exact compiler-grade type definitions, hover documentation, cross-file references, and document symbols without bundling language runtimes into kern.",
+		InputSchema: schema(map[string]any{
+			"file":       strProp("Target source file path"),
+			"line":       strProp("1-based line number (required for definition, hover, references)"),
+			"column":     strProp("1-based column number (default 1)"),
+			"action":     strProp("LSP query action: 'definition' (default), 'hover', 'references', 'symbols', or 'servers'"),
+			"server_cmd": strProp("Optional custom language server command to override auto-detection"),
+			"root":       strProp("Project root directory (defaults to current directory)"),
+			"format":     strProp("'text' (default) or 'json'"),
+		}, []string{"file"}),
 	},
 	{
 		Name:          "kern_surprising",
@@ -1382,6 +1455,32 @@ var tools = []Tool{
 			"symbol": strProp("Optional specific symbol name targeted for modification"),
 			"root":   strProp("Project root directory (defaults to current directory)"),
 		}, nil),
+	},
+	{
+		Name:          "kern_repair_diagnostics",
+		SchemaVersion: SchemaVersionV1,
+		Phase:         "edit",
+		RiskLevel:     "medium",
+		Description:   "Compiler-Error-to-AST Auto-Repair Engine: deterministically fixes trivial syntax, unused imports, missing standard library imports, and unused variables from compiler diagnostics in <1ms without LLM latency or token waste.",
+		InputSchema: schema(map[string]any{
+			"root":            strProp("Project root directory (defaults to current directory)"),
+			"compiler_output": strProp("Raw output or error string from the compiler/linter (e.g. go build / go test)"),
+			"apply":           strProp("'true' to apply the repairs directly to files, 'false' (default) to preview changes"),
+		}, []string{"compiler_output"}),
+	},
+	{
+		Name:          "kern_refactor_transaction",
+		SchemaVersion: SchemaVersionV1,
+		Phase:         "edit",
+		RiskLevel:     "high",
+		Description:   "Multi-File Transactional AST Refactoring Engine: evaluates batch multi-file modifications in an isolated sandbox worktree with automated compilation verification. Guarantees atomic rollback on compilation errors with 0 broken multi-file refactor commits.",
+		InputSchema: schema(map[string]any{
+			"root":            strProp("Project root directory (defaults to current directory)"),
+			"edits":           map[string]any{"type": "array", "items": map[string]any{"type": "object", "properties": map[string]any{"path": strProp("File path"), "content": strProp("New complete file content")}, "required": []string{"path", "content"}}, "description": "Array of file modifications to test and apply atomically"},
+			"compile_command": strProp("Optional compilation command (default auto-detects go build ./...)"),
+			"apply":           strProp("'true' to commit changes to the live working tree on successful compilation, 'false' (default) for dry-run preview"),
+			"format":          strProp("'text' (default) or 'json'"),
+		}, []string{"edits"}),
 	},
 	{
 		Name:          "kern_prompt_fill",

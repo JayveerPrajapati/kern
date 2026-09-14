@@ -18,6 +18,19 @@ func resolveCommandAndFlags() (cmd string, rest []string) {
 	cmd = os.Args[1]
 	rest = os.Args[2:]
 
+	if cmd == "--all" || ((cmd == "help" || cmd == "--help" || cmd == "-h") && hasFlag(rest, "--all")) {
+		usageAll()
+		os.Exit(0)
+	}
+
+	if cmd == "help" {
+		if len(rest) > 0 && rest[0] != "--help" && rest[0] != "-h" {
+			printCommandHelp(rest[0])
+		}
+		usage()
+		os.Exit(0)
+	}
+
 	// `--help`/`-h` on any subcommand (or on kern itself) prints the
 	// per-command help and exits 0 instead of being dispatched to a
 	// subcommand handler.
@@ -103,6 +116,13 @@ var mcpCLIAlias = map[string]string{
 	"kern_org_tasks":          "org",
 	"kern_org_search":         "org",
 	"kern_org_audit":          "org",
+	"kern_fit_context":         "fit-context",
+	"kern_refactor_transaction": "refactor-transaction",
+	"kern_repair_diagnostics":  "repair-diagnostics",
+	"kern_lsp_bridge":          "lsp-bridge",
+	"kern_fw_trace":            "fw-trace",
+	"kern_mutation_test":       "mutate",
+	"kern_fragility_hotspots":  "fragility",
 }
 
 // printCommandHelp prints the one-line help for a subcommand and exits 0.
