@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -592,16 +591,6 @@ func (r *Recorder) SnapshotWithGovernance(gd GovernanceData) Snapshot {
 	s.ViolationsCount = gd.ViolationsCount
 	s.AvgConfidence = gd.AvgConfidence
 	return s
-}
-
-// SortedKeys is a helper for deterministic map iteration in reports.
-func sortedKeys(m map[string]int) []string {
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	return keys
 }
 
 // --- Disk persistence (cross-process CLI metrics) ---

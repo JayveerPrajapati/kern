@@ -236,21 +236,6 @@ func findDef(ix *index.Index, full string) (index.Symbol, bool) {
 	return index.Symbol{}, false
 }
 
-// cleanNames strips package qualifiers to simple names for display.
-func cleanNames(in []string) []string {
-	out := make([]string, 0, len(in))
-	seen := map[string]bool{}
-	for _, n := range in {
-		simple := simpleName(n)
-		if !seen[simple] {
-			seen[simple] = true
-			out = append(out, simple)
-		}
-	}
-	sort.Strings(out)
-	return out
-}
-
 // RenderExplore renders the report as compact text.
 func RenderExplore(r *ExploreReport) string {
 	if r == nil {
