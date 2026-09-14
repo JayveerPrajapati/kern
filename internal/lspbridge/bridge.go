@@ -103,31 +103,31 @@ var DefaultServerRegistry = map[string]LanguageServerDef{
 
 // ExtToLanguage maps file extensions to language names.
 var ExtToLanguage = map[string]string{
-	".go":    "go",
-	".py":    "python",
-	".pyw":   "python",
-	".ts":    "typescript",
-	".tsx":   "typescript",
-	".js":    "javascript",
-	".jsx":   "javascript",
-	".mjs":   "javascript",
-	".cjs":   "javascript",
-	".rs":    "rust",
-	".c":     "c",
-	".h":     "c",
-	".cpp":   "cpp",
-	".cxx":   "cpp",
-	".cc":    "cpp",
-	".hpp":   "cpp",
-	".java":  "java",
-	".cs":    "csharp",
-	".rb":    "ruby",
-	".php":   "php",
-	".json":  "json",
-	".yaml":  "yaml",
-	".yml":   "yaml",
-	".sh":    "bash",
-	".bash":  "bash",
+	".go":   "go",
+	".py":   "python",
+	".pyw":  "python",
+	".ts":   "typescript",
+	".tsx":  "typescript",
+	".js":   "javascript",
+	".jsx":  "javascript",
+	".mjs":  "javascript",
+	".cjs":  "javascript",
+	".rs":   "rust",
+	".c":    "c",
+	".h":    "c",
+	".cpp":  "cpp",
+	".cxx":  "cpp",
+	".cc":   "cpp",
+	".hpp":  "cpp",
+	".java": "java",
+	".cs":   "csharp",
+	".rb":   "ruby",
+	".php":  "php",
+	".json": "json",
+	".yaml": "yaml",
+	".yml":  "yaml",
+	".sh":   "bash",
+	".bash": "bash",
 }
 
 // DetectServer returns the best available language server command for the given file or language.
@@ -216,9 +216,9 @@ type SymbolInfo struct {
 type QueryRequest struct {
 	Root      string   `json:"root"`
 	File      string   `json:"file"`
-	Line      int      `json:"line"` // 1-based
-	Column    int      `json:"column"` // 1-based (optional, default 1)
-	Action    string   `json:"action"` // "definition", "hover", "references", "symbols", "servers"
+	Line      int      `json:"line"`                 // 1-based
+	Column    int      `json:"column"`               // 1-based (optional, default 1)
+	Action    string   `json:"action"`               // "definition", "hover", "references", "symbols", "servers"
 	ServerCmd []string `json:"server_cmd,omitempty"` // optional custom command
 }
 

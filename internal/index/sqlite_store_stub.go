@@ -29,13 +29,19 @@ func (s *SQLiteStore) LookupCallers(callee string) ([]string, error) { return ni
 func (s *SQLiteStore) LookupCalls(caller string) ([]CallEdge, error) { return nil, errSQLiteNotEnabled }
 
 // LookupFileSymbols is unavailable in the default build.
-func (s *SQLiteStore) LookupFileSymbols(file string) ([]Symbol, error) { return nil, errSQLiteNotEnabled }
+func (s *SQLiteStore) LookupFileSymbols(file string) ([]Symbol, error) {
+	return nil, errSQLiteNotEnabled
+}
 
 // LookupInherits is unavailable in the default build.
-func (s *SQLiteStore) LookupInherits(subtype string) ([]string, error) { return nil, errSQLiteNotEnabled }
+func (s *SQLiteStore) LookupInherits(subtype string) ([]string, error) {
+	return nil, errSQLiteNotEnabled
+}
 
 // LookupInheritedBy is unavailable in the default build.
-func (s *SQLiteStore) LookupInheritedBy(base string) ([]string, error) { return nil, errSQLiteNotEnabled }
+func (s *SQLiteStore) LookupInheritedBy(base string) ([]string, error) {
+	return nil, errSQLiteNotEnabled
+}
 
 // OpenSQLite is unavailable in the default build.
 func OpenSQLite(root string) (*SQLiteStore, error) {

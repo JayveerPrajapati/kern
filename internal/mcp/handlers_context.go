@@ -302,4 +302,3 @@ func (s *Server) handleFitContext(ctx context.Context, args map[string]any) (str
 	}
 	return res.Content, nil
 }
-

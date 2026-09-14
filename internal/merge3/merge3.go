@@ -379,8 +379,8 @@ func extractStructFieldLines(code string) []string {
 // -----------------------------------------------------------------------------
 
 var (
-	pyDefRe   = regexp.MustCompile(`(?m)^(?:async\s+)?def\s+([a-zA-Z0-9_]+)\s*\(`)
-	pyClassRe = regexp.MustCompile(`(?m)^class\s+([a-zA-Z0-9_]+)(?:\s*\([^)]*\))?\s*:`)
+	pyDefRe    = regexp.MustCompile(`(?m)^(?:async\s+)?def\s+([a-zA-Z0-9_]+)\s*\(`)
+	pyClassRe  = regexp.MustCompile(`(?m)^class\s+([a-zA-Z0-9_]+)(?:\s*\([^)]*\))?\s*:`)
 	pyImportRe = regexp.MustCompile(`(?m)^(?:from\s+[^\n]+\s+import\s+[^\n]+|import\s+[^\n]+)`)
 )
 

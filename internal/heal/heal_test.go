@@ -101,7 +101,6 @@ func TestFailingFilesSkipsPackageHeaders(t *testing.T) {
 	}
 }
 
-
 // TestFailingFilesNeverProbesOutsideRoot verifies absolute paths and ".."
 // escapes in tool output are ignored: untrusted output must not become a
 // filesystem oracle .

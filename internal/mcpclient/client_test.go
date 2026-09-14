@@ -214,4 +214,3 @@ func TestDialUnixEchoServer(t *testing.T) {
 		t.Errorf("expected echoed reply over UDS, got %v", res)
 	}
 }
-
