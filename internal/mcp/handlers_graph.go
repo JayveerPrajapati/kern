@@ -265,6 +265,7 @@ func (s *Server) handleRepoSearch(ctx context.Context, args map[string]any) (str
 			}
 			limit = n
 		}
+		root := resolveRoot(argString(args, "root"))
 		var hits []intel.RepoHit
 		sem := argString(args, "semantic")
 		if sem == "true" || sem == "1" {
@@ -272,12 +273,12 @@ func (s *Server) handleRepoSearch(ctx context.Context, args map[string]any) (str
 			if !client.HasEmbeddingModel() {
 				return "", fmt.Errorf("embedding model %q not installed (run: ollama pull %s)", llm.EmbedModel(), llm.EmbedModel())
 			}
-			hits = intel.SemanticSearchRepos(query, limit, client)
+			hits = intel.SemanticSearchReposIn(root, query, limit, client)
 		} else {
-			hits = intel.SearchRepos(query, limit)
+			hits = intel.SearchReposIn(root, query, limit)
 		}
 		if len(hits) == 0 {
-			return "no symbols matched across registered repos: " + query, nil
+			return "no symbols matched across repos: " + query, nil
 		}
 		return intel.FormatRepoHits(hits), nil
 

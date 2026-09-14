@@ -318,6 +318,30 @@ func TestSearchRepos(t *testing.T) {
 	}
 }
 
+func TestDiscoverSubreposAndFederatedSearch(t *testing.T) {
+	parent := t.TempDir()
+	sub1 := filepath.Join(parent, "repo-alpha")
+	sub2 := filepath.Join(parent, "repo-beta")
+
+	_ = os.MkdirAll(filepath.Join(sub1, ".git"), 0o755)
+	_ = os.MkdirAll(filepath.Join(sub2, ".git"), 0o755)
+	_ = os.WriteFile(filepath.Join(sub1, "app.go"), []byte("package alpha\nfunc AlphaService() {}\n"), 0o644)
+	_ = os.WriteFile(filepath.Join(sub2, "main.go"), []byte("package beta\nfunc BetaProcessor() {}\n"), 0o644)
+
+	repos := DiscoverSubrepos(parent)
+	if len(repos) < 2 {
+		t.Fatalf("expected at least 2 discovered repos under parent, got %d", len(repos))
+	}
+
+	hits := SearchReposIn(parent, "Processor", 10)
+	if len(hits) == 0 {
+		t.Fatalf("expected search hit from discovered subrepo, got %v", hits)
+	}
+	if hits[0].Symbol.Name != "BetaProcessor" {
+		t.Errorf("expected BetaProcessor hit, got %v", hits[0].Symbol.Name)
+	}
+}
+
 func TestFilesForRangeLAndChangedFiles(t *testing.T) {
 	root := buildTestProject(t)
 	execGit(t, root, "init", "-q")

@@ -68,10 +68,10 @@ func scanPyLine(rel string, lineNo int, line string) []Finding {
 	if rePySQLExec.MatchString(line) && (strings.Contains(line, `f"`) || strings.Contains(line, `f'`) || rePyPercentF.MatchString(line) || strings.Contains(line, ".format(")) {
 		add("py-sql-format", SeverityError, "SQL built with f-string, %-formatting or .format() from a query call")
 	}
-	if rePyEval.MatchString(line) {
+	if isPyGlobalCall(line, "eval") {
 		add("py-eval", SeverityError, "dynamic code evaluation via eval()")
 	}
-	if rePyExec.MatchString(line) {
+	if isPyGlobalCall(line, "exec") {
 		add("py-exec", SeverityError, "dynamic code execution via exec()")
 	}
 	if rePyOsSystem.MatchString(line) {
@@ -91,4 +91,37 @@ func pySnippet(line string) string {
 		s = s[:117] + "..."
 	}
 	return s
+}
+
+// isPyGlobalCall reports whether fn is invoked as a global/builtin function call
+// on line (i.e. AST Name(id=fn)), as opposed to a method call on an instance
+// (e.g. model.eval(), module.eval(), AST Attribute(attr=fn)) or a function/method
+// definition (e.g. def eval(self):).
+func isPyGlobalCall(line, fn string) bool {
+	var re *regexp.Regexp
+	switch fn {
+	case "eval":
+		re = rePyEval
+	case "exec":
+		re = rePyExec
+	default:
+		re = regexp.MustCompile(`\b` + regexp.QuoteMeta(fn) + `\s*\(`)
+	}
+	locs := re.FindAllStringIndex(line, -1)
+	for _, loc := range locs {
+		start := loc[0]
+		// Attribute / method check: if preceded by '.', it is an instance call (model.eval()).
+		if start > 0 && line[start-1] == '.' {
+			continue
+		}
+		// Function/method definition check: def eval( / async def eval(
+		prefix := strings.TrimSpace(line[:start])
+		if strings.HasSuffix(prefix, "def") {
+			if len(prefix) == 3 || prefix[len(prefix)-4] == ' ' || prefix[len(prefix)-4] == '\t' {
+				continue
+			}
+		}
+		return true
+	}
+	return false
 }

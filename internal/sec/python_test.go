@@ -142,3 +142,24 @@ func TestFilterByFiles(t *testing.T) {
 		t.Errorf("FilterByFiles mutated input: %+v", base)
 	}
 }
+
+func TestScanPythonFilePyTorchModelEvalIgnored(t *testing.T) {
+	src := []byte(`import torch
+
+def evaluate(model, module):
+    model.eval()
+    module.eval()
+    self.eval()
+    res = model.eval()
+    
+    # Global eval must still be flagged
+    eval(user_payload)
+`)
+	findings := ScanPythonFile("train.py", src)
+	if len(findings) != 1 {
+		t.Fatalf("expected exactly 1 finding for global eval, got %d: %+v", len(findings), findings)
+	}
+	if findings[0].Rule != "py-eval" || findings[0].Line != 10 {
+		t.Errorf("expected py-eval on line 10, got %+v", findings[0])
+	}
+}

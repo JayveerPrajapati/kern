@@ -129,15 +129,151 @@ type RepoHit struct {
 	Score  int          `json:"score"`
 }
 
+// DiscoverSubrepos scans root and subdirectories up to depth 3 for .git repositories
+// and standalone project workspaces.
+func DiscoverSubrepos(root string) []Repo {
+	absRoot, err := filepath.Abs(root)
+	if err != nil {
+		absRoot = root
+	}
+	var repos []Repo
+	seen := make(map[string]bool)
+
+	// Check if root itself is a repo
+	if isRepoDir(absRoot) {
+		name := filepath.Base(absRoot)
+		repos = append(repos, Repo{Name: name, Root: absRoot, Added: time.Now().Format(time.RFC3339)})
+		seen[absRoot] = true
+	}
+
+	// Walk subdirectories up to depth 3
+	_ = filepath.WalkDir(absRoot, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if !d.IsDir() {
+			return nil
+		}
+		if path == absRoot {
+			return nil
+		}
+
+		name := d.Name()
+		// Skip non-workspace/cache dirs
+		if name == ".git" || name == ".kern" || name == "node_modules" || name == "vendor" ||
+			name == ".venv" || name == "venv" || name == "dist" || name == "build" ||
+			name == "target" || name == "bin" || name == ".cache" || name == "__pycache__" {
+			return filepath.SkipDir
+		}
+
+		// Calculate relative depth from absRoot
+		rel, err := filepath.Rel(absRoot, path)
+		if err != nil {
+			return nil
+		}
+		depth := strings.Count(filepath.ToSlash(rel), "/") + 1
+		if depth > 3 {
+			return filepath.SkipDir
+		}
+
+		if isRepoDir(path) && !seen[path] {
+			seen[path] = true
+			repoName := filepath.Base(path)
+			repos = append(repos, Repo{
+				Name:  repoName,
+				Root:  path,
+				Added: time.Now().Format(time.RFC3339),
+			})
+			return filepath.SkipDir
+		}
+
+		return nil
+	})
+
+	return repos
+}
+
+func isRepoDir(path string) bool {
+	// Check for .git dir/file or .kern dir
+	gitPath := filepath.Join(path, ".git")
+	if st, err := os.Stat(gitPath); err == nil {
+		if st.IsDir() || st.Mode().IsRegular() {
+			return true
+		}
+	}
+	kernPath := filepath.Join(path, ".kern")
+	if st, err := os.Stat(kernPath); err == nil && st.IsDir() {
+		return true
+	}
+	// Check for common project manifest files
+	for _, m := range []string{"go.mod", "pom.xml", "package.json", "Cargo.toml", "pyproject.toml", "build.gradle"} {
+		if _, err := os.Stat(filepath.Join(path, m)); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
+// FederatedRepos returns the union of registered repos from repos.json and
+// any discovered subproject workspaces in root and cwd.
+func FederatedRepos(root string) []Repo {
+	var all []Repo
+	seen := make(map[string]bool)
+
+	// 1. Registered repos
+	reg, err := LoadRepos()
+	if err == nil && reg != nil {
+		for _, r := range reg.Repos {
+			abs, err := filepath.Abs(r.Root)
+			if err == nil {
+				if !seen[abs] {
+					seen[abs] = true
+					all = append(all, r)
+				}
+			}
+		}
+	}
+
+	// 2. Discover in root if provided
+	if root != "" {
+		for _, r := range DiscoverSubrepos(root) {
+			abs, err := filepath.Abs(r.Root)
+			if err == nil && !seen[abs] {
+				seen[abs] = true
+				all = append(all, r)
+			}
+		}
+	}
+
+	// 3. Discover in current working directory
+	if cwd, err := os.Getwd(); err == nil && cwd != root {
+		for _, r := range DiscoverSubrepos(cwd) {
+			abs, err := filepath.Abs(r.Root)
+			if err == nil && !seen[abs] {
+				seen[abs] = true
+				all = append(all, r)
+			}
+		}
+	}
+
+	sort.Slice(all, func(i, j int) bool { return all[i].Name < all[j].Name })
+	return all
+}
+
 // SemanticSearchRepos is SearchRepos with a dense re-rank pass: the pooled
 // lexical hits across all registered repos are re-ordered by cosine similarity
 // between the query embedding and each symbol descriptor (see SemanticSearch).
 // Returns nil when no repo matches.
 func SemanticSearchRepos(query string, limit int, e SymbolEmbedder) []RepoHit {
+	return SemanticSearchReposIn(".", query, limit, e)
+}
+
+// SemanticSearchReposIn runs semantic search across all federated repositories in root.
+func SemanticSearchReposIn(root string, query string, limit int, e SymbolEmbedder) []RepoHit {
 	if e == nil {
-		return SearchRepos(query, limit)
+		return SearchReposIn(root, query, limit)
 	}
-	pool := SearchRepos(query, limit*4)
+	pool := SearchReposIn(root, query, limit*4)
 	if len(pool) == 0 {
 		return nil
 	}
@@ -202,28 +338,41 @@ func truncateRepoHits(in []RepoHit, limit int) []RepoHit {
 	return in[:limit]
 }
 
-// SearchRepos runs a ranked free-text search across every registered repo and
-// returns the best hits with their repo of origin. Repos whose index cannot be
-// built are skipped.
+// SearchRepos runs a ranked free-text search across every federated repo and
+// returns the best hits with their repo of origin.
 func SearchRepos(query string, limit int) []RepoHit {
+	return SearchReposIn(".", query, limit)
+}
+
+// SearchReposIn runs ranked search across every registered repo and discovered
+// subproject in root.
+func SearchReposIn(root string, query string, limit int) []RepoHit {
 	if limit <= 0 {
 		limit = 20
 	}
-	reg, err := LoadRepos()
-	if err != nil || len(reg.Repos) == 0 {
+	repos := FederatedRepos(root)
+	if len(repos) == 0 {
 		return nil
 	}
 	var hits []RepoHit
-	for _, repo := range reg.Repos {
+	for _, repo := range repos {
 		ix, err := ReadIndex(repo.Root)
 		if err != nil || ix == nil {
-			continue
+			ix, err = index.LoadOrBuild(repo.Root)
+			if err != nil || ix == nil {
+				continue
+			}
 		}
-		for _, s := range RankedSearch(ix, query, limit) {
-			hits = append(hits, RepoHit{Repo: repo.Name, Root: repo.Root, Symbol: s})
+		for _, rh := range RankedSearchScored(ix, query, limit) {
+			rh.Repo = repo.Name
+			rh.Root = repo.Root
+			hits = append(hits, rh)
 		}
 	}
 	sort.Slice(hits, func(i, j int) bool {
+		if hits[i].Score != hits[j].Score {
+			return hits[i].Score > hits[j].Score
+		}
 		if hits[i].Repo != hits[j].Repo {
 			return hits[i].Repo < hits[j].Repo
 		}

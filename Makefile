@@ -8,7 +8,7 @@ LDFLAGS := -X main.version=$(VERSION) -X github.com/JayveerPrajapati/kern/intern
 RELEASE_LDFLAGS := -s -w -X main.version=$(VERSION) -X github.com/JayveerPrajapati/kern/internal/version.Version=$(VERSION)
 GOFLAGS := -buildvcs=false
 
-.PHONY: all build build-treesitter test test-race vet lint bench install hooks release dist mcpb clean clean-artifacts
+.PHONY: all build build-treesitter test test-race vet lint bench install install-treesitter hooks release dist mcpb clean clean-artifacts
 
 all: build
 
@@ -53,6 +53,15 @@ install: build
 # com.apple.provenance xattr on first launch (exit 137, empty output).
 # Re-sign after copy and strip both quarantine and provenance xattrs so
 # agents can launch kern-mcp without a Gatekeeper kill.
+ifeq ($(shell uname -s),Darwin)
+	codesign --force --sign - $${HOME}/.local/bin/kern $${HOME}/.local/bin/kern-mcp $${HOME}/.local/bin/kern-server 2>/dev/null || true
+	xattr -dr com.apple.quarantine $${HOME}/.local/bin/kern $${HOME}/.local/bin/kern-mcp $${HOME}/.local/bin/kern-server 2>/dev/null || true
+	xattr -dr com.apple.provenance $${HOME}/.local/bin/kern $${HOME}/.local/bin/kern-mcp $${HOME}/.local/bin/kern-server 2>/dev/null || true
+endif
+
+install-treesitter: build-treesitter
+	mkdir -p $${HOME}/.local/bin
+	install -m 755 $(BIN)/kern $(BIN)/kern-mcp $(BIN)/kern-server $${HOME}/.local/bin/
 ifeq ($(shell uname -s),Darwin)
 	codesign --force --sign - $${HOME}/.local/bin/kern $${HOME}/.local/bin/kern-mcp $${HOME}/.local/bin/kern-server 2>/dev/null || true
 	xattr -dr com.apple.quarantine $${HOME}/.local/bin/kern $${HOME}/.local/bin/kern-mcp $${HOME}/.local/bin/kern-server 2>/dev/null || true

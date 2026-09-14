@@ -265,6 +265,7 @@ func Update(root string, prev *Index) (*Index, error) {
 	// and Callers/AliasCallers are derived from it afterwards.
 	dropDanglingCalls(ix, prev, copied)
 	ix.promoteLowEdges()
+	ix.addFrameworkDIEdges()
 	ix.computeCallers()
 	ix.addDispatchEdges()
 	ix.measureCallResolution()

@@ -640,3 +640,28 @@ func TestLockfileAuthorEmailSuppressed(t *testing.T) {
 		}
 	}
 }
+
+func TestMarkdownTableAndLogsSuppressed(t *testing.T) {
+	src := []byte(`# Benchmark Results
+
+| Metric | Value |
+|---|---|
+| MoE ACTIVE/Token : 77,127,680 | 100 |
+
+## Sample Execution Log
+(msvc_delivery) INFO 21:00:39.609 - Early warning to deliver order 'b32ad' to customer_id 'd94a6c43d9f487c1bef659f05c002213'
+(msvc_delivery) INFO 21:01:01.662 - Deliverying order 'b32ad' for customer_id 'd94a6c43d9f487c1bef659f05c002213'
+
+Checkout at https://example.com/api?id=4074cca80beef0123456789abcdef0123
+
+## Real secret in doc must still be caught:
+sk-proj-abc1234567890abcdef1234567890
+`)
+	findings := ScanFile("README.md", src)
+	if len(findings) != 1 {
+		t.Fatalf("expected exactly 1 finding for real secret in doc, got %d: %+v", len(findings), findings)
+	}
+	if findings[0].Rule != "hardcoded-secret" || !strings.Contains(findings[0].Snippet, "sk-proj-") {
+		t.Errorf("expected OpenAI key finding, got %+v", findings[0])
+	}
+}

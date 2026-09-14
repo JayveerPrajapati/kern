@@ -65,4 +65,3 @@ func TestRenderCompactSecurityFindingDetails(t *testing.T) {
 		t.Errorf("RenderCompact missing finding detail %q in:\n%s", want, out)
 	}
 }
-

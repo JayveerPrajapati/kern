@@ -196,4 +196,3 @@ func TestRenderImpactArchitectureRules(t *testing.T) {
 		t.Fatalf("missing expected architecture rule names in:\n%s", out)
 	}
 }
-
