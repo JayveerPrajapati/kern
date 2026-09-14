@@ -18,6 +18,7 @@ func newGitRepo(t *testing.T) string {
 	execGit(t, root, "init", "-q", "-b", "main")
 	execGit(t, root, "config", "user.email", "test@example.com")
 	execGit(t, root, "config", "user.name", "Test")
+	execGit(t, root, "config", "gc.auto", "0")
 	write := func(rel, content string) {
 		p := filepath.Join(root, rel)
 		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
@@ -178,6 +179,7 @@ func newVendorGitRepo(t *testing.T) string {
 	execGit(t, root, "init", "-q", "-b", "main")
 	execGit(t, root, "config", "user.email", "test@example.com")
 	execGit(t, root, "config", "user.name", "Test")
+	execGit(t, root, "config", "gc.auto", "0")
 	write := func(rel, content string) {
 		p := filepath.Join(root, rel)
 		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
@@ -241,6 +243,7 @@ func TestChurnRiskScoringManyFiles(t *testing.T) {
 	execGit(t, root, "init", "-q", "-b", "main")
 	execGit(t, root, "config", "user.email", "test@example.com")
 	execGit(t, root, "config", "user.name", "Test")
+	execGit(t, root, "config", "gc.auto", "0")
 	write := func(rel, content string) {
 		p := filepath.Join(root, rel)
 		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
