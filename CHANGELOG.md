@@ -6,7 +6,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-## [1.0.0] - 2026-09-14
+## [0.9.8] - 2026-09-14
 
 ### Added
 - **Storage & IPC Scalability (Domain 1)**:
@@ -34,8 +34,6 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Changed
 - Universal MCP tool catalog synchronized to **143 tools** with 100% parity across `internal/mcp/tools.go`, `.opencode/plugins/kern.ts`, `README.md`, `AGENTS.md`, and all `docs/mcp/*.md` specifications.
 - Verified and documented all 40 Blueprint Firewall Gates (**G0 through G39**) in `docs/gates.md`.
-
-## [0.9.8] - 2026-09-10
 
 - **Review Packs, Council & Diff Gate (silent-orchestrator P2)**:
   - `kern review-pack` (KERN-P2-001): immutable deterministic review packet — commit + dirty-state hash, task, planner-selected evidence with reasons, relevant symbols with call paths, changed code, tests, project constraints, observed claims, unverified assumptions, and exact per-section token counts. Pack sealed with a content hash; identical builds over identical state produce byte-identical JSON. `internal/reviewpack`.
