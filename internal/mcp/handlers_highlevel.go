@@ -945,6 +945,8 @@ func classifyProjectTools(low, request string) (string, map[string]any, bool) {
 		return "kern_project_map", map[string]any{}, true
 	case strings.Contains(low, "pack") || strings.Contains(low, "bundle"):
 		return "kern_pack", map[string]any{}, true
+	case strings.Contains(low, "fit context") || strings.Contains(low, "adaptive context") || strings.Contains(low, "compress context") || strings.Contains(low, "fit token"):
+		return "kern_fit_context", map[string]any{"query": request}, true
 	case hasWord(low, "compact") && strings.Contains(low, "file"):
 		return "kern_compact_file", map[string]any{}, true
 	case hasWord(low, "buddy") || hasWord(low, "onboard") || strings.Contains(low, "getting started"):
@@ -961,6 +963,8 @@ func classifyProjectTools(low, request string) (string, map[string]any, bool) {
 		return "kern_doc_search", map[string]any{"query": request}, true
 	case hasWord(low, "build") || hasWord(low, "test") || hasWord(low, "lint"):
 		return "kern_run_build", map[string]any{}, true
+	case strings.Contains(low, "repair") || strings.Contains(low, "auto repair") || strings.Contains(low, "fix diagnostics") || strings.Contains(low, "compiler error"):
+		return "kern_repair_diagnostics", map[string]any{"compiler_output": request}, true
 	case hasWord(low, "exec") || strings.Contains(low, "run script") || strings.Contains(low, "run code"):
 		return "kern_exec", map[string]any{}, true
 	case strings.Contains(low, "safe delete") || strings.Contains(low, "delete symbol") || strings.Contains(low, "can i delete"):

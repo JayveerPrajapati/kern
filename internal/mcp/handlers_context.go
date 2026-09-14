@@ -6,6 +6,7 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/brief"
 	"github.com/JayveerPrajapati/kern/internal/code"
 	kernctx "github.com/JayveerPrajapati/kern/internal/context"
+	"github.com/JayveerPrajapati/kern/internal/fit"
 	"github.com/JayveerPrajapati/kern/internal/index"
 	"github.com/JayveerPrajapati/kern/internal/intel"
 	"github.com/JayveerPrajapati/kern/internal/pack"
@@ -255,3 +256,50 @@ func (s *Server) handlePack(ctx context.Context, args map[string]any) (string, e
 
 	}
 }
+
+func (s *Server) handleFitContext(ctx context.Context, args map[string]any) (string, error) {
+	root := argString(args, "root")
+	if root == "" {
+		cwd, _ := os.Getwd()
+		root = cwd
+	}
+	maxTokens := 8000
+	if v := argString(args, "max_tokens"); v != "" {
+		if n, err := atoiArg(v, maxTokens); err == nil {
+			maxTokens = n
+		}
+	}
+	var files []string
+	if v := argString(args, "files"); v != "" {
+		for _, f := range strings.Split(v, ",") {
+			if trimmed := strings.TrimSpace(f); trimmed != "" {
+				files = append(files, trimmed)
+			}
+		}
+	}
+	var symbols []string
+	if v := argString(args, "symbols"); v != "" {
+		for _, sym := range strings.Split(v, ",") {
+			if trimmed := strings.TrimSpace(sym); trimmed != "" {
+				symbols = append(symbols, trimmed)
+			}
+		}
+	}
+	query := argString(args, "query")
+
+	res, err := fit.FitContext(ctx, fit.Request{
+		Root:      root,
+		MaxTokens: maxTokens,
+		Files:     files,
+		Symbols:   symbols,
+		Query:     query,
+	})
+	if err != nil {
+		return "", err
+	}
+	if argString(args, "format") == "json" {
+		return res.RenderJSON(), nil
+	}
+	return res.Content, nil
+}
+

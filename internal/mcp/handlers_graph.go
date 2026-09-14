@@ -73,6 +73,58 @@ func (s *Server) handleFrameworks(ctx context.Context, args map[string]any) (str
 	}
 }
 
+func (s *Server) handleFWTrace(ctx context.Context, args map[string]any) (string, error) {
+	root := argString(args, "root")
+	if root == "" {
+		cwd, _ := os.Getwd()
+		root = cwd
+	}
+	filter := argString(args, "filter")
+	format := argString(args, "format")
+
+	res, err := fw.TraceRoutes(ctx, root, filter)
+	if err != nil {
+		return "", err
+	}
+
+	if format == "json" {
+		data, err := json.MarshalIndent(res, "", "  ")
+		if err != nil {
+			return "", err
+		}
+		return string(data), nil
+	}
+
+	var b strings.Builder
+	b.WriteString(fmt.Sprintf("=== Framework Route & Dependency Flow (%d routes traced) ===\n", res.Total))
+	if len(res.Frameworks) > 0 {
+		b.WriteString(fmt.Sprintf("Detected Frameworks: %s\n", strings.Join(res.Frameworks, ", ")))
+	}
+	b.WriteString("\n")
+
+	for i, r := range res.Routes {
+		b.WriteString(fmt.Sprintf("[%d] %s %s (%s)\n", i+1, r.Method, r.Path, r.Framework))
+		b.WriteString(fmt.Sprintf("    Declared in: %s:%d\n", r.File, r.Line))
+		if len(r.Middleware) > 0 {
+			b.WriteString(fmt.Sprintf("    Middleware:  %s\n", strings.Join(r.Middleware, " -> ")))
+		}
+		b.WriteString(fmt.Sprintf("    Handler:     %s\n", r.Handler))
+		if len(r.InjectedServices) > 0 {
+			b.WriteString(fmt.Sprintf("    Injected DI: %s\n", strings.Join(r.InjectedServices, ", ")))
+		}
+		if len(r.DBModels) > 0 {
+			b.WriteString(fmt.Sprintf("    DB Models:   %s\n", strings.Join(r.DBModels, ", ")))
+		}
+		b.WriteString("    Pipeline:\n")
+		for _, step := range r.Steps {
+			b.WriteString(fmt.Sprintf("      -> [%s] %s (%s:%d)\n", step.Stage, step.Symbol, step.File, step.Line))
+		}
+		b.WriteString("\n")
+	}
+
+	return b.String(), nil
+}
+
 func (s *Server) handleEntryPoints(ctx context.Context, args map[string]any) (string, error) {
 	{
 		root := argString(args, "root")

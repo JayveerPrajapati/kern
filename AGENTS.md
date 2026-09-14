@@ -8,7 +8,7 @@ prebuilt symbol index instead of re-reading files.
 
 ## The kern_meta tool (preferred entry point)
 
-Instead of choosing among 136 individual `kern_*` tools, call the single
+Instead of choosing among 143 individual `kern_*` tools, call the single
 **`kern_meta`** tool with a natural-language request. Kern classifies the
 request and runs the right tool(s) internally — you get the same result
 without having to know which tool fits. Think in phases: explore (read/discover),
@@ -25,7 +25,7 @@ Examples:
 
 Prefer `kern_meta` as your default. By default (`KERN_MCP_FULL=0` or unset), only a minimal 11-tool surface
 is advertised (the high-level task-oriented entry points plus `kern_meta`) to keep context windows minimal and fast;
-set `KERN_MCP_FULL=1` if you or your environment require exposing the entire 136-tool catalog directly,
+set `KERN_MCP_FULL=1` if you or your environment require exposing the entire 143-tool catalog directly,
 `KERN_MCP_PHASE=explore|plan|edit|verify` to filter the advertised list to a
 phase's shortlist (plus the always-on meta/cross tools), and
 `KERN_MCP_SINGLE_TOOL=1` to expose ONLY `kern_meta` (useful when an agent is
@@ -129,7 +129,7 @@ re-explore or re-parse files that the index already covers.
 
 ## Full capability catalog
 
-`kern` ships 136 `kern_*` MCP tools across many domains. If you are unsure
+`kern` ships 143 `kern_*` MCP tools across many domains. If you are unsure
 which tool fits, call `kern_usage_guide` (categorized guide with performance
 tiers) or `kern_buddy` to enumerate options. By default only the minimal
 11-tool surface is advertised; set `KERN_MCP_FULL=1` to expose the full

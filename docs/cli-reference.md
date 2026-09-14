@@ -137,10 +137,16 @@ kern authorize-context [-agent ID -task DESC] [--root .] [--json]   compute the 
                                                                 agent may read for a task + auditable authorization proof
 kern gen-catalog [--root <dir>]                     regenerate docs/tool-catalog.md from the live MCP catalog
 kern metrics                                        show local change-governance validation metrics
-kern efficiency <id> [--root ROOT]                  efficiency metrics
 kern cycles [--json] [--root ROOT]                  package-level import cycles (Tarjan SCC)
 kern surprising [--json] [--root ROOT]              cross-community call edges ranked by community distance x rarity
 kern twin                                           software twin (live map of the repo)
+kern fit-context <symbol|file> [--budget N]         context-adaptive token window compressor
+kern lsp-bridge <symbol|file> [--action def]        zero-weight LSP bridge for compiler types & definitions
+kern fw-trace <symbol|route> [--framework name]     framework dependency injection & route tracer
+kern mutate [root] [--threshold N]                  lightweight mutation testing for regression sensitivity
+kern fragility [root] [--limit N]                   causal defect & fragility hotspot memory
+kern refactor-transaction <plan-json>               multi-file transactional AST refactor sandbox
+kern repair-diagnostics <error-text>                compiler diagnostic-to-AST auto-repair engine
 ```
 
 ## `kern exec` — think in code

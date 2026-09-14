@@ -183,7 +183,7 @@ sub-tool regardless.
 | Env var | Effect |
 |---|---|
 | `KERN_MCP_PHASE` | `explore` \| `plan` \| `edit` \| `verify` — advertise only that phase's shortlist plus always-on meta/cross tools |
-| `KERN_MCP_FULL=1` | Advertise the full 136-tool catalog (default is the minimal ~11-tool surface) |
+| `KERN_MCP_FULL=1` | Advertise the full 143-tool catalog (default is the minimal ~11-tool surface) |
 | `KERN_MCP_SINGLE_TOOL=1` | Advertise only `kern_meta` |
 | `KERN_MCP_ROOTS` | Comma-separated allowed workspace roots for the path gate (§6); also configurable as `mcp.roots` in `.kern/config.json` |
 | `KERN_MCP_PERMISSIVE=1` | Opt out of the path-confinement gate |

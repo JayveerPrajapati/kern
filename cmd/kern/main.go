@@ -27,7 +27,34 @@ func init() {
 }
 
 func usage() {
-	fmt.Fprintf(os.Stderr, `kern - kern your context. Local-only token optimizer for AI agents.
+	fmt.Fprintf(os.Stderr, `kern - local context, blast-radius & governance engine for AI agents & developers.
+
+Core Workflows (The 5 Essential Verbs):
+  kern meta "<request>"                           Natural language intent router (dispatches to any tool)
+  kern explore <symbol|file> [--arch] [--json]    Deep symbol/file exploration (source, call flow, blast radius)
+  kern search <query> [--repos] [--semantic]      AST symbol & full-text search across codebase
+  kern plan <symbol|task> [--json]                Blast-radius impact & surgical refactor planning
+  kern mutate | kern rename | kern refactor       Safe AST transformations, renames & test gap sensitivity
+  kern verify [types] [--types build,test,sec]    Unified build/test/firewall gate validation (G0-G39)
+
+Context & Token Optimization:
+  kern optimize <prompt> [--fewshot] [--mask]     Compress & fine-tune prompts with project memory
+  kern fit-context <symbol|file> [--budget N]     Multi-tier adaptive token window compressor
+  kern pack [root] [--max-tokens N] [--graph]     Token-dense context bundle for LLMs
+  kern compact <file>                             Symbolic signature summary of a file
+
+Agent & Session Setup:
+  kern onboard [root]                             Session start: register, index & wire agents
+  kern buddy [root]                               Session digest & conventions for incoming agents
+  kern setup [--detect] [--global]                Wire kern-first tools into AI agents (MCP/OpenCode/Claude)
+  kern doctor [root] [--json]                     Diagnostic report (binary, index, wiring, freshness)
+
+Tip: Run 'kern --all' or 'kern help --all' to list all 140+ specialized micro-commands.
+`)
+}
+
+func usageAll() {
+	fmt.Fprintf(os.Stderr, `kern - kern your context. Complete CLI catalog.
 
 Usage:
   kern optimize <prompt> [--attach FILE] [--session ID] [--model NAME] [--llm MODEL]
@@ -42,13 +69,8 @@ Usage:
   kern verify-receipt [--repo DIR] [FILE]                       verify a tamper-evident CI receipt (or its CI artifact)
   kern build "<command>" [--dir DIR]              run build, compact output
   kern log <file|->                                 compress a log file
-  kern index [root] [--status] [--json] [--force] build/refresh the AST index (skips the rebuild when
-                                                the persisted index is fresh; --status reports cached
-                                                index health (symbols/files/stale) without rebuilding;
-                                                --force rebuilds unconditionally)
-  kern index ensure-fresh [root] [--json]        probe freshness, update/rebuild when stale, strictly
-                                                re-verify; exits 2 when the index does not converge
-                                                (freshness + status JSON in one subprocess)
+  kern index [root] [--status] [--json] [--force] build/refresh the AST index
+  kern index ensure-fresh [root] [--json]        probe freshness, update/rebuild when stale, strictly re-verify
   kern watch [root]                               daemon: auto re-index on change
   kern ast <pattern> [--all]                      AST symbol search (wildcards, kind prefixes; --all: search ALL cached projects)
   kern search <query> [--limit N] [--repos] [--json] [--semantic]
@@ -66,7 +88,7 @@ Usage:
   kern diff [--session ID]                        recent before/after entries
   kern export --csv                               export stats to CSV
   kern tokens [--bpe] "<text>"                    token count (estimator or exact BPE)
-  kern setup [--root DIR] [--agents mcp,opencode,claude] [--detect] [--global]   wire kern into agents (idempotent); --global also writes kern-first instructions to global agent config (~/AGENTS.md, ~/.claude/CLAUDE.md, ~/.config/opencode/plugins/)
+  kern setup [--root DIR] [--agents mcp,opencode,claude] [--detect] [--global]   wire kern into agents (idempotent)
   kern setup --check                                    show wiring status
   kern setup --verify                                   spawn the configured kern-mcp and check it answers the MCP initialize handshake
   kern setup --detect                                   auto-detect present agents and wire only those
@@ -79,37 +101,25 @@ Usage:
   kern memory [--clear]                           show project memory
   kern recall "<prompt>" [root] [--limit N]        recall up-to-N relevant past lessons for a prompt
   kern learn                                      extract recurring patterns from engineering memory
-   kern budget "<text>" --max N                    fit text into a token budget
-   kern terse "<text>"|-                            compress an LLM's output: strip filler, keep code
-   kern exec "<code>" [--lang LANG] [--timeout s] [--max bytes] [--stdin file|-]
-                                                 run a script in an isolated local runtime (python3,
-                                                 node, go, bash, ...) and return ONLY stdout; shebang
-                                                 or --lang selects the runtime; --list shows installed
+  kern budget "<text>" --max N                    fit text into a token budget
+  kern terse "<text>"|-                            compress an LLM's output: strip filler, keep code
+  kern exec "<code>" [--lang LANG] [--timeout s] [--max bytes] [--stdin file|-]
+                                                run a script in an isolated local runtime
   kern doctor [root] [--json]                     diagnostics report (binary, wiring, index, freshness, LLM)
   kern mask [file|-] [--names a,b,c]              mask secrets/PII locally with [MASKED_*] placeholders
   kern sec [root] [--severity error,warning,info] [--max N] [--json]
-                                                 security scan: hardcoded secrets, dynamic SQL, command
-                                                 injection, weak crypto, unsafe deserialization (exit 1 on errors)
-  kern delete <symbol> [root] [--apply] [--json]   safe-delete check: callers (prod vs test), exported/entry
-                                                 point, SAFE/NOT SAFE verdict (exit 1 when unsafe);
-                                                 --apply removes the symbol + its test-only callers
-                                                 (backed up under .kern/rename-backup/, rollback on failure)
+                                                security scan: hardcoded secrets, dynamic SQL, command injection
+  kern delete <symbol> [root] [--apply] [--json]   safe-delete check: callers, exported/entry point verdict
   kern rename <old> <new> [root] [--apply] [--json]
-                                                 structural rename (Go, AST-precise): previews every
-                                                 definition/reference first; --apply commits with backups
-                                                 under .kern/rename-backup/ and transactional rollback
+                                                structural rename (Go, AST-precise) with transactional rollback
   kern flight (list|show <task-id>|tasks|gc) [root] [--json]
-                                                 replay agent flight records (list|show); tasks lists
-                                                 task trails; gc enforces retention (--keep-tasks, --older-than)
-  kern runtime (status|drift) [root] [--json]    production intelligence: status = wired adapter + service
-                                                 profiles (discovery wizard when none); drift = runtime
-                                                 routes vs code routes; kern review --runtime overlays them
-   kern docs <query> [root] [--limit N]            local vector search over documents (md/txt/rst)
-   kern docs index [root] [--semantic]             pre-index documents; --semantic adds Ollama embeddings;
-                                                   kern docs clear resets
-   kern docs fetch <url> [name] [root] [--semantic]  fetch a public doc page into the local index + cache
-   kern doc_fetch <url> [--name N] [--root ROOT]     fetch a public doc page into the local index + cache
-   kern doc_search <query> [--root ROOT] [--limit N]  local vector search over indexed documents
+                                                replay agent flight records
+  kern runtime (status|drift) [root] [--json]    production intelligence: status & drift
+  kern docs <query> [root] [--limit N]            local vector search over documents (md/txt/rst)
+  kern docs index [root] [--semantic]             pre-index documents
+  kern docs fetch <url> [name] [root] [--semantic]  fetch a public doc page into the local index + cache
+  kern doc_fetch <url> [--name N] [--root ROOT]     fetch a public doc page into the local index + cache
+  kern doc_search <query> [--root ROOT] [--limit N]  local vector search over indexed documents
   kern verify <file|- for stdin> [root] [--json]  cross-check file:line/symbol/route claims in agent output
   kern schema <data.json|-> --schema <schema.json>
                                                 deterministically validate JSON output against a JSON schema
@@ -117,21 +127,14 @@ Usage:
   kern validate [root] [--cmd "custom"] [--timeout s] [--json]
                                                 auto-detect and run the project's build/test/syntax check
   kern heal [root] [--llm model] [--task TEXT] [--max N] [--timeout s]
-                                                on failure, have the local LLM fix files in a snapshot,
-                                                re-validate there, and show a diff to review (never edits your tree)
-  kern optimize <prompt> [--fewshot]           inject top recalled lessons from project memory as baselines
+                                                on failure, have the local LLM fix files in a snapshot
   kern udiff <file-a> <file-b> [--out patch]    unified line diff between two files (pure Go, no deps)
   kern sandbox [root] -- <command...> [--timeout s] [--json]
-                                                run a risky command; on failure the tree is restored to a
-                                                snapshot (success keeps changes)
+                                                run a risky command in an isolated sandbox snapshot
   kern swap <file|-> [root] [--max N] [--mode summary|expand]
-                                                swap tagged code blocks (fenced lang:path blocks) for
-                                                per-file signatures to fit a token budget, or expand back
+                                                swap tagged code blocks for per-file signatures
   kern precache [root] [--interval s] [--once]  watch daemon: pre-warm code-summary and doc-search caches
-  kern optimize ... [--mask] [--names a,b,c]      also strip secrets from the prompt (restored in output)
-  kern optimize ... [--cache]                     serve identical requests from the local response cache
-  kern fw [root] [--catalog [lang]]               detect frameworks (default: --catalog shows the built-in list)
-  kern frameworks [root]                          alias for kern fw
+  kern fw [root] [--catalog [lang]]               detect frameworks
   kern entry-points [root] [--limit N] [--pattern GLOB]  list framework entry points (handlers, routes)
   kern hook install                               install post-commit diff->memory hook
   kern hook diff [range]                          compressed git diff (default HEAD~1..HEAD)
@@ -144,8 +147,7 @@ Usage:
   kern impact <change> [kind] [new-target] [--root ROOT] [--json]
                                                 deterministic 11-question ImpactReport (graph-driven, no LLM)
   kern what-if|simulate <change> [kind] [new-target] [--root ROOT] [--json]
-                                                simulate a change on the graph; JSON emits the full
-                                                impact report (affected, risk, claims, mitigations)
+                                                simulate a change on the graph
   kern entries [root] [--limit N] [--json]        framework entry points in the index
   kern flows [root] [--limit N] [--json]          execution flows from entry points, by reach
   kern communities [root] [--limit N] [--json] [--full]     call-graph communities (label propagation)
@@ -153,56 +155,40 @@ Usage:
   kern dead [root] [--limit N] [--json]           dead code: symbols with no in-project callers
   kern larges [root] [--lines N] [--limit N] [--json]   largest declarations by source lines
   kern arch [root] [--json]                       architecture overview + coupling warnings
-kern twin [root] [--root ROOT]                  digital twin knowledge graph: node counts per kind + api endpoints
+  kern twin [root] [--root ROOT]                  digital twin knowledge graph
   kern churn [root] [--range a..b] [--json]       change-frequency risk (most-churned files)
   kern cochange [root] [--range a..b] [--limit N] [--json]   co-change coupling (files edited in lockstep)
   kern explore <symbol> [root] [--depth N] [--max N] [--json]   source + call flow + blast radius in one call
-  kern fts "<query>" [root] [--limit N] [--json]  full-text search over the sqlite index (requires -tags sqlite)
-  kern near <symbol> [root] [--depth N] [--max N] [--json]   dependency tree N hops away (walk-graph)
-  kern walk <symbol> [root] [--depth N] [--max N]             alias of kern near
+  kern fts "<query>" [root] [--limit N] [--json]  full-text search over the sqlite index
+  kern near <symbol> [root] [--depth N] [--max N] [--json]   dependency tree N hops away
   kern probe "<task text>" [root] [--max N] [--json]         task -> budget-capped micro-context bundle
   kern trace <file|- for stdin> [root] [--limit N] [--json]  overlay pprof/stack trace on call graph
-  kern lock <scope> [root] [--hold]               acquire a workspace lock (held until interrupted, or --hold for non-blocking; lock is per-process — unlock runs in the same process)
+  kern lock <scope> [root] [--hold]               acquire a workspace lock
   kern unlock <scope> [root]                     remove a stale lock file
-  kern status [root] [--json]                    list workspace locks (held/free)
-   kern approve [id] [--reject --reason "..." --approver "..."]
-                                                 list pending approvals; with an id, approve (or --reject) it
-   kern audit [task-id] [--root ROOT] [--json]   show the audit trail (all entries, or for one task)
-   kern audit append [--root ROOT] [--file PATH]  link an external entry into the tamper-evident hash chain (entry JSON from stdin or --file)
-   kern evidence export [--root ROOT] [--agent-id ID] [--task T] [--out FILE]
-                                                 signed, tamper-evident evidence bundle (authorization +
-                                                 freshness + lineage + audit trail snapshot, SHA-256 sealed)
-                                                 for SOC 2 / ISO 42001 / EU AI Act review; --out "-" = stdout
-   kern evidence verify [--file FILE] [--root ROOT]
-                                                 validate a bundle's seal and the repo's audit chain;
-                                                 exit 0 = valid, 2 = tampered/broken, 1 = parse error
-    kern efficiency <id> [--root ROOT]    efficiency report (17.6) for a task
+  kern status [root] [--json]                    list workspace locks
+  kern approve [id] [--reject --reason "..." --approver "..."]
+                                                list/approve/reject pending approvals
+  kern audit [task-id] [--root ROOT] [--json]   show the audit trail
+  kern evidence export [--root ROOT] [--agent-id ID] [--task T] [--out FILE]
+                                                signed, tamper-evident evidence bundle (SHA-256 sealed)
+  kern evidence verify [--file FILE] [--root ROOT]
+                                                validate a bundle's seal and the repo's audit chain
   kern guard init [root]                         scaffold .kern/boundaries.json
-   kern guard check [root] [--file F] [--range a..b] [--json|--sarif] [--threshold N]  reject boundary violations (exit 2 when count > N)
-   kern fingerprint [root] [--file f1,f2] [--json]   structural fingerprints of Go functions (data command; never a gate)
-   kern commitmsg [--staged|--range a..b] [--subject]   deterministic conventional commit message from the diff
-   kern commit [--staged] [--all] [--message TEXT] [--dry-run]   stage + commit with a generated conventional message
-   kern version                                    show version
+  kern guard check [root] [--file F] [--range a..b] [--json|--sarif] [--threshold N]  reject boundary violations
+  kern commitmsg [--staged|--range a..b] [--subject]   deterministic conventional commit message from the diff
+  kern commit [--staged] [--all] [--message TEXT] [--dry-run]   stage + commit with a generated conventional message
+  kern version                                    show version
   kern guide                                      categorized tool usage guide (performance tiers)
   kern completion <bash|zsh|fish>                 generate shell completion scripts
-  kern hook <install|diff|store|claude-post|claude-prompt|gemini-after|gemini-prompt>   git hooks (install/diff/store) or agent hooks (read hook JSON on stdin)
   kern mcp                                        run MCP server on stdio
   kern meta "<request>"                           single entry point: describe what you need, kern picks the tool
-   kern analyze <symbol> [--root ROOT]       analyze a proposed change (symbol-based; for natural-language changes use: kern run "<change>")
-   kern plan <symbol> [--root ROOT]          implementation plan for a proposed change (symbol-based; NL: kern run "<change>")
-   kern modernize [--root ROOT]              phased monolith modernization plan
-   kern execute <patch|patch-file> [--root]  apply a diff in an isolated worktree and verify build
-   kern verify <types> [--root ROOT]         unified verification engine (types: build,test,security,architecture,dependency; default build,test)
-   kern incident <alert-json> [snapshot] [--root]  end-to-end incident investigation
-   kern correlate <alert-json> [--root ROOT]       correlate an alert to evidence (alert→service→commit→symbol)
-   kern team [--root ROOT]          build the standard specialist team; list roles + task states
-   kern artifacts [task-id] [--root ROOT]          inspect task artifacts
-   kern loop <intent> [--level L0..L5] [--root]    run the closed loop (default L0 read-only) and show the stage timeline
-   kern autonomy <intent> [--level L0..L5]         alias of kern loop
-  kern serve [--root PATH] [--addr ADDR] [--enterprise] [--project NAME=PATH]...
-                                 start the kern REST API + dashboard server
-                                 (single-project, or --enterprise multi-project
-                                 with shared org audit/memory/policies)
+  kern fit-context <symbol|file> [--budget N]     context-adaptive token window compressor
+  kern lsp-bridge <symbol|file> [--action def]    zero-weight LSP bridge for compiler types & definitions
+  kern fw-trace <symbol|route> [--framework name] framework dependency injection & route tracer
+  kern mutate [root] [--threshold N]              lightweight mutation testing for regression sensitivity
+  kern fragility [root] [--limit N]               causal defect & fragility hotspot memory
+  kern modernize [--root ROOT]                    phased monolith modernization plan
+  kern verify <types> [--root ROOT]               unified verification engine
 `)
 }
 

@@ -119,6 +119,13 @@ type flags struct {
 	verifyTokenReduction bool
 	scanPath             string
 	types                string
+	action               string
+	column               int
+	compilerOutput       string
+	edits                string
+	serverCmd            string
+	target               string
+	minFixes             int
 }
 
 func parseFlags(args []string) (flags, []string, error) {
@@ -385,6 +392,20 @@ func parseFlags(args []string) (flags, []string, error) {
 			f.reject = true
 		case "--reason":
 			setStr(&i, &f.reason)
+		case "--action":
+			setStr(&i, &f.action)
+		case "--column", "--col":
+			setIntFlag(&i, &f.column, "--column")
+		case "--compiler-output":
+			setStr(&i, &f.compilerOutput)
+		case "--edits":
+			setStr(&i, &f.edits)
+		case "--server-cmd":
+			setStr(&i, &f.serverCmd)
+		case "--target":
+			setStr(&i, &f.target)
+		case "--min-fixes":
+			setIntFlag(&i, &f.minFixes, "--min-fixes")
 		case "--help", "-h":
 			f.help = true
 		default:
