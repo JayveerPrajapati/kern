@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -162,16 +163,37 @@ func ServeHTTPContextWithTLS(ctx context.Context, addr string, tlsCfg *TLSConfig
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		_, _ = io.WriteString(w, "kern MCP server over HTTP\n\nPOST /mcp with a JSON-RPC body (e.g. initialize, tools/list, tools/call, prompts/list, prompts/get).\n")
 	})
-	// Loopback-only: kern-mcp exposes RCE-capable tools (kern_sandbox,
-	// kern_exec), so binding to anything but the loopback interface would be an
-	// unauthenticated network attack surface. An explicitly supplied LAN IP is
-	// refused outright rather than silently rebinding it to loopback.
-	bindAddr, err := localhostAddr(addr)
-	if err != nil {
-		return err
+	var ln net.Listener
+	var sockPath string
+	isUnix := strings.HasPrefix(addr, "unix:") || strings.HasPrefix(addr, "/") || strings.HasSuffix(addr, ".sock")
+	if isUnix {
+		sockPath = strings.TrimPrefix(addr, "unix:")
+		if err := os.MkdirAll(filepath.Dir(sockPath), 0o755); err != nil {
+			return err
+		}
+		_ = os.Remove(sockPath)
+		uln, err := net.Listen("unix", sockPath)
+		if err != nil {
+			return fmt.Errorf("listen unix socket %s: %w", sockPath, err)
+		}
+		_ = os.Chmod(sockPath, 0o600)
+		defer os.Remove(sockPath)
+		defer uln.Close()
+		ln = uln
+	} else {
+		bindAddr, err := localhostAddr(addr)
+		if err != nil {
+			return err
+		}
+		tln, err := net.Listen("tcp", bindAddr)
+		if err != nil {
+			return err
+		}
+		defer tln.Close()
+		ln = tln
 	}
+
 	hs := &http.Server{
-		Addr:              bindAddr,
 		Handler:           mux,
 		ReadHeaderTimeout: 10 * time.Second,
 		// Timeouts guard the socket phase, not handler duration; a long tool
@@ -179,18 +201,21 @@ func ServeHTTPContextWithTLS(ctx context.Context, addr string, tlsCfg *TLSConfig
 		WriteTimeout: 60 * time.Second,
 		IdleTimeout:  60 * time.Second,
 	}
-	if tlsCfg != nil {
-		// TLS is opt-in: when configured, enforce a floor of TLS 1.2 so an
-		// operator cannot accidentally serve a transport with legacy ciphers.
-		hs.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS12}
+	if tlsCfg != nil && tlsCfg.Valid() {
+		cert, err := tls.LoadX509KeyPair(tlsCfg.CertFile, tlsCfg.KeyFile)
+		if err != nil {
+			return fmt.Errorf("load tls cert: %w", err)
+		}
+		hs.TLSConfig = &tls.Config{
+			Certificates: []tls.Certificate{cert},
+			MinVersion:   tls.VersionTLS12,
+		}
+		ln = tls.NewListener(ln, hs.TLSConfig)
 	}
+
 	done := make(chan error, 1)
 	go func() {
-		if tlsCfg != nil {
-			done <- hs.ListenAndServeTLS(tlsCfg.CertFile, tlsCfg.KeyFile)
-			return
-		}
-		done <- hs.ListenAndServe()
+		done <- hs.Serve(ln)
 	}()
 	select {
 	case err := <-done:

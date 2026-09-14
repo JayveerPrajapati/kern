@@ -1,4 +1,4 @@
-//go:build sqlite
+//go:build !nosqlite
 
 package storage
 
@@ -16,7 +16,8 @@ var SQLitePragmas = []string{
 	"PRAGMA synchronous=NORMAL;",
 	"PRAGMA busy_timeout=5000;",
 	"PRAGMA temp_store=MEMORY;",
-	"PRAGMA cache_size=-20000;", // Allocate ~20MB buffer
+	"PRAGMA cache_size=-64000;", // 64MB buffer
+	"PRAGMA mmap_size=268435456;", // 256MB memory map for zero-copy B-Tree reads
 }
 
 // OpenSQLite opens a SQLite database at path with optimized WAL and concurrency pragmas applied.

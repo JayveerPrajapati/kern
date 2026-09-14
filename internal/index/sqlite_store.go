@@ -1,4 +1,4 @@
-//go:build sqlite
+//go:build !nosqlite
 
 package index
 
@@ -75,7 +75,8 @@ func OpenSQLite(root string) (*SQLiteStore, error) {
 		"PRAGMA synchronous=NORMAL;",
 		"PRAGMA busy_timeout=5000;",
 		"PRAGMA temp_store=MEMORY;",
-		"PRAGMA cache_size=-20000;",
+		"PRAGMA cache_size=-64000;",
+		"PRAGMA mmap_size=268435456;", // 256MB memory mapped I/O
 		"PRAGMA wal_autocheckpoint=0;",
 	} {
 		if _, err := db.Exec(pragma); err != nil {
@@ -881,6 +882,130 @@ func FTS5Search(root, query string, limit int) ([]Symbol, error) {
 		return nil, fmt.Errorf("no sqlite index for %q (run a build with -tags sqlite or use the CLI index command)", root)
 	}
 	return s.SearchFTS(query, limit)
+}
+
+// LookupSymbol performs a direct index point-query for a symbol by its Name or FullName.
+func (s *SQLiteStore) LookupSymbol(name string) (*Symbol, error) {
+	var sym Symbol
+	var end, entry int
+	var params string
+	row := s.db.QueryRow(`
+SELECT kind,name,receiver,file,line,"end",lang,entry,framework,route,params
+FROM symbols
+WHERE name = ? OR (receiver || '.' || name) = ?
+LIMIT 1`, name, name)
+	if err := row.Scan(&sym.Kind, &sym.Name, &sym.Receiver, &sym.File, &sym.Line, &end,
+		&sym.Lang, &entry, &sym.Framework, &sym.Route, &params); err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, err
+	}
+	sym.End = end
+	sym.Entry = entry == 1
+	if err := json.Unmarshal([]byte(params), &sym.Params); err != nil {
+		return nil, err
+	}
+	return &sym, nil
+}
+
+// LookupCallers performs a direct B-Tree point-query for in-project callers of callee.
+func (s *SQLiteStore) LookupCallers(callee string) ([]string, error) {
+	rows, err := s.db.Query("SELECT DISTINCT caller FROM calls WHERE callee = ? UNION SELECT caller FROM callers WHERE callee = ?", callee, callee)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var callers []string
+	for rows.Next() {
+		var c string
+		if err := rows.Scan(&c); err == nil && c != "" {
+			callers = append(callers, c)
+		}
+	}
+	return callers, rows.Err()
+}
+
+// LookupCalls performs a direct point-query for outgoing call edges from caller.
+func (s *SQLiteStore) LookupCalls(caller string) ([]CallEdge, error) {
+	rows, err := s.db.Query("SELECT callee, confidence FROM calls WHERE caller = ?", caller)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var edges []CallEdge
+	for rows.Next() {
+		var callee, confidence string
+		if err := rows.Scan(&callee, &confidence); err == nil {
+			edges = append(edges, CallEdge{
+				Target:     callee,
+				Confidence: parseConfidence(confidence),
+			})
+		}
+	}
+	return edges, rows.Err()
+}
+
+// LookupFileSymbols performs a point-query for all symbols defined in a file.
+func (s *SQLiteStore) LookupFileSymbols(file string) ([]Symbol, error) {
+	rows, err := s.db.Query(`
+SELECT kind,name,receiver,file,line,"end",lang,entry,framework,route,params
+FROM symbols
+WHERE file = ?
+ORDER BY line ASC`, file)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var syms []Symbol
+	for rows.Next() {
+		var sym Symbol
+		var end, entry int
+		var params string
+		if err := rows.Scan(&sym.Kind, &sym.Name, &sym.Receiver, &sym.File, &sym.Line, &end,
+			&sym.Lang, &entry, &sym.Framework, &sym.Route, &params); err != nil {
+			return nil, err
+		}
+		sym.End = end
+		sym.Entry = entry == 1
+		_ = json.Unmarshal([]byte(params), &sym.Params)
+		syms = append(syms, sym)
+	}
+	return syms, rows.Err()
+}
+
+// LookupInherits returns the base types/interfaces that subtype inherits or implements.
+func (s *SQLiteStore) LookupInherits(subtype string) ([]string, error) {
+	rows, err := s.db.Query("SELECT base FROM inherits WHERE subtype = ?", subtype)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var bases []string
+	for rows.Next() {
+		var b string
+		if err := rows.Scan(&b); err == nil {
+			bases = append(bases, b)
+		}
+	}
+	return bases, rows.Err()
+}
+
+// LookupInheritedBy returns the subtypes that extend or implement base.
+func (s *SQLiteStore) LookupInheritedBy(base string) ([]string, error) {
+	rows, err := s.db.Query("SELECT subtype FROM inherits WHERE base = ?", base)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var subtypes []string
+	for rows.Next() {
+		var sub string
+		if err := rows.Scan(&sub); err == nil {
+			subtypes = append(subtypes, sub)
+		}
+	}
+	return subtypes, rows.Err()
 }
 
 // storeExists reports whether the store has a committed index (non-empty

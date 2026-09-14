@@ -16,6 +16,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -71,8 +72,12 @@ func (s *Server) Validate() error {
 		if s.URL == "" {
 			return fmt.Errorf("streamable-http transport requires a url")
 		}
+	case "unix", "uds":
+		if s.URL == "" {
+			return fmt.Errorf("unix transport requires a socket path in url (e.g. /tmp/kern.sock or unix:///tmp/kern.sock)")
+		}
 	default:
-		return fmt.Errorf("unknown transport %q (use stdio or streamable-http)", s.Transport)
+		return fmt.Errorf("unknown transport %q (use stdio, streamable-http, or unix)", s.Transport)
 	}
 	return nil
 }
@@ -250,6 +255,30 @@ func startHTTP(s *Server) *httpClient {
 	}
 }
 
+func startUnix(s *Server) *httpClient {
+	sockPath := s.URL
+	if strings.HasPrefix(sockPath, "unix://") {
+		sockPath = strings.TrimPrefix(sockPath, "unix://")
+	}
+	tr := &http.Transport{
+		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			var d net.Dialer
+			return d.DialContext(ctx, "unix", sockPath)
+		},
+	}
+	return &httpClient{
+		server: s,
+		client: &http.Client{
+			Transport: tr,
+			Timeout:   60 * time.Second,
+		},
+		headers: map[string]string{
+			"Content-Type": "application/json",
+			"Accept":       "application/json, text/event-stream",
+		},
+	}
+}
+
 // roundTrip performs one JSON-RPC request as a single POST (stateless; no
 // session negotiation needed for tools/list and tools/call).
 func (c *httpClient) roundTrip(req rpcRequest) (any, error) {
@@ -257,7 +286,11 @@ func (c *httpClient) roundTrip(req rpcRequest) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	hreq, err := http.NewRequest(http.MethodPost, c.server.URL, bytes.NewReader(body))
+	targetURL := c.server.URL
+	if c.server.Transport == "unix" || c.server.Transport == "uds" {
+		targetURL = "http://localhost/mcp"
+	}
+	hreq, err := http.NewRequest(http.MethodPost, targetURL, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
@@ -315,6 +348,8 @@ func Dial(ctx context.Context, s *Server) (*Client, error) {
 		c.stdio = sc
 	case "streamable-http":
 		c.http = startHTTP(s)
+	case "unix", "uds":
+		c.http = startUnix(s)
 	}
 	return c, nil
 }

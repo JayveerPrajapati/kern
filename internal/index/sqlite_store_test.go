@@ -1,4 +1,4 @@
-//go:build sqlite
+//go:build !nosqlite
 
 package index
 
@@ -240,4 +240,76 @@ func equalImportEdges(a, b []ImportEdge) bool {
 		}
 	}
 	return true
+}
+
+func TestSQLitePointQueries(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	dir := writeTree(t, map[string]string{
+		"main.go": srcMain,
+		"user.go": srcOther,
+	})
+	ix, err := Build(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := SaveSQLite(dir, ix); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := OpenSQLite(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	// 1. LookupSymbol
+	sym, err := store.LookupSymbol("greet")
+	if err != nil {
+		t.Fatalf("LookupSymbol(greet) err: %v", err)
+	}
+	if sym == nil || sym.Name != "greet" {
+		t.Fatalf("LookupSymbol(greet) got %+v, want name 'greet'", sym)
+	}
+
+	symNone, err := store.LookupSymbol("nonexistent")
+	if err != nil {
+		t.Fatalf("LookupSymbol(nonexistent) err: %v", err)
+	}
+	if symNone != nil {
+		t.Fatalf("LookupSymbol(nonexistent) expected nil, got %+v", symNone)
+	}
+
+	// 2. LookupCallers
+	callers, err := store.LookupCallers("greet")
+	if err != nil {
+		t.Fatalf("LookupCallers(greet) err: %v", err)
+	}
+	if len(callers) == 0 {
+		t.Fatalf("LookupCallers(greet) got 0 callers, expected main or User.Login")
+	}
+
+	// 3. LookupCalls
+	calls, err := store.LookupCalls("main")
+	if err != nil {
+		t.Fatalf("LookupCalls(main) err: %v", err)
+	}
+	if len(calls) == 0 {
+		t.Fatalf("LookupCalls(main) got 0 calls, expected call to greet")
+	}
+
+	// 4. LookupFileSymbols
+	fileSyms, err := store.LookupFileSymbols("main.go")
+	if err != nil {
+		t.Fatalf("LookupFileSymbols(main.go) err: %v", err)
+	}
+	if len(fileSyms) < 2 {
+		t.Fatalf("LookupFileSymbols(main.go) got %d symbols, expected at least main and greet", len(fileSyms))
+	}
+
+	// 5. LookupInherits / LookupInheritedBy (empty for plain Go code without embedded/subtypes)
+	inherits, err := store.LookupInherits("User")
+	if err != nil {
+		t.Fatalf("LookupInherits(User) err: %v", err)
+	}
+	_ = inherits
 }
