@@ -286,6 +286,10 @@ func (s *Server) handleGuardCheck(ctx context.Context, args map[string]any) (str
 		if err != nil {
 			return "", err
 		}
+		unconfigured := b == nil
+		if b == nil {
+			b = intel.InferBoundaries(ix)
+		}
 		violations, skipped := intel.CheckBoundariesPrecise(ix, b, files, false)
 		// @pure mutability assertions are opt-in via "pure": true in
 		// .kern/boundaries.json; a nil ruleset carries no Pure flag, so the
@@ -296,7 +300,7 @@ func (s *Server) handleGuardCheck(ctx context.Context, args map[string]any) (str
 		// Publish guard outcomes exactly like the CLI guard check: persisted
 		// to .kern/events.jsonl for replay and, when a relay owns the socket,
 		// emitted live to watchers. Best-effort; never changes the verdict.
-		relay.PublishPersisted(root, intel.GuardEvents(violations, skipped["boundaries-not-configured"] > 0))
+		relay.PublishPersisted(root, intel.GuardEvents(violations, unconfigured || skipped["boundaries-not-configured"] > 0))
 		threshold := 0
 		if v := argString(args, "threshold"); v != "" {
 			n, err := atoiArg(v, threshold)

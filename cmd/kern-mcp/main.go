@@ -71,8 +71,8 @@ func main() {
 		if existing != "" {
 			roots = append(roots, strings.Split(existing, ",")...)
 		}
-		os.Setenv("KERN_MCP_ROOTS", strings.Join(roots, ","))
-		os.Setenv("KERN_ROOTS", strings.Join(roots, ","))
+		_ = os.Setenv("KERN_MCP_ROOTS", strings.Join(roots, ","))
+		_ = os.Setenv("KERN_ROOTS", strings.Join(roots, ","))
 	}
 	// Same contract as the other binaries (blueprint-mcp precedent,
 	// f778aff): -v/--version/version all print the ldflags-stamped

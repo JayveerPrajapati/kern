@@ -79,13 +79,112 @@ type ExtractionPlan struct {
 // the deterministic v1 path and avoids reimplementing community or bridge
 // detection .
 type Analyzer struct {
-	ix *index.Index
+	ix         *index.Index
+	pathPrefix string
 }
 
 // NewAnalyzer creates an Analyzer from a project's AST index — the input
 // consumed by intel.Communities and intel.Bridges.
 func NewAnalyzer(ix *index.Index) *Analyzer {
 	return &Analyzer{ix: ix}
+}
+
+// WithPathPrefix restricts bounded context extraction to symbols within the
+// given project/subfolder path prefix.
+func (a *Analyzer) WithPathPrefix(prefix string) *Analyzer {
+	a.pathPrefix = filepath.Clean(prefix)
+	return a
+}
+
+// scopedIndex returns an index filtered to symbols and call edges within pathPrefix.
+func (a *Analyzer) scopedIndex() *index.Index {
+	if a.pathPrefix == "" || a.pathPrefix == "." {
+		return a.ix
+	}
+	cleanPrefix := filepath.Clean(filepath.ToSlash(a.pathPrefix))
+	if cleanPrefix == "." || cleanPrefix == "" {
+		return a.ix
+	}
+
+	scoped := &index.Index{
+		Root:            a.ix.Root,
+		Version:         a.ix.Version,
+		Calls:           make(map[string][]index.CallEdge),
+		Callers:         make(map[string][]string),
+		Pkgs:            make(map[string]*index.Pkg),
+		ImportsByFile:   make(map[string][]index.ImportEdge),
+		FileHashes:      make(map[string]string),
+		GeneratedFiles:  make(map[string]bool),
+		Communities:     make(map[string]string),
+		PrecisionByLang: a.ix.PrecisionByLang,
+	}
+
+	matchesPrefix := func(path string) bool {
+		norm := filepath.Clean(filepath.ToSlash(path))
+		return norm == cleanPrefix || strings.HasPrefix(norm, cleanPrefix+"/")
+	}
+
+	symSet := make(map[string]bool)
+	for _, sym := range a.ix.Symbols {
+		if matchesPrefix(sym.File) {
+			scoped.Symbols = append(scoped.Symbols, sym)
+			symSet[sym.Name] = true
+			if sym.Receiver != "" {
+				symSet[sym.Receiver+"."+sym.Name] = true
+				symSet["("+sym.Receiver+")."+sym.Name] = true
+			}
+		}
+	}
+
+	for f, hash := range a.ix.FileHashes {
+		if matchesPrefix(f) {
+			scoped.FileHashes[f] = hash
+		}
+	}
+
+	for f, gen := range a.ix.GeneratedFiles {
+		if matchesPrefix(f) {
+			scoped.GeneratedFiles[f] = gen
+		}
+	}
+
+	for f, imps := range a.ix.ImportsByFile {
+		if matchesPrefix(f) {
+			scoped.ImportsByFile[f] = imps
+		}
+	}
+
+	for pkgPath, pkg := range a.ix.Pkgs {
+		if matchesPrefix(pkgPath) {
+			scoped.Pkgs[pkgPath] = pkg
+		}
+	}
+
+	for src, edges := range a.ix.Calls {
+		if symSet[src] {
+			var filtered []index.CallEdge
+			for _, edge := range edges {
+				if symSet[edge.Target] {
+					filtered = append(filtered, edge)
+				}
+			}
+			scoped.Calls[src] = filtered
+		}
+	}
+
+	for tgt, callers := range a.ix.Callers {
+		if symSet[tgt] {
+			var filtered []string
+			for _, caller := range callers {
+				if symSet[caller] {
+					filtered = append(filtered, caller)
+				}
+			}
+			scoped.Callers[tgt] = filtered
+		}
+	}
+
+	return scoped
 }
 
 // Analyze detects bounded contexts and coupling bridges, then generates a
@@ -98,20 +197,22 @@ func (a *Analyzer) Analyze() (*ExtractionPlan, error) {
 		return nil, fmt.Errorf("modernization: analyzer requires an index")
 	}
 
+	ix := a.scopedIndex()
+
 	// Community detection is gated for large repos: intel.Communities returns
 	// empty above index.MaxCommunitySymbols to avoid O(n*iter) latency. Detect
 	// that here and return a valid plan with a skip-note instead of a silent
 	// empty plan.
-	if len(a.ix.Symbols) > index.MaxCommunitySymbols {
+	if len(ix.Symbols) > index.MaxCommunitySymbols {
 		return &ExtractionPlan{
 			Summary: fmt.Sprintf("modernization analysis skipped — %d symbols exceed the %d-symbol community-detection gate; use `kern bridges` and `kern churn` for structural analysis on gated repos",
-				len(a.ix.Symbols), index.MaxCommunitySymbols),
+				len(ix.Symbols), index.MaxCommunitySymbols),
 		}, nil
 	}
 
 	// 1. Communities -> candidate bounded contexts (intel reuses label
 	// propagation; no reimplementation here).
-	communities := intel.Communities(a.ix)
+	communities := intel.Communities(ix)
 
 	// symbol full-name -> owning community ID, and community ID -> display name.
 	symToCtx := map[string]string{}
@@ -125,7 +226,7 @@ func (a *Analyzer) Analyze() (*ExtractionPlan, error) {
 	// 2. Compute cohesion and cross-context deps per community.
 	contexts := make([]BoundedContext, len(communities))
 	for i, c := range communities {
-		contexts[i] = buildContext(a.ix, c, idToName[c.ID])
+		contexts[i] = buildContext(ix, c, idToName[c.ID])
 	}
 
 	// 3. Bridges between contexts (reuses intel.Bridges, which finds symbols
@@ -134,7 +235,7 @@ func (a *Analyzer) Analyze() (*ExtractionPlan, error) {
 	// analyzer wants every coupling bridge so it can derive an accurate risk
 	// level; a large limit avoids silently undercounting bridges (bug: Bridges
 	// has no dedicated "unlimited" sentinel).
-	bridges := a.mapBridges(intel.Bridges(a.ix, 10000), symToCtx, idToName)
+	bridges := a.mapBridges(intel.Bridges(ix, 10000), symToCtx, idToName)
 
 	// Per-context bridge count -> phase risk level.
 	bridgeCount := map[string]int{}
@@ -143,7 +244,7 @@ func (a *Analyzer) Analyze() (*ExtractionPlan, error) {
 	}
 
 	// 4. Churn scores, best-effort (0 when not a git repo / not indexed).
-	churn := churnScores(a.ix)
+	churn := churnScores(ix)
 
 	// 5. Sort contexts by extraction risk ascending (lowest first). The risk
 	// level of a phase is derived from its bridge count, so sort on that
@@ -171,7 +272,7 @@ func (a *Analyzer) Analyze() (*ExtractionPlan, error) {
 		Contexts: contexts,
 		Bridges:  bridges,
 		Phases:   phases,
-		Summary:  buildSummary(contexts, bridges, order, a.ix),
+		Summary:  buildSummary(contexts, bridges, order, ix),
 	}, nil
 }
 

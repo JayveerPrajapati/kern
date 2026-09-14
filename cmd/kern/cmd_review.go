@@ -1055,13 +1055,17 @@ func runLearn(rest []string) {
 }
 
 func runModernize(rest []string) {
-	f, _, err := parseFlags(rest)
+	f, args, err := parseFlags(rest)
 	if err != nil {
 		fatalUsage("flags: %v", err)
 	}
 	root := f.root
 	if root == "" {
-		root = "."
+		if len(args) > 0 && args[0] != "" {
+			root = args[0]
+		} else {
+			root = "."
+		}
 	}
 	p, err := app.New(root)
 	if err != nil {

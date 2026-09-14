@@ -9,6 +9,7 @@ package project
 import (
 	"log"
 	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -20,14 +21,15 @@ import (
 // Session bundles a project root with its on-demand symbol index and a stats
 // session identity. It is safe for concurrent use.
 type Session struct {
-	mu         sync.Mutex
-	Root       string
-	Session    string
-	ix         *index.Index
-	staleUntil time.Time // cooldown: skip staleness walk until this time
-	stale      bool      // mark index stale on file-event notification
-	watcher    *fileWatcher
-	saveWG     sync.WaitGroup // B6: in-flight background index saves (drained by Close)
+	mu               sync.Mutex
+	Root             string
+	Session          string
+	ix               *index.Index
+	lastStoreModTime time.Time // modtime of sqlite/json on disk when index was loaded
+	staleUntil       time.Time // cooldown: skip staleness walk until this time
+	stale            bool      // mark index stale on file-event notification
+	watcher          *fileWatcher
+	saveWG           sync.WaitGroup // B6: in-flight background index saves (drained by Close)
 	// B1 single-flight state: one rebuild runs at a time, OFF the session
 	// lock (stale-while-revalidate). cond wakes callers that arrived before
 	// any index existed and must wait for the first build; buildResult /
@@ -48,6 +50,24 @@ type Session struct {
 	bridgesLimit int
 }
 
+// latestStoreModTime checks the latest modification time of the sqlite/json index on disk.
+func latestStoreModTime(root string) time.Time {
+	var maxM time.Time
+	paths := []string{
+		filepath.Join(root, ".kern", "index.sqlite"),
+		filepath.Join(root, ".kern", "index.sqlite-wal"),
+		filepath.Join(root, ".kern", "index.json"),
+	}
+	for _, p := range paths {
+		if fi, err := os.Stat(p); err == nil {
+			if fi.ModTime().After(maxM) {
+				maxM = fi.ModTime()
+			}
+		}
+	}
+	return maxM
+}
+
 // New returns a Session for root. An empty root resolves to the current
 // directory. session is the optional identity used when recording stats.
 // When a native file-event tool (inotifywait/fswatch) is available, a background
@@ -59,7 +79,11 @@ func New(root, session string) *Session {
 			root = cwd
 		}
 	}
-	s := &Session{Root: root, Session: session}
+	s := &Session{
+		Root:             root,
+		Session:          session,
+		lastStoreModTime: latestStoreModTime(root),
+	}
 	s.cond = sync.NewCond(&s.mu)
 	s.watcher = newFileWatcher(root, func(string) { s.Invalidate() })
 	return s
@@ -85,13 +109,6 @@ func (s *Session) Close() {
 // is rate-limited: once it returns "fresh", the next check is skipped for
 // staleCooldown (1 second by default), so burst tool calls reuse the cached
 // index without re-walking disk.
-// Index returns the symbol index for the session's root. A cached index is
-// reused while fresh; a stale or missing index is rebuilt and persisted so the
-// session always reflects the current tree (see index.Stale).
-// To avoid a full filesystem walk on every MCP tool call, the staleness check
-// is rate-limited: once it returns "fresh", the next check is skipped for
-// staleCooldown (1 second by default), so burst tool calls reuse the cached
-// index without re-walking disk.
 //
 // B1 — stale-while-revalidate: the rebuild runs OFF the session lock, so the
 // first tool call after an edit no longer blocks ALL other tool calls for the
@@ -101,6 +118,18 @@ func (s *Session) Close() {
 // callers that arrive before any index exists wait on the condition variable.
 func (s *Session) Index() (*index.Index, error) {
 	s.mu.Lock()
+	// Check if external index write updated SQLite or JSON on disk
+	storeMod := latestStoreModTime(s.Root)
+	if !storeMod.IsZero() && storeMod.After(s.lastStoreModTime) && s.ix != nil {
+		s.ix = nil
+		s.stale = true
+		s.arch = nil
+		s.communities = nil
+		s.hubs = nil
+		s.hubsLimit = 0
+		s.bridges = nil
+		s.bridgesLimit = 0
+	}
 	// A file-event notification (or explicit invalidation) marks the index
 	// stale, bypassing the cooldown so we never serve stale code.
 	if s.stale {
@@ -152,6 +181,7 @@ func (s *Session) Index() (*index.Index, error) {
 	s.buildResult = ix
 	if err == nil && ix != nil {
 		s.ix = ix
+		s.lastStoreModTime = latestStoreModTime(root)
 		s.staleUntil = time.Now().Add(s.freshnessCooldown())
 		s.stale = false
 		// Clear the derived computation caches so they rebuild with the

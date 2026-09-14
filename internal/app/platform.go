@@ -351,13 +351,18 @@ func populateWhatIfEvidence(p *Platform, imp *whatif.Impact, target string) {
 	// A missing boundaries.json is fail-open — no rule set, no entries.
 	if p.ix != nil {
 		b, bErr := intel.LoadBoundaries(p.root)
-		if bErr == nil && b != nil && len(b.Rules) > 0 {
-			for _, v := range intel.CheckBoundaries(p.ix, b, imp.Files) {
-				imp.ArchitectureViolations = append(imp.ArchitectureViolations,
-					fmt.Sprintf("boundary: %s -> %s forbidden by rule %s -> %s (%s)", v.CallerFile, v.CalleeFile, v.RuleFrom, v.RuleTo, v.CallerFile))
+		if bErr == nil {
+			if b == nil {
+				b = intel.InferBoundaries(p.ix)
 			}
-			// Dedupe against entries the firewall block already added.
-			imp.ArchitectureViolations = dedupeStrings(imp.ArchitectureViolations)
+			if b != nil && len(b.Rules) > 0 {
+				for _, v := range intel.CheckBoundaries(p.ix, b, imp.Files) {
+					imp.ArchitectureViolations = append(imp.ArchitectureViolations,
+						fmt.Sprintf("boundary: %s -> %s forbidden by rule %s -> %s (%s)", v.CallerFile, v.CalleeFile, v.RuleFrom, v.RuleTo, v.CallerFile))
+				}
+				// Dedupe against entries the firewall block already added.
+				imp.ArchitectureViolations = dedupeStrings(imp.ArchitectureViolations)
+			}
 		}
 	}
 	// Historical evidence: recall incident lessons related to the target so

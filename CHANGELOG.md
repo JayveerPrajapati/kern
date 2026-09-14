@@ -6,7 +6,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-## [0.9.8.1] - 2026-09-14
+## [0.9.8.2] - 2026-09-14
+
+### Added
+- **Dynamic Architecture Guardrails Fallback**: `kern guard` and `kern impact` automatically infer default layered architecture boundaries (`intel.InferBoundaries`) from AST module hierarchies (Controller/Router $\rightarrow$ Service $\rightarrow$ Repository/DB, banning reverse dependencies) when `.kern/boundaries.json` is unconfigured, falling back cleanly without hard errors while publishing `architecture.warning` events.
+- **Multi-Repo Aggregate Freshness in `kern doctor`**: `internal/doctor` automatically discovers subprojects in multi-repo workspaces and evaluates aggregate index freshness and symbol counts across all child projects.
+
+### Fixed
+- **Sub-Repository Scoping in `kern modernize`**: added `WithPathPrefix` filter to `modernization.Analyzer` ensuring bounded context extraction and migration planning are scoped strictly to the target subfolder rather than including sibling repositories in a parent workspace.
+- **MCP Server In-Memory Index Hot-Reload**: added filesystem modtime tracking for SQLite and JSON stores so external `kern index --force` runs immediately update active MCP server sessions without requiring a process restart.
+- **`kern fit-context` Positional Arguments & `--budget` Alias**: added fallback positional argument handling (`args[0]` as symbol or file path) and `--budget` flag alias for `--max-tokens` to match `kern --help` interface.
+- **Total Token Budget Compaction in `fit-context`**: enforced global aggregate token limits (`renderTierBudgeted`) across multi-file search results, preventing individual file slices from exceeding the requested token budget.
+
 
 ### Fixed
 - **MCP Server Background Watcher**: eliminated concurrency data race during server shutdown by serializing watch termination state and preventing asynchronous rebuild scheduling against `sync.WaitGroup`.

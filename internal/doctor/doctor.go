@@ -443,6 +443,9 @@ func checkIndex(root string) Finding {
 		detail := fmt.Sprintf("%d symbols, %d files, %d cached projects", len(ix.Symbols), len(ix.FileHashes), n)
 		return Finding{Check: "index", Level: "ok", Detail: detail}
 	}
+	if f, ok := CheckMultiRepoIndex(root); ok {
+		return f
+	}
 	// No cached index: report whether the tree even has indexable sources,
 	// without building a throwaway index just to answer that.
 	if index.HasIndexableSources(root) {
@@ -458,11 +461,17 @@ func checkIndex(root string) Finding {
 func checkIndexFreshness(root string) Finding {
 	ix, err := index.Load(root)
 	if err != nil || ix == nil {
+		if f, ok := CheckMultiRepoFreshness(root); ok {
+			return f
+		}
 		// No cached index: checkIndex already reports this; nothing to be
 		// stale about. Report ok so the report does not double-fail.
 		return Finding{Check: "freshness", Level: "ok", Detail: "no cached index to check"}
 	}
 	if ix.Stale() {
+		if f, ok := CheckMultiRepoFreshness(root); ok {
+			return f
+		}
 		return Finding{Check: "freshness", Level: "warn",
 			Detail: fmt.Sprintf("index is STALE (%d symbols) — source changed since build; run `kern index .`", len(ix.Symbols))}
 	}
