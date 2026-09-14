@@ -1,3 +1,4 @@
+// Package fit calculates token fit and compression budgets for context packages.
 package fit
 
 import (

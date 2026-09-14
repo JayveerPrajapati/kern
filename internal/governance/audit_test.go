@@ -1042,7 +1042,7 @@ func TestAuditHashNilOutcomeMatchesLegacyFormat(t *testing.T) {
 // computeAuditHash body) so the byte-compat contract is pinned in the test.
 func legacyAuditHash(e AuditEntry, prevHash string) string {
 	h := sha256.New()
-	fmt.Fprintf(h, "%s|%s|%s|%s|%s|%v|%v|%v|%s|%s", prevHash, e.ID, e.AgentID, e.Action, e.Resource, e.Timestamp.UnixNano(), e.Risk, e.Approved, e.Result, e.TaskID)
+	_, _ = fmt.Fprintf(h, "%s|%s|%s|%s|%s|%v|%v|%v|%s|%s", prevHash, e.ID, e.AgentID, e.Action, e.Resource, e.Timestamp.UnixNano(), e.Risk, e.Approved, e.Result, e.TaskID)
 	return hex.EncodeToString(h.Sum(nil))
 }
 

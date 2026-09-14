@@ -153,6 +153,7 @@ func TestPromptMaskRoundTrip(t *testing.T) {
 }
 
 func TestPromptLLMFallback(t *testing.T) {
+	t.Setenv("KERN_LLM_PROVIDER", "ollama")
 	t.Setenv("OLLAMA_HOST", "http://127.0.0.1:1")
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	res, err := Prompt("deterministic fallback path", "", Options{LLM: "llama3.2"})

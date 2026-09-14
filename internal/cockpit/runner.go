@@ -125,7 +125,7 @@ func (r *Runner) Run(ctx context.Context) (*State, error) {
 	}
 
 	if r.cfg.NonInteractive {
-		fmt.Fprintf(r.out, "[KERNOPS] Starting task: %q (Level: %s)\n", r.cfg.TaskPrompt, r.cfg.AutonomyLevel)
+		_, _ = fmt.Fprintf(r.out, "[KERNOPS] Starting task: %q (Level: %s)\n", r.cfg.TaskPrompt, r.cfg.AutonomyLevel)
 	} else {
 		r.draw()
 	}
@@ -211,9 +211,9 @@ func (r *Runner) Run(ctx context.Context) (*State, error) {
 		r.draw()
 	} else {
 		if r.state.Success {
-			fmt.Fprintf(r.out, "[KERNOPS] SUCCESS: Task %s completed cleanly. All gates passed.\n", r.state.TaskID)
+			_, _ = fmt.Fprintf(r.out, "[KERNOPS] SUCCESS: Task %s completed cleanly. All gates passed.\n", r.state.TaskID)
 		} else {
-			fmt.Fprintf(r.out, "[KERNOPS] FAILED: %s\n", r.state.Error)
+			_, _ = fmt.Fprintf(r.out, "[KERNOPS] FAILED: %s\n", r.state.Error)
 		}
 	}
 
@@ -223,8 +223,8 @@ func (r *Runner) Run(ctx context.Context) (*State, error) {
 // draw prints the rendered cockpit UI to the output writer.
 func (r *Runner) draw() {
 	// Clear screen in interactive terminal
-	fmt.Fprintf(r.out, "\033[2J\033[H")
-	fmt.Fprint(r.out, RenderCockpit(r.state, 90))
+	_, _ = fmt.Fprintf(r.out, "\033[2J\033[H")
+	_, _ = fmt.Fprint(r.out, RenderCockpit(r.state, 90))
 }
 
 func payloadMap(ev eventbus.Event) map[string]string {

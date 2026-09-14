@@ -1,5 +1,6 @@
 // This file defines the runtime domain entities for production operations:
 // Alert, Deployment, Incident, Hypothesis, and RootCause.
+
 package domain
 
 import "time"

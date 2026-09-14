@@ -7,6 +7,7 @@
 // Types that already shipped (ContextPacket, ImpactReport, Plan, PullRequest,
 // VerificationResult, Deployment, Incident, Risk, Claim, Evidence, Memory) are
 // intentionally NOT re-defined here.
+
 package domain
 
 import "time"

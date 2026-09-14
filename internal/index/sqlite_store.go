@@ -80,7 +80,7 @@ func OpenSQLite(root string) (*SQLiteStore, error) {
 		"PRAGMA wal_autocheckpoint=0;",
 	} {
 		if _, err := db.Exec(pragma); err != nil {
-			db.Close()
+			_ = db.Close()
 			return nil, err
 		}
 	}
@@ -88,7 +88,7 @@ func OpenSQLite(root string) (*SQLiteStore, error) {
 	db.SetMaxIdleConns(1)
 	s := &SQLiteStore{db: db, root: root, path: p}
 	if err := s.applySchema(); err != nil {
-		db.Close()
+		_ = db.Close()
 		return nil, err
 	}
 	return s, nil
@@ -220,7 +220,7 @@ func storeHasColumn(db *sql.DB, table, col string) bool {
 	if err != nil {
 		return false
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	for rows.Next() {
 		var cid, notnull, pk int
 		var name, typ string
@@ -267,7 +267,7 @@ func walLiveFrames(storePath string) int64 {
 	if err != nil {
 		return -1
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	var hdr [100]byte
 	if _, err := f.ReadAt(hdr[:], 0); err != nil {
 		return -1
@@ -331,7 +331,7 @@ func (s *SQLiteStore) Save(ix *Index) error {
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	// meta: root, version, updated_at, max_mtime, identity
 	meta := map[string]string{
@@ -388,7 +388,7 @@ func (s *SQLiteStore) Save(ix *Index) error {
 	if err != nil {
 		return err
 	}
-	defer stmtCalls.Close()
+	defer func() { _ = stmtCalls.Close() }()
 	for caller, callees := range ix.Calls {
 		for _, ce := range callees {
 			if _, err := stmtCalls.Exec(caller, ce.Target, "call", string(ce.Confidence)); err != nil {
@@ -400,7 +400,7 @@ func (s *SQLiteStore) Save(ix *Index) error {
 	if err != nil {
 		return err
 	}
-	defer stmtCallers.Close()
+	defer func() { _ = stmtCallers.Close() }()
 	for callee, callers := range ix.Callers {
 		for _, c := range callers {
 			if _, err := stmtCallers.Exec(callee, c); err != nil {
@@ -416,7 +416,7 @@ func (s *SQLiteStore) Save(ix *Index) error {
 	if err != nil {
 		return err
 	}
-	defer stmtInherits.Close()
+	defer func() { _ = stmtInherits.Close() }()
 	for subtype, bases := range ix.Inherits {
 		for _, b := range bases {
 			if _, err := stmtInherits.Exec(subtype, b); err != nil {
@@ -434,7 +434,7 @@ func (s *SQLiteStore) Save(ix *Index) error {
 	if err != nil {
 		return err
 	}
-	defer stmtCommunities.Close()
+	defer func() { _ = stmtCommunities.Close() }()
 	for sym, comm := range ix.CommunityLabels() {
 		if _, err := stmtCommunities.Exec(sym, comm); err != nil {
 			return err
@@ -507,7 +507,7 @@ func (s *SQLiteStore) Save(ix *Index) error {
 	if err != nil {
 		return err
 	}
-	defer ftsStmt.Close()
+	defer func() { _ = ftsStmt.Close() }()
 	for i, sym := range ix.Symbols {
 		params, err := json.Marshal(sym.Params)
 		if err != nil {
@@ -554,7 +554,7 @@ func (s *SQLiteStore) Load() (*Index, error) {
 	if t, err := time.Parse(time.RFC3339Nano, updated); err == nil {
 		ix.UpdatedAt = t
 	}
-	fmt.Sscanf(maxMtime, "%d", &ix.MaxMtime)
+	_, _ = fmt.Sscanf(maxMtime, "%d", &ix.MaxMtime)
 	// Restore the content-addressed identity if the store has one; indexes
 	// written before identity existed get a nil Identity and fail closed.
 	var identity string
@@ -570,7 +570,7 @@ func (s *SQLiteStore) Load() (*Index, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	for rows.Next() {
 		var sym Symbol
 		var end, entry int
@@ -595,7 +595,7 @@ func (s *SQLiteStore) Load() (*Index, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer crows.Close()
+	defer func() { _ = crows.Close() }()
 	for crows.Next() {
 		var caller, callee, confidence string
 		if err := crows.Scan(&caller, &callee, &confidence); err != nil {
@@ -619,7 +619,7 @@ func (s *SQLiteStore) Load() (*Index, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer ir.Close()
+	defer func() { _ = ir.Close() }()
 	for ir.Next() {
 		var subtype, base string
 		if err := ir.Scan(&subtype, &base); err != nil {
@@ -636,7 +636,7 @@ func (s *SQLiteStore) Load() (*Index, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer com.Close()
+	defer func() { _ = com.Close() }()
 	for com.Next() {
 		var sym, community string
 		if err := com.Scan(&sym, &community); err != nil {
@@ -653,7 +653,7 @@ func (s *SQLiteStore) Load() (*Index, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer pr.Close()
+	defer func() { _ = pr.Close() }()
 	for pr.Next() {
 		var path, name, lang, imports, files, structFields, constructors string
 		if err := pr.Scan(&path, &name, &lang, &imports, &files, &structFields, &constructors); err != nil {
@@ -710,7 +710,7 @@ func (s *SQLiteStore) Load() (*Index, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer fr.Close()
+	defer func() { _ = fr.Close() }()
 	for fr.Next() {
 		var path, hash string
 		var gen int
@@ -827,7 +827,7 @@ ORDER BY rank LIMIT ?`, q, limit)
 	if err != nil {
 		return nil, fmt.Errorf("fts query error: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var out []Symbol
 	for rows.Next() {
 		var sym Symbol
@@ -853,7 +853,7 @@ func SaveSQLite(root string, ix *Index) error {
 	if err != nil {
 		return err
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 	return s.Save(ix)
 }
 
@@ -864,7 +864,7 @@ func LoadSQLite(root string) (*Index, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 	return s.Load()
 }
 
@@ -876,7 +876,7 @@ func FTS5Search(root, query string, limit int) ([]Symbol, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 	exists, err := storeExists(s)
 	if err != nil || !exists {
 		return nil, fmt.Errorf("no sqlite index for %q (run a build with -tags sqlite or use the CLI index command)", root)
@@ -915,7 +915,7 @@ func (s *SQLiteStore) LookupCallers(callee string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var callers []string
 	for rows.Next() {
 		var c string
@@ -932,7 +932,7 @@ func (s *SQLiteStore) LookupCalls(caller string) ([]CallEdge, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var edges []CallEdge
 	for rows.Next() {
 		var callee, confidence string
@@ -956,7 +956,7 @@ ORDER BY line ASC`, file)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var syms []Symbol
 	for rows.Next() {
 		var sym Symbol
@@ -980,7 +980,7 @@ func (s *SQLiteStore) LookupInherits(subtype string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var bases []string
 	for rows.Next() {
 		var b string
@@ -997,7 +997,7 @@ func (s *SQLiteStore) LookupInheritedBy(base string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var subtypes []string
 	for rows.Next() {
 		var sub string

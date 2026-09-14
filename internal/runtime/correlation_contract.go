@@ -3,6 +3,7 @@
 // layer. They give every correlation a typed FACTUAL/INFERRED/UNKNOWN contract
 // (13.2) and every change a stable, comparable fingerprint (13.4), and they
 // link trace/event evidence into the correlation chain (13.1).
+
 package runtime
 
 import (

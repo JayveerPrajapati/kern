@@ -361,7 +361,7 @@ func toolFingerprint(t ToolInfo) string {
 		schemaJSON = []byte("{}")
 	}
 	h := sha256.New()
-	fmt.Fprintf(h, "%s\x00%s\x00%s\x00%s", t.Name, t.Phase, t.RiskLevel, schemaJSON)
+	_, _ = fmt.Fprintf(h, "%s\x00%s\x00%s\x00%s", t.Name, t.Phase, t.RiskLevel, schemaJSON)
 	return hex.EncodeToString(h.Sum(nil))
 }
 

@@ -19,10 +19,6 @@ func WikiExport(ix *index.Index, outDir string, obsidian bool) ([]string, error)
 	if err := os.MkdirAll(outDir, 0o755); err != nil {
 		return nil, err
 	}
-	type pkg struct {
-		dir     string
-		symbols []index.Symbol
-	}
 	byDir := map[string][]index.Symbol{}
 	for _, s := range ix.Symbols {
 		d := filepath.Dir(s.File)

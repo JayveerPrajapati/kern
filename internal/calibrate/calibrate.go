@@ -120,13 +120,13 @@ func Run(root string, commitsN int, thresholds []float64, w io.Writer) error {
 		}
 	}
 
-	fmt.Fprintf(w, "root:        %s\n", root)
-	fmt.Fprintf(w, "commits:     %d scored, %d skipped (no indexable changes)\n", scored, skipped)
+	_, _ = fmt.Fprintf(w, "root:        %s\n", root)
+	_, _ = fmt.Fprintf(w, "commits:     %d scored, %d skipped (no indexable changes)\n", scored, skipped)
 
-	fmt.Fprintf(w, "\n1) risk-threshold calibration (review load vs recall)\n")
-	fmt.Fprintf(w, "%-10s %-12s %-16s\n", "threshold", "recall", "mean flagged/commit")
+	_, _ = fmt.Fprintf(w, "\n1) risk-threshold calibration (review load vs recall)\n")
+	_, _ = fmt.Fprintf(w, "%-10s %-12s %-16s\n", "threshold", "recall", "mean flagged/commit")
 	for i, t := range thr {
-		fmt.Fprintf(w, "%-10.1f %-12.3f %-16.2f\n", t, prec(recalled[i], changedTotal), float64(flagged[i])/float64(scored))
+		_, _ = fmt.Fprintf(w, "%-10.1f %-12.3f %-16.2f\n", t, prec(recalled[i], changedTotal), float64(flagged[i])/float64(scored))
 	}
 
 	p := prec(tp, tp+fp)
@@ -135,14 +135,14 @@ func Run(root string, commitsN int, thresholds []float64, w io.Writer) error {
 	if p+r > 0 {
 		f1 = 2 * p * r / (p + r)
 	}
-	fmt.Fprintf(w, "\n2) impact F1 (blast radius vs files actually edited)\n")
-	fmt.Fprintf(w, "precision=%.3f recall=%.3f F1=%.3f (commits with nonzero predicted set: %d/%d)\n", p, r, f1, f1Commits, scored)
+	_, _ = fmt.Fprintf(w, "\n2) impact F1 (blast radius vs files actually edited)\n")
+	_, _ = fmt.Fprintf(w, "precision=%.3f recall=%.3f F1=%.3f (commits with nonzero predicted set: %d/%d)\n", p, r, f1, f1Commits, scored)
 
-	fmt.Fprintln(w, "\nrisk distribution (across all scored changes):")
+	_, _ = fmt.Fprintln(w, "\nrisk distribution (across all scored changes):")
 	for _, b := range histogram(risks) {
-		fmt.Fprintf(w, "  [%4.1f, %4.1f) %5d\n", b.lo, b.hi, b.n)
+		_, _ = fmt.Fprintf(w, "  [%4.1f, %4.1f) %5d\n", b.lo, b.hi, b.n)
 	}
-	fmt.Fprintln(w, `
+	_, _ = fmt.Fprintln(w, `
 The threshold with the best recall-vs-load tradeoff on this repo's history is
 the calibration point for the risk scale. Pick the knee, or keep the default
 4.0 (base 1.0 + log2 callers + log2 transitive blast + 1.5 cross-pkg + 2.0

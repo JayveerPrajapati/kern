@@ -256,10 +256,7 @@ func startHTTP(s *Server) *httpClient {
 }
 
 func startUnix(s *Server) *httpClient {
-	sockPath := s.URL
-	if strings.HasPrefix(sockPath, "unix://") {
-		sockPath = strings.TrimPrefix(sockPath, "unix://")
-	}
+	sockPath := strings.TrimPrefix(s.URL, "unix://")
 	tr := &http.Transport{
 		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 			var d net.Dialer
@@ -304,7 +301,7 @@ func (c *httpClient) roundTrip(req rpcRequest) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	data, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, err

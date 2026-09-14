@@ -154,7 +154,7 @@ func TestGoSDKAgainstControlPlane(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EventsStream: %v", err)
 	}
-	defer body.Close()
+	defer func() { _ = body.Close() }()
 	if _, err := body.Read(make([]byte, 128)); err != nil && err != io.EOF {
 		t.Fatalf("EventsStream read: %v", err)
 	}

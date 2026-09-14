@@ -43,6 +43,6 @@ func AnchorLine(ix *index.Index, symbol string) string {
 		return ""
 	}
 	h := sha256.New()
-	fmt.Fprintf(h, "%s|%s|%d|%v|%s", file, full, line, true, ix.Root)
+	_, _ = fmt.Fprintf(h, "%s|%s|%d|%v|%s", file, full, line, true, ix.Root)
 	return fmt.Sprintf("evidence: %s:%d %s", file, line, "evidence-sha256:"+hex.EncodeToString(h.Sum(nil))[:16])
 }

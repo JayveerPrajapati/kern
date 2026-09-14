@@ -257,7 +257,7 @@ func (c Check) fingerprintChanged(ctx context.Context, repoRoot string, diskFile
 	if err != nil {
 		return nil, fmt.Errorf("create temp dir: %w", err)
 	}
-	defer os.RemoveAll(tmpDir)
+	defer func() { _ = os.RemoveAll(tmpDir) }()
 
 	relPaths := make([]string, 0, len(contentByPath))
 	for path, content := range contentByPath {

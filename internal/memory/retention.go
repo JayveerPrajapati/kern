@@ -8,6 +8,7 @@
 //
 // Durations are configured as strings and accept a day suffix ("30d" = 720h)
 // in addition to Go's standard duration syntax ("720h", "168h").
+
 package memory
 
 import (

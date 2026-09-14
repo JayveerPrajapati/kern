@@ -38,7 +38,7 @@ func appendFile(t *testing.T, dir, relpath, content string) {
 	if err != nil {
 		t.Fatalf("open %s: %v", relpath, err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	if _, err := f.WriteString(content); err != nil {
 		t.Fatalf("append %s: %v", relpath, err)
 	}

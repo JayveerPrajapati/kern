@@ -277,7 +277,7 @@ func createWorktree(repoRoot string) (string, func(), error) {
 	cmd := exec.Command("git", "worktree", "add", "--detach", worktreePath, "HEAD")
 	cmd.Dir = repoRoot
 	if out, err := cmd.CombinedOutput(); err != nil {
-		os.RemoveAll(tmpDir)
+		_ = os.RemoveAll(tmpDir)
 		return "", nil, fmt.Errorf("git worktree add: %w: %s", err, string(out))
 	}
 
@@ -291,7 +291,7 @@ func createWorktree(repoRoot string) (string, func(), error) {
 		pruneCmd.Dir = repoRoot
 		_ = pruneCmd.Run()
 		// Remove the temp dir.
-		os.RemoveAll(tmpDir)
+		_ = os.RemoveAll(tmpDir)
 	}
 
 	return worktreePath, cleanup, nil

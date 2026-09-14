@@ -252,7 +252,7 @@ func (c *Client) do(req *http.Request, out any) error {
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return fmt.Errorf("kern sdk: %s %s returned %s: %s", req.Method, req.URL.Path, resp.Status, readErrorBody(io.LimitReader(resp.Body, maxResponseBody)))

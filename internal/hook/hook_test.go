@@ -171,7 +171,7 @@ func TestGeminiPromptCapturesUserMessage(t *testing.T) {
 		t.Fatalf("prompt not captured: %+v", lessons)
 	}
 	// Dedupe: identical prompt must not be stored again.
-	GeminiPrompt(dir, b)
+	_ = GeminiPrompt(dir, b)
 	if got := len(memory.List(dir)); got != 1 {
 		t.Fatalf("dedupe failed: %d lessons", got)
 	}

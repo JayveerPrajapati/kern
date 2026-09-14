@@ -33,13 +33,7 @@ func LoadSamplesFromDir(dir string) ([]Sample, error) {
 		if err := json.Unmarshal(data, &js); err != nil {
 			return samples, fmt.Errorf("eval: load sample %s: %w", e.Name(), err)
 		}
-		samples = append(samples, Sample{
-			Name:             js.Name,
-			Baseline:         js.Baseline,
-			Candidate:        js.Candidate,
-			CriticalEvidence: js.CriticalEvidence,
-			Intent:           js.Intent,
-		})
+		samples = append(samples, Sample(js))
 	}
 	return samples, nil
 }

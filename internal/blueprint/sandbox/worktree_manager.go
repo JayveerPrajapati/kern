@@ -54,7 +54,7 @@ func (m *WorktreeManager) Create(taskID string) (string, func(), error) {
 	targetDir := filepath.Join(m.baseDir, cleanTaskID)
 	// Sweep abandoned worktree copies from previous interrupted runs before
 	// creating a new one (V3: stale snapshots accumulated in user repos).
-	m.GC(staleWorktreeAge)
+	_, _ = m.GC(staleWorktreeAge)
 
 	// Ensure parent directories exist
 	if err := os.MkdirAll(filepath.Dir(targetDir), 0o755); err != nil {

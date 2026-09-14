@@ -154,7 +154,7 @@ func (s *Server) handleEvidenceAnchor(ctx context.Context, args map[string]any) 
 
 	// Compute deterministic SHA-256 evidence certificate
 	h := sha256.New()
-	fmt.Fprintf(h, "%s|%s|%d|%v|%s", proof.File, proof.Symbol, proof.Line, proof.Verified, ix.Root)
+	_, _ = fmt.Fprintf(h, "%s|%s|%d|%v|%s", proof.File, proof.Symbol, proof.Line, proof.Verified, ix.Root)
 	proof.EvidenceID = "evidence-sha256:" + hex.EncodeToString(h.Sum(nil))[:16]
 
 	// D4: compact text summary by default; full JSON behind format=json.

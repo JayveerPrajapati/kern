@@ -79,7 +79,7 @@ func (o *GoogleProvider) Generate(ctx context.Context, system, user string, opts
 	if err != nil {
 		return "", err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("google status %d", resp.StatusCode)
 	}

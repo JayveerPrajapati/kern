@@ -1,4 +1,5 @@
 // File-backed persistence for the approval workflow.
+
 package governance
 
 import (
@@ -111,20 +112,20 @@ func (s *FileStore) saveLocked(approvals []domain.Approval) error {
 		return fmt.Errorf("approval store: create temp: %w", err)
 	}
 	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
-		os.Remove(tmp.Name())
+		_ = tmp.Close()
+		_ = os.Remove(tmp.Name())
 		return fmt.Errorf("approval store: write %s: %w", tmp.Name(), err)
 	}
 	if err := tmp.Close(); err != nil {
-		os.Remove(tmp.Name())
+		_ = os.Remove(tmp.Name())
 		return fmt.Errorf("approval store: close %s: %w", tmp.Name(), err)
 	}
 	if err := os.Chmod(tmp.Name(), 0o644); err != nil {
-		os.Remove(tmp.Name())
+		_ = os.Remove(tmp.Name())
 		return fmt.Errorf("approval store: chmod %s: %w", tmp.Name(), err)
 	}
 	if err := os.Rename(tmp.Name(), s.path); err != nil {
-		os.Remove(tmp.Name())
+		_ = os.Remove(tmp.Name())
 		return fmt.Errorf("approval store: rename: %w", err)
 	}
 	return nil

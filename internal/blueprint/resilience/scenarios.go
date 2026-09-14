@@ -123,7 +123,7 @@ func (h *HTTPFault) Run(ctx context.Context, target Sandbox) Result {
 			Detail:        fmt.Sprintf("could not write resilience test: %v", err),
 		}
 	}
-	defer os.Remove(filePath)
+	defer func() { _ = os.Remove(filePath) }()
 
 	res := target.Run(ctx, dir, []string{"go", "test", "./...", "-run", testName, "-timeout", "10s"})
 	return Result{

@@ -85,24 +85,24 @@ func wireProjectSkills(root string) []Status {
 	opencodeJSON := filepath.Join(root, "opencode.json")
 	if _, err1 := os.Stat(opencodeDir); err1 == nil {
 		opTarget := filepath.Join(opencodeDir, "skills")
-		installSkillsToDir(opTarget)
+		_, _ = installSkillsToDir(opTarget)
 	} else if _, err2 := os.Stat(opencodeJSON); err2 == nil {
 		opTarget := filepath.Join(opencodeDir, "skills")
-		installSkillsToDir(opTarget)
+		_, _ = installSkillsToDir(opTarget)
 	}
 
 	// 5. Codex project skills (.codex/skills) if .codex exists
 	codexDir := filepath.Join(root, ".codex")
 	if _, err := os.Stat(codexDir); err == nil {
 		codexTarget := filepath.Join(codexDir, "skills")
-		installSkillsToDir(codexTarget)
+		_, _ = installSkillsToDir(codexTarget)
 	}
 
 	// 6. Copilot project skills (.github/skills) if .github exists
 	githubDir := filepath.Join(root, ".github")
 	if _, err := os.Stat(githubDir); err == nil {
 		copilotTarget := filepath.Join(githubDir, "skills")
-		installSkillsToDir(copilotTarget)
+		_, _ = installSkillsToDir(copilotTarget)
 	}
 
 	return statuses

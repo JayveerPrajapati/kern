@@ -5,6 +5,7 @@
 // algorithm. Counts are reproducible run-to-run because the corpus and the
 // tie-breaking rule are fixed. This implements the tokenize.Counter interface
 // so it can replace the estimator without changing callers.
+
 package tokenize
 
 import (

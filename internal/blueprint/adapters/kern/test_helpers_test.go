@@ -4,7 +4,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 	"testing"
 )
 
@@ -77,19 +76,3 @@ func runBlueprintCheck(t *testing.T, binPath, repo string, extraArgs ...string) 
 	return string(out), code
 }
 
-// ensureStaged verifies that the fixture's staged files are actually staged
-// in git (defensive — catches fixture materialization bugs).
-func ensureStaged(t *testing.T, repo string, expected []string) {
-	t.Helper()
-	cmd := exec.Command("git", "-C", repo, "diff", "--cached", "--name-only")
-	out, err := cmd.Output()
-	if err != nil {
-		t.Fatalf("git diff --cached --name-only: %v", err)
-	}
-	staged := strings.TrimSpace(string(out))
-	for _, f := range expected {
-		if !strings.Contains(staged, f) {
-			t.Fatalf("fixture bug: %s not staged; staged files:\n%s", f, staged)
-		}
-	}
-}

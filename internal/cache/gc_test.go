@@ -41,12 +41,12 @@ func gunzipBytes(t *testing.T, path string) []byte {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	zr, err := gzip.NewReader(f)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer zr.Close()
+	defer func() { _ = zr.Close() }()
 	var buf bytes.Buffer
 	if _, err := buf.ReadFrom(zr); err != nil {
 		t.Fatal(err)
@@ -400,8 +400,8 @@ func TestExistsGzTwin(t *testing.T) {
 	}
 	var buf bytes.Buffer
 	zw := gzip.NewWriter(&buf)
-	zw.Write([]byte(`{}`))
-	zw.Close()
+	_, _ = zw.Write([]byte(`{}`))
+	_ = zw.Close()
 	if err := os.WriteFile(Path("data", key+".json.gz"), buf.Bytes(), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -424,8 +424,8 @@ func TestStoreAfterArchival(t *testing.T) {
 	plain := Path("data", key+".json")
 	var buf bytes.Buffer
 	zw := gzip.NewWriter(&buf)
-	zw.Write([]byte(`{"stale":true}`))
-	zw.Close()
+	_, _ = zw.Write([]byte(`{"stale":true}`))
+	_ = zw.Close()
 	if err := os.WriteFile(plain+".gz", buf.Bytes(), 0o600); err != nil {
 		t.Fatal(err)
 	}

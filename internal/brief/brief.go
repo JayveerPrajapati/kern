@@ -101,9 +101,6 @@ func surprisingSection(ix *index.Index) string {
 // fixed sections leave. The full map stays available via kern_project_map.
 const digestBudget = 21 << 10
 
-// mapFloor is the minimum the project-map section always gets, even when the
-// fixed sections are unusually large.
-const mapFloor = 4 << 10
 
 // renderProjectMap renders the project map, dropping whole file summaries
 // past the byte budget (never cutting mid-file) with a pointer to the full

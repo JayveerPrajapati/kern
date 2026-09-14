@@ -124,8 +124,8 @@ func TestReadStdinNonTTY(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	w.WriteString("chore: fix pipe input\n")
-	w.Close()
+	_, _ = w.WriteString("chore: fix pipe input\n")
+	_ = w.Close()
 	os.Stdin = r
 	b, err := readStdin()
 	if err != nil {
@@ -134,7 +134,7 @@ func TestReadStdinNonTTY(t *testing.T) {
 	if string(b) != "chore: fix pipe input\n" {
 		t.Errorf("readStdin(pipe) = %q", b)
 	}
-	r.Close()
+	_ = r.Close()
 
 	// An empty regular file reads as empty (non-TTY, no hang).
 	empty := filepath.Join(t.TempDir(), "empty")
@@ -149,7 +149,7 @@ func TestReadStdinNonTTY(t *testing.T) {
 	if b, err := readStdin(); err != nil || len(b) != 0 {
 		t.Fatalf("readStdin(empty file) = %q, %v; want empty, nil", b, err)
 	}
-	f.Close()
+	_ = f.Close()
 
 	// A character device (/dev/null on POSIX) must return immediately with
 	// nil content — this is the interactive-terminal case that used to hang
@@ -162,7 +162,7 @@ func TestReadStdinNonTTY(t *testing.T) {
 	if b, err := readStdin(); err != nil || b != nil {
 		t.Fatalf("readStdin(char device) = %q, %v; want nil, nil (no blocking)", b, err)
 	}
-	devNull.Close()
+	_ = devNull.Close()
 }
 
 func TestRunCompactAbsolutePathInCwd(t *testing.T) {

@@ -1,3 +1,4 @@
+// Package cockpit provides interactive terminal UI and triage runners for autonomous workflows.
 package cockpit
 
 import (
@@ -48,15 +49,15 @@ func executeCockpitCLI(args []string, stdout, stderr io.Writer) int {
 
 	rest := fs.Args()
 	if len(rest) == 0 {
-		fmt.Fprintf(stderr, "Usage: kern ops [flags] <task-intent>\n")
-		fmt.Fprintf(stderr, "Example: kern ops \"Implement JWT rotation in auth middleware\"\n\n")
+		_, _ = fmt.Fprintf(stderr, "Usage: kern ops [flags] <task-intent>\n")
+		_, _ = fmt.Fprintf(stderr, "Example: kern ops \"Implement JWT rotation in auth middleware\"\n\n")
 		fs.PrintDefaults()
 		return 2
 	}
 	for _, arg := range rest {
 		if strings.HasPrefix(arg, "-") && arg != "-" {
-			fmt.Fprintf(stderr, "kern ops: unexpected flag %q after the task intent; place all flags before the intent\n", arg)
-			fmt.Fprintf(stderr, "Usage: kern ops [flags] <task-intent>\n")
+			_, _ = fmt.Fprintf(stderr, "kern ops: unexpected flag %q after the task intent; place all flags before the intent\n", arg)
+			_, _ = fmt.Fprintf(stderr, "Usage: kern ops [flags] <task-intent>\n")
 			return 2
 		}
 	}
@@ -80,7 +81,7 @@ func executeCockpitCLI(args []string, stdout, stderr io.Writer) int {
 	if levelSet {
 		autonomyLevel, err = loop.ParseLevel(*levelFlag)
 		if err != nil {
-			fmt.Fprintf(stderr, "kern ops: invalid autonomy level %q: %v\n", *levelFlag, err)
+			_, _ = fmt.Fprintf(stderr, "kern ops: invalid autonomy level %q: %v\n", *levelFlag, err)
 			return 2
 		}
 	}
@@ -133,14 +134,14 @@ func executeTriageCLI(args []string, stdout, stderr io.Writer) int {
 	if *logFlag == "-" {
 		b, err := io.ReadAll(os.Stdin)
 		if err != nil {
-			fmt.Fprintf(stderr, "kern ops triage: cannot read stdin: %v\n", err)
+			_, _ = fmt.Fprintf(stderr, "kern ops triage: cannot read stdin: %v\n", err)
 			return 2
 		}
 		rawLog = string(b)
 	} else if *logFlag != "" {
 		b, err := os.ReadFile(*logFlag)
 		if err != nil {
-			fmt.Fprintf(stderr, "kern ops triage: cannot read log file %q: %v\n", *logFlag, err)
+			_, _ = fmt.Fprintf(stderr, "kern ops triage: cannot read log file %q: %v\n", *logFlag, err)
 			return 2
 		}
 		rawLog = string(b)
@@ -155,7 +156,7 @@ func executeTriageCLI(args []string, stdout, stderr io.Writer) int {
 	}
 
 	if strings.TrimSpace(rawLog) == "" {
-		fmt.Fprintf(stderr, "Usage: kern ops triage --log <path-or-stdin> [flags]\n")
+		_, _ = fmt.Fprintf(stderr, "Usage: kern ops triage --log <path-or-stdin> [flags]\n")
 		fs.PrintDefaults()
 		return 2
 	}

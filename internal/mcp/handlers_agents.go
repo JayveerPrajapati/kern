@@ -14,10 +14,6 @@ import (
 // absent. Without a probe flag it reports binary presence; with probe=1 it
 // live-tests each installed provider with a trivial prompt.
 func (s *Server) handleLLMProviders(ctx context.Context, args map[string]any) (string, error) {
-	root, _ := args["root"].(string)
-	if root == "" {
-		root = "."
-	}
 	probe, _ := args["probe"].(bool)
 	var b strings.Builder
 	chainNames := []string{}

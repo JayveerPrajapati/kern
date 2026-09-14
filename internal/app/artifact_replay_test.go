@@ -68,7 +68,7 @@ func TestArtifactCompare(t *testing.T) {
 		{ID: "b2", TaskID: "t1", Kind: domain.ArtifactAnalysisReport, Status: "final", CreatedAt: now.Add(1 * time.Second), ParentArtifactID: "b1", Digest: "x2"},
 		{ID: "b3", TaskID: "t1", Kind: domain.ArtifactImpactReport, Status: "final", CreatedAt: now.Add(2 * time.Second), ParentArtifactID: "b2", Digest: "x3"},
 	} {
-		store.Save(a)
+		_, _ = store.Save(a)
 	}
 
 	// Task 2: ContextPacket + Analysis + Plan (Impact missing, Plan added, Analysis digest differs).
@@ -77,7 +77,7 @@ func TestArtifactCompare(t *testing.T) {
 		{ID: "c2", TaskID: "t2", Kind: domain.ArtifactAnalysisReport, Status: "final", CreatedAt: now.Add(1 * time.Second), ParentArtifactID: "c1", Digest: "DIFFERENT"},
 		{ID: "c3", TaskID: "t2", Kind: domain.ArtifactPlan, Status: "final", CreatedAt: now.Add(2 * time.Second), ParentArtifactID: "c2", Digest: "x4"},
 	} {
-		store.Save(a)
+		_, _ = store.Save(a)
 	}
 
 	cmp, err := store.Compare("t1", "t2")
@@ -132,7 +132,7 @@ func TestArtifactDraftReplaceable(t *testing.T) {
 		ID: "dr", TaskID: "t", Kind: domain.ArtifactPlan, Status: "draft",
 		CreatedAt: time.Now().UTC(), Digest: "v1",
 	}
-	store.Save(a1)
+	_, _ = store.Save(a1)
 	a2 := a1
 	a2.Digest = "v2"
 	if _, err := store.Save(a2); err != nil {

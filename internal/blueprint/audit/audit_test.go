@@ -56,7 +56,7 @@ func TestAudit_AppendsJSONL(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	var lines []string
 	sc := bufio.NewScanner(f)
@@ -351,10 +351,10 @@ func TestWriter_VerifyChain_LegacyBackwardCompat(t *testing.T) {
 			t.Fatalf("open legacy %d: %v", i, err)
 		}
 		if _, err := f.Write(append(final, '\n')); err != nil {
-			f.Close()
+			_ = f.Close()
 			t.Fatalf("write legacy %d: %v", i, err)
 		}
-		f.Close()
+		_ = f.Close()
 	}
 
 	// A new chained record must continue from the file's last hash.

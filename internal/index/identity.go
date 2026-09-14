@@ -55,13 +55,6 @@ type FreshnessProof struct {
 // must not be trusted.
 func (p FreshnessProof) Stale() bool { return p.Verdict != FreshnessFresh }
 
-// buildIdentity captures the content identity of an index at build time.
-// ContentRoot is always populated; TreeOID/GitCommit are best-effort and
-// empty when root is not a git worktree or git is unavailable.
-func buildIdentity(root string, fileHashes map[string]string, builtAt time.Time) *IndexIdentity {
-	g := startIdentityGit(root)
-	return g.joinIdentity(fileHashes, builtAt)
-}
 
 // identityGit holds the walk-independent git observations of an index
 // identity (tree OID, commit). StartIdentityGit launches them on a
@@ -228,14 +221,14 @@ func treeOID(root string) string {
 		return ""
 	}
 	idxPath := tmp.Name()
-	tmp.Close()
+	_ = tmp.Close()
 	// Remove the (empty) placeholder: git treats a pre-existing 0-byte index
 	// file as corrupt ("index file smaller than expected") instead of as an
 	// empty index, so let git create the file itself.
 	if err := os.Remove(idxPath); err != nil {
 		return ""
 	}
-	defer os.Remove(idxPath)
+	defer func() { _ = os.Remove(idxPath) }()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

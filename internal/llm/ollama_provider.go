@@ -47,7 +47,7 @@ func (o *OllamaProvider) Generate(ctx context.Context, system, user string, opts
 	if err != nil {
 		return "", err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("ollama status %d", resp.StatusCode)
 	}
@@ -100,13 +100,13 @@ func (o *OllamaProvider) Stream(ctx context.Context, system, user string, opts O
 		return nil, err
 	}
 	if resp.StatusCode != http.StatusOK {
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		return nil, fmt.Errorf("ollama status %d", resp.StatusCode)
 	}
 	pr, pw := io.Pipe()
 	go func() {
-		defer pw.Close()
-		defer resp.Body.Close()
+		defer func() { _ = pw.Close() }()
+		defer func() { _ = resp.Body.Close() }()
 		dec := json.NewDecoder(resp.Body)
 		for {
 			var chunk struct {
@@ -126,8 +126,8 @@ func (o *OllamaProvider) Stream(ctx context.Context, system, user string, opts O
 	// Without the pw.Close(), a pump blocked mid-write survives Close()
 	// and leaks. Double-close of an io.Pipe is a harmless ErrClosedPipe.
 	return &Stream{Reader: pr, Close: func() error {
-		resp.Body.Close()
-		pw.Close()
+		_ = resp.Body.Close()
+		_ = pw.Close()
 		return nil
 	}}, nil
 }

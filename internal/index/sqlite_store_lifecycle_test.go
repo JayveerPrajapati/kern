@@ -15,7 +15,7 @@ func TestOpenSQLite_CreatesSchema(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OpenSQLite: %v", err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 
 	for _, table := range []string{
 		"meta", "symbols", "calls", "callers", "communities",
@@ -157,7 +157,7 @@ func TestReopenExisting(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reopen: %v", err)
 	}
-	defer s2.Close()
+	defer func() { _ = s2.Close() }()
 	got, err := s2.Load()
 	if err != nil {
 		t.Fatalf("Load after reopen: %v", err)

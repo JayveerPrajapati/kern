@@ -30,19 +30,21 @@ func startShortWatch(t *testing.T, dir string) *watchRecorder {
 	rec := &watchRecorder{ch: make(chan []string, 64)}
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
-	go Watch(ctx, dir, 2*time.Second, func(changes []index.Change, ix *index.Index) {
-		var files []string
-		for _, c := range changes {
-			files = append(files, string(c.Kind)+":"+c.File)
-		}
-		rec.mu.Lock()
-		rec.batches = append(rec.batches, files)
-		rec.mu.Unlock()
-		select {
-		case rec.ch <- files:
-		default:
-		}
-	}, nil)
+	go func() {
+		_ = Watch(ctx, dir, 2*time.Second, func(changes []index.Change, ix *index.Index) {
+			var files []string
+			for _, c := range changes {
+				files = append(files, string(c.Kind)+":"+c.File)
+			}
+			rec.mu.Lock()
+			rec.batches = append(rec.batches, files)
+			rec.mu.Unlock()
+			select {
+			case rec.ch <- files:
+			default:
+			}
+		}, nil)
+	}()
 	return rec
 }
 

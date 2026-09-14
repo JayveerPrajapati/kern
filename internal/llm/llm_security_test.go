@@ -189,7 +189,7 @@ func TestClientEmbedText(t *testing.T) {
 		if body["input"] != "hello world" {
 			t.Errorf("input = %v, want hello world", body["input"])
 		}
-		w.Write([]byte(`{"embeddings":[[0.1,0.2,0.3]]}`))
+		_, _ = w.Write([]byte(`{"embeddings":[[0.1,0.2,0.3]]}`))
 	})
 	defer srv.Close()
 
@@ -218,7 +218,7 @@ func TestClientEmbedText_Errors(t *testing.T) {
 	})
 	t.Run("empty-embeddings", func(t *testing.T) {
 		srv := mockOllama(t, func(w http.ResponseWriter, _ *http.Request) {
-			w.Write([]byte(`{"embeddings":[]}`))
+			_, _ = w.Write([]byte(`{"embeddings":[]}`))
 		})
 		defer srv.Close()
 		c := New("")
@@ -255,7 +255,7 @@ func TestClientHasEmbeddingModel(t *testing.T) {
 				if r.URL.Path != "/api/tags" {
 					t.Fatalf("path = %q, want /api/tags", r.URL.Path)
 				}
-				w.Write([]byte(tc.body))
+				_, _ = w.Write([]byte(tc.body))
 			}))
 			defer srv.Close()
 			c := New("")

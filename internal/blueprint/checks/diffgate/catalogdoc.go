@@ -131,7 +131,7 @@ func (c *CatalogDocCheck) Run(ctx context.Context, req domain.ChangeRequest) (do
 	}
 	fresh := GenerateCatalogDoc(catalog)
 	if !bytes.Equal(committed, fresh) {
-		return domain.CheckResult{Name: c.Name(), Status: domain.StatusBlock, Error: fmt.Sprintf("docs/tool-catalog.md is stale or out of order — run `kern gen-catalog` and commit the regenerated file")}, nil
+		return domain.CheckResult{Name: c.Name(), Status: domain.StatusBlock, Error: "docs/tool-catalog.md is stale or out of order — run `kern gen-catalog` and commit the regenerated file"}, nil
 	}
 	return domain.CheckResult{Name: c.Name(), Status: domain.StatusPass}, nil
 }

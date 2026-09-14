@@ -168,12 +168,6 @@ func dirOf(fileMap map[string]string, sym string) string {
 	return d
 }
 
-// prodCallers returns the callers of sym that live outside test files.
-// Unknown symbols (e.g. stdlib) are kept — they are not in this project's
-// tests.
-func prodCallers(ix *index.Index, sym string) []string {
-	return prodCallersWithFileMap(ix, sym, buildFileMap(ix))
-}
 
 // prodCallersWithFileMap is prodCallers with a precomputed file map. Callers
 // that iterate over the whole symbol table MUST hoist buildFileMap(ix) out of

@@ -292,16 +292,14 @@ func Replay(r domain.ContextReplay) domain.ContextPacket {
 	for _, f := range r.Snapshot.Files {
 		pkt.Files = append(pkt.Files, domain.File{Path: f})
 	}
-	for _, t := range r.Snapshot.Tests {
-		pkt.RequiredValidation = append(pkt.RequiredValidation, t)
-	}
+	pkt.RequiredValidation = append(pkt.RequiredValidation, r.Snapshot.Tests...)
 	for _, rk := range r.Snapshot.Risks {
 		pkt.Risks = append(pkt.Risks, domain.Risk{Mitigation: rk})
 	}
 	return pkt
 }
 
-// minSufficient picks the smallest subset of items whose combined relevance is
+// SelectMinimal picks the smallest subset of items whose combined relevance is
 // "sufficient" for the task (P5.3). Items are sorted by relevance descending;
 // the selector takes items until the accumulated relevance reaches threshold or
 // maxItems is reached, whichever comes first. maxItems 0 = unlimited.
@@ -349,7 +347,7 @@ func lastUsePenalty(item domain.ContextItem, now time.Time) float64 {
 	}
 }
 
-// ApplyFreshness filters and classifies items per the freshness policy (P5.9).
+// ApplyFreshnessPolicy filters and classifies items per the freshness policy (P5.9).
 // Items older than the policy MaxAge are dropped from the active set. It
 // returns the retained items plus a map of item ID -> freshness classification.
 func ApplyFreshnessPolicy(items []domain.ContextItem, policy domain.FreshnessPolicy, now time.Time) ([]domain.ContextItem, map[string]domain.Freshness) {

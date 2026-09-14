@@ -8,9 +8,7 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/docbudget"
 )
 
-// G39 — doc:budget
-//
-// DocBudgetCheck (G39) enforces the committed documentation budget manifest
+// DocBudgetCheck (G39 — doc:budget) enforces the committed documentation budget manifest
 // (docs/doc-budgets.json): every listed document must exist and stay under
 // its word ceiling. It BLOCKs on violation — the "one home per fact" guard
 // against docs silently growing past their budget.

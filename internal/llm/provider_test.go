@@ -20,7 +20,7 @@ func TestNewProviderDefaultOllama(t *testing.T) {
 		if body["stream"] != false {
 			t.Fatalf("stream = %v, want false", body["stream"])
 		}
-		w.Write([]byte(`{"response":"ollama ok"}`))
+		_, _ = w.Write([]byte(`{"response":"ollama ok"}`))
 	}))
 	defer srv.Close()
 	t.Setenv("OLLAMA_HOST", srv.URL)
@@ -66,7 +66,7 @@ func TestNewProviderOpenAIWireAndOptions(t *testing.T) {
 			t.Fatalf("auth = %q, want Bearer test-key", r.Header.Get("Authorization"))
 		}
 		_ = json.NewDecoder(r.Body).Decode(&gotBody)
-		w.Write([]byte(`{"choices":[{"message":{"content":"openai ok"}}]}`))
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"openai ok"}}]}`))
 	}))
 	defer srv.Close()
 	t.Setenv("OPENAI_BASE_URL", srv.URL)
@@ -114,7 +114,7 @@ func TestNewProviderAnthropicWire(t *testing.T) {
 			t.Fatalf("x-api-key = %q, want k", r.Header.Get("x-api-key"))
 		}
 		_ = json.NewDecoder(r.Body).Decode(&gotBody)
-		w.Write([]byte(`{"content":[{"type":"text","text":"claude ok"}]}`))
+		_, _ = w.Write([]byte(`{"content":[{"type":"text","text":"claude ok"}]}`))
 	}))
 	defer srv.Close()
 	t.Setenv("ANTHROPIC_API_KEY", "k")
@@ -160,7 +160,7 @@ func TestNewProviderGoogle(t *testing.T) {
 	var gotPath string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.Path
-		w.Write([]byte(`{"candidates":[{"content":{"parts":[{"text":"gemini ok"}]}}]}`))
+		_, _ = w.Write([]byte(`{"candidates":[{"content":{"parts":[{"text":"gemini ok"}]}}]}`))
 	}))
 	defer srv.Close()
 	t.Setenv("GEMINI_API_KEY", "k")
@@ -224,7 +224,7 @@ func TestOllamaStreamReturnsTokens(t *testing.T) {
 			t.Fatalf("stream = %v, want true", body["stream"])
 		}
 		w.Header().Set("Content-Type", "application/x-ndjson")
-		w.Write([]byte(`{"response":"hello "}` + "\n" + `{"response":"world"}` + "\n"))
+		_, _ = w.Write([]byte(`{"response":"hello "}` + "\n" + `{"response":"world"}` + "\n"))
 	}))
 	defer srv.Close()
 	t.Setenv("OLLAMA_HOST", srv.URL)
@@ -234,7 +234,7 @@ func TestOllamaStreamReturnsTokens(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Stream: %v", err)
 	}
-	defer st.Close()
+	defer func() { _ = st.Close() }()
 	b, err := io.ReadAll(st.Reader)
 	if err != nil {
 		t.Fatalf("ReadAll: %v", err)
@@ -248,9 +248,9 @@ func TestOpenAIStreamSSE(t *testing.T) {
 	t.Setenv("KERN_LLM_PROVIDER", "openai")
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
-		w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"hi \"}}]}\n\n"))
-		w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"there\"}}]}\n\n"))
-		w.Write([]byte("data: [DONE]\n\n"))
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"hi \"}}]}\n\n"))
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"there\"}}]}\n\n"))
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
 	}))
 	defer srv.Close()
 	t.Setenv("OPENAI_BASE_URL", srv.URL)
@@ -262,7 +262,7 @@ func TestOpenAIStreamSSE(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Stream: %v", err)
 	}
-	defer st.Close()
+	defer func() { _ = st.Close() }()
 	b, err := io.ReadAll(st.Reader)
 	if err != nil {
 		t.Fatalf("ReadAll: %v", err)
@@ -282,7 +282,7 @@ func TestOpenAIEmbedWire(t *testing.T) {
 		if body["model"] != "text-embedding-3-small" {
 			t.Fatalf("embed model = %v, want default", body["model"])
 		}
-		w.Write([]byte(`{"data":[{"embedding":[0.1,0.2,0.3]}]}`))
+		_, _ = w.Write([]byte(`{"data":[{"embedding":[0.1,0.2,0.3]}]}`))
 	}))
 	defer srv.Close()
 
@@ -306,7 +306,7 @@ func TestNewEmbedderOllamaWire(t *testing.T) {
 		if r.URL.Path != "/api/embed" {
 			t.Fatalf("path = %q, want /api/embed", r.URL.Path)
 		}
-		w.Write([]byte(`{"embeddings":[[0.5,0.5]]}`))
+		_, _ = w.Write([]byte(`{"embeddings":[[0.5,0.5]]}`))
 	}))
 	defer srv.Close()
 	t.Setenv("OLLAMA_HOST", srv.URL)

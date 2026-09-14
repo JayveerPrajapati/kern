@@ -1,5 +1,6 @@
 // Package firewall provides the unified AI change firewall that ties together
 // agent identity, risk scoring, the approval workflow, and the audit log.
+
 package governance
 
 import (

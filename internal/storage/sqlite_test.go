@@ -17,7 +17,7 @@ func TestConcurrentSQLiteWALPragmas(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OpenSQLite failed: %v", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	// Verify pragmas
 	var journalMode string

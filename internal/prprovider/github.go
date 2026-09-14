@@ -77,7 +77,7 @@ func (g *GitHubProvider) CreatePR(req Request) (*Result, error) {
 	if err != nil {
 		return nil, fmt.Errorf("prprovider: API call: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusCreated {
 		// Parse GitHub error response for better diagnostics.

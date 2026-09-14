@@ -69,7 +69,7 @@ func parseRequires(gomod string) []string {
 	if err != nil {
 		return nil
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	var mods []string
 	inBlock := false

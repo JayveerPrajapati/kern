@@ -24,8 +24,7 @@ func TestServeHTTPOverUnixDomainSocket(t *testing.T) {
 	}()
 
 	// Wait for socket to become active
-	var client *http.Client
-	client = &http.Client{
+	client := &http.Client{
 		Transport: &http.Transport{
 			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
 				return net.Dial("unix", sockPath)
@@ -52,7 +51,7 @@ func TestServeHTTPOverUnixDomainSocket(t *testing.T) {
 	if resp == nil {
 		t.Fatalf("failed to connect to unix socket at %s", sockPath)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200 OK, got %d", resp.StatusCode)

@@ -33,7 +33,7 @@ CREATE TABLE orders (id INT PRIMARY KEY, user_id INT);
 
 func TestExtractSQLAlchemyModels(t *testing.T) {
 	dir := t.TempDir()
-	os.WriteFile(filepath.Join(dir, "models.py"), []byte(`
+	_ = os.WriteFile(filepath.Join(dir, "models.py"), []byte(`
 class User:
     __tablename__ = "users"
 class Order:
@@ -61,7 +61,7 @@ class Order:
 // previously only SQLAlchemy was covered.
 func TestExtractORMGormJPAAndSqlx(t *testing.T) {
 	dir := t.TempDir()
-	os.WriteFile(filepath.Join(dir, "models.go"), []byte(`
+	_ = os.WriteFile(filepath.Join(dir, "models.go"), []byte(`
 package models
 
 type User struct {
@@ -71,7 +71,7 @@ type Account struct {
 	ID uint `+"`"+`db:"accounts"`+"`"+`
 }
 `), 0644)
-	os.WriteFile(filepath.Join(dir, "Entities.java"), []byte(`
+	_ = os.WriteFile(filepath.Join(dir, "Entities.java"), []byte(`
 @Entity
 @Table(name = "orders")
 public class Order { }

@@ -266,7 +266,7 @@ func TestLogStoreLastEntry(t *testing.T) {
 	if _, err := f.WriteString(`{"k":"audit-audit-4","v":{"n":4}`); err != nil {
 		t.Fatalf("torn write: %v", err)
 	}
-	f.Close()
+	_ = f.Close()
 	last, err = s2.LastEntry(ctx)
 	if err != nil {
 		t.Fatalf("LastEntry (torn tail): %v", err)

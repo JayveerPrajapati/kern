@@ -58,7 +58,7 @@ func TestFanOutToClients(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Dial %d: %v", i, err)
 		}
-		defer c.Close()
+		defer func() { _ = c.Close() }()
 		clients[i] = c
 	}
 
@@ -80,12 +80,12 @@ func TestSlowClientDropped(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer slow.Close()
+	defer func() { _ = slow.Close() }()
 	fast, err := Dial(root)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer fast.Close()
+	defer func() { _ = fast.Close() }()
 
 	// Registration is asynchronous: wait until both clients are actually
 	// wired to the server before flooding, so the overflow is attributable
@@ -176,7 +176,7 @@ func TestSocketPathFallback(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Dial on fallback path: %v", err)
 	}
-	defer c.Close()
+	defer func() { _ = c.Close() }()
 	s.Broadcast(eventbus.Event{Kind: eventbus.LockAcquired, Subject: "deep"})
 	_ = c.conn.SetReadDeadline(time.Now().Add(2 * time.Second))
 	got := broadcastUntil(t, s, c, eventbus.Event{Kind: eventbus.LockAcquired, Subject: "deep"})
@@ -196,7 +196,7 @@ func TestStaleSocketRecovery(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Dial after stale recovery: %v", err)
 	}
-	defer c.Close()
+	defer func() { _ = c.Close() }()
 }
 
 func TestSocketInUse(t *testing.T) {
@@ -226,7 +226,7 @@ func TestEmitThroughServer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer c.Close()
+	defer func() { _ = c.Close() }()
 	if err := c.Emit(eventbus.Event{
 		Kind:    eventbus.LockReleased,
 		Source:  "cli",

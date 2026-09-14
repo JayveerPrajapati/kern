@@ -306,7 +306,7 @@ func TestNilBusIsNoOp(t *testing.T) {
 
 func TestAuditLogAccessor(t *testing.T) {
 	f := NewFirewall().WithAgents(broadAgent("agent-aud"))
-	f.Check("agent-aud", "source", "write")
+	_, _, _, _ = f.Check("agent-aud", "source", "write")
 	if got := f.AuditLog().All(); len(got) == 0 {
 		t.Error("AuditLog should contain the recorded decision")
 	}

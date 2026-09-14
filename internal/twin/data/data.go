@@ -70,7 +70,7 @@ func (e *Extractor) extractSQL(path string) ([]domain.Node, []domain.Edge) {
 	if err != nil {
 		return nil, nil
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	var nodes []domain.Node
 	var edges []domain.Edge
@@ -124,7 +124,7 @@ func (e *Extractor) extractORM(path string) ([]domain.Node, []domain.Edge) {
 	if err != nil {
 		return nil, nil
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	var nodes []domain.Node
 	var edges []domain.Edge

@@ -321,9 +321,6 @@ func (ix *Index) TokenSavingsForNeighborhood(g GraphResult) TokenStats {
 	return computeTokenSavings(fullText.String(), g.GraphJSON(), "neighborhood")
 }
 
-// resolveName finds a definition for a call target name. Exact matches win;
-// a package-qualified target like "index.Build" falls back to the bare name
-// ("Build") so call sites still resolve to real definitions.
 // ResolveDottedMethod resolves a dotted method reference ("Type.Method" or
 // "pkg.Type.Method") to the method symbols whose receiver matches the
 // qualifier. The index may key a Java method's FullName as

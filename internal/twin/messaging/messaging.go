@@ -85,7 +85,7 @@ func (e *Extractor) extractFile(path string, seenTopics map[string]bool) ([]doma
 	if err != nil {
 		return nil, nil
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	var nodes []domain.Node
 	var edges []domain.Edge

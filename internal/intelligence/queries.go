@@ -175,10 +175,6 @@ func (g *Graph) resolveNodeID(ref string) (string, bool) {
 	}
 }
 
-// resolveSymbol maps a user-provided symbol to its canonical node ID. It handles
-// bare names ("Func"), package-scoped names ("pkg.Func"), and method names
-// ("Type.Method"). When the input doesn't match a node ID directly, the name is
-// matched against node names, resolving to the unique node when unambiguous.
 // Resolvable reports whether ref maps to a node in the graph (a bare symbol
 // name, package-scoped name, or method name that uniquely resolves). Used to
 // verify natural-language extraction against the real index (report A8).

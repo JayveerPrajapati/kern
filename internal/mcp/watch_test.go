@@ -133,10 +133,18 @@ func TestBackgroundWatchSingleFlight(t *testing.T) {
 		t.Fatal("tick after the busy flag cleared did not rebuild the stale index")
 	}
 	// The spawned rebuild must have cleared the busy flag on completion.
-	s.watchMu.Lock()
-	busy := s.watchBusy
-	s.watchMu.Unlock()
-	if busy {
+	busyCleared := false
+	for time.Now().Before(deadline) {
+		s.watchMu.Lock()
+		busy := s.watchBusy
+		s.watchMu.Unlock()
+		if !busy {
+			busyCleared = true
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !busyCleared {
 		t.Fatal("watchBusy was not cleared after the rebuild completed")
 	}
 }
@@ -182,7 +190,7 @@ func TestWatchElectionDefersToLockHolder(t *testing.T) {
 	if err != nil {
 		t.Fatalf("acquire election lock: %v", err)
 	}
-	defer holder.Release()
+	defer func() { _ = holder.Release() }()
 
 	// The rebuild must be skipped entirely: no index may be built for the
 	// root while another process owns the rebuild.

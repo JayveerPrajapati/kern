@@ -108,7 +108,7 @@ func (r *Recorder) Record(e Entry) error {
 	if err != nil {
 		return err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	_, err = f.Write(append(data, '\n'))
 	return err
 }
@@ -169,7 +169,7 @@ func (r *Recorder) Summarize(days int, session string) (*Summary, error) {
 			sum.CostSaved += e.CostSavedUSD
 			sum.ByOperation[e.Operation]++
 		}
-		f.Close()
+		_ = f.Close()
 	}
 	if sum.BeforeTotal > 0 {
 		sum.SavedPct = float64(sum.SavedTotal) / float64(sum.BeforeTotal) * 100
@@ -202,7 +202,7 @@ func (r *Recorder) Entries(n int) ([]Entry, error) {
 				all = append(all, e)
 			}
 		}
-		f.Close()
+		_ = f.Close()
 	}
 	sort.Slice(all, func(i, j int) bool { return all[i].Time.After(all[j].Time) })
 	if len(all) > n {

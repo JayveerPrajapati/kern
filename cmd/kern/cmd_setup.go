@@ -402,7 +402,7 @@ func isGoProject(root string) bool {
 	const depth = 3
 	skip := map[string]bool{".git": true, ".hg": true, ".svn": true, "node_modules": true, "vendor": true, "dist": true, "build": true, "out": true, "bin": true, ".venv": true, "__pycache__": true, ".kern": true, "target": true}
 	found := false
-	filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+	_ = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil || found {
 			return nil
 		}

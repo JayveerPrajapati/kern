@@ -54,7 +54,7 @@ func VerifyFullPipeline(root, symbol string) FullPipelineReport {
 	steps := func(format string, args ...any) { rep.Steps = append(rep.Steps, fmt.Sprintf(format, args...)) }
 
 	// 1. Index build (once).
-	ix, err := index.Build(root)
+	ix, err := index.LoadOrBuild(root)
 	if err != nil {
 		steps("index build failed: %v", err)
 		return rep
@@ -208,7 +208,7 @@ func ScanSilent(root, path string, limit int) (SilentScanReport, error) {
 	if _, err := os.Stat(statPath); err != nil {
 		return report, fmt.Errorf("scan path %q not found", path)
 	}
-	ix, err := index.Build(root)
+	ix, err := index.LoadOrBuild(root)
 	if err != nil {
 		return report, err
 	}
@@ -257,7 +257,7 @@ func ScanSilent(root, path string, limit int) (SilentScanReport, error) {
 // critical evidence = the symbol's name + its file path. Returns the eval
 // EvalResult and nil error when the harness ran.
 func VerifyTokenReduction(root, symbol string) (eval.EvalResult, error) {
-	ix, err := index.Build(root)
+	ix, err := index.LoadOrBuild(root)
 	if err != nil {
 		return eval.EvalResult{}, fmt.Errorf("verify: index build: %w", err)
 	}
@@ -359,10 +359,14 @@ func copyTreeToTemp(root string) (string, error) {
 		if rel == "." {
 			return nil
 		}
-		// kern runtime state (index, coordination, eventbus socket) is not
-		// target-repo content; copying it fails on the events.sock socket and
-		// bloats the temp tree (north-star NS-2). Skip the whole .kern/ dir.
-		if rel == ".kern" || strings.HasPrefix(rel, ".kern"+string(os.PathSeparator)) {
+		// kern runtime state (index, coordination, eventbus socket) and heavy
+		// metadata (.git, node_modules, bin, .cache) are not target-repo content;
+		// copying them bloats the temp tree and causes heavy IO.
+		if rel == ".kern" || strings.HasPrefix(rel, ".kern"+string(os.PathSeparator)) ||
+			rel == ".git" || strings.HasPrefix(rel, ".git"+string(os.PathSeparator)) ||
+			rel == "node_modules" || strings.HasPrefix(rel, "node_modules"+string(os.PathSeparator)) ||
+			rel == ".cache" || strings.HasPrefix(rel, ".cache"+string(os.PathSeparator)) ||
+			rel == "bin" || strings.HasPrefix(rel, "bin"+string(os.PathSeparator)) {
 			if d.IsDir() {
 				return filepath.SkipDir
 			}

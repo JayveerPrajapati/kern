@@ -111,10 +111,10 @@ type g27Risk struct {
 // standalone module).
 func g27Hash(e g27Entry, prev string) string {
 	h := sha256.New()
-	fmt.Fprintf(h, "%s|%s|%s|%s|%s|%v|%v|%v|%s|%s", prev, e.ID, e.AgentID, e.Action, e.Resource, e.Timestamp.UnixNano(), e.Risk, e.Approved, e.Result, e.TaskID)
+	_, _ = fmt.Fprintf(h, "%s|%s|%s|%s|%s|%v|%v|%v|%s|%s", prev, e.ID, e.AgentID, e.Action, e.Resource, e.Timestamp.UnixNano(), e.Risk, e.Approved, e.Result, e.TaskID)
 	if e.ValidationOutcome != nil {
 		vo := e.ValidationOutcome
-		fmt.Fprintf(h, "|%s|%d|%s|%s|%d", vo.Status, vo.ExitCode, strings.Join(vo.BlockedFiles, ","), vo.CorrelationID, vo.Findings)
+		_, _ = fmt.Fprintf(h, "|%s|%d|%s|%s|%d", vo.Status, vo.ExitCode, strings.Join(vo.BlockedFiles, ","), vo.CorrelationID, vo.Findings)
 	}
 	return hex.EncodeToString(h.Sum(nil))
 }

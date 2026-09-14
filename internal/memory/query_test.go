@@ -91,8 +91,8 @@ func TestParseScope(t *testing.T) {
 
 func TestQueryByModuleScope(t *testing.T) {
 	s := NewMemoryStore(t.TempDir())
-	s.Add(domain.Memory{ID: "m1", Scope: "module:auth", Content: "auth memory"})
-	s.Add(domain.Memory{ID: "m2", Scope: "module:billing", Content: "billing memory"})
+	_, _ = s.Add(domain.Memory{ID: "m1", Scope: "module:auth", Content: "auth memory"})
+	_, _ = s.Add(domain.Memory{ID: "m2", Scope: "module:billing", Content: "billing memory"})
 	got, _ := s.Recall(Query{Module: "auth"})
 	if len(got) != 1 || got[0].ID != "m1" {
 		t.Errorf("Recall(Module=auth) = %v, want [m1]", got)
@@ -101,8 +101,8 @@ func TestQueryByModuleScope(t *testing.T) {
 
 func TestQueryGlobalScope(t *testing.T) {
 	s := NewMemoryStore(t.TempDir())
-	s.Add(domain.Memory{ID: "g1", Scope: "", Content: "global"})
-	s.Add(domain.Memory{ID: "g2", Scope: "service:payments", Content: "scoped"})
+	_, _ = s.Add(domain.Memory{ID: "g1", Scope: "", Content: "global"})
+	_, _ = s.Add(domain.Memory{ID: "g2", Scope: "service:payments", Content: "scoped"})
 	got, _ := s.Recall(Query{Global: true})
 	if len(got) != 1 || got[0].ID != "g1" {
 		t.Errorf("Recall(Global=true) = %v, want [g1]", got)

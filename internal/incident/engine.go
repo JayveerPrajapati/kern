@@ -372,7 +372,7 @@ func (e *Engine) ApplyAndVerifyFix(inc *domain.Incident, apply func(workDir stri
 			return diff, errors.New("fix blocked by governance: " + inc.FixRisk)
 		}
 		_ = approval
-		inc.FixRisk = fmt.Sprintf("%s", r.Level)
+		inc.FixRisk = string(r.Level)
 	}
 
 	// Human approval gate is required for production changes; verification

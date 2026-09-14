@@ -17,7 +17,7 @@ http_requests{service="orders",method="POST"} 567 1700000000
 `
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain")
-		w.Write([]byte(payload))
+		_, _ = w.Write([]byte(payload))
 	}))
 	defer srv.Close()
 
@@ -50,7 +50,7 @@ func TestLiveOtelSource(t *testing.T) {
 	payload := `{"logs":[{"service":"checkout","timestamp":"2024-01-01T00:00:00Z","severity":"error","body":"nil pointer","attributes":{"file":"main.go"}}],"traces":[],"metrics":[]}`
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(payload))
+		_, _ = w.Write([]byte(payload))
 	}))
 	defer srv.Close()
 
@@ -84,10 +84,10 @@ func TestLiveKubernetesSource(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		if strings.Contains(r.URL.Path, "deployments") {
-			w.Write([]byte(depPayload))
+			_, _ = w.Write([]byte(depPayload))
 			return
 		}
-		w.Write([]byte(evPayload))
+		_, _ = w.Write([]byte(evPayload))
 	}))
 	defer srv.Close()
 
@@ -120,7 +120,7 @@ func TestLiveKubernetesSourceEmptyURL(t *testing.T) {
 
 func TestLiveSourceCloseStopsPolling(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(""))
+		_, _ = w.Write([]byte(""))
 	}))
 	defer srv.Close()
 

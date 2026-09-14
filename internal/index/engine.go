@@ -212,13 +212,13 @@ func (ix *Index) Save() error {
 		return err
 	}
 	tmpPath := f.Name()
-	defer os.Remove(tmpPath) // no-op if rename succeeded
+	defer func() { _ = os.Remove(tmpPath) }() // no-op if rename succeeded
 	if _, err := f.Write(data); err != nil {
-		f.Close()
+		_ = f.Close()
 		return err
 	}
 	if err := f.Sync(); err != nil {
-		f.Close()
+		_ = f.Close()
 		return err
 	}
 	if err := f.Close(); err != nil {
@@ -238,7 +238,7 @@ func onDiskVersion(p string) int {
 	if err != nil {
 		return 0
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	buf := make([]byte, 4096)
 	n, _ := io.ReadFull(f, buf)
 	if n == 0 {
@@ -470,20 +470,6 @@ var ignoreDirs = map[string]bool{
 // scanners that mirror the index's file-selection policy.
 func IgnoredDir(name string) bool { return ignoreDirs[name] }
 
-// Build walks root, parses every source file and assembles the index. On
-// error it returns a nil index so a half-built index is never mistaken for
-// a usable one.
-// Build walks root, parses every source file and assembles the index. On
-// error it returns a nil index so a half-built index is never mistaken for
-// a usable one.
-//
-// The expensive per-file work (ReadFile, hashing, language detection, AST
-// extraction) is parallelized across CPU cores by default (buildParallel):
-// workers compute each file's result independently and the main goroutine
-// folds results back in lexical file order, so the merged index is
-// byte-identical to the serial build. Set KERN_INDEX_SERIAL=1 to force the
-// original single-threaded path (buildSerial) for A/B testing and ops
-// diagnostics.
 // BuildOption customizes BuildWithOptions.
 type BuildOption func(*buildConfig)
 

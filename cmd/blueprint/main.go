@@ -124,7 +124,7 @@ func buildWatchChecks(policy string, client *kern.KernClient) ([]service.Check, 
 }
 
 func usage(w io.Writer) {
-	fmt.Fprint(w, `usage: blueprint <command> [args]
+	_, _ = fmt.Fprint(w, `usage: blueprint <command> [args]
 
 Blueprint has been merged into kern. This adapter forwards every command to
 the shared internal implementation, so behavior matches `+"`kern check`"+`,

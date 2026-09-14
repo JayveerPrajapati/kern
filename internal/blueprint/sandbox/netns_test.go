@@ -43,10 +43,10 @@ func TestSandboxNetworkIsolationMacOSFallbackWarns(t *testing.T) {
 		AllowUnisolated: true,
 	})
 
-	w.Close()
+	_ = w.Close()
 	os.Stderr = oldStderr
 	got, readErr := io.ReadAll(r)
-	r.Close()
+	_ = r.Close()
 	if readErr != nil {
 		t.Fatalf("read captured stderr: %v", readErr)
 	}

@@ -9,14 +9,6 @@ import (
 	"testing"
 )
 
-func tmpFile(t *testing.T, name, content string) string {
-	t.Helper()
-	p := filepath.Join(t.TempDir(), name)
-	if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	return p
-}
 
 func toolsCallJSON(t *testing.T, id int, name string, args map[string]any) string {
 	t.Helper()

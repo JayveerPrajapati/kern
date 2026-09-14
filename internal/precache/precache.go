@@ -32,11 +32,6 @@ type Report struct {
 	SourceMiss  bool // root does not exist or is empty
 }
 
-var ignoreDirs = map[string]bool{
-	".git": true, ".hg": true, ".svn": true, "node_modules": true,
-	"vendor": true, "dist": true, "build": true, ".cache": true,
-	".kern": true,
-}
 
 // Per-pass warm budgets bound how much work a single Warm pass can do so a
 // huge file or a very large tree cannot cause unbounded memory/CPU/IO spikes.

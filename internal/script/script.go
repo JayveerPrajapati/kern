@@ -331,7 +331,7 @@ func RunScript(r Run) *Result {
 		res.Err = err
 		return res
 	}
-	defer os.RemoveAll(dir)
+	defer func() { _ = os.RemoveAll(dir) }()
 
 	src := filepath.Join(dir, "main"+rt.ext)
 	if err := os.WriteFile(src, []byte(code), 0o600); err != nil {

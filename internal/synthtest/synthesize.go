@@ -1,3 +1,4 @@
+// Package synthtest generates synthetic reproduction and edge-case unit tests.
 package synthtest
 
 import (

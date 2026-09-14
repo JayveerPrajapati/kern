@@ -168,7 +168,7 @@ func (c *SecretCheck) scanContent(ctx context.Context, contentFiles []domain.Fil
 	if err != nil {
 		return nil, fmt.Errorf("scan proposed content: create temp dir: %w", err)
 	}
-	defer os.RemoveAll(tmpDir)
+	defer func() { _ = os.RemoveAll(tmpDir) }()
 
 	for _, fc := range contentFiles {
 		// Confine proposed paths to the temp dir: reject anything that would

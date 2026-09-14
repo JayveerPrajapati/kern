@@ -94,7 +94,7 @@ func (e *Extractor) extractFile(path string) ([]domain.Node, []domain.Edge) {
 	if err != nil {
 		return nil, nil
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	relPath, _ := filepath.Rel(e.root, path)
 

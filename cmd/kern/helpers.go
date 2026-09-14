@@ -413,7 +413,7 @@ func printSavingsFooter(w io.Writer, beforeTokens, afterTokens int, costPerToken
 	if saved <= 0 {
 		return
 	}
-	fmt.Fprintf(w, "[%.0f%% ──> %d tokens ──> $%.4f]\n",
+	_, _ = fmt.Fprintf(w, "[%.0f%% ──> %d tokens ──> $%.4f]\n",
 		strutil.Pct(beforeTokens, afterTokens), saved, float64(saved)*costPerToken)
 }
 

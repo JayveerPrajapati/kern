@@ -61,28 +61,28 @@ func runMetrics(args []string) int {
 
 	// Human-readable report goes to stdout (the primary output of the
 	// command); errors and status messages stay on stderr.
-	fmt.Fprintln(os.Stdout, "━━━ Blueprint Metrics ━━━")
-	fmt.Fprintf(os.Stdout, "Validations:    %d (pass=%d block=%d warn=%d error=%d)\n",
+	fmt.Println("━━━ Blueprint Metrics ━━━")
+	fmt.Printf("Validations:    %d (pass=%d block=%d warn=%d error=%d)\n",
 		stats.ValidationCount, stats.PassCount, stats.BlockedCount, stats.WarningCount, stats.ErrorCount)
-	fmt.Fprintf(os.Stdout, "Latency p50:    %.2fms\n", stats.ValidationP50Ms)
-	fmt.Fprintf(os.Stdout, "Latency p95:    %.2fms\n", stats.ValidationP95Ms)
+	fmt.Printf("Latency p50:    %.2fms\n", stats.ValidationP50Ms)
+	fmt.Printf("Latency p95:    %.2fms\n", stats.ValidationP95Ms)
 	if stats.SandboxP50Ms > 0 {
-		fmt.Fprintf(os.Stdout, "Sandbox p50:    %.2fms\n", stats.SandboxP50Ms)
-		fmt.Fprintf(os.Stdout, "Sandbox p95:    %.2fms\n", stats.SandboxP95Ms)
+		fmt.Printf("Sandbox p50:    %.2fms\n", stats.SandboxP50Ms)
+		fmt.Printf("Sandbox p95:    %.2fms\n", stats.SandboxP95Ms)
 	}
 	if len(stats.PerCheckP50Ms) > 0 {
-		fmt.Fprintln(os.Stdout, "Per-check latency:")
+		fmt.Println("Per-check latency:")
 		for name, p50 := range stats.PerCheckP50Ms {
 			p95 := stats.PerCheckP95Ms[name]
-			fmt.Fprintf(os.Stdout, "  %-30s p50=%.2fms p95=%.2fms\n", name, p50, p95)
+			fmt.Printf("  %-30s p50=%.2fms p95=%.2fms\n", name, p50, p95)
 		}
 	}
 	if stats.RepairSuccessRate > 0 || stats.ValidationCount > 0 {
-		fmt.Fprintf(os.Stdout, "Repair success: %.0f%%\n", stats.RepairSuccessRate*100)
+		fmt.Printf("Repair success: %.0f%%\n", stats.RepairSuccessRate*100)
 	}
 	if stats.FalsePositiveOverrides > 0 {
-		fmt.Fprintf(os.Stdout, "FP overrides:   %d\n", stats.FalsePositiveOverrides)
+		fmt.Printf("FP overrides:   %d\n", stats.FalsePositiveOverrides)
 	}
-	fmt.Fprintf(os.Stdout, "Metrics file:   %s\n", path)
+	fmt.Printf("Metrics file:   %s\n", path)
 	return 0
 }

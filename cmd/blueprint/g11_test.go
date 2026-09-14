@@ -240,7 +240,9 @@ func TestG11_MissingBinary(t *testing.T) {
 		t.Fatalf("read artifact: %v", err)
 	}
 	var artifact CIArtifact
-	json.Unmarshal(artifactBytes, &artifact)
+	if err := json.Unmarshal(artifactBytes, &artifact); err != nil {
+		t.Fatalf("unmarshal artifact: %v", err)
+	}
 	if artifact.Status != "ERROR" {
 		t.Errorf("status = %s, want ERROR", artifact.Status)
 	}
@@ -359,7 +361,7 @@ func TestG11_HumanReadableSummary(t *testing.T) {
 	cmd.Env = append(os.Environ(), "KERN_BINARY="+kernPath)
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
-	cmd.Run()
+	_ = cmd.Run()
 
 	summary := stderr.String()
 	// Must contain key sections.
@@ -393,7 +395,7 @@ func TestG11_NoLocalDaemonState(t *testing.T) {
 	)
 
 	// Remove any pre-existing .kern index (simulating a fresh CI checkout).
-	os.RemoveAll(filepath.Join(dir, ".kern", "index.json"))
+	_ = os.RemoveAll(filepath.Join(dir, ".kern", "index.json"))
 
 	_, _, exitCode, artifact := runCICommand(t, binPath, dir, kernPath)
 

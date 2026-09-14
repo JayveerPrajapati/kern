@@ -101,7 +101,7 @@ func (o *OpenAICompatibleProvider) Generate(ctx context.Context, system, user st
 	if err != nil {
 		return "", err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("openai status %d", resp.StatusCode)
 	}
@@ -132,7 +132,7 @@ func (o *OpenAICompatibleProvider) Embed(ctx context.Context, text string) ([]fl
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("openai embed status %d", resp.StatusCode)
 	}
@@ -182,13 +182,13 @@ func (o *OpenAICompatibleProvider) Stream(ctx context.Context, system, user stri
 		return nil, err
 	}
 	if resp.StatusCode != http.StatusOK {
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		return nil, fmt.Errorf("openai status %d", resp.StatusCode)
 	}
 	pr, pw := io.Pipe()
 	go func() {
-		defer pw.Close()
-		defer resp.Body.Close()
+		defer func() { _ = pw.Close() }()
+		defer func() { _ = resp.Body.Close() }()
 		sc := bufio.NewScanner(resp.Body)
 		sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 		for sc.Scan() {
@@ -225,8 +225,8 @@ func (o *OpenAICompatibleProvider) Stream(ctx context.Context, system, user stri
 	// Without the pw.Close(), a pump blocked mid-write survives Close()
 	// and leaks. Double-close of an io.Pipe is a harmless ErrClosedPipe.
 	return &Stream{Reader: pr, Close: func() error {
-		resp.Body.Close()
-		pw.Close()
+		_ = resp.Body.Close()
+		_ = pw.Close()
 		return nil
 	}}, nil
 }

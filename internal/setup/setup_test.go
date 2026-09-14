@@ -85,7 +85,7 @@ func TestMergeJSONPreservesOtherKeys(t *testing.T) {
 func TestMergeJSONInvalid(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "bad.json")
-	os.WriteFile(path, []byte("not json {"), 0o644)
+	_ = os.WriteFile(path, []byte("not json {"), 0o644)
 	if err := mergeJSON(path, "mcp", map[string]any{}); err == nil {
 		t.Fatal("expected error for invalid JSON")
 	}
@@ -103,7 +103,7 @@ func TestMergeJSONHandlesComments(t *testing.T) {
   },
   "other": "value"
 }`
-	os.WriteFile(path, []byte(src), 0o644)
+	_ = os.WriteFile(path, []byte(src), 0o644)
 	entry := map[string]any{"command": []string{"kern-mcp"}, "type": "local", "enabled": true}
 	if err := mergeJSON(path, "mcp", entry); err != nil {
 		t.Fatalf("mergeJSON failed on JSONC with comments: %v", err)
@@ -161,7 +161,7 @@ func TestWirePeerAgentRules(t *testing.T) {
 	dir := t.TempDir()
 	// Existing host files get the same single-source rules; setup must not
 	// create host rule files that do not exist.
-	os.WriteFile(filepath.Join(dir, "CLAUDE.md"), []byte("# Claude\n"), 0o644)
+	_ = os.WriteFile(filepath.Join(dir, "CLAUDE.md"), []byte("# Claude\n"), 0o644)
 	sts := Wire(dir, []string{"mcp", "opencode"}, false)
 	if !allInstalled(sts, "opencode") {
 		t.Fatalf("opencode not installed: %+v", sts)
@@ -522,7 +522,7 @@ func TestWireClaudeHooks(t *testing.T) {
 		t.Fatalf("second install failed: %s", st.Note)
 	}
 	b, _ = os.ReadFile(filepath.Join(dir, ".claude", "settings.json"))
-	json.Unmarshal(b, &m)
+	_ = json.Unmarshal(b, &m)
 	hooks, _ = m["hooks"].(map[string]any)
 	if post, _ := hooks["PostToolUse"].([]any); len(post) != 1 {
 		t.Fatalf("re-run duplicated PostToolUse groups: %d", len(post))
@@ -540,7 +540,7 @@ func TestWireGeminiHooksPreservesMCPServers(t *testing.T) {
 	}
 	existing := map[string]any{"mcpServers": map[string]any{"kern": map[string]any{"type": "stdio"}}}
 	b, _ := json.Marshal(existing)
-	os.WriteFile(gpath, b, 0o644)
+	_ = os.WriteFile(gpath, b, 0o644)
 
 	st := wireGeminiHooks("/x/kern")
 	if !st.Installed {
@@ -578,7 +578,7 @@ func TestWireGeminiHooksPreservesMCPServers(t *testing.T) {
 func TestGitignoreGenerated(t *testing.T) {
 	dir := t.TempDir()
 	// Existing .gitignore content is preserved.
-	os.WriteFile(filepath.Join(dir, ".gitignore"), []byte("bin/\n"), 0o644)
+	_ = os.WriteFile(filepath.Join(dir, ".gitignore"), []byte("bin/\n"), 0o644)
 	st := gitignoreGenerated(dir)
 	if !st.Installed {
 		t.Fatalf("gitignore update failed: %s", st.Note)
@@ -610,7 +610,7 @@ func TestWireLocalGitExclude(t *testing.T) {
 
 	// Create a simulated .git directory
 	gitDir := filepath.Join(dir, ".git")
-	os.MkdirAll(filepath.Join(gitDir, "info"), 0o755)
+	_ = os.MkdirAll(filepath.Join(gitDir, "info"), 0o755)
 
 	st = wireLocalGitExclude(dir)
 	if !st.Installed {

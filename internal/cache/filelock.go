@@ -1,6 +1,6 @@
 package cache
 
-// Cross-process advisory file locks for JSON-file stores.
+// FileLock provides cross-process advisory file locks for JSON-file stores.
 // The stores (TaskStore, ArtifactStore, SnapshotStore) read-modify-write a
 // single JSON file that is shared by every kern process working on the same
 // project root (kern-mcp server, kern-server, the CLI, and parallel test

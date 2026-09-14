@@ -14,7 +14,7 @@ import (
 // socket must still resolve afterwards.
 func TestDiffSurvivesUnixSocket(t *testing.T) {
 	src, _ := os.MkdirTemp("", "wt-sock")
-	defer os.RemoveAll(src)
+	defer func() { _ = os.RemoveAll(src) }()
 	if err := os.WriteFile(filepath.Join(src, "file.txt"), []byte("one\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -25,7 +25,7 @@ func TestDiffSurvivesUnixSocket(t *testing.T) {
 	if err != nil {
 		t.Skipf("unix sockets unavailable: %v", err)
 	}
-	defer ln.Close()
+	defer func() { _ = ln.Close() }()
 
 	wt, err := NewWorktree(src)
 	if err != nil {
@@ -50,7 +50,7 @@ func TestDiffSurvivesUnixSocket(t *testing.T) {
 	}
 	conn, err := net.Dial("unix", filepath.Join(src, ".kern", "events.sock"))
 	if err == nil {
-		conn.Close()
+		_ = conn.Close()
 	} else if !os.IsExist(err) && !strings.Contains(err.Error(), "refused") && !strings.Contains(err.Error(), "not listen") {
 		// ECONNREFUSED proves the path still resolves to the listening
 		// socket; only a missing path (ENOENT) would be a failure.

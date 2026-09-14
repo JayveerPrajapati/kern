@@ -464,7 +464,7 @@ func (p *Platform) resolveSymbol(change string) (string, error) {
 	}
 	cands := whatif.ExtractSymbols(change)
 	if len(cands) == 0 {
-		return "", fmt.Errorf("could not identify a symbol in the change description. Pass a bare symbol name (e.g. 'GetMySQLDB') or include a qualified name (e.g. 'pkg.Symbol') in the description.")
+		return "", fmt.Errorf("could not identify a symbol in the change description: pass a bare symbol name (e.g. 'GetMySQLDB') or include a qualified name (e.g. 'pkg.Symbol') in the description")
 	}
 	// Prefer the first candidate that exists in the graph; keep extraction
 	// order as the tiebreaker.
@@ -477,7 +477,7 @@ func (p *Platform) resolveSymbol(change string) (string, error) {
 		// None resolve in this project's index — fail with a hint instead of
 		// analysing a word from prose and reporting a misleading 0-caller
 		// impact (report A8).
-		return "", fmt.Errorf("no symbol named %q was found in this project's index (candidates: %s). Pass a concrete exported name (e.g. %q) or a qualified name (e.g. 'pkg.Symbol').",
+		return "", fmt.Errorf("no symbol named %q was found in this project's index (candidates: %s): pass a concrete exported name (e.g. %q) or a qualified name (e.g. 'pkg.Symbol')",
 			cands[0], strings.Join(cands, ", "), cands[0])
 	}
 	return cands[0], nil

@@ -58,7 +58,7 @@ func TestProviderHonorsOptions(t *testing.T) {
 			t.Fatalf("path = %q, want /chat/completions", r.URL.Path)
 		}
 		_ = json.NewDecoder(r.Body).Decode(&gotBody)
-		w.Write([]byte(`{"choices":[{"message":{"content":"ok"}}]}`))
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"ok"}}]}`))
 	}))
 	defer srv.Close()
 

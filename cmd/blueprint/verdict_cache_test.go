@@ -234,7 +234,7 @@ func TestCIVerdictCacheMissOnPolicyChange(t *testing.T) {
 	inv2 := countKernInvocations(logPath)
 
 	// Revert the policy config: must hit the run-1 entry again.
-	os.Remove(configPath)
+	_ = os.Remove(configPath)
 	_, _, exit3, art3 := runCICommand(t, binPath, dir, wrapper, "--head", "HEAD")
 	inv3 := countKernInvocations(logPath)
 	if art3.CacheStatus != "hit" {

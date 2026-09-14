@@ -2,6 +2,7 @@
 // teams that own projects and group agents as members, layered on top of the
 // existing flat org (projects + agents). Additive only: web.App, domain.Team,
 // and the single-project path are untouched.
+
 package enterprise
 
 import (

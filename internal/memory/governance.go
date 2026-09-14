@@ -14,6 +14,7 @@
 // permissions and record audits. DefaultPolicy is fully permissive, so
 // attaching governance never breaks existing behavior — it only starts
 // recording the audit trail. Tighten the policy to actually restrict.
+
 package memory
 
 import (

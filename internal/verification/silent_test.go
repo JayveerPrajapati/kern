@@ -207,7 +207,7 @@ func TestCopyTreeToTempSkipsSymlinks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("copyTreeToTemp: %v", err)
 	}
-	defer os.RemoveAll(dst)
+	defer func() { _ = os.RemoveAll(dst) }()
 
 	// The symlink entries themselves must not exist in the copy.
 	for _, rel := range []string{"notes", "secretdir"} {
@@ -272,7 +272,7 @@ func TestCopyTreeToTempSkipsSocketAndKernDir(t *testing.T) {
 	if err != nil {
 		t.Fatalf("copyTreeToTemp with socket entries: %v", err)
 	}
-	defer os.RemoveAll(dst)
+	defer func() { _ = os.RemoveAll(dst) }()
 
 	if _, err := os.Stat(filepath.Join(dst, "main.go")); err != nil {
 		t.Errorf("regular file must be copied: %v", err)

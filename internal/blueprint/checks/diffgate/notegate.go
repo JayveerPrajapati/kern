@@ -9,9 +9,7 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/note"
 )
 
-// G37 — note:format
-//
-// NoteFormatCheck (G37) validates the committed docs/notes/ decision-record
+// NoteFormatCheck (G37 — note:format) validates the committed docs/notes/ decision-record
 // tree (the kern analogue of dsh's Agent Notes). It BLOCKs on any format
 // violation: path-encoded lifecycle/class agreement, the `# Agent Note:`
 // / `Status:` / blank-line header, the `## Problem` opening, and the
@@ -58,9 +56,7 @@ func (c *NoteFormatCheck) Run(ctx context.Context, req domain.ChangeRequest) (do
 	return domain.CheckResult{Name: c.Name(), Status: domain.StatusBlock, Findings: findings}, nil
 }
 
-// G38 — note:missing
-//
-// NoteMissingCheck (G38) mirrors the changelog gate: it WARNs when the
+// NoteMissingCheck (G38 — note:missing) mirrors the changelog gate: it WARNs when the
 // changed set contains non-doc source changes but no docs/notes/ note —
 // the "every non-trivial change ships a note" rule as advisory, matching
 // dsh's policy without forcing it.

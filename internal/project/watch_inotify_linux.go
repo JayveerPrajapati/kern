@@ -55,7 +55,7 @@ func (w *inotifyWatcher) Close() {
 	w.closeOnce.Do(func() {
 		close(w.closed)
 		<-w.done // wait until the loop has actually stopped touching the maps
-		syscall.Close(w.fd)
+		_ = syscall.Close(w.fd)
 		w.dirs = map[int]string{}
 		w.files = map[int]string{}
 	})

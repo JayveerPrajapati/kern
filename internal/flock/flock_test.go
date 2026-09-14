@@ -23,7 +23,7 @@ func TestTryLockContention(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer Release(f)
+	defer func() { _ = Release(f) }()
 	// A second handle to the same file must contend.
 	if _, err := TryLock(p); err != ErrLocked {
 		t.Fatalf("second TryLock = %v, want ErrLocked", err)
@@ -36,7 +36,9 @@ func TestTryLockContention(t *testing.T) {
 	if err != nil {
 		t.Fatalf("re-acquire after release: %v", err)
 	}
-	Release(f2)
+	if err := Release(f2); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestLockFilePersistsAfterRelease(t *testing.T) {

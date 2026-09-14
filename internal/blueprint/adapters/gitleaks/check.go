@@ -143,7 +143,7 @@ func (c *Check) Run(ctx context.Context, req domain.ChangeRequest) (domain.Check
 	if err != nil {
 		return domain.CheckResult{Name: c.Name(), Status: domain.StatusError, Error: "gitleaks: create scan dir: " + err.Error()}, nil
 	}
-	defer os.RemoveAll(scanDir)
+	defer func() { _ = os.RemoveAll(scanDir) }()
 
 	changedSet := make(map[string]bool, len(req.Files))
 	// addedLinesByFile maps a changed file to the exact NEW-file line numbers
@@ -205,7 +205,7 @@ func (c *Check) Run(ctx context.Context, req domain.ChangeRequest) (domain.Check
 	if err := reportFile.Close(); err != nil {
 		return domain.CheckResult{Name: c.Name(), Status: domain.StatusError, Error: "gitleaks: close report file: " + err.Error()}, nil
 	}
-	defer os.Remove(reportPath)
+	defer func() { _ = os.Remove(reportPath) }()
 
 	_, stderr, code, runErr := c.runner(ctx, c.binary,
 		[]string{"dir", "--no-banner", "--report-format", "json", "--report-path", reportPath, scanDir},

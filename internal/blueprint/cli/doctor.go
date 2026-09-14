@@ -1,4 +1,4 @@
-// Package main is the Blueprint CLI entry point.
+// Package cli is the Blueprint CLI entry point.
 package cli
 
 import (
