@@ -61,11 +61,11 @@ var (
 	nestRouteRe = regexp.MustCompile(`(?i)@(Get|Post|Put|Delete|Patch|All|Options|Head)\s*\(\s*(?:["'\x60]([^"'\x60]*)["'\x60])?\s*\)\s*(?:\n\s*@[^\n]+)*\s*\n\s*(?:public|private|protected|async)?\s*([a-zA-Z0-9_]+)\s*\(`)
 
 	// DI Signals
-	goDISignalRe     = regexp.MustCompile(`(?i)(?:Service|Repository|Repo|Client|Store|DB|Dao|UseCase)\b`)
-	goModelSignalRe  = regexp.MustCompile(`(?i)(?:Model|Entity|Schema|Table|User|Order|Item|Product|Account|Payment|Token|Session|Record)\b`)
-	pyDISignalRe     = regexp.MustCompile(`(?i)Depends\s*\(\s*([a-zA-Z0-9_]+)\s*\)`)
-	javaDISignalRe   = regexp.MustCompile(`(?i)@(Autowired|Inject|Resource)\s*(?:\n\s*@[^\n]+)*\s*\n\s*(?:private|protected|public)?\s*([a-zA-Z0-9_<>]+)\s+([a-zA-Z0-9_]+);`)
-	nestDISignalRe   = regexp.MustCompile(`(?i)(?:private|protected|public|readonly)\s+([a-zA-Z0-9_]+)\s*:\s*([a-zA-Z0-9_]+Service|[a-zA-Z0-9_]+Repository|[a-zA-Z0-9_]+Client)`)
+	goDISignalRe    = regexp.MustCompile(`(?i)(?:Service|Repository|Repo|Client|Store|DB|Dao|UseCase)\b`)
+	goModelSignalRe = regexp.MustCompile(`(?i)(?:Model|Entity|Schema|Table|User|Order|Item|Product|Account|Payment|Token|Session|Record)\b`)
+	pyDISignalRe    = regexp.MustCompile(`(?i)Depends\s*\(\s*([a-zA-Z0-9_]+)\s*\)`)
+	javaDISignalRe  = regexp.MustCompile(`(?i)@(Autowired|Inject|Resource)\s*(?:\n\s*@[^\n]+)*\s*\n\s*(?:private|protected|public)?\s*([a-zA-Z0-9_<>]+)\s+([a-zA-Z0-9_]+);`)
+	nestDISignalRe  = regexp.MustCompile(`(?i)(?:private|protected|public|readonly)\s+([a-zA-Z0-9_]+)\s*:\s*([a-zA-Z0-9_]+Service|[a-zA-Z0-9_]+Repository|[a-zA-Z0-9_]+Client)`)
 )
 
 // TraceRoutes scans the project codebase using AST index and regex extractors to construct

@@ -33,11 +33,11 @@ type Mutant struct {
 
 // Options configures mutation testing execution.
 type Options struct {
-	Root        string   `json:"root"`
-	Files       []string `json:"files,omitempty"`
-	MaxMutants  int      `json:"max_mutants,omitempty"`
-	DryRun      bool     `json:"dry_run,omitempty"` // only generate mutants without running test suite
-	TestCommand string   `json:"test_command,omitempty"`
+	Root        string        `json:"root"`
+	Files       []string      `json:"files,omitempty"`
+	MaxMutants  int           `json:"max_mutants,omitempty"`
+	DryRun      bool          `json:"dry_run,omitempty"` // only generate mutants without running test suite
+	TestCommand string        `json:"test_command,omitempty"`
 	Timeout     time.Duration `json:"timeout,omitempty"`
 }
 
