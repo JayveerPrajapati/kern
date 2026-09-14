@@ -141,8 +141,3 @@ func dispatchTarget(arg ast.Expr) string {
 	}
 	return ""
 }
-
-func isIdentName(e ast.Expr, name string) bool {
-	id, ok := e.(*ast.Ident)
-	return ok && id.Name == name
-}
