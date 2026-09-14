@@ -50,7 +50,7 @@ func mcpRoot(args []string) (string, []string) {
 func mcpClientAdd(args []string) {
 	root, args := mcpRoot(args)
 	if len(args) < 1 {
-		fatalUsage("usage: kern mcp-client add <name> --transport stdio|streamable-http [--command C [--arg A]...] [--url U] [--header K=V]... [--env K=V]...")
+		fatalUsage("usage: kern mcp-client add <name> --transport stdio|streamable-http|unix [--command C [--arg A]...] [--url U] [--header K=V]... [--env K=V]...")
 	}
 	name := args[0]
 	rest := args[1:]
@@ -229,7 +229,7 @@ func mcpClientHelp() {
 	fmt.Println("usage: kern mcp-client <subcommand>")
 	fmt.Println()
 	fmt.Println("Connect to external MCP servers and call their tools as mcp__<server>__<tool>:")
-	fmt.Println("  add <name> --transport stdio|streamable-http [--command C [--arg A]... | --url U] [--header K=V]... [--env K=V]...")
+	fmt.Println("  add <name> --transport stdio|streamable-http|unix [--command C [--arg A]... | --url U] [--header K=V]... [--env K=V]...")
 	fmt.Println("  list")
 	fmt.Println("  rm <name>")
 	fmt.Println("  call <server> <tool> '<json-args>'")
