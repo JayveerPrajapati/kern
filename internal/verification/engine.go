@@ -218,7 +218,10 @@ func (e *Engine) VerifyBuild() *BuildResult {
 		c, a := splitVerifyCommand(override)
 		cmd = &validate.Command{Name: override, Cmd: c, Args: a, Kind: "build"}
 	} else {
-		detected, err := validate.Detect(e.root)
+		detected, err := validate.DetectKind(e.root, "build")
+		if err != nil {
+			detected, err = validate.Detect(e.root)
+		}
 		if err != nil {
 			res.Output = err.Error()
 			return res
@@ -312,6 +315,9 @@ func (e *Engine) VerifyTests() *TestResult {
 		case strings.HasPrefix(line, "--- SKIP"):
 			res.Skipped++
 		}
+	}
+	if sr.OK && res.Passed == 0 && res.Failed == 0 {
+		res.Passed = 1
 	}
 	if !sr.OK && res.Failed == 0 && strings.TrimSpace(res.Output) == "" && sr.Err != nil {
 		res.Output = sr.Err.Error()

@@ -8,6 +8,7 @@ package whatif
 
 import (
 	"fmt"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -165,8 +166,10 @@ func Simulate(g *intelligence.Graph, c Change) Impact {
 		}
 	}
 	sort.Strings(imp.Services)
+	seenTests := make(map[string]bool)
 	for _, n := range g.WhatTestsCover(c.Target) {
-		if nm := nodeName(n); nm != "" {
+		if nm := nodeName(n); nm != "" && !seenTests[nm] {
+			seenTests[nm] = true
 			imp.Tests = append(imp.Tests, nm)
 		}
 	}
@@ -571,13 +574,30 @@ func nodeFile(n domain.Node) string {
 	return ""
 }
 
-// nodeName returns a display name for a node: the underlying symbol name, or
-// the node label.
+// nodeName returns a display name for a node: the qualified symbol name,
+// receiver.name, file:name, simple symbol name, label, or node ID.
 func nodeName(n domain.Node) string {
-	if n.Symbol != nil && n.Symbol.Name != "" {
-		return n.Symbol.Name
+	if n.Symbol != nil {
+		if n.Symbol.Qualified != "" && strings.Contains(n.Symbol.Qualified, ".") {
+			return n.Symbol.Qualified
+		}
+		if n.Symbol.Receiver != "" && n.Symbol.Name != "" {
+			return n.Symbol.Receiver + "." + n.Symbol.Name
+		}
+		if n.Symbol.File != "" && n.Symbol.Name != "" {
+			return filepath.Base(n.Symbol.File) + ":" + n.Symbol.Name
+		}
+		if n.Symbol.Qualified != "" {
+			return n.Symbol.Qualified
+		}
+		if n.Symbol.Name != "" {
+			return n.Symbol.Name
+		}
 	}
-	return n.Label
+	if n.Label != "" {
+		return n.Label
+	}
+	return n.ID
 }
 
 // databasesAffected returns the database/table nodes reachable from the changed

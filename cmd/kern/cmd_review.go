@@ -43,12 +43,6 @@ func runAnalyze(cmd string, rest []string) {
 		fatal("--lens/--profile are only supported for kern analyze")
 	}
 	change := args[0]
-	// V5: the deterministic analyze/plan path resolves <change> as an exact
-	// symbol name. NL prose belongs to the kern run intent pipeline — route
-	// loudly instead of failing later with a confusing "no symbol named" error.
-	if strings.ContainsAny(change, " \t") {
-		fatal("kern %s resolves <change> as a SYMBOL name (e.g. pkg.Func or Type.Method).\nFor natural-language change descriptions use: kern run \"%s\"", cmd, change)
-	}
 	p, err := app.New(root)
 	if err != nil {
 		fatal("Analyze: %v", err)
@@ -632,6 +626,11 @@ func runVerify(rest []string) {
 			// A FAIL verdict is a valid outcome: surface the typed verdict and
 			// per-check status (report A11) instead of a bare error.
 			if v.Verdict != "" || v.Build != nil || v.UnitTests != nil || v.Security != nil || v.Architecture != nil || v.Dependency != nil {
+				if f.json {
+					v.Version = version
+					printJSON(v)
+					panic(exitError{code: 1})
+				}
 				fmt.Println(verification.RenderCompact(v))
 				fatal("verification FAILED — see report above; fix failing checks and rerun kern verify")
 			}

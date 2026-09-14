@@ -2,6 +2,7 @@ package app
 
 import (
 	"fmt"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -200,13 +201,24 @@ func deploymentNotes(pkt domain.ContextPacket) string {
 }
 
 // nodeName extracts a display name from a domain.Node. It prefers the symbol's
-// qualified name, then the file path, then the label, then the ID.
+// qualified name, then receiver.name, then file:name, then simple name, file path, label, or ID.
 func nodeName(n domain.Node) string {
-	if n.Symbol != nil && n.Symbol.Qualified != "" {
-		return n.Symbol.Qualified
-	}
-	if n.Symbol != nil && n.Symbol.Name != "" {
-		return n.Symbol.Name
+	if n.Symbol != nil {
+		if n.Symbol.Qualified != "" && strings.Contains(n.Symbol.Qualified, ".") {
+			return n.Symbol.Qualified
+		}
+		if n.Symbol.Receiver != "" && n.Symbol.Name != "" {
+			return n.Symbol.Receiver + "." + n.Symbol.Name
+		}
+		if n.Symbol.File != "" && n.Symbol.Name != "" {
+			return filepath.Base(n.Symbol.File) + ":" + n.Symbol.Name
+		}
+		if n.Symbol.Qualified != "" {
+			return n.Symbol.Qualified
+		}
+		if n.Symbol.Name != "" {
+			return n.Symbol.Name
+		}
 	}
 	if n.File != nil && n.File.Path != "" {
 		return n.File.Path

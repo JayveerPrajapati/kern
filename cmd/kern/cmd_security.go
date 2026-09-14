@@ -101,10 +101,14 @@ func runSec(rest []string) {
 	}
 	max := f.max
 	// Default gate is error-only: warnings/info are triage material, not CI
-	// failures. Pass --severity explicitly to widen the lens.
+	// failures. Pass --severity explicitly (or --severity all) to widen the lens.
 	allow := []string{"error"}
 	if f.severity != "" {
-		allow = strings.Split(f.severity, ",")
+		if strings.ToLower(f.severity) == "all" {
+			allow = nil
+		} else {
+			allow = strings.Split(f.severity, ",")
+		}
 	}
 	findings, serr := svc.Security.Scan(context.Background(), root)
 	if serr != nil {
@@ -121,8 +125,13 @@ func runSec(rest []string) {
 		}
 	} else {
 		fmt.Print(svc.Security.Render(findings, max))
-		fmt.Fprintf(os.Stderr, "kern sec: %d findings (%d error, %d warning, %d info)\n",
-			len(findings), counts["error"], counts["warning"], counts["info"])
+		if f.severity == "" {
+			fmt.Fprintf(os.Stderr, "kern sec: %d findings (%d error, %d warning, %d info) [use --severity error,warning,info to view all]\n",
+				len(findings), counts["error"], counts["warning"], counts["info"])
+		} else {
+			fmt.Fprintf(os.Stderr, "kern sec: %d findings (%d error, %d warning, %d info)\n",
+				len(findings), counts["error"], counts["warning"], counts["info"])
+		}
 	}
 	// The exit code must be the same in --json and text mode: error-severity
 	// findings are a CI gate failure regardless of output format.
