@@ -105,7 +105,7 @@ func TestBackgroundWatchSingleFlight(t *testing.T) {
 	// the index instance).
 	s.watchBusy = true
 	s.maybeRebuildIndexes()
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(1200 * time.Millisecond)
 	for time.Now().Before(deadline) {
 		s.watchMu.Lock()
 		busy := s.watchBusy
@@ -114,7 +114,7 @@ func TestBackgroundWatchSingleFlight(t *testing.T) {
 		if !busy || cur != before {
 			t.Fatal("tick while a rebuild was in flight spawned a rebuild (single-flight violated)")
 		}
-		time.Sleep(20 * time.Millisecond)
+		time.Sleep(10 * time.Millisecond)
 	}
 
 	// Let the in-flight rebuild "finish", then the next tick may rebuild.

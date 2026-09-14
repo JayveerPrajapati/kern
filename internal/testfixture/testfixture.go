@@ -6,13 +6,14 @@
 // with millisecond index builds, so the same assertions run 10-50x faster.
 //
 // The fixture is generated into a fresh temp git repo per call, so tests
-// never depend on shared mutable state and never pollute the real repo.
 package testfixture
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sync"
 	"testing"
 )
 
@@ -80,27 +81,81 @@ func (s *Server) Handle(id string) string { return s.svc.Get(id) }
 `,
 }
 
+var (
+	templateOnce sync.Once
+	templateDir  string
+	templateErr  error
+)
+
+func initTemplate() {
+	dir, err := os.MkdirTemp("", "kern-testfixture-template-*")
+	if err != nil {
+		templateErr = err
+		return
+	}
+	templateDir = dir
+	for rel, content := range Files {
+		full := filepath.Join(dir, rel)
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			templateErr = err
+			return
+		}
+		if err := os.WriteFile(full, []byte(content), 0o644); err != nil {
+			templateErr = err
+			return
+		}
+	}
+	// Pre-ignore tool-state directories so status and fast-paths stay clean
+	_ = os.WriteFile(filepath.Join(dir, ".gitignore"), []byte("/.kern\n/.blueprint\n"), 0o644)
+	cmd := exec.Command("git", "-C", dir, "init", "-q")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		templateErr = fmt.Errorf("git init: %v (%s)", err, out)
+		return
+	}
+	_ = exec.Command("git", "-C", dir, "config", "user.name", "testfixture").Run()
+	_ = exec.Command("git", "-C", dir, "config", "user.email", "testfixture@example.com").Run()
+	_ = exec.Command("git", "-C", dir, "add", "-A").Run()
+	if out, err := exec.Command("git", "-C", dir, "commit", "-qm", "fixture init").CombinedOutput(); err != nil {
+		templateErr = fmt.Errorf("git commit: %v (%s)", err, out)
+		return
+	}
+}
+
+func copyDir(src, dst string) error {
+	return filepath.Walk(src, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(src, path)
+		if err != nil {
+			return err
+		}
+		target := filepath.Join(dst, rel)
+		if info.IsDir() {
+			return os.MkdirAll(target, info.Mode())
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(target, data, info.Mode())
+	})
+}
+
 // Repo creates a fresh temp git repository containing the fixture source,
 // commits it, and returns the repo path. The repo is registered with t for
 // cleanup. Every call returns an independent repo, so concurrent tests never
 // share state; the fixture is small, so the per-call cost is milliseconds.
 func Repo(t *testing.T) string {
 	t.Helper()
-	dir := t.TempDir()
-	for rel, content := range Files {
-		full := filepath.Join(dir, rel)
-		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
-			t.Fatalf("testfixture: mkdir %s: %v", rel, err)
-		}
-		if err := os.WriteFile(full, []byte(content), 0o644); err != nil {
-			t.Fatalf("testfixture: write %s: %v", rel, err)
-		}
+	templateOnce.Do(initTemplate)
+	if templateErr != nil {
+		t.Fatalf("testfixture: template init: %v", templateErr)
 	}
-	git(t, dir, "init", "-q")
-	git(t, dir, "config", "user.name", "testfixture")
-	git(t, dir, "config", "user.email", "testfixture@example.com")
-	git(t, dir, "add", "-A")
-	git(t, dir, "commit", "-qm", "fixture init")
+	dir := t.TempDir()
+	if err := copyDir(templateDir, dir); err != nil {
+		t.Fatalf("testfixture: copy template: %v", err)
+	}
 	return dir
 }
 
