@@ -37,7 +37,11 @@ func TestRunDoctorFailsClosedWithoutBinary(t *testing.T) {
 // contract probe fails (not kern), so the run still must not exit 0, and the
 // JSON output must carry the checks array.
 func TestRunDoctorJSONShape(t *testing.T) {
-	t.Setenv("KERN_BINARY", os.Args[0]) // a binary, but not kern: contract probe fails
+	dummy := filepath.Join(t.TempDir(), "not-kern")
+	if err := os.WriteFile(dummy, []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("KERN_BINARY", dummy) // a binary, but not kern: contract probe fails immediately
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	code := RunDoctor([]string{"--repo", fixtureRepo(t), "--json"})
 	if code == 0 {
