@@ -2,6 +2,9 @@ package mcpclient
 
 import (
 	"context"
+	"encoding/json"
+	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -42,6 +45,7 @@ func TestServerValidate(t *testing.T) {
 	good := []Server{
 		{Name: "gh", Transport: "stdio", Command: "npx"},
 		{Name: "web", Transport: "streamable-http", URL: "http://localhost:3000/mcp"},
+		{Name: "uds", Transport: "unix", URL: "/tmp/kern.sock"},
 	}
 	for _, s := range good {
 		if err := s.Validate(); err != nil {
@@ -53,6 +57,7 @@ func TestServerValidate(t *testing.T) {
 		{Name: "too long name here x", Transport: "stdio", Command: "x"}, // name > 32 / invalid chars
 		{Name: "a", Transport: "stdio"},                                  // no command
 		{Name: "a", Transport: "streamable-http"},                        // no url
+		{Name: "a", Transport: "unix"},                                   // no url/sock
 		{Name: "a", Transport: "bogus", Command: "x"},                    // bad transport
 	}
 	for _, s := range bad {
@@ -137,3 +142,76 @@ func TestDialStdioEchoServer(t *testing.T) {
 		t.Errorf("expected echoed reply, got %v", res)
 	}
 }
+
+func TestDialUnixEchoServer(t *testing.T) {
+	sockDir := t.TempDir()
+	sockPath := filepath.Join(sockDir, "test.sock")
+	ln, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Skipf("unix sockets not supported or failed: %v", err)
+	}
+	defer ln.Close()
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/mcp", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Method string `json:"method"`
+			ID     any    `json:"id"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		w.Header().Set("Content-Type", "application/json")
+		if req.Method == "tools/list" {
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"jsonrpc": "2.0",
+				"id":      req.ID,
+				"result": map[string]any{
+					"tools": []map[string]any{
+						{"name": "echo_uds", "description": "echo over UDS"},
+					},
+				},
+			})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"jsonrpc": "2.0",
+			"id":      req.ID,
+			"result": map[string]any{
+				"echoed": true,
+			},
+		})
+	})
+
+	srv := &http.Server{Handler: mux}
+	go func() { _ = srv.Serve(ln) }()
+	defer srv.Close()
+
+	server := Server{
+		Name:      "echo_uds",
+		Transport: "unix",
+		URL:       sockPath,
+	}
+	ctx := context.Background()
+	c, err := Dial(ctx, &server)
+	if err != nil {
+		t.Fatalf("dial unix: %v", err)
+	}
+	defer c.Close()
+
+	tools, err := c.ListTools(ctx)
+	if err != nil {
+		t.Fatalf("list tools: %v", err)
+	}
+	if len(tools) != 1 || tools[0].Name != "echo_uds" {
+		t.Fatalf("unexpected tools over unix socket: %+v", tools)
+	}
+
+	res, err := c.CallTool(ctx, "echo_uds", map[string]any{})
+	if err != nil {
+		t.Fatalf("call tool over unix: %v", err)
+	}
+	out, _ := res.(map[string]any)
+	if out["echoed"] != true {
+		t.Errorf("expected echoed reply over UDS, got %v", res)
+	}
+}
+
