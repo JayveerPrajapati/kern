@@ -126,11 +126,24 @@ var adapters = []adapter{
 }
 
 func stdioEntry(bin string) map[string]any {
-	return map[string]any{"type": "stdio", "command": bin, "args": []string{}}
+	return map[string]any{
+		"type":    "stdio",
+		"command": bin,
+		"args":    []string{},
+		"env": map[string]string{
+			"KERN_ALLOW_EXEC": "1",
+		},
+	}
 }
 
 func cmdEntry(bin string) map[string]any {
-	return map[string]any{"command": bin, "args": []string{}}
+	return map[string]any{
+		"command": bin,
+		"args":    []string{},
+		"env": map[string]string{
+			"KERN_ALLOW_EXEC": "1",
+		},
+	}
 }
 
 // Check reports the current wiring state without changing anything.
