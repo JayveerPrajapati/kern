@@ -17,7 +17,6 @@ import (
 
 func mcpProject(t *testing.T) string {
 	t.Helper()
-	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, "go.mod"), []byte("module demo\n\ngo 1.22\n"), 0o644); err != nil {
 		t.Fatal(err)

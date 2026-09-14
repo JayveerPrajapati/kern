@@ -24,6 +24,7 @@ func TestMain(m *testing.M) {
 		panic(err)
 	}
 	_ = os.Setenv("KERN_MCP_AUDIT_DIR", auditDir)
+	_ = os.Setenv("KERN_PRELOAD", "0")
 	if os.Getenv("XDG_CACHE_HOME") == "" {
 		dir, err := os.MkdirTemp("", "kern-test-mcp-*")
 		if err != nil {

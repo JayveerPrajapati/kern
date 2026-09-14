@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -73,10 +74,40 @@ type identityGit struct {
 	commit string
 }
 
+// isGitWorktree reports whether root is located within a git repository worktree.
+// When root is not a git worktree, expensive git subprocesses are bypassed.
+func isGitWorktree(root string) bool {
+	if root == "" {
+		return false
+	}
+	if os.Getenv("GIT_DIR") != "" || os.Getenv("GIT_WORK_TREE") != "" {
+		return true
+	}
+	dir, err := filepath.Abs(root)
+	if err != nil {
+		return false
+	}
+	for {
+		gitPath := filepath.Join(dir, ".git")
+		if _, err := os.Stat(gitPath); err == nil {
+			return true
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir || parent == "." {
+			break
+		}
+		dir = parent
+	}
+	return false
+}
+
 // startIdentityGit begins observing root's git identity concurrently. Call
 // joinIdentity when the build/update walk has finished.
 func startIdentityGit(root string) *identityGit {
 	g := &identityGit{}
+	if !isGitWorktree(root) {
+		return g
+	}
 	g.wg.Add(1)
 	go func() {
 		defer g.wg.Done()
@@ -171,7 +202,10 @@ func aggregateHash(fileHashes map[string]string) string {
 // or git is unavailable. Callers on a hot path use this first and only pay
 // for the full staging form when they truly need a decisive OID.
 func treeOIDFast(root string) string {
-	if out, err := runGit(root, "status", "--porcelain", "--", ".", ":(exclude).kern", ":(exclude).blueprint"); err == nil && out == "" {
+	if !isGitWorktree(root) {
+		return ""
+	}
+	if out, err := runGit(root, "status", "--porcelain", "--", ".", ":(exclude).kern", ":(exclude).kern/**", ":(exclude).blueprint", ":(exclude).blueprint/**"); err == nil && out == "" {
 		if head, err := runGit(root, "rev-parse", "HEAD^{tree}"); err == nil && head != "" {
 			return head
 		}
@@ -180,6 +214,9 @@ func treeOIDFast(root string) string {
 }
 
 func treeOID(root string) string {
+	if !isGitWorktree(root) {
+		return ""
+	}
 	// Fast path: porcelain-clean outside the excluded dirs means staging the
 	// working tree (slow path) would produce exactly HEAD's tree object.
 	if oid := treeOIDFast(root); oid != "" {

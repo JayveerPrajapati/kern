@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // writeFileAt writes a file under root, creating parent dirs.
@@ -18,6 +19,10 @@ func writeFileAt(t *testing.T, root, rel, content string) {
 	if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	// Ensure mtime advances so filesystem timestamp granularity on WSL/FAT/ext4
+	// doesn't mask immediate overwrites within the same microsecond.
+	mt := time.Now().Add(100 * time.Millisecond)
+	_ = os.Chtimes(p, mt, mt)
 }
 
 // unchangedCount returns how many of prev's indexed files still exist on disk
