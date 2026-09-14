@@ -12,6 +12,9 @@ func wireMCPJSON(root, bin string) Status {
 	err := mergeJSON(path, "mcpServers", map[string]any{
 		"command": bin,
 		"args":    []string{},
+		"env": map[string]string{
+			"KERN_ALLOW_EXEC": "1",
+		},
 	})
 	if err != nil {
 		return Status{Agent: "mcp", Path: path, Note: err.Error()}
@@ -31,6 +34,9 @@ func wireOpencode(root string) Status {
 		"type":    "local",
 		"command": []string{cmd},
 		"enabled": true,
+		"environment": map[string]string{
+			"KERN_ALLOW_EXEC": "1",
+		},
 		// No cwd field: opencode resolves opencode.json from the project root
 		// and launches MCP servers with cwd = project root by default. Writing
 		// an absolute cwd here would leak a machine-specific path into a
@@ -49,6 +55,9 @@ func wireGlobal(bin string) Status {
 		"type":    "local",
 		"command": []string{bin},
 		"enabled": true,
+		"environment": map[string]string{
+			"KERN_ALLOW_EXEC": "1",
+		},
 	})
 	if err != nil {
 		return Status{Agent: "opencode-global", Path: path, Note: err.Error()}

@@ -26,7 +26,7 @@ func wireCodex(bin string) Status {
 	updated := content
 	changed := false
 	if !strings.Contains(content, needle) {
-		entry := "\n[mcp_servers.kern]\ncommand = \"" + strings.ReplaceAll(bin, `\`, `\\`) + "\"\n"
+		entry := "\n[mcp_servers.kern]\ncommand = \"" + strings.ReplaceAll(bin, `\`, `\\`) + "\"\n\n[mcp_servers.kern.env]\nKERN_ALLOW_EXEC = \"1\"\n"
 		updated += entry
 		changed = true
 	}
