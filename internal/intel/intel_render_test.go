@@ -32,7 +32,8 @@ func buildTestProject(t *testing.T) string {
 
 func execGit(t *testing.T, dir string, args ...string) {
 	t.Helper()
-	cmd := exec.Command("git", args...)
+	gitArgs := append([]string{"-c", "gc.auto=0", "-c", "core.fsmonitor=false", "-c", "maintenance.auto=0"}, args...)
+	cmd := exec.Command("git", gitArgs...)
 	cmd.Dir = dir
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("git %s: %v\n%s", args, err, out)
