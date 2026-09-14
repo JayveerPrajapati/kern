@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -107,7 +108,7 @@ func initTemplate() {
 	}
 	// Pre-ignore tool-state directories so status and fast-paths stay clean
 	_ = os.WriteFile(filepath.Join(dir, ".gitignore"), []byte("/.kern\n/.blueprint\n"), 0o644)
-	cmd := exec.Command("git", "-C", dir, "init", "-q")
+	cmd := exec.Command("git", "-C", dir, "-c", "maintenance.auto=0", "-c", "gc.auto=0", "init", "-q")
 	if out, err := cmd.CombinedOutput(); err != nil {
 		templateErr = fmt.Errorf("git init: %v (%s)", err, out)
 		return
@@ -115,7 +116,7 @@ func initTemplate() {
 	_ = exec.Command("git", "-C", dir, "config", "user.name", "testfixture").Run()
 	_ = exec.Command("git", "-C", dir, "config", "user.email", "testfixture@example.com").Run()
 	_ = exec.Command("git", "-C", dir, "add", "-A").Run()
-	if out, err := exec.Command("git", "-C", dir, "commit", "-qm", "fixture init").CombinedOutput(); err != nil {
+	if out, err := exec.Command("git", "-C", dir, "-c", "maintenance.auto=0", "-c", "gc.auto=0", "commit", "-qm", "fixture init").CombinedOutput(); err != nil {
 		templateErr = fmt.Errorf("git commit: %v (%s)", err, out)
 		return
 	}
@@ -124,18 +125,32 @@ func initTemplate() {
 func copyDir(src, dst string) error {
 	return filepath.Walk(src, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
+			if os.IsNotExist(err) {
+				return nil
+			}
 			return err
+		}
+		if info.IsDir() {
+			rel, err := filepath.Rel(src, path)
+			if err != nil {
+				return err
+			}
+			target := filepath.Join(dst, rel)
+			return os.MkdirAll(target, info.Mode())
+		}
+		if strings.HasSuffix(info.Name(), ".lock") {
+			return nil
 		}
 		rel, err := filepath.Rel(src, path)
 		if err != nil {
 			return err
 		}
 		target := filepath.Join(dst, rel)
-		if info.IsDir() {
-			return os.MkdirAll(target, info.Mode())
-		}
 		data, err := os.ReadFile(path)
 		if err != nil {
+			if os.IsNotExist(err) {
+				return nil
+			}
 			return err
 		}
 		return os.WriteFile(target, data, info.Mode())

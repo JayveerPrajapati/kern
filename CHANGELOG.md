@@ -6,6 +6,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.9.8.1] - 2026-09-14
+
+### Fixed
+- **MCP Server Background Watcher**: eliminated concurrency data race during server shutdown by serializing watch termination state and preventing asynchronous rebuild scheduling against `sync.WaitGroup`.
+- **Test Fixtures**: disabled background Git maintenance/gc in template repository initialization and added resilient handling for transient lock files during fixture directory copies.
+- **Security & Code Quality Hardening**:
+  - Bound memory allocations and integer multiplication in line diff DP table calculations (`internal/diff`).
+  - Added Unicode rune codepoint validation before decoding PII runes (`internal/pii`).
+  - Clamped capacity hints in WhatIf symbol parsing to prevent integer overflow (`internal/whatif`).
+  - Enforced path cleaning on root validation within MCP server requests (`internal/mcp`).
+
 ## [0.9.8] - 2026-09-14
 
 ### Added

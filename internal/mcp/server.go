@@ -581,6 +581,7 @@ type Server struct {
 	watchWG      sync.WaitGroup
 	watchMu      sync.Mutex
 	watchBusy    bool
+	watchStopped bool
 }
 
 // WithPreToolHook registers a pre-tool-use hook. NewServer wires the
@@ -1807,13 +1808,13 @@ func withinRoot(root, file string) (string, error) {
 // rejected: it is never a project to index. It returns "" on success so it can
 // be called inline as `if msg := validateRoot(root); msg != "" { return "", msg }`.
 func validateRoot(root string) error {
-	root = resolveRoot(root)
-	if isFilesystemRoot(root) {
-		return fmt.Errorf("root %q is a filesystem root and cannot be treated as a project", root)
+	clean := filepath.Clean(resolveRoot(root))
+	if isFilesystemRoot(clean) {
+		return fmt.Errorf("root %q is a filesystem root and cannot be treated as a project", clean)
 	}
-	if st, err := os.Stat(root); err == nil {
+	if st, err := os.Stat(clean); err == nil {
 		if !st.IsDir() {
-			return fmt.Errorf("root %q exists but is not a directory", root)
+			return fmt.Errorf("root %q exists but is not a directory", clean)
 		}
 	}
 	return nil

@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 )
 
 // Pattern describes one detection rule.
@@ -384,7 +385,7 @@ func decodeEncoded(kind, s string) (string, bool) {
 		for i := 0; i < len(s); {
 			if s[i] == '\\' && i+6 <= len(s) && s[i+1] == 'u' {
 				cp, err := strconv.ParseUint(s[i+2:i+6], 16, 32)
-				if err == nil {
+				if err == nil && utf8.ValidRune(rune(cp)) {
 					b.WriteRune(rune(cp))
 					i += 6
 					continue

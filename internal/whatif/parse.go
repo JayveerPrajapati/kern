@@ -129,7 +129,11 @@ func ExtractSymbols(change string) []string {
 
 	// Qualified names yield the most reliable symbol: prefer the last
 	// component as the bare symbol, full qualified name as a candidate.
-	ordered := make([]string, 0, len(quoted)+len(qualified)+len(fileStems)+len(bare))
+	capHint := int64(len(quoted)) + int64(len(qualified)) + int64(len(fileStems)) + int64(len(bare))
+	if capHint < 0 || capHint > 1_000_000 {
+		capHint = 0
+	}
+	ordered := make([]string, 0, int(capHint))
 	seen := make(map[string]bool)
 	add := func(s string) {
 		if s == "" || seen[s] {

@@ -106,7 +106,7 @@ func (s *Server) watchLoop(ctx context.Context, interval time.Duration) {
 // on the next tick; it never blocks tool calls.
 func (s *Server) maybeRebuildIndexes() {
 	s.watchMu.Lock()
-	if s.watchBusy {
+	if s.watchBusy || s.watchStopped {
 		s.watchMu.Unlock()
 		return
 	}
@@ -173,7 +173,12 @@ func (s *Server) stopWatch() {
 	if s.watchStop == nil {
 		return
 	}
-	s.watchOnce.Do(func() { close(s.watchStop) })
+	s.watchOnce.Do(func() {
+		s.watchMu.Lock()
+		s.watchStopped = true
+		s.watchMu.Unlock()
+		close(s.watchStop)
+	})
 	drained := make(chan struct{})
 	go func() {
 		s.watchWG.Wait()

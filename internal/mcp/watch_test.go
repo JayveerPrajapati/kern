@@ -103,7 +103,9 @@ func TestBackgroundWatchSingleFlight(t *testing.T) {
 	// skipped — no rebuild goroutine may be spawned (a spawned rebuild would
 	// complete quickly on this tiny fixture, clearing watchBusy and swapping
 	// the index instance).
+	s.watchMu.Lock()
 	s.watchBusy = true
+	s.watchMu.Unlock()
 	s.maybeRebuildIndexes()
 	deadline := time.Now().Add(1200 * time.Millisecond)
 	for time.Now().Before(deadline) {
@@ -118,7 +120,9 @@ func TestBackgroundWatchSingleFlight(t *testing.T) {
 	}
 
 	// Let the in-flight rebuild "finish", then the next tick may rebuild.
+	s.watchMu.Lock()
 	s.watchBusy = false
+	s.watchMu.Unlock()
 	s.maybeRebuildIndexes()
 	deadline = time.Now().Add(15 * time.Second)
 	rebuilt := false

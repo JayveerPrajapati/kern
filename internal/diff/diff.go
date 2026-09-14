@@ -20,9 +20,13 @@ type Op struct {
 func DiffLines(a, b []string) []Op {
 	n, m := len(a), len(b)
 	const maxCells = 5_000_000
-	if n*m > maxCells {
+	if n < 0 || m < 0 || int64(n) > maxCells || int64(m) > maxCells || int64(n)+int64(m) > maxCells || int64(n)*int64(m) > maxCells {
 		// Coarse fallback: whole-file replace.
-		ops := make([]Op, 0, n+m)
+		capAlloc := 0
+		if total := int64(n) + int64(m); total > 0 && total <= maxCells {
+			capAlloc = int(total)
+		}
+		ops := make([]Op, 0, capAlloc)
 		for i, l := range a {
 			ops = append(ops, Op{Kind: '-', A: i + 1, Text: l})
 		}
@@ -49,7 +53,11 @@ func DiffLines(a, b []string) []Op {
 			}
 		}
 	}
-	ops := make([]Op, 0, n+m)
+	capOps := 0
+	if total := int64(n) + int64(m); total > 0 && total <= maxCells {
+		capOps = int(total)
+	}
+	ops := make([]Op, 0, capOps)
 	i, j := n, m
 	for i > 0 && j > 0 {
 		if a[i-1] == b[j-1] {
