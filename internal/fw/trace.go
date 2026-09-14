@@ -274,7 +274,7 @@ func extractPythonRoutes(relPath, content string, ix *index.Index) []RouteFlow {
 		}
 
 		flow := buildRouteFlow("fastapi/flask", method, path, handler, relPath, lineNum, nil, content, ix)
-		flow.InjectedServices = append(flow.InjectedServices, injected...)
+		flow.InjectedServices = uniqueStrings(append(flow.InjectedServices, injected...))
 		routes = append(routes, flow)
 	}
 
@@ -308,7 +308,7 @@ func extractJavaRoutes(relPath, content string, ix *index.Index) []RouteFlow {
 		}
 
 		flow := buildRouteFlow("spring-boot", method, path, handler, relPath, lineNum, nil, content, ix)
-		flow.InjectedServices = append(flow.InjectedServices, injected...)
+		flow.InjectedServices = uniqueStrings(append(flow.InjectedServices, injected...))
 		routes = append(routes, flow)
 	}
 

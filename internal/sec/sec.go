@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"fmt"
 	"io/fs"
+	"math"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -201,7 +202,7 @@ func ScanFile(rel string, src []byte) []Finding {
 			// Loader=", "assert pickle.loads(...)") mention the pattern but do
 			// not execute it — matches inside quoted literals are rule
 			// documentation, not dynamic code (F-016).
-			if r.ID == "code-eval" && isInQuotedString(src, idx[0]) {
+			if r.ID == "code-eval" && (isInQuotedString(src, idx[0]) || isMethodCallOrDef(src, idx[0], idx[1])) {
 				continue
 			}
 			// Deterministic false-positive filters: a scanner that flags its
@@ -248,7 +249,7 @@ func ScanFile(rel string, src []byte) []Finding {
 			// Struct literals and stdlib conversions are construction, not
 			// leaks: `PrivateKey: ed25519.PrivateKey(priv)` holds no
 			// credential literal.
-			if r.ID == "hardcoded-secret" && isQualifiedCodeValue(src, idx[0], idx[1]) {
+			if r.ID == "hardcoded-secret" && (isQualifiedCodeValue(src, idx[0], idx[1]) || isLowEntropySecret(src, idx[0], idx[1], r.Label)) {
 				continue
 			}
 			line := lineAt(src, idx[0])
@@ -408,9 +409,84 @@ func isDocProseSecret(f Finding) bool {
 	if f.Rule != "hardcoded-secret" {
 		return false
 	}
-	switch strings.TrimPrefix(f.Message, "hardcoded secret: ") {
-	case "EMAIL", "IP", "IPV6", "URL_CRED":
+	label := strings.TrimPrefix(f.Message, "hardcoded secret: ")
+	switch label {
+	case "EMAIL", "IP", "IPV6", "URL_CRED", "HEX", "TOKEN", "KEY", "PASSWORD", "PHONE", "SSN":
 		return true
+	}
+	return false
+}
+
+// isMethodCallOrDef reports whether a code-eval match is a method call on an instance
+// (e.g. model.eval()) or a function definition rather than global eval().
+func isMethodCallOrDef(src []byte, start, end int) bool {
+	matched := string(src[start:end])
+	if strings.Contains(strings.ToLower(matched), "eval") {
+		if start > 0 && src[start-1] == '.' {
+			return true
+		}
+		lineStart, _ := lineBounds(src, start)
+		prefix := strings.TrimSpace(string(src[lineStart:start]))
+		if strings.HasSuffix(prefix, "def") {
+			if len(prefix) == 3 || prefix[len(prefix)-4] == ' ' || prefix[len(prefix)-4] == '\t' {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// isLowEntropySecret checks if a secret match is non-secret prose/metrics (e.g. table numbers,
+// low-entropy identifiers, or URL query parameters with non-secret tokens).
+func isLowEntropySecret(src []byte, start, end int, label string) bool {
+	if label != "TOKEN" && label != "KEY" && label != "PASSWORD" && label != "HEX" {
+		return false
+	}
+	m := src[start:end]
+	sep := bytes.LastIndexAny(m, "=:")
+	var val []byte
+	if sep >= 0 {
+		val = bytes.Trim(m[sep+1:], " \t\"'`")
+	} else {
+		val = bytes.Trim(m, " \t\"'`")
+	}
+	if len(val) == 0 {
+		return true
+	}
+	// Check if all digits or formatted numbers (e.g. "77,127,680")
+	allDigits := true
+	for _, b := range val {
+		if (b < '0' || b > '9') && b != ',' && b != '.' {
+			allDigits = false
+			break
+		}
+	}
+	if allDigits {
+		return true
+	}
+	// Check if in markdown table row (line contains '|')
+	lineStart, lineEnd := lineBounds(src, start)
+	line := src[lineStart:lineEnd]
+	if bytes.Contains(line, []byte("|")) && !bytes.Contains(line, []byte("export ")) && !bytes.Contains(line, []byte("const ")) {
+		if label == "TOKEN" || label == "KEY" || label == "HEX" {
+			return true
+		}
+	}
+	// Calculate Shannon entropy on value
+	if len(val) >= 8 {
+		freq := map[byte]int{}
+		for _, b := range val {
+			freq[b]++
+		}
+		var ent float64
+		n := float64(len(val))
+		for _, count := range freq {
+			p := float64(count) / n
+			ent -= p * math.Log2(p)
+		}
+		if ent < 2.3 { // low entropy / repeated pattern
+			return true
+		}
 	}
 	return false
 }

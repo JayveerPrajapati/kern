@@ -194,6 +194,16 @@ func denseCosine(a, b []float32) float64 {
 // hand-written implementations of the same name rank first. Unlike
 // Index.Search (AST wildcard patterns) this is forgiving free-text lookup.
 func RankedSearch(ix *index.Index, query string, limit int) []index.Symbol {
+	scored := RankedSearchScored(ix, query, limit)
+	out := make([]index.Symbol, len(scored))
+	for i, h := range scored {
+		out[i] = h.Symbol
+	}
+	return out
+}
+
+// RankedSearchScored returns symbols matching a free-text query with their match scores.
+func RankedSearchScored(ix *index.Index, query string, limit int) []RepoHit {
 	if limit <= 0 {
 		limit = 50
 	}
@@ -207,11 +217,7 @@ func RankedSearch(ix *index.Index, query string, limit int) []index.Symbol {
 	// work") keep the plain ranking.
 	codeIntent := isCodeIntentQuery(query)
 	segCache := map[string][]string{}
-	type hit struct {
-		s     index.Symbol
-		score int
-	}
-	var hits []hit
+	var hits []RepoHit
 	for _, s := range ix.Symbols {
 		name := strings.ToLower(s.Name)
 		full := strings.ToLower(s.FullName())
@@ -238,35 +244,31 @@ func RankedSearch(ix *index.Index, query string, limit int) []index.Symbol {
 		if codeIntent {
 			// V7b: for code-oriented queries, code symbols must beat prose
 			// headings ("What Is Conduit?" matches query words trivially
-			// and drowns the actual API surface).
-			if isCodeKind(s.Kind) {
-				score += 25
-			} else if s.Kind == "heading" {
-				score -= 20
+			// but a developer looking for symbols wants the type/func).
+			if s.Kind == "heading" {
+				score -= 100
+			} else if isCodeKind(s.Kind) {
+				score += 30
 			}
 		}
 		if ix.IsGenerated(s.File) {
-			score -= 60 // demote generated stubs below real implementations
+			score -= 60
 		}
-		hits = append(hits, hit{s: s, score: score})
+		hits = append(hits, RepoHit{Symbol: s, Score: score})
 	}
 	sort.Slice(hits, func(i, j int) bool {
-		if hits[i].score != hits[j].score {
-			return hits[i].score > hits[j].score
+		if hits[i].Score != hits[j].Score {
+			return hits[i].Score > hits[j].Score
 		}
-		if hits[i].s.FullName() != hits[j].s.FullName() {
-			return hits[i].s.FullName() < hits[j].s.FullName()
+		if hits[i].Symbol.FullName() != hits[j].Symbol.FullName() {
+			return hits[i].Symbol.FullName() < hits[j].Symbol.FullName()
 		}
-		return hits[i].s.File < hits[j].s.File
+		return hits[i].Symbol.File < hits[j].Symbol.File
 	})
 	if len(hits) > limit {
 		hits = hits[:limit]
 	}
-	out := make([]index.Symbol, len(hits))
-	for i, h := range hits {
-		out[i] = h.s
-	}
-	return out
+	return hits
 }
 
 // queryWords splits and normalizes a free-text query into matchable words:

@@ -538,7 +538,16 @@ func runSearch(rest []string) {
 		limit = 20
 	}
 	if f.repos {
-		hits := intel.SearchRepos(query, limit)
+		var hits []intel.RepoHit
+		if f.semantic {
+			client := llm.NewEmbedder()
+			if !client.HasEmbeddingModel() {
+				fatal("embedding model %q not installed (run: ollama pull %s)", llm.EmbedModel(), llm.EmbedModel())
+			}
+			hits = intel.SemanticSearchReposIn(root, query, limit, client)
+		} else {
+			hits = intel.SearchReposIn(root, query, limit)
+		}
 		if f.json {
 			if hits == nil {
 				hits = []intel.RepoHit{}

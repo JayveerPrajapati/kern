@@ -39,6 +39,11 @@ jobs:
           go build -buildvcs=false -tags sqlite -o /dev/null ./cmd/kern-mcp
           go build -buildvcs=false -tags sqlite -o /dev/null ./cmd/kern-server
           go build -buildvcs=false -tags sqlite -o /dev/null ./cmd/kernops
+      - name: Build all binaries (treesitter tags)
+        run: |
+          CGO_ENABLED=1 go build -buildvcs=false -tags treesitter -o /dev/null ./cmd/kern
+          CGO_ENABLED=1 go build -buildvcs=false -tags treesitter -o /dev/null ./cmd/kern-mcp
+          CGO_ENABLED=1 go build -buildvcs=false -tags treesitter -o /dev/null ./cmd/kern-server
       # Race detector over the concurrency-sensitive packages (covers the
       # agent registry / in-flight tool / lock lifecycle races). Scoped to
       # keep the full -race ./... suite from slowing CI. The -timeout is sized
