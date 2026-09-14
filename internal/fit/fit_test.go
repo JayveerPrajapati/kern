@@ -87,3 +87,32 @@ func TestFitContextEmpty(t *testing.T) {
 		t.Errorf("expected tier empty, got %s", res.Tier)
 	}
 }
+
+func TestFitContextTotalTokenBudgetCompaction(t *testing.T) {
+	dir := t.TempDir()
+	var files []string
+	for i := 0; i < 20; i++ {
+		name := filepath.Join(dir, filepath.FromSlash(strings.ToLower(string(rune('a'+i)))+".go"))
+		content := "package main\n\nfunc MultiHeadAttention" + string(rune('A'+i)) + "() {\n\t// implementation\n}\n"
+		if err := os.WriteFile(name, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		files = append(files, strings.ToLower(string(rune('a'+i)))+".go")
+	}
+
+	res, err := FitContext(context.Background(), Request{
+		Root:      dir,
+		MaxTokens: 200,
+		Files:     files,
+	})
+	if err != nil {
+		t.Fatalf("FitContext failed: %v", err)
+	}
+
+	if res.UsedTokens > 250 {
+		t.Errorf("expected UsedTokens <= 250 (compacted within budget), got %d", res.UsedTokens)
+	}
+	if !strings.Contains(res.Content, "omitted to fit within token budget") {
+		t.Errorf("expected omitted files note in content, got:\n%s", res.Content)
+	}
+}

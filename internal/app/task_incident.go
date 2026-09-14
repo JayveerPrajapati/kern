@@ -4,6 +4,11 @@ package app
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
+
 	"github.com/JayveerPrajapati/kern/internal/agent"
 	"github.com/JayveerPrajapati/kern/internal/domain"
 	"github.com/JayveerPrajapati/kern/internal/eventbus"
@@ -11,8 +16,6 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/learning"
 	"github.com/JayveerPrajapati/kern/internal/modernization"
 	"github.com/JayveerPrajapati/kern/internal/runtime"
-	"os"
-	"time"
 )
 
 // correlator returns the single shared correlation service for this TaskService
@@ -319,6 +322,13 @@ func (s *TaskService) Modernize() (*agent.Task, modernization.ExtractionPlan, st
 	s.publish(eventbus.TaskUpdated, t.ID, map[string]string{"state": "ANALYZING"})
 
 	analyzer := modernization.NewAnalyzer(s.platform.Index())
+	if s.platform != nil && s.platform.Root() != "" && s.platform.Index() != nil && s.platform.Index().Root != "" {
+		if rel, err := filepath.Rel(s.platform.Index().Root, s.platform.Root()); err == nil && rel != "." && !strings.HasPrefix(rel, "..") {
+			analyzer = analyzer.WithPathPrefix(rel)
+		} else if s.platform.Root() != s.platform.Index().Root {
+			analyzer = analyzer.WithPathPrefix(s.platform.Root())
+		}
+	}
 	planPtr, err := analyzer.Analyze()
 	if err != nil {
 		s.fail(t, err.Error())

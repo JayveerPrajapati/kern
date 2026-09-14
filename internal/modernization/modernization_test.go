@@ -357,3 +357,36 @@ func TestModernizationDisambiguateNames(t *testing.T) {
 		t.Errorf("expected hub in comm-2 name, got %q", names["comm-2"])
 	}
 }
+
+func TestModernizationWithPathPrefix(t *testing.T) {
+	files := map[string]string{
+		"project_a/orders/orders.go":   ordersPkg,
+		"project_a/billing/billing.go": billingPkg,
+		"project_b/other/other.go": `package other
+func RunOther() int { return 42 }
+`,
+	}
+	ix := build(t, files)
+
+	// Without prefix, both project_a and project_b symbols are in index
+	planAll, err := NewAnalyzer(ix).Analyze()
+	if err != nil {
+		t.Fatalf("Analyze: %v", err)
+	}
+	if len(planAll.Contexts) == 0 {
+		t.Fatalf("expected contexts in un-scoped plan")
+	}
+
+	// With prefix "project_a", project_b symbols must not be included
+	planA, err := NewAnalyzer(ix).WithPathPrefix("project_a").Analyze()
+	if err != nil {
+		t.Fatalf("Analyze with prefix: %v", err)
+	}
+	for _, ctx := range planA.Contexts {
+		for _, sym := range ctx.Symbols {
+			if strings.Contains(sym, "RunOther") || strings.Contains(sym, "other") {
+				t.Errorf("expected project_b symbol to be excluded with project_a prefix, found %s in context %s", sym, ctx.Name)
+			}
+		}
+	}
+}

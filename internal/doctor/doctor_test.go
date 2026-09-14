@@ -406,3 +406,42 @@ func TestCheckExecDetectsSIGKILL(t *testing.T) {
 		t.Fatalf("expected Gatekeeper re-sign guidance in detail, got %q", f.Detail)
 	}
 }
+
+func TestCheckMultiRepoFreshness(t *testing.T) {
+	parent := t.TempDir()
+
+	subA := filepath.Join(parent, "repo-a")
+	subB := filepath.Join(parent, "repo-b")
+	_ = os.MkdirAll(filepath.Join(subA, ".git"), 0o755)
+	_ = os.MkdirAll(filepath.Join(subB, ".git"), 0o755)
+
+	writeGoFile(t, subA, "a.go")
+	writeGoFile(t, subB, "b.go")
+
+	ixA, err := index.Build(subA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ixA.Save(); err != nil {
+		t.Fatal(err)
+	}
+
+	ixB, err := index.Build(subB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ixB.Save(); err != nil {
+		t.Fatal(err)
+	}
+
+	// In parent workspace with no root index, child indices must aggregate as fresh
+	f := checkIndexFreshness(parent)
+	if f.Level != "ok" || !strings.Contains(f.Detail, "multi-repo index is fresh") {
+		t.Fatalf("expected ok multi-repo freshness, got %+v", f)
+	}
+
+	fi := checkIndex(parent)
+	if fi.Level != "ok" || !strings.Contains(fi.Detail, "multi-repo index") {
+		t.Fatalf("expected ok multi-repo index, got %+v", fi)
+	}
+}

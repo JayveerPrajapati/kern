@@ -3,7 +3,6 @@ package intel
 import (
 	"encoding/json"
 	"fmt"
-	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -40,14 +39,12 @@ func DefaultBoundariesPath(root string) string {
 
 // LoadBoundaries reads the guardrail rules for root. A missing file is not an
 // error — it yields a nil ruleset (nothing to enforce), preserving the
-// zero-config experience, but logs a warning so the absence of guardrails is
-// visible. A present-but-malformed file IS an error (fail-closed): a broken
-// boundaries.json must never silently permit everything.
+// zero-config experience. A present-but-malformed file IS an error (fail-closed):
+// a broken boundaries.json must never silently permit everything.
 func LoadBoundaries(root string) (*Boundaries, error) {
 	data, err := os.ReadFile(DefaultBoundariesPath(root))
 	if err != nil {
 		if os.IsNotExist(err) {
-			log.Printf("WARNING: no boundary rules configured — %s not found; nothing to enforce", DefaultBoundariesPath(root))
 			return nil, nil
 		}
 		return nil, err
@@ -57,6 +54,126 @@ func LoadBoundaries(root string) (*Boundaries, error) {
 		return nil, fmt.Errorf("invalid %s: %w", DefaultBoundariesPath(root), err)
 	}
 	return &b, nil
+}
+
+// InferBoundaries analyzes the index (packages, communities, file structure)
+// and returns default layered architecture guardrails (Controller/Router -> Service -> Repository/DB)
+// when no explicit .kern/boundaries.json is defined.
+func InferBoundaries(ix *index.Index) *Boundaries {
+	if ix == nil {
+		return &Boundaries{
+			Description: "Inferred baseline layered architecture guardrails",
+			Rules: []BoundaryRule{
+				{From: "repository", To: "controller", Action: "forbid"},
+				{From: "service", To: "controller", Action: "forbid"},
+				{From: "db", To: "web", Action: "forbid"},
+				{From: "web", To: "db", Action: "forbid"},
+			},
+		}
+	}
+
+	// Detect directories corresponding to common layers
+	layer1 := make(map[string]bool) // Presentation / Controller / Web / Route / Handler / API
+	layer2 := make(map[string]bool) // Service / Business / Logic / UseCase / Domain
+	layer3 := make(map[string]bool) // Repository / DAO / Store / DB / Database / Model
+
+	isL1 := func(name string) bool {
+		lower := strings.ToLower(name)
+		return strings.Contains(lower, "controller") || strings.Contains(lower, "handler") ||
+			strings.Contains(lower, "route") || strings.Contains(lower, "web") ||
+			strings.Contains(lower, "api") || strings.Contains(lower, "rest") ||
+			strings.Contains(lower, "transport") || strings.Contains(lower, "delivery") ||
+			strings.Contains(lower, "endpoint")
+	}
+	isL2 := func(name string) bool {
+		lower := strings.ToLower(name)
+		return strings.Contains(lower, "service") || strings.Contains(lower, "usecase") ||
+			strings.Contains(lower, "domain") || strings.Contains(lower, "logic") ||
+			strings.Contains(lower, "biz")
+	}
+	isL3 := func(name string) bool {
+		lower := strings.ToLower(name)
+		return strings.Contains(lower, "repo") || strings.Contains(lower, "dao") ||
+			strings.Contains(lower, "store") || strings.Contains(lower, "database") ||
+			lower == "db" || strings.HasSuffix(lower, "/db") || strings.Contains(lower, "model") ||
+			strings.Contains(lower, "entity")
+	}
+
+	for p := range ix.Pkgs {
+		pClean := filepath.ToSlash(p)
+		if isL1(pClean) {
+			layer1[pClean] = true
+		}
+		if isL2(pClean) {
+			layer2[pClean] = true
+		}
+		if isL3(pClean) {
+			layer3[pClean] = true
+		}
+	}
+
+	for f := range ix.FileHashes {
+		d := filepath.ToSlash(filepath.Dir(f))
+		if d == "." || d == "" {
+			continue
+		}
+		if isL1(d) {
+			layer1[d] = true
+		}
+		if isL2(d) {
+			layer2[d] = true
+		}
+		if isL3(d) {
+			layer3[d] = true
+		}
+	}
+
+	var rules []BoundaryRule
+	ruleSet := make(map[string]bool)
+	addRule := func(from, to, action string) {
+		key := from + "->" + to + ":" + action
+		if !ruleSet[key] {
+			ruleSet[key] = true
+			rules = append(rules, BoundaryRule{From: from, To: to, Action: action})
+		}
+	}
+
+	// Layer 3 (Repository/DB) cannot depend on Layer 2 (Service) or Layer 1 (Controller)
+	for l3 := range layer3 {
+		for l1 := range layer1 {
+			if l3 != l1 {
+				addRule(l3, l1, "forbid")
+			}
+		}
+		for l2 := range layer2 {
+			if l3 != l2 {
+				addRule(l3, l2, "forbid")
+			}
+		}
+	}
+
+	// Layer 2 (Service) cannot depend on Layer 1 (Controller)
+	for l2 := range layer2 {
+		for l1 := range layer1 {
+			if l2 != l1 {
+				addRule(l2, l1, "forbid")
+			}
+		}
+	}
+
+	// Always ensure standard baseline keyword rules are present as fallbacks
+	addRule("repository", "controller", "forbid")
+	addRule("repository", "service", "forbid")
+	addRule("service", "controller", "forbid")
+	addRule("service", "web", "forbid")
+	addRule("db", "web", "forbid")
+	addRule("db", "controller", "forbid")
+	addRule("db", "service", "forbid")
+
+	return &Boundaries{
+		Description: "Inferred layered architecture guardrails (Controller -> Service -> Repository/DB)",
+		Rules:       rules,
+	}
 }
 
 // InitBoundaries scaffolds a starter guardrail file.
@@ -101,9 +218,8 @@ func CheckBoundaries(ix *index.Index, b *Boundaries, files []string) []Violation
 // heuristic edge can never fabricate a boundary violation. The returned map
 // records, per caller language, how many call edges were skipped.
 //
-// Fail-open on missing mandatory data is surfaced, never silent: a nil
-// boundaries ruleset (no .kern/boundaries.json) with a non-empty check scope
-// records a "boundaries-not-configured" skip (a warning), not a violation.
+// When b is nil (no .kern/boundaries.json present), default layered architecture
+// guardrails are dynamically inferred from detected communities and symbol packages.
 func CheckBoundariesPrecise(ix *index.Index, b *Boundaries, files []string, strict bool) ([]Violation, map[string]int) {
 	var violations []Violation
 	skipped := map[string]int{}
@@ -113,10 +229,7 @@ func CheckBoundariesPrecise(ix *index.Index, b *Boundaries, files []string, stri
 		return violations, skipped
 	}
 	if b == nil {
-		// No .kern/boundaries.json — the guard is not configured. Returning
-		// empty violations here would be a silent PASS, so mirror the
-		// imports-by-file-missing precedent: surface the gap as a skip (a
-		// warning), never a violation.
+		// No .kern/boundaries.json and no inferred rules passed — surface the gap as a skip.
 		skipped["boundaries-not-configured"] = len(files)
 		return violations, skipped
 	}

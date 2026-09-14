@@ -29,8 +29,8 @@ func runMCP(rest []string) {
 		if existing != "" {
 			roots = append(roots, strings.Split(existing, ",")...)
 		}
-		os.Setenv("KERN_MCP_ROOTS", strings.Join(roots, ","))
-		os.Setenv("KERN_ROOTS", strings.Join(roots, ","))
+		_ = os.Setenv("KERN_MCP_ROOTS", strings.Join(roots, ","))
+		_ = os.Setenv("KERN_ROOTS", strings.Join(roots, ","))
 	}
 	wireRecorder()
 	mcp.SetServerVersion(version)

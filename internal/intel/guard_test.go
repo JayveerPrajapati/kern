@@ -263,3 +263,40 @@ func Handler() {}
 		}
 	}
 }
+
+func TestInferBoundaries(t *testing.T) {
+	dir := writeTree(t, map[string]string{
+		"controller/user.go": `package controller
+func HandleUser() {}
+`,
+		"service/user.go": `package service
+func GetUser() {}
+`,
+		"repository/user.go": `package repository
+func FindUser() {}
+`,
+	})
+	ix, err := index.Build(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	b := InferBoundaries(ix)
+	if b == nil {
+		t.Fatal("expected inferred boundaries, got nil")
+	}
+	if len(b.Rules) == 0 {
+		t.Fatal("expected inferred rules, got 0")
+	}
+
+	// Verify that repository -> controller or service -> controller is forbidden
+	foundRepoRule := false
+	for _, r := range b.Rules {
+		if strings.Contains(r.From, "repo") && strings.Contains(r.To, "controller") && r.Action == "forbid" {
+			foundRepoRule = true
+		}
+	}
+	if !foundRepoRule {
+		t.Errorf("expected inferred rule forbidding repository -> controller, got rules: %+v", b.Rules)
+	}
+}

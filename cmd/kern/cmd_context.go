@@ -499,6 +499,10 @@ func runGuard(rest []string) {
 		if err != nil {
 			fatal("Guard: %v", err)
 		}
+		unconfigured := b == nil
+		if b == nil {
+			b = intel.InferBoundaries(ix)
+		}
 		var files []string
 		if f.file != "" {
 			for _, p := range strings.Split(f.file, ",") {
@@ -619,7 +623,7 @@ func runGuard(rest []string) {
 		// kern-server webhook delivery) can see guard results. Best-effort
 		// side effect: output and exit behavior are unchanged, and the events
 		// are persisted even when the check REJECTs below.
-		publishGuardEvents(root, violations, skipped["boundaries-not-configured"] > 0)
+		publishGuardEvents(root, violations, unconfigured || skipped["boundaries-not-configured"] > 0)
 		if f.threshold >= 0 && len(violations) > f.threshold {
 			panic(exitError{code: 2})
 		}

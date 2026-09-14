@@ -155,23 +155,45 @@ func FitContext(ctx context.Context, req Request) (*Result, error) {
 		}, nil
 	}
 
-	// Try Tier 3: Summary
+	// Try Tier 3: Summary across all files
 	tier3Content, tier3Files, tier3Tokens := renderTier(absRoot, filesList, fileContents, code.TierSummary)
+	if tier3Tokens <= req.MaxTokens {
+		if tier1Tokens > 0 {
+			savings = float64(tier1Tokens-tier3Tokens) / float64(tier1Tokens) * 100.0
+		}
+		return &Result{
+			Tier:       "summary",
+			Budget:     req.MaxTokens,
+			UsedTokens: tier3Tokens,
+			SavingsPct: savings,
+			FileCount:  len(tier3Files),
+			Files:      tier3Files,
+			Content:    tier3Content,
+		}, nil
+	}
+
+	// When even summary tier across all files exceeds MaxTokens, enforce global token accumulator
+	// to prune/prioritize files strictly within the requested token budget.
+	budgetedContent, budgetedFiles, budgetedTokens := renderTierBudgeted(absRoot, filesList, fileContents, code.TierSummary, req.MaxTokens)
 	if tier1Tokens > 0 {
-		savings = float64(tier1Tokens-tier3Tokens) / float64(tier1Tokens) * 100.0
+		savings = float64(tier1Tokens-budgetedTokens) / float64(tier1Tokens) * 100.0
 	}
 	return &Result{
 		Tier:       "summary",
 		Budget:     req.MaxTokens,
-		UsedTokens: tier3Tokens,
+		UsedTokens: budgetedTokens,
 		SavingsPct: savings,
-		FileCount:  len(tier3Files),
-		Files:      tier3Files,
-		Content:    tier3Content,
+		FileCount:  len(budgetedFiles),
+		Files:      budgetedFiles,
+		Content:    budgetedContent,
 	}, nil
 }
 
 func renderTier(root string, files []string, contents map[string]string, tier code.Tier) (string, []FileResult, int) {
+	return renderTierBudgeted(root, files, contents, tier, 0)
+}
+
+func renderTierBudgeted(root string, files []string, contents map[string]string, tier code.Tier, maxTokens int) (string, []FileResult, int) {
 	var b strings.Builder
 	var results []FileResult
 	tierName := "full"
@@ -182,6 +204,8 @@ func renderTier(root string, files []string, contents map[string]string, tier co
 		tierName = "summary"
 	}
 
+	totalTokens := 0
+	omitted := 0
 	for _, f := range files {
 		c, ok := contents[f]
 		if !ok {
@@ -189,20 +213,32 @@ func renderTier(root string, files []string, contents map[string]string, tier co
 		}
 		rendered := code.RenderTier(f, []byte(c), tier)
 		tokens := tokenize.Count(rendered)
+		header := fmt.Sprintf("// --- %s (%s, ~%d tokens) ---\n", f, tierName, tokens)
+		fileBlock := header + rendered + "\n\n"
+		blockTokens := tokenize.Count(fileBlock)
+
+		if maxTokens > 0 && len(results) > 0 && totalTokens+blockTokens > maxTokens {
+			omitted++
+			continue
+		}
+
 		results = append(results, FileResult{
 			Path:   f,
 			Tier:   tierName,
 			Tokens: tokens,
 		})
+		b.WriteString(fileBlock)
+		totalTokens += blockTokens
+	}
 
-		fmt.Fprintf(&b, "// --- %s (%s, ~%d tokens) ---\n", f, tierName, tokens)
-		b.WriteString(rendered)
-		b.WriteString("\n\n")
+	if omitted > 0 {
+		note := fmt.Sprintf("// ... %d additional matching files omitted to fit within token budget (%d / %d tokens)\n", omitted, totalTokens, maxTokens)
+		b.WriteString(note)
 	}
 
 	fullText := b.String()
-	totalTokens := tokenize.Count(fullText)
-	return fullText, results, totalTokens
+	actualTokens := tokenize.Count(fullText)
+	return fullText, results, actualTokens
 }
 
 // RenderJSON serializes the Result to indented JSON.

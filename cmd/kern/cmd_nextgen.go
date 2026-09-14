@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/JayveerPrajapati/kern/internal/fit"
@@ -16,7 +17,7 @@ import (
 )
 
 func runFitContext(rest []string) {
-	f, _, err := parseFlags(rest)
+	f, args, err := parseFlags(rest)
 	if err != nil {
 		fatalUsage("flags: %v", err)
 	}
@@ -25,6 +26,9 @@ func runFitContext(rest []string) {
 		root = "."
 	}
 	maxTok := f.maxTokens
+	if maxTok <= 0 && f.budget > 0 {
+		maxTok = f.budget
+	}
 	if maxTok <= 0 {
 		maxTok = 8000
 	}
@@ -36,6 +40,24 @@ func runFitContext(rest []string) {
 	var syms []string
 	if f.symbol != "" {
 		syms = strings.Split(f.symbol, ",")
+	}
+
+	// Positional arguments fallback: kern fit-context <symbol|file> [--budget N]
+	if len(files) == 0 && len(syms) == 0 && len(args) > 0 {
+		for _, arg := range args {
+			arg = strings.TrimSpace(arg)
+			if arg == "" {
+				continue
+			}
+			fullPath := filepath.Join(root, arg)
+			if fi, err := os.Stat(fullPath); err == nil && !fi.IsDir() {
+				files = append(files, arg)
+			} else if strings.Contains(arg, ".") || strings.Contains(arg, "/") || strings.Contains(arg, "\\") {
+				files = append(files, arg)
+			} else {
+				syms = append(syms, arg)
+			}
+		}
 	}
 
 	res, err := fit.FitContext(context.Background(), fit.Request{

@@ -599,3 +599,42 @@ func TestSessionRebuildLargeDiffBacksOffToFullBuild(t *testing.T) {
 		t.Errorf("ReusedResults = %d, want 0 on the large-diff back-off (full Build reuses nothing)", got)
 	}
 }
+
+func TestSessionExternalStoreHotReload(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	root := t.TempDir()
+	writeFile(t, root, "go.mod", "module demo\n\ngo 1.22\n")
+	writeFile(t, root, "app.go", "package main\n\nfunc Initial() {}\n")
+
+	s := New(root, "")
+	defer s.Close()
+
+	ix1, err := s.Index()
+	if err != nil {
+		t.Fatalf("Index 1: %v", err)
+	}
+	if !hasSymbol(ix1, "Initial") {
+		t.Fatal("expected Initial symbol in ix1")
+	}
+
+	// External modification: new file added and built externally
+	writeFile(t, root, "extra.go", "package main\n\nfunc ExternalAdded() {}\n")
+	ixExt, err := index.Build(root)
+	if err != nil {
+		t.Fatalf("Build external: %v", err)
+	}
+	// Give a slight delay to ensure distinct filesystem timestamp if needed
+	time.Sleep(10 * time.Millisecond)
+	if err := ixExt.Save(); err != nil {
+		t.Fatalf("Save external: %v", err)
+	}
+
+	// Session.Index() must immediately hot-reload the newly saved store
+	ix2, err := s.Index()
+	if err != nil {
+		t.Fatalf("Index 2: %v", err)
+	}
+	if !hasSymbol(ix2, "ExternalAdded") {
+		t.Fatal("expected ExternalAdded symbol in hot-reloaded index")
+	}
+}
