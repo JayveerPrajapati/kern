@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"encoding/json"
+	"github.com/JayveerPrajapati/kern/internal/mcp/provenance"
 	"os"
 	"path/filepath"
 	"strings"
@@ -85,12 +86,6 @@ func provenanceOf(t *testing.T, resp map[string]any) map[string]any {
 	return p
 }
 
-// TestProvenance_RawExplore verifies the P0.1 flip: omitting agent_id (with
-// no KERN_MCP_PERMISSIVE) no longer returns raw unfiltered results. The call
-// is governed by the default agent with the default cwd-scoped scope — an
-// explicit denied scope is honored, the denied symbol is excluded, provenance
-// is mode="governed" with policy_source="default-scoped", and an auditable
-// authorizing rule is present.
 func TestProvenance_RawExplore(t *testing.T) {
 	root := provenanceProject(t)
 	resp := mcpCall(t, "kern_explore", map[string]any{
@@ -527,7 +522,7 @@ func TestProvenance_UnknownAgentDenial(t *testing.T) {
 // marshal→unmarshal cycle field-for-field, in both governed and raw shapes.
 func TestProvenance_JSONRoundTrip(t *testing.T) {
 	governed := &Provenance{
-		SchemaVersion: provenanceSchemaVersion,
+		SchemaVersion: provenance.SchemaVersion,
 		Mode:          ProvenanceModeGoverned,
 		AuthorizingRule: &AuthorizingRule{
 			PolicySource: "task-scope",
@@ -574,7 +569,7 @@ func TestProvenance_JSONRoundTrip(t *testing.T) {
 
 	// Raw shape: no authorizing rule → absent in JSON, nil after round-trip.
 	raw := &Provenance{
-		SchemaVersion: provenanceSchemaVersion,
+		SchemaVersion: provenance.SchemaVersion,
 		Mode:          ProvenanceModeRaw,
 		Index:         IndexProvenance{ContentRoot: "c", FreshnessVerdict: "stale"},
 		Symbols:       []SymbolProvenance{},

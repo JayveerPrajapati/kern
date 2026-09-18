@@ -29,11 +29,11 @@ func (s *Server) handleSandbox(ctx context.Context, id string, args map[string]a
 			return "", fmt.Errorf("command is required")
 		}
 		// Host command execution must pass the governance firewall; fail closed on denial.
-		if err := governance.CheckExec(); err != nil {
+		// The command text is bound to any approval, so a HIGH/CRITICAL denial
+		// returns a resolvable approval ID (`kern approve <id>`).
+		if err := governance.CheckExecCommand(cmdLine, root); err != nil {
 			return "", err
 		}
-		stop := s.startProgress(ctx, id, "kern_sandbox")
-		defer stop()
 		parts := splitShellLine(cmdLine)
 		if len(parts) == 0 {
 			return "", fmt.Errorf("command is empty")
@@ -58,7 +58,10 @@ func (s *Server) handleSandbox(ctx context.Context, id string, args map[string]a
 			fmt.Fprintf(&b, "status: FAIL (exit %d, %s)\n", res.ExitCode, res.Duration.Round(time.Millisecond))
 		}
 		if res.Err != nil {
-			fmt.Fprintf(&b, "error: %v\n", res.Err)
+			// Mask PII/secrets in the error line too (audit R4): res.Output
+			// is masked below, so an unmasked error would leak what the
+			// masked output redacted.
+			fmt.Fprintf(&b, "error: %v\n", pii.Mask(res.Err.Error()).Text)
 		}
 		if res.Network != nil {
 			fmt.Fprintf(&b, "network: %s\n", res.Network.Summary())
@@ -146,14 +149,17 @@ func (s *Server) handleHeal(ctx context.Context, id string, args map[string]any)
 		if root == "" {
 			root = "."
 		}
-		// kern_heal drives validation/build commands (arbitrary host code); it
-		// must pass the governance firewall, fail closed.
-		if err := governance.CheckExec(); err != nil {
-			return "", err
-		}
 		task := argString(args, "task")
 		if task == "" {
 			task = "Fix the failing build/test/syntax errors in this project."
+		}
+		// kern_heal drives validation/build commands (arbitrary host code); it
+		// must pass the governance firewall, fail closed. The task text is the
+		// best command binding available (the concrete commands are
+		// LLM-chosen), so an approval for one heal task never authorizes a
+		// different one.
+		if err := governance.CheckExecCommand(task, root); err != nil {
+			return "", err
 		}
 		model := argString(args, "model")
 		rounds := 3
@@ -176,8 +182,6 @@ func (s *Server) handleHeal(ctx context.Context, id string, args map[string]any)
 				timeout = time.Duration(sec) * time.Second
 			}
 		}
-		stop := s.startProgress(ctx, id, "kern_heal")
-		defer stop()
 		res := heal.Run(ctx, root, task, model, rounds, timeout, argBool(args, "force"))
 		var b strings.Builder
 		if res.Validated {
@@ -233,8 +237,9 @@ func (s *Server) handleValidate(ctx context.Context, args map[string]any) (strin
 		}
 		// Running the detected or user-supplied command executes arbitrary host
 		// code, so it must pass the governance firewall first; fail closed on
-		// denial (same gate as kern_exec/kern_sandbox).
-		if err := governance.CheckExec(); err != nil {
+		// denial (same gate as kern_exec/kern_sandbox). The concrete command is
+		// bound to any approval.
+		if err := governance.CheckExecCommand(strings.Join(append([]string{c.Cmd}, c.Args...), " "), root); err != nil {
 			return "", err
 		}
 		res := validate.Run(ctx, root, c, timeout)
@@ -265,12 +270,15 @@ func (s *Server) handleRunBuild(ctx context.Context, id string, args map[string]
 			return "", fmt.Errorf("command is required")
 		}
 		// Host command execution must pass the governance firewall; fail closed
-		// on denial (same gate as kern_exec/kern_sandbox).
-		if err := governance.CheckExec(); err != nil {
+		// on denial (same gate as kern_exec/kern_sandbox). The concrete
+		// command is bound to any approval.
+		root := argString(args, "dir")
+		if root == "" {
+			root = "."
+		}
+		if err := governance.CheckExecCommand(cmd, root); err != nil {
 			return "", err
 		}
-		stop := s.startProgress(ctx, id, "kern_run_build")
-		defer stop()
 		// Bound the build so a hanging command cannot hold the server: builds
 		// and tests can legitimately take minutes, but never forever.
 		bctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
@@ -295,8 +303,14 @@ func (s *Server) handleExec(ctx context.Context, args map[string]any) (string, e
 				strings.Join(script.Available(), ", "), strings.Join(script.Languages(), ", ")), nil
 		}
 		// Running a script executes an arbitrary host command, so it must pass
-		// the governance firewall first; fail closed on denial.
-		if err := governance.CheckExec(); err != nil {
+		// the governance firewall first; fail closed on denial. The script
+		// text is bound to any approval, so one approval never authorizes a
+		// different script.
+		root := argString(args, "root")
+		if root == "" {
+			root = "."
+		}
+		if err := governance.CheckExecCommand(argString(args, "code"), root); err != nil {
 			return "", err
 		}
 		// no_isolate (full env + network) is only honored when the operator has
@@ -330,7 +344,13 @@ func (s *Server) handleExec(ctx context.Context, args map[string]any) (string, e
 		}
 		res := script.RunScript(run)
 		if res.Err != nil {
-			return "", fmt.Errorf("kern_exec: %s", res.Err)
+			// Mask PII/secrets in the error path too (audit A5): a failed
+			// script commonly prints the secret to stderr before dying.
+			// res.Err already folds the script's stderr in ("failed with exit
+			// code N: <stderr>"), so masking the error text covers stderr as
+			// well — matching the CLI (cmd/kern/cmd_exec.go masks both
+			// streams).
+			return "", fmt.Errorf("kern_exec: %s", pii.Mask(res.Err.Error()).Text)
 		}
 		// Mask PII/secrets in script stdout before returning it.
 		return pii.Mask(res.Stdout).Text, nil

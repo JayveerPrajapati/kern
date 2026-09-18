@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/JayveerPrajapati/kern/internal/governance"
+	"github.com/JayveerPrajapati/kern/internal/mcp/org"
 )
 
 // orgProjectsResp is the decoded shape of kern_org_projects.
@@ -86,12 +87,12 @@ func TestHandleOrgProjects_ProjectPairs(t *testing.T) {
 // TestHandleOrgAgents_RegisterListDuplicate: a shared server registers an
 // agent, rejects a duplicate id, and lists the agent back.
 func TestHandleOrgAgents_RegisterListDuplicate(t *testing.T) {
-	srv, err := orgServer(map[string]any{})
+	srv, err := org.OrgServer(map[string]any{})
 	if err != nil {
 		t.Fatalf("org server: %v", err)
 	}
 
-	res, err := orgAgentsRegister(srv, map[string]any{"id": "a1", "name": "Alpha"})
+	res, err := org.OrgAgentsRegister(srv, map[string]any{"id": "a1", "name": "Alpha"})
 	if err != nil {
 		t.Fatalf("register agent error: %v", err)
 	}
@@ -104,14 +105,14 @@ func TestHandleOrgAgents_RegisterListDuplicate(t *testing.T) {
 	}
 
 	// Duplicate id -> 409-style error.
-	if _, err := orgAgentsRegister(srv, map[string]any{"id": "a1", "name": "Alpha"}); err == nil {
+	if _, err := org.OrgAgentsRegister(srv, map[string]any{"id": "a1", "name": "Alpha"}); err == nil {
 		t.Fatal("expected duplicate agent registration to error")
 	} else if !strings.Contains(err.Error(), "already registered") {
 		t.Errorf("expected already-registered error, got: %v", err)
 	}
 
 	// List round-trip.
-	list, err := orgAgentsList(srv, map[string]any{})
+	list, err := org.OrgAgentsList(srv, map[string]any{})
 	if err != nil {
 		t.Fatalf("list agents error: %v", err)
 	}
@@ -144,7 +145,7 @@ func TestHandleOrgAgents_RegisterListDuplicate(t *testing.T) {
 // against a shared server, plus unknown-project validation and 404-style show.
 func TestHandleOrgTeams_RoundTrip(t *testing.T) {
 	root := t.TempDir()
-	srv, err := orgServer(map[string]any{"root": root})
+	srv, err := org.OrgServer(map[string]any{"root": root})
 	if err != nil {
 		t.Fatalf("org server: %v", err)
 	}
@@ -155,7 +156,7 @@ func TestHandleOrgTeams_RoundTrip(t *testing.T) {
 	projName := filepath.Base(root)
 
 	// Create: project reference to the registered default project is valid.
-	res, err := orgTeamsCreate(srv, map[string]any{
+	res, err := org.OrgTeamsCreate(srv, map[string]any{
 		"id":       "t1",
 		"name":     "Team One",
 		"projects": projName,
@@ -173,7 +174,7 @@ func TestHandleOrgTeams_RoundTrip(t *testing.T) {
 	}
 
 	// Show.
-	show, err := orgTeamsShow(srv, map[string]any{"id": "t1"})
+	show, err := org.OrgTeamsShow(srv, map[string]any{"id": "t1"})
 	if err != nil {
 		t.Fatalf("show team error: %v", err)
 	}
@@ -182,7 +183,7 @@ func TestHandleOrgTeams_RoundTrip(t *testing.T) {
 	}
 
 	// List.
-	list, err := orgTeamsList(srv, map[string]any{})
+	list, err := org.OrgTeamsList(srv, map[string]any{})
 	if err != nil {
 		t.Fatalf("list teams error: %v", err)
 	}
@@ -198,21 +199,21 @@ func TestHandleOrgTeams_RoundTrip(t *testing.T) {
 	}
 
 	// Unknown-project validation error.
-	if _, err := orgTeamsCreate(srv, map[string]any{"id": "t2", "name": "Bad", "projects": "nope"}); err == nil {
+	if _, err := org.OrgTeamsCreate(srv, map[string]any{"id": "t2", "name": "Bad", "projects": "nope"}); err == nil {
 		t.Fatal("expected unknown-project validation error")
 	} else if !strings.Contains(err.Error(), "unknown project") {
 		t.Errorf("expected unknown-project error, got: %v", err)
 	}
 
 	// Unknown-agent validation error.
-	if _, err := orgTeamsCreate(srv, map[string]any{"id": "t3", "name": "Bad", "members": "ghost"}); err == nil {
+	if _, err := org.OrgTeamsCreate(srv, map[string]any{"id": "t3", "name": "Bad", "members": "ghost"}); err == nil {
 		t.Fatal("expected unknown-agent validation error")
 	} else if !strings.Contains(err.Error(), "unknown agent") {
 		t.Errorf("expected unknown-agent error, got: %v", err)
 	}
 
 	// Remove.
-	rem, err := orgTeamsRemove(srv, map[string]any{"id": "t1"})
+	rem, err := org.OrgTeamsRemove(srv, map[string]any{"id": "t1"})
 	if err != nil {
 		t.Fatalf("remove team error: %v", err)
 	}
@@ -221,7 +222,7 @@ func TestHandleOrgTeams_RoundTrip(t *testing.T) {
 	}
 
 	// Show of a missing team -> 404-style error string.
-	if _, err := orgTeamsShow(srv, map[string]any{"id": "t1"}); err == nil {
+	if _, err := org.OrgTeamsShow(srv, map[string]any{"id": "t1"}); err == nil {
 		t.Fatal("expected show of removed team to error")
 	} else if !strings.Contains(err.Error(), `team "t1" not found`) {
 		t.Errorf("expected team-not-found error, got: %v", err)
@@ -237,13 +238,13 @@ func TestHandleOrgTeams_RoundTrip(t *testing.T) {
 // TestHandleOrgMemory_AddList: a memory added via the org store appears in the
 // org list; add without content is an error.
 func TestHandleOrgMemory_AddList(t *testing.T) {
-	srv, err := orgServer(map[string]any{"root": t.TempDir()})
+	srv, err := org.OrgServer(map[string]any{"root": t.TempDir()})
 	if err != nil {
 		t.Fatalf("org server: %v", err)
 	}
 	content := "org memory content " + t.Name()
 
-	add, err := orgMemoryAdd(srv, map[string]any{"content": content, "type": "lesson"})
+	add, err := org.OrgMemoryAdd(srv, map[string]any{"content": content, "type": "lesson"})
 	if err != nil {
 		t.Fatalf("add memory error: %v", err)
 	}
@@ -255,7 +256,7 @@ func TestHandleOrgMemory_AddList(t *testing.T) {
 		t.Errorf("unexpected added memory: %v", added)
 	}
 
-	list, err := orgMemoryList(srv, map[string]any{})
+	list, err := org.OrgMemoryList(srv, map[string]any{})
 	if err != nil {
 		t.Fatalf("list memories error: %v", err)
 	}
@@ -283,7 +284,7 @@ func TestHandleOrgMemory_AddList(t *testing.T) {
 		t.Errorf("added memory %q not found in org list", content)
 	}
 
-	if _, err := orgMemoryAdd(srv, map[string]any{}); err == nil {
+	if _, err := org.OrgMemoryAdd(srv, map[string]any{}); err == nil {
 		t.Error("expected add without content to error")
 	}
 }

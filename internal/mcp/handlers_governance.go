@@ -167,7 +167,7 @@ func (s *Server) handleRename(ctx context.Context, args map[string]any) (string,
 	}
 }
 
-// handleAuthorizeContext implements the kern_authorize_context tool (P0.1):
+// handleAuthorizeContext implements the kern_authorize_context tool:
 // the authorized-context primitive. It computes the symbols and call edges an
 // agent may legally read for a task, scoped by the agent's firewall identity
 // and an optional task scope, and returns the permitted scope plus an

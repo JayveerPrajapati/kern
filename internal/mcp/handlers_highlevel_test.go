@@ -6,6 +6,7 @@ import (
 	"io"
 	"strings"
 	"testing"
+	"time"
 )
 
 // classifyCase is one routing expectation for classifyMetaRequest.
@@ -93,11 +94,27 @@ func TestClassifyMetaRequest_Branches(t *testing.T) {
 		{"project_map", "show me the project map", "kern_project_map", nil},
 		{"commitmsg", "generate a commit message", "kern_commitmsg", nil},
 		{"explore_qualified_symbol", "how does Server.dispatch work", "kern_explore", map[string]string{"symbol": "Server.dispatch"}},
-		{"implementation_plan_falls_back", "show me the implementation plan", "kern_search", nil},
+		{"implementation_plan_routes", "show me the implementation plan", "kern_plan", nil},
 		// F-1: CLI/subcommand questions must not fall into the graph router's
 		// "entry points" fallback — they are symbol searches.
 		{"cli_dispatch_question", "how does CLI command dispatch work in this repo?", "kern_search", nil},
 		{"cli_change_still_impact", "what breaks if I change the CLI dispatch table", "kern_impact", nil},
+		// F-2: index intents — rebuild/refresh routes to kern_onboard (the
+		// tool that builds/refreshes the index), status/freshness to
+		// kern_health, plain "index" questions still fall back to search.
+		{"index_rebuild", "refresh and rebuild the index for this repo now so it is fresh at HEAD", "kern_onboard", nil},
+		{"index_rebuild_short", "rebuild the index", "kern_onboard", nil},
+		{"index_reindex", "reindex this project", "kern_onboard", nil},
+		{"index_status", "is the index fresh", "kern_health", nil},
+		{"index_health_word", "index health", "kern_health", nil},
+		{"index_plain_falls_back", "how does the index work", "kern_search", nil},
+		// LLM provider intents — chain/sampler/status questions route to
+		// kern_llm_providers; plain code questions fall back to search.
+		{"llm_providers", "list the LLM provider chain and whether a host sampler is connected", "kern_llm_providers", nil},
+		{"llm_providers_short", "llm providers", "kern_llm_providers", nil},
+		{"host_sampler", "is the host sampler connected", "kern_llm_providers", nil},
+		{"which_local_agent", "which local agent should I use", "kern_llm_providers", nil},
+		{"llm_question_falls_back", "how does the llm provider work", "kern_search", nil},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -138,10 +155,6 @@ func TestHandleMeta_PhaseArg(t *testing.T) {
 	}
 }
 
-// TestClassifyMetaRequest_Flow routes flow questions to a graph answer
-// (report A9): a flow query with no extractable symbol must reach
-// kern_entry_points, and one naming a CamelCase symbol must reach kern_walk —
-// never the flat kern_search fallback.
 func TestClassifyMetaRequest_Flow(t *testing.T) {
 	cases := []classifyCase{
 		{"flow_no_symbol", "how does the bundle upload flow work end to end?", "kern_entry_points", nil},
@@ -243,9 +256,6 @@ func TestHandleRiskServesRiskAssessment(t *testing.T) {
 	}
 }
 
-// TestHandleAnalyzeLens drives the P1-002 lens arg through kern_analyze: a
-// valid lens succeeds with the ANALYSIS prefix and task line; an unknown lens
-// is rejected with a clear error.
 func TestHandleAnalyzeLens(t *testing.T) {
 	root := provenanceProject(t)
 	s := NewServer(strings.NewReader(""), io.Discard)
@@ -266,13 +276,6 @@ func TestHandleAnalyzeLens(t *testing.T) {
 	}
 }
 
-// TestHandleAnalyzeProfile drives the P1-005 profile arg through kern_analyze:
-// machine-json wraps the full analysis output in a JSON envelope; an unknown
-// profile is rejected; no profile arg leaves the output byte-identical.
-// (The wrapped content is NOT byte-compared against the base run: each
-// handleAnalyze call creates a fresh Task, so the [task: <id>] line differs
-// between runs — the invariant is the ANALYSIS prefix + task line inside the
-// envelope.)
 func TestHandleAnalyzeProfile(t *testing.T) {
 	root := provenanceProject(t)
 	s := NewServer(strings.NewReader(""), io.Discard)
@@ -400,9 +403,6 @@ func TestClassifyMetaRequest_SkillLoadRoutes(t *testing.T) {
 	}
 }
 
-// TestHandleImpactNoDuplicateHeader (F-014 mirror): renderImpactText already
-// emits the "IMPACT for: <target>" header, so the MCP kern_impact handler must
-// not prepend it again — the output contains exactly one header.
 func TestHandleImpactNoDuplicateHeader(t *testing.T) {
 	root := provenanceProject(t)
 	s := NewServer(strings.NewReader(""), io.Discard)
@@ -416,5 +416,186 @@ func TestHandleImpactNoDuplicateHeader(t *testing.T) {
 	}
 	if !strings.Contains(out, "[task: ") {
 		t.Errorf("handleImpact output missing task line:\n%s", out)
+	}
+}
+
+// TestHandleMetaRoutesLLMProviders: the meta dispatch switch must have a
+// case for every classifier route — a missing case silently reclassifies to
+// kern_search (the default branch). Regression for the kern_llm_providers
+// route added with the LLM-provider intent.
+func TestHandleMetaRoutesLLMProviders(t *testing.T) {
+	s := newTestServer()
+	out, err := s.CallTool(context.Background(), "kern_meta", map[string]any{
+		"request": "list the LLM provider chain and whether a host sampler is connected",
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if !strings.Contains(out, "classified as: kern_llm_providers") {
+		t.Errorf("kern_meta must route LLM-provider questions to kern_llm_providers, got:\n%s", out)
+	}
+}
+
+// TestKnownVerifyType pins the verify-type vocabulary: every token the engine
+// can run (including the aliases its substring dispatch accepts) is known,
+// and garbage tokens (e.g. types=123, a number coerced to "123") are not.
+func TestKnownVerifyType(t *testing.T) {
+	valid := []string{
+		"build", "test", "security", "architecture", "dependency",
+		"e2e", "static-analysis", "performance", "ci",
+		// Aliases the engine's substring dispatch accepts.
+		"unit", "integration", "sec", "archi", "dep", "vet", "lint", "bench", "end-to-end",
+	}
+	for _, v := range valid {
+		if !knownVerifyType(v) {
+			t.Errorf("knownVerifyType(%q) = false, want true", v)
+		}
+	}
+	invalid := []string{"123", "garbage", "zzz", "foo bar"}
+	for _, v := range invalid {
+		if knownVerifyType(v) {
+			t.Errorf("knownVerifyType(%q) = true, want false", v)
+		}
+	}
+}
+
+// TestHandleVerifyRejectsUnknownType: kern_verify with types=123 (a number
+// coerced to the string "123") must be rejected up front with an error naming
+// the type — never a vacuous "summary: PASS" run. The rejection happens
+// before the exec firewall and before any check, so it needs no platform and
+// returns instantly.
+func TestHandleVerifyRejectsUnknownType(t *testing.T) {
+	s := newTestServer()
+	_, err := s.handleVerify(context.Background(), map[string]any{"root": ".", "types": "123"})
+	if err == nil {
+		t.Fatal("handleVerify(types=123) must error, got nil")
+	}
+	if !strings.Contains(err.Error(), "unknown verify type: 123") {
+		t.Fatalf("error must name the offending type, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "known:") {
+		t.Fatalf("error must list the known types, got: %v", err)
+	}
+	// A garbage token mixed with valid ones is rejected too, and the valid
+	// token is never silently dropped.
+	_, err = s.handleVerify(context.Background(), map[string]any{"root": ".", "types": "build,zzz"})
+	if err == nil || !strings.Contains(err.Error(), "unknown verify type: zzz") {
+		t.Fatalf("handleVerify(types=build,zzz): err = %v, want rejection of zzz", err)
+	}
+}
+
+// TestHandleVerifyAcceptsBuildTest: kern_verify with a valid exec type list
+// passes the type gate and runs the real build+test verification on a small
+// compiling fixture (exec firewall + fail-closed sandbox gate opted in, same
+// pattern as the existing exec/sandbox tests).
+func TestHandleVerifyAcceptsBuildTest(t *testing.T) {
+	t.Setenv("KERN_ALLOW_EXEC", "1")        // build/test are governed exec checks
+	t.Setenv("KERN_ALLOW_NET", "1")         // fail-closed gate: opt into unisolated runs on hosts without netns (darwin)
+	t.Setenv("XDG_CACHE_HOME", t.TempDir()) // hermetic Go build cache
+	root := mcpProject(t)
+	s := NewServer(strings.NewReader(""), io.Discard)
+	defer s.Close()
+	out, err := s.handleVerify(context.Background(), map[string]any{"root": root, "types": "build,test"})
+	if err != nil {
+		t.Fatalf("handleVerify(build,test): %v", err)
+	}
+	if !strings.Contains(out, "verdict:") || !strings.Contains(out, "[task: ") {
+		t.Errorf("output missing verdict/task line:\n%s", out)
+	}
+	if strings.Contains(out, "unknown verify type") {
+		t.Errorf("valid types must not trip the type gate:\n%s", out)
+	}
+}
+
+// TestHandleVerifyAcceptsArchitecture: kern_verify with the index-only
+// architecture check runs in-process (no exec allowlist required) and
+// returns the typed verdict.
+func TestHandleVerifyAcceptsArchitecture(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	root := mcpProject(t)
+	s := NewServer(strings.NewReader(""), io.Discard)
+	defer s.Close()
+	out, err := s.handleVerify(context.Background(), map[string]any{"root": root, "types": "architecture"})
+	if err != nil {
+		t.Fatalf("handleVerify(architecture): %v", err)
+	}
+	if !strings.Contains(out, "verdict:") {
+		t.Errorf("output missing verdict:\n%s", out)
+	}
+	if strings.Contains(out, "unknown verify type") {
+		t.Errorf("architecture must not trip the type gate:\n%s", out)
+	}
+}
+
+// TestHandleWhatIfGarbageWarns: kern_what_if with an unresolvable change
+// (bare symbol absent from the index) must surface a visible not-found
+// warning instead of a clean "Safe to proceed" bill; a real symbol from the
+// fixture must not warn.
+func TestHandleWhatIfGarbageWarns(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	root := mcpProject(t)
+	s := NewServer(strings.NewReader(""), io.Discard)
+	defer s.Close()
+
+	out, err := s.handleWhatIf(context.Background(), map[string]any{"root": root, "change": "ZZZgarbage"})
+	if err != nil {
+		t.Fatalf("handleWhatIf(garbage): %v", err)
+	}
+	if !strings.Contains(out, "not found") {
+		t.Errorf("garbage change must surface a not-found warning, got:\n%s", out)
+	}
+	if strings.Contains(out, "Safe to proceed") && !strings.Contains(out, "warning:") {
+		t.Errorf("garbage change must not read as a clean bill, got:\n%s", out)
+	}
+
+	out2, err := s.handleWhatIf(context.Background(), map[string]any{"root": root, "change": "Greet"})
+	if err != nil {
+		t.Fatalf("handleWhatIf(Greet): %v", err)
+	}
+	if strings.Contains(out2, "not found") {
+		t.Errorf("valid symbol must not carry the not-found warning, got:\n%s", out2)
+	}
+}
+
+// TestHandleDoFailsFastWithoutProvider: kern_do with no reachable LLM
+// provider must fail fast with a clear provider error instead of silently
+// running the ~180s provider-chain fallthrough. The provider is pinned to
+// Ollama at an unreachable address so the test is deterministic on any host.
+func TestHandleDoFailsFastWithoutProvider(t *testing.T) {
+	t.Setenv("KERN_LLM_PROVIDER", "ollama")
+	t.Setenv("OLLAMA_HOST", "http://127.0.0.1:1") // nothing listens here: instant refusal
+	s := newTestServer()
+	start := time.Now()
+	_, err := s.handleDo(context.Background(), map[string]any{"root": ".", "intent": "test intent"})
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("handleDo with no reachable provider must error")
+	}
+	if !strings.Contains(err.Error(), "provider") {
+		t.Errorf("error must mention the provider, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "kern_do") {
+		t.Errorf("error must point at kern_do, got: %v", err)
+	}
+	if elapsed > 30*time.Second {
+		t.Errorf("handleDo took %v — the pre-flight must fail fast, not run the 180s workflow", elapsed)
+	}
+}
+
+// TestProbeLLMProviderReachableFailsWithoutProvider exercises the extracted
+// pre-flight helper directly: with the provider pinned to an unreachable
+// Ollama address it errors quickly (the probe is bounded ~8s), which is the
+// condition that used to send kern_do down the 180s path.
+func TestProbeLLMProviderReachableFailsWithoutProvider(t *testing.T) {
+	t.Setenv("KERN_LLM_PROVIDER", "ollama")
+	t.Setenv("OLLAMA_HOST", "http://127.0.0.1:1")
+	start := time.Now()
+	err := probeLLMProviderReachable()
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("probe must fail with no reachable provider")
+	}
+	if elapsed > 30*time.Second {
+		t.Errorf("probe took %v — must be bounded and fast", elapsed)
 	}
 }

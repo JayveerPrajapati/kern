@@ -8,9 +8,6 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/index"
 )
 
-// TestNewGovernator_PermissiveRawMode: KERN_MCP_PERMISSIVE=1 restores raw mode
-// — a call without agent_id returns a nil governor, so handlers short-circuit
-// to unfiltered results (the pre-P0.1 legacy default).
 func TestNewGovernator_PermissiveRawMode(t *testing.T) {
 	t.Setenv("KERN_MCP_PERMISSIVE", "1")
 	root := provenanceProject(t)
@@ -45,13 +42,13 @@ func TestNewGovernator_DefaultScoped(t *testing.T) {
 	if gov == nil {
 		t.Fatal("default path must return a non-nil governor")
 	}
-	if gov.policySource != policySourceDefaultScoped {
-		t.Fatalf("expected policySource %q, got %q", policySourceDefaultScoped, gov.policySource)
+	if gov.PolicySource != policySourceDefaultScoped {
+		t.Fatalf("expected policySource %q, got %q", policySourceDefaultScoped, gov.PolicySource)
 	}
 	// The whole project root is in scope: PublicA, Greet, main, SecretB.
 	for _, want := range []string{"PublicA", "Greet", "main", "SecretB"} {
-		if !gov.allowed[want] {
-			t.Errorf("default scope must allow project symbol %s (allowed=%v)", want, gov.allowed)
+		if !gov.Allowed[want] {
+			t.Errorf("default scope must allow project symbol %s (allowed=%v)", want, gov.Allowed)
 		}
 	}
 }
@@ -79,11 +76,11 @@ func TestNewGovernator_ExplicitAgentTaskScope(t *testing.T) {
 	if gov == nil {
 		t.Fatal("explicit governed call must return a non-nil governor")
 	}
-	if gov.policySource != policySourceTaskScope {
-		t.Fatalf("expected policySource %q, got %q", policySourceTaskScope, gov.policySource)
+	if gov.PolicySource != policySourceTaskScope {
+		t.Fatalf("expected policySource %q, got %q", policySourceTaskScope, gov.PolicySource)
 	}
-	if !gov.allowed["PublicA"] || gov.allowed["SecretB"] {
-		t.Fatalf("task-scope governor allowed set wrong: PublicA must be allowed and SecretB denied (allowed=%v)", gov.allowed)
+	if !gov.Allowed["PublicA"] || gov.Allowed["SecretB"] {
+		t.Fatalf("task-scope governor allowed set wrong: PublicA must be allowed and SecretB denied (allowed=%v)", gov.Allowed)
 	}
 }
 
@@ -107,7 +104,7 @@ func TestNewGovernator_UnknownAgentDenied(t *testing.T) {
 	if gov == nil {
 		t.Fatal("the governor must still be returned alongside the error for auditability")
 	}
-	if gov.policySource == "" {
+	if gov.PolicySource == "" {
 		t.Fatal("denied governor must carry its policy source")
 	}
 }

@@ -67,8 +67,9 @@ func NewGateFromEnv() *Gate {
 // (e.g. files[].path) are confined the same way as top-level ones — and each
 // string value is resolved to its real location (absolute + symlinks
 // evaluated). A value whose real location is not inside at least one root is
-// rejected with an error naming the key, the value and the allowed roots; the
-// handler must not run for a rejected call.
+// rejected with an error naming the denied key and generic guidance — the
+// allowed roots are never disclosed to the client (audit A6); the handler
+// must not run for a rejected call.
 func (g *Gate) Check(toolName string, args map[string]any) error {
 	if !g.enabled {
 		return nil
@@ -127,12 +128,13 @@ func (g *Gate) confineSlice(vals []any) error {
 }
 
 // isPathKey reports whether a tool-call argument key is path-typed: the
-// explicit "root" and "dir" keys plus any key containing "path"
-// (case-insensitive, so "targetPath" is caught too). This mirrors blueprint's
-// key detection adapted to kern's argument names — kern tools use "root" where
-// blueprint uses "repo".
+// explicit "root", "dir" and "repo" keys plus any key containing "path"
+// (case-insensitive, so "targetPath" is caught too). "repo" is the argument
+// blueprint tools use for the project root (audit R3): leaving it out let a
+// client pass `repo` directly and bypass raw-arg confinement, after which the
+// decoded-path confinement used an attacker-chosen root.
 func isPathKey(key string) bool {
-	return key == "root" || key == "dir" || strings.Contains(strings.ToLower(key), "path")
+	return key == "root" || key == "dir" || key == "repo" || strings.Contains(strings.ToLower(key), "path")
 }
 
 // gatePath confines a single path value to the allowed roots. The value is
@@ -158,7 +160,10 @@ func (g *Gate) gatePath(key, p string) error {
 			return nil // inside an allowed root
 		}
 	}
-	return fmt.Errorf("path outside allowed roots: %s=%q (allowed: %s)", key, p, strings.Join(g.roots, ", "))
+	// Audit A6: the denial must NOT disclose the server's allowed roots —
+	// they are server configuration a client must not learn from a denial.
+	// Name only the denied key with generic guidance.
+	return fmt.Errorf("path outside allowed roots for key %q", key)
 }
 
 // RootContains reports whether the symlink-resolved path resolved lies inside

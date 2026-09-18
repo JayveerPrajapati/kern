@@ -16,9 +16,6 @@ import (
 // processes (e.g. the cross-process store tests) inherit the parent's cache
 // dir and must keep writing to the SAME store the parent reads.
 func TestMain(m *testing.M) {
-	// G-2: keep the tool-call audit chain out of the package dir's real
-	// .kern/audit store while tests run (individual tests may override with
-	// t.Setenv for their own assertions).
 	auditDir, err := os.MkdirTemp("", "kern-test-mcp-audit-*")
 	if err != nil {
 		panic(err)

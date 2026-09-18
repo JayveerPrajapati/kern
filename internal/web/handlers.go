@@ -114,7 +114,7 @@ func (a *App) handleIncidents(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]interface{}{"items": items})
+		writeJSON(w, http.StatusOK, map[string]any{"items": items})
 	case http.MethodPost:
 		a.handleIncidentSave(w, r)
 	default:
@@ -137,8 +137,15 @@ func (a *App) handleGovernance(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, a.buildGovernance())
 }
 
-// handleHealth serves a trivial liveness probe.
+// handleHealth serves a trivial liveness probe. GET/HEAD only — net/http
+// serves HEAD through the GET handler, so a GET check is sufficient. Any
+// other method (POST/PUT/DELETE) returns 405, matching the method guards on
+// the other API routes.
 func (a *App) handleHealth(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
@@ -175,7 +182,7 @@ func (a *App) handleApprovalApprove(w http.ResponseWriter, r *http.Request) {
 		// file store (not this in-memory workflow): fall back to the
 		// persistent store so a UI approve still resolves it. Routing through
 		// the app-layer TaskService both persists the decision AND advances a
-		// gated task parked at WAITING_FOR_APPROVAL (F-026, mirroring
+		// gated task parked at WAITING_FOR_APPROVAL (mirroring
 		// `kern approve`).
 		if a.taskSvc != nil {
 			if _, ferr := a.taskSvc.ResolveApprovalForTask(req.ID, req.Approver, true, ""); ferr != nil {
@@ -201,7 +208,7 @@ func (a *App) handleApprovalApprove(w http.ResponseWriter, r *http.Request) {
 	}
 	// Also record the decision in the persistent store so the workflow engine
 	// (which reads the file store for its gates) observes it on resume, and
-	// advance a gated task parked at WAITING_FOR_APPROVAL (F-026). Routing
+	// advance a gated task parked at WAITING_FOR_APPROVAL. Routing
 	// through the app-layer TaskService makes the web approve behave like
 	// `kern approve` / kern_approve. Approve above already persisted the
 	// decision through the workflow's own store; a failure of this
@@ -252,7 +259,7 @@ func (a *App) handleApprovalReject(w http.ResponseWriter, r *http.Request) {
 		// Fall back to the persistent store (workflow-engine gates live there).
 		// Routing through the app-layer TaskService both persists the decision
 		// AND advances a gated task parked at WAITING_FOR_APPROVAL to REJECTED
-		// (F-026, mirroring `kern approve --reject`).
+		// (mirroring `kern approve --reject`).
 		if a.taskSvc != nil {
 			if _, ferr := a.taskSvc.ResolveApprovalForTask(req.ID, req.Approver, false, "rejected via console"); ferr != nil {
 				writeError(w, http.StatusInternalServerError, fmt.Sprintf("approval %q not found in the in-memory workflow (%v) and the decision could not be recorded: %v", req.ID, err, ferr))
@@ -267,7 +274,7 @@ func (a *App) handleApprovalReject(w http.ResponseWriter, r *http.Request) {
 	}
 	// Record the rejection in the persistent store too, so any gate reading
 	// the file store observes it, and advance a gated task parked at
-	// WAITING_FOR_APPROVAL to REJECTED (F-026). Routing through the
+	// WAITING_FOR_APPROVAL to REJECTED. Routing through the
 	// app-layer TaskService makes the web reject behave like
 	// `kern approve --reject` / kern_approve reject=true. Reject above
 	// already persisted the decision through the workflow's own store; a

@@ -8,6 +8,8 @@ import (
 	"sync"
 )
 
+// RoleDefinition is an RBAC role: a named set of allowed/denied tools plus
+// execution and write capabilities.
 type RoleDefinition struct {
 	Role         string   `json:"role"`
 	Description  string   `json:"description"`

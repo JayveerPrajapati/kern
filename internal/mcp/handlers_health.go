@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/JayveerPrajapati/kern/internal/index"
 	"github.com/JayveerPrajapati/kern/internal/metrics"
 )
 
@@ -22,27 +23,46 @@ func (s *Server) handleHealth(ctx context.Context, args map[string]any) (string,
 	}
 	snap := metrics.Default().Snapshot()
 
-	// Index health & freshness
-	indexAge := "unknown"
-	indexSymbols := 0
-	indexFiles := 0
-	indexFresh := false
-	indexReused := 0
-	indexLowPromoted := 0
-	indexLowUnresolved := 0
+	// Index health & freshness: the in-memory session cache when the server
+	// has loaded an index for this root; otherwise fall back to the persisted
+	// disk index (index.DiskIndexView) so a long-lived server with a cold
+	// session cache never reports a healthy on-disk index as missing — the
+	// same disk-authoritative block `kern health` shows.
+	cacheLoaded := false
+	indexBlock := map[string]any{
+		"root":                 root,
+		"fresh":                false,
+		"age":                  "unknown",
+		"symbols":              0,
+		"files":                0,
+		"reused_results":       0,
+		"promoted_low_edges":   0,
+		"unresolved_low_edges": 0,
+		"builds_count":         snap.IndexBuildCount,
+		"build_avg_ms":         snap.IndexBuildAvgMs,
+	}
 	if root != "" {
 		sess := s.sessionFor(root)
 		if sess != nil {
 			if ix, ok := sess.CachedIndex(); ok && ix != nil {
-				indexFresh = true
+				cacheLoaded = true
+				indexBlock["fresh"] = true
 				if !ix.UpdatedAt.IsZero() {
-					indexAge = time.Since(ix.UpdatedAt).Round(time.Second).String()
+					indexBlock["age"] = time.Since(ix.UpdatedAt).Round(time.Second).String()
 				}
-				indexSymbols = len(ix.Symbols)
-				indexFiles = len(ix.FileHashes)
-				indexReused = ix.ReusedResults()
-				indexLowPromoted = ix.PromotedLowEdges
-				indexLowUnresolved = ix.UnresolvedLowEdges
+				indexBlock["symbols"] = len(ix.Symbols)
+				indexBlock["files"] = len(ix.FileHashes)
+				indexBlock["reused_results"] = ix.ReusedResults()
+				indexBlock["promoted_low_edges"] = ix.PromotedLowEdges
+				indexBlock["unresolved_low_edges"] = ix.UnresolvedLowEdges
+			}
+		}
+		if !cacheLoaded {
+			if disk := index.DiskIndexView(root); disk != nil {
+				disk["note"] = "in-memory session cache empty; showing persisted disk index"
+				disk["builds_count"] = snap.IndexBuildCount
+				disk["build_avg_ms"] = snap.IndexBuildAvgMs
+				indexBlock = disk
 			}
 		}
 	}
@@ -65,18 +85,7 @@ func (s *Server) handleHealth(ctx context.Context, args map[string]any) (string,
 	result := map[string]any{
 		"status":  "ok",
 		"version": serverVersion,
-		"index": map[string]any{
-			"root":                 root,
-			"fresh":                indexFresh,
-			"age":                  indexAge,
-			"symbols":              indexSymbols,
-			"files":                indexFiles,
-			"reused_results":       indexReused,
-			"promoted_low_edges":   indexLowPromoted,
-			"unresolved_low_edges": indexLowUnresolved,
-			"builds_count":         snap.IndexBuildCount,
-			"build_avg_ms":         snap.IndexBuildAvgMs,
-		},
+		"index":   indexBlock,
 		"tools": map[string]any{
 			"registered": len(tools),
 			"advertised": len(s.filteredTools()),

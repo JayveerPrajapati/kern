@@ -12,9 +12,6 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/retrieval"
 )
 
-// TestHandleContextLens drives the P1-002 lens arg through kern_context: a
-// valid lens prepends the deterministic "lens: name (type=weight, ...)" line;
-// an unknown lens is rejected; no lens arg leaves the output byte-identical.
 func TestHandleContextLens(t *testing.T) {
 	root := provenanceProject(t)
 	s := NewServer(strings.NewReader(""), io.Discard)
@@ -47,9 +44,6 @@ func TestHandleContextLens(t *testing.T) {
 	}
 }
 
-// TestHandleContextProfile drives the P1-005 profile arg through kern_context:
-// machine-json wraps the body in a JSON envelope; an unknown profile is
-// rejected; no profile arg leaves the output byte-identical.
 func TestHandleContextProfile(t *testing.T) {
 	root := provenanceProject(t)
 	s := NewServer(strings.NewReader(""), io.Discard)

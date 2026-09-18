@@ -178,9 +178,9 @@ func (s *Server) handleEvidenceAnchor(ctx context.Context, args map[string]any) 
 		fmt.Fprintf(&sb, "verification: %s\n", proof.Verification)
 	}
 	if proof.Snippet != "" {
-		cap := 200
-		if len(proof.Snippet) > cap {
-			proof.Snippet = proof.Snippet[:cap] + "..."
+		limit := 200
+		if len(proof.Snippet) > limit {
+			proof.Snippet = proof.Snippet[:limit] + "..."
 		}
 		fmt.Fprintf(&sb, "snippet: %s\n", proof.Snippet)
 	}

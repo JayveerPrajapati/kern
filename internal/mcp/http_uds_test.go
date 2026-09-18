@@ -5,6 +5,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -12,8 +13,15 @@ import (
 )
 
 func TestServeHTTPOverUnixDomainSocket(t *testing.T) {
-	dir := t.TempDir()
-	sockPath := filepath.Join(dir, "mcp.sock")
+	// Use a short temp dir: t.TempDir() derives its path from the test name
+	// (33 chars here), which pushes the socket path past macOS's 104-byte
+	// sun_path limit and makes bind/connect fail with EINVAL.
+	sockDir, err := os.MkdirTemp("", "mcp-uds-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(sockDir) })
+	sockPath := filepath.Join(sockDir, "mcp.sock")
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -74,5 +82,22 @@ func TestServeHTTPOverUnixDomainSocket(t *testing.T) {
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("server did not shut down in time")
+	}
+}
+
+// TestUnixSocketPathTooLongErrors: a socket path longer than the portable
+// sun_path budget must fail fast with a clear error, never surface as the
+// OS's silent "invalid argument" (macOS sun_path is 104 bytes; Linux 108).
+func TestUnixSocketPathTooLongErrors(t *testing.T) {
+	long := filepath.Join(t.TempDir(), strings.Repeat("a", 120), "mcp.sock")
+	if len(long) <= 100 { // portable sun_path budget; see transport.maxUnixSocketPath
+		t.Fatalf("fixture path %d bytes must exceed the 100-byte socket path budget", len(long))
+	}
+	err := ServeHTTPContext(context.Background(), "unix:"+long)
+	if err == nil {
+		t.Fatal("expected an error for an over-long unix socket path")
+	}
+	if !strings.Contains(err.Error(), "too long") {
+		t.Errorf("expected a clear path-length error, got: %v", err)
 	}
 }

@@ -17,9 +17,11 @@ import (
 	"log"
 	"net/http"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"time"
 
+	"crypto/subtle"
 	"github.com/JayveerPrajapati/kern/internal/agent"
 	"github.com/JayveerPrajapati/kern/internal/app"
 	"github.com/JayveerPrajapati/kern/internal/eventbus"
@@ -32,7 +34,13 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/relay"
 	"github.com/JayveerPrajapati/kern/internal/service"
 	"github.com/JayveerPrajapati/kern/internal/verification"
+	"os"
+	"strings"
 )
+
+// authTokenEnv is the bearer-token env shared with enterprise mode; when set,
+// the console requires it on every request.
+const authTokenEnv = "KERN_AUTH_TOKEN"
 
 // App holds the project root and the derived console state.
 // It delegates routing to an embedded http.ServeMux via ServeHTTP.
@@ -42,6 +50,10 @@ type App struct {
 	ix       *index.Index
 	graph    *intelligence.Graph
 	platform *app.Platform
+	// rateLimiter caps state-mutating (POST/PUT/PATCH/DELETE) requests per
+	// client IP (fixed window, KERN_WEB_RATE_LIMIT req/min, default 600, 0
+	// disables). Nil when limiting is disabled. See ratelimit.go.
+	rateLimiter *rateLimiter
 	// svc is the delivery-mechanism-independent service layer. Handlers
 	// delegate core operations (index, graph, memory, governance, security)
 	// to it instead of importing the internal engines directly, so the same
@@ -76,6 +88,19 @@ type App struct {
 	evalT         *template.Template
 	bus           *eventbus.Bus   // publishes incident/approval events
 	tasks         *agent.Registry // agent/task registry for /v1/tasks lookup
+	// relay is the cross-process event relay server started by New (nil when
+	// another process owns the socket or the relay failed to start). Close()
+	// tears it down so relay goroutines/sockets do not leak across App
+	// evictions in enterprise mode.
+	relay *relay.Server
+	// relayUnsub unsubscribes the relay's Broadcast handler from the bus;
+	// Close() calls it so an evicted App stops receiving bus events.
+	relayUnsub func()
+	// closeOnce makes Close airtight under concurrency: the nil-checks below
+	// are only safe because closeOnce guarantees exactly one goroutine ever
+	// runs the teardown body, so concurrent Close calls can never race the
+	// nil-check-and-nil-assign sequence (oracle-gate).
+	closeOnce sync.Once
 
 	// archTTL is how long a validated architecture report is cached before the
 	// next /api/architecture, /api/overview or "/" request re-runs
@@ -135,6 +160,11 @@ func New(root string) (*App, error) {
 		return nil, err
 	}
 
+	// The event bus is created BEFORE the TaskService so the task/loop lanes
+	// publish onto the SAME bus the console streams (/v1/events/stream) and the
+	// relay fan out — loop progress, approvals, and lifecycle events are
+	// observable instead of being dropped on a nil bus.
+	bus := eventbus.New()
 	a := &App{
 		root:          root,
 		ix:            ix,
@@ -146,21 +176,26 @@ func New(root string) (*App, error) {
 		firewall:      platform.Firewall(),
 		approvals:     governance.NewPersistedApprovalWorkflow(root),
 		fileApprovals: governance.NewFileStore(root),
-		taskSvc:       app.NewTaskService(platform, nil).WithAgentID("web").WithPRProvider(app.AutoPRProvider()),
+		taskSvc:       app.NewTaskService(platform, bus).WithAgentID("web").WithPRProvider(app.AutoPRProvider()),
 		tasks:         agent.NewRegistry(),
+		bus:           bus,
 		archTTL:       5 * time.Second,
+		rateLimiter:   rateLimitFromEnv(),
 	}
 	// Back the /v1/tasks registry with a persisted task store so submitted
 	// tasks survive across server restarts and handleV1Task can serve a real,
 	// non-empty task registry (returning 404 only when a task is genuinely
 	// unknown).
 	a.tasks.SetTaskStore(agent.NewTaskStore(root))
-	a.bus = eventbus.New()
 	// Cross-process event relay: the first process to bind owns the
 	// socket; concurrent servers (or a kern events serve instance) run
-	// without one. Purely additive observability — never fatal.
+	// without one. Purely additive observability — never fatal. The server
+	// and its bus subscription are retained on the App so Close() can tear
+	// them down (relay goroutines/sockets must not leak across App
+	// evictions in enterprise mode).
 	if srv, rerr := relay.Start(root); rerr == nil {
-		a.bus.Subscribe("", srv.Broadcast) // "" = every kind
+		a.relay = srv
+		a.relayUnsub = a.bus.Subscribe("", srv.Broadcast) // "" = every kind
 		srv.SetPublisher(a.bus.Publish)
 	}
 	// Bridge the verification engine's architecture events onto the
@@ -357,7 +392,59 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case http.MethodPost, http.MethodPut, http.MethodPatch:
 		r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	}
+	// P2-10: opt-in bearer gate. The console defaults to a loopback bind
+	// (trusted local, no gate). When KERN_AUTH_TOKEN is set — which the
+	// server enforces for non-loopback binds — every request must carry
+	// "Authorization: Bearer <token>": the console serves state-mutating
+	// endpoints (/v1/memory writes, /api/approvals/approve|reject, incident
+	// ingestion) and LLM work, so a network-exposed console without auth is
+	// an unauthenticated write/execute surface. Constant-time compare, same
+	// as the enterprise gate.
+	if !a.authorized(r) {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	// P2-11: per-IP rate cap on state-mutating requests (POST/PUT/PATCH/
+	// DELETE). Fixed window (default 600 req/min per IP, KERN_WEB_RATE_LIMIT,
+	// 0 disables). Read-only dashboard/API GETs are not throttled so the
+	// console stays snappy under normal polling; only the write/LLM-heavy
+	// surface is bounded against runaway clients.
+	if a.rateLimiter != nil && mutatingMethod(r.Method) {
+		if ok, retry := a.rateLimiter.allow(clientIP(r), time.Now()); !ok {
+			w.Header().Set("Retry-After", strconv.Itoa(retry))
+			http.Error(w, "rate limit exceeded", http.StatusTooManyRequests)
+			return
+		}
+	}
+	// P2-12: cross-origin / DNS-rebinding guard on state-mutating requests.
+	// Only browser-initiated requests (those carrying an Origin header) are
+	// checked; curl/SDK/bearer-token clients never send Origin and always
+	// pass. The allowlist is recomputed per request so KERN_WEB_ALLOWED_HOSTS
+	// changes apply without a restart.
+	if mutatingMethod(r.Method) {
+		if reason := csrfViolation(r, allowedHosts()); reason != "" {
+			http.Error(w, reason, http.StatusForbidden)
+			return
+		}
+	}
 	a.mux.ServeHTTP(w, r)
+}
+
+// authorized reports whether the request passes the opt-in bearer gate. When
+// KERN_AUTH_TOKEN is unset there is no gate (loopback default). When set, the
+// request must present a matching "Authorization: Bearer <token>" header.
+func (a *App) authorized(r *http.Request) bool {
+	token := os.Getenv(authTokenEnv)
+	if token == "" {
+		return true
+	}
+	const prefix = "Bearer "
+	h := r.Header.Get("Authorization")
+	if !strings.HasPrefix(h, prefix) {
+		return false
+	}
+	provided := strings.TrimSpace(strings.TrimPrefix(h, prefix))
+	return subtle.ConstantTimeCompare([]byte(provided), []byte(token)) == 1
 }
 
 // freshGraph returns the current knowledge graph and index, rebuilding both if
@@ -453,6 +540,37 @@ func (a *App) rebuildIndex() (*index.Index, error) {
 // subscribe and fan events out to webhooks or an audit trail.
 func (a *App) Bus() *eventbus.Bus { return a.bus }
 
+// Close tears down the background resources New() started: the cross-process
+// event relay (listener, socket, client connections) and its bus subscription,
+// so an App that is dropped (e.g. evicted from the enterprise cache) does not
+// leak relay goroutines or sockets. It is idempotent and best-effort — a
+// failure to close one resource is logged and does not stop the others — and
+// it never panics, so callers can invoke it defensively before discarding an
+// App. The App is not usable for serving after Close (New must be called again
+// to rebuild it).
+//
+// Airtight under concurrency: the whole teardown body runs inside a sync.Once,
+// so any number of concurrent Close calls (e.g. an eviction race between the
+// enterprise cache and a shutdown path) execute the teardown exactly once and
+// never race the nil checks (oracle-gate). Waiters on the once block until the
+// first Close finishes, then return nil.
+func (a *App) Close() error {
+	a.closeOnce.Do(func() {
+		if a.relay != nil {
+			// relay.Close is idempotent; it removes the socket file too, so a
+			// rebuilt App on the same root can rebind.
+			a.relay.Close()
+			a.relay = nil
+		}
+		if a.relayUnsub != nil {
+			// The unsubscriber is idempotent; nil it so a second Close is a no-op.
+			a.relayUnsub()
+			a.relayUnsub = nil
+		}
+	})
+	return nil
+}
+
 // ListTasks returns all tasks in the App's task registry. Used by
 // the enterprise server to aggregate task visibility across projects.
 func (a *App) ListTasks() []*agent.Task {
@@ -470,7 +588,7 @@ func (a *App) handlePerformance(w http.ResponseWriter, r *http.Request) {
 }
 
 // writeJSON writes a JSON response with the given status code.
-func writeJSON(w http.ResponseWriter, status int, v interface{}) {
+func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(v)

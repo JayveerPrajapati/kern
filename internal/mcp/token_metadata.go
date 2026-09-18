@@ -8,7 +8,7 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/tokenize"
 )
 
-// TokenMetadata (P1-006) is structured token usage/cost info attached to every
+// TokenMetadata is structured token usage/cost info attached to every
 // tool response. Clients can read it to understand the token cost of a call
 // without parsing the content text. Fields are omitted when they are zero
 // (not applicable), so a plain result stays lean.

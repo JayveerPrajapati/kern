@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"github.com/JayveerPrajapati/kern/internal/brief"
 	"github.com/JayveerPrajapati/kern/internal/code"
@@ -10,6 +11,7 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/index"
 	"github.com/JayveerPrajapati/kern/internal/intel"
 	"github.com/JayveerPrajapati/kern/internal/pack"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -156,7 +158,7 @@ func (s *Server) handleOnboard(ctx context.Context, args map[string]any) (string
 		// internal/mcp, which would create an import cycle), so report the
 		// missing file and direct the caller to `kern setup` / `kern onboard`.
 		wired := ""
-		if _, serr := os.Stat(filepath.Join(abs, "AGENTS.md")); os.IsNotExist(serr) {
+		if _, serr := os.Stat(filepath.Join(abs, "AGENTS.md")); errors.Is(serr, fs.ErrNotExist) {
 			wired = "missing — run kern setup (or kern onboard) to write it"
 		} else {
 			wired = "present"

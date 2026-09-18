@@ -71,7 +71,7 @@ func (a *App) handleRisks(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handleRisksJSON(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]interface{}{"items": a.buildRisks()})
+	writeJSON(w, http.StatusOK, map[string]any{"items": a.buildRisks()})
 }
 
 // ---------------------------------------------------------------------------
@@ -125,7 +125,7 @@ func (a *App) handleArtifacts(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handleArtifactsJSON(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]interface{}{"items": a.buildArtifacts()})
+	writeJSON(w, http.StatusOK, map[string]any{"items": a.buildArtifacts()})
 }
 
 // ---------------------------------------------------------------------------
@@ -168,7 +168,7 @@ func (a *App) handleAudit(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handleAuditJSON(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]interface{}{"items": a.buildAudit()})
+	writeJSON(w, http.StatusOK, map[string]any{"items": a.buildAudit()})
 }
 
 // ---------------------------------------------------------------------------

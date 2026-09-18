@@ -291,6 +291,47 @@ func TestToolDispatchCoverage(t *testing.T) {
 	_ = mcpAssertOK(t, "kern_path", map[string]any{"root": root, "from": "main", "to": "Greet"})
 }
 
+// TestStringArgCoercionViaMCP pins the documented D6 coercion contract end to
+// end: a JSON number where the schema declares a string is coerced to its
+// canonical string form (query: 12345 runs a real "12345" search), while
+// null/object/array values for string-typed arguments surface as a clear
+// isError naming the argument, the tool and the expected type instead of a
+// silent "no symbols matched".
+func TestStringArgCoercionViaMCP(t *testing.T) {
+	root := mcpProject(t)
+
+	// query: 12345 (JSON number for a string-typed prop) → coerced to
+	// "12345", runs as a normal (empty-result) search, NOT an error.
+	out := mcpAssertOK(t, "kern_search", map[string]any{"root": root, "query": 12345})
+	if !strings.Contains(out, "no symbols matched: 12345") {
+		t.Fatalf("expected coerced number search output, got %q", out)
+	}
+
+	// query: {} (object) → isError naming arg, tool and expected type.
+	err := mcpToolError(t, "kern_search", map[string]any{"root": root, "query": map[string]any{}})
+	if !strings.Contains(err, `argument "query" for tool kern_search: expected a string, got an object`) {
+		t.Fatalf("expected object rejection message, got %q", err)
+	}
+
+	// query: null → isError naming arg, tool and expected type.
+	err = mcpToolError(t, "kern_search", map[string]any{"root": root, "query": nil})
+	if !strings.Contains(err, `argument "query" for tool kern_search: expected a string, got null`) {
+		t.Fatalf("expected null rejection message, got %q", err)
+	}
+
+	// query: [...] (array) → isError naming arg, tool and expected type.
+	err = mcpToolError(t, "kern_search", map[string]any{"root": root, "query": []any{"Greet"}})
+	if !strings.Contains(err, `argument "query" for tool kern_search: expected a string, got an array`) {
+		t.Fatalf("expected array rejection message, got %q", err)
+	}
+
+	// Control: the same tool with a plain string still succeeds.
+	out = mcpAssertOK(t, "kern_search", map[string]any{"root": root, "query": "Greet"})
+	if !strings.Contains(out, "Greet") {
+		t.Fatalf("expected search hit for control call, got %q", out)
+	}
+}
+
 func TestInheritsToolViaMCP(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	root := t.TempDir()
@@ -369,7 +410,7 @@ func TestSecurityToolViaMCP(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "creds.go"), []byte("package main\n\n"+secret), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	out := mcpAssertOK(t, "kern_security", map[string]any{"root": root})
+	out := mcpLastOK(t, "kern_security", map[string]any{"root": root})
 	if !strings.Contains(out, "hardcoded-secret") || !strings.Contains(out, "creds.go:3") {
 		t.Fatalf("expected hardcoded-secret finding, got %q", out)
 	}
@@ -377,12 +418,12 @@ func TestSecurityToolViaMCP(t *testing.T) {
 		t.Fatalf("expected summary line, got %q", out)
 	}
 	// severity filter drops the error finding.
-	warnOnly := mcpAssertOK(t, "kern_security", map[string]any{"root": root, "severity": "warning"})
+	warnOnly := mcpLastOK(t, "kern_security", map[string]any{"root": root, "severity": "warning"})
 	if strings.Contains(warnOnly, "hardcoded-secret") {
 		t.Fatalf("severity filter should exclude errors, got %q", warnOnly)
 	}
 	// JSON format returns parseable output.
-	jsonOut := mcpAssertOK(t, "kern_security", map[string]any{"root": root, "format": "json", "max": "0"})
+	jsonOut := mcpLastOK(t, "kern_security", map[string]any{"root": root, "format": "json", "max": "0"})
 	var findings []map[string]any
 	if err := json.Unmarshal([]byte(jsonOut), &findings); err != nil {
 		t.Fatalf("expected JSON findings, got %q: %v", jsonOut, err)
@@ -417,9 +458,36 @@ func TestMissingRequiredArgs(t *testing.T) {
 	mcpToolError(t, "kern_why", map[string]any{"root": "."})
 }
 
-// runToolCases returns the dispatchable tool names from dispatchTable. The
-// dispatch switch was replaced by the table (G-11 expensive tier), so this is
-// a structural read of the table keys — no source parsing.
+// TestOrchestrateViaMCP pins the kern_orchestrate surface: arg validation and
+// the deterministic JSON result shape. Both surfaces (CLI `kern orchestrate`
+// and this tool) are thin adapters over Platform.Orchestrate — the engine
+// owns NL intent resolution — so this test guards the adapter contract only.
+func TestOrchestrateViaMCP(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	root := mcpProject(t)
+	mcpToolError(t, "kern_orchestrate", map[string]any{"root": root})
+	mcpToolError(t, "kern_orchestrate", map[string]any{"root": root, "intent": "explain Greet", "budget": "bogus"})
+	out := mcpAssertOK(t, "kern_orchestrate", map[string]any{"root": root, "intent": "explain Greet", "budget": "2000"})
+	// The tool returns the marshaled OrchestrateResult as JSON; the server may
+	// append its index status footer after the body, so assert on stable keys
+	// rather than parsing the whole response as one JSON document.
+	if !strings.Contains(out, `"task_type"`) {
+		t.Fatalf("expected task_type in orchestrate result, got %q", out)
+	}
+	if !strings.Contains(out, `"envelope_version"`) {
+		t.Fatalf("expected envelope_version in orchestrate result, got %q", out)
+	}
+}
+
+func TestKernMemoryActionRecallNoMatchHint(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	root := mcpProject(t)
+	miss := mcpAssertOK(t, "kern_memory", map[string]any{"root": root, "action": "recall", "prompt": "xyzzy plugh unrelated"})
+	if !strings.HasPrefix(miss, "no matching lessons") {
+		t.Fatalf("expected no-match hint on kern_memory action=recall (previously returned an empty string), got %q", miss)
+	}
+}
+
 func runToolCases() []string {
 	var out []string
 	for name := range dispatchTable {
@@ -450,8 +518,8 @@ func TestMemoryToolsViaMCP(t *testing.T) {
 		t.Fatalf("expected recall hit via legacy k alias, got %q", aliasHit)
 	}
 	miss := mcpAssertOK(t, "kern_memory_recall", map[string]any{"root": root, "prompt": "xyzzy plugh unrelated"})
-	if miss != "" {
-		t.Fatalf("expected empty recall for unrelated prompt, got %q", miss)
+	if !strings.HasPrefix(miss, "no matching lessons") {
+		t.Fatalf("expected no-match hint for unrelated prompt, got %q", miss)
 	}
 	badK := mcpToolError(t, "kern_memory_recall", map[string]any{"root": root, "prompt": "how are deploy tags released?", "limit": "bogus"})
 	if !strings.Contains(badK, "invalid integer") {

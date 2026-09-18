@@ -11,8 +11,10 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/JayveerPrajapati/kern/internal/lock"
+	"github.com/JayveerPrajapati/kern/internal/mcp/catalog"
 )
 
 // mcpCallLast runs a tools/call and returns the final response, skipping any
@@ -216,6 +218,54 @@ func TestCancelRequestStringID(t *testing.T) {
 	}
 }
 
+// TestCancelRequestAbortsRealToolCall pins the production registration
+// path: a real tools/call through dispatch registers its cancel func in
+// toolCallResponse, and $/cancelRequest for that id aborts the in-flight
+// handler promptly instead of waiting out the 30-minute ceiling. The other
+// TestCancelRequest* tests shortcut registration via registerInflight
+// directly; this one guards the wiring a transport split must preserve.
+func TestCancelRequestAbortsRealToolCall(t *testing.T) {
+	t.Setenv("KERN_PRELOAD", "0") // hermetic: no background index build
+	dispatchTable["kern_test_cancel"] = func(s *Server, ctx context.Context, id string, args map[string]any) (string, error) {
+		<-ctx.Done()
+		return "handler observed: " + ctx.Err().Error(), nil
+	}
+	defer delete(dispatchTable, "kern_test_cancel")
+
+	buf := &bytes.Buffer{}
+	s := NewServer(strings.NewReader(""), buf)
+
+	done := make(chan any, 1)
+	go func() {
+		done <- s.dispatch(rpcRequest{ID: json.RawMessage(`99`), Method: "tools/call", Params: json.RawMessage(`{"name":"kern_test_cancel","arguments":{}}`)})
+	}()
+
+	// The production path must register the call as in-flight.
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) && s.Inflight() != 1 {
+		time.Sleep(2 * time.Millisecond)
+	}
+	if s.Inflight() != 1 {
+		t.Fatalf("expected tools/call to register in-flight, got %d", s.Inflight())
+	}
+
+	// Cancel via the JSON-RPC notification; the handler must unblock now.
+	s.dispatch(rpcRequest{Method: "$/cancelRequest", Params: json.RawMessage(`{"id":99}`)})
+
+	select {
+	case resp := <-done:
+		b, _ := json.Marshal(resp)
+		if !strings.Contains(string(b), "handler observed: context canceled") {
+			t.Fatalf("expected cancellation to reach the in-flight handler, got %s", b)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("tools/call did not return after $/cancelRequest (still waiting out the 30m ceiling?)")
+	}
+	if s.Inflight() != 0 {
+		t.Fatalf("expected in-flight to drain after cancellation, got %d", s.Inflight())
+	}
+}
+
 // TestIdKeyCanonicalization pins the id-key forms so tools/call and
 // $/cancelRequest agree on numbers, strings and raw ids.
 func TestIdKeyCanonicalization(t *testing.T) {
@@ -391,5 +441,101 @@ func TestSandboxManifestViaMCP(t *testing.T) {
 	}
 	if !strings.Contains(out, "2 change(s)") {
 		t.Fatalf("expected summary line, got %q", out)
+	}
+}
+
+func TestSlowToolEmitsProgress(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	old := slowTools
+	slowTools = map[string]bool{"kern_test_slow": true}
+	defer func() { slowTools = old }()
+	dispatchTable["kern_test_slow"] = func(s *Server, ctx context.Context, id string, args map[string]any) (string, error) {
+		time.Sleep(20 * time.Millisecond)
+		return "slow done", nil
+	}
+	defer delete(dispatchTable, "kern_test_slow")
+
+	buf := &bytes.Buffer{}
+	s := NewServer(strings.NewReader(""), buf)
+	out, err := s.runTool(context.Background(), "77", "kern_test_slow", map[string]any{})
+	if err != nil {
+		t.Fatalf("runTool: %v", err)
+	}
+	if out != "slow done" {
+		t.Fatalf("out = %q, want slow done", out)
+	}
+	lines := splitNonEmpty(buf.String())
+	if len(lines) < 2 {
+		t.Fatalf("expected 0%% and 100%% progress notifications, got %d lines: %q", len(lines), buf.String())
+	}
+	for _, ln := range lines {
+		var m map[string]any
+		if err := json.Unmarshal([]byte(ln), &m); err != nil {
+			t.Fatalf("bad line %q: %v", ln, err)
+		}
+		if m["method"] != "notifications/progress" {
+			t.Fatalf("expected progress notification, got %+v", m)
+		}
+	}
+}
+
+func TestFastToolEmitsNoProgress(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	// Ensure the fake fast tool is not slow (the set derives from the
+	// catalog's per-tool Slow flag).
+	if slowTools["kern_test_fast"] {
+		t.Fatal("kern_test_fast must not be a slow tool")
+	}
+	dispatchTable["kern_test_fast"] = func(s *Server, ctx context.Context, id string, args map[string]any) (string, error) {
+		return "fast done", nil
+	}
+	defer delete(dispatchTable, "kern_test_fast")
+
+	buf := &bytes.Buffer{}
+	s := NewServer(strings.NewReader(""), buf)
+	out, err := s.runTool(context.Background(), "88", "kern_test_fast", map[string]any{})
+	if err != nil {
+		t.Fatalf("runTool: %v", err)
+	}
+	if out != "fast done" {
+		t.Fatalf("out = %q, want fast done", out)
+	}
+	if got := buf.String(); got != "" {
+		t.Fatalf("fast tool emitted progress notifications: %q", got)
+	}
+}
+
+func TestSlowToolSetDerivedFromCatalog(t *testing.T) {
+	slow := map[string]bool{}
+	for _, t := range catalog.All {
+		if t.Slow {
+			slow[t.Name] = true
+		}
+	}
+	// The set is derived: server slowTools must equal the catalog flags.
+	if len(slowTools) != len(slow) {
+		t.Fatalf("slowTools (%d) does not match catalog slow flags (%d)", len(slowTools), len(slow))
+	}
+	for name := range slow {
+		if !slowTools[name] {
+			t.Errorf("catalog slow tool %s missing from server slowTools", name)
+		}
+	}
+	for name := range slowTools {
+		if !slow[name] {
+			t.Errorf("server slowTools %s not flagged Slow in the catalog", name)
+		}
+	}
+	// The task contract: index/build/scan tools emit progress…
+	for _, want := range []string{"kern_run_build", "kern_heal", "kern_validate", "kern_sandbox", "kern_refactor_transaction", "kern_repair_diagnostics", "kern_doc_index"} {
+		if !slowTools[want] {
+			t.Errorf("expected %s to be a slow (progress-emitting) tool", want)
+		}
+	}
+	// …and fast lookups stay silent.
+	for _, want := range []string{"kern_search", "kern_explore", "kern_graph", "kern_context", "kern_compact_file"} {
+		if slowTools[want] {
+			t.Errorf("expected %s to be a fast (no-progress) tool", want)
+		}
 	}
 }

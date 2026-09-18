@@ -45,7 +45,7 @@ func (s *Server) handleReview(ctx context.Context, args map[string]any) (string,
 			overlays = append(overlays, runtime.Overlay(src))
 		}
 		var out string
-		// Review lens (P1-002): a named lens prepends its evidence-priority
+		// Review lens: a named lens prepends its evidence-priority
 		// line so the caller knows which review posture the context is sized
 		// for. No lens arg -> byte-identical output. Combined names
 		// ("security+maintainability", "security,maintainability") resolve to
