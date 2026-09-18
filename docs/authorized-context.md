@@ -223,7 +223,7 @@ kern_meta(request="what can I touch in this repo for the refactor task")
 
 ## The proof structure
 
-Every field of `AuthorizationProof` (`internal/governance/authz/types.go`):
+Every field of `AuthorizationProof` (`internal/governance/types.go`):
 
 | Field            | Type                | Meaning                                                          |
 |------------------|---------------------|------------------------------------------------------------------|
