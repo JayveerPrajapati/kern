@@ -8,14 +8,34 @@ package semcache
 
 import (
 	"encoding/json"
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/JayveerPrajapati/kern/internal/cache"
 )
+
+// DefaultTTL is how long a stored entry stays servable before Lookup treats
+// it as a miss and reclaims it. Without a timestamp an entry would serve a
+// stale result forever; the TTL bounds how old an answer may be. Overridable
+// via KERN_SEMCACHE_TTL (a Go duration, e.g. "72h"); a value <= 0 or garbage
+// falls back to this default.
+const DefaultTTL = 168 * time.Hour // 7 days
+
+// ttl returns the semcache entry TTL from KERN_SEMCACHE_TTL (0 = default).
+func ttl() time.Duration {
+	if v := strings.TrimSpace(os.Getenv("KERN_SEMCACHE_TTL")); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			return d
+		}
+	}
+	return DefaultTTL
+}
 
 // DefaultThreshold is the minimum Jaccard similarity for a hit on inputs with
 // enough shingles to compare. 0.60 requires ~60% shingle overlap, which clear
@@ -43,9 +63,18 @@ const MaxShingles = 2000
 const MaxInputLen = 2048
 
 type entry struct {
-	Key   string   `json:"key"`   // cache.Load/Store payload key
-	Input string   `json:"input"` // the stored input (for the "matched" report)
-	Sig   []uint32 `json:"sig"`   // shingle signature (sorted)
+	Key   string    `json:"key"`   // cache.Load/Store payload key
+	Input string    `json:"input"` // the stored input (for the "matched" report)
+	Sig   []uint32  `json:"sig"`   // shingle signature (sorted)
+	At    time.Time `json:"at"`    // store time — drives TTL expiry
+}
+
+// newEntry builds a fresh index entry stamped with the current time. Entries
+// written before the At field existed unmarshal with a zero At, which Lookup
+// treats as stale (older than any TTL), so legacy entries are reclaimed on
+// the first lookup instead of being served forever.
+func newEntry(key, input string) entry {
+	return entry{Key: key, Input: truncate(input), Sig: shingles(input), At: time.Now()}
 }
 
 // nsState bundles a namespace's stripe lock with its in-memory index. Each
@@ -268,7 +297,7 @@ func Store(ns, input string, v any) error {
 	es, _ = st.loadIndex(ns)
 	if replace >= 0 && replace < len(es) && es[replace].Key == key {
 		// Replace an identical input if still present (unchanged semantics).
-		es[replace] = entry{Key: key, Input: truncate(input), Sig: shingles(input)}
+		es[replace] = newEntry(key, input)
 		if err := saveIndex(ns, es); err != nil {
 			return err
 		}
@@ -279,13 +308,13 @@ func Store(ns, input string, v any) error {
 	found := false
 	for i := range es {
 		if es[i].Key == key {
-			es[i] = entry{Key: key, Input: truncate(input), Sig: shingles(input)}
+			es[i] = newEntry(key, input)
 			found = true
 			break
 		}
 	}
 	if !found {
-		es = append(es, entry{Key: key, Input: truncate(input), Sig: shingles(input)})
+		es = append(es, newEntry(key, input))
 	}
 	if len(es) > MaxEntries {
 		evicted := es[:len(es)-MaxEntries]
@@ -305,7 +334,10 @@ func Store(ns, input string, v any) error {
 // Lookup searches namespace ns for a stored entry whose input is similar enough
 // to input. On a hit it loads the payload into v and returns the matched input,
 // the similarity, and true. Thresholds: ShortThreshold for short inputs, else
-// DefaultThreshold (overridable via thr when > 0).
+// DefaultThreshold (overridable via thr when > 0). Entries older than the TTL
+// (DefaultTTL, or KERN_SEMCACHE_TTL) are treated as misses and reclaimed, so a
+// stale result is never served — entries written before the At field existed
+// (zero At) are stale by definition.
 func Lookup(ns, input string, v any, thr float64) (matched string, sim float64, hit bool, err error) {
 	st := lockFor(ns)
 
@@ -329,9 +361,16 @@ func Lookup(ns, input string, v any, thr float64) (matched string, sim float64, 
 			cut = ShortThreshold
 		}
 	}
+	ttlDur := ttl()
+	now := time.Now()
 	best := -1.0
 	var bestE *entry
+	stale := false
 	for i := range es {
+		if ttlDur > 0 && now.Sub(es[i].At) > ttlDur {
+			stale = true // past its TTL: never served, reclaimed below
+			continue
+		}
 		s := jaccard(sq, es[i].Sig)
 		if s > best {
 			best = s
@@ -339,14 +378,22 @@ func Lookup(ns, input string, v any, thr float64) (matched string, sim float64, 
 		}
 	}
 	if bestE == nil || best < cut {
+		if stale {
+			// Reclaim stale entries even on a miss so they cannot resurface.
+			st.pruneStale(ns, ttlDur, now)
+		}
 		st.mu.Unlock()
 		return "", 0, false, nil
 	}
 	// Copy the payload key + matched input, then release the lock: the
 	// payload cache.Load below is blocking disk I/O and must not run under
-	// any lock (the whole point of the striped design).
+	// any lock (the whole point of the striped design). Copying before the
+	// prune below matters: pruneStale compacts the shared backing array.
 	key := bestE.Key
 	in := bestE.Input
+	if stale {
+		st.pruneStale(ns, ttlDur, now)
+	}
 	st.mu.Unlock()
 
 	if err := cache.Load(key, v); err != nil {
@@ -400,6 +447,25 @@ func (st *nsState) prune(ns, key string) {
 	st.es = kept
 }
 
+// pruneStale drops entries older than the TTL from ns's index (and their
+// payload files) and persists the result, so stale answers can never be
+// served again. Callers must hold the namespace lock. Best-effort: a failed
+// save leaves the in-memory index consistent and disk is reconciled on the
+// next load.
+func (st *nsState) pruneStale(ns string, ttlDur time.Duration, now time.Time) {
+	es, _ := st.loadIndex(ns)
+	kept := es[:0]
+	for _, e := range es {
+		if ttlDur > 0 && now.Sub(e.At) > ttlDur {
+			_ = os.Remove(cache.Path("data", e.Key+".json"))
+			continue
+		}
+		kept = append(kept, e)
+	}
+	_ = saveIndex(ns, kept)
+	st.es = kept
+}
+
 // Entries reports the current index size and the stored inputs (most recent
 // first) for a namespace.
 func Entries(ns string) ([]string, error) {
@@ -448,7 +514,7 @@ func Clear(ns string) error {
 	for _, e := range es {
 		_ = os.Remove(cache.Path("data", e.Key+".json"))
 	}
-	if err := os.Remove(cache.Path("data", "sem", ns+"-index.json")); err != nil && !os.IsNotExist(err) {
+	if err := os.Remove(cache.Path("data", "sem", ns+"-index.json")); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return err
 	}
 	st.es = nil
@@ -461,7 +527,7 @@ func Stats() (map[string]int, error) {
 	dir := cache.Path("data", "sem")
 	files, err := os.ReadDir(dir)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, fs.ErrNotExist) {
 			return out, nil
 		}
 		return nil, err

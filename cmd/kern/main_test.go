@@ -112,9 +112,6 @@ func TestRunWorkflowCLI(t *testing.T) {
 	}
 }
 
-// TestReadStdinNonTTY (report A15 regression) pins the v0.9.5.2 fix: reading
-// stdin must never block on a character device (interactive terminal), return
-// real piped content for a regular file, and respect the size cap.
 func TestReadStdinNonTTY(t *testing.T) {
 	old := os.Stdin
 	t.Cleanup(func() { os.Stdin = old })
@@ -185,5 +182,50 @@ func TestRenderStatelessPlanNetNewFeature(t *testing.T) {
 	}
 	if !strings.Contains(rendered, "Scope: net-new feature") {
 		t.Errorf("expected net-new feature scope, got:\n%s", rendered)
+	}
+}
+
+// TestRenderStatelessPlanCLICommand: a net-new plan for a `kern <name>`
+// command must name the concrete new file, the registration point, the test
+// file, and the verification commands — not the old generic one-liner
+// (dogfood finding F-5).
+func TestRenderStatelessPlanCLICommand(t *testing.T) {
+	rendered := renderStatelessPlan("Add a `kern dogfood` CLI command that runs a self-check battery and prints a report", domain.ContextPacket{})
+	for _, want := range []string{
+		"cmd/kern/cmd_dogfood.go",
+		"cmd/kern/cmd_dogfood_test.go",
+		"cmd/kern/dispatch_table.go",
+		"go test ./cmd/kern/ -count=1",
+	} {
+		if !strings.Contains(rendered, want) {
+			t.Errorf("CLI plan missing %q, got:\n%s", want, rendered)
+		}
+	}
+	if strings.Contains(rendered, "Implement the new feature according to specifications") {
+		t.Errorf("CLI plan still contains the generic one-liner, got:\n%s", rendered)
+	}
+}
+
+// TestRenderStatelessPlanCLICommandPlainPhrase: the same detection works
+// without backticks ("kern dogfood command" phrasing).
+func TestRenderStatelessPlanCLICommandPlainPhrase(t *testing.T) {
+	rendered := renderStatelessPlan("add a kern dogfood command", domain.ContextPacket{})
+	if !strings.Contains(rendered, "cmd/kern/cmd_dogfood.go") {
+		t.Errorf("plain-phrase CLI plan missing new file, got:\n%s", rendered)
+	}
+}
+
+// TestRenderStatelessPlanValidationNotDuplicated: packet validation items
+// must render exactly once (under Tests), not twice (the old version repeated
+// them under Implementation steps as well).
+func TestRenderStatelessPlanValidationNotDuplicated(t *testing.T) {
+	pkt := domain.ContextPacket{
+		RequiredValidation: []string{"write and run unit tests for kern", "build verification"},
+	}
+	rendered := renderStatelessPlan("Add a status endpoint", pkt)
+	for _, v := range pkt.RequiredValidation {
+		if n := strings.Count(rendered, v); n != 1 {
+			t.Errorf("validation item %q appears %d times, want exactly 1:\n%s", v, n, rendered)
+		}
 	}
 }

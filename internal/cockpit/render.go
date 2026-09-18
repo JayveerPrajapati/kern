@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/JayveerPrajapati/kern/internal/blueprint/gates"
+	"github.com/JayveerPrajapati/kern/internal/gates"
 )
 
 // ANSI color codes

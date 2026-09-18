@@ -1,5 +1,5 @@
 // Package reviewpack builds immutable, deterministic review packs
-// (blueprint KERN-P2-001): one evidence packet that can be reviewed by a
+// one evidence packet that can be reviewed by a
 // human, one model, or several council members, without re-deriving
 // evidence per reviewer. Everything in a pack is derived deterministically
 // from the repository, the task text, and the assembled context packet —

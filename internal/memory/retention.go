@@ -1,4 +1,4 @@
-// Memory retention policies (P1-007).
+// Memory retention policies.
 //
 // A RetentionPolicy controls the memory lifecycle:
 //   - ExpireAfter auto-deletes memories older than the duration.
@@ -138,9 +138,9 @@ func (p RetentionPolicy) Apply(ms []domain.Memory, now time.Time) ([]domain.Memo
 	kept := make([]domain.Memory, 0, len(ms))
 	var res RetentionResult
 
-	max := p.MaxEntries
-	if max <= 0 {
-		max = maxTypedEntries
+	maxEntries := p.MaxEntries
+	if maxEntries <= 0 {
+		maxEntries = maxTypedEntries
 	}
 
 	expireAfter := time.Duration(p.ExpireAfter)
@@ -162,9 +162,9 @@ func (p RetentionPolicy) Apply(ms []domain.Memory, now time.Time) ([]domain.Memo
 		kept = append(kept, m)
 	}
 
-	if len(kept) > max {
-		res.Trimmed = len(kept) - max
-		kept = kept[len(kept)-max:]
+	if len(kept) > maxEntries {
+		res.Trimmed = len(kept) - maxEntries
+		kept = kept[len(kept)-maxEntries:]
 	}
 	res.Kept = len(kept)
 	return kept, res

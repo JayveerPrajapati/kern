@@ -2,11 +2,14 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	kdiff "github.com/JayveerPrajapati/kern/internal/diff"
 	"github.com/JayveerPrajapati/kern/internal/governance"
 	"github.com/JayveerPrajapati/kern/internal/heal"
 	"github.com/JayveerPrajapati/kern/internal/index"
+	"github.com/JayveerPrajapati/kern/internal/llm"
 	"github.com/JayveerPrajapati/kern/internal/optimize"
 	"github.com/JayveerPrajapati/kern/internal/pii"
 	"github.com/JayveerPrajapati/kern/internal/sandbox"
@@ -14,7 +17,9 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/strutil"
 	"github.com/JayveerPrajapati/kern/internal/validate"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -28,8 +33,14 @@ func runBuild(rest []string) {
 		fatalUsage("usage: kern build <command>")
 	}
 	// Building runs arbitrary host commands; it must pass the governance
-	// firewall, fail closed (same gate as the MCP tools).
-	if err := governance.CheckExec(); err != nil {
+	// firewall, fail closed (same gate as the MCP tools). The concrete command
+	// is bound to any approval, so a HIGH/CRITICAL denial prints a resolvable
+	// approval ID (`kern approve <id>`).
+	root := f.root
+	if root == "" {
+		root = "."
+	}
+	if err := governance.CheckExecCommand(cmdStr, root); err != nil {
 		fatal("Build: %v", err)
 	}
 	wireRecorder()
@@ -43,8 +54,12 @@ func runBuild(rest []string) {
 	if err != nil {
 		// RunBuild folds the error text into res.Output; print the partial
 		// output (usually the actual compile/test error) before exiting, and
-		// point at the timeout knob instead of a bare error.
-		fmt.Print(res.Output)
+		// point at the timeout knob instead of a bare error. Child stderr
+		// often lacks a trailing newline — separate it from kern's message.
+		out := strings.TrimRight(res.Output, "\n")
+		if out != "" {
+			fmt.Println(out)
+		}
 		fatal("build: command failed (raise with --timeout N; --timeout 0 = no limit)")
 	}
 	fmt.Println(res.Output)
@@ -99,8 +114,7 @@ func runValidate(rest []string) {
 			"output":      res.Output,
 		})
 		if !res.OK {
-			fmt.Fprintln(os.Stderr, "kern: sandbox command failed — see the JSON result above")
-			panic(exitError{code: 1})
+			fatal("sandbox command failed — see the JSON result above")
 		}
 		return
 	}
@@ -116,11 +130,9 @@ func runValidate(rest []string) {
 	// non-zero exit sets res.ExitCode. Reporting both keeps the verdict
 	// self-contained whether stdout is merged with stderr or not.
 	if res.Err != nil {
-		fmt.Printf("kern: validation FAILED (%s, %s)\n", c.Name, res.Err)
-	} else {
-		fmt.Printf("kern: validation FAILED (%s, exit %d)\n", c.Name, res.ExitCode)
+		fatal("validation FAILED (%s, %s)", c.Name, res.Err)
 	}
-	panic(exitError{code: 1})
+	fatal("validation FAILED (%s, exit %d)", c.Name, res.ExitCode)
 
 }
 
@@ -141,10 +153,45 @@ func runHeal(rest []string) {
 	if iters == 0 {
 		iters = 3
 	}
-	fmt.Printf("kern: heal %s (cmd=%s, rounds=%d)\n", root, f.llm, iters)
-	res := heal.Run(context.Background(), root, task, f.llm, iters, toolTimeout(f), f.force)
+	// Pre-flight the LLM provider so a dead backend fails fast instead of
+	// hanging the loop (observed: >60s with zero output and an orphaned
+	// `opencode run` child). An explicit --llm selects an Ollama model and
+	// must NOT let the auto chain fall through to agent CLIs (claude/
+	// opencode/...) when Ollama is down; without --llm, probe the whole
+	// chain exactly like `kern do` so a missing provider is a one-line
+	// error rather than a silent hang.
+	if f.llm != "" {
+		c := llm.New("")
+		if !c.Available() {
+			fatal("heal: --llm %s selects an Ollama model but Ollama is not reachable at %s (start ollama or drop --llm to use the provider chain)", f.llm, c.Base)
+		}
+	} else if err := probeLLMProvider(); err != nil {
+		fatal("heal: no reachable LLM provider: %v — start ollama (or set KERN_LLM_PROVIDER to a reachable provider) before using kern heal", err)
+	}
+	if f.file != "" {
+		fmt.Printf("kern: heal %s (cmd=%s, rounds=%d, file=%s)\n", root, f.llm, iters, f.file)
+	} else {
+		fmt.Printf("kern: heal %s (cmd=%s, rounds=%d)\n", root, f.llm, iters)
+	}
+	var res *heal.Result
+	// Cancel the agentic loop on SIGINT/SIGTERM so the spawned `opencode run`
+	// child (exec.CommandContext in internal/llm/localcli.go) is killed too —
+	// otherwise the grandchildren survive the interrupt and burn CPU.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	if f.file != "" {
+		res = heal.RunFile(ctx, root, task, f.llm, f.file, iters, toolTimeout(f), f.force)
+	} else {
+		res = heal.Run(ctx, root, task, f.llm, iters, toolTimeout(f), f.force)
+	}
 	if res.Err != nil {
 		fatal("%v", res.Err)
+	}
+	if len(res.Unvalidated) > 0 {
+		if res.LastOutput != "" {
+			fmt.Print(res.LastOutput)
+		}
+		fatal("heal: unable to validate: %s (not OK — install the toolchain or scope with --file)", strings.Join(res.Unvalidated, ", "))
 	}
 	if res.Validated {
 		fmt.Printf("kern: validated OK after %d correction round(s)\n", res.Iterations)
@@ -159,9 +206,8 @@ func runHeal(rest []string) {
 		}
 		return
 	}
-	fmt.Printf("kern: still failing after %d round(s)\n", res.Iterations)
 	fmt.Print(res.LastOutput)
-	panic(exitError{code: 1})
+	fatal("heal: still failing after %d round(s)", res.Iterations)
 
 }
 
@@ -259,8 +305,10 @@ func runSandbox(rest []string) {
 		cmdParts = strings.Fields(cmdParts[0])
 	}
 	// Sandboxed commands execute arbitrary host code; they must pass the
-	// governance firewall, fail closed.
-	if err := governance.CheckExec(); err != nil {
+	// governance firewall, fail closed. The concrete command is bound to any
+	// approval, so a HIGH/CRITICAL denial prints a resolvable approval ID
+	// (`kern approve <id>`).
+	if err := governance.CheckExecCommand(strings.Join(cmdParts, " "), root); err != nil {
 		fatal("Sandbox: %v", err)
 	}
 	if f.json {
@@ -280,7 +328,7 @@ func runSandbox(rest []string) {
 			"network":     res.Network.Summary(),
 		})
 		if !res.OK {
-			panic(exitError{code: 1})
+			fatal("sandbox command failed — see the JSON result above")
 		}
 		return
 	}
@@ -303,11 +351,9 @@ func runSandbox(rest []string) {
 		reason = res.Err.Error()
 	}
 	if res.Restored {
-		fmt.Printf("kern: FAILED (%s, %s); tree restored to snapshot (%d files)\n", reason, res.Duration.Round(time.Millisecond), res.Snapshots)
-	} else {
-		fmt.Printf("kern: FAILED (%s)\n", reason)
+		fatal("FAILED (%s, %s); tree restored to snapshot (%d files)", reason, res.Duration.Round(time.Millisecond), res.Snapshots)
 	}
-	panic(exitError{code: 1})
+	fatal("FAILED (%s)", reason)
 
 }
 
@@ -320,11 +366,6 @@ func runExec(rest []string) {
 	f, args, err := parseFlags(rest)
 	if err != nil {
 		fatalUsage("flags: %v", err)
-	}
-	// Executing a script runs arbitrary code; it must pass the governance
-	// firewall, fail closed (same gate as the MCP kern_exec tool).
-	if err := governance.CheckExec(); err != nil {
-		fatal("Exec: %v", err)
 	}
 	// Script source: positional args win. A lone "-" or a piped stdin
 	// reads the script from stdin; a path to an existing file runs that
@@ -355,6 +396,32 @@ func runExec(rest []string) {
 	}
 	if strings.TrimSpace(code) == "" && path == "" {
 		fatalUsage("usage: kern exec \"<code>\" [--lang LANG] [--timeout s] [--max bytes] [--stdin file|-]\n       kern exec script.py | kern exec - | kern exec --list")
+	}
+	// Executing a script runs arbitrary code; it must pass the governance
+	// firewall, fail closed (same gate as the MCP kern_exec tool). The script
+	// text (or the script file path, when a file is run) is bound to any
+	// approval, so a HIGH/CRITICAL denial prints a resolvable approval ID
+	// (`kern approve <id>`).
+	binding := code
+	if path != "" {
+		// R5: bind to the script CONTENT, not the path — a path-bound
+		// approval would let an approved script be edited and replayed. Read
+		// the file and bind to a SHA-256 of its bytes so the approval covers
+		// exactly what runs. An unreadable file falls back to the path (the
+		// run itself will fail later).
+		if b, rerr := os.ReadFile(path); rerr == nil {
+			sum := sha256.Sum256(b)
+			binding = hex.EncodeToString(sum[:])
+		} else {
+			binding = path
+		}
+	}
+	root := f.root
+	if root == "" {
+		root = "."
+	}
+	if err := governance.CheckExecCommand(binding, root); err != nil {
+		fatal("Exec: %v", err)
 	}
 
 	run := script.Run{Lang: f.lang, Code: code, Path: path}
@@ -412,7 +479,7 @@ func runExec(rest []string) {
 	if f.json {
 		printJSON(res)
 		if res.Err != nil {
-			panic(exitError{code: 1})
+			fatal("exec: %v", res.Err)
 		}
 		return
 	}
@@ -421,8 +488,7 @@ func runExec(rest []string) {
 		fmt.Println()
 	}
 	if res.Err != nil {
-		fmt.Fprintln(os.Stderr, "kern exec: "+res.Err.Error())
-		panic(exitError{code: 1})
+		fatal("exec: %v", res.Err)
 	}
 	fmt.Fprintf(os.Stderr, "kern exec: %s ok (%s, %d bytes stdout)\n", res.Runtime, res.Duration.Round(time.Millisecond), len(res.Stdout))
 

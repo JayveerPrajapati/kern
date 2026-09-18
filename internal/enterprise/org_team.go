@@ -7,7 +7,8 @@ package enterprise
 
 import (
 	"fmt"
-	"sort"
+	"maps"
+	"slices"
 
 	"github.com/JayveerPrajapati/kern/internal/governance"
 )
@@ -71,11 +72,7 @@ func (s *Server) Teams() []OrgTeam {
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	ids := make([]string, 0, len(s.teamRegistry))
-	for id := range s.teamRegistry {
-		ids = append(ids, id)
-	}
-	sort.Strings(ids)
+	ids := slices.Sorted(maps.Keys(s.teamRegistry))
 	out := make([]OrgTeam, 0, len(ids))
 	for _, id := range ids {
 		out = append(out, *s.teamRegistry[id])
@@ -111,7 +108,7 @@ func (s *Server) TeamAgents(teamID string) []*governance.AgentIdentity {
 			ids = append(ids, a)
 		}
 	}
-	sort.Strings(ids)
+	slices.Sort(ids)
 	out := make([]*governance.AgentIdentity, 0, len(ids))
 	for _, id := range ids {
 		out = append(out, s.orgAgents[id])
@@ -149,7 +146,7 @@ func (s *Server) AgentTeams(agentID string) []string {
 			}
 		}
 	}
-	sort.Strings(out)
+	slices.Sort(out)
 	return out
 }
 

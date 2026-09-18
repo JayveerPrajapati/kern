@@ -11,6 +11,13 @@ import (
 )
 
 func runVersion(rest []string) {
+	// F22: version previously ignored every flag (even `kern version
+	// --nope` exited 0). Parse flags so an unknown flag is a usage error
+	// (rc=2); known flags (--json, --root, ...) are accepted and ignored,
+	// keeping `kern version`, `kern --version` and `kern -v` working.
+	if _, _, err := parseFlags(rest); err != nil {
+		fatalUsage("flags: %v", err)
+	}
 	v := version
 	if v == "dev" {
 		// Unstamped source build (plain `go build`, no Makefile ldflags):
@@ -49,6 +56,14 @@ func buildInfoRevision() string {
 }
 
 func runGuide(rest []string) {
+	// QA: `kern guide --nonsense` previously ignored every flag (exit 0).
+	// guide takes no flags; any token starting with "-" is a usage error
+	// (--help/-h is intercepted by the dispatcher before dispatch).
+	for _, a := range rest {
+		if strings.HasPrefix(a, "-") {
+			fatalUsage("unknown flag %q", a)
+		}
+	}
 	fmt.Println(mcp.Guide())
 }
 
@@ -83,6 +98,16 @@ classifies the request and runs the right tool internally. Examples:
   kern meta "compress this log: ERROR: dispatchCommand failed"`)
 			return
 		default:
+			// QA: an unknown flag AFTER the free-form request was previously
+			// silently appended to it (exit 0). Reject it as a usage error.
+			// A leading "-..." token is still the request when nothing has
+			// been captured yet (a quoted single-argument request like
+			// `kern meta "-x flag"` arrives as ONE arg and must keep
+			// working) — mirroring how parseFlags-based commands reject
+			// unknown flags without touching positionals.
+			if strings.HasPrefix(rest[i], "-") && request != "" {
+				fatalUsage("unknown flag %q", rest[i])
+			}
 			if request == "" {
 				request = rest[i]
 			} else {
@@ -91,10 +116,9 @@ classifies the request and runs the right tool internally. Examples:
 		}
 	}
 	if strings.TrimSpace(request) == "" {
-		fmt.Fprintln(os.Stderr, `usage: kern meta "<request>" [--root DIR]
+		fatalUsage(`usage: kern meta "<request>" [--root DIR]
 describe what you need and kern picks the right tool. Example:
   kern meta "show me the architecture"`)
-		panic(exitError{code: 2})
 	}
 
 	// Re-dispatch via the MCP server's internal classifier. We build a
@@ -104,8 +128,7 @@ describe what you need and kern picks the right tool. Example:
 	args := map[string]any{"request": request, "root": root}
 	out, err := srv.HandleMeta(context.Background(), args)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "kern meta:", err)
-		panic(exitError{code: 1})
+		fatal("meta: %v", err)
 	}
 	fmt.Println(out)
 }

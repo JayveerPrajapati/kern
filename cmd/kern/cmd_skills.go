@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"os"
 	"strings"
 
 	"github.com/JayveerPrajapati/kern/internal/setup"
@@ -58,8 +57,7 @@ func listSkills() {
 func showSkill(name string) {
 	data, err := setup.ReadSkill(name)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: unknown skill %q (available: %s)\n", name, strings.Join(setup.SkillNames, ", "))
-		panic(exitError{code: 1})
+		fatal("unknown skill %q (available: %s)", name, strings.Join(setup.SkillNames, ", "))
 	}
 	fmt.Println(string(data))
 }

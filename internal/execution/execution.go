@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/JayveerPrajapati/kern/internal/governance"
@@ -48,12 +49,16 @@ func (e *Executor) WithGovernance(check func(command string, args []string) erro
 }
 
 // WithExecFirewall attaches the repo's governance firewall to the executor so
-// every Execute call passes through governance.CheckExec. Callers that already
-// gate at their call site may leave the executor unconfigured to avoid
-// double-gating.
+// every Execute call passes through governance.CheckExec. The gate binds the
+// CONCRETE command text it is about to run (command + args) and the executor's
+// project root, so a HIGH/CRITICAL denial creates a persisted, command-bound
+// approval `kern approve <id>` can resolve out-of-band (oracle-gate: the
+// legacy empty-command gate created an unresolvable in-memory approval).
+// Callers that already gate at their call site may leave the executor
+// unconfigured to avoid double-gating.
 func (e *Executor) WithExecFirewall() *Executor {
 	return e.WithGovernance(func(command string, args []string) error {
-		return governance.CheckExec()
+		return governance.CheckExecCommand(strings.Join(append([]string{command}, args...), " "), e.projectRoot())
 	})
 }
 

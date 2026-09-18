@@ -21,13 +21,13 @@ kern is the explicit, user-invoked `kern_doc_fetch`.
 
 | Document | Contents |
 |---|---|
-| [`tool-contracts.md`](tool-contracts.md) | The authoritative catalog of all 143 MCP tools: name, phase, risk level, description, parameters, required parameters, and JSON-RPC usage examples. |
+| [`tool-contracts.md`](tool-contracts.md) | The authoritative catalog of all 145 MCP tools: name, phase, risk level, description, parameters, required parameters, and JSON-RPC usage examples. |
 | [`protocol.md`](protocol.md) | The wire protocol: transports (stdio / HTTP), JSON-RPC methods, capabilities, error handling, governance gates, and shutdown behavior. |
 | [`versioning.md`](versioning.md) | Versioning policy: supported MCP protocol versions, server version reporting, tool-catalog stability rules, and how clients should negotiate. |
 
 ## Catalog at a glance
 
-- **143 tools** across six phases: explore, plan, edit, verify,
+- **145 tools** across six phases: explore, plan, edit, verify,
   meta, cross.
 - **Risk levels** on every tool: low (82), medium (31), high (18), critical (5) —
   governed clients gate tool access on these.
@@ -37,7 +37,7 @@ kern is the explicit, user-invoked `kern_doc_fetch`.
 ## Source of truth
 
 The single source of truth for the tool catalog is the registration table in
-[`internal/mcp/tools.go`](../../internal/mcp/tools.go) (`var tools = []Tool{...}`).
+[`internal/mcp/catalog/tools.go`](../../internal/mcp/catalog/tools.go) (`var All = []Tool{...}`).
 `internal/mcp/server.go` defines the `Tool` struct (`name`, `description`, `inputSchema`,
 `phase`, `riskLevel`), the phase and risk constants, and the JSON-RPC method handling.
 Catalog-parity invariants (plugin ↔ MCP, docs ↔ MCP) read the table via `ToolNames()`.
@@ -57,7 +57,7 @@ docs can be regenerated.
 
 - [`docs/authorized-context.md`](../authorized-context.md) — governed-mode context
   authorization (`kern_authorize_context`).
-- [`docs/architecture/tool-gateway.md`](../architecture/tool-gateway.md) — tool gateway architecture.
+- [`ARCHITECTURE.md`](../../ARCHITECTURE.md) — system architecture and package subsystem boundaries.
 - [`internal/mcp/usage_guide.go`](../../internal/mcp/usage_guide.go) — the `kern guide`
   text: phase shortlists, performance tiers and pitfalls (served verbatim to the CLI
   and the opencode plugin).

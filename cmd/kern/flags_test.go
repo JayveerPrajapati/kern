@@ -90,3 +90,121 @@ func TestParseFlagsHelpAndMissingValue(t *testing.T) {
 		t.Errorf("root = %q, want empty (no value given)", f.root)
 	}
 }
+
+// TestParseFlagsInlineEqualsForms pins the unified parser's --flag=value
+// support (the stdlib flag package forms the migrated FlagSets accepted):
+// value flags take both --flag value and --flag=value; bool flags take
+// --flag, --flag=true and --flag=false. Representative migrated flags are
+// used (--pipeline/--template strings, --auto-gap/--sign/--apply bools,
+// single-dash -k).
+func TestParseFlagsInlineEqualsForms(t *testing.T) {
+	// String flag: --flag value AND --flag=value (last wins).
+	f, rest, err := parseFlags([]string{"--root", "/a", "--root=/b", "pos"})
+	if err != nil {
+		t.Fatalf("parseFlags: %v", err)
+	}
+	if f.root != "/b" {
+		t.Errorf("root = %q, want /b (last --root=/b wins)", f.root)
+	}
+	if len(rest) != 1 || rest[0] != "pos" {
+		t.Errorf("rest = %v, want [pos]", rest)
+	}
+	// Migrated FlagSet string flags, both forms, including single-dash -k.
+	f, _, err = parseFlags([]string{"--template", "t1", "--pipeline={\"a\":1}", "-k=5", "--agent", "a1"})
+	if err != nil {
+		t.Fatalf("parseFlags: %v", err)
+	}
+	if f.template != "t1" || f.pipeline != `{"a":1}` || f.k != "5" || f.agent != "a1" {
+		t.Errorf("migrated strings = template %q pipeline %q k %q agent %q", f.template, f.pipeline, f.k, f.agent)
+	}
+	// Bool flag with and without =value.
+	f, _, err = parseFlags([]string{"--json"})
+	if err != nil || !f.json {
+		t.Fatalf("--json = %v err %v, want true/nil", f.json, err)
+	}
+	f, _, err = parseFlags([]string{"--json=true"})
+	if err != nil || !f.json {
+		t.Fatalf("--json=true = %v err %v, want true/nil", f.json, err)
+	}
+	f, _, err = parseFlags([]string{"--json=false"})
+	if err != nil || f.json {
+		t.Fatalf("--json=false = %v err %v, want false/nil", f.json, err)
+	}
+	// Migrated FlagSet bools, mixed forms.
+	f, _, err = parseFlags([]string{"--auto-gap", "--sign=true", "--apply=false"})
+	if err != nil {
+		t.Fatalf("parseFlags: %v", err)
+	}
+	if !f.autoGap || !f.sign || f.apply {
+		t.Errorf("bools = autoGap %v sign %v apply %v, want true/true/false", f.autoGap, f.sign, f.apply)
+	}
+}
+
+// TestParseFlagsTrailingValueLessFlag pins the documented accept-and-default
+// semantic (parseFlags contract #1): a value flag at the end of the line
+// with no value is accepted and left at its default — never an error, never
+// silently swallowed as a positional. This is the single unified semantic
+// that replaced the stdlib FlagSets, which each rejected the same input
+// ("flag needs an argument: -x") with per-command error paths.
+func TestParseFlagsTrailingValueLessFlag(t *testing.T) {
+	f, rest, err := parseFlags([]string{"--root", "x", "--out"})
+	if err != nil {
+		t.Fatalf("trailing --out must be accepted (accept-and-default): %v", err)
+	}
+	if f.root != "x" {
+		t.Errorf("root = %q, want x (value flag before the trailing one)", f.root)
+	}
+	if f.out != "" {
+		t.Errorf("out = %q, want default (empty)", f.out)
+	}
+	if len(rest) != 0 {
+		t.Errorf("rest = %v, want empty (the trailing flag is not a positional)", rest)
+	}
+	// Same for a migrated FlagSet int flag (flight gc --keep-tasks).
+	f, _, err = parseFlags([]string{"--keep-tasks"})
+	if err != nil {
+		t.Fatalf("trailing --keep-tasks must be accepted (accept-and-default): %v", err)
+	}
+	if f.keepTasks != 20 {
+		t.Errorf("keepTasks = %d, want default 20", f.keepTasks)
+	}
+	// And for a repeatable migrated flag (policy-dsl --file).
+	f, _, err = parseFlags([]string{"--file"})
+	if err != nil {
+		t.Fatalf("trailing --file must be accepted (accept-and-default): %v", err)
+	}
+	if len(f.files) != 0 || f.file != "" {
+		t.Errorf("files = %v file %q, want empty defaults", f.files, f.file)
+	}
+}
+
+// TestParseFlagsMigratedDefaults pins the preserved FlagSet defaults of the
+// migrated per-command flags (contract: name, default and help text were
+// preserved exactly through the unified parser).
+func TestParseFlagsMigratedDefaults(t *testing.T) {
+	f, _, err := parseFlags(nil)
+	if err != nil {
+		t.Fatalf("parseFlags(nil): %v", err)
+	}
+	if f.keepTasks != 20 || f.k != "5" || f.halfLife != "7.0" || f.format != "text" ||
+		f.chunkSize != "1000" || f.ttl != "300" || f.injectMemory != "true" {
+		t.Errorf("migrated defaults = keepTasks %d k %q halfLife %q format %q chunkSize %q ttl %q injectMemory %q",
+			f.keepTasks, f.k, f.halfLife, f.format, f.chunkSize, f.ttl, f.injectMemory)
+	}
+}
+
+// TestRunHealthRootEqualsForm pins the unified parser at the handler level:
+// a migrated FlagSet command (health) accepts the --flag=value form.
+func TestRunHealthRootEqualsForm(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	root := t.TempDir()
+	out := captureStdout(t, func() { runHealth([]string{"--root=" + root}) })
+	m := assertValidJSON(t, out)
+	idx, ok := m["index"].(map[string]any)
+	if !ok {
+		t.Fatalf("health output missing index block: %v", m)
+	}
+	if idx["built"] != false {
+		t.Fatalf("index block = %v, want built=false (empty dir)", idx)
+	}
+}

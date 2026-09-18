@@ -2,6 +2,7 @@ package llm
 
 import (
 	"context"
+	"fmt"
 	"testing"
 )
 
@@ -145,5 +146,78 @@ func TestMaskRequiredWithMCPProvider(t *testing.T) {
 	t.Setenv("KERN_LLM_PROVIDER", "host")
 	if MaskRequired() {
 		t.Fatal("MaskRequired() = true for host provider, want false")
+	}
+}
+
+// TestRegisterHostSamplerForMultipleKeys: several sessions/agents can each
+// register their own sampler; the provider tries them in registration order
+// (first success wins) and disposing one key leaves the others intact.
+func TestRegisterHostSamplerForMultipleKeys(t *testing.T) {
+	agentA := RegisterHostSamplerFor("agent-a", func(ctx context.Context, system, user string, opts Options) (string, error) {
+		return "A:" + user, nil
+	})
+	agentB := RegisterHostSamplerFor("agent-b", func(ctx context.Context, system, user string, opts Options) (string, error) {
+		return "", fmt.Errorf("agent-b down")
+	})
+	agentC := RegisterHostSamplerFor("agent-c", func(ctx context.Context, system, user string, opts Options) (string, error) {
+		return "C:" + user, nil
+	})
+	defer agentA()
+	defer agentB()
+	defer agentC()
+
+	prov := NewMCPProvider()
+
+	// First registered key answers.
+	out, err := prov.Generate(context.Background(), "", "u", Options{})
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	if out != "A:u" {
+		t.Errorf("got %q, want A:u (first registered sampler wins)", out)
+	}
+
+	// Dispose A: B fails, so C answers.
+	agentA()
+	out, err = prov.Generate(context.Background(), "", "u", Options{})
+	if err != nil {
+		t.Fatalf("Generate after disposing A: %v", err)
+	}
+	if out != "C:u" {
+		t.Errorf("got %q, want C:u (failing sampler skipped)", out)
+	}
+
+	// Replace B with a working sampler under the same key (re-registration
+	// keeps the slot's original position — C was registered before B, so C
+	// still wins; disposing C then lets the replaced B answer).
+	agentB()
+	agentB2 := RegisterHostSamplerFor("agent-b", func(ctx context.Context, system, user string, opts Options) (string, error) {
+		return "B2:" + user, nil
+	})
+	defer agentB2()
+	out, err = prov.Generate(context.Background(), "", "u", Options{})
+	if err != nil {
+		t.Fatalf("Generate after re-registering B: %v", err)
+	}
+	if out != "C:u" {
+		t.Errorf("got %q, want C:u (earlier-registered sampler still first)", out)
+	}
+	agentC()
+	out, err = prov.Generate(context.Background(), "", "u", Options{})
+	if err != nil {
+		t.Fatalf("Generate after disposing C: %v", err)
+	}
+	if out != "B2:u" {
+		t.Errorf("got %q, want B2:u", out)
+	}
+
+	// Dispose everything: no sampler left.
+	agentB2()
+	agentC()
+	if HasHostSampler() {
+		t.Fatal("HasHostSampler should be false after disposing every key")
+	}
+	if _, err := prov.Generate(context.Background(), "", "u", Options{}); err == nil {
+		t.Fatal("Generate should fail with no samplers registered")
 	}
 }

@@ -2,15 +2,11 @@ package service
 
 import (
 	"context"
-	"fmt"
-	"strings"
 	"time"
 
-	"github.com/JayveerPrajapati/kern/internal/governance"
 	"github.com/JayveerPrajapati/kern/internal/pii"
 	jsonschema "github.com/JayveerPrajapati/kern/internal/schema"
 	"github.com/JayveerPrajapati/kern/internal/sec"
-	"github.com/JayveerPrajapati/kern/internal/validate"
 )
 
 // SecurityService centralizes security operations: scanning a tree for
@@ -28,11 +24,6 @@ type SecurityService interface {
 	// Mask replaces secrets/PII in text with [MASKED_*] placeholders.
 	// names is an optional list of extra identifiers to mask.
 	Mask(ctx context.Context, text string, names []string) (pii.Result, error)
-	// MaskFile masks the contents of the file at path.
-	MaskFile(ctx context.Context, path string) (pii.Result, error)
-	// Validate detects (or uses opts.Command) and runs the project's
-	// build/test/syntax check under the governance firewall.
-	Validate(ctx context.Context, root string, opts ValidateOptions) (*validate.Result, error)
 	// SchemaValidate deterministically validates data against the JSON
 	// schema spec, returning the list of violations (empty = conforms).
 	SchemaValidate(ctx context.Context, data []byte, schemaSpec string) ([]string, error)
@@ -73,40 +64,6 @@ func (s *securityService) Mask(ctx context.Context, text string, names []string)
 		return pii.Result{}, err
 	}
 	return pii.MaskAllCustom(text, pii.DefaultPatterns, names), nil
-}
-
-func (s *securityService) MaskFile(ctx context.Context, path string) (pii.Result, error) {
-	if err := ctx.Err(); err != nil {
-		return pii.Result{}, err
-	}
-	return pii.MaskFile(path)
-}
-
-func (s *securityService) Validate(ctx context.Context, root string, opts ValidateOptions) (*validate.Result, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	// Validation runs the detected or user-supplied command (arbitrary host
-	// code); it must pass the governance firewall, fail closed.
-	if err := governance.CheckExec(); err != nil {
-		return nil, err
-	}
-	root = resolveRoot(root)
-	var c *validate.Command
-	if opts.Command != "" {
-		parts := strings.Fields(opts.Command)
-		if len(parts) == 0 {
-			return nil, fmt.Errorf("validate: empty --cmd")
-		}
-		c = &validate.Command{Name: parts[0], Cmd: parts[0], Args: parts[1:]}
-	} else {
-		var err error
-		c, err = validate.Detect(root)
-		if err != nil {
-			return nil, err
-		}
-	}
-	return validate.Run(ctx, root, c, opts.Timeout), nil
 }
 
 func (s *securityService) SchemaValidate(ctx context.Context, data []byte, schemaSpec string) ([]string, error) {

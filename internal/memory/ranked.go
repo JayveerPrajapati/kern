@@ -2,6 +2,7 @@ package memory
 
 import (
 	"math"
+	"sort"
 	"time"
 )
 
@@ -91,14 +92,19 @@ func RecallRanked(root, prompt string, k int, halfLifeDays float64) []RankedEntr
 		})
 	}
 
-	// Sort descending by score
-	for i := 0; i < len(pool); i++ {
-		for j := i + 1; j < len(pool); j++ {
-			if pool[j].Score > pool[i].Score {
-				pool[i], pool[j] = pool[j], pool[i]
-			}
+	// Deterministic ranking: score desc, then recency desc (newer first),
+	// then the entry text as the final tiebreaker (Entry carries no ID field,
+	// so the unique text is the deterministic key). O(n log n) sort.Slice
+	// replaces the former O(n^2) bubble sort.
+	sort.Slice(pool, func(i, j int) bool {
+		if pool[i].Score != pool[j].Score {
+			return pool[i].Score > pool[j].Score
 		}
-	}
+		if !pool[i].Entry.Time.Equal(pool[j].Entry.Time) {
+			return pool[i].Entry.Time.After(pool[j].Entry.Time)
+		}
+		return pool[i].Entry.Text < pool[j].Entry.Text
+	})
 
 	if len(pool) > k {
 		pool = pool[:k]

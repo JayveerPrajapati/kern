@@ -17,6 +17,7 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/eventbus"
 	"github.com/JayveerPrajapati/kern/internal/evidence"
 	"github.com/JayveerPrajapati/kern/internal/governance"
+	"github.com/JayveerPrajapati/kern/internal/index"
 	"github.com/JayveerPrajapati/kern/internal/intelligence"
 	"github.com/JayveerPrajapati/kern/internal/memory"
 	"github.com/JayveerPrajapati/kern/internal/metrics"
@@ -59,12 +60,18 @@ type Engine struct {
 	freshnessScoring bool
 
 	// clearance is the optional security clearance (0-3) applied on the main
-	// retrieval path (AUD-13). When 0 (the default), retrieval uses the legacy
+	// retrieval path. When 0 (the default), retrieval uses the legacy
 	// un-governed memory.Recall exactly as before. When >0, retrieval goes
 	// through memory.AuthorizedRecall, which excludes memories whose
 	// classification level exceeds this clearance and, when governance is
 	// attached to the memory store, enforces read permission + audit.
 	clearance int
+	// ix is an optional prebuilt project index consulted when extracting
+	// symbol candidates from a natural-language intent: a token that resolves
+	// (case-sensitively) to a real index symbol is kept even when it collides
+	// with the change-verb stoplist (a symbol named "Add"/"Fix"/... must never
+	// be dropped). Nil = pure stopword extraction (backward-compatible).
+	ix *index.Index
 
 	// nodesByIDCache caches the node ID -> node lookup, built once on first use.
 	// The graph is fixed at Engine construction, so the cache never goes stale.
@@ -75,6 +82,15 @@ type Engine struct {
 // NewEngine creates a context engine with the given dependencies.
 func NewEngine(root string, graph *intelligence.Graph, mem *memory.MemoryStore, fw *governance.Firewall) *Engine {
 	return &Engine{graph: graph, memory: mem, firewall: fw, root: root}
+}
+
+// WithIndex attaches the prebuilt project index used to disambiguate
+// stopword-colliding symbol names during candidate extraction from
+// natural-language intents. Nil-safe: a nil index keeps pure stopword
+// extraction. It returns e for chaining.
+func (e *Engine) WithIndex(ix *index.Index) *Engine {
+	e.ix = ix
+	return e
 }
 
 // WithRuntimeSource attaches an optional production runtime source. When nil,
@@ -121,7 +137,7 @@ func (e *Engine) WithFreshnessScoring(enabled bool) *Engine {
 }
 
 // WithClearance sets the optional security clearance for the engine's main
-// retrieval path (AUD-13). The level is the numeric clearance from the memory
+// retrieval path. The level is the numeric clearance from the memory
 // domain: 0 = unclassified, 1 = internal, 2 = confidential, 3 = restricted.
 // When set (>0), memory retrieval goes through the authorization-filtered path
 // (memory.AuthorizedRecall) so memories classified above this clearance are
@@ -134,7 +150,7 @@ func (e *Engine) WithClearance(level int) *Engine {
 }
 
 // recall retrieves memory for the packet. When a clearance is set on the
-// engine (AUD-13), it goes through the governed, clearance-filtered path
+// engine, it goes through the governed, clearance-filtered path
 // (memory.AuthorizedRecall); otherwise it uses the legacy plain Recall, so
 // behavior is unchanged for existing callers.
 func (e *Engine) recall(q memory.Query) ([]domain.Memory, error) {
@@ -531,32 +547,39 @@ func (e *Engine) assessRisk(scope string, roots []domain.Symbol) []domain.Risk {
 		risk.Blocked = true
 	}
 
-	// Adjust risk based on blast radius: a tiny isolated change should not be
-	// CRITICAL just because it touches source code. The firewall's
-	// resource-based level is the ceiling; the actual risk is proportional to
-	// how much of the system is affected. Security-sensitive changes are the
-	// exception — their HIGH escalation is inherent to the resource (auth,
-	// credentials, TLS, ...) and is intentionally NOT downgraded by scope size.
-	blastRadius := len(roots)
-	isSecuritySensitive := resource == "security"
-	switch {
-	case blastRadius <= 1 && !isSecuritySensitive:
-		// Isolated change — cap at MEDIUM regardless of firewall level.
-		if riskScore(risk.Level) > riskScore(domain.RiskMedium) {
-			risk.Level = domain.RiskMedium
-			risk.Score = riskScore(domain.RiskMedium)
+	// Adjust risk based on the TRANSITIVE blast radius, not the root count:
+	// a single root with hundreds of transitive dependents is a large change,
+	// not an isolated one. The impact set (transitive dependents + the roots
+	// themselves) is the same input the what-if simulation feeds the shared
+	// classifier, so kern risk and kern simulate derive the SAME tier for the
+	// same change (D3). Security-sensitive changes are the exception — their
+	// HIGH escalation is inherent to the resource (auth, credentials, TLS,
+	// ...) and is intentionally NOT downgraded by scope size.
+	affected := map[string]bool{}
+	services := map[string]bool{}
+	if e.graph != nil {
+		for _, r := range roots {
+			if r.Qualified == "" {
+				continue
+			}
+			affected[r.Qualified] = true
+			for _, n := range e.graph.WhatDependsOn(r.Qualified) {
+				affected[n.ID] = true
+			}
+			for _, s := range e.graph.WhatServicesAffected(r.Qualified) {
+				services[s.ID] = true
+			}
 		}
-		risk.Factors = append(risk.Factors, "blast-radius:isolated")
-	case blastRadius <= 5 && !isSecuritySensitive:
-		// Moderate change — cap at HIGH.
-		if riskScore(risk.Level) > riskScore(domain.RiskHigh) {
-			risk.Level = domain.RiskHigh
-			risk.Score = riskScore(domain.RiskHigh)
-		}
-		risk.Factors = append(risk.Factors, "blast-radius:moderate")
-	default:
-		risk.Factors = append(risk.Factors, "blast-radius:large")
 	}
+	tier, factor := domain.RiskFromImpact(domain.ImpactRisk{
+		AffectedCount:     len(affected),
+		ServicesAffected:  len(services),
+		SecuritySensitive: resource == "security",
+		Severity:          risk.Level,
+	})
+	risk.Level = tier
+	risk.Score = riskScore(tier)
+	risk.Factors = append(risk.Factors, factor)
 
 	return []domain.Risk{risk}
 }

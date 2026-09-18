@@ -1,4 +1,4 @@
-// Memory governance: access control for memory operations (P1-007).
+// Memory governance: access control for memory operations.
 //
 // A Governance layer bundles three concerns:
 //   - AccessControl: who may read, write and delete memories (per-agent

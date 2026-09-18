@@ -97,6 +97,14 @@ type Impact struct {
 	// Evidence is the P2 anchor for the change target (file:line +
 	// certificate), populated by the platform layer which owns the index.
 	Evidence string `json:"evidence,omitempty"`
+	// NotResolved is true when the change's target symbol does not resolve in
+	// the project index and the simulation found nothing affected as a result
+	// — the change is a not-found condition, not a clean "isolated" bill.
+	// AddSymbol is exempt: a brand-new symbol is expected to be absent.
+	NotResolved bool `json:"not_resolved,omitempty"`
+	// NotResolvedWarning is the human-readable warning rendered (and carried
+	// in JSON) when NotResolved is true.
+	NotResolvedWarning string `json:"not_resolved_warning,omitempty"`
 }
 
 // Simulate applies the change to the graph (in memory) and returns the impact.
@@ -156,6 +164,17 @@ func Simulate(g *intelligence.Graph, c Change) Impact {
 		imp.Affected = append(imp.Affected, id)
 	}
 	sort.Strings(imp.Affected)
+	// Not-found detection: when the change's target does not resolve in the
+	// project index, zero affected symbols means the change is unresolvable —
+	// NOT a clean "isolated: safe to proceed" bill. Mirror the impact path's
+	// "no symbol named X" detection (intel.Resolve / platform.resolveSymbol)
+	// via the graph's own resolver (bare names, package-scoped, methods).
+	// AddSymbol is exempt: a brand-new symbol is expected to be absent, and
+	// flagging it would turn the normal add-symbol case into a false warning.
+	if len(imp.Affected) == 0 && c.Kind != AddSymbol && !g.Resolvable(c.Target) {
+		imp.NotResolved = true
+		imp.NotResolvedWarning = fmt.Sprintf("symbol %q was not found in this project's index — the simulation could not resolve it, so the impact estimate does not reflect a real symbol; pass the exact symbol name (or a qualified 'pkg.Symbol')", c.Target)
+	}
 	for f := range files {
 		imp.Files = append(imp.Files, f)
 	}
@@ -353,19 +372,20 @@ func computeUntestedAffected(s simState, c Change, imp Impact) ([]string, bool, 
 	return sortedKeys(untested), capped, untestedCandidates
 }
 
-// assessRisk sets the isolated flag and the deterministic risk ladder.
+// assessRisk sets the isolated flag and the deterministic risk ladder. The
+// tier comes from the shared domain classifier (domain.RiskFromImpact) — the
+// SAME classifier the context engine's risk assessment uses — so the same
+// change string yields the same risk tier under kern simulate and kern risk
+// (D3). The simulation has no governance firewall, so no security-resource
+// escalation applies (SecuritySensitive/Severity stay zero).
 func assessRisk(imp *Impact, createsCycle bool) {
 	imp.Isolated = len(imp.Affected) == 0
-	switch {
-	case createsCycle:
-		imp.Risk = "high"
-	case len(imp.Services) > 0 || len(imp.Affected) > 10:
-		imp.Risk = "high"
-	case len(imp.Affected) > 0:
-		imp.Risk = "medium"
-	default:
-		imp.Risk = "low"
-	}
+	tier, _ := domain.RiskFromImpact(domain.ImpactRisk{
+		AffectedCount:    len(imp.Affected),
+		ServicesAffected: len(imp.Services),
+		CreatesCycle:     createsCycle,
+	})
+	imp.Risk = strings.ToLower(string(tier))
 }
 
 // sortedKeys returns the map's keys sorted ascending, deduplicated by the map.

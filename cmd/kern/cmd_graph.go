@@ -3,10 +3,12 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"github.com/JayveerPrajapati/kern/internal/app"
 	kernctx "github.com/JayveerPrajapati/kern/internal/context"
 	"github.com/JayveerPrajapati/kern/internal/intel"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -60,13 +62,34 @@ func runGraph(rest []string) {
 		fatal("Graph: %v", err)
 	}
 	if f.mermaid {
-		fmt.Println(ix.Mermaid(symbol))
+		out := ix.Mermaid(symbol)
+		if f.limit > 0 {
+			out = capMermaid(out, f.limit)
+		}
+		graphOut(f, out)
 		return
 	}
 	if f.json || f.graphml || f.cypher || f.html {
 		g, gerr := svc.Graph.Neighborhood(context.Background(), root, symbol)
 		if gerr != nil {
 			fatalNoSymbol(symbol, ix)
+		}
+		// F10: honor --limit in symbol mode too — cap the rendered
+		// nodes/edges like the whole-repo path does (WholeGraph caps at
+		// --limit), surfacing the cut on stderr so a capped graph is never
+		// mistaken for the full neighbourhood.
+		if f.limit > 0 {
+			beforeN, beforeE := len(g.Nodes), len(g.Edges)
+			if len(g.Nodes) > f.limit {
+				g.Nodes = g.Nodes[:f.limit]
+			}
+			if len(g.Edges) > f.limit {
+				g.Edges = g.Edges[:f.limit]
+			}
+			if beforeN > len(g.Nodes) || beforeE > len(g.Edges) {
+				fmt.Fprintf(os.Stderr, "kern: graph capped at --limit %d (%d node(s), %d edge(s) omitted)\n",
+					f.limit, beforeN-len(g.Nodes), beforeE-len(g.Edges))
+			}
 		}
 		var out string
 		switch {
@@ -79,14 +102,7 @@ func runGraph(rest []string) {
 		default:
 			out = g.GraphHTML(ix)
 		}
-		if f.out != "" {
-			if err := os.WriteFile(f.out, []byte(out), 0o644); err != nil {
-				fatal("Graph: %v", err)
-			}
-			fmt.Printf("wrote %s (%d bytes)\n", f.out, len(out))
-			return
-		}
-		fmt.Println(out)
+		graphOut(f, out)
 		return
 	}
 	if f.maxTokens > 0 {
@@ -94,15 +110,89 @@ func runGraph(rest []string) {
 		if err != nil {
 			fatal("Graph: %v", err)
 		}
-		fmt.Println(out)
+		graphOut(f, out)
 		return
 	}
 	out, gerr := svc.Graph.Graph(context.Background(), root, symbol)
 	if gerr != nil || strings.Contains(out, "no symbol found") {
 		fatalNoSymbol(symbol, ix)
 	}
-	fmt.Println(out)
+	if f.limit > 0 {
+		out = capGraphText(out, f.limit)
+	}
+	graphOut(f, out)
 
+}
+
+// graphOut emits a rendered graph honoring --out with the whole-repo path's
+// semantics: when --out is set the output is written to the file and a
+// confirmation is printed (no stdout); otherwise it goes to stdout. F10:
+// the symbol-subgraph paths previously ignored --out entirely.
+func graphOut(f flags, out string) {
+	if f.out != "" {
+		if err := os.WriteFile(f.out, []byte(out), 0o644); err != nil {
+			fatal("Graph: %v", err)
+		}
+		fmt.Printf("wrote %s (%d bytes)\n", f.out, len(out))
+		return
+	}
+	fmt.Println(out)
+}
+
+// capGraphEdgeLines truncates the rendered edge lines of a symbol graph
+// (text or mermaid) to at most limit entries, preserving headers and
+// directives, and appends a "... (N more, capped at --limit)" note when
+// anything is cut so a capped result is never mistaken for the full graph
+// (F10). A limit <= 0 leaves the output untouched.
+func capGraphEdgeLines(out string, limit int, isEdge func(string) bool, notePrefix string) string {
+	if limit <= 0 || out == "" {
+		return out
+	}
+	lines := strings.Split(out, "\n")
+	var b strings.Builder
+	kept, cut := 0, 0
+	for _, ln := range lines {
+		if isEdge(ln) {
+			if kept >= limit {
+				cut++
+				continue
+			}
+			kept++
+		}
+		b.WriteString(ln)
+		b.WriteString("\n")
+	}
+	if cut > 0 {
+		fmt.Fprintf(&b, "%s... (%d more, capped at --limit %d)\n", notePrefix, cut, limit)
+	}
+	return strings.TrimSuffix(b.String(), "\n")
+}
+
+// capGraphText caps the def/callers/calls text render of a symbol subgraph:
+// the root definition line(s) are always kept, the caller/callee edge lists
+// are truncated to limit entries.
+func capGraphText(out string, limit int) string {
+	return capGraphEdgeLines(out, limit, func(ln string) bool {
+		return strings.HasPrefix(ln, "  ") && !strings.HasPrefix(ln, "    ")
+	}, "")
+}
+
+// capMermaid caps the edge lines of a Mermaid flowchart to limit entries,
+// keeping the flowchart directive and any staleness banner.
+func capMermaid(out string, limit int) string {
+	return capGraphEdgeLines(out, limit, func(ln string) bool {
+		return strings.Contains(ln, " --> ")
+	}, "%% ")
+}
+
+// typeKindOf reports whether a symbol kind is a type (the target of
+// inheritance queries). Mirrors the index's searchTypeKinds set.
+func typeKindOf(kind string) bool {
+	switch kind {
+	case "type", "class", "interface", "struct", "enum", "record", "trait", "union":
+		return true
+	}
+	return false
 }
 
 func runInherits(rest []string) {
@@ -126,6 +216,23 @@ func runInherits(rest []string) {
 		fatal("Inherits: %v", err)
 	}
 	sym, ok := ix.FindSymbol(symbol)
+	if !ok {
+		// Qualified forms ("index.Index") resolve through the same chain
+		// Graph uses: dotted receiver match, then package-directory match.
+		if r, ok2 := ix.ResolveName(symbol); ok2 {
+			sym = r
+			ok = true
+		}
+	}
+	if ok && !typeKindOf(sym.Kind) {
+		// Inheritance is a type-level concept. When the bare name is
+		// ambiguous between a type and same-named methods/functions (e.g.
+		// `kern inherits Index` must resolve the struct, not Platform.Index),
+		// prefer the type symbol.
+		if types := ix.Search("type "+symbol, 1); len(types) > 0 {
+			sym = types[0]
+		}
+	}
 	if !ok {
 		fatalNoSymbol(symbol, ix)
 	}
@@ -258,10 +365,13 @@ func runHubs(rest []string) {
 		limit = 10
 	}
 	if f.json {
-		printJSON(map[string]any{
-			"hubs":    intel.Hubs(ix, limit),
-			"bridges": intel.Bridges(ix, 15),
-		})
+		// Ordered struct (not a map) so JSON key order is stable: hubs
+		// first, then bridges — a map renders keys in random order and
+		// made the payload look like a bridges-only response.
+		printJSON(struct {
+			Hubs    any `json:"hubs"`
+			Bridges any `json:"bridges"`
+		}{intel.Hubs(ix, limit), intel.Bridges(ix, 15)})
 		return
 	}
 	fmt.Println(intel.RenderHubs(intel.Hubs(ix, limit)))
@@ -275,14 +385,7 @@ func runBridges(rest []string) {
 	if err != nil {
 		fatalUsage("flags: %v", err)
 	}
-	root := f.root
-	if root == "" {
-		root = "."
-		if len(args) > 0 {
-			root = args[0]
-		}
-	}
-	ix, err := intel.ReadIndex(root)
+	_, ix, err := resolveRoot(f, args)
 	if err != nil {
 		fatal("Bridges: %v", err)
 	}
@@ -303,14 +406,7 @@ func runTestgaps(rest []string) {
 	if err != nil {
 		fatalUsage("flags: %v", err)
 	}
-	root := f.root
-	if root == "" {
-		root = "."
-		if len(args) > 0 {
-			root = args[0]
-		}
-	}
-	ix, err := intel.ReadIndex(root)
+	_, ix, err := resolveRoot(f, args)
 	if err != nil {
 		fatal("Testgaps: %v", err)
 	}
@@ -331,14 +427,7 @@ func runFlows(rest []string) {
 	if err != nil {
 		fatalUsage("flags: %v", err)
 	}
-	root := f.root
-	if root == "" {
-		root = "."
-		if len(args) > 0 {
-			root = args[0]
-		}
-	}
-	ix, err := intel.ReadIndex(root)
+	_, ix, err := resolveRoot(f, args)
 	if err != nil {
 		fatal("Flows: %v", err)
 	}
@@ -356,14 +445,7 @@ func runEntries(rest []string) {
 	if err != nil {
 		fatalUsage("flags: %v", err)
 	}
-	root := f.root
-	if root == "" {
-		root = "."
-		if len(args) > 0 {
-			root = args[0]
-		}
-	}
-	ix, err := intel.ReadIndex(root)
+	_, ix, err := resolveRoot(f, args)
 	if err != nil {
 		fatal("Entries: %v", err)
 	}
@@ -397,7 +479,7 @@ func runEntries(rest []string) {
 			route = s.Route
 		} else if fwID, ok := goNativeEntry(s, pkgOf); ok {
 			// Language-native entry points (Go main/init) alongside the
-			// framework-tagged ones (F-009).
+			// framework-tagged ones.
 			framework = fwID
 			route = "-"
 		}
@@ -431,14 +513,7 @@ func runCommunities(rest []string) {
 	if err != nil {
 		fatalUsage("flags: %v", err)
 	}
-	root := f.root
-	if root == "" {
-		root = "."
-		if len(args) > 0 {
-			root = args[0]
-		}
-	}
-	ix, err := intel.ReadIndex(root)
+	_, ix, err := resolveRoot(f, args)
 	if err != nil {
 		fatal("Communities: %v", err)
 	}
@@ -462,7 +537,7 @@ func runPath(rest []string) {
 	if err != nil {
 		fatalUsage("flags: %v", err)
 	}
-	// F-033: --from/--to are flag aliases for the positional form
+	// --from/--to are flag aliases for the positional form
 	// `kern path <from-symbol> <to-symbol> [root]`; the positional form
 	// remains supported. The root is optional in both forms.
 	from, to := f.from, f.to
@@ -523,14 +598,7 @@ func runDead(rest []string) {
 	if err != nil {
 		fatalUsage("flags: %v", err)
 	}
-	root := f.root
-	if root == "" {
-		root = "."
-		if len(args) > 0 {
-			root = args[0]
-		}
-	}
-	ix, err := intel.ReadIndex(root)
+	_, ix, err := resolveRoot(f, args)
 	if err != nil {
 		fatal("Dead: %v", err)
 	}
@@ -551,14 +619,7 @@ func runLarges(rest []string) {
 	if err != nil {
 		fatalUsage("flags: %v", err)
 	}
-	root := f.root
-	if root == "" {
-		root = "."
-		if len(args) > 0 {
-			root = args[0]
-		}
-	}
-	ix, err := intel.ReadIndex(root)
+	_, ix, err := resolveRoot(f, args)
 	if err != nil {
 		fatal("Larges: %v", err)
 	}
@@ -567,6 +628,9 @@ func runLarges(rest []string) {
 		minLines = 60
 	}
 	large := intel.LargeFunctions(ix, minLines)
+	if f.limit > 0 && len(large) > f.limit {
+		large = large[:f.limit]
+	}
 	if f.json {
 		printJSON(map[string]any{"min_lines": minLines, "large": large})
 		return
@@ -580,14 +644,7 @@ func runArch(rest []string) {
 	if err != nil {
 		fatalUsage("flags: %v", err)
 	}
-	root := f.root
-	if root == "" {
-		root = "."
-		if len(args) > 0 {
-			root = args[0]
-		}
-	}
-	ix, err := intel.ReadIndex(root)
+	_, ix, err := resolveRoot(f, args)
 	if err != nil {
 		fatal("Arch: %v", err)
 	}
@@ -615,6 +672,12 @@ func runTwin(rest []string) {
 	}
 	if len(args) > 0 {
 		root = args[0]
+	}
+	// The twin is rooted at a project directory. A file path (or missing
+	// path) would build a graph on a bogus root and make the governance
+	// store log "approvals.json: not a directory" noise, so validate first.
+	if fi, err := os.Stat(root); err != nil || !fi.IsDir() {
+		fatalUsage("twin: %s is not a directory (usage: kern twin [root] [--root DIR])", root)
 	}
 	p, err := app.New(root)
 	if err != nil {
@@ -674,7 +737,7 @@ func runChurn(rest []string) {
 		printJSON(report)
 		return
 	}
-	fmt.Println(intel.RenderChurn(report))
+	fmt.Println(intel.RenderChurnLimit(report, f.limit))
 
 }
 
@@ -781,7 +844,7 @@ func runNear(rest []string) {
 	if f.depth < 0 || f.max <= 0 {
 		// Surface the defaults so a capped tree is never mistaken for the
 		// full result (--json already reports depth/max_nodes).
-		fmt.Fprintf(os.Stderr, "kern: walk defaults depth=%d max=%d (use --depth/--max to widen)\n", depth, maxN)
+		fmt.Fprintf(os.Stderr, "kern: near defaults depth=%d max=%d (use --depth/--max to widen)\n", depth, maxN)
 	}
 	nodes, err := intel.Near(ix, args[0], depth, maxN)
 	if err != nil {
@@ -800,14 +863,7 @@ func runCycles(rest []string) {
 	if err != nil {
 		fatalUsage("flags: %v", err)
 	}
-	root := f.root
-	if root == "" {
-		root = "."
-		if len(args) > 0 {
-			root = args[0]
-		}
-	}
-	ix, err := intel.ReadIndex(root)
+	_, ix, err := resolveRoot(f, args)
 	if err != nil {
 		fatal("Cycles: %v", err)
 	}
@@ -918,13 +974,13 @@ func runTrace(rest []string) {
 	} else {
 		b, err := os.ReadFile(sourceName)
 		if err != nil {
-			if os.IsNotExist(err) && intel.LooksLikeTrace(sourceName) {
+			if errors.Is(err, fs.ErrNotExist) && intel.LooksLikeTrace(sourceName) {
 				// Not a path — inline trace text such as
-				// `kern trace "path/file.py:24 selectSlice"` (report A6).
+				// `kern trace "path/file.py:24 selectSlice"`.
 				src = sourceName
 				sourceName = "inline"
 			} else {
-				if os.IsNotExist(err) {
+				if errors.Is(err, fs.ErrNotExist) {
 					fatal("trace: file not found: %s (pass a path, `-` for stdin, or inline trace text)", sourceName)
 				}
 				fatal("Trace: %v", err)

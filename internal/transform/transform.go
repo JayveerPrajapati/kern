@@ -135,12 +135,18 @@ func Transform(req Request) (*Result, error) {
 	res.Diff = diff.Unified(filePath, filePath, oldLines, newLines)
 
 	if req.Apply && req.File != "" && res.Diff != "" {
+		// Never write output that does not parse: a mistyped -target
+		// (e.g. a path instead of a struct name) or a generator
+		// regression would otherwise silently corrupt the target file
+		// with syntactically invalid Go (QA F-6).
+		if _, perr := parser.ParseFile(token.NewFileSet(), filePath, newCode, parser.ParseComments); perr != nil {
+			return nil, fmt.Errorf("refusing to apply: generated code does not parse: %w", perr)
+		}
 		if err := os.WriteFile(filePath, newCode, 0644); err != nil {
 			return nil, fmt.Errorf("write transformed file: %w", err)
 		}
 		res.Applied = true
 	}
-
 	return res, nil
 }
 
@@ -179,8 +185,14 @@ func implementInterface(src []byte, filename string, req Request) ([]byte, []str
 				})
 			}
 		}
+		// The index records interface declarations but not the methods
+		// declared inside them, so the symbol lookup above matches only
+		// concrete receivers. Fall back to parsing the interface
+		// declaration itself from source when the lookup came up empty.
+		if len(methods) == 0 {
+			methods = interfaceMethodsFromIndex(req.Index, req.InterfaceName, req.Root)
+		}
 	}
-
 	if len(methods) == 0 {
 		return nil, nil, fmt.Errorf("unknown interface %q or no methods found", req.InterfaceName)
 	}
@@ -235,6 +247,90 @@ func implementInterface(src []byte, filename string, req Request) ([]byte, []str
 		return []byte(sb.String()), added, nil
 	}
 	return formatted, added, nil
+}
+
+// interfaceMethodsFromIndex resolves the method set of an interface declared
+// in the indexed project. It locates the interface's declaration file via the
+// index (Kind "interface"), parses the declaration, and extracts the method
+// signatures. This covers interfaces whose methods are not indexed as
+// standalone method symbols.
+func interfaceMethodsFromIndex(ix *index.Index, iface, root string) []MethodSig {
+	var file string
+	for _, s := range ix.Symbols {
+		if s.Kind == "interface" && (s.Name == iface || strings.HasSuffix(s.FullName(), "."+iface)) {
+			file = s.File
+			break
+		}
+	}
+	if file == "" {
+		return nil
+	}
+	if root != "" && !filepath.IsAbs(file) {
+		file = filepath.Join(root, file)
+	}
+	src, err := os.ReadFile(file)
+	if err != nil {
+		return nil
+	}
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, file, src, parser.ParseComments)
+	if err != nil {
+		return nil
+	}
+	var methods []MethodSig
+	ast.Inspect(f, func(n ast.Node) bool {
+		ts, ok := n.(*ast.TypeSpec)
+		if !ok || ts.Name.Name != iface {
+			return true
+		}
+		ifaceType, ok := ts.Type.(*ast.InterfaceType)
+		if !ok || ifaceType.Methods == nil {
+			return false
+		}
+		for _, m := range ifaceType.Methods.List {
+			fnType, ok := m.Type.(*ast.FuncType)
+			if !ok || len(m.Names) == 0 {
+				continue // embedded interface, not a method
+			}
+			methods = append(methods, MethodSig{
+				Name:    m.Names[0].Name,
+				Params:  formatFieldList(fnType.Params),
+				Returns: formatFieldList(fnType.Results),
+				Body:    `panic("not implemented")`,
+			})
+		}
+		return false
+	})
+	return methods
+}
+
+// formatFieldList renders a field list as a comma-separated "name type" string
+// suitable for a generated signature (e.g. "ctx context.Context, opts Options").
+func formatFieldList(fl *ast.FieldList) string {
+	if fl == nil || len(fl.List) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(fl.List))
+	for _, f := range fl.List {
+		typeStr := exprString(f.Type)
+		if len(f.Names) == 0 {
+			parts = append(parts, typeStr)
+			continue
+		}
+		for _, n := range f.Names {
+			parts = append(parts, n.Name+" "+typeStr)
+		}
+	}
+	return strings.Join(parts, ", ")
+}
+
+// exprString renders an AST expression as Go source text.
+func exprString(e ast.Expr) string {
+	var buf bytes.Buffer
+	if err := format.Node(&buf, token.NewFileSet(), e); err != nil {
+		return ""
+	}
+	return buf.String()
 }
 
 func addField(src []byte, filename string, req Request) ([]byte, []string, error) {

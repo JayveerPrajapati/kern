@@ -290,10 +290,6 @@ func TestRunAuditWarnsOnTamperedChain(t *testing.T) {
 	}
 }
 
-// TestAuditRenderSurfacesExternalAppendFields verifies F-027: an externally
-// appended entry carrying the friendly event/by/note JSON keys renders its
-// content in the audit table (AGENT/ACTION/RESULT) instead of a row with
-// blank columns.
 func TestAuditRenderSurfacesExternalAppendFields(t *testing.T) {
 	root := t.TempDir()
 	stdout, _ := appendAuditEntryJSON(t, root, map[string]any{

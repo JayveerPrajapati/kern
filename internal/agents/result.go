@@ -1,8 +1,6 @@
 package agents
 
 import (
-	"encoding/json"
-
 	"github.com/JayveerPrajapati/kern/internal/domain"
 )
 
@@ -121,20 +119,4 @@ func (r *AgentResult) AddArtifact(id string) *AgentResult {
 func (r *AgentResult) WithRecommendedAction(action string) *AgentResult {
 	r.RecommendedAction = action
 	return r
-}
-
-// MarshalJSON implements json.Marshaler so the slices always serialize as
-// arrays rather than null.
-func (r AgentResult) MarshalJSON() ([]byte, error) {
-	type alias AgentResult
-	if r.Evidence == nil {
-		r.Evidence = []domain.Claim{}
-	}
-	if r.Risks == nil {
-		r.Risks = []domain.Risk{}
-	}
-	if r.Artifacts == nil {
-		r.Artifacts = []string{}
-	}
-	return json.Marshal(alias(r))
 }

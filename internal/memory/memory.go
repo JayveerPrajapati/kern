@@ -6,14 +6,18 @@ package memory
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/JayveerPrajapati/kern/internal/cache"
+	"github.com/JayveerPrajapati/kern/internal/fsutil"
 )
 
 const maxEntries = 50
@@ -28,7 +32,7 @@ var mu sync.Mutex
 // ("", set by kern remember / kern_memory_add) from automatic session captures
 // ("auto", written by the hooks/plugin conversation capture). Auto entries are
 // labeled on list and excluded from recall by default (see Recall) so raw
-// prompts never leak back into an LLM context (report A17).
+// prompts never leak back into an LLM context.
 type Entry struct {
 	Time   time.Time `json:"time"`
 	Text   string    `json:"text"`
@@ -39,6 +43,38 @@ type Entry struct {
 type Store struct {
 	Root    string  `json:"root"`
 	Entries []Entry `json:"entries"`
+}
+
+// DefaultRecallLimit is the number of recall hits when the caller does not
+// specify one. Shared by the CLI and MCP surfaces so the default cannot
+// drift between them.
+const DefaultRecallLimit = 5
+
+// NoRecallMatch is the no-match hint surfaced by every recall path (CLI
+// `kern recall` / `kern memory recall`, MCP `kern_memory_recall` and the
+// `kern_memory` recall action). It points the user at the fix (record a
+// lesson) instead of printing nothing.
+const NoRecallMatch = "no matching lessons (record one with: kern memory add <lesson>)"
+
+// FormatEntry renders one entry as a single line (no trailing newline) in
+// the format shared by every surface: "2006-01-02 15:04  [auto] lesson text".
+// Auto captures carry the [auto] label so raw session captures are visibly
+// distinct from deliberate lessons wherever entries are listed or recalled.
+func FormatEntry(e Entry) string {
+	marker := ""
+	if e.Source == "auto" {
+		marker = "[auto] "
+	}
+	return e.Time.UTC().Format("2006-01-02 15:04") + "  " + marker + e.Text
+}
+
+// FormatEntries renders entries one per line; empty string when none.
+func FormatEntries(entries []Entry) string {
+	lines := make([]string, len(entries))
+	for i, e := range entries {
+		lines[i] = FormatEntry(e)
+	}
+	return strings.Join(lines, "\n")
 }
 
 // Path returns the on-disk location for the memory of root.
@@ -127,7 +163,7 @@ func Clear(root string) error {
 	mu.Lock()
 	defer mu.Unlock()
 	err := os.Remove(Path(root))
-	if os.IsNotExist(err) {
+	if errors.Is(err, fs.ErrNotExist) {
 		return nil
 	}
 	return err
@@ -200,14 +236,19 @@ func Recall(root, prompt string, k int) []Entry {
 			pool = append(pool, scored{e, s})
 		}
 	}
-	// Stable sort desc by score keeps recency order on ties.
-	for i := 0; i < len(pool); i++ {
-		for j := i + 1; j < len(pool); j++ {
-			if pool[j].s > pool[i].s {
-				pool[i], pool[j] = pool[j], pool[i]
-			}
+	// Deterministic ranking: score desc, then recency desc (newer first),
+	// then the entry text as the final tiebreaker (Entry carries no ID field,
+	// so the unique text is the deterministic key). O(n log n) sort.Slice
+	// replaces the former O(n^2) bubble sort.
+	sort.Slice(pool, func(i, j int) bool {
+		if pool[i].s != pool[j].s {
+			return pool[i].s > pool[j].s
 		}
-	}
+		if !pool[i].e.Time.Equal(pool[j].e.Time) {
+			return pool[i].e.Time.After(pool[j].e.Time)
+		}
+		return pool[i].e.Text < pool[j].e.Text
+	})
 	if len(pool) > k {
 		pool = pool[:k]
 	}
@@ -241,24 +282,6 @@ func writeJSON(path string, v any) error {
 		return err
 	}
 	// Atomic write (temp file + rename) so a concurrent reader never observes
-	// a partially-written store. The temp name is unique so concurrent writers
-	// never clobber each other's staging file.
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".tmp-*")
-	if err != nil {
-		return err
-	}
-	if _, err := tmp.Write(b); err != nil {
-		_ = tmp.Close()
-		_ = os.Remove(tmp.Name())
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		_ = os.Remove(tmp.Name())
-		return err
-	}
-	if err := os.Chmod(tmp.Name(), 0o600); err != nil {
-		_ = os.Remove(tmp.Name())
-		return err
-	}
-	return os.Rename(tmp.Name(), path)
+	// a partially-written store.
+	return fsutil.WriteFileAtomic(path, b, 0o600)
 }

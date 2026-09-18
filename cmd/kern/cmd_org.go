@@ -134,6 +134,23 @@ func runOrgAgents(srv *enterprise.Server, rest []string, jsonOut bool) {
 		fatalUsage("org agents: %v", err)
 	}
 	agents := srv.Agents()
+	// In local (non-enterprise) mode the enterprise server's registry is
+	// process-local, so merge agents persisted by earlier `kern org agents
+	// register` runs from the current project's store. Only persisted
+	// identities are merged — incidental in-memory registrations (e.g. the
+	// built-in default agent) are not part of the org surface.
+	if cwd, cerr := os.Getwd(); cerr == nil {
+		persisted := governance.PersistedAgents(cwd)
+		seen := make(map[string]bool, len(agents))
+		for _, a := range agents {
+			seen[a.ID] = true
+		}
+		for _, a := range persisted {
+			if !seen[a.ID] {
+				agents = append(agents, a)
+			}
+		}
+	}
 	if jsonOut || f.json {
 		type agentJSON struct {
 			ID   string `json:"id"`
@@ -184,6 +201,19 @@ func runOrgAgentRegister(srv *enterprise.Server, rest []string) {
 	}
 	if err := srv.RegisterAgent(governance.NewAgent(id, name, agentType, perms)); err != nil {
 		fatal("org agents register: %v", err)
+	}
+	// The enterprise server's registry is in-memory and dies with this
+	// process. Register into the governance registry too and persist to
+	// the current project's .kern/agents.json so later processes
+	// (kern authorize-context, kern org agents) see the identity.
+	agent := governance.NewAgent(id, name, agentType, perms)
+	if err := governance.RegisterAgent(agent); err != nil {
+		fatal("org agents register: %v", err)
+	}
+	if cwd, cerr := os.Getwd(); cerr == nil {
+		if err := governance.PersistAgent(cwd, agent); err != nil {
+			fatal("org agents register: persist: %v", err)
+		}
 	}
 	fmt.Printf("registered agent %s\n", id)
 }

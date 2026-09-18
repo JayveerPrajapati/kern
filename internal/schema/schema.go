@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 )
@@ -224,7 +225,7 @@ func (s *Schema) check(path string, v any) []string {
 				keys = append(keys, k)
 			}
 		}
-		sort.Strings(keys)
+		slices.Sort(keys)
 		for _, k := range keys {
 			out = append(out, s.Properties[k].check(prefix+k, obj[k])...)
 		}

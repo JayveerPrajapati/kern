@@ -1,7 +1,7 @@
 # Blueprint Firewall Gates (G0–G39)
 
 This document is the catalog of the 40 Blueprint change-firewall gates (G0 through G39)
-implemented in [`internal/blueprint/gates/registry.go`](../internal/blueprint/gates/registry.go).
+implemented in [`internal/gates/registry.go`](../internal/gates/registry.go).
 These gates are enforced by `kern check` and `kern ci` to ensure architectural integrity,
 security, and code health.
 

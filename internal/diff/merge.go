@@ -389,13 +389,7 @@ func mergeLines3Way(filePath string, base, local, remote []byte) (*MergeResult, 
 	var out []string
 	var conflicts []Conflict
 
-	max := len(bLines)
-	if len(lLines) > max {
-		max = len(lLines)
-	}
-	if len(rLines) > max {
-		max = len(rLines)
-	}
+	max := max(len(bLines), len(lLines), len(rLines))
 
 	for i := 0; i < max; i++ {
 		var b, l, r string

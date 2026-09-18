@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"os"
 	"path/filepath"
 
 	"github.com/JayveerPrajapati/kern/internal/blueprint/checks/diffgate"
@@ -31,13 +30,11 @@ func runGenCatalog(rest []string) {
 	}
 	absRoot, err := filepath.Abs(root)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: resolve root: %v\n", err)
-		panic(exitError{code: 1})
+		fatal("gen-catalog: resolve root: %v", err)
 	}
-	path, err := diffgate.WriteCatalogDoc(absRoot)
+	path, err := diffgate.WriteCatalogDoc(absRoot, diffgate.ToolInfos())
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		panic(exitError{code: 1})
+		fatal("gen-catalog: %v", err)
 	}
 	fmt.Printf("regenerated %s from the live MCP catalog\n", path)
 }

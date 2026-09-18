@@ -15,7 +15,7 @@ import (
 func TestAGENTSmdWrittenWithoutOpencode(t *testing.T) {
 	dir := t.TempDir()
 	// Wire ONLY claude — opencode intentionally absent.
-	Wire(dir, []string{"claude"}, false)
+	Wire(dir, []string{"claude"}, false, false)
 	if _, err := os.Stat(filepath.Join(dir, "AGENTS.md")); err != nil {
 		t.Fatalf("AGENTS.md not written when opencode absent: %v", err)
 	}
@@ -25,7 +25,7 @@ func TestAGENTSmdWrittenWithoutOpencode(t *testing.T) {
 // bare `kern setup --agents mcp` run with no agent-specific wiring.
 func TestAGENTSmdWrittenWithOnlyMCP(t *testing.T) {
 	dir := t.TempDir()
-	Wire(dir, []string{"mcp"}, false)
+	Wire(dir, []string{"mcp"}, false, false)
 	if _, err := os.Stat(filepath.Join(dir, "AGENTS.md")); err != nil {
 		t.Fatalf("AGENTS.md not written with only mcp: %v", err)
 	}

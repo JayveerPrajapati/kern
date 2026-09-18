@@ -2,7 +2,9 @@ package architecture
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -65,7 +67,7 @@ func Load(root string) (*Config, error) {
 		path := filepath.Join(root, ".kern", "architecture"+ext)
 		info, err := os.Stat(path)
 		if err != nil {
-			if os.IsNotExist(err) {
+			if errors.Is(err, fs.ErrNotExist) {
 				continue
 			}
 			return nil, err
@@ -75,7 +77,7 @@ func Load(root string) (*Config, error) {
 		}
 		data, err := os.ReadFile(path)
 		if err != nil {
-			if os.IsNotExist(err) {
+			if errors.Is(err, fs.ErrNotExist) {
 				continue
 			}
 			return nil, err
@@ -113,13 +115,13 @@ func decodeYAML(data []byte) (*Config, error) {
 
 // decodeConfig walks a generic YAML document and type-checks it into a Config.
 // It fails closed: any unexpected shape or type is an error.
-func decodeConfig(root interface{}) (*Config, error) {
+func decodeConfig(root any) (*Config, error) {
 	cfg := &Config{}
 	// Accept an empty/rootless document.
 	if root == nil {
 		return cfg, nil
 	}
-	m, ok := root.(map[string]interface{})
+	m, ok := root.(map[string]any)
 	if !ok {
 		return nil, fmt.Errorf("architecture config must be a mapping, got %T", root)
 	}
@@ -130,12 +132,12 @@ func decodeConfig(root interface{}) (*Config, error) {
 	cfg.Name = scalarString(m["name"])
 
 	if v, ok := m["layers"]; ok {
-		items, ok := v.([]interface{})
+		items, ok := v.([]any)
 		if !ok {
 			return nil, fmt.Errorf("layers must be a list")
 		}
 		for i, li := range items {
-			lm, ok := li.(map[string]interface{})
+			lm, ok := li.(map[string]any)
 			if !ok {
 				return nil, fmt.Errorf("layers[%d] must be a mapping", i)
 			}
@@ -148,12 +150,12 @@ func decodeConfig(root interface{}) (*Config, error) {
 		}
 	}
 	if v, ok := m["rules"]; ok {
-		items, ok := v.([]interface{})
+		items, ok := v.([]any)
 		if !ok {
 			return nil, fmt.Errorf("rules must be a list")
 		}
 		for i, ri := range items {
-			rm, ok := ri.(map[string]interface{})
+			rm, ok := ri.(map[string]any)
 			if !ok {
 				return nil, fmt.Errorf("rules[%d] must be a mapping", i)
 			}
@@ -178,11 +180,11 @@ func decodeConfig(root interface{}) (*Config, error) {
 
 // toStringSlice converts a decoded value to a []string. Accepts a list of
 // scalars, a single scalar string, or nil.
-func toStringSlice(v interface{}) []string {
+func toStringSlice(v any) []string {
 	switch t := v.(type) {
 	case nil:
 		return nil
-	case []interface{}:
+	case []any:
 		out := make([]string, 0, len(t))
 		for _, e := range t {
 			if s := scalarString(e); s != "" {
@@ -199,7 +201,7 @@ func toStringSlice(v interface{}) []string {
 }
 
 // scalarString returns a string for a scalar value, or "" for nil.
-func scalarString(v interface{}) string {
+func scalarString(v any) string {
 	switch t := v.(type) {
 	case nil:
 		return ""

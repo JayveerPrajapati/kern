@@ -1,5 +1,5 @@
 // Package council normalizes review results into consensus and divergence
-// reports (blueprint KERN-P2-002) without treating majority vote as truth.
+// reports without treating majority vote as truth.
 //
 // Inputs are review packs (internal/reviewpack): each pack is one reviewer's
 // immutable evidence artifact. The council matches claims across packs by
@@ -105,7 +105,7 @@ type NextVerification struct {
 	Why    string // reason: divergence or unsupported
 }
 
-// Report is the normalized council output (KERN-P2-002 output fields).
+// Report is the normalized council output.
 type Report struct {
 	SchemaVersion    int                `json:"schema_version"`
 	Packs            []string           `json:"packs"` // reviewers analyzed, sorted

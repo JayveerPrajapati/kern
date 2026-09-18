@@ -181,8 +181,8 @@ func TestGenerateDeclarationNaming(t *testing.T) {
 	if m.Type != "feat" {
 		t.Errorf("type = %q, want feat (additive new symbol)", m.Type)
 	}
-	if !strings.Contains(m.Subject, "environmentfor") {
-		t.Errorf("subject = %q, want it named after the added declaration", m.Subject)
+	if !strings.Contains(m.Subject, "environment for") {
+		t.Errorf("subject = %q, want it named after the added declaration (camelCase split)", m.Subject)
 	}
 }
 
@@ -220,5 +220,106 @@ func TestGenerateEmptyDiff(t *testing.T) {
 	m := Generate("")
 	if m.Type != "chore" || !strings.HasPrefix(m.Subject, "chore") {
 		t.Errorf("empty diff -> %q / %q", m.Type, m.Subject)
+	}
+}
+
+func TestGenerateErrSentinelIsFix(t *testing.T) {
+	// An Err* sentinel is fix infrastructure: it must not flip the commit to
+	// feat (the exported-declaration rule skips it) and its raw identifier
+	// must not name the subject.
+	diff := `diff --git a/internal/heal/patch.go b/internal/heal/patch.go
+--- a/internal/heal/patch.go
++++ b/internal/heal/patch.go
+@@ -10,3 +10,7 @@
++var ErrInvalidPatch = errors.New("invalid patch")
++if errors.Is(err, ErrInvalidPatch) {
++	return fmt.Errorf("fix the invalid patch: %w", err)
++}
+`
+	m := Generate(diff)
+	if m.Type != "fix" {
+		t.Errorf("type = %q, want fix (Err sentinel is fix infrastructure, not feat)", m.Type)
+	}
+	if strings.Contains(m.Subject, "errinvalidpatch") {
+		t.Errorf("subject = %q, must not contain the raw Err sentinel name", m.Subject)
+	}
+}
+
+func TestGenerateMultiAreaNoScopeAndLiteralSubject(t *testing.T) {
+	// A cross-cutting change gets no scope (no file owns ≥ 50% of the diff)
+	// and its subject comes from the first qualifying string literal, not
+	// from an exported declaration in one of many packages.
+	diff := `diff --git a/internal/app/y.go b/internal/app/y.go
+--- a/internal/app/y.go
++++ b/internal/app/y.go
+@@ -10,2 +10,3 @@
++var ErrInvalidPatch = errors.New("invalid patch")
+diff --git a/cmd/kern/x.go b/cmd/kern/x.go
+--- a/cmd/kern/x.go
++++ b/cmd/kern/x.go
+@@ -5,2 +5,3 @@
++return fmt.Errorf("fix the crash: %w", err)
+diff --git a/internal/web/z.go b/internal/web/z.go
+--- a/internal/web/z.go
++++ b/internal/web/z.go
+@@ -5,2 +5,3 @@
++return fmt.Errorf("fix the broken handler: %w", err)
+`
+	m := Generate(diff)
+	if m.Type != "fix" {
+		t.Errorf("type = %q, want fix (multi-area fix commit)", m.Type)
+	}
+	if m.Scope != "" {
+		t.Errorf("scope = %q, want empty (no file owns ≥50%% of the diff)", m.Scope)
+	}
+	if !strings.Contains(m.Subject, "invalid patch") {
+		t.Errorf("subject = %q, want it from the first qualifying string literal", m.Subject)
+	}
+}
+
+func TestGenerateMultiAreaExportedDeclNotFeat(t *testing.T) {
+	// One exported declaration among several packages must not flip a
+	// cross-cutting commit to feat.
+	diff := `diff --git a/internal/blueprint/service/validate.go b/internal/blueprint/service/validate.go
+--- a/internal/blueprint/service/validate.go
++++ b/internal/blueprint/service/validate.go
+@@ -10,2 +10,5 @@
++type CheckReporter interface {
++	CheckStarted(i, n int, name string)
++}
+diff --git a/cmd/kern/main.go b/cmd/kern/main.go
+--- a/cmd/kern/main.go
++++ b/cmd/kern/main.go
+@@ -5,2 +5,3 @@
++return fmt.Errorf("fix the crash: %w", err)
+`
+	m := Generate(diff)
+	if m.Type != "fix" {
+		t.Errorf("type = %q, want fix (exported decl must not flip a cross-cutting commit to feat)", m.Type)
+	}
+}
+
+func TestGenerateSingleAreaExportedStillFeat(t *testing.T) {
+	// Regression guard for TestGenerateDeclarationExportedIsFeat: within a
+	// single area, a new exported method is still a feature even in a
+	// multi-file change.
+	diff := `diff --git a/api/handler.go b/api/handler.go
+--- a/api/handler.go
++++ b/api/handler.go
+@@ -10,2 +10,5 @@
++func (h *Handler) Login() error {
++	return h.session
++}
+diff --git a/api/middleware.go b/api/middleware.go
+--- a/api/middleware.go
++++ b/api/middleware.go
+@@ -5,2 +5,5 @@
++func (m *Middleware) Authenticate() error {
++	return nil
++}
+`
+	m := Generate(diff)
+	if m.Type != "feat" {
+		t.Errorf("type = %q, want feat (single-area exported method)", m.Type)
 	}
 }

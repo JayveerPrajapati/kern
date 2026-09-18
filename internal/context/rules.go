@@ -141,6 +141,19 @@ func (e *Engine) crossesBoundary(p domain.Policy, roots []domain.Symbol) bool {
 	}
 
 	byID := e.nodesByID()
+	// Bare-name -> node id index for resolveEdgeID. The previous fallback
+	// scanned the ENTIRE node map per unresolved endpoint — with thousands
+	// of qualified cross-package endpoints and multiple roots this made
+	// crossesBoundary (and therefore `kern impact`, AnalyzeChange, etc.)
+	// hang for minutes in an O(edges × nodes) map scan.
+	byName := map[string]string{}
+	for id, n := range byID {
+		if n.Symbol != nil && n.Symbol.Name != "" {
+			if _, exists := byName[n.Symbol.Name]; !exists {
+				byName[n.Symbol.Name] = id
+			}
+		}
+	}
 	for _, edge := range e.graph.Edges {
 		if edge.Kind != "calls" {
 			continue
@@ -148,11 +161,11 @@ func (e *Engine) crossesBoundary(p domain.Policy, roots []domain.Symbol) bool {
 		if !reachable[edge.From] || !reachable[edge.To] {
 			continue
 		}
-		fromID, ok := resolveEdgeID(edge.From, byID)
+		fromID, ok := resolveEdgeID(edge.From, byID, byName)
 		if !ok {
 			continue
 		}
-		toID, ok := resolveEdgeID(edge.To, byID)
+		toID, ok := resolveEdgeID(edge.To, byID, byName)
 		if !ok {
 			continue
 		}
@@ -177,8 +190,10 @@ func (e *Engine) crossesBoundary(p domain.Policy, roots []domain.Symbol) bool {
 // node IDs already, but cross-package call edges reference the callee by a
 // qualified name (e.g. "db.Do") while the graph node is the bare symbol name
 // ("Do"). Resolution is deterministic: exact match first, then the bare
-// identifier segment, then the symbol's Name.
-func resolveEdgeID(endpoint string, byID map[string]domain.Node) (string, bool) {
+// identifier segment, then the precomputed name index. The name index makes
+// the lookup O(1) — a linear scan here was the hot path behind multi-minute
+// hangs in crossesBoundary.
+func resolveEdgeID(endpoint string, byID map[string]domain.Node, byName map[string]string) (string, bool) {
 	if _, ok := byID[endpoint]; ok {
 		return endpoint, true
 	}
@@ -189,12 +204,8 @@ func resolveEdgeID(endpoint string, byID map[string]domain.Node) (string, bool) 
 	if _, ok := byID[seg]; ok {
 		return seg, true
 	}
-	for id, n := range byID {
-		if n.Symbol != nil && n.Symbol.Name == seg {
-			return id, true
-		}
-	}
-	return "", false
+	id, ok := byName[seg]
+	return id, ok
 }
 
 // parseBoundary splits a boundary rule Name of the form

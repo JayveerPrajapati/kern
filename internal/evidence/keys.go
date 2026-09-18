@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 )
@@ -51,7 +52,7 @@ func LoadOrCreateKeys(root string) (*KeyPair, error) {
 		}
 		return kp, nil
 	}
-	if !os.IsNotExist(err) {
+	if !errors.Is(err, fs.ErrNotExist) {
 		return nil, fmt.Errorf("evidence: read project key: %w", err)
 	}
 

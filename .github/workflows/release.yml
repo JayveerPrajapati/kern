@@ -111,13 +111,13 @@ jobs:
           dir="${{ steps.vars.outputs.dir }}"
           mkdir -p "$dir"
           GOOS="$os" GOARCH="$arch" CGO_ENABLED=0 \
-            go build -buildvcs=false -trimpath -tags sqlite -ldflags "-s -w -X main.version=${{ steps.vars.outputs.tag }}" \
+            go build -buildvcs=false -trimpath -tags sqlite -ldflags "-s -w -X main.version=${{ steps.vars.outputs.tag }} -X github.com/JayveerPrajapati/kern/internal/version.Version=${{ steps.vars.outputs.tag }}" \
             -o "$dir/kern" ./cmd/kern
           GOOS="$os" GOARCH="$arch" CGO_ENABLED=0 \
-            go build -buildvcs=false -trimpath -tags sqlite -ldflags "-s -w -X main.version=${{ steps.vars.outputs.tag }}" \
+            go build -buildvcs=false -trimpath -tags sqlite -ldflags "-s -w -X main.version=${{ steps.vars.outputs.tag }} -X github.com/JayveerPrajapati/kern/internal/version.Version=${{ steps.vars.outputs.tag }}" \
             -o "$dir/kern-mcp" ./cmd/kern-mcp
           GOOS="$os" GOARCH="$arch" CGO_ENABLED=0 \
-            go build -buildvcs=false -trimpath -tags sqlite -ldflags "-s -w -X main.version=${{ steps.vars.outputs.tag }}" \
+            go build -buildvcs=false -trimpath -tags sqlite -ldflags "-s -w -X main.version=${{ steps.vars.outputs.tag }} -X github.com/JayveerPrajapati/kern/internal/version.Version=${{ steps.vars.outputs.tag }}" \
             -o "$dir/kern-server" ./cmd/kern-server
 
       # Shrink the binaries with UPX (best compression). Significant savings:

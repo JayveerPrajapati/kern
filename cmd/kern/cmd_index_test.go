@@ -7,10 +7,6 @@ import (
 	"testing"
 )
 
-// TestRunIndexJSONEmitsSummary pins F-003: `kern index --json` must emit a
-// valid JSON summary of the index operation (freshness + symbols/files/
-// packages/version/store/languages, mirroring `kern index ensure-fresh
-// --json`) instead of silently ignoring the flag and printing human text.
 func TestRunIndexJSONEmitsSummary(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	root := jsonCliFixture(t)
@@ -43,9 +39,6 @@ func TestRunIndexJSONEmitsSummary(t *testing.T) {
 	}
 }
 
-// TestRunIndexSkipsRebuildWhenFresh pins F-004 warm-path behavior: the
-// second `kern index` on an unchanged tree skips the rebuild and reports the
-// fresh state with symbol counts; --force restores the unconditional rebuild.
 func TestRunIndexSkipsRebuildWhenFresh(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	root := jsonCliFixture(t)

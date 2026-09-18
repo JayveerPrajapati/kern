@@ -207,12 +207,16 @@ func Check(root string) []Status {
 // every detected agent that has an instruction file, regardless of the
 // agents list — this ensures kern-first enforcement across all present
 // platforms without per-agent configuration.
-// GLOBAL-scoped configs (user-scope hooks, home/global MCP adapters) are
-// pre-wired for EVERY agent regardless of detection: an agent installed
-// later (or used from a different machine) is already wired with no
-// re-run. Detection only gates per-repo files (.mcp.json, opencode.json,
-// cursor rules, vscode/copilot adapters, instruction files).
-func Wire(root string, agents []string, detect bool) []Status {
+// global gates every USER-GLOBAL write (home-scoped hook files, home/global
+// MCP adapters, global opencode config/plugin, global git ignore, editor
+// exclusions, global skills): project wiring (`kern setup` without
+// --global) must never touch user-global config. With global=true
+// the GLOBAL-scoped configs are pre-wired for EVERY agent regardless of
+// detection: an agent installed later (or used from a different machine) is
+// already wired with no re-run. Detection only gates per-repo files
+// (.mcp.json, opencode.json, cursor rules, vscode/copilot adapters,
+// instruction files).
+func Wire(root string, agents []string, detect bool, global bool) []Status {
 	detected := DetectAgents(root)
 	explicit := agents // snapshot: explicit --agents list, if any
 	bin := PortableMCPCommand()
@@ -239,7 +243,7 @@ func Wire(root string, agents []string, detect bool) []Status {
 	}
 	// globalEnabled gates user-scope configs: explicit list wins; else ALL
 	// agents — never detection-gated, so an agent installed later is already
-	// wired globally.
+	// wired globally. It only matters when global is true.
 	globalEnabled := func(name string) bool {
 		if len(explicit) > 0 {
 			for _, a := range explicit {
@@ -263,23 +267,31 @@ func Wire(root string, agents []string, detect bool) []Status {
 		out = append(out, wireOpencode(root))
 		out = append(out, wirePlugin(root))
 	}
-	if globalEnabled("opencode") {
-		out = append(out, wireGlobal(GlobalMCPCommand()))
-		out = append(out, wireGlobalPlugin())
-	}
-	if globalEnabled("claude") {
-		out = append(out, wireClaude(bin))
-		out = append(out, wireClaudeHooks(PortableCLICommand()))
-	}
-	if globalEnabled("codex") {
-		out = append(out, wireCodex(bin))
-		out = append(out, wireCodexHooks(root))
+	// User-global wiring: hooks, home/global MCP adapters, global
+	// opencode config/plugin, global git ignore and editor exclusions are
+	// written ONLY with --global. Project wiring must not touch them.
+	if global {
+		if globalEnabled("opencode") {
+			out = append(out, wireGlobal(GlobalMCPCommand()))
+			out = append(out, wireGlobalPlugin())
+		}
+		if globalEnabled("claude") {
+			out = append(out, wireClaude(bin))
+			out = append(out, wireClaudeHooks(PortableCLICommand()))
+		}
+		if globalEnabled("codex") {
+			out = append(out, wireCodex(bin))
+			out = append(out, wireCodexHooks(root))
+		}
 	}
 	allAdapters, customErrs := effectiveAdapters(root)
 	for _, err := range customErrs {
 		out = append(out, Status{Agent: "custom adapters", Note: err.Error()})
 	}
 	for _, a := range allAdapters {
+		if a.scope == "global" && !global {
+			continue
+		}
 		gate := repoEnabled
 		if a.scope == "global" {
 			gate = globalEnabled
@@ -300,31 +312,35 @@ func Wire(root string, agents []string, detect bool) []Status {
 			}
 		}
 	}
-	if globalEnabled("gemini") {
-		out = append(out, wireGeminiHooks(PortableCLICommand()))
-	}
 	if repoEnabled("cursor") {
 		out = append(out, wireCursorRules(root))
 	}
-	if globalEnabled("cursor") {
-		out = append(out, wireCursorHooks())
-	}
-	if globalEnabled("copilot") {
-		out = append(out, wireCopilotHooks())
-	}
-	if globalEnabled("qwen") {
-		out = append(out, wireQwenHooks(root))
-	}
-	if globalEnabled("qoder") {
-		out = append(out, wireQoderHooks(root))
+	if global {
+		if globalEnabled("gemini") {
+			out = append(out, wireGeminiHooks(PortableCLICommand()))
+		}
+		if globalEnabled("cursor") {
+			out = append(out, wireCursorHooks())
+		}
+		if globalEnabled("copilot") {
+			out = append(out, wireCopilotHooks())
+		}
+		if globalEnabled("qwen") {
+			out = append(out, wireQwenHooks(root))
+		}
+		if globalEnabled("qoder") {
+			out = append(out, wireQoderHooks(root))
+		}
 	}
 	out = append(out, gitignoreGenerated(root))
 	out = append(out, wireLocalGitExclude(root))
-	out = append(out, wireGlobalGitignore())
-	out = append(out, wireEditorExclusions()...)
+	if global {
+		out = append(out, wireGlobalGitignore())
+		out = append(out, wireEditorExclusions()...)
+		out = append(out, wireGlobalSkills()...)
+	}
 
 	out = append(out, wireProjectSkills(root)...)
-	out = append(out, wireGlobalSkills()...)
 	out = append(out, ensureKernConfig(root))
 
 	// Wire kern-first instruction files for every detected platform that

@@ -3,9 +3,12 @@ package llm
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 // fakeAgentCLI writes a fake agent binary into a temp dir and prepends it to
@@ -25,6 +28,13 @@ func fakeAgentCLI(t *testing.T, name string, behavior string) string {
 		script += "exit 0\n"
 	case "slow":
 		script += "sleep 5\n"
+	case "slow30":
+		// Absolute /bin/sleep: the test's isolatePATH strips /usr/bin from
+		// PATH, so a bare `sleep` would fail with exit 127 instead of
+		// blocking. Long enough that the 1s test timeout fires mid-run, and
+		// long enough that an orphaned grandchild would still be alive when
+		// the test pgreps for it.
+		script += "/bin/sleep 30\n"
 	}
 	bin := filepath.Join(dir, name)
 	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
@@ -144,5 +154,76 @@ func TestChainProviderEmbedFallsToCapableOnly(t *testing.T) {
 	chain := NewChainProvider(NewLocalCliProvider("claude"))
 	if _, err := chain.Embed(context.Background(), "x"); err == nil {
 		t.Fatal("embed must fail cleanly when no provider supports it")
+	}
+}
+
+// pgrepPath is resolved at package init, before any test's isolatePATH
+// replaces PATH with the fake-bin dirs (pgrep lives in /usr/bin, which the
+// isolated PATH no longer contains).
+var pgrepPath = func() string {
+	p, err := exec.LookPath("pgrep")
+	if err != nil {
+		return ""
+	}
+	return p
+}()
+
+// pgrepExact returns the set of PIDs whose full command line exactly matches
+// pattern (pgrep -xf). pgrep exits 1 when nothing matches — that is a normal
+// empty result, not an error.
+func pgrepExact(t *testing.T, pattern string) map[string]bool {
+	t.Helper()
+	if pgrepPath == "" {
+		t.Skip("pgrep not available on this system")
+	}
+	out, err := exec.Command(pgrepPath, "-xf", pattern).Output()
+	if err != nil {
+		if ee, ok := err.(*exec.ExitError); ok && ee.ExitCode() == 1 {
+			return map[string]bool{}
+		}
+		t.Fatalf("pgrep -xf %q: %v", pattern, err)
+	}
+	pids := map[string]bool{}
+	for _, pid := range strings.Fields(string(out)) {
+		pids[pid] = true
+	}
+	return pids
+}
+
+func TestLocalCliProviderTimeoutKillsProcessGroup(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("process-group kill semantics are POSIX-only")
+	}
+	d1 := fakeAgentCLI(t, "opencode", "slow30")
+	isolatePATH(t, d1)
+	// 1s per-call timeout: the stub sleeps 30s, so the timeout branch (not
+	// ctx cancellation) must fire and kill the process group.
+	t.Setenv("KERN_LLM_CLI_TIMEOUT", "1")
+	p := NewLocalCliProvider("opencode")
+
+	before := pgrepExact(t, "/bin/sleep 30")
+
+	start := time.Now()
+	_, err := p.Generate(context.Background(), "s", "u", Options{})
+	if err == nil {
+		t.Fatal("expected timeout error from a 30s-sleeping stub with a 1s timeout")
+	}
+	if !strings.Contains(err.Error(), "timed out") {
+		t.Fatalf("error should mention the timeout: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > 10*time.Second {
+		t.Fatalf("Generate took %v, expected the ~1s timeout to bound it", elapsed)
+	}
+
+	// The stub's `/bin/sleep 30` runs as a CHILD of the stub shell — i.e. a
+	// grandchild of Generate's process. Killing only the direct child would
+	// orphan it (reparented to PID 1); the fix kills the whole process
+	// group, so no NEW sleep-30 process may survive.
+	time.Sleep(200 * time.Millisecond) // let SIGKILL delivery + reaping settle
+	after := pgrepExact(t, "/bin/sleep 30")
+	for pid := range after {
+		if !before[pid] {
+			t.Errorf("orphaned grandchild `/bin/sleep 30` (pid %s) survived the timeout kill", pid)
+		}
 	}
 }

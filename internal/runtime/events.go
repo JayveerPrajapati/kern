@@ -41,7 +41,7 @@ type Event struct {
 // secrets: only type/severity/message/service). It is the canonical
 // renderer shared by the context engine's rule evidence and the app
 // platform's what-if runtime evidence — previously two byte-identical
-// private mirrors (blueprint duplication finding, G-11).
+// private mirrors (blueprint duplication finding).
 func FormatEvent(ev Event) string {
 	msg := strings.TrimSpace(ev.Message)
 	if msg == "" {

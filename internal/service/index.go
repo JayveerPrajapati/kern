@@ -3,10 +3,10 @@ package service
 import (
 	"context"
 	"fmt"
+	"log"
 	"time"
 
 	"github.com/JayveerPrajapati/kern/internal/index"
-	"github.com/JayveerPrajapati/kern/internal/project"
 )
 
 // IndexService centralizes symbol-index operations: building, loading,
@@ -15,9 +15,6 @@ import (
 type IndexService interface {
 	// Build creates or refreshes the symbol index for root and returns it.
 	Build(ctx context.Context, root string) (*index.Index, error)
-	// Load reads the cached index for root without rebuilding. It returns the
-	// index even when stale; callers decide whether freshness matters.
-	Load(ctx context.Context, root string) (*index.Index, error)
 	// LoadOrBuild returns the cached index when it is fresh, otherwise
 	// rebuilds it. This is the behavior `kern graph`/`kern search` use.
 	LoadOrBuild(ctx context.Context, root string) (*index.Index, error)
@@ -37,10 +34,6 @@ type IndexService interface {
 	// disk. Freshness is "fresh" (no rebuild), "rebuilt" (converged), or
 	// "stale" (fail-closed: the index did not converge after a rebuild).
 	EnsureFresh(ctx context.Context, root string) (*EnsureFreshResult, error)
-	// Watch monitors root and re-indexes on change, invoking onChange with
-	// each refresh. It blocks until ctx is cancelled; onError (when non-nil)
-	// receives non-fatal watch errors.
-	Watch(ctx context.Context, root string, interval time.Duration, onChange func(WatchEvent), onError func(error)) error
 }
 
 // IndexStatus is a JSON-ready snapshot of a cached index's health, mirroring
@@ -119,13 +112,6 @@ func (s *indexService) Build(ctx context.Context, root string) (*index.Index, er
 	return ix, nil
 }
 
-func (s *indexService) Load(ctx context.Context, root string) (*index.Index, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	return index.Load(resolveRoot(root))
-}
-
 func (s *indexService) LoadOrBuild(ctx context.Context, root string) (*index.Index, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -156,7 +142,9 @@ func (s *indexService) LoadOrBuild(ctx context.Context, root string) (*index.Ind
 				// changed files. Persist like `kern index` so Status/Load observe
 				// the refresh in other processes.
 				if uix, uerr := index.Update(root, ix); uerr == nil && uix != nil {
-					_ = uix.Save()
+					if serr := uix.Save(); serr != nil {
+						log.Printf("service: catch-up index save failed (next load will re-index): %v", serr)
+					}
 					return uix, nil
 				}
 				// Update failed (unloadable prev, parse error): fall through to
@@ -229,18 +217,6 @@ func (s *indexService) Status(ctx context.Context, root string, strict bool) (*I
 		status.IndexIdentity = ix.Identity
 	}
 	return status, nil
-}
-
-func (s *indexService) Watch(ctx context.Context, root string, interval time.Duration, onChange func(WatchEvent), onError func(error)) error {
-	root = resolveRoot(root)
-	if interval <= 0 {
-		interval = 5 * time.Second
-	}
-	return project.Watch(ctx, root, interval, func(changes []index.Change, ix *index.Index) {
-		if onChange != nil {
-			onChange(WatchEvent{Changes: changes, Index: ix})
-		}
-	}, onError)
 }
 
 // EnsureFresh implements IndexService.EnsureFresh. See the interface

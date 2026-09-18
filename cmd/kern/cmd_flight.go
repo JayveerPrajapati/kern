@@ -2,7 +2,6 @@ package main
 
 import (
 	"encoding/json"
-	"flag"
 	"fmt"
 	"os"
 	"strconv"
@@ -41,18 +40,33 @@ func runFlight(args []string) int {
 }
 
 func runFlightList(args []string) int {
-	fs := flag.NewFlagSet("flight list", flag.ContinueOnError)
-	root := fs.String("root", ".", "project root holding .kern/flight")
-	agent := fs.String("agent", "", "filter by agent id")
-	task := fs.String("task", "", "filter by task id")
-	status := fs.String("status", "", "filter by record status (ok|error|blocked|denied)")
-	asJSON := fs.Bool("json", false, "emit JSON lines")
-	if err := fs.Parse(args); err != nil {
+	f, pos, err := parseFlags(args)
+	if err != nil {
 		return 2
 	}
-	recs := flight.New(*root).Filter(*agent, *task, *status)
+	root := f.root
+	agent := f.agent
+	task := f.task
+	status := f.statusFilter
+	if status == "" && len(pos) > 0 {
+		// --status is the dual-form bool/string flag: `--status ok` lands the
+		// value in the first positional (the next token is never consumed, so
+		// `kern index --status <root>` keeps its root); the inline
+		// `--status=ok` form lands in statusFilter directly.
+		status = pos[0]
+	}
+	asJSON := f.json
+	recs := flight.New(root).Filter(agent, task, status)
+	if len(recs) == 0 {
+		if asJSON {
+			fmt.Println("[]")
+		} else {
+			fmt.Println("no flight records (root: " + root + ")")
+		}
+		return 0
+	}
 	for _, rec := range recs {
-		if *asJSON {
+		if asJSON {
 			data, err := json.Marshal(rec)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "kern flight list: %v\n", err)
@@ -68,36 +82,39 @@ func runFlightList(args []string) int {
 }
 
 func runFlightShow(args []string) int {
-	fs := flag.NewFlagSet("flight show", flag.ContinueOnError)
-	root := fs.String("root", ".", "project root holding .kern/flight")
-	if err := fs.Parse(args); err != nil {
+	f, pos, err := parseFlags(args)
+	if err != nil {
 		return 2
 	}
-	taskID := fs.Arg(0)
+	root := f.root
+	taskID := ""
+	if len(pos) > 0 {
+		taskID = pos[0]
+	}
 	if taskID == "" {
 		fmt.Fprintln(os.Stderr, "usage: kern flight show <task-id> [--root DIR]")
 		return 2
 	}
-	fmt.Print(flight.New(*root).TrailText(taskID))
+	fmt.Print(flight.New(root).TrailText(taskID))
 	return 0
 }
 
 // runFlightTasks lists every task with a flight trail, most recently active
 // first — the task-id to trail linkage view.
 func runFlightTasks(args []string) int {
-	fs := flag.NewFlagSet("flight tasks", flag.ContinueOnError)
-	root := fs.String("root", ".", "project root holding .kern/flight")
-	asJSON := fs.Bool("json", false, "emit JSON")
-	if err := fs.Parse(args); err != nil {
+	f, _, err := parseFlags(args)
+	if err != nil {
 		return 2
 	}
-	sums, err := flight.New(*root).Tasks()
+	root := f.root
+	asJSON := f.json
+	sums, err := flight.New(root).Tasks()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "kern flight tasks: %v\n", err)
 		return 1
 	}
 	for _, s := range sums {
-		if *asJSON {
+		if asJSON {
 			data, err := json.Marshal(s)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "kern flight tasks: %v\n", err)
@@ -121,24 +138,24 @@ func runFlightTasks(args []string) int {
 // (never partially truncated), keeping the keepTasks most recently active
 // tasks plus any task active within olderThan.
 func runFlightGC(args []string) int {
-	fs := flag.NewFlagSet("flight gc", flag.ContinueOnError)
-	root := fs.String("root", ".", "project root holding .kern/flight")
-	keepTasks := fs.Int("keep-tasks", 20, "retain the N most recently active task trails (0 disables)")
-	olderThan := fs.String("older-than", "", "retain tasks active within this duration (e.g. 30d, 720h)")
-	if err := fs.Parse(args); err != nil {
+	f, _, err := parseFlags(args)
+	if err != nil {
 		return 2
 	}
+	root := f.root
+	keepTasks := f.keepTasks
+	olderThan := f.olderThan
 	var cutoff time.Duration
-	if *olderThan != "" {
-		d, err := parseDurationDays(*olderThan)
+	if olderThan != "" {
+		d, err := parseDurationDays(olderThan)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "kern flight gc: --older-than %q: %v\n", *olderThan, err)
+			fmt.Fprintf(os.Stderr, "kern flight gc: --older-than %q: %v\n", olderThan, err)
 			return 2
 		}
 		cutoff = d
 	}
-	rec := flight.New(*root)
-	deleted, err := rec.GC(*keepTasks, cutoff)
+	rec := flight.New(root)
+	deleted, err := rec.GC(keepTasks, cutoff)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "kern flight gc: %v\n", err)
 		return 1
@@ -149,7 +166,7 @@ func runFlightGC(args []string) int {
 		return 1
 	}
 	fmt.Printf("kern flight gc: deleted %d record(s); %d task trail(s) remain (keep-tasks=%d, older-than=%s)\n",
-		deleted, len(after), *keepTasks, *olderThan)
+		deleted, len(after), keepTasks, olderThan)
 	return 0
 }
 

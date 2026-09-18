@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/JayveerPrajapati/kern/internal/app"
+	"github.com/JayveerPrajapati/kern/internal/governance"
 )
 
 // runAgentMessage implements `kern agent-message`: sends a message to an
@@ -17,6 +18,7 @@ import (
 // kern_agent_coordination action=inbox sees it.
 func runAgentMessage(rest []string) {
 	var to, from, taskID, msg, root string
+	taskExplicit := false // true only when the caller passed --task (an auto-generated id must not be validated)
 	var words []string
 	for i := 0; i < len(rest); i++ {
 		switch rest[i] {
@@ -33,6 +35,7 @@ func runAgentMessage(rest []string) {
 		case "--task":
 			if i+1 < len(rest) {
 				taskID = rest[i+1]
+				taskExplicit = true
 				i++
 			}
 		case "--root", "-r":
@@ -61,10 +64,46 @@ func runAgentMessage(rest []string) {
 	if err != nil {
 		fatalUsage("%v", err)
 	}
+	// Recipient validation against the governance agent registry (when one
+	// exists). A registry that is absent or empty keeps the open-inbox
+	// behavior (cold-start handoffs) but says so on stderr; a non-empty
+	// registry rejects unknown recipients loudly instead of silently
+	// queueing a message nobody will read.
+	_ = governance.LoadAgents(absRoot)
+	registered := governance.ListAgents()
+	if len(registered) > 0 {
+		known := false
+		ids := make([]string, 0, len(registered))
+		for _, a := range registered {
+			if a.ID == to {
+				known = true
+			}
+			ids = append(ids, a.ID)
+		}
+		if !known {
+			fatal("agent-message: recipient %q is not a registered agent (registered: %s)", to, strings.Join(ids, ", "))
+		}
+	} else {
+		fmt.Fprintln(os.Stderr, "kern agent-message: warning: no registered agents in this workspace — queuing to open inbox")
+	}
+	// Task validation against the agent task registry: a --task naming an
+	// unknown task id is a caller error — fail BEFORE queueing instead of
+	// silently creating a handoff that references a task that does not exist.
+	// Uses the same TaskService lookup kern agent-interrupt performs (the
+	// registry in memory first, then the persisted store).
+	if taskExplicit {
+		p, err := app.New(absRoot)
+		if err != nil {
+			fatal("agent-message: %v", err)
+		}
+		ts := app.NewTaskService(p, nil)
+		if _, ok := ts.Get(taskID); !ok {
+			fatal("agent-message: task %q not found", taskID)
+		}
+	}
 	dir := filepath.Join(absRoot, ".kern", "coordination")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		panic(exitError{code: 1})
+		fatal("agent-message: %v", err)
 	}
 	handoff := map[string]any{
 		"id":         fmt.Sprintf("hf-%d", time.Now().UnixNano()%100000),
@@ -77,13 +116,11 @@ func runAgentMessage(rest []string) {
 	}
 	b, err := json.MarshalIndent(handoff, "", "  ")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		panic(exitError{code: 1})
+		fatal("agent-message: %v", err)
 	}
 	path := filepath.Join(dir, handoff["id"].(string)+".json")
 	if err := os.WriteFile(path, b, 0o644); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		panic(exitError{code: 1})
+		fatal("agent-message: %v", err)
 	}
 	fmt.Printf("queued message to %q (handoff %s)\n", to, handoff["id"].(string))
 }
@@ -117,13 +154,11 @@ func runAgentInterrupt(rest []string) {
 	}
 	p, err := app.New(root)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		panic(exitError{code: 1})
+		fatal("agent-interrupt: %v", err)
 	}
 	ts := app.NewTaskService(p, nil)
 	if err := ts.Cancel(taskID, reason); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		panic(exitError{code: 1})
+		fatal("agent-interrupt: %v", err)
 	}
 	fmt.Printf("task %s cancelled: %s\n", taskID, reason)
 }

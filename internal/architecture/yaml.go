@@ -21,7 +21,7 @@ type yamlLine struct {
 // on pathological inputs like deeply nested "[[[…]]]" flow lists.
 const maxFlowDepth = 64
 
-func parseYAML(data []byte) (interface{}, error) {
+func parseYAML(data []byte) (any, error) {
 	var lines []yamlLine
 	for _, raw := range strings.Split(string(data), "\n") {
 		if strings.TrimSpace(raw) == "" {
@@ -41,7 +41,7 @@ func parseYAML(data []byte) (interface{}, error) {
 	return parseBlock(lines, &pos, lines[0].indent, 0)
 }
 
-func parseBlock(lines []yamlLine, pos *int, indent, depth int) (interface{}, error) {
+func parseBlock(lines []yamlLine, pos *int, indent, depth int) (any, error) {
 	if depth > maxFlowDepth {
 		return nil, fmt.Errorf("yaml nesting exceeds depth limit of %d", maxFlowDepth)
 	}
@@ -54,11 +54,11 @@ func parseBlock(lines []yamlLine, pos *int, indent, depth int) (interface{}, err
 	return parseMap(lines, pos, indent, depth+1)
 }
 
-func parseMap(lines []yamlLine, pos *int, indent, depth int) (map[string]interface{}, error) {
+func parseMap(lines []yamlLine, pos *int, indent, depth int) (map[string]any, error) {
 	if depth > maxFlowDepth {
 		return nil, fmt.Errorf("yaml nesting exceeds depth limit of %d", maxFlowDepth)
 	}
-	m := map[string]interface{}{}
+	m := map[string]any{}
 	for *pos < len(lines) {
 		ln := lines[*pos]
 		if ln.indent < indent {
@@ -97,11 +97,11 @@ func parseMap(lines []yamlLine, pos *int, indent, depth int) (map[string]interfa
 	return m, nil
 }
 
-func parseSeq(lines []yamlLine, pos *int, indent, depth int) ([]interface{}, error) {
+func parseSeq(lines []yamlLine, pos *int, indent, depth int) ([]any, error) {
 	if depth > maxFlowDepth {
 		return nil, fmt.Errorf("yaml nesting exceeds depth limit of %d", maxFlowDepth)
 	}
-	var items []interface{}
+	var items []any
 	for *pos < len(lines) {
 		ln := lines[*pos]
 		if ln.indent < indent {
@@ -131,7 +131,7 @@ func parseSeq(lines []yamlLine, pos *int, indent, depth int) ([]interface{}, err
 		// Inline map item: "- key: value" followed by more keys at deeper indent.
 		if key, val, hasVal := splitKV(rest); hasVal && key != "" {
 			*pos++
-			item := map[string]interface{}{}
+			item := map[string]any{}
 			sv, err := parseScalar(val, depth+1)
 			if err != nil {
 				return nil, err
@@ -198,7 +198,7 @@ func parseSeq(lines []yamlLine, pos *int, indent, depth int) ([]interface{}, err
 	return items, nil
 }
 
-func parseScalar(s string, depth int) (interface{}, error) {
+func parseScalar(s string, depth int) (any, error) {
 	if depth > maxFlowDepth {
 		return nil, fmt.Errorf("yaml flow nesting exceeds depth limit of %d", maxFlowDepth)
 	}
@@ -209,9 +209,9 @@ func parseScalar(s string, depth int) (interface{}, error) {
 		}
 		inner := strings.TrimSpace(s[1 : len(s)-1])
 		if inner == "" {
-			return []interface{}{}, nil
+			return []any{}, nil
 		}
-		var out []interface{}
+		var out []any
 		for _, p := range splitFlowList(inner) {
 			v, err := parseScalar(p, depth+1)
 			if err != nil {

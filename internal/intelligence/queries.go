@@ -14,6 +14,23 @@ import (
 // unbounded traversal. The v1 call graph of a real project is far shallower.
 const maxHops = 50
 
+// adjacency returns the cached outgoing/incoming "calls" adjacency for the
+// requested precision mode, building each variant once per graph. Callers
+// must treat the returned maps as read-only; the one call site that
+// extends a slice copies it first.
+func (g *Graph) adjacency(strict bool) (outgoing, incoming map[string][]string) {
+	if strict {
+		g.adjStrictOnce.Do(func() {
+			g.adjStrictOut, g.adjStrictIn = g.buildAdjacencyOpt(true)
+		})
+		return g.adjStrictOut, g.adjStrictIn
+	}
+	g.adjLooseOnce.Do(func() {
+		g.adjLooseOut, g.adjLooseIn = g.buildAdjacencyOpt(false)
+	})
+	return g.adjLooseOut, g.adjLooseIn
+}
+
 // buildAdjacencyOpt builds the adjacency map with a precision mode. When
 // strict is true, "calls" edges whose caller node's language is not
 // "resolved"-precision (per the index's PrecisionByLang) are dropped, so
@@ -177,7 +194,7 @@ func (g *Graph) resolveNodeID(ref string) (string, bool) {
 
 // Resolvable reports whether ref maps to a node in the graph (a bare symbol
 // name, package-scoped name, or method name that uniquely resolves). Used to
-// verify natural-language extraction against the real index (report A8).
+// verify natural-language extraction against the real index.
 func (g *Graph) Resolvable(ref string) bool {
 	_, ok := g.resolveNodeID(ref)
 	return ok
@@ -186,7 +203,7 @@ func (g *Graph) Resolvable(ref string) bool {
 // ResolveNodeID maps a user-provided entity reference to its canonical node ID
 // (bare name, package-scoped name, or method name). It is the exported form of
 // resolveNodeID so web handlers can look up graph entities by symbol name
-// without building a fresh index (F-031).
+// without building a fresh index.
 func (g *Graph) ResolveNodeID(ref string) (string, bool) {
 	return g.resolveNodeID(ref)
 }
@@ -339,7 +356,7 @@ func (g *Graph) WhoCalls(symbol string) []domain.Node {
 // direct callers whose caller language is not "resolved"-precision are
 // skipped (reported as unknown rather than guessed).
 func (g *Graph) WhoCallsPrecise(symbol string, strict bool) []domain.Node {
-	_, incoming := g.buildAdjacencyOpt(strict)
+	_, incoming := g.adjacency(strict)
 	reach := transitive(g.resolveSymbol(symbol), incoming, 1)
 	return nodesForIDs(g.nodesByID(), reach)
 }
@@ -354,7 +371,7 @@ func (g *Graph) WhatDependsOn(symbol string) []domain.Node {
 // WhatDependsOnPrecise is WhatDependsOn with a precision mode: when strict is
 // true, callers whose caller language is not "resolved"-precision are skipped.
 func (g *Graph) WhatDependsOnPrecise(symbol string, strict bool) []domain.Node {
-	_, incoming := g.buildAdjacencyOpt(strict)
+	_, incoming := g.adjacency(strict)
 	reach := transitive(g.resolveSymbol(symbol), incoming, maxHops)
 	return nodesForIDs(g.nodesByID(), reach)
 }
@@ -370,7 +387,7 @@ func (g *Graph) WhatDoesXDependOn(symbol string) []domain.Node {
 // strict is true, outgoing call edges from a caller whose language is not
 // "resolved"-precision are skipped.
 func (g *Graph) WhatDoesXDependOnPrecise(symbol string, strict bool) []domain.Node {
-	outgoing, _ := g.buildAdjacencyOpt(strict)
+	outgoing, _ := g.adjacency(strict)
 	reach := transitive(g.resolveSymbol(symbol), outgoing, maxHops)
 	return nodesForIDs(g.nodesByID(), reach)
 }
@@ -383,7 +400,7 @@ func (g *Graph) WhatDoesXDependOnPrecise(symbol string, strict bool) []domain.No
 // raw edges (e2e round 2, P0-1). Resolved IDs map to node names; unresolved
 // IDs are returned verbatim so impact reports stop under-reporting.
 func (g *Graph) WhatDoesXDependOnNames(symbol string, strict bool) []string {
-	outgoing, _ := g.buildAdjacencyOpt(strict)
+	outgoing, _ := g.adjacency(strict)
 	reach := transitive(g.resolveSymbol(symbol), outgoing, maxHops)
 	byID := g.nodesByID()
 	out := make([]string, 0, len(reach))
@@ -404,9 +421,9 @@ func (g *Graph) WhatDoesXDependOnNames(symbol string, strict bool) []string {
 // DirectDependsOnNames returns the 1-hop callees of symbol as renderable names,
 // using the same resolved-or-verbatim mapping as WhatDoesXDependOnNames. It
 // exists so impact reports can list direct calls first, then transitive-only
-// callees, instead of an undifferentiated alphabetical dump (P1-4).
+// callees, instead of an undifferentiated alphabetical dump.
 func (g *Graph) DirectDependsOnNames(symbol string, strict bool) []string {
-	outgoing, _ := g.buildAdjacencyOpt(strict)
+	outgoing, _ := g.adjacency(strict)
 	start := g.resolveSymbol(symbol)
 	byID := g.nodesByID()
 	seen := map[string]bool{}
@@ -439,7 +456,7 @@ func (g *Graph) WhatAPIsAffected(symbol string) []domain.Node {
 // WhatAPIsAffectedPrecise is WhatAPIsAffected with a precision mode: when
 // strict is true, non-"resolved" caller edges are skipped during traversal.
 func (g *Graph) WhatAPIsAffectedPrecise(symbol string, strict bool) []domain.Node {
-	_, incoming := g.buildAdjacencyOpt(strict)
+	_, incoming := g.adjacency(strict)
 	resolved := g.resolveSymbol(symbol)
 	reach := transitive(resolved, incoming, maxHops)
 
@@ -528,9 +545,12 @@ func (g *Graph) WhatEventsAffected(symbol string) []domain.Node {
 func (g *Graph) WhatEventsAffectedPrecise(symbol string, strict bool) []domain.Node {
 	// Direct callees (produced/consumed) and direct callers, plus the symbol
 	// itself. Depth-1 keeps the result tight and deterministic.
-	outgoing, incoming := g.buildAdjacencyOpt(strict)
+	outgoing, incoming := g.adjacency(strict)
 	resolved := g.resolveSymbol(symbol)
-	ids := append(incoming[resolved], resolved)
+	// Defensive copy: incoming is cached on the graph; appending to the
+	// shared slice could write into its spare capacity.
+	ids := append([]string(nil), incoming[resolved]...)
+	ids = append(ids, resolved)
 	ids = append(ids, outgoing[resolved]...)
 
 	byID := g.nodesByID()
@@ -650,7 +670,7 @@ func (g *Graph) WhatTestsCover(symbol string) []domain.Node {
 // WhatTestsCoverPrecise is WhatTestsCover with a precision mode: when strict
 // is true, non-"resolved" caller edges are skipped during traversal.
 func (g *Graph) WhatTestsCoverPrecise(symbol string, strict bool) []domain.Node {
-	_, incoming := g.buildAdjacencyOpt(strict)
+	_, incoming := g.adjacency(strict)
 	reach := transitive(g.resolveSymbol(symbol), incoming, maxHops)
 	byID := g.nodesByID()
 

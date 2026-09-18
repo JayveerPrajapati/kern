@@ -553,7 +553,7 @@ func (t *Task) Snapshot() domain.ContextSnapshot {
 	}
 	risks := make([]string, 0, len(t.Risks))
 	for _, r := range t.Risks {
-		if s, ok := interface{}(r).(fmt.Stringer); ok {
+		if s, ok := any(r).(fmt.Stringer); ok {
 			risks = append(risks, s.String())
 		} else {
 			risks = append(risks, string(r.Level))

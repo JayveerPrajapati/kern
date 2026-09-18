@@ -1,6 +1,8 @@
 package host
 
 import (
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -36,7 +38,7 @@ func (a *fileAdapter) Inject(root string, pkt *domain.ContextPacket, budget int)
 	path := a.FilePath(root)
 	content, err := os.ReadFile(path)
 	if err != nil {
-		if !os.IsNotExist(err) {
+		if !errors.Is(err, fs.ErrNotExist) {
 			return "", err
 		}
 		content = nil
@@ -80,7 +82,7 @@ func appendBlock(text, start, block, end string) string {
 func (a *fileAdapter) Extract(root string) (string, error) {
 	content, err := os.ReadFile(a.FilePath(root))
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, fs.ErrNotExist) {
 			return "", nil
 		}
 		return "", err
@@ -102,7 +104,7 @@ func (a *fileAdapter) Uninstall(root string) error {
 	path := a.FilePath(root)
 	content, err := os.ReadFile(path)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, fs.ErrNotExist) {
 			return nil
 		}
 		return err

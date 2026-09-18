@@ -5,10 +5,6 @@ import (
 	"testing"
 )
 
-// TestProseBareCallUsage (F-011): `kern prose` with no arguments must fail
-// with a friendly usage message that documents the required <words> positional
-// (maps prose words to symbol candidates) and shows an example — not a cryptic
-// bare usage line.
 func TestProseBareCallUsage(t *testing.T) {
 	code := runProseExit(t, nil)
 	if code != 2 {

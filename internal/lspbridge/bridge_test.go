@@ -184,7 +184,7 @@ while True:
         break
     method = msg.get("method")
     req_id = msg.get("id")
-    
+
     if method == "initialize":
         send_msg({"jsonrpc": "2.0", "id": req_id, "result": {"capabilities": {}}})
     elif method == "textDocument/definition":

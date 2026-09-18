@@ -51,6 +51,11 @@ func TestFailureDrillPolicyDenial(t *testing.T) {
 
 // TestFailureDrillTestFailure: an injected failing test makes verification FAIL.
 func TestFailureDrillTestFailure(t *testing.T) {
+	// The sandbox fails closed without network isolation (darwin). The drill's
+	// whole point is to run the injected failing test, so opt into the
+	// unisolated runtime — hermetic on every platform (no netns needed for a
+	// tiny local module, no network access involved).
+	t.Setenv("KERN_ALLOW_UNISOLATED", "1")
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "go.mod"), "module testfail\n\ngo 1.21\n")
 	writeFile(t, filepath.Join(dir, "x.go"), "package testfail\n\nfunc Add(a, b int) int { return a + b }\n")

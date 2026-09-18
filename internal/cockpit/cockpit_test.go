@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/JayveerPrajapati/kern/internal/blueprint/gates"
 	"github.com/JayveerPrajapati/kern/internal/execution"
+	"github.com/JayveerPrajapati/kern/internal/gates"
 	"github.com/JayveerPrajapati/kern/internal/loop"
 )
 

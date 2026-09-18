@@ -87,13 +87,28 @@ jobs:
       - uses: ./.github/actions/setup-tools
       - name: Build kern from checkout
         run: go build -buildvcs=false -o "$RUNNER_TEMP/kern" ./cmd/kern
-      - name: Full E2E suite (non-short) — app, cicd, mcp
-        run: go test -p 1 -timeout 30m ./internal/app/... ./internal/cicd/... ./internal/mcp/...
+      - name: Full E2E suite (non-short) — app, mcp
+        run: go test -p 1 -timeout 30m ./internal/app/... ./internal/mcp/...
         env:
           KERN_BINARY: ${{ runner.temp }}/kern
           KERN_REQUIRE_BINARY: "1"
       - name: Full blueprint suite (non-short)
         run: go test -p 1 -timeout 30m ./internal/blueprint/...
+        env:
+          KERN_BINARY: ${{ runner.temp }}/kern
+          KERN_REQUIRE_BINARY: "1"
+      # Full (non-short) loop + verification engine suites. The primary `test`
+      # job runs -short, which skips the ~45 real-execution tests in these two
+      # packages (loop stages against a real worktree; verification engine
+      # running real go build/go test/security/arch/dependency checks). These
+      # must run for real in CI so a regression in the loop's safety gates or
+      # the verification engine cannot pass every workflow silently.
+      # -p 2: the two packages are independent test binaries with per-test
+      # t.TempDir fixtures and the loop binary redirects XDG_CACHE_HOME; the
+      # shared Go build cache is concurrency-safe, so parallel package
+      # execution is safe and roughly halves this step's wall time (~36s -> ~25s).
+      - name: Full E2E suite (non-short) — loop, verification
+        run: go test -p 2 -timeout 30m ./internal/loop/... ./internal/verification/...
         env:
           KERN_BINARY: ${{ runner.temp }}/kern
           KERN_REQUIRE_BINARY: "1"

@@ -8,7 +8,7 @@ prebuilt symbol index instead of re-reading files.
 
 ## The kern_meta tool (preferred entry point)
 
-Instead of choosing among 143 individual `kern_*` tools, call the single
+Instead of choosing among 145 individual `kern_*` tools, call the single
 **`kern_meta`** tool with a natural-language request. Kern classifies the
 request and runs the right tool(s) internally — you get the same result
 without having to know which tool fits. Think in phases: explore (read/discover),
@@ -25,7 +25,7 @@ Examples:
 
 Prefer `kern_meta` as your default. By default (`KERN_MCP_FULL=0` or unset), only a minimal 11-tool surface
 is advertised (the high-level task-oriented entry points plus `kern_meta`) to keep context windows minimal and fast;
-set `KERN_MCP_FULL=1` if you or your environment require exposing the entire 143-tool catalog directly,
+set `KERN_MCP_FULL=1` if you or your environment require exposing the entire 145-tool catalog directly,
 `KERN_MCP_PHASE=explore|plan|edit|verify` to filter the advertised list to a
 phase's shortlist (plus the always-on meta/cross tools), and
 `KERN_MCP_SINGLE_TOOL=1` to expose ONLY `kern_meta` (useful when an agent is
@@ -129,11 +129,25 @@ re-explore or re-parse files that the index already covers.
 
 ## Full capability catalog
 
-`kern` ships 143 `kern_*` MCP tools across many domains. If you are unsure
+`kern` ships 145 `kern_*` MCP tools across many domains. If you are unsure
 which tool fits, call `kern_usage_guide` (categorized guide with performance
 tiers) or `kern_buddy` to enumerate options. By default only the minimal
 11-tool surface is advertised; set `KERN_MCP_FULL=1` to expose the full
 catalog to agents.
+
+## Multi-Agent Specialist Squad (The 7 Roles)
+
+`kern` embeds a 7-role specialist squad (`internal/agents` / `kern team`) that agents can orchestrate or delegate to directly:
+
+1. **Planner (`RolePlanner`)** (Autonomy L0–L3): Analyzes tasks, scopes boundaries, and drafts phased milestones. Trigger: `kern_meta("plan <task>")` / `kern_plan`.
+2. **Architect (`RoleArchitect`)** (Autonomy L0–L3): Validates designs against AST call graphs, module boundaries, and structural interface satisfaction. Trigger: `kern_meta("architecture / impact of <change>")` / `kern_explore`.
+3. **Coder (`RoleCoder`)** (Autonomy L2–L3): Mutates code inside isolated `.kern/sandboxes/` snapshots with surgical `TreeDiff` payload extraction. Trigger: `kern_safe_change` / `kern_refactor`.
+4. **Reviewer (`RoleReviewer`)** (Autonomy L0–L2): Audits diffs for correctness, maintainability, and anti-patterns. Trigger: `kern_meta("review staged changes")` / `kern_review`.
+5. **Security (`RoleSecurity`)** (Autonomy L0–L2): Scans for injection sinks, hardcoded secrets, and policy firewall gates (G0–G39). Trigger: `kern_check` / `kern_sec` / `kern_taint`.
+6. **Tester (`RoleTester`)** (Autonomy L0–L2): Synthesizes reproduction test fixtures and validates test pass rates. Trigger: `kern_synthesize_test` / `kern_run_build`.
+7. **SRE (`RoleSRE`)** (Autonomy L0–L4): Correlates runtime stack traces to exact AST symbols, optimizes logs, and triages production drift. Trigger: `kern-incident-triage` / `kern_correlate_evidence`.
+
+When working on complex tasks, orchestrate these 7 specialist personas across the **Explore → Plan → Edit → Verify** lifecycle.
 
 ## When a build, test, or long-running command is needed
 

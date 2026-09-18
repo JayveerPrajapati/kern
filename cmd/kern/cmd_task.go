@@ -62,7 +62,7 @@ func runTask(rest []string) {
 		}
 	}
 	// `kern task list` (no id): list every known task instead of treating
-	// "list" as a task id (F-028).
+	// "list" as a task id.
 	if args[0] == "list" {
 		runTaskList(root)
 		return
@@ -266,7 +266,7 @@ func runTaskRetry(root, id string) {
 }
 
 // runTasks implements `kern tasks` — the discovery surface for task state
-// (F-028). It lists every task known to the task store with
+// . It lists every task known to the task store with
 // id/state/intent/updated columns, complementing the `kern task <id>` detail
 // command. `kern task list` routes here too.
 func runTasks(rest []string) {

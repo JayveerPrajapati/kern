@@ -7,8 +7,6 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/domain"
 )
 
-// TestGCPinnedSurvivesMaxItemsOne verifies AUD-12: a low-scoring pinned fact
-// survives GC at maxItems=1, even though it would otherwise be dropped.
 func TestGCPinnedSurvivesMaxItemsOne(t *testing.T) {
 	now := time.Now()
 	// high outranks low on every scoring factor: it matches the target, has a
@@ -39,8 +37,6 @@ func TestGCPinnedSurvivesMaxItemsOne(t *testing.T) {
 	}
 }
 
-// TestGCPinPreventsDrop verifies AUD-12: pinning a fact that would otherwise be
-// dropped (score < 0.1, beyond maxItems) turns its action into KEEP.
 func TestGCPinPreventsDrop(t *testing.T) {
 	now := time.Now()
 	dropCandidate := domain.ContextItem{ID: "doomed", Class: domain.ContextHistory, Content: "stale unrelated", Freshness: now.Add(-72 * time.Hour), LastUsed: now.Add(-72 * time.Hour)}
@@ -62,9 +58,6 @@ func TestGCPinPreventsDrop(t *testing.T) {
 	}
 }
 
-// TestGCPinnedSurvivesBeyondMaxItems verifies AUD-12: when the pinned count
-// alone exceeds maxItems, every pinned item still survives (the cap only
-// bounds unpinned items).
 func TestGCPinnedSurvivesBeyondMaxItems(t *testing.T) {
 	now := time.Now()
 	// Two pinned items, all low-scoring, against maxItems=1.
@@ -84,8 +77,6 @@ func TestGCPinnedSurvivesBeyondMaxItems(t *testing.T) {
 	}
 }
 
-// TestGCPinPreventsDemote verifies AUD-12: a pinned item that would otherwise
-// be DEMOTED (or ARCHIVED) is kept instead.
 func TestGCPinPreventsDemote(t *testing.T) {
 	now := time.Now()
 	// mid scores just under the winner: beyond maxItems=1 it would be demoted.
@@ -105,9 +96,6 @@ func TestGCPinPreventsDemote(t *testing.T) {
 	}
 }
 
-// TestGCPinOptInZeroValue verifies AUD-12 back-compat: with no Pin call the
-// zero-value config behaves exactly as before — pinning is opt-in and changes
-// nothing by default.
 func TestGCPinOptInZeroValue(t *testing.T) {
 	now := time.Now()
 	near := domain.ContextItem{ID: "near", Class: domain.ContextFact, Content: "x", Freshness: now, LastUsed: now}

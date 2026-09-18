@@ -7,9 +7,12 @@ import (
 	stdlog "log"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 	"time"
 
 	kctx "github.com/JayveerPrajapati/kern/internal/context"
+	"github.com/JayveerPrajapati/kern/internal/gates"
 	"github.com/JayveerPrajapati/kern/internal/governance"
 	"github.com/JayveerPrajapati/kern/internal/storage"
 )
@@ -49,6 +52,21 @@ func runAudit(rest []string) {
 	entries, err := svc.Governance.Audit(context.Background(), root, taskID)
 	if err != nil {
 		fatal("Audit: %v", err)
+	}
+
+	// F22: approval decisions made via the blueprint approval store
+	// (`kern request-approval` + `kern approve/reject apr-*`) are recorded in
+	// .blueprint/approvals/requests.jsonl — not the governance chain — so
+	// they never appeared in `kern audit`. Surface them as audit rows so a
+	// human approve/reject decision is always reconstructable end-to-end.
+	// Entries the governance chain already carries for the same decision
+	// (task-gated approvals record Action approve/reject with Resource
+	// "approval:<id>") are not duplicated.
+	if taskID == "" {
+		entries = append(entries, blueprintApprovalAuditEntries(root, entries)...)
+		sort.SliceStable(entries, func(i, j int) bool {
+			return entries[i].Timestamp.Before(entries[j].Timestamp)
+		})
 	}
 
 	if len(entries) == 0 {
@@ -93,7 +111,7 @@ func runAudit(rest []string) {
 		}
 		// Surface every field an entry carries: external appends often set
 		// only some fields (e.g. event/by/note), so fall back along the
-		// field chain instead of printing blank columns (F-027).
+		// field chain instead of printing blank columns.
 		agent := e.AgentID
 		if agent == "" {
 			agent = e.Policy
@@ -128,6 +146,61 @@ func cellOrDash(s string) string {
 		return "-"
 	}
 	return s
+}
+
+// blueprintApprovalAuditEntries converts decided blueprint approval requests
+// (status approved/rejected in .blueprint/approvals/requests.jsonl) into
+// governance-shaped audit rows. Best-effort and read-only: a missing or
+// unreadable approval store yields no entries, never an error. Entries the
+// governance chain already records for the same decision (Action approve/
+// reject with Resource "approval:<id>", e.g. task-gated approvals) are
+// skipped so a decision is never shown twice.
+func blueprintApprovalAuditEntries(root string, existing []governance.AuditEntry) []governance.AuditEntry {
+	reqs, err := gates.NewStore(root).List("")
+	if err != nil || len(reqs) == 0 {
+		return nil
+	}
+	have := map[string]bool{}
+	for _, e := range existing {
+		if (e.Action == "approve" || e.Action == "reject") && strings.HasPrefix(e.Resource, "approval:") {
+			have[e.Action+":"+e.Resource] = true
+		}
+	}
+	var out []governance.AuditEntry
+	for _, r := range reqs {
+		var action, result string
+		var approved bool
+		switch r.Status {
+		case gates.StatusApproved:
+			action, result, approved = "approve", "approved", true
+		case gates.StatusRejected:
+			action, result = "reject", "rejected"
+		default:
+			continue // pending/expired — no human decision to surface
+		}
+		if r.DecidedAt == nil {
+			continue // decided record without a timestamp is not a real decision
+		}
+		resource := "approval:" + r.ID
+		if have[action+":"+resource] {
+			continue
+		}
+		reason := r.Reason
+		if reason == "" {
+			reason = r.Intent
+		}
+		out = append(out, governance.AuditEntry{
+			Timestamp: *r.DecidedAt,
+			AgentID:   r.Approver,
+			Action:    action,
+			Resource:  resource,
+			Approved:  approved,
+			Result:    result,
+			Policy:    "approval",
+			Reason:    reason,
+		})
+	}
+	return out
 }
 
 // runAuditAppend links an external entry into the tamper-evident audit chain.
@@ -168,8 +241,7 @@ func runAuditAppend(rest []string) {
 	}
 	// Accept the friendly keys external writers commonly use (event/by/note)
 	// alongside the canonical AuditEntry fields, so an appended entry carries
-	// its content into the table render instead of appearing as blank columns
-	// (F-027).
+	// its content into the table render instead of appearing as blank columns.
 	applyAuditEntryAliases(&entry, raw)
 
 	auditDir := filepath.Join(root, ".kern", "audit")
@@ -182,7 +254,7 @@ func runAuditAppend(rest []string) {
 		fatal("audit append: %v", err)
 	}
 
-	// P0.4: consume Blueprint's validation outcome. BLOCK/ERROR marks the
+	// Consume Blueprint's validation outcome. BLOCK/ERROR marks the
 	// blocked context entities stale (in-memory invalidation only — no
 	// persistence in this first cut); WARN is logged but does not invalidate;
 	// PASS/SKIP and absent outcomes take no action.

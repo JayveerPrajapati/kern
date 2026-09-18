@@ -391,7 +391,7 @@ func (s *TaskService) collectGraphImpact(g *intelligence.Graph, target string, s
 	// to indexed nodes (e.g. "fmt.Println") survive instead of emptying the
 	// section - methods that only call external code reported "What it
 	// calls: 0" while `kern why` showed the edges (e2e round 2, P0-1).
-	// P1-4: order direct (1-hop) callees first, then transitive-only ones.
+	// Order direct (1-hop) callees first, then transitive-only ones.
 	// The full transitive set is preserved for --json; the text renderer
 	// truncates with "+N more" and collapses stdlib. Direct-first keeps the
 	// actionable entries visible after truncation on hubs like loadOrBuild

@@ -8,7 +8,9 @@ package docbudget
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -42,7 +44,7 @@ func Load(root string) (Manifest, error) {
 	path := filepath.Join(root, filepath.FromSlash(ManifestRelPath))
 	data, err := os.ReadFile(path)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, fs.ErrNotExist) {
 			return Manifest{}, nil
 		}
 		return Manifest{}, err
@@ -102,7 +104,7 @@ func Validate(root string) ([]Violation, error) {
 		abs := filepath.Join(root, filepath.FromSlash(r.Path))
 		count, err := CountWords(abs)
 		if err != nil {
-			if os.IsNotExist(err) {
+			if errors.Is(err, fs.ErrNotExist) {
 				out = append(out, Violation{Path: r.Path, Message: "document listed in doc-budgets.json is missing"})
 				continue
 			}

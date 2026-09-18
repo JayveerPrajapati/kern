@@ -2,11 +2,17 @@ package main
 
 import (
 	"fmt"
-	"strings"
-
 	"github.com/JayveerPrajapati/kern/internal/intel"
 	"github.com/JayveerPrajapati/kern/internal/retrieval"
+	"os"
+	"strings"
 )
+
+// retrieveUsage is the canonical `kern retrieve` usage line, shared verbatim
+// by the dispatch table help text and every error path (QA: the error paths
+// used to print three divergent variants that contradicted the documented
+// usage — single source of truth now).
+const retrieveUsage = "usage: kern retrieve --task-type <type> --symbol <name> [root] [--max-tokens N]"
 
 // parseRetrieveLevelCLI maps the string form of a disclosure level to the
 // retrieval.Level constants, mirroring the MCP handler's parsing. Empty
@@ -56,14 +62,14 @@ func runRetrieve(rest []string) {
 		// planner policy for the task type (documentation→l1,
 		// refactor→l3, everything else l2).
 		if symbol == "" {
-			fatalUsage("usage: kern retrieve --task-type <type> --symbol <name> [root] [--max-tokens N]")
+			fatalUsage(retrieveUsage)
 		}
 	} else {
 		if level == retrieval.L1 && query == "" {
-			fatalUsage("usage: kern retrieve --level l1 --query \"<text>\" [root] [--limit N] [--max-tokens N]")
+			fatalUsage(retrieveUsage)
 		}
 		if level != retrieval.L1 && symbol == "" {
-			fatalUsage("usage: kern retrieve --level l2|l3 --symbol <name> [root] [--depth N] [--max N] [--lines N] [--max-tokens N]")
+			fatalUsage(retrieveUsage)
 		}
 	}
 	root := f.root
@@ -109,6 +115,12 @@ func runRetrieve(rest []string) {
 	if err != nil {
 		fatal("Retrieve: %v", err)
 	}
+	// Persist the handles this run registered so a later `kern resolve` in a
+	// fresh process can map the printed handle ID back to its symbol. The
+	// store is best-effort: a write failure must not fail retrieval itself.
+	if err := retrieval.DefaultRegistry.Save(retrieval.HandleStorePath(root)); err != nil {
+		fmt.Fprintf(os.Stderr, "kern: retrieve: %v\n", err)
+	}
 	if f.json {
 		printJSON(res)
 		return
@@ -131,6 +143,16 @@ func runResolve(rest []string) {
 	if err != nil {
 		fatal("Resolve: %v", err)
 	}
+	root := f.root
+	if root == "" {
+		root = "."
+		if len(args) > 1 {
+			root = args[1]
+		}
+	}
+	// Load handles persisted by earlier `kern retrieve` runs so a handle ID
+	// printed by a previous process resolves here.
+	retrieval.DefaultRegistry.Load(retrieval.HandleStorePath(root))
 	h, ok := retrieval.DefaultRegistry.Resolve(args[0])
 	if !ok {
 		// Render displays an 8-char handle prefix; fall back to a prefix
@@ -145,14 +167,7 @@ func runResolve(rest []string) {
 		}
 	}
 	if !ok {
-		fatal("Resolve: unknown handle %q (handles expire with the registry; re-run kern retrieve)", args[0])
-	}
-	root := f.root
-	if root == "" {
-		root = "."
-		if len(args) > 1 {
-			root = args[1]
-		}
+		fatal("Resolve: unknown handle %q (re-run kern retrieve to refresh the handle store)", args[0])
 	}
 	ix, err := intel.ReadIndex(root)
 	if err != nil {

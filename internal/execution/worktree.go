@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/JayveerPrajapati/kern/internal/ignore"
 	"github.com/JayveerPrajapati/kern/internal/sandbox"
 )
 
@@ -88,6 +89,10 @@ func (w *Worktree) Apply(patch string) error {
 // worktree is a git repo). Header paths are normalized to be relative to the
 // worktree root so the patch applies cleanly inside a copy.
 func (w *Worktree) Diff() (string, error) {
+	// The ignore matcher filters diff sections for repository-ignored
+	// paths (setup-generated wiring, node_modules, generated docs). Loaded
+	// once per Diff call; the walk reads only .gitignore/.kernignore files.
+	ign := ignore.Load(w.srcRoot)
 	// `git diff --no-index` aborts with exit 128 ("fatal: cannot hash")
 	// when the source tree contains a file git cannot hash — unix sockets,
 	// FIFOs, device nodes (e.g. the event relay's .kern/events.sock). Move
@@ -132,12 +137,18 @@ func (w *Worktree) Diff() (string, error) {
 	// vendor, build output, ...) but the source tree still contains them, so
 	// `git diff --no-index` reports every skipped file as deleted. That noise
 	// would corrupt the execute result diff, so drop whole sections whose
-	// paths belong to a skipped directory.
+	// paths belong to a skipped directory — and also sections for files the
+	// repository itself ignores (.gitignore/.kernignore: setup-generated agent
+	// wiring, .opencode/node_modules, generated docs, ...), which the snapshot
+	// may legitimately contain but which are not part of a change surface.
 	var filtered []string
 	skip := false // true while inside a section whose path is skip-listed
 	for _, ln := range lines {
 		if strings.HasPrefix(ln, "diff --git ") {
 			skip = skippedDiffSection(ln)
+			if !skip && ign != nil {
+				skip = ignoredDiffSection(ln, ign)
+			}
 			if skip {
 				continue
 			}
@@ -147,6 +158,28 @@ func (w *Worktree) Diff() (string, error) {
 		filtered = append(filtered, ln)
 	}
 	return strings.Join(filtered, "\n"), nil
+}
+
+// ignoredDiffSection reports whether a diff section's path is ignored by the
+// repository's .gitignore/.kernignore rules. Matcher.Ignored is cheap (regexp
+// per rule) and the matcher is shared across sections via Diff's caller.
+func ignoredDiffSection(header string, ign *ignore.Matcher) bool {
+	rest := strings.TrimPrefix(header, "diff --git ")
+	for _, p := range strings.Fields(rest) {
+		for _, marker := range []string{"a/", "b/"} {
+			if strings.HasPrefix(p, marker) {
+				p = strings.TrimPrefix(p, marker)
+				break
+			}
+		}
+		if p == "/dev/null" {
+			continue
+		}
+		if ign.Ignored(p) {
+			return true
+		}
+	}
+	return false
 }
 
 // moveUnhashableAside moves non-regular files (sockets, FIFOs, device

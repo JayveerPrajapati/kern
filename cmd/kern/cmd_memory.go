@@ -4,14 +4,26 @@ import (
 	"context"
 	"fmt"
 	"strings"
+
+	"github.com/JayveerPrajapati/kern/internal/memory"
 )
 
 func runRemember(rest []string) {
-	lesson := strings.Join(rest, " ")
+	// Parse flags first so an unknown flag (e.g. `kern remember --bogus`) is
+	// rejected with a usage error (rc=2) instead of being stored as a lesson.
+	f, args, err := parseFlags(rest)
+	if err != nil {
+		fatalUsage("flags: %v", err)
+	}
+	lesson := strings.Join(args, " ")
 	if lesson == "" {
 		fatalUsage("usage: kern remember <lesson>")
 	}
-	if err := svc.Memory.Add(context.Background(), ".", lesson); err != nil {
+	root := f.root
+	if root == "" {
+		root = "."
+	}
+	if err := svc.Memory.Add(context.Background(), root, lesson); err != nil {
 		fatal("Remember: %v", err)
 	}
 	fmt.Println("remembered.")
@@ -51,8 +63,8 @@ func runMemory(rest []string) {
 				printJSON(entries)
 				return
 			}
-			for _, e := range entries {
-				fmt.Printf("%s  %s%s\n", e.Time.UTC().Format("2006-01-02 15:04"), label(e.Source), e.Text)
+			if s := memory.FormatEntries(entries); s != "" {
+				fmt.Println(s)
 			}
 			return
 		case "recall":
@@ -61,7 +73,7 @@ func runMemory(rest []string) {
 			}
 			k := f.limit
 			if k <= 0 {
-				k = 5
+				k = memory.DefaultRecallLimit
 			}
 			entries, err := svc.Memory.Recall(ctx, root, args[1], k)
 			if err != nil {
@@ -71,8 +83,10 @@ func runMemory(rest []string) {
 				printJSON(entries)
 				return
 			}
-			for _, e := range entries {
-				fmt.Printf("%s  %s%s\n", e.Time.UTC().Format("2006-01-02 15:04"), label(e.Source), e.Text)
+			if s := memory.FormatEntries(entries); s != "" {
+				fmt.Println(s)
+			} else {
+				fmt.Println(memory.NoRecallMatch)
 			}
 			return
 		}
@@ -92,8 +106,8 @@ func runMemory(rest []string) {
 		printJSON(entries)
 		return
 	}
-	for _, e := range entries {
-		fmt.Printf("%s  %s%s\n", e.Time.UTC().Format("2006-01-02 15:04"), label(e.Source), e.Text)
+	if s := memory.FormatEntries(entries); s != "" {
+		fmt.Println(s)
 	}
 
 }
@@ -112,24 +126,16 @@ func runRecall(rest []string) {
 	}
 	k := f.limit
 	if k <= 0 {
-		k = 5
+		k = memory.DefaultRecallLimit
 	}
 	entries, err := svc.Memory.Recall(context.Background(), root, args[0], k)
 	if err != nil {
 		fatal("Recall: %v", err)
 	}
-	for _, e := range entries {
-		fmt.Printf("%s  %s%s\n", e.Time.UTC().Format("2006-01-02 15:04"), label(e.Source), e.Text)
+	if s := memory.FormatEntries(entries); s != "" {
+		fmt.Println(s)
+	} else {
+		fmt.Println(memory.NoRecallMatch)
 	}
 
-}
-
-// label prefixes an auto-captured entry (raw prompt/tool outcome) so `kern
-// memory list` visibly distinguishes automatic session captures from deliberate
-// lessons (report A17).
-func label(source string) string {
-	if source == "auto" {
-		return "[auto] "
-	}
-	return ""
 }

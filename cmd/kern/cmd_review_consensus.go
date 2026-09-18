@@ -10,7 +10,7 @@ import (
 )
 
 // runReviewConsensus implements `kern review-consensus <pack.json>...
-// [--json]` (blueprint KERN-P2-002): normalize two or more review packs
+// [--json]`: normalize two or more review packs
 // into a consensus/divergence report — agreement is reported with its exact
 // scope, disagreement is surfaced, and no majority winner is selected.
 func runReviewConsensus(rest []string) int {

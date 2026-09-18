@@ -21,7 +21,7 @@ import (
 func runEvents(args []string) int {
 	if len(args) == 0 {
 		fmt.Fprintln(os.Stderr, "kern events: subcommand required (serve|watch|emit)")
-		return 1
+		return 2
 	}
 	switch args[0] {
 	case "serve":
@@ -32,7 +32,7 @@ func runEvents(args []string) int {
 		return runEventsEmit(args[1:])
 	default:
 		fmt.Fprintf(os.Stderr, "kern events: unknown subcommand %q (serve|watch|emit)\n", args[0])
-		return 1
+		return 2
 	}
 }
 
@@ -150,7 +150,7 @@ func runEventsEmit(args []string) int {
 	positional := nonFlagArgs(args)
 	if len(positional) == 0 {
 		fmt.Fprintln(os.Stderr, "kern events emit: kind required (kern events emit <kind> [--subject S] [--payload k=v])")
-		return 1
+		return 2
 	}
 	kind := positional[0]
 	payload := make(map[string]any)

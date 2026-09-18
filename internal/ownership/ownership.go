@@ -6,6 +6,8 @@ package ownership
 
 import (
 	"bufio"
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -33,7 +35,7 @@ type Map struct {
 func Parse(codeownersPath, root string) (*Map, error) {
 	f, err := os.Open(codeownersPath)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, fs.ErrNotExist) {
 			return &Map{root: root}, nil
 		}
 		return nil, err
@@ -129,18 +131,6 @@ func matchScore(pattern, path string) int {
 		return 100
 	}
 	return 0
-}
-
-// OwnersByFile returns a map from file path to owners for the given files.
-// Files with no owning rule are omitted from the map.
-func (m *Map) OwnersByFile(paths []string) map[string][]string {
-	result := make(map[string][]string)
-	for _, p := range paths {
-		if owners := m.Lookup(p); len(owners) > 0 {
-			result[p] = owners
-		}
-	}
-	return result
 }
 
 // Teams returns the deduplicated, sorted list of all owner handles in the map.

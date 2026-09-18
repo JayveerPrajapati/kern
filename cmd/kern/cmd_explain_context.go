@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/JayveerPrajapati/kern/internal/app"
 	kernctx "github.com/JayveerPrajapati/kern/internal/context"
@@ -21,6 +22,12 @@ func runExplainContext(rest []string) {
 		// Positional fallback: a bare token is the change, matching the MCP
 		// tool's required `change` argument.
 		change = args[0]
+	}
+	if change != "" && len(args) > 0 {
+		// The shared parser consumes only the first token after --task, so an
+		// UNQUOTED multi-word intent silently lost its tail ("--task add test"
+		// became just "add"). Re-append the trailing tokens.
+		change = strings.TrimSpace(change + " " + strings.Join(args, " "))
 	}
 	if change == "" {
 		fatalUsage("usage: kern explain-context --task \"<change or intent>\" [--root ROOT] [--budget N] [--json]")
@@ -46,5 +53,9 @@ func runExplainContext(rest []string) {
 		fmt.Println(string(out))
 		return
 	}
-	fmt.Print(kernctx.RenderPlan(plan))
+	out := kernctx.RenderPlan(plan)
+	if !strings.HasSuffix(out, "\n") {
+		out += "\n"
+	}
+	fmt.Print(out)
 }

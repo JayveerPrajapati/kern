@@ -1,7 +1,7 @@
 name: blueprint-nightly
 # Nightly full-depth governance suite. The per-push ci.yml runs the gate
 # tests in -short (fast unit + smoke keepers only — see the testing.Short()
-# skips in cmd/blueprint and internal/blueprint/mcp), so the heavy E2E gate
+# skips in internal/bpcli/cli and internal/bpcli/mcp), so the heavy E2E gate
 # suite and the repo-wide two-pass duplication/architecture debt report live
 # here instead, on GitHub's larger runners.
 on:
@@ -30,7 +30,7 @@ jobs:
       # the mcp leg tests (G5/G15/G18/G28/P12). -p 2 matches the e2e job's
       # memory profile; the suite spawns real kern/gitleaks/jscpd children.
       - name: Full blueprint gate suite (non-short)
-        run: go test -p 2 -count=1 -timeout 60m ./cmd/blueprint/... ./internal/blueprint/...
+        run: go test -p 2 -count=1 -timeout 60m ./internal/blueprint/... ./internal/bpcli/... ./internal/gates/... ./internal/scanners/... ./internal/bppolicy/... ./internal/bpreceipt/... ./internal/resilience/...
       # Repo-wide governance debt report: the FULL two-pass duplication
       # check (jscpd over the whole tree) and all-repo architecture findings
       # — the checks the pre-commit hook deliberately skips via --fast.

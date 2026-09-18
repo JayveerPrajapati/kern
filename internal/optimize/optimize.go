@@ -136,6 +136,44 @@ func pct(before, after int) float64 {
 	return float64(before-after) / float64(before) * 100
 }
 
+// maskEnabled reports whether PII masking applies to this run: explicitly via
+// opts.Mask, or by default when the prompt will be sent to a non-local LLM (a
+// remote OLLAMA_HOST, or any non-Ollama provider selected via
+// KERN_LLM_PROVIDER). NOTE: with a NON-local LLM the default always applies —
+// masking is fail-safe for off-box sends and cannot be turned off for them;
+// mask=false only takes effect for local-LLM flows. With no LLM configured
+// (opts.LLM=="") masking is off, so raw PII can land in the LOCAL semcache
+// index/preview (local-only, 0600, pre-existing). Shared by the cache-key
+// path and promptUncached so both agree on the same verdict.
+func maskEnabled(opts Options) bool {
+	if opts.Mask {
+		return true
+	}
+	if opts.LLM == "" {
+		return false
+	}
+	if p, perr := llm.NewProvider(); perr == nil {
+		if _, isOllama := p.(*llm.OllamaProvider); isOllama {
+			return !isLocalHost(llm.New(opts.LLM).Base)
+		}
+		return true // openai/anthropic/google are always remote
+	}
+	return false
+}
+
+// maskForCache returns prompt+attached in the form that may enter cache keys
+// and the on-disk semantic preview: masked when masking is in effect, so raw
+// PII never lands in the key JSON or the stored preview. Masking is
+// deterministic, so the masked form — and therefore the derived key — is
+// stable across runs.
+func maskForCache(prompt, attachedLog string, opts Options) (string, string) {
+	if !maskEnabled(opts) {
+		return prompt, attachedLog
+	}
+	return pii.MaskNames(prompt, opts.MaskNames).Text,
+		pii.MaskNames(attachedLog, opts.MaskNames).Text
+}
+
 // Prompt optimizes a raw user prompt, optionally compressing attached log text.
 func Prompt(prompt string, attachedLog string, opts Options) (Result, error) {
 	if strings.TrimSpace(prompt) == "" && strings.TrimSpace(attachedLog) == "" {
@@ -145,7 +183,10 @@ func Prompt(prompt string, attachedLog string, opts Options) (Result, error) {
 		// The key covers every option that can change the result: model, LLM
 		// choice, FewShot/Root (memory context), and Mask/MaskNames
 		// (placeholder remapping). Two calls differing in any of them must not
-		// share a cached entry.
+		// share a cached entry. The prompt+attached that enter the key are the
+		// MASKED forms (see maskForCache): the key JSON and the semantic
+		// preview must never carry raw PII.
+		keyPrompt, keyAttached := maskForCache(prompt, attachedLog, opts)
 		kb, _ := json.Marshal(struct {
 			Model     string
 			LLM       string
@@ -162,8 +203,8 @@ func Prompt(prompt string, attachedLog string, opts Options) (Result, error) {
 			Root:      opts.Root,
 			Mask:      opts.Mask,
 			MaskNames: opts.MaskNames,
-			Prompt:    prompt,
-			Attached:  attachedLog,
+			Prompt:    keyPrompt,
+			Attached:  keyAttached,
 		})
 		key := "queries/" + cache.Hash(kb)
 		var cached Result
@@ -177,7 +218,7 @@ func Prompt(prompt string, attachedLog string, opts Options) (Result, error) {
 		// model's answer.
 		if opts.LLM == "" {
 			var sem Result
-			raw := prompt + "\x00" + attachedLog
+			raw := keyPrompt + "\x00" + keyAttached
 			if matched, sim, hit, serr := semcache.Lookup("prompt", raw, &sem, 0); serr == nil && hit {
 				sem.FromCache = true
 				sem.SemanticHit = true
@@ -192,7 +233,7 @@ func Prompt(prompt string, attachedLog string, opts Options) (Result, error) {
 		}
 		_ = cache.Store(key, res)
 		if opts.LLM == "" {
-			_ = semcache.Store("prompt", prompt+"\x00"+attachedLog, res)
+			_ = semcache.Store("prompt", keyPrompt+"\x00"+keyAttached, res)
 		}
 		return res, nil
 	}
@@ -206,20 +247,11 @@ func promptUncached(prompt string, attachedLog string, opts Options) (Result, er
 		raw = prompt + "\n\n--- attached log ---\n" + attachedLog
 		prompt = prompt + "\n\n--- attached log (compressed) ---\n" + logPart
 	}
-	// Mask secrets by default when the prompt will be sent to a non-local LLM:
-	// a remote OLLAMA_HOST, or any non-Ollama provider selected via
-	// KERN_LLM_PROVIDER. Otherwise the compression step would ship PII off-box.
-	// Explicit mask=false still wins.
-	mask := opts.Mask
-	if !mask && opts.LLM != "" {
-		if p, perr := llm.NewProvider(); perr == nil {
-			if _, isOllama := p.(*llm.OllamaProvider); isOllama {
-				mask = !isLocalHost(llm.New(opts.LLM).Base)
-			} else {
-				mask = true // openai/anthropic/google are always remote
-			}
-		}
-	}
+	// Mask secrets by default when the prompt will be sent to a non-local LLM
+	// (see maskEnabled): otherwise the compression step would ship PII
+	// off-box. A non-local LLM always masks (fail-safe); mask=false only
+	// applies to local-LLM flows.
+	mask := maskEnabled(opts)
 	var masked pii.Result
 	if mask {
 		masked = pii.MaskNames(prompt, opts.MaskNames)

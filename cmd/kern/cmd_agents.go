@@ -22,6 +22,12 @@ type agentReport struct {
 	Latency   string `json:"latency_ms,omitempty"`
 }
 
+// probeTimeout caps each --probe live-test so `kern agents --probe` cannot
+// hang: a dead Ollama fails in milliseconds, a hung agent CLI is killed
+// (whole process group) at the deadline, and the full probe finishes in
+// bounded time.
+const probeTimeout = 20 * time.Second
+
 // runAgents implements `kern agents`: which agents kern is attached to
 // (setup wiring), which of them can serve as LLM providers (CLI presence),
 // and — with --probe — which one actually answers right now (the priority
@@ -112,34 +118,34 @@ func runAgents(rest []string) {
 
 	// 3. Live probe (--probe): ask each installed provider a trivial
 	// question and report who actually answers — the real priority order.
+	// Every probe is bounded by probeTimeout and announces itself on stderr
+	// so a slow probe is visible instead of a silent hang.
 	if probe {
 		for i := range reports {
 			r := &reports[i]
 			if r.Kind != "llm-provider" || !r.Installed {
 				continue
 			}
+			fmt.Fprintf(os.Stderr, "kern: probing %s ...\n", r.Name)
 			start := time.Now()
 			var out string
 			var perr error
+			ctx, cancel := context.WithTimeout(context.Background(), probeTimeout)
 			switch r.Name {
 			case "host":
 				prov := llm.NewMCPProvider()
-				ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 				out, perr = prov.Generate(ctx, "", "Reply with exactly: OK", llm.Options{})
-				cancel()
 			case "ollama":
-				prov, perr0 := llm.NewProvider()
-				if perr0 != nil {
-					perr = perr0
-				} else {
-					out, perr = prov.Generate(context.Background(), "", "Reply with exactly: OK", llm.Options{})
-				}
+				// Probe Ollama directly, not the whole auto chain: a chain
+				// probe would burn the budget spawning agent CLIs after the
+				// (already unreachable, failing-in-ms) Ollama leg.
+				prov := llm.NewOllamaProvider()
+				out, perr = prov.Generate(ctx, "", "Reply with exactly: OK", llm.Options{})
 			default:
 				prov := llm.NewLocalCliProvider(r.Name)
-				ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 				out, perr = prov.Generate(ctx, "", "Reply with exactly: OK", llm.Options{})
-				cancel()
 			}
+			cancel()
 			r.Latency = fmt.Sprintf("%d", time.Since(start).Milliseconds())
 			if perr == nil && strings.TrimSpace(out) != "" {
 				r.Healthy = "ok"

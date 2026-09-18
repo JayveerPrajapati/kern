@@ -6,12 +6,10 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/JayveerPrajapati/kern/internal/fw"
 	"github.com/JayveerPrajapati/kern/internal/index"
 )
 
-// TestGoNativeEntry pins F-009: Go's language-native entry points — main in
-// package main, and init funcs — must be recognized as entry points so
-// `kern entry-points` finds them on a plain Go module with no framework.
 func TestGoNativeEntry(t *testing.T) {
 	pkgOf := map[string]string{
 		"cmd/app/main.go":   "main",
@@ -42,9 +40,6 @@ func TestGoNativeEntry(t *testing.T) {
 	}
 }
 
-// TestRunEntryPointsFindsGoMain pins F-009 end to end: after indexing a plain
-// Go module (no framework), `kern entry-points` must list the native main
-// entry instead of reporting "no framework entry points".
 func TestRunEntryPointsFindsGoMain(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	dir := jsonCliFixture(t)
@@ -57,9 +52,6 @@ func TestRunEntryPointsFindsGoMain(t *testing.T) {
 	}
 }
 
-// TestRunFwReportsGoStdlib pins F-010: `kern frameworks` on a plain Go module
-// must report Go itself ("Go (stdlib)") instead of "No known frameworks
-// detected", while a non-Go project keeps the old message.
 func TestRunFwReportsGoStdlib(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	dir := t.TempDir()
@@ -92,16 +84,16 @@ func TestWithGoStdlib(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(gomod, "go.mod"), []byte("module m\ngo 1.23\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	det := withGoStdlib(gomod, nil)
+	det := fw.WithGoStdlib(gomod, nil)
 	if len(det) != 1 || det[0].ID != "go-stdlib" || det[0].Lang != "go" {
-		t.Fatalf("withGoStdlib(go.mod dir) = %+v, want one go-stdlib entry", det)
+		t.Fatalf("fw.WithGoStdlib(go.mod dir) = %+v, want one go-stdlib entry", det)
 	}
 	// A gin-style module keeps both the framework and the baseline.
 	gin := t.TempDir()
 	if err := os.WriteFile(filepath.Join(gin, "go.mod"), []byte("module m\ngo 1.23\nrequire github.com/gin-gonic/gin v1.9.1\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	det = withGoStdlib(gin, nil)
+	det = fw.WithGoStdlib(gin, nil)
 	if len(det) != 1 {
 		t.Fatalf("withGoStdlib without detected frameworks = %+v", det)
 	}
@@ -113,23 +105,20 @@ func TestWithGoStdlib(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(gosrc, "lib", "x.go"), []byte("package lib\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if det := withGoStdlib(gosrc, nil); len(det) != 1 {
-		t.Fatalf("withGoStdlib(.go-only dir) = %+v, want one go-stdlib entry", det)
+	if det := fw.WithGoStdlib(gosrc, nil); len(det) != 1 {
+		t.Fatalf("fw.WithGoStdlib(.go-only dir) = %+v, want one go-stdlib entry", det)
 	}
 	// Empty dir: no Go entry, no framework.
-	if det := withGoStdlib(t.TempDir(), nil); len(det) != 0 {
-		t.Fatalf("withGoStdlib(empty dir) = %+v, want none", det)
+	if det := fw.WithGoStdlib(t.TempDir(), nil); len(det) != 0 {
+		t.Fatalf("fw.WithGoStdlib(empty dir) = %+v, want none", det)
 	}
 	// Existing go-stdlib entry is not duplicated.
-	dup := withGoStdlib(gomod, det)
+	dup := fw.WithGoStdlib(gomod, det)
 	if len(dup) != 1 {
 		t.Fatalf("withGoStdlib must not duplicate go-stdlib, got %d entries", len(dup))
 	}
 }
 
-// TestAnnotateImpactCallees pins F-014: the "What it calls" section of a
-// rendered impact report must label each entry (direct) or (transitive) using
-// the index's direct call edges, and leave unrelated text untouched.
 func TestAnnotateImpactCallees(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	dir := t.TempDir()

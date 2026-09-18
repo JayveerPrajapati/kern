@@ -11,10 +11,12 @@ import (
 	"fmt"
 	"html"
 	"io"
+	"log"
+	"maps"
 	"net/http"
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -51,6 +53,11 @@ type Server struct {
 	teamRegistry map[string]*OrgTeam                  // org-level team registry
 	profile      Profile                              // org-level default profile
 	profileCfg   ProfileConfig                        // org-level profile configuration
+	// closeApp is the teardown hook for evicted cached web.App instances. It
+	// defaults to calling web.App.Close; tests may replace it to assert that
+	// eviction tears down the app (relay/bus subscriptions must not leak
+	// across evictions). It is always invoked with s.mu held.
+	closeApp func(app *web.App) error
 }
 
 type projectState struct {
@@ -77,6 +84,7 @@ func New() *Server {
 		teamRegistry: map[string]*OrgTeam{},
 		profile:      DefaultProfile,
 		profileCfg:   ProfileConfig{Profile: DefaultProfile},
+		closeApp:     func(a *web.App) error { return a.Close() },
 	}
 	// Opt-in deployment-time profile selection via KERN_ENTERPRISE_PROFILE.
 	if p, ok := ParseProfile(os.Getenv(enterpriseProfileEnv)); ok {
@@ -178,11 +186,7 @@ func (s *Server) Unregister(name string) error {
 func (s *Server) Projects() []Project {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	names := make([]string, 0, len(s.projects))
-	for n := range s.projects {
-		names = append(names, n)
-	}
-	sort.Strings(names)
+	names := slices.Sorted(maps.Keys(s.projects))
 	result := make([]Project, 0, len(names))
 	for _, n := range names {
 		result = append(result, s.projects[n].project)
@@ -296,9 +300,12 @@ func (s *Server) cachedCount() int {
 }
 
 // evictLRU drops the cached web.App of the least-recently-used project that
-// currently has one built. The projectState (and its per-project memory store)
-// are retained so the app can be rebuilt on next access. Must be called with
-// s.mu held.
+// currently has one built. The evicted app is torn down via the closeApp hook
+// (web.App.Close by default) so the relay/bus subscriptions and background
+// loops New() started do not leak goroutines or sockets across evictions. The
+// teardown is best-effort: an error is logged and never fails the eviction.
+// The projectState (and its per-project memory store) are retained so the app
+// can be rebuilt on next access. Must be called with s.mu held.
 func (s *Server) evictLRU() {
 	var oldest *projectState
 	var oldestT time.Time
@@ -313,6 +320,12 @@ func (s *Server) evictLRU() {
 	}
 	if oldest == nil {
 		return
+	}
+	// Tear down the evicted app BEFORE dropping it: without this, every
+	// eviction leaks the relay listener goroutine, the socket, and the bus
+	// subscription the app's New() wired.
+	if err := s.closeApp(oldest.app); err != nil {
+		log.Printf("enterprise: close app for project %q: %v", oldest.project.Name, err)
 	}
 	oldest.app = nil
 	oldest.appErr = nil
@@ -480,11 +493,7 @@ func (s *Server) Agents() []*governance.AgentIdentity {
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	ids := make([]string, 0, len(s.orgAgents))
-	for id := range s.orgAgents {
-		ids = append(ids, id)
-	}
-	sort.Strings(ids)
+	ids := slices.Sorted(maps.Keys(s.orgAgents))
 	out := make([]*governance.AgentIdentity, 0, len(ids))
 	for _, id := range ids {
 		out = append(out, s.orgAgents[id])

@@ -49,6 +49,17 @@ type Graph struct {
 	// alongside byID/nameIndex.
 	nodePkg    map[string]string
 	pkgImports map[string][]string
+	// adjLooseOut/adjLooseIn and adjStrictOut/adjStrictIn cache the two
+	// "calls" adjacency variants (loose and strict precision), each built
+	// once per graph and guarded by its own sync.Once. Rebuilding them per
+	// query was the dominant cost of the hottest read tools (kern_impact,
+	// kern_why, blast radius): every call re-walked all edges with map
+	// allocations and per-node sorts before traversal even started. The
+	// graph is read-only after construction, so the caches never go stale.
+	adjLooseOut, adjLooseIn   map[string][]string
+	adjLooseOnce              sync.Once
+	adjStrictOut, adjStrictIn map[string][]string
+	adjStrictOnce             sync.Once
 }
 
 // FromIndex builds a canonical domain.Graph from a v1 index.Index: every symbol

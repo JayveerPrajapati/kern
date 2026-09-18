@@ -8,4 +8,6 @@
 // a := modernization.NewAnalyzer(ix) // ix *index.Index
 // plan, err := a.Analyze()
 // // plan.Phases[0] is the safest context to extract first
+// // plan.TotalContexts reports the full context count; for large monoliths
+// // the lowest-risk contexts are consolidated so Phases never exceeds 20.
 package modernization

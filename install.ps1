@@ -113,17 +113,17 @@ if (-not $tag) {
     exit 1
 }
 
-# Detect architecture (Windows prebuilt = amd64 only).
+# Detect architecture (Windows prebuilt = amd64 and arm64).
 $arch = $env:PROCESSOR_ARCHITECTURE
 $goarch = if ($arch -match "ARM64") { "arm64" } elseif ($arch -match "64") { "amd64" } else { "386" }
-if ($goarch -ne "amd64") {
+if ($goarch -ne "amd64" -and $goarch -ne "arm64") {
     Write-Host "kern: no prebuilt asset for $goarch on Windows; falling back to go install." -ForegroundColor Yellow
     if (Get-Command go -ErrorAction SilentlyContinue) { $goInstalled = Install-Go; if ($goInstalled) { & Wire-Kern; exit 0 }; exit 1 }
     Write-Host "kern: install Go or use a 64-bit Windows." -ForegroundColor Red
     exit 1
 }
 
-$file = "kern-windows-amd64.zip"
+$file = "kern-windows-${goarch}.zip"
 $url = "https://github.com/$Repo/releases/download/$tag/$file"
 $tmp = Join-Path $env:TEMP "kern-install-$([guid]::NewGuid().ToString('N'))"
 New-Item -ItemType Directory -Force -Path $tmp | Out-Null

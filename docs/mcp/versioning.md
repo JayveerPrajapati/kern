@@ -59,7 +59,7 @@ negotiating any of them can talk to this server.
 
 ## 3. Tool catalog
 
-The catalog is the contract clients depend on most: 143 tools at HEAD, registered in
+The catalog is the contract clients depend on most: 145 tools at HEAD, registered in
 `internal/mcp/tools.go` and served via `tools/list`. Every tool entry carries
 `name`, `description`, `inputSchema`, `phase` and `riskLevel`.
 
@@ -83,7 +83,7 @@ The catalog is the contract clients depend on most: 143 tools at HEAD, registere
 - A tool or parameter being removed is first marked **deprecated** in its
   `description` (and in `tool-contracts.md`) for at least one minor release.
 - Deprecated tools keep working until their removal release.
-- The catalog count (143) and the `ToolNames()` set are enforced by catalog-parity
+- The catalog count (145) and the `ToolNames()` set are enforced by catalog-parity
   invariants (plugin ↔ MCP, docs ↔ MCP) — a change to the registration table that
   breaks parity fails CI.
 

@@ -339,10 +339,7 @@ func levenshteinRatio(a, b string) float64 {
 		}
 		prev = cur
 	}
-	max := la
-	if lb > max {
-		max = lb
-	}
+	max := max(la, lb)
 	return 1 - float64(prev[lb])/float64(max)
 }
 
@@ -384,7 +381,7 @@ func clusterLines(lines []string) []string {
 	// The eligibility criteria live in eligible below. Small logs scan every
 	// cluster pairwise (the original behaviour); logs above
 	// minHashClusterThreshold prune the candidate set with an LSH band index
-	// (G-9) so the pass stays sub-quadratic. The band index only decides
+	// so the pass stays sub-quadratic. The band index only decides
 	// which pairs are compared — never whether a pair merges — so the banded
 	// path cannot merge lines the pairwise path would keep apart.
 	eligible := func(c, other *cluster, tok string) bool {

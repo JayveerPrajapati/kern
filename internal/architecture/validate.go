@@ -55,16 +55,6 @@ func ValidateDiff(root string, files []string) (*Report, error) {
 	return buildReport(NewEngine(cfg).Check(ix, files)), nil
 }
 
-// ValidateDiffWithIndex is like ValidateDiff but runs against a prebuilt index
-// the caller owns and must treat as read-only.
-func ValidateDiffWithIndex(root string, ix *index.Index, files []string) (*Report, error) {
-	cfg, err := Load(root)
-	if err != nil {
-		return nil, err
-	}
-	return buildReport(NewEngine(cfg).Check(ix, files)), nil
-}
-
 // Render returns a human-readable validation report: the base violation lines
 // from intel.RenderViolations, then a summary line "N errors, M warnings".
 func Render(r *Report) string {

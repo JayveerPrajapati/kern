@@ -1,4 +1,4 @@
-// Audit trail for memory operations (P1-007).
+// Audit trail for memory operations.
 //
 // Every governed memory operation is recorded as an AuditEvent with a
 // timestamp, the acting agent, the operation type, and the outcome. Events

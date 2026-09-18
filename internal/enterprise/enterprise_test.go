@@ -2,6 +2,7 @@ package enterprise
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -592,8 +593,6 @@ func TestServeOrgAgentsPostRegister(t *testing.T) {
 	if got.Count != 1 || len(got.Agents) != 1 || got.Agents[0].ID != "agent-1" {
 		t.Fatalf("after POST, agents = %+v, want 1 agent with ID agent-1", got)
 	}
-	// Client-supplied permissions must be stripped at registration (AUD-08):
-	// org-registered agents never carry enforcement permissions.
 	if len(got.Agents[0].Permissions) != 0 {
 		t.Errorf("registered agent retained client-supplied permissions: %+v", got.Agents[0].Permissions)
 	}
@@ -622,5 +621,65 @@ func TestServeOrgAgentsPostRegister(t *testing.T) {
 	s.ServeHTTP(nrr, noid)
 	if nrr.Code != http.StatusBadRequest {
 		t.Fatalf("POST /org/agents without id code = %d, want 400", nrr.Code)
+	}
+}
+
+// TestEvictionClosesApp pins the app-teardown contract: evicting a cached
+// web.App must invoke the close hook (web.App.Close by default) so the
+// relay/bus subscriptions New() started do not leak goroutines or sockets
+// across evictions — and a Close error must never fail the eviction itself.
+func TestEvictionClosesApp(t *testing.T) {
+	t.Setenv("KERN_ENTERPRISE_MAX_PROJECTS", "2")
+	s := New()
+	for _, name := range []string{"p1", "p2", "p3"} {
+		if err := s.Register(name, t.TempDir()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var closed []string
+	s.closeApp = func(a *web.App) error {
+		closed = append(closed, "closed")
+		return nil
+	}
+	// Building p3 with a cap of 2 evicts the LRU cached app (p1).
+	for _, name := range []string{"p1", "p2", "p3"} {
+		if _, err := s.appFor(name); err != nil {
+			t.Fatalf("appFor(%s): %v", name, err)
+		}
+	}
+	if len(closed) == 0 {
+		t.Fatal("eviction did not call the app close hook")
+	}
+	if len(closed) > 1 {
+		t.Errorf("expected exactly one eviction close, got %d", len(closed))
+	}
+}
+
+// TestEvictionSurvivesCloseError pins the best-effort teardown contract: a
+// Close error is logged and the eviction still completes (the app slot is
+// freed and the project stays registered/rebuildable).
+func TestEvictionSurvivesCloseError(t *testing.T) {
+	t.Setenv("KERN_ENTERPRISE_MAX_PROJECTS", "2")
+	s := New()
+	for _, name := range []string{"a1", "a2", "a3"} {
+		if err := s.Register(name, t.TempDir()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	s.closeApp = func(*web.App) error { return fmt.Errorf("teardown boom") }
+	for _, name := range []string{"a1", "a2", "a3"} {
+		if _, err := s.appFor(name); err != nil {
+			t.Fatalf("appFor(%s): %v", name, err)
+		}
+	}
+	s.mu.RLock()
+	evicted := s.projects["a1"].app == nil
+	s.mu.RUnlock()
+	if !evicted {
+		t.Error("eviction must complete even when the app close hook errors")
+	}
+	// The evicted project remains registered and rebuilds on next access.
+	if app, _ := s.appFor("a1"); app == nil {
+		t.Error("project with a failed app close should still rebuild on next access")
 	}
 }

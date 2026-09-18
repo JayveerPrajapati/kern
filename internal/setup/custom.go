@@ -31,7 +31,9 @@ package setup
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -72,7 +74,7 @@ func effectiveAdapters(root string) ([]adapter, []error) {
 		}
 		data, err := os.ReadFile(file)
 		if err != nil {
-			if os.IsNotExist(err) {
+			if errors.Is(err, fs.ErrNotExist) {
 				return
 			}
 			errs = append(errs, fmt.Errorf("%s: %w", file, err))

@@ -2,7 +2,8 @@ package main
 
 import (
 	"fmt"
-	bpcli "github.com/JayveerPrajapati/kern/internal/blueprint/cli"
+	bpcli "github.com/JayveerPrajapati/kern/internal/bpcli/cli"
+	"os"
 	"strings"
 )
 
@@ -18,6 +19,26 @@ type commandEntry struct {
 	// --base/--local/--remote). Empty for commands whose one-liner suffices.
 	usage string
 }
+
+// Shared help texts for the MCP-mirror command pairs: the canonical
+// underscore spelling and its dash alias must report the same description, so
+// each pair's text lives in one place and both entries reference it.
+const (
+	preEditHelp           = "predictive blast-radius and edit risk"
+	promptFillHelp        = "dynamic prompt template compilation"
+	semanticDiffHelp      = "AST functional symbol diff"
+	evidenceAnchorHelp    = "verify citations and cryptographic proof"
+	contextWatchHelp      = "context token budget bloat audit"
+	agentFingerprintHelp  = "agent loop and drift detection"
+	crossRepoImpactHelp   = "cross-repo blast radius"
+	memoryRankedHelp      = "decay-weighted memory retrieval"
+	policyDSLHelp         = "policy-as-code evaluation"
+	agentCoordinationHelp = "multi-agent handoffs and claims"
+	agentRoleRBACHelp     = "role-based tool access control"
+	astTransformHelp      = "deterministic AST-level transformations and scaffolding"
+	semanticMergeHelp     = "AST-aware 3-way semantic merge and conflict detection"
+	synthesizeTestHelp    = "automatically synthesize table-driven unit tests from AST signatures"
+)
 
 // commandTable fuses the dispatchCommand switch (E3 refactor) with the
 // one-line help map: every subcommand and alias routes through one
@@ -62,11 +83,11 @@ var commandTable = map[string]commandEntry{
 	"pack": {run: func(cmd string, rest []string) int {
 		runPack(rest)
 		return 0
-	}, help: "paste-ready project bundle (--graph: graph-snapshot pack)", usage: "usage: kern pack [flags]\n  options:\n    --fold             fold function bodies\n    --graph            graph mode / graph-snapshot pack\n    --no-instructions  omit generated instructions\n    --out              write output to FILE\n    --tier             summary|folded|full"},
+	}, help: "paste-ready project bundle (--graph: graph-snapshot pack)", usage: "usage: kern pack [flags]\n  options:\n    --fold             fold function bodies\n    --graph            graph mode / graph-snapshot pack\n    --max-tokens       fit the pack to a token budget\n    --no-instructions  omit generated instructions\n    --out              write output to FILE\n    --tier             summary|folded|full"},
 	"build": {run: func(cmd string, rest []string) int {
 		runBuild(rest)
 		return 0
-	}, help: "", usage: "usage: kern build <command>\n  options:\n    --dir              working directory\n    --session          session id"},
+	}, help: "run a build command in the governed sandbox", usage: "usage: kern build <command>\n  options:\n    --dir              working directory\n    --session          session id"},
 	"log": {run: func(cmd string, rest []string) int {
 		runLog(rest)
 		return 0
@@ -87,6 +108,10 @@ var commandTable = map[string]commandEntry{
 		runOnboard(rest)
 		return 0
 	}, help: "register+index+wired status for the repo", usage: "usage: kern onboard [flags]\n  options:\n    --root             project root (default: .)"},
+	"brief": {run: func(cmd string, rest []string) int {
+		runBrief(rest)
+		return 0
+	}, help: "print the repo onboarding brief (project map, index, hubs, entry points, stats, memory)", usage: "usage: kern brief [root]\n  options:\n    --root             project root (default: .)"},
 	"skills": {run: func(cmd string, rest []string) int {
 		runSkills(rest)
 		return 0
@@ -94,7 +119,7 @@ var commandTable = map[string]commandEntry{
 	"prompt": {run: func(cmd string, rest []string) int {
 		runPrompt(rest)
 		return 0
-	}, help: "", usage: "usage: kern prompt <template> [--file PATH] [--task TEXT]\n  options:\n    --file             file path\n    --schema           schema file/JSON\n    --task"},
+	}, help: "render a prompt template (kern prompt list: list templates)", usage: "usage: kern prompt <template> [--file PATH] [--task TEXT]\n  options:\n    --file             file path\n    --schema           schema file/JSON\n    --task"},
 	"validate": {run: func(cmd string, rest []string) int {
 		runValidate(rest)
 		return 0
@@ -114,7 +139,7 @@ var commandTable = map[string]commandEntry{
 	"heal": {run: func(cmd string, rest []string) int {
 		runHeal(rest)
 		return 0
-	}, help: "self-correct failing files", usage: "usage: kern heal [flags]\n  options:\n    --force            override the HIGH-risk repair gate\n    --llm              LLM backend name\n    --task"},
+	}, help: "self-correct failing files", usage: "usage: kern heal [flags]\n  options:\n    --force            override the HIGH-risk repair gate\n    --llm              Ollama model name\n    --task"},
 	"udiff": {run: func(cmd string, rest []string) int {
 		runUdiff(rest)
 		return 0
@@ -126,11 +151,11 @@ var commandTable = map[string]commandEntry{
 	"swap": {run: func(cmd string, rest []string) int {
 		runSwap(rest)
 		return 0
-	}, help: "budget-swap fenced code blocks", usage: "usage: kern swap [flags]\n  options:\n    --mode             mode selector"},
+	}, help: "budget-swap path-tagged fenced code blocks", usage: "usage: kern swap [FILE|-] [--max N] [--mode fit|summary|expand]\n  swappable fences carry a file path tag: ```lang:path (e.g. ```go:internal/foo.go)\n  options:\n    --max              token budget (default: 4000)\n    --mode             fit (default) | summary | expand"},
 	"precache": {run: func(cmd string, rest []string) int {
 		runPrecache(rest)
 		return 0
-	}, help: "warm caches", usage: "usage: kern precache [flags]\n  options:\n    --once             single pass, no watch"},
+	}, help: "warm caches", usage: "usage: kern precache [flags]\n  options:\n    --once             single pass, no watch (default: watch mode — runs until interrupted)"},
 	"schema": {run: func(cmd string, rest []string) int {
 		runSchema(rest)
 		return 0
@@ -146,7 +171,7 @@ var commandTable = map[string]commandEntry{
 	"recall": {run: func(cmd string, rest []string) int {
 		runRecall(rest)
 		return 0
-	}, help: "recall lessons", usage: "usage: kern recall \n  options:\n    --limit            cap results at N"},
+	}, help: "recall lessons", usage: "usage: kern recall \"<prompt>\" [root]\n  options:\n    --limit            cap results at N (default: 5)"},
 	"budget": {run: func(cmd string, rest []string) int {
 		runBudget(rest)
 		return 0
@@ -154,18 +179,29 @@ var commandTable = map[string]commandEntry{
 	"terse": {run: func(cmd string, rest []string) int {
 		runTerse(rest)
 		return 0
-	}, help: "terser output", usage: "usage: kern terse \n  options:\n    --max              maximum count/threshold"},
+	}, help: "terser output", usage: "usage: kern terse \"<text>\" [--max N]  (or pipe stdin)\n  options:\n    --max              token ceiling: keep the head until the budget"},
 	"exec": {run: func(cmd string, rest []string) int {
 		runExec(rest)
 		return 0
 	}, help: "run code in an isolated sandbox", usage: "usage: kern exec \n  options:\n    --json             emit JSON output\n    --lang             language\n    --list\n    --max              maximum count/threshold\n    --stdin            stdin content\n    --timeout          timeout (seconds or ms per command)"},
+	"exitcode": {run: func(cmd string, rest []string) int {
+		runExitcode(rest)
+		return 0
+	}, help: "print kern's documented exit-code conventions", usage: "usage: kern exitcode\n  prints the exit-code conventions table (0 ok, 1 error, 2 usage, 3 decided-state/policy)"},
 	"doctor": {run: func(cmd string, rest []string) int {
 		return runDoctor(rest)
 	}, help: "self-diagnostics", usage: "usage: kern doctor [flags]\n  options:\n    --json             emit JSON output\n    --root             project root (default: .)"},
 	"agents": {run: func(cmd string, rest []string) int {
 		runAgents(rest)
 		return 0
-	}, help: "wired agents + LLM provider priority", usage: "usage: kern agents [--probe] [--json] [--root ROOT]\n  options:\n    --probe            live-test each installed LLM provider (may take minutes)\n    --json             emit JSON\n    --root             project root (default: .)"},
+	}, help: "wired agents + LLM provider priority", usage: "usage: kern agents [--probe] [--json] [--root ROOT]\n  options:\n    --probe            live-test each installed LLM provider (bounded: ~20s per provider)\n    --json             emit JSON\n    --root             project root (default: .)"},
+	"register-host-sampler": {run: func(cmd string, rest []string) int {
+		return runRegisterHostSampler(rest)
+	}, help: "register/unregister a host sampler command for LLM delegation (hosts that do not announce MCP sampling)", usage: "usage: kern register-host-sampler [command] [--key K] [--timeout S] [--model M]\n  options:\n    --key               registration key (default: this connection's slot)\n    --timeout           per-call timeout in seconds (default 180)\n    --model             optional model label"},
+	"gen-contracts": {run: func(cmd string, rest []string) int {
+		runGenContracts(rest)
+		return 0
+	}, help: "regenerate docs/mcp/tool-contracts.md from the live MCP catalog", usage: "usage: kern gen-contracts [--root <dir>]\n  options:\n    --root             project root (default: .)"},
 	"calibrate": {run: func(cmd string, rest []string) int {
 		runCalibrate(rest)
 		return 0
@@ -181,11 +217,11 @@ var commandTable = map[string]commandEntry{
 	"plan": {run: func(cmd string, rest []string) int {
 		runAnalyze(cmd, rest)
 		return 0
-	}, help: "analyze a proposed change", usage: "usage: kern plan <change> [--root ROOT]\n  options:\n    --lens             analysis lens\n    --profile          profile name\n    --root             project root (default: .)\n    --task"},
+	}, help: "analyze a proposed change", usage: "usage: kern plan <change> [--root ROOT]\n  options:\n    --root             project root (default: .)\n    --task"},
 	"team": {run: func(cmd string, rest []string) int {
 		runTeam(rest)
 		return 0
-	}, help: "", usage: "usage: kern team [flags]\n  options:\n    --root             project root (default: .)"},
+	}, help: "show the agent team overview", usage: "usage: kern team [flags]\n  options:\n    --root             project root (default: .)"},
 	"workflow": {run: func(cmd string, rest []string) int {
 		runWorkflow(rest)
 		return 0
@@ -280,9 +316,8 @@ var commandTable = map[string]commandEntry{
 		return 0
 	}, help: "verify a change", usage: "usage: kern verify [<types>|<file|->] [flags]\n  high-level: kern verify [build,test,security,architecture,dependency] [--types X] (default build,test; needs KERN_ALLOW_EXEC=1)\n  claims: kern verify <file|-> [root]\n  options:\n    --types            explicit check types (alias for positional <types>; matches MCP kern_verify)\n    --eval             evaluate a directory of cases\n    --json             emit JSON output\n    --root             project root (default: .)\n    --scan             scan path\n    --skill            skill directory\n    --verify-pipeline  silent-orchestrator pipeline verify\n    --verify-silent    silent verify\n    --verify-token-reduction token-reduction verify"},
 	"check-draft": {run: func(cmd string, rest []string) int {
-		runCheckDraft(rest)
-		return 0
-	}, help: "validate draft code against the index", usage: "usage: kern check-draft [flags]\n  options:\n    --lang             language\n    --root             project root (default: .)"},
+		return runCheckDraft(rest)
+	}, help: "validate draft code against the index", usage: "usage: kern check-draft <file|-> [root] [--lang LANG] [--file F]\n  options:\n    --file             draft source file (default: positional arg or stdin)\n    --lang             language\n    --root             project root (default: .)"},
 	"taint": {run: func(cmd string, rest []string) int {
 		runTaint(rest)
 		return 0
@@ -291,14 +326,22 @@ var commandTable = map[string]commandEntry{
 		runDocs(rest)
 		return 0
 	}, help: "local doc search", usage: "usage: kern docs fetch <url> [name] [root]\n  options:\n    --limit            cap results at N\n    --root             project root (default: .)\n    --semantic         semantic matching"},
+	"doc-fetch": {run: func(cmd string, rest []string) int {
+		runDocFetch(rest)
+		return 0
+	}, help: "fetch a doc page into the index", usage: "usage: kern doc-fetch <url> [--name N] [--root ROOT]\n  options:\n    --name             name (memory key / item name)\n    --root             project root (default: .)"},
 	"doc_fetch": {run: func(cmd string, rest []string) int {
 		runDocFetch(rest)
 		return 0
-	}, help: "fetch a doc page into the index", usage: "usage: kern doc_fetch <url> [--name N] [--root ROOT]\n  options:\n    --name             name (memory key / item name)\n    --root             project root (default: .)"},
+	}, help: "fetch a doc page into the index (alias of doc-fetch)", usage: "usage: kern doc_fetch <url> [--name N] [--root ROOT]  (alias of doc-fetch)"},
+	"doc-search": {run: func(cmd string, rest []string) int {
+		runDocSearch(rest)
+		return 0
+	}, help: "search local docs", usage: "usage: kern doc-search <query> [--root ROOT] [--limit N]\n  options:\n    --limit            cap results at N\n    --root             project root (default: .)"},
 	"doc_search": {run: func(cmd string, rest []string) int {
 		runDocSearch(rest)
 		return 0
-	}, help: "search local docs", usage: "usage: kern doc_search <query> [--root ROOT] [--limit N]\n  options:\n    --limit            cap results at N\n    --root             project root (default: .)"},
+	}, help: "search local docs (alias of doc-search)", usage: "usage: kern doc_search <query> [--root ROOT] [--limit N]  (alias of doc-search)"},
 	"check": {run: func(cmd string, rest []string) int {
 		return bpcli.RunCheck(rest)
 	}, help: "validate staged changes against policy (boundaries, secrets, tests)", usage: "usage: kern check [flags]"},
@@ -319,16 +362,19 @@ var commandTable = map[string]commandEntry{
 	}, help: "reject a pending approval request: reject <id> [--reason ...]", usage: "usage: kern reject [flags]"},
 	"verify-receipt": {run: func(cmd string, rest []string) int {
 		return bpcli.RunVerifyReceipt(rest)
-	}, help: "verify a tamper-evident CI receipt", usage: "usage: kern verify-receipt [flags]"},
+	}, help: "verify a tamper-evident CI receipt", usage: "usage: kern verify-receipt [--receipt-id <id>] [--repo ROOT] [--json|--sarif|--in-toto] [--check-diff]\n  options:\n    --receipt-id       receipt id to verify (default: latest receipt)\n    --repo             repository root (default: current directory)\n    --json             emit JSON instead of human-readable text\n    --sarif            emit SARIF 2.1.0 JSON report\n    --in-toto          emit in-toto v0.2 supply-chain attestation statement\n    --check-diff       verify PR git revision / diff matches receipt fingerprint"},
 	"ci": {run: func(cmd string, rest []string) int {
 		return bpcli.RunCI(rest)
-	}, help: "CI change-governance validation (base vs head)", usage: "usage: kern ci [flags]"},
+	}, help: "CI change-governance validation (base vs head)", usage: "usage: kern ci [flags]\n  options:\n    --base             base revision (default: main)\n    --head             proposed revision (default: HEAD)\n    --receipt          generate a tamper-evident receipt (default: true)"},
 	"install": {run: func(cmd string, rest []string) int {
 		// Blueprint change-governance git hooks (pre-commit/pre-push). The
 		// Blueprint CLI lives inside kern (kern check / kern ci / kern sec),
 		// so `kern install hook` replaces the standalone `blueprint install hook`.
 		return bpcli.RunInstall(rest)
 	}, help: "install Blueprint change-governance git hooks (pre-commit/pre-push)", usage: "usage: kern install [flags]"},
+	"blueprint": {run: func(cmd string, rest []string) int {
+		return runBlueprint(rest)
+	}, help: "blueprint change-governance suite (check/diff-gate/fix/metrics/request-approval/reject/verify-receipt/ci/install)", usage: "usage: kern blueprint <subcommand> [args]\n  subcommands (each also runs standalone as kern <subcommand>):\n    check             validate staged changes against policy\n    diff-gate         deterministic diff gate (advisory; --blocking for CI)\n    fix               validate agent-proposed fixes in an isolated worktree\n    metrics           show local change-governance validation metrics\n    request-approval  request human approval for a high-risk change\n    reject            reject a pending approval request\n    verify-receipt    verify a tamper-evident CI receipt\n    ci                CI change-governance validation (base vs head)\n    install           install Blueprint change-governance git hooks"},
 	"fw": {run: func(cmd string, rest []string) int {
 		runFw(rest)
 		return 0
@@ -361,63 +407,9 @@ var commandTable = map[string]commandEntry{
 		runSemcache(rest)
 		return 0
 	}, help: "semantic cache stats", usage: "usage: kern semcache list <prompt|log>\n  options:\n    --json             emit JSON output"},
-	"stats": {run: func(cmd string, rest []string) int {
-		// `kern stats performance` routes to the metrics snapshot (F-41/F-46/
-		// F-47/F-56) instead of the token-savings stats. `--reset` clears the
-		// process-wide recorder first; `--json` emits the structured snapshot.
-		if cmd == "stats" && len(rest) > 0 && rest[0] == "performance" {
-			f, _, err := parseFlags(rest[1:])
-			if err != nil {
-				fatalUsage("flags: %v", err)
-			}
-			out, err := runStatsPerformance(f.reset, f.json)
-			if err != nil {
-				fatal("dispatchCommand: %v", err)
-			}
-			fmt.Println(out)
-			return 0
-		}
-		runStats(cmd, rest)
-		return 0
-	}, help: "token savings", usage: "usage: kern stats [flags]"},
-	"diff": {run: func(cmd string, rest []string) int {
-		// `kern stats performance` routes to the metrics snapshot (F-41/F-46/
-		// F-47/F-56) instead of the token-savings stats. `--reset` clears the
-		// process-wide recorder first; `--json` emits the structured snapshot.
-		if cmd == "stats" && len(rest) > 0 && rest[0] == "performance" {
-			f, _, err := parseFlags(rest[1:])
-			if err != nil {
-				fatalUsage("flags: %v", err)
-			}
-			out, err := runStatsPerformance(f.reset, f.json)
-			if err != nil {
-				fatal("dispatchCommand: %v", err)
-			}
-			fmt.Println(out)
-			return 0
-		}
-		runStats(cmd, rest)
-		return 0
-	}, help: "", usage: "usage: kern diff [flags]  (alias of stats)"},
-	"export": {run: func(cmd string, rest []string) int {
-		// `kern stats performance` routes to the metrics snapshot (F-41/F-46/
-		// F-47/F-56) instead of the token-savings stats. `--reset` clears the
-		// process-wide recorder first; `--json` emits the structured snapshot.
-		if cmd == "stats" && len(rest) > 0 && rest[0] == "performance" {
-			f, _, err := parseFlags(rest[1:])
-			if err != nil {
-				fatalUsage("flags: %v", err)
-			}
-			out, err := runStatsPerformance(f.reset, f.json)
-			if err != nil {
-				fatal("dispatchCommand: %v", err)
-			}
-			fmt.Println(out)
-			return 0
-		}
-		runStats(cmd, rest)
-		return 0
-	}, help: "", usage: "usage: kern export [flags]  (alias of stats)"},
+	"stats":  {run: runStatsEntry, help: "token savings", usage: "usage: kern stats [flags]"},
+	"diff":   {run: runStatsEntry, help: "", usage: "usage: kern diff [flags]  (alias of stats)\n  options:\n    --limit            max entries (default 20)\n    --session          filter by session id\n    --json             emit JSON output"},
+	"export": {run: runStatsEntry, help: "", usage: "usage: kern export [flags]  (alias of stats)"},
 	"mcp": {run: func(cmd string, rest []string) int {
 		runMCP(rest)
 		return 0
@@ -429,11 +421,15 @@ var commandTable = map[string]commandEntry{
 	"meta": {run: func(cmd string, rest []string) int {
 		runMeta(rest)
 		return 0
-	}, help: "NL request router", usage: "usage: kern meta"},
+	}, help: "NL request router", usage: "usage: kern meta \"<request>\" [--root DIR]\n  example: kern meta \"show me the architecture\""},
+	"ask": {run: func(cmd string, rest []string) int {
+		runMeta(rest)
+		return 0
+	}, help: "NL request router (alias of meta)", usage: "usage: kern ask \"<question>\" [--root DIR]\n  example: kern ask \"how does dispatch work\""},
 	"serve": {run: func(cmd string, rest []string) int {
 		runServe(rest)
 		return 0
-	}, help: "run the web console", usage: "usage: kern serve [flags]\n  options:\n    --addr             listen address\n    --root             project root (default: .)"},
+	}, help: "run the web console", usage: "usage: kern serve [flags]\n  options:\n    --addr             listen address\n    --enterprise       enterprise mode\n    --project          project name\n    --root             project root (default: .)"},
 	"org": {run: func(cmd string, rest []string) int {
 		runOrg(rest)
 		return 0
@@ -441,7 +437,7 @@ var commandTable = map[string]commandEntry{
 	"web": {run: func(cmd string, rest []string) int {
 		runServe(rest)
 		return 0
-	}, help: "run the web console", usage: "usage: kern web [flags]  (alias of serve)\n  options:\n    --addr             listen address\n    --root             project root (default: .)"},
+	}, help: "run the web console", usage: "usage: kern web [flags]  (alias of serve)\n  options:\n    --addr             listen address\n    --enterprise       enterprise mode\n    --project          project name\n    --root             project root (default: .)"},
 	"index": {run: func(cmd string, rest []string) int {
 		runIndex(rest)
 		return 0
@@ -450,10 +446,17 @@ var commandTable = map[string]commandEntry{
 		runSec(rest)
 		return 0
 	}, help: "security scan", usage: "usage: kern sec [flags]\n  options:\n    --json             emit JSON output\n    --root             project root (default: .)\n    --severity         severity filter (comma-separated, default error)"},
+	"security": {run: func(cmd string, rest []string) int {
+		// QA: `kern security` used to be an unknown command (generic banner,
+		// rc=2). It is the user-visible name of the security tool whose
+		// canonical spelling is `kern sec`; alias it so both work identically.
+		runSec(rest)
+		return 0
+	}, help: "security scan (alias of sec)", usage: "usage: kern security [flags]  (alias of sec)\n  options:\n    --json             emit JSON output\n    --root             project root (default: .)\n    --severity         severity filter (comma-separated, default error)"},
 	"delete": {run: func(cmd string, rest []string) int {
 		runDelete(rest)
 		return 0
-	}, help: "safe symbol deletion", usage: "usage: kern delete <symbol> [root] [--apply] [--json]\n  options:\n    --apply            apply the change (HIGH pre-edit verdict blocks without --force)\n    --force            override the HIGH-risk mutation gate\n    --json             emit JSON output\n    --root             project root (default: .)"},
+	}, help: "safe symbol deletion", usage: "usage: kern delete <symbol> [root] [--apply] [--json]\n  options:\n    --apply            apply the change (HIGH pre-edit verdict blocks without --force)\n    --force            override the HIGH-risk mutation gate ONLY — structural refusals (e.g. a symbol with production callers) are never bypassed\n    --json             emit JSON output\n    --root             project root (default: .)"},
 	"rename": {run: func(cmd string, rest []string) int {
 		runRename(rest)
 		return 0
@@ -475,8 +478,7 @@ var commandTable = map[string]commandEntry{
 		return 0
 	}, help: "ranked symbol search", usage: "usage: kern search <query> [root] [--limit N] [--repos] [--json] [--semantic]\n  options:\n    --json             emit JSON output\n    --limit            cap results at N\n    --repos            scan across repositories\n    --root             project root (default: .)\n    --semantic         semantic matching"},
 	"prose": {run: func(cmd string, rest []string) int {
-		runProse(rest)
-		return 0
+		return runProse(rest)
 	}, help: "map prose <words> to symbol candidates", usage: "usage: kern prose \"<words>\" [root] [--limit N]\n  options:\n    --limit            cap results at N\n    --root             project root (default: .)"},
 	"graph": {run: func(cmd string, rest []string) int {
 		runGraph(rest)
@@ -497,15 +499,15 @@ var commandTable = map[string]commandEntry{
 	"wiki": {run: func(cmd string, rest []string) int {
 		runWiki(rest)
 		return 0
-	}, help: "repo digest", usage: "usage: kern wiki [flags]\n  options:\n    --out              write output to FILE\n    --root             project root (default: .)"},
+	}, help: "repo digest", usage: "usage: kern wiki [flags]\n  options:\n    --out              write output to DIR\n    --obsidian         wikilinks + frontmatter\n    --root             project root (default: .)"},
 	"changes": {run: func(cmd string, rest []string) int {
 		runChanges(cmd, rest)
 		return 0
-	}, help: "review context for changed files", usage: "usage: kern changes [flags]\n  options:\n    --file             file path\n    --json             emit JSON output\n    --lens             analysis lens\n    --profile          profile name\n    --range            line range a..b\n    --root             project root (default: .)\n    --runtime"},
+	}, help: "review context for changed files", usage: "usage: kern changes [flags]\n  options:\n    --file             file path\n    --json             emit JSON output\n    --lens             analysis lens\n    --max              token budget for the review output\n    --profile          profile name\n    --range            line range a..b\n    --root             project root (default: .)\n    --runtime"},
 	"review": {run: func(cmd string, rest []string) int {
 		runChanges(cmd, rest)
 		return 0
-	}, help: "review context for changed files", usage: "usage: kern review [flags]  (alias of changes)\n  options:\n    --file             file path\n    --json             emit JSON output\n    --lens             analysis lens\n    --profile          profile name\n    --range            line range a..b\n    --root             project root (default: .)\n    --runtime"},
+	}, help: "review context for changed files", usage: "usage: kern review [flags]  (alias of changes)\n  options:\n    --file             file path\n    --json             emit JSON output\n    --lens             analysis lens\n    --max              token budget for the review output\n    --profile          profile name\n    --range            line range a..b\n    --root             project root (default: .)\n    --runtime"},
 	"hubs": {run: func(cmd string, rest []string) int {
 		runHubs(rest)
 		return 0
@@ -517,7 +519,7 @@ var commandTable = map[string]commandEntry{
 	"testgaps": {run: func(cmd string, rest []string) int {
 		runTestgaps(rest)
 		return 0
-	}, help: "", usage: "usage: kern testgaps [flags]\n  options:\n    --json             emit JSON output\n    --root             project root (default: .)"},
+	}, help: "analyze test coverage gaps", usage: "usage: kern testgaps [flags]\n  options:\n    --json             emit JSON output\n    --root             project root (default: .)"},
 	"test-gaps": {run: func(cmd string, rest []string) int {
 		runTestgaps(rest)
 		return 0
@@ -537,7 +539,7 @@ var commandTable = map[string]commandEntry{
 	"path": {run: func(cmd string, rest []string) int {
 		runPath(rest)
 		return 0
-	}, help: "shortest call path", usage: "usage: kern path <from-symbol> <to-symbol> [root] (or --from S --to S)\n  options:\n    --from             git range start (ref/sha)\n    --json             emit JSON output\n    --min-confidence   minimum confidence\n    --root             project root (default: .)\n    --to               git range end (ref/sha)"},
+	}, help: "shortest call path", usage: "usage: kern path <from-symbol> <to-symbol> [root] (or --from S --to S)\n  options:\n    --from             start symbol\n    --json             emit JSON output\n    --min-confidence   minimum confidence\n    --root             project root (default: .)\n    --to               end symbol"},
 	"dead": {run: func(cmd string, rest []string) int {
 		runDead(rest)
 		return 0
@@ -579,7 +581,7 @@ var commandTable = map[string]commandEntry{
 	"fts": {run: func(cmd string, rest []string) int {
 		runFts(rest)
 		return 0
-	}, help: "FTS5 search", usage: "usage: kern fts \n  options:\n    --json             emit JSON output\n    --limit            cap results at N\n    --root             project root (default: .)"},
+	}, help: "FTS5 search", usage: "usage: kern fts \"<query>\" [root] [--limit N]\n  options:\n    --json             emit JSON output\n    --limit            cap results at N\n    --root             project root (default: .)"},
 	"near": {run: func(cmd string, rest []string) int {
 		runNear(rest)
 		return 0
@@ -587,15 +589,15 @@ var commandTable = map[string]commandEntry{
 	"walk": {run: func(cmd string, rest []string) int {
 		runNear(rest)
 		return 0
-	}, help: "dependency-tree walk", usage: "usage: kern near <symbol> [root] [--depth N] [--max N]\n  options:\n    --depth            traversal depth\n    --json             emit JSON output\n    --max              maximum count/threshold\n    --root             project root (default: .)"},
+	}, help: "dependency-tree walk", usage: "usage: kern walk <symbol> [root] [--depth N] [--max N]\n  options:\n    --depth            traversal depth\n    --json             emit JSON output\n    --max              maximum count/threshold\n    --root             project root (default: .)"},
 	"probe": {run: func(cmd string, rest []string) int {
 		runProbe(rest)
 		return 0
-	}, help: "task-driven context bundle", usage: "usage: kern probe \n  options:\n    --json             emit JSON output\n    --max              maximum count/threshold\n    --min-confidence   minimum confidence"},
+	}, help: "task-driven context bundle", usage: "usage: kern probe \"<task text>\" [root] [--max N]\n  options:\n    --json             emit JSON output\n    --max              maximum count/threshold\n    --min-confidence   minimum confidence"},
 	"retrieve": {run: func(cmd string, rest []string) int {
 		runRetrieve(rest)
 		return 0
-	}, help: "progressive disclosure retrieval (l1|l2|l3)", usage: "usage: kern retrieve --task-type <type> --symbol <name> [root] [--max-tokens N]\n  options:\n    --depth            traversal depth\n    --json             emit JSON output\n    --level            autonomy level (L0-L5)\n    --limit            cap results at N\n    --lines            context line count\n    --max              maximum count/threshold\n    --max-tokens       token cap\n    --query            search query\n    --root             project root (default: .)\n    --symbol           target symbol name\n    --task-type"},
+	}, help: "progressive disclosure retrieval (l1|l2|l3)", usage: retrieveUsage + "\n  options:\n    --depth            traversal depth\n    --json             emit JSON output\n    --level            autonomy level (L0-L5)\n    --limit            cap results at N\n    --lines            context line count\n    --max              maximum count/threshold\n    --max-tokens       token cap\n    --query            search query\n    --root             project root (default: .)\n    --symbol           target symbol name\n    --task-type"},
 	"resolve": {run: func(cmd string, rest []string) int {
 		runResolve(rest)
 		return 0
@@ -611,7 +613,7 @@ var commandTable = map[string]commandEntry{
 	"orchestrate": {run: func(cmd string, rest []string) int {
 		runOrchestrate(rest)
 		return 0
-	}, help: "silent context pipeline (classify -> plan -> evidence -> budget -> envelope)", usage: "usage: kern orchestrate \n  options:\n    --change\n    --max-tokens       token cap\n    --mode             mode selector\n    --root             project root (default: .)\n    --with-skill       attach a skill by name"},
+	}, help: "silent context pipeline (classify -> plan -> evidence -> budget -> envelope)", usage: "usage: kern orchestrate \"<intent>\" [--root ROOT] [--max-tokens N] [--mode fix|review|architecture|incident|explain] [--with-skill NAME]\n  options:\n    --change           intent (alias for positional <intent>)\n    --max-tokens       token cap\n    --mode             mode selector\n    --root             project root (default: .)\n    --with-skill       attach a skill by name"},
 	"eval": {run: func(cmd string, rest []string) int {
 		runEval(rest)
 		return 0
@@ -631,7 +633,7 @@ var commandTable = map[string]commandEntry{
 	"agent-message": {run: func(cmd string, rest []string) int {
 		runAgentMessage(rest)
 		return 0
-	}, help: "send a message to an agent's coordination inbox", usage: "usage: kern agent-message --to <agent> [--from <agent>] [--task <id>] \n  options:\n    --from             git range start (ref/sha)\n    --task\n    --to               git range end (ref/sha)"},
+	}, help: "send a message to an agent's coordination inbox", usage: "usage: kern agent-message --to <agent> [--from <agent>] [--task <id>]\n  options:\n    --from             sender agent id\n    --task             task id\n    --to               recipient agent id"},
 	"agent-interrupt": {run: func(cmd string, rest []string) int {
 		runAgentInterrupt(rest)
 		return 0
@@ -641,12 +643,10 @@ var commandTable = map[string]commandEntry{
 		return 0
 	}, help: "external MCP servers: add/list/rm/call", usage: "usage: kern mcp-client [flags]"},
 	"review-pack": {run: func(cmd string, rest []string) int {
-		runReviewPack(rest)
-		return 0
+		return runReviewPack(rest)
 	}, help: "immutable deterministic review pack (P2-001)", usage: "usage: kern review-pack [flags]"},
 	"review-consensus": {run: func(cmd string, rest []string) int {
-		runReviewConsensus(rest)
-		return 0
+		return runReviewConsensus(rest)
 	}, help: "normalize review packs into consensus/divergence (P2-002)", usage: "usage: kern review-consensus [flags]"},
 	"host": {run: func(cmd string, rest []string) int {
 		runHost(rest)
@@ -663,7 +663,7 @@ var commandTable = map[string]commandEntry{
 	"lock": {run: func(cmd string, rest []string) int {
 		runLock(rest)
 		return 0
-	}, help: "acquire workspace lock", usage: "usage: kern lock <scope> [root]\n  options:\n    --hold             hold the gate open\n    --root             project root (default: .)"},
+	}, help: "acquire workspace lock", usage: "usage: kern lock <scope> [root]\n  options:\n    --hold             non-blocking (without --hold, blocks until SIGINT/SIGTERM)\n    --root             project root (default: .)"},
 	"unlock": {run: func(cmd string, rest []string) int {
 		runUnlock(rest)
 		return 0
@@ -690,8 +690,7 @@ var commandTable = map[string]commandEntry{
 		return 0
 	}, help: "repo fingerprint", usage: "usage: kern fingerprint [flags]\n  options:\n    --file             file path\n    --json             emit JSON output\n    --root             project root (default: .)"},
 	"authorize-context": {run: func(cmd string, rest []string) int {
-		runAuthorizeContext(rest)
-		return 0
+		return runAuthorizeContext(rest)
 	}, help: "compute authorized context", usage: "usage: kern authorize-context [flags]"},
 	"do": {run: func(cmd string, rest []string) int {
 		// `kern do "<intent>"` — single-entry autonomous coding (F-12/F-36/F-50).
@@ -718,11 +717,11 @@ var commandTable = map[string]commandEntry{
 		out, err := runDo(root, f.level, intent)
 		if err != nil {
 			fmt.Print(out)
-			fatal("dispatchCommand: %v", err)
+			fatal("do: %v", err)
 		}
 		fmt.Print(out)
 		return 0
-	}, help: "autonomous task", usage: "usage: kern do [flags]"},
+	}, help: "autonomous task", usage: "usage: kern do \"<intent>\" [--level L0..L5]\n  intent can also be passed via stdin\n  options:\n    --level            autonomy level L0-L5 (default: L2)\n    --root             project root (default: .)"},
 	"health": {run: func(cmd string, rest []string) int {
 		runHealth(rest)
 		return 0
@@ -731,126 +730,126 @@ var commandTable = map[string]commandEntry{
 		runCompose(rest)
 		return 0
 	}, help: "multi-tool pipeline runner", usage: "usage: kern compose --pipeline '[{\"tool\": \"kern_search\", \"args\": {\"query\": \"Index.Search\"}}]'\n  options:\n    --pipeline JSON  deterministic multi-tool pipeline spec with variable interpolation"},
-	"pre_edit": {run: func(cmd string, rest []string) int {
-		runPreEdit(rest)
-		return 0
-	}, help: "", usage: "usage: kern pre_edit [flags]"},
 	"pre-edit": {run: func(cmd string, rest []string) int {
 		runPreEdit(rest)
 		return 0
-	}, help: "predictive blast-radius and edit risk", usage: "usage: kern pre-edit [flags]  (alias of pre_edit)"},
-	"prompt_fill": {run: func(cmd string, rest []string) int {
-		runPromptFill(rest)
+	}, help: preEditHelp, usage: "usage: kern pre-edit [flags]"},
+	"pre_edit": {run: func(cmd string, rest []string) int {
+		runPreEdit(rest)
 		return 0
-	}, help: "", usage: "usage: kern prompt-fill --template <name> [--task <desc>] [--file <path>]\n  options:\n    --file             file path\n    --task\n    --template"},
+	}, help: preEditHelp, usage: "usage: kern pre_edit [flags]  (alias of pre-edit)"},
 	"prompt-fill": {run: func(cmd string, rest []string) int {
 		runPromptFill(rest)
 		return 0
-	}, help: "dynamic prompt template compilation", usage: "usage: kern prompt-fill --template <name> [--task <desc>] [--file <path>]\n  options:\n    --file             file path\n    --task\n    --template"},
-	"semantic_diff": {run: func(cmd string, rest []string) int {
-		runSemanticDiff(rest)
+	}, help: promptFillHelp, usage: "usage: kern prompt-fill --template <name> [--task <desc>] [--file <path>]\n  options:\n    --file             file path\n    --task\n    --template"},
+	"prompt_fill": {run: func(cmd string, rest []string) int {
+		runPromptFill(rest)
 		return 0
-	}, help: "", usage: "usage: kern semantic_diff [flags]"},
+	}, help: promptFillHelp, usage: "usage: kern prompt_fill [flags]  (alias of prompt-fill)"},
 	"semantic-diff": {run: func(cmd string, rest []string) int {
 		runSemanticDiff(rest)
 		return 0
-	}, help: "AST functional symbol diff", usage: "usage: kern semantic-diff [flags]  (alias of semantic_diff)"},
-	"evidence_anchor": {run: func(cmd string, rest []string) int {
-		runEvidenceAnchor(rest)
+	}, help: semanticDiffHelp, usage: "usage: kern semantic-diff [flags]"},
+	"semantic_diff": {run: func(cmd string, rest []string) int {
+		runSemanticDiff(rest)
 		return 0
-	}, help: "", usage: "usage: kern evidence_anchor [flags]"},
+	}, help: semanticDiffHelp, usage: "usage: kern semantic_diff [flags]  (alias of semantic-diff)"},
 	"evidence-anchor": {run: func(cmd string, rest []string) int {
 		runEvidenceAnchor(rest)
 		return 0
-	}, help: "verify citations and cryptographic proof", usage: "usage: kern evidence-anchor [flags]  (alias of evidence_anchor)"},
-	"context_watch": {run: func(cmd string, rest []string) int {
-		runContextWatch(rest)
+	}, help: evidenceAnchorHelp, usage: "usage: kern evidence-anchor [flags]"},
+	"evidence_anchor": {run: func(cmd string, rest []string) int {
+		runEvidenceAnchor(rest)
 		return 0
-	}, help: "", usage: "usage: kern context-watch [--budget NUM] [--format text|json] <text>\n  options:\n    --budget           token budget\n    --format           output format: json|terminal"},
+	}, help: evidenceAnchorHelp, usage: "usage: kern evidence_anchor [flags]  (alias of evidence-anchor)"},
 	"context-watch": {run: func(cmd string, rest []string) int {
 		runContextWatch(rest)
 		return 0
-	}, help: "context token budget bloat audit", usage: "usage: kern context-watch [--budget NUM] [--format text|json] <text>\n  options:\n    --budget           token budget\n    --format           output format: json|terminal"},
-	"agent_fingerprint": {run: func(cmd string, rest []string) int {
-		runAgentFingerprint(rest)
+	}, help: contextWatchHelp, usage: "usage: kern context-watch [--budget NUM] [--format text|json] <text>\n  options:\n    --budget           token budget\n    --format           output format: json|terminal"},
+	"context_watch": {run: func(cmd string, rest []string) int {
+		runContextWatch(rest)
 		return 0
-	}, help: "", usage: "usage: kern agent_fingerprint [flags]"},
+	}, help: contextWatchHelp, usage: "usage: kern context_watch [flags]  (alias of context-watch)"},
 	"agent-fingerprint": {run: func(cmd string, rest []string) int {
 		runAgentFingerprint(rest)
 		return 0
-	}, help: "agent loop and drift detection", usage: "usage: kern agent-fingerprint [flags]  (alias of agent_fingerprint)"},
+	}, help: agentFingerprintHelp, usage: "usage: kern agent-fingerprint [flags]"},
+	"agent_fingerprint": {run: func(cmd string, rest []string) int {
+		runAgentFingerprint(rest)
+		return 0
+	}, help: agentFingerprintHelp, usage: "usage: kern agent_fingerprint [flags]  (alias of agent-fingerprint)"},
 	"explain": {run: func(cmd string, rest []string) int {
 		runExplain(rest)
 		return 0
 	}, help: "architectural narrative synthesis", usage: "usage: kern explain <target-symbol-or-file> [--root DIR]\n  options:\n    --root             project root (default: .)"},
-	"cross_repo_impact": {run: func(cmd string, rest []string) int {
-		runCrossRepoImpact(rest)
-		return 0
-	}, help: "", usage: "usage: kern cross-repo-impact <symbol> [--repo <path>]... [--root DIR]\n  options:\n    --repo             repository root (default: current directory)\n    --root             project root (default: .)"},
 	"cross-repo-impact": {run: func(cmd string, rest []string) int {
 		runCrossRepoImpact(rest)
 		return 0
-	}, help: "cross-repo blast radius", usage: "usage: kern cross-repo-impact <symbol> [--repo <path>]... [--root DIR]\n  options:\n    --repo             repository root (default: current directory)\n    --root             project root (default: .)"},
-	"memory_ranked": {run: func(cmd string, rest []string) int {
-		runMemoryRanked(rest)
+	}, help: crossRepoImpactHelp, usage: "usage: kern cross-repo-impact <symbol> [--repo <path>]... [--root DIR]\n  options:\n    --repo             repository root (default: current directory)\n    --root             project root (default: .)"},
+	"cross_repo_impact": {run: func(cmd string, rest []string) int {
+		runCrossRepoImpact(rest)
 		return 0
-	}, help: "", usage: "usage: kern memory-ranked <prompt> [-k 5] [--half-life 7.0] [--root DIR]\n  options:\n    --half-life\n    --root             project root (default: .)"},
+	}, help: crossRepoImpactHelp, usage: "usage: kern cross_repo_impact [flags]  (alias of cross-repo-impact)"},
 	"memory-ranked": {run: func(cmd string, rest []string) int {
 		runMemoryRanked(rest)
 		return 0
-	}, help: "decay-weighted memory retrieval", usage: "usage: kern memory-ranked <prompt> [-k 5] [--half-life 7.0] [--root DIR]\n  options:\n    --half-life\n    --root             project root (default: .)"},
-	"policy_dsl": {run: func(cmd string, rest []string) int {
-		runPolicyDSL(rest)
+	}, help: memoryRankedHelp, usage: "usage: kern memory-ranked <prompt> [-k 5] [--half-life 7.0] [--root DIR]\n  options:\n    --half-life\n    --root             project root (default: .)"},
+	"memory_ranked": {run: func(cmd string, rest []string) int {
+		runMemoryRanked(rest)
 		return 0
-	}, help: "", usage: "usage: kern policy_dsl [flags]"},
+	}, help: memoryRankedHelp, usage: "usage: kern memory_ranked [flags]  (alias of memory-ranked)"},
 	"policy-dsl": {run: func(cmd string, rest []string) int {
 		runPolicyDSL(rest)
 		return 0
-	}, help: "policy-as-code evaluation", usage: "usage: kern policy-dsl [flags]  (alias of policy_dsl)"},
-	"agent_coordination": {run: func(cmd string, rest []string) int {
-		runAgentCoordination(rest)
+	}, help: policyDSLHelp, usage: "usage: kern policy-dsl [flags]"},
+	"policy_dsl": {run: func(cmd string, rest []string) int {
+		runPolicyDSL(rest)
 		return 0
-	}, help: "", usage: "usage: kern agent_coordination [flags]"},
+	}, help: policyDSLHelp, usage: "usage: kern policy_dsl [flags]  (alias of policy-dsl)"},
 	"agent-coordination": {run: func(cmd string, rest []string) int {
 		runAgentCoordination(rest)
 		return 0
-	}, help: "multi-agent handoffs and claims", usage: "usage: kern agent-coordination [flags]  (alias of agent_coordination)"},
-	"agent_role_rbac": {run: func(cmd string, rest []string) int {
-		runAgentRoleRBAC(rest)
+	}, help: agentCoordinationHelp, usage: "usage: kern agent-coordination [flags]"},
+	"agent_coordination": {run: func(cmd string, rest []string) int {
+		runAgentCoordination(rest)
 		return 0
-	}, help: "", usage: "usage: kern agent_role_rbac [flags]"},
+	}, help: agentCoordinationHelp, usage: "usage: kern agent_coordination [flags]  (alias of agent-coordination)"},
 	"agent-role-rbac": {run: func(cmd string, rest []string) int {
 		runAgentRoleRBAC(rest)
 		return 0
-	}, help: "role-based tool access control", usage: "usage: kern agent-role-rbac [flags]  (alias of agent_role_rbac)"},
+	}, help: agentRoleRBACHelp, usage: "usage: kern agent-role-rbac [flags]"},
+	"agent_role_rbac": {run: func(cmd string, rest []string) int {
+		runAgentRoleRBAC(rest)
+		return 0
+	}, help: agentRoleRBACHelp, usage: "usage: kern agent_role_rbac [flags]  (alias of agent-role-rbac)"},
 	"stream": {run: func(cmd string, rest []string) int {
 		runStream(rest)
 		return 0
 	}, help: "chunking and stream progress", usage: "usage: kern stream [flags]"},
-	"ast_transform": {run: func(cmd string, rest []string) int {
-		runAstTransform(rest)
-		return 0
-	}, help: "", usage: "usage: kern ast_transform [flags]"},
 	"ast-transform": {run: func(cmd string, rest []string) int {
 		runAstTransform(rest)
 		return 0
-	}, help: "deterministic AST-level transformations and scaffolding", usage: "usage: kern ast-transform [flags]  (alias of ast_transform)"},
-	"semantic_merge": {run: func(cmd string, rest []string) int {
-		runSemanticMerge(rest)
+	}, help: astTransformHelp, usage: "usage: kern ast-transform <action> --file F [--apply] [--json]\n  actions: implement_interface (--iface I --target T) | add_field (--target T --field N --field-type T --tag X) | add_method (--target T)\n  options:\n    --apply            write changes to disk (default: dry-run)\n    --file             target source file\n    --root             project root (default: .)"},
+	"ast_transform": {run: func(cmd string, rest []string) int {
+		runAstTransform(rest)
 		return 0
-	}, help: "", usage: "usage: kern semantic_merge [flags]"},
+	}, help: astTransformHelp, usage: "usage: kern ast_transform [flags]  (alias of ast-transform)"},
 	"semantic-merge": {run: func(cmd string, rest []string) int {
 		runSemanticMerge(rest)
 		return 0
-	}, help: "AST-aware 3-way semantic merge and conflict detection", usage: "usage: kern semantic-merge [--file FILE] [--base CODE] [--local CODE] [--remote CODE] [--apply] [--json] [--root DIR]\n  options:\n    --base CODE    base version: code string, or a path to a file containing it\n    --local CODE   local version: code string or file path\n    --remote CODE  remote version: code string or file path\n    --file FILE    target file path (required with --apply)\n    --apply        write a clean 3-way merge into the target file\n    --json         emit the merge/conflict result as JSON\n    --root DIR     project root for AST context (default: .)"},
-	"synthesize_test": {run: func(cmd string, rest []string) int {
-		runSynthesizeTest(rest)
+	}, help: semanticMergeHelp, usage: "usage: kern semantic-merge [--file FILE] [--base CODE] [--local CODE] [--remote CODE] [--apply] [--json] [--root DIR]\n  options:\n    --base CODE    base version: code string, or a path to a file containing it\n    --local CODE   local version: code string or file path\n    --remote CODE  remote version: code string or file path\n    --file FILE    target file path (required with --apply)\n    --apply        write a clean 3-way merge into the target file\n    --json         emit the merge/conflict result as JSON\n    --root DIR     project root for AST context (default: .)"},
+	"semantic_merge": {run: func(cmd string, rest []string) int {
+		runSemanticMerge(rest)
 		return 0
-	}, help: "", usage: "usage: kern synthesize_test [flags]"},
+	}, help: semanticMergeHelp, usage: "usage: kern semantic_merge [flags]  (alias of semantic-merge)"},
 	"synthesize-test": {run: func(cmd string, rest []string) int {
 		runSynthesizeTest(rest)
 		return 0
-	}, help: "automatically synthesize table-driven unit tests from AST signatures", usage: "usage: kern synthesize-test [flags]  (alias of synthesize_test)"},
+	}, help: synthesizeTestHelp, usage: "usage: kern synthesize-test [flags]"},
+	"synthesize_test": {run: func(cmd string, rest []string) int {
+		runSynthesizeTest(rest)
+		return 0
+	}, help: synthesizeTestHelp, usage: "usage: kern synthesize_test [flags]  (alias of synthesize-test)"},
 	"cache": {run: func(cmd string, rest []string) int {
 		runCache(rest)
 		return 0
@@ -866,7 +865,11 @@ var commandTable = map[string]commandEntry{
 	"refactor-transaction": {run: func(cmd string, rest []string) int {
 		runRefactorTransaction(rest)
 		return 0
-	}, help: "multi-file transactional AST refactoring engine with sandbox compilation and rollback", usage: "usage: kern refactor-transaction [flags]\n  options:\n    --edits            JSON array of [{path, content}]\n    --cmd              custom compilation command\n    --apply            commit changes on success (dry-run without)\n    --root             project root (default: .)\n    --json             emit result as JSON"},
+	}, help: "multi-file transactional AST refactoring engine with sandbox compilation and rollback", usage: "usage: kern refactor-transaction [flags]\n  options:\n    --edits            JSON array of [{path, content}]\n    --cmd              custom compilation command (verification needs go.mod or --cmd; otherwise it is skipped with a warning)\n    --apply            commit changes on success (dry-run without)\n    --root             project root (default: .)\n    --json             emit result as JSON"},
+	"refactor": {run: func(cmd string, rest []string) int {
+		runRefactorTransaction(rest)
+		return 0
+	}, help: "multi-file transactional AST refactoring engine with sandbox compilation and rollback", usage: "usage: kern refactor [flags]  (alias of refactor-transaction)\n  options:\n    --edits            JSON array of [{path, content}]\n    --cmd              custom compilation command\n    --apply            commit changes on success (dry-run without)\n    --root             project root (default: .)\n    --json             emit result as JSON"},
 	"repair-diagnostics": {run: func(cmd string, rest []string) int {
 		runRepairDiagnostics(rest)
 		return 0
@@ -887,4 +890,70 @@ var commandTable = map[string]commandEntry{
 		runFragility(rest)
 		return 0
 	}, help: "correlate git defect/fix commit history with AST call graph to identify fragility hotspots", usage: "usage: kern fragility [target] [flags]\n  options:\n    --target           target file or symbol filter\n    --commits          commits history depth (default: 60)\n    --min-fixes        minimum bug fixes threshold\n    --limit            max hotspots to display\n    --root             project root (default: .)\n    --json             emit result as JSON"},
+}
+
+// runStatsEntry is the shared handler for the `stats` command and its
+// `diff` / `export` aliases. `kern stats performance` routes to the metrics
+// snapshot (F-41/F-46/F-47/F-56) instead of the token-savings stats; `--reset`
+// clears the process-wide recorder first; `--json` emits the structured
+// snapshot. All other spellings fall through to the token-savings stats.
+func runStatsEntry(cmd string, rest []string) int {
+	if cmd == "stats" && len(rest) > 0 && rest[0] == "performance" {
+		f, _, err := parseFlags(rest[1:])
+		if err != nil {
+			fatalUsage("flags: %v", err)
+		}
+		out, err := runStatsPerformance(f.reset, f.json)
+		if err != nil {
+			fatal("dispatchCommand: %v", err)
+		}
+		fmt.Println(out)
+		return 0
+	}
+	runStats(cmd, rest)
+	return 0
+}
+
+// blueprintSuite maps the `kern blueprint <sub>` subcommands to the same
+// bpcli runners the flat `kern check` / `kern diff-gate` / ... commands use,
+// so the umbrella adds no second implementation to drift.
+var blueprintSuite = map[string]func(args []string) int{
+	"check":            bpcli.RunCheck,
+	"diff-gate":        bpcli.RunDiffGate,
+	"fix":              bpcli.RunFix,
+	"metrics":          bpcli.RunMetrics,
+	"request-approval": bpcli.RunRequestApproval,
+	"reject":           func(args []string) int { return bpcli.RunApprovalDecision("reject", args) },
+	"verify-receipt":   bpcli.RunVerifyReceipt,
+	"ci":               bpcli.RunCI,
+	"install":          bpcli.RunInstall,
+}
+
+// printBlueprintSuite lists the change-governance suite on stdout.
+func printBlueprintSuite() {
+	fmt.Println("kern blueprint — change-governance suite")
+	fmt.Println("subcommands: check, diff-gate, fix, metrics, request-approval, reject, verify-receipt, ci, install")
+	fmt.Println("each subcommand also runs standalone: kern <subcommand> [args] (e.g. kern check, kern ci)")
+	fmt.Println("run 'kern blueprint <subcommand> --help' via 'kern <subcommand> --help' for per-command help")
+}
+
+// runBlueprint implements the `kern blueprint` umbrella: no args prints the
+// suite list (rc 0), `<sub> [args]` routes to the matching bpcli runner,
+// and an unknown subcommand prints the suite list and returns rc 2.
+func runBlueprint(rest []string) int {
+	if len(rest) == 0 {
+		printBlueprintSuite()
+		return 0
+	}
+	sub := rest[0]
+	if sub == "--help" || sub == "-h" {
+		printBlueprintSuite()
+		return 0
+	}
+	if run, ok := blueprintSuite[sub]; ok {
+		return run(rest[1:])
+	}
+	fmt.Fprintf(os.Stderr, "kern blueprint: unknown subcommand %q\n", sub)
+	printBlueprintSuite()
+	return 2
 }

@@ -48,12 +48,6 @@ func assertTransitionSequence(t *testing.T, reasons []string, want []string) {
 	}
 }
 
-// TestResolveApprovalForTaskAdvancesGatedTask verifies F-026: resolving a
-// pending approval through the app layer advances a task parked in
-// WAITING_FOR_APPROVAL to APPROVED, refreshes its UpdatedAt, persists it (a
-// fresh service / `kern task` process sees the new state), records the
-// gate-crossing transition AND the approval decision in the audit chain
-// (F-025), and the workflow engine still resumes the run to completion.
 func TestResolveApprovalForTaskAdvancesGatedTask(t *testing.T) {
 	root := workflowFixtureRoot(t)
 	p, err := New(root)
@@ -106,8 +100,6 @@ func TestResolveApprovalForTaskAdvancesGatedTask(t *testing.T) {
 		t.Fatalf("UpdatedAt not refreshed by the decision: before=%v after=%v", preUpdated, got.UpdatedAt)
 	}
 
-	// F-025: the gate-crossing transition and the approval decision must both
-	// be in the persisted audit chain.
 	entries, err := fresh.AuditEntriesForTask(task.ID)
 	if err != nil {
 		t.Fatalf("AuditEntriesForTask: %v", err)
@@ -145,9 +137,6 @@ func TestResolveApprovalForTaskAdvancesGatedTask(t *testing.T) {
 	}
 }
 
-// TestResolveApprovalForTaskRejectMarksTaskRejected verifies F-026 for the
-// reject path: rejecting advances WAITING_FOR_APPROVAL -> REJECTED and records
-// the reject decision in the audit chain.
 func TestResolveApprovalForTaskRejectMarksTaskRejected(t *testing.T) {
 	root := workflowFixtureRoot(t)
 	p, err := New(root)
@@ -196,10 +185,6 @@ func TestResolveApprovalForTaskRejectMarksTaskRejected(t *testing.T) {
 	}
 }
 
-// TestWorkflowLifecycleTransitionsAudited verifies F-025: the gated-task
-// lifecycle transitions the workflow engine drives internally (parking at the
-// approval gate, then the post-approval run) are recorded in the audit chain,
-// so `kern audit <task-id>` reconstructs the governance flow end-to-end.
 func TestWorkflowLifecycleTransitionsAudited(t *testing.T) {
 	root := workflowFixtureRoot(t)
 	p, err := New(root)

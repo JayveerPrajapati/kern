@@ -128,18 +128,24 @@ func TestRiskEngineDefaultWithoutFirewall(t *testing.T) {
 	}
 }
 
-// TestAssessRiskBlastRadiusCapsSourceRisk verifies risk is proportional to the
-// blast radius: a single-root source change must never be CRITICAL (capped at
-// MEDIUM for an isolated change), while a large change may keep CRITICAL.
+// TestAssessRiskBlastRadiusCapsSource verifies risk is proportional to the
+// TRANSITIVE blast radius (the shared D3 classifier's input), not the root
+// count or the raw firewall policy level: a 1-symbol change is MEDIUM at most
+// even under a pathological CRITICAL source:write policy, while a wide change
+// (many transitive dependents) is HIGH. The firewall's policy no longer sets
+// the tier for ordinary source changes — the impact-based classifier does.
 func TestAssessRiskBlastRadiusCapsSource(t *testing.T) {
 	// Simulate a firewall whose default source:write policy is CRITICAL (the
-	// pathological default that motivated B8) so we can observe the cap.
+	// pathological default that motivated B8) so the classifier's override is
+	// observable: the tier comes from the transitive impact, not the policy.
 	e := riskEngine(t, []governance.Permission{{Resource: "source", Action: "write"}})
 	e.firewall = e.firewall.WithPolicies([]domain.Policy{
 		{ID: "p", Name: "source_write", Description: "source", Rule: "CRITICAL source.write", Scope: "source", Enabled: true},
 	})
 
-	// 1-root change: must be capped to MEDIUM, never CRITICAL.
+	// 1-root change with no dependents: the affected set is the root itself
+	// (affected=1, matching what-if's rename/signature simulation) -> MEDIUM,
+	// never CRITICAL, and the factor reports the true (tiny) blast radius.
 	pkt1, err := e.AnalyzeChange("Helper")
 	if err != nil {
 		t.Fatalf("AnalyzeChange(Helper): %v", err)
@@ -148,26 +154,40 @@ func TestAssessRiskBlastRadiusCapsSource(t *testing.T) {
 		t.Fatalf("expected 1 risk, got %d", len(pkt1.Risks))
 	}
 	r1 := pkt1.Risks[0]
-	if r1.Level == domain.RiskCritical || r1.Level == domain.RiskHigh {
-		t.Errorf("1-root source change should be capped at MEDIUM, got %q", r1.Level)
-	}
 	if r1.Level != domain.RiskMedium {
-		t.Errorf("1-root source change level = %q, want MEDIUM", r1.Level)
+		t.Errorf("1-root source change level = %q, want MEDIUM (affected=1)", r1.Level)
+	}
+	if !hasFactor(r1.Factors, "blast-radius:moderate") {
+		t.Errorf("1-root source change should carry blast-radius:moderate, got %v", r1.Factors)
 	}
 
-	// Large change (many roots) keeps CRITICAL from the firewall.
-	roots := make([]domain.Symbol, 0, 10)
-	for i := 0; i < 10; i++ {
-		roots = append(roots, domain.Symbol{Name: fmt.Sprintf("Sym%d", i), File: "main.go", Kind: "func"})
+	// Wide change (11 roots) crosses the HIGH threshold regardless of the
+	// firewall's CRITICAL policy: the impact model replaces the policy tier.
+	roots := make([]domain.Symbol, 0, 11)
+	for i := 0; i < 11; i++ {
+		roots = append(roots, domain.Symbol{Name: fmt.Sprintf("Sym%d", i), Qualified: fmt.Sprintf("Sym%d", i), File: "main.go", Kind: "func"})
 	}
 	pktBig := e.assemble("large change", "main.go", roots)
 	if len(pktBig.Risks) != 1 {
 		t.Fatalf("expected 1 risk for large change, got %d", len(pktBig.Risks))
 	}
 	rb := pktBig.Risks[0]
-	if rb.Level != domain.RiskCritical {
-		t.Errorf("10-root source change should keep CRITICAL, got %q", rb.Level)
+	if rb.Level != domain.RiskHigh {
+		t.Errorf("11-root source change level = %q, want HIGH (affected-count model)", rb.Level)
 	}
+	if !hasFactor(rb.Factors, "blast-radius:large") {
+		t.Errorf("11-root source change should carry blast-radius:large, got %v", rb.Factors)
+	}
+}
+
+// hasFactor reports whether the risk factor list contains the given factor.
+func hasFactor(factors []string, want string) bool {
+	for _, f := range factors {
+		if f == want {
+			return true
+		}
+	}
+	return false
 }
 
 // TestAssessRiskSecurityNotDowngraded verifies a security-sensitive change

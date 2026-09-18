@@ -89,6 +89,10 @@ func DiffLines(a, b []string) []Op {
 // 3 lines of context per hunk. Returns "" when there is no difference.
 func Unified(aPath, bPath string, a, b []string) string {
 	ops := DiffLines(a, b)
+	aLines, bLines := countLines(a), countLines(b)
+	// Drop the trailing split artifact ("a\nb\n" -> ["a","b",""]) so hunks
+	// never count or emit padding past the real end of file.
+	ops = trimPastEOF(ops, aLines, bLines)
 	hasChange := false
 	for _, op := range ops {
 		if op.Kind != ' ' {
@@ -105,8 +109,9 @@ func Unified(aPath, bPath string, a, b []string) string {
 	const ctx = 3
 	hunks := groupHunks(ops, ctx)
 	for _, h := range hunks {
-		aStart, aCount, bStart, bCount := hunkRange(h)
+		aStart, aCount, bStart, bCount := hunkRange(h, aLines, bLines)
 		fmt.Fprintf(&bd, "@@ -%d,%d +%d,%d @@\n", aStart, aCount, bStart, bCount)
+		normalizeHunkOrder(h)
 		for _, op := range h {
 			bd.WriteByte(op.Kind)
 			if op.Kind == ' ' {
@@ -117,6 +122,62 @@ func Unified(aPath, bPath string, a, b []string) string {
 		}
 	}
 	return bd.String()
+}
+
+// countLines reports the number of real lines a split representation has,
+// ignoring the single trailing empty element that strings.Split produces for
+// a trailing newline ("a\nb\n" -> ["a","b",""] has 2 real lines). An empty
+// input ([""]) reports 0 lines.
+func countLines(s []string) int {
+	if n := len(s); n > 0 && s[n-1] == "" {
+		return n - 1
+	}
+	return len(s)
+}
+
+// trimPastEOF drops ops that reference a line beyond the real end of either
+// file (the trailing split artifact after a final newline), so hunk counts
+// and content never pad past EOF.
+func trimPastEOF(ops []Op, aLines, bLines int) []Op {
+	filtered := make([]Op, 0, len(ops))
+	for _, op := range ops {
+		if op.A > aLines || op.B > bLines {
+			continue
+		}
+		filtered = append(filtered, op)
+	}
+	return filtered
+}
+
+// normalizeHunkOrder reorders each contiguous change region of a hunk so all
+// '-' (deletion) ops precede '+' (insertion) ops. The LCS backtrack can emit
+// a replacement region as '+' then '-'; strict patch consumers expect
+// deletions before insertions within a region.
+func normalizeHunkOrder(h []Op) {
+	i := 0
+	for i < len(h) {
+		if h[i].Kind == ' ' {
+			i++
+			continue
+		}
+		j := i
+		for j < len(h) && h[j].Kind != ' ' {
+			j++
+		}
+		region := make([]Op, 0, j-i)
+		for k := i; k < j; k++ {
+			if h[k].Kind == '-' {
+				region = append(region, h[k])
+			}
+		}
+		for k := i; k < j; k++ {
+			if h[k].Kind == '+' {
+				region = append(region, h[k])
+			}
+		}
+		copy(h[i:j], region)
+		i = j
+	}
 }
 
 // labelPath normalizes a path for a unified-diff header so absolute paths do
@@ -179,8 +240,9 @@ func hunkSpan(ops []Op, first, last, ctx int) []Op {
 
 // hunkRange computes (aStart,aCount,bStart,bCount) for a hunk. Start lines are
 // the first touched line on each side; a side with no lines is reported as
-// start=0 (git's "from/to empty" convention).
-func hunkRange(h []Op) (aStart, aCount, bStart, bCount int) {
+// start=0 (git's "from/to empty" convention). Counts are clamped to the real
+// file line counts so a hunk never claims more lines than the file has.
+func hunkRange(h []Op, aLines, bLines int) (aStart, aCount, bStart, bCount int) {
 	for _, op := range h {
 		if op.A > 0 {
 			aCount++
@@ -200,6 +262,12 @@ func hunkRange(h []Op) (aStart, aCount, bStart, bCount int) {
 			bStart = op.B
 			break
 		}
+	}
+	if aCount > aLines {
+		aCount = aLines
+	}
+	if bCount > bLines {
+		bCount = bLines
 	}
 	if aCount == 0 {
 		aStart = 0
@@ -265,4 +333,85 @@ func Compact(aPath, bPath string, a, b []string, resolve SpanResolver) string {
 	}
 	flush()
 	return bd.String()
+}
+
+// SymbolDiffEntry isolates the structural diff for a single enclosing symbol or file section.
+type SymbolDiffEntry struct {
+	Symbol string `json:"symbol"`  // enclosing symbol name or "(file)"
+	File   string `json:"file"`    // file path
+	StartA int    `json:"start_a"` // first line modified in A
+	EndA   int    `json:"end_a"`   // last line modified in A
+	StartB int    `json:"start_b"` // first line modified in B
+	EndB   int    `json:"end_b"`   // last line modified in B
+	Hunks  string `json:"hunks"`   // symbol-scoped unified diff snippet
+}
+
+// TreeDiff extracts symbol-scoped diff entries across files for surgical agent edits.
+func TreeDiff(aPath, bPath string, a, b []string, resolve SpanResolver) []SymbolDiffEntry {
+	ops := DiffLines(a, b)
+	if len(ops) == 0 {
+		return nil
+	}
+	if resolve == nil {
+		resolve = func(string, int) string { return "" }
+	}
+	var entries []SymbolDiffEntry
+	bySymbol := make(map[string][]Op)
+	var order []string
+
+	for _, op := range ops {
+		if op.Kind == ' ' {
+			continue
+		}
+		sym := resolve(aPath, op.A)
+		if sym == "" {
+			sym = resolve(bPath, op.B)
+		}
+		if sym == "" {
+			sym = "(file)"
+		}
+		if _, seen := bySymbol[sym]; !seen {
+			order = append(order, sym)
+		}
+		bySymbol[sym] = append(bySymbol[sym], op)
+	}
+
+	for _, sym := range order {
+		sOps := bySymbol[sym]
+		if len(sOps) == 0 {
+			continue
+		}
+		var minA, maxA, minB, maxB int
+		var bld strings.Builder
+		bld.WriteString(fmt.Sprintf("@@ %s @@\n", sym))
+		for _, op := range sOps {
+			if op.A > 0 {
+				if minA == 0 || op.A < minA {
+					minA = op.A
+				}
+				if op.A > maxA {
+					maxA = op.A
+				}
+			}
+			if op.B > 0 {
+				if minB == 0 || op.B < minB {
+					minB = op.B
+				}
+				if op.B > maxB {
+					maxB = op.B
+				}
+			}
+			bld.WriteString(fmt.Sprintf("%c%s\n", op.Kind, op.Text))
+		}
+		entries = append(entries, SymbolDiffEntry{
+			Symbol: sym,
+			File:   aPath,
+			StartA: minA,
+			EndA:   maxA,
+			StartB: minB,
+			EndB:   maxB,
+			Hunks:  bld.String(),
+		})
+	}
+	return entries
 }

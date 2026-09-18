@@ -2,6 +2,9 @@ package diff
 
 import (
 	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -248,5 +251,217 @@ func TestCompactTrailingAndLeadingRuns(t *testing.T) {
 	got2 := Compact("a.txt", "b.txt", a2, b2, nil)
 	if !strings.Contains(got2, " ... 99 lines unchanged") {
 		t.Fatalf("expected collapsed leading run, got:\n%s", got2)
+	}
+}
+
+// TestHunkCountsNeverExceedFileLength verifies that hunk header counts are
+// clamped to the real file line counts: the trailing "" element produced by
+// strings.Split of a newline-terminated file must never be counted (or
+// emitted) as a line past EOF.
+func TestHunkCountsNeverExceedFileLength(t *testing.T) {
+	raw := func(s string) []string { return strings.Split(s, "\n") }
+	cases := []struct {
+		name string
+		a, b string
+	}{
+		{"both trailing newline", "line1\nline2\nline3\n", "line1\nCHANGED\nline3\n"},
+		{"neither trailing newline", "line1\nline2\nline3", "line1\nCHANGED\nline3"},
+		{"a trailing newline only", "line1\nline2\nline3\n", "line1\nCHANGED\nline3"},
+		{"b trailing newline only", "line1\nline2\nline3", "line1\nCHANGED\nline3\n"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			a, b := raw(tc.a), raw(tc.b)
+			aLines, bLines := countLines(a), countLines(b)
+			got := Unified("a.txt", "b.txt", a, b)
+			if got == "" {
+				t.Fatalf("expected a non-empty diff for %q -> %q", tc.a, tc.b)
+			}
+			for _, line := range strings.Split(got, "\n") {
+				if !strings.HasPrefix(line, "@@") {
+					continue
+				}
+				var aStart, aCount, bStart, bCount int
+				if _, err := fmt.Sscanf(line, "@@ -%d,%d +%d,%d @@", &aStart, &aCount, &bStart, &bCount); err != nil {
+					t.Fatalf("cannot parse hunk header %q: %v", line, err)
+				}
+				if aCount > aLines || (aCount > 0 && aStart+aCount-1 > aLines) {
+					t.Fatalf("a-side hunk %q exceeds real file length %d", line, aLines)
+				}
+				if bCount > bLines || (bCount > 0 && bStart+bCount-1 > bLines) {
+					t.Fatalf("b-side hunk %q exceeds real file length %d", line, bLines)
+				}
+			}
+		})
+	}
+}
+
+// TestHunkOrderDeletionsBeforeInsertions verifies that within each hunk body
+// every deletion '-' line precedes every insertion '+' line.
+func TestHunkOrderDeletionsBeforeInsertions(t *testing.T) {
+	a := strings.Split("line1\nline2\nline3\n", "\n")
+	b := strings.Split("line1\nCHANGED\nline3\n", "\n")
+	got := Unified("a.txt", "b.txt", a, b)
+	inHunk := false
+	check := func(plus, minus []int) {
+		if len(plus) > 0 && len(minus) > 0 && minus[len(minus)-1] >= plus[0] {
+			t.Fatalf("'+' line at body index %d precedes '-' at %d:\n%s", plus[0], minus[len(minus)-1], got)
+		}
+	}
+	var plus, minus []int
+	idx := 0
+	for _, line := range strings.Split(got, "\n") {
+		if strings.HasPrefix(line, "@@") {
+			if inHunk {
+				check(plus, minus)
+			}
+			inHunk = true
+			plus, minus = nil, nil
+			idx = 0
+			continue
+		}
+		if !inHunk || line == "" {
+			continue
+		}
+		switch line[0] {
+		case '+':
+			plus = append(plus, idx)
+		case '-':
+			minus = append(minus, idx)
+		}
+		idx++
+	}
+	if inHunk {
+		check(plus, minus)
+	}
+}
+
+// TestPatchAppliesCleanly verifies the generated patch for a small
+// before/after applies with patch(1) when available; otherwise it applies the
+// hunks manually as a structural check. Both paths assert the result matches
+// the target file.
+func TestPatchAppliesCleanly(t *testing.T) {
+	before := "line1\nline2\nline3\n"
+	after := "line1\nCHANGED\nline3\n"
+	a := strings.Split(before, "\n")
+	b := strings.Split(after, "\n")
+	patch := Unified("a.txt", "b.txt", a, b)
+	if patch == "" {
+		t.Fatal("expected a non-empty patch")
+	}
+	if _, err := exec.LookPath("patch"); err != nil {
+		// Structural fallback: parse the patch and apply hunks manually.
+		got := applyPatchManually(t, patch, a)
+		if strings.Join(got, "\n") != strings.TrimSuffix(after, "\n") {
+			t.Fatalf("manually applied patch mismatch:\ngot:\n%q\nwant:\n%q\npatch:\n%s", strings.Join(got, "\n"), after, patch)
+		}
+		return
+	}
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "a"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "a", "a.txt"), []byte(before), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("patch", "-p0")
+	cmd.Dir = dir
+	cmd.Stdin = strings.NewReader(patch)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("patch -p0 failed: %v\n%s\npatch:\n%s", err, out, patch)
+	}
+	got, err := os.ReadFile(filepath.Join(dir, "a", "a.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != after {
+		t.Fatalf("patched file mismatch:\ngot:\n%q\nwant:\n%q\npatch:\n%s", string(got), after, patch)
+	}
+}
+
+// applyPatchManually applies a patch produced by Unified to a and returns the
+// resulting lines. Used only as a structural fallback when patch(1) is not on
+// PATH.
+func applyPatchManually(t *testing.T, patch string, a []string) []string {
+	t.Helper()
+	cur := append([]string(nil), a...)
+	offset := 0 // cumulative line-count delta from earlier hunks
+	lines := strings.Split(patch, "\n")
+	for i := 0; i < len(lines); i++ {
+		line := lines[i]
+		if !strings.HasPrefix(line, "@@") {
+			continue
+		}
+		var aStart, aCount, bStart, bCount int
+		if _, err := fmt.Sscanf(line, "@@ -%d,%d +%d,%d @@", &aStart, &aCount, &bStart, &bCount); err != nil {
+			t.Fatalf("parse hunk header %q: %v", line, err)
+		}
+		i++
+		var replacement []string
+		for i < len(lines) && !strings.HasPrefix(lines[i], "@@") && lines[i] != "" {
+			body := lines[i]
+			switch body[0] {
+			case ' ':
+				replacement = append(replacement, body[1:])
+			case '-':
+				// deleted line: falls out of the a-side slice below
+			case '+':
+				replacement = append(replacement, body[1:])
+			default:
+				t.Fatalf("unexpected hunk body line %q", body)
+			}
+			i++
+		}
+		i--
+		startIdx := aStart - 1 + offset
+		if startIdx < 0 || startIdx+aCount > len(cur) {
+			t.Fatalf("hunk -%d,%d out of range (len %d):\n%s", aStart, aCount, len(cur), patch)
+		}
+		cur = append(cur[:startIdx], append(replacement, cur[startIdx+aCount:]...)...)
+		offset += len(replacement) - aCount
+	}
+	return cur
+}
+
+func TestTreeDiff(t *testing.T) {
+	a := []string{
+		"package main",
+		"func Alpha() {",
+		"    oldAlpha()",
+		"}",
+		"func Beta() {",
+		"    oldBeta()",
+		"}",
+	}
+	b := []string{
+		"package main",
+		"func Alpha() {",
+		"    newAlpha()",
+		"}",
+		"func Beta() {",
+		"    newBeta()",
+		"}",
+	}
+
+	resolve := func(file string, line int) string {
+		if line >= 2 && line <= 4 {
+			return "Alpha"
+		}
+		if line >= 5 && line <= 7 {
+			return "Beta"
+		}
+		return ""
+	}
+
+	entries := TreeDiff("main.go", "main.go", a, b, resolve)
+	if len(entries) != 2 {
+		t.Fatalf("expected 2 symbol diff entries, got %d", len(entries))
+	}
+	if entries[0].Symbol != "Alpha" || entries[1].Symbol != "Beta" {
+		t.Fatalf("unexpected symbol order: %v, %v", entries[0].Symbol, entries[1].Symbol)
+	}
+	if !strings.Contains(entries[0].Hunks, "-    oldAlpha()") || !strings.Contains(entries[0].Hunks, "+    newAlpha()") {
+		t.Fatalf("unexpected Alpha hunks: %s", entries[0].Hunks)
 	}
 }

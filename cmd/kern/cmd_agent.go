@@ -36,7 +36,7 @@ func runTeam(rest []string) {
 // message and interrupt are MCP-tool surfaces (kern_agent_message /
 // kern_agent_interrupt); the CLI mirrors exist as `kern agent-message` and
 // `kern agent-interrupt`. Invoking `kern agent message ...` gets a graceful,
-// specific hint instead of the raw unknown-command usage dump (F-029).
+// specific hint instead of the raw unknown-command usage dump.
 func runAgent(rest []string) {
 	if len(rest) == 0 {
 		fatalUsage("usage: kern agent <message|interrupt> [args] — agent control is an MCP-tool surface; use the kern_agent_message / kern_agent_interrupt MCP tools, or the CLI mirrors 'kern agent-message' / 'kern agent-interrupt'")
@@ -62,6 +62,10 @@ func runWorkflow(rest []string) {
 	if f.task != "" {
 		text, err := runWorkflowResumeCLI(root, f.task)
 		if err != nil {
+			// Render the task state first (it explains why the transition
+			// was invalid), then fail loudly — an invalid transition is a
+			// failure, not a normal state (exit 1, not 0).
+			fmt.Print(text)
 			fatal("workflow resume: %v", err)
 		}
 		fmt.Print(text)
@@ -73,6 +77,7 @@ func runWorkflow(rest []string) {
 	}
 	text, err := runWorkflowCLI(root, intent)
 	if err != nil {
+		fmt.Print(text)
 		fatal("workflow: %v", err)
 	}
 	fmt.Print(text)
@@ -113,8 +118,17 @@ func runIncident(rest []string) {
 		fatalUsage("usage: kern incident <alert-json> [snapshot-json] [--root ROOT]")
 	}
 	var al domain.Alert
-	if err := json.Unmarshal([]byte(args[0]), &al); err != nil {
-		fatal("invalid alert JSON: %v", err)
+	alertText := args[0]
+	// Accept a file path to the alert JSON as well as inline JSON — the
+	// previous behavior parsed the literal argument and produced a cryptic
+	// "invalid character '/'" for paths.
+	if _, serr := os.Stat(alertText); serr == nil {
+		if b, rerr := os.ReadFile(alertText); rerr == nil {
+			alertText = string(b)
+		}
+	}
+	if err := json.Unmarshal([]byte(alertText), &al); err != nil {
+		fatal("invalid alert JSON (pass JSON inline or a file path): %v", err)
 	}
 	// Route through TaskService.InvestigateIncident for the full lifecycle.
 	p, err := app.New(root)

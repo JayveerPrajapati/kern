@@ -16,7 +16,7 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/tokenize"
 )
 
-// GraphBundle is the graph-mode pack result. It embeds the P1-5 GraphSnapshot
+// GraphBundle is the graph-mode pack result. It embeds the GraphSnapshot
 // (schema version, mode, root, identity, graph, per-file fingerprint) so the
 // bundle IS the snapshot format, and adds the flat sorted node list plus the
 // one-line signatures rendered for handoff/review. Nothing is duplicated: the

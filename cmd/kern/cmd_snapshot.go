@@ -14,7 +14,7 @@ import (
 // [--limit N] [--verify FILE]`: load-or-build the index, render a canonical
 // versioned graph snapshot (whole-repo, or the neighbourhood of --symbol),
 // print a one-line summary, then emit the snapshot JSON to stdout or --out.
-// `--verify FILE` (F-008) loads a previously written snapshot and checks it
+// `--verify FILE` loads a previously written snapshot and checks it
 // against the current repo, mirroring the MCP kern_snapshot action=verify
 // handler instead of silently treating the snapshot file as a repo root.
 func runSnapshot(rest []string) int {
@@ -44,7 +44,7 @@ func runSnapshot(rest []string) int {
 	if len(args) > 0 {
 		root = args[0]
 	}
-	// F-008 guard: a positional path that names a file (not a directory) is
+	// Guard: a positional path that names a file (not a directory) is
 	// almost certainly a snapshot JSON meant for --verify. Refuse it with a
 	// clear error instead of building an empty fresh snapshot over it.
 	if fi, statErr := os.Stat(root); statErr == nil && !fi.IsDir() {

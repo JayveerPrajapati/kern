@@ -1,6 +1,7 @@
 package terse
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -126,7 +127,6 @@ func TestStripPromptFluffPreservesFence(t *testing.T) {
 }
 
 func TestCompressPreservesTrailingWhitespaceFreeText(t *testing.T) {
-	// W2-45: trailing whitespace must be dropped, never re-prefixed.
 	in := "hello world   \n  indented line  \n"
 	out, _ := Compress(in)
 	if out != "hello world\n  indented line" {
@@ -176,4 +176,84 @@ func TestCompressConversationalFiller(t *testing.T) {
 	if droppedSingle != 1 || strings.TrimSpace(outSingle) != "" {
 		t.Errorf("Compress single pure filler = %q (dropped %d), want empty (dropped 1)", outSingle, droppedSingle)
 	}
+}
+
+func TestTersifyStripsBlankAndCommentLines(t *testing.T) {
+	in := "// header comment\n\n\nfunc main() {\n\n    // inner comment\n    fmt.Println(\"hi\")\n}\n\n// trailing\n"
+	out, st := Tersify(in, 0)
+	if st.DroppedComment < 3 {
+		t.Fatalf("expected >=3 comment lines dropped, got %d", st.DroppedComment)
+	}
+	if st.DroppedBlank < 3 {
+		t.Fatalf("expected >=3 blank lines dropped, got %d", st.DroppedBlank)
+	}
+	if !contains(out, "func main() {") || !contains(out, `fmt.Println("hi")`) {
+		t.Fatalf("code lines must survive: %q", out)
+	}
+	if contains(out, "header comment") || contains(out, "inner comment") {
+		t.Fatalf("comment lines survived: %q", out)
+	}
+	if st.AfterTokens >= st.BeforeTokens {
+		t.Fatalf("expected token savings on a comment-heavy file, %d -> %d", st.BeforeTokens, st.AfterTokens)
+	}
+}
+
+func TestTersifyMarkdownHeadingsSurvive(t *testing.T) {
+	in := "# Section One\n\n# todo: fix this later\n\n## Getting Started\n"
+	out, st := Tersify(in, 0)
+	if !contains(out, "# Section One") || !contains(out, "## Getting Started") {
+		t.Fatalf("markdown headings must survive: %q", out)
+	}
+	if st.DroppedComment < 1 {
+		t.Fatalf("expected the todo comment dropped, got %d", st.DroppedComment)
+	}
+}
+
+func TestTersifyMaxBudgetKeepsHead(t *testing.T) {
+	var b strings.Builder
+	for i := 0; i < 50; i++ {
+		b.WriteString("line of technical content number ")
+		b.WriteString(itoaT(i))
+		b.WriteString(" with some words\n")
+	}
+	in := b.String()
+	out, st := Tersify(in, 40)
+	if st.DroppedBudget <= 0 {
+		t.Fatalf("expected budget drops, got %d", st.DroppedBudget)
+	}
+	if st.AfterTokens > 60 {
+		t.Fatalf("output exceeds budget: %d tokens", st.AfterTokens)
+	}
+	if !strings.HasPrefix(out, "line of technical content number 0") {
+		t.Fatalf("head not kept: %q", out)
+	}
+	if st.BeforeTokens <= st.AfterTokens {
+		t.Fatalf("expected savings, %d -> %d", st.BeforeTokens, st.AfterTokens)
+	}
+}
+
+func TestTersifyPreservesFences(t *testing.T) {
+	in := "Sure!\n\n```go\n// comment inside fence\n\n   func x() {}\n```\n\nThanks!"
+	out, st := Tersify(in, 0)
+	if !contains(out, "```go") || !contains(out, "// comment inside fence") || !contains(out, "func x() {}") {
+		t.Fatalf("fence content lost: %q", out)
+	}
+	if contains(out, "Sure") || contains(out, "Thanks") {
+		t.Fatalf("filler survived: %q", out)
+	}
+	if st.DroppedFiller < 2 {
+		t.Fatalf("expected 2 filler drops, got %d", st.DroppedFiller)
+	}
+}
+
+func TestTersifyCollapsesRepeatedWhitespace(t *testing.T) {
+	in := "  the   answer   is 42  "
+	out, _ := Tersify(in, 0)
+	if !contains(out, "the answer is 42") {
+		t.Fatalf("whitespace not collapsed: %q", out)
+	}
+}
+
+func itoaT(n int) string {
+	return strings.TrimSpace(strings.ReplaceAll(strings.Repeat(" ", 0), " ", "")) + fmt.Sprintf("%d", n)
 }

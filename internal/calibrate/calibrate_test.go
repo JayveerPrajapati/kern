@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/JayveerPrajapati/kern/internal/version"
 )
 
 // tinyGitRepo builds a temp git checkout with two commits so the harness has
@@ -85,5 +87,98 @@ func TestRunErrorsOnNonGitDir(t *testing.T) {
 	var buf bytes.Buffer
 	if err := Run(dir, 2, []float64{2.0}, &buf); err == nil {
 		t.Fatal("Run on a non-git dir: expected error, got nil")
+	}
+}
+
+// TestCacheWarmRerun: a second Run over the same (root, commit-range,
+// thresholds) tuple must replay the stored report with the "cached" marker
+// line, byte-identical to the fresh report.
+func TestCacheWarmRerun(t *testing.T) {
+	dir := tinyGitRepo(t)
+
+	var first bytes.Buffer
+	if err := Run(dir, 2, []float64{2.0, 4.0}, &first); err != nil {
+		t.Fatalf("first Run: %v", err)
+	}
+	if strings.Contains(first.String(), "cached") {
+		t.Fatalf("first run must not be served from cache:\n%s", first.String())
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".kern", "calibrate-cache.json")); err != nil {
+		t.Fatalf("cache file not written: %v", err)
+	}
+
+	var second bytes.Buffer
+	if err := Run(dir, 2, []float64{2.0, 4.0}, &second); err != nil {
+		t.Fatalf("second Run: %v", err)
+	}
+	secondOut := second.String()
+	if !strings.HasPrefix(secondOut, "# cached calibrate result") {
+		t.Fatalf("warm rerun missing cached marker:\n%s", secondOut)
+	}
+	report := strings.TrimPrefix(secondOut, secondOut[:strings.IndexByte(secondOut, '\n')+1])
+	if report != first.String() {
+		t.Fatalf("cached report differs from fresh report:\n--- fresh ---\n%s\n--- cached ---\n%s", first.String(), report)
+	}
+}
+
+// TestCacheMissOnChangedInputs: a different threshold sweep (or window) is a
+// different key and must recompute, not replay the previous entry.
+func TestCacheMissOnChangedInputs(t *testing.T) {
+	dir := tinyGitRepo(t)
+
+	var a bytes.Buffer
+	if err := Run(dir, 2, []float64{2.0, 4.0}, &a); err != nil {
+		t.Fatalf("Run thresholds 2,4: %v", err)
+	}
+
+	var b bytes.Buffer
+	if err := Run(dir, 2, []float64{6.0, 8.0}, &b); err != nil {
+		t.Fatalf("Run thresholds 6,8: %v", err)
+	}
+	if strings.Contains(b.String(), "cached") {
+		t.Fatalf("different thresholds must miss the cache:\n%s", b.String())
+	}
+
+	// Original tuple still served from cache afterwards.
+	var c bytes.Buffer
+	if err := Run(dir, 2, []float64{2.0, 4.0}, &c); err != nil {
+		t.Fatalf("Run thresholds 2,4 again: %v", err)
+	}
+	if !strings.HasPrefix(c.String(), "# cached calibrate result") {
+		t.Fatalf("original tuple should hit cache after eviction-less reuse:\n%s", c.String())
+	}
+}
+
+// TestCacheMissOnVersionChange: the cache key includes the engine version
+// (internal/version.Version), so a different version — as a release bump
+// would stamp — must miss the cache even with an identical (root, range,
+// thresholds) tuple.
+func TestCacheMissOnVersionChange(t *testing.T) {
+	dir := tinyGitRepo(t)
+	orig := version.Version
+	defer func() { version.Version = orig }()
+
+	var a bytes.Buffer
+	if err := Run(dir, 2, []float64{2.0}, &a); err != nil {
+		t.Fatalf("Run v1: %v", err)
+	}
+
+	version.Version = "9.9.9-test"
+	var b bytes.Buffer
+	if err := Run(dir, 2, []float64{2.0}, &b); err != nil {
+		t.Fatalf("Run v2: %v", err)
+	}
+	if strings.Contains(b.String(), "cached") {
+		t.Fatalf("different engine version must miss the cache:\n%s", b.String())
+	}
+
+	// Restored version hits again.
+	version.Version = orig
+	var c bytes.Buffer
+	if err := Run(dir, 2, []float64{2.0}, &c); err != nil {
+		t.Fatalf("Run v1 again: %v", err)
+	}
+	if !strings.HasPrefix(c.String(), "# cached calibrate result") {
+		t.Fatalf("original version should hit cache after restore:\n%s", c.String())
 	}
 }

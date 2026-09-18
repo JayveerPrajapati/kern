@@ -10,8 +10,8 @@ import (
 )
 
 // runReviewPack implements `kern review-pack [root] --task TASK
-// [--lens L] [--max-tokens N] [--json] [--out PATH]` (blueprint
-// KERN-P2-001): one immutable, deterministic evidence packet that any
+// [--lens L] [--max-tokens N] [--json] [--out PATH]`:
+// one immutable, deterministic evidence packet that any
 // reviewer (human, model, or council member) can be given verbatim.
 func runReviewPack(rest []string) int {
 	f, args, err := parseFlags(rest)

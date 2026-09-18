@@ -34,9 +34,6 @@ func TestRenderImpactTextNoWarnWhenResolved(t *testing.T) {
 	}
 }
 
-// TestRenderImpactTruncatesLongLists pins P1-4: long sections collapse to
-// top-20 + "+N more" so hubs like loadOrBuild (1274 transitive) stay readable.
-// Header counts stay exact; full data is preserved in ImpactReport for --json.
 func TestRenderImpactTruncatesLongLists(t *testing.T) {
 	var callers []string
 	for i := 0; i < 30; i++ {
@@ -62,9 +59,6 @@ func TestRenderImpactTruncatesLongLists(t *testing.T) {
 	}
 }
 
-// TestRenderWhatItCallsCollapsesStdlib pins P1-4 stdlib collapse: project
-// calls render individually while strings/os/fmt fan-out collapses to one
-// summary line with per-package counts.
 func TestRenderWhatItCallsCollapsesStdlib(t *testing.T) {
 	out := renderImpactText(domain.ImpactReport{
 		Target:      "m",

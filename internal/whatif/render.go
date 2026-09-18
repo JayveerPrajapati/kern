@@ -20,7 +20,7 @@ func SimulateRender(root string, kind ChangeKind, change, newTarget string) (str
 	g := intelligence.FromIndex(ix)
 	target := change
 	if strings.ContainsAny(change, " \t") {
-		cands := ExtractSymbols(change)
+		cands := ExtractSymbolsIndex(change, ix)
 		if len(cands) == 0 {
 			return "", fmt.Errorf("what-if: could not identify a symbol in the change description: pass a bare symbol name (e.g. 'GetMySQLDB') or include a qualified name (e.g. 'pkg.Symbol') in the description")
 		}
@@ -42,6 +42,12 @@ func SimulateRender(root string, kind ChangeKind, change, newTarget string) (str
 	fmt.Fprintf(&b, "tests: %d\n", len(imp.Tests))
 	fmt.Fprintf(&b, "risk: %s\n", imp.Risk)
 	fmt.Fprintf(&b, "recommendation: %s\n", imp.Recommendation)
+	// An unresolvable change must never read as a clean bill: surface the
+	// not-found warning right under the recommendation so "Safe to proceed"
+	// cannot be mistaken for a real isolated change.
+	if imp.NotResolved {
+		fmt.Fprintf(&b, "warning: %s\n", imp.NotResolvedWarning)
+	}
 	// The what-if output must surface the full set of findings the
 	// spec requires — facts, dependencies (databases/services), architecture
 	// impact, confidence, and limitations — not just the affected/risk core.

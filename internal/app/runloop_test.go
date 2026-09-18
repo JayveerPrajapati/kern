@@ -1,8 +1,10 @@
 package app
 
 import (
+	"context"
 	"testing"
 
+	"github.com/JayveerPrajapati/kern/internal/domain"
 	"github.com/JayveerPrajapati/kern/internal/loop"
 )
 
@@ -31,6 +33,31 @@ func TestRunLoopRoutesThroughService(t *testing.T) {
 	// The task must exist in the registry (task-tracking is the point).
 	if _, ok := ts.Get(task.ID); !ok {
 		t.Errorf("task %s was not tracked by the service", task.ID)
+	}
+}
+
+// TestRunLoopContextCancelled locks the oracle-gate ctx threading: a cancelled
+// context must stop RunLoopContext BEFORE any stage runs, and the aborted run
+// must still be observable — the created Task is marked FAILED (terminal), not
+// silently abandoned.
+func TestRunLoopContextCancelled(t *testing.T) {
+	ts := NewTaskService(&Platform{root: t.TempDir()}, nil)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // cancelled before the run starts
+
+	task, res, err := ts.RunLoopContext(ctx, "explain the caching strategy", loop.L0)
+	if err == nil {
+		t.Fatal("RunLoopContext with a cancelled context must return the cancellation error")
+	}
+	if res != nil {
+		t.Error("RunLoopContext with a cancelled context must not run any stage")
+	}
+	if task == nil {
+		t.Fatal("RunLoopContext must still create a Task so the cancelled run is observable")
+	}
+	if task.State != domain.TaskFailed {
+		t.Errorf("cancelled run task state = %s, want FAILED (terminal and observable)", task.State)
 	}
 }
 
