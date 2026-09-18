@@ -65,7 +65,7 @@ func Run(root string, commitsN int, thresholds []float64, w io.Writer) error {
 		abs = root
 	}
 	if rep, ok := loadCalibrateCache(abs, commits, thr); ok {
-		fmt.Fprintf(w, "# cached calibrate result (%d commits, thresholds %s)\n", len(commits), thresholdKey(thr))
+		_, _ = fmt.Fprintf(w, "# cached calibrate result (%d commits, thresholds %s)\n", len(commits), thresholdKey(thr))
 		_, _ = io.WriteString(w, rep)
 		return nil
 	}

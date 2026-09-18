@@ -130,7 +130,7 @@ func ExpandModeBudget(text, root string, maxTokens int) (string, bool) {
 		out.WriteString(rendered)
 		used += tokenize.CountKind(rendered, tokenize.KindGeneric)
 	}
-	used += tokenize.CountKind(tail, tokenize.KindGeneric)
+	_ = tokenize.CountKind(tail, tokenize.KindGeneric)
 	out.WriteString(tail)
 
 	if tokenize.CountKind(out.String(), tokenize.KindGeneric) <= maxTokens {
@@ -226,7 +226,7 @@ func FitBlocks(text, root string, maxTokens int) (string, bool, []string) {
 	if allowance := maxTokens - used; allowance > 0 && tokenize.CountKind(tail, tokenize.KindGeneric) > allowance {
 		tail = fitProse(tail, allowance)
 	}
-	used += tokenize.CountKind(tail, tokenize.KindGeneric)
+	_ = tokenize.CountKind(tail, tokenize.KindGeneric)
 	out.WriteString(tail)
 
 	if tokenize.CountKind(out.String(), tokenize.KindGeneric) <= maxTokens {

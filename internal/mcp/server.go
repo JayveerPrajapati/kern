@@ -14,7 +14,6 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/intel"
 	"github.com/JayveerPrajapati/kern/internal/lock"
 	"github.com/JayveerPrajapati/kern/internal/mcp/catalog"
-	"github.com/JayveerPrajapati/kern/internal/mcp/doc"
 	"github.com/JayveerPrajapati/kern/internal/metrics"
 	"github.com/JayveerPrajapati/kern/internal/optimize"
 	"github.com/JayveerPrajapati/kern/internal/project"
@@ -1619,10 +1618,6 @@ func clipForMarker(s string) string {
 		return s
 	}
 	return s[:max] + "…"
-}
-
-func sanitizeDocName(name string) (string, error) {
-	return doc.SanitizeDocName(name)
 }
 
 func renderStats(daysStr, session string) (string, error) {

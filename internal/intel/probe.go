@@ -60,10 +60,6 @@ func Probe(ix *index.Index, task string, maxTokens int) *ProbeReport {
 			candidates[r] = true
 			continue
 		}
-		low := strings.ToLower(w)
-		if stopWords[low] && !strings.Contains(w, ".") && !strings.Contains(w, "_") && !isCamelCase(w) {
-			continue
-		}
 	}
 
 	// Fuzzy fallback for natural-language tasks like "decommission a network

@@ -175,11 +175,6 @@ func TestG13_FreshMachineEndToEnd(t *testing.T) {
 
 // --- Helpers ---
 
-func buildBlueprintBinary(t *testing.T) string {
-	t.Helper()
-	return kernTestBinary(t)
-}
-
 func findRepoRoot(t *testing.T) string {
 	t.Helper()
 	dir, _ := os.Getwd()

@@ -329,12 +329,3 @@ func registeredGate(t *testing.T, id string) (Gate, bool) {
 	return Gate{}, false
 }
 
-// declaredFuncs returns the names of every top-level `func <name>(` declared
-// in content (test functions and helpers alike).
-func declaredFuncs(content string) []string {
-	var names []string
-	for _, m := range funcDeclRe.FindAllStringSubmatch(content, -1) {
-		names = append(names, m[1])
-	}
-	return names
-}

@@ -67,7 +67,7 @@ func TestPermissiveActiveAndWarning(t *testing.T) {
 	os.Stderr = w
 	t.Setenv("KERN_MCP_PERMISSIVE", "1")
 	active := PermissiveActive()
-	w.Close()
+	_ = w.Close()
 	os.Stderr = oldStderr
 	buf, _ := io.ReadAll(r)
 	if !active {
@@ -86,7 +86,7 @@ func TestPermissiveActiveAndWarning(t *testing.T) {
 	os.Stderr = w2
 	PermissiveActive()
 	PermissiveActive()
-	w2.Close()
+	_ = w2.Close()
 	os.Stderr = oldStderr
 	buf2, _ := io.ReadAll(r2)
 	if strings.Count(string(buf2), "WARNING: KERN_MCP_PERMISSIVE") > 1 {
