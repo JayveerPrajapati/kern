@@ -7,7 +7,7 @@ import (
 	"os"
 	"strings"
 
-	bpmcp "github.com/JayveerPrajapati/kern/internal/blueprint/mcp"
+	bpmcp "github.com/JayveerPrajapati/kern/internal/bpcli/mcp"
 )
 
 // Blueprint change-firewall CLI surface. These are the thin CLI twins of
@@ -70,13 +70,37 @@ func runBlueprintToolCLI(rest []string, h bpmcp.ToolHandler, build func(root, so
 	if res.IsError {
 		return 1
 	}
+	// A BLOCK verdict arrives as a SUCCESSFUL (isError=false) JSON payload
+	// ({"status":"BLOCK","exit_code":1,...}) — the check itself ran fine but
+	// the change must not pass. Mapping the CLI exit on IsError alone let a
+	// blocked change exit 0, silently failing the pipeline (F6). Mirror the
+	// verdict: BLOCK/ERROR status or a non-zero payload exit code → rc=1;
+	// PASS (and non-blocking WARN) → 0.
+	if status, code := blueprintVerdict(out); status == "BLOCK" || status == "ERROR" || code != 0 {
+		return 1
+	}
 	return 0
+}
+
+// blueprintVerdict extracts the verdict from a validate-* JSON payload
+// ({"status": ..., "exit_code": ...}). It returns ("", 0) when out is not a
+// JSON object with a status field (e.g. explain-finding prose), so the caller
+// falls back to res.IsError alone.
+func blueprintVerdict(out string) (status string, exitCode int) {
+	var v struct {
+		Status   string `json:"status"`
+		ExitCode int    `json:"exit_code"`
+	}
+	if err := json.Unmarshal([]byte(out), &v); err != nil {
+		return "", 0
+	}
+	return strings.ToUpper(v.Status), v.ExitCode
 }
 
 func bgCtx() context.Context { return context.Background() }
 
 func runValidateProposed(rest []string) {
-	usage := "usage: kern validate-proposed --files <json> [--root ROOT] [--source SRC]\n  options:\n    --files            JSON array of proposed changes [{\"path\",\"content\",\"op\"}]\n    --root             repository root (default: .)\n    --source           agent identity (default: agent)"
+	usage := "usage: kern validate-proposed --files <json> [--root ROOT] [--source SRC]\n  options:\n    --files            JSON array of proposed changes [{\"path\",\"content\",\"op\"}] (op: write|edit|delete|rename|commit, default write)\n    --root             repository root (default: .)\n    --source           agent identity (default: agent)"
 	build := func(root, source, payload string) map[string]any {
 		var files []any
 		_ = json.Unmarshal([]byte(payload), &files)
@@ -89,7 +113,14 @@ func runExplainFinding(rest []string) {
 	usage := "usage: kern explain-finding --finding <json> [--root ROOT]"
 	build := func(root, source, payload string) map[string]any {
 		var finding any
-		_ = json.Unmarshal([]byte(payload), &finding)
+		if payload != "" {
+			if err := json.Unmarshal([]byte(payload), &finding); err != nil {
+				fatalUsage("explain-finding: --finding must be a JSON object: %v", err)
+			}
+			if finding == nil {
+				fatalUsage("explain-finding: --finding must be a JSON object (e.g. {\"rule_id\": \"format:gofmt\", \"file\": \"x.go\"})")
+			}
+		}
 		return map[string]any{"repo": root, "finding": finding}
 	}
 	os.Exit(runBlueprintToolCLI(rest, bpmcp.ExplainFindingHandler{}, build, usage))
@@ -99,7 +130,11 @@ func runRepairGuidance(rest []string) {
 	usage := "usage: kern repair-guidance --finding <json> [--root ROOT]"
 	build := func(root, source, payload string) map[string]any {
 		var finding any
-		_ = json.Unmarshal([]byte(payload), &finding)
+		if payload != "" {
+			if err := json.Unmarshal([]byte(payload), &finding); err != nil {
+				fatalUsage("repair-guidance: --finding must be a JSON object: %v", err)
+			}
+		}
 		return map[string]any{"repo": root, "finding": finding}
 	}
 	os.Exit(runBlueprintToolCLI(rest, bpmcp.RepairGuidanceHandler{}, build, usage))

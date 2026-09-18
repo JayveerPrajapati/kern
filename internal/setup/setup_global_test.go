@@ -243,7 +243,7 @@ func TestWireUsesPortableMCPCommand(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("HOME", t.TempDir())
 	dir := t.TempDir()
-	Wire(dir, []string{"mcp", "opencode"}, false)
+	Wire(dir, []string{"mcp", "opencode"}, false, false)
 
 	exeDir := ""
 	if abs, err := os.Executable(); err == nil {

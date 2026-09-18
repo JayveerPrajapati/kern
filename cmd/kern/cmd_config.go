@@ -3,7 +3,8 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"sort"
+	"maps"
+	"slices"
 	"strings"
 	"time"
 
@@ -54,11 +55,7 @@ func formatConfigValue(v any) string {
 	case time.Duration:
 		return t.String()
 	case map[string]string:
-		keys := make([]string, 0, len(t))
-		for k := range t {
-			keys = append(keys, k)
-		}
-		sort.Strings(keys)
+		keys := slices.Sorted(maps.Keys(t))
 		parts := make([]string, 0, len(keys))
 		for _, k := range keys {
 			parts = append(parts, k+"="+t[k])

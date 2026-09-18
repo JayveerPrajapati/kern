@@ -56,7 +56,7 @@ type TaskService struct {
 	workflowRuns map[string]*workflowRun
 	wfMu         sync.Mutex
 	// auditLog is the unified tamper-evident governance audit chain. Every
-	// task state transition writes a task-lifecycle entry into it (AUD-11);
+	// task state transition writes a task-lifecycle entry into it;
 	// the write is best-effort and never blocks the transition. A nil log
 	// (no wiring) is a no-op for back-compat. Defaults to the platform
 	// firewall's audit log when the platform carries one.
@@ -89,7 +89,7 @@ func NewTaskService(p *Platform, bus *eventbus.Bus) *TaskService {
 		deployer:     deployment.NewDeployerFromEnv(),
 		scopes:       map[string]domain.TaskScope{},
 		workflowRuns: map[string]*workflowRun{},
-		// AUD-11: default to the platform's unified audit chain so task
+		// Default to the platform's unified audit chain so task
 		// transitions land in the same tamper-evident log the firewall
 		// writes. Nil-safe: a platform without a firewall (test literals)
 		// yields a nil log = no-op.
@@ -143,7 +143,7 @@ func (s *TaskService) WithAuditLog(a *governance.AuditLog) *TaskService {
 }
 
 // transition advances the task to next and records the transition in the
-// unified tamper-evident governance audit chain (AUD-11). It replaces direct
+// unified tamper-evident governance audit chain. It replaces direct
 // t.Transition call sites so every lifecycle state change is audited exactly
 // once, alongside the existing eventbus event and snapshot/artifact writes.
 //
@@ -540,8 +540,26 @@ func (s *TaskService) Run(intent string) (*domain.RunResult, error) {
 // inline loop.NewLoop(...).Run(...) orchestration in the MCP handler: the
 // service owns the loop so every interface gets task tracking and an audit
 // trail. RunLoop runs the loop's default no-op stages (read-only).
+//
+// RunLoop is the backward-compatible command-less form; it runs with
+// context.Background() so a deadline/cancel never applies. Callers that hold
+// a request-derived context (web /v1/loop, MCP kern_loop) should use
+// RunLoopContext so a deadline or client disconnect actually cancels the run
+// between stages instead of leaving it running in the background
+// (oracle-gate ctx threading).
 func (s *TaskService) RunLoop(intent string, level loop.Autonomy) (*agent.Task, *loop.Result, error) {
-	return s.runLoop(intent, level, false)
+	return s.RunLoopContext(context.Background(), intent, level)
+}
+
+// RunLoopContext is the context-aware form of RunLoop: it threads ctx into
+// the closed loop so a caller deadline or cancellation stops the run BETWEEN
+// stages (and before it starts) instead of leaving it running in the
+// background. The loop's own stage loop checks ctx.Err() before every stage;
+// the app layer checks it around task setup too. The created Task is always
+// observable: a cancelled run fails the Task (FAILED) so the aborted run is
+// terminal and auditable, never an orphan.
+func (s *TaskService) RunLoopContext(ctx context.Context, intent string, level loop.Autonomy) (*agent.Task, *loop.Result, error) {
+	return s.runLoop(ctx, intent, level, false)
 }
 
 // RunDo is the task-scoped autonomous closed-loop entry point (the "Implement
@@ -553,14 +571,26 @@ func (s *TaskService) RunLoop(intent string, level loop.Autonomy) (*agent.Task, 
 // factory (KERN_LLM_PROVIDER, default local Ollama); their stage gates sit at
 // >= L2 autonomy, so L0/L1 runs never invoke them.
 func (s *TaskService) RunDo(intent string, level loop.Autonomy) (*agent.Task, *loop.Result, error) {
-	return s.runLoop(intent, level, true)
+	return s.RunDoContext(context.Background(), intent, level)
+}
+
+// RunDoContext is RunDo with caller cancellation: a cancelled context stops
+// the autonomous loop between stages (and before it starts) instead of
+// leaving the L2 code-modifying loop running in the background after the
+// caller (server shutdown, $/cancelRequest, client disconnect) believes it
+// stopped. kern_do routes here.
+func (s *TaskService) RunDoContext(ctx context.Context, intent string, level loop.Autonomy) (*agent.Task, *loop.Result, error) {
+	return s.runLoop(ctx, intent, level, true)
 }
 
 // runLoop is the shared task-scoped closed-loop implementation behind RunLoop
 // and RunDo. When autonomous is true, the loop's default code and plan stages
 // are handled by the coder and planner agents (mirroring what the CLI's runDo
 // previously wired inline) instead of no-op'ing.
-func (s *TaskService) runLoop(intent string, level loop.Autonomy, autonomous bool) (*agent.Task, *loop.Result, error) {
+func (s *TaskService) runLoop(ctx context.Context, intent string, level loop.Autonomy, autonomous bool) (*agent.Task, *loop.Result, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if s.platform == nil {
 		return nil, nil, fmt.Errorf("task service: platform not configured")
 	}
@@ -568,8 +598,19 @@ func (s *TaskService) runLoop(intent string, level loop.Autonomy, autonomous boo
 	if err != nil {
 		return nil, nil, err
 	}
+	// The caller's deadline/cancel may already have fired (e.g. a web request
+	// whose context expired during setup): record a FAILED task so the aborted
+	// run is terminal and observable, then surface the cancellation.
+	if err := ctx.Err(); err != nil {
+		s.fail(t, "loop cancelled: "+err.Error())
+		return t, nil, err
+	}
 	if err := s.transition(t, domain.TaskAnalyzing); err != nil {
 		s.fail(t, err.Error())
+		return t, nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		s.fail(t, "loop cancelled: "+err.Error())
 		return t, nil, err
 	}
 	s.publish(eventbus.TaskUpdated, t.ID, map[string]string{"state": "ANALYZING"})
@@ -595,7 +636,9 @@ func (s *TaskService) runLoop(intent string, level loop.Autonomy, autonomous boo
 		l.WithBus(s.bus)
 	}
 
-	res, err := l.Run(intent, nil)
+	// RunContext threads ctx into the loop's per-stage cancellation checks, so
+	// a deadline/disconnect stops the run between stages (oracle-gate).
+	res, err := l.RunContext(ctx, intent, nil)
 	if res == nil {
 		res = &loop.Result{Intent: intent, Level: level}
 	}
@@ -892,9 +935,22 @@ func (s *TaskService) getTaskForMutation(taskID string) (*agent.Task, error) {
 // persisted on the task and the approval decision through the project's
 // approval store, so resume also works across processes.
 func (s *TaskService) RunWorkflowDefault(intent string) (*agent.Task, error) {
+	return s.RunWorkflowDefaultContext(context.Background(), intent)
+}
+
+// RunWorkflowDefaultContext is RunWorkflowDefault with caller cancellation:
+// the context is checked before the workflow starts and before every
+// workflow step (WorkflowEngine.RunContext), so a cancelled caller stops the
+// run between steps instead of leaving it running in the background.
+// kern_workflow routes here.
+func (s *TaskService) RunWorkflowDefaultContext(ctx context.Context, intent string) (*agent.Task, error) {
 	t, err := s.Create(intent)
 	if err != nil {
 		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		s.fail(t, "workflow cancelled: "+err.Error())
+		return t, err
 	}
 	eng := s.engineForTask(t)
 
@@ -904,12 +960,23 @@ func (s *TaskService) RunWorkflowDefault(intent string) (*agent.Task, error) {
 	s.workflowRuns[t.ID] = &workflowRun{task: t, engine: eng}
 	s.wfMu.Unlock()
 
-	return s.runStoredWorkflow(t.ID)
+	return s.runStoredWorkflowContext(ctx, t.ID)
 }
 
 // fail marks a Task FAILED, persists it, and publishes a task.failed event.
+// When the FAILED transition itself fails (the task is already terminal, or
+// its current state cannot legally transition to FAILED — agent.Task.Fail
+// returns ErrInvalidTransition in that case), the task is NOT marked FAILED:
+// the failure is logged loudly and NEITHER the misleading task.failed event
+// is published NOR the task persisted as FAILED, so downstream consumers
+// never observe a FAILED task that is not actually in FAILED state. The
+// success path is unchanged: a task that really transitions to FAILED is
+// persisted and announced exactly as before.
 func (s *TaskService) fail(t *agent.Task, errMsg string) {
-	_ = t.Fail(errMsg)
+	if err := t.Fail(errMsg); err != nil {
+		log.Printf("kern app: task %s could not be marked FAILED: %v", t.ID, err)
+		return
+	}
 	s.persist(t)
 	s.publish(eventbus.TaskFailed, t.ID, map[string]string{"error": errMsg})
 }

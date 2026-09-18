@@ -2,7 +2,7 @@ package compress
 
 import "sort"
 
-// MinHash + LSH banding for the large-log fuzzy-merge pass (G-9).
+// MinHash + LSH banding for the large-log fuzzy-merge pass.
 //
 // clusterLines' fuzzy merge compares each singleton against every cluster —
 // O(n²) Levenshtein comparisons that dominate on very large logs. Above
@@ -91,7 +91,7 @@ func minHashSignature(norm string) [minHashK]uint32 {
 }
 
 // bandIndex maps (signature slot, value) band keys to the cluster positions
-// carrying them (G-9).
+// carrying them.
 type bandIndex struct {
 	buckets map[uint64][]int
 	sigs    [][minHashK]uint32

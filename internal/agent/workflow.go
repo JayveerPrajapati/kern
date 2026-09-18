@@ -1,6 +1,7 @@
 package agent
 
 import (
+	stdctx "context"
 	"errors"
 	"fmt"
 	"strings"
@@ -151,7 +152,7 @@ type WorkflowEngine struct {
 	workflows map[string]Workflow
 
 	// mu guards the approvalRef/satisfied/progress maps, which are mutated by
-	// both Run and CompleteApproval (and RejectApproval).
+	// both Run and CompleteApproval.
 	mu sync.Mutex
 	// approvalRef maps a governance approval ID back to the (task, step) it gates.
 	approvalRef map[string]approval
@@ -312,6 +313,20 @@ func DefaultWorkflow() Workflow {
 // then calls CompleteApproval and re-runs. A handler error marks the task
 // FAILED and returns the error.
 func (e *WorkflowEngine) Run(rootTask *Task, stepHandler func(action string, task *Task) (string, error)) (*Task, error) {
+	return e.RunContext(stdctx.Background(), rootTask, stepHandler)
+}
+
+// RunContext is Run with caller cancellation: the context is checked before
+// every step, so a cancelled caller (server shutdown, $/cancelRequest,
+// client disconnect) stops the workflow between steps — before a later
+// code-modifying step executes — instead of running to completion in the
+// background. Mirrors the loop's between-stage check: the task is failed so
+// the aborted run is terminal and auditable, never an orphan.
+func (e *WorkflowEngine) RunContext(ctx stdctx.Context, rootTask *Task, stepHandler func(action string, task *Task) (string, error)) (*Task, error) {
+	if ctx == nil {
+		ctx = stdctx.Background()
+	}
+
 	metrics.Default().RecordAgentRun()
 	if rootTask == nil {
 		return nil, errors.New("agent: cannot run a nil task")
@@ -341,6 +356,15 @@ func (e *WorkflowEngine) Run(rootTask *Task, stepHandler func(action string, tas
 		// Abort if the task reached a terminal state mid-flight.
 		if rootTask.Terminal() {
 			return rootTask, fmt.Errorf("agent: task %s reached terminal state %s before step %d", rootTask.ID, rootTask.State, i)
+		}
+		// Cancellation between steps: a cancelled caller must never leave a
+		// later (potentially code-modifying) step executing after the caller
+		// believes it stopped. The task is failed so the aborted run is
+		// terminal and auditable.
+		if err := ctx.Err(); err != nil {
+			rootTask.CurrentStage = step.Action
+			_ = rootTask.Fail("workflow cancelled: " + err.Error())
+			return rootTask, fmt.Errorf("agent: workflow for task %s cancelled before step %d (%s): %w", rootTask.ID, i, step.Action, err)
 		}
 
 		// Track the current workflow stage on the task ("current stage" is
@@ -499,27 +523,6 @@ func (e *WorkflowEngine) CompleteApproval(approvalID, approver string) error {
 	e.satisfied[ref.key] = true
 	e.mu.Unlock()
 	e.publish(eventbus.TaskApproved, taskIDForKey(ref), map[string]string{"approval": approvalID})
-	return nil
-}
-
-// RejectApproval marks a pending approval as rejected. The task's gate stays
-// unsatisfied; the caller should mark the task REJECTED. Errors if unknown.
-func (e *WorkflowEngine) RejectApproval(approvalID, approver, reason string) error {
-	if _, err := e.approvals.Reject(approvalID, approver, reason); err != nil {
-		return err
-	}
-	if e.store != nil {
-		if _, err := e.store.Decide(approvalID, approver, false, reason); err != nil {
-			return err
-		}
-	}
-	e.mu.Lock()
-	ref, ok := e.approvalRef[approvalID]
-	e.mu.Unlock()
-	if !ok {
-		return fmt.Errorf("agent: approval %q not tracked by engine", approvalID)
-	}
-	e.publish(eventbus.TaskRejected, taskIDForKey(ref), map[string]string{"approval": approvalID, "reason": reason})
 	return nil
 }
 

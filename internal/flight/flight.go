@@ -390,23 +390,10 @@ func (r *Recorder) WhichToolsCalled(taskID string) []Record {
 	return r.query(taskID, ActionToolCalled)
 }
 
-// WhoApproved returns all approval_requested and change_accepted records for
-// the task, in chronological order. Answers Workflow E: "who approved this
-// change?"
-func (r *Recorder) WhoApproved(taskID string) []Record {
-	return r.query(taskID, ActionApprovalRequested, ActionChangeAccepted)
-}
-
 // WhatChanged returns all file_modified and file_changed records for the task,
 // in chronological order. Answers Workflow E: "what files were modified?"
 func (r *Recorder) WhatChanged(taskID string) []Record {
 	return r.query(taskID, ActionFileModified, ActionFileChanged)
-}
-
-// WhatTested returns all test_executed records for the task, in chronological
-// order. Answers Workflow E: "what tests were run?"
-func (r *Recorder) WhatTested(taskID string) []Record {
-	return r.query(taskID, ActionTestExecuted)
 }
 
 // WhatVerified returns all verification_started and verification_completed

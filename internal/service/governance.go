@@ -9,7 +9,7 @@ import (
 	"path/filepath"
 	"sync"
 
-	bpcli "github.com/JayveerPrajapati/kern/internal/blueprint/cli"
+	bpcli "github.com/JayveerPrajapati/kern/internal/bpcli/cli"
 	"github.com/JayveerPrajapati/kern/internal/domain"
 	"github.com/JayveerPrajapati/kern/internal/governance"
 	"github.com/JayveerPrajapati/kern/internal/storage"

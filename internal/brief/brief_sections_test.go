@@ -121,10 +121,6 @@ func TestDedupe(t *testing.T) {
 	}
 }
 
-// TestCallEdgesIsDirectedEdgeSum (report A10): the buddy digest's "Call edges"
-// must be the total directed caller→callee edge count, not the number of
-// distinct callers — it must agree with `kern onboard`'s metric. A caller
-// with two callees contributes two edges.
 func TestCallEdgesIsDirectedEdgeSum(t *testing.T) {
 	ix := &index.Index{
 		Calls: map[string][]index.CallEdge{

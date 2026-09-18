@@ -213,6 +213,60 @@ func TestTaskServiceReturnToAgentPublishesEvent(t *testing.T) {
 	}
 }
 
+// TestTaskServiceFailPublishesEvent verifies the success path of fail(): a
+// task that legally transitions to FAILED is persisted as FAILED and a
+// task.failed event is published.
+func TestTaskServiceFailPublishesEvent(t *testing.T) {
+	svc, bus := newTestTaskService(t)
+	tk := agent.NewTask("code", "x")
+	_ = tk.Start("bot-1")
+	_ = svc.registry.SubmitTask(tk)
+
+	svc.fail(tk, "boom")
+
+	last := lastEvent(t, bus)
+	if last.Kind != eventbus.TaskFailed {
+		t.Fatalf("event kind=%s, want task.failed", last.Kind)
+	}
+	stored, err := svc.store.Get(tk.ID)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	if stored.State != domain.TaskFailed {
+		t.Fatalf("stored state=%s, want FAILED", stored.State)
+	}
+}
+
+// TestTaskServiceFailNoEventWhenTransitionFails: when a task cannot legally
+// transition to FAILED (already terminal — agent.Task.Fail returns an
+// invalid-transition error), fail() must NOT publish a misleading task.failed
+// event NOR persist the task as FAILED; the task's real state is preserved
+// and only the transition failure is logged.
+func TestTaskServiceFailNoEventWhenTransitionFails(t *testing.T) {
+	svc, bus := newTestTaskService(t)
+	tk := agent.NewTask("code", "x")
+	_ = tk.Start("bot-1")
+	if err := tk.Complete("done"); err != nil { // COMPLETED is terminal: FAILED is unreachable
+		t.Fatalf("Complete: %v", err)
+	}
+	_ = svc.registry.SubmitTask(tk)
+
+	svc.fail(tk, "should never land")
+
+	for _, ev := range bus.History("") {
+		if ev.Kind == eventbus.TaskFailed {
+			t.Fatalf("task.failed event must NOT be published when the FAILED transition fails (got %s for %s)", ev.Kind, ev.Subject)
+		}
+	}
+	stored, err := svc.store.Get(tk.ID)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	if stored.State != domain.TaskCompleted {
+		t.Fatalf("stored state=%s, want COMPLETED (task must not be persisted as FAILED)", stored.State)
+	}
+}
+
 // TestTaskServiceTimeoutPublishesEvent verifies Timeout publishes a task.failed
 // event.
 func TestTaskServiceTimeoutPublishesEvent(t *testing.T) {

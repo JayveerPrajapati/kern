@@ -18,6 +18,47 @@ import (
 	"time"
 )
 
+// ErrInvalidPatch is the sentinel error returned when a patch cannot be
+// applied to the worktree (malformed, garbage, or non-applicable input that
+// git apply rejects). A patch that cannot be applied is always a caller error
+// — the caller sent a patch that does not describe a valid change — so
+// callers (e.g. the web API) classify it as a client error (400) rather than
+// an internal failure (500). Other execution failures (worktree setup, diff,
+// verification) are NOT wrapped with this sentinel.
+var ErrInvalidPatch = errors.New("invalid patch")
+
+// execExecutePatchCommand is the descriptive command text an Execute approval
+// binds to. The patch itself is applied by git in a sandboxed worktree, so no
+// shell command string exists at this site; the approval is bound to a
+// stable, human-readable operation name so a HIGH/CRITICAL denial creates a
+// PERSISTED, command-bound approval under the project root that `kern approve
+// <id>` can resolve out-of-band (oracle-gate: the legacy empty-command gate
+// left an in-memory approval nobody could resolve).
+const execExecutePatchCommand = "kern_execute apply patch"
+
+// execVerifyCommand renders the descriptive command text an ExecuteAndVerify
+// approval binds to: "kern verify <types>" over the exact types that will run
+// in the worktree. An empty types list mirrors the verify engine's own
+// default (build), so the bound command always names what actually runs.
+func execVerifyCommand(types []string) string {
+	if len(types) == 0 {
+		types = []string{"build"}
+	}
+	return "kern verify " + strings.Join(types, " ")
+}
+
+// execApprovalRoot returns the platform root exec approvals are persisted
+// under, or "" when no platform is configured (the in-memory approval path:
+// nothing to persist to, so CheckExecCommand returns honest guidance instead
+// of a dead-end hint). Test services built without a Platform exercise this
+// path.
+func (s *TaskService) execApprovalRoot() string {
+	if s.platform == nil {
+		return ""
+	}
+	return s.platform.Root()
+}
+
 // Execute runs a patch in a sandboxed worktree, gated by governance .
 // It creates a Task, transitions to EXECUTING, checks the governance firewall,
 // applies the patch in a worktree, records the diff as an artifact, and returns
@@ -31,8 +72,12 @@ func (s *TaskService) Execute(patch string) (*agent.Task, string, error) {
 		return nil, "", err
 	}
 
-	// Governance gate: fail-closed before any execution.
-	if err := governance.CheckExec(); err != nil {
+	// Governance gate: fail-closed before any execution. The approval is bound
+	// to the descriptive apply-patch command and persisted under the project
+	// root, so a HIGH/CRITICAL denial is resolvable via `kern approve <id>`
+	// (oracle-gate: the legacy empty-command gate created an unresolvable
+	// in-memory approval).
+	if err := governance.CheckExecCommand(execExecutePatchCommand, s.execApprovalRoot()); err != nil {
 		s.fail(t, "governance denied: "+err.Error())
 		return t, "", err
 	}
@@ -60,7 +105,11 @@ func (s *TaskService) Execute(patch string) (*agent.Task, string, error) {
 
 	if err := wt.Apply(patch); err != nil {
 		s.fail(t, "apply: "+err.Error())
-		return t, "", err
+		// A patch that git apply rejects (garbage, malformed, or not
+		// applicable to the tree) is a caller error; wrap it so callers can
+		// classify it via errors.Is(err, ErrInvalidPatch). The original
+		// message text is preserved (the sentinel is only a prefix).
+		return t, "", fmt.Errorf("%w: %v", ErrInvalidPatch, err)
 	}
 
 	diff, err := wt.Diff()
@@ -107,8 +156,13 @@ func (s *TaskService) ExecuteAndVerify(patch string, verifyTypes []string) (*age
 		return nil, "", verification.VerificationResult{}, err
 	}
 
-	// Governance gate: fail-closed before any execution.
-	if err := governance.CheckExec(); err != nil {
+	// Governance gate: fail-closed before any execution. The approval is bound
+	// to the concrete verify command that will run in the worktree (the same
+	// default the verify engine applies) and persisted under the project root,
+	// so a HIGH/CRITICAL denial is command-bound and resolvable via `kern
+	// approve <id>` (oracle-gate: the legacy empty-command gate created an
+	// unresolvable in-memory approval).
+	if err := governance.CheckExecCommand(execVerifyCommand(verifyTypes), s.execApprovalRoot()); err != nil {
 		s.fail(t, "governance denied: "+err.Error())
 		return t, "", verification.VerificationResult{}, err
 	}
@@ -135,7 +189,9 @@ func (s *TaskService) ExecuteAndVerify(patch string, verifyTypes []string) (*age
 
 	if err := wt.Apply(patch); err != nil {
 		s.fail(t, "apply: "+err.Error())
-		return t, "", verification.VerificationResult{}, err
+		// Same classification as Execute: an unapplicable patch is a caller
+		// error, wrapped in ErrInvalidPatch (message text preserved).
+		return t, "", verification.VerificationResult{}, fmt.Errorf("%w: %v", ErrInvalidPatch, err)
 	}
 
 	diff, err := wt.Diff()
@@ -203,62 +259,6 @@ func (s *TaskService) verifyInWorktree(t *agent.Task, worktreeDir string, types 
 	return res
 }
 
-// VerifyTask verifies a Task's worktree diff and transitions to READY_FOR_PR
-// Unlike the standalone Verify, this chains after Execute: it
-// verifies the specific worktree produced by execution, not the current tree.
-// The Task transitions VERIFYING → READY_FOR_PR (on pass) or FAILED (on fail).
-// Every check produces evidence, and the final verification becomes an artifact.
-func (s *TaskService) VerifyTask(taskID string, worktreeDir string, types []string) (*agent.Task, verification.VerificationResult, error) {
-	t, ok := s.Get(taskID)
-	if !ok {
-		return nil, verification.VerificationResult{}, fmt.Errorf("task not found: %s", taskID)
-	}
-	if len(types) == 0 {
-		types = []string{"build", "test"}
-	}
-
-	if err := s.transition(t, domain.TaskVerifying); err != nil {
-		s.fail(t, err.Error())
-		return t, verification.VerificationResult{}, err
-	}
-	s.publish(eventbus.TaskUpdated, t.ID, map[string]string{"state": "VERIFYING"})
-
-	// Verify the worktree, not the main tree.
-	eng := verification.NewEngine(worktreeDir)
-	res := eng.Verify(types)
-	t.Verification = &res
-	t.Output = fmt.Sprintf("verdict: %s", res.Verdict)
-	t.AddStep(agent.Step{
-		Action:     "verify",
-		AgentID:    "verification-engine",
-		StartedAt:  t.UpdatedAt,
-		FinishedAt: time.Now(),
-		Result:     fmt.Sprintf("verdict: %s, summary: %s", res.Verdict, res.Summary),
-		Status:     "success",
-	})
-
-	// Record the verification artifact linked to the diff artifact.
-	s.recordArtifact(domain.ArtifactVerificationReport, t.ID, "verification-engine",
-		fmt.Sprintf("verdict: %s, summary: %s", res.Verdict, res.Summary),
-		s.lastArtifactID(t.ID, domain.ArtifactDiff), "verification:worktree")
-
-	// Transition based on the verdict.
-	if res.Verdict == verification.VerdictPass || res.Verdict == verification.VerdictPassWithWarning {
-		if err := s.transition(t, domain.TaskReadyForPR); err != nil {
-			s.fail(t, err.Error())
-			return t, res, err
-		}
-		s.publish(eventbus.TaskUpdated, t.ID, map[string]string{"state": "READY_FOR_PR"})
-	} else {
-		verr := verificationFailure(res)
-		s.fail(t, verr.Error())
-		return t, res, verr
-	}
-
-	s.persist(t)
-	return t, res, nil
-}
-
 // CreatePR creates a PR from the Task's structured artifacts .
 // It renders a PR body from the Plan, Impact, and Verification artifacts, and
 // transitions the Task to PR_CREATED.
@@ -277,7 +277,7 @@ func (s *TaskService) CreatePR(taskID string, branch string) (*agent.Task, strin
 
 	// Require verification to have passed.
 	if t.State != domain.TaskReadyForPR {
-		return t, "", fmt.Errorf("task must be in READY_FOR_PR state (current: %s) — run VerifyTask first", t.State)
+		return t, "", fmt.Errorf("task must be in READY_FOR_PR state (current: %s)", t.State)
 	}
 
 	// Render the PR body from structured artifacts.

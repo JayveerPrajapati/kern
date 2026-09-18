@@ -123,7 +123,7 @@ func formatOtelValue(raw json.RawMessage) string {
 	if len(raw) == 0 {
 		return ""
 	}
-	var v interface{}
+	var v any
 	if err := json.Unmarshal(raw, &v); err != nil {
 		return string(raw)
 	}

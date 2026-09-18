@@ -228,11 +228,6 @@ func TestEvidenceVerify_TrustAnchor(t *testing.T) {
 	}
 }
 
-// TestEvidenceVerify_PositionalFile (F-012): `kern evidence verify <path>`
-// must read the bundle from the positional file argument exactly like
-// `--file <path>`. Before the fix the positional was ignored, so verify fell
-// through to (empty) stdin and died with `parse bundle: unexpected end of
-// JSON input`.
 func TestEvidenceVerify_PositionalFile(t *testing.T) {
 	dir := evidenceFixture(t)
 	outPath := filepath.Join(t.TempDir(), "evidence.json")
@@ -252,8 +247,6 @@ func TestEvidenceVerify_PositionalFile(t *testing.T) {
 	}
 }
 
-// TestEvidenceExplain_PositionalFile (F-012): the same positional-file
-// plumbing applies to `kern evidence explain <path>`.
 func TestEvidenceExplain_PositionalFile(t *testing.T) {
 	dir := evidenceFixture(t)
 	outPath := filepath.Join(t.TempDir(), "evidence.json")

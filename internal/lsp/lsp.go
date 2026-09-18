@@ -1,5 +1,5 @@
 // Package lsp implements a minimal Language Server Protocol server over
-// stdio for kern (G-8). It speaks Content-Length framed JSON-RPC 2.0 and is
+// stdio for kern. It speaks Content-Length framed JSON-RPC 2.0 and is
 // powered by kern's prebuilt symbol index: textDocument/hover,
 // textDocument/definition and textDocument/references resolve identifiers
 // against the index that `kern index` (or the CLI load-or-build path) writes

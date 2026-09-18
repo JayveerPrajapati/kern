@@ -1,6 +1,9 @@
 package architecture
 
 import (
+	"fmt"
+	"go/parser"
+	"go/token"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -9,32 +12,29 @@ import (
 	"testing"
 )
 
-// archdoc_test.go implements the ARCHITECTURE.md parity gate (G-P0-4):
-// the subsystem table at the repo root is the machine-readable source of
-// truth, and this test fails when the code diverges from it — a directory
-// missing, LOC past its cap, or a new kern-internal import outside the
-// documented allowed set. Updating the architecture means updating
-// ARCHITECTURE.md deliberately, never silently.
-
 const (
-	archDocRel  = "ARCHITECTURE.md"
-	moduleRoot  = "github.com/JayveerPrajapati/kern/"
-	internalPfx = moduleRoot + "internal/"
+	archDocRel = "ARCHITECTURE.md"
+	moduleRoot = "github.com/JayveerPrajapati/kern/"
 )
 
 var skipDirs = map[string]bool{
 	".kern": true, ".git": true, "node_modules": true, "vendor": true,
 	".opencode": true, ".claude": true, ".cursor": true, ".gemini": true,
 	".kiro": true, "graphify-out": true, "bin": true, "testfixture": true,
+	"sdk": true, "python": true, "dist": true, "docs": true, "homebrew": true,
 }
 
 type archRow struct {
 	dir     string
 	cap     int
-	imports map[string]bool // allowed kern-internal top-2 segments
+	imports map[string]bool // allowed kern-internal paths (each a subtree root)
 }
 
-var archRowRe = regexp.MustCompile(`^\|\s*` + "`" + `(internal/[A-Za-z0-9_]+)` + "`" + `\s*\|\s*(\d+)\s*\|\s*(\d+)\s*\|(.*)\|\s*$`)
+// archRowRe matches table rows whose dir cell is an internal path, allowing
+// nested dirs (internal/mcp/doc, internal/blueprint/checks/diffgate) — the
+// `/` and `.` are legal in package paths and the nested rows must be parsed
+// or their cap/dep enforcement silently vanishes.
+var archRowRe = regexp.MustCompile(`^\|\s*` + "`" + `(internal/[A-Za-z0-9_/.]+)` + "`" + `\s*\|\s*(\d+)\s*\|\s*(\d+)\s*\|(.*)\|\s*$`)
 
 func repoRoot(t *testing.T) string {
 	t.Helper()
@@ -85,12 +85,19 @@ func parseArchTable(t *testing.T, root string) []archRow {
 	return rows
 }
 
-// measureDir returns non-test Go LOC and the set of kern-internal top-2
-// segment imports for a directory, mirroring the table's generation rules
-// (walk skips generated/vendored dirs and _test.go files).
-func measureDir(dir string) (int, map[string]bool, error) {
+// measureDir returns non-test Go LOC and the set of kern-internal import
+// paths for a directory, mirroring the table's generation rules (walk skips
+// generated/vendored dirs and _test.go files). Imports are parsed with
+// go/parser + go/ast so every form is captured — grouped, single-form,
+// aliased, and dot-imports (dot-imports count by their resolved path, they
+// are not special-cased) — and keys are the FULL resolved package paths
+// (e.g. internal/mcp/gov), not collapsed top-level prefixes: the nested mcp
+// rows are therefore enforced, and an allowed-dep entry acts as a subtree
+// root (internal/foo permits internal/foo/**).
+func measureDir(dir string) (int, map[string]bool, int, error) {
 	loc := 0
 	imports := map[string]bool{}
+	decls := 0 // internal-import declarations seen (all forms), for the strictness sanity
 	err := filepath.WalkDir(dir, func(p string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -108,39 +115,50 @@ func measureDir(dir string) (int, map[string]bool, error) {
 		if err != nil {
 			return err
 		}
-		src := string(b)
-		loc += strings.Count(src, "\n")
-		for _, line := range strings.Split(src, "\n") {
-			t := strings.TrimSpace(line)
-			if !strings.HasPrefix(t, `"`) || !strings.HasSuffix(t, `"`) {
+		loc += strings.Count(string(b), "\n")
+		f, err := parser.ParseFile(token.NewFileSet(), p, b, parser.ImportsOnly|parser.SkipObjectResolution)
+		if err != nil {
+			return fmt.Errorf("%s: %w", p, err)
+		}
+		for _, imp := range f.Imports {
+			// Resolve the import relative to the module root: keep only the
+			// internal/<subsystem>[/<leaf>...] part as the map key.
+			path := strings.TrimPrefix(strings.Trim(imp.Path.Value, `"`), moduleRoot)
+			if !strings.HasPrefix(path, "internal/") {
 				continue
 			}
-			imp := strings.Trim(t, `"`)
-			if !strings.HasPrefix(imp, internalPfx) {
-				continue
-			}
-			// Collapse to the top-level subsystem (internal/<first>): the
-			// table's allowed deps are top-level dirs and a subsystem's own
-			// subpackages are always allowed (internal/blueprint/x imports
-			// collapse to internal/blueprint == self).
-			segs := strings.Split(strings.TrimPrefix(imp, internalPfx), "/")
-			imports["internal/"+segs[0]] = true
+			imports[path] = true
+			decls++
 		}
 		return nil
 	})
-	return loc, imports, err
+	return loc, imports, decls, err
+}
+
+// allowed reports whether imp lies inside any allowed dep's subtree. An
+// allowed entry is a subtree root: internal/domain covers internal/domain
+// itself and internal/domain/x; internal/mcp/gov covers that exact leaf.
+func allowed(imp string, deps map[string]bool) bool {
+	for dep := range deps {
+		if imp == dep || strings.HasPrefix(imp, dep+"/") {
+			return true
+		}
+	}
+	return false
 }
 
 func TestArchitectureDocParity(t *testing.T) {
 	root := repoRoot(t)
 	rows := parseArchTable(t, root)
+	validated := 0
+	totalDecls := 0
 	for _, row := range rows {
 		dir := filepath.Join(root, row.dir)
 		if _, err := os.Stat(dir); err != nil {
 			t.Errorf("%s: directory missing", row.dir)
 			continue
 		}
-		loc, imports, err := measureDir(dir)
+		loc, imports, decls, err := measureDir(dir)
 		if err != nil {
 			t.Errorf("%s: measure failed: %v", row.dir, err)
 			continue
@@ -149,10 +167,16 @@ func TestArchitectureDocParity(t *testing.T) {
 			t.Errorf("%s: LOC %d exceeds cap %d — split the package or raise the cap in ARCHITECTURE.md (suggested cap %d)",
 				row.dir, loc, row.cap, int(float64(loc)*1.5/100)*100+100)
 		}
-		self := "internal/" + filepath.Base(dir)
+		validated += len(imports)
+		totalDecls += decls
+		self := row.dir // full internal path, nested dirs included
 		var violations []string
 		for imp := range imports {
-			if imp == self || row.imports[imp] {
+			// A subsystem's own subpackages are always allowed.
+			if imp == self || strings.HasPrefix(imp, self+"/") {
+				continue
+			}
+			if allowed(imp, row.imports) {
 				continue
 			}
 			violations = append(violations, imp)
@@ -163,11 +187,22 @@ func TestArchitectureDocParity(t *testing.T) {
 				row.dir, violations)
 		}
 	}
+	// Sanity: the ast parser captures every import form (grouped, single,
+	// aliased, dot) and every nested path, so it must validate strictly more
+	// internal-import declarations than the old bare-quoted-line scan (~855
+	// grouped-form sites, 30 aliased/single-form missed). The declaration
+	// count is the direct analog of that 855 baseline.
+	if totalDecls <= 855 {
+		t.Errorf("strict parser captured only %d internal-import declarations — expected > 855 (old line scan caught 855 grouped-form sites)", totalDecls)
+	}
+	t.Logf("TestArchitectureDocParity validated %d distinct kern-internal import paths across %d rows from %d internal-import declarations",
+		validated, len(rows), totalDecls)
 }
 
-// TestArchitectureDocMentionsKnownDrift pins that the doc records the two
-// largest subsystems honestly (the plan's drift examples: mcp monolith,
-// blueprint size) instead of hiding them.
+// TestArchitectureDocMentionsKnownDrift pins that the doc records the
+// largest subsystem honestly (the plan's drift example: mcp monolith)
+// instead of hiding it, and keeps the settled blueprint cap (9800, Stage D
+// follow-up) from regressing.
 func TestArchitectureDocMentionsKnownDrift(t *testing.T) {
 	root := repoRoot(t)
 	b, err := os.ReadFile(filepath.Join(root, archDocRel))
@@ -183,8 +218,8 @@ func TestArchitectureDocMentionsKnownDrift(t *testing.T) {
 		if row.dir == "internal/mcp" && row.cap < 20000 {
 			t.Errorf("internal/mcp cap %d too tight for the documented monolith", row.cap)
 		}
-		if row.dir == "internal/blueprint" && row.cap < 28000 {
-			t.Errorf("internal/blueprint cap %d too tight for the documented size", row.cap)
+		if row.dir == "internal/blueprint" && row.cap < 9800 {
+			t.Errorf("internal/blueprint cap %d below the settled Stage D cap (9800)", row.cap)
 		}
 	}
 }

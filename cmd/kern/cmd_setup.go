@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"github.com/JayveerPrajapati/kern/internal/brief"
 	"github.com/JayveerPrajapati/kern/internal/commitmsg"
@@ -14,11 +15,11 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/intel"
 	"github.com/JayveerPrajapati/kern/internal/setup"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
-	"sort"
 	"strings"
 	"time"
 )
@@ -44,8 +45,7 @@ func runSetup(rest []string) {
 	}
 	if f.verify {
 		if err := verifyMCP(root); err != nil {
-			fmt.Printf("[FAIL] mcp binary not reachable: %v\n", err)
-			panic(exitError{code: 1})
+			fatal("[FAIL] mcp binary not reachable: %v", err)
 		}
 		fmt.Println("[ok] mcp binary responds to initialize")
 		return
@@ -59,7 +59,10 @@ func runSetup(rest []string) {
 		detected = setup.DetectAgents(root)
 	}
 	failed := 0
-	for _, s := range setup.Wire(root, agents, f.detect) {
+	// The --global flag gates ALL user-global writes (home-scoped hooks,
+	// home/global MCP adapters, global git ignore): without it, Wire touches
+	// only project-scope files.
+	for _, s := range setup.Wire(root, agents, f.detect, f.global) {
 		mark := "ok"
 		if s.Skipped {
 			mark = "--"
@@ -72,8 +75,7 @@ func runSetup(rest []string) {
 	if f.global {
 		// Global pre-wiring targets ALL agents (or the explicit --agents
 		// list), never just the detected subset: an agent installed later is
-		// already wired with no re-run. Wire() itself already pre-wires
-		// global hooks/adapters for all agents; WireGlobal adds the global
+		// already wired with no re-run. WireGlobal adds the global
 		// instruction files (AGENTS.md, CLAUDE.md) and the opencode plugin.
 		for _, s := range setup.WireGlobal(agents) {
 			mark := "ok"
@@ -95,7 +97,7 @@ func runSetup(rest []string) {
 	// Fail closed: a partial wiring (some agents errored) must not look like a
 	// clean success. Exit non-zero so install scripts and CI can detect it.
 	if failed > 0 {
-		panic(exitError{code: 1})
+		fatal("setup: %d agent(s) failed to wire — fix the errors above and rerun", failed)
 	}
 }
 
@@ -192,9 +194,25 @@ func verifyMCP(root string) error {
 }
 
 func runBuddy(rest []string) {
-	root := "."
-	if len(rest) > 0 {
-		root = rest[0]
+	f, args, err := parseFlags(rest)
+	if err != nil {
+		fatalUsage("flags: %v", err)
+	}
+	// A single positional argument is the project root; more than one is a
+	// usage error, and an unknown flag is rejected by parseFlags above
+	// (previously `kern buddy --nope` silently treated --nope as the root).
+	if len(args) > 1 {
+		fatalUsage("usage: kern buddy [root]")
+	}
+	root := f.root
+	if root == "" {
+		root = "."
+		if len(args) > 0 {
+			root = args[0]
+		}
+	}
+	if _, err := os.Stat(root); err != nil {
+		fatal("buddy: %v", err)
 	}
 	out, err := brief.Build(root)
 	if err != nil {
@@ -278,9 +296,9 @@ func runOnboard(rest []string) {
 
 	// AGENTS.md wiring, only if the file is missing.
 	wired := ""
-	if _, serr := os.Stat(filepath.Join(abs, "AGENTS.md")); os.IsNotExist(serr) {
+	if _, serr := os.Stat(filepath.Join(abs, "AGENTS.md")); errors.Is(serr, fs.ErrNotExist) {
 		agents := setup.DetectAgents(abs)
-		setup.Wire(abs, agents, false)
+		setup.Wire(abs, agents, false, false) // onboard is project-scoped: never touch user-global config
 		if _, werr := os.Stat(filepath.Join(abs, "AGENTS.md")); werr == nil {
 			wired = "written"
 		} else {
@@ -341,86 +359,32 @@ func runFw(rest []string) {
 		}
 		return
 	}
-	root := "."
-	if len(args) > 0 && args[0] != "" {
-		root = args[0]
+	f, pos, err := parseFlags(rest)
+	if err != nil {
+		fatalUsage("flags: %v", err)
 	}
-	det, err := fw.Detect(root)
+	root := f.root
+	if root == "" {
+		root = "."
+		if len(pos) > 0 {
+			root = pos[0]
+		}
+	}
+	if f.root != "" {
+		// An explicit --root must name an existing directory; a bogus root
+		// must fail loud (rc=1) instead of reporting "No known frameworks
+		// detected" (the walk silently produces zero signals on a missing
+		// dir), matching arch/dead fail-loud behavior.
+		if st, serr := os.Stat(f.root); serr != nil || !st.IsDir() {
+			fatal("fw: root %q does not exist", f.root)
+		}
+	}
+	det, err := fw.DetectWithStdlib(root)
 	if err != nil {
 		fatal("fw: %v", err)
 	}
-	det = withGoStdlib(root, det)
 	fmt.Println(fw.Render(det))
 
-}
-
-// withGoStdlib guarantees a Go project reports the Go language itself, not
-// just the frameworks layered on top of it (F-010: `kern frameworks` said
-// "No known frameworks detected" for a plain Go module whose go.mod has no
-// framework dependencies). A Go module without gin/echo/grpc/... still runs
-// on the standard library, so it gets a "Go (stdlib)" baseline entry
-// alongside any framework entries the catalog already found. Signal-less
-// projects keep the pre-existing "No known frameworks detected" message.
-func withGoStdlib(root string, det []fw.Detected) []fw.Detected {
-	for _, d := range det {
-		if d.ID == "go-stdlib" {
-			return det
-		}
-	}
-	if !isGoProject(root) {
-		return det
-	}
-	out := append([]fw.Detected(nil), det...)
-	out = append(out, fw.Detected{
-		Framework: fw.Framework{
-			ID:      "go-stdlib",
-			Name:    "Go (stdlib)",
-			Lang:    "go",
-			Summary: "Go standard library: modules and programs with no third-party framework.",
-		},
-		Signals: []string{"go.mod / *.go"},
-	})
-	// Match fw.Detect's ordering contract (lang, then name) so Render
-	// groups languages cleanly even when a Go framework was also detected.
-	sort.Slice(out, func(i, j int) bool {
-		if out[i].Lang != out[j].Lang {
-			return out[i].Lang < out[j].Lang
-		}
-		return out[i].Name < out[j].Name
-	})
-	return out
-}
-
-// isGoProject reports whether root contains Go source: a go.mod manifest or
-// .go files. The walk is bounded and skips the same baseline dirs the fw
-// detector skips (VCS, dependency, build output) so node_modules/vendor trees
-// cannot masquerade as Go projects.
-func isGoProject(root string) bool {
-	if st, err := os.Stat(filepath.Join(root, "go.mod")); err == nil && !st.IsDir() {
-		return true
-	}
-	const depth = 3
-	skip := map[string]bool{".git": true, ".hg": true, ".svn": true, "node_modules": true, "vendor": true, "dist": true, "build": true, "out": true, "bin": true, ".venv": true, "__pycache__": true, ".kern": true, "target": true}
-	found := false
-	_ = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
-		if err != nil || found {
-			return nil
-		}
-		if d.IsDir() {
-			if path != root {
-				rel, _ := filepath.Rel(root, path)
-				if skip[rel] || strings.Count(rel, string(filepath.Separator)) >= depth {
-					return filepath.SkipDir
-				}
-			}
-			return nil
-		}
-		if strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "go.mod") {
-			found = true
-		}
-		return nil
-	})
-	return found
 }
 
 // runEntryPoints lists framework-detected entry points (handlers, controllers,
@@ -453,6 +417,14 @@ func runEntryPoints(rest []string) {
 			fatal("bad pattern %q: %v", f.pattern, err)
 		}
 	}
+	type entryJSON struct {
+		Framework string `json:"framework"`
+		Symbol    string `json:"symbol"`
+		Route     string `json:"route"`
+		File      string `json:"file"`
+		Line      int    `json:"line"`
+	}
+	var out []entryJSON
 	n := 0
 	pkgOf := map[string]string{} // file -> package name
 	for _, p := range ix.Pkgs {
@@ -472,7 +444,7 @@ func runEntryPoints(rest []string) {
 		} else if fwID, ok := goNativeEntry(s, pkgOf); ok {
 			// Language-native entry point: Go main (package main) and init
 			// funcs are entry points even when no framework tagged them
-			// (F-009: `kern entry-points` reported none on a plain Go
+			// (`kern entry-points` reported none on a plain Go
 			// module). Listed alongside framework-tagged entries.
 			framework = fwID
 			route = "-"
@@ -483,11 +455,23 @@ func runEntryPoints(rest []string) {
 		if re != nil && !re.MatchString(s.Name) && (route == "" || !re.MatchString(route)) {
 			continue
 		}
-		fmt.Printf("%s %s %s %s:%d\n", framework, s.FullName(), route, s.File, s.Line)
+		out = append(out, entryJSON{framework, s.FullName(), route, s.File, s.Line})
 		n++
 		if n >= limit {
 			break
 		}
+	}
+	if f.json {
+		// --json was previously ignored here (plain text always emitted);
+		// emit the same shape as `kern entries --json`.
+		if out == nil {
+			out = []entryJSON{}
+		}
+		printJSON(map[string]any{"entries": out})
+		return
+	}
+	for _, e := range out {
+		fmt.Printf("%s %s %s %s:%d\n", e.Framework, e.Symbol, e.Route, e.File, e.Line)
 	}
 	if n == 0 {
 		fmt.Println("no framework entry points in index (run kern index to populate)")
@@ -580,8 +564,7 @@ func runHook(rest []string) {
 			if repl != "" {
 				// Gemini: exit code 2 + stderr text hides the real tool
 				// result and substitutes the stderr content.
-				fmt.Fprintln(os.Stderr, repl)
-				panic(exitError{code: 2})
+				fatalUsage("%s", repl)
 			}
 		case "gemini-prompt":
 			if err := hook.GeminiPrompt(root, in); err != nil {
@@ -644,6 +627,30 @@ func runCommit(rest []string) {
 	if err != nil {
 		fatalUsage("flags: %v", err)
 	}
+	// A dry-run must never mutate the index, so --all may only stage when the
+	// commit is real. The preview still reflects --all by diffing tracked
+	// changes against HEAD and rendering untracked files as no-index diffs.
+	if f.dryRun {
+		preview, perr := commitPreviewDiff(f.all)
+		if perr != nil {
+			fatal("commit: %v", perr)
+		}
+		if len(strings.TrimSpace(preview)) == 0 {
+			fatal("nothing staged to commit (use --all to stage tracked+untracked changes)")
+		}
+		msg := commitmsg.Generate(preview)
+		subject := f.message
+		if subject == "" {
+			subject = msg.Subject
+		}
+		fmt.Println("kern: would commit with:")
+		fmt.Println()
+		fmt.Println(subject)
+		for _, l := range msg.Body {
+			fmt.Println(l)
+		}
+		return
+	}
 	if f.all {
 		if _, err := gitOutput("add", "-A"); err != nil {
 			fatal("staging failed: %v", err)
@@ -661,15 +668,6 @@ func runCommit(rest []string) {
 	if subject == "" {
 		subject = msg.Subject
 	}
-	if f.dryRun {
-		fmt.Println("kern: would commit with:")
-		fmt.Println()
-		fmt.Println(subject)
-		for _, l := range msg.Body {
-			fmt.Println(l)
-		}
-		return
-	}
 	body := strings.Join(msg.Body, "\n")
 	full := subject
 	if body != "" {
@@ -681,5 +679,47 @@ func runCommit(rest []string) {
 	}
 	short := shortHash()
 	fmt.Printf("committed %s %s\n", short, subject)
+}
 
+// commitPreviewDiff renders what a commit would include without touching the
+// index. Without all it mirrors the real commit exactly (the staged diff,
+// which is a read-only query). With all it approximates `git add -A` by
+// diffing tracked changes against HEAD and rendering each untracked file as a
+// no-index diff against /dev/null.
+func commitPreviewDiff(all bool) (string, error) {
+	if !all {
+		out, err := gitDiff("diff --cached")
+		if err != nil {
+			return "", err
+		}
+		return string(out), nil
+	}
+	var b strings.Builder
+	// git diff HEAD covers staged + unstaged tracked changes. In a repo with
+	// no commits yet it fails; fall back to the staged diff, which diffs
+	// against the empty tree.
+	if out, err := gitDiff("diff HEAD"); err == nil {
+		b.Write(out)
+	} else if out, err := gitDiff("diff --cached"); err != nil {
+		return "", err
+	} else {
+		b.Write(out)
+	}
+	out, err := gitOutput("ls-files", "--others", "--exclude-standard")
+	if err != nil {
+		return "", err
+	}
+	for _, p := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if p == "" {
+			continue
+		}
+		// git diff --no-index exits 1 when the file differs from /dev/null — the
+		// expected case — so only treat empty output as failure.
+		if d, derr := gitOutput("diff", "--no-index", "--", "/dev/null", p); derr != nil && len(d) == 0 {
+			continue
+		} else {
+			b.Write(d)
+		}
+	}
+	return b.String(), nil
 }

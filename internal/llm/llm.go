@@ -71,15 +71,17 @@ func (c *Client) Available() bool {
 
 const instruction = "You are a context optimizer for an AI coding assistant. Compress the following prompt: keep the intent, constraints, file paths and key identifiers, remove fluff and redundancy. Reply with only the compressed prompt and no commentary."
 
-// Compress asks the local model to condense prompt. It returns an error when
-// Ollama is unavailable, the model errors, or the response is empty.
-func (c *Client) Compress(prompt string) (string, error) {
+// postGenerate POSTs a non-streaming generate request to the local Ollama and
+// returns the trimmed model response. It is the shared POST→status-check→
+// decode-body flow of Compress and Complete, including the reachability guard
+// and the empty-response error.
+func (c *Client) postGenerate(prompt string) (string, error) {
 	if !c.Available() {
 		return "", fmt.Errorf("ollama not reachable at %s", c.Base)
 	}
 	payload, err := json.Marshal(map[string]any{
 		"model":  c.Model,
-		"prompt": instruction + "\n\n" + prompt,
+		"prompt": prompt,
 		"stream": false,
 	})
 	if err != nil {
@@ -106,40 +108,17 @@ func (c *Client) Compress(prompt string) (string, error) {
 	return out.Response, nil
 }
 
+// Compress asks the local model to condense prompt. It returns an error when
+// Ollama is unavailable, the model errors, or the response is empty.
+func (c *Client) Compress(prompt string) (string, error) {
+	return c.postGenerate(instruction + "\n\n" + prompt)
+}
+
 // Complete asks the local model to continue a directive prompt (system) plus
 // user context. It is the generic completion used by the self-correction loop
 // and returns the model's raw text.
 func (c *Client) Complete(system, user string) (string, error) {
-	if !c.Available() {
-		return "", fmt.Errorf("ollama not reachable at %s", c.Base)
-	}
-	payload, err := json.Marshal(map[string]any{
-		"model":  c.Model,
-		"prompt": system + "\n\n" + user,
-		"stream": false,
-	})
-	if err != nil {
-		return "", err
-	}
-	resp, err := c.HTTP.Post(c.Base+"/api/generate", "application/json", bytes.NewReader(payload))
-	if err != nil {
-		return "", err
-	}
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("ollama status %d", resp.StatusCode)
-	}
-	var out struct {
-		Response string `json:"response"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return "", err
-	}
-	out.Response = strings.TrimSpace(out.Response)
-	if out.Response == "" {
-		return "", errors.New("empty ollama response")
-	}
-	return out.Response, nil
+	return c.postGenerate(system + "\n\n" + user)
 }
 
 // EmbedModel resolves the embedding model: the argument, else KERN_EMBED_MODEL

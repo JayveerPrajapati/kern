@@ -58,8 +58,6 @@ func recoverExitCode(fn func()) (code int) {
 	return 0
 }
 
-// --- F-028: kern tasks / kern task list ---
-
 func TestTasksListsTasks(t *testing.T) {
 	dir := fix3Fixture(t)
 	// Seed a task through the same TaskService the CLI uses.
@@ -93,8 +91,6 @@ func TestTaskListSubcommand(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create task: %v", err)
 	}
-	// `kern task list` must list tasks, not treat "list" as a task id
-	// (F-028 repro: `kern task list` -> "task not found: list").
 	out := captureStdout(t, func() {
 		runTask([]string{"list", "--root", dir})
 	})
@@ -120,8 +116,6 @@ func TestTasksEmptyOutput(t *testing.T) {
 		t.Errorf("kern tasks on empty store = %q, want 'no tasks'", out)
 	}
 }
-
-// --- F-029: kern agent message/interrupt hint ---
 
 func TestRunAgentHintsMCPSurfaces(t *testing.T) {
 	for _, sub := range []string{"message", "interrupt"} {
@@ -159,8 +153,6 @@ func TestRunAgentUnknownSubcommand(t *testing.T) {
 	}
 }
 
-// TestDispatchAgentAndTasksRegistered pins that `agent` and `tasks` are
-// dispatchable commands (F-028/F-029) with help text.
 func TestDispatchAgentAndTasksRegistered(t *testing.T) {
 	if e, ok := commandTable["tasks"]; !ok || e.help == "" {
 		t.Errorf("commandTable[tasks] = %+v, want registered entry with help", e)
@@ -169,8 +161,6 @@ func TestDispatchAgentAndTasksRegistered(t *testing.T) {
 		t.Errorf("commandTable[agent] = %+v, want registered entry with help", e)
 	}
 }
-
-// --- F-013: kern plan graceful degradation ---
 
 func TestPlanSymbolDegradeHints(t *testing.T) {
 	dir := fix3Fixture(t)

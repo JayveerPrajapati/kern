@@ -1,54 +1,50 @@
 package main
 
 import (
-	"flag"
 	"fmt"
-	"strings"
-
 	"github.com/JayveerPrajapati/kern/internal/domain"
 	"github.com/JayveerPrajapati/kern/internal/governance"
 )
 
-// arrayFlag is a repeatable string flag value (flag.Value), used for
-// repeatable options like -deny-path.
-type arrayFlag []string
-
-func (a *arrayFlag) String() string { return strings.Join(*a, ",") }
-
-func (a *arrayFlag) Set(v string) error {
-	*a = append(*a, v)
-	return nil
-}
-
 // runAuthorizeContext implements `kern authorize-context`: compute the context
 // an agent may legally read for a task. Exit codes: 0 = allowed, 2 = denied
 // (proof still printed), 1 = error.
-func runAuthorizeContext(rest []string) {
-	fs := flag.NewFlagSet("authorize-context", flag.ContinueOnError)
-	var (
-		agentID   = fs.String("agent", "", "agent ID to authorize (required)")
-		task      = fs.String("task", "", "task ID the authorization is scoped to (required)")
-		root      = fs.String("root", ".", "project root")
-		symbol    = fs.String("symbol", "", "optional substring filter applied to allowed symbols")
-		denyPaths arrayFlag
-		jsonOut   = fs.Bool("json", true, "emit JSON (default true)")
-	)
-	fs.Var(&denyPaths, "deny-path", "path prefix denied by the task scope (repeatable)")
-	if err := fs.Parse(rest); err != nil {
+func runAuthorizeContext(rest []string) int {
+	f, _, err := parseFlags(rest)
+	if err != nil {
 		fatalUsage("authorize-context: %v", err)
 	}
-	if *agentID == "" || *task == "" {
+	agentID := f.agent
+	task := f.task
+	root := f.root
+	symbol := f.symbol
+	denyPaths := f.denyPaths
+	// --json defaults TRUE for authorize-context (preserved FlagSet default);
+	// the unified parser's bool default is false, so treat it as json unless
+	// an explicit --json[=false] was given.
+	jsonOut := f.json || !f.jsonSet
+	if agentID == "" || task == "" {
 		fatalUsage("authorize-context: -agent and -task are required")
 	}
-
-	ix, err := loadOrBuild(*root)
+	// Agent identities are process-local by default; a fresh CLI process
+	// starts with an empty registry, which would deny every agent — even
+	// the built-in default. Ensure the default identity exists and merge
+	// any agents persisted by `kern org agents register` before resolving.
+	governance.EnsureDefaultAgent()
+	// Fail loud: a registry that cannot be loaded would silently deny or
+	// mis-scope every authorization decision below — never continue with a
+	// partial registry.
+	if err := governance.LoadAgents(root); err != nil {
+		fatal("authorize-context: could not load agents: %v", err)
+	}
+	ix, err := loadOrBuild(root)
 	if err != nil {
 		fatal("AuthorizeContext: %v", err)
 	}
 
 	// Build a per-call firewall and register the resolved agent into it.
 	fw := governance.NewFirewall()
-	if agent, aerr := governance.GetAgent(*agentID); aerr == nil {
+	if agent, aerr := governance.GetAgent(agentID); aerr == nil {
 		fw = fw.WithAgents(agent)
 	}
 
@@ -56,31 +52,31 @@ func runAuthorizeContext(rest []string) {
 	// permissive default applies.
 	var scope *domain.TaskScope
 	if len(denyPaths) > 0 {
-		scope = &domain.TaskScope{TaskID: *task, DeniedPaths: denyPaths}
+		scope = &domain.TaskScope{TaskID: task, DeniedPaths: denyPaths}
 	}
 
 	req := governance.Request{
-		Task:         *task,
-		AgentID:      *agentID,
+		Task:         task,
+		AgentID:      agentID,
 		Scope:        scope,
-		Root:         *root,
-		SymbolFilter: *symbol,
+		Root:         root,
+		SymbolFilter: symbol,
 	}
 	resp, err := governance.AuthorizeContext(req, ix, fw)
 	if err != nil && err != governance.ErrUnauthorized {
 		fatal("AuthorizeContext: %v", err)
 	}
 
-	if *jsonOut {
+	if jsonOut {
 		printJSON(resp)
 	} else {
 		printAuthorizeContextText(resp)
 	}
 
 	if resp.Proof.Decision.Allowed {
-		panic(exitError{code: 0})
+		return 0
 	}
-	panic(exitError{code: 2})
+	return 2
 }
 
 // printAuthorizeContextText renders a human-readable summary of an

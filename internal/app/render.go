@@ -231,12 +231,12 @@ func nodeName(n domain.Node) string {
 
 // maxImpactListItems caps how many entries of any impact section the text
 // renderer prints. Counts stay exact; overflow collapses to a "+N more (use
-// --json for full list)" line, mirroring the concise what-if style (P1-4).
+// --json for full list)" line, mirroring the concise what-if style.
 // Full data is preserved in ImpactReport for --json / MCP / REST.
 const maxImpactListItems = 20
 
 // stdlibPkgs is the Go standard-library top-level package set used to collapse
-// transitive stdlib fan-out in "What it calls" (P1-4: loadOrBuild fanned to
+// transitive stdlib fan-out in "What it calls" (loadOrBuild fanned to
 // 1274 entries incl. strings.*/os.*/fmt.*). Only these exact first-segment
 // names collapse; internal packages (index, app, domain, ...) are never in
 // this set so project calls are always shown in full.

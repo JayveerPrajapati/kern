@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 
@@ -113,16 +112,14 @@ func mcpClientAdd(args []string) {
 	}
 	servers, err := mcpclient.LoadConfig(absRoot)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		panic(exitError{code: 1})
+		fatal("mcp-client: %v", err)
 	}
 	if _, exists := mcpclient.FindServer(servers, name); exists {
 		fatalUsage("server %q already configured", name)
 	}
 	servers = append(servers, s)
 	if err := mcpclient.SaveConfig(absRoot, servers); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		panic(exitError{code: 1})
+		fatal("mcp-client: %v", err)
 	}
 	fmt.Printf("added MCP server %q (%s)\n", name, s.Transport)
 }
@@ -135,8 +132,7 @@ func mcpClientList(args []string) {
 	}
 	servers, err := mcpclient.LoadConfig(absRoot)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		panic(exitError{code: 1})
+		fatal("mcp-client: %v", err)
 	}
 	if len(servers) == 0 {
 		fmt.Println("no MCP servers configured (use: kern mcp-client add)")
@@ -163,8 +159,7 @@ func mcpClientRemove(args []string) {
 	}
 	servers, err := mcpclient.LoadConfig(absRoot)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		panic(exitError{code: 1})
+		fatal("mcp-client: %v", err)
 	}
 	kept := servers[:0]
 	found := false
@@ -179,8 +174,7 @@ func mcpClientRemove(args []string) {
 		fatalUsage("no configured server named %q", args[0])
 	}
 	if err := mcpclient.SaveConfig(absRoot, kept); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		panic(exitError{code: 1})
+		fatal("mcp-client: %v", err)
 	}
 	fmt.Printf("removed MCP server %q\n", args[0])
 }
@@ -203,8 +197,7 @@ func mcpClientCall(args []string) {
 	}
 	servers, err := mcpclient.LoadConfig(absRoot)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		panic(exitError{code: 1})
+		fatal("mcp-client: %v", err)
 	}
 	server, ok := mcpclient.FindServer(servers, serverName)
 	if !ok {
@@ -212,14 +205,12 @@ func mcpClientCall(args []string) {
 	}
 	c, err := mcpclient.Dial(context.Background(), &server)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		panic(exitError{code: 1})
+		fatal("mcp-client: %v", err)
 	}
 	defer c.Close()
 	res, err := c.CallTool(context.Background(), tool, toolArgs)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		panic(exitError{code: 1})
+		fatal("mcp-client: %v", err)
 	}
 	b, _ := json.MarshalIndent(res, "", "  ")
 	fmt.Println(string(b))

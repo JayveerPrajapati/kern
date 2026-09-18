@@ -66,3 +66,54 @@ func TestRunProjectMissingRootFails(t *testing.T) {
 	}()
 	runProject([]string{missing})
 }
+
+// assertExitCode recovers the exitError sentinel and asserts its code —
+// the shared contract check for the P2-8 straggler fixes.
+func assertExitCode(t *testing.T, want int, fn func()) {
+	t.Helper()
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatalf("expected exitError panic (code %d), got none", want)
+		}
+		e, ok := r.(exitError)
+		if !ok {
+			panic(r)
+		}
+		if e.code != want {
+			t.Fatalf("exit code = %d, want %d", e.code, want)
+		}
+	}()
+	fn()
+}
+
+// TestRunMissingRootFails (P2-8): kern brief/buddy/pack rendered empty output
+// with exit 0 for a nonexistent root; a missing root must fail loud (exit 1).
+func TestRunMissingRootFails(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "nope")
+	t.Run("brief", func(t *testing.T) { assertExitCode(t, 1, func() { runBrief([]string{missing}) }) })
+	t.Run("buddy", func(t *testing.T) { assertExitCode(t, 1, func() { runBuddy([]string{missing}) }) })
+	t.Run("pack", func(t *testing.T) { assertExitCode(t, 1, func() { runPack([]string{missing}) }) })
+}
+
+// TestParseSwallowBadFlagFails (P2-8): the mcp-tool mirror commands swallowed
+// fs.Parse errors — an unknown flag printed usage to stderr but exited 0.
+// The parse error must now fail loud (exit 2).
+func TestParseSwallowBadFlagFails(t *testing.T) {
+	bad := []string{"--nope"}
+	cases := map[string]func([]string){
+		"evidence-anchor":    runEvidenceAnchor,
+		"stream":             runStream,
+		"compose":            runCompose,
+		"prompt-fill":        runPromptFill,
+		"context-watch":      runContextWatch,
+		"agent-fingerprint":  runAgentFingerprint,
+		"memory-ranked":      runMemoryRanked,
+		"agent-coordination": runAgentCoordination,
+		"semantic-merge":     runSemanticMerge,
+	}
+	for name, fn := range cases {
+		t.Run(name, func(t *testing.T) { assertExitCode(t, 2, func() { fn(bad) }) })
+	}
+	t.Run("register-host-sampler", func(t *testing.T) { assertExitCode(t, 2, func() { runRegisterHostSampler(bad) }) })
+}

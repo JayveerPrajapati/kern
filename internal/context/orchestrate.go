@@ -108,11 +108,26 @@ func (e *Engine) Orchestrate(intent string, opts OrchestrateOptions) (*Orchestra
 	// intents assemble a packet rather than failing with symbol-not-found).
 	pkt, err := e.AnalyzeChange(intent)
 	if err != nil {
-		for _, cand := range whatif.ExtractSymbols(intent) {
+		for _, cand := range whatif.ExtractSymbolsIndex(intent, e.ix) {
 			if cand == intent {
 				continue
 			}
 			if pkt2, err2 := e.AnalyzeChange(cand); err2 == nil {
+				pkt = pkt2
+				err = nil
+				break
+			}
+		}
+	}
+	if err != nil {
+		// Prose fallback: intents whose words name no symbol (e.g. "explain
+		// the greeting flow") still resolve through the build-time prose
+		// vocab before the pipeline gives up.
+		for _, hit := range e.ix.LookupProse(intent, 5) {
+			if hit.Symbol == intent {
+				continue
+			}
+			if pkt2, err2 := e.AnalyzeChange(hit.Symbol); err2 == nil {
 				pkt = pkt2
 				err = nil
 				break

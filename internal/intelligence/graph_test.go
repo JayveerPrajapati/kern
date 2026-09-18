@@ -312,9 +312,6 @@ func TestWhatDoesXDependOnNamesKeepsUnresolvedCallees(t *testing.T) {
 	}
 }
 
-// TestDirectDependsOnNamesIsOneHop pins P1-4: the direct view returns only
-// 1-hop callees (Bar + unresolved fmt.Println), not the transitive closure,
-// so impact reports can order direct calls first.
 func TestDirectDependsOnNamesIsOneHop(t *testing.T) {
 	ix := &index.Index{
 		Root: "/ext",

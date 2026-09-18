@@ -130,9 +130,11 @@ func TestServeEnterpriseDefaultsToRoot(t *testing.T) {
 	}
 }
 
-// TestServeHelpOrUsage asserts `serve --help` and bare `serve` print usage and
-// never construct a handler (so no server starts).
-func TestServeHelpOrUsage(t *testing.T) {
+// TestServeHelpPrintsUsageAndBareServeStarts asserts `serve --help` prints
+// usage and never constructs a handler, while a bare `serve` (zero args)
+// starts the server in single-project mode on the default address (or
+// KERN_ADDR when set) instead of printing usage.
+func TestServeHelpPrintsUsageAndBareServeStarts(t *testing.T) {
 	h, mode, err := buildServeHandler([]string{"--help"})
 	if err != nil {
 		t.Fatalf("buildServeHandler(--help): %v", err)
@@ -140,12 +142,18 @@ func TestServeHelpOrUsage(t *testing.T) {
 	if h != nil || mode != "" {
 		t.Fatalf("--help must not construct a handler; got handler=%v mode=%q", h, mode)
 	}
+	// Bare `kern serve` (zero args): single-project mode on the default
+	// address. Chdir to a fixture so web.New(".") has a tiny module to index.
+	t.Chdir(serveFixture(t))
 	h, mode, err = buildServeHandler(nil)
 	if err != nil {
 		t.Fatalf("buildServeHandler(no args): %v", err)
 	}
-	if h != nil || mode != "" {
-		t.Fatalf("no args must not construct a handler; got handler=%v mode=%q", h, mode)
+	if h == nil {
+		t.Fatal("bare serve must construct a handler (single-project mode)")
+	}
+	if mode != "single-project" {
+		t.Fatalf("expected mode %q, got %q", "single-project", mode)
 	}
 }
 

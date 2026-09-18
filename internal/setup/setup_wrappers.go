@@ -23,20 +23,21 @@ func wrapperVersion(bin string) (string, bool) {
 	return fields[1], true
 }
 
-// checkWrapperFreshness verifies that leftover liability binaries on PATH
-// (blueprint, blueprint-mcp — legacy shims kept only for backward
-// compatibility, no longer built or installed by CI/Makefile/setup) report
-// the same version as the running kern binary. After a release upgrade, stale
-// standalone leftovers can silently downgrade or bypass the pre-commit
-// governance gate (A16): an old hook may run `exec blueprint check` and would
-// invoke the old binary. The check is advisory — it reports a mismatch with a
-// refresh hint, never by itself a failure. A healthy deployment (no leftover
-// installed, or matching versions) contributes no Status entries so
-// `kern setup --check` stays clean.
+// checkWrapperFreshness verifies that the `kern` binary on PATH reports the
+// same version as the running kern binary. The standalone liability shims
+// (blueprint, blueprint-mcp — and the kernops binary) were decommissioned:
+// their functionality now lives as `kern blueprint` subcommands, so the
+// freshness check targets kern itself. After a release upgrade, a stale kern
+// leftover on PATH can silently downgrade or bypass the pre-commit governance
+// gate (A16): an old hook may run `exec kern check` and would invoke the old
+// binary. The check is advisory — it reports a mismatch with a refresh hint,
+// never by itself a failure. A healthy deployment (no leftover installed, or
+// matching versions) contributes no Status entries so `kern setup --check`
+// stays clean.
 func checkWrapperFreshness() []Status {
 	own := kernversion.Version
 	var out []Status
-	for _, bin := range []string{"blueprint", "blueprint-mcp"} {
+	for _, bin := range []string{"kern"} {
 		path, err := exec.LookPath(bin)
 		if err != nil {
 			continue // not installed via this PATH; no check applies

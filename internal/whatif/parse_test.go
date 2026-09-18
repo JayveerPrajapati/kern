@@ -4,6 +4,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/JayveerPrajapati/kern/internal/index"
 )
 
 func TestExtractSymbols(t *testing.T) {
@@ -72,10 +74,6 @@ func TestExtractSymbols(t *testing.T) {
 	}
 }
 
-// TestExtractSymbolsSkipsInflectedLeadVerbs (report A8): a prose query that
-// opens with an inflected change-verb ("what breaks if I remove the translate
-// function from cmaas_controller?") must never surface "breaks" (or "removes")
-// ahead of the real symbol that follows it.
 func TestExtractSymbolsSkipsInflectedLeadVerbs(t *testing.T) {
 	cands := ExtractSymbols("what breaks if I remove the translate function from cmaas_controller?")
 	if len(cands) == 0 || cands[0] != "translate" {
@@ -121,5 +119,26 @@ func TestExtractSymbolsNetNewFeatureStopwords(t *testing.T) {
 				t.Errorf("stoplisted word %q leaked into candidates %v", bad, cands)
 			}
 		}
+	}
+}
+
+// Stopword-colliding symbols: "fix the Add function" mentions only words that
+// collide with the change-verb stoplist, yet "Add" is a real symbol. The
+// index-aware extractor must surface it; the pure extractor (no index) keeps
+// its old stopword behavior.
+func TestExtractSymbolsIndexKeepsStopwordCollidingSymbol(t *testing.T) {
+	ix := &index.Index{
+		Symbols: []index.Symbol{
+			{Kind: "func", Name: "Add", File: "math.go", Line: 10},
+		},
+		Calls:   map[string][]index.CallEdge{},
+		Callers: map[string][]string{},
+	}
+	cands := ExtractSymbolsIndex("fix the Add function", ix)
+	if len(cands) == 0 || cands[0] != "Add" {
+		t.Fatalf("ExtractSymbolsIndex(%q) = %v, want leading candidate %q", "fix the Add function", cands, "Add")
+	}
+	if pure := ExtractSymbols("fix the Add function"); len(pure) != 0 {
+		t.Errorf("pure ExtractSymbols must keep its stopword behavior, got %v", pure)
 	}
 }

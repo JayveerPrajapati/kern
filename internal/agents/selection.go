@@ -251,24 +251,17 @@ func (r RoutingContext) RankRoles(candidates []string) []string {
 	return out
 }
 
-// RouteTeam returns the ordered agent roles for this routing context. It
+// RouteFor returns the ordered agent roles for this routing context. It
 // starts from the pipeline roles selected for the classified [TaskKind] and
 // reorders them by [RoutingContext.RankRoles] so repository, policy, and
 // historical-success influences are honored where they apply. It never returns
 // an empty slice: if ranking yields nothing useful it falls back to the
 // pipeline roles in their natural order.
-func (r *RoutingContext) RouteTeam() []string {
-	return r.route()
-}
-
-// RouteFor is an alias for [RoutingContext.RouteTeam]; both produce the same
-// deterministic, policy/repository/history-aware role ordering for this
-// routing context.
 func (r *RoutingContext) RouteFor() []string {
 	return r.route()
 }
 
-// route is the shared implementation behind RouteTeam and RouteFor.
+// route is the shared implementation behind RouteFor.
 func (r *RoutingContext) route() []string {
 	stages := SelectPipeline(r.Kind())
 	if len(stages) == 0 {

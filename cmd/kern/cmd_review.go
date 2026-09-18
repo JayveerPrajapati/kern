@@ -20,6 +20,7 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/verify"
 	"github.com/JayveerPrajapati/kern/internal/whatif"
 	"os"
+	"regexp"
 	"sort"
 	"strings"
 )
@@ -41,6 +42,12 @@ func runAnalyze(cmd string, rest []string) {
 	// profile surface. Reject them loudly instead of silently dropping.
 	if cmd != "analyze" && (f.lens != "" || f.profile != "") {
 		fatal("--lens/--profile are only supported for kern analyze")
+	}
+	// plan/risk print deterministic text plans; the shared parser accepted
+	// --json but the command ignored it. Reject loudly instead of silently
+	// dropping the flag.
+	if cmd != "analyze" && f.json {
+		fatal("--json is only supported for kern analyze")
 	}
 	change := args[0]
 	p, err := app.New(root)
@@ -192,7 +199,12 @@ func runExecute(rest []string) {
 	}
 	fmt.Printf("verdict: %s\n", v.Verdict)
 	fmt.Printf("summary: %s\n", v.Summary)
-	fmt.Printf("diff:\n%s\n", diff)
+	const maxDiff = 1 << 20 // 1 MiB print cap (a sandbox diff can reach tens of MB)
+	if len(diff) > maxDiff {
+		fmt.Printf("diff: (%d bytes, showing first %d)\n%s\n", len(diff), maxDiff, diff[:maxDiff])
+	} else {
+		fmt.Printf("diff:\n%s\n", diff)
+	}
 	fmt.Printf("\n[task: %s — state: %s]\n", t.ID, t.State)
 }
 
@@ -251,6 +263,14 @@ func runImpact(rest []string) {
 	}
 	if len(args) < 1 || args[0] == "" {
 		fatalUsage("usage: kern impact <change> [kind] [new-target] [--root ROOT]")
+	}
+	// F22: --precision previously accepted any value and silently ignored
+	// everything except "strict". Reject unknown values as a usage error
+	// (rc=2) instead of pretending they took effect.
+	switch f.precision {
+	case "", "default", "strict":
+	default:
+		fatalUsage("impact: invalid --precision %q (want \"default\" or \"strict\")", f.precision)
 	}
 	change := args[0]
 	p, err := app.New(root)
@@ -313,7 +333,7 @@ func runImpact(rest []string) {
 	}
 	// renderImpactText already emits the "IMPACT for: <target>" header (the
 	// impact renderer is shared with the MCP and REST surfaces), so printing it
-	// here again produced a duplicated header (F-014). The transitive callees in
+	// here again produced a duplicated header. The transitive callees in
 	// the "What it calls" section are relabeled against the index's direct call
 	// edges so transitive entries are no longer indistinguishable from direct
 	// ones.
@@ -329,7 +349,7 @@ func runImpact(rest []string) {
 
 // annotateImpactCallees relabels the "What it calls" section of a rendered
 // impact report, marking each entry "(direct)" or "(transitive)" using the
-// index's direct call edges (F-014: the report listed transitive callees of
+// index's direct call edges (the report listed transitive callees of
 // the target — callees of callees — alongside direct ones with no way to tell
 // them apart). The text is returned unchanged when the index is unavailable
 // or the target has no recorded call edges, so the annotation never degrades
@@ -369,7 +389,7 @@ func annotateImpactCallees(text, target, root string) string {
 			continue
 		}
 		entry := strings.TrimSpace(trimmed[2:])
-		// P1-4: skip renderer summary lines (stdlib collapse, "+N more") so
+		// skip renderer summary lines (stdlib collapse, "+N more") so
 		// they are never mislabeled as transitive callees.
 		if strings.HasPrefix(entry, "stdlib:") || strings.Contains(entry, "use --json for full list") {
 			continue
@@ -443,6 +463,9 @@ func runVerify(rest []string) {
 		if f.json {
 			rep.Version = version
 			printJSON(rep)
+			if !rep.EnvelopeValid {
+				fatal("verify-pipeline: envelope invalid — see JSON output above")
+			}
 			return
 		}
 		fmt.Printf("envelope_valid: %t\n", rep.EnvelopeValid)
@@ -455,6 +478,9 @@ func runVerify(rest []string) {
 		fmt.Printf("evidence_retained: %.2f\n", rep.EvidenceRetained)
 		for _, s := range rep.Steps {
 			fmt.Printf("  - %s\n", s)
+		}
+		if !rep.EnvelopeValid {
+			fatal("verify-pipeline: envelope invalid — see output above")
 		}
 		return
 	case f.verifySilent:
@@ -490,6 +516,9 @@ func runVerify(rest []string) {
 		ok, reasons := verification.VerifySilentOrchestration(root, symbol)
 		if f.json {
 			printJSON(map[string]any{"version": version, "ok": ok, "reasons": reasons})
+			if !ok {
+				fatal("verify-silent: orchestration leak detected — see JSON output above")
+			}
 			return
 		}
 		if ok {
@@ -499,6 +528,9 @@ func runVerify(rest []string) {
 		}
 		for _, r := range reasons {
 			fmt.Printf("  - %s\n", r)
+		}
+		if !ok {
+			fatal("verify-silent: orchestration leak detected — see output above")
 		}
 		return
 	case f.verifyTokenReduction:
@@ -568,7 +600,13 @@ func runVerify(rest []string) {
 		}
 		if f.json {
 			printJSON(map[string]any{"version": version, "valid": valid, "invalid": invalid})
+			if len(invalid) > 0 {
+				fatal("verify: %d invalid skill(s) — see JSON output above", len(invalid))
+			}
 			return
+		}
+		if len(invalid) > 0 {
+			fatal("verify: %d invalid skill(s) — see output above", len(invalid))
 		}
 		return
 	case f.scanPath != "":
@@ -611,9 +649,11 @@ func runVerify(rest []string) {
 		}
 		// Verification runs build/test commands (arbitrary host code); it must
 		// pass the governance firewall, fail closed (same gate as kern_validate
-		// and the MCP kern_verify tool). Without KERN_ALLOW_EXEC=1 (or an exec
-		// tool in the KERN_TOOLS allowlist) the high-level form is refused.
-		if err := governance.CheckExec(); err != nil {
+		// and the MCP kern_verify tool). The concrete verify command is bound to
+		// any approval, so a HIGH/CRITICAL denial persists a command-bound,
+		// human-resolvable approval (`kern approve <id>`) under the project root
+		// instead of an in-memory approval nobody can resolve (oracle-gate).
+		if err := governance.CheckExecCommand("kern verify "+strings.Join(types, " "), root); err != nil {
 			fatal("Verify: %v", err)
 		}
 		p, perr := app.New(root)
@@ -624,14 +664,17 @@ func runVerify(rest []string) {
 		_, v, err := ts.Verify(types)
 		if err != nil {
 			// A FAIL verdict is a valid outcome: surface the typed verdict and
-			// per-check status (report A11) instead of a bare error.
+			// per-check status instead of a bare error.
 			if v.Verdict != "" || v.Build != nil || v.UnitTests != nil || v.Security != nil || v.Architecture != nil || v.Dependency != nil {
 				if f.json {
 					v.Version = version
 					printJSON(v)
-					panic(exitError{code: 1})
+					fatal("verify: %s — see JSON output above", v.Verdict)
 				}
 				fmt.Println(verification.RenderCompact(v))
+				if v.Verdict == "WARN" {
+					fatal("verification WARNED — see report above; address the warnings and rerun kern verify")
+				}
 				fatal("verification FAILED — see report above; fix failing checks and rerun kern verify")
 			}
 			fatal("Verify: %v", err)
@@ -687,13 +730,17 @@ func runVerify(rest []string) {
 			}
 		}
 		if v.Dependency != nil {
-			st := "OK"
-			if !v.Dependency.OK {
-				st = "FAIL"
-			}
-			fmt.Printf("dependency: %s nodes=%d edges=%d\n", st, v.Dependency.GraphNodes, v.Dependency.GraphEdges)
-			for _, fd := range v.Dependency.Findings {
-				fmt.Printf("  - %s\n", fd)
+			if v.Dependency.Skipped != "" {
+				fmt.Printf("dependency: SKIPPED %s\n", v.Dependency.Skipped)
+			} else {
+				st := "OK"
+				if !v.Dependency.OK {
+					st = "FAIL"
+				}
+				fmt.Printf("dependency: %s nodes=%d edges=%d\n", st, v.Dependency.GraphNodes, v.Dependency.GraphEdges)
+				for _, fd := range v.Dependency.Findings {
+					fmt.Printf("  - %s\n", fd)
+				}
 			}
 		}
 		return
@@ -728,17 +775,22 @@ func runVerify(rest []string) {
 	if f.json {
 		rep.Version = version
 		printJSON(rep)
+		if !rep.OK {
+			fatal("verify: %d unverifiable/missing references — see JSON output above", len(rep.Missing))
+		}
 		return
 	}
 	fmt.Println(verify.Render(rep))
-
+	if !rep.OK {
+		fatal("verify: %d unverifiable/missing references", len(rep.Missing))
+	}
 }
 
 // runCheckDraft implements `kern check-draft <file|-> [root] [--lang LANG]`:
 // validate a draft code snippet against the project index. The MCP tool
 // kern_check_draft is the primary surface (this thin CLI form exists so the
 // opencode plugin, which shells out to the CLI, can reach the same check).
-func runCheckDraft(rest []string) {
+func runCheckDraft(rest []string) int {
 	f, args, err := parseFlags(rest)
 	if err != nil {
 		fatalUsage("flags: %v", err)
@@ -748,6 +800,9 @@ func runCheckDraft(rest []string) {
 		root = "."
 	}
 	in := "-"
+	if f.file != "" {
+		in = f.file
+	}
 	if len(args) > 0 && args[0] != "" {
 		in = args[0]
 		args = args[1:]
@@ -771,12 +826,15 @@ func runCheckDraft(rest []string) {
 	findings := verify.CheckDraft(ix, root, b, f.lang)
 	if len(findings) == 0 {
 		fmt.Println("OK: draft validates cleanly — no issues found")
-		return
+		return 0
 	}
 	for _, fd := range findings {
 		fmt.Printf("draft.go:%d [%s] %s\n", fd.Line, fd.Kind, fd.Message)
 	}
 	fmt.Printf("%d issue(s) found\n", len(findings))
+	// Issues found is a failure for CI-style consumers; previously the
+	// command exited 0 despite reporting issues.
+	return 1
 }
 
 func runChanges(cmd string, rest []string) {
@@ -827,7 +885,7 @@ func runChanges(cmd string, rest []string) {
 			// not silently dropped for the markdown view.
 			printJSON(report)
 			if report.TotalRisk > 0 {
-				panic(exitError{code: 1})
+				fatal("review: %d changed file(s) with risk (total %.1f) — see JSON output above", len(report.Changes), report.TotalRisk)
 			}
 			return
 		}
@@ -861,8 +919,7 @@ func runChanges(cmd string, rest []string) {
 		}
 		fmt.Println(out)
 		if report.TotalRisk > 0 {
-			fmt.Fprintf(os.Stderr, "kern: %d changed file(s) with risk (total %.1f); exit 1\n", len(report.Changes), report.TotalRisk)
-			panic(exitError{code: 1})
+			fatal("%d changed file(s) with risk (total %.1f); exit 1", len(report.Changes), report.TotalRisk)
 		}
 		return
 	}
@@ -870,14 +927,13 @@ func runChanges(cmd string, rest []string) {
 	if f.json {
 		printJSON(report)
 		if report.TotalRisk > 0 {
-			panic(exitError{code: 1})
+			fatal("changes: %d changed file(s) with risk (total %.1f) — see JSON output above", len(report.Changes), report.TotalRisk)
 		}
 		return
 	}
 	fmt.Println(intel.RenderChanges(report))
 	if report.TotalRisk > 0 {
-		fmt.Fprintf(os.Stderr, "kern: %d changed file(s) with risk (total %.1f); exit 1\n", len(report.Changes), report.TotalRisk)
-		panic(exitError{code: 1})
+		fatal("%d changed file(s) with risk (total %.1f); exit 1", len(report.Changes), report.TotalRisk)
 	}
 
 }
@@ -910,7 +966,7 @@ func parseChangeKind(change string) whatif.ChangeKind {
 }
 
 // planSymbolDegrade handles a plan that could not resolve the free-text
-// change to a concrete symbol (F-013). The planner is symbol-index-bound:
+// change to a concrete symbol. The planner is symbol-index-bound:
 // instead of a bare `no symbol named "X"` error we degrade gracefully with an
 // actionable message — close symbol candidates from the index (when any
 // exist) and a pointer to `kern search` so the caller can find the concrete
@@ -935,6 +991,27 @@ func planSymbolDegrade(change, root string, err error) bool {
 	fmt.Fprintf(&b, "hint: run `kern search %q` to find the concrete symbol, then re-run `kern plan <symbol>`", change)
 	fatal("%s", b.String())
 	return true
+}
+
+var (
+	backtickCmdRe = regexp.MustCompile("`kern ([a-z0-9-]+)`")
+	plainCmdRe    = regexp.MustCompile(`\bkern ([a-z0-9-]+) (?:cli )?(?:sub)?command`)
+)
+
+// cliCommandName extracts a new CLI subcommand name from a plan intent, e.g.
+// "Add a `kern dogfood` CLI command ..." → "dogfood". Detection is
+// conservative: a backticked `kern <name>` reference, or a "kern <name>
+// command/subcommand" phrasing (with optional "CLI"). Returns "" when the
+// intent is not about a new kern CLI command, so generic net-new feature
+// plans keep the generic steps.
+func cliCommandName(change string) string {
+	if m := backtickCmdRe.FindStringSubmatch(change); m != nil {
+		return m[1]
+	}
+	if m := plainCmdRe.FindStringSubmatch(strings.ToLower(change)); m != nil {
+		return m[1]
+	}
+	return ""
 }
 
 // renderStatelessPlan renders a domain.Plan-shaped text from a context packet
@@ -972,14 +1049,34 @@ func renderStatelessPlan(change string, pkt domain.ContextPacket) string {
 	}
 	fmt.Fprintf(&b, "Implementation steps:\n")
 	if whatif.IsNetNewFeature(change) {
-		fmt.Fprintf(&b, "  1. Implement the new feature according to specifications.\n")
+		if name := cliCommandName(change); name != "" {
+			fmt.Fprintf(&b, "  1. Implement the command in a new file cmd/kern/cmd_%s.go.\n", name)
+			fmt.Fprintf(&b, "  2. Register %q in the command table cmd/kern/dispatch_table.go, following the existing entry pattern ({run: func(cmd string, rest []string) int {...}}).\n", name)
+			fmt.Fprintf(&b, "  3. Add tests in cmd/kern/cmd_%s_test.go (house helpers: captureStdout, exitError sentinel).\n", name)
+			fmt.Fprintf(&b, "  4. Document the command in CHANGELOG.md [Unreleased].\n")
+		} else {
+			fmt.Fprintf(&b, "  1. Implement the feature in a new file under the relevant package (CLI surface lives in cmd/kern/).\n")
+			fmt.Fprintf(&b, "  2. Add unit tests alongside the new code.\n")
+			fmt.Fprintf(&b, "  3. Document the change in CHANGELOG.md [Unreleased].\n")
+		}
 	} else if len(pkt.Symbols)+len(pkt.Files) > 0 {
 		fmt.Fprintf(&b, "  1. Implement the change in the affected components above.\n")
 	} else {
 		fmt.Fprintf(&b, "  1. Implement the requested change.\n")
 	}
-	for _, v := range pkt.RequiredValidation {
-		fmt.Fprintf(&b, "  - %s\n", v)
+	// Packet validation items are rendered once, under Tests below — the old
+	// version repeated every item under Implementation steps as well.
+	if whatif.IsNetNewFeature(change) {
+		fmt.Fprintf(&b, "Verification:\n")
+		if cliCommandName(change) != "" {
+			fmt.Fprintf(&b, "  - go build ./...\n")
+			fmt.Fprintf(&b, "  - go test ./cmd/kern/ -count=1\n")
+			fmt.Fprintf(&b, "  - go vet ./cmd/kern/\n")
+		} else {
+			fmt.Fprintf(&b, "  - go build ./...\n")
+			fmt.Fprintf(&b, "  - go test ./... -count=1 (or the affected package)\n")
+			fmt.Fprintf(&b, "  - go vet ./...\n")
+		}
 	}
 	if len(pkt.Risks) > 0 {
 		fmt.Fprintf(&b, "Rollback: revert the commit")
@@ -1010,8 +1107,17 @@ func runCorrelate(rest []string) {
 		fatalUsage("usage: kern correlate <alert-json> [--root ROOT]")
 	}
 	var al domain.Alert
-	if err := json.Unmarshal([]byte(args[0]), &al); err != nil {
-		fatal("invalid alert JSON: %v", err)
+	alertText := args[0]
+	// Accept a file path to the alert JSON as well as inline JSON — mirror
+	// the kern incident handler so both commands share the same UX;
+	// a literal path previously produced a cryptic "invalid character '/'".
+	if _, serr := os.Stat(alertText); serr == nil {
+		if b, rerr := os.ReadFile(alertText); rerr == nil {
+			alertText = string(b)
+		}
+	}
+	if err := json.Unmarshal([]byte(alertText), &al); err != nil {
+		fatal("invalid alert JSON (pass JSON inline or a file path): %v", err)
 	}
 	p, err := app.New(root)
 	if err != nil {

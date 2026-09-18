@@ -93,15 +93,15 @@ func (c *ChainProvider) Stream(ctx context.Context, system, user string, opts Op
 
 // Capabilities is the union of the chained providers.
 func (c *ChainProvider) Capabilities() Capabilities {
-	cap := Capabilities{}
+	caps := Capabilities{}
 	for _, p := range c.providers {
 		pc := p.Capabilities()
-		cap.Generate = cap.Generate || pc.Generate
-		cap.Embed = cap.Embed || pc.Embed
-		cap.Stream = cap.Stream || pc.Stream
-		cap.Models = append(cap.Models, pc.Models...)
+		caps.Generate = caps.Generate || pc.Generate
+		caps.Embed = caps.Embed || pc.Embed
+		caps.Stream = caps.Stream || pc.Stream
+		caps.Models = append(caps.Models, pc.Models...)
 	}
-	return cap
+	return caps
 }
 
 // AllLocal reports whether every provider in the chain is a local-machine

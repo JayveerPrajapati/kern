@@ -32,15 +32,29 @@ func tick(n int) int {
 
 // Count returns the total after n ticks.
 func Count(n int) int {
-	return tick(n)
+return tick(n)
+}
+
+// Sum returns the accumulated total of n Count calls.
+func Sum(n int) int {
+total := 0
+for i := 0; i < n; i++ {
+total += Count(3)
+}
+return total
 }
 `,
 		"main.go": `package fixture
-
 // Run counts three ticks and returns the result.
 func Run() int {
-	return Count(3)
+return Count(3)
 }
+
+// Report returns the Count total for two rounds of ticks.
+func Report() int {
+return Count(2)
+}
+
 
 // Describe returns a fixed description of the fixture.
 func Describe() string {

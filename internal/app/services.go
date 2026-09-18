@@ -136,7 +136,13 @@ type Execution interface {
 type Loop interface {
 	// RunLoop creates a Task and runs the closed loop at the given autonomy
 	// level, returning the Task and the loop Result for rendering.
+	// Backward-compatible form: runs with context.Background().
 	RunLoop(intent string, level loop.Autonomy) (*agent.Task, *loop.Result, error)
+	// RunLoopContext is the context-aware form: a deadline or cancellation in
+	// ctx stops the run between stages instead of leaving it running in the
+	// background. Interface layers that hold a request-derived context
+	// (REST /v1/loop, MCP kern_loop) must use this form.
+	RunLoopContext(ctx context.Context, intent string, level loop.Autonomy) (*agent.Task, *loop.Result, error)
 }
 
 // Verification is the verification contract service. It runs the verification
@@ -144,8 +150,6 @@ type Loop interface {
 type Verification interface {
 	// Verify runs verification and returns the Task plus the result.
 	Verify(types []string) (*agent.Task, verification.VerificationResult, error)
-	// VerifyTask verifies a Task's worktree and transitions to READY_FOR_PR.
-	VerifyTask(taskID string, worktreeDir string, types []string) (*agent.Task, verification.VerificationResult, error)
 }
 
 // Incident is the incident-management contract service. It correlates alerts

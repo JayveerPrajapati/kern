@@ -90,6 +90,7 @@ func (c *LocalCliProvider) Generate(ctx context.Context, system, user string, op
 	}
 	argv := append(c.argsFor(c.name), prompt)
 	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
+	setProcessGroup(cmd)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -103,7 +104,11 @@ func (c *LocalCliProvider) Generate(ctx context.Context, system, user string, op
 	go func() { done <- cmd.Wait() }()
 	select {
 	case <-ctx.Done():
-		_ = cmd.Process.Kill()
+		// Kill the whole process group, not just the direct child: agent
+		// CLIs like `opencode run` spawn their own children, and killing
+		// only the parent orphaned them (observed PPID 1, CPU-burning,
+		// editing files).
+		killProcessGroup(cmd)
 		<-done
 		return "", fmt.Errorf("llm: %s: %v", c.name, ctx.Err())
 	case err := <-done:
@@ -120,6 +125,15 @@ func (c *LocalCliProvider) Generate(ctx context.Context, system, user string, op
 			}
 			return "", fmt.Errorf("llm: %s: %v: %s", c.name, err, msg)
 		}
+	case <-time.After(c.timeout):
+		// The select previously had NO timeout case: an agent CLI that
+		// hangs (e.g. `opencode run` waiting on a session) blocked the whole
+		// chain forever — `kern do` produced zero output for 300s+ (audit
+		// M2). Kill the process group and let the chain fall through to the
+		// next provider.
+		killProcessGroup(cmd)
+		<-done
+		return "", fmt.Errorf("llm: %s: timed out after %v (set KERN_LLM_CLI_TIMEOUT to adjust)", c.name, c.timeout)
 	}
 	out := strings.TrimSpace(stdout.String())
 	if out == "" {

@@ -31,14 +31,20 @@ type File struct {
 
 // Bundle is a paste-ready snapshot of a repository.
 type Bundle struct {
-	Root         string        `json:"root"`
-	Instructions []File        `json:"instructions"`
-	Files        []File        `json:"files"`
-	TotalTokens  int           `json:"total_tokens"`
-	Truncated    bool          `json:"truncated"`
-	Dropped      int           `json:"dropped"`
-	Ignored      int           `json:"ignored"`
-	Security     []sec.Finding `json:"security,omitempty"`
+	Root         string `json:"root"`
+	Instructions []File `json:"instructions"`
+	Files        []File `json:"files"`
+	TotalTokens  int    `json:"total_tokens"`
+	// TokenCount is the packed token count of the bundle (instructions +
+	// source files). It always equals TotalTokens and is exposed under this
+	// name as the CLI-warning contract (callers warn when an unlimited pack
+	// exceeds PackedTokensWarningThreshold). It is deliberately not
+	// serialized, so the machine-readable JSON output is unchanged.
+	TokenCount int           `json:"-"`
+	Truncated  bool          `json:"truncated"`
+	Dropped    int           `json:"dropped"`
+	Ignored    int           `json:"ignored"`
+	Security   []sec.Finding `json:"security,omitempty"`
 
 	// budgetTooSmall is set when MaxTokens was too small to include ANY source
 	// file (instructions consumed the budget). Render surfaces a warning so the
@@ -47,6 +53,12 @@ type Bundle struct {
 	budgetTooSmall   bool
 	budgetAfterInstr int
 }
+
+// PackedTokensWarningThreshold is the packed-bundle size (in tokens) above
+// which an unlimited pack is considered too large to hand to an agent
+// without a --max-tokens budget. Callers (e.g. the CLI) surface a warning
+// when TokenCount exceeds it.
+const PackedTokensWarningThreshold = 200_000
 
 // Options controls a pack build.
 type Options struct {
@@ -234,6 +246,9 @@ func Build(root string, opts Options) (*Bundle, error) {
 	for _, f := range b.Instructions {
 		b.TotalTokens += f.Tokens
 	}
+	// Expose the packed count under the CLI-warning contract name; it mirrors
+	// TotalTokens (instructions + source files).
+	b.TokenCount = b.TotalTokens
 	// Secrets can hide in instructions (READMEs, AGENTS.md) too — scan both
 	// buckets so hardcoded tokens in docs ship flagged, not silently.
 	var scan []File
@@ -253,7 +268,7 @@ func scanFindings(files []File) []sec.Finding {
 	var out []sec.Finding
 	for _, f := range files {
 		out = append(out, sec.ScanFile(f.Path, []byte(f.Content))...)
-		// G-4: python sinks get the same treatment in bundles as in sec.Scan,
+		// python sinks get the same treatment in bundles as in sec.Scan,
 		// so a packed .py file carrying eval/os.system surfaces too.
 		if strings.HasSuffix(f.Path, ".py") {
 			out = append(out, sec.ScanPythonFile(f.Path, []byte(f.Content))...)
@@ -344,19 +359,17 @@ func pathHash(rel string) string {
 // than the longest backtick run in content, minimum 3, so a file containing
 // ``` cannot break out of the fence and be interpreted as instructions.
 func fence(content string) string {
-	max := 0
+	maxRun := 0
 	run := 0
 	for _, r := range content {
 		if r == '`' {
 			run++
-			if run > max {
-				max = run
-			}
+			maxRun = max(maxRun, run)
 		} else {
 			run = 0
 		}
 	}
-	n := max + 1
+	n := maxRun + 1
 	if n < 3 {
 		n = 3
 	}

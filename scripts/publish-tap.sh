@@ -21,13 +21,21 @@ OWNER="${2:-$(gh repo view --json owner --jq .owner.login 2>/dev/null || echo Ja
 KERN_REPO="${KERN_REPO:-$OWNER/kern}"
 TAP_REPO="$OWNER/homebrew-tap"
 
+# sha256sum on Linux, `shasum -a 256` on macOS (both emit the two-space
+# `<hash>  <file>` format Homebrew and install.sh expect).
+if command -v sha256sum >/dev/null 2>&1; then
+  SHA256SUM="sha256sum"
+else
+  SHA256SUM="shasum -a 256"
+fi
+
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
 ARCHIVE="https://github.com/${KERN_REPO}/archive/refs/tags/${TAG}.tar.gz"
 echo "==> fetching source archive: ${ARCHIVE}"
 curl -fsSL "$ARCHIVE" -o "$TMP/source.tar.gz"
-SHA256="$(sha256sum "$TMP/source.tar.gz" | awk '{print $1}')"
+SHA256="$($SHA256SUM "$TMP/source.tar.gz" | awk '{print $1}')"
 echo "==> source sha256: ${SHA256}"
 
 echo "==> generating formula for ${TAG}"

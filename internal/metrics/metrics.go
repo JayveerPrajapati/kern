@@ -6,7 +6,9 @@ package metrics
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"strings"
 	"sync"
@@ -634,7 +636,7 @@ func (r *Recorder) Load(path string) error {
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, fs.ErrNotExist) {
 			return nil // no prior state — fine
 		}
 		return err

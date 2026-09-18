@@ -7,13 +7,6 @@ import (
 	"testing"
 )
 
-// writeFakeClaude installs a fake `claude` CLI on PATH that mimics the real
-// `claude mcp add` behavior against a temp HOME: the first `mcp add` registers
-// kern in ~/.claude.json, and any later `mcp add` while kern is present fails
-// with "MCP server kern already exists in local config" — exactly the failure
-// F-001 reproduced on a second `kern setup` run. Every `mcp add` invocation is
-// appended to a counter file so tests can assert the add ran exactly (or never)
-// as expected. Returns the counter file path.
 func writeFakeClaude(t *testing.T, home string) string {
 	t.Helper()
 	binDir := t.TempDir()
@@ -52,11 +45,6 @@ func fakeClaudeAddCount(t *testing.T, countPath string) int {
 	return strings.Count(string(b), "\n")
 }
 
-// TestWireClaudeIdempotent verifies F-001: wiring claude twice against the same
-// temp HOME must not error on the second run. The first run registers kern via
-// `claude mcp add`; the second must detect the existing registration in the
-// local claude config and skip the add (reporting "already registered") instead
-// of letting `claude mcp add` fail and exit 1.
 func TestWireClaudeIdempotent(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -123,21 +111,18 @@ func TestWireClaudeSkipsWhenAlreadyRegistered(t *testing.T) {
 	}
 }
 
-// TestWireIdempotentWithClaude runs the full Wire flow (the path `kern setup`
-// exercises) twice against a temp HOME + repo and asserts the second run
-// reports no failure for claude — the F-001 exit-1 repro at the Wire level.
 func TestWireIdempotentWithClaude(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	writeFakeClaude(t, home)
 	root := t.TempDir()
 
-	first := Wire(root, []string{"claude"}, false)
+	first := Wire(root, []string{"claude"}, false, true)
 	if !allInstalled(first, "claude") {
 		t.Fatalf("first Wire claude not installed: %+v", first)
 	}
 
-	second := Wire(root, []string{"claude"}, false)
+	second := Wire(root, []string{"claude"}, false, true)
 	if !allInstalled(second, "claude") {
 		t.Fatalf("second Wire must stay idempotent for claude, got failures: %+v", second)
 	}

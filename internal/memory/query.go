@@ -42,7 +42,8 @@ type Query struct {
 
 // Recall returns the memories matching the query, ranked by relevance.
 // Filters are applied by field, then remaining memories are scored by
-// MatchScore, sorted by score then recency, and truncated to Limit.
+// MatchScore, sorted deterministically (score desc, recency desc, then ID),
+// and truncated to Limit.
 //
 // This is the un-governed read path (no agent identity, no audit). Governed
 // consumers use AuthorizedRecall, which checks read permission and records
@@ -119,12 +120,18 @@ func (s *MemoryStore) recall(query Query, agentID string, audit bool) ([]domain.
 		}
 		out = append(out, m)
 	}
-	sort.SliceStable(out, func(i, j int) bool {
+	// Deterministic ranking: score desc, then recency desc (newer first),
+	// then ID asc as the final tiebreaker — explicit keys, so the order does
+	// not depend on store iteration order.
+	sort.Slice(out, func(i, j int) bool {
 		si, sj := MatchScore(out[i], query), MatchScore(out[j], query)
 		if si != sj {
 			return si > sj
 		}
-		return out[i].CreatedAt.After(out[j].CreatedAt)
+		if !out[i].CreatedAt.Equal(out[j].CreatedAt) {
+			return out[i].CreatedAt.After(out[j].CreatedAt)
+		}
+		return out[i].ID < out[j].ID
 	})
 	if query.Limit > 0 && len(out) > query.Limit {
 		out = out[:query.Limit]

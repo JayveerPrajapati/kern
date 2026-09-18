@@ -3,7 +3,7 @@ package cockpit
 import (
 	"time"
 
-	"github.com/JayveerPrajapati/kern/internal/blueprint/gates"
+	"github.com/JayveerPrajapati/kern/internal/gates"
 	"github.com/JayveerPrajapati/kern/internal/loop"
 )
 
@@ -86,7 +86,7 @@ type State struct {
 }
 
 // NewInitialState creates an empty State initialized with all registered
-// Blueprint gates (see internal/blueprint/gates.Registry).
+// Blueprint gates (see internal/gates.Registry).
 func NewInitialState(taskID, intent, repoRoot string) *State {
 	s := &State{
 		TaskID:        taskID,

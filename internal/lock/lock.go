@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"time"
@@ -61,8 +62,14 @@ func pathFor(root, scope string) string {
 }
 
 // Remove deletes the lock file for scope (a stale file whose holder has
-// exited). It refuses to remove a lock that is still held.
+// exited). It refuses to remove a lock that is still held. Held() creates
+// the lock file when absent (see lock_unix.go), so a never-acquired scope
+// must be rejected up front instead of silently "succeeding".
 func Remove(root, scope string) error {
+	p := pathFor(root, scope)
+	if _, err := os.Stat(p); errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("no lock %q held in %s", scope, root)
+	}
 	held, pid, err := Held(root, scope)
 	if err != nil {
 		return err

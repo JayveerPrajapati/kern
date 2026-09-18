@@ -1,6 +1,7 @@
 package whatif
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -315,6 +316,58 @@ func TestSimulateConfidence(t *testing.T) {
 	imp2 := Simulate(g, Change{Kind: ChangeSignature, Target: unused})
 	if len(imp2.Affected) >= 5 || imp2.Confidence != 0.80 {
 		t.Fatalf("small affected set: len=%d confidence = %v, want 0.80", len(imp2.Affected), imp2.Confidence)
+	}
+}
+
+// TestSimulateNotResolvedWarning: an unresolvable change target must surface a
+// visible not-found warning instead of a clean "isolated / safe to proceed"
+// bill, because zero affected symbols means the symbol does not exist — not
+// that nothing depends on it. A real symbol from the fixture must NOT warn,
+// and add_symbol on a brand-new name is the one kind where an absent target
+// is the point (never a warning).
+func TestSimulateNotResolvedWarning(t *testing.T) {
+	g := buildGraph(t)
+
+	// Garbage symbol: unresolvable → the report carries the not-found warning.
+	imp := Simulate(g, Change{Kind: RemoveSymbol, Target: "ZZZgarbage"})
+	if !imp.NotResolved {
+		t.Fatal("garbage symbol: expected NotResolved=true")
+	}
+	if imp.NotResolvedWarning == "" {
+		t.Fatal("garbage symbol: expected a non-empty not-found warning")
+	}
+	if !strings.Contains(imp.NotResolvedWarning, "ZZZgarbage") || !strings.Contains(imp.NotResolvedWarning, "not found") {
+		t.Fatalf("warning must name the symbol and say not found, got %q", imp.NotResolvedWarning)
+	}
+	if len(imp.Affected) != 0 {
+		t.Fatalf("garbage symbol: affected = %v, want none", imp.Affected)
+	}
+	// The warning must be present in the JSON serialization too.
+	b, err := json.Marshal(imp)
+	if err != nil {
+		t.Fatalf("marshal impact: %v", err)
+	}
+	if !strings.Contains(string(b), "not_resolved") || !strings.Contains(string(b), "ZZZgarbage") {
+		t.Fatalf("JSON impact must carry the not-found warning, got %s", b)
+	}
+
+	// Valid symbol from the fixture: no warning.
+	id := nodeID(g, "helper")
+	if id == "" {
+		t.Fatal("helper symbol not found")
+	}
+	imp2 := Simulate(g, Change{Kind: RemoveSymbol, Target: id})
+	if imp2.NotResolved {
+		t.Fatal("valid symbol: must NOT carry the not-found warning")
+	}
+	if imp2.NotResolvedWarning != "" {
+		t.Fatalf("valid symbol: warning must be empty, got %q", imp2.NotResolvedWarning)
+	}
+
+	// add_symbol on a brand-new name is expected to be absent: no warning.
+	imp3 := Simulate(g, Change{Kind: AddSymbol, Target: "whatiffix.brandnew"})
+	if imp3.NotResolved {
+		t.Fatal("add_symbol on a new name must not warn about a missing symbol")
 	}
 }
 

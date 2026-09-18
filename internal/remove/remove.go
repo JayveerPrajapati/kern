@@ -76,16 +76,48 @@ func Plan(ix *index.Index, sym string) (*rename.Report, error) {
 	// Test files must reference the name ONLY through calls from test
 	// functions (which the plan removes together with the symbol). Any
 	// non-call reference would survive the edit set and break the build.
-	if files := testNonCallRefs(ix, simpleName(sym)); len(files) > 0 {
-		return nil, &ErrUnsafe{fmt.Sprintf("test files reference %s outside a call (function/method value, assignment, etc.): %s", simpleName(sym), strings.Join(files, ", "))}
-	}
 	// Removal set: the symbol's declaration plus every test-only caller's
 	// declaration (DeleteCheck splits callers into production/test; Safe
 	// means production callers are absent).
+	members := []string{sym}
 	removals := []declRange{{file: target.File, start: target.Line, end: target.End}}
 	for _, caller := range check.TestCallers {
 		if d := findFunc(ix, caller); d != nil {
+			members = append(members, caller)
 			removals = append(removals, declRange{file: d.File, start: d.Line, end: d.End})
+		}
+	}
+	// Closure check (fail-closed, mirrors DeleteCheck's own closure gate):
+	// every member of the removal set must itself be referenced ONLY from
+	// within the set. A test-only caller that is also called from a test
+	// function outside the set — or from production — would keep a live call
+	// site after its declaration is removed and break the build. The symbol's
+	// own declaration name is excluded: its declaration is the deletion
+	// itself, not a caller.
+	set := make(map[string]bool, len(members))
+	for _, m := range members {
+		set[m] = true
+	}
+	var breaks []string
+	for _, m := range members {
+		for _, c := range ix.CallersIncludingAliases(m) {
+			if set[c] || c == sym {
+				continue
+			}
+			breaks = append(breaks, fmt.Sprintf("%s also called from %s (caller outside deletion set)", m, callerName(ix, c)))
+		}
+	}
+	if len(breaks) > 0 {
+		sort.Strings(breaks)
+		return nil, &ErrUnsafe{strings.Join(breaks, "; ")}
+	}
+	// Test files must reference every member ONLY through calls from test
+	// functions (which the plan removes together with the symbol). Any
+	// non-call reference would survive the edit set and break the build.
+	for _, m := range members {
+		name := simpleName(m)
+		if files := testNonCallRefs(ix, name); len(files) > 0 {
+			return nil, &ErrUnsafe{fmt.Sprintf("test files reference %s outside a call: %s", name, strings.Join(files, ", "))}
 		}
 	}
 	edits, err := buildEdits(ix.Root, removals)
@@ -135,6 +167,18 @@ func simpleName(s string) string {
 		return s[i+1:]
 	}
 	return s
+}
+
+// callerName maps a caller symbol to its defining file — the unit whose
+// build breaks when the caller's callee is deleted — falling back to the raw
+// name when the caller is not an indexed symbol (e.g. a foreign caller).
+func callerName(ix *index.Index, caller string) string {
+	for _, s := range ix.Symbols {
+		if s.File != "" && (s.FullName() == caller || s.Name == caller) {
+			return s.File
+		}
+	}
+	return caller
 }
 
 // testNonCallRefs lists test files that reference name outside a call

@@ -110,20 +110,6 @@ func ViolatesEdges(violations map[string]string) []domain.Edge {
 	return edges
 }
 
-// DocumentedByEdges builds edges linking symbols to documentation files
-// that mention them. docLinks maps symbol ID → doc file path.
-func DocumentedByEdges(docLinks map[string]string) []domain.Edge {
-	var edges []domain.Edge
-	for sym, docFile := range docLinks {
-		edges = append(edges, domain.Edge{
-			From: "file:" + docFile,
-			To:   sym,
-			Kind: KindDocumentedBy,
-		})
-	}
-	return edges
-}
-
 // OwnsEdges builds edges from team ownership. ownership maps file/symbol
 // ID → team ID.
 func OwnsEdges(ownership map[string]string) []domain.Edge {

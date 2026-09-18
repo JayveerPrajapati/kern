@@ -14,6 +14,13 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/intel"
 )
 
+// maxPhases caps the number of extraction phases in a generated plan. A plan
+// with one phase per bounded context is unusable for large monoliths — hundreds
+// of contexts become hundreds of phases. When contexts outnumber the cap, the
+// lowest-risk contexts are consolidated into fewer phases so the plan stays
+// actionable while the analysis (the context count itself) stays honest.
+const maxPhases = 20
+
 // BoundedContext is a candidate extracted service/module detected by
 // community detection. It groups symbols that are tightly coupled
 // internally and loosely coupled to other groups.
@@ -46,7 +53,7 @@ type Bridge struct {
 // extracts one or more contexts with validation and rollback guidance.
 type ExtractionPhase struct {
 	Phase       int      // 1-based phase number
-	Context     string   // the bounded context being extracted
+	Context     string   // the primary bounded context being extracted
 	RiskLevel   string   // "low", "medium", "high"
 	BlastRadius int      // number of symbols affected
 	Bridges     []Bridge // bridges that must be addressed first
@@ -58,6 +65,11 @@ type ExtractionPhase struct {
 	// TaskID is the task that tracks this phase's extraction (
 	// phase-tasks). Set when the phase is materialized as a task.
 	TaskID string `json:"task_id,omitempty"`
+	// Contexts lists every bounded context merged into this phase, in
+	// ascending risk order. It is set only for consolidated phases (several
+	// low-risk contexts grouped into one phase when contexts outnumber
+	// maxPhases); single-context phases leave it nil and use Context.
+	Contexts []string `json:"contexts,omitempty"`
 }
 
 // ExtractionPlan is the full phased plan for modernizing a monolith.
@@ -69,6 +81,11 @@ type ExtractionPlan struct {
 	Bridges  []Bridge          // all inter-context bridges
 	Phases   []ExtractionPhase // ordered extraction phases (lowest risk first)
 	Summary  string            // human-readable summary
+	// TotalContexts is the number of bounded contexts the Phases were
+	// generated from. It equals len(Contexts) and is exposed so consumers
+	// can see that many contexts were consolidated into a capped number of
+	// phases (at most maxPhases).
+	TotalContexts int `json:"total_contexts,omitempty"`
 }
 
 // Analyzer detects bounded contexts and generates extraction plans.
@@ -262,18 +279,110 @@ func (a *Analyzer) Analyze() (*ExtractionPlan, error) {
 		return safetyScore(contexts[order[x]], churn) < safetyScore(contexts[order[y]], churn)
 	})
 
-	// 6. Generate one phase per context, ordered by safety.
-	phases := make([]ExtractionPhase, 0, len(order))
-	for i, idx := range order {
-		phases = append(phases, buildPhase(i+1, contexts[idx], bridgeCount[contexts[idx].Name], bridges, contexts))
-	}
+	// 6. Generate the extraction phases ordered by safety, capped at
+	// maxPhases. When contexts outnumber the cap, the lowest-risk contexts
+	// are consolidated into a single leading phase so the plan stays
+	// actionable; the riskiest contexts keep individual phases. The analysis
+	// itself is unchanged — TotalContexts still reports every context.
+	phases := buildPhases(order, contexts, bridgeCount, bridges)
 
 	return &ExtractionPlan{
-		Contexts: contexts,
-		Bridges:  bridges,
-		Phases:   phases,
-		Summary:  buildSummary(contexts, bridges, order, ix),
+		Contexts:      contexts,
+		Bridges:       bridges,
+		Phases:        phases,
+		TotalContexts: len(contexts),
+		Summary:       buildSummary(contexts, bridges, order, ix),
 	}, nil
+}
+
+// buildPhases generates the phased extraction plan from a risk-ordered list
+// of context indices (order[0] is the safest). The plan never exceeds
+// maxPhases phases: when contexts outnumber the cap, the lowest-risk contexts
+// (the head of order) are consolidated into a single leading phase and the
+// riskiest maxPhases-1 contexts keep individual phases after it. This
+// preserves the package invariant that Phases[0] is the safest to extract
+// first. The grouping is deterministic — it follows the stable risk ordering
+// of order, so the same repo always yields the same phases.
+func buildPhases(order []int, contexts []BoundedContext, bridgeCount map[string]int, bridges []Bridge) []ExtractionPhase {
+	if len(order) <= maxPhases {
+		phases := make([]ExtractionPhase, 0, len(order))
+		for i, idx := range order {
+			phases = append(phases, buildPhase(i+1, contexts[idx], bridgeCount[contexts[idx].Name], bridges, contexts))
+		}
+		return phases
+	}
+
+	// Consolidate the lowest-risk contexts (the head of order) into one
+	// leading phase; the riskiest maxPhases-1 contexts keep individual
+	// phases after it, in ascending risk order.
+	mergedCount := len(order) - (maxPhases - 1)
+	merged := make([]string, 0, mergedCount)
+	maxBridge := 0
+	for i := 0; i < mergedCount; i++ {
+		ctx := contexts[order[i]]
+		merged = append(merged, ctx.Name)
+		if bc := bridgeCount[ctx.Name]; bc > maxBridge {
+			maxBridge = bc
+		}
+	}
+	phases := make([]ExtractionPhase, 0, maxPhases)
+	phases = append(phases, buildMergedPhase(1, merged, maxBridge, bridges, contexts))
+	for i, idx := range order[mergedCount:] {
+		phases = append(phases, buildPhase(i+2, contexts[idx], bridgeCount[contexts[idx].Name], bridges, contexts))
+	}
+	return phases
+}
+
+// buildMergedPhase constructs one extraction phase that consolidates several
+// lowest-risk contexts (used when contexts outnumber maxPhases). The phase's
+// Context is the primary context (the first, safest, of the merged set);
+// Contexts lists every merged context in ascending risk order. Its risk level
+// derives from the riskiest merged member so the phase ordering stays
+// non-decreasing, and its blast radius covers every context outside the
+// merged set.
+func buildMergedPhase(phaseNum int, merged []string, bridgeCount int, all []Bridge, contexts []BoundedContext) ExtractionPhase {
+	primary := merged[0]
+	mergedSet := map[string]bool{}
+	for _, name := range merged {
+		mergedSet[name] = true
+	}
+	radius := 0
+	var ownership string
+	for _, other := range contexts {
+		if !mergedSet[other.Name] {
+			radius += len(other.Symbols)
+			continue
+		}
+		if other.Name == primary {
+			ownership = other.Ownership
+		}
+	}
+	phase := ExtractionPhase{
+		Phase:       phaseNum,
+		Context:     primary,
+		Contexts:    append([]string(nil), merged...),
+		RiskLevel:   phaseRisk(bridgeCount),
+		BlastRadius: radius,
+		// Carry the primary context's ownership onto the phase.
+		Ownership: ownership,
+		Migration: fmt.Sprintf("Extract the %d consolidated contexts as separate modules, starting with %s.",
+			len(merged), primary),
+		Rollback:   "Revert the module extraction commits. No data migration needed (code-only).",
+		Validation: fmt.Sprintf("Run the full test suite after each consolidated extraction; verify API contracts for all %d contexts via integration tests.", len(merged)),
+	}
+	for _, b := range all {
+		if mergedSet[b.From] {
+			phase.Bridges = append(phase.Bridges, b)
+			continue
+		}
+		for _, to := range strings.Split(b.To, ", ") {
+			if mergedSet[to] {
+				phase.Bridges = append(phase.Bridges, b)
+				break
+			}
+		}
+	}
+	return phase
 }
 
 // safetyScore ranks how safe a context is to extract first: lower is safer.
@@ -617,7 +726,9 @@ func phaseRisk(bridgeCount int) string {
 	}
 }
 
-// buildSummary produces a human-readable plan summary.
+// buildSummary produces a human-readable plan summary. When contexts
+// outnumber maxPhases the summary notes the consolidation so consumers see
+// that the full context count was folded into a capped number of phases.
 func buildSummary(contexts []BoundedContext, bridges []Bridge, order []int, ix *index.Index) string {
 	if len(order) == 0 {
 		return "Detected 0 bounded contexts. The monolith is already atomic."
@@ -625,11 +736,18 @@ func buildSummary(contexts []BoundedContext, bridges []Bridge, order []int, ix *
 	first := contexts[order[0]].Name
 	last := contexts[order[len(order)-1]].Name
 	symbols, files := totalExtent(contexts, ix)
+	nPhases := len(order)
+	consolidated := ""
+	if nPhases > maxPhases {
+		consolidated = fmt.Sprintf(" %d contexts consolidated into %d phases (lowest-risk merged).",
+			len(order), maxPhases)
+		nPhases = maxPhases
+	}
 	return fmt.Sprintf(
 		"Detected %d bounded contexts with %d coupling bridges. Recommended %d-phase extraction: "+
 			"phase 1 (lowest risk) extracts %s, phase %d (highest risk) extracts %s. "+
-			"Total blast radius: %d symbols across %d files.",
-		len(contexts), len(bridges), len(order), first, len(order), last, symbols, files)
+			"Total blast radius: %d symbols across %d files.%s",
+		len(contexts), len(bridges), nPhases, first, nPhases, last, symbols, files, consolidated)
 }
 
 // totalExtent sums symbols and distinct files across all contexts.

@@ -28,7 +28,7 @@ type GC struct {
 	maxItems int // max ACTIVE items (0 = unlimited)
 
 	// pinned holds the IDs of items that must survive GC unconditionally
-	// (AUD-12). Pinned items are never COMPRESS/DEMOTE/ARCHIVE/DROP — they are
+	// Pinned items are never COMPRESS/DEMOTE/ARCHIVE/DROP — they are
 	// always KEEP, regardless of their relevance score and regardless of
 	// maxItems. A nil map (the zero value, or never calling Pin) means nothing
 	// is pinned: behavior is exactly as before.
@@ -68,7 +68,7 @@ func (g *GC) SetTaskRelation(rel map[string]float64) *GC {
 	return g
 }
 
-// Pin hard-pins the given item IDs so they survive GC unconditionally (AUD-12):
+// Pin hard-pins the given item IDs so they survive GC unconditionally:
 // a pinned item is always KEEP — never COMPRESS/DEMOTE/ARCHIVE/DROP — regardless
 // of its relevance score and regardless of maxItems. If the pinned count alone
 // exceeds maxItems, every pinned item still survives (the cap only bounds
@@ -117,7 +117,7 @@ func (g *GC) Run(items []domain.ContextItem) []domain.GCAction {
 	sort.SliceStable(idx, func(a, b int) bool { return scores[idx[a]] > scores[idx[b]] })
 
 	// Assign actions: top maxItems → KEEP, rest → DEMOTE (or DROP if very low).
-	// Hard-pinned items (AUD-12) bypass the cap and the score bands entirely:
+	// Hard-pinned items bypass the cap and the score bands entirely:
 	// they are always KEEP, even when maxItems is exceeded or their score is
 	// near zero, so a low-scoring required fact can never be demoted or dropped.
 	for rank, i := range idx {

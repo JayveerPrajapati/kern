@@ -129,7 +129,7 @@ func TestMergeJSONHandlesComments(t *testing.T) {
 
 func TestWireCreatesProjectFiles(t *testing.T) {
 	dir := t.TempDir()
-	sts := Wire(dir, []string{"mcp", "opencode"}, false)
+	sts := Wire(dir, []string{"mcp", "opencode"}, false, false)
 	if !allInstalled(sts, "mcp") {
 		t.Fatalf("mcp not installed: %+v", sts)
 	}
@@ -142,8 +142,8 @@ func TestWireCreatesProjectFiles(t *testing.T) {
 
 func TestWireIsIdempotent(t *testing.T) {
 	dir := t.TempDir()
-	Wire(dir, []string{"mcp", "opencode"}, false)
-	Wire(dir, []string{"mcp", "opencode"}, false)
+	Wire(dir, []string{"mcp", "opencode"}, false, false)
+	Wire(dir, []string{"mcp", "opencode"}, false, false)
 	b, _ := os.ReadFile(filepath.Join(dir, ".mcp.json"))
 	if strings.Count(string(b), `"kern":`) != 1 {
 		t.Fatalf("duplicated kern entries: %s", b)
@@ -162,7 +162,7 @@ func TestWirePeerAgentRules(t *testing.T) {
 	// Existing host files get the same single-source rules; setup must not
 	// create host rule files that do not exist.
 	_ = os.WriteFile(filepath.Join(dir, "CLAUDE.md"), []byte("# Claude\n"), 0o644)
-	sts := Wire(dir, []string{"mcp", "opencode"}, false)
+	sts := Wire(dir, []string{"mcp", "opencode"}, false, false)
 	if !allInstalled(sts, "opencode") {
 		t.Fatalf("opencode not installed: %+v", sts)
 	}
@@ -175,7 +175,7 @@ func TestWirePeerAgentRules(t *testing.T) {
 		t.Fatal("setup must not create GEMINI.md unprompted")
 	}
 	// Idempotent: a second run appends nothing.
-	Wire(dir, []string{"mcp", "opencode"}, false)
+	Wire(dir, []string{"mcp", "opencode"}, false, false)
 	c2, _ := os.ReadFile(filepath.Join(dir, "CLAUDE.md"))
 	if strings.Count(string(c2), "kern usage rules") != 1 {
 		t.Fatalf("CLAUDE.md rules duplicated: %s", c2)
@@ -207,7 +207,7 @@ func TestWireAllAgents(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("HOME", t.TempDir())
 	dir := t.TempDir()
-	sts := Wire(dir, nil, false)
+	sts := Wire(dir, nil, false, true)
 
 	bin := Bin()
 	home := os.Getenv("HOME")
@@ -320,12 +320,6 @@ func TestPluginMatchesMCPCatalog(t *testing.T) {
 	}
 }
 
-// TestDocsStateMCPToolCount is the doc-side parity invariant behind the
-// catalog count: README.md and AGENTS.md both state the full MCP tool count.
-// The MCP registration table is the source of truth — when the catalog grows
-// or shrinks, this test fails until the docs are updated, so the "84 vs 86"
-// drift class (G-6 claimed a fix; it was incomplete across README + AGENTS)
-// cannot recur.
 func TestDocsStateMCPToolCount(t *testing.T) {
 	count := 0
 	for _, n := range mcp.ToolNames() {
@@ -713,7 +707,7 @@ func TestWireDetectEmptyPreWiresGlobalOnly(t *testing.T) {
 	t.Setenv("PATH", "/nonexistent")
 	dir := t.TempDir()
 
-	sts := Wire(dir, nil, true)
+	sts := Wire(dir, nil, true, true)
 	var sawGlobalHook, sawUniversal bool
 	for _, s := range sts {
 		switch s.Agent {
@@ -757,7 +751,7 @@ func TestWireDetectWiresInstructions(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	sts := Wire(dir, nil, true)
+	sts := Wire(dir, nil, true, false)
 	found := false
 	for _, s := range sts {
 		if s.Agent == "claude-instruction" && s.Installed {
@@ -862,7 +856,7 @@ func TestMCPDocumentationCountsParity(t *testing.T) {
 
 func TestWireScaffoldsKernConfig(t *testing.T) {
 	dir := t.TempDir()
-	Wire(dir, nil, false)
+	Wire(dir, nil, false, false)
 
 	profilesPath := filepath.Join(dir, ".kern", "profiles.json")
 	b, err := os.ReadFile(profilesPath)
@@ -880,17 +874,13 @@ func TestWireScaffoldsKernConfig(t *testing.T) {
 	if err := os.WriteFile(profilesPath, []byte(`[{"name":"mine"}]`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	Wire(dir, nil, false)
+	Wire(dir, nil, false, false)
 	b2, _ := os.ReadFile(profilesPath)
 	if string(b2) != `[{"name":"mine"}]` {
 		t.Fatalf("profiles.json was overwritten: %q", b2)
 	}
 }
 
-// TestGitignoreGeneratedBlueprintRuntime (F-023c): the generated .gitignore
-// block must carry the .blueprint/ RUNTIME entries (audit, receipts, caches,
-// metrics) but never ".blueprint/" wholesale, and must not ignore the user
-// config files (config.yaml, suppressions.yaml, owners.yaml).
 func TestGitignoreGeneratedBlueprintRuntime(t *testing.T) {
 	dir := t.TempDir()
 	st := gitignoreGenerated(dir)
@@ -937,9 +927,62 @@ func TestGitignoreGeneratedBlueprintRuntime(t *testing.T) {
 	}
 }
 
-// TestWireGlobalGitignoreBlueprintRuntime (F-023c): the global git ignore must
-// carry .kern/ plus the blueprint runtime entries, must be idempotent on
-// re-run, and must not ignore blueprint config files.
+func TestGitignoreGeneratedIdempotentReplace(t *testing.T) {
+	dir := t.TempDir()
+	legacy := "# user section\nfoo/\n" + gitignoreMarker + "\n.old-entry/\n"
+	if err := os.WriteFile(filepath.Join(dir, ".gitignore"), []byte(legacy), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	st := gitignoreGenerated(dir)
+	if !st.Installed {
+		t.Fatalf("gitignore update failed: %s", st.Note)
+	}
+	b, _ := os.ReadFile(filepath.Join(dir, ".gitignore"))
+	content := string(b)
+	if !strings.HasPrefix(content, "# user section\nfoo/\n") {
+		t.Fatalf("user content not preserved:\n%s", content)
+	}
+	if got := strings.Count(content, gitignoreMarker); got != 1 {
+		t.Fatalf("expected exactly one kern block, got %d markers:\n%s", got, content)
+	}
+	if strings.Contains(content, ".old-entry/") {
+		t.Fatalf("legacy block not replaced (stale entry still present):\n%s", content)
+	}
+	// Run twice: still one block, byte-identical.
+	before := content
+	gitignoreGenerated(dir)
+	b, _ = os.ReadFile(filepath.Join(dir, ".gitignore"))
+	if string(b) != before {
+		t.Fatal("second run changed the file")
+	}
+	if got := strings.Count(string(b), gitignoreMarker); got != 1 {
+		t.Fatalf("second run duplicated the kern block: %d markers", got)
+	}
+}
+
+func TestWireProjectScopeSkipsGlobalConfig(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	root := t.TempDir()
+
+	// Project-only wiring: no user-global hook files may appear.
+	Wire(root, nil, false, false)
+	for _, rel := range []string{".claude/settings.json", ".cursor/hooks.json"} {
+		if _, err := os.Stat(filepath.Join(home, rel)); err == nil {
+			t.Fatalf("project wiring must not create global file ~/%s", rel)
+		}
+	}
+
+	// Global wiring: both hook files are created.
+	Wire(root, nil, false, true)
+	for _, rel := range []string{".claude/settings.json", ".cursor/hooks.json"} {
+		if _, err := os.Stat(filepath.Join(home, rel)); err != nil {
+			t.Fatalf("--global must create ~/%s: %v", rel, err)
+		}
+	}
+}
+
 func TestWireGlobalGitignoreBlueprintRuntime(t *testing.T) {
 	dir := withTempHome(t, true) // XDG_CONFIG_HOME -> dir/.config
 	if err := os.MkdirAll(filepath.Join(dir, ".config", "git"), 0o755); err != nil {
@@ -989,7 +1032,7 @@ func TestWireCopilotWritesMCPConfig(t *testing.T) {
 	t.Setenv("HOME", dir)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(dir, "config")) // must NOT receive mcp-config.json
 
-	sts := Wire(dir, []string{"copilot"}, false)
+	sts := Wire(dir, []string{"copilot"}, false, true)
 
 	// The global MCP config must land directly under HOME, not XDG.
 	mcpPath := filepath.Join(dir, ".copilot", "mcp-config.json")
@@ -1029,7 +1072,7 @@ func TestWireQoderWritesMCPSettings(t *testing.T) {
 	t.Setenv("HOME", dir)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(dir, "config"))
 
-	sts := Wire(dir, []string{"qoder"}, false)
+	sts := Wire(dir, []string{"qoder"}, false, true)
 
 	path := filepath.Join(dir, ".qoder", "settings.json")
 	b, err := os.ReadFile(path)

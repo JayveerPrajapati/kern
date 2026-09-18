@@ -1,6 +1,7 @@
 package context
 
 import (
+	"slices"
 	"sort"
 	"time"
 
@@ -38,16 +39,6 @@ func resourceForItem(item domain.ContextItem) string {
 // everything (backward-compatible).
 func AuthorizeItems(items []domain.ContextItem, fw *governance.Firewall, holder string) []domain.ContextItem {
 	return AuthorizeItemsScoped(items, fw, domain.ContextAuthorization{Agent: holder})
-}
-
-// containsString reports whether s is present in list.
-func containsString(list []string, s string) bool {
-	for _, v := range list {
-		if v == s {
-			return true
-		}
-	}
-	return false
 }
 
 // AuthorizeItemsScoped runs per-item governance checks (P5.4) across the five
@@ -98,14 +89,14 @@ func AuthorizeItemsScoped(items []domain.ContextItem, fw *governance.Firewall, a
 				item.DenyReason = "tenant denied"
 				continue
 			}
-			if len(auth.AllowedTenants) > 0 && !containsString(auth.AllowedTenants, item.Tenant) {
+			if len(auth.AllowedTenants) > 0 && !slices.Contains(auth.AllowedTenants, item.Tenant) {
 				item.Authorized = false
 				item.DenyReason = "tenant denied"
 				continue
 			}
 		}
 		// Security-classification dimension.
-		if item.SecurityClass != "" && len(auth.AllowedSecurityClasses) > 0 && !containsString(auth.AllowedSecurityClasses, item.SecurityClass) {
+		if item.SecurityClass != "" && len(auth.AllowedSecurityClasses) > 0 && !slices.Contains(auth.AllowedSecurityClasses, item.SecurityClass) {
 			item.Authorized = false
 			item.DenyReason = "security class denied"
 			continue

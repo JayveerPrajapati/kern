@@ -72,6 +72,18 @@ var docExts = map[string]bool{
 	".md": true, ".txt": true, ".rst": true, ".adoc": true, ".asciidoc": true,
 }
 
+// typeScoreOrder is the keyword-scoring priority: within one scoring pass the
+// first type whose hits exceed the running best wins, so a tie on a single
+// pass still prefers the feature reading.
+var typeScoreOrder = []struct {
+	typ   string
+	words map[string]bool
+}{
+	{"feat", featWords},
+	{"fix", fixWords},
+	{"refactor", refactorWords},
+}
+
 type fileChange struct {
 	path    string
 	added   []string
@@ -84,7 +96,7 @@ type fileChange struct {
 func Generate(diffText string) Message {
 	files := parseDiff(diffText)
 	// Exclude VCS/build/vendor-dir noise (vendor/, dist/, ...) so a
-	// vendor-heavy diff cannot drown the message in boilerplate (report A5).
+	// vendor-heavy diff cannot drown the message in boilerplate.
 	if len(files) > 0 {
 		clean := files[:0]
 		for _, f := range files {
@@ -98,9 +110,15 @@ func Generate(diffText string) Message {
 		return Message{Type: "chore", Subject: "chore: update"}
 	}
 
-	typ := classify(files)
+	// A change is single-area when every file shares at least the first path
+	// segment (a shared "cmd" or "internal" segment counts). Cross-cutting
+	// commits lose the exported-declaration headline rules: no one package
+	// owns them, so one exported symbol or one error sentinel cannot speak for
+	// the whole diff.
+	singleArea := commonPrefixNonEmpty(files)
+	typ := classify(files, singleArea)
 	scope := scopeOf(files)
-	noun := subjectNoun(files)
+	noun := subjectNoun(files, singleArea)
 	subject := typ
 	if scope != "" {
 		subject += "(" + scope + ")"
@@ -231,14 +249,19 @@ func countHits(lines []string, words map[string]bool) int {
 
 // classify picks the commit message. When the change adds top-level Go
 // declarations (col-0 func/type/var/const), the type is driven by those
-// declarations alone — a new exported symbol is a feature, and incidental
-// fix keywords in surrounding body lines can no longer outvote it. Without
+// declarations alone: in a single-area change a new exported symbol (other
+// than an Err* error sentinel, which is fix infrastructure) is a feature, and
+// incidental fix keywords in surrounding body lines can no longer outvote it.
+// A cross-cutting (multi-area) change never becomes feat on the strength of
+// one exported symbol among many packages: its declaration lines are
+// keyword-scored, falling back to all added code lines when the declarations
+// alone carry no signal, and only then to the additive-feat default. Without
 // added declarations, it falls back to fix/feat/refactor keyword hits over
 // the added lines (highest score wins, fix first for ties). A change touching
 // only tests is "test" and only docs is "docs"; otherwise "chore". Doc/test
 // type is decided by file kind, never by content keywords, so prose mentioning
 // "docs" cannot outvote a code change.
-func classify(files []fileChange) string {
+func classify(files []fileChange, singleArea bool) string {
 	var codeFiles, testFiles, docFiles []fileChange
 	for _, f := range files {
 		switch {
@@ -263,20 +286,31 @@ func classify(files []fileChange) string {
 	// Declaration-aware path: the added top-level declarations are the signal,
 	// not the incidental keywords in modified bodies.
 	if decls, lines := codeAddedDeclarations(codeFiles); len(decls) > 0 {
-		for _, d := range decls {
-			if isExported(d) {
-				return "feat" // new public API is the strongest feature signal
+		if singleArea {
+			for _, d := range decls {
+				if isExported(d) {
+					return "feat" // new public API is the strongest feature signal
+				}
 			}
 		}
 		best, bestScore := "chore", 0
-		for _, sig := range []struct {
-			typ   string
-			words map[string]bool
-		}{
-			{"feat", featWords}, {"fix", fixWords}, {"refactor", refactorWords},
-		} {
+		for _, sig := range typeScoreOrder {
 			if s := countHits(lines, sig.words); s > bestScore {
 				best, bestScore = sig.typ, s
+			}
+		}
+		if bestScore == 0 && !singleArea {
+			// Cross-cutting change: no decisive keyword footprint on the
+			// declaration lines alone, so score every added code line before
+			// falling back to the additive default.
+			var all []string
+			for _, f := range codeFiles {
+				all = append(all, f.added...)
+			}
+			for _, sig := range typeScoreOrder {
+				if s := countHits(all, sig.words); s > bestScore {
+					best, bestScore = sig.typ, s
+				}
 			}
 		}
 		if bestScore > 0 {
@@ -305,11 +339,14 @@ func classify(files []fileChange) string {
 
 // codeAddedDeclarations collects the added top-level declarations across the
 // code files (names, preserving case) and their source lines, so classification
-// can weight declarations instead of arbitrary added body lines.
+// can weight declarations instead of arbitrary added body lines. Err*-prefixed
+// declarations (error sentinels) are fix infrastructure and are excluded: they
+// must never drive a commit to feat, nor leak their "new"/"add" tokens into the
+// declaration keyword scoring.
 func codeAddedDeclarations(codeFiles []fileChange) (names []string, lines []string) {
 	for _, f := range codeFiles {
 		for _, l := range f.added {
-			if n, ok := declOf(l); ok {
+			if n, ok := declOf(l); ok && !isErrSentinel(n) {
 				names = append(names, n)
 				lines = append(lines, l)
 			}
@@ -401,6 +438,13 @@ func isExported(name string) bool {
 	return name != "" && name[0] >= 'A' && name[0] <= 'Z'
 }
 
+// isErrSentinel reports whether name is an Err*-prefixed Go error sentinel or
+// error type. Such declarations are fix infrastructure, never a feature
+// headline, and must not name a commit's subject on their own.
+func isErrSentinel(name string) bool {
+	return strings.HasPrefix(name, "Err")
+}
+
 // isTestFunc reports whether name is a Go test/benchmark/example function that
 // should not name a commit's subject.
 func isTestFunc(name string) bool {
@@ -410,39 +454,63 @@ func isTestFunc(name string) bool {
 		strings.HasPrefix(name, "Fuzz")
 }
 
-// scopeOf is the common directory prefix of the changed files, with generic
-// container segments (src, internal, pkg, cmd, lib) stripped but never to
-// nothing.
-func scopeOf(files []fileChange) string {
-	var segs [][]string
-	for _, f := range files {
-		segs = append(segs, strings.Split(filepathSlash(f.path), "/"))
+// commonPathSegments returns the path segments shared by every file, in order.
+// It is empty when the files diverge at the first segment. A single file's
+// prefix includes its own file-name segment.
+func commonPathSegments(files []fileChange) []string {
+	if len(files) == 0 {
+		return nil
 	}
-	if len(segs) == 0 {
-		return ""
-	}
-	common := segs[0]
-	for _, s := range segs[1:] {
+	common := strings.Split(filepathSlash(files[0].path), "/")
+	for _, f := range files[1:] {
+		s := strings.Split(filepathSlash(f.path), "/")
 		n := 0
 		for n < len(common) && n < len(s) && common[n] == s[n] {
 			n++
 		}
 		common = common[:n]
 	}
+	return common
+}
+
+// commonPrefixNonEmpty reports whether every file shares at least the first
+// path segment — the change stays within a single top-level area. A shared
+// generic segment (cmd, internal, ...) counts, mirroring how scopeOf treats
+// generic segments.
+func commonPrefixNonEmpty(files []fileChange) bool {
+	return len(commonPathSegments(files)) > 0
+}
+
+// scopeOf is the common directory prefix of the changed files, with generic
+// container segments (src, internal, pkg, cmd, lib) stripped but never to
+// nothing. When the files share no prefix at all, the fallback scope is the
+// dominant file's package directory — but only when that file really owns the
+// diff (≥ 50% of all changed lines); a cross-cutting change gets no scope.
+func scopeOf(files []fileChange) string {
+	if len(files) == 0 {
+		return ""
+	}
+	common := commonPathSegments(files)
 	// A single file pulls its own name into the prefix; drop it to get dirs.
 	if len(common) > 0 && strings.Contains(common[len(common)-1], ".") {
 		common = common[:len(common)-1]
 	}
 	generic := map[string]bool{"src": true, "internal": true, "pkg": true, "cmd": true, "lib": true, "app": true}
 	if len(common) == 0 {
-		// Fallback: pick the primary package directory from the file with the most changed lines
+		// Fallback: pick the primary package directory from the file with the
+		// most changed lines, but only when that file dominates the diff.
 		bestFile := files[0]
 		maxLines := len(bestFile.added) + len(bestFile.removed)
-		for _, f := range files[1:] {
+		total := 0
+		for _, f := range files {
+			total += len(f.added) + len(f.removed)
 			if lines := len(f.added) + len(f.removed); lines > maxLines {
 				maxLines = lines
 				bestFile = f
 			}
+		}
+		if maxLines*2 < total {
+			return ""
 		}
 		parts := strings.Split(filepathSlash(bestFile.path), "/")
 		if len(parts) > 1 {
@@ -472,17 +540,30 @@ func scopeOf(files []fileChange) string {
 	return strings.Join(dirs, "/")
 }
 
-// subjectNoun picks the strongest noun from the added lines: the first added
-// top-level declaration's identifier (the new symbol the commit introduces),
-// skipping Go test/benchmark/example functions; else the first
-// function/method identifier, else the first identifier token.
-func subjectNoun(files []fileChange) string {
-	// 1. Exported declarations take highest precedence
-	for _, f := range files {
-		for _, l := range f.added {
-			if n, ok := declOf(l); ok && isExported(n) && !isTestFunc(n) {
-				return strings.ToLower(n)
+// subjectNoun picks the strongest noun from the added lines. In a single-area
+// change it is the first added top-level declaration's identifier (the new
+// symbol the commit introduces), skipping Go test/benchmark/example functions
+// and Err* sentinels. In a multi-area change no single package owns the commit,
+// so the exported-declaration step is skipped in favor of the first qualifying
+// quoted string literal (e.g. "invalid patch"). Otherwise it falls through to
+// the first function/method identifier, then action phrases, then the first
+// declaration, then the first identifier token.
+func subjectNoun(files []fileChange, singleArea bool) string {
+	if singleArea {
+		// 1. Exported declarations take highest precedence (Err sentinels are
+		// fix infrastructure and are skipped).
+		for _, f := range files {
+			for _, l := range f.added {
+				if n, ok := declOf(l); ok && isExported(n) && !isTestFunc(n) && !isErrSentinel(n) {
+					return splitIdent(n)
+				}
 			}
+		}
+	} else {
+		// Multi-area: the strongest noun is the first qualifying string
+		// literal in the added lines.
+		if s := quotedLiteralSubject(files); s != "" {
+			return s
 		}
 	}
 	// 2. Added call or method identifiers
@@ -493,7 +574,7 @@ func subjectNoun(files []fileChange) string {
 				continue
 			}
 			if id := declIdent(trimmed); id != "" && !isStopWord(id) {
-				return strings.ToLower(id)
+				return splitIdent(id)
 			}
 		}
 	}
@@ -510,7 +591,7 @@ func subjectNoun(files []fileChange) string {
 	for _, f := range files {
 		for _, l := range f.added {
 			if n, ok := declOf(l); ok && !isTestFunc(n) {
-				return strings.ToLower(n)
+				return splitIdent(n)
 			}
 		}
 	}
@@ -524,6 +605,103 @@ func subjectNoun(files []fileChange) string {
 		}
 	}
 	return ""
+}
+
+// quotedLiteralSubject scans all files' added lines in order for the first
+// double-quoted string literal whose tokenized content has at least two
+// non-stopword tokens, returning those tokens joined with spaces (capped at
+// three). Only top-level (column-0), non-comment lines are scanned: indented
+// body lines and comments are skipped so incidental format strings
+// (fmt.Fprintf(os.Stderr, "kern: probing %s ...\n", ...)) or prose inside
+// comments never hijack a cross-cutting subject.
+func quotedLiteralSubject(files []fileChange) string {
+	for _, f := range files {
+		for _, l := range f.added {
+			if l == "" || l[0] == ' ' || l[0] == '\t' {
+				continue // indented body line
+			}
+			if strings.HasPrefix(l, "//") {
+				continue // comment, not code
+			}
+			lit, ok := firstQuotedLiteral(l)
+			if !ok {
+				continue
+			}
+			toks := tokenizeWords(lit)
+			nonStop := 0
+			for _, t := range toks {
+				if !isStopWord(t) {
+					nonStop++
+				}
+			}
+			if nonStop < 2 {
+				continue
+			}
+			if len(toks) > 3 {
+				toks = toks[:3]
+			}
+			return strings.Join(toks, " ")
+		}
+	}
+	return ""
+}
+
+// firstQuotedLiteral returns the text of the first double-quoted string
+// literal on a line, honoring backslash escapes so `\"` does not terminate the
+// literal early.
+func firstQuotedLiteral(line string) (string, bool) {
+	i := strings.IndexByte(line, '"')
+	if i < 0 {
+		return "", false
+	}
+	var b strings.Builder
+	for j := i + 1; j < len(line); j++ {
+		switch line[j] {
+		case '\\':
+			j++ // skip the escaped character
+		case '"':
+			return b.String(), true
+		default:
+			b.WriteByte(line[j])
+		}
+	}
+	return "", false
+}
+
+// splitIdent splits a Go identifier into space-separated lowercased words on
+// camelCase transitions and underscore runs: "ErrInvalidPatch" → "err invalid
+// patch", "environmentFor" → "environment for", "NewServer" → "new server",
+// "g27RequireKern" → "g27 require kern". An identifier without boundaries
+// passes through lowercased.
+func splitIdent(name string) string {
+	var words []string
+	var b strings.Builder
+	lastLower := false // previous written rune was lowercase or digit
+	flush := func() {
+		if b.Len() > 0 {
+			words = append(words, b.String())
+			b.Reset()
+		}
+	}
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		switch {
+		case c == '_':
+			flush() // underscore run → word boundary
+			lastLower = false
+		case c >= 'A' && c <= 'Z':
+			if lastLower {
+				flush() // camelCase boundary after a lowercase/digit run
+			}
+			b.WriteByte(c)
+			lastLower = false
+		default:
+			b.WriteByte(c)
+			lastLower = c >= 'a' && c <= 'z' || c >= '0' && c <= '9'
+		}
+	}
+	flush()
+	return strings.ToLower(strings.Join(words, " "))
 }
 
 // declIdent returns the identifier immediately before the first "(" of a line,
@@ -558,20 +736,28 @@ func declIdent(trimmed string) string {
 	return ""
 }
 
+// lastIdent returns the last identifier in s, preserving case, so a caller can
+// still split camelCase (e.g. environmentFor) before lowercasing for display.
 func lastIdent(s string) string {
-	words := tokenizeWords(s)
-	if len(words) == 0 {
-		return ""
+	for i := len(s) - 1; i >= 0; i-- {
+		if isIdentChar(s[i]) {
+			j := i
+			for j > 0 && isIdentChar(s[j-1]) {
+				j--
+			}
+			return s[j : i+1]
+		}
 	}
-	return words[len(words)-1]
+	return ""
 }
 
 func classifyNote(f fileChange) string {
 	// Prefer the top-level declaration the file adds, so the note names the
 	// introduced symbol instead of grabbing two random tokens from a body line.
+	// Err* sentinels are skipped: they are fix infrastructure, not a headline.
 	for _, l := range f.added {
-		if n, ok := declOf(l); ok && !isTestFunc(n) {
-			return "add " + strings.ToLower(n)
+		if n, ok := declOf(l); ok && !isTestFunc(n) && !isErrSentinel(n) {
+			return "add " + splitIdent(n)
 		}
 	}
 	words := tokenizeWords(strings.Join(f.added, " "))

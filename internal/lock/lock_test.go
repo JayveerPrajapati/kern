@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -93,6 +94,20 @@ func TestRemoveRefusesHeldAndCleansStale(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(root, ".kern", "locks", "gate.lock")); !os.IsNotExist(err) {
 		t.Errorf("lock file should be gone, got %v", err)
+	}
+}
+
+// TestRemoveNoLockHeldErrors locks the never-held case: Held() creates the
+// lock file when absent, so Remove on a scope that was never acquired must
+// error up front instead of silently "succeeding".
+func TestRemoveNoLockHeldErrors(t *testing.T) {
+	root := t.TempDir()
+	err := Remove(root, "never-held")
+	if err == nil {
+		t.Fatal("Remove on a never-acquired scope must error")
+	}
+	if !strings.Contains(err.Error(), "no lock") {
+		t.Fatalf("error = %q, want it to contain \"no lock\"", err)
 	}
 }
 

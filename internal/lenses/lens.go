@@ -5,6 +5,8 @@ package lenses
 
 import (
 	"fmt"
+	"maps"
+	"slices"
 	"sort"
 	"strings"
 
@@ -55,12 +57,7 @@ func (r *Registry) Select(name string) (Lens, bool) {
 
 // List returns the registered lens names, sorted.
 func (r *Registry) List() []string {
-	names := make([]string, 0, len(r.lenses))
-	for n := range r.lenses {
-		names = append(names, n)
-	}
-	sort.Strings(names)
-	return names
+	return slices.Sorted(maps.Keys(r.lenses))
 }
 
 // SecurityLens prioritizes policy and runtime evidence: what a security
@@ -194,11 +191,6 @@ func Resolve(name string) (Lens, error) {
 		ls = append(ls, l)
 	}
 	return CombinedLens(strings.Join(parts, "+"), ls...), nil
-}
-
-// GetPriorities returns the lens's priorities (nil-safe).
-func GetPriorities(l Lens) []EvidencePriority {
-	return l.Priorities
 }
 
 // CombinedLens merges several lenses into one preset (e.g. "security-focused"

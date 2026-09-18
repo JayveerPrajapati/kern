@@ -13,8 +13,8 @@ import (
 	"time"
 
 	bpdomain "github.com/JayveerPrajapati/kern/internal/blueprint/domain"
-	"github.com/JayveerPrajapati/kern/internal/blueprint/receipt"
 	"github.com/JayveerPrajapati/kern/internal/blueprint/sandbox"
+	"github.com/JayveerPrajapati/kern/internal/bpreceipt/receipt"
 	"github.com/JayveerPrajapati/kern/internal/domain"
 	"github.com/JayveerPrajapati/kern/internal/incident"
 	"github.com/JayveerPrajapati/kern/internal/index"
@@ -288,6 +288,10 @@ func TestTriageReproduction(t *testing.T) {
 	return report, nil
 }
 
+// frameRe matches a Go stack-trace frame ("path/to/file.go:42") inside a log
+// line. Compiled once at package init instead of per parsePanicAndFrames call.
+var frameRe = regexp.MustCompile(`(?:^|\s+)([a-zA-Z0-9_\-\./]+\.go):(\d+)`)
+
 // parsePanicAndFrames extracts panic messages and stack frames from log output.
 func parsePanicAndFrames(root, logText string) (string, []StackFrame) {
 	var errMsg string
@@ -306,8 +310,6 @@ func parsePanicAndFrames(root, logText string) (string, []StackFrame) {
 			break
 		}
 	}
-
-	frameRe := regexp.MustCompile(`(?:^|\s+)([a-zA-Z0-9_\-\./]+\.go):(\d+)`)
 
 	var curFn string
 	for _, ln := range lines {

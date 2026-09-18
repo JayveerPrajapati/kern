@@ -1,6 +1,8 @@
 package app
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -212,4 +214,67 @@ func headStr(s string, n int) string {
 		return s[:n] + "..."
 	}
 	return s
+}
+
+// Stopword-colliding symbols: "fix the Add function" mentions only words that
+// collide with the change-verb stoplist, yet "Add" is a real symbol in the
+// fixture. The Analyze (kern analyze/kern plan) and WhatIf chains must resolve
+// it instead of erroring with symbol-not-found.
+func TestAnalyzeResolvesStopwordCollidingSymbol(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "go.mod"), []byte("module scratch\n\ngo 1.21\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "math.go"), []byte("package scratch\n\n// Add returns the sum of a and b.\nfunc Add(a, b int) int { return a + b }\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	p, err := New(root)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	// Plan/analyze path: the whole change text is stopwords + the symbol.
+	pkt, text, err := p.Analyze("fix the Add function")
+	if err != nil {
+		t.Fatalf("Analyze(%q): %v", "fix the Add function", err)
+	}
+	if text == "" || len(pkt.Symbols) == 0 {
+		t.Fatalf("Analyze resolved no symbols; text=%q packet=%+v", text, pkt)
+	}
+	// What-if path: same extraction, different consumer. "Add" is a leaf
+	// function, so Affected is legitimately empty — the fix is that the
+	// change RESOLVES to the real symbol instead of erroring.
+	imp, _, err := p.WhatIf(whatif.RemoveSymbol, "fix the Add function", "")
+	if err != nil {
+		t.Fatalf("WhatIf(%q): %v", "fix the Add function", err)
+	}
+	if imp.Change.Target != "Add" {
+		t.Errorf("WhatIf resolved target = %q, want %q", imp.Change.Target, "Add")
+	}
+}
+
+// TestNewPersistsIndexViaLoadOrBuild guards the P1a fix: New must go through
+// index.LoadOrBuild so one-shot CLI invocations (analyze/review/task/do and
+// the other 35+ call sites) reuse the persisted index — and incremental
+// Update on staleness — instead of full-rebuilding the tree on every call.
+// Observable: LoadOrBuild saves the index back for the next caller; a bare
+// index.Build never persists.
+func TestNewPersistsIndexViaLoadOrBuild(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "hello.go"), []byte("package hello\n\nfunc Hello() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	p, err := New(dir)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if p.Index() == nil || len(p.Index().Symbols) == 0 {
+		t.Fatal("New: empty index")
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".kern", "index.json")); err != nil {
+		t.Fatalf("New did not persist the index (load-or-build path bypassed): %v", err)
+	}
+	// A second New must succeed against the persisted index.
+	if _, err := New(dir); err != nil {
+		t.Fatalf("second New: %v", err)
+	}
 }

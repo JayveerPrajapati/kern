@@ -96,6 +96,46 @@ var _ = dead
 	}
 }
 
+// TestPlanRefusesClosureBreak pins the fail-closed closure gate: when a
+// test-only caller of the symbol is itself called from a test function
+// outside the deletion set, the plan must refuse (removing the helper would
+// break the outside caller's build).
+func TestPlanRefusesClosureBreak(t *testing.T) {
+	root := writeTree(t, map[string]string{
+		"lib/lib.go": `package lib
+
+func dead() {}
+`,
+		"lib/lib_test.go": `package lib
+
+import "testing"
+
+func helper() {
+	dead()
+}
+
+func TestCallsHelper(t *testing.T) {
+	helper()
+}
+
+func TestOther(t *testing.T) {
+	helper()
+}
+`,
+	})
+	_, err := Plan(build(t, root), "dead")
+	var u *ErrUnsafe
+	if !errors.As(err, &u) {
+		t.Fatalf("Plan(dead) error = %v, want ErrUnsafe (helper called from outside the deletion set)", err)
+	}
+	if !strings.Contains(err.Error(), "lib_test.go") {
+		t.Fatalf("ErrUnsafe = %q, want the outside caller's file named", err)
+	}
+	if !strings.Contains(err.Error(), "also called from") {
+		t.Fatalf("ErrUnsafe = %q, want the closure-break explanation", err)
+	}
+}
+
 // TestPlanAndApplyRemovesDeadSymbolAndTestCaller pins the happy path: the
 // plan covers the symbol's declaration (with its doc comment) and the
 // test-only caller's declaration; Apply removes exactly those lines, backs

@@ -1,6 +1,7 @@
 package modernization
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -387,6 +388,145 @@ func RunOther() int { return 42 }
 			if strings.Contains(sym, "RunOther") || strings.Contains(sym, "other") {
 				t.Errorf("expected project_b symbol to be excluded with project_a prefix, found %s in context %s", sym, ctx.Name)
 			}
+		}
+	}
+}
+
+// TestExtractionPlanPhaseCap verifies the QA finding fix: a repo with more
+// bounded contexts than maxPhases must yield a plan capped at maxPhases
+// phases (not one phase per context), while the analysis stays honest —
+// TotalContexts reports the full context count and the summary notes the
+// consolidation. Phases must remain risk-ordered: sequential numbers and
+// non-decreasing risk rank from phase 0 (Phases[0] stays the safest).
+func TestExtractionPlanPhaseCap(t *testing.T) {
+	// 22 independent packages plus a shared utility called by pkg20 and
+	// pkg21: 23 bounded contexts, one of which (shared) carries coupling
+	// bridges and is therefore the highest-risk extraction candidate.
+	files := map[string]string{}
+	for i := 0; i < 22; i++ {
+		pkg := fmt.Sprintf("pkg%02d", i)
+		upper := fmt.Sprintf("A%02d", i)
+		lower := fmt.Sprintf("B%02d", i)
+		files[pkg+"/"+pkg+".go"] = fmt.Sprintf(`package %s
+
+func %s() int { return %s() }
+
+func %s() int { return 1 }
+`, pkg, upper, lower, lower)
+	}
+	files["pkg20/pkg20.go"] = `package pkg20
+
+import "shared"
+
+func A20() int { return B20() + shared.Util(1) }
+
+func B20() int { return 1 }
+`
+	files["pkg21/pkg21.go"] = `package pkg21
+
+import "shared"
+
+func A21() int { return B21() + shared.Util(2) }
+
+func B21() int { return 1 }
+`
+	files["shared/shared.go"] = `package shared
+
+func Util(v int) int { return helper(v) }
+
+func helper(v int) int { return v }
+`
+
+	plan, err := NewAnalyzer(build(t, files)).Analyze()
+	if err != nil {
+		t.Fatalf("Analyze: %v", err)
+	}
+
+	// The analysis stays honest: all 23 contexts are still reported.
+	if len(plan.Contexts) != 23 {
+		t.Fatalf("expected 23 contexts, got %d", len(plan.Contexts))
+	}
+	if plan.TotalContexts != 23 {
+		t.Errorf("expected TotalContexts=23, got %d", plan.TotalContexts)
+	}
+
+	// The plan is capped: 23 contexts consolidate into at most maxPhases
+	// phases, and the consolidation is called out in the summary.
+	if len(plan.Phases) > maxPhases {
+		t.Errorf("expected at most %d phases, got %d", maxPhases, len(plan.Phases))
+	}
+	if len(plan.Phases) >= len(plan.Contexts) {
+		t.Errorf("expected consolidation below %d contexts, got %d phases", len(plan.Contexts), len(plan.Phases))
+	}
+	if !strings.Contains(plan.Summary, "consolidated") {
+		t.Errorf("expected consolidation note in summary, got %q", plan.Summary)
+	}
+
+	// Phases remain risk-ordered: sequential numbers starting at 1, and risk
+	// rank never decreases (a later phase is never safer than an earlier one).
+	rank := map[string]int{"low": 0, "medium": 1, "high": 2}
+	for i, ph := range plan.Phases {
+		if ph.Phase != i+1 {
+			t.Errorf("phase %d has wrong number %d", i, ph.Phase)
+		}
+		if ph.RiskLevel != "low" && ph.RiskLevel != "medium" && ph.RiskLevel != "high" {
+			t.Errorf("phase %d has invalid risk level %q", ph.Phase, ph.RiskLevel)
+		}
+		if i > 0 && rank[ph.RiskLevel] < rank[plan.Phases[i-1].RiskLevel] {
+			t.Errorf("phases out of order: phase %d (%s) is safer than phase %d (%s)",
+				i, ph.RiskLevel, i-1, plan.Phases[i-1].RiskLevel)
+		}
+	}
+
+	// The consolidated leading phase lists every merged context id, and each
+	// id resolves to a real bounded context.
+	first := plan.Phases[0]
+	if len(first.Contexts) == 0 {
+		t.Errorf("expected consolidated leading phase to list merged contexts, got none")
+	}
+	for _, name := range first.Contexts {
+		if contextByName(plan, name) == nil {
+			t.Errorf("consolidated phase lists unknown context %q", name)
+		}
+	}
+
+	// The riskiest context (shared, the bridge owner) keeps its own final
+	// phase, so the plan still ends on the highest-risk extraction.
+	last := plan.Phases[len(plan.Phases)-1]
+	if last.Context != "shared" {
+		t.Errorf("expected final phase to extract shared, got %q", last.Context)
+	}
+	if last.RiskLevel != "medium" {
+		t.Errorf("expected final phase risk level medium, got %q", last.RiskLevel)
+	}
+}
+
+// TestBuildPhasesUnderCap verifies the phase builder keeps one phase per
+// context when contexts do not exceed maxPhases (no consolidation).
+func TestBuildPhasesUnderCap(t *testing.T) {
+	contexts := make([]BoundedContext, 5)
+	bridgeCount := map[string]int{}
+	order := make([]int, len(contexts))
+	for i := range contexts {
+		name := fmt.Sprintf("ctx-%d", i)
+		contexts[i] = BoundedContext{Name: name, Symbols: []string{name + ".sym"}}
+		bridgeCount[name] = i // ascending risk: ctx-0 safest
+		order[i] = i
+	}
+	phases := buildPhases(order, contexts, bridgeCount, nil)
+	if len(phases) != len(contexts) {
+		t.Fatalf("expected one phase per context below cap, got %d phases for %d contexts",
+			len(phases), len(contexts))
+	}
+	for i, ph := range phases {
+		if ph.Phase != i+1 {
+			t.Errorf("phase %d has wrong number %d", i, ph.Phase)
+		}
+		if ph.Context != contexts[order[i]].Name {
+			t.Errorf("phase %d extracts %q, want %q", ph.Phase, ph.Context, contexts[order[i]].Name)
+		}
+		if len(ph.Contexts) != 0 {
+			t.Errorf("phase %d should not list merged contexts, got %v", ph.Phase, ph.Contexts)
 		}
 	}
 }

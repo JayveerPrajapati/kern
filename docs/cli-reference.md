@@ -70,7 +70,7 @@ kern changes / review / hubs / testgaps / entries / flows / communities / path /
        / larges / arch / churn / cochange / near / walk / probe / trace / explore
                                 change impact and code-intelligence analyses
 kern fts "<query>" [root] [--limit N]               full-text search over the SQLite index
-                                (requires -tags sqlite)
+                                (sqlite store compiled in by default; disable with -tags nosqlite)
 kern cache [root] [--dry-run]                           cache GC: gzip-archive dormant entries, TTL-evict stale ones
 kern lsp [root]                                     LSP over stdio: hover/definition/references from the index
 kern guard init [root]                              scaffold .kern/boundaries.json

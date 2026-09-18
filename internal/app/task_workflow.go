@@ -264,23 +264,35 @@ func (s *TaskService) RunWorkflowResume(taskID string) (*agent.Task, error) {
 // runStoredWorkflow runs (or resumes) the workflow for a stored task, evicting
 // the run once the task reaches a terminal state.
 func (s *TaskService) runStoredWorkflow(taskID string) (*agent.Task, error) {
+	return s.runStoredWorkflowContext(context.Background(), taskID)
+}
+
+// runStoredWorkflowContext is runStoredWorkflow with caller cancellation,
+// threaded through to WorkflowEngine.RunContext.
+func (s *TaskService) runStoredWorkflowContext(ctx context.Context, taskID string) (*agent.Task, error) {
 	s.wfMu.Lock()
 	run, ok := s.workflowRuns[taskID]
 	s.wfMu.Unlock()
 	if !ok {
 		return nil, fmt.Errorf("no agent-team workflow run for task %s", taskID)
 	}
-	return s.runWorkflow(run.task, run.engine)
+	return s.runWorkflowContext(ctx, run.task, run.engine)
 }
 
 // runWorkflow runs an engine against a task, evicting the run once the task
 // reaches a terminal state, and records the task-lifecycle transitions the
-// engine drove in the audit chain (AUD-11: the engine advances the state
+// engine drove in the audit chain (the engine advances the state
 // machine internally, bypassing the TaskService.transition audit hook).
 func (s *TaskService) runWorkflow(t *agent.Task, eng *agent.WorkflowEngine) (*agent.Task, error) {
+	return s.runWorkflowContext(context.Background(), t, eng)
+}
+
+// runWorkflowContext is runWorkflow with caller cancellation: the engine
+// checks the context before every workflow step.
+func (s *TaskService) runWorkflowContext(ctx context.Context, t *agent.Task, eng *agent.WorkflowEngine) (*agent.Task, error) {
 	from := t.State
 	stepCount := len(t.Steps)
-	res, err := eng.Run(t, s.defaultWorkflowStep())
+	res, err := eng.RunContext(ctx, t, s.defaultWorkflowStep())
 	if res != nil && res.Terminal() {
 		s.wfMu.Lock()
 		delete(s.workflowRuns, res.ID)

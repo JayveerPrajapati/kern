@@ -11,6 +11,7 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/fit"
 	"github.com/JayveerPrajapati/kern/internal/fragility"
 	"github.com/JayveerPrajapati/kern/internal/fw"
+	"github.com/JayveerPrajapati/kern/internal/intel"
 	"github.com/JayveerPrajapati/kern/internal/mutation"
 	"github.com/JayveerPrajapati/kern/internal/refactor"
 	"github.com/JayveerPrajapati/kern/internal/repair"
@@ -111,8 +112,10 @@ func runRepairDiagnostics(rest []string) {
 
 	if f.apply {
 		fmt.Printf("Applied repairs to %d files:\n", repairedCount)
+	} else if repairedCount == 0 {
+		fmt.Printf("Parsed %d diagnostic files, none auto-repairable (dry-run):\n", len(results))
 	} else {
-		fmt.Printf("Proposed %d repairs (dry-run, pass --apply to commit):\n", len(results))
+		fmt.Printf("Proposed %d repairs (dry-run, pass --apply to commit):\n", repairedCount)
 	}
 	for _, r := range results {
 		status := "PASS"
@@ -165,12 +168,20 @@ func runRefactorTransaction(rest []string) {
 
 	if f.json {
 		printJSON(res)
+		if !res.Success {
+			fatal("refactor-transaction: failed — see JSON output above")
+		}
 		return
 	}
 
 	if res.Success {
+		if res.VerificationSkipped {
+			fmt.Fprintln(os.Stderr, "WARNING: verification skipped: no go.mod and no --cmd")
+		}
 		if f.apply {
 			fmt.Printf("SUCCESS: Atomic refactor committed (%d files)\n", len(res.ModifiedFiles))
+		} else if res.VerificationSkipped {
+			fmt.Printf("SUCCESS: dry-run preview (%d files modified, verification skipped)\n", len(res.ModifiedFiles))
 		} else {
 			fmt.Printf("SUCCESS: Verification passed in sandbox (%d files modified, dry-run)\n", len(res.ModifiedFiles))
 		}
@@ -178,7 +189,7 @@ func runRefactorTransaction(rest []string) {
 			fmt.Printf("\n%s\n", res.UnifiedDiff)
 		}
 	} else {
-		fmt.Printf("FAILED: Atomic rollback executed (0 files modified).\nError: %s\n%s\n", res.Error, res.CompilerOutput)
+		fatal("FAILED: Atomic rollback executed (0 files modified).\nError: %s\n%s", res.Error, res.CompilerOutput)
 	}
 }
 
@@ -234,6 +245,13 @@ func runFWTrace(rest []string) {
 }
 
 func runMutationTest(rest []string) {
+	// --files is the documented mutate flag (comma-separated, repeatable);
+	// the shared parser only knows --file, so hoist --files out of rest
+	// before generic parsing (which would otherwise reject it) and merge
+	// both sources below.
+	var filesFlag []string
+	rest, filesFlag = extractListFlag(rest, "--files")
+
 	f, _, err := parseFlags(rest)
 	if err != nil {
 		fatalUsage("flags: %v", err)
@@ -242,9 +260,22 @@ func runMutationTest(rest []string) {
 	if root == "" {
 		root = "."
 	}
-	var files []string
+	files := filesFlag
 	if f.file != "" {
-		files = strings.Split(f.file, ",")
+		files = append(files, strings.Split(f.file, ",")...)
+	}
+	// --symbol scopes the run to the symbol's defining file (the shared
+	// parser accepted the flag but the function used to ignore it).
+	if f.symbol != "" {
+		ix, ierr := intel.ReadIndex(root)
+		if ierr != nil {
+			fatal("mutate: %v", ierr)
+		}
+		if def, ok := ix.ResolveName(f.symbol); ok && def.File != "" {
+			files = append(files, def.File)
+		} else {
+			fatal("mutate: symbol %q not found in the index (run kern index first)", f.symbol)
+		}
 	}
 	maxMuts := f.max
 	if maxMuts <= 0 {
@@ -272,6 +303,15 @@ func runMutationTest(rest []string) {
 		fmt.Printf("Mutation Score:   %.1f%%\n", report.Score)
 		fmt.Printf("Killed Mutants:   %d (Tests caught the regression)\n", report.KilledCount)
 		fmt.Printf("Survived Mutants: %d (Test Gap / False-positive tests!)\n", report.SurvivedCount)
+		untested := 0
+		for _, m := range report.Mutants {
+			if m.Status == "untested" {
+				untested++
+			}
+		}
+		if untested > 0 {
+			fmt.Printf("Untested Mutants: %d (zero_return skipped without type analysis)\n", untested)
+		}
 	}
 	fmt.Println("\n--- Mutants Evaluated ---")
 
@@ -284,6 +324,8 @@ func runMutationTest(rest []string) {
 			statusIcon = "🚨 SURVIVED (TEST GAP)"
 		case "compile_error":
 			statusIcon = "⚠️ COMPILE ERROR"
+		case "untested":
+			statusIcon = "⏭️ UNTESTED (SKIPPED)"
 		}
 
 		fmt.Printf("[%s] %s:%d (%s)\n", statusIcon, m.File, m.Line, m.Operator)
@@ -306,8 +348,9 @@ func runFragility(rest []string) {
 	}
 
 	report, err := fragility.Analyze(context.Background(), fragility.Options{
-		Root:  root,
-		Limit: 20,
+		Root:   root,
+		Target: f.target,
+		Limit:  20,
 	})
 	if err != nil {
 		fatal("fragility analysis: %v", err)
@@ -350,4 +393,29 @@ func runFragility(rest []string) {
 		}
 		fmt.Println()
 	}
+}
+
+// extractListFlag removes occurrences of flag (a value-taking flag that the
+// shared parser does not know) from args and returns their values, split on
+// commas and trimmed of whitespace. Empty entries are dropped and repeated
+// flags accumulate, matching the documented "comma-separated list" semantics.
+// A trailing flag with no value is ignored, matching the shared parser's
+// lenient behavior for trailing value flags.
+func extractListFlag(args []string, flag string) (rest, values []string) {
+	for i := 0; i < len(args); i++ {
+		if args[i] != flag {
+			rest = append(rest, args[i])
+			continue
+		}
+		if i+1 >= len(args) {
+			break // trailing flag without a value
+		}
+		i++
+		for _, v := range strings.Split(args[i], ",") {
+			if v = strings.TrimSpace(v); v != "" {
+				values = append(values, v)
+			}
+		}
+	}
+	return rest, values
 }

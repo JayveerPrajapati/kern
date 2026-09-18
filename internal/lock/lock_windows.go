@@ -4,6 +4,8 @@ package lock
 
 import (
 	"encoding/json"
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -57,7 +59,7 @@ func Acquire(root, scope string) (*Lock, error) {
 	p := pathFor(root, scope)
 	f, err := os.OpenFile(p, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
 	if err != nil {
-		if !os.IsExist(err) {
+		if !errors.Is(err, os.ErrExist) {
 			return nil, err
 		}
 		if !reclaim(p) {
@@ -109,7 +111,7 @@ func Held(root, scope string) (bool, int, error) {
 		_ = os.Remove(p)
 		return false, 0, nil
 	}
-	if os.IsExist(err) {
+	if errors.Is(err, os.ErrExist) {
 		if reclaim(p) {
 			return false, 0, nil
 		}
@@ -125,7 +127,7 @@ func Held(root, scope string) (bool, int, error) {
 func List(root string) ([]Status, error) {
 	entries, err := os.ReadDir(dir(root))
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, fs.ErrNotExist) {
 			return nil, nil
 		}
 		return nil, err
@@ -140,7 +142,7 @@ func List(root string) ([]Status, error) {
 		if f, err := os.OpenFile(p, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644); err == nil {
 			_ = f.Close()
 			_ = os.Remove(p)
-		} else if os.IsExist(err) && reclaim(p) {
+		} else if errors.Is(err, os.ErrExist) && reclaim(p) {
 			// stale file reclaimed
 		} else {
 			s.Held = true

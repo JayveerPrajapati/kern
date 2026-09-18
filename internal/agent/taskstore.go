@@ -9,6 +9,7 @@ import (
 	"sync"
 
 	"github.com/JayveerPrajapati/kern/internal/cache"
+	"github.com/JayveerPrajapati/kern/internal/fsutil"
 )
 
 // TaskStore is a JSON file store for tasks under the project cache.
@@ -61,26 +62,7 @@ func (s *TaskStore) saveLocked(list []Task) error {
 	if err != nil {
 		return err
 	}
-	tmp, err := os.CreateTemp(filepath.Dir(s.path), "*.tmp")
-	if err != nil {
-		return err
-	}
-	name := tmp.Name()
-	if _, err := tmp.Write(b); err != nil {
-		_ = tmp.Close()
-		_ = os.Remove(name)
-		return err
-	}
-	if err := tmp.Chmod(0o600); err != nil {
-		_ = tmp.Close()
-		_ = os.Remove(name)
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		_ = os.Remove(name)
-		return err
-	}
-	return os.Rename(name, s.path)
+	return fsutil.WriteFileAtomic(s.path, b, 0o600)
 }
 
 // Save persists a task (insert or replace by ID) and returns the stored record.

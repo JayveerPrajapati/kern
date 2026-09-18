@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"github.com/JayveerPrajapati/kern/internal/agent"
@@ -10,6 +11,8 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/code"
 	"github.com/JayveerPrajapati/kern/internal/docsearch"
 	"github.com/JayveerPrajapati/kern/internal/index"
+	"github.com/JayveerPrajapati/kern/internal/intel"
+	"github.com/JayveerPrajapati/kern/internal/llm"
 	"github.com/JayveerPrajapati/kern/internal/loop"
 	"github.com/JayveerPrajapati/kern/internal/metrics"
 	"github.com/JayveerPrajapati/kern/internal/optimize"
@@ -167,6 +170,14 @@ func runDo(root, levelStr, intent string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("could not load project: %w — run kern index first", err)
 	}
+	// `kern do` drives the closed loop with the autonomous coder, which
+	// needs a reachable LLM provider. Without one the loop silently blocks
+	// inside the first Generate call (long connect/retry windows) with no
+	// output at all — an apparent hang. Probe the provider up front with a
+	// short timeout so the failure is a clear one-line error instead.
+	if err := probeLLMProvider(); err != nil {
+		return "", fmt.Errorf("no reachable LLM provider: %w — start ollama (or set KERN_LLM_PROVIDER to a reachable provider) before using kern do", err)
+	}
 	ts := app.NewTaskService(p, nil).WithPRProvider(app.AutoPRProvider())
 	_, res, err := ts.RunDo(intent, level)
 	var b strings.Builder
@@ -191,6 +202,29 @@ func runDo(root, levelStr, intent string) (string, error) {
 		return b.String(), loopFailureMessage(res, err)
 	}
 	return b.String(), nil
+}
+
+// probeLLMProvider verifies a reachable LLM provider before a command that
+// hard-depends on one. It mirrors the provider the coder/planner agents use
+// (llm.NewProvider, env-driven with an auto chain) and asks it a trivial
+// question under a short timeout. The auto chain falls back across
+// providers, so this only fails when no provider in the chain answers —
+// exactly the silent-hang condition `kern do` used to exhibit.
+func probeLLMProvider() error {
+	prov, err := llm.NewProvider()
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	out, err := prov.Generate(ctx, "", "Reply with exactly: OK", llm.Options{})
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(out) == "" {
+		return fmt.Errorf("provider returned an empty response")
+	}
+	return nil
 }
 
 // loopFailureMessage converts a failed loop run into a one-line cause that
@@ -226,6 +260,13 @@ func runWorkflowCLI(root, intent string) (string, error) {
 	if err != nil && task == nil {
 		return "", err
 	}
+	// A task-level failure (e.g. ErrInvalidTransition) carries the task
+	// object; render the state for context but surface the error so the CLI
+	// exits non-zero. Only the approval-required pause is a normal state and
+	// exits 0 (matching the request-approval/approve rc=3 policy convention).
+	if err != nil && agent.ApprovalID(err) == "" {
+		return renderWorkflowResult(task, err), err
+	}
 	return renderWorkflowResult(task, err), nil
 }
 
@@ -239,6 +280,11 @@ func runWorkflowResumeCLI(root, taskID string) (string, error) {
 	task, err := ts.RunWorkflowResume(taskID)
 	if err != nil && task == nil {
 		return "", err
+	}
+	// Same error-surfacing rule as runWorkflowCLI: invalid transitions are
+	// failures (non-zero exit), approval-required is a normal pause (exit 0).
+	if err != nil && agent.ApprovalID(err) == "" {
+		return renderWorkflowResult(task, err), err
 	}
 	return renderWorkflowResult(task, err), nil
 }
@@ -319,7 +365,7 @@ func wireRecorder() {
 }
 
 // loadOrBuild delegates to index.LoadOrBuild — the canonical shared
-// implementation (G-11). Kept as a thin wrapper for its many CLI callers.
+// implementation. Kept as a thin wrapper for its many CLI callers.
 func loadOrBuild(root string) (*index.Index, error) {
 	return index.LoadOrBuild(root)
 }
@@ -465,6 +511,15 @@ func fatalUsage(format string, args ...any) {
 	panic(exitError{code: 2})
 }
 
+// fatalPolicy prints an error to stderr and exits with code 3 (the
+// decided-state / policy-outcome convention — see `kern exitcode`). Use it
+// for approvals that are already decided and similar policy outcomes.
+// Like fatal, it panics with the exitError sentinel.
+func fatalPolicy(format string, args ...any) {
+	fmt.Fprintf(os.Stderr, "kern: "+format+"\n", args...)
+	panic(exitError{code: 3})
+}
+
 func splitNames(s string) []string {
 	var out []string
 	for _, n := range strings.Split(s, ",") {
@@ -549,4 +604,24 @@ func clipText(s string, n int) string {
 func isDir(p string) bool {
 	info, err := os.Stat(p)
 	return err == nil && info.IsDir()
+}
+
+// resolveRoot resolves the project root shared by the graph subcommands — the
+// --root flag, else the first positional argument, else "." — and opens the
+// project index, reproducing the root-resolution + index-open preamble each
+// subcommand repeats. The index-open error is returned so each caller formats
+// its own failure message.
+func resolveRoot(f flags, args []string) (string, *index.Index, error) {
+	root := f.root
+	if root == "" {
+		root = "."
+		if len(args) > 0 {
+			root = args[0]
+		}
+	}
+	ix, err := intel.ReadIndex(root)
+	if err != nil {
+		return root, nil, err
+	}
+	return root, ix, nil
 }

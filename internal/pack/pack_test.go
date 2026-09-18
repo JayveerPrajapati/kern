@@ -264,6 +264,59 @@ func countTokens(b *Bundle) int {
 	return n
 }
 
+func TestUnlimitedPackTokenCountExceedsThreshold(t *testing.T) {
+	// ~2M chars of a single identifier: the estimator counts ~1 token per
+	// 3.5–4 chars (~500k tokens) while exact cl100k BPE merges 8 x's per
+	// token (~250k) — either way this lands well above
+	// PackedTokensWarningThreshold regardless of the active tokenizer.
+	// MaxFileBytes is raised so the file clears the default 512KiB
+	// per-file cap.
+	big := strings.Repeat("x", 2_000_000)
+	root := writeTree(t, map[string]string{
+		"a.go": "package a\n" + big + "\n",
+	})
+	b, err := Build(root, Options{Root: root, MaxFileBytes: 3 << 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.TokenCount <= PackedTokensWarningThreshold {
+		t.Fatalf("unlimited pack TokenCount = %d, want > %d", b.TokenCount, PackedTokensWarningThreshold)
+	}
+	if b.TokenCount != b.TotalTokens {
+		t.Fatalf("TokenCount = %d, TotalTokens = %d; want them equal", b.TokenCount, b.TotalTokens)
+	}
+	if b.Truncated {
+		t.Fatalf("unlimited pack should not be truncated")
+	}
+}
+
+func TestBudgetedPackTokenCountFits(t *testing.T) {
+	root := writeTree(t, map[string]string{
+		"a.go": "package a\n" + strings.Repeat("x", 200) + "\n", // ~57 tokens
+		"b.go": "package b\nsmall\n",
+	})
+	const budget = 1000
+	b, err := Build(root, Options{Root: root, MaxTokens: budget})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.TokenCount > budget {
+		t.Fatalf("budgeted pack TokenCount = %d, want <= %d", b.TokenCount, budget)
+	}
+	if b.TokenCount != b.TotalTokens {
+		t.Fatalf("TokenCount = %d, TotalTokens = %d; want them equal", b.TokenCount, b.TotalTokens)
+	}
+	// The new field must not leak into machine-readable output: existing
+	// formats stay byte-identical.
+	js, err := b.JSON()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(js, "token_count") {
+		t.Fatalf("JSON output changed: unexpected token_count field in %s", js)
+	}
+}
+
 func TestSkipInstructions(t *testing.T) {
 	root := writeTree(t, map[string]string{
 		"AGENTS.md":      "# rules\n",

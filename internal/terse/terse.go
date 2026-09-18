@@ -1,12 +1,16 @@
 // Package terse implements deterministic LLM output compression: it strips
 // filler, pleasantries and hedge language from a model's prose response while
 // preserving code blocks, lists, errors and technical terms. No LLM involved,
-// byte-for-byte reproducible.
+// byte-for-byte reproducible. Tersify extends this with line-level
+// tersification (blank/comment-only lines, repeated whitespace) and an
+// optional --max token ceiling.
 package terse
 
 import (
 	"strings"
 	"unicode"
+
+	"github.com/JayveerPrajapati/kern/internal/tokenize"
 )
 
 // filler lines are dropped verbatim (after trimming punctuation).
@@ -677,4 +681,164 @@ func carriesPayload(s string) bool {
 		return true // long lines are unlikely to be pure filler
 	}
 	return false
+}
+
+// TersifyStats reports what deterministic line-level tersification removed.
+type TersifyStats struct {
+	BeforeTokens   int // token count of the input
+	AfterTokens    int // token count of the output
+	DroppedFiller  int // filler/prose lines dropped
+	DroppedBlank   int // blank lines dropped
+	DroppedComment int // comment-only lines dropped
+	DroppedBudget  int // lines dropped by the --max budget ceiling
+}
+
+// Tersify applies deterministic line-level tersification to text (no LLM):
+//
+//   - blank lines are dropped entirely (unlike Compress, which collapses
+//     runs to a single blank line),
+//   - comment-only lines are dropped (//, single-line /* */, and lowercase
+//     # lines that do not look like Markdown headings),
+//   - redundant filler patterns are dropped and inline filler is stripped
+//     (reusing Compress's filler tables),
+//   - repeated whitespace inside a line is collapsed to a single space
+//     (leading indentation is preserved),
+//   - when maxTokens > 0 the head of the tersified text is kept until the
+//     token budget is met; the remainder counts as DroppedBudget.
+//
+// Fenced code blocks (``` or ~~~) are always preserved verbatim, and a line
+// that carries technical payload is never dropped.
+func Tersify(text string, maxTokens int) (string, TersifyStats) {
+	before := tokenize.Count(text)
+	lines := strings.Split(text, "\n")
+	var out []string
+	st := TersifyStats{BeforeTokens: before}
+	inFence := false
+	for _, raw := range lines {
+		trimmed := strings.TrimRightFunc(raw, unicode.IsSpace)
+
+		if isFenceLine(trimmed) {
+			inFence = !inFence
+			out = append(out, raw)
+			continue
+		}
+		if inFence {
+			out = append(out, raw)
+			continue
+		}
+
+		clean := strings.TrimSpace(trimmed)
+		if clean == "" {
+			st.DroppedBlank++
+			continue
+		}
+		if isCommentOnly(clean) {
+			st.DroppedComment++
+			continue
+		}
+		if isFiller(clean) {
+			st.DroppedFiller++
+			continue
+		}
+		stripped := stripInlineFiller(clean)
+		if stripped == "" {
+			st.DroppedFiller++
+			continue
+		}
+		// Keep the leading indentation, collapse repeated internal
+		// whitespace ("a    b" -> "a b").
+		indent := raw[:len(trimmed)-len(clean)]
+		out = append(out, indent+collapseSpaces(stripped))
+	}
+	result := strings.Join(out, "\n")
+	if maxTokens > 0 {
+		result, st.DroppedBudget = headToBudget(result, maxTokens)
+	}
+	st.AfterTokens = tokenize.Count(result)
+	return result, st
+}
+
+// isCommentOnly reports whether a trimmed line is entirely a comment. `//`
+// and single-line `/* ... */` lines are unambiguous code comments and are
+// always dropped. A `#` line is treated as a comment only when it does not
+// look like a Markdown heading: Title-Case or numeric first words are kept
+// as headings, lowercase `# ...` lines are dropped, and lines opening with a
+// known comment marker (todo/fixme/xxx/hack) are dropped regardless of case.
+func isCommentOnly(s string) bool {
+	if strings.HasPrefix(s, "//") {
+		// Protocol-relative URLs / UNC-ish paths ("///host", "//\\host")
+		// carry payload; anything else starting with // is a comment.
+		if strings.HasPrefix(s, "///") || strings.HasPrefix(s, "//\\") {
+			return false
+		}
+		return true
+	}
+	if strings.HasPrefix(s, "/*") && strings.HasSuffix(s, "*/") {
+		return true
+	}
+	if strings.HasPrefix(s, "#") {
+		rest := strings.TrimSpace(strings.TrimLeft(s, "#"))
+		if rest == "" {
+			return true
+		}
+		lower := strings.ToLower(rest)
+		for _, m := range commentMarkers {
+			if strings.HasPrefix(lower, m) {
+				return true
+			}
+		}
+		// Title-Case or numeric first word -> Markdown heading, keep.
+		first := strings.Fields(rest)[0]
+		if first[0] >= 'A' && first[0] <= 'Z' {
+			return false
+		}
+		if first[0] >= '0' && first[0] <= '9' {
+			return false
+		}
+		return true
+	}
+	return false
+}
+
+// commentMarkers are classic inline-comment openers that are dropped even
+// when Title-Cased ("TODO: fix", "# Fixme: ...").
+var commentMarkers = []string{
+	"todo:", "fixme:", "xxx:", "hack:",
+}
+
+// collapseSpaces collapses runs of repeated whitespace (2+ spaces/tabs) to a
+// single space, leaving single spaces, tabs and all other runes untouched.
+func collapseSpaces(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	prevSpace := false
+	for _, r := range s {
+		isWS := r == ' ' || r == '\t'
+		if isWS && prevSpace {
+			continue
+		}
+		b.WriteRune(r)
+		prevSpace = isWS
+	}
+	return b.String()
+}
+
+// headToBudget keeps the head of text until the token budget is met and
+// returns the kept head plus the number of dropped lines. A non-empty input
+// always keeps its first line, so an over-budget head is reported truthfully
+// instead of handing back an empty document.
+func headToBudget(text string, maxTokens int) (string, int) {
+	if text == "" || tokenize.Count(text) <= maxTokens {
+		return text, 0
+	}
+	lines := strings.Split(text, "\n")
+	kept := 1 // head floor: always keep the first line
+	for kept < len(lines) {
+		head := strings.Join(lines[:kept+1], "\n")
+		if tokenize.Count(head) > maxTokens {
+			break
+		}
+		kept++
+	}
+	return strings.Join(lines[:kept], "\n"), len(lines) - kept
 }

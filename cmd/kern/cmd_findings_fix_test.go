@@ -8,10 +8,6 @@ import (
 	"testing"
 )
 
-// fixesExitCode runs fn and returns the exit code it raised through the
-// exitError sentinel panic (0 when fn returns normally), mirroring the
-// recover/exit loop in production main(). Tests for F-006/F-024/F-033 use it
-// to observe usage/runtime exit codes of runSearch/runPrompt/runPath.
 func fixesExitCode(fn func()) (code int) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -26,11 +22,6 @@ func fixesExitCode(fn func()) (code int) {
 	return 0
 }
 
-// fixesRunStderrExit runs fn with os.Stderr redirected to a pipe and returns
-// the captured stderr plus the exit code raised through the exitError
-// sentinel panic (0 when fn returns normally). Unlike captureStderr it drains
-// the pipe even when fn panics, so stderr written by fatal()/fatalUsage()
-// before the panic is observable in-process (F-024).
 func fixesRunStderrExit(fn func()) (stderr string, code int) {
 	old := os.Stderr
 	r, w, err := os.Pipe()
@@ -76,11 +67,6 @@ func fixesChdir(t *testing.T, dir string, fn func()) {
 	fn()
 }
 
-// TestRunSearchMultiWordQueryJoinsPositionals (F-006): `kern search user
-// service --limit 5` must join both positional words into ONE query and
-// search the current repo. Before the fix the 2nd token was taken as the
-// repo root, so the search failed with `lstat <cwd>/service: no such file
-// or directory` (exit 1) whenever the word was not an existing directory.
 func TestRunSearchMultiWordQueryJoinsPositionals(t *testing.T) {
 	dir := t.TempDir()
 	writeFixtureFile(t, dir, "go.mod", "module searchfix\n\ngo 1.20\n")
@@ -107,9 +93,6 @@ func main() { _ = UserService() }
 	})
 }
 
-// TestRunSearchExistingDirRootStillHonored (F-006): `kern search FindUser
-// /existing/repo` must keep treating the trailing positional that names an
-// existing directory as the repo root and search only the leading word.
 func TestRunSearchExistingDirRootStillHonored(t *testing.T) {
 	dir := t.TempDir()
 	writeFixtureFile(t, dir, "go.mod", "module searchfix\n\ngo 1.20\n")
@@ -134,10 +117,6 @@ func main() { _ = FindUser() }
 	}
 }
 
-// TestRunPromptUnknownTemplateGuidesUser (F-024): `kern prompt "Fix this:
-// {{task}}"` must fail with a self-diagnosing error — the available template
-// names plus the --file PATH escape hatch — instead of a bare
-// `unknown template "Fix this: {{task}}"`.
 func TestRunPromptUnknownTemplateGuidesUser(t *testing.T) {
 	// Run from a scratch dir so the pre-render project-map build is cheap.
 	dir := t.TempDir()
@@ -163,9 +142,6 @@ func TestRunPromptUnknownTemplateGuidesUser(t *testing.T) {
 	})
 }
 
-// TestRunPathFromToFlagAliases (F-033): `kern path --from A --to B` must be
-// a flag alias for the positional form `kern path A B [root]` — both render
-// the same path.
 func TestRunPathFromToFlagAliases(t *testing.T) {
 	dir := t.TempDir()
 	writeFixtureFile(t, dir, "go.mod", "module pathfix\n\ngo 1.20\n")
@@ -203,8 +179,6 @@ func main() { _ = Helper() }
 	}
 }
 
-// TestRunPathFromToFlagsRequireBoth (F-033): passing only one of --from/--to
-// is a usage error (exit 2), matching the two-required-positionals contract.
 func TestRunPathFromToFlagsRequireBoth(t *testing.T) {
 	_, code := fixesRunStderrExit(func() {
 		runPath([]string{"--from", "main", filepath.Join(t.TempDir(), "root")})

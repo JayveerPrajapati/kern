@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -62,9 +64,12 @@ func runPack(rest []string) {
 	if err != nil {
 		fatalUsage("flags: %v", err)
 	}
-	root := "."
-	if len(args) > 0 {
-		root = args[0]
+	root := f.root
+	if root == "" {
+		root = "."
+		if len(args) > 0 {
+			root = args[0]
+		}
 	}
 	tier := code.TierFull
 	if f.fold {
@@ -80,6 +85,9 @@ func runPack(rest []string) {
 		runPackGraph(root, f)
 		return
 	}
+	if _, err := os.Stat(root); err != nil {
+		fatal("pack: %v", err)
+	}
 	b, err := pack.Build(root, pack.Options{
 		MaxTokens:        f.maxTokens,
 		SkipInstructions: f.noinstructions,
@@ -87,6 +95,17 @@ func runPack(rest []string) {
 	})
 	if err != nil {
 		fatal("Pack: %v", err)
+	}
+	// PACK-INTEGRATION (lane R-2): when the pack ran without a token budget
+	// and the bundle exceeds the warning threshold, say so and point at
+	// --max-tokens so the user can fit a budget. Informational only: rc stays 0.
+	if f.maxTokens == 0 && b.TokenCount > pack.PackedTokensWarningThreshold {
+		fmt.Fprintf(os.Stderr, "pack: %d tokens packed (unlimited — rerun with --max-tokens N to fit a budget)\n", b.TokenCount)
+	}
+	if len(b.Files) == 0 && f.maxTokens > 0 {
+		// A budget smaller than the tree+instructions block silently packed
+		// zero files — say so instead of printing "packed 0 files".
+		fmt.Fprintf(os.Stderr, "kern: warning: --max-tokens %d left no room for any file (tree+instructions already %d tokens); raise the budget or drop --max-tokens\n", f.maxTokens, b.TotalTokens)
 	}
 	out := b.Render()
 	if f.out != "" {
@@ -169,7 +188,7 @@ func runPrompt(rest []string) {
 	}
 	out, err := prompt.Render(args[0], vars)
 	if err != nil {
-		// F-024: a bare "unknown template" error leaves the user with no
+		// A bare "unknown template" error leaves the user with no
 		// idea how to proceed. Enrich it with the available template names
 		// and the --file escape hatch for custom templates.
 		if strings.Contains(err.Error(), "unknown template") {
@@ -192,7 +211,7 @@ func runPrompt(rest []string) {
 }
 
 // promptUnknownTemplateHint builds a self-diagnosing error for an unknown
-// template name (F-024): it lists the bundled template names (the same set
+// template name: it lists the bundled template names (the same set
 // `kern prompt list` shows) and points at --file PATH for custom templates,
 // so the user is not left staring at a bare "unknown template" error.
 func promptUnknownTemplateHint(name string) string {
@@ -212,6 +231,14 @@ func runSwap(rest []string) {
 	f, args, err := parseFlags(rest)
 	if err != nil {
 		fatalUsage("flags: %v", err)
+	}
+	// Validate --mode against the modes the help text declares before doing
+	// any work: an unknown mode is a usage error (rc=2), never a silent
+	// fall-through to the default fit path.
+	switch f.mode {
+	case "", "fit", "summary", "expand":
+	default:
+		fatalUsage("swap: unknown --mode %q (valid modes: fit, summary, expand)", f.mode)
 	}
 	root := "."
 	if len(args) > 0 && isDir(args[0]) {
@@ -236,7 +263,19 @@ func runSwap(rest []string) {
 	case "summary":
 		fmt.Print(swap.SummaryMode(text, root))
 	default:
-		out, fits := swap.Fit(text, root, f.max)
+		// fit (default): budget-fit fenced-block replacement. When --max is
+		// omitted the budget defaults to 4000 tokens, mirroring `kern budget`,
+		// so a bare `kern swap` replaces blocks once the document is over it.
+		budget := f.max
+		if budget <= 0 {
+			budget = 4000
+		}
+		out, fits, swapped := swap.FitBlocks(text, root, budget)
+		if len(swapped) > 0 {
+			fmt.Fprintf(os.Stderr, "kern: swapped %d fenced block(s) to fit budget %d: %s\n", len(swapped), budget, strings.Join(swapped, ", "))
+		} else {
+			fmt.Fprintf(os.Stderr, "kern: no fenced blocks swapped (none present or all within budget %d)\n", budget)
+		}
 		if !fits {
 			fmt.Fprintf(os.Stderr, "kern: warning: still over budget after summarization\n")
 		}
@@ -466,7 +505,7 @@ func runGuard(rest []string) {
 	if err != nil {
 		fatalUsage("flags: %v", err)
 	}
-	// P0.4: the authz gate needs both halves of the agent identity — an
+	// The authz gate needs both halves of the agent identity — an
 	// agent-id without a task description is a usage error.
 	if f.agentID != "" && f.task == "" {
 		fatalUsage("--agent-id requires --task")
@@ -481,10 +520,18 @@ func runGuard(rest []string) {
 	}
 	switch sub {
 	case "init":
+		path := intel.DefaultBoundariesPath(root)
+		if _, serr := os.Stat(path); serr == nil && !f.force {
+			// guard init previously OVERWROTE an existing boundaries file
+			// without warning (destroying custom rules). Refuse unless
+			// --force is given.
+			fmt.Printf("guard: %s already exists — leaving untouched (pass --force to overwrite)\n", path)
+			return
+		}
 		if err := intel.InitBoundaries(root); err != nil {
 			fatal("Guard: %v", err)
 		}
-		fmt.Printf("wrote %s (edit it to declare boundary rules)\n", intel.DefaultBoundariesPath(root))
+		fmt.Printf("wrote %s (edit it to declare boundary rules)\n", path)
 	case "check":
 		// ReadIndexWithProof returns the freshness proof ReadIndex's staleness
 		// decision was based on (or the post-update observation), so the JSON
@@ -522,7 +569,7 @@ func runGuard(rest []string) {
 		}
 		for _, p := range files {
 			if _, err := os.Stat(filepath.Join(root, p)); err != nil {
-				if os.IsNotExist(err) {
+				if errors.Is(err, fs.ErrNotExist) {
 					// Deleted in the diff: nothing to check — the file's
 					// symbols are gone from the index too .
 					continue
@@ -531,7 +578,7 @@ func runGuard(rest []string) {
 			}
 		}
 
-		// P0.4 authz gate: when both --agent-id and --task are present, run
+		// Authz gate: when both --agent-id and --task are present, run
 		// AuthorizeContext BEFORE the boundary check and surface the verdict in
 		// the JSON output. A denied verdict is a blocking gate: exit 2 without
 		// proceeding to the boundary check.
@@ -548,15 +595,13 @@ func runGuard(rest []string) {
 					"freshness_proof": freshness,
 					"authz_verdict":   authzVerdict,
 				})
-			} else {
-				fmt.Fprintf(os.Stderr, "kern: guard: authz denied for agent %q task %q\n", f.agentID, f.task)
 			}
-			panic(exitError{code: 2})
+			fatalUsage("guard: authz denied for agent %q task %q", f.agentID, f.task)
 		}
 
 		strict := f.precision == "strict"
 		violations, skipped := intel.CheckBoundariesPrecise(ix, b, files, strict)
-		// G-P0-2 guard gate: a changed file whose package participates in an
+		// Guard gate: a changed file whose package participates in an
 		// import cycle is a WARN (never a violation — the exit code stays
 		// driven by boundary violations alone), surfaced in both output modes.
 		cycleWarnings := intel.ImportCycleWarnings(ix, files)
@@ -625,7 +670,7 @@ func runGuard(rest []string) {
 		// are persisted even when the check REJECTs below.
 		publishGuardEvents(root, violations, unconfigured || skipped["boundaries-not-configured"] > 0)
 		if f.threshold >= 0 && len(violations) > f.threshold {
-			panic(exitError{code: 2})
+			fatalUsage("guard: %d violation(s) exceed threshold %d — see output above", len(violations), f.threshold)
 		}
 	default:
 		fatalUsage("usage: kern guard <check|init> [root] [--file f1,f2] [--range a..b] [--json|--sarif] [--threshold N] [--precision default|strict] [--agent-id ID --task DESC]")

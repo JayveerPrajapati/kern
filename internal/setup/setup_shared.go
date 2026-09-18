@@ -252,7 +252,7 @@ const gitignoreMarker = "# --- kern generated (agent wiring, machine-specific) -
 // metrics file are machine-local by nature. The .blueprint/ directory itself
 // and its config files (config.yaml, suppressions.yaml, owners.yaml) are user
 // config and must stay committable, so only these specific paths are ignored,
-// never ".blueprint/" wholesale (F-023c).
+// never ".blueprint/" wholesale.
 var blueprintRuntimeEntries = []string{
 	".blueprint/audit/",
 	".blueprint/receipts/",
@@ -268,9 +268,9 @@ var blueprintRuntimeEntries = []string{
 // opencode.json (relative "bin/kern-mcp" command) and the .opencache plugins
 // directory ARE committed — only their machine-specific subdirs (node_modules)
 // are ignored.
-// Overwrite-always: on every run the existing kern-generated block (between the
-// markers) is removed and the fresh block re-inserted, so new ignore entries
-// added in an upgrade are picked up rather than skipped.
+// Idempotent replacement: an existing kern block — marked or
+// unmarked, current or stale — is detected and replaced IN PLACE, so running
+// setup twice always yields exactly ONE block.
 func gitignoreGenerated(root string) Status {
 	path := filepath.Join(root, ".gitignore")
 	data, err := os.ReadFile(path)
@@ -278,8 +278,34 @@ func gitignoreGenerated(root string) Status {
 		return Status{Agent: "gitignore", Path: path, Note: err.Error()}
 	}
 	closeMarker := "# --- end kern generated ---"
-	block := "\n" + gitignoreMarker + `
-# Re-run ` + "`kern setup`" + ` to refresh. Unignore a line to commit shared config.
+	block := "\n" + gitignoreMarker + "\n" + gitignoreBody + closeMarker + "\n"
+	content := string(data)
+	// Fast idempotency: the canonical block is already present — nothing to
+	// write (no duplicate append, no mtime bump).
+	if strings.Contains(content, block) {
+		return Status{Agent: "gitignore", Installed: true, Path: path, Note: "generated entries already current"}
+	}
+	// Remove any existing kern block (marked, or the legacy unmarked form
+	// written by older versions) and re-append the fresh one in its place.
+	cleaned := removeGitignoreBlock(content, closeMarker)
+	out := strings.TrimRight(cleaned, "\n")
+	if out != "" {
+		out += "\n"
+	}
+	out += block
+	if out == content {
+		return Status{Agent: "gitignore", Installed: true, Path: path, Note: "generated entries already current"}
+	}
+	if err := os.WriteFile(path, []byte(out), 0o644); err != nil {
+		return Status{Agent: "gitignore", Path: path, Note: err.Error()}
+	}
+	return Status{Agent: "gitignore", Installed: true, Path: path, Note: "generated entries written to .gitignore"}
+}
+
+// gitignoreBody is the entry list of the generated .gitignore block (between
+// the header marker and the close marker). Kept as a named string so the
+// canonical block can be matched verbatim for idempotency.
+var gitignoreBody = `# Re-run ` + "`kern setup`" + ` to refresh. Unignore a line to commit shared config.
 .mcp.json
 .claude/
 .cursor/
@@ -296,24 +322,48 @@ GEMINI.md
 .github/copilot-instructions.md
 .agents/rules/kern.md
 .github/hooks/
-` + strings.Join(blueprintRuntimeEntries, "\n") + "\n" + closeMarker + "\n"
-	cleaned := removeMarkedBlock(string(data), gitignoreMarker, closeMarker)
-	out := strings.TrimRight(cleaned, "\n")
-	if out != "" {
-		out += "\n"
+` + strings.Join(blueprintRuntimeEntries, "\n") + "\n"
+
+// removeGitignoreBlock strips any existing kern-generated .gitignore block
+// from content, handling both forms kern has written over time: the marked
+// form (gitignoreMarker … closeMarker) and the legacy unmarked form (the
+// header marker alone, appended last by older versions). A mismatched block
+// (stale entries, edited markers) is removed the same way, so re-running
+// setup replaces it in place instead of appending a duplicate.
+func removeGitignoreBlock(content, closeMarker string) string {
+	// Marked block: header + close marker present. removeMarkedBlock strips
+	// between them inclusive; a stale block (markers intact, entries edited)
+	// is replaced by this path.
+	if strings.Contains(content, gitignoreMarker) && strings.Contains(content, closeMarker) {
+		return removeMarkedBlock(content, gitignoreMarker, closeMarker)
 	}
-	out += block
-	if err := os.WriteFile(path, []byte(out), 0o644); err != nil {
-		return Status{Agent: "gitignore", Path: path, Note: err.Error()}
+	// Legacy unmarked block: header marker without the close marker. Older
+	// versions appended the block last, so the kern-owned section runs from
+	// the marker to the next blank-line section boundary (or EOF).
+	if i := strings.Index(content, gitignoreMarker); i >= 0 {
+		end := len(content)
+		if j := strings.Index(content[i+len(gitignoreMarker):], "\n\n"); j >= 0 {
+			end = i + len(gitignoreMarker) + j
+		}
+		return strings.TrimRight(content[:i], "\n") + content[end:]
 	}
-	return Status{Agent: "gitignore", Installed: true, Path: path, Note: "generated entries written to .gitignore"}
+	// Orphaned close marker (the header line was edited away): drop the
+	// trailing section containing it.
+	if i := strings.Index(content, closeMarker); i >= 0 {
+		start := i
+		if j := strings.LastIndex(content[:i], "\n\n"); j >= 0 {
+			start = j + 1
+		}
+		return strings.TrimRight(content[:start], "\n")
+	}
+	return content
 }
 
 // wireGlobalGitignore ensures that ~/.config/git/ignore (or the custom
 // core.excludesfile) contains .kern/ and the blueprint runtime entries so that
 // git machine-wide ignores them across ALL repositories. Only the runtime
 // paths are added — .blueprint/ config (config.yaml, suppressions.yaml,
-// owners.yaml) stays committable (F-023c).
+// owners.yaml) stays committable.
 func wireGlobalGitignore() Status {
 	ignorePath := globalConfig("git", "ignore")("")
 	data, err := os.ReadFile(ignorePath)

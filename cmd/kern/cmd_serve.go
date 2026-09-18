@@ -1,12 +1,16 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
+	"time"
 
 	"github.com/JayveerPrajapati/kern/internal/enterprise"
 	"github.com/JayveerPrajapati/kern/internal/web"
@@ -48,6 +52,12 @@ Examples:
 
 // runServe starts the REST API and dashboard server.
 func runServe(rest []string) {
+	// serve/web take flags only; a stray positional (e.g. `kern web static`)
+	// must fail loudly instead of silently starting a server on the default
+	// address. Positionals are detected before any handler is constructed.
+	if _, positionals, err := parseFlags(rest); err == nil && len(positionals) > 0 {
+		fatalUsage("serve: unexpected argument: %s", positionals[0])
+	}
 	h, mode, err := buildServeHandler(rest)
 	if err != nil {
 		fatalUsage("serve: %v", err)
@@ -60,6 +70,9 @@ func runServe(rest []string) {
 		fatalUsage("serve: %v", err)
 	}
 	addr := f.addr
+	if addr == "" {
+		addr = os.Getenv("KERN_ADDR")
+	}
 	if addr == "" {
 		addr = defaultServeAddr
 	}
@@ -79,18 +92,39 @@ func runServe(rest []string) {
 		}
 		log.Printf("kern serve: single-project mode on %s (root: %s)", addr, root)
 	}
-	if err := http.ListenAndServe(addr, h); err != nil {
+	// Graceful shutdown: on SIGINT/SIGTERM drain in-flight requests for up to
+	// 10s before returning (exit 0), so the REST API + dashboard is not
+	// hard-killed mid-request. Mirrors cmd/kern-server/main.go serve(). The
+	// goroutine owns stop() (called only after a real signal), so a startup
+	// failure path — where fatal() panics out of runServe — never logs a
+	// spurious "shutting down..." for a server that did not come up.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	srv := &http.Server{Addr: addr, Handler: h}
+	go func() {
+		<-ctx.Done()
+		stop()
+		log.Printf("kern serve: shutting down...")
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := srv.Shutdown(shutdownCtx); err != nil {
+			log.Printf("kern serve: shutdown error: %v", err)
+		}
+	}()
+	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		fatal("serve failed: %v — is the port in use? (change with --addr)", err)
 	}
 }
 
-// buildServeHandler constructs the HTTP handler from serve args.
+// buildServeHandler constructs the HTTP handler from serve args. Only an
+// explicit help request prints usage and returns nil; a bare `kern serve`
+// (zero args) starts the server in single-project mode on the default
+// address (or KERN_ADDR when set).
 func buildServeHandler(args []string) (http.Handler, string, error) {
 	f, _, err := parseFlags(args)
 	if err != nil {
 		return nil, "", err
 	}
-	if f.help || len(args) == 0 {
+	if f.help {
 		fmt.Fprint(os.Stderr, serveUsage)
 		return nil, "", nil
 	}

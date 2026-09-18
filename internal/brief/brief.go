@@ -7,6 +7,7 @@ package brief
 import (
 	"fmt"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -52,8 +53,7 @@ func Build(root string) (string, error) {
 		tail.WriteString("## Project memory (from past sessions)\n")
 		for _, e := range entries {
 			// Auto captures (raw prompts, tool outcomes) are session context,
-			// not project lessons — never inject them into a session digest
-			// (report A17).
+			// not project lessons — never inject them into a session digest.
 			if e.Source == "auto" {
 				continue
 			}
@@ -146,8 +146,8 @@ func Warm(root string) error {
 }
 
 // callEdges returns the total number of directed caller→callee edges in an
-// index. Concurrent with `kern onboard`'s metric (report A10): a symbol that
-// calls three helpers contributes three edges, not one row.
+// index. A symbol that calls three helpers contributes three edges, not
+// one row.
 func callEdges(ix *index.Index) int {
 	n := 0
 	for _, callees := range ix.Calls {
@@ -174,7 +174,7 @@ func indexSection(ix *index.Index) string {
 	for k, n := range kindCount {
 		kinds = append(kinds, fmt.Sprintf("%s %d", k, n))
 	}
-	sort.Strings(kinds)
+	slices.Sort(kinds)
 	if len(kinds) > 0 {
 		b.WriteString("Kinds: " + strings.Join(kinds, " · ") + "\n")
 	}
@@ -325,15 +325,12 @@ func statsSection(b *strings.Builder) {
 }
 
 func dedupe(in []string) []string {
-	seen := map[string]bool{}
-	var out []string
-	for _, s := range in {
-		if !seen[s] {
-			seen[s] = true
-			out = append(out, s)
-		}
+	if len(in) == 0 {
+		return nil
 	}
-	return out
+	cp := append([]string(nil), in...)
+	slices.Sort(cp)
+	return slices.Compact(cp)
 }
 
 const cheatsheet = `## How to use kern in this session

@@ -52,15 +52,24 @@ func runPrecache(rest []string) {
 	if err != nil {
 		fatalUsage("flags: %v", err)
 	}
-	root := "."
-	if len(args) > 0 {
-		root = args[0]
+	root := f.root
+	if root == "" {
+		root = "."
+		if len(args) > 0 {
+			root = args[0]
+		}
 	}
 	if f.once {
 		rep := precache.Warm(root)
 		fmt.Printf("kern: warmed %d summaries (%d cache hits), %d doc chunks, index %s, docs saved=%v in %s\n",
 			rep.Warmed, rep.CacheHits, rep.DocChunks, rep.IndexStatus, rep.DocsSaved, rep.Dur.Round(time.Millisecond))
 		return
+	}
+	// Watch mode is a never-exiting daemon: validate the root first so a
+	// typo'd --root fails loud (rc=1) instead of silently watching the wrong
+	// directory forever.
+	if st, serr := os.Stat(root); serr != nil || !st.IsDir() {
+		fatal("precache: root %q does not exist", root)
 	}
 	interval := time.Duration(f.interval) * time.Second
 	if interval <= 0 {
@@ -109,7 +118,7 @@ func runEnsureFresh(jsonOut bool, root string) {
 	if res.Freshness == "stale" {
 		// Fail-closed: a stale non-converged index must not be trusted. The
 		// JSON was printed above; the non-zero exit is the signal.
-		panic(exitError{code: 2})
+		fatalUsage("index: stale (non-converged) — rebuild with kern index (see output above)")
 	}
 }
 
@@ -320,16 +329,32 @@ func indexJSONSummary(ix *index.Index, freshness, action, root string) indexJSON
 }
 
 func runWatch(rest []string) {
-	root := "."
+	f, args, err := parseFlags(rest)
+	if err != nil {
+		fatalUsage("flags: %v", err)
+	}
+	root := f.root
+	if root == "" {
+		root = "."
+		if len(args) > 0 {
+			root = args[0]
+		}
+	}
+	// Validate the root BEFORE daemonizing: a missing root used to start a
+	// long-lived watcher that only ever reported lstat errors (and an unknown
+	// flag was silently monitored as the root). Fail loud with rc=1 instead.
+	if st, serr := os.Stat(root); serr != nil || !st.IsDir() {
+		fatal("watch: root %q does not exist", root)
+	}
 	interval := 5
-	if len(rest) > 0 {
-		root = rest[0]
+	if f.interval > 0 {
+		interval = f.interval
 	}
 	mode := project.WatchMode(root)
 	fmt.Printf("kern watch: monitoring %s (mode: %s)\n", root, mode)
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
-	err := project.Watch(ctx, root, time.Duration(interval)*time.Second, func(changes []index.Change, ix *index.Index) {
+	err = project.Watch(ctx, root, time.Duration(interval)*time.Second, func(changes []index.Change, ix *index.Index) {
 		for _, c := range changes {
 			fmt.Printf("[kern] %-8s %s\n", c.Kind, c.File)
 		}
@@ -364,7 +389,11 @@ func runAst(rest []string) {
 	if f.all && root == "" {
 		files, err := os.ReadDir(cache.Path("index"))
 		if err != nil {
-			fatal("Ast: %v", err)
+			// The legacy global cache (~/.cache/kern/index) no longer exists
+			// on modern installs — indexes live per-project under .kern/.
+			// Report that instead of a raw filesystem fatal.
+			fmt.Fprintf(os.Stderr, "kern: --all: no cached project indexes found under %s (modern indexes live per-project in .kern/; pass a root to search a specific repo)\n", cache.Path("index"))
+			return
 		}
 		searched := 0
 		skipped := 0
@@ -425,6 +454,22 @@ func runAst(rest []string) {
 }
 
 func runRepos(rest []string) {
+	// QA: `kern repos list --nonsense` (and friends) previously ignored
+	// unknown flags (exit 0). repos takes a fixed subcommand plus
+	// positionals; any token starting with "-" that is not a known flag is
+	// a usage error. The first token is the subcommand word when present;
+	// known flags (--limit/--root/--json for `search`, --help/-h handled by
+	// the dispatcher) are whitelisted.
+	reposKnownFlags := map[string]bool{"--limit": true, "--root": true, "--json": true, "--help": true, "-h": true}
+	reposScanStart := 0
+	if len(rest) > 0 && (rest[0] == "list" || rest[0] == "add" || rest[0] == "remove" || rest[0] == "search") {
+		reposScanStart = 1
+	}
+	for _, a := range rest[reposScanStart:] {
+		if strings.HasPrefix(a, "-") && !reposKnownFlags[a] {
+			fatalUsage("unknown flag %q", a)
+		}
+	}
 	if len(rest) == 0 || rest[0] == "list" {
 		reg, err := intel.LoadRepos()
 		if err != nil {
@@ -490,7 +535,7 @@ func runRepos(rest []string) {
 		if len(args) < 1 {
 			fatalUsage("usage: kern repos search <query> [--limit N]")
 		}
-		// F-006 style: all positional words form ONE query (joined with spaces).
+		// All positional words form ONE query (joined with spaces).
 		query := strings.Join(args, " ")
 		limit := f.limit
 		if limit <= 0 {
@@ -518,7 +563,7 @@ func runSearch(rest []string) {
 	if len(args) < 1 {
 		fatalUsage("usage: kern search <query> [root] [--limit N] [--repos] [--json] [--semantic]")
 	}
-	// F-006: all positional words form ONE query (joined with spaces), so
+	// All positional words form ONE query (joined with spaces), so
 	// `kern search user service` searches for "user service" instead of
 	// treating the 2nd token as a repo root and failing with lstat ENOENT.
 	// The trailing positional root is honored ONLY when it names an existing
@@ -544,7 +589,15 @@ func runSearch(rest []string) {
 			if !client.HasEmbeddingModel() {
 				fatal("embedding model %q not installed (run: ollama pull %s)", llm.EmbedModel(), llm.EmbedModel())
 			}
-			hits = intel.SemanticSearchReposIn(root, query, limit, client)
+			if _, err := client.EmbedText("probe"); err != nil {
+				// Model configured but server unreachable: semantic ranking
+				// degrades silently — say so (audit: byte-identical output
+				// with --semantic, zero stderr).
+				fmt.Fprintln(os.Stderr, "kern: --semantic: embedding server unreachable — using ranked search")
+				hits = intel.SearchReposIn(root, query, limit)
+			} else {
+				hits = intel.SemanticSearchReposIn(root, query, limit, client)
+			}
 		} else {
 			hits = intel.SearchReposIn(root, query, limit)
 		}
@@ -577,7 +630,13 @@ func runSearch(rest []string) {
 		if !client.HasEmbeddingModel() {
 			fatal("embedding model %q not installed (run: ollama pull %s)", llm.EmbedModel(), llm.EmbedModel())
 		}
-		matches = intel.SemanticSearch(ix, query, limit, client)
+		if _, err := client.EmbedText("probe"); err != nil {
+			fmt.Fprintln(os.Stderr, "kern: --semantic: embedding server unreachable — using ranked search")
+			f.semantic = false
+			matches = intel.RankedSearch(ix, query, limit)
+		} else {
+			matches = intel.SemanticSearch(ix, query, limit, client)
+		}
 	} else {
 		matches = intel.RankedSearch(ix, query, limit)
 	}

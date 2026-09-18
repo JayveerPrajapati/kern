@@ -14,12 +14,20 @@ set -eu
 VERSION="${1:?usage: brew-release.sh <tag> [tarball]}"
 TARBALL="${2:-}"
 
+# sha256sum on Linux, `shasum -a 256` on macOS (both emit the two-space
+# `<hash>  <file>` format Homebrew and install.sh expect).
+if command -v sha256sum >/dev/null 2>&1; then
+  SHA256SUM="sha256sum"
+else
+  SHA256SUM="shasum -a 256"
+fi
+
 if [ -n "$TARBALL" ]; then
   if [ ! -f "$TARBALL" ]; then
     echo "error: tarball not found: $TARBALL" >&2
     exit 1
   fi
-  SHA256="$(sha256sum "$TARBALL" | awk '{print $1}')"
+  SHA256="$($SHA256SUM "$TARBALL" | awk '{print $1}')"
   URL_TARBALL="file://$TARBALL"
 else
   TMP="$(mktemp -d)"
@@ -27,7 +35,7 @@ else
   echo "fetching source tarball: https://github.com/${KERN_REPO:-JayveerPrajapati/kern}/archive/refs/tags/${VERSION}.tar.gz" >&2
   curl -fsSL "https://github.com/${KERN_REPO:-JayveerPrajapati/kern}/archive/refs/tags/${VERSION}.tar.gz" \
     -o "$TMP/kern.tar.gz"
-  SHA256="$(sha256sum "$TMP/kern.tar.gz" | awk '{print $1}')"
+  SHA256="$($SHA256SUM "$TMP/kern.tar.gz" | awk '{print $1}')"
   URL_TARBALL="$TMP/kern.tar.gz"
 fi
 

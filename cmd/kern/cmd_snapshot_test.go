@@ -28,10 +28,6 @@ func snapshotFixture(t *testing.T) string {
 	return dir
 }
 
-// TestSnapshotVerifyRoundtrip (F-008): a snapshot written with
-// `kern snapshot --out snap.json` must verify cleanly against the same repo
-// with `kern snapshot --verify snap.json` (previously the positional path was
-// treated as a repo root, producing an empty fresh snapshot).
 func TestSnapshotVerifyRoundtrip(t *testing.T) {
 	dir := snapshotFixture(t)
 	outPath := filepath.Join(t.TempDir(), "snap.json")
@@ -63,8 +59,6 @@ func TestSnapshotVerifyRoundtrip(t *testing.T) {
 	}
 }
 
-// TestSnapshotVerifyStale (F-008): touching a source file after the snapshot
-// is taken must flip the verdict to stale.
 func TestSnapshotVerifyStale(t *testing.T) {
 	dir := snapshotFixture(t)
 	outPath := filepath.Join(t.TempDir(), "snap.json")
@@ -92,8 +86,6 @@ func TestSnapshotVerifyStale(t *testing.T) {
 	}
 }
 
-// TestSnapshotVerifyUnknown (F-008): verifying a bogus snapshot file fails
-// loudly (schema mismatch / not a snapshot) with exit code 2.
 func TestSnapshotVerifyUnknown(t *testing.T) {
 	dir := snapshotFixture(t)
 	bogus := filepath.Join(t.TempDir(), "bogus.json")
@@ -106,9 +98,6 @@ func TestSnapshotVerifyUnknown(t *testing.T) {
 	}
 }
 
-// TestSnapshotPositionalFileGuard (F-008): passing a snapshot FILE as the
-// positional root must fail with a clear usage error instead of silently
-// producing an empty fresh snapshot.
 func TestSnapshotPositionalFileGuard(t *testing.T) {
 	dir := snapshotFixture(t)
 	outPath := filepath.Join(t.TempDir(), "snap.json")

@@ -15,11 +15,6 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/storage"
 )
 
-// TestTaskTransitionAudited verifies AUD-11: a task state transition through
-// the TaskService writes a task-lifecycle entry into the unified
-// tamper-evident audit chain (the same store `kern audit` reads), carrying
-// task ID, from → to state, agent and timestamp, and that the entry is
-// retrievable from the persisted store.
 func TestTaskTransitionAudited(t *testing.T) {
 	root := auditTestRoot(t)
 	p, err := New(root)
@@ -72,11 +67,6 @@ func TestTaskTransitionAudited(t *testing.T) {
 	}
 }
 
-// TestTaskTransitionAuditFailureDoesNotAbort verifies the deliberate AUD-11
-// failure semantics: when the audit write fails, the error is surfaced loudly
-// (stderr log) but the state transition is NOT rolled back or blocked — task
-// liveness wins (a missing chain entry is detectable via chain repair, a
-// blocked task is not).
 func TestTaskTransitionAuditFailureDoesNotAbort(t *testing.T) {
 	root := auditTestRoot(t)
 	ts := NewTaskService(&Platform{root: root}, nil).WithAgentID("audit-agent")

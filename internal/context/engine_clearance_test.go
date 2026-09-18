@@ -40,9 +40,6 @@ func clearanceTestEngine(t *testing.T, withClearance bool) *Engine {
 	return e
 }
 
-// TestEngineClearanceFiltersUnauthorizedMemory verifies AUD-13: with a
-// clearance set, retrieval goes through the authorization-filtered path and a
-// memory classified above the caller's clearance is excluded from the packet.
 func TestEngineClearanceFiltersUnauthorizedMemory(t *testing.T) {
 	e := clearanceTestEngine(t, true)
 	pkt, err := e.AnalyzeChange("Foo")
@@ -65,9 +62,6 @@ func TestEngineClearanceFiltersUnauthorizedMemory(t *testing.T) {
 	}
 }
 
-// TestEngineNoClearanceGoldenBehavior verifies AUD-13 back-compat: with no
-// clearance the engine uses the legacy plain Recall, so classification is not
-// enforced and the results are identical to before (all memories untouched).
 func TestEngineNoClearanceGoldenBehavior(t *testing.T) {
 	e := clearanceTestEngine(t, false)
 	pkt, err := e.AnalyzeChange("Foo")

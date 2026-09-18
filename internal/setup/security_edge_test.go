@@ -233,7 +233,7 @@ func TestWireUnknownAgentSkipsSilently(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("HOME", t.TempDir())
 	dir := t.TempDir()
-	sts := Wire(dir, []string{"nonexistent"}, false)
+	sts := Wire(dir, []string{"nonexistent"}, false, false)
 	for _, s := range sts {
 		if s.Agent == "nonexistent" {
 			t.Fatal("unknown agent must not produce a status entry")
@@ -251,7 +251,7 @@ func TestWireEmptyAgentIDNoPanic(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("HOME", t.TempDir())
 	dir := t.TempDir()
-	sts := Wire(dir, []string{""}, false)
+	sts := Wire(dir, []string{""}, false, false)
 	if len(sts) == 0 {
 		t.Fatal("expected statuses for the universal files")
 	}
@@ -261,7 +261,7 @@ func TestWireDuplicateAgentIdempotent(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("HOME", t.TempDir())
 	dir := t.TempDir()
-	sts := Wire(dir, []string{"opencode", "opencode"}, false)
+	sts := Wire(dir, []string{"opencode", "opencode"}, false, false)
 	if !allInstalled(sts, "opencode") {
 		t.Fatalf("opencode not installed: %+v", sts)
 	}

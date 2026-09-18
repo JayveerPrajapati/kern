@@ -9,7 +9,7 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/cache"
 )
 
-// runCache reports the cache dir health and runs the G-7 maintain pass
+// runCache reports the cache dir health and runs the maintain pass
 // (docs/audit/next-plan-gaps.md): entry count + total size of all *.json and
 // *.json.gz cache files, then MaintainDefaults on the cache root. --dry-run
 // reports what the pass WOULD archive/evict without touching anything.

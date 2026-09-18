@@ -4,7 +4,9 @@ package lock
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -78,7 +80,7 @@ func Held(root, scope string) (bool, int, error) {
 func List(root string) ([]Status, error) {
 	entries, err := os.ReadDir(dir(root))
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, fs.ErrNotExist) {
 			return nil, nil
 		}
 		return nil, err

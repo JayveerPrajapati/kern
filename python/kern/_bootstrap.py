@@ -145,10 +145,13 @@ def _fetch(tag, os_arch):
         bin_dir = os.path.join(_cache_dir(), "bin")
         os.makedirs(bin_dir, exist_ok=True)
         for name in ("kern", "kern-mcp"):
-            src = os.path.join(tmp, "kern-{}".format(os_arch), name)
+            src = os.path.join(tmp, name)
+            if not os.path.exists(src):
+                src = os.path.join(tmp, "kern-{}".format(os_arch), name)
             dst = os.path.join(bin_dir, name)
-            shutil.copy2(src, dst)
-            os.chmod(dst, 0o755)
+            if os.path.exists(src):
+                shutil.copy2(src, dst)
+                os.chmod(dst, 0o755)
         with open(_marker_path(), "w") as f:
             f.write(tag)
 

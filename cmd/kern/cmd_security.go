@@ -10,6 +10,7 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/rename"
 	"github.com/JayveerPrajapati/kern/internal/sec"
 	"os"
+	"path/filepath"
 	"strings"
 )
 
@@ -45,7 +46,7 @@ func runSchema(rest []string) {
 	for _, v := range violations {
 		fmt.Println("  - " + v)
 	}
-	panic(exitError{code: 1})
+	fatal("schema: %d violation(s) — see output above", len(violations))
 
 }
 
@@ -99,7 +100,7 @@ func runSec(rest []string) {
 			root = args[0]
 		}
 	}
-	max := f.max
+	maxN := f.max
 	// Default gate is error-only: warnings/info are triage material, not CI
 	// failures. Pass --severity explicitly (or --severity all) to widen the lens.
 	allow := []string{"error"}
@@ -124,7 +125,7 @@ func runSec(rest []string) {
 			fatal("sec: %v", err)
 		}
 	} else {
-		fmt.Print(svc.Security.Render(findings, max))
+		fmt.Print(svc.Security.Render(findings, maxN))
 		if f.severity == "" {
 			fmt.Fprintf(os.Stderr, "kern sec: %d findings (%d error, %d warning, %d info) [use --severity error,warning,info to view all]\n",
 				len(findings), counts["error"], counts["warning"], counts["info"])
@@ -134,9 +135,15 @@ func runSec(rest []string) {
 		}
 	}
 	// The exit code must be the same in --json and text mode: error-severity
-	// findings are a CI gate failure regardless of output format.
+	// findings are a CI gate failure regardless of output format. The
+	// summary line prints only in text mode: --json keeps stderr empty so
+	// machine consumers (blueprint's SecScan contract: exit 1 + stderr =
+	// tool error, not a findings result) can tell findings from failures.
 	if counts["error"] > 0 {
-		panic(exitError{code: 1})
+		if f.json {
+			panic(exitError{code: 1})
+		}
+		fatal("sec: %d error-severity finding(s) — CI gate failed", counts["error"])
 	}
 }
 
@@ -145,7 +152,7 @@ func runSec(rest []string) {
 // function is marked tainted when it is transitively called by a framework
 // entry point or its file contains a source expression; --generate appends a
 // test scaffold per tainted sink (go test for Go sinks, pytest for Python
-// sinks, G-4). --range scopes findings to the files changed in a git range
+// sinks). --range scopes findings to the files changed in a git range
 // (".." = working tree). The MCP tool kern_taint is the primary surface (this
 // thin CLI form exists so the opencode plugin can reach the same check).
 func runTaint(rest []string) {
@@ -172,8 +179,20 @@ func runTaint(rest []string) {
 			}
 		}
 		findings = filtered
+		// F22: `kern taint --file /nonexistent` used to report "no security
+		// findings" (rc=0) — a false clean bill for a path that does not
+		// exist. When --file matches nothing, distinguish a missing file
+		// (error rc=1) from a file that exists but is clean (rc=0, explicit
+		// "no findings for <file>").
+		if len(findings) == 0 {
+			if !taintFileExists(root, f.file) {
+				fatal("kern taint: file not found: %s", f.file)
+			}
+			fmt.Printf("no findings for %s\n", f.file)
+			return
+		}
 	}
-	// G-4: --range scopes findings to the files changed in a git range.
+	// --range scopes findings to the files changed in a git range.
 	// Combined with --file the two filters intersect.
 	if f.range_ != "" {
 		from, to, rerr := parseTaintRange(f.range_)
@@ -223,13 +242,40 @@ func runTaint(rest []string) {
 }
 
 // parseTaintRange splits a "from..to" git range into its endpoints. An empty
-// from and to ("..") means the working tree (G-4).
+// from and to ("..") means the working tree.
 func parseTaintRange(r string) (from, to string, err error) {
 	parts := strings.Split(r, "..")
 	if len(parts) != 2 {
 		return "", "", fmt.Errorf("invalid range %q: want <from>..<to>", r)
 	}
 	return parts[0], parts[1], nil
+}
+
+// taintFileExists reports whether --file names a real file: present on disk
+// under root (or absolute) or known to the index. Used to tell a false clean
+// bill ("no security findings" for a path that does not exist) apart from a
+// genuinely clean file (F22).
+func taintFileExists(root, file string) bool {
+	if file == "" {
+		return false
+	}
+	abs := file
+	if !filepath.IsAbs(abs) {
+		abs = filepath.Join(root, file)
+	}
+	if fi, err := os.Stat(abs); err == nil && !fi.IsDir() {
+		return true
+	}
+	if ix, err := loadOrBuild(root); err == nil {
+		for _, p := range ix.Pkgs {
+			for _, f := range p.Files {
+				if f == file {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 func runDelete(rest []string) {
@@ -265,7 +311,7 @@ func runDelete(rest []string) {
 	// The exit code must be the same in --json and text mode: an unsafe
 	// deletion is a gate failure regardless of output format.
 	if !r.Safe {
-		panic(exitError{code: 1})
+		fatal("delete: %s is not safe to delete — see output above", sym)
 	}
 
 }

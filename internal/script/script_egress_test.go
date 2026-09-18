@@ -116,9 +116,6 @@ func TestParseEgressTargets(t *testing.T) {
 	}
 }
 
-// TestScriptEgressNetworkCallNoDeclarationDenied asserts the deny-by-default
-// gate (AUD-01): an unisolated script performing a network-shaped operation
-// with zero egress declarations is refused before it can reach the network.
 func TestScriptEgressNetworkCallNoDeclarationDenied(t *testing.T) {
 	egressProbeOptIn(t)
 	res := RunScript(Run{Lang: "bash", NoIsolate: true, Code: "curl http://example.com\n"})
@@ -135,10 +132,6 @@ func TestScriptEgressNetworkCallNoDeclarationDenied(t *testing.T) {
 	}
 }
 
-// TestScriptEgressNetworkCallWithDeclarationPolicyDenied asserts that once a
-// declaration exists the per-target policy check runs (AUD-01): a declared
-// external target under the default local-only policy is refused by the
-// policy — not by the deny-by-default no-declaration gate.
 func TestScriptEgressNetworkCallWithDeclarationPolicyDenied(t *testing.T) {
 	egressProbeOptIn(t)
 	res := RunScript(Run{Lang: "bash", NoIsolate: true, Code: "# egress: 8.8.8.8:443\ncurl http://8.8.8.8\n"})
@@ -166,9 +159,6 @@ func TestScriptEgressNetworkCallWithLocalDeclarationAllowed(t *testing.T) {
 	}
 }
 
-// TestParseEgressTargetsSlashComments pins the JS/TS-family "// egress:"
-// declaration syntax (AUD-01): exact case-sensitive prefix, leading whitespace
-// allowed, non-empty values only.
 func TestParseEgressTargetsSlashComments(t *testing.T) {
 	code := "#!/usr/bin/env node\n" +
 		"// egress: api.example.com:443\n" +
@@ -207,9 +197,6 @@ func TestParseEgressTargetsMixedComments(t *testing.T) {
 	}
 }
 
-// TestScriptEgressIsolatedUnaffected asserts the gate is a no-op for isolated
-// runs: the netns blocks egress anyway, so even a network-calling script with
-// no declarations passes when isolated (AUD-01).
 func TestScriptEgressIsolatedUnaffected(t *testing.T) {
 	if err := egressGate("curl http://example.com\n", nil, true); err != nil {
 		t.Fatalf("egressGate(isolated) should be a no-op, got %v", err)
@@ -222,9 +209,6 @@ func TestScriptEgressIsolatedUnaffected(t *testing.T) {
 	}
 }
 
-// TestContainsNetworkCall pins the conservative network-call heuristic
-// (AUD-01): the listed shapes must be detected; benign code and the egress
-// declaration lines themselves must not trip it.
 func TestContainsNetworkCall(t *testing.T) {
 	network := []string{
 		"curl http://example.com",
@@ -271,10 +255,6 @@ func TestContainsNetworkCall(t *testing.T) {
 	}
 }
 
-// TestScriptEgressStructuredOnlySatisfiesGate asserts structured Run.Egress
-// declarations satisfy the deny-by-default gate (AUD-01): a network-shaped
-// script with a structured local target passes, while the same script with
-// no declarations (comment OR structured) is refused before it can run.
 func TestScriptEgressStructuredOnlySatisfiesGate(t *testing.T) {
 	egressProbeOptIn(t)
 
@@ -294,10 +274,6 @@ func TestScriptEgressStructuredOnlySatisfiesGate(t *testing.T) {
 	}
 }
 
-// TestScriptEgressStructuredPolicyChecked asserts every structured target goes
-// through the same per-target policy check as comment declarations (AUD-01):
-// a structured external target under the default local-only policy is refused
-// by the policy — not by the no-declaration gate.
 func TestScriptEgressStructuredPolicyChecked(t *testing.T) {
 	egressProbeOptIn(t)
 
@@ -315,10 +291,6 @@ func TestScriptEgressStructuredPolicyChecked(t *testing.T) {
 	}
 }
 
-// TestScriptEgressStructuredUnionWithComments asserts structured and comment
-// declarations are merged (union, AUD-01): a comment-declared local target
-// and a structured local target both satisfy the gate, and a denied entry in
-// either source refuses the run.
 func TestScriptEgressStructuredUnionWithComments(t *testing.T) {
 	egressProbeOptIn(t)
 
@@ -361,9 +333,6 @@ func TestScriptEgressStructuredUnionWithComments(t *testing.T) {
 	}
 }
 
-// TestScriptEgressStructuredInvalidRefused asserts an invalid structured entry
-// (not "host:port") refuses the run with a clear error naming the offending
-// value (AUD-01). Comment declarations keep their existing lenient handling.
 func TestScriptEgressStructuredInvalidRefused(t *testing.T) {
 	egressProbeOptIn(t)
 

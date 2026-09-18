@@ -179,6 +179,23 @@ func TestValidateTreeAggregates(t *testing.T) {
 		t.Fatal("expected violations from the bad note")
 	}
 }
+
+// TestValidateTreeSkipsReadme: docs/notes/README.md is a navigation/index
+// file, not a decision note — it must not produce format violations (G37
+// would otherwise block every run on a pre-existing README).
+func TestValidateTreeSkipsReadme(t *testing.T) {
+	root := t.TempDir()
+	writeNote(t, root, "docs/notes/README.md", "# Engineering Notes\n\nJust an index.\n")
+	v, err := ValidateTree(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, vi := range v {
+		if strings.Contains(vi.Path, "README.md") {
+			t.Errorf("README.md flagged as a note violation: %v", vi)
+		}
+	}
+}
 func TestParseFileRejectedWithReasonValid(t *testing.T) {
 	root := t.TempDir()
 	rel := "docs/notes/rejected/process/2026-09-11-x.md"

@@ -4,6 +4,21 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+
+	"github.com/JayveerPrajapati/kern/internal/index"
+)
+
+// Symbol-extraction regexes, compiled once at package init instead of per
+// ExtractSymbols call.
+var (
+	// quotedRe matches backtick / double-quoted symbol references.
+	quotedRe = regexp.MustCompile("`([A-Za-z_][A-Za-z0-9_.]*)`|\"([A-Za-z_][A-Za-z0-9_.]*)\"")
+	// qualifiedRe matches dotted qualified names: pkg.Symbol / Type.Method.
+	qualifiedRe = regexp.MustCompile(`[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)+`)
+	// fileRe matches file-path references with optional :line suffix.
+	fileRe = regexp.MustCompile(`[\w./-]+\.go(?::\d+)?`)
+	// bareRe matches word-bounded bare identifiers of 3+ chars.
+	bareRe = regexp.MustCompile(`\b[a-zA-Z_][a-zA-Z0-9_]{2,}\b`)
 )
 
 // ExtractSymbols pulls candidate symbol identifiers from a natural-language
@@ -11,6 +26,19 @@ import (
 // priority order: quoted > qualified-name > file-stem > bare-CamelCase.
 // Returns nil when the input looks like a bare symbol already (no spaces).
 func ExtractSymbols(change string) []string {
+	return extractSymbols(change, nil)
+}
+
+// ExtractSymbolsIndex is ExtractSymbols with an index consult: a bare token
+// that resolves (case-sensitively) to a real index symbol is kept even when it
+// collides with a common English/change verb (Add, Get, Run, Set, Make, Call,
+// Fix, ...). Stopword filtering still applies to every token that does NOT
+// resolve to an index symbol. A nil index behaves exactly like ExtractSymbols.
+func ExtractSymbolsIndex(change string, ix *index.Index) []string {
+	return extractSymbols(change, ix)
+}
+
+func extractSymbols(change string, ix *index.Index) []string {
 	change = strings.TrimSpace(change)
 	if change == "" {
 		return nil
@@ -22,7 +50,6 @@ func ExtractSymbols(change string) []string {
 	}
 
 	// 1. Backtick / double-quote quoted symbols.
-	quotedRe := regexp.MustCompile("`([A-Za-z_][A-Za-z0-9_.]*)`|\"([A-Za-z_][A-Za-z0-9_.]*)\"")
 	var quoted []string
 	for _, m := range quotedRe.FindAllStringSubmatch(change, -1) {
 		if m[1] != "" {
@@ -35,7 +62,6 @@ func ExtractSymbols(change string) []string {
 	// 2. Qualified names: pkg.Symbol / Type.Method / pkg.Type.Method. A match
 	// whose last segment is a known file extension (e.g. `db_connections.go`) is
 	// really a file path, not a qualified name — leave it for file-stem handling.
-	qualifiedRe := regexp.MustCompile(`[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)+`)
 	ext := map[string]bool{
 		".go": true, ".py": true, ".js": true, ".ts": true, ".tsx": true,
 		".jsx": true, ".rs": true, ".java": true, ".c": true, ".cpp": true,
@@ -54,7 +80,6 @@ func ExtractSymbols(change string) []string {
 	}
 
 	// 3. File-path references with optional line: path/to/file.go:42.
-	fileRe := regexp.MustCompile(`[\w./-]+\.go(?::\d+)?`)
 	var fileStems []string
 	for _, m := range fileRe.FindAllString(change, -1) {
 		stem := strings.TrimSuffix(m, filepath.Ext(m))
@@ -75,7 +100,6 @@ func ExtractSymbols(change string) []string {
 	// word-bounded identifier of 3+ chars starting with a letter or underscore,
 	// so it captures loadQuestion, replicaCount, process_service_request and
 	// GetMySQLDB alike — not just uppercase-leading CamelCase.
-	bareRe := regexp.MustCompile(`\b[a-zA-Z_][a-zA-Z0-9_]{2,}\b`)
 	stop := map[string]bool{}
 	for _, w := range []string{
 		"the", "a", "an", "and", "or", "but", "not", "for", "with", "from",
@@ -90,7 +114,7 @@ func ExtractSymbols(change string) []string {
 		"rename", "extract", "inline", "simplify", "clean", "fix", "break",
 		// Inflected change-verbs: 3rd-person / past forms of the verbs above
 		// headline prose ("what breaks if I remove X") and must never outrank
-		// a real symbol that follows them (report A8).
+		// a real symbol that follows them.
 		"refactors", "removes", "removed", "changes", "changed", "adds",
 		"added", "deletes", "deleted", "updates", "updated", "renames",
 		"renamed", "moves", "moved", "extracts", "simplifies", "split",
@@ -122,9 +146,13 @@ func ExtractSymbols(change string) []string {
 	}
 	var bare []string
 	for _, m := range bareRe.FindAllString(change, -1) {
-		if !stop[strings.ToLower(m)] {
-			bare = append(bare, m)
+		// A token that resolves (case-sensitively) to a real index symbol
+		// is kept even when it collides with the stoplist (e.g. "Add",
+		// "Fix"); the stoplist applies only to tokens that do NOT resolve.
+		if stop[strings.ToLower(m)] && !hasIndexSymbol(ix, m) {
+			continue
 		}
+		bare = append(bare, m)
 	}
 
 	// Qualified names yield the most reliable symbol: prefer the last
@@ -180,6 +208,21 @@ func ExtractSymbols(change string) []string {
 func hasLetter(s string) bool {
 	for _, r := range s {
 		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') {
+			return true
+		}
+	}
+	return false
+}
+
+// hasIndexSymbol reports whether the index contains a symbol whose simple name
+// (or full name) equals name case-sensitively. A nil index never matches, so
+// ExtractSymbols keeps its pure stopword behavior when no index is consulted.
+func hasIndexSymbol(ix *index.Index, name string) bool {
+	if ix == nil {
+		return false
+	}
+	for _, s := range ix.Symbols {
+		if s.Name == name || s.FullName() == name {
 			return true
 		}
 	}

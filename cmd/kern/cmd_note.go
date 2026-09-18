@@ -80,17 +80,14 @@ func noteNew(args []string) {
 	}
 	abs := filepath.Join(root, filepath.FromSlash(rel))
 	if _, err := os.Stat(abs); err == nil {
-		fmt.Fprintf(os.Stderr, "Error: note already exists at %s\n", rel)
-		panic(exitError{code: 1})
+		fatal("note: already exists at %s", rel)
 	}
 	body := fmt.Sprintf("Record the decision for this %s change. Describe the problem, what was decided, and what was given up.", class)
 	if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		panic(exitError{code: 1})
+		fatal("note: %v", err)
 	}
 	if err := os.WriteFile(abs, []byte(note.Skeleton(lifecycle, title, body)), 0o644); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		panic(exitError{code: 1})
+		fatal("note: %v", err)
 	}
 	fmt.Printf("created %s\n", rel)
 }
@@ -108,8 +105,7 @@ func noteList(args []string) {
 	}
 	paths, err := note.WalkNotes(root)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		panic(exitError{code: 1})
+		fatal("note: %v", err)
 	}
 	if len(paths) == 0 {
 		fmt.Println("no notes under docs/notes/")
@@ -169,8 +165,7 @@ func noteStatus(args []string) {
 	reason := strings.TrimSpace(strings.Join(reasonWords, " "))
 	newRel, err := note.Move(root, file, target, reason, time.Now())
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		panic(exitError{code: 1})
+		fatal("note: %v", err)
 	}
 	fmt.Printf("moved %s -> %s\n", file, newRel)
 }
@@ -190,8 +185,7 @@ func noteValidate(args []string) {
 	}
 	violations, err := note.ValidateTree(root)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		panic(exitError{code: 1})
+		fatal("note: %v", err)
 	}
 	if len(violations) == 0 {
 		fmt.Println("note tree valid")
@@ -200,7 +194,7 @@ func noteValidate(args []string) {
 	for _, v := range violations {
 		fmt.Printf("  ! %s: %s\n", v.Path, v.Message)
 	}
-	panic(exitError{code: 1})
+	fatal("note: %d format violation(s) — see output above", len(violations))
 }
 
 func noteHelp() {

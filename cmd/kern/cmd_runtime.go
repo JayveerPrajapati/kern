@@ -1,7 +1,6 @@
 package main
 
 import (
-	"flag"
 	"fmt"
 	"os"
 	"sort"
@@ -40,14 +39,14 @@ func runRuntime(args []string) int {
 // labels) against code-declared routes (index framework entry points),
 // template-aware: "/users/:id" matches "/users/42".
 func runRuntimeDrift(args []string) int {
-	fs := flag.NewFlagSet("runtime drift", flag.ContinueOnError)
-	root := fs.String("root", ".", "project root")
-	asJSON := fs.Bool("json", false, "emit JSON")
-	if err := fs.Parse(args); err != nil {
+	f, _, err := parseFlags(args)
+	if err != nil {
 		return 2
 	}
-	src := runtime.LoadSource(*root)
-	ix, err := loadOrBuild(*root)
+	root := f.root
+	asJSON := f.json
+	src := runtime.LoadSource(root)
+	ix, err := loadOrBuild(root)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "kern runtime drift: %v\n", err)
 		return 1
@@ -62,7 +61,7 @@ func runRuntimeDrift(args []string) int {
 		}
 	}
 	rep := runtime.Drift(runtime.Routes(src), codeRoutes)
-	if *asJSON {
+	if asJSON {
 		printJSON(rep)
 		return 0
 	}
@@ -78,14 +77,14 @@ func runRuntimeDrift(args []string) int {
 }
 
 func runRuntimeStatus(args []string) int {
-	fs := flag.NewFlagSet("runtime status", flag.ContinueOnError)
-	root := fs.String("root", ".", "project root")
-	asJSON := fs.Bool("json", false, "emit JSON")
-	if err := fs.Parse(args); err != nil {
+	f, _, err := parseFlags(args)
+	if err != nil {
 		return 2
 	}
-	src := runtime.LoadSource(*root)
-	if *asJSON {
+	root := f.root
+	asJSON := f.json
+	src := runtime.LoadSource(root)
+	if asJSON {
 		printJSON(runtime.StatusSnapshot(src))
 		return 0
 	}

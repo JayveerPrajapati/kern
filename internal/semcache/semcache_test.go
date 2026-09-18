@@ -143,6 +143,57 @@ func BenchmarkShingles(b *testing.B) {
 	}
 }
 
+// TestLookupTTLRejectsStale: an entry stored past the TTL is a miss and is
+// reclaimed from the index (and its payload), so a stale answer is never
+// served. Entries without a usable timestamp (zero At — e.g. written before
+// the At field existed) are stale by definition.
+func TestLookupTTLRejectsStale(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	t.Setenv("KERN_SEMCACHE_TTL", "") // force the 168h default
+	_ = Clear("")
+	_ = Store("ttl", "the database connection failed during migration", "fresh-payload")
+
+	// Backdate the stored entry past the default TTL.
+	st := lockFor("ttl")
+	st.mu.Lock()
+	es, _ := st.loadIndex("ttl")
+	for i := range es {
+		es[i].At = time.Now().Add(-200 * time.Hour)
+	}
+	_ = saveIndex("ttl", es)
+	st.es = es
+	st.mu.Unlock()
+
+	// A near-duplicate lookup must treat the stale entry as a miss.
+	var v string
+	if _, _, hit, err := Lookup("ttl", "the database connection failed during the migration run", &v, 0); err != nil || hit {
+		t.Fatalf("stale entry must be a miss: hit=%v err=%v", hit, err)
+	}
+	// And the stale entry is reclaimed.
+	if ents, _ := Entries("ttl"); len(ents) != 0 {
+		t.Fatalf("stale entry must be reclaimed, got %d entries", len(ents))
+	}
+	// A fresh store hits again.
+	_ = Store("ttl", "the database connection failed during migration", "fresh2")
+	if _, _, hit, _ := Lookup("ttl", "the database connection failed during the migration run", &v, 0); !hit || v != "fresh2" {
+		t.Fatalf("fresh entry must hit after stale pruning: hit=%v v=%q", hit, v)
+	}
+}
+
+// TestLookupTTLEnv drives the TTL from KERN_SEMCACHE_TTL: an entry stored
+// under a 50ms TTL is a miss after it ages out.
+func TestLookupTTLEnv(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	t.Setenv("KERN_SEMCACHE_TTL", "50ms")
+	_ = Clear("")
+	_ = Store("ttl-env", "the database connection failed during migration", "p")
+	time.Sleep(150 * time.Millisecond)
+	var v string
+	if _, _, hit, _ := Lookup("ttl-env", "the database connection failed during the migration run", &v, 0); hit {
+		t.Fatal("entry past a 50ms TTL must be a miss")
+	}
+}
+
 func TestLockForStripesPerNamespace(t *testing.T) {
 	a1, a2 := lockFor("striped-a"), lockFor("striped-a")
 	b := lockFor("striped-b")

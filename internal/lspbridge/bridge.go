@@ -692,16 +692,6 @@ func (p *Pool) GetOrStart(ctx context.Context, root string, cmd []string) (*Clie
 	return c, nil
 }
 
-// CloseAll terminates all pooled language servers.
-func (p *Pool) CloseAll() {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	for _, c := range p.clients {
-		_ = c.Close()
-	}
-	p.clients = make(map[string]*Client)
-}
-
 // Query executes a high-level LSP query using auto-detected or explicit language servers.
 func Query(ctx context.Context, req QueryRequest) (*QueryResult, error) {
 	if req.Root == "" {

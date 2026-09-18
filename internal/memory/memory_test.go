@@ -119,12 +119,6 @@ func TestRecallKCap(t *testing.T) {
 	}
 }
 
-// TestAutoCaptureLabeledAndExcludedFromRecall (report A17): raw session
-// captures — the "User: …" prompts and "Edited …"/"Command failed: …" tool
-// outcomes written by the opencode plugin and native hooks — must be labeled
-// Source "auto" and must never be returned by Recall (they can carry PII and
-// are session context, not project lessons), while a deliberate lesson stays
-// recallable.
 func TestAutoCaptureLabeledAndExcludedFromRecall(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	root := t.TempDir()
@@ -185,6 +179,58 @@ func TestAutoCaptureLabeledAndExcludedFromRecall(t *testing.T) {
 
 // TestAutoCaptureMigration: entries persisted before Source existed carry no
 // field; Load must backfill the auto label from the capture prefixes.
+// TestRecallDeterministicTies: scoring is unchanged, but ties must resolve
+// deterministically — score desc, then recency desc (newer first), then the
+// entry text as the final key.
+func TestRecallDeterministicTies(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	root := t.TempDir()
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	// Both lessons score identically for the query (same token set); the
+	// newer one must rank first on the recency tiebreak.
+	_ = writeJSON(Path(root), Store{Root: root, Entries: []Entry{
+		{Time: base, Text: "alpha beta gamma delta"},
+		{Time: base.Add(time.Hour), Text: "beta gamma delta alpha"},
+	}})
+	got := Recall(root, "alpha beta gamma delta", 10)
+	if len(got) != 2 {
+		t.Fatalf("expected 2 recalls, got %d", len(got))
+	}
+	if got[0].Text != "beta gamma delta alpha" {
+		t.Fatalf("score tie must rank by recency (newer first), got %q first", got[0].Text)
+	}
+
+	// Identical timestamps: the full tie must resolve deterministically by
+	// text, regardless of store order.
+	_ = writeJSON(Path(root), Store{Root: root, Entries: []Entry{
+		{Time: base, Text: "beta gamma delta alpha"},
+		{Time: base, Text: "alpha beta gamma delta"},
+	}})
+	got = Recall(root, "alpha beta gamma delta", 10)
+	if got[0].Text != "alpha beta gamma delta" {
+		t.Fatalf("full tie must resolve deterministically by text, got %q first", got[0].Text)
+	}
+}
+
+// TestRecallRankedDeterministicTies: identical age and token set produce an
+// identical score; the order must then be deterministic by text.
+func TestRecallRankedDeterministicTies(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	root := t.TempDir()
+	base := time.Now().UTC().Add(-24 * time.Hour)
+	_ = writeJSON(Path(root), Store{Root: root, Entries: []Entry{
+		{Time: base, Text: "zeta eta theta iota"},
+		{Time: base, Text: "eta theta iota zeta"},
+	}})
+	got := RecallRanked(root, "zeta eta theta iota", 10, 7.0)
+	if len(got) != 2 {
+		t.Fatalf("expected 2 ranked recalls, got %d", len(got))
+	}
+	if got[0].Entry.Text != "eta theta iota zeta" {
+		t.Fatalf("full tie must resolve deterministically by text, got %q first", got[0].Entry.Text)
+	}
+}
+
 func TestAutoCaptureMigration(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	root := t.TempDir()

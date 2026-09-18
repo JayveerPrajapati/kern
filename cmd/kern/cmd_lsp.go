@@ -12,7 +12,7 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/lspbridge"
 )
 
-// runLSP serves the Language Server Protocol over stdio (G-8), backed by the
+// runLSP serves the Language Server Protocol over stdio, backed by the
 // prebuilt symbol index. It mirrors cmd_mcp.go's graceful pattern: SIGINT /
 // SIGTERM cancel a NotifyContext that lsp.Serve observes (closing stdin to
 // unblock the read loop), so the process exits 0 on a clean drain.
@@ -43,6 +43,9 @@ func runLSPBridge(rest []string) {
 	file := f.file
 	if file == "" && len(args) > 0 {
 		file = args[0]
+	}
+	if file == "" {
+		fatalUsage("usage: kern lsp-bridge <file> [--action def|symbols|servers] [--line N] [--column N]")
 	}
 	action := f.action
 	if action == "" {

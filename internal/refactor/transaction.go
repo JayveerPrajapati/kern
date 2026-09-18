@@ -35,6 +35,9 @@ type TransactionResult struct {
 	UnifiedDiff    string   `json:"unified_diff"`
 	CompilerOutput string   `json:"compiler_output,omitempty"`
 	Error          string   `json:"error,omitempty"`
+	// VerificationSkipped is true when no compile command was configured and
+	// no go.mod was present, so no compilation check actually ran.
+	VerificationSkipped bool `json:"verification_skipped,omitempty"`
 }
 
 // ExecuteTransaction applies batch modifications in an isolated workspace,
@@ -55,6 +58,30 @@ func ExecuteTransaction(ctx context.Context, req TransactionRequest) (*Transacti
 			ModifiedFiles: nil,
 			UnifiedDiff:   "",
 		}, nil
+	}
+
+	// Validate every edit before touching the sandbox: an empty path would
+	// surface as a confusing "write .: is a directory" deep inside the
+	// transaction engine, and a relative path escaping the root ("../..")
+	// would write outside the confined project tree on apply. Absolute
+	// paths are confined to the root (normalized to repo-relative). This
+	// mirrors the guards internal/mcp/handlers_refactor.go applies — the
+	// engine fails closed even when a caller bypasses the MCP layer.
+	for i := range req.Edits {
+		if strings.TrimSpace(req.Edits[i].Path) == "" {
+			return nil, fmt.Errorf("edits[%d].path is required (each edit is {path, content} with the new complete file content)", i)
+		}
+		rel := filepath.Clean(req.Edits[i].Path)
+		if filepath.IsAbs(rel) {
+			r, err := filepath.Rel(absRoot, rel)
+			if err != nil || strings.HasPrefix(r, "..") {
+				return nil, fmt.Errorf("edits[%d].path %q is outside the project root", i, req.Edits[i].Path)
+			}
+			rel = r
+		} else if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return nil, fmt.Errorf("edits[%d].path %q escapes the project root", i, req.Edits[i].Path)
+		}
+		req.Edits[i].Path = rel
 	}
 
 	// 1. Create temporary sandbox workspace
@@ -106,10 +133,15 @@ func ExecuteTransaction(ctx context.Context, req TransactionRequest) (*Transacti
 
 	// 3. Automated Compilation Check in the sandbox
 	compileCmd := req.CompileCommand
+	verificationSkipped := false
 	if compileCmd == "" {
 		// Auto-detect go module
 		if _, err := os.Stat(filepath.Join(sandboxDir, "go.mod")); err == nil {
 			compileCmd = "go build ./..."
+		} else {
+			// No compile command and no go.mod: nothing can be verified.
+			// Callers must surface this instead of claiming verification.
+			verificationSkipped = true
 		}
 	}
 
@@ -160,11 +192,12 @@ func ExecuteTransaction(ctx context.Context, req TransactionRequest) (*Transacti
 	}
 
 	return &TransactionResult{
-		Success:        true,
-		RolledBack:     false,
-		ModifiedFiles:  modifiedPaths,
-		UnifiedDiff:    diffBuilder.String(),
-		CompilerOutput: compileOutput,
+		Success:             true,
+		RolledBack:          false,
+		ModifiedFiles:       modifiedPaths,
+		UnifiedDiff:         diffBuilder.String(),
+		CompilerOutput:      compileOutput,
+		VerificationSkipped: verificationSkipped,
 	}, nil
 }
 

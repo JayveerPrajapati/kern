@@ -27,7 +27,7 @@ func TestCustomAdapterWire(t *testing.T) {
 			"key": "mcpServers"
 		}
 	]`)
-	statuses := Wire(root, nil, false)
+	statuses := Wire(root, nil, false, true)
 	var found bool
 	for _, s := range statuses {
 		if s.Agent == "myagent" {
@@ -162,7 +162,7 @@ func TestCustomAdapterValidationErrors(t *testing.T) {
 func TestCustomAdapterErrorsDoNotAbortWire(t *testing.T) {
 	root := t.TempDir()
 	writeAgentsFile(t, filepath.Join(root, ".kern", "agents.json"), `[{"name": "broken"}]`)
-	statuses := Wire(root, nil, false)
+	statuses := Wire(root, nil, false, true)
 	var sawErr, sawMCP bool
 	for _, s := range statuses {
 		if s.Agent == "custom adapters" && strings.Contains(s.Note, "path is required") {

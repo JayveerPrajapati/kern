@@ -7,6 +7,10 @@ VERSION ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo dev)
 LDFLAGS := -X main.version=$(VERSION) -X github.com/JayveerPrajapati/kern/internal/version.Version=$(VERSION)
 RELEASE_LDFLAGS := -s -w -X main.version=$(VERSION) -X github.com/JayveerPrajapati/kern/internal/version.Version=$(VERSION)
 GOFLAGS := -buildvcs=false
+# Checksum tool for the release manifest: prefer sha256sum (Linux), fall back
+# to shasum -a 256 (macOS). Both emit "<hash>  <filename>" — the two-space
+# separator that install.sh greps for when verifying a download.
+SHA256SUM := $(shell command -v sha256sum >/dev/null 2>&1 && echo sha256sum || echo "shasum -a 256")
 
 .PHONY: all build build-treesitter test test-race vet lint bench install install-treesitter hooks release dist mcpb clean clean-artifacts
 
@@ -28,6 +32,15 @@ build-treesitter:
 
 test:
 	go test ./...
+# test-short runs the fast CI path (skips the deep nightly integration
+# tests: resilience real-execution scenarios, long index builds).
+test-short:
+	go test -short ./...
+# cover runs the short suite with coverage and prints the per-package
+# summary. CI uploads coverage.out to Codecov; this is the local equivalent.
+cover:
+	go test -short -coverprofile=coverage.out -covermode=atomic ./...
+	go tool cover -func=coverage.out | tail -1
 
 # test-race runs the test suite with the Go race detector. It is slower than
 # `test` but catches data races in the event bus, gateway, stores, and loop.
@@ -40,7 +53,7 @@ vet:
 	go vet ./...
 
 lint: vet
-	@test -z "$$(gofmt -l .)" || { echo "gofmt needed on:"; gofmt -l .; exit 1; }
+	@test -z "$$(gofmt -l . | grep -v '^\.kern/')" || { echo "gofmt needed on:"; gofmt -l . | grep -v '^\.kern/'; exit 1; }
 
 bench:
 	go test ./evaluate/bench/
@@ -68,9 +81,20 @@ ifeq ($(shell uname -s),Darwin)
 	xattr -dr com.apple.provenance $${HOME}/.local/bin/kern $${HOME}/.local/bin/kern-mcp $${HOME}/.local/bin/kern-server 2>/dev/null || true
 endif
 
-# opencode hooks: MCP config + auto-discovered plugin + agent rules
+# opencode hooks: MCP server + config + auto-discovered plugin + agent rules.
+# This is the opencode-only convenience; `kern setup --global` (or
+# `kern setup --detect` in a project) is the full path — it wires every
+# detected agent (Claude, Codex, Cursor, ...), not just opencode.
 hooks: build
+	mkdir -p $${HOME}/.local/bin
 	cp $(BIN)/kern-mcp $${HOME}/.local/bin/
+# Same macOS Gatekeeper handling as `make install` (see the note there):
+# re-sign after copy and strip quarantine/provenance xattrs.
+ifeq ($(shell uname -s),Darwin)
+	codesign --force --sign - $${HOME}/.local/bin/kern-mcp 2>/dev/null || true
+	xattr -dr com.apple.quarantine $${HOME}/.local/bin/kern-mcp 2>/dev/null || true
+	xattr -dr com.apple.provenance $${HOME}/.local/bin/kern-mcp 2>/dev/null || true
+endif
 	mkdir -p $${HOME}/.config/opencode
 	cp opencode.json .opencode/plugins/kern.ts $${HOME}/.config/opencode/ 2>/dev/null || true
 	cp AGENTS.md $${HOME}/.config/opencode/AGENTS.md
@@ -101,6 +125,11 @@ release: clean
 	GOOS=windows GOARCH=arm64 go build -tags sqlite $(GOFLAGS) -ldflags "$(RELEASE_LDFLAGS)" -o $(BIN)/kern-windows-arm64/kern-mcp.exe ./cmd/kern-mcp; \
 	GOOS=windows GOARCH=arm64 go build -tags sqlite $(GOFLAGS) -ldflags "$(RELEASE_LDFLAGS)" -o $(BIN)/kern-windows-arm64/kern-server.exe ./cmd/kern-server; \
 	cd $(BIN)/kern-windows-arm64 && zip -q -r ../kern-windows-arm64.zip . && cd .. && rm -rf kern-windows-arm64
+	# Checksum manifest for every release archive (same format the release
+	# workflow ships): shasum -a 256 (macOS) and sha256sum (Linux) both emit
+	# "<hash>  <filename>" — the two-space separator install.sh greps for.
+	# Verify with: cd $(BIN) && shasum -a 256 -c SHA256SUMS
+	cd $(BIN) && $(SHA256SUM) kern-*.tar.gz kern-*.zip > SHA256SUMS
 	@echo "release assets in $(BIN):"; ls $(BIN)/*.tar.gz $(BIN)/*.zip
 
 dist: release
@@ -124,7 +153,7 @@ clean:
 # at the repo root by ad-hoc builds (go build without -o, go test -c, pip
 # imports). All targets are gitignored, so this only reclaims disk space.
 clean-artifacts:
-	rm -f kern kern-mcp kern-server kernops
+	rm -f kern kern-mcp kern-server
 	rm -f *.test
 	rm -f bench
 	rm -rf __pycache__

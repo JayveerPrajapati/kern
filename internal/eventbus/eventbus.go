@@ -234,7 +234,7 @@ type Bus struct {
 	subs    []*subscription
 	history []Event
 	max     int
-	eid     uint64 // monotonic event id suffix (Bug: ID collision)
+	eid     atomic.Uint64 // monotonic event id suffix (Bug: ID collision)
 	wg      sync.WaitGroup
 
 	// P4.3 idempotency: events whose ID was already published are de-duplicated
@@ -352,7 +352,7 @@ func (b *Bus) Publish(ev Event) {
 	if ev.ID == "" {
 		// Combine a monotonic counter with the timestamp so events published
 		// within the same nanosecond never collide (Bug: ID collision).
-		ev.ID = fmt.Sprintf("e-%d-%d", time.Now().UnixNano(), atomic.AddUint64(&b.eid, 1))
+		ev.ID = fmt.Sprintf("e-%d-%d", time.Now().UnixNano(), b.eid.Add(1))
 	}
 	if ev.OccurredAt.IsZero() {
 		ev.OccurredAt = time.Now()

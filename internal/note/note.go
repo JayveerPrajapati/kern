@@ -8,7 +8,9 @@
 package note
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -118,7 +120,7 @@ func PathFor(lc Lifecycle, c Class, date, title string) (string, error) {
 		return "", err
 	}
 	if _, err := time.Parse("2006-01-02", date); err != nil {
-		return "", fmt.Errorf("date must be yyyy-mm-dd: %v", err)
+		return "", fmt.Errorf("date must be yyyy-mm-dd: %w", err)
 	}
 	slug := Slug(title)
 	if slug == "" {
@@ -235,13 +237,16 @@ func WalkNotes(root string) ([]string, error) {
 	var out []string
 	err := filepath.WalkDir(base, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
-			if os.IsNotExist(err) {
+			if errors.Is(err, fs.ErrNotExist) {
 				return nil
 			}
 			return err
 		}
 		if d.IsDir() || !strings.HasSuffix(path, ".md") {
 			return nil
+		}
+		if strings.EqualFold(d.Name(), "README.md") {
+			return nil // directory index/navigation file, not a decision note
 		}
 		out = append(out, path)
 		return nil

@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"testing"
@@ -281,5 +282,26 @@ func TestApprovalGatePersistsAcrossEngine(t *testing.T) {
 	}
 	if final.ResumeStep != 0 || final.ApprovalRefs != nil {
 		t.Errorf("resume state not cleared on completion: ResumeStep=%d ApprovalRefs=%v", final.ResumeStep, final.ApprovalRefs)
+	}
+}
+
+// TestRunContextCancelled guards the kern_do/kern_workflow cancellation fix:
+// a cancelled context must stop the workflow before the first step executes —
+// the task is failed (terminal + auditable) and no step handler runs.
+func TestRunContextCancelled(t *testing.T) {
+	e := NewWorkflowEngine(setupWorkflowRegistry(), nil)
+	tk := NewTask("code", "feature")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	handler := func(action string, task *Task) (string, error) {
+		t.Fatalf("handler invoked for step %q after cancellation", action)
+		return "", nil
+	}
+	got, err := e.RunContext(ctx, tk, handler)
+	if err == nil {
+		t.Fatal("RunContext: expected cancellation error, got nil")
+	}
+	if got == nil || got.State != domain.TaskFailed {
+		t.Fatalf("task = %+v, want state FAILED", got)
 	}
 }

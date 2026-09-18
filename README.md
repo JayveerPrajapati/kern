@@ -4,13 +4,13 @@
 
 ### The local, deterministic code-intelligence engine for AI agents
 
-**Index · Graph · Guard · Audit · Optimize — One self-contained CLI binary, zero network, no telemetry.**
+**Index · Graph · Guard · Audit · Optimize — One self-contained CLI binary. Local-first, no telemetry.**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Language: Go](https://img.shields.io/badge/Language-Go_1.25+-blue.svg)](https://go.dev/)
 [![Telemetry: None](https://img.shields.io/badge/Telemetry-None-brightgreen.svg)](#telemetry--privacy)
 [![Network: Zero](https://img.shields.io/badge/Network-100%25_Offline-brightgreen.svg)](#telemetry--privacy)
-[![Dependencies: Zero](https://img.shields.io/badge/Dependencies-Zero_(stdlib_only)-brightgreen.svg)](#how-it-works)
+[![Dependencies: Minimal](https://img.shields.io/badge/Dependencies-Minimal_(stdlib%2Bsqlite%2Byaml)-brightgreen.svg)](#how-it-works)
 
 [![opencode](https://img.shields.io/badge/opencode-supported-blueviolet.svg)](#supported-agents)
 [![Claude Code](https://img.shields.io/badge/Claude_Code-supported-blueviolet.svg)](#supported-agents)
@@ -30,7 +30,7 @@
 
 <br>
 
-**17 Indexed Languages · 74 Frameworks Recognized · Phase-aware MCP Routing (11 high-level tools by default, 143 in full mode) · 100% Local**
+**17 Indexed Languages · 74 Frameworks Recognized · Phase-aware MCP Routing (11 high-level tools by default, 145 in full mode) · 100% Local**
 
 </div>
 
@@ -87,6 +87,32 @@ curl -fsSL https://raw.githubusercontent.com/JayveerPrajapati/kern/main/install.
 # Windows (PowerShell)
 powershell -ExecutionPolicy Bypass -c "irm https://raw.githubusercontent.com/JayveerPrajapati/kern/main/install.ps1 | iex"
 ```
+
+The installer prints every step as it completes (platform detection → release
+resolution → download → checksum verification → install → macOS Gatekeeper
+re-sign → `kern version` check → a real `kern-mcp` MCP initialize handshake)
+and aborts loudly on any failure — never a silent partial install. On macOS
+the handshake probe turns the "Gatekeeper kills kern-mcp" failure mode into
+a deterministic per-install verdict with the exact fix commands on failure.
+
+Beyond the default install, the script manages the full lifecycle:
+
+```sh
+curl -fsSL .../install.sh | sh -s -- status     # installed version, path, platform
+curl -fsSL .../install.sh | sh -s -- upgrade    # compare + swap if newer (with backup)
+curl -fsSL .../install.sh | sh -s -- uninstall  # binaries + optional config (--yes to skip prompt)
+```
+
+`uninstall` removes the three binaries, the kern PATH lines from your shell
+rc, `~/.config/kern` / `~/.cache/kern` when present, and surgically excises
+the kern-first block from `~/AGENTS.md` (other content preserved). Pin a
+version with `KERN_VERSION=v1.2.3`, relocate with `KERN_INSTALL_DIR=dir`;
+when a platform has no prebuilt asset the installer falls back to
+`go install` automatically. Windows Git-Bash users can run `install.sh`
+(zip path documented); a native `install.ps1` upgrade is planned.
+
+The installer ships the pure-Go **sqlite** build; the tree-sitter indexer
+requires CGO and a from-source build (`make install-treesitter`).
 
 <details>
 <summary><b>Other install options (Homebrew, Go install, Source)</b></summary>
@@ -160,7 +186,7 @@ flowchart LR
 ```
 
 1. **Extraction & Indexing** — `go/ast` parses Go precisely; a zero-dependency heuristic extractor covers 16 more languages; `-tags treesitter` adds deep tree-sitter grammars for 14 languages.
-2. **Deterministic Storage** — Content-hash-verified index cached under `~/.cache/kern/`. `-tags sqlite` provides SQLite WAL + FTS5 full-text search.
+2. **Deterministic Storage** — Content-hash-verified index cached under `~/.cache/kern/`, with SQLite WAL + FTS5 full-text search compiled in by default. `-tags treesitter` adds deep tree-sitter grammars for 14 languages.
 3. **Deep Graph Intelligence** — 90+ CLI commands and MCP tools compute call graphs, blast radius, change impact, dead code, hotspots, and architecture boundaries.
 4. **Autonomous Auto-Sync** — File-event watchers (inotifywait/fswatch + polling fallback) update the index on save, backed by staleness checks on every read.
 
@@ -168,7 +194,7 @@ flowchart LR
 
 ## Connect to Your Agent
 
-`kern setup` connects to 17 MCP clients automatically. To configure manually:
+`kern setup` connects to 11 MCP clients automatically (12 config surfaces incl. Copilot's global MCP config). To configure manually:
 
 <details open>
 <summary><b>Claude Code</b></summary>
@@ -201,7 +227,7 @@ Run `kern setup` or check [`docs/mcp-client.md`](docs/mcp-client.md) for custom 
 
 ## MCP Tools & Routing
 
-By default, `kern` advertises a **focused 11-tool high-level surface** (11 high-level tools by default, 143 in full mode) routed through the smart **`kern_meta`** natural-language dispatcher.
+By default, `kern` advertises a **focused 11-tool high-level surface** (11 high-level tools by default, 145 in full mode) routed through the smart **`kern_meta`** natural-language dispatcher.
 
 | Core Tool | Purpose | What it Replaces |
 |---|---|---|
@@ -211,12 +237,30 @@ By default, `kern` advertises a **focused 11-tool high-level surface** (11 high-
 | **`kern_explore`** | Full symbol call hierarchy, callers, callees, and blast radius | Manual file crawls |
 | **`kern_impact`** | Predicts blast radius, risk rating, and test gaps before changing code | Guesswork refactoring |
 | **`kern_plan`** | Deterministic multi-file implementation plan for a proposed change | Ad-hoc edits |
+| **`kern_run`** | Orchestrates complete multi-step tasks across the explore-plan-edit-verify loop | Manual tool chains |
+| **`kern_verify`** | Unified verification engine across build, test, security, and architecture | Fragmented check scripts |
 | **`kern_review`** | Token-optimized code review context for diffs and pull requests | Whole-file diff reviews |
 | **`kern_authorize_context`** | Computes authorized symbol context with cryptographic access proof | Unchecked file access |
 | **`kern_optimize_prompt`** | Strips boilerplate and masks secrets before sending prompts | Unsafe prompt leaks |
 
-*Set `KERN_MCP_FULL=1` to expose the entire 143-tool catalog (11 high-level tools by default, 143
+*Set `KERN_MCP_FULL=1` to expose the entire 145-tool catalog (11 high-level tools by default, 145
 in full mode), or `KERN_MCP_PHASE=explore|plan|edit|verify` to filter by active agent phase.*
+
+---
+
+## Multi-Agent Specialist Squad (The 7 Roles)
+
+`kern` embeds a 7-role specialist squad architecture (`kern team` / `internal/agents`) that autonomous agents can orchestrate across the **Explore → Plan → Edit → Verify** engineering loop:
+
+| Specialist Role | Focus Area | Autonomy Level | Key Trigger |
+|---|---|---|---|
+| **Planner** (`RolePlanner`) | Requirements analysis, milestone phasing & boundary scoping | L0–L3 | `kern_plan` / `kern_meta("plan <task>")` |
+| **Architect** (`RoleArchitect`) | AST call graph verification, interface satisfaction & module boundaries | L0–L3 | `kern_explore` / `kern_meta("architecture...")` |
+| **Coder** (`RoleCoder`) | Isolated `.kern/sandboxes/` edits with `TreeDiff` payload extraction | L2–L3 | `kern_safe_change` / `kern_refactor` |
+| **Reviewer** (`RoleReviewer`) | AST diff auditing, code maintainability & anti-pattern detection | L0–L2 | `kern_review` / `kern_meta("review staged changes")` |
+| **Security** (`RoleSecurity`) | Static taint analysis, injection sink scans & policy firewall gates (G0–G39) | L0–L2 | `kern_check` / `kern_sec` / `kern_taint` |
+| **Tester** (`RoleTester`) | Reproduction test fixture synthesis & test pass rate verification | L0–L2 | `kern_synthesize_test` / `kern_run_build` |
+| **SRE** (`RoleSRE`) | AST symbol stack trace correlation, log compression & incident triage | L0–L4 | `kern-incident-triage` / `kern_correlate_evidence` |
 
 ---
 
@@ -283,7 +327,7 @@ Spring Boot, Django, FastAPI, Flask, Express, NestJS, Rails, Laravel, Gin, Echo,
 [ok] cursor                 kern entry present
 [ok] freshness              index is fresh (13080 symbols, 53520 call edges)
 [ok] precision              all 11 languages at AST-or-better precision
-[ok] stats                  3720 ops, 831436 tokens saved (19.9%)
+[ok] stats                  3720 ops, 831446 tokens saved (19.9%)
 
 verdict: all systems operational
 ```
@@ -303,7 +347,7 @@ verdict: all systems operational
 ## Docs
 
 - [`docs/cli-reference.md`](docs/cli-reference.md) — Complete 90+ CLI command reference.
-- [`docs/tool-catalog.md`](docs/tool-catalog.md) — Full generated MCP tool catalog (143 tools).
+- [`docs/tool-catalog.md`](docs/tool-catalog.md) — Full generated MCP tool catalog (145 tools).
 - [`docs/configuration.md`](docs/configuration.md) — Configuration and environment variables.
 - [`docs/privacy.md`](docs/privacy.md) — Security and privacy specifications.
 - [`docs/authorized-context.md`](docs/authorized-context.md) — Authorized-context & governance proofs.

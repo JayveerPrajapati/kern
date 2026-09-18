@@ -24,6 +24,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 
@@ -75,12 +76,15 @@ func (p *Platform) WithBus(b *eventbus.Bus) *Platform {
 // Bus returns the Platform's event bus (may be nil).
 func (p *Platform) Bus() *eventbus.Bus { return p.bus }
 
-// New builds the index for root and returns a Platform with all engines
-// prebuilt and shared. It is the one-shot constructor for CLI and MCP callers.
+// New loads the persisted index for root — building and saving one only when
+// missing or stale (index.LoadOrBuild) — and returns a Platform with all
+// engines prebuilt and shared. It is the one-shot constructor for CLI and MCP
+// callers: one-shot invocations reuse the persisted index instead of
+// full-rebuilding the tree on every run.
 // The index, graph, memory, firewall, and engines are built exactly once here;
 // callers must not rebuild them.
 func New(root string) (*Platform, error) {
-	ix, err := index.Build(root)
+	ix, err := index.LoadOrBuild(root)
 	if err != nil {
 		return nil, fmt.Errorf("app: index: %w", err)
 	}
@@ -177,7 +181,8 @@ func NewWithGraph(root string, ix *index.Index, g *intelligence.Graph) (*Platfor
 
 	ctxEng := context.NewEngine(root, g, mem, fw).
 		WithRuntimeSource(rtSrc).
-		WithBoundaryProvider(loadBoundaryProvider(root))
+		WithBoundaryProvider(loadBoundaryProvider(root)).
+		WithIndex(ix)
 
 	verEng := verification.NewEngineWithIndex(root, ix)
 
@@ -244,7 +249,7 @@ func (p *Platform) VerificationEngine() *verification.Engine { return p.ver }
 // implementation of the "analyze this proposed change" workflow shared by
 // kern analyze (CLI), kern_analyze (MCP), and POST /v1/analyze (REST).
 // If change contains whitespace, a symbol is extracted from the description
-// (via whatif.ExtractSymbols); otherwise it is treated as a bare symbol name.
+// (via whatif.ExtractSymbolsIndex); otherwise it is treated as a bare symbol name.
 func (p *Platform) Analyze(change string) (domain.ContextPacket, string, error) {
 	sym, err := p.resolveSymbol(change)
 	if err != nil {
@@ -258,7 +263,7 @@ func (p *Platform) Analyze(change string) (domain.ContextPacket, string, error) 
 		// first that resolves, so a natural-language request naming several
 		// identifiers works whenever at least one names a real symbol. Only if
 		// NONE resolve do we surface the first candidate's error.
-		cands := whatif.ExtractSymbols(change)
+		cands := whatif.ExtractSymbolsIndex(change, p.ix)
 		for _, cand := range cands {
 			if cand == sym {
 				continue
@@ -282,7 +287,7 @@ func (p *Platform) analyzeChangeResolvable(change string) (domain.ContextPacket,
 	if err == nil {
 		return pkt, nil
 	}
-	for _, cand := range whatif.ExtractSymbols(change) {
+	for _, cand := range whatif.ExtractSymbolsIndex(change, p.ix) {
 		if cand == change {
 			continue
 		}
@@ -380,19 +385,15 @@ func populateWhatIfEvidence(p *Platform, imp *whatif.Impact, target string) {
 	}
 }
 
-// dedupeStrings removes duplicate strings, keeping the first occurrence, and
-// preserves order.
+// dedupeStrings removes duplicate strings and returns them sorted for
+// deterministic output.
 func dedupeStrings(in []string) []string {
-	seen := map[string]bool{}
-	out := make([]string, 0, len(in))
-	for _, s := range in {
-		if seen[s] {
-			continue
-		}
-		seen[s] = true
-		out = append(out, s)
+	if len(in) == 0 {
+		return make([]string, 0)
 	}
-	return out
+	cp := append([]string(nil), in...)
+	slices.Sort(cp)
+	return slices.Compact(cp)
 }
 
 // runtimeEvidenceFor returns the target's runtime error evidence from the
@@ -462,12 +463,12 @@ func (p *Platform) Verify(types []string) verification.VerificationResult {
 // it is used as-is. When multiple candidates are extracted, the first that
 // actually resolves in the index wins, so prose such as "what breaks if I
 // remove the translate function from cmaas_controller?" lands on `translate`,
-// not on the lead verb `breaks` (report A8).
+// not on the lead verb `breaks`.
 func (p *Platform) resolveSymbol(change string) (string, error) {
 	if !strings.ContainsAny(change, " \t") {
 		return change, nil
 	}
-	cands := whatif.ExtractSymbols(change)
+	cands := whatif.ExtractSymbolsIndex(change, p.ix)
 	if len(cands) == 0 {
 		return "", fmt.Errorf("could not identify a symbol in the change description: pass a bare symbol name (e.g. 'GetMySQLDB') or include a qualified name (e.g. 'pkg.Symbol') in the description")
 	}
@@ -481,9 +482,9 @@ func (p *Platform) resolveSymbol(change string) (string, error) {
 		}
 		// None resolve in this project's index — fail with a hint instead of
 		// analysing a word from prose and reporting a misleading 0-caller
-		// impact (report A8).
-		return "", fmt.Errorf("no symbol named %q was found in this project's index (candidates: %s): pass a concrete exported name (e.g. %q) or a qualified name (e.g. 'pkg.Symbol')",
-			cands[0], strings.Join(cands, ", "), cands[0])
+		// impact.
+		return "", fmt.Errorf("no symbol named %q was found in this project's index (closest candidates: %s): kern what-if analyzes an existing symbol — pass its exact name, or a qualified 'pkg.Symbol'",
+			cands[0], strings.Join(cands, ", "))
 	}
 	return cands[0], nil
 }
@@ -540,7 +541,7 @@ func (p *Platform) CodeContext(intent, plan string) (string, error) {
 	var syms []string
 	seenSym := map[string]bool{}
 	for _, text := range []string{intent, plan} {
-		for _, c := range whatif.ExtractSymbols(text) {
+		for _, c := range whatif.ExtractSymbolsIndex(text, p.ix) {
 			if !seenSym[c] {
 				seenSym[c] = true
 				syms = append(syms, c)

@@ -16,6 +16,7 @@ import (
 
 	"github.com/JayveerPrajapati/kern/internal/cache"
 	"github.com/JayveerPrajapati/kern/internal/domain"
+	"github.com/JayveerPrajapati/kern/internal/fsutil"
 )
 
 // maxTypedEntries caps the number of typed memories persisted per store. When
@@ -90,24 +91,7 @@ func (s *MemoryStore) save(ms []domain.Memory) error {
 	if err != nil {
 		return err
 	}
-	tmp, err := os.CreateTemp(filepath.Dir(s.path), ".tmp-*")
-	if err != nil {
-		return err
-	}
-	if _, err := tmp.Write(b); err != nil {
-		_ = tmp.Close()
-		_ = os.Remove(tmp.Name())
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		_ = os.Remove(tmp.Name())
-		return err
-	}
-	if err := os.Chmod(tmp.Name(), 0o600); err != nil {
-		_ = os.Remove(tmp.Name())
-		return err
-	}
-	return os.Rename(tmp.Name(), s.path)
+	return fsutil.WriteFileAtomic(s.path, b, 0o600)
 }
 
 // Add stores a new typed memory entry. Returns the entry with ID and

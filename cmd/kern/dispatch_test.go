@@ -88,9 +88,6 @@ func TestDispatchCommandHelpStyleFlags(t *testing.T) {
 	}
 }
 
-// TestEveryCommandHasUsage (F-034): every commandTable entry must carry a
-// non-empty multi-line usage string (synopsis + real flags) so `kern <cmd>
-// --help` never prints a bare one-liner.
 func TestEveryCommandHasUsage(t *testing.T) {
 	if len(commandTable) < 170 {
 		t.Fatalf("commandTable has %d entries, want >= 170", len(commandTable))

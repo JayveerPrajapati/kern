@@ -7,14 +7,16 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/code"
 	kernctx "github.com/JayveerPrajapati/kern/internal/context"
 	"github.com/JayveerPrajapati/kern/internal/optimize"
+	"github.com/JayveerPrajapati/kern/internal/pii"
 	"github.com/JayveerPrajapati/kern/internal/semcache"
 	"github.com/JayveerPrajapati/kern/internal/stats"
 	"github.com/JayveerPrajapati/kern/internal/strutil"
 	"github.com/JayveerPrajapati/kern/internal/terse"
 	"github.com/JayveerPrajapati/kern/internal/tokenize"
+	"maps"
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -36,7 +38,7 @@ func runOptimize(cmd string, rest []string) {
 		}
 	}
 	if prompt == "" {
-		fatal("prompt is required")
+		fatalUsage("prompt is required (kern %s \"<prompt>\" or pipe stdin)", cmd)
 	}
 	wireRecorder()
 	var attach string
@@ -62,7 +64,17 @@ func runOptimize(cmd string, rest []string) {
 	if err != nil {
 		fatal("optimize: %v", err)
 	}
-	fmt.Println(res.Output)
+	out := res.Output
+	// Deterministic (no-LLM) path: optimize.Prompt unmasks its internal
+	// placeholders before returning even when no LLM ran, so a --mask run
+	// without an LLM backend would echo the original secrets verbatim. Re-apply
+	// the deterministic pii.Mask to the output before printing so --mask never
+	// echoes known secret patterns (sk-proj-…, emails, …). The LLM path is
+	// left unchanged — its output is intentionally unmasked and readable.
+	if f.mask && (f.llm == "" || res.LLMSkipped != "") {
+		out = pii.Mask(out).Text
+	}
+	fmt.Println(out)
 	if res.FromCache {
 		fmt.Fprintf(os.Stderr, "kern: served from cache\n")
 	}
@@ -228,7 +240,7 @@ func runBudget(rest []string) {
 }
 
 func runTerse(rest []string) {
-	_, args, err := parseFlags(rest)
+	f, args, err := parseFlags(rest)
 	if err != nil {
 		fatalUsage("flags: %v", err)
 	}
@@ -258,12 +270,26 @@ func runTerse(rest []string) {
 		text = string(b)
 	}
 	if text == "" {
-		fatalUsage("usage: kern terse \"<text>\" [--max]  (or pipe stdin)")
+		fatalUsage("usage: kern terse \"<text>\" [--max N]  (or pipe stdin)")
 	}
-	out, dropped := terse.Compress(text)
-	before := tokenize.Count(text)
-	after := tokenize.Count(out)
-	fmt.Fprintf(os.Stderr, "kern: %d -> %d tokens (saved %d, %.1f%%, %d filler lines dropped)\n", before, after, before-after, strutil.Pct(before, after), dropped)
+	// Deterministic line-level tersification (internal/terse.Tersify): blank
+	// and comment-only lines are stripped, repeated whitespace collapsed, and
+	// filler dropped. --max is honored as a token ceiling: the head is kept
+	// until the budget is met and the over-budget tail is reported as dropped.
+	out, st := terse.Tersify(text, f.max)
+	before, after := st.BeforeTokens, st.AfterTokens
+	msg := fmt.Sprintf("kern: %d -> %d tokens (saved %d, %.1f%%, %d filler lines dropped", before, after, before-after, strutil.Pct(before, after), st.DroppedFiller)
+	if st.DroppedBlank > 0 || st.DroppedComment > 0 {
+		msg += fmt.Sprintf(", %d blank + %d comment lines stripped", st.DroppedBlank, st.DroppedComment)
+	}
+	if f.max > 0 {
+		msg += fmt.Sprintf(", budget %d", f.max)
+		if st.DroppedBudget > 0 {
+			msg += fmt.Sprintf(" (%d lines dropped)", st.DroppedBudget)
+		}
+	}
+	msg += ")"
+	fmt.Fprintln(os.Stderr, msg)
 	fmt.Println(out)
 	printSavingsFooter(os.Stderr, before, after, kernctx.CostPerToken())
 }
@@ -305,6 +331,10 @@ func runSemcache(rest []string) {
 		if err != nil {
 			fatal("semcache: %v", err)
 		}
+		if f.json {
+			printJSON(entries)
+			return
+		}
 		if len(entries) == 0 {
 			fmt.Printf("semcache %q: empty\n", ns)
 			return
@@ -316,6 +346,10 @@ func runSemcache(rest []string) {
 	case "sim":
 		if len(args) != 2 {
 			fatalUsage("usage: kern semcache sim <textA> <textB>")
+		}
+		if f.json {
+			printJSON(map[string]any{"similarity": semcache.Similarity(args[0], args[1])})
+			return
 		}
 		fmt.Printf("similarity: %.3f\n", semcache.Similarity(args[0], args[1]))
 	default:
@@ -332,11 +366,7 @@ func runSemcache(rest []string) {
 			return
 		}
 		fmt.Println("semcache entries by namespace:")
-		names := make([]string, 0, len(st))
-		for ns := range st {
-			names = append(names, ns)
-		}
-		sort.Strings(names)
+		names := slices.Sorted(maps.Keys(st))
 		for _, ns := range names {
 			fmt.Printf("  %-8s %d\n", ns, st[ns])
 		}
@@ -345,11 +375,12 @@ func runSemcache(rest []string) {
 }
 
 func runStats(cmd string, rest []string) {
-	f, args, err := parseFlags(rest)
+	// Positional args are unused by the stats subcommands; parseFlags still
+	// validates unknown flags so typos fail loudly (rc=2).
+	f, _, err := parseFlags(rest)
 	if err != nil {
 		fatalUsage("flags: %v", err)
 	}
-	_ = args
 	rec, err := stats.NewRecorder()
 	if err != nil {
 		fatal("stats: %v", err)

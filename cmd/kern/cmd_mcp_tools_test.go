@@ -1,6 +1,7 @@
 package main
 
 import (
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,14 +10,47 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/index"
 )
 
+// captureStderrExit runs fn with os.Stderr redirected to a pipe, returning
+// the captured stderr and the exit code of any exitError panic fn raises
+// (0 when fn returns without panicking). Non-exitError panics re-panic.
+func captureStderrExit(t *testing.T, fn func()) (string, int) {
+	t.Helper()
+	old := os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stderr = w
+	code := 0
+	func() {
+		defer func() {
+			if rec := recover(); rec != nil {
+				if ee, ok := rec.(exitError); ok {
+					code = ee.code
+				} else {
+					panic(rec)
+				}
+			}
+		}()
+		fn()
+	}()
+	_ = w.Close()
+	os.Stderr = old
+	b, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b), code
+}
+
 // TestDiskIndexViewReportsPersistedIndex pins the kern health disk view: it
 // summarizes the persisted index.json (not the empty session view of a fresh
 // process), and reports "rebuild required" instead of silently zeroes when
 // the on-disk schema is older than this binary's.
 func TestDiskIndexViewReportsPersistedIndex(t *testing.T) {
 	root := t.TempDir()
-	if got := diskIndexView(root); got != nil {
-		t.Fatalf("diskIndexView(empty dir) = %v, want nil", got)
+	if got := index.DiskIndexView(root); got != nil {
+		t.Fatalf("index.DiskIndexView(empty dir) = %v, want nil", got)
 	}
 
 	ix := index.New(root)
@@ -24,7 +58,7 @@ func TestDiskIndexViewReportsPersistedIndex(t *testing.T) {
 	if err := ix.Save(); err != nil {
 		t.Fatal(err)
 	}
-	got := diskIndexView(root)
+	got := index.DiskIndexView(root)
 	if got == nil || got["version"] != wantVersion {
 		t.Fatalf("diskIndexView = %v, want version %d", got, wantVersion)
 	}
@@ -46,7 +80,7 @@ func TestDiskIndexViewReportsRebuildRequired(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(p, "index.json"), []byte(`{"root":"x","version":0}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	got := diskIndexView(root)
+	got := index.DiskIndexView(root)
 	if got == nil {
 		t.Fatal("diskIndexView = nil, want rebuild_required report")
 	}
@@ -55,13 +89,6 @@ func TestDiskIndexViewReportsRebuildRequired(t *testing.T) {
 	}
 }
 
-// TestRunHealthIndexBlockIsDiskAuthoritative pins F-002: `kern health` (and
-// `kern health --json`) must report the DISK index as the authoritative
-// "index" block — built=true with the persisted symbol/file counts and a
-// real freshness verdict — NOT the in-memory MCP session view, which is
-// always empty (fresh=false/symbols=0/files=0) on a fresh CLI invocation.
-// The in-memory view is relabeled mcp_memory_index with an explicit note so
-// it cannot be mistaken for persisted state.
 func TestRunHealthIndexBlockIsDiskAuthoritative(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	root := jsonCliFixture(t)
@@ -150,4 +177,26 @@ func TestRunMCPToolUnknownToolPanics(t *testing.T) {
 		}
 	}()
 	runMCPTool("definitely_not_a_tool", nil)
+}
+
+// TestRunSynthesizeTestBadFlagExits2 pins the uniform flag-error handling:
+// a bad flag must exit 2 with a single "kern: flags: ..." line, never the
+// stdlib flag package's raw "flag provided but not defined" + "Usage of"
+// dump.
+func TestRunSynthesizeTestBadFlagExits2(t *testing.T) {
+	out, code := captureStderrExit(t, func() {
+		runSynthesizeTest([]string{"-symbol", "x"})
+	})
+	if code != 2 {
+		t.Fatalf("exit = %d, want 2 for a bad flag", code)
+	}
+	if n := strings.Count(out, "kern: flags:"); n != 1 {
+		t.Fatalf("stderr must contain exactly one \"kern: flags:\" line, got %d:\n%s", n, out)
+	}
+	if !strings.Contains(out, "flag provided but not defined") {
+		t.Fatalf("stderr should name the bad flag:\n%s", out)
+	}
+	if strings.Contains(out, "Usage of") {
+		t.Fatalf("stderr must not contain the stdlib flag usage dump:\n%s", out)
+	}
 }
