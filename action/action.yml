@@ -46,6 +46,7 @@ runs:
         fetch-depth: 0
 
     - name: Setup Go
+      if: hashFiles('go.mod') != ''
       uses: 'actions/setup-go@v5'
       with:
         go-version-file: 'go.mod'
@@ -195,6 +196,7 @@ runs:
         exit 1
 
     - name: Post review comment
+      if: github.event_name == 'pull_request'
       uses: 'actions/github-script@v7'
       with:
         script: |

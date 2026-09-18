@@ -8,21 +8,21 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Language: Go](https://img.shields.io/badge/Language-Go_1.25+-blue.svg)](https://go.dev/)
-[![Telemetry: None](https://img.shields.io/badge/Telemetry-None-brightgreen.svg)](#telemetry--privacy)
-[![Network: Zero](https://img.shields.io/badge/Network-100%25_Offline-brightgreen.svg)](#telemetry--privacy)
+[![Telemetry: None](https://img.shields.io/badge/Telemetry-None-brightgreen.svg)](#traditional-agent-vs-agent--kern)
+[![Network: Zero](https://img.shields.io/badge/Network-100%25_Offline-brightgreen.svg)](#traditional-agent-vs-agent--kern)
 [![Dependencies: Minimal](https://img.shields.io/badge/Dependencies-Minimal_(stdlib%2Bsqlite%2Byaml)-brightgreen.svg)](#how-it-works)
 
-[![opencode](https://img.shields.io/badge/opencode-supported-blueviolet.svg)](#supported-agents)
-[![Claude Code](https://img.shields.io/badge/Claude_Code-supported-blueviolet.svg)](#supported-agents)
-[![Cursor](https://img.shields.io/badge/Cursor-supported-blueviolet.svg)](#supported-agents)
-[![Codex](https://img.shields.io/badge/Codex-supported-blueviolet.svg)](#supported-agents)
-[![Gemini](https://img.shields.io/badge/Gemini-supported-blueviolet.svg)](#supported-agents)
-[![+12 more](https://img.shields.io/badge/%2B12_more_surfaces-blueviolet.svg)](#supported-agents)
+[![opencode](https://img.shields.io/badge/opencode-supported-blueviolet.svg)](#supported-ecosystem)
+[![Claude Code](https://img.shields.io/badge/Claude_Code-supported-blueviolet.svg)](#supported-ecosystem)
+[![Cursor](https://img.shields.io/badge/Cursor-supported-blueviolet.svg)](#supported-ecosystem)
+[![Codex](https://img.shields.io/badge/Codex-supported-blueviolet.svg)](#supported-ecosystem)
+[![Gemini](https://img.shields.io/badge/Gemini-supported-blueviolet.svg)](#supported-ecosystem)
+[![+12 more](https://img.shields.io/badge/%2B12_more_surfaces-blueviolet.svg)](#supported-ecosystem)
 
 <br>
 
 [**Quickstart**](#quickstart) •
-[**Why kern?**](#why-kern) •
+[**Why kern?**](#the-problem-the-ai-agent-context-crisis) •
 [**Benchmarks**](#benchmark-results) •
 [**MCP Setup**](#connect-to-your-agent) •
 [**How It Works**](#how-it-works) •
@@ -124,6 +124,7 @@ brew install --build-from-source ./homebrew/kern.rb
 # Go Install (Go 1.25+)
 go install github.com/JayveerPrajapati/kern/cmd/kern@latest
 go install github.com/JayveerPrajapati/kern/cmd/kern-mcp@latest
+go install github.com/JayveerPrajapati/kern/cmd/kern-server@latest
 
 # Build from source
 make build  # Produces bin/kern, bin/kern-mcp, bin/kern-server
