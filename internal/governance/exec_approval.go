@@ -312,7 +312,7 @@ func appendConsumedID(id string) error {
 	if err != nil {
 		return err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	_, err = fmt.Fprintf(f, "%s %s\n", id, hex.EncodeToString(mac.Sum(nil)))
 	return err
 }

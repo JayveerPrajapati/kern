@@ -261,12 +261,6 @@ func (s *TaskService) RunWorkflowResume(taskID string) (*agent.Task, error) {
 	return s.runWorkflow(&task, eng)
 }
 
-// runStoredWorkflow runs (or resumes) the workflow for a stored task, evicting
-// the run once the task reaches a terminal state.
-func (s *TaskService) runStoredWorkflow(taskID string) (*agent.Task, error) {
-	return s.runStoredWorkflowContext(context.Background(), taskID)
-}
-
 // runStoredWorkflowContext is runStoredWorkflow with caller cancellation,
 // threaded through to WorkflowEngine.RunContext.
 func (s *TaskService) runStoredWorkflowContext(ctx context.Context, taskID string) (*agent.Task, error) {

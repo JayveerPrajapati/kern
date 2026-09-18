@@ -30,13 +30,6 @@ const (
 	ProvenanceModeRaw      = provenance.ProvenanceModeRaw
 )
 
-// indexProvenance builds the index-identity portion of a stamp, falling back
-// to the kernel's cached git commit when the index carries no recorded
-// identity.
-func (s *Server) indexProvenance(ix *index.Index) IndexProvenance {
-	return provenance.IndexIdentity(ix, s.commit)
-}
-
 // rawProvenance builds index-identity-only provenance for ungoverned
 // responses: retrieval calls without agent_id, and non-retrieval tools that
 // loaded an index.
@@ -68,10 +61,3 @@ func (s *Server) stampProvenance(ctx context.Context, p *Provenance) {
 	}
 }
 
-// symbolProvenances resolves a list of (possibly simple or qualified) names
-// to provenance records. Unresolvable names (foreign/external callees) are
-// kept with their name only — mirroring the authz edge filter's
-// keep-unresolved-callees rule.
-func symbolProvenances(ix *index.Index, names []string) []SymbolProvenance {
-	return provenance.SymbolProvenances(ix, names)
-}

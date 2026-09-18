@@ -143,16 +143,8 @@ func cacheKeyFor(name string, args map[string]any, root, identity string) string
 		}
 	}
 	h := sha256.New()
-	fmt.Fprintf(h, "%s\x00%s\x00%s\x00%s\x00%s\x00%s", name, canon, root, identity, schemaVersion, version.BuildID())
+	_, _ = fmt.Fprintf(h, "%s\x00%s\x00%s\x00%s\x00%s\x00%s", name, canon, root, identity, schemaVersion, version.BuildID())
 	return hex.EncodeToString(h.Sum(nil))
-}
-
-// cacheKey computes the D1 key for a call using the session's currently
-// cached index identity for its root (peeked, never built — see
-// cacheIndexIdentity).
-func (s *Server) cacheKey(name string, args map[string]any) string {
-	root := resolveRoot(argString(args, "root"))
-	return cacheKeyFor(name, args, root, s.cacheIndexIdentity(root))
 }
 
 // indexIdentityString renders the cache-relevant identity of an index:

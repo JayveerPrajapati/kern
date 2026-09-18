@@ -7,7 +7,6 @@ import (
 
 // estGeneric mirrors the pre-hot-swap behavior of Count/CountKind.
 func estGeneric(s string) int      { return (Estimator{Kind: KindGeneric}).Count(s) }
-func estKind(s string, k Kind) int { return Estimator{Kind: k}.Count(s) }
 
 // TestDefaultCounterIsExactBPEWhenAvailable: the default is "bpe-if-available"
 // — the exact cl100k_base BPE counter when its table data loads, and only the

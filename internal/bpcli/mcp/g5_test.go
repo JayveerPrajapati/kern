@@ -644,20 +644,3 @@ func g5WithinRoot(root, resolved string) bool {
 	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
-// g5FindRepoRoot walks up to find go.mod.
-func g5FindRepoRoot(t *testing.T) string {
-	t.Helper()
-	dir, _ := os.Getwd()
-	for i := 0; i < 10; i++ {
-		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
-			return dir
-		}
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			break
-		}
-		dir = parent
-	}
-	t.Fatal("could not find go.mod")
-	return ""
-}

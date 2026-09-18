@@ -36,14 +36,3 @@ func taskScopeFromArgs(args map[string]any, taskID string) *domain.TaskScope {
 	return gov.TaskScopeFromArgs(args, taskID)
 }
 
-func graphSymbolsFromText(ix *index.Index, text string) []provenance.SymbolProvenance {
-	return gov.GraphSymbolsFromText(ix, text)
-}
-
-func simpleName(name string) string {
-	return provenance.SimpleName(name)
-}
-
-func simpleNames(in []string) []string {
-	return gov.SimpleNames(in)
-}
