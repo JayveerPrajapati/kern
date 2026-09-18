@@ -207,8 +207,6 @@ func newVendorGitRepo(t *testing.T) string {
 	return root
 }
 
-// TestChurnExcludesIgnored (report A5): vendored files must not appear in the
-// churn report, even when they churn more than the real source.
 func TestChurnExcludesIgnored(t *testing.T) {
 	root := newVendorGitRepo(t)
 	report, err := Churn(root, "", "")
@@ -232,12 +230,6 @@ func TestChurnExcludesIgnored(t *testing.T) {
 	}
 }
 
-// TestChurnRiskScoringManyFiles exercises the churn risk-scoring path over a
-// repo with many files (F-015 regression: risk scoring called prodCallers per
-// symbol, rebuilding the symbol->file map each time — quadratic on large
-// repos, taking ~7.8s on the kern repo). The test pins the functional
-// contract: every churned file that is indexed carries a risk score, and the
-// score reflects direct + transitive callers.
 func TestChurnRiskScoringManyFiles(t *testing.T) {
 	root := t.TempDir()
 	execGit(t, root, "init", "-q", "-b", "main")
@@ -314,14 +306,6 @@ func main() { _ = pkg0.Func0() }
 	}
 }
 
-// BenchmarkChurnContextKernRepo measures the warm-path latency of kern churn
-// on a large real repo (F-015 target: <1s). Run with:
-//
-//	go test ./internal/intel/ -run '^$' -bench BenchmarkChurnContextKernRepo
-//
-// The kernel of the fix is that risk scoring reuses one hoisted symbol->file
-// map instead of rebuilding it per symbol, and churn reads the persisted
-// index snapshot instead of re-verifying freshness with a git tree-OID walk.
 func BenchmarkChurnContextKernRepo(b *testing.B) {
 	root := os.Getenv("KERN_BENCH_ROOT")
 	if root == "" {

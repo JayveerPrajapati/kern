@@ -132,7 +132,7 @@ func renderCommunities(ix *index.Index, label map[string]string) []Community {
 			if fileMap[s] == "" {
 				continue
 			}
-			// P1-5: ambiguous names resolve to their strongest definition
+			// ambiguous names resolve to their strongest definition
 			// unit (package-qualified display); unique names are unchanged.
 			hubName, n := bestUnitCallers(ix, fileMap, dups, byName, splits, s)
 			if n > best {

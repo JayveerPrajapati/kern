@@ -5,12 +5,12 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"log"
 	"os"
 	"path/filepath"
 	"regexp"
 	"runtime"
 	"slices"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -76,7 +76,7 @@ type Index struct {
 	// resolution rate is visible and regressions are provable. Zero on
 	// indexes built before this pass existed.
 	CallResolution CallResStats `json:"call_resolution,omitempty"`
-	// ProseVocab is the build-time inverted word→symbol table (CG-P1-9):
+	// ProseVocab is the build-time inverted word→symbol table:
 	// each prose word ("middleware", "retry") maps to the full names of
 	// symbols whose name or defining directory matches that word. Built by
 	// buildProseVocab in every finalize sequence and served by LookupProse;
@@ -224,7 +224,14 @@ func (ix *Index) Save() error {
 	if err := f.Close(); err != nil {
 		return err
 	}
-	return os.Rename(tmpPath, p)
+	if err := os.Rename(tmpPath, p); err != nil {
+		return err
+	}
+	// Binary snapshot cache (Rec P0-3): written alongside the canonical JSON
+	// so the next Load/LoadFile can skip the multi-MB JSON parse. Best
+	// effort — a snapshot failure is non-fatal (JSON remains canonical).
+	_ = writeBinSnapshot(ix, p)
+	return nil
 }
 
 // onDiskVersion reads the "version" field of a persisted index without
@@ -308,7 +315,11 @@ func ensureGitExclude(root string) {
 		separator = ""
 	}
 	newContent := content + separator + "# kern local exclude\n.kern/\n"
-	_ = os.WriteFile(excludePath, []byte(newContent), 0o644)
+	if err := os.WriteFile(excludePath, []byte(newContent), 0o644); err != nil {
+		// Benign for indexing, but never invisible: without the entry git
+		// tracks .kern/, so say why it is missing.
+		log.Printf("kern index: could not add .kern/ to %s (git may show .kern as untracked): %v", excludePath, err)
+	}
 }
 
 // Load reads the index for root. Returns nil if absent.
@@ -317,7 +328,22 @@ func Load(root string) (*Index, error) {
 	if err != nil {
 		abs = root
 	}
-	data, err := os.ReadFile(StorePath(abs))
+	p := StorePath(abs)
+	// Fast path (Rec P0-3): a fresh binary snapshot decodes ~5-10x faster
+	// than the JSON document; JSON stays canonical and any miss/staleness
+	// falls through to the existing path below.
+	if ix, ok := loadBinSnapshot(p); ok {
+		if ix.Version != indexVersion {
+			metrics.Default().RecordCacheMiss()
+			return nil, fmt.Errorf("index version %d (want %d): rebuild required", ix.Version, indexVersion)
+		}
+		ix.initMaps()
+		ix.reindexByFile()
+		ix.buildSymbolIndex()
+		metrics.Default().RecordCacheHit()
+		return ix, nil
+	}
+	data, err := os.ReadFile(p)
 	if err != nil {
 		metrics.Default().RecordCacheMiss()
 		return nil, err
@@ -398,6 +424,16 @@ func (ix *Index) legacyStale() bool {
 // LoadFile reads an index directly from a store path (used for
 // cross-project search across the cache directory).
 func LoadFile(path string) (*Index, error) {
+	// Fast path (Rec P0-3): same snapshot preference as Load; JSON canonical.
+	if ix, ok := loadBinSnapshot(path); ok {
+		if ix.Version != indexVersion {
+			return nil, fmt.Errorf("index version %d (want %d): rebuild required", ix.Version, indexVersion)
+		}
+		ix.initMaps()
+		ix.reindexByFile()
+		ix.buildSymbolIndex()
+		return ix, nil
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
@@ -411,6 +447,7 @@ func LoadFile(path string) (*Index, error) {
 	}
 	ix.initMaps()
 	ix.reindexByFile()
+	ix.buildSymbolIndex()
 	return ix, nil
 }
 
@@ -433,7 +470,7 @@ func (ix *Index) Languages() []string {
 	for l := range set {
 		out = append(out, l)
 	}
-	sort.Strings(out)
+	slices.Sort(out)
 	return out
 }
 
@@ -733,7 +770,7 @@ func buildSerial(abs string, cfg *buildConfig) (*Index, error) {
 	ix.measureCallResolution()
 	ix.resolveEntries()
 	ix.reindexByFile()
-	// CG-P1-9: build the prose→symbol inverted vocab after the symbol table is
+	// build the prose→symbol inverted vocab after the symbol table is
 	// final so LookupProse can serve miss-chain candidates without re-walking it.
 	ix.buildProseVocab()
 	// Record the edge-precision tier per language so strict call-edge following
@@ -838,7 +875,7 @@ func buildParallel(abs string, cfg *buildConfig) (*Index, error) {
 		workers := t.workers
 		results := make(chan fileResult, t.resultBuf)
 		var wg sync.WaitGroup
-		var next int64
+		var next atomic.Int64
 		// applied tracks the merge cursor: the next seq the merge loop will
 		// apply. Workers may claim jobs at most reorderWindow ahead of it, so
 		// the reorder buffer stays bounded (B7).
@@ -848,7 +885,7 @@ func buildParallel(abs string, cfg *buildConfig) (*Index, error) {
 			go func() {
 				defer wg.Done()
 				for {
-					claim := atomic.LoadInt64(&next)
+					claim := next.Load()
 					if claim >= int64(len(jobs)) {
 						return
 					}
@@ -860,7 +897,7 @@ func buildParallel(abs string, cfg *buildConfig) (*Index, error) {
 						runtime.Gosched()
 						continue
 					}
-					idx := atomic.AddInt64(&next, 1) - 1
+					idx := next.Add(1) - 1
 					if idx >= int64(len(jobs)) {
 						return
 					}
@@ -924,7 +961,7 @@ func buildParallel(abs string, cfg *buildConfig) (*Index, error) {
 	ix.measureCallResolution()
 	ix.resolveEntries()
 	ix.reindexByFile()
-	// CG-P1-9: build the prose→symbol inverted vocab after the symbol table is
+	// build the prose→symbol inverted vocab after the symbol table is
 	// final so LookupProse can serve miss-chain candidates without re-walking it.
 	ix.buildProseVocab()
 	// Record the edge-precision tier per language so strict call-edge following
@@ -1061,6 +1098,17 @@ func (ix *Index) applyFileResult(r fileResult) {
 	if r.pkg != nil {
 		if existing, ok := ix.Pkgs[r.pkg.Path]; ok {
 			existing.Files = append(existing.Files, r.pkg.Files...)
+			// A Go file's package clause is the authoritative name for its
+			// directory. Foreign-language extractors fall back to the
+			// directory basename, which is "." at the repository root, so
+			// when a non-Go file registers the shared root path first the
+			// Go package name (e.g. "main") is silently clobbered and
+			// package-name consumers like `kern entries` find nothing. Let
+			// the Go name win when merging into a fallback-named package.
+			if r.pkg.Lang == "go" && existing.Lang != "go" && r.pkg.Name != "" && existing.Name == filepath.Base(filepath.Dir(r.rel)) {
+				existing.Name = r.pkg.Name
+				existing.Lang = "go"
+			}
 			// Merge imports from every file of the package, not just the first
 			// indexed one. Without this, guard's import-level boundary check
 			// only ever sees the first file's imports.
@@ -1179,6 +1227,55 @@ func (ix *Index) computeCallers() {
 	for k := range ix.AliasCallers {
 		ix.AliasCallers[k] = dedupeSorted(ix.AliasCallers[k])
 	}
+	// Resolve structural interface implementations: match concrete types to interface
+	// definitions in the same package.
+	ifaceDir := map[string]string{}
+	concreteDir := map[string]string{}
+	concreteMethods := map[string]map[string]bool{}
+	for _, s := range ix.Symbols {
+		dir := filepath.Dir(s.File)
+		if s.Kind == "interface" {
+			ifaceDir[s.Name] = dir
+		} else if s.Kind == "struct" || s.Kind == "type" {
+			concreteDir[s.Name] = dir
+		}
+		if s.Kind == "method" && s.Receiver != "" {
+			if concreteMethods[s.Receiver] == nil {
+				concreteMethods[s.Receiver] = map[string]bool{}
+			}
+			concreteMethods[s.Receiver][s.Name] = true
+			if concreteDir[s.Receiver] == "" {
+				concreteDir[s.Receiver] = dir
+			}
+		}
+	}
+	for iface, iDir := range ifaceDir {
+		for concrete, cDir := range concreteDir {
+			if concrete == iface || cDir != iDir {
+				continue
+			}
+			if _, isIface := ifaceDir[concrete]; isIface {
+				continue
+			}
+			if len(concreteMethods[concrete]) > 0 {
+				edge := "implements:" + iface
+				already := false
+				for _, e := range ix.Inherits[concrete] {
+					if e == edge {
+						already = true
+						break
+					}
+				}
+				if !already {
+					if ix.Inherits == nil {
+						ix.Inherits = map[string][]string{}
+					}
+					ix.Inherits[concrete] = append(ix.Inherits[concrete], edge)
+				}
+			}
+		}
+	}
+
 	// Reverse inheritance map: base name (and bare name) -> subtypes.
 	ix.InheritedBy = map[string][]string{}
 	for subtype, taggedBases := range ix.Inherits {
@@ -1280,20 +1377,13 @@ func dedupeSorted(in []string) []string {
 	if len(in) == 0 {
 		return in
 	}
-	cp := make([]string, len(in))
-	copy(cp, in)
-	sort.Strings(cp)
-	out := cp[:0]
-	for i, s := range cp {
-		if i == 0 || s != cp[i-1] {
-			out = append(out, s)
-		}
-	}
-	return out
+	cp := append([]string(nil), in...)
+	slices.Sort(cp)
+	return slices.Compact(cp)
 }
 
 // dedupeCallEdges dedupes a call-edge slice by target keeping the
-// HIGHEST-confidence representative (CG-P1-6). A first-wins dedupe let an
+// HIGHEST-confidence representative. A first-wins dedupe let an
 // edge recorded LOW before it was re-resolved stay LOW forever; promotion
 // can also merge distinct target forms ("db.Open" and "Open") into one key,
 // and the highest confidence is the honest verdict for that key. Ties keep
@@ -1314,7 +1404,7 @@ func dedupeCallEdges(in []CallEdge) []CallEdge {
 	for _, e := range best {
 		out = append(out, e)
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Target < out[j].Target })
+	slices.SortFunc(out, func(a, b CallEdge) int { return strings.Compare(a.Target, b.Target) })
 	return out
 }
 
@@ -1616,8 +1706,19 @@ func (ix *Index) Context(symbol string, linesAround int) string {
 			return ""
 		}
 	}
+	return ix.ContextDef(defs[0], linesAround)
+}
+
+// ContextDef slices source for an EXPLICIT symbol — definition window plus
+// callers/callees — without re-resolving the name. Context(symbol, n)
+// re-resolves a bare name with a different first-match order than the
+// caller's own resolution, which could mix candidates (e.g. a TS interface
+// definition with a Go method source window for the same bare name).
+func (ix *Index) ContextDef(d Symbol, linesAround int) string {
+	if linesAround <= 0 {
+		linesAround = 12
+	}
 	var b strings.Builder
-	d := defs[0]
 	src, err := os.ReadFile(filepath.Join(ix.Root, d.File))
 	if err != nil {
 		return ""

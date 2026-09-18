@@ -1,8 +1,8 @@
 package cache
 
-// G-7 (docs/audit/next-plan-gaps.md): TTL-based eviction of stale cache
+// TTL-based eviction of stale cache
 // files + gzip archival of dormant ones — the "active in RAM, dormant
-// archived to disk" half of report STEP 3. Dormant entries older than
+// archived to disk" lifecycle. Dormant entries older than
 // archiveAfter are compressed to "<name>.json.gz" (readers transparently
 // fall back to the twin, see Load), and anything older than evictAfter is
 // deleted outright. Everything is best-effort and never disturbs callers.
@@ -10,6 +10,7 @@ package cache
 import (
 	"compress/gzip"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -31,8 +32,9 @@ const maintainInterval = time.Hour
 // directory; its content is the unix timestamp of the last run.
 const maintainMarker = ".maintained-at"
 
-// Maintain walks dir (non-recursively) and applies the G-7 lifecycle to the
-// top-level *.json / *.json.gz files it finds:
+// Maintain walks dir recursively (including subdirectories such as
+// data/sem/**, where semcache payloads and index files live) and applies the
+// lifecycle to every *.json / *.json.gz file it finds:
 //
 //   - mtime older than evictAfter → the file is deleted (and its .gz twin if
 //     present) and counted as evicted;
@@ -40,31 +42,40 @@ const maintainMarker = ".maintained-at"
 //     minArchiveBytes → gzipped to "<name>.json.gz" (temp + rename, original
 //     mtime preserved so dormancy tracking stays correct) and the plain file
 //     removed; counted as archived;
-//   - everything else is left alone. *.json.gz files are never re-archived,
-//     non-.json files are skipped, and subdirectories are never touched.
+//   - everything else is left alone. *.json.gz files are never re-archived
+//     and non-.json files are skipped.
 //
 // A duration <= 0 disables its pass (archiveAfter <= 0 → no archiving;
 // evictAfter <= 0 → no eviction). With dryRun the same decisions are made and
 // counted but nothing on disk is modified.
 func Maintain(dir string, archiveAfter, evictAfter time.Duration, dryRun bool) (archived, evicted int, err error) {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return 0, 0, err
-	}
 	now := time.Now()
-	for _, e := range entries {
-		if e.IsDir() {
-			continue // never touch subdirectories (G-7)
+	walkErr := filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			// Only the ROOT dir error aborts the walk (missing/unreadable
+			// root is the documented error contract). A child that errors
+			// mid-walk (e.g. a permission-denied subdirectory) is skipped
+			// best-effort so one bad directory cannot starve GC of the
+			// whole tree (gate-2 attempt-1).
+			if path == dir {
+				return err
+			}
+			if d != nil && d.IsDir() {
+				return fs.SkipDir
+			}
+			return nil
 		}
-		name := e.Name()
+		if d.IsDir() {
+			return nil // recurse; only files are candidates
+		}
+		name := d.Name()
 		isGz := strings.HasSuffix(name, ".json.gz")
 		if !isGz && !strings.HasSuffix(name, ".json") {
-			continue // only cache entries (and their twins)
+			return nil // only cache entries (and their twins)
 		}
-		path := filepath.Join(dir, name)
-		info, err := e.Info()
+		info, err := d.Info()
 		if err != nil {
-			continue // vanished mid-walk; best-effort
+			return nil // vanished mid-walk; best-effort
 		}
 		age := now.Sub(info.ModTime())
 		if evictAfter > 0 && age > evictAfter {
@@ -75,25 +86,26 @@ func Maintain(dir string, archiveAfter, evictAfter time.Duration, dryRun bool) (
 				}
 			}
 			evicted++
-			continue
+			return nil
 		}
 		if isGz {
-			continue // already archived; never re-archive (G-7)
+			return nil // already archived; never re-archive (G-7)
 		}
 		if archiveAfter <= 0 || age <= archiveAfter {
-			continue // too fresh, or archiving disabled
+			return nil // too fresh, or archiving disabled
 		}
 		if info.Size() < minArchiveBytes {
-			continue // too small to bother gzipping
+			return nil // too small to bother gzipping
 		}
 		if !dryRun {
 			if err := gzipFile(path); err != nil {
-				continue // best-effort: skip files we could not compress
+				return nil // best-effort: skip files we could not compress
 			}
 		}
 		archived++
-	}
-	return archived, evicted, nil
+		return nil
+	})
+	return archived, evicted, walkErr
 }
 
 // MaintainDefaults runs Maintain on dir with the durations from
@@ -108,7 +120,7 @@ func MaintainDefaults(dir string, dryRun bool) (archived, evicted int, err error
 	return Maintain(dir, archiveAfter, evictAfter, dryRun)
 }
 
-// MaintainOnce is the opportunistic, rate-limited G-7 driver. It checks the
+// MaintainOnce is the opportunistic, rate-limited driver. It checks the
 // <dir>/.maintained-at marker and, if it is missing or older than an hour,
 // writes a fresh marker and runs MaintainDefaults. All errors are swallowed:
 // the pass is best-effort and must never disturb Store/Load callers. The
@@ -193,7 +205,7 @@ func gzipFile(path string) error {
 // daysFromConfig parses a days-as-float config value (env var or
 // .kern/config.json key) into a duration. Unset or garbage values fall back
 // to def; a parsed value <= 0 disables the pass (returns 0). KERN_CACHE_*
-// knobs (G-7).
+// knobs.
 func daysFromConfig(envName, key string, def float64) time.Duration {
 	v := config.Float64("", envName, key, def)
 	if v <= 0 {

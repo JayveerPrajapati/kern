@@ -23,6 +23,13 @@ type DeleteReport struct {
 	EntryPoint  bool     `json:"entry_point"`
 	Callers     []string `json:"callers"`
 	TestCallers []string `json:"test_callers"`
+	// TestClosureBreaks names test-only callers that are themselves referenced
+	// from outside the deletion set {sym} ∪ TestCallers ("remove the tests
+	// together" contract). Deleting such a helper alongside the symbol would
+	// leave the outside referent's build broken, so their presence forces
+	// Safe=false even though every direct caller of the symbol lives in a
+	// test file.
+	TestClosureBreaks []string `json:"test_closure_breaks,omitempty"`
 	// NonCallRefs lists production files that reference the symbol outside a
 	// call position (a function/method value, an assignment, a struct field, an
 	// interface member, etc.). These are invisible to the call graph, so they
@@ -105,6 +112,37 @@ func DeleteCheck(ix *index.Index, sym string) DeleteReport {
 	// symbol unsafe to delete.
 	r.NonCallRefs = newNonCallRefIndex(ix).productionFiles(simpleName(sym))
 
+	// Closure check: the deletion set is {sym} ∪ TestCallers. Every test-only
+	// caller must itself be referenced ONLY from within that set — a helper
+	// that is also called from a test function outside it (or from
+	// production) would keep a live call site after its declaration is
+	// removed and break the build. The outside caller is shown as its
+	// defining file (the unit whose build breaks), falling back to the raw
+	// name when the caller is not an indexed symbol (e.g. a foreign caller).
+	if len(r.TestCallers) > 0 {
+		inSet := map[string]bool{sym: true}
+		for _, tc := range r.TestCallers {
+			inSet[tc] = true
+		}
+		breaks := map[string]bool{}
+		for _, tc := range r.TestCallers {
+			for _, caller := range ix.CallersIncludingAliases(tc) {
+				if inSet[caller] {
+					continue
+				}
+				where := fileMap[caller]
+				if where == "" {
+					where = caller
+				}
+				breaks[tc+" also called from "+where] = true
+			}
+		}
+		for b := range breaks {
+			r.TestClosureBreaks = append(r.TestClosureBreaks, b)
+		}
+		sort.Strings(r.TestClosureBreaks)
+	}
+
 	switch {
 	case len(r.NonCallRefs) > 0:
 		r.Reason = "referenced outside a call (function/method value, assignment, interface, etc.): " + strings.Join(r.NonCallRefs, ", ")
@@ -114,6 +152,8 @@ func DeleteCheck(ix *index.Index, sym string) DeleteReport {
 		r.Reason = "entry point (" + sym + "): removing it breaks startup/CLI wiring"
 	case r.Exported:
 		r.Reason = "exported symbol: external or dynamic callers are invisible to the index"
+	case len(r.TestClosureBreaks) > 0:
+		r.Reason = "test-only callers are themselves referenced outside the deletion set: " + strings.Join(r.TestClosureBreaks, ", ")
 	case len(r.TestCallers) > 0:
 		r.Reason = "only referenced from tests (" + strings.Join(r.TestCallers, ", ") + "); remove the tests together"
 		r.Safe = true
@@ -153,6 +193,12 @@ func RenderDelete(r DeleteReport) string {
 		b.WriteString("test-only callers:\n")
 		for _, c := range r.TestCallers {
 			b.WriteString("  " + c + "\n")
+		}
+	}
+	if len(r.TestClosureBreaks) > 0 {
+		b.WriteString("test-only callers referenced outside the deletion set (removing them breaks these files):\n")
+		for _, s := range r.TestClosureBreaks {
+			b.WriteString("  " + s + "\n")
 		}
 	}
 	if len(r.NonCallRefs) > 0 {

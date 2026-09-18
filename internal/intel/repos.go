@@ -2,7 +2,9 @@ package intel
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -34,7 +36,7 @@ func LoadRepos() (*RepoRegistry, error) {
 	r := &RepoRegistry{}
 	b, err := os.ReadFile(reposPath())
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, fs.ErrNotExist) {
 			return r, nil
 		}
 		return nil, err
@@ -48,6 +50,7 @@ func LoadRepos() (*RepoRegistry, error) {
 	return r, nil
 }
 
+// Save persists the registry to disk (atomic temp-file + rename).
 func (r *RepoRegistry) Save() error {
 	data, err := json.MarshalIndent(r, "", "  ")
 	if err != nil {
@@ -260,14 +263,6 @@ func FederatedRepos(root string) []Repo {
 	return all
 }
 
-// SemanticSearchRepos is SearchRepos with a dense re-rank pass: the pooled
-// lexical hits across all registered repos are re-ordered by cosine similarity
-// between the query embedding and each symbol descriptor (see SemanticSearch).
-// Returns nil when no repo matches.
-func SemanticSearchRepos(query string, limit int, e SymbolEmbedder) []RepoHit {
-	return SemanticSearchReposIn(".", query, limit, e)
-}
-
 // SemanticSearchReposIn runs semantic search across all federated repositories in root.
 func SemanticSearchReposIn(root string, query string, limit int, e SymbolEmbedder) []RepoHit {
 	if e == nil {
@@ -385,15 +380,6 @@ func SearchReposIn(root string, query string, limit int) []RepoHit {
 		hits = hits[:limit]
 	}
 	return hits
-}
-
-// RepoNames lists registered repo names.
-func RepoNames(reg *RepoRegistry) []string {
-	names := make([]string, 0, len(reg.Repos))
-	for _, r := range reg.Repos {
-		names = append(names, r.Name)
-	}
-	return names
 }
 
 func repoHitString(h RepoHit) string {

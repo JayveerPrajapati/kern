@@ -20,10 +20,6 @@ func testGit(t *testing.T, dir string, args ...string) string {
 	return out
 }
 
-// TestFreshnessProof_GitApplyDetected is the P0.2 regression test: an edit
-// that preserves the file's mtime (exactly what `git apply` does) must still
-// flip the freshness verdict to stale, even though the old mtime fast gate
-// would have served the index as fresh.
 func TestFreshnessProof_GitApplyDetected(t *testing.T) {
 	dir := t.TempDir()
 	testGit(t, dir, "init")

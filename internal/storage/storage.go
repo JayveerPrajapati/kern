@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -72,7 +73,7 @@ func (s *LocalStore) Get(ctx context.Context, key string) (json.RawMessage, erro
 	}
 	b, err := os.ReadFile(filepath.Join(s.dir, key+".json"))
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, fs.ErrNotExist) {
 			return nil, ErrNotFound
 		}
 		return nil, err
@@ -86,7 +87,7 @@ func (s *LocalStore) Delete(ctx context.Context, key string) error {
 		return err
 	}
 	err := os.Remove(filepath.Join(s.dir, key+".json"))
-	if os.IsNotExist(err) {
+	if errors.Is(err, fs.ErrNotExist) {
 		return nil
 	}
 	return err
@@ -97,7 +98,7 @@ func (s *LocalStore) Delete(ctx context.Context, key string) error {
 func (s *LocalStore) List(ctx context.Context) ([]Entry, error) {
 	entries, err := os.ReadDir(s.dir)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, fs.ErrNotExist) {
 			return []Entry{}, nil
 		}
 		return nil, err
@@ -135,7 +136,7 @@ func validateKey(key string) error {
 }
 
 // MarshalValue marshals v to opaque JSON for storage via Put.
-func MarshalValue(v interface{}) (json.RawMessage, error) {
+func MarshalValue(v any) (json.RawMessage, error) {
 	b, err := json.Marshal(v)
 	if err != nil {
 		return nil, err
@@ -144,7 +145,7 @@ func MarshalValue(v interface{}) (json.RawMessage, error) {
 }
 
 // UnmarshalValue unmarshals a stored raw value into out.
-func UnmarshalValue(raw json.RawMessage, out interface{}) error {
+func UnmarshalValue(raw json.RawMessage, out any) error {
 	return json.Unmarshal(raw, out)
 }
 

@@ -55,17 +55,6 @@ func ParseTier(s string) (Tier, error) {
 	return TierFull, fmt.Errorf("unknown tier %q (want full, folded or summary)", s)
 }
 
-func (t Tier) String() string {
-	switch t {
-	case TierFolded:
-		return "folded"
-	case TierSummary:
-		return "summary"
-	default:
-		return "full"
-	}
-}
-
 // RenderTier renders a file at the requested tier. TierFull passes the
 // original source through unchanged, TierFolded folds bodies, TierSummary
 // returns the symbolic summary. This is the single entry point used by the CLI

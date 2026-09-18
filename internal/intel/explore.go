@@ -92,8 +92,11 @@ func ExploreBudgeted(ix *index.Index, symbol string, depth, maxNodes int, minCon
 		Symbol:     symbol,
 		Resolved:   resolved,
 		Definition: d,
-		Source:     ix.Context(resolved, 0),
-		Evidence:   AnchorLine(ix, resolved),
+		// Source must come from the SAME candidate as Definition: Context
+		// re-resolves a bare name and could slice a different symbol (e.g.
+		// TS interface definition + Go method source for "dispatch").
+		Source:   ix.ContextDef(d, 0),
+		Evidence: AnchorLine(ix, resolved),
 	}
 	passes := MinConfidenceFilter(minConf)
 	seenCallers := map[string]bool{}

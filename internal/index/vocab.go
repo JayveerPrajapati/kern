@@ -1,4 +1,4 @@
-// Prose→symbol vocab (CG-P1-9): a build-time inverted word→symbol table so
+// Prose→symbol vocab: a build-time inverted word→symbol table so
 // agents can skip the miss-chain (kern_search miss → kern_ast_search miss).
 // The Index.ProseVocab field is declared in engine.go's Index struct (Go
 // structs cannot be extended across files); this file owns the build, the
@@ -81,12 +81,22 @@ func (ix *Index) LookupProse(query string, limit int) []ProseHit {
 	// several times in one word's list (several Symbol entries share it), and
 	// a candidate must score 1 per matching word, not per list entry.
 	matched := make(map[string]map[string]bool) // symbol -> word -> true
-	for _, w := range words {
-		for _, sym := range ix.ProseVocab[w] {
+	add := func(word, vocabWord string) {
+		for _, sym := range ix.ProseVocab[vocabWord] {
 			if matched[sym] == nil {
 				matched[sym] = map[string]bool{}
 			}
-			matched[sym][w] = true
+			matched[sym][word] = true
+		}
+	}
+	for _, w := range words {
+		add(w, w)
+		if _, exact := ix.ProseVocab[w]; !exact {
+			// Light stemming: "greeting" resolves to the vocab word "greet",
+			// "indexes" to "index". Deterministic suffix stripping only.
+			for _, stem := range proseStems(w) {
+				add(w, stem)
+			}
 		}
 	}
 	hits := make([]ProseHit, 0, len(matched))
@@ -114,6 +124,53 @@ func (ix *Index) LookupProse(query string, limit int) []ProseHit {
 // boundaries ("extract2x" → "extract"; the "2x" fragment is dropped by the
 // length rule). Results are deduplicated and returned in first-seen order.
 // Deterministic, stdlib only.
+
+// proseStems returns light-stem variants of a prose word so inflected prose
+// ("greeting", "indexes", "running") still resolves to vocab words ("greet",
+// "index", "run"). Deterministic suffix stripping: plural/verb endings,
+// chained one level deep, with doubled consonants undone ("running" →
+// "runn" → "run"). Stems shorter than the vocab's 3-char word rule are
+// never produced.
+func proseStems(w string) []string {
+	var out []string
+	seen := map[string]bool{}
+	var add func(s string, depth int)
+	add = func(s string, depth int) {
+		if depth == 0 {
+			return
+		}
+		for _, suf := range []string{"ing", "es", "ed", "s"} {
+			if !strings.HasSuffix(s, suf) || len(s) <= len(suf)+2 {
+				continue
+			}
+			stem := strings.TrimSuffix(s, suf)
+			if !seen[stem] {
+				seen[stem] = true
+				out = append(out, stem)
+				add(stem, depth-1)
+			}
+			if len(stem) >= 2 && stem[len(stem)-1] == stem[len(stem)-2] && !isVowelByte(stem[len(stem)-1]) {
+				und := stem[:len(stem)-1]
+				if !seen[und] {
+					seen[und] = true
+					out = append(out, und)
+					add(und, depth-1)
+				}
+			}
+		}
+	}
+	add(w, 2)
+	return out
+}
+
+// isVowelByte reports whether the ASCII byte is a vowel (a, e, i, o, u).
+func isVowelByte(b byte) bool {
+	switch b {
+	case 'a', 'e', 'i', 'o', 'u':
+		return true
+	}
+	return false
+}
 func proseWords(name string) []string {
 	var out []string
 	seen := map[string]bool{}

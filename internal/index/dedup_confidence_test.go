@@ -5,9 +5,6 @@ import (
 	"testing"
 )
 
-// TestDedupeKeepsHighestConfidence: dedupeCallEdges must keep the
-// HIGHEST-confidence representative for a target — an edge recorded LOW
-// before it was re-resolved must not stay LOW forever (CG-P1-6).
 func TestDedupeKeepsHighestConfidence(t *testing.T) {
 	cases := []struct {
 		name string

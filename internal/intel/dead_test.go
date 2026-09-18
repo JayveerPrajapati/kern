@@ -157,12 +157,6 @@ func inner() string { return "y" }
 	}
 }
 
-// TestDeadVisibilityGoRules pins the exported/unexported classification used
-// by the dead-code summary (F-007). Go exports a name only when its first
-// character is an uppercase letter; anything else — lowercase first letter,
-// underscore prefix — is unexported and must be counted as private, and the
-// verdict must be "certain" (no other package can reach it via interface
-// dispatch).
 func TestDeadVisibilityGoRules(t *testing.T) {
 	dir := writeTree(t, map[string]string{
 		"lib/lib.go": `package lib

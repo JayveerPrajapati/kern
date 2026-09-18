@@ -1,6 +1,7 @@
 package intel
 
 import (
+	"container/list"
 	"sort"
 	"strconv"
 	"strings"
@@ -47,20 +48,28 @@ func SemanticSearch(ix *index.Index, query string, limit int, e SymbolEmbedder) 
 	}
 	scoredList := make([]*scored, len(pool))
 	var wg sync.WaitGroup
-	// Concurrently embed up to 8 candidates in parallel
-	sem := make(chan struct{}, 8)
+	// Embed concurrency is capped at 4 (was 8): the local embedding model is
+	// the bottleneck, and extra goroutines only queue requests. Descriptors
+	// already cached in this process are scored inline — a cheap map-membership
+	// check (cachedEmbedding) skips both the goroutine and the embed cost.
+	sem := make(chan struct{}, 4)
 	for idx, s := range pool {
+		desc := symbolDescriptor(s)
+		if v, ok := cachedEmbedding(desc); ok {
+			scoredList[idx] = &scored{s: s, cos: denseCosine(qvec, v), rank: idx}
+			continue
+		}
 		wg.Add(1)
-		go func(rank int, sym index.Symbol) {
+		go func(rank int, sym index.Symbol, desc string) {
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			vec, err := embedCached(e, symbolDescriptor(sym))
+			vec, err := embedCached(e, desc)
 			if err != nil {
 				return
 			}
 			scoredList[rank] = &scored{s: sym, cos: denseCosine(qvec, vec), rank: rank}
-		}(idx, s)
+		}(idx, s, desc)
 	}
 	wg.Wait()
 
@@ -108,15 +117,30 @@ func SemanticSearch(ix *index.Index, query string, limit int, e SymbolEmbedder) 
 // long-lived MCP session re-ranks without re-embedding the same symbols.
 var (
 	symbolEmbedMu    sync.Mutex
-	symbolEmbedCache = map[string][]float32{}
+	symbolEmbedCache = map[string]*embedCacheEntry{}
+	// symbolEmbedOrder is the LRU recency list of cache keys (front = most
+	// recently used): on overflow the LEAST-recently-used key is evicted.
+	// Every hit refreshes recency (move-to-front), so hot descriptors survive
+	// cold scans that would have evicted them under FIFO. Kept in lockstep
+	// with symbolEmbedCache.
+	symbolEmbedOrder list.List
 	symbolEmbedCap   = 1000
 )
 
+// embedCacheEntry pairs a cached embedding with its recency-list element so a
+// hit can refresh LRU recency in O(1).
+type embedCacheEntry struct {
+	vec []float32
+	el  *list.Element
+}
+
 func embedCached(e SymbolEmbedder, desc string) ([]float32, error) {
 	symbolEmbedMu.Lock()
-	if v, ok := symbolEmbedCache[desc]; ok {
+	if entry, ok := symbolEmbedCache[desc]; ok {
+		// LRU: refresh recency on hit — hot entries move to the front.
+		symbolEmbedOrder.MoveToFront(entry.el)
 		symbolEmbedMu.Unlock()
-		return v, nil
+		return entry.vec, nil
 	}
 	symbolEmbedMu.Unlock()
 	v, err := e.EmbedText(desc)
@@ -124,15 +148,45 @@ func embedCached(e SymbolEmbedder, desc string) ([]float32, error) {
 		return nil, err
 	}
 	symbolEmbedMu.Lock()
-	if len(symbolEmbedCache) >= symbolEmbedCap {
-		for k := range symbolEmbedCache {
-			delete(symbolEmbedCache, k)
-			break
+	for len(symbolEmbedCache) >= symbolEmbedCap {
+		// LRU eviction: drop the least-recently-used key (the back of the
+		// recency list) instead of the oldest-inserted one, so hot
+		// descriptors survive cold scans.
+		if el := symbolEmbedOrder.Back(); el != nil {
+			oldest := el.Value.(string)
+			symbolEmbedOrder.Remove(el)
+			delete(symbolEmbedCache, oldest)
+			continue
 		}
+		break
 	}
-	symbolEmbedCache[desc] = v
+	// The map check guards the recency list against duplicate keys when two
+	// goroutines embed the same descriptor concurrently (one already inserted
+	// it between our miss above and this lock). Keep the existing entry and
+	// refresh its recency; the freshly computed vector is discarded.
+	if entry, ok := symbolEmbedCache[desc]; ok {
+		symbolEmbedOrder.MoveToFront(entry.el)
+	} else {
+		el := symbolEmbedOrder.PushFront(desc)
+		symbolEmbedCache[desc] = &embedCacheEntry{vec: v, el: el}
+	}
 	symbolEmbedMu.Unlock()
 	return v, nil
+}
+
+// cachedEmbedding returns a descriptor's cached embedding without triggering
+// an embed — the cheap membership test used to skip goroutines (and embed
+// cost) for symbols already embedded in this process.
+func cachedEmbedding(desc string) ([]float32, bool) {
+	symbolEmbedMu.Lock()
+	defer symbolEmbedMu.Unlock()
+	entry, ok := symbolEmbedCache[desc]
+	if !ok {
+		return nil, false
+	}
+	// LRU: a membership probe is an access too — refresh recency.
+	symbolEmbedOrder.MoveToFront(entry.el)
+	return entry.vec, true
 }
 
 // symbolDescriptor is the compact text that represents a symbol to an
@@ -216,12 +270,25 @@ func RankedSearchScored(ix *index.Index, query string, limit int) []RepoHit {
 	// promoted. Doc queries ("what is the architecture", "how does X
 	// work") keep the plain ranking.
 	codeIntent := isCodeIntentQuery(query)
+	// Precompute the lowercase name/full-name/file for every symbol once, so
+	// the scoring loop below never repeats strings.ToLower (nor the
+	// FullName() concatenation it wraps) per symbol. Semantics are identical:
+	// the same lowered forms feed matchWord, and segCache stays keyed on the
+	// original Name (segment splitting is case-preserving upstream).
+	lowerNames := make([]string, len(ix.Symbols))
+	lowerFulls := make([]string, len(ix.Symbols))
+	lowerFiles := make([]string, len(ix.Symbols))
+	for i, s := range ix.Symbols {
+		lowerNames[i] = strings.ToLower(s.Name)
+		lowerFulls[i] = strings.ToLower(s.FullName())
+		lowerFiles[i] = strings.ToLower(s.File)
+	}
 	segCache := map[string][]string{}
 	var hits []RepoHit
-	for _, s := range ix.Symbols {
-		name := strings.ToLower(s.Name)
-		full := strings.ToLower(s.FullName())
-		file := strings.ToLower(s.File)
+	for i, s := range ix.Symbols {
+		name := lowerNames[i]
+		full := lowerFulls[i]
+		file := lowerFiles[i]
 		segs, ok := segCache[s.Name]
 		if !ok {
 			segs = splitIdentifierSegments(s.Name)
@@ -298,6 +365,11 @@ func queryWords(query string) []string {
 // Only the strongest tier for the word counts. Segment tiers are whole-word
 // evidence: an exact segment match outranks prefix/substring hits, and a
 // plural-folded segment ("services" -> service) still hits its symbol.
+// The substring tiers require a minimum query-word length of 3: a 2-char
+// fragment from a camelCase split (e.g. "ZzZzNopeNope" -> "zz") would
+// otherwise substring-match every symbol containing a coincidental 2-char
+// run. 2-char searches like "io" or "db" still work through the exact/
+// segment/prefix tiers above.
 func matchWord(w, name, full, file string, segs []string) int {
 	switch {
 	case name == w:
@@ -312,11 +384,11 @@ func matchWord(w, name, full, file string, segs []string) int {
 		return 70
 	case segmentFolded(w, segs):
 		return 66
-	case strings.Contains(name, w):
+	case len(w) >= 3 && strings.Contains(name, w):
 		return 60
-	case strings.Contains(full, w):
+	case len(w) >= 3 && strings.Contains(full, w):
 		return 45
-	case strings.Contains(file, w):
+	case len(w) >= 3 && strings.Contains(file, w):
 		return 20
 	}
 	return 0

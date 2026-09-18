@@ -258,7 +258,7 @@ func treeOID(root string) string {
 // runGit runs `git -C <root> <args...>` with a 5s timeout and returns the
 // trimmed stdout. It returns an error when git is absent, root is not a
 // worktree, or the command exits non-zero. Local package helper (internal/git
-// does not exist; P0.2 keeps this package-local).
+// does not exist; kept package-local).
 func runGit(root string, args ...string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

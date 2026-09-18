@@ -4,6 +4,7 @@
 package intel
 
 import (
+	"log"
 	"os/exec"
 	"path/filepath"
 	"sort"
@@ -80,6 +81,7 @@ type GitError struct {
 	Err error
 }
 
+// Error implements the error interface for GitError.
 func (e *GitError) Error() string {
 	return "git failed (" + e.Op + "): " + e.Err.Error()
 }
@@ -112,6 +114,14 @@ func isTestFile(rel string) bool {
 		}
 	}
 	return false
+}
+
+// isFixtureFile reports whether a relative path lives under a testdata/
+// directory segment — Go's canonical location for test fixtures and demo
+// code. Fixtures are not production source, so architecture enforcement must
+// not flag (or silently skip-check) their crossings.
+func isFixtureFile(rel string) bool {
+	return strings.Contains("/"+filepath.ToSlash(rel)+"/", "/testdata/")
 }
 
 // isEntryPoint reports whether a symbol name is conventionally an entry point.
@@ -362,7 +372,9 @@ func ReadIndexWithProof(root string) (*index.Index, index.FreshnessProof, error)
 		// proofs and staleness detection behave identically; any Update failure
 		// falls back to the full Build.
 		if ix, err := index.Update(root, prev); err == nil && ix != nil {
-			_ = ix.Save()
+			if serr := ix.Save(); serr != nil {
+				log.Printf("intel: incremental index save failed (next load will re-index): %v", serr)
+			}
 			// Post-update proof: observe the tree the served index claims to
 			// reflect (expected: fresh — Update records the current identity).
 			return ix, ix.FreshnessProof(root), nil
@@ -372,6 +384,8 @@ func ReadIndexWithProof(root string) (*index.Index, index.FreshnessProof, error)
 	if err != nil {
 		return nil, index.FreshnessProof{}, err
 	}
-	_ = ix.Save()
+	if serr := ix.Save(); serr != nil {
+		log.Printf("intel: index save failed (next load will re-index): %v", serr)
+	}
 	return ix, ix.FreshnessProof(root), nil
 }

@@ -5,6 +5,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 
@@ -81,8 +82,8 @@ func AnalyzeChangesRanged(ix *index.Index, changes []FileChange) *ChangesReport 
 		for _, s := range changed {
 			// fileMap is hoisted once above; prodCallers would rebuild it per
 			// symbol (O(len(Symbols)) inside this loop — quadratic on large
-			// repos). prodCallersWithFileMap reuses the hoisted map (report A5:
-			// kern churn took ~7.8s on the kern repo because of this).
+			// repos). prodCallersWithFileMap reuses the hoisted map (kern
+			// churn took ~7.8s on the kern repo because of this).
 			for _, c := range prodCallersWithFileMap(ix, s, fileMap) {
 				if !seenCaller[c] {
 					seenCaller[c] = true
@@ -91,7 +92,7 @@ func AnalyzeChangesRanged(ix *index.Index, changes []FileChange) *ChangesReport 
 			}
 		}
 		for s := range blastDist {
-			if !seenCaller[s] && !contains(changed, s) {
+			if !seenCaller[s] && !slices.Contains(changed, s) {
 				transitive++
 			}
 		}
@@ -187,7 +188,7 @@ func changedSymbols(ix *index.Index, f string, ranges []LineRange) []string {
 		}
 		out = append(out, s.FullName())
 	}
-	sort.Strings(out)
+	slices.Sort(out)
 	return out
 }
 
@@ -306,18 +307,6 @@ func Review(ix *index.Index, files []string, maxTokens int) string {
 	return ReviewRanged(ix, changes, maxTokens)
 }
 
-// ReviewWithRuntime renders Review with a runtime overlay. overlays render
-// one extra line per changed file (e.g. runtime.Overlay(src) from the
-// internal/runtime package) — the overlay seam keeps intel free of a runtime
-// dependency.
-func ReviewWithRuntime(ix *index.Index, files []string, maxTokens int, overlays ...func(file string) string) string {
-	changes := make([]FileChange, len(files))
-	for i, f := range files {
-		changes[i] = FileChange{File: f}
-	}
-	return ReviewRanged(ix, changes, maxTokens, overlays...)
-}
-
 // ReviewRanged is the line-aware variant of Review: symbol impact is scoped to
 // the added-line ranges of the diff, and each changed symbol is shown with its
 // file:line span. Optional overlays render one extra line per changed file
@@ -429,14 +418,10 @@ func symbolSpans(ix *index.Index, f string, names []string) map[string]LineRange
 }
 
 func dedupe(in []string) []string {
-	seen := map[string]bool{}
-	var out []string
-	for _, s := range in {
-		if !seen[s] {
-			seen[s] = true
-			out = append(out, s)
-		}
+	if len(in) == 0 {
+		return nil
 	}
-	sort.Strings(out)
-	return out
+	cp := append([]string(nil), in...)
+	slices.Sort(cp)
+	return slices.Compact(cp)
 }

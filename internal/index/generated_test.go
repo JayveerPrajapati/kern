@@ -139,6 +139,45 @@ func TestIsMinified(t *testing.T) {
 	}
 }
 
+// TestIsIndexableLongLineGoAndMarkdown guards the isMinified language gate:
+// a Go dispatch table or generated Markdown catalog with many 500+ char lines
+// is legitimate source and must stay indexable, while a genuinely minified
+// JS/CSS bundle is still rejected.
+func TestIsIndexableLongLineGoAndMarkdown(t *testing.T) {
+	var goTable strings.Builder
+	goTable.WriteString("package main\n")
+	for i := 0; i < 12; i++ {
+		goTable.WriteString("\"cmd")
+		goTable.WriteString(strings.Repeat("x", 40))
+		goTable.WriteString("\": {run: func(cmd string, rest []string) int { return 0 }, help: ")
+		goTable.WriteString(strings.Repeat("h", 500))
+		goTable.WriteString("},\n")
+	}
+	if !isIndexable("cmd/kern/dispatch_table.go", []byte(goTable.String())) {
+		t.Error("long-line Go dispatch table must stay indexable (was misclassified as minified)")
+	}
+
+	var md strings.Builder
+	md.WriteString("# Catalog\n")
+	for i := 0; i < 12; i++ {
+		md.WriteString("| ")
+		md.WriteString(strings.Repeat("c", 600))
+		md.WriteString(" |\n")
+	}
+	if !isIndexable("docs/tool-catalog.md", []byte(md.String())) {
+		t.Error("long-line Markdown catalog must stay indexable (was misclassified as minified)")
+	}
+
+	// The gate must not weaken real minified-bundle rejection for JS/CSS.
+	jsBundle := strings.Repeat("x", 600) + "\n" + strings.Repeat("y", 600) + "\n" + strings.Repeat("z", 600) + "\n" + strings.Repeat("w", 600) + "\n" + strings.Repeat("v", 600) + "\n" + strings.Repeat("u", 600) + "\n" + strings.Repeat("t", 600) + "\n" + strings.Repeat("s", 600) + "\n" + strings.Repeat("r", 600) + "\n" + strings.Repeat("q", 600) + "\n" + strings.Repeat("p", 600) + "\n"
+	if isIndexable("vendor/bundle.min.js", []byte(jsBundle)) {
+		t.Error("minified JS bundle must stay rejected")
+	}
+	if isIndexable("vendor/bundle.min.css", []byte(jsBundle)) {
+		t.Error("minified CSS bundle must stay rejected")
+	}
+}
+
 func TestBuildMarksGeneratedFiles(t *testing.T) {
 	root := writeTree(t, map[string]string{
 		"go.mod":             "module demo\n\ngo 1.22\n",

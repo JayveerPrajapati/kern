@@ -1,7 +1,7 @@
 // Package cache persists kern state on the local machine, outside any user
 // workspace, so nothing generated is ever visible in a project.
 //
-// G-7 lifecycle: dormant entries older than the archive threshold are gzipped
+// Lifecycle: dormant entries older than the archive threshold are gzipped
 // to "<name>.json.gz" twins and stale ones are evicted by Maintain (gc.go).
 // Readers stay transparent to that: Load falls back to the .gz twin, Exists
 // reports either variant, and Store always keeps the active copy plain.
@@ -12,7 +12,9 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 )
@@ -48,7 +50,7 @@ func Hash(b []byte) string {
 
 // Store writes v as JSON under key. Keys are namespaced with a subdir.
 func Store(key string, v any) error {
-	// G-7: opportunistic GC of the data dir this key lives in (rate-limited
+	// opportunistic GC of the data dir this key lives in (rate-limited
 	// to once an hour by the .maintained-at marker); best-effort, swallowed.
 	MaintainOnce(Path("data"))
 	if err := Ensure(); err != nil {
@@ -66,7 +68,7 @@ func Store(key string, v any) error {
 		return err
 	}
 	// A dormant .gz twin must not outlive its freshly written plain active
-	// copy (G-7); drop it so the twin is never the newer of the two.
+	// copy; drop it so the twin is never the newer of the two.
 	_ = os.Remove(path + ".gz")
 	return nil
 }
@@ -96,16 +98,16 @@ func atomicWrite(path string, data []byte) error {
 
 // Load reads JSON previously stored under key. Returns os.ErrNotExist if
 // absent. If the plain file is missing but its gzip twin "<path>.json.gz"
-// exists (G-7 archival), the twin is transparently decompressed.
+// exists (archival), the twin is transparently decompressed.
 func Load(key string, v any) error {
-	// G-7: opportunistic GC of the data dir this key lives in (rate-limited
+	// opportunistic GC of the data dir this key lives in (rate-limited
 	// to once an hour by the .maintained-at marker); best-effort, swallowed.
 	MaintainOnce(Path("data"))
 	path := Path("data", key+".json")
 	data, err := os.ReadFile(path)
 	if err != nil {
-		if os.IsNotExist(err) {
-			// Fall back to the dormant gzip twin (G-7).
+		if errors.Is(err, fs.ErrNotExist) {
+			// Fall back to the dormant gzip twin.
 			data, err = gunzipFile(path + ".gz")
 		}
 		if err != nil {
@@ -116,7 +118,7 @@ func Load(key string, v any) error {
 }
 
 // gunzipFile reads and decompresses a .gz file. Used to serve archived
-// (dormant) cache entries transparently (G-7).
+// (dormant) cache entries transparently.
 func gunzipFile(path string) ([]byte, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -132,7 +134,7 @@ func gunzipFile(path string) ([]byte, error) {
 }
 
 // Exists reports whether a key is cached, either as a plain file or as a
-// gzip-archived twin (G-7).
+// gzip-archived twin.
 func Exists(key string) bool {
 	path := Path("data", key+".json")
 	if _, err := os.Stat(path); err == nil {
@@ -140,4 +142,19 @@ func Exists(key string) bool {
 	}
 	_, err := os.Stat(path + ".gz")
 	return err == nil
+}
+
+// Remove deletes a cached entry: the plain file and any dormant gzip twin
+// so an expired entry can never resurface from its archive. An absent
+// key is a no-op (returns nil).
+func Remove(key string) error {
+	path := Path("data", key+".json")
+	err := os.Remove(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		err = nil
+	}
+	if gzErr := os.Remove(path + ".gz"); gzErr != nil && !errors.Is(gzErr, fs.ErrNotExist) && err == nil {
+		err = gzErr
+	}
+	return err
 }

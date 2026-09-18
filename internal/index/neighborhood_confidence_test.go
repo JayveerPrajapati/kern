@@ -2,15 +2,6 @@ package index
 
 import "testing"
 
-// TestNeighborhoodUsesParserConfidence pins G-P0-1: Neighborhood must prefer
-// the parser's per-edge confidence (CallEdge.Confidence, like WholeGraph)
-// over the directory heuristic. Two fixtures where the two disagree:
-//
-//   - Go cross-directory call: parser says HIGH (direct call, goast.go),
-//     the directory heuristic would say medium.
-//   - Python same-directory call: the regex extractor resolves via
-//     name-heuristic matching and says MEDIUM, the directory heuristic
-//     would say high.
 func TestNeighborhoodUsesParserConfidence(t *testing.T) {
 	dir := writeTree(t, map[string]string{
 		"lib/lib.go": "package lib\n\nfunc Public() {}\n",

@@ -1,6 +1,7 @@
 package index
 
 import (
+	"os"
 	"path/filepath"
 	"reflect"
 	"regexp"
@@ -317,5 +318,35 @@ func TestResolveDottedMethodNestedClass(t *testing.T) {
 	// A more-qualified query for a nested class still resolves.
 	if s, ok := resolveName(ix, "Outer.Inner.build"); !ok || s.FullName() != "Inner.build" {
 		t.Errorf("resolveName(Outer.Inner.build) = %q, %v; want Inner.build", s.FullName(), ok)
+	}
+}
+
+// TestLoadFileBuildsSymbolIndex guards P1b: LoadFile must build the symbol
+// index (symbolIdx) like every other load path (Load, Build, sqlite Load,
+// Update). Without it, FindSymbol/ResolveName fall back to the O(n) linear
+// scan in symbolsFor on every cross-project lookup (cmd_index.go search
+// over N cached indexes = N x O(symbols)).
+func TestLoadFileBuildsSymbolIndex(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "hello.go"), []byte("package hello\n\nfunc Hello() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ix, err := Build(dir)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if err := ix.Save(); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	path := StorePath(dir)
+	loaded, err := LoadFile(path)
+	if err != nil {
+		t.Fatalf("LoadFile: %v", err)
+	}
+	if loaded.symbolIdx == nil {
+		t.Fatal("LoadFile left symbolIdx nil - symbolsFor falls back to the linear scan")
+	}
+	if len(loaded.symbolsFor("Hello")) == 0 {
+		t.Fatal("Hello missing after LoadFile")
 	}
 }

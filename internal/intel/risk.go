@@ -2,8 +2,9 @@ package intel
 
 import (
 	"fmt"
+	"maps"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strings"
 
 	"github.com/JayveerPrajapati/kern/internal/index"
@@ -76,6 +77,8 @@ func AssessEditFiles(ix *index.Index, files []string) RiskVerdict {
 	return AssessTargets(ix, targets)
 }
 
+// AssessTargets scores the risk of changing a set of symbols by classifying
+// their direct and transitive callers.
 func AssessTargets(ix *index.Index, targets []index.Symbol) RiskVerdict {
 	directSet := map[string]bool{}
 	transSet := map[string]bool{}
@@ -91,17 +94,9 @@ func AssessTargets(ix *index.Index, targets []index.Symbol) RiskVerdict {
 			}
 		}
 	}
-	sort.Strings(names)
-	direct := make([]string, 0, len(directSet))
-	for c := range directSet {
-		direct = append(direct, c)
-	}
-	sort.Strings(direct)
-	trans := make([]string, 0, len(transSet))
-	for c := range transSet {
-		trans = append(trans, c)
-	}
-	sort.Strings(trans)
+	slices.Sort(names)
+	direct := slices.Sorted(maps.Keys(directSet))
+	trans := slices.Sorted(maps.Keys(transSet))
 	risk := "LOW"
 	if len(direct) > riskHighDirect || len(trans) > riskHighTransitive {
 		risk = "HIGH"

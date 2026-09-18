@@ -3,6 +3,7 @@ package intel
 import (
 	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -168,15 +169,85 @@ func recordViolation(eval *PolicyEvaluation, v PolicyViolation, severity string)
 }
 
 // ParsePolicySpec parses JSON or lightweight line-based YAML into a PolicySpec.
+//
+// The value may also name a policy FILE (the `--policy FILE` CLI form): an
+// existing file is read and parsed; a value that looks like a path but does
+// not exist is a hard error. This closes the fail-open hole where a policy
+// file was never read and silently evaluated as a vacuous 0-rule ALLOWED —
+// a requested policy must load, or fail loud (F7).
 func ParsePolicySpec(content string) (PolicySpec, error) {
 	content = strings.TrimSpace(content)
-	if strings.HasPrefix(content, "{") {
-		var spec PolicySpec
-		err := json.Unmarshal([]byte(content), &spec)
-		return spec, err
+	if content == "" {
+		return PolicySpec{}, fmt.Errorf("empty policy")
 	}
 
-	// Basic fallback parsing for YAML
+	resolved, fromFile, err := resolvePolicyInput(content)
+	if err != nil {
+		return PolicySpec{}, err
+	}
+	content = resolved
+
+	spec := PolicySpec{}
+	if strings.HasPrefix(content, "{") {
+		err = json.Unmarshal([]byte(content), &spec)
+	} else {
+		spec = parsePolicyYAML(content)
+	}
+	if err != nil {
+		return spec, err
+	}
+	// Never allow a policy FILE request to fail open: a file that parses to
+	// zero rules would make EvaluatePolicy vacuously ALLOW everything.
+	if fromFile && len(spec.Rules) == 0 {
+		return spec, fmt.Errorf("policy file contains no rules; refusing to evaluate a vacuous ALLOWED")
+	}
+	return spec, nil
+}
+
+// resolvePolicyInput decides whether the value is an existing policy file, a
+// path-like value that must fail loud, or inline policy text. It returns the
+// text to parse and whether it came from a file.
+func resolvePolicyInput(content string) (string, bool, error) {
+	// 1. A value naming an existing regular file is read as the policy.
+	if fi, err := os.Stat(content); err == nil && fi.Mode().IsRegular() {
+		data, rerr := os.ReadFile(content)
+		if rerr != nil {
+			return "", true, fmt.Errorf("policy file not found: %s (%v)", content, rerr)
+		}
+		return string(data), true, nil
+	}
+	// 2. A value that looks like a file path but does not exist is a hard
+	// error — never silently parse it as inline text and allow everything.
+	if looksLikePolicyPath(content) {
+		return "", false, fmt.Errorf("policy file not found: %s", content)
+	}
+	// 3. Pure inline text keeps the historical behavior.
+	return content, false, nil
+}
+
+// looksLikePolicyPath reports whether s is a plausible policy file path
+// rather than inline policy text: a single line that is not a JSON document
+// and not a YAML rule line, containing a path separator or a policy file
+// extension (.json/.yaml/.yml). Multi-line text is always inline.
+func looksLikePolicyPath(s string) bool {
+	if strings.ContainsAny(s, "\n\r") {
+		return false // multi-line: inline policy text
+	}
+	if strings.HasPrefix(s, "{") || strings.HasPrefix(s, "[") {
+		return false // inline JSON
+	}
+	if strings.HasPrefix(s, "- ") || strings.HasPrefix(s, "name:") || strings.HasPrefix(s, "id:") {
+		return false // single-line YAML rule
+	}
+	lower := strings.ToLower(s)
+	if strings.HasSuffix(lower, ".json") || strings.HasSuffix(lower, ".yaml") || strings.HasSuffix(lower, ".yml") {
+		return true
+	}
+	return strings.Contains(s, "/")
+}
+
+// parsePolicyYAML parses lightweight line-based YAML into a PolicySpec.
+func parsePolicyYAML(content string) PolicySpec {
 	spec := PolicySpec{Name: "custom_policy"}
 	lines := strings.Split(content, "\n")
 	var curRule *PolicyRule
@@ -227,5 +298,5 @@ func ParsePolicySpec(content string) (PolicySpec, error) {
 		spec.Rules = append(spec.Rules, *curRule)
 	}
 
-	return spec, nil
+	return spec
 }

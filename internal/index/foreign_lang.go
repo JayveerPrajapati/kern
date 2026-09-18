@@ -557,8 +557,16 @@ func scanCallsInner(f *ffile, i int, owner string, calls map[string][]CallEdge, 
 		if full == owner {
 			continue
 		}
-		if len(full) > 80 {
-			full = full[:80]
+		// Bound the recorded callee on pathological regex matches only. The
+		// calls column is TEXT (unbounded in SQLite, JSON, and gob stores), so
+		// there is no fixed-width column to fit; the old 80-char cut silently
+		// unlinked cross-package edges, whose qualified names (pkg.sub.Type.
+		// Method) routinely exceed 80 chars and then matched nothing on the
+		// callee side. 512 covers real-world qualified names while still
+		// bounding memory.
+		const maxCalleeLen = 512
+		if len(full) > maxCalleeLen {
+			full = full[:maxCalleeLen]
 		}
 		// Regex-extracted calls are name-heuristic: the pattern can match
 		// inside strings/edge cases, and callees are never type-resolved

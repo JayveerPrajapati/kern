@@ -44,7 +44,7 @@ func CoChange(root, from, to string) (*CoChangeReport, error) {
 
 // CoChangeContext computes co-change coupling from git history with context
 // cancellation and deadline support, so deep vendor-heavy ranges can be bounded
-// by the caller instead of hanging (report A5).
+// by the caller instead of hanging.
 func CoChangeContext(ctx context.Context, root, from, to string) (*CoChangeReport, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -69,7 +69,7 @@ func CoChangeContext(ctx context.Context, root, from, to string) (*CoChangeRepor
 	for _, files := range commitFiles {
 		// Dedupe files within a commit (a rename appears once) and skip
 		// VCS/build/vendor-dir noise so the coupling map stays real-source
-		// only (report A5).
+		// only.
 		uniq := make([]string, 0, len(files))
 		uset := map[string]bool{}
 		for _, f := range files {

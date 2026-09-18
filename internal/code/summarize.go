@@ -86,7 +86,7 @@ var patterns = map[string][]struct {
 }
 
 // goBlockOpenRE matches the opener of a const/var declaration block. The block
-// members are captured as individual const/var symbols (F-005) so a secret
+// members are captured as individual const/var symbols so a secret
 // declared inside a block is not hidden from the symbolic summary.
 var goBlockOpenRE = regexp.MustCompile(`^(const|var)\s*\($`)
 

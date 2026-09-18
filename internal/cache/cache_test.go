@@ -108,3 +108,35 @@ func TestStorePersistsJSON(t *testing.T) {
 		t.Fatalf("unexpected serialized form: %s", raw)
 	}
 }
+
+func TestRemoveDeletesEntryAndTwin(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	if err := Store("rm/entry", map[string]string{"a": "b"}); err != nil {
+		t.Fatal(err)
+	}
+	if !Exists("rm/entry") {
+		t.Fatal("entry must exist after store")
+	}
+	if err := Remove("rm/entry"); err != nil {
+		t.Fatal(err)
+	}
+	if Exists("rm/entry") {
+		t.Fatal("entry must not exist after Remove")
+	}
+	if err := Remove("rm/entry"); err != nil {
+		t.Fatalf("removing an absent key must be a no-op, got %v", err)
+	}
+	// A dormant .gz twin is removed too.
+	if err := Store("rm/twin", map[string]string{"a": "b"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(Path("data", "rm/twin.json.gz"), []byte("stale"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := Remove("rm/twin"); err != nil {
+		t.Fatal(err)
+	}
+	if Exists("rm/twin") {
+		t.Fatal("gzip twin must not survive Remove")
+	}
+}

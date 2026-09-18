@@ -13,7 +13,7 @@ import (
 
 // riskCap bounds the files risk-scored against the call graph. With vendor
 // noise excluded the real source set is small; the cap is defensive so deep
-// history walks on pathological repos cannot blow up ChurnContext (report A5).
+// history walks on pathological repos cannot blow up ChurnContext.
 const riskCap = 300
 
 // ChurnEntry is one file with its change-frequency stats.
@@ -62,7 +62,7 @@ func ChurnContext(ctx context.Context, root, from, to string) (*ChurnReport, err
 	}
 	counts, commits := parseLog(string(out))
 	// Exclude VCS/build/vendor-dir noise (vendor/, dist/, build/, ...) so deep
-	// vendor-heavy history walks report real source churn only (report A5).
+	// vendor-heavy history walks report real source churn only.
 	for f := range counts {
 		if code.ShouldIgnore(f) {
 			delete(counts, f)
@@ -94,7 +94,7 @@ func ChurnContext(ctx context.Context, root, from, to string) (*ChurnReport, err
 	// every call, and on a working tree with uncommitted edits that means a
 	// git tree-OID walk plus an incremental re-index and an ~8MB index save
 	// per invocation — turning a sub-second churn report into a multi-second
-	// one (report A5: kern churn was ~7.8s on the kern repo). Churn is a
+	// one (kern churn was ~7.8s on the kern repo). Churn is a
 	// git-history metric; the call-graph risk overlay is best-effort (it is
 	// skipped entirely when indexing fails), so the last persisted snapshot
 	// is the right trade. When no snapshot exists at all, fall back to
@@ -106,7 +106,7 @@ func ChurnContext(ctx context.Context, root, from, to string) (*ChurnReport, err
 	if lerr == nil {
 		// Risk-score at most riskCap entries: the churn ranking already
 		// prompted the review; scoring every historical file (which is what
-		// made deep ranges hang) adds no signal (report A5).
+		// made deep ranges hang) adds no signal.
 		scored := entries
 		if len(scored) > riskCap {
 			scored = scored[:riskCap]
@@ -169,6 +169,18 @@ func parseLog(out string) (map[string]int, int) {
 // RenderChurn returns a compact churn report, flagging files that are both
 // high-churn and still being edited.
 func RenderChurn(r *ChurnReport) string {
+	return RenderChurnLimit(r, 0)
+}
+
+// RenderChurnLimit is RenderChurn with an optional row cap: at most limit
+// entries are rendered (limit <= 0 = no cap, so RenderChurnLimit(r, 0) is
+// exactly RenderChurn). The header still reports the report's full commit and
+// file counts.
+func RenderChurnLimit(r *ChurnReport, limit int) string {
+	entries := r.Entries
+	if limit > 0 && len(entries) > limit {
+		entries = entries[:limit]
+	}
 	var b strings.Builder
 	head := fmt.Sprintf("change churn over %d commits (%d files)", r.Commits, r.Files)
 	if r.From != "" {
@@ -176,7 +188,7 @@ func RenderChurn(r *ChurnReport) string {
 	}
 	b.WriteString(head + ":\n")
 	hasGuard := false
-	for _, e := range r.Entries {
+	for _, e := range entries {
 		flags := ""
 		if e.InWorkingTree {
 			flags += "  [being edited NOW]"

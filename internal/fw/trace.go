@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 
@@ -106,6 +107,12 @@ func TraceRoutes(ctx context.Context, root string, routeFilter string) (*TraceRe
 
 		rel, _ := filepath.Rel(absRoot, path)
 		if strings.Contains(rel, "vendor/") || strings.Contains(rel, "node_modules/") || strings.Contains(rel, "_test.go") || strings.Contains(rel, ".test.") {
+			return nil
+		}
+		// The framework's own package tree is not the project's routes: its
+		// demo/self registrations (e.g. internal/fw/trace.go's GET /path
+		// mw1/mw2/handler) showed up as 100% false positives.
+		if strings.HasPrefix(rel, "internal/fw/") || strings.HasPrefix(rel, "internal/framework/") {
 			return nil
 		}
 
@@ -442,14 +449,12 @@ func getLineNumber(content string, byteOffset int) int {
 }
 
 func uniqueStrings(s []string) []string {
-	seen := make(map[string]bool)
 	var out []string
 	for _, v := range s {
-		v = strings.TrimSpace(v)
-		if v != "" && !seen[v] {
-			seen[v] = true
+		if v = strings.TrimSpace(v); v != "" {
 			out = append(out, v)
 		}
 	}
-	return out
+	slices.Sort(out)
+	return slices.Compact(out)
 }

@@ -84,6 +84,8 @@ type TokenStats struct {
 	Source        string `json:"source,omitempty"` // "graph" or "context"
 }
 
+// Summary renders a one-line token-savings summary, or "" when no savings
+// apply (e.g. an empty or non-positive full-context count).
 func (t TokenStats) Summary() string {
 	if t.FullContext <= 0 {
 		return ""
@@ -590,7 +592,7 @@ func kindColorJSON() string {
 // whole-repo mode: symbols grouped into community (or package) bands, with a
 // search box to filter them. When any of the files backing the rendered nodes
 // changed on disk since the index was built, a staleness banner is shown
-// below the top bar (P1-7).
+// below the top bar.
 func (g GraphResult) GraphHTML(ix *Index) string {
 	data, err := json.Marshal(g)
 	if err != nil {

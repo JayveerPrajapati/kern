@@ -3,6 +3,7 @@ package intel
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/JayveerPrajapati/kern/internal/index"
@@ -150,6 +151,93 @@ func TestDeleteCheckNotFound(t *testing.T) {
 	}
 	if r.Safe {
 		t.Fatal("undefined symbol must not be reported safe")
+	}
+}
+
+// TestDeleteCheckTestCallerWithOutsideCallerUnsafe pins the closure gate: a
+// symbol whose only callers are test helpers is NOT safe when one of those
+// helpers is itself called from a test function outside the deletion set
+// {sym} ∪ TestCallers — removing the helper would break the outside caller.
+func TestDeleteCheckTestCallerWithOutsideCallerUnsafe(t *testing.T) {
+	dir := writeTree(t, map[string]string{
+		"lib/lib.go": `package lib
+
+func dead() {}
+`,
+		"lib/lib_test.go": `package lib
+
+import "testing"
+
+func helper() {
+	dead()
+}
+
+func TestCallsHelper(t *testing.T) {
+	helper()
+}
+
+func TestOther(t *testing.T) {
+	helper()
+}
+`,
+	})
+	ix, err := index.Build(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := DeleteCheck(ix, "dead")
+	if r.Safe {
+		t.Fatalf("dead's only caller helper is called from TestOther (outside the deletion set), must be unsafe, got %+v", r)
+	}
+	if len(r.TestCallers) != 1 || r.TestCallers[0] != "helper" {
+		t.Fatalf("expected helper split out as the test caller, got %+v", r.TestCallers)
+	}
+	if len(r.TestClosureBreaks) == 0 {
+		t.Fatalf("expected TestClosureBreaks naming the outside caller, got %+v", r)
+	}
+	if !strings.Contains(r.TestClosureBreaks[0], "helper also called from ") || !strings.Contains(r.TestClosureBreaks[0], "lib_test.go") {
+		t.Fatalf("TestClosureBreaks = %v, want entry %q", r.TestClosureBreaks, "helper also called from <lib_test.go>")
+	}
+	if !strings.Contains(r.Reason, "test-only callers are themselves referenced outside the deletion set") {
+		t.Fatalf("reason = %q, want the closure-break explanation", r.Reason)
+	}
+}
+
+// TestDeleteCheckHelperChainWithinSetSafe pins the clean closure case: a
+// helper chain where every helper is only called from within the deletion
+// set {sym} ∪ TestCallers stays Safe — removing the tests together removes
+// every reference.
+func TestDeleteCheckHelperChainWithinSetSafe(t *testing.T) {
+	dir := writeTree(t, map[string]string{
+		"lib/lib.go": `package lib
+
+func dead() {}
+`,
+		"lib/lib_test.go": `package lib
+
+func helperA() {
+	dead()
+}
+
+func helperB() {
+	helperA()
+	dead()
+}
+`,
+	})
+	ix, err := index.Build(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := DeleteCheck(ix, "dead")
+	if !r.Safe {
+		t.Fatalf("helper chain closes within the deletion set, must be safe, got %+v", r)
+	}
+	if len(r.TestCallers) != 2 {
+		t.Fatalf("expected helperA and helperB as test callers, got %+v", r.TestCallers)
+	}
+	if len(r.TestClosureBreaks) != 0 {
+		t.Fatalf("expected no closure breaks, got %v", r.TestClosureBreaks)
 	}
 }
 

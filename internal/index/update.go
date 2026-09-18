@@ -175,7 +175,7 @@ func Update(root string, prev *Index) (*Index, error) {
 		workers := t.workers
 		results := make(chan updateResult, t.resultBuf)
 		var wg sync.WaitGroup
-		var next int64
+		var next atomic.Int64
 		// applied tracks the merge cursor: the next seq the merge loop will
 		// apply. Workers may claim jobs at most reorderWindow ahead of it, so
 		// the reorder buffer stays bounded (B7).
@@ -185,7 +185,7 @@ func Update(root string, prev *Index) (*Index, error) {
 			go func() {
 				defer wg.Done()
 				for {
-					claim := atomic.LoadInt64(&next)
+					claim := next.Load()
 					if claim >= int64(len(jobs)) {
 						return
 					}
@@ -197,7 +197,7 @@ func Update(root string, prev *Index) (*Index, error) {
 						runtime.Gosched()
 						continue
 					}
-					idx := atomic.AddInt64(&next, 1) - 1
+					idx := next.Add(1) - 1
 					if idx >= int64(len(jobs)) {
 						return
 					}
@@ -271,7 +271,7 @@ func Update(root string, prev *Index) (*Index, error) {
 	ix.measureCallResolution()
 	ix.resolveEntries()
 	ix.reindexByFile()
-	// CG-P1-9: build the prose→symbol inverted vocab after the symbol table is
+	// build the prose→symbol inverted vocab after the symbol table is
 	// final so LookupProse can serve miss-chain candidates without re-walking it.
 	ix.buildProseVocab()
 	ix.computePrecisionByLang()

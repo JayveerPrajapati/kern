@@ -96,8 +96,6 @@ func TestRenderCoChange(t *testing.T) {
 	}
 }
 
-// TestCoChangeExcludesIgnored (report A5): vendored files must not appear in
-// the co-change coupling map or as partners.
 func TestCoChangeExcludesIgnored(t *testing.T) {
 	root := newVendorGitRepo(t)
 	report, err := CoChange(root, "", "")

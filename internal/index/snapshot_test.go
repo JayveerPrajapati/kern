@@ -211,6 +211,45 @@ func TestSnapshotSubgraphMode(t *testing.T) {
 	}
 }
 
+func TestVerifySnapshotStrictCatchesTamper(t *testing.T) {
+	root, ix := buildSnapshotIndex(t)
+	snap, err := ix.Snapshot("whole", "", 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Baseline: unmodified tree verifies fresh in strict mode.
+	verdict, err := VerifySnapshot(root, &snap, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if verdict != FreshnessFresh {
+		t.Fatalf("baseline strict verdict = %q; want fresh", verdict)
+	}
+	// Tamper: edit one file in the snapshot set.
+	edited := "package lib\n\nfunc Public() string { return \"tampered\" }\n"
+	if err := os.WriteFile(filepath.Join(root, "lib/lib.go"), []byte(edited), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	verdict, err = VerifySnapshot(root, &snap, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if verdict != FreshnessStale {
+		t.Fatalf("strict verdict after tamper = %q; want stale", verdict)
+	}
+	// Restore: back to fresh.
+	if err := os.WriteFile(filepath.Join(root, "lib/lib.go"), []byte(snapshotFixture["lib/lib.go"]), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	verdict, err = VerifySnapshot(root, &snap, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if verdict != FreshnessFresh {
+		t.Fatalf("strict verdict after restore = %q; want fresh", verdict)
+	}
+}
+
 // TestVerifySnapshotNilAndVersion: a nil snapshot and a schema-version
 // mismatch both report unknown without error.
 func TestVerifySnapshotNilAndVersion(t *testing.T) {

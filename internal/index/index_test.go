@@ -518,8 +518,6 @@ func contains(list []string, s string) bool {
 	return false
 }
 
-// W2-15: an external call to fmt.Println must never register a caller under
-// an unrelated local symbol named Println.
 func TestForeignCalleeNeverAliasesLocalSymbol(t *testing.T) {
 	src := `package main
 
@@ -553,7 +551,6 @@ func main() {
 	}
 }
 
-// W2-16: a call to Alpha.Save must never show up as a caller of Beta.Save.
 func TestSameNameMethodsDoNotMergeCallers(t *testing.T) {
 	src := `package main
 
@@ -591,7 +588,6 @@ func main() {
 	}
 }
 
-// W2-18: hub-style exact lookup and why-style lookup must agree.
 func TestCallerLookupsAgree(t *testing.T) {
 	src := `package main
 
@@ -681,5 +677,33 @@ func main() {}
 	}
 	if !strings.Contains(string(b), ".kern/") {
 		t.Fatalf("expected .kern/ in .git/info/exclude, got: %s", string(b))
+	}
+}
+
+func TestGoStructuralInterfaceResolution(t *testing.T) {
+	src := `package main
+
+type Greeter interface {
+	Greet() string
+}
+
+type Human struct{}
+
+func (h Human) Greet() string {
+	return "hello"
+}
+`
+	dir := writeTree(t, map[string]string{"main.go": src})
+	ix, err := Build(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Human implements Greeter structurally
+	if !contains(ix.InheritedBy["Greeter"], "Human") {
+		t.Fatalf("expected InheritedBy[Greeter] to include Human, got: %v", ix.InheritedBy["Greeter"])
+	}
+	if !contains(ix.Inherits["Human"], "implements:Greeter") {
+		t.Fatalf("expected Inherits[Human] to include implements:Greeter, got: %v", ix.Inherits["Human"])
 	}
 }

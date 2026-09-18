@@ -70,21 +70,67 @@ func (ix *Index) Snapshot(mode, symbol string, limit int) (GraphSnapshot, error)
 	return snap, nil
 }
 
-// Save writes the snapshot as indented JSON with 0644 permissions. The
-// format is versioned by SnapshotSchemaVersion, so a snapshot written by a
-// future kern that bumps the schema cannot be silently misread.
+// Save writes the snapshot as indented JSON with 0644 permissions. The write
+// is atomic (unique temp file + rename, like the index Save path): a crash
+// mid-write can leave a stray temp file but never a torn snapshot at path, so
+// a later LoadSnapshot can never read half-written bytes. The format is
+// versioned by SnapshotSchemaVersion, so a snapshot written by a future kern
+// that bumps the schema cannot be silently misread. A marshaled size over
+// snapshotMaxSize is refused (cap symmetry with LoadSnapshot): writing a
+// file LoadSnapshot would then hard-refuse would create a permanent
+// save/refuse/rebuild loop on large repos.
 func (s *GraphSnapshot) Save(path string) error {
 	b, err := json.MarshalIndent(s, "", "  ")
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, b, 0o644)
+	// Cap symmetry (gate-4): LoadSnapshot hard-refuses files over
+	// snapshotMaxSize, so Save must refuse to write them too. Callers
+	// treat a Save error as "no snapshot" and fall back to normal paths.
+	if int64(len(b)) > snapshotMaxSize {
+		return fmt.Errorf("snapshot %s: marshaled size %d exceeds the %d-byte cap (snapshotMaxSize); skipping snapshot write", path, len(b), snapshotMaxSize)
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".kern-snap-*.tmp")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer func() { _ = os.Remove(tmpName) }() // no-op if rename succeeded
+	if _, err := tmp.Write(b); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, path)
 }
+
+// snapshotMaxSize caps the on-disk snapshot files LoadSnapshot and
+// loadBinSnapshot will read into memory (256 MiB). A file larger than this is
+// never read: LoadSnapshot fails loudly, and loadBinSnapshot degrades to the
+// JSON path (its documented fallback for any unreadable snapshot). Either way
+// the caller falls back to a full build rather than allocating unbounded
+// memory.
+var snapshotMaxSize int64 = 256 << 20 // 256 MiB
 
 // LoadSnapshot reads a GraphSnapshot from path and validates its schema
 // version. A version mismatch is a hard error (fail loud — kern rule): an
-// unrecognized layout must never be interpreted as the current one.
+// unrecognized layout must never be interpreted as the current one. A file
+// over snapshotMaxSize is likewise a hard error (it would mean unbounded
+// memory to read) and callers should treat it as a failed load and rebuild.
 func LoadSnapshot(path string) (*GraphSnapshot, error) {
+	fi, err := os.Stat(path)
+	if err != nil {
+		return nil, err
+	}
+	if fi.Size() > snapshotMaxSize {
+		return nil, fmt.Errorf("snapshot %s: size %d exceeds the %d-byte read cap (snapshotMaxSize); rebuild the snapshot", path, fi.Size(), snapshotMaxSize)
+	}
 	b, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err

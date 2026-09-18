@@ -2,7 +2,9 @@ package intel
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -44,7 +46,7 @@ func DefaultBoundariesPath(root string) string {
 func LoadBoundaries(root string) (*Boundaries, error) {
 	data, err := os.ReadFile(DefaultBoundariesPath(root))
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, fs.ErrNotExist) {
 			return nil, nil
 		}
 		return nil, err
@@ -77,26 +79,77 @@ func InferBoundaries(ix *index.Index) *Boundaries {
 	layer2 := make(map[string]bool) // Service / Business / Logic / UseCase / Domain
 	layer3 := make(map[string]bool) // Repository / DAO / Store / DB / Database / Model
 
+	// Maven-style "*-api" modules are contract/interface modules that the
+	// *-service modules IMPLEMENT — the correct dependency direction is
+	// service -> api. Treating "api" as a presentation layer (L1) for Java
+	// projects fabricates mass false positives on every Maven monorepo
+	// (dogfood finding on slice-adaptors: 197 spurious service->api
+	// violations). For Go/Python/JS, an "api" dir is usually the HTTP
+	// surface, so it stays L1 there.
+	javaProject := false
+	for f := range ix.FileHashes {
+		if strings.HasSuffix(f, ".java") {
+			javaProject = true
+			break
+		}
+	}
+	if !javaProject {
+		for _, p := range ix.Pkgs {
+			if p.Lang == "java" {
+				javaProject = true
+				break
+			}
+		}
+	}
+	// A dir's layer is decided by its OWN name (last path segment), never by
+	// ancestor segments: a package "com/x/service/dao" is a DAO layer, not a
+	// service layer, even though an ancestor module is named *-service.
+	// Full-path keyword matching made every subpackage of a *-service module
+	// also an L2 dir, which fabricated intra-module dao->service violations
+	// (dogfood finding: 19 spurious findings on slice-adaptors).
+	baseName := func(name string) string {
+		if i := strings.LastIndexByte(name, '/'); i >= 0 {
+			return name[i+1:]
+		}
+		return name
+	}
+	// mavenContractDir reports whether a Java relative dir lives under a
+	// Maven "*-api" module segment. Those modules are the CONTRACT surface
+	// (interfaces, DTOs, JAX-RS interfaces) that *-service modules implement
+	// — the correct dependency direction is service -> api. Any layer keyword
+	// (api, rest, web, ...) inside them is contract space, never presentation.
+	mavenContractDir := func(dir string) bool {
+		for _, seg := range strings.Split(dir, "/") {
+			if strings.HasSuffix(seg, "-api") {
+				return true
+			}
+		}
+		return false
+	}
 	isL1 := func(name string) bool {
 		lower := strings.ToLower(name)
-		return strings.Contains(lower, "controller") || strings.Contains(lower, "handler") ||
-			strings.Contains(lower, "route") || strings.Contains(lower, "web") ||
-			strings.Contains(lower, "api") || strings.Contains(lower, "rest") ||
-			strings.Contains(lower, "transport") || strings.Contains(lower, "delivery") ||
-			strings.Contains(lower, "endpoint")
+		if javaProject && mavenContractDir(lower) {
+			return false
+		}
+		base := baseName(lower)
+		return strings.Contains(base, "controller") || strings.Contains(base, "handler") ||
+			strings.Contains(base, "route") || strings.Contains(base, "web") ||
+			strings.Contains(base, "rest") || strings.Contains(base, "transport") ||
+			strings.Contains(base, "delivery") || strings.Contains(base, "endpoint") ||
+			(!javaProject && strings.Contains(base, "api"))
 	}
 	isL2 := func(name string) bool {
-		lower := strings.ToLower(name)
-		return strings.Contains(lower, "service") || strings.Contains(lower, "usecase") ||
-			strings.Contains(lower, "domain") || strings.Contains(lower, "logic") ||
-			strings.Contains(lower, "biz")
+		base := baseName(strings.ToLower(name))
+		return strings.Contains(base, "service") || strings.Contains(base, "usecase") ||
+			strings.Contains(base, "domain") || strings.Contains(base, "logic") ||
+			strings.Contains(base, "biz")
 	}
 	isL3 := func(name string) bool {
-		lower := strings.ToLower(name)
-		return strings.Contains(lower, "repo") || strings.Contains(lower, "dao") ||
-			strings.Contains(lower, "store") || strings.Contains(lower, "database") ||
-			lower == "db" || strings.HasSuffix(lower, "/db") || strings.Contains(lower, "model") ||
-			strings.Contains(lower, "entity")
+		base := baseName(strings.ToLower(name))
+		return strings.Contains(base, "repo") || strings.Contains(base, "dao") ||
+			strings.Contains(base, "store") || strings.Contains(base, "database") ||
+			base == "db" || strings.HasSuffix(base, "/db") || strings.Contains(base, "model") ||
+			strings.Contains(base, "entity")
 	}
 
 	for p := range ix.Pkgs {
@@ -139,14 +192,22 @@ func InferBoundaries(ix *index.Index) *Boundaries {
 	}
 
 	// Layer 3 (Repository/DB) cannot depend on Layer 2 (Service) or Layer 1 (Controller)
+	nested := func(a, b string) bool {
+		// One layer dir contains the other: a dao subpackage of a *-service
+		// module is part of that service, not a separate layer it must not
+		// reach. Rules between ancestor-descendant dirs fabricate
+		// intra-module violations (dao/impl -> dao flagged as dao -> service);
+		// sibling-module pairs keep the real cross-module enforcement.
+		return strings.HasPrefix(a+"/", b+"/") || strings.HasPrefix(b+"/", a+"/")
+	}
 	for l3 := range layer3 {
 		for l1 := range layer1 {
-			if l3 != l1 {
+			if !nested(l3, l1) {
 				addRule(l3, l1, "forbid")
 			}
 		}
 		for l2 := range layer2 {
-			if l3 != l2 {
+			if !nested(l3, l2) {
 				addRule(l3, l2, "forbid")
 			}
 		}
@@ -155,7 +216,7 @@ func InferBoundaries(ix *index.Index) *Boundaries {
 	// Layer 2 (Service) cannot depend on Layer 1 (Controller)
 	for l2 := range layer2 {
 		for l1 := range layer1 {
-			if l2 != l1 {
+			if !nested(l2, l1) {
 				addRule(l2, l1, "forbid")
 			}
 		}
@@ -240,13 +301,30 @@ func CheckBoundariesPrecise(ix *index.Index, b *Boundaries, files []string, stri
 	}
 
 	meta := map[string]index.Symbol{}
-	dirs := map[string]string{} // symbol FullName -> dir
 	for _, s := range ix.Symbols {
 		if _, ok := meta[s.FullName()]; !ok {
 			meta[s.FullName()] = s
 		}
-		if _, ok := dirs[s.FullName()]; !ok {
-			dirs[s.FullName()] = filepath.Dir(s.File)
+	}
+
+	// Bare-name collision set: the index keys call edges by the caller's
+	// FullName, which for package-level functions is the bare name (every
+	// package has a "New"). Edges under such a key merge calls from EVERY
+	// same-named function across packages, so a per-file traversal would
+	// attribute another package's calls to this file's symbol (fabricated
+	// violations). Only traverse call edges for names this file uniquely
+	// owns; the per-file import check below remains the enforcement path for
+	// ambiguous names (it is file-attributed and collision-free).
+	colliding := map[string]bool{}
+	byNameFile := map[string]string{} // FullName -> first file that owns it
+	for _, s := range ix.Symbols {
+		full := s.FullName()
+		if prev, ok := byNameFile[full]; ok {
+			if prev != s.File {
+				colliding[full] = true
+			}
+		} else {
+			byNameFile[full] = s.File
 		}
 	}
 
@@ -267,13 +345,20 @@ func CheckBoundariesPrecise(ix *index.Index, b *Boundaries, files []string, stri
 	}
 
 	for _, f := range files {
-		if isTestFile(f) {
+		if isTestFile(f) || isFixtureFile(f) {
 			continue
 		}
 		fromDir := filepath.Dir(f)
 		syms := ix.SymbolsByFile[f]
 		for _, s := range syms {
 			full := s.FullName()
+			if colliding[full] {
+				// Ambiguous bare-name key: edges under `full` may originate
+				// from another package's same-named function. Do not
+				// fabricate crossings from foreign edges; the import-level
+				// check below still enforces this file's real dependencies.
+				continue
+			}
 			for _, ce := range ix.Calls[full] {
 				c := ce.Target
 				if strict {
@@ -285,13 +370,11 @@ func CheckBoundariesPrecise(ix *index.Index, b *Boundaries, files []string, stri
 						continue
 					}
 				}
-				resolved := resolveCallee(ix, meta, c)
-				if resolved == "" || resolved == full {
+				resolved, ok := resolveCallee(ix, meta, colliding, c, s.File)
+				if !ok || resolved.FullName() == full {
 					continue
 				}
-				if toDir := dirs[resolved]; toDir != "" {
-					check(fromDir, toDir, f, symbolFile(meta, resolved), resolved, symbolLine(meta, resolved))
-				}
+				check(fromDir, filepath.Dir(resolved.File), f, resolved.File, resolved.FullName(), resolved.Line)
 			}
 		}
 		// Import-level check: catch edges where a file imports a forbidden
@@ -420,52 +503,66 @@ func importMatches(importPath, dir string) bool {
 	return false
 }
 
-// resolveCallee maps a raw callee name to a canonical in-project symbol
-// FullName. When several symbols share a simple name the lexicographically
-// smallest FullName wins, so verdicts are deterministic across runs.
-func resolveCallee(ix *index.Index, meta map[string]index.Symbol, name string) string {
-	if _, ok := meta[name]; ok {
-		return name
+// resolveCallee maps a raw callee name to a canonical in-project symbol,
+// preferring definitions in the caller's own file. A bare name that is
+// ambiguous (defined in several files, none of them the caller's) resolves
+// to nothing: attributing it to one arbitrary file would fabricate a
+// cross-package edge — the mirror image of the colliding-caller guard
+// above (dogfood finding: TradingApp nse_service.py -> api/stocks.py
+// "get_quote" was such a fabrication).
+func resolveCallee(ix *index.Index, meta map[string]index.Symbol, colliding map[string]bool, name, callerFile string) (index.Symbol, bool) {
+	if sym, ok := meta[name]; ok {
+		// Exact FullName hit. meta keeps the first-seen symbol, so when the
+		// name is defined in several files the winner may be a foreign one:
+		// a definition in the caller's own file is the real callee.
+		if sym.File == callerFile {
+			return sym, true
+		}
+		for _, ls := range ix.SymbolsByFile[callerFile] {
+			if ls.FullName() == name {
+				return ls, true
+			}
+		}
+		if !colliding[name] {
+			return sym, true
+		}
+		return index.Symbol{}, false
 	}
 	i := strings.LastIndexByte(name, '.')
 	if i <= 0 {
 		// Bare callees must be exact indexed symbols; name-only resolution
 		// across the whole index fabricates cross-package edges.
-		return ""
+		return index.Symbol{}, false
 	}
 	qual, simple := name[:i], name[i+1:]
 	if qual == "" || simple == "" {
-		return ""
+		return index.Symbol{}, false
 	}
 	// Resolve "qualifier.simple" only when the qualifier scopes the symbol:
 	// a matching receiver (Type.method) or package/directory basename
-	// (pkg.Func); the exact qualified name is handled above.
-	var best string
+	// (pkg.Func); the exact qualified name is handled above. Same-file
+	// definitions win over the meta scan.
+	for _, ls := range ix.SymbolsByFile[callerFile] {
+		if ls.Name == simple && (ls.Receiver == qual || filepath.Base(filepath.Dir(ls.File)) == qual) {
+			return ls, true
+		}
+	}
+	var best *index.Symbol
 	for full, s := range meta {
 		if s.Name != simple {
 			continue
 		}
 		if s.Receiver == qual || filepath.Base(filepath.Dir(s.File)) == qual {
-			if best == "" || full < best {
-				best = full
+			if best == nil || full < best.FullName() {
+				cp := s
+				best = &cp
 			}
 		}
 	}
-	return best
-}
-
-func symbolFile(meta map[string]index.Symbol, name string) string {
-	if s, ok := meta[name]; ok {
-		return s.File
+	if best == nil || colliding[best.FullName()] {
+		return index.Symbol{}, false
 	}
-	return ""
-}
-
-func symbolLine(meta map[string]index.Symbol, name string) int {
-	if s, ok := meta[name]; ok {
-		return s.Line
-	}
-	return 0
+	return *best, true
 }
 
 // indexDirs returns the distinct package directories present in the index.

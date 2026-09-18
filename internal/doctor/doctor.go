@@ -5,7 +5,7 @@ package doctor
 import (
 	"bytes"
 	"context"
-	"crypto/md5"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -54,6 +54,7 @@ func Run(root string) []Finding {
 	out = append(out, checkSandboxes(root))
 	out = append(out, checkWiring(root)...)
 	out = append(out, checkPluginSync()...)
+	out = append(out, checkGitExclude(root))
 	out = append(out, checkIndex(root))
 	out = append(out, checkIndexFreshness(root))
 	out = append(out, checkPrecision(root))
@@ -278,7 +279,7 @@ func checkConfig(root string) Finding {
 	path := filepath.Join(root, ".kern", "config.json")
 	data, err := os.ReadFile(path)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, fs.ErrNotExist) {
 			return Finding{Check: "config", Level: "ok", Detail: "no .kern/config.json (defaults)"}
 		}
 		return Finding{Check: "config", Level: "fail", Detail: err.Error()}
@@ -356,7 +357,7 @@ func checkSandboxes(root string) Finding {
 	dir := filepath.Join(root, ".kern", "sandboxes")
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, fs.ErrNotExist) {
 			return Finding{Check: "sandboxes", Level: "ok", Detail: "no sandbox worktrees"}
 		}
 		return Finding{Check: "sandboxes", Level: "ok", Detail: dir + " unreadable"}
@@ -419,7 +420,7 @@ func checkPluginSync() []Finding {
 		}
 		if !bytes.Equal(cur, src) {
 			out = append(out, Finding{Check: "opencode-plugin-sync", Level: "warn",
-				Detail: fmt.Sprintf("%s: stale copy (md5 %x, embedded is %x) — run: kern setup --global, then restart opencode", p, md5.Sum(cur), md5.Sum(src))})
+				Detail: fmt.Sprintf("%s: stale copy (sha256 %x, embedded is %x) — run: kern setup --global, then restart opencode", p, sha256.Sum256(cur), sha256.Sum256(src))})
 		}
 	}
 	if compared > 0 && len(out) == 0 {
@@ -611,4 +612,47 @@ func Render(root string, findings []Finding) string {
 	}
 	fmt.Fprintf(&b, "\nverdict: %s\n", verdict)
 	return b.String()
+}
+
+// checkGitExclude verifies the side effect index.Save performs silently:
+// <root>/.git/info/exclude must list .kern/ so git never tracks kern's index
+// store. Warn (not fail) — the entry is (re)added on the next Save, and a
+// missing entry only makes .kern visible in git status.
+func checkGitExclude(root string) Finding {
+	if root == "" {
+		return Finding{Check: "git-exclude", Level: "ok", Detail: "no root"}
+	}
+	gitDir := filepath.Join(root, ".git")
+	fi, err := os.Stat(gitDir)
+	if err != nil {
+		return Finding{Check: "git-exclude", Level: "ok", Detail: "not a git repository"}
+	}
+	infoDir := filepath.Join(gitDir, "info")
+	if !fi.IsDir() {
+		// Worktree/submodule gitdir file: "gitdir: /path/to/.git/worktrees/n".
+		b, err := os.ReadFile(gitDir)
+		if err != nil {
+			return Finding{Check: "git-exclude", Level: "warn", Detail: "cannot read gitdir file"}
+		}
+		line := strings.TrimSpace(string(b))
+		if !strings.HasPrefix(line, "gitdir:") {
+			return Finding{Check: "git-exclude", Level: "warn", Detail: "unrecognized .git layout"}
+		}
+		target := strings.TrimSpace(strings.TrimPrefix(line, "gitdir:"))
+		if !filepath.IsAbs(target) {
+			target = filepath.Join(root, target)
+		}
+		infoDir = filepath.Join(target, "info")
+	}
+	b, err := os.ReadFile(filepath.Join(infoDir, "exclude"))
+	if err != nil {
+		return Finding{Check: "git-exclude", Level: "warn", Detail: "no .git/info/exclude (added on next kern index)"}
+	}
+	for _, line := range strings.Split(string(b), "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == ".kern" || trimmed == ".kern/" {
+			return Finding{Check: "git-exclude", Level: "ok", Detail: ".kern/ excluded from git"}
+		}
+	}
+	return Finding{Check: "git-exclude", Level: "warn", Detail: ".kern/ not in .git/info/exclude yet (added on next kern index)"}
 }

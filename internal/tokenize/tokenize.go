@@ -1,14 +1,18 @@
 // Package tokenize provides local, offline token counting for prompts.
-// It uses a character/word based estimator that is consistent between the
-// "before" and "after" versions of a prompt, so token savings percentages are
-// accurate even though absolute counts are approximate. A pluggable interface
-// allows swapping in an exact BPE tokenizer later without changing callers.
+// It offers a character/word based estimator plus exact BPE tokenizers
+// (tiktoken cl100k_base/o200k_base tables, and a bundled lightweight BPE).
+// A pluggable interface lets callers swap counters without changing callers.
 //
 // The package-level Count/CountKind functions delegate to a configurable
-// default counter (see SetDefault, InitFromEnv). By default — and for every
-// release before this mechanism existed — that is the Estimator, so all
-// reported numbers stay stable unless a caller opts into an exact tokenizer
-// (NewCl100kCounter/NewO200kCounter, or KERN_TOKENIZER=cl100k|o200k|bpe).
+// default counter (see SetDefault, InitFromEnv). The default is
+// "bpe-if-available": the exact cl100k_base BPE counter when its table data
+// loads (it is embedded, so it is available in every normal build), falling
+// back to the Estimator with a single warning when the data is missing.
+// Set KERN_TOKENIZER=bpe|estimate|estimator|cl100k|o200k (or the tokenizer
+// key in .kern/config.json) to force a specific counter, or KERN_MODEL to
+// pick the encoding for a known model family (gpt-4o* -> o200k, gpt-4*/3.5*
+// -> cl100k); an unknown or unset configuration resolves to the
+// bpe-if-available default.
 package tokenize
 
 import (
@@ -103,18 +107,22 @@ func (e Estimator) countKind(s string, k Kind) int {
 // ---------------------------------------------------------------------------
 // Default-counter selection.
 //
-// The default is the Estimator. Callers can swap in an exact tokenizer
-// with SetDefault, or let the environment/config decide (InitFromEnv, or the
-// lazy resolution performed by the first Count call):
+// The default is bpe-if-available: the exact cl100k_base BPE counter when its
+// data is available at runtime, else the Estimator (one warning on fallback).
+// Callers can swap in a counter with SetDefault, or let the environment/config
+// decide (InitFromEnv, or the lazy resolution performed by the first Count
+// call):
 //
-//	KERN_TOKENIZER (or tokenizer in .kern/config.json) = estimator | bpe | cl100k | o200k
-//	    (aliases: cl100k_base, o200k_base)
+//	KERN_TOKENIZER (or tokenizer in .kern/config.json) = estimate | estimator | bpe | cl100k | o200k
+//	    (aliases: cl100k_base, o200k_base, tiktoken-cl100k, tiktoken-o200k)
 //	KERN_MODEL (or llm.model in .kern/config.json) = model name;
 //	    gpt-4o*/o1*/o3* select o200k, gpt-4*/gpt-3.5* select cl100k,
-//	    anything else keeps the estimator
+//	    anything else resolves the bpe-if-available default
 //
 // KERN_TOKENIZER wins over KERN_MODEL. An unknown value or a failed
-// table load falls back to the Estimator with a one-line warning.
+// table load falls back to the Estimator with a one-line warning; the
+// fallback warning is logged during the (cached, once-per-process) default
+// resolution, never per call.
 
 var (
 	defaultMu       sync.RWMutex
@@ -176,7 +184,7 @@ func resolveFromEnv() Counter {
 	est := Estimator{Kind: KindGeneric}
 	if v := strings.TrimSpace(config.String("", "KERN_TOKENIZER", "tokenizer", "")); v != "" {
 		switch strings.ToLower(v) {
-		case "estimator":
+		case "estimator", "estimate":
 			return est
 		case "bpe":
 			return NewBPECounter()
@@ -193,30 +201,38 @@ func resolveFromEnv() Counter {
 				fmt.Fprintf(os.Stderr, "kern/tokenize: KERN_TOKENIZER=%q unavailable (%v); using estimator\n", v, err)
 			}
 		default:
-			fmt.Fprintf(os.Stderr, "kern/tokenize: unknown KERN_TOKENIZER=%q (want estimator|bpe|cl100k|o200k); using estimator\n", v)
+			fmt.Fprintf(os.Stderr, "kern/tokenize: unknown KERN_TOKENIZER=%q (want estimate|estimator|bpe|cl100k|o200k); using estimator\n", v)
 		}
 		return est
 	}
 	model := strings.ToLower(config.String("", "KERN_MODEL", "llm.model", ""))
-	if model == "" {
-		return est
+	if model != "" {
+		switch {
+		case strings.Contains(model, "gpt-4o"),
+			strings.Contains(model, "chatgpt-4o"),
+			strings.HasPrefix(model, "o1"),
+			strings.HasPrefix(model, "o3"),
+			strings.HasPrefix(model, "o4"):
+			if c, err := NewO200kCounter(); err == nil {
+				return c
+			}
+		case strings.Contains(model, "gpt-4"),
+			strings.Contains(model, "gpt-3.5"),
+			strings.Contains(model, "gpt-35"),
+			strings.Contains(model, "gpt3.5"):
+			if c, err := NewCl100kCounter(); err == nil {
+				return c
+			}
+		}
 	}
-	switch {
-	case strings.Contains(model, "gpt-4o"),
-		strings.Contains(model, "chatgpt-4o"),
-		strings.HasPrefix(model, "o1"),
-		strings.HasPrefix(model, "o3"),
-		strings.HasPrefix(model, "o4"):
-		if c, err := NewO200kCounter(); err == nil {
-			return c
-		}
-	case strings.Contains(model, "gpt-4"),
-		strings.Contains(model, "gpt-3.5"),
-		strings.Contains(model, "gpt-35"),
-		strings.Contains(model, "gpt3.5"):
-		if c, err := NewCl100kCounter(); err == nil {
-			return c
-		}
+	// Default mode "bpe-if-available": use the exact cl100k_base BPE counter
+	// when its data is available at runtime, otherwise fall back to the
+	// Estimator. Default() caches this resolution, so the fallback warning is
+	// logged at most once per process, never per Count call.
+	if c, cErr := NewCl100kCounter(); cErr == nil {
+		return c
+	} else {
+		fmt.Fprintf(os.Stderr, "kern/tokenize: BPE tokenizer data unavailable (%v); using estimator\n", cErr)
 	}
 	return est
 }
