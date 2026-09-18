@@ -73,7 +73,7 @@ runs:
             --pattern "kern-linux-amd64.tar.gz" \
             --dir /tmp/kern-bin --clobber
           tar -xzf /tmp/kern-bin/kern-linux-amd64.tar.gz -C /tmp/kern-bin
-          KERN_BIN=/tmp/kern-bin/kern-linux-amd64/kern
+          KERN_BIN=/tmp/kern-bin/kern
         fi
         # GITHUB_ENV only applies to later steps, so keep a local copy for the
         # version probe in this step.

@@ -51,7 +51,7 @@ On denial the contract still holds: `scope` is empty (zero symbols) and the
 ## Algorithm
 
 `AuthorizeContext(req Request, ix *index.Index, fw *firewall.Firewall)`
-(`internal/governance/authz/authorize.go`) runs a six-step flow, and always
+(`internal/governance/authorize.go`) runs a six-step flow, and always
 returns a `Response` whose `Proof` is auditable; on denial it additionally
 returns `ErrUnauthorized`.
 

@@ -52,7 +52,7 @@ known limitations, and how to report vulnerabilities.
   injection, weak crypto, and unsafe deserialization (`internal/sec/`).
 - **MCP tool confinement** — path-typed tool arguments are confined to
   configured roots via `withinRoot()` and `rootedPath()` in
-  `internal/mcp/server.go` and `cmd/blueprint-mcp/main.go`. Symlinks are
+  `internal/mcp/server.go`. Symlinks are
   resolved and rejected when they escape a root.
 - **Tamper-evident audit chain** — every governed action is appended to a
   hash-chained audit log (`internal/governance/audit.go`).
@@ -62,9 +62,9 @@ known limitations, and how to report vulnerabilities.
 - **Arbitrary root/dir arguments** — MCP tools accept arbitrary `root`/`dir`
   arguments. This is by design: the loopback client is the trusted principal,
   and confinement roots are enforced per tool invocation.
-- **No TLS for HTTP MCP transport** — the HTTP MCP mode is loopback-only and
-  unencrypted. Do not expose it to a network; use stdio mode (or a local TLS
-  reverse proxy) for anything beyond localhost.
+- **TLS for HTTP MCP transport** — the HTTP MCP mode supports TLS via `KERN_MCP_TLS_CERT`
+  and `KERN_MCP_TLS_KEY`. When enabled, it is encrypted. If TLS
+  is not configured, it is unencrypted and loopback-only; use stdio mode for anything beyond localhost.
 - **No auth beyond Origin header** — the loopback HTTP server authenticates
   requests only by validating that the `Origin` header is a local origin
   (`isLocalhostOrigin`, `internal/mcp/http.go`). It is not a security
@@ -81,18 +81,18 @@ known limitations, and how to report vulnerabilities.
 
 ## Build Tags
 
-- `-tags sqlite` — enables the persistent SQLite symbol index with WAL and
+- `-tags nosqlite` — disables the persistent SQLite symbol index with WAL and
   FTS5 full-text search (`internal/index/sqlite_store.go`). The default build
-  uses an in-memory index.
+  uses the SQLite index.
 - `-tags treesitter` — enables tree-sitter AST parsing (~13 grammars) instead
   of the regex heuristic fallback (`internal/index/treesitter.go`).
 
 ## Dependencies
 
-The default build is minimal: the Go standard library plus one small pure-Go
-dependency (`gopkg.in/yaml.v3` for YAML policy/config parsing) — no cgo, no C
+The default build is minimal: the Go standard library plus pure-Go
+dependencies (`gopkg.in/yaml.v3` for YAML policy/config parsing, and the cgo-free SQLite driver) — no cgo, no C
 toolchain required. Optional build tags pull in pure-Go tree-sitter grammars
-(`-tags treesitter`) and the cgo-free SQLite driver (`-tags sqlite`).
+(`-tags treesitter`) or disable SQLite (`-tags nosqlite`).
 
 ## Security-relevant environment variables
 
@@ -106,3 +106,7 @@ All fail closed unless noted:
 | `KERN_MCP_ROOTS` | Comma-separated workspace roots for MCP path confinement. Defaults to the process cwd and fails closed. |
 | `KERN_AUTH_TOKEN` | Bearer token required for enterprise / HTTP serve mode. Unset = server refuses to serve (503). |
 | `KERN_SANDBOX_MAX_SNAPSHOT_BYTES` | Per-file sandbox snapshot cap (default 100 MiB). |
+| `KERN_MCP_TLS_CERT` | Path to the TLS certificate file for the HTTP MCP server. |
+| `KERN_MCP_TLS_KEY` | Path to the TLS private key file for the HTTP MCP server. |
+| `KERN_ALLOW_UNISOLATED` | If set to `1`, allows execution outside the sandbox. |
+| `KERN_ALLOW_NET` | If set to `1`, allows unrestricted network access during sandbox execution. |

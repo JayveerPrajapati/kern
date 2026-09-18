@@ -41,16 +41,16 @@ security, and code health.
 | **G27** | Pre-edit blast radius | Safety | Block | Requires operator approval before editing HIGH-risk hubs |
 | **G28** | Reproduction test synthesis | SRE | Block | Requires minimal failing test before applying incident repairs |
 | **G29** | In-toto attestation | Security | Block | Attests build provenance with SLSA-compatible metadata |
-| **G30** | Code formatting (gofmt) | Style | Block | Enforces standard formatting without whitespace drift |
-| **G31** | Network egress lockdown | Security | Block | Enforces private network namespaces during test/exec execution |
-| **G32** | Event relay fan-out | Observability| Warn | Verifies event bus publication across concurrent watchers |
-| **G33** | Workspace lock lifecycle | Concurrency | Block | Prevents race conditions among concurrent autonomous agents |
-| **G34** | Memory pattern extraction | Learning | Warn | Converts recurrent failure patterns into memory constraints |
-| **G35** | Evidence bundle signing | Integrity | Block | Generates SHA-256 evidence certificates for AST claims |
-| **G36** | Tool catalog parity | Contracts | Block | Asserts MCP registration table matches generated catalog docs |
-| **G37** | Shell completion validity | CLI | Block | Validates shell completion scripts for bash, zsh, and fish |
-| **G38** | JSON schema stability | Contracts | Block | Enforces versioned, backwards-compatible JSON CLI output |
-| **G39** | Host model delegation | Autonomy | Block | Validates MCP sampling contract and provider auto-chaining |
+| **G30** | Diff gate: gofmt | Style | Warn | diff-gate format:gofmt flags unformatted changed .go files (advisory WARN; gofmt -l is deterministic) |
+| **G31** | Diff gate: vulnerabilities | Security | Warn | diff-gate vulnerability:sec maps the in-house sec scanner onto the changed set (error→BLOCK, warning→WARN, info→INFO) |
+| **G32** | Diff gate: schema drift | Integrity | Warn | diff-gate schema:drift fingerprints the MCP tool catalog (name/phase/risk/InputSchema sha256) and detects baseline drift; --init-baseline round-trips |
+| **G33** | Diff gate: unsafe execution | Security | Warn | diff-gate exec:unsafe flags changed non-test .go files importing os/exec, calling exec.Command, or containing sh -c (advisory WARN) |
+| **G34** | Diff gate: changelog | Documentation | Warn | diff-gate changelog:missing warns on non-doc source changes without a CHANGELOG.md entry (advisory WARN) |
+| **G35** | Diff gate: MCP catalog drift | Contracts | Block | diff-gate catalog:drift BLOCKs when the opencode plugin tool set diverges from the MCP catalog (real drift guard) |
+| **G36** | Diff gate: tool catalog doc freshness | Contracts | Block | diff-gate catalog:doc BLOCKs when docs/tool-catalog.md is missing, does not document a registered MCP tool, or differs from a fresh `kern gen-catalog` generation (docs never drift from the catalog) |
+| **G37** | Decision-record format | Documentation | Block | diff-gate note:format BLOCKs when the docs/notes/ decision-record tree violates its path-encoded lifecycle/class contract or in-file format (kern note validate contract) |
+| **G38** | Decision-record on change | Documentation | Warn | diff-gate note:missing WARNs when non-doc source changes carry no docs/notes/ decision record (advisory, mirrors the changelog gate) |
+| **G39** | Documentation budget | Documentation | Block | diff-gate doc:budget BLOCKs when a document listed in docs/doc-budgets.json exceeds its word ceiling or goes missing (one home per fact, enforced ceilings) |
 
 ---
 
