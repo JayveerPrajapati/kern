@@ -1,10 +1,12 @@
 package heal
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/JayveerPrajapati/kern/internal/sandbox"
 )
@@ -35,6 +37,52 @@ trailing`
 func TestParseReplacementsNoBlocks(t *testing.T) {
 	if got := ParseReplacements("no blocks here"); len(got) != 0 {
 		t.Fatalf("expected none, got %+v", got)
+	}
+}
+
+// TestParseReplacementsWithFallbackFenced: agent-style replies (prose + a
+// fenced code block, no ### FILE: markers) are recovered when exactly one
+// failing file is known — the first fenced block replaces it.
+func TestParseReplacementsWithFallbackFenced(t *testing.T) {
+	text := `Here is the fixed file:
+
+\` + "```go" + `
+package main
+
+func Answer() int { return 42 }
+` + "```" + `
+
+That should do it.`
+	reps := ParseReplacementsWithFallback(text, []string{"main.go"})
+	if len(reps) != 1 {
+		t.Fatalf("expected 1 replacement from the fenced fallback, got %d: %+v", len(reps), reps)
+	}
+	if reps[0].Path != "main.go" {
+		t.Errorf("path = %q, want main.go", reps[0].Path)
+	}
+	if !strings.Contains(reps[0].Content, "return 42") {
+		t.Errorf("content missing the fix: %q", reps[0].Content)
+	}
+}
+
+// TestParseReplacementsWithFallbackRules: the fallback stays conservative —
+// FILE blocks win; multiple failing files or missing fences remain ambiguous
+// (empty result, the caller keeps the loud error).
+func TestParseReplacementsWithFallbackRules(t *testing.T) {
+	// FILE blocks win over fences: the replacement is the FILE block's
+	// content (which may itself contain fence markers as plain text).
+	text := "### FILE: a.go\npackage a\n\n```go\nignored\n```"
+	reps := ParseReplacementsWithFallback(text, []string{"a.go"})
+	if len(reps) != 1 || reps[0].Path != "a.go" || !strings.HasPrefix(reps[0].Content, "package a") {
+		t.Fatalf("FILE blocks must win over fences: %+v", reps)
+	}
+	// Two failing files + one fence: ambiguous.
+	if got := ParseReplacementsWithFallback("```go\nx\n```", []string{"a.go", "b.go"}); len(got) != 0 {
+		t.Fatalf("ambiguous fallback must be empty, got %+v", got)
+	}
+	// No fence at all: ambiguous.
+	if got := ParseReplacementsWithFallback("just prose", []string{"a.go"}); len(got) != 0 {
+		t.Fatalf("prose-only reply must be empty, got %+v", got)
 	}
 }
 
@@ -112,5 +160,42 @@ func TestFailingFilesNeverProbesOutsideRoot(t *testing.T) {
 	files := failingFiles(root, outside+":1:1: err\n../secret.go:1:1: err\n./broken.go:1:1: err")
 	if len(files) != 1 || files[0] != "broken.go" {
 		t.Fatalf("expected only broken.go (no absolute/escape probes), got %+v", files)
+	}
+}
+
+func TestEvaluateCandidates(t *testing.T) {
+	root := t.TempDir()
+	_ = os.WriteFile(filepath.Join(root, "go.mod"), []byte("module sample\n\ngo 1.22\n"), 0o644)
+	_ = os.WriteFile(filepath.Join(root, "main.go"), []byte("package main\n\nfunc main() {\n\tinvalidSyntax\n}\n"), 0o644)
+
+	candidates := []Candidate{
+		{
+			ID:      "cand-1-bad",
+			Summary: "invalid repair",
+			Replacements: []Replacement{
+				{Path: "main.go", Content: "package main\n\nfunc main() {\n\tstillBad(\n}\n"},
+			},
+		},
+		{
+			ID:      "cand-2-good",
+			Summary: "valid repair",
+			Replacements: []Replacement{
+				{Path: "main.go", Content: "package main\n\nfunc main() {}\n"},
+			},
+		},
+	}
+
+	best, all := EvaluateCandidates(context.Background(), root, candidates, "", 10*time.Second)
+	if best == nil {
+		t.Fatal("expected a passing candidate, got nil")
+	}
+	if best.Candidate.ID != "cand-2-good" {
+		t.Fatalf("best candidate ID = %q, want cand-2-good", best.Candidate.ID)
+	}
+	if len(all) != 2 {
+		t.Fatalf("evaluated count = %d, want 2", len(all))
+	}
+	if !best.Passed {
+		t.Fatal("best candidate must have Passed = true")
 	}
 }

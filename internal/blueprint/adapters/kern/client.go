@@ -23,14 +23,14 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/JayveerPrajapati/kern/internal/blueprint/version"
+	"github.com/JayveerPrajapati/kern/internal/bpreceipt/version"
 )
 
 // KernContractVersion is the version of the JSON contract Blueprint expects
 // from `kern guard check --json` and `kern sec --json`. kern emits
 // {"schema_version":2,"violations":[...]},
 // {"schema_version":2,"findings":[...]}, and — when the change carries an
-// agent identity — an "authz_verdict" object (P0.4) since this version.
+// agent identity — an "authz_verdict" object since this version.
 // Blueprint fails closed on any missing/wrong/malformed contract so a
 // version skew surfaces as an ERROR rather than a silent misparse.
 const KernContractVersion = 2
@@ -60,8 +60,8 @@ type SecFinding struct {
 	Snippet  string `json:"snippet"`
 }
 
-// AuthzVerdict is kern's authorization verdict for an agent-sourced change
-// (P0.4), carried in the v2 `kern guard check --json` payload under the
+// AuthzVerdict is kern's authorization verdict for an agent-sourced change,
+// carried in the v2 `kern guard check --json` payload under the
 // "authz_verdict" key. Decision is "allowed" | "denied" | "unknown";
 // PolicySource says which policy produced it ("default-scoped" |
 // "task-scope" | "permissive-default"). DeniedFiles lists the paths the
@@ -354,7 +354,7 @@ func (c *KernClient) GuardCheckFiles(ctx context.Context, workdir string, files 
 }
 
 // AuthzVerdict returns kern's authorization verdict for an agent-sourced
-// change (P0.4). It runs `kern guard check --file <files> --agent-id <id>
+// change. It runs `kern guard check --file <files> --agent-id <id>
 // --task <task> --json` in workdir and parses the "authz_verdict" object out
 // of the v2 output.
 //
@@ -372,7 +372,7 @@ func (c *KernClient) GuardCheckFiles(ctx context.Context, workdir string, files 
 func (c *KernClient) AuthzVerdict(ctx context.Context, workdir, agentID, task string, files []string) (*AuthzVerdict, error) {
 	if agentID == "" || task == "" || len(files) == 0 {
 		// No agent identity, no task scope, or no files to authorize: kern's
-		// guard requires --agent-id AND --task together (its P0.4 usage
+		// guard requires --agent-id AND --task together (its usage
 		// rule), and with nothing to authorize there is no verdict. The
 		// caller proceeds without authz.
 		return nil, nil
@@ -459,7 +459,7 @@ func (c *KernClient) IndexUpdate(ctx context.Context, workdir string) (stdout st
 //
 // The payload is schema-versioned (schema_version is the STRING "2"); a
 // missing or mismatched version is a contract skew and fails closed, so an
-// older kern without the P0.2 freshness contract surfaces as an ERROR rather
+// older kern without the freshness contract surfaces as an ERROR rather
 // than a silent misparse. In the payload, top-level "stale" is false exactly
 // when freshness_proof.verdict is "fresh"; when built is false (no index),
 // both freshness_proof and index_identity are omitted, and the caller treats

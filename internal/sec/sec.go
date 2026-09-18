@@ -173,7 +173,7 @@ func ScanFile(rel string, src []byte) []Finding {
 			// semantic-version string is not an email address. Likewise, RFC
 			// 2606 documentation domains (example.com/.org/.net) are
 			// placeholders by construction — e.g. testfixture@example.com in
-			// a git-config test helper — never real credentials (F-016).
+			// a git-config test helper — never real credentials.
 			if r.Label == "EMAIL" {
 				// Lockfiles are generated registry metadata: the only
 				// emails in them are author/maintainer contacts from npm
@@ -194,14 +194,14 @@ func ScanFile(rel string, src []byte) []Finding {
 			}
 			// Rule-identifier literals (RuleID: "secret:incumbent-unavailable")
 			// are the scanner's own taxonomy, not credentials: a detector that
-			// flags its own rule IDs is noise (F-016).
+			// flags its own rule IDs is noise.
 			if isRuleIDLiteral(src, idx[0]) {
 				continue
 			}
 			// code-eval description strings ("yaml.load without an explicit
 			// Loader=", "assert pickle.loads(...)") mention the pattern but do
 			// not execute it — matches inside quoted literals are rule
-			// documentation, not dynamic code (F-016).
+			// documentation, not dynamic code.
 			if r.ID == "code-eval" && (isInQuotedString(src, idx[0]) || isMethodCallOrDef(src, idx[0], idx[1])) {
 				continue
 			}
@@ -263,7 +263,7 @@ func ScanFile(rel string, src []byte) []Finding {
 			})
 		}
 	}
-	// Documentation prose (F-016): markdown/txt/rst files legitimately contain
+	// Documentation prose: markdown/txt/rst files legitimately contain
 	// example emails, localhost bind addresses and scheme-less userinfo URLs
 	// (e.g. "kern-server binds 128.0.0.1:8090", "sk-live-… dash-form" masking
 	// examples). These informational EMAIL/IP/IPV6/URL_CRED matches are not
@@ -345,7 +345,7 @@ func lineBounds(src []byte, pos int) (int, int) {
 // isExampleDomain reports whether a host is an RFC 2606 documentation domain
 // (example.com / example.org / example.net or a subdomain). Addresses on these
 // domains are placeholders by construction (testfixture@example.com in a test
-// helper, kern@example.org in docs) — never real credentials (F-016).
+// helper, kern@example.org in docs) — never real credentials.
 func isExampleDomain(host string) bool {
 	h := strings.ToLower(strings.TrimSuffix(host, "."))
 	return h == "example.com" || h == "example.org" || h == "example.net" ||
@@ -356,7 +356,7 @@ func isExampleDomain(host string) bool {
 
 // isRuleIDLiteral reports whether the match at pos is the quoted value of a
 // rule-identifier field (RuleID / rule_id): the scanner's own taxonomy, not a
-// credential (F-016).
+// credential.
 func isRuleIDLiteral(src []byte, pos int) bool {
 	start, end := lineBounds(src, pos)
 	line := src[start:end]
@@ -377,7 +377,7 @@ func isRuleIDLiteral(src []byte, pos int) bool {
 // its line (odd number of quote characters before it; escapes ignored — good
 // enough for line-scoped scans). Rule description strings that merely mention
 // a pattern ("yaml.load without an explicit Loader=") are documentation, not
-// dynamic code (F-016).
+// dynamic code.
 func isInQuotedString(src []byte, pos int) bool {
 	start, _ := lineBounds(src, pos)
 	quotes := 0
@@ -392,7 +392,7 @@ func isInQuotedString(src []byte, pos int) bool {
 
 // isDocFile reports whether a root-relative path is a non-source documentation
 // file (.md/.markdown/.mdx/.txt/.rst/.adoc). Doc prose legitimately contains
-// example emails, localhost binds and userinfo-URL examples (F-016).
+// example emails, localhost binds and userinfo-URL examples.
 func isDocFile(rel string) bool {
 	switch strings.ToLower(filepath.Ext(rel)) {
 	case ".md", ".markdown", ".mdx", ".txt", ".rst", ".adoc":
@@ -404,7 +404,7 @@ func isDocFile(rel string) bool {
 // isDocProseSecret reports whether a finding is the informational
 // EMAIL/IP/IPV6/URL_CRED class that documentation prose legitimately contains.
 // Real-secret labels (GENERIC, API_KEY, TOKEN, HEX, ...) are untouched, so a
-// genuine key pasted into a README is still reported (F-016).
+// genuine key pasted into a README is still reported.
 func isDocProseSecret(f Finding) bool {
 	if f.Rule != "hardcoded-secret" {
 		return false
@@ -766,7 +766,7 @@ func Scan(root string) ([]Finding, error) {
 		if isConfigFile(rel) {
 			findings = append(findings, ScanConfigFile(rel, src)...)
 		}
-		// Python files get an additional Python-aware scan pass (G-4).
+		// Python files get an additional Python-aware scan pass.
 		if isPythonFile(rel) {
 			findings = append(findings, ScanPythonFile(rel, src)...)
 		}
@@ -803,7 +803,7 @@ func FilterBySeverity(findings []Finding, allow []string) []Finding {
 	return out
 }
 
-// FilterByFiles keeps only findings whose File is in the files set (G-4),
+// FilterByFiles keeps only findings whose File is in the files set,
 // used to scope findings to the files touched by a git range. An empty set
 // matches nothing — pass nil to disable the filter.
 func FilterByFiles(findings []Finding, files []string) []Finding {
@@ -881,7 +881,7 @@ func isConfigFile(rel string) bool {
 }
 
 // isPythonFile reports whether the file is a Python source file, which
-// receives the Python-aware scan pass (G-4) in addition to the generic one.
+// receives the Python-aware scan pass in addition to the generic one.
 func isPythonFile(rel string) bool {
 	return strings.EqualFold(filepath.Ext(rel), ".py")
 }

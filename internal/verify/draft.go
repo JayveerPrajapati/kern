@@ -8,10 +8,11 @@ import (
 	"go/parser"
 	"go/scanner"
 	"go/token"
+	"maps"
 	"os"
 	"path/filepath"
 	"regexp"
-	"sort"
+	"slices"
 	"strings"
 
 	"github.com/JayveerPrajapati/kern/internal/index"
@@ -32,6 +33,25 @@ var goBuiltins = map[string]bool{
 	"max": true, "min": true, "new": true, "panic": true, "print": true,
 	"println": true, "real": true, "recover": true,
 }
+
+// Java/Python/JS draft-check regexes, compiled once at package init instead
+// of per CheckDraft call.
+var (
+	// javaClassRe matches a class/interface/enum/record declaration header.
+	javaClassRe = regexp.MustCompile(`\b(?:class|interface|enum|record)\s+([A-Za-z_$][\w$]*)`)
+	// javaMethodRe matches a method declaration header.
+	javaMethodRe = regexp.MustCompile(`(?:public|protected|private|static|final|\s)*\b(?:[A-Za-z_$][\w$]*|<[^>]+>|\[\]|\s)+\s+([A-Za-z_$][\w$]*)\s*\([^)]*\)\s*\{?`)
+	// javaVarRe matches a variable declaration.
+	javaVarRe = regexp.MustCompile(`\b([A-Za-z_$][\w$]*(?:<[^>]*>)?)\s+([A-Za-z_$][\w$]*)\s*(?:=|;|,|\))`)
+	// javaCallRe matches a call target (possibly dotted).
+	javaCallRe = regexp.MustCompile(`\b([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\s*\(`)
+	// pyRelImportRe matches a Python relative import line.
+	pyRelImportRe = regexp.MustCompile(`^\s*from\s+(\.+[a-zA-Z0-9_.]*)\s+import`)
+	// pyColonHeaderRe matches a Python header line that must end with ':'.
+	pyColonHeaderRe = regexp.MustCompile(`^\s*(?:def\s+[a-zA-Z_]\w*\s*\(.*?\)|class\s+[a-zA-Z_]\w*(?:\(.*?\))?|if\s+.*|elif\s+.*|while\s+.*|for\s+.*|with\s+.*)\s*$`)
+	// jsRelImportRe matches a JS/TS relative import or require.
+	jsRelImportRe = regexp.MustCompile(`(?:import\s+.*?from\s+['"](\.[^'"]+)['"]|require\(['"](\.[^'"]+)['"]\))`)
+)
 
 // CheckDraft validates a draft code snippet against the project index.
 // Go code (lang "" or "go") is parsed with go/parser and checked
@@ -247,11 +267,7 @@ func indexPackageSymbols(ix *index.Index, importPath string) ([]index.Symbol, bo
 	if i := strings.LastIndex(base, "/"); i >= 0 {
 		base = base[i+1:]
 	}
-	keys := make([]string, 0, len(ix.Pkgs))
-	for k := range ix.Pkgs {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
+	keys := slices.Sorted(maps.Keys(ix.Pkgs))
 	var files []string
 	matched := false
 	for _, k := range keys {
@@ -336,24 +352,19 @@ func checkJavaDraft(ix *index.Index, root string, code []byte) []DraftFinding {
 	locals := map[string]bool{}
 	draftMethods := map[string]bool{}
 
-	reClass := regexp.MustCompile(`\b(?:class|interface|enum|record)\s+([A-Za-z_$][\w$]*)`)
-	reMethod := regexp.MustCompile(`(?:public|protected|private|static|final|\s)*\b(?:[A-Za-z_$][\w$]*|<[^>]+>|\[\]|\s)+\s+([A-Za-z_$][\w$]*)\s*\([^)]*\)\s*\{?`)
-	reVar := regexp.MustCompile(`\b([A-Za-z_$][\w$]*(?:<[^>]*>)?)\s+([A-Za-z_$][\w$]*)\s*(?:=|;|,|\))`)
-	reCall := regexp.MustCompile(`\b([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\s*\(`)
-
 	// First pass: collect local declarations
 	for _, line := range lines {
 		trimmed := strings.TrimSpace(line)
 		if strings.HasPrefix(trimmed, "//") || strings.HasPrefix(trimmed, "/*") || strings.HasPrefix(trimmed, "*") {
 			continue
 		}
-		if m := reClass.FindStringSubmatch(trimmed); m != nil {
+		if m := javaClassRe.FindStringSubmatch(trimmed); m != nil {
 			locals[m[1]] = true
 		}
-		if m := reMethod.FindStringSubmatch(trimmed); m != nil {
+		if m := javaMethodRe.FindStringSubmatch(trimmed); m != nil {
 			draftMethods[m[1]] = true
 		}
-		for _, m := range reVar.FindAllStringSubmatch(trimmed, -1) {
+		for _, m := range javaVarRe.FindAllStringSubmatch(trimmed, -1) {
 			locals[m[2]] = true
 		}
 	}
@@ -367,7 +378,7 @@ func checkJavaDraft(ix *index.Index, root string, code []byte) []DraftFinding {
 		}
 		cleanLine := stripStrings(trimmed)
 
-		for _, m := range reCall.FindAllStringSubmatch(cleanLine, -1) {
+		for _, m := range javaCallRe.FindAllStringSubmatch(cleanLine, -1) {
 			full := m[1]
 			if javaBuiltinKeywords[full] {
 				continue
@@ -637,8 +648,6 @@ func checkPythonDraft(ix *index.Index, root string, code []byte) []DraftFinding 
 	}
 
 	lines := strings.Split(string(code), "\n")
-	reRelImport := regexp.MustCompile(`^\s*from\s+(\.+[a-zA-Z0-9_.]*)\s+import`)
-	reColonHeader := regexp.MustCompile(`^\s*(?:def\s+[a-zA-Z_]\w*\s*\(.*?\)|class\s+[a-zA-Z_]\w*(?:\(.*?\))?|if\s+.*|elif\s+.*|while\s+.*|for\s+.*|with\s+.*)\s*$`)
 
 	for lineIdx, line := range lines {
 		lineNum := lineIdx + 1
@@ -647,7 +656,7 @@ func checkPythonDraft(ix *index.Index, root string, code []byte) []DraftFinding 
 			continue
 		}
 
-		if m := reRelImport.FindStringSubmatch(trimmed); m != nil && root != "" {
+		if m := pyRelImportRe.FindStringSubmatch(trimmed); m != nil && root != "" {
 			relDots := m[1]
 			relPath := strings.ReplaceAll(relDots, ".", "/")
 			fullPath := filepath.Join(root, relPath)
@@ -664,7 +673,7 @@ func checkPythonDraft(ix *index.Index, root string, code []byte) []DraftFinding 
 			}
 		}
 
-		if reColonHeader.MatchString(trimmed) && !strings.HasSuffix(trimmed, ":") {
+		if pyColonHeaderRe.MatchString(trimmed) && !strings.HasSuffix(trimmed, ":") {
 			findings = append(findings, DraftFinding{
 				Line:    lineNum,
 				Kind:    "parse_error",
@@ -683,7 +692,6 @@ func checkJSDraft(ix *index.Index, root string, code []byte) []DraftFinding {
 	}
 
 	lines := strings.Split(string(code), "\n")
-	reRelImport := regexp.MustCompile(`(?:import\s+.*?from\s+['"](\.[^'"]+)['"]|require\(['"](\.[^'"]+)['"]\))`)
 
 	for lineIdx, line := range lines {
 		lineNum := lineIdx + 1
@@ -692,7 +700,7 @@ func checkJSDraft(ix *index.Index, root string, code []byte) []DraftFinding {
 			continue
 		}
 
-		if m := reRelImport.FindStringSubmatch(trimmed); m != nil && root != "" {
+		if m := jsRelImportRe.FindStringSubmatch(trimmed); m != nil && root != "" {
 			rel := m[1]
 			if rel == "" && len(m) > 2 {
 				rel = m[2]

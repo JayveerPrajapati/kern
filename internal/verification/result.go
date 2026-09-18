@@ -31,7 +31,19 @@ const (
 	VerdictBlocked Verdict = "BLOCKED"
 	// VerdictNotRun indicates the check was not executed.
 	VerdictNotRun Verdict = "NOT_RUN"
+	// VerdictSkipped means at least one executed check was explicitly skipped
+	// (e.g. tests could not run because network isolation is unavailable). A
+	// skipped check counts as NEITHER passing nor failing in the verdict math,
+	// so the run is not a pass: an operator cannot claim full verification when
+	// a check did not run.
+	VerdictSkipped Verdict = "SKIPPED"
 )
+
+// StatusSkipped is the explicit per-check status stamped on a sub-verification
+// that was NOT executed (e.g. a test set skipped because network isolation is
+// unavailable on this platform). It is distinct from OK and FAIL: a skipped
+// check is excluded from the verdict math and must never render as a pass.
+const StatusSkipped = "SKIPPED"
 
 // VerificationResult is the unified verification output.
 type VerificationResult struct {
@@ -87,6 +99,11 @@ type TestResult struct {
 	// Claims are the evidence-backed claims for this test result (e.g. from
 	// evidence.FromTestResult).
 	Claims []domain.Claim
+	// Status is an explicit per-check status label. "" means the OK bool
+	// decides (OK/FAIL). StatusSkipped means the test set was NOT executed
+	// (e.g. network isolation unavailable) — it is neither a pass nor a fail
+	// and must not be counted as either in the verdict math.
+	Status string
 }
 
 // SecurityResult aggregates security scan findings. The internal/sec scanner
@@ -131,16 +148,21 @@ type ArchitectureResult struct {
 	OK       bool
 }
 
-// DependencyResult verifies real module dependencies (missing modules, version
-// duplication) in addition to summarizing the intelligence graph.
+// DependencyResult verifies real dependency manifests (missing modules,
+// unpinned or duplicate dependencies) across supported ecosystems, in addition
+// to summarizing the intelligence graph.
 type DependencyResult struct {
 	GraphNodes int
 	GraphEdges int
 	OK         bool
 	// Findings lists concrete dependency anomalies (e.g. "missing module
-	// example.com/x required by main.go"). Empty = the module's dependencies
-	// are consistent.
+	// example.com/x required by main.go", "unpinned dependency foo"). Empty =
+	// the project's declared dependencies are consistent.
 	Findings []string
+	// Skipped is non-empty when the project has no supported dependency
+	// manifest at all (nothing to verify) — an honest skip, distinct from a
+	// PASS or a FAIL.
+	Skipped string
 }
 
 // E2ETestResult holds end-to-end test results. E2E tests are distinguished
@@ -153,6 +175,10 @@ type E2ETestResult struct {
 	Skipped  int
 	Output   string
 	Duration time.Duration
+	// Status is an explicit per-check status label; StatusSkipped means the
+	// E2E set was NOT executed (e.g. network isolation unavailable) and must
+	// not count as passing or failing in the verdict math.
+	Status string
 }
 
 // StaticAnalysisResult holds static analysis output (go vet, staticcheck,
@@ -198,7 +224,7 @@ type CIResult struct {
 
 // RenderCompact renders a VerificationResult as a short verdict plus one line
 // per executed sub-check. Used where a FAIL verdict must still surface the
-// typed verdict and per-check status instead of a bare error (report A11).
+// typed verdict and per-check status instead of a bare error.
 func RenderCompact(v VerificationResult) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "verdict: %s\n", v.Verdict)
@@ -219,10 +245,24 @@ func RenderCompact(v VerificationResult) string {
 		line("build", okStatus(v.Build.OK), fmt.Sprintf("(%s)", v.Build.Duration))
 	}
 	if v.UnitTests != nil {
-		line("tests", okStatus(v.UnitTests.OK), fmt.Sprintf("passed=%d failed=%d skipped=%d (%s)", v.UnitTests.Passed, v.UnitTests.Failed, v.UnitTests.Skipped, v.UnitTests.Duration))
+		if v.UnitTests.Status == StatusSkipped {
+			b.WriteString("tests: SKIPPED " + firstLine(v.UnitTests.Output) + "\n")
+		} else {
+			line("tests", okStatus(v.UnitTests.OK), fmt.Sprintf("passed=%d failed=%d skipped=%d (%s)", v.UnitTests.Passed, v.UnitTests.Failed, v.UnitTests.Skipped, v.UnitTests.Duration))
+			if !v.UnitTests.OK && strings.TrimSpace(v.UnitTests.Output) != "" {
+				b.WriteString(strings.TrimSpace(v.UnitTests.Output) + "\n")
+			}
+		}
 	}
 	if v.Integration != nil {
-		line("integration", okStatus(v.Integration.OK), fmt.Sprintf("passed=%d failed=%d skipped=%d (%s)", v.Integration.Passed, v.Integration.Failed, v.Integration.Skipped, v.Integration.Duration))
+		if v.Integration.Status == StatusSkipped {
+			b.WriteString("integration: SKIPPED " + firstLine(v.Integration.Output) + "\n")
+		} else {
+			line("integration", okStatus(v.Integration.OK), fmt.Sprintf("passed=%d failed=%d skipped=%d (%s)", v.Integration.Passed, v.Integration.Failed, v.Integration.Skipped, v.Integration.Duration))
+			if !v.Integration.OK && strings.TrimSpace(v.Integration.Output) != "" {
+				b.WriteString(strings.TrimSpace(v.Integration.Output) + "\n")
+			}
+		}
 	}
 	if v.Security != nil {
 		detail := fmt.Sprintf("findings=%d critical=%d high=%d low=%d", v.Security.Count, v.Security.Critical, v.Security.High, v.Security.Low)
@@ -242,15 +282,46 @@ func RenderCompact(v VerificationResult) string {
 		line("architecture", okStatus(v.Architecture.OK), fmt.Sprintf("violations=%d warnings=%d", len(v.Architecture.Violations), len(v.Architecture.Warnings)))
 	}
 	if v.Dependency != nil {
-		line("dependency", okStatus(v.Dependency.OK), fmt.Sprintf("nodes=%d edges=%d findings=%d", v.Dependency.GraphNodes, v.Dependency.GraphEdges, len(v.Dependency.Findings)))
+		if v.Dependency.Skipped != "" {
+			b.WriteString("dependency: SKIPPED " + v.Dependency.Skipped + "\n")
+		} else {
+			line("dependency", okStatus(v.Dependency.OK), fmt.Sprintf("nodes=%d edges=%d findings=%d", v.Dependency.GraphNodes, v.Dependency.GraphEdges, len(v.Dependency.Findings)))
+			if !v.Dependency.OK {
+				for i, fd := range v.Dependency.Findings {
+					if i >= 10 {
+						b.WriteString(fmt.Sprintf("  ... and %d more findings\n", len(v.Dependency.Findings)-10))
+						break
+					}
+					b.WriteString(fmt.Sprintf("  - %s\n", fd))
+				}
+			}
+		}
 	}
 	if v.StaticAnalysis != nil {
 		line("static-analysis", okStatus(v.StaticAnalysis.OK), fmt.Sprintf("tool=%s findings=%d", v.StaticAnalysis.Tool, len(v.StaticAnalysis.Findings)))
 	}
 	if v.E2ETests != nil {
-		line("e2e", okStatus(v.E2ETests.OK), fmt.Sprintf("passed=%d failed=%d skipped=%d", v.E2ETests.Passed, v.E2ETests.Failed, v.E2ETests.Skipped))
+		if v.E2ETests.Status == StatusSkipped {
+			b.WriteString("e2e: SKIPPED " + firstLine(v.E2ETests.Output) + "\n")
+		} else {
+			line("e2e", okStatus(v.E2ETests.OK), fmt.Sprintf("passed=%d failed=%d skipped=%d", v.E2ETests.Passed, v.E2ETests.Failed, v.E2ETests.Skipped))
+			if !v.E2ETests.OK && strings.TrimSpace(v.E2ETests.Output) != "" {
+				b.WriteString(strings.TrimSpace(v.E2ETests.Output) + "\n")
+			}
+		}
 	}
 	return strings.TrimSuffix(b.String(), "\n")
+}
+
+// firstLine returns the first non-empty, trimmed line of s — the concise
+// reason carried by a SKIPPED check's output.
+func firstLine(s string) string {
+	for _, ln := range strings.Split(s, "\n") {
+		if t := strings.TrimSpace(ln); t != "" {
+			return t
+		}
+	}
+	return strings.TrimSpace(s)
 }
 
 func okStatus(ok bool) string {

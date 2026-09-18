@@ -111,7 +111,7 @@ type Finding struct {
 	Evidence     []Evidence `json:"evidence,omitempty"`
 	Redacted     bool       `json:"redacted,omitempty"`
 
-	// Suppression maturity (P1-2): a finding covered by a reviewed, expiring
+	// Suppression maturity: a finding covered by a reviewed, expiring
 	// suppression is marked Suppressed, downgraded to INFO (visible, never
 	// blocking), and stamped with the suppression reason so the lift stays
 	// auditable. Owner is the responsible team from owners.yaml for routing.
@@ -124,7 +124,7 @@ type Finding struct {
 	// RuleVersion is the rule-family version ("1" for every v1 check).
 	// KernVersion is the kern binary that produced the underlying signal
 	// (best-effort; empty when the probe failed or no kern was involved).
-	// IndexFreshness is the kern-index state for index-backed checks (P0.2),
+	// IndexFreshness is the kern-index state for index-backed checks,
 	// empty when unknown:
 	//   "fresh"   — the index was already current when the check ran (no rebuild);
 	//   "rebuilt" — the index was stale, the check rebuilt it, and it is now current;
@@ -165,7 +165,7 @@ type Summary struct {
 	Skipped  int `json:"skipped"`
 }
 
-// ValidationOutcome (P0.4) summarizes a blueprint validation for kern's
+// ValidationOutcome summarizes a blueprint validation for kern's
 // audit chain: status, exit code, blocked files, correlation id, and finding
 // count. Kern consumes it via the `kern audit append` chain link to mark the
 // blocked context stale and route follow-ups. The wire format is the UNTAGGED

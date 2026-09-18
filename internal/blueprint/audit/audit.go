@@ -1,4 +1,4 @@
-// Package audit implements the Blueprint validation audit trail (P1-1).
+// Package audit implements the Blueprint validation audit trail.
 //
 // Every validation that flows through the canonical pipeline
 // (BlueprintService.Validate) writes one JSONL record to
@@ -27,8 +27,10 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -41,7 +43,7 @@ import (
 // FindingMeta is the redacted metadata of one finding: rule, severity,
 // category, and location. It deliberately omits message, explanation,
 // suggested_fix, evidence, and snippets (redaction invariant). Suppression
-// state (P1-2) is included so a suppression lift is itself auditable.
+// state is included so a suppression lift is itself auditable.
 type FindingMeta struct {
 	RuleID   string          `json:"rule_id"`
 	Severity domain.Severity `json:"severity"`
@@ -351,7 +353,7 @@ func (w *Writer) VerifyChain() (string, error) {
 
 	data, err := os.ReadFile(w.path)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, fs.ErrNotExist) {
 			return "", nil // no chain yet — trivially intact
 		}
 		return "", err
@@ -415,7 +417,7 @@ func (w *Writer) ChainContainsHash(hash string) (bool, error) {
 	}
 	data, err := os.ReadFile(w.path)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, fs.ErrNotExist) {
 			return false, nil
 		}
 		return false, err

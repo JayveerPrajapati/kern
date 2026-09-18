@@ -66,11 +66,6 @@ func TestRunRecordsNetworkPolicy(t *testing.T) {
 	}
 }
 
-// TestRunFailsClosedWithoutIsolation (F-022): on hosts without network
-// isolation the sandbox must REFUSE to run unless the local operator opted in
-// via KERN_ALLOW_UNISOLATED=1 / KERN_ALLOW_NET=1 — the same fail-closed gate
-// `kern exec` enforces (internal/script). The error must name the override
-// env vars so the caller knows how to proceed.
 func TestRunFailsClosedWithoutIsolation(t *testing.T) {
 	if networkIsolationAvailable() {
 		t.Skip("host provides network isolation; the fail-closed branch is not reachable")

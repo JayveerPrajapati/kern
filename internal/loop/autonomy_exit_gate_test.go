@@ -27,10 +27,13 @@ func (failingDeployer) Deploy(ctx context.Context, req deployment.DeployRequest)
 // SECURITY, ROLLBACK, BUDGET, and POLICY-BYPASS tests. Each sub-test exercises
 // one dimension at the loop level so a regression in any guard is caught here.
 func TestAutonomyExitGate(t *testing.T) {
-	t.Setenv("KERN_ALLOW_UNISOLATED", "1") // fail-closed gate: opt into unisolated runs on hosts without netns (darwin)
+	t.Parallel()
 	t.Run("failure_surfaces_error", func(t *testing.T) {
 		// A stage that fails must surface the error and stop — no silent
 		// success, no deployment.
+		if testing.Short() {
+			t.Skip("skipping real-worktree loop execution in -short mode")
+		}
 		lp, err := NewLoop(LoopConfig{Root: loopFixture(t), Level: L2, Mem: memory.NewMemoryStore(t.TempDir())})
 		if err != nil {
 			t.Fatalf("NewLoop: %v", err)
@@ -73,7 +76,9 @@ func TestAutonomyExitGate(t *testing.T) {
 	t.Run("rollback_on_failed_deploy", func(t *testing.T) {
 		// A failing deployer must roll back (res.Deployed=false, rolled-back
 		// event, error surfaced) — never a silent success.
-		t.Setenv("KERN_ALLOW_DEPLOY", "1")
+		if testing.Short() {
+			t.Skip("skipping real-worktree loop execution in -short mode")
+		}
 		bus := eventbus.New()
 		rolledBack := make(chan eventbus.Event, 1)
 		bus.Subscribe(eventbus.DeploymentRolledBack, func(ev eventbus.Event) {
@@ -106,6 +111,9 @@ func TestAutonomyExitGate(t *testing.T) {
 
 	t.Run("budget_pause", func(t *testing.T) {
 		// Exceeding the safety budget must PAUSE the loop.
+		if testing.Short() {
+			t.Skip("skipping real-worktree loop execution in -short mode")
+		}
 		budget := &domain.SafetyBudget{MaxToolCalls: 1}
 		lp, err := NewLoop(LoopConfig{Root: loopFixture(t), Level: L2, Mem: memory.NewMemoryStore(t.TempDir()), Budget: budget})
 		if err != nil {
@@ -129,6 +137,9 @@ func TestAutonomyExitGate(t *testing.T) {
 	t.Run("policy_bypass_level_gate", func(t *testing.T) {
 		// At L0 the code stage must NEVER execute even with a step handler
 		// that would run it (below-level stages are skipped, not bypassed).
+		if testing.Short() {
+			t.Skip("skipping real-worktree loop execution in -short mode")
+		}
 		called := false
 		lp, err := NewLoop(LoopConfig{Root: loopFixture(t), Level: L0, Mem: memory.NewMemoryStore(t.TempDir())})
 		if err != nil {

@@ -12,7 +12,7 @@ import (
 )
 
 // NetworkPolicy records the network posture of a sandboxed run — the network
-// half of the impact manifest (G-3). A zero-dependency build cannot trace
+// half of the impact manifest. A zero-dependency build cannot trace
 // syscalls, so the policy captures what was enforced and any network
 // failures visible in the command's output, not per-connection attempts.
 // (Per-syscall read/write network auditing would need ptrace/eBPF or a
@@ -60,7 +60,7 @@ var networkErrorSignatures = []string{
 const maxNetworkHits = 5
 
 // assessNetwork builds the run's network policy from its combined output
-// (G-3).
+// .
 func assessNetwork(output string) *NetworkPolicy {
 	p := &NetworkPolicy{
 		Isolated:    false, // sandbox.Run does not isolate egress; see NetworkPolicy.Isolated

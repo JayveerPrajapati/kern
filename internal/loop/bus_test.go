@@ -15,12 +15,14 @@ import (
 // TestLoopPublishesEvents verifies the closed loop publishes deployment,
 // observe and lesson events when a bus is attached.
 func TestLoopPublishesEvents(t *testing.T) {
-	t.Setenv("KERN_ALLOW_UNISOLATED", "1") // fail-closed gate: opt into unisolated runs on hosts without netns (darwin)
+	if testing.Short() {
+		t.Skip("skipping real-worktree loop execution in -short mode")
+	}
+	t.Parallel()
 	root := loopFixture(t)
 
-	// Production mutation is disabled by default (KERN_ALLOW_DEPLOY).
-	// This test exercises the deploy stage, so it must opt in explicitly.
-	t.Setenv("KERN_ALLOW_DEPLOY", "1")
+	// Deploy runs because KERN_ALLOW_DEPLOY=1 is set for the whole binary in
+	// TestMain (no test asserts the default block).
 
 	src := runtime.NewStore()
 	now := time.Now().Truncate(time.Second)
@@ -90,6 +92,10 @@ func TestLoopPublishesEvents(t *testing.T) {
 
 // TestLoopWithBusNilIsNoOp verifies a loop with a nil bus still runs.
 func TestLoopWithBusNilIsNoOp(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping real-worktree loop execution in -short mode")
+	}
+	t.Parallel()
 	root := loopFixture(t)
 	lp, err := NewLoop(LoopConfig{Root: root, Level: L0, Service: "s", Source: runtime.NewStore()})
 	if err != nil {

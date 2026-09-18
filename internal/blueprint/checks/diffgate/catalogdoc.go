@@ -3,9 +3,13 @@ package diffgate
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 
@@ -58,12 +62,7 @@ func schemaPropertyKeys(schema map[string]any) []string {
 	if !ok {
 		return nil
 	}
-	keys := make([]string, 0, len(props))
-	for k := range props {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	return keys
+	return slices.Sorted(maps.Keys(props))
 }
 
 // CatalogDocCheck (G36) verifies the committed docs/tool-catalog.md is
@@ -72,26 +71,28 @@ func schemaPropertyKeys(schema map[string]any) []string {
 // regenerating the catalog is silently undocumented, which is exactly the
 // drift dsh's verify-tool-catalog guard prevents.
 type CatalogDocCheck struct {
-	root string
+	root  string
+	tools []ToolInfo
 }
 
 // NewCatalogDocCheck constructs the catalog-doc check bound to a repo root.
-func NewCatalogDocCheck(root string) *CatalogDocCheck {
-	return &CatalogDocCheck{root: root}
+// tools is the injected live MCP catalog — mandatory (a wiring site that
+// omits it fails to compile; an empty list fails loud at Run).
+func NewCatalogDocCheck(root string, tools []ToolInfo) *CatalogDocCheck {
+	return &CatalogDocCheck{root: root, tools: tools}
 }
 
 // WriteCatalogDoc regenerates docs/tool-catalog.md from the live MCP catalog
-// and returns the written path. Errors when no catalog provider is linked.
-func WriteCatalogDoc(root string) (string, error) {
-	catalog, ok := toolCatalog()
-	if !ok {
-		return "", fmt.Errorf("no live MCP catalog available — link internal/mcp (kern binary)")
+// and returns the written path. Errors when no catalog is injected.
+func WriteCatalogDoc(root string, tools []ToolInfo) (string, error) {
+	if err := requireCatalogTools(tools); err != nil {
+		return "", err
 	}
 	docPath := filepath.Join(root, filepath.FromSlash(catalogDocRelPath))
 	if err := os.MkdirAll(filepath.Dir(docPath), 0o755); err != nil {
 		return "", err
 	}
-	if err := os.WriteFile(docPath, GenerateCatalogDoc(catalog), 0o644); err != nil {
+	if err := os.WriteFile(docPath, GenerateCatalogDoc(tools), 0o644); err != nil {
 		return "", err
 	}
 	return docPath, nil
@@ -105,15 +106,13 @@ func (c *CatalogDocCheck) Run(ctx context.Context, req domain.ChangeRequest) (do
 	if c.root == "" {
 		return domain.CheckResult{Name: c.Name(), Status: domain.StatusError, Error: "repository root required"}, nil
 	}
-	catalog, ok := toolCatalog()
-	if !ok {
-		// No catalog provider (mcp not linked): nothing to verify.
-		return domain.CheckResult{Name: c.Name(), Status: domain.StatusSkip, Skipped: true}, nil
+	if err := requireCatalogTools(c.tools); err != nil {
+		return domain.CheckResult{Name: c.Name(), Status: domain.StatusError, Error: err.Error()}, nil
 	}
 	docPath := filepath.Join(c.root, filepath.FromSlash(catalogDocRelPath))
 	committed, err := os.ReadFile(docPath)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, fs.ErrNotExist) {
 			return domain.CheckResult{Name: c.Name(), Status: domain.StatusBlock, Error: fmt.Sprintf("generated tool catalog missing at %s — run `kern gen-catalog`", catalogDocRelPath)}, nil
 		}
 		return domain.CheckResult{Name: c.Name(), Status: domain.StatusError, Error: fmt.Sprintf("read %s: %v", docPath, err)}, nil
@@ -121,7 +120,7 @@ func (c *CatalogDocCheck) Run(ctx context.Context, req domain.ChangeRequest) (do
 
 	docText := string(committed)
 	var missing []string
-	for _, t := range catalog {
+	for _, t := range c.tools {
 		if !strings.Contains(docText, "`"+t.Name+"`") {
 			missing = append(missing, t.Name)
 		}
@@ -129,7 +128,7 @@ func (c *CatalogDocCheck) Run(ctx context.Context, req domain.ChangeRequest) (do
 	if len(missing) > 0 {
 		return domain.CheckResult{Name: c.Name(), Status: domain.StatusBlock, Error: fmt.Sprintf("docs/tool-catalog.md does not document registered tool(s): %s — run `kern gen-catalog`", strings.Join(missing, ", "))}, nil
 	}
-	fresh := GenerateCatalogDoc(catalog)
+	fresh := GenerateCatalogDoc(c.tools)
 	if !bytes.Equal(committed, fresh) {
 		return domain.CheckResult{Name: c.Name(), Status: domain.StatusBlock, Error: "docs/tool-catalog.md is stale or out of order — run `kern gen-catalog` and commit the regenerated file"}, nil
 	}

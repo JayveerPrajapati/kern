@@ -12,15 +12,19 @@ import (
 	"fmt"
 	"io/fs"
 	"log"
+	"math"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	goruntime "runtime"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/JayveerPrajapati/kern/internal/fsutil"
 	"github.com/JayveerPrajapati/kern/internal/governance"
 	"github.com/JayveerPrajapati/kern/internal/index"
 	"github.com/JayveerPrajapati/kern/internal/intel"
@@ -85,13 +89,19 @@ func parseByteSize(s string) (int64, error) {
 	if n <= 0 {
 		return 0, fmt.Errorf("byte size must be positive: %q", s)
 	}
+	if n > math.MaxInt64/unit {
+		return 0, fmt.Errorf("byte size %q overflows: %d", s, n)
+	}
 	return n * unit, nil
 }
 
 // envAllowlist is the set of environment variables that are safe and useful
 // for sandboxed build/test commands. Everything else (API keys, tokens,
 // credentials) is stripped so a sandboxed command cannot read or exfiltrate
-// the operator's secrets.
+// the operator's secrets. Every allowlisted value is additionally scrubbed by
+// sanitizeEnvValue before it reaches the sandbox: Go proxy/sumdb variables
+// routinely carry credentialed URLs (https://user:token@proxy.corp/), which
+// must never be handed to arbitrary sandboxed commands.
 var envAllowlist = map[string]bool{
 	"PATH":             true,
 	"HOME":             true,
@@ -111,7 +121,10 @@ var envAllowlist = map[string]bool{
 	"GOCACHE":          true,
 	"GOMODCACHE":       true,
 	"GOPROXY":          true,
+	"GONOPROXY":        true,
 	"GOSUMDB":          true,
+	"GONOSUMDB":        true,
+	"GOPRIVATE":        true,
 	"GOTOOLCHAIN":      true,
 	"GOFLAGS":          true,
 	"CGO_ENABLED":      true,
@@ -121,8 +134,102 @@ var envAllowlist = map[string]bool{
 	"npm_config_cache": true,
 }
 
+// goURLEnvVars are allowlisted Go environment variables whose values are
+// (possibly comma- or pipe-separated) lists of URLs. Corporate proxies
+// routinely embed credentials in these — https://user:token@proxy.corp/ — so
+// every list segment that parses as a URL with userinfo is stripped of that
+// userinfo before the environment reaches a sandboxed command. Non-URL
+// segments ("direct", "off", "!pattern", module path globs) pass through
+// untouched.
+var goURLEnvVars = map[string]bool{
+	"GOPROXY":   true,
+	"GONOPROXY": true,
+	"GOSUMDB":   true,
+	"GONOSUMDB": true,
+}
+
+// credentialedURLRe matches the userinfo portion of a URL that carries
+// embedded credentials ("user:secret@" between "://" and the host). It is
+// used to decide whether a plain (non-list) value — a path such as GOMODCACHE,
+// module globs such as GOPRIVATE, or flags — needs scrubbing, so ordinary
+// values are never rewritten.
+var credentialedURLRe = regexp.MustCompile(`://[^/@\s]+@`)
+
+// sanitizeEnvValue scrubs a single allowlisted environment variable's value
+// before it is handed to a sandboxed command.
+//
+// URL-list variables (GOPROXY, GONOPROXY, GOSUMDB, GONOSUMDB) are split on
+// ',' and '|' (GOPROXY supports "proxy1,direct,!internal", "off", and "="
+// list forms); each segment that parses as a URL with userinfo has that
+// userinfo removed (https://user:pass@host → https://host), and non-URL
+// segments ("direct", "off", "!pattern", module globs) are left untouched.
+//
+// Every other allowlisted value (paths such as GOMODCACHE, patterns such as
+// GOPRIVATE, flags) is returned byte-for-byte unchanged unless a credentialed
+// URL is trivially detectable, in which case the embedded credentials are
+// removed. This keeps plain values intact while still defending against
+// credentials smuggled into non-list variables.
+func sanitizeEnvValue(name, value string) string {
+	if value == "" {
+		return value
+	}
+	if goURLEnvVars[name] {
+		return sanitizeEnvList(value, stripURLUserinfo)
+	}
+	return scrubEmbeddedCredentials(value)
+}
+
+// sanitizeEnvList applies fn to each ','- or '|'-separated segment of a Go
+// env list value, preserving the original separators so the reassembled value
+// differs from the input only where fn actually scrubbed something.
+func sanitizeEnvList(value string, fn func(string) string) string {
+	var b strings.Builder
+	start := 0
+	for i := 0; i < len(value); i++ {
+		if value[i] == ',' || value[i] == '|' {
+			b.WriteString(fn(value[start:i]))
+			b.WriteByte(value[i])
+			start = i + 1
+		}
+	}
+	b.WriteString(fn(value[start:]))
+	return b.String()
+}
+
+// stripURLUserinfo removes the userinfo from a single URL segment
+// (https://user:secret@proxy.corp → https://proxy.corp). Segments that do not
+// parse as URLs with a scheme and userinfo — "direct", "off", "!internal",
+// "*.corp.example.com", bare "sum.golang.org" — are returned unchanged.
+func stripURLUserinfo(seg string) string {
+	seg = strings.TrimSpace(seg)
+	if seg == "" {
+		return seg
+	}
+	u, err := url.Parse(seg)
+	if err != nil || u.Scheme == "" || u.User == nil {
+		return seg
+	}
+	u.User = nil
+	return u.String()
+}
+
+// scrubEmbeddedCredentials removes the userinfo from any credentialed URL
+// found in a plain (non-list) value: GOMODCACHE paths, GOPRIVATE module globs,
+// GOFLAGS, and so on. It is intentionally conservative — a value with no
+// "scheme://user:pass@host" pattern is returned exactly as given, so ordinary
+// paths and globs are never altered.
+func scrubEmbeddedCredentials(value string) string {
+	if !credentialedURLRe.MatchString(value) {
+		return value
+	}
+	return credentialedURLRe.ReplaceAllString(value, "://")
+}
+
 // sanitizedEnv returns an environment containing only allowlisted vars from
-// the operator's environment. All secrets, tokens, and API keys are dropped.
+// the operator's environment, with each value scrubbed by sanitizeEnvValue so
+// credentials embedded in Go proxy/sumdb URLs (https://user:token@proxy.corp/)
+// never reach sandboxed commands. All secrets, tokens, and API keys are
+// dropped.
 func sanitizedEnv() []string {
 	src := os.Environ()
 	out := make([]string, 0, len(src))
@@ -132,7 +239,7 @@ func sanitizedEnv() []string {
 			continue
 		}
 		if envAllowlist[kv[:eq]] {
-			out = append(out, kv)
+			out = append(out, kv[:eq]+"="+sanitizeEnvValue(kv[:eq], kv[eq+1:]))
 		}
 	}
 	return out
@@ -146,10 +253,11 @@ type Snap struct {
 	root           string
 	tmp            string
 	files          []string
-	skipped        map[string]bool  // pre-existing files not copied (size cap / read errors); never deleted on restore
-	skippedOverCap []string         // relative paths skipped for exceeding the snapshot cap; surfaced to callers
-	skippedSize    map[string]int64 // sizes (bytes) of skippedOverCap files at snapshot time, for post-run change detection
-	dirs           map[string]bool  // relative paths of directories that existed at snapshot time
+	skipped        map[string]bool        // pre-existing files not copied (size cap / read errors); never deleted on restore
+	skippedOverCap []string               // relative paths skipped for exceeding the snapshot cap; surfaced to callers
+	skippedSize    map[string]int64       // sizes (bytes) of skippedOverCap files at snapshot time, for post-run change detection
+	modes          map[string]fs.FileMode // original permission bits of snapshotted files, restored on rollback
+	dirs           map[string]bool        // relative paths of directories that existed at snapshot time
 }
 
 // Snapshot copies root into a temp directory and returns a Snap.
@@ -158,7 +266,7 @@ func Snapshot(root string) (*Snap, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := &Snap{root: root, tmp: tmp, skipped: map[string]bool{}, skippedSize: map[string]int64{}, dirs: map[string]bool{}}
+	s := &Snap{root: root, tmp: tmp, skipped: map[string]bool{}, skippedSize: map[string]int64{}, modes: map[string]fs.FileMode{}, dirs: map[string]bool{}}
 	var bytes int64
 	capBytes := snapshotCap()
 	var walkErrs []string
@@ -217,6 +325,11 @@ func Snapshot(root string) (*Snap, error) {
 			return nil
 		}
 		bytes += int64(len(data))
+		// Capture the original permission bits so a rollback can restore the
+		// mode along with the content (writeAtomic writes via CreateTemp,
+		// which always lands 0600; without the recorded mode every restored
+		// file would come back 0600/0644 instead of its pre-run mode).
+		s.modes[rel] = info.Mode()
 		s.files = append(s.files, rel)
 		return os.WriteFile(filepath.Join(tmp, rel), data, 0o644)
 	})
@@ -242,7 +355,7 @@ func (s *Snap) changedSkipped() []string {
 	for _, rel := range s.skippedOverCap {
 		fi, err := os.Lstat(filepath.Join(s.root, rel))
 		if err != nil {
-			if os.IsNotExist(err) {
+			if errors.Is(err, fs.ErrNotExist) {
 				changed = append(changed, rel)
 			}
 			continue
@@ -388,6 +501,13 @@ func (s *Snap) Restore() error {
 			continue
 		}
 		record(writeAtomic(dst, data))
+		// Restore the file's pre-run permission bits: writeAtomic writes via a
+		// 0600 temp file + rename, so without an explicit chmod every restored
+		// file would come back 0600 — silently destroying executable scripts
+		// and group/world-readable files across the tree (F25).
+		if mode, ok := s.modes[f]; ok {
+			record(os.Chmod(dst, mode))
+		}
 	}
 	// Remove anything new under root that wasn't in the snapshot. Ignored
 	// dirs are still skipped: their contents are not snapshotted, so deleting
@@ -448,7 +568,7 @@ func (s *Snap) Restore() error {
 		if Escape(s.root, rel) {
 			continue
 		}
-		if _, err := os.Lstat(filepath.Join(s.root, rel)); os.IsNotExist(err) {
+		if _, err := os.Lstat(filepath.Join(s.root, rel)); errors.Is(err, fs.ErrNotExist) {
 			record(fmt.Errorf("sandbox: file %q existed at snapshot time but was DELETED by the run and could not be restored (it was skipped at snapshot time because it exceeded the snapshot cap of %d bytes or could not be read); data may be lost", rel, snapshotCap()))
 		}
 	}
@@ -457,28 +577,10 @@ func (s *Snap) Restore() error {
 
 // writeAtomic writes data to path via a same-directory temp file + rename, so
 // readers never observe a partially written file and the write either lands
-// fully or not at all.
+// fully or not at all. The temp file's default 0600 mode is preserved (the
+// caller — Restore — re-applies the original file mode afterwards).
 func writeAtomic(path string, data []byte) error {
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".kern-restore-*")
-	if err != nil {
-		return err
-	}
-	tmpName := tmp.Name()
-	_, werr := tmp.Write(data)
-	cerr := tmp.Close()
-	if werr != nil {
-		_ = os.Remove(tmpName)
-		return werr
-	}
-	if cerr != nil {
-		_ = os.Remove(tmpName)
-		return cerr
-	}
-	if err := os.Rename(tmpName, path); err != nil {
-		_ = os.Remove(tmpName)
-		return err
-	}
-	return nil
+	return fsutil.WriteFileAtomic(path, data, 0o600)
 }
 
 // Close removes the temp snapshot.
@@ -515,7 +617,7 @@ type Result struct {
 	// or failed. Empty when the run left the snapshotted tree unchanged.
 	Manifest []Change
 	// Network records the run's network posture — the network half of the
-	// impact manifest (G-3). Zero-dependency builds cannot trace syscalls,
+	// impact manifest. Zero-dependency builds cannot trace syscalls,
 	// so it captures the enforced policy and any network failures visible
 	// in the output, not per-connection attempts. Nil only when the run
 	// never started (snapshot failure).
@@ -602,7 +704,7 @@ func runGuarded(parent context.Context, root string, cmdName string, args []stri
 	processgroup.Set(c)
 	out, err := c.CombinedOutput()
 	res.Output = string(out)
-	// G-3: record the run's network posture alongside the FS manifest so
+	// record the run's network posture alongside the FS manifest so
 	// the impact audit covers the network half too.
 	res.Network = assessNetwork(string(out))
 	res.Duration = time.Since(start)

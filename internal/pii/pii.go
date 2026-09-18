@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"unicode/utf8"
 )
 
@@ -30,7 +31,12 @@ var DefaultPatterns = []Pattern{
 	{Label: "PRIVATE_KEY", RE: regexp.MustCompile(`-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----`)},
 	{Label: "AWS", RE: regexp.MustCompile(`\bAKIA[0-9A-Z]{16}\b`)},
 	{Label: "AWS_SECRET", RE: regexp.MustCompile(`\b(?:aws_)?secret(?:_access_key)?\s*[=:]\s*["']?[A-Za-z0-9/+=]{40}["']?`)},
-	{Label: "GITHUB", RE: regexp.MustCompile(`\bgh[pousr]_[A-Za-z0-9]{30,}\b`)},
+	// GOOGLE: AIza… API keys (Google Maps/Cloud/Vertex). Placed ahead of the
+	// generic KEY/TOKEN patterns so provider hits label as GOOGLE.
+	{Label: "GOOGLE", RE: regexp.MustCompile(`\bAIza[0-9A-Za-z_-]{20,}\b`)},
+	// GITHUB: ghp_ (personal), gho_ (OAuth), ghu_ (user-to-server),
+	// ghs_ (server-to-server), ghr_ (refresh), ghx_ (expiring user).
+	{Label: "GITHUB", RE: regexp.MustCompile(`\bgh[pousrx]_[A-Za-z0-9]{30,}\b`)},
 	{Label: "GITHUB_PAT", RE: regexp.MustCompile(`\bgithub_pat_[A-Za-z0-9_]{60,}\b`)},
 	{Label: "SLACK", RE: regexp.MustCompile(`\bxox[baprs]-[A-Za-z0-9-]{10,}\b`)},
 	{Label: "STRIPE", RE: regexp.MustCompile(`\bsk_(?:live|test)_[A-Za-z0-9]{20,}\b`)},
@@ -38,6 +44,10 @@ var DefaultPatterns = []Pattern{
 	// prefixes also use dashes). The bare sk-… dash prefixes are covered by
 	// OPENAI/OPENAI_SHORT; this catches the pill‑shaped live/test variants.
 	{Label: "STRIPE_DASH", RE: regexp.MustCompile(`\bsk-(?:live|test)-[A-Za-z0-9]{16,}\b`)},
+	// ANTHROPIC: sk-ant-… / sk-ant-api03-… Claude API keys. Kept ahead of
+	// OPENAI/OPENAI_SHORT: the dashes in "ant-api03-" would otherwise let the
+	// token slip past OpenAI's [A-Za-z0-9] tails and reach the LLM unmasked.
+	{Label: "ANTHROPIC", RE: regexp.MustCompile(`\bsk-ant-(?:api03-)?[A-Za-z0-9_-]{20,}\b`)},
 	// OPENAI: sk-… keys. The proj- variant carries a unique prefix (only
 	// OpenAI emits sk-proj-) so it needs no length guardrail beyond a short
 	// tail; truncated keys in logs/fixtures (sk-proj-abc…{,12}) are secrets all
@@ -91,6 +101,23 @@ var (
 	rePct = regexp.MustCompile(`(?:%[0-9a-fA-F]{2}){8,}`)
 	reUni = regexp.MustCompile(`(?:(?:\\u[0-9a-fA-F]{4}){4,}|(?:\\x[0-9a-fA-F]{2}){8,})`)
 )
+
+// nameReCache caches the compiled case-insensitive word-boundary regex for
+// each masked name, so repeated MaskCustom/MaskNames calls with the same name
+// list never recompile a pattern. One entry per distinct name — bounded by
+// the number of distinct names ever masked.
+var nameReCache sync.Map
+
+// namePattern returns the compiled word-boundary regex for a masked name,
+// compiling and caching it on first use (see the wordReCache idiom).
+func namePattern(n string) *regexp.Regexp {
+	if v, ok := nameReCache.Load(n); ok {
+		return v.(*regexp.Regexp)
+	}
+	re := regexp.MustCompile(`(?i)\b` + regexp.QuoteMeta(n) + `\b`)
+	nameReCache.Store(n, re)
+	return re
+}
 
 // Result of a masking pass.
 type Result struct {
@@ -213,7 +240,7 @@ func maskCustom(text string, patterns []Pattern, names []string, suppressNonSecr
 		if n == "" {
 			continue
 		}
-		re := regexp.MustCompile(`(?i)\b` + regexp.QuoteMeta(n) + `\b`)
+		re := namePattern(n)
 		for _, m := range re.FindAllStringIndex(text, -1) {
 			hits = append(hits, hit{m[0], m[1], "NAME"})
 		}

@@ -55,11 +55,19 @@ func Annotate(result *VerificationResult) []domain.Claim {
 		appendFact("build", fmt.Sprintf("build verification %s", okWord(b.OK)))
 	}
 	if t := result.UnitTests; t != nil {
-		appendFact("test", fmt.Sprintf("unit tests %s (%d passed, %d failed, %d skipped)",
-			okWord(t.OK), t.Passed, t.Failed, t.Skipped))
+		if t.Status == StatusSkipped {
+			appendFact("test", "unit tests SKIPPED ("+firstLine(t.Output)+")")
+		} else {
+			appendFact("test", fmt.Sprintf("unit tests %s (%d passed, %d failed, %d skipped)",
+				okWord(t.OK), t.Passed, t.Failed, t.Skipped))
+		}
 	}
 	if t := result.Integration; t != nil {
-		appendFact("test", fmt.Sprintf("integration tests %s", okWord(t.OK)))
+		if t.Status == StatusSkipped {
+			appendFact("test", "integration tests SKIPPED ("+firstLine(t.Output)+")")
+		} else {
+			appendFact("test", fmt.Sprintf("integration tests %s", okWord(t.OK)))
+		}
 	}
 	if s := result.Security; s != nil {
 		appendFact("security", fmt.Sprintf("security scan %s (%d findings, %d critical, %d high, %d low)",
@@ -74,8 +82,12 @@ func Annotate(result *VerificationResult) []domain.Claim {
 			okWord(d.OK), d.GraphNodes, d.GraphEdges))
 	}
 	if e := result.E2ETests; e != nil {
-		appendFact("e2e", fmt.Sprintf("e2e tests %s (%d passed, %d failed, %d skipped)",
-			okWord(e.OK), e.Passed, e.Failed, e.Skipped))
+		if e.Status == StatusSkipped {
+			appendFact("e2e", "e2e tests SKIPPED ("+firstLine(e.Output)+")")
+		} else {
+			appendFact("e2e", fmt.Sprintf("e2e tests %s (%d passed, %d failed, %d skipped)",
+				okWord(e.OK), e.Passed, e.Failed, e.Skipped))
+		}
 	}
 	if s := result.StaticAnalysis; s != nil {
 		appendFact("static-analysis", fmt.Sprintf("static analysis %s (%s, %d findings)",
@@ -134,18 +146,30 @@ func evidenceOf(result *VerificationResult) []domain.Evidence {
 	return []domain.Evidence{ToEvidence(result.Verdict, result)}
 }
 
-// verdictOf derives the overall verdict from the individual results.
+// verdictOf derives the overall verdict from the individual results. A check
+// stamped StatusSkipped is excluded from the math: it counts as neither
+// passing nor failing, so a run with a skipped check can never claim a plain
+// PASS (it yields VerdictSkipped when nothing else failed).
 func verdictOf(result *VerificationResult) Verdict {
 	fail := false
 	warn := false
+	skipped := false
 	if b := result.Build; b != nil && !b.OK {
 		fail = true
 	}
-	if t := result.UnitTests; t != nil && !t.OK {
-		fail = true
+	if t := result.UnitTests; t != nil {
+		if t.Status == StatusSkipped {
+			skipped = true
+		} else if !t.OK {
+			fail = true
+		}
 	}
-	if t := result.Integration; t != nil && !t.OK {
-		fail = true
+	if t := result.Integration; t != nil {
+		if t.Status == StatusSkipped {
+			skipped = true
+		} else if !t.OK {
+			fail = true
+		}
 	}
 	if s := result.Security; s != nil {
 		if !s.OK {
@@ -162,8 +186,12 @@ func verdictOf(result *VerificationResult) Verdict {
 		fail = true
 	}
 	// E2E and static-analysis are hard failures when they report a problem.
-	if e := result.E2ETests; e != nil && !e.OK {
-		fail = true
+	if e := result.E2ETests; e != nil {
+		if e.Status == StatusSkipped {
+			skipped = true
+		} else if !e.OK {
+			fail = true
+		}
 	}
 	if s := result.StaticAnalysis; s != nil && !s.OK {
 		fail = true
@@ -172,6 +200,9 @@ func verdictOf(result *VerificationResult) Verdict {
 	// non-zero does not fail the verdict.
 	if fail {
 		return VerdictFail
+	}
+	if skipped {
+		return VerdictSkipped
 	}
 	if warn {
 		return VerdictWarn

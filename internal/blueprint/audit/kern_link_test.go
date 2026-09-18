@@ -306,13 +306,6 @@ func TestKernEntryCarriesContextProvenance(t *testing.T) {
 	}
 }
 
-// --- P0.4 ValidationOutcome mapping tests ---
-//
-// The audit chain link carries blueprint's validation outcome to kern so kern
-// can mark blocked context stale. The wire format is kern's AuditEntry field
-// name ("ValidationOutcome") with the untagged Go field names of
-// domain.ValidationOutcome as the nested keys.
-
 func TestKernEntry_ValidationOutcome_Populated(t *testing.T) {
 	r := testRecord() // BLOCK, ExitCode 1, CorrelationID bp-123
 	// Extend with a duplicate blocking path (must dedup) and a non-blocking

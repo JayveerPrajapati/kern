@@ -4,7 +4,9 @@ package governance
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"log"
 	"os"
 	"path/filepath"
@@ -51,7 +53,10 @@ type FileStore struct {
 // later read.
 func NewFileStore(root string) *FileStore {
 	dir := filepath.Join(root, ".kern")
-	_ = os.MkdirAll(dir, 0o755)
+	// The approvals directory holds pending human-approval decisions; create
+	// it owner-only (0o700) so other local users cannot read who approved
+	// what or the gated task keys (audit A2: approvals are sensitive).
+	_ = os.MkdirAll(dir, 0o700)
 	s := &FileStore{path: filepath.Join(dir, "approvals.json")}
 	// Prime the store on construction. Every read/write re-loads the file (so
 	// the store observes cross-process writes), but loading here surfaces a
@@ -81,7 +86,7 @@ func (s *FileStore) LoadError() error {
 func (s *FileStore) loadLocked() ([]domain.Approval, error) {
 	data, err := os.ReadFile(s.path)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, fs.ErrNotExist) {
 			return nil, nil
 		}
 		return nil, fmt.Errorf("approval store: read %s: %w", s.path, err)
@@ -100,7 +105,7 @@ func (s *FileStore) loadLocked() ([]domain.Approval, error) {
 // It writes to a unique temp file (os.CreateTemp) then renames atomically,
 // avoiding cross-process temp-file collisions.
 func (s *FileStore) saveLocked(approvals []domain.Approval) error {
-	if err := os.MkdirAll(filepath.Dir(s.path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(s.path), 0o700); err != nil {
 		return err
 	}
 	data, err := json.MarshalIndent(approvals, "", "  ")
@@ -120,7 +125,9 @@ func (s *FileStore) saveLocked(approvals []domain.Approval) error {
 		_ = os.Remove(tmp.Name())
 		return fmt.Errorf("approval store: close %s: %w", tmp.Name(), err)
 	}
-	if err := os.Chmod(tmp.Name(), 0o644); err != nil {
+	// Owner-only (0o600): the approvals file carries pending decisions and
+	// task keys that other local users must not read (audit A2).
+	if err := os.Chmod(tmp.Name(), 0o600); err != nil {
 		_ = os.Remove(tmp.Name())
 		return fmt.Errorf("approval store: chmod %s: %w", tmp.Name(), err)
 	}
@@ -162,13 +169,52 @@ func (s *FileStore) AddPending(a domain.Approval) error {
 	})
 }
 
+// Consume atomically removes the approval with the given ID and reports
+// whether it was present (claimed). The removal runs inside the single
+// flock'd load-modify-save critical section (mutate), so two concurrent
+// claims for the same ID can never both report true — the single-use
+// guarantee for exec approvals (gate-1 attempt-2: a check-then-consume
+// outside the lock let two concurrent identical calls both pass).
+func (s *FileStore) Consume(approvalID string) (bool, error) {
+	claimed := false
+	err := s.mutate(func(approvals []domain.Approval) []domain.Approval {
+		kept := approvals[:0]
+		for _, it := range approvals {
+			if it.ID == approvalID {
+				claimed = true
+				continue
+			}
+			kept = append(kept, it)
+		}
+		return kept
+	})
+	if err != nil {
+		return false, err
+	}
+	return claimed, nil
+}
+
 // Decide marks an approval as approved or rejected, sets the DecidedAt timestamp,
 // and saves. Returns the updated approval and an error if not found.
 func (s *FileStore) Decide(approvalID, approver string, approved bool, reason string) (domain.Approval, error) {
 	var decided domain.Approval
+	// R1: a decision that changes an exec-stamped record's Status invalidates
+	// its HMAC (the MAC covers Status), so the record must be re-stamped. If
+	// the secret is unavailable the decision fails closed — an unverifiable
+	// record can never grant execution.
+	var stampErr error
+	var integrityErr error
 	err := s.mutate(func(approvals []domain.Approval) []domain.Approval {
 		for i := range approvals {
 			if approvals[i].ID == approvalID {
+				// Gate-1 attempt-2: refuse to decide an exec-stamped record
+				// whose integrity does not verify. Deciding would re-stamp
+				// and launder the tamper into a fully-valid grant, so a
+				// tampered pending record must never be decidable.
+				if mac := execApprovalStampFrom(approvals[i]); mac != "" && !execApprovalMACValid(approvals[i]) {
+					integrityErr = fmt.Errorf("approval %s: integrity check failed (record was modified outside the approval workflow); refusing to decide", approvalID)
+					return approvals
+				}
 				now := time.Now()
 				approvals[i].Approver = approver
 				approvals[i].DecidedAt = &now
@@ -180,6 +226,16 @@ func (s *FileStore) Decide(approvalID, approver string, approved bool, reason st
 				} else {
 					approvals[i].Status = "rejected"
 				}
+				// Exec-path integrity only: records carrying the exec HMAC
+				// marker are re-stamped over their new status; records from
+				// other features sharing this store are untouched.
+				if mac := execApprovalStampFrom(approvals[i]); mac != "" {
+					if re, rerr := execApprovalStamp(approvals[i]); rerr != nil {
+						stampErr = rerr
+					} else {
+						approvals[i].ArtifactID = re
+					}
+				}
 				decided = approvals[i]
 				break
 			}
@@ -188,6 +244,14 @@ func (s *FileStore) Decide(approvalID, approver string, approved bool, reason st
 	})
 	if err != nil {
 		return domain.Approval{}, err
+	}
+	if integrityErr != nil {
+		return domain.Approval{}, integrityErr
+	}
+	if stampErr != nil {
+		// The status change was persisted but the record's HMAC is now stale
+		// (unverifiable), so the decision must not be reported as usable.
+		return domain.Approval{}, fmt.Errorf("approval %s: decision recorded but integrity re-stamp failed (approval is unverifiable; failing closed): %w", approvalID, stampErr)
 	}
 	if decided.ID == "" {
 		return domain.Approval{}, fmt.Errorf("approval not found: %s", approvalID)

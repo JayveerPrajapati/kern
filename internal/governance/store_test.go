@@ -437,3 +437,29 @@ func TestNewFileStoreCorruptFileFailsClosed(t *testing.T) {
 		t.Fatalf("want empty store after repair, got %+v", got)
 	}
 }
+
+// TestFileStoreSavePerms locks audit A2: the approvals file must be written
+// owner-only (0o600) and the approvals directory created 0o700, so other
+// local users cannot read pending approvals, gated task keys, or approvers.
+func TestFileStoreSavePerms(t *testing.T) {
+	root := t.TempDir()
+	s := NewFileStore(root)
+	if err := s.AddPending(domain.Approval{ID: "appr-perm", TaskID: "task-perm", Status: "pending", RequestedAt: time.Now()}); err != nil {
+		t.Fatalf("AddPending: %v", err)
+	}
+
+	fi, err := os.Stat(filepath.Join(root, ".kern", "approvals.json"))
+	if err != nil {
+		t.Fatalf("stat approvals.json: %v", err)
+	}
+	if perm := fi.Mode().Perm(); perm != 0o600 {
+		t.Errorf("approvals.json mode = %o, want 0600", perm)
+	}
+	di, err := os.Stat(filepath.Join(root, ".kern"))
+	if err != nil {
+		t.Fatalf("stat .kern dir: %v", err)
+	}
+	if perm := di.Mode().Perm(); perm != 0o700 {
+		t.Errorf(".kern dir mode = %o, want 0700", perm)
+	}
+}

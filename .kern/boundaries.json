@@ -1,0 +1,80 @@
+{
+  "description": "kern self-governance guardrails pinned from inference on 2026-09-15 (keep in sync with architecture changes)",
+  "rules": [
+    {
+      "from": "internal/blueprint/domain",
+      "to": "internal/web",
+      "action": "forbid"
+    },
+    {
+      "from": "internal/blueprint/domain",
+      "to": "internal/webhook",
+      "action": "forbid"
+    },
+    {
+      "from": "internal/domain",
+      "to": "internal/webhook",
+      "action": "forbid"
+    },
+    {
+      "from": "internal/domain",
+      "to": "internal/web",
+      "action": "forbid"
+    },
+    {
+      "from": "internal/blueprint/service",
+      "to": "internal/web",
+      "action": "forbid"
+    },
+    {
+      "from": "internal/blueprint/service",
+      "to": "internal/webhook",
+      "action": "forbid"
+    },
+    {
+      "from": "internal/service",
+      "to": "internal/web",
+      "action": "forbid"
+    },
+    {
+      "from": "internal/service",
+      "to": "internal/webhook",
+      "action": "forbid"
+    },
+    {
+      "from": "repository",
+      "to": "controller",
+      "action": "forbid"
+    },
+    {
+      "from": "repository",
+      "to": "service",
+      "action": "forbid"
+    },
+    {
+      "from": "service",
+      "to": "controller",
+      "action": "forbid"
+    },
+    {
+      "from": "service",
+      "to": "web",
+      "action": "forbid"
+    },
+    {
+      "from": "db",
+      "to": "web",
+      "action": "forbid"
+    },
+    {
+      "from": "db",
+      "to": "controller",
+      "action": "forbid"
+    },
+    {
+      "from": "db",
+      "to": "service",
+      "action": "forbid"
+    }
+  ]
+}

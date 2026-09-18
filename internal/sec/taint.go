@@ -60,7 +60,7 @@ func TaintLite(ix *index.Index, findings []Finding) []TaintFinding {
 // check when no entry path exists.
 func taintOne(ix *index.Index, f Finding) TaintFinding {
 	tf := TaintFinding{Finding: f, Func: "<unknown>"}
-	// G-4: Python findings carry no Go call-graph symbols. The sink symbol is
+	// Python findings carry no Go call-graph symbols. The sink symbol is
 	// the matched callee and taint is decided by the source-file heuristic.
 	if isPythonFinding(f) {
 		tf.Func = pythonSinkSymbol(f)
@@ -157,7 +157,7 @@ func sourceFileTainted(ix *index.Index, f Finding) bool {
 }
 
 // isPythonFinding reports whether the finding originates from a Python file
-// or a Python-specific rule (G-4); such findings have no Go call-graph path.
+// or a Python-specific rule; such findings have no Go call-graph path.
 func isPythonFinding(f Finding) bool {
 	return strings.HasPrefix(f.Rule, "py-") || strings.HasSuffix(strings.ToLower(f.File), ".py")
 }

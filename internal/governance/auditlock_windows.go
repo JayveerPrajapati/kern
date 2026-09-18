@@ -3,6 +3,7 @@
 package governance
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"time"
@@ -25,7 +26,7 @@ func lockAuditFile(path string) (unlock func(), err error) {
 			f.Close()
 			return func() { os.Remove(path) }, nil
 		}
-		if !os.IsExist(err) {
+		if !errors.Is(err, os.ErrExist) {
 			return nil, err
 		}
 		if time.Now().After(deadline) {

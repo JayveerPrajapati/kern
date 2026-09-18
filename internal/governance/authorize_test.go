@@ -21,10 +21,6 @@ func writeFile(t *testing.T, dir, rel, content string) {
 	}
 }
 
-// TestAuthorizeContext_DeniedPathExcludesSymbols is the P0.1 DoD gate: a
-// registered agent with the context.read permission, a task scope that denies
-// secret/, must see PublicA but never SecretB — and SecretB must appear in the
-// Denied list with Stage == "path".
 func TestAuthorizeContext_DeniedPathExcludesSymbols(t *testing.T) {
 	agent := NewAgent("restricted-bot", "Restricted Bot", "planner", []Permission{
 		{Resource: "context", Action: "read"},

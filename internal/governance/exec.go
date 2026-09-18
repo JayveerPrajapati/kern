@@ -4,6 +4,8 @@
 package governance
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -23,7 +25,10 @@ import (
 // named in it; a non-empty but unrelated allowlist does not re-enable exec.
 // 3. The change firewall authorizes the command via the risk model, so a
 // command.execute can become approval-gated (HIGH/CRITICAL) rather than
-// hardcoded LOW.
+// hardcoded LOW. When it is, the approval is bound to the exact command text
+// (SHA-256 in the key) and persisted to <root>/.kern/approvals.json, so
+// `kern approve <id>` can resolve it out-of-band and one approval authorizes
+// exactly one command (audit A3/A4).
 const execAgentID = "mcp-exec"
 
 // execToolNames are the host-command tools that a KERN_TOOLS allowlist must
@@ -36,10 +41,29 @@ var execToolNames = []string{"kern_exec", "kern_sandbox", "kern_execute"}
 // refused. toolName optionally names the specific exec tool so the allowlist
 // is validated against exactly what is being allowed; when empty, at least one
 // exec tool must be present in the allowlist.
-// A HIGH/CRITICAL command.execute fails closed here with an
-// approval-required error. Callers that want to drive the human-approval
-// workflow should use RequestExecApproval / ResumeExecApproval instead.
+// A HIGH/CRITICAL command.execute fails closed here with an approval-required
+// error. Callers that hold the concrete command text should use
+// CheckExecCommand instead, so the approval is command-specific and
+// persisted; CheckExec is the command-less form and delegates to it with an
+// empty command (approval stays in-memory — there is no command to bind and
+// no root to persist under).
 func CheckExec(toolName ...string) error {
+	return CheckExecCommand("", "", toolName...)
+}
+
+// CheckExecCommand is the command-aware form of CheckExec: it gates one
+// concrete command text. When the command is approval-gated (HIGH/CRITICAL
+// via KERN_EXEC_RISK, and no KERN_ALLOW_EXEC / KERN_TOOLS allowlist bypass
+// applies), it creates a PERSISTED, command-hash-bound approval under root
+// (<root>/.kern/approvals.json) — integrity-stamped with an HMAC keyed by a
+// secret outside the workspace (R1) — and returns an error carrying the
+// approval ID with the resolution hint "resolve with: kern approve <id>".
+// After a human approves that ID, the SAME command passes exactly once (the
+// grant is consumed, R2); a DIFFERENT command never passes on that approval
+// (the approval key embeds the command's SHA-256). An empty root keeps the
+// approval in-memory (visible only to this process) and returns honest
+// guidance instead of the out-of-band approve hint (R6).
+func CheckExecCommand(command, root string, toolName ...string) error {
 	tool := ""
 	if len(toolName) > 0 {
 		tool = strings.TrimSpace(toolName[0])
@@ -47,17 +71,61 @@ func CheckExec(toolName ...string) error {
 	if err := execAllowlistGate(tool); err != nil {
 		return err
 	}
-	allowed, risk, approval, err := execFirewallCheck()
+	key := TaskKey(execAgentID, "command", "execute")
+	if command != "" {
+		key = execCommandKey(command)
+	}
+	fw := newExecFirewall(root, command)
+	granted := execApprovedFor(root, key)
+	if granted != nil {
+		// A human approved this exact command out-of-band (`kern approve
+		// <id>` persisted a MAC-verified approved record): grant the key so
+		// the firewall's approval gate lets this ONE execution through.
+		fw.grantApproval(key)
+	}
+	allowed, risk, ap, err := fw.Check(execAgentID, "command", "execute")
 	if err != nil {
 		return fmt.Errorf("governance: exec firewall denied: %w", err)
 	}
-	if !allowed {
-		if approval != nil || RequiresApproval(risk.Level) {
-			return fmt.Errorf("governance: command execution requires human approval (risk level %s, score %.2f); approve it before running", risk.Level, risk.Score)
+	if allowed {
+		// R2: the grant authorizes exactly one execution — atomically claim
+		// the approved record (single flock'd mutation; only one concurrent
+		// execution wins) and ledger the consumed ID outside the workspace so
+		// a snapshot-and-reinsert replay cannot reauthorize it (R2d). The
+		// claim targets the record from the FIRST lookup: if a concurrent
+		// execution already consumed it, Consume reports claimed=false and
+		// this call denies BEFORE executing (gate-1 attempt-3).
+		if granted != nil {
+			claimed, cerr := claimExecApproval(root, granted.ID)
+			if cerr != nil {
+				return fmt.Errorf("governance: exec approval %s could not be consumed (single-use guarantee broken; failing closed): %w", granted.ID, cerr)
+			}
+			if !claimed {
+				return fmt.Errorf("governance: exec approval %s was already consumed by a concurrent execution (single-use); request a new approval", granted.ID)
+			}
 		}
-		return errors.New("governance: exec firewall denied command execution")
+		return nil
 	}
-	return nil
+	if ap != nil {
+		if root == "" {
+			// R6: in-memory approval — no other process can resolve it, so
+			// the `kern approve <id>` hint would be a dead end. Give honest
+			// guidance instead.
+			return fmt.Errorf("governance: command execution requires human approval (risk level %s, score %.2f); no persistent approval store for this call — allow it via the KERN_TOOLS allowlist or run with a project root to enable `kern approve`", risk.Level, risk.Score)
+		}
+		if serr := stampExecApproval(root, ap); serr != nil {
+			return fmt.Errorf("governance: command execution requires human approval, but the approval could not be integrity-protected: %w", serr)
+		}
+		// The firewall already requested (and persisted) the command-bound
+		// approval. Surface it with the resolution hint so the caller can
+		// route it to a human (`kern approve <id>`).
+		return fmt.Errorf("governance: command execution requires human approval (risk level %s, score %.2f); approval %s pending — resolve with: kern approve %s", risk.Level, risk.Score, ap.ID, ap.ID)
+	}
+	if RequiresApproval(risk.Level) {
+		// Approval-required but no approval could be surfaced: fail closed.
+		return fmt.Errorf("governance: command execution requires human approval (risk level %s, score %.2f) but no approval could be created; failing closed", risk.Level, risk.Score)
+	}
+	return errors.New("governance: exec firewall denied command execution")
 }
 
 // execAllowlistGate enforces the KERN_TOOLS allowlist (gates 1 and 2 above).
@@ -91,7 +159,7 @@ func execAllowlistGate(tool string) error {
 // returns whether it is allowed, the assessed risk, and — when the action is
 // approval-gated — the pending approval from the firewall's own ephemeral
 // workflow. Callers that want a real, externally-reviewable approval should
-// use RequestExecApproval instead.
+// use RequestExecApproval / CheckExecCommand instead.
 func execFirewallCheck() (allowed bool, risk domain.Risk, approval *domain.Approval, err error) {
 	fw := NewFirewall().WithPolicies(execPolicies())
 	agent := NewAgent(execAgentID, "mcp-exec", "application", []Permission{{Resource: "command", Action: "execute"}})
@@ -99,17 +167,54 @@ func execFirewallCheck() (allowed bool, risk domain.Risk, approval *domain.Appro
 	return allowed, risk, approval, err
 }
 
+// newExecFirewall builds the exec firewall: the operator-configurable exec
+// policies plus the mcp-exec agent. When root is non-empty the approval
+// workflow is persisted to <root>/.kern/approvals.json (so `kern approve
+// <id>` can resolve approvals out-of-band); otherwise it is in-memory. When
+// command is non-empty the firewall binds its approval gate to the exact
+// command text (see WithExecCommand).
+func newExecFirewall(root, command string) *Firewall {
+	var fw *Firewall
+	if root != "" {
+		fw = NewFirewallWithApprovalStore(root)
+	} else {
+		fw = NewFirewall()
+	}
+	fw = fw.WithPolicies(execPolicies())
+	fw = fw.WithAgents(NewAgent(execAgentID, "mcp-exec", "application", []Permission{{Resource: "command", Action: "execute"}}))
+	if command != "" {
+		fw = fw.WithExecCommand(command)
+	}
+	return fw
+}
+
+// execCommandHash returns the hex SHA-256 of the command text — the component
+// that makes an exec approval command-specific (audit A3).
+func execCommandHash(command string) string {
+	sum := sha256.Sum256([]byte(command))
+	return hex.EncodeToString(sum[:])
+}
+
+// execCommandKey builds the approval/task key for a concrete command: the
+// exec task triple plus the command hash, so an approval authorizes exactly
+// one command and cannot be replayed against a different one.
+func execCommandKey(command string) string {
+	return TaskKey(execAgentID, "command", "execute") + "|" + execCommandHash(command)
+}
+
 // RequestExecApproval runs the full exec governance gate and, when the command
 // is approval-gated (command.execute scoring HIGH/CRITICAL via KERN_EXEC_RISK),
-// submits an ApprovalRequest to wf and returns the pending approval so the
-// orchestrator/CLI can route it to a human reviewer.
+// submits a command-bound ApprovalRequest to wf and returns the pending
+// approval so the orchestrator/CLI can route it to a human reviewer.
+// command is the exact command text that will run: the approval is bound to
+// its SHA-256 (audit A3), so one approval authorizes exactly that command.
 // Returns:
 // - (nil, risk, nil): the command may run directly (no approval required).
 // - (&approval, risk, nil): an approval is pending; it must be approved
 // (wf.Approve) before ResumeExecApproval lets the command run.
 // - (nil, risk, err): the command is denied, or approval is required but no
 // workflow is configured (fails closed).
-func RequestExecApproval(wf *ApprovalWorkflow, toolName ...string) (*domain.Approval, domain.Risk, error) {
+func RequestExecApproval(wf *ApprovalWorkflow, command string, toolName ...string) (*domain.Approval, domain.Risk, error) {
 	tool := ""
 	if len(toolName) > 0 {
 		tool = strings.TrimSpace(toolName[0])
@@ -132,9 +237,31 @@ func RequestExecApproval(wf *ApprovalWorkflow, toolName ...string) (*domain.Appr
 		// a HIGH/CRITICAL command without a human approval path.
 		return nil, risk, fmt.Errorf("governance: command execution requires human approval (risk level %s, score %.2f) but no approval workflow is configured; failing closed", risk.Level, risk.Score)
 	}
-	ap, err := wf.Request(TaskKey(execAgentID, "command", "execute"), execAgentID, risk.Mitigation)
+	key := TaskKey(execAgentID, "command", "execute")
+	if command != "" {
+		key = execCommandKey(command)
+	}
+	var evidence []string
+	if command != "" {
+		evidence = []string{command}
+	}
+	ap, err := wf.RequestWithBinding(key, execAgentID, risk.Mitigation, risk.Level, nil, evidence, "")
 	if err != nil {
 		return nil, risk, fmt.Errorf("governance: command execution requires human approval, but the approval could not be persisted: %w", err)
+	}
+	// R1: a persistence-backed workflow must carry the exec integrity stamp
+	// so a forged/legacy record in the shared approval file can never be
+	// resumed. In-memory workflows (no store) skip the stamp — there is
+	// nothing on disk to forge.
+	if wf.store != nil {
+		stamp, serr := execApprovalStamp(ap)
+		if serr != nil {
+			return nil, risk, fmt.Errorf("governance: exec approval %s could not be integrity-stamped: %w", ap.ID, serr)
+		}
+		ap.ArtifactID = stamp
+		if perr := wf.store.AddPending(ap); perr != nil {
+			return nil, risk, fmt.Errorf("governance: exec approval %s integrity stamp could not be persisted: %w", ap.ID, perr)
+		}
 	}
 	return &ap, risk, nil
 }
@@ -142,7 +269,10 @@ func RequestExecApproval(wf *ApprovalWorkflow, toolName ...string) (*domain.Appr
 // ResumeExecApproval reports whether a previously-requested exec approval may
 // proceed, i.e. the human has approved it. It returns nil (proceed) only when
 // wf has the approval in the "approved" state; otherwise it fails closed
-// (still pending / rejected / unknown).
+// (still pending / rejected / unknown). For persistence-backed workflows the
+// approved record must additionally carry a valid exec HMAC (R1): the store
+// copy is verified — not the in-memory copy, which keeps the pre-decision
+// stamp — so a forged/legacy record can never resume execution.
 func ResumeExecApproval(wf *ApprovalWorkflow, approvalID string) error {
 	if wf == nil {
 		return errors.New("governance: no approval workflow configured; cannot resume command execution")
@@ -153,6 +283,15 @@ func ResumeExecApproval(wf *ApprovalWorkflow, approvalID string) error {
 	}
 	if a.Status != "approved" {
 		return fmt.Errorf("governance: exec approval %q is %s, not approved; command not run", approvalID, a.Status)
+	}
+	if wf.store != nil {
+		stored, serr := wf.store.Get(approvalID)
+		if serr != nil {
+			return fmt.Errorf("governance: exec approval %q not in the persisted store: %w", approvalID, serr)
+		}
+		if !execApprovalMACValid(stored) {
+			return fmt.Errorf("governance: exec approval %q failed integrity verification; command not run", approvalID)
+		}
 	}
 	return nil
 }

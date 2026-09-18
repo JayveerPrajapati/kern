@@ -29,7 +29,7 @@ func pyProbeFor(rule string) string {
 }
 
 // GenPytestScaffold builds a deterministic pytest frame for a tainted Python
-// sink (G-4). The output file is <sink dir>/<sink base>_taint_test.py; the
+// sink. The output file is <sink dir>/<sink base>_taint_test.py; the
 // test function is test_<rule>_<line> (rule dashes become underscores so the
 // name is a valid Python identifier). The probe body is intentionally left
 // for the caller (LLM-assisted fill); the frame itself is deterministic.
@@ -73,7 +73,7 @@ def %s():
 }
 
 // ScaffoldFor returns the language-appropriate test scaffold for a tainted
-// finding (G-4): a pytest frame when the sink is a Python file or a py-*
+// finding: a pytest frame when the sink is a Python file or a py-*
 // rule, the Go frame otherwise.
 func ScaffoldFor(t TaintFinding) TestScaffold {
 	if strings.HasSuffix(strings.ToLower(t.File), ".py") || strings.HasPrefix(t.Rule, "py-") {

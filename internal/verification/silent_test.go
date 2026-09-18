@@ -172,11 +172,6 @@ func TestScanSilentEmpty(t *testing.T) {
 	}
 }
 
-// TestCopyTreeToTempSkipsSymlinks guards AUD-04: copyTreeToTemp must never
-// follow a symlink out of root. A repo symlink (notes -> external secret
-// file, or a symlinked dir) must be skipped entirely — neither the link nor
-// its target's content may appear in the copied tree, while regular files
-// still copy normally.
 func TestCopyTreeToTempSkipsSymlinks(t *testing.T) {
 	root := t.TempDir()
 

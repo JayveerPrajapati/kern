@@ -11,7 +11,7 @@ import (
 	"testing"
 
 	"github.com/JayveerPrajapati/kern/internal/blueprint/domain"
-	"github.com/JayveerPrajapati/kern/internal/blueprint/policy"
+	"github.com/JayveerPrajapati/kern/internal/bppolicy/policy"
 )
 
 // freshEnsureJSON is the canned `kern index ensure-fresh --json` payload
@@ -350,11 +350,6 @@ func TestArchitectureCheckMissingIndex(t *testing.T) {
 	}
 }
 
-// TestArchitectureCheckSandboxIndexInvisible (report A4): kern's .kern index
-// is gitignored, so a validation run in a detached-worktree sandbox (CI at a
-// non-HEAD ref) cannot see it even though the source repo has a fresh index.
-// The not-enforced WARN must then say "the sandbox cannot see the index"
-// rather than "kern has never been run in this repo".
 func TestArchitectureCheckSandboxIndexInvisible(t *testing.T) {
 	src := t.TempDir()
 	runGit(t, src, "init", "-q")
@@ -880,11 +875,6 @@ func TestArchitectureCheckRuleVersionConfidenceFreshness(t *testing.T) {
 	}
 }
 
-// TestArchitectureCheck_StaleIndexErrors (P0.2 DoD): when the ensure-fresh
-// subprocess reports the index stale and a rebuild does NOT converge
-// (freshness "stale", exit 2), the check must ERROR with an
-// architecture:index-stale finding carrying IndexFreshness "stale" — it must
-// never silently pass on a potentially-misleading index.
 func TestArchitectureCheck_StaleIndexErrors(t *testing.T) {
 	t.Setenv("BLUEPRINT_ALLOW_STALE_REBUILD", "")
 	root := repoRoot(t)
@@ -927,10 +917,6 @@ func TestArchitectureCheck_StaleIndexErrors(t *testing.T) {
 	}
 }
 
-// TestArchitectureCheck_StaleIndexRebuildsThenPasses (P0.2 happy path): a
-// stale index that converges after one rebuild passes. The freshness label
-// ("rebuilt") only materializes on findings, so after the clean pass the test
-// re-runs with a boundary violation to observe the stamp.
 func TestArchitectureCheck_StaleIndexRebuildsThenPasses(t *testing.T) {
 	t.Setenv("BLUEPRINT_ALLOW_STALE_REBUILD", "")
 	root := repoRoot(t)
@@ -1271,14 +1257,6 @@ func TestArchitectureCheck_NilClient_Degraded(t *testing.T) {
 	}
 }
 
-// --- P0.4 authz gate tests ---
-//
-// The architecture check consumes kern's authz verdict BEFORE the boundary
-// check when the change carries an agent identity: a denied verdict blocks
-// (authz:unauthorized, boundary skipped); allowed/nil verdicts proceed;
-// a probe failure degrades to a visible WARN (authz:verdict-error) without
-// gating the boundary check.
-
 // authzRunner answers the always-on `index ensure-fresh` call with a FRESH
 // index and dispatches guard invocations by whether they carry --agent-id:
 // authz probes (with --agent-id) return authzOut/authzExit, boundary checks
@@ -1389,8 +1367,6 @@ func TestArchitectureCheck_AuthzAllowed_Proceeds(t *testing.T) {
 }
 
 func TestArchitectureCheck_AuthzNil_Proceeds(t *testing.T) {
-	// No agent identity: no authz call at all, boundary check runs (backward
-	// compat with every pre-P0.4 flow).
 	guardCalls := 0
 	client := &KernClient{binaryPath: "kern", runner: authzRunner(authzDeniedOut, cleanGuardOut, 2, &guardCalls)}
 	chk := NewArchitectureCheck(client)

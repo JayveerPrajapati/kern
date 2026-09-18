@@ -313,10 +313,6 @@ func TestReplay(t *testing.T) {
 	})
 }
 
-// TestValidationOutcomeWireFormat pins the P0.4 wire convention for
-// Blueprint's validation outcome: exported Go field names are the JSON keys
-// (matching AuditEntry's untagged style), the field is optional on the entry,
-// and it round-trips through the persisted form.
 func TestValidationOutcomeWireFormat(t *testing.T) {
 	// Unmarshal a Blueprint-authored outcome (untagged-style keys).
 	raw := `{"Status":"BLOCK","ExitCode":1,"BlockedFiles":["foo.go"],"CorrelationID":"c1","Findings":2}`
@@ -1023,10 +1019,6 @@ func TestAuditRetentionCapAndCounters(t *testing.T) {
 	}
 }
 
-// TestAuditHashNilOutcomeMatchesLegacyFormat: entries without a validation
-// outcome must hash byte-identically to the pre-P0.4 format, so chains
-// recorded by older versions still verify; with an outcome the hash must
-// differ (the field is now covered by the tamper chain).
 func TestAuditHashNilOutcomeMatchesLegacyFormat(t *testing.T) {
 	e := entry("", "x")
 	if got, want := computeAuditHash(e, "prev"), legacyAuditHash(e, "prev"); got != want {
@@ -1038,8 +1030,6 @@ func TestAuditHashNilOutcomeMatchesLegacyFormat(t *testing.T) {
 	}
 }
 
-// legacyAuditHash replicates the pre-P0.4 tamper-hash format (the old
-// computeAuditHash body) so the byte-compat contract is pinned in the test.
 func legacyAuditHash(e AuditEntry, prevHash string) string {
 	h := sha256.New()
 	_, _ = fmt.Fprintf(h, "%s|%s|%s|%s|%s|%v|%v|%v|%s|%s", prevHash, e.ID, e.AgentID, e.Action, e.Resource, e.Timestamp.UnixNano(), e.Risk, e.Approved, e.Result, e.TaskID)

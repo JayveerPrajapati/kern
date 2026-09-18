@@ -22,7 +22,7 @@ import (
 )
 
 // ValidationOutcome is Blueprint's validation result for the change this
-// entry records (P0.4 shared-state contract). Kern consumes it on audit
+// entry records (shared-state contract). Kern consumes it on audit
 // append to invalidate context the blueprint proved stale. Field names are
 // the wire format: matching the AuditEntry convention of exported Go field
 // names as JSON keys (explicit tags document it).
@@ -49,7 +49,7 @@ type AuditEntry struct {
 	TaskID    string // Invariant 4: the task this audit entry belongs to (empty when N/A)
 	// ValidationOutcome carries Blueprint's validation result for this entry.
 	// It is optional (absent for legacy entries) and consumed by `kern audit
-	// append` to mark blocked context stale (in-memory invalidation, P0.4).
+	// append` to mark blocked context stale (in-memory invalidation).
 	ValidationOutcome *ValidationOutcome `json:"ValidationOutcome,omitempty"`
 	// Policy identifies the policy that made the decision ("firewall",
 	// "permission", "egress", ...). Optional; absent for legacy entries.
@@ -65,7 +65,7 @@ type AuditLog struct {
 	mu         sync.Mutex
 	entries    []AuditEntry
 	seq        int
-	atomicSeq  int64         // atomic sequence counter for high-concurrency RecordParallel
+	atomicSeq  atomic.Int64  // atomic sequence counter for high-concurrency RecordParallel
 	store      storage.Store // optional persistence; nil = in-memory only
 	hashChain  string        // hash of the previous entry (tamper detection)
 	lockPath   string        // cross-process advisory lock file ("" = legacy, unlocked)
@@ -440,7 +440,7 @@ func (l *AuditLog) RepairChain() (int, error) {
 	for i, e := range entries {
 		want := computeAuditHash(e, prev)
 		// An entry that verifies under either formula (modern, or the
-		// pre-P0.4 legacy formula) is intact — leave it untouched so repair
+		// legacy formula) is intact — leave it untouched so repair
 		// stays minimal (only genuinely broken links are re-chained).
 		if e.Hash != want && e.Hash != computeAuditHashLegacy(e, prev) {
 			e.Hash = want
@@ -505,7 +505,7 @@ func computeAuditHash(e AuditEntry, prevHash string) string {
 		// The tamper chain must cover the full entry: ValidationOutcome is
 		// part of a persisted entry, so it must be covered too, or it could
 		// be modified without breaking VerifyChain. Entries with a nil
-		// ValidationOutcome hash byte-identically to the pre-P0.4 format, so
+		// ValidationOutcome hash byte-identically to the legacy format, so
 		// chains recorded by older versions still verify.
 		_, _ = fmt.Fprintf(h, "|%s|%d|%s|%s|%d", e.ValidationOutcome.Status, e.ValidationOutcome.ExitCode, strings.Join(e.ValidationOutcome.BlockedFiles, ","), e.ValidationOutcome.CorrelationID, e.ValidationOutcome.Findings)
 	}
@@ -543,20 +543,6 @@ func (l *AuditLog) Filter(agentID string) []AuditEntry {
 	return out
 }
 
-// FilterByTask returns entries matching the given task ID (Invariant 4). An
-// empty taskID returns entries with no task association.
-func (l *AuditLog) FilterByTask(taskID string) []AuditEntry {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	var out []AuditEntry
-	for _, e := range l.entries {
-		if e.TaskID == taskID {
-			out = append(out, e)
-		}
-	}
-	return out
-}
-
 // VerifyChainReport verifies the hash chain and reports how it fails.
 // firstBroken is the index of the first entry whose stored hash does not
 // match the recomputed chain (-1 when the whole chain verifies); verified is
@@ -581,7 +567,7 @@ func (l *AuditLog) VerifyChainReport() (firstBroken, verified int) {
 	var prevHash string
 	for _, e := range l.entries {
 		if e.Hash != computeAuditHash(e, prevHash) {
-			// Pre-P0.4 transition window: entries with a non-nil
+			// Legacy transition window: entries with a non-nil
 			// ValidationOutcome were persisted by the in-transition binary
 			// BEFORE ValidationOutcome was folded into the hash, so their
 			// stored hashes use the legacy formula. The legacy formula
@@ -604,7 +590,7 @@ func (l *AuditLog) VerifyChainReport() (firstBroken, verified int) {
 }
 
 // computeAuditHashLegacy recomputes an entry hash WITHOUT the
-// ValidationOutcome clause — the formula used by binaries before P0.4
+// ValidationOutcome clause — the formula used by older binaries
 // extended the chain to cover it. Used only as a verification fallback for
 // entries persisted during that transition window (their stored hash cannot
 // match the modern formula by construction).
@@ -745,15 +731,6 @@ func (m *MerkleTree) Root() string {
 	return m.root
 }
 
-// Leaves returns a copy of all leaf hashes in the Merkle tree.
-func (m *MerkleTree) Leaves() []string {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	cp := make([]string, len(m.leaves))
-	copy(cp, m.leaves)
-	return cp
-}
-
 // MerkleRoot returns the current Merkle tree root hash for the audit log.
 func (l *AuditLog) MerkleRoot() string {
 	l.mu.Lock()
@@ -792,14 +769,14 @@ func (l *AuditLog) initMerkleTreeLocked() {
 // nextSeq allocates a sequence number atomically without holding l.mu.
 func (l *AuditLog) nextSeq() int64 {
 	for {
-		cur := atomic.LoadInt64(&l.atomicSeq)
+		cur := l.atomicSeq.Load()
 		lSeq := int64(l.seq)
 		base := cur
 		if lSeq > base {
 			base = lSeq
 		}
 		next := base + 1
-		if atomic.CompareAndSwapInt64(&l.atomicSeq, cur, next) {
+		if l.atomicSeq.CompareAndSwap(cur, next) {
 			return next
 		}
 	}

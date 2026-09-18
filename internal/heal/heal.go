@@ -6,6 +6,7 @@ package heal
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -39,6 +40,11 @@ type Result struct {
 	LastOutput string   // final validation output (or last failure)
 	Err        error    // non-nil if LLM unavailable or apply failed
 	Duration   time.Duration
+	// Unvalidated lists the per-extension checks that could not run (missing
+	// toolchain or no syntax parser). It is set — with Validated false and no
+	// repair attempted — when validation produced no failures but also no
+	// real verdict: "unable to validate" must never be reported as OK.
+	Unvalidated []string
 }
 
 const systemPrompt = `You are a senior software engineer fixing build/test failures.
@@ -49,6 +55,11 @@ involved. Reply with corrected FULL file contents, one per file, formatted as:
 <entire corrected file>
 
 Do not include any other text, commentary, or diff markers. Only the FILE blocks.`
+
+// roundTimeout bounds a single LLM round: a provider (or the agent-CLI
+// chain it falls back to) that hangs must not block the heal loop beyond
+// this bound. It is a package var so tests can inject a short deadline.
+var roundTimeout = 120 * time.Second
 
 // ParseReplacements extracts ### FILE: blocks from model output.
 func ParseReplacements(text string) []Replacement {
@@ -74,6 +85,35 @@ func ParseReplacements(text string) []Replacement {
 	}
 	flush()
 	return out
+}
+
+// fencedBlockRe matches a ``` fenced code block (any language hint).
+var fencedBlockRe = regexp.MustCompile("(?s)```[^\n]*\n(.*?)```")
+
+// ParseReplacementsWithFallback is ParseReplacements with a fenced-code-block
+// fallback for agent-style replies: some LLM front-ends (e.g. `opencode run`,
+// which is an agent, not a raw generator) reply with prose and fenced code
+// blocks instead of `### FILE:` markers. When no FILE block is present and
+// exactly ONE failing file is known, the first fenced block is treated as the
+// replacement for that file. Any other shape (multiple FILE-less blocks, no
+// fences, multiple failing files) stays ambiguous and returns nothing — the
+// caller keeps its loud "no FILE blocks" error rather than guessing.
+func ParseReplacementsWithFallback(text string, fallbackPaths []string) []Replacement {
+	if reps := ParseReplacements(text); len(reps) > 0 {
+		return reps
+	}
+	if len(fallbackPaths) != 1 {
+		return nil
+	}
+	m := fencedBlockRe.FindStringSubmatch(text)
+	if m == nil {
+		return nil
+	}
+	content := strings.TrimSpace(m[1])
+	if content == "" {
+		return nil
+	}
+	return []Replacement{{Path: fallbackPaths[0], Content: content}}
 }
 
 // Apply writes replacements into root (any relative dirs created).
@@ -105,17 +145,31 @@ func Apply(root string, reps []Replacement) error {
 // gate keeps the loop from burning LLM rounds on (and proposing) hub-wide
 // rewrites the operator has not sanctioned.
 func Run(ctx context.Context, root, task, model string, maxRounds int, timeout time.Duration, force bool) *Result {
+	return RunFile(ctx, root, task, model, "", maxRounds, timeout, force)
+}
+
+// RunFile is Run constrained to a single root-relative file (heal --file):
+// validation only covers the per-extension checks for that file, and repair
+// replacements are filtered to it. A file filter never widens validation —
+// sibling files in other languages are neither checked nor repaired.
+//
+// Validation is per-extension (validate.RunChecks), replacing the old
+// single-language auto-detect: a polyglot repo used to validate with one
+// command for whichever language won detection, so a broken .go file passed
+// as "validated OK" when Python won. Now every detected language group runs
+// its own check — .go always gets the deterministic in-process go/parser
+// syntax parse (no toolchain), .py keeps compileall — and a group with no
+// available checker is reported as "unable to validate" (Unvalidated), never
+// as OK.
+func RunFile(ctx context.Context, root, task, model, file string, maxRounds int, timeout time.Duration, force bool) *Result {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	start := time.Now()
 	res := &Result{}
-	c, err := validate.Detect(root)
-	if err != nil {
-		res.Err = err
-		res.Duration = time.Since(start)
-		return res
-	}
+	// Detect still supplies the primary command label for display/compat; the
+	// actual validation below is per-extension and does not depend on it.
+	c, derr := validate.Detect(root)
 	res.Command = c
 
 	snap, err := sandbox.Snapshot(root)
@@ -127,10 +181,26 @@ func Run(ctx context.Context, root, task, model string, maxRounds int, timeout t
 	defer snap.Close()
 
 	// Baseline validation in the snapshot (same result as the live tree).
-	base := validate.Run(ctx, snap.Tmp(), c, timeout)
+	base := validate.RunChecks(ctx, snap.Tmp(), file, timeout)
 	res.LastOutput = base.Output
+	if base.Err != nil {
+		if derr != nil {
+			res.Err = derr
+		} else {
+			res.Err = base.Err
+		}
+		res.Duration = time.Since(start)
+		return res
+	}
 	if base.OK {
 		res.Validated = true
+		res.Duration = time.Since(start)
+		return res
+	}
+	if len(base.FailedChecks()) == 0 {
+		// Nothing failed, but some checks could not run: there is nothing to
+		// repair and no verdict to claim. Report "unable to validate".
+		res.Unvalidated = base.SkippedChecks()
 		res.Duration = time.Since(start)
 		return res
 	}
@@ -160,6 +230,9 @@ func Run(ctx context.Context, root, task, model string, maxRounds int, timeout t
 			return res
 		}
 		failPaths := failingFiles(root, base.Output)
+		if file != "" {
+			failPaths = keepFile(failPaths, file)
+		}
 		// P2 mutation gate: refuse to draft hub-wide rewrites without
 		// sanction. The live tree is untouched either way — the gate fires
 		// before any LLM round is spent.
@@ -173,7 +246,11 @@ func Run(ctx context.Context, root, task, model string, maxRounds int, timeout t
 		}
 		var b strings.Builder
 		b.WriteString("TASK: " + task + "\n\n")
-		b.WriteString("VALIDATION COMMAND: " + c.Cmd + " " + strings.Join(c.Args, " ") + "\n\n")
+		if c != nil {
+			b.WriteString("VALIDATION COMMAND: " + c.Cmd + " " + strings.Join(c.Args, " ") + "\n\n")
+		} else {
+			b.WriteString("VALIDATION COMMAND: per-extension syntax checks\n\n")
+		}
 		b.WriteString("FAILING OUTPUT:\n" + truncate(base.Output, 6000) + "\n\n")
 		b.WriteString("RELEVANT FILE CONTENTS:\n")
 		for _, fp := range failPaths {
@@ -186,16 +263,32 @@ func Run(ctx context.Context, root, task, model string, maxRounds int, timeout t
 		if len(failPaths) == 0 {
 			b.WriteString("(no file:line references found in output; apply your own judgement)\n")
 		}
-		reply, cerr := prov.Generate(ctx, systemPrompt, b.String(), llm.Options{Model: model})
+		// A per-round hard deadline keeps a single hung Generate (e.g. an
+		// agent CLI in the provider chain waiting on a session) from blocking
+		// the loop beyond a bound; the outer ctx still cancels the whole run.
+		roundCtx, roundCancel := context.WithTimeout(ctx, roundTimeout)
+		reply, cerr := prov.Generate(roundCtx, systemPrompt, b.String(), llm.Options{Model: model})
+		roundCancel()
 		if cerr != nil {
-			res.Err = fmt.Errorf("llm round %d: %w", iter, cerr)
+			if errors.Is(cerr, context.DeadlineExceeded) {
+				res.Err = fmt.Errorf("llm round %d: %w (timed out after %s)", iter, cerr, roundTimeout)
+			} else {
+				res.Err = fmt.Errorf("llm round %d: %w", iter, cerr)
+			}
 			res.Iterations = iter
 			res.Duration = time.Since(start)
 			return res
 		}
-		reps := ParseReplacements(reply)
+		reps := ParseReplacementsWithFallback(reply, failPaths)
+		if file != "" {
+			reps = keepReps(reps, file)
+		}
 		if len(reps) == 0 {
-			res.Err = fmt.Errorf("llm round %d: no ### FILE: blocks in reply", iter)
+			if file != "" {
+				res.Err = fmt.Errorf("llm round %d: no ### FILE: blocks for %s", iter, file)
+			} else {
+				res.Err = fmt.Errorf("llm round %d: no ### FILE: blocks in reply", iter)
+			}
 			res.Iterations = iter
 			res.Duration = time.Since(start)
 			return res
@@ -207,7 +300,7 @@ func Run(ctx context.Context, root, task, model string, maxRounds int, timeout t
 			return res
 		}
 		// Rerun validation.
-		next := validate.Run(ctx, snap.Tmp(), c, timeout)
+		next := validate.RunChecks(ctx, snap.Tmp(), file, timeout)
 		res.LastOutput = next.Output
 		base = next
 		for _, r := range reps {
@@ -229,9 +322,38 @@ func Run(ctx context.Context, root, task, model string, maxRounds int, timeout t
 			res.Duration = time.Since(start)
 			return res
 		}
+		if len(next.FailedChecks()) == 0 {
+			// Repair changed the tree but left only unvalidatable checks: stop
+			// rather than burning more rounds on a project we cannot judge.
+			res.Unvalidated = next.SkippedChecks()
+			res.Duration = time.Since(start)
+			return res
+		}
 	}
 	res.Duration = time.Since(start)
 	return res
+}
+
+// keepFile narrows failing-file candidates to the --file target.
+func keepFile(paths []string, file string) []string {
+	var out []string
+	for _, p := range paths {
+		if p == file {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// keepReps narrows model replacements to the --file target.
+func keepReps(reps []Replacement, file string) []Replacement {
+	var out []Replacement
+	for _, r := range reps {
+		if r.Path == file {
+			out = append(out, r)
+		}
+	}
+	return out
 }
 
 var failLineRe = regexp.MustCompile(`(?m)^([^\s:\n][^:\n]+):(\d+)(?::\d+)?[: ]`)
@@ -276,4 +398,79 @@ func truncate(s string, n int) string {
 
 func splitLines(s string) []string {
 	return strings.Split(strings.TrimRight(s, "\n"), "\n")
+}
+
+// Candidate is one speculative repair candidate containing replacements and a label.
+type Candidate struct {
+	ID           string
+	Summary      string
+	Replacements []Replacement
+}
+
+// CandidateResult is the validation outcome of evaluating one speculative Candidate.
+type CandidateResult struct {
+	Candidate Candidate
+	Passed    bool
+	Output    string
+	Diff      string
+	Duration  time.Duration
+}
+
+// EvaluateCandidate evaluates a single candidate replacement in an isolated snapshot.
+func EvaluateCandidate(ctx context.Context, root string, cand Candidate, file string, timeout time.Duration) CandidateResult {
+	start := time.Now()
+	snap, err := sandbox.Snapshot(root)
+	if err != nil {
+		return CandidateResult{
+			Candidate: cand,
+			Passed:    false,
+			Output:    fmt.Sprintf("snapshot: %v", err),
+			Duration:  time.Since(start),
+		}
+	}
+	defer snap.Close()
+
+	if err := Apply(snap.Tmp(), cand.Replacements); err != nil {
+		return CandidateResult{
+			Candidate: cand,
+			Passed:    false,
+			Output:    fmt.Sprintf("apply: %v", err),
+			Duration:  time.Since(start),
+		}
+	}
+
+	res := validate.RunChecks(ctx, snap.Tmp(), file, timeout)
+	var diffBuilder strings.Builder
+	for _, r := range cand.Replacements {
+		oldB, err1 := os.ReadFile(filepath.Join(root, r.Path))
+		if err1 != nil {
+			continue
+		}
+		diffBuilder.WriteString(diff.Unified(r.Path, r.Path+" (candidate)", splitLines(string(oldB)), splitLines(r.Content)))
+	}
+
+	return CandidateResult{
+		Candidate: cand,
+		Passed:    res.OK,
+		Output:    res.Output,
+		Diff:      diffBuilder.String(),
+		Duration:  time.Since(start),
+	}
+}
+
+// EvaluateCandidates evaluates multiple speculative repair candidates in isolated sandboxes
+// and returns the first passing candidate (or all results if none pass).
+func EvaluateCandidates(ctx context.Context, root string, candidates []Candidate, file string, timeout time.Duration) (*CandidateResult, []CandidateResult) {
+	var all []CandidateResult
+	for _, cand := range candidates {
+		if ctx.Err() != nil {
+			break
+		}
+		res := EvaluateCandidate(ctx, root, cand, file, timeout)
+		all = append(all, res)
+		if res.Passed {
+			return &res, all
+		}
+	}
+	return nil, all
 }

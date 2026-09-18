@@ -28,7 +28,7 @@ const (
 // ValidationResult.ChecksSkipped (e.g. "resilience" for resilience:scenarios).
 var checkLegKinds = map[string]LegKind{
 	"architecture:guard": LegKindBlocking,
-	// P0.4: the authz gate rides the architecture check (its findings are
+	// the authz gate rides the architecture check (its findings are
 	// emitted by ArchitectureCheck under Name() "architecture:guard"), but
 	// the leg is classified separately so an authz:unauthorized BLOCK is
 	// never mistaken for an advisory signal in per-leg verdicts.

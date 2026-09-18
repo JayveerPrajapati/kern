@@ -151,7 +151,7 @@ def evaluate(model, module):
     module.eval()
     self.eval()
     res = model.eval()
-    
+
     # Global eval must still be flagged
     eval(user_payload)
 `)

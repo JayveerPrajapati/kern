@@ -644,10 +644,6 @@ func TestFirewallConcurrentCheckAndApprove(t *testing.T) {
 	wg.Wait()
 }
 
-// TestTaskKeyRoundTripWithPipeInResource asserts the composite task key
-// round-trips losslessly when a component contains the '|' separator
-// (AUD-07): compose escapes, split unescapes, and the encoded key differs
-// from the naive concatenation.
 func TestTaskKeyRoundTripWithPipeInResource(t *testing.T) {
 	cases := []struct {
 		agentID, resource, action string
@@ -676,10 +672,6 @@ func TestTaskKeyRoundTripWithPipeInResource(t *testing.T) {
 	}
 }
 
-// TestApproveActionAttributesPipeResource exercises the full approval path
-// with a resource containing '|' (AUD-07): ApproveAction must attribute the
-// audit record to the right agent/action/unescaped resource, and enforcement
-// must still pass on the full composite key.
 func TestApproveActionAttributesPipeResource(t *testing.T) {
 	agent := NewAgent("agent-pipe", "Pipe Agent", "coder", []Permission{{Resource: "db|prod|primary", Action: "write"}})
 	f := NewFirewall().WithAgents(agent)

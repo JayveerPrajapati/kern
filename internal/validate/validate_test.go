@@ -3,7 +3,9 @@ package validate
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -154,4 +156,144 @@ func TestDetectKind(t *testing.T) {
 	if _, err := DetectKind(empty, "test"); err == nil {
 		t.Fatal("DetectKind on empty dir should error")
 	}
+}
+
+// TestRunChecksBrokenGoFailsWithoutToolchain pins the D4 regression: a broken
+// .go file next to a broken .py must FAIL per-extension validation — the Go
+// syntax check is the deterministic in-process go/parser parse and runs even
+// when no toolchain would be detected (the old auto-detect validated only the
+// winning language, letting the broken .go pass as "OK").
+func TestRunChecksBrokenGoAndPyFail(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "broken.go"), []byte("package main\n\nfunc broken(\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "broken.py"), []byte("def broken(\n    pass\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	res := RunChecks(context.Background(), root, "", 30*time.Second)
+	if res.Err != nil {
+		t.Fatalf("RunChecks: %v", res.Err)
+	}
+	if res.OK {
+		t.Fatal("broken .go must fail validation (D4 regression)")
+	}
+	if !contains(res.FailedChecks(), "go syntax") {
+		t.Fatalf("expected go syntax to fail, failed=%v skipped=%v", res.FailedChecks(), res.SkippedChecks())
+	}
+	if !strings.Contains(res.Output, "broken.go:") {
+		t.Fatalf("output must name broken.go with a line, got:\n%s", res.Output)
+	}
+	if !pythonOnPath(t) {
+		t.Skip("python not on PATH; python half of the check skipped")
+	}
+	if !contains(res.FailedChecks(), "python py_compile") {
+		t.Fatalf("expected python py_compile to fail, failed=%v", res.FailedChecks())
+	}
+	if !strings.Contains(res.Output, "broken.py:") {
+		t.Fatalf("output must name broken.py (normalized compileall), got:\n%s", res.Output)
+	}
+}
+
+// TestRunChecksHealthyPolyglotPasses verifies healthy Go + Python files pass
+// per-extension validation.
+func TestRunChecksHealthyPolyglotPasses(t *testing.T) {
+	if !pythonOnPath(t) {
+		t.Skip("python not on PATH")
+	}
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "ok.go"), []byte("package main\n\nfunc main() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "ok.py"), []byte("def ok():\n    return 1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	res := RunChecks(context.Background(), root, "", 30*time.Second)
+	if res.Err != nil {
+		t.Fatalf("RunChecks: %v", res.Err)
+	}
+	if !res.OK {
+		t.Fatalf("healthy files must pass, failed=%v skipped=%v\n%s", res.FailedChecks(), res.SkippedChecks(), res.Output)
+	}
+}
+
+// TestRunChecksFileScoping verifies heal --file semantics: RunChecks with a
+// file filter only validates that file — the sibling broken .py is neither
+// checked nor named in the output.
+func TestRunChecksFileScoping(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "broken.go"), []byte("package main\n\nfunc broken(\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "broken.py"), []byte("def broken(\n    pass\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	res := RunChecks(context.Background(), root, "broken.go", 30*time.Second)
+	if res.Err != nil {
+		t.Fatalf("RunChecks: %v", res.Err)
+	}
+	if res.OK {
+		t.Fatal("scoped to broken.go it must fail")
+	}
+	for _, c := range res.Checks {
+		if c.Name == "python py_compile" {
+			t.Fatal("python check must not run when scoped to broken.go")
+		}
+	}
+	if !strings.Contains(res.Output, "broken.go:") {
+		t.Fatalf("scoped output must name broken.go, got:\n%s", res.Output)
+	}
+	if strings.Contains(res.Output, "broken.py") {
+		t.Fatalf("scoped output must not mention broken.py, got:\n%s", res.Output)
+	}
+
+	// The scoped run must pass once the file is healthy.
+	_ = os.WriteFile(filepath.Join(root, "broken.go"), []byte("package main\n\nfunc main() {}\n"), 0o644)
+	res2 := RunChecks(context.Background(), root, "broken.go", 30*time.Second)
+	if res2.Err != nil {
+		t.Fatalf("RunChecks: %v", res2.Err)
+	}
+	if !res2.OK {
+		t.Fatalf("healthy scoped file must pass, failed=%v skipped=%v\n%s", res2.FailedChecks(), res2.SkippedChecks(), res2.Output)
+	}
+}
+
+// TestRunChecksUnvalidatableLangNotOK verifies the "unable to validate"
+// fallback: a language with no syntax checker must NOT read as OK.
+func TestRunChecksUnvalidatableLangNotOK(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "lib.rs"), []byte("fn main() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	res := RunChecks(context.Background(), root, "", 10*time.Second)
+	if res.Err != nil {
+		t.Fatalf("RunChecks: %v", res.Err)
+	}
+	if res.OK {
+		t.Fatal("unvalidatable language must not read as OK")
+	}
+	if len(res.FailedChecks()) != 0 {
+		t.Fatalf("nothing should fail, failed=%v", res.FailedChecks())
+	}
+	if len(res.SkippedChecks()) == 0 {
+		t.Fatalf("expected skipped checks for rust, got %+v", res.Checks)
+	}
+}
+
+func pythonOnPath(t *testing.T) bool {
+	t.Helper()
+	if _, err := exec.LookPath("python"); err == nil {
+		return true
+	}
+	_, err := exec.LookPath("python3")
+	return err == nil
+}
+
+func contains(hay []string, needle string) bool {
+	for _, s := range hay {
+		if s == needle {
+			return true
+		}
+	}
+	return false
 }

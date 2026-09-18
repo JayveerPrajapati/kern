@@ -25,8 +25,6 @@ func TestCheckEgressLocalOnly(t *testing.T) {
 		port int
 	}{
 		{"8.8.8.8", 443}, {"example.com", 443},
-		// Empty, single-label and .local names are NOT local (they may resolve
-		// to routable external IPs under DNS search domains) — AUD-02.
 		{"", 0}, {"myhost", 80}, {"kern.local", 80}, {"MyHost", 80},
 	}
 	for _, tc := range denied {
@@ -85,8 +83,6 @@ func TestIsLocalHost(t *testing.T) {
 		{"localhost", true}, {"LOCALHOST", true}, {"localhost.localdomain", true},
 		{"127.0.0.1", true}, {"::1", true}, {"10.0.0.1", true},
 		{"172.16.0.1", true}, {"192.168.1.1", true}, {"169.254.1.1", true}, {"0.0.0.0", true},
-		// Empty, single-label and .local names are NOT local (AUD-02): they can
-		// resolve to routable external IPs under DNS search domains.
 		{"", false}, {"myhost", false}, {"kern.local", false}, {"MyHost", false},
 		{"8.8.8.8", false}, {"example.com", false}, {"1.2.3.4", false}, {"localhost.evil.com", false},
 	}

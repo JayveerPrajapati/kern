@@ -228,24 +228,39 @@ func (c *SecretCheck) scanDisk(ctx context.Context, req domain.ChangeRequest, di
 	cachePath := secCachePath(req.RepositoryRoot)
 	cache := loadSecCache(cachePath)
 
-	// Fast path: every disk file still matches its cached stat -> replay
-	// the cached findings without invoking kern at all.
-	cachedFindings, allMatched := c.replayFromCache(cache, diskReq)
+	// Fast path: every disk file still matches its cached identity (stat or
+	// content hash) -> replay the cached findings without invoking kern at
+	// all. Only genuinely modified files come back as dirty.
+	cachedFindings, dirty, allMatched := c.replayFromCache(cache, diskReq)
 	if !allMatched {
-		// Full scan: kern sec only works on directories, so scan the whole
-		// repo once and filter to the disk files below.
-		allFindings, _, _, scanErr := c.client.SecScan(ctx, req.RepositoryRoot, ".")
-		if scanErr != nil {
-			return nil, scanErr
+		if len(dirty) == len(diskFiles) {
+			// Full miss (empty cache or every staged file changed): kern sec
+			// only works on directories, so scan the whole repo once and
+			// filter to the disk files below.
+			allFindings, _, _, scanErr := c.client.SecScan(ctx, req.RepositoryRoot, ".")
+			if scanErr != nil {
+				return nil, scanErr
+			}
+			cachedFindings = allFindings
+		} else {
+			// Partial miss: re-scan ONLY the genuinely modified files from a
+			// temp dir; every unchanged file's findings were already replayed
+			// above. The common "one file edited since the last validation"
+			// case drops from a whole-repo scan (~seconds) to a one-file scan
+			// (~milliseconds).
+			partial, err := c.scanFromTempDir(ctx, req.RepositoryRoot, dirty)
+			if err != nil {
+				return nil, err
+			}
+			cachedFindings = append(cachedFindings, partial...)
 		}
-		cachedFindings = allFindings
 		// Rebuild the cache from this scan's findings plus the scanned disk
-		// files (every scanned file gets an entry keyed by its current stat;
-		// clean files get an entry with zero findings so they are cache hits
-		// on the next run; entries for files that no longer exist are
-		// dropped) and persist it. Best-effort: a failed save must never fail
-		// the validation.
-		rebuildSecCache(cachePath, req.RepositoryRoot, allFindings, diskFiles, excludeSet)
+		// files (every scanned file gets an entry keyed by its current stat
+		// + content hash; clean files get an entry with zero findings so they
+		// are cache hits on the next run; entries for files that no longer
+		// exist are dropped) and persist it. Best-effort: a failed save must
+		// never fail the validation.
+		rebuildSecCache(cachePath, req.RepositoryRoot, cachedFindings, diskFiles, excludeSet)
 	}
 
 	// Build a set of disk file paths for fast lookup. We normalize to
@@ -257,7 +272,7 @@ func (c *SecretCheck) scanDisk(ctx context.Context, req domain.ChangeRequest, di
 	// addedLinesByFile maps a changed file to the exact NEW-file line numbers
 	// its diff hunks introduce (domain.FileChange.Added, populated by the
 	// staged/CI diff hunk parser). When present, findings are only reported
-	// for those lines (F-018): a secret that pre-dates the change in a
+	// for those lines: a secret that pre-dates the change in a
 	// modified file is not part of this change and must not be attributed to
 	// it. Files without hunk data (Content-provided proposals, CI diffs)
 	// keep the whole-file semantics: every finding in the file reports.
@@ -293,7 +308,7 @@ func (c *SecretCheck) scanDisk(ctx context.Context, req domain.ChangeRequest, di
 			continue
 		}
 
-		// F-018: when the diff hunks for this file are known, only report
+		// when the diff hunks for this file are known, only report
 		// secrets on lines the change actually ADDS. A pre-existing secret on
 		// an unchanged line of a modified file is not this change's finding.
 		if added, ok := addedLinesByFile[normFile]; ok && !added[sf.Line] {
@@ -336,38 +351,104 @@ func (c *SecretCheck) findingFromSec(sf SecFinding) domain.Finding {
 	}
 }
 
-// replayFromCache returns the union of cached findings for the staged files
-// and true when EVERY staged file has a cache entry whose size+mtime still
-// match the file on disk (a missing file on disk counts as a mismatch). On
-// any mismatch it returns nil, false and the caller must re-scan.
-func (c *SecretCheck) replayFromCache(cache secCache, req domain.ChangeRequest) ([]SecFinding, bool) {
+// replayFromCache returns the union of cached findings for the staged files,
+// the subset of files that are genuinely dirty (missing on disk, or content
+// changed since their cache entry), and true when NO file is dirty. A file is
+// replayed when its cached stat matches (size + mtime, zero reads) OR its
+// content hash matches (a touch that preserved bytes — git checkout, editors
+// rewriting identical content — is not a real edit). A missing file on disk
+// always counts as dirty.
+func (c *SecretCheck) replayFromCache(cache secCache, req domain.ChangeRequest) ([]SecFinding, []domain.FileChange, bool) {
 	var findings []SecFinding
+	var dirty []domain.FileChange
 	for _, fc := range req.Files {
+		if fc.Op == domain.OpDelete {
+			continue // deleted: nothing to scan; its cache entry is dropped at rebuild
+		}
 		key := normalizePath(fc.Path)
 		entry, ok := cache.Files[key]
-		if !ok {
-			return nil, false
-		}
 		info, err := os.Stat(filepath.Join(req.RepositoryRoot, fc.Path))
 		if err != nil {
-			return nil, false // file gone: cannot trust the cached identity
+			dirty = append(dirty, fc)
+			continue
 		}
-		if info.Size() != entry.Size || info.ModTime().UnixNano() != entry.MTimeNS {
-			return nil, false
+		if ok && entry.Size == info.Size() && entry.MTimeNS == info.ModTime().UnixNano() {
+			findings = append(findings, entry.Findings...)
+			continue
 		}
-		findings = append(findings, entry.Findings...)
+		// Stat mismatch: decide by content hash. Same content → replay (the
+		// file was touched, not edited); different content → partial miss.
+		content, err := os.ReadFile(filepath.Join(req.RepositoryRoot, fc.Path))
+		if err != nil {
+			dirty = append(dirty, fc)
+			continue
+		}
+		if ok && entry.ContentHash == contentHash(content) {
+			findings = append(findings, entry.Findings...)
+			continue
+		}
+		dirty = append(dirty, fc)
 	}
-	return findings, true
+	return findings, dirty, len(dirty) == 0
 }
 
-// rebuildSecCache rebuilds the cache from a full scan's findings plus the
-// list of scanned files. Every scanned file gets a cache entry keyed by its
-// normalized path with the file's current stat — including clean files, which
-// get an entry with zero findings (negative caching), so an unchanged clean
-// staged set replays from cache instead of forcing a whole-repo rescan.
-// Findings for files outside the scanned set are still cached (prior
-// behavior). Files that no longer exist are dropped. Save failures are
-// ignored (best-effort).
+// scanFromTempDir re-scans ONLY the given files: their current on-disk
+// content is written into a temp directory under each file's exact
+// repo-relative path, and one `kern sec` scan runs against it — the same
+// directory-only interface trick as scanContent, so `kern sec` is never asked
+// to scan a single file. Findings are filtered to the scanned paths. The temp
+// dir is removed before returning (the check stays read-only with respect to
+// the repository). A file that vanished between the replay stat and this scan
+// is skipped (its cache entry is dropped at rebuild).
+func (c *SecretCheck) scanFromTempDir(ctx context.Context, root string, files []domain.FileChange) ([]SecFinding, error) {
+	tmpDir, err := os.MkdirTemp("", "blueprint-sec-partial-*")
+	if err != nil {
+		return nil, fmt.Errorf("scan partial: create temp dir: %w", err)
+	}
+	defer func() { _ = os.RemoveAll(tmpDir) }()
+
+	scanned := make(map[string]bool, len(files))
+	for _, fc := range files {
+		rel := filepath.Clean(fc.Path)
+		if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+			return nil, fmt.Errorf("invalid path in partial scan: %q", fc.Path)
+		}
+		scanned[normalizePath(fc.Path)] = true
+		content, err := os.ReadFile(filepath.Join(root, fc.Path))
+		if err != nil {
+			continue // file vanished between replay and scan: skip it
+		}
+		dest := filepath.Join(tmpDir, rel)
+		if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+			return nil, fmt.Errorf("scan partial: mkdir: %w", err)
+		}
+		if err := os.WriteFile(dest, content, 0o644); err != nil {
+			return nil, fmt.Errorf("scan partial: write %s: %w", fc.Path, err)
+		}
+	}
+
+	allFindings, _, _, scanErr := c.client.SecScan(ctx, tmpDir, ".")
+	if scanErr != nil {
+		return nil, fmt.Errorf("scan partial: %w", scanErr)
+	}
+	var findings []SecFinding
+	for _, sf := range allFindings {
+		if scanned[normalizePath(sf.File)] {
+			findings = append(findings, sf)
+		}
+	}
+	return findings, nil
+}
+
+// rebuildSecCache rebuilds the cache from a full/partial scan's findings plus
+// the list of scanned files. Every scanned file gets a cache entry keyed by
+// its normalized path with the file's current stat AND content hash —
+// including clean files, which get an entry with zero findings (negative
+// caching), so an unchanged clean staged set replays from cache instead of
+// forcing a whole-repo rescan, and a mere touch of a dirty file (same bytes,
+// new mtime) also replays via the hash. Findings for files outside the
+// scanned set are still cached (prior behavior). Files that no longer exist
+// are dropped. Save failures are ignored (best-effort).
 func rebuildSecCache(path, root string, findings []SecFinding, scanned []domain.FileChange, excludeSet map[string]bool) {
 	entries := make(map[string]secCacheEntry, len(scanned))
 	// Negative caching: seed every scanned file with an empty-findings entry
@@ -380,26 +461,40 @@ func rebuildSecCache(path, root string, findings []SecFinding, scanned []domain.
 		if _, ok := entries[key]; ok {
 			continue
 		}
-		info, err := os.Stat(filepath.Join(root, fc.Path))
-		if err != nil {
+		e := statEntry(filepath.Join(root, fc.Path))
+		if e.Size == 0 && e.MTimeNS == 0 {
 			continue // file gone since the scan: drop it
 		}
-		entries[key] = secCacheEntry{Size: info.Size(), MTimeNS: info.ModTime().UnixNano()}
+		entries[key] = e
 	}
 	for _, sf := range findings {
 		key := normalizePath(sf.File)
 		e, ok := entries[key]
 		if !ok {
-			info, err := os.Stat(filepath.Join(root, sf.File))
-			if err != nil {
+			e = statEntry(filepath.Join(root, sf.File))
+			if e.Size == 0 && e.MTimeNS == 0 {
 				continue // file gone since the scan: drop its findings
 			}
-			e = secCacheEntry{Size: info.Size(), MTimeNS: info.ModTime().UnixNano()}
 		}
 		e.Findings = append(e.Findings, sf)
 		entries[key] = e
 	}
 	_ = saveSecCache(path, secCache{Version: secCacheVersion, Files: entries})
+}
+
+// statEntry builds a cache entry for the file at full: stat (size + mtime)
+// plus the content hash. Returns the zero entry when the file is absent or
+// unreadable — callers drop zero entries (file gone).
+func statEntry(full string) secCacheEntry {
+	info, err := os.Stat(full)
+	if err != nil {
+		return secCacheEntry{}
+	}
+	e := secCacheEntry{Size: info.Size(), MTimeNS: info.ModTime().UnixNano()}
+	if content, err := os.ReadFile(full); err == nil {
+		e.ContentHash = contentHash(content)
+	}
+	return e
 }
 
 // dedupeFindings removes duplicate findings with the same normalized file and

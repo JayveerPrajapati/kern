@@ -1,7 +1,9 @@
 package sandbox
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -103,7 +105,7 @@ func (m *WorktreeManager) CreateExecutionWorktree(taskID string) (*execution.Wor
 func (m *WorktreeManager) GC(maxAge time.Duration) ([]string, error) {
 	entries, err := os.ReadDir(m.baseDir)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, fs.ErrNotExist) {
 			return nil, nil
 		}
 		return nil, err

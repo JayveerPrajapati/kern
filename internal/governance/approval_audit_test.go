@@ -30,11 +30,6 @@ func readAuditEntries(t *testing.T, root string) []AuditEntry {
 	return out
 }
 
-// TestFileStoreDecideRecordsApprovalDecision verifies F-025: a human approval
-// decision persisted through the approval FileStore — the shared choke point
-// behind `kern approve`, the web console, and the workflow engine — is
-// recorded as an entry in the project's tamper-evident audit chain, carrying
-// the decision (approve), the approver, the approval ID, and the gated task.
 func TestFileStoreDecideRecordsApprovalDecision(t *testing.T) {
 	root := t.TempDir()
 	store := NewFileStore(root)
@@ -103,8 +98,6 @@ func TestFileStoreDecideRecordsApprovalDecision(t *testing.T) {
 	}
 }
 
-// TestFileStoreRejectRecordsApprovalDecision verifies F-025 for the reject
-// path: the decision is recorded with Result "denied" and Approved=false.
 func TestFileStoreRejectRecordsApprovalDecision(t *testing.T) {
 	root := t.TempDir()
 	store := NewFileStore(root)

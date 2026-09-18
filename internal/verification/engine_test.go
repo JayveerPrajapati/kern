@@ -61,7 +61,7 @@ func TestHelper(t *testing.T) {
 	return dir
 }
 
-// TestVerdictEnum asserts the three extended verdicts exist with the right
+// TestVerdictEnum asserts the extended verdicts exist with the right
 // string values, are distinct from the original PASS/FAIL/WARN, and are
 // classified as non-fail by a switch that handles them explicitly.
 func TestVerdictEnum(t *testing.T) {
@@ -69,6 +69,7 @@ func TestVerdictEnum(t *testing.T) {
 		VerdictPassWithWarning: "PASS_WITH_WARNING",
 		VerdictBlocked:         "BLOCKED",
 		VerdictNotRun:          "NOT_RUN",
+		VerdictSkipped:         "SKIPPED",
 	}
 	// Each new verdict must have the correct string value.
 	for v, want := range extended {
@@ -92,7 +93,7 @@ func TestVerdictEnum(t *testing.T) {
 	for v := range extended {
 		isFail := false
 		switch v {
-		case VerdictPass, VerdictPassWithWarning, VerdictBlocked, VerdictNotRun, VerdictWarn:
+		case VerdictPass, VerdictPassWithWarning, VerdictBlocked, VerdictNotRun, VerdictWarn, VerdictSkipped:
 			isFail = false
 		case VerdictFail:
 			isFail = true
@@ -103,12 +104,82 @@ func TestVerdictEnum(t *testing.T) {
 	}
 }
 
+// TestIsolationSkipMarkedSkippedNotPassed pins the isolation-skip honesty
+// contract (audit M3 fix): a test set that could not run because network
+// isolation is unavailable is stamped StatusSkipped — never WARN, which reads
+// like a pass — with the KERN_ALLOW_UNISOLATED=1 opt-in hint, and the skipped
+// set is excluded from the verdict math: it counts as neither passing nor
+// failing, and the summary must show "test: SKIPPED", never "test: PASS".
+func TestIsolationSkipMarkedSkippedNotPassed(t *testing.T) {
+	res := VerificationResult{
+		Build: &BuildResult{OK: true},
+		UnitTests: &TestResult{
+			OK:     false,
+			Output: "network isolation not available on this platform (darwin); refusing to run unisolated (fail-closed)",
+		},
+	}
+	markIsolationSkipped(&res)
+	if res.UnitTests.Status != StatusSkipped {
+		t.Fatalf("UnitTests.Status = %q, want %q", res.UnitTests.Status, StatusSkipped)
+	}
+	if !strings.Contains(res.UnitTests.Output, "KERN_ALLOW_UNISOLATED=1") {
+		t.Errorf("skip reason must carry the KERN_ALLOW_UNISOLATED=1 opt-in hint, got: %s", res.UnitTests.Output)
+	}
+	res.Verdict = verdictOf(&res)
+	if res.Verdict != VerdictSkipped {
+		t.Errorf("verdict = %q, want %q (a skipped set must not read as PASS or FAIL)", res.Verdict, VerdictSkipped)
+	}
+	sum := summarizeChecks(&res)
+	if !strings.Contains(sum, "test: SKIPPED") {
+		t.Errorf("summary must show test: SKIPPED, got: %s", sum)
+	}
+	if strings.Contains(sum, "test: PASS") {
+		t.Errorf("summary must not count the skipped test set as passing: %s", sum)
+	}
+}
+
+// TestVerifyTestsIsolationRefusalIsSkipped runs the REAL Verify path WITHOUT
+// the KERN_ALLOW_UNISOLATED=1 opt-in: on hosts where network isolation is
+// unavailable (darwin), the sandbox refuses and the test set must come back
+// SKIPPED with the opt-in hint — and the verdict must not read as a plain
+// PASS. On hosts that can isolate, the fixture's tests actually run and the
+// skip-path assertions are not applicable.
+func TestVerifyTestsIsolationRefusalIsSkipped(t *testing.T) {
+	// TestMain sets KERN_ALLOW_UNISOLATED=1 for the whole binary (needed by
+	// the parallel tests). This test exercises the refusal path, so it clears
+	// the opt-in locally. It MUST stay non-parallel: t.Setenv panics in a
+	// parallel test, and non-parallel tests run to completion before the
+	// parallel batch starts, so the manipulation is race-free by design.
+	t.Setenv("KERN_ALLOW_UNISOLATED", "") // sandbox reads os.Getenv; "" == not opted in
+	dir := verifyFixture(t)
+	res := NewEngine(dir).Verify([]string{"test"})
+	if res.UnitTests == nil {
+		t.Fatal("nil unit tests result")
+	}
+	if res.UnitTests.Status != StatusSkipped {
+		t.Logf("isolation available on this host; tests executed (verdict %s) — skip-path assertions not applicable", res.Verdict)
+		return
+	}
+	if !strings.Contains(res.UnitTests.Output, "KERN_ALLOW_UNISOLATED=1") {
+		t.Errorf("skipped test output missing KERN_ALLOW_UNISOLATED=1 opt-in hint: %s", trunc(res.UnitTests.Output))
+	}
+	if res.Verdict == VerdictPass {
+		t.Errorf("verdict %q must not read as PASS when the test set was skipped", res.Verdict)
+	}
+	if !strings.Contains(res.Summary, "SKIPPED") {
+		t.Errorf("summary must surface the skipped test set, got: %s", res.Summary)
+	}
+}
+
 // TestVerifyBuild runs the build verification against a tiny fixture module
 // and asserts a passing build. Scoped to the fixture so it completes in
 // seconds instead of building the whole kern repo. `go build` is silent on
 // success, so the fixture's build output may legitimately be empty.
 func TestVerifyBuild(t *testing.T) {
-	t.Setenv("KERN_ALLOW_UNISOLATED", "1") // fail-closed gate: opt into unisolated runs on hosts without netns (darwin)
+	if testing.Short() {
+		t.Skip("skipping real-execution verification in -short mode")
+	}
+	t.Parallel()
 	e := NewEngine(verifyFixture(t))
 	br := e.VerifyBuild()
 	if br == nil {
@@ -126,7 +197,10 @@ func TestVerifyBuild(t *testing.T) {
 // fixture module and asserts the package is exercised and no failures are
 // reported. Scoped to the fixture so it completes in seconds.
 func TestVerifyTests(t *testing.T) {
-	t.Setenv("KERN_ALLOW_UNISOLATED", "1") // fail-closed gate: opt into unisolated runs on hosts without netns (darwin)
+	if testing.Short() {
+		t.Skip("skipping real-execution verification in -short mode")
+	}
+	t.Parallel()
 	e := NewEngine(verifyFixture(t))
 	tr := e.VerifyTests()
 	if tr == nil {
@@ -152,7 +226,10 @@ func TestVerifyTests(t *testing.T) {
 // TestVerifySecurity scans a small fixture containing a weak-crypto use and
 // asserts the finding is detected deterministically.
 func TestVerifySecurity(t *testing.T) {
-	t.Setenv("KERN_ALLOW_UNISOLATED", "1") // fail-closed gate: opt into unisolated runs on hosts without netns (darwin)
+	if testing.Short() {
+		t.Skip("skipping real-execution verification in -short mode")
+	}
+	t.Parallel()
 	dir := t.TempDir()
 	writeTree(t, dir, map[string]string{
 		"app.go": "package app\nimport \"crypto/md5\"\nvar h = md5.New()\n",
@@ -188,7 +265,10 @@ func TestVerifySecurity(t *testing.T) {
 // makes the security check block (OK=false). Previously only "critical"/"high"
 // were counted, so every severity read 0 and findings never blocked.
 func TestVerifySecuritySeverityMapping(t *testing.T) {
-	t.Setenv("KERN_ALLOW_UNISOLATED", "1") // fail-closed gate: opt into unisolated runs on hosts without netns (darwin)
+	if testing.Short() {
+		t.Skip("skipping real-execution verification in -short mode")
+	}
+	t.Parallel()
 	dir := t.TempDir()
 	writeTree(t, dir, map[string]string{
 		// error severity: dynamic SQL built from a variable.
@@ -226,7 +306,10 @@ func f(id string) { db.Query(fmt.Sprintf("SELECT * FROM t WHERE id=%s", id)) }
 // TestVerifySecurityCriticalBlocksVerdict asserts that a critical security
 // finding produces a FAIL verdict, while a warning-only scan produces WARN.
 func TestVerifySecurityCriticalBlocksVerdict(t *testing.T) {
-	t.Setenv("KERN_ALLOW_UNISOLATED", "1") // fail-closed gate: opt into unisolated runs on hosts without netns (darwin)
+	if testing.Short() {
+		t.Skip("skipping real-execution verification in -short mode")
+	}
+	t.Parallel()
 	// Critical (error severity) fixture → FAIL.
 	critDir := t.TempDir()
 	writeTree(t, critDir, map[string]string{
@@ -253,7 +336,10 @@ func TestVerifySecurityCriticalBlocksVerdict(t *testing.T) {
 // (evidence.FromSecurityFinding) is invoked through the production security
 // path: a security scan must emit an evidence-backed Claim into the result.
 func TestVerifySecurityEmitsEvidenceClaim(t *testing.T) {
-	t.Setenv("KERN_ALLOW_UNISOLATED", "1") // fail-closed gate: opt into unisolated runs on hosts without netns (darwin)
+	if testing.Short() {
+		t.Skip("skipping real-execution verification in -short mode")
+	}
+	t.Parallel()
 	dir := t.TempDir()
 	writeTree(t, dir, map[string]string{
 		"sql.go": "package app\nimport \"fmt\"\nfunc f(q string) { db.Query(fmt.Sprintf(\"SELECT * FROM t WHERE id=%s\", q)) }\n",
@@ -282,7 +368,10 @@ func TestVerifySecurityEmitsEvidenceClaim(t *testing.T) {
 // TestVerifyDependencyModuleMissingModule verifies G4: a real dependency check
 // surfaces a missing-module finding (fail-closed, never a fabricated PASS).
 func TestVerifyDependencyModuleMissingModule(t *testing.T) {
-	t.Setenv("KERN_ALLOW_UNISOLATED", "1") // fail-closed gate: opt into unisolated runs on hosts without netns (darwin)
+	if testing.Short() {
+		t.Skip("skipping real-execution verification in -short mode")
+	}
+	t.Parallel()
 	dir := t.TempDir()
 	writeTree(t, dir, map[string]string{
 		"go.mod":  "module depfixture\n\ngo 1.20\n",
@@ -312,7 +401,10 @@ func TestVerifyDependencyModuleMissingModule(t *testing.T) {
 // TestVerifyDependencyModuleDuplicateRequire verifies G4 detects version
 // duplication (a module required more than once).
 func TestVerifyDependencyModuleDuplicateRequire(t *testing.T) {
-	t.Setenv("KERN_ALLOW_UNISOLATED", "1") // fail-closed gate: opt into unisolated runs on hosts without netns (darwin)
+	if testing.Short() {
+		t.Skip("skipping real-execution verification in -short mode")
+	}
+	t.Parallel()
 	dir := t.TempDir()
 	writeTree(t, dir, map[string]string{
 		"go.mod":  "module dupfixture\n\ngo 1.20\n\nrequire (\n\texample.com/a v1.0.0\n\texample.com/a v1.1.0\n)\n",
@@ -333,7 +425,10 @@ func TestVerifyDependencyModuleDuplicateRequire(t *testing.T) {
 // TestVerifyDependencyModuleClean verifies a consistent module passes G4 with
 // no findings.
 func TestVerifyDependencyModuleClean(t *testing.T) {
-	t.Setenv("KERN_ALLOW_UNISOLATED", "1") // fail-closed gate: opt into unisolated runs on hosts without netns (darwin)
+	if testing.Short() {
+		t.Skip("skipping real-execution verification in -short mode")
+	}
+	t.Parallel()
 	dir := t.TempDir()
 	writeTree(t, dir, map[string]string{
 		"go.mod":  "module cleanfixture\n\ngo 1.20\n",
@@ -351,10 +446,15 @@ func TestVerifyDependencyModuleClean(t *testing.T) {
 	}
 }
 
-// TestVerifyDependencyModuleFailClosedOnNoGomod verifies G4 stays fail-closed:
-// a project without a readable go.mod is NOT reported as a PASS.
-func TestVerifyDependencyModuleFailClosedOnNoGomod(t *testing.T) {
-	t.Setenv("KERN_ALLOW_UNISOLATED", "1") // fail-closed gate: opt into unisolated runs on hosts without netns (darwin)
+// TestVerifyDependencyNoManifestSkips verifies the multi-ecosystem semantics:
+// a project with NO supported dependency manifest is reported as an honest
+// skip (distinct from a PASS or FAIL), so a non-Go repo is never failed just
+// because it lacks go.mod. The graph verdict still stands.
+func TestVerifyDependencyNoManifestSkips(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping real-execution verification in -short mode")
+	}
+	t.Parallel()
 	dir := t.TempDir()
 	writeTree(t, dir, map[string]string{
 		"main.go": "package main\nfunc main() {}\n",
@@ -363,8 +463,38 @@ func TestVerifyDependencyModuleFailClosedOnNoGomod(t *testing.T) {
 	if dr == nil {
 		t.Fatal("nil dependency result")
 	}
+	if dr.Skipped == "" {
+		t.Errorf("expected a skip note for a project without any supported manifest, got %+v", dr)
+	}
+	if !strings.Contains(dr.Skipped, "no supported dependency manifest") {
+		t.Errorf("skip note = %q, want it to name the missing manifests", dr.Skipped)
+	}
+	if len(dr.Findings) != 0 {
+		t.Errorf("no-manifest project must not produce findings, got %v", dr.Findings)
+	}
+}
+
+// TestVerifyDependencyUnreadableGomodFailClosed: a go.mod that exists but
+// cannot be read is fail-closed — surfaced as a finding, never a PASS.
+func TestVerifyDependencyUnreadableGomodFailClosed(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping real-execution verification in -short mode")
+	}
+	t.Parallel()
+	dir := t.TempDir()
+	// A DIRECTORY named go.mod: os.ReadFile fails with "is a directory".
+	if err := os.MkdirAll(filepath.Join(dir, "go.mod"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeTree(t, dir, map[string]string{
+		"main.go": "package main\nfunc main() {}\n",
+	})
+	dr := NewEngine(dir).VerifyDependency("")
+	if dr == nil {
+		t.Fatal("nil dependency result")
+	}
 	if dr.OK {
-		t.Error("a project without a readable go.mod must not fabricate a PASS")
+		t.Error("an unreadable go.mod must not fabricate a PASS")
 	}
 	if len(dr.Findings) == 0 {
 		t.Error("expected a fail-closed finding when go.mod is unreadable")
@@ -374,7 +504,10 @@ func TestVerifyDependencyModuleFailClosedOnNoGomod(t *testing.T) {
 // TestVerifyArchitecture creates a temp boundary rule forbidding client->lib
 // and asserts the violation is detected.
 func TestVerifyArchitecture(t *testing.T) {
-	t.Setenv("KERN_ALLOW_UNISOLATED", "1") // fail-closed gate: opt into unisolated runs on hosts without netns (darwin)
+	if testing.Short() {
+		t.Skip("skipping real-execution verification in -short mode")
+	}
+	t.Parallel()
 	dir := t.TempDir()
 	writeTree(t, dir, map[string]string{
 		"lib/lib.go": `package lib
@@ -404,12 +537,16 @@ func Caller() string { return lib.Public() }
 	}
 }
 
-// TestVerifyArchitectureWarnsWhenBoundariesMissing: with no .kern/boundaries.json
-// and source files in scope, VerifyArchitecture must not silently pass — it
-// surfaces a "boundaries-not-configured" warning while keeping OK true (a WARN
-// is not a violation, and a missing guard must not fail an advisory verify).
-func TestVerifyArchitectureWarnsWhenBoundariesMissing(t *testing.T) {
-	t.Setenv("KERN_ALLOW_UNISOLATED", "1") // fail-closed gate: opt into unisolated runs on hosts without netns (darwin)
+// TestVerifyArchitectureInfersBoundariesWhenMissing: with no .kern/boundaries.json
+// and source files in scope, VerifyArchitecture must not silently skip — it
+// falls back to inferred layered guardrails, surfaces an advisory warning
+// that inference was used, and keeps OK true when no inferred rule matches
+// (a WARN is not a violation, and an advisory inference must not fail).
+func TestVerifyArchitectureInfersBoundariesWhenMissing(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping real-execution verification in -short mode")
+	}
+	t.Parallel()
 	dir := t.TempDir()
 	writeTree(t, dir, map[string]string{
 		"main.go": `package main
@@ -423,10 +560,64 @@ func main() {}
 		t.Fatal("nil architecture result")
 	}
 	if !ar.OK {
-		t.Error("missing boundaries is a warning, not a failure: expected OK true")
+		t.Error("clean fixture with inferred boundaries: expected OK true")
 	}
 	if len(ar.Warnings) == 0 {
-		t.Error("expected a boundaries-not-configured warning")
+		t.Fatal("expected an advisory warning that inferred boundaries were used")
+	}
+	if !strings.Contains(ar.Warnings[0], "inferred") {
+		t.Errorf("warning should mention inferred boundaries, got %q", ar.Warnings[0])
+	}
+	if strings.Contains(ar.Warnings[0], "NOT enforced") {
+		t.Errorf("warning must not claim the guard was not enforced, got %q", ar.Warnings[0])
+	}
+	if len(ar.Violations) != 0 {
+		t.Errorf("clean fixture must have no violations, got %v", ar.Violations)
+	}
+}
+
+// TestVerifyArchitectureEnforcesInferredBoundaries: with no .kern/boundaries.json,
+// the inferred layered guardrails (db->web forbid) are enforced — an upward
+// dependency from a repository/DB layer into a web layer must be detected as
+// a violation, exactly as if the rule had been pinned explicitly.
+func TestVerifyArchitectureEnforcesInferredBoundaries(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping real-execution verification in -short mode")
+	}
+	t.Parallel()
+	dir := t.TempDir()
+	writeTree(t, dir, map[string]string{
+		"go.mod": "module archfixture\n\ngo 1.20\n",
+		"web/web.go": `package web
+
+func W() string { return "w" }
+`,
+		"db/db.go": `package db
+
+import "archfixture/web"
+
+func D() string { return web.W() }
+`,
+	})
+	e := NewEngine(dir)
+	ar := e.VerifyArchitecture()
+	if ar == nil {
+		t.Fatal("nil architecture result")
+	}
+	if ar.OK {
+		t.Fatal("db->web dependency must be flagged by the inferred boundaries (db->web forbid), got OK")
+	}
+	if len(ar.Violations) == 0 {
+		t.Fatal("expected at least one inferred-boundary violation")
+	}
+	found := false
+	for _, v := range ar.Violations {
+		if strings.Contains(v, "db/db.go") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected the db/db.go violation to be reported, got %v", ar.Violations)
 	}
 }
 
@@ -434,7 +625,10 @@ func main() {}
 // fixture and asserts node/edge counts are populated. Scoped to the fixture so
 // it does not re-index the whole kern repository.
 func TestVerifyDependency(t *testing.T) {
-	t.Setenv("KERN_ALLOW_UNISOLATED", "1") // fail-closed gate: opt into unisolated runs on hosts without netns (darwin)
+	if testing.Short() {
+		t.Skip("skipping real-execution verification in -short mode")
+	}
+	t.Parallel()
 	e := NewEngine(verifyFixture(t))
 	dr := e.VerifyDependency("helper")
 	if dr == nil {
@@ -515,7 +709,10 @@ func TestAnnotate(t *testing.T) {
 // module and asserts StaticAnalysis is non-nil and OK (the fixture has no vet
 // issues).
 func TestVerifyStaticAnalysis(t *testing.T) {
-	t.Setenv("KERN_ALLOW_UNISOLATED", "1") // fail-closed gate: opt into unisolated runs on hosts without netns (darwin)
+	if testing.Short() {
+		t.Skip("skipping real-execution verification in -short mode")
+	}
+	t.Parallel()
 	res := NewEngine(verifyFixture(t)).Verify([]string{"static-analysis"})
 	if res.StaticAnalysis == nil {
 		t.Fatal("nil static analysis result")
@@ -537,7 +734,10 @@ func TestVerifyStaticAnalysis(t *testing.T) {
 // TestVerifyE2E runs Verify with ["e2e"] on a fixture without e2e-tagged
 // tests; the result must be nil (not run) and the engine must not panic.
 func TestVerifyE2E(t *testing.T) {
-	t.Setenv("KERN_ALLOW_UNISOLATED", "1") // fail-closed gate: opt into unisolated runs on hosts without netns (darwin)
+	if testing.Short() {
+		t.Skip("skipping real-execution verification in -short mode")
+	}
+	t.Parallel()
 	res := NewEngine(verifyFixture(t)).Verify([]string{"e2e"})
 	if res.E2ETests != nil {
 		t.Error("expected nil E2ETests when no e2e-tagged tests are detected")
@@ -550,7 +750,10 @@ func TestVerifyE2E(t *testing.T) {
 // TestVerifyE2EPresent runs Verify with ["e2e"] on a fixture carrying an
 // e2e-tagged test and asserts the result is populated and passing.
 func TestVerifyE2ERun(t *testing.T) {
-	t.Setenv("KERN_ALLOW_UNISOLATED", "1") // fail-closed gate: opt into unisolated runs on hosts without netns (darwin)
+	if testing.Short() {
+		t.Skip("skipping real-execution verification in -short mode")
+	}
+	t.Parallel()
 	dir := t.TempDir()
 	writeTree(t, dir, map[string]string{
 		"go.mod": "module e2efixture\n\ngo 1.20\n",
@@ -590,7 +793,10 @@ func TestVerifyPerformanceNilWhenNoBenchmarks(t *testing.T) {
 // declares a benchmark; Performance must be populated and advisory (a failed
 // bench run does not fail the verdict).
 func TestVerifyPerformanceRuns(t *testing.T) {
-	t.Setenv("KERN_ALLOW_UNISOLATED", "1") // fail-closed gate: opt into unisolated runs on hosts without netns (darwin)
+	if testing.Short() {
+		t.Skip("skipping real-execution verification in -short mode")
+	}
+	t.Parallel()
 	dir := t.TempDir()
 	writeTree(t, dir, map[string]string{
 		"go.mod": "module benchfixture\n\ngo 1.20\n",
@@ -622,7 +828,10 @@ func BenchmarkSum(b *testing.B) {
 // so non-Go projects (or unusual layouts) are verifiable without code
 // changes.
 func TestVerifyTestsConfigOverride(t *testing.T) {
-	t.Setenv("KERN_ALLOW_UNISOLATED", "1") // fail-closed gate: opt into unisolated runs on hosts without netns (darwin)
+	if testing.Short() {
+		t.Skip("skipping real-execution verification in -short mode")
+	}
+	t.Parallel()
 	root := verifyFixture(t)
 	dir := filepath.Join(root, ".kern")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -650,7 +859,9 @@ func TestVerifyTestsConfigOverride(t *testing.T) {
 // TestVerifyTestsNpmNoScriptSkips guards the npm false-fail: a package.json
 // without a "test" script must report a clean skip, not a failing suite.
 func TestVerifyTestsNpmNoScriptSkips(t *testing.T) {
-	t.Setenv("KERN_ALLOW_UNISOLATED", "1") // fail-closed gate: opt into unisolated runs on hosts without netns (darwin)
+	if testing.Short() {
+		t.Skip("skipping real-execution verification in -short mode")
+	}
 	if _, err := exec.LookPath("npm"); err != nil {
 		t.Skip("npm not on PATH")
 	}

@@ -124,3 +124,50 @@ func TestGetAgentUnknown(t *testing.T) {
 		t.Error("GetAgent for unknown ID should error (fail closed)")
 	}
 }
+
+// TestSaveLoadAgentsRoundTrip verifies an agent registered in one process
+// (registry instance) is visible to a later process via the store — the
+// `kern org agents register` -> `kern authorize-context` contract.
+func TestSaveLoadAgentsRoundTrip(t *testing.T) {
+	root := t.TempDir()
+	a := NewAgent("qa-agent", "QA Agent", "tester", []Permission{{Resource: "context", Action: "read"}})
+	if err := RegisterAgent(a); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		// restore pristine registry for other tests
+		agentRegistryMu.Lock()
+		delete(agentRegistry, "qa-agent")
+		agentRegistryMu.Unlock()
+	}()
+	if err := SaveAgents(root); err != nil {
+		t.Fatalf("SaveAgents: %v", err)
+	}
+	// Simulate a fresh process: wipe the in-memory registry, then load.
+	agentRegistryMu.Lock()
+	agentRegistry = map[string]*AgentIdentity{}
+	agentRegistryMu.Unlock()
+	if err := LoadAgents(root); err != nil {
+		t.Fatalf("LoadAgents: %v", err)
+	}
+	got, err := GetAgent("qa-agent")
+	if err != nil {
+		t.Fatalf("GetAgent after LoadAgents: %v", err)
+	}
+	if got.Name != "QA Agent" || len(got.Permissions) != 1 || got.Permissions[0].Resource != "context" {
+		t.Fatalf("round-trip mismatch: %+v", got)
+	}
+}
+
+// TestLoadAgentsMissingStoreIsNoop ensures a fresh project (no agents.json)
+// leaves the registry untouched rather than erroring — lookups still fail
+// closed with "unknown agent".
+func TestLoadAgentsMissingStoreIsNoop(t *testing.T) {
+	root := t.TempDir()
+	if err := LoadAgents(root); err != nil {
+		t.Fatalf("LoadAgents on missing store should be a no-op, got %v", err)
+	}
+	if _, err := GetAgent("nobody"); err == nil {
+		t.Error("GetAgent for unknown ID should still fail closed")
+	}
+}

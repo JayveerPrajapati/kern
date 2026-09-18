@@ -213,9 +213,8 @@ func (w *ApprovalWorkflow) Pending() []domain.Approval {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	var out []domain.Approval
-	for id, a := range w.pending {
+	for _, a := range w.pending {
 		if a.Status == "pending" {
-			_ = id
 			out = append(out, a)
 		}
 	}

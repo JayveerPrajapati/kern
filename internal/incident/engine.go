@@ -625,7 +625,7 @@ func (e *Engine) hypotheses(inc *domain.Incident) []domain.Hypothesis {
 			Source:     "memory",
 			Confidence: domain.ClaimInference,
 			Score:      0.6,
-			Evidence:   []domain.Evidence{domain.Evidence{Type: domain.EvidenceMemory, Source: "memory", Content: m.Content}},
+			Evidence:   []domain.Evidence{{Type: domain.EvidenceMemory, Source: "memory", Content: m.Content}},
 		})
 	}
 
@@ -638,7 +638,7 @@ func (e *Engine) hypotheses(inc *domain.Incident) []domain.Hypothesis {
 				Source:     "code",
 				Confidence: domain.ClaimInference,
 				Score:      0.5,
-				Evidence:   []domain.Evidence{domain.Evidence{Type: domain.EvidenceRuntime, Source: "runtime", Content: "errors reference " + f}},
+				Evidence:   []domain.Evidence{{Type: domain.EvidenceRuntime, Source: "runtime", Content: "errors reference " + f}},
 			})
 		}
 	}

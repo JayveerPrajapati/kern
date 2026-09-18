@@ -84,7 +84,7 @@ func (c *ArchitectureCheck) Run(ctx context.Context, req domain.ChangeRequest) (
 		return domain.CheckResult{Name: c.Name(), Status: domain.StatusSkip, Skipped: true}, nil
 	}
 
-	// Rebuild the kern index only when it is stale (P0.2 content-addressed
+	// Rebuild the kern index only when it is stale (content-addressed
 	// staleness verdict; P2-4 index freshness provenance; see
 	// ensureFreshIndex). A stale index is rebuilt once and re-verified; a
 	// rebuild that does not converge is an ERROR, never a silent pass.
@@ -93,7 +93,7 @@ func (c *ArchitectureCheck) Run(ctx context.Context, req domain.ChangeRequest) (
 		return result, nil
 	}
 
-	// P0.4 authz gate: ask kern for the change's authorization verdict BEFORE
+	// authz gate: ask kern for the change's authorization verdict BEFORE
 	// the boundary check (degradation contract and denial handling in
 	// authzVerdict). A denied verdict blocks and skips boundary evaluation.
 	authzFindings, result, done := c.authzVerdict(ctx, req)
@@ -159,7 +159,7 @@ func (c *ArchitectureCheck) degradedWarnFinding(req domain.ChangeRequest) (domai
 	// kern's index directory is gitignored, so a validation run in a
 	// detached-worktree sandbox (e.g. CI at a non-HEAD ref) will not contain
 	// it even when the source repo has a fresh index — distinguish that case
-	// from "boundaries were never declared" (report A4).
+	// from "boundaries were never declared".
 	if _, err := os.Stat(filepath.Join(req.RepositoryRoot, ".kern")); err != nil {
 		if len(stagedFilePaths(req)) == 0 {
 			return domain.CheckResult{Name: c.Name(), Status: domain.StatusSkip, Skipped: true}, true
@@ -189,7 +189,7 @@ func (c *ArchitectureCheck) degradedWarnFinding(req domain.ChangeRequest) (domai
 // worktree list shows the source repo keeps a .kern/ index elsewhere (kern's
 // index is gitignored, so a detached-worktree CI sandbox cannot see it), the
 // WARN is phrased as "sandbox cannot see the index" rather than "kern has
-// never been run here" (report A4).
+// never been run here".
 func archNoKernDetail(evalRoot string) (msg, explanation, fix string) {
 	noIndexAtAll := true
 	if out, err := exec.Command("git", "-C", evalRoot, "worktree", "list", "--porcelain").Output(); err == nil {
@@ -216,7 +216,7 @@ func archNoKernDetail(evalRoot string) (msg, explanation, fix string) {
 
 // ensureFreshIndex rebuilds the kern index only when it is stale and returns
 // the index freshness verdict ("fresh"/"rebuilt") for provenance stamping on
-// every finding. P0.2: staleness is kern's authoritative content-addressed
+// every finding. Staleness is kern's authoritative content-addressed
 // verdict, not an mtime heuristic — operations that preserve mtimes (e.g.
 // `git apply`) can no longer hide a stale index (git hashes content, so a
 // content edit flips the tree OID even when the mtime is untouched).
@@ -287,11 +287,11 @@ func (c *ArchitectureCheck) ensureFreshIndex(ctx context.Context, req domain.Cha
 }
 
 // authzVerdict asks kern for the change's authorization verdict when it
-// carries an agent identity (P0.4), BEFORE the boundary check. An
+// carries an agent identity, BEFORE the boundary check. An
 // unauthorized agent's structural violations are moot — a denied verdict
 // blocks the change (done=true) and skips the boundary evaluation entirely.
 // Degradation contract (never a hard failure):
-//   - verdict == nil (no --task scope, or kern without the P0.4 authz key):
+//   - verdict == nil (no --task scope, or kern without the authz key):
 //     proceed unchanged (backward compat);
 //   - err != nil (probe failed): emit an authz:verdict-error WARN and
 //     proceed with the boundary check — the architecture check must not
