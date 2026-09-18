@@ -209,7 +209,7 @@ func (s *Session) Index() (*index.Index, error) {
 // reusing symbols and edges of unchanged ones. Any Update failure (or no
 // loadable previous index) falls back to a full Build, as does a change set
 // larger than index.CatchUpMaxChanges — over a near-whole-tree diff Update is
-// more expensive than a clean Build (the CG-P1-7 policy). The explicit
+// more expensive than a clean Build (the policy). The explicit
 // `kern index` CLI command is unaffected (it calls index.Build directly).
 func (s *Session) rebuildIndex(root string) (*index.Index, error) {
 	var prev *index.Index
@@ -237,7 +237,7 @@ func (s *Session) rebuildIndex(root string) (*index.Index, error) {
 	if prev != nil {
 		// Large change sets make incremental Update more expensive than a
 		// clean Build — Update would re-parse nearly every file — so skip it
-		// and rebuild (the CG-P1-7 policy).
+		// and rebuild (the policy).
 		cur, herr := index.FileHashes(root)
 		if herr != nil {
 			// Unprovable freshness (scan error): fail closed with a full
@@ -347,32 +347,6 @@ func (s *Session) CommunitiesList(ix *index.Index) []intel.Community {
 	}
 	s.communities = intel.Communities(ix)
 	return s.communities
-}
-
-// HubsList returns the cached hub list for the given limit. A different limit
-// forces recompute (hubs are sorted by score; a smaller limit is a prefix but
-// we recompute to be safe with the sort).
-func (s *Session) HubsList(ix *index.Index, limit int) []intel.Hub {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.hubs != nil && s.hubsLimit == limit {
-		return s.hubs
-	}
-	s.hubs = intel.Hubs(ix, limit)
-	s.hubsLimit = limit
-	return s.hubs
-}
-
-// BridgesList returns the cached bridge list for the given limit.
-func (s *Session) BridgesList(ix *index.Index, limit int) []intel.Bridge {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.bridges != nil && s.bridgesLimit == limit {
-		return s.bridges
-	}
-	s.bridges = intel.Bridges(ix, limit)
-	s.bridgesLimit = limit
-	return s.bridges
 }
 
 // Recorder returns a stats recorder rooted in the local cache, or nil when

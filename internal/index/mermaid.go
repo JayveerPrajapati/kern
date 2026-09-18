@@ -9,7 +9,7 @@ import (
 // suitable for pasting into any markdown viewer or agent chat. When any of
 // the cited files (the definition file plus the files of resolvable callee
 // targets) changed on disk since the index was built, a staleness banner is
-// prepended as a mermaid comment (P1-7).
+// prepended as a mermaid comment.
 func (ix *Index) Mermaid(symbol string) string {
 	defs := ix.symbolsFor(symbol)
 	if len(defs) == 0 {

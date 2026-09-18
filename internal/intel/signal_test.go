@@ -6,9 +6,6 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/index"
 )
 
-// TestLargeFunctionsSkipsBundledAssetsAndGenerated pins P1-7: a 2892-line
-// plugin bundle under */assets/* and tool-generated scaffolding are not
-// hand-written debt, so neither may outrank real hotspots.
 func TestLargeFunctionsSkipsBundledAssetsAndGenerated(t *testing.T) {
 	ix := &index.Index{
 		Symbols: []index.Symbol{
@@ -24,9 +21,6 @@ func TestLargeFunctionsSkipsBundledAssetsAndGenerated(t *testing.T) {
 	}
 }
 
-// TestAnalyzeCoverageSkipsFuncMain pins P1-7: entry points are invoked by the
-// runtime, never by callers under test — func main must not rank as an
-// "untested hotspot" (reported: func main evaluate/calibration/main.go:36).
 func TestAnalyzeCoverageSkipsFuncMain(t *testing.T) {
 	edge := func(target string) []index.CallEdge {
 		return []index.CallEdge{{Target: target, Confidence: index.ConfidenceHigh}}

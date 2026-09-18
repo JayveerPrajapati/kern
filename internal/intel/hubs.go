@@ -26,7 +26,7 @@ type Hub struct {
 	Weighted float64 `json:"weighted,omitempty"`
 	// bare is the unqualified FullName (the index Callers/Calls key). It is
 	// unexported so JSON output is unchanged; hubSet uses it to keep bare
-	// lookups working for risk scoring (P1-5).
+	// lookups working for risk scoring.
 	bare string
 }
 
@@ -51,7 +51,7 @@ func hubSet(ix *index.Index) map[string]bool {
 	out := map[string]bool{}
 	for _, h := range ranked[:max(len(ranked)/10, min(len(ranked), 5))] {
 		out[h.Symbol] = true
-		// P1-5: hub symbols for ambiguous names are package-qualified
+		// hub symbols for ambiguous names are package-qualified
 		// (internal/cache.Load), but risk scoring looks hubs up by bare
 		// FullName and call-edge target. Keep the bare key so existing
 		// lookups keep working (conservative: any same-named hub flags).
@@ -84,7 +84,7 @@ func Hubs(ix *index.Index, limit int) []Hub {
 			continue
 		}
 		callers := hubUnitCallers(ix, fileMap, dups, byName, splits, u)
-		// NOTE (P1-5): outgoing calls stay aggregated by bare name —
+		// NOTE: outgoing calls stay aggregated by bare name —
 		// ix.Calls merges every same-named definition's callees with no
 		// per-file provenance, so per-definition calls cannot be recovered
 		// at this layer. Caller counts (the bridge/hub signal that matters)

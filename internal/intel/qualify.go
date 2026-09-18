@@ -2,18 +2,18 @@ package intel
 
 import (
 	"path/filepath"
-	"sort"
+	"slices"
 	"strings"
 
 	"github.com/JayveerPrajapati/kern/internal/index"
 )
 
-// P1-5: same-named symbols in different packages (twelve bare `func Load`,
+// same-named symbols in different packages (twelve bare `func Load`,
 // six bare `func New`) used to share one Callers bucket and one display name,
 // so `kern bridges` printed eleven identical `Load` rows and `kern hubs`
 // ranked every `New` with the same 82 callers. This file scopes ambiguous
 // names by package so each definition is ranked and displayed on its own
-// evidence (P1-5: bridges shows `cache.Load`, not `Load`).
+// evidence (bridges shows `cache.Load`, not `Load`).
 //
 // The package-scoping convention mirrors the intelligence graph
 // (internal/intelligence/graph.go nodeID via packagePathByFile): a symbol in
@@ -243,14 +243,7 @@ func dedupeSorted(in []string) []string {
 	if len(in) == 0 {
 		return nil
 	}
-	seen := map[string]bool{}
-	out := make([]string, 0, len(in))
-	for _, s := range in {
-		if !seen[s] {
-			seen[s] = true
-			out = append(out, s)
-		}
-	}
-	sort.Strings(out)
-	return out
+	cp := append([]string(nil), in...)
+	slices.Sort(cp)
+	return slices.Compact(cp)
 }

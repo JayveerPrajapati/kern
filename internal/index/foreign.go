@@ -203,10 +203,19 @@ func isIndexable(rel string, src []byte) bool {
 	// Minified/bundled files are skipped entirely: their truncated variable
 	// names and single-line bodies produce garbage symbols and corrupt the
 	// call graph, unlike generated code (which still reuses real names).
-	if isMinified(src) {
-		return false
+	// The heuristic is gated to the languages that are actually minified in
+	// the wild (JS/TS/CSS): applied unconditionally it false-positives on
+	// legitimate long-line source — Go dispatch tables and generated
+	// Markdown catalogs routinely exceed 10 lines of 500+ chars and were
+	// silently dropped from the index.
+	lang := detectLang(rel, src)
+	switch lang {
+	case "javascript", "typescript", "css":
+		if isMinified(src) {
+			return false
+		}
 	}
-	return detectLang(rel, src) != ""
+	return lang != ""
 }
 
 type declRule struct {

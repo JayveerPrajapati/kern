@@ -1,6 +1,8 @@
 package intel
 
 import (
+	"container/list"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -169,6 +171,39 @@ func Order() {}
 	}
 }
 
+// TestRankedSearchNoTwoCharSubstringNoise locks the substring-tier minimum
+// length: the query "ZzZzNopeNope" camelCase-splits to "zz"/"nope", and the
+// 2-char "zz" must no longer substring-match every symbol containing a
+// coincidental run (e.g. "Fuzzy") — 0 hits. A 2-char WHOLE segment ("db")
+// still matches through the exact-segment tier.
+func TestRankedSearchNoTwoCharSubstringNoise(t *testing.T) {
+	root := writeTree(t, map[string]string{
+		"go.mod": "module demo\n\ngo 1.22\n",
+		"app.go": `package main
+
+// FuzzySearch matches fuzzy substrings.
+func FuzzySearch() {}
+
+// GetDBConnection opens a database connection.
+func GetDBConnection() {}
+`,
+	})
+	ix, err := index.Build(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hits := RankedSearch(ix, "ZzZzNopeNope", 10); len(hits) != 0 {
+		t.Fatalf("2-char substring query must return 0 hits, got %d (%v)", len(hits), hits)
+	}
+	hits := RankedSearch(ix, "db", 10)
+	if len(hits) == 0 {
+		t.Fatal("2-char whole-segment query should still match")
+	}
+	if hits[0].Name != "GetDBConnection" {
+		t.Errorf("2-char segment query should hit GetDBConnection, got %s", hits[0].Name)
+	}
+}
+
 // fakeEmbedder returns a bag-of-words dense vector so tests can predict cosine
 // similarity without an Ollama server. Two texts share the same vector exactly
 // when they contain the same whitespace-token set.
@@ -281,30 +316,97 @@ func FifthDecoy() {}
 }
 
 func TestSemanticSearchDescriptCacheBounded(t *testing.T) {
-	// Push many unique descriptors through the cache and confirm the cache does
-	// not grow without bound (a new key evicts one old key past the cap).
+	// Push many UNIQUE descriptors through the cache and confirm it does not
+	// grow without bound (a new key evicts one old key past the cap) and that
+	// eviction is LRU — with no intervening hits the least-recently-used key
+	// is the oldest inserted one, which must go first (deterministic, not
+	// random).
 	symbolEmbedMu.Lock()
-	old := symbolEmbedCache
-	symbolEmbedCache = map[string][]float32{}
+	oldCache := symbolEmbedCache
+	oldOrder := symbolEmbedOrder
+	symbolEmbedCache = map[string]*embedCacheEntry{}
+	symbolEmbedOrder = list.List{}
 	symbolEmbedMu.Unlock()
 	defer func() {
 		symbolEmbedMu.Lock()
-		symbolEmbedCache = old
+		symbolEmbedCache = oldCache
+		symbolEmbedOrder = oldOrder
 		symbolEmbedMu.Unlock()
 	}()
-	for i := 0; i < symbolEmbedCap+50; i++ {
-		desc := "func Symbol" + string(rune('A'+i%26)) + " file.go"
+	const extra = 50
+	for i := 0; i < symbolEmbedCap+extra; i++ {
+		desc := fmt.Sprintf("func Symbol%d file.go", i)
 		if _, err := embedCached(fakeEmbedder{}, desc); err != nil {
 			t.Fatal(err)
 		}
 	}
 	symbolEmbedMu.Lock()
 	size := len(symbolEmbedCache)
+	orderLen := symbolEmbedOrder.Len()
+	oldest := symbolEmbedCache["func Symbol0 file.go"]
+	newest := symbolEmbedCache[fmt.Sprintf("func Symbol%d file.go", symbolEmbedCap+extra-1)]
 	symbolEmbedMu.Unlock()
 	if size > symbolEmbedCap {
 		t.Errorf("cache exceeded cap: %d > %d", size, symbolEmbedCap)
 	}
-	if size < 2 {
-		t.Errorf("cache should retain recent keys, got %d", size)
+	if size != symbolEmbedCap {
+		t.Errorf("cache size = %d, want %d (cap, after evicting the oldest %d)", size, symbolEmbedCap, extra)
+	}
+	if orderLen != symbolEmbedCap {
+		t.Errorf("LRU recency list length = %d, want %d (one entry per cached key)", orderLen, symbolEmbedCap)
+	}
+	if oldest != nil {
+		t.Error("oldest inserted descriptor must be evicted first (LRU: least recently used), but it is still cached")
+	}
+	if newest == nil {
+		t.Error("newest inserted descriptor must be retained under LRU eviction")
+	}
+}
+
+// TestSymbolEmbedCacheLRUHitRefreshesRecency: a hit must refresh a key's
+// recency so hot entries survive cold scans — under FIFO the hot entry would
+// be the oldest-inserted and get evicted first.
+func TestSymbolEmbedCacheLRUHitRefreshesRecency(t *testing.T) {
+	symbolEmbedMu.Lock()
+	oldCap, oldCache, oldOrder := symbolEmbedCap, symbolEmbedCache, symbolEmbedOrder
+	symbolEmbedCap = 3
+	symbolEmbedCache = map[string]*embedCacheEntry{}
+	symbolEmbedOrder = list.List{}
+	symbolEmbedMu.Unlock()
+	defer func() {
+		symbolEmbedMu.Lock()
+		symbolEmbedCap, symbolEmbedCache, symbolEmbedOrder = oldCap, oldCache, oldOrder
+		symbolEmbedMu.Unlock()
+	}()
+
+	e := fakeEmbedder{}
+	for _, desc := range []string{"a", "b", "c"} {
+		if _, err := embedCached(e, desc); err != nil {
+			t.Fatalf("embed %q: %v", desc, err)
+		}
+	}
+	// Hit "a" — refreshes its recency (moves it to the most-recently-used end).
+	if _, err := embedCached(e, "a"); err != nil {
+		t.Fatalf("re-embed a: %v", err)
+	}
+	// Insert "d": evicts the least-recently-used ("b"), NOT the hot "a".
+	if _, err := embedCached(e, "d"); err != nil {
+		t.Fatalf("embed d: %v", err)
+	}
+	// Insert "e": evicts the next-least-recently-used ("c"). "a" survives two
+	// cold scans only because its hit refreshed recency. (Assertions probe via
+	// cachedEmbedding only AFTER all inserts: probes refresh recency too.)
+	if _, err := embedCached(e, "e"); err != nil {
+		t.Fatalf("embed e: %v", err)
+	}
+	for _, gone := range []string{"b", "c"} {
+		if _, ok := cachedEmbedding(gone); ok {
+			t.Errorf("LRU violation: %q (least recently used) should have been evicted", gone)
+		}
+	}
+	for _, want := range []string{"a", "d", "e"} {
+		if _, ok := cachedEmbedding(want); !ok {
+			t.Errorf("expected %q still cached (hot / recently inserted), got evicted", want)
+		}
 	}
 }

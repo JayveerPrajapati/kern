@@ -101,16 +101,6 @@ func (b *SafetyBudget) TrackToolCall() {
 	b.toolCallsUsed++
 }
 
-// TrackFile increments the file-change counter.
-func (b *SafetyBudget) TrackFile() {
-	b.filesUsed++
-}
-
-// TrackTokens adds to the token counter.
-func (b *SafetyBudget) TrackTokens(n int) {
-	b.tokensUsed += n
-}
-
 // TrackToolCallKind increments the per-tool-kind counter for the given kind.
 // It is the per-kind counterpart to TrackToolCall: callers can cap e.g. "exec"
 // calls independently of the total tool-call budget.

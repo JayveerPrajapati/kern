@@ -154,8 +154,6 @@ func TestParseLogCountsPerCommit(t *testing.T) {
 	}
 }
 
-// W2-16: an uncalled method sharing a simple name with a called method of
-// another type must still be reported dead.
 func TestDeadKeepsUncalledSameNameMethod(t *testing.T) {
 	src := `package lib
 
@@ -186,8 +184,6 @@ func main() {
 	t.Errorf("Beta.Save is never called and must be reported dead, got %+v", dead)
 }
 
-// W2-17: a test calling fmt.Println must not mark an unrelated local Println
-// as covered.
 func TestCoverageIgnoresForeignCallees(t *testing.T) {
 	dir := writeTree(t, map[string]string{
 		"lib/lib.go": `package lib

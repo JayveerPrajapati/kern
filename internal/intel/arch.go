@@ -79,7 +79,7 @@ func AnalyzeArchitecture(ix *index.Index) Architecture {
 			if d := dirOf(fileMap, s); d != "" {
 				packages[d] = true
 			}
-			// P1-5: ambiguous names resolve to their strongest definition
+			// ambiguous names resolve to their strongest definition
 			// unit (package-qualified display); unique names are unchanged.
 			hubName, n := bestUnitCallers(ix, fileMap, dups, byName, splits, s)
 			if n > best {

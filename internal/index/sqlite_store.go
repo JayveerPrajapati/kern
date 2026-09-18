@@ -20,8 +20,9 @@ import (
 func sqliteEnabled() bool { return true }
 
 // SQLiteEnabled reports whether the SQLite persistent store is available in
-// this build (built with -tags sqlite). The stub build returns false so
-// callers can degrade gracefully to the JSON cache.
+// this build. SQLite is the DEFAULT: this file is compiled in unless the
+// build is tagged -tags nosqlite, which swaps in the stub (sqlite_store_stub.go)
+// returning false so callers degrade gracefully to the JSON cache.
 func SQLiteEnabled() bool { return sqliteEnabled() }
 
 // SQLiteStore is a persistent, concurrent-safe SQLite-backed index store with
@@ -56,7 +57,12 @@ func OpenSQLite(root string) (*SQLiteStore, error) {
 		return nil, err
 	}
 	ensureGitExclude(root)
-	dsn := fmt.Sprintf("file:%s?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=temp_store(MEMORY)&_pragma=cache_size(-20000)", p)
+	// cache_size is formatted INTO the DSN (_pragma=...) so it is applied by
+	// the driver at connection open, not via a later Exec on the single-conn
+	// pool: the DSN pragma is robust against connection re-creation and
+	// cannot be skipped by a reordered pragma list (oracle-gate hardening).
+	// All other pragmas stay in the Exec list below.
+	dsn := fmt.Sprintf("file:%s?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=temp_store(MEMORY)&_pragma=cache_size(%d)", p, sqliteCacheSize)
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, err
@@ -75,7 +81,6 @@ func OpenSQLite(root string) (*SQLiteStore, error) {
 		"PRAGMA synchronous=NORMAL;",
 		"PRAGMA busy_timeout=5000;",
 		"PRAGMA temp_store=MEMORY;",
-		"PRAGMA cache_size=-64000;",
 		"PRAGMA mmap_size=268435456;", // 256MB memory mapped I/O
 		"PRAGMA wal_autocheckpoint=0;",
 	} {
@@ -244,6 +249,14 @@ func storeHasColumn(db *sql.DB, table, col string) bool {
 // transaction and are checkpointed by the valve at that transaction
 // boundary; the valve targets the incremental pattern, where the coarse
 // default would otherwise checkpoint on every commit.
+// sqliteCacheSize is the SQLite page-cache budget in KiB (negative values are
+// KiB, positive are pages): 64 MiB. It is the single authoritative cache_size:
+// it is formatted INTO the DSN (_pragma=cache_size(...)) and applied by the
+// driver at connection open, so the OpenSQLite Exec pragma list carries no
+// cache_size and there is exactly one value and one apply site (a DSN pragma
+// plus an Exec pragma with different values used to fight each other).
+const sqliteCacheSize = -64000
+
 const (
 	// walSoftCap is the target ceiling for the WAL: 8 MiB. That is far
 	// below the 100 MiB sandbox snapshot cap and the JSON index scale, so
@@ -746,10 +759,16 @@ func (s *SQLiteStore) Load() (*Index, error) {
 // double-quoted phrase form, doubling embedded quotes. Leading/trailing
 // operators are dropped and consecutive ones collapsed so an input like
 // "greet AND" cannot leave FTS5 with an operand-less operator.
+//
+// ftsColRe/ftsWordRe/ftsPhraseRe are the token classifiers, compiled once at
+// package init instead of per ftsEscape call.
+var (
+	ftsColRe    = regexp.MustCompile(`^[\p{L}\p{N}_]+:("(?:[^"]|"")*"|[\p{L}\p{N}_]+)`)
+	ftsWordRe   = regexp.MustCompile(`^[\p{L}\p{N}_]+`)
+	ftsPhraseRe = regexp.MustCompile(`^"(?:[^"]|"")*"`)
+)
+
 func ftsEscape(q string) string {
-	colRe := regexp.MustCompile(`^[\p{L}\p{N}_]+:("(?:[^"]|"")*"|[\p{L}\p{N}_]+)`)
-	wordRe := regexp.MustCompile(`^[\p{L}\p{N}_]+`)
-	phraseRe := regexp.MustCompile(`^"(?:[^"]|"")*"`)
 	parts := []string{}
 	rest := q
 	for len(rest) > 0 {
@@ -758,14 +777,14 @@ func ftsEscape(q string) string {
 			break
 		}
 		switch {
-		case colRe.MatchString(rest):
-			parts = append(parts, colRe.FindString(rest))
-			rest = rest[len(colRe.FindString(rest)):]
-		case phraseRe.MatchString(rest):
-			parts = append(parts, phraseRe.FindString(rest))
-			rest = rest[len(phraseRe.FindString(rest)):]
-		case wordRe.MatchString(rest):
-			w := wordRe.FindString(rest)
+		case ftsColRe.MatchString(rest):
+			parts = append(parts, ftsColRe.FindString(rest))
+			rest = rest[len(ftsColRe.FindString(rest)):]
+		case ftsPhraseRe.MatchString(rest):
+			parts = append(parts, ftsPhraseRe.FindString(rest))
+			rest = rest[len(ftsPhraseRe.FindString(rest)):]
+		case ftsWordRe.MatchString(rest):
+			w := ftsWordRe.FindString(rest)
 			if strings.EqualFold(w, "AND") || strings.EqualFold(w, "OR") || strings.EqualFold(w, "NOT") {
 				parts = append(parts, strings.ToUpper(w))
 			} else {
@@ -879,21 +898,64 @@ func FTS5Search(root, query string, limit int) ([]Symbol, error) {
 	defer func() { _ = s.Close() }()
 	exists, err := storeExists(s)
 	if err != nil || !exists {
-		return nil, fmt.Errorf("no sqlite index for %q (run a build with -tags sqlite or use the CLI index command)", root)
+		return nil, fmt.Errorf("no sqlite index for %q (run the CLI index command; sqlite is the default build and is disabled only with -tags nosqlite)", root)
 	}
 	return s.SearchFTS(query, limit)
 }
 
-// LookupSymbol performs a direct index point-query for a symbol by its Name or FullName.
+// LookupSymbol performs a direct index point-query for a symbol by its Name or
+// FullName (receiver-qualified, "Receiver.name"). The lookup is
+// index-friendly: the predicates are separate UNION ALL branches instead of an
+// OR-concat, and the receiver-qualified form is split at the input's last dot
+// into an indexable `receiver = ? AND name = ?` (the split is the exact
+// inverse of the concat for Go symbols, whose names never contain a dot).
+// The concat expression remains as a fallback branch for exotic foreign-lang
+// names that can contain dots — that branch alone may scan. The result is
+// deterministic when several symbols share a name:
+//
+//  1. an exact name match wins over a receiver-qualified match;
+//  2. among exact matches, the shortest qualified name wins (unqualified
+//     symbols before methods, then the shortest receiver);
+//  3. remaining ties break on name, receiver, file, then line.
+//
+// For unique names the behaviour is identical to a plain `WHERE name = ?`
+// point-query: the single exact-match row is returned.
 func (s *SQLiteStore) LookupSymbol(name string) (*Symbol, error) {
 	var sym Symbol
 	var end, entry int
 	var params string
+	// Split the qualified input at its last dot: the common case
+	// ("pkg.Receiver.method" style receivers) resolves to an indexable
+	// receiver/name pair; inputs without a dot degenerate to a plain name
+	// match already covered by branch 1.
+	recvPart, namePart := "", name
+	if i := strings.LastIndex(name, "."); i >= 0 {
+		recvPart, namePart = name[:i], name[i+1:]
+	}
+	// The UNION branches each project an extra sort-key column, and the
+	// ordering happens in an outer SELECT (SQLite forbids expression ORDER BY
+	// terms on a compound SELECT — they must be result columns, and the scan
+	// below expects exactly the 11 symbol columns).
 	row := s.db.QueryRow(`
 SELECT kind,name,receiver,file,line,"end",lang,entry,framework,route,params
-FROM symbols
-WHERE name = ? OR (receiver || '.' || name) = ?
-LIMIT 1`, name, name)
+FROM (
+	SELECT kind,name,receiver,file,line,"end",lang,entry,framework,route,params,
+	       0 AS prio, (receiver <> '') AS has_recv, length(receiver) AS recv_len
+	FROM symbols
+	WHERE name = ?
+	UNION ALL
+	SELECT kind,name,receiver,file,line,"end",lang,entry,framework,route,params,
+	       1 AS prio, (receiver <> '') AS has_recv, length(receiver) AS recv_len
+	FROM symbols
+	WHERE name <> ? AND receiver = ? AND name = ?
+	UNION ALL
+	SELECT kind,name,receiver,file,line,"end",lang,entry,framework,route,params,
+	       1 AS prio, (receiver <> '') AS has_recv, length(receiver) AS recv_len
+	FROM symbols
+	WHERE name <> ? AND (receiver || '.' || name) = ?
+)
+ORDER BY prio, has_recv, recv_len, name, receiver, file, line
+LIMIT 1`, name, name, recvPart, namePart, name, name)
 	if err := row.Scan(&sym.Kind, &sym.Name, &sym.Receiver, &sym.File, &sym.Line, &end,
 		&sym.Lang, &entry, &sym.Framework, &sym.Route, &params); err != nil {
 		if err == sql.ErrNoRows {
@@ -989,23 +1051,6 @@ func (s *SQLiteStore) LookupInherits(subtype string) ([]string, error) {
 		}
 	}
 	return bases, rows.Err()
-}
-
-// LookupInheritedBy returns the subtypes that extend or implement base.
-func (s *SQLiteStore) LookupInheritedBy(base string) ([]string, error) {
-	rows, err := s.db.Query("SELECT subtype FROM inherits WHERE base = ?", base)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = rows.Close() }()
-	var subtypes []string
-	for rows.Next() {
-		var sub string
-		if err := rows.Scan(&sub); err == nil {
-			subtypes = append(subtypes, sub)
-		}
-	}
-	return subtypes, rows.Err()
 }
 
 // storeExists reports whether the store has a committed index (non-empty

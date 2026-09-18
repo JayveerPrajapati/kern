@@ -71,6 +71,7 @@ type Result struct {
 	Source    *Source  `json:"source,omitempty"`
 	Tokens    int      `json:"tokens"`              // tokenize.Count of rendered text
 	Truncated bool     `json:"truncated,omitempty"` // true when MaxTokens forced trimming
+	MaxTokens int      `json:"-"`                   // render budget (0 = no fitting); Render fits to it
 }
 
 // DefaultRegistry is the package-level handle registry: L1 retrieval registers
@@ -188,6 +189,7 @@ func retrieveL1(ix *index.Index, opts Options) (*Result, error) {
 		})
 	}
 	r.Tokens = tokenize.Count(Render(r))
+	r.MaxTokens = opts.MaxTokens
 	return r, nil
 }
 
@@ -214,8 +216,10 @@ func retrieveL2(ix *index.Index, opts Options) (*Result, error) {
 	h := NewHandle(TypeSymbol, opts.Symbol, rep.Definition.File, rep.Definition.Line,
 		tokenCost, confidenceScore(rep.Definition.Confidence), evidence.Digest(rep.Source))
 	d.Handle = h
+	DefaultRegistry.Register(h)
 	r := &Result{Level: L2, Detail: d}
 	r.Tokens = tokenize.Count(Render(r))
+	r.MaxTokens = opts.MaxTokens
 	return r, nil
 }
 
@@ -245,6 +249,7 @@ func retrieveL3(ix *index.Index, opts Options) (*Result, error) {
 	}
 	h := NewHandle(TypeSymbol, opts.Symbol, def.File, def.Line,
 		tokenize.Count(text), confidenceScore(def.Confidence), evidence.Digest(text))
+	DefaultRegistry.Register(h)
 	r := &Result{Level: L3, Source: &Source{Handle: h, Text: text}, Truncated: truncated}
 	r.Tokens = tokenize.Count(Render(r))
 	return r, nil
@@ -313,11 +318,26 @@ func Render(r *Result) string {
 	default:
 		return ""
 	}
-	fmt.Fprintf(&b, "~%d tokens", payload)
-	if r.Truncated {
-		b.WriteString(" (truncated)")
+	// Budget fit (all levels): when MaxTokens is set, the rendered payload
+	// (header + items/neighborhood/source) is deterministically compacted to
+	// the budget. L3 already fits its source text at retrieve time; L1/L2
+	// fit here — fitting the final render means post-governance filtering of
+	// the items is reflected in the budget, not bypassed by a precomputed
+	// blob. The footer (and its truncation marker) is appended after
+	// the fit so it always survives the trim.
+	text := b.String()
+	if r.MaxTokens > 0 && tokenize.Count(text) > r.MaxTokens {
+		r.Truncated = true
+		text = budget.FitCode(text, r.MaxTokens)
 	}
-	return b.String()
+	if !strings.HasSuffix(text, "\n") {
+		text += "\n"
+	}
+	text += fmt.Sprintf("~%d tokens", payload)
+	if r.Truncated {
+		text += " (truncated)"
+	}
+	return text
 }
 
 // writeL2Body writes the L2 header plus its non-empty sections into b and

@@ -38,9 +38,6 @@ const (
 	}
 }
 
-// TestSummarizeGoConstVarDecls guards F-005: single-line const/var declarations
-// must appear in the symbolic summary (security blind spot — a const holding a
-// secret key was previously invisible to `kern compact`).
 func TestSummarizeGoConstVarDecls(t *testing.T) {
 	src := `package main
 

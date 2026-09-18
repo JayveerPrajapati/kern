@@ -51,12 +51,18 @@ func Probe(ix *index.Index, task string, maxTokens int) *ProbeReport {
 	}
 	candidates := map[string]bool{}
 	for _, w := range identRe.FindAllString(task, -1) {
+		// Consult the index FIRST: a token that resolves (case-sensitively)
+		// to a real symbol wins over the stopword filter, so a symbol whose
+		// name collides with a common English/change verb (Add, Get, Run,
+		// Set, Make, Call, Fix, ...) is never dropped. Stopword filtering
+		// applies only to tokens that do NOT resolve to an index symbol.
+		if r, ok := Resolve(ix, w); ok {
+			candidates[r] = true
+			continue
+		}
 		low := strings.ToLower(w)
 		if stopWords[low] && !strings.Contains(w, ".") && !strings.Contains(w, "_") && !isCamelCase(w) {
 			continue
-		}
-		if r, ok := Resolve(ix, w); ok {
-			candidates[r] = true
 		}
 	}
 

@@ -317,6 +317,7 @@ type graphEdgeRow struct {
 	loc  string // " — file:line" or ""
 }
 
+// String renders the edge row as "name [conf]file:line".
 func (r graphEdgeRow) String() string {
 	return r.name + " [" + r.conf + "]" + r.loc
 }

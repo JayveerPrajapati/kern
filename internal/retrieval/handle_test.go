@@ -1,6 +1,10 @@
 package retrieval
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
 
 func TestNewHandleStableID(t *testing.T) {
 	h1 := NewHandle(TypeSymbol, "greet", "a/b.go", 10, 5, 1.0, "hash1")
@@ -75,5 +79,46 @@ func TestRegistryListSorted(t *testing.T) {
 		if list[i-1].ID > list[i].ID {
 			t.Fatalf("List not sorted at %d: %q > %q", i, list[i-1].ID, list[i].ID)
 		}
+	}
+}
+
+// TestRegistrySaveLoadRoundTrip verifies a handle survives the process
+// boundary: Save in one registry instance, Load in a fresh one (what
+// `kern retrieve` -> `kern resolve` now rely on).
+func TestRegistrySaveLoadRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "handles.json")
+
+	r1 := NewRegistry()
+	h := NewHandle(TypeSymbol, "TaskService", "internal/app/task.go", 29, 27, 1.0, "abc")
+	r1.Register(h)
+	if err := r1.Save(path); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	r2 := NewRegistry()
+	r2.Load(path)
+	got, ok := r2.Resolve(h.ID)
+	if !ok {
+		t.Fatal("handle not resolvable after Load in fresh registry")
+	}
+	if got.Name != "TaskService" || got.Source != "internal/app/task.go" || got.Line != 29 {
+		t.Fatalf("round-trip mismatch: %+v", got)
+	}
+}
+
+// TestRegistryLoadCorruptIsBestEffort ensures a corrupt store leaves the
+// registry empty (resolve then fails with the usual unknown-handle message)
+// rather than panicking or failing loudly.
+func TestRegistryLoadCorruptIsBestEffort(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "handles.json")
+	if err := os.WriteFile(path, []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	r := NewRegistry()
+	r.Load(path) // must not panic
+	if r.Len() != 0 {
+		t.Fatalf("Len = %d after corrupt load, want 0", r.Len())
 	}
 }

@@ -1,6 +1,7 @@
 package intel
 
 import (
+	"container/heap"
 	"fmt"
 	"strings"
 
@@ -83,6 +84,49 @@ func ShortestPathMin(ix *index.Index, from, to string, minConf string) []string 
 	adj := map[string][]string{}
 	names := canonicalNames(ix)
 	local := localNames(ix)
+	// One-pass confidence index (caller -> normalized callee -> label). The
+	// previous per-edge path went through EdgeConfidenceLabel ->
+	// canonicalSimple -> Resolve -> symbolByName, a linear scan of every
+	// symbol per unresolved edge — the profile showed 90% of `kern path`
+	// time (~43s on 13k symbols) inside Resolve. Recorded targets are keyed
+	// under their raw, simple, and canonical forms so the lookup below is
+	// O(1); unrecorded edges stay AMBIGUOUS (conservative, same default as
+	// the old heuristic's miss path).
+	edgeConf := map[string]map[string]string{}
+	addConf := func(caller, callee, label string) {
+		if caller == "" || callee == "" || caller == callee {
+			return
+		}
+		m := edgeConf[caller]
+		if m == nil {
+			m = map[string]string{}
+			edgeConf[caller] = m
+		}
+		if _, ok := m[callee]; !ok {
+			m[callee] = label
+		}
+	}
+	for caller, ces := range ix.Calls {
+		for _, ce := range ces {
+			lbl := labelOf(ce.Confidence.String())
+			addConf(caller, ce.Target, lbl)
+			addConf(caller, simpleName(ce.Target), lbl)
+			addConf(caller, canon(names, ce.Target), lbl)
+		}
+	}
+	labelFor := func(from, to string) string {
+		if m := edgeConf[from]; m != nil {
+			if l, ok := m[to]; ok {
+				return l
+			}
+		}
+		if m := edgeConf[to]; m != nil {
+			if l, ok := m[from]; ok {
+				return l
+			}
+		}
+		return confAmbiguous
+	}
 	for _, s := range ix.Symbols {
 		caller := s.FullName()
 		for _, c := range localCalleesWith(ix, caller, local) {
@@ -90,7 +134,7 @@ func ShortestPathMin(ix *index.Index, from, to string, minConf string) []string 
 			if c == caller {
 				continue
 			}
-			if !passes(EdgeConfidenceLabel(ix, caller, c)) {
+			if !passes(labelFor(caller, c)) {
 				continue
 			}
 			if !contains(adj[caller], c) {
@@ -102,26 +146,17 @@ func ShortestPathMin(ix *index.Index, from, to string, minConf string) []string 
 		}
 	}
 
-	type queueItem struct {
-		node string
-		dist int
-	}
-
+	// Min-heap priority queue. The previous implementation re-scanned the
+	// whole queue per extraction (O(V^2) on 13k+ nodes) — one of the two
+	// quadratic behaviours that made `kern path` take ~55s.
 	dist := map[string]int{from: 0}
 	prev := map[string]string{}
 	visited := map[string]bool{}
-	pq := []queueItem{{node: from, dist: 0}}
+	pq := &pathPQ{{node: from, dist: 0}}
+	heap.Init(pq)
 
-	for len(pq) > 0 {
-		minIdx := 0
-		for i := 1; i < len(pq); i++ {
-			if pq[i].dist < pq[minIdx].dist {
-				minIdx = i
-			}
-		}
-		cur := pq[minIdx]
-		pq = append(pq[:minIdx], pq[minIdx+1:]...)
-
+	for pq.Len() > 0 {
+		cur := heap.Pop(pq).(queueItem)
 		if visited[cur.node] {
 			continue
 		}
@@ -135,16 +170,44 @@ func ShortestPathMin(ix *index.Index, from, to string, minConf string) []string 
 			if visited[nb] {
 				continue
 			}
-			cost := edgeWeight(EdgeConfidenceLabel(ix, cur.node, nb))
+			cost := edgeWeight(labelFor(cur.node, nb))
 			newDist := cur.dist + cost
 			if d, ok := dist[nb]; !ok || newDist < d {
 				dist[nb] = newDist
 				prev[nb] = cur.node
-				pq = append(pq, queueItem{node: nb, dist: newDist})
+				heap.Push(pq, queueItem{node: nb, dist: newDist})
 			}
 		}
 	}
 	return nil
+}
+
+type queueItem struct {
+	node string
+	dist int
+}
+
+type pathPQ []queueItem
+
+// Len implements heap.Interface.
+func (p pathPQ) Len() int { return len(p) }
+
+// Less implements heap.Interface (min-heap by distance).
+func (p pathPQ) Less(i, j int) bool { return p[i].dist < p[j].dist }
+
+// Swap implements heap.Interface.
+func (p pathPQ) Swap(i, j int) { p[i], p[j] = p[j], p[i] }
+
+// Push implements heap.Interface.
+func (p *pathPQ) Push(x any) { *p = append(*p, x.(queueItem)) }
+
+// Pop implements heap.Interface.
+func (p *pathPQ) Pop() any {
+	old := *p
+	n := len(old)
+	it := old[n-1]
+	*p = old[:n-1]
+	return it
 }
 
 func edgeWeight(label string) int {

@@ -151,9 +151,6 @@ func TestProbeBudgetCap(t *testing.T) {
 	if len(fitted) > len(RenderProbe(r)) {
 		t.Error("FitProbe must not grow the bundle")
 	}
-	// W2-24: the report payload itself (what --json serializes) must fit the
-	// budget, not just the text view. A 5-token budget sits below the report
-	// skeleton (task line + anchor headers), so use a reachable budget.
 	r2 := Probe(ix, "Caller Public inner Deep", 120)
 	if _, err := json.Marshal(r2); err != nil {
 		t.Fatalf("report must stay JSON-serializable after trimming: %v", err)
@@ -188,20 +185,40 @@ func TestProbeFiltersStopwords(t *testing.T) {
 		Callers: map[string][]string{},
 	}
 	r := Probe(ix, "When the system tries to find a user, UserService should handle it", 4000)
+	anchored := map[string]bool{}
 	for _, a := range r.Anchors {
-		if a.Name == "when" || a.Name == "find" {
-			t.Errorf("stopword %q should not be anchored in probe report", a.Name)
-		}
+		anchored[a.Name] = true
 	}
-	foundUserService := false
-	for _, a := range r.Anchors {
-		if a.Name == "UserService" {
-			foundUserService = true
-			break
-		}
+	// "find" is a real symbol whose name collides with a stopword: the index
+	// consult runs first, so it must be anchored (never dropped).
+	if !anchored["find"] {
+		t.Errorf("real symbol %q colliding with a stopword should be anchored, got %+v", "find", r.Anchors)
 	}
-	if !foundUserService {
+	// "when" is also a real symbol, but the task text capitalizes it ("When");
+	// case-sensitive resolution must not treat it as a match, so the
+	// lowercased stopword is still filtered.
+	if anchored["when"] {
+		t.Errorf("stopword %q (no case-sensitive symbol match) should not be anchored, got %+v", "when", r.Anchors)
+	}
+	if !anchored["UserService"] {
 		t.Errorf("expected UserService to be anchored, got %+v", r.Anchors)
+	}
+}
+
+// Stopword-colliding symbols: "Add" is both a change verb and a real function
+// here. A probe query whose words are all stopwords except the symbol must
+// still resolve it — the index consult precedes the stopword filter.
+func TestProbeResolvesStopwordCollidingSymbol(t *testing.T) {
+	ix := &index.Index{
+		Symbols: []index.Symbol{
+			{Kind: "func", Name: "Add", File: "math.go", Line: 10},
+		},
+		Calls:   map[string][]index.CallEdge{},
+		Callers: map[string][]string{},
+	}
+	r := Probe(ix, "Add returns wrong result", 4000)
+	if len(r.Anchors) != 1 || r.Anchors[0].Name != "Add" {
+		t.Fatalf("expected exactly one anchor for Add, got %+v", r.Anchors)
 	}
 }
 
@@ -285,10 +302,6 @@ func TestTraceUnresolved(t *testing.T) {
 	}
 }
 
-// TestTracePlainFileLineFormat (report A6): a plain "path/file:line symbol"
-// trace line must resolve the trailing symbol against the index, and inline
-// trace text (multi-line or with a file:line prefix) must be recognized as
-// trace content rather than a path.
 func TestTracePlainFileLineFormat(t *testing.T) {
 	dir := writeTree(t, map[string]string{
 		"lib/lib.go":       srcLib,
@@ -324,8 +337,6 @@ func TestTracePlainFileLineFormat(t *testing.T) {
 	}
 }
 
-// TestRenderTraceFormatHint: an unresolved trace returns a format hint listing
-// the accepted input shapes (report A6).
 func TestRenderTraceFormatHint(t *testing.T) {
 	dir := writeTree(t, map[string]string{"lib/lib.go": srcLib})
 	ix, err := index.Build(dir)

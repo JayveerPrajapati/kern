@@ -3,6 +3,7 @@ package intel
 import (
 	"fmt"
 	"math"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
@@ -40,13 +41,13 @@ var (
 	tokenRe     = regexp.MustCompile(`[A-Za-z_][A-Za-z0-9_]*`)
 	// fileLineRe matches a plain "path:line symbol …" trace line — e.g.
 	// "path/file.py:24 funcname" or "lib/posix.go:123 getpid(map)" — where the
-	// symbol is the word immediately after the file:line prefix (report A6).
+	// symbol is the word immediately after the file:line prefix.
 	fileLineRe = regexp.MustCompile(`(?m)^\s*[^\s:]+:\d+\s+([A-Za-z_][A-Za-z0-9_]*)`)
 )
 
 // LooksLikeTrace reports whether text looks like inline trace content rather
 // than a file path: a multi-line trace, or a single line with a file:line
-// prefix (report A6: `kern trace "path/file.py:24 funcname"`).
+// prefix (`kern trace "path/file.py:24 funcname"`).
 func LooksLikeTrace(text string) bool {
 	return strings.Contains(text, "\n") || fileLineRe.MatchString(text)
 }
@@ -67,6 +68,14 @@ func Trace(ix *index.Index, src, sourceName string, limit int) *TraceReport {
 		}
 		frames++
 		seen := map[string]bool{}
+		frameFile := ""
+		if m := fileLineRe.FindStringSubmatch(trimmed); len(m) > 1 {
+			// "path/file.go:123 sym" — remember the frame's file so the
+			// symbol resolution below prefers the definition AT that
+			// file:line over an unrelated same-named symbol (e.g. a TS
+			// interface shadowing a Go method).
+			frameFile = m[1]
+		}
 		for _, cand := range traceCandidates(trimmed) {
 			if seen[cand] {
 				continue
@@ -75,6 +84,11 @@ func Trace(ix *index.Index, src, sourceName string, limit int) *TraceReport {
 			r, ok := Resolve(ix, cand)
 			if !ok {
 				continue
+			}
+			if frameFile != "" {
+				if s, ok := metaByFileAndName(ix, cand, frameFile); ok {
+					r = s
+				}
 			}
 			if _, exists := counts[r]; !exists {
 				ordered[r] = len(ordered)
@@ -136,6 +150,20 @@ func Trace(ix *index.Index, src, sourceName string, limit int) *TraceReport {
 // trailing identifier of a qualified name, bare identifiers followed by '('
 // (call sites), the symbol after a plain "file:line " prefix, and lines that
 // are a single identifier.
+// metaByFileAndName returns the FullName of a symbol whose Name matches cand
+// and whose source file equals file (the frame's file:line prefix), so trace
+// overlay prefers the exact definition over an unrelated same-named symbol
+// (e.g. a TS interface shadowing a Go method).
+func metaByFileAndName(ix *index.Index, cand, file string) (string, bool) {
+	file = filepath.Base(file)
+	for _, s := range ix.Symbols {
+		if s.Name == cand && filepath.Base(s.File) == file {
+			return s.FullName(), true
+		}
+	}
+	return "", false
+}
+
 func traceCandidates(line string) []string {
 	var out []string
 	for _, m := range qualifiedRe.FindAllString(line, -1) {
@@ -147,7 +175,7 @@ func traceCandidates(line string) []string {
 		out = append(out, strings.TrimSuffix(m, "("))
 	}
 	// "path/file.py:24 funcname" — the trailing word after the file:line
-	// prefix is the symbol (report A6).
+	// prefix is the symbol.
 	if m := fileLineRe.FindStringSubmatch(line); len(m) > 1 {
 		out = append(out, m[1])
 	}

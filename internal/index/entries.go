@@ -140,6 +140,11 @@ func joinRoute(base, route string) string {
 	}
 }
 
+// identWordRe is cleanHandler's compiled word-extraction regex over the
+// shared identRe character class (defined in foreign.go), compiled once at
+// package init instead of per call during index builds.
+var identWordRe = regexp.MustCompile(identRe)
+
 // cleanHandler reduces a route-target string ("UserController@index",
 // "[Ctrl::class, 'show']", "views.index") to the bare method name used for
 // enrichment, e.g. "index".
@@ -170,7 +175,7 @@ func cleanHandler(s string) string {
 	if i := strings.Index(s, "::class"); i >= 0 {
 		s = s[:i]
 	}
-	words := regexp.MustCompile(identRe).FindAllString(s, -1)
+	words := identWordRe.FindAllString(s, -1)
 	if len(words) > 0 {
 		return words[len(words)-1]
 	}

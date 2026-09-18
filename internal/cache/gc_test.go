@@ -54,9 +54,6 @@ func gunzipBytes(t *testing.T, path string) []byte {
 	return buf.Bytes()
 }
 
-// TestMaintainArchivesAndEvicts covers the core G-7 lifecycle: a fresh file
-// is untouched, an old (dormant) one is gzipped with its mtime preserved and
-// the plain file removed, and an ancient one is deleted outright.
 func TestMaintainArchivesAndEvicts(t *testing.T) {
 	dir := t.TempDir()
 	now := time.Now()
@@ -255,6 +252,30 @@ func TestMaintainDeterministic(t *testing.T) {
 	}
 	if _, err := os.Stat(old); !os.IsNotExist(err) {
 		t.Fatal("old file must stay archived")
+	}
+}
+
+func TestMaintainRecursesIntoSubdirs(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Now()
+	payload := bigJSON()
+	deep := filepath.Join(dir, "data", "sem", "prompt", "deadbeef.json")
+	writeJSONFile(t, deep, payload, now.Add(-40*24*time.Hour))
+	fresh := filepath.Join(dir, "data", "sem", "prompt", "cafe.json")
+	writeJSONFile(t, fresh, payload, now)
+
+	archived, evicted, err := Maintain(dir, 7*24*time.Hour, 30*24*time.Hour, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if archived != 0 || evicted != 1 {
+		t.Fatalf("expected evicted=1 archived=0, got archived=%d evicted=%d", archived, evicted)
+	}
+	if _, err := os.Stat(deep); !os.IsNotExist(err) {
+		t.Fatal("ancient nested payload must be evicted")
+	}
+	if _, err := os.Stat(fresh); err != nil {
+		t.Fatalf("fresh nested payload must survive: %v", err)
 	}
 }
 

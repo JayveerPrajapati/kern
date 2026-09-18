@@ -137,10 +137,10 @@ func TestWatchTrailingMergesRelatedBurst(t *testing.T) {
 	dir := t.TempDir()
 	rec := startShortWatch(t, dir)
 	// Let the baseline rebuild and the native watcher registration settle.
-	time.Sleep(150 * time.Millisecond)
+	time.Sleep(50 * time.Millisecond)
 
 	writeFile(t, dir, "foo.go", "package main\n\nfunc Foo() {}\n")
-	time.Sleep(40 * time.Millisecond)
+	time.Sleep(20 * time.Millisecond)
 	writeFile(t, dir, "foo_test.go", "package main\n\nfunc TestFoo(t *testing.T) {}\n")
 
 	select {
@@ -159,7 +159,7 @@ func TestWatchTrailingMergesRelatedBurst(t *testing.T) {
 	}
 
 	// No further rebuild may fire within this window.
-	time.Sleep(400 * time.Millisecond)
+	time.Sleep(150 * time.Millisecond)
 	rec.mu.Lock()
 	defer rec.mu.Unlock()
 	if n := len(rec.batches); n != 1 {
@@ -175,7 +175,7 @@ func TestWatchSeparatesUnrelatedBursts(t *testing.T) {
 	}
 	dir := t.TempDir()
 	rec := startShortWatch(t, dir)
-	time.Sleep(150 * time.Millisecond)
+	time.Sleep(50 * time.Millisecond)
 
 	writeFile(t, dir, "a.go", "package main\n\nfunc A() {}\n")
 	select {
@@ -184,7 +184,7 @@ func TestWatchSeparatesUnrelatedBursts(t *testing.T) {
 		t.Fatal("timed out waiting for the first change batch")
 	}
 	// Wait well past the trailing window before the second edit.
-	time.Sleep(300 * time.Millisecond)
+	time.Sleep(120 * time.Millisecond)
 
 	writeFile(t, dir, "b.go", "package main\n\nfunc B() {}\n")
 	select {
@@ -193,7 +193,7 @@ func TestWatchSeparatesUnrelatedBursts(t *testing.T) {
 		t.Fatal("timed out waiting for the second change batch")
 	}
 
-	time.Sleep(400 * time.Millisecond)
+	time.Sleep(150 * time.Millisecond)
 	rec.mu.Lock()
 	defer rec.mu.Unlock()
 	if n := len(rec.batches); n != 2 {

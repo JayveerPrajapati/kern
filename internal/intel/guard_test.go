@@ -169,6 +169,197 @@ func Handler() {}
 	}
 }
 
+// TestCheckBoundariesPrecise_SkipsTestdataFixtures: files under a testdata/
+// directory are fixture/demo code, not production source — architecture
+// enforcement must not flag their crossings (the indexer does not exclude
+// them, so the skip must live in the check). A production file with the same
+// crossing must still be flagged.
+func TestCheckBoundariesPrecise_SkipsTestdataFixtures(t *testing.T) {
+	dir := writeTree(t, map[string]string{
+		"go.mod": "module m\n\ngo 1.20\n",
+		"web/web.go": `package web
+
+func W() {}
+`,
+		"api/api.go": `package api
+
+import "m/web"
+
+func A() { web.W() }
+`,
+		"testdata/fixture/main.go": `package main
+
+import "m/web"
+
+func main() { web.W() }
+`,
+	})
+	ix, err := index.Build(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := &Boundaries{Rules: []BoundaryRule{
+		{From: "api", To: "web", Action: "forbid"},
+		{From: "fixture", To: "web", Action: "forbid"},
+	}}
+	violations, _ := CheckBoundariesPrecise(ix, b, []string{
+		"api/api.go", "web/web.go", "testdata/fixture/main.go",
+	}, false)
+	if len(violations) != 1 {
+		t.Fatalf("expected exactly the api->web violation (fixture skipped), got %+v", violations)
+	}
+	if violations[0].CallerFile != "api/api.go" {
+		t.Errorf("expected the api/api.go crossing to be the only violation, got %+v", violations)
+	}
+}
+
+// TestCheckBoundariesPrecise_BareNameCollision: the index merges call edges
+// for same-named package-level funcs across packages (bare-name keys — every
+// package has a "New"). A same-named function in a DIFFERENT package must not
+// inherit those edges: only the file that owns the name may be held to them,
+// otherwise "svc" would be falsely flagged for web.New's loadTemplates call.
+func TestCheckBoundariesPrecise_BareNameCollision(t *testing.T) {
+	dir := writeTree(t, map[string]string{
+		"go.mod": "module m\n\ngo 1.20\n",
+		"web/web.go": `package web
+
+type App struct{}
+
+func New() *App {
+	a := &App{}
+	a.loadTemplates()
+	return a
+}
+
+func (a *App) loadTemplates() {}
+`,
+		"svc/svc.go": `package svc
+
+type S struct{}
+
+func New() *S { return &S{} }
+`,
+	})
+	ix, err := index.Build(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := &Boundaries{Rules: []BoundaryRule{{From: "svc", To: "web", Action: "forbid"}}}
+	violations, _ := CheckBoundariesPrecise(ix, b, []string{"web/web.go", "svc/svc.go"}, false)
+	if len(violations) != 0 {
+		t.Fatalf("svc.New must not inherit web.New's call edges (bare-name collision), got %+v", violations)
+	}
+}
+
+// TestCheckBoundariesPrecise_CalleeBareNameCollision: two files in different
+// layers define the same bare function name, and a method in the service file
+// calls its OWN local definition. The callee must not be attributed to the
+// api file's same-named def — that fabrication would reverse the real
+// dependency (dogfood finding: TradingApp nse_service.py -> api/stocks.py
+// "get_quote", where api actually CALLS the service).
+func TestCheckBoundariesPrecise_CalleeBareNameCollision(t *testing.T) {
+	dir := writeTree(t, map[string]string{
+		"api/stocks.py": `async def get_quote(symbol: str):
+    return {"symbol": symbol}
+`,
+		"services/nse_service.py": `async def get_quote(symbol: str):
+    return {"symbol": symbol}
+
+
+class Scanner:
+    async def scan(self, symbol: str):
+        quote = await get_quote(symbol)
+        return quote
+`,
+	})
+	ix, err := index.Build(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := &Boundaries{Rules: []BoundaryRule{{From: "services", To: "api", Action: "forbid"}}}
+	violations, _ := CheckBoundariesPrecise(ix, b, []string{"api/stocks.py", "services/nse_service.py"}, false)
+	if len(violations) != 0 {
+		t.Fatalf("services.Scanner.scan must resolve get_quote to its own file, not api/stocks.py (bare-name callee collision), got %+v", violations)
+	}
+}
+
+// TestInferBoundariesJavaApiModulesNotL1: Maven "*-api" modules are contract
+// interfaces that *-service modules implement (service -> api is the CORRECT
+// direction). For Java projects, "api" must NOT be treated as a presentation
+// layer, or every Maven monorepo gets mass false violations (dogfood finding:
+// 197 spurious service->api findings on slice-adaptors).
+func TestInferBoundariesJavaApiModulesNotL1(t *testing.T) {
+	ix := &index.Index{
+		FileHashes: map[string]string{
+			"x-service/src/main/java/com/x/Service.java":  "h1",
+			"x-api/src/main/java/com/x/api/Contract.java": "h2",
+			// JAX-RS interfaces inside the contract module must also not be
+			// L1 — the "rest" keyword alone would re-flag them (the second
+			// dogfood finding on slice-adaptors).
+			"x-api/src/main/java/com/x/api/rest/ContractResource.java": "h3",
+		},
+	}
+	b := InferBoundaries(ix)
+	for _, r := range b.Rules {
+		if strings.Contains(r.From, "x-api") || strings.Contains(r.To, "x-api") {
+			t.Fatalf("java project must not classify contract-module dirs as any layer, got rule %s -> %s", r.From, r.To)
+		}
+	}
+}
+
+// TestInferBoundariesNonJavaApiIsL1: for Go/Python/JS, an "api" directory is
+// the HTTP surface (presentation). The service -> api forbid must exist so
+// enforcement still catches genuine layering breaks (e.g. TradingApp's
+// services/nse_service.py -> api/stocks.py).
+func TestInferBoundariesNonJavaApiIsL1(t *testing.T) {
+	ix := &index.Index{
+		FileHashes: map[string]string{
+			"app/api/stocks.py":     "h1",
+			"app/services/quote.py": "h2",
+		},
+	}
+	b := InferBoundaries(ix)
+	found := false
+	for _, r := range b.Rules {
+		if r.Action == "forbid" && strings.Contains(r.From, "service") && strings.Contains(r.To, "api") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("non-java project must forbid service -> api, got rules: %+v", b.Rules)
+	}
+}
+
+// TestInferBoundariesIntraModuleSubpackagesNotLayered: a dir's layer comes
+// from its OWN name, not ancestor segments. "*-service/.../dao/impl" must not
+// be classified L2 (service) because an ancestor module is named *-service —
+// that fabricated intra-module dao->service violations (dogfood finding on
+// slice-adaptors).
+func TestInferBoundariesIntraModuleSubpackagesNotLayered(t *testing.T) {
+	ix := &index.Index{
+		FileHashes: map[string]string{
+			"sub/sub-service/src/main/java/com/x/dao/impl/Impl.java": "h1",
+			"sub/sub-service/src/main/java/com/x/dao/Base.java":      "h2",
+		},
+	}
+	b := InferBoundaries(ix)
+	for _, r := range b.Rules {
+		if strings.Contains(r.From, "dao/impl") || strings.Contains(r.To, "dao/impl") {
+			t.Fatalf("dao/impl subpackage must not be a layer, got rule %s -> %s", r.From, r.To)
+		}
+		// Nested ancestor-descendant layer pairs (dao dir inside its own
+		// *-service module) must not produce rules — they fabricate
+		// intra-module dao->service findings.
+		if strings.Contains(r.From, "/dao") && strings.Contains(r.To, "sub-service") {
+			t.Fatalf("nested same-module layer pair must not produce a rule, got %s -> %s", r.From, r.To)
+		}
+		if strings.Contains(r.To, "/dao") && strings.Contains(r.From, "sub-service") {
+			t.Fatalf("nested same-module layer pair must not produce a rule, got %s -> %s", r.From, r.To)
+		}
+	}
+}
+
 // TestImportCheckWarnsOnMissingImportsByFile: an index that carries
 // package-level imports (Pkgs[dir].Imports) but lacks per-file attribution
 // (ImportsByFile is nil — indexes written by older kern) must not pass the

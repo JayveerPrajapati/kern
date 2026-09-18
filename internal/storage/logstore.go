@@ -5,7 +5,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -88,7 +90,7 @@ func (s *LogStore) Put(ctx context.Context, key string, value json.RawMessage) e
 	// prefers the per-key file) cannot observe an outdated value. A failed
 	// removal is surfaced — the shadow would silently win over the fresh
 	// chain line.
-	if err := os.Remove(filepath.Join(s.dir, key+".json")); err != nil && !os.IsNotExist(err) {
+	if err := os.Remove(filepath.Join(s.dir, key+".json")); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return err
 	}
 	return nil
@@ -103,7 +105,7 @@ func (s *LogStore) Get(ctx context.Context, key string) (json.RawMessage, error)
 	}
 	if b, err := os.ReadFile(filepath.Join(s.dir, key+".json")); err == nil {
 		return json.RawMessage(b), nil
-	} else if !os.IsNotExist(err) {
+	} else if !errors.Is(err, fs.ErrNotExist) {
 		return nil, err
 	}
 	return s.getChain(ctx, key)
@@ -114,7 +116,7 @@ func (s *LogStore) Get(ctx context.Context, key string) (json.RawMessage, error)
 func (s *LogStore) getChain(ctx context.Context, key string) (json.RawMessage, error) {
 	f, err := os.Open(filepath.Join(s.dir, chainFile))
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, fs.ErrNotExist) {
 			return nil, ErrNotFound
 		}
 		return nil, err
@@ -190,7 +192,7 @@ func (s *LogStore) List(ctx context.Context) ([]Entry, error) {
 func (s *LogStore) listLegacy(ctx context.Context) ([]Entry, error) {
 	entries, err := os.ReadDir(s.dir)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, fs.ErrNotExist) {
 			return nil, nil
 		}
 		return nil, err
@@ -216,7 +218,7 @@ func (s *LogStore) listLegacy(ctx context.Context) ([]Entry, error) {
 func (s *LogStore) listChain(ctx context.Context) ([]Entry, error) {
 	f, err := os.Open(filepath.Join(s.dir, chainFile))
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, fs.ErrNotExist) {
 			return nil, nil
 		}
 		return nil, err
@@ -248,13 +250,13 @@ func (s *LogStore) Delete(ctx context.Context, key string) error {
 	if err := validateKey(key); err != nil {
 		return err
 	}
-	if err := os.Remove(filepath.Join(s.dir, key+".json")); err != nil && !os.IsNotExist(err) {
+	if err := os.Remove(filepath.Join(s.dir, key+".json")); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return err
 	}
 	path := filepath.Join(s.dir, chainFile)
 	data, err := os.ReadFile(path)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, fs.ErrNotExist) {
 			return nil
 		}
 		return err
@@ -322,7 +324,7 @@ func (s *LogStore) RewriteAll(ctx context.Context, entries []Entry) error {
 		if de.IsDir() || !strings.HasSuffix(name, ".json") || strings.HasSuffix(name, ".tmp") {
 			continue
 		}
-		if err := os.Remove(filepath.Join(s.dir, name)); err != nil && !os.IsNotExist(err) {
+		if err := os.Remove(filepath.Join(s.dir, name)); err != nil && !errors.Is(err, fs.ErrNotExist) {
 			return err
 		}
 	}
@@ -353,7 +355,7 @@ func (s *LogStore) LastEntry(ctx context.Context) (Entry, error) {
 func (s *LogStore) lastChainLine(ctx context.Context) (Entry, bool, error) {
 	f, err := os.Open(filepath.Join(s.dir, chainFile))
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, fs.ErrNotExist) {
 			return Entry{}, false, nil
 		}
 		return Entry{}, false, err

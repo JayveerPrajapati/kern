@@ -319,6 +319,7 @@ func TestSearchRepos(t *testing.T) {
 }
 
 func TestDiscoverSubreposAndFederatedSearch(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	parent := t.TempDir()
 	sub1 := filepath.Join(parent, "repo-alpha")
 	sub2 := filepath.Join(parent, "repo-beta")

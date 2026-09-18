@@ -140,6 +140,15 @@ func (t *TiktokenCounter) countText(s string) int {
 // countWord reduces one pre-token by repeatedly merging the adjacent
 // pair whose byte concatenation has the lowest rank (the tiktoken
 // byte_pair_merge algorithm). Returns the resulting piece count.
+//
+// Each outer pass finds the globally lowest-rank pair and then merges ALL
+// of its occurrences in one left-to-right sweep, instead of merging one pair
+// per full scan. This is count-equivalent to the reference one-at-a-time
+// reduction (the only difference is intermediate segmentation order, never
+// the final piece count, and it is validated against the reference counts in
+// the tiktoken fixture tests) and keeps pathological inputs linear-ish: a
+// homogeneous 1M-rune run halves its part count every pass instead of doing
+// O(n^2) single-pair scans.
 func (t *TiktokenCounter) countWord(w string) int {
 	n := len(w)
 	if n <= 1 {
@@ -157,16 +166,33 @@ func (t *TiktokenCounter) countWord(w string) int {
 	}
 	for len(parts) > 2 {
 		bestRank := int(^uint(0) >> 1)
-		bestIdx := -1
 		for i := 0; i+2 < len(parts); i++ {
 			if r, ok := t.vocab[w[parts[i]:parts[i+2]]]; ok && r < bestRank {
-				bestRank, bestIdx = r, i
+				bestRank = r
 			}
 		}
-		if bestIdx < 0 {
-			break
+		if bestRank == int(^uint(0)>>1) {
+			break // no adjacent pair has a mergeable rank
 		}
-		parts = append(parts[:bestIdx+1], parts[bestIdx+2:]...)
+		// Merge every adjacent occurrence of the lowest-rank pair in one
+		// sweep. A merged span keeps the offset of its left part, so the
+		// pair it forms with its right neighbour is revisited on the next
+		// pass (same as the reference's per-pair loop).
+		dst := 0
+		for i := 0; i < len(parts); {
+			if i+2 < len(parts) {
+				if r, ok := t.vocab[w[parts[i]:parts[i+2]]]; ok && r == bestRank {
+					parts[dst] = parts[i]
+					dst++
+					i += 2
+					continue
+				}
+			}
+			parts[dst] = parts[i]
+			dst++
+			i++
+		}
+		parts = parts[:dst]
 	}
 	return len(parts) - 1
 }

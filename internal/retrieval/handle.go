@@ -5,11 +5,14 @@
 package retrieval
 
 import (
+	"encoding/json"
+	"github.com/JayveerPrajapati/kern/internal/evidence"
+	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"sync"
-
-	"github.com/JayveerPrajapati/kern/internal/evidence"
+	"time"
 )
 
 // Type identifies what a Handle points at.
@@ -61,6 +64,74 @@ type Registry struct {
 // NewRegistry returns an empty registry.
 func NewRegistry() *Registry {
 	return &Registry{handles: map[string]*Handle{}}
+}
+
+// handleTTL bounds how long persisted handles survive before expiring. The
+// ID is content-stable across runs, so a stale handle would still resolve —
+// but the source it points at may have moved; TTL keeps the store honest.
+const handleTTL = 7 * 24 * time.Hour
+
+// HandleStorePath returns the per-project persistent handle store path.
+func HandleStorePath(root string) string {
+	return filepath.Join(root, ".kern", "handles.json")
+}
+
+// Save persists every registered handle to the store at path (atomic write
+// via rename). It is the persistence half of the handle lifecycle: the CLI
+// runs retrieve and resolve in separate processes, so a handle created by
+// `kern retrieve` must survive long enough for `kern resolve` to find it.
+func (r *Registry) Save(path string) error {
+	r.mu.RLock()
+	now := time.Now()
+	type entry struct {
+		Handle       *Handle   `json:"handle"`
+		RegisteredAt time.Time `json:"registered_at"`
+	}
+	entries := make([]entry, 0, len(r.handles))
+	for _, h := range r.handles {
+		entries = append(entries, entry{Handle: h, RegisteredAt: now})
+	}
+	r.mu.RUnlock()
+	data, err := json.MarshalIndent(entries, "", "  ")
+	if err != nil {
+		return err
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
+// Load merges persisted handles from the store at path into the registry,
+// dropping entries older than handleTTL. Best-effort: a missing or corrupt
+// store leaves the registry unchanged (resolve then fails with the usual
+// "unknown handle" message).
+func (r *Registry) Load(path string) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	type entry struct {
+		Handle       *Handle   `json:"handle"`
+		RegisteredAt time.Time `json:"registered_at"`
+	}
+	var entries []entry
+	if err := json.Unmarshal(data, &entries); err != nil {
+		return
+	}
+	cutoff := time.Now().Add(-handleTTL)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, e := range entries {
+		if e.Handle == nil || e.Handle.ID == "" {
+			continue
+		}
+		if !e.RegisteredAt.IsZero() && e.RegisteredAt.Before(cutoff) {
+			continue
+		}
+		r.handles[e.Handle.ID] = e.Handle
+	}
 }
 
 // Register inserts h, overwriting any existing handle with the same ID.

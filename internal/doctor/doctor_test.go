@@ -445,3 +445,35 @@ func TestCheckMultiRepoFreshness(t *testing.T) {
 		t.Fatalf("expected ok multi-repo index, got %+v", fi)
 	}
 }
+
+// TestCheckGitExclude covers the doctor surface for index.Save's silent
+// .git/info/exclude side effect: ok when the entry exists, warn when a git
+// repo lacks it, ok for non-git roots.
+func TestCheckGitExclude(t *testing.T) {
+	// non-git root: ok
+	f := checkGitExclude(t.TempDir())
+	if f.Level != "ok" {
+		t.Fatalf("non-git: level = %s, want ok", f.Level)
+	}
+	// git repo with the entry: ok
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, ".git", "info"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".git", "info", "exclude"), []byte(".kern/"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f = checkGitExclude(dir)
+	if f.Level != "ok" {
+		t.Fatalf("with entry: level = %s (%s), want ok", f.Level, f.Detail)
+	}
+	// git repo without the entry: warn
+	dir2 := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir2, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	f = checkGitExclude(dir2)
+	if f.Level != "warn" {
+		t.Fatalf("without entry: level = %s (%s), want warn", f.Level, f.Detail)
+	}
+}

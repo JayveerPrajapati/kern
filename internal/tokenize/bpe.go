@@ -120,26 +120,37 @@ func (b *BPECounter) Count(s string) int {
 }
 
 // encodeWord merges a single pre-token by lowest-rank pair until fixed point.
+// Each pass finds the globally lowest-rank pair and merges ALL of its
+// occurrences in one sweep (instead of one pair per full scan), so long
+// homogeneous runs reduce in O(n log n) passes of work rather than O(n^2).
 func (b *BPECounter) encodeWord(w []byte) []int {
 	ids := bytesToIDs(w)
 	for {
 		bestRank := 1 << 30
-		bestPos := -1
 		for i := 0; i+1 < len(ids); i++ {
 			if r, ok := b.ranks[pairKey{ids[i], ids[i+1]}]; ok && r < bestRank {
 				bestRank = r
-				bestPos = i
 			}
 		}
-		if bestPos < 0 {
+		if bestRank == 1<<30 {
 			break
 		}
 		merged := 256 + bestRank
-		next := make([]int, 0, len(ids)-1)
-		next = append(next, ids[:bestPos]...)
-		next = append(next, merged)
-		next = append(next, ids[bestPos+2:]...)
-		ids = next
+		dst := 0
+		for i := 0; i < len(ids); {
+			if i+1 < len(ids) {
+				if r, ok := b.ranks[pairKey{ids[i], ids[i+1]}]; ok && r == bestRank {
+					ids[dst] = merged
+					dst++
+					i += 2
+					continue
+				}
+			}
+			ids[dst] = ids[i]
+			dst++
+			i++
+		}
+		ids = ids[:dst]
 	}
 	return ids
 }

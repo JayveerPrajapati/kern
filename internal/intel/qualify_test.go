@@ -6,18 +6,6 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/index"
 )
 
-// dupNameFixture builds a synthetic index with an ambiguous bare name: two
-// `func Load` definitions in different dirs sharing one Callers bucket (the
-// P1-5 `kern bridges` bug: eleven identical `Load` rows with 67 callers).
-//
-//	a/a.go: Load, UseA (calls Load — same package), Solo (called by UseA)
-//	b/b.go: Load, UseB (calls Load — same package)
-//	c/c.go: UseBoth (calls Load, imports dir a — attributed to a.Load)
-//	d/d.go: Orphan (calls Load, imports nothing — unattributable, dropped)
-//	e/e.go: UseB2 (calls Load, imports dir b — attributed to b.Load)
-//
-// No Pkgs table: package paths fall back to file dirs (a, b, ...), so the
-// qualified rows are a.Load and b.Load.
 func dupNameFixture() *index.Index {
 	syms := []index.Symbol{
 		{Kind: "func", Name: "Load", File: "a/a.go", Line: 10},
@@ -66,9 +54,6 @@ func bridgeBySymbol(bridges []Bridge, sym string) *Bridge {
 	return nil
 }
 
-// TestBridgesQualifyAmbiguousNames pins P1-5: same-named definitions in
-// different packages surface as distinct package-qualified rows with honestly
-// split caller counts — never as repeated bare rows sharing one bucket.
 func TestBridgesQualifyAmbiguousNames(t *testing.T) {
 	ix := dupNameFixture()
 	bridges := Bridges(ix, 10)
@@ -97,9 +82,6 @@ func TestBridgesQualifyAmbiguousNames(t *testing.T) {
 	}
 }
 
-// TestHubsQualifyAmbiguousNames pins P1-5 for hubs: distinct qualified rows
-// with split caller counts, while unique names keep bare display and today's
-// aggregated lookup.
 func TestHubsQualifyAmbiguousNames(t *testing.T) {
 	ix := dupNameFixture()
 	hubs := Hubs(ix, 20)
@@ -147,9 +129,6 @@ func TestHubSetKeepsBareKeys(t *testing.T) {
 	}
 }
 
-// TestCommunityHubQualifiesAmbiguousNames pins P1-5 for clustering: the
-// community hub field names the strongest definition unit, not the bare
-// shared name.
 func TestCommunityHubQualifiesAmbiguousNames(t *testing.T) {
 	ix := dupNameFixture()
 	comms := renderCommunities(ix, map[string]string{

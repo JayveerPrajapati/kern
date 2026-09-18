@@ -2,7 +2,10 @@ package intel
 
 import (
 	"fmt"
+	"os/exec"
+	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/JayveerPrajapati/kern/internal/index"
@@ -67,13 +70,13 @@ func SemanticDiff(ix *index.Index, root, from, to string) (*SemanticDiffReport, 
 		}
 
 		overlaps := false
+		symEnd := sym.End
+		if symEnd <= 0 {
+			symEnd = sym.Line + 10
+		}
 		if len(fc.Ranges) == 0 {
 			overlaps = true // whole file changed
 		} else {
-			symEnd := sym.End
-			if symEnd <= 0 {
-				symEnd = sym.Line + 10
-			}
 			for _, r := range fc.Ranges {
 				if !(r.End < sym.Line || r.Start > symEnd) {
 					overlaps = true
@@ -81,7 +84,13 @@ func SemanticDiff(ix *index.Index, root, from, to string) (*SemanticDiffReport, 
 				}
 			}
 		}
-
+		// Comment-only edits inside a symbol's span are not real modifications
+		// (e.g. a trailing comment appended after a method). When the changed
+		// ranges are known, require at least one non-comment added line in the
+		// span before reporting the symbol as Modified.
+		if overlaps && len(fc.Ranges) > 0 && !addedCodeInSpan(root, from, to, sym.File, sym.Line, symEnd) {
+			overlaps = false
+		}
 		if overlaps {
 			mod := ModifiedSym{
 				Symbol:     sym.FullName(),
@@ -115,6 +124,75 @@ func SemanticDiff(ix *index.Index, root, from, to string) (*SemanticDiffReport, 
 	}
 
 	return report, nil
+}
+
+// addedCodeInSpan reports whether the diff between from..to adds any
+// non-comment line within the new-side span [start, end] of file. Comment-only
+// additions (e.g. a trailing comment appended after a method) report false so
+// symbols aren't flagged as Modified for doc/comment churn. A git failure is
+// conservative: it reports true (keep the symbol flagged).
+func addedCodeInSpan(root, from, to, file string, start, end int) bool {
+	args := []string{"-C", root, "diff", "-U0"}
+	if from == "" && to == "" {
+		args = append(args, "HEAD")
+	} else {
+		args = append(args, from+".."+to)
+	}
+	args = append(args, "--", file)
+	out, err := exec.Command("git", args...).Output()
+	if err != nil {
+		return true
+	}
+	newLine := 0
+	inHunk := false
+	for _, line := range strings.Split(string(out), "\n") {
+		if strings.HasPrefix(line, "@@") {
+			// @@ -a,b +c,d @@ — new-side start is c.
+			parts := strings.Split(line, " ")
+			if len(parts) >= 3 && strings.HasPrefix(parts[2], "+") {
+				ns := strings.TrimPrefix(strings.Split(parts[2], ",")[0], "+")
+				if n, err := strconv.Atoi(ns); err == nil {
+					newLine = n - 1
+				}
+			}
+			inHunk = true
+			continue
+		}
+		if !inHunk {
+			continue
+		}
+		switch {
+		case strings.HasPrefix(line, "+"):
+			newLine++
+			if newLine >= start && newLine <= end && !commentOnly(line[1:], file) {
+				return true
+			}
+		case strings.HasPrefix(line, "-"):
+			// Deletions don't advance the new-side line counter.
+		default:
+			newLine++ // Context lines advance it too.
+		}
+	}
+	return false
+}
+
+// commentOnly reports whether the (possibly indented) content is a pure
+// comment line for the file's language. Unknown languages are treated as code
+// (conservative: a symbol is kept flagged).
+func commentOnly(content, file string) bool {
+	trimmed := strings.TrimSpace(content)
+	if trimmed == "" {
+		return true
+	}
+	switch strings.ToLower(filepath.Ext(file)) {
+	case ".py", ".rb", ".sh", ".yaml", ".yml", ".toml", ".ini", ".cfg":
+		return strings.HasPrefix(trimmed, "#")
+	case ".go", ".ts", ".tsx", ".js", ".jsx", ".rs", ".c", ".h", ".cpp", ".hpp",
+		".java", ".swift", ".kt", ".php", ".css":
+		return strings.HasPrefix(trimmed, "//") || strings.HasPrefix(trimmed, "/*")
+	default:
+		return false
+	}
 }
 
 // Render formats the SemanticDiffReport into a clean, concise, token-optimized summary.

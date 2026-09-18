@@ -16,10 +16,10 @@ import (
 // re-persists a live-emitted copy writes a duplicate line carrying the SAME
 // id, which eventbus idempotency (P4.3) collapses at replay.
 
-var guardEventSeq uint64
+var guardEventSeq atomic.Uint64
 
 func guardEventID() string {
-	return fmt.Sprintf("guard-%d-%d", time.Now().UnixNano(), atomic.AddUint64(&guardEventSeq, 1))
+	return fmt.Sprintf("guard-%d-%d", time.Now().UnixNano(), guardEventSeq.Add(1))
 }
 
 // GuardEvent converts a boundary or purity violation into the

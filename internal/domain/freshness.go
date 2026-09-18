@@ -20,19 +20,6 @@ type FreshnessRecord struct {
 	State         FreshnessState `json:"state"`
 }
 
-// ComputeFreshness determines the freshness state from the observed time.
-// Items observed within the staleness threshold are FRESH; older items are
-// STALE; items with no timestamp are UNKNOWN.
-func ComputeFreshness(observedAt time.Time, stalenessThreshold time.Duration) FreshnessState {
-	if observedAt.IsZero() {
-		return FreshUnknown
-	}
-	if time.Since(observedAt) <= stalenessThreshold {
-		return FreshFresh
-	}
-	return FreshStale
-}
-
 // DefaultStalenessThreshold is the default time after which knowledge is
 // considered stale (24 hours).
 const DefaultStalenessThreshold = 24 * time.Hour

@@ -3,8 +3,10 @@ package intel
 import (
 	"bufio"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 
@@ -293,12 +295,7 @@ func tarjanSCCs(graph map[string][]string) [][]string {
 }
 
 func sortedKeys(graph map[string][]string) []string {
-	keys := make([]string, 0, len(graph))
-	for k := range graph {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	return keys
+	return slices.Sorted(maps.Keys(graph))
 }
 
 // ImportCycleWarnings returns human-readable warnings for changed files whose

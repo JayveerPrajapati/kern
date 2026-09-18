@@ -6,8 +6,6 @@ import (
 	"testing"
 )
 
-// TestLoadOrBuildRoundtrip: a cold root builds and persists; a second call
-// with a fresh index loads instead of rebuilding (G-11).
 func TestLoadOrBuildRoundtrip(t *testing.T) {
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, "sample.go"), []byte("package sample\n\nfunc Hello() string { return \"hi\" }\n"), 0o644); err != nil {

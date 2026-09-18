@@ -9,19 +9,28 @@ import (
 func estGeneric(s string) int      { return (Estimator{Kind: KindGeneric}).Count(s) }
 func estKind(s string, k Kind) int { return Estimator{Kind: k}.Count(s) }
 
-func TestDefaultCounterIsEstimator(t *testing.T) {
+// TestDefaultCounterIsExactBPEWhenAvailable: the default is "bpe-if-available"
+// — the exact cl100k_base BPE counter when its table data loads, and only the
+// Estimator when the data is missing. Behavior must always match the active
+// default counter.
+func TestDefaultCounterIsExactBPEWhenAvailable(t *testing.T) {
 	ResetDefault()
 	defer ResetDefault()
-	if _, ok := Default().(Estimator); !ok {
-		t.Fatalf("default counter = %T, want Estimator", Default())
-	}
-	// Behavior must be identical to the pre-hot-swap functions.
-	for _, s := range []string{"hello world", "code: x := y + 1", "log: 2026-09-01 ERROR boom"} {
-		if got, want := Count(s), estGeneric(s); got != want {
-			t.Errorf("Count(%q) = %d, want %d", s, got, want)
+	d := Default()
+	switch c := d.(type) {
+	case *TiktokenCounter:
+		if c.Name() != "cl100k_base" {
+			t.Fatalf("default BPE encoding = %q, want cl100k_base", c.Name())
 		}
-		if got, want := CountKind(s, KindCode), estKind(s, KindCode); got != want {
-			t.Errorf("CountKind(%q, code) = %d, want %d", s, got, want)
+	case Estimator:
+		// Data unavailable (e.g. an embed-stripped build): documented fallback.
+	default:
+		t.Fatalf("default counter = %T, want *TiktokenCounter(cl100k_base) or Estimator", d)
+	}
+	// Behavior must be identical to whatever the active default is.
+	for _, s := range []string{"hello world", "code: x := y + 1", "log: 2026-09-01 ERROR boom"} {
+		if got, want := Count(s), d.Count(s); got != want {
+			t.Errorf("Count(%q) = %d, want %d (active default)", s, got, want)
 		}
 	}
 }
@@ -56,8 +65,9 @@ func TestInitFromEnvSelection(t *testing.T) {
 		model     string
 		wantName  string // "", "bpe", "cl100k_base", "o200k_base"
 	}{
-		{"unset", "", "", ""},
+		{"unset defaults to bpe-if-available", "", "", "cl100k_base"},
 		{"explicit estimator", "estimator", "gpt-4o", ""},
+		{"estimate alias", "estimate", "gpt-4o", ""},
 		{"bpe", "bpe", "", "bpe"},
 		{"cl100k", "cl100k", "", "cl100k_base"},
 		{"cl100k_base alias", "cl100k_base", "", "cl100k_base"},
@@ -69,7 +79,7 @@ func TestInitFromEnvSelection(t *testing.T) {
 		{"model o1", "", "o1-preview", "o200k_base"},
 		{"model gpt-4", "", "gpt-4-turbo", "cl100k_base"},
 		{"model gpt-3.5", "", "gpt-3.5-turbo", "cl100k_base"},
-		{"model llama stays estimator", "", "llama3.2", ""},
+		{"model llama defaults to bpe-if-available", "", "llama3.2", "cl100k_base"},
 		{"tokenizer beats model", "estimator", "gpt-4o", ""},
 	}
 	for _, tc := range cases {
