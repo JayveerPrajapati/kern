@@ -459,8 +459,9 @@ func TestV1LoopDeadline(t *testing.T) {
 	for {
 		var done bool
 		for _, tk := range app.taskSvc.List() {
+			st := tk.CurrentState()
 			if tk.Intent == "deadline me" &&
-				(tk.State == domain.TaskCompleted || tk.State == domain.TaskFailed) {
+				(st == domain.TaskCompleted || st == domain.TaskFailed) {
 				done = true
 			}
 		}

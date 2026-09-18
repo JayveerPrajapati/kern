@@ -213,6 +213,15 @@ func (t *Task) Terminal() bool {
 	return t.IsTerminal()
 }
 
+// CurrentState returns the task's state under the state lock. Use this from
+// concurrent callers (such as background polling loops or test runners)
+// to inspect task state without data races.
+func (t *Task) CurrentState() domain.TaskState {
+	t.stateLock().RLock()
+	defer t.stateLock().RUnlock()
+	return t.State
+}
+
 // Validate checks the Task aggregate invariants: required fields, valid
 // state, valid references. It returns a descriptive error for the
 // first violation. Refs are opaque identifiers — they are validated for being
