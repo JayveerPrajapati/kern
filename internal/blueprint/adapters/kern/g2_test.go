@@ -252,7 +252,7 @@ func TestG2_DeletedImportScenario(t *testing.T) {
 	}
 }
 
-// TestG2_CLI_EndToEnd verifies the full CLI path: `blueprint check --json`
+// TestG2_CLI_EndToEnd verifies the full CLI path: `kern check --json`
 // against the IllegalDependency fixture produces a BLOCK result with correct
 // JSON structure.
 func TestG2_CLI_EndToEnd(t *testing.T) {
@@ -261,10 +261,10 @@ func TestG2_CLI_EndToEnd(t *testing.T) {
 	requireFingerprintBinary(t)
 	fr := IllegalDependency(t)
 
-	// Build the blueprint binary once (cached).
+	// Build the merged kern binary once (cached).
 	binPath := buildBlueprintBinary(t)
 
-	// Run `blueprint check --json --repo <fixture> --source ci`.
+	// Run `kern check --json --repo <fixture> --source ci`.
 	// KERN_BINARY is inherited from the test environment.
 	out, code := runBlueprintCheck(t, binPath, fr.RepoPath, "--json")
 

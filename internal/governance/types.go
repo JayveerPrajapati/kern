@@ -1,4 +1,4 @@
-// Package authz implements the authorized-context primitive (P0.1): given an
+// Package authz implements the authorized-context primitive: given an
 // agent identity, a task scope and the project index, it computes the exact
 // set of symbols and call edges the agent is permitted to read, together with
 // an auditable authorization proof. It is the product spine every governed

@@ -179,7 +179,7 @@ func TestG31_SecScanInjectionBlocks(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestG32_SchemaBaselineRoundTrip(t *testing.T) {
-	SetCatalogProvider(func() []ToolInfo { return fakeCatalog() })
+	SetToolInfos(fakeCatalog())
 	dir := t.TempDir()
 	root := filepath.Join(dir, "repo")
 	if err := os.MkdirAll(root, 0o755); err != nil {
@@ -187,7 +187,7 @@ func TestG32_SchemaBaselineRoundTrip(t *testing.T) {
 	}
 
 	// init-baseline run: writes the baseline and reports PASS.
-	chk := NewSchemaDriftCheck(root, true)
+	chk := NewSchemaDriftCheck(root, true, ToolInfos())
 	res, err := chk.Run(context.Background(), changeRequest(root))
 	if err != nil {
 		t.Fatalf("Run(init): %v", err)
@@ -224,7 +224,7 @@ func TestG32_SchemaBaselineRoundTrip(t *testing.T) {
 	}
 
 	// Re-run without init on the unchanged catalog: PASS, no drift.
-	chk2 := NewSchemaDriftCheck(root, false)
+	chk2 := NewSchemaDriftCheck(root, false, ToolInfos())
 	res2, err := chk2.Run(context.Background(), changeRequest(root))
 	if err != nil {
 		t.Fatalf("Run(recheck): %v", err)
@@ -238,7 +238,7 @@ func TestG32_SchemaBaselineRoundTrip(t *testing.T) {
 }
 
 func TestG32_SchemaDriftDetected(t *testing.T) {
-	SetCatalogProvider(func() []ToolInfo { return fakeCatalog() })
+	SetToolInfos(fakeCatalog())
 	dir := t.TempDir()
 	root := filepath.Join(dir, "repo")
 	if err := os.MkdirAll(root, 0o755); err != nil {
@@ -260,7 +260,7 @@ func TestG32_SchemaDriftDetected(t *testing.T) {
 		t.Fatalf("write stale baseline: %v", err)
 	}
 
-	chk := NewSchemaDriftCheck(root, false)
+	chk := NewSchemaDriftCheck(root, false, ToolInfos())
 	res, err := chk.Run(context.Background(), changeRequest(root))
 	if err != nil {
 		t.Fatalf("Run: %v", err)
@@ -291,9 +291,9 @@ func TestG32_SchemaDriftDetected(t *testing.T) {
 }
 
 func TestG32_SchemaBaselineMissingPromptsInit(t *testing.T) {
-	SetCatalogProvider(func() []ToolInfo { return fakeCatalog() })
+	SetToolInfos(fakeCatalog())
 	dir := t.TempDir()
-	chk := NewSchemaDriftCheck(dir, false)
+	chk := NewSchemaDriftCheck(dir, false, ToolInfos())
 	res, err := chk.Run(context.Background(), changeRequest(dir))
 	if err != nil {
 		t.Fatalf("Run: %v", err)
@@ -398,7 +398,7 @@ func TestG34_DocOnlyChangePasses(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestG35_CatalogDriftMismatch(t *testing.T) {
-	SetCatalogProvider(func() []ToolInfo { return fakeCatalog() })
+	SetToolInfos(fakeCatalog())
 	names := fakeCatalogNames()
 
 	// A fake plugin content missing one real tool must produce BLOCK findings.
@@ -441,7 +441,7 @@ func TestG35_CatalogDriftMismatch(t *testing.T) {
 }
 
 func TestG35_CatalogDriftExactMatch(t *testing.T) {
-	SetCatalogProvider(func() []ToolInfo { return fakeCatalog() })
+	SetToolInfos(fakeCatalog())
 	names := fakeCatalogNames()
 	if findings := compareToolSets(names, pluginFromCatalog(names)); len(findings) != 0 {
 		t.Fatalf("exact match produced findings: %+v", findings)
@@ -449,16 +449,11 @@ func TestG35_CatalogDriftExactMatch(t *testing.T) {
 }
 
 func TestG35_CatalogDriftPhaseMismatch(t *testing.T) {
-	SetCatalogProvider(func() []ToolInfo {
-		return []ToolInfo{
-			{Name: "kern_alpha", Phase: "explore", RiskLevel: "low"},
-			{Name: "kern_beta", Phase: "explore", RiskLevel: "low"},
-		}
+	SetToolInfos([]ToolInfo{
+		{Name: "kern_alpha", Phase: "explore", RiskLevel: "low"},
+		{Name: "kern_beta", Phase: "explore", RiskLevel: "low"},
 	})
-	catalog, ok := toolCatalog()
-	if !ok {
-		t.Fatal("catalog provider not registered")
-	}
+	catalog := ToolInfos()
 	// The plugin declares kern_alpha as "edit" while the catalog says
 	// "explore": the plugin would advertise the wrong surface for
 	// KERN_MCP_PHASE=explore, so the drift gate must BLOCK.
@@ -482,16 +477,11 @@ func TestG35_CatalogDriftPhaseMismatch(t *testing.T) {
 }
 
 func TestG35_CatalogDriftPhasesAgree(t *testing.T) {
-	SetCatalogProvider(func() []ToolInfo {
-		return []ToolInfo{
-			{Name: "kern_alpha", Phase: "explore", RiskLevel: "low"},
-			{Name: "kern_beta", Phase: "edit", RiskLevel: "low"},
-		}
+	SetToolInfos([]ToolInfo{
+		{Name: "kern_alpha", Phase: "explore", RiskLevel: "low"},
+		{Name: "kern_beta", Phase: "edit", RiskLevel: "low"},
 	})
-	catalog, ok := toolCatalog()
-	if !ok {
-		t.Fatal("catalog provider not registered")
-	}
+	catalog := ToolInfos()
 	// Matching phases pass; a plugin-only tool (kern_gamma) is ignored for
 	// phase purposes (name drift is compareToolSets' job).
 	content := `const TOOL_PHASES: Record<string, string> = {

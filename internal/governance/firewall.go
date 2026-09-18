@@ -27,6 +27,7 @@ type Firewall struct {
 	approvedKeys map[string]bool
 	bus          *eventbus.Bus // optional event publisher; nil = no-op
 	egress       EgressRule    // outbound-connection posture (zero value = local-only default)
+	execCommand  string        // optional command text bound to command.execute approvals (WithExecCommand)
 }
 
 // NewFirewall creates a new change firewall with the default policies. No
@@ -94,6 +95,30 @@ func (f *Firewall) WithEgressRule(rule EgressRule) *Firewall {
 func (f *Firewall) WithBus(b *eventbus.Bus) *Firewall {
 	f.bus = b
 	return f
+}
+
+// WithExecCommand binds the firewall's approval gate to a concrete command
+// text (audit A3: exec approvals must be command-specific). When a
+// command.execute Check hits the approval gate, the approval key gains a
+// SHA-256 of the command (so one approval authorizes exactly that command)
+// and the persisted approval records the command text as evidence. It returns
+// the firewall for chaining; an empty command leaves the gate unbound.
+func (f *Firewall) WithExecCommand(command string) *Firewall {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.execCommand = command
+	return f
+}
+
+// grantApproval marks a task key as approved for subsequent Checks on this
+// firewall instance (single use — the grant is consumed by the next matching
+// Check). It lets the exec gate honor an approval that was decided
+// out-of-band (`kern approve <id>` persisted the decision while this process
+// was running) without waiting for an in-process ApproveAction.
+func (f *Firewall) grantApproval(key string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.approvedKeys[key] = true
 }
 
 // Policies returns a copy of the risk policies currently loaded. It is the
@@ -225,17 +250,32 @@ func (f *Firewall) Check(agentID, resource, action string) (allowed bool, risk d
 	// 4. Approval gate.
 	if r.ApprovalRequired || RequiresApproval(r.Level) {
 		key := TaskKey(agentID, resource, action)
+		cmd := ""
+		if resource == "command" && action == "execute" {
+			if c := f.execCommand; c != "" {
+				// Bind the approval to the exact command text (audit A3): the
+				// key gains a SHA-256 of the command so one approval
+				// authorizes one command, and the persisted record carries
+				// the command text as evidence.
+				key = execCommandKey(c)
+				cmd = c
+			}
+		}
 		f.mu.Lock()
 		approved := f.approvedKeys[key]
 		if approved {
-			// A granted approval authorizes exactly one action: consume it so it
-			// cannot be reused on subsequent Checks.
+			// A granted approval authorizes exactly one action: consume it so
+			// it cannot be reused on subsequent Checks.
 			delete(f.approvedKeys, key)
 		}
 		f.mu.Unlock()
 
 		if !approved {
-			appr, err := f.approval.RequestWithBinding(key, agentID, r.Mitigation, r.Level, nil, nil, "")
+			var evidence []string
+			if cmd != "" {
+				evidence = []string{cmd}
+			}
+			appr, err := f.approval.RequestWithBinding(key, agentID, r.Mitigation, r.Level, nil, evidence, "")
 			if err != nil {
 				f.audit.Record(AuditEntry{AgentID: agentID, Action: action, Resource: resource, Risk: r, Result: "denied"})
 				return false, r, nil, fmt.Errorf("governance: approval for %s:%s could not be persisted: %w", resource, action, err)
@@ -302,7 +342,9 @@ func (f *Firewall) CheckEgress(agentID, host string, port int) (allowed bool, de
 		}
 		f.mu.Unlock()
 		if !approved {
-			appr, err := f.approval.RequestWithBinding(key, agentID, dec.Reason, domain.RiskHigh, nil, nil, "")
+			// The egress approval records the exact connection it authorizes
+			// as evidence (audit A3: approvals carry the content they gate).
+			appr, err := f.approval.RequestWithBinding(key, agentID, dec.Reason, domain.RiskHigh, nil, []string{fmt.Sprintf("%s:%d", host, port)}, "")
 			if err != nil {
 				return false, dec, nil, fmt.Errorf("governance: approval for egress %s:%d could not be persisted: %w", host, port, err)
 			}

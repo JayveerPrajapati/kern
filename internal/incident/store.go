@@ -12,6 +12,7 @@ import (
 
 	"github.com/JayveerPrajapati/kern/internal/cache"
 	"github.com/JayveerPrajapati/kern/internal/domain"
+	"github.com/JayveerPrajapati/kern/internal/fsutil"
 )
 
 // Store persists incidents per project so the Web Console and the
@@ -61,22 +62,9 @@ func (s *Store) save(list []domain.Incident) error {
 	if err != nil {
 		return err
 	}
-	// Unique temp name so concurrent writers never clobber each other.
-	tmp, err := os.CreateTemp(dir, "*.tmp")
-	if err != nil {
-		return err
-	}
-	tmpName := tmp.Name()
-	if _, err := tmp.Write(b); err != nil {
-		_ = tmp.Close()
-		_ = os.Remove(tmpName)
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		_ = os.Remove(tmpName)
-		return err
-	}
-	return os.Rename(tmpName, s.path)
+	// Atomic write (unique temp name + rename) so concurrent writers never
+	// clobber each other and readers never see a half-written file.
+	return fsutil.WriteFileAtomic(s.path, b, 0o600)
 }
 
 // randomIncidentID returns a cryptographically random incident ID of the form

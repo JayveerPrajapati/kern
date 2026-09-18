@@ -6,8 +6,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -78,6 +80,68 @@ func newBrokenGoProject(t *testing.T) string {
 	return root
 }
 
+// slowMockOllama is a fake Ollama server whose /api/generate sleeps far
+// longer than the round deadline before responding, simulating a hung
+// model/server. It counts generate calls so tests can assert the loop does
+// not retry past a timed-out round.
+func slowMockOllama(t *testing.T, hang time.Duration) (*httptest.Server, *int32) {
+	t.Helper()
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/tags" {
+			_, _ = w.Write([]byte(`{"models":[]}`))
+			return
+		}
+		if r.URL.Path != "/api/generate" {
+			t.Fatalf("unexpected path %q", r.URL.Path)
+		}
+		atomic.AddInt32(&calls, 1)
+		// Outlast the client's round deadline: the client aborts the request
+		// at roundTimeout, well before this returns. The write below fails
+		// harmlessly on the dead connection.
+		time.Sleep(hang)
+		_, _ = w.Write([]byte(`{"response":"too late"}`))
+	}))
+	return srv, &calls
+}
+
+// TestRunHealRoundTimeoutBounded pins the per-round hard deadline: a Generate
+// that hangs past roundTimeout must return the round-timeout error after ONE
+// round and must NOT loop further (no retry with another round).
+func TestRunHealRoundTimeoutBounded(t *testing.T) {
+	root := newBrokenGoProject(t)
+	srv, calls := slowMockOllama(t, 500*time.Millisecond)
+	defer srv.Close()
+	t.Setenv("OLLAMA_HOST", srv.URL)
+	t.Setenv("KERN_LLM_PROVIDER", "ollama")
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+
+	old := roundTimeout
+	roundTimeout = 100 * time.Millisecond
+	defer func() { roundTimeout = old }()
+
+	start := time.Now()
+	res := Run(context.Background(), root, "task", "", 3, 30*time.Second, false)
+	if elapsed := time.Since(start); elapsed > 10*time.Second {
+		t.Fatalf("a hung round must fail fast, heal took %v", elapsed)
+	}
+	if res.Err == nil {
+		t.Fatal("expected round-timeout error, got nil")
+	}
+	if !strings.Contains(res.Err.Error(), "timed out after") {
+		t.Fatalf("expected timed-out message, got %v", res.Err)
+	}
+	if !strings.Contains(res.Err.Error(), "llm round 1") {
+		t.Fatalf("expected error to name round 1, got %v", res.Err)
+	}
+	if res.Iterations != 1 {
+		t.Fatalf("expected exactly 1 iteration, got %d", res.Iterations)
+	}
+	if got := atomic.LoadInt32(calls); got != 1 {
+		t.Fatalf("expected exactly 1 generate call (no retry past the timeout), got %d", got)
+	}
+}
+
 func TestRunHealLoopEndToEnd(t *testing.T) {
 	root := newBrokenGoProject(t)
 
@@ -86,6 +150,7 @@ func TestRunHealLoopEndToEnd(t *testing.T) {
 	srv := mockOllama(t, corrected)
 	defer srv.Close()
 	t.Setenv("OLLAMA_HOST", srv.URL)
+	t.Setenv("KERN_LLM_PROVIDER", "ollama")
 	// Avoid touching the real XDG cache.
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 
@@ -137,6 +202,7 @@ func TestRunLLMNoFileBlocks(t *testing.T) {
 	srv := mockOllama(t, "no file blocks here")
 	defer srv.Close()
 	t.Setenv("OLLAMA_HOST", srv.URL)
+	t.Setenv("KERN_LLM_PROVIDER", "ollama")
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 
 	res := Run(context.Background(), root, "task", "", 1, 60*time.Second, false)
@@ -207,6 +273,7 @@ func TestRunRefusesHighRiskRepair(t *testing.T) {
 	srv := mockOllama(t, "### FILE: hub.go\npackage main\n\nfunc Hub() int { return 42 }\n")
 	defer srv.Close()
 	t.Setenv("OLLAMA_HOST", srv.URL)
+	t.Setenv("KERN_LLM_PROVIDER", "ollama")
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 
 	res := Run(context.Background(), root, "fix the build", "", 3, 60*time.Second, false)
@@ -224,6 +291,7 @@ func TestRunForceRepairsHighRisk(t *testing.T) {
 	srv := mockOllama(t, "### FILE: hub.go\npackage main\n\nfunc Hub() int { return 42 }\n")
 	defer srv.Close()
 	t.Setenv("OLLAMA_HOST", srv.URL)
+	t.Setenv("KERN_LLM_PROVIDER", "ollama")
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 
 	res := Run(context.Background(), root, "fix the build", "", 3, 60*time.Second, true)
@@ -233,4 +301,105 @@ func TestRunForceRepairsHighRisk(t *testing.T) {
 	if !res.Validated {
 		t.Fatalf("forced heal must validate, got %+v", res)
 	}
+}
+
+// newPolyglotBrokenProject builds a repo with a broken Go file AND a broken
+// Python file and no go.mod: the exact shape the D4 bug reported as
+// "validated OK" (the old validator auto-detected a single language — Python
+// — and never looked at the .go file).
+func newPolyglotBrokenProject(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
+	_ = os.WriteFile(filepath.Join(root, "broken.go"), []byte("package main\n\nfunc broken(\n"), 0o644)
+	_ = os.WriteFile(filepath.Join(root, "broken.py"), []byte("def broken(\n    pass\n"), 0o644)
+	return root
+}
+
+// TestRunHealPolyglotFlagsBoth pins D4: a broken .go next to a broken .py
+// must fail per-extension validation and heal must repair BOTH files in one
+// round.
+func TestRunHealPolyglotFlagsBoth(t *testing.T) {
+	if _, err := exec.LookPath("python"); err != nil {
+		if _, err2 := exec.LookPath("python3"); err2 != nil {
+			t.Skip("python not on PATH")
+		}
+	}
+	root := newPolyglotBrokenProject(t)
+	srv := mockOllama(t, "### FILE: broken.go\npackage main\n\nfunc main() {}\n### FILE: broken.py\ndef fixed():\n    return 1\n")
+	defer srv.Close()
+	t.Setenv("OLLAMA_HOST", srv.URL)
+	t.Setenv("KERN_LLM_PROVIDER", "ollama")
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	res := Run(context.Background(), root, "fix the syntax errors", "", 3, 60*time.Second, false)
+	if res.Err != nil {
+		t.Fatalf("heal: %v", res.Err)
+	}
+	if !res.Validated {
+		t.Fatalf("expected validated, last output:\n%s", res.LastOutput)
+	}
+	if !sliceHas(res.Changes, "broken.go") || !sliceHas(res.Changes, "broken.py") {
+		t.Fatalf("expected both files repaired, got %v", res.Changes)
+	}
+}
+
+// TestRunFileHealScopesToFile pins heal --file: only the named file is
+// validated and repaired; the sibling broken file is neither checked nor
+// touched.
+func TestRunFileHealScopesToFile(t *testing.T) {
+	root := newPolyglotBrokenProject(t)
+	srv := mockOllama(t, "### FILE: broken.go\npackage main\n\nfunc main() {}\n")
+	defer srv.Close()
+	t.Setenv("OLLAMA_HOST", srv.URL)
+	t.Setenv("KERN_LLM_PROVIDER", "ollama")
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	res := RunFile(context.Background(), root, "fix the syntax errors", "", "broken.go", 3, 60*time.Second, false)
+	if res.Err != nil {
+		t.Fatalf("heal: %v", res.Err)
+	}
+	if !res.Validated {
+		t.Fatalf("expected validated, last output:\n%s", res.LastOutput)
+	}
+	if len(res.Changes) != 1 || res.Changes[0] != "broken.go" {
+		t.Fatalf("expected only broken.go repaired, got %v", res.Changes)
+	}
+}
+
+// TestRunFileHealUnknownFileErrors pins heal --file on a missing file: the
+// loop must error, not silently validate nothing.
+func TestRunFileHealUnknownFileErrors(t *testing.T) {
+	root := newPolyglotBrokenProject(t)
+	res := RunFile(context.Background(), root, "task", "", "nope.go", 3, 10*time.Second, false)
+	if res.Err == nil || !strings.Contains(res.Err.Error(), "nope.go") {
+		t.Fatalf("expected file-not-found error naming nope.go, got %+v", res)
+	}
+}
+
+// TestRunHealUnvalidatableReportsNotOK: a language with no syntax checker
+// must be reported as "unable to validate" — never as validated OK — and heal
+// must not burn an LLM round on it.
+func TestRunHealUnvalidatableReportsNotOK(t *testing.T) {
+	root := t.TempDir()
+	_ = os.WriteFile(filepath.Join(root, "lib.rs"), []byte("fn main() {}\n"), 0o644)
+	res := Run(context.Background(), root, "task", "", 3, 10*time.Second, false)
+	if res.Err != nil {
+		t.Fatalf("expected no error, got %v", res.Err)
+	}
+	if res.Validated {
+		t.Fatal("unvalidatable project must not be validated OK")
+	}
+	if len(res.Unvalidated) == 0 {
+		t.Fatalf("expected unvalidated report, got %+v", res)
+	}
+	if res.Iterations != 0 {
+		t.Fatalf("no LLM rounds should be spent, got %d", res.Iterations)
+	}
+}
+
+func sliceHas(hay []string, needle string) bool {
+	for _, s := range hay {
+		if s == needle {
+			return true
+		}
+	}
+	return false
 }

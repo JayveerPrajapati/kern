@@ -222,12 +222,14 @@ func TestLearnWritesEpisodicAndLesson(t *testing.T) {
 }
 
 func TestPhase15LoopEndToEnd(t *testing.T) {
-	t.Setenv("KERN_ALLOW_UNISOLATED", "1") // fail-closed gate: opt into unisolated runs on hosts without netns (darwin)
+	if testing.Short() {
+		t.Skip("skipping real-worktree loop execution in -short mode")
+	}
+	t.Parallel()
 	root := loopFixture(t)
 
-	// Production mutation is disabled by default (KERN_ALLOW_DEPLOY).
-	// This test exercises the deploy stage, so it must opt in explicitly.
-	t.Setenv("KERN_ALLOW_DEPLOY", "1")
+	// Deploy runs because KERN_ALLOW_DEPLOY=1 is set for the whole binary in
+	// TestMain (no test asserts the default block).
 
 	// Production source with no errors in the observe window → healthy.
 	src := runtime.NewStore()
@@ -335,7 +337,10 @@ func TestPhase15LoopEndToEnd(t *testing.T) {
 // proofs are satisfied they are permitted. This closes the prior gap where
 // the L5 proof machinery (AllowsStageWithProofs/L5Proofs) was dead code.
 func TestL5ProofGate(t *testing.T) {
-	t.Setenv("KERN_ALLOW_UNISOLATED", "1") // fail-closed gate: opt into unisolated runs on hosts without netns (darwin)
+	if testing.Short() {
+		t.Skip("skipping real-worktree loop execution in -short mode")
+	}
+	t.Parallel()
 	root := loopFixture(t)
 
 	// 1) L5 with nil proofs: write stages must be skipped (fail closed).
@@ -401,6 +406,10 @@ func TestL5ProofGate(t *testing.T) {
 // TestRememberStage verifies the REMEMBER stage recalls engineering memory
 // relevant to the intent before planning, surfacing it on res.Remembered.
 func TestRememberStage(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping real-worktree loop execution in -short mode")
+	}
+	t.Parallel()
 	store := memory.NewMemoryStore(t.TempDir())
 	if _, err := store.Add(domain.Memory{
 		Type:    domain.MemoryLesson,
@@ -438,7 +447,10 @@ func TestRememberStage(t *testing.T) {
 // is not explicitly approved: a freshly-created "pending" approval must block
 // the deploy (Bug #2), not let it proceed.
 func TestProtectStage(t *testing.T) {
-	t.Setenv("KERN_ALLOW_UNISOLATED", "1") // fail-closed gate: opt into unisolated runs on hosts without netns (darwin)
+	if testing.Short() {
+		t.Skip("skipping real-worktree loop execution in -short mode")
+	}
+	t.Parallel()
 	appr := governance.NewApprovalWorkflow()
 	src := runtime.NewStore()
 	now := time.Now().Truncate(time.Second)
@@ -518,7 +530,10 @@ const coderCommentPatch = "```diff\n" +
 // at an autonomy level that permits the code stage (L2). The code stage must
 // run, surface a coder-produced output, and yield a non-empty diff.
 func TestLoopUsesCoderWhenStepNil(t *testing.T) {
-	t.Setenv("KERN_ALLOW_UNISOLATED", "1") // fail-closed gate: opt into unisolated runs on hosts without netns (darwin)
+	if testing.Short() {
+		t.Skip("skipping real-worktree loop execution in -short mode")
+	}
+	t.Parallel()
 	prov := &fakeProvider{responses: []string{coderCommentPatch}}
 	a := coder.New(prov)
 
@@ -565,6 +580,9 @@ func TestLoopUsesCoderWhenStepNil(t *testing.T) {
 // wired coder has no LLM provider: the code stage must report it and the loop
 // must return an error.
 func TestLoopCoderNoProvider(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping real-worktree loop execution in -short mode")
+	}
 	a := coder.New(nil) // no provider → Code returns ErrNoProvider
 
 	lp, err := NewLoop(LoopConfig{
@@ -604,6 +622,9 @@ func TestLoopCoderNoProvider(t *testing.T) {
 // Result.BudgetPaused, and returns instead of proceeding through the rest of
 // the pipeline.
 func TestSafetyBudgetPause(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping real-worktree loop execution in -short mode")
+	}
 	budget := &domain.SafetyBudget{MaxToolCalls: 1}
 
 	lp, err := NewLoop(LoopConfig{
@@ -633,6 +654,9 @@ func TestSafetyBudgetPause(t *testing.T) {
 }
 
 func TestLoopRunContextCancellation(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping real-worktree loop execution in -short mode")
+	}
 	lp, err := NewLoop(LoopConfig{
 		Root:  loopFixture(t),
 		Level: L2,
@@ -655,14 +679,11 @@ func TestLoopRunContextCancellation(t *testing.T) {
 	}
 }
 
-// TestVerifyReadOnlyLoopAdvisory (report A13, MED): a repo that carries
-// pre-existing hardcoded-secret findings makes the verification verdict FAIL.
-// At read-only levels (L0/L1) the loop makes no changes, so that FAIL can only
-// reflect repo hygiene, never the task's change surface — the run must succeed
-// and surface the summary as an advisory (Result.VerifyAdvisory) instead of
-// aborting. At a write level (L2+) the same repo still hard-fails the verify
-// stage.
 func TestVerifyReadOnlyLoopAdvisory(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping real-worktree loop execution in -short mode")
+	}
+	t.Parallel()
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, "go.mod"), []byte("module advisory\n\ngo 1.20\n"), 0o644); err != nil {
 		t.Fatal(err)

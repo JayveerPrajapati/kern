@@ -13,6 +13,9 @@ import (
 // when the assessed risk of the intent exceeds the configured MaxRiskLevel ceiling,
 // the loop PAUSES with reason "risk_exceeded" before running any stages.
 func TestLoopPausesOnRiskExceeded(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping real-worktree loop execution in -short mode")
+	}
 	lp, err := NewLoop(LoopConfig{
 		Root:         loopFixture(t),
 		Level:        L4,
@@ -40,7 +43,10 @@ func TestLoopPausesOnRiskExceeded(t *testing.T) {
 // TestLoopRiskCeilingRespectsAssessorNil verifies that without an AssessRisk the
 // risk gate never trips (preserves prior behavior).
 func TestLoopRiskCeilingRespectsAssessorNil(t *testing.T) {
-	t.Setenv("KERN_ALLOW_UNISOLATED", "1") // fail-closed gate: opt into unisolated runs on hosts without netns (darwin)
+	if testing.Short() {
+		t.Skip("skipping real-worktree loop execution in -short mode")
+	}
+	t.Parallel()
 	lp, err := NewLoop(LoopConfig{Root: loopFixture(t), Level: L4, Mem: memory.NewMemoryStore(t.TempDir())})
 	if err != nil {
 		t.Fatalf("NewLoop: %v", err)
@@ -59,6 +65,9 @@ func TestLoopRiskCeilingRespectsAssessorNil(t *testing.T) {
 // TestBudgetPauseSetsPausedFlag verifies the budget-exceed pause also surfaces the
 // unified Paused/PauseReason flags (back-compat keeps BudgetPaused true).
 func TestBudgetPauseSetsPausedFlag(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping real-worktree loop execution in -short mode")
+	}
 	budget := &domain.SafetyBudget{MaxToolCalls: 1}
 	lp, err := NewLoop(LoopConfig{Root: loopFixture(t), Level: L2, Budget: budget})
 	if err != nil {
@@ -81,6 +90,9 @@ func TestBudgetPauseSetsPausedFlag(t *testing.T) {
 // TestPauseOnBudgetEnvNotAllowed verifies the env dimension from trips
 // the budget and pauses with the env reason.
 func TestPauseOnBudgetEnvNotAllowed(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping real-worktree loop execution in -short mode")
+	}
 	budget := &domain.SafetyBudget{MaxToolCalls: 100, AllowedEnvs: []string{"development"}}
 	budget.TrackEnv("production")
 	lp, err := NewLoop(LoopConfig{Root: loopFixture(t), Level: L2, Budget: budget})
@@ -103,6 +115,9 @@ func TestPauseOnBudgetEnvNotAllowed(t *testing.T) {
 
 // TestPauseOnToolKindLimit verifies per-tool-kind budget caps trigger a pause.
 func TestPauseOnToolKindLimit(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping real-worktree loop execution in -short mode")
+	}
 	budget := &domain.SafetyBudget{
 		MaxToolCalls:       100,
 		MaxToolCallsByKind: map[string]int{"exec": 1},

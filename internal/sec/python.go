@@ -5,7 +5,7 @@ import (
 	"strings"
 )
 
-// Python sink rules (G-4). Detection is line-oriented: each rule's trigger
+// Python sink rules. Detection is line-oriented: each rule's trigger
 // regex is matched against a single source line, and the rule's condition may
 // require (or forbid) additional tokens on the same line — e.g. subprocess's
 // shell=True flag, or yaml.load's explicit Loader=. Comment lines (trimmed

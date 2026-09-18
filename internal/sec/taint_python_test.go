@@ -8,9 +8,6 @@ import (
 
 func TestTaintLitePythonFinding(t *testing.T) {
 	root := t.TempDir()
-	// The file contains a source expression (req.Body) and a Python sink
-	// (os.system); the finding must pass through and be marked tainted by the
-	// source-file heuristic — no Go call-graph symbols are required (G-4).
 	writeTaintFile(t, root, "app.py", "import os\n\ndef run(cmd):\n    cmd = req.Body[\"cmd\"]\n    os.system(cmd)\n")
 	ix := &index.Index{Root: root, Symbols: nil, Callers: map[string][]string{}}
 	findings := []Finding{{

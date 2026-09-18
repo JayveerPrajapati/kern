@@ -12,11 +12,8 @@ import (
 
 func writeCatalogDoc(t *testing.T, root string) {
 	t.Helper()
-	SetCatalogProvider(func() []ToolInfo { return fakeCatalog() })
-	catalog, ok := toolCatalog()
-	if !ok {
-		t.Fatal("catalog provider not set")
-	}
+	SetToolInfos(fakeCatalog())
+	catalog := ToolInfos()
 	dir := filepath.Join(root, "docs")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
@@ -29,7 +26,7 @@ func writeCatalogDoc(t *testing.T, root string) {
 func TestG36_CatalogDocFresh(t *testing.T) {
 	root := t.TempDir()
 	writeCatalogDoc(t, root)
-	c := NewCatalogDocCheck(root)
+	c := NewCatalogDocCheck(root, ToolInfos())
 	res, err := c.Run(context.Background(), domain.ChangeRequest{})
 	if err != nil {
 		t.Fatalf("Run error: %v", err)
@@ -51,7 +48,7 @@ func TestG36_CatalogDocStale(t *testing.T) {
 	if err := os.WriteFile(docPath, []byte(strings.Replace(string(data), "kern_alpha", "kern_alpha_mutated", 1)), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	c := NewCatalogDocCheck(root)
+	c := NewCatalogDocCheck(root, ToolInfos())
 	res, err := c.Run(context.Background(), domain.ChangeRequest{})
 	if err != nil {
 		t.Fatalf("Run error: %v", err)
@@ -63,8 +60,8 @@ func TestG36_CatalogDocStale(t *testing.T) {
 
 func TestG36_CatalogDocMissing(t *testing.T) {
 	root := t.TempDir()
-	SetCatalogProvider(func() []ToolInfo { return fakeCatalog() })
-	c := NewCatalogDocCheck(root)
+	SetToolInfos(fakeCatalog())
+	c := NewCatalogDocCheck(root, ToolInfos())
 	res, err := c.Run(context.Background(), domain.ChangeRequest{})
 	if err != nil {
 		t.Fatalf("Run error: %v", err)
@@ -78,11 +75,8 @@ func TestG36_CatalogDocMissingTool(t *testing.T) {
 	root := t.TempDir()
 	writeCatalogDoc(t, root)
 	// Add a new tool to the live catalog after the doc was generated.
-	SetCatalogProvider(func() []ToolInfo {
-		c := fakeCatalog()
-		return append(c, ToolInfo{Name: "kern_newtool", Phase: "meta", RiskLevel: "low"})
-	})
-	c := NewCatalogDocCheck(root)
+	SetToolInfos(append(fakeCatalog(), ToolInfo{Name: "kern_newtool", Phase: "meta", RiskLevel: "low"}))
+	c := NewCatalogDocCheck(root, ToolInfos())
 	res, err := c.Run(context.Background(), domain.ChangeRequest{})
 	if err != nil {
 		t.Fatalf("Run error: %v", err)
@@ -96,8 +90,8 @@ func TestG36_CatalogDocMissingTool(t *testing.T) {
 }
 
 func TestGenerateCatalogDocDeterministic(t *testing.T) {
-	SetCatalogProvider(func() []ToolInfo { return fakeCatalog() })
-	catalog, _ := toolCatalog()
+	SetToolInfos(fakeCatalog())
+	catalog := ToolInfos()
 	a := GenerateCatalogDoc(catalog)
 	b := GenerateCatalogDoc(catalog)
 	if string(a) != string(b) {

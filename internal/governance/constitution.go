@@ -1,7 +1,9 @@
 package governance
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -29,7 +31,7 @@ func LoadConstitution(root string) (*domain.Constitution, error) {
 	path := filepath.Join(root, ".kern", "constitution.yaml")
 	b, err := os.ReadFile(path)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, fs.ErrNotExist) {
 			return &domain.Constitution{}, nil // no constitution = no constraints
 		}
 		return nil, fmt.Errorf("constitution: read %s: %w", path, err)

@@ -7,10 +7,6 @@ import (
 	"testing"
 )
 
-// TestScanFileSkipsCodeExpressionSecrets pins the P1-6 struct-literal
-// allowlist: `PrivateKey: ed25519.PrivateKey(priv)` is construction via a
-// stdlib conversion, and `client_secret = getSecret1()` composes a call —
-// neither holds a credential literal. Quoted literals still fire.
 func TestScanFileSkipsCodeExpressionSecrets(t *testing.T) {
 	src := []byte(`package evidence
 
@@ -67,10 +63,6 @@ func stale(cur, src []byte) string {
 	}
 }
 
-// TestScanTreeSkipsFixtureDirs pins the P1-6 fixture-dir allowlist: fake
-// secrets and synthetic queries under testfixture(s)/fixtures are
-// not production findings (reported: sql-injection on "user:"+id in
-// internal/testfixture/testfixture.go:64).
 func TestScanTreeSkipsFixtureDirs(t *testing.T) {
 	dir := t.TempDir()
 	// Single-label secret (mirrors TestScanTreeSkipsTestFixturesEverywhere):

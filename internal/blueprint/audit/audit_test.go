@@ -172,9 +172,6 @@ func TestAudit_MkdirAll(t *testing.T) {
 	}
 }
 
-// TestG20_AuditSuppressedMeta: a suppressed finding's audit meta records the
-// suppression flag and the owner, so the suppression lift itself stays
-// auditable (P1-2).
 func TestG20_AuditSuppressedMeta(t *testing.T) {
 	r := testRecord()
 	r.Findings[0].Suppressed = true

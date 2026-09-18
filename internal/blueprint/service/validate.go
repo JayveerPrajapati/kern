@@ -14,7 +14,7 @@ import (
 
 	"github.com/JayveerPrajapati/kern/internal/blueprint/audit"
 	"github.com/JayveerPrajapati/kern/internal/blueprint/domain"
-	"github.com/JayveerPrajapati/kern/internal/blueprint/resilience"
+	"github.com/JayveerPrajapati/kern/internal/resilience"
 )
 
 // Check is the seam every validator implements. A check examines a ChangeRequest
@@ -32,6 +32,23 @@ type Check interface {
 	// its CheckResult is authoritative. A non-nil error means the check could
 	// not run (tool failure, missing dependency) and produces StatusError.
 	Run(ctx context.Context, req domain.ChangeRequest) (domain.CheckResult, error)
+}
+
+// CheckReporter observes the per-check lifecycle during Validate so
+// long-running pipelines (e.g. diff-gate's sandboxed tests:build-test check,
+// which can consume the whole gate budget) can emit incremental progress
+// instead of one final verdict rendered only at the end. It is OPTIONAL: a
+// nil reporter (the default) leaves every existing caller — check, ci, mcp —
+// byte-identical.
+//
+// Both callbacks run synchronously in the validation goroutine, immediately
+// before/after each check executes. They must not block the pipeline.
+type CheckReporter interface {
+	// CheckStarted is invoked before check i (0-based) of n begins.
+	CheckStarted(i, n int, name string)
+	// CheckFinished is invoked after check i of n completes, with the check's
+	// final status and its measured wall-clock duration.
+	CheckFinished(i, n int, name string, status domain.Status, duration time.Duration)
 }
 
 // optionalChecks is the catalog of opt-in checks a pipeline may legitimately
@@ -55,6 +72,7 @@ type BlueprintService struct {
 	metrics     MetricsRecorder
 	metricsPath string
 	audit       *audit.Writer
+	reporter    CheckReporter
 }
 
 // PolicyEvaluator maps a CheckResult to a final Status per the loaded policy
@@ -133,6 +151,14 @@ func WithAudit(w *audit.Writer) Option {
 	return func(s *BlueprintService) { s.audit = w }
 }
 
+// WithCheckReporter attaches a per-check lifecycle observer for incremental
+// progress output on long-running validations. Nil-safe: when absent (the
+// default), Validate emits no progress events and existing callers behave
+// exactly as before.
+func WithCheckReporter(r CheckReporter) Option {
+	return func(s *BlueprintService) { s.reporter = r }
+}
+
 // WithKernVersion sets the kern binary version the service stamps onto every
 // finding (P2-4, service-owned provenance). Callers obtain it from a
 // best-effort client.Version() probe. An empty value skips stamping, so a
@@ -169,7 +195,7 @@ func (s *BlueprintService) Validate(ctx context.Context, req domain.ChangeReques
 
 	// Empty change => documented NOOP contract (G1: "empty change => PASS/NOOP").
 	// The NOOP early return is intentionally audit-free: no-op validations
-	// write no audit record (P1-1).
+	// write no audit record.
 	if len(req.Files) == 0 {
 		return domain.ValidationResult{
 			Status:        domain.StatusPass,
@@ -183,8 +209,15 @@ func (s *BlueprintService) Validate(ctx context.Context, req domain.ChangeReques
 	results := make([]domain.CheckResult, 0, len(s.checks))
 	timeout := s.config.timeoutDuration()
 
-	for _, chk := range s.checks {
+	n := len(s.checks)
+	for i, chk := range s.checks {
+		if s.reporter != nil {
+			s.reporter.CheckStarted(i, n, chk.Name())
+		}
 		cr := s.runCheck(ctx, chk, req, timeout)
+		if s.reporter != nil {
+			s.reporter.CheckFinished(i, n, cr.Name, cr.Status, time.Duration(cr.Duration)*time.Millisecond)
+		}
 		results = append(results, cr)
 	}
 	// P2-2: record which opt-in checks were NOT exercised in this pipeline
@@ -290,7 +323,7 @@ func (s *BlueprintService) recordMetrics(status domain.Status, results []domain.
 }
 
 // writeAudit appends one self-hashed audit record for a completed validation
-// (P1-1). Best-effort: a failed audit write must never fail a validation —
+// Best-effort: a failed audit write must never fail a validation —
 // same philosophy as metrics. Records carry findings META only
 // (rule_id/severity/category/file/line); messages, evidence, and snippets are
 // never written (redaction invariant).
@@ -391,7 +424,10 @@ func (s *BlueprintService) runCheck(ctx context.Context, chk Check, req domain.C
 		cr.Status = enforcedStatus
 		cr.Findings = enforcedFindings
 	}
-
+	// perf SLI gate: advisory WARN on budget overshoot (never BLOCK —
+	// timing is flaky; order-of-magnitude regression detector). Runs after
+	// policy so the finding survives a policy-rewritten result.
+	applyPerfSLI(&cr)
 	return cr
 }
 

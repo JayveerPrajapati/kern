@@ -13,7 +13,7 @@ import (
 // isolation is requested on macOS. It denies ALL network operations — bind,
 // inbound, outbound — including loopback and unix-domain sockets. This is
 // stricter than the Linux behavior (a fresh netns still has loopback) and
-// matches the P0.3 definition of done: a localhost bind/connect is denied
+// matches the original definition of done: a localhost bind/connect is denied
 // under isolation.
 //
 // The profile must lead with (allow default): a non-empty sandbox-exec

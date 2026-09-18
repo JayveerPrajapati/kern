@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/JayveerPrajapati/kern/internal/blueprint/domain"
 )
@@ -152,6 +153,13 @@ func (c Check) Run(ctx context.Context, req domain.ChangeRequest) (result domain
 		}}
 	}
 
+	// effectiveBudget is the real wall-clock budget the sandbox commands run
+	// under: the earlier of the caller's ctx deadline (e.g. a diff-gate gate
+	// budget) and the configured sandbox timeout. Timeout messages must
+	// report this, not the configured timeout alone — a check killed by a
+	// 60s gate budget is NOT "timed out after 5m0s".
+	budget := effectiveBudget(ctx, c.config.Timeout)
+
 	for _, target := range targets {
 		// Run build command if configured
 		if len(target.Build) > 0 {
@@ -167,7 +175,7 @@ func (c Check) Run(ctx context.Context, req domain.ChangeRequest) (result domain
 				return domain.CheckResult{
 					Name:   c.Name(),
 					Status: domain.StatusError,
-					Error:  fmt.Sprintf("sandbox build [%s] timed out after %s", target.Name, c.config.Timeout),
+					Error:  fmt.Sprintf("sandbox build [%s] timed out after %s", target.Name, budget),
 				}, nil
 			}
 			if !buildResult.Ok {
@@ -217,7 +225,7 @@ func (c Check) Run(ctx context.Context, req domain.ChangeRequest) (result domain
 				return domain.CheckResult{
 					Name:   c.Name(),
 					Status: domain.StatusError,
-					Error:  fmt.Sprintf("sandbox test [%s] timed out after %s", target.Name, c.config.Timeout),
+					Error:  fmt.Sprintf("sandbox test [%s] timed out after %s", target.Name, budget),
 				}, nil
 			}
 			if !testResult.Ok {
@@ -267,7 +275,7 @@ func (c Check) Run(ctx context.Context, req domain.ChangeRequest) (result domain
 				return domain.CheckResult{
 					Name:   c.Name(),
 					Status: domain.StatusError,
-					Error:  fmt.Sprintf("sandbox command [%s] timed out after %s", target.Name, c.config.Timeout),
+					Error:  fmt.Sprintf("sandbox command [%s] timed out after %s", target.Name, budget),
 				}, nil
 			}
 			if !cmdResult.Ok {
@@ -308,6 +316,19 @@ func (c Check) Run(ctx context.Context, req domain.ChangeRequest) (result domain
 		Name:   c.Name(),
 		Status: domain.StatusPass,
 	}, nil
+}
+
+// effectiveBudget returns the actual wall-clock budget the sandbox commands
+// run under: the earlier of the caller's ctx deadline and the configured
+// timeout. A gate that gives the check 60s while the sandbox config allows
+// 5m must report 60s as the timeout, not 5m.
+func effectiveBudget(ctx context.Context, configured time.Duration) time.Duration {
+	if d, ok := ctx.Deadline(); ok {
+		if rem := time.Until(d); rem > 0 && rem < configured {
+			return rem.Round(time.Second)
+		}
+	}
+	return configured
 }
 
 // SplitCommand splits a command line string by whitespace into an argument slice.

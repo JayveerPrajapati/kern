@@ -298,6 +298,26 @@ func TestMaskGithubPATFormat(t *testing.T) {
 	}
 }
 
+func TestMaskProviderTokens(t *testing.T) {
+	cases := []struct{ in, label string }{
+		{"sk-ant-api03-abcdefghijklmnopqrstuvwxyz1234567890ABCDEF", "ANTHROPIC"},
+		{"ghp_abcdefghijklmnopqrstuvwxyz1234567890", "GITHUB"},
+		{"ghx_abcdefghijklmnopqrstuvwxyz1234567890", "GITHUB"},
+		{"github_pat_ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890_abcdefghijklmnopqrstuvwxyz1234567890", "GITHUB_PAT"},
+		{"AIzaSyabcdefghijklmnopqrstuvwxyz1234567", "GOOGLE"},
+		{"sk-abcdefghijklmnopqrstuvwxyz123456", "OPENAI"},
+	}
+	for _, c := range cases {
+		res := Mask(c.in)
+		if res.ByLabel[c.label] == 0 {
+			t.Errorf("input %q: label %s not detected (got %+v)", c.in, c.label, res.ByLabel)
+		}
+		if strings.Contains(res.Text, c.in) && c.in != res.Text {
+			t.Errorf("input %q not fully replaced: %q", c.in, res.Text)
+		}
+	}
+}
+
 func TestMaskBase64APIKey(t *testing.T) {
 	key := "AKIAIOSFODNN7EXAMPLE" // matches the AWS pattern once decoded
 	enc := base64.StdEncoding.EncodeToString([]byte(key))
@@ -348,12 +368,6 @@ func TestMaskNormalBase64NotMasked(t *testing.T) {
 	}
 }
 
-// TestMaskMixedSecretsA7 (report A7, MED): sk-… dash keys, scheme-less DSN
-// credentials, emails, phones and IPs in one blob must ALL be masked. Before
-// the fix, "sk-live-9f8a7b6c5d4e3f2a1b0c" and "root:supersecret@tcp(host:port)"
-// leaked past the URL_CRED (scheme-only) and sk_/sk- (underscore / bare) rules.
-// MaskAll is used because the report's repro (preparing logs for a remote LLM)
-// also masks the private 10.0.0.42 address.
 func TestMaskMixedSecretsA7(t *testing.T) {
 	in := "Server started with API key sk-live-9f8a7b6c5d4e3f2a1b0c DB at root:supersecret@tcp(db.internal.example.com:3306) admin@example.com 555-123-4567 IP 10.0.0.42"
 	res := MaskAll(in)
@@ -435,5 +449,48 @@ func TestMaskInlinePasswordAndVaultTokens(t *testing.T) {
 	}
 	if res.ByLabel["VAULT"] == 0 {
 		t.Errorf("VAULT label not detected: %+v", res.ByLabel)
+	}
+}
+
+// TestMaskCustomNameCache verifies the name→regex cache behind maskCustom:
+// repeated calls with repeated names must (a) produce byte-identical,
+// deterministic output equivalent to the pre-cache behavior, and (b) reuse a
+// bounded cache — one compiled pattern per distinct name, never per call.
+func TestMaskCustomNameCache(t *testing.T) {
+	names := []string{"CacheCheckAlice", "CacheCheckProjectX", "CacheCheckAlice"}
+	text := "CacheCheckAlice shipped CacheCheckProjectX; then CacheCheckAlice reviewed it."
+
+	want := MaskNames(text, names)
+	if want.Replaced == 0 || !strings.Contains(want.Text, "[MASKED_NAME_1]") {
+		t.Fatalf("pre-cache-equivalent masking did not mask names: %q", want.Text)
+	}
+	// Repeated calls must stay identical (the cache must not change output).
+	for i := 0; i < 5; i++ {
+		got := MaskNames(text, names)
+		if got.Text != want.Text || got.Replaced != want.Replaced || len(got.Mapping) != len(want.Mapping) {
+			t.Fatalf("repeated MaskNames diverged on iteration %d:\n got %q\nwant %q", i, got.Text, want.Text)
+		}
+		for ph, orig := range want.Mapping {
+			if got.Mapping[ph] != orig {
+				t.Fatalf("mapping diverged on iteration %d: %q -> %q vs %q", i, ph, got.Mapping[ph], orig)
+			}
+		}
+	}
+	// The cache holds one compiled pattern per distinct name (bounded), and
+	// the distinct names from this test are present.
+	for _, n := range []string{"CacheCheckAlice", "CacheCheckProjectX"} {
+		if _, ok := nameReCache.Load(n); !ok {
+			t.Fatalf("name cache missing compiled pattern for %q", n)
+		}
+	}
+	distinct := 0
+	nameReCache.Range(func(k, _ any) bool {
+		if k == "CacheCheckAlice" || k == "CacheCheckProjectX" {
+			distinct++
+		}
+		return true
+	})
+	if distinct != 2 {
+		t.Fatalf("expected exactly 2 cached name patterns, found %d", distinct)
 	}
 }

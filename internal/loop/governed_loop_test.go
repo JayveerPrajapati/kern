@@ -25,6 +25,10 @@ func (m *mockValidator) Validate(ctx context.Context, req blueprintdomain.Change
 }
 
 func TestGovernedLoopAutoRepairBoundaryViolation(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping real-worktree loop execution in -short mode")
+	}
+	t.Parallel()
 	tmp := t.TempDir()
 	authFile := filepath.Join(tmp, "internal", "auth", "middleware.go")
 
@@ -126,6 +130,10 @@ func TestGovernedLoopAutoRepairBoundaryViolation(t *testing.T) {
 }
 
 func TestGovernedLoopAutoRepairExhausted(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping real-worktree loop execution in -short mode")
+	}
+	t.Parallel()
 	tmp := t.TempDir()
 
 	validator := &mockValidator{
@@ -221,6 +229,10 @@ func TestRepairContractFormatting(t *testing.T) {
 }
 
 func TestGovernedLoopProtectApprovalGate(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping real-worktree loop execution in -short mode")
+	}
+	t.Parallel()
 	tmp := t.TempDir()
 
 	validator := &mockValidator{

@@ -24,7 +24,7 @@ const (
 	FileRef Type = "file:line"
 	Route   Type = "route"
 	// Call is a natural-language call-graph claim ("X is called from Y" /
-	// "X calls Y") verified against the indexed call edges (F-017).
+	// "X calls Y") verified against the indexed call edges.
 	Call Type = "call"
 )
 
@@ -119,7 +119,7 @@ func Verify(ix *index.Index, root, text string) Report {
 		}
 	}
 
-	// Natural-language call-graph claims (F-017): "X is called from Y" means
+	// Natural-language call-graph claims: "X is called from Y" means
 	// Y calls X, "X calls Y" means Y is among X's callees. Both are verified
 	// against the index's call edges. Conservative by design — only these two
 	// sentence shapes are parsed; anything else is left to the symbol checks.
@@ -141,7 +141,7 @@ func Verify(ix *index.Index, root, text string) Report {
 // checkCallClaim verifies a call-graph claim (caller calls callee) against the
 // index. Both sides may be written qualified ("service.FindUser",
 // "repo.Query") or bare ("FindUser"); matching accepts the full key or its
-// final dotted component. Without an index the claim is unverifiable (F-017).
+// final dotted component. Without an index the claim is unverifiable.
 func checkCallClaim(ix *index.Index, caller, callee string) (bool, string) {
 	if ix == nil {
 		return false, "no index available for call-graph verification"

@@ -305,6 +305,24 @@ func TestMaxSnapshotBytesConfigurable(t *testing.T) {
 	}
 }
 
+// TestParseByteSizeOverflow: a numeric value whose product with the largest
+// unit suffix overflows int64 must return an error instead of a silently
+// wrapped (bogus) byte count, so KERN_SANDBOX_MAX_SNAPSHOT_BYTES can never
+// degrade to a wrong snapshot cap.
+func TestParseByteSizeOverflow(t *testing.T) {
+	// MaxInt64 with the largest unit (GiB, 1<<30) wraps if multiplied naively.
+	if _, err := parseByteSize("9223372036854775807GiB"); err == nil {
+		t.Fatal("MaxInt64 GiB must overflow and return an error, not a wrapped value")
+	}
+	if _, err := parseByteSize("9223372036854775807"); err != nil {
+		t.Fatalf("plain MaxInt64 bytes should parse (unit 1): %v", err)
+	}
+	// Positive case: the largest size that still fits must parse exactly.
+	if got, err := parseByteSize("1023MiB"); err != nil || got != 1023<<20 {
+		t.Fatalf("parseByteSize(1023MiB) = %d, %v; want %d", got, err, 1023<<20)
+	}
+}
+
 // TestRollbackRestoresSkippedFileFailsClearly: restoring after a skipped
 // (over-cap) file was DELETED by the run fails loudly, naming the file and
 // the snapshot cap so the data loss is never silent.
@@ -463,5 +481,161 @@ func TestManifestSortedDeterministic(t *testing.T) {
 		if man1[i-1].Path >= man1[i].Path {
 			t.Fatalf("manifest not sorted by Path: %+v", man1)
 		}
+	}
+}
+
+// TestSanitizeEnvValue: Go proxy/sumdb env values may carry credentialed URLs
+// (https://user:token@proxy.corp/); sanitizeEnvValue must strip the userinfo
+// from every URL in comma- or pipe-separated lists while leaving non-URL
+// segments ("direct", "off", globs) and plain values byte-for-byte unchanged.
+func TestSanitizeEnvValue(t *testing.T) {
+	tests := []struct {
+		name  string
+		env   string
+		value string
+		want  string
+	}{
+		{
+			name:  "goproxy credentialed list",
+			env:   "GOPROXY",
+			value: "https://user:secret@proxy.corp,https://backup:pwd@proxy2.corp,direct",
+			want:  "https://proxy.corp,https://proxy2.corp,direct",
+		},
+		{
+			name:  "goproxy plain list passes through",
+			env:   "GOPROXY",
+			value: "https://proxy.corp,https://proxy2.corp,direct",
+			want:  "https://proxy.corp,https://proxy2.corp,direct",
+		},
+		{
+			name:  "goproxy off",
+			env:   "GOPROXY",
+			value: "off",
+			want:  "off",
+		},
+		{
+			name:  "goproxy negation pattern",
+			env:   "GOPROXY",
+			value: "https://proxy.corp,!internal,direct",
+			want:  "https://proxy.corp,!internal,direct",
+		},
+		{
+			name:  "goproxy pipe separated",
+			env:   "GOPROXY",
+			value: "https://a:b@x.com|https://c:d@y.com|direct",
+			want:  "https://x.com|https://y.com|direct",
+		},
+		{
+			name:  "goproxy token-only userinfo",
+			env:   "GOPROXY",
+			value: "https://token@proxy.corp",
+			want:  "https://proxy.corp",
+		},
+		{
+			name:  "goproxy url with port and path",
+			env:   "GOPROXY",
+			value: "https://user:pass@proxy.corp:8443/mirror",
+			want:  "https://proxy.corp:8443/mirror",
+		},
+		{
+			name:  "goproxy empty",
+			env:   "GOPROXY",
+			value: "",
+			want:  "",
+		},
+		{
+			name:  "gosumdb bare host untouched",
+			env:   "GOSUMDB",
+			value: "sum.golang.org",
+			want:  "sum.golang.org",
+		},
+		{
+			name:  "gosumdb credentialed",
+			env:   "GOSUMDB",
+			value: "https://user:pass@sum.corp",
+			want:  "https://sum.corp",
+		},
+		{
+			name:  "gonoproxy module globs untouched",
+			env:   "GONOPROXY",
+			value: "*.corp.example.com,github.com/org/private",
+			want:  "*.corp.example.com,github.com/org/private",
+		},
+		{
+			name:  "gonosumdb module globs untouched",
+			env:   "GONOSUMDB",
+			value: "*.corp.example.com,rsc.io/private",
+			want:  "*.corp.example.com,rsc.io/private",
+		},
+		{
+			name:  "gomodcache plain path unchanged",
+			env:   "GOMODCACHE",
+			value: "/home/user/go/pkg/mod",
+			want:  "/home/user/go/pkg/mod",
+		},
+		{
+			name:  "gomodcache embedded credential scrubbed",
+			env:   "GOMODCACHE",
+			value: "https://user:pass@host/cache",
+			want:  "https://host/cache",
+		},
+		{
+			name:  "goprivate patterns unchanged",
+			env:   "GOPRIVATE",
+			value: "*.corp.example.com,rsc.io/private",
+			want:  "*.corp.example.com,rsc.io/private",
+		},
+		{
+			name:  "goprivate smuggled credential scrubbed",
+			env:   "GOPRIVATE",
+			value: "https://user:token@git.corp/org,github.com/public",
+			want:  "https://git.corp/org,github.com/public",
+		},
+		{
+			name:  "unrelated env var untouched",
+			env:   "HOME",
+			value: "/home/operator",
+			want:  "/home/operator",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := sanitizeEnvValue(tt.env, tt.value); got != tt.want {
+				t.Fatalf("sanitizeEnvValue(%q, %q) = %q; want %q", tt.env, tt.value, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestSanitizedEnvScrubsGoproxy: the allowlisted environment assembled for
+// sandboxed commands must carry the scrubbed GOPROXY value, not the raw
+// credentialed one, and plain values must round-trip unchanged.
+func TestSanitizedEnvScrubsGoproxy(t *testing.T) {
+	t.Setenv("GOPROXY", "https://user:secret@proxy.corp,https://backup:pwd@proxy2.corp,direct")
+	found := false
+	for _, kv := range sanitizedEnv() {
+		if strings.HasPrefix(kv, "GOPROXY=") {
+			found = true
+			if got := strings.TrimPrefix(kv, "GOPROXY="); got != "https://proxy.corp,https://proxy2.corp,direct" {
+				t.Fatalf("sanitizedEnv GOPROXY = %q; want %q", got, "https://proxy.corp,https://proxy2.corp,direct")
+			}
+		}
+	}
+	if !found {
+		t.Fatal("GOPROXY missing from sanitizedEnv")
+	}
+	// A plain value must pass through unchanged.
+	t.Setenv("GOSUMDB", "sum.golang.org")
+	found = false
+	for _, kv := range sanitizedEnv() {
+		if strings.HasPrefix(kv, "GOSUMDB=") {
+			found = true
+			if got := strings.TrimPrefix(kv, "GOSUMDB="); got != "sum.golang.org" {
+				t.Fatalf("sanitizedEnv GOSUMDB = %q; want unchanged %q", got, "sum.golang.org")
+			}
+		}
+	}
+	if !found {
+		t.Fatal("GOSUMDB missing from sanitizedEnv")
 	}
 }

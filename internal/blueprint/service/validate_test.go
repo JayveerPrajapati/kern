@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,7 +12,7 @@ import (
 
 	"github.com/JayveerPrajapati/kern/internal/blueprint/audit"
 	"github.com/JayveerPrajapati/kern/internal/blueprint/domain"
-	"github.com/JayveerPrajapati/kern/internal/blueprint/metrics"
+	"github.com/JayveerPrajapati/kern/internal/bpreceipt/metrics"
 )
 
 // fakeCheck is a test double implementing Check with a predetermined result.
@@ -496,8 +497,6 @@ func TestG16_ServiceSetsCheckResultSource(t *testing.T) {
 	}
 }
 
-// --- P1-1 audit trail (gate G19) ---
-
 // readAuditLines reads the audit JSONL file into one string per line.
 func readAuditLines(t *testing.T, path string) []string {
 	t.Helper()
@@ -890,5 +889,159 @@ func TestG25_StampingLeavesCheckOwnedFieldsUntouched(t *testing.T) {
 	}
 	if got.KernVersion != "v0.9.0" {
 		t.Errorf("KernVersion = %q, want v0.9.0", got.KernVersion)
+	}
+}
+
+// sleepCheck is a check that sleeps before returning, so runCheck's real
+// measured Duration exceeds a test-shrunk budget.
+type sleepCheck struct {
+	name   string
+	sleep  time.Duration
+	status domain.Status
+}
+
+func (c *sleepCheck) Name() string { return c.name }
+
+func (c *sleepCheck) Run(ctx context.Context, req domain.ChangeRequest) (domain.CheckResult, error) {
+	time.Sleep(c.sleep)
+	return domain.CheckResult{Name: c.name, Status: c.status}, nil
+}
+
+func TestPerfSLIOverBudget(t *testing.T) {
+	old := perfSLIBudgets
+	perfSLIBudgets = map[string]int64{"slow:check": 1} // 1ms budget vs 20ms sleep
+	defer func() { perfSLIBudgets = old }()
+
+	svc := New([]Check{&sleepCheck{name: "slow:check", sleep: 20 * time.Millisecond, status: domain.StatusPass}})
+	res := svc.Validate(context.Background(), req())
+	if res.Status != domain.StatusWarn {
+		t.Fatalf("Status = %q, want WARN (over-budget check must be visible)", res.Status)
+	}
+	var found bool
+	for _, cr := range res.Checks {
+		if cr.Name != "slow:check" {
+			continue
+		}
+		found = true
+		if cr.Status != domain.StatusWarn {
+			t.Errorf("check Status = %q, want WARN (PASS bumped)", cr.Status)
+		}
+		var sli bool
+		for _, f := range cr.Findings {
+			if f.RuleID == "perf:sli" {
+				sli = true
+				if f.Severity != domain.SeverityWarn {
+					t.Errorf("perf:sli severity = %q, want warn (advisory, never block)", f.Severity)
+				}
+				if f.Category != domain.CategoryPerformance {
+					t.Errorf("perf:sli category = %q, want performance", f.Category)
+				}
+			}
+		}
+		if !sli {
+			t.Errorf("slow:check has no perf:sli finding; findings = %+v", cr.Findings)
+		}
+	}
+	if !found {
+		t.Fatalf("slow:check missing from results")
+	}
+}
+
+func TestPerfSLIWithinBudget(t *testing.T) {
+	svc := New([]Check{&fakeCheck{name: "fast:check", result: domain.CheckResult{Name: "fast:check", Status: domain.StatusPass}}})
+	res := svc.Validate(context.Background(), req())
+	if res.Status != domain.StatusPass {
+		t.Fatalf("Status = %q, want PASS", res.Status)
+	}
+	for _, cr := range res.Checks {
+		if cr.Name != "fast:check" {
+			continue
+		}
+		for _, f := range cr.Findings {
+			if f.RuleID == "perf:sli" {
+				t.Errorf("fast:check got perf:sli finding %+v, want none (under budget)", f)
+			}
+		}
+	}
+}
+
+// --- P2-5 (check reporter): incremental per-check progress ---
+
+// recordingReporter is a CheckReporter test double that records lifecycle
+// events in execution order for assertions. Finish events include the
+// reported duration so tests can verify real wall time is surfaced.
+type recordingReporter struct {
+	events []string
+}
+
+func (r *recordingReporter) CheckStarted(i, n int, name string) {
+	r.events = append(r.events, fmt.Sprintf("start %d/%d %s", i+1, n, name))
+}
+
+func (r *recordingReporter) CheckFinished(i, n int, name string, status domain.Status, duration time.Duration) {
+	r.events = append(r.events, fmt.Sprintf("finish %d/%d %s %s %s", i+1, n, name, status, duration))
+}
+
+// TestValidateCheckReporterEventsInOrder: WithCheckReporter invokes the
+// per-check lifecycle callbacks for every check, in execution order, with the
+// 1-based index/total and each check's final status. The sleepCheck proves the
+// finish duration reflects the check's real wall time. A nil reporter (the
+// default) emits nothing — every other test in this file exercises that path.
+func TestValidateCheckReporterEventsInOrder(t *testing.T) {
+	checks := []Check{
+		&fakeCheck{name: "a:one", result: domain.CheckResult{Name: "a:one", Status: domain.StatusPass}},
+		&sleepCheck{name: "b:two", sleep: 2 * time.Millisecond, status: domain.StatusBlock},
+	}
+	rep := &recordingReporter{}
+	svc := New(checks, WithPolicy(noPolicy()), WithCheckReporter(rep))
+	res := svc.Validate(context.Background(), req())
+	if res.Status != domain.StatusBlock {
+		t.Fatalf("Status = %q, want BLOCK", res.Status)
+	}
+
+	if len(rep.events) != 4 {
+		t.Fatalf("reporter events = %v, want exactly 4 (start+finish per check)", rep.events)
+	}
+	// Start events are exact (deterministic).
+	if rep.events[0] != "start 1/2 a:one" {
+		t.Errorf("event[0] = %q, want %q", rep.events[0], "start 1/2 a:one")
+	}
+	if rep.events[2] != "start 2/2 b:two" {
+		t.Errorf("event[2] = %q, want %q", rep.events[2], "start 2/2 b:two")
+	}
+	// Finish events carry status + duration (duration varies, so prefix-match).
+	for i, prefix := range map[int]string{
+		1: "finish 1/2 a:one PASS ",
+		3: "finish 2/2 b:two BLOCK ",
+	} {
+		if !strings.HasPrefix(rep.events[i], prefix) {
+			t.Errorf("event[%d] = %q, want prefix %q", i, rep.events[i], prefix)
+		}
+	}
+	// The sleeping check's reported duration must be at least its sleep.
+	d, err := time.ParseDuration(strings.TrimPrefix(rep.events[3], "finish 2/2 b:two BLOCK "))
+	if err != nil {
+		t.Fatalf("parse b:two finish duration from %q: %v", rep.events[3], err)
+	}
+	if d < 2*time.Millisecond {
+		t.Errorf("b:two reported duration = %s, want >= 2ms (real wall time)", d)
+	}
+}
+
+// TestValidateCheckReporterEmptyChangeNoEvents: an empty change is the
+// documented NOOP early return — no checks run, so the reporter must receive
+// no events (there is nothing to report progress for).
+func TestValidateCheckReporterEmptyChangeNoEvents(t *testing.T) {
+	rep := &recordingReporter{}
+	svc := New([]Check{
+		&fakeCheck{name: "a:one", result: domain.CheckResult{Name: "a:one", Status: domain.StatusPass}},
+	}, WithCheckReporter(rep))
+	emptyReq := domain.ChangeRequest{RepositoryRoot: "/tmp/repo", Source: domain.SourceHuman, Operation: domain.OpCommit, Files: nil}
+	r := svc.Validate(context.Background(), emptyReq)
+	if r.Status != domain.StatusPass {
+		t.Fatalf("Status = %q, want PASS for empty change", r.Status)
+	}
+	if len(rep.events) != 0 {
+		t.Errorf("reporter events on empty change = %v, want none", rep.events)
 	}
 }

@@ -194,8 +194,6 @@ func TestVerifyNonExistentFileLineReportedMissing(t *testing.T) {
 	}
 }
 
-// F-017: natural-language call-graph claims ("X is called from Y" / "X calls
-// Y") are parsed and verified against the indexed call edges, not ignored.
 func TestVerifyCallClaimCalledFrom(t *testing.T) {
 	ix, root := build(t, map[string]string{
 		"go.mod":                      "module example.com/demo\n\ngo 1.20\n",
@@ -230,7 +228,6 @@ func TestVerifyCallClaimCalls(t *testing.T) {
 	}
 }
 
-// F-017: a false call claim must be reported as MISS and flip the report.
 func TestVerifyCallClaimMissing(t *testing.T) {
 	ix, root := build(t, map[string]string{
 		"go.mod":                      "module example.com/demo\n\ngo 1.20\n",
@@ -251,7 +248,6 @@ func TestVerifyCallClaimMissing(t *testing.T) {
 	}
 }
 
-// F-017: without an index the claim is unverifiable (MISS, not a crash).
 func TestVerifyCallClaimNilIndex(t *testing.T) {
 	rep := Sorted(Verify(nil, "", "repo.Query is called from service.FindUser"))
 	c := findCheck(rep, Call, "repo.Query <- service.FindUser")

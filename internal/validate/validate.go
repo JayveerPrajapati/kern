@@ -9,7 +9,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"time"
 
@@ -312,6 +311,40 @@ type Result struct {
 	Output   string
 	Err      error
 	Dur      time.Duration
+	// Checks holds one outcome per per-extension check when the result was
+	// produced by RunChecks; it is empty for single-command Run results.
+	Checks []CheckResult
+}
+
+// FailedChecks returns the names of per-extension checks that ran and failed.
+// A project whose validation output is all failure is what the heal loop
+// repairs against.
+func (r *Result) FailedChecks() []string {
+	var out []string
+	for _, c := range r.Checks {
+		if !c.Skipped && !c.OK {
+			out = append(out, c.Name)
+		}
+	}
+	return out
+}
+
+// SkippedChecks returns the names of per-extension checks that could not run
+// (missing toolchain or no syntax parser). Skipped is NOT a pass: "unable to
+// validate" must never read as "OK".
+func (r *Result) SkippedChecks() []string {
+	var out []string
+	for _, c := range r.Checks {
+		if !c.Skipped {
+			continue
+		}
+		if c.Reason != "" {
+			out = append(out, c.Name+" ("+c.Reason+")")
+		} else {
+			out = append(out, c.Name)
+		}
+	}
+	return out
 }
 
 // maxOutput caps the amount of combined output captured from a validation
@@ -402,21 +435,3 @@ func (c *cappedBuffer) Write(p []byte) (int, error) {
 }
 
 func (c *cappedBuffer) String() string { return c.buf.String() }
-
-// Toolchain reports the runtime toolchain available for a detected command
-// (used for richer CLI output).
-func Toolchain(c *Command) string {
-	if c == nil {
-		return ""
-	}
-	switch c.Cmd {
-	case "go":
-		return runtime.Version()
-	default:
-		p, err := exec.LookPath(c.Cmd)
-		if err != nil {
-			return "not found"
-		}
-		return p
-	}
-}

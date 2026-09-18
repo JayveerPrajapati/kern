@@ -6,8 +6,8 @@ import (
 	"time"
 
 	"github.com/JayveerPrajapati/kern/internal/blueprint/domain"
-	"github.com/JayveerPrajapati/kern/internal/blueprint/policy"
 	"github.com/JayveerPrajapati/kern/internal/blueprint/service"
+	"github.com/JayveerPrajapati/kern/internal/bppolicy/policy"
 )
 
 // fakeBlockCheck is a test double implementing service.Check with a
@@ -23,9 +23,6 @@ func (f *fakeBlockCheck) Run(ctx context.Context, req domain.ChangeRequest) (dom
 	return f.result, nil
 }
 
-// TestG20_SuppressedBlockDoesNotBlock: engine with a suppression + a fake
-// check returning a block finding => final status WARN (not BLOCK), and the
-// finding is marked suppressed in the aggregated result (P1-2).
 func TestG20_SuppressedBlockDoesNotBlock(t *testing.T) {
 	engine := policy.NewEngine(policy.Policy{
 		Mode: "enforce",

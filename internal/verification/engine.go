@@ -141,48 +141,32 @@ func (e *Engine) Verify(types []string) VerificationResult {
 		}
 	}
 
-	var parts []string
 	if run["build"] {
 		res.Build = e.VerifyBuild()
-		parts = append(parts, "build")
 	}
 	if run["test"] {
 		res.UnitTests = e.VerifyTests()
-		parts = append(parts, "test")
 	}
 	if run["security"] {
 		res.Security = e.VerifySecurity()
-		parts = append(parts, "security")
 	}
 	if run["architecture"] {
 		res.Architecture = e.VerifyArchitecture()
-		parts = append(parts, "architecture")
 	}
 	if run["dependency"] {
 		res.Dependency = e.VerifyDependency("")
-		parts = append(parts, "dependency")
 	}
 	if run["e2e"] {
 		res.E2ETests = e.VerifyE2ETests()
-		if res.E2ETests != nil {
-			parts = append(parts, "e2e")
-		}
 	}
 	if run["static-analysis"] {
 		res.StaticAnalysis = e.VerifyStaticAnalysis()
-		if res.StaticAnalysis != nil {
-			parts = append(parts, "static-analysis")
-		}
 	}
 	if run["performance"] {
 		res.Performance = e.VerifyPerformance()
-		if res.Performance != nil {
-			parts = append(parts, "performance")
-		}
 	}
 	if run["ci"] {
 		res.CI = e.VerifyCI()
-		parts = append(parts, "ci")
 	}
 
 	res.Evidence = evidenceOf(&res)
@@ -191,6 +175,16 @@ func (e *Engine) Verify(types []string) VerificationResult {
 	res.Claims = append(res.Claims, res.Security.claims()...)
 	res.Claims = append(res.Claims, res.UnitTests.claims()...)
 	res.Claims = append(res.Claims, res.Build.claims()...)
+	// Platform-isolation honesty (audit M3): on platforms without network
+	// isolation (darwin), the default test check cannot run — the sandbox
+	// fails closed with "refusing to run unisolated" unless the operator
+	// explicitly opted in via KERN_ALLOW_UNISOLATED=1. Mark such a test set
+	// SKIPPED (never WARN, which reads like a pass) with the reason and the
+	// opt-in hint, and exclude it from the verdict math so it counts as
+	// neither passing nor failing. KERN_ALLOW_UNISOLATED=1 remains the ONLY
+	// way to actually run tests unisolated (the sandbox gate itself is
+	// untouched).
+	markIsolationSkipped(&res)
 	res.Verdict = verdictOf(&res)
 	// verdictOf has no knowledge of the CI sub-result, so fold it in here. A
 	// non-empty Status means CI was actually evaluated (not requested, or
@@ -198,13 +192,114 @@ func (e *Engine) Verify(types []string) VerificationResult {
 	if res.CI.Status != "" && !res.CI.OK {
 		res.Verdict = VerdictFail
 	}
-	res.Summary = strings.Join(parts, ", ") + ": " + string(res.Verdict)
+	res.Summary = summarizeChecks(&res)
 	if res.Verdict == VerdictFail {
 		e.publish(eventbus.VerificationFailed, &res)
 	} else {
 		e.publish(eventbus.VerificationCompleted, &res)
 	}
 	return res
+}
+
+// isolationSkipReason is the explicit SKIPPED reason stamped on a test set
+// that could not run because network isolation is unavailable on this
+// platform. It carries the KERN_ALLOW_UNISOLATED=1 opt-in hint so operators
+// see exactly how to actually run the tests.
+const isolationSkipReason = "tests not executed: network isolation unavailable on this platform; set KERN_ALLOW_UNISOLATED=1 (or KERN_ALLOW_NET=1) to run tests unisolated"
+
+// markIsolationSkipped stamps StatusSkipped onto any test set whose failure
+// is the sandbox's fail-closed isolation refusal ("refusing to run
+// unisolated") — i.e. the tests were NOT executed, not that they ran and
+// failed. The output is prefixed with the explicit reason + opt-in hint. A
+// skipped set is excluded from the verdict math by verdictOf.
+func markIsolationSkipped(res *VerificationResult) {
+	// A sandbox isolation refusal means NOTHING executed — the zero-count
+	// signature (Passed==0 && Failed==0) distinguishes it from a genuine
+	// test failure whose output merely QUOTES the refusal text (e.g. a test
+	// asserting on the sandbox's refusal message), which must stay a FAIL
+	// (gate-3 attempt-1).
+	mark := func(t *TestResult) {
+		if t == nil || t.Status == StatusSkipped {
+			return
+		}
+		if !t.OK && t.Passed == 0 && t.Failed == 0 && strings.Contains(t.Output, "refusing to run unisolated") {
+			t.Status = StatusSkipped
+			t.Output = isolationSkipReason + "\n" + t.Output
+		}
+	}
+	mark(res.UnitTests)
+	mark(res.Integration)
+	if e := res.E2ETests; e != nil && e.Status != StatusSkipped &&
+		!e.OK && e.Passed == 0 && e.Failed == 0 && strings.Contains(e.Output, "refusing to run unisolated") {
+		e.Status = StatusSkipped
+		e.Output = isolationSkipReason + "\n" + e.Output
+	}
+}
+
+// summarizeChecks renders the per-check status lines of a verification run as
+// a single comma-joined summary. A SKIPPED check is shown explicitly as
+// "SKIPPED <reason>" — it is never folded into a joint "PASS" line, so a
+// skipped test set is never counted as passing in the summary.
+func summarizeChecks(res *VerificationResult) string {
+	var lines []string
+	add := func(name, status string) {
+		lines = append(lines, name+": "+status)
+	}
+	if b := res.Build; b != nil {
+		add("build", okWord(b.OK))
+	}
+	if t := res.UnitTests; t != nil {
+		add("test", testStatus(t))
+	}
+	if t := res.Integration; t != nil {
+		add("integration", testStatus(t))
+	}
+	if s := res.Security; s != nil {
+		switch {
+		case !s.OK:
+			add("security", "FAIL")
+		case s.Count > 0:
+			add("security", "WARN")
+		default:
+			add("security", "PASS")
+		}
+	}
+	if a := res.Architecture; a != nil {
+		add("architecture", okWord(a.OK))
+	}
+	if d := res.Dependency; d != nil {
+		if d.Skipped != "" {
+			add("dependency", "SKIPPED "+d.Skipped)
+		} else {
+			add("dependency", okWord(d.OK))
+		}
+	}
+	if e := res.E2ETests; e != nil {
+		if e.Status == StatusSkipped {
+			add("e2e", "SKIPPED "+firstLine(e.Output))
+		} else {
+			add("e2e", okWord(e.OK))
+		}
+	}
+	if s := res.StaticAnalysis; s != nil {
+		add("static-analysis", okWord(s.OK))
+	}
+	if p := res.Performance; p != nil {
+		add("performance", okWord(p.OK))
+	}
+	if len(lines) == 0 {
+		return string(res.Verdict)
+	}
+	return strings.Join(lines, ", ")
+}
+
+// testStatus renders one test check's status: "PASS"/"FAIL" from OK, or
+// "SKIPPED <reason>" when the set was not executed.
+func testStatus(t *TestResult) string {
+	if t.Status == StatusSkipped {
+		return "SKIPPED " + firstLine(t.Output)
+	}
+	return okWord(t.OK)
 }
 
 // VerifyBuild runs the build verification (wraps v1 validate/validate).
@@ -605,13 +700,38 @@ func (e *Engine) VerifyArchitecture() *ArchitectureResult {
 		res.OK = false
 		return res
 	}
+	// No explicit .kern/boundaries.json: fall back to the inferred layered
+	// guardrails (same semantics as kern guard / kern impact / the MCP guard
+	// handler) so the architecture check is ENFORCED by default instead of
+	// silently skipped. The inference is surfaced on the result so operators
+	// know to pin explicit rules for deterministic enforcement.
+	inferred := false
+	if b == nil {
+		b = intel.InferBoundaries(ix)
+		inferred = true
+	}
 	files := listSourceFiles(e.root)
 	violations, skipped := intel.CheckBoundariesPrecise(ix, b, files, false)
-	// A missing boundaries file with files in scope is a warning, not a
-	// violation: the guard was not enforced. Surface it on the result and the
-	// bus so it is observable, but keep OK driven by real violations — a WARN
-	// must not silently pass, yet must not fail an advisory verify either.
-	if n := skipped["boundaries-not-configured"]; n > 0 {
+	if inferred {
+		// The guard IS enforced with inferred rules — never claim otherwise.
+		// Surface the inference as a warning (advisory) so the absence of an
+		// explicit rules file stays observable, while OK stays driven by real
+		// violations: inferred violations DO fail the check.
+		msg := fmt.Sprintf("no .kern/boundaries.json found — verified against %d inferred layered boundary rule(s); create .kern/boundaries.json to pin explicit rules", len(b.Rules))
+		res.Warnings = append(res.Warnings, msg)
+		if e.bus != nil {
+			e.bus.Publish(eventbus.Event{
+				Kind:    eventbus.ArchitectureWarning,
+				Source:  "verification",
+				Subject: "architecture",
+				Payload: map[string]string{"warning": msg},
+			})
+		}
+	} else if n := skipped["boundaries-not-configured"]; n > 0 {
+		// A missing boundaries file with files in scope is a warning, not a
+		// violation: the guard was not enforced. Surface it on the result and the
+		// bus so it is observable, but keep OK driven by real violations — a WARN
+		// must not silently pass, yet must not fail an advisory verify either.
 		msg := fmt.Sprintf("no boundary rules configured (.kern/boundaries.json not found) — architecture guard NOT enforced; %d files unchecked", n)
 		res.Warnings = append(res.Warnings, msg)
 		if e.bus != nil {
@@ -643,9 +763,11 @@ func (e *Engine) VerifyArchitecture() *ArchitectureResult {
 // VerifyDependency verifies real module dependencies (missing modules,
 // duplicated requires) plus the intelligence graph dependencies for the target.
 // A target may be a symbol name or qualified name; an empty target checks the
-// whole graph. For Go modules the check is done in-process (see deps.go); it is
-// fail-closed — an error running the check is surfaced as a finding, never a
-// fabricated PASS.
+// whole graph. Dependency manifests are verified in-process for every
+// supported ecosystem present (go.mod, package.json, requirements.txt,
+// pom.xml, Cargo.toml — see manifests.go). It is fail-closed: an unreadable
+// or unparseable manifest is surfaced as a finding, never a fabricated PASS;
+// a project with no supported manifest at all is reported as an honest skip.
 func (e *Engine) VerifyDependency(target string) *DependencyResult {
 	res := &DependencyResult{}
 	ix := e.loadIndex()
@@ -676,14 +798,19 @@ func (e *Engine) VerifyDependency(target string) *DependencyResult {
 		res.OK = found
 	}
 
-	// Real module dependency verification (fail-closed on any error).
-	if md := checkModuleDeps(e.root); md != nil {
-		res.Findings = append(res.Findings, md.findings...)
-		if md.ok {
-			if len(md.findings) > 0 {
+	// Real dependency manifest verification (fail-closed on any error).
+	if mc := checkManifestDeps(e.root); mc != nil {
+		res.Findings = append(res.Findings, mc.findings...)
+		switch {
+		case mc.skipped:
+			// No supported manifest: honest skip, not a fabricated PASS or
+			// FAIL — the graph verdict above still stands.
+			res.Skipped = mc.skippedNote
+		case mc.ok:
+			if len(mc.findings) > 0 {
 				res.OK = false
 			}
-		} else {
+		default:
 			// Could not run the check: never fabricate a PASS.
 			res.OK = false
 		}

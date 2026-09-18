@@ -1,5 +1,5 @@
 // Package diffgate implements the deterministic local diff-gate checks
-// (KERN-P2-003). Each check is a service.Check that runs against the
+// Each check is a service.Check that runs against the
 // working-tree diff (domain.ChangeRequest.Files) and returns structured
 // verdicts. Every check is deterministic and stdlib-only: no network, no
 // external services, no LLM. The six checks here are registered as gates
@@ -12,30 +12,34 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/JayveerPrajapati/kern/internal/blueprint/domain"
 	"github.com/JayveerPrajapati/kern/internal/sec"
 )
 
 // ---------------------------------------------------------------------------
-// MCP catalog provider (dependency inversion)
+// MCP catalog injection (dependency inversion)
 // ---------------------------------------------------------------------------
 //
 // The drift checks (schema:drift, catalog:drift) need the live MCP tool
 // catalog. internal/blueprint/cli cannot import internal/mcp (mcp
 // transitively imports cli via enterprise → web → service, so cli → mcp is
-// an import cycle). Instead the checks consume the catalog through a
-// provider: internal/mcp registers it in an init() (see
-// internal/mcp/catalog_provider.go), so every binary that links mcp — the
-// kern binary and its tests — automatically supplies the live catalog. When
-// the provider is unset, the drift checks SKIP (they cannot compare).
+// an import cycle). Instead the catalog is injected EXPLICITLY: internal/mcp
+// calls catalog.WithDiffgateTools() at server construction and binary
+// startup (never from init()), and the checks receive the injected list as a
+// mandatory constructor argument. A wiring site that omits the list does not
+// compile, and a check constructed with an empty list fails loud
+// (StatusError) instead of silently skipping — the fail-loud standing rule.
 
 // ToolInfo is the minimal, neutral contract surface the drift checks read
 // from the MCP catalog: name, phase, risk level, the tool's input schema,
@@ -48,21 +52,44 @@ type ToolInfo struct {
 	Description string
 }
 
-// catalogProvider is the registered source of the live MCP tool catalog.
-var catalogProvider func() []ToolInfo
+// catalogTools is the injected live MCP tool catalog. It is populated
+// explicitly at server construction via internal/mcp/catalog.WithDiffgateTools
+// — never from init(). cli (which cannot import mcp) reads it through
+// ToolInfos() to pass to the checks' constructors; tests inject fake
+// catalogs with SetToolInfos.
+var (
+	catalogTools   []ToolInfo
+	catalogToolsMu sync.Mutex
+)
 
-// SetCatalogProvider registers the live catalog source. It is called from
-// internal/mcp's init; tests may register a fake catalog.
-func SetCatalogProvider(p func() []ToolInfo) {
-	catalogProvider = p
+// ToolInfos returns the injected live MCP tool catalog as a defensive copy —
+// callers cannot mutate the shared catalog (gate BP-B follow-up).
+func ToolInfos() []ToolInfo {
+	catalogToolsMu.Lock()
+	defer catalogToolsMu.Unlock()
+	out := make([]ToolInfo, len(catalogTools))
+	copy(out, catalogTools)
+	return out
 }
 
-// toolCatalog returns the live catalog and whether a provider is registered.
-func toolCatalog() ([]ToolInfo, bool) {
-	if catalogProvider == nil {
-		return nil, false
+// SetToolInfos injects the live catalog. Called from
+// internal/mcp/catalog.WithDiffgateTools at server construction and from
+// tests with fake catalogs; never from init(). Mutex-guarded so parallel
+// tests injecting different fakes cannot race (gate BP-B follow-up).
+func SetToolInfos(tools []ToolInfo) {
+	catalogToolsMu.Lock()
+	catalogTools = tools
+	catalogToolsMu.Unlock()
+}
+
+// requireCatalogTools is the fail-loud guard: a check constructed without an
+// injected catalog must ERROR (a missing referent errors at the earliest
+// resolvable point), never silently SKIP.
+func requireCatalogTools(tools []ToolInfo) error {
+	if len(tools) == 0 {
+		return errors.New("no MCP tool catalog injected: call internal/mcp/catalog.WithDiffgateTools() at server construction")
 	}
-	return catalogProvider(), true
+	return nil
 }
 
 // ---------------------------------------------------------------------------
@@ -272,13 +299,16 @@ const schemaBaselineVersion = 1
 type SchemaDriftCheck struct {
 	root         string
 	initBaseline bool
+	tools        []ToolInfo
 }
 
 // NewSchemaDriftCheck constructs the schema-drift check bound to a repo root.
 // initBaseline selects write-mode: the check writes the baseline instead of
-// comparing against it.
-func NewSchemaDriftCheck(root string, initBaseline bool) *SchemaDriftCheck {
-	return &SchemaDriftCheck{root: root, initBaseline: initBaseline}
+// comparing against it. tools is the injected live MCP catalog — mandatory
+// (a wiring site that omits it fails to compile; an empty list fails loud at
+// Run).
+func NewSchemaDriftCheck(root string, initBaseline bool, tools []ToolInfo) *SchemaDriftCheck {
+	return &SchemaDriftCheck{root: root, initBaseline: initBaseline, tools: tools}
 }
 
 // Name is the stable check identifier.
@@ -289,12 +319,10 @@ func (c *SchemaDriftCheck) Run(ctx context.Context, req domain.ChangeRequest) (d
 	if c.root == "" {
 		return domain.CheckResult{Name: c.Name(), Status: domain.StatusError, Error: "repository root required"}, nil
 	}
-	catalog, ok := toolCatalog()
-	if !ok {
-		// No catalog provider (mcp not linked): nothing to fingerprint.
-		return domain.CheckResult{Name: c.Name(), Status: domain.StatusSkip, Skipped: true}, nil
+	if err := requireCatalogTools(c.tools); err != nil {
+		return domain.CheckResult{Name: c.Name(), Status: domain.StatusError, Error: err.Error()}, nil
 	}
-	entries := fingerprintCatalog(catalog)
+	entries := fingerprintCatalog(c.tools)
 	sort.Slice(entries, func(i, j int) bool { return entries[i].Name < entries[j].Name })
 	baselinePath := filepath.Join(c.root, filepath.FromSlash(schemaBaselineRelPath))
 
@@ -316,7 +344,7 @@ func (c *SchemaDriftCheck) Run(ctx context.Context, req domain.ChangeRequest) (d
 
 	baseline, err := loadSchemaBaseline(baselinePath)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, fs.ErrNotExist) {
 			return domain.CheckResult{Name: c.Name(), Status: domain.StatusWarn, Findings: []domain.Finding{{
 				RuleID:      "schema:drift",
 				Severity:    domain.SeverityWarn,
@@ -615,43 +643,45 @@ var pluginPhaseRe = regexp.MustCompile(`kern_([a-zA-Z0-9_]+):\s*"(explore|plan|e
 // (internal/setup/assets/plugin/kern.ts). A mismatch is a BLOCK: the plugin
 // surface silently lagging the universal catalog is the real drift guard.
 type CatalogDriftCheck struct {
-	root string
+	root  string
+	tools []ToolInfo
 }
 
 // NewCatalogDriftCheck constructs the catalog-drift check bound to a repo
-// root (the plugin asset is read relative to it).
-func NewCatalogDriftCheck(root string) *CatalogDriftCheck {
-	return &CatalogDriftCheck{root: root}
+// root (the plugin asset is read relative to it). tools is the injected live
+// MCP catalog — mandatory (a wiring site that omits it fails to compile; an
+// empty list fails loud at Run).
+func NewCatalogDriftCheck(root string, tools []ToolInfo) *CatalogDriftCheck {
+	return &CatalogDriftCheck{root: root, tools: tools}
 }
 
 // Name is the stable check identifier.
 func (c *CatalogDriftCheck) Name() string { return "catalog:drift" }
 
 // Run compares the live MCP catalog with the plugin's declared tool set.
-// When the plugin asset is absent (not a kern repo) or no catalog provider is
-// registered, the check SKIPs.
+// When the plugin asset is absent (not a kern repo) the check SKIPs; a check
+// constructed without an injected catalog fails loud (StatusError).
 func (c *CatalogDriftCheck) Run(ctx context.Context, req domain.ChangeRequest) (domain.CheckResult, error) {
 	if c.root == "" {
 		return domain.CheckResult{Name: c.Name(), Status: domain.StatusError, Error: "repository root required"}, nil
 	}
-	catalog, ok := toolCatalog()
-	if !ok {
-		return domain.CheckResult{Name: c.Name(), Status: domain.StatusSkip, Skipped: true}, nil
+	if err := requireCatalogTools(c.tools); err != nil {
+		return domain.CheckResult{Name: c.Name(), Status: domain.StatusError, Error: err.Error()}, nil
 	}
 	pluginPath := filepath.Join(c.root, filepath.FromSlash("internal/setup/assets/plugin/kern.ts"))
 	content, err := os.ReadFile(pluginPath)
 	if err != nil {
 		return domain.CheckResult{Name: c.Name(), Status: domain.StatusSkip, Skipped: true}, nil
 	}
-	mcpSet := make(map[string]bool, len(catalog))
-	for _, t := range catalog {
+	mcpSet := make(map[string]bool, len(c.tools))
+	for _, t := range c.tools {
 		mcpSet[t.Name] = true
 	}
 	findings := compareToolSets(mcpSet, string(content))
 	// Phase parity: a tool whose phase differs between the MCP catalog and
 	// the plugin's TOOL_PHASES map means the plugin would advertise the wrong
 	// surface for a given KERN_MCP_PHASE — a BLOCK, same as a name drift.
-	findings = append(findings, compareToolPhases(catalog, string(content))...)
+	findings = append(findings, compareToolPhases(c.tools, string(content))...)
 	if len(findings) == 0 {
 		return domain.CheckResult{Name: c.Name(), Status: domain.StatusPass}, nil
 	}

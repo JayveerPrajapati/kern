@@ -463,9 +463,6 @@ func TestScanTreeRecordsUnreadableFile(t *testing.T) {
 	}
 }
 
-// F-016: non-source doc files (.md/.txt/.rst) must not report informational
-// EMAIL/IP/URL_CRED prose matches — example emails, localhost binds and
-// scheme-less userinfo examples are documentation, not committed credentials.
 func TestDocFileProseSecretsSuppressed(t *testing.T) {
 	src := []byte(`# README
 
@@ -482,8 +479,6 @@ Masking accepts the sk-live-…/sk-test-… dash-form prefixes.
 	}
 }
 
-// F-016: a REAL secret pasted into a doc file must still be reported — the
-// doc filter only drops the informational EMAIL/IP/URL_CRED classes.
 func TestDocFileRealSecretStillCaught(t *testing.T) {
 	src := []byte("# Notes\n\nAPI key: sk-abcdefghijklmnopqrstuvwxyz1234567890\n")
 	findings := ScanFile("NOTES.md", src)
@@ -498,9 +493,6 @@ func TestDocFileRealSecretStillCaught(t *testing.T) {
 	}
 }
 
-// F-016: RFC 2606 documentation-domain emails (example.com/.org/.net) are
-// placeholders by construction, even in source files (test helpers, config
-// examples). Real domains are unaffected (see TestEmailFlaggedInRealCode).
 func TestExampleDomainEmailSuppressed(t *testing.T) {
 	src := []byte(`git(t, dir, "config", "user.email", "testfixture@example.com")
 const contact = "ops@example.org"
@@ -513,8 +505,6 @@ const contact = "ops@example.org"
 	}
 }
 
-// F-016: rule-identifier literals (RuleID: "secret:...") are the scanner's
-// own taxonomy, not credentials.
 func TestRuleIDLiteralSuppressed(t *testing.T) {
 	src := []byte(`res.Findings = append(res.Findings, domain.Finding{
 	RuleID:      "secret:incumbent-unavailable",
@@ -528,9 +518,6 @@ func TestRuleIDLiteralSuppressed(t *testing.T) {
 	}
 }
 
-// F-016: code-eval matches inside quoted string literals are rule-description
-// text ("yaml.load without an explicit Loader="), not dynamic code. Real
-// unquoted eval/yaml.load calls must still be caught.
 func TestCodeEvalQuotedDescriptionSuppressed(t *testing.T) {
 	desc := []byte(`add("py-yaml-load", SeverityError, "yaml.load without an explicit Loader= (unsafe by default)")
 return "pickle.loads"

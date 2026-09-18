@@ -6,13 +6,6 @@ import (
 	"testing"
 )
 
-// --- P0.4 authz verdict contract tests ---
-//
-// These tests use fakeRunner (architecture_test.go) so they never depend on a
-// real kern binary. The contract: `kern guard check --file <files>
-// --agent-id <id> --task <task> --json` returns the v2 payload with an
-// optional "authz_verdict" object; exit 2 is a RESULT (denied), not an error.
-
 func TestAuthzVerdict_Allowed(t *testing.T) {
 	const out = `{"schema_version":2,"violations":[],"authz_verdict":{
 		"schema_version":1,"agent_id":"default","task":"test","decision":"allowed",
@@ -96,9 +89,6 @@ func TestAuthzVerdict_VersionMismatch(t *testing.T) {
 }
 
 func TestAuthzVerdict_EmptyTask_NoVerdict(t *testing.T) {
-	// kern's guard requires --agent-id AND --task together (P0.4 usage rule).
-	// Without a task scope there is nothing to authorize: nil, nil, and the
-	// runner must NOT be invoked.
 	called := false
 	client := &KernClient{binaryPath: "kern", runner: func(ctx context.Context, name string, args []string, workdir string) (string, string, int, error) {
 		called = true

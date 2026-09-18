@@ -122,7 +122,7 @@ func main() {
 }
 `)
 
-	cfg := Config{Timeout: 2 * time.Second, MaxOutputBytes: 1 << 20}
+	cfg := Config{Timeout: 300 * time.Millisecond, MaxOutputBytes: 1 << 20}
 	res := Run(context.Background(), dir, []string{"go", "run", "main.go"}, cfg)
 	if !res.TimedOut {
 		t.Fatal("expected TimedOut=true")
@@ -154,7 +154,7 @@ func main() {
 }
 `)
 
-	cfg := Config{Timeout: 2 * time.Second, MaxOutputBytes: 1 << 20}
+	cfg := Config{Timeout: 300 * time.Millisecond, MaxOutputBytes: 1 << 20}
 	res := Run(context.Background(), dir, []string{"go", "run", "main.go"}, cfg)
 	if !res.TimedOut {
 		t.Fatal("expected timeout")
@@ -176,7 +176,7 @@ func main() {
 			t.Errorf("orphaned child process still running after timeout:\n%s", out)
 			break
 		}
-		time.Sleep(200 * time.Millisecond)
+		time.Sleep(50 * time.Millisecond)
 	}
 }
 
@@ -281,7 +281,7 @@ func main() {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
-		time.Sleep(1 * time.Second)
+		time.Sleep(100 * time.Millisecond)
 		cancel()
 	}()
 

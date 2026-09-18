@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -318,7 +319,7 @@ func fingerprint(ix *index.Index, decision domain.GatewayResult, policySource st
 	for _, s := range symbols {
 		names = append(names, s.Qualified)
 	}
-	sort.Strings(names)
+	slices.Sort(names)
 	for _, n := range names {
 		_, _ = fmt.Fprintf(h, "symbol=%s\n", n)
 	}

@@ -10,13 +10,13 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/JayveerPrajapati/kern/internal/blueprint/adapters/gitleaks"
-	"github.com/JayveerPrajapati/kern/internal/blueprint/adapters/jscpd"
 	"github.com/JayveerPrajapati/kern/internal/blueprint/adapters/kern"
 	blueprintdomain "github.com/JayveerPrajapati/kern/internal/blueprint/domain"
-	"github.com/JayveerPrajapati/kern/internal/blueprint/policy"
 	"github.com/JayveerPrajapati/kern/internal/blueprint/service"
+	"github.com/JayveerPrajapati/kern/internal/bppolicy/policy"
 	"github.com/JayveerPrajapati/kern/internal/execution"
+	"github.com/JayveerPrajapati/kern/internal/scanners/gitleaks"
+	"github.com/JayveerPrajapati/kern/internal/scanners/jscpd"
 )
 
 // RepairContract represents a machine-actionable repair contract for an agent (KernOps spec Section 6.1).
@@ -216,11 +216,6 @@ func NewDefaultFirewallAdapter(repoRoot string) (*FirewallAdapter, error) {
 	return NewFirewallAdapter(svc, repoRoot), nil
 }
 
-// Validator returns the underlying FirewallValidator.
-func (a *FirewallAdapter) Validator() FirewallValidator {
-	return a.validator
-}
-
 // ValidateWorktree runs the Blueprint validation pipeline against the worktree state.
 func (a *FirewallAdapter) ValidateWorktree(ctx context.Context, wt *execution.Worktree, taskID, intent string, iteration int) (blueprintdomain.ValidationResult, []RepairContract, error) {
 	if a.validator == nil {
@@ -333,7 +328,7 @@ func (a *FirewallAdapter) ExtractChanges(wt *execution.Worktree) ([]blueprintdom
 		srcPath := filepath.Join(srcRoot, rel)
 		srcContent, srcReadErr := os.ReadFile(srcPath)
 
-		if os.IsNotExist(srcReadErr) {
+		if errors.Is(srcReadErr, fs.ErrNotExist) {
 			changes = append(changes, blueprintdomain.FileChange{
 				Path:    rel,
 				Op:      blueprintdomain.OpWrite,

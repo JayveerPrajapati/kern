@@ -47,7 +47,7 @@ type kernAuditEntry struct {
 	Result    string    `json:"Result"`
 	Hash      string    `json:"Hash"`
 	TaskID    string    `json:"TaskID"`
-	// ValidationOutcome (P0.4) carries Blueprint's validation result for this
+	// ValidationOutcome carries Blueprint's validation result for this
 	// entry. Kern's AuditEntry consumes it on `kern audit append` to mark the
 	// blocked context stale. Omitted when the record carries none; the key is
 	// kern's exported field name ("ValidationOutcome") with the untagged Go
@@ -95,7 +95,7 @@ func kernEntry(r Record) kernAuditEntry {
 	}
 }
 
-// validationOutcomeFor builds the P0.4 ValidationOutcome from a validation
+// validationOutcomeFor builds the ValidationOutcome from a validation
 // Record: the status, pipeline exit code, the unique paths of BLOCK-severity
 // findings, the correlation id, and the finding count. Always non-nil for a
 // validation record (kern consumes it to invalidate blocked context).

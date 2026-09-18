@@ -15,7 +15,15 @@ import (
 // The redirect is skipped when XDG_CACHE_HOME is already set: child test
 // processes (e.g. the cross-process store tests) inherit the parent's cache
 // dir and must keep writing to the SAME store the parent reads.
+//
+// The real-execution opt-in env vars are set ONCE here instead of per-test
+// t.Setenv: t.Setenv panics after t.Parallel(), and the heavy loop tests run
+// in parallel. No loop test asserts the KERN_ALLOW_DEPLOY default-block
+// ("deploy skipped: KERN_ALLOW_DEPLOY not set"), so enabling it globally is
+// safe — the tests that exercise deploy all set it themselves today.
 func TestMain(m *testing.M) {
+	_ = os.Setenv("KERN_ALLOW_UNISOLATED", "1") // fail-closed gate: opt into unisolated runs on hosts without netns (darwin)
+	_ = os.Setenv("KERN_ALLOW_DEPLOY", "1")     // production mutation opt-in (no test asserts the default block)
 	if os.Getenv("XDG_CACHE_HOME") == "" {
 		dir, err := os.MkdirTemp("", "kern-test-loop-*")
 		if err != nil {

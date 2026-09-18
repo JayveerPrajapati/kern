@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/JayveerPrajapati/kern/internal/blueprint/domain"
 )
@@ -463,12 +464,6 @@ func TestSecretCheckRuleVersionConfidence(t *testing.T) {
 	}
 }
 
-// TestKernSecretCheckAddedLineFilter (F-018 followup): the in-house kern
-// scanner must apply the same added-line filter as the gitleaks adapter — a
-// modified file carries a pre-existing secret on an unchanged line; the diff
-// hunks (FileChange.Added) list only the genuinely added lines. The check
-// reports the added-line finding and must NOT re-report the pre-existing
-// secret on an unchanged line as part of this change.
 func TestKernSecretCheckAddedLineFilter(t *testing.T) {
 	const out = `{"schema_version":2,"findings":[
 {"file":"config.go","line":5,"rule":"hardcoded-secret","severity":"error","message":"hardcoded secret: KEY","snippet":"pre-existing"},
@@ -507,9 +502,6 @@ func TestKernSecretCheckAddedLineFilter(t *testing.T) {
 	}
 }
 
-// TestKernSecretCheckAddedLineNoHunks (F-018 followup): without hunk data
-// (no FileChange.Added) the whole-file semantics are preserved — every
-// finding in the file reports (proposals and CI diffs carry no Added lines).
 func TestKernSecretCheckAddedLineNoHunks(t *testing.T) {
 	const out = `{"schema_version":2,"findings":[
 {"file":"config.go","line":5,"rule":"hardcoded-secret","severity":"error","message":"hardcoded secret: KEY","snippet":"pre-existing"}
@@ -535,5 +527,94 @@ func TestKernSecretCheckAddedLineNoHunks(t *testing.T) {
 	}
 	if cr.Findings[0].Line != 5 {
 		t.Errorf("Finding.Line = %d, want 5", cr.Findings[0].Line)
+	}
+}
+
+func TestSecretCheckMtimeTouchReplays(t *testing.T) {
+	const canned = `{"schema_version":2,"findings":[{"file": "main.go", "line": 2, "rule": "hardcoded-secret", "severity": "error", "message": "hardcoded API key detected", "snippet": "sk_live_ABC"}]}`
+	client, calls, root := secretCacheFixture(t, canned)
+	chk := NewSecretCheck(client)
+	req := cacheSecretReq(root)
+
+	if _, err := chk.Run(context.Background(), req); err != nil {
+		t.Fatalf("first Run: %v", err)
+	}
+	if *calls != 1 {
+		t.Fatalf("runner calls after first Run = %d, want 1", *calls)
+	}
+
+	// Touch the file: same bytes, future mtime. The stat gate misses, but the
+	// content hash matches — the cached findings must replay, no rescan.
+	full := filepath.Join(root, "main.go")
+	future := time.Now().Add(2 * time.Second)
+	if err := os.Chtimes(full, future, future); err != nil {
+		t.Fatal(err)
+	}
+	cr2, err := chk.Run(context.Background(), req)
+	if err != nil {
+		t.Fatalf("second Run after touch: %v", err)
+	}
+	if *calls != 1 {
+		t.Fatalf("runner calls after mtime-only touch = %d, want 1 (content hash replay)", *calls)
+	}
+	if len(cr2.Findings) != 1 {
+		t.Fatalf("Findings = %d, want 1 (replayed)", len(cr2.Findings))
+	}
+}
+
+func TestSecretCheckPartialDirtyScansOnlyDirty(t *testing.T) {
+	const canned = `{"schema_version":2,"findings":[{"file": "main.go", "line": 2, "rule": "hardcoded-secret", "severity": "error", "message": "hardcoded API key detected", "snippet": "sk_live_ABC"}]}`
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "clean.go"), []byte("package main\nconst c = 1\n"), 0o644); err != nil {
+		t.Fatalf("write clean.go: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "main.go"), []byte("package main\nconst k = \"x\"\n"), 0o644); err != nil {
+		t.Fatalf("write main.go: %v", err)
+	}
+	var workdirs []string
+	calls := 0
+	client := &KernClient{
+		binaryPath: "kern",
+		runner: func(ctx context.Context, name string, args []string, workdir string) (string, string, int, error) {
+			calls++
+			workdirs = append(workdirs, workdir)
+			return canned, "", 1, nil
+		},
+	}
+	chk := NewSecretCheck(client)
+	req := domain.ChangeRequest{
+		RepositoryRoot: root,
+		Files:          []domain.FileChange{{Path: "clean.go", Op: domain.OpWrite}, {Path: "main.go", Op: domain.OpWrite}},
+	}
+
+	// First run: cold cache -> one whole-repo scan from the repo root.
+	if _, err := chk.Run(context.Background(), req); err != nil {
+		t.Fatalf("first Run: %v", err)
+	}
+	if calls != 1 || workdirs[0] != root {
+		t.Fatalf("first Run: calls = %d workdir = %q, want 1 call from repo root %q", calls, workdirs[0], root)
+	}
+
+	// Edit ONLY main.go (content change -> size and mtime change).
+	if err := os.WriteFile(filepath.Join(root, "main.go"), []byte("package main\nconst k = \"a much longer secret value\"\n"), 0o644); err != nil {
+		t.Fatalf("rewrite main.go: %v", err)
+	}
+	cr2, err := chk.Run(context.Background(), req)
+	if err != nil {
+		t.Fatalf("second Run: %v", err)
+	}
+	if calls != 2 {
+		t.Fatalf("runner calls after one file edited = %d, want 2 (partial re-scan)", calls)
+	}
+	// The second scan must run against a TEMP DIR (only the dirty file), not
+	// the whole repo root.
+	if workdirs[1] == root {
+		t.Errorf("partial re-scan ran from repo root (whole-repo scan); want a temp dir containing only the dirty file")
+	}
+	if cr2.Status != domain.StatusBlock {
+		t.Errorf("Status = %q, want %q (dirty file secret reported)", cr2.Status, domain.StatusBlock)
+	}
+	if len(cr2.Findings) != 1 {
+		t.Fatalf("Findings = %d, want 1 (only main.go's finding; clean.go has none)", len(cr2.Findings))
 	}
 }
