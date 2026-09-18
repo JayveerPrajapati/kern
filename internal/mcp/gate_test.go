@@ -82,3 +82,48 @@ func TestHandleRenamePreviewUnaffected(t *testing.T) {
 		t.Fatal("expected non-empty rename preview")
 	}
 }
+
+// TestGateErrorDoesNotDiscloseRoots locks audit A6: a denied path's error
+// must not disclose the server's allowed roots — they are server
+// configuration a client must not learn from a denial. The denial names only
+// the denied key with generic guidance.
+func TestGateErrorDoesNotDiscloseRoots(t *testing.T) {
+	secretRoot := t.TempDir()
+	g := &Gate{roots: []string{secretRoot}, enabled: true}
+	err := g.gatePath("root", "/tmp/kern-outside-dir")
+	if err == nil {
+		t.Fatal("path outside the allowed roots must be denied")
+	}
+	if strings.Contains(err.Error(), secretRoot) {
+		t.Fatalf("denial must not disclose allowed roots, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "outside allowed roots") {
+		t.Fatalf("denial should carry generic guidance, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), `"root"`) {
+		t.Fatalf("denial should name the denied key, got: %v", err)
+	}
+}
+
+// TestGateCheckConfinesRepoArg locks R3: the raw `repo` argument (the root
+// name blueprint tools use) must be confined exactly like root/dir — a client
+// passing `repo` directly must not bypass raw-arg confinement.
+func TestGateCheckConfinesRepoArg(t *testing.T) {
+	ws := t.TempDir()
+	sub := filepath.Join(ws, "sub")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	g := &Gate{roots: []string{ws}, enabled: true}
+	if err := g.Check("kern_blueprint_apply", map[string]any{"repo": sub}); err != nil {
+		t.Fatalf("repo arg inside the root must be allowed: %v", err)
+	}
+	outside := t.TempDir()
+	err := g.Check("kern_blueprint_apply", map[string]any{"repo": outside})
+	if err == nil {
+		t.Fatal("repo arg outside the root must be denied")
+	}
+	if !strings.Contains(err.Error(), "outside allowed roots") {
+		t.Fatalf("expected a confinement denial, got %v", err)
+	}
+}

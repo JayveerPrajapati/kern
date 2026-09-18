@@ -7,7 +7,7 @@ import (
 )
 
 // handleProse implements kern_prose: prose-word → symbol candidate lookup via
-// the index's build-time inverted vocab (CG-P1-9). Mirrors handleSearch's
+// the index's build-time inverted vocab. Mirrors handleSearch's
 // structure (loadIndex, query required, limit default 20) so agents can skip
 // the miss-chain (kern_search miss → kern_ast_search miss): ask "middleware"
 // and get the exact symbol names that embed that word.

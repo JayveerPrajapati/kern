@@ -8,11 +8,6 @@ import (
 	"testing"
 )
 
-// TestHandleReviewLens drives the P1-002 lens arg through kern_review: a
-// valid lens prepends the deterministic "lens: name (type=weight, ...)" line;
-// an unknown lens is rejected; no lens arg leaves the output byte-identical.
-// The file arg scopes the review to a known path so the test does not depend
-// on git state.
 func TestHandleReviewLens(t *testing.T) {
 	root := provenanceProject(t)
 	s := NewServer(strings.NewReader(""), io.Discard)
@@ -49,9 +44,6 @@ func TestHandleReviewLens(t *testing.T) {
 	}
 }
 
-// TestHandleReviewProfile drives the P1-005 profile arg through kern_review:
-// machine-json wraps the review in a JSON envelope; an unknown profile is
-// rejected; no profile arg leaves the output byte-identical.
 func TestHandleReviewProfile(t *testing.T) {
 	root := provenanceProject(t)
 	s := NewServer(strings.NewReader(""), io.Discard)

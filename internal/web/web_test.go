@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/JayveerPrajapati/kern/internal/agent"
@@ -357,6 +358,12 @@ func TestHealthEndpoint(t *testing.T) {
 	if !strings.Contains(rec.Body.String(), "ok") {
 		t.Fatalf("body = %q, want to contain %q", rec.Body.String(), "ok")
 	}
+	// The health probe is GET-only (QA: /api/health previously accepted
+	// POST with no method guard). Any other method must return 405.
+	rec = postJSON(t, app, "/api/health", "")
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("POST status = %d, want 405", rec.Code)
+	}
 }
 
 // TestContextEngineWiredRuntimeAndBoundary verifies G3: the shipped web App
@@ -494,5 +501,59 @@ func TestRuntimeEndpoint(t *testing.T) {
 	}
 	if _, ok := snap["drift"]; !ok {
 		t.Error("runtime snapshot missing drift key")
+	}
+}
+
+// TestAppCloseTearsDownRelayAndIsIdempotent pins the App.Close teardown
+// contract: Close must tear down the relay server and its bus subscription
+// started by New (so evicted enterprise apps do not leak relay goroutines or
+// sockets), and must be idempotent and panic-free.
+func TestAppCloseTearsDownRelayAndIsIdempotent(t *testing.T) {
+	app := newEmptyApp(t)
+	if app.relay == nil {
+		t.Fatal("New should have started the cross-process relay for a fresh root")
+	}
+	if app.relayUnsub == nil {
+		t.Fatal("New should have wired the relay's bus subscription")
+	}
+	if err := app.Close(); err != nil {
+		t.Fatalf("first Close: %v", err)
+	}
+	if app.relay != nil || app.relayUnsub != nil {
+		t.Error("Close must nil the relay and its unsubscriber")
+	}
+	// Idempotent: a second Close is a no-op, not a panic or an error.
+	if err := app.Close(); err != nil {
+		t.Fatalf("second Close: %v", err)
+	}
+}
+
+// TestAppCloseConcurrentSafe pins the oracle-gate Close hardening: concurrent
+// Close calls must not race the relay/relayUnsub nil-checks (the teardown runs
+// inside a sync.Once), every caller gets a nil error, and the resources end up
+// torn down exactly once.
+func TestAppCloseConcurrentSafe(t *testing.T) {
+	app := newEmptyApp(t)
+	if app.relay == nil {
+		t.Fatal("New should have started the cross-process relay for a fresh root")
+	}
+	const n = 8
+	errs := make([]error, n)
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			errs[idx] = app.Close()
+		}(i)
+	}
+	wg.Wait()
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent Close %d returned error: %v", i, err)
+		}
+	}
+	if app.relay != nil || app.relayUnsub != nil {
+		t.Error("Close must nil the relay and its unsubscriber after the concurrent teardown")
 	}
 }

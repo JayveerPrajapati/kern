@@ -217,5 +217,20 @@ chosen option to size the real edit — both before you run kern_execute.
   acquired by one MCP server (or CLI process) is not releasable by another;
   the lock marker persists in <root>/.kern/locks until kern unlock runs in
   the owning process.
+- Timeouts & progress: every tool call has a 30-minute ceiling
+  (KERN_MCP_CONCURRENCY bounds parallel calls). The exec family
+  (kern_exec/kern_sandbox/kern_heal) defaults to 120s and honors a
+  timeout=N argument; kern_run_build is hard-bounded at 5 minutes.
+  Slow tools (sandbox, heal, run_build, execute, verify, validate,
+  doc_index) emit MCP notifications/progress over stdio —
+  0% start, keep-alive every 5s, 100% stop — so agents see liveness
+  during multi-second calls; HTTP has no push channel, so progress is
+  stdio-only. Per-call output is capped at 24KiB (KERN_MCP_MAX_OUTPUT)
+  unless you pass max_output=N.
+- Cost hints: every kern_meta classification carries an est latency +
+  output-token hint (fast ~10ms/~150 tok, medium ~150ms/~1200 tok, slow
+  ~800ms/~4000 tok — exec/verify + LLM-class tools). A HINT for context
+  budgeting, never a promise; per-tool actuals live in metrics and
+  kern_stats reports token savings.
 `
 }

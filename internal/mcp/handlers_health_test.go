@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/JayveerPrajapati/kern/internal/governance"
+	"github.com/JayveerPrajapati/kern/internal/index"
 	"github.com/JayveerPrajapati/kern/internal/metrics"
 )
 
@@ -136,5 +137,58 @@ func TestHttpHealthEndpoint(t *testing.T) {
 	}
 	if data["status"] != "ok" {
 		t.Errorf("expected status 'ok', got %v", data["status"])
+	}
+}
+
+// TestHandleHealthFallsBackToDiskIndex: a server with a cold session cache
+// (no index ever loaded in-process) must report the persisted disk index in
+// the "index" block instead of all-zero "not built" values — otherwise agents
+// reading health conclude the index is missing and rebuild it. Regression for
+// the dogfooding finding where a long-lived MCP server reported
+// fresh=false/symbols=0/files=0 while searches returned fresh disk data.
+func TestHandleHealthFallsBackToDiskIndex(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "a.go"), []byte("package a\n\nfunc A() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ix, err := index.Build(dir)
+	if err != nil {
+		t.Fatalf("index build: %v", err)
+	}
+	if err := ix.Save(); err != nil {
+		t.Fatalf("index save: %v", err)
+	}
+
+	s := NewServer(strings.NewReader(""), io.Discard)
+	s.roots = []string{dir}
+	// Deliberately do NOT call s.loadIndex: the session cache must stay cold
+	// so the handler exercises the disk fallback path.
+
+	out, err := s.handleHealth(context.Background(), map[string]any{"root": dir})
+	if err != nil {
+		t.Fatalf("handleHealth: %v", err)
+	}
+	var data map[string]any
+	if err := json.Unmarshal([]byte(out), &data); err != nil {
+		t.Fatalf("unmarshal health JSON: %v", err)
+	}
+	idx, ok := data["index"].(map[string]any)
+	if !ok {
+		t.Fatalf("missing index block: %v", data)
+	}
+	if idx["built"] != true {
+		t.Errorf("index.built = %v, want true (disk fallback)", idx["built"])
+	}
+	if idx["fresh"] != true {
+		t.Errorf("index.fresh = %v, want true", idx["fresh"])
+	}
+	if n, _ := idx["symbols"].(float64); n <= 0 {
+		t.Errorf("index.symbols = %v, want > 0", idx["symbols"])
+	}
+	if idx["note"] == nil {
+		t.Errorf("expected fallback note in index block, got %v", idx)
+	}
+	if _, ok := idx["builds_count"]; !ok {
+		t.Errorf("index block missing builds_count: %v", idx)
 	}
 }

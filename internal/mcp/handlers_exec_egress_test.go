@@ -6,16 +6,6 @@ import (
 	"testing"
 )
 
-// TestExecEgressArgReachesGate asserts the optional egress tool argument is
-// parsed into script.Run.Egress and threaded into the deny-by-default egress
-// gate (AUD-01): a network-shaped script that would be refused for declaring
-// no egress targets succeeds (or gets the per-target policy decision) once
-// structured egress targets are passed via the tool argument.
-//
-// no_isolate + KERN_ALLOW_NO_ISOLATE=1 makes the run deterministically
-// unisolated on every platform (the same trick the script package's egress
-// tests use), so the gate is always exercised regardless of whether an
-// unprivileged netns is available.
 func TestExecEgressArgReachesGate(t *testing.T) {
 	if _, err := exec.LookPath("bash"); err != nil {
 		t.Skip("bash not installed")
@@ -58,8 +48,16 @@ func TestExecEgressArgReachesGate(t *testing.T) {
 		"no_isolate": "true",
 		"egress":     []string{"8.8.8.8:443"},
 	})
-	if !strings.Contains(err, "denies target") || !strings.Contains(err, "8.8.8.8:443") {
+	if !strings.Contains(err, "denies target") {
 		t.Fatalf("expected per-target policy denial, got %q", err)
+	}
+	// Audit A5: the kern_exec error path masks PII — the denied IP must not
+	// leak raw (it appears as a masked placeholder instead).
+	if strings.Contains(err, "8.8.8.8") {
+		t.Fatalf("error path must mask the denied IP (audit A5), got %q", err)
+	}
+	if !strings.Contains(err, "MASKED") {
+		t.Fatalf("expected a masked IP placeholder in the denial, got %q", err)
 	}
 	if strings.Contains(err, "declares no egress targets") {
 		t.Fatalf("no-declaration gate fired despite a structured egress argument: %q", err)

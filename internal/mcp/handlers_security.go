@@ -54,14 +54,14 @@ func (s *Server) handleSecurity(ctx context.Context, args map[string]any) (strin
 		if s := argString(args, "severity"); s != "" {
 			allow = strings.Split(s, ",")
 		}
-		max := 100
+		maxN := 100
 		if v := argString(args, "max"); v != "" {
 			n, err := strconv.Atoi(v)
 			if err != nil {
 				return "", fmt.Errorf("max: invalid integer %q", v)
 			}
 			if n > 0 {
-				max = n
+				maxN = n
 			}
 		}
 		findings, serr := s.svc.Security.Scan(ctx, root)
@@ -79,7 +79,7 @@ func (s *Server) handleSecurity(ctx context.Context, args map[string]any) (strin
 		if len(findings) == 0 {
 			return "no security findings", nil
 		}
-		out := s.svc.Security.Render(findings, max)
+		out := s.svc.Security.Render(findings, maxN)
 		counts := sec.Counts(findings)
 		out += fmt.Sprintf("[kern] %d findings: %d error, %d warning, %d info\n",
 			len(findings), counts["error"], counts["warning"], counts["info"])
@@ -91,7 +91,7 @@ func (s *Server) handleSecurity(ctx context.Context, args map[string]any) (strin
 // findings. Each finding's containing function is marked tainted when it is
 // transitively called by a framework entry point (Symbol.Entry) or its file
 // contains a source expression; with generate=true, a deterministic test
-// scaffold (go test for Go sinks, pytest for Python sinks, G-4) is appended
+// scaffold (go test for Go sinks, pytest for Python sinks) is appended
 // per tainted sink for the caller to fill. The optional range argument
 // scopes findings to the files changed in a "from..to" git range.
 func (s *Server) handleTaint(ctx context.Context, args map[string]any) (string, error) {
@@ -118,7 +118,7 @@ func (s *Server) handleTaint(ctx context.Context, args map[string]any) (string, 
 			}
 			findings = filtered
 		}
-		// G-4: scope findings to the files changed in a git range
+		// scope findings to the files changed in a git range
 		// ("from..to", ".." = working tree). Combined with fileFilter the
 		// two filters intersect.
 		scopeNote := ""
@@ -311,7 +311,7 @@ func (s *Server) handleGuardCheck(ctx context.Context, args map[string]any) (str
 		}
 		// threshold=-1 means "never reject" (audit only).
 		if threshold >= 0 && len(violations) > threshold {
-			return "", fmt.Errorf("REJECT: %d boundary violations exceed threshold %d", len(violations), threshold)
+			return "", fmt.Errorf("rejected: %d boundary violations exceed threshold %d", len(violations), threshold)
 		}
 		if argString(args, "format") == "sarif" {
 			return intel.RenderViolationsSARIF(violations, serverVersion), nil

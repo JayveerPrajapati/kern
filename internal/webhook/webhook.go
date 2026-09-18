@@ -166,7 +166,7 @@ func (c *Client) Deliver(ev eventbus.Event) map[string]error {
 	c.mu.Unlock()
 
 	// Project only the stable event fields; timestamps serialize as RFC3339.
-	payload, err := json.Marshal(map[string]interface{}{
+	payload, err := json.Marshal(map[string]any{
 		"id":          ev.ID,
 		"kind":        string(ev.Kind),
 		"source":      ev.Source,

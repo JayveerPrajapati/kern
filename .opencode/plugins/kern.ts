@@ -191,8 +191,9 @@ const TOOL_PHASES: Record<string, string> = {
   kern_agents: "cross",
   kern_analyze: "plan",
   kern_approve: "edit",
-  kern_arch: "explore",
-  kern_ast_search: "explore",
+kern_arch: "explore",
+kern_ask: "meta",
+kern_ast_search: "explore",
   kern_ast_transform: "edit",
   kern_audit: "verify",
   kern_authorize_context: "cross",
@@ -402,6 +403,13 @@ export default (async ({ directory, $ }) => {
   // host `$` shell (sh -c) exactly as opencode's built-in bash would, with the
   // same timeout ceiling as `run` (timeout is milliseconds, the opencode bash
   // convention). Only used when kern is unavailable.
+  // Host model delegation for hosts that do not announce MCP sampling
+  // (e.g. opencode) is handled server-side: set KERN_HOST_SAMPLER_CMD (and
+  // optionally KERN_HOST_SAMPLER_TIMEOUT / KERN_HOST_SAMPLER_KEY) and the
+  // kern MCP server self-registers the command sampler at startup — the auto
+  // LLM chain's host leg then shells it per generation (stdin = user prompt,
+  // $KERN_SYSTEM_PROMPT = system prompt, stdout = reply). Example:
+  // KERN_HOST_SAMPLER_CMD="opencode run" kern-mcp
   const runRaw = async (command: string, workdir?: string, timeout?: number): Promise<string> => {
     const p = $`sh -c ${command}`
     if (workdir) p.cwd(workdir)
@@ -1002,7 +1010,7 @@ kern_optimize_log: tool({
       }),
       kern_fts_search: tool({
         description:
-          "FTS5 full-text search over the persisted SQLite symbol index. Supports MATCH syntax ('greet', 'func AND greet'). Requires a build with -tags sqlite.",
+          "FTS5 full-text search over the persisted SQLite symbol index. Supports MATCH syntax ('greet', 'func AND greet'). The SQLite store is compiled in by default (disable with -tags nosqlite).",
         args: {
           query: tool.schema.string(),
           root: tool.schema.string().optional(),
@@ -1963,7 +1971,25 @@ if (args.probe) flags.push("--probe")
 return run(flags)
 },
 }),
-kern_loop: tool({
+kern_register_host_sampler: tool({
+        description:
+          "Register (or unregister) a host sampler command for LLM delegation: the auto LLM chain's host leg executes this command via sh -c with the user prompt on stdin and the system prompt in $KERN_SYSTEM_PROMPT; stdout is the reply. Pass an empty command to unregister. key namespaces the registration (default: this connection's slot) so several sessions/agents/repos can coexist — every registered sampler is tried in order. For hosts that do not announce MCP sampling (e.g. opencode), set KERN_HOST_SAMPLER_CMD and the kern MCP server self-registers the command at startup.",
+        args: {
+          command: tool.schema.string(),
+          key: tool.schema.string().optional(),
+          timeout: tool.schema.string().optional(),
+          model: tool.schema.string().optional(),
+        },
+        async execute(args) {
+          const flags: string[] = ["register-host-sampler"]
+          if (args.command) flags.push(args.command)
+          if (args.key) flags.push("--key", args.key)
+          if (args.timeout) flags.push("--timeout", String(args.timeout))
+          if (args.model) flags.push("--model", args.model)
+          return run(flags)
+        },
+      }),
+      kern_loop: tool({
         description:
           "HIGH-LEVEL (Workflow E): run the closed autonomy loop against an intent string and return the stage timeline plus the deployed / observed-healthy / learned outcome. The autonomy level (L0-L5, default L0 read-only) gates which stages run.",
         args: {
@@ -2006,7 +2032,20 @@ kern_loop: tool({
           return run(flags)
         },
       }),
-      kern_run: tool({
+      kern_ask: tool({
+description:
+"Ask kern a question about the codebase — deterministic index-first answering (never calls an LLM). Classifies the request exactly like kern_meta and runs the right tool internally: 'how does dispatch work?' → kern_explore, 'find the dispatch function' → kern_search, 'show me the architecture' → kern_arch. Alias of kern_meta with an explicit deterministic-only contract.",
+args: {
+root: tool.schema.string().optional(),
+request: tool.schema.string(),
+},
+async execute(args) {
+const flags: string[] = ["ask", args.request]
+if (args.root) flags.push("--root", args.root)
+return run(flags)
+},
+}),
+kern_run: tool({
         description:
           "HIGH-LEVEL (Workflow E): run an intent through the full task pipeline — compile the intent, select workflow + capabilities + agents, create the Task, run policy preflight, and return the result (task, workflow, risk/approval, caps, tools, agents, next). Single entry point that orchestrates the whole workflow.",
         args: {

@@ -99,9 +99,6 @@ func TestTaintCleanProjectViaMCP(t *testing.T) {
 	}
 }
 
-// TestTaintPythonViaMCP verifies kern_taint end-to-end on a Python sink:
-// ScanPythonFile finds py-os-system, the source-file heuristic taints it, and
-// generate=true appends a pytest scaffold (G-4).
 func TestTaintPythonViaMCP(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	root := testRoot(t)
@@ -128,8 +125,6 @@ def run(cmd):
 	}
 }
 
-// TestTaintInvalidRangeViaMCP verifies that a malformed --range/range value
-// is rejected with a clear error (G-4).
 func TestTaintInvalidRangeViaMCP(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	root := testRoot(t)

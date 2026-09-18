@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"strconv"
-	"strings"
 
 	"github.com/JayveerPrajapati/kern/internal/memory"
 )
@@ -27,18 +26,6 @@ func (s *Server) handleMemoryAdd(ctx context.Context, args map[string]any) (stri
 
 }
 
-func memoryListText(entries []memory.Entry) string {
-	var b strings.Builder
-	for _, e := range entries {
-		marker := ""
-		if e.Source == "auto" {
-			marker = "[auto] "
-		}
-		fmt.Fprintf(&b, "%s  %s%s\n", e.Time.UTC().Format("2006-01-02 15:04"), marker, e.Text)
-	}
-	return strings.TrimSuffix(b.String(), "\n")
-}
-
 func (s *Server) handleMemoryList(ctx context.Context, args map[string]any) (string, error) {
 	root := argString(args, "root")
 	if root == "" {
@@ -49,7 +36,7 @@ func (s *Server) handleMemoryList(ctx context.Context, args map[string]any) (str
 	if err != nil {
 		return "", err
 	}
-	return memoryListText(entries), nil
+	return memory.FormatEntries(entries), nil
 
 }
 
@@ -63,7 +50,7 @@ func (s *Server) handleMemoryRecall(ctx context.Context, args map[string]any) (s
 		cwd, _ := os.Getwd()
 		root = cwd
 	}
-	k := 5
+	k := memory.DefaultRecallLimit
 	limitStr := argString(args, "limit")
 	if limitStr == "" {
 		limitStr = argString(args, "k") // backward-compat alias for pre-rename prompts
@@ -81,11 +68,10 @@ func (s *Server) handleMemoryRecall(ctx context.Context, args map[string]any) (s
 	if err != nil {
 		return "", err
 	}
-	var b strings.Builder
-	for _, e := range entries {
-		fmt.Fprintf(&b, "%s  %s\n", e.Time.UTC().Format("2006-01-02 15:04"), e.Text)
+	if len(entries) == 0 {
+		return memory.NoRecallMatch, nil
 	}
-	return strings.TrimSuffix(b.String(), "\n"), nil
+	return memory.FormatEntries(entries), nil
 
 }
 
@@ -111,21 +97,20 @@ func (s *Server) handleMemory(ctx context.Context, args map[string]any) (string,
 		if err != nil {
 			return "", err
 		}
-		return memoryListText(entries), nil
+		return memory.FormatEntries(entries), nil
 	case "recall":
 		prompt := argString(args, "prompt")
 		if prompt == "" {
 			return "", fmt.Errorf("prompt is required for action 'recall'")
 		}
-		entries, err := s.svc.Memory.Recall(ctx, root, prompt, 5)
+		entries, err := s.svc.Memory.Recall(ctx, root, prompt, memory.DefaultRecallLimit)
 		if err != nil {
 			return "", err
 		}
-		var b strings.Builder
-		for _, e := range entries {
-			fmt.Fprintf(&b, "%s  %s\n", e.Time.UTC().Format("2006-01-02 15:04"), e.Text)
+		if len(entries) == 0 {
+			return memory.NoRecallMatch, nil
 		}
-		return strings.TrimSuffix(b.String(), "\n"), nil
+		return memory.FormatEntries(entries), nil
 	default:
 		return "", fmt.Errorf("unknown memory action %q (want add, list, or recall)", action)
 	}

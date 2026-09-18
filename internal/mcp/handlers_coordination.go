@@ -12,6 +12,7 @@ import (
 	"time"
 )
 
+// AgentHandoff is a pending handoff of a task from one agent to another.
 type AgentHandoff struct {
 	ID        string         `json:"id"`
 	FromAgent string         `json:"from_agent"`
@@ -23,6 +24,8 @@ type AgentHandoff struct {
 	Status    string         `json:"status"` // "pending", "accepted", "completed"
 }
 
+// ResourceClaim is a temporary exclusive claim on a shared resource by one
+// agent, released when it expires.
 type ResourceClaim struct {
 	Resource  string    `json:"resource"`
 	AgentID   string    `json:"agent_id"`
@@ -36,6 +39,79 @@ var (
 	activeClaims   = map[string]map[string]ResourceClaim{} // root -> resource -> claim
 )
 
+// coordinationDir returns the on-disk directory for coordination state of a
+// workspace root. Handoffs are already persisted there as hf-*.json; claims
+// are persisted as claims.json so claim/status/release survive process
+// restarts (a claim made by one process must be visible to the next).
+func coordinationDir(root string) string {
+	return filepath.Join(root, ".kern", "coordination")
+}
+
+func claimsPath(root string) string {
+	return filepath.Join(coordinationDir(root), "claims.json")
+}
+
+// loadClaims reads the persisted claims for a root. A missing or corrupt
+// file yields an empty set (a fresh workspace has no claims).
+func loadClaims(root string) map[string]ResourceClaim {
+	claims := map[string]ResourceClaim{}
+	b, err := os.ReadFile(claimsPath(root))
+	if err != nil {
+		return claims
+	}
+	if err := json.Unmarshal(b, &claims); err != nil {
+		return map[string]ResourceClaim{}
+	}
+	if claims == nil {
+		claims = map[string]ResourceClaim{}
+	}
+	return claims
+}
+
+// saveClaims atomically writes the in-memory claims of a root to disk (tmp
+// file + rename, so a crash mid-write never leaves a truncated claims.json).
+// Best-effort, matching the existing handoff write style.
+func saveClaims(root string) {
+	dir := coordinationDir(root)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return
+	}
+	b, err := json.MarshalIndent(activeClaims[root], "", "  ")
+	if err != nil {
+		return
+	}
+	tmp := claimsPath(root) + ".tmp"
+	if err := os.WriteFile(tmp, b, 0o644); err != nil {
+		return
+	}
+	_ = os.Rename(tmp, claimsPath(root))
+}
+
+// loadHandoffs reads the on-disk handoff records (hf-*.json) for a root so
+// status/inbox in a fresh process still count handoffs made earlier.
+func loadHandoffs(root string) []AgentHandoff {
+	var handoffs []AgentHandoff
+	dir := coordinationDir(root)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasPrefix(e.Name(), "hf-") || !strings.HasSuffix(e.Name(), ".json") {
+			continue
+		}
+		b, err := os.ReadFile(filepath.Join(dir, e.Name()))
+		if err != nil {
+			continue
+		}
+		var h AgentHandoff
+		if json.Unmarshal(b, &h) == nil && h.ID != "" {
+			handoffs = append(handoffs, h)
+		}
+	}
+	return handoffs
+}
+
 func (s *Server) handleAgentCoordination(ctx context.Context, args map[string]any) (string, error) {
 	action := strings.ToLower(strings.TrimSpace(argString(args, "action")))
 	if action == "" {
@@ -47,19 +123,24 @@ func (s *Server) handleAgentCoordination(ctx context.Context, args map[string]an
 	defer coordMu.Unlock()
 
 	if _, ok := activeHandoffs[root]; !ok {
-		activeHandoffs[root] = []AgentHandoff{}
+		activeHandoffs[root] = loadHandoffs(root)
 	}
 	if _, ok := activeClaims[root]; !ok {
-		activeClaims[root] = map[string]ResourceClaim{}
+		activeClaims[root] = loadClaims(root)
 	}
 
 	now := time.Now().UTC()
 
 	// Clean up expired claims
+	cleaned := false
 	for res, c := range activeClaims[root] {
 		if now.After(c.ExpiresAt) {
 			delete(activeClaims[root], res)
+			cleaned = true
 		}
+	}
+	if cleaned {
+		saveClaims(root)
 	}
 
 	agentID := argString(args, "agent_id")
@@ -176,6 +257,7 @@ func (s *Server) coordClaim(root string, now time.Time, agentID, format string, 
 		ExpiresAt: expiresAt,
 	}
 	activeClaims[root][resource] = claim
+	saveClaims(root)
 
 	if format == "json" {
 		data, _ := json.MarshalIndent(map[string]any{
@@ -204,6 +286,7 @@ func (s *Server) coordRelease(root, agentID string, args map[string]any) (string
 		return "", fmt.Errorf("kern_agent_coordination: cannot release resource %q held by %q (caller is %q)", resource, existing.AgentID, agentID)
 	}
 	delete(activeClaims[root], resource)
+	saveClaims(root)
 	return fmt.Sprintf("🔓 Resource %q released successfully", resource), nil
 }
 
@@ -233,20 +316,28 @@ func (s *Server) coordInbox(root, agentID, format string) (string, error) {
 
 func (s *Server) coordStatus(root string, now time.Time, format string) (string, error) {
 
+	// Read the persisted state so status in a fresh process reflects claims
+	// and handoffs made by earlier processes (and vice versa), not just the
+	// in-memory view of the current one.
+	claims := loadClaims(root)
+	handoffs := loadHandoffs(root)
+
 	var claimList []ResourceClaim
-	for _, c := range activeClaims[root] {
-		claimList = append(claimList, c)
+	for _, c := range claims {
+		if now.Before(c.ExpiresAt) {
+			claimList = append(claimList, c)
+		}
 	}
 	if format == "json" {
 		data, _ := json.MarshalIndent(map[string]any{
 			"claims":   claimList,
-			"handoffs": activeHandoffs[root],
+			"handoffs": handoffs,
 		}, "", "  ")
 		return string(data), nil
 	}
 	var sb strings.Builder
 	sb.WriteString("## Multi-Agent Workspace Coordination\n\n")
-	sb.WriteString(fmt.Sprintf("**Active Claims:** %d | **Total Handoffs:** %d\n\n", len(claimList), len(activeHandoffs[root])))
+	sb.WriteString(fmt.Sprintf("**Active Claims:** %d | **Total Handoffs:** %d\n\n", len(claimList), len(handoffs)))
 	if len(claimList) > 0 {
 		sb.WriteString("### 🔒 Claimed Resources\n")
 		for _, c := range claimList {
@@ -255,9 +346,9 @@ func (s *Server) coordStatus(root string, now time.Time, format string) (string,
 		}
 		sb.WriteString("\n")
 	}
-	if len(activeHandoffs[root]) > 0 {
+	if len(handoffs) > 0 {
 		sb.WriteString("### 📬 Active Handoffs\n")
-		for _, h := range activeHandoffs[root] {
+		for _, h := range handoffs {
 			sb.WriteString(fmt.Sprintf("- **%s** (%s ➡️ %s): %s [%s]\n",
 				h.ID, h.FromAgent, h.ToAgent, h.Notes, h.Status))
 		}

@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -38,6 +39,22 @@ func init() {
 	version = kversion.Adopt(version)
 }
 
+// isLoopbackAddr reports whether the listen address binds only the loopback
+// interface. A bare ":port" or an explicit non-loopback host binds all
+// interfaces and requires KERN_AUTH_TOKEN (P2-10). A parse failure is
+// treated as non-loopback (fail closed).
+func isLoopbackAddr(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return false
+	}
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
 func main() {
 	root := flag.String("root", ".", "project root to serve (single-project mode)")
 	addr := flag.String("addr", "127.0.0.1:8090", "listen address")
@@ -52,6 +69,15 @@ func main() {
 	if *enterprise {
 		runEnterprise(*addr)
 		return
+	}
+	// P2-10: the single-project console defaults to a loopback bind (trusted
+	// local). Binding a non-loopback address without KERN_AUTH_TOKEN exposes
+	// state-mutating endpoints (/v1/memory, /api/approvals/*) and LLM work to
+	// the network unauthenticated — refuse to start (same fail-closed posture
+	// as enterprise mode and kern-mcp --http).
+	if !isLoopbackAddr(*addr) && os.Getenv("KERN_AUTH_TOKEN") == "" {
+		fmt.Fprintln(os.Stderr, "kern-server: refusing to bind "+*addr+" (non-loopback) without KERN_AUTH_TOKEN — unauthenticated RCE surface; set KERN_AUTH_TOKEN or bind 127.0.0.1")
+		os.Exit(1)
 	}
 
 	app, err := web.New(*root)

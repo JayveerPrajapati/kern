@@ -14,8 +14,10 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net"
 	"net/http"
 	"os"
@@ -251,6 +253,10 @@ func startHTTP(s *Server) *httpClient {
 		headers: map[string]string{
 			"Content-Type": "application/json",
 			"Accept":       "application/json, text/event-stream",
+			// MCP-Protocol-Version is mandatory on streamable-http POSTs;
+			// spec-compliant servers reject requests without it (kern's own
+			// server answers HTTP 412 "unsupported MCP protocol version").
+			"MCP-Protocol-Version": ProtocolVersion,
 		},
 	}
 }
@@ -270,8 +276,9 @@ func startUnix(s *Server) *httpClient {
 			Timeout:   60 * time.Second,
 		},
 		headers: map[string]string{
-			"Content-Type": "application/json",
-			"Accept":       "application/json, text/event-stream",
+			"Content-Type":         "application/json",
+			"Accept":               "application/json, text/event-stream",
+			"MCP-Protocol-Version": ProtocolVersion,
 		},
 	}
 }
@@ -416,7 +423,7 @@ func LoadConfig(root string) ([]Server, error) {
 	path := filepath.Join(root, filepath.FromSlash(DefaultConfigPath))
 	data, err := os.ReadFile(path)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, fs.ErrNotExist) {
 			return nil, nil
 		}
 		return nil, err

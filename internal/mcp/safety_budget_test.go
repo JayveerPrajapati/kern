@@ -14,12 +14,6 @@ import (
 // tests. It executes against the package dir (server.go exists there).
 var compactArgs = map[string]any{"path": "server.go"}
 
-// TestSafetyBudgetDeniesWhenExceeded verifies the AUD-10 choke-point wiring:
-// once the gateway budget is exhausted, a tool call is denied with the
-// structured "safety budget exceeded ... tool call denied" error instead of
-// executing, while under-budget calls pass through untouched. runTool is
-// called directly (not via Serve) so the two calls are sequential and the
-// assertion is deterministic.
 func TestSafetyBudgetDeniesWhenExceeded(t *testing.T) {
 	s := NewServer(strings.NewReader(""), &bytes.Buffer{})
 	s.roots = []string{"/"}
@@ -95,10 +89,6 @@ func TestSafetyBudgetNilGatewayNoop(t *testing.T) {
 	}
 }
 
-// TestSafetyBudgetWiredOnlyWhenEnvOptIn verifies NewServer leaves the
-// safety budget unwired by default (long-lived servers must not hit a
-// process-wide cap; per-task budgets are enforced in the loop) and wires it
-// when any KERN_SAFETY_BUDGET_* variable is set (AUD-10).
 func TestSafetyBudgetWiredOnlyWhenEnvOptIn(t *testing.T) {
 	budgetVars := []string{
 		"KERN_SAFETY_BUDGET_MAX_TOOL_CALLS", "KERN_SAFETY_BUDGET_MAX_FILES",

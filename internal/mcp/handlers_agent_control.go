@@ -27,6 +27,21 @@ func (s *Server) handleAgentMessage(ctx context.Context, args map[string]any) (s
 	if from == "" {
 		from = "model"
 	}
+	taskID := argString(args, "task_id")
+	// Task validation: a task_id naming an unknown task is a caller error —
+	// fail instead of silently creating a handoff that references a task
+	// that does not exist. Mirrors the CLI agent-message check and uses the
+	// same TaskService lookup kern_agent_interrupt performs.
+	if taskID != "" {
+		p, err := s.platformFor(ctx, root)
+		if err != nil {
+			return "", err
+		}
+		ts := app.NewTaskService(p, nil)
+		if _, ok := ts.Get(taskID); !ok {
+			return "", fmt.Errorf("task %q not found", taskID)
+		}
+	}
 
 	coordMu.Lock()
 	if _, ok := activeHandoffs[root]; !ok {
@@ -42,8 +57,8 @@ func (s *Server) handleAgentMessage(ctx context.Context, args map[string]any) (s
 		"to_agent":   to,
 		"notes":      notes,
 	}
-	if v := argString(args, "task_id"); v != "" {
-		send["task_id"] = v
+	if taskID != "" {
+		send["task_id"] = taskID
 	}
 	return s.coordHandoff(root, time.Now().UTC(), from, "json", send)
 }

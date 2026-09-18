@@ -50,6 +50,10 @@ func TestNamedToolRiskLevels(t *testing.T) {
 		"kern_plan":    RiskMedium,
 		"kern_impact":  RiskMedium,
 		"kern_verify":  RiskMedium,
+		// medium — contained state mutation (D1 F1 reclassification: these
+		// were low but mutate state, so they are never cacheable)
+		"kern_note":                  RiskMedium,
+		"kern_register_host_sampler": RiskMedium,
 		// low — read-only tools
 		"kern_search":       RiskLow,
 		"kern_explore":      RiskLow,

@@ -101,12 +101,6 @@ func TestApproveToolNotFound(t *testing.T) {
 	}
 }
 
-// TestApproveToolAdvancesGatedTask pins the approve-surface symmetry fix
-// (F-026): a kern_approve on a workflow approval must advance the gated task
-// parked at WAITING_FOR_APPROVAL exactly like `kern approve` does — the task
-// state flips immediately, the tool result carries the CLI's resume hint, and
-// the gate-crossing transition lands in the audit chain. Before the fix the
-// MCP surface only decided the approval, leaving the task parked.
 func TestApproveToolAdvancesGatedTask(t *testing.T) {
 	root := mcpProject(t)
 
@@ -153,7 +147,6 @@ func TestApproveToolAdvancesGatedTask(t *testing.T) {
 		t.Fatalf("state = %q, want APPROVED after MCP approve", got.State)
 	}
 
-	// F-025: the gate-crossing transition must be in the persisted audit chain.
 	entries, err := fresh.AuditEntriesForTask(task.ID)
 	if err != nil {
 		t.Fatalf("AuditEntriesForTask: %v", err)

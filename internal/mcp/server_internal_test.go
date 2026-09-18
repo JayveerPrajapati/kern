@@ -192,3 +192,64 @@ func TestArgBool(t *testing.T) {
 		}
 	}
 }
+
+// TestValidateStringArgs pins the D6 string-argument coercion contract
+// enforced at dispatch: scalar string-typed args accept string / JSON number
+// / bool, while null, object and array values are rejected with an error
+// naming the argument, the tool and the expected type. Undeclared keys and
+// non-string-typed props pass through untouched; unknown tools validate
+// nothing.
+func TestValidateStringArgs(t *testing.T) {
+	// kern_search declares query/root/limit/semantic as strings.
+	rejectCases := []struct {
+		name string
+		args map[string]any
+		want string // substring expected in the error
+	}{
+		{name: "null", args: map[string]any{"query": nil}, want: `argument "query" for tool kern_search: expected a string, got null`},
+		{name: "object", args: map[string]any{"query": map[string]any{}}, want: `argument "query" for tool kern_search: expected a string, got an object`},
+		{name: "array any", args: map[string]any{"query": []any{"x"}}, want: `argument "query" for tool kern_search: expected a string, got an array`},
+		{name: "array string", args: map[string]any{"query": []string{"x"}}, want: `argument "query" for tool kern_search: expected a string, got an array`},
+		{name: "nested object", args: map[string]any{"query": map[string]any{"a": "b"}}, want: `argument "query" for tool kern_search: expected a string, got an object`},
+	}
+	for _, tc := range rejectCases {
+		if err := validateStringArgs("kern_search", tc.args); err == nil {
+			t.Errorf("%s: validateStringArgs(kern_search, %v) = nil, want error containing %q", tc.name, tc.args, tc.want)
+		} else if !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: error %q does not contain %q", tc.name, err, tc.want)
+		}
+	}
+
+	acceptCases := []struct {
+		name string
+		args map[string]any
+	}{
+		{name: "plain string", args: map[string]any{"query": "Greet"}},
+		{name: "JSON number coerced to string", args: map[string]any{"query": 12345.0}},
+		{name: "Go-API int coerced to string", args: map[string]any{"query": 12345}},
+		{name: "bool for strProp flag", args: map[string]any{"query": "Greet", "semantic": true}},
+		{name: "string bool flag", args: map[string]any{"query": "Greet", "semantic": "true"}},
+		{name: "absent optional", args: map[string]any{"query": "Greet"}},
+		{name: "undeclared key untouched", args: map[string]any{"query": "Greet", "max_output": 100}},
+	}
+	for _, tc := range acceptCases {
+		if err := validateStringArgs("kern_search", tc.args); err != nil {
+			t.Errorf("%s: validateStringArgs(kern_search, %v) = %v, want nil", tc.name, tc.args, err)
+		}
+	}
+
+	// Non-string-typed props are out of scope: kern_retrieve's integer/boolean
+	// props must pass through even with non-scalar values (their handlers fail
+	// loud via atoiArg instead).
+	if err := validateStringArgs("kern_retrieve", map[string]any{"limit": map[string]any{}}); err != nil {
+		t.Errorf("non-string prop with object value should pass through, got %v", err)
+	}
+	if err := validateStringArgs("kern_retrieve", map[string]any{"with_freshness": []any{"x"}}); err != nil {
+		t.Errorf("non-string prop with array value should pass through, got %v", err)
+	}
+
+	// Unknown tool names validate nothing.
+	if err := validateStringArgs("kern_no_such_tool", map[string]any{"query": map[string]any{}}); err != nil {
+		t.Errorf("unknown tool should validate nothing, got %v", err)
+	}
+}

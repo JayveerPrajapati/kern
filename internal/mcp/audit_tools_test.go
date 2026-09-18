@@ -78,7 +78,7 @@ func TestToolCallsAudited(t *testing.T) {
 func TestAuditToolCallBlockedResult(t *testing.T) {
 	t.Setenv("KERN_MCP_AUDIT_DIR", t.TempDir())
 	s := NewServer(strings.NewReader(""), &bytes.Buffer{})
-	s.auditToolCall("kern_arch", nil, nil, false)
+	s.auditToolCall("kern_arch", nil, nil, false, false)
 	entries := readAuditEntries(t)
 	if len(entries) != 1 {
 		t.Fatalf("expected exactly one audit entry, got %d", len(entries))
@@ -94,7 +94,7 @@ func TestAuditToolCallBlockedResult(t *testing.T) {
 func TestAuditToolCallNilArgsSafe(t *testing.T) {
 	t.Setenv("KERN_MCP_AUDIT_DIR", t.TempDir())
 	s := NewServer(strings.NewReader(""), &bytes.Buffer{})
-	s.auditToolCall("kern_search", nil, nil, true)
+	s.auditToolCall("kern_search", nil, nil, true, false)
 	for _, e := range readAuditEntries(t) {
 		if e["AgentID"] != "default" {
 			t.Fatalf("expected default agent identity, got %+v", e)

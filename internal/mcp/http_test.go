@@ -17,8 +17,6 @@ import (
 
 	"github.com/JayveerPrajapati/kern/internal/config"
 	"github.com/JayveerPrajapati/kern/internal/docsearch"
-	"github.com/JayveerPrajapati/kern/internal/lock"
-	"github.com/JayveerPrajapati/kern/internal/project"
 )
 
 // ageRE matches the relative-age stamp ("built 3s ago") embedded in index
@@ -27,22 +25,11 @@ import (
 var ageRE = regexp.MustCompile(`built \d+s ago`)
 
 func newHTTPServer() *Server {
-	// Mirrors the production ServeHTTPContext constructor: every map/channel
-	// field must be initialized or an index-loading tool panics ("assignment
-	// to entry in nil map" in Server.commit / deadlocks on a nil sem). Keep in
-	// sync with ServeHTTPContext in http.go.
-	return &Server{
-		sem:       make(chan struct{}, 8),
-		locks:     map[string]*lock.Lock{},
-		inflight:  map[string]context.CancelFunc{},
-		sessions:  map[string]*project.Session{},
-		transport: "http",
-		roots:     defaultWorkspaceRoots(),
-		gate:      NewGateFromEnv(),
-		commits:   map[string]string{},
-		watchStop: make(chan struct{}),
-		watchDone: make(chan struct{}),
-	}
+	// Exercises the production constructor path (newServerCore) so tests
+	// cover the exact field set the HTTP transport serves with — svc,
+	// allowlist, and samplingSlots included. The pre-fix hand-rolled literal
+	// skipped them, panicking svc-backed tools and ignoring KERN_TOOLS.
+	return newServerCore("http")
 }
 
 func doHTTP(t *testing.T, s *Server, method, ctype, body string, headers map[string]string) *httptest.ResponseRecorder {
@@ -287,29 +274,6 @@ func TestHandleHTTPDocFetchEndToEnd(t *testing.T) {
 	}
 }
 
-func TestIsLocalhostOrigin(t *testing.T) {
-	cases := []struct {
-		origin string
-		want   bool
-	}{
-		{"", true},
-		{"http://localhost:5173", true},
-		{"http://127.0.0.1:8080", true},
-		{"https://[::1]:9999", true},
-		{"https://evil.example", false},
-		{"not a url", false},
-	}
-	for _, c := range cases {
-		req := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(""))
-		if c.origin != "" {
-			req.Header.Set("Origin", c.origin)
-		}
-		if got := isLocalhostOrigin(req); got != c.want {
-			t.Errorf("isLocalhostOrigin(%q) = %v, want %v", c.origin, got, c.want)
-		}
-	}
-}
-
 // TestHandleHTTPIndexToolNoPanic is a regression test for the HTTP transport
 // panic where an index-loading tool call crashed with "assignment to entry in
 // nil map" in Server.commit (s.commits was nil because the HTTP constructor
@@ -447,3 +411,47 @@ func TestDaemonModeServesMultipleClients(t *testing.T) {
 		t.Fatalf("clients disagree on the shared index:\nA: %v\nB: %v", textA, textB)
 	}
 }
+
+// TestHandleHTTPServiceBackedTool verifies the HTTP transport serves
+// svc-backed tools (kern_memory_add/list). Before the newServerCore fix the
+// HTTP Server was built via a struct literal that left svc nil, panicking
+// these handlers and killing the connection.
+func TestHandleHTTPServiceBackedTool(t *testing.T) {
+	// The gate fails closed to the process cwd; the temp dir is outside it.
+	t.Setenv("KERN_MCP_NO_CONFINE", "1")
+	dir := t.TempDir()
+	t.Setenv("KERN_ROOTS", dir)
+	s := newHTTPServer()
+	add := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"kern_memory_add","arguments":{"lesson":"http transport svc-backed regression guard","root":` + strconv_quote(dir) + `}}}`
+	rr := doHTTP(t, s, http.MethodPost, "application/json", add, nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("add: status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+	list := `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"kern_memory_list","arguments":{"root":` + strconv_quote(dir) + `}}}`
+	rr = doHTTP(t, s, http.MethodPost, "application/json", list, nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("list: status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "http transport svc-backed regression guard") {
+		t.Fatalf("list: lesson missing from response: %s", rr.Body.String())
+	}
+}
+
+// TestHandleHTTPAllowlistEnforced verifies KERN_TOOLS gates execution on the
+// HTTP transport, not just advertisement. Before the newServerCore fix the
+// HTTP Server's nil allowlist made toolAllowed pass everything.
+func TestHandleHTTPAllowlistEnforced(t *testing.T) {
+	t.Setenv("KERN_TOOLS", "kern_search")
+	s := newHTTPServer()
+	body := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"kern_memory_list","arguments":{}}}`
+	rr := doHTTP(t, s, http.MethodPost, "application/json", body, nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "not allowed") {
+		t.Fatalf("expected KERN_TOOLS denial, got: %s", rr.Body.String())
+	}
+}
+
+// strconv_quote JSON-quotes dir without pulling fmt in twice.
+func strconv_quote(s string) string { return `"` + s + `"` }

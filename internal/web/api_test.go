@@ -85,10 +85,6 @@ func TestV1TaskNotFound(t *testing.T) {
 	}
 }
 
-// TestV1AnalyzeMissingSymbol (F-030): POST /v1/analyze with a change naming a
-// symbol that does not exist in the index must return 404 with the real
-// message and candidate hints in the body — not a masked 500 "internal error"
-// (writeError hides 5xx messages).
 func TestV1AnalyzeMissingSymbol(t *testing.T) {
 	app := newTestApp(t)
 	rec := postJSON(t, app, "/v1/analyze", `{"change":"Add a SaveUser function to the service layer"}`)
@@ -107,8 +103,6 @@ func TestV1AnalyzeMissingSymbol(t *testing.T) {
 	}
 }
 
-// TestV1AnalyzeNoSymbolIdentified (F-030): a change with no identifiable
-// symbol at all is a client error (400), not a 500.
 func TestV1AnalyzeNoSymbolIdentified(t *testing.T) {
 	app := newTestApp(t)
 	rec := postJSON(t, app, "/v1/analyze", `{"change":"!!! ??? ###"}`)
@@ -124,8 +118,6 @@ func TestV1AnalyzeNoSymbolIdentified(t *testing.T) {
 	}
 }
 
-// TestV1AnalyzeValidSymbolStill200 (F-030): the 200 path is unchanged — a
-// change naming a real indexed symbol resolves normally.
 func TestV1AnalyzeValidSymbolStill200(t *testing.T) {
 	app := newTestApp(t)
 	rec := postJSON(t, app, "/v1/analyze", `{"change":"helper"}`)
@@ -134,10 +126,6 @@ func TestV1AnalyzeValidSymbolStill200(t *testing.T) {
 	}
 }
 
-// TestV1GraphSymbolNameResolution (F-031): GET /v1/graph/{entity} must resolve
-// a bare SYMBOL NAME ("FindUser") to its prebuilt graph node — node IDs are
-// package-qualified ("pkg.FindUser"), so an exact-ID-only lookup 404'd every
-// indexed symbol. Unknown entities keep the 404.
 func TestV1GraphSymbolNameResolution(t *testing.T) {
 	root := t.TempDir()
 	files := map[string]string{
@@ -179,12 +167,72 @@ func TestV1GraphSymbolNameResolution(t *testing.T) {
 	}
 }
 
-// TestV1GraphUnknownEntityStill404 (F-031): a name that resolves to no node
-// keeps the 404 contract.
 func TestV1GraphUnknownEntityStill404(t *testing.T) {
 	app := newTestApp(t)
 	rec := get(t, app, "/v1/graph/NoSuchEntityAnywhere")
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404 (body: %s)", rec.Code, rec.Body.String())
+	}
+}
+
+// TestV1ExecuteInvalidPatchReturns400 pins the invalid-patch HTTP contract:
+// a garbage / non-applicable patch is a CLIENT error and must return 400 (not
+// the 500 "internal error" QA reproduced), with a message that names the
+// patch failure. The empty-patch 400 and the valid-patch 200 contracts are
+// asserted alongside so all three branches of /v1/execute stay pinned.
+func TestV1ExecuteInvalidPatchReturns400(t *testing.T) {
+	t.Setenv("KERN_ALLOW_EXEC", "1") // Execute runs under the governance exec gate
+	app := newTestApp(t)
+
+	// 1. Empty patch → 400 "patch is required" (pre-existing contract).
+	rec := postJSON(t, app, "/v1/execute", `{"patch": ""}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("POST /v1/execute empty patch = %d, want 400 (body: %s)", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "patch is required") {
+		t.Fatalf("empty patch body = %s, want %q", rec.Body.String(), "patch is required")
+	}
+
+	// 2. Garbage patch → 400 (NOT 500), message names the patch failure.
+	rec = postJSON(t, app, "/v1/execute", `{"patch": "this is not a patch at all"}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("POST /v1/execute garbage patch = %d, want 400 (body: %s)", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "patch") {
+		t.Fatalf("garbage patch body = %s, want it to mention the patch failure", rec.Body.String())
+	}
+
+	// 3. A real patch -> 200 with the diff. json.Marshal escapes the literal
+	// tabs in the patch so the JSON body round-trips them correctly (raw tabs
+	// are invalid inside JSON strings).
+	patch := `diff --git a/main.go b/main.go
+--- a/main.go
++++ b/main.go
+@@ -1,5 +1,5 @@
+ package main
+
+ func helper() string {
+-	return "h"
++	return "hh"
+ }
+`
+	bodyBytes, err := json.Marshal(struct {
+		Patch string `json:"patch"`
+	}{Patch: patch})
+	if err != nil {
+		t.Fatalf("marshal patch body: %v", err)
+	}
+	rec = postJSON(t, app, "/v1/execute", string(bodyBytes))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("POST /v1/execute valid patch = %d, want 200 (body: %s)", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Diff string `json:"diff"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode valid-patch response: %v (body: %s)", err, rec.Body.String())
+	}
+	if !strings.Contains(body.Diff, "main.go") {
+		t.Fatalf("valid-patch diff = %q, want it to mention main.go", body.Diff)
 	}
 }

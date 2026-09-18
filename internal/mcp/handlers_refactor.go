@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 
 	"github.com/JayveerPrajapati/kern/internal/refactor"
 )
@@ -40,6 +42,32 @@ func (s *Server) handleRefactorTransaction(ctx context.Context, args map[string]
 		edits = val
 	default:
 		return "", fmt.Errorf("unsupported edits format: %T", rawEdits)
+	}
+
+	// Validate every edit before touching the sandbox: an empty path would
+	// surface as a confusing "write .: is a directory" deep inside the
+	// transaction engine, and a relative path escaping the root ("../..")
+	// would write outside the confined project tree on apply — the same
+	// confinement contract rootedPath enforces for file-reading tools.
+	absRoot, err := filepath.Abs(root)
+	if err != nil {
+		return "", fmt.Errorf("resolve root: %w", err)
+	}
+	for i := range edits {
+		if strings.TrimSpace(edits[i].Path) == "" {
+			return "", fmt.Errorf("edits[%d].path is required (each edit is {path, content} with the new complete file content)", i)
+		}
+		rel := filepath.Clean(edits[i].Path)
+		if filepath.IsAbs(rel) {
+			r, err := filepath.Rel(absRoot, rel)
+			if err != nil || strings.HasPrefix(r, "..") {
+				return "", fmt.Errorf("edits[%d].path %q is outside the project root", i, edits[i].Path)
+			}
+			rel = r
+		} else if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return "", fmt.Errorf("edits[%d].path %q escapes the project root", i, edits[i].Path)
+		}
+		edits[i].Path = rel
 	}
 
 	compileCmd := argString(args, "compile_command")

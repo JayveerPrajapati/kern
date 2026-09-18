@@ -35,10 +35,13 @@ func (s *Server) toolAudit() *governance.AuditLog {
 
 // auditToolCall appends one tamper-evident chain entry per MCP tool call —
 // executed tools (read-only included) and pre-dispatch rejections alike
-// (G-2: the chain previously recorded only firewall decisions, approvals,
+// (the chain previously recorded only firewall decisions, approvals,
 // and gated exec). Best-effort by design: an audit failure is swallowed and
-// never fails the tool call it describes.
-func (s *Server) auditToolCall(name string, args map[string]any, runErr error, executed bool) {
+// never fails the tool call it describes. cached marks a D1 cache hit: the
+// entry is tagged Policy:"tool-cache" / Reason:"served from cache" so the
+// evidence chain reflects what was actually served (F5). Result stays
+// "allowed" — no new Result value is invented.
+func (s *Server) auditToolCall(name string, args map[string]any, runErr error, executed bool, cached bool) {
 	defer func() { _ = recover() }() // the audit trail must never take a tool call down
 	agent := argString(args, "agent_id")
 	if agent == "" {
@@ -51,12 +54,17 @@ func (s *Server) auditToolCall(name string, args map[string]any, runErr error, e
 	case runErr != nil:
 		result = "error"
 	}
-	s.toolAudit().Record(governance.AuditEntry{
+	entry := governance.AuditEntry{
 		AgentID:  agent,
 		Action:   "tool_call",
 		Resource: name,
 		Approved: executed,
 		Result:   result,
 		TaskID:   argString(args, "task"),
-	})
+	}
+	if cached {
+		entry.Policy = "tool-cache"
+		entry.Reason = "served from cache"
+	}
+	s.toolAudit().Record(entry)
 }

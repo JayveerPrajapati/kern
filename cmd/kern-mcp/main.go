@@ -20,6 +20,7 @@ import (
 	"syscall"
 
 	"github.com/JayveerPrajapati/kern/internal/mcp"
+	"github.com/JayveerPrajapati/kern/internal/mcp/transport"
 	"github.com/JayveerPrajapati/kern/internal/optimize"
 	kversion "github.com/JayveerPrajapati/kern/internal/version"
 )
@@ -87,7 +88,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	if *httpAddr != "" {
-		tlsCfg := mcp.TLSOptions(*tlsCert, *tlsKey)
+		tlsCfg := transport.TLSOptions(*tlsCert, *tlsKey)
 		if err := mcp.ServeHTTPContextWithTLS(ctx, *httpAddr, tlsCfg); err != nil {
 			os.Exit(1)
 		}

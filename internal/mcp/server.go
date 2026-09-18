@@ -8,20 +8,18 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/JayveerPrajapati/kern/internal/app"
-	"github.com/JayveerPrajapati/kern/internal/config"
 	"github.com/JayveerPrajapati/kern/internal/domain"
 	"github.com/JayveerPrajapati/kern/internal/governance"
 	"github.com/JayveerPrajapati/kern/internal/index"
 	"github.com/JayveerPrajapati/kern/internal/intel"
 	"github.com/JayveerPrajapati/kern/internal/lock"
+	"github.com/JayveerPrajapati/kern/internal/mcp/catalog"
+	"github.com/JayveerPrajapati/kern/internal/mcp/doc"
 	"github.com/JayveerPrajapati/kern/internal/metrics"
 	"github.com/JayveerPrajapati/kern/internal/optimize"
 	"github.com/JayveerPrajapati/kern/internal/project"
 	"github.com/JayveerPrajapati/kern/internal/service"
 	"github.com/JayveerPrajapati/kern/internal/stats"
-	"github.com/JayveerPrajapati/kern/internal/strutil"
-	"github.com/JayveerPrajapati/kern/internal/tokenize"
-	"github.com/JayveerPrajapati/kern/internal/verify"
 	"io"
 	"os"
 	"os/exec"
@@ -31,98 +29,35 @@ import (
 	"strings"
 	"sync"
 	"time"
-	"unicode/utf8"
 )
 
+// Tool, tools and ToolNames re-export the catalog package for callers that
+// predate the catalog extraction (handlers, transports, tests, setup parity).
+type Tool = catalog.Tool
+
+// tools is the registered catalog; the alias keeps in-package references
+// (len(tools), range tools) stable while the table lives in catalog.All.
+var tools = catalog.All
+
+// ToolNames returns every registered MCP tool name (delegates to catalog).
+func ToolNames() []string { return catalog.ToolNames() }
+
+// Phase/risk/schema-version constants re-exported for the same reason.
 const (
-	protocolVersion = "2025-06-18"
-	serverName      = "kern"
-)
+	PhaseExplore = catalog.PhaseExplore
+	PhasePlan    = catalog.PhasePlan
+	PhaseEdit    = catalog.PhaseEdit
+	PhaseVerify  = catalog.PhaseVerify
+	PhaseMeta    = catalog.PhaseMeta
+	PhaseCross   = catalog.PhaseCross
 
-// instructions is the human-readable one-paragraph description of kern's
-// capabilities returned in the MCP initialize result. MCP hosts surface it
-// to users and agents. It is deliberately grounded (no hype), omits a hard
-// tool count (the catalog grows), and describes what the tools actually do.
-const instructions = "kern is a fully local-first code context engine. It makes no network calls and requires no API keys: every tool runs against a prebuilt, per-project symbol index. Its tools are deterministic code-intelligence answers — no LLM in the loop — covering symbol lookup, call graphs, impact and blast radius analysis, freshness proofs, governance and approvals, and evidence bundles. Results carry provenance such as file:line references, confidence, and freshness, so they can be independently verified."
+	RiskLow      = catalog.RiskLow
+	RiskMedium   = catalog.RiskMedium
+	RiskHigh     = catalog.RiskHigh
+	RiskCritical = catalog.RiskCritical
 
-// serverVersion is stamped at build time via -ldflags "-X main.version=...";
-// the binary entry points forward it through SetServerVersion. Defaults to
-// "dev" when built without ldflags so initialize still reports something sane.
-var serverVersion = "dev"
-
-// SetServerVersion overrides the version reported in the initialize response.
-// The CLI entry points call it with their ldflags-stamped main.version.
-func SetServerVersion(v string) {
-	if v != "" {
-		serverVersion = v
-	}
-}
-
-// Tool is an MCP tool definition.
-type Tool struct {
-	Name        string         `json:"name"`
-	Description string         `json:"description"`
-	InputSchema map[string]any `json:"inputSchema"`
-	// Phase tags the tool with the agent phase it belongs to (explore, plan,
-	// edit or verify). "meta" (kern_meta itself) and "cross" (phase-agnostic
-	// utilities) are always advertised regardless of the active phase; an
-	// empty phase means the tool is not phase-filtered.
-	Phase string `json:"phase,omitempty"`
-	// RiskLevel tags the tool with the risk it carries when called (low,
-	// medium, high or critical; see Risk* constants). low = read-only,
-	// medium = contained state mutation or analysis, high = security-sensitive
-	// or destructive, critical = arbitrary command execution or deployment.
-	// Governed clients use this to gate tool access (P0-004).
-	RiskLevel string `json:"riskLevel,omitempty"`
-	// SchemaVersion tags the tool's input/output contract with a semantic
-	// version (P2-003). Every registration carries it; a bump signals
-	// clients that tool contracts changed and they should re-validate
-	// before calling. Governed clients use this for versioned tool
-	// contracts, negotiating during initialize (see negotiateSchemaVersion).
-	SchemaVersion string `json:"schemaVersion,omitempty"`
-}
-
-// Agent phases for phase-aware tool routing (P1.2). Each phase exposes a
-// focused shortlist of tools instead of the full catalog; kern_meta routes
-// within whatever tools are available. Tools tagged PhaseMeta or PhaseCross
-// are always advertised regardless of the active KERN_MCP_PHASE.
-const (
-	PhaseExplore = "explore"
-	PhasePlan    = "plan"
-	PhaseEdit    = "edit"
-	PhaseVerify  = "verify"
-	PhaseMeta    = "meta"
-	PhaseCross   = "cross"
-)
-
-// Tool risk levels for risk-aware tool metadata (P0-004). RiskLevel tags each
-// registered tool with the blast radius of calling it: RiskLow for read-only
-// tools, RiskMedium for contained state mutation or analysis, RiskHigh for
-// security-sensitive or destructive operations, and RiskCritical for arbitrary
-// command execution or deployment. Governed clients can gate tool access on
-// these levels; every tool in the catalog must carry one.
-const (
-	RiskLow      = "low"
-	RiskMedium   = "medium"
-	RiskHigh     = "high"
-	RiskCritical = "critical"
-)
-
-// Tool schema versions for versioned tool contracts (P2-003). SchemaVersion
-// tags every registered tool with the version of its input/output contract;
-// clients negotiate the schema version they speak during initialize and the
-// server honors a supported request verbatim (falling back to the current
-// catalog version otherwise). Bump SchemaVersionCurrent — and register the
-// new value in supportedSchemaVersions — whenever a tool's contract changes.
-const (
-	// SchemaVersionV1 is the initial tool schema contract version: every
-	// tool registration carries it, and all input/response shapes are
-	// stable within it.
-	SchemaVersionV1 = "1.0.0"
-
-	// SchemaVersionCurrent is the schema version the server serves by
-	// default and the version new tool registrations must carry.
-	SchemaVersionCurrent = SchemaVersionV1
+	SchemaVersionV1      = catalog.SchemaVersionV1
+	SchemaVersionCurrent = catalog.SchemaVersionCurrent
 )
 
 // supportedSchemaVersions lists every tool schema contract version the
@@ -176,15 +111,6 @@ func negotiateSchemaVersion(requested string) string {
 // directly regardless of the phase setting. This is by design so kern_meta can
 // route to unadvertised sub-tools. KERN_MCP_PHASE is NOT a security boundary —
 // for real per-phase tool restriction, use the KERN_TOOLS allowlist.
-
-// ToolNames returns every registered MCP tool name.
-func ToolNames() []string {
-	out := make([]string, len(tools))
-	for i, t := range tools {
-		out[i] = t.Name
-	}
-	return out
-}
 
 // parseAllowlist reads the KERN_TOOLS allowlist from the environment. A
 // comma-separated list restricts which tools the server exposes and executes;
@@ -460,32 +386,6 @@ func (s *Server) filteredTools() []Tool {
 	return s.filtered
 }
 
-func schema(props map[string]any, required []string) map[string]any {
-	s := map[string]any{
-		"type":       "object",
-		"properties": props,
-	}
-	if len(required) > 0 {
-		s["required"] = required
-	}
-	return s
-}
-
-func strProp(desc string) map[string]any {
-	return map[string]any{"type": "string", "description": desc}
-}
-
-// enumProp is a string property constrained to a closed vocabulary whose
-// values the server validates (or dispatches on) — e.g. kern_meta's phase
-// (explore|plan|edit|verify) and the whatif/impact change kinds. Declaring
-// the enum lets strict MCP clients constrain generation at the source
-// instead of discovering valid values by trial and error. Use it ONLY for
-// genuinely closed vocabularies: open-ended params (free-form presets,
-// registry-extensible names, language overrides) must stay strProp.
-func enumProp(desc string, values ...string) map[string]any {
-	return map[string]any{"type": "string", "description": desc, "enum": values}
-}
-
 // Server handles MCP requests over a stdio stream or HTTP.
 type Server struct {
 	in        io.Reader // raw stdio reader, used to rebuild the scanner after an oversized line
@@ -539,7 +439,7 @@ type Server struct {
 	// printed once per root instead of on every stale rebuild.
 	indexedRoots sync.Map
 	// audit records every executed (and pre-dispatch-rejected) MCP tool
-	// call into the project's tamper-evident audit chain (G-2); auditMu
+	// call into the project's tamper-evident audit chain; auditMu
 	// guards toolAudit's lazy initialization.
 	audit   *governance.AuditLog
 	auditMu sync.Mutex
@@ -582,6 +482,23 @@ type Server struct {
 	watchMu      sync.Mutex
 	watchBusy    bool
 	watchStopped bool
+	// Host-model sampling (host agent delegation): when a stdio client
+	// declares sampling capability at initialize, the server registers an
+	// LLM host sampler (llm.RegisterHostSamplerFor, keyed by samplerKey) whose
+	// Generate performs an MCP sampling/createMessage round-trip to the
+	// connected host — the last-resort leg of the auto LLM chain. Explicit
+	// command samplers (kern_register_host_sampler) register under their own
+	// keys (default: this server's slot), so several agents/repos can coexist
+	// without clobbering each other; every registered sampler is tried in
+	// registration order. samplingSlots maps key -> disposer; samplingMu
+	// guards it plus the pending correlation map and request counter.
+	samplingMu      sync.Mutex
+	samplingSeq     int64
+	samplingPending map[string]chan samplingReply
+	samplingSlots   map[string]func()
+	samplingHost    bool // this server's own slot has a sampler (MCP sampling or command)
+	samplingCapable bool
+	samplerKey      string
 }
 
 // WithPreToolHook registers a pre-tool-use hook. NewServer wires the
@@ -691,16 +608,28 @@ func defaultConcurrency() int {
 	return 32
 }
 
-// NewServer returns a *Server wired to the given reader/writer.
-func NewServer(in io.Reader, out io.Writer) *Server {
-	sc := bufio.NewScanner(in)
-	sc.Buffer(make([]byte, 64<<20), 64<<20)
-	s := &Server{in: in, out: out, sem: make(chan struct{}, defaultConcurrency()), locks: map[string]*lock.Lock{}, inflight: map[string]context.CancelFunc{}, sessions: map[string]*project.Session{}, svc: service.New(), transport: "stdio", roots: defaultWorkspaceRoots(), gate: confinementGate(), commits: map[string]string{}, allowlist: parseAllowlist(), watchStop: make(chan struct{}), watchDone: make(chan struct{})}
-	// P0.1: register the built-in default agent so calls without an explicit
+// newServerCore constructs the transport-independent core of a Server: the
+// shared service layer, the KERN_TOOLS allowlist, the sampling slots, the
+// confinement gate wiring, the opt-in safety-budget gateway, and
+// host-sampler registration. Both transports (stdio NewServer and HTTP
+// ServeHTTPContextWithTLS) must build through it — the HTTP path previously
+// hand-rolled its own struct literal, silently skipping
+// svc/allowlist/samplerKey/samplingSlots, which made svc-backed tools
+// (memory, security) panic and KERN_TOOLS a no-op over HTTP.
+func newServerCore(transport string) *Server {
+	// Inject the live tool catalog into the diff-gate drift checks explicitly
+	// at server construction —
+	// never via init(). cli (which cannot import mcp) reads it through
+	// diffgate.ToolInfos() when building the diff-gate check list; a binary
+	// that never constructs a server (e.g. a pure `kern diff-gate` CLI run)
+	// is wired in cmd/kern main.
+	catalog.WithDiffgateTools()
+	s := &Server{sem: make(chan struct{}, defaultConcurrency()), locks: map[string]*lock.Lock{}, inflight: map[string]context.CancelFunc{}, sessions: map[string]*project.Session{}, svc: service.New(), transport: transport, roots: defaultWorkspaceRoots(), gate: confinementGate(), commits: map[string]string{}, allowlist: parseAllowlist(), watchStop: make(chan struct{}), watchDone: make(chan struct{}), samplerKey: samplerKeyFor(), samplingSlots: map[string]func(){}}
+	// register the built-in default agent so calls without an explicit
 	// agent_id are governed (cwd-scoped) instead of raw. KERN_MCP_PERMISSIVE=1
 	// remains the explicit opt-out that restores raw mode.
 	governance.EnsureDefaultAgent()
-	// AUD-10: the safety-budget ToolGateway is wired at construction only
+	// the safety-budget ToolGateway is wired at construction only
 	// when the operator opts in via at least one KERN_SAFETY_BUDGET_* env var.
 	// Without opt-in the server stays budget-free (byte-for-byte legacy
 	// behavior): per-task budgets are already enforced inside the loop, and a
@@ -721,6 +650,30 @@ func NewServer(in io.Reader, out io.Writer) *Server {
 	if s.gate != nil {
 		s.preTool = s.gate.Check
 	}
+	// Host model delegation for hosts that do not announce MCP sampling
+	// (e.g. opencode): KERN_HOST_SAMPLER_CMD self-registers a command
+	// sampler at startup — the auto LLM chain's host leg then shells the
+	// command per generation. The command may be a non-interactive agent
+	// invocation such as `opencode run`. KERN_HOST_SAMPLER_TIMEOUT (seconds)
+	// bounds each call; KERN_HOST_SAMPLER_KEY namespaces the registration.
+	if cmd := os.Getenv("KERN_HOST_SAMPLER_CMD"); strings.TrimSpace(cmd) != "" {
+		timeout := time.Duration(0)
+		if v := os.Getenv("KERN_HOST_SAMPLER_TIMEOUT"); v != "" {
+			if secs, err := strconv.Atoi(v); err == nil && secs > 0 {
+				timeout = time.Duration(secs) * time.Second
+			}
+		}
+		key := os.Getenv("KERN_HOST_SAMPLER_KEY")
+		_, _ = s.registerCommandSampler(cmd, timeout, key)
+	}
+	return s
+}
+
+// NewServer returns a *Server wired to the given reader/writer.
+func NewServer(in io.Reader, out io.Writer) *Server {
+	s := newServerCore("stdio")
+	s.in = in
+	s.out = out
 	return s
 }
 
@@ -735,119 +688,17 @@ func confinementGate() *Gate {
 	return NewGateFromEnv()
 }
 
-// defaultWorkspaceRoots returns the roots tools may target: KERN_ROOTS (or
-// mcp.roots in .kern/config.json) when set, else the startup directory. Every
-// tool root/dir is confined to these.
-func defaultWorkspaceRoots() []string {
-	var roots []string
-	for _, r := range config.StringsSplit("", "KERN_ROOTS", "mcp.roots", nil, func(s string) []string {
-		return strings.FieldsFunc(s, func(r rune) bool { return r == ':' || r == ',' })
-	}) {
-		r = strings.TrimSpace(r)
-		if r != "" {
-			roots = append(roots, resolveAbs(r))
-		}
-	}
-	if len(roots) == 0 {
-		if cwd, err := os.Getwd(); err == nil {
-			roots = []string{resolveAbs(cwd)}
-		}
-	}
-	return roots
-}
-
-// resolveAbs cleans p to an absolute path.
-func resolveAbs(p string) string {
-	if abs, err := filepath.Abs(p); err == nil {
-		return filepath.Clean(abs)
-	}
-	return filepath.Clean(p)
-}
-
-// checkRootArg rejects any non-empty root/dir tool argument that resolves
-// outside the server's workspace roots. Called once per tool call before
-// dispatch so confinement cannot be forgotten for a new tool.
-func (s *Server) checkRootArg(args map[string]any) error {
-	for _, key := range []string{"root", "dir"} {
-		v := argString(args, key)
-		if v == "" {
-			continue
-		}
-		if err := s.checkWithinWorkspace(v); err != nil {
-			return fmt.Errorf("%s %q: %w", key, v, err)
-		}
-	}
-	return nil
-}
-
-// checkWithinWorkspace reports whether p (absolute or relative) resolves
-// inside one of the workspace roots, following symlinks. The resolved target
-// must be the root itself or a descendant; a symlink pointing outside is
-// rejected even though its text lives inside.
-func (s *Server) checkWithinWorkspace(p string) error {
-	real, err := realPath(p)
-	if err != nil {
-		return err
-	}
-	for _, r := range s.roots {
-		rr, err := realPath(r)
-		if err != nil {
-			return err
-		}
-		if real == rr || within(rr, real) {
-			return nil
-		}
-	}
-	var roots []string
-	for _, r := range s.roots {
-		roots = append(roots, resolveAbs(r))
-	}
-	return fmt.Errorf("outside the allowed workspace (roots: %s)", strings.Join(roots, ", "))
-}
-
-// realPath resolves p to an absolute, symlink-resolved path. For paths that do
-// not exist yet it resolves the nearest existing ancestor and re-appends the
-// remaining components.
-func realPath(p string) (string, error) {
-	abs := resolveAbs(p)
-	var rem []string
-	probe := abs
-	for {
-		real, err := filepath.EvalSymlinks(probe)
-		if err == nil {
-			if len(rem) == 0 {
-				return real, nil
-			}
-			return filepath.Join(append([]string{real}, rem...)...), nil
-		}
-		parent := filepath.Dir(probe)
-		if parent == probe {
-			return abs, fmt.Errorf("cannot resolve %q", p)
-		}
-		rem = append([]string{filepath.Base(probe)}, rem...)
-		probe = parent
-	}
-}
-
-// within reports whether child is parent or a descendant of parent. Unlike
-// verify.WithinAbs it also rejects an absolute rel path (e.g. a different
-// drive root on Windows).
-func within(parent, child string) bool {
-	if !verify.WithinAbs(parent, child) {
-		return false
-	}
-	rel, err := filepath.Rel(parent, child)
-	if err != nil {
-		return false
-	}
-	return !filepath.IsAbs(rel)
-}
-
 type rpcRequest struct {
 	JSONRPC string          `json:"jsonrpc"`
 	ID      json.RawMessage `json:"id"`
 	Method  string          `json:"method"`
 	Params  json.RawMessage `json:"params"`
+	// Result/Error capture JSON-RPC RESPONSES from the client (top-level
+	// fields). Requests never carry them; responses never carry a method.
+	// They exist so server-initiated requests (host sampling) can correlate
+	// the client's reply instead of misrouting it as a request.
+	Result json.RawMessage `json:"result"`
+	Error  json.RawMessage `json:"error"`
 }
 
 // isNotification reports whether the request is a JSON-RPC notification: it
@@ -901,6 +752,28 @@ func (s *Server) progress(ctx context.Context, id string, tool string, pct int, 
 // never arrive after "finished"; every emission is gated on ctx.Err() and the
 // writer mutex, so a progress message can never arrive after the final
 // response.
+// slowTools are the tools whose dispatch can take seconds to minutes; they
+// emit MCP progress notifications so agents see liveness instead of
+// silence during multi-second tool calls. The "slow" flag lives on the
+// per-tool catalog table (catalog.Tool.Slow in internal/mcp/catalog/tools.go)
+// — slowness is declared next to each tool definition (index/build/scan,
+// sandbox, heal, validate, refactor, repair), not in a drifting side map —
+// and this set is derived from it. Fast lookups (search, explore, graph,
+// context) emit no progress and stay silent. Tests may replace the whole map
+// to exercise the central runTool wrap. LLM-class tools (kern_analyze/
+// kern_plan) are deliberately NOT slow-flagged: their responses are captured
+// byte-exact by cross-interface tests, and the LLM legs have their own
+// latency story.
+var slowTools = func() map[string]bool {
+	m := make(map[string]bool, 16)
+	for _, t := range catalog.All {
+		if t.Slow {
+			m[t.Name] = true
+		}
+	}
+	return m
+}()
+
 func (s *Server) startProgress(ctx context.Context, id, tool string) func() {
 	done := make(chan struct{})
 	var wg sync.WaitGroup
@@ -1030,6 +903,8 @@ func (s *Server) workspaceRoots() []string {
 	return out
 }
 
+// Serve runs the MCP server loop until EOF or a write error, draining
+// in-flight tool calls before returning.
 func (s *Server) Serve() error {
 	if s.sem == nil {
 		s.sem = make(chan struct{}, defaultConcurrency())
@@ -1069,6 +944,14 @@ func (s *Server) Serve() error {
 					return err
 				}
 				continue
+			}
+			if req.Method == "" && rawPresent(req.Result) || req.Method == "" && rawPresent(req.Error) {
+				// A response to a server-initiated request (host sampling):
+				// deliver it to the waiting sampler, never dispatch it as a
+				// request.
+				if s.deliverSamplingReply(req) {
+					continue
+				}
 			}
 			if req.Method == "tools/call" {
 				// Run tools concurrently so a slow tool (build, heal, LLM
@@ -1130,6 +1013,15 @@ func (s *Server) Close() {
 		sess.Close()
 	}
 	s.mu.Unlock()
+	// Unregister every host sampler slot: no LLM call may delegate to a host
+	// that is shutting down (registrations are effects — dispose them).
+	s.samplingMu.Lock()
+	for _, d := range s.samplingSlots {
+		d()
+	}
+	s.samplingSlots = map[string]func(){}
+	s.samplingHost = false
+	s.samplingMu.Unlock()
 	// Stop the background index watch: no rebuild may start after this point,
 	// and an in-flight rebuild is drained briefly (see stopWatch).
 	s.stopWatch()
@@ -1206,9 +1098,24 @@ func (s *Server) dispatch(req rpcRequest) any {
 		var initParams struct {
 			ProtocolVersion string `json:"protocolVersion"`
 			SchemaVersion   string `json:"schemaVersion"`
+			Capabilities    struct {
+				Sampling json.RawMessage `json:"sampling"`
+			} `json:"capabilities"`
 		}
-		if json.Unmarshal(req.Params, &initParams) == nil && supportedProtocolVersions[initParams.ProtocolVersion] {
-			version = initParams.ProtocolVersion
+		if json.Unmarshal(req.Params, &initParams) == nil {
+			if supportedProtocolVersions[initParams.ProtocolVersion] {
+				version = initParams.ProtocolVersion
+			}
+			// Host model delegation: a client that announces sampling
+			// capability can serve LLM generation to kern (sampling/
+			// createMessage round-trips). Register the host sampler so the
+			// auto LLM chain's first leg is the connected host agent.
+			if rawPresent(initParams.Capabilities.Sampling) {
+				s.samplingMu.Lock()
+				s.samplingCapable = true
+				s.samplingMu.Unlock()
+				s.registerHostSampling()
+			}
 		}
 		// Negotiate the tool schema contract version (P2-003): honor a supported
 		// client request verbatim, else serve the current catalog version. The
@@ -1245,327 +1152,6 @@ func (s *Server) dispatch(req rpcRequest) any {
 	}
 }
 
-func errorResponse(id json.RawMessage, code int, msg string) map[string]any {
-	return map[string]any{
-		"jsonrpc": "2.0", "id": id,
-		"error": map[string]any{"code": code, "message": msg},
-	}
-}
-
-// idKey canonicalizes a JSON-RPC id into the map key used to track in-flight
-// requests, so tools/call and $/cancelRequest agree on the same key whether
-// the client used a JSON number (77) or string ("77") id. A raw id that does
-// not parse is used verbatim.
-func idKey(id json.RawMessage) string {
-	var v any
-	if err := json.Unmarshal(id, &v); err != nil || v == nil {
-		return string(id)
-	}
-	switch t := v.(type) {
-	case float64:
-		return strconv.FormatFloat(t, 'f', -1, 64)
-	case string:
-		return t
-	default:
-		return fmt.Sprintf("%v", v)
-	}
-}
-func (s *Server) toolCallResponse(id json.RawMessage, params json.RawMessage) any {
-	// First real use: start background indexing (no-op if initialize already
-	// triggered it — indexOnce fires exactly once per server lifetime).
-	s.indexOnce.Do(func() { go s.preloadIndexes() })
-	var p struct {
-		Name      string         `json:"name"`
-		Arguments map[string]any `json:"arguments"`
-	}
-	if err := json.Unmarshal(params, &p); err != nil {
-		return errorResponse(id, -32602, "invalid params")
-	}
-	key := idKey(id)
-	// Pre-tool-use hook: deny the call before any side effect runs. The hook
-	// is optional (nil = no-op) and returns nil to allow, or an error to
-	// reject — rejection is reported as a tool error (isError=true) so the
-	// agent sees why the call was blocked.
-	if s.preTool != nil {
-		if err := s.preTool(p.Name, p.Arguments); err != nil {
-			denied := fmt.Sprintf("pre-tool-use denied: %s", err)
-			result := map[string]any{
-				"content": []any{map[string]any{"type": "text", "text": denied}},
-				"isError": true,
-			}
-			attachTokenMetadata(result, p.Name, p.Arguments, denied)
-			return map[string]any{"jsonrpc": "2.0", "id": id, "result": result}
-		}
-	}
-	// A generous 30-minute per-call ceiling so a hung subprocess (an
-	// unresponsive Ollama during plan/analyze, or a slow index build) can
-	// never wedge the server goroutine forever; long legitimate operations
-	// (kern_execute sandbox builds, kern_verify full suites) run within it.
-	// This is the effective cap for plugin-driven calls: it must be >= the
-	// plugin MAX_CEILING_MS (kern.ts) so the agent's requested timeout
-	// governs. The exec-family handlers install their own shorter deadlines
-	// on top.
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
-	// The per-call scope carries the index loaded during this tool's execution
-	// so provenance is stamped from this call's index, never another's. It is
-	// scoped here instead of on the Server struct to avoid cross-talk between
-	// concurrent tool calls.
-	scope := &indexScope{}
-	ctx = context.WithValue(ctx, indexScopeKey{}, scope)
-	s.registerInflight(key, cancel)
-	defer func() {
-		cancel()
-		s.unregisterInflight(key)
-	}()
-	text, err := func() (out string, runErr error) {
-		defer func() {
-			if rec := recover(); rec != nil {
-				runErr = fmt.Errorf("panic in tool %s: %v", p.Name, rec)
-				fmt.Fprintf(os.Stderr, "kern-mcp: panic running %s: %v\n%s\n", p.Name, rec, debug.Stack())
-			}
-		}()
-		return s.runTool(ctx, key, p.Name, p.Arguments)
-	}()
-	// Cap every tool response at the output budget so a large result cannot
-	// flood the agent's context. Overridable per call with max_output=N.
-	if err == nil {
-		var budget int
-		budget, err = callOutputBudget(p.Arguments)
-		if err == nil {
-			text = sandboxOutput(text, budget, p.Name)
-		}
-	}
-	result := map[string]any{
-		"content": []any{map[string]any{"type": "text", "text": text}},
-		"isError": false,
-	}
-	// Structured provenance (P1.2): retrieval handlers stamp it on the
-	// per-call scope; any other tool that loaded an index gets
-	// index-identity-only raw provenance. The one-line summary appended to
-	// the content text is derived from the same structured field, so there
-	// is a single source of truth for index evidence.
-	if scope.prov == nil && scope.ix != nil {
-		scope.prov = s.rawProvenance(scope.ix, nil)
-	}
-	if err != nil {
-		if scope.prov != nil {
-			// Errors can carry provenance too: governed denials attach the
-			// auditable authorizing rule alongside the error text.
-			text = err.Error() + "\n" + s.provenanceSummary(scope.ix, scope.prov)
-			result["provenance"] = scope.prov
-		} else {
-			text = err.Error()
-		}
-		result["content"] = []any{map[string]any{"type": "text", "text": text}}
-		result["isError"] = true
-	} else if scope.prov != nil {
-		result["provenance"] = scope.prov
-		result["content"] = []any{map[string]any{"type": "text", "text": text + "\n" + s.provenanceSummary(scope.ix, scope.prov)}}
-	}
-	// Structured token metadata (P1-006): the request tokens were counted
-	// before processing; count the final response text (provenance summary
-	// included) after and stamp the ledger on the result.
-	out := text
-	if content, ok := result["content"].([]any); ok && len(content) > 0 {
-		if first, ok := content[0].(map[string]any); ok {
-			if t, ok := first["text"].(string); ok {
-				out = t
-			}
-		}
-	}
-	attachTokenMetadata(result, p.Name, p.Arguments, out)
-	return map[string]any{"jsonrpc": "2.0", "id": id, "result": result}
-}
-
-// defaultOutputBudget is the MCP output sandbox cap in bytes, used when the
-// agent does not pass max_output= and KERN_MCP_MAX_OUTPUT is unset. ~6K tokens
-// of safety net for a single tool result.
-const defaultOutputBudget = 24 << 10
-
-// outputBudget resolves the global cap from KERN_MCP_MAX_OUTPUT (bytes).
-func outputBudget() int {
-	if v := os.Getenv("KERN_MCP_MAX_OUTPUT"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			return n
-		}
-	}
-	return defaultOutputBudget
-}
-
-// callOutputBudget returns the per-call budget: an explicit max_output=N
-// argument (bytes; 0 disables the sandbox) wins over the global cap. A
-// malformed max_output is an error, not a silent fallback.
-func callOutputBudget(args map[string]any) (int, error) {
-	if v := argString(args, "max_output"); v != "" {
-		n, err := strconv.Atoi(v)
-		if err != nil {
-			return 0, fmt.Errorf("max_output: invalid integer %q", v)
-		}
-		if n <= 0 {
-			return 0, nil // disabled for this call
-		}
-		return n, nil
-	}
-	return outputBudget(), nil
-}
-
-// sandboxOutput truncates text to budget bytes (when budget > 0) and stamps a
-// marker with before/after token counts and a tool-specific recovery hint. The
-// marker doubles as the anti-context-flood boundary: an agent that needs more
-// can re-call with a larger max_output or a narrower tool.
-func sandboxOutput(text string, budget int, tool string) string {
-	if budget <= 0 || len(text) <= budget {
-		return text
-	}
-	// Trim to a rune-safe boundary: slicing mid-multi-byte-rune would leave a
-	// dangling UTF-8 sequence that corrupts the marker's own token counts and
-	// any downstream tokenizer.
-	cut := budget
-	for cut > 0 && !utf8.RuneStart(text[cut]) {
-		cut--
-	}
-	return text[:cut] + fmt.Sprintf("\n\n… [MCP output sandbox: %d → %d chars (%d → %d tokens). %s Pass max_output=N to this tool for more, or narrow the request.]",
-		len(text), cut, tokenize.Count(text), tokenize.Count(text[:cut]), recoveryHint(tool))
-}
-
-// recoveryHint suggests the narrower tool to recover the truncated detail.
-func recoveryHint(tool string) string {
-	switch tool {
-	case "kern_project_map", "kern_compact_file":
-		return "Use kern_context or kern_compact_file for specific symbols instead."
-	case "kern_walk":
-		return "Use a shallower depth= or a different root symbol."
-	case "kern_near":
-		return "Lower max= or depth=."
-	case "kern_context":
-		return "Request fewer lines=."
-	case "kern_review", "kern_context_budget":
-		return "Lower max_tokens=."
-	case "kern_doc_search":
-		return "Narrow the query or lower k=."
-	case "kern_ast_search":
-		return "Tighten the pattern."
-	case "kern_exec":
-		return "Cap the script's own output with max=."
-	case "kern_graph", "kern_arch", "kern_hubs":
-		return "This report is inherently large; prefer kern_search/kern_context for specifics."
-	default:
-		return "Narrow the query."
-	}
-}
-
-func (s *Server) promptGetResponse(id json.RawMessage, params json.RawMessage) any {
-	var p struct {
-		Name      string         `json:"name"`
-		Arguments map[string]any `json:"arguments"`
-	}
-	if err := json.Unmarshal(params, &p); err != nil {
-		return errorResponse(id, -32602, "invalid params")
-	}
-	var def *Prompt
-	for i := range prompts {
-		if prompts[i].Name == p.Name {
-			def = &prompts[i]
-			break
-		}
-	}
-	if def == nil {
-		return errorResponse(id, -32602, "prompt not found: "+p.Name)
-	}
-	if p.Arguments == nil {
-		p.Arguments = map[string]any{}
-	}
-	return map[string]any{
-		"jsonrpc": "2.0", "id": id,
-		"result": map[string]any{
-			"description": def.Description,
-			"messages": []any{
-				map[string]any{
-					"role": "user",
-					"content": map[string]any{
-						"type": "text",
-						"text": promptText(p.Name, p.Arguments),
-					},
-				},
-			},
-		},
-	}
-}
-
-func argString(args map[string]any, key string) string {
-	v, ok := args[key]
-	if !ok || v == nil {
-		return ""
-	}
-	return strings.TrimSpace(fmt.Sprintf("%v", v))
-}
-
-// argStrings reads an optional array-of-strings tool argument. Accepts a
-// []any / []string (MCP JSON arrays) and, for lenient clients that pass
-// everything as a single string, a comma- or whitespace-separated list.
-// Values are trimmed and empty entries dropped; missing/nil returns nil.
-func argStrings(args map[string]any, key string) []string {
-	v, ok := args[key]
-	if !ok || v == nil {
-		return nil
-	}
-	var out []string
-	switch t := v.(type) {
-	case []string:
-		for _, s := range t {
-			if s = strings.TrimSpace(s); s != "" {
-				out = append(out, s)
-			}
-		}
-	case []any:
-		for _, e := range t {
-			if s := strings.TrimSpace(fmt.Sprintf("%v", e)); s != "" {
-				out = append(out, s)
-			}
-		}
-	case string:
-		for _, s := range strings.FieldsFunc(t, func(r rune) bool { return r == ',' || r == ' ' || r == '\n' || r == '\t' }) {
-			if s = strings.TrimSpace(s); s != "" {
-				out = append(out, s)
-			}
-		}
-	}
-	return out
-}
-
-// argBool reads an optional boolean tool argument. Accepts native bools and
-// the strings "true"/"1" (MCP clients often pass everything as strings).
-func argBool(args map[string]any, key string) bool {
-	v, ok := args[key]
-	if !ok || v == nil {
-		return false
-	}
-	switch t := v.(type) {
-	case bool:
-		return t
-	case string:
-		s := strings.TrimSpace(t)
-		return s == "true" || s == "1"
-	case float64:
-		return t != 0
-	}
-	return false
-}
-
-// atoiArg parses an integer tool argument, falling back to def for empty
-// input. A malformed value is an error, not a silent default, so a typo'd
-// number can't quietly zero out a limit or mis-size a buffer.
-func atoiArg(v string, def int) (int, error) {
-	if v == "" {
-		return def, nil
-	}
-	n, err := strconv.Atoi(v)
-	if err != nil {
-		return 0, fmt.Errorf("invalid integer %q", v)
-	}
-	return n, nil
-}
-
 // rootedPath resolves p for a file-reading tool. When root is given, the path
 // must stay inside it (rejecting "..", absolute paths outside, and symlink
 // escapes). A rootless call may only reference a path relative to the current
@@ -1592,26 +1178,70 @@ func (s *Server) runTool(ctx context.Context, id string, name string, args map[s
 	origName := name // precheckTool may remap the name; audit the executed one
 	metrics.Default().RecordRequest()
 	start := time.Now()
+	fromCache := false
 	defer func() {
-		metrics.Default().RecordToolCall(time.Since(start))
+		// D1: cache-hit durations must not pollute the RecordToolCall latency
+		// percentiles — hits are counted under RecordCacheHit instead (F4).
+		if !fromCache {
+			metrics.Default().RecordToolCall(time.Since(start))
+		}
 		if runErr != nil {
 			metrics.Default().RecordError()
 		}
-		// G-2: every MCP tool execution — read-only tools included —
+		// every MCP tool execution — read-only tools included —
 		// appends to the tamper-evident audit chain. Pre-dispatch
 		// rejections (allowlist / root validation) are recorded as
-		// blocked; executed calls as allowed/error.
+		// blocked; executed calls as allowed/error. Cache hits append too,
+		// tagged Policy:"tool-cache" / Reason:"served from cache" (F5).
 		if name != "" {
-			s.auditToolCall(name, args, runErr, true)
+			s.auditToolCall(name, args, runErr, true, fromCache)
 		} else {
-			s.auditToolCall(origName, args, runErr, false)
+			s.auditToolCall(origName, args, runErr, false, fromCache)
 		}
 	}()
 	name, err := s.precheckTool(name, args)
 	if err != nil {
 		return "", err
 	}
-	return s.dispatchTool(ctx, id, name, args)
+	// D6: enforce the string-argument coercion contract (accept string/number/
+	// bool; reject null/object/array) before the handler runs, so a wrong-typed
+	// argument surfaces as a clear isError instead of a silent mis-coercion.
+	if err := validateStringArgs(name, args); err != nil {
+		return "", err
+	}
+	// D1 — tool-response cache: check INSIDE runTool, after precheckTool and
+	// validateStringArgs succeed and before dispatchTool (F4), so a cache hit
+	// never skips the KERN_TOOLS allowlist, root validation, the 	// safety budget, metrics or the audit chain. Only Cacheable (explicit
+	// opt-in allowlist, F1) tools participate; KERN_MCP_CACHE=0 and per-call
+	// no_cache=1 bypass. The effective flag is call-level (cacheableForCall):
+	// kern_meta participates only when the sub-tool it routes to is itself
+	// cacheable (R1), and semantic calls never participate (R3). Lookup and
+	// store below use the same gate, so both paths are covered.
+	if cacheableForCall(name, args) && cacheEnabled() && !noCacheArg(args) {
+		if text, hit := s.cacheLookup(ctx, name, args); hit {
+			fromCache = true
+			metrics.Default().RecordCacheHit()
+			return text, nil
+		}
+		metrics.Default().RecordCacheMiss()
+	}
+	// slow tools emit MCP progress notifications (0% start, 5s
+	// keep-alive, 100% stop) so agents see liveness instead of silence during
+	// multi-second tool calls. Centralized here (sandbox/heal/run_build
+	// previously started progress in their handlers; the central wrap
+	// supersedes those). Cache hits return before this point, so they never
+	// emit progress.
+	if slowTools[name] {
+		stop := s.startProgress(ctx, id, name)
+		defer stop()
+	}
+	text, err := s.dispatchTool(ctx, id, name, args)
+	// D1: store only successful (non-error) results; the response text is
+	// the raw pre-sandbox output (max_output is applied at serve time).
+	if err == nil && cacheableForCall(name, args) && cacheEnabled() && !noCacheArg(args) {
+		s.cacheStore(ctx, name, args, text)
+	}
+	return text, err
 }
 
 // precheckTool validates a tool name against the KERN_TOOLS allowlist and the
@@ -1650,7 +1280,7 @@ func (s *Server) precheckTool(name string, args map[string]any) (string, error) 
 			return "", err
 		}
 	}
-	// AUD-10: track every tool call against the safety budget through the
+	// track every tool call against the safety budget through the
 	// ToolGateway. A nil gateway or nil budget is a safe no-op (back-compat).
 	// The budget gate runs after allowlist/root validation so blocked calls
 	// never consume budget; when the budget is already exceeded the call is
@@ -1839,7 +1469,11 @@ func (s *Server) loadIndex(ctx context.Context, root string) (*index.Index, erro
 	// background preload is still running): tell the user the wait is the
 	// initial build, not a hang. Subsequent stale rebuilds stay silent.
 	if _, built := s.indexedRoots.Load(root); !built {
-		fmt.Fprintf(os.Stderr, "kern-mcp: first index build for %s in progress, tool call waiting...\n", root)
+		if root == "" {
+			fmt.Fprintf(os.Stderr, "kern-mcp: first index build in progress, tool call waiting...\n")
+		} else {
+			fmt.Fprintf(os.Stderr, "kern-mcp: first index build for %s in progress, tool call waiting...\n", root)
+		}
 	}
 	ix, err := s.sessionFor(root).Index()
 	if err != nil {
@@ -1987,41 +1621,8 @@ func clipForMarker(s string) string {
 	return s[:max] + "…"
 }
 
-// clip trims a string to n bytes for a tool summary.
-func clip(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	return s[:n] + "…"
-}
-
-// hasSlugChar reports whether s contains at least one character a slug keeps,
-// so sanitizeDocName can reject names that would collapse to nothing.
-func hasSlugChar(s string) bool {
-	for _, r := range s {
-		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' {
-			return true
-		}
-	}
-	return false
-}
-
-// sanitizeDocName constrains a doc name to a safe cache filename:
-// lowercase alphanumerics and dashes only. Path separators, dot-dot and
-// other punctuation are replaced (or collapse to nothing), so a name can
-// never escape the cache root via ../ or produce a bogus index key.
-// Empty input (or a name with no slug-able characters) yields an error.
 func sanitizeDocName(name string) (string, error) {
-	if !hasSlugChar(name) {
-		return "", fmt.Errorf("invalid doc name %q", name)
-	}
-	return strutil.Slug(name), nil
-}
-
-// docSearchSlug derives a filesystem-safe doc name from a URL, e.g.
-// https://react.dev/reference/usestate -> react-dev-reference-usestate.
-func docSearchSlug(rawURL string) string {
-	return strutil.DocSlug(rawURL)
+	return doc.SanitizeDocName(name)
 }
 
 func renderStats(daysStr, session string) (string, error) {

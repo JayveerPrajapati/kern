@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/JayveerPrajapati/kern/internal/domain"
 )
@@ -275,8 +276,11 @@ func TestNestedTaskActionRoutes(t *testing.T) {
 // route was previously missing (404 "unknown task action"). Deploy follows the
 // task state machine: a fresh (CREATED) task is not deployable → 409; a task
 // driven to PR_CREATED deploys → 200 with state DEPLOYING (default Noop
-// deployer). Unknown tasks → 404, non-POST → 405.
+// deployer). Unknown tasks → 404, non-POST → 405. The web deploy handler is
+// gated on KERN_ALLOW_DEPLOY=1 (the same gate as the CLI/loop paths), so the
+// test opts in explicitly.
 func TestTaskDeployAction(t *testing.T) {
+	t.Setenv("KERN_ALLOW_DEPLOY", "1")
 	app := newTestApp(t)
 
 	// Unknown task → 404, not 500.
@@ -351,5 +355,121 @@ func TestTaskDeployAction(t *testing.T) {
 	}
 	if state, _ := deployed["State"].(string); state != string(domain.TaskDeploying) {
 		t.Fatalf("deployed task state = %v, want %s", deployed["State"], domain.TaskDeploying)
+	}
+}
+
+// TestV1DeployGatedWithoutAllowDeploy pins the deploy-gate fix: the web
+// deploy handler applies the SAME KERN_ALLOW_DEPLOY=1 gate as the CLI/loop
+// paths BEFORE invoking the deployer, regardless of deployer type — so the
+// default NoopDeployer can never run the web /v1/tasks/{id}/deploy path
+// ungoverned. With the gate off the handler returns 403 with guidance and
+// never touches the task (even a nonexistent one).
+func TestV1DeployGatedWithoutAllowDeploy(t *testing.T) {
+	t.Setenv("KERN_ALLOW_DEPLOY", "")
+	app := newEmptyApp(t)
+	rec := postJSON(t, app, "/v1/tasks/does-not-exist/deploy", `{"version":"v1.0.0"}`)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 without KERN_ALLOW_DEPLOY: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "KERN_ALLOW_DEPLOY") {
+		t.Errorf("403 body must name the KERN_ALLOW_DEPLOY gate for guidance: %s", rec.Body.String())
+	}
+	// The gate fires before task lookup: an unknown task must still be a 403
+	// (gate), never a 404 — proving the deployer was never invoked.
+	if strings.Contains(rec.Body.String(), "task not found") {
+		t.Errorf("gate must fire before the deployer/task lookup, got: %s", rec.Body.String())
+	}
+}
+
+// TestV1DeployGateAllowsWhenSet verifies the gate is a pass-through when
+// KERN_ALLOW_DEPLOY=1 is set: the request reaches the TaskService.Deploy path
+// (here proven by the 404 for an unknown task instead of a 403 gate refusal).
+func TestV1DeployGateAllowsWhenSet(t *testing.T) {
+	t.Setenv("KERN_ALLOW_DEPLOY", "1")
+	app := newEmptyApp(t)
+	rec := postJSON(t, app, "/v1/tasks/does-not-exist/deploy", `{"version":"v1.0.0"}`)
+	if rec.Code == http.StatusForbidden {
+		t.Fatalf("status = 403 with KERN_ALLOW_DEPLOY=1 set; the gate should be open: %s", rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "task not found") {
+		t.Errorf("with the gate open the request must reach Deploy (404 for unknown task), got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestV1LoopAutonomyCappedDefault pins the /v1/loop autonomy cap default: with
+// no KERN_WEB_MAX_AUTONOMY the cap is the server's own autonomy (L0,
+// read-only), so a client requesting L4 runs at L0 — never above the server's
+// configured level.
+func TestV1LoopAutonomyCappedDefault(t *testing.T) {
+	t.Setenv("KERN_WEB_MAX_AUTONOMY", "")
+	app := newEmptyApp(t)
+	rec := postJSON(t, app, "/v1/loop", `{"intent":"cap me","level":"L4"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Level string `json:"level"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.Level != "L0" {
+		t.Errorf("level = %q, want L0 (requested L4 capped at the default server autonomy)", body.Level)
+	}
+}
+
+// TestV1LoopAutonomyCappedByEnv pins the KERN_WEB_MAX_AUTONOMY cap: a request
+// above the configured cap runs AT the cap (L1 here), never above it.
+func TestV1LoopAutonomyCappedByEnv(t *testing.T) {
+	t.Setenv("KERN_WEB_MAX_AUTONOMY", "L1")
+	app := newEmptyApp(t)
+	rec := postJSON(t, app, "/v1/loop", `{"intent":"cap me","level":"L4"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Level string `json:"level"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.Level != "L1" {
+		t.Errorf("level = %q, want L1 (requested L4 capped at KERN_WEB_MAX_AUTONOMY=L1)", body.Level)
+	}
+}
+
+// TestV1LoopDeadline pins the server-side /v1/loop timeout: with
+// KERN_WEB_LOOP_TIMEOUT set to a tiny value, the handler returns 504 naming
+// the env var instead of hanging until the loop completes.
+func TestV1LoopDeadline(t *testing.T) {
+	t.Setenv("KERN_WEB_LOOP_TIMEOUT", "1ms")
+	app := newEmptyApp(t)
+	rec := postJSON(t, app, "/v1/loop", `{"intent":"deadline me","level":""}`)
+	if rec.Code != http.StatusGatewayTimeout {
+		t.Fatalf("status = %d, want 504: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "KERN_WEB_LOOP_TIMEOUT") {
+		t.Errorf("504 body must name the KERN_WEB_LOOP_TIMEOUT env for guidance: %s", rec.Body.String())
+	}
+	// The handler returned on the deadline while the loop run continues in the
+	// background. Wait for it to reach a terminal task state before the test
+	// returns, so the background run cannot write into the test's temp dir
+	// during cleanup.
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		var done bool
+		for _, tk := range app.taskSvc.List() {
+			if tk.Intent == "deadline me" &&
+				(tk.State == domain.TaskCompleted || tk.State == domain.TaskFailed) {
+				done = true
+			}
+		}
+		if done {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("background loop run did not finish within 15s")
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
 }

@@ -64,14 +64,13 @@ func watchIntervalFromEnv() time.Duration {
 // <= 0 disables the watcher. The first call wins; later calls are no-ops.
 // The stdio and HTTP serve paths start it automatically with the
 // KERN_MCP_WATCH / KERN_MCP_WATCH_INTERVAL environment configuration.
-func (s *Server) StartBackgroundWatch(ctx context.Context, interval time.Duration) *Server {
+func (s *Server) StartBackgroundWatch(ctx context.Context, interval time.Duration) {
 	if interval <= 0 {
-		return s
+		return
 	}
 	s.watchStarted.Do(func() {
 		go s.watchLoop(ctx, interval)
 	})
-	return s
 }
 
 // watchLoop is the background watch goroutine. It ticks every interval until

@@ -2,12 +2,15 @@ package web
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 
@@ -40,8 +43,8 @@ type v1PlanResponse struct {
 	TaskID string      `json:"task_id,omitempty"`
 }
 
-// symbolErrorStatus maps a symbol-resolution failure to its HTTP status
-// (F-030): 404 when the change names a symbol that does not exist in the
+// symbolErrorStatus maps a symbol-resolution failure to its HTTP status:
+// 404 when the change names a symbol that does not exist in the
 // project's index (the message carries real candidates), 400 when no symbol
 // could be identified at all. Zero means the error is not a resolution
 // failure and should stay a 500. Without this, writeError masks these
@@ -373,7 +376,7 @@ func (a *App) handleV1Graph(w http.ResponseWriter, r *http.Request) {
 	}
 	nodeID := entity
 	if node == nil {
-		// F-031: the trailing segment may be a symbol NAME ("FindUser") rather
+		// The trailing segment may be a symbol NAME ("FindUser") rather
 		// than a node ID ("pkg.FindUser"). Resolve it through the prebuilt
 		// graph engine (never build a new index) and return the neighborhood
 		// of the resolved node; unknown entities keep the 404.
@@ -391,7 +394,7 @@ func (a *App) handleV1Graph(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "entity not found")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]interface{}{
+	writeJSON(w, http.StatusOK, map[string]any{
 		"node":         *node,
 		"who_calls":    g.WhoCalls(nodeID),
 		"depends_on":   g.WhatDependsOn(nodeID),
@@ -450,7 +453,7 @@ func (a *App) handleV1Risk(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]interface{}{"risks": pkt.Risks, "change": req.Change})
+	writeJSON(w, http.StatusOK, map[string]any{"risks": pkt.Risks, "change": req.Change})
 }
 
 // handleV1Task serves a single task by ID (GET /v1/tasks/{id}) and dispatches
@@ -506,15 +509,15 @@ func (a *App) handleV1Task(w http.ResponseWriter, r *http.Request) {
 func (a *App) handleV1TaskAction(w http.ResponseWriter, r *http.Request, taskID, action string) {
 	switch action {
 	case "analyze":
-		a.handleV1Analyze(w, injectBody(r, map[string]interface{}{"task_id": taskID}))
+		a.handleV1Analyze(w, injectBody(r, map[string]any{"task_id": taskID}))
 	case "plan":
-		a.handleV1Plan(w, injectBody(r, map[string]interface{}{"task_id": taskID}))
+		a.handleV1Plan(w, injectBody(r, map[string]any{"task_id": taskID}))
 	case "approve":
-		a.handleApprovalApprove(w, injectBody(r, map[string]interface{}{"id": taskID}))
+		a.handleApprovalApprove(w, injectBody(r, map[string]any{"id": taskID}))
 	case "execute":
-		a.handleV1Execute(w, injectBody(r, map[string]interface{}{"task_id": taskID}))
+		a.handleV1Execute(w, injectBody(r, map[string]any{"task_id": taskID}))
 	case "verify":
-		a.handleV1Verify(w, injectBody(r, map[string]interface{}{"task_id": taskID}))
+		a.handleV1Verify(w, injectBody(r, map[string]any{"task_id": taskID}))
 	case "deploy":
 		a.handleV1Deploy(w, r, taskID)
 	case "artifacts":
@@ -541,9 +544,21 @@ func (a *App) handleV1TaskAction(w http.ResponseWriter, r *http.Request, taskID,
 // updated task on success; 404 for unknown tasks, 403 when a human approval
 // is pending (the approval id is embedded in the error message), and 500 for
 // any other failure.
+//
+// Governance gate: production mutation is disabled by default. The same
+// KERN_ALLOW_DEPLOY=1 gate the CLI/loop paths enforce is applied HERE, before
+// the deployer is invoked, REGARDLESS of deployer type — so the web path can
+// never bypass the governance firewall by running with the default
+// NoopDeployer while the CLI path is gated. When the gate is off the handler
+// returns 403 with the opt-in guidance and does not touch the task.
 func (a *App) handleV1Deploy(w http.ResponseWriter, r *http.Request, taskID string) {
 	if r.Method != http.MethodPost {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if os.Getenv("KERN_ALLOW_DEPLOY") != "1" {
+		writeError(w, http.StatusForbidden,
+			"deployment refused: KERN_ALLOW_DEPLOY not set (production mutation disabled by default); set KERN_ALLOW_DEPLOY=1 to enable deploys via the web console")
 		return
 	}
 	var req struct {
@@ -581,11 +596,11 @@ func (a *App) handleV1Deploy(w http.ResponseWriter, r *http.Request, taskID stri
 // routes append the task id onto the body before delegating to an existing
 // handler without changing the top-level behavior. A non-object/empty body is
 // treated as an empty object.
-func injectBody(r *http.Request, extra map[string]interface{}) *http.Request {
-	var obj map[string]interface{}
+func injectBody(r *http.Request, extra map[string]any) *http.Request {
+	var obj map[string]any
 	_ = json.NewDecoder(r.Body).Decode(&obj)
 	if obj == nil {
-		obj = map[string]interface{}{}
+		obj = map[string]any{}
 	}
 	for k, v := range extra {
 		obj[k] = v
@@ -610,7 +625,7 @@ func (a *App) handleV1Incidents(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]interface{}{"items": items})
+	writeJSON(w, http.StatusOK, map[string]any{"items": items})
 }
 
 // handleV1Incident serves a single incident by ID (GET /v1/incidents/{id}). The
@@ -701,7 +716,7 @@ func (a *App) handleV1Agents(w http.ResponseWriter, r *http.Request) {
 		caps := append([]string{}, ag.Capabilities...)
 		specialists = append(specialists, v1Specialist{ID: ag.ID, Role: ag.Type, Capabilities: caps})
 	}
-	writeJSON(w, http.StatusOK, map[string]interface{}{
+	writeJSON(w, http.StatusOK, map[string]any{
 		"specialists": specialists,
 		"tasks":       a.tasks.ListTasks(),
 	})
@@ -718,6 +733,8 @@ type v1LoopStage struct {
 type v1LoopResponse struct {
 	Intent          string        `json:"intent"`
 	Level           string        `json:"level"`
+	RequestedLevel  string        `json:"requested_level,omitempty"`
+	Capped          bool          `json:"capped,omitempty"`
 	Stages          []v1LoopStage `json:"stages"`
 	Deployed        bool          `json:"deployed"`
 	ObservedHealthy bool          `json:"observed_healthy"`
@@ -727,6 +744,28 @@ type v1LoopResponse struct {
 // handleV1Loop runs the closed loop against an intent and returns the stage
 // timeline plus the outcome (POST /v1/loop). The autonomy level defaults to
 // L0 (read-only); AI stages use the deterministic no-op default.
+//
+// Autonomy cap: the client's requested level is capped at the server's
+// configured maximum (KERN_WEB_MAX_AUTONOMY, default L0 — the server's own
+// autonomy). A request above the cap runs AT the cap, never above it, so an
+// unconfigured console cannot be escalated to write levels by a client.
+//
+// Deadline: the loop derives its context from the request (a client
+// disconnect cancels the run between stages) wrapped in a server-side timeout
+// (KERN_WEB_LOOP_TIMEOUT, default 30m) so a wedged run cannot hang the
+// handler. On timeout the handler returns 504 and the run is CANCELLED
+// between stages — the aborted task is marked FAILED and remains observable,
+// instead of the run continuing in the background (oracle-gate ctx
+// threading).
+//
+// Latency note: an L0 run is NOT instant. The verify stage always runs the
+// full verification engine (go build + go test + security + architecture +
+// dependency checks) against a sandbox worktree, which takes ~15-30s on a
+// real repository. This is inherent closed-loop semantics, identical to the
+// CLI's `kern loop`; there is intentionally no "skip verify" parameter. At
+// L0/L1 the verify result is advisory — a FAIL reflects pre-existing repo
+// hygiene (surfaced as VerifyAdvisory), never the run's own change surface,
+// and never fails the run. Clients must allow >30s for this endpoint.
 func (a *App) handleV1Loop(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -749,29 +788,119 @@ func (a *App) handleV1Loop(w http.ResponseWriter, r *http.Request) {
 		}
 		level = parsed
 	}
-	// Production mutation is disabled by default. The deploy stage
-	// (autonomy L4+) is only reached when KERN_ALLOW_DEPLOY=1 is set, so a
-	// local console cannot accidentally trigger a production deployment
-	// without explicit operator opt-in. The approval workflow is also wired
-	// so high-risk stages pass through governance.
-	_, res, err := a.taskSvc.RunLoop(req.Intent, level)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+	// Server-side autonomy cap: a client request above the configured cap runs
+	// AT the cap (never above it). The cap defaults to the server's own
+	// autonomy (L0, read-only), so an unconfigured console cannot be escalated
+	// by a client-supplied level. The response tells the client both the
+	// requested and the effective level (gate-3).
+	requestedLevel := level
+	capped := false
+	if cap := maxLoopAutonomy(); level > cap {
+		level = cap
+		capped = true
+	}
+
+	// Server-side deadline + request cancellation. RunLoopContext threads the
+	// request-derived context into the loop, so the first of completion, the
+	// KERN_WEB_LOOP_TIMEOUT deadline, or a client disconnect CANCELS the run
+	// between stages (the run no longer continues in the background — its
+	// progress is not silently abandoned, and the aborted Task is marked
+	// FAILED so it stays observable and auditable).
+	ctx, cancel := context.WithTimeout(r.Context(), loopTimeout())
+	defer cancel()
+	type loopOutcome struct {
+		res *loop.Result
+		err error
+	}
+	done := make(chan loopOutcome, 1)
+	go func() {
+		_, res, err := a.taskSvc.RunLoopContext(ctx, req.Intent, level)
+		done <- loopOutcome{res: res, err: err}
+	}()
+
+	select {
+	case <-ctx.Done():
+		// The request context ended before the loop did: either the
+		// server-side deadline fired or the client disconnected. A deadline
+		// gets an explicit 504 naming the timeout; a disconnect has no one to
+		// write to, so the cancelled run's result is discarded (the loop
+		// stopped between stages and the aborted Task is marked FAILED on the
+		// task registry).
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			// Deliberately bypass writeError's 5xx masking: this message is
+			// client-facing guidance (it names a public env var), not an
+			// internal detail.
+			writeJSON(w, http.StatusGatewayTimeout, map[string]string{
+				"error": fmt.Sprintf("loop timed out after %s (KERN_WEB_LOOP_TIMEOUT); the run was cancelled between stages and the task is marked FAILED", loopTimeout()),
+			})
+		}
 		return
+	case out := <-done:
+		if out.err != nil {
+			writeError(w, http.StatusInternalServerError, out.err.Error())
+			return
+		}
+		res := out.res
+		if res == nil {
+			writeError(w, http.StatusInternalServerError, "loop returned no result")
+			return
+		}
+		response := v1LoopResponse{
+			Intent:          res.Intent,
+			Level:           res.Level.String(),
+			RequestedLevel:  requestedLevel.String(),
+			Capped:          capped,
+			Deployed:        res.Deployed,
+			ObservedHealthy: res.ObservedHealthy,
+		}
+		for _, st := range res.Stages {
+			response.Stages = append(response.Stages, v1LoopStage{Stage: st.Stage, Status: st.Status, Output: st.Output})
+		}
+		if res.Learned != nil {
+			response.Learned = res.Learned.ID
+		}
+		writeJSON(w, http.StatusOK, response)
 	}
-	out := v1LoopResponse{
-		Intent:          res.Intent,
-		Level:           res.Level.String(),
-		Deployed:        res.Deployed,
-		ObservedHealthy: res.ObservedHealthy,
+}
+
+// loopTimeoutEnv is the environment variable controlling the server-side
+// /v1/loop deadline. loopTimeoutEnvName is its human-readable name for
+// messages.
+const (
+	loopTimeoutEnv     = "KERN_WEB_LOOP_TIMEOUT"
+	defaultLoopTimeout = 30 * time.Minute
+)
+
+// loopTimeout returns the server-side /v1/loop deadline: KERN_WEB_LOOP_TIMEOUT
+// when set to a positive duration, else defaultLoopTimeout (30m). An
+// unparsable or non-positive value logs a warning and falls back to the
+// default rather than failing the endpoint.
+func loopTimeout() time.Duration {
+	if v := os.Getenv(loopTimeoutEnv); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			return d
+		}
+		log.Printf("WARNING: invalid %s %q; using default %s", loopTimeoutEnv, v, defaultLoopTimeout)
 	}
-	for _, st := range res.Stages {
-		out.Stages = append(out.Stages, v1LoopStage{Stage: st.Stage, Status: st.Status, Output: st.Output})
+	return defaultLoopTimeout
+}
+
+// maxLoopAutonomyEnv is the environment variable capping the autonomy a
+// client may request on /v1/loop.
+const maxLoopAutonomyEnv = "KERN_WEB_MAX_AUTONOMY"
+
+// maxLoopAutonomy returns the server-side /v1/loop autonomy cap: the
+// KERN_WEB_MAX_AUTONOMY level when set and valid, else the server's default
+// autonomy (L0 — read-only). An unparsable value logs a warning and falls
+// back to L0. A client request above the cap runs AT the cap.
+func maxLoopAutonomy() loop.Autonomy {
+	if v := os.Getenv(maxLoopAutonomyEnv); v != "" {
+		if lvl, err := loop.ParseLevel(v); err == nil {
+			return lvl
+		}
+		log.Printf("WARNING: invalid %s %q; using default L0", maxLoopAutonomyEnv, v)
 	}
-	if res.Learned != nil {
-		out.Learned = res.Learned.ID
-	}
-	writeJSON(w, http.StatusOK, out)
+	return loop.L0
 }
 
 // handleV1IncidentInvestigate runs the full incident workflow against an alert
@@ -798,7 +927,7 @@ func (a *App) handleV1IncidentInvestigate(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]interface{}{
+	writeJSON(w, http.StatusOK, map[string]any{
 		"incident":         inc,
 		"hypotheses":       inc.Hypotheses,
 		"affected_service": inc.AffectedService,
@@ -907,7 +1036,12 @@ func (a *App) handleV1Learn(w http.ResponseWriter, r *http.Request) {
 	}{Patterns: patterns, TaskID: t.ID})
 }
 
-// handleV1Modernize runs the legacy modernization analysis. .
+// handleV1Modernize runs the legacy modernization analysis.
+//
+// Latency note: the analyzer walks the whole prebuilt index (communities →
+// bridges → churn → candidate boundaries → impact → risk → migration plan),
+// which takes ~20-30s on a real repository. This is inherent analysis cost;
+// clients must allow >30s for this endpoint.
 func (a *App) handleV1Modernize(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -940,6 +1074,14 @@ func (a *App) handleV1Execute(w http.ResponseWriter, r *http.Request) {
 	}
 	t, diff, err := a.taskSvc.Execute(req.Patch)
 	if err != nil {
+		if errors.Is(err, app.ErrInvalidPatch) {
+			// A malformed / non-applicable patch is a CLIENT error: the caller
+			// sent a patch that cannot be applied, so it must not surface as a
+			// 500 "internal error". Keep the message (it names the git apply
+			// failure) so the client can see why the patch was rejected.
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -1021,12 +1163,23 @@ func (a *App) handleV1EventsStream(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
+	// Standard SSE hardening: ask any buffering reverse proxy / accelerator
+	// (nginx X-Accel, CDNs) not to buffer the stream, so the initial chunk
+	// reaches the client immediately instead of after the handler returns.
+	w.Header().Set("X-Accel-Buffering", "no")
 
 	if a.bus == nil {
 		_, _ = fmt.Fprintf(w, "event: error\ndata: {\"error\":\"event bus not configured\"}\n\n")
 		flusher.Flush()
 		return
 	}
+
+	// Write + flush the initial "connected" chunk BEFORE subscribing so the
+	// client always observes the handshake first — a client parser that
+	// expects "connected" before any bus event must never see a data event
+	// arrive ahead of it — and so the chunk is on the wire immediately.
+	_, _ = fmt.Fprintf(w, "event: connected\ndata: {\"status\":\"connected\",\"timestamp\":%d}\n\n", time.Now().Unix())
+	flusher.Flush()
 
 	ch := make(chan eventbus.Event, 64)
 	unsub := a.bus.Subscribe("", func(ev eventbus.Event) {
@@ -1037,9 +1190,6 @@ func (a *App) handleV1EventsStream(w http.ResponseWriter, r *http.Request) {
 		}
 	})
 	defer unsub()
-
-	_, _ = fmt.Fprintf(w, "event: connected\ndata: {\"status\":\"connected\",\"timestamp\":%d}\n\n", time.Now().Unix())
-	flusher.Flush()
 
 	ctx := r.Context()
 	for {

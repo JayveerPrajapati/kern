@@ -89,12 +89,6 @@ func TestWorkflowApprovalThroughUI(t *testing.T) {
 	}
 }
 
-// TestWorkflowRejectionThroughUI verifies a human can REJECT a task's approval
-// gate through the UI: the workflow must NOT proceed past the gate. Since the
-// approve-surface symmetry fix (F-026) routes the UI decision through the
-// app-layer TaskService, the gated task is marked REJECTED immediately
-// (mirroring `kern approve --reject`) and a resume cannot walk past the
-// terminal state.
 func TestWorkflowRejectionThroughUI(t *testing.T) {
 	root := fixtureRoot(t)
 
@@ -122,8 +116,6 @@ func TestWorkflowRejectionThroughUI(t *testing.T) {
 		t.Fatalf("POST /api/approvals/reject = %d (%s), want 200", rec.Code, rec.Body.String())
 	}
 
-	// The gated task must be marked REJECTED immediately (F-026): a fresh
-	// service (simulating `kern task`) sees the terminal state.
 	fresh := app.NewTaskService(p, nil)
 	got, ok := fresh.Get(task.ID)
 	if !ok {
@@ -146,13 +138,6 @@ func TestWorkflowRejectionThroughUI(t *testing.T) {
 	}
 }
 
-// TestWebApprovalAdvancesGatedTask pins the approve-surface symmetry fix
-// (F-026): POST /api/approvals/approve must route through the app-layer
-// TaskService so a gated task parked at WAITING_FOR_APPROVAL advances to
-// APPROVED immediately (visible via `kern task`) and the gate-crossing
-// transition lands in the audit chain — mirroring `kern approve` and
-// kern_approve. Before the fix the web surface only decided the approval,
-// leaving the task parked until the next workflow resume.
 func TestWebApprovalAdvancesGatedTask(t *testing.T) {
 	root := fixtureRoot(t)
 
@@ -198,7 +183,6 @@ func TestWebApprovalAdvancesGatedTask(t *testing.T) {
 		t.Fatalf("state = %q, want APPROVED after UI approval", got.State)
 	}
 
-	// F-025: the gate-crossing transition must be in the persisted audit chain.
 	entries, err := webApp.taskSvc.AuditEntriesForTask(task.ID)
 	if err != nil {
 		t.Fatalf("AuditEntriesForTask: %v", err)
