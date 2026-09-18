@@ -2,6 +2,8 @@ package skills
 
 import (
 	"embed"
+	"errors"
+	"io/fs"
 	"path/filepath"
 	"strings"
 )
@@ -14,6 +16,7 @@ var SkillNames = []string{
 	"kern-investigate",
 	"kern-safe-change",
 	"kern-incident-triage",
+	"kern-team-orchestration",
 }
 
 // ReadSkill returns the content of the bundled skill SKILL.md.
@@ -33,6 +36,9 @@ func ListSkillScripts(skillName string) ([]string, error) {
 	scriptsRel := filepath.ToSlash(filepath.Join("assets", skillName, "scripts"))
 	entries, err := skillsFS.ReadDir(scriptsRel)
 	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, nil
+		}
 		return nil, err
 	}
 	var out []string

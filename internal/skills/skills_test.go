@@ -6,8 +6,8 @@ import (
 )
 
 func TestSkillsReadAndScripts(t *testing.T) {
-	if len(SkillNames) != 3 {
-		t.Fatalf("expected 3 skills, got %d", len(SkillNames))
+	if len(SkillNames) != 4 {
+		t.Fatalf("expected 4 skills, got %d", len(SkillNames))
 	}
 
 	for _, name := range SkillNames {
@@ -30,9 +30,6 @@ func TestSkillsReadAndScripts(t *testing.T) {
 		scripts, err := ListSkillScripts(name)
 		if err != nil {
 			t.Fatalf("ListSkillScripts(%s) failed: %v", name, err)
-		}
-		if len(scripts) == 0 {
-			t.Fatalf("skill %s has no scripts", name)
 		}
 		for _, sName := range scripts {
 			sData, err := ReadSkillScript(name, sName)
