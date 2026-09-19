@@ -338,3 +338,97 @@ export function run() {
 	}
 	t.Error("expected promoted arrow-function symbol greet")
 }
+
+func TestTreeSitterExtractTypeScriptAdvanced(t *testing.T) {
+	src := `export enum Status {
+	Active = "ACTIVE",
+	Pending = "PENDING",
+}
+
+export type ID = string | number;
+
+export abstract class BaseService {
+	abstract execute(): Promise<void>;
+}
+
+export class UserWorker extends BaseService {
+	async execute(): Promise<void> {
+		this.cleanup();
+	}
+
+	private cleanup(): void {}
+}
+`
+	syms, calls, inherits, _, err := tsExtract("worker.ts", []byte(src), "typescript")
+	if err != nil {
+		t.Fatal(err)
+	}
+	byName := map[string]Symbol{}
+	for _, s := range syms {
+		byName[s.Name] = s
+	}
+
+	if status, ok := byName["Status"]; !ok || status.Kind != "enum" {
+		t.Errorf("expected Status enum, got %+v", status)
+	}
+	if idType, ok := byName["ID"]; !ok || idType.Kind != "type" {
+		t.Errorf("expected ID type alias, got %+v", idType)
+	}
+	if base, ok := byName["BaseService"]; !ok || base.Kind != "class" {
+		t.Errorf("expected BaseService class, got %+v", base)
+	}
+	if worker, ok := byName["UserWorker"]; !ok || worker.Kind != "class" {
+		t.Errorf("expected UserWorker class, got %+v", worker)
+	}
+
+	bases := inherits["UserWorker"]
+	hasBaseExt := false
+	for _, b := range bases {
+		if b == "extends:BaseService" {
+			hasBaseExt = true
+		}
+	}
+	if !hasBaseExt {
+		t.Errorf("expected UserWorker to extend BaseService, got %v", bases)
+	}
+
+	cleanupFound := false
+	for _, ce := range calls["UserWorker.execute"] {
+		if ce.Target == "this.cleanup" || ce.Target == "cleanup" {
+			cleanupFound = true
+		}
+	}
+	if !cleanupFound {
+		t.Logf("calls for UserWorker.execute: %v", calls["UserWorker.execute"])
+	}
+}
+
+func TestTreeSitterExtractCpp(t *testing.T) {
+	src := `class Engine {
+public:
+    void start();
+};
+
+void Engine::start() {
+    init();
+}
+`
+	syms, calls, _, _, err := tsExtract("engine.cpp", []byte(src), "cpp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	byName := map[string]Symbol{}
+	for _, s := range syms {
+		byName[s.Name] = s
+	}
+
+	if eng, ok := byName["Engine"]; !ok || eng.Kind != "class" {
+		t.Errorf("expected Engine class, got %+v", eng)
+	}
+	if start, ok := byName["start"]; !ok || start.Kind != "method" || start.Receiver != "Engine" {
+		t.Errorf("expected Engine.start method, got %+v", start)
+	}
+	if len(calls) == 0 {
+		t.Logf("Cpp calls extracted: %v", calls)
+	}
+}

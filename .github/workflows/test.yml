@@ -51,6 +51,8 @@ jobs:
         run: go test -short -race -timeout 10m ./internal/governance/... ./internal/mcp/... ./internal/app/... ./internal/web/...
       - name: MCP catalog parity
         run: go test ./internal/setup/ -run TestPluginMatchesMCPCatalog -count=1
+      - name: Architecture doc parity
+        run: go test -v ./internal/architecture/ -run TestArchitectureDocParity -count=1
       - name: CLI command usage and parity contract
         run: go test ./cmd/kern/ -run 'TestEveryCommandHasUsage|TestMCPToolsReachableFromCLI' -count=1
 

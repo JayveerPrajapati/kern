@@ -17,4 +17,4 @@ kern log "$LOG_PATH" || true
 
 echo ""
 echo "=== 2. Auto-SRE Triage & AST Symbol Mapping ==="
-kern ops triage --log "$LOG_PATH"
+kern ops triage --log "$LOG_PATH" --non-interactive
