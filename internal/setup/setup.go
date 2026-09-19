@@ -167,11 +167,11 @@ func Check(root string) []Status {
 	}
 	out = append(out, claudeStatus())
 	out = append(out, codexStatus())
-	out = append(out, fileStatus(filepath.Join(root, ".claude", "settings.json"), "claude hooks"))
-	out = append(out, fileStatus(filepath.Join(root, ".gemini", "settings.json"), "gemini hooks"))
+	out = append(out, fileStatusAny("claude hooks", filepath.Join(root, ".claude", "settings.json"), filepath.Join(globalHomeDir(), ".claude", "settings.json")))
+	out = append(out, fileStatusAny("gemini hooks", filepath.Join(root, ".gemini", "settings.json"), filepath.Join(globalHomeDir(), ".gemini", "settings.json")))
 	out = append(out, fileStatus(filepath.Join(root, ".cursor", "rules", "kern-hooks.mdc"), "cursor rule"))
-	out = append(out, fileStatus(filepath.Join(root, ".cursor", "hooks.json"), "cursor hooks"))
-	out = append(out, fileStatus(filepath.Join(root, ".github", "hooks", "kern-pretooluse.json"), "copilot hooks"))
+	out = append(out, fileStatusAny("cursor hooks", filepath.Join(root, ".cursor", "hooks.json"), filepath.Join(globalHomeDir(), ".cursor", "hooks.json")))
+	out = append(out, fileStatusAny("copilot hooks", filepath.Join(root, ".github", "hooks", "kern-pretooluse.json"), filepath.Join(globalHomeDir(), ".copilot", "hooks", "kern-pretooluse.json")))
 	out = append(out, fileStatus(filepath.Join(homeConfig(".codex", "hooks.json")("")), "codex hooks"))
 	out = append(out, fileStatus(filepath.Join(homeConfig(".qoder", "settings.json")("")), "qoder hooks"))
 

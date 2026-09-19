@@ -797,7 +797,12 @@ func TestAGENTSMdParity(t *testing.T) {
 // .agents/skills, .github/skills, .opencode/skills, and internal/skills/assets
 // stay byte-identical.
 func TestSkillCopiesParity(t *testing.T) {
-	skills := []string{"kern-investigate", "kern-safe-change", "kern-incident-triage"}
+	skills := []string{
+		"kern-investigate",
+		"kern-safe-change",
+		"kern-incident-triage",
+		"kern-team-orchestration",
+	}
 	roots := []string{
 		filepath.Join("..", "..", ".agents", "skills"),
 		filepath.Join("..", "..", ".github", "skills"),

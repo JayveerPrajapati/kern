@@ -228,6 +228,7 @@ kern_ast_search: "explore",
   kern_execute: "edit",
   kern_explain: "explore",
   kern_explore: "explore",
+  kern_fetch_raw_anchor: "cross",
   kern_fit_context: "plan",
   kern_flight: "cross",
   kern_fragility_hotspots: "plan",
@@ -553,6 +554,17 @@ async function runPayload(args: string[], timeoutMs?: number, preserveExit = fal
           if (args.session) flags.push("--session", args.session)
           if (args.model) flags.push("--model", args.model)
           return run([...flags, args.prompt])
+        },
+      }),
+      kern_fetch_raw_anchor: tool({
+        description:
+          "Two-tier context hydration: fetch raw uncompressed text segments that were truncated by kern (e.g. from an anchor marker like [kern: Truncated ... Anchor: anchor-xxx]). Allows AI agents to pull full original logs or code slices on-demand without hallucination or context bloat.",
+        args: {
+          anchor_id: tool.schema.string().describe("The anchor identifier emitted in the compressed output (e.g. anchor-a1b2c3d4e5f6)"),
+        },
+        async execute(args) {
+          const flags: string[] = ["anchor", args.anchor_id]
+          return run(flags)
         },
       }),
       kern_compact_file: tool({
