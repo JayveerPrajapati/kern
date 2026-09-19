@@ -42,6 +42,7 @@ func init() {
 		"kern_meta":                  simple((*Server).handleMeta),
 		"kern_ask":                   simple((*Server).handleMeta),
 		"kern_optimize_prompt":       simple((*Server).handleOptimizePrompt),
+		"kern_fetch_raw_anchor":      simple((*Server).handleFetchAnchor),
 		"kern_memory_add":            simple((*Server).handleMemoryAdd),
 		"kern_memory_list":           simple((*Server).handleMemoryList),
 		"kern_memory_recall":         simple((*Server).handleMemoryRecall),

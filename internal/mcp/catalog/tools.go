@@ -29,6 +29,16 @@ var All = []Tool{
 		}, []string{"prompt"}),
 	},
 	{
+		Name:          "kern_fetch_raw_anchor",
+		SchemaVersion: SchemaVersionV1,
+		Phase:         "cross",
+		RiskLevel:     "low",
+		Description:   "Two-tier context hydration: fetch raw uncompressed text segments that were truncated by kern (e.g. from an anchor marker like [kern: Truncated ... Anchor: anchor-xxx]). Allows AI agents to pull full original logs or code slices on-demand without hallucination or context bloat.",
+		InputSchema: schema(map[string]any{
+			"anchor_id": strProp("The anchor identifier emitted in the compressed output (e.g. anchor-a1b2c3d4e5f6)"),
+		}, []string{"anchor_id"}),
+	},
+	{
 		Name:          "kern_llm_providers",
 		SchemaVersion: SchemaVersionV1,
 		Phase:         "cross",

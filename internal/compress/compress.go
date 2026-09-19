@@ -41,11 +41,45 @@ type Options struct {
 	// KeepContext keeps one neutral line before each error cluster to give
 	// surrounding context without retaining full noise.
 	KeepContext bool
+	// ContextBefore specifies how many leading context lines (-B) to preserve
+	// around error/failure events.
+	ContextBefore int
+	// ContextAfter specifies how many trailing context lines (-A) to preserve
+	// around error/failure events.
+	ContextAfter int
+	// StructuredMarkers emits semantic anchor tags (e.g. [kern: Truncated N lines ...])
+	// instead of bare ellipsis when lines are omitted.
+	StructuredMarkers bool
+	// AnchorFunc is an optional hook to store omitted text and receive an anchor identifier.
+	AnchorFunc func(omitted string) string
 	// Cluster collapses near-duplicate lines (stack traces differing only in
 	// hex addresses, UUIDs, goroutine IDs, standalone numbers or IPs) into one
 	// representative line annotated with "(repeated Nx)". The zero value keeps
 	// the legacy exact-dedup behaviour.
 	Cluster bool
+	// TruncateRules specifies custom pattern-matching and adaptive window/strip rules.
+	TruncateRules []TruncateRule
+}
+
+// TruncateRule controls custom pattern matching and action/windowing for log lines.
+type TruncateRule struct {
+	Match           string
+	Action          string // "strip_completely" or ""
+	KeepLinesBefore int
+	KeepLinesAfter  int
+}
+
+// isImportantLogLine determines if a log line represents an error, warning, or stack frame.
+func isImportantLogLine(trimmed string, idx int, raw []string) bool {
+	if isChatter(trimmed) || strings.Contains(strings.ToLower(trimmed), "exit status") {
+		return false
+	}
+	if stackFrameRe.MatchString(trimmed) || warnLevelRe.MatchString(trimmed) || buildErrRe.MatchString(trimmed) ||
+		(strings.Contains(trimmed, "(") && strings.Contains(trimmed, ")")) ||
+		(idx+1 < len(raw) && strings.HasPrefix(raw[idx+1], "\t")) {
+		return true
+	}
+	return false
 }
 
 // CompressLog reduces noisy log output to its meaningful core: error/warning
@@ -57,6 +91,61 @@ func CompressLog(text string, opts Options) string {
 		opts.MaxLines = 200
 	}
 	raw := strings.Split(text, "\n")
+
+	cb := opts.ContextBefore
+	if opts.KeepContext && cb < 1 {
+		cb = 1
+	}
+	ca := opts.ContextAfter
+
+	// When context windowing (-B / -A) is requested, compute the active inclusion mask
+	inWindow := make([]bool, len(raw))
+	if cb > 0 || ca > 0 {
+		for idx, line := range raw {
+			normalized := timestampRe.ReplaceAllString(line, "")
+			trimmed := strings.TrimSpace(normalized)
+			if isImportantLogLine(trimmed, idx, raw) {
+				start := idx - cb
+				if start < 0 {
+					start = 0
+				}
+				end := idx + ca
+				if end >= len(raw) {
+					end = len(raw) - 1
+				}
+				for j := start; j <= end; j++ {
+					inWindow[j] = true
+				}
+			}
+		}
+	}
+
+	// When custom truncate rules are supplied, compute rule-based stripping and windows
+	isStripped := make([]bool, len(raw))
+	for _, rule := range opts.TruncateRules {
+		if rule.Match == "" {
+			continue
+		}
+		for idx, line := range raw {
+			if strings.Contains(line, rule.Match) {
+				if rule.Action == "strip_completely" {
+					isStripped[idx] = true
+				} else {
+					start := idx - rule.KeepLinesBefore
+					if start < 0 {
+						start = 0
+					}
+					end := idx + rule.KeepLinesAfter
+					if end >= len(raw) {
+						end = len(raw) - 1
+					}
+					for j := start; j <= end; j++ {
+						inWindow[j] = true
+					}
+				}
+			}
+		}
+	}
 
 	var out []string
 	seen := make(map[string]bool)
@@ -73,6 +162,9 @@ func CompressLog(text string, opts Options) string {
 	// repetition counts can span the whole log before the cap is applied.
 	var important []string
 	for idx, line := range raw {
+		if isStripped[idx] {
+			continue
+		}
 		normalized := timestampRe.ReplaceAllString(line, "")
 		// Strip hex offset from stack frame lines (+0x1a3 -> "")
 		if stackFrameRe.MatchString(normalized) || strings.Contains(normalized, "+0x") {
@@ -91,14 +183,13 @@ func CompressLog(text string, opts Options) string {
 		if isChatter(trimmed) || strings.Contains(strings.ToLower(trimmed), "exit status") {
 			continue
 		}
-		importantLine := false
-		if stackFrameRe.MatchString(trimmed) || warnLevelRe.MatchString(trimmed) || buildErrRe.MatchString(trimmed) || (strings.Contains(trimmed, "(") && strings.Contains(trimmed, ")")) || (idx+1 < len(raw) && strings.HasPrefix(raw[idx+1], "\t")) {
-			importantLine = true
-		}
-		if !importantLine && infoLevelRe.MatchString(trimmed) {
+		importantLine := isImportantLogLine(trimmed, idx, raw)
+		inContextWindow := inWindow[idx]
+
+		if !importantLine && !inContextWindow && infoLevelRe.MatchString(trimmed) {
 			continue
 		}
-		if !importantLine && !isUsefulLogLine(trimmed) {
+		if !importantLine && !inContextWindow && !isUsefulLogLine(trimmed) {
 			continue
 		}
 		if opts.Cluster {
@@ -116,7 +207,20 @@ func CompressLog(text string, opts Options) string {
 			// Say the cap was hit so a truncated compression is never mistaken
 			// for the full log.
 			if remaining := len(raw) - idx - 1; remaining > 0 {
-				out = append(out, fmt.Sprintf("… (%d lines omitted)", remaining))
+				omittedBlock := strings.Join(raw[idx+1:], "\n")
+				anchorID := ""
+				if opts.AnchorFunc != nil {
+					anchorID = opts.AnchorFunc(omittedBlock)
+				}
+				if opts.StructuredMarkers {
+					if anchorID != "" {
+						out = append(out, fmt.Sprintf("[kern: Truncated %d lines. Anchor: %s (hydrate with fetch_raw_anchor)]", remaining, anchorID))
+					} else {
+						out = append(out, fmt.Sprintf("[kern: Truncated %d lines of repeated logs]", remaining))
+					}
+				} else {
+					out = append(out, fmt.Sprintf("… (%d lines omitted)", remaining))
+				}
 			}
 			break
 		}

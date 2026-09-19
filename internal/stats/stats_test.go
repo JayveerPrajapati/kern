@@ -23,6 +23,20 @@ func TestCostPerMillion(t *testing.T) {
 	}
 }
 
+func TestModelSavings(t *testing.T) {
+	savings := ModelSavings(1_000_000)
+	if savings["gpt-4o"] != 2.50 {
+		t.Errorf("expected $2.50 savings on gpt-4o for 1M tokens, got: %f", savings["gpt-4o"])
+	}
+	if savings["claude-3-5-sonnet"] != 3.00 {
+		t.Errorf("expected $3.00 savings on claude-3-5-sonnet for 1M tokens, got: %f", savings["claude-3-5-sonnet"])
+	}
+	zero := ModelSavings(0)
+	if len(zero) != 0 {
+		t.Errorf("expected empty map on 0 tokens, got %v", zero)
+	}
+}
+
 func TestRecorderRecordAndSummarize(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "stats")
 	if err := os.MkdirAll(dir, 0o755); err != nil {

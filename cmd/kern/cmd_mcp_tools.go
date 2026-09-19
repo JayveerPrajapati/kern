@@ -584,3 +584,18 @@ func runSynthesizeTest(rest []string) {
 	}
 	runMCPTool("kern_synthesize_test", args)
 }
+
+func runFetchRawAnchor(rest []string) int {
+	if len(rest) == 0 {
+		fmt.Fprintln(os.Stderr, "kern anchor: anchor_id argument required")
+		return 1
+	}
+	anchorID := rest[0]
+	out, err := callTool("kern_fetch_raw_anchor", map[string]any{"anchor_id": anchorID})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "kern anchor: %v\n", err)
+		return 1
+	}
+	fmt.Println(out)
+	return 0
+}

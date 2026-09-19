@@ -61,6 +61,12 @@ var commandTable = map[string]commandEntry{
 		runGuide(rest)
 		return 0
 	}, help: "usage guide", usage: "usage: kern guide [flags]"},
+	"anchor": {run: func(cmd string, rest []string) int {
+		return runFetchRawAnchor(rest)
+	}, help: "fetch raw uncompressed anchor content", usage: "usage: kern anchor <anchor-id>"},
+	"fetch-raw-anchor": {run: func(cmd string, rest []string) int {
+		return runFetchRawAnchor(rest)
+	}, help: "fetch raw uncompressed anchor content", usage: "usage: kern fetch-raw-anchor <anchor-id>  (alias of anchor)"},
 	"completion": {run: func(cmd string, rest []string) int {
 		return runCompletion(rest)
 	}, help: "generate shell completion scripts", usage: "usage: kern completion <bash|zsh|fish>\n  supported shells: bash, zsh, fish"},

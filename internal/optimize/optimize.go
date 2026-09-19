@@ -16,6 +16,7 @@ import (
 
 	"github.com/JayveerPrajapati/kern/internal/cache"
 	"github.com/JayveerPrajapati/kern/internal/compress"
+	"github.com/JayveerPrajapati/kern/internal/kernconfig"
 	"github.com/JayveerPrajapati/kern/internal/llm"
 	"github.com/JayveerPrajapati/kern/internal/memory"
 	"github.com/JayveerPrajapati/kern/internal/pii"
@@ -75,6 +76,14 @@ type Options struct {
 	// Root selects the project memory store for FewShot. Defaults to the
 	// current working directory.
 	Root string
+	// ContextBefore specifies how many leading context lines (-B) to preserve around error events.
+	ContextBefore int
+	// ContextAfter specifies how many trailing context lines (-A) to preserve around error events.
+	ContextAfter int
+	// StructuredMarkers emits semantic anchor tags for truncated sections.
+	StructuredMarkers bool
+	// Profile optionally names a profile from .kern/kern.yaml
+	Profile string
 }
 
 // Recorder is the stats sink. It is nilable for pure/dry-run usage.
@@ -302,8 +311,22 @@ func Log(text string, opts Options) (Result, error) {
 	if strings.TrimSpace(text) == "" {
 		return Result{}, errors.New("empty log")
 	}
+
+	var truncateRules []compress.TruncateRule
+	if cfg := kernconfig.Load(opts.Root); cfg != nil {
+		prof := cfg.Profile(opts.Profile)
+		for _, r := range prof.TruncateRules {
+			truncateRules = append(truncateRules, compress.TruncateRule{
+				Match:           r.Match,
+				Action:          r.Action,
+				KeepLinesBefore: r.KeepLinesBefore,
+				KeepLinesAfter:  r.KeepLinesAfter,
+			})
+		}
+	}
+
 	if opts.Cache {
-		key := "logs/" + cache.Hash([]byte(text))
+		key := "logs/" + cache.Hash([]byte(text+":"+opts.Profile))
 		var cached Result
 		if err := cache.Load(key, &cached); err == nil && cached.Output != "" {
 			cached.FromCache = true
@@ -317,13 +340,31 @@ func Log(text string, opts Options) (Result, error) {
 			sem.Similarity = sim
 			return sem, nil
 		}
-		res := finish(text, compress.CompressLog(text, compress.Options{MaxLines: 200, Cluster: true}), tokenize.KindLog)
+		compressOpts := compress.Options{
+			MaxLines:          200,
+			Cluster:           true,
+			ContextBefore:     opts.ContextBefore,
+			ContextAfter:      opts.ContextAfter,
+			StructuredMarkers: opts.StructuredMarkers,
+			AnchorFunc:        StoreAnchor,
+			TruncateRules:     truncateRules,
+		}
+		res := finish(text, compress.CompressLog(text, compressOpts), tokenize.KindLog)
 		record(stats.OpOptimizeLog, opts, res)
 		_ = cache.Store(key, res)
 		_ = semcache.Store("log", text, res)
 		return res, nil
 	}
-	out := compress.CompressLog(text, compress.Options{MaxLines: 200, Cluster: true})
+	compressOpts := compress.Options{
+		MaxLines:          200,
+		Cluster:           true,
+		ContextBefore:     opts.ContextBefore,
+		ContextAfter:      opts.ContextAfter,
+		StructuredMarkers: opts.StructuredMarkers,
+		AnchorFunc:        StoreAnchor,
+		TruncateRules:     truncateRules,
+	}
+	out := compress.CompressLog(text, compressOpts)
 	res := finish(text, out, tokenize.KindLog)
 	record(stats.OpOptimizeLog, opts, res)
 	return res, nil

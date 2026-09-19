@@ -166,26 +166,44 @@ func confineToRoot(root, file string) (string, error) {
 }
 
 func runLog(rest []string) {
+	f, args, err := parseFlags(rest)
+	if err != nil {
+		fatalUsage("flags: %v", err)
+	}
 	var b []byte
-	var err error
-	if len(rest) < 1 || rest[0] == "-" {
-		b, err = readStdin()
-		if err != nil {
-			fatal("log: %v", err)
+	var rerr error
+	src := ""
+	if len(args) < 1 || args[0] == "-" {
+		b, rerr = readStdin()
+		if rerr != nil {
+			fatal("log: %v", rerr)
 		}
 	} else {
-		b, err = os.ReadFile(rest[0])
-		if err != nil {
-			fatal("log: %v", err)
+		src = args[0]
+		b, rerr = os.ReadFile(src)
+		if rerr != nil {
+			fatal("log: %v", rerr)
 		}
 	}
 	wireRecorder()
-	res, err := optimize.Log(string(b), optimize.Options{})
+	res, err := optimize.Log(string(b), optimize.Options{
+		ContextBefore: f.contextBefore,
+		ContextAfter:  f.contextAfter,
+		Profile:       f.profile,
+		Root:          f.root,
+	})
 	if err != nil {
 		fatal("log: %v", err)
 	}
 	fmt.Println(res.Output)
-	fmt.Fprintf(os.Stderr, "kern: %d -> %d tokens (saved %d, %.1f%%)\n", res.BeforeTokens, res.AfterTokens, res.SavedTokens, res.SavedPercent)
+	fmt.Fprintf(os.Stderr, "kern: %d -> %d tokens (saved %d, %.1f%%)%s\n",
+		res.BeforeTokens, res.AfterTokens, res.SavedTokens, res.SavedPercent,
+		func() string {
+			if f.contextBefore > 0 || f.contextAfter > 0 {
+				return fmt.Sprintf(" [window -%d/+%d]", f.contextBefore, f.contextAfter)
+			}
+			return ""
+		}())
 	if res.LLMSkipped != "" {
 		fmt.Fprintf(os.Stderr, "kern: warning: %s\n", res.LLMSkipped)
 	}

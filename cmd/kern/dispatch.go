@@ -58,6 +58,7 @@ var mcpCLIAlias = map[string]string{
 	"kern_validate_proposed":     "validate-proposed",
 	"kern_explain_finding":       "explain-finding",
 	"kern_repair_guidance":       "repair-guidance",
+	"kern_fetch_raw_anchor":      "anchor",
 	"kern_ast_search":            "ast",
 	"kern_authorize_context":     "authorize-context",
 	"kern_code_graph":            "graph",
