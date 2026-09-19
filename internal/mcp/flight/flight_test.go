@@ -25,7 +25,7 @@ func TestFlightNonExistentTask(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Flight failed: %v", err)
 	}
-	if !strings.Contains(res, "no events recorded") && !strings.Contains(res, "Trail") {
-		// Output may vary depending on trail text, but shouldn't error
+	if !strings.Contains(res, "no flight records") && !strings.Contains(res, "Trail") {
+		t.Errorf("unexpected Flight output: %q", res)
 	}
 }
