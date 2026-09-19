@@ -4,8 +4,9 @@ import (
 	"context"
 	"fmt"
 	"strconv"
+	"strings"
 
-	"github.com/JayveerPrajapati/kern/internal/intel"
+	"github.com/JayveerPrajapati/kern/internal/mcp/crossrepo"
 )
 
 // handleCrossRepoImpact traces external call sites across all registered repositories in RepoRegistry.
@@ -28,10 +29,6 @@ func (s *Server) handleCrossRepoImpact(ctx context.Context, args map[string]any)
 		}
 	}
 
-	rep, err := intel.CrossRepoImpact(subject, limit)
-	if err != nil {
-		return "", err
-	}
-
-	return rep.Render(), nil
+	format := strings.ToLower(argString(args, "format"))
+	return crossrepo.Impact(subject, limit, format)
 }

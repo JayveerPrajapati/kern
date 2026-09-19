@@ -102,6 +102,16 @@ func (w *Worktree) Diff() (string, error) {
 	moves := moveUnhashableAside(w.srcRoot)
 	defer restoreMoved(moves)
 
+	// Fast-path: if the worktree is backed by git (an isolated git worktree),
+	// git diff HEAD in the worktree is indexed, instant, and avoids
+	// recursively crawling unindexed filesystem trees.
+	if fi, err := os.Stat(filepath.Join(w.workDir, ".git")); err == nil && fi != nil {
+		cmd := exec.Command("git", "-C", w.workDir, "diff", "HEAD")
+		if out, err := cmd.CombinedOutput(); err == nil {
+			return string(out), nil
+		}
+	}
+
 	cmd := exec.Command("git", "diff", "--no-index", "--", w.srcRoot, w.workDir)
 	out, err := cmd.CombinedOutput()
 	if err != nil {

@@ -184,6 +184,22 @@ func fileStatus(path, label string) Status {
 	return Status{Agent: label, Installed: installed, Path: path, Note: note}
 }
 
+func fileStatusAny(label string, paths ...string) Status {
+	for _, p := range paths {
+		if p == "" {
+			continue
+		}
+		st := fileStatus(p, label)
+		if st.Installed {
+			return st
+		}
+	}
+	if len(paths) > 0 {
+		return fileStatus(paths[0], label)
+	}
+	return Status{Agent: label, Note: "not present"}
+}
+
 func claudeConfigPath() string {
 	home, err := os.UserHomeDir()
 	if err != nil {
