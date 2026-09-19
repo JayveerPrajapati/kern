@@ -273,12 +273,21 @@ func createWorktree(repoRoot string) (string, func(), error) {
 	}
 	worktreePath := filepath.Join(tmpDir, "work")
 
-	// Create a worktree from the current HEAD.
-	cmd := exec.Command("git", "worktree", "add", "--detach", worktreePath, "HEAD")
-	cmd.Dir = repoRoot
-	if out, err := cmd.CombinedOutput(); err != nil {
+	// Create a worktree from the current HEAD with retries under lock contention.
+	var out []byte
+	var cmdErr error
+	for attempt := 0; attempt < 5; attempt++ {
+		cmd := exec.Command("git", "worktree", "add", "--detach", worktreePath, "HEAD")
+		cmd.Dir = repoRoot
+		out, cmdErr = cmd.CombinedOutput()
+		if cmdErr == nil {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if cmdErr != nil {
 		_ = os.RemoveAll(tmpDir)
-		return "", nil, fmt.Errorf("git worktree add: %w: %s", err, string(out))
+		return "", nil, fmt.Errorf("git worktree add: %w: %s", cmdErr, string(out))
 	}
 
 	cleanup := func() {
