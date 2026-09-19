@@ -35,4 +35,3 @@ func (s *Server) newGovernor(ctx context.Context, args map[string]any, ix *index
 func taskScopeFromArgs(args map[string]any, taskID string) *domain.TaskScope {
 	return gov.TaskScopeFromArgs(args, taskID)
 }
-

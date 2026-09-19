@@ -60,4 +60,3 @@ func (s *Server) stampProvenance(ctx context.Context, p *Provenance) {
 		scope.prov = p
 	}
 }
-

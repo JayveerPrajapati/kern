@@ -643,4 +643,3 @@ func g5WithinRoot(root, resolved string) bool {
 	rel, err := filepath.Rel(r, resolved)
 	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
-
