@@ -58,7 +58,7 @@ func scanPyLine(rel string, lineNo int, line string) []Finding {
 	if rePySubproc.MatchString(line) {
 		if strings.Contains(line, "shell=True") {
 			add("py-subprocess-shell", SeverityError, "subprocess launched with shell=True (shell injection risk)")
-		} else {
+		} else if !strings.Contains(line, "shell=False") {
 			add("py-subprocess", SeverityWarning, "subprocess execution without an explicit shell=False guard")
 		}
 	}
