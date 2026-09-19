@@ -5,6 +5,8 @@ import (
 	"io"
 	"strings"
 	"testing"
+
+	"github.com/JayveerPrajapati/kern/internal/mcp/compose"
 )
 
 func TestHandleComposePipelineSuccess(t *testing.T) {
@@ -58,7 +60,7 @@ func TestHandleComposeInterpolation(t *testing.T) {
 		"count":     10,
 	}
 
-	resolved := interpolateArgs(args, bindings)
+	resolved := compose.InterpolateArgs(args, bindings)
 	if resolved["exact_var"] != "LoadUser" {
 		t.Errorf("exact_var = %v, want 'LoadUser'", resolved["exact_var"])
 	}

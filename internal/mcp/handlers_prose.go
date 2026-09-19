@@ -3,14 +3,12 @@ package mcp
 import (
 	"context"
 	"fmt"
-	"strings"
+
+	"github.com/JayveerPrajapati/kern/internal/mcp/prose"
 )
 
 // handleProse implements kern_prose: prose-word → symbol candidate lookup via
-// the index's build-time inverted vocab. Mirrors handleSearch's
-// structure (loadIndex, query required, limit default 20) so agents can skip
-// the miss-chain (kern_search miss → kern_ast_search miss): ask "middleware"
-// and get the exact symbol names that embed that word.
+// the index's build-time inverted vocab.
 func (s *Server) handleProse(ctx context.Context, args map[string]any) (string, error) {
 	query := argString(args, "query")
 	if query == "" {
@@ -28,13 +26,5 @@ func (s *Server) handleProse(ctx context.Context, args map[string]any) (string, 
 		}
 		limit = n
 	}
-	hits := ix.LookupProse(query, limit)
-	if len(hits) == 0 {
-		return "no prose matches: " + query, nil
-	}
-	var b strings.Builder
-	for _, h := range hits {
-		fmt.Fprintf(&b, "%s (%d words matched)\n", h.Symbol, h.Matched)
-	}
-	return strings.TrimSuffix(b.String(), "\n"), nil
+	return prose.Lookup(ix, query, limit)
 }

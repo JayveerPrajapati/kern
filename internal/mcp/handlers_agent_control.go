@@ -2,96 +2,25 @@ package mcp
 
 import (
 	"context"
-	"encoding/json"
-	"fmt"
-	"time"
 
-	"github.com/JayveerPrajapati/kern/internal/app"
+	mcpagentctl "github.com/JayveerPrajapati/kern/internal/mcp/agentctl"
 )
 
+func (s *Server) agentctlHooks() mcpagentctl.Hooks {
+	return mcpagentctl.Hooks{
+		PlatformFor:  s.platformFor,
+		CoordHandoff: s.coordHandoff,
+	}
+}
+
 // handleAgentMessage implements kern_agent_message: the model sends a
-// message to an agent's coordination inbox. Wraps the coordination handoff
-// primitive (ToAgent = target, Notes = message) with the model as the
-// default sender, so a running agent observing its inbox sees the directive.
+// message to an agent's coordination inbox.
 func (s *Server) handleAgentMessage(ctx context.Context, args map[string]any) (string, error) {
-	to := argString(args, "to_agent")
-	if to == "" {
-		return "", fmt.Errorf("to_agent is required")
-	}
-	notes := argString(args, "notes")
-	if notes == "" {
-		return "", fmt.Errorf("notes (the message) is required")
-	}
-	root := resolveRoot(argString(args, "root"))
-	from := argString(args, "from_agent")
-	if from == "" {
-		from = "model"
-	}
-	taskID := argString(args, "task_id")
-	// Task validation: a task_id naming an unknown task is a caller error —
-	// fail instead of silently creating a handoff that references a task
-	// that does not exist. Mirrors the CLI agent-message check and uses the
-	// same TaskService lookup kern_agent_interrupt performs.
-	if taskID != "" {
-		p, err := s.platformFor(ctx, root)
-		if err != nil {
-			return "", err
-		}
-		ts := app.NewTaskService(p, nil)
-		if _, ok := ts.Get(taskID); !ok {
-			return "", fmt.Errorf("task %q not found", taskID)
-		}
-	}
-
-	coordMu.Lock()
-	if _, ok := activeHandoffs[root]; !ok {
-		activeHandoffs[root] = []AgentHandoff{}
-	}
-	if _, ok := activeClaims[root]; !ok {
-		activeClaims[root] = map[string]ResourceClaim{}
-	}
-	coordMu.Unlock()
-
-	send := map[string]any{
-		"from_agent": from,
-		"to_agent":   to,
-		"notes":      notes,
-	}
-	if taskID != "" {
-		send["task_id"] = taskID
-	}
-	return s.coordHandoff(root, time.Now().UTC(), from, "json", send)
+	return mcpagentctl.AgentMessage(ctx, s.agentctlHooks(), args)
 }
 
 // handleAgentInterrupt implements kern_agent_interrupt: cancels a running
-// task by ID through the TaskService (the real cancel path — task
-// transitions to CANCELLED with a reason, persisted, event published).
+// task by ID through the TaskService.
 func (s *Server) handleAgentInterrupt(ctx context.Context, args map[string]any) (string, error) {
-	taskID := argString(args, "task_id")
-	if taskID == "" {
-		return "", fmt.Errorf("task_id is required")
-	}
-	reason := argString(args, "reason")
-	if reason == "" {
-		reason = "interrupted by model via kern_agent_interrupt"
-	}
-	root := resolveRoot(argString(args, "root"))
-
-	p, err := s.platformFor(ctx, root)
-	if err != nil {
-		return "", err
-	}
-	ts := app.NewTaskService(p, nil)
-	if err := ts.Cancel(taskID, reason); err != nil {
-		return "", err
-	}
-	out, err := json.MarshalIndent(map[string]any{
-		"status":  "cancelled",
-		"task_id": taskID,
-		"reason":  reason,
-	}, "", "  ")
-	if err != nil {
-		return "", err
-	}
-	return string(out), nil
+	return mcpagentctl.AgentInterrupt(ctx, s.agentctlHooks(), args)
 }

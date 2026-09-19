@@ -4,6 +4,8 @@ import (
 	"context"
 	"strings"
 	"testing"
+
+	"github.com/JayveerPrajapati/kern/internal/mcp/coord"
 )
 
 func TestHandleAgentCoordination(t *testing.T) {
@@ -93,10 +95,7 @@ func TestAgentCoordinationClaimsPersistAcrossInstances(t *testing.T) {
 
 	// Simulate a fresh process: drop all in-memory package state. Only the
 	// persisted claims.json may survive.
-	coordMu.Lock()
-	activeClaims = map[string]map[string]ResourceClaim{}
-	activeHandoffs = map[string][]AgentHandoff{}
-	coordMu.Unlock()
+	coord.ResetMemory()
 
 	// Instance 2 (fresh state): status must see the persisted claim.
 	srvB := newTestServer()
@@ -122,10 +121,7 @@ func TestAgentCoordinationClaimsPersistAcrossInstances(t *testing.T) {
 	}
 
 	// Another fresh process: status must show the release (0 claims).
-	coordMu.Lock()
-	activeClaims = map[string]map[string]ResourceClaim{}
-	activeHandoffs = map[string][]AgentHandoff{}
-	coordMu.Unlock()
+	coord.ResetMemory()
 
 	srvC := newTestServer()
 	status, err = srvC.handleAgentCoordination(ctx, map[string]any{
@@ -159,10 +155,7 @@ func TestAgentCoordinationHandoffsPersistAcrossInstances(t *testing.T) {
 	}
 
 	// Simulate a fresh process: only the hf-*.json on disk remains.
-	coordMu.Lock()
-	activeClaims = map[string]map[string]ResourceClaim{}
-	activeHandoffs = map[string][]AgentHandoff{}
-	coordMu.Unlock()
+	coord.ResetMemory()
 
 	srvB := newTestServer()
 	status, err := srvB.handleAgentCoordination(ctx, map[string]any{
