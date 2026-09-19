@@ -49,9 +49,14 @@ var pricesUSD = map[string]float64{
 	"gpt-4.1-nano":      0.10,
 	"claude-sonnet-4":   3.00,
 	"claude-3-5-sonnet": 3.00,
+	"claude-3-5-haiku":  0.80,
 	"claude-haiku-4-5":  1.00,
 	"gemini-2.5-pro":    1.25,
 	"gemini-2.5-flash":  0.30,
+	"gemini-1.5-flash":  0.075,
+	"o3-mini":           1.10,
+	"deepseek-r1":       0.55,
+	"deepseek-v3":       0.14,
 	"llama-3.3-70b":     0.00,
 	"local":             0.00,
 }
@@ -65,6 +70,20 @@ func CostPerMillion(model string) float64 {
 		return 0
 	}
 	return 0
+}
+
+// ModelSavings returns estimated dollar savings across major frontier LLM pricing tiers.
+func ModelSavings(savedTokens int) map[string]float64 {
+	out := make(map[string]float64)
+	if savedTokens <= 0 {
+		return out
+	}
+	for m, price := range pricesUSD {
+		if price > 0 {
+			out[m] = float64(savedTokens) / 1e6 * price
+		}
+	}
+	return out
 }
 
 // DefaultModel is used when a caller doesn't specify a model.

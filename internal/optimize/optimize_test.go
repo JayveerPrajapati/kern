@@ -122,3 +122,58 @@ func TestPromptMaskProviderTokens(t *testing.T) {
 		}
 	}
 }
+
+func TestLogWithKernYAMLProfile(t *testing.T) {
+	tempDir := t.TempDir()
+	kernDir := filepath.Join(tempDir, ".kern")
+	if err := os.MkdirAll(kernDir, 0755); err != nil {
+		t.Fatalf("mkdir failed: %v", err)
+	}
+
+	yamlContent := `
+profiles:
+  test-profile:
+    truncate_rules:
+      - match: "console.log"
+        action: strip_completely
+      - match: "ValidationError:"
+        keep_lines_before: 1
+        keep_lines_after: 1
+`
+	if err := os.WriteFile(filepath.Join(kernDir, "kern.yaml"), []byte(yamlContent), 0644); err != nil {
+		t.Fatalf("write kern.yaml failed: %v", err)
+	}
+
+	log := strings.Join([]string{
+		"2024-01-01 INFO uninteresting chatter 1",
+		"2024-01-01 INFO noise: console.log should be removed",
+		"2024-01-01 INFO request context id=999",
+		"2024-01-01 ValidationError: bad request",
+		"2024-01-01 INFO detail: field missing",
+		"2024-01-01 INFO uninteresting chatter 2",
+	}, "\n")
+
+	res, err := Log(log, Options{
+		Root:    tempDir,
+		Profile: "test-profile",
+	})
+	if err != nil {
+		t.Fatalf("Log failed: %v", err)
+	}
+
+	if strings.Contains(res.Output, "console.log") {
+		t.Errorf("expected console.log to be stripped completely, got:\n%s", res.Output)
+	}
+	if !strings.Contains(res.Output, "ValidationError: bad request") {
+		t.Errorf("expected ValidationError to be preserved, got:\n%s", res.Output)
+	}
+	if !strings.Contains(res.Output, "request context id=999") {
+		t.Errorf("expected request context before to be preserved, got:\n%s", res.Output)
+	}
+	if !strings.Contains(res.Output, "detail: field missing") {
+		t.Errorf("expected detail after to be preserved, got:\n%s", res.Output)
+	}
+	if strings.Contains(res.Output, "uninteresting chatter") {
+		t.Errorf("expected uninteresting chatter to be omitted, got:\n%s", res.Output)
+	}
+}

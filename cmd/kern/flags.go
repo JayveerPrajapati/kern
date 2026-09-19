@@ -134,6 +134,8 @@ type flags struct {
 	serverCmd            string
 	target               string
 	minFixes             int
+	contextBefore        int // --context-before (optimize log adaptive windowing)
+	contextAfter         int // --context-after  (optimize log adaptive windowing)
 
 	// ---- FlagSet-migrated flags (unified parser). Each field backs one or
 	// more subcommand flags that previously used stdlib flag.FlagSet; names,
@@ -556,6 +558,10 @@ func parseFlags(args []string) (flags, []string, error) {
 			setIntFlag(&i, &f.maxTokens, "--max-tokens", inline, hasInline)
 		case "--max-files":
 			setIntFlag(&i, &f.maxFiles, "--max-files", inline, hasInline)
+		case "--context-before":
+			setIntFlag(&i, &f.contextBefore, "--context-before", inline, hasInline)
+		case "--context-after":
+			setIntFlag(&i, &f.contextAfter, "--context-after", inline, hasInline)
 		case "--tier":
 			setStr(&i, &f.tier, inline, hasInline)
 		case "--precision":

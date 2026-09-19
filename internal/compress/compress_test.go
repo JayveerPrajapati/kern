@@ -205,3 +205,81 @@ func TestCompressLogFoldStackFrames(t *testing.T) {
 		t.Fatalf("expected top and bottom app frames preserved, got:\n%s", got)
 	}
 }
+
+func TestCompressLogAdaptiveWindowing(t *testing.T) {
+	log := strings.Join([]string{
+		"2024-01-01 10:00:00 INFO step 1 initialized",
+		"2024-01-01 10:00:01 INFO loading config file /etc/app.json",
+		"2024-01-01 10:00:02 INFO preparing database pool",
+		"2024-01-01 10:00:03 ERROR database connection timeout",
+		"2024-01-01 10:00:04 INFO teardown started",
+		"2024-01-01 10:00:05 INFO cleanup completed",
+	}, "\n")
+
+	// ContextBefore=2, ContextAfter=1 ensures the 2 lines before and 1 line after error are retained
+	got := CompressLog(log, Options{ContextBefore: 2, ContextAfter: 1, MaxLines: 50})
+	if !strings.Contains(got, "loading config file") {
+		t.Errorf("expected context before (line 2) retained, got:\n%s", got)
+	}
+	if !strings.Contains(got, "preparing database pool") {
+		t.Errorf("expected context before (line 3) retained, got:\n%s", got)
+	}
+	if !strings.Contains(got, "ERROR database connection timeout") {
+		t.Errorf("expected error line retained, got:\n%s", got)
+	}
+	if !strings.Contains(got, "teardown started") {
+		t.Errorf("expected context after (line 5) retained, got:\n%s", got)
+	}
+}
+
+func TestCompressLogStructuredMarkers(t *testing.T) {
+	var sb strings.Builder
+	for i := 0; i < 30; i++ {
+		fmt.Fprintf(&sb, "ERROR task failed with code %d\n", i)
+	}
+	got := CompressLog(sb.String(), Options{MaxLines: 5, StructuredMarkers: true})
+	if !strings.Contains(got, "[kern: Truncated") {
+		t.Errorf("expected structured marker, got:\n%s", got)
+	}
+}
+
+func TestCompressLogTruncateRules(t *testing.T) {
+	log := strings.Join([]string{
+		"2024-01-01 10:00:00 INFO step 1",
+		"2024-01-01 10:00:01 INFO payload debug: console.log secret data",
+		"2024-01-01 10:00:02 INFO payload request user_id=42",
+		"2024-01-01 10:00:03 ValidationError: invalid field age",
+		"2024-01-01 10:00:04 INFO validation detail: age cannot be negative",
+		"2024-01-01 10:00:05 INFO validation detail: rule schema v2",
+		"2024-01-01 10:00:06 INFO step done",
+	}, "\n")
+
+	rules := []TruncateRule{
+		{Match: "console.log", Action: "strip_completely"},
+		{Match: "ValidationError:", KeepLinesBefore: 1, KeepLinesAfter: 2},
+	}
+
+	got := CompressLog(log, Options{TruncateRules: rules, MaxLines: 50})
+
+	// console.log should be completely stripped
+	if strings.Contains(got, "console.log") {
+		t.Errorf("expected console.log to be stripped completely, got:\n%s", got)
+	}
+	// ValidationError and its window before (line 3) and after (lines 5, 6) should be preserved
+	if !strings.Contains(got, "payload request user_id=42") {
+		t.Errorf("expected user_id=42 (KeepLinesBefore=1) preserved, got:\n%s", got)
+	}
+	if !strings.Contains(got, "ValidationError: invalid field age") {
+		t.Errorf("expected ValidationError preserved, got:\n%s", got)
+	}
+	if !strings.Contains(got, "validation detail: age cannot be negative") {
+		t.Errorf("expected detail age (KeepLinesAfter=2) preserved, got:\n%s", got)
+	}
+	if !strings.Contains(got, "validation detail: rule schema v2") {
+		t.Errorf("expected detail schema (KeepLinesAfter=2) preserved, got:\n%s", got)
+	}
+	// step 1 and step done should NOT be in the window
+	if strings.Contains(got, "step 1") || strings.Contains(got, "step done") {
+		t.Errorf("expected outside steps to be omitted, got:\n%s", got)
+	}
+}
