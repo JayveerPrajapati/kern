@@ -328,4 +328,3 @@ func registeredGate(t *testing.T, id string) (Gate, bool) {
 	}
 	return Gate{}, false
 }
-
