@@ -30,7 +30,7 @@
 
 <br>
 
-**17 Indexed Languages · 74 Frameworks Recognized · Phase-aware MCP Routing (11 high-level tools by default, 145 in full mode) · 100% Local**
+**17 Indexed Languages · 74 Frameworks Recognized · Phase-aware MCP Routing (11 high-level tools by default, 146 in full mode) · 100% Local**
 
 </div>
 
@@ -228,7 +228,7 @@ Run `kern setup` or check [`docs/mcp-client.md`](docs/mcp-client.md) for custom 
 
 ## MCP Tools & Routing
 
-By default, `kern` advertises a **focused 11-tool high-level surface** (11 high-level tools by default, 145 in full mode) routed through the smart **`kern_meta`** natural-language dispatcher.
+By default, `kern` advertises a **focused 11-tool high-level surface** (11 high-level tools by default, 146 in full mode) routed through the smart **`kern_meta`** natural-language dispatcher.
 
 | Core Tool | Purpose | What it Replaces |
 |---|---|---|
@@ -244,7 +244,7 @@ By default, `kern` advertises a **focused 11-tool high-level surface** (11 high-
 | **`kern_authorize_context`** | Computes authorized symbol context with cryptographic access proof | Unchecked file access |
 | **`kern_optimize_prompt`** | Strips boilerplate and masks secrets before sending prompts | Unsafe prompt leaks |
 
-*Set `KERN_MCP_FULL=1` to expose the entire 145-tool catalog (11 high-level tools by default, 145
+*Set `KERN_MCP_FULL=1` to expose the entire 146-tool catalog (11 high-level tools by default, 146
 in full mode), or `KERN_MCP_PHASE=explore|plan|edit|verify` to filter by active agent phase.*
 
 ---
@@ -281,7 +281,7 @@ kern guard                # Verify architecture boundaries
 
 # Diagnostics & Optimization
 kern doctor               # Verify binary, agent configs, and index health
-kern optimize <prompt>    # Strip filler and mask secrets
+kern optimize <prompt>    # Strip filler, mask secrets, and preserve context (-A/-B)
 kern stats                # Track cumulative local token & cost savings
 ```
 
@@ -348,8 +348,9 @@ verdict: all systems operational
 ## Docs
 
 - [`docs/cli-reference.md`](docs/cli-reference.md) — Complete 90+ CLI command reference.
-- [`docs/tool-catalog.md`](docs/tool-catalog.md) — Full generated MCP tool catalog (145 tools).
-- [`docs/configuration.md`](docs/configuration.md) — Configuration and environment variables.
+- [`docs/tool-catalog.md`](docs/tool-catalog.md) — Full generated MCP tool catalog (146 tools).
+- [`docs/configuration.md`](docs/configuration.md) — Configuration, `.kern.yaml` profiles, and environment variables.
+- [`docs/duplication-benchmark.md`](docs/duplication-benchmark.md) — Multi-language structural duplication benchmark results.
 - [`docs/privacy.md`](docs/privacy.md) — Security and privacy specifications.
 - [`docs/authorized-context.md`](docs/authorized-context.md) — Authorized-context & governance proofs.
 - [`docs/skills.md`](docs/skills.md) — Bundled agent skills & runbooks.

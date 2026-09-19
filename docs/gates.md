@@ -1,7 +1,7 @@
-# Blueprint Firewall Gates (G0–G39)
+# Blueprint Firewall Gates (G0–G39, G10 retired)
 
-This document is the catalog of the 40 Blueprint change-firewall gates (G0 through G39)
-implemented in [`internal/gates/registry.go`](../internal/gates/registry.go).
+This document is the catalog of the 39 Blueprint change-firewall gates (G0 through G39,
+G10 retired) implemented in [`internal/gates/registry.go`](../internal/gates/registry.go).
 These gates are enforced by `kern check` and `kern ci` to ensure architectural integrity,
 security, and code health.
 
@@ -9,48 +9,48 @@ security, and code health.
 
 ## Gate Inventory
 
-| Gate | Name | Category | Enforcement | Verifies |
-|---|---|---|---|---|
-| **G0** | Baseline build & vets | Core | Block | Baseline builds+vets, ownership docs exist, exit-code contract |
-| **G1** | Scope containment | Core | Block | Changes remain strictly within authorized task scope |
-| **G2** | Architectural boundaries | Architecture | Block | Prohibits cross-tier package violations (e.g. CLI importing internal packages directly) |
-| **G3** | Secret detection | Security | Block | Prevents hardcoded API keys, tokens, and private keys |
-| **G4** | Public API drift | Interface | Warn | Tracks additions and breaks in exported API surface |
-| **G5** | Taint & injection | Security | Block | Flags unvalidated inputs reaching system sinks (exec, SQL, HTML) |
-| **G6** | Code duplication | Quality | Warn | Pass-1 AST similarity triage and jscpd clone detection |
-| **G7** | Cache GC & retention | Hygiene | Warn | Verifies cache expiration and dormant entry archiving |
-| **G8** | Test coverage floor | Testing | Block | Ensures modified functions maintain test coverage thresholds |
-| **G9** | Package import cycles | Architecture | Block | Rejects circular package dependencies (Tarjan SCC) |
-| **G10** | Error handling contracts | Reliability | Block | Rejects ignored errors and enforces structured error wrapping |
-| **G11** | Concurrency safety | Reliability | Block | Detects data races and unbuffered channel leaks |
-| **G12** | Memory leaks & allocs | Performance | Warn | Bounds heap allocation growth in hot execution paths |
-| **G13** | Schema validation | Integrity | Block | Validates JSON/YAML configurations against schema definitions |
-| **G14** | Audit chain continuity | Governance | Block | Verifies cryptographic hash continuity of the audit trail |
-| **G15** | Role-based tool access (RBAC)| Governance | Block | Enforces agent role permissions (junior_dev, reviewer, admin) |
-| **G16** | Context budget limits | Efficiency | Warn | Monitors conversation token bloat and prompts compaction |
-| **G17** | Health & freshness | Diagnostics | Warn | Verifies MCP server health and symbol index freshness |
-| **G18** | Rollback integrity | Sandbox | Block | Validates ephemeral snapshot restoration on execution failure |
-| **G19** | Conventional commits | Metadata | Block | Asserts deterministic type/scope formatting in commit messages |
-| **G20** | License compliance | Compliance | Block | Rejects forbidden third-party dependency licenses |
-| **G21** | Dead code elimination | Hygiene | Warn | Flags unreachable private functions and unused constants |
-| **G22** | Large file limits | Hygiene | Warn | Flags god-functions (>200 lines) and oversized files |
-| **G23** | Hub coupling control | Architecture | Warn | Limits transitive fan-out on core system hub functions |
-| **G24** | Bridge qualification | Architecture | Warn | Requires qualified package.Symbol naming on cross-package bridges |
-| **G25** | PII masking enforcement | Privacy | Block | Asserts secrets and IPs are scrubbed before remote egress |
-| **G26** | Non-interactive safety | Autonomy | Block | Disallows unmonitored interactive prompts in CI/headless mode |
-| **G27** | Pre-edit blast radius | Safety | Block | Requires operator approval before editing HIGH-risk hubs |
-| **G28** | Reproduction test synthesis | SRE | Block | Requires minimal failing test before applying incident repairs |
-| **G29** | In-toto attestation | Security | Block | Attests build provenance with SLSA-compatible metadata |
-| **G30** | Diff gate: gofmt | Style | Warn | diff-gate format:gofmt flags unformatted changed .go files (advisory WARN; gofmt -l is deterministic) |
-| **G31** | Diff gate: vulnerabilities | Security | Warn | diff-gate vulnerability:sec maps the in-house sec scanner onto the changed set (error→BLOCK, warning→WARN, info→INFO) |
-| **G32** | Diff gate: schema drift | Integrity | Warn | diff-gate schema:drift fingerprints the MCP tool catalog (name/phase/risk/InputSchema sha256) and detects baseline drift; --init-baseline round-trips |
-| **G33** | Diff gate: unsafe execution | Security | Warn | diff-gate exec:unsafe flags changed non-test .go files importing os/exec, calling exec.Command, or containing sh -c (advisory WARN) |
-| **G34** | Diff gate: changelog | Documentation | Warn | diff-gate changelog:missing warns on non-doc source changes without a CHANGELOG.md entry (advisory WARN) |
-| **G35** | Diff gate: MCP catalog drift | Contracts | Block | diff-gate catalog:drift BLOCKs when the opencode plugin tool set diverges from the MCP catalog (real drift guard) |
-| **G36** | Diff gate: tool catalog doc freshness | Contracts | Block | diff-gate catalog:doc BLOCKs when docs/tool-catalog.md is missing, does not document a registered MCP tool, or differs from a fresh `kern gen-catalog` generation (docs never drift from the catalog) |
-| **G37** | Decision-record format | Documentation | Block | diff-gate note:format BLOCKs when the docs/notes/ decision-record tree violates its path-encoded lifecycle/class contract or in-file format (kern note validate contract) |
-| **G38** | Decision-record on change | Documentation | Warn | diff-gate note:missing WARNs when non-doc source changes carry no docs/notes/ decision record (advisory, mirrors the changelog gate) |
-| **G39** | Documentation budget | Documentation | Block | diff-gate doc:budget BLOCKs when a document listed in docs/doc-budgets.json exceeds its word ceiling or goes missing (one home per fact, enforced ceilings) |
+| Gate | Name | Enforcement | Verifies |
+|---|---|---|---|
+| **G0** | Baseline build & vets | Block | Baseline builds+vets, ownership docs exist, exit-code contract |
+| **G1** | Validation engine | Block | PASS/BLOCK aggregation, precedence ERROR>BLOCK, JSON, SKIP |
+| **G2** | Architecture/boundary enforcement | Block | Architecture/boundary enforcement via kern guard |
+| **G3** | Secret detection & redaction | Block | Secret detection + redaction (gitleaks adapter primary, kern sec fallback) |
+| **G4** | Pre-commit hook via CLI | Block | Pre-commit hook: clean/block/JSON/bypass/idempotent/foreign-hook |
+| **G5** | MCP validate_staged tool | Block | MCP server validate_staged tool |
+| **G6** | Duplication check | Warn | Duplication: precision/recall on 7 fixtures, never-blocks, format |
+| **G7** | Agent repair loop & feedback | Block | Agent repair loop + feedback contract (BLOCK carries evidence) |
+| **G8** | Sandboxed build/test isolation | Block | Sandboxed build/test isolation |
+| **G9** | Resilience scenarios | Warn | Resilience: injected timeouts, network leakage, cleanup, shell scenarios |
+| ~~**G10**~~ | *(retired)* | — | *(Retired alongside internal/blueprint/watcher)* |
+| **G11** | CI command | Block | CI command: clean/block PR, determinism, JSON artifact, detached-head no-mutation |
+| **G12** | Metrics | Info | Metrics: latency benchmarks, persistence, cap, atomic save |
+| **G13** | Fresh-machine end-to-end | Block | Fresh-machine end-to-end (build+install+MCP+check) |
+| **G14** | Versioned kern contract | Block | Versioned kern contract, fail-closed |
+| **G15** | Pre-write validation (validate_proposed) | Block | Pre-write validation for agents via validate_proposed |
+| **G16** | Source-aware policy | Warn | Source-aware policy (source override changes status, never passes block, warn cap) |
+| **G17** | Doctor preflight | Info | blueprint doctor preflight (env/config/git) |
+| **G18** | Policy in MCP handlers | Block | Policy evaluator wired into MCP handlers |
+| **G19** | Audit trail on validation | Block | Audit trail written on validation |
+| **G20** | Suppressions & owners | Info | Suppressions + owners policy |
+| **G21** | Duplication on-disk/content-path | Warn | Duplication on-disk / content-path warn, confidence=similarity |
+| **G22** | blueprint fix command | Block | blueprint fix: proposed fix, confinement, worktree cleanup, JSON |
+| **G23** | Resilience check wiring | Warn | Resilience check wiring / scenarios (YAML) |
+| **G24** | Latency budget gate | Block | Latency budget gate, strict-latency hard-fail |
+| **G25** | Evidence provenance fields | Info | Kern 2.0 evidence provenance fields |
+| **G26** | Sandbox tests opt-in | Block | Sandbox build/test check behind --tests opt-in |
+| **G27** | Audit chain linked to kern | Block | audit chain linked to kern's tamper-evident chain via kern audit append |
+| **G28** | Repair loop via MCP | Block | Repair-loop end-to-end via MCP repair_guidance tool |
+| **G29** | Approval gate (two-person rule) | Block | high-risk agent changes require explicit human approval before proceeding |
+| **G30** | Diff gate: gofmt | Warn | diff-gate format:gofmt flags unformatted changed .go files (advisory WARN; gofmt -l is deterministic) |
+| **G31** | Diff gate: vulnerabilities | Warn | diff-gate vulnerability:sec maps the in-house sec scanner onto the changed set (error→BLOCK, warning→WARN, info→INFO) |
+| **G32** | Diff gate: schema drift | Warn | diff-gate schema:drift fingerprints the MCP tool catalog (name/phase/risk/InputSchema sha256) and detects baseline drift; --init-baseline round-trips |
+| **G33** | Diff gate: unsafe execution | Warn | diff-gate exec:unsafe flags changed non-test .go files importing os/exec, calling exec.Command, or containing sh -c (advisory WARN) |
+| **G34** | Diff gate: changelog | Warn | diff-gate changelog:missing warns on non-doc source changes without a CHANGELOG.md entry (advisory WARN) |
+| **G35** | Diff gate: MCP catalog drift | Block | diff-gate catalog:drift BLOCKs when the opencode plugin tool set diverges from the MCP catalog (real drift guard) |
+| **G36** | Diff gate: tool catalog doc freshness | Block | diff-gate catalog:doc BLOCKs when docs/tool-catalog.md is missing, does not document a registered MCP tool, or differs from a fresh `kern gen-catalog` generation (docs never drift from the catalog) |
+| **G37** | Decision-record format | Block | diff-gate note:format BLOCKs when the docs/notes/ decision-record tree violates its path-encoded lifecycle/class contract or in-file format (kern note validate contract) |
+| **G38** | Decision-record on change | Warn | diff-gate note:missing WARNs when non-doc source changes carry no docs/notes/ decision record (advisory, mirrors the changelog gate) |
+| **G39** | Documentation budget | Block | diff-gate doc:budget BLOCKs when a document listed in docs/doc-budgets.json exceeds its word ceiling or goes missing (one home per fact, enforced ceilings) |
 
 ---
 
@@ -58,3 +58,4 @@ security, and code health.
 
 * **Block**: The gate violation halts the pipeline immediately and exits with code 2. The change cannot be merged or executed without remediation or explicit override.
 * **Warn**: An advisory notice is emitted in reports and logs, but execution proceeds.
+* **Info**: Informational only — reported in diagnostics (`blueprint doctor --json`) but does not affect pipeline status.

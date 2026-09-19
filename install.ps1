@@ -3,16 +3,21 @@
 #   powershell -ExecutionPolicy Bypass -c "irm https://raw.githubusercontent.com/JayveerPrajapati/kern/main/install.ps1 | iex"
 #
 # Behavior (mirrors install.sh):
-#   * Defaults to the latest release; pin with $env:KERN_VERSION="v1.2.3".
+#   * Defaults to the latest release; pin with $env:KERN_VERSION="v0.9.9.1".
 #   * Installs to $HOME\.local\bin by default, or $env:KERN_INSTALL_DIR if set.
 #   * Downloads the prebuilt kern-windows-amd64.zip; falls back to `go install`
 #     if the download fails but `go` is present.
-#   * Adds the install dir to the current process PATH (persist with setx).
+#   * Adds the install dir to the user PATH (persisted via User environment).
+#   * Verifies `kern.exe version` and performs an MCP JSON-RPC initialize handshake.
+#   * Auto-wires kern into detected agents (`kern setup --detect --global`).
+#   * Supports actions: install (default), status, uninstall.
 #
 # Distribution note: replace JayveerPrajapati below with your GitHub username
 # (or run scripts/retarget.sh which rewrites this file for you).
 
-param()
+param(
+    [string]$Action = "install"
+)
 
 $ErrorActionPreference = "Stop"
 $Owner = $env:KERN_REPO_OWNER
@@ -33,6 +38,38 @@ function Get-Version {
   } catch {
     return $null
   }
+}
+
+function Probe-Mcp {
+    param([string]$McpPath)
+    if (-not (Test-Path $McpPath)) { return $false }
+    try {
+        $initReq = '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"kern-installer","version":"1.0"}}}'
+        $resp = $initReq | & $McpPath 2>$null | Select-Object -First 1
+        if ($resp -and $resp -match '"jsonrpc"') {
+            Write-Host "kern: kern-mcp MCP handshake OK" -ForegroundColor Green
+            return $true
+        }
+    } catch {}
+    Write-Host "kern: warning: kern-mcp did not answer the MCP initialize handshake" -ForegroundColor Yellow
+    return $false
+}
+
+function Verify-Kern {
+    param([string]$PrefixDir)
+    $kern = Join-Path $PrefixDir "kern.exe"
+    $mcp = Join-Path $PrefixDir "kern-mcp.exe"
+    if (Test-Path $kern) {
+        try {
+            $ver = (& $kern version 2>$null | Select-Object -First 1)
+            if ($ver -match "kern") {
+                Write-Host "kern: verified $ver" -ForegroundColor Green
+            }
+        } catch {}
+    }
+    if (Test-Path $mcp) {
+        Probe-Mcp -McpPath $mcp | Out-Null
+    }
 }
 
 function Install-Go {
@@ -73,11 +110,6 @@ function Confirm-Sha256 {
     return $true
 }
 
-# Wire-Kern adds $Prefix to the user PATH (if needed) and auto-wires kern into
-# the detected agents (setup --detect --global) plus auto-indexes the project.
-# Extracted into a function so BOTH the prebuilt-install path and the go-install
-# fallback run it — a fallback install must wire agents exactly like a prebuilt
-# one (previously it returned early and left nothing wired / MCP broken).
 function Wire-Kern {
     $oldPath = [Environment]::GetEnvironmentVariable("Path", "User")
     if ($oldPath -notlike "*$Prefix*") {
@@ -105,10 +137,64 @@ function Wire-Kern {
     } catch { <# non-fatal: setup/index is best-effort #> }
 }
 
+function Show-Status {
+    $arch = $env:PROCESSOR_ARCHITECTURE
+    Write-Host "kern installer status"
+    Write-Host "  platform:    windows-$arch"
+    Write-Host "  install dir: $Prefix"
+    $kern = Join-Path $Prefix "kern.exe"
+    if (Test-Path $kern) {
+        $ver = (& $kern version 2>$null | Select-Object -First 1)
+        Write-Host "  installed:   $ver ($kern)"
+        $mcp = Join-Path $Prefix "kern-mcp.exe"
+        if (Test-Path $mcp) {
+            Probe-Mcp -McpPath $mcp | Out-Null
+        }
+    } else {
+        Write-Host "  installed:   not installed in $Prefix"
+    }
+}
+
+function Uninstall-Kern {
+    Write-Host "kern: uninstalling from $Prefix..."
+    foreach ($b in @("kern.exe", "kern-mcp.exe", "kern-server.exe")) {
+        $p = Join-Path $Prefix $b
+        if (Test-Path $p) {
+            Remove-Item -Force $p -ErrorAction SilentlyContinue
+            Write-Host "  removed $p"
+        }
+    }
+    $oldPath = [Environment]::GetEnvironmentVariable("Path", "User")
+    if ($oldPath -like "*$Prefix*") {
+        $newPath = (($oldPath -split ";" | Where-Object { $_ -ne $Prefix -and $_.Trim() -ne "" }) -join ";")
+        [Environment]::SetEnvironmentVariable("Path", $newPath, "User")
+        Write-Host "  removed $Prefix from User PATH"
+    }
+    Write-Host "kern: uninstalled successfully." -ForegroundColor Green
+}
+
+# Command dispatch:
+if ($Action -eq "status" -or ($args.Count -gt 0 -and $args[0] -eq "status")) {
+    Show-Status
+    exit 0
+}
+if ($Action -eq "uninstall" -or ($args.Count -gt 0 -and $args[0] -eq "uninstall")) {
+    Uninstall-Kern
+    exit 0
+}
+
 $tag = Get-Version
 if (-not $tag) {
     Write-Host "kern: could not resolve release version" -ForegroundColor Yellow
-    if (Get-Command go -ErrorAction SilentlyContinue) { $goInstalled = Install-Go; if ($goInstalled) { & Wire-Kern; exit 0 } ; exit 1 }
+    if (Get-Command go -ErrorAction SilentlyContinue) {
+        $goInstalled = Install-Go
+        if ($goInstalled) {
+            Verify-Kern -PrefixDir $Prefix
+            & Wire-Kern
+            exit 0
+        }
+        exit 1
+    }
     Write-Host "kern: install Go (https://go.dev/dl/) or download from https://github.com/$Repo/releases" -ForegroundColor Red
     exit 1
 }
@@ -118,7 +204,15 @@ $arch = $env:PROCESSOR_ARCHITECTURE
 $goarch = if ($arch -match "ARM64") { "arm64" } elseif ($arch -match "64") { "amd64" } else { "386" }
 if ($goarch -ne "amd64" -and $goarch -ne "arm64") {
     Write-Host "kern: no prebuilt asset for $goarch on Windows; falling back to go install." -ForegroundColor Yellow
-    if (Get-Command go -ErrorAction SilentlyContinue) { $goInstalled = Install-Go; if ($goInstalled) { & Wire-Kern; exit 0 }; exit 1 }
+    if (Get-Command go -ErrorAction SilentlyContinue) {
+        $goInstalled = Install-Go
+        if ($goInstalled) {
+            Verify-Kern -PrefixDir $Prefix
+            & Wire-Kern
+            exit 0
+        }
+        exit 1
+    }
     Write-Host "kern: install Go or use a 64-bit Windows." -ForegroundColor Red
     exit 1
 }
@@ -135,7 +229,15 @@ try {
         Invoke-WebRequest -Uri $url -OutFile $zip -UseBasicParsing
     } catch {
         Write-Host "kern: no prebuilt asset for Windows at $tag; falling back to go install." -ForegroundColor Yellow
-        if (Get-Command go -ErrorAction SilentlyContinue) { $goInstalled = Install-Go; if ($goInstalled) { & Wire-Kern; exit 0 }; exit 1 }
+        if (Get-Command go -ErrorAction SilentlyContinue) {
+            $goInstalled = Install-Go
+            if ($goInstalled) {
+                Verify-Kern -PrefixDir $Prefix
+                & Wire-Kern
+                exit 0
+            }
+            exit 1
+        }
         Write-Host "kern: download failed and go is not installed." -ForegroundColor Red
         exit 1
     }
@@ -162,6 +264,7 @@ try {
     if ($server) { Copy-Item $server.FullName (Join-Path $Prefix "kern-server.exe") -Force }
 
     Write-Host "installed: $(Join-Path $Prefix 'kern.exe') ($tag)"
+    Verify-Kern -PrefixDir $Prefix
     & Wire-Kern
 
     Write-Host "kern is ready. Run 'kern buddy' for a project onboarding digest."

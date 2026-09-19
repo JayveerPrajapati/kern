@@ -23,9 +23,9 @@ The server rejects **null**, **object** and **array** values for string-typed ar
 
 | Metric | Value |
 |---|---|
-| Total tools | 145 |
-| Phases | explore (40), plan (16), edit (22), verify (21), meta (2), cross (44) |
-| Risk levels | low (85), medium (36), high (19), critical (5) |
+| Total tools | 146 |
+| Phases | explore (40), plan (16), edit (22), verify (21), meta (2), cross (45) |
+| Risk levels | low (86), medium (36), high (19), critical (5) |
 
 ## Full catalog (summary)
 
@@ -78,6 +78,7 @@ The server rejects **null**, **object** and **array** values for string-typed ar
 | `kern_explain` | explore | low | Synthesizes an end-to-end architectural narrative for a symbol or file: purpose, callers, callees, interfaces, and testing posture in a single call. |
 | `kern_explain_finding` | verify | low | Blueprint change firewall: explain a single gate finding (rule id, severity, category, file, line, message, evidence) in plain language — why it was raised and what the rule checks. Merged from the standalone blueprint-mcp server. |
 | `kern_explore` | explore | low | Single-call explore (#2): return a symbol's verbatim source, direct call flow (callers + callees) and transitive blast radius (with affected files) in one shot. The primitive that replaces three separate calls (graph/near/path) for 'what touches this and how'. Pass depth=N to cap the blast radius to N hops and max=N to cap node count. |
+| `kern_fetch_raw_anchor` | cross | low | Two-tier context hydration: fetch raw uncompressed text segments that were truncated by kern (e.g. from an anchor marker like [kern: Truncated ... Anchor: anchor-xxx]). Allows AI agents to pull full original logs or code slices on-demand without hallucination or context bloat. |
 | `kern_fit_context` | plan | low | Adaptive token compressor: fits targeted source files, symbols, or queries into any specified token budget using tiered AST folding (Full Source -> Signatures + Docstrings -> Symbolic Summary). Prevents context truncation panics while maximizing code fidelity. |
 | `kern_flight` | cross | low | Replay the AI flight recorder (Workflow E observability): the full recorded trail for one task — every stage, tool call, decision, approval, and outcome, in chronological order. Read-only; answers 'what did the agent do, why, and what happened?'. Records live under <root>/.kern/flight. |
 | `kern_fragility_hotspots` | plan | low | Causal Defect & Fragility Hotspot Analysis: correlates historical git defect/fix commits with the AST symbol call graph to calculate fragility scores and proactively flag regression-prone components before edits are made. |
@@ -1867,6 +1868,18 @@ Local vector search over a project's documents (markdown, text, rst, adoc). Chun
 | `k` | string | no | Max fragments to return (default 5) |
 | `query` | string | no | Natural-language or keyword query |
 | `root` | string | no | Project root (defaults to current directory) |
+
+### `kern_fetch_raw_anchor`
+
+- **Phase:** cross
+- **Risk level:** low
+- **Required:** none
+
+Two-tier context hydration: fetch raw uncompressed text segments that were truncated by kern (e.g. from an anchor marker like [kern: Truncated ... Anchor: anchor-xxx]). Allows AI agents to pull full original logs or code slices on-demand without hallucination or context bloat.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `anchor_id` | string | no | The anchor identifier emitted in the compressed output (e.g. anchor-a1b2c3d4e5f6) |
 
 ### `kern_flight`
 

@@ -77,6 +77,7 @@ and capped like every other subsystem.
 | `internal/integration` | 0 | 100 |  |
 | `internal/intel` | 7837 | 11800 | `internal/budget` `internal/cache` `internal/code` `internal/eventbus` `internal/index` `internal/tokenize` |
 | `internal/intelligence` | 855 | 1300 | `internal/domain` `internal/index` |
+| `internal/kernconfig` | 135 | 300 |  |
 | `internal/learning` | 197 | 300 | `internal/cache` `internal/domain` `internal/memory` |
 | `internal/lenses` | 289 | 500 | `internal/domain` |
 | `internal/llm` | 1102 | 1700 | `internal/config` |
@@ -84,15 +85,49 @@ and capped like every other subsystem.
 | `internal/loop` | 1700 | 2600 | `internal/blueprint` `internal/bppolicy` `internal/coder` `internal/deployment` `internal/domain` `internal/eventbus` `internal/execution` `internal/flight` `internal/governance` `internal/incident` `internal/learning` `internal/memory` `internal/planner` `internal/runtime` `internal/scanners` `internal/verification` |
 | `internal/lsp` | 658 | 1000 | `internal/index` |
 | `internal/lspbridge` | 1006 | 1600 |  |
-| `internal/mcp` | 13775 | 20700 | `internal/agent` `internal/blueprint/checks/diffgate` `internal/bpcli` `internal/app` `internal/brief` `internal/budget` `internal/cache` `internal/code` `internal/commitmsg` `internal/config` `internal/context` `internal/diff` `internal/docsearch` `internal/domain` `internal/enterprise` `internal/evidence` `internal/fetch` `internal/fit` `internal/flight` `internal/fragility` `internal/fw` `internal/governance` `internal/heal` `internal/index` `internal/intel` `internal/lenses` `internal/llm` `internal/lock` `internal/loop` `internal/lspbridge` `internal/mcpclient` `internal/mcp/catalog` `internal/mcp/doc` `internal/mcp/gov` `internal/mcp/graph` `internal/mcp/mcpargs` `internal/mcp/org` `internal/mcp/provenance` `internal/mcp/retrieve` `internal/mcp/transport` `internal/memory` `internal/metrics` `internal/mutation` `internal/note` `internal/optimize` `internal/pack` `internal/pii` `internal/precache` `internal/profiles` `internal/project` `internal/prompt` `internal/refactor` `internal/relay` `internal/rename` `internal/repair` `internal/retrieval` `internal/runtime` `internal/sandbox` `internal/schema` `internal/script` `internal/sec` `internal/semcache` `internal/service` `internal/skills` `internal/stats` `internal/storage` `internal/strutil` `internal/swap` `internal/synthtest` `internal/terse` `internal/tokenize` `internal/transform` `internal/validate` `internal/verification` `internal/verify` `internal/version` `internal/whatif` |
+| `internal/mcp` | 13775 | 20700 | `internal/agent` `internal/app` `internal/blueprint/checks/diffgate` `internal/bpcli` `internal/brief` `internal/budget` `internal/cache` `internal/code` `internal/commitmsg` `internal/config` `internal/context` `internal/diff` `internal/docsearch` `internal/domain` `internal/enterprise` `internal/evidence` `internal/fetch` `internal/fit` `internal/flight` `internal/fragility` `internal/fw` `internal/governance` `internal/heal` `internal/index` `internal/intel` `internal/lenses` `internal/llm` `internal/lock` `internal/loop` `internal/lspbridge` `internal/mcp/agentctl` `internal/mcp/bridge` `internal/mcp/catalog` `internal/mcp/compose` `internal/mcp/contextwatch` `internal/mcp/coord` `internal/mcp/crossrepo` `internal/mcp/deploy` `internal/mcp/doc` `internal/mcp/evidence` `internal/mcp/exec` `internal/mcp/explain` `internal/mcp/fingerprint` `internal/mcp/flight` `internal/mcp/fragility` `internal/mcp/gov` `internal/mcp/graph` `internal/mcp/health` `internal/mcp/lsp` `internal/mcp/mcpargs` `internal/mcp/memory` `internal/mcp/merge` `internal/mcp/mutation` `internal/mcp/note` `internal/mcp/optimize` `internal/mcp/org` `internal/mcp/policydsl` `internal/mcp/preedit` `internal/mcp/prompt` `internal/mcp/prose` `internal/mcp/provenance` `internal/mcp/rbac` `internal/mcp/refactor` `internal/mcp/repair` `internal/mcp/retrieve` `internal/mcp/review` `internal/mcp/runtime` `internal/mcp/security` `internal/mcp/skill` `internal/mcp/stream` `internal/mcp/synthtest` `internal/mcp/transform` `internal/mcp/transport` `internal/mcpclient` `internal/memory` `internal/metrics` `internal/mutation` `internal/note` `internal/optimize` `internal/pack` `internal/pii` `internal/precache` `internal/profiles` `internal/project` `internal/prompt` `internal/refactor` `internal/relay` `internal/rename` `internal/repair` `internal/retrieval` `internal/runtime` `internal/sandbox` `internal/schema` `internal/script` `internal/sec` `internal/semcache` `internal/service` `internal/skills` `internal/stats` `internal/storage` `internal/strutil` `internal/swap` `internal/synthtest` `internal/terse` `internal/tokenize` `internal/transform` `internal/validate` `internal/verification` `internal/verify` `internal/version` `internal/whatif` |
+| `internal/mcp/agentctl` | 165 | 300 | `internal/app` `internal/llm` `internal/mcp/mcpargs` |
+| `internal/mcp/bridge` | 68 | 200 | `internal/mcp/mcpargs` `internal/mcpclient` |
 | `internal/mcp/catalog` | 2057 | 3200 | `internal/blueprint/checks/diffgate` |
+| `internal/mcp/compose` | 157 | 300 | `internal/mcp/mcpargs` |
+| `internal/mcp/contextwatch` | 155 | 300 | `internal/tokenize` |
+| `internal/mcp/coord` | 240 | 400 | `internal/mcp/mcpargs` |
+| `internal/mcp/crossrepo` | 25 | 100 | `internal/intel` |
+| `internal/mcp/deploy` | 51 | 150 | `internal/agent` `internal/app` `internal/mcp/mcpargs` |
 | `internal/mcp/doc` | 287 | 431 | `internal/cache` `internal/commitmsg` `internal/docsearch` `internal/fetch` `internal/index` `internal/intel` `internal/llm` `internal/mcp/gov` `internal/mcp/mcpargs` `internal/precache` `internal/strutil` |
-| `internal/mcp/graph` | 1110 | 1401 | `internal/budget` `internal/context` `internal/fw` `internal/index` `internal/intel` `internal/lenses` `internal/llm` `internal/mcp/gov` `internal/mcp/mcpargs` `internal/mcp/provenance` `internal/profiles` `internal/project` `internal/retrieval` |
+| `internal/mcp/evidence` | 455 | 700 | `internal/evidence` `internal/fetch` `internal/governance` `internal/index` `internal/mcp/mcpargs` `internal/storage` |
+| `internal/mcp/exec` | 185 | 350 | `internal/governance` `internal/mcp/mcpargs` `internal/optimize` `internal/pii` `internal/sandbox` `internal/script` |
+| `internal/mcp/explain` | 25 | 100 | `internal/index` `internal/intel` |
+| `internal/mcp/fingerprint` | 148 | 300 | `internal/governance` `internal/mcp/mcpargs` |
+| `internal/mcp/flight` | 26 | 100 | `internal/flight` `internal/mcp/mcpargs` |
+| `internal/mcp/fragility` | 98 | 250 | `internal/fragility` `internal/mcp/mcpargs` |
 | `internal/mcp/gov` | 252 | 380 | `internal/domain` `internal/governance` `internal/index` `internal/mcp/mcpargs` `internal/mcp/provenance` |
+| `internal/mcp/graph` | 1110 | 1401 | `internal/budget` `internal/context` `internal/fw` `internal/index` `internal/intel` `internal/lenses` `internal/llm` `internal/mcp/gov` `internal/mcp/mcpargs` `internal/mcp/provenance` `internal/profiles` `internal/project` `internal/retrieval` |
+| `internal/mcp/health` | 108 | 250 | `internal/index` `internal/mcp/mcpargs` `internal/metrics` |
+| `internal/mcp/lsp` | 139 | 300 | `internal/lspbridge` `internal/mcp/mcpargs` |
 | `internal/mcp/mcpargs` | 147 | 300 |  |
+| `internal/mcp/memory` | 196 | 350 | `internal/mcp/mcpargs` `internal/memory` |
+| `internal/mcp/merge` | 187 | 350 | `internal/diff` `internal/index` `internal/intel` `internal/mcp/mcpargs` |
+| `internal/mcp/mutation` | 95 | 200 | `internal/mcp/mcpargs` `internal/mutation` |
+| `internal/mcp/note` | 126 | 300 | `internal/mcp/mcpargs` `internal/note` |
+| `internal/mcp/optimize` | 245 | 400 | `internal/budget` `internal/mcp/mcpargs` `internal/optimize` `internal/semcache` `internal/strutil` `internal/swap` `internal/terse` `internal/tokenize` |
 | `internal/mcp/org` | 353 | 530 | `internal/domain` `internal/enterprise` `internal/governance` `internal/intel` `internal/mcp/mcpargs` |
+| `internal/mcp/policydsl` | 128 | 250 | `internal/intel` `internal/mcp/mcpargs` |
+| `internal/mcp/preedit` | 145 | 300 | `internal/index` `internal/intel` |
+| `internal/mcp/prompt` | 106 | 250 | `internal/code` `internal/mcp/mcpargs` `internal/memory` `internal/prompt` |
+| `internal/mcp/prose` | 30 | 100 | `internal/index` |
 | `internal/mcp/provenance` | 148 | 225 | `internal/governance` `internal/index` |
+| `internal/mcp/rbac` | 160 | 300 | `internal/mcp/mcpargs` |
+| `internal/mcp/refactor` | 108 | 250 | `internal/mcp/mcpargs` `internal/refactor` |
+| `internal/mcp/repair` | 59 | 200 | `internal/mcp/mcpargs` `internal/repair` |
 | `internal/mcp/retrieve` | 203 | 305 | `internal/index` `internal/mcp/graph` `internal/mcp/gov` `internal/mcp/mcpargs` `internal/mcp/provenance` `internal/retrieval` |
+| `internal/mcp/review` | 109 | 250 | `internal/index` `internal/intel` `internal/lenses` `internal/mcp/mcpargs` `internal/profiles` `internal/runtime` |
+| `internal/mcp/runtime` | 105 | 250 | `internal/domain` `internal/index` `internal/mcp/mcpargs` `internal/runtime` |
+| `internal/mcp/security` | 309 | 500 | `internal/index` `internal/intel` `internal/mcp/mcpargs` `internal/relay` `internal/schema` `internal/sec` `internal/service` `internal/verify` |
+| `internal/mcp/skill` | 67 | 200 | `internal/mcp/mcpargs` `internal/skills` |
+| `internal/mcp/stream` | 145 | 300 | `internal/mcp/mcpargs` |
+| `internal/mcp/synthtest` | 79 | 250 | `internal/index` `internal/mcp/mcpargs` `internal/synthtest` |
+| `internal/mcp/transform` | 100 | 250 | `internal/index` `internal/mcp/mcpargs` `internal/transform` |
 | `internal/mcp/transport` | 350 | 525 |  |
 | `internal/mcpclient` | 487 | 800 |  |
 | `internal/memory` | 1871 | 2900 | `internal/cache` `internal/domain` `internal/fsutil` `internal/metrics` `internal/storage` |
@@ -100,7 +135,7 @@ and capped like every other subsystem.
 | `internal/modernization` | 558 | 900 | `internal/index` `internal/intel` |
 | `internal/mutation` | 400 | 700 |  |
 | `internal/note` | 320 | 500 |  |
-| `internal/optimize` | 409 | 700 | `internal/cache` `internal/compress` `internal/llm` `internal/memory` `internal/pii` `internal/semcache` `internal/stats` `internal/tokenize` |
+| `internal/optimize` | 425 | 700 | `internal/cache` `internal/compress` `internal/kernconfig` `internal/llm` `internal/memory` `internal/pii` `internal/semcache` `internal/stats` `internal/tokenize` |
 | `internal/ownership` | 160 | 300 |  |
 | `internal/pack` | 717 | 1100 | `internal/budget` `internal/code` `internal/ignore` `internal/index` `internal/sec` `internal/tokenize` |
 | `internal/pii` | 426 | 700 |  |
