@@ -3,102 +3,21 @@ package mcp
 import (
 	"context"
 	"fmt"
-	"github.com/JayveerPrajapati/kern/internal/diff"
-	"github.com/JayveerPrajapati/kern/internal/governance"
-	"github.com/JayveerPrajapati/kern/internal/heal"
-	"github.com/JayveerPrajapati/kern/internal/optimize"
-	"github.com/JayveerPrajapati/kern/internal/pii"
-	"github.com/JayveerPrajapati/kern/internal/sandbox"
-	"github.com/JayveerPrajapati/kern/internal/script"
-	"github.com/JayveerPrajapati/kern/internal/strutil"
-	"github.com/JayveerPrajapati/kern/internal/validate"
 	"os"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/JayveerPrajapati/kern/internal/diff"
+	"github.com/JayveerPrajapati/kern/internal/governance"
+	"github.com/JayveerPrajapati/kern/internal/heal"
+	mcpexec "github.com/JayveerPrajapati/kern/internal/mcp/exec"
+	"github.com/JayveerPrajapati/kern/internal/strutil"
+	"github.com/JayveerPrajapati/kern/internal/validate"
 )
 
 func (s *Server) handleSandbox(ctx context.Context, id string, args map[string]any) (string, error) {
-	{
-		root := argString(args, "root")
-		if root == "" {
-			root = "."
-		}
-		cmdLine := argString(args, "command")
-		if cmdLine == "" {
-			return "", fmt.Errorf("command is required")
-		}
-		// Host command execution must pass the governance firewall; fail closed on denial.
-		// The command text is bound to any approval, so a HIGH/CRITICAL denial
-		// returns a resolvable approval ID (`kern approve <id>`).
-		if err := governance.CheckExecCommand(cmdLine, root); err != nil {
-			return "", err
-		}
-		parts := splitShellLine(cmdLine)
-		if len(parts) == 0 {
-			return "", fmt.Errorf("command is empty")
-		}
-		timeout := 120 * time.Second
-		if s := argString(args, "timeout"); s != "" {
-			sec, err := strconv.Atoi(s)
-			if err != nil {
-				return "", fmt.Errorf("timeout: invalid integer %q", s)
-			}
-			if sec > 0 {
-				timeout = time.Duration(sec) * time.Second
-			}
-		}
-		res := sandbox.RunGuarded(ctx, root, parts[0], parts[1:], timeout, argBool(args, "force"))
-		var b strings.Builder
-		if res.OK {
-			fmt.Fprintf(&b, "status: PASS (%s), changes kept\n", res.Duration.Round(time.Millisecond))
-		} else if res.Restored {
-			fmt.Fprintf(&b, "status: FAIL (exit %d, %s), tree restored to snapshot (%d files)\n", res.ExitCode, res.Duration.Round(time.Millisecond), res.Snapshots)
-		} else {
-			fmt.Fprintf(&b, "status: FAIL (exit %d, %s)\n", res.ExitCode, res.Duration.Round(time.Millisecond))
-		}
-		if res.Err != nil {
-			// Mask PII/secrets in the error line too (audit R4): res.Output
-			// is masked below, so an unmasked error would leak what the
-			// masked output redacted.
-			fmt.Fprintf(&b, "error: %v\n", pii.Mask(res.Err.Error()).Text)
-		}
-		if res.Network != nil {
-			fmt.Fprintf(&b, "network: %s\n", res.Network.Summary())
-		}
-		out := res.Output
-		if len(out) > 4000 {
-			out = out[:4000] + "\n... (truncated)"
-		}
-		if out != "" {
-			// Mask PII/secrets in command output before returning it to the caller.
-			out = pii.Mask(out).Text
-			fmt.Fprintf(&b, "output:\n%s\n", out)
-		}
-		if len(res.Manifest) > 0 {
-			fmt.Fprintf(&b, "=== sandbox impact manifest ===\n")
-			for _, c := range res.Manifest {
-				marker := "~"
-				switch c.Kind {
-				case "created":
-					marker = "+"
-				case "deleted":
-					marker = "-"
-				}
-				fmt.Fprintf(&b, "%s %s (%d B, sha256:%s)\n", marker, c.Path, c.Size, c.Hash)
-			}
-			fmt.Fprintf(&b, "%d change(s)", len(res.Manifest))
-			if m := len(res.SkippedFiles); m > 0 {
-				fmt.Fprintf(&b, "; %d file(s) skipped (over snapshot cap)", m)
-			}
-			if res.Restored {
-				fmt.Fprintf(&b, "; tree restored to snapshot — changes rolled back")
-			}
-			fmt.Fprintf(&b, "\n")
-		}
-		return b.String(), nil
-
-	}
+	return mcpexec.Sandbox(ctx, id, args)
 }
 
 func (s *Server) handleDiffFiles(ctx context.Context, args map[string]any) (string, error) {
@@ -264,96 +183,9 @@ func (s *Server) handleValidate(ctx context.Context, args map[string]any) (strin
 }
 
 func (s *Server) handleRunBuild(ctx context.Context, id string, args map[string]any) (string, error) {
-	{
-		cmd := argString(args, "command")
-		if cmd == "" {
-			return "", fmt.Errorf("command is required")
-		}
-		// Host command execution must pass the governance firewall; fail closed
-		// on denial (same gate as kern_exec/kern_sandbox). The concrete
-		// command is bound to any approval.
-		root := argString(args, "dir")
-		if root == "" {
-			root = "."
-		}
-		if err := governance.CheckExecCommand(cmd, root); err != nil {
-			return "", err
-		}
-		// Bound the build so a hanging command cannot hold the server: builds
-		// and tests can legitimately take minutes, but never forever.
-		bctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
-		defer cancel()
-		res, err := optimize.RunBuild(bctx, cmd, argString(args, "dir"), optimize.Options{})
-		if err != nil {
-			// Fold partial output into the result: RunBuild already appends the
-			// error text to res.Output, and on a timeout that partial output is
-			// usually the actual compiler/test error — discarding it (as the
-			// previous bare error return did) hides the only useful signal.
-			return res.Output, err
-		}
-		return res.Output, nil
-
-	}
+	return mcpexec.RunBuild(ctx, id, args)
 }
 
 func (s *Server) handleExec(ctx context.Context, args map[string]any) (string, error) {
-	{
-		if argString(args, "list") == "true" || argString(args, "list") == "1" {
-			return fmt.Sprintf("installed runtimes: %s\nsupported languages: %s",
-				strings.Join(script.Available(), ", "), strings.Join(script.Languages(), ", ")), nil
-		}
-		// Running a script executes an arbitrary host command, so it must pass
-		// the governance firewall first; fail closed on denial. The script
-		// text is bound to any approval, so one approval never authorizes a
-		// different script.
-		root := argString(args, "root")
-		if root == "" {
-			root = "."
-		}
-		if err := governance.CheckExecCommand(argString(args, "code"), root); err != nil {
-			return "", err
-		}
-		// no_isolate (full env + network) is only honored when the operator has
-		// explicitly set KERN_ALLOW_NO_ISOLATE=1; otherwise it is ignored.
-		noIsolate := argString(args, "no_isolate") == "true" || argString(args, "no_isolate") == "1"
-		if noIsolate && os.Getenv("KERN_ALLOW_NO_ISOLATE") != "1" {
-			noIsolate = false
-		}
-		run := script.Run{
-			Lang:      argString(args, "lang"),
-			Code:      argString(args, "code"),
-			Stdin:     argString(args, "stdin"),
-			NoIsolate: noIsolate,
-			Egress:    argStrings(args, "egress"),
-		}
-		if v := argString(args, "timeout"); v != "" {
-			sec, err := strconv.Atoi(v)
-			if err != nil {
-				return "", fmt.Errorf("timeout: invalid integer %q", v)
-			}
-			run.Timeout = time.Duration(sec) * time.Second
-		}
-		if v := argString(args, "max"); v != "" {
-			n, err := strconv.Atoi(v)
-			if err != nil {
-				return "", fmt.Errorf("max: invalid integer %q", v)
-			}
-			if n > 0 {
-				run.MaxOut = n
-			}
-		}
-		res := script.RunScript(run)
-		if res.Err != nil {
-			// Mask PII/secrets in the error path too (audit A5): a failed
-			// script commonly prints the secret to stderr before dying.
-			// res.Err already folds the script's stderr in ("failed with exit
-			// code N: <stderr>"), so masking the error text covers stderr as
-			// well — matching the CLI (cmd/kern/cmd_exec.go masks both
-			// streams).
-			return "", fmt.Errorf("kern_exec: %s", pii.Mask(res.Err.Error()).Text)
-		}
-		// Mask PII/secrets in script stdout before returning it.
-		return pii.Mask(res.Stdout).Text, nil
-
-	}
+	return mcpexec.Exec(ctx, args)
 }

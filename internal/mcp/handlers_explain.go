@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/JayveerPrajapati/kern/internal/intel"
+	"github.com/JayveerPrajapati/kern/internal/mcp/explain"
 )
 
 // handleExplain produces an end-to-end architecture explanation for a symbol or subsystem.
@@ -28,10 +28,5 @@ func (s *Server) handleExplain(ctx context.Context, args map[string]any) (string
 		return "", fmt.Errorf("load index: %w", err)
 	}
 
-	exp, err := intel.Explain(ix, subject)
-	if err != nil {
-		return "", err
-	}
-
-	return exp.Render(), nil
+	return explain.Explain(ix, subject)
 }
