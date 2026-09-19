@@ -83,6 +83,24 @@ where the MCP server persists its tool-call audit chain (default
   `KERN_ALLOW_LOOPBACK_FETCH`, `KERN_INDEX_SERIAL`, `KERN_MCP_WATCH*`, sandbox
   isolation knobs, and installer vars.
 
+- **`.kern/kern.yaml`** (optional) — per-project log compression profiles and adaptive truncation rules. Configure custom patterns, context line padding (`keep_lines_before`/`keep_lines_after`), or complete removal (`action: strip_completely`).
+
+  ```yaml
+  profiles:
+    default:
+      truncate_rules:
+        - match: "console.log"
+          action: strip_completely
+    nodejs-backend:
+      exclude_patterns: ["node_modules/**", ".env"]
+      truncate_rules:
+        - match: "ValidationError:"
+          keep_lines_before: 2
+          keep_lines_after: 5
+        - match: "console.debug"
+          action: strip_completely
+  ```
+
 ## What the index skips
 
 Dependency/build/cache directories (`node_modules`, `vendor`, `dist`,

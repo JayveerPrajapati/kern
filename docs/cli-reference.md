@@ -14,7 +14,7 @@ kern compact <file>                             symbolic summary of a file
 kern project [root]                             compact project map
 kern pack [root] [--max-tokens N] [--out FILE]  one paste-ready bundle: tree + instructions + contents
 kern build "<command>" [--dir DIR]              run build, compact output
-kern log <file>                                 compress a log file
+kern log [<file>|-] [--context-before N] [--context-after M] [--profile NAME] [--root DIR]   compress a log file with adaptive windowing & profiles
 kern index [root]                               build/refresh the AST index
 kern watch [root]                               daemon: auto re-index on change
 kern ast <pattern> [--all]                      AST symbol search (wildcards, kind prefixes)

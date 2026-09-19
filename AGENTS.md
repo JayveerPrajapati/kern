@@ -8,7 +8,7 @@ prebuilt symbol index instead of re-reading files.
 
 ## The kern_meta tool (preferred entry point)
 
-Instead of choosing among 145 individual `kern_*` tools, call the single
+Instead of choosing among 146 individual `kern_*` tools, call the single
 **`kern_meta`** tool with a natural-language request. Kern classifies the
 request and runs the right tool(s) internally — you get the same result
 without having to know which tool fits. Think in phases: explore (read/discover),
@@ -23,32 +23,10 @@ Examples:
 - `kern_meta(request="mask secrets in: ...")` → runs `kern_mask_pii`
 - `kern_meta(request="find the NewServer function")` → runs `kern_search`
 
-Prefer `kern_meta` as your default. By default (`KERN_MCP_FULL=0` or unset), only a minimal 11-tool surface
-is advertised (the high-level task-oriented entry points plus `kern_meta`) to keep context windows minimal and fast;
-set `KERN_MCP_FULL=1` if you or your environment require exposing the entire 145-tool catalog directly,
-`KERN_MCP_PHASE=explore|plan|edit|verify` to filter the advertised list to a
-phase's shortlist (plus the always-on meta/cross tools), and
-`KERN_MCP_SINGLE_TOOL=1` to expose ONLY `kern_meta` (useful when an agent is
-overwhelmed by the catalog). Note `kern_meta`'s NL router still reaches
-every sub-tool handler internally regardless of what is advertised, so no
-capability is lost — only the advertised surface shrinks. The classifier is
-deterministic keyword matching — no LLM, no
-network. When you know the exact tool you need, calling it directly is fine
-and slightly faster.
-
-## The kern_authorize_context tool
-
-`kern_authorize_context` computes the context an agent may legally read for a
-task: the exact set of symbols and call edges permitted by the agent's
-identity and task scope, plus an auditable authorization proof (decision,
-fingerprint, index freshness). Call it before retrieval when a task must not
-leak out-of-scope code. It is part of the default tool surface (no
-`KERN_MCP_FULL` needed).
-
-- CLI: `kern authorize-context -agent <id> -task <desc> [-root .] [-symbol <filter>] [-deny-path <path>] [-json]` — exit 0 = allowed, 2 = denied (proof printed), 1 = error
-- MCP: `kern_authorize_context(agent_id, task, [root], [symbol_filter], [scope])` → `{scope, proof}` JSON
-- `kern_meta` NL routing: "authorize", "authorized", "allowed to see", "permitted", "what can i" — e.g. "what can I touch in this repo for the refactor task"
-- Full reference: `docs/authorized-context.md`
+Prefer `kern_meta` as your default. Set `KERN_MCP_FULL=1` for all 146 tools,
+`KERN_MCP_PHASE=explore|plan|edit|verify` for phase subsets, or
+`KERN_MCP_SINGLE_TOOL=1` for only `kern_meta`. The classifier is deterministic
+keyword matching — no LLM, no network.
 
 ## Kern-first policy (ENFORCED & AUTONOMOUS)
 
@@ -104,93 +82,22 @@ back to the built-in — but never skip kern when it's available.
 
 When you begin work in a repo you have not worked in before — or any time you
 suspect a repo may not be indexed or registered — call `kern_onboard` (or
-`kern_buddy`) FIRST, before reading/grepping/globbing the tree. `kern_onboard`:
-
-- registers the working directory in kern's repo registry (if not already),
-- builds/refreshes kern's index of the repo (if stale or missing),
-- writes the `AGENTS.md` kern-first rules (if missing),
-- returns a status report (registered · indexed · symbols/edges/files · wired).
+`kern_buddy`) FIRST, before reading/grepping/globbing the tree. `kern_onboard`
+registers the repo, builds/refreshes the index, and returns a status report.
 
 Do this automatically on session start so the repo is indexed before you search
-it. If `kern_onboard` reports the repo is not registered or not indexed, fix
-that (register + index) before doing manual discovery.
-
-**Prefer the index over re-exploring.** Once a repo is indexed, fetch details
-from the index instead of re-searching the filesystem with read/grep/glob/git:
-- `kern_project_map` / `kern_buddy` — repo layout + conventions (not raw `ls`)
-- `kern_search` / `kern_ast_search` / `kern_fts_search` / `kern_repo_search` — find symbols (not raw `grep`/`rg`)
-- `kern_code_graph` / `kern_graph` / `kern_explore` / `kern_context` — understand a symbol and its callers/callees (not read-every-file)
-- `kern_probe` — answer "what does this touch / what breaks if I change X" from the index
-- `kern_diff_files` / `kern_commitmsg` — git-adjacent work against the index/diff (not raw `git diff`/`git log` alone)
-- `kern_why` / `kern_inherits` / `kern_path` — graph answers for symbols
-
-If kern already has the index, fetch the answer from it directly — do not
-re-explore or re-parse files that the index already covers.
+it. **Prefer the index over re-exploring.** Once indexed, use `kern_search`,
+`kern_explore`, `kern_code_graph`, `kern_probe` etc. instead of raw grep/read.
 
 ## Full capability catalog
 
-`kern` ships 145 `kern_*` MCP tools across many domains. If you are unsure
-which tool fits, call `kern_usage_guide` (categorized guide with performance
-tiers) or `kern_buddy` to enumerate options. By default only the minimal
-11-tool surface is advertised; set `KERN_MCP_FULL=1` to expose the full
-catalog to agents.
+`kern` ships 146 `kern_*` MCP tools across many domains. If you are unsure
+which tool fits, call `kern_usage_guide` or `kern_buddy` to enumerate options.
 
-## Multi-Agent Specialist Squad (The 7 Roles)
+## Additional capabilities
 
-`kern` embeds a 7-role specialist squad (`internal/agents` / `kern team`) that agents can orchestrate or delegate to directly:
-
-1. **Planner (`RolePlanner`)** (Autonomy L0–L3): Analyzes tasks, scopes boundaries, and drafts phased milestones. Trigger: `kern_meta("plan <task>")` / `kern_plan`.
-2. **Architect (`RoleArchitect`)** (Autonomy L0–L3): Validates designs against AST call graphs, module boundaries, and structural interface satisfaction. Trigger: `kern_meta("architecture / impact of <change>")` / `kern_explore`.
-3. **Coder (`RoleCoder`)** (Autonomy L2–L3): Mutates code inside isolated `.kern/sandboxes/` snapshots with surgical `TreeDiff` payload extraction. Trigger: `kern_safe_change` / `kern_refactor`.
-4. **Reviewer (`RoleReviewer`)** (Autonomy L0–L2): Audits diffs for correctness, maintainability, and anti-patterns. Trigger: `kern_meta("review staged changes")` / `kern_review`.
-5. **Security (`RoleSecurity`)** (Autonomy L0–L2): Scans for injection sinks, hardcoded secrets, and policy firewall gates (G0–G39). Trigger: `kern_check` / `kern_sec` / `kern_taint`.
-6. **Tester (`RoleTester`)** (Autonomy L0–L2): Synthesizes reproduction test fixtures and validates test pass rates. Trigger: `kern_synthesize_test` / `kern_run_build`.
-7. **SRE (`RoleSRE`)** (Autonomy L0–L4): Correlates runtime stack traces to exact AST symbols, optimizes logs, and triages production drift. Trigger: `kern-incident-triage` / `kern_correlate_evidence`.
-
-When working on complex tasks, orchestrate these 7 specialist personas across the **Explore → Plan → Edit → Verify** lifecycle.
-
-## When a build, test, or long-running command is needed
-
-Prefer `kern_run_build` over running the command directly and pasting full
-output into context.
-
-## Git workflows
-
-- Before committing, use `kern_commitmsg` to get a deterministic conventional
-  commit message (type/scope/subject + per-file body) from the diff; it is
-  rule-based and offline, so edit the result freely. `kern commit` can stage
-  and commit in one step (CLI only — a machine committing on its own is too
-  destructive to expose as a tool).
-- `kern pack` and `kern project map` honor a root `.gitignore` and `.kernignore`
-  (`.kernignore` wins), and packed bundles carry a `SECURITY` section of
-  secrets/injection findings for files being sent to an agent.
-
-## Prompt hygiene
-
-If a user prompt or attached data is large or noisy, optimize it first with
-`kern_optimize_prompt` before processing. Optimization results are cached, so
-a repeated or reworded query (semantic cache) returns instantly with a
-`served from ... cache` marker. Use `kern_semcache` to inspect or clear the
-cache, or to preview whether two inputs are similar enough to hit.
-
-## Savings tracking
-
-Report token savings when asked: use `kern_stats`. This shows before/after
-tokens and estimated cost saved.
-
-
-## Engineering principles (standing rules)
-
-- **Model-visible ⟺ logged**: anything that reaches a model request must be
-  reconstructable from the session log; a new model-visible input requires a
-  session event. kern's evidence/audit chain + flight recorder are the log.
-- **Registrations are effects**: every tool/event registration goes through
-  the owning context and returns a disposer; never register by side effect.
-- **Monotonic SCHEMA_VERSION**: durable `.kern/` formats bump a monotonic
-  schema version and migrate forward; never move, overwrite, or delete
-  committed generations in place.
-- **Capability seam = Service Definition / Provider / Consumer**: a seam is
-  complete only with all three roles (template: `intel` / `llm` / `runtime`);
-  split roles only when they evolve independently.
-- **Misconfiguration fails loud**: a missing referent errors at load or the
-  earliest resolvable point; never silently skip it.
+- **Multi-agent squad**: kern embeds 7 specialist roles (Planner, Architect,
+  Coder, Reviewer, Security, Tester, SRE). See the `kern-team-orchestration` skill.
+- **Git workflows**: Use `kern_commitmsg` for deterministic commit messages.
+- **Prompt hygiene**: Use `kern_optimize_prompt` to strip noise before processing.
+- **Token savings**: Use `kern_stats` to report before/after token savings.
