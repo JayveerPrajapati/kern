@@ -50,11 +50,6 @@ func (s *safeBuffer) Bytes() []byte {
 var binPath string
 
 func TestMain(m *testing.M) {
-	repoBin := filepath.Join("..", "..", "bin", "kern-mcp")
-	if info, err := os.Stat(repoBin); err == nil && !info.IsDir() {
-		binPath = repoBin
-		os.Exit(m.Run())
-	}
 	dir, err := os.MkdirTemp("", "kern-mcp-bin-*")
 	if err != nil {
 		panic(err)
