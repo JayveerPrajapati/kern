@@ -295,6 +295,21 @@ func (p *Platform) analyzeChangeResolvable(change string) (domain.ContextPacket,
 			return pkt2, nil
 		}
 	}
+	// Fuzzy fallback across ranked search matches for approximate phrases/doc titles
+	if p.ix != nil {
+		for _, m := range intel.RankedSearch(p.ix, change, 5) {
+			if m.FullName() != change {
+				if pkt2, err2 := p.ctx.AnalyzeChange(m.FullName()); err2 == nil {
+					return pkt2, nil
+				}
+			}
+			if m.Name != change {
+				if pkt2, err2 := p.ctx.AnalyzeChange(m.Name); err2 == nil {
+					return pkt2, nil
+				}
+			}
+		}
+	}
 	return domain.ContextPacket{}, err
 }
 
@@ -466,12 +481,23 @@ func (p *Platform) Verify(types []string) verification.VerificationResult {
 // not on the lead verb `breaks`.
 func (p *Platform) resolveSymbol(change string) (string, error) {
 	if !strings.ContainsAny(change, " \t") {
+		if p.graph == nil || p.graph.Resolvable(change) {
+			return change, nil
+		}
+		// If single-token symbol not directly resolvable, find closest candidate via ranked search
+		if p.ix != nil {
+			for _, m := range intel.RankedSearch(p.ix, change, 5) {
+				if p.graph.Resolvable(m.FullName()) {
+					return m.FullName(), nil
+				}
+				if p.graph.Resolvable(m.Name) {
+					return m.Name, nil
+				}
+			}
+		}
 		return change, nil
 	}
 	cands := whatif.ExtractSymbolsIndex(change, p.ix)
-	if len(cands) == 0 {
-		return "", fmt.Errorf("could not identify a symbol in the change description: pass a bare symbol name (e.g. 'GetMySQLDB') or include a qualified name (e.g. 'pkg.Symbol') in the description")
-	}
 	// Prefer the first candidate that exists in the graph; keep extraction
 	// order as the tiebreaker.
 	if p.graph != nil {
@@ -480,11 +506,35 @@ func (p *Platform) resolveSymbol(change string) (string, error) {
 				return c, nil
 			}
 		}
-		// None resolve in this project's index — fail with a hint instead of
-		// analysing a word from prose and reporting a misleading 0-caller
-		// impact.
+		// Auto-resolve: find closest symbol candidates from the index via ranked search
+		if p.ix != nil {
+			for _, c := range cands {
+				for _, m := range intel.RankedSearch(p.ix, c, 5) {
+					if p.graph.Resolvable(m.FullName()) {
+						return m.FullName(), nil
+					}
+					if p.graph.Resolvable(m.Name) {
+						return m.Name, nil
+					}
+				}
+			}
+			for _, m := range intel.RankedSearch(p.ix, change, 5) {
+				if p.graph.Resolvable(m.FullName()) {
+					return m.FullName(), nil
+				}
+				if p.graph.Resolvable(m.Name) {
+					return m.Name, nil
+				}
+			}
+		}
+		if len(cands) == 0 {
+			return "", fmt.Errorf("could not identify a symbol in the change description: pass a bare symbol name (e.g. 'GetMySQLDB') or include a qualified name (e.g. 'pkg.Symbol') in the description")
+		}
 		return "", fmt.Errorf("no symbol named %q was found in this project's index (closest candidates: %s): kern what-if analyzes an existing symbol — pass its exact name, or a qualified 'pkg.Symbol'",
 			cands[0], strings.Join(cands, ", "))
+	}
+	if len(cands) == 0 {
+		return "", fmt.Errorf("could not identify a symbol in the change description: pass a bare symbol name (e.g. 'GetMySQLDB') or include a qualified name (e.g. 'pkg.Symbol') in the description")
 	}
 	return cands[0], nil
 }
