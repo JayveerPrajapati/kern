@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/JayveerPrajapati/kern/internal/ignore"
 	"github.com/JayveerPrajapati/kern/internal/sandbox"
@@ -109,6 +110,24 @@ func (w *Worktree) Diff() (string, error) {
 		cmd := exec.Command("git", "-C", w.workDir, "diff", "HEAD")
 		if out, err := cmd.CombinedOutput(); err == nil {
 			return string(out), nil
+		}
+	}
+
+	// Hide .git in srcRoot if present so git diff --no-index does not traverse
+	// internal git repository metadata (objects, hooks, COMMIT_EDITMSG).
+	// sandbox.Snapshot already excluded .git from workDir; traversing .git
+	// under git diff --no-index triggers fatal exit 128 on git versions with
+	// repository boundary protections (CVE-2024-32002/32004).
+	gitPath := filepath.Join(w.srcRoot, ".git")
+	if fi, err := os.Stat(gitPath); err == nil && fi != nil {
+		hiddenGit := filepath.Join(filepath.Dir(w.srcRoot), fmt.Sprintf(".kern-git-aside-%d-%d", os.Getpid(), time.Now().UnixNano()))
+		if rerr := os.Rename(gitPath, hiddenGit); rerr == nil {
+			defer func() { _ = os.Rename(hiddenGit, gitPath) }()
+		} else {
+			hiddenGit = filepath.Join(os.TempDir(), fmt.Sprintf("kern-git-aside-%d-%d", os.Getpid(), time.Now().UnixNano()))
+			if rerr := os.Rename(gitPath, hiddenGit); rerr == nil {
+				defer func() { _ = os.Rename(hiddenGit, gitPath) }()
+			}
 		}
 	}
 
