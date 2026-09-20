@@ -21,8 +21,13 @@ jobs:
         run: go vet ./...
       - name: Format
         run: test -z "$(gofmt -l .)" || { echo "gofmt needed on:"; gofmt -l .; exit 1; }
-      - name: Test
-        run: go test -short -timeout 10m ./...
+      - name: Test (with coverage)
+        run: go test -short -timeout 10m -coverprofile=coverage.out -covermode=atomic ./...
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@0fb7174895f61a3b6b78fc075e0cd60383518dac # v5.5.5
+        with:
+          files: coverage.out
+          fail_ci_if_error: false
       - name: Test (sqlite tags)
         run: go test -tags sqlite ./internal/index/... ./internal/doctor/...
       - name: Test (treesitter tags)

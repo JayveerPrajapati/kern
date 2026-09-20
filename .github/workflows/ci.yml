@@ -11,12 +11,12 @@ concurrency:
 jobs:
   test:
     # Reusable workflow (test.yml has `on: workflow_call`). A workflow .yml can
-    # ONLY be referenced at job level — a step-level `uses:` of it fails on
-    # GitHub with "unable to resolve action". Caller jobs support only
-    # needs/if/permissions/strategy/concurrency/uses/with/secrets — no
-    # runs-on/steps/timeout-minutes (the 30m timeout lives inside test.yml).
+    # ONLY be referenced at job level. Runs unit tests with coverage, tags tests,
+    # race detector, parity gates, and release archive layout verification.
     uses: ./.github/workflows/test.yml
-  lint:
+
+  lint-and-vuln:
+    name: Lint & Security Checks
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -30,50 +30,18 @@ jobs:
         with:
           version: v2.13.2
           args: --timeout=10m
-
-  govulncheck:
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
-        with:
-          go-version-file: go.mod
-          cache: true
       - name: Install govulncheck
         run: go install golang.org/x/vuln/cmd/govulncheck@latest
       - name: Run govulncheck
         run: govulncheck ./...
 
-  coverage:
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          fetch-depth: 0
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
-        with:
-          go-version-file: go.mod
-          cache: true
-      - uses: ./.github/actions/setup-tools
-      - name: Run tests with coverage
-        run: go test -short -timeout 10m -coverprofile=coverage.out -covermode=atomic ./...
-      - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@0fb7174895f61a3b6b78fc075e0cd60383518dac # v5.5.5
-        with:
-          files: coverage.out
-          fail_ci_if_error: false
-          token: ${{ secrets.CODECOV_TOKEN }}
   # A2: full (non-short) E2E gate. The primary `test` job runs -short, which
   # skips ~25 test functions (the 20-step vertical slice, acceptance matrix,
   # replay/resume, 3/4 cicd governance-gate tests, all MCP
-  # interface-consistency tests) — the exact mechanism that let the
-  # VersionAtLeast bug ship unnoticed. This job runs those suites for real,
-  # with the kern binary built from this checkout and KERN_REQUIRE_BINARY=1
-  # so any test that would skip on a missing binary FAILS instead of
-  # silently passing.
+  # interface-consistency tests). This job runs those suites for real,
+  # with the kern binary built from this checkout and KERN_REQUIRE_BINARY=1.
   e2e:
+    name: Full E2E & Blueprint Gates
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -97,16 +65,6 @@ jobs:
         env:
           KERN_BINARY: ${{ runner.temp }}/kern
           KERN_REQUIRE_BINARY: "1"
-      # Full (non-short) loop + verification engine suites. The primary `test`
-      # job runs -short, which skips the ~45 real-execution tests in these two
-      # packages (loop stages against a real worktree; verification engine
-      # running real go build/go test/security/arch/dependency checks). These
-      # must run for real in CI so a regression in the loop's safety gates or
-      # the verification engine cannot pass every workflow silently.
-      # -p 2: the two packages are independent test binaries with per-test
-      # t.TempDir fixtures and the loop binary redirects XDG_CACHE_HOME; the
-      # shared Go build cache is concurrency-safe, so parallel package
-      # execution is safe and roughly halves this step's wall time (~36s -> ~25s).
       - name: Full E2E suite (non-short) — loop, verification
         run: go test -p 2 -timeout 30m ./internal/loop/... ./internal/verification/...
         env:
