@@ -323,4 +323,3 @@ func ProcessLogin() bool {
 		t.Errorf("resolveSymbol resolved %q, want UserAuthenticationRateLimiter", sym2)
 	}
 }
-
