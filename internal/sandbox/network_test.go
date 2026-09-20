@@ -13,7 +13,7 @@ func TestAssessNetworkDetectsSignatures(t *testing.T) {
 	if p.Isolated {
 		t.Fatal("sandbox.Run is not network-isolated; the policy must say so")
 	}
-	if p.NetnsAvail != (runtime.GOOS == "linux") {
+	if p.NetnsAvail != networkIsolationAvailable() {
 		t.Fatalf("NetnsAvail must follow the platform, got %v", p.NetnsAvail)
 	}
 	joined := strings.Join(p.Hits, ",")
