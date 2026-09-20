@@ -14,6 +14,7 @@ func split(s string) []string {
 }
 
 func TestUnifiedIdentical(t *testing.T) {
+	t.Parallel()
 	a := []string{"x", "y"}
 	if got := Unified("a", "b", a, []string{"x", "y"}); got != "" {
 		t.Fatalf("identical should be empty, got %q", got)
@@ -21,6 +22,7 @@ func TestUnifiedIdentical(t *testing.T) {
 }
 
 func TestUnifiedDeleteInsert(t *testing.T) {
+	t.Parallel()
 	a := split("hello\nworld\nfoo")
 	b := split("hello\ncruel\nworld\nfoo")
 	got := Unified("old.txt", "new.txt", a, b)
@@ -41,6 +43,7 @@ func TestUnifiedDeleteInsert(t *testing.T) {
 }
 
 func TestUnifiedLabelPathNormalized(t *testing.T) {
+	t.Parallel()
 	a := split("foo")
 	b := split("bar")
 	got := Unified("/tmp/fa", "./fb", a, b)
@@ -59,6 +62,7 @@ func TestUnifiedLabelPathNormalized(t *testing.T) {
 }
 
 func TestDiffLinesEditScript(t *testing.T) {
+	t.Parallel()
 	a := []string{"1", "2", "3"}
 	b := []string{"1", "x", "3"}
 	ops := DiffLines(a, b)
