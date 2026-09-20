@@ -170,7 +170,7 @@ func dedupLayerViolations(vs []Violation) []Violation {
 	best := map[string]int{}
 	var out []Violation
 	for _, v := range vs {
-		key := v.CallerFile + "\x00" + filepath.Dir(v.CalleeFile)
+		key := filepath.ToSlash(v.CallerFile) + "\x00" + filepath.ToSlash(filepath.Dir(v.CalleeFile))
 		if i, ok := best[key]; ok {
 			if out[i].Symbol == "" && v.Symbol != "" {
 				out[i] = v
@@ -205,15 +205,17 @@ func collectEdges(ix *index.Index, files []string) []edge {
 			meta[s.FullName()] = s
 		}
 		if _, ok := dirs[s.FullName()]; !ok {
-			dirs[s.FullName()] = filepath.Dir(s.File)
+			dirs[s.FullName()] = filepath.ToSlash(filepath.Dir(s.File))
 		}
 	}
 	seen := map[string]bool{}
 	add := func(fromDir, toDir, callerFile, calleeFile, symbol string, line int) {
+		fromDir = filepath.ToSlash(fromDir)
+		toDir = filepath.ToSlash(toDir)
 		if fromDir == "" || toDir == "" || fromDir == toDir {
 			return
 		}
-		key := callerFile + "\x00" + toDir + "\x00" + symbol
+		key := filepath.ToSlash(callerFile) + "\x00" + toDir + "\x00" + symbol
 		if seen[key] {
 			return
 		}
@@ -225,7 +227,7 @@ func collectEdges(ix *index.Index, files []string) []edge {
 		if isTestFile(f) {
 			continue
 		}
-		fromDir := filepath.Dir(f)
+		fromDir := filepath.ToSlash(filepath.Dir(f))
 		for _, s := range ix.SymbolsByFile[f] {
 			full := s.FullName()
 			for _, ce := range ix.Calls[full] {
@@ -338,6 +340,8 @@ func normalizeGlob(pattern string) string {
 // globMatch matches a rule/layer pattern against a directory. It supports exact,
 // "prefix/…", "…/suffix", and "prefix/**" (self-or-descendant) forms.
 func globMatch(pattern, dir string) bool {
+	pattern = filepath.ToSlash(pattern)
+	dir = filepath.ToSlash(dir)
 	if pattern == "" || dir == "" {
 		return false
 	}
@@ -389,7 +393,7 @@ func simpleName(name string) string {
 func indexDirs(ix *index.Index) map[string]bool {
 	dirs := map[string]bool{}
 	for _, s := range ix.Symbols {
-		if d := filepath.Dir(s.File); d != "." && d != "" {
+		if d := filepath.ToSlash(filepath.Dir(s.File)); d != "." && d != "" {
 			dirs[d] = true
 		}
 	}
@@ -400,6 +404,7 @@ func importMatches(importPath, dir string) bool {
 	if importPath == "" {
 		return false
 	}
+	dir = filepath.ToSlash(dir)
 	if strings.HasSuffix(importPath, "/"+dir) || importPath == dir {
 		return true
 	}

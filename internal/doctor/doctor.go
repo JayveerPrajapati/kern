@@ -143,8 +143,12 @@ func killedBySIGKILL(ee *exec.ExitError) bool {
 // reports that honestly instead of implying isolation is always available.
 func checkNetworkIsolation() Finding {
 	if script.NetworkIsolationAvailable() {
+		backend := "Linux unshare --user --map-root-user --net"
+		if goruntime.GOOS == "darwin" {
+			backend = "macOS Apple Seatbelt (/usr/bin/sandbox-exec)"
+		}
 		return Finding{Check: "network-isolation", Level: "ok",
-			Detail: "network isolation: available (Linux unshare --user --map-root-user --net)"}
+			Detail: fmt.Sprintf("network isolation: available (%s)", backend)}
 	}
 	return Finding{Check: "network-isolation", Level: "warn",
 		Detail: fmt.Sprintf("network isolation: unavailable (%s) — scripts fail closed unless KERN_ALLOW_UNISOLATED=1 (or KERN_ALLOW_NET=1) is set", goruntime.GOOS)}

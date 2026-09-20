@@ -7,6 +7,7 @@ import (
 )
 
 func TestWriteFileAtomic(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "out.json")
 
@@ -55,5 +56,53 @@ func TestWriteFileAtomic(t *testing.T) {
 	}
 	if len(entries) != 1 {
 		t.Fatalf("dir has %d entries, want exactly the target file", len(entries))
+	}
+}
+
+func TestNormalizePath(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		input string
+		want  string
+	}{
+		{"", ""},
+		{".", "."},
+		{"a/b/c", "a/b/c"},
+		{"a\\b\\c", "a/b/c"},
+		{"a/b/../c", "a/c"},
+		{"a\\b\\..\\c", "a/c"},
+		{"./a/b/c", "a/b/c"},
+		{".\\a\\b\\c", "a/b/c"},
+		{"/a/b/c", "/a/b/c"},
+		{"\\a\\b\\c", "/a/b/c"},
+	}
+	for _, tc := range cases {
+		got := NormalizePath(tc.input)
+		if got != tc.want {
+			t.Errorf("NormalizePath(%q) = %q, want %q", tc.input, got, tc.want)
+		}
+	}
+}
+
+func TestNormalizeRelPath(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		input string
+		want  string
+	}{
+		{"", ""},
+		{".", "."},
+		{"./", "."},
+		{"./a/b", "a/b"},
+		{".\\a\\b", "a/b"},
+		{"a/b/c", "a/b/c"},
+		{"a\\b\\c", "a/b/c"},
+		{"./a/b/../c", "a/c"},
+	}
+	for _, tc := range cases {
+		got := NormalizeRelPath(tc.input)
+		if got != tc.want {
+			t.Errorf("NormalizeRelPath(%q) = %q, want %q", tc.input, got, tc.want)
+		}
 	}
 }

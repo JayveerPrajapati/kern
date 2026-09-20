@@ -8,6 +8,7 @@ import (
 )
 
 func TestScanFileSkipsCodeExpressionSecrets(t *testing.T) {
+	t.Parallel()
 	src := []byte(`package evidence
 
 import "crypto/ed25519"
@@ -44,6 +45,7 @@ const apiKey = "sk-abcdefghijklmnopqrstuvwxyz1234567890"
 // md5.Sum calls on one line (doctor.go:422) are a single weak-crypto
 // finding, not two.
 func TestScanFileDedupesSameLineSameRule(t *testing.T) {
+	t.Parallel()
 	src := []byte(`package doctor
 
 import "crypto/md5"
@@ -64,6 +66,7 @@ func stale(cur, src []byte) string {
 }
 
 func TestScanTreeSkipsFixtureDirs(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	// Single-label secret (mirrors TestScanTreeSkipsTestFixturesEverywhere):
 	// one credential, one finding — the test pins directory skipping, not

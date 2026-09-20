@@ -6,6 +6,7 @@ import (
 )
 
 func TestValidateProjectNoConfigPasses(t *testing.T) {
+	t.Parallel()
 	root := scaffoldModule(t, webToDBModule())
 	rep, err := ValidateProject(root)
 	if err != nil {
@@ -17,6 +18,7 @@ func TestValidateProjectNoConfigPasses(t *testing.T) {
 }
 
 func TestValidateProjectFailsOnForbid(t *testing.T) {
+	t.Parallel()
 	root := scaffoldModule(t, webToDBModule())
 	writeConfig(t, root, "architecture.yaml", `version: "1"
 rules:
@@ -41,6 +43,7 @@ rules:
 }
 
 func TestValidateDiffScopedToChangedFiles(t *testing.T) {
+	t.Parallel()
 	root := scaffoldModule(t, webToDBModule())
 	writeConfig(t, root, "architecture.yaml", `version: "1"
 rules:
@@ -68,6 +71,7 @@ rules:
 }
 
 func TestRenderReportWithCounts(t *testing.T) {
+	t.Parallel()
 	root := scaffoldModule(t, webToDBModule())
 	writeConfig(t, root, "architecture.yaml", `version: "1"
 rules:
@@ -91,6 +95,7 @@ rules:
 }
 
 func TestRenderEmptyReport(t *testing.T) {
+	t.Parallel()
 	root := scaffoldModule(t, webToDBModule())
 	rep, _ := ValidateProject(root)
 	text := Render(rep)

@@ -124,11 +124,22 @@ var (
 	netNSArgs    []string
 )
 
-// networkNS returns the unshare prefix that runs a child in a private network
-// namespace, or nil when unavailable (probed once per process). The wrapper is
-// safe: --map-root-user inside a fresh user namespace grants no host access.
+// networkNS returns the isolation prefix that runs a child with network egress
+// blocked (Linux unshare network namespace or macOS sandbox-exec Seatbelt),
+// or nil when unavailable (probed once per process).
 func networkNS() []string {
 	netProbeOnce.Do(func() {
+		if goruntime.GOOS == "darwin" {
+			if bin, err := exec.LookPath("sandbox-exec"); err == nil {
+				ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+				defer cancel()
+				profile := "(version 1)\n(allow default)\n(deny network*)"
+				if err := exec.CommandContext(ctx, bin, "-p", profile, "true").Run(); err == nil {
+					netNSArgs = []string{bin, "-p", profile}
+					return
+				}
+			}
+		}
 		bin, err := exec.LookPath("unshare")
 		if err != nil {
 			return

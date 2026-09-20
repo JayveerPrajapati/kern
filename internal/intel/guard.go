@@ -108,6 +108,7 @@ func InferBoundaries(ix *index.Index) *Boundaries {
 	// also an L2 dir, which fabricated intra-module dao->service violations
 	// (dogfood finding: 19 spurious findings on slice-adaptors).
 	baseName := func(name string) string {
+		name = filepath.ToSlash(name)
 		if i := strings.LastIndexByte(name, '/'); i >= 0 {
 			return name[i+1:]
 		}
@@ -119,6 +120,7 @@ func InferBoundaries(ix *index.Index) *Boundaries {
 	// — the correct dependency direction is service -> api. Any layer keyword
 	// (api, rest, web, ...) inside them is contract space, never presentation.
 	mavenContractDir := func(dir string) bool {
+		dir = filepath.ToSlash(dir)
 		for _, seg := range strings.Split(dir, "/") {
 			if strings.HasSuffix(seg, "-api") {
 				return true
