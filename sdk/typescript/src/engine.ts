@@ -150,4 +150,16 @@ export class KernEngine {
     }
     return this._run(args);
   }
+
+  async fetchRawAnchor(fileOrSymbol: string, options: { lines?: number; root?: string } = {}): Promise<string> {
+    const args = ["context", fileOrSymbol];
+    if (options.root) {
+      args.push("--root", options.root);
+    }
+    if (options.lines && options.lines > 0) {
+      args.push("--lines", String(options.lines));
+    }
+    return this._run(args);
+  }
 }
+

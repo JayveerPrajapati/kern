@@ -87,3 +87,44 @@ class KernEngine:
             return stdout
         except Exception as e:
             raise RuntimeError(f"Failed to execute kern engine: {e}") from e
+
+    def fetch_raw_anchor(self, file_or_symbol: str, lines: int = 0, root: str = ".") -> str:
+        """Hydrate raw context for an anchor citation or omitted block."""
+        cmd = [self.binary_path, "context", file_or_symbol, "--root", root]
+        if lines > 0:
+            cmd.extend(["--lines", str(lines)])
+        try:
+            process = subprocess.Popen(
+                cmd, shell=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            stdout, stderr = process.communicate()
+            if process.returncode != 0:
+                raise RuntimeError(f"kern error: {stderr.strip()}")
+            return stdout
+        except Exception as e:
+            raise RuntimeError(f"Failed to execute kern engine: {e}") from e
+
+    def search(self, query: str, root: str = ".", limit: int = 20, semantic: bool = False) -> str:
+        """Execute AST & semantic symbol search across codebase."""
+        cmd = [self.binary_path, "search", query, "--json", "--root", root]
+        if limit > 0:
+            cmd.extend(["--limit", str(limit)])
+        if semantic:
+            cmd.append("--semantic")
+        try:
+            process = subprocess.Popen(
+                cmd, shell=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            stdout, stderr = process.communicate()
+            if process.returncode != 0:
+                raise RuntimeError(f"kern error: {stderr.strip()}")
+            return stdout
+        except Exception as e:
+            raise RuntimeError(f"Failed to execute kern engine: {e}") from e
+
