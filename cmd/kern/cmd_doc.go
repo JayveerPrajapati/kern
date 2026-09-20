@@ -94,7 +94,7 @@ func runDocSearch(rest []string) {
 	if hasSemantic(ix) {
 		client := llm.NewEmbedder()
 		if client.HasEmbeddingModel() {
-			docsearch.SemanticEmbedder = client
+			docsearch.SetSemanticEmbedder(client)
 		}
 	}
 	results := ix.Search(query, k)
