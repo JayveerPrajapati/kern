@@ -278,3 +278,49 @@ func TestNewPersistsIndexViaLoadOrBuild(t *testing.T) {
 		t.Fatalf("second New: %v", err)
 	}
 }
+
+// TestResolveSymbolFuzzyApproximatePhrase verifies that approximate phrases
+// or doc titles without exact qualified symbol names auto-resolve to the
+// closest matching candidate symbol in the graph rather than failing.
+func TestResolveSymbolFuzzyApproximatePhrase(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "go.mod"), []byte("module userauth\n\ngo 1.21\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	code := `package userauth
+
+func UserAuthenticationRateLimiter() bool {
+	return true
+}
+
+func ProcessLogin() bool {
+	return UserAuthenticationRateLimiter()
+}
+`
+	if err := os.WriteFile(filepath.Join(root, "auth.go"), []byte(code), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	p, err := New(root)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	// Approximate query: "user authentication rate limiting"
+	sym, err := p.resolveSymbol("user authentication rate limiting")
+	if err != nil {
+		t.Fatalf("resolveSymbol failed to auto-resolve approximate phrase: %v", err)
+	}
+	if !strings.Contains(sym, "UserAuthenticationRateLimiter") {
+		t.Errorf("resolveSymbol resolved %q, want UserAuthenticationRateLimiter", sym)
+	}
+
+	// Single approximate token: "RateLimiter"
+	sym2, err := p.resolveSymbol("RateLimiter")
+	if err != nil {
+		t.Fatalf("resolveSymbol single approximate token failed: %v", err)
+	}
+	if !strings.Contains(sym2, "UserAuthenticationRateLimiter") {
+		t.Errorf("resolveSymbol resolved %q, want UserAuthenticationRateLimiter", sym2)
+	}
+}
+
