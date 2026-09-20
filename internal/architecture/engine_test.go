@@ -18,6 +18,7 @@ func buildIndex(t *testing.T, root string) *index.Index {
 }
 
 func TestLoadMissingFileIsEmpty(t *testing.T) {
+	t.Parallel()
 	root := scaffoldModule(t, webToDBModule())
 	cfg, err := Load(root)
 	if err != nil {
@@ -29,6 +30,7 @@ func TestLoadMissingFileIsEmpty(t *testing.T) {
 }
 
 func TestLoadParsesYAML(t *testing.T) {
+	t.Parallel()
 	root := scaffoldModule(t, webToDBModule())
 	writeConfig(t, root, "architecture.yaml", `version: "1"
 name: "fixture"
@@ -57,6 +59,7 @@ rules:
 }
 
 func TestLoadAcceptsJSON(t *testing.T) {
+	t.Parallel()
 	root := scaffoldModule(t, webToDBModule())
 	writeConfig(t, root, "architecture.json", `{"version":"1","rules":[{"from":"web","to":"db","action":"forbid"}]}`)
 	cfg, err := Load(root)
@@ -69,6 +72,7 @@ func TestLoadAcceptsJSON(t *testing.T) {
 }
 
 func TestLoadFailClosedOnUnparseable(t *testing.T) {
+	t.Parallel()
 	root := scaffoldModule(t, webToDBModule())
 	writeConfig(t, root, "architecture.yaml", "this is: : not valid: :yaml {{{\n  - broken")
 	if _, err := Load(root); err == nil {
@@ -77,6 +81,7 @@ func TestLoadFailClosedOnUnparseable(t *testing.T) {
 }
 
 func TestLoadRejectsUnknownVersion(t *testing.T) {
+	t.Parallel()
 	root := scaffoldModule(t, webToDBModule())
 	writeConfig(t, root, "architecture.yaml", "version: \"99\"\nrules: []\n")
 	if _, err := Load(root); err == nil {
@@ -85,6 +90,7 @@ func TestLoadRejectsUnknownVersion(t *testing.T) {
 }
 
 func TestLoadRejectsBadAction(t *testing.T) {
+	t.Parallel()
 	root := scaffoldModule(t, webToDBModule())
 	writeConfig(t, root, "architecture.yaml", `version: "1"
 rules:
@@ -98,6 +104,7 @@ rules:
 }
 
 func TestCheckForbiddenEdge(t *testing.T) {
+	t.Parallel()
 	root := scaffoldModule(t, webToDBModule())
 	writeConfig(t, root, "architecture.yaml", `version: "1"
 rules:
@@ -121,6 +128,7 @@ rules:
 }
 
 func TestAllowRuleOverridesForbid(t *testing.T) {
+	t.Parallel()
 	root := scaffoldModule(t, webToDBModule())
 	writeConfig(t, root, "architecture.yaml", `version: "1"
 rules:
@@ -141,6 +149,7 @@ rules:
 }
 
 func TestCheckWarningSeverity(t *testing.T) {
+	t.Parallel()
 	root := scaffoldModule(t, webToDBModule())
 	writeConfig(t, root, "architecture.yaml", `version: "1"
 rules:
@@ -159,6 +168,7 @@ rules:
 }
 
 func TestCheckLayerRules(t *testing.T) {
+	t.Parallel()
 	root := scaffoldModule(t, webToDBModule())
 	writeConfig(t, root, "architecture.yaml", `version: "1"
 layers:
@@ -187,6 +197,7 @@ rules:
 }
 
 func TestCheckLayerDepends(t *testing.T) {
+	t.Parallel()
 	// layer "web" may depend only on "api"; it reaches "db" -> violation.
 	root := scaffoldModule(t, webToDBModule())
 	writeConfig(t, root, "architecture.yaml", `version: "1"
@@ -210,6 +221,7 @@ rules: []
 }
 
 func TestCheckDeterministicOrdering(t *testing.T) {
+	t.Parallel()
 	root := scaffoldModule(t, webToDBModule())
 	writeConfig(t, root, "architecture.yaml", `version: "1"
 rules:

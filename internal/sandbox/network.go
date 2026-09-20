@@ -64,7 +64,7 @@ const maxNetworkHits = 5
 func assessNetwork(output string) *NetworkPolicy {
 	p := &NetworkPolicy{
 		Isolated:    false, // sandbox.Run does not isolate egress; see NetworkPolicy.Isolated
-		NetnsAvail:  runtime.GOOS == "linux",
+		NetnsAvail:  networkIsolationAvailable(),
 		AllowNetEnv: netEscapeHatchSet(),
 	}
 	lower := strings.ToLower(output)
@@ -79,8 +79,8 @@ func assessNetwork(output string) *NetworkPolicy {
 	return p
 }
 
-// netIsolationProbe caches the unshare availability probe: whether this host
-// can run a command in a private network namespace is a per-host fact that
+// netIsolationProbe caches the isolation availability probe: whether this host
+// can run a command in an isolated network environment is a per-host fact that
 // does not change during a process lifetime. Mirrors internal/script's probe
 // so `kern sandbox` and `kern exec` make the same fail-closed decision.
 var (
@@ -89,11 +89,21 @@ var (
 )
 
 // networkIsolationAvailable reports whether this host can provide network
-// isolation for a sandboxed run (unprivileged user + network namespaces via
-// `unshare --user --map-root-user --net`). Linux with unprivileged userns
-// enabled: yes; macOS/Windows: no (no unprivileged user namespaces).
+// isolation for a sandboxed run (Linux unprivileged user+network namespaces via
+// `unshare` or macOS Apple Seatbelt via `sandbox-exec`).
 func networkIsolationAvailable() bool {
 	netProbeOnce.Do(func() {
+		if runtime.GOOS == "darwin" {
+			if bin, err := exec.LookPath("sandbox-exec"); err == nil {
+				ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+				defer cancel()
+				profile := "(version 1)\n(allow default)\n(deny network*)"
+				if err := exec.CommandContext(ctx, bin, "-p", profile, "true").Run(); err == nil {
+					netIsolationOK = true
+					return
+				}
+			}
+		}
 		bin, err := exec.LookPath("unshare")
 		if err != nil {
 			return

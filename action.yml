@@ -1,0 +1,99 @@
+name: kern
+description: >
+  Zero-telemetry local code-intelligence, change-firewall verification, and
+  governance analysis for AI agent workflows and CI pipelines. Runs kern check,
+  guard, verify, or review locally without network egress.
+
+branding:
+  icon: shield
+  color: blue
+
+inputs:
+  version:
+    description: >
+      kern release tag to install (e.g. v0.9.9.1); 'latest' resolves to the newest release.
+    required: false
+    default: latest
+  command:
+    description: >
+      kern command to execute (e.g. 'check', 'verify', 'review', 'guard', 'doctor').
+    required: false
+    default: check
+  args:
+    description: >
+      Additional CLI flags and arguments passed to the command (e.g. '--ci', '--staged', '--format=sarif').
+    required: false
+    default: --ci
+  kern-bin:
+    description: >
+      Path to an existing kern binary already present on the runner. When set, download is skipped.
+    required: false
+    default: ""
+  working-directory:
+    description: >
+      Directory where the command should be run (defaults to project root).
+    required: false
+    default: "."
+
+outputs:
+  exit-code:
+    description: Exit code returned by the kern invocation.
+  output:
+    description: Standard output captured from the execution.
+
+runs:
+  using: composite
+  steps:
+    - name: Setup kern binary
+      id: setup-kern
+      shell: bash
+      run: |
+        set -euo pipefail
+        if [ -n "${{ inputs.kern-bin }}" ]; then
+          KERN_BIN="${{ inputs.kern-bin }}"
+        else
+          mkdir -p /tmp/kern-bin
+          repo="${{ github.action_repository }}"
+          if [ -z "$repo" ]; then
+            repo="JayveerPrajapati/kern"
+          fi
+          tag="${{ inputs.version }}"
+          if [ "$tag" = "latest" ]; then
+            tag=$(gh release view --repo "$repo" --json tagName --jq .tagName 2>/dev/null || echo "")
+            if [ -z "$tag" ]; then
+              tag="v0.9.9.1"
+            fi
+          fi
+          gh release download "$tag" \
+            --repo "$repo" \
+            --pattern "kern-linux-amd64.tar.gz" \
+            --dir /tmp/kern-bin --clobber
+          tar -xzf /tmp/kern-bin/kern-linux-amd64.tar.gz -C /tmp/kern-bin
+          KERN_BIN=/tmp/kern-bin/kern
+        fi
+        echo "KERN_BIN=${KERN_BIN}" >> "$GITHUB_ENV"
+        "$KERN_BIN" version >/dev/null
+      env:
+        GH_TOKEN: ${{ github.token }}
+
+    - name: Run kern ${{ inputs.command }}
+      id: run-kern
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        set -o pipefail
+        echo "Executing: $KERN_BIN ${{ inputs.command }} ${{ inputs.args }}"
+        output_file="/tmp/kern-action-output.txt"
+        exit_code=0
+        "$KERN_BIN" ${{ inputs.command }} ${{ inputs.args }} > "$output_file" 2>&1 || exit_code=$?
+        cat "$output_file"
+        echo "exit-code=${exit_code}" >> "$GITHUB_OUTPUT"
+        
+        delim="KERN_OUTPUT_EOF"
+        echo "output<<${delim}" >> "$GITHUB_OUTPUT"
+        cat "$output_file" >> "$GITHUB_OUTPUT"
+        echo "${delim}" >> "$GITHUB_OUTPUT"
+        
+        if [ "$exit_code" -ne 0 ]; then
+          exit "$exit_code"
+        fi

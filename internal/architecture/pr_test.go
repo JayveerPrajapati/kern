@@ -6,6 +6,7 @@ import (
 )
 
 func TestValidatePRApprovedWhenClean(t *testing.T) {
+	t.Parallel()
 	root := scaffoldModule(t, webToDBModule())
 	// No governance rules -> everything permitted.
 	pv, err := ValidatePR(root, "feature/x", "main", []string{"web/web.go", "db/db.go"})
@@ -24,6 +25,7 @@ func TestValidatePRApprovedWhenClean(t *testing.T) {
 }
 
 func TestValidatePRBlockedOnError(t *testing.T) {
+	t.Parallel()
 	root := scaffoldModule(t, webToDBModule())
 	writeConfig(t, root, "architecture.yaml", `version: "1"
 rules:
@@ -51,6 +53,7 @@ rules:
 }
 
 func TestValidatePRAllowsWarningsOnly(t *testing.T) {
+	t.Parallel()
 	root := scaffoldModule(t, webToDBModule())
 	writeConfig(t, root, "architecture.yaml", `version: "1"
 rules:
@@ -67,9 +70,13 @@ rules:
 	if !pv.Approved {
 		t.Fatal("warning-only violations should not block approval")
 	}
+	if len(pv.Violations) != 1 {
+		t.Fatalf("expected 1 warning violation, got %d", len(pv.Violations))
+	}
 }
 
 func TestAgentCheckReturnsReportForProposedFiles(t *testing.T) {
+	t.Parallel()
 	root := scaffoldModule(t, webToDBModule())
 	writeConfig(t, root, "architecture.yaml", `version: "1"
 rules:
@@ -94,6 +101,7 @@ rules:
 }
 
 func TestAgentCheckIgnoresNonProposedFiles(t *testing.T) {
+	t.Parallel()
 	root := scaffoldModule(t, webToDBModule())
 	writeConfig(t, root, "architecture.yaml", `version: "1"
 rules:

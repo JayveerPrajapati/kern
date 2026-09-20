@@ -6,6 +6,7 @@ import (
 )
 
 func TestGenerateFeatWithScope(t *testing.T) {
+	t.Parallel()
 	diff := `diff --git a/api/login.go b/api/login.go
 index abc..def 100644
 --- a/api/login.go
@@ -45,6 +46,7 @@ index 111..222 100644
 }
 
 func TestGenerateFixBeatsFeat(t *testing.T) {
+	t.Parallel()
 	diff := `diff --git a/cmd/kern/main.go b/cmd/kern/main.go
 --- a/cmd/kern/main.go
 +++ b/cmd/kern/main.go
@@ -59,6 +61,7 @@ func TestGenerateFixBeatsFeat(t *testing.T) {
 }
 
 func TestGenerateTestChange(t *testing.T) {
+	t.Parallel()
 	diff := `diff --git a/pkg/auth/auth_test.go b/pkg/auth/auth_test.go
 --- a/pkg/auth/auth_test.go
 +++ b/pkg/auth/auth_test.go
@@ -75,6 +78,7 @@ func TestGenerateTestChange(t *testing.T) {
 }
 
 func TestGenerateDocs(t *testing.T) {
+	t.Parallel()
 	diff := `diff --git a/README.md b/README.md
 --- a/README.md
 +++ b/README.md
@@ -88,6 +92,7 @@ func TestGenerateDocs(t *testing.T) {
 }
 
 func TestGenerateRename(t *testing.T) {
+	t.Parallel()
 	diff := `diff --git a/old.go b/new.go
 similarity index 95%
 rename from old.go
@@ -100,6 +105,7 @@ rename to new.go
 }
 
 func TestGenerateQuotedPaths(t *testing.T) {
+	t.Parallel()
 	diff := `diff --git "a/my file.go" "b/my file.go"
 index abc..def 100644
 --- "a/my file.go"
@@ -126,6 +132,7 @@ index 111..222 100644
 }
 
 func TestGenerateQuotedRename(t *testing.T) {
+	t.Parallel()
 	diff := `diff --git "a/old file.go" "b/new file.go"
 similarity index 95%
 rename from old file.go
@@ -138,6 +145,7 @@ rename to new file.go
 }
 
 func TestGenerateDeclarationExportedIsFeat(t *testing.T) {
+	t.Parallel()
 	// A new exported declaration is a feature even when the surrounding added
 	// body line carries fix keywords ("error"), which used to over-match.
 	diff := `diff --git a/api/handler.go b/api/handler.go
@@ -164,6 +172,7 @@ func TestGenerateDeclarationExportedIsFeat(t *testing.T) {
 }
 
 func TestGenerateDeclarationNaming(t *testing.T) {
+	t.Parallel()
 	// The subject must name the added top-level declaration, not a random
 	// non-stopword from an added body line.
 	diff := `diff --git a/internal/app/intent.go b/internal/app/intent.go
@@ -187,6 +196,7 @@ func TestGenerateDeclarationNaming(t *testing.T) {
 }
 
 func TestGenerateNoDeclarationKeepsKeywordScoring(t *testing.T) {
+	t.Parallel()
 	// Without any top-level declaration, the legacy fix-keyword scoring must
 	// still win (fix over feat) so existing behavior is preserved.
 	diff := `diff --git a/cmd/kern/main.go b/cmd/kern/main.go
@@ -203,6 +213,7 @@ func TestGenerateNoDeclarationKeepsKeywordScoring(t *testing.T) {
 }
 
 func TestGenerateDeterministic(t *testing.T) {
+	t.Parallel()
 	diff := `diff --git a/x.go b/x.go
 --- a/x.go
 +++ b/x.go
@@ -217,6 +228,7 @@ func TestGenerateDeterministic(t *testing.T) {
 }
 
 func TestGenerateEmptyDiff(t *testing.T) {
+	t.Parallel()
 	m := Generate("")
 	if m.Type != "chore" || !strings.HasPrefix(m.Subject, "chore") {
 		t.Errorf("empty diff -> %q / %q", m.Type, m.Subject)
@@ -224,6 +236,7 @@ func TestGenerateEmptyDiff(t *testing.T) {
 }
 
 func TestGenerateErrSentinelIsFix(t *testing.T) {
+	t.Parallel()
 	// An Err* sentinel is fix infrastructure: it must not flip the commit to
 	// feat (the exported-declaration rule skips it) and its raw identifier
 	// must not name the subject.
@@ -246,6 +259,7 @@ func TestGenerateErrSentinelIsFix(t *testing.T) {
 }
 
 func TestGenerateMultiAreaNoScopeAndLiteralSubject(t *testing.T) {
+	t.Parallel()
 	// A cross-cutting change gets no scope (no file owns ≥ 50% of the diff)
 	// and its subject comes from the first qualifying string literal, not
 	// from an exported declaration in one of many packages.
@@ -278,6 +292,7 @@ diff --git a/internal/web/z.go b/internal/web/z.go
 }
 
 func TestGenerateMultiAreaExportedDeclNotFeat(t *testing.T) {
+	t.Parallel()
 	// One exported declaration among several packages must not flip a
 	// cross-cutting commit to feat.
 	diff := `diff --git a/internal/blueprint/service/validate.go b/internal/blueprint/service/validate.go
@@ -300,6 +315,7 @@ diff --git a/cmd/kern/main.go b/cmd/kern/main.go
 }
 
 func TestGenerateSingleAreaExportedStillFeat(t *testing.T) {
+	t.Parallel()
 	// Regression guard for TestGenerateDeclarationExportedIsFeat: within a
 	// single area, a new exported method is still a feature even in a
 	// multi-file change.

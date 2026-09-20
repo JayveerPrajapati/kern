@@ -7,6 +7,7 @@ import (
 )
 
 func TestCompressStripsFiller(t *testing.T) {
+	t.Parallel()
 	in := "Sure! Great question.\n\nI think the bug is here.\n\nNote that the error is in parseLine.\n\nfunc main() {}\n\nHope this helps!"
 	out, dropped := Compress(in)
 	if dropped < 3 {
@@ -24,6 +25,7 @@ func TestCompressStripsFiller(t *testing.T) {
 }
 
 func TestCompressKeepsTechnicalPayload(t *testing.T) {
+	t.Parallel()
 	in := "The function returns err: nil.\n\nJust to be clear, use ctx.\n\ncmd := exec.Command(\"go\", \"build\")\n\nLet me know if that works."
 	out, _ := Compress(in)
 	if !contains(out, "cmd := exec.Command") {
@@ -35,6 +37,7 @@ func TestCompressKeepsTechnicalPayload(t *testing.T) {
 }
 
 func TestCompressPreservesFences(t *testing.T) {
+	t.Parallel()
 	in := "Here's the fix:\n\n```go\n// keep me\n```\n\nThanks!"
 	out, _ := Compress(in)
 	if !contains(out, "```go") || !contains(out, "// keep me") {
@@ -46,6 +49,7 @@ func TestCompressPreservesFences(t *testing.T) {
 }
 
 func TestCompressNoOpOnCleanOutput(t *testing.T) {
+	t.Parallel()
 	in := "var x = 42\n\nreturn x + 1\n"
 	out, dropped := Compress(in)
 	if out != "var x = 42\n\nreturn x + 1" {
@@ -57,6 +61,7 @@ func TestCompressNoOpOnCleanOutput(t *testing.T) {
 }
 
 func TestCompressCollapsesBlankRuns(t *testing.T) {
+	t.Parallel()
 	in := "a\n\n\n\n\nb"
 	out, _ := Compress(in)
 	if out != "a\n\nb" {
@@ -65,6 +70,7 @@ func TestCompressCollapsesBlankRuns(t *testing.T) {
 }
 
 func TestCompressStripsFillerFromShortPayloadLine(t *testing.T) {
+	t.Parallel()
 	// A short single-line response that carries technical payload must still
 	// have its filler stripped (regression: payload lines were appended
 	// verbatim, so "Sure! ... server.go. Hope that helps!" survived intact).
@@ -92,6 +98,7 @@ func contains(s, sub string) bool {
 }
 
 func TestStripPromptFluffRemovesConversationalFiller(t *testing.T) {
+	t.Parallel()
 	in := "Hi there!\n\nI hope you're well.\n\nI'm trying to debug billing-worker at internal/worker/billing.go.\n\nPlease take a look at the code.\n\nThanks so much in advance!"
 	out, dropped := StripPromptFluff(in)
 	if dropped < 3 {
@@ -106,6 +113,7 @@ func TestStripPromptFluffRemovesConversationalFiller(t *testing.T) {
 }
 
 func TestStripPromptFluffKeepsTechnicalLineWithHedge(t *testing.T) {
+	t.Parallel()
 	// "note that" can prefix a real instruction; the payload guard plus the
 	// absence of generic hedge prefixes must keep this line.
 	in := "Note that the parser fails on unicode input.\n\nThe fix is in tokenize.go."
@@ -119,6 +127,7 @@ func TestStripPromptFluffKeepsTechnicalLineWithHedge(t *testing.T) {
 }
 
 func TestStripPromptFluffPreservesFence(t *testing.T) {
+	t.Parallel()
 	in := "Please help me.\n\n```go\nfunc main() {}\n```\n\nThanks!"
 	out, _ := StripPromptFluff(in)
 	if !contains(out, "```go") || !contains(out, "func main()") {
@@ -127,6 +136,7 @@ func TestStripPromptFluffPreservesFence(t *testing.T) {
 }
 
 func TestCompressPreservesTrailingWhitespaceFreeText(t *testing.T) {
+	t.Parallel()
 	in := "hello world   \n  indented line  \n"
 	out, _ := Compress(in)
 	if out != "hello world\n  indented line" {
@@ -135,6 +145,7 @@ func TestCompressPreservesTrailingWhitespaceFreeText(t *testing.T) {
 }
 
 func TestStripPromptFluffKeepsRequestAfterPrefix(t *testing.T) {
+	t.Parallel()
 	// A filler-only line that is the ENTIRE prompt must not vanish: the
 	// empty-result guard falls back to the original text.
 	in := "So basically, I just wanted to say thanks for asking this question. Let me help you with that."
@@ -145,6 +156,7 @@ func TestStripPromptFluffKeepsRequestAfterPrefix(t *testing.T) {
 }
 
 func TestStripPromptFluffNeverReturnsEmpty(t *testing.T) {
+	t.Parallel()
 	cases := []string{
 		"So basically, I just wanted to say thanks for asking this question. Let me help you with that.",
 		"please just simply provide the final answer thank you very much",
@@ -159,6 +171,7 @@ func TestStripPromptFluffNeverReturnsEmpty(t *testing.T) {
 }
 
 func TestCompressConversationalFiller(t *testing.T) {
+	t.Parallel()
 	// K-16: polite filler phrases must be stripped
 	in := "Certainly! Great question.\nBasically, the system works by caching queries.\nIn summary: everything is fine."
 	out, dropped := Compress(in)
@@ -179,6 +192,7 @@ func TestCompressConversationalFiller(t *testing.T) {
 }
 
 func TestTersifyStripsBlankAndCommentLines(t *testing.T) {
+	t.Parallel()
 	in := "// header comment\n\n\nfunc main() {\n\n    // inner comment\n    fmt.Println(\"hi\")\n}\n\n// trailing\n"
 	out, st := Tersify(in, 0)
 	if st.DroppedComment < 3 {
@@ -199,6 +213,7 @@ func TestTersifyStripsBlankAndCommentLines(t *testing.T) {
 }
 
 func TestTersifyMarkdownHeadingsSurvive(t *testing.T) {
+	t.Parallel()
 	in := "# Section One\n\n# todo: fix this later\n\n## Getting Started\n"
 	out, st := Tersify(in, 0)
 	if !contains(out, "# Section One") || !contains(out, "## Getting Started") {
@@ -210,6 +225,7 @@ func TestTersifyMarkdownHeadingsSurvive(t *testing.T) {
 }
 
 func TestTersifyMaxBudgetKeepsHead(t *testing.T) {
+	t.Parallel()
 	var b strings.Builder
 	for i := 0; i < 50; i++ {
 		b.WriteString("line of technical content number ")
@@ -233,6 +249,7 @@ func TestTersifyMaxBudgetKeepsHead(t *testing.T) {
 }
 
 func TestTersifyPreservesFences(t *testing.T) {
+	t.Parallel()
 	in := "Sure!\n\n```go\n// comment inside fence\n\n   func x() {}\n```\n\nThanks!"
 	out, st := Tersify(in, 0)
 	if !contains(out, "```go") || !contains(out, "// comment inside fence") || !contains(out, "func x() {}") {
@@ -247,6 +264,7 @@ func TestTersifyPreservesFences(t *testing.T) {
 }
 
 func TestTersifyCollapsesRepeatedWhitespace(t *testing.T) {
+	t.Parallel()
 	in := "  the   answer   is 42  "
 	out, _ := Tersify(in, 0)
 	if !contains(out, "the answer is 42") {

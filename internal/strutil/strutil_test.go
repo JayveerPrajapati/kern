@@ -6,6 +6,7 @@ import (
 )
 
 func TestPct(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name   string
 		before int
@@ -24,6 +25,7 @@ func TestPct(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			got := Pct(tt.before, tt.after)
 			eps := tt.eps
 			if eps == 0 {
@@ -37,6 +39,7 @@ func TestPct(t *testing.T) {
 }
 
 func TestSlug(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name  string
 		input string
@@ -55,6 +58,7 @@ func TestSlug(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			if got := Slug(tt.input); got != tt.want {
 				t.Errorf("Slug(%q) = %q, want %q", tt.input, got, tt.want)
 			}
