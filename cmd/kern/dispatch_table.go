@@ -444,6 +444,10 @@ var commandTable = map[string]commandEntry{
 		runServe(rest)
 		return 0
 	}, help: "run the web console", usage: "usage: kern web [flags]  (alias of serve)\n  options:\n    --addr             listen address\n    --enterprise       enterprise mode\n    --project          project name\n    --root             project root (default: .)"},
+	"ui": {run: func(cmd string, rest []string) int {
+		runServe(rest)
+		return 0
+	}, help: "run the web console", usage: "usage: kern ui [flags]  (alias of serve)\n  options:\n    --addr             listen address\n    --enterprise       enterprise mode\n    --project          project name\n    --root             project root (default: .)"},
 	"index": {run: func(cmd string, rest []string) int {
 		runIndex(rest)
 		return 0
