@@ -6,6 +6,7 @@ import (
 )
 
 func TestSemanticMergeCleanMethodAdditions(t *testing.T) {
+	t.Parallel()
 	base := `package worker
 
 type Job struct {
@@ -67,6 +68,7 @@ func (j *Job) Stop() error {
 }
 
 func TestSemanticMergeStructFields(t *testing.T) {
+	t.Parallel()
 	base := `package config
 
 type Config struct {
@@ -110,6 +112,7 @@ type Config struct {
 }
 
 func TestSemanticMergeConflictDetection(t *testing.T) {
+	t.Parallel()
 	base := `package calc
 
 func Compute(x int) int {
