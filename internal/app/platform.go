@@ -295,21 +295,6 @@ func (p *Platform) analyzeChangeResolvable(change string) (domain.ContextPacket,
 			return pkt2, nil
 		}
 	}
-	// Fuzzy fallback across ranked search matches for approximate phrases/doc titles
-	if p.ix != nil {
-		for _, m := range intel.RankedSearch(p.ix, change, 5) {
-			if m.FullName() != change {
-				if pkt2, err2 := p.ctx.AnalyzeChange(m.FullName()); err2 == nil {
-					return pkt2, nil
-				}
-			}
-			if m.Name != change {
-				if pkt2, err2 := p.ctx.AnalyzeChange(m.Name); err2 == nil {
-					return pkt2, nil
-				}
-			}
-		}
-	}
 	return domain.ContextPacket{}, err
 }
 
@@ -486,12 +471,14 @@ func (p *Platform) resolveSymbol(change string) (string, error) {
 		}
 		// If single-token symbol not directly resolvable, find closest candidate via ranked search
 		if p.ix != nil {
-			for _, m := range intel.RankedSearch(p.ix, change, 5) {
-				if p.graph.Resolvable(m.FullName()) {
-					return m.FullName(), nil
-				}
-				if p.graph.Resolvable(m.Name) {
-					return m.Name, nil
+			for _, h := range intel.RankedSearchScored(p.ix, change, 5) {
+				if h.Score >= 150 {
+					if p.graph.Resolvable(h.Symbol.FullName()) {
+						return h.Symbol.FullName(), nil
+					}
+					if p.graph.Resolvable(h.Symbol.Name) {
+						return h.Symbol.Name, nil
+					}
 				}
 			}
 		}
@@ -506,24 +493,16 @@ func (p *Platform) resolveSymbol(change string) (string, error) {
 				return c, nil
 			}
 		}
-		// Auto-resolve: find closest symbol candidates from the index via ranked search
+		// Try high-confidence ranked search match for approximate phrases
 		if p.ix != nil {
-			for _, c := range cands {
-				for _, m := range intel.RankedSearch(p.ix, c, 5) {
-					if p.graph.Resolvable(m.FullName()) {
-						return m.FullName(), nil
+			for _, h := range intel.RankedSearchScored(p.ix, change, 5) {
+				if h.Score >= 150 {
+					if p.graph.Resolvable(h.Symbol.FullName()) {
+						return h.Symbol.FullName(), nil
 					}
-					if p.graph.Resolvable(m.Name) {
-						return m.Name, nil
+					if p.graph.Resolvable(h.Symbol.Name) {
+						return h.Symbol.Name, nil
 					}
-				}
-			}
-			for _, m := range intel.RankedSearch(p.ix, change, 5) {
-				if p.graph.Resolvable(m.FullName()) {
-					return m.FullName(), nil
-				}
-				if p.graph.Resolvable(m.Name) {
-					return m.Name, nil
 				}
 			}
 		}
