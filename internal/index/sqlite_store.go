@@ -81,7 +81,6 @@ func OpenSQLite(root string) (*SQLiteStore, error) {
 		"PRAGMA synchronous=NORMAL;",
 		"PRAGMA busy_timeout=5000;",
 		"PRAGMA temp_store=MEMORY;",
-		"PRAGMA mmap_size=268435456;", // 256MB memory mapped I/O
 		"PRAGMA wal_autocheckpoint=0;",
 	} {
 		if _, err := db.Exec(pragma); err != nil {
