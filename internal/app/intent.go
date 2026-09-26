@@ -2,6 +2,7 @@ package app
 
 import (
 	"strings"
+	"unicode"
 
 	"github.com/JayveerPrajapati/kern/internal/domain"
 )
@@ -30,7 +31,11 @@ func CompileIntent(raw string) domain.CompiledIntent {
 	switch {
 	case containsAny(lower, "explain", "understand", "what does", "how does", "describe"):
 		it = domain.IntentUnderstand
-	case containsAny(lower, "what if", "simulate", "predict", "impact of"):
+	// F-RN1: "what happens if …" is a prediction question, not a code
+	// change — without the keyword it fell through to the CODE_CHANGE verbs
+	// ("change" in "what happens if we change X") and compiled with
+	// execution capabilities: the worst failure direction.
+	case containsAny(lower, "what if", "what happens if", "what would happen", "simulate", "predict", "impact of"):
 		it = domain.IntentWhatIf
 	case containsAny(lower, "deploy", "release", "rollout"):
 		it = domain.IntentDeploy
@@ -42,7 +47,7 @@ func CompileIntent(raw string) domain.CompiledIntent {
 		it = domain.IntentSecurity
 	case containsAny(lower, "review", "check code", "inspect"):
 		it = domain.IntentReview
-	case containsAny(lower, "test", "coverage", "unit test"):
+	case containsWholeWord(lower, "test") || containsWholeWord(lower, "tests") || containsWholeWord(lower, "testing") || containsAny(lower, "coverage", "unit test"):
 		it = domain.IntentTest
 	case containsAny(lower, "audit", "who changed", "what did", "governance"):
 		it = domain.IntentAudit
@@ -225,6 +230,37 @@ func containsAny(s string, subs ...string) bool {
 		}
 	}
 	return false
+}
+
+// containsWholeWord reports whether s contains word as a WHOLE word, bounded
+// by non-word characters on both sides (underscore counts as a word
+// character, matching Go identifier semantics). Unlike containsAny, a
+// substring inside a longer identifier does NOT match — "test" inside
+// "testgaps" is a code-change command about a tool, not a request to run
+// tests. (Named containsWholeWord because capability.go already owns
+// containsWord with different semantics.)
+func containsWholeWord(s, word string) bool {
+	if word == "" || s == "" {
+		return false
+	}
+	for i := 0; i+len(word) <= len(s); i++ {
+		if !strings.HasPrefix(s[i:], word) {
+			continue
+		}
+		beforeOK := i == 0 || !isWordChar(rune(s[i-1]))
+		after := i + len(word)
+		afterOK := after >= len(s) || !isWordChar(rune(s[after]))
+		if beforeOK && afterOK {
+			return true
+		}
+	}
+	return false
+}
+
+// isWordChar reports whether r is a word character (letter, digit, or
+// underscore — the identifier alphabet, matching regexp \b semantics).
+func isWordChar(r rune) bool {
+	return r == '_' || unicode.IsLetter(r) || unicode.IsDigit(r)
 }
 
 // extractTarget heuristically extracts the target symbol/service from the

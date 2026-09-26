@@ -224,6 +224,26 @@ func TestTersifyMarkdownHeadingsSurvive(t *testing.T) {
 	}
 }
 
+func TestTersifyCountsKnownIssueComments(t *testing.T) {
+	t.Parallel()
+	// TODO/FIXME/XXX/HACK comments are still stripped, but must be counted in
+	// DroppedIssue so the summary header can alert agents to known issues.
+	in := "// TODO: fix the parser\n\n# todo: fix this later\n\n# Section One\n\n// plain comment\n"
+	out, st := Tersify(in, 0)
+	if st.DroppedIssue != 2 {
+		t.Fatalf("expected 2 known-issue comments counted, got %d", st.DroppedIssue)
+	}
+	if st.DroppedComment != 3 {
+		t.Fatalf("expected 3 comment lines dropped, got %d", st.DroppedComment)
+	}
+	if !contains(out, "# Section One") {
+		t.Fatalf("markdown heading must survive: %q", out)
+	}
+	if contains(out, "TODO") || contains(out, "todo") {
+		t.Fatalf("known-issue comment must be stripped: %q", out)
+	}
+}
+
 func TestTersifyMaxBudgetKeepsHead(t *testing.T) {
 	t.Parallel()
 	var b strings.Builder
@@ -274,4 +294,46 @@ func TestTersifyCollapsesRepeatedWhitespace(t *testing.T) {
 
 func itoaT(n int) string {
 	return strings.TrimSpace(strings.ReplaceAll(strings.Repeat(" ", 0), " ", "")) + fmt.Sprintf("%d", n)
+}
+
+// TestStripPromptFluffInlineAndDedup (F-OP1): prose compression must (a)
+// strip in-line hedge openers from payload lines and (b) dedup a sentence
+// repeated with blanks between (the adjacent-only collapse misses those).
+// The QA fixture: 20x "So basically I think that we should probably
+// consider ..." compressed by exactly 1 token before the fix.
+func TestStripPromptFluffInlineAndDedup(t *testing.T) {
+	sent := "So basically I think that we should probably consider the retry timeout increase."
+	var b strings.Builder
+	for i := 0; i < 20; i++ {
+		b.WriteString(sent + "\n\n")
+	}
+	out, dropped := StripPromptFluff(b.String())
+	if strings.Contains(strings.ToLower(out), "basically") || strings.Contains(out, "I think") {
+		t.Fatalf("inline filler must be stripped, got: %q", out)
+	}
+	if strings.Contains(out, "probably") {
+		t.Fatalf("hedge must be stripped, got: %q", out)
+	}
+	if !strings.Contains(out, "consider the retry timeout increase") {
+		t.Fatalf("payload sentence must survive, got: %q", out)
+	}
+	if dropped < 19 {
+		t.Fatalf("19 duplicate lines must drop, got %d", dropped)
+	}
+	occurrences := strings.Count(out, "consider the retry timeout increase")
+	if occurrences != 1 {
+		t.Fatalf("dedup must keep exactly one occurrence, got %d", occurrences)
+	}
+}
+
+// TestStripPromptFluffKeepsPayload pins the safety property: stripping
+// hedges never removes content words, paths, or numbers.
+func TestStripPromptFluffKeepsPayload(t *testing.T) {
+	in := "So basically I think we should probably increase the retry timeout in internal/retry/backoff.go to 30s."
+	out, _ := StripPromptFluff(in)
+	for _, want := range []string{"increase", "internal/retry/backoff.go", "30s"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("payload %q lost, got: %q", want, out)
+		}
+	}
 }

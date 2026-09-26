@@ -23,7 +23,7 @@ func dashboardBody(t *testing.T, s *Server) string {
 }
 
 func TestOrgAdminDashboardRendersProjectsAgentsTeams(t *testing.T) {
-	s := New()
+	s := mustNew(t)
 	if err := s.Register("proj-a", t.TempDir()); err != nil {
 		t.Fatal(err)
 	}
@@ -74,7 +74,7 @@ func TestOrgAdminDashboardRendersProjectsAgentsTeams(t *testing.T) {
 }
 
 func TestOrgAdminDashboardEmptyStates(t *testing.T) {
-	s := New()
+	s := mustNew(t)
 	body := dashboardBody(t, s)
 	for _, want := range []string{"no projects registered", "no agents registered", "no teams registered"} {
 		if !strings.Contains(body, want) {
@@ -84,7 +84,7 @@ func TestOrgAdminDashboardEmptyStates(t *testing.T) {
 }
 
 func TestOrgAdminDashboardEscapesNames(t *testing.T) {
-	s := New()
+	s := mustNew(t)
 	if err := s.Register(`<script>`, t.TempDir()); err != nil {
 		t.Fatal(err)
 	}

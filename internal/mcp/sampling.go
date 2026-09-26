@@ -12,7 +12,9 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/JayveerPrajapati/kern/internal/governance"
 	"github.com/JayveerPrajapati/kern/internal/llm"
+	"github.com/JayveerPrajapati/kern/internal/pii"
 )
 
 // samplingTimeout caps a single host sampling round-trip. The LLM chain
@@ -74,6 +76,16 @@ func (s *Server) registerHostSampling() func() {
 // passive MCP-sampling sampler when the client announced sampling capability.
 // key allows advanced callers to namespace a registration beyond the server's
 // own slot (e.g. per agent or per repo); the empty key uses this server's slot.
+//
+// Security contract: a registered command is an exec surface (sh -c per
+// generation). The client-callable entry point (handleRegisterHostSampler)
+// gates registration through governance.CheckExecCommand — the same
+// KERN_ALLOW_EXEC / KERN_TOOLS allowlist firewall as kern_exec/kern_sandbox.
+// This function itself does NOT gate: the operator-set KERN_HOST_SAMPLER_CMD
+// path (server.go) calls it directly, and that env value is the operator's
+// own approval. The spawned command runs with a minimal environment —
+// PATH, HOME, TMPDIR plus KERN_SYSTEM_PROMPT — never the full os.Environ()
+// (operators can inline env in the command string itself: `FOO=bar cmd`).
 func (s *Server) registerCommandSampler(cmd string, timeout time.Duration, key string) (string, error) {
 	if key == "" {
 		key = s.samplerKey
@@ -114,7 +126,26 @@ func (s *Server) registerCommandSampler(cmd string, timeout time.Duration, key s
 	return fmt.Sprintf("host sampler registered (key %s): %s", key, cmd), nil
 }
 
-// handleRegisterHostSampler implements kern_register_host_sampler.
+// serverRoot returns the server's confined workspace root — the root the
+// governance exec gate persists approvals under (<root>/.kern/approvals.json),
+// mirroring how the other exec handlers (kern_exec, kern_sandbox,
+// kern_validate) resolve their root. The first workspace root is the
+// server's own project root; stdio servers fall back to the process cwd.
+func (s *Server) serverRoot() string {
+	if roots := s.workspaceRoots(); len(roots) > 0 {
+		return roots[0]
+	}
+	return ""
+}
+
+// handleRegisterHostSampler implements kern_register_host_sampler. Registering
+// a command is an exec-surface action (the command runs via sh -c for every
+// generation), so a non-empty command must pass the governance exec firewall
+// first — KERN_ALLOW_EXEC=1, or a KERN_TOOLS allowlist naming
+// kern_register_host_sampler (or any exec tool). Fail closed: the gate error
+// is returned as-is, exactly like kern_exec. An EMPTY command unregisters —
+// it executes nothing, so it is not gated (and a client must be able to
+// unregister an operator-set KERN_HOST_SAMPLER_CMD sampler).
 func (s *Server) handleRegisterHostSampler(ctx context.Context, args map[string]any) (string, error) {
 	cmd := argString(args, "command")
 	key := argString(args, "key")
@@ -125,6 +156,11 @@ func (s *Server) handleRegisterHostSampler(ctx context.Context, args map[string]
 			return "", fmt.Errorf("timeout: invalid seconds %q", v)
 		}
 		timeout = time.Duration(secs) * time.Second
+	}
+	if strings.TrimSpace(cmd) != "" {
+		if err := governance.CheckExecCommand(cmd, s.serverRoot(), "kern_register_host_sampler"); err != nil {
+			return "", err
+		}
 	}
 	model := argString(args, "model")
 	msg, err := s.registerCommandSampler(cmd, timeout, key)
@@ -141,6 +177,14 @@ func (s *Server) handleRegisterHostSampler(ctx context.Context, args map[string]
 // The user prompt is fed on stdin, the system prompt exported as
 // $KERN_SYSTEM_PROMPT; stdout (trimmed) is the reply. Output is capped at
 // 64KiB so a misbehaving command cannot flood the caller.
+//
+// Environment contract: the child runs with a MINIMAL allowlist — PATH,
+// HOME, TMPDIR, plus KERN_SYSTEM_PROMPT — never the full os.Environ(), so a
+// registered command cannot read operator secrets out of the environment
+// (operators can inline env in the command string itself: `FOO=bar cmd`).
+// Output is PII-masked BEFORE the 64KiB cap check and before trimming, so a
+// secret straddling the byte cut cannot escape the mask regexes (same
+// mask-before-truncate invariant as internal/mcp/exec maskedOutput).
 func runHostSamplerCommand(ctx context.Context, cmd string, timeout time.Duration, system, user string) (string, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -149,7 +193,16 @@ func runHostSamplerCommand(ctx context.Context, cmd string, timeout time.Duratio
 	defer cancel()
 	c := exec.CommandContext(cctx, "sh", "-c", cmd)
 	c.Stdin = strings.NewReader(user)
-	c.Env = append(os.Environ(), "KERN_SYSTEM_PROMPT="+system)
+	c.Env = []string{
+		"PATH=" + os.Getenv("PATH"),
+		"KERN_SYSTEM_PROMPT=" + system,
+	}
+	if h := os.Getenv("HOME"); h != "" {
+		c.Env = append(c.Env, "HOME="+h)
+	}
+	if t := os.Getenv("TMPDIR"); t != "" {
+		c.Env = append(c.Env, "TMPDIR="+t)
+	}
 	var out, errb bytes.Buffer
 	c.Stdout = &out
 	c.Stderr = &errb
@@ -163,13 +216,16 @@ func runHostSamplerCommand(ctx context.Context, cmd string, timeout time.Duratio
 		}
 		return "", fmt.Errorf("llm: host sampler command failed: %s", msg)
 	}
-	if out.Len() == 0 {
+	// Mask the FULL output before the cap check and before trimming: a secret
+	// straddling the byte cut would otherwise escape the mask regexes.
+	text := pii.Mask(out.String()).Text
+	if text == "" {
 		return "", fmt.Errorf("llm: host sampler command produced no output")
 	}
-	if out.Len() > 64<<10 {
+	if len(text) > 64<<10 {
 		return "", fmt.Errorf("llm: host sampler output exceeds the 64KiB cap")
 	}
-	return strings.TrimSpace(out.String()), nil
+	return strings.TrimSpace(text), nil
 }
 
 // sample implements llm.Sampler: it sends a sampling/createMessage request
@@ -275,8 +331,10 @@ func (s *Server) deliverSamplingReply(req rpcRequest) bool {
 			rep.err = fmt.Errorf("mcp: host sampling error (unparseable)")
 		}
 	} else if rawPresent(req.Result) {
-		_ = json.Unmarshal(req.Result, &rep.result)
-		if rep.result == nil {
+		if err := json.Unmarshal(req.Result, &rep.result); err != nil {
+			// A malformed payload must not be misreported as an empty result.
+			rep.err = fmt.Errorf("mcp: host sampling result: %w", err)
+		} else if rep.result == nil {
 			rep.err = fmt.Errorf("mcp: host sampling empty result")
 		}
 	} else {

@@ -339,3 +339,73 @@ diff --git a/api/middleware.go b/api/middleware.go
 		t.Errorf("type = %q, want feat (single-area exported method)", m.Type)
 	}
 }
+
+// TestSubjectNounPrefersModifiedDecl (F-CM1): when changed lines concentrate
+// inside an existing declaration (the header line arriving via hunk context),
+// the subject must name THAT declaration — not a word grabbed from the added
+// lines ("print json" used to headline a fix that modified runRename).
+func TestSubjectNounPrefersModifiedDecl(t *testing.T) {
+	diff := `diff --git a/pkg/api.go b/pkg/api.go
+index 111..222 100644
+--- a/pkg/api.go
++++ b/pkg/api.go
+@@ -10,7 +10,9 @@ import "fmt"
+ // Apply renders and applies.
+ func Apply(root string) error {
+-	if rep.Applied {
++	// Apply for real: never skip the mutation.
++	if rep.Applied {
+ 		return 0, nil
+ 	}
++	fmt.Println("applied")
+ 	return nil
+ }`
+	m := Generate(diff)
+	if !strings.Contains(strings.ToLower(m.Subject), "apply") {
+		t.Fatalf("subject should name the modified declaration Apply, got: %s", m.Subject)
+	}
+}
+
+// TestSubjectNounWordGrabWhenNoDecl pins the fallback: markdown / decl-less
+// diffs keep the word-grab path (rule 3/4) — decl tracking adds nothing there.
+func TestSubjectNounWordGrabWhenNoDecl(t *testing.T) {
+	diff := `diff --git a/docs/readme.md b/docs/readme.md
+index 111..222 100644
+--- a/docs/readme.md
++++ b/docs/readme.md
+@@ -1,3 +1,5 @@
++# Regenerated catalog
++
+ body text here unchanged`
+	m := Generate(diff)
+	if m.Type != "docs" {
+		t.Fatalf("markdown-only diff should classify docs, got %s", m.Type)
+	}
+	if m.Subject == "" {
+		t.Fatal("subject must not be empty")
+	}
+}
+
+// TestEnhanceAttributesBodyDeepEdits (F-CM1): a body-deep edit — hunk
+// context far from the declaration header, or --unified=0 diffs with no
+// context at all — still names the enclosing declaration when the file
+// content is available, instead of a word grabbed from the added lines.
+func TestEnhanceAttributesBodyDeepEdits(t *testing.T) {
+	// Current file: two top-level functions, the change lands deep inside
+	// the second one (--unified=0: no context lines at all).
+	content := "package pkg\n\nfunc first() int {\n\treturn 1\n}\n\nfunc processQueue(items []string) error {\n\tvar out []string\n\tfor _, it := range items {\n\t\tout = append(out, it)\n\t}\n\treturn nil\n}\n"
+	diff := `diff --git a/pkg/worker.go b/pkg/worker.go
+index 111..222 100644
+--- a/pkg/worker.go
++++ b/pkg/worker.go
+@@ -9,2 +9,3 @@
+-func processQueue(items []string) error {
+-	var out []string
++func processQueue(items []string) error {
++	var out []string
++	filtered := out[:0]`
+	m := Enhance(diff, func(p string) (string, bool) { return content, true })
+	if !strings.Contains(strings.ToLower(m.Subject), "process queue") {
+		t.Fatalf("subject should name processQueue (the enclosing declaration), got: %s", m.Subject)
+	}
+}

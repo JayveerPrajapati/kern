@@ -8,7 +8,11 @@ import (
 	"strings"
 	"testing"
 
+	// Alias the internal/app import: the web test package already names its
+	// App instances `app`, so the package-level identifier would collide.
+	kernapp "github.com/JayveerPrajapati/kern/internal/app"
 	"github.com/JayveerPrajapati/kern/internal/domain"
+	"github.com/JayveerPrajapati/kern/internal/eventbus"
 )
 
 // firstSymbolNodeID returns the ID of the first symbol node in the app's
@@ -123,6 +127,36 @@ func TestV1AnalyzeValidSymbolStill200(t *testing.T) {
 	rec := postJSON(t, app, "/v1/analyze", `{"change":"helper"}`)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 (body: %s)", rec.Code, rec.Body.String())
+	}
+}
+
+// TestV1AnalyzePersistsTaskRecord locks the F9 regression fix on the web
+// surface: handleV1Analyze's comment promises an authoritative Task record is
+// created and the response returns the TaskID, so the record must be written
+// to the persisted store — a fresh TaskService (a new process) must resolve
+// the returned TaskID via Get.
+func TestV1AnalyzePersistsTaskRecord(t *testing.T) {
+	app := newTestApp(t)
+	rec := postJSON(t, app, "/v1/analyze", `{"change":"helper"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body: %s)", rec.Code, rec.Body.String())
+	}
+	var resp v1AnalyzeResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v (body: %s)", err, rec.Body.String())
+	}
+	if resp.TaskID == "" {
+		t.Fatal("v1/analyze response has no task_id")
+	}
+	if !strings.HasPrefix(resp.TaskID, "t-") {
+		t.Fatalf("task_id = %q, want store-assigned t-<n> (authoritative record)", resp.TaskID)
+	}
+	// A fresh service reads the same persisted store `kern task <id>` reads.
+	fresh := kernapp.NewTaskService(app.platform, eventbus.New())
+	if got, ok := fresh.Get(resp.TaskID); !ok {
+		t.Fatalf("task %q not queryable from a fresh TaskService after POST /v1/analyze", resp.TaskID)
+	} else if got.State == "" {
+		t.Fatalf("task %q loaded from store has no state", resp.TaskID)
 	}
 }
 

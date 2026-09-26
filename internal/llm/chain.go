@@ -72,6 +72,33 @@ func (c *ChainProvider) Embed(ctx context.Context, text string) ([]float32, erro
 	return nil, fmt.Errorf("llm: all embedding providers failed (%s)", strings.Join(errs, "; "))
 }
 
+// EmbedBatch embeds many texts via the first chained provider that supports
+// batched embedding (Ollama's /api/embed input array). The auto chain leads
+// with Ollama, so a multi-thousand-chunk index costs one HTTP round-trip
+// instead of thousands. When no chained provider batches, the error makes the
+// caller fall back to per-text embedding.
+func (c *ChainProvider) EmbedBatch(ctx context.Context, texts []string) ([][]float32, error) {
+	if len(texts) == 0 {
+		return nil, nil
+	}
+	var errs []string
+	for i, p := range c.providers {
+		bp, ok := p.(batchProvider)
+		if !ok {
+			continue
+		}
+		vecs, err := bp.EmbedBatch(ctx, texts)
+		if err == nil {
+			return vecs, nil
+		}
+		errs = append(errs, fmt.Sprintf("%s: %v", c.names[i], err))
+	}
+	if len(errs) == 0 {
+		return nil, fmt.Errorf("llm: no provider in the chain supports batched embeddings")
+	}
+	return nil, fmt.Errorf("llm: all batched embedding providers failed (%s)", strings.Join(errs, "; "))
+}
+
 // Stream tries each provider in order.
 func (c *ChainProvider) Stream(ctx context.Context, system, user string, opts Options) (*Stream, error) {
 	var errs []string

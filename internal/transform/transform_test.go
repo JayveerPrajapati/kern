@@ -206,6 +206,7 @@ type Server struct{}
 	req := Request{
 		Action:        "implement_interface",
 		File:          target,
+		Root:          dir,             // confinement root: production callers always set it (the MCP leaf resolves cwd)
 		TargetSymbol:  "src/server.go", // path-like: yields an invalid receiver type
 		InterfaceName: "io.Writer",
 		Apply:         true,

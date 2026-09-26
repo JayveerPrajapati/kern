@@ -177,3 +177,57 @@ profiles:
 		t.Errorf("expected uninteresting chatter to be omitted, got:\n%s", res.Output)
 	}
 }
+
+// TestLogProfileSlugNoPathTraversal covers audit iteration-3 finding 1: a
+// hostile profile (an agent-supplied tool arg) must be slugified before it
+// enters the semcache namespace, because semcache embeds the namespace
+// verbatim in on-disk paths (payload key sem/<ns>/<hash>, index
+// sem/<ns>-index.json). A value like "../../../etc" must stay inside the
+// cache tree: the derived namespace and every path built from it contain no
+// ".." separator and resolve under the cache root.
+func TestLogProfileSlugNoPathTraversal(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+
+	ns := logNS("../../../etc")
+	if strings.Contains(ns, "..") {
+		t.Fatalf("logNS(\"../../../etc\") = %q: namespace contains '..'", ns)
+	}
+	if ns != "log:etc" {
+		t.Fatalf("logNS(\"../../../etc\") = %q, want %q", ns, "log:etc")
+	}
+
+	// Every path semcache builds from the namespace must stay under the cache
+	// root. filepath.Join cleans "..", so a traversal would land OUTSIDE root;
+	// assert both the containment and the absence of "..".
+	root := cache.Dir()
+	idxPath := filepath.Clean(cache.Path("data", "sem", ns+"-index.json"))
+	if strings.Contains(idxPath, "..") || !strings.HasPrefix(idxPath, root) {
+		t.Fatalf("index path %q escapes cache root %q", idxPath, root)
+	}
+	key := "sem/" + ns + "/" + cache.Hash([]byte("x"))
+	payloadPath := filepath.Clean(cache.Path("data", key+".json"))
+	if strings.Contains(payloadPath, "..") || !strings.HasPrefix(payloadPath, root) {
+		t.Fatalf("payload path %q escapes cache root %q", payloadPath, root)
+	}
+
+	// Full run: a Log() with the hostile profile stores under the safe
+	// namespace — the index lands inside the cache tree, proving the Store
+	// side (not just the derived string) is contained.
+	logText := "2024-01-01 INFO request handled\n2024-01-01 ERROR boom\n"
+	if _, err := Log(logText, Options{Cache: true, Profile: "../../../etc"}); err != nil {
+		t.Fatalf("Log with hostile profile: %v", err)
+	}
+	if _, err := os.Stat(idxPath); err != nil {
+		t.Fatalf("expected index at %s: %v", idxPath, err)
+	}
+
+	// Mixed separators collapse to single dashes; nothing hostile survives.
+	if got := logNS("a b/c\\d:e"); got != "log:a-b-c-d-e" {
+		t.Fatalf("logNS(%q) = %q, want slugged form", "a b/c\\d:e", got)
+	}
+	// A profile with no slug-able characters falls back to the default
+	// namespace, so it cannot forge a sibling namespace either.
+	if got := logNS("///..."); got != "log:default" {
+		t.Fatalf("logNS(\"///...\") = %q, want log:default", got)
+	}
+}

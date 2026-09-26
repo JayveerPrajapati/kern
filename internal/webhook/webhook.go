@@ -6,6 +6,7 @@ package webhook
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -43,6 +44,16 @@ func New() *Client {
 		hooks: map[string]string{},
 		http: &http.Client{
 			Timeout: defaultTimeout,
+			// Guard every outbound dial against the cloud-metadata range
+			// (SSRF): unlike the registration-time literal-IP check in Add,
+			// this resolves the host at DIAL time, so a domain that resolves
+			// to 169.254.x.x (DNS rebinding) is caught too. Private/LAN and
+			// loopback destinations stay reachable — hook URLs are
+			// user-configured and legitimate local webhooks must keep
+			// working.
+			Transport: &http.Transport{
+				DialContext: guardedDialContext,
+			},
 			// Never follow redirects when delivering a webhook: a compromised or
 			// malicious URL could otherwise redirect us to an internal service
 			// (SSRF). Treat any redirect as the final response.
@@ -124,6 +135,32 @@ func restrictedHost(host string) (bool, string) {
 		return true, "unspecified"
 	}
 	return false, ""
+}
+
+// guardedDialContext is the http.Client dialer for webhook delivery. It
+// resolves the host at dial time and refuses the link-local / cloud-metadata
+// range (169.254.0.0/16 — the concrete metadata-IP SSRF risk, e.g.
+// 169.254.169.254 — plus IPv6 link-local fe80::/10). Hook URLs are
+// user-configured (not agent-influenced), so private/LAN and loopback
+// destinations are deliberately NOT blocked: a legitimate local webhook must
+// keep working. This is the transport-level complement to Add's
+// registration-time literal-IP check (restrictedHost): a domain resolving to
+// the metadata range at delivery time is caught here.
+func guardedDialContext(ctx context.Context, network, addr string) (net.Conn, error) {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return nil, err
+	}
+	ips, err := net.LookupIP(host)
+	if err != nil {
+		return nil, fmt.Errorf("webhook: resolve %s: %w", host, err)
+	}
+	for _, ip := range ips {
+		if ip.IsLinkLocalUnicast() {
+			return nil, fmt.Errorf("webhook: refusing link-local/cloud-metadata address %s (host %s)", ip, host)
+		}
+	}
+	return (&net.Dialer{Timeout: defaultTimeout}).DialContext(ctx, network, addr)
 }
 
 // Remove unregisters the hook named name. Removing an unknown name is a no-op.

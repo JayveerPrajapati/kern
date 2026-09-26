@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 	"time"
@@ -93,20 +94,38 @@ func (a *GitHubActionsAdapter) Trigger(p Pipeline) (string, error) {
 	// Poll for the triggered run. A short sleep lets the new run appear in
 	// `gh run list` before we query it, and we filter by the requested ref so a
 	// concurrently-started run for another branch can't be mistaken for ours.
-	time.Sleep(2 * time.Second)
+	// Up to 3 attempts with exponential backoff (2s, 4s, 8s by default)
+	// tolerate slow CI queues where the run takes a while to appear. The
+	// initial delay is configurable via the KERN_CI_POLL_DELAY env var.
 	listArgs := []string{"run", "list", "--workflow", p.Name, "--ref", p.Ref, "--limit", "5", "--json", "databaseId,status,createdAt,headBranch"}
 	if a.repo != "" {
 		listArgs = append(listArgs, "-R", a.repo)
 	}
-	out, err := exec.Command("gh", listArgs...).CombinedOutput()
-	if err != nil {
-		return "", fmt.Errorf("ci: gh run list: %w: %s", err, out)
+	delay := pollDelay()
+	var id string
+	for attempt := 0; attempt < 3; attempt++ {
+		time.Sleep(delay)
+		out, err := exec.Command("gh", listArgs...).CombinedOutput()
+		if err != nil {
+			return "", fmt.Errorf("ci: gh run list: %w: %s", err, out)
+		}
+		if id = parseRunIDForRef(out, p.Ref); id != "" {
+			return id, nil
+		}
+		delay *= 2 // exponential backoff for the next attempt
 	}
-	id := parseRunIDForRef(out, p.Ref)
-	if id == "" {
-		return "", errors.New("ci: could not find triggered run")
+	return "", errors.New("ci: could not find triggered run")
+}
+
+// pollDelay returns the initial delay before the first `gh run list` poll in
+// Trigger. It is configurable via the KERN_CI_POLL_DELAY environment variable
+// (parsed as a time.Duration, e.g. "2s") and defaults to 2s when unset or
+// invalid, preserving the previous behavior.
+func pollDelay() time.Duration {
+	if d, err := time.ParseDuration(os.Getenv("KERN_CI_POLL_DELAY")); err == nil && d > 0 {
+		return d
 	}
-	return id, nil
+	return 2 * time.Second
 }
 
 // Status runs `gh run view <id> --json status,conclusion,url` and maps

@@ -202,7 +202,7 @@ func TestG32_SchemaBaselineRoundTrip(t *testing.T) {
 		t.Errorf("message = %q, want 'baseline initialized'", res.Findings[0].Message)
 	}
 
-	baselinePath := filepath.Join(root, ".kern", "diff-gate", "tool-schemas.json")
+	baselinePath := filepath.Join(root, "docs", "mcp", "tool-schemas.json")
 	data, err := os.ReadFile(baselinePath)
 	if err != nil {
 		t.Fatalf("baseline file: %v", err)
@@ -256,7 +256,7 @@ func TestG32_SchemaDriftDetected(t *testing.T) {
 	fake := append([]toolSchemaEntry(nil), entries...)
 	fake = append(fake, toolSchemaEntry{Name: "kern_fake_tool", Phase: "meta", Risk: "low", SHA256: strings.Repeat("ab", 32)})
 	sort.Slice(fake, func(i, j int) bool { return fake[i].Name < fake[j].Name })
-	if err := writeSchemaBaseline(filepath.Join(root, ".kern", "diff-gate", "tool-schemas.json"), fake); err != nil {
+	if err := writeSchemaBaseline(filepath.Join(root, "docs", "mcp", "tool-schemas.json"), fake); err != nil {
 		t.Fatalf("write stale baseline: %v", err)
 	}
 

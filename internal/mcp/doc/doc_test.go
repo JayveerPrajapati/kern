@@ -2,8 +2,12 @@ package doc
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/JayveerPrajapati/kern/internal/index"
 )
 
 func TestSanitizeDocName(t *testing.T) {
@@ -96,5 +100,56 @@ func TestCommitmsgRejectsLeadingDashRange(t *testing.T) {
 		t.Error("Commitmsg with option-looking range: want error, got nil")
 	} else if !strings.Contains(err.Error(), "must not start with -") {
 		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+// TestSearchEmptyDocsIndexExplains pins N3: a repo with NO documentation
+// indexed gets an explanatory message (with the `kern docs index` hint), not
+// a bare "no matching document fragments" that reads as a confident miss.
+func TestSearchEmptyDocsIndexExplains(t *testing.T) {
+	root := t.TempDir()
+	// Only a Go file — no docs tree, so the docs index is empty.
+	if err := os.WriteFile(filepath.Join(root, "main.go"), []byte("package main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	h := Hooks{
+		LoadIndex: func(ctx context.Context, root string) (*index.Index, error) { return nil, nil },
+	}
+	out, err := Search(context.Background(), h, map[string]any{"query": "anything", "root": root})
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if !strings.Contains(out, "no matching document fragments") {
+		t.Errorf("expected the no-match prefix, got: %q", out)
+	}
+	if !strings.Contains(out, "no documentation indexed") || !strings.Contains(out, "kern docs index") {
+		t.Errorf("empty docs index must explain and hint at indexing, got: %q", out)
+	}
+}
+
+// TestSearchDocsIndexedNoMatchKeepsMessage pins the N3 negative: when docs
+// ARE indexed but nothing matched, the message keeps its current shape (with
+// an honest fragment-count suffix), never the "no documentation indexed"
+// explanation.
+func TestSearchDocsIndexedNoMatchKeepsMessage(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "README.md"), []byte("# Demo Guide\n\nThis documentation paragraph is long enough to clear the chunk floor and be indexed.\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	h := Hooks{
+		LoadIndex: func(ctx context.Context, root string) (*index.Index, error) { return nil, nil },
+	}
+	out, err := Search(context.Background(), h, map[string]any{"query": "zzzznope", "root": root})
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if !strings.Contains(out, "no matching document fragments") {
+		t.Errorf("expected the no-match prefix, got: %q", out)
+	}
+	if strings.Contains(out, "no documentation indexed") {
+		t.Errorf("indexed repo must keep the plain message, got: %q", out)
+	}
+	if !strings.Contains(out, "indexed fragments") {
+		t.Errorf("expected the fragment-count suffix, got: %q", out)
 	}
 }

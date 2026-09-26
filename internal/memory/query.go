@@ -122,17 +122,30 @@ func (s *MemoryStore) recall(query Query, agentID string, audit bool) ([]domain.
 	}
 	// Deterministic ranking: score desc, then recency desc (newer first),
 	// then ID asc as the final tiebreaker — explicit keys, so the order does
-	// not depend on store iteration order.
-	sort.Slice(out, func(i, j int) bool {
-		si, sj := MatchScore(out[i], query), MatchScore(out[j], query)
-		if si != sj {
-			return si > sj
+	// not depend on store iteration order. Scores are computed ONCE per
+	// memory up front: MatchScore re-tokenizes the query content, so calling
+	// it inside the sort comparator would rescore O(n log n) times per
+	// recall instead of O(n).
+	type scored struct {
+		m     domain.Memory
+		score int
+	}
+	ranked := make([]scored, 0, len(out))
+	for _, m := range out {
+		ranked = append(ranked, scored{m: m, score: MatchScore(m, query)})
+	}
+	sort.Slice(ranked, func(i, j int) bool {
+		if ranked[i].score != ranked[j].score {
+			return ranked[i].score > ranked[j].score
 		}
-		if !out[i].CreatedAt.Equal(out[j].CreatedAt) {
-			return out[i].CreatedAt.After(out[j].CreatedAt)
+		if !ranked[i].m.CreatedAt.Equal(ranked[j].m.CreatedAt) {
+			return ranked[i].m.CreatedAt.After(ranked[j].m.CreatedAt)
 		}
-		return out[i].ID < out[j].ID
+		return ranked[i].m.ID < ranked[j].m.ID
 	})
+	for i := range ranked {
+		out[i] = ranked[i].m
+	}
 	if query.Limit > 0 && len(out) > query.Limit {
 		out = out[:query.Limit]
 	}

@@ -712,3 +712,26 @@ func TestApproveActionAttributesPipeResource(t *testing.T) {
 		t.Errorf("re-check after approval should be allowed with no new approval, allowed=%v approval2=%+v", allowed2, approval2)
 	}
 }
+
+// TestWithPoliciesConcurrentWithReads is the -race regression for the policy
+// race: WithPolicies swapped f.assessor lock-free while Policies() read it
+// lock-free. Both are now guarded by f.mu, so hammering the setter against
+// concurrent getter reads must not race or tear.
+func TestWithPoliciesConcurrentWithReads(t *testing.T) {
+	f := NewFirewall()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 200; i++ {
+			f.WithPolicies([]domain.Policy{{ID: "p", Name: "n", Rule: "LOW x.y", Scope: "x", Enabled: true}})
+		}
+	}()
+	for {
+		select {
+		case <-done:
+			return
+		default:
+			_ = f.Policies()
+		}
+	}
+}

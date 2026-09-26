@@ -297,3 +297,46 @@ func contains(hay []string, needle string) bool {
 	}
 	return false
 }
+
+// TestDetectNoModuleGoVetPerFile pins F1 in validate: a root with loose .go
+// files and NO go.mod must offer a vet command that targets the explicit
+// files — `go vet ./...` is invalid outside a module ("directory prefix .
+// does not contain main module"), so the no-module candidate must never
+// carry the ./... pattern.
+func TestDetectNoModuleGoVetPerFile(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "stray.go"), []byte("package main\nfunc main() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "other.go"), []byte("package main\nvar _ = 1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c, err := Detect(root)
+	if err != nil {
+		t.Fatalf("Detect on no-module go root: %v", err)
+	}
+	if c.Cmd != "go" {
+		t.Fatalf("expected go, got %v", c.Cmd)
+	}
+	if len(c.Args) < 2 || c.Args[0] != "vet" {
+		t.Fatalf("expected go vet <files>, got %v %v", c.Cmd, c.Args)
+	}
+	for _, a := range c.Args {
+		if strings.Contains(a, "./...") {
+			t.Errorf("no-module vet candidate must not use ./...: %v", c.Args)
+		}
+	}
+	// The explicit file names must be present.
+	joined := strings.Join(c.Args, " ")
+	if !strings.Contains(joined, "stray.go") || !strings.Contains(joined, "other.go") {
+		t.Errorf("vet candidate must name the root .go files: %v", c.Args)
+	}
+	// It must also be the lint-kind candidate.
+	l, err := DetectKind(root, "lint")
+	if err != nil {
+		t.Fatalf("DetectKind(lint) on no-module go root: %v", err)
+	}
+	if l.Cmd != "go" || l.Kind != "lint" {
+		t.Fatalf("DetectKind(lint) = %+v; want go vet", l)
+	}
+}

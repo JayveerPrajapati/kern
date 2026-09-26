@@ -264,3 +264,30 @@ func TestAutoCaptureMigration(t *testing.T) {
 		}
 	}
 }
+
+// TestAddAutoDedupesDuplicateCaptures: the same conversation event captured
+// by several agent surfaces (opencode plugin + Claude/Codex/Gemini hooks)
+// within seconds must store ONE auto entry, not three; a different capture
+// in the same window must still be stored.
+func TestAddAutoDedupesDuplicateCaptures(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	root := t.TempDir()
+	for i := 0; i < 3; i++ {
+		if err := AddAuto(root, "Command failed: go build ./..."); err != nil {
+			t.Fatalf("AddAuto #%d: %v", i, err)
+		}
+	}
+	if err := AddAuto(root, "Edited internal/api/handlers.go"); err != nil {
+		t.Fatalf("AddAuto different capture: %v", err)
+	}
+	counts := map[string]int{}
+	for _, e := range List(root) {
+		counts[e.Text]++
+	}
+	if counts["Command failed: go build ./..."] != 1 {
+		t.Fatalf("expected 1 auto entry after 3 identical captures, got %d (entries: %v)", counts["Command failed: go build ./..."], counts)
+	}
+	if counts["Edited internal/api/handlers.go"] != 1 {
+		t.Fatalf("different capture must not be deduped, got %d", counts["Edited internal/api/handlers.go"])
+	}
+}

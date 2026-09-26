@@ -84,9 +84,17 @@ func TestSave_ErrorPaths(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(dir, ".kern", "index.sqlite"), []byte("definitely not a sqlite database"), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := OpenSQLite(dir); err == nil {
-			t.Error("OpenSQLite on corrupt file: want error")
+		// F-IX1 (QA Pick #14) inverted this contract: a corrupt store used
+		// to fail every open with a raw driver error and nothing ever
+		// recreated it. OpenSQLite now self-heals — the corrupt file is
+		// quarantined and a fresh store opens. Full coverage in
+		// TestOpenSQLiteSelfHealsCorruptStore; this subtest keeps the
+		// corruption fixture exercising the heal path.
+		s, err := OpenSQLite(dir)
+		if err != nil {
+			t.Fatalf("OpenSQLite on corrupt file must self-heal: %v", err)
 		}
+		s.Close()
 	})
 }
 

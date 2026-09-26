@@ -21,8 +21,10 @@ func TestToolFallbackAllowlistReroutes(t *testing.T) {
 
 	// A call to the blocked kern_what_if must reroute to kern_impact. With a
 	// real repo root, handleImpact runs against the working directory.
-	outStr, err := s.runTool(context.Background(), "fallback-test", "kern_what_if",
-		map[string]any{"root": ".", "change": "CompileIntent", "kind": "remove_symbol"})
+	// "NewServer" resolves in the internal/mcp index (the package under
+	// test); "CompileIntent" would be a silent fuzzy substitution.
+	outStr, err := s.runTool(context.Background(), "fallback-test", "", "kern_what_if",
+		map[string]any{"root": ".", "change": "NewServer", "kind": "remove_symbol"})
 	if err != nil {
 		t.Fatalf("runTool(kern_what_if) blocked without fallback: %v", err)
 	}
@@ -42,7 +44,7 @@ func TestToolFallbackFailsClosedWhenAlternativeBlocked(t *testing.T) {
 	in, out := newPipe()
 	s := NewServer(in, out)
 
-	_, err := s.runTool(context.Background(), "fallback-test", "kern_what_if",
+	_, err := s.runTool(context.Background(), "fallback-test", "", "kern_what_if",
 		map[string]any{"root": "."})
 	if err == nil {
 		t.Fatal("blocked tool with blocked fallback must error")

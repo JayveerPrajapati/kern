@@ -182,10 +182,11 @@ func TestRunMCPToolUnknownToolPanics(t *testing.T) {
 // TestRunSynthesizeTestBadFlagExits2 pins the uniform flag-error handling:
 // a bad flag must exit 2 with a single "kern: flags: ..." line, never the
 // stdlib flag package's raw "flag provided but not defined" + "Usage of"
-// dump.
+// dump. (-symbol is a KNOWN flag now that single-dash long flags normalize
+// to their -- forms, so a genuinely unknown flag is used.)
 func TestRunSynthesizeTestBadFlagExits2(t *testing.T) {
 	out, code := captureStderrExit(t, func() {
-		runSynthesizeTest([]string{"-symbol", "x"})
+		runSynthesizeTest([]string{"-bogus", "x"})
 	})
 	if code != 2 {
 		t.Fatalf("exit = %d, want 2 for a bad flag", code)

@@ -2,6 +2,7 @@ package ci
 
 import (
 	"testing"
+	"time"
 )
 
 func TestParseRunStatus(t *testing.T) {
@@ -39,5 +40,26 @@ func TestPipelineFields(t *testing.T) {
 	p := Pipeline{Name: "ci.yml", Ref: "main", Inputs: map[string]string{"env": "staging"}}
 	if p.Name != "ci.yml" || p.Ref != "main" || p.Inputs["env"] != "staging" {
 		t.Error("Pipeline fields not set correctly")
+	}
+}
+
+func TestPollDelayDefault(t *testing.T) {
+	t.Setenv("KERN_CI_POLL_DELAY", "")
+	if d := pollDelay(); d != 2*time.Second {
+		t.Errorf("pollDelay() = %v, want 2s", d)
+	}
+}
+
+func TestPollDelayFromEnv(t *testing.T) {
+	t.Setenv("KERN_CI_POLL_DELAY", "500ms")
+	if d := pollDelay(); d != 500*time.Millisecond {
+		t.Errorf("pollDelay() = %v, want 500ms", d)
+	}
+}
+
+func TestPollDelayInvalidEnvFallsBack(t *testing.T) {
+	t.Setenv("KERN_CI_POLL_DELAY", "bogus")
+	if d := pollDelay(); d != 2*time.Second {
+		t.Errorf("pollDelay() = %v, want 2s fallback", d)
 	}
 }

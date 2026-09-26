@@ -367,7 +367,7 @@ func (w *Writer) VerifyChain() (string, error) {
 		}
 		var rec Record
 		if err := json.Unmarshal([]byte(line), &rec); err != nil {
-			return "", fmt.Errorf("record %d: cannot parse: %v", i+1, err)
+			return "", fmt.Errorf("record %d: cannot parse: %w", i+1, err)
 		}
 		if rec.PreviousHash == "" {
 			// Anchor (genesis or legacy prefix). Only legal before the chain
@@ -386,7 +386,7 @@ func (w *Writer) VerifyChain() (string, error) {
 		unsigned.Hash = ""
 		b, err := json.Marshal(unsigned)
 		if err != nil {
-			return "", fmt.Errorf("record %d (correlation_id %q): cannot re-marshal for hash check: %v", i+1, rec.CorrelationID, err)
+			return "", fmt.Errorf("record %d (correlation_id %q): cannot re-marshal for hash check: %w", i+1, rec.CorrelationID, err)
 		}
 		sum := sha256.Sum256(b)
 		if want := hex.EncodeToString(sum[:]); rec.Hash != want {
@@ -429,7 +429,7 @@ func (w *Writer) ChainContainsHash(hash string) (bool, error) {
 		}
 		var rec Record
 		if err := json.Unmarshal([]byte(line), &rec); err != nil {
-			return false, fmt.Errorf("record %d: cannot parse: %v", i+1, err)
+			return false, fmt.Errorf("record %d: cannot parse: %w", i+1, err)
 		}
 		if rec.Hash == hash {
 			return true, nil

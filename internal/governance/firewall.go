@@ -73,8 +73,11 @@ func (f *Firewall) WithAgents(agents ...*AgentIdentity) *Firewall {
 }
 
 // WithPolicies sets custom risk policies (overrides the defaults). It returns
-// the firewall for chaining.
+// the firewall for chaining. The assessor swap is guarded by f.mu so a
+// concurrent Policies() read never sees a torn pointer.
 func (f *Firewall) WithPolicies(policies []domain.Policy) *Firewall {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.assessor = NewRiskAssessor(policies)
 	return f
 }
@@ -92,7 +95,10 @@ func (f *Firewall) WithEgressRule(rule EgressRule) *Firewall {
 // WithBus attaches an optional event bus. When non-nil, the firewall publishes
 // policy.evaluated, policy.blocked and approval.requested events at the
 // relevant transition points. A nil bus is a no-op (firewall still works).
+// The swap is guarded by f.mu so concurrent publish reads never race it.
 func (f *Firewall) WithBus(b *eventbus.Bus) *Firewall {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.bus = b
 	return f
 }
@@ -123,8 +129,11 @@ func (f *Firewall) grantApproval(key string) {
 
 // Policies returns a copy of the risk policies currently loaded. It is the
 // additive accessor callers (e.g. the context engine) use to surface the
-// governance rules that apply to a change scope.
+// governance rules that apply to a change scope. The assessor read is guarded
+// by f.mu so a concurrent WithPolicies swap is never observed torn.
 func (f *Firewall) Policies() []domain.Policy {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
 	return f.assessor.Policies()
 }
 
@@ -170,15 +179,20 @@ func splitTaskKey(key string) (agentID, resource, action string) {
 }
 
 // publish delivers an event to the optional bus. A nil bus is a no-op so the
-// firewall keeps working unchanged when no bus is attached.
+// firewall keeps working unchanged when no bus is attached. The bus read is
+// guarded by f.mu (publish is never called with f.mu held by Check paths) so
+// a concurrent WithBus swap is never observed torn.
 func (f *Firewall) publish(ev eventbus.Event) {
-	if f.bus == nil {
+	f.mu.RLock()
+	bus := f.bus
+	f.mu.RUnlock()
+	if bus == nil {
 		return
 	}
 	if ev.Source == "" {
 		ev.Source = "governance"
 	}
-	f.bus.Publish(ev)
+	bus.Publish(ev)
 }
 
 // Check evaluates whether an agent can perform an action. It returns whether
@@ -370,6 +384,14 @@ func (f *Firewall) CheckEgress(agentID, host string, port int) (allowed bool, de
 // ApproveAction approves a previously-requested approval by ID. On success it
 // records the decision in the audit log so that a subsequent Check for the same
 // action passes.
+//
+// Trust model: approvals are local-operator actions, not remotely grantable
+// ones. The web console — the only remote-reachable approval surface — now
+// requires a loopback bind or KERN_AUTH_TOKEN (`kern serve` refuses
+// non-loopback binds without the token, and enterprise fails closed with 503;
+// added 2026-09-25), so the approval workflow is not remotely satisfiable by
+// default. The approver string is a self-attested local identity recorded for
+// audit, not an authentication credential.
 func (f *Firewall) ApproveAction(approvalID, approver string) error {
 	appr, err := f.approval.Approve(approvalID, approver)
 	if err != nil {
