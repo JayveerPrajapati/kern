@@ -32,6 +32,7 @@ func serveMany(t *testing.T, reqs ...string) []map[string]any {
 	in := strings.NewReader(strings.Join(reqs, "\n") + "\n")
 	buf := &bytes.Buffer{}
 	s := NewServer(in, buf)
+	defer s.Close()
 	// Tests use temp-dir roots outside the process cwd; confine to everything.
 	s.roots = []string{"/"}
 	// The KERN_MCP_ROOTS gate now fails closed to the process cwd; tests

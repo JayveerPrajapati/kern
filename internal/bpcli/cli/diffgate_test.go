@@ -365,3 +365,48 @@ func TestRunDiffGateEmitsProgressLines(t *testing.T) {
 		t.Errorf("stdout missing the final verdict:\n%s", stdout)
 	}
 }
+
+// TestDiscoverWorkingTreeChangesIncludesUntracked (F-DG1): untracked files
+// are part of the working-tree change set — a badly-formatted brand-new file
+// used to be invisible to every diff-gate check because the discovery only
+// looked at git diff (tracked modifications).
+func TestDiscoverWorkingTreeChangesIncludesUntracked(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	dir := t.TempDir()
+	run := func(args ...string) {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v (%s)", args, err, out)
+		}
+	}
+	run("init", "-q")
+	run("config", "user.email", "t@example.com")
+	run("config", "user.name", "t")
+	if err := os.WriteFile(filepath.Join(dir, "tracked.go"), []byte("package main\n\nfunc ok() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	run("add", "-A")
+	run("commit", "-q", "-m", "baseline")
+
+	// Untracked, badly formatted file — invisible to `git diff HEAD`.
+	if err := os.WriteFile(filepath.Join(dir, "fresh.go"), []byte("package main\nfunc bad(){\n}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	changes, err := discoverWorkingTreeChanges(dir)
+	if err != nil {
+		t.Fatalf("discoverWorkingTreeChanges: %v", err)
+	}
+	found := false
+	for _, c := range changes {
+		if c.Path == "fresh.go" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("untracked fresh.go missing from discovered changes: %+v", changes)
+	}
+}
