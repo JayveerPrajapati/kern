@@ -19,6 +19,7 @@ func toolsCallJSON(t *testing.T, id int, name string, args map[string]any) strin
 }
 
 func TestSchemaValidateOK(t *testing.T) {
+	t.Parallel()
 	args := map[string]any{"data": `{"name":"x","n":3}`, "schema": `{"type":"object","required":["name","n"],"properties":{"name":{"type":"string"},"n":{"type":"number"}}}`}
 	resp := serveOne(t, toolsCallJSON(t, 31, "kern_schema_validate", args))
 	out, isErr := toolResultText(t, resp)
@@ -31,6 +32,7 @@ func TestSchemaValidateOK(t *testing.T) {
 }
 
 func TestSchemaValidateViolations(t *testing.T) {
+	t.Parallel()
 	args := map[string]any{"data": `{"name":123}`, "schema": `{"type":"object","required":["name"],"properties":{"name":{"type":"string"}}}`}
 	resp := serveOne(t, toolsCallJSON(t, 32, "kern_schema_validate", args))
 	out, _ := toolResultText(t, resp)
@@ -40,6 +42,7 @@ func TestSchemaValidateViolations(t *testing.T) {
 }
 
 func TestSchemaValidateMissingArgs(t *testing.T) {
+	t.Parallel()
 	resp := serveOne(t, toolsCallJSON(t, 33, "kern_schema_validate", map[string]any{}))
 	out, isErr := toolResultText(t, resp)
 	if !isErr || !strings.Contains(out, "required") {
@@ -48,6 +51,7 @@ func TestSchemaValidateMissingArgs(t *testing.T) {
 }
 
 func TestDiffFilesIdenticalAndMissing(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	a := filepath.Join(root, "a.txt")
 	b := filepath.Join(root, "b.txt")
@@ -71,6 +75,7 @@ func TestDiffFilesIdenticalAndMissing(t *testing.T) {
 }
 
 func TestCompactFileMissingPath(t *testing.T) {
+	t.Parallel()
 	resp := serveOne(t, toolsCallJSON(t, 36, "kern_compact_file", map[string]any{}))
 	out, isErr := toolResultText(t, resp)
 	if !isErr || !strings.Contains(out, "path is required") {
@@ -79,6 +84,7 @@ func TestCompactFileMissingPath(t *testing.T) {
 }
 
 func TestVerifyOutputMissingText(t *testing.T) {
+	t.Parallel()
 	resp := serveOne(t, toolsCallJSON(t, 37, "kern_verify_output", map[string]any{}))
 	out, isErr := toolResultText(t, resp)
 	if !isErr || !strings.Contains(out, "text is required") {
@@ -87,6 +93,7 @@ func TestVerifyOutputMissingText(t *testing.T) {
 }
 
 func TestPromptGetNotFound(t *testing.T) {
+	t.Parallel()
 	resp := serveOne(t, writeReq("prompts/get", 38, `{"name":"does_not_exist","arguments":{}}`))
 	if e, ok := resp["error"].(map[string]any); !ok || int(e["code"].(float64)) != -32602 {
 		t.Fatalf("expected prompt-not-found (-32602), got: %+v", resp)
@@ -94,6 +101,7 @@ func TestPromptGetNotFound(t *testing.T) {
 }
 
 func TestGraphCtxToolBudgeted(t *testing.T) {
+	t.Parallel()
 	root := mcpProject(t)
 	out := mcpAssertOK(t, "kern_graph", map[string]any{"root": root, "symbol": "Greet", "max_tokens": "150"})
 	if !strings.Contains(out, "callers (1)") {
@@ -108,6 +116,7 @@ func TestGraphCtxToolBudgeted(t *testing.T) {
 }
 
 func TestGraphCtxToolUnknownSymbol(t *testing.T) {
+	t.Parallel()
 	root := mcpProject(t)
 	resp := serveOne(t, toolsCallJSON(t, 39, "kern_graph", map[string]any{"root": root, "symbol": "Nope"}))
 	out, isErr := toolResultText(t, resp)
@@ -117,6 +126,7 @@ func TestGraphCtxToolUnknownSymbol(t *testing.T) {
 }
 
 func TestGraphCtxToolMissingSymbol(t *testing.T) {
+	t.Parallel()
 	resp := serveOne(t, toolsCallJSON(t, 40, "kern_graph", map[string]any{}))
 	out, isErr := toolResultText(t, resp)
 	if !isErr || !strings.Contains(out, "symbol is required") {

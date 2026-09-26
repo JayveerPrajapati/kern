@@ -1,6 +1,9 @@
 package web
 
 import (
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -38,13 +41,14 @@ func (a *App) buildOverview() overviewData {
 		warnCount = rep.WarningCount
 	}
 	g, ix := a.freshGraph()
+	comms, hubs := a.graphCommunitiesHubs()
 	return overviewData{
 		Root:               a.root,
 		Symbols:            len(ix.Symbols),
 		Files:              len(ix.SymbolsByFile),
 		Edges:              len(g.Edges),
-		Communities:        len(intel.Communities(ix)),
-		Hubs:               len(intel.Hubs(ix, 5)),
+		Communities:        len(comms),
+		Hubs:               len(hubsTop(hubs, 5)),
 		Incidents:          len(incidents),
 		Memories:           len(memories),
 		ApprovalsPending:   len(a.approvals.Pending()),
@@ -60,12 +64,16 @@ type graphData struct {
 	Communities []intel.Community `json:"communities"`
 }
 
-// buildGraph returns the top hubs and all communities.
+// buildGraph returns the top hubs and all communities. It shares the cached
+// per-generation Communities + Hubs computation with buildOverview and
+// buildSystemMap (graphCommunitiesHubs), so a dashboard render never computes
+// label propagation + hub ranking more than once per rebuild.
 func (a *App) buildGraph(limit int) graphData {
-	_, ix := a.freshGraph()
+	a.freshGraph()
+	comms, hubs := a.graphCommunitiesHubs()
 	return graphData{
-		Hubs:        intel.Hubs(ix, limit),
-		Communities: intel.Communities(ix),
+		Hubs:        hubsTop(hubs, limit),
+		Communities: comms,
 	}
 }
 
@@ -201,9 +209,36 @@ func (a *App) buildArchitecture() (*architectureData, error) {
 // ArchitectureReport returns the architecture validation report for this
 // project. It is the exported accessor the enterprise org endpoint uses to
 // aggregate per-project architecture health ( .3 "architecture"),
-// reusing the same cached builder as /api/architecture.
-func (a *App) ArchitectureReport() (*architectureData, error) {
-	return a.buildArchitecture()
+// reusing the same cached builder as /api/architecture. The return type is
+// architecture.Report (not the JSON DTO architectureData) so internal/
+// enterprise can name it in its ProjectApp interface without importing
+// internal/web — web.App satisfies the interface structurally and the
+// mcp → org → enterprise → web transitive closure is broken.
+func (a *App) ArchitectureReport() (*architecture.Report, error) {
+	dto, err := a.buildArchitecture()
+	if err != nil || dto == nil {
+		return nil, err
+	}
+	rep := &architecture.Report{
+		OK:           dto.OK,
+		ErrorCount:   dto.ErrorCount,
+		WarningCount: dto.WarningCount,
+		Violations:   make([]architecture.Violation, 0, len(dto.Violations)),
+	}
+	for _, v := range dto.Violations {
+		rep.Violations = append(rep.Violations, architecture.Violation{
+			Violation: intel.Violation{
+				CallerFile: v.CallerFile,
+				CalleeFile: v.CalleeFile,
+				Symbol:     v.Symbol,
+				RuleFrom:   v.RuleFrom,
+				RuleTo:     v.RuleTo,
+			},
+			RuleID:   v.RuleID,
+			Severity: v.Severity,
+		})
+	}
+	return rep, nil
 }
 
 // governancePolicy is a projection of a domain.Policy.
@@ -293,7 +328,15 @@ func (a *App) buildApprovals() []domainApproval {
 
 // buildGovernance assembles the governance panel data.
 func (a *App) buildGovernance() governanceData {
+	// Read the policies the firewall ACTUALLY enforces (not a fresh
+	// DefaultPolicies copy): when enterprise mode has applied an org policy
+	// via SetPolicies, the panel shows the enforced org rule set instead of
+	// silently displaying the defaults. Without SetPolicies the firewall
+	// holds DefaultPolicies, so the output is byte-for-byte unchanged.
 	policies := governance.DefaultPolicies()
+	if a.firewall != nil {
+		policies = a.firewall.Policies()
+	}
 	out := make([]governancePolicy, 0, len(policies))
 	for _, p := range policies {
 		out = append(out, governancePolicy{
@@ -811,4 +854,79 @@ func (a *App) buildEval() (*evalData, error) {
 		Tasks:        tasks,
 		ContextItems: rows,
 	}, nil
+}
+
+// ---------------------------------------------------------------------------
+// Benchmarks view (/benchmarks): the .kern/bench.json latency report
+// ---------------------------------------------------------------------------
+
+// benchData is the template model for the /benchmarks HTML page. Present is
+// false when no .kern/bench.json exists yet — the page then renders the
+// "run kern bench to refresh" hint instead of an empty report.
+type benchData struct {
+	Root    string
+	Present bool
+	Bench   *benchReport
+}
+
+// benchReport mirrors the .kern/bench.json schema written by `kern bench`
+// (cmd/kern/cmd_bench.go's benchResult). Field names are the JSON contract —
+// change them in lockstep with the bench command AND the golden fixture
+// internal/web/testdata/bench.json (pinned by TestBenchReportGoldenFixture:
+// a renamed field here silently zeroes the /benchmarks page).
+type benchReport struct {
+	Suite          string       `json:"suite"`
+	Date           string       `json:"date"`
+	Root           string       `json:"root"`
+	GitHead        string       `json:"git_head"`
+	SymbolCount    int          `json:"symbol_count"`
+	Machine        benchMachine `json:"machine"`
+	ColdLoadMS     benchSample  `json:"cold_load_ms"`
+	WarmLoadMS     benchSample  `json:"warm_load_ms"`
+	ColdVsWarm     float64      `json:"cold_vs_warm_speedup"`
+	Queries        []benchQuery `json:"queries"`
+	MethodologyRef string       `json:"methodology_ref"`
+}
+
+// benchMachine is the machine-context envelope of a bench report.
+type benchMachine struct {
+	GOOS      string `json:"goos"`
+	GOARCH    string `json:"goarch"`
+	GoVersion string `json:"go_version"`
+	NumCPU    int    `json:"num_cpu"`
+}
+
+// benchSample is one latency distribution: median/min in milliseconds plus
+// the number of runs the summary was computed from.
+type benchSample struct {
+	MedianMS float64 `json:"median_ms"`
+	MinMS    float64 `json:"min_ms"`
+	Runs     int     `json:"runs"`
+}
+
+// benchQuery is one fixed query's latency summary plus its target symbol
+// (empty for repo-wide scans).
+type benchQuery struct {
+	Name     string  `json:"name"`
+	Kind     string  `json:"kind"`
+	Target   string  `json:"target,omitempty"`
+	MedianMS float64 `json:"median_ms"`
+	MinMS    float64 `json:"min_ms"`
+	Runs     int     `json:"runs"`
+}
+
+// buildBenchmarks loads the latest .kern/bench.json (written by `kern bench`)
+// and projects it onto the page model. A missing or unparsable document
+// degrades to Present=false so the page shows the refresh hint rather than
+// erroring — the report is advisory observability, never a console failure.
+func (a *App) buildBenchmarks() benchData {
+	raw, err := os.ReadFile(filepath.Join(a.root, ".kern", "bench.json"))
+	if err != nil {
+		return benchData{Root: a.root, Present: false}
+	}
+	var rep benchReport
+	if err := json.Unmarshal(raw, &rep); err != nil {
+		return benchData{Root: a.root, Present: false}
+	}
+	return benchData{Root: a.root, Present: true, Bench: &rep}
 }

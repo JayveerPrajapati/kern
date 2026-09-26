@@ -13,6 +13,7 @@ import (
 // TestHandleFlightRequiresTask pins the kern_flight contract: the task
 // argument is mandatory and rejected before any store access.
 func TestHandleFlightRequiresTask(t *testing.T) {
+	t.Parallel()
 	s := newTestServer()
 	_, err := s.handleFlight(context.Background(), map[string]any{"root": "."})
 	if err == nil || !strings.Contains(err.Error(), "task is required") {
@@ -23,6 +24,7 @@ func TestHandleFlightRequiresTask(t *testing.T) {
 // TestHandleFlightReplaysTrail records a flight trail into a temp project
 // root and verifies the handler replays it end to end (the C3 reader).
 func TestHandleFlightReplaysTrail(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	rec := flight.New(root)
 	base := time.Now().Add(-5 * time.Minute).UTC()

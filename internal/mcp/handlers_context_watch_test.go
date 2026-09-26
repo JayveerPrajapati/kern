@@ -9,6 +9,7 @@ import (
 )
 
 func TestHandleContextWatch(t *testing.T) {
+	t.Parallel()
 	s := NewServer(strings.NewReader(""), io.Discard)
 	defer s.Close() // drain sessions (watcher + background index saves) before t.TempDir cleanup
 

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/JayveerPrajapati/kern/internal/cache"
 	"github.com/JayveerPrajapati/kern/internal/domain"
 	"io/fs"
 	"os"
@@ -30,6 +31,12 @@ type Permission struct {
 type AgentIdentity struct {
 	domain.Agent
 	Permissions []Permission
+	// Role is the optional org-scope RBAC role binding (Stage 2): when an
+	// identity is registered at the org level with a Role set, the role is
+	// persisted to <org-root>/.kern/org-rbac.json and enforced org-wide with
+	// org-wins precedence. The per-project agents.json store never carries
+	// it — org roles live only in the org role store.
+	Role string
 }
 
 // NewAgent creates a new agent identity with the given permissions. The
@@ -141,14 +148,43 @@ func agentStorePath(root string) string {
 // the registration surface for `kern org agents register`: it writes exactly
 // the explicitly-registered identity, never incidental in-memory
 // registrations like the built-in default agent.
+//
+// The read-modify-write runs inside the same locked critical section the
+// approval FileStore uses (in-process per-path lock + cross-process flock,
+// then a unique temp-file + atomic rename write), so concurrent
+// registrations — the MCP server, the CLI, or separate kern processes — never
+// interleave and silently lose each other's agents. A corrupt store fails
+// closed (the registration errors) instead of being overwritten and
+// destroying the identities it contains.
 func PersistAgent(root string, a *AgentIdentity) error {
 	if a == nil || a.ID == "" {
 		return fmt.Errorf("governance: cannot persist nil or empty-ID agent")
 	}
 	path := agentStorePath(root)
+	fl, err := cache.LockFile(path)
+	if err != nil {
+		return fmt.Errorf("governance: lock agent store: %w", err)
+	}
+	defer fl.Unlock()
+	pl := cache.PathLock(path)
+	pl.Lock()
+	defer pl.Unlock()
+
 	var agents []*AgentIdentity
-	if data, err := os.ReadFile(path); err == nil {
-		_ = json.Unmarshal(data, &agents)
+	data, err := os.ReadFile(path)
+	switch {
+	case err == nil:
+		if len(data) > 0 {
+			if err := json.Unmarshal(data, &agents); err != nil {
+				// Fail closed: overwriting a corrupt store would destroy
+				// every other agent identity it contains.
+				return fmt.Errorf("governance: decode agent store: %w", err)
+			}
+		}
+	case errors.Is(err, fs.ErrNotExist):
+		// Fresh store: start from an empty list.
+	default:
+		return fmt.Errorf("governance: read agent store: %w", err)
 	}
 	replaced := false
 	for i := range agents {
@@ -161,15 +197,35 @@ func PersistAgent(root string, a *AgentIdentity) error {
 	if !replaced {
 		agents = append(agents, a)
 	}
-	data, err := json.MarshalIndent(agents, "", "  ")
+	data, err = json.MarshalIndent(agents, "", "  ")
 	if err != nil {
 		return fmt.Errorf("governance: encode agents: %w", err)
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return fmt.Errorf("governance: create agent store dir: %w", err)
 	}
-	if err := os.WriteFile(path, data, 0o600); err != nil {
-		return fmt.Errorf("governance: write agent store: %w", err)
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".agents-tmp-*")
+	if err != nil {
+		return fmt.Errorf("governance: create agent store temp: %w", err)
+	}
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmp.Name())
+		return fmt.Errorf("governance: write agent store temp: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmp.Name())
+		return fmt.Errorf("governance: close agent store temp: %w", err)
+	}
+	// Owner-only (0o600): agent identities carry permission grants that other
+	// local users must not read (mirrors saveLocked in store.go).
+	if err := os.Chmod(tmp.Name(), 0o600); err != nil {
+		_ = os.Remove(tmp.Name())
+		return fmt.Errorf("governance: chmod agent store: %w", err)
+	}
+	if err := os.Rename(tmp.Name(), path); err != nil {
+		_ = os.Remove(tmp.Name())
+		return fmt.Errorf("governance: rename agent store: %w", err)
 	}
 	return nil
 }
@@ -193,11 +249,16 @@ func SaveAgents(root string) error {
 		return fmt.Errorf("governance: encode agents: %w", err)
 	}
 	path := agentStorePath(root)
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return fmt.Errorf("governance: create agent store dir: %w", err)
 	}
 	if err := os.WriteFile(path, data, 0o600); err != nil {
 		return fmt.Errorf("governance: write agent store: %w", err)
+	}
+	// os.WriteFile sets the mode only on create; tighten an existing file
+	// (created by an older kern version with looser perms) to owner-only.
+	if err := os.Chmod(path, 0o600); err != nil {
+		return fmt.Errorf("governance: chmod agent store: %w", err)
 	}
 	return nil
 }

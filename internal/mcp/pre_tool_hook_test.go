@@ -13,6 +13,7 @@ import (
 // purely additive: a nil hook (the default) leaves tools/call untouched,
 // and a set hook can deny a call before any side effect runs.
 func TestPreToolHook(t *testing.T) {
+	t.Parallel()
 	callReq := writeReq("tools/call", 1, `{"name":"kern_compact_file","arguments":{"path":"server.go"}}`)
 
 	t.Run("nil_hook_is_noop", func(t *testing.T) {

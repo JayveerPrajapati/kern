@@ -7,6 +7,7 @@ import (
 )
 
 func TestRunOps(t *testing.T) {
+	t.Parallel()
 	tmp := t.TempDir()
 
 	// Missing arguments returns 2 (usage error)
@@ -36,6 +37,7 @@ func TestRunOps(t *testing.T) {
 // task intent being silently swallowed into the task prompt (A14). They must
 // be rejected with a usage error instead.
 func TestRunOpsRejectsFlagsAfterIntent(t *testing.T) {
+	t.Parallel()
 	tmp := t.TempDir()
 	if code := runOps([]string{
 		"--repo", tmp,
@@ -51,6 +53,7 @@ func TestRunOpsRejectsFlagsAfterIntent(t *testing.T) {
 // TestRunOpsHonorsExplicitL0Guard verifies an explicit -level L0 is honored
 // (A1) and is not silently upgraded to the default L3.
 func TestRunOpsHonorsExplicitL0Guard(t *testing.T) {
+	t.Parallel()
 	tmp := t.TempDir()
 	if code := runOps([]string{
 		"--repo", tmp,
@@ -63,6 +66,7 @@ func TestRunOpsHonorsExplicitL0Guard(t *testing.T) {
 }
 
 func TestRunOpsTriage(t *testing.T) {
+	t.Parallel()
 	tmp := t.TempDir()
 
 	// Missing arguments returns 2

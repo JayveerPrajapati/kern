@@ -57,6 +57,7 @@ type FeatureSet struct {
 	OrgMemory          bool // shared org-level memory store
 	AgentRegistry      bool // org-level agent identities
 	TeamRegistry       bool // org-level teams
+	UserRegistry       bool // org-level user registry + RBAC (Feature Batch G)
 	CrossProjectSearch bool // cross-project symbol search (OrgSearch)
 	OrgDashboard       bool // org admin dashboard routes
 	MaxProjects        int  // max registered projects (0 = unlimited)
@@ -81,6 +82,7 @@ var (
 		OrgMemory:          true,
 		AgentRegistry:      true,
 		TeamRegistry:       true,
+		UserRegistry:       true,
 		CrossProjectSearch: true,
 		OrgDashboard:       true,
 		MaxCachedApps:      defaultMaxProjects, // 16, the historical default
@@ -93,6 +95,7 @@ var (
 		OrgMemory:          true,
 		AgentRegistry:      true,
 		TeamRegistry:       true,
+		UserRegistry:       true,
 		CrossProjectSearch: true,
 		OrgDashboard:       true,
 		MaxCachedApps:      advancedMaxCachedApps,

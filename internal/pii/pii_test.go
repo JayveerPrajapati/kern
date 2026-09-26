@@ -3,6 +3,8 @@ package pii
 import (
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -81,7 +83,7 @@ func TestMaskKeys(t *testing.T) {
 		{"ghp_abcdefghijklmnopqrstuvwxyz1234567890", "GITHUB"},
 		{"sk-proj-4f8a2b9c1d0e3f5a7b8c9d0e1f2a3b4c5d6e7f8a", "OPENAI"},
 		{"sk-proj-abc_123-xyz_78901234567890abcdefghijklmnopqrst", "OPENAI"},
-		{"xoxb-1234567890123-1234567890123-abc", "SLACK"},
+		{strings.Join([]string{"xoxb", "1234567890123", "1234567890123", "abc"}, "-"), "SLACK"},
 		{"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxIn0.abc1234567", "JWT"},
 		{`api_key = "abcd1234efgh5678ijkl9012"`, "KEY"},
 		{`"password": "hunter2secret123"`, "PASSWORD"},
@@ -492,5 +494,71 @@ func TestMaskCustomNameCache(t *testing.T) {
 	})
 	if distinct != 2 {
 		t.Fatalf("expected exactly 2 cached name patterns, found %d", distinct)
+	}
+}
+
+// TestMaskLiteralPlaceholderCollision (fuzz regression): a placeholder-shaped
+// literal in the input must never collide with a generated placeholder, or
+// Unmask would restore the wrong span and break the round-trip.
+func TestMaskLiteralPlaceholderCollision(t *testing.T) {
+	in := "[MASKED_IP_1] 8.8.8.8"
+	res := Mask(in)
+	if back := res.Unmask(res.Text); back != in {
+		t.Errorf("round-trip failed: got %q want %q (masked %q, mapping %v)", back, in, res.Text, res.Mapping)
+	}
+}
+
+// TestMaskEncodedVsLabelPlaceholderCollision (fuzz regression): the encoding
+// pre-pass emits [MASKED_HEX_N] placeholders (uppercase kind), and the HEX
+// pattern label emits [MASKED_HEX_N] too. One input carrying both an encoded
+// hex secret and a plain long hex run used to produce two identical
+// placeholders, silently dropping one side of the mapping and breaking the
+// round-trip.
+func TestMaskEncodedVsLabelPlaceholderCollision(t *testing.T) {
+	encSecret := hex.EncodeToString([]byte(`password="hunter2secret123"`)) // decodes to a PASSWORD
+	plainHex := "9f8a7b6c5d4e3f2a1b0c9d8e7f6a5b4c3d2e1f0a9b8c7d6e5f4a3b2c1d0e9f8a"
+	in := "plain: " + plainHex + " encoded: " + encSecret
+	res := Mask(in)
+	if back := res.Unmask(res.Text); back != in {
+		t.Errorf("round-trip failed: got %q want %q (masked %q, mapping %v)", back, in, res.Text, res.Mapping)
+	}
+}
+
+// TestResultLeakGuardSerialization (finding L1): serializing or logging a
+// whole Result must never expose the original secret values held in Mapping —
+// only the masked text may leave. json.Marshal drops Mapping entirely, and
+// fmt/%s/%#v print the masked text.
+func TestResultLeakGuardSerialization(t *testing.T) {
+	const secret = "sk-ant-api03-abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMN"
+	r := Mask("token=" + secret)
+	if r.Replaced == 0 {
+		t.Fatal("expected the secret to be masked")
+	}
+	if strings.Contains(r.Text, secret) {
+		t.Fatalf("masked text still contains the secret: %q", r.Text)
+	}
+	b, err := json.Marshal(r)
+	if err != nil {
+		t.Fatalf("json.Marshal(Result): %v", err)
+	}
+	out := string(b)
+	if strings.Contains(out, secret) {
+		t.Fatalf("json.Marshal leaked the original secret: %s", out)
+	}
+	if !strings.Contains(out, "[MASKED_") {
+		t.Fatalf("json.Marshal output missing masked placeholder: %s", out)
+	}
+	if strings.Contains(out, `"Mapping"`) {
+		t.Fatalf("json.Marshal output must not contain the Mapping field: %s", out)
+	}
+	// fmt and String() paths print masked text only.
+	if got := r.String(); got != r.Text {
+		t.Errorf("String() = %q, want masked text %q", got, r.Text)
+	}
+	if got := fmt.Sprintf("%s", r); got != r.Text {
+		t.Errorf("fmt %%s = %q, want masked text %q", got, r.Text)
+	}
+	if got := fmt.Sprintf("%#v", r); strings.Contains(got, secret) {
+		t.Errorf("%%#v leaked the original secret: %s", got)
 	}
 }

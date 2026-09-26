@@ -13,6 +13,7 @@ import (
 )
 
 func TestHandleAgentFingerprint(t *testing.T) {
+	t.Parallel()
 	s := NewServer(strings.NewReader(""), io.Discard)
 	s.audit = governance.NewAuditLog()
 

@@ -10,7 +10,7 @@ import (
 // each test exercises exactly the env it sets, regardless of the host shell.
 func clearMCPSurfaceEnv(t *testing.T) {
 	t.Helper()
-	for _, v := range []string{"KERN_MCP_FULL", "KERN_MCP_HIGH_LEVEL_ONLY", "KERN_MCP_SINGLE_TOOL", "KERN_MCP_PHASE", "KERN_TOOLS"} {
+	for _, v := range []string{"KERN_MCP_FULL", "KERN_MCP_HIGH_LEVEL_ONLY", "KERN_MCP_SINGLE_TOOL", "KERN_MCP_PHASE", "KERN_MCP_CATEGORY", "KERN_TOOLS"} {
 		t.Setenv(v, "")
 	}
 }
@@ -103,16 +103,16 @@ func TestFilteredToolsKernToolsAllowlist(t *testing.T) {
 
 // TestCallToolResolvesUnadvertisedHandler is the correctness invariant for
 // the minimal default surface: kern_meta's NL router must still reach
-// sub-tool handlers that are NOT advertised. kern_code_graph is not in
+// sub-tool handlers that are NOT advertised. kern_inherits is not in
 // defaultTools, so with default env the tools/call dispatch must resolve it
 // to its real handler (which errors on a missing symbol arg) rather than
 // failing with "unknown tool".
 func TestCallToolResolvesUnadvertisedHandler(t *testing.T) {
 	clearMCPSurfaceEnv(t)
-	if defaultTools["kern_code_graph"] {
-		t.Fatal("test premise broken: kern_code_graph must not be in the default surface")
+	if defaultTools["kern_inherits"] {
+		t.Fatal("test premise broken: kern_inherits must not be in the default surface")
 	}
-	text := mcpToolError(t, "kern_code_graph", map[string]any{})
+	text := mcpToolError(t, "kern_inherits", map[string]any{})
 	if strings.Contains(text, "unknown tool") {
 		t.Fatalf("unadvertised tool was rejected as unknown: %q", text)
 	}
@@ -252,6 +252,82 @@ func TestFilteredTools_PhaseIntersectsTier(t *testing.T) {
 	for name := range want {
 		if !gotNames[name] {
 			t.Errorf("phase=explore + high-level surface missing %q", name)
+		}
+	}
+}
+
+// TestFilteredTools_CategoryGraph verifies KERN_MCP_CATEGORY=graph (with the
+// full catalog opted in) advertises only graph-category tools plus kern_meta
+// as the always-on router.
+func TestFilteredTools_CategoryGraph(t *testing.T) {
+	clearMCPSurfaceEnv(t)
+	t.Setenv("KERN_MCP_FULL", "1")
+	t.Setenv("KERN_MCP_CATEGORY", "graph")
+	s := NewServer(strings.NewReader(""), io.Discard)
+	got := s.filteredTools()
+	if len(got) == 0 {
+		t.Fatal("category=graph filteredTools() = 0 tools")
+	}
+	names := map[string]bool{}
+	for _, tool := range got {
+		names[tool.Name] = true
+		if tool.Name == "kern_meta" {
+			continue // always advertised as the router
+		}
+		if tool.Category != "graph" {
+			t.Errorf("category=graph surface contains tool %q with category %q", tool.Name, tool.Category)
+		}
+	}
+	if !names["kern_meta"] {
+		t.Error("category=graph surface missing always-on kern_meta router")
+	}
+	for _, want := range []string{"kern_search", "kern_near", "kern_explore"} {
+		if !names[want] {
+			t.Errorf("category=graph surface missing graph tool %q", want)
+		}
+	}
+	for _, notWant := range []string{"kern_plan", "kern_verify", "kern_rename", "kern_org_tasks"} {
+		if names[notWant] {
+			t.Errorf("category=graph surface should not advertise %q", notWant)
+		}
+	}
+}
+
+// TestFilteredTools_CategoryMeta verifies KERN_MCP_CATEGORY=meta keeps the
+// meta family (kern_meta, kern_usage_guide, kern_buddy).
+func TestFilteredTools_CategoryMeta(t *testing.T) {
+	clearMCPSurfaceEnv(t)
+	t.Setenv("KERN_MCP_FULL", "1")
+	t.Setenv("KERN_MCP_CATEGORY", "meta")
+	s := NewServer(strings.NewReader(""), io.Discard)
+	names := map[string]bool{}
+	for _, tool := range s.filteredTools() {
+		names[tool.Name] = true
+	}
+	for _, want := range []string{"kern_meta", "kern_usage_guide", "kern_buddy"} {
+		if !names[want] {
+			t.Errorf("category=meta surface missing %q", want)
+		}
+	}
+	if names["kern_search"] {
+		t.Error("category=meta surface should not advertise kern_search")
+	}
+}
+
+// TestFilteredTools_CategoryUnknown verifies an invalid KERN_MCP_CATEGORY
+// falls back to the un-filtered default tier surface (no error, just no
+// category filtering), mirroring the phase filter's behavior.
+func TestFilteredTools_CategoryUnknown(t *testing.T) {
+	clearMCPSurfaceEnv(t)
+	t.Setenv("KERN_MCP_CATEGORY", "bogus")
+	s := NewServer(strings.NewReader(""), io.Discard)
+	got := s.filteredTools()
+	if len(got) != len(defaultTools) {
+		t.Fatalf("category=bogus filteredTools() = %d tools, want all %d defaults: %v", len(got), len(defaultTools), toolNamesOf(got))
+	}
+	for _, tool := range got {
+		if !defaultTools[tool.Name] {
+			t.Errorf("category=bogus surface contains unexpected tool %q", tool.Name)
 		}
 	}
 }

@@ -8,6 +8,7 @@ import (
 	kdiff "github.com/JayveerPrajapati/kern/internal/diff"
 	"github.com/JayveerPrajapati/kern/internal/governance"
 	"github.com/JayveerPrajapati/kern/internal/heal"
+	"github.com/JayveerPrajapati/kern/internal/incident"
 	"github.com/JayveerPrajapati/kern/internal/index"
 	"github.com/JayveerPrajapati/kern/internal/llm"
 	"github.com/JayveerPrajapati/kern/internal/optimize"
@@ -16,6 +17,7 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/script"
 	"github.com/JayveerPrajapati/kern/internal/strutil"
 	"github.com/JayveerPrajapati/kern/internal/validate"
+	"io"
 	"os"
 	"os/signal"
 	"strings"
@@ -24,10 +26,7 @@ import (
 )
 
 func runBuild(rest []string) {
-	f, args, err := parseFlags(rest)
-	if err != nil {
-		fatalUsage("flags: %v", err)
-	}
+	f, args := parseFlagsOrDie(rest)
 	cmdStr := strings.Join(args, " ")
 	if cmdStr == "" {
 		fatalUsage("usage: kern build <command>")
@@ -36,10 +35,7 @@ func runBuild(rest []string) {
 	// firewall, fail closed (same gate as the MCP tools). The concrete command
 	// is bound to any approval, so a HIGH/CRITICAL denial prints a resolvable
 	// approval ID (`kern approve <id>`).
-	root := f.root
-	if root == "" {
-		root = "."
-	}
+	root := projectRoot(f)
 	if err := governance.CheckExecCommand(cmdStr, root); err != nil {
 		fatal("Build: %v", err)
 	}
@@ -67,16 +63,10 @@ func runBuild(rest []string) {
 }
 
 func runValidate(rest []string) {
-	f, args, err := parseFlags(rest)
-	if err != nil {
-		fatalUsage("flags: %v", err)
-	}
-	root := f.root
-	if root == "" && len(args) > 0 {
+	f, args := parseFlagsOrDie(rest)
+	root := projectRoot(f)
+	if f.root == "" && len(args) > 0 && args[0] != "" {
 		root = args[0]
-	}
-	if root == "" {
-		root = "."
 	}
 	// Validation runs the detected or user-supplied command (arbitrary host
 	// code); it must pass the governance firewall, fail closed.
@@ -136,14 +126,45 @@ func runValidate(rest []string) {
 
 }
 
+// stdinIsTerminal reports whether stdin is an interactive terminal (a char
+// device), so confirmation prompts are skipped for pipes, scripts and CI.
+func stdinIsTerminal() bool {
+	fi, err := os.Stdin.Stat()
+	return err == nil && fi.Mode()&os.ModeCharDevice != 0
+}
+
+// healForceGateConfirmed reads one line from r and reports whether the
+// operator explicitly confirmed the HIGH-risk repair gate override with y/Y.
+// Anything else — an empty line, EOF, or any other input — declines. The
+// prompt itself is printed by the caller; this function is factored out so
+// tests can exercise the gate decision without running a real heal.
+func healForceGateConfirmed(r io.Reader) bool {
+	var answer string
+	// Fscanln's error is ignored deliberately: an empty line or EOF leaves
+	// answer == "" (declines) while "y" + EOF still yields "y" (accepts).
+	_, _ = fmt.Fscanln(r, &answer)
+	return answer == "y" || answer == "Y"
+}
+
 func runHeal(rest []string) {
-	f, args, err := parseFlags(rest)
-	if err != nil {
-		fatalUsage("flags: %v", err)
-	}
+	f, args := parseFlagsOrDie(rest)
 	root := "."
 	if len(args) > 0 {
 		root = args[0]
+	}
+	// The HIGH-risk repair gate exists to stop accidental YOLO repairs;
+	// --force is one fat-finger away from bypassing it. Fail closed: --force
+	// without --yes requires an explicit interactive y/Y confirmation, and a
+	// non-interactive stdin (scripts, CI, MCP) refuses outright — never hang
+	// a pipeline on a prompt, never silently proceed.
+	if f.force && !f.yes {
+		if !stdinIsTerminal() {
+			fatal("refusing --force without --yes in non-interactive mode")
+		}
+		fmt.Print("HIGH-risk repair gate override requested\noverride? [y/N] ")
+		if !healForceGateConfirmed(os.Stdin) {
+			fatal("aborted — re-run with --yes to skip this prompt")
+		}
 	}
 	task := f.task
 	if task == "" {
@@ -153,20 +174,28 @@ func runHeal(rest []string) {
 	if iters == 0 {
 		iters = 3
 	}
-	// Pre-flight the LLM provider so a dead backend fails fast instead of
-	// hanging the loop (observed: >60s with zero output and an orphaned
-	// `opencode run` child). An explicit --llm selects an Ollama model and
-	// must NOT let the auto chain fall through to agent CLIs (claude/
-	// opencode/...) when Ollama is down; without --llm, probe the whole
-	// chain exactly like `kern do` so a missing provider is a one-line
-	// error rather than a silent hang.
+	// Validate local arguments before the LLM provider probe (QA F3): a
+	// missing root or --file must fail as a usage error up front, not
+	// surface behind a dead-provider error after the reachability check.
+	if fi, err := os.Stat(root); err != nil || !fi.IsDir() {
+		fatalUsage("heal: root %q is not a directory", root)
+	}
+	if f.file != "" {
+		if _, err := os.Stat(f.file); err != nil {
+			fatalUsage("heal: --file %q not found", f.file)
+		}
+	}
+	// Pre-flight the explicit --llm Ollama model so a dead Ollama fails fast
+	// (QA F3 note: local argument validation above still precedes it). The
+	// default provider-chain pre-flight moved INTO heal.RunFile (F-ES1/
+	// F-H1): it now runs after a playbook miss, so a recorded fix replays
+	// with no provider up, and both the CLI and the MCP door fail fast on
+	// a dead chain with the same actionable one-liner.
 	if f.llm != "" {
 		c := llm.New("")
 		if !c.Available() {
 			fatal("heal: --llm %s selects an Ollama model but Ollama is not reachable at %s (start ollama or drop --llm to use the provider chain)", f.llm, c.Base)
 		}
-	} else if err := probeLLMProvider(); err != nil {
-		fatal("heal: no reachable LLM provider: %v — start ollama (or set KERN_LLM_PROVIDER to a reachable provider) before using kern heal", err)
 	}
 	if f.file != "" {
 		fmt.Printf("kern: heal %s (cmd=%s, rounds=%d, file=%s)\n", root, f.llm, iters, f.file)
@@ -179,10 +208,19 @@ func runHeal(rest []string) {
 	// otherwise the grandchildren survive the interrupt and burn CPU.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	// Consult recorded heal playbooks first (same <root>/.kern/playbooks.json
+	// store the incident command uses): a matching recorded fix is replayed and
+	// verified without any LLM round; a miss or a failed verification escalates
+	// to the full loop below. NewPlaybookStore never fails, but a nil pb keeps
+	// the call exactly today's behavior regardless.
+	var pb heal.Playbook
+	if store := incident.NewPlaybookStore(root); store != nil {
+		pb = &healPlaybookStore{root: root, store: store}
+	}
 	if f.file != "" {
-		res = heal.RunFile(ctx, root, task, f.llm, f.file, iters, toolTimeout(f), f.force)
+		res = heal.RunFileWithPlaybook(ctx, root, task, f.llm, f.file, iters, toolTimeout(f), f.force, pb)
 	} else {
-		res = heal.Run(ctx, root, task, f.llm, iters, toolTimeout(f), f.force)
+		res = heal.RunWithPlaybook(ctx, root, task, f.llm, iters, toolTimeout(f), f.force, pb)
 	}
 	if res.Err != nil {
 		fatal("%v", res.Err)
@@ -194,7 +232,11 @@ func runHeal(rest []string) {
 		fatal("heal: unable to validate: %s (not OK — install the toolchain or scope with --file)", strings.Join(res.Unvalidated, ", "))
 	}
 	if res.Validated {
-		fmt.Printf("kern: validated OK after %d correction round(s)\n", res.Iterations)
+		if res.UsedPlaybook {
+			fmt.Printf("kern: validated OK via recorded playbook (no LLM rounds)\n")
+		} else {
+			fmt.Printf("kern: validated OK after %d correction round(s)\n", res.Iterations)
+		}
 		if len(res.Changes) > 0 {
 			fmt.Printf("kern: changed files (review and apply in your tree):\n")
 			for _, c := range res.Changes {
@@ -212,10 +254,7 @@ func runHeal(rest []string) {
 }
 
 func runUdiff(rest []string) {
-	f, args, err := parseFlags(rest)
-	if err != nil {
-		fatalUsage("flags: %v", err)
-	}
+	f, args := parseFlagsOrDie(rest)
 	if len(args) < 2 {
 		fatalUsage("usage: kern udiff <file-a> <file-b> [--out out.patch] [--compact]")
 	}
@@ -232,10 +271,7 @@ func runUdiff(rest []string) {
 		if f.out != "" {
 			fatalUsage("--compact and --out cannot be combined")
 		}
-		root := f.root
-		if root == "" {
-			root = "."
-		}
+		root := projectRoot(f)
 		ix, _ := index.Load(root)
 		u := kdiff.Compact(args[0], args[1], strutil.Lines(string(ab)), strutil.Lines(string(bb)), kdiff.IndexSpanResolver(ix))
 		if u == "" {
@@ -279,10 +315,7 @@ func runSandbox(rest []string) {
 	if !separator {
 		flagArgs = rest // no separator: parse everything (legacy behavior)
 	}
-	f, args, err := parseFlags(flagArgs)
-	if err != nil {
-		fatalUsage("flags: %v", err)
-	}
+	f, args := parseFlagsOrDie(flagArgs)
 	root := "."
 	cmdParts := cmdRest
 	if len(args) > 0 && args[0] != "--" && isDir(args[0]) {
@@ -333,6 +366,11 @@ func runSandbox(rest []string) {
 		return
 	}
 	fmt.Printf("kern: sandbox run in %s: %s\n", root, strings.Join(cmdParts, " "))
+	// The CLI prints the sandbox output raw (no pii.Mask, no truncation): a
+	// human at the terminal terminates the output and sees it in full, so
+	// masking here would only corrupt legitimate content. The agent-facing
+	// MCP surface (internal/mcp/exec.Sandbox) masks + truncates before
+	// returning — that is where the confidentiality boundary lives.
 	res := sandbox.RunGuarded(context.Background(), root, cmdParts[0], cmdParts[1:], toolTimeout(f), f.force)
 	fmt.Print(res.Output)
 	if res.Network != nil {
@@ -363,10 +401,7 @@ func runExec(rest []string) {
 		fmt.Printf("  supported languages: %s\n", strings.Join(script.Languages(), ", "))
 		return
 	}
-	f, args, err := parseFlags(rest)
-	if err != nil {
-		fatalUsage("flags: %v", err)
-	}
+	f, args := parseFlagsOrDie(rest)
 	// Script source: positional args win. A lone "-" or a piped stdin
 	// reads the script from stdin; a path to an existing file runs that
 	// file (language from extension); anything else is treated as inline
@@ -416,10 +451,7 @@ func runExec(rest []string) {
 			binding = path
 		}
 	}
-	root := f.root
-	if root == "" {
-		root = "."
-	}
+	root := projectRoot(f)
 	if err := governance.CheckExecCommand(binding, root); err != nil {
 		fatal("Exec: %v", err)
 	}
@@ -491,5 +523,30 @@ func runExec(rest []string) {
 		fatal("exec: %v", res.Err)
 	}
 	fmt.Fprintf(os.Stderr, "kern exec: %s ok (%s, %d bytes stdout)\n", res.Runtime, res.Duration.Round(time.Millisecond), len(res.Stdout))
+}
 
+// healPlaybookStore adapts incident.PlaybookStore to heal.Playbook so the
+// heal loop consults and records playbooks without importing incident. Steps
+// are heal's deterministic "path|old|new" text format (base64 contents).
+type healPlaybookStore struct {
+	root  string
+	store *incident.PlaybookStore
+}
+
+// Lookup returns the recorded replacements for an exact signature.
+func (h *healPlaybookStore) Lookup(signature string) ([]heal.Replacement, bool) {
+	pb, ok := h.store.FindBySignature(signature)
+	if !ok {
+		return nil, false
+	}
+	reps := heal.DecodeReplacements(pb.Steps)
+	if len(reps) == 0 {
+		return nil, false
+	}
+	return reps, true
+}
+
+// Record stores replacements under a signature (upsert by signature).
+func (h *healPlaybookStore) Record(signature string, reps []heal.Replacement) error {
+	return h.store.UpsertBySignature(signature, heal.EncodeReplacements(h.root, reps))
 }

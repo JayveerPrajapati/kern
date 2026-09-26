@@ -9,6 +9,7 @@ import (
 )
 
 func TestHandleLLMProviders(t *testing.T) {
+	t.Parallel()
 	s := &Server{}
 	out, err := s.handleLLMProviders(context.Background(), map[string]any{"probe": false})
 	if err != nil {

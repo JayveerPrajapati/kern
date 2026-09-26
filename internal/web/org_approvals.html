@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Org Approvals &mdash; Kern Web Console</title>
+<style>
+:root { --bg:#0f1115; --panel:#171a21; --panel2:#1c2029; --fg:#e6e8ee; --muted:#9aa3b2; --accent:#4f8cff; --border:#262b36; --good:#3fb950; --warn:#d29922; --bad:#f85149; }
+* { box-sizing:border-box; }
+body { margin:0; background:var(--bg); color:var(--fg); font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif; }
+header { padding:16px 28px; border-bottom:1px solid var(--border); background:var(--panel); display:flex; align-items:center; justify-content:space-between; gap:16px; flex-wrap:wrap; }
+header .brand h1 { margin:0; font-size:20px; }
+header .brand p { margin:4px 0 0; color:var(--muted); font-size:12px; }
+.topnav { display:flex; gap:4px; }
+.topnav a { color:var(--muted); text-decoration:none; font-size:12px; padding:6px 12px; border-radius:6px; border:1px solid transparent; }
+.topnav a:hover { color:var(--fg); background:var(--panel2); }
+.topnav a.active { color:var(--accent); border-color:var(--border); background:var(--panel2); }
+main { padding:20px 28px; display:grid; grid-template-columns:repeat(auto-fit,minmax(340px,1fr)); gap:16px; }
+section.panel { background:var(--panel); border:1px solid var(--border); border-radius:8px; padding:16px; }
+section.panel h2 { margin:0 0 12px; font-size:15px; text-transform:uppercase; letter-spacing:.04em; color:var(--muted); }
+.kpi { display:grid; grid-template-columns:repeat(auto-fit,minmax(90px,1fr)); gap:10px; }
+.kpi div { background:var(--panel2); border:1px solid var(--border); border-radius:6px; padding:10px; text-align:center; }
+.kpi b { display:block; font-size:22px; }
+.kpi span { font-size:11px; color:var(--muted); }
+table { width:100%; border-collapse:collapse; font-size:12px; }
+th,td { text-align:left; padding:6px 8px; border-bottom:1px solid var(--border); vertical-align:top; }
+th { color:var(--muted); font-weight:600; }
+.muted { color:var(--muted); }
+.warn { color:var(--warn); }
+.badge { display:inline-block; padding:1px 7px; border-radius:10px; font-size:11px; background:var(--panel2); border:1px solid var(--border); }
+.status-approved { color:var(--good); }
+.status-pending { color:var(--warn); }
+.status-rejected, .status-used { color:var(--muted); }
+.decision { display:inline-flex; gap:6px; align-items:center; }
+.decision input[type=text] { background:var(--panel2); color:var(--fg); border:1px solid var(--border); border-radius:6px; padding:3px 8px; font-family:inherit; font-size:11px; width:110px; }
+.decision input[type=hidden] { display:none; }
+.decision button { font:inherit; font-size:11px; padding:3px 10px; border-radius:6px; border:1px solid var(--border); cursor:pointer; color:var(--fg); background:var(--panel2); }
+.decision button.approve { border-color:var(--good); color:var(--good); }
+.decision button.reject { border-color:var(--bad); color:var(--bad); }
+footer { padding:14px 28px; border-top:1px solid var(--border); background:var(--panel); }
+footer p { margin:0; font-size:11px; color:var(--muted); }
+@media (max-width:760px) {
+header { padding:12px 16px; }
+.topnav { flex-wrap:wrap; }
+main { padding:14px 12px; grid-template-columns:1fr; }
+table { display:block; overflow-x:auto; }
+}
+</style>
+</head>
+<body>
+<header>
+<div class="brand">
+<h1>Org Approvals</h1>
+<p>Org-wide single-use approvals &mdash; org root: {{.OrgRoot}} (project: {{.Root}})</p>
+</div>
+<nav class="topnav">
+<a href="/">Dashboard</a>
+<a href="/approvals">Approvals</a>
+<a href="/org-approvals" class="active">Org Approvals</a>
+<a href="/risks">Risks</a>
+<a href="/audit">Audit</a>
+<a href="/tasks">Tasks</a>
+<a href="/agents">Agents</a>
+</nav>
+</header>
+<main>
+<section class="panel">
+<h2>Org Approvals</h2>
+<div class="kpi">
+<div><b>{{.Count}}</b><span>approvals</span></div>
+</div>
+{{if not .OrgRoot}}
+<p class="warn">No org root configured (KERN_ORG_ROOT) — the org approval store is inactive and the per-project approval flow is authoritative.</p>
+{{else if .Approvals}}
+<table>
+<tr><th>ID</th><th>Action</th><th>Resource</th><th>Granted By</th><th>Reason</th><th>Status</th><th>Decision</th></tr>
+{{range .Approvals}}
+<tr>
+<td><span class="badge">{{.ID}}</span></td>
+<td>{{.Action}}</td>
+<td>{{.Resource}}</td>
+<td>{{.GrantedBy}}</td>
+<td>{{.Reason}}</td>
+<td class="status-{{.Status}}">{{.Status}}</td>
+<td>
+{{if eq .Status "pending"}}
+<span class="decision">
+<form method="post" action="/org-approvals">
+<input type="hidden" name="id" value="{{.ID}}">
+<input type="hidden" name="action" value="approve">
+<input type="text" name="granted_by" placeholder="admin id" required>
+<button type="submit" class="approve">Approve</button>
+</form>
+<form method="post" action="/org-approvals">
+<input type="hidden" name="id" value="{{.ID}}">
+<input type="hidden" name="action" value="reject">
+<input type="text" name="granted_by" placeholder="admin id" required>
+<input type="text" name="reason" placeholder="reason">
+<button type="submit" class="reject">Reject</button>
+</form>
+</span>
+{{else}}
+<span class="muted">&mdash;</span>
+{{end}}
+</td>
+</tr>
+{{end}}
+</table>
+{{else}}
+<p class="muted">No org approvals recorded yet. Create one via <code>POST /org/approvals</code> on the enterprise org surface.</p>
+{{end}}
+</section>
+</main>
+<footer><p>Org approvals are single-use: an approved approval clears one matching deploy gate and is consumed atomically.</p></footer>
+</body>
+</html>

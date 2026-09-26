@@ -97,6 +97,30 @@ func Annotate(result *VerificationResult) []domain.Claim {
 		appendFact("performance", fmt.Sprintf("benchmarks %s (%d benchmarks)",
 			okWord(p.OK), len(p.Benchmarks)))
 	}
+	if c := result.CVE; c != nil {
+		if c.Status == StatusSkipped {
+			appendFact("cve", "CVE scan SKIPPED ("+firstLine(c.Detail)+")")
+		} else {
+			appendFact("cve", fmt.Sprintf("CVE scan %s (%d vulnerabilities)",
+				okWord(c.OK), c.Count))
+		}
+	}
+	if l := result.License; l != nil {
+		if l.Skipped != "" {
+			appendFact("license", "license check SKIPPED ("+l.Skipped+")")
+		} else {
+			appendFact("license", fmt.Sprintf("license check %s (%d modules, %d findings)",
+				okWord(l.OK), len(l.Modules), len(l.Findings)))
+		}
+	}
+	if s := result.Secrets; s != nil {
+		if s.Status == StatusSkipped {
+			appendFact("secrets", "secrets scan SKIPPED ("+firstLine(s.Detail)+")")
+		} else {
+			appendFact("secrets", fmt.Sprintf("secrets scan %s (%d findings)",
+				okWord(s.OK), s.Count))
+		}
+	}
 
 	claims = append(claims, domain.Claim{
 		Type:       domain.ClaimInference,
@@ -195,6 +219,31 @@ func verdictOf(result *VerificationResult) Verdict {
 	}
 	if s := result.StaticAnalysis; s != nil && !s.OK {
 		fail = true
+	}
+	// The compliance checks (cve/license/secrets) are advisory: findings and
+	// copyleft/unknown licenses surface as warnings, never failures. A check
+	// that could not run (binary absent, no manifest, not a git repo) is
+	// SKIPPED and counts as neither passing nor failing.
+	if c := result.CVE; c != nil {
+		if c.Status == StatusSkipped {
+			skipped = true
+		} else if c.Count > 0 {
+			warn = true
+		}
+	}
+	if l := result.License; l != nil {
+		if l.Skipped != "" {
+			skipped = true
+		} else if len(l.Findings) > 0 {
+			warn = true
+		}
+	}
+	if s := result.Secrets; s != nil {
+		if s.Status == StatusSkipped {
+			skipped = true
+		} else if s.Count > 0 {
+			warn = true
+		}
 	}
 	// Performance is advisory ("where available"): a benchmark run returning
 	// non-zero does not fail the verdict.

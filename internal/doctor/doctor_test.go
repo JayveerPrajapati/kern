@@ -2,6 +2,7 @@ package doctor
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -9,7 +10,70 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/index"
 	"github.com/JayveerPrajapati/kern/internal/script"
 	"github.com/JayveerPrajapati/kern/internal/setup"
+	"github.com/JayveerPrajapati/kern/internal/version"
 )
+
+// repoRoot walks up from the package directory to the go.mod owner (a git
+// checkout, which checkParity needs).
+func repoRoot(t *testing.T) string {
+	t.Helper()
+	dir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for {
+		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			t.Fatal("go.mod not found above " + dir)
+		}
+		dir = parent
+	}
+}
+
+// TestCheckParityReleaseTagAccepted pins the checkParity release-shape
+// classification after the tagRe -> version.Provenance dedupe: release
+// stamps — including 4-component tags like v0.9.9.1 — are accepted as "ok"
+// (a tag build cannot be mapped to a HEAD hash), a matching hash stamp is
+// "ok", a stale hash is "warn", and a non-release-shaped stamp (5 numeric
+// components) is no longer tag-shaped and falls to the stale warn.
+func TestCheckParityReleaseTagAccepted(t *testing.T) {
+	orig := version.Version
+	defer func() { version.Version = orig }()
+	root := repoRoot(t)
+
+	version.Version = "v0.9.9.1"
+	if f := checkParity(root); f.Level != "ok" || !strings.Contains(f.Detail, "release build") {
+		t.Errorf("checkParity(v0.9.9.1) = %+v, want ok release build", f)
+	}
+	version.Version = "v0.9.9"
+	if f := checkParity(root); f.Level != "ok" {
+		t.Errorf("checkParity(v0.9.9) = %+v, want ok", f)
+	}
+	// A stamp matching HEAD is ok (parity proven).
+	version.Version = shortHashAt(root)
+	if f := checkParity(root); f.Level != "ok" {
+		t.Errorf("checkParity(HEAD hash) = %+v, want ok", f)
+	}
+	// A non-release-shaped stamp (5 components) is Unknown provenance and
+	// must NOT be accepted as a release build.
+	version.Version = "v1.2.3.4.5"
+	if f := checkParity(root); f.Level != "warn" {
+		t.Errorf("checkParity(v1.2.3.4.5) = %+v, want warn (not release-shaped)", f)
+	}
+}
+
+// shortHashAt returns the repo HEAD short hash at root ("" outside a git
+// checkout).
+func shortHashAt(root string) string {
+	out, err := exec.Command("git", "-C", root, "rev-parse", "--short", "HEAD").Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}
 
 func TestRunReturnsFindings(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
@@ -407,6 +471,74 @@ func TestCheckExecDetectsSIGKILL(t *testing.T) {
 	}
 }
 
+// TestCheckExecMCPInitializeHandshake pins the N6 fix: binary-exec passes
+// only when the binary answers a real MCP initialize handshake. A stub that
+// answers initialize passes (with the server name/version in the detail); a
+// stub that only prints usage fails.
+func TestCheckExecMCPInitializeHandshake(t *testing.T) {
+	dir := t.TempDir()
+
+	// A stub that answers the initialize handshake passes.
+	good := filepath.Join(dir, "good-mcp")
+	stub := "#!/bin/sh\ncat >/dev/null\nprintf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{},\"serverInfo\":{\"name\":\"kern-mcp\",\"version\":\"0.9.9\"}}}'\n"
+	if err := os.WriteFile(good, []byte(stub), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	f := checkExec(good)
+	if f.Level != "ok" {
+		t.Fatalf("initialize-answering stub = %+v, want ok", f)
+	}
+	if !strings.Contains(f.Detail, "handshake ok") || !strings.Contains(f.Detail, "kern-mcp/0.9.9") {
+		t.Fatalf("ok detail = %q, want handshake ok + server name/version", f.Detail)
+	}
+
+	// A stub that only prints usage fails the new check.
+	bad := filepath.Join(dir, "usage-only")
+	if err := os.WriteFile(bad, []byte("#!/bin/sh\nprintf '%s\\n' 'Usage of kern-mcp: ...'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	f = checkExec(bad)
+	if f.Level != "fail" {
+		t.Fatalf("usage-only stub = %+v, want fail", f)
+	}
+	if !strings.Contains(f.Detail, "handshake") {
+		t.Fatalf("fail detail should name the handshake, got %q", f.Detail)
+	}
+
+	// A stub that exits without answering (empty stdout) also fails.
+	quiet := filepath.Join(dir, "quiet")
+	if err := os.WriteFile(quiet, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if f := checkExec(quiet); f.Level != "fail" {
+		t.Fatalf("quiet stub = %+v, want fail", f)
+	}
+}
+
+// TestParseMCPInitializeResponse pins the response parser: a valid response
+// yields the server name/version; a usage line or garbage yields not-ok.
+func TestParseMCPInitializeResponse(t *testing.T) {
+	server, ok := parseMCPInitializeResponse([]byte(`{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{},"serverInfo":{"name":"kern","version":"dev"}}}` + "\n"))
+	if !ok || server != "kern/dev" {
+		t.Fatalf("valid response = (%q, %v), want (kern/dev, true)", server, ok)
+	}
+	// Result without serverInfo still parses (ok, no server string).
+	server, ok = parseMCPInitializeResponse([]byte(`{"jsonrpc":"2.0","id":1,"result":{"capabilities":{}}}`))
+	if !ok || server != "" {
+		t.Fatalf("result-without-serverInfo = (%q, %v), want (\"\", true)", server, ok)
+	}
+	// An error response (no result) is not a pass.
+	if _, ok := parseMCPInitializeResponse([]byte(`{"jsonrpc":"2.0","id":1,"error":{"code":-32601,"message":"Method not found"}}`)); ok {
+		t.Fatal("error response must not parse as a pass")
+	}
+	// A usage line or garbage is not a pass.
+	for _, bad := range []string{"Usage of kern-mcp:\n", "not json\n", ""} {
+		if _, ok := parseMCPInitializeResponse([]byte(bad)); ok {
+			t.Fatalf("input %q must not parse as a pass", bad)
+		}
+	}
+}
+
 func TestCheckMultiRepoFreshness(t *testing.T) {
 	parent := t.TempDir()
 
@@ -475,5 +607,176 @@ func TestCheckGitExclude(t *testing.T) {
 	f = checkGitExclude(dir2)
 	if f.Level != "warn" {
 		t.Fatalf("without entry: level = %s (%s), want warn", f.Level, f.Detail)
+	}
+}
+
+// TestWiringFindingsDedupesGlobalPlugin pins F13: setup.Check reports the
+// opencode plugin (global) once per global plugin location; doctor must
+// merge those into a single finding instead of printing the same line twice.
+func TestWiringFindingsDedupesGlobalPlugin(t *testing.T) {
+	sts := []setup.Status{
+		{Agent: "opencode plugin (global)", Installed: true, Path: "/home/u/.config/opencode/plugins/kern.ts", Note: "kern entry present"},
+		{Agent: "opencode plugin (global)", Installed: true, Path: "/home/u/.opencode/plugins/kern.ts", Note: "kern entry present"},
+		{Agent: "AGENTS.md rules", Installed: true, Path: "/repo/AGENTS.md", Note: "kern entry present"},
+	}
+	findings := wiringFindings(sts)
+	count := 0
+	for _, f := range findings {
+		if f.Check == "opencode plugin (global)" {
+			count++
+			if f.Level != "ok" {
+				t.Fatalf("merged global plugin level = %s, want ok", f.Level)
+			}
+			if !strings.Contains(f.Detail, ".config/opencode") || !strings.Contains(f.Detail, ".opencode") {
+				t.Fatalf("merged detail should name both global paths, got %q", f.Detail)
+			}
+		}
+	}
+	if count != 1 {
+		t.Fatalf("opencode plugin (global) reported %d times, want exactly 1 (deduped)", count)
+	}
+}
+
+// TestWiringFindingsRegisteredOnlyWhenDetected pins F13: a "registered"
+// claim must not be reported as [ok] when the agent itself is not detected.
+func TestWiringFindingsRegisteredOnlyWhenDetected(t *testing.T) {
+	// claude config says "registered" but claude is NOT in the detected set.
+	sts := []setup.Status{
+		{Agent: "claude", Installed: true, Path: "/usr/local/bin/claude", Note: "kern MCP registered (project or user scope)"},
+	}
+	findings := wiringFindings(sts)
+	for _, f := range findings {
+		if f.Check == "claude" {
+			if f.Level != "warn" {
+				t.Fatalf("undetected-agent registration level = %s, want warn", f.Level)
+			}
+			if !strings.Contains(f.Detail, "not detected") {
+				t.Fatalf("detail should say the agent is not detected, got %q", f.Detail)
+			}
+		}
+	}
+
+	// Control: with "claude (detected)" present, the registration is [ok].
+	sts = []setup.Status{
+		{Agent: "claude", Installed: true, Path: "/usr/local/bin/claude", Note: "kern MCP registered (project or user scope)"},
+		{Agent: "claude (detected)", Installed: true, Path: "/repo/CLAUDE.md", Note: "kern-first policy present"},
+	}
+	for _, f := range wiringFindings(sts) {
+		if f.Check == "claude" && f.Level != "ok" {
+			t.Fatalf("detected-agent registration level = %s, want ok", f.Level)
+		}
+	}
+}
+
+// TestWiringFindingsRewordsDetectedNotPresent pins F13: "[warn] claude
+// (detected) not present" next to a registered line reads as "claude not
+// installed"; reword it to name what is actually missing (the kern-first
+// policy in the instruction file).
+func TestWiringFindingsRewordsDetectedNotPresent(t *testing.T) {
+	sts := []setup.Status{
+		{Agent: "claude", Installed: true, Path: "/usr/local/bin/claude", Note: "kern MCP registered (project or user scope)"},
+		{Agent: "claude (detected)", Installed: false, Path: "/repo/CLAUDE.md", Note: "not present"},
+	}
+	for _, f := range wiringFindings(sts) {
+		if f.Check == "claude (detected)" {
+			if strings.Contains(f.Detail, "not present") && !strings.Contains(f.Detail, "policy not present") {
+				t.Fatalf("reworded detail still reads as 'not present': %q", f.Detail)
+			}
+			if !strings.Contains(f.Detail, "kern-first policy") {
+				t.Fatalf("detail should name the missing policy, got %q", f.Detail)
+			}
+		}
+	}
+}
+
+// TestCheckIndexReportsStorePath pins F5a: doctor's index check must name
+// the RESOLVED store path the root serves, not just the counts.
+func TestCheckIndexReportsStorePath(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	root := t.TempDir()
+	writeGoFile(t, root, "a.go")
+	ix, err := index.Build(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ix.Save(); err != nil {
+		t.Fatal(err)
+	}
+	f := checkIndex(root)
+	if f.Level != "ok" {
+		t.Fatalf("checkIndex level = %s: %+v", f.Level, f)
+	}
+	if !strings.Contains(f.Detail, index.StorePath(root)) {
+		t.Fatalf("checkIndex detail missing resolved store path %q: %q", index.StorePath(root), f.Detail)
+	}
+}
+
+// TestCheckIndexShadowNested pins F5c: serving a nested .kern while a parent
+// directory also holds an index must warn.
+func TestCheckIndexShadowNested(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	parent := t.TempDir()
+	writeGoFile(t, parent, "a.go")
+	ix, err := index.Build(parent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ix.Save(); err != nil {
+		t.Fatal(err)
+	}
+	// Parent root: its own index, no parent-of-parent index → ok.
+	if f := checkIndexShadow(parent); f.Level != "ok" {
+		t.Fatalf("parent root reported %s: %+v", f.Level, f)
+	}
+	// A nested subdir with its own index → warn (shadowing a parent index).
+	sub := filepath.Join(parent, "sub")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeGoFile(t, sub, "b.go")
+	six, err := index.Build(sub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := six.Save(); err != nil {
+		t.Fatal(err)
+	}
+	f := checkIndexShadow(sub)
+	if f.Level != "warn" {
+		t.Fatalf("nested root reported %s, want warn: %+v", f.Level, f)
+	}
+	if !strings.Contains(f.Detail, parent) {
+		t.Fatalf("shadow warning should name the parent dir %q: %q", parent, f.Detail)
+	}
+	// A dir with no nested index at all → ok.
+	empty := t.TempDir()
+	if f := checkIndexShadow(empty); f.Level != "ok" {
+		t.Fatalf("index-less root reported %s: %+v", f.Level, f)
+	}
+}
+
+// TestParentIndexDir walks up to the nearest ancestor holding an index.
+func TestParentIndexDir(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	parent := t.TempDir()
+	sub := filepath.Join(parent, "a", "b")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if got := ParentIndexDir(sub); got != "" {
+		t.Fatalf("no ancestor index yet, but ParentIndexDir = %q", got)
+	}
+	ix, err := index.Build(parent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ix.Save(); err != nil {
+		t.Fatal(err)
+	}
+	if got := ParentIndexDir(sub); filepath.Clean(got) != filepath.Clean(parent) {
+		t.Fatalf("ParentIndexDir = %q, want %q", got, parent)
+	}
+	if got := ParentIndexDir(parent); got != "" {
+		t.Fatalf("ParentIndexDir of the indexed root itself = %q, want \"\"", got)
 	}
 }

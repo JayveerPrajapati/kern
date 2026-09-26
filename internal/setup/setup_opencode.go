@@ -12,9 +12,11 @@ func wireMCPJSON(root, bin string) Status {
 	err := mergeJSON(path, "mcpServers", map[string]any{
 		"command": bin,
 		"args":    []string{},
-		"env": map[string]string{
-			"KERN_ALLOW_EXEC": "1",
-		},
+		// No KERN_ALLOW_EXEC default: exec is opt-in per host. The shipped
+		// .mcp.json must not silently enable arbitrary command execution for
+		// every agent that opens the repo; governance.CheckExec already fails
+		// closed without it, and the approval workflow still gates.
+		"env": map[string]string{},
 	})
 	if err != nil {
 		return Status{Agent: "mcp", Path: path, Note: err.Error()}
@@ -80,6 +82,16 @@ func wirePlugin(root string) Status {
 		if bytes.Equal(cur, src) {
 			return Status{Agent: "opencode-plugin", Installed: true, Path: path, Note: "plugin already current"}
 		}
+		// F-DR1: a copy matching a previously SHIPPED version is kern's own
+		// deployment (from an older kern), not user customization — safe and
+		// necessary to update. Only an unrecognized copy is treated as
+		// customized and left untouched.
+		if isShippedPluginVersion(cur) {
+			if err := os.WriteFile(path, src, 0o644); err != nil {
+				return Status{Agent: "opencode-plugin", Path: path, Note: err.Error()}
+			}
+			return Status{Agent: "opencode-plugin", Installed: true, Path: path, Note: "plugin updated from an older kern version (was a previously shipped copy)"}
+		}
 		// Customized copies are intentionally left untouched; the plugin IS
 		// deployed, so this is a note, not a setup failure.
 		return Status{Agent: "opencode-plugin", Installed: true, Path: path, Note: "plugin is customized — left untouched"}
@@ -96,8 +108,8 @@ func wirePlugin(root string) Status {
 // (~/.opencode/plugins), where a stale copy silently wins over the project
 // one — installing both keeps every copy in sync with the embedded asset.
 // Uses the same compare-and-write semantics as wirePlugin: copies identical
-// to the embedded asset are left alone and user-customized copies are never
-// overwritten.
+// to the embedded asset are left alone, previously-shipped copies are updated
+// (F-DR1), and user-customized copies are never overwritten.
 func wireGlobalPlugin() Status {
 	src, err := pluginFS.ReadFile("assets/plugin/kern.ts")
 	if err != nil {
@@ -109,6 +121,19 @@ func wireGlobalPlugin() Status {
 		if cur, rerr := os.ReadFile(path); rerr == nil {
 			if bytes.Equal(cur, src) {
 				notes = append(notes, tildePath(path)+" current")
+				installed = true
+				continue
+			}
+			// F-DR1: a previously shipped version is kern's own deployment
+			// (from an older kern) — update it instead of leaving doctor's
+			// prescribed remedy unable to converge. Only an unrecognized copy
+			// is treated as user-customized and never overwritten.
+			if isShippedPluginVersion(cur) {
+				if err := os.WriteFile(path, src, 0o644); err != nil {
+					notes = append(notes, tildePath(path)+": "+err.Error())
+					continue
+				}
+				notes = append(notes, tildePath(path)+" updated from an older kern version")
 				installed = true
 				continue
 			}
@@ -147,7 +172,16 @@ func tildePath(p string) string {
 // exists — setup never creates new rule files unprompted.
 var hostRuleFiles = []string{"CLAUDE.md", "GEMINI.md"}
 
-func wireAgentRules(root string) Status {
+// wireAgentRules writes the kern usage rules to the universal repo AGENTS.md
+// (and any existing per-host rule files). mode selects the AGENTS.md variant:
+// "thin" writes the opt-in thin file (full rules live in the host's global
+// instructions, managed by `kern setup --global-rules`); anything else
+// writes the full rules (default). wired names the agents this run wired,
+// used only by the thin variant's wiring-facts line.
+func wireAgentRules(root, mode, wired string) Status {
+	if mode == "thin" {
+		return wireThinAgentRules(root, wired)
+	}
 	status := wireRulesFile(root, "AGENTS.md")
 	// Same content, per host. Errors here are informational: the universal
 	// AGENTS.md is the primary delivery mechanism.

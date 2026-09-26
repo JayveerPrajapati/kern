@@ -35,7 +35,11 @@ live when one is. The socket is local-user-only; a second
   transparently bind under a hashed name in the temp dir.
 - **Environment variables** — `OLLAMA_HOST` (default `http://localhost:11434`,
   used only when you opt in), `KERN_EMBED_MODEL` (default
-  `nomic-embed-text`), `KERN_VERSION`/`KERN_INSTALL_DIR` (installer).
+  `nomic-embed-text`), `KERN_VERSION`/`KERN_CHANNEL`/`KERN_INSTALL_DIR`
+  (installer: `KERN_VERSION` pins a release tag, `KERN_CHANNEL` selects the
+  channel `latest` resolves to — `latest` (default), `stable` (newest
+  3-component tag, 4-component hotfixes excluded), or a regex over tag
+  names; an explicit `KERN_VERSION` pin always overrides the channel).
 `KERN_TOKENIZER` selects the token counter used across all sizing and
 savings numbers: `estimator` (default — stable, heuristic, offline),
 `bpe` (self-trained byte-level BPE), or exact OpenAI encodings
@@ -49,7 +53,16 @@ the archive age are gzip-compressed in place, and past the TTL they are
 evicted (`kern cache [root] [--dry-run]` runs it on demand; it also
 runs automatically, at most once an hour). `KERN_MCP_AUDIT_DIR` overrides
 where the MCP server persists its tool-call audit chain (default
-`<project>/.kern/audit`).
+`<project>/.kern/audit`). `KERN_MCP_ROOTS` (comma-separated directories;
+the `mcp.roots` config key and the historical `KERN_ROOTS` alias also
+apply) widens the tool workspace of the **single-root stdio MCP server**
+(`kern-mcp`): every tool root/dir/path argument is confined to these
+roots, falling back to the startup directory when unset. **Per-App tool
+servers ignore it:** the root-aware servers that back each web-console
+`/v1/tools/{name}` passthrough (single-project `kern serve` and every
+enterprise-mode project) confine to their App root ONLY — a
+`KERN_MCP_ROOTS` value naming another project's tree can never widen one
+project's console.
 - **`.kern/config.json`** (optional) — one config path for operator knobs,
   resolved as **env var > `.kern/config.json` > built-in default**, per
   project root. JSON, stdlib-only, parsed once per root; a malformed file
@@ -80,8 +93,47 @@ where the MCP server persists its tool-call audit chain (default
   `KERN_ALLOW_*`, `KERN_MCP_PERMISSIVE`, `KERN_MCP_NO_CONFINE`, `KERN_TOOLS`,
   `KERN_MCP_FULL/PHASE/SINGLE_TOOL/HIGH_LEVEL_ONLY/AUDIT_DIR`,
   `KERN_MCP_TLS_CERT`/`KERN_MCP_TLS_KEY` (optional TLS for the HTTP MCP transport),
-  `KERN_ALLOW_LOOPBACK_FETCH`, `KERN_INDEX_SERIAL`, `KERN_MCP_WATCH*`, sandbox
-  isolation knobs, and installer vars.
+`KERN_ALLOW_LOOPBACK_FETCH`, `KERN_INDEX_SERIAL`, `KERN_MCP_WATCH*`, sandbox
+isolation knobs, and installer vars.
+
+### Agent RBAC environment variables
+
+Role-based access control for MCP agents (`kern_agent_role_rbac`, enforced at
+the tool-dispatch choke point) is controlled by two env-only opt-ins:
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `KERN_ALLOW_RBAC_ASSIGN` | unset | When `1`, allows the `assign` action of `kern_agent_role_rbac` (role assignment). Fails closed otherwise — an agent must never be able to assign itself a role. |
+| `KERN_RBAC_DEFAULT_DENY` | unset | When `1`, agents with no explicitly assigned role — including the built-in `default` principal that every unauthenticated call resolves to — are mapped to the read-only `reviewer` role instead of the legacy permit-all loopback trust. Explicitly assigned roles are unaffected. |
+
+### Org governance environment variables
+
+Org mode (enterprise server / org-wide policy + approvals + RBAC) is strictly
+opt-in and is gated on its RBAC pairing:
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `KERN_ORG_ROOT` | unset | The org root directory: enables org mode. Blast radius: the org policy document at `<root>/.kern/org-policy.json` overrides the default firewall policy set for every project under the org, org-wins RBAC (org role assignments at `<root>/.kern/org-rbac.json` beat per-project roles), and the org-wide approval store (`/org/approvals`, deploy-gate approvals) becomes authoritative. **Pairing requirement:** with `KERN_ORG_ROOT` set, `KERN_RBAC_DEFAULT_DENY=1` is REQUIRED — enterprise `New()` and `WithOrgRoot` refuse to start without it, because org-wins RBAC rests on a client-asserted `agent_id` (untrusted input) and unassigned principals would otherwise keep the legacy permit-all trust, defeating the org-governance story. |
+| `KERN_ORG_ALLOW_WEAK_RBAC` | unset | **Unsafe escape hatch.** When `1`, org mode is allowed without `KERN_RBAC_DEFAULT_DENY=1` — unassigned agents keep the legacy permit-all posture under org-wins RBAC. Only for deployments that genuinely need weak org RBAC; documented-unsafe. |
+
+> **Security note — `agent_id` is untrusted input.** Every RBAC decision keys
+> off the `agent_id` a caller asserts (tool-call argument, raw REST body).
+> It is NOT authenticated identity: an agent that can supply another agent's
+> id inherits that agent's role. Org mode mitigates this only when
+> `KERN_RBAC_DEFAULT_DENY=1` (unassigned ⇒ read-only), never by trusting the
+> id. Treat `agent_id` as a label, not proof of identity.
+
+Interplay: `KERN_RBAC_DEFAULT_DENY=1` auto-permits the `assign` action of
+`kern_agent_role_rbac` — but only for principals that are already permitted
+the tool. Unassigned/reviewer principals are denied `kern_agent_role_rbac` at
+dispatch like any other write tool, so a stranded read-only principal can
+never self-elevate: self-assignment stays impossible by design. Role bootstrap
+is therefore an operator out-of-band action — hand-edit
+`<root>/.kern/rbac.json` (owner-only, atomic write) or run `assign` as a
+privileged principal; a restart, or the next assignment, brings the change
+into effect. `KERN_ALLOW_RBAC_ASSIGN=1` keeps working standalone (assign
+without default-deny). Assignments persist to `<root>/.kern/rbac.json` and
+survive restarts.
 
 - **`.kern/kern.yaml`** (optional) — per-project log compression profiles and adaptive truncation rules. Configure custom patterns, context line padding (`keep_lines_before`/`keep_lines_after`), or complete removal (`action: strip_completely`).
 

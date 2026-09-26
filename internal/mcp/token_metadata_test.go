@@ -48,6 +48,7 @@ func assertTokenMetadataPresent(t *testing.T, res map[string]any) {
 }
 
 func TestCountRequestTokens(t *testing.T) {
+	t.Parallel()
 	empty := countRequestTokens("kern_foo", nil)
 	if empty <= 0 {
 		t.Errorf("countRequestTokens(name, nil) = %d, want > 0", empty)
@@ -59,6 +60,7 @@ func TestCountRequestTokens(t *testing.T) {
 }
 
 func TestTokenMetadataFor(t *testing.T) {
+	t.Parallel()
 	args := map[string]any{"text": strings.Repeat("word ", 500)}
 	meta := tokenMetadataFor("kern_x", args, "short output")
 	if meta.TokensUsed <= 0 {
@@ -79,6 +81,7 @@ func TestTokenMetadataFor(t *testing.T) {
 }
 
 func TestTokenMetadataForClampsSavings(t *testing.T) {
+	t.Parallel()
 	// A response larger than the request (the common case: search/read tools
 	// return more than they consume) must report zero savings, not negative.
 	meta := tokenMetadataFor("kern_x", map[string]any{}, strings.Repeat("word ", 2000))
@@ -88,6 +91,7 @@ func TestTokenMetadataForClampsSavings(t *testing.T) {
 }
 
 func TestTokenMetadataOmitsZeroSavings(t *testing.T) {
+	t.Parallel()
 	meta := TokenMetadata{TokensUsed: 10, TokensReturned: 5, EstimatedCost: 0.00015, Savings: 0}
 	b, err := json.Marshal(meta)
 	if err != nil {
@@ -138,6 +142,7 @@ func TestTokenMetadataSavingsOnOptimize(t *testing.T) {
 }
 
 func TestTokenMetadataOnErrorResult(t *testing.T) {
+	t.Parallel()
 	// A handler error (isError=true) is still a tool response and must carry
 	// the token ledger, counting the error text it returned.
 	resp := serveOne(t, writeReq("tools/call", 3, `{"name":"kern_optimize_prompt","arguments":{}}`))
@@ -158,6 +163,7 @@ func TestTokenMetadataOnErrorResult(t *testing.T) {
 }
 
 func TestTokenMetadataOnPreToolDenial(t *testing.T) {
+	t.Parallel()
 	s := newTestServer()
 	s.roots = []string{"/"}
 	s.gate = nil
@@ -185,6 +191,7 @@ func TestTokenMetadataOnPreToolDenial(t *testing.T) {
 }
 
 func TestTokenMetadataOnGateDenial(t *testing.T) {
+	t.Parallel()
 	s := newTestServer()
 	s.roots = []string{"/"}
 	s.gate = &Gate{roots: []string{"/definitely-not-a-real-root-xyz"}, enabled: true}

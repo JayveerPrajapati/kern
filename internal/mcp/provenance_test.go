@@ -521,6 +521,7 @@ func TestProvenance_UnknownAgentDenial(t *testing.T) {
 // TestProvenance_JSONRoundTrip verifies the provenance struct survives a
 // marshal→unmarshal cycle field-for-field, in both governed and raw shapes.
 func TestProvenance_JSONRoundTrip(t *testing.T) {
+	t.Parallel()
 	governed := &Provenance{
 		SchemaVersion: provenance.SchemaVersion,
 		Mode:          ProvenanceModeGoverned,

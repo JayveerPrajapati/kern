@@ -12,12 +12,19 @@
 // fingerprint for the verify walk. Both coexist.
 //
 // Invariants:
-//   - index.json remains the canonical persisted format. The binary snapshot
-//     is a derived cache: Save writes both, and every load path falls back to
-//     JSON when the snapshot is missing, stale, or undecodable.
+//   - index.json remains the canonical persisted format of the fallback path.
+//     Save is SQLite-primary in the default build, so the JSON + binary
+//     snapshot pair is written only when SQLite is compiled out (-tags
+//     nosqlite) or the SQLite write fails; index.json is then the read
+//     migration path for caches written by older kern, and Load/LoadFile
+//     fall back to it whenever the snapshot is missing, stale, or
+//     undecodable.
 //   - Freshness is proven by comparing the snapshot header against the
 //     current index.json stat (size + nanosecond mtime): any rewrite of the
 //     JSON invalidates the snapshot, so a stale snapshot can never be served.
+//     Load additionally refuses the snapshot when a newer SQLite store
+//     supersedes the JSON (sqliteStoreNewerThanJSON), so a legacy snapshot
+//     cannot shadow the SQLite-primary store.
 //   - A corrupt/foreign snapshot degrades to the JSON path, never to an
 //     error: loadBinSnapshot returns ok=false on any failure (including an
 //     over-cap file, which is never read into memory).

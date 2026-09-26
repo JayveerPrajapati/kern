@@ -7,6 +7,7 @@ import (
 )
 
 func TestHandleFragilityHotspots(t *testing.T) {
+	t.Parallel()
 	s := NewServer(strings.NewReader(""), nil)
 	defer s.Close()
 

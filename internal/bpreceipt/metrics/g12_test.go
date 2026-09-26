@@ -214,10 +214,11 @@ func TestG12_ColdVsWarmIndex(t *testing.T) {
 	client := requireKernBinary(t)
 	dir := makeRepo(t, 100)
 
-	// Cold: remove index before each run.
+	// Cold: remove the whole .kern store (SQLite-primary in the default
+	// build, legacy JSON cache otherwise) before each run.
 	var coldLatencies []time.Duration
 	for i := 0; i < 3; i++ {
-		_ = os.RemoveAll(filepath.Join(dir, ".kern", "index.json"))
+		_ = os.RemoveAll(filepath.Join(dir, ".kern"))
 		diffFiles := getDiffFiles(dir)
 		if len(diffFiles) == 0 {
 			// Create a staged change.

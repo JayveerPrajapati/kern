@@ -13,6 +13,7 @@ package mcp
 import (
 	"encoding/json"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -120,18 +121,33 @@ func TestE2ERetrieve(t *testing.T) {
 	}
 }
 
-// TestE2EOrgProjects drives the org-family admin tool kern_org_projects over
+// TestE2EOrgProjects drives the org-family read tool kern_org_projects over
 // HTTP: with no projects arg it returns the default single project named
-// after the root's base name as JSON — no enterprise server needed.
+// after the root's base name as JSON. The org entry point builds its own
+// enterprise.Server per call, so the org-mode env pairing + an org-rbac.json
+// provide the acting user's role. "root" maps to the taxonomy role
+// "developer" so BOTH enforcement layers pass: the dispatch-layer
+// CheckAgentTool (developer allows all tools) and the org per-action RBAC
+// (projects is a member-tier read).
 func TestE2EOrgProjects(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("KERN_ROOTS", root)
 	t.Setenv("KERN_MCP_ROOTS", root)
 	t.Setenv("KERN_PRELOAD", "0")
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	orgRoot := t.TempDir()
+	kdir := filepath.Join(orgRoot, ".kern")
+	if err := os.MkdirAll(kdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(kdir, "org-rbac.json"), []byte(`{"root":"developer"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("KERN_ORG_ROOT", orgRoot)
+	t.Setenv("KERN_RBAC_DEFAULT_DENY", "1")
 	s := newHTTPServer()
 
-	resp := e2eCall(t, s, 4, "kern_org_projects", map[string]any{"root": root})
+	resp := e2eCall(t, s, 4, "kern_org_projects", map[string]any{"root": root, "actor_id": "root", "agent_id": "root"})
 	text := e2eText(t, "kern_org_projects", resp)
 	// The handler returns indented JSON; decode and assert the shape.
 	var projects struct {

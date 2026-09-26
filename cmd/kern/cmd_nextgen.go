@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/JayveerPrajapati/kern/internal/fit"
@@ -18,14 +19,17 @@ import (
 )
 
 func runFitContext(rest []string) {
-	f, args, err := parseFlags(rest)
-	if err != nil {
-		fatalUsage("flags: %v", err)
-	}
-	root := f.root
-	if root == "" {
-		root = "."
-	}
+	// `kern fit-context` is a thin wrapper over `kern budget --mode fit`
+	// (surface consolidation T2b): the handler presets the mode and the
+	// shared core reproduces the fit-context output byte-for-byte.
+	runFitContextCore(rest)
+}
+
+// runFitContextCore is the adaptive context-window token compressor shared
+// by `kern fit-context` and `kern budget --mode fit`.
+func runFitContextCore(rest []string) {
+	f, args := parseFlagsOrDie(rest)
+	root := projectRoot(f)
 	maxTok := f.maxTokens
 	if maxTok <= 0 && f.budget > 0 {
 		maxTok = f.budget
@@ -80,14 +84,8 @@ func runFitContext(rest []string) {
 }
 
 func runRepairDiagnostics(rest []string) {
-	f, _, err := parseFlags(rest)
-	if err != nil {
-		fatalUsage("flags: %v", err)
-	}
-	root := f.root
-	if root == "" {
-		root = "."
-	}
+	f, _ := parseFlagsOrDie(rest)
+	root := projectRoot(f)
 	compilerOut := f.compilerOutput
 	if compilerOut == "" {
 		fatalUsage("missing required --compiler-output")
@@ -130,14 +128,8 @@ func runRepairDiagnostics(rest []string) {
 }
 
 func runRefactorTransaction(rest []string) {
-	f, _, err := parseFlags(rest)
-	if err != nil {
-		fatalUsage("flags: %v", err)
-	}
-	root := f.root
-	if root == "" {
-		root = "."
-	}
+	f, _ := parseFlagsOrDie(rest)
+	root := projectRoot(f)
 
 	var edits []refactor.FileEdit
 	if f.edits != "" {
@@ -194,14 +186,8 @@ func runRefactorTransaction(rest []string) {
 }
 
 func runFWTrace(rest []string) {
-	f, args, err := parseFlags(rest)
-	if err != nil {
-		fatalUsage("flags: %v", err)
-	}
-	root := f.root
-	if root == "" {
-		root = "."
-	}
+	f, args := parseFlagsOrDie(rest)
+	root := projectRoot(f)
 	filter := f.pattern
 	if filter == "" && len(args) > 0 {
 		filter = args[0]
@@ -244,21 +230,26 @@ func runFWTrace(rest []string) {
 	}
 }
 
-func runMutationTest(rest []string) {
+func runMutationTest(rest []string) int {
 	// --files is the documented mutate flag (comma-separated, repeatable);
 	// the shared parser only knows --file, so hoist --files out of rest
 	// before generic parsing (which would otherwise reject it) and merge
 	// both sources below.
 	var filesFlag []string
 	rest, filesFlag = extractListFlag(rest, "--files")
+	// --min-score (F-MU1, QA Pick #13) gates the run: exit 1 when the
+	// mutation score lands below the threshold, so `kern mutate` can gate
+	// CI on suite sensitivity like every other findings-producing command.
+	rest, minScore := extractFloatFlag(rest, "--min-score")
 
-	f, _, err := parseFlags(rest)
-	if err != nil {
-		fatalUsage("flags: %v", err)
-	}
-	root := f.root
-	if root == "" {
-		root = "."
+	f, args := parseFlagsOrDie(rest)
+	root := projectRoot(f)
+	// Positional root (kern mutate /path/to/module), same convention as
+	// commitmsg and index: silently ignoring it made `kern mutate [root]`
+	// mutate the CWD instead — in a test context that spawned the package's
+	// own suite recursively (live-caught 2026-09-23).
+	if f.root == "" && len(args) > 0 && args[0] != "" {
+		root = args[0]
 	}
 	files := filesFlag
 	if f.file != "" {
@@ -293,24 +284,35 @@ func runMutationTest(rest []string) {
 		fatal("mutate: %v", err)
 	}
 
+	// Score gate (F-MU1): findings-producing commands exit non-zero —
+	// changes/review exit 3, validate/security exit 1 — so a completed run
+	// with surviving mutants can now fail CI. Checked before both output
+	// paths so --json consumers get the same contract.
+	belowThreshold := !f.dryRun && minScore >= 0 && report.Score < minScore
+
 	if f.json {
 		printJSON(report)
-		return
+		if belowThreshold {
+			fmt.Fprintf(os.Stderr, "mutate: mutation score %.1f%% below --min-score %.1f%% (%d surviving mutants = test gap)\n", report.Score, minScore, report.SurvivedCount)
+			return 1
+		}
+		return 0
 	}
 
 	fmt.Printf("=== Mutation Testing Report (%d Mutants Generated) ===\n", report.TotalMutants)
 	if !f.dryRun {
 		fmt.Printf("Mutation Score:   %.1f%%\n", report.Score)
+		// F-MU2 disclosure: the score covers EVALUATED mutants only — a
+		// zero_return class that cannot run without type analysis must not
+		// silently inflate the headline number.
+		if report.UntestedCount > 0 {
+			fmt.Printf("Evaluated:       %d/%d mutants (%d zero_return skipped without type analysis — the score covers evaluated mutants only)\n",
+				report.EvaluatedCount, report.TotalMutants, report.UntestedCount)
+		}
 		fmt.Printf("Killed Mutants:   %d (Tests caught the regression)\n", report.KilledCount)
 		fmt.Printf("Survived Mutants: %d (Test Gap / False-positive tests!)\n", report.SurvivedCount)
-		untested := 0
-		for _, m := range report.Mutants {
-			if m.Status == "untested" {
-				untested++
-			}
-		}
-		if untested > 0 {
-			fmt.Printf("Untested Mutants: %d (zero_return skipped without type analysis)\n", untested)
+		if report.UntestedCount > 0 {
+			fmt.Printf("Untested Mutants: %d (zero_return skipped without type analysis)\n", report.UntestedCount)
 		}
 	}
 	fmt.Println("\n--- Mutants Evaluated ---")
@@ -332,13 +334,44 @@ func runMutationTest(rest []string) {
 		fmt.Printf("    Original:    %s\n", m.Original)
 		fmt.Printf("    Mutated to:  %s\n\n", m.Replacement)
 	}
+	if belowThreshold {
+		fmt.Fprintf(os.Stderr, "mutate: mutation score %.1f%% below --min-score %.1f%% (%d surviving mutants = test gap)\n", report.Score, minScore, report.SurvivedCount)
+		return 1
+	}
+	return 0
+}
+
+// extractFloatFlag removes flag ("--name value" or "--name=value") from args
+// and returns its parsed float value. A trailing value-less flag or a
+// non-numeric value is dropped with the default returned (parseFlags-style
+// accept-and-default semantics; the usage error surfaces later if the value
+// mattered).
+func extractFloatFlag(args []string, flag string) (rest []string, value float64) {
+	prefix := flag + "="
+	for i := 0; i < len(args); i++ {
+		if strings.HasPrefix(args[i], prefix) {
+			if v, err := strconv.ParseFloat(strings.TrimPrefix(args[i], prefix), 64); err == nil {
+				value = v
+			}
+			continue
+		}
+		if args[i] != flag {
+			rest = append(rest, args[i])
+			continue
+		}
+		if i+1 >= len(args) {
+			continue // trailing flag without a value
+		}
+		i++
+		if v, err := strconv.ParseFloat(args[i], 64); err == nil {
+			value = v
+		}
+	}
+	return rest, value
 }
 
 func runFragility(rest []string) {
-	f, args, err := parseFlags(rest)
-	if err != nil {
-		fatalUsage("flags: %v", err)
-	}
+	f, args := parseFlagsOrDie(rest)
 	root := "."
 	if len(args) > 0 {
 		root = args[0]

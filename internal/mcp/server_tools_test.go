@@ -28,6 +28,20 @@ func mcpProject(t *testing.T) string {
 	return root
 }
 
+// seedTestProject writes a minimal Go source file into an existing temp root
+// so index-loading tools see a non-empty project. Index tools reject empty
+// roots as a real error (F2), so tests that exercise other behavior (agent
+// control, compose) must seed the root instead of passing a bare temp dir.
+func seedTestProject(t *testing.T, root string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(root, "go.mod"), []byte("module demo\n\ngo 1.22\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "app.go"), []byte("package main\n\n// Seed does nothing.\nfunc Seed() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func mcpCall(t *testing.T, name string, args map[string]any) map[string]any {
 	t.Helper()
 	pa, _ := json.Marshal(args)
@@ -59,6 +73,7 @@ func mcpToolError(t *testing.T, name string, args map[string]any) string {
 }
 
 func TestHelpersPctArgStringTruncate(t *testing.T) {
+	t.Parallel()
 	if strconv.Itoa(0) != "0" {
 		t.Fatalf("strconv.Itoa(0) = %q", strconv.Itoa(0))
 	}
@@ -88,6 +103,7 @@ func TestHelpersPctArgStringTruncate(t *testing.T) {
 }
 
 func TestLoadOrBuildIndexCacheHit(t *testing.T) {
+	t.Parallel()
 	root := mcpProject(t)
 	s := NewServer(strings.NewReader(""), &bytes.Buffer{})
 	defer s.Close()
@@ -105,6 +121,7 @@ func TestLoadOrBuildIndexCacheHit(t *testing.T) {
 }
 
 func TestChangedContextViaMCP(t *testing.T) {
+	t.Parallel()
 	root := mcpProject(t)
 	out := mcpAssertOK(t, "kern_changes", map[string]any{"root": root, "file": "app.go"})
 	if !strings.Contains(out, "app.go") {
@@ -113,11 +130,13 @@ func TestChangedContextViaMCP(t *testing.T) {
 }
 
 func TestChangedContextRangeNeedsGit(t *testing.T) {
+	t.Parallel()
 	root := mcpProject(t)
 	_ = mcpToolError(t, "kern_changes", map[string]any{"root": root, "range": "HEAD~1..HEAD"})
 }
 
 func TestPathTraversalFileArgRejected(t *testing.T) {
+	t.Parallel()
 	root := mcpProject(t)
 	for _, evil := range []string{"../outside.go", "../../etc/passwd", root + "/../outside.go"} {
 		out := mcpToolError(t, "kern_changes", map[string]any{"root": root, "file": evil})
@@ -128,6 +147,7 @@ func TestPathTraversalFileArgRejected(t *testing.T) {
 }
 
 func TestRootedPathToolsRejectEscapes(t *testing.T) {
+	t.Parallel()
 	root := mcpProject(t)
 	outside := filepath.Join(filepath.Dir(root), "outside.go")
 	_ = os.WriteFile(outside, []byte("package main\n"), 0o644)
@@ -158,6 +178,7 @@ func TestRootedPathToolsRejectEscapes(t *testing.T) {
 // name a root so the path is confined to the workspace. Rootless relative
 // paths still resolve against the current working directory.
 func TestRootlessAbsolutePathRejected(t *testing.T) {
+	t.Parallel()
 	root := mcpProject(t)
 	msg := mcpToolError(t, "kern_compact_file", map[string]any{"path": filepath.Join(root, "app.go")})
 	if !strings.Contains(msg, "absolute path requires root argument") {
@@ -171,6 +192,7 @@ func TestRootlessAbsolutePathRejected(t *testing.T) {
 }
 
 func TestRootlessAbsolutePathInsideCwdAllowed(t *testing.T) {
+	t.Parallel()
 	cwd, err := os.Getwd()
 	if err != nil {
 		t.Fatal(err)
@@ -187,6 +209,7 @@ func TestRootlessAbsolutePathInsideCwdAllowed(t *testing.T) {
 }
 
 func TestRootlessRelativePathEscapesRejected(t *testing.T) {
+	t.Parallel()
 	msg := mcpToolError(t, "kern_compact_file", map[string]any{"path": "../../escaped.go"})
 	if !strings.Contains(msg, "escapes project root") {
 		t.Fatalf("expected path escape rejection, got %q", msg)
@@ -210,12 +233,23 @@ func TestGitBasedChurnAndRangeChanges(t *testing.T) {
 	run("add", ".")
 	run("commit", "-q", "-m", "init")
 
-	churn := mcpAssertOK(t, "kern_churn", map[string]any{"root": root})
+	// Both index-backed calls target the same committed root, so one shared
+	// server builds its index once instead of once per call.
+	resps := mcpBatch(t, []mcpCallSpec{
+		{"kern_churn", map[string]any{"root": root}},
+		{"kern_changes", map[string]any{"root": root, "range": "HEAD"}},
+	})
+	churn, isErr := toolResultText(t, resps[0])
+	if isErr {
+		t.Fatalf("kern_churn returned isError result: %s", churn)
+	}
 	if !strings.Contains(churn, "app.go") {
 		t.Fatalf("expected churn to mention app.go, got %q", churn)
 	}
 	// Working-tree changes against HEAD (clean tree here -> clean summary or 0).
-	_ = mcpAssertOK(t, "kern_changes", map[string]any{"root": root, "range": "HEAD"})
+	if text, isErr := toolResultText(t, resps[1]); isErr {
+		t.Fatalf("kern_changes returned isError result: %s", text)
+	}
 }
 
 func TestCommitmsgToolInRealRepo(t *testing.T) {
@@ -252,43 +286,76 @@ func TestCommitmsgToolInRealRepo(t *testing.T) {
 func TestToolDispatchCoverage(t *testing.T) {
 	root := mcpProject(t)
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
-	_ = mcpAssertOK(t, "kern_changes", map[string]any{"root": root, "file": "app.go"})
-	_ = mcpAssertOK(t, "kern_review", map[string]any{"root": root, "file": "app.go", "max": "500"})
-	_ = mcpAssertOK(t, "kern_test_gaps", map[string]any{"root": root})
-	_ = mcpAssertOK(t, "kern_arch", map[string]any{"root": root})
-	out := mcpAssertOK(t, "kern_dead", map[string]any{"root": root})
+	// All 18 sweeps target the same root and are read-only analysis calls, so
+	// they run through ONE server: the session's cached index is built once
+	// and reused, instead of one full index build per call (the dominant cost
+	// of a fresh-server-per-call sweep).
+	calls := []mcpCallSpec{
+		{"kern_changes", map[string]any{"root": root, "file": "app.go"}},
+		{"kern_review", map[string]any{"root": root, "file": "app.go", "max": "500"}},
+		{"kern_test_gaps", map[string]any{"root": root}},
+		{"kern_arch", map[string]any{"root": root}},
+		{"kern_dead", map[string]any{"root": root}},
+		{"kern_larges", map[string]any{"root": root, "min_lines": "1"}},
+		{"kern_hubs", map[string]any{"root": root}},
+		{"kern_near", map[string]any{"root": root, "symbol": "Greet", "depth": "2", "max": "50"}},
+		{"kern_graph", map[string]any{"root": root, "symbol": "Greet", "format": "one-line"}},
+		{"kern_context", map[string]any{"root": root, "symbol": "Greet", "lines": "5"}},
+		{"kern_why", map[string]any{"root": root, "symbol": "Greet"}},
+		{"kern_search", map[string]any{"root": root, "query": "greet"}},
+		{"kern_inherits", map[string]any{"root": root, "symbol": "Greet"}},
+		{"kern_entry_points", map[string]any{"root": root}},
+		{"kern_trace", map[string]any{"root": root, "trace": "panic in Greet\ncalled Greet\n", "limit": "10"}},
+		{"kern_lock_status", map[string]any{"root": root}},
+		{"kern_guard_check", map[string]any{"root": root, "file": "app.go"}},
+		{"kern_path", map[string]any{"root": root, "from": "main", "to": "Greet"}},
+	}
+	resps := mcpBatch(t, calls)
+	assertOK := func(i int) string {
+		t.Helper()
+		if e, ok := resps[i]["error"].(map[string]any); ok {
+			t.Fatalf("tool %s returned error: %+v", calls[i].name, e)
+		}
+		text, isErr := toolResultText(t, resps[i])
+		if isErr {
+			t.Fatalf("tool %s returned isError result: %s", calls[i].name, text)
+		}
+		return text
+	}
+	out := assertOK(4) // kern_dead
 	if !strings.Contains(out, "helper") {
 		t.Fatalf("expected dead code 'helper', got %q", out)
 	}
-	out = mcpAssertOK(t, "kern_larges", map[string]any{"root": root, "min_lines": "1"})
+	out = assertOK(5) // kern_larges
 	if !strings.Contains(out, "Greet") {
 		t.Fatalf("expected Greet among large decls, got %q", out)
 	}
-	out = mcpAssertOK(t, "kern_hubs", map[string]any{"root": root})
+	out = assertOK(6) // kern_hubs
 	if !strings.Contains(out, "Greet") {
 		t.Fatalf("expected Greet as hub, got %q", out)
 	}
-	_ = mcpAssertOK(t, "kern_near", map[string]any{"root": root, "symbol": "Greet", "depth": "2", "max": "50"})
-	_ = mcpAssertOK(t, "kern_walk", map[string]any{"root": root, "symbol": "Greet", "depth": "1"})
-	_ = mcpAssertOK(t, "kern_code_graph", map[string]any{"root": root, "symbol": "Greet"})
-	_ = mcpAssertOK(t, "kern_context", map[string]any{"root": root, "symbol": "Greet", "lines": "5"})
-	out = mcpAssertOK(t, "kern_why", map[string]any{"root": root, "symbol": "Greet"})
+	out = assertOK(10) // kern_why
 	if !strings.Contains(out, "Greet says hello") {
 		t.Fatalf("expected doc for Greet, got %q", out)
 	}
-	out = mcpAssertOK(t, "kern_search", map[string]any{"root": root, "query": "greet"})
+	out = assertOK(11) // kern_search
 	if !strings.Contains(strings.ToLower(out), "greet") {
 		t.Fatalf("expected search hit, got %q", out)
 	}
-	_ = mcpAssertOK(t, "kern_inherits", map[string]any{"root": root, "symbol": "Greet"})
-	out = mcpAssertOK(t, "kern_entry_points", map[string]any{"root": root})
+	out = assertOK(13) // kern_entry_points
 	if !strings.Contains(out, "no framework entry points") {
 		t.Fatalf("expected entry-point message, got %q", out)
 	}
-	_ = mcpAssertOK(t, "kern_trace", map[string]any{"root": root, "trace": "panic in Greet\ncalled Greet\n", "limit": "10"})
-	_ = mcpAssertOK(t, "kern_lock_status", map[string]any{"root": root})
-	_ = mcpAssertOK(t, "kern_guard_check", map[string]any{"root": root, "file": "app.go"})
-	_ = mcpAssertOK(t, "kern_path", map[string]any{"root": root, "from": "main", "to": "Greet"})
+	// Remaining calls only need to dispatch without error.
+	for i, c := range calls {
+		switch i {
+		case 4, 5, 6, 10, 11, 13:
+			continue // asserted above
+		default:
+			assertOK(i)
+		}
+		_ = c
+	}
 }
 
 // TestStringArgCoercionViaMCP pins the documented D6 coercion contract end to
@@ -298,6 +365,7 @@ func TestToolDispatchCoverage(t *testing.T) {
 // isError naming the argument, the tool and the expected type instead of a
 // silent "no symbols matched".
 func TestStringArgCoercionViaMCP(t *testing.T) {
+	t.Parallel()
 	root := mcpProject(t)
 
 	// query: 12345 (JSON number for a string-typed prop) → coerced to
@@ -368,6 +436,7 @@ type Item struct {
 }
 
 func TestTestGapsHonorsLimit(t *testing.T) {
+	t.Parallel()
 	root := mcpProject(t)
 	src := "package main\n\n// A is uncovered but called.\nfunc A() {}\nfunc B() { A() }\nfunc C() { A() }\nfunc D() { A() }\n\nfunc main() { B(); C(); D() }\n"
 	if err := os.WriteFile(filepath.Join(root, "hot.go"), []byte(src), 0o644); err != nil {
@@ -384,6 +453,7 @@ func TestTestGapsHonorsLimit(t *testing.T) {
 }
 
 func TestPromptGetViaMCP(t *testing.T) {
+	t.Parallel()
 	params := `{"name":"review_changes","arguments":{}}`
 	resp := serveOne(t, writeReq("prompts/get", 42, params))
 	res, ok := resp["result"].(map[string]any)
@@ -405,6 +475,7 @@ func TestKernStatsViaMCP(t *testing.T) {
 }
 
 func TestSecurityToolViaMCP(t *testing.T) {
+	t.Parallel()
 	root := mcpProject(t)
 	secret := "const apiKey = \"sk-abcdefghijklmnopqrstuvwxyz1234567890\"\n"
 	if err := os.WriteFile(filepath.Join(root, "creds.go"), []byte("package main\n\n"+secret), 0o644); err != nil {
@@ -434,6 +505,7 @@ func TestSecurityToolViaMCP(t *testing.T) {
 }
 
 func TestSafeDeleteToolViaMCP(t *testing.T) {
+	t.Parallel()
 	root := mcpProject(t)
 	// mcpProject defines helper (unused) and Greet (called by main).
 	safe := mcpAssertOK(t, "kern_safe_delete", map[string]any{"root": root, "symbol": "helper"})
@@ -452,10 +524,30 @@ func TestSafeDeleteToolViaMCP(t *testing.T) {
 }
 
 func TestMissingRequiredArgs(t *testing.T) {
-	mcpToolError(t, "kern_ast_search", nil)
-	mcpToolError(t, "kern_search", map[string]any{"root": "."})
-	mcpToolError(t, "kern_path", map[string]any{"root": "."})
-	mcpToolError(t, "kern_why", map[string]any{"root": "."})
+	t.Parallel()
+	// The three root-taking calls previously used root="." (the package dir),
+	// which forced a full index build of the real repo before the missing-arg
+	// error surfaced. A tiny seeded fixture exercises the identical error
+	// path — the assertions only check the isError result, never the root's
+	// contents — and one shared server builds its index once instead of once
+	// per call.
+	root := mcpProject(t)
+	resps := mcpBatch(t, []mcpCallSpec{
+		// kern_ast_search validates the required pattern arg; pointing root at
+		// the tiny fixture (as the other three calls do) keeps the same
+		// missing-arg error without building the package dir's index.
+		{"kern_ast_search", map[string]any{"root": root}},
+		{"kern_search", map[string]any{"root": root}},
+		{"kern_path", map[string]any{"root": root}},
+		{"kern_why", map[string]any{"root": root}},
+	})
+	for i, c := range []string{"kern_ast_search", "kern_search", "kern_path", "kern_why"} {
+		text, isErr := toolResultText(t, resps[i])
+		if !isErr {
+			t.Fatalf("expected isError for %s, got: %+v", c, resps[i])
+		}
+		_ = text
+	}
 }
 
 // TestOrchestrateViaMCP pins the kern_orchestrate surface: arg validation and
@@ -479,12 +571,16 @@ func TestOrchestrateViaMCP(t *testing.T) {
 	}
 }
 
+// TestKernMemoryActionRecallNoMatchHint pins the no-match hint on the
+// dedicated recall surface: the kern_memory action wrapper was folded into
+// kern_memory_add/kern_memory_list/kern_memory_recall (surface
+// consolidation T2a), so the hint must come from kern_memory_recall.
 func TestKernMemoryActionRecallNoMatchHint(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	root := mcpProject(t)
-	miss := mcpAssertOK(t, "kern_memory", map[string]any{"root": root, "action": "recall", "prompt": "xyzzy plugh unrelated"})
+	miss := mcpAssertOK(t, "kern_memory_recall", map[string]any{"root": root, "prompt": "xyzzy plugh unrelated"})
 	if !strings.HasPrefix(miss, "no matching lessons") {
-		t.Fatalf("expected no-match hint on kern_memory action=recall (previously returned an empty string), got %q", miss)
+		t.Fatalf("expected no-match hint on kern_memory_recall (previously returned an empty string), got %q", miss)
 	}
 }
 
@@ -534,6 +630,7 @@ func TestMemoryToolsViaMCP(t *testing.T) {
 }
 
 func TestToolsListMatchesDispatchCases(t *testing.T) {
+	t.Parallel()
 	seen := map[string]bool{}
 	for _, c := range runToolCases() {
 		seen[c] = true
@@ -545,22 +642,8 @@ func TestToolsListMatchesDispatchCases(t *testing.T) {
 	}
 }
 
-func TestToolsListContainsWalk(t *testing.T) {
-	// kern_walk is not in the default minimal surface; opt in to the full
-	// catalog so the wire response advertises it.
-	t.Setenv("KERN_MCP_FULL", "1")
-	resp := serveOne(t, writeReq("tools/list", 3, ``))
-	res := resp["result"].(map[string]any)
-	for _, item := range res["tools"].([]any) {
-		name := item.(map[string]any)["name"].(string)
-		if name == "kern_walk" {
-			return
-		}
-	}
-	t.Fatal("kern_walk missing from tools/list")
-}
-
 func TestProvenanceStampOnIndexTools(t *testing.T) {
+	t.Parallel()
 	root := mcpProject(t)
 	out := mcpAssertOK(t, "kern_search", map[string]any{"root": root, "query": "greet"})
 	if !strings.Contains(out, "[kern] index: ") {
@@ -573,6 +656,7 @@ func TestProvenanceStampOnIndexTools(t *testing.T) {
 }
 
 func TestNoProvenanceStampOnNonIndexTools(t *testing.T) {
+	t.Parallel()
 	root := mcpProject(t)
 	_ = mcpAssertOK(t, "kern_memory_add", map[string]any{"root": root, "lesson": "provenance probe"})
 	out := mcpAssertOK(t, "kern_memory_list", map[string]any{"root": root})
@@ -706,9 +790,24 @@ func TestGuardCheckPureRulesViaMCP(t *testing.T) {
 }
 
 func TestRenamePreviewAndApply(t *testing.T) {
+	t.Parallel()
 	root := mcpProject(t)
+	// One server for the whole sequence: preview + apply + the two error
+	// probes share the session's cached index (one build instead of four).
+	// The apply path invalidates the session, so the post-apply probes see a
+	// rebuilt index containing the renamed symbol — the same semantics as the
+	// previous fresh-server-per-call harness.
+	resps := mcpBatch(t, []mcpCallSpec{
+		{"kern_rename", map[string]any{"root": root, "symbol": "Greet", "new_name": "Hi"}},
+		{"kern_rename", map[string]any{"root": root, "symbol": "Greet", "new_name": "Hi", "apply": "true"}},
+		{"kern_rename", map[string]any{"root": root, "symbol": "Nope", "new_name": "X"}},
+		{"kern_rename", map[string]any{"root": root, "symbol": "Hi", "new_name": "for"}},
+	})
 	// Preview mode: reports the definition + the reference in main(), does not write.
-	out := mcpAssertOK(t, "kern_rename", map[string]any{"root": root, "symbol": "Greet", "new_name": "Hi"})
+	out, isErr := toolResultText(t, resps[0])
+	if isErr {
+		t.Fatalf("rename preview returned isError result: %s", out)
+	}
 	if !strings.Contains(out, "PREVIEW") || !strings.Contains(out, "Greet -> Hi") {
 		t.Fatalf("expected rename preview, got %q", out)
 	}
@@ -721,7 +820,10 @@ func TestRenamePreviewAndApply(t *testing.T) {
 	}
 
 	// Apply mode: commits and reports a backup path.
-	out = mcpAssertOK(t, "kern_rename", map[string]any{"root": root, "symbol": "Greet", "new_name": "Hi", "apply": "true"})
+	out, isErr = toolResultText(t, resps[1])
+	if isErr {
+		t.Fatalf("rename apply returned isError result: %s", out)
+	}
 	if !strings.Contains(out, "renamed Greet -> Hi") {
 		t.Fatalf("expected applied report, got %q", out)
 	}
@@ -737,17 +839,24 @@ func TestRenamePreviewAndApply(t *testing.T) {
 	}
 
 	// Missing symbol and invalid new name are errors, not silent no-ops.
-	err1 := mcpToolError(t, "kern_rename", map[string]any{"root": root, "symbol": "Nope", "new_name": "X"})
+	err1, isErr := toolResultText(t, resps[2])
+	if !isErr {
+		t.Fatalf("expected not-found error for missing symbol, got %q", err1)
+	}
 	if !strings.Contains(err1, "not found") {
 		t.Fatalf("expected not-found error, got %q", err1)
 	}
-	err2 := mcpToolError(t, "kern_rename", map[string]any{"root": root, "symbol": "Hi", "new_name": "for"})
+	err2, isErr := toolResultText(t, resps[3])
+	if !isErr {
+		t.Fatalf("expected identifier error, got %q", err2)
+	}
 	if !strings.Contains(err2, "not a valid Go identifier") {
 		t.Fatalf("expected identifier error, got %q", err2)
 	}
 }
 
 func TestRenameRefusesMethodAndNonGo(t *testing.T) {
+	t.Parallel()
 	root := mcpProject(t)
 	// v2: method-form names ("main.Greet" = receiver main, method Greet) are
 	// handled by the method path — with no receiver type "main" in the
@@ -816,6 +925,7 @@ func TestExecReturnsOnlyStdout(t *testing.T) {
 }
 
 func TestOutputSandboxUnit(t *testing.T) {
+	t.Parallel()
 	big := strings.Repeat("lorem ipsum dolor sit amet ", 2000)
 	// Under budget: untouched.
 	if got := sandboxOutput(big, 1<<20, "kern_project_map"); got != big {
@@ -866,6 +976,7 @@ func TestOutputBudgetResolution(t *testing.T) {
 }
 
 func TestAtoiArgReportsParseErrors(t *testing.T) {
+	t.Parallel()
 	// Empty input keeps the default.
 	if n, err := atoiArg("", 42); err != nil || n != 42 {
 		t.Fatalf("empty -> %d, %v; want 42, nil", n, err)
@@ -1061,4 +1172,19 @@ func containsTool(ts []Tool, name string) bool {
 		}
 	}
 	return false
+}
+
+// QA F6: a bare argument error from an index-backed tool must not drag
+// the index banner along — the stamp stays for success results and
+// governed denials only.
+func TestBareToolErrorCarriesNoIndexBanner(t *testing.T) {
+	t.Parallel()
+	root := mcpProject(t)
+	text := mcpToolError(t, "kern_search", map[string]any{"root": root})
+	if !strings.Contains(text, "query") {
+		t.Fatalf("expected the argument error, got %q", text)
+	}
+	if strings.Contains(text, "[kern] index:") {
+		t.Fatalf("argument error must not carry the index banner: %q", text)
+	}
 }

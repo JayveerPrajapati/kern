@@ -3,7 +3,9 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -13,11 +15,33 @@ import (
 	"time"
 
 	"github.com/JayveerPrajapati/kern/internal/enterprise"
+	"github.com/JayveerPrajapati/kern/internal/mcp"
 	"github.com/JayveerPrajapati/kern/internal/web"
 )
 
-// defaultServeAddr is the default listen address for the serve command.
-const defaultServeAddr = ":8090"
+// init wires the in-process MCP dispatch factory into every web.App the kern
+// binary builds (single-project `kern serve` and enterprise-mode projects
+// alike). internal/web cannot import internal/mcp itself — the mcp → org →
+// enterprise → web import cycle — so the /v1/tools/{name} passthrough route
+// receives its governed dispatch server (mcp.NewServerForRoot +
+// CallToolGoverned: KERN_TOOLS allowlist, root confinement, RBAC) from here,
+// the one package above the cycle. The factory is ROOT-AWARE: each App's
+// server is confined to THAT App's project root, so enterprise multi-project
+// mode never shares one cwd-rooted server across projects and a single
+// project's console cannot target another project's tree (finding 1). Each
+// App closes its server with the App. The stdio reader is never consumed
+// (Serve is never called — CallToolGoverned drives dispatch directly).
+func init() {
+	web.SetToolServerFactory(func(root string) web.ToolServer {
+		return mcp.NewServerForRoot(strings.NewReader(""), io.Discard, root)
+	})
+}
+
+// defaultServeAddr is the default listen address for the serve command. It
+// binds loopback only: the console serves state-mutating endpoints and LLM
+// work, so a bare ":port" (all interfaces) is refused without KERN_AUTH_TOKEN
+// (see runServe). Use --addr / KERN_ADDR to bind elsewhere WITH a token set.
+const defaultServeAddr = "127.0.0.1:8090"
 
 // serveProject is a single NAME=PATH project registration for enterprise mode.
 type serveProject struct {
@@ -38,17 +62,34 @@ mode is fail-closed: every request requires "Authorization: Bearer $KERN_AUTH_TO
 
 Flags:
   --root PATH          project root for single-project mode (default: .)
-  --addr ADDR          listen address (default :8090)
+  --addr ADDR          listen address (default 127.0.0.1:8090; non-loopback
+                       binds require KERN_AUTH_TOKEN)
   --enterprise         multi-project enterprise mode
   --project NAME=PATH  register a project (repeatable; --enterprise only).
                        With no --project flags, --root is registered as a single
                        project named after its base directory.
 
 Examples:
-  kern serve                                serve the current directory on :8090
+  kern serve                                serve the current directory on 127.0.0.1:8090
   kern serve --root ./api --addr :8080
   kern serve --enterprise --project api=./api --project web=./web
 `
+
+// isLoopbackAddr reports whether the listen address binds only the loopback
+// interface. A bare ":port" or an explicit non-loopback host binds all
+// interfaces and requires KERN_AUTH_TOKEN (P2-10). A parse failure is
+// treated as non-loopback (fail closed). Mirrors cmd/kern-server/main.go.
+func isLoopbackAddr(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return false
+	}
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
 
 // runServe starts the REST API and dashboard server.
 func runServe(rest []string) {
@@ -76,6 +117,14 @@ func runServe(rest []string) {
 	if addr == "" {
 		addr = defaultServeAddr
 	}
+	// P2-10 fail-closed bind guard (same posture as cmd/kern-server): the
+	// console serves state-mutating endpoints (/v1/memory, approvals, LLM
+	// work), so binding a non-loopback address without KERN_AUTH_TOKEN is an
+	// unauthenticated network surface — refuse to start. --addr / KERN_ADDR
+	// overrides still work for operators who DO set KERN_AUTH_TOKEN.
+	if !isLoopbackAddr(addr) && os.Getenv("KERN_AUTH_TOKEN") == "" {
+		fatal("serve: refusing to bind %s (non-loopback) without KERN_AUTH_TOKEN — unauthenticated RCE surface; set KERN_AUTH_TOKEN or bind 127.0.0.1", addr)
+	}
 	if mode == "enterprise" {
 		projects := 1
 		if len(f.projects) > 0 {
@@ -86,10 +135,7 @@ func runServe(rest []string) {
 		}
 		log.Printf("kern serve: enterprise mode on %s (%d project(s))", addr, projects)
 	} else {
-		root := f.root
-		if root == "" {
-			root = "."
-		}
+		root := projectRoot(f)
 		log.Printf("kern serve: single-project mode on %s (root: %s)", addr, root)
 	}
 	// Graceful shutdown: on SIGINT/SIGTERM drain in-flight requests for up to
@@ -128,12 +174,17 @@ func buildServeHandler(args []string) (http.Handler, string, error) {
 		fmt.Fprint(os.Stderr, serveUsage)
 		return nil, "", nil
 	}
-	root := f.root
-	if root == "" {
-		root = "."
-	}
+	root := projectRoot(f)
 	if f.enterprise {
-		srv := enterprise.New()
+		srv, err := enterprise.New()
+		if err != nil {
+			return nil, "", err
+		}
+		// Wire the ProjectApp constructor: internal/enterprise does not
+		// import internal/web (breaking the mcp → org → enterprise → web
+		// transitive closure), so the concrete web.New factory is injected
+		// here at the composition root.
+		srv.SetAppFactory(func(root string) (enterprise.ProjectApp, error) { return web.New(root) })
 		projects, err := resolveServeProjects(f.projects, root)
 		if err != nil {
 			return nil, "", err

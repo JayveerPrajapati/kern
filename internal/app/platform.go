@@ -26,18 +26,21 @@ import (
 	"regexp"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 
+	"github.com/JayveerPrajapati/kern/internal/budget"
+	"github.com/JayveerPrajapati/kern/internal/calibrate"
 	"github.com/JayveerPrajapati/kern/internal/context"
 	"github.com/JayveerPrajapati/kern/internal/domain"
 	"github.com/JayveerPrajapati/kern/internal/eventbus"
 	"github.com/JayveerPrajapati/kern/internal/governance"
 	"github.com/JayveerPrajapati/kern/internal/index"
 	"github.com/JayveerPrajapati/kern/internal/intel"
-	"github.com/JayveerPrajapati/kern/internal/intelligence"
 	"github.com/JayveerPrajapati/kern/internal/memory"
 	"github.com/JayveerPrajapati/kern/internal/runtime"
 	"github.com/JayveerPrajapati/kern/internal/storage"
+	tok "github.com/JayveerPrajapati/kern/internal/tokenize"
 	"github.com/JayveerPrajapati/kern/internal/twin"
 	"github.com/JayveerPrajapati/kern/internal/verification"
 	"github.com/JayveerPrajapati/kern/internal/whatif"
@@ -52,7 +55,7 @@ import (
 type Platform struct {
 	root  string
 	ix    *index.Index
-	graph *intelligence.Graph
+	graph *intel.Graph
 	mem   *memory.MemoryStore
 	fw    *governance.Firewall
 	ctx   *context.Engine
@@ -96,16 +99,16 @@ func New(root string) (*Platform, error) {
 // the hot-path constructor for long-lived servers that already indexed at
 // startup — it avoids the per-request re-index bottleneck.
 func NewWithIndex(root string, ix *index.Index) (*Platform, error) {
-	g := intelligence.FromIndex(ix)
+	g := intel.FromIndex(ix)
 	return NewWithGraph(root, ix, &g)
 }
 
 // NewWithGraph is the server constructor for callers that own their own graph
 // pointer (e.g. web.App, which swaps the graph value in place when the index
-// goes stale). The caller's *intelligence.Graph must outlive the Platform;
+// goes stale). The caller's *intel.Graph must outlive the Platform;
 // Platform stores the pointer (not a copy) so the context engine — which also
 // holds this pointer — sees any in-place swap the caller performs.
-func NewWithGraph(root string, ix *index.Index, g *intelligence.Graph) (*Platform, error) {
+func NewWithGraph(root string, ix *index.Index, g *intel.Graph) (*Platform, error) {
 	// The runtime source is loaded once and wired into BOTH the Digital Twin's
 	// runtime extractor (so the merged knowledge graph carries production
 	// runtime nodes) and the context engine (runtime evidence). Reusing one
@@ -216,7 +219,7 @@ func (p *Platform) Root() string { return p.root }
 func (p *Platform) Index() *index.Index { return p.ix }
 
 // Graph returns the shared twin-merged knowledge graph. Read-only after build.
-func (p *Platform) Graph() *intelligence.Graph { return p.graph }
+func (p *Platform) Graph() *intel.Graph { return p.graph }
 
 // Memory returns the shared engineering memory store.
 func (p *Platform) Memory() *memory.MemoryStore { return p.mem }
@@ -251,7 +254,7 @@ func (p *Platform) VerificationEngine() *verification.Engine { return p.ver }
 // If change contains whitespace, a symbol is extracted from the description
 // (via whatif.ExtractSymbolsIndex); otherwise it is treated as a bare symbol name.
 func (p *Platform) Analyze(change string) (domain.ContextPacket, string, error) {
-	sym, err := p.resolveSymbol(change)
+	sym, fuzzy, err := p.resolveSymbol(change)
 	if err != nil {
 		return domain.ContextPacket{}, "", err
 	}
@@ -274,7 +277,13 @@ func (p *Platform) Analyze(change string) (domain.ContextPacket, string, error) 
 		}
 		return domain.ContextPacket{}, "", fmt.Errorf("analyze: %w", err)
 	}
-	return pkt, context.RenderText(pkt), nil
+	text := context.RenderText(pkt)
+	if fuzzy && text != "" {
+		// The requested symbol was fuzzy-resolved to a different one: surface
+		// the mapping so the substitution is never silent.
+		text = fmt.Sprintf("resolved %q -> %s (fuzzy match)\n%s", change, sym, text)
+	}
+	return pkt, text, nil
 }
 
 // analyzeChangeResolvable analyzes a proposed change, trying the change text
@@ -325,17 +334,39 @@ func (p *Platform) Risk(change string) (domain.ContextPacket, string, error) {
 // If change contains whitespace, a symbol is extracted; otherwise it is used
 // as the bare target.
 func (p *Platform) WhatIf(kind whatif.ChangeKind, change, newTarget string) (whatif.Impact, string, error) {
-	target, err := p.resolveSymbol(change)
+	target, fuzzy, err := p.resolveSymbol(change)
 	if err != nil {
 		return whatif.Impact{}, "", err
 	}
 	imp := whatif.Simulate(p.graph, whatif.Change{Kind: kind, Target: target, NewTarget: newTarget})
+	// Entity overlay (Feature 3): surface the twin entity nodes implicated by
+	// the change's blast radius — the target plus every transitively affected
+	// symbol. Zero-cost when the twin graph carries no entities for them.
+	syms := make([]string, 0, len(imp.Affected)+1)
+	syms = append(syms, target)
+	syms = append(syms, imp.Affected...)
+	imp.Entities = attachWhatIfEntities(p.graph, syms)
 	// What-if output previously omitted the architecture, memory,
 	// and runtime evidence dimensions. Populate them from the platform's own
 	// deterministic sources so the impact is complete.
 	populateWhatIfEvidence(p, &imp, target)
 	imp.Evidence = intel.AnchorLine(p.ix, target)
-	return imp, renderWhatIfText(kind, change, target, imp), nil
+	text := renderWhatIfText(kind, change, target, imp)
+	if fuzzy && text != "" {
+		// The requested symbol was fuzzy-resolved to a different one: surface
+		// the mapping so the substitution is never silent.
+		text = fmt.Sprintf("resolved %q -> %s (fuzzy match)\n%s", change, target, text)
+	}
+	// Calibration (Feature Batch C): append the per-subsystem confidence line
+	// at the end of the rendered report (best-effort; omitted on any error).
+	// This is the shared render path for CLI kern what-if/simulate and MCP
+	// kern_what_if.
+	if f := p.graphNodeFile(target); f != "" {
+		if line := calibrate.ConfidenceLine(p.root, calibrate.SubsystemOf(f)); line != "" {
+			text = text + "\n" + line
+		}
+	}
+	return imp, text, nil
 }
 
 // populateWhatIfEvidence fills the Impact's architecture/historical/runtime
@@ -463,26 +494,27 @@ func (p *Platform) Verify(types []string) verification.VerificationResult {
 // it is used as-is. When multiple candidates are extracted, the first that
 // actually resolves in the index wins, so prose such as "what breaks if I
 // remove the translate function from cmaas_controller?" lands on `translate`,
-// not on the lead verb `breaks`.
-func (p *Platform) resolveSymbol(change string) (string, error) {
+// not on the lead verb `breaks`. The bool reports whether the returned symbol
+// came from fuzzy (ranked-search) resolution instead of an exact match or
+// extraction, so callers can surface a "resolved X -> Y (fuzzy match)" banner
+// instead of silently analyzing a different symbol.
+func (p *Platform) resolveSymbol(change string) (string, bool, error) {
 	if !strings.ContainsAny(change, " \t") {
 		if p.graph == nil || p.graph.Resolvable(change) {
-			return change, nil
+			return change, false, nil
 		}
-		// If single-token symbol not directly resolvable, find closest candidate via ranked search
+		// If single-token symbol not directly resolvable, find the closest
+		// candidate via ranked search. Only a match that covers EVERY query
+		// word counts: a partial segment hit (e.g. "NoSuchSymbolXYZ" sharing
+		// the words "no"/"symbol" with an unrelated symbol) must NOT silently
+		// substitute that symbol.
 		if p.ix != nil {
-			for _, h := range intel.RankedSearchScored(p.ix, change, 5) {
-				if h.Score >= 150 {
-					if p.graph.Resolvable(h.Symbol.FullName()) {
-						return h.Symbol.FullName(), nil
-					}
-					if p.graph.Resolvable(h.Symbol.Name) {
-						return h.Symbol.Name, nil
-					}
-				}
+			if cand, ok := intel.ResolveFuzzy(p.ix, change); ok && p.graph.Resolvable(cand) {
+				return cand, true, nil
 			}
 		}
-		return change, nil
+		return "", false, fmt.Errorf("no symbol named %q was found in this project's index (closest candidates: %s): kern what-if analyzes an existing symbol — pass its exact name, or a qualified 'pkg.Symbol'",
+			change, closestCandidates(p.ix, change))
 	}
 	cands := whatif.ExtractSymbolsIndex(change, p.ix)
 	// Prefer the first candidate that exists in the graph; keep extraction
@@ -490,32 +522,45 @@ func (p *Platform) resolveSymbol(change string) (string, error) {
 	if p.graph != nil {
 		for _, c := range cands {
 			if p.graph.Resolvable(c) {
-				return c, nil
+				return c, false, nil
 			}
 		}
-		// Try high-confidence ranked search match for approximate phrases
+		// Try high-confidence ranked search match for approximate phrases.
 		if p.ix != nil {
 			for _, h := range intel.RankedSearchScored(p.ix, change, 5) {
 				if h.Score >= 150 {
 					if p.graph.Resolvable(h.Symbol.FullName()) {
-						return h.Symbol.FullName(), nil
+						return h.Symbol.FullName(), true, nil
 					}
 					if p.graph.Resolvable(h.Symbol.Name) {
-						return h.Symbol.Name, nil
+						return h.Symbol.Name, true, nil
 					}
 				}
 			}
 		}
 		if len(cands) == 0 {
-			return "", fmt.Errorf("could not identify a symbol in the change description: pass a bare symbol name (e.g. 'GetMySQLDB') or include a qualified name (e.g. 'pkg.Symbol') in the description")
+			return "", false, fmt.Errorf("could not identify a symbol in the change description: pass a bare symbol name (e.g. 'GetMySQLDB') or include a qualified name (e.g. 'pkg.Symbol') in the description")
 		}
-		return "", fmt.Errorf("no symbol named %q was found in this project's index (closest candidates: %s): kern what-if analyzes an existing symbol — pass its exact name, or a qualified 'pkg.Symbol'",
+		return "", false, fmt.Errorf("no symbol named %q was found in this project's index (closest candidates: %s): kern what-if analyzes an existing symbol — pass its exact name, or a qualified 'pkg.Symbol'",
 			cands[0], strings.Join(cands, ", "))
 	}
 	if len(cands) == 0 {
-		return "", fmt.Errorf("could not identify a symbol in the change description: pass a bare symbol name (e.g. 'GetMySQLDB') or include a qualified name (e.g. 'pkg.Symbol') in the description")
+		return "", false, fmt.Errorf("could not identify a symbol in the change description: pass a bare symbol name (e.g. 'GetMySQLDB') or include a qualified name (e.g. 'pkg.Symbol') in the description")
 	}
-	return cands[0], nil
+	return cands[0], false, nil
+}
+
+// closestCandidates returns the top ranked-search symbol names near change,
+// for the "no symbol named ..." error message ("" when no index).
+func closestCandidates(ix *index.Index, change string) string {
+	if ix == nil {
+		return ""
+	}
+	var names []string
+	for _, h := range intel.RankedSearchScored(ix, change, 3) {
+		names = append(names, h.Symbol.Name)
+	}
+	return strings.Join(names, ", ")
 }
 
 // loadRuntimeSource returns the runtime source used for correlation/incident.
@@ -565,6 +610,14 @@ var planFileMention = regexp.MustCompile(`[\w./~-]+\.(go|py|ts|tsx|js|jsx|java|r
 // depends on them). Best-effort by design: an intent that resolves to no
 // symbol and a plan naming no existing file yields empty context, and the
 // coder runs ungrounded (intent + plan only) as before.
+//
+// The bundle is bounded structurally by codeContextMaxFiles /
+// codeContextMaxFileBytes / codeContextMaxImpactSyms (worst case ~24k
+// tokens). Setting KERN_CODE_CONTEXT_MAX_TOKENS > 0 additionally
+// budget.Fits the rendered bundle to that token count (measured with
+// tokenize.Count) before returning. The default — unset, empty, non-numeric,
+// negative, or 0 — preserves the previous behavior byte-for-byte: no token
+// fitting is applied.
 func (p *Platform) CodeContext(intent, plan string) (string, error) {
 	// 1. Candidate symbols mentioned in the intent or plan text.
 	var syms []string
@@ -596,7 +649,7 @@ func (p *Platform) CodeContext(intent, plan string) (string, error) {
 	}
 	var impact []string
 	for _, s := range syms {
-		id, err := p.resolveSymbol(s)
+		id, _, err := p.resolveSymbol(s)
 		if err != nil {
 			continue
 		}
@@ -639,7 +692,30 @@ func (p *Platform) CodeContext(intent, plan string) (string, error) {
 		}
 		fmt.Fprintf(&b, "<context-file path=%q>\n%s\n</context-file>\n\n", f, string(data))
 	}
-	return b.String(), nil
+	out := b.String()
+	// KERN_CODE_CONTEXT_MAX_TOKENS knob (Lever 5): when set > 0, fit the
+	// rendered bundle to the token budget before returning. 0 (the default)
+	// preserves the pre-knob behavior byte-for-byte.
+	if max := codeContextMaxTokens(); max > 0 && tok.Count(out) > max {
+		out = budget.Fit(out, max)
+	}
+	return out, nil
+}
+
+// codeContextMaxTokens returns the KERN_CODE_CONTEXT_MAX_TOKENS budget knob
+// for CodeContext. 0 — unset, empty, non-numeric, or negative — means
+// unchanged behavior: the grounding bundle is bounded only by the
+// file/bytes/impact-symbol caps above.
+func codeContextMaxTokens() int {
+	v := strings.TrimSpace(os.Getenv("KERN_CODE_CONTEXT_MAX_TOKENS"))
+	if v == "" {
+		return 0
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 0 {
+		return 0
+	}
+	return n
 }
 
 // graphNodeFile returns the defining file of the graph node for the given

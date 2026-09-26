@@ -6,11 +6,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/JayveerPrajapati/kern/internal/brief"
 	"github.com/JayveerPrajapati/kern/internal/commitmsg"
 	"github.com/JayveerPrajapati/kern/internal/fw"
 	"github.com/JayveerPrajapati/kern/internal/hook"
-	"github.com/JayveerPrajapati/kern/internal/hooks"
 	"github.com/JayveerPrajapati/kern/internal/index"
 	"github.com/JayveerPrajapati/kern/internal/intel"
 	"github.com/JayveerPrajapati/kern/internal/setup"
@@ -25,14 +23,8 @@ import (
 )
 
 func runSetup(rest []string) {
-	f, _, err := parseFlags(rest)
-	if err != nil {
-		fatalUsage("flags: %v", err)
-	}
-	root := f.root
-	if root == "" {
-		root = "."
-	}
+	f, _ := parseFlagsOrDie(rest)
+	root := projectRoot(f)
 	if f.check {
 		for _, s := range setup.Check(root) {
 			mark := "-"
@@ -58,11 +50,15 @@ func runSetup(rest []string) {
 	if f.detect && len(f.agents) == 0 {
 		detected = setup.DetectAgents(root)
 	}
+	if f.agentsMD != "" && f.agentsMD != "thin" && f.agentsMD != "full" {
+		fatalUsage("setup: --agents-md must be thin or full, got %q", f.agentsMD)
+	}
 	failed := 0
 	// The --global flag gates ALL user-global writes (home-scoped hooks,
 	// home/global MCP adapters, global git ignore): without it, Wire touches
 	// only project-scope files.
-	for _, s := range setup.Wire(root, agents, f.detect, f.global) {
+	opts := setup.WireOptions{AgentsMD: f.agentsMD}
+	for _, s := range setup.WireWith(root, agents, f.detect, f.global, opts) {
 		mark := "ok"
 		if s.Skipped {
 			mark = "--"
@@ -71,6 +67,22 @@ func runSetup(rest []string) {
 			failed++
 		}
 		fmt.Printf("[%s] %-32s %s\n", mark, s.Agent, s.Note)
+	}
+	if f.globalRules {
+		// --global-rules manages the kern agent-usage policy in each host's
+		// GLOBAL instructions slot (~/.claude/CLAUDE.md, ~/.codex/AGENTS.md,
+		// ~/.config/opencode/AGENTS.md): replace the marker-delimited block,
+		// preserve user content outside it, create missing files.
+		for _, s := range setup.WireGlobalRules() {
+			mark := "ok"
+			if s.Skipped {
+				mark = "--"
+			} else if !s.Installed {
+				mark = "!!"
+				failed++
+			}
+			fmt.Printf("[%s] %-32s %s\n", mark, s.Agent, s.Note)
+		}
 	}
 	if f.global {
 		// Global pre-wiring targets ALL agents (or the explicit --agents
@@ -193,50 +205,15 @@ func verifyMCP(root string) error {
 	return nil
 }
 
-func runBuddy(rest []string) {
-	f, args, err := parseFlags(rest)
-	if err != nil {
-		fatalUsage("flags: %v", err)
-	}
-	// A single positional argument is the project root; more than one is a
-	// usage error, and an unknown flag is rejected by parseFlags above
-	// (previously `kern buddy --nope` silently treated --nope as the root).
-	if len(args) > 1 {
-		fatalUsage("usage: kern buddy [root]")
-	}
-	root := f.root
-	if root == "" {
-		root = "."
-		if len(args) > 0 {
-			root = args[0]
-		}
-	}
-	if _, err := os.Stat(root); err != nil {
-		fatal("buddy: %v", err)
-	}
-	out, err := brief.Build(root)
-	if err != nil {
-		fatal("buddy: %v", err)
-	}
-	fmt.Println(out)
-
-}
-
 // runOnboard ensures a working directory is fully wired to kern: registers the
 // repo in the registry, builds/refreshes the index, writes AGENTS.md if
 // missing, and prints a status report. Mirrors the MCP tool kern_onboard.
-// Usage: kern onboard [--root DIR]
+// Usage: kern onboard [--root ROOT]
 func runOnboard(rest []string) {
-	f, args, err := parseFlags(rest)
-	if err != nil {
-		fatalUsage("flags: %v", err)
-	}
-	root := f.root
-	if root == "" {
-		root = "."
-		if len(args) > 0 && args[0] != "" {
-			root = args[0]
-		}
+	f, args := parseFlagsOrDie(rest)
+	root := projectRoot(f)
+	if f.root == "" && len(args) > 0 && args[0] != "" {
+		root = args[0]
 	}
 	abs, err := filepath.Abs(root)
 	if err != nil {
@@ -315,7 +292,7 @@ func runOnboard(rest []string) {
 		fmt.Printf("timing:     %s\n", timing)
 	}
 	fmt.Printf("AGENTS.md:  %s\n", wired)
-	fmt.Printf("next:       explore with kern_explore / kern_code_graph, or kern buddy for a session digest\n")
+	fmt.Printf("next:       explore with kern_explore / kern_graph, or kern buddy for a session digest\n")
 
 	// A4: onboard previously folded failures into the status strings above
 	// and still exited 0, so scripts and CI could not detect a failed
@@ -359,16 +336,10 @@ func runFw(rest []string) {
 		}
 		return
 	}
-	f, pos, err := parseFlags(rest)
-	if err != nil {
-		fatalUsage("flags: %v", err)
-	}
-	root := f.root
-	if root == "" {
-		root = "."
-		if len(pos) > 0 {
-			root = pos[0]
-		}
+	f, pos := parseFlagsOrDie(rest)
+	root := projectRoot(f)
+	if f.root == "" && len(pos) > 0 {
+		root = pos[0]
 	}
 	if f.root != "" {
 		// An explicit --root must name an existing directory; a bogus root
@@ -391,16 +362,10 @@ func runFw(rest []string) {
 // route targets) from the index. Mirrors the MCP tool kern_entry_points.
 // Usage: kern entry-points [root] [--limit N] [--pattern GLOB]
 func runEntryPoints(rest []string) {
-	f, args, err := parseFlags(rest)
-	if err != nil {
-		fatalUsage("flags: %v", err)
-	}
-	root := f.root
-	if root == "" {
-		root = "."
-		if len(args) > 0 && args[0] != "" {
-			root = args[0]
-		}
+	f, args := parseFlagsOrDie(rest)
+	root := projectRoot(f)
+	if f.root == "" && len(args) > 0 && args[0] != "" {
+		root = args[0]
 	}
 	limit := f.limit
 	if limit <= 0 {
@@ -497,10 +462,7 @@ func goNativeEntry(s index.Symbol, pkgOf map[string]string) (string, bool) {
 }
 
 func runHook(rest []string) {
-	f, args, err := parseFlags(rest)
-	if err != nil {
-		fatalUsage("flags: %v", err)
-	}
+	f, args := parseFlagsOrDie(rest)
 	sub := "store"
 	if len(args) > 0 {
 		sub = args[0]
@@ -517,18 +479,18 @@ func runHook(rest []string) {
 	}
 	switch sub {
 	case "install":
-		if err := hooks.Install("."); err != nil {
+		if err := hook.Install("."); err != nil {
 			fatal("hooks install: %v", err)
 		}
 		fmt.Println("post-commit hook installed (compresses each commit diff into project memory).")
 	case "diff":
-		out, err := hooks.Diff(from, to)
+		out, err := hook.Diff(from, to)
 		if err != nil {
 			fatal("hooks diff: %v", err)
 		}
 		fmt.Println(out)
 	case "store":
-		if err := hooks.Store(".", from, to); err != nil {
+		if err := hook.Store(".", from, to); err != nil {
 			fatal("hooks store: %v", err)
 		}
 		fmt.Println("diff stored in project memory.")
@@ -582,12 +544,24 @@ func runCommitmsg(rest []string) {
 	if err != nil {
 		fatalUsage("flags: %v", err)
 	}
-	root := f.root
-	if root == "" && len(args) > 0 {
+	root := projectRoot(f)
+	if f.root == "" && len(args) > 0 && args[0] != "" {
 		root = args[0]
 	}
-	if root == "" {
-		root = "."
+	// --changelog renders a subsystem-grouped release-notes draft from git
+	// history. It is mutually exclusive with the diff-message path: when both
+	// are given, the changelog wins (the message-path input — piped stdin,
+	// --staged, --range, --subject — is ignored, with a note).
+	if f.changelogSet {
+		if f.staged || f.range_ != "" || f.subject {
+			fmt.Fprintln(os.Stderr, "note: --changelog given; message-path input (piped stdin, --staged, --range, --subject) is ignored")
+		}
+		draft, cerr := commitmsg.Changelog(root, f.changelog)
+		if cerr != nil {
+			fatal("commitmsg: %v", cerr)
+		}
+		fmt.Print(draft) // the draft already ends with a newline
+		return
 	}
 	var out []byte
 	// Prefer piped stdin when available, so `git diff | kern commitmsg` works
@@ -613,7 +587,18 @@ func runCommitmsg(rest []string) {
 	if err != nil {
 		fatal("commitmsg: %v", err)
 	}
-	msg := commitmsg.Generate(string(out))
+	// F-CM1: with repo access, Enhance attributes added lines to their
+	// enclosing top-level declarations by line number — a body-deep edit
+	// names the function it modified instead of a word grabbed from the
+	// added lines. Files that cannot be read (deleted in this diff) fall
+	// back to the diff-only heuristics.
+	msg := commitmsg.Enhance(string(out), func(p string) (string, bool) {
+		b, rerr := os.ReadFile(filepath.Join(root, p))
+		if rerr != nil {
+			return "", false
+		}
+		return string(b), true
+	})
 	if f.subject {
 		fmt.Println(msg.Subject)
 	} else {
@@ -623,10 +608,7 @@ func runCommitmsg(rest []string) {
 }
 
 func runCommit(rest []string) {
-	f, _, err := parseFlags(rest)
-	if err != nil {
-		fatalUsage("flags: %v", err)
-	}
+	f, _ := parseFlagsOrDie(rest)
 	// A dry-run must never mutate the index, so --all may only stage when the
 	// commit is real. The preview still reflects --all by diffing tracked
 	// changes against HEAD and rendering untracked files as no-index diffs.

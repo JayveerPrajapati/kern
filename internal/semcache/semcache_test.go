@@ -1,12 +1,16 @@
 package semcache
 
 import (
+	"encoding/json"
 	"fmt"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/JayveerPrajapati/kern/internal/cache"
 )
 
 func TestSimilarity(t *testing.T) {
@@ -94,7 +98,7 @@ func TestIndexBoundedAndClearable(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	_ = Clear("")
 	for i := 0; i < MaxEntries+50; i++ {
-		_ = Store("bench", "input number "+string(rune('a'+i%26))+" with words "+string(rune('z'-i%26)), "p")
+		_ = Store("bench", fmt.Sprintf("input number %d with distinctive words %d", i, i), "p")
 	}
 	ents, err := Entries("bench")
 	if err != nil {
@@ -107,8 +111,12 @@ func TestIndexBoundedAndClearable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if stats["bench"] != len(ents) {
-		t.Fatalf("stats mismatch: %v vs %d", stats["bench"], len(ents))
+	if stats["bench"].Entries != len(ents) {
+		t.Fatalf("stats mismatch: %v vs %d", stats["bench"].Entries, len(ents))
+	}
+	// 250 stores into a 200-entry cap: exactly 50 evictions, all accounted.
+	if stats["bench"].Evictions != 50 {
+		t.Fatalf("expected 50 evictions, got %d", stats["bench"].Evictions)
 	}
 	if err := Clear("bench"); err != nil {
 		t.Fatal(err)
@@ -194,6 +202,95 @@ func TestLookupTTLEnv(t *testing.T) {
 	}
 }
 
+// TestStatsCounters: per-namespace hit/miss/savings accounting is reported by
+// Stats: a hit and a miss each count once, a hit records the stored payload
+// size as the savings estimate, and the entry count stays truthful.
+func TestStatsCounters(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	_ = Clear("")
+	ns := "counters"
+	_ = Store(ns, "the database connection failed during migration", "p")
+	var v string
+	if _, _, hit, _ := Lookup(ns, "the database connection failed during the migration run", &v, 0); !hit {
+		t.Fatal("expected a hit")
+	}
+	if _, _, hit, _ := Lookup(ns, "buy a ticket to the opera tonight", &v, 0); hit {
+		t.Fatal("expected a miss")
+	}
+	st, err := Stats()
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := st[ns]
+	if s.Hits != 1 || s.Misses != 1 {
+		t.Fatalf("counters wrong: hits=%d misses=%d", s.Hits, s.Misses)
+	}
+	if s.SavedBytes <= 0 {
+		t.Fatalf("expected saved bytes recorded on hit, got %d", s.SavedBytes)
+	}
+	if s.Entries != 1 {
+		t.Fatalf("expected 1 entry, got %d", s.Entries)
+	}
+}
+
+// TestLookupTouchRefreshesAt: a hit advances the matched entry's last-use At
+// (throttled by touchPersistInterval) and persists it, so LRU eviction and
+// idle-time TTL semantics survive restarts.
+func TestLookupTouchRefreshesAt(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	_ = Clear("")
+	ns := "touch"
+	_ = Store(ns, "the database connection failed during migration", "p")
+	// Backdate the entry past the touch threshold (but inside the TTL).
+	st := lockFor(ns)
+	st.mu.Lock()
+	es, _ := st.loadIndex(ns)
+	es[0].At = time.Now().Add(-2 * time.Hour)
+	st.es = es
+	st.mu.Unlock()
+	var v string
+	if _, _, hit, _ := Lookup(ns, "the database connection failed during the migration run", &v, 0); !hit {
+		t.Fatal("expected a hit")
+	}
+	st.mu.Lock()
+	es, _ = st.loadIndex(ns)
+	age := time.Since(es[0].At)
+	st.mu.Unlock()
+	if age > 90*time.Minute {
+		t.Fatalf("hit did not refresh At (age %v)", age)
+	}
+}
+
+// TestStatsAgeSweepReclaimsUntouchedNamespaces: Stats() sweeps every on-disk
+// namespace, so a stale entry in a namespace no lookup ever touches is
+// reclaimed instead of lingering forever.
+func TestStatsAgeSweepReclaimsUntouchedNamespaces(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	t.Setenv("KERN_SEMCACHE_TTL", "") // force the 168h default
+	_ = Clear("")
+	ns := "untouched"
+	_ = Store(ns, "the database connection failed during migration", "p")
+	// Backdate the entry past the TTL — but never Lookup this namespace.
+	st := lockFor(ns)
+	st.mu.Lock()
+	es, _ := st.loadIndex(ns)
+	es[0].At = time.Now().Add(-200 * time.Hour)
+	st.es = es
+	st.mu.Unlock()
+	stats, err := Stats()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats[ns].Entries != 0 {
+		t.Fatalf("age sweep should reclaim the stale entry, got %d", stats[ns].Entries)
+	}
+	// The stale payload file is reclaimed too.
+	payloadPath := cache.Path("data", "sem/"+ns+"/"+cache.Hash([]byte("the database connection failed during migration"))+".json")
+	if _, err := os.Stat(payloadPath); err == nil {
+		t.Fatalf("stale payload should be reclaimed by the sweep")
+	}
+}
+
 func TestLockForStripesPerNamespace(t *testing.T) {
 	a1, a2 := lockFor("striped-a"), lockFor("striped-a")
 	b := lockFor("striped-b")
@@ -203,6 +300,134 @@ func TestLockForStripesPerNamespace(t *testing.T) {
 	if a1 == b {
 		t.Fatal("different namespaces must not share a lock state")
 	}
+}
+
+// TestPersistedCountersCompoundAcrossRestarts: hit/miss counters are
+// persisted to disk (sem/<ns>-counters, deliberately without a .json
+// extension so the cache GC never evicts the accounting), so a fresh process
+// — simulated here by resetting the in-memory state — still sees the
+// accumulated numbers. This is what makes `kern cache` show a compounding
+// hit rate instead of always-zero per-process atomics.
+func TestPersistedCountersCompoundAcrossRestarts(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	_ = Clear("")
+	ns := "persisted"
+	_ = Store(ns, "the database connection failed during migration", "p")
+	var v string
+	if _, _, hit, _ := Lookup(ns, "the database connection failed during the migration run", &v, 0); !hit {
+		t.Fatal("expected a hit")
+	}
+	// The counters write is throttled to once per second; let the hit's
+	// write land before the miss so both increments reach the file.
+	time.Sleep(1100 * time.Millisecond)
+	if _, _, hit, _ := Lookup(ns, "buy a ticket to the opera tonight", &v, 0); hit {
+		t.Fatal("expected a miss")
+	}
+
+	// The counters file exists with both increments.
+	b, err := os.ReadFile(countersPath(ns))
+	if err != nil {
+		t.Fatalf("counters file missing: %v", err)
+	}
+	var c nsCounters
+	if err := json.Unmarshal(b, &c); err != nil {
+		t.Fatalf("counters file corrupt: %v", err)
+	}
+	if c.Hits != 1 || c.Misses != 1 {
+		t.Fatalf("persisted counters wrong: %+v", c)
+	}
+	// The counters file must not be a .json (the cache GC / kern cache walk
+	// would treat it as a cache entry).
+	if _, err := os.Stat(countersPath(ns) + ".json"); err == nil {
+		t.Fatal("counters file must not carry a .json extension")
+	}
+
+	// Simulate a fresh process: drop the in-memory index and counters.
+	st := lockFor(ns)
+	st.mu.Lock()
+	st.es = nil
+	st.pc = nil
+	st.mu.Unlock()
+
+	nss, err := Namespaces()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(nss) != 1 || nss[0].Namespace != ns {
+		t.Fatalf("Namespaces = %+v, want exactly the persisted namespace", nss)
+	}
+	if nss[0].Hits != 1 || nss[0].Misses != 1 {
+		t.Fatalf("restart view lost persisted counters: %+v", nss[0])
+	}
+	if nss[0].Entries != 1 || nss[0].Bytes <= 0 {
+		t.Fatalf("restart view lost index shape: %+v", nss[0])
+	}
+}
+
+// TestNamespacesEmptyWithoutSemDir: a cache with no semantic data yields an
+// empty report (no error) — the `kern cache` renderer prints the single
+// "no entries yet" line instead of a zero-table.
+func TestNamespacesEmptyWithoutSemDir(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	nss, err := Namespaces()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(nss) != 0 {
+		t.Fatalf("fresh cache must have no namespaces, got %+v", nss)
+	}
+}
+
+// TestClearResetsPersistedCounters: clearing a namespace wipes its counters
+// file (and in-memory counter state), so a cleared cache starts its
+// accounting fresh instead of compounding across clears.
+func TestClearResetsPersistedCounters(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	_ = Clear("")
+	ns := "clear-counters"
+	_ = Store(ns, "the database connection failed during migration", "p")
+	var v string
+	if _, _, hit, _ := Lookup(ns, "the database connection failed during the migration run", &v, 0); !hit {
+		t.Fatal("expected a hit")
+	}
+	if err := Clear(ns); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(countersPath(ns)); err == nil {
+		t.Fatal("counters file must be removed by Clear")
+	}
+	// The namespace is gone from the report entirely (no index file).
+	for _, s := range mustNamespaces(t) {
+		if s.Namespace == ns {
+			t.Fatalf("cleared namespace still reported: %+v", s)
+		}
+	}
+	// A new lookup starts the counters fresh (miss=1, hit=0) and the first
+	// write lands immediately (the throttle timestamp was reset by Clear).
+	if _, _, hit, _ := Lookup(ns, "buy a ticket to the opera tonight", &v, 0); hit {
+		t.Fatal("expected a miss on the cleared namespace")
+	}
+	b, err := os.ReadFile(countersPath(ns))
+	if err != nil {
+		t.Fatalf("counters file not recreated: %v", err)
+	}
+	var c nsCounters
+	if err := json.Unmarshal(b, &c); err != nil {
+		t.Fatalf("counters file corrupt: %v", err)
+	}
+	if c.Hits != 0 || c.Misses != 1 {
+		t.Fatalf("counters did not restart fresh: %+v", c)
+	}
+}
+
+// mustNamespaces is a test helper that fails the test on a Namespaces error.
+func mustNamespaces(t *testing.T) []NamespaceStat {
+	t.Helper()
+	nss, err := Namespaces()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return nss
 }
 
 // TestNamespacesDoNotSerialize proves the striped locks let one namespace's

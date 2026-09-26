@@ -125,6 +125,52 @@ func TestFileStoreGetNotFound(t *testing.T) {
 	}
 }
 
+// TestFileStoreDecisions covers the Decisions accessor the policy-signal
+// learner reads: it returns only decided (approved/rejected) approvals,
+// ordered deterministically by decision time then ID, and never pending ones.
+func TestFileStoreDecisions(t *testing.T) {
+	root := t.TempDir()
+	s := NewFileStore(root)
+
+	mustAdd := func(id string) {
+		t.Helper()
+		if err := s.AddPending(domain.Approval{ID: id, TaskID: "t", Status: "pending", RequestedAt: time.Now()}); err != nil {
+			t.Fatalf("AddPending %s: %v", id, err)
+		}
+	}
+	mustAdd("appr-pending")
+	mustAdd("appr-early")
+	mustAdd("appr-late")
+	mustAdd("appr-mid")
+	if _, err := s.Decide("appr-early", "human", true, ""); err != nil {
+		t.Fatalf("Decide appr-early: %v", err)
+	}
+	if _, err := s.Decide("appr-mid", "human", false, "no"); err != nil {
+		t.Fatalf("Decide appr-mid: %v", err)
+	}
+	if _, err := s.Decide("appr-late", "human", true, ""); err != nil {
+		t.Fatalf("Decide appr-late: %v", err)
+	}
+
+	got, err := s.Decisions()
+	if err != nil {
+		t.Fatalf("Decisions: %v", err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("Decisions = %d, want 3 (pending excluded)", len(got))
+	}
+	// Decision-time ascending; the ID fallback on equal timestamps yields the
+	// same expected order (early < late < mid lexically too).
+	if got[0].ID != "appr-early" || got[1].ID != "appr-mid" || got[2].ID != "appr-late" {
+		t.Errorf("Decisions order = %s,%s,%s, want early,mid,late", got[0].ID, got[1].ID, got[2].ID)
+	}
+	for _, a := range got {
+		if a.Status != "approved" && a.Status != "rejected" {
+			t.Errorf("Decisions returned %q status %q", a.ID, a.Status)
+		}
+	}
+}
+
 func TestFileStoreLoadMissingFile(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "does-not-exist")
 	s := NewFileStore(root)

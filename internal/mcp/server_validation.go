@@ -11,6 +11,8 @@ import (
 	"unicode/utf8"
 
 	"github.com/JayveerPrajapati/kern/internal/mcp/mcpargs"
+	"github.com/JayveerPrajapati/kern/internal/optimize"
+	"github.com/JayveerPrajapati/kern/internal/stats"
 	"github.com/JayveerPrajapati/kern/internal/tokenize"
 )
 
@@ -46,9 +48,21 @@ func (s *Server) toolCallResponse(id json.RawMessage, params json.RawMessage) an
 	var p struct {
 		Name      string         `json:"name"`
 		Arguments map[string]any `json:"arguments"`
+		Meta      struct {
+			ProgressToken json.RawMessage `json:"progressToken"`
+		} `json:"_meta"`
 	}
 	if err := json.Unmarshal(params, &p); err != nil {
 		return errorResponse(id, -32602, "invalid params")
+	}
+	// MCP spec: progress notifications are only emitted when the client
+	// supplied a progressToken in the request's _meta — never unsolicited.
+	// Stringify the token the same way ids are canonicalized (string kept
+	// verbatim, number to its canonical form); absent/null yields "", which
+	// suppresses progress entirely.
+	token := ""
+	if p.Meta.ProgressToken != nil && string(p.Meta.ProgressToken) != "null" {
+		token = idKey(p.Meta.ProgressToken)
 	}
 	key := idKey(id)
 	// Pre-tool-use hook: deny the call before any side effect runs. The hook
@@ -93,7 +107,7 @@ func (s *Server) toolCallResponse(id json.RawMessage, params json.RawMessage) an
 				fmt.Fprintf(os.Stderr, "kern-mcp: panic running %s: %v\n%s\n", p.Name, rec, debug.Stack())
 			}
 		}()
-		return s.runTool(ctx, key, p.Name, p.Arguments)
+		return s.runTool(ctx, key, token, p.Name, p.Arguments)
 	}()
 	// Cap every tool response at the output budget so a large result cannot
 	// flood the agent's context. Overridable per call with max_output=N.
@@ -113,6 +127,11 @@ func (s *Server) toolCallResponse(id json.RawMessage, params json.RawMessage) an
 	// index-identity-only raw provenance. The one-line summary appended to
 	// the content text is derived from the same structured field, so there
 	// is a single source of truth for index evidence.
+	// Track whether the handler explicitly attached provenance (a governed
+	// denial) versus the raw auto-fill below: errors only carry the index
+	// stamp when it is genuinely load-bearing. A bare argument error like
+	// "query is required" must not drag the index banner along (QA F6).
+	explicitProv := scope.prov != nil
 	if scope.prov == nil && scope.ix != nil {
 		scope.prov = s.rawProvenance(scope.ix, nil)
 	}
@@ -125,7 +144,7 @@ func (s *Server) toolCallResponse(id json.RawMessage, params json.RawMessage) an
 			// denial itself stays auditable (the handler's documented
 			// contract) instead of being replaced by the bare error text.
 			text = err.Error() + "\n" + text
-		case scope.prov != nil:
+		case explicitProv:
 			// Errors can carry provenance too: governed denials attach the
 			// auditable authorizing rule alongside the error text.
 			text = err.Error() + "\n" + s.provenanceSummary(scope.ix, scope.prov)
@@ -150,8 +169,68 @@ func (s *Server) toolCallResponse(id json.RawMessage, params json.RawMessage) an
 			}
 		}
 	}
+	// Per-tool token ledger: one entry per executed tool call (never for
+	// pre-tool denials — they return before this point). The same final
+	// response text the client sees is what gets counted, so the ledger
+	// answers "which tools return the most tokens to my context".
+	recordToolCall(p.Name, p.Arguments, out, s.clientNameFor())
 	attachTokenMetadata(result, p.Name, p.Arguments, out)
 	return map[string]any{"jsonrpc": "2.0", "id": id, "result": result}
+}
+
+// selfRecordingTools are the tools whose handlers already append a stats
+// entry with real before/after savings (the optimize family records through
+// optimize.record, which stamps the Tool on the entry). The dispatch path
+// skips them so the per-tool ledger never double-counts a single call; their
+// real savings reach the ledger through their own entries.
+var selfRecordingTools = map[string]bool{
+	"kern_optimize_prompt": true,
+	"kern_optimize_log":    true,
+	"kern_run_build":       true,
+}
+
+// clientNameFor returns the client identity captured at the initialize
+// handshake (clientInfo.name), "" when no client has initialized yet.
+// Mutex-guarded like the schemaVersion state it is stored alongside.
+func (s *Server) clientNameFor() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.clientName
+}
+
+// recordToolCall appends one per-tool stats entry for an executed MCP tool
+// call: the tool name, the session (when the caller passed one — the same
+// convention the optimize handlers use) and the returned payload token
+// estimate via the shared tokenizer. Tools that do not know their
+// before/after contribute AfterTokens only (Before=0, Saved=0 — honest, never
+// fabricated). Agent attribution: an explicit agent_id argument wins; else
+// the client identity captured at initialize (clientInfo.name); else the
+// neutral "mcp" bucket so `kern stats --by-agent` never reports
+// "(unattributed)" for tool calls. Recording must never fail a tool call, so
+// every error path is swallowed.
+func recordToolCall(tool string, args map[string]any, out string, clientName string) {
+	if selfRecordingTools[tool] {
+		return
+	}
+	if optimize.Recorder == nil {
+		if err := optimize.EnsureRecorder(); err != nil {
+			return
+		}
+	}
+	agent := mcpargs.ArgString(args, "agent_id")
+	if agent == "" {
+		agent = clientName
+	}
+	if agent == "" {
+		agent = "mcp"
+	}
+	_ = optimize.Recorder.Record(stats.Entry{
+		Session:     argString(args, "session"),
+		Operation:   stats.OpToolCall,
+		Tool:        tool,
+		Agent:       agent,
+		AfterTokens: tokenize.Count(out),
+	})
 }
 
 // defaultOutputBudget is the MCP output sandbox cap in bytes, used when the
@@ -210,8 +289,6 @@ func recoveryHint(tool string) string {
 	switch tool {
 	case "kern_project_map", "kern_compact_file":
 		return "Use kern_context or kern_compact_file for specific symbols instead."
-	case "kern_walk":
-		return "Use a shallower depth= or a different root symbol."
 	case "kern_near":
 		return "Lower max= or depth=."
 	case "kern_context":

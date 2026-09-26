@@ -14,6 +14,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/JayveerPrajapati/kern/internal/budget"
 	kernctx "github.com/JayveerPrajapati/kern/internal/context"
@@ -28,6 +29,7 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/profiles"
 	"github.com/JayveerPrajapati/kern/internal/project"
 	"github.com/JayveerPrajapati/kern/internal/retrieval"
+	"github.com/JayveerPrajapati/kern/internal/twin"
 )
 
 func AstSearch(ctx context.Context, ix *index.Index, args map[string]any) (string, error) {
@@ -45,7 +47,7 @@ func AstSearch(ctx context.Context, ix *index.Index, args map[string]any) (strin
 	}
 	matches := ix.Search(pattern, limit)
 	if len(matches) == 0 {
-		return "no symbols matched: " + pattern, nil
+		return "no symbols matched: " + pattern + staleNote(ix), nil
 	}
 	var b strings.Builder
 	for _, m := range matches {
@@ -125,15 +127,6 @@ func Why(ctx context.Context, ix *index.Index, args map[string]any) (string, err
 		info.InEdges = len(kept)
 	}
 	return intel.FormatWhy(info), nil
-
-}
-
-func CodeGraph(ctx context.Context, ix *index.Index, args map[string]any) (string, error) {
-	symbol := mcpargs.ArgString(args, "symbol")
-	if symbol == "" {
-		return "", fmt.Errorf("symbol is required")
-	}
-	return ix.Graph(symbol), nil
 
 }
 
@@ -388,6 +381,17 @@ func RepoSearch(ctx context.Context, root string, args map[string]any) (string, 
 		}
 		limit = n
 	}
+	// N2 follow-up (cross-repo): capture the primary root's staleness
+	// BEFORE the repo walk — the walk's LoadOrBuild fallback rebuilds stale
+	// per-repo indexes as a side effect, so a post-walk load would read the
+	// fresh rebuild and the note could never fire. Best-effort: an
+	// unloadable index yields no note (the verdict cannot be derived),
+	// never an error. Only the primary root is checked — sub-repo
+	// staleness is not covered by this note.
+	rootStale := ""
+	if ix, err := index.Load(root); err == nil {
+		rootStale = staleNote(ix)
+	}
 	var hits []intel.RepoHit
 	sem := mcpargs.ArgString(args, "semantic")
 	if sem == "true" || sem == "1" {
@@ -400,7 +404,7 @@ func RepoSearch(ctx context.Context, root string, args map[string]any) (string, 
 		hits = intel.SearchReposIn(root, query, limit)
 	}
 	if len(hits) == 0 {
-		return "no symbols matched across repos: " + query, nil
+		return "no symbols matched across repos: " + clipQuery(query) + rootStale, nil
 	}
 	return intel.FormatRepoHits(hits), nil
 
@@ -444,9 +448,9 @@ func FtsSearch(ctx context.Context, root string, args map[string]any) (string, e
 		}
 		limit = n
 	}
-	if _, err := index.LoadSQLite(root); err != nil {
-		return "", err
-	}
+	// No LoadSQLite precheck here: it loaded the ENTIRE index into memory
+	// purely as an existence check, and FTS5Search below re-opens the store
+	// and returns a clear error when it is missing.
 	matches, err := index.FTS5Search(root, query, limit)
 	if err != nil {
 		return "", err
@@ -499,6 +503,16 @@ func Cochange(ctx context.Context, args map[string]any) (string, error) {
 
 }
 
+// clipQuery truncates a search query for echo in output lines (QA F7:
+// a 5000-char query was echoed in full inside "no symbols matched").
+// 120 chars is enough to recognize any realistic query.
+func clipQuery(s string) string {
+	if len(s) <= 120 {
+		return s
+	}
+	return s[:117] + "..."
+}
+
 func Search(ctx context.Context, ix *index.Index, gvc mcpgov.GovContext, args map[string]any) (string, error) {
 	query := mcpargs.ArgString(args, "query")
 	if query == "" {
@@ -545,7 +559,7 @@ func Search(ctx context.Context, ix *index.Index, gvc mcpgov.GovContext, args ma
 		gvc.StampRaw(provenance.SymbolProvenances(ix, searchSymbolNames(matches)))
 	}
 	if len(matches) == 0 {
-		return "no symbols matched: " + query, nil
+		return "no symbols matched: " + clipQuery(query) + staleNote(ix), nil
 	}
 	var b strings.Builder
 	for _, m := range matches {
@@ -578,50 +592,15 @@ func Context(ctx context.Context, ix *index.Index, gvc mcpgov.GovContext, args m
 		}
 		lines = n
 	}
-	// Optional handle/level args (P2 tracker): a resolved retrieval handle
-	// renders its L2 neighborhood, and a disclosure level renders the
-	// L1/L2/L3 view of the symbol instead of the default context slice.
-	// Mutually exclusive; both default to the context slice.
-	handle := mcpargs.ArgString(args, "handle")
-	level := mcpargs.ArgString(args, "level")
-	if handle != "" && level != "" {
-		return "", fmt.Errorf("use only one of handle/level")
+	// The level/handle retrieval paths were removed (surface consolidation
+	// T2a): progressive-disclosure level views are served exclusively by
+	// kern_retrieve. Reject the args loudly instead of silently ignoring
+	// them or falling back to the default context slice.
+	if handle := mcpargs.ArgString(args, "handle"); handle != "" {
+		return "", fmt.Errorf("level views are served by kern_retrieve (use kern_retrieve with the handle %q)", handle)
 	}
-	if handle != "" {
-		// Mirror kern_resolve: exact registry resolve, then a prefix
-		// fallback so a handle copied verbatim from kern_retrieve output
-		// (which renders an 8-char prefix) resolves. Handles are
-		// staleness-checked by the registry at register time; an expired
-		// handle fails the resolve and must be re-retrieved.
-		h, ok := retrieval.DefaultRegistry.Resolve(handle)
-		if !ok {
-			for _, cand := range retrieval.DefaultRegistry.List() {
-				if strings.HasPrefix(cand.ID, handle) {
-					h = cand
-					ok = true
-					break
-				}
-			}
-		}
-		if !ok {
-			return "", fmt.Errorf("unknown handle %q (handles expire with the registry; re-run kern_retrieve)", handle)
-		}
-		res, err := retrieval.Retrieve(ix, retrieval.Options{Symbol: h.Name, Level: retrieval.L2})
-		if err != nil {
-			return "", err
-		}
-		return RenderRetrieval(ctx, ix, gvc, args, res)
-	}
-	if level != "" {
-		lvl, err := parseLevelArg(level)
-		if err != nil {
-			return "", err
-		}
-		res, err := retrieval.Retrieve(ix, retrieval.Options{Query: symbol, Symbol: symbol, Level: lvl})
-		if err != nil {
-			return "", err
-		}
-		return RenderRetrieval(ctx, ix, gvc, args, res)
+	if level := mcpargs.ArgString(args, "level"); level != "" {
+		return "", fmt.Errorf("level views are served by kern_retrieve (use kern_retrieve with the handle)")
 	}
 	gov, err := gvc.NewGov()
 	if err != nil {
@@ -744,6 +723,19 @@ func Graph(ctx context.Context, ix *index.Index, gvc mcpgov.GovContext, args map
 	if symbol == "" {
 		return "", fmt.Errorf("symbol is required")
 	}
+	// format=one-line serves the former kern_code_graph contract: the
+	// single-line call-graph neighbourhood (definition, callers, callees).
+	if mcpargs.ArgString(args, "format") == "one-line" {
+		out := ix.Graph(symbol)
+		if mcpargs.ArgBool(args, "entities") {
+			block, err := entityBlock(ix, args, symbol)
+			if err != nil {
+				return "", fmt.Errorf("unknown symbol: %s", symbol)
+			}
+			out += "\n" + block
+		}
+		return out, nil
+	}
 	// Absent max_tokens → adaptive default scaled to the symbol's
 	// adjacency degree (section-15-item-3); an explicit max_tokens
 	// (including "0" = no cap) wins untouched.
@@ -779,7 +771,36 @@ func Graph(ctx context.Context, ix *index.Index, gvc mcpgov.GovContext, args map
 	} else {
 		gvc.StampRaw(mcpgov.GraphSymbolsFromText(ix, out))
 	}
+	// entities=true appends the digital-twin entity block: the API
+	// endpoints, DB tables, topics, services, and deployments connected to
+	// the symbol via twin edges (same deterministic render as `kern graph
+	// --entities`). The CLI graph path and this leaf both operate on the
+	// code graph, so the twin extractors are merged in exactly the way
+	// platform.go wires them (twin.MergeIntoIndex).
+	if mcpargs.ArgBool(args, "entities") {
+		block, err := entityBlock(ix, args, symbol)
+		if err != nil {
+			return "", fmt.Errorf("unknown symbol: %s", symbol)
+		}
+		out += "\n" + block
+	}
 	return out + FreshnessFooter(args, ix), nil
+}
+
+// entityBlock renders the digital-twin entity block for a symbol over the
+// twin-merged knowledge graph. The symbol must resolve in the code graph; an
+// unresolvable symbol returns an error so the caller surfaces the standard
+// unknown-symbol contract.
+func entityBlock(ix *index.Index, args map[string]any, symbol string) (string, error) {
+	root := mcpargs.ArgString(args, "root")
+	if root == "" {
+		root = ix.Root
+	}
+	ents, err := twin.Entities(twin.MergeIntoIndex(ix, root), symbol)
+	if err != nil {
+		return "", err
+	}
+	return twin.RenderEntities(ents), nil
 }
 
 func Explore(ctx context.Context, ix *index.Index, gvc mcpgov.GovContext, args map[string]any) (string, error) {
@@ -803,19 +824,11 @@ func Explore(ctx context.Context, ix *index.Index, gvc mcpgov.GovContext, args m
 		}
 		maxNodes = n
 	}
-	// Optional level arg (P2 tracker): render the symbol through the
-	// retrieval levels (L1 names, L2 neighborhood, L3 source) instead of
-	// the explore report. Same semantics as kern_retrieve.
+	// The level retrieval path was removed (surface consolidation T2a):
+	// progressive-disclosure level views are served exclusively by
+	// kern_retrieve. Reject the arg loudly instead of silently falling back.
 	if level := mcpargs.ArgString(args, "level"); level != "" {
-		lvl, err := parseLevelArg(level)
-		if err != nil {
-			return "", err
-		}
-		res, err := retrieval.Retrieve(ix, retrieval.Options{Query: symbol, Symbol: symbol, Level: lvl})
-		if err != nil {
-			return "", err
-		}
-		return RenderRetrieval(ctx, ix, gvc, args, res)
+		return "", fmt.Errorf("level views are served by kern_retrieve (use kern_retrieve with the handle)")
 	}
 	maxTokens := 0
 	if v := mcpargs.ArgString(args, "max_tokens"); v != "" {
@@ -827,6 +840,15 @@ func Explore(ctx context.Context, ix *index.Index, gvc mcpgov.GovContext, args m
 	}
 	rep, err := intel.ExploreBudgeted(ix, symbol, depth, maxNodes, mcpargs.ArgString(args, "min_confidence"), maxTokens)
 	if err != nil {
+		// Total miss: surface the strongest ranked candidates as a "did you
+		// mean" hint (the CLI does the same) instead of a bare error, so the
+		// agent can recover from a typo or case variant. Only hits scoring
+		// >= 150 are suggested; weak matches are noise, not hints.
+		if sugg := exploreSuggestions(ix, symbol); sugg != "" {
+			// Preserve the error chain: the suggestion list is folded into the
+			// message while err stays wrapped via %w as the final verb.
+			return "", fmt.Errorf("did you mean one of: %s: %w", sugg, err)
+		}
 		return "", err
 	}
 	gov, err := gvc.NewGov()
@@ -891,10 +913,38 @@ func Explore(ctx context.Context, ix *index.Index, gvc mcpgov.GovContext, args m
 	return rendered + FreshnessFooter(args, ix), nil
 }
 
+// exploreSuggestions builds the "did you mean" hint for a failed
+// kern_explore lookup from the strongest ranked-search hits for the queried
+// symbol. Only hits scoring >= 150 are suggested (a weak match is noise, not
+// a hint) and names are deduped, mirroring the CLI's suggestion set.
+func exploreSuggestions(ix *index.Index, symbol string) string {
+	hits := intel.RankedSearchScored(ix, symbol, 5)
+	seen := map[string]bool{}
+	names := make([]string, 0, len(hits))
+	for _, h := range hits {
+		if h.Score < 150 {
+			continue
+		}
+		name := h.Symbol.Name
+		if name == "" || seen[name] {
+			continue
+		}
+		seen[name] = true
+		names = append(names, name)
+	}
+	return strings.Join(names, ", ")
+}
+
 func Probe(ctx context.Context, ix *index.Index, gvc mcpgov.GovContext, args map[string]any) (string, error) {
 	task := mcpargs.ArgString(args, "task")
 	if task == "" {
 		return "", fmt.Errorf("task is required")
+	}
+	// The level retrieval path was removed (surface consolidation T2a):
+	// progressive-disclosure level views are served exclusively by
+	// kern_retrieve. Reject the arg loudly instead of silently falling back.
+	if level := mcpargs.ArgString(args, "level"); level != "" {
+		return "", fmt.Errorf("level views are served by kern_retrieve (use kern_retrieve with the handle)")
 	}
 	maxTokens := 4000
 	if v := mcpargs.ArgString(args, "max_tokens"); v != "" {
@@ -927,27 +977,6 @@ func Probe(ctx context.Context, ix *index.Index, gvc mcpgov.GovContext, args map
 			a.Callees = keptCallees
 		}
 	}
-	// Optional level arg (P2 tracker): render the primary probed symbol
-	// through the retrieval levels (L1 names, L2 neighborhood, L3 source)
-	// instead of the probe report.
-	if level := mcpargs.ArgString(args, "level"); level != "" {
-		lvl, err := parseLevelArg(level)
-		if err != nil {
-			return "", err
-		}
-		if len(report.Anchors) == 0 {
-			return "", fmt.Errorf("no symbol resolved from task %q", task)
-		}
-		sym := report.Anchors[0].Resolved
-		if sym == "" {
-			sym = report.Anchors[0].Name
-		}
-		res, err := retrieval.Retrieve(ix, retrieval.Options{Query: sym, Symbol: sym, Level: lvl})
-		if err != nil {
-			return "", err
-		}
-		return RenderRetrieval(ctx, ix, gvc, args, res)
-	}
 	text := intel.RenderProbe(report)
 	if report.Truncated {
 		text = intel.FitProbe(text, maxTokens)
@@ -973,28 +1002,22 @@ func Communities(ctx context.Context, ix *index.Index, sess *project.Session, ar
 
 }
 
-// renderRetrieval renders a retrieval result through the same governance +
-// provenance pipeline as kern_retrieve/kern_resolve: authorize, filter L1
-// items by scope, stamp provenance, then render with the freshness footer.
-func RenderRetrieval(ctx context.Context, ix *index.Index, gvc mcpgov.GovContext, args map[string]any, res *retrieval.Result) (string, error) {
-	gov, err := gvc.NewGov()
-	if err != nil {
-		gvc.StampGov(gov, nil)
-		return "", err
+// staleNote appends an inline staleness warning to a no-match result when
+// the serving index is stale (N2): a bare "no symbols matched" reads as a
+// confident answer even though recent file changes may not be reflected in
+// the index. The verdict reuses index.FreshnessProof — the same source the
+// provenance footer renders — never a second computation. Returns "" for
+// fresh/unknown indexes so normal results keep their exact output. Callers
+// without an index (RepoSearch) have no verdict and get no note.
+func staleNote(ix *index.Index) string {
+	if ix == nil || ix.FreshnessProof(ix.Root).Verdict != index.FreshnessStale {
+		return ""
 	}
-	if gov != nil {
-		var kept []retrieval.L1Item
-		for _, it := range res.Items {
-			if gov.Allowed[it.Name] {
-				kept = append(kept, it)
-			}
-		}
-		res.Items = kept
-		gvc.StampGov(gov, provenance.SymbolProvenances(ix, RetrieveItemNames(res.Items)))
-	} else {
-		gvc.StampRaw(provenance.SymbolProvenances(ix, RetrieveItemNames(res.Items)))
+	age := time.Since(ix.UpdatedAt)
+	if age < 0 {
+		age = 0
 	}
-	return retrieval.Render(res) + FreshnessFooter(args, ix), nil
+	return fmt.Sprintf("\n[kern] note: index is STALE (built %s ago) — recent file changes may not be reflected; retry in a moment to pick up the rebuilt index (the rebuild is asynchronous).", age.Round(time.Second))
 }
 
 // freshnessFooter renders the opt-in content-addressed freshness proof footer.
@@ -1019,24 +1042,6 @@ func searchSymbolNames(matches []index.Symbol) []string {
 		names = append(names, m.FullName())
 	}
 	return names
-}
-
-// parseLevelArg maps the string form of a disclosure level ("l1"|"l2"|"l3",
-// case-insensitive) to the retrieval.Level constants. It serves the optional
-// level arg on kern_context/kern_explore/kern_probe; the retrieval tools use
-// parseRetrieveLevel (same semantics, different error wording kept for their
-// existing contract).
-func parseLevelArg(v string) (retrieval.Level, error) {
-	switch strings.ToLower(strings.TrimSpace(v)) {
-	case "l1":
-		return retrieval.L1, nil
-	case "l2":
-		return retrieval.L2, nil
-	case "l3":
-		return retrieval.L3, nil
-	default:
-		return 0, fmt.Errorf("unknown level %q (valid: l1, l2, l3)", v)
-	}
 }
 
 // RetrieveItemNames returns the non-empty item names of an L1 result.

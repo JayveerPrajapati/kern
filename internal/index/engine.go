@@ -104,6 +104,10 @@ type Index struct {
 	// symbolIdx is the precomputed name -> symbols lookup for symbolsFor;
 	// nil means symbolsFor falls back to the linear scan.
 	symbolIdx map[string][]Symbol
+	// kindIdx is the precomputed kind -> symbols lookup for kind-filtered
+	// Search queries ("func foo", "type Bar", "entry */admin*"); nil means
+	// Search falls back to the linear scan over all symbols.
+	kindIdx map[string][]Symbol
 }
 
 // New returns an empty index rooted at root.
@@ -190,6 +194,21 @@ func StorePath(root string) string {
 // silently clobber a newer index.json written by a current binary — the
 // indexVersion guard only runs at load time, not at save time.
 func (ix *Index) Save() error {
+	// SQLite-primary (default build): the concurrent WAL store is the
+	// canonical write path for the persisted index, so a build/update writes
+	// ONE format instead of three (JSON + gob snapshot + SQLite). The JSON
+	// cache and its gob snapshot below are written only when SQLite is
+	// compiled out (-tags nosqlite) or the SQLite write fails — the
+	// persistence contract degrades to the legacy formats instead of
+	// disappearing. JSON remains the read-migration path for caches written
+	// by older kern (Load falls back to it).
+	if SQLiteEnabled() {
+		if serr := SaveSQLite(ix.Root, ix); serr == nil {
+			return nil
+		} else {
+			log.Printf("kern index: sqlite persist failed for %s, falling back to the JSON cache: %v", ix.Root, serr)
+		}
+	}
 	data, err := json.Marshal(ix)
 	if err != nil {
 		return err
@@ -331,17 +350,35 @@ func Load(root string) (*Index, error) {
 	p := StorePath(abs)
 	// Fast path (Rec P0-3): a fresh binary snapshot decodes ~5-10x faster
 	// than the JSON document; JSON stays canonical and any miss/staleness
-	// falls through to the existing path below.
-	if ix, ok := loadBinSnapshot(p); ok {
-		if ix.Version != indexVersion {
-			metrics.Default().RecordCacheMiss()
-			return nil, fmt.Errorf("index version %d (want %d): rebuild required", ix.Version, indexVersion)
+	// falls through to the existing path below. The snapshot is trusted only
+	// while the JSON it mirrors is not out-dated by a newer SQLite store:
+	// since Save became SQLite-primary, index.json is no longer rewritten, so
+	// a legacy snapshot would otherwise keep matching its frozen index.json
+	// stat and serve stale content forever.
+	if !sqliteStoreNewerThanJSON(p) {
+		if ix, ok := loadBinSnapshot(p); ok {
+			if ix.Version != indexVersion {
+				metrics.Default().RecordCacheMiss()
+				return nil, fmt.Errorf("index version %d (want %d): rebuild required", ix.Version, indexVersion)
+			}
+			ix.initMaps()
+			ix.reindexByFile()
+			ix.buildSymbolIndex()
+			metrics.Default().RecordCacheHit()
+			return ix, nil
 		}
-		ix.initMaps()
-		ix.reindexByFile()
-		ix.buildSymbolIndex()
-		metrics.Default().RecordCacheHit()
-		return ix, nil
+	}
+	// SQLite-primary store (default build): read it when present. Load errors
+	// are tolerated (mirroring project.Session's load chain) — a corrupt or
+	// version-mismatched store falls through to the JSON migration path, and
+	// OpenSQLite self-heals a corrupt file by quarantining it.
+	if SQLiteEnabled() {
+		if _, serr := os.Stat(SQLitePath(abs)); serr == nil {
+			if ix, lerr := LoadSQLite(abs); lerr == nil && ix != nil {
+				metrics.Default().RecordCacheHit()
+				return ix, nil
+			}
+		}
 	}
 	data, err := os.ReadFile(p)
 	if err != nil {
@@ -362,6 +399,29 @@ func Load(root string) (*Index, error) {
 	ix.buildSymbolIndex()
 	metrics.Default().RecordCacheHit()
 	return ix, nil
+}
+
+// sqliteStoreNewerThanJSON reports whether the SQLite store was written after
+// the JSON cache at jsonPath. It guards the gob-snapshot fast path in Load:
+// the snapshot's freshness proof compares against index.json's stat, and once
+// Save is SQLite-primary (default build) index.json is no longer rewritten, so
+// a legacy snapshot would otherwise keep matching its frozen stat and serve
+// stale content forever. When SQLite is compiled out, or either file is
+// missing, it reports false and the snapshot path is left to its own
+// (JSON-stat) freshness check.
+func sqliteStoreNewerThanJSON(jsonPath string) bool {
+	if !SQLiteEnabled() {
+		return false
+	}
+	jj, err := os.Stat(jsonPath)
+	if err != nil {
+		return false // no JSON → nothing for a snapshot to mirror
+	}
+	sj, err := os.Stat(filepath.Join(filepath.Dir(jsonPath), "index.sqlite"))
+	if err != nil {
+		return false // no SQLite store → legacy JSON/snapshot path stands
+	}
+	return sj.ModTime().After(jj.ModTime())
 }
 
 // Stale reports whether a source file was added, removed, or edited since the
@@ -455,6 +515,39 @@ func (ix *Index) reindexByFile() {
 	ix.SymbolsByFile = map[string][]Symbol{}
 	for _, s := range ix.Symbols {
 		ix.SymbolsByFile[s.File] = append(ix.SymbolsByFile[s.File], s)
+	}
+	// The kind buckets must be built from the FINAL symbol table: the
+	// build/update sequences call this after resolveEntries (which flips
+	// Entry on func/method symbols), and the load paths call it on persisted
+	// symbols whose Entry flags are already baked in.
+	ix.buildKindIndex()
+}
+
+// buildKindIndex precomputes the kind -> symbols buckets that let
+// kind-filtered Search queries iterate only matching-kind symbols instead of
+// scanning every one. Bucket membership mirrors symbolMatches exactly, in
+// Symbols order:
+//   - every non-empty Kind gets an exact bucket ("func", "method", ...),
+//     except "entry" (a flag, not a Kind) and the searchTypeKinds members,
+//     which land in the "type" super-category bucket instead;
+//   - every symbol with Entry set lands in the "entry" bucket;
+//   - "type" holds every symbol whose Kind is in searchTypeKinds.
+//
+// Search re-applies symbolMatches on top of the bucket, so a bucket is only
+// ever a candidate superset — results and limit behavior are identical to
+// the pre-index linear scan.
+func (ix *Index) buildKindIndex() {
+	ix.kindIdx = make(map[string][]Symbol)
+	for _, s := range ix.Symbols {
+		if s.Kind != "" && s.Kind != "entry" && !searchTypeKinds[s.Kind] {
+			ix.kindIdx[s.Kind] = append(ix.kindIdx[s.Kind], s)
+		}
+		if searchTypeKinds[s.Kind] {
+			ix.kindIdx["type"] = append(ix.kindIdx["type"], s)
+		}
+		if s.Entry {
+			ix.kindIdx["entry"] = append(ix.kindIdx["entry"], s)
+		}
 	}
 }
 
@@ -1480,11 +1573,29 @@ func (ix *Index) ResolveName(name string) (Symbol, bool) {
 
 // Search matches symbols by pattern. Patterns support "*" wildcards and the
 // prefixes "func ", "type ", "struct ", "method ", "const ", "var ", "call ".
+// Kind-prefixed queries iterate the precomputed kind bucket (when the index
+// has one) instead of every symbol; plain queries keep the full scan.
 func (ix *Index) Search(pattern string, limit int) []Symbol {
 	if limit <= 0 {
 		limit = 50
 	}
 	re, kind := symbolRegex(pattern)
+	if kind != "" {
+		// Buckets preserve Symbols order and Search re-applies symbolMatches,
+		// so results (and the limit cut) are identical to the linear scan.
+		if syms, ok := ix.kindSymbols(kind); ok {
+			var out []Symbol
+			for _, s := range syms {
+				if symbolMatches(s, kind, re) {
+					out = append(out, s)
+					if len(out) >= limit {
+						break
+					}
+				}
+			}
+			return out
+		}
+	}
 	var out []Symbol
 	for _, s := range ix.Symbols {
 		if symbolMatches(s, kind, re) {
@@ -1495,6 +1606,55 @@ func (ix *Index) Search(pattern string, limit int) []Symbol {
 		}
 	}
 	return out
+}
+
+// kindSymbols returns the precomputed symbol bucket for a search kind
+// ("func", "method", "type", "entry", ...). ok is false when the index has
+// no kind index (hand-built Index structs that never ran reindexByFile), and
+// Search falls back to the linear scan — the pre-index behavior.
+func (ix *Index) kindSymbols(kind string) ([]Symbol, bool) {
+	if ix.kindIdx == nil {
+		return nil, false
+	}
+	syms, ok := ix.kindIdx[kind]
+	return syms, ok
+}
+
+// symbolRegexCacheSize bounds the number of compiled search regexes kept in
+// memory. Search compiles one regex per query and the compile is pure
+// overhead relative to the scan; without a cache, repeated patterns (the
+// common case in agent loops) pay it every time.
+const symbolRegexCacheSize = 128
+
+var (
+	symbolRegexCacheMu sync.Mutex
+	// symbolRegexCache maps a stripped search pattern to its compiled regex.
+	// Compiled regexes are immutable and safe for concurrent use, so one
+	// cached entry may be shared across concurrent Search calls.
+	symbolRegexCache = make(map[string]*regexp.Regexp)
+	// symbolRegexOrder tracks insertion order for FIFO eviction.
+	symbolRegexOrder []string
+)
+
+// cachedSymbolRegex returns the compiled regex for a stripped search pattern,
+// compiling and caching it on first use. Eviction is FIFO once the cache
+// reaches symbolRegexCacheSize entries; evicting a regex never changes
+// behavior — the same pattern is simply recompiled on its next use.
+func cachedSymbolRegex(p string) *regexp.Regexp {
+	symbolRegexCacheMu.Lock()
+	defer symbolRegexCacheMu.Unlock()
+	if re, ok := symbolRegexCache[p]; ok {
+		return re
+	}
+	expr := "^" + strings.ReplaceAll(regexp.QuoteMeta(p), `\*`, `.*`) + "$"
+	re := regexp.MustCompile(expr)
+	if len(symbolRegexCache) >= symbolRegexCacheSize {
+		delete(symbolRegexCache, symbolRegexOrder[0])
+		symbolRegexOrder = symbolRegexOrder[1:]
+	}
+	symbolRegexCache[p] = re
+	symbolRegexOrder = append(symbolRegexOrder, p)
+	return re
 }
 
 func symbolRegex(pattern string) (*regexp.Regexp, string) {
@@ -1509,8 +1669,9 @@ func symbolRegex(pattern string) (*regexp.Regexp, string) {
 			p = p[i+1:]
 		}
 	}
-	expr := "^" + strings.ReplaceAll(regexp.QuoteMeta(p), `\*`, `.*`) + "$"
-	return regexp.MustCompile(expr), kind
+	// The cache is keyed on the stripped pattern, so "func foo" and
+	// "method foo" share one compiled regex; only the kind differs.
+	return cachedSymbolRegex(p), kind
 }
 
 func symbolMatches(s Symbol, kind string, re *regexp.Regexp) bool {

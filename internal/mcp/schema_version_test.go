@@ -10,6 +10,7 @@ import (
 // the registration table directly, mirroring the RiskLevel invariant
 // (P0-004): a new tool added without a schema version fails here.
 func TestAllToolsHaveValidSchemaVersion(t *testing.T) {
+	t.Parallel()
 	if len(tools) == 0 {
 		t.Fatal("no tools registered")
 	}
@@ -30,6 +31,7 @@ func TestAllToolsHaveValidSchemaVersion(t *testing.T) {
 // TestValidSchemaVersion covers the format validator: exactly three numeric
 // components (major.minor.patch).
 func TestValidSchemaVersion(t *testing.T) {
+	t.Parallel()
 	valid := []string{"1.0.0", "0.1.0", "2.3.4", "10.20.30", "0.0.1"}
 	for _, v := range valid {
 		if !validSchemaVersion(v) {
@@ -51,6 +53,7 @@ func TestValidSchemaVersion(t *testing.T) {
 // request is honored verbatim; an empty or unsupported request falls back to
 // the current catalog version.
 func TestNegotiateSchemaVersion(t *testing.T) {
+	t.Parallel()
 	if got := negotiateSchemaVersion(""); got != SchemaVersionCurrent {
 		t.Errorf("negotiateSchemaVersion(\"\") = %q, want current %q", got, SchemaVersionCurrent)
 	}
@@ -71,6 +74,7 @@ func TestNegotiateSchemaVersion(t *testing.T) {
 // catalog version for an unsupported one. The negotiated value is then
 // surfaced by tools/list.
 func TestInitializeAdvertisesAndNegotiatesSchemaVersion(t *testing.T) {
+	t.Parallel()
 	t.Run("supported_request_is_echoed", func(t *testing.T) {
 		req := writeReq("initialize", 1, `{"protocolVersion":"2025-06-18","schemaVersion":"`+SchemaVersionV1+`"}`)
 		resps := serveMany(t, req, writeReq("tools/list", 2, ""))
@@ -129,6 +133,7 @@ func TestInitializeAdvertisesAndNegotiatesSchemaVersion(t *testing.T) {
 // carries a schemaVersion field so clients can inspect contracts without an
 // initialize round-trip (P2-003).
 func TestToolsListAdvertisesPerToolSchemaVersion(t *testing.T) {
+	t.Parallel()
 	resps := serveMany(t, writeReq("tools/list", 1, ""))
 	if len(resps) != 1 {
 		t.Fatalf("expected 1 response, got %d", len(resps))

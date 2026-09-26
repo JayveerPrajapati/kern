@@ -12,6 +12,7 @@ import (
 // TestBlueprintFirewallToolsRegistered verifies the four blueprint change-
 // firewall tools are callable through the kern server (merged catalog).
 func TestBlueprintFirewallToolsRegistered(t *testing.T) {
+	t.Parallel()
 	if _, err := exec.LookPath("kern"); err != nil {
 		t.Skip("kern binary not available (set PATH)")
 	}

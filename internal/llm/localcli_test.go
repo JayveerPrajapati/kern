@@ -218,9 +218,25 @@ func TestLocalCliProviderTimeoutKillsProcessGroup(t *testing.T) {
 	// The stub's `/bin/sleep 30` runs as a CHILD of the stub shell — i.e. a
 	// grandchild of Generate's process. Killing only the direct child would
 	// orphan it (reparented to PID 1); the fix kills the whole process
-	// group, so no NEW sleep-30 process may survive.
-	time.Sleep(200 * time.Millisecond) // let SIGKILL delivery + reaping settle
-	after := pgrepExact(t, "/bin/sleep 30")
+	// group, so no NEW sleep-30 process may survive. SIGKILL delivery and
+	// reaping are asynchronous, so poll until no new process remains — a
+	// fixed sleep flakes under load when reaping lags.
+	deadline := time.Now().Add(time.Second)
+	var after map[string]bool
+	for {
+		after = pgrepExact(t, "/bin/sleep 30")
+		clean := true
+		for pid := range after {
+			if !before[pid] {
+				clean = false
+				break
+			}
+		}
+		if clean || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
 	for pid := range after {
 		if !before[pid] {
 			t.Errorf("orphaned grandchild `/bin/sleep 30` (pid %s) survived the timeout kill", pid)

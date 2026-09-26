@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/JayveerPrajapati/kern/internal/semcache"
 	"github.com/JayveerPrajapati/kern/internal/stats"
 )
 
@@ -87,6 +88,110 @@ func TestPromptSemanticCacheHit(t *testing.T) {
 	}
 	if third.FromCache {
 		t.Fatalf("disjoint prompt should miss, got FromCache=%v", third.FromCache)
+	}
+}
+
+// TestPromptLLMSemanticCacheModelScoped: an LLM-path result is stored under
+// the model-scoped namespace prompt.llm.<model> (never the plain "prompt"
+// namespace), and a near-duplicate query with the same model hits it. The
+// LLM provider is unreachable, so the run exercises the llmSkipped fallback:
+// the result is still deterministic and still cached.
+func TestPromptLLMSemanticCacheModelScoped(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	_ = semcache.Clear("") // reset in-memory namespaces left by earlier tests
+	t.Setenv("KERN_LLM_PROVIDER", "ollama")
+	t.Setenv("OLLAMA_HOST", "http://127.0.0.1:1") // unreachable: LLM path fails gracefully
+	first, err := Prompt("how do I compress a very large server log file", "", Options{Cache: true, LLM: "llama3.2"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.FromCache {
+		t.Fatal("first call must not be served from cache")
+	}
+	// The entry lives in the model-scoped namespace, not the plain one.
+	if n, _ := semcache.Entries("prompt.llm.llama3.2"); len(n) != 1 {
+		t.Fatalf("expected 1 entry under prompt.llm.llama3.2, got %d", len(n))
+	}
+	if n, _ := semcache.Entries("prompt"); len(n) != 0 {
+		t.Fatalf("LLM result leaked into the plain prompt namespace: %d entries", len(n))
+	}
+	// Near-duplicate with the same model: fuzzy hit at the 0.8 threshold.
+	second, err := Prompt("how do I compress a very large server log", "", Options{Cache: true, LLM: "llama3.2"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !second.FromCache || !second.SemanticHit {
+		t.Fatalf("expected model-scoped semantic hit, got FromCache=%v SemanticHit=%v", second.FromCache, second.SemanticHit)
+	}
+	if second.Output != first.Output {
+		t.Fatalf("semantic hit must reuse the stored output, got %q != %q", second.Output, first.Output)
+	}
+}
+
+// TestPromptSemanticCacheCrossModelIsolation: entries under prompt.llm.<mA>
+// never serve a lookup for prompt.llm.<mB> (each model gets its own
+// namespace), and LLM entries never leak into the plain "prompt" namespace.
+func TestPromptSemanticCacheCrossModelIsolation(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	_ = semcache.Clear("") // reset in-memory namespaces left by earlier tests
+	t.Setenv("KERN_LLM_PROVIDER", "ollama")
+	t.Setenv("OLLAMA_HOST", "http://127.0.0.1:1")
+	// Store under model-a.
+	if _, err := Prompt("the database connection failed during migration", "", Options{Cache: true, LLM: "model-a"}); err != nil {
+		t.Fatal(err)
+	}
+	if n, _ := semcache.Entries("prompt.llm.model-a"); len(n) != 1 {
+		t.Fatalf("expected 1 entry under prompt.llm.model-a, got %d", len(n))
+	}
+	// Same prompt, different model: must NOT fuzzy-hit model-a's entry.
+	second, err := Prompt("the database connection failed during migration", "", Options{Cache: true, LLM: "model-b"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.FromCache {
+		t.Fatalf("cross-model lookup must miss, got FromCache=%v SemanticHit=%v", second.FromCache, second.SemanticHit)
+	}
+	// The model-b run stored its own entry.
+	if n, _ := semcache.Entries("prompt.llm.model-b"); len(n) != 1 {
+		t.Fatalf("expected the model-b run to store its own entry, got %d", len(n))
+	}
+	// The deterministic namespace stayed untouched.
+	if n, _ := semcache.Entries("prompt"); len(n) != 0 {
+		t.Fatalf("LLM entries leaked into plain prompt: %d", len(n))
+	}
+}
+
+// TestPromptLLMSemanticCacheHigherThreshold: the LLM namespace uses a 0.8
+// threshold (vs 0.60/0.70 for the deterministic path), so a mid-similarity
+// pair (~0.67) that hits the plain "prompt" cache must MISS the LLM cache.
+func TestPromptLLMSemanticCacheHigherThreshold(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	_ = semcache.Clear("") // reset in-memory namespaces left by earlier tests
+	t.Setenv("KERN_LLM_PROVIDER", "ollama")
+	t.Setenv("OLLAMA_HOST", "http://127.0.0.1:1")
+	p1 := "the database connection failed during migration"
+	p2 := "the database connection failed during the migration run" // ~0.67 sim: ≥0.60, <0.80
+	// Deterministic path: this pair hits at the default threshold.
+	if _, err := Prompt(p1, "", Options{Cache: true}); err != nil {
+		t.Fatal(err)
+	}
+	det, err := Prompt(p2, "", Options{Cache: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !det.SemanticHit {
+		t.Fatalf("deterministic path must hit at 0.60, got SemanticHit=%v sim=%.3f", det.SemanticHit, det.Similarity)
+	}
+	// LLM path with the same pair: the 0.8 threshold rejects it.
+	if _, err := Prompt(p1, "", Options{Cache: true, LLM: "llama3.2"}); err != nil {
+		t.Fatal(err)
+	}
+	llm, err := Prompt(p2, "", Options{Cache: true, LLM: "llama3.2"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if llm.FromCache || llm.SemanticHit {
+		t.Fatalf("mid-similarity pair must MISS the 0.8 LLM threshold, got FromCache=%v SemanticHit=%v sim=%.3f", llm.FromCache, llm.SemanticHit, llm.Similarity)
 	}
 }
 
@@ -380,4 +485,58 @@ func contains(lines []string, s string) bool {
 		}
 	}
 	return false
+}
+
+// TestLogSemcacheProfileIsolation is the audit iteration-2 finding-2
+// regression: a log compressed under profile A must never be fuzzy-served to
+// profile B. Profiles scope the NAMESPACE (log:<profile>), so a near-duplicate
+// lookup under profile B misses even though the text is nearly identical (the
+// old text+profile suffix was a ~1-shingle delta and passed the 0.60 Jaccard
+// threshold).
+func TestLogSemcacheProfileIsolation(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	_ = semcache.Clear("")
+	text := "INFO starting\nERROR panic in database connection pool\nERROR connection refused\nDEBUG worker 3\n"
+	nearDup := "INFO starting service\nERROR panic in the database connection pool\nERROR connection refused again\nDEBUG worker 4\n"
+
+	// Store under profile A (cache path accrues into "log:a").
+	first, err := Log(text, Options{Cache: true, Profile: "a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.FromCache {
+		t.Fatal("first call must not be served from cache")
+	}
+
+	// Profile B lookup of a near-duplicate: the exact cache key differs
+	// (text+profile), so this exercises the semantic layer — which must miss.
+	other, err := Log(nearDup, Options{Cache: true, Profile: "b"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if other.FromCache || other.SemanticHit {
+		t.Fatalf("profile B must NOT be served profile A's entry (FromCache=%v SemanticHit=%v)", other.FromCache, other.SemanticHit)
+	}
+
+	// Same profile A, near-duplicate: semantic hit, output reused.
+	again, err := Log(nearDup, Options{Cache: true, Profile: "a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !again.FromCache || !again.SemanticHit {
+		t.Fatalf("profile A must hit its own entry, got FromCache=%v SemanticHit=%v", again.FromCache, again.SemanticHit)
+	}
+	if again.Output != first.Output {
+		t.Fatalf("profile A semantic hit must reuse the stored output")
+	}
+
+	// The default profile is a THIRD namespace ("log:default"): nothing
+	// cross-serves into it either.
+	def, err := Log(nearDup, Options{Cache: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if def.FromCache || def.SemanticHit {
+		t.Fatalf("default profile must not be served profile A's entry (FromCache=%v SemanticHit=%v)", def.FromCache, def.SemanticHit)
+	}
 }

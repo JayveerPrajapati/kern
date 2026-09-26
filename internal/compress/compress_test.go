@@ -2,9 +2,23 @@ package compress
 
 import (
 	"fmt"
+	"os"
 	"strings"
 	"testing"
 )
+
+// TestMain isolates the package's cache side effects: CompressLog accrues
+// every compression into the semantic cache, so without an isolated
+// XDG_CACHE_HOME these tests would write into the real user cache dir.
+func TestMain(m *testing.M) {
+	tmp, err := os.MkdirTemp("", "kern-compress-test-cache")
+	if err != nil {
+		panic(err)
+	}
+	defer os.RemoveAll(tmp)
+	os.Setenv("XDG_CACHE_HOME", tmp)
+	os.Exit(m.Run())
+}
 
 func TestCompressLogKeepsErrors(t *testing.T) {
 	log := strings.Join([]string{

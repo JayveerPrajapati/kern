@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"fmt"
 	stdlog "log"
 	"path/filepath"
@@ -19,19 +18,18 @@ import (
 // With no args, lists pending approvals. With an ID, approves it.
 // Use --reject to reject instead of approve.
 func runApprove(rest []string) {
-	f, args, err := parseFlags(rest)
-	if err != nil {
-		fatalUsage("flags: %v", err)
-	}
-	root := f.root
-	if root == "" {
-		root = "."
-	}
-	ctx := context.Background()
+	f, args := parseFlagsOrDie(rest)
+	root := projectRoot(f)
 
 	if len(args) < 1 || args[0] == "" {
-		// List pending approvals.
-		pending, err := svc.Governance.PendingApprovals(ctx, root)
+		fatalUsage("approve requires an approval id: kern approve <id> [--approver NAME] [--reason ...] — use 'kern approve list' to see pending approvals")
+	}
+
+	// `kern approve list` shows the pending-approval queue. (QA F2: bare
+	// `kern approve` used to fall through to this listing and exit 0, which
+	// read as success to scripts; the id requirement now matches reject's.)
+	if args[0] == "list" {
+		pending, err := governance.NewFileStore(root).Pending()
 		if err != nil {
 			fatal("approve: %v", err)
 		}
@@ -166,6 +164,14 @@ func decideApproval(root, verb, id, approver string, approve bool, reason string
 			fatal("%s: approval %s not found — check kern audit %s for state", verb, id, id)
 		}
 		fatal("%s: %v — check kern audit %s for state", verb, err, id)
+	}
+	// Self-improvement (use-cases Tier 3 #7): the human decision is now
+	// recorded — learn from the approval log which actions always get
+	// approved vs which are risky. Best-effort and non-blocking: learning
+	// proposes typed-claim memories (RECOMMENDATION / INFERENCE) only and
+	// never changes policy; a failure here is logged and ignored.
+	if _, lerr := app.RecordPolicySignals(governance.NewFileStore(root), p.Memory(), app.DefaultPolicySignalThreshold); lerr != nil {
+		stdlog.Printf("kern %s: policy signal learning skipped: %v", verb, lerr)
 	}
 	return a, nil
 }

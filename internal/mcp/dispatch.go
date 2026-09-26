@@ -13,6 +13,10 @@ package mcp
 import (
 	"context"
 	"fmt"
+
+	"github.com/JayveerPrajapati/kern/internal/domain"
+	"github.com/JayveerPrajapati/kern/internal/governance"
+	"github.com/JayveerPrajapati/kern/internal/mcp/rbac"
 )
 
 // dispatchFunc is the signature of every tool handler in dispatchTable. The
@@ -40,7 +44,6 @@ func init() {
 		"kern_explain_finding":       simple((*Server).handleExplainFinding),
 		"kern_repair_guidance":       simple((*Server).handleRepairGuidance),
 		"kern_meta":                  simple((*Server).handleMeta),
-		"kern_ask":                   simple((*Server).handleMeta),
 		"kern_optimize_prompt":       simple((*Server).handleOptimizePrompt),
 		"kern_fetch_raw_anchor":      simple((*Server).handleFetchAnchor),
 		"kern_memory_add":            simple((*Server).handleMemoryAdd),
@@ -70,7 +73,6 @@ func init() {
 		"kern_buddy":                 simple((*Server).handleBuddy),
 		"kern_project_map":           simple((*Server).handleProjectMap),
 		"kern_pack":                  simple((*Server).handlePack),
-		"kern_run_build":             (*Server).handleRunBuild,
 		"kern_runtime":               simple((*Server).handleRuntime),
 		"kern_deploy":                simple((*Server).handleDeploy),
 		"kern_evidence":              simple((*Server).handleEvidence),
@@ -87,7 +89,6 @@ func init() {
 		"kern_prose":                 simple((*Server).handleProse),
 		"kern_repo_search":           simple((*Server).handleRepoSearch),
 		"kern_why":                   simple((*Server).handleWhy),
-		"kern_code_graph":            simple((*Server).handleCodeGraph),
 		"kern_inherits":              simple((*Server).handleInherits),
 		"kern_context":               simple((*Server).handleContext),
 		"kern_changes":               simple((*Server).handleChanges),
@@ -104,7 +105,6 @@ func init() {
 		"kern_churn":                 simple((*Server).handleChurn),
 		"kern_fragility_hotspots":    simple((*Server).handleFragilityHotspots),
 		"kern_near":                  simple((*Server).handleNear),
-		"kern_walk":                  simple((*Server).handleNear),
 		"kern_graph":                 simple((*Server).handleGraph),
 		"kern_explore":               simple((*Server).handleExplore),
 		"kern_fts_search":            simple((*Server).handleFtsSearch),
@@ -136,12 +136,9 @@ func init() {
 		"kern_incident":              simple((*Server).handleIncident),
 		"kern_what_if":               simple((*Server).handleWhatIf),
 		"kern_impact":                simple((*Server).handleImpact),
-		"kern_risk":                  simple((*Server).handleRisk),
 		"kern_flight":                simple((*Server).handleFlight),
-		"kern_memory":                simple((*Server).handleMemory),
 		"kern_agents":                simple((*Server).handleAgents),
 		"kern_loop":                  simple((*Server).handleLoop),
-		"kern_do":                    simple((*Server).handleDo),
 		"kern_run":                   simple((*Server).handleRun),
 		"kern_workflow":              simple((*Server).handleWorkflow),
 		"kern_onboard":               simple((*Server).handleOnboard),
@@ -166,7 +163,6 @@ func init() {
 		"kern_agent_message":         simple((*Server).handleAgentMessage),
 		"kern_agent_interrupt":       simple((*Server).handleAgentInterrupt),
 		"kern_mcp_call":              simple((*Server).handleMcpCall),
-		"kern_note":                  simple((*Server).handleNote),
 		"kern_agent_role_rbac":       simple((*Server).handleAgentRoleRBAC),
 		"kern_stream":                simple((*Server).handleStream),
 		"kern_ast_transform":         simple((*Server).handleAstTransform),
@@ -179,19 +175,42 @@ func init() {
 		"kern_org_tasks":             simple((*Server).handleOrgTasks),
 		"kern_org_search":            simple((*Server).handleOrgSearch),
 		"kern_org_audit":             simple((*Server).handleOrgAudit),
+		"kern_org_user":              simple((*Server).handleOrgUsers),
 	}
 }
 
 // dispatchTool routes a prechecked tool name to its handler. Every registered
 // kern_* tool has an entry in dispatchTable; runTool applies allowlist and
-// root validation via precheckTool before dispatching, so dispatchTool only
-// ever sees a tool that passed the gate.
+// root validation via precheckTool before dispatching, and RBAC enforcement
+// (kern_agent_role_rbac) runs here at the single dispatch funnel so direct
+// tools/call, kern_meta sub-tool routing, compose steps and CallTool all pass
+// the same gate — no invocation path can reach a handler without its role
+// check.
 func (s *Server) dispatchTool(ctx context.Context, id string, name string, args map[string]any) (string, error) {
 	h, ok := dispatchTable[name]
 	if !ok {
-		return "", fmt.Errorf("unknown tool: %s", name)
+		return "", fmt.Errorf("%w: %s", domain.ErrToolUnknown, name)
+	}
+	// RBAC enforcement: an agent with an assigned role may only invoke tools
+	// its role grants (AllowedTools; DeniedTools always win). Agents without
+	// an assigned role keep the legacy loopback-client trust model unchanged
+	// (backward compatible). Denial surfaces as a tool error before any
+	// handler side effect runs.
+	if allowed, reason := rbac.CheckAgentTool(agentIDFor(args), name); !allowed {
+		return "", fmt.Errorf("%w: RBAC denied: %s", domain.ErrToolDenied, reason)
 	}
 	return h(s, ctx, id, args)
+}
+
+// agentIDFor returns the calling agent identity for a tool call: the explicit
+// agent_id argument when present, else the built-in default agent — the same
+// scoping precheckTool's safety-budget accounting uses, so enforcement and
+// governance agree on who is calling.
+func agentIDFor(args map[string]any) string {
+	if id := argString(args, "agent_id"); id != "" {
+		return id
+	}
+	return governance.DefaultAgentID
 }
 
 // CallTool executes any registered MCP tool by name with the given argument map.
@@ -200,4 +219,29 @@ func (s *Server) CallTool(ctx context.Context, name string, args map[string]any)
 		args = map[string]any{}
 	}
 	return s.dispatchTool(ctx, "cli", name, args)
+}
+
+// CallToolGoverned executes any registered MCP tool by name through the FULL
+// governed dispatch path a JSON-RPC tools/call takes: the pre-tool-use hook
+// (the KERN_MCP_ROOTS confinement gate), runTool's preamble (KERN_TOOLS
+// allowlist, checkRootArg root confinement, validateRoot, safety budget,
+// string-argument coercion, audit + metrics) and the RBAC agent check at the
+// dispatch funnel. It returns the raw tool output; a governed denial or an
+// unknown tool surfaces as an error.
+//
+// CallTool — the trusted-loopback shorthand the CLI uses — skips the
+// allowlist and root confinement. CallToolGoverned is the passthrough entry
+// external callers (the SDK catalog client, REST routes) MUST use: it is a
+// passthrough, never a governance bypass, and it fails closed exactly like an
+// MCP client's tools/call.
+func (s *Server) CallToolGoverned(ctx context.Context, name string, args map[string]any) (string, error) {
+	if args == nil {
+		args = map[string]any{}
+	}
+	if s.preTool != nil {
+		if err := s.preTool(name, args); err != nil {
+			return "", fmt.Errorf("pre-tool-use denied: %w", err)
+		}
+	}
+	return s.runTool(ctx, "sdk", "", name, args)
 }

@@ -36,6 +36,25 @@ li { margin:2px 0; }
 button.deploy { font:inherit; font-size:11px; padding:3px 10px; border-radius:6px; border:1px solid var(--good); cursor:pointer; color:var(--good); background:var(--panel2); }
 button.deploy:disabled { cursor:default; opacity:.6; }
 .deploy-msg { margin:8px 0 0; font-size:12px; }
+
+/* Console usability additions — vanilla, no external assets. */
+.table-tools { display:flex; align-items:center; gap:8px; margin:0 0 8px; }
+.table-tools input { background:var(--panel2); color:var(--fg); border:1px solid var(--border); border-radius:6px; padding:4px 8px; font-family:inherit; font-size:12px; width:220px; max-width:100%; }
+.table-tools input:focus { outline:none; border-color:var(--accent); }
+.filter-count { font-size:11px; color:var(--muted); }
+.row-hidden { display:none; }
+.index-status { margin:0; padding:6px 28px; font-size:12px; color:var(--warn); background:var(--panel); border-bottom:1px solid var(--border); }
+.index-status[hidden] { display:none; }
+.index-status .spin { display:inline-block; width:10px; height:10px; border:2px solid var(--warn); border-top-color:transparent; border-radius:50%; margin-right:7px; vertical-align:-1px; animation:console-spin 1s linear infinite; }
+@keyframes console-spin { to { transform:rotate(180deg); } }
+@media (max-width:760px) {
+  header { padding:12px 16px; }
+  .topnav { flex-wrap:wrap; }
+  main { padding:14px 12px; grid-template-columns:1fr; }
+  section.panel { min-width:0; }
+  .index-status { padding:5px 16px; }
+  table { display:block; overflow-x:auto; }
+}
 </style>
 </head>
 <body>
@@ -47,6 +66,7 @@ button.deploy:disabled { cursor:default; opacity:.6; }
   <nav class="topnav">
     <a href="/">Dashboard</a>
     <a href="/approvals">Approvals</a>
+    {{if navOrgLink}}<a href="/org-approvals">Org Approvals</a>{{end}}
     <a href="/risks">Risks</a>
     <a href="/artifacts">Artifacts</a>
     <a href="/audit">Audit</a>
@@ -54,9 +74,12 @@ button.deploy:disabled { cursor:default; opacity:.6; }
     <a href="/incidents">Incidents</a>
     <a href="/tasks">Tasks</a>
     <a href="/efficiency">Efficiency</a>
+    <a href="/benchmarks">Benchmarks</a>
     <a href="/agents">Agents</a>
   </nav>
 </header>
+<p class="index-status" id="index-status" hidden><span class="spin" aria-hidden="true"></span>Index is rebuilding after recent edits &mdash; data on this page may be a moment behind.</p>
+
 <main>
   <!-- Field 1+2: State + Intent -->
   <section class="panel">
@@ -260,6 +283,94 @@ button.deploy:disabled { cursor:default; opacity:.6; }
       reset();
     });
   });
+})();
+</script>
+
+<script>
+(function () {
+  "use strict";
+  // Table filters: a small filter input above every data table in <main>.
+  // Tables with six or more rows get one automatically; tables marked
+  // data-filter-always (the single-table pages: incidents, audit, memory)
+  // always get one when they render at all.
+  var MIN_ROWS = 6;
+  var tables = document.querySelectorAll("main table");
+  for (var t = 0; t < tables.length; t++) {
+    var table = tables[t];
+    var rows = table.rows;
+    if (!rows || rows.length < 2) continue;
+    var dataRows = [];
+    for (var i = 1; i < rows.length; i++) dataRows.push(rows[i]);
+    var always = table.hasAttribute("data-filter-always");
+    if (!always && dataRows.length < MIN_ROWS) continue;
+
+    var tools = document.createElement("div");
+    tools.className = "table-tools";
+    var input = document.createElement("input");
+    input.type = "search";
+    input.placeholder = "Filter rows\u2026";
+    input.setAttribute("aria-label", "Filter table rows");
+    var count = document.createElement("span");
+    count.className = "filter-count";
+    count.hidden = true;
+    tools.appendChild(input);
+    tools.appendChild(count);
+    table.parentNode.insertBefore(tools, table);
+
+    var empty = document.createElement("p");
+    empty.className = "muted";
+    empty.textContent = "No rows match the filter.";
+    empty.hidden = true;
+    table.parentNode.insertBefore(empty, table.nextSibling);
+
+    input.addEventListener("input", function () {
+      var q = input.value.trim().toLowerCase();
+      var shown = 0;
+      for (var r = 0; r < dataRows.length; r++) {
+        var row = dataRows[r];
+        var match = q === "" || row.textContent.toLowerCase().indexOf(q) !== -1;
+        if (match) {
+          shown++;
+          row.classList.remove("row-hidden");
+        } else {
+          row.classList.add("row-hidden");
+        }
+      }
+      if (q === "") {
+        count.hidden = true;
+        empty.hidden = true;
+      } else {
+        count.textContent = shown + " of " + dataRows.length + " rows";
+        count.hidden = false;
+        empty.hidden = shown !== 0;
+      }
+    });
+  }
+
+  // Index rebuild status: poll /api/health; while the server reports a
+  // background index rebuild in flight, show the status line under the
+  // header. The line clears itself when the rebuild lands.
+  var statusLine = document.getElementById("index-status");
+  if (statusLine && window.fetch) {
+    var timer = null;
+    var check = function () {
+      fetch("/api/health").then(function (res) {
+        return res.ok ? res.json() : null;
+      }).then(function (body) {
+        var building = !!(body && body.index && body.index.building);
+        statusLine.hidden = !building;
+        if (building && timer === null) {
+          timer = window.setInterval(check, 3000);
+        } else if (!building && timer !== null) {
+          window.clearInterval(timer);
+          timer = null;
+        }
+      }).catch(function () {
+        // Server unreachable: leave the line as it is.
+      });
+    };
+    check();
+  }
 })();
 </script>
 </body>

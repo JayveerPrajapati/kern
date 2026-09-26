@@ -7,23 +7,16 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/cache"
 	"github.com/JayveerPrajapati/kern/internal/docsearch"
 	"github.com/JayveerPrajapati/kern/internal/domain"
-	"github.com/JayveerPrajapati/kern/internal/fetch"
+	"github.com/JayveerPrajapati/kern/internal/incident"
 	"github.com/JayveerPrajapati/kern/internal/llm"
 	"github.com/JayveerPrajapati/kern/internal/runtime"
-	"github.com/JayveerPrajapati/kern/internal/strutil"
 	"os"
 	"strings"
 )
 
 func runTeam(rest []string) {
-	f, _, err := parseFlags(rest)
-	if err != nil {
-		fatalUsage("flags: %v", err)
-	}
-	root := f.root
-	if root == "" {
-		root = "."
-	}
+	f, _ := parseFlagsOrDie(rest)
+	root := projectRoot(f)
 	text, err := renderTeamText(root)
 	if err != nil {
 		fatal("team: %v", err)
@@ -32,33 +25,10 @@ func runTeam(rest []string) {
 
 }
 
-// runAgent implements `kern agent ...`. Agent control surfaces such as
-// message and interrupt are MCP-tool surfaces (kern_agent_message /
-// kern_agent_interrupt); the CLI mirrors exist as `kern agent-message` and
-// `kern agent-interrupt`. Invoking `kern agent message ...` gets a graceful,
-// specific hint instead of the raw unknown-command usage dump.
-func runAgent(rest []string) {
-	if len(rest) == 0 {
-		fatalUsage("usage: kern agent <message|interrupt> [args] — agent control is an MCP-tool surface; use the kern_agent_message / kern_agent_interrupt MCP tools, or the CLI mirrors 'kern agent-message' / 'kern agent-interrupt'")
-	}
-	switch rest[0] {
-	case "message", "interrupt":
-		fatal("'kern agent %s' is an MCP-tool surface — use the kern_agent_%s MCP tool, or the CLI mirror 'kern agent-%s'", rest[0], rest[0], rest[0])
-	default:
-		fatalUsage("unknown 'kern agent %s' — agent control surfaces (message/interrupt) are MCP-tool surfaces; use the kern_agent_message / kern_agent_interrupt MCP tools, or the CLI mirrors 'kern agent-message' / 'kern agent-interrupt'", rest[0])
-	}
-}
-
 // runWorkflow runs an intent through the agent team workflow.
 func runWorkflow(rest []string) {
-	f, args, err := parseFlags(rest)
-	if err != nil {
-		fatalUsage("flags: %v", err)
-	}
-	root := f.root
-	if root == "" {
-		root = "."
-	}
+	f, args := parseFlagsOrDie(rest)
+	root := projectRoot(f)
 	if f.task != "" {
 		text, err := runWorkflowResumeCLI(root, f.task)
 		if err != nil {
@@ -84,18 +54,38 @@ func runWorkflow(rest []string) {
 }
 
 func runLoop(cmd string, rest []string) {
-	f, args, err := parseFlags(rest)
-	if err != nil {
-		fatalUsage("flags: %v", err)
-	}
-	root := f.root
-	if root == "" {
-		root = "."
-	}
+	f, args := parseFlagsOrDie(rest)
+	root := projectRoot(f)
 	if len(args) < 1 || args[0] == "" {
 		fatalUsage("usage: kern %s <intent> [--level L0..L5] [--root ROOT]", cmd)
 	}
+	// --mode observe (default) is the current read-only no-op stage loop;
+	// --mode autonomous is the former kern_do behavior (LLM coder + planner
+	// wired as the loop's default stage handlers, default level L2) — the
+	// CLI mirror of kern_loop mode=autonomous (surface consolidation T2b).
+	switch f.mode {
+	case "", "observe":
+	case "autonomous":
+	default:
+		fatalUsage("loop: unknown --mode %q (valid modes: observe, autonomous)", f.mode)
+	}
 	intent := args[0]
+	if f.schedule != "" {
+		// --schedule: closed-loop runs on a cron cadence (Feature Batch I).
+		runLoopScheduled(cmd, f, root, intent)
+		return
+	}
+	if f.mode == "autonomous" {
+		// runDo probes the LLM provider up front and routes through
+		// TaskService.RunDo (default level L2 when --level is absent).
+		text, err := runDo(root, f.level, intent)
+		if err != nil {
+			fmt.Print(text)
+			fatal("Loop: %v", err)
+		}
+		fmt.Print(text)
+		return
+	}
 	text, err := runLoopCLI(root, f.level, intent)
 	if err != nil {
 		fmt.Print(text)
@@ -105,17 +95,102 @@ func runLoop(cmd string, rest []string) {
 
 }
 
-func runIncident(rest []string) {
-	f, args, err := parseFlags(rest)
+// listIncidents renders the persisted incident history (newest first) —
+// the Persona 3 SRE ask: browse past incidents without JSON-on-CLI intake.
+func listIncidents(root string, jsonOut bool) {
+	store := incident.NewStore(root)
+	list, err := store.List()
 	if err != nil {
-		fatalUsage("flags: %v", err)
+		fatal("list incidents: %v", err)
 	}
-	root := f.root
-	if root == "" {
-		root = "."
+	if jsonOut {
+		b, err := json.MarshalIndent(list, "", "  ")
+		if err != nil {
+			fatal("list incidents: %v", err)
+		}
+		fmt.Println(string(b))
+		return
 	}
+	if len(list) == 0 {
+		fmt.Println("no incidents recorded")
+		return
+	}
+	fmt.Printf("incidents (%d, newest first):\n", len(list))
+	for _, inc := range list {
+		title := inc.Title
+		if title == "" {
+			title = "(no title)"
+		}
+		fmt.Printf("  %s  [%s/%s]  %s\n", inc.ID, inc.Severity, inc.Status, title)
+		if inc.AffectedService != "" {
+			fmt.Printf("    service: %s\n", inc.AffectedService)
+		}
+		if inc.RootCause != nil && inc.RootCause.Summary != "" {
+			fmt.Printf("    root cause: %s\n", inc.RootCause.Summary)
+		}
+		if inc.FixDescription != "" {
+			fmt.Printf("    fix: %s\n", inc.FixDescription)
+		}
+		if inc.PRURL != "" {
+			fmt.Printf("    pr: %s\n", inc.PRURL)
+		}
+	}
+}
+
+func runIncident(rest []string) {
+	f, args := parseFlagsOrDie(rest)
+	root := projectRoot(f)
+
+	// `kern incident list` browses the persisted incident history instead
+	// of ingesting a new alert — the SRE on-call ask (Persona 3).
+	if len(args) > 0 && args[0] == "list" {
+		listIncidents(root, f.json)
+		return
+	}
+
+	// Heal-playbook store (Feature Batch D): list or add without an alert.
+	if f.listPlaybooks {
+		list, err := incident.ListPlaybooks(root)
+		if err != nil {
+			fatal("list playbooks: %v", err)
+		}
+		if len(list) == 0 {
+			fmt.Println("no playbooks stored")
+			return
+		}
+		fmt.Printf("playbooks (%d):\n", len(list))
+		for _, pb := range list {
+			fmt.Printf("  %s\n", pb.Signature)
+			for _, s := range pb.Steps {
+				fmt.Printf("    step: %s\n", s)
+			}
+			if pb.Source != "" {
+				fmt.Printf("    source: %s\n", pb.Source)
+			}
+		}
+		return
+	}
+	if f.runbook != "" {
+		var pb incident.Playbook
+		rbText := f.runbook
+		// Accept a file path to the runbook JSON as well as inline JSON.
+		if _, serr := os.Stat(rbText); serr == nil {
+			if b, rerr := os.ReadFile(rbText); rerr == nil {
+				rbText = string(b)
+			}
+		}
+		if err := json.Unmarshal([]byte(rbText), &pb); err != nil {
+			fatal("invalid runbook JSON (pass JSON inline or a file path): %v", err)
+		}
+		if err := incident.AddPlaybook(root, pb); err != nil {
+			fatal("add playbook: %v", err)
+		}
+		fmt.Printf("added playbook: %s (%d steps)\n", pb.Signature, len(pb.Steps))
+		return
+	}
+
 	if len(args) < 1 || args[0] == "" {
-		fatalUsage("usage: kern incident <alert-json> [snapshot-json] [--root ROOT]")
+		fatalUsage("usage: kern incident list | <alert-json> [snapshot-json] [--root ROOT] [--correlate] [--json] [--runbook JSON] [--list-playbooks]")
 	}
 	var al domain.Alert
 	alertText := args[0]
@@ -143,6 +218,19 @@ func runIncident(rest []string) {
 		p.WithRuntimeSource(store)
 	}
 	ts := app.NewTaskService(p, nil).WithPRProvider(app.AutoPRProvider())
+
+	// --correlate: run the incident→twin→code correlation engine and render
+	// the correlation report (Feature Batch D) instead of the full pipeline.
+	if f.correlate {
+		t, corr, text, err := ts.CorrelateCode(al)
+		if err != nil {
+			fatal("incident correlate: %v", err)
+		}
+		fmt.Print(text)
+		fmt.Printf("[task: %s — state: %s — incident: %s]\n", t.ID, t.State, corr.Alert.ID)
+		return
+	}
+
 	t, inc, text, err := ts.InvestigateIncident(al)
 	if err != nil {
 		fatal("incident: %v", err)
@@ -152,10 +240,7 @@ func runIncident(rest []string) {
 }
 
 func runDocs(rest []string) {
-	f, args, err := parseFlags(rest)
-	if err != nil {
-		fatalUsage("flags: %v", err)
-	}
+	f, args := parseFlagsOrDie(rest)
 	sub := ""
 	if len(args) > 0 && (args[0] == "index" || args[0] == "clear" || args[0] == "fetch") {
 		sub = args[0]
@@ -182,44 +267,7 @@ func runDocs(rest []string) {
 		if f.root != "" {
 			root = f.root
 		}
-		res, err := fetch.Fetch(rawURL, 0)
-		if err != nil {
-			fatal("docs fetch: %v", err)
-		}
-		if name == "" {
-			name = slugName(rawURL)
-		} else {
-			name = strutil.Slug(name)
-		}
-		if err := os.MkdirAll(cache.Path("data", "docs-fetch"), 0o755); err != nil {
-			fatal("docs fetch: %v", err)
-		}
-		if err := os.WriteFile(cache.Path("data", "docs-fetch", name+".md"), []byte(res.Text), 0o600); err != nil {
-			fatal("docs fetch: %v", err)
-		}
-		added, err := docsearch.MergeFetched(root, name, res.Text)
-		if err != nil {
-			fatal("docs fetch: %v", err)
-		}
-		if f.semantic {
-			client := llm.NewEmbedder()
-			if !client.HasEmbeddingModel() {
-				fmt.Printf("note: semantic embeddings skipped (%s not installed; run: ollama pull %s)\n", llm.EmbedModel(), llm.EmbedModel())
-			} else {
-				embedded, eerr := docsearch.ReembedFetch(root, name, client)
-				if eerr != nil {
-					fatal("%v", eerr)
-				}
-				if embedded > 0 {
-					fmt.Printf("semantic embeddings attached to %d fetched chunks (KERN_EMBED_MODEL=%s)\n", embedded, llm.EmbedModel())
-				}
-			}
-		}
-		fmt.Printf("fetched %s -> %s (%d chars, %d chunks indexed into %s doc index)\n", rawURL, name, len(res.Text), added, root)
-		if res.Title != "" {
-			fmt.Printf("# %s\n\n", res.Title)
-		}
-		fmt.Println(clipText(res.Text, 600))
+		docsFetchCore(rawURL, name, root, f.semantic)
 		return
 	}
 	if len(args) > 0 {
@@ -260,39 +308,7 @@ func runDocs(rest []string) {
 		if query == "" {
 			fatalUsage("usage: kern docs <query> [root] [--root ROOT] [--limit N] | kern docs index [root] [--semantic] | kern docs clear")
 		}
-		ix := docsearch.Load(root)
-		if ix == nil {
-			var err error
-			ix, err = docsearch.IndexDir(root)
-			if err != nil {
-				fatal("docs index: %v", err)
-			}
-			if err := ix.Save(); err != nil {
-				fatal("docs index: %v", err)
-			}
-		}
-		// If the persisted index carries dense vectors, re-attach the
-		// local embedder so queries fuse the semantic signal too.
-		if hasSemantic(ix) {
-			client := llm.NewEmbedder()
-			if client.HasEmbeddingModel() {
-				docsearch.SemanticEmbedder = client
-			}
-		}
-		k := f.limit
-		results := ix.Search(query, k)
-		if len(results) == 0 {
-			fmt.Println("no matching document fragments")
-			return
-		}
-		for i, r := range results {
-			fmt.Printf("#%d sim=%.3f %s:%d\n", i+1, r.Sim, r.Doc.Chunk.File, r.Doc.Chunk.Start)
-			body := strings.ReplaceAll(r.Doc.Chunk.Text, "\n", " ")
-			if len(body) > 300 {
-				body = body[:300] + "…"
-			}
-			fmt.Printf("  %s\n", body)
-		}
+		docsSearchCore(query, root, f.limit)
 	}
 
 }

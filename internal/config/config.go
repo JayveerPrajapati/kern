@@ -66,15 +66,14 @@ func load(root string) *fileEntry {
 func resolveRoot(root string) string {
 	if root == "" {
 		if cwd, err := os.Getwd(); err == nil {
-			return cwd
+			return filepath.Clean(cwd)
 		}
 		return "."
 	}
-	abs, err := filepath.Abs(root)
-	if err != nil {
-		return root
+	if abs, err := filepath.Abs(root); err == nil {
+		return filepath.Clean(abs)
 	}
-	return abs
+	return root
 }
 
 // readFile parses one config file. Missing/unreadable files yield an empty
@@ -462,6 +461,7 @@ var Registry = []Key{
 	{Key: "cost_per_token", Env: "KERN_COST_PER_TOKEN", Type: "float", Default: 0.00001},
 	{Key: "cache.archive_days", Env: "KERN_CACHE_ARCHIVE_DAYS", Type: "float", Default: 7.0},
 	{Key: "cache.ttl_days", Env: "KERN_CACHE_TTL_DAYS", Type: "float", Default: 30.0},
+	{Key: "cache.max_mb", Env: "KERN_CACHE_MAX_MB", Type: "float", Default: 1024.0},
 	{Key: "runtime.poll_interval", Env: "KERN_POLL_INTERVAL", Type: "duration", Default: 30 * time.Second},
 	{Key: "runtime.prometheus_url", Env: "KERN_PROMETHEUS_URL", Type: "string", Default: ""},
 	{Key: "runtime.otel_url", Env: "KERN_OTEL_URL", Type: "string", Default: ""},

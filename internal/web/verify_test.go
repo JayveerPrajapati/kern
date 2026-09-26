@@ -1,13 +1,8 @@
 package web
 
 import (
-	"encoding/json"
-	"net/http"
-	"net/http/httptest"
 	"strings"
 	"testing"
-
-	"github.com/JayveerPrajapati/kern/internal/sdk"
 )
 
 // TestDecodeVerifyTypesBody covers the /v1/verify request-body decoder: the
@@ -61,35 +56,7 @@ func TestDecodeVerifyTypesBody(t *testing.T) {
 	}
 }
 
-// TestSDKVerifyRoundTrip proves the SDK sends types as a JSON array that the
-// server's real /v1/verify decoder (decodeVerifyTypesBody) honors — the same
-// decoder handleV1Verify uses. It exercises the actual SDK client against the
-// actual server-side decode so a mismatch (e.g. the SDK sending a shape the
-// server silently drops) would fail loudly instead of falling back to the
-// default.
-func TestSDKVerifyRoundTrip(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-		types, err := decodeVerifyTypesBody(r.Body)
-		if err != nil {
-			http.Error(w, `{"error":"invalid types"}`, http.StatusBadRequest)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{"types": types})
-	}))
-	t.Cleanup(srv.Close)
-
-	client := sdk.New(srv.URL)
-	res, err := client.Verify([]string{"build", "test"})
-	if err != nil {
-		t.Fatalf("sdk Verify returned error: %v", err)
-	}
-	types, ok := res["types"].([]any)
-	if !ok || len(types) != 2 || types[0] != "build" || types[1] != "test" {
-		t.Errorf("server decoded types = %v, want [build test]", res["types"])
-	}
-}
+// TestSDKVerifyRoundTrip moved to sdk_contract_test.go (external web_test
+// package): internal/web's in-package test build cannot import internal/sdk
+// since the SDK passthrough made sdk depend on internal/mcp (sdk → mcp →
+// org → enterprise → web cycle).

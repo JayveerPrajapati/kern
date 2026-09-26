@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"text/template"
 
 	"github.com/JayveerPrajapati/kern/internal/tokenize"
@@ -265,8 +266,14 @@ func topDir(root, file string) string {
 // computeTokenSavings compares tokens in the concatenated source files of all
 // graph nodes against the compact text form (graph JSON or context text).
 func computeTokenSavings(fullText, compact, source string) TokenStats {
-	fullTokens := tokenize.Count(fullText)
-	compactTokens := tokenize.Count(compact)
+	return tokenStatsFromCounts(tokenize.Count(fullText), tokenize.Count(compact), source)
+}
+
+// tokenStatsFromCounts assembles a TokenStats from already-computed token
+// counts. Kept separate from computeTokenSavings so cached file-token counts
+// (see fileTokenCount) can build the footer without re-reading or re-tokenizing
+// the definition file on every query.
+func tokenStatsFromCounts(fullTokens, compactTokens int, source string) TokenStats {
 	savings := 0
 	if fullTokens > 0 {
 		savings = int(float64(fullTokens-compactTokens) / float64(fullTokens) * 100)
@@ -279,18 +286,88 @@ func computeTokenSavings(fullText, compact, source string) TokenStats {
 	}
 }
 
+// savingsCacheKey identifies one cached file-token count: the absolute file
+// path plus the file's mtime at the moment it was tokenized. The mtime is the
+// invalidation signal — the same trust model reuseByMtime uses (an edit that
+// does not bump mtime already evades kern's other caches), so a content edit
+// that touches the mtime is picked up on the next query.
+type savingsCacheKey struct {
+	path  string
+	mtime int64
+}
+
+// savingsCache is a small bounded memo of definition-file token counts used by
+// the token-savings footers. Computing one costs a file read plus a full
+// tokenize (~35ms on real files) purely for a cosmetic footer, so the count is
+// cached until the file's mtime changes. The compact-text half of the savings
+// computation is query-specific and cheap, so it is never cached.
+type savingsCache struct {
+	mu      sync.Mutex
+	entries map[savingsCacheKey]int
+}
+
+// savingsCacheCap bounds the memo. Entries are evicted arbitrarily (any live
+// entry repopulates on the next miss), keeping memory bounded without the
+// complexity of an LRU.
+const savingsCacheCap = 64
+
+// fileTokenSavingsCache is the process-wide memo. It is safe to share across
+// indexes: a file's token count is a pure function of the file on disk, and
+// the key includes the absolute path, so projects never collide.
+var fileTokenSavingsCache = &savingsCache{entries: map[savingsCacheKey]int{}}
+
+// fileTokenCount returns the token count of the file at path, memoized by
+// (path, mtime). A missing or unreadable file counts as 0, matching the
+// previous behavior of TokenSavingsForGraph (a failed read yielded nil
+// fullData). The mtime is re-statted on every call, so an edit that bumps the
+// mtime is observed on the next query; the read + tokenize happens only on a
+// miss. The stat/read pair is not atomic, but a concurrent edit between them
+// can only leave an unreachable stale entry (the next call stats the new mtime
+// and misses it), never a wrong hit.
+func fileTokenCount(path string) int {
+	if path == "" {
+		return 0
+	}
+	fi, err := os.Stat(path)
+	var mtime int64
+	if err == nil {
+		mtime = fi.ModTime().UnixNano()
+	}
+	key := savingsCacheKey{path: path, mtime: mtime}
+	fileTokenSavingsCache.mu.Lock()
+	if n, ok := fileTokenSavingsCache.entries[key]; ok {
+		fileTokenSavingsCache.mu.Unlock()
+		return n
+	}
+	fileTokenSavingsCache.mu.Unlock()
+
+	// Miss: read + tokenize outside the lock so concurrent queries never
+	// serialize on the expensive part.
+	data, rerr := os.ReadFile(path)
+	n := 0
+	if rerr == nil {
+		n = tokenize.Count(string(data))
+	}
+	fileTokenSavingsCache.mu.Lock()
+	if len(fileTokenSavingsCache.entries) >= savingsCacheCap {
+		for k := range fileTokenSavingsCache.entries {
+			delete(fileTokenSavingsCache.entries, k)
+			break
+		}
+	}
+	fileTokenSavingsCache.entries[key] = n
+	fileTokenSavingsCache.mu.Unlock()
+	return n
+}
+
 // TokenSavingsForGraph computes token savings for the Graph() text output,
 // comparing it against the full source file of the symbol's definition.
 func (ix *Index) TokenSavingsForGraph(defFile, compact string) TokenStats {
-	var fullData []byte
+	fullTokens := 0
 	if defFile != "" {
-		var err error
-		fullData, err = os.ReadFile(filepath.Join(ix.Root, defFile))
-		if err != nil {
-			fullData = nil
-		}
+		fullTokens = fileTokenCount(filepath.Join(ix.Root, defFile))
 	}
-	return computeTokenSavings(string(fullData), compact, "graph")
+	return tokenStatsFromCounts(fullTokens, tokenize.Count(compact), "graph")
 }
 
 // TokenSavingsForContext computes token savings for the Context() text output.

@@ -130,6 +130,7 @@ func TestToolCacheHitIdenticalToFreshRun(t *testing.T) {
 // serve-time/identity-only args (max_output, no_cache, agent_id, task) are
 // stripped so identical answers share one entry (F8).
 func TestToolCacheKeyChangesWithIndexIdentity(t *testing.T) {
+	t.Parallel()
 	args := map[string]any{"root": "/r", "query": "x"}
 	kA := cacheKeyFor("kern_search", args, "/r", "identityA")
 	kB := cacheKeyFor("kern_search", args, "/r", "identityB")
@@ -158,7 +159,7 @@ func TestToolCacheMutatingToolNeverCached(t *testing.T) {
 	root := mcpProject(t)
 	s := cacheTestServer(t)
 	for _, name := range []string{
-		"kern_approve", "kern_note", "kern_register_host_sampler", "kern_lock_status",
+		"kern_approve", "kern_register_host_sampler", "kern_lock_status",
 		"kern_stats", "kern_commitmsg", "kern_changes", "kern_review", "kern_memory_add",
 		"kern_doc_search", "kern_skill", "kern_snapshot",
 	} {
@@ -377,21 +378,21 @@ func TestToolCacheSizeCapSkipsLargeEntries(t *testing.T) {
 // stateful, git-diff-family, docsearch, skill, note, snapshot — must stay
 // uncacheable.
 func TestCacheableAllowlistPinned(t *testing.T) {
+	t.Parallel()
 	cacheable := map[string]bool{
 		// index-backed deterministic tools (F1)
 		"kern_search": true, "kern_explore": true, "kern_context": true,
 		"kern_compact_file": true, "kern_ast_search": true, "kern_fts_search": true,
-		"kern_why": true, "kern_code_graph": true,
+		"kern_why":      true,
 		"kern_inherits": true, "kern_path": true, "kern_dead": true,
 		"kern_cycles": true, "kern_larges": true, "kern_arch": true,
 		"kern_communities": true, "kern_hubs": true, "kern_near": true,
-		"kern_walk": true, "kern_probe": true, "kern_retrieve": true,
+		"kern_probe": true, "kern_retrieve": true,
 		"kern_resolve": true, "kern_explain": true, "kern_graph": true,
 		"kern_bridges": true, "kern_cochange": true, "kern_surprising": true,
 		"kern_churn": true, "kern_test_gaps": true, "kern_fragility_hotspots": true,
 		"kern_frameworks": true, "kern_fw_trace": true, "kern_entry_points": true,
 		"kern_meta": true, // F11: vetted like every other entry (runtime gate R1)
-		"kern_ask":  true, // meta alias — same runtime gate (R1) covers routed sub-tools
 		// pure-arg tools (F1)
 		"kern_mask_pii": true, "kern_prose": true, "kern_optimize_log": true,
 		"kern_optimize_output": true, "kern_check_draft": true,
@@ -425,8 +426,8 @@ func TestCacheableAllowlistPinned(t *testing.T) {
 		"kern_llm_providers", "kern_context_watch", "kern_agent_fingerprint",
 		"kern_org_agents", "kern_org_audit", "kern_org_memory", "kern_org_projects",
 		"kern_org_search", "kern_org_tasks", "kern_org_teams",
-		"kern_commitmsg", "kern_changes", "kern_review", "kern_check",
-		"kern_doc_search", "kern_skill", "kern_note", "kern_snapshot",
+		"kern_commitmsg", "kern_changes", "kern_review",
+		"kern_doc_search", "kern_skill", "kern_snapshot",
 		"kern_repo_search",
 	} {
 		if got[name] {
@@ -442,6 +443,7 @@ func TestCacheableAllowlistPinned(t *testing.T) {
 // the lookup gate (before dispatch) and the store gate (after dispatch) agree
 // on the same verdict.
 func TestToolCacheMetaRoutingGate(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		request string
 		want    bool
@@ -559,6 +561,7 @@ func TestToolCacheSemanticSearchNeverCached(t *testing.T) {
 // key (cross-rebuild/cross-process hits), while a content change still
 // rotates the key.
 func TestToolCacheIdentityIgnoresBuiltAt(t *testing.T) {
+	t.Parallel()
 	base := time.Date(2024, 1, 2, 3, 4, 5, 0, time.UTC)
 	idA := &index.IndexIdentity{ContentRoot: "/r", TreeOID: "tree-abc", GitCommit: "c1", BuiltAt: base}
 	idB := &index.IndexIdentity{ContentRoot: "/r", TreeOID: "tree-abc", GitCommit: "c1", BuiltAt: base.Add(24 * time.Hour)}

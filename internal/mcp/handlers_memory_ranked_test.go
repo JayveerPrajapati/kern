@@ -9,6 +9,7 @@ import (
 )
 
 func TestHandleMemoryRanked(t *testing.T) {
+	t.Parallel()
 	srv := newTestServer()
 	ctx := context.Background()
 	tmpDir := t.TempDir()

@@ -13,6 +13,7 @@ import (
 // gate is resolved out-of-band via the persistent store — kern_workflow with
 // the same task_id resumes and completes the run.
 func TestWorkflowToolRunsTeam(t *testing.T) {
+	t.Parallel()
 	root := mcpProject(t)
 
 	// Run 1: kern sequences the team; the run must park at the approval gate

@@ -57,6 +57,16 @@ type Recorder struct {
 	falsePositives     int64
 	impactPredictions  int64
 	correctPredictions int64
+
+	// Coder prompt-token metrics (Lever 5): cumulative fixed (constant prompt
+	// components: base template + intent + plan + grounded context) and final
+	// (last round, incl. prior-round failure feedback) token counts per coder
+	// run. Kept separate from RecordTokenUsage because that metric is a
+	// compression before/after reduction; a coder prompt only grows across
+	// rounds, so it must not feed the reduction percentage.
+	promptTokenRuns  int64
+	promptTokenFixed int64
+	promptTokenFinal int64
 }
 
 // New creates a new empty Recorder.
@@ -285,6 +295,23 @@ func (r *Recorder) RecordTokenUsage(before, after int64) {
 	r.tokenAfter += after
 }
 
+// RecordPromptTokens records a coder run's prompt token counts: fixed is the
+// constant prompt component (base edit-format template + intent + plan +
+// grounded project context) and final is the last round's total (fixed +
+// prior-round failure feedback). Both accumulate across runs. This is a cost
+// metric (final >= fixed), not a reduction metric, so it is kept out of
+// TokenReductionPct.
+func (r *Recorder) RecordPromptTokens(fixed, final int) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.promptTokenRuns++
+	r.promptTokenFixed += int64(fixed)
+	r.promptTokenFinal += int64(final)
+}
+
 // RecordAnalysis records a completed analysis.
 func (r *Recorder) RecordAnalysis() {
 	if r == nil {
@@ -322,46 +349,51 @@ func (r *Recorder) RecordImpactPrediction(correct bool) {
 
 // Snapshot captures all metrics at a point in time.
 type Snapshot struct {
-	Timestamp time.Time
+	Timestamp time.Time `json:"timestamp"`
 
 	// Performance — 10 metrics
-	IndexBuildAvgMs       float64
-	GraphQueryAvgMs       float64
-	ContextRetrievalAvgMs float64
-	MemoryRecallAvgMs     float64
-	PolicyEvalAvgMs       float64
-	ToolCallAvgMs         float64
-	VerificationAvgMs     float64
-	CacheHitRate          float64
-	IndexBuildCount       int
-	TotalIndexTimeMs      float64
+	IndexBuildAvgMs       float64 `json:"index_build_avg_ms"`
+	GraphQueryAvgMs       float64 `json:"graph_query_avg_ms"`
+	ContextRetrievalAvgMs float64 `json:"context_retrieval_avg_ms"`
+	MemoryRecallAvgMs     float64 `json:"memory_recall_avg_ms"`
+	PolicyEvalAvgMs       float64 `json:"policy_eval_avg_ms"`
+	ToolCallAvgMs         float64 `json:"tool_call_avg_ms"`
+	VerificationAvgMs     float64 `json:"verification_avg_ms"`
+	CacheHitRate          float64 `json:"cache_hit_rate"`
+	IndexBuildCount       int     `json:"index_build_count"`
+	TotalIndexTimeMs      float64 `json:"total_index_time_ms"`
 
 	// Self-observability — 14 dimensions
-	RequestCount    int64
-	ToolCallCount   int64
-	AgentRunCount   int64
-	LLMLatencyAvgMs float64
-	IndexingCount   int64
-	ApprovalCount   int64
-	SandboxOps      int64
-	IncidentCount   int64
-	ErrorCount      int64
-	CacheHits       int64
-	CacheMisses     int64
+	RequestCount    int64   `json:"request_count"`
+	ToolCallCount   int64   `json:"tool_call_count"`
+	AgentRunCount   int64   `json:"agent_run_count"`
+	LLMLatencyAvgMs float64 `json:"llm_latency_avg_ms"`
+	IndexingCount   int64   `json:"indexing_count"`
+	ApprovalCount   int64   `json:"approval_count"`
+	SandboxOps      int64   `json:"sandbox_ops"`
+	IncidentCount   int64   `json:"incident_count"`
+	ErrorCount      int64   `json:"error_count"`
+	CacheHits       int64   `json:"cache_hits"`
+	CacheMisses     int64   `json:"cache_misses"`
 
 	// Product success — key metrics
-	TokenReductionPct float64
-	AnalysisCount     int64
-	FalsePositiveRate float64
-	ImpactAccuracyPct float64
+	TokenReductionPct float64 `json:"token_reduction_pct"`
+	AnalysisCount     int64   `json:"analysis_count"`
+	FalsePositiveRate float64 `json:"false_positive_rate"`
+	ImpactAccuracyPct float64 `json:"impact_accuracy_pct"`
+
+	// Coder prompt tokens (Lever 5) — cumulative across coder runs
+	PromptTokenRuns  int64 `json:"prompt_token_runs"`
+	PromptTokenFixed int64 `json:"prompt_token_fixed"`
+	PromptTokenFinal int64 `json:"prompt_token_final"`
 
 	// Governance — populated from external sources via SnapshotWithGovernance
-	AgentCount      int
-	TaskCount       int
-	BlocksCount     int
-	OverridesCount  int
-	ViolationsCount int
-	AvgConfidence   float64
+	AgentCount      int     `json:"agent_count"`
+	TaskCount       int     `json:"task_count"`
+	BlocksCount     int     `json:"blocks_count"`
+	OverridesCount  int     `json:"overrides_count"`
+	ViolationsCount int     `json:"violations_count"`
+	AvgConfidence   float64 `json:"avg_confidence"`
 }
 
 // Snapshot returns a point-in-time view of all recorded metrics.
@@ -413,6 +445,11 @@ func (r *Recorder) Snapshot() Snapshot {
 	if r.impactPredictions > 0 {
 		s.ImpactAccuracyPct = float64(r.correctPredictions) / float64(r.impactPredictions) * 100
 	}
+
+	// Coder prompt tokens
+	s.PromptTokenRuns = r.promptTokenRuns
+	s.PromptTokenFixed = r.promptTokenFixed
+	s.PromptTokenFinal = r.promptTokenFinal
 
 	return s
 }
@@ -472,6 +509,7 @@ func (r *Recorder) Render() string {
 
 	fmt.Fprintf(&b, "\nproduct success (F-56):\n")
 	fmt.Fprintf(&b, "  token reduction    : %.1f%%\n", s.TokenReductionPct)
+	fmt.Fprintf(&b, "  coder prompt tokens: %d runs (fixed %d -> final %d)\n", s.PromptTokenRuns, s.PromptTokenFixed, s.PromptTokenFinal)
 	fmt.Fprintf(&b, "  analyses           : %d\n", s.AnalysisCount)
 	fmt.Fprintf(&b, "  false positive rate: %.1f%%\n", s.FalsePositiveRate*100)
 	fmt.Fprintf(&b, "  impact accuracy    : %.1f%%\n", s.ImpactAccuracyPct)
@@ -519,6 +557,9 @@ func (r *Recorder) Reset() {
 	r.falsePositives = 0
 	r.impactPredictions = 0
 	r.correctPredictions = 0
+	r.promptTokenRuns = 0
+	r.promptTokenFixed = 0
+	r.promptTokenFinal = 0
 }
 
 // --- Report ---
@@ -686,6 +727,11 @@ func (r *Recorder) Load(path string) error {
 	} else {
 		r.analysisCount += s.AnalysisCount
 	}
+
+	// Merge coder prompt-token counters (plain counters, add directly).
+	r.promptTokenRuns += s.PromptTokenRuns
+	r.promptTokenFixed += s.PromptTokenFixed
+	r.promptTokenFinal += s.PromptTokenFinal
 
 	return nil
 }

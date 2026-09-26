@@ -100,4 +100,12 @@ type Incident struct {
 	Memories  []Memory
 	// Claims produced during root-cause analysis (e.g. a Hypothesis per candidate).
 	Claims []Claim
+	// Playbook (heal-runbook auto-attach, Feature Batch D): when a stored
+	// playbook matches the incident's deterministic error signature at
+	// ingestion, the matched signature, its steps and its source are carried
+	// on the incident so the report surfaces the runbook. Empty when no
+	// playbook matched.
+	PlaybookSignature string
+	PlaybookSteps     []string
+	PlaybookSource    string
 }

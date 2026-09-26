@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -227,8 +228,6 @@ func buildDiffGateCheckList(absRoot string, cfg *policy.LoadedConfig, initBaseli
 		diffgate.NewExecUnsafeCheck(),
 		diffgate.NewChangelogCheck(),
 		diffgate.NewCatalogDriftCheck(absRoot, tools),
-		diffgate.NewNoteFormatCheck(absRoot),
-		diffgate.NewNoteMissingCheck(),
 		diffgate.NewDocBudgetCheck(absRoot),
 	}
 	if _, err := os.Stat(filepath.Join(absRoot, "docs", "tool-catalog.md")); err == nil {
@@ -237,7 +236,7 @@ func buildDiffGateCheckList(absRoot string, cfg *policy.LoadedConfig, initBaseli
 	if _, err := os.Stat(filepath.Join(absRoot, "docs", "mcp", "tool-contracts.md")); err == nil {
 		checks = append(checks, diffgate.NewContractsDocCheck(absRoot, tools))
 	}
-	if client, _, code := newKernClientOrDegraded(false, jsonOut); code == 0 && client != nil {
+	if client, _, code := newKernClientOrDegraded(false, jsonOut, false); code == 0 && client != nil {
 		checks = append(checks, kern.NewSecretCheck(client))
 	}
 	if !noTests {
@@ -268,11 +267,18 @@ func applyBlocking(result domain.ValidationResult, blocking bool) domain.Validat
 	return result
 }
 
-// discoverWorkingTreeChanges finds the working-tree diff (staged + unstaged)
-// vs HEAD in the same deterministic shape as discoverStagedChanges: one
-// --name-status pass plus one --unified=0 pass, with per-file diff blocks and
-// real added/removed line numbers attached. On an unborn HEAD (fresh repo
-// with no commits) it falls back to the staged set.
+// discoverWorkingTreeChanges finds the working-tree diff (staged + unstaged
+// + untracked) vs HEAD in the same deterministic shape as
+// discoverStagedChanges: one --name-status pass plus one --unified=0 pass,
+// with per-file diff blocks and real added/removed line numbers attached.
+// On an unborn HEAD (fresh repo with no commits) it falls back to the
+// staged set.
+//
+// Untracked files (QA Pick #6, F-DG1): `git diff HEAD` cannot see files not
+// yet added to the index, so new-file workflows (the agent-driven common
+// case) bypassed every check. They are now included as OpWrite changes with
+// a synthesized all-added diff block. `--exclude-standard` respects
+// .gitignore, so generated/ignored files stay out.
 func discoverWorkingTreeChanges(repoRoot string) ([]domain.FileChange, error) {
 	if !isGitRepo(repoRoot) {
 		return nil, fmt.Errorf("not a git repository: %s", repoRoot)
@@ -287,16 +293,57 @@ func discoverWorkingTreeChanges(repoRoot string) ([]domain.FileChange, error) {
 		return nil, fmt.Errorf("git diff HEAD --name-status: %w", err)
 	}
 
-	if strings.TrimSpace(nameStatus) == "" {
+	var changes []domain.FileChange
+	if strings.TrimSpace(nameStatus) != "" {
+		// ONE unified=0 diff over the whole working tree (not one git spawn per
+		// file): keeps argv bounded and avoids N subprocess launches.
+		unified, err := gitOutput(repoRoot, "-c", "core.quotepath=false", "diff", "HEAD", "--unified=0", "--no-ext-diff")
+		if err != nil {
+			return nil, fmt.Errorf("git diff HEAD --unified=0: %w", err)
+		}
+		changes = fileChangesFromStatus(nameStatus, unified, nil)
+	}
+
+	// Untracked files: invisible to git diff, visible to ls-files --others.
+	untracked, err := gitOutput(repoRoot, "-c", "core.quotepath=false", "ls-files", "--others", "--exclude-standard")
+	if err != nil {
+		return nil, fmt.Errorf("git ls-files --others: %w", err)
+	}
+	for _, p := range strings.Split(strings.TrimSpace(untracked), "\n") {
+		if p == "" {
+			continue
+		}
+		changes = append(changes, untrackedFileChange(repoRoot, p))
+	}
+	if len(changes) == 0 {
 		return nil, nil // clean working tree
 	}
+	return changes, nil
+}
 
-	// ONE unified=0 diff over the whole working tree (not one git spawn per
-	// file): keeps argv bounded and avoids N subprocess launches.
-	unified, err := gitOutput(repoRoot, "-c", "core.quotepath=false", "diff", "HEAD", "--unified=0", "--no-ext-diff")
+// untrackedFileChange builds the FileChange for a file git diff cannot see:
+// status A, whole-file diff block (every line added), and the file content
+// attached so content-based checks behave exactly as for tracked changes.
+func untrackedFileChange(repoRoot, path string) domain.FileChange {
+	fc := domain.FileChange{Path: path, Op: domain.OpWrite}
+	b, err := os.ReadFile(filepath.Join(repoRoot, filepath.FromSlash(path)))
 	if err != nil {
-		return nil, fmt.Errorf("git diff HEAD --unified=0: %w", err)
+		return fc // not on disk (raced away): checks that need it will skip
 	}
-
-	return fileChangesFromStatus(nameStatus, unified, nil), nil
+	fc.Content = string(b)
+	lines := strings.Split(strings.TrimRight(fc.Content, "\n"), "\n")
+	if fc.Content == "" {
+		lines = nil
+	}
+	var block strings.Builder
+	block.WriteString("--- /dev/null\n+++ " + path + "\n")
+	if len(lines) > 0 {
+		block.WriteString("@@ -0,0 +1," + strconv.Itoa(len(lines)) + " @@\n")
+	}
+	for i, l := range lines {
+		fc.Added = append(fc.Added, strconv.Itoa(i+1))
+		block.WriteString("+" + l + "\n")
+	}
+	fc.Diff = block.String()
+	return fc
 }

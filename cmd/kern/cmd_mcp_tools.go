@@ -41,7 +41,7 @@ func readStdinIfPipe() string {
 func runHealth(rest []string) {
 	f, _, err := parseFlags(rest)
 	if err != nil {
-		fatalUsage("usage: kern health [--root DIR] [--json]\nflags: %v", err)
+		fatalUsage("usage: kern health [--root ROOT] [--json]\nflags: %v", err)
 	}
 	root := f.root
 	// --json is accepted for CLI compatibility (pinned by
@@ -87,10 +87,20 @@ func runHealth(rest []string) {
 }
 
 func runCompose(rest []string) {
-	f, pos, err := parseFlags(rest)
-	if err != nil {
-		fatalUsage("flags: %v", err)
-	}
+	// `kern compose` is a thin wrapper over `kern meta --pipeline` (surface
+	// consolidation T2b): the wrapper injects the --pipeline marker so
+	// runMeta routes here, and runComposeCore accepts every input form the
+	// compose command historically did (--pipeline flag, positional JSON,
+	// stdin).
+	runComposeCore(rest)
+}
+
+// runComposeCore is the deterministic multi-tool pipeline engine shared by
+// `kern compose` and `kern meta --pipeline`: parse --pipeline JSON (or
+// positional JSON / stdin), validate it, and execute it step by step through
+// the MCP tool runner (runMCPTool over kern_compose).
+func runComposeCore(rest []string) {
+	f, pos := parseFlagsOrDie(rest)
 	root := f.root
 	pipelineJSON := f.pipeline
 	timeout := "60"
@@ -122,7 +132,7 @@ func runCompose(rest []string) {
 func runPreEdit(rest []string) {
 	f, pos, err := parseFlags(rest)
 	if err != nil {
-		fatalUsage("usage: kern pre-edit [--file PATH] [--lines N] [--symbol NAME] [--root DIR] [--json]")
+		fatalUsage("usage: kern pre-edit [--file <file>] [--lines N] [--symbol NAME] [--root ROOT] [--json]")
 	}
 
 	file := f.file
@@ -173,10 +183,7 @@ func runPreEdit(rest []string) {
 }
 
 func runPromptFill(rest []string) {
-	f, pos, err := parseFlags(rest)
-	if err != nil {
-		fatalUsage("flags: %v", err)
-	}
+	f, pos := parseFlagsOrDie(rest)
 
 	t := f.template
 	if t == "" && len(pos) > 0 {
@@ -187,7 +194,7 @@ func runPromptFill(rest []string) {
 		desc = strings.Join(pos[1:], " ")
 	}
 	if t == "" {
-		fatalUsage("usage: kern prompt-fill --template <name> [--task <desc>] [--file <path>]")
+		fatalUsage("usage: kern prompt-fill --template <name> [--task <desc>] [--file <file>]")
 	}
 	args := map[string]any{
 		"template":      t,
@@ -204,7 +211,7 @@ func runPromptFill(rest []string) {
 func runSemanticDiff(rest []string) {
 	f, pos, err := parseFlags(rest)
 	if err != nil {
-		fatalUsage("flags: %v\nusage: kern semantic-diff [--from REV] [--to REV] [--range A..B] [--root DIR]", err)
+		fatalUsage("flags: %v\nusage: kern semantic-diff [--from REV] [--to REV] [--range A..B] [--root ROOT]", err)
 	}
 
 	args := map[string]any{"root": f.root}
@@ -223,10 +230,7 @@ func runSemanticDiff(rest []string) {
 }
 
 func runEvidenceAnchor(rest []string) {
-	f, pos, err := parseFlags(rest)
-	if err != nil {
-		fatalUsage("flags: %v", err)
-	}
+	f, pos := parseFlagsOrDie(rest)
 
 	c := f.claim
 	if c == "" && len(pos) > 0 {
@@ -246,10 +250,7 @@ func runEvidenceAnchor(rest []string) {
 }
 
 func runContextWatch(rest []string) {
-	f, pos, err := parseFlags(rest)
-	if err != nil {
-		fatalUsage("flags: %v", err)
-	}
+	f, pos := parseFlagsOrDie(rest)
 
 	budget := "32000"
 	if f.budgetSet {
@@ -274,10 +275,7 @@ func runContextWatch(rest []string) {
 }
 
 func runAgentFingerprint(rest []string) {
-	f, pos, err := parseFlags(rest)
-	if err != nil {
-		fatalUsage("flags: %v", err)
-	}
+	f, pos := parseFlagsOrDie(rest)
 
 	args := map[string]any{"format": f.format}
 	if f.agent != "" {
@@ -291,7 +289,7 @@ func runAgentFingerprint(rest []string) {
 func runExplain(rest []string) {
 	f, pos, err := parseFlags(rest)
 	if err != nil {
-		fatalUsage("flags: %v\nusage: kern explain <target-symbol-or-file> [--root DIR]", err)
+		fatalUsage("flags: %v\nusage: kern explain <target-symbol-or-file> [--root ROOT]", err)
 	}
 
 	t := f.target
@@ -303,7 +301,7 @@ func runExplain(rest []string) {
 	// (exit 0). The unified parser rejects unknown flags everywhere (before
 	// AND after positionals), so the trailing-flag sweep is no longer needed.
 	if t == "" {
-		fatalUsage("usage: kern explain <target-symbol-or-file> [--root DIR]")
+		fatalUsage("usage: kern explain <target-symbol-or-file> [--root ROOT]")
 	}
 	runMCPTool("kern_explain", map[string]any{
 		"target": t,
@@ -314,7 +312,7 @@ func runExplain(rest []string) {
 func runCrossRepoImpact(rest []string) {
 	f, pos, err := parseFlags(rest)
 	if err != nil {
-		fatalUsage("flags: %v\nusage: kern cross-repo-impact <symbol> [--repo <path>]... [--root DIR]", err)
+		fatalUsage("flags: %v\nusage: kern cross-repo-impact <symbol> [--repo <path>]... [--root ROOT]", err)
 	}
 
 	t := f.target
@@ -329,7 +327,7 @@ func runCrossRepoImpact(rest []string) {
 	// unknown flag (exit 0). The unified parser rejects unknown flags
 	// everywhere, so the trailing-flag sweep is no longer needed.
 	if t == "" {
-		fatalUsage("usage: kern cross-repo-impact <symbol> [--repo <path>]... [--root DIR]")
+		fatalUsage("usage: kern cross-repo-impact <symbol> [--repo <path>]... [--root ROOT]")
 	}
 	for _, rp := range f.repoPaths {
 		if _, err := os.Stat(rp); err != nil {
@@ -344,17 +342,14 @@ func runCrossRepoImpact(rest []string) {
 }
 
 func runMemoryRanked(rest []string) {
-	f, pos, err := parseFlags(rest)
-	if err != nil {
-		fatalUsage("flags: %v", err)
-	}
+	f, pos := parseFlagsOrDie(rest)
 
 	p := f.prompt
 	if p == "" && len(pos) > 0 {
 		p = strings.Join(pos, " ")
 	}
 	if p == "" {
-		fatalUsage("usage: kern memory-ranked <prompt> [-k 5] [--half-life 7.0] [--root DIR]")
+		fatalUsage("usage: kern memory-ranked <prompt> [-k 5] [--half-life 7.0] [--root ROOT]")
 	}
 	runMCPTool("kern_memory_ranked", map[string]any{
 		"prompt":         p,
@@ -400,10 +395,7 @@ func runPolicyDSL(rest []string) {
 }
 
 func runAgentCoordination(rest []string) {
-	f, pos, err := parseFlags(rest)
-	if err != nil {
-		fatalUsage("flags: %v", err)
-	}
+	f, pos := parseFlagsOrDie(rest)
 
 	act := f.action
 	if act == "" {
@@ -450,10 +442,7 @@ func runAgentRoleRBAC(rest []string) {
 }
 
 func runStream(rest []string) {
-	f, pos, err := parseFlags(rest)
-	if err != nil {
-		fatalUsage("flags: %v", err)
-	}
+	f, pos := parseFlagsOrDie(rest)
 
 	act := f.action
 	if act == "" {
@@ -475,10 +464,7 @@ func runStream(rest []string) {
 }
 
 func runAstTransform(rest []string) {
-	f, pos, err := parseFlags(rest)
-	if err != nil {
-		fatalUsage("flags: %v", err)
-	}
+	f, pos := parseFlagsOrDie(rest)
 
 	act := f.action
 	if act == "" {
@@ -533,10 +519,7 @@ func runAstTransform(rest []string) {
 }
 
 func runSemanticMerge(rest []string) {
-	f, _, err := parseFlags(rest)
-	if err != nil {
-		fatalUsage("flags: %v", err)
-	}
+	f, _ := parseFlagsOrDie(rest)
 
 	format := "text"
 	if f.json {
@@ -561,7 +544,7 @@ func runSynthesizeTest(rest []string) {
 		// stdlibFlagErr keeps the pinned "flag provided but not defined"
 		// wording (TestRunSynthesizeTestBadFlagExits2); the parse itself is
 		// the unified parseFlags.
-		fatalUsage("flags: %v\nusage: kern synthesize-test [--target NAME] [--file PATH] [--auto-gap] [--apply] [--json] [--root DIR]", stdlibFlagErr(err))
+		fatalUsage("flags: %v\nusage: kern synthesize-test [--target NAME] [--file <file>] [--auto-gap] [--apply] [--json] [--root ROOT]", stdlibFlagErr(err))
 	}
 
 	tgt := f.target
@@ -581,6 +564,9 @@ func runSynthesizeTest(rest []string) {
 		"apply":    f.apply,
 		"format":   format,
 		"root":     f.root,
+	}
+	if f.sinks != "" {
+		args["sinks"] = f.sinks
 	}
 	runMCPTool("kern_synthesize_test", args)
 }

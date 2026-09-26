@@ -151,7 +151,16 @@ func ServeListener(ctx context.Context, addr string, tlsCfg *TLSConfig, h http.H
 		if len(sockPath) > maxUnixSocketPath {
 			return fmt.Errorf("unix socket path too long (%d bytes, limit ~100): %s — use a shorter --addr path", len(sockPath), sockPath)
 		}
-		if err := os.MkdirAll(filepath.Dir(sockPath), 0o755); err != nil {
+		// Restrict the parent directory ONLY when we create it: a fresh
+		// auto-selected dir arrives 0700 from MkdirTemp (see
+		// mcp.ResolveHTTPAddr), and a user-chosen parent (e.g. /tmp) keeps
+		// its own permissions rather than being loosened or tightened by us.
+		parent := filepath.Dir(sockPath)
+		if _, err := os.Stat(parent); os.IsNotExist(err) {
+			if err := os.MkdirAll(parent, 0o700); err != nil {
+				return err
+			}
+		} else if err != nil {
 			return err
 		}
 		_ = os.Remove(sockPath)
