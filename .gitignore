@@ -48,7 +48,8 @@ TODO.md
 docs/deepseek-harness-compliance.md
 docs/phase-reports/
 docs/audit/
-docs/architecture/
+docs/architecture/*
+!docs/architecture/ledger-details.md
 docs/roadmap.md
 docs/repo-exploration-report.md
 docs/agent-intelligence-roadmap.md

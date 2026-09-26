@@ -10,22 +10,14 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/JayveerPrajapati/kern/internal/domain"
 	"github.com/JayveerPrajapati/kern/internal/index"
 )
 
-// BoundaryRule declares one allowed or forbidden dependency edge between two
-// package/directory patterns. Action is "forbid" (a violation) or "allow" (an
-// explicit exemption that overrides forbids for the same pair).
-type BoundaryRule struct {
-	From   string `json:"from"`
-	To     string `json:"to"`
-	Action string `json:"action"`
-}
-
 // Boundaries is the declarative guardrail file loaded from .kern/boundaries.json.
 type Boundaries struct {
-	Description string         `json:"description,omitempty"`
-	Rules       []BoundaryRule `json:"rules"`
+	Description string                `json:"description,omitempty"`
+	Rules       []domain.BoundaryRule `json:"rules"`
 	// Pure opts into @pure mutability assertions: when true, `kern guard
 	// check` (and the MCP guard tool) also validate that every Go
 	// function/method whose doc comment contains "@pure" does not mutate
@@ -65,7 +57,7 @@ func InferBoundaries(ix *index.Index) *Boundaries {
 	if ix == nil {
 		return &Boundaries{
 			Description: "Inferred baseline layered architecture guardrails",
-			Rules: []BoundaryRule{
+			Rules: []domain.BoundaryRule{
 				{From: "repository", To: "controller", Action: "forbid"},
 				{From: "service", To: "controller", Action: "forbid"},
 				{From: "db", To: "web", Action: "forbid"},
@@ -183,13 +175,13 @@ func InferBoundaries(ix *index.Index) *Boundaries {
 		}
 	}
 
-	var rules []BoundaryRule
+	var rules []domain.BoundaryRule
 	ruleSet := make(map[string]bool)
 	addRule := func(from, to, action string) {
 		key := from + "->" + to + ":" + action
 		if !ruleSet[key] {
 			ruleSet[key] = true
-			rules = append(rules, BoundaryRule{From: from, To: to, Action: action})
+			rules = append(rules, domain.BoundaryRule{From: from, To: to, Action: action})
 		}
 	}
 
@@ -456,7 +448,7 @@ func CheckBoundariesPrecise(ix *index.Index, b *Boundaries, files []string, stri
 // in the slice it appears. Only when no allow rule matches is the first
 // forbid rule that matches returned (a violation). If nothing matches, the
 // pair is permitted (default-permit for unconfigured pairs).
-func verdict(rules []BoundaryRule, fromDir, toDir string) *BoundaryRule {
+func verdict(rules []domain.BoundaryRule, fromDir, toDir string) *domain.BoundaryRule {
 	for i := range rules {
 		if rules[i].Action == "allow" && DirMatch(rules[i].From, fromDir) && DirMatch(rules[i].To, toDir) {
 			return nil

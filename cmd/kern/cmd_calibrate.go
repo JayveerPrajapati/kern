@@ -13,16 +13,10 @@ import (
 // impact F1 of the call graph's predictions. It is the first-class form of
 // the standalone evaluate/calibration harness — same flags, identical output.
 func runCalibrate(rest []string) {
-	f, args, err := parseFlags(rest)
-	if err != nil {
-		fatalUsage("flags: %v", err)
-	}
-	root := f.root
-	if root == "" && len(args) > 0 && args[0] != "" {
+	f, args := parseFlagsOrDie(rest)
+	root := projectRoot(f)
+	if f.root == "" && len(args) > 0 && args[0] != "" {
 		root = args[0]
-	}
-	if root == "" {
-		root = "."
 	}
 
 	thr := []float64{}

@@ -9,7 +9,8 @@ import (
 
 // TestTaintViaMCP verifies kern_taint end-to-end: sec.Scan finds a
 // sql-injection sink, the built index resolves the entry-point path to it
-// (tainted: yes), and generate=true appends a go test scaffold.
+// (tainted: yes). The generate=true scaffold path moved to
+// kern_synthesize_test with a sinks= filter (surface consolidation T2a).
 func TestTaintViaMCP(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	root := testRoot(t)
@@ -54,22 +55,9 @@ func lookup(name string) {
 		t.Fatalf("expected entry-point attribution 'via H', got %q", out)
 	}
 
-	// generate=true appends the deterministic test scaffold.
-	resp2 := serveOne(t, toolsCallJSON(t, 61, "kern_taint", map[string]any{"root": root, "generate": true}))
-	out2, isErr2 := toolResultText(t, resp2)
-	if isErr2 {
-		t.Fatalf("unexpected error: %s", out2)
-	}
-	if !strings.Contains(out2, "TestTaintSQLInjection") {
-		t.Fatalf("expected scaffold func TestTaintSQLInjection, got %q", out2)
-	}
-	if !strings.Contains(out2, "write to:") {
-		t.Fatalf("expected write-to line, got %q", out2)
-	}
-	if !strings.Contains(out2, "```go") {
-		t.Fatalf("expected fenced go block, got %q", out2)
-	}
-
+	// The generate=true scaffold path was removed (surface consolidation T2a):
+	// test scaffolds per tainted sink moved to kern_synthesize_test with a
+	// sinks= filter.
 	// A file filter that matches nothing yields the empty verdict.
 	resp3 := serveOne(t, toolsCallJSON(t, 62, "kern_taint", map[string]any{"root": root, "file": "nope.go"}))
 	out3, isErr3 := toolResultText(t, resp3)
@@ -104,27 +92,24 @@ func TestTaintPythonViaMCP(t *testing.T) {
 	root := testRoot(t)
 	app := filepath.Join(root, "app.py")
 	src := `import os
-
 def run(cmd):
-    cmd = req.Body["cmd"]
-    os.system(cmd)
+	cmd = req.Body["cmd"]
+	os.system(cmd)
 `
 	if err := os.WriteFile(app, []byte(src), 0o644); err != nil {
 		t.Fatal(err)
 	}
-
-	resp := serveOne(t, toolsCallJSON(t, 64, "kern_taint", map[string]any{"root": root, "generate": true}))
+	resp := serveOne(t, toolsCallJSON(t, 64, "kern_taint", map[string]any{"root": root}))
 	out, isErr := toolResultText(t, resp)
 	if isErr {
 		t.Fatalf("unexpected error: %s", out)
 	}
-	for _, want := range []string{"py-os-system", "tainted: yes", "```python", "def test_py_os_system_5", "write to:"} {
+	for _, want := range []string{"py-os-system", "tainted: yes"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("expected %q in kern_taint output, got %q", want, out)
 		}
 	}
 }
-
 func TestTaintInvalidRangeViaMCP(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	root := testRoot(t)

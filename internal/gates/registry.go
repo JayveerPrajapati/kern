@@ -227,8 +227,8 @@ var Registry = []Gate{
 	},
 	{
 		ID:          "G8",
-		Name:        "Sandboxed build/test isolation",
-		Verifies:    "Sandboxed build/test isolation",
+		Name:        "Sandboxed build/test rollback",
+		Verifies:    "Sandboxed build/test rollback (snapshot + restore on failure, not OS isolation)",
 		Enforcement: "block",
 		TestFile:    "internal/blueprint/sandbox/g8_test.go",
 		TestFuncs: []string{
@@ -639,32 +639,6 @@ var Registry = []Gate{
 			"TestG36_CatalogDocStale",
 			"TestG36_CatalogDocMissing",
 			"TestG36_CatalogDocMissingTool",
-		},
-		Package: "diffgate",
-	},
-	{
-		ID:          "G37",
-		Name:        "Decision-record format",
-		Verifies:    "diff-gate note:format BLOCKs when the docs/notes/ decision-record tree violates its path-encoded lifecycle/class contract or in-file format (kern note validate contract)",
-		Enforcement: "block",
-		TestFile:    "internal/blueprint/checks/diffgate/notegate_test.go",
-		TestFuncs: []string{
-			"TestG37_NoteFormatValid",
-			"TestG37_NoteFormatViolation",
-			"TestG37_NoteFormatNoTree",
-		},
-		Package: "diffgate",
-	},
-	{
-		ID:          "G38",
-		Name:        "Decision-record on change",
-		Verifies:    "diff-gate note:missing WARNs when non-doc source changes carry no docs/notes/ decision record (advisory, mirrors the changelog gate)",
-		Enforcement: "warn",
-		TestFile:    "internal/blueprint/checks/diffgate/notegate_test.go",
-		TestFuncs: []string{
-			"TestG38_NoteMissingWarns",
-			"TestG38_NoteMissingPassesWithNote",
-			"TestG38_NoteMissingPassesDocOnly",
 		},
 		Package: "diffgate",
 	},

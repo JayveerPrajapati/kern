@@ -14,10 +14,7 @@ import (
 // into a consensus/divergence report — agreement is reported with its exact
 // scope, disagreement is surfaced, and no majority winner is selected.
 func runReviewConsensus(rest []string) int {
-	f, args, err := parseFlags(rest)
-	if err != nil {
-		fatalUsage("flags: %v", err)
-	}
+	f, args := parseFlagsOrDie(rest)
 	if len(args) < 2 {
 		fatalUsage("usage: kern review-consensus <pack1.json> <pack2.json> [more packs...] [--json]")
 	}

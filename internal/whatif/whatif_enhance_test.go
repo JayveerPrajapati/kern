@@ -7,7 +7,7 @@ import (
 	"testing"
 
 	"github.com/JayveerPrajapati/kern/internal/domain"
-	"github.com/JayveerPrajapati/kern/internal/intelligence"
+	"github.com/JayveerPrajapati/kern/internal/intel"
 )
 
 // enhanceFixtureGraph builds a hand-crafted knowledge graph for the enhanced
@@ -18,8 +18,8 @@ import (
 //
 // Node IDs are the bare symbol names; edges are "calls" edges only, which is
 // what WhatDependsOn/WhatTestsCover traverse.
-func enhanceFixtureGraph() *intelligence.Graph {
-	g := &intelligence.Graph{}
+func enhanceFixtureGraph() *intel.Graph {
+	g := &intel.Graph{}
 	sym := func(id, name, file string) domain.Node {
 		return domain.Node{
 			ID:     id,
@@ -28,12 +28,16 @@ func enhanceFixtureGraph() *intelligence.Graph {
 			Symbol: &domain.Symbol{Name: name, Qualified: "pkg." + name, File: file},
 		}
 	}
+	// Each symbol lives in its own package directory so same-package test
+	// attribution is unambiguous: T (TestC) is the only test in pkg/c, the
+	// package of C. Under the scoped WhatTestsCover semantics, T covers C
+	// (same package + direct caller) and nothing else.
 	g.Nodes = []domain.Node{
-		sym("A", "A", "a.go"),
-		sym("B", "B", "b.go"),
-		sym("C", "C", "c.go"),
-		sym("D", "D", "d.go"),
-		sym("T", "TestC", "c_test.go"),
+		sym("A", "A", "pkg/a/a.go"),
+		sym("B", "B", "pkg/b/b.go"),
+		sym("C", "C", "pkg/c/c.go"),
+		sym("D", "D", "pkg/d/d.go"),
+		sym("T", "TestC", "pkg/c/c_test.go"),
 	}
 	g.Edges = []domain.Edge{
 		{From: "A", To: "B", Kind: "calls"},

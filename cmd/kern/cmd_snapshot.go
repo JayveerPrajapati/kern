@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/JayveerPrajapati/kern/internal/index"
+	"github.com/JayveerPrajapati/kern/internal/pack"
 )
 
 // runSnapshot implements `kern snapshot [root] [--out FILE] [--symbol X]
@@ -33,14 +34,8 @@ func runSnapshot(rest []string) int {
 			return runSnapshotVerify(vrest)
 		}
 	}
-	f, args, err := parseFlags(rest)
-	if err != nil {
-		fatalUsage("flags: %v", err)
-	}
-	root := f.root
-	if root == "" {
-		root = "."
-	}
+	f, args := parseFlagsOrDie(rest)
+	root := projectRoot(f)
 	if len(args) > 0 {
 		root = args[0]
 	}
@@ -53,6 +48,29 @@ func runSnapshot(rest []string) int {
 	ix, err := loadOrBuild(root)
 	if err != nil {
 		fatal("Snapshot: %v", err)
+	}
+	// --format pack renders the graph-snapshot pack text (pack.BuildGraph —
+	// the `kern pack --graph` render, whole graph or --symbol neighbourhood)
+	// instead of the versioned snapshot JSON. --max-tokens caps the
+	// signature section deterministically (surface consolidation T2b).
+	if f.format == "pack" {
+		gb, err := pack.BuildGraph(root, pack.Options{
+			MaxTokens:   f.maxTokens,
+			GraphSymbol: f.symbol,
+		})
+		if err != nil {
+			fatal("Snapshot: %v", err)
+		}
+		out := gb.Render()
+		if f.out != "" {
+			if werr := os.WriteFile(f.out, []byte(out), 0o644); werr != nil {
+				fatal("Snapshot: %v", werr)
+			}
+			fmt.Printf("wrote %s (%d bytes)\n", f.out, len(out))
+			return 0
+		}
+		fmt.Print(out)
+		return 0
 	}
 	mode := "whole"
 	if f.symbol != "" {
@@ -87,18 +105,12 @@ func runSnapshot(rest []string) int {
 // [--strict]`: load the snapshot, verify it against root, print the verdict,
 // and exit 0 fresh / 1 stale / 2 unknown or error.
 func runSnapshotVerify(rest []string) int {
-	f, args, err := parseFlags(rest)
-	if err != nil {
-		fatalUsage("flags: %v", err)
-	}
+	f, args := parseFlagsOrDie(rest)
 	if len(args) < 1 {
 		fatalUsage("usage: kern snapshot verify <file> [root] [--strict]")
 	}
 	file := args[0]
-	root := f.root
-	if root == "" {
-		root = "."
-	}
+	root := projectRoot(f)
 	if len(args) > 1 {
 		root = args[1]
 	}

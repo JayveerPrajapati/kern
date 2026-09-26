@@ -117,48 +117,9 @@ func TestTasksEmptyOutput(t *testing.T) {
 	}
 }
 
-func TestRunAgentHintsMCPSurfaces(t *testing.T) {
-	for _, sub := range []string{"message", "interrupt"} {
-		stderr := captureStderr(t, func() {
-			code := recoverExitCode(func() {
-				runAgent([]string{sub, "--to", "worker", "hello"})
-			})
-			if code != 1 {
-				t.Errorf("runAgent(%q) exit code = %d, want 1 (runtime error, not usage dump)", sub, code)
-			}
-		})
-		if !strings.Contains(stderr, "MCP-tool surface") {
-			t.Errorf("runAgent(%q) hint missing 'MCP-tool surface':\n%s", sub, stderr)
-		}
-		if !strings.Contains(stderr, "kern_agent_"+sub) {
-			t.Errorf("runAgent(%q) hint missing kern_agent_%s MCP tool name:\n%s", sub, sub, stderr)
-		}
-		if !strings.Contains(stderr, "kern agent-"+sub) {
-			t.Errorf("runAgent(%q) hint missing CLI mirror 'kern agent-%s':\n%s", sub, sub, stderr)
-		}
-	}
-}
-
-func TestRunAgentUnknownSubcommand(t *testing.T) {
-	stderr := captureStderr(t, func() {
-		code := recoverExitCode(func() {
-			runAgent([]string{"frobnicate"})
-		})
-		if code != 2 {
-			t.Errorf("runAgent(unknown) exit code = %d, want 2 (usage error)", code)
-		}
-	})
-	if !strings.Contains(stderr, "MCP-tool surface") {
-		t.Errorf("runAgent(unknown) hint missing MCP-tool hint:\n%s", stderr)
-	}
-}
-
-func TestDispatchAgentAndTasksRegistered(t *testing.T) {
+func TestDispatchTasksRegistered(t *testing.T) {
 	if e, ok := commandTable["tasks"]; !ok || e.help == "" {
 		t.Errorf("commandTable[tasks] = %+v, want registered entry with help", e)
-	}
-	if e, ok := commandTable["agent"]; !ok || e.help == "" {
-		t.Errorf("commandTable[agent] = %+v, want registered entry with help", e)
 	}
 }
 
@@ -170,10 +131,10 @@ func TestPlanSymbolDegradeHints(t *testing.T) {
 	err := fmt.Errorf("no symbol named %q was found in this project's index (candidates: %s). Pass a concrete exported name.", "pagination", "pagination")
 	stderr := captureStderr(t, func() {
 		code := recoverExitCode(func() {
-			planSymbolDegrade("Add pagination to the service layer", dir, err)
+			symbolDegrade("plan", "Add pagination to the service layer", dir, err)
 		})
 		if code != 1 {
-			t.Errorf("planSymbolDegrade exit code = %d, want 1", code)
+			t.Errorf("symbolDegrade exit code = %d, want 1", code)
 		}
 	})
 	for _, want := range []string{
@@ -184,13 +145,161 @@ func TestPlanSymbolDegradeHints(t *testing.T) {
 		"kern plan <symbol>",
 	} {
 		if !strings.Contains(stderr, want) {
-			t.Errorf("planSymbolDegrade message missing %q:\n%s", want, stderr)
+			t.Errorf("symbolDegrade message missing %q:\n%s", want, stderr)
 		}
+	}
+	if symbolDegrade("plan", "x", ".", fmt.Errorf("some unrelated failure")) {
+		t.Fatal("symbolDegrade handled a non-symbol error, want passthrough")
 	}
 }
 
-func TestPlanSymbolDegradePassesThroughOtherErrors(t *testing.T) {
-	if planSymbolDegrade("x", ".", fmt.Errorf("some unrelated failure")) {
-		t.Fatal("planSymbolDegrade handled a non-symbol error, want passthrough")
+// storeRecordCount returns how many task records the persisted store for dir
+// currently holds (the same file `kern task <id>` and a fresh TaskService
+// read).
+func storeRecordCount(t *testing.T, dir string) int {
+	t.Helper()
+	ts := app.NewTaskService(mustApp(t, dir), eventbus.New())
+	if ts.Store() == nil {
+		t.Fatal("task service has no persisted store")
+	}
+	list, err := ts.Store().List()
+	if err != nil {
+		t.Fatalf("store.List: %v", err)
+	}
+	return len(list)
+}
+
+// taskIDFromOutput extracts the task ID from a CLI "[task: <id> — state: …]"
+// line.
+func taskIDFromOutput(t *testing.T, out string) string {
+	t.Helper()
+	const marker = "[task: "
+	start := strings.Index(out, marker)
+	if start < 0 {
+		t.Fatalf("output has no %q line:\n%s", marker, out)
+	}
+	rest := out[start+len(marker):]
+	end := strings.Index(rest, " — ")
+	if end < 0 {
+		t.Fatalf("cannot parse task line from output:\n%s", out)
+	}
+	return rest[:end]
+}
+
+// TestAnalyzeTaskPersistenceGatedOnTaskFlag locks the F9 regression fix: the
+// CLI's documented `--task` flag must produce an authoritative persisted task
+// record (store-assigned t-<n>, queryable via `kern task <id>` from a fresh
+// service), while a run without --task must not touch the store. A --lens-only
+// run (no --task) stays ephemeral: it uses the taskful machinery but makes no
+// persistence promise.
+func TestAnalyzeTaskPersistenceGatedOnTaskFlag(t *testing.T) {
+	dir := fix3Fixture(t)
+
+	// With --task: the [task: <id>] line names a persisted record.
+	var out string
+	if code := recoverExitCode(func() {
+		out = captureStdout(t, func() { runAnalyze("analyze", []string{"FindUser", "--root", dir, "--task", "persist-me"}) })
+	}); code != 0 {
+		t.Fatalf("analyze --task exited %d, want 0 (stderr above)", code)
+	}
+	id := taskIDFromOutput(t, out)
+	if !strings.HasPrefix(id, "t-") {
+		t.Fatalf("task id = %q, want store-assigned t-<n> prefix with --task", id)
+	}
+	// A fresh service (a new process) must resolve the task via the store —
+	// the same store `kern task <id>` reads.
+	ts := app.NewTaskService(mustApp(t, dir), eventbus.New())
+	if got, ok := ts.Get(id); !ok {
+		t.Fatalf("task %q not queryable from a fresh service after --task analyze", id)
+	} else if got.State == "" {
+		t.Fatalf("task %q loaded from store has no state", id)
+	}
+
+	// Without --task: the stateless path prints no task line and the store
+	// gains no records.
+	before := storeRecordCount(t, dir)
+	if code := recoverExitCode(func() {
+		captureStdout(t, func() { runAnalyze("analyze", []string{"FindUser", "--root", dir}) })
+	}); code != 0 {
+		t.Fatalf("stateless analyze exited %d, want 0", code)
+	}
+	if got := storeRecordCount(t, dir); got != before {
+		t.Fatalf("stateless analyze added %d store record(s): %d -> %d", got-before, before, got)
+	}
+
+	// --lens only (no --task): taskful machinery, but ephemeral — the printed
+	// ID is a-<n> and is NOT queryable from a fresh service.
+	if code := recoverExitCode(func() {
+		out = captureStdout(t, func() { runAnalyze("analyze", []string{"FindUser", "--root", dir, "--lens", "security"}) })
+	}); code != 0 {
+		t.Fatalf("analyze --lens exited %d, want 0", code)
+	}
+	ephID := taskIDFromOutput(t, out)
+	if !strings.HasPrefix(ephID, "a-") {
+		t.Fatalf("lens-only task id = %q, want ephemeral a-<n> prefix", ephID)
+	}
+	ts2 := app.NewTaskService(mustApp(t, dir), eventbus.New())
+	if _, ok := ts2.Get(ephID); ok {
+		t.Fatalf("lens-only task %q must NOT be persisted (F9: no store pollution without --task)", ephID)
+	}
+	if got := storeRecordCount(t, dir); got != before {
+		t.Fatalf("lens-only analyze added %d store record(s): %d -> %d", got-before, before, got)
+	}
+}
+
+// TestWhatIfImpactTaskPersistenceGatedOnTaskFlag locks the same --task gate on
+// `kern what-if` and `kern impact`: --task persists (fresh Get succeeds),
+// absent --task the store is untouched. The task ID is read from the --json
+// task_id field (the text renderers carry no task line).
+func TestWhatIfImpactTaskPersistenceGatedOnTaskFlag(t *testing.T) {
+	dir := fix3Fixture(t)
+
+	// what-if --task persists.
+	var out string
+	if code := recoverExitCode(func() {
+		out = captureStdout(t, func() { runWhatIf("what-if", []string{"FindUser", "--root", dir, "--task", "wi", "--json"}) })
+	}); code != 0 {
+		t.Fatalf("what-if --task exited %d, want 0", code)
+	}
+	wi := assertValidJSON(t, out)
+	id, _ := wi["task_id"].(string)
+	if !strings.HasPrefix(id, "t-") {
+		t.Fatalf("what-if task_id = %q, want t-<n> with --task", id)
+	}
+	ts := app.NewTaskService(mustApp(t, dir), eventbus.New())
+	if _, ok := ts.Get(id); !ok {
+		t.Fatalf("what-if task %q not queryable from a fresh service", id)
+	}
+
+	// impact --task persists.
+	if code := recoverExitCode(func() {
+		out = captureStdout(t, func() { runImpact([]string{"FindUser", "--root", dir, "--task", "imp", "--json"}) })
+	}); code != 0 {
+		t.Fatalf("impact --task exited %d, want 0", code)
+	}
+	imp := assertValidJSON(t, out)
+	id2, _ := imp["task_id"].(string)
+	if !strings.HasPrefix(id2, "t-") {
+		t.Fatalf("impact task_id = %q, want t-<n> with --task", id2)
+	}
+	ts = app.NewTaskService(mustApp(t, dir), eventbus.New())
+	if _, ok := ts.Get(id2); !ok {
+		t.Fatalf("impact task %q not queryable from a fresh service", id2)
+	}
+
+	// Absent --task: no store growth.
+	before := storeRecordCount(t, dir)
+	if code := recoverExitCode(func() {
+		captureStdout(t, func() { runWhatIf("what-if", []string{"FindUser", "--root", dir, "--json"}) })
+	}); code != 0 {
+		t.Fatalf("what-if exited %d, want 0", code)
+	}
+	if code := recoverExitCode(func() {
+		captureStdout(t, func() { runImpact([]string{"FindUser", "--root", dir, "--json"}) })
+	}); code != 0 {
+		t.Fatalf("impact exited %d, want 0", code)
+	}
+	if got := storeRecordCount(t, dir); got != before {
+		t.Fatalf("stateless what-if/impact added %d store record(s): %d -> %d", got-before, before, got)
 	}
 }

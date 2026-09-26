@@ -14,17 +14,11 @@ import (
 // (real deploys require an approval), and lifecycle events all apply — the
 // same path the web console's POST /v1/tasks/{id}/deploy uses.
 func runDeploy(rest []string) {
-	f, args, err := parseFlags(rest)
-	if err != nil {
-		fatalUsage("flags: %v", err)
-	}
+	f, args := parseFlagsOrDie(rest)
 	if len(args) < 1 || args[0] == "" {
 		fatalUsage("usage: kern deploy <task-id> [--version V]")
 	}
-	root := f.root
-	if root == "" {
-		root = "."
-	}
+	root := projectRoot(f)
 	p, err := app.New(root)
 	if err != nil {
 		fatal("could not load project: %v — run kern index first", err)

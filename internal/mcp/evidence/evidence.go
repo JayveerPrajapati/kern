@@ -19,6 +19,8 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/governance"
 	"github.com/JayveerPrajapati/kern/internal/index"
 	"github.com/JayveerPrajapati/kern/internal/mcp/mcpargs"
+	rootpkg "github.com/JayveerPrajapati/kern/internal/mcp/root"
+	"github.com/JayveerPrajapati/kern/internal/pii"
 	"github.com/JayveerPrajapati/kern/internal/storage"
 )
 
@@ -27,17 +29,52 @@ type Hooks struct {
 	LoadIndex func(ctx context.Context, root string) (*index.Index, error)
 }
 
-func resolveRoot(root string) string {
-	if root == "" {
-		if cwd, err := os.Getwd(); err == nil {
-			return filepath.Clean(cwd)
+// evalSymlinksNearest resolves p to its canonical absolute path, walking up to
+// the nearest EXISTING ancestor when EvalSymlinks fails on the full path (the
+// file itself may not exist yet — evidence verifies a file+line, and a missing
+// target is a normal outcome). Re-appending the unresolved remainder preserves
+// the not-yet-existing suffix while still resolving every symlink that DOES
+// exist, so a symlink escape is caught by confinePath's Rel check even when
+// the final path component is absent. On total failure (nothing resolves) the
+// cleaned lexical path is returned and the caller's escape check still
+// applies lexically.
+func evalSymlinksNearest(p string) string {
+	cur := filepath.Clean(p)
+	var tail []string
+	for {
+		if resolved, err := filepath.EvalSymlinks(cur); err == nil {
+			if len(tail) == 0 {
+				return resolved
+			}
+			return filepath.Join(resolved, filepath.Join(tail...))
 		}
-		return "."
+		parent := filepath.Dir(cur)
+		if parent == cur { // reached the filesystem root
+			return filepath.Join(cur, filepath.Join(tail...))
+		}
+		tail = append([]string{filepath.Base(cur)}, tail...)
+		cur = parent
 	}
-	if abs, err := filepath.Abs(root); err == nil {
-		return filepath.Clean(abs)
+}
+
+// confinePath resolves candidate against root (a relative candidate is joined
+// to root first) and rejects any path that escapes root — via ".." segments
+// OR via a symlink whose target lies outside root. The returned path is the
+// symlink-resolved absolute path, safe to read. A candidate equal to root
+// itself is allowed (Rel returns ".").
+func confinePath(root, candidate string) (string, error) {
+	root = rootpkg.ResolveRoot(root)
+	cand := candidate
+	if !filepath.IsAbs(cand) {
+		cand = filepath.Join(root, cand)
 	}
-	return root
+	rootResolved := evalSymlinksNearest(root)
+	candResolved := evalSymlinksNearest(cand)
+	rel, err := filepath.Rel(rootResolved, candResolved)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("path %q escapes project root %s", candidate, root)
+	}
+	return candResolved, nil
 }
 
 // EvidenceProof provides an auditable, deterministic certificate verifying
@@ -64,7 +101,7 @@ func Anchor(ctx context.Context, h Hooks, args map[string]any) (string, error) {
 	symbol := mcpargs.ArgString(args, "symbol")
 	lineStr := mcpargs.ArgString(args, "line")
 	claim := mcpargs.ArgString(args, "claim")
-	root := resolveRoot(mcpargs.ArgString(args, "root"))
+	root := rootpkg.ResolveRoot(mcpargs.ArgString(args, "root"))
 
 	// Auto-extract from claim if file/symbol are missing
 	if file == "" && symbol == "" && claim != "" {
@@ -143,32 +180,40 @@ func Anchor(ctx context.Context, h Hooks, args map[string]any) (string, error) {
 			}
 		}
 
-		fullPath := filepath.Join(root, cleanRel)
-		data, err := os.ReadFile(fullPath)
+		fullPath, err := confinePath(root, cleanRel)
 		if err != nil {
 			proof.Verified = false
 			proof.Verification = fmt.Sprintf("File %s not accessible on disk: %v", cleanRel, err)
 		} else {
-			lines := strings.Split(string(data), "\n")
-			proof.File = cleanRel
-			proof.Verified = true
-
-			if reqLine > 0 && reqLine <= len(lines) {
-				proof.Line = reqLine
-				proof.Verification = fmt.Sprintf("File and line confirmed (%s:%d)", cleanRel, reqLine)
-				start := reqLine - 1
-				end := reqLine + 2
-				if end > len(lines) {
-					end = len(lines)
-				}
-				proof.Snippet = strings.TrimSpace(strings.Join(lines[start:end], "\n"))
-			} else if reqLine > len(lines) {
-				proof.Line = len(lines)
-				proof.LineDrift = len(lines) - reqLine
-				proof.Verification = fmt.Sprintf("Line %d exceeds file length (%d lines); anchored to file tail", reqLine, len(lines))
+			data, err := os.ReadFile(fullPath)
+			if err != nil {
+				proof.Verified = false
+				proof.Verification = fmt.Sprintf("File %s not accessible on disk: %v", cleanRel, err)
 			} else {
-				proof.Line = 1
-				proof.Verification = fmt.Sprintf("File confirmed (%d total lines)", len(lines))
+				lines := strings.Split(string(data), "\n")
+				proof.File = cleanRel
+				proof.Verified = true
+
+				if reqLine > 0 && reqLine <= len(lines) {
+					proof.Line = reqLine
+					proof.Verification = fmt.Sprintf("File and line confirmed (%s:%d)", cleanRel, reqLine)
+					start := reqLine - 1
+					end := reqLine + 2
+					if end > len(lines) {
+						end = len(lines)
+					}
+					// Mask the returned content lines: the snippet is
+					// evidence of file+line existence, not a channel for raw
+					// secrets (tokens, keys) from the verified file.
+					proof.Snippet = strings.TrimSpace(pii.Mask(strings.Join(lines[start:end], "\n")).Text)
+				} else if reqLine > len(lines) {
+					proof.Line = len(lines)
+					proof.LineDrift = len(lines) - reqLine
+					proof.Verification = fmt.Sprintf("Line %d exceeds file length (%d lines); anchored to file tail", reqLine, len(lines))
+				} else {
+					proof.Line = 1
+					proof.Verification = fmt.Sprintf("File confirmed (%d total lines)", len(lines))
+				}
 			}
 		}
 	} else {

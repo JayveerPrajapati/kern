@@ -19,7 +19,7 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/governance"
 	"github.com/JayveerPrajapati/kern/internal/host"
 	"github.com/JayveerPrajapati/kern/internal/index"
-	"github.com/JayveerPrajapati/kern/internal/intelligence"
+	"github.com/JayveerPrajapati/kern/internal/intel"
 	"github.com/JayveerPrajapati/kern/internal/memory"
 	"github.com/JayveerPrajapati/kern/internal/retrieval"
 	"github.com/JayveerPrajapati/kern/internal/tokenize"
@@ -297,7 +297,7 @@ func VerifyTokenReduction(root, symbol string) (eval.EvalResult, error) {
 // assessment passes instead of emitting a "DENIED: register the agent before
 // use" policy fact that would leak "governance" into the rendered output.
 func analyzePacket(root string, ix *index.Index, symbol string) (domain.ContextPacket, error) {
-	g := intelligence.FromIndex(ix)
+	g := intel.FromIndex(ix)
 	mem := memory.NewMemoryStore(root)
 	fw := governance.NewFirewall().WithAgents(governance.NewAgent(
 		"context-engine", "Context Engine", "analyzer",

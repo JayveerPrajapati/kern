@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/JayveerPrajapati/kern/internal/domain"
 	"github.com/JayveerPrajapati/kern/internal/index"
 	"github.com/JayveerPrajapati/kern/internal/intel"
 )
@@ -40,12 +41,12 @@ func (e *Engine) Check(ix *index.Index, files []string) []Violation {
 	// dirMatch only does exact/prefix/suffix comparison, so normalize glob
 	// suffixes (e.g. "web/**") to a form it understands: stripping "/**" lets the
 	// existing prefix check ("pattern/…") match self-or-descendant.
-	var br []intel.BoundaryRule
+	var br []domain.BoundaryRule
 	for _, r := range e.config.Rules {
 		if r.From == "" || r.To == "" {
 			continue
 		}
-		br = append(br, intel.BoundaryRule{From: normalizeGlob(r.From), To: normalizeGlob(r.To), Action: r.Action})
+		br = append(br, domain.BoundaryRule{From: normalizeGlob(r.From), To: normalizeGlob(r.To), Action: r.Action})
 	}
 	severityOf := func(from, to, action string) string {
 		for _, r := range e.config.Rules {

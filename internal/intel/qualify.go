@@ -22,7 +22,7 @@ import (
 // unique symbols (and every existing test fixture) behave exactly as before.
 
 // packagePathByFile maps each indexed file to its package path, mirroring
-// internal/intelligence packagePathByFile (kept local so intel does not grow
+// intel graphPackagePathByFile (kept local so intel does not grow
 // a dependency on the intelligence package).
 func packagePathByFile(ix *index.Index) map[string]string {
 	m := make(map[string]string, len(ix.Pkgs))

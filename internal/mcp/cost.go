@@ -27,7 +27,7 @@ var (
 // Mirrors the slowTools progress set plus the LLM-class tools (analyze/plan
 // wait on a model call).
 var slowCostTools = map[string]bool{
-	"kern_sandbox": true, "kern_heal": true, "kern_run_build": true,
+	"kern_sandbox": true, "kern_heal": true,
 	"kern_execute": true, "kern_verify": true, "kern_validate": true,
 	"kern_doc_index": true, "kern_analyze": true, "kern_plan": true,
 }
@@ -36,7 +36,7 @@ var slowCostTools = map[string]bool{
 // touch the symbol index but return bounded results.
 var mediumCostTools = map[string]bool{
 	"kern_search": true, "kern_explore": true, "kern_context": true,
-	"kern_graph": true, "kern_code_graph": true, "kern_probe": true,
+	"kern_graph": true, "kern_probe": true,
 	"kern_impact": true, "kern_arch": true, "kern_project_map": true,
 	"kern_optimize_prompt": true, "kern_pack": true, "kern_retrieve": true,
 	"kern_resolve": true, "kern_what_if": true, "kern_why": true,

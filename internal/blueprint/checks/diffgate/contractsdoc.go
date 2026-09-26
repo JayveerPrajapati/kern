@@ -42,10 +42,10 @@ var contractsRiskOrder = []string{"low", "medium", "high", "critical"}
 // generator preserves it verbatim so regeneration never loses it.
 const contractsExamples = `## Usage examples
 
-### Example 1 — explore: understand a symbol (` + "`kern_code_graph`" + `)
+### Example 1 — explore: understand a symbol (` + "`kern_graph`" + `)
 
 ` + "```json" + `
-{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"kern_code_graph","arguments":{"symbol":"User.Login","root":"/path/to/project"}}}
+{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"kern_graph","arguments":{"symbol":"User.Login","root":"/path/to/project"}}}
 ` + "```" + `
 
 ### Example 2 — plan: simulate an impact (` + "`kern_impact`" + `)
@@ -94,7 +94,7 @@ func GenerateContractsDoc(catalog []ToolInfo) []byte {
 	b.WriteString("     Run `kern gen-contracts` after adding, renaming, or changing an MCP tool.\n")
 	b.WriteString("     The contracts:doc gate fails when this file is stale or a tool is missing. -->\n")
 	b.WriteString("# Kern MCP Tool Contracts\n\n")
-	b.WriteString("> **Source of truth:** `internal/mcp/tools.go` — the tool registration table. This document is generated from that table; if the two disagree, the table wins.\n\n")
+	b.WriteString("> **Source of truth:** `internal/mcp/catalog/tools.go` — the tool registration table. This document is generated from that table; if the two disagree, the table wins.\n\n")
 	b.WriteString("This page is the authoritative reference for every tool the kern MCP server exposes. Each contract lists the tool's name, agent phase, risk level, description, input parameters and required parameters.\n\n")
 
 	// D6: the argument-coercion contract shared by every tool. Kept inside the

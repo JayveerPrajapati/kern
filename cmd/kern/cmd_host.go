@@ -13,14 +13,8 @@ import (
 // detected host instruction file (CLAUDE.md, AGENTS.md, .cursor rules, GitHub
 // copilot instructions), or dry-runs / checks / uninstalls that injection.
 func runHost(rest []string) {
-	f, _, err := parseFlags(rest)
-	if err != nil {
-		fatalUsage("flags: %v", err)
-	}
-	root := f.root
-	if root == "" {
-		root = "."
-	}
+	f, _ := parseFlagsOrDie(rest)
+	root := projectRoot(f)
 	pipeline := host.NewPipeline(host.NewRegistry())
 
 	switch {

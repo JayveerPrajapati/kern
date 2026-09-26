@@ -128,20 +128,24 @@ func collectTestFiles(t *testing.T, root string) (map[string]string, map[string]
 	return cachedTestFiles, cachedFileFuncs
 }
 
-// TestRegistryShape pins the registry contract: exactly 39 gates, IDs G0-G39
-// in order with no duplicates (G10 is retired along with the deleted
-// internal/blueprint/watcher package, leaving a single documented gap), and
+// TestRegistryShape pins the registry contract: gates G0-G39 in order with
+// no duplicates and documented gaps (G10 retired with the deleted watcher
+// package; G37/G38 retired with the deleted decision-record system), and
 // every field populated.
 func TestRegistryShape(t *testing.T) {
-	if len(Registry) != 39 {
-		t.Fatalf("Registry has %d entries, want 39 (G0-G39, G10 retired)", len(Registry))
+	// Retired gate numbers, in ascending order.
+	retired := []int{10, 37, 38}
+	want := 40 - len(retired)
+	if len(Registry) != want {
+		t.Fatalf("Registry has %d entries, want %d (G0-G39 minus retired %v)", len(Registry), want, retired)
 	}
 	seen := make(map[string]bool, len(Registry))
+	ri := 0
 	for i, g := range Registry {
-		wantID := "G" + itoa(i)
-		if i >= 10 {
-			wantID = "G" + itoa(i+1) // G10 retired with the watcher package
+		for ri < len(retired) && i+ri == retired[ri] {
+			ri++
 		}
+		wantID := "G" + itoa(i+ri)
 		if g.ID != wantID {
 			t.Errorf("Registry[%d].ID = %q, want %q (gates must be G0-G39 in order, G10 retired)", i, g.ID, wantID)
 		}

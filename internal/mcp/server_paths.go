@@ -7,7 +7,7 @@ import (
 	"strings"
 
 	"github.com/JayveerPrajapati/kern/internal/config"
-	"github.com/JayveerPrajapati/kern/internal/verify"
+	"github.com/JayveerPrajapati/kern/internal/verification"
 )
 
 const (
@@ -34,25 +34,67 @@ func SetServerVersion(v string) {
 	}
 }
 
-// defaultWorkspaceRoots returns the roots tools may target: KERN_ROOTS (or
-// mcp.roots in .kern/config.json) when set, else the startup directory. Every
-// tool root/dir is confined to these.
-func defaultWorkspaceRoots() []string {
+// workspaceRootsFromEnv returns the roots configured via the documented
+// confinement variables (KERN_MCP_ROOTS, the historical KERN_ROOTS alias, and
+// mcp.roots in .kern/config.json), deduplicated, in no particular order. It
+// is the env-scan half of defaultWorkspaceRoots (process-cwd fallback) — the
+// single-root stdio MCP server's workspace. Root-bound servers
+// (workspaceRootsForRoot) deliberately do NOT use it: per-App isolation.
+func workspaceRootsFromEnv() []string {
 	var roots []string
-	for _, r := range config.StringsSplit("", "KERN_ROOTS", "mcp.roots", nil, func(s string) []string {
+	seen := map[string]bool{}
+	split := func(s string) []string {
 		return strings.FieldsFunc(s, func(r rune) bool { return r == ':' || r == ',' })
-	}) {
+	}
+	add := func(r string) {
 		r = strings.TrimSpace(r)
-		if r != "" {
-			roots = append(roots, resolveAbs(r))
+		if r == "" {
+			return
+		}
+		abs := resolveAbs(r)
+		if !seen[abs] {
+			seen[abs] = true
+			roots = append(roots, abs)
 		}
 	}
+	for _, r := range config.StringsSplit("", "KERN_MCP_ROOTS", "mcp.roots", nil, split) {
+		add(r)
+	}
+	for _, r := range config.StringsSplit("", "KERN_ROOTS", "mcp.roots", nil, split) {
+		add(r)
+	}
+	return roots
+}
+
+// defaultWorkspaceRoots returns the roots tools may target. KERN_MCP_ROOTS is
+// the documented confinement variable (see gate.go) and must be honored as a
+// workspace root too — otherwise a root configured through the documented env
+// is confined to but never served by the tools (F2). KERN_ROOTS remains
+// accepted as the historical alias, and mcp.roots in .kern/config.json still
+// applies. All three sources merge, deduplicated; with none set the roots
+// fall back to the startup directory. Every tool root/dir is confined to
+// these.
+func defaultWorkspaceRoots() []string {
+	roots := workspaceRootsFromEnv()
 	if len(roots) == 0 {
 		if cwd, err := os.Getwd(); err == nil {
 			roots = []string{resolveAbs(cwd)}
 		}
 	}
 	return roots
+}
+
+// workspaceRootsForRoot returns the workspace roots for a server serving
+// root: the root itself, absolute and cleaned. The global confinement env
+// (KERN_MCP_ROOTS / KERN_ROOTS / mcp.roots) is deliberately NOT merged — a
+// root-bound server (NewServerForRoot, backing the web-console tool
+// passthrough: single-project `kern serve` and enterprise per-App alike)
+// must confine to the project it serves ONLY, so one App's console can never
+// target another App's tree even when the operator set a cross-App root
+// list. The env keeps its widening semantics on the single-root stdio MCP
+// server (defaultWorkspaceRoots).
+func workspaceRootsForRoot(root string) []string {
+	return []string{resolveAbs(root)}
 }
 
 // resolveAbs cleans p to an absolute path.
@@ -63,11 +105,21 @@ func resolveAbs(p string) string {
 	return filepath.Clean(p)
 }
 
-// checkRootArg rejects any non-empty root/dir tool argument that resolves
+// checkRootArg rejects any non-empty path-typed tool argument that resolves
 // outside the server's workspace roots. Called once per tool call before
-// dispatch so confinement cannot be forgotten for a new tool.
+// dispatch so confinement cannot be forgotten for a new tool. The key list
+// mirrors isPathKey's fixed keys ("root", "dir", plus the file-path args
+// "file", "output", "disk_path") and every *_file key (base_file,
+// local_file, remote_file, ...) that appears in the call. Bare "target" is
+// deliberately NOT confined: it is a symbol/test-target name, not a path.
 func (s *Server) checkRootArg(args map[string]any) error {
-	for _, key := range []string{"root", "dir"} {
+	keys := []string{"root", "dir", "file", "output", "disk_path"}
+	for k := range args {
+		if strings.HasSuffix(k, "_file") {
+			keys = append(keys, k)
+		}
+	}
+	for _, key := range keys {
 		v := argString(args, key)
 		if v == "" {
 			continue
@@ -129,10 +181,10 @@ func realPath(p string) (string, error) {
 }
 
 // within reports whether child is parent or a descendant of parent. Unlike
-// verify.WithinAbs it also rejects an absolute rel path (e.g. a different
+// verification.WithinAbs it also rejects an absolute rel path (e.g. a different
 // drive root on Windows).
 func within(parent, child string) bool {
-	if !verify.WithinAbs(parent, child) {
+	if !verification.WithinAbs(parent, child) {
 		return false
 	}
 	rel, err := filepath.Rel(parent, child)

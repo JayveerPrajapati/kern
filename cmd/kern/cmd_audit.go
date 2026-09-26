@@ -35,21 +35,15 @@ func runAudit(rest []string) {
 		}
 	}
 
-	f, args, err := parseFlags(rest)
-	if err != nil {
-		fatalUsage("flags: %v", err)
-	}
-	root := f.root
-	if root == "" {
-		root = "."
-	}
+	f, args := parseFlagsOrDie(rest)
+	root := projectRoot(f)
 
 	taskID := ""
 	if len(args) > 0 {
 		taskID = args[0]
 	}
 
-	entries, err := svc.Governance.Audit(context.Background(), root, taskID)
+	entries, err := governance.ReadAuditTrail(context.Background(), root, taskID)
 	if err != nil {
 		fatal("Audit: %v", err)
 	}
@@ -95,6 +89,14 @@ func runAudit(rest []string) {
 				} else {
 					fmt.Fprintf(os.Stderr, "WARNING: audit log tamper chain verification FAILED at entry %d of %d — governance records may have been modified; investigate before trusting them (kern audit repair / kern evidence verify)\n", brk+1, len(all))
 				}
+			}
+			// Surface degraded chain integrity: when the HMAC secret is
+			// unavailable, hashes fall back to plain SHA-256 and
+			// VerifyChainReport still passes, so the degradation must be
+			// visible here rather than silent (the write path deliberately
+			// never loses entries over an unavailable key).
+			if l.IntegrityMode() == "plain" {
+				fmt.Fprintf(os.Stderr, "WARNING: audit chain HMAC secret unavailable — hashes are plain SHA-256 (full-chain-rewrite tamper protection is OFF); restore the key at <UserConfigDir>/kern/audit-chain.key, then run `kern audit repair`\n")
 			}
 		}
 	}
@@ -205,17 +207,11 @@ func blueprintApprovalAuditEntries(root string, existing []governance.AuditEntry
 
 // runAuditAppend links an external entry into the tamper-evident audit chain.
 func runAuditAppend(rest []string) {
-	f, args, err := parseFlags(rest)
-	if err != nil {
-		fatalUsage("flags: %v", err)
-	}
+	f, args := parseFlagsOrDie(rest)
 	if len(args) > 0 {
 		fatalUsage("audit append: unexpected argument %q (entry JSON comes from stdin or --file)", args[0])
 	}
-	root := f.root
-	if root == "" {
-		root = "."
-	}
+	root := projectRoot(f)
 
 	var entry governance.AuditEntry
 	var raw map[string]any
@@ -319,17 +315,11 @@ func applyAuditEntryAliases(e *governance.AuditEntry, raw map[string]any) {
 // bug) but cannot distinguish those from genuine tampering, so it only runs
 // on explicit user request.
 func runAuditRepair(rest []string) {
-	f, args, err := parseFlags(rest)
-	if err != nil {
-		fatalUsage("flags: %v", err)
-	}
+	f, args := parseFlagsOrDie(rest)
 	if len(args) > 0 {
 		fatalUsage("audit repair: unexpected argument %q", args[0])
 	}
-	root := f.root
-	if root == "" {
-		root = "."
-	}
+	root := projectRoot(f)
 
 	auditDir := filepath.Join(root, ".kern", "audit")
 	if fi, err := os.Stat(auditDir); err != nil || !fi.IsDir() {

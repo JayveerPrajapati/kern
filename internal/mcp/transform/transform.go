@@ -6,12 +6,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/JayveerPrajapati/kern/internal/index"
 	"github.com/JayveerPrajapati/kern/internal/mcp/mcpargs"
+	"github.com/JayveerPrajapati/kern/internal/mcp/root"
 	"github.com/JayveerPrajapati/kern/internal/transform"
 )
 
@@ -20,22 +19,9 @@ type Hooks struct {
 	LoadIndex func(ctx context.Context, root string) (*index.Index, error)
 }
 
-func resolveRoot(root string) string {
-	if root == "" {
-		if cwd, err := os.Getwd(); err == nil {
-			return filepath.Clean(cwd)
-		}
-		return "."
-	}
-	if abs, err := filepath.Abs(root); err == nil {
-		return filepath.Clean(abs)
-	}
-	return root
-}
-
 // Transform executes an AST-level semantic mutation without fragile regex diffs.
 func Transform(ctx context.Context, h Hooks, args map[string]any) (string, error) {
-	root := resolveRoot(mcpargs.ArgString(args, "root"))
+	root := root.ResolveRoot(mcpargs.ArgString(args, "root"))
 	action := mcpargs.ArgString(args, "action")
 	if action == "" {
 		action = "implement_interface"

@@ -5,7 +5,7 @@ import (
 
 	"github.com/JayveerPrajapati/kern/internal/domain"
 	"github.com/JayveerPrajapati/kern/internal/governance"
-	"github.com/JayveerPrajapati/kern/internal/intelligence"
+	"github.com/JayveerPrajapati/kern/internal/intel"
 	"github.com/JayveerPrajapati/kern/internal/memory"
 )
 
@@ -32,7 +32,7 @@ func clearanceTestEngine(t *testing.T, withClearance bool) *Engine {
 		[]governance.Permission{{Resource: "source", Action: "write"}},
 	))
 
-	g := intelligence.FromIndex(fakeIndex())
+	g := intel.FromIndex(fakeIndex())
 	e := NewEngine("/fake", &g, mem, fw)
 	if withClearance {
 		e.WithClearance(1) // internal — restricted (level 3) must be filtered
