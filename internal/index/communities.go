@@ -25,6 +25,7 @@ func (ix *Index) CommunityLabels() map[string]string {
 		localFull[s.FullName()] = true
 	}
 	adj := map[string][]string{}
+	adjSet := map[string]map[string]bool{}
 	nodes := []string{}
 	for _, s := range ix.Symbols {
 		caller := s.FullName()
@@ -39,10 +40,21 @@ func (ix *Index) CommunityLabels() map[string]string {
 			if !localFull[c] {
 				continue
 			}
-			if !containsStr(adj[caller], c) {
+			// Set-membership dedup keeps adjacency insertion O(1) per edge
+			// instead of the old containsStr linear scan (O(degree) per
+			// insert, quadratic on hub files with thousands of calls).
+			if !adjSet[caller][c] {
+				if adjSet[caller] == nil {
+					adjSet[caller] = map[string]bool{}
+				}
+				adjSet[caller][c] = true
 				adj[caller] = append(adj[caller], c)
 			}
-			if !containsStr(adj[c], caller) {
+			if !adjSet[c][caller] {
+				if adjSet[c] == nil {
+					adjSet[c] = map[string]bool{}
+				}
+				adjSet[c][caller] = true
 				adj[c] = append(adj[c], caller)
 			}
 			nodes = append(nodes, caller, c)
@@ -92,6 +104,9 @@ func (ix *Index) CommunityLabels() map[string]string {
 	return label
 }
 
+// containsStr reports whether s appears in list. Production adjacency
+// building uses set-based dedup (see CommunityLabels); this helper remains
+// for the package's tests.
 func containsStr(list []string, s string) bool {
 	for _, v := range list {
 		if v == s {

@@ -95,13 +95,15 @@ var (
 	reDisabledSsl = regexp.MustCompile(`(?im)^[^#=\s]*(?:ssl|tls|certificate)[^=]*(?:verify|verification|validation|enabled)\s*=\s*false\b`)
 )
 
-// Rules is the deterministic rule set, sorted by ID then summary. The
+// rules is the deterministic rule set, sorted by ID then summary. The
 // hardcoded-secret rule is expanded per pii label so messages stay precise.
-var Rules []Rule
+// Unexported: the set is immutable after init and must not be mutated across
+// package boundaries.
+var rules []Rule
 
 func init() {
 	for _, p := range pii.DefaultPatterns {
-		Rules = append(Rules, Rule{
+		rules = append(rules, Rule{
 			ID:       "hardcoded-secret",
 			Severity: SeverityError,
 			Summary:  "hardcoded secret: " + p.Label,
@@ -109,7 +111,7 @@ func init() {
 			Label:    p.Label,
 		})
 	}
-	Rules = append(Rules,
+	rules = append(rules,
 		Rule{ID: "sql-injection", Severity: SeverityError, Summary: "dynamic SQL built from variables", RE: reDynamicSQL},
 		Rule{ID: "command-injection", Severity: SeverityError, Summary: "shell command built from variables", RE: reCommandInjection},
 		Rule{ID: "unsafe-deserialization", Severity: SeverityWarning, Summary: "untrusted input deserialized into untyped/weak types", RE: reUnsafeDeserialization},
@@ -118,11 +120,11 @@ func init() {
 		Rule{ID: "insecure-random", Severity: SeverityWarning, Summary: "non-cryptographic randomness for security-relevant data", RE: reInsecureRandom},
 		Rule{ID: "weak-crypto", Severity: SeverityWarning, Summary: "deprecated or weak cryptographic primitive", RE: reWeakCrypto},
 	)
-	sort.SliceStable(Rules, func(i, j int) bool {
-		if Rules[i].ID != Rules[j].ID {
-			return Rules[i].ID < Rules[j].ID
+	sort.SliceStable(rules, func(i, j int) bool {
+		if rules[i].ID != rules[j].ID {
+			return rules[i].ID < rules[j].ID
 		}
-		return Rules[i].Summary < Rules[j].Summary
+		return rules[i].Summary < rules[j].Summary
 	})
 }
 
@@ -140,7 +142,7 @@ func isLockfile(rel string) bool {
 // path used only for reporting.
 func ScanFile(rel string, src []byte) []Finding {
 	var findings []Finding
-	for _, r := range Rules {
+	for _, r := range rules {
 		for _, idx := range r.RE.FindAllIndex(src, -1) {
 			if pii.IsNonSecretIP(r.Label, string(src[idx[0]:idx[1]])) {
 				continue
@@ -160,6 +162,18 @@ func ScanFile(rel string, src []byte) []Finding {
 					continue
 				}
 				if strings.HasSuffix(rel, ".svg") {
+					continue
+				}
+				// Version fields, not addresses: a dotted quad in the
+				// value position of a version key ("version": "0.9.9.1"
+				// in JSON, version: 1.2.3.4 in YAML, version=1.2.3.4 in
+				// properties) is a build string, never an endpoint. And a
+				// four-dotted number whose first octet is 0 (0.0.0.0/8,
+				// "this network", RFC 791) is never a literal host
+				// address — it reads as a version (0.9.9.1). e2e: kern
+				// security on kern's own repo flagged server.json's
+				// "version": "0.9.9.1" and failed the CI gate.
+				if isVersionKeyContext(src, idx[0]) || hasLeadingZeroOctet(string(src[idx[0]:idx[1]])) {
 					continue
 				}
 			}
@@ -219,6 +233,15 @@ func ScanFile(rel string, src []byte) []Finding {
 				continue
 			}
 			if r.Label == "HEX" && isDocumentedChecksum(src, idx[0], idx[1]) {
+				continue
+			}
+			// Hash registries (internal/setup/plugin_hashes.go): a SHA-256
+			// table whose entries map a 64-hex digest to a boolean is a
+			// shipped-artifact allowlist, not a credential. Two gates must
+			// BOTH pass (see isHashTableContext), so a real 64-char hex
+			// secret in a value position is still flagged even in a file
+			// named *hashes.go.
+			if r.Label == "HEX" && isHashTableContext(src, idx[0], idx[1], rel) {
 				continue
 			}
 			// Skip matches inside source-code comment lines (// or # after
@@ -352,6 +375,29 @@ func isExampleDomain(host string) bool {
 		strings.HasSuffix(h, ".example.com") ||
 		strings.HasSuffix(h, ".example.org") ||
 		strings.HasSuffix(h, ".example.net")
+}
+
+// reVersionKey matches the tail of a line up to an IP-labeled match when
+// the match sits in the value position of a version-ish key: "version":
+// (JSON), appVersion: (YAML), build_version= (properties). Case-insensitive;
+// the leading [\w.-]* lets compound keys (app_version, build.Version)
+// qualify.
+var reVersionKey = regexp.MustCompile(`(?i)[\w.-]*version[\w.-]*["']?\s*[:=]\s*["']?\s*$`)
+
+// isVersionKeyContext reports whether the match at pos is the value of a
+// version key on its line — a build string, not a network address.
+func isVersionKeyContext(src []byte, pos int) bool {
+	lineStart, _ := lineBounds(src, pos)
+	return reVersionKey.Match(src[lineStart:pos])
+}
+
+// hasLeadingZeroOctet reports whether an IPv4-looking hit starts "0." —
+// 0.0.0.0/8 ("this network", RFC 791) is never a literal host address, so a
+// four-dotted number with a leading zero octet is a version string (0.9.9.1)
+// the IP pattern reads as an address. 0.0.0.0 itself is already suppressed
+// as an unspecified address by pii.IsNonSecretIP.
+func hasLeadingZeroOctet(hit string) bool {
+	return len(hit) > 1 && hit[0] == '0' && hit[1] == '.'
 }
 
 // isRuleIDLiteral reports whether the match at pos is the quoted value of a
@@ -907,7 +953,7 @@ func ScanConfigFile(rel string, src []byte) []Finding {
 	return findings
 }
 
-// configRules are the config-specific rules. They are separate from Rules
+// configRules are the config-specific rules. They are separate from rules
 // (source-code rules) so they only fire on config files, not source code
 // that might contain similar patterns (e.g. a Go string literal with $VAR).
 var configRules = []Rule{
@@ -975,7 +1021,73 @@ func isDocumentedChecksum(src []byte, start, end int) bool {
 		// which would otherwise compute src[:-1] and panic.
 		return false
 	}
+	// JSON key/value form ("sha256": "<64-hex>"): the key itself names the
+	// value a checksum — e.g. the diff-gate tool-schema baseline carries one
+	// digest per MCP tool. A key naming the hash is not a hardcoded secret.
+	kv := bytes.TrimSpace(src[lineStart:start])
+	// JSON string values carry their opening quote before the match:
+	// "sha256": "<hex>" — strip it before the colon-suffix check.
+	kv = bytes.TrimSpace(bytes.TrimSuffix(kv, []byte("\"")))
+	if bytes.HasSuffix(kv, []byte(":")) {
+		key := bytes.Trim(bytes.TrimSuffix(kv, []byte(":")), "\"'")
+		if checksumKeyRe.Match(key) {
+			return true
+		}
+	}
 	prevStart := bytes.LastIndexByte(src[:lineStart-1], '\n') + 1
 	prev := src[prevStart:lineStart]
 	return bytes.Contains(prev, []byte("checksum")) || bytes.Contains(prev, []byte("SHA-256"))
+}
+
+// checksumKeyRe matches JSON keys that name their value a checksum/digest.
+var checksumKeyRe = regexp.MustCompile(`^(?i)(sha-?256|sha-?512|sha-?1|md5|checksum|digest|hash)$`)
+
+// reHashTableEntry matches a boolean-valued map/set entry whose key is a
+// quoted 64-hex digest — the canonical shape of a hash registry
+// (`"<sha256>": true`), never a credential assignment. Credentials live in
+// value positions (`key = "<hex>"`, `"key": "<hex>"`); a digest as a map KEY
+// mapped to a boolean literal is a membership table.
+var reHashTableEntry = regexp.MustCompile(`^\s*"[0-9a-fA-F]{64}"\s*:\s*(?:true|false)\b`)
+
+// reHashVarDecl matches a map declaration whose variable name marks it a hash
+// registry: `var <name-with-hash> = map[...]...{` (e.g. shippedPluginHashes,
+// knownHashes). The declaration must sit before the match within a bounded
+// backward window.
+var reHashVarDecl = regexp.MustCompile(`(?i)\bvar\s+[a-z_][a-z0-9_]*hash[a-z0-9_]*\s*=\s*map\[`)
+
+// isHashTableContext reports whether a 64-hex match is the KEY of a
+// boolean-valued entry in a hash registry — a SHA-256 table
+// (internal/setup/plugin_hashes.go — 37 false positives, e2e), not a
+// credential. Two gates must both pass so a REAL 64-char hex secret is never
+// over-suppressed:
+//  1. the context names a hash table: the file name carries "hash"
+//     (plugin_hashes.go), or the nearest preceding `var <name> = map[`
+//     declaration names the variable with "hash"; AND
+//  2. the match line is exactly `"<64-hex>": true|false` — the digest sits
+//     in KEY position with a boolean value. A hex in VALUE position
+//     (`"api_key": "<hex>"`, `secret := "<hex>"`) is still flagged even in a
+//     file named *hashes.go.
+func isHashTableContext(src []byte, start, end int, rel string) bool {
+	if end-start != 64 {
+		return false
+	}
+	if !strings.Contains(strings.ToLower(filepath.Base(rel)), "hash") && !hashVarDeclBefore(src, start) {
+		return false
+	}
+	lineStart, lineEnd := lineBounds(src, start)
+	return reHashTableEntry.Match(src[lineStart:lineEnd])
+}
+
+// hashVarDeclBefore reports whether the match at pos sits inside a map
+// declaration whose variable name carries "hash": the nearest `var <name> =
+// map[` opening before pos (within a bounded backward window) names a hash
+// table. The 4 KiB window covers the declaration-to-first-entry distance in
+// typical registry files while staying line-scoped enough to never reach an
+// unrelated declaration two blocks away.
+func hashVarDeclBefore(src []byte, pos int) bool {
+	from := pos - 4096
+	if from < 0 {
+		from = 0
+	}
+	return reHashVarDecl.Match(src[from:pos])
 }

@@ -914,3 +914,113 @@ func TestSplitVerifyCommand(t *testing.T) {
 		}
 	}
 }
+
+// ---- F1: module-less roots degrade, never fail ----
+
+// TestVerifyStaticAnalysisNoModuleDegrades pins F1: a root WITHOUT go.mod
+// that has a stray .go file must not run `go vet ./...` (which exits 1 with
+// "directory prefix . does not contain main module") — the check degrades to
+// the per-file gofmt -e syntax baseline and passes.
+func TestVerifyStaticAnalysisNoModuleDegrades(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping real-execution verification in -short mode")
+	}
+	t.Parallel()
+	dir := t.TempDir()
+	writeTree(t, dir, map[string]string{
+		"stray.go": "package main\nfunc main() {}\n",
+	})
+	res := NewEngine(dir).Verify([]string{"static-analysis"})
+	if res.StaticAnalysis == nil {
+		t.Fatal("nil static analysis result")
+	}
+	if !res.StaticAnalysis.OK {
+		t.Errorf("module-less static analysis must degrade, not fail: %s", trunc(res.StaticAnalysis.Output))
+	}
+	if res.StaticAnalysis.Tool != "gofmt -e" {
+		t.Errorf("expected degraded tool gofmt -e, got %q", res.StaticAnalysis.Tool)
+	}
+	if len(res.StaticAnalysis.Findings) != 0 {
+		t.Errorf("expected no findings on the clean stray file, got %v", res.StaticAnalysis.Findings)
+	}
+	if res.Verdict == VerdictFail {
+		t.Error("module-less static analysis must not fail the verdict")
+	}
+}
+
+// TestVerifyTestsNoModuleSkips pins F1: with no detected test runner and no
+// go.mod, VerifyTests reports a clean skip instead of running `go test
+// ./...` (which dies outside a module).
+func TestVerifyTestsNoModuleSkips(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping real-execution verification in -short mode")
+	}
+	t.Parallel()
+	dir := t.TempDir()
+	writeTree(t, dir, map[string]string{
+		"stray.go": "package main\nfunc main() {}\n",
+	})
+	res := NewEngine(dir).VerifyTests()
+	if res == nil {
+		t.Fatal("nil test result")
+	}
+	if !res.OK {
+		t.Errorf("absent test suite must be a clean skip, not a FAIL: %s", trunc(res.Output))
+	}
+	if !strings.Contains(res.Output, "skipped") {
+		t.Errorf("output should explain the skip: %s", trunc(res.Output))
+	}
+	if res.Status == StatusSkipped {
+		// The npm-skip style sets OK=true with no Status; keep it that way.
+		t.Error("no-runner skip should not need StatusSkipped (OK=true carries it)")
+	}
+}
+
+// TestVerifyNoModuleDegradesNotFails pins F1 end-to-end: the full default
+// verify run on a no-go.mod root with a stray .go file (the live repro shape)
+// must degrade across every check — the verdict is never FAIL.
+func TestVerifyNoModuleDegradesNotFails(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping real-execution verification in -short mode")
+	}
+	t.Parallel()
+	dir := t.TempDir()
+	writeTree(t, dir, map[string]string{
+		"stray.go": "package main\nfunc main() {}\n",
+	})
+	res := NewEngine(dir).Verify(nil)
+	if res.Verdict == VerdictFail {
+		t.Errorf("verify on a module-less root must not FAIL; verdict=%q summary=%q", res.Verdict, res.Summary)
+	}
+	if res.Build == nil || !res.Build.OK {
+		t.Errorf("build must degrade on a module-less root: %s", trunc(res.Build.Output))
+	}
+	if res.StaticAnalysis == nil || !res.StaticAnalysis.OK {
+		t.Errorf("static analysis must degrade on a module-less root: %s", trunc(res.StaticAnalysis.Output))
+	}
+}
+
+// TestVerifyNestedModuleStrayRootGoFile pins the exact F1 live repro: a root
+// with a nested src/ module AND a stray root .go file used to exit 1 with
+// "pattern ./...: directory prefix . does not contain main module". The
+// verify run must degrade, never FAIL.
+func TestVerifyNestedModuleStrayRootGoFile(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping real-execution verification in -short mode")
+	}
+	t.Parallel()
+	dir := t.TempDir()
+	writeTree(t, dir, map[string]string{
+		"stray.go":         "package main\nfunc main() {}\n",
+		"src/go.mod":       "module nestedmod\n\ngo 1.20\n",
+		"src/main.go":      "package main\nfunc main() {}\n",
+		"src/main_test.go": "package main\nimport \"testing\"\nfunc TestAlwaysPass(t *testing.T) {}\n",
+	})
+	res := NewEngine(dir).Verify(nil)
+	if res.Verdict == VerdictFail {
+		t.Errorf("verify must not FAIL on the F1 repro shape; verdict=%q summary=%q", res.Verdict, res.Summary)
+	}
+	if res.StaticAnalysis == nil || !res.StaticAnalysis.OK {
+		t.Errorf("static analysis must degrade (gofmt baseline), not run go vet ./...: %s", trunc(res.StaticAnalysis.Output))
+	}
+}

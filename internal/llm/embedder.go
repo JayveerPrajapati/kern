@@ -40,6 +40,37 @@ func (e *Embedder) EmbedText(text string) ([]float32, error) {
 	return e.p.Embed(ctx, text)
 }
 
+// batchProvider is implemented by providers that embed many texts in a single
+// request (Ollama's /api/embed input array). Embedder uses it when available
+// and otherwise falls back to one request per text.
+type batchProvider interface {
+	EmbedBatch(ctx context.Context, texts []string) ([][]float32, error)
+}
+
+// EmbedBatch embeds many texts. When the backing provider supports it (Ollama)
+// the whole batch is one HTTP request bound by a single embedTimeout; otherwise
+// each text falls back to EmbedText's per-call timeout. Indexing a
+// multi-thousand-chunk corpus therefore costs one round-trip, not thousands.
+func (e *Embedder) EmbedBatch(texts []string) ([][]float32, error) {
+	if len(texts) == 0 {
+		return nil, nil
+	}
+	if bp, ok := e.p.(batchProvider); ok {
+		ctx, cancel := context.WithTimeout(context.Background(), embedTimeout)
+		defer cancel()
+		return bp.EmbedBatch(ctx, texts)
+	}
+	vecs := make([][]float32, len(texts))
+	for i, t := range texts {
+		v, err := e.EmbedText(t)
+		if err != nil {
+			return nil, err
+		}
+		vecs[i] = v
+	}
+	return vecs, nil
+}
+
 // Available reports whether the backing embedder can be reached. For the local
 // Ollama backend it probes the server (matching the historical CLI check); for
 // a remote provider it reports true (the caller assumes configuration intent).

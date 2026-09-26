@@ -269,6 +269,7 @@ func StripPromptFluff(text string) (string, int) {
 	var out []string
 	dropped := 0
 	inFence := false
+	seenLines := map[string]bool{}
 	for _, raw := range lines {
 		trimmed := strings.TrimRightFunc(raw, unicode.IsSpace)
 		if isFenceLine(trimmed) {
@@ -281,6 +282,11 @@ func StripPromptFluff(text string) (string, int) {
 			continue
 		}
 		clean := strings.TrimSpace(trimmed)
+		// Leading whitespace, computed BEFORE any in-line stripping: the old
+		// length-arithmetic reconstruction (raw[:len(trimmed)-len(clean)])
+		// silently re-inserted stripped filler as pseudo-indentation once
+		// clean could shrink mid-line (F-OP1).
+		indent := trimmed[:len(trimmed)-len(clean)]
 		if clean == "" {
 			out = append(out, "")
 			continue
@@ -289,8 +295,24 @@ func StripPromptFluff(text string) (string, int) {
 			dropped++
 			continue
 		}
+		// F-OP1: strip IN-LINE leading filler ("So basically I think that
+		// we should probably consider X" -> "consider X") — whole-line
+		// dropping alone left hedges embedded in payload lines untouched.
+		clean = stripInlineFillers(clean)
+		// F-OP1: dedup repeated lines across the WHOLE text (a sentence
+		// repeated 20 times with blanks between defeats the adjacent-only
+		// collapse in CompressPrompt). First occurrence wins; only
+		// substantial lines dedup so short legit repeats ("ok", "-") stay.
+		if len(clean) >= 8 {
+			key := strings.ToLower(clean)
+			if seenLines[key] {
+				dropped++
+				continue
+			}
+			seenLines[key] = true
+		}
 		// Keep the leading indentation, drop trailing whitespace (see Compress).
-		out = append(out, raw[:len(trimmed)-len(clean)]+clean)
+		out = append(out, indent+clean)
 	}
 	// Collapse blank runs and trim leading/trailing blanks (same as Compress).
 	var collapsed []string
@@ -316,6 +338,53 @@ func StripPromptFluff(text string) (string, int) {
 		return text, 0
 	}
 	return result, dropped
+}
+
+// inlineFillerPrefixes are hedge/opinion openers stripped from the START of
+// payload lines (F-OP1). Only unambiguous conversational padding: stripping can
+// never remove content words, so a line is never emptied (a line reduced to
+// nothing keeps its original text).
+var inlineFillerPrefixes = []string{
+	"so basically,", "so basically", "basically,", "basically",
+	"i think that", "i think", "i believe that", "i believe", "i feel like",
+	"i would say", "i'd say", "i'd argue", "i'm not sure but",
+	"in my opinion,", "in my opinion", "in my humble opinion",
+	"it seems like", "it seems", "it appears that",
+	"as you know,", "as you know", "you know,",
+	"we should probably", "we could probably", "you should probably",
+	"we might want to", "we may want to",
+	"maybe we should", "perhaps we should", "perhaps",
+	"just wanted to say", "i just want to say", "i just wanted to say",
+	"to be honest,", "to be honest", "honestly,", "honestly",
+	"at the end of the day,", "at the end of the day",
+	"let me be clear,", "what i'm saying is",
+	"i suggest that", "i recommend that",
+	"kind of,", "sort of,", "sorta",
+}
+
+// stripInlineFillers removes leading hedge/opinion filler from a line,
+// repeating until stable. A line that would be emptied is returned unchanged.
+func stripInlineFillers(line string) string {
+	cur := line
+	for {
+		lower := strings.ToLower(cur)
+		matched := false
+		for _, p := range inlineFillerPrefixes {
+			if strings.HasPrefix(lower, p) {
+				next := strings.TrimSpace(cur[len(p):])
+				next = strings.TrimLeft(next, ",;: ")
+				if next == "" {
+					return line // never empty a payload line
+				}
+				cur = next
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return cur
+		}
+	}
 }
 
 // promptFluffExact are whole lines that are pure conversational filler.
@@ -690,6 +759,7 @@ type TersifyStats struct {
 	DroppedFiller  int // filler/prose lines dropped
 	DroppedBlank   int // blank lines dropped
 	DroppedComment int // comment-only lines dropped
+	DroppedIssue   int // TODO/FIXME/XXX/HACK comment lines dropped (known-issue annotations)
 	DroppedBudget  int // lines dropped by the --max budget ceiling
 }
 
@@ -733,6 +803,12 @@ func Tersify(text string, maxTokens int) (string, TersifyStats) {
 			continue
 		}
 		if isCommentOnly(clean) {
+			// Count known-issue annotations (TODO/FIXME/XXX/HACK) before
+			// stripping them, so the summary header can surface that they
+			// existed in the compressed view.
+			if isIssueComment(clean) {
+				st.DroppedIssue++
+			}
 			st.DroppedComment++
 			continue
 		}
@@ -804,6 +880,31 @@ func isCommentOnly(s string) bool {
 // when Title-Cased ("TODO: fix", "# Fixme: ...").
 var commentMarkers = []string{
 	"todo:", "fixme:", "xxx:", "hack:",
+}
+
+// isIssueComment reports whether a comment-only line is a known-issue
+// annotation (TODO/FIXME/XXX/HACK). Tersify still strips these lines, but
+// counts them in TersifyStats.DroppedIssue so compressed views can surface
+// that known issues were removed.
+func isIssueComment(s string) bool {
+	var body string
+	switch {
+	case strings.HasPrefix(s, "//"):
+		body = strings.TrimSpace(strings.TrimPrefix(s, "//"))
+	case strings.HasPrefix(s, "/*") && strings.HasSuffix(s, "*/"):
+		body = strings.TrimSpace(s[2 : len(s)-2])
+	case strings.HasPrefix(s, "#"):
+		body = strings.TrimSpace(strings.TrimLeft(s, "#"))
+	default:
+		return false
+	}
+	lower := strings.ToLower(body)
+	for _, m := range commentMarkers {
+		if strings.HasPrefix(lower, m) {
+			return true
+		}
+	}
+	return false
 }
 
 // collapseSpaces collapses runs of repeated whitespace (2+ spaces/tabs) to a

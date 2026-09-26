@@ -46,6 +46,15 @@ type Embedder interface {
 	EmbedText(text string) ([]float32, error)
 }
 
+// batchEmbedder is the optional batched form of Embedder. Embedders backed by
+// a server that accepts input arrays (llm.Embedder on Ollama) implement it so
+// a multi-thousand-chunk index costs one HTTP round-trip instead of thousands.
+// IndexDirSemantic and ReembedFetch use it when present and otherwise fall
+// back to per-chunk EmbedText calls.
+type batchEmbedder interface {
+	EmbedBatch(texts []string) ([][]float32, error)
+}
+
 // Index is a set of embedded chunks for one root.
 type Index struct {
 	Root string `json:"root"`
@@ -179,6 +188,23 @@ func IndexDirSemantic(root string, e Embedder) (*Index, error) {
 	if e == nil {
 		return ix, nil
 	}
+	// Prefer one batched embedding request (Ollama input[]) for the whole
+	// index; a multi-thousand-chunk corpus must not cost thousands of HTTP
+	// round-trips. Fall back to per-chunk best effort when the embedder has
+	// no batch support or the batch fails, so a partially-available model
+	// still yields a usable index.
+	if be, ok := e.(batchEmbedder); ok {
+		texts := make([]string, len(ix.Docs))
+		for i := range ix.Docs {
+			texts[i] = ix.Docs[i].Chunk.Text
+		}
+		if vecs, err := be.EmbedBatch(texts); err == nil && len(vecs) == len(ix.Docs) {
+			for i := range ix.Docs {
+				ix.Docs[i].Semantic = vecs[i]
+			}
+			return ix, nil
+		}
+	}
 	for i := range ix.Docs {
 		vec, err := e.EmbedText(ix.Docs[i].Chunk.Text)
 		if err != nil {
@@ -309,17 +335,39 @@ func ReembedFetch(root, name string, e Embedder) (int, error) {
 		return 0, nil
 	}
 	file := fetchPrefix + name + ".md"
-	n := 0
+	// Index the fetched document's chunks in order so a single batched request
+	// can embed them all; fall back to per-chunk calls when the embedder has
+	// no batch support or the batch fails.
+	var idxs []int
 	for i := range ix.Docs {
-		if ix.Docs[i].Chunk.File != file {
-			continue
+		if ix.Docs[i].Chunk.File == file {
+			idxs = append(idxs, i)
 		}
-		vec, err := e.EmbedText(ix.Docs[i].Chunk.Text)
-		if err != nil {
-			continue
+	}
+	n := 0
+	batched := false
+	if be, ok := e.(batchEmbedder); ok && len(idxs) > 0 {
+		texts := make([]string, len(idxs))
+		for j, i := range idxs {
+			texts[j] = ix.Docs[i].Chunk.Text
 		}
-		ix.Docs[i].Semantic = vec
-		n++
+		if vecs, err := be.EmbedBatch(texts); err == nil && len(vecs) == len(idxs) {
+			for j, i := range idxs {
+				ix.Docs[i].Semantic = vecs[j]
+			}
+			n = len(idxs)
+			batched = true
+		}
+	}
+	if !batched {
+		for _, i := range idxs {
+			vec, err := e.EmbedText(ix.Docs[i].Chunk.Text)
+			if err != nil {
+				continue
+			}
+			ix.Docs[i].Semantic = vec
+			n++
+		}
 	}
 	if err := ix.Save(); err != nil {
 		return n, err

@@ -4,6 +4,7 @@ import (
 	stdctx "context"
 	"errors"
 	"fmt"
+	"log"
 	"strings"
 	"sync"
 	"time"
@@ -482,7 +483,12 @@ func (e *WorkflowEngine) RunContext(ctx stdctx.Context, rootTask *Task, stepHand
 // set) so terminal transitions survive across sessions.
 func (e *WorkflowEngine) persist(t *Task) {
 	if st := e.registry.TaskStore(); st != nil {
-		_, _ = st.Save(*t)
+		if _, err := st.Save(*t); err != nil {
+			// Workflow state persistence is best-effort (the run continues
+			// when the store fails), but a silent drop hides lost state:
+			// surface it loudly so resume state loss is observable in logs.
+			log.Printf("kern agent: task %s workflow state could not be persisted: %v", t.ID, err)
+		}
 	}
 }
 

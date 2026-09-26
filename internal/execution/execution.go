@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/JayveerPrajapati/kern/internal/governance"
+	"github.com/JayveerPrajapati/kern/internal/index"
 	"github.com/JayveerPrajapati/kern/internal/metrics"
 	"github.com/JayveerPrajapati/kern/internal/sandbox"
 )
@@ -92,6 +93,14 @@ type Result struct {
 // (e.g. ["test", "./..."]). timeout limits the execution; a non-positive
 // timeout means no explicit limit beyond the sandbox run.
 func (e *Executor) Execute(command string, args []string, timeout time.Duration) Result {
+	return e.runIn(e.projectRoot(), command, args, timeout)
+}
+
+// runIn is Execute's core: runs command in dir under the sandbox, honoring
+// the optional governance gate (fail closed). Execute uses the executor
+// root; the build/test helpers use the discovered Go module root when the
+// project's module lives in a subdirectory (F1).
+func (e *Executor) runIn(dir, command string, args []string, timeout time.Duration) Result {
 	metrics.Default().RecordSandboxOp()
 	start := time.Now()
 	defer func() { metrics.Default().RecordToolCall(time.Since(start)) }()
@@ -99,15 +108,14 @@ func (e *Executor) Execute(command string, args []string, timeout time.Duration)
 	if args == nil {
 		args = []string{}
 	}
-	root := e.projectRoot()
 	// When a governance gate is configured, refuse to run the command if the
 	// gate denies it (fail closed).
 	if e != nil && e.check != nil {
 		if err := e.check(command, args); err != nil {
-			return Result{OK: false, Err: err, Root: root}
+			return Result{OK: false, Err: err, Root: dir}
 		}
 	}
-	r := sandbox.Run(context.Background(), root, command, args, timeout)
+	r := sandbox.Run(context.Background(), dir, command, args, timeout)
 	return Result{
 		OK:        r.OK,
 		ExitCode:  r.ExitCode,
@@ -116,49 +124,92 @@ func (e *Executor) Execute(command string, args []string, timeout time.Duration)
 		Duration:  r.Duration,
 		Restored:  r.Restored,
 		Snapshots: r.Snapshots,
-		Root:      root,
+		Root:      dir,
 	}
 }
 
-// buildCommand returns the shell-free command name and args used to build a
-// project at root. Go projects use "go build ./..."; projects with a Makefile
-// use "make" (with no args). A missing (nil) slice means no args.
-func buildCommand(root string) (string, []string, error) {
+// goModuleRoot returns the directory whose go.mod defines the Go module for
+// a project at root: root itself when root/go.mod exists, otherwise the
+// single nested go.mod discovered within two directory levels (the Go
+// analogue of the nested pom.xml/gradle discovery in internal/validate).
+// Returns "" when no go.mod is in scope, or when the discovery is ambiguous
+// (multiple nested modules) — ambiguous roots keep their existing
+// no-module behavior rather than guessing (F1).
+func goModuleRoot(root string) string {
 	if _, err := os.Stat(filepath.Join(root, "go.mod")); err == nil {
-		return "go", []string{"build", "./..."}, nil
+		return root
+	}
+	var found string
+	multiple := false
+	_ = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if d.IsDir() {
+			if path != root && index.IgnoredDir(d.Name()) {
+				return filepath.SkipDir
+			}
+			// Bounded discovery: only two directory levels below root.
+			rel, rerr := filepath.Rel(root, path)
+			if rerr == nil && strings.Count(rel, string(filepath.Separator)) >= 2 {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if d.Name() == "go.mod" {
+			if found != "" {
+				multiple = true
+				return filepath.SkipAll
+			}
+			found = filepath.Dir(path)
+		}
+		return nil
+	})
+	if found == "" || multiple {
+		return ""
+	}
+	return found
+}
+
+// buildCommand returns the shell-free command name, args, and working
+// directory used to build a project at root. Go projects use "go build
+// ./..." inside the module root — root itself, or a nested module discovered
+// within two levels when root has no go.mod; projects with a Makefile use
+// "make" (with no args) at root. A missing (nil) args slice means no args.
+func buildCommand(root string) (string, []string, string, error) {
+	if dir := goModuleRoot(root); dir != "" {
+		return "go", []string{"build", "./..."}, dir, nil
 	}
 	if _, err := os.Stat(filepath.Join(root, "Makefile")); err == nil {
-		return "make", []string{}, nil
+		return "make", []string{}, root, nil
 	}
-	return "", nil, fmt.Errorf("no build command detected: expected go.mod (go build ./...) or Makefile (make)")
+	return "", nil, "", fmt.Errorf("no build command detected: expected go.mod (go build ./...) or Makefile (make)")
 }
 
 // testCommand is like buildCommand but for the test suite.
-func testCommand(root string) (string, []string, error) {
-	if _, err := os.Stat(filepath.Join(root, "go.mod")); err == nil {
-		return "go", []string{"test", "./..."}, nil
+func testCommand(root string) (string, []string, string, error) {
+	if dir := goModuleRoot(root); dir != "" {
+		return "go", []string{"test", "./..."}, dir, nil
 	}
-	return "", nil, fmt.Errorf("no test command detected: expected go.mod (go test ./...)")
+	return "", nil, "", fmt.Errorf("no test command detected: expected go.mod (go test ./...)")
 }
 
 // ExecuteBuild runs the project's build command in a sandbox.
 // Returns Result with OK set on success.
 func (e *Executor) ExecuteBuild(timeout time.Duration) Result {
-	metrics.Default().RecordSandboxOp()
-	cmd, args, err := buildCommand(e.projectRoot())
+	cmd, args, dir, err := buildCommand(e.projectRoot())
 	if err != nil {
 		return Result{Err: err, Root: e.projectRoot()}
 	}
-	return e.Execute(cmd, args, timeout)
+	return e.runIn(dir, cmd, args, timeout)
 }
 
 // ExecuteTests runs the project's test command in a sandbox.
 // Returns Result with OK set on success.
 func (e *Executor) ExecuteTests(timeout time.Duration) Result {
-	metrics.Default().RecordSandboxOp()
-	cmd, args, err := testCommand(e.projectRoot())
+	cmd, args, dir, err := testCommand(e.projectRoot())
 	if err != nil {
 		return Result{Err: err, Root: e.projectRoot()}
 	}
-	return e.Execute(cmd, args, timeout)
+	return e.runIn(dir, cmd, args, timeout)
 }

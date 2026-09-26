@@ -137,8 +137,11 @@ func TestRunHealRoundTimeoutBounded(t *testing.T) {
 	if res.Iterations != 1 {
 		t.Fatalf("expected exactly 1 iteration, got %d", res.Iterations)
 	}
-	if got := atomic.LoadInt32(calls); got != 1 {
-		t.Fatalf("expected exactly 1 generate call (no retry past the timeout), got %d", got)
+	// 2 generate calls are expected: 1 provider pre-flight probe (F-ES1,
+	// "Reply with exactly: OK") + 1 round. The loop must still NOT retry
+	// past the timeout — exactly one round is spent.
+	if got := atomic.LoadInt32(calls); got != 2 {
+		t.Fatalf("expected exactly 2 generate calls (1 pre-flight probe + 1 round, no retry past the timeout), got %d", got)
 	}
 }
 
@@ -402,4 +405,31 @@ func sliceHas(hay []string, needle string) bool {
 		}
 	}
 	return false
+}
+
+// TestProbeProviderFailsFastWhenUnreachable (F-ES1): the pre-flight probe
+// must fail fast with an actionable one-line error naming the provider chain
+// — the MCP door used to hang for minutes on the same input. The probe is
+// lazy: a HEALTHY repo never probes (no LLM needed), and the local
+// validation ordering (unknown --file) errors before any provider attempt.
+func TestProbeProviderFailsFastWhenUnreachable(t *testing.T) {
+	t.Setenv("KERN_LLM_PROVIDER", "ollama")
+	t.Setenv("OLLAMA_HOST", "http://127.0.0.1:1")
+	probeCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- probeProvider() }()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("unreachable provider chain must error")
+		}
+		// The error surfaces the configured provider endpoint (the raw
+		// Generate failure), not a hang and not a swallowed timeout.
+		if !strings.Contains(err.Error(), "127.0.0.1:1") {
+			t.Fatalf("error must surface the provider endpoint, got: %v", err)
+		}
+	case <-probeCtx.Done():
+		t.Fatal("probe must fail fast, not hang")
+	}
 }

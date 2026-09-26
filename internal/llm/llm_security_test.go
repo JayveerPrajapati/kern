@@ -186,8 +186,10 @@ func TestClientEmbedText(t *testing.T) {
 		if body["model"] != "my-embed" {
 			t.Errorf("model = %v, want my-embed", body["model"])
 		}
-		if body["input"] != "hello world" {
-			t.Errorf("input = %v, want hello world", body["input"])
+		// EmbedText now sends input as a one-element array (the shared
+		// batch wire format), which /api/embed accepts for both forms.
+		if input, ok := body["input"].([]any); !ok || len(input) != 1 || input[0] != "hello world" {
+			t.Errorf("input = %v, want [hello world]", body["input"])
 		}
 		_, _ = w.Write([]byte(`{"embeddings":[[0.1,0.2,0.3]]}`))
 	})
@@ -201,6 +203,38 @@ func TestClientEmbedText(t *testing.T) {
 	}
 	if len(vec) != 3 || vec[0] != 0.1 || vec[2] != 0.3 {
 		t.Fatalf("vec = %v, want [0.1 0.2 0.3]", vec)
+	}
+}
+
+func TestClientEmbedTexts(t *testing.T) {
+	t.Setenv("KERN_EMBED_MODEL", "my-embed")
+	srv := mockOllama(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/embed" {
+			t.Fatalf("path = %q, want /api/embed", r.URL.Path)
+		}
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("bad body: %v", err)
+		}
+		input, ok := body["input"].([]any)
+		if !ok || len(input) != 2 || input[0] != "first" || input[1] != "second" {
+			t.Errorf("input = %v, want [first second]", body["input"])
+		}
+		_, _ = w.Write([]byte(`{"embeddings":[[0.1,0.2],[0.3,0.4]]}`))
+	})
+	defer srv.Close()
+
+	c := New("test-model")
+	c.Base = srv.URL
+	vecs, err := c.EmbedTexts(context.Background(), []string{"first", "second"})
+	if err != nil {
+		t.Fatalf("EmbedTexts: %v", err)
+	}
+	if len(vecs) != 2 {
+		t.Fatalf("got %d vectors, want 2", len(vecs))
+	}
+	if vecs[0][0] != 0.1 || vecs[1][1] != 0.4 {
+		t.Fatalf("vecs = %v, want [[0.1 0.2] [0.3 0.4]]", vecs)
 	}
 }
 

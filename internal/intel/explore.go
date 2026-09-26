@@ -81,6 +81,14 @@ func ExploreBudgeted(ix *index.Index, symbol string, depth, maxNodes int, minCon
 	}
 	resolved, ok := Resolve(ix, symbol)
 	if !ok {
+		// Exact resolution failed: a unique strong fuzzy match (every query
+		// word matched) auto-resolves; a partial match must NOT substitute
+		// an unrelated symbol.
+		if cand, ok2 := ResolveFuzzy(ix, symbol); ok2 {
+			resolved, ok = cand, true
+		}
+	}
+	if !ok {
 		return nil, fmt.Errorf("unknown symbol: %s", symbol)
 	}
 	d, ok := findDef(ix, resolved)
@@ -239,6 +247,31 @@ func findDef(ix *index.Index, full string) (index.Symbol, bool) {
 	return index.Symbol{}, false
 }
 
+// ResolveFuzzy resolves a bare name that is not in the index to the single
+// strongest ranked-search candidate — but only when the candidate matched
+// EVERY query word (MatchedAll) with a high score. A partial match is not
+// evidence of identity: a query that shares two common words with an
+// unrelated symbol ("NoSuchSymbolXYZ" matching "no"/"symbol" inside
+// "TestSimulateRemoveSymbolNoBrokenCallSites") must fail resolution rather
+// than silently substitute that symbol. Returns the candidate's FullName
+// (falling back to its bare Name) and whether a fuzzy resolution happened.
+func ResolveFuzzy(ix *index.Index, query string) (string, bool) {
+	if ix == nil {
+		return "", false
+	}
+	for _, h := range RankedSearchScored(ix, query, 5) {
+		if h.MatchedAll && h.Score >= 150 {
+			if full := h.Symbol.FullName(); full != "" {
+				return full, true
+			}
+			if n := h.Symbol.Name; n != "" {
+				return n, true
+			}
+		}
+	}
+	return "", false
+}
+
 // RenderExplore renders the report as compact text.
 func RenderExplore(r *ExploreReport) string {
 	if r == nil {
@@ -247,6 +280,12 @@ func RenderExplore(r *ExploreReport) string {
 	var b strings.Builder
 	if r.StaleBanner != "" {
 		b.WriteString(r.StaleBanner + "\n\n")
+	}
+	if r.Symbol != r.Resolved {
+		// The user asked for one symbol and got another (fuzzy resolution):
+		// surface the mapping before the report so the substitution is never
+		// silent.
+		fmt.Fprintf(&b, "resolved %s -> %s (fuzzy match)\n", r.Symbol, r.Resolved)
 	}
 	fmt.Fprintf(&b, "symbol: %s (%s %s:%d)\n\n",
 		r.Resolved, r.Definition.Kind, r.Definition.File, r.Definition.Line)

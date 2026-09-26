@@ -89,12 +89,110 @@ type fileChange struct {
 	added   []string
 	removed []string
 	renamed bool
+	// declHits counts changed (+/-) lines attributed to each enclosing
+	// top-level declaration, tracked while parsing (the declaration header
+	// itself may come from a hunk CONTEXT line). This is the "what was
+	// modified" signal: subjectNoun prefers it over naive word grabs.
+	// curDecl is the parser's current enclosing declaration.
+	declHits map[string]int
+	curDecl  string
+	// addedAt holds the NEW-side line number of each added line (parallel to
+	// added), tracked from the @@ hunk headers. Enhance uses it to attribute
+	// added lines to the enclosing declaration by reading the file itself —
+	// body-deep edits far from any hunk-context header still resolve.
+	// newLine is the parser's running NEW-side position.
+	addedAt []int
+	newLine int
 }
 
 // Generate parses a unified diff (as produced by `git diff`) and returns a
 // deterministic message. An empty or unparseable diff yields a chore subject.
 func Generate(diffText string) Message {
+	return buildMessage(parseDiff(diffText))
+}
+
+// Enhance is Generate with file access: when read can supply a changed file's
+// CURRENT content, added lines are attributed to their enclosing top-level
+// declaration by line number — so a body-deep edit names the function it
+// modified, not a word grabbed from the added lines (F-CM1). Files read
+// returns false for are simply left to the diff-only heuristics.
+func Enhance(diffText string, read func(path string) (string, bool)) Message {
 	files := parseDiff(diffText)
+	for i := range files {
+		content, ok := read(files[i].path)
+		if !ok {
+			continue
+		}
+		attributeByLineNumbers(&files[i], content)
+	}
+	return buildMessage(files)
+}
+
+// attributeByLineNumbers maps each added line's NEW-side number to the
+// enclosing top-level declaration of the file content, feeding declHits.
+// A declaration starts at any column-0 func/type/var/const line and runs to
+// the next such line (or EOF).
+func attributeByLineNumbers(f *fileChange, content string) {
+	// Collect top-level declaration start lines.
+	lines := strings.Split(content, "\n")
+	declAt := make([]int, 0, 8)
+	declName := make([]string, 0, 8)
+	for i, l := range lines {
+		if l == "" || (l[0] != 'f' && l[0] != 't' && l[0] != 'v' && l[0] != 'c') {
+			continue
+		}
+		if id := declIdent(l); id != "" && !isTestFunc(id) {
+			declAt = append(declAt, i+1) // 1-based
+			declName = append(declName, id)
+		}
+	}
+	if len(declAt) == 0 {
+		return
+	}
+	if f.declHits == nil {
+		f.declHits = map[string]int{}
+	}
+	for _, ln := range f.addedAt {
+		if ln <= 0 {
+			continue
+		}
+		// Find the last declaration starting at or before ln.
+		lo, hi := 0, len(declAt)-1
+		for lo < hi {
+			mid := (lo + hi + 1) / 2
+			if declAt[mid] <= ln {
+				lo = mid
+			} else {
+				hi = mid - 1
+			}
+		}
+		if declAt[lo] <= ln {
+			f.declHits[declName[lo]]++
+		}
+	}
+}
+
+// hunkNewStart extracts the NEW-side start line from a unified-diff hunk
+// header "@@ -a,b +c,d @@ ..." (c > 0 on success).
+func hunkNewStart(header string) int {
+	plus := strings.Index(header, "+")
+	if plus < 0 {
+		return 0
+	}
+	rest := header[plus+1:]
+	end := strings.IndexAny(rest, ", @")
+	if end < 0 {
+		end = len(rest)
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(rest[:end]))
+	if err != nil || n < 0 {
+		return 0
+	}
+	return n
+}
+
+// buildMessage is Generate's core over parsed files.
+func buildMessage(files []fileChange) Message {
 	// Exclude VCS/build/vendor-dir noise (vendor/, dist/, ...) so a
 	// vendor-heavy diff cannot drown the message in boilerplate.
 	if len(files) > 0 {
@@ -199,15 +297,59 @@ func parseDiff(d string) []fileChange {
 		case strings.HasPrefix(l, "+++ ") || strings.HasPrefix(l, "--- "):
 			continue
 		case strings.HasPrefix(l, "@@"):
-			continue
+			// Hunk header: `@@ -a,b +c,d @@` — c is the first NEW-side line
+			// number. Context and added lines advance it; removed lines do
+			// not.
+			if c := hunkNewStart(l); c > 0 {
+				cur.newLine = c
+			}
 		case strings.HasPrefix(l, "+"):
-			cur.added = append(cur.added, strings.TrimPrefix(l, "+"))
+			body := strings.TrimPrefix(l, "+")
+			cur.added = append(cur.added, body)
+			cur.addedAt = append(cur.addedAt, cur.newLine)
+			if cur.newLine > 0 {
+				cur.newLine++
+			}
+			attributeDecl(cur, body)
+		case strings.HasPrefix(l, " "):
+			// Context lines update the enclosing-declaration tracker so
+			// +/- lines deep inside a small declaration are still attributed
+			// to it (the header line itself often only appears as context).
+			if cur.newLine > 0 {
+				cur.newLine++
+			}
+			attributeDecl(cur, strings.TrimPrefix(l, " "))
 		case strings.HasPrefix(l, "-"):
-			cur.removed = append(cur.removed, strings.TrimPrefix(l, "-"))
+			body := strings.TrimPrefix(l, "-")
+			cur.removed = append(cur.removed, body)
+			attributeDecl(cur, body)
 		}
 	}
 	push()
 	return files
+}
+
+// attributeDecl updates the enclosing-declaration tracker for a file: a
+// top-level declaration header (func/type/var/const) becomes the current
+// decl, and changed lines increment the hit count of the decl they land in.
+// The header itself may come from a hunk CONTEXT line — that is the point:
+// body-only edits deep inside a small declaration stay attributed to it.
+func attributeDecl(f *fileChange, line string) {
+	trimmed := strings.TrimSpace(line)
+	if trimmed == "" {
+		return
+	}
+	if id := declIdent(trimmed); id != "" && !isTestFunc(id) {
+		f.curDecl = id
+		return
+	}
+	if f.curDecl == "" {
+		return
+	}
+	if f.declHits == nil {
+		f.declHits = map[string]int{}
+	}
+	f.declHits[f.curDecl]++
 }
 
 // unquoteGitPath undoes git's C-quoting of a path header (`"my file.txt"`),
@@ -548,6 +690,21 @@ func scopeOf(files []fileChange) string {
 // quoted string literal (e.g. "invalid patch"). Otherwise it falls through to
 // the first function/method identifier, then action phrases, then the first
 // declaration, then the first identifier token.
+// topModifiedDecl returns the declaration absorbing the most changed lines
+// across the diff (see fileChange.declHits) and its hit count. Used by
+// subjectNoun rule 1.5 (F-CM1): the touched declaration is the subject.
+func topModifiedDecl(files []fileChange) (string, int) {
+	best, hits := "", 0
+	for _, f := range files {
+		for id, n := range f.declHits {
+			if n > hits && !isStopWord(id) && !isErrSentinel(id) {
+				best, hits = id, n
+			}
+		}
+	}
+	return best, hits
+}
+
 func subjectNoun(files []fileChange, singleArea bool) string {
 	if singleArea {
 		// 1. Exported declarations take highest precedence (Err sentinels are
@@ -565,6 +722,16 @@ func subjectNoun(files []fileChange, singleArea bool) string {
 		if s := quotedLiteralSubject(files); s != "" {
 			return s
 		}
+	}
+	// 1.5 (F-CM1) Modified declarations: when +/- lines concentrate inside
+	// an existing declaration (tracked via hunk context headers), THAT
+	// declaration is what the commit touched — a far more informative
+	// headline than any word grabbed from the added lines. Ranked by hit
+	// count so the dominant edit wins; only declarations with real weight
+	// (>= 2 changed lines) qualify, so a stray context line cannot
+	// headline a fix.
+	if best, hits := topModifiedDecl(files); hits >= 2 {
+		return splitIdent(best)
 	}
 	// 2. Added call or method identifiers
 	for _, f := range files {

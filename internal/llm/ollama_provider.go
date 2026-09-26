@@ -70,6 +70,14 @@ func (o *OllamaProvider) Embed(ctx context.Context, text string) ([]float32, err
 	return o.client.EmbedText(ctx, text)
 }
 
+// EmbedBatch embeds many texts in a single /api/embed request (the input
+// array), returning one vector per text in input order. Index builds use it to
+// turn a multi-thousand-chunk corpus into one HTTP round-trip instead of
+// thousands.
+func (o *OllamaProvider) EmbedBatch(ctx context.Context, texts []string) ([][]float32, error) {
+	return o.client.EmbedTexts(ctx, texts)
+}
+
 // Capabilities reports full support (generate, embed, stream).
 func (o *OllamaProvider) Capabilities() Capabilities {
 	return Capabilities{Generate: true, Embed: true, Stream: true, Models: []string{o.client.Model}}

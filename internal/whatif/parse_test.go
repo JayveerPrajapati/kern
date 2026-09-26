@@ -142,3 +142,55 @@ func TestExtractSymbolsIndexKeepsStopwordCollidingSymbol(t *testing.T) {
 		t.Errorf("pure ExtractSymbols must keep its stopword behavior, got %v", pure)
 	}
 }
+
+// TestExtractSymbolsDemotesVerbShapedSymbols (QA F-IM1/F-AN2/F-WI1 root
+// cause, layer 2): a token that is BOTH a real index symbol and
+// sentence-verb-shaped ("add a caching layer to Fit" — a lowercase `add`
+// helper exists in most codebases) must not outrank the symbol it
+// headlines: it is demoted to the end of the candidate order.
+func TestExtractSymbolsDemotesVerbShapedSymbols(t *testing.T) {
+	ix := &index.Index{
+		Symbols: []index.Symbol{
+			{Kind: "func", Name: "add", File: "util.go", Line: 3},
+			{Kind: "func", Name: "Fit", File: "fit.go", Line: 7},
+		},
+		Calls:   map[string][]index.CallEdge{},
+		Callers: map[string][]string{},
+	}
+	cands := ExtractSymbolsIndex("add a new caching layer to Fit", ix)
+	posFit, posAdd := -1, -1
+	for i, c := range cands {
+		if c == "Fit" {
+			posFit = i
+		}
+		if c == "add" {
+			posAdd = i
+		}
+	}
+	if posFit == -1 || posAdd == -1 {
+		t.Fatalf("want both Fit and add as candidates, got %v", cands)
+	}
+	if posFit > posAdd {
+		t.Fatalf("Fit must outrank the verb-shaped symbol, got %v", cands)
+	}
+	// The verb-shaped symbol stays reachable when it is the only candidate.
+	only := ExtractSymbolsIndex("remove add", ix)
+	if len(only) == 0 || only[len(only)-1] != "add" {
+		t.Fatalf("verb-shaped symbol must remain a (demoted) candidate, got %v", only)
+	}
+}
+
+// TestIsChangeVerb pins the CLI-join vocabulary: the sentence-headline verbs
+// that mark an unquoted multi-word change on the analysis doors.
+func TestIsChangeVerb(t *testing.T) {
+	for _, w := range []string{"remove", "Remove", "RENAME", "adds", "deleted", "refactor"} {
+		if !IsChangeVerb(w) {
+			t.Errorf("IsChangeVerb(%q) = false, want true", w)
+		}
+	}
+	for _, w := range []string{"WriteFileAtomic", "Fit", "the", ""} {
+		if IsChangeVerb(w) {
+			t.Errorf("IsChangeVerb(%q) = true, want false", w)
+		}
+	}
+}

@@ -34,7 +34,10 @@ const execAgentID = "mcp-exec"
 // execToolNames are the host-command tools that a KERN_TOOLS allowlist must
 // name for command execution to be permitted. When CheckExec is called without
 // a specific tool name, at least one of these must appear in the allowlist.
-var execToolNames = []string{"kern_exec", "kern_sandbox", "kern_execute"}
+// kern_register_host_sampler is an exec surface too: its command runs via
+// sh -c for every generation, so registering one must pass the same
+// KERN_ALLOW_EXEC / KERN_TOOLS gate as the other exec tools.
+var execToolNames = []string{"kern_exec", "kern_sandbox", "kern_execute", "kern_register_host_sampler"}
 
 // CheckExec reports whether arbitrary host command execution is permitted for
 // the current server invocation, returning an error when execution must be

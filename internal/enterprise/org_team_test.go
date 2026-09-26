@@ -15,7 +15,7 @@ import (
 func setupOrgWithTeamDeps(t *testing.T) *Server {
 	t.Helper()
 	t.Setenv("KERN_AUTH_TOKEN", testToken)
-	s := New()
+	s := mustNew(t)
 	if err := s.Register("proj-a", t.TempDir()); err != nil {
 		t.Fatal(err)
 	}
@@ -53,7 +53,7 @@ func TestCreateTeam(t *testing.T) {
 
 func TestCreateTeamErrors(t *testing.T) {
 	t.Run("empty ID", func(t *testing.T) {
-		s := New()
+		s := mustNew(t)
 		if err := s.CreateTeam(OrgTeam{ID: ""}); err == nil {
 			t.Error("expected error for empty ID")
 		}
@@ -337,7 +337,7 @@ func TestOrgAgentTeamsHTTP(t *testing.T) {
 }
 
 func TestServeHTTPOrgDashboardHasTeamsLink(t *testing.T) {
-	s := New()
+	s := mustNew(t)
 	rr := httptest.NewRecorder()
 	s.ServeHTTP(rr, authedRequest(t, "GET", "/"))
 	if rr.Code != 200 {

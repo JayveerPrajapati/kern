@@ -577,3 +577,93 @@ func (h *HTTPClient) Post() {}
 		t.Errorf("field-access caller lost after Update: TaskService.Run callers = %v, want Use", got)
 	}
 }
+
+// TestUpdateProseNameCollisionKeepsGoCallEdges pins the fix for the kern dead
+// false positive: a markdown heading whose name collides with a Go function
+// ("# Changelog" in CHANGELOG.md vs func Changelog) must not lure the Go
+// function's call edges into the prose file's bucket — changing the prose
+// file then silently deleted them, and computeCallers lost the callers of
+// every helper Changelog calls (reported "certainly dead").
+func TestUpdateProseNameCollisionKeepsGoCallEdges(t *testing.T) {
+	root := t.TempDir()
+	writeFileAt(t, root, "CHANGELOG.md", "# Changelog\n\n## v1\n- initial\n")
+	writeFileAt(t, root, "p/changelog.go", "package p\n\nfunc Changelog() string { return changelogCommits() }\n\nfunc changelogCommits() string { return \"\" }\n")
+	prior, err := Build(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := prior.Save(); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := Load(root)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(loaded.fileResults) != 0 {
+		t.Fatal("loaded prior must carry no per-file parse results")
+	}
+
+	// Change the prose file: its heading bucket is replaced by a fresh
+	// (call-less) prose extraction.
+	writeFileAt(t, root, "CHANGELOG.md", "# Changelog\n\n## v1\n- initial\n- more\n")
+	inc, err := Update(root, loaded)
+	if err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	var helper Symbol
+	found := false
+	for _, s := range inc.Symbols {
+		if s.Name == "changelogCommits" {
+			helper = s
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("changelogCommits symbol missing after update")
+	}
+	if callers := inc.CallersFor(helper); len(callers) == 0 {
+		t.Fatal("changelogCommits lost its caller: the Go Changelog call edges were mis-attributed to the CHANGELOG.md bucket and dropped when the prose file changed")
+	}
+}
+
+// TestUpdateSharedOwnerNameAcrossPackages is the Go-to-Go form of the same
+// collision: two packages defining the same function name (New) share one
+// flat Calls key. Changing one package's file must not drop the other
+// package's edges from the shared bucket.
+func TestUpdateSharedOwnerNameAcrossPackages(t *testing.T) {
+	root := t.TempDir()
+	writeFileAt(t, root, "a/a.go", "package a\n\nfunc New() int { return aHelper() }\n\nfunc aHelper() int { return 1 }\n")
+	writeFileAt(t, root, "b/b.go", "package b\n\nfunc New() int { return bHelper() }\n\nfunc bHelper() int { return 2 }\n")
+	prior, err := Build(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := prior.Save(); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := Load(root)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	// Change only a/a.go: the shared "New" bucket must keep b's edges.
+	writeFileAt(t, root, "a/a.go", "package a\n\nfunc New() int { return aHelper() }\n\nfunc aHelper() int { return 1 }\n\nfunc Extra() {}\n")
+	inc, err := Update(root, loaded)
+	if err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	var bHelper Symbol
+	found := false
+	for _, s := range inc.Symbols {
+		if s.Name == "bHelper" {
+			bHelper = s
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("bHelper symbol missing after update")
+	}
+	if callers := inc.CallersFor(bHelper); len(callers) == 0 {
+		t.Fatal("bHelper lost its caller: b/b.go's edges were dropped from the shared New bucket when a/a.go changed")
+	}
+}

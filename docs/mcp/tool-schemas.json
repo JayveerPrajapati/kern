@@ -1,0 +1,845 @@
+{
+  "schema_version": 1,
+  "tools": [
+    {
+      "name": "kern_agent_coordination",
+      "phase": "cross",
+      "risk": "medium",
+      "sha256": "87756121650b1999b61eb3f61c859ad9a16df75422a83f43722e57cd6ca76202"
+    },
+    {
+      "name": "kern_agent_fingerprint",
+      "phase": "cross",
+      "risk": "low",
+      "sha256": "bea46234f7a471422d8410020028b9e2a031473764b2a3ab930792c159dcb3a5"
+    },
+    {
+      "name": "kern_agent_interrupt",
+      "phase": "edit",
+      "risk": "high",
+      "sha256": "dbcce06150017676efc822efe531d0a497eb35e0f52bf6987fe4417f419e88c9"
+    },
+    {
+      "name": "kern_agent_message",
+      "phase": "edit",
+      "risk": "medium",
+      "sha256": "62b578f5bb82a8b767cf881dfb832a8631e9693d44af9c0a58e1143130fb14d4"
+    },
+    {
+      "name": "kern_agent_role_rbac",
+      "phase": "cross",
+      "risk": "high",
+      "sha256": "ba7541c89615764b2cc6cccd618ecbc8af7e93a02e96609a42816492f1308378"
+    },
+    {
+      "name": "kern_agents",
+      "phase": "cross",
+      "risk": "low",
+      "sha256": "26a33939ec32e8d95b7f4da8914a347774b8717820812dea4ca0edbce79537c6"
+    },
+    {
+      "name": "kern_analyze",
+      "phase": "plan",
+      "risk": "medium",
+      "sha256": "fa6f29669d5bcf3dc3aa089adf0b703b7d54fdf0ca4617e3ca56142f94305174"
+    },
+    {
+      "name": "kern_approve",
+      "phase": "edit",
+      "risk": "medium",
+      "sha256": "22acd19e38605a5c93688f58947e72af45fbcbb29303f627f2a608f176d1645b"
+    },
+    {
+      "name": "kern_arch",
+      "phase": "explore",
+      "risk": "low",
+      "sha256": "42a7b618f6cbc98e0ad49827e685f546ccc98a9635bb5c1fd9ff7334d7e8be90"
+    },
+    {
+      "name": "kern_ast_search",
+      "phase": "explore",
+      "risk": "low",
+      "sha256": "3bcd31e53b5465826963c55a205b53e2b80588db4c0d1a1bae556987bc6d7d0b"
+    },
+    {
+      "name": "kern_ast_transform",
+      "phase": "edit",
+      "risk": "high",
+      "sha256": "0b86dcd7fcc948a4bba53da66aa8226bb514285802787fae7a4a6e85d40b3a8c"
+    },
+    {
+      "name": "kern_audit",
+      "phase": "verify",
+      "risk": "low",
+      "sha256": "67aae7924faf0136fe1a1dc3413974dc00290e6270fa64806b06c3bc4e5927fe"
+    },
+    {
+      "name": "kern_authorize_context",
+      "phase": "cross",
+      "risk": "low",
+      "sha256": "9670f1718d5afc867fb03a220fa13206514da23cd2413cbbc53c60eb6d70e3c6"
+    },
+    {
+      "name": "kern_bridges",
+      "phase": "explore",
+      "risk": "low",
+      "sha256": "d04d0d0262fef3ac39720e0932e5b28e79fe903b187d6fbdee97cde9001990ce"
+    },
+    {
+      "name": "kern_buddy",
+      "phase": "explore",
+      "risk": "low",
+      "sha256": "3b825a3b1fd28b5aed95c3013796485009e5f27cbc4182fec179bea2a49093ee"
+    },
+    {
+      "name": "kern_changes",
+      "phase": "verify",
+      "risk": "low",
+      "sha256": "d066481d4f9a36d87d297dd6181625c391b0e83888ed87190c5116c0986273a7"
+    },
+    {
+      "name": "kern_check_draft",
+      "phase": "verify",
+      "risk": "low",
+      "sha256": "f502f4660cf2d86f620abc71bdd6df90bef4bb92a3e942d1b4662f61be9242c3"
+    },
+    {
+      "name": "kern_churn",
+      "phase": "explore",
+      "risk": "low",
+      "sha256": "9fe7712b70823dd81bbf862589d3eaa5d4031e81c29310b16de3a9c9b95ac760"
+    },
+    {
+      "name": "kern_cochange",
+      "phase": "explore",
+      "risk": "low",
+      "sha256": "f3467263115f0eee9b7a399d10aa08643aaa07d3c5c8958250d2eaffd9b63ce2"
+    },
+    {
+      "name": "kern_commitmsg",
+      "phase": "edit",
+      "risk": "low",
+      "sha256": "7fac003aaefb5aa7e53673d1aec5072460b7f0a8bdab887dc3dec3080041cc7a"
+    },
+    {
+      "name": "kern_communities",
+      "phase": "explore",
+      "risk": "low",
+      "sha256": "3f97d5e1de9d289b0f5db8288c7145072a43396d2fc8b85b0b2f264370d7c837"
+    },
+    {
+      "name": "kern_compact_file",
+      "phase": "explore",
+      "risk": "low",
+      "sha256": "272eb615bf3e205698a50d18cc5f7bb8507246b6468ec421e86138e746b77d87"
+    },
+    {
+      "name": "kern_compose",
+      "phase": "cross",
+      "risk": "high",
+      "sha256": "a8dbba1c63e951c4131ccafb2fcfc52c42b924b658e70ec560f425649db3a5ed"
+    },
+    {
+      "name": "kern_context",
+      "phase": "explore",
+      "risk": "low",
+      "sha256": "b162ded59f076c65bc398c1705161f118831311de458aec0c6ed214626a1582d"
+    },
+    {
+      "name": "kern_context_budget",
+      "phase": "plan",
+      "risk": "low",
+      "sha256": "796ed379484e31d784fb24cc910916535d926b7b9c398849a600344895e48a6f"
+    },
+    {
+      "name": "kern_context_envelope",
+      "phase": "explore",
+      "risk": "low",
+      "sha256": "5f3c19792e0c2598204d25cb8d7f649e7bcf589ced557b2b4910ae6e72f4450a"
+    },
+    {
+      "name": "kern_context_watch",
+      "phase": "cross",
+      "risk": "low",
+      "sha256": "df3f12ae0ffc756cf55bf5b7b622bf92dd97c831bc1cd4cbf9d55df6f1556baf"
+    },
+    {
+      "name": "kern_correlate",
+      "phase": "cross",
+      "risk": "medium",
+      "sha256": "7004ed0b9f2e663fedecc80075c79a3b355753b0c6a2ccf5fc1722097e9e3654"
+    },
+    {
+      "name": "kern_cross_repo_impact",
+      "phase": "plan",
+      "risk": "medium",
+      "sha256": "30bb9adc83cd6c87422a0cfdccf725ee675d0601af40402653cc6ad0b378d11c"
+    },
+    {
+      "name": "kern_cycles",
+      "phase": "explore",
+      "risk": "low",
+      "sha256": "7ebeaffd91ae9277771906676bad298fcb4d9480ff7964d6569415e454d23c16"
+    },
+    {
+      "name": "kern_dead",
+      "phase": "explore",
+      "risk": "low",
+      "sha256": "2538ea309894e3b970bc790176f61aebf95a219eb92e94c9b9402e9e162ba43d"
+    },
+    {
+      "name": "kern_deploy",
+      "phase": "edit",
+      "risk": "critical",
+      "sha256": "969804d43b37f5c25299857613121c3db17fe8609abb7ff6361f04ee9c245daa"
+    },
+    {
+      "name": "kern_diff_files",
+      "phase": "verify",
+      "risk": "low",
+      "sha256": "aab0b3356342d3459b3d00462060689b0d3c8a44f4650069bccad91e71cef42e"
+    },
+    {
+      "name": "kern_doc_fetch",
+      "phase": "cross",
+      "risk": "medium",
+      "sha256": "76bcc576c474825d04c83a9fdc619c3a6bc2623d32bff9bdc394b4d19ffcb5d0"
+    },
+    {
+      "name": "kern_doc_index",
+      "phase": "cross",
+      "risk": "medium",
+      "sha256": "f0d0a7ff7252b8cc29997eb1ff731a30d9cde75a84311156b08526716ef1250b"
+    },
+    {
+      "name": "kern_doc_search",
+      "phase": "cross",
+      "risk": "low",
+      "sha256": "bae446b4098fc712eaa9415344f8753d5975fffd8121419c6db1919597875f46"
+    },
+    {
+      "name": "kern_entry_points",
+      "phase": "explore",
+      "risk": "low",
+      "sha256": "50afbf7062626374ead6f99eed0d8339b3ee369c2e0683c30884bfa24adb51e2"
+    },
+    {
+      "name": "kern_evidence",
+      "phase": "verify",
+      "risk": "medium",
+      "sha256": "05c25ad0071340a4ff4dd98e398687edc2149627b41a80d26f4ca0742f3281ef"
+    },
+    {
+      "name": "kern_evidence_anchor",
+      "phase": "verify",
+      "risk": "medium",
+      "sha256": "310533f0d97a0f219f389cc9cacbfee29f611cdbf06eec28ca8b85f6ef88040a"
+    },
+    {
+      "name": "kern_exec",
+      "phase": "edit",
+      "risk": "critical",
+      "sha256": "19069488002696de8634f291e125f9901ed1b3557f4efa55ea6cf31303c2ef02"
+    },
+    {
+      "name": "kern_execute",
+      "phase": "edit",
+      "risk": "critical",
+      "sha256": "304fd23931d94ce6ae7a530522a10f12d1bb6375ab9fef3168e850d5ac24e061"
+    },
+    {
+      "name": "kern_explain",
+      "phase": "explore",
+      "risk": "low",
+      "sha256": "b4613a96acc06d9ca7605e5edcf3d8aae25b51cb6059f58e004222f6e6f99724"
+    },
+    {
+      "name": "kern_explain_finding",
+      "phase": "verify",
+      "risk": "low",
+      "sha256": "836dc60a15d8dd89a0049d7c8fa55852355bb6756ad7809c0b9bbd0d10376260"
+    },
+    {
+      "name": "kern_explore",
+      "phase": "explore",
+      "risk": "low",
+      "sha256": "d7496dcdc8633a2565c1083078ab7353ebcc3447fed8a519d67df4970e73a64c"
+    },
+    {
+      "name": "kern_fetch_raw_anchor",
+      "phase": "cross",
+      "risk": "low",
+      "sha256": "c086ac161cb87dd604ce72dc03bf27bd17c47d571db8cd12755270490ec40f7a"
+    },
+    {
+      "name": "kern_fit_context",
+      "phase": "plan",
+      "risk": "low",
+      "sha256": "e96794844591358ba00a7e68a9938c1dac5d230f0b785965fb74e967cd00d9e8"
+    },
+    {
+      "name": "kern_flight",
+      "phase": "cross",
+      "risk": "low",
+      "sha256": "3f23d0e4af0ae5e3ffebec0e73368f4c2a482122aeaef5f9abc8e5ca313e0029"
+    },
+    {
+      "name": "kern_fragility_hotspots",
+      "phase": "plan",
+      "risk": "low",
+      "sha256": "aaca7c1da53a27ca1f5facd47669d16697090b1583893a658a9b65d5ec6d5d4b"
+    },
+    {
+      "name": "kern_frameworks",
+      "phase": "explore",
+      "risk": "low",
+      "sha256": "607a18039f87fadfdda909856c99c92457387591beb74370a9f7b9d03d5fff98"
+    },
+    {
+      "name": "kern_fts_search",
+      "phase": "explore",
+      "risk": "low",
+      "sha256": "1c366e63a23c893aff0b784424bcfe4334b08034f38ec11c95e85df056236356"
+    },
+    {
+      "name": "kern_fw_trace",
+      "phase": "explore",
+      "risk": "low",
+      "sha256": "1bd0bb98852ac4a01a4d44b42783e62a4154a71d57a6ce345207672d287f0d42"
+    },
+    {
+      "name": "kern_graph",
+      "phase": "explore",
+      "risk": "low",
+      "sha256": "3a6af96581fe8a282f1a9e8d4143ce7c34005cc0cc68fd492f2cf75120d908d0"
+    },
+    {
+      "name": "kern_guard_check",
+      "phase": "edit",
+      "risk": "low",
+      "sha256": "a7f2682d1501a9944b78adc6dca62159b4770571d9bfc986364e19ae82bbfa11"
+    },
+    {
+      "name": "kern_heal",
+      "phase": "edit",
+      "risk": "high",
+      "sha256": "1b63e3643ef723cb55f836c2ea4254912bbc9b8e50d6712afe41976ad78d0679"
+    },
+    {
+      "name": "kern_health",
+      "phase": "cross",
+      "risk": "low",
+      "sha256": "80ad4811c4652f483cf774c22247366ba8a06bc4eadf176572769952249d39a8"
+    },
+    {
+      "name": "kern_hubs",
+      "phase": "explore",
+      "risk": "low",
+      "sha256": "da6e1cda923816398f77ea037040386a1ecde863214f6d3ffb1ebf4ec019c69c"
+    },
+    {
+      "name": "kern_impact",
+      "phase": "plan",
+      "risk": "medium",
+      "sha256": "68e232048b975ba8bc7486e64441797520bf9a01d56897c105d46f2902ce47af"
+    },
+    {
+      "name": "kern_incident",
+      "phase": "cross",
+      "risk": "medium",
+      "sha256": "8cba2472f99a58b96096105612d76392c4db07a1b32a13793c7056e7221dd58b"
+    },
+    {
+      "name": "kern_inherits",
+      "phase": "explore",
+      "risk": "low",
+      "sha256": "b656a92fca9e05fd06a1eddd58f428f81c109f93416dc69feb115fb869abd6bc"
+    },
+    {
+      "name": "kern_larges",
+      "phase": "explore",
+      "risk": "low",
+      "sha256": "2dd8ae8c8b7a4e9a40862d775117946ba620a9a998a5dca5f961d6244eb4c615"
+    },
+    {
+      "name": "kern_learn",
+      "phase": "cross",
+      "risk": "medium",
+      "sha256": "89eeeab8cd8a42e1e8c0d6014831c0ed04d71e14ae4b8337cc4ef3888091f707"
+    },
+    {
+      "name": "kern_llm_providers",
+      "phase": "cross",
+      "risk": "low",
+      "sha256": "0a398caf1c0d52a933ecb7d19d7cc511e0137ff6e1b621dad45e5a5883271eab"
+    },
+    {
+      "name": "kern_lock",
+      "phase": "edit",
+      "risk": "medium",
+      "sha256": "62b5ca8b75a74ef9cc65a1092e5c2254116c807c6549c3b93458948a0baa92e3"
+    },
+    {
+      "name": "kern_lock_status",
+      "phase": "edit",
+      "risk": "low",
+      "sha256": "d93562dfae6fbb9477a987ccc4addc80e60e970723694ce16d59d05befa7e9fe"
+    },
+    {
+      "name": "kern_loop",
+      "phase": "cross",
+      "risk": "high",
+      "sha256": "81761fac182ec12f661e4b136635671fef341aa4ac762f71aa75bfb04f912a3c"
+    },
+    {
+      "name": "kern_lsp_bridge",
+      "phase": "explore",
+      "risk": "low",
+      "sha256": "5cb5268b449d490f71422a77f0e43dd562cb2f5f126ef693881e50d09c07dd2f"
+    },
+    {
+      "name": "kern_mask_pii",
+      "phase": "cross",
+      "risk": "low",
+      "sha256": "265c44ecc762ccbe0b0e3443a6498a3803f00be686c28bdf685bd607b458a1e1"
+    },
+    {
+      "name": "kern_mcp_call",
+      "phase": "edit",
+      "risk": "high",
+      "sha256": "f0b73308a38dbcd1cb4d796078b0a121c41723039e758f74a377a78075887574"
+    },
+    {
+      "name": "kern_memory_add",
+      "phase": "cross",
+      "risk": "medium",
+      "sha256": "9302beeaf52efeb38cd2f16e609aead6da6b5f00338fbc3152f610af743c590a"
+    },
+    {
+      "name": "kern_memory_list",
+      "phase": "cross",
+      "risk": "low",
+      "sha256": "240ec31cf5370a2a918ea138acda6d65cb98e5c296a087ffd8ffa1fdee53a8be"
+    },
+    {
+      "name": "kern_memory_ranked",
+      "phase": "cross",
+      "risk": "low",
+      "sha256": "0fdf89ed543f477ac31fc641279e649e79608b831c9bf8e26e046f026c0c6ce3"
+    },
+    {
+      "name": "kern_memory_recall",
+      "phase": "cross",
+      "risk": "low",
+      "sha256": "fb146e0d0f965341bee7cd303134a7d3e772b75a648b7f89be00ab381518d62f"
+    },
+    {
+      "name": "kern_meta",
+      "phase": "meta",
+      "risk": "medium",
+      "sha256": "02e4a616994df891e59a11429138cb7817cdc23f95380fbf7fd56ffa0185bf00"
+    },
+    {
+      "name": "kern_modernize",
+      "phase": "cross",
+      "risk": "medium",
+      "sha256": "9bb48206981369eb537bad421e84b441d7f18787e078865bc5294c6916de0cd0"
+    },
+    {
+      "name": "kern_mutation_test",
+      "phase": "verify",
+      "risk": "medium",
+      "sha256": "a9acf214a2851fdf3e86b6748684fd51539304e7882a69d3ed6c039173f2bd46"
+    },
+    {
+      "name": "kern_near",
+      "phase": "explore",
+      "risk": "low",
+      "sha256": "26ac0d6e076850650be45db73eb3562fbcfcb1004926adc69ac6a9a50d38e14c"
+    },
+    {
+      "name": "kern_note",
+      "phase": "edit",
+      "risk": "medium",
+      "sha256": "a2404d6a1edc81aad822bfbb21bf72bca1d53cb8fa2eca6c59e4dfd136513084"
+    },
+    {
+      "name": "kern_onboard",
+      "phase": "cross",
+      "risk": "medium",
+      "sha256": "94d3eaea5e523bbfcae554478cb7956eca5d581264dd72079f6a5e57fe4cfada"
+    },
+    {
+      "name": "kern_optimize_log",
+      "phase": "cross",
+      "risk": "low",
+      "sha256": "326865eeacda99bda30902152e1f9654f2c3b4cd160c499308f3d7f7cc8d36ac"
+    },
+    {
+      "name": "kern_optimize_output",
+      "phase": "cross",
+      "risk": "low",
+      "sha256": "2c263e4b0f639c00a4585297195cf590bc06fcae08c98506e99a9e5d489826b1"
+    },
+    {
+      "name": "kern_optimize_prompt",
+      "phase": "cross",
+      "risk": "low",
+      "sha256": "c4f181585c83229780ac849340581bac5d87bbb740f36c21bdeb4ff4a4d8ae8c"
+    },
+    {
+      "name": "kern_orchestrate",
+      "phase": "explore",
+      "risk": "low",
+      "sha256": "a9479f28cd233b0ca4b65a62476eaba7c8232bea960459a3df9f7a79f651999a"
+    },
+    {
+      "name": "kern_org_agents",
+      "phase": "cross",
+      "risk": "medium",
+      "sha256": "a588b096d524856097dd4dbce157972c304a3aa2ec6c5768f9bb9fd82dc74787"
+    },
+    {
+      "name": "kern_org_audit",
+      "phase": "cross",
+      "risk": "low",
+      "sha256": "79d9ee8f5efd605e420eaca530a1df7f4d64964a262358f9d730a181f3c67784"
+    },
+    {
+      "name": "kern_org_memory",
+      "phase": "cross",
+      "risk": "medium",
+      "sha256": "8b82d430a1274399d40d54b57efa2d091f27d193461b1aaa65b49353b83aae46"
+    },
+    {
+      "name": "kern_org_projects",
+      "phase": "cross",
+      "risk": "low",
+      "sha256": "10ca9d60c9556500835be8580fefb01786283decc5b4757aba052cafb6965b72"
+    },
+    {
+      "name": "kern_org_search",
+      "phase": "cross",
+      "risk": "low",
+      "sha256": "7c4c9ab83ad79dfbde52261f97edc71df2df83841143151b4ab298be2de115de"
+    },
+    {
+      "name": "kern_org_tasks",
+      "phase": "cross",
+      "risk": "low",
+      "sha256": "4faf347b364f48e9af573b59aeafad3f2489948bbafb8ffbf755bac230603ab2"
+    },
+    {
+      "name": "kern_org_teams",
+      "phase": "cross",
+      "risk": "medium",
+      "sha256": "8b99cfd2e7a717f9c9aa13f421986067ae4353d470365eaae71b4a01c5d92ecf"
+    },
+    {
+      "name": "kern_org_user",
+      "phase": "cross",
+      "risk": "medium",
+      "sha256": "7a946e861655d661ab2ff9aab6b4b5fe49ec304045ffa338712702bb31f9bb68"
+    },
+    {
+      "name": "kern_pack",
+      "phase": "plan",
+      "risk": "low",
+      "sha256": "78096b34c5ae275e9ebbb95ee98df12dff72f84eb60fc7a26880fa93661fa6e8"
+    },
+    {
+      "name": "kern_path",
+      "phase": "explore",
+      "risk": "low",
+      "sha256": "a90b2a49200d16de59cb4644e1fb60510af7b3922d1f25dd3092a6452a708b75"
+    },
+    {
+      "name": "kern_plan",
+      "phase": "plan",
+      "risk": "medium",
+      "sha256": "60c44bd0321996bb6075cbb5584c3359c8928056889dd84fd380d27240852bd7"
+    },
+    {
+      "name": "kern_plan_context",
+      "phase": "plan",
+      "risk": "low",
+      "sha256": "7fe8711ac37cc3e33ccbeaaa1ef997c9449c4c3c3db89a791b3249dcb7dbc3e8"
+    },
+    {
+      "name": "kern_policy_dsl",
+      "phase": "verify",
+      "risk": "low",
+      "sha256": "8af612839c081a093b077bfd06a68d4e30d103d5e1427770a2cfa52c6c614c81"
+    },
+    {
+      "name": "kern_pre_edit",
+      "phase": "plan",
+      "risk": "medium",
+      "sha256": "dfefe42627c2c6c3ac808869f315a588f393145dc58cceb35d13ff7fce6d3cbb"
+    },
+    {
+      "name": "kern_precache",
+      "phase": "verify",
+      "risk": "medium",
+      "sha256": "a9786a5b5316498eacd37b59efdbbd6a250affc5c5301e213adb5cca73358585"
+    },
+    {
+      "name": "kern_probe",
+      "phase": "explore",
+      "risk": "low",
+      "sha256": "cdae88252065846e00001c751bf924a98781c9775e511be4da3acb2cae3c4d1a"
+    },
+    {
+      "name": "kern_project_map",
+      "phase": "explore",
+      "risk": "low",
+      "sha256": "97a2a38dd942f93480ae9182ca8001fb59309bf64dca3817c07a2f1db3c63dba"
+    },
+    {
+      "name": "kern_prompt_fill",
+      "phase": "cross",
+      "risk": "low",
+      "sha256": "ca238b6f081cc9e9d6485c49af54f42ec40488f100b7202d20a56e79e1778644"
+    },
+    {
+      "name": "kern_prose",
+      "phase": "explore",
+      "risk": "low",
+      "sha256": "e06cbb02f9b9fe591569f3fc5f98f42d2daf49cd57dc1e7b0c983b7fe50f5deb"
+    },
+    {
+      "name": "kern_refactor_transaction",
+      "phase": "edit",
+      "risk": "high",
+      "sha256": "9ba71049f0f8441815cec31736dc468317d226dc3c05ebed09e8e82a22efee6c"
+    },
+    {
+      "name": "kern_register_host_sampler",
+      "phase": "cross",
+      "risk": "medium",
+      "sha256": "3f107018840e5d62367235086d7251eb479f079dc7d7336c4b5cfee0b3c6806c"
+    },
+    {
+      "name": "kern_rename",
+      "phase": "edit",
+      "risk": "high",
+      "sha256": "ee803f4a9b9693530e8457ed043e513200203fba0b76f72f9bd26d12f9c1aa1c"
+    },
+    {
+      "name": "kern_repair_diagnostics",
+      "phase": "edit",
+      "risk": "medium",
+      "sha256": "d0ce57ee14fc0c4c55866c38b011c9950869576f8f9b2b1d09c097c16f068873"
+    },
+    {
+      "name": "kern_repair_guidance",
+      "phase": "verify",
+      "risk": "low",
+      "sha256": "e69a557f11e8c6bf2691806f2d4084a6c6d8f80d444d6216d944da4a6fc0bb80"
+    },
+    {
+      "name": "kern_repo_search",
+      "phase": "explore",
+      "risk": "low",
+      "sha256": "2135e5e72c03c6a748389ad40c973a9e36d6dc9617dfb9e45f29c70d02a84d29"
+    },
+    {
+      "name": "kern_resolve",
+      "phase": "explore",
+      "risk": "low",
+      "sha256": "10d87d0917b60d664008b7823a6dda24015032b5fce04e2afd47c4965db0bcf2"
+    },
+    {
+      "name": "kern_retrieve",
+      "phase": "explore",
+      "risk": "low",
+      "sha256": "aff60d554a4abe79a5645b725dd800259d1b87f453066d444d458aea883afc00"
+    },
+    {
+      "name": "kern_review",
+      "phase": "verify",
+      "risk": "low",
+      "sha256": "07ae1ed90067c855c8092135e514c44c42588e70148a8ae78bbba86b94d2dcdb"
+    },
+    {
+      "name": "kern_run",
+      "phase": "cross",
+      "risk": "high",
+      "sha256": "7ba03c886b182d89feb6969013a0e4b494ac9e6f8cb20031768b8514546ff1cf"
+    },
+    {
+      "name": "kern_runtime",
+      "phase": "explore",
+      "risk": "low",
+      "sha256": "77a207a9ec96f41c3677e7d944d7da449accc2b83586040926dc11256720cb0f"
+    },
+    {
+      "name": "kern_safe_delete",
+      "phase": "edit",
+      "risk": "high",
+      "sha256": "d887bfc6d9ef4b5bcee34ff3cd50eaa5867c5bd0a43d32a8b424051f7021786c"
+    },
+    {
+      "name": "kern_sandbox",
+      "phase": "edit",
+      "risk": "critical",
+      "sha256": "56cbd823cf37139687641ac87ef2e9f1b5ca3c39cf5aab8316f2339af201940d"
+    },
+    {
+      "name": "kern_schema_validate",
+      "phase": "verify",
+      "risk": "low",
+      "sha256": "71275d95feb7352105e5d8b410b40ce14074c6095272dd62422176fb080cfeeb"
+    },
+    {
+      "name": "kern_search",
+      "phase": "explore",
+      "risk": "low",
+      "sha256": "142e6a743a0423ed0dbf9ff8944378d5e7624e602c2ea8cd60c5499577d55708"
+    },
+    {
+      "name": "kern_security",
+      "phase": "verify",
+      "risk": "high",
+      "sha256": "70cbc6122fa25b1d58cda10f3feea08f7bec7be085558a4c9c271c86d8b151fe"
+    },
+    {
+      "name": "kern_semantic_diff",
+      "phase": "cross",
+      "risk": "low",
+      "sha256": "7450c1757092265920177cb254f7303e7a37052bdf0189ccad5e0532657d5e7b"
+    },
+    {
+      "name": "kern_semantic_merge",
+      "phase": "edit",
+      "risk": "high",
+      "sha256": "1992713e89bb5a4f5aed32cb8579b9a03cd63f0ad117cf1c1609b0ea5b7fbab2"
+    },
+    {
+      "name": "kern_semcache",
+      "phase": "cross",
+      "risk": "medium",
+      "sha256": "9a4e00f8ed26dc0ce04de573bf5dccff9cadfc82299f6220134ae09e2c7864ab"
+    },
+    {
+      "name": "kern_skill",
+      "phase": "explore",
+      "risk": "low",
+      "sha256": "0f64df1e97e2367363af536e6d809e3e65263ca15199e6c119dc367f351f9757"
+    },
+    {
+      "name": "kern_snapshot",
+      "phase": "explore",
+      "risk": "low",
+      "sha256": "0af0bec173907f47cad5cf68c8db9a0a088288d6fffa381eb3832080965bbb95"
+    },
+    {
+      "name": "kern_stats",
+      "phase": "cross",
+      "risk": "low",
+      "sha256": "b3ce73286a5df3336ea44f54998f1377492897bff35d114899611e64cf3288ab"
+    },
+    {
+      "name": "kern_stream",
+      "phase": "cross",
+      "risk": "low",
+      "sha256": "d63c8fe53d209f47ab051a39c6abd4591648b8bd3c1a0e4050bd0b0026975ad8"
+    },
+    {
+      "name": "kern_surprising",
+      "phase": "explore",
+      "risk": "low",
+      "sha256": "a066a23e85e78243bf11c686dfcf4cad4d73f091592d9301cdc14ef7a9b93da4"
+    },
+    {
+      "name": "kern_swap",
+      "phase": "plan",
+      "risk": "low",
+      "sha256": "08931b5b92c2c4ba29adfd043f21123a8a9c89073d9f742076364c6a4b462650"
+    },
+    {
+      "name": "kern_synthesize_test",
+      "phase": "verify",
+      "risk": "medium",
+      "sha256": "3068d8208313e192b22ef0781cf7f74a118438723a9267e807ee31505a5fd887"
+    },
+    {
+      "name": "kern_taint",
+      "phase": "verify",
+      "risk": "high",
+      "sha256": "d2e85d9a090b90ed93ab5cf5ea65931c5d2d60af8c35b6ae977864c3d98efa6f"
+    },
+    {
+      "name": "kern_test_gaps",
+      "phase": "plan",
+      "risk": "low",
+      "sha256": "3b427b9ba5f1eebd94d91678c355e77fe1bf5243c7314017e012db54158dd7f7"
+    },
+    {
+      "name": "kern_trace",
+      "phase": "plan",
+      "risk": "low",
+      "sha256": "ebc98743da182d82bddbd635f290e0376cdc2ef236ab72332fb1406131d650ea"
+    },
+    {
+      "name": "kern_unlock",
+      "phase": "edit",
+      "risk": "medium",
+      "sha256": "d97c8cb8a9cab7d269398c11f92c5e97b0e5a41ffe7ac097833663be4211cb91"
+    },
+    {
+      "name": "kern_usage_guide",
+      "phase": "plan",
+      "risk": "low",
+      "sha256": "4e5e729e58efd3367887b4f1446d23926a0bb3b042935bc971695234cf1bc679"
+    },
+    {
+      "name": "kern_validate",
+      "phase": "verify",
+      "risk": "high",
+      "sha256": "0087ed1ca10e6a7b9291f2dc03be06042b49d3795acc20709cea984c679d3ac2"
+    },
+    {
+      "name": "kern_validate_proposed",
+      "phase": "verify",
+      "risk": "high",
+      "sha256": "9224061b320a6e2f2dbba403daf3dca236495167f3103439358a5fcbe8715840"
+    },
+    {
+      "name": "kern_validate_staged",
+      "phase": "verify",
+      "risk": "high",
+      "sha256": "feeeb076b3f2e4a235fdd447de79fba99a9f0148f119a91f0a818228d0669545"
+    },
+    {
+      "name": "kern_verify",
+      "phase": "verify",
+      "risk": "medium",
+      "sha256": "0e71dcf5dbc8067cf33668a92c27ab994a216145364576c41a1ee5a1351e9f97"
+    },
+    {
+      "name": "kern_verify_output",
+      "phase": "verify",
+      "risk": "low",
+      "sha256": "852775cf0a7b77b5f738151ffb499c1708f97b8e8cf65807a71d1d24d4521609"
+    },
+    {
+      "name": "kern_what_if",
+      "phase": "plan",
+      "risk": "medium",
+      "sha256": "8e4d2865aa0bdfe36dd5641de0717d5b4056206a446b75412fbd62817c7bafa0"
+    },
+    {
+      "name": "kern_why",
+      "phase": "explore",
+      "risk": "low",
+      "sha256": "c01ed6eacaac17c0fa251d3e31bb24632dd9ae295d1b1b7a781ad65456f1fc81"
+    },
+    {
+      "name": "kern_workflow",
+      "phase": "cross",
+      "risk": "high",
+      "sha256": "c41d4532fee65f5c8a9be458ae650e5aacd000d9a70dba11068919200ddadfe4"
+    }
+  ]
+}

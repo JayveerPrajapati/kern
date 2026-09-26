@@ -162,3 +162,95 @@ func TestFreshGraphSingleFlight(t *testing.T) {
 		t.Fatalf("graphVer = %d, want exactly one rebuild (%d + 1)", app.graphVer, verBefore)
 	}
 }
+
+// TestFreshGraphRebuildsPlatformWithNewGeneration pins the invariant that a
+// rebuild swaps EVERY web surface onto the same index generation: index,
+// graph (the platform's twin-merged one), arch index, verification engine,
+// platform and TaskService. Before this fix the Platform kept serving the
+// ORIGINAL graph forever after a swap (the /v1/context + TaskService surfaces
+// never saw the fresh index), and a.graph pointed at an un-merged graph while
+// the context engine reasoned over the twin-merged one.
+func TestFreshGraphRebuildsPlatformWithNewGeneration(t *testing.T) {
+	app := newEmptyApp(t)
+
+	// Seed a couple of indexable files so the rebuild has something to
+	// change, then force staleness.
+	for _, f := range []struct{ name, body string }{
+		{"a.go", "package main\n\nfunc A() int { return 1 }\n"},
+		{"b.go", "package main\n\nfunc B() int { return A() }\n"},
+	} {
+		if err := os.WriteFile(filepath.Join(app.root, f.name), []byte(f.body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(app.root, "c.go"), []byte("package main\n\nfunc C() int { return 2 }\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	app.staleUntil = time.Time{}
+
+	// Sanity: the pre-swap surfaces are internally consistent and share the
+	// startup generation.
+	if app.graph != app.platform.Graph() {
+		t.Fatal("startup: a.graph != platform.Graph() (dashboard and context engine disagree)")
+	}
+
+	verBefore := app.graphVer
+	oldGraph := app.graph
+	oldPlatform := app.platform
+	g, ix := app.freshGraph()
+	if g == nil || ix == nil {
+		t.Fatal("freshGraph returned nil graph/index")
+	}
+	if app.graphVer != verBefore+1 {
+		t.Fatalf("graphVer = %d, want %d after rebuild", app.graphVer, verBefore+1)
+	}
+	if app.platform == oldPlatform {
+		t.Fatal("platform was not rebuilt on swap")
+	}
+	if app.graph == oldGraph {
+		t.Fatal("graph was not swapped to the new generation")
+	}
+	// The old generation stays intact for in-flight readers (pointer swap,
+	// never in-place mutation): the pre-swap graph object is untouched.
+	if oldGraph == app.platform.Graph() || oldGraph == app.graph {
+		t.Fatal("old graph generation was mutated/reused by the swap")
+	}
+	// EVERY web surface now serves the same generation.
+	if app.graph != app.platform.Graph() {
+		t.Fatal("post-swap a.graph != platform.Graph() (dashboard and context engine disagree on dimensions)")
+	}
+	if app.ix != app.platform.Index() {
+		t.Fatal("post-swap a.ix != platform.Index()")
+	}
+	if app.archIndex != app.ix {
+		t.Fatal("post-swap archIndex != ix")
+	}
+	if app.ver != app.platform.VerificationEngine() {
+		t.Fatal("post-swap a.ver != platform.VerificationEngine()")
+	}
+	if app.memories != app.platform.Memory() {
+		t.Fatal("post-swap a.memories != platform.Memory()")
+	}
+	if app.firewall != app.platform.Firewall() {
+		t.Fatal("post-swap a.firewall != platform.Firewall()")
+	}
+	if app.taskSvc == nil || app.taskSvc.Firewall() != app.platform.Firewall() {
+		t.Fatal("post-swap taskSvc does not serve the rebuilt platform")
+	}
+	// The new graph serves the added symbol from the new index generation;
+	// the old generation does not (proof the swap is a real generation
+	// change, not an in-place refresh).
+	if !app.graph.Resolvable("C") {
+		t.Fatal("new generation graph does not resolve the added symbol C")
+	}
+	if oldGraph.Resolvable("C") {
+		t.Fatal("old generation graph unexpectedly resolves C (generations mixed?)")
+	}
+	if id, ok := app.graph.ResolveNodeID("C"); ok {
+		if n, ok := app.graph.NodeByID(id); !ok || n.Symbol == nil || n.Symbol.Name != "C" {
+			t.Fatalf("NodeByID(%q) = %+v, ok=%v; want the C symbol node", id, n, ok)
+		}
+	} else {
+		t.Fatal("ResolveNodeID(C) failed on the new generation graph")
+	}
+}

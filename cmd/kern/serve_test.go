@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/JayveerPrajapati/kern/internal/enterprise"
@@ -60,6 +61,53 @@ func TestServeSingleProject(t *testing.T) {
 	app.ServeHTTP(rr, httptest.NewRequest("GET", "/api/health", nil))
 	if rr.Code != http.StatusOK {
 		t.Fatalf("GET /api/health = %d, want 200 (body: %s)", rr.Code, rr.Body.String())
+	}
+}
+
+// TestServeToolServerRootBound asserts the finding-1 root-binding: the web
+// console's in-process tool server (built by the ROOT-AWARE factory wired in
+// cmd_serve.go's init — web.SetToolServerFactory(func(root string) ...))
+// confines every /v1/tools/{name} call to the App's OWN project root. A root
+// arg inside App A's tree is served (200); a root outside it is refused
+// (403) even though the test process chdirs elsewhere — an unrooted
+// cwd-fallback server would have allowed the foreign root, which is exactly
+// the enterprise-mode cross-project leak this test pins.
+func TestServeToolServerRootBound(t *testing.T) {
+	root := serveFixture(t)
+	foreign := t.TempDir() // inside App A's tree → allowed; outside → denied
+	t.Chdir(foreign)       // process cwd must NOT be the served root
+	h, mode, err := buildServeHandler([]string{"--root", root, "--addr", ":0"})
+	if err != nil {
+		t.Fatalf("buildServeHandler: %v", err)
+	}
+	if mode != "single-project" {
+		t.Fatalf("expected mode %q, got %q", "single-project", mode)
+	}
+	app, ok := h.(*web.App)
+	if !ok {
+		t.Fatalf("expected *web.App handler, got %T", h)
+	}
+
+	// A root INSIDE the App's project root is confined-in and served.
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/v1/tools/kern_mask_pii", strings.NewReader(`{"text":"token=sk-x","root":"`+root+`"}`))
+	req.Header.Set("Content-Type", "application/json")
+	app.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("in-root tool call = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "masked") {
+		t.Errorf("in-root tool output missing masked result: %s", rec.Body.String())
+	}
+
+	// A root OUTSIDE App A's project root is refused (403): the server is
+	// bound to App A's root, never to the process cwd.
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest("POST", "/v1/tools/kern_mask_pii", strings.NewReader(`{"text":"x","root":"`+foreign+`"}`))
+	req.Header.Set("Content-Type", "application/json")
+	app.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("out-of-root tool call = %d, want 403 (body %s)", rec.Code, rec.Body.String())
 	}
 }
 

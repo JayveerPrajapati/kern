@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -15,6 +16,55 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/domain"
 	"github.com/JayveerPrajapati/kern/internal/storage"
 )
+
+// TestMain redirects the audit-chain HMAC secret to a temp dir for the whole
+// package test run, so audit tests never create
+// <UserConfigDir>/kern/audit-chain.key on the developer's machine and the
+// key is deterministic across tests (chains recorded in one test verify in
+// the next).
+func TestMain(m *testing.M) {
+	orig := auditChainSecretPath
+	dir, err := os.MkdirTemp("", "kern-audit-secret-*")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "audit TestMain: %v\n", err)
+		os.Exit(1)
+	}
+	auditChainSecretPath = func() (string, error) {
+		return filepath.Join(dir, "audit-chain.key"), nil
+	}
+	code := m.Run()
+	auditChainSecretPath = orig
+	resetAuditChainSecret()
+	_ = os.RemoveAll(dir)
+	os.Exit(code)
+}
+
+// overrideAuditChainSecret redirects the audit-chain HMAC secret to a fresh
+// temp dir and resets the package cache (mirrors overrideExecApprovalSecret
+// in exec_test.go), so key-change tests are deterministic regardless of test
+// order and never touch the real user config dir.
+func overrideAuditChainSecret(t *testing.T) {
+	t.Helper()
+	secretDir := t.TempDir()
+	orig := auditChainSecretPath
+	auditChainSecretPath = func() (string, error) {
+		return filepath.Join(secretDir, "audit-chain.key"), nil
+	}
+	resetAuditChainSecret()
+	t.Cleanup(func() {
+		auditChainSecretPath = orig
+		resetAuditChainSecret()
+	})
+}
+
+// resetAuditChainSecret clears the cached audit secret so the next
+// computeAuditHash call re-resolves the (possibly redirected) path.
+func resetAuditChainSecret() {
+	auditChainSecretOnce = sync.Once{}
+	auditChainSecretKey = nil
+	auditChainSecretErr = nil
+	auditChainSecretDegraded = sync.Once{}
+}
 
 func entry(id, agentID string) AuditEntry {
 	return AuditEntry{ID: id, AgentID: agentID, Action: "write", Resource: "source",
@@ -170,9 +220,9 @@ func TestTamperBreaksChain(t *testing.T) {
 		t.Fatal("chain should be intact before tampering")
 	}
 
-	// Tamper with the middle entry in memory; the chain must break.
-	all := l.All()
-	all[1].AgentID = "evil-agent"
+	// Tamper with the middle entry in memory; the chain must break. All()
+	// returns a copy (no aliasing), so tamper via the internal slice.
+	l.entries[1].AgentID = "evil-agent"
 	if l.VerifyChain() {
 		t.Error("VerifyChain() = true after tampering with an entry, want false")
 	}
@@ -196,22 +246,19 @@ func TestVerifyChainLegacyValidationOutcomeHash(t *testing.T) {
 	}
 
 	// Rewrite the middle entry's hash with the legacy formula, as the
-	// in-transition binary would have persisted it.
-	all := l.All()
-	all[1].ValidationOutcome = &ValidationOutcome{Status: "WARN", ExitCode: 0,
+	// in-transition binary would have persisted it, and relink its
+	// successor off the stored (legacy) hash — the chain after a
+	// legacy-formula entry still links via stored hashes.
+	l.entries[1].ValidationOutcome = &ValidationOutcome{Status: "WARN", ExitCode: 0,
 		BlockedFiles: []string{"internal/app/platform.go"}, CorrelationID: "bp-1", Findings: 52}
-	all[1].Hash = computeAuditHashLegacy(all[1], all[0].Hash)
+	l.entries[1].Hash = computeAuditHashLegacy(l.entries[1], l.entries[0].Hash)
+	l.entries[2].Hash = computeAuditHash(l.entries[2], l.entries[1].Hash)
 	if !l.VerifyChain() {
 		t.Fatal("VerifyChain() = false for legacy-formula entry with ValidationOutcome, want true")
 	}
-	// The chain after it still links via stored hashes.
-	all[2].Hash = computeAuditHash(all[2], all[1].Hash)
-	if !l.VerifyChain() {
-		t.Fatal("VerifyChain() = false after relinking successor, want true")
-	}
 
 	// Tampering with the legacy entry's covered fields must still break.
-	all[1].AgentID = "evil-agent"
+	l.entries[1].AgentID = "evil-agent"
 	if l.VerifyChain() {
 		t.Error("VerifyChain() = true after tampering with legacy entry, want false")
 	}
@@ -454,9 +501,9 @@ func TestAuditLogHashChain(t *testing.T) {
 		t.Fatal("VerifyChain() = false, want true for intact chain")
 	}
 
-	// Tamper with an entry in memory and verify the chain breaks.
-	all := l.All()
-	all[1].AgentID = "evil-agent"
+	// Tamper with an entry in memory and verify the chain breaks. All() returns
+	// a copy (no aliasing), so tamper via the internal slice.
+	l.entries[1].AgentID = "evil-agent"
 	if l.VerifyChain() {
 		t.Error("VerifyChain() = true after tampering with an entry, want false")
 	}
@@ -1019,14 +1066,107 @@ func TestAuditRetentionCapAndCounters(t *testing.T) {
 	}
 }
 
-func TestAuditHashNilOutcomeMatchesLegacyFormat(t *testing.T) {
+// TestAuditHashNilOutcomeMatchesPlainFormat pins the hash-format invariant
+// after the HMAC change: the PLAIN formula (the pre-HMAC computeAuditHash)
+// still byte-matches the legacy formula for nil-ValidationOutcome entries
+// (a nil outcome contributes nothing to the serialization), and still
+// differs from the legacy formula once a ValidationOutcome is present (the
+// clause is covered). The live computeAuditHash is HMAC-SHA256, covered
+// separately in TestAuditHashHMACKeyed.
+func TestAuditHashNilOutcomeMatchesPlainFormat(t *testing.T) {
 	e := entry("", "x")
-	if got, want := computeAuditHash(e, "prev"), legacyAuditHash(e, "prev"); got != want {
-		t.Errorf("nil-ValidationOutcome hash = %s, want legacy format %s", got, want)
+	if got, want := computeAuditHashPlain(e, "prev"), legacyAuditHash(e, "prev"); got != want {
+		t.Errorf("nil-ValidationOutcome plain hash = %s, want legacy format %s", got, want)
 	}
 	e.ValidationOutcome = &ValidationOutcome{Status: "BLOCK", ExitCode: 1, BlockedFiles: []string{"a.go"}, CorrelationID: "c1", Findings: 2}
-	if got, want := computeAuditHash(e, "prev"), legacyAuditHash(e, "prev"); got == want {
-		t.Error("hash with ValidationOutcome equals the legacy hash, want different")
+	if got, want := computeAuditHashPlain(e, "prev"), legacyAuditHash(e, "prev"); got == want {
+		t.Error("plain hash with ValidationOutcome equals the legacy hash, want different")
+	}
+}
+
+// TestAuditHashHMACKeyed locks the HMAC keying: computeAuditHash must differ
+// from both plain formulas, carry the hex-SHA-256 shape, and change when the
+// secret changes — an attacker who can rewrite the audit store but does not
+// hold the out-of-workspace secret cannot recompute the chain.
+func TestAuditHashHMACKeyed(t *testing.T) {
+	e := entry("", "x")
+	hmacHash := computeAuditHash(e, "prev")
+	if hmacHash == computeAuditHashPlain(e, "prev") {
+		t.Error("computeAuditHash must differ from the plain formula (HMAC keying)")
+	}
+	if hmacHash == computeAuditHashLegacy(e, "prev") {
+		t.Error("computeAuditHash must differ from the legacy formula")
+	}
+	if len(hmacHash) != sha256.Size*2 {
+		t.Errorf("computeAuditHash length = %d, want %d hex chars", len(hmacHash), sha256.Size*2)
+	}
+	// A different secret must produce a different hash (keyed, not static).
+	overrideAuditChainSecret(t)
+	if got := computeAuditHash(e, "prev"); got == hmacHash {
+		t.Error("hash must change when the secret changes (keyed HMAC)")
+	}
+}
+
+// TestAuditHashDegradesToPlainWithoutSecret: when the HMAC secret cannot be
+// loaded (read-only user config dir, sandbox), computeAuditHash must fall
+// back to the plain formula — the audit log must not lose entries over an
+// unavailable key — and a chain written in degraded mode must still verify
+// (the plain fallback in VerifyChainReport covers it).
+func TestAuditHashDegradesToPlainWithoutSecret(t *testing.T) {
+	orig := auditChainSecretPath
+	auditChainSecretPath = func() (string, error) { return "", errors.New("secret unavailable") }
+	resetAuditChainSecret()
+	t.Cleanup(func() {
+		auditChainSecretPath = orig
+		resetAuditChainSecret()
+	})
+
+	e := entry("", "x")
+	if got, want := computeAuditHash(e, "prev"), computeAuditHashPlain(e, "prev"); got != want {
+		t.Errorf("without the secret computeAuditHash = %s, want plain fallback %s", got, want)
+	}
+
+	// A persisted chain written in degraded mode must still verify.
+	dir := t.TempDir()
+	store := storage.NewLocal(dir)
+	l := NewAuditLog().WithStore(store)
+	l.Record(entry("", "a"))
+	l.Record(entry("", "b"))
+	if !l.VerifyChain() {
+		t.Error("VerifyChain() = false for a degraded-mode (plain) chain, want true")
+	}
+}
+
+// TestVerifyChainPlainPreHMACChain: a chain persisted entirely with the
+// pre-HMAC plain formula — exactly what the immediately preceding binaries
+// wrote (ValidationOutcome folded in, no key) — must still verify, and
+// tampering with it must still break the chain.
+func TestVerifyChainPlainPreHMACChain(t *testing.T) {
+	dir := t.TempDir()
+	store := storage.NewLocal(dir)
+	l := NewAuditLog().WithStore(store)
+	l.Record(entry("", "a"))
+	l.Record(entry("", "b"))
+	l.Record(entry("", "c"))
+	if !l.VerifyChain() {
+		t.Fatal("chain should verify before rewriting")
+	}
+
+	// Rewrite all three hashes with the pre-HMAC plain formula, as the
+	// current binary would have persisted them before the HMAC change. All()
+	// returns a copy (no aliasing), so mutate the internal slice directly.
+	prev := ""
+	for i := range l.entries {
+		l.entries[i].Hash = computeAuditHashPlain(l.entries[i], prev)
+		prev = l.entries[i].Hash
+	}
+	if !l.VerifyChain() {
+		t.Fatal("pre-HMAC plain chain must still verify (backward compat)")
+	}
+	// Tampering with a plain-format entry must still break the chain.
+	l.entries[1].AgentID = "evil-agent"
+	if l.VerifyChain() {
+		t.Error("tampered pre-HMAC chain must not verify")
 	}
 }
 
@@ -1119,4 +1259,131 @@ func TestRepairChainLogStoreNoDuplicates(t *testing.T) {
 	if brk, verified := check2.VerifyChainReport(); brk != -1 || verified != 5 {
 		t.Fatalf("post-repair record: VerifyChainReport() = (%d, %d), want (-1, 5)", brk, verified)
 	}
+}
+
+// TestRecordRecordParallelUniqueIDs is the race-targeted regression for the
+// split ID authority: Record minted "audit-N" IDs via l.seq++ under mu while
+// RecordParallel minted them via the lock-free atomic nextSeq — two
+// authorities that could hand out the SAME ID, invalidating VerifyChain.
+// Both must now allocate through nextSeq, the single authority, so a mix of
+// concurrent Record + RecordParallel calls yields only unique IDs. Run under
+// -race this also proves no data race on the shared sequence state.
+func TestRecordRecordParallelUniqueIDs(t *testing.T) {
+	l := NewAuditLog()
+	const goroutines = 8
+	const perGoroutine = 50
+
+	var wg sync.WaitGroup
+	for g := 0; g < goroutines; g++ {
+		wg.Add(1)
+		go func(g int) {
+			defer wg.Done()
+			for i := 0; i < perGoroutine; i++ {
+				e := AuditEntry{
+					AgentID:  fmt.Sprintf("g%d", g),
+					Action:   "write",
+					Resource: "source",
+					Risk:     domain.Risk{Level: domain.RiskLow},
+					Result:   "allowed",
+				}
+				if g%2 == 0 {
+					l.Record(e)
+				} else {
+					l.RecordParallel(e)
+				}
+			}
+		}(g)
+	}
+	wg.Wait()
+
+	all := l.All()
+	if len(all) != goroutines*perGoroutine {
+		t.Fatalf("All() = %d entries, want %d", len(all), goroutines*perGoroutine)
+	}
+	seen := map[string]bool{}
+	for _, e := range all {
+		if e.ID == "" {
+			t.Fatal("entry with empty ID")
+		}
+		if !strings.HasPrefix(e.ID, "audit-") {
+			t.Fatalf("ID %q lacks audit- prefix", e.ID)
+		}
+		if seen[e.ID] {
+			t.Fatalf("colliding audit ID %q minted by Record/RecordParallel", e.ID)
+		}
+		seen[e.ID] = true
+	}
+}
+
+// TestAllFilterDoNotAliasBackingSlice: All() and Filter() must return copies,
+// not the log's internal backing slice — noteResultAndTrimLocked rewrites the
+// backing array in place on trim, so an aliased caller would observe shifted
+// entries, and mutating a returned slice must never corrupt the log.
+func TestAllFilterDoNotAliasBackingSlice(t *testing.T) {
+	l := NewAuditLog()
+	for i := 0; i < 5; i++ {
+		l.Record(entry(fmt.Sprintf("%d", i), "a"))
+	}
+
+	// Mutating an All() result must not affect the log.
+	got := l.All()
+	got[0].ID = "tampered"
+	got[2].AgentID = "evil"
+	if l.All()[0].ID != "0" || l.All()[2].AgentID != "a" {
+		t.Error("mutating an All() result corrupted the log")
+	}
+
+	// Same for the empty-agent Filter(), which returns every entry.
+	f := l.Filter("")
+	if len(f) != 5 {
+		t.Fatalf("Filter(\"\") = %d entries, want 5", len(f))
+	}
+	f[1].ID = "tampered"
+	if l.All()[1].ID != "1" {
+		t.Error("mutating a Filter(\"\") result corrupted the log")
+	}
+
+	// The aliasing regression: hold an All() view, then push the log past the
+	// retention cap so the trim rewrites the backing array in place. With the
+	// old aliasing the held view would show the trimmed window; with the
+	// clone fix it keeps its original entries.
+	big := NewAuditLog()
+	for i := 0; i < 10; i++ {
+		big.Record(entry(fmt.Sprintf("orig-%d", i), "a"))
+	}
+	held := big.All()
+	for i := 0; i < maxAuditEntries+10; i++ {
+		big.Record(entry("", "a"))
+	}
+	if len(held) != 10 {
+		t.Fatalf("held All() view = %d entries, want 10 (stable across trim)", len(held))
+	}
+	if held[0].ID != "orig-0" || held[9].ID != "orig-9" {
+		t.Errorf("held All() view shifted by trim: %q..%q", held[0].ID, held[9].ID)
+	}
+}
+
+// TestIntegrityMode covers the exported IntegrityMode() report: "hmac" when
+// the out-of-workspace secret resolves, "plain" when it does not and hashes
+// degrade to plain SHA-256 (the mode `kern audit` warns about).
+func TestIntegrityMode(t *testing.T) {
+	t.Run("hmac_when_secret_available", func(t *testing.T) {
+		overrideAuditChainSecret(t)
+		if got := NewAuditLog().IntegrityMode(); got != "hmac" {
+			t.Errorf("IntegrityMode() = %q, want hmac", got)
+		}
+	})
+
+	t.Run("plain_when_secret_unavailable", func(t *testing.T) {
+		orig := auditChainSecretPath
+		auditChainSecretPath = func() (string, error) { return "", errors.New("secret unavailable") }
+		resetAuditChainSecret()
+		t.Cleanup(func() {
+			auditChainSecretPath = orig
+			resetAuditChainSecret()
+		})
+		if got := NewAuditLog().IntegrityMode(); got != "plain" {
+			t.Errorf("IntegrityMode() = %q, want plain", got)
+		}
+	})
 }

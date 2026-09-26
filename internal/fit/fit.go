@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -74,9 +75,15 @@ func FitContext(ctx context.Context, req Request) (*Result, error) {
 
 	// If symbols or query specified, resolve files via index
 	if len(req.Symbols) > 0 || req.Query != "" {
-		ix, _ := index.Load(absRoot)
+		ix, err := index.Load(absRoot)
+		if err != nil {
+			log.Printf("fit: load index at %s: %v", absRoot, err)
+		}
 		if ix == nil {
-			ix, _ = index.Build(absRoot)
+			ix, err = index.Build(absRoot)
+			if err != nil {
+				log.Printf("fit: build index at %s: %v", absRoot, err)
+			}
 		}
 		if ix != nil {
 			for _, symName := range req.Symbols {

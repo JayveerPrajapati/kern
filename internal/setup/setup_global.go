@@ -138,8 +138,22 @@ func copyGlobalPlugin() Status {
 	if err != nil {
 		return Status{Agent: "opencode-plugin-global", Path: dst, Note: err.Error()}
 	}
-	if cur, rerr := os.ReadFile(dst); rerr == nil && bytes.Equal(cur, src) {
-		return Status{Agent: "opencode-plugin-global", Installed: true, Path: dst, Note: "global plugin already current"}
+	if cur, rerr := os.ReadFile(dst); rerr == nil {
+		if bytes.Equal(cur, src) {
+			return Status{Agent: "opencode-plugin-global", Installed: true, Path: dst, Note: "global plugin already current"}
+		}
+		// Same policy as wireGlobalPlugin (F-DR1): a previously shipped
+		// version is kern's own deployment and is updated; only an
+		// unrecognized copy is treated as user-customized and never
+		// overwritten. This writer previously clobbered ANY non-current
+		// copy — including hand edits — with no policy at all.
+		if !isShippedPluginVersion(cur) {
+			return Status{Agent: "opencode-plugin-global", Installed: true, Path: dst, Note: "global plugin is customized — left untouched"}
+		}
+		if err := os.WriteFile(dst, src, 0o644); err != nil {
+			return Status{Agent: "opencode-plugin-global", Path: dst, Note: err.Error()}
+		}
+		return Status{Agent: "opencode-plugin-global", Installed: true, Path: dst, Note: "global plugin updated from an older kern version"}
 	}
 	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 		return Status{Agent: "opencode-plugin-global", Path: dst, Note: err.Error()}

@@ -549,10 +549,13 @@ func (c *KernClient) SecScan(ctx context.Context, workdir, path string) (finding
 	if runErr != nil {
 		return nil, out, code, fmt.Errorf("kern sec: %w", runErr)
 	}
-	if code != 0 && code != 1 {
+	// Exit contract: 0 = clean, 1 = findings, 3 = findings under the policy
+	// family (fatalPolicy — same drift the plugin shadows hit, F-RV1 class).
+	// Both carry the findings JSON on stdout; only other codes are errors.
+	if code != 0 && code != 1 && code != 3 {
 		return nil, out, code, fmt.Errorf("kern sec failed (exit %d): %s", code, strings.TrimSpace(errOut))
 	}
-	if code == 1 && strings.TrimSpace(errOut) != "" {
+	if (code == 1 || code == 3) && strings.TrimSpace(errOut) != "" {
 		// Tool error, not a findings result.
 		return nil, out, code, fmt.Errorf("kern sec: %s", strings.TrimSpace(errOut))
 	}

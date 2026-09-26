@@ -169,6 +169,13 @@ func Retrieve(ctx context.Context, ix *index.Index, gvc mcpgov.GovContext, args 
 	} else {
 		gvc.StampRaw(provenance.SymbolProvenances(ix, graph.RetrieveItemNames(res.Items)))
 	}
+	// Persist registered handles (QA Pick #10, F-M1): the MCP path
+	// previously registered handles in-memory only, so they died with the
+	// server process. Save is merge-on-disk, so cross-process handles
+	// survive too.
+	if ix != nil {
+		_ = retrieval.DefaultRegistry.Save(retrieval.HandleStorePath(ix.Root))
+	}
 	return renderWithHandle(res) + graph.FreshnessFooter(args, ix), nil
 
 }
@@ -177,6 +184,14 @@ func Resolve(ctx context.Context, ix *index.Index, gvc mcpgov.GovContext, args m
 	id := mcpargs.ArgString(args, "handle")
 	if id == "" {
 		return "", fmt.Errorf("handle is required")
+	}
+	// Load persisted handles (QA Pick #10, F-M1): the MCP path previously
+	// resolved only in-memory handles, so every handle created by another
+	// process (CLI `kern retrieve`, or a restarted server) failed as
+	// "unknown handle" even though it sat in .kern/handles.json with a
+	// 7-day TTL. Load merges the store into the registry (best-effort).
+	if ix != nil {
+		retrieval.DefaultRegistry.Load(retrieval.HandleStorePath(ix.Root))
 	}
 	h, ok := retrieval.DefaultRegistry.Resolve(id)
 	if !ok {

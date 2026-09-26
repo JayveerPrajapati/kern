@@ -70,7 +70,10 @@ func runOrg(rest []string) {
 		fmt.Fprint(os.Stderr, orgUsage)
 		return
 	}
-	srv := enterprise.New()
+	srv, err := enterprise.New()
+	if err != nil {
+		fatal("org: %v", err)
+	}
 	projs, err := resolveServeProjects(projects, ".")
 	if err != nil {
 		fatalUsage("org: %v", err)

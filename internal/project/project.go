@@ -108,7 +108,9 @@ func (s *Session) Close() {
 // To avoid a full filesystem walk on every MCP tool call, the staleness check
 // is rate-limited: once it returns "fresh", the next check is skipped for
 // staleCooldown (1 second by default), so burst tool calls reuse the cached
-// index without re-walking disk.
+// index without re-walking disk. The check itself runs OFF the session lock
+// (it can cost ~438ms of git subprocesses on a dirty tree), so concurrent
+// tool calls are never blocked behind it.
 //
 // B1 — stale-while-revalidate: the rebuild runs OFF the session lock, so the
 // first tool call after an edit no longer blocks ALL other tool calls for the
@@ -140,11 +142,44 @@ func (s *Session) Index() (*index.Index, error) {
 		s.mu.Unlock()
 		return ix, nil
 	}
-	if s.ix != nil && !s.stale && !s.ix.Stale() {
-		s.staleUntil = time.Now().Add(s.freshnessCooldown())
+	// The staleness check is expensive: on a dirty git tree it falls through
+	// to the full staging form (git add -A + git write-tree), measured at
+	// ~438ms. Running it under the session lock would block every concurrent
+	// tool call in the MCP server, so it runs OFF the lock: copy the index
+	// pointer under the lock, release it, run the check, then re-lock and
+	// reconcile the result with whatever the session state is now. This is
+	// safe because the served index is immutable once published (rebuilds
+	// load fresh indexes from disk privately and Invalidate only swaps the
+	// pointer), and the git slow path stages into a throwaway index file, so
+	// concurrent checks do not contend.
+	if s.ix != nil && !s.stale {
 		ix := s.ix
 		s.mu.Unlock()
-		return ix, nil
+
+		stale := ix.Stale()
+
+		s.mu.Lock()
+		// Reconcile with the current state: the session may have changed
+		// while the check ran (Invalidate, a concurrent rebuild, or an
+		// external store write).
+		//
+		// 1. A concurrent rebuild finished while we were checking and the
+		//    session now serves a fresh index — serve it instead of
+		//    triggering a second rebuild.
+		if s.ix != nil && !s.stale && time.Now().Before(s.staleUntil) {
+			cur := s.ix
+			s.mu.Unlock()
+			return cur, nil
+		}
+		// 2. The check judged the SAME index we copied still fresh, and the
+		//    session state is unchanged — record the cooldown and serve it.
+		if !stale && s.ix == ix && !s.stale {
+			s.staleUntil = time.Now().Add(s.freshnessCooldown())
+			s.mu.Unlock()
+			return ix, nil
+		}
+		// Otherwise the index is stale (or the session state changed): fall
+		// through to the rebuild/await path below with the lock held.
 	}
 
 	if s.rebuilding {

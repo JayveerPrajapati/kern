@@ -6,8 +6,11 @@ package modernization
 
 import (
 	"fmt"
+	"math"
+	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/JayveerPrajapati/kern/internal/index"
@@ -20,6 +23,35 @@ import (
 // lowest-risk contexts are consolidated into fewer phases so the plan stays
 // actionable while the analysis (the context count itself) stays honest.
 const maxPhases = 20
+
+// defaultBridgeLimit caps how many coupling bridges intel.Bridges returns
+// during analysis. A repo with more bridges than this would silently
+// undercount coupling and misrate phase risk, so the cap is overridable via
+// KERN_BRIDGES_LIMIT (see bridgeLimit). The default keeps analysis bounded
+// for typical repos.
+const defaultBridgeLimit = 10000
+
+// bridgeLimit returns the bridge cap Analyze passes to intel.Bridges, read
+// from KERN_BRIDGES_LIMIT. A value of 0 means "unlimited": intel.Bridges has
+// no dedicated unlimited sentinel (limit<=0 is coerced to its own default of
+// 15), so the analyzer maps 0 to the largest possible int, which skips
+// truncation entirely. Negative or non-numeric values fall back to the
+// default.
+func bridgeLimit() int {
+	if v := strings.TrimSpace(os.Getenv("KERN_BRIDGES_LIMIT")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			switch {
+			case n < 0:
+				return defaultBridgeLimit
+			case n == 0:
+				return math.MaxInt
+			default:
+				return n
+			}
+		}
+	}
+	return defaultBridgeLimit
+}
 
 // BoundedContext is a candidate extracted service/module detected by
 // community detection. It groups symbols that are tightly coupled
@@ -248,11 +280,12 @@ func (a *Analyzer) Analyze() (*ExtractionPlan, error) {
 
 	// 3. Bridges between contexts (reuses intel.Bridges, which finds symbols
 	// called from more than one package).
-	// intel.Bridges treats limit<=0 as "use default 15" and truncates. The
+	// intel.Bridges treats limit<=0 as "use default 15" and truncates; the
 	// analyzer wants every coupling bridge so it can derive an accurate risk
-	// level; a large limit avoids silently undercounting bridges (bug: Bridges
-	// has no dedicated "unlimited" sentinel).
-	bridges := a.mapBridges(intel.Bridges(ix, 10000), symToCtx, idToName)
+	// level. bridgeLimit() resolves KERN_BRIDGES_LIMIT (default 10000, 0 =
+	// unlimited), so a repo with more bridges than the default cannot silently
+	// undercount coupling and misrate phase risk.
+	bridges := a.mapBridges(intel.Bridges(ix, bridgeLimit()), symToCtx, idToName)
 
 	// Per-context bridge count -> phase risk level.
 	bridgeCount := map[string]int{}

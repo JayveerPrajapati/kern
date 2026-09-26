@@ -322,6 +322,42 @@ func TestNewEmbedderOllamaWire(t *testing.T) {
 	}
 }
 
+func TestNewEmbedderOllamaBatchWire(t *testing.T) {
+	// EmbedBatch must send the whole batch as one /api/embed request with the
+	// input array, and return one vector per input in order.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/embed" {
+			t.Fatalf("path = %q, want /api/embed", r.URL.Path)
+		}
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		if input, ok := body["input"].([]any); !ok || len(input) != 2 || input[0] != "first" || input[1] != "second" {
+			t.Fatalf("input = %v, want [first second]", body["input"])
+		}
+		_, _ = w.Write([]byte(`{"embeddings":[[0.1,0.2],[0.3,0.4]]}`))
+	}))
+	defer srv.Close()
+	t.Setenv("OLLAMA_HOST", srv.URL)
+	t.Setenv("KERN_LLM_PROVIDER", "")
+
+	e := NewEmbedder()
+	vecs, err := e.EmbedBatch([]string{"first", "second"})
+	if err != nil {
+		t.Fatalf("EmbedBatch: %v", err)
+	}
+	if len(vecs) != 2 {
+		t.Fatalf("got %d vectors, want 2", len(vecs))
+	}
+	if vecs[0][0] != 0.1 || vecs[1][1] != 0.4 {
+		t.Fatalf("vecs = %v, want [[0.1 0.2] [0.3 0.4]]", vecs)
+	}
+	// Empty input is a no-op, not an HTTP round-trip.
+	empty, err := e.EmbedBatch(nil)
+	if err != nil || empty != nil {
+		t.Fatalf("EmbedBatch(nil) = %v, %v; want nil, nil", empty, err)
+	}
+}
+
 // NewAnthropicProviderForTest builds a provider without requiring env, for
 // capability assertions only.
 func NewAnthropicProviderForTest() (*AnthropicProvider, error) {

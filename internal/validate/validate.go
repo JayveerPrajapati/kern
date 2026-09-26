@@ -200,7 +200,19 @@ func detectCandidates(root string) []*Command {
 			out = append(out, &Command{Name: "helm lint " + d, Cmd: "helm", Args: []string{"lint", d}})
 		}
 	case glob("*.go"):
-		out = append(out, &Command{Name: "go vet (no module)", Cmd: "go", Args: []string{"vet", "./..."}})
+		// No go.mod: `go vet ./...` is invalid outside a module ("pattern
+		// ./...: directory prefix . does not contain main module"), so the
+		// no-module vet form targets the explicit root-level files instead —
+		// `go vet <file>...` runs without a module (F1).
+		vetArgs := []string{"vet"}
+		if fs, _ := filepath.Glob(filepath.Join(root, "*.go")); len(fs) > 0 {
+			for _, f := range fs {
+				vetArgs = append(vetArgs, filepath.Base(f))
+			}
+		} else {
+			vetArgs = append(vetArgs, "./...")
+		}
+		out = append(out, &Command{Name: "go vet (no module)", Cmd: "go", Args: vetArgs})
 	case glob("*.py"):
 		out = append(out, &Command{Name: "python py_compile", Cmd: "python", Args: []string{"-m", "compileall", "-q", root}})
 	case glob("*.js"), glob("*.ts"):

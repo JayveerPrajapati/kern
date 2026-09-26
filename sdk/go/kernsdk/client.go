@@ -298,6 +298,22 @@ func (c *Client) Incident(ctx context.Context, id string) (map[string]any, error
 	return out, err
 }
 
+// CallTool invokes any MCP catalog tool through the single REST passthrough
+// (POST /v1/tools/{name}). The request body is the tool's argument map; the
+// response JSON is {"output": "<raw tool text>"}, and this method returns
+// that output payload. The route delegates to the same in-process governed
+// dispatch path MCP clients hit (KERN_TOOLS allowlist, root confinement,
+// RBAC), so one route reaches the entire catalog. Errors surface as *Err
+// with the HTTP status: 403 for governed denials (allowlist/root/RBAC), 404
+// for unknown tools, 503 when dispatch is unavailable, 500 for tool failures.
+func (c *Client) CallTool(ctx context.Context, name string, args map[string]any) (string, error) {
+	var out struct {
+		Output string `json:"output"`
+	}
+	err := c.post(ctx, "/v1/tools/"+url.PathEscape(name), args, &out)
+	return out.Output, err
+}
+
 // EventsStream opens the live event stream (GET /v1/events/stream) and
 // returns the raw SSE response body. The caller reads and parses the
 // "data:" lines itself and must Close the body when done.

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"sync"
 	"time"
@@ -219,12 +220,25 @@ func NewLiveKubernetesSource(apiServer, token, namespace string, interval time.D
 		evURL := fmt.Sprintf("%s/api/v1/namespaces/%s/events", apiServer, ns)
 
 		var depData, evData []byte
+		var err error
 		if token != "" {
-			depData, _ = httpGetAuth(base.client, depURL, token)
-			evData, _ = httpGetAuth(base.client, evURL, token)
+			depData, err = httpGetAuth(base.client, depURL, token)
+			if err != nil {
+				log.Printf("live kubernetes: fetch deployments from %s: %v", depURL, err)
+			}
+			evData, err = httpGetAuth(base.client, evURL, token)
+			if err != nil {
+				log.Printf("live kubernetes: fetch events from %s: %v", evURL, err)
+			}
 		} else {
-			depData, _ = httpGet(base.client, depURL)
-			evData, _ = httpGet(base.client, evURL)
+			depData, err = httpGet(base.client, depURL)
+			if err != nil {
+				log.Printf("live kubernetes: fetch deployments from %s: %v", depURL, err)
+			}
+			evData, err = httpGet(base.client, evURL)
+			if err != nil {
+				log.Printf("live kubernetes: fetch events from %s: %v", evURL, err)
+			}
 		}
 		// Merge into a single JSON doc that ParseKubernetes can parse.
 		// We wrap both responses into the expected {deployments:[],events:[]} shape.

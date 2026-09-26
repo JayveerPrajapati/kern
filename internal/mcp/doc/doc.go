@@ -135,7 +135,12 @@ func Search(ctx context.Context, h Hooks, args map[string]any) (string, error) {
 	}
 
 	if len(results) == 0 && len(codeMatches) == 0 {
-		return "no matching document fragments", nil
+		// N3: a repo with no indexed docs gets an explanation, not a bare
+		// "no matching document fragments" that reads as a confident miss.
+		if len(ix.Docs) == 0 {
+			return "no matching document fragments — this repo has no documentation indexed (kern docs searches only indexed repo docs; run `kern docs index <root>` to index a docs tree)", nil
+		}
+		return fmt.Sprintf("no matching document fragments (query matched nothing in %d indexed fragments)", len(ix.Docs)), nil
 	}
 
 	var b strings.Builder

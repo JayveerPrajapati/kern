@@ -2,6 +2,7 @@ package modernization
 
 import (
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -134,6 +135,33 @@ func bridgeFixture(t *testing.T) *index.Index {
 		"billing/b.go": bridgeBilling,
 		"common/c.go":  bridgeCommon,
 	})
+}
+
+// TestBridgeLimitEnv verifies KERN_BRIDGES_LIMIT controls the bridge cap:
+// unset -> default, positive -> that cap, 0 -> unlimited (mapped to
+// math.MaxInt because intel.Bridges coerces limit<=0 to its own default of
+// 15), garbage/negative -> default.
+func TestBridgeLimitEnv(t *testing.T) {
+	t.Setenv("KERN_BRIDGES_LIMIT", "")
+	if got := bridgeLimit(); got != defaultBridgeLimit {
+		t.Errorf("unset: expected %d, got %d", defaultBridgeLimit, got)
+	}
+	t.Setenv("KERN_BRIDGES_LIMIT", "500")
+	if got := bridgeLimit(); got != 500 {
+		t.Errorf("explicit: expected 500, got %d", got)
+	}
+	t.Setenv("KERN_BRIDGES_LIMIT", "0")
+	if got := bridgeLimit(); got != math.MaxInt {
+		t.Errorf("unlimited: expected math.MaxInt, got %d", got)
+	}
+	t.Setenv("KERN_BRIDGES_LIMIT", "bogus")
+	if got := bridgeLimit(); got != defaultBridgeLimit {
+		t.Errorf("garbage: expected %d, got %d", defaultBridgeLimit, got)
+	}
+	t.Setenv("KERN_BRIDGES_LIMIT", "-7")
+	if got := bridgeLimit(); got != defaultBridgeLimit {
+		t.Errorf("negative: expected %d, got %d", defaultBridgeLimit, got)
+	}
 }
 
 func TestAnalyzeGatedLargeRepo(t *testing.T) {

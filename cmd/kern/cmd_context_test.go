@@ -351,3 +351,109 @@ func TestGuardCheckPublishesWarningWhenUnconfigured(t *testing.T) {
 		t.Fatalf("events file missing unconfigured warning payload, got: %s", content)
 	}
 }
+
+// contextSymbolFixture writes a tiny Go module carrying the given extra
+// methods on type Bus, so `kern context` resolution (F12) has symbols to
+// fuzzy-match against.
+func contextSymbolFixture(t *testing.T, methods string) string {
+	t.Helper()
+	dir := t.TempDir()
+	files := map[string]string{
+		"go.mod": "module ctxfuzzy\n\ngo 1.20\n",
+		"bus.go": `package main
+
+// Bus is a message bus.
+type Bus struct{}
+
+` + methods + `
+func main() {
+	b := Bus{}
+	b.enqueueDeadLetter("boom")
+}
+`,
+	}
+	for rel, content := range files {
+		p := filepath.Join(dir, rel)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return dir
+}
+
+// TestContextAutoResolvesUniqueFuzzyMatch locks F12: `kern context enqueue`
+// must resolve like `kern what-if` — a unique strong fuzzy match
+// (Bus.enqueueDeadLetter) auto-resolves instead of exiting 1 with
+// "did you mean". Output keeps the resolved-note format.
+func TestContextAutoResolvesUniqueFuzzyMatch(t *testing.T) {
+	root := contextSymbolFixture(t, `// enqueueDeadLetter routes an event to the dead-letter queue.
+func (b *Bus) enqueueDeadLetter(e string) {}
+`)
+	var out string
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				if e, ok := r.(exitError); ok {
+					t.Fatalf("context enqueue exited %d; want auto-resolve (exit 0): %v", e.code, r)
+				}
+				t.Fatalf("unexpected panic: %v", r)
+			}
+		}()
+		out = captureStdout(t, func() { runContext([]string{"enqueue", root}) })
+	}()
+	if !strings.Contains(out, "enqueueDeadLetter") {
+		t.Fatalf("expected auto-resolved symbol context, got:\n%s", out)
+	}
+	if !strings.Contains(out, "# resolved") {
+		t.Fatalf("expected resolved note, got:\n%s", out)
+	}
+}
+
+// TestContextAmbiguousFuzzyMatchShowsDidYouMean locks the ambiguity branch of
+// the F12 policy: multiple distinct strong fuzzy matches must NOT
+// auto-resolve — they surface the did-you-mean error (exit 1) so the user can
+// pick a concrete symbol.
+func TestContextAmbiguousFuzzyMatchShowsDidYouMean(t *testing.T) {
+	root := contextSymbolFixture(t, `// enqueueDeadLetter routes an event to the dead-letter queue.
+func (b *Bus) enqueueDeadLetter(e string) {}
+
+// enqueueLive routes an event to the live queue.
+func (b *Bus) enqueueLive(e string) {}
+`)
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				if e, ok := r.(exitError); ok && e.code == 1 {
+					return // expected: did-you-mean error, no auto-resolve
+				}
+				t.Fatalf("expected exitError{code:1} for ambiguous fuzzy match, got %v", r)
+			}
+			t.Fatal("expected exitError{code:1} for ambiguous fuzzy match, got no error")
+		}()
+		runContext([]string{"enqueue", root})
+	}()
+}
+
+// TestContextUnknownSymbolClearError locks the no-match branch of the F12
+// policy: a symbol with no fuzzy candidate at all is a clear error (exit 1)
+// with no crash and no auto-resolve.
+func TestContextUnknownSymbolClearError(t *testing.T) {
+	root := contextSymbolFixture(t, `// enqueueDeadLetter routes an event to the dead-letter queue.
+func (b *Bus) enqueueDeadLetter(e string) {}
+`)
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				if e, ok := r.(exitError); ok && e.code == 1 {
+					return // expected: no symbol found
+				}
+				t.Fatalf("expected exitError{code:1} for unknown symbol, got %v", r)
+			}
+			t.Fatal("expected exitError{code:1} for unknown symbol, got no error")
+		}()
+		runContext([]string{"zzz_nonexistent_symbol", root})
+	}()
+}

@@ -38,6 +38,40 @@ func ExtractSymbolsIndex(change string, ix *index.Index) []string {
 	return extractSymbols(change, ix)
 }
 
+// changeVerbs are the verbs that headline change descriptions ("remove X",
+// "rename X to Y"). They are stoplisted during symbol extraction AND used by
+// the CLI doors to detect unquoted multi-word changes: `kern impact remove
+// WriteFileAtomic` arrives as args[0]="remove", args[1]="WriteFileAtomic"
+// (the second parsed as the [kind] positional), and the verb-first pattern
+// means the user forgot to quote the sentence — the positionals are joined
+// instead of fuzzy-resolving the bare verb to an unrelated symbol (QA
+// campaign: impact/analyze/what-if/plan all resolved 'remove' to
+// Client.Remove and confidently reported on it).
+var changeVerbs = map[string]bool{
+	"refactor": true, "remove": true, "change": true, "add": true,
+	"delete": true, "update": true, "split": true, "move": true,
+	"create": true, "introduce": true, "modify": true, "replace": true,
+	"rewrite": true, "rename": true, "extract": true, "inline": true,
+	"simplify": true, "clean": true, "fix": true, "break": true,
+	// Inflected change-verbs: 3rd-person / past forms of the verbs above
+	// headline prose ("what breaks if I remove X") and must never outrank
+	// a real symbol that follows them.
+	"refactors": true, "removes": true, "removed": true, "changes": true,
+	"changed": true, "adds": true, "added": true, "deletes": true,
+	"deleted": true, "updates": true, "updated": true, "renames": true,
+	"renamed": true, "moves": true, "moved": true, "extracts": true,
+	"simplifies": true, "splits": true, "breaks": true, "fixes": true,
+	"fixed": true, "modifies": true, "replaces": true, "replaced": true,
+	"rewrites": true, "introduces": true, "creates": true,
+}
+
+// IsChangeVerb reports whether w is a change verb from the extraction
+// stoplist (remove, add, rename, ...) — the words that headline an
+// unquoted multi-word change on the CLI.
+func IsChangeVerb(w string) bool {
+	return changeVerbs[strings.ToLower(w)]
+}
+
 func extractSymbols(change string, ix *index.Index) []string {
 	change = strings.TrimSpace(change)
 	if change == "" {
@@ -101,6 +135,9 @@ func extractSymbols(change string, ix *index.Index) []string {
 	// so it captures loadQuestion, replicaCount, process_service_request and
 	// GetMySQLDB alike — not just uppercase-leading CamelCase.
 	stop := map[string]bool{}
+	for w := range changeVerbs {
+		stop[w] = true
+	}
 	for _, w := range []string{
 		"the", "a", "an", "and", "or", "but", "not", "for", "with", "from",
 		"into", "to", "of", "in", "on", "at", "by", "is", "are", "was",
@@ -109,17 +146,6 @@ func extractSymbols(change string, ix *index.Index) []string {
 		"this", "that", "these", "those", "it", "its", "they", "them",
 		"their", "we", "you", "your", "our", "his", "her", "him", "she",
 		"who", "which", "what", "when", "where", "why", "how",
-		"refactor", "remove", "change", "add", "delete", "update", "split",
-		"move", "create", "introduce", "modify", "replace", "rewrite",
-		"rename", "extract", "inline", "simplify", "clean", "fix", "break",
-		// Inflected change-verbs: 3rd-person / past forms of the verbs above
-		// headline prose ("what breaks if I remove X") and must never outrank
-		// a real symbol that follows them.
-		"refactors", "removes", "removed", "changes", "changed", "adds",
-		"added", "deletes", "deleted", "updates", "updated", "renames",
-		"renamed", "moves", "moved", "extracts", "simplifies", "split",
-		"splits", "breaks", "fixes", "fixed", "modifies", "replaces",
-		"replaced", "rewrites", "introduces", "creates",
 		"method", "function", "file", "symbol", "code", "line", "lines",
 		"class", "struct", "type", "interface", "module", "package",
 		"variable", "constant", "field", "property", "parameter", "argument",
@@ -144,7 +170,7 @@ func extractSymbols(change string, ix *index.Index) []string {
 	} {
 		stop[strings.ToLower(w)] = true
 	}
-	var bare []string
+	var bare, verbBare []string
 	for _, m := range bareRe.FindAllString(change, -1) {
 		// A token that resolves (case-sensitively) to a real index symbol
 		// is kept even when it collides with the stoplist (e.g. "Add",
@@ -152,8 +178,18 @@ func extractSymbols(change string, ix *index.Index) []string {
 		if stop[strings.ToLower(m)] && !hasIndexSymbol(ix, m) {
 			continue
 		}
+		// ...but a token that is BOTH a real symbol AND sentence-verb-shaped
+		// ("add a caching layer to Fit" — a lowercase `add` helper exists
+		// somewhere in most codebases) is DEMOTED to the end of the
+		// candidate order instead of outranking the symbols it headlines.
+		// Backticks (`add`) still quote-win and take precedence.
+		if changeVerbs[strings.ToLower(m)] {
+			verbBare = append(verbBare, m)
+			continue
+		}
 		bare = append(bare, m)
 	}
+	bare = append(bare, verbBare...)
 
 	// Qualified names yield the most reliable symbol: prefer the last
 	// component as the bare symbol, full qualified name as a candidate.

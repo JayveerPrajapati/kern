@@ -147,15 +147,15 @@ func (c *Client) HasEmbeddingModel() bool {
 	return false
 }
 
-// EmbedText embeds a single text with the local Ollama embedding model
-// (POST /api/embed). It returns a dense vector of float32s. Errors when Ollama
-// is unreachable or the model is missing — callers keep their deterministic
-// fallback in that case.
-func (c *Client) EmbedText(ctx context.Context, text string) ([]float32, error) {
+// EmbedTexts embeds many texts in a single request (POST /api/embed with the
+// input array). It returns one dense vector per text, in input order. Errors
+// when Ollama is unreachable or the model is missing — callers keep their
+// deterministic fallback in that case.
+func (c *Client) EmbedTexts(ctx context.Context, texts []string) ([][]float32, error) {
 	model := EmbedModel()
 	payload, err := json.Marshal(map[string]any{
 		"model": model,
-		"input": text,
+		"input": texts,
 	})
 	if err != nil {
 		return nil, err
@@ -182,7 +182,19 @@ func (c *Client) EmbedText(ctx context.Context, text string) ([]float32, error) 
 	if len(out.Embeddings) == 0 {
 		return nil, errors.New("empty ollama embedding")
 	}
-	return out.Embeddings[0], nil
+	return out.Embeddings, nil
+}
+
+// EmbedText embeds a single text with the local Ollama embedding model
+// (POST /api/embed). It returns a dense vector of float32s. Errors when Ollama
+// is unreachable or the model is missing — callers keep their deterministic
+// fallback in that case.
+func (c *Client) EmbedText(ctx context.Context, text string) ([]float32, error) {
+	vecs, err := c.EmbedTexts(ctx, []string{text})
+	if err != nil {
+		return nil, err
+	}
+	return vecs[0], nil
 }
 
 func (c *Client) tags() ([]string, error) {

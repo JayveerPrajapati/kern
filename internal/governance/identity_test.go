@@ -1,6 +1,10 @@
 package governance
 
 import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"sync"
 	"testing"
 )
 
@@ -169,5 +173,81 @@ func TestLoadAgentsMissingStoreIsNoop(t *testing.T) {
 	}
 	if _, err := GetAgent("nobody"); err == nil {
 		t.Error("GetAgent for unknown ID should still fail closed")
+	}
+}
+
+// TestPersistAgentConcurrentNoLoss hammers PersistAgent from many goroutines
+// at once. The old plain os.WriteFile read-modify-write interleaved and
+// silently lost other agents; the locked flock + atomic-rename critical
+// section must preserve every registration.
+func TestPersistAgentConcurrentNoLoss(t *testing.T) {
+	root := t.TempDir()
+	const agents = 20
+	var wg sync.WaitGroup
+	errs := make(chan error, agents)
+	for i := 0; i < agents; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			id := fmt.Sprintf("agent-%02d", i)
+			a := NewAgent(id, "Agent "+id, "tester", []Permission{{Resource: "context", Action: "read"}})
+			if err := PersistAgent(root, a); err != nil {
+				errs <- fmt.Errorf("persist %s: %w", id, err)
+			}
+		}(i)
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Error(err)
+	}
+
+	persisted := PersistedAgents(root)
+	if len(persisted) != agents {
+		t.Fatalf("PersistedAgents = %d, want %d (concurrent updates lost)", len(persisted), agents)
+	}
+	ids := map[string]bool{}
+	for _, a := range persisted {
+		ids[a.ID] = true
+	}
+	for i := 0; i < agents; i++ {
+		if !ids[fmt.Sprintf("agent-%02d", i)] {
+			t.Errorf("agent-%02d missing from store", i)
+		}
+	}
+}
+
+// TestPersistAgentCorruptStoreFailsClosed: a corrupt agents.json must fail
+// closed (registration errors) instead of being overwritten — the old code
+// swallowed the unmarshal error and rewrote the file, destroying every other
+// agent identity it contained.
+func TestPersistAgentCorruptStoreFailsClosed(t *testing.T) {
+	root := t.TempDir()
+	path := agentStorePath(root)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := PersistAgent(root, NewAgent("a1", "A", "tester", nil)); err == nil {
+		t.Fatal("PersistAgent on a corrupt store should fail closed, got nil")
+	}
+	// The corrupt content must be left untouched, not overwritten.
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "{not json" {
+		t.Errorf("corrupt store was overwritten: %q", data)
+	}
+
+	// A healthy store still works after the fix.
+	root2 := t.TempDir()
+	if err := PersistAgent(root2, NewAgent("b1", "B", "tester", nil)); err != nil {
+		t.Fatalf("PersistAgent on healthy store: %v", err)
+	}
+	if got := PersistedAgents(root2); len(got) != 1 {
+		t.Fatalf("PersistedAgents = %d, want 1", len(got))
 	}
 }

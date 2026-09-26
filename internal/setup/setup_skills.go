@@ -2,6 +2,7 @@ package setup
 
 import (
 	"bytes"
+	"log"
 	"os"
 	"path/filepath"
 
@@ -85,24 +86,32 @@ func wireProjectSkills(root string) []Status {
 	opencodeJSON := filepath.Join(root, "opencode.json")
 	if _, err1 := os.Stat(opencodeDir); err1 == nil {
 		opTarget := filepath.Join(opencodeDir, "skills")
-		_, _ = installSkillsToDir(opTarget)
+		if _, err := installSkillsToDir(opTarget); err != nil {
+			log.Printf("WARNING: failed to install OpenCode skills into %s: %v", opTarget, err)
+		}
 	} else if _, err2 := os.Stat(opencodeJSON); err2 == nil {
 		opTarget := filepath.Join(opencodeDir, "skills")
-		_, _ = installSkillsToDir(opTarget)
+		if _, err := installSkillsToDir(opTarget); err != nil {
+			log.Printf("WARNING: failed to install OpenCode skills into %s: %v", opTarget, err)
+		}
 	}
 
 	// 5. Codex project skills (.codex/skills) if .codex exists
 	codexDir := filepath.Join(root, ".codex")
 	if _, err := os.Stat(codexDir); err == nil {
 		codexTarget := filepath.Join(codexDir, "skills")
-		_, _ = installSkillsToDir(codexTarget)
+		if _, err := installSkillsToDir(codexTarget); err != nil {
+			log.Printf("WARNING: failed to install Codex skills into %s: %v", codexTarget, err)
+		}
 	}
 
 	// 6. Copilot project skills (.github/skills) if .github exists
 	githubDir := filepath.Join(root, ".github")
 	if _, err := os.Stat(githubDir); err == nil {
 		copilotTarget := filepath.Join(githubDir, "skills")
-		_, _ = installSkillsToDir(copilotTarget)
+		if _, err := installSkillsToDir(copilotTarget); err != nil {
+			log.Printf("WARNING: failed to install Copilot skills into %s: %v", copilotTarget, err)
+		}
 	}
 
 	return statuses

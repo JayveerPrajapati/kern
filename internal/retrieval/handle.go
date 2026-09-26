@@ -80,6 +80,13 @@ func HandleStorePath(root string) string {
 // via rename). It is the persistence half of the handle lifecycle: the CLI
 // runs retrieve and resolve in separate processes, so a handle created by
 // `kern retrieve` must survive long enough for `kern resolve` to find it.
+//
+// Merge-on-disk (QA Pick #2, F-R1): a fresh process starts with an empty
+// registry, so writing only its own handles would orphan every handle
+// persisted by earlier processes (retrieve in process A, then retrieve in
+// process B, left A's handles unusable). Before writing, entries already in
+// the store that this registry does not hold are carried over (in-memory
+// wins on ID conflict), and TTL-expired entries are dropped.
 func (r *Registry) Save(path string) error {
 	r.mu.RLock()
 	now := time.Now()
@@ -92,6 +99,27 @@ func (r *Registry) Save(path string) error {
 		entries = append(entries, entry{Handle: h, RegisteredAt: now})
 	}
 	r.mu.RUnlock()
+	if data, err := os.ReadFile(path); err == nil {
+		var persisted []entry
+		if json.Unmarshal(data, &persisted) == nil {
+			known := make(map[string]bool, len(entries))
+			for _, e := range entries {
+				if e.Handle != nil {
+					known[e.Handle.ID] = true
+				}
+			}
+			cutoff := time.Now().Add(-handleTTL)
+			for _, e := range persisted {
+				if e.Handle == nil || e.Handle.ID == "" || known[e.Handle.ID] {
+					continue
+				}
+				if !e.RegisteredAt.IsZero() && e.RegisteredAt.Before(cutoff) {
+					continue
+				}
+				entries = append(entries, e)
+			}
+		}
+	}
 	data, err := json.MarshalIndent(entries, "", "  ")
 	if err != nil {
 		return err

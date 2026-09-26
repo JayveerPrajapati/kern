@@ -178,3 +178,48 @@ func TestRenderCompactDependencySkipped(t *testing.T) {
 		t.Errorf("expected the skip reason in the line, got:\n%s", out)
 	}
 }
+
+// TestRenderCompactSecretsFindingsWarn pins F7's renderer contradiction: a
+// secrets scan that FOUND 63 secrets must read "secrets: WARN findings=63",
+// never the old "secrets: OK findings=63" (findings are findings, not OK).
+func TestRenderCompactSecretsFindingsWarn(t *testing.T) {
+	v := VerificationResult{
+		Verdict: VerdictWarn,
+		Secrets: &SecretsResult{
+			OK:       true, // advisory: findings never flip OK
+			Count:    63,
+			Detail:   "found 63 secret(s) in commit history",
+			Findings: []SecretFinding{{Commit: "abc1234", File: "config.txt", Line: 2, Kind: "aws-access-key", Snippet: "AKIA…MPLE"}},
+		},
+	}
+	out := RenderCompact(v)
+	if !strings.Contains(out, "secrets: WARN findings=63") {
+		t.Errorf("RenderCompact must render findings as WARN, got:\n%s", out)
+	}
+	if strings.Contains(out, "secrets: OK") {
+		t.Errorf("RenderCompact must not render a findings-carrying secrets check as OK:\n%s", out)
+	}
+	if !strings.Contains(out, "abc1234 config.txt:2 [aws-access-key] AKIA…MPLE") {
+		t.Errorf("RenderCompact must still list the finding detail:\n%s", out)
+	}
+}
+
+// TestRenderCompactCVEFindingsWarn is the CVE analogue: reported
+// vulnerabilities render as WARN, not OK.
+func TestRenderCompactCVEFindingsWarn(t *testing.T) {
+	v := VerificationResult{
+		Verdict: VerdictWarn,
+		CVE: &CVEResult{
+			OK:       true, // advisory
+			Count:    2,
+			Findings: []CVEFinding{{ID: "GO-2023-1234", Module: "example.com/x", Summary: "summary"}},
+		},
+	}
+	out := RenderCompact(v)
+	if !strings.Contains(out, "cve: WARN vulnerabilities=2") {
+		t.Errorf("RenderCompact must render vulnerabilities as WARN, got:\n%s", out)
+	}
+	if strings.Contains(out, "cve: OK") {
+		t.Errorf("RenderCompact must not render a vulnerabilities-carrying CVE check as OK:\n%s", out)
+	}
+}

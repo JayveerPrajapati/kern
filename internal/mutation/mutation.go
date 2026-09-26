@@ -43,12 +43,14 @@ type Options struct {
 
 // Report encapsulates the complete mutation testing results.
 type Report struct {
-	Root          string   `json:"root"`
-	TotalMutants  int      `json:"total_mutants"`
-	KilledCount   int      `json:"killed_count"`
-	SurvivedCount int      `json:"survived_count"`
-	Score         float64  `json:"mutation_score"` // 0-100%
-	Mutants       []Mutant `json:"mutants"`
+	Root           string   `json:"root"`
+	TotalMutants   int      `json:"total_mutants"`
+	KilledCount    int      `json:"killed_count"`
+	SurvivedCount  int      `json:"survived_count"`
+	EvaluatedCount int      `json:"evaluated_count"` // killed + survived; the score's denominator
+	UntestedCount  int      `json:"untested_count"`  // zero_return class: skipped without type analysis
+	Score          float64  `json:"mutation_score"`  // 0-100% over EVALUATED mutants only
+	Mutants        []Mutant `json:"mutants"`
 }
 
 // GenerateMutants parses Go source code and returns candidate AST mutants without altering disk.
@@ -276,9 +278,11 @@ func Run(ctx context.Context, opts Options) (*Report, error) {
 
 	if opts.DryRun || len(allMutants) == 0 {
 		return &Report{
-			Root:         absRoot,
-			TotalMutants: len(allMutants),
-			Mutants:      allMutants,
+			Root:           absRoot,
+			TotalMutants:   len(allMutants),
+			EvaluatedCount: 0,
+			UntestedCount:  len(allMutants), // dry run: nothing is executed
+			Mutants:        allMutants,
 		}, nil
 	}
 
@@ -349,13 +353,21 @@ func Run(ctx context.Context, opts Options) (*Report, error) {
 		score = (float64(killed) / float64(totalEvaluated)) * 100.0
 	}
 
+	untested := 0
+	for i := range allMutants {
+		if allMutants[i].Status == "untested" {
+			untested++
+		}
+	}
 	return &Report{
-		Root:          absRoot,
-		TotalMutants:  len(allMutants),
-		KilledCount:   killed,
-		SurvivedCount: survived,
-		Score:         score,
-		Mutants:       allMutants,
+		Root:           absRoot,
+		TotalMutants:   len(allMutants),
+		KilledCount:    killed,
+		SurvivedCount:  survived,
+		EvaluatedCount: killed + survived,
+		UntestedCount:  untested,
+		Score:          score,
+		Mutants:        allMutants,
 	}, nil
 }
 

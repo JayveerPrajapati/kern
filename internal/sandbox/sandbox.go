@@ -2,6 +2,23 @@
 // restores the tree when the command fails. This lets risky operations (agents,
 // scripts, migrations) run safely: success keeps changes, non-zero exit rolls
 // everything back exactly.
+//
+// This is rollback-on-failure, NOT isolation. Sandboxed commands run with the
+// caller's full user privileges — they are not confined at the OS level, and
+// the environment is only scrubbed of secret-named variables, not of the
+// filesystem. Any write made OUTSIDE the snapshot root is never rolled back.
+// Only changes inside root are reverted on a non-zero exit; treat the sandbox
+// as an undo button for the project tree, not a security boundary.
+//
+// Stage-1 FS confinement (defense-in-depth, NOT a boundary): when
+// KERN_SANDBOX_FS_CONFINEMENT is on (the default), the sensitive-path
+// blocklist (~/.ssh, ~/.aws, ~/.gnupg, ~/.kube, ~/.netrc, cloud credentials)
+// is blocked from READS — on macOS by the Seatbelt profile, and on Linux by
+// the Landlock allowlist when the kernel supports it (the trampoline in
+// internal/sandbox/landlock). KERN_SANDBOX_WRITE_CONFINEMENT (default on)
+// additionally confines Linux writes to the workspace, temp and cache dirs.
+// Where Landlock is unavailable the Linux behavior is unchanged
+// (degrade-safe).
 package sandbox
 
 import (
@@ -29,6 +46,7 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/index"
 	"github.com/JayveerPrajapati/kern/internal/intel"
 	"github.com/JayveerPrajapati/kern/internal/processgroup"
+	"github.com/JayveerPrajapati/kern/internal/sandbox/landlock"
 )
 
 // maxSnapshotBytes is the default per-file snapshot cap (100 MiB): a file that
@@ -230,6 +248,12 @@ func scrubEmbeddedCredentials(value string) string {
 // credentials embedded in Go proxy/sumdb URLs (https://user:token@proxy.corp/)
 // never reach sandboxed commands. All secrets, tokens, and API keys are
 // dropped.
+//
+// HOME and GOPATH pass through intentionally — sandboxed builds need them to
+// locate the Go module cache and build tools. This does not reopen the
+// secret-file exposure: the Linux read-confinement (Landlock, added
+// 2026-09-25) confines the sandboxed command's filesystem reads and closes
+// HOME-relative secret-file reads (e.g. ~/.aws/credentials, ~/.ssh/id_rsa).
 func sanitizedEnv() []string {
 	src := os.Environ()
 	out := make([]string, 0, len(src))
@@ -690,14 +714,58 @@ func runGuarded(parent context.Context, root string, cmdName string, args []stri
 	}
 	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
+	// Network isolation (F-S1): the availability gate above used to probe
+	// CAPABILITY and then run the command via plain exec — full egress on
+	// stock macOS. The probe validates exactly this wrap, so when isolation
+	// is available (and not explicitly opted out of), run the command behind
+	// it: sandbox-exec's deny-network Seatbelt profile on darwin, unshare's
+	// user+net namespace on Linux. processgroup.Set below makes the timeout
+	// kill reach the whole wrapper tree.
+	netIsolated := false
+	fsConfined := false
 	c := exec.CommandContext(ctx, cmdName, args...)
+	if !netEscapeHatchSet() {
+		if prefix, ok := netIsolationPrefix(); ok {
+			// Linux Stage-1 FS confinement (M3): when Landlock is available,
+			// re-exec this binary as a trampoline that applies the allowlist
+			// and then runs the SAME unshare -> sh -> target chain below.
+			// Landlock is per-thread and cannot be dropped, so it must be
+			// applied in a fresh child, never in this process.
+			if goruntime.GOOS == "linux" && fsConfinementEnabled() && landlock.LandlockAvailable(prefix) {
+				childEnv := governance.StripSecrets(sanitizedEnv(), governance.DefaultSecretFilter())
+				if exe, err := os.Executable(); err == nil {
+					absRoot := root
+					if !filepath.IsAbs(absRoot) {
+						if a, aerr := filepath.Abs(absRoot); aerr == nil {
+							absRoot = a
+						}
+					}
+					if spec, merr := landlock.ChildSpecJSON(absRoot, cmdName, args, childEnv, prefix); merr == nil {
+						c = exec.CommandContext(ctx, exe)
+						c.Env = append(childEnv, landlock.ChildSpecEnv+"="+spec)
+						netIsolated, fsConfined = true, true
+					}
+				}
+			}
+			if !fsConfined {
+				wrapped := append(append([]string{}, prefix[1:]...), cmdName)
+				wrapped = append(wrapped, args...)
+				c = exec.CommandContext(ctx, prefix[0], wrapped...)
+				netIsolated = true
+			}
+		}
+	}
 	c.Dir = root
 	// Sanitize the environment so sandboxed commands cannot read or exfiltrate
 	// secrets (API keys, tokens) from the operator's environment. Only a
 	// whitelist of build/locale-safe vars is passed through.
 	// The allowlist already drops secrets; StripSecrets is defense-in-depth so
 	// any future allowlist additions cannot reintroduce secret-named vars.
-	c.Env = governance.StripSecrets(sanitizedEnv(), governance.DefaultSecretFilter())
+	// The Landlock trampoline above already carries the sanitized env (plus
+	// its own marker), so it is only set here for the plain wrap path.
+	if !fsConfined {
+		c.Env = governance.StripSecrets(sanitizedEnv(), governance.DefaultSecretFilter())
+	}
 	// Run the command in its own process group so that on timeout the whole
 	// group (the command and any grandchildren it spawns) is killed, not just
 	// the direct child.
@@ -705,8 +773,11 @@ func runGuarded(parent context.Context, root string, cmdName string, args []stri
 	out, err := c.CombinedOutput()
 	res.Output = string(out)
 	// record the run's network posture alongside the FS manifest so
-	// the impact audit covers the network half too.
+	// the impact audit covers the network half too. Isolated reflects the
+	// actual wrap above (F-S1), not assessNetwork's static default.
 	res.Network = assessNetwork(string(out))
+	res.Network.Isolated = netIsolated
+	res.Network.FSConfined = fsConfined
 	res.Duration = time.Since(start)
 	if ctx.Err() == context.DeadlineExceeded || ctx.Err() == context.Canceled {
 		// The context kill only reaches the direct child; kill the process
@@ -732,7 +803,11 @@ func runGuarded(parent context.Context, root string, cmdName string, args []stri
 	// before the restore decision: a failed run's changes are about to be
 	// rolled back, but they must still be auditable via res.Manifest. The
 	// skipped count is surfaced through res.SkippedFiles for the summary.
-	res.Manifest, _ = snap.Manifest()
+	var skippedCount int
+	res.Manifest, skippedCount = snap.Manifest()
+	if skippedCount > 0 {
+		log.Printf("WARNING: %d file(s) exceeded the snapshot cap and are excluded from the impact manifest; audit trail may be incomplete before rollback", skippedCount)
+	}
 	if res.ExitCode != 0 || res.Err != nil {
 		// F7: files that exceeded the snapshot cap were never copied into the
 		// snapshot, so if the failed run modified or deleted one of them,
@@ -791,6 +866,34 @@ func runGuarded(parent context.Context, root string, cmdName string, args []stri
 	return res
 }
 
+// evalSymlinksNearest resolves p to its canonical absolute path, walking up to
+// the nearest EXISTING ancestor when EvalSymlinks fails on the full path (the
+// restore target may not exist yet — rollback writes files that the failed run
+// may have deleted). Re-appending the unresolved remainder preserves the
+// not-yet-existing suffix while still resolving every symlink that DOES exist,
+// so a symlink created during a sandboxed run is resolved before Escape's
+// prefix check even when the final path component is absent. On total failure
+// (nothing resolves) the cleaned lexical path is returned and Escape's
+// lexical prefix check still applies.
+func evalSymlinksNearest(p string) string {
+	cur := filepath.Clean(p)
+	var tail []string
+	for {
+		if resolved, err := filepath.EvalSymlinks(cur); err == nil {
+			if len(tail) == 0 {
+				return resolved
+			}
+			return filepath.Join(resolved, filepath.Join(tail...))
+		}
+		parent := filepath.Dir(cur)
+		if parent == cur { // reached the filesystem root
+			return filepath.Join(cur, filepath.Join(tail...))
+		}
+		tail = append([]string{filepath.Base(cur)}, tail...)
+		cur = parent
+	}
+}
+
 // Escape checks a path stays within root (defense against traversal).
 // root is resolved to an absolute path first, so the check is correct whether
 // the caller passed "." (the runSandbox default), a relative path, or an
@@ -798,11 +901,18 @@ func runGuarded(parent context.Context, root string, cmdName string, args []stri
 // every file appear to "escape" (filepath.Clean(".")+"./" never matches
 // "go.mod"), which caused Restore to refuse every file and then delete the
 // entire working tree — a critical data-loss bug.
+//
+// Both sides are symlink-resolved (nearest existing ancestor) before the
+// prefix check, so a symlink created during a sandboxed run cannot point a
+// restore path outside the snapshot root: lexical Clean + prefix matching
+// alone would let "root/link" restore to the link's target anywhere on disk
+// (e.g. root/link -> /etc), which the rollback would then happily write to.
 func Escape(root, p string) bool {
 	absRoot, err := filepath.Abs(root)
 	if err != nil {
 		absRoot = filepath.Clean(root)
 	}
-	clean := filepath.Clean(filepath.Join(absRoot, p))
-	return !strings.HasPrefix(clean, absRoot+string(filepath.Separator))
+	rootResolved := evalSymlinksNearest(absRoot)
+	clean := evalSymlinksNearest(filepath.Join(absRoot, p))
+	return !strings.HasPrefix(clean, rootResolved+string(filepath.Separator))
 }

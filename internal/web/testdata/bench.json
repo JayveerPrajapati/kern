@@ -1,0 +1,43 @@
+{
+  "suite": "kern-bench",
+  "date": "2026-09-25T00:00:00Z",
+  "root": "/tmp/kern-bench-fixture",
+  "git_head": "0000000",
+  "symbol_count": 42,
+  "machine": {
+    "goos": "darwin",
+    "goarch": "arm64",
+    "go_version": "go1.23.0",
+    "num_cpu": 8
+  },
+  "cold_load_ms": {
+    "median_ms": 1234.5,
+    "min_ms": 1234.5,
+    "runs": 1
+  },
+  "warm_load_ms": {
+    "median_ms": 12.345,
+    "min_ms": 10.1,
+    "runs": 3
+  },
+  "cold_vs_warm_speedup": 100.0,
+  "queries": [
+    {
+      "name": "search",
+      "kind": "symbol-search",
+      "target": "main",
+      "median_ms": 1.2,
+      "min_ms": 0.9,
+      "runs": 5
+    },
+    {
+      "name": "blast",
+      "kind": "transitive-blast-radius",
+      "target": "Public",
+      "median_ms": 3.4,
+      "min_ms": 2.8,
+      "runs": 5
+    }
+  ],
+  "methodology_ref": "docs/benchmarks/graph-latency.md + internal/bpreceipt/metrics G12"
+}

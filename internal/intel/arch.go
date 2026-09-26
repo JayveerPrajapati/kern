@@ -144,6 +144,29 @@ func AnalyzeArchitecture(ix *index.Index) Architecture {
 	return Architecture{Communities: comms, Coupling: coupling}
 }
 
+// wrapColumn renders pkgs joined with ", " so no line exceeds maxCol visible
+// columns given the current line already holds prefix (prefix ends with the
+// "pkgs " column). Continuation lines are prefixed with 6 spaces. Used by the
+// arch/communities renderers to keep wide package lists readable.
+func wrapColumn(pkgs []string, prefix string, maxCol int) string {
+	var b strings.Builder
+	col := len(prefix)
+	for i, p := range pkgs {
+		sep := ""
+		if i > 0 {
+			sep = ", "
+		}
+		if i > 0 && col+len(sep)+len(p) > maxCol {
+			b.WriteString("\n      ")
+			col = 6
+			sep = ""
+		}
+		b.WriteString(sep + p)
+		col += len(sep) + len(p)
+	}
+	return b.String()
+}
+
 // RenderArch returns the architecture report: subsystems first, then coupling
 // warnings ranked by bundle size. When community detection was skipped, a
 // skip note is rendered instead of a "no call structure" message.
@@ -160,8 +183,8 @@ func RenderArch(a Architecture) string {
 		b.WriteString("  (no project-local call structure detected)\n")
 	}
 	for _, c := range a.Communities {
-		fmt.Fprintf(&b, "  %-24s size %-4d hub %-24s pkgs %s\n",
-			c.ID, c.Size, c.Hub, strings.Join(c.Packages, ", "))
+		prefix := fmt.Sprintf("  %-24s size %-4d hub %-24s pkgs ", c.ID, c.Size, c.Hub)
+		fmt.Fprintf(&b, "%s%s\n", prefix, wrapColumn(c.Packages, prefix, 100))
 	}
 	b.WriteString("\ncoupling warnings (cross-community call bundles):\n")
 	if len(a.Coupling) == 0 {

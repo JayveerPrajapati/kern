@@ -445,6 +445,12 @@ func (s *BlueprintService) Aggregate(results []domain.CheckResult) (status domai
 	skipped := 0
 
 	findings = []domain.Finding{}
+	// F-DG4: a check that BLOCKs (verdict) with zero SeverityBlock findings
+	// must still surface in summary.Blocks — otherwise the summary line says
+	// blocks=0 while the check renders [BLOCK]. Counted per check, only when
+	// the check's own findings carry no severity-block, so a block finding is
+	// never double-counted.
+	noFindingBlockVerdicts := 0
 	for _, cr := range results {
 		// A check is skipped when it says so explicitly (Skipped flag) or
 		// when its status IS StatusSkip — both must be counted and must not
@@ -458,6 +464,15 @@ func (s *BlueprintService) Aggregate(results []domain.CheckResult) (status domai
 			hasError = true
 		case domain.StatusBlock:
 			hasBlock = true
+			blockFindings := 0
+			for _, f := range cr.Findings {
+				if f.Severity == domain.SeverityBlock {
+					blockFindings++
+				}
+			}
+			if blockFindings == 0 {
+				noFindingBlockVerdicts++
+			}
 		case domain.StatusWarn:
 			hasWarn = true
 		case domain.StatusPass:
@@ -503,6 +518,9 @@ func (s *BlueprintService) Aggregate(results []domain.CheckResult) (status domai
 			summary.Blocks++
 		}
 	}
+	// F-DG4: fold in BLOCK verdicts that produced no severity-block
+	// findings, so blocks >= 1 whenever any check renders [BLOCK].
+	summary.Blocks += noFindingBlockVerdicts
 
 	return status, exitCode, findings, summary
 }

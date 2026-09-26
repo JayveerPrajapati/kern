@@ -245,7 +245,14 @@ func TestRunTestGapsJSON(t *testing.T) {
 	if _, ok := m["coverage"]; !ok {
 		t.Fatalf("expected coverage object: %v", m)
 	}
-	if _, ok := m["gaps"]; !ok {
+	gaps, ok := m["gaps"]
+	if !ok {
 		t.Fatalf("expected gaps array: %v", m)
+	}
+	// gaps must be the FULL uncovered list (never null) — the zero-caller
+	// symbols are named too.
+	arr, ok := gaps.([]any)
+	if !ok || len(arr) == 0 {
+		t.Fatalf("expected non-null gaps array with entries, got %v (%T)", gaps, gaps)
 	}
 }

@@ -4,7 +4,8 @@
 // per-project index/graph/memories/incidents, while org-level audit and
 // policies are shared.
 // Usage:
-// srv := enterprise.New()
+// srv, err := enterprise.New()
+// if err != nil { /* org mode refused without KERN_RBAC_DEFAULT_DENY=1 */ }
 // srv.Register("payments", "/repos/payments")
 // srv.Register("orders", "/repos/orders")
 // http.ListenAndServe(":8090", srv)

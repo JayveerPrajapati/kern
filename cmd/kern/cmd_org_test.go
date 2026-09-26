@@ -25,7 +25,10 @@ func TestOrgProjectsSubcommand(t *testing.T) {
 // server built the same way runOrg builds it (enterprise.New + Register +
 // RegisterAgent).
 func TestOrgTeamsRoundTrip(t *testing.T) {
-	srv := enterprise.New()
+	srv, err := enterprise.New()
+	if err != nil {
+		t.Fatalf("enterprise.New: %v", err)
+	}
 	if err := srv.Register("p1", t.TempDir()); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -65,7 +68,10 @@ func TestOrgTeamsRoundTrip(t *testing.T) {
 // TestOrgTeamsRoundTrip) because runOrg builds a fresh in-process server per
 // invocation, so register and list must share one.
 func TestOrgAgentsRegisterList(t *testing.T) {
-	srv := enterprise.New()
+	srv, err := enterprise.New()
+	if err != nil {
+		t.Fatalf("enterprise.New: %v", err)
+	}
 	out := captureStdout(t, func() {
 		runOrgAgentRegister(srv, []string{"a1", "Agent One", "--type", "builder", "--perm", "source:read", "--perm", "tests:write"})
 	})

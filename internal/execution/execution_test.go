@@ -450,3 +450,112 @@ func TestWriteArtifact(t *testing.T) {
 		t.Fatalf("written content = %q, want %q", string(data), a.Content)
 	}
 }
+
+// ---- F1: nested go.mod discovery (bounded, ≤2 levels) ----
+
+// TestGoModuleRoot pins the discovery rules: root go.mod wins; a single
+// nested go.mod is found (2 levels deep); multiple nested modules are
+// ambiguous and yield ""; a module-less root yields "".
+func TestGoModuleRoot(t *testing.T) {
+	t.Run("root module", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module m\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if got := goModuleRoot(dir); got != dir {
+			t.Errorf("goModuleRoot = %q, want root %q", got, dir)
+		}
+	})
+	t.Run("nested single module", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(dir, "src"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "src", "go.mod"), []byte("module m\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if got := goModuleRoot(dir); got != filepath.Join(dir, "src") {
+			t.Errorf("goModuleRoot = %q, want %q", got, filepath.Join(dir, "src"))
+		}
+	})
+	t.Run("nested two levels deep", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(dir, "a", "b"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "a", "b", "go.mod"), []byte("module m\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if got := goModuleRoot(dir); got != filepath.Join(dir, "a", "b") {
+			t.Errorf("goModuleRoot = %q, want %q", got, filepath.Join(dir, "a", "b"))
+		}
+	})
+	t.Run("multiple nested modules ambiguous", func(t *testing.T) {
+		dir := t.TempDir()
+		for _, sub := range []string{"src1", "src2"} {
+			if err := os.MkdirAll(filepath.Join(dir, sub), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, sub, "go.mod"), []byte("module m\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if got := goModuleRoot(dir); got != "" {
+			t.Errorf("ambiguous nested modules: goModuleRoot = %q, want \"\"", got)
+		}
+	})
+	t.Run("no module", func(t *testing.T) {
+		dir := t.TempDir()
+		if got := goModuleRoot(dir); got != "" {
+			t.Errorf("goModuleRoot = %q, want \"\"", got)
+		}
+	})
+}
+
+// TestExecuteBuildNestedModule pins F1 in execution: a root without go.mod
+// whose module lives in a subdirectory builds inside the discovered module,
+// and the result's Root reflects the module directory.
+func TestExecuteBuildNestedModule(t *testing.T) {
+	t.Setenv("KERN_ALLOW_UNISOLATED", "1") // fail-closed gate: opt into unisolated runs on hosts without netns (darwin)
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "src"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "src", "go.mod"), []byte("module example.com/nested\n\ngo 1.23\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "src", "main.go"), []byte("package main\nfunc main() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ex := NewExecutor(dir)
+	res := ex.ExecuteBuild(30 * time.Second)
+	if !res.OK {
+		t.Fatalf("nested-module build failed: OK=%v Err=%v Output=%s", res.OK, res.Err, res.Output)
+	}
+	if res.Root != filepath.Join(dir, "src") {
+		t.Errorf("Root = %q, want the nested module dir %q", res.Root, filepath.Join(dir, "src"))
+	}
+}
+
+// TestExecuteBuildAmbiguousModulesNoCommand: multiple nested go.mod files are
+// ambiguous — the executor keeps its existing no-module error rather than
+// guessing.
+func TestExecuteBuildAmbiguousModulesNoCommand(t *testing.T) {
+	dir := t.TempDir()
+	for _, sub := range []string{"src1", "src2"} {
+		if err := os.MkdirAll(filepath.Join(dir, sub), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, sub, "go.mod"), []byte("module m\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ex := NewExecutor(dir)
+	res := ex.ExecuteBuild(10 * time.Second)
+	if res.OK {
+		t.Fatal("ambiguous modules must not auto-build")
+	}
+	if res.Err == nil || !strings.Contains(res.Err.Error(), "no build command") {
+		t.Errorf("Err = %v, want a clean detection error", res.Err)
+	}
+}

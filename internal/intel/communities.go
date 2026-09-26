@@ -169,8 +169,8 @@ func RenderCommunities(comms []Community) string {
 	var b strings.Builder
 	b.WriteString("code communities (call-graph clusters):\n")
 	for _, c := range comms {
-		fmt.Fprintf(&b, "  %-28s size %-4d hub %-24s pkgs %s\n",
-			c.ID, c.Size, c.Hub, strings.Join(c.Packages, ", "))
+		prefix := fmt.Sprintf("  %-28s size %-4d hub %-24s pkgs ", c.ID, c.Size, c.Hub)
+		fmt.Fprintf(&b, "%s%s\n", prefix, wrapColumn(c.Packages, prefix, 100))
 		shown := c.Symbols
 		if len(shown) > 10 {
 			shown = shown[:10]
