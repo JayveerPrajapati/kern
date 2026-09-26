@@ -10,6 +10,7 @@ import (
 // TestSandboxMatrix_DefaultGoTarget verifies that a sandbox check with no matrix
 // configured falls back to the default Go build+test target and passes.
 func TestSandboxMatrix_DefaultGoTarget(t *testing.T) {
+	t.Parallel()
 	dir := g8Repo(t)
 	check := NewDefaultCheck()
 	result, err := check.Run(context.Background(), domain.ChangeRequest{RepositoryRoot: dir})
@@ -24,6 +25,7 @@ func TestSandboxMatrix_DefaultGoTarget(t *testing.T) {
 // TestSandboxMatrix_ExplicitGoTarget verifies that an explicit matrix with a Go
 // target produces the same pass result.
 func TestSandboxMatrix_ExplicitGoTarget(t *testing.T) {
+	t.Parallel()
 	dir := g8Repo(t)
 	check := NewDefaultCheck(WithMatrix([]MatrixTarget{
 		{
@@ -44,6 +46,7 @@ func TestSandboxMatrix_ExplicitGoTarget(t *testing.T) {
 
 // TestSandboxMatrix_CommandTarget verifies the combined `command` field.
 func TestSandboxMatrix_CommandTarget(t *testing.T) {
+	t.Parallel()
 	dir := g8Repo(t)
 	check := NewDefaultCheck(WithMatrix([]MatrixTarget{
 		{
@@ -63,6 +66,7 @@ func TestSandboxMatrix_CommandTarget(t *testing.T) {
 
 // TestSandboxMatrix_FailingTarget verifies a failing build returns StatusBlock.
 func TestSandboxMatrix_FailingTarget(t *testing.T) {
+	t.Parallel()
 	dir := g8Repo(t)
 	g8WriteCommit(t, dir, "bad.go", "package main\n\nfunc broken() { this is invalid }\n")
 
@@ -91,6 +95,7 @@ func TestSandboxMatrix_FailingTarget(t *testing.T) {
 // TestSandboxMatrix_MultiTarget verifies two targets both run and a failing
 // second step is caught.
 func TestSandboxMatrix_MultiTarget(t *testing.T) {
+	t.Parallel()
 	dir := g8Repo(t)
 	check := NewDefaultCheck(WithMatrix([]MatrixTarget{
 		{

@@ -13,6 +13,10 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/cache"
 )
 
+func init() {
+	_ = os.Setenv("KERN_CACHE_DISABLE_ASYNC_GC", "1")
+}
+
 func TestSimilarity(t *testing.T) {
 	if got := Similarity("hello world", "hello world"); got != 1 {
 		t.Fatalf("identical should be 1, got %v", got)

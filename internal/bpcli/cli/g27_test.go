@@ -1,10 +1,12 @@
 package cli
 
 import (
+	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -100,14 +102,84 @@ type g27Risk struct {
 	ApprovalRequired bool     `json:"ApprovalRequired"`
 }
 
+// g27Hash computes the current chain-link hash exactly as the kern binary
+// does (governance.computeAuditHash): HMAC-SHA256 keyed by the 32-byte
+// secret at <UserConfigDir>/kern/audit-chain.key, over the format version
+// byte 0x01 (auditHashFormatVersion) followed by the canonical pipe-framed
+// fields. When the secret cannot be read it degrades to the plain formula,
+// mirroring the production fallback, so the test never fails over key
+// availability. The child kern binary self-creates the key on its first
+// append, so it exists by the time the chain is verified here.
 func g27Hash(e g27Entry, prev string) string {
-	h := sha256.New()
+	key, err := g27AuditSecret()
+	if err != nil {
+		return g27HashPlain(e, prev)
+	}
+	h := hmac.New(sha256.New, key)
+	// auditHashFormatVersion = 1: the version byte is the first MAC input so
+	// framing changes are distinguishable from tampering by construction.
+	_, _ = h.Write([]byte{1})
+	g27WriteChainFields(h, e, prev)
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// g27AuditSecret reads the 32-byte HMAC secret from
+// <UserConfigDir>/kern/audit-chain.key (governance.auditChainSecretPath).
+// Any error — missing file, wrong length — is returned so g27Hash falls
+// back to plain-only matching.
+func g27AuditSecret() ([]byte, error) {
+	dir, err := os.UserConfigDir()
+	if err != nil {
+		return nil, err
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "kern", "audit-chain.key"))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) != 32 {
+		return nil, fmt.Errorf("audit-chain secret is %d bytes, want 32", len(data))
+	}
+	return data, nil
+}
+
+// g27WriteChainFields writes the audit entry content plus the previous chain
+// hash with the canonical pipe-separated framing, byte-identical to
+// governance.writeAuditChainFields (field order and framing must match for
+// the recomputed hash to equal the persisted one).
+func g27WriteChainFields(h io.Writer, e g27Entry, prev string) {
 	_, _ = fmt.Fprintf(h, "%s|%s|%s|%s|%s|%v|%v|%v|%s|%s", prev, e.ID, e.AgentID, e.Action, e.Resource, e.Timestamp.UnixNano(), e.Risk, e.Approved, e.Result, e.TaskID)
 	if e.ValidationOutcome != nil {
 		vo := e.ValidationOutcome
 		_, _ = fmt.Fprintf(h, "|%s|%d|%s|%s|%d", vo.Status, vo.ExitCode, strings.Join(vo.BlockedFiles, ","), vo.CorrelationID, vo.Findings)
 	}
+}
+
+// g27HashPlain recomputes the pre-HMAC plain SHA-256 formula (the full field
+// sequence, ValidationOutcome clause included) —
+// governance.computeAuditHashPlain.
+func g27HashPlain(e g27Entry, prev string) string {
+	h := sha256.New()
+	g27WriteChainFields(h, e, prev)
 	return hex.EncodeToString(h.Sum(nil))
+}
+
+// g27HashLegacy recomputes the legacy formula WITHOUT the ValidationOutcome
+// clause — governance.computeAuditHashLegacy, the formula used by the
+// in-transition binary before ValidationOutcome was folded into the hash.
+func g27HashLegacy(e g27Entry, prev string) string {
+	h := sha256.New()
+	_, _ = fmt.Fprintf(h, "%s|%s|%s|%s|%s|%v|%v|%v|%s|%s", prev, e.ID, e.AgentID, e.Action, e.Resource, e.Timestamp.UnixNano(), e.Risk, e.Approved, e.Result, e.TaskID)
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// g27HashMatches mirrors governance.VerifyChainReport's acceptance: a stored
+// hash is intact when it matches ANY of the three chain formulas —
+// HMAC-SHA256 (current), plain SHA-256 (pre-HMAC), or the legacy formula
+// without the ValidationOutcome clause — so chains persisted by older
+// resolved kern binaries don't false-fail, while genuine tampering breaks
+// all three.
+func g27HashMatches(e g27Entry, prev, stored string) bool {
+	return stored == g27Hash(e, prev) || stored == g27HashPlain(e, prev) || stored == g27HashLegacy(e, prev)
 }
 
 // g27ReadChain reads every persisted entry from <root>/.kern/audit/, sorted
@@ -167,6 +239,9 @@ func g27ReadChain(t *testing.T, root string) []g27Entry {
 // repo's .kern/audit/ — and that chain must verify (each hash covers the
 // previous). Requires a real kern binary (skipped when unavailable).
 func TestG27_AuditChainLinked(t *testing.T) {
+	if testing.Short() {
+		t.Skip("E2E gate test — full pipeline; runs in nightly non-short suite")
+	}
 	kernBin := g27RequireKern(t)
 	t.Setenv("KERN_BINARY", kernBin)
 
@@ -234,8 +309,8 @@ func TestG27_AuditChainLinked(t *testing.T) {
 	//    hash from the previous one (kern VerifyChain semantics).
 	prev := ""
 	for i, e := range chain {
-		if e.Hash != g27Hash(e, prev) {
-			t.Fatalf("chain broken at entry %d (%s): stored hash %q != recomputed %q", i, e.ID, e.Hash, g27Hash(e, prev))
+		if !g27HashMatches(e, prev, e.Hash) {
+			t.Fatalf("chain broken at entry %d (%s): stored hash %q matches none of the hmac/plain/legacy formulas (hmac recompute %q)", i, e.ID, e.Hash, g27Hash(e, prev))
 		}
 		prev = e.Hash
 	}
@@ -271,7 +346,7 @@ func TestG27_AuditChainLinked(t *testing.T) {
 	broken := false
 	prevHash := ""
 	for _, e := range tamperedChain {
-		if e.Hash != g27Hash(e, prevHash) {
+		if !g27HashMatches(e, prevHash, e.Hash) {
 			broken = true
 			break
 		}

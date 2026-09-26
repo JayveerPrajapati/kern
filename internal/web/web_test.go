@@ -247,7 +247,7 @@ func TestGovernanceMetricsAvgConfidence(t *testing.T) {
 		t.Fatalf("status = %d, want 200", rec.Code)
 	}
 	var body struct {
-		AvgConfidence float64 `json:"AvgConfidence"`
+		AvgConfidence float64 `json:"avg_confidence"` // snake_case since metrics.Snapshot gained tags (F-A)
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
 		t.Fatalf("decode: %v", err)

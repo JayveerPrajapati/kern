@@ -145,6 +145,9 @@ func g4BlueprintCheck(t *testing.T, binPath, dir string, extraArgs ...string) (s
 
 // G4-1: clean commit
 func TestG4_CleanCommit(t *testing.T) {
+	if testing.Short() {
+		t.Skip("E2E gate test — full pipeline; runs in nightly non-short suite")
+	}
 	bin := g4BuildBinary(t)
 	dir := t.TempDir()
 	g4GitRepo(t, dir)
@@ -195,6 +198,9 @@ func TestG4_ArchitectureViolation(t *testing.T) {
 
 // G4-3: secret violation
 func TestG4_SecretViolation(t *testing.T) {
+	if testing.Short() {
+		t.Skip("E2E gate test — full pipeline; runs in nightly non-short suite")
+	}
 	_ = requireKernPath(t)
 	bin := g4BuildBinary(t)
 	dir := t.TempDir()

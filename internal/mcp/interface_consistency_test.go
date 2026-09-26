@@ -75,6 +75,10 @@ func freshTaskService(t *testing.T, root string) *app.TaskService {
 // both produce equivalent domain results that land in the same authoritative
 // task store. This is the cross-interface exit gate.
 func TestCrossInterfaceAnalyzeConsistency(t *testing.T) {
+	// Independent of every other test: each builds its own fixture root,
+	// its own platform instances, and its own task store, so the trio can
+	// run concurrently to overlap the per-instance platform builds.
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("skipping cross-interface index build in -short mode")
 	}
@@ -144,6 +148,10 @@ func TestCrossInterfaceAnalyzeConsistency(t *testing.T) {
 // calls Analyze. Replicating that here proves the CLI, like MCP and web, lands
 // in the same authoritative store producing the same domain result.
 func TestCrossInterfaceMatchesCLIServicePath(t *testing.T) {
+	// Independent of every other test: each builds its own fixture root,
+	// its own platform instances, and its own task store, so the trio can
+	// run concurrently to overlap the per-instance platform builds.
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("skipping CLI service-path index build in -short mode")
 	}
@@ -178,6 +186,10 @@ func TestCrossInterfaceMatchesCLIServicePath(t *testing.T) {
 // workflow specifically (CLI `kern incident` was refactored to the same
 // service in ; see cmd/kern/cmd_agent.go runIncident).
 func TestCrossInterfaceIncidentConsistency(t *testing.T) {
+	// Independent of every other test: each builds its own fixture root,
+	// its own platform instances, and its own task store, so the trio can
+	// run concurrently to overlap the per-instance platform builds.
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("skipping cross-interface incident index build in -short mode")
 	}

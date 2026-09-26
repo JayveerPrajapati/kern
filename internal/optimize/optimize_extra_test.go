@@ -2,12 +2,17 @@ package optimize
 
 import (
 	"context"
+	"os"
 	"strings"
 	"testing"
 
 	"github.com/JayveerPrajapati/kern/internal/semcache"
 	"github.com/JayveerPrajapati/kern/internal/stats"
 )
+
+func init() {
+	_ = os.Setenv("KERN_CACHE_DISABLE_ASYNC_GC", "1")
+}
 
 func TestPromptEmptyInput(t *testing.T) {
 	if _, err := Prompt("   ", "", Options{}); err == nil {
