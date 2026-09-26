@@ -41,7 +41,14 @@ var (
 	dirMu     sync.Mutex
 	dirEnvKey string // "XDG_CACHE_HOME|HOME" the memoized dir was resolved for
 	dirVal    string
+
+	maintainWG sync.WaitGroup
 )
+
+// WaitForMaintain blocks until all outstanding async MaintainOnce background passes finish.
+func WaitForMaintain() {
+	maintainWG.Wait()
+}
 
 // Dir returns the kern cache root, honouring XDG_CACHE_HOME. The root is
 // memoized while the governing env vars are unchanged — every Path() call
@@ -79,7 +86,13 @@ func Store(key string, v any) error {
 	// opportunistic GC of the data dir this key lives in (rate-limited to
 	// once an hour by the .maintained-at marker); best-effort and async so a
 	// due GC pass (recursive walk + gzip + trim) never blocks the write.
-	go MaintainOnce(Path("data"))
+	if os.Getenv("KERN_CACHE_DISABLE_ASYNC_GC") != "1" {
+		maintainWG.Add(1)
+		go func() {
+			defer maintainWG.Done()
+			MaintainOnce(Path("data"))
+		}()
+	}
 	if err := Ensure(); err != nil {
 		return err
 	}

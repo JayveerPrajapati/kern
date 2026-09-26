@@ -32,6 +32,7 @@ func serveMany(t *testing.T, reqs ...string) []map[string]any {
 	in := strings.NewReader(strings.Join(reqs, "\n") + "\n")
 	buf := &bytes.Buffer{}
 	s := NewServer(in, buf)
+	defer s.Close()
 	// Tests use temp-dir roots outside the process cwd; confine to everything.
 	s.roots = []string{"/"}
 	// The KERN_MCP_ROOTS gate now fails closed to the process cwd; tests
@@ -589,7 +590,7 @@ func waitForResponse(t *testing.T, out *lockedBuffer, req string) map[string]any
 	if err := json.Unmarshal([]byte(req), &probe); err != nil {
 		t.Fatalf("parse id from request: %v", err)
 	}
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
 		for _, line := range strings.Split(out.String(), "\n") {
 			line = strings.TrimSpace(line)

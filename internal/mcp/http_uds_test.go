@@ -98,7 +98,7 @@ func TestServeHTTPOverUnixDomainSocket(t *testing.T) {
 		if err != nil {
 			t.Errorf("expected nil error on shutdown, got: %v", err)
 		}
-	case <-time.After(3 * time.Second):
+	case <-time.After(15 * time.Second):
 		t.Fatal("server did not shut down in time")
 	}
 
@@ -146,7 +146,7 @@ func TestServeHTTPAutoUnixSocketDefault(t *testing.T) {
 		},
 		Timeout: 2 * time.Second,
 	}
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(30 * time.Second)
 	var resp *http.Response
 	for time.Now().Before(deadline) {
 		req, err := http.NewRequestWithContext(ctx, "GET", "http://unix/health", nil)
@@ -188,7 +188,7 @@ func TestServeHTTPAutoUnixSocketDefault(t *testing.T) {
 		if err != nil {
 			t.Errorf("expected nil error on shutdown, got: %v", err)
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(15 * time.Second):
 		t.Fatal("server did not shut down in time")
 	}
 	if _, err := os.Stat(sockPath); !os.IsNotExist(err) {

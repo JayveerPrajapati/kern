@@ -58,6 +58,7 @@ func g8WriteCommit(t *testing.T, dir, relpath, content string) {
 
 // G8-1: successful build
 func TestG8_SuccessfulBuild(t *testing.T) {
+	t.Parallel()
 	dir := g8Repo(t)
 	res := Run(context.Background(), dir, []string{"go", "build", "./..."}, DefaultConfig())
 	if res.Error != "" {
@@ -70,6 +71,7 @@ func TestG8_SuccessfulBuild(t *testing.T) {
 
 // G8-2: failing build
 func TestG8_FailingBuild(t *testing.T) {
+	t.Parallel()
 	dir := g8Repo(t)
 	g8WriteCommit(t, dir, "bad.go", "package main\n\nfunc broken() { this is invalid }\n")
 
@@ -87,6 +89,7 @@ func TestG8_FailingBuild(t *testing.T) {
 
 // G8-3: failing test
 func TestG8_FailingTest(t *testing.T) {
+	t.Parallel()
 	dir := g8Repo(t)
 	g8WriteCommit(t, dir, "main_test.go", `package main
 
@@ -108,6 +111,7 @@ func TestFail(t *testing.T) {
 
 // G8-4: timeout
 func TestG8_Timeout(t *testing.T) {
+	t.Parallel()
 	dir := g8Repo(t)
 	g8WriteCommit(t, dir, "main.go", `package main
 
@@ -135,6 +139,7 @@ func main() {
 // G8-5: process tree cleanup
 // Verifies that after a timeout, no child processes are left running.
 func TestG8_ProcessTreeCleanup(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("process group test is Unix-only")
 	}
@@ -182,6 +187,7 @@ func main() {
 
 // G8-6: large stdout
 func TestG8_LargeStdout(t *testing.T) {
+	t.Parallel()
 	dir := g8Repo(t)
 	// Create a program that prints a lot to stdout.
 	g8WriteCommit(t, dir, "main.go", `package main
@@ -212,6 +218,7 @@ func main() {
 
 // G8-7: large stderr
 func TestG8_LargeStderr(t *testing.T) {
+	t.Parallel()
 	dir := g8Repo(t)
 	g8WriteCommit(t, dir, "main.go", `package main
 
@@ -241,6 +248,7 @@ func main() {
 
 // G8-8: concurrent sandbox runs
 func TestG8_ConcurrentRuns(t *testing.T) {
+	t.Parallel()
 	dir := g8Repo(t)
 
 	const N = 5
@@ -267,6 +275,7 @@ func TestG8_ConcurrentRuns(t *testing.T) {
 
 // G8-9: cancellation
 func TestG8_Cancellation(t *testing.T) {
+	t.Parallel()
 	dir := g8Repo(t)
 	g8WriteCommit(t, dir, "main.go", `package main
 
@@ -294,6 +303,7 @@ func main() {
 
 // G8-10: cleanup after failure
 func TestG8_CleanupAfterFailure(t *testing.T) {
+	t.Parallel()
 	dir := g8Repo(t)
 	g8WriteCommit(t, dir, "bad.go", "package main\n\nfunc broken() { invalid }")
 
@@ -322,6 +332,7 @@ func TestG8_CleanupAfterFailure(t *testing.T) {
 
 // G8-11: repository remains untouched after sandbox execution
 func TestG8_RepoUntouched(t *testing.T) {
+	t.Parallel()
 	dir := g8Repo(t)
 
 	// Record the repo state before sandbox execution.
@@ -352,6 +363,7 @@ func TestG8_RepoUntouched(t *testing.T) {
 
 // G8-bonus: SandboxCheck as a service.Check
 func TestG8_SandboxCheckPass(t *testing.T) {
+	t.Parallel()
 	dir := g8Repo(t)
 	check := NewDefaultCheck()
 	res, err := check.Run(context.Background(), changeReq(dir))
@@ -365,6 +377,7 @@ func TestG8_SandboxCheckPass(t *testing.T) {
 
 // G8-bonus: SandboxCheck detects failing build
 func TestG8_SandboxCheckFailingBuild(t *testing.T) {
+	t.Parallel()
 	dir := g8Repo(t)
 	g8WriteCommit(t, dir, "bad.go", "package main\n\nfunc broken() { invalid }")
 
@@ -380,6 +393,7 @@ func TestG8_SandboxCheckFailingBuild(t *testing.T) {
 
 // G8-bonus: SandboxCheck detects failing test
 func TestG8_SandboxCheckFailingTest(t *testing.T) {
+	t.Parallel()
 	dir := g8Repo(t)
 	g8WriteCommit(t, dir, "main_test.go", `package main
 

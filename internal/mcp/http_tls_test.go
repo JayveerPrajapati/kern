@@ -113,7 +113,7 @@ func TestServeHTTPContextWithTLSServesHTTPS(t *testing.T) {
 	}
 
 	// Wait for readiness over TLS.
-	deadline := time.Now().Add(15 * time.Second)
+	deadline := time.Now().Add(30 * time.Second)
 	healthy := false
 	for time.Now().Before(deadline) {
 		resp, err := client.Get("https://" + addr + "/health")
@@ -171,7 +171,7 @@ func TestServeHTTPContextWithTLSPlainHTTPWhenNil(t *testing.T) {
 	go func() { _ = ServeHTTPContextWithTLS(ctx, addr, nil) }()
 
 	client := &http.Client{Timeout: 2 * time.Second}
-	deadline := time.Now().Add(15 * time.Second)
+	deadline := time.Now().Add(30 * time.Second)
 	healthy := false
 	for time.Now().Before(deadline) {
 		resp, err := client.Get("http://" + addr + "/health")

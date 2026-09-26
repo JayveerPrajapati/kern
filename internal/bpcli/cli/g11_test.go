@@ -109,6 +109,9 @@ func runCICommand(t *testing.T, binPath, repoDir, kernPath string, extraArgs ...
 
 // G11-1: clean PR — no violations, should PASS.
 func TestG11_CleanPR(t *testing.T) {
+	if testing.Short() {
+		t.Skip("E2E gate test — full pipeline; runs in nightly non-short suite")
+	}
 	kernPath := requireKernPath(t)
 	binPath := buildBlueprint(t)
 	dir := g11Repo(t,

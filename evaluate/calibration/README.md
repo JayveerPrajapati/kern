@@ -34,10 +34,10 @@ recall vs review load:
 
 | threshold | recall | mean flagged/commit |
 |---|---|---|
-| 2.0 | 1.000 | 12.50 |
-| 4.0 | 0.811 | 10.14 |
-| 6.0 | 0.735 | 9.18 |
-| 8.0 | 0.647 | 8.09 |
+| 2.0 | 1.000 | 13.26 |
+| 4.0 | 0.849 | 11.26 |
+| 6.0 | 0.730 | 9.69 |
+| 8.0 | 0.596 | 7.91 |
 
 Interpretation for kern's own history: recall stays high up to ~6.0 while
 review load barely moves, because most changed files are genuinely risky
@@ -52,13 +52,28 @@ Given the symbols a commit touched, the graph predicts the affected files
 Precision = predicted files that were really edited; recall = edited files
 the graph predicted. This is the honest error budget of the call graph:
 
-    precision=0.235 recall=1.000 F1=0.381   (kern on kern, 60 commits)
+    precision=0.039 recall=1.000 F1=0.076   (kern on kern, measured 2026-09-22, 54 scored commits)
 
-Recall 1.000 means no real ripple edit was missed; precision 0.235 means the
-graph over-predicts (every caller of a changed symbol is "affected", but
-authors rarely edit all of them). That is the expected conservative bias of a
-deterministic static graph — the number to watch across versions is F1
-trending up without recall dropping below ~0.9.
+Recall 1.000 means no real ripple edit was missed; precision 0.039 means the
+graph massively over-predicts (every caller of a changed symbol is
+"affected", but authors rarely edit all of them). That is the expected
+conservative bias of a deterministic static graph — the number to watch
+across versions is F1 trending up without recall dropping below ~0.9.
+
+Regenerate these numbers with:
+
+```sh
+go run ./evaluate/calibration/              # self-calibration on kern's own history
+```
+
+> Context for the low precision: the underlying call graph over-predicts
+> because a large share of callees are unresolved — `kern index --status`
+> on this snapshot reports 6161/9379 call edges resolved (34% unresolved).
+> Unresolved callees widen the predicted blast radius, which drags precision
+> down while keeping recall at 1.000. Precision is expected to rise as graph
+> resolution improves; the earlier 0.235 figure was measured on a 60-commit
+> sample with a different (smaller, more resolvable) index snapshot and is
+> not directly comparable.
 
 ## Honesty notes
 
