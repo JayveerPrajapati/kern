@@ -301,7 +301,7 @@ func TestMaintainDefaultsEnv(t *testing.T) {
 
 	t.Setenv("KERN_CACHE_ARCHIVE_DAYS", "0.5")
 	t.Setenv("KERN_CACHE_TTL_DAYS", "3")
-	archived, evicted, err := MaintainDefaults(dir, false)
+	archived, evicted, _, err := MaintainDefaults(dir, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -320,7 +320,7 @@ func TestMaintainDefaultsEnv(t *testing.T) {
 	// nothing further changes.
 	t.Setenv("KERN_CACHE_ARCHIVE_DAYS", "not-a-number")
 	t.Setenv("KERN_CACHE_TTL_DAYS", "garbage")
-	if _, _, err := MaintainDefaults(dir, false); err != nil {
+	if _, _, _, err := MaintainDefaults(dir, false); err != nil {
 		t.Fatal(err)
 	}
 
@@ -330,7 +330,7 @@ func TestMaintainDefaultsEnv(t *testing.T) {
 	writeJSONFile(t, stay, payload, now.Add(-10*24*time.Hour))
 	t.Setenv("KERN_CACHE_ARCHIVE_DAYS", "0")
 	t.Setenv("KERN_CACHE_TTL_DAYS", "-1")
-	if a, e, err := MaintainDefaults(dir2, false); err != nil || a != 0 || e != 0 {
+	if a, e, _, err := MaintainDefaults(dir2, false); err != nil || a != 0 || e != 0 {
 		t.Fatalf("disabled pass: a=%d e=%d err=%v", a, e, err)
 	}
 	if _, err := os.Stat(stay); err != nil {
@@ -479,4 +479,84 @@ func TestMaintainOnceFreshDir(t *testing.T) {
 		t.Fatalf("marker must be written: %v", err)
 	}
 	MaintainOnce(dir) // marker fresh → skip
+}
+
+func TestTrimToBudgetOldestFirst(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Now()
+	payload := bigJSON()
+
+	old := filepath.Join(dir, "old.json")
+	mid := filepath.Join(dir, "mid.json")
+	fresh := filepath.Join(dir, "fresh.json")
+	writeJSONFile(t, old, payload, now.Add(-48*time.Hour))
+	writeJSONFile(t, mid, payload, now.Add(-1*time.Hour))
+	writeJSONFile(t, fresh, payload, now)
+
+	// Budget fits exactly one entry: the two oldest must go, newest stays.
+	trimmed, err := TrimToBudget(dir, int64(len(payload)), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if trimmed != 2 {
+		t.Fatalf("trimmed=%d, want 2", trimmed)
+	}
+	if _, err := os.Stat(old); !os.IsNotExist(err) {
+		t.Fatal("oldest file must be trimmed")
+	}
+	if _, err := os.Stat(mid); !os.IsNotExist(err) {
+		t.Fatal("mid file must be trimmed (budget fits only one entry)")
+	}
+	if _, err := os.Stat(fresh); err != nil {
+		t.Fatal("freshest file must survive")
+	}
+}
+
+func TestTrimToBudgetDisabledAndUnder(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Now()
+	f := filepath.Join(dir, "entry.json")
+	writeJSONFile(t, f, bigJSON(), now)
+
+	// maxBytes <= 0 disables the pass entirely.
+	if n, err := TrimToBudget(dir, 0, false); err != nil || n != 0 {
+		t.Fatalf("disabled: n=%d err=%v, want 0/nil", n, err)
+	}
+	// A budget larger than the total is a no-op.
+	if n, err := TrimToBudget(dir, 1<<40, false); err != nil || n != 0 {
+		t.Fatalf("under budget: n=%d err=%v, want 0/nil", n, err)
+	}
+}
+
+func TestTrimToBudgetDryRun(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Now()
+	f := filepath.Join(dir, "entry.json")
+	writeJSONFile(t, f, bigJSON(), now)
+
+	// Dry-run counts the decision but must not delete.
+	trimmed, err := TrimToBudget(dir, 1, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if trimmed != 1 {
+		t.Fatalf("trimmed=%d, want 1", trimmed)
+	}
+	if _, err := os.Stat(f); err != nil {
+		t.Fatal("dry-run must not delete")
+	}
+}
+
+func TestMaxBudgetBytesFromEnv(t *testing.T) {
+	if got := MaxBudgetBytes(); got != 1024*1024*1024 {
+		t.Fatalf("default budget = %d, want 1 GiB", got)
+	}
+	t.Setenv("KERN_CACHE_MAX_MB", "0")
+	if got := MaxBudgetBytes(); got != 0 {
+		t.Fatalf("KERN_CACHE_MAX_MB=0 must disable, got %d", got)
+	}
+	t.Setenv("KERN_CACHE_MAX_MB", "2.5")
+	if got := MaxBudgetBytes(); got != int64(2.5*1024*1024) {
+		t.Fatalf("KERN_CACHE_MAX_MB=2.5 = %d, want 2.5 MiB", got)
+	}
 }

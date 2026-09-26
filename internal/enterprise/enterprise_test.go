@@ -10,9 +10,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/JayveerPrajapati/kern/internal/agent"
+	"github.com/JayveerPrajapati/kern/internal/architecture"
 	"github.com/JayveerPrajapati/kern/internal/domain"
 	"github.com/JayveerPrajapati/kern/internal/governance"
-	"github.com/JayveerPrajapati/kern/internal/web"
 )
 
 const testToken = "test-enterprise-token"
@@ -27,8 +28,80 @@ func authedRequest(t *testing.T, method, target string) *http.Request {
 	return req
 }
 
+// mustNew builds an enterprise server, failing the test on a startup refusal
+// (org mode without the KERN_RBAC_DEFAULT_DENY pairing is refused — finding
+// 2). Tests exercising org mode set that env themselves.
+func mustNew(t *testing.T) *Server {
+	t.Helper()
+	s, err := New()
+	if err != nil {
+		t.Fatalf("enterprise.New: %v", err)
+	}
+	return s
+}
+
+// stubApp is a minimal ProjectApp implementation for tests: web.New is far
+// too heavy (full repo index + relay + MCP server) for unit tests of the
+// enterprise server. Calls are recorded so tests can assert delegation; the
+// default ArchitectureReport is an empty passing report (never nil — the
+// org aggregation endpoint dereferences it). GET /<project>/api/governance
+// renders the policies most recently pushed via SetPolicies, so the policy
+// propagation tests can assert what the built firewall enforces.
+type stubApp struct {
+	closed     bool
+	policies   []domain.Policy
+	roleLookup func(id string) (string, bool)
+	tasks      []*agent.Task
+	arch       *architecture.Report
+	archErr    error
+	serveCalls int
+}
+
+func (a *stubApp) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	a.serveCalls++
+	if strings.HasSuffix(r.URL.Path, "/api/governance") {
+		type govPolicyJSON struct {
+			ID          string `json:"id"`
+			Name        string `json:"name"`
+			Description string `json:"description"`
+			Scope       string `json:"scope"`
+		}
+		policies := make([]govPolicyJSON, 0, len(a.policies))
+		for _, p := range a.policies {
+			policies = append(policies, govPolicyJSON{ID: p.ID, Name: p.Name, Description: p.Description, Scope: p.Scope})
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"policies": policies})
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+}
+func (a *stubApp) SetUserRoleLookup(lookup func(id string) (string, bool)) {
+	a.roleLookup = lookup
+}
+func (a *stubApp) SetPolicies(policies []domain.Policy) { a.policies = policies }
+func (a *stubApp) Close() error {
+	a.closed = true
+	return nil
+}
+func (a *stubApp) ListTasks() []*agent.Task { return a.tasks }
+func (a *stubApp) ArchitectureReport() (*architecture.Report, error) {
+	if a.arch != nil || a.archErr != nil {
+		return a.arch, a.archErr
+	}
+	return &architecture.Report{OK: true}, nil
+}
+
+// withStubFactory installs a factory returning a fresh stubApp per build so
+// tests can drive appFor/eviction/LRU paths without a real web.App. The
+// factory records nothing itself; the built apps are reachable via
+// appForCached.
+func withStubFactory(s *Server) *Server {
+	s.SetAppFactory(func(root string) (ProjectApp, error) { return &stubApp{}, nil })
+	return s
+}
+
 func TestRegisterAndProjects(t *testing.T) {
-	s := New()
+	s := mustNew(t)
 	if err := s.Register("proj-a", t.TempDir()); err != nil {
 		t.Fatal(err)
 	}
@@ -45,7 +118,7 @@ func TestRegisterAndProjects(t *testing.T) {
 }
 
 func TestRegisterDuplicate(t *testing.T) {
-	s := New()
+	s := mustNew(t)
 	_ = s.Register("p", t.TempDir())
 	if err := s.Register("p", t.TempDir()); err == nil {
 		t.Error("expected error for duplicate registration")
@@ -53,7 +126,7 @@ func TestRegisterDuplicate(t *testing.T) {
 }
 
 func TestUnregister(t *testing.T) {
-	s := New()
+	s := mustNew(t)
 	_ = s.Register("p", t.TempDir())
 	if err := s.Unregister("p"); err != nil {
 		t.Fatal(err)
@@ -64,7 +137,7 @@ func TestUnregister(t *testing.T) {
 }
 
 func TestServeHTTPOrgDashboard(t *testing.T) {
-	s := New()
+	s := mustNew(t)
 	_ = s.Register("proj-a", t.TempDir())
 	req := authedRequest(t, "GET", "/")
 	rr := httptest.NewRecorder()
@@ -81,7 +154,7 @@ func TestServeHTTPOrgDashboard(t *testing.T) {
 }
 
 func TestServeHTTPOrgProjectsAPI(t *testing.T) {
-	s := New()
+	s := mustNew(t)
 	_ = s.Register("proj-a", t.TempDir())
 	req := authedRequest(t, "GET", "/org/projects")
 	rr := httptest.NewRecorder()
@@ -98,7 +171,7 @@ func TestServeHTTPOrgProjectsAPI(t *testing.T) {
 }
 
 func TestServeHTTPOrgAudit(t *testing.T) {
-	s := New()
+	s := mustNew(t)
 	s.OrgAudit().Record(governance.AuditEntry{ID: "a1", AgentID: "agent-1", Action: "test"})
 	req := authedRequest(t, "GET", "/org/audit")
 	rr := httptest.NewRecorder()
@@ -113,7 +186,7 @@ func TestServeHTTPOrgAudit(t *testing.T) {
 
 func TestServeHTTPRequiresAuth(t *testing.T) {
 	t.Run("missing token fails closed", func(t *testing.T) {
-		s := New()
+		s := mustNew(t)
 		t.Setenv("KERN_AUTH_TOKEN", "")
 		req := httptest.NewRequest("GET", "/", nil)
 		rr := httptest.NewRecorder()
@@ -123,7 +196,7 @@ func TestServeHTTPRequiresAuth(t *testing.T) {
 		}
 	})
 	t.Run("missing header rejected", func(t *testing.T) {
-		s := New()
+		s := mustNew(t)
 		t.Setenv("KERN_AUTH_TOKEN", testToken)
 		req := httptest.NewRequest("GET", "/", nil)
 		rr := httptest.NewRecorder()
@@ -133,7 +206,7 @@ func TestServeHTTPRequiresAuth(t *testing.T) {
 		}
 	})
 	t.Run("wrong token rejected", func(t *testing.T) {
-		s := New()
+		s := mustNew(t)
 		t.Setenv("KERN_AUTH_TOKEN", testToken)
 		req := httptest.NewRequest("GET", "/", nil)
 		req.Header.Set("Authorization", "Bearer wrong-token")
@@ -146,7 +219,7 @@ func TestServeHTTPRequiresAuth(t *testing.T) {
 }
 
 func TestServeHTTPOrgMemory(t *testing.T) {
-	s := New()
+	s := mustNew(t)
 	// Add an org-level memory.
 	_, err := s.OrgMemory().Add(domain.Memory{
 		Type:    domain.MemoryLesson,
@@ -194,7 +267,7 @@ func TestServeHTTPOrgMemory(t *testing.T) {
 }
 
 func TestServeHTTPOrgTasks(t *testing.T) {
-	s := New()
+	s := mustNew(t)
 	// No projects built → empty task list.
 	req := authedRequest(t, "GET", "/org/tasks")
 	rr := httptest.NewRecorder()
@@ -209,7 +282,7 @@ func TestServeHTTPOrgTasks(t *testing.T) {
 }
 
 func TestServeHTTPOrgSearch(t *testing.T) {
-	s := New()
+	s := mustNew(t)
 
 	t.Run("missing query returns 400", func(t *testing.T) {
 		req := authedRequest(t, "GET", "/org/search")
@@ -235,7 +308,7 @@ func TestServeHTTPOrgSearch(t *testing.T) {
 }
 
 func TestServeHTTPOrgAgents(t *testing.T) {
-	s := New()
+	s := mustNew(t)
 
 	// Register an org-level agent.
 	err := s.RegisterAgent(governance.NewAgent("agent-coder-1", "Coder Agent", "coder", []governance.Permission{
@@ -261,7 +334,7 @@ func TestServeHTTPOrgAgents(t *testing.T) {
 }
 
 func TestRegisterAgentDuplicate(t *testing.T) {
-	s := New()
+	s := mustNew(t)
 	agent1 := governance.NewAgent("agent-1", "Agent One", "coder", nil)
 	if err := s.RegisterAgent(agent1); err != nil {
 		t.Fatal(err)
@@ -273,7 +346,7 @@ func TestRegisterAgentDuplicate(t *testing.T) {
 }
 
 func TestOrgDashboardLinksNewEndpoints(t *testing.T) {
-	s := New()
+	s := mustNew(t)
 	_ = s.Register("proj-a", t.TempDir())
 	req := authedRequest(t, "GET", "/")
 	rr := httptest.NewRecorder()
@@ -289,7 +362,7 @@ func TestOrgDashboardLinksNewEndpoints(t *testing.T) {
 // TestServeHTTPOrgRepositories verifies the "repository" org route
 // lists the registered repositories (projects) under the canonical name.
 func TestServeHTTPOrgRepositories(t *testing.T) {
-	s := New()
+	s := mustNew(t)
 	if err := s.Register("proj-a", t.TempDir()); err != nil {
 		t.Fatal(err)
 	}
@@ -328,7 +401,7 @@ func TestServeHTTPOrgRepositories(t *testing.T) {
 // projects reported as "pending" (no serial rebuilds inside the request),
 // and the background warm fills the cache so the next request aggregates.
 func TestServeHTTPOrgArchitecture(t *testing.T) {
-	s := New()
+	s := withStubFactory(mustNew(t))
 	if err := s.Register("proj-a", t.TempDir()); err != nil {
 		t.Fatal(err)
 	}
@@ -384,15 +457,15 @@ func TestServeHTTPOrgArchitecture(t *testing.T) {
 }
 
 // TestAppForOffLockSingleFlight pins B4: concurrent appFor calls on a fresh
-// project share one build result — no duplicate web.New and no deadlock with
+// no duplicate factory build and no deadlock with
 // the org-wide mutex released during the build.
 func TestAppForOffLockSingleFlight(t *testing.T) {
-	s := New()
+	s := withStubFactory(mustNew(t))
 	if err := s.Register("proj-a", t.TempDir()); err != nil {
 		t.Fatal(err)
 	}
 	const callers = 8
-	results := make(chan *web.App, callers)
+	results := make(chan ProjectApp, callers)
 	errs := make(chan error, callers)
 	for i := 0; i < callers; i++ {
 		go func() {
@@ -417,7 +490,7 @@ func TestAppForOffLockSingleFlight(t *testing.T) {
 // TestAppForCachedDoesNotBuild pins the cached-only accessor: it must never
 // trigger a build, and must return the cached app pointer once built.
 func TestAppForCachedDoesNotBuild(t *testing.T) {
-	s := New()
+	s := withStubFactory(mustNew(t))
 	if err := s.Register("proj-a", t.TempDir()); err != nil {
 		t.Fatal(err)
 	}
@@ -435,7 +508,7 @@ func TestAppForCachedDoesNotBuild(t *testing.T) {
 }
 
 func TestProjectMemoryIsolation(t *testing.T) {
-	s := New()
+	s := mustNew(t)
 	if err := s.Register("proj-a", t.TempDir()); err != nil {
 		t.Fatal(err)
 	}
@@ -490,7 +563,7 @@ func TestProjectMemoryIsolation(t *testing.T) {
 }
 
 func TestServeOrgMemoryProjectParam(t *testing.T) {
-	s := New()
+	s := mustNew(t)
 	_ = s.Register("proj-a", t.TempDir())
 
 	t.Run("unknown project returns 404", func(t *testing.T) {
@@ -526,7 +599,7 @@ func TestServeOrgMemoryProjectParam(t *testing.T) {
 
 func TestAppEviction(t *testing.T) {
 	t.Setenv("KERN_ENTERPRISE_MAX_PROJECTS", "2")
-	s := New()
+	s := withStubFactory(mustNew(t))
 	for _, name := range []string{"p1", "p2", "p3"} {
 		if err := s.Register(name, t.TempDir()); err != nil {
 			t.Fatal(err)
@@ -567,7 +640,7 @@ func TestAppEviction(t *testing.T) {
 }
 
 func TestServeOrgAgentsPostRegister(t *testing.T) {
-	s := New()
+	s := mustNew(t)
 
 	// Register via POST /org/agents (must create + return 201).
 	body := `{"id":"agent-1","name":"Agent One","type":"coder","permissions":[{"resource":"source","action":"read"}]}`
@@ -584,8 +657,10 @@ func TestServeOrgAgentsPostRegister(t *testing.T) {
 	grr := httptest.NewRecorder()
 	s.ServeHTTP(grr, greq)
 	var got struct {
-		Agents []governance.AgentIdentity `json:"agents"`
-		Count  int                        `json:"count"`
+		Agents []struct {
+			ID string `json:"id"`
+		} `json:"agents"`
+		Count int `json:"count"`
 	}
 	if err := json.Unmarshal(grr.Body.Bytes(), &got); err != nil {
 		t.Fatalf("decode GET /org/agents: %v", err)
@@ -593,8 +668,11 @@ func TestServeOrgAgentsPostRegister(t *testing.T) {
 	if got.Count != 1 || len(got.Agents) != 1 || got.Agents[0].ID != "agent-1" {
 		t.Fatalf("after POST, agents = %+v, want 1 agent with ID agent-1", got)
 	}
-	if len(got.Agents[0].Permissions) != 0 {
-		t.Errorf("registered agent retained client-supplied permissions: %+v", got.Agents[0].Permissions)
+	// The strict wire shape never carries permissions at all (accepted in
+	// the body but stripped before registering — see TestServeOrgAgentsPostStrictBody
+	// for the accepted-and-stripped assertion on the POST echo).
+	if strings.Contains(grr.Body.String(), `"permissions":[{`) {
+		t.Errorf("registered agent retained client-supplied permissions: %s", grr.Body.String())
 	}
 
 	// Duplicate POST → 409.
@@ -625,19 +703,19 @@ func TestServeOrgAgentsPostRegister(t *testing.T) {
 }
 
 // TestEvictionClosesApp pins the app-teardown contract: evicting a cached
-// web.App must invoke the close hook (web.App.Close by default) so the
+// ProjectApp must invoke the close hook (ProjectApp.Close by default) so the
 // relay/bus subscriptions New() started do not leak goroutines or sockets
 // across evictions — and a Close error must never fail the eviction itself.
 func TestEvictionClosesApp(t *testing.T) {
 	t.Setenv("KERN_ENTERPRISE_MAX_PROJECTS", "2")
-	s := New()
+	s := withStubFactory(mustNew(t))
 	for _, name := range []string{"p1", "p2", "p3"} {
 		if err := s.Register(name, t.TempDir()); err != nil {
 			t.Fatal(err)
 		}
 	}
 	var closed []string
-	s.closeApp = func(a *web.App) error {
+	s.closeApp = func(a ProjectApp) error {
 		closed = append(closed, "closed")
 		return nil
 	}
@@ -660,13 +738,13 @@ func TestEvictionClosesApp(t *testing.T) {
 // freed and the project stays registered/rebuildable).
 func TestEvictionSurvivesCloseError(t *testing.T) {
 	t.Setenv("KERN_ENTERPRISE_MAX_PROJECTS", "2")
-	s := New()
+	s := withStubFactory(mustNew(t))
 	for _, name := range []string{"a1", "a2", "a3"} {
 		if err := s.Register(name, t.TempDir()); err != nil {
 			t.Fatal(err)
 		}
 	}
-	s.closeApp = func(*web.App) error { return fmt.Errorf("teardown boom") }
+	s.closeApp = func(ProjectApp) error { return fmt.Errorf("teardown boom") }
 	for _, name := range []string{"a1", "a2", "a3"} {
 		if _, err := s.appFor(name); err != nil {
 			t.Fatalf("appFor(%s): %v", name, err)
@@ -681,5 +759,63 @@ func TestEvictionSurvivesCloseError(t *testing.T) {
 	// The evicted project remains registered and rebuilds on next access.
 	if app, _ := s.appFor("a1"); app == nil {
 		t.Error("project with a failed app close should still rebuild on next access")
+	}
+}
+
+// TestServeOrgAgentsPostStrictBody pins the F-OR2 fix: POST /org/agents must
+// stamp CreatedAt server-side (never echo a zero value), reject unknown
+// fields by name instead of silently dropping them (e.g. a client-submitted
+// "roles"), and keep the accepted-and-stripped permissions posture.
+func TestServeOrgAgentsPostStrictBody(t *testing.T) {
+	s := mustNew(t)
+
+	post := func(body string) *httptest.ResponseRecorder {
+		req := authedRequest(t, "POST", "/org/agents")
+		req.Body = io.NopCloser(strings.NewReader(body))
+		rr := httptest.NewRecorder()
+		s.ServeHTTP(rr, req)
+		return rr
+	}
+
+	// Unknown field ("roles") is rejected by name, not silently dropped
+	// behind a 201 that looks like it registered something.
+	rr := post(`{"id":"agent-x","name":"X","roles":["admin"]}`)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("unknown-field POST code = %d, want 400 (body: %s)", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), `"roles"`) && !strings.Contains(rr.Body.String(), "roles") {
+		t.Errorf("400 should name the unknown field, got: %s", rr.Body.String())
+	}
+
+	// Valid registration: CreatedAt is stamped server-side, permissions
+	// accepted-but-stripped, and the echoed record is complete.
+	ok := post(`{"id":"agent-9","name":"Agent Nine","type":"coder","permissions":[{"resource":"source","action":"read"}]}`)
+	if ok.Code != http.StatusCreated {
+		t.Fatalf("valid POST code = %d, want 201 (body: %s)", ok.Code, ok.Body.String())
+	}
+	var created struct {
+		ID        string    `json:"id"`
+		Name      string    `json:"name"`
+		Type      string    `json:"type"`
+		CreatedAt time.Time `json:"created_at"`
+	}
+	if err := json.Unmarshal(ok.Body.Bytes(), &created); err != nil {
+		t.Fatalf("decode created agent: %v; raw=%s", err, ok.Body.String())
+	}
+	if created.ID != "agent-9" || created.Name != "Agent Nine" || created.Type != "coder" {
+		t.Errorf("echoed agent = %+v, want the submitted id/name/type", created)
+	}
+	if created.CreatedAt.IsZero() {
+		t.Error("echoed CreatedAt is the zero value — registration must stamp it server-side")
+	}
+	if strings.Contains(ok.Body.String(), "source") || strings.Contains(ok.Body.String(), "Permissions\":[{") {
+		t.Errorf("echoed agent retained client-supplied permissions: %s", ok.Body.String())
+	}
+
+	// A duplicate still 409s (the strict decode must not change the
+	// duplicate contract).
+	dup := post(`{"id":"agent-9","name":"Agent Nine again"}`)
+	if dup.Code != http.StatusConflict {
+		t.Fatalf("duplicate POST code = %d, want 409", dup.Code)
 	}
 }

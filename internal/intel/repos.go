@@ -130,6 +130,11 @@ type RepoHit struct {
 	Root   string       `json:"root"`
 	Symbol index.Symbol `json:"symbol"`
 	Score  int          `json:"score"`
+	// MatchedAll reports whether the query matched EVERY normalized word of
+	// the symbol. A partial hit (some words matched, some not) is not strong
+	// enough evidence for a fuzzy resolution — it would substitute an
+	// unrelated symbol when a query shares a couple of common words with it.
+	MatchedAll bool `json:"matched_all,omitempty"`
 }
 
 // DiscoverSubrepos scans root and subdirectories up to depth 3 for .git repositories
@@ -364,6 +369,7 @@ func SearchReposIn(root string, query string, limit int) []RepoHit {
 			hits = append(hits, rh)
 		}
 	}
+	hits = dedupNestedRepoHits(hits)
 	sort.Slice(hits, func(i, j int) bool {
 		if hits[i].Score != hits[j].Score {
 			return hits[i].Score > hits[j].Score
@@ -374,12 +380,55 @@ func SearchReposIn(root string, query string, limit int) []RepoHit {
 		if hits[i].Symbol.FullName() != hits[j].Symbol.FullName() {
 			return hits[i].Symbol.FullName() < hits[j].Symbol.FullName()
 		}
-		return hits[i].Symbol.File < hits[j].Symbol.File
+		if hits[i].Symbol.File != hits[j].Symbol.File {
+			return hits[i].Symbol.File < hits[j].Symbol.File
+		}
+		return hits[i].Symbol.Line < hits[j].Symbol.Line
 	})
 	if len(hits) > limit {
 		hits = hits[:limit]
 	}
 	return hits
+}
+
+// dedupNestedRepoHits removes duplicate hits caused by nested repos: when
+// both a repo root and a sub-repo under it are registered (or discovered),
+// the parent's index also contains the sub-repo's symbols, so the same
+// underlying symbol is reported once per repo label — same file, same line,
+// doubled counts, halved effective limit. Hits are keyed by absolute file
+// path + symbol identity; when two repos report the same symbol, the hit
+// from the deepest (most specific) repo root wins, so the label names the
+// actual owning repository.
+func dedupNestedRepoHits(hits []RepoHit) []RepoHit {
+	type hitKey struct {
+		file string
+		name string
+		line int
+	}
+	keep := make(map[hitKey]RepoHit, len(hits))
+	for _, h := range hits {
+		k := hitKey{
+			file: filepath.Join(h.Root, h.Symbol.File),
+			name: h.Symbol.FullName(),
+			line: h.Symbol.Line,
+		}
+		if prev, ok := keep[k]; ok {
+			// Deeper root (longer path — it is nested under the other) is
+			// the more specific repo label; on equal roots keep the first.
+			if len(h.Root) <= len(prev.Root) {
+				continue
+			}
+		}
+		keep[k] = h
+	}
+	if len(keep) == len(hits) {
+		return hits
+	}
+	out := make([]RepoHit, 0, len(keep))
+	for _, h := range keep {
+		out = append(out, h)
+	}
+	return out
 }
 
 func repoHitString(h RepoHit) string {

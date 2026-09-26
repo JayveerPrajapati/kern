@@ -122,3 +122,72 @@ func TestRegistryLoadCorruptIsBestEffort(t *testing.T) {
 		t.Fatalf("Len = %d after corrupt load, want 0", r.Len())
 	}
 }
+
+// TestRegistrySaveMergesOnDisk guards the cross-process handle lifecycle
+// (QA Pick #2, F-R1): each `kern retrieve` runs in a fresh process with an
+// empty registry. Before the merge-on-disk fix, Save wrote only that
+// process's handles, orphaning every handle persisted by earlier processes
+// (10 entries -> 1 after the next retrieve). A fresh registry that saves
+// must carry over handles already in the store.
+func TestRegistrySaveMergesOnDisk(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "handles.json")
+
+	// Process A registers two handles and saves.
+	a := NewRegistry()
+	for _, name := range []string{"FuncA1", "FuncA2"} {
+		h := NewHandle(TypeSymbol, name, "pkg/a.go", 10, 20, 0.9, "aaa")
+		a.Register(h)
+	}
+	if err := a.Save(path); err != nil {
+		t.Fatalf("save A: %v", err)
+	}
+
+	// Process B (fresh, empty registry) registers one different handle and
+	// saves to the same store.
+	b := NewRegistry()
+	hb := NewHandle(TypeSymbol, "FuncB1", "pkg/b.go", 30, 40, 0.9, "bbb")
+	b.Register(hb)
+	if err := b.Save(path); err != nil {
+		t.Fatalf("save B: %v", err)
+	}
+
+	// A fresh process C must be able to load and resolve ALL three handles.
+	c := NewRegistry()
+	c.Load(path)
+	for _, id := range []string{a.List()[0].ID, a.List()[1].ID, hb.ID} {
+		if _, ok := c.Resolve(id); !ok {
+			t.Fatalf("handle %s orphaned by fresh-process save (F-R1 regression)", id)
+		}
+	}
+}
+
+// TestRegistrySaveInMemoryWinsOnConflict pins the merge precedence: when the
+// saving registry re-registers a handle with the same ID as a persisted one,
+// the in-memory version is written.
+func TestRegistrySaveInMemoryWinsOnConflict(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "handles.json")
+
+	a := NewRegistry()
+	a.Register(NewHandle(TypeSymbol, "Dup", "same.go", 1, 2, 0.9, "ccc"))
+	if err := a.Save(path); err != nil {
+		t.Fatal(err)
+	}
+
+	b := NewRegistry()
+	fresh := NewHandle(TypeSymbol, "Dup", "same.go", 1, 2, 0.9, "ddd")
+	b.Register(fresh)
+	if err := b.Save(path); err != nil {
+		t.Fatal(err)
+	}
+
+	c := NewRegistry()
+	c.Load(path)
+	if c.Len() != 1 {
+		t.Fatalf("Len = %d, want 1 (one handle per ID)", c.Len())
+	}
+	if got, _ := c.Resolve(a.List()[0].ID); got == nil || got.ContentHash != "ddd" {
+		t.Fatalf("in-memory version did not win: %+v", got)
+	}
+}

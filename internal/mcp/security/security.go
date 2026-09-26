@@ -7,44 +7,42 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 
 	"github.com/JayveerPrajapati/kern/internal/index"
 	"github.com/JayveerPrajapati/kern/internal/intel"
 	"github.com/JayveerPrajapati/kern/internal/mcp/mcpargs"
+	"github.com/JayveerPrajapati/kern/internal/mcp/root"
+	"github.com/JayveerPrajapati/kern/internal/pii"
 	"github.com/JayveerPrajapati/kern/internal/relay"
 	jsonschema "github.com/JayveerPrajapati/kern/internal/schema"
 	"github.com/JayveerPrajapati/kern/internal/sec"
-	"github.com/JayveerPrajapati/kern/internal/service"
-	"github.com/JayveerPrajapati/kern/internal/verify"
+	"github.com/JayveerPrajapati/kern/internal/verification"
 )
+
+// SecurityService is the minimal security surface the security-family tool
+// bodies need: scanning a tree, severity filtering, rendering, and PII
+// masking. It is declared locally (rather than importing the dissolved
+// internal/service layer) so this package depends only on the internal
+// engines.
+type SecurityService interface {
+	Scan(ctx context.Context, root string) ([]sec.Finding, error)
+	FilterBySeverity(findings []sec.Finding, allow []string) []sec.Finding
+	Render(findings []sec.Finding, max int) string
+	Mask(ctx context.Context, text string, names []string) (pii.Result, error)
+}
 
 // Hooks provides dependencies from the owning MCP server.
 type Hooks struct {
 	LoadIndex      func(ctx context.Context, root string) (*index.Index, error)
 	ChangedContext func(ctx context.Context, args map[string]any) ([]intel.FileChange, *index.Index, error)
-	SecuritySvc    service.SecurityService
+	SecuritySvc    SecurityService
 	ServerVersion  string
 }
 
-func resolveRoot(root string) string {
-	if root == "" {
-		if cwd, err := os.Getwd(); err == nil {
-			return filepath.Clean(cwd)
-		}
-		return "."
-	}
-	if abs, err := filepath.Abs(root); err == nil {
-		return filepath.Clean(abs)
-	}
-	return root
-}
-
 // MaskPII sanitizes sensitive PII and secrets from text.
-func MaskPII(ctx context.Context, secSvc service.SecurityService, args map[string]any) (string, error) {
+func MaskPII(ctx context.Context, secSvc SecurityService, args map[string]any) (string, error) {
 	text := mcpargs.ArgString(args, "text")
 	if text == "" {
 		return "", fmt.Errorf("text is required")
@@ -71,8 +69,8 @@ func MaskPII(ctx context.Context, secSvc service.SecurityService, args map[strin
 }
 
 // Scan performs a static security audit of source code files.
-func Scan(ctx context.Context, secSvc service.SecurityService, args map[string]any) (string, error) {
-	root := resolveRoot(mcpargs.ArgString(args, "root"))
+func Scan(ctx context.Context, secSvc SecurityService, args map[string]any) (string, error) {
+	root := root.ResolveRoot(mcpargs.ArgString(args, "root"))
 	var allow []string
 	if s := mcpargs.ArgString(args, "severity"); s != "" {
 		allow = strings.Split(s, ",")
@@ -111,9 +109,8 @@ func Scan(ctx context.Context, secSvc service.SecurityService, args map[string]a
 
 // Taint tracks taint propagation from external inputs to sensitive sinks.
 func Taint(ctx context.Context, h Hooks, args map[string]any) (string, error) {
-	root := resolveRoot(mcpargs.ArgString(args, "root"))
+	root := root.ResolveRoot(mcpargs.ArgString(args, "root"))
 	fileFilter := mcpargs.ArgString(args, "file")
-	generate := mcpargs.ArgBool(args, "generate")
 	rng := mcpargs.ArgString(args, "range")
 
 	findings, serr := sec.Scan(root)
@@ -163,14 +160,6 @@ func Taint(ctx context.Context, h Hooks, args map[string]any) (string, error) {
 			b.WriteString("\n")
 		} else {
 			b.WriteString("  tainted: no\n")
-		}
-		if generate && tf.Tainted {
-			sc := sec.ScaffoldFor(tf)
-			lang := "go"
-			if strings.HasSuffix(strings.ToLower(tf.File), ".py") || strings.HasPrefix(tf.Rule, "py-") {
-				lang = "python"
-			}
-			fmt.Fprintf(&b, "# write to: %s\n```%s\n%s\n```\n", sc.File, lang, sc.Code)
 		}
 	}
 	return b.String(), nil
@@ -231,8 +220,8 @@ func VerifyOutput(ctx context.Context, h Hooks, args map[string]any) (string, er
 	if err != nil {
 		return "", fmt.Errorf("cannot verify: index unavailable for %q: %w", root, err)
 	}
-	rep := verify.Sorted(verify.Verify(ix, root, text))
-	return verify.Render(rep), nil
+	rep := verification.Sorted(verification.Verify(ix, root, text))
+	return verification.Render(rep), nil
 }
 
 // CheckDraft validates draft code snippets for unexported accesses and undefined symbols.
@@ -241,13 +230,13 @@ func CheckDraft(ctx context.Context, h Hooks, args map[string]any) (string, erro
 	if code == "" {
 		return "", fmt.Errorf("code is required")
 	}
-	root := resolveRoot(mcpargs.ArgString(args, "root"))
+	root := root.ResolveRoot(mcpargs.ArgString(args, "root"))
 	lang := mcpargs.ArgString(args, "lang")
 	ix, err := h.LoadIndex(ctx, root)
 	if err != nil {
 		return "", fmt.Errorf("cannot check draft: index unavailable for %q: %w", root, err)
 	}
-	findings := verify.CheckDraft(ix, root, []byte(code), lang)
+	findings := verification.CheckDraft(ix, root, []byte(code), lang)
 	if len(findings) == 0 {
 		return "OK: draft validates cleanly — no issues found", nil
 	}
@@ -272,7 +261,7 @@ func GuardCheck(ctx context.Context, h Hooks, args map[string]any) (string, erro
 	for _, c := range changes {
 		files = append(files, c.File)
 	}
-	root := resolveRoot(mcpargs.ArgString(args, "root"))
+	root := root.ResolveRoot(mcpargs.ArgString(args, "root"))
 	b, err := intel.LoadBoundaries(root)
 	if err != nil {
 		return "", err

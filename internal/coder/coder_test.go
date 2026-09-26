@@ -1,11 +1,13 @@
 package coder
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/JayveerPrajapati/kern/internal/agent"
 	"github.com/JayveerPrajapati/kern/internal/execution"
 )
 
@@ -257,5 +259,51 @@ func TestApplyEditsRejectsPathEscape(t *testing.T) {
 		if err == nil {
 			t.Errorf("path %q should be rejected", p)
 		}
+	}
+}
+
+// errProvider is an agent.Provider that always fails, so Code never reaches
+// apply/verify: prompt-token accounting is exercised without a real LLM and
+// without running the verification engine.
+type errProvider struct{}
+
+func (errProvider) Generate(prompt string, options ...agent.Option) (string, error) {
+	return "", errors.New("boom")
+}
+
+// TestCodeCountsPromptTokens verifies Lever 5 accounting: the fixed prompt
+// part (base template + intent + plan + context, no prior rounds) and the
+// final round's total are both counted onto the Result. With a single
+// failing round there is no prior-round feedback, so the two are equal.
+func TestCodeCountsPromptTokens(t *testing.T) {
+	w := editFixtureWorktree(t)
+	a := New(errProvider{}, WithMaxRounds(1))
+	res, err := a.Code("add caching", "add Redis client", "package main\n\nfunc main() {}\n", w)
+	if err != ErrBudgetExhausted {
+		t.Fatalf("Code err = %v, want ErrBudgetExhausted", err)
+	}
+	if res.PromptFixedTokens <= 0 {
+		t.Errorf("PromptFixedTokens = %d, want > 0", res.PromptFixedTokens)
+	}
+	if res.PromptTokens <= 0 {
+		t.Errorf("PromptTokens = %d, want > 0", res.PromptTokens)
+	}
+	if res.PromptTokens != res.PromptFixedTokens {
+		t.Errorf("round 1 PromptTokens = %d != PromptFixedTokens = %d (no prior-round feedback yet)", res.PromptTokens, res.PromptFixedTokens)
+	}
+}
+
+// TestCodePromptTokensGrowWithRounds verifies per-round growth: a second
+// round's prompt carries the first round's failure feedback, so the final
+// total exceeds the fixed part.
+func TestCodePromptTokensGrowWithRounds(t *testing.T) {
+	w := editFixtureWorktree(t)
+	a := New(errProvider{}, WithMaxRounds(2))
+	res, err := a.Code("add caching", "add Redis client", "package main\n\nfunc main() {}\n", w)
+	if err != ErrBudgetExhausted {
+		t.Fatalf("Code err = %v, want ErrBudgetExhausted", err)
+	}
+	if res.PromptTokens <= res.PromptFixedTokens {
+		t.Errorf("round 2 PromptTokens = %d should exceed PromptFixedTokens = %d (prior-error feedback adds tokens)", res.PromptTokens, res.PromptFixedTokens)
 	}
 }

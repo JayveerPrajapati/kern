@@ -7,7 +7,7 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/domain"
 	"github.com/JayveerPrajapati/kern/internal/governance"
 	"github.com/JayveerPrajapati/kern/internal/index"
-	"github.com/JayveerPrajapati/kern/internal/intelligence"
+	"github.com/JayveerPrajapati/kern/internal/intel"
 	"github.com/JayveerPrajapati/kern/internal/runtime"
 )
 
@@ -59,7 +59,7 @@ func TestArchitectureRulesFromGovernance(t *testing.T) {
 // TestArchitectureRulesBoundaryCrossed verifies that a change crossing a
 // forbidden dependency boundary surfaces the boundary rule.
 func TestArchitectureRulesBoundaryCrossed(t *testing.T) {
-	g := intelligence.FromIndex(boundaryIndex())
+	g := intel.FromIndex(boundaryIndex())
 	fw := governance.NewFirewall().WithAgents(governance.NewAgent(
 		engineAgent, "Context Engine", "planner",
 		[]governance.Permission{{Resource: "source", Action: "write"}},
@@ -103,7 +103,7 @@ func TestRuntimeEvidenceEmptyWhenNoSource(t *testing.T) {
 // TestRuntimeEvidencePopulatesWhenSource proves the field populates from the
 // runtime source when one is provided.
 func TestRuntimeEvidencePopulatesWhenSource(t *testing.T) {
-	g := intelligence.FromIndex(boundaryIndex())
+	g := intel.FromIndex(boundaryIndex())
 	fw := governance.NewFirewall().WithAgents(governance.NewAgent(
 		engineAgent, "Context Engine", "planner",
 		[]governance.Permission{{Resource: "source", Action: "write"}},

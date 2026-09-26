@@ -270,7 +270,16 @@ func vulnSeverity(s string) domain.Severity {
 
 // schemaBaselineRelPath is the repo-relative path (slash-separated) of the
 // MCP tool-schema baseline file written by `kern diff-gate --init-baseline`.
-const schemaBaselineRelPath = ".kern/diff-gate/tool-schemas.json"
+// schemaBaselineRelPath is where the tool-schema baseline lives. It MUST be
+// a git-tracked path: the whole point of the baseline is that a fresh clone
+// compares its catalog against the COMMITTED schemas (team + CI drift
+// detection). The original location (.kern/diff-gate/) was inside the
+// gitignored generated-files block — the baseline could never be committed,
+// so every clone re-warned and the check only compared a machine against
+// itself (live-caught closing F-DG5, 2026-09-23). The tracked docs/mcp/
+// directory already carries the committed tool-catalog and tool-contracts
+// artifacts — the baseline joins them.
+const schemaBaselineRelPath = "docs/mcp/tool-schemas.json"
 
 // toolSchemaEntry is one baseline entry: the deterministic fingerprint of one
 // MCP tool's contract (name, phase, risk, canonical InputSchema JSON).
@@ -292,7 +301,7 @@ type schemaBaseline struct {
 const schemaBaselineVersion = 1
 
 // SchemaDriftCheck (G32) fingerprints the MCP tool catalog and compares it
-// against a committed baseline at <root>/.kern/diff-gate/tool-schemas.json.
+// against a committed baseline at <root>/docs/mcp/tool-schemas.json.
 // Added/removed/changed tools are reported as WARN findings. With
 // initBaseline set, the baseline is written (or refreshed) and the check
 // reports PASS "baseline initialized".
@@ -350,7 +359,7 @@ func (c *SchemaDriftCheck) Run(ctx context.Context, req domain.ChangeRequest) (d
 				Severity:    domain.SeverityWarn,
 				Category:    domain.CategoryPolicy,
 				Message:     "no schema baseline found; run `kern diff-gate --init-baseline` to establish one",
-				Explanation: "Without a baseline the MCP tool-schema drift guard cannot compare anything. The baseline is a committed JSON file under .kern/diff-gate/.",
+				Explanation: "Without a baseline the MCP tool-schema drift guard cannot compare anything. The baseline is a committed JSON file under docs/mcp/.",
 				RuleVersion: "1",
 				Confidence:  1.0,
 				Scope:       "repo",
@@ -459,7 +468,7 @@ func shortHash(h string) string {
 }
 
 // writeSchemaBaseline persists the baseline as pretty JSON, creating the
-// .kern/diff-gate directory as needed.
+// tracked docs/mcp directory (created if missing).
 func writeSchemaBaseline(path string, entries []toolSchemaEntry) error {
 	bl := schemaBaseline{SchemaVersion: schemaBaselineVersion, Tools: entries}
 	data, err := json.MarshalIndent(bl, "", "  ")

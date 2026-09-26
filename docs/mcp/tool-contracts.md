@@ -3,7 +3,7 @@
      The contracts:doc gate fails when this file is stale or a tool is missing. -->
 # Kern MCP Tool Contracts
 
-> **Source of truth:** `internal/mcp/tools.go` — the tool registration table. This document is generated from that table; if the two disagree, the table wins.
+> **Source of truth:** `internal/mcp/catalog/tools.go` — the tool registration table. This document is generated from that table; if the two disagree, the table wins.
 
 This page is the authoritative reference for every tool the kern MCP server exposes. Each contract lists the tool's name, agent phase, risk level, description, input parameters and required parameters.
 
@@ -23,160 +23,153 @@ The server rejects **null**, **object** and **array** values for string-typed ar
 
 | Metric | Value |
 |---|---|
-| Total tools | 146 |
-| Phases | explore (40), plan (16), edit (22), verify (21), meta (2), cross (45) |
-| Risk levels | low (86), medium (36), high (19), critical (5) |
+| Total tools | 139 |
+| Phases | explore (38), plan (15), edit (20), verify (21), meta (1), cross (44) |
+| Risk levels | low (84), medium (33), high (18), critical (4) |
 
 ## Full catalog (summary)
 
 | Tool | Phase | Risk | Description |
 |---|---|---|---|
-| `kern_agent_coordination` | cross | medium | Workspace coordination protocol for multi-agent teams: register handoffs, claim/release exclusive resource locks, and query inbox tasks. |
-| `kern_agent_fingerprint` | cross | low | Hashes and evaluates an agent's tool-call pattern from the audit trail to detect repetitive loops, anomalous tool polarization, or behavioral drift. |
-| `kern_agent_interrupt` | edit | high | Cancel a running task by ID through the TaskService: the task transitions to CANCELLED with a reason, is persisted, and a task.updated event is published. Use to stop a runaway or obsolete task; cannot undo the work already committed. |
-| `kern_agent_message` | edit | medium | Send a message to an agent's coordination inbox (wraps the coordination handoff primitive with the model as default sender). The target agent observes the directive via kern_agent_coordination action=inbox. Use to steer running subagents between task boundaries. |
-| `kern_agent_role_rbac` | cross | high | Enforces identity-based role access control (RBAC): restricts sensitive tools (exec, delete, fix) based on agent roles (junior_dev, reviewer, auditor, admin). |
-| `kern_agents` | cross | low | HIGH-LEVEL (Workflow E): build the standard specialist team and list its roster — name, role, capabilities — plus the current task states from the agent registry. Read-only and deterministic. |
-| `kern_analyze` | plan | medium | HIGH-LEVEL (ADR-0006): analyze a proposed change against the whole system — relevant code, architecture, dependencies, historical memory, blast radius, risks, evidence, and required validation. This is the Kern 2.0 killer workflow 'Analyze this proposed change' exposed over MCP. |
-| `kern_approve` | edit | medium | HIGH-LEVEL: resolve a governance approval gate. With no id, lists pending approvals. With an id, approves it; set reject=true to reject instead. CLI-equivalent: kern approve. Agents hit this when kern_run/kern_workflow parks at the human approval gate — the returned error carries the approval ID. |
-| `kern_arch` | explore | low | Architecture overview from call-graph communities: subsystems with their hubs/packages, plus coupling warnings ranking the cross-community call bundles that make changes ripple. |
-| `kern_ask` | meta | medium | Ask kern a question about the codebase — deterministic index-first answering (this tool never calls an LLM). Classifies the request exactly like kern_meta and runs the right tool internally: 'how does dispatch work?' → kern_explore, 'find the dispatch function' → kern_search, 'show me the architecture' → kern_arch. Alias of kern_meta with an explicit deterministic-only contract. Per-call knobs: pass max_output=<bytes> to raise the output sandbox cap for this call, or no_cache=1 to bypass the local tool-response cache. |
-| `kern_ast_search` | explore | low | AST-level symbol search across a Go project. Supports patterns like 'func greet', 'type *User*', 'method *', '*Handler*'. Returns definitions with file:line. |
-| `kern_ast_transform` | edit | high | Executes deterministic AST-level transformations on code: scaffolding interface method stubs, adding struct fields, or inserting methods without fragile whitespace or regex diff errors. |
-| `kern_audit` | verify | low | HIGH-LEVEL: return the tamper-evident governance audit log for the project (every firewall decision/approval). CLI-equivalent: kern audit. Backs the AUDIT intent workflow. |
-| `kern_authorize_context` | cross | low | Authorized-context primitive (P0.1): compute the exact set of symbols and call edges an agent may legally read for a task, filtered by the agent's identity (firewall context.read permission) and an optional task scope, and return it with an auditable authorization proof (decision, fingerprint, index freshness). Denied symbols are listed with their denial stage and reason. Use before retrieval when a task must not leak out-of-scope code. |
-| `kern_bridges` | explore | low | Bridge detection (#4): symbols called from two or more distinct packages/directories — the coupling points where a change in one subsystem can break another. Ranks bridges by number of calling packages then caller count. |
-| `kern_buddy` | explore | low | Session onboarding digest for any agent: the project's conventions, layout, entry points and gotchas distilled from the index, docs and recent history. Call once at the start of a session on an unfamiliar repo. |
-| `kern_changes` | verify | low | Line-aware change-impact analysis for a diff: scopes each changed file to the symbols its added lines actually touch (from git diff hunks), then computes blast radius (transitive callers), risk scores, and test gaps. Use to review what a PR could break before reading files. |
-| `kern_check_draft` | verify | low | Validate an agent's draft code against the project index (lighter than LSP, deterministic): Go parse errors, relative imports that do not resolve under root, calls to symbols that are neither declared in the draft nor indexed, and method calls on package aliases not found in the indexed package. Non-Go languages are skipped conservatively. |
-| `kern_churn` | explore | low | Change-frequency risk: which files were touched by the most commits in a range, whether they are being edited right now, and how risky they are in the call graph. |
-| `kern_cochange` | explore | low | Co-change mode (#6): which files are actually changed together in the same commits (from git history), independent of the call graph. Grades change risk by co-change frequency: files that co-change with the current edits are the ones most likely to break next. Use before a commit to see what else must change in lockstep. |
-| `kern_code_graph` | explore | low | Return the call graph neighbourhood of a symbol: its definition, its callers, and what it calls. Use to understand dependencies without reading whole files. |
-| `kern_commitmsg` | edit | low | Generate a deterministic conventional-commit message (type, scope, subject, per-file body) from the git diff — rule-based, no LLM, no network; the same diff always yields the same message. Use when a commit needs a starting message the human can tweak. |
-| `kern_communities` | explore | low | Call-graph communities (label propagation): which symbols cluster together as subsystems, with each cluster's size and hub. Use to name the architecture's parts before refactoring. |
-| `kern_compact_file` | explore | low | Return a compact symbolic summary of a source file (functions, types, line numbers) instead of reading the whole file. Use before reading files in large codebases. Optional tier: 'summary' (default, symbol list), 'full' (entire source), or 'folded' (signatures kept, bodies replaced with 'body elided: N lines' placeholders). |
-| `kern_compose` | cross | high | Executes an ordered pipeline of kern tools in a single RPC round-trip, passing intermediate outputs to downstream steps using $variable bindings. Drastically reduces agent latency and token overhead for multi-step workflows. |
-| `kern_context` | explore | low | Return the minimal relevant source slice for a symbol: its definition source, its callers, and what it calls. Use instead of reading an entire file. |
-| `kern_context_budget` | plan | low | Fit text into a token budget: deduplicate lines, keep the head plus important lines (errors, stack frames), then trim. Use to manage a crowded context window before adding more content. |
-| `kern_context_envelope` | explore | low | Return the assembled context envelope (domain.ContextPacket) as machine-readable JSON with schema versioning. Use when a client needs the structured packet, not rendered text. |
-| `kern_context_watch` | cross | low | Monitors and audits rolling agent context, detects bloated log/code dumps, and recommends concrete deterministic compression actions to prevent context window overflow. |
-| `kern_correlate` | cross | medium | HIGH-LEVEL: correlate a production alert against the runtime to produce a deep evidence chain (alert→service→deployment→commit→symbol→task/pr/agent). Deterministic — derived from runtime source and git history, not LLM. |
-| `kern_cross_repo_impact` | plan | medium | Evaluates multi-repository blast radius: detects contract breaking changes, shared symbol dependencies, and cross-repo interface divergences. |
-| `kern_cycles` | explore | low | Package-level import cycles via Tarjan SCC over the project-local import graph (project packages only, third-party imports ignored). Returns the deterministic cycle list with file:line evidence — answers in one call what previously took many grep round trips. |
-| `kern_dead` | explore | low | Dead-code detection: symbols nothing in the project calls. Private names are dead for certain; public names may be external API. Sorted by size so the biggest cleanup wins show first. Callers reached through function values or interface dispatch are invisible to the index and are reported as dead — confirm before removing. |
-| `kern_deploy` | edit | critical | Deploy a task through TaskService.Deploy so the governance firewall, the human-approval gate (real deploys require approval), and lifecycle events all apply — the same path as `kern deploy <task-id>` and POST /v1/tasks/{id}/deploy. Returns the updated task state and deployment ref. |
-| `kern_diff_files` | verify | low | Delta streaming (#13): compute a unified line diff between two files (or two versions of the same file) using pure Go. Returns the full patch, or a note when files are identical. Feed the output back to the model as a compact edit description. |
-| `kern_do` | cross | high | HIGH-LEVEL (Workflow E): the MCP counterpart of `kern do` — run the autonomous closed loop (understand→remember→plan→code→verify→protect→observe→learn) for an intent. Unlike kern_loop's read-only no-op stages, this wires the LLM coder and planner (provider-neutral factory, default local Ollama) as the default stage handlers, grounded with project context (relevant files + impact set) and verified with the polyglot verification engine. Default level L2 (sandboxed code changes); L3 adds PR creation, L4 deploy-with-approval. |
-| `kern_doc_fetch` | cross | medium | Fetch a public documentation page and merge it into the project's local doc index so kern_doc_search can find it. This is the ONLY network call in kern and is invoked explicitly by the user; everything else stays local. The page is HTML-stripped, capped, stored under cache/data/docs-fetch and indexed as fetch/<name>.md (re-fetching a name replaces it). Pass semantic=true to also attach dense embeddings via the local Ollama model so the page ranks in semantic search. |
-| `kern_doc_index` | cross | medium | Pre-index a project's documents for kern_doc_search. Run once after documents change; searches auto-index on first use. Pass semantic=true to also embed chunks with a local Ollama embedding model (KERN_EMBED_MODEL, default nomic-embed-text); queries then fuse a real-meaning dense signal with the deterministic n-gram vectors and BM25. |
-| `kern_doc_search` | cross | low | Local vector search over a project's documents (markdown, text, rst, adoc). Chunks and embeds docs locally with deterministic n-gram hashing (no ML deps) and returns only the most relevant fragments. Use instead of pasting whole documents into context. |
-| `kern_entry_points` | explore | low | List framework entry points found in the index: handlers, controllers and route targets with their framework and route (e.g. spring-mvc UserController.list /api/users). Search for all symbols with the 'entry' kind prefix via kern_ast_search. |
-| `kern_evidence` | verify | medium | Signed-evidence read path: kern_evidence with action=verify validates an evidence bundle (args.file or args.url — fetched without cloning) and reports tamper-seal status, signature status, audit-chain replay and, when args.expect_fingerprint is given, the fingerprint trust-anchor match; action=explain renders the bundle in plain language; action=export builds a bundle from the project's evidence store for args.task_id (or the current state) and returns its path + id. Mirrors `kern evidence export|verify|explain`. |
-| `kern_evidence_anchor` | verify | medium | Validates code claims or citations (symbol, file:line), corrects line drift, and generates a tamper-evident SHA-256 evidence certificate for zero-hallucination code claims. |
-| `kern_exec` | edit | critical | Run code in an isolated local runtime and return ONLY stdout — the 'Think in Code' surface. Language is selected by --lang or a shebang line; runtimes are resolved from PATH (python3, node, go, bash, perl, ruby, php, lua, julia, R, bun, deno, rust, ...). The script runs in a fresh temp dir with a hard timeout (default 10s, override timeout=N), a stdout byte cap (default 16KiB, override max=N), and a sanitized environment (HOME/XDG pointed into the sandbox, secrets stripped). Isolation is enforced: the script runs in a private network namespace when the platform supports it, and the run refuses to execute if network isolation is unavailable (never silently runs with full network). stderr is never mixed into stdout and is only surfaced on failure. On platforms where private network namespaces are unavailable (e.g. macOS, some containers) the run refuses to execute — it fails closed instead of degrading to full network egress — unless the local operator sets KERN_ALLOW_UNISOLATED=1 (alias KERN_ALLOW_NET=1). Use it to compute things (math, data munging, JSON transforms) without polluting context. |
-| `kern_execute` | edit | critical | HIGH-LEVEL (ADR-0006): execute a change inside an isolated sandbox worktree (autonomy L2). Applies the given unified diff, verifies it builds, and returns the resulting diff. Never mutates the live repository. |
-| `kern_explain` | explore | low | Synthesizes an end-to-end architectural narrative for a symbol or file: purpose, callers, callees, interfaces, and testing posture in a single call. |
-| `kern_explain_finding` | verify | low | Blueprint change firewall: explain a single gate finding (rule id, severity, category, file, line, message, evidence) in plain language — why it was raised and what the rule checks. Merged from the standalone blueprint-mcp server. |
-| `kern_explore` | explore | low | Single-call explore (#2): return a symbol's verbatim source, direct call flow (callers + callees) and transitive blast radius (with affected files) in one shot. The primitive that replaces three separate calls (graph/near/path) for 'what touches this and how'. Pass depth=N to cap the blast radius to N hops and max=N to cap node count. |
-| `kern_fetch_raw_anchor` | cross | low | Two-tier context hydration: fetch raw uncompressed text segments that were truncated by kern (e.g. from an anchor marker like [kern: Truncated ... Anchor: anchor-xxx]). Allows AI agents to pull full original logs or code slices on-demand without hallucination or context bloat. |
-| `kern_fit_context` | plan | low | Adaptive token compressor: fits targeted source files, symbols, or queries into any specified token budget using tiered AST folding (Full Source -> Signatures + Docstrings -> Symbolic Summary). Prevents context truncation panics while maximizing code fidelity. |
-| `kern_flight` | cross | low | Replay the AI flight recorder (Workflow E observability): the full recorded trail for one task — every stage, tool call, decision, approval, and outcome, in chronological order. Read-only; answers 'what did the agent do, why, and what happened?'. Records live under <root>/.kern/flight. |
-| `kern_fragility_hotspots` | plan | low | Causal Defect & Fragility Hotspot Analysis: correlates historical git defect/fix commits with the AST symbol call graph to calculate fragility scores and proactively flag regression-prone components before edits are made. |
-| `kern_frameworks` | explore | low | Detect the frameworks and libraries a project uses (Spring, Rails, Django, Express, gin, etc.) by scanning manifests and source markers. Use to know what stack the codebase is on. |
-| `kern_fts_search` | explore | low | FTS5 full-text search (#3) over the SQLite symbol index. Supports MATCH syntax ('greet', 'func AND greet', `file:"main.go"`). The SQLite store is compiled in by default (disable with -tags nosqlite); requires a persisted index, and falls back to a clear error on a nosqlite build. |
-| `kern_fw_trace` | explore | low | Deep Framework Dependency Injection & Route Tracing: maps end-to-end framework execution pipelines (Route -> Middleware -> Handler DTO -> Injected Service -> DB Model) across Gin, Express, FastAPI, Spring Boot, and NestJS. |
-| `kern_graph` | explore | low | One-call graph context: token-budgeted names-only adjacency for a symbol — callers first (the direction that matters for impact), then callees, every edge tagged EXTRACTED/INFERRED/AMBIGUOUS, plus community membership. Calls to interface methods carry dispatch hints listing the concrete implementations they can reach. Parity with code-review-graph's minimal_context: the minimal caller-first answer sized to the context window, no source text. |
-| `kern_guard_check` | edit | low | Deterministic architectural guardrails: validate changed files against .kern/boundaries.json rules and return every forbidden dependency crossing (e.g. a frontend importing a backend DB model) with file evidence. Rejects a proposal before it touches the filesystem. Use format=sarif for a SARIF 2.1.0 report (GitHub code scanning / Azure DevOps) and threshold=N to fail (isError) when the violation count exceeds N. |
-| `kern_heal` | edit | high | Self-correction loop (#9): run validation; on failure ask a local Ollama model to rewrite the failing files, apply the fix inside a throwaway snapshot, re-validate, and report a diff to review. Never edits the user's working tree. Requires Ollama at localhost:11434. |
-| `kern_health` | cross | low | Returns a real-time health and self-observability snapshot of the kern MCP server: index freshness, symbol counts, cache hit-rate, audit chain length, active tools, and in-flight operations. Enables AI agents to self-diagnose server state and avoid blind retries. |
-| `kern_hubs` | explore | low | Architectural hotspots: the most depended-on symbols (hubs) and cross-package bridges where a change in one subsystem can break another. |
-| `kern_impact` | plan | medium | HIGH-LEVEL: estimate the impact/blast-radius of a change to a symbol — transitively affected symbols/files/services/tests, deterministic risk, and typed claims. Read-only. |
-| `kern_incident` | cross | medium | HIGH-LEVEL (ADR-0006): investigate a production incident end-to-end — correlate an alert to the affected service and evidence, derive the root cause and hypotheses, and summarize. Provide the alert as JSON; optionally a runtime snapshot (events/deployments/commits) as JSON. |
-| `kern_inherits` | explore | low | Return the inheritance edges of a symbol: its supertypes (extends/implements/embeds) and subtypes (what extends/implements/embeds it). Use to see class hierarchies without reading whole files. |
-| `kern_larges` | explore | low | Find the largest function/method declarations by source lines. Use to locate god functions that beg for refactoring. |
-| `kern_learn` | cross | medium | HIGH-LEVEL: extract recurring patterns from engineering memory and surface those above a threshold. Patterns are promoted to memory (evidence-based). Deterministic — the LLM may explain but does not create patterns. |
-| `kern_llm_providers` | cross | low | List the LLM provider chain in priority order (Ollama first, then locally-wired agent CLIs: claude, opencode, codex, gemini, qwen). With probe=true, live-tests each installed provider with a trivial prompt and reports who actually answers — the priority pick when Ollama is absent. The full wired-agent history is available via kern agents (CLI) and kern doctor. |
-| `kern_lock` | edit | medium | Acquire an advisory workspace lock on a scope (flock-based). Held by this server until kern_unlock. Lets concurrent agents coordinate before touching shared files. Errors when the scope is already held. |
-| `kern_lock_status` | edit | low | List workspace locks with whether each is held and by which PID. Use to see what other agents are working on. |
-| `kern_loop` | cross | high | HIGH-LEVEL (Workflow E): run the closed autonomy loop against an intent string and return the stage timeline plus the deployed / observed-healthy / learned outcome. The autonomy level (L0-L5, default L0 read-only) gates which stages run; the AI stages use the deterministic no-op step by default and are pluggable via the loop's StepFunc mechanism. |
-| `kern_lsp_bridge` | explore | low | Zero-Weight LSP Client Bridge: queries local language servers (gopls, pyright, vtsls, rust-analyzer, clangd, etc.) for exact compiler-grade type definitions, hover documentation, cross-file references, and document symbols without bundling language runtimes into kern. |
-| `kern_mask_pii` | cross | low | Locally scan text for secrets and PII (API keys, passwords, tokens, URLs with credentials, IPs, emails) and replace them with safe [MASKED_*] placeholders. Use before sending any text to a remote LLM. Pure local, deterministic, reversible via the returned mapping. |
-| `kern_mcp_call` | edit | high | Bridge a tool from an external MCP server configured via `kern mcp add` (config .kern/mcp-servers.json). Pass the raw wire tool name or the public name (mcp__<server>__<tool>); only the raw name is sent on the wire. External servers are never enabled by default — only servers the operator configured are reachable. |
-| `kern_memory` | cross | medium | HIGH-LEVEL (Workflow E): manage engineering memory — add a lesson, list stored lessons, or recall the most relevant lessons for a prompt. |
-| `kern_memory_add` | cross | medium | Persist a distilled, cross-session lesson for a project (the project 'brain'). Agents record what they learned so future sessions can recall it. Appends to the project memory store (most recent 50 entries kept). |
-| `kern_memory_list` | cross | low | List all stored lessons for a project, most recent first with timestamps. |
-| `kern_memory_ranked` | cross | low | Retrieves past project lessons weighted by keyword relevance and exponential time decay (half-life), ensuring stale memories don't obscure fresh lessons. |
-| `kern_memory_recall` | cross | low | Recall the up-to-k most relevant past lessons for a prompt by keyword overlap. Returns only lessons whose tokens match; deterministic and local. |
-| `kern_meta` | meta | medium | Single entry point: describe what you need in natural language and kern classifies the request and runs the right tool(s) internally. Examples: 'how does dispatch work?' → kern_explore, 'what breaks if I change dispatch?' → kern_impact, 'compress this log: ...' → kern_optimize_log, 'mask secrets in: ...' → kern_mask_pii, 'find the dispatch function' → kern_search, 'show me the architecture' → kern_arch. Prefer this over calling individual kern_* tools — it picks the right one for you. Per-call knobs: pass max_output=<bytes> to raise the output sandbox cap for this call, or no_cache=1 to bypass the local tool-response cache. |
-| `kern_modernize` | cross | medium | HIGH-LEVEL: analyze the monolith and produce a phased modernization plan (communities→bridges→churn→candidate boundaries→impact→risk→migration plan). Each extraction phase becomes an auditable Task. |
-| `kern_mutation_test` | verify | medium | Lightweight Mutation Testing for Test Gaps: inverts conditions, flips booleans, and applies boundary shifts to verify test suite regression sensitivity and pinpoint surviving mutants (false-positive tests). |
-| `kern_near` | explore | low | Dependency-tree expansion: every symbol within N hops of a symbol, in both directions (callers + callees), budget-capped. The graph-guided traversal primitive that replaces blind grep — e.g. 'everything two degrees from this database model' in one call. |
-| `kern_note` | edit | medium | Governed decision records (docs/notes/{lifecycle}/{class}/yyyy-mm-dd-title.md). Actions: new (create a gate-conformant skeleton — title, class, optional lifecycle/date), status (move a note between lifecycle folders — rejected needs a one-line reason, archived inserts the frozen marker), validate (report format violations, satisfying the note:format gate G37), list (inventory). Use before making non-trivial kern repo changes so the note:missing gate (G38) stays satisfied. |
-| `kern_onboard` | cross | medium | Session-start onboarding: ensure the working directory is fully wired to kern in one call. Checks whether the repo is registered (repos registry) and indexed; if not, registers it, builds/refreshes the index, and writes AGENTS.md rules if missing. Returns a status report (registered, indexed, wired, symbols/edges/files). Call this at session start in a new project instead of manually indexing or re-exploring with read/grep/glob. |
-| `kern_optimize_log` | cross | low | Strip noise from log output: keeps errors, warnings, stack traces and build failures, removes timestamps and chatter. Use before pasting logs into context. |
-| `kern_optimize_output` | cross | low | Compress an LLM's response (assistant output) by stripping filler, pleasantries and hedge language while preserving code blocks, lists, errors and technical content. Deterministic and local, no LLM involved. Use on verbose model replies before they are stored or echoed back into context. |
-| `kern_optimize_prompt` | cross | low | Compress and clean a raw prompt before sending it to an LLM. Returns the optimized prompt plus token savings. Use this to reduce context cost for large or noisy prompts. When OLLAMA_HOST points at a non-local (remote) LLM, secrets/PII are masked automatically before processing and restored in the output (the result may contain [MASKED_*] placeholders). |
-| `kern_orchestrate` | explore | low | Run the silent context pipeline over an intent: classify the task type, assemble the context packet, select evidence by the task policy, fit it to a token budget, stamp the context envelope, and return a content-hash-sealed escalation handle — all deterministically and in one call. Use to get planner-selected context for a natural-language task instead of invoking individual context tools. |
-| `kern_org_agents` | cross | medium | Enterprise org admin: register or list agent identities (C11). action=list returns {agents:[{id,name,type}],count}; action=register creates an agent from id/name (type defaults to 'default') and returns the created agent. |
+| `kern_agent_coordination` | cross | medium | Workspace coordination protocol for multi-agent teams. |
+| `kern_agent_fingerprint` | cross | low | Hash and evaluate an agent's tool-call pattern from the audit trail to detect repetitive loops or behavioral drift. |
+| `kern_agent_interrupt` | edit | high | Cancel a running task by ID via TaskService: transitions to CANCELLED with a reason, persists, publishes task. |
+| `kern_agent_message` | edit | medium | Send a message to an agent's coordination inbox (model as default sender); the target observes it via action=inbox. |
+| `kern_agent_role_rbac` | cross | high | Identity-based role access control (RBAC): restrict sensitive tools (exec, delete, fix) by agent roles. |
+| `kern_agents` | cross | low | Build the standard specialist team and list its roster (name, role, capabilities) plus current task states. |
+| `kern_analyze` | plan | medium | Analyze a proposed change or symbol and return a review report under a lens (security, performance, maintainability, architecture) with the persisted task ID. |
+| `kern_approve` | edit | medium | Resolve a governance approval gate: no id lists pending approvals. |
+| `kern_arch` | explore | low | Architecture overview from call-graph communities: subsystems with hubs/packages, plus coupling warnings. |
+| `kern_ast_search` | explore | low | AST-level symbol search across a Go project: patterns like 'func greet', 'type *User*'. |
+| `kern_ast_transform` | edit | high | Deterministic AST-level transformations: scaffold interface method stubs, add struct fields, insert methods. |
+| `kern_audit` | verify | low | Return the tamper-evident governance audit log for the project (every firewall decision/approval). |
+| `kern_authorize_context` | cross | low | Authorized-context primitive (P0.1): compute the symbols/call edges an agent may legally read, filtered by identity and task scope, with an auditable proof. |
+| `kern_bridges` | explore | low | Find cross-package bridges: symbols called from more than one package, ranked by how many packages they couple. |
+| `kern_buddy` | explore | low | Session onboarding digest: the project's conventions, layout, entry points and gotchas distilled from the index, docs, history. |
+| `kern_changes` | verify | low | Line-aware change-impact analysis for a diff. |
+| `kern_check_draft` | verify | low | Validate agent draft code against the project index (lighter than LSP). |
+| `kern_churn` | explore | low | Change-frequency risk. |
+| `kern_cochange` | explore | low | Co-change analysis: which files are actually changed together in the same commits, independent of the call graph. |
+| `kern_commitmsg` | edit | low | Generate a deterministic conventional-commit message (type, scope, subject, per-file body) from the git diff. |
+| `kern_communities` | explore | low | Call-graph communities (label propagation). |
+| `kern_compact_file` | explore | low | Return a compact symbolic summary of a source file (functions, types, line numbers). |
+| `kern_compose` | cross | high | Execute an ordered pipeline of kern tools in a single RPC round-trip, passing outputs between steps via $variable. |
+| `kern_context` | explore | low | Return the minimal relevant source slice for a symbol: definition source, callers, and what it calls. |
+| `kern_context_budget` | plan | low | Fit text into a token budget: deduplicate lines, keep head plus important lines (errors, stack frames), then trim. |
+| `kern_context_envelope` | explore | low | Return the assembled context envelope (domain.ContextPacket) as machine-readable JSON with schema versioning. |
+| `kern_context_watch` | cross | low | Monitor and audit rolling agent context. |
+| `kern_correlate` | cross | medium | Correlate a production alert against the runtime into an evidence chain (alert→service→deployment→commit→symbol). code=true adds incident→twin→code. |
+| `kern_cross_repo_impact` | plan | medium | Evaluate multi-repository blast radius. |
+| `kern_cycles` | explore | low | Package-level import cycles via Tarjan SCC over the project-local import graph. |
+| `kern_dead` | explore | low | Dead-code detection: symbols nothing in the project calls. |
+| `kern_deploy` | edit | critical | Deploy a task via TaskService. |
+| `kern_diff_files` | verify | low | Compute a unified line diff between two files (or versions) using pure Go. |
+| `kern_doc_fetch` | cross | medium | Fetch a public doc page into the project doc index — the ONLY network call in kern, explicit. semantic=true adds embeddings. |
+| `kern_doc_index` | cross | medium | Pre-index project docs for kern_doc_search; semantic=true adds local Ollama embeddings (KERN_EMBED_MODEL). |
+| `kern_doc_search` | cross | low | Local vector search over project docs (markdown, text, rst, adoc) with deterministic n-gram hashing. |
+| `kern_entry_points` | explore | low | List framework entry points from the index: handlers, controllers, route targets with framework and route. |
+| `kern_evidence` | verify | medium | Signed-evidence read path: verify validates a bundle (file or url) — tamper-seal, signature, audit-chain replay. |
+| `kern_evidence_anchor` | verify | medium | Validate code claims/citations (symbol, file:line), correct line drift, and generate a tamper-evident SHA-256 certificate. |
+| `kern_exec` | edit | critical | Run code in an isolated runtime, return ONLY stdout. Fails closed without network isolation unless KERN_ALLOW_UNISOLATED=1 (alias KERN_ALLOW_NET=1). |
+| `kern_execute` | edit | critical | Execute a change in an isolated sandbox worktree (autonomy L2). |
+| `kern_explain` | explore | low | Synthesize an end-to-end architectural narrative for a symbol or file: purpose, callers, callees, interfaces, testing posture. |
+| `kern_explain_finding` | verify | low | Blueprint change firewall: explain a gate finding (rule id, severity, category, file, line, message, evidence). |
+| `kern_explore` | explore | low | One-call symbol exploration: definition source, callers, callees, and blast radius up to N hops; optional why-rationale. |
+| `kern_fetch_raw_anchor` | cross | low | Fetch raw text segments truncated by kern (anchor markers); pulls full logs/code slices on demand. |
+| `kern_fit_context` | plan | low | Fit targeted files, symbols or queries into a token budget via tiered AST folding (Full Source -> Signatures ->. |
+| `kern_flight` | cross | low | Replay the AI flight recorder for one task. |
+| `kern_fragility_hotspots` | plan | low | Correlate historical defect/fix commits with the AST symbol call graph to score fragility and flag regression-prone components. |
+| `kern_frameworks` | explore | low | Detect the frameworks/libraries a project uses (Spring, Rails, Django, Express, gin, ...) by scanning manifests. |
+| `kern_fts_search` | explore | low | FTS5 full-text search over the SQLite symbol index (MATCH syntax like 'func AND greet'). |
+| `kern_fw_trace` | explore | low | Framework DI & route tracing: maps pipelines across Gin, Express, FastAPI, Spring Boot, NestJS. |
+| `kern_graph` | explore | low | One-call graph context. |
+| `kern_guard_check` | edit | low | Architectural guardrails: validate changed files against .kern/boundaries.json; return forbidden dependency crossings. format=sarif; threshold=N fails above N. |
+| `kern_heal` | edit | high | Self-correction loop: run validation, ask a local Ollama model to fix failing files in a throwaway snapshot, re-validate. Never edits the working tree. |
+| `kern_health` | cross | low | Real-time health snapshot of the kern MCP server. |
+| `kern_hubs` | explore | low | Architectural hotspots: the most depended-on symbols (hubs) and cross-package bridges. |
+| `kern_impact` | plan | medium | Estimate the impact/blast radius of a change to a symbol. |
+| `kern_incident` | cross | medium | Investigate a production incident end-to-end: correlate the alert to service/evidence, derive root cause, summarize. correlate=true runs incident→twin→code. |
+| `kern_inherits` | explore | low | Return the inheritance edges of a symbol: supertypes (extends/implements/embeds) and subtypes. |
+| `kern_larges` | explore | low | Find the largest function/method declarations by source lines — god functions that beg for refactoring. |
+| `kern_learn` | cross | medium | Extract recurring patterns from engineering memory above a threshold. |
+| `kern_llm_providers` | cross | low | List the LLM provider chain in priority order (Ollama first, then wired agent CLIs). |
+| `kern_lock` | edit | medium | Acquire an advisory flock-based workspace lock on a scope, held until kern_unlock; errors when already held. |
+| `kern_lock_status` | edit | low | List workspace locks with whether each is held and by which PID. |
+| `kern_loop` | cross | high | Run the closed autonomy loop on an intent; returns the stage timeline and outcome. observe: deterministic handlers, L0-L5 gating; autonomous: LLM coder/planner. |
+| `kern_lsp_bridge` | explore | low | Zero-weight LSP client bridge. |
+| `kern_mask_pii` | cross | low | Locally scan text for secrets/PII (API keys, passwords, tokens, URLs, emails). |
+| `kern_mcp_call` | edit | high | Bridge a tool from an external MCP server configured via kern mcp add (.kern/mcp-servers.json). |
+| `kern_memory_add` | cross | medium | Persist a distilled cross-session lesson for a project (the project 'brain'). |
+| `kern_memory_list` | cross | low | List stored lessons for a project, most recent first with timestamps. |
+| `kern_memory_ranked` | cross | low | Retrieve past project lessons weighted by keyword relevance and time decay (half-life). |
+| `kern_memory_recall` | cross | low | Recall up-to-k most relevant past lessons for a prompt by keyword overlap; deterministic, local. |
+| `kern_meta` | meta | medium | Single entry point: describe what you need in natural language; kern classifies and runs the right tool(s). Full catalog reachable through this router. |
+| `kern_modernize` | cross | medium | Analyze the monolith and produce a phased modernization plan. |
+| `kern_mutation_test` | verify | medium | Lightweight mutation testing for test gaps: inverts conditions, flips booleans to find surviving mutants. |
+| `kern_near` | explore | low | Dependency-tree expansion: every symbol within N hops of a symbol (callers + callees), budget-capped. |
+| `kern_onboard` | cross | medium | Session-start onboarding: register the repo, build/refresh the index, write AGENTS.md if missing. |
+| `kern_optimize_log` | cross | low | Strip noise from log output: keep errors, warnings, stack traces, build failures. |
+| `kern_optimize_output` | cross | low | Compress an LLM response (assistant output): strip filler/hedge language, preserve code, lists, errors. |
+| `kern_optimize_prompt` | cross | low | Compress a raw prompt before sending to an LLM; returns optimized text plus token savings. Non-local OLLAMA_HOST auto-masks secrets/PII. |
+| `kern_orchestrate` | explore | low | Run the silent context pipeline over an intent. |
+| `kern_org_agents` | cross | medium | Org admin: register or list agent identities (C11). action=list returns agents. |
 | `kern_org_audit` | cross | low | Enterprise org admin: org-level audit log (C11). Returns {entries:[...],count} with AuditEntry's raw JSON field names. |
-| `kern_org_memory` | cross | medium | Enterprise org admin: org-level shared memory visible across all projects (C11). action=list returns {memories:[{id,content,type}],count}; action=add stores a memory from content with optional type. |
+| `kern_org_memory` | cross | medium | Org admin: org-level shared memory across all projects (C11). action=list returns memories. |
 | `kern_org_projects` | cross | low | Enterprise org admin: list registered projects (C11). Returns {projects:[{name,root}],count}. |
-| `kern_org_search` | cross | low | Enterprise org admin: cross-project symbol search (C11). Requires q; returns {hits:[{repo,root,symbol,score}],count}. |
+| `kern_org_search` | cross | low | Enterprise org admin: cross-project symbol search (C11). Requires q; returns hits. |
 | `kern_org_tasks` | cross | low | Enterprise org admin: aggregate task visibility (C11). Returns {projects:{name:[{id,state,intent,type}]},total}. |
-| `kern_org_teams` | cross | medium | Enterprise org admin: manage teams that group agents and own projects (C11). action=list|show|create|remove — create takes id/name plus optional projects (team project names) and members (agent IDs); show/remove take id. |
-| `kern_pack` | plan | low | Pack a whole project into one paste-ready bundle: project instructions, a directory tree with per-file token counts, and file contents, sized to fit max_tokens. Use when an agent needs the full working picture (source to edit against), not just a map. Files are ordered by sha256 of their relative path so re-packs of the same tree are byte-identical (LLM prompt-cache friendly). Set fold=true to pack signatures with bodies elided. Graph mode: set graph=true to pack the call-graph snapshot instead — adjacency, one-line per-symbol signatures, and a per-file SHA-256 fingerprint — at roughly 1-5% of the raw file token cost for handoff/review; the receiver verifies freshness and hydrates source lazily via kern_context per symbol. When graph=true, symbol selects that symbol's neighbourhood (empty = whole graph); symbol is ignored when graph is false (files mode is unaffected). |
-| `kern_path` | explore | low | Shortest call path between two symbols, following in-project call edges in either direction. Traces how two things connect without reading files. |
-| `kern_plan` | plan | medium | HIGH-LEVEL (ADR-0006): produce an implementation plan for a proposed change — affected files, dependencies, risks and required validation. Deterministic plan over the analysis; no LLM required. |
-| `kern_plan_context` | plan | low | Deterministically plan which context to include for a change: classify the task type, score evidence classes by policy, and fit the selection to a token budget. Explainable — use json=true for the structured plan. |
-| `kern_policy_dsl` | verify | low | Evaluates diffs, changed files, and imported libraries against declarative policy-as-code rules (banned packages, protected paths, max diff size). |
-| `kern_pre_edit` | plan | medium | Predicts the blast radius, direct callers, untested dependencies, and boundary risks of modifying a specific file or symbol BEFORE changes are made. Saves agents from making risky changes or incurring expensive rollback cycles. |
-| `kern_precache` | verify | medium | Speculative pre-caching (#20): scan the project once and fill the code-summary and document-vector caches so later kern calls are instant. Run periodically or after bulk edits. |
-| `kern_probe` | explore | low | Query-driven micro-context router: given a task (bug report, prompt, error text), extract the symbol names it mentions, resolve them against the index, and return a budget-capped bundle of definitions, callers, callees and tests. The graph is the retrieval index, never the payload. |
-| `kern_project_map` | explore | low | Return a compressed map of a whole project: every source file with its symbols and line counts. Use instead of listing/reading every file in a repo. |
-| `kern_prompt_fill` | cross | low | Dynamically renders standardized, token-efficient agent prompts with auto-injected project layout and memory lessons. Prevents agents from wasting tokens on repetitive prompt boilerplate. |
-| `kern_prose` | explore | low | Prose-word to symbol candidate lookup for the NL router miss-chain: maps plain-English words ('middleware', 'retry') to candidate symbols via the build-time inverted vocab, so agents skip the miss-chain (kern_search miss -> kern_ast_search miss). Each hit is a symbol full name plus the number of query words that matched it; multi-word queries rank symbols matching more words first. |
-| `kern_refactor_transaction` | edit | high | Multi-File Transactional AST Refactoring Engine: evaluates batch multi-file modifications in an isolated sandbox worktree with automated compilation verification. Guarantees atomic rollback on compilation errors with 0 broken multi-file refactor commits. |
-| `kern_register_host_sampler` | cross | medium | Register (or unregister) a host sampler command for LLM delegation: the auto LLM chain's host leg executes this command via sh -c with the user prompt on stdin and the system prompt in $KERN_SYSTEM_PROMPT; stdout is the reply. Pass an empty command to unregister. key namespaces the registration (default: this connection's slot) so several sessions/agents/repos can coexist — every registered sampler is tried in order. For hosts that do not announce MCP sampling (e.g. opencode), set KERN_HOST_SAMPLER_CMD and the kern MCP server self-registers the command at startup. |
-| `kern_rename` | edit | high | Structural symbol rename on the AST index (P0-5): previews every definition/reference for a Go package-level symbol (types, funcs, vars, consts) with file:line:col edits, then applies them transactionally when apply=true. Edits come from a real go/ast parse, so strings, comments, struct-field names, composite-literal keys, import aliases and the package clause are never touched; cross-package references (pkg.Symbol) are handled for exported symbols. Before applying, every touched file is backed up under <root>/.kern/rename-backup/ and a mid-flight failure restores all files. Method rename and non-Go symbols are refused. Returns the preview (or apply result) as text. |
-| `kern_repair_diagnostics` | edit | medium | Compiler-Error-to-AST Auto-Repair Engine: deterministically fixes trivial syntax, unused imports, missing standard library imports, and unused variables from compiler diagnostics in <1ms without LLM latency or token waste. |
-| `kern_repair_guidance` | verify | low | Blueprint change firewall: repair guidance for a gate finding — concrete suggested fix, suppression guidance, and the rule reference. Merged from the standalone blueprint-mcp server. |
-| `kern_repo_search` | explore | low | Ranked free-text symbol search across every repo in the kern multi-repo registry (kern repos add). Returns matches tagged with their repo name, best hits first. Set semantic=true to re-rank pooled results by Ollama dense embeddings. |
+| `kern_org_teams` | cross | medium | Org admin: manage teams grouping agents and projects (C11). action=list|show|create|remove; create takes id/name. |
+| `kern_org_user` | cross | medium | Org-wide user management + RBAC: user-add, user-list, user-role, user-disable, user-audit. actor_id required. |
+| `kern_pack` | plan | low | Pack a whole project into one paste-ready bundle (instructions, tree, contents) sized to max_tokens. |
+| `kern_path` | explore | low | Shortest call path between two symbols, following in-project call edges in either direction. |
+| `kern_plan` | plan | medium | Produce an implementation plan for a proposed change: affected files, dependencies, risks, required validation. Deterministic; no LLM. |
+| `kern_plan_context` | plan | low | Deterministically plan which context to include for a change. |
+| `kern_policy_dsl` | verify | low | Evaluate diffs, changed files and imports against policy-as-code rules (banned packages, protected paths, max diff. |
+| `kern_pre_edit` | plan | medium | Predict blast radius, callers, untested dependencies and boundary risks of modifying a file or symbol before you edit. |
+| `kern_precache` | verify | medium | Scan the project once and fill code-summary and document-vector caches so later kern calls are instant. |
+| `kern_probe` | explore | low | Micro-context router. |
+| `kern_project_map` | explore | low | Return a compressed map of a whole project: every source file with its symbols and line counts. |
+| `kern_prompt_fill` | cross | low | Render standardized, token-efficient agent prompts with auto-injected project layout and memory lessons. |
+| `kern_prose` | explore | low | Prose-word to symbol candidate lookup. |
+| `kern_refactor_transaction` | edit | high | Multi-file transactional AST refactoring: evaluate batch edits in a sandbox worktree with compile verification. |
+| `kern_register_host_sampler` | cross | medium | Register/unregister a host sampler command for LLM delegation (sh -c; prompt on stdin, $KERN_SYSTEM_PROMPT = system prompt); empty unregisters. Registration is exec-gated: KERN_ALLOW_EXEC=1 or KERN_TOOLS must name kern_register_host_sampler; runs with a minimal PATH/HOME/TMPDIR env. |
+| `kern_rename` | edit | high | Structural rename on the AST index: preview definitions/references for a Go package-level symbol, apply with apply=true (backups + rollback). Non-Go refused. |
+| `kern_repair_diagnostics` | edit | medium | Compiler-error-to-AST auto-repair. |
+| `kern_repair_guidance` | verify | low | Blueprint change firewall: repair guidance for a gate finding — suggested fix, suppression, rule reference. |
+| `kern_repo_search` | explore | low | Ranked free-text symbol search across every repo in the kern multi-repo registry. |
 | `kern_resolve` | explore | low | Resolve a handle ID from kern_retrieve to L2 or L3 content, validating staleness via content hash. |
-| `kern_retrieve` | explore | low | Retrieve context at progressive disclosure levels (L1=index summary, L2=neighborhood, L3=source) with stable handles; task_type selects the level from the planner policy (documentation=l1, refactor=l3, else l2). |
-| `kern_review` | verify | low | Token-optimised code-review context for changed files: line-scoped changed symbols (with file:line spans), their callers, blast radius, risk and test gaps, sized to fit a token budget. The smallest answer a reviewer needs. |
-| `kern_risk` | plan | medium | HIGH-LEVEL: the governance risk assessment for a proposed change — the same engine behind `kern risk` (CLI) and POST /v1/risk (REST): the context engine's risk claims (level, score, factors), firewall check result (allowed/blocked, approval requirement), and required validations. Read-only. |
-| `kern_run` | cross | high | HIGH-LEVEL (Workflow E): run an intent through the full task pipeline — compiles the intent, selects workflow + capabilities + agents, creates a Task, runs policy precheck, and returns the run result (task id, workflow, risk/approval, capabilities, tools, agents, next action). This is the single entry point that orchestrates the whole workflow from one call. |
-| `kern_run_build` | edit | critical | Run a build/test command locally and return only the compact result (exit status + errors), not full output. Use for builds, tests, linting to save context. |
-| `kern_runtime` | explore | low | Production-intelligence snapshot: kern_runtime with action=status reports which runtime source is wired (live adapter via KERN_PROMETHEUS_URL/KERN_OTEL_URL/KERN_K8S_API or .kern/runtime.json) plus per-service profiles (events/errors/error rate); action=drift compares runtime routes against code-declared routes (template-aware). JSON output, mirroring `kern runtime status|drift --json`. |
-| `kern_safe_delete` | edit | high | Check whether a symbol can be safely deleted: reports in-project callers (production vs test-only), whether it is exported or an entry point, and a conservative SAFE/NOT SAFE verdict. Use before removing dead code. |
-| `kern_sandbox` | edit | critical | Run a risky command inside a snapshot of the project (#15): on non-zero exit the tree is rolled back exactly (files restored, new files removed). Success keeps changes unless they touch HIGH-risk files, in which case the tree is likewise restored unless force=true. Use before destructive operations, migrations, or agent-applied edits. Gated by the command-execution governance firewall (KERN_ALLOW_EXEC / KERN_TOOLS) and command output is PII/secret-masked before return. |
-| `kern_schema_validate` | verify | low | Deterministically validate JSON output against a JSON schema (subset: object/array/primitives, required, enum, min/max/length, pattern, additionalProperties). Returns either a conform message or one line per violation. |
-| `kern_search` | explore | low | Ranked free-text symbol search: returns symbols matching a query by name or file, best matches first. Forgiving lookup for humans — 'load index' or 'login handler' work, and prose hits camelCase symbols by name segment ('state machine' -> OrderStateMachine), plural-folded ('user services' -> UserService), accent-normalized ('résolution' -> ResolveResolution), or as a camelCase query ('stateMachine'). Set semantic=true to re-rank results by dense embeddings from a local Ollama server (embedding model KERN_EMBED_MODEL, default nomic-embed-text). |
-| `kern_security` | verify | high | Local security scan of a project's source files: hardcoded secrets, dynamic SQL, shell command injection, weak crypto, insecure randomness and unsafe deserialization. Deterministic and line-scoped. Use before reviewing code or shipping changes. |
-| `kern_semantic_diff` | cross | low | Computes a functional AST-level symbol diff instead of raw line noise: surfaces modified functions, changed signatures, and newly impacted callers between commits or working tree. |
-| `kern_semantic_merge` | edit | high | Performs AST-aware 3-way code merge between base, local, and remote versions. Resolves non-overlapping struct fields, methods, imports, and declarations cleanly, and flags precise semantic conflicts. |
-| `kern_semcache` | cross | medium | Inspect and manage the semantic cache that serves similar (not just identical) prior queries instantly. Actions: 'stats' (default) lists entries per namespace (prompt/log), 'list' shows the stored inputs of a namespace, 'clear' wipes it (or all), 'similarity' reports the Jaccard overlap of two inputs so you can predict whether a near-duplicate will hit. Use to verify or reset the fuzzy layer. |
-| `kern_skill` | explore | low | Catalog or load the bundled agent skills (kern-investigate, kern-safe-change, kern-incident-triage). catalog (default) lists every skill with its description; load returns the full SKILL.md runbook for a named skill so the model can follow the repo's own operating procedures. |
-| `kern_snapshot` | explore | low | Canonical versioned graph snapshot for cross-agent handoff: whole-repo or per-symbol subgraph plus the build-time IndexIdentity fingerprint (content root, git tree/commit) and per-file SHA-256 hashes. action=create builds a snapshot (output is the versioned GraphSnapshot JSON); action=verify checks a snapshot file against a root and returns the freshness verdict (fresh/stale/unknown) with the fingerprint. A receiving agent can trust or distrust the graph without any other kern state. |
-| `kern_stats` | cross | low | Return before/after token savings and cost estimates from kern optimizations, optionally filtered to today or a session. |
-| `kern_stream` | cross | low | Inspects streaming status, partitions large responses into token-friendly chunks, and manages progress notification channels for long-running operations. |
-| `kern_surprising` | explore | low | Surprising connections (#): cross-community call edges ranked by community distance x rarity, deduped against known bridges. Deterministic; surfaces unexpected coupling an onboarding digest should point at. |
-| `kern_swap` | plan | low | Budget swapping (#18): in a context document, replace fenced code blocks tagged `lang:path` with per-file symbolic signatures to fit a token budget, or expand `lang:path:summary` blocks back to full file contents. Returns the budget-fitted document. |
-| `kern_synthesize_test` | verify | medium | Automatically synthesizes comprehensive table-driven unit tests, parameter fixtures, and boundary invariants for untested functions or methods based on AST signatures. |
-| `kern_taint` | verify | high | Taint-lite analysis: flag security sinks (SQL injection, command injection, unsafe deserialization, Python eval/exec/subprocess/pickle/yaml sinks) whose containing function is transitively called by a framework entry point (Symbol.Entry) or whose file contains source expressions (request params, bodies, CLI args). With generate=true, emits a deterministic test scaffold per tainted sink (go test for Go sinks, pytest for Python sinks, G-4) for LLM-assisted fill. The optional range argument scopes findings to files changed in a 'from..to' git range ('..' = working tree). Deterministic, bounded BFS. |
-| `kern_test_gaps` | plan | low | Test-coverage analysis from the call graph: what percent of callable symbols are exercised by tests, plus untested hotspots (called by many, covered by none). |
-| `kern_trace` | plan | low | Runtime-impact overlay: parse a pprof -top dump, a crash stack trace, or a plain list of function names and map the hot symbols onto the call graph — file:line, blast radius, test coverage and risk. Use to see what a hot path touches at runtime. |
+| `kern_retrieve` | explore | low | Retrieve context at progressive disclosure levels (L1=index summary, L2=neighborhood, L3=source) with stable handles; task_type selects the level. |
+| `kern_review` | verify | low | Token-optimised code-review context for changed files. |
+| `kern_run` | cross | high | Run an intent through the full task pipeline. |
+| `kern_runtime` | explore | low | Production snapshot: status reports the wired runtime source (KERN_PROMETHEUS_URL/KERN_OTEL_URL/KERN_K8S_API or .kern/runtime.json); drift compares routes. |
+| `kern_safe_delete` | edit | high | Check whether a symbol can be safely deleted. |
+| `kern_sandbox` | edit | critical | Run a risky command inside a project snapshot: non-zero exit rolls back exactly; HIGH-risk touches restore unless force=true. Rollback-on-failure, NOT isolation: full user privileges, out-of-root writes never rolled back, file-borne secrets readable. Gated by KERN_ALLOW_EXEC / KERN_TOOLS. |
+| `kern_schema_validate` | verify | low | Validate JSON output against a JSON schema (subset: primitives, required, enum, bounds, pattern, additionalProperties); one line per violation. |
+| `kern_search` | explore | low | Ranked free-text symbol search: symbols matching a query by name or file, best first; camelCase/plural/accent forgiving. semantic=true re-ranks via Ollama. |
+| `kern_security` | verify | high | Local security scan of project source. |
+| `kern_semantic_diff` | cross | low | Functional AST-level symbol diff. |
+| `kern_semantic_merge` | edit | high | AST-aware 3-way code merge (base/local/remote): resolves non-overlapping struct fields, methods, imports. |
+| `kern_semcache` | cross | medium | Inspect/manage the semantic cache serving similar prior queries: stats (default), list, clear, or similarity. |
+| `kern_skill` | explore | low | Catalog or load bundled agent skills (kern-investigate, kern-safe-change, kern-incident-triage). |
+| `kern_snapshot` | explore | low | Versioned graph snapshot for cross-agent handoff. |
+| `kern_stats` | cross | low | Return before/after token savings and cost estimates from kern optimizations, optionally filtered. |
+| `kern_stream` | cross | low | Inspect streaming status, partition large responses into token-friendly chunks, manage progress notification. |
+| `kern_surprising` | explore | low | Surprising connections. |
+| `kern_swap` | plan | low | Swap fenced code blocks tagged lang:path to per-file symbolic signatures to fit a token budget, or expand them back |
+| `kern_synthesize_test` | verify | medium | Synthesize table-driven unit tests for untested functions from AST signatures. |
+| `kern_taint` | verify | high | Taint-lite analysis: flag security sinks (SQL/command injection, unsafe deserialization, Python eval/exec/yaml) reachable from entry points; optional git range. |
+| `kern_test_gaps` | plan | low | Test-coverage analysis from the call graph: percent of callable symbols exercised by tests, plus untested hotspots. |
+| `kern_trace` | plan | low | Runtime-impact overlay: parse a pprof dump, stack trace, or function list and map hot symbols onto the call graph — file:line, blast radius, coverage. |
 | `kern_unlock` | edit | medium | Release a workspace lock previously acquired via kern_lock. |
-| `kern_usage_guide` | plan | low | Categorized usage guide for every kern MCP tool with performance tiers (fast/moderate/expensive), recommended workflows, and pitfalls. Consult this first when deciding which tool fits a task. |
-| `kern_validate` | verify | high | Auto-validation (#7): detect the project's language-appropriate build/test/syntax command and run it. Returns exit status, truncated output and duration. Use after editing code to gate correctness before final answers. |
-| `kern_validate_proposed` | verify | high | Blueprint change firewall: validate a PROPOSED change (not yet on disk) against policy — files is an array of {path, content, op} for the would-be diff. Returns per-gate PASS/BLOCK findings. Merged from the standalone blueprint-mcp server. |
-| `kern_validate_staged` | verify | high | Blueprint change firewall: validate the STAGED diff (git diff --cached) against policy (boundaries, secrets, duplication, architecture). Returns per-gate PASS/BLOCK findings with rule ids and files. Merged from the standalone blueprint-mcp server. Use before committing. |
-| `kern_verify` | verify | medium | HIGH-LEVEL (ADR-0006): verify a change with the unified verification engine — build, unit tests, security, architecture, dependency. Returns the typed verdict (PASS/FAIL/WARN) and per-check summary. |
-| `kern_verify_output` | verify | low | Hallucination check: extract file:line, symbol-name and route references from an agent's output text and confirm each against the real source tree and index. Returns ok/MISS verdicts for every reference. |
-| `kern_walk` | explore | low | Graph-guided walk: the /walk-graph primitive. Returns an indented parent-child dependency tree of every symbol up to N hops away from a symbol, across files, with file:line per node. Alias of kern_near with a tree-oriented description; use instead of grepping or reading whole files to locate code. |
-| `kern_what_if` | plan | medium | HIGH-LEVEL (Workflow C / ADR-0012): simulate the impact of a hypothetical change on the knowledge graph — transitively affected symbols, files, services, tests, a deterministic risk level, and a typed RECOMMENDATION claim. Read-only; never mutates the graph or index. |
-| `kern_why` | explore | low | Rationale and doc-reference report for a symbol: its doc comment, who depends on it and why (each caller's own doc line), and its in/out edge counts. Use to answer 'why does this exist and who needs it'. |
-| `kern_workflow` | cross | high | HIGH-LEVEL (Workflow E): select and coordinate the agent team without the external caller manually sequencing it. Classifies the intent, registers the kind-specific workflow (only the specialists that apply), wires the standard team, and drives the steps (analyze → plan → [human approval gate] → code → verify → pr for code changes; kind-specific stages for incident/documentation/modernization tasks). The run parks at the human approval gate before the first execution step: the returned error carries the approval ID, resolve it via kern_approve then call kern_workflow again with the same task_id to resume. |
+| `kern_usage_guide` | plan | low | Categorized usage guide for every kern MCP tool with performance tiers, recommended workflows, and pitfalls. |
+| `kern_validate` | verify | high | Auto-validation: detect and run the project's build/test command. |
+| `kern_validate_proposed` | verify | high | Blueprint change firewall: validate a PROPOSED change (files [{path,content,op}]) against policy. |
+| `kern_validate_staged` | verify | high | Blueprint change firewall: validate the STAGED diff (git diff --cached) against policy. |
+| `kern_verify` | verify | medium | Verify a change with the unified engine (build, unit tests, security, architecture, dependency). |
+| `kern_verify_output` | verify | low | Hallucination check: extract file:line, symbol and route references from agent output and confirm against the source tree; ok/MISS verdicts. |
+| `kern_what_if` | plan | medium | Simulate the impact of a hypothetical change on the knowledge graph. |
+| `kern_why` | explore | low | Rationale and doc-reference report for a symbol: doc comment, who depends on it and why, in/out edge counts. |
+| `kern_workflow` | cross | high | Coordinate the agent team for an intent (analyze → plan → approval → code → verify → pr); parks at the approval gate; resume with the same task_id. |
 
 ## Detailed contracts
 
@@ -188,11 +181,11 @@ The server rejects **null**, **object** and **array** values for string-typed ar
 - **Risk level:** low
 - **Required:** none
 
-Architecture overview from call-graph communities: subsystems with their hubs/packages, plus coupling warnings ranking the cross-community call bundles that make changes ripple.
+Architecture overview from call-graph communities: subsystems with hubs/packages, plus coupling warnings.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `root` | string | no | Project root (defaults to current directory) |
+| `root` | string | no | Project root (default: server cwd; stdio MCP server: confined to the workspace root, widenable via KERN_MCP_ROOTS; web console/SDK: confined to that App's project root — KERN_MCP_ROOTS does not widen) |
 
 ### `kern_ast_search`
 
@@ -200,13 +193,13 @@ Architecture overview from call-graph communities: subsystems with their hubs/pa
 - **Risk level:** low
 - **Required:** none
 
-AST-level symbol search across a Go project. Supports patterns like 'func greet', 'type *User*', 'method *', '*Handler*'. Returns definitions with file:line.
+AST-level symbol search across a Go project: patterns like 'func greet', 'type *User*'.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `limit` | string | no | Max results (default 50) |
 | `pattern` | string | no | Symbol pattern. Prefixes: func, method, struct, interface, type, const, var. '*' wildcards supported |
-| `root` | string | no | Project root (defaults to current directory) |
+| `root` | string | no | Project root (default: server cwd; stdio MCP server: confined to the workspace root, widenable via KERN_MCP_ROOTS; web console/SDK: confined to that App's project root — KERN_MCP_ROOTS does not widen) |
 
 ### `kern_bridges`
 
@@ -214,12 +207,12 @@ AST-level symbol search across a Go project. Supports patterns like 'func greet'
 - **Risk level:** low
 - **Required:** none
 
-Bridge detection (#4): symbols called from two or more distinct packages/directories — the coupling points where a change in one subsystem can break another. Ranks bridges by number of calling packages then caller count.
+Find cross-package bridges: symbols called from more than one package, ranked by how many packages they couple.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `limit` | string | no | Max bridges to return (default 15) |
-| `root` | string | no | Project root (defaults to current directory) |
+| `root` | string | no | Project root (default: server cwd; stdio MCP server: confined to the workspace root, widenable via KERN_MCP_ROOTS; web console/SDK: confined to that App's project root — KERN_MCP_ROOTS does not widen) |
 
 ### `kern_buddy`
 
@@ -227,12 +220,12 @@ Bridge detection (#4): symbols called from two or more distinct packages/directo
 - **Risk level:** low
 - **Required:** none
 
-Session onboarding digest for any agent: the project's conventions, layout, entry points and gotchas distilled from the index, docs and recent history. Call once at the start of a session on an unfamiliar repo.
+Session onboarding digest: the project's conventions, layout, entry points and gotchas distilled from the index, docs, history.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `max_output` | string | no | Raise the MCP output sandbox cap for this call (bytes; 0 disables). The digest is compact by design; use kern_project_map for the full map. |
-| `root` | string | no | Project root (defaults to current directory) |
+| `max_output` | string | no | Raise the MCP output sandbox cap for this call (bytes; 0 disables) |
+| `root` | string | no | Project root (default: server cwd; stdio MCP server: confined to the workspace root, widenable via KERN_MCP_ROOTS; web console/SDK: confined to that App's project root — KERN_MCP_ROOTS does not widen) |
 
 ### `kern_churn`
 
@@ -240,12 +233,12 @@ Session onboarding digest for any agent: the project's conventions, layout, entr
 - **Risk level:** low
 - **Required:** none
 
-Change-frequency risk: which files were touched by the most commits in a range, whether they are being edited right now, and how risky they are in the call graph.
+Change-frequency risk.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `range` | string | no | Git range like 'HEAD~10..HEAD' (default last 30 commits) |
-| `root` | string | no | Project root (defaults to current directory) |
+| `root` | string | no | Project root (default: server cwd; stdio MCP server: confined to the workspace root, widenable via KERN_MCP_ROOTS; web console/SDK: confined to that App's project root — KERN_MCP_ROOTS does not widen) |
 
 ### `kern_cochange`
 
@@ -253,26 +246,13 @@ Change-frequency risk: which files were touched by the most commits in a range, 
 - **Risk level:** low
 - **Required:** none
 
-Co-change mode (#6): which files are actually changed together in the same commits (from git history), independent of the call graph. Grades change risk by co-change frequency: files that co-change with the current edits are the ones most likely to break next. Use before a commit to see what else must change in lockstep.
+Co-change analysis: which files are actually changed together in the same commits, independent of the call graph.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `limit` | string | no | Max co-change pairs to return (default 20) |
 | `range` | string | no | Git range like 'HEAD~10..HEAD' (default last 30 commits) |
-| `root` | string | no | Project root (defaults to current directory) |
-
-### `kern_code_graph`
-
-- **Phase:** explore
-- **Risk level:** low
-- **Required:** none
-
-Return the call graph neighbourhood of a symbol: its definition, its callers, and what it calls. Use to understand dependencies without reading whole files.
-
-| Parameter | Type | Required | Description |
-|---|---|---|---|
-| `root` | string | no | Project root (defaults to current directory) |
-| `symbol` | string | no | Symbol name (e.g. 'greet' or 'User.Login') |
+| `root` | string | no | Project root (default: server cwd; stdio MCP server: confined to the workspace root, widenable via KERN_MCP_ROOTS; web console/SDK: confined to that App's project root — KERN_MCP_ROOTS does not widen) |
 
 ### `kern_communities`
 
@@ -280,12 +260,12 @@ Return the call graph neighbourhood of a symbol: its definition, its callers, an
 - **Risk level:** low
 - **Required:** none
 
-Call-graph communities (label propagation): which symbols cluster together as subsystems, with each cluster's size and hub. Use to name the architecture's parts before refactoring.
+Call-graph communities (label propagation).
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `limit` | string | no | Max communities to return (default all) |
-| `root` | string | no | Project root (defaults to current directory) |
+| `root` | string | no | Project root (default: server cwd; stdio MCP server: confined to the workspace root, widenable via KERN_MCP_ROOTS; web console/SDK: confined to that App's project root — KERN_MCP_ROOTS does not widen) |
 
 ### `kern_compact_file`
 
@@ -293,12 +273,12 @@ Call-graph communities (label propagation): which symbols cluster together as su
 - **Risk level:** low
 - **Required:** none
 
-Return a compact symbolic summary of a source file (functions, types, line numbers) instead of reading the whole file. Use before reading files in large codebases. Optional tier: 'summary' (default, symbol list), 'full' (entire source), or 'folded' (signatures kept, bodies replaced with 'body elided: N lines' placeholders).
+Return a compact symbolic summary of a source file (functions, types, line numbers).
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `path` | string | no | Absolute or relative path of the file to summarize |
-| `root` | string | no | Project root; when set, path must stay inside it (defaults to unrestricted) |
+| `root` | string | no | Project root; when set, path must stay inside it (stdio MCP server: confined to the workspace root, widenable via KERN_MCP_ROOTS; web console/SDK: confined to that App's project root — KERN_MCP_ROOTS does not widen) |
 | `tier` | string | no | 'summary' (default), 'full', or 'folded' |
 
 ### `kern_context`
@@ -307,20 +287,20 @@ Return a compact symbolic summary of a source file (functions, types, line numbe
 - **Risk level:** low
 - **Required:** none
 
-Return the minimal relevant source slice for a symbol: its definition source, its callers, and what it calls. Use instead of reading an entire file.
+Return the minimal relevant source slice for a symbol: definition source, callers, and what it calls.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `agent_id` | string | no | Agent identity for governed mode (P1.2): enables authorized-context filtering — results are scoped to what this agent may read. Omit for raw (ungoverned) mode. |
-| `lens` | string | no | Review lens: security, performance, maintainability, architecture, balanced, or a combined preset name. Re-ranks evidence priorities when the output carries claims. |
+| `agent_id` | string | no | Agent identity for governed mode (P1.2): scopes results to what this agent may read; omit for raw mode. |
+| `lens` | string | no | Review lens: security, performance, maintainability, architecture, balanced, or a combined preset. |
 | `lines` | string | no | Lines of source context around the definition (default 12) |
-| `max_tokens` | string | no | Optional token budget cap. When provided, automatically fits the slice within this limit using deterministic budget compaction. |
-| `profile` | string | no | Output profile: machine-json, action-first, human-readable, debug. Shapes the response format (default: human-readable). |
-| `root` | string | no | Project root (defaults to current directory) |
+| `max_tokens` | string | no | Optional token budget cap; when provided, fits the slice within it deterministically |
+| `profile` | string | no | Output profile: machine-json, action-first, human-readable, or debug (default human-readable). |
+| `root` | string | no | Project root (default: server cwd; stdio MCP server: confined to the workspace root, widenable via KERN_MCP_ROOTS; web console/SDK: confined to that App's project root — KERN_MCP_ROOTS does not widen) |
 | `scope` | object | no | Optional task scope object {paths, denied_paths, services, envs, artifacts} for governed mode. |
 | `symbol` | string | no | Symbol name (e.g. 'greet') |
 | `task` | string | no | Task ID for governed mode; pairs with agent_id to scope authorization to the task paths. |
-| `with_freshness` | string | no | When 'true', append a ---freshness-proof--- footer with the index's content-addressed freshness proof |
+| `with_freshness` | string | no | When true, append the index freshness-proof footer |
 
 ### `kern_context_envelope`
 
@@ -328,13 +308,13 @@ Return the minimal relevant source slice for a symbol: its definition source, it
 - **Risk level:** low
 - **Required:** none
 
-Return the assembled context envelope (domain.ContextPacket) as machine-readable JSON with schema versioning. Use when a client needs the structured packet, not rendered text.
+Return the assembled context envelope (domain.ContextPacket) as machine-readable JSON with schema versioning.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `change` | string | no | Symbol name or change description to analyze into a context packet |
 | `max_tokens` | integer | no | Token budget for the fitted render (default 0 = no fitting) |
-| `root` | string | no | Project root (defaults to current directory) |
+| `root` | string | no | Project root (default: server cwd; stdio MCP server: confined to the workspace root, widenable via KERN_MCP_ROOTS; web console/SDK: confined to that App's project root — KERN_MCP_ROOTS does not widen) |
 | `with_freshness` | boolean | no | When true, append a ---freshness-proof--- footer with the index's content-addressed freshness proof |
 
 ### `kern_cycles`
@@ -343,12 +323,12 @@ Return the assembled context envelope (domain.ContextPacket) as machine-readable
 - **Risk level:** low
 - **Required:** none
 
-Package-level import cycles via Tarjan SCC over the project-local import graph (project packages only, third-party imports ignored). Returns the deterministic cycle list with file:line evidence — answers in one call what previously took many grep round trips.
+Package-level import cycles via Tarjan SCC over the project-local import graph.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `json` | string | no | When 'true', return the structured cycles JSON instead of the text report |
-| `root` | string | no | Project root (defaults to current directory) |
+| `root` | string | no | Project root (default: server cwd; stdio MCP server: confined to the workspace root, widenable via KERN_MCP_ROOTS; web console/SDK: confined to that App's project root — KERN_MCP_ROOTS does not widen) |
 
 ### `kern_dead`
 
@@ -356,12 +336,12 @@ Package-level import cycles via Tarjan SCC over the project-local import graph (
 - **Risk level:** low
 - **Required:** none
 
-Dead-code detection: symbols nothing in the project calls. Private names are dead for certain; public names may be external API. Sorted by size so the biggest cleanup wins show first. Callers reached through function values or interface dispatch are invisible to the index and are reported as dead — confirm before removing.
+Dead-code detection: symbols nothing in the project calls.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `limit` | string | no | Max entries (default all) |
-| `root` | string | no | Project root (defaults to current directory) |
+| `root` | string | no | Project root (default: server cwd; stdio MCP server: confined to the workspace root, widenable via KERN_MCP_ROOTS; web console/SDK: confined to that App's project root — KERN_MCP_ROOTS does not widen) |
 
 ### `kern_entry_points`
 
@@ -369,13 +349,13 @@ Dead-code detection: symbols nothing in the project calls. Private names are dea
 - **Risk level:** low
 - **Required:** none
 
-List framework entry points found in the index: handlers, controllers and route targets with their framework and route (e.g. spring-mvc UserController.list /api/users). Search for all symbols with the 'entry' kind prefix via kern_ast_search.
+List framework entry points from the index: handlers, controllers, route targets with framework and route.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `limit` | string | no | Max results (default 50) |
 | `pattern` | string | no | Optional route/name wildcard filter, e.g. '*admin*' |
-| `root` | string | no | Project root (defaults to current directory) |
+| `root` | string | no | Project root (default: server cwd; stdio MCP server: confined to the workspace root, widenable via KERN_MCP_ROOTS; web console/SDK: confined to that App's project root — KERN_MCP_ROOTS does not widen) |
 
 ### `kern_explain`
 
@@ -383,11 +363,11 @@ List framework entry points found in the index: handlers, controllers and route 
 - **Risk level:** low
 - **Required:** none
 
-Synthesizes an end-to-end architectural narrative for a symbol or file: purpose, callers, callees, interfaces, and testing posture in a single call.
+Synthesize an end-to-end architectural narrative for a symbol or file: purpose, callers, callees, interfaces, testing posture.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `root` | string | no | Project root directory (defaults to current directory) |
+| `root` | string | no | Project root (default: server cwd; stdio MCP server: confined to the workspace root, widenable via KERN_MCP_ROOTS; web console/SDK: confined to that App's project root — KERN_MCP_ROOTS does not widen) |
 | `target` | string | no | Target symbol name or relative file path to explain |
 
 ### `kern_explore`
@@ -396,21 +376,21 @@ Synthesizes an end-to-end architectural narrative for a symbol or file: purpose,
 - **Risk level:** low
 - **Required:** none
 
-Single-call explore (#2): return a symbol's verbatim source, direct call flow (callers + callees) and transitive blast radius (with affected files) in one shot. The primitive that replaces three separate calls (graph/near/path) for 'what touches this and how'. Pass depth=N to cap the blast radius to N hops and max=N to cap node count.
+One-call symbol exploration: definition source, callers, callees, and blast radius up to N hops; optional why-rationale.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `agent_id` | string | no | Agent identity for governed mode (P1.2): enables authorized-context filtering — results are scoped to what this agent may read. Omit for raw (ungoverned) mode. |
+| `agent_id` | string | no | Agent identity for governed mode (P1.2): scopes results to what this agent may read; omit for raw mode. |
 | `depth` | string | no | Cap blast radius to N hops from the symbol (default 2, 0 = unlimited) |
 | `explain` | string | no | When 'true', append the why-rationale section (what the symbol is, who depends on it and why) |
 | `max` | string | no | Maximum blast-radius symbols to return (default 30) |
 | `max_tokens` | string | no | Token budget for source + callee skeletons (default: verbatim, no skeletons) |
 | `min_confidence` | string | no | Prune callers/callees below this provenance tier: EXTRACTED, INFERRED or AMBIGUOUS (default: keep all) |
-| `root` | string | no | Project root (defaults to current directory) |
+| `root` | string | no | Project root (default: server cwd; stdio MCP server: confined to the workspace root, widenable via KERN_MCP_ROOTS; web console/SDK: confined to that App's project root — KERN_MCP_ROOTS does not widen) |
 | `scope` | object | no | Optional task scope object {paths, denied_paths, services, envs, artifacts} for governed mode. |
 | `symbol` | string | no | Symbol name (e.g. 'greet' or 'User.Login') |
 | `task` | string | no | Task ID for governed mode; pairs with agent_id to scope authorization to the task paths. |
-| `with_freshness` | string | no | When 'true', append a ---freshness-proof--- footer with the index's content-addressed freshness proof |
+| `with_freshness` | string | no | When true, append the index freshness-proof footer |
 
 ### `kern_frameworks`
 
@@ -418,11 +398,11 @@ Single-call explore (#2): return a symbol's verbatim source, direct call flow (c
 - **Risk level:** low
 - **Required:** none
 
-Detect the frameworks and libraries a project uses (Spring, Rails, Django, Express, gin, etc.) by scanning manifests and source markers. Use to know what stack the codebase is on.
+Detect the frameworks/libraries a project uses (Spring, Rails, Django, Express, gin, ...) by scanning manifests.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `root` | string | no | Project root (defaults to current directory) |
+| `root` | string | no | Project root (default: server cwd; stdio MCP server: confined to the workspace root, widenable via KERN_MCP_ROOTS; web console/SDK: confined to that App's project root — KERN_MCP_ROOTS does not widen) |
 
 ### `kern_fts_search`
 
@@ -430,13 +410,13 @@ Detect the frameworks and libraries a project uses (Spring, Rails, Django, Expre
 - **Risk level:** low
 - **Required:** none
 
-FTS5 full-text search (#3) over the SQLite symbol index. Supports MATCH syntax ('greet', 'func AND greet', `file:"main.go"`). The SQLite store is compiled in by default (disable with -tags nosqlite); requires a persisted index, and falls back to a clear error on a nosqlite build.
+FTS5 full-text search over the SQLite symbol index (MATCH syntax like 'func AND greet').
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `limit` | string | no | Max results (default 20) |
 | `query` | string | no | FTS5 MATCH query over symbols |
-| `root` | string | no | Project root (defaults to current directory) |
+| `root` | string | no | Project root (default: server cwd; stdio MCP server: confined to the workspace root, widenable via KERN_MCP_ROOTS; web console/SDK: confined to that App's project root — KERN_MCP_ROOTS does not widen) |
 
 ### `kern_fw_trace`
 
@@ -444,13 +424,13 @@ FTS5 full-text search (#3) over the SQLite symbol index. Supports MATCH syntax (
 - **Risk level:** low
 - **Required:** none
 
-Deep Framework Dependency Injection & Route Tracing: maps end-to-end framework execution pipelines (Route -> Middleware -> Handler DTO -> Injected Service -> DB Model) across Gin, Express, FastAPI, Spring Boot, and NestJS.
+Framework DI & route tracing: maps pipelines across Gin, Express, FastAPI, Spring Boot, NestJS.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `filter` | string | no | Optional keyword or path filter to match specific routes/handlers |
 | `format` | string | no | 'text' (default) or 'json' |
-| `root` | string | no | Project root directory (defaults to current directory) |
+| `root` | string | no | Project root (default: server cwd; stdio MCP server: confined to the workspace root, widenable via KERN_MCP_ROOTS; web console/SDK: confined to that App's project root — KERN_MCP_ROOTS does not widen) |
 
 ### `kern_graph`
 
@@ -458,18 +438,20 @@ Deep Framework Dependency Injection & Route Tracing: maps end-to-end framework e
 - **Risk level:** low
 - **Required:** none
 
-One-call graph context: token-budgeted names-only adjacency for a symbol — callers first (the direction that matters for impact), then callees, every edge tagged EXTRACTED/INFERRED/AMBIGUOUS, plus community membership. Calls to interface methods carry dispatch hints listing the concrete implementations they can reach. Parity with code-review-graph's minimal_context: the minimal caller-first answer sized to the context window, no source text.
+One-call graph context.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `agent_id` | string | no | Agent identity for governed mode (P1.2): enables authorized-context filtering — results are scoped to what this agent may read. Omit for raw (ungoverned) mode. |
-| `max_tokens` | string | no | Token budget for the names-only adjacency (default: adaptive to the symbol's adjacency degree, base 400 + 20/neighbor capped 2000; 0 = uncapped) |
+| `agent_id` | string | no | Agent identity for governed mode (P1.2): scopes results to what this agent may read; omit for raw mode. |
+| `entities` | string | no | When true, append the entity-node block: digital-twin entities (API endpoints, DB tables, topics, services, deployments) connected via twin edges |
+| `format` | string | no | 'one-line' renders the single-line call-graph neighbourhood (kern_code_graph contract); default: adjacency report |
+| `max_tokens` | string | no | Token budget for the names-only adjacency (default: adaptive, base 400 + 20/neighbor capped 2000; 0 = uncapped) |
 | `min_confidence` | string | no | Prune adjacency rows below this provenance tier: EXTRACTED, INFERRED or AMBIGUOUS (default: keep all) |
-| `root` | string | no | Project root (defaults to current directory) |
+| `root` | string | no | Project root (default: server cwd; stdio MCP server: confined to the workspace root, widenable via KERN_MCP_ROOTS; web console/SDK: confined to that App's project root — KERN_MCP_ROOTS does not widen) |
 | `scope` | object | no | Optional task scope object {paths, denied_paths, services, envs, artifacts} for governed mode. |
 | `symbol` | string | no | Symbol name (simple name or Type.Method) |
 | `task` | string | no | Task ID for governed mode; pairs with agent_id to scope authorization to the task paths. |
-| `with_freshness` | string | no | When 'true', append a ---freshness-proof--- footer with the index's content-addressed freshness proof |
+| `with_freshness` | string | no | When true, append the index freshness-proof footer |
 
 ### `kern_hubs`
 
@@ -477,12 +459,12 @@ One-call graph context: token-budgeted names-only adjacency for a symbol — cal
 - **Risk level:** low
 - **Required:** none
 
-Architectural hotspots: the most depended-on symbols (hubs) and cross-package bridges where a change in one subsystem can break another.
+Architectural hotspots: the most depended-on symbols (hubs) and cross-package bridges.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `limit` | string | no | Max hubs to return (default 10) |
-| `root` | string | no | Project root (defaults to current directory) |
+| `root` | string | no | Project root (default: server cwd; stdio MCP server: confined to the workspace root, widenable via KERN_MCP_ROOTS; web console/SDK: confined to that App's project root — KERN_MCP_ROOTS does not widen) |
 
 ### `kern_inherits`
 
@@ -490,11 +472,11 @@ Architectural hotspots: the most depended-on symbols (hubs) and cross-package br
 - **Risk level:** low
 - **Required:** none
 
-Return the inheritance edges of a symbol: its supertypes (extends/implements/embeds) and subtypes (what extends/implements/embeds it). Use to see class hierarchies without reading whole files.
+Return the inheritance edges of a symbol: supertypes (extends/implements/embeds) and subtypes.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `root` | string | no | Project root (defaults to current directory) |
+| `root` | string | no | Project root (default: server cwd; stdio MCP server: confined to the workspace root, widenable via KERN_MCP_ROOTS; web console/SDK: confined to that App's project root — KERN_MCP_ROOTS does not widen) |
 | `symbol` | string | no | Symbol name (e.g. 'Item' or 'Logger') |
 
 ### `kern_larges`
@@ -503,13 +485,13 @@ Return the inheritance edges of a symbol: its supertypes (extends/implements/emb
 - **Risk level:** low
 - **Required:** none
 
-Find the largest function/method declarations by source lines. Use to locate god functions that beg for refactoring.
+Find the largest function/method declarations by source lines — god functions that beg for refactoring.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `limit` | string | no | Max results (default all) |
 | `min_lines` | string | no | Size threshold in source lines (default 60) |
-| `root` | string | no | Project root (defaults to current directory) |
+| `root` | string | no | Project root (default: server cwd; stdio MCP server: confined to the workspace root, widenable via KERN_MCP_ROOTS; web console/SDK: confined to that App's project root — KERN_MCP_ROOTS does not widen) |
 
 ### `kern_lsp_bridge`
 
@@ -517,7 +499,7 @@ Find the largest function/method declarations by source lines. Use to locate god
 - **Risk level:** low
 - **Required:** none
 
-Zero-Weight LSP Client Bridge: queries local language servers (gopls, pyright, vtsls, rust-analyzer, clangd, etc.) for exact compiler-grade type definitions, hover documentation, cross-file references, and document symbols without bundling language runtimes into kern.
+Zero-weight LSP client bridge.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -526,7 +508,7 @@ Zero-Weight LSP Client Bridge: queries local language servers (gopls, pyright, v
 | `file` | string | no | Target source file path |
 | `format` | string | no | 'text' (default) or 'json' |
 | `line` | string | no | 1-based line number (required for definition, hover, references) |
-| `root` | string | no | Project root directory (defaults to current directory) |
+| `root` | string | no | Project root (default: server cwd; stdio MCP server: confined to the workspace root, widenable via KERN_MCP_ROOTS; web console/SDK: confined to that App's project root — KERN_MCP_ROOTS does not widen) |
 | `server_cmd` | string | no | Optional custom language server command to override auto-detection |
 
 ### `kern_near`
@@ -535,13 +517,13 @@ Zero-Weight LSP Client Bridge: queries local language servers (gopls, pyright, v
 - **Risk level:** low
 - **Required:** none
 
-Dependency-tree expansion: every symbol within N hops of a symbol, in both directions (callers + callees), budget-capped. The graph-guided traversal primitive that replaces blind grep — e.g. 'everything two degrees from this database model' in one call.
+Dependency-tree expansion: every symbol within N hops of a symbol (callers + callees), budget-capped.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `depth` | string | no | Number of hops to expand (default 2) |
 | `max` | string | no | Maximum nodes to return (default 100) |
-| `root` | string | no | Project root (defaults to current directory) |
+| `root` | string | no | Project root (default: server cwd; stdio MCP server: confined to the workspace root, widenable via KERN_MCP_ROOTS; web console/SDK: confined to that App's project root — KERN_MCP_ROOTS does not widen) |
 | `symbol` | string | no | Root symbol (simple name or Type.Method) |
 
 ### `kern_orchestrate`
@@ -550,14 +532,14 @@ Dependency-tree expansion: every symbol within N hops of a symbol, in both direc
 - **Risk level:** low
 - **Required:** none
 
-Run the silent context pipeline over an intent: classify the task type, assemble the context packet, select evidence by the task policy, fit it to a token budget, stamp the context envelope, and return a content-hash-sealed escalation handle — all deterministically and in one call. Use to get planner-selected context for a natural-language task instead of invoking individual context tools.
+Run the silent context pipeline over an intent.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `budget` | integer | no | Token budget for the fitted envelope (default 0 = the task policy's MaxTokens) |
 | `intent` | string | no | Natural-language task or change description to orchestrate context for |
 | `mode` | string | no | Context-mode preset overriding the policy family: fix | review | architecture | incident | explain (default empty = classify the intent) |
-| `root` | string | no | Project root (defaults to current directory) |
+| `root` | string | no | Project root (default: server cwd; stdio MCP server: confined to the workspace root, widenable via KERN_MCP_ROOTS; web console/SDK: confined to that App's project root — KERN_MCP_ROOTS does not widen) |
 | `skill` | string | no | Bundled agent skill whose runbook is appended to the delivered render: kern-investigate | kern-safe-change | kern-incident-triage (default empty = no skill section) |
 
 ### `kern_path`
@@ -566,13 +548,13 @@ Run the silent context pipeline over an intent: classify the task type, assemble
 - **Risk level:** low
 - **Required:** none
 
-Shortest call path between two symbols, following in-project call edges in either direction. Traces how two things connect without reading files.
+Shortest call path between two symbols, following in-project call edges in either direction.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `from` | string | no | Source symbol (simple name or Type.Method) |
 | `min_confidence` | string | no | Search only edges at/above this provenance tier: EXTRACTED, INFERRED or AMBIGUOUS (default: every edge) |
-| `root` | string | no | Project root (defaults to current directory) |
+| `root` | string | no | Project root (default: server cwd; stdio MCP server: confined to the workspace root, widenable via KERN_MCP_ROOTS; web console/SDK: confined to that App's project root — KERN_MCP_ROOTS does not widen) |
 | `to` | string | no | Target symbol (simple name or Type.Method) |
 
 ### `kern_probe`
@@ -581,13 +563,13 @@ Shortest call path between two symbols, following in-project call edges in eithe
 - **Risk level:** low
 - **Required:** none
 
-Query-driven micro-context router: given a task (bug report, prompt, error text), extract the symbol names it mentions, resolve them against the index, and return a budget-capped bundle of definitions, callers, callees and tests. The graph is the retrieval index, never the payload.
+Micro-context router.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `max_tokens` | string | no | Token budget for the bundle (default 4000) |
 | `min_confidence` | string | no | Prune anchor call rows below this provenance tier: EXTRACTED, INFERRED or AMBIGUOUS (default: keep all) |
-| `root` | string | no | Project root (defaults to current directory) |
+| `root` | string | no | Project root (default: server cwd; stdio MCP server: confined to the workspace root, widenable via KERN_MCP_ROOTS; web console/SDK: confined to that App's project root — KERN_MCP_ROOTS does not widen) |
 | `task` | string | no | Natural-language task, bug report or error text mentioning symbols |
 
 ### `kern_project_map`
@@ -596,7 +578,7 @@ Query-driven micro-context router: given a task (bug report, prompt, error text)
 - **Risk level:** low
 - **Required:** none
 
-Return a compressed map of a whole project: every source file with its symbols and line counts. Use instead of listing/reading every file in a repo.
+Return a compressed map of a whole project: every source file with its symbols and line counts.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -609,13 +591,13 @@ Return a compressed map of a whole project: every source file with its symbols a
 - **Risk level:** low
 - **Required:** none
 
-Prose-word to symbol candidate lookup for the NL router miss-chain: maps plain-English words ('middleware', 'retry') to candidate symbols via the build-time inverted vocab, so agents skip the miss-chain (kern_search miss -> kern_ast_search miss). Each hit is a symbol full name plus the number of query words that matched it; multi-word queries rank symbols matching more words first.
+Prose-word to symbol candidate lookup.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `limit` | string | no | Max results (default 20) |
 | `query` | string | no | Prose words to resolve to symbol candidates (e.g. 'build security') |
-| `root` | string | no | Project root (defaults to current directory) |
+| `root` | string | no | Project root (default: server cwd; stdio MCP server: confined to the workspace root, widenable via KERN_MCP_ROOTS; web console/SDK: confined to that App's project root — KERN_MCP_ROOTS does not widen) |
 
 ### `kern_repo_search`
 
@@ -623,7 +605,7 @@ Prose-word to symbol candidate lookup for the NL router miss-chain: maps plain-E
 - **Risk level:** low
 - **Required:** none
 
-Ranked free-text symbol search across every repo in the kern multi-repo registry (kern repos add). Returns matches tagged with their repo name, best hits first. Set semantic=true to re-rank pooled results by Ollama dense embeddings.
+Ranked free-text symbol search across every repo in the kern multi-repo registry.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -644,7 +626,7 @@ Resolve a handle ID from kern_retrieve to L2 or L3 content, validating staleness
 | `handle` | string | no | Handle ID returned by kern_retrieve (e.g. 'a1b2c3...') |
 | `level` | string | no | Disclosure level to resolve to: l2=neighborhood, l3=source (default l2) |
 | `max_tokens` | integer | no | Token budget for the rendered result (default 0 = no cap) |
-| `root` | string | no | Project root (defaults to current directory) |
+| `root` | string | no | Project root (default: server cwd; stdio MCP server: confined to the workspace root, widenable via KERN_MCP_ROOTS; web console/SDK: confined to that App's project root — KERN_MCP_ROOTS does not widen) |
 | `with_freshness` | boolean | no | When true, append a ---freshness-proof--- footer with the index's content-addressed freshness proof |
 
 ### `kern_retrieve`
@@ -653,7 +635,7 @@ Resolve a handle ID from kern_retrieve to L2 or L3 content, validating staleness
 - **Risk level:** low
 - **Required:** none
 
-Retrieve context at progressive disclosure levels (L1=index summary, L2=neighborhood, L3=source) with stable handles; task_type selects the level from the planner policy (documentation=l1, refactor=l3, else l2).
+Retrieve context at progressive disclosure levels (L1=index summary, L2=neighborhood, L3=source) with stable handles; task_type selects the level.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -664,9 +646,9 @@ Retrieve context at progressive disclosure levels (L1=index summary, L2=neighbor
 | `max_nodes` | integer | no | Max L2 neighborhood nodes to return (default 0 = unlimited) |
 | `max_tokens` | integer | no | Token budget for the rendered result (default 0 = no cap) |
 | `query` | string | no | Free-text query for the L1 index summary (required at level l1) |
-| `root` | string | no | Project root (defaults to current directory) |
+| `root` | string | no | Project root (default: server cwd; stdio MCP server: confined to the workspace root, widenable via KERN_MCP_ROOTS; web console/SDK: confined to that App's project root — KERN_MCP_ROOTS does not widen) |
 | `symbol` | string | no | Symbol name for L2 neighborhood / L3 source retrieval (required at level l2/l3) |
-| `task_type` | string | no | Task type driving the disclosure level via the planner policy (documentation=l1, refactor=l3, else l2); mutually exclusive with level |
+| `task_type` | string | no | Task type driving the disclosure level via planner policy (documentation=l1, refactor=l3, else l2); exclusive with level |
 | `with_freshness` | boolean | no | When true, append a ---freshness-proof--- footer with the index's content-addressed freshness proof |
 
 ### `kern_runtime`
@@ -675,12 +657,12 @@ Retrieve context at progressive disclosure levels (L1=index summary, L2=neighbor
 - **Risk level:** low
 - **Required:** none
 
-Production-intelligence snapshot: kern_runtime with action=status reports which runtime source is wired (live adapter via KERN_PROMETHEUS_URL/KERN_OTEL_URL/KERN_K8S_API or .kern/runtime.json) plus per-service profiles (events/errors/error rate); action=drift compares runtime routes against code-declared routes (template-aware). JSON output, mirroring `kern runtime status|drift --json`.
+Production snapshot: status reports the wired runtime source (KERN_PROMETHEUS_URL/KERN_OTEL_URL/KERN_K8S_API or .kern/runtime.json); drift compares routes.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `action` | string | no | 'status' (default) or 'drift' |
-| `root` | string | no | Project root (defaults to current directory) |
+| `root` | string | no | Project root (default: server cwd; stdio MCP server: confined to the workspace root, widenable via KERN_MCP_ROOTS; web console/SDK: confined to that App's project root — KERN_MCP_ROOTS does not widen) |
 
 ### `kern_search`
 
@@ -688,13 +670,13 @@ Production-intelligence snapshot: kern_runtime with action=status reports which 
 - **Risk level:** low
 - **Required:** none
 
-Ranked free-text symbol search: returns symbols matching a query by name or file, best matches first. Forgiving lookup for humans — 'load index' or 'login handler' work, and prose hits camelCase symbols by name segment ('state machine' -> OrderStateMachine), plural-folded ('user services' -> UserService), accent-normalized ('résolution' -> ResolveResolution), or as a camelCase query ('stateMachine'). Set semantic=true to re-rank results by dense embeddings from a local Ollama server (embedding model KERN_EMBED_MODEL, default nomic-embed-text).
+Ranked free-text symbol search: symbols matching a query by name or file, best first; camelCase/plural/accent forgiving. semantic=true re-ranks via Ollama.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `limit` | string | no | Max results (default 20) |
 | `query` | string | no | Free-text query (symbol name, path fragment, or partial name) |
-| `root` | string | no | Project root (defaults to current directory) |
+| `root` | string | no | Project root (default: server cwd; stdio MCP server: confined to the workspace root, widenable via KERN_MCP_ROOTS; web console/SDK: confined to that App's project root — KERN_MCP_ROOTS does not widen) |
 | `semantic` | string | no | When 'true', re-rank by Ollama dense embeddings (requires embedding model) |
 
 ### `kern_skill`
@@ -703,7 +685,7 @@ Ranked free-text symbol search: returns symbols matching a query by name or file
 - **Risk level:** low
 - **Required:** none
 
-Catalog or load the bundled agent skills (kern-investigate, kern-safe-change, kern-incident-triage). catalog (default) lists every skill with its description; load returns the full SKILL.md runbook for a named skill so the model can follow the repo's own operating procedures.
+Catalog or load bundled agent skills (kern-investigate, kern-safe-change, kern-incident-triage).
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -716,14 +698,14 @@ Catalog or load the bundled agent skills (kern-investigate, kern-safe-change, ke
 - **Risk level:** low
 - **Required:** none
 
-Canonical versioned graph snapshot for cross-agent handoff: whole-repo or per-symbol subgraph plus the build-time IndexIdentity fingerprint (content root, git tree/commit) and per-file SHA-256 hashes. action=create builds a snapshot (output is the versioned GraphSnapshot JSON); action=verify checks a snapshot file against a root and returns the freshness verdict (fresh/stale/unknown) with the fingerprint. A receiving agent can trust or distrust the graph without any other kern state.
+Versioned graph snapshot for cross-agent handoff.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `action` | string | no | create | verify (required) |
 | `file` | string | no | Snapshot file path (verify) |
 | `limit` | string | no | Max graph symbols (create, whole-repo mode; default 400) |
-| `root` | string | no | Project root (defaults to current directory) |
+| `root` | string | no | Project root (default: server cwd; stdio MCP server: confined to the workspace root, widenable via KERN_MCP_ROOTS; web console/SDK: confined to that App's project root — KERN_MCP_ROOTS does not widen) |
 | `symbol` | string | no | Symbol for subgraph mode (create; omit for whole-repo mode) |
 
 ### `kern_surprising`
@@ -732,27 +714,12 @@ Canonical versioned graph snapshot for cross-agent handoff: whole-repo or per-sy
 - **Risk level:** low
 - **Required:** none
 
-Surprising connections (#): cross-community call edges ranked by community distance x rarity, deduped against known bridges. Deterministic; surfaces unexpected coupling an onboarding digest should point at.
+Surprising connections.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `limit` | string | no | Max connections to return (default 15) |
-| `root` | string | no | Project root (defaults to current directory) |
-
-### `kern_walk`
-
-- **Phase:** explore
-- **Risk level:** low
-- **Required:** none
-
-Graph-guided walk: the /walk-graph primitive. Returns an indented parent-child dependency tree of every symbol up to N hops away from a symbol, across files, with file:line per node. Alias of kern_near with a tree-oriented description; use instead of grepping or reading whole files to locate code.
-
-| Parameter | Type | Required | Description |
-|---|---|---|---|
-| `depth` | string | no | Number of hops to expand (default 2) |
-| `max` | string | no | Maximum nodes to return (default 100) |
-| `root` | string | no | Project root (defaults to current directory) |
-| `symbol` | string | no | Root symbol (simple name or Type.Method) |
+| `root` | string | no | Project root (default: server cwd; stdio MCP server: confined to the workspace root, widenable via KERN_MCP_ROOTS; web console/SDK: confined to that App's project root — KERN_MCP_ROOTS does not widen) |
 
 ### `kern_why`
 
@@ -760,12 +727,12 @@ Graph-guided walk: the /walk-graph primitive. Returns an indented parent-child d
 - **Risk level:** low
 - **Required:** none
 
-Rationale and doc-reference report for a symbol: its doc comment, who depends on it and why (each caller's own doc line), and its in/out edge counts. Use to answer 'why does this exist and who needs it'.
+Rationale and doc-reference report for a symbol: doc comment, who depends on it and why, in/out edge counts.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `min_confidence` | string | no | Prune caller rows below this provenance tier: EXTRACTED, INFERRED or AMBIGUOUS (default: keep all) |
-| `root` | string | no | Project root (defaults to current directory) |
+| `root` | string | no | Project root (default: server cwd; stdio MCP server: confined to the workspace root, widenable via KERN_MCP_ROOTS; web console/SDK: confined to that App's project root — KERN_MCP_ROOTS does not widen) |
 | `symbol` | string | no | Symbol name or Receiver.Name |
 
 ## Plan — analyze / simulate
@@ -776,14 +743,14 @@ Rationale and doc-reference report for a symbol: its doc comment, who depends on
 - **Risk level:** medium
 - **Required:** none
 
-HIGH-LEVEL (ADR-0006): analyze a proposed change against the whole system — relevant code, architecture, dependencies, historical memory, blast radius, risks, evidence, and required validation. This is the Kern 2.0 killer workflow 'Analyze this proposed change' exposed over MCP.
+Analyze a proposed change or symbol and return a review report under a lens (security, performance, maintainability, architecture) with the persisted task ID.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `change` | string | no | The change/symbol to analyze, e.g. 'Add a Greet function' or 'helper' |
-| `lens` | string | no | Review lens: security, performance, maintainability, architecture, balanced, or a combined preset name. Re-ranks evidence priorities when the output carries claims. |
-| `profile` | string | no | Output profile: machine-json, action-first, human-readable, debug. Shapes the response format (default: human-readable). |
-| `root` | string | no | Project root (defaults to current directory) |
+| `lens` | string | no | Review lens: security, performance, maintainability, architecture, balanced, or a combined preset. |
+| `profile` | string | no | Output profile: machine-json, action-first, human-readable, or debug (default human-readable). |
+| `root` | string | no | Project root (default: server cwd; stdio MCP server: confined to the workspace root, widenable via KERN_MCP_ROOTS; web console/SDK: confined to that App's project root — KERN_MCP_ROOTS does not widen) |
 
 ### `kern_context_budget`
 
@@ -791,7 +758,7 @@ HIGH-LEVEL (ADR-0006): analyze a proposed change against the whole system — re
 - **Risk level:** low
 - **Required:** none
 
-Fit text into a token budget: deduplicate lines, keep the head plus important lines (errors, stack frames), then trim. Use to manage a crowded context window before adding more content.
+Fit text into a token budget: deduplicate lines, keep head plus important lines (errors, stack frames), then trim.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -804,12 +771,12 @@ Fit text into a token budget: deduplicate lines, keep the head plus important li
 - **Risk level:** medium
 - **Required:** none
 
-Evaluates multi-repository blast radius: detects contract breaking changes, shared symbol dependencies, and cross-repo interface divergences.
+Evaluate multi-repository blast radius.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `linked_repos` | array | no | Array of paths to linked repositories or microservices to scan |
-| `root` | string | no | Project root directory (defaults to current directory) |
+| `root` | string | no | Project root (default: server cwd; stdio MCP server: confined to the workspace root, widenable via KERN_MCP_ROOTS; web console/SDK: confined to that App's project root — KERN_MCP_ROOTS does not widen) |
 | `target_symbol` | string | no | Exported symbol or interface undergoing changes |
 
 ### `kern_fit_context`
@@ -818,7 +785,7 @@ Evaluates multi-repository blast radius: detects contract breaking changes, shar
 - **Risk level:** low
 - **Required:** none
 
-Adaptive token compressor: fits targeted source files, symbols, or queries into any specified token budget using tiered AST folding (Full Source -> Signatures + Docstrings -> Symbolic Summary). Prevents context truncation panics while maximizing code fidelity.
+Fit targeted files, symbols or queries into a token budget via tiered AST folding (Full Source -> Signatures ->.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -835,7 +802,7 @@ Adaptive token compressor: fits targeted source files, symbols, or queries into 
 - **Risk level:** low
 - **Required:** none
 
-Causal Defect & Fragility Hotspot Analysis: correlates historical git defect/fix commits with the AST symbol call graph to calculate fragility scores and proactively flag regression-prone components before edits are made.
+Correlate historical defect/fix commits with the AST symbol call graph to score fragility and flag regression-prone components.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -843,7 +810,7 @@ Causal Defect & Fragility Hotspot Analysis: correlates historical git defect/fix
 | `format` | string | no | 'text' (default) or 'json' |
 | `limit` | string | no | Max hotspots to return (default 15) |
 | `min_fixes` | string | no | Minimum defect fix commits required to qualify (default 1) |
-| `root` | string | no | Project root directory (defaults to current directory) |
+| `root` | string | no | Project root (default: server cwd; stdio MCP server: confined to the workspace root, widenable via KERN_MCP_ROOTS; web console/SDK: confined to that App's project root — KERN_MCP_ROOTS does not widen) |
 | `target` | string | no | Optional specific file or symbol name to query |
 
 ### `kern_impact`
@@ -852,14 +819,15 @@ Causal Defect & Fragility Hotspot Analysis: correlates historical git defect/fix
 - **Risk level:** medium
 - **Required:** none
 
-HIGH-LEVEL: estimate the impact/blast-radius of a change to a symbol — transitively affected symbols/files/services/tests, deterministic risk, and typed claims. Read-only.
+Estimate the impact/blast radius of a change to a symbol.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `change` | string | no | The symbol to change/remove (qualified name), e.g. 'helper' |
-| `kind` | string | no | Change kind to simulate (whatif.ChangeKind): remove_symbol (default), change_dependency (with new_target), add_symbol, change_signature, add_dependency, remove_dependency, rename_symbol, split_service, move_module, change_infra |
+| `kind` | string | no | Change kind to simulate (whatif.ChangeKind); defaults to remove_symbol |
 | `new_target` | string | no | For change_dependency: the symbol Target now depends on |
-| `root` | string | no | Project root (defaults to current directory) |
+| `risk` | string | no | When true, render the governance risk assessment (kern_risk contract) instead of the impact report |
+| `root` | string | no | Project root (default: server cwd; stdio MCP server: confined to the workspace root, widenable via KERN_MCP_ROOTS; web console/SDK: confined to that App's project root — KERN_MCP_ROOTS does not widen) |
 
 ### `kern_pack`
 
@@ -867,15 +835,15 @@ HIGH-LEVEL: estimate the impact/blast-radius of a change to a symbol — transit
 - **Risk level:** low
 - **Required:** none
 
-Pack a whole project into one paste-ready bundle: project instructions, a directory tree with per-file token counts, and file contents, sized to fit max_tokens. Use when an agent needs the full working picture (source to edit against), not just a map. Files are ordered by sha256 of their relative path so re-packs of the same tree are byte-identical (LLM prompt-cache friendly). Set fold=true to pack signatures with bodies elided. Graph mode: set graph=true to pack the call-graph snapshot instead — adjacency, one-line per-symbol signatures, and a per-file SHA-256 fingerprint — at roughly 1-5% of the raw file token cost for handoff/review; the receiver verifies freshness and hydrates source lazily via kern_context per symbol. When graph=true, symbol selects that symbol's neighbourhood (empty = whole graph); symbol is ignored when graph is false (files mode is unaffected).
+Pack a whole project into one paste-ready bundle (instructions, tree, contents) sized to max_tokens.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `fold` | string | no | 'true' to pack tier=folded content (signatures kept, bodies elided with line counts) |
 | `format` | string | no | 'text' (default) or 'json' |
-| `graph` | string | no | 'true' to pack the graph-snapshot mode (adjacency + signatures + per-file SHA-256 fingerprint) instead of file contents |
+| `graph` | string | no | 'true' to pack the graph-snapshot mode (adjacency + signatures + per-file SHA-256) instead of contents |
 | `instructions` | string | no | 'true' to include root-level docs as instructions (default), 'false' to skip them |
-| `max_tokens` | string | no | Token budget for the bundle (default 8000; 0 = unlimited — use with max_output=0 to avoid the output sandbox) |
+| `max_tokens` | string | no | Token budget for the bundle (default 8000; 0 = unlimited) |
 | `root` | string | no | Project root directory |
 | `symbol` | string | no | Symbol to pack as a subgraph (graph mode only; empty = whole graph; ignored when graph=false) |
 | `tier` | string | no | Content tier: 'full' (default), 'folded', or 'summary' |
@@ -886,12 +854,12 @@ Pack a whole project into one paste-ready bundle: project instructions, a direct
 - **Risk level:** medium
 - **Required:** none
 
-HIGH-LEVEL (ADR-0006): produce an implementation plan for a proposed change — affected files, dependencies, risks and required validation. Deterministic plan over the analysis; no LLM required.
+Produce an implementation plan for a proposed change: affected files, dependencies, risks, required validation. Deterministic; no LLM.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `change` | string | no | The change to plan, e.g. 'Add a Greet function to main.go' |
-| `root` | string | no | Project root (defaults to current directory) |
+| `root` | string | no | Project root (default: server cwd; stdio MCP server: confined to the workspace root, widenable via KERN_MCP_ROOTS; web console/SDK: confined to that App's project root — KERN_MCP_ROOTS does not widen) |
 
 ### `kern_plan_context`
 
@@ -899,14 +867,14 @@ HIGH-LEVEL (ADR-0006): produce an implementation plan for a proposed change — 
 - **Risk level:** low
 - **Required:** none
 
-Deterministically plan which context to include for a change: classify the task type, score evidence classes by policy, and fit the selection to a token budget. Explainable — use json=true for the structured plan.
+Deterministically plan which context to include for a change.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `budget` | integer | no | Token budget for the selection (default 0 = the policy's MaxTokens) |
 | `change` | string | no | Symbol name or change description to plan context for |
 | `json` | boolean | no | When true, return the structured plan as JSON instead of rendered text |
-| `root` | string | no | Project root (defaults to current directory) |
+| `root` | string | no | Project root (default: server cwd; stdio MCP server: confined to the workspace root, widenable via KERN_MCP_ROOTS; web console/SDK: confined to that App's project root — KERN_MCP_ROOTS does not widen) |
 
 ### `kern_pre_edit`
 
@@ -914,27 +882,14 @@ Deterministically plan which context to include for a change: classify the task 
 - **Risk level:** medium
 - **Required:** none
 
-Predicts the blast radius, direct callers, untested dependencies, and boundary risks of modifying a specific file or symbol BEFORE changes are made. Saves agents from making risky changes or incurring expensive rollback cycles.
+Predict blast radius, callers, untested dependencies and boundary risks of modifying a file or symbol before you edit.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `file` | string | no | Relative or absolute path to the file to be edited |
 | `lines` | string | no | Optional line or line range being edited, e.g. '45-90' or '120' |
-| `root` | string | no | Project root directory (defaults to current directory) |
+| `root` | string | no | Project root (default: server cwd; stdio MCP server: confined to the workspace root, widenable via KERN_MCP_ROOTS; web console/SDK: confined to that App's project root — KERN_MCP_ROOTS does not widen) |
 | `symbol` | string | no | Optional specific symbol name targeted for modification |
-
-### `kern_risk`
-
-- **Phase:** plan
-- **Risk level:** medium
-- **Required:** none
-
-HIGH-LEVEL: the governance risk assessment for a proposed change — the same engine behind `kern risk` (CLI) and POST /v1/risk (REST): the context engine's risk claims (level, score, factors), firewall check result (allowed/blocked, approval requirement), and required validations. Read-only.
-
-| Parameter | Type | Required | Description |
-|---|---|---|---|
-| `change` | string | no | The proposed change: a bare symbol name or a description containing one, e.g. 'add a new route handler in the auth package' |
-| `root` | string | no | Project root (defaults to current directory) |
 
 ### `kern_swap`
 
@@ -942,7 +897,7 @@ HIGH-LEVEL: the governance risk assessment for a proposed change — the same en
 - **Risk level:** low
 - **Required:** none
 
-Budget swapping (#18): in a context document, replace fenced code blocks tagged `lang:path` with per-file symbolic signatures to fit a token budget, or expand `lang:path:summary` blocks back to full file contents. Returns the budget-fitted document.
+Swap fenced code blocks tagged lang:path to per-file symbolic signatures to fit a token budget, or expand them back
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -957,12 +912,12 @@ Budget swapping (#18): in a context document, replace fenced code blocks tagged 
 - **Risk level:** low
 - **Required:** none
 
-Test-coverage analysis from the call graph: what percent of callable symbols are exercised by tests, plus untested hotspots (called by many, covered by none).
+Test-coverage analysis from the call graph: percent of callable symbols exercised by tests, plus untested hotspots.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `limit` | string | no | Max hotspots to list (default 10) |
-| `root` | string | no | Project root (defaults to current directory) |
+| `root` | string | no | Project root (default: server cwd; stdio MCP server: confined to the workspace root, widenable via KERN_MCP_ROOTS; web console/SDK: confined to that App's project root — KERN_MCP_ROOTS does not widen) |
 
 ### `kern_trace`
 
@@ -970,12 +925,12 @@ Test-coverage analysis from the call graph: what percent of callable symbols are
 - **Risk level:** low
 - **Required:** none
 
-Runtime-impact overlay: parse a pprof -top dump, a crash stack trace, or a plain list of function names and map the hot symbols onto the call graph — file:line, blast radius, test coverage and risk. Use to see what a hot path touches at runtime.
+Runtime-impact overlay: parse a pprof dump, stack trace, or function list and map hot symbols onto the call graph — file:line, blast radius, coverage.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `limit` | string | no | Max hot symbols to return (default all) |
-| `root` | string | no | Project root (defaults to current directory) |
+| `root` | string | no | Project root (default: server cwd; stdio MCP server: confined to the workspace root, widenable via KERN_MCP_ROOTS; web console/SDK: confined to that App's project root — KERN_MCP_ROOTS does not widen) |
 | `trace` | string | no | The trace text (pprof -top, stack trace, or symbol list) |
 
 ### `kern_usage_guide`
@@ -984,7 +939,7 @@ Runtime-impact overlay: parse a pprof -top dump, a crash stack trace, or a plain
 - **Risk level:** low
 - **Required:** none
 
-Categorized usage guide for every kern MCP tool with performance tiers (fast/moderate/expensive), recommended workflows, and pitfalls. Consult this first when deciding which tool fits a task.
+Categorized usage guide for every kern MCP tool with performance tiers, recommended workflows, and pitfalls.
 
 _No input parameters._
 
@@ -994,14 +949,14 @@ _No input parameters._
 - **Risk level:** medium
 - **Required:** none
 
-HIGH-LEVEL (Workflow C / ADR-0012): simulate the impact of a hypothetical change on the knowledge graph — transitively affected symbols, files, services, tests, a deterministic risk level, and a typed RECOMMENDATION claim. Read-only; never mutates the graph or index.
+Simulate the impact of a hypothetical change on the knowledge graph.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `change` | string | no | The symbol to change/remove (qualified name), e.g. 'helper' |
-| `kind` | string | no | Change kind to simulate (whatif.ChangeKind): remove_symbol (default), change_dependency (with new_target), add_symbol, change_signature, add_dependency, remove_dependency, rename_symbol, split_service, move_module, change_infra |
+| `kind` | string | no | Change kind to simulate (whatif.ChangeKind); defaults to remove_symbol |
 | `new_target` | string | no | For change_dependency: the symbol Target now depends on |
-| `root` | string | no | Project root (defaults to current directory) |
+| `root` | string | no | Project root (default: server cwd; stdio MCP server: confined to the workspace root, widenable via KERN_MCP_ROOTS; web console/SDK: confined to that App's project root — KERN_MCP_ROOTS does not widen) |
 
 ## Edit — mutate / execute
 
@@ -1011,12 +966,12 @@ HIGH-LEVEL (Workflow C / ADR-0012): simulate the impact of a hypothetical change
 - **Risk level:** high
 - **Required:** none
 
-Cancel a running task by ID through the TaskService: the task transitions to CANCELLED with a reason, is persisted, and a task.updated event is published. Use to stop a runaway or obsolete task; cannot undo the work already committed.
+Cancel a running task by ID via TaskService: transitions to CANCELLED with a reason, persists, publishes task.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `reason` | string | no | Why the task is being interrupted (default: 'interrupted by model via kern_agent_interrupt') |
-| `root` | string | no | Project root (defaults to current directory) |
+| `root` | string | no | Project root (default: server cwd; stdio MCP server: confined to the workspace root, widenable via KERN_MCP_ROOTS; web console/SDK: confined to that App's project root — KERN_MCP_ROOTS does not widen) |
 | `task_id` | string | no | Task id to cancel (required) |
 
 ### `kern_agent_message`
@@ -1025,13 +980,13 @@ Cancel a running task by ID through the TaskService: the task transitions to CAN
 - **Risk level:** medium
 - **Required:** none
 
-Send a message to an agent's coordination inbox (wraps the coordination handoff primitive with the model as default sender). The target agent observes the directive via kern_agent_coordination action=inbox. Use to steer running subagents between task boundaries.
+Send a message to an agent's coordination inbox (model as default sender); the target observes it via action=inbox.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `from_agent` | string | no | Sender id (default: the calling model) |
 | `notes` | string | no | The message/directive to send (required) |
-| `root` | string | no | Project root (defaults to current directory) |
+| `root` | string | no | Project root (default: server cwd; stdio MCP server: confined to the workspace root, widenable via KERN_MCP_ROOTS; web console/SDK: confined to that App's project root — KERN_MCP_ROOTS does not widen) |
 | `task_id` | string | no | Optional task id to associate the message with |
 | `to_agent` | string | no | Target agent id (required) |
 
@@ -1041,7 +996,7 @@ Send a message to an agent's coordination inbox (wraps the coordination handoff 
 - **Risk level:** medium
 - **Required:** none
 
-HIGH-LEVEL: resolve a governance approval gate. With no id, lists pending approvals. With an id, approves it; set reject=true to reject instead. CLI-equivalent: kern approve. Agents hit this when kern_run/kern_workflow parks at the human approval gate — the returned error carries the approval ID.
+Resolve a governance approval gate: no id lists pending approvals.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -1049,7 +1004,7 @@ HIGH-LEVEL: resolve a governance approval gate. With no id, lists pending approv
 | `id` | string | no | Approval ID to approve/reject (omit to list pending approvals) |
 | `reason` | string | no | Optional reason for the decision |
 | `reject` | string | no | If true, reject the approval instead of approving it (default false) |
-| `root` | string | no | Project root (defaults to current directory) |
+| `root` | string | no | Project root (default: server cwd; stdio MCP server: confined to the workspace root, widenable via KERN_MCP_ROOTS; web console/SDK: confined to that App's project root — KERN_MCP_ROOTS does not widen) |
 
 ### `kern_ast_transform`
 
@@ -1057,7 +1012,7 @@ HIGH-LEVEL: resolve a governance approval gate. With no id, lists pending approv
 - **Risk level:** high
 - **Required:** none
 
-Executes deterministic AST-level transformations on code: scaffolding interface method stubs, adding struct fields, or inserting methods without fragile whitespace or regex diff errors.
+Deterministic AST-level transformations: scaffold interface method stubs, add struct fields, insert methods.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -1083,12 +1038,12 @@ Executes deterministic AST-level transformations on code: scaffolding interface 
 - **Risk level:** low
 - **Required:** none
 
-Generate a deterministic conventional-commit message (type, scope, subject, per-file body) from the git diff — rule-based, no LLM, no network; the same diff always yields the same message. Use when a commit needs a starting message the human can tweak.
+Generate a deterministic conventional-commit message (type, scope, subject, per-file body) from the git diff.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `range` | string | no | Optional commit range like a..b; overrides staged and HEAD defaults |
-| `root` | string | no | Project root (defaults to current directory) |
+| `root` | string | no | Project root (default: server cwd; stdio MCP server: confined to the workspace root, widenable via KERN_MCP_ROOTS; web console/SDK: confined to that App's project root — KERN_MCP_ROOTS does not widen) |
 | `staged` | string | no | If true, read the staged diff (git diff --cached) instead of the working tree vs HEAD |
 
 ### `kern_deploy`
@@ -1097,11 +1052,11 @@ Generate a deterministic conventional-commit message (type, scope, subject, per-
 - **Risk level:** critical
 - **Required:** none
 
-Deploy a task through TaskService.Deploy so the governance firewall, the human-approval gate (real deploys require approval), and lifecycle events all apply — the same path as `kern deploy <task-id>` and POST /v1/tasks/{id}/deploy. Returns the updated task state and deployment ref.
+Deploy a task via TaskService.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `root` | string | no | Project root (defaults to current directory) |
+| `root` | string | no | Project root (default: server cwd; stdio MCP server: confined to the workspace root, widenable via KERN_MCP_ROOTS; web console/SDK: confined to that App's project root — KERN_MCP_ROOTS does not widen) |
 | `task_id` | string | no | Task ID to deploy |
 | `version` | string | no | Optional version string (default empty) |
 
@@ -1111,7 +1066,7 @@ Deploy a task through TaskService.Deploy so the governance firewall, the human-a
 - **Risk level:** critical
 - **Required:** none
 
-Run code in an isolated local runtime and return ONLY stdout — the 'Think in Code' surface. Language is selected by --lang or a shebang line; runtimes are resolved from PATH (python3, node, go, bash, perl, ruby, php, lua, julia, R, bun, deno, rust, ...). The script runs in a fresh temp dir with a hard timeout (default 10s, override timeout=N), a stdout byte cap (default 16KiB, override max=N), and a sanitized environment (HOME/XDG pointed into the sandbox, secrets stripped). Isolation is enforced: the script runs in a private network namespace when the platform supports it, and the run refuses to execute if network isolation is unavailable (never silently runs with full network). stderr is never mixed into stdout and is only surfaced on failure. On platforms where private network namespaces are unavailable (e.g. macOS, some containers) the run refuses to execute — it fails closed instead of degrading to full network egress — unless the local operator sets KERN_ALLOW_UNISOLATED=1 (alias KERN_ALLOW_NET=1). Use it to compute things (math, data munging, JSON transforms) without polluting context.
+Run code in an isolated runtime, return ONLY stdout. Fails closed without network isolation unless KERN_ALLOW_UNISOLATED=1 (alias KERN_ALLOW_NET=1).
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -1130,12 +1085,12 @@ Run code in an isolated local runtime and return ONLY stdout — the 'Think in C
 - **Risk level:** critical
 - **Required:** none
 
-HIGH-LEVEL (ADR-0006): execute a change inside an isolated sandbox worktree (autonomy L2). Applies the given unified diff, verifies it builds, and returns the resulting diff. Never mutates the live repository.
+Execute a change in an isolated sandbox worktree (autonomy L2).
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `patch` | string | no | A unified diff to apply to the sandbox worktree |
-| `root` | string | no | Project root (defaults to current directory) |
+| `root` | string | no | Project root (default: server cwd; stdio MCP server: confined to the workspace root, widenable via KERN_MCP_ROOTS; web console/SDK: confined to that App's project root — KERN_MCP_ROOTS does not widen) |
 
 ### `kern_guard_check`
 
@@ -1143,14 +1098,14 @@ HIGH-LEVEL (ADR-0006): execute a change inside an isolated sandbox worktree (aut
 - **Risk level:** low
 - **Required:** none
 
-Deterministic architectural guardrails: validate changed files against .kern/boundaries.json rules and return every forbidden dependency crossing (e.g. a frontend importing a backend DB model) with file evidence. Rejects a proposal before it touches the filesystem. Use format=sarif for a SARIF 2.1.0 report (GitHub code scanning / Azure DevOps) and threshold=N to fail (isError) when the violation count exceeds N.
+Architectural guardrails: validate changed files against .kern/boundaries.json; return forbidden dependency crossings. format=sarif; threshold=N fails above N.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `file` | string | no | Optional comma-separated explicit file list, overrides git range |
 | `format` | string | no | Output format: text (default) or sarif |
 | `range` | string | no | Git range like 'HEAD~2..HEAD'. Empty = working-tree changes |
-| `root` | string | no | Project root (defaults to current directory) |
+| `root` | string | no | Project root (default: server cwd; stdio MCP server: confined to the workspace root, widenable via KERN_MCP_ROOTS; web console/SDK: confined to that App's project root — KERN_MCP_ROOTS does not widen) |
 | `threshold` | string | no | Fail (isError) when the violation count exceeds this number (default 0 = any violation fails) |
 
 ### `kern_heal`
@@ -1159,14 +1114,14 @@ Deterministic architectural guardrails: validate changed files against .kern/bou
 - **Risk level:** high
 - **Required:** none
 
-Self-correction loop (#9): run validation; on failure ask a local Ollama model to rewrite the failing files, apply the fix inside a throwaway snapshot, re-validate, and report a diff to review. Never edits the user's working tree. Requires Ollama at localhost:11434.
+Self-correction loop: run validation, ask a local Ollama model to fix failing files in a throwaway snapshot, re-validate. Never edits the working tree.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `force` | string | no | If true, attempt repairs even when the failing files carry a HIGH pre-edit verdict (default refuses) |
 | `max_rounds` | string | no | Correction attempts (default 3) |
 | `model` | string | no | Ollama model (default KERN_MODEL or llama3.2) |
-| `root` | string | no | Project root (defaults to current directory) |
+| `root` | string | no | Project root (default: server cwd; stdio MCP server: confined to the workspace root, widenable via KERN_MCP_ROOTS; web console/SDK: confined to that App's project root — KERN_MCP_ROOTS does not widen) |
 | `task` | string | no | The original task the code is meant to fulfil |
 | `timeout` | string | no | Validation timeout in seconds (default 120) |
 
@@ -1176,11 +1131,11 @@ Self-correction loop (#9): run validation; on failure ask a local Ollama model t
 - **Risk level:** medium
 - **Required:** none
 
-Acquire an advisory workspace lock on a scope (flock-based). Held by this server until kern_unlock. Lets concurrent agents coordinate before touching shared files. Errors when the scope is already held.
+Acquire an advisory flock-based workspace lock on a scope, held until kern_unlock; errors when already held.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `root` | string | no | Project root (defaults to current directory) |
+| `root` | string | no | Project root (default: server cwd; stdio MCP server: confined to the workspace root, widenable via KERN_MCP_ROOTS; web console/SDK: confined to that App's project root — KERN_MCP_ROOTS does not widen) |
 | `scope` | string | no | Lock scope, e.g. 'db-models' or 'checkout' |
 
 ### `kern_lock_status`
@@ -1189,11 +1144,11 @@ Acquire an advisory workspace lock on a scope (flock-based). Held by this server
 - **Risk level:** low
 - **Required:** none
 
-List workspace locks with whether each is held and by which PID. Use to see what other agents are working on.
+List workspace locks with whether each is held and by which PID.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `root` | string | no | Project root (defaults to current directory) |
+| `root` | string | no | Project root (default: server cwd; stdio MCP server: confined to the workspace root, widenable via KERN_MCP_ROOTS; web console/SDK: confined to that App's project root — KERN_MCP_ROOTS does not widen) |
 
 ### `kern_mcp_call`
 
@@ -1201,34 +1156,14 @@ List workspace locks with whether each is held and by which PID. Use to see what
 - **Risk level:** high
 - **Required:** none
 
-Bridge a tool from an external MCP server configured via `kern mcp add` (config .kern/mcp-servers.json). Pass the raw wire tool name or the public name (mcp__<server>__<tool>); only the raw name is sent on the wire. External servers are never enabled by default — only servers the operator configured are reachable.
+Bridge a tool from an external MCP server configured via kern mcp add (.kern/mcp-servers.json).
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `arguments` | object | no | JSON arguments object for the tool |
-| `root` | string | no | Project root (defaults to current directory) |
+| `root` | string | no | Project root (default: server cwd; stdio MCP server: confined to the workspace root, widenable via KERN_MCP_ROOTS; web console/SDK: confined to that App's project root — KERN_MCP_ROOTS does not widen) |
 | `server` | string | no | Configured server name (required; see kern mcp list) |
 | `tool` | string | no | Tool name to call — raw wire name or public mcp__<server>__<tool> (required) |
-
-### `kern_note`
-
-- **Phase:** edit
-- **Risk level:** medium
-- **Required:** none
-
-Governed decision records (docs/notes/{lifecycle}/{class}/yyyy-mm-dd-title.md). Actions: new (create a gate-conformant skeleton — title, class, optional lifecycle/date), status (move a note between lifecycle folders — rejected needs a one-line reason, archived inserts the frozen marker), validate (report format violations, satisfying the note:format gate G37), list (inventory). Use before making non-trivial kern repo changes so the note:missing gate (G38) stays satisfied.
-
-| Parameter | Type | Required | Description |
-|---|---|---|---|
-| `action` | string | no | new | status | validate | list (default list) |
-| `class` | string | no | Class folder for action=new: feature | bug-fix | simplification | architecture | process | testing |
-| `date` | string | no | yyyy-mm-dd date for the note filename (default today) |
-| `file` | string | no | Note file path for action=status (repo-relative) |
-| `lifecycle` | string | no | Lifecycle folder for action=new or the target for action=status: proposed | implemented | rejected | archived (default proposed) |
-| `reason` | string | no | One-line rejection reason (required when moving to rejected) |
-| `root` | string | no | Project root (defaults to current directory) |
-| `set` | string | no | Target lifecycle for action=status (alias of lifecycle) |
-| `title` | string | no | Note title (required for action=new) |
 
 ### `kern_refactor_transaction`
 
@@ -1236,15 +1171,15 @@ Governed decision records (docs/notes/{lifecycle}/{class}/yyyy-mm-dd-title.md). 
 - **Risk level:** high
 - **Required:** none
 
-Multi-File Transactional AST Refactoring Engine: evaluates batch multi-file modifications in an isolated sandbox worktree with automated compilation verification. Guarantees atomic rollback on compilation errors with 0 broken multi-file refactor commits.
+Multi-file transactional AST refactoring: evaluate batch edits in a sandbox worktree with compile verification.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `apply` | string | no | 'true' to commit changes to the live working tree on successful compilation, 'false' (default) for dry-run preview |
+| `apply` | string | no | 'true' commits to the live tree on success, 'false' (default) dry-run preview |
 | `compile_command` | string | no | Optional compilation command (default auto-detects go build ./...) |
 | `edits` | array | no | Array of file modifications to test and apply atomically |
 | `format` | string | no | 'text' (default) or 'json' |
-| `root` | string | no | Project root directory (defaults to current directory) |
+| `root` | string | no | Project root (default: server cwd; stdio MCP server: confined to the workspace root, widenable via KERN_MCP_ROOTS; web console/SDK: confined to that App's project root — KERN_MCP_ROOTS does not widen) |
 
 ### `kern_rename`
 
@@ -1252,14 +1187,14 @@ Multi-File Transactional AST Refactoring Engine: evaluates batch multi-file modi
 - **Risk level:** high
 - **Required:** none
 
-Structural symbol rename on the AST index (P0-5): previews every definition/reference for a Go package-level symbol (types, funcs, vars, consts) with file:line:col edits, then applies them transactionally when apply=true. Edits come from a real go/ast parse, so strings, comments, struct-field names, composite-literal keys, import aliases and the package clause are never touched; cross-package references (pkg.Symbol) are handled for exported symbols. Before applying, every touched file is backed up under <root>/.kern/rename-backup/ and a mid-flight failure restores all files. Method rename and non-Go symbols are refused. Returns the preview (or apply result) as text.
+Structural rename on the AST index: preview definitions/references for a Go package-level symbol, apply with apply=true (backups + rollback). Non-Go refused.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `apply` | string | no | If true, commit the rename (with backups + rollback); otherwise return the preview only |
 | `force` | string | no | If true, apply even when the symbol carries a HIGH pre-edit verdict (default refuses) |
 | `new_name` | string | no | New identifier |
-| `root` | string | no | Project root (defaults to current directory) |
+| `root` | string | no | Project root (default: server cwd; stdio MCP server: confined to the workspace root, widenable via KERN_MCP_ROOTS; web console/SDK: confined to that App's project root — KERN_MCP_ROOTS does not widen) |
 | `symbol` | string | no | Symbol to rename (package-level Go name, e.g. Widget) |
 
 ### `kern_repair_diagnostics`
@@ -1268,26 +1203,13 @@ Structural symbol rename on the AST index (P0-5): previews every definition/refe
 - **Risk level:** medium
 - **Required:** none
 
-Compiler-Error-to-AST Auto-Repair Engine: deterministically fixes trivial syntax, unused imports, missing standard library imports, and unused variables from compiler diagnostics in <1ms without LLM latency or token waste.
+Compiler-error-to-AST auto-repair.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `apply` | string | no | 'true' to apply the repairs directly to files, 'false' (default) to preview changes |
 | `compiler_output` | string | no | Raw output or error string from the compiler/linter (e.g. go build / go test) |
-| `root` | string | no | Project root directory (defaults to current directory) |
-
-### `kern_run_build`
-
-- **Phase:** edit
-- **Risk level:** critical
-- **Required:** none
-
-Run a build/test command locally and return only the compact result (exit status + errors), not full output. Use for builds, tests, linting to save context.
-
-| Parameter | Type | Required | Description |
-|---|---|---|---|
-| `command` | string | no | Shell command to run |
-| `dir` | string | no | Working directory for the command |
+| `root` | string | no | Project root (default: server cwd; stdio MCP server: confined to the workspace root, widenable via KERN_MCP_ROOTS; web console/SDK: confined to that App's project root — KERN_MCP_ROOTS does not widen) |
 
 ### `kern_safe_delete`
 
@@ -1295,12 +1217,12 @@ Run a build/test command locally and return only the compact result (exit status
 - **Risk level:** high
 - **Required:** none
 
-Check whether a symbol can be safely deleted: reports in-project callers (production vs test-only), whether it is exported or an entry point, and a conservative SAFE/NOT SAFE verdict. Use before removing dead code.
+Check whether a symbol can be safely deleted.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `format` | string | no | Output format: text or json (default text) |
-| `root` | string | no | Project root (defaults to current directory) |
+| `root` | string | no | Project root (default: server cwd; stdio MCP server: confined to the workspace root, widenable via KERN_MCP_ROOTS; web console/SDK: confined to that App's project root — KERN_MCP_ROOTS does not widen) |
 | `symbol` | string | no | Symbol name (simple name like 'greet' or qualified like 'User.Login') |
 
 ### `kern_sandbox`
@@ -1309,7 +1231,7 @@ Check whether a symbol can be safely deleted: reports in-project callers (produc
 - **Risk level:** critical
 - **Required:** none
 
-Run a risky command inside a snapshot of the project (#15): on non-zero exit the tree is rolled back exactly (files restored, new files removed). Success keeps changes unless they touch HIGH-risk files, in which case the tree is likewise restored unless force=true. Use before destructive operations, migrations, or agent-applied edits. Gated by the command-execution governance firewall (KERN_ALLOW_EXEC / KERN_TOOLS) and command output is PII/secret-masked before return.
+Run a risky command inside a project snapshot: non-zero exit rolls back exactly; HIGH-risk touches restore unless force=true. Rollback-on-failure, NOT isolation: full user privileges, out-of-root writes never rolled back, file-borne secrets readable. Gated by KERN_ALLOW_EXEC / KERN_TOOLS.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -1324,7 +1246,7 @@ Run a risky command inside a snapshot of the project (#15): on non-zero exit the
 - **Risk level:** high
 - **Required:** none
 
-Performs AST-aware 3-way code merge between base, local, and remote versions. Resolves non-overlapping struct fields, methods, imports, and declarations cleanly, and flags precise semantic conflicts.
+AST-aware 3-way code merge (base/local/remote): resolves non-overlapping struct fields, methods, imports.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -1359,11 +1281,11 @@ Release a workspace lock previously acquired via kern_lock.
 - **Risk level:** low
 - **Required:** none
 
-HIGH-LEVEL: return the tamper-evident governance audit log for the project (every firewall decision/approval). CLI-equivalent: kern audit. Backs the AUDIT intent workflow.
+Return the tamper-evident governance audit log for the project (every firewall decision/approval).
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `root` | string | no | Project root (defaults to current directory) |
+| `root` | string | no | Project root (default: server cwd; stdio MCP server: confined to the workspace root, widenable via KERN_MCP_ROOTS; web console/SDK: confined to that App's project root — KERN_MCP_ROOTS does not widen) |
 
 ### `kern_changes`
 
@@ -1371,13 +1293,13 @@ HIGH-LEVEL: return the tamper-evident governance audit log for the project (ever
 - **Risk level:** low
 - **Required:** none
 
-Line-aware change-impact analysis for a diff: scopes each changed file to the symbols its added lines actually touch (from git diff hunks), then computes blast radius (transitive callers), risk scores, and test gaps. Use to review what a PR could break before reading files.
+Line-aware change-impact analysis for a diff.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `file` | string | no | Optional comma-separated explicit file list, overrides git range |
 | `range` | string | no | Git range like 'HEAD~2..HEAD'. Empty = working-tree changes |
-| `root` | string | no | Project root (defaults to current directory) |
+| `root` | string | no | Project root (default: server cwd; stdio MCP server: confined to the workspace root, widenable via KERN_MCP_ROOTS; web console/SDK: confined to that App's project root — KERN_MCP_ROOTS does not widen) |
 
 ### `kern_check_draft`
 
@@ -1385,13 +1307,13 @@ Line-aware change-impact analysis for a diff: scopes each changed file to the sy
 - **Risk level:** low
 - **Required:** none
 
-Validate an agent's draft code against the project index (lighter than LSP, deterministic): Go parse errors, relative imports that do not resolve under root, calls to symbols that are neither declared in the draft nor indexed, and method calls on package aliases not found in the indexed package. Non-Go languages are skipped conservatively.
+Validate agent draft code against the project index (lighter than LSP).
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `code` | string | no | The draft code to validate |
 | `lang` | string | no | Code language: "go" or empty for Go; any other language is skipped conservatively |
-| `root` | string | no | Project root (defaults to current directory) |
+| `root` | string | no | Project root (default: server cwd; stdio MCP server: confined to the workspace root, widenable via KERN_MCP_ROOTS; web console/SDK: confined to that App's project root — KERN_MCP_ROOTS does not widen) |
 
 ### `kern_diff_files`
 
@@ -1399,13 +1321,13 @@ Validate an agent's draft code against the project index (lighter than LSP, dete
 - **Risk level:** low
 - **Required:** none
 
-Delta streaming (#13): compute a unified line diff between two files (or two versions of the same file) using pure Go. Returns the full patch, or a note when files are identical. Feed the output back to the model as a compact edit description.
+Compute a unified line diff between two files (or versions) using pure Go.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `a` | string | no | Path to the old/base file |
 | `b` | string | no | Path to the new/changed file |
-| `root` | string | no | Project root; when set, a and b must stay inside it (defaults to unrestricted) |
+| `root` | string | no | Project root; when set, a and b must stay inside it (stdio MCP server: confined to the workspace root, widenable via KERN_MCP_ROOTS; web console/SDK: confined to that App's project root — KERN_MCP_ROOTS does not widen) |
 
 ### `kern_evidence`
 
@@ -1413,14 +1335,14 @@ Delta streaming (#13): compute a unified line diff between two files (or two ver
 - **Risk level:** medium
 - **Required:** none
 
-Signed-evidence read path: kern_evidence with action=verify validates an evidence bundle (args.file or args.url — fetched without cloning) and reports tamper-seal status, signature status, audit-chain replay and, when args.expect_fingerprint is given, the fingerprint trust-anchor match; action=explain renders the bundle in plain language; action=export builds a bundle from the project's evidence store for args.task_id (or the current state) and returns its path + id. Mirrors `kern evidence export|verify|explain`.
+Signed-evidence read path: verify validates a bundle (file or url) — tamper-seal, signature, audit-chain replay.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `action` | string | no | 'verify' (default), 'explain', or 'export' |
 | `expect_fingerprint` | string | no | Require the bundle to be signed by this key fingerprint (the trust anchor) |
 | `file` | string | no | Bundle JSON file to verify/explain |
-| `root` | string | no | Project root (defaults to current directory) |
+| `root` | string | no | Project root (default: server cwd; stdio MCP server: confined to the workspace root, widenable via KERN_MCP_ROOTS; web console/SDK: confined to that App's project root — KERN_MCP_ROOTS does not widen) |
 | `task_id` | string | no | Task ID to scope the export (default: current state, like the CLI) |
 | `url` | string | no | Bundle URL to fetch and verify/explain without cloning |
 
@@ -1430,14 +1352,14 @@ Signed-evidence read path: kern_evidence with action=verify validates an evidenc
 - **Risk level:** medium
 - **Required:** none
 
-Validates code claims or citations (symbol, file:line), corrects line drift, and generates a tamper-evident SHA-256 evidence certificate for zero-hallucination code claims.
+Validate code claims/citations (symbol, file:line), correct line drift, and generate a tamper-evident SHA-256 certificate.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `claim` | string | no | Claim or citation to verify, e.g. 'internal/index/engine.go:45' or 'NewServer' |
 | `file` | string | no | Optional file path of the cited reference |
 | `line` | string | no | Optional 1-based line number of the cited reference |
-| `root` | string | no | Project root directory (defaults to current directory) |
+| `root` | string | no | Project root (default: server cwd; stdio MCP server: confined to the workspace root, widenable via KERN_MCP_ROOTS; web console/SDK: confined to that App's project root — KERN_MCP_ROOTS does not widen) |
 | `symbol` | string | no | Optional symbol name of the cited reference |
 
 ### `kern_explain_finding`
@@ -1446,12 +1368,12 @@ Validates code claims or citations (symbol, file:line), corrects line drift, and
 - **Risk level:** low
 - **Required:** none
 
-Blueprint change firewall: explain a single gate finding (rule id, severity, category, file, line, message, evidence) in plain language — why it was raised and what the rule checks. Merged from the standalone blueprint-mcp server.
+Blueprint change firewall: explain a gate finding (rule id, severity, category, file, line, message, evidence).
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `finding` | string | no | JSON object of the finding: {"rule_id":"...","severity":"error","category":"secret","file":"...","line":1,"message":"..."} |
-| `root` | string | no | Repository root (defaults to current directory) |
+| `root` | string | no | Repository root (default: server cwd) |
 
 ### `kern_mutation_test`
 
@@ -1459,7 +1381,7 @@ Blueprint change firewall: explain a single gate finding (rule id, severity, cat
 - **Risk level:** medium
 - **Required:** none
 
-Lightweight Mutation Testing for Test Gaps: inverts conditions, flips booleans, and applies boundary shifts to verify test suite regression sensitivity and pinpoint surviving mutants (false-positive tests).
+Lightweight mutation testing for test gaps: inverts conditions, flips booleans to find surviving mutants.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -1467,7 +1389,7 @@ Lightweight Mutation Testing for Test Gaps: inverts conditions, flips booleans, 
 | `files` | string | no | Comma-separated list of target files to mutate (default: all project files) |
 | `format` | string | no | 'text' (default) or 'json' |
 | `max_mutants` | string | no | Maximum number of mutants to evaluate (default 20) |
-| `root` | string | no | Project root directory (defaults to current directory) |
+| `root` | string | no | Project root (default: server cwd; stdio MCP server: confined to the workspace root, widenable via KERN_MCP_ROOTS; web console/SDK: confined to that App's project root — KERN_MCP_ROOTS does not widen) |
 | `test_command` | string | no | Optional custom test command (default: go test ./<pkg> -count=1) |
 
 ### `kern_policy_dsl`
@@ -1476,7 +1398,7 @@ Lightweight Mutation Testing for Test Gaps: inverts conditions, flips booleans, 
 - **Risk level:** low
 - **Required:** none
 
-Evaluates diffs, changed files, and imported libraries against declarative policy-as-code rules (banned packages, protected paths, max diff size).
+Evaluate diffs, changed files and imports against policy-as-code rules (banned packages, protected paths, max diff.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -1484,7 +1406,7 @@ Evaluates diffs, changed files, and imported libraries against declarative polic
 | `files` | array | no | List of files being changed or checked |
 | `imports` | array | no | Optional list of package imports to evaluate |
 | `policy` | string | no | Optional inline YAML/JSON policy rules or path to policy file |
-| `root` | string | no | Project root directory (defaults to current directory) |
+| `root` | string | no | Project root (default: server cwd; stdio MCP server: confined to the workspace root, widenable via KERN_MCP_ROOTS; web console/SDK: confined to that App's project root — KERN_MCP_ROOTS does not widen) |
 
 ### `kern_precache`
 
@@ -1492,11 +1414,11 @@ Evaluates diffs, changed files, and imported libraries against declarative polic
 - **Risk level:** medium
 - **Required:** none
 
-Speculative pre-caching (#20): scan the project once and fill the code-summary and document-vector caches so later kern calls are instant. Run periodically or after bulk edits.
+Scan the project once and fill code-summary and document-vector caches so later kern calls are instant.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `root` | string | no | Project root (defaults to current directory) |
+| `root` | string | no | Project root (default: server cwd; stdio MCP server: confined to the workspace root, widenable via KERN_MCP_ROOTS; web console/SDK: confined to that App's project root — KERN_MCP_ROOTS does not widen) |
 
 ### `kern_repair_guidance`
 
@@ -1504,12 +1426,12 @@ Speculative pre-caching (#20): scan the project once and fill the code-summary a
 - **Risk level:** low
 - **Required:** none
 
-Blueprint change firewall: repair guidance for a gate finding — concrete suggested fix, suppression guidance, and the rule reference. Merged from the standalone blueprint-mcp server.
+Blueprint change firewall: repair guidance for a gate finding — suggested fix, suppression, rule reference.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `finding` | string | no | JSON object of the finding (same shape as kern_explain_finding) |
-| `root` | string | no | Repository root (defaults to current directory) |
+| `root` | string | no | Repository root (default: server cwd) |
 
 ### `kern_review`
 
@@ -1517,16 +1439,16 @@ Blueprint change firewall: repair guidance for a gate finding — concrete sugge
 - **Risk level:** low
 - **Required:** none
 
-Token-optimised code-review context for changed files: line-scoped changed symbols (with file:line spans), their callers, blast radius, risk and test gaps, sized to fit a token budget. The smallest answer a reviewer needs.
+Token-optimised code-review context for changed files.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `file` | string | no | Optional comma-separated explicit file list, overrides git range |
-| `lens` | string | no | Review lens: security, performance, maintainability, architecture, balanced, or a combined preset name. Re-ranks evidence priorities when the output carries claims. |
+| `lens` | string | no | Review lens: security, performance, maintainability, architecture, balanced, or a combined preset. |
 | `max_tokens` | string | no | Maximum tokens for the review context (default 8000) |
-| `profile` | string | no | Output profile: machine-json, action-first, human-readable, debug. Shapes the response format (default: human-readable). |
+| `profile` | string | no | Output profile: machine-json, action-first, human-readable, or debug (default human-readable). |
 | `range` | string | no | Git range like 'HEAD~2..HEAD'. Empty = working-tree changes |
-| `root` | string | no | Project root (defaults to current directory) |
+| `root` | string | no | Project root (default: server cwd; stdio MCP server: confined to the workspace root, widenable via KERN_MCP_ROOTS; web console/SDK: confined to that App's project root — KERN_MCP_ROOTS does not widen) |
 
 ### `kern_schema_validate`
 
@@ -1534,7 +1456,7 @@ Token-optimised code-review context for changed files: line-scoped changed symbo
 - **Risk level:** low
 - **Required:** none
 
-Deterministically validate JSON output against a JSON schema (subset: object/array/primitives, required, enum, min/max/length, pattern, additionalProperties). Returns either a conform message or one line per violation.
+Validate JSON output against a JSON schema (subset: primitives, required, enum, bounds, pattern, additionalProperties); one line per violation.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -1547,13 +1469,13 @@ Deterministically validate JSON output against a JSON schema (subset: object/arr
 - **Risk level:** high
 - **Required:** none
 
-Local security scan of a project's source files: hardcoded secrets, dynamic SQL, shell command injection, weak crypto, insecure randomness and unsafe deserialization. Deterministic and line-scoped. Use before reviewing code or shipping changes.
+Local security scan of project source.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `format` | string | no | Output format: text or json (default text) |
 | `max` | string | no | Max findings to return (default 100; 0 = no cap) |
-| `root` | string | no | Project root to scan (defaults to current directory) |
+| `root` | string | no | Project root to scan (default: server cwd; stdio MCP server: confined to the workspace root, widenable via KERN_MCP_ROOTS; web console/SDK: confined to that App's project root — KERN_MCP_ROOTS does not widen) |
 | `severity` | string | no | Comma-separated severities to include: error,warning,info (default all) |
 
 ### `kern_synthesize_test`
@@ -1562,7 +1484,7 @@ Local security scan of a project's source files: hardcoded secrets, dynamic SQL,
 - **Risk level:** medium
 - **Required:** none
 
-Automatically synthesizes comprehensive table-driven unit tests, parameter fixtures, and boundary invariants for untested functions or methods based on AST signatures.
+Synthesize table-driven unit tests for untested functions from AST signatures.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -1572,6 +1494,7 @@ Automatically synthesizes comprehensive table-driven unit tests, parameter fixtu
 | `file` | string | no | Target source file path |
 | `format` | string | no | Output format: 'text' (default) or 'json' |
 | `root` | string | no | Project root directory |
+| `sinks` | string | no | Comma-separated security sink rule ids to scaffold one deterministic test per tainted sink (e.g. sql-injection,command-injection) |
 | `target` | string | no | Target function or method name (e.g. 'Compute', 'Worker.Process') |
 
 ### `kern_taint`
@@ -1580,14 +1503,13 @@ Automatically synthesizes comprehensive table-driven unit tests, parameter fixtu
 - **Risk level:** high
 - **Required:** none
 
-Taint-lite analysis: flag security sinks (SQL injection, command injection, unsafe deserialization, Python eval/exec/subprocess/pickle/yaml sinks) whose containing function is transitively called by a framework entry point (Symbol.Entry) or whose file contains source expressions (request params, bodies, CLI args). With generate=true, emits a deterministic test scaffold per tainted sink (go test for Go sinks, pytest for Python sinks, G-4) for LLM-assisted fill. The optional range argument scopes findings to files changed in a 'from..to' git range ('..' = working tree). Deterministic, bounded BFS.
+Taint-lite analysis: flag security sinks (SQL/command injection, unsafe deserialization, Python eval/exec/yaml) reachable from entry points; optional git range.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `file` | string | no | Optional filter: only findings in this file path |
-| `generate` | boolean | no | When true, emit a test scaffold per tainted sink (default false) |
 | `range` | string | no | Optional git range 'from..to' to scope findings to changed files; '..' means the working tree |
-| `root` | string | no | Project root to scan (defaults to current directory) |
+| `root` | string | no | Project root to scan (default: server cwd; stdio MCP server: confined to the workspace root, widenable via KERN_MCP_ROOTS; web console/SDK: confined to that App's project root — KERN_MCP_ROOTS does not widen) |
 
 ### `kern_validate`
 
@@ -1595,12 +1517,13 @@ Taint-lite analysis: flag security sinks (SQL injection, command injection, unsa
 - **Risk level:** high
 - **Required:** none
 
-Auto-validation (#7): detect the project's language-appropriate build/test/syntax command and run it. Returns exit status, truncated output and duration. Use after editing code to gate correctness before final answers.
+Auto-validation: detect and run the project's build/test command.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `command` | string | no | Optional override command, e.g. "go test ./..." (defaults to auto-detected) |
-| `root` | string | no | Project root (defaults to current directory) |
+| `raw` | string | no | Emit the raw command output without the report envelope (run_build-style compact result) |
+| `root` | string | no | Project root (default: server cwd; stdio MCP server: confined to the workspace root, widenable via KERN_MCP_ROOTS; web console/SDK: confined to that App's project root — KERN_MCP_ROOTS does not widen) |
 | `timeout` | string | no | Timeout in seconds (default 120) |
 
 ### `kern_validate_proposed`
@@ -1609,12 +1532,12 @@ Auto-validation (#7): detect the project's language-appropriate build/test/synta
 - **Risk level:** high
 - **Required:** none
 
-Blueprint change firewall: validate a PROPOSED change (not yet on disk) against policy — files is an array of {path, content, op} for the would-be diff. Returns per-gate PASS/BLOCK findings. Merged from the standalone blueprint-mcp server.
+Blueprint change firewall: validate a PROPOSED change (files [{path,content,op}]) against policy.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `files` | string | no | JSON array of proposed file changes: [{"path":"a.go","content":"...","op":"add"}] |
-| `root` | string | no | Repository root (defaults to current directory) |
+| `root` | string | no | Repository root (default: server cwd) |
 | `source` | string | no | Agent identity for provenance stamping (default: agent) |
 
 ### `kern_validate_staged`
@@ -1623,11 +1546,11 @@ Blueprint change firewall: validate a PROPOSED change (not yet on disk) against 
 - **Risk level:** high
 - **Required:** none
 
-Blueprint change firewall: validate the STAGED diff (git diff --cached) against policy (boundaries, secrets, duplication, architecture). Returns per-gate PASS/BLOCK findings with rule ids and files. Merged from the standalone blueprint-mcp server. Use before committing.
+Blueprint change firewall: validate the STAGED diff (git diff --cached) against policy.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `root` | string | no | Repository root (defaults to current directory) |
+| `root` | string | no | Repository root (default: server cwd) |
 | `source` | string | no | Agent identity for provenance stamping (default: agent) |
 
 ### `kern_verify`
@@ -1636,12 +1559,15 @@ Blueprint change firewall: validate the STAGED diff (git diff --cached) against 
 - **Risk level:** medium
 - **Required:** none
 
-HIGH-LEVEL (ADR-0006): verify a change with the unified verification engine — build, unit tests, security, architecture, dependency. Returns the typed verdict (PASS/FAIL/WARN) and per-check summary.
+Verify a change with the unified engine (build, unit tests, security, architecture, dependency).
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `root` | string | no | Project root (defaults to current directory) |
-| `types` | string | no | Comma-separated checks: build,test,security,architecture,dependency (default 'build'; pass 'build,test' for full test suite) |
+| `cve` | boolean | no | When true, run the govulncheck vulnerability scan (SKIPPED when govulncheck is not installed) |
+| `license` | boolean | no | When true, classify module licenses from go.mod/vendor (deterministic, no network) |
+| `root` | string | no | Project root (default: server cwd; stdio MCP server: confined to the workspace root, widenable via KERN_MCP_ROOTS; web console/SDK: confined to that App's project root — KERN_MCP_ROOTS does not widen) |
+| `secrets` | boolean | no | When true, scan git history for committed secrets (masked snippets only) |
+| `types` | string | no | Comma-separated checks: build,test,security,architecture,dependency,cve,license,secrets (default 'build') |
 
 ### `kern_verify_output`
 
@@ -1649,31 +1575,14 @@ HIGH-LEVEL (ADR-0006): verify a change with the unified verification engine — 
 - **Risk level:** low
 - **Required:** none
 
-Hallucination check: extract file:line, symbol-name and route references from an agent's output text and confirm each against the real source tree and index. Returns ok/MISS verdicts for every reference.
+Hallucination check: extract file:line, symbol and route references from agent output and confirm against the source tree; ok/MISS verdicts.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `root` | string | no | Project root (defaults to current directory) |
+| `root` | string | no | Project root (default: server cwd; stdio MCP server: confined to the workspace root, widenable via KERN_MCP_ROOTS; web console/SDK: confined to that App's project root — KERN_MCP_ROOTS does not widen) |
 | `text` | string | no | The agent output text to verify |
 
 ## Meta — routing
-
-### `kern_ask`
-
-- **Phase:** meta
-- **Risk level:** medium
-- **Required:** none
-
-Ask kern a question about the codebase — deterministic index-first answering (this tool never calls an LLM). Classifies the request exactly like kern_meta and runs the right tool internally: 'how does dispatch work?' → kern_explore, 'find the dispatch function' → kern_search, 'show me the architecture' → kern_arch. Alias of kern_meta with an explicit deterministic-only contract. Per-call knobs: pass max_output=<bytes> to raise the output sandbox cap for this call, or no_cache=1 to bypass the local tool-response cache.
-
-| Parameter | Type | Required | Description |
-|---|---|---|---|
-| `agent_id` | string | no | Agent identity for governed mode (P1.2): enables authorized-context filtering — results are scoped to what this agent may read. Omit for raw (ungoverned) mode. |
-| `phase` | string | no | Agent phase. Hints the phase context for routing; the advertised tool list is filtered server-wide via KERN_MCP_PHASE. Optional. |
-| `request` | string | no | Natural-language question about the codebase |
-| `root` | string | no | Project root (defaults to current directory) |
-| `scope` | object | no | Optional task scope object {paths, denied_paths, services, envs, artifacts} for governed mode. |
-| `task` | string | no | Task ID for governed mode; pairs with agent_id to scope authorization to the task paths. |
 
 ### `kern_meta`
 
@@ -1681,14 +1590,14 @@ Ask kern a question about the codebase — deterministic index-first answering (
 - **Risk level:** medium
 - **Required:** none
 
-Single entry point: describe what you need in natural language and kern classifies the request and runs the right tool(s) internally. Examples: 'how does dispatch work?' → kern_explore, 'what breaks if I change dispatch?' → kern_impact, 'compress this log: ...' → kern_optimize_log, 'mask secrets in: ...' → kern_mask_pii, 'find the dispatch function' → kern_search, 'show me the architecture' → kern_arch. Prefer this over calling individual kern_* tools — it picks the right one for you. Per-call knobs: pass max_output=<bytes> to raise the output sandbox cap for this call, or no_cache=1 to bypass the local tool-response cache.
+Single entry point: describe what you need in natural language; kern classifies and runs the right tool(s). Full catalog reachable through this router.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `agent_id` | string | no | Agent identity for governed mode (P1.2): enables authorized-context filtering — results are scoped to what this agent may read. Omit for raw (ungoverned) mode. |
-| `phase` | string | no | Agent phase. Hints the phase context for routing; the advertised tool list is filtered server-wide via KERN_MCP_PHASE. Optional. |
+| `agent_id` | string | no | Agent identity for governed mode (P1.2): scopes results to what this agent may read; omit for raw mode. |
+| `phase` | string | no | Agent phase hint for routing; the advertised tool list is filtered server-wide via KERN_MCP_PHASE. Optional. |
 | `request` | string | no | Natural-language request describing what you need from kern |
-| `root` | string | no | Project root (defaults to current directory) |
+| `root` | string | no | Project root (default: server cwd; stdio MCP server: confined to the workspace root, widenable via KERN_MCP_ROOTS; web console/SDK: confined to that App's project root — KERN_MCP_ROOTS does not widen) |
 | `scope` | object | no | Optional task scope object {paths, denied_paths, services, envs, artifacts} for governed mode. |
 | `task` | string | no | Task ID for governed mode; pairs with agent_id to scope authorization to the task paths. |
 
@@ -1700,7 +1609,7 @@ Single entry point: describe what you need in natural language and kern classifi
 - **Risk level:** medium
 - **Required:** none
 
-Workspace coordination protocol for multi-agent teams: register handoffs, claim/release exclusive resource locks, and query inbox tasks.
+Workspace coordination protocol for multi-agent teams.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -1710,7 +1619,7 @@ Workspace coordination protocol for multi-agent teams: register handoffs, claim/
 | `notes` | string | no | Handoff notes or completion description |
 | `payload` | object | no | Structured state payload passed in handoff — free-form JSON object; keys and shape are defined by the sending/receiving agents |
 | `resource` | string | no | Resource name to claim or release |
-| `root` | string | no | Project root directory (defaults to current directory) |
+| `root` | string | no | Project root (default: server cwd; stdio MCP server: confined to the workspace root, widenable via KERN_MCP_ROOTS; web console/SDK: confined to that App's project root — KERN_MCP_ROOTS does not widen) |
 | `task_id` | string | no | Task identifier |
 | `to_agent` | string | no | Destination agent ID (or '*' for broadcast) |
 | `ttl_seconds` | string | no | Time-to-live in seconds for resource claims (default 300) |
@@ -1721,7 +1630,7 @@ Workspace coordination protocol for multi-agent teams: register handoffs, claim/
 - **Risk level:** low
 - **Required:** none
 
-Hashes and evaluates an agent's tool-call pattern from the audit trail to detect repetitive loops, anomalous tool polarization, or behavioral drift.
+Hash and evaluate an agent's tool-call pattern from the audit trail to detect repetitive loops or behavioral drift.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -1734,14 +1643,14 @@ Hashes and evaluates an agent's tool-call pattern from the audit trail to detect
 - **Risk level:** high
 - **Required:** none
 
-Enforces identity-based role access control (RBAC): restricts sensitive tools (exec, delete, fix) based on agent roles (junior_dev, reviewer, auditor, admin).
+Identity-based role access control (RBAC): restrict sensitive tools (exec, delete, fix) by agent roles.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `action` | string | no | Action: 'evaluate' (default), 'roles', 'assign', 'check' |
 | `agent_id` | string | no | Agent identifier |
 | `role` | string | no | Role name (e.g. 'admin', 'architect', 'developer', 'junior_dev', 'reviewer', 'auditor') |
-| `root` | string | no | Project root directory (defaults to current directory) |
+| `root` | string | no | Project root (default: server cwd; stdio MCP server: confined to the workspace root, widenable via KERN_MCP_ROOTS; web console/SDK: confined to that App's project root — KERN_MCP_ROOTS does not widen) |
 | `tool` | string | no | Tool name being requested to evaluate |
 
 ### `kern_agents`
@@ -1750,11 +1659,11 @@ Enforces identity-based role access control (RBAC): restricts sensitive tools (e
 - **Risk level:** low
 - **Required:** none
 
-HIGH-LEVEL (Workflow E): build the standard specialist team and list its roster — name, role, capabilities — plus the current task states from the agent registry. Read-only and deterministic.
+Build the standard specialist team and list its roster (name, role, capabilities) plus current task states.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `root` | string | no | Project root (defaults to current directory) |
+| `root` | string | no | Project root (default: server cwd; stdio MCP server: confined to the workspace root, widenable via KERN_MCP_ROOTS; web console/SDK: confined to that App's project root — KERN_MCP_ROOTS does not widen) |
 
 ### `kern_authorize_context`
 
@@ -1762,12 +1671,12 @@ HIGH-LEVEL (Workflow E): build the standard specialist team and list its roster 
 - **Risk level:** low
 - **Required:** none
 
-Authorized-context primitive (P0.1): compute the exact set of symbols and call edges an agent may legally read for a task, filtered by the agent's identity (firewall context.read permission) and an optional task scope, and return it with an auditable authorization proof (decision, fingerprint, index freshness). Denied symbols are listed with their denial stage and reason. Use before retrieval when a task must not leak out-of-scope code.
+Authorized-context primitive (P0.1): compute the symbols/call edges an agent may legally read, filtered by identity and task scope, with an auditable proof.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `agent_id` | string | no | Agent ID to authorize (must be registered, e.g. via identity.RegisterAgent / kern_agent) |
-| `root` | string | no | Project root (defaults to current directory) |
+| `root` | string | no | Project root (default: server cwd; stdio MCP server: confined to the workspace root, widenable via KERN_MCP_ROOTS; web console/SDK: confined to that App's project root — KERN_MCP_ROOTS does not widen) |
 | `scope` | string | no | Optional task scope object: {paths: [], denied_paths: [], services: [], envs: [], artifacts: []} |
 | `symbol_filter` | string | no | Optional substring filter applied to the allowed symbols only |
 | `task` | string | no | Task ID the authorization is scoped to |
@@ -1778,7 +1687,7 @@ Authorized-context primitive (P0.1): compute the exact set of symbols and call e
 - **Risk level:** high
 - **Required:** none
 
-Executes an ordered pipeline of kern tools in a single RPC round-trip, passing intermediate outputs to downstream steps using $variable bindings. Drastically reduces agent latency and token overhead for multi-step workflows.
+Execute an ordered pipeline of kern tools in a single RPC round-trip, passing outputs between steps via $variable.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -1791,7 +1700,7 @@ Executes an ordered pipeline of kern tools in a single RPC round-trip, passing i
 - **Risk level:** low
 - **Required:** none
 
-Monitors and audits rolling agent context, detects bloated log/code dumps, and recommends concrete deterministic compression actions to prevent context window overflow.
+Monitor and audit rolling agent context.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -1805,27 +1714,14 @@ Monitors and audits rolling agent context, detects bloated log/code dumps, and r
 - **Risk level:** medium
 - **Required:** none
 
-HIGH-LEVEL: correlate a production alert against the runtime to produce a deep evidence chain (alert→service→deployment→commit→symbol→task/pr/agent). Deterministic — derived from runtime source and git history, not LLM.
+Correlate a production alert against the runtime into an evidence chain (alert→service→deployment→commit→symbol). code=true adds incident→twin→code.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `alert` | string | no | JSON of a domain.Alert: {id,severity,message,service,source,occurred_at} |
-| `root` | string | no | Project root (defaults to current directory) |
+| `code` | string | no | If true, include the incident→twin→code correlation section in the report |
+| `root` | string | no | Project root (default: server cwd; stdio MCP server: confined to the workspace root, widenable via KERN_MCP_ROOTS; web console/SDK: confined to that App's project root — KERN_MCP_ROOTS does not widen) |
 | `snapshot` | string | no | Optional JSON of a runtime snapshot: {events,deployments,commits} |
-
-### `kern_do`
-
-- **Phase:** cross
-- **Risk level:** high
-- **Required:** none
-
-HIGH-LEVEL (Workflow E): the MCP counterpart of `kern do` — run the autonomous closed loop (understand→remember→plan→code→verify→protect→observe→learn) for an intent. Unlike kern_loop's read-only no-op stages, this wires the LLM coder and planner (provider-neutral factory, default local Ollama) as the default stage handlers, grounded with project context (relevant files + impact set) and verified with the polyglot verification engine. Default level L2 (sandboxed code changes); L3 adds PR creation, L4 deploy-with-approval.
-
-| Parameter | Type | Required | Description |
-|---|---|---|---|
-| `intent` | string | no | The change to implement, e.g. 'add a cache layer to the user service' |
-| `level` | string | no | Autonomy level L2-L5 (default L2, sandboxed code changes) |
-| `root` | string | no | Project root (defaults to current directory) |
 
 ### `kern_doc_fetch`
 
@@ -1833,7 +1729,7 @@ HIGH-LEVEL (Workflow E): the MCP counterpart of `kern do` — run the autonomous
 - **Risk level:** medium
 - **Required:** none
 
-Fetch a public documentation page and merge it into the project's local doc index so kern_doc_search can find it. This is the ONLY network call in kern and is invoked explicitly by the user; everything else stays local. The page is HTML-stripped, capped, stored under cache/data/docs-fetch and indexed as fetch/<name>.md (re-fetching a name replaces it). Pass semantic=true to also attach dense embeddings via the local Ollama model so the page ranks in semantic search.
+Fetch a public doc page into the project doc index — the ONLY network call in kern, explicit. semantic=true adds embeddings.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -1848,12 +1744,12 @@ Fetch a public documentation page and merge it into the project's local doc inde
 - **Risk level:** medium
 - **Required:** none
 
-Pre-index a project's documents for kern_doc_search. Run once after documents change; searches auto-index on first use. Pass semantic=true to also embed chunks with a local Ollama embedding model (KERN_EMBED_MODEL, default nomic-embed-text); queries then fuse a real-meaning dense signal with the deterministic n-gram vectors and BM25.
+Pre-index project docs for kern_doc_search; semantic=true adds local Ollama embeddings (KERN_EMBED_MODEL).
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `root` | string | no | Project root (defaults to current directory) |
-| `semantic` | string | no | If true, add dense Ollama embeddings to the index (requires a local Ollama with the embedding model pulled) |
+| `root` | string | no | Project root (default: server cwd; stdio MCP server: confined to the workspace root, widenable via KERN_MCP_ROOTS; web console/SDK: confined to that App's project root — KERN_MCP_ROOTS does not widen) |
+| `semantic` | string | no | If true, add dense Ollama embeddings (requires a local Ollama with the model pulled) |
 
 ### `kern_doc_search`
 
@@ -1861,13 +1757,13 @@ Pre-index a project's documents for kern_doc_search. Run once after documents ch
 - **Risk level:** low
 - **Required:** none
 
-Local vector search over a project's documents (markdown, text, rst, adoc). Chunks and embeds docs locally with deterministic n-gram hashing (no ML deps) and returns only the most relevant fragments. Use instead of pasting whole documents into context.
+Local vector search over project docs (markdown, text, rst, adoc) with deterministic n-gram hashing.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `k` | string | no | Max fragments to return (default 5) |
 | `query` | string | no | Natural-language or keyword query |
-| `root` | string | no | Project root (defaults to current directory) |
+| `root` | string | no | Project root (default: server cwd; stdio MCP server: confined to the workspace root, widenable via KERN_MCP_ROOTS; web console/SDK: confined to that App's project root — KERN_MCP_ROOTS does not widen) |
 
 ### `kern_fetch_raw_anchor`
 
@@ -1875,7 +1771,7 @@ Local vector search over a project's documents (markdown, text, rst, adoc). Chun
 - **Risk level:** low
 - **Required:** none
 
-Two-tier context hydration: fetch raw uncompressed text segments that were truncated by kern (e.g. from an anchor marker like [kern: Truncated ... Anchor: anchor-xxx]). Allows AI agents to pull full original logs or code slices on-demand without hallucination or context bloat.
+Fetch raw text segments truncated by kern (anchor markers); pulls full logs/code slices on demand.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -1887,11 +1783,11 @@ Two-tier context hydration: fetch raw uncompressed text segments that were trunc
 - **Risk level:** low
 - **Required:** none
 
-Replay the AI flight recorder (Workflow E observability): the full recorded trail for one task — every stage, tool call, decision, approval, and outcome, in chronological order. Read-only; answers 'what did the agent do, why, and what happened?'. Records live under <root>/.kern/flight.
+Replay the AI flight recorder for one task.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `root` | string | no | Project root (defaults to current directory) |
+| `root` | string | no | Project root (default: server cwd; stdio MCP server: confined to the workspace root, widenable via KERN_MCP_ROOTS; web console/SDK: confined to that App's project root — KERN_MCP_ROOTS does not widen) |
 | `task` | string | no | Task id whose flight trail to replay |
 
 ### `kern_health`
@@ -1900,7 +1796,7 @@ Replay the AI flight recorder (Workflow E observability): the full recorded trai
 - **Risk level:** low
 - **Required:** none
 
-Returns a real-time health and self-observability snapshot of the kern MCP server: index freshness, symbol counts, cache hit-rate, audit chain length, active tools, and in-flight operations. Enables AI agents to self-diagnose server state and avoid blind retries.
+Real-time health snapshot of the kern MCP server.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -1912,12 +1808,15 @@ Returns a real-time health and self-observability snapshot of the kern MCP serve
 - **Risk level:** medium
 - **Required:** none
 
-HIGH-LEVEL (ADR-0006): investigate a production incident end-to-end — correlate an alert to the affected service and evidence, derive the root cause and hypotheses, and summarize. Provide the alert as JSON; optionally a runtime snapshot (events/deployments/commits) as JSON.
+Investigate a production incident end-to-end: correlate the alert to service/evidence, derive root cause, summarize. correlate=true runs incident→twin→code.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `alert` | string | no | JSON of a domain.Alert: {id,severity,message,service,source,occurred_at} |
-| `root` | string | no | Project root (defaults to current directory) |
+| `correlate` | string | no | If true, run the incident→twin→code correlation engine and render its report instead of the full pipeline |
+| `list_playbooks` | string | no | If true, list the stored heal playbooks |
+| `root` | string | no | Project root (default: server cwd; stdio MCP server: confined to the workspace root, widenable via KERN_MCP_ROOTS; web console/SDK: confined to that App's project root — KERN_MCP_ROOTS does not widen) |
+| `runbook` | string | no | JSON of a heal playbook to add: {signature, steps}; signature = the incident's deterministic error signature |
 | `snapshot` | string | no | Optional JSON of a runtime snapshot: {events,deployments,commits} |
 
 ### `kern_learn`
@@ -1926,11 +1825,11 @@ HIGH-LEVEL (ADR-0006): investigate a production incident end-to-end — correlat
 - **Risk level:** medium
 - **Required:** none
 
-HIGH-LEVEL: extract recurring patterns from engineering memory and surface those above a threshold. Patterns are promoted to memory (evidence-based). Deterministic — the LLM may explain but does not create patterns.
+Extract recurring patterns from engineering memory above a threshold.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `root` | string | no | Project root (defaults to current directory) |
+| `root` | string | no | Project root (default: server cwd; stdio MCP server: confined to the workspace root, widenable via KERN_MCP_ROOTS; web console/SDK: confined to that App's project root — KERN_MCP_ROOTS does not widen) |
 | `threshold` | string | no | Minimum pattern count to surface (default 3) |
 
 ### `kern_llm_providers`
@@ -1939,12 +1838,12 @@ HIGH-LEVEL: extract recurring patterns from engineering memory and surface those
 - **Risk level:** low
 - **Required:** none
 
-List the LLM provider chain in priority order (Ollama first, then locally-wired agent CLIs: claude, opencode, codex, gemini, qwen). With probe=true, live-tests each installed provider with a trivial prompt and reports who actually answers — the priority pick when Ollama is absent. The full wired-agent history is available via kern agents (CLI) and kern doctor.
+List the LLM provider chain in priority order (Ollama first, then wired agent CLIs).
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `probe` | string | no | If true, live-test each installed LLM provider (may take minutes) |
-| `root` | string | no | Project root (defaults to current directory) |
+| `root` | string | no | Project root (default: server cwd; stdio MCP server: confined to the workspace root, widenable via KERN_MCP_ROOTS; web console/SDK: confined to that App's project root — KERN_MCP_ROOTS does not widen) |
 
 ### `kern_loop`
 
@@ -1952,13 +1851,14 @@ List the LLM provider chain in priority order (Ollama first, then locally-wired 
 - **Risk level:** high
 - **Required:** none
 
-HIGH-LEVEL (Workflow E): run the closed autonomy loop against an intent string and return the stage timeline plus the deployed / observed-healthy / learned outcome. The autonomy level (L0-L5, default L0 read-only) gates which stages run; the AI stages use the deterministic no-op step by default and are pluggable via the loop's StepFunc mechanism.
+Run the closed autonomy loop on an intent; returns the stage timeline and outcome. observe: deterministic handlers, L0-L5 gating; autonomous: LLM coder/planner.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `intent` | string | no | The intent/goal to run the loop against |
-| `level` | string | no | Autonomy level L0-L5 (default L0, read-only) |
-| `root` | string | no | Project root (defaults to current directory) |
+| `level` | string | no | Autonomy level L0-L5 (observe default L0 read-only; autonomous default L2 sandboxed code changes) |
+| `mode` | string | no | Loop mode: 'observe' (default, deterministic) or 'autonomous' (LLM coder + planner with pre-flight probe) |
+| `root` | string | no | Project root (default: server cwd; stdio MCP server: confined to the workspace root, widenable via KERN_MCP_ROOTS; web console/SDK: confined to that App's project root — KERN_MCP_ROOTS does not widen) |
 
 ### `kern_mask_pii`
 
@@ -1966,27 +1866,12 @@ HIGH-LEVEL (Workflow E): run the closed autonomy loop against an intent string a
 - **Risk level:** low
 - **Required:** none
 
-Locally scan text for secrets and PII (API keys, passwords, tokens, URLs with credentials, IPs, emails) and replace them with safe [MASKED_*] placeholders. Use before sending any text to a remote LLM. Pure local, deterministic, reversible via the returned mapping.
+Locally scan text for secrets/PII (API keys, passwords, tokens, URLs, emails).
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `mask_names` | string | no | Optional comma-separated client/project names to mask |
 | `text` | string | no | The raw text to mask |
-
-### `kern_memory`
-
-- **Phase:** cross
-- **Risk level:** medium
-- **Required:** none
-
-HIGH-LEVEL (Workflow E): manage engineering memory — add a lesson, list stored lessons, or recall the most relevant lessons for a prompt.
-
-| Parameter | Type | Required | Description |
-|---|---|---|---|
-| `action` | string | no | Action to perform: 'add', 'list', or 'recall' |
-| `lesson` | string | no | For 'add': the lesson to remember |
-| `prompt` | string | no | For 'recall': query to match lessons against |
-| `root` | string | no | Project root (defaults to current directory) |
 
 ### `kern_memory_add`
 
@@ -1994,7 +1879,7 @@ HIGH-LEVEL (Workflow E): manage engineering memory — add a lesson, list stored
 - **Risk level:** medium
 - **Required:** none
 
-Persist a distilled, cross-session lesson for a project (the project 'brain'). Agents record what they learned so future sessions can recall it. Appends to the project memory store (most recent 50 entries kept).
+Persist a distilled cross-session lesson for a project (the project 'brain').
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -2007,11 +1892,11 @@ Persist a distilled, cross-session lesson for a project (the project 'brain'). A
 - **Risk level:** low
 - **Required:** none
 
-List all stored lessons for a project, most recent first with timestamps.
+List stored lessons for a project, most recent first with timestamps.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `root` | string | no | Project root (defaults to current directory) |
+| `root` | string | no | Project root (default: server cwd; stdio MCP server: confined to the workspace root, widenable via KERN_MCP_ROOTS; web console/SDK: confined to that App's project root — KERN_MCP_ROOTS does not widen) |
 
 ### `kern_memory_ranked`
 
@@ -2019,14 +1904,14 @@ List all stored lessons for a project, most recent first with timestamps.
 - **Risk level:** low
 - **Required:** none
 
-Retrieves past project lessons weighted by keyword relevance and exponential time decay (half-life), ensuring stale memories don't obscure fresh lessons.
+Retrieve past project lessons weighted by keyword relevance and time decay (half-life).
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `half_life_days` | string | no | Decay half-life in days (default 7.0) |
 | `k` | string | no | Maximum number of ranked lessons to return (default 5) |
 | `prompt` | string | no | Current task prompt or error context to find lessons for |
-| `root` | string | no | Project root directory (defaults to current directory) |
+| `root` | string | no | Project root (default: server cwd; stdio MCP server: confined to the workspace root, widenable via KERN_MCP_ROOTS; web console/SDK: confined to that App's project root — KERN_MCP_ROOTS does not widen) |
 
 ### `kern_memory_recall`
 
@@ -2034,13 +1919,13 @@ Retrieves past project lessons weighted by keyword relevance and exponential tim
 - **Risk level:** low
 - **Required:** none
 
-Recall the up-to-k most relevant past lessons for a prompt by keyword overlap. Returns only lessons whose tokens match; deterministic and local.
+Recall up-to-k most relevant past lessons for a prompt by keyword overlap; deterministic, local.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `limit` | string | no | Max lessons to return (default 5) |
 | `prompt` | string | no | Query to match lessons against |
-| `root` | string | no | Project root (defaults to current directory) |
+| `root` | string | no | Project root (default: server cwd; stdio MCP server: confined to the workspace root, widenable via KERN_MCP_ROOTS; web console/SDK: confined to that App's project root — KERN_MCP_ROOTS does not widen) |
 
 ### `kern_modernize`
 
@@ -2048,11 +1933,11 @@ Recall the up-to-k most relevant past lessons for a prompt by keyword overlap. R
 - **Risk level:** medium
 - **Required:** none
 
-HIGH-LEVEL: analyze the monolith and produce a phased modernization plan (communities→bridges→churn→candidate boundaries→impact→risk→migration plan). Each extraction phase becomes an auditable Task.
+Analyze the monolith and produce a phased modernization plan.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `root` | string | no | Project root (defaults to current directory) |
+| `root` | string | no | Project root (default: server cwd; stdio MCP server: confined to the workspace root, widenable via KERN_MCP_ROOTS; web console/SDK: confined to that App's project root — KERN_MCP_ROOTS does not widen) |
 
 ### `kern_onboard`
 
@@ -2060,11 +1945,11 @@ HIGH-LEVEL: analyze the monolith and produce a phased modernization plan (commun
 - **Risk level:** medium
 - **Required:** none
 
-Session-start onboarding: ensure the working directory is fully wired to kern in one call. Checks whether the repo is registered (repos registry) and indexed; if not, registers it, builds/refreshes the index, and writes AGENTS.md rules if missing. Returns a status report (registered, indexed, wired, symbols/edges/files). Call this at session start in a new project instead of manually indexing or re-exploring with read/grep/glob.
+Session-start onboarding: register the repo, build/refresh the index, write AGENTS.md if missing.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `root` | string | no | Project root (defaults to current directory) |
+| `root` | string | no | Project root (default: server cwd; stdio MCP server: confined to the workspace root, widenable via KERN_MCP_ROOTS; web console/SDK: confined to that App's project root — KERN_MCP_ROOTS does not widen) |
 
 ### `kern_optimize_log`
 
@@ -2072,7 +1957,7 @@ Session-start onboarding: ensure the working directory is fully wired to kern in
 - **Risk level:** low
 - **Required:** none
 
-Strip noise from log output: keeps errors, warnings, stack traces and build failures, removes timestamps and chatter. Use before pasting logs into context.
+Strip noise from log output: keep errors, warnings, stack traces, build failures.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -2084,7 +1969,7 @@ Strip noise from log output: keeps errors, warnings, stack traces and build fail
 - **Risk level:** low
 - **Required:** none
 
-Compress an LLM's response (assistant output) by stripping filler, pleasantries and hedge language while preserving code blocks, lists, errors and technical content. Deterministic and local, no LLM involved. Use on verbose model replies before they are stored or echoed back into context.
+Compress an LLM response (assistant output): strip filler/hedge language, preserve code, lists, errors.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -2096,14 +1981,14 @@ Compress an LLM's response (assistant output) by stripping filler, pleasantries 
 - **Risk level:** low
 - **Required:** none
 
-Compress and clean a raw prompt before sending it to an LLM. Returns the optimized prompt plus token savings. Use this to reduce context cost for large or noisy prompts. When OLLAMA_HOST points at a non-local (remote) LLM, secrets/PII are masked automatically before processing and restored in the output (the result may contain [MASKED_*] placeholders).
+Compress a raw prompt before sending to an LLM; returns optimized text plus token savings. Non-local OLLAMA_HOST auto-masks secrets/PII.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `attached_log` | string | no | Optional noisy log output to compress and attach |
 | `cache` | string | no | If true, serve identical requests from the local response cache (default false) |
 | `few_shot` | string | no | If true, inject top recalled lessons from project memory as baseline examples (default false) |
-| `mask` | string | no | If true, strip secrets/PII before processing and restore placeholders in the output (default false; also auto-enabled for non-local LLM hosts) |
+| `mask` | string | no | If true, strip secrets/PII before processing and restore placeholders (default false; auto-enabled for non-local LLM hosts) |
 | `mask_names` | string | no | Comma-separated client/project names to mask as [MASKED_NAME_N] |
 | `model` | string | no | Optional model name for cost estimation |
 | `prompt` | string | no | The raw prompt text to optimize |
@@ -2116,7 +2001,7 @@ Compress and clean a raw prompt before sending it to an LLM. Returns the optimiz
 - **Risk level:** medium
 - **Required:** none
 
-Enterprise org admin: register or list agent identities (C11). action=list returns {agents:[{id,name,type}],count}; action=register creates an agent from id/name (type defaults to 'default') and returns the created agent.
+Org admin: register or list agent identities (C11). action=list returns agents.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -2124,7 +2009,7 @@ Enterprise org admin: register or list agent identities (C11). action=list retur
 | `id` | string | no | Agent ID (required for register) |
 | `name` | string | no | Agent display name (required for register) |
 | `projects` | string | no | Optional comma-separated NAME=PATH pairs registering multiple projects |
-| `root` | string | no | Project root for the default single project (defaults to current directory) |
+| `root` | string | no | Project root for the default project (default: server cwd; stdio MCP server: confined to the workspace root, widenable via KERN_MCP_ROOTS; web console/SDK: confined to that App's project root — KERN_MCP_ROOTS does not widen) |
 | `type` | string | no | Agent type (default 'default') |
 
 ### `kern_org_audit`
@@ -2138,7 +2023,7 @@ Enterprise org admin: org-level audit log (C11). Returns {entries:[...],count} w
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `projects` | string | no | Optional comma-separated NAME=PATH pairs registering multiple projects |
-| `root` | string | no | Project root for the default single project (defaults to current directory) |
+| `root` | string | no | Project root for the default project (default: server cwd; stdio MCP server: confined to the workspace root, widenable via KERN_MCP_ROOTS; web console/SDK: confined to that App's project root — KERN_MCP_ROOTS does not widen) |
 
 ### `kern_org_memory`
 
@@ -2146,14 +2031,14 @@ Enterprise org admin: org-level audit log (C11). Returns {entries:[...],count} w
 - **Risk level:** medium
 - **Required:** none
 
-Enterprise org admin: org-level shared memory visible across all projects (C11). action=list returns {memories:[{id,content,type}],count}; action=add stores a memory from content with optional type.
+Org admin: org-level shared memory across all projects (C11). action=list returns memories.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `action` | string | no | 'list' (default) or 'add' |
 | `content` | string | no | Memory content (required for add) |
 | `projects` | string | no | Optional comma-separated NAME=PATH pairs registering multiple projects |
-| `root` | string | no | Project root for the default single project (defaults to current directory) |
+| `root` | string | no | Project root for the default project (default: server cwd; stdio MCP server: confined to the workspace root, widenable via KERN_MCP_ROOTS; web console/SDK: confined to that App's project root — KERN_MCP_ROOTS does not widen) |
 | `type` | string | no | Optional memory type (e.g. lesson, decision, incident, constraint) |
 
 ### `kern_org_projects`
@@ -2167,7 +2052,7 @@ Enterprise org admin: list registered projects (C11). Returns {projects:[{name,r
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `projects` | string | no | Optional comma-separated NAME=PATH pairs registering multiple projects |
-| `root` | string | no | Project root for the default single project (defaults to current directory) |
+| `root` | string | no | Project root for the default project (default: server cwd; stdio MCP server: confined to the workspace root, widenable via KERN_MCP_ROOTS; web console/SDK: confined to that App's project root — KERN_MCP_ROOTS does not widen) |
 
 ### `kern_org_search`
 
@@ -2175,13 +2060,13 @@ Enterprise org admin: list registered projects (C11). Returns {projects:[{name,r
 - **Risk level:** low
 - **Required:** none
 
-Enterprise org admin: cross-project symbol search (C11). Requires q; returns {hits:[{repo,root,symbol,score}],count}.
+Enterprise org admin: cross-project symbol search (C11). Requires q; returns hits.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `projects` | string | no | Optional comma-separated NAME=PATH pairs registering multiple projects |
 | `q` | string | no | Search query (required) |
-| `root` | string | no | Project root for the default single project (defaults to current directory) |
+| `root` | string | no | Project root for the default project (default: server cwd; stdio MCP server: confined to the workspace root, widenable via KERN_MCP_ROOTS; web console/SDK: confined to that App's project root — KERN_MCP_ROOTS does not widen) |
 
 ### `kern_org_tasks`
 
@@ -2194,7 +2079,7 @@ Enterprise org admin: aggregate task visibility (C11). Returns {projects:{name:[
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `projects` | string | no | Optional comma-separated NAME=PATH pairs registering multiple projects |
-| `root` | string | no | Project root for the default single project (defaults to current directory) |
+| `root` | string | no | Project root for the default project (default: server cwd; stdio MCP server: confined to the workspace root, widenable via KERN_MCP_ROOTS; web console/SDK: confined to that App's project root — KERN_MCP_ROOTS does not widen) |
 
 ### `kern_org_teams`
 
@@ -2202,7 +2087,7 @@ Enterprise org admin: aggregate task visibility (C11). Returns {projects:{name:[
 - **Risk level:** medium
 - **Required:** none
 
-Enterprise org admin: manage teams that group agents and own projects (C11). action=list|show|create|remove — create takes id/name plus optional projects (team project names) and members (agent IDs); show/remove take id.
+Org admin: manage teams grouping agents and projects (C11). action=list|show|create|remove; create takes id/name.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -2211,7 +2096,24 @@ Enterprise org admin: manage teams that group agents and own projects (C11). act
 | `members` | string | no | For create: comma-separated agent IDs that are team members |
 | `name` | string | no | Team display name (required for create) |
 | `projects` | string | no | For create: comma-separated project names the team owns; for other tools: NAME=PATH registration pairs |
-| `root` | string | no | Project root for the default single project (defaults to current directory) |
+| `root` | string | no | Project root for the default project (default: server cwd; stdio MCP server: confined to the workspace root, widenable via KERN_MCP_ROOTS; web console/SDK: confined to that App's project root — KERN_MCP_ROOTS does not widen) |
+
+### `kern_org_user`
+
+- **Phase:** cross
+- **Risk level:** medium
+- **Required:** none
+
+Org-wide user management + RBAC: user-add, user-list, user-role, user-disable, user-audit. actor_id required.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `action` | string | no | One of user-add|user-list|user-role|user-disable|user-audit (required) |
+| `actor_id` | string | no | The acting user's ID (required on every action; RBAC-checked against the user registry) |
+| `projects` | string | no | Optional comma-separated NAME=PATH pairs registering multiple projects |
+| `role` | string | no | Role to assign (required for user-add and user-role; org-admin or a member role) |
+| `root` | string | no | Project root for the default project (default: server cwd; stdio MCP server: confined to the workspace root, widenable via KERN_MCP_ROOTS; web console/SDK: confined to that App's project root — KERN_MCP_ROOTS does not widen) |
+| `user_id` | string | no | Target user ID (required for user-add, user-role, user-disable, user-audit) |
 
 ### `kern_prompt_fill`
 
@@ -2219,13 +2121,13 @@ Enterprise org admin: manage teams that group agents and own projects (C11). act
 - **Risk level:** low
 - **Required:** none
 
-Dynamically renders standardized, token-efficient agent prompts with auto-injected project layout and memory lessons. Prevents agents from wasting tokens on repetitive prompt boilerplate.
+Render standardized, token-efficient agent prompts with auto-injected project layout and memory lessons.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `file` | string | no | Optional target file path to inject into the template |
 | `inject_memory` | string | no | Whether to auto-inject relevant lessons from project brain (default true if task provided) |
-| `root` | string | no | Project root directory (defaults to current directory) |
+| `root` | string | no | Project root (default: server cwd; stdio MCP server: confined to the workspace root, widenable via KERN_MCP_ROOTS; web console/SDK: confined to that App's project root — KERN_MCP_ROOTS does not widen) |
 | `slots` | object | no | Optional custom key-value slot overrides: keys match the template's {{KEY}} placeholders, values are their replacement strings |
 | `task` | string | no | Task or error description to inject |
 | `template` | string | no | Template name to fill, e.g. 'debug', 'code-review', 'fix-bug', 'explain', 'write-tests', 'onboard' |
@@ -2236,11 +2138,11 @@ Dynamically renders standardized, token-efficient agent prompts with auto-inject
 - **Risk level:** medium
 - **Required:** none
 
-Register (or unregister) a host sampler command for LLM delegation: the auto LLM chain's host leg executes this command via sh -c with the user prompt on stdin and the system prompt in $KERN_SYSTEM_PROMPT; stdout is the reply. Pass an empty command to unregister. key namespaces the registration (default: this connection's slot) so several sessions/agents/repos can coexist — every registered sampler is tried in order. For hosts that do not announce MCP sampling (e.g. opencode), set KERN_HOST_SAMPLER_CMD and the kern MCP server self-registers the command at startup.
+Register/unregister a host sampler command for LLM delegation (sh -c; prompt on stdin, $KERN_SYSTEM_PROMPT = system prompt); empty unregisters. Registration is exec-gated: KERN_ALLOW_EXEC=1 or KERN_TOOLS must name kern_register_host_sampler; runs with a minimal PATH/HOME/TMPDIR env.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `command` | string | no | Shell command run for each generation (stdin = user prompt, $KERN_SYSTEM_PROMPT = system prompt); empty = unregister |
+| `command` | string | no | Shell command per generation (stdin = prompt, $KERN_SYSTEM_PROMPT = system prompt); empty = unregister |
 | `key` | string | no | Optional registration key (default: this connection's slot); per-agent/per-repo namespaces coexist |
 | `model` | string | no | Optional model label reported with the registration |
 | `timeout` | string | no | Per-call timeout in seconds (default 180; env KERN_HOST_SAMPLER_TIMEOUT) |
@@ -2251,12 +2153,12 @@ Register (or unregister) a host sampler command for LLM delegation: the auto LLM
 - **Risk level:** high
 - **Required:** none
 
-HIGH-LEVEL (Workflow E): run an intent through the full task pipeline — compiles the intent, selects workflow + capabilities + agents, creates a Task, runs policy precheck, and returns the run result (task id, workflow, risk/approval, capabilities, tools, agents, next action). This is the single entry point that orchestrates the whole workflow from one call.
+Run an intent through the full task pipeline.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `intent` | string | no | The intent/goal to run through the pipeline |
-| `root` | string | no | Project root (defaults to current directory) |
+| `root` | string | no | Project root (default: server cwd; stdio MCP server: confined to the workspace root, widenable via KERN_MCP_ROOTS; web console/SDK: confined to that App's project root — KERN_MCP_ROOTS does not widen) |
 
 ### `kern_semantic_diff`
 
@@ -2264,13 +2166,13 @@ HIGH-LEVEL (Workflow E): run an intent through the full task pipeline — compil
 - **Risk level:** low
 - **Required:** none
 
-Computes a functional AST-level symbol diff instead of raw line noise: surfaces modified functions, changed signatures, and newly impacted callers between commits or working tree.
+Functional AST-level symbol diff.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `from` | string | no | Starting git revision (defaults to HEAD) |
 | `range` | string | no | Optional git range, e.g. 'HEAD~1..HEAD' |
-| `root` | string | no | Project root directory (defaults to current directory) |
+| `root` | string | no | Project root (default: server cwd; stdio MCP server: confined to the workspace root, widenable via KERN_MCP_ROOTS; web console/SDK: confined to that App's project root — KERN_MCP_ROOTS does not widen) |
 | `to` | string | no | Ending git revision or leave empty for working tree |
 
 ### `kern_semcache`
@@ -2279,7 +2181,7 @@ Computes a functional AST-level symbol diff instead of raw line noise: surfaces 
 - **Risk level:** medium
 - **Required:** none
 
-Inspect and manage the semantic cache that serves similar (not just identical) prior queries instantly. Actions: 'stats' (default) lists entries per namespace (prompt/log), 'list' shows the stored inputs of a namespace, 'clear' wipes it (or all), 'similarity' reports the Jaccard overlap of two inputs so you can predict whether a near-duplicate will hit. Use to verify or reset the fuzzy layer.
+Inspect/manage the semantic cache serving similar prior queries: stats (default), list, clear, or similarity.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -2294,7 +2196,7 @@ Inspect and manage the semantic cache that serves similar (not just identical) p
 - **Risk level:** low
 - **Required:** none
 
-Return before/after token savings and cost estimates from kern optimizations, optionally filtered to today or a session.
+Return before/after token savings and cost estimates from kern optimizations, optionally filtered.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -2307,7 +2209,7 @@ Return before/after token savings and cost estimates from kern optimizations, op
 - **Risk level:** low
 - **Required:** none
 
-Inspects streaming status, partitions large responses into token-friendly chunks, and manages progress notification channels for long-running operations.
+Inspect streaming status, partition large responses into token-friendly chunks, manage progress notification.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -2325,20 +2227,20 @@ Inspects streaming status, partitions large responses into token-friendly chunks
 - **Risk level:** high
 - **Required:** none
 
-HIGH-LEVEL (Workflow E): select and coordinate the agent team without the external caller manually sequencing it. Classifies the intent, registers the kind-specific workflow (only the specialists that apply), wires the standard team, and drives the steps (analyze → plan → [human approval gate] → code → verify → pr for code changes; kind-specific stages for incident/documentation/modernization tasks). The run parks at the human approval gate before the first execution step: the returned error carries the approval ID, resolve it via kern_approve then call kern_workflow again with the same task_id to resume.
+Coordinate the agent team for an intent (analyze → plan → approval → code → verify → pr); parks at the approval gate; resume with the same task_id.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `intent` | string | no | The intent/goal to run through the agent team |
-| `root` | string | no | Project root (defaults to current directory) |
+| `root` | string | no | Project root (default: server cwd; stdio MCP server: confined to the workspace root, widenable via KERN_MCP_ROOTS; web console/SDK: confined to that App's project root — KERN_MCP_ROOTS does not widen) |
 | `task_id` | string | no | Resume an approval-parked run for this task (omit to start a new run) |
 
 ## Usage examples
 
-### Example 1 — explore: understand a symbol (`kern_code_graph`)
+### Example 1 — explore: understand a symbol (`kern_graph`)
 
 ```json
-{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"kern_code_graph","arguments":{"symbol":"User.Login","root":"/path/to/project"}}}
+{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"kern_graph","arguments":{"symbol":"User.Login","root":"/path/to/project"}}}
 ```
 
 ### Example 2 — plan: simulate an impact (`kern_impact`)

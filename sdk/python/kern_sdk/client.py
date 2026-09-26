@@ -173,6 +173,22 @@ class Client:
         """Return a flattened summary of persisted incidents (GET /v1/incidents)."""
         return self._get("/v1/incidents")
 
+    def call_tool(self, name: str, args: dict = None) -> str:
+        """Invoke any MCP catalog tool through the REST passthrough (POST /v1/tools/{name}).
+
+        The request body is the tool's argument map; the response JSON is
+        {"output": "<raw tool text>"}, and this method returns that output
+        payload. The route delegates to the same in-process governed dispatch
+        path MCP clients hit (KERN_TOOLS allowlist, root confinement, RBAC),
+        so one route reaches the entire catalog. Errors raise KernError with
+        the HTTP status: 403 for governed denials (allowlist/root/RBAC), 404
+        for unknown tools, 503 when dispatch is unavailable, 500 for tool
+        failures.
+        """
+        from urllib.parse import quote
+        resp = self._post(f"/v1/tools/{quote(name, safe='')}", args or {})
+        return resp.get("output", "") if isinstance(resp, dict) else ""
+
     def incident(self, incident_id: str) -> dict:
         """Return a single incident by ID (GET /v1/incidents/{id})."""
         if not incident_id:

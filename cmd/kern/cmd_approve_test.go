@@ -58,7 +58,7 @@ func approvalFixture(t *testing.T, root, taskID, requester, reason string) strin
 // print "no pending approvals", never a bare table header.
 func TestApproveListEmpty(t *testing.T) {
 	root := newRoot(t)
-	out := captureStdout(t, func() { runApprove([]string{"--root", root}) })
+	out := captureStdout(t, func() { runApprove([]string{"list", "--root", root}) })
 	if !strings.Contains(out, "no pending approvals") {
 		t.Fatalf("expected empty listing, got %q", out)
 	}
@@ -69,7 +69,7 @@ func TestApproveListEmpty(t *testing.T) {
 func TestApproveListPending(t *testing.T) {
 	root := newRoot(t)
 	id := approvalFixture(t, root, "t-1", "alice", "deploy to prod")
-	out := captureStdout(t, func() { runApprove([]string{"--root", root}) })
+	out := captureStdout(t, func() { runApprove([]string{"list", "--root", root}) })
 	for _, want := range []string{"ID", "TASK", "REQUESTER", "REASON", id, "t-1", "alice", "deploy to prod"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("listing missing %q:\n%s", want, out)
@@ -89,7 +89,7 @@ func TestApproveDecision(t *testing.T) {
 			t.Errorf("approve output missing %q:\n%s", want, out)
 		}
 	}
-	out = captureStdout(t, func() { runApprove([]string{"--root", root}) })
+	out = captureStdout(t, func() { runApprove([]string{"list", "--root", root}) })
 	if !strings.Contains(out, "no pending approvals") {
 		t.Errorf("approval should be decided; listing:\n%s", out)
 	}
@@ -256,5 +256,34 @@ func TestBlueprintDecisionWritesAuditChain(t *testing.T) {
 				t.Errorf("kern audit shows %q %d time(s), want exactly 1:\n%s", "approval:"+id, n, out)
 			}
 		})
+	}
+}
+
+// TestJoinVerbPositionals (verb-trap fix, F-IM1/F-WI1/F-PL1 family): a
+// leading change-verb across multiple positionals is an unquoted sentence —
+// `kern impact remove WriteFileAtomic` previously parsed change="remove" and
+// fuzzy-resolved the WRONG symbol. Quoted/explicit-kind forms pass through.
+func TestJoinVerbPositionals(t *testing.T) {
+	cases := []struct {
+		in, want []string
+	}{
+		{[]string{"remove", "WriteFileAtomic"}, []string{"remove WriteFileAtomic"}},
+		{[]string{"add", "a", "new", "caching", "layer", "to", "Fit"}, []string{"add a new caching layer to Fit"}},
+		{[]string{"remove"}, []string{"remove"}},
+		{[]string{"WriteFileAtomic"}, []string{"WriteFileAtomic"}},
+		{[]string{"Client.Remove", "change_dependency", "NewTarget"}, nil},
+		{[]string{"change", "the", "signature", "of", "Fit"}, []string{"change the signature of Fit"}},
+	}
+	for _, c := range cases {
+		got := joinVerbPositionals(c.in)
+		if c.want == nil {
+			if len(got) != len(c.in) {
+				t.Fatalf("joinVerbPositionals(%v) = %v, want untouched", c.in, got)
+			}
+			continue
+		}
+		if len(got) != 1 || got[0] != c.want[0] {
+			t.Fatalf("joinVerbPositionals(%v) = %v, want %v", c.in, got, c.want)
+		}
 	}
 }

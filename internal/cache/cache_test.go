@@ -29,10 +29,13 @@ func TestDirHonoursXDG(t *testing.T) {
 }
 
 func TestDirFallsBackToHome(t *testing.T) {
+	// Dir() is resolved once at first use (memoized) and TestDirHonoursXDG
+	// already warmed it, so the fallback resolution is exercised through the
+	// extracted resolver directly.
 	t.Setenv("XDG_CACHE_HOME", "")
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	got := Dir()
+	got := resolveCacheDir()
 	want := filepath.Join(home, ".cache", "kern")
 	if got != want {
 		t.Fatalf("expected %s, got %s", want, got)

@@ -36,3 +36,6 @@ func (s *Server) handleOrgSearch(ctx context.Context, args map[string]any) (stri
 func (s *Server) handleOrgAudit(ctx context.Context, args map[string]any) (string, error) {
 	return org.Audit(ctx, args)
 }
+func (s *Server) handleOrgUsers(ctx context.Context, args map[string]any) (string, error) {
+	return org.Users(ctx, args)
+}

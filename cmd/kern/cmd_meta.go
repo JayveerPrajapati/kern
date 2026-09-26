@@ -72,11 +72,23 @@ func runGuide(rest []string) {
 // (via the same internal classifier the MCP server uses), and dispatches to
 // the appropriate CLI subcommand. This lets shell users get the same
 // "describe what you want, kern picks the tool" experience as agents.
-// Usage: kern meta "<request>" [--root DIR]
+// Usage: kern meta "<request>" [--root ROOT]
 // Example: kern meta "show me the architecture"
 // kern meta "how does dispatch work"
 // kern meta "find the NewServer function"
 func runMeta(rest []string) {
+	// --pipeline routes to the deterministic multi-tool compose engine
+	// (surface consolidation T2b): `kern compose` is now a thin wrapper over
+	// `kern meta --pipeline`, and both spellings execute the JSON pipeline
+	// instead of NL routing. The whole remaining arg vector is passed
+	// through so every input form the compose command historically accepted
+	// (--pipeline flag, positional JSON, stdin) keeps working.
+	for _, a := range rest {
+		if a == "--pipeline" || strings.HasPrefix(a, "--pipeline=") {
+			runComposeCore(rest)
+			return
+		}
+	}
 	var request string
 	root := "."
 	for i := 0; i < len(rest); i++ {
@@ -87,7 +99,7 @@ func runMeta(rest []string) {
 				root = rest[i]
 			}
 		case "--help", "-h":
-			fmt.Println(`kern meta "<request>" [--root DIR]
+			fmt.Println(`kern meta "<request>" [--root ROOT]
 
 Single entry point: describe what you need in natural language and kern
 classifies the request and runs the right tool internally. Examples:
@@ -116,7 +128,7 @@ classifies the request and runs the right tool internally. Examples:
 		}
 	}
 	if strings.TrimSpace(request) == "" {
-		fatalUsage(`usage: kern meta "<request>" [--root DIR]
+		fatalUsage(`usage: kern meta "<request>" [--root ROOT]
 describe what you need and kern picks the right tool. Example:
   kern meta "show me the architecture"`)
 	}

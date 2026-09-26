@@ -2,39 +2,11 @@ package architecture
 
 import (
 	"fmt"
-	"go/parser"
-	"go/token"
 	"os"
 	"path/filepath"
-	"regexp"
-	"sort"
 	"strings"
 	"testing"
 )
-
-const (
-	archDocRel = "ARCHITECTURE.md"
-	moduleRoot = "github.com/JayveerPrajapati/kern/"
-)
-
-var skipDirs = map[string]bool{
-	".kern": true, ".git": true, "node_modules": true, "vendor": true,
-	".opencode": true, ".claude": true, ".cursor": true, ".gemini": true,
-	".kiro": true, "graphify-out": true, "bin": true, "testfixture": true,
-	"sdk": true, "python": true, "dist": true, "docs": true, "homebrew": true,
-}
-
-type archRow struct {
-	dir     string
-	cap     int
-	imports map[string]bool // allowed kern-internal paths (each a subtree root)
-}
-
-// archRowRe matches table rows whose dir cell is an internal path, allowing
-// nested dirs (internal/mcp/doc, internal/blueprint/checks/diffgate) — the
-// `/` and `.` are legal in package paths and the nested rows must be parsed
-// or their cap/dep enforcement silently vanishes.
-var archRowRe = regexp.MustCompile(`^\|\s*` + "`" + `(internal/[A-Za-z0-9_/.]+)` + "`" + `\s*\|\s*(\d+)\s*\|\s*(\d+)\s*\|(.*)\|\s*$`)
 
 func repoRoot(t *testing.T) string {
 	t.Helper()
@@ -47,144 +19,42 @@ func repoRoot(t *testing.T) string {
 	if _, err := os.Stat(filepath.Join(root, archDocRel)); err != nil {
 		t.Fatalf("ARCHITECTURE.md not found at %s (cwd %s)", filepath.Join(root, archDocRel), wd)
 	}
+	if _, err := os.Stat(filepath.Join(root, ledgerDocRel)); err != nil {
+		t.Fatalf("ledger-details.md not found at %s (cwd %s)", filepath.Join(root, ledgerDocRel), wd)
+	}
 	return root
 }
 
-func parseArchTable(t *testing.T, root string) []archRow {
-	t.Helper()
-	b, err := os.ReadFile(filepath.Join(root, archDocRel))
-	if err != nil {
-		t.Fatal(err)
-	}
-	var rows []archRow
-	for _, line := range strings.Split(string(b), "\n") {
-		m := archRowRe.FindStringSubmatch(line)
-		if m == nil {
-			continue
-		}
-		row := archRow{dir: m[1], imports: map[string]bool{}}
-		cap := 0
-		for _, ch := range m[3] {
-			if ch < '0' || ch > '9' {
-				break
-			}
-			cap = cap*10 + int(ch-'0')
-		}
-		row.cap = cap
-		for _, dep := range strings.Fields(m[4]) {
-			dep = strings.Trim(dep, "`")
-			if strings.HasPrefix(dep, "internal/") {
-				row.imports[dep] = true
-			}
-		}
-		rows = append(rows, row)
-	}
-	if len(rows) < 10 {
-		t.Fatalf("ARCHITECTURE.md table parsed only %d rows — table format broken?", len(rows))
-	}
-	return rows
-}
-
-// measureDir returns non-test Go LOC and the set of kern-internal import
-// paths for a directory, mirroring the table's generation rules (walk skips
-// generated/vendored dirs and _test.go files). Imports are parsed with
-// go/parser + go/ast so every form is captured — grouped, single-form,
-// aliased, and dot-imports (dot-imports count by their resolved path, they
-// are not special-cased) — and keys are the FULL resolved package paths
-// (e.g. internal/mcp/gov), not collapsed top-level prefixes: the nested mcp
-// rows are therefore enforced, and an allowed-dep entry acts as a subtree
-// root (internal/foo permits internal/foo/**).
-func measureDir(dir string) (int, map[string]bool, int, error) {
-	loc := 0
-	imports := map[string]bool{}
-	decls := 0 // internal-import declarations seen (all forms), for the strictness sanity
-	err := filepath.WalkDir(dir, func(p string, d os.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if d.IsDir() {
-			if p != dir && skipDirs[d.Name()] {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		if !strings.HasSuffix(d.Name(), ".go") || strings.HasSuffix(d.Name(), "_test.go") {
-			return nil
-		}
-		b, err := os.ReadFile(p)
-		if err != nil {
-			return err
-		}
-		loc += strings.Count(string(b), "\n")
-		f, err := parser.ParseFile(token.NewFileSet(), p, b, parser.ImportsOnly|parser.SkipObjectResolution)
-		if err != nil {
-			return fmt.Errorf("%s: %w", p, err)
-		}
-		for _, imp := range f.Imports {
-			// Resolve the import relative to the module root: keep only the
-			// internal/<subsystem>[/<leaf>...] part as the map key.
-			path := strings.TrimPrefix(strings.Trim(imp.Path.Value, `"`), moduleRoot)
-			if !strings.HasPrefix(path, "internal/") {
-				continue
-			}
-			imports[path] = true
-			decls++
-		}
-		return nil
-	})
-	return loc, imports, decls, err
-}
-
-// allowed reports whether imp lies inside any allowed dep's subtree. An
-// allowed entry is a subtree root: internal/domain covers internal/domain
-// itself and internal/domain/x; internal/mcp/gov covers that exact leaf.
-func allowed(imp string, deps map[string]bool) bool {
-	for dep := range deps {
-		if imp == dep || strings.HasPrefix(imp, dep+"/") {
-			return true
-		}
-	}
-	return false
-}
+// The parse/measure/collect machinery behind this test lives in parity.go as
+// the exported API (ParseArchDoc, ParseLedgerDetails, MeasureDir, Allowed,
+// CheckArchDocParity) so `kern doctor --arch-drift` reports exactly the drift
+// this test gates. CheckArchDocParity joins the two ledger halves — the cap
+// table in ARCHITECTURE.md and the allowed-deps table in
+// docs/architecture/ledger-details.md — and fails if they diverge. This file
+// only renders the report as test failures — the logic is shared, never
+// duplicated.
 
 func TestArchitectureDocParity(t *testing.T) {
 	root := repoRoot(t)
-	rows := parseArchTable(t, root)
-	validated := 0
-	totalDecls := 0
-	for _, row := range rows {
-		dir := filepath.Join(root, row.dir)
-		if _, err := os.Stat(dir); err != nil {
-			t.Errorf("%s: directory missing", row.dir)
+	report, err := CheckArchDocParity(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Rows < 10 {
+		t.Fatalf("ARCHITECTURE.md table parsed only %d rows — table format broken?", report.Rows)
+	}
+	for _, f := range report.Findings {
+		if f.Err != "" {
+			t.Errorf("%s: %s", f.Subsystem, f.Err)
 			continue
 		}
-		loc, imports, decls, err := measureDir(dir)
-		if err != nil {
-			t.Errorf("%s: measure failed: %v", row.dir, err)
-			continue
-		}
-		if loc > row.cap {
+		if f.LOC > f.Cap {
 			t.Errorf("%s: LOC %d exceeds cap %d — split the package or raise the cap in ARCHITECTURE.md (suggested cap %d)",
-				row.dir, loc, row.cap, int(float64(loc)*1.5/100)*100+100)
+				f.Subsystem, f.LOC, f.Cap, int(float64(f.LOC)*1.5/100)*100+100)
 		}
-		validated += len(imports)
-		totalDecls += decls
-		self := row.dir // full internal path, nested dirs included
-		var violations []string
-		for imp := range imports {
-			// A subsystem's own subpackages are always allowed.
-			if imp == self || strings.HasPrefix(imp, self+"/") {
-				continue
-			}
-			if allowed(imp, row.imports) {
-				continue
-			}
-			violations = append(violations, imp)
-		}
-		if len(violations) > 0 {
-			sort.Strings(violations)
-			t.Errorf("%s: new internal imports outside documented allowed deps: %v — update ARCHITECTURE.md before adding them",
-				row.dir, violations)
+		if len(f.Violations) > 0 {
+			t.Errorf("%s: new internal imports outside documented allowed deps: %v — update docs/architecture/ledger-details.md before adding them",
+				f.Subsystem, f.Violations)
 		}
 	}
 	// Sanity: the ast parser captures every import form (grouped, single,
@@ -192,11 +62,11 @@ func TestArchitectureDocParity(t *testing.T) {
 	// internal-import declarations than the old bare-quoted-line scan (~855
 	// grouped-form sites, 30 aliased/single-form missed). The declaration
 	// count is the direct analog of that 855 baseline.
-	if totalDecls <= 855 {
-		t.Errorf("strict parser captured only %d internal-import declarations — expected > 855 (old line scan caught 855 grouped-form sites)", totalDecls)
+	if report.Decls <= 855 {
+		t.Errorf("strict parser captured only %d internal-import declarations — expected > 855 (old line scan caught 855 grouped-form sites)", report.Decls)
 	}
 	t.Logf("TestArchitectureDocParity validated %d distinct kern-internal import paths across %d rows from %d internal-import declarations",
-		validated, len(rows), totalDecls)
+		report.ImportPaths, report.Rows, report.Decls)
 }
 
 // TestArchitectureDocMentionsKnownDrift pins that the doc records the
@@ -213,13 +83,168 @@ func TestArchitectureDocMentionsKnownDrift(t *testing.T) {
 	if !strings.Contains(doc, "internal/mcp") || !strings.Contains(doc, "internal/blueprint") {
 		t.Error("ARCHITECTURE.md must document the known drift (mcp monolith, blueprint size) explicitly")
 	}
-	rows := parseArchTable(t, root)
+	rows, err := ParseArchDoc(root)
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, row := range rows {
-		if row.dir == "internal/mcp" && row.cap < 20000 {
-			t.Errorf("internal/mcp cap %d too tight for the documented monolith", row.cap)
+		if row.Dir == "internal/mcp" && row.Cap < 20000 {
+			t.Errorf("internal/mcp cap %d too tight for the documented monolith", row.Cap)
 		}
-		if row.dir == "internal/blueprint" && row.cap < 9800 {
-			t.Errorf("internal/blueprint cap %d below the settled Stage D cap (9800)", row.cap)
+		if row.Dir == "internal/blueprint" && row.Cap < 9800 {
+			t.Errorf("internal/blueprint cap %d below the settled Stage D cap (9800)", row.Cap)
 		}
+	}
+}
+
+// ---- Two-file ledger fixtures ----------------------------------------------
+//
+// The ledger is split across ARCHITECTURE.md (dir + LOC baseline + cap) and
+// docs/architecture/ledger-details.md (dir + allowed deps). These fixtures
+// prove the gate still bites with the split in place: an over-cap directory
+// fails via the part-1 table, an import outside allowed deps fails via the
+// part-2 table, and divergent halves fail closed (row-count and same-count
+// directions).
+
+// writeLedgerFixture builds a temp repo with both halves of the ledger and 12
+// subsystems: internal/alpha (over cap, importing a package outside its
+// allowed deps), internal/beta (healthy), and ten healthy fillers — enough
+// rows to keep the <10-row fail-closed sanity from masking divergence tests.
+func writeLedgerFixture(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
+	var arch, details strings.Builder
+	arch.WriteString("# ARCHITECTURE.md — subsystem ledger (part 1)\n\n")
+	arch.WriteString("| subsystem | dir | LOC baseline | cap |\n")
+	arch.WriteString("|---|---|---|---|\n")
+	details.WriteString("# Architecture ledger — part 2: allowed deps\n\n")
+	details.WriteString("| subsystem | dir | allowed deps |\n")
+	details.WriteString("|---|---|---|\n")
+	add := func(dir, baseline, cap, deps string) {
+		arch.WriteString(fmt.Sprintf("| `%s` | %s | %s |\n", dir, baseline, cap))
+		details.WriteString(fmt.Sprintf("| `%s` | `%s` | %s |\n", dir, dir, deps))
+	}
+	add("internal/alpha", "5", "10", "`internal/beta`")
+	add("internal/beta", "2", "10", "")
+	for i := 0; i < 10; i++ {
+		add(fmt.Sprintf("internal/sub%02d", i), "1", "100", "")
+	}
+	if err := os.MkdirAll(filepath.Join(root, filepath.Dir(ledgerDocRel)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, archDocRel), []byte(arch.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ledgerDocRel), []byte(details.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// internal/alpha: 30 non-test LOC (cap 10) importing internal/gamma
+	// (allowed deps only list internal/beta).
+	alpha := "package alpha\n\nimport \"github.com/JayveerPrajapati/kern/internal/gamma\"\n"
+	alpha += strings.Repeat("// filler\n", 27)
+	if err := os.MkdirAll(filepath.Join(root, "internal", "alpha"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "internal", "alpha", "a.go"), []byte(alpha), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// internal/beta: 3 non-test LOC, no internal imports.
+	beta := "package beta\n\nvar X = 1\n"
+	if err := os.MkdirAll(filepath.Join(root, "internal", "beta"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "internal", "beta", "b.go"), []byte(beta), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Ten healthy fillers (3 LOC each, cap 100, no imports).
+	for i := 0; i < 10; i++ {
+		dir := filepath.Join(root, "internal", fmt.Sprintf("sub%02d", i))
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "s.go"), []byte("package sub\n\nvar X = 1\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return root
+}
+
+// TestCheckArchDocParityTwoFileLedger proves both enforcement halves bite on
+// a fixture: (a) a directory over its cap fails via the ARCHITECTURE.md half,
+// (b) an import outside allowed deps fails via the ledger-details.md half.
+func TestCheckArchDocParityTwoFileLedger(t *testing.T) {
+	root := writeLedgerFixture(t)
+	report, err := CheckArchDocParity(root)
+	if err != nil {
+		t.Fatalf("two-file fixture must parse and join cleanly: %v", err)
+	}
+	if report.Rows != 12 {
+		t.Fatalf("rows = %d, want 12", report.Rows)
+	}
+	byDir := map[string]*ArchDrift{}
+	for i := range report.Findings {
+		byDir[report.Findings[i].Subsystem] = &report.Findings[i]
+	}
+	alpha := byDir["internal/alpha"]
+	if alpha == nil {
+		t.Fatal("no finding for internal/alpha")
+	}
+	if alpha.LOC <= alpha.Cap {
+		t.Errorf("alpha LOC %d must exceed cap %d — over-cap drift must fail via the ARCHITECTURE.md half", alpha.LOC, alpha.Cap)
+	}
+	if len(alpha.Violations) != 1 || alpha.Violations[0] != "internal/gamma" {
+		t.Errorf("alpha violations = %v, want [internal/gamma] — import outside allowed deps must fail via the ledger-details.md half", alpha.Violations)
+	}
+	beta := byDir["internal/beta"]
+	if beta == nil {
+		t.Fatal("no finding for internal/beta")
+	}
+	if beta.LOC > beta.Cap || len(beta.Violations) != 0 {
+		t.Errorf("beta should be healthy, got LOC %d/%d violations %v", beta.LOC, beta.Cap, beta.Violations)
+	}
+}
+
+// TestCheckArchDocParityTwoFileDivergence proves the row-count-agreement
+// sanity: dropping a subsystem from one half fails the whole gate closed.
+func TestCheckArchDocParityTwoFileDivergence(t *testing.T) {
+	root := writeLedgerFixture(t)
+	// Drop internal/beta from the ledger-details half (row-count divergence).
+	p := filepath.Join(root, ledgerDocRel)
+	b, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var kept []string
+	for _, ln := range strings.Split(string(b), "\n") {
+		if strings.HasPrefix(ln, "| `internal/beta` |") {
+			continue
+		}
+		kept = append(kept, ln)
+	}
+	if err := os.WriteFile(p, []byte(strings.Join(kept, "\n")), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := CheckArchDocParity(root); err == nil || !strings.Contains(err.Error(), "diverged") {
+		t.Fatalf("row-count-divergent ledger halves must fail closed with a divergence error, got %v", err)
+	}
+}
+
+// TestCheckArchDocParityTwoFileSameCountDivergence proves the per-row
+// matching sanity: even with equal row counts, a subsystem renamed in one
+// half has no matching row in the other and the gate fails closed.
+func TestCheckArchDocParityTwoFileSameCountDivergence(t *testing.T) {
+	root := writeLedgerFixture(t)
+	// Rename internal/beta to internal/gamma in the ledger-details half only.
+	p := filepath.Join(root, ledgerDocRel)
+	b, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := strings.ReplaceAll(string(b), "`internal/beta`", "`internal/gamma`")
+	if err := os.WriteFile(p, []byte(out), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := CheckArchDocParity(root); err == nil || !strings.Contains(err.Error(), "diverged") {
+		t.Fatalf("same-count divergent halves must fail closed with a divergence error, got %v", err)
 	}
 }

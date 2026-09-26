@@ -3,6 +3,8 @@
 // The GitHubProvider creates real PRs via the GitHub REST API using net/http.
 package prprovider
 
+import "context"
+
 // Request describes a PR to be created.
 type Request struct {
 	Owner string // repo owner (e.g. "JayveerPrajapati")
@@ -20,7 +22,18 @@ type Result struct {
 	State  string // "open"
 }
 
-// Provider creates pull requests on a code-hosting platform.
+// CommentRequest describes a comment to post on an existing PR. It mirrors
+// Request's owner/repo/body shape so the provider can build the endpoint URL
+// without holding repo state.
+type CommentRequest struct {
+	Owner  string // repo owner (e.g. "JayveerPrajapati")
+	Repo   string // repo name (e.g. "kern")
+	Number int    // PR number to comment on
+	Body   string // comment body (markdown)
+}
+
+// Provider creates pull requests and posts comments on a code-hosting platform.
 type Provider interface {
 	CreatePR(req Request) (*Result, error)
+	CommentPR(ctx context.Context, req CommentRequest) error
 }

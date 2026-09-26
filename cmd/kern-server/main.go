@@ -130,7 +130,16 @@ func main() {
 // enterprise.projects in .kern/config.json). A bare path (no "name=") uses
 // the path as the project name.
 func runEnterprise(addr string) {
-	srv := enterprise.New()
+	srv, err := enterprise.New()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "kern-server: %v\n", err)
+		os.Exit(1)
+	}
+	// Wire the ProjectApp constructor: internal/enterprise does not import
+	// internal/web (breaking the mcp → org → enterprise → web transitive
+	// closure), so the concrete web.New factory is injected here at the
+	// composition root.
+	srv.SetAppFactory(func(root string) (enterprise.ProjectApp, error) { return web.New(root) })
 	for name, path := range config.StringMap("", "KERN_ENTERPRISE_PROJECTS", "enterprise.projects", nil) {
 		if err := srv.Register(name, path); err != nil {
 			log.Printf("kern-server: skipping project %q: %v", name, err)

@@ -1,17 +1,24 @@
-# kern Semantic Retention Benchmarks
+# kern Benchmark Suite Index
 
-**Suite:** P1-001 · **Status:** baseline established 2026-09-09
+**Suite:** benchmarks · **Status:** multiple baselines, see each suite's page
 
-This directory holds kern's **semantic retention** benchmark suite: how much
-*meaning* survives kern's context optimization, not just how many tokens it
-removes.
+This directory holds kern's benchmark suites. Each suite answers a different
+marketing claim with a machine-checkable protocol, honest numbers, and a
+documented methodology — deterministic, stdlib-only, zero network, no LLM
+calls in the measurements.
 
-kern already proves token reduction in `evaluate/bench` (compression-focused,
-wired into CI). This suite is the complementary question: when a log, prompt,
-or slice of code is compressed, does the important information — errors,
-stack frames, paths, symbols, call relationships — survive?
+## Suites
 
-## The four benchmark dimensions
+| Suite | Page | Claim under test |
+|---|---|---|
+| Semantic retention | [`semantic-retention.md`](semantic-retention.md) | Compression keeps *meaning*, not just tokens (tier1 retention, symbol recall, call-graph fidelity, loss-adjusted savings) |
+| Graph latency | [`graph-latency.md`](graph-latency.md) | "Sub-millisecond graph": cold/warm index + query latency, honest verdict at fixture and ~12k-symbol scale |
+| Cold-start scale | [`cold-start.md`](cold-start.md) | "Slower than grep": one-shot cold-build/cold-load vs `grep -rn` across repo sizes (83 → 7,819 files), same-tree protocol |
+| Telemetry audit | [`telemetry-audit.md`](telemetry-audit.md) | Zero network egress in core packages (CI-enforced static import scan) |
+| Token savings | [`token-savings.md`](token-savings.md) | Compact context vs naive full-file context token reduction (machine-generated report) |
+| Duplication detector | [`../duplication-benchmark.md`](../duplication-benchmark.md) | AST duplication scanner confusion matrix and precision floors |
+
+## The four benchmark dimensions (semantic retention)
 
 | # | Dimension | Question | Headline gate |
 |---|---|---|---|
@@ -20,59 +27,31 @@ stack frames, paths, symbols, call relationships — survive?
 | 3 | **Call graph fidelity** | Are who-calls-whom relationships preserved? | suite-mean endpoint fidelity ≥ 0.55, fabricated edges = 0 |
 | 4 | **Token savings** | Is the reduction real, or information destruction? | loss-adjusted savings ≥ 0.40 (logs) / ≥ 0.10 (prompts) |
 
-Full formulas, operators, per-fixture gates, stretch targets, and the
-measured baseline live in
-[`semantic-retention.md`](semantic-retention.md).
-
 ## Quick facts
 
-- **Operators under test:** `compress.CompressLog`, `compress.CompressPrompt`,
-  `budget.FitCode` (+ `terse.Compress`, `budget.FitLossless` as future modes).
-- **Tokenizer:** `internal/tokenize.Count` — deterministic, offline, stdlib-only.
-- **Corpus:** six synthetic fixtures — two Go services, two logs, two prompts —
-  with hand-audited ground truth in [`fixtures/expected/`](fixtures/expected/).
-- **Zero external dependencies.** Everything is Go stdlib + plain JSON/text.
 - **Deterministic.** No LLM calls, no network, no clocks in the measurements.
+- **Zero external dependencies.** Everything is Go stdlib + plain JSON/text.
+- **Live harness:** `kern bench` measures this repo's cold/warm index load and
+  query latencies and writes `.kern/bench.json` (rendered by the web console's
+  /benchmarks page); `make bench-latency` wraps it.
+- **Compression suite:** token-reduction benchmarks still run with
+  `go run ./evaluate/bench` (or `make bench`), wired into CI.
 
 ## Directory map
 
 ```
 docs/benchmarks/
-  README.md              this overview
-  semantic-retention.md  detailed specification (metrics, gates, baseline)
-  fixtures/
-    README.md            corpus layout + ground-truth derivation
-    manifest.json        machine-readable index of fixtures and expected values
-    code/                Go source corpora (symbol recall + call graph)
-    logs/                log corpora (context window + token savings)
-    prompts/             prompt corpora (context window + token savings)
-    expected/            deterministic ground truth (symbols, edges, retention)
+  README.md              this suite index
+  semantic-retention.md  detailed spec (metrics, gates, baseline) + fixtures map
+  graph-latency.md       cold/warm + query latency methodology and results
+  telemetry-audit.md     zero-network-egress audit (CI-gated)
+  token-savings.md       machine-generated token-savings report
+  fixtures/              semantic-retention corpus (code/logs/prompts + ground truth)
 ```
-
-## Baseline at a glance (2026-09-09)
-
-- Logs: 81.7% savings on the chatty server log with 100% tier1 retention;
-  17.6% on the short build-failure log. Suite-mean loss-adjusted savings 0.50.
-- Prompts: 27.6% / 5.4% savings, 100% tier1 retention.
-- Symbol recall at 50% budget: ordersvc 82%, authsvc 64% (gate ≥ 60%).
-- Call graph endpoint fidelity at 50% budget: 0.75 / 0.50, fabricated edges 0.
-
-Known gaps surfaced by the baseline (WARN-line loss, path loss on INFO
-lines, FitCode recall plateau) are documented as follow-ups in
-[`semantic-retention.md`](semantic-retention.md#8-known-gaps-documented-findings--backlog).
-
-## Running
-
-No harness is committed yet — the spec + fixtures + baseline table are the
-protocol. A committed stdlib-only harness (`evaluate/retention`) is the
-follow-up task; the reproduction procedure is in
-[`semantic-retention.md`](semantic-retention.md#9-reproducing-the-baseline).
-The existing compression suite is unchanged and still runs with
-`go run ./evaluate/bench` (or `make bench`).
 
 ## Related
 
-- [`evaluate/bench`](../../evaluate/bench/main.go) — token-reduction benchmarks (CI-gated).
-- [`internal/compress`](../../internal/compress/compress.go) — log/prompt compression.
-- [`internal/budget`](../../internal/budget/budget.go) — token-budget fitting.
-- [`internal/tokenize`](../../internal/tokenize/tokenize.go) — deterministic token counting.
+- [`cmd/kern/cmd_bench.go`](../../cmd/kern/cmd_bench.go) — the `kern bench` latency harness.
+- [`docs/benchmarks/graph-latency.md`](graph-latency.md) — methodology the harness mirrors.
+- [`internal/bpreceipt/metrics/g12_test.go`](../../internal/bpreceipt/metrics/g12_test.go) — G12 cold-vs-warm latency tests.
+- [`evaluate/bench/main.go`](../../evaluate/bench/main.go) — token-reduction benchmarks (CI-gated).

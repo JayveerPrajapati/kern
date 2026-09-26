@@ -47,13 +47,18 @@ jobs:
           CGO_ENABLED=1 go build -buildvcs=false -tags treesitter -o /dev/null ./cmd/kern
           CGO_ENABLED=1 go build -buildvcs=false -tags treesitter -o /dev/null ./cmd/kern-mcp
           CGO_ENABLED=1 go build -buildvcs=false -tags treesitter -o /dev/null ./cmd/kern-server
-      # Race detector over the concurrency-sensitive packages (covers the
-      # agent registry / in-flight tool / lock lifecycle races). Scoped to
-      # keep the full -race ./... suite from slowing CI. The -timeout is sized
-      # for the race run: internal/app alone is ~3min without -race and
-      # exceeds the default 10m cap under instrumentation.
+      # Race detector over the concurrency-sensitive packages (agent registry /
+      # in-flight tool / lock lifecycle races, event bus, blueprint sandbox,
+      # loop scheduler, symbol index, project store, process groups). Scoped
+      # to keep the full -race ./... suite from slowing CI. The -timeout is
+      # sized for the race run (roughly 4x slower): internal/app alone is
+      # ~3min without -race and exceeds the default 10m cap under
+      # instrumentation, and the index suite adds ~4min under -race, so the
+      # step gets a 20m budget. This only adds the -race flag — test
+      # parallelism is unchanged, so netns tests (which rely on t.Setenv and
+      # must stay serial) are unaffected.
       - name: Test (race detector)
-        run: go test -short -race -timeout 10m ./internal/governance/... ./internal/mcp/... ./internal/app/... ./internal/web/...
+        run: go test -short -race -timeout 20m ./internal/governance/... ./internal/mcp/... ./internal/app/... ./internal/web/... ./internal/eventbus/... ./internal/blueprint/sandbox/... ./internal/loop/... ./internal/index/... ./internal/project/... ./internal/processgroup/...
       - name: MCP catalog parity
         run: go test ./internal/setup/ -run TestPluginMatchesMCPCatalog -count=1
       - name: Architecture doc parity

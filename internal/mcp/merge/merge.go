@@ -14,6 +14,7 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/index"
 	"github.com/JayveerPrajapati/kern/internal/intel"
 	"github.com/JayveerPrajapati/kern/internal/mcp/mcpargs"
+	"github.com/JayveerPrajapati/kern/internal/mcp/root"
 )
 
 // Hooks provides dependencies from the owning MCP server.
@@ -21,24 +22,69 @@ type Hooks struct {
 	LoadIndex func(ctx context.Context, root string) (*index.Index, error)
 }
 
-func resolveRoot(root string) string {
+// confinePath resolves p against root (nearest-existing-ancestor symlink
+// resolution, re-appending the remaining components) and rejects any path
+// that escapes root — "..", absolute paths outside the root, and symlinked
+// parents (root/link -> /etc) that would smuggle a read or write outside the
+// workspace. It returns the absolute cleaned path on success.
+func confinePath(root, p string) (string, error) {
 	if root == "" {
 		if cwd, err := os.Getwd(); err == nil {
-			return filepath.Clean(cwd)
+			root = filepath.Clean(cwd)
+		} else {
+			root = "."
 		}
-		return "."
 	}
-	if abs, err := filepath.Abs(root); err == nil {
-		return filepath.Clean(abs)
+	var abs string
+	if filepath.IsAbs(p) {
+		abs = filepath.Clean(p)
+	} else {
+		abs = filepath.Join(root, p)
 	}
-	return root
+	real, err := nearestExisting(abs)
+	if err != nil {
+		return "", err
+	}
+	rr, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		rr = root
+	}
+	rel, err := filepath.Rel(rr, real)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+		return "", fmt.Errorf("kern_semantic_merge: file %q escapes workspace root", p)
+	}
+	return abs, nil
+}
+
+// nearestExisting resolves the real location of the nearest existing ancestor
+// of abs (walking up until EvalSymlinks succeeds) and re-appends the
+// remaining components, so a not-yet-existing file under a symlinked
+// directory is judged by its real location.
+func nearestExisting(abs string) (string, error) {
+	var rem []string
+	probe := abs
+	for {
+		real, err := filepath.EvalSymlinks(probe)
+		if err == nil {
+			if len(rem) == 0 {
+				return real, nil
+			}
+			return filepath.Join(append([]string{real}, rem...)...), nil
+		}
+		parent := filepath.Dir(probe)
+		if parent == probe {
+			return "", fmt.Errorf("kern_semantic_merge: cannot resolve %q", abs)
+		}
+		rem = append([]string{filepath.Base(probe)}, rem...)
+		probe = parent
+	}
 }
 
 // SemanticMerge executes an AST-aware 3-way merge between base, local,
 // and remote versions of source code. Cleanly combines non-overlapping struct
 // fields, methods, functions, and imports, and flags precise semantic conflicts.
 func SemanticMerge(ctx context.Context, args map[string]any) (string, error) {
-	root := resolveRoot(mcpargs.ArgString(args, "root"))
+	root := root.ResolveRoot(mcpargs.ArgString(args, "root"))
 	file := mcpargs.ArgString(args, "file")
 	baseStr := mcpargs.ArgString(args, "base")
 	localStr := mcpargs.ArgString(args, "local")
@@ -56,6 +102,9 @@ func SemanticMerge(ctx context.Context, args map[string]any) (string, error) {
 				p = filepath.Join(root, p)
 			}
 			if fi, err := os.Stat(p); err == nil && !fi.IsDir() {
+				if _, cerr := confinePath(root, p); cerr != nil {
+					return nil, cerr
+				}
 				return os.ReadFile(p)
 			}
 			return []byte(content), nil
@@ -64,6 +113,9 @@ func SemanticMerge(ctx context.Context, args map[string]any) (string, error) {
 			p := fPath
 			if !filepath.IsAbs(p) && root != "" {
 				p = filepath.Join(root, p)
+			}
+			if _, cerr := confinePath(root, p); cerr != nil {
+				return nil, cerr
 			}
 			return os.ReadFile(p)
 		}
@@ -101,6 +153,9 @@ func SemanticMerge(ctx context.Context, args map[string]any) (string, error) {
 		p := file
 		if !filepath.IsAbs(p) && root != "" {
 			p = filepath.Join(root, p)
+		}
+		if _, cerr := confinePath(root, p); cerr != nil {
+			return "", cerr
 		}
 		if werr := os.WriteFile(p, []byte(res.MergedCode), 0o644); werr != nil {
 			return "", fmt.Errorf("write merged file: %w", werr)
@@ -160,7 +215,7 @@ func SemanticMerge(ctx context.Context, args map[string]any) (string, error) {
 // SemanticDiff returns an AST-level symbol diff instead of raw lines.
 // Highlights changed functions, modified signatures, and newly impacted callers.
 func SemanticDiff(ctx context.Context, h Hooks, args map[string]any) (string, error) {
-	root := resolveRoot(mcpargs.ArgString(args, "root"))
+	root := root.ResolveRoot(mcpargs.ArgString(args, "root"))
 	from := mcpargs.ArgString(args, "from")
 	to := mcpargs.ArgString(args, "to")
 

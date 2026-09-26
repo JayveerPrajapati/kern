@@ -11,8 +11,8 @@ import (
 
 // runRuntime surfaces the production-intelligence layer:
 //
-//	kern runtime status [--root DIR] [--json]
-//	kern runtime drift [--root DIR] [--json]
+//	kern runtime status [--root ROOT] [--json]
+//	kern runtime drift [--root ROOT] [--json]
 //
 // status is also the adapter discovery wizard: it reports which runtime
 // source is wired (live adapter via env/config, or the local snapshot) and,

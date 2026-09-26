@@ -421,3 +421,67 @@ func TestIntelError(t *testing.T) {
 		t.Fatalf("expected Op in error: %s", err.Error())
 	}
 }
+
+// TestSearchReposInDedupsNestedRepoHits pins the F-OR1 fix: when both a repo
+// root and a sub-repo under it are discovered, the parent's index also
+// contains the sub-repo's symbols, so the same underlying symbol used to be
+// reported twice — once per repo label. Search must deduplicate by absolute
+// file + symbol identity, keeping the hit from the deepest (most specific)
+// repo root.
+func TestSearchReposInDedupsNestedRepoHits(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	parent := t.TempDir()
+	sub := filepath.Join(parent, "nested")
+
+	_ = os.WriteFile(filepath.Join(parent, "go.mod"), []byte("module parent\n\ngo 1.22\n"), 0o644)
+	_ = os.WriteFile(filepath.Join(parent, "parent.go"), []byte("package parent\n\nfunc QuobxParentFn() {}\n"), 0o644)
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	_ = os.WriteFile(filepath.Join(sub, "go.mod"), []byte("module nested\n\ngo 1.22\n"), 0o644)
+	// ZorphGadget lives in the sub-repo: the parent's index sees it at
+	// nested/shared.go, the sub-repo's index at shared.go — same absolute
+	// file, same symbol, same line.
+	_ = os.WriteFile(filepath.Join(sub, "shared.go"), []byte("package nested\n\nfunc ZorphGadget() {}\n"), 0o644)
+
+	// Build + persist indexes for BOTH repos so each contributes hits.
+	for _, root := range []string{parent, sub} {
+		ix := buildIndex(t, root)
+		if err := ix.Save(); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// DiscoverSubrepos must find both: the parent itself (go.mod) and the
+	// nested sub-repo (go.mod at depth 1).
+	repos := DiscoverSubrepos(parent)
+	if len(repos) != 2 {
+		t.Fatalf("expected parent + nested repos, got %d: %+v", len(repos), repos)
+	}
+
+	hits := SearchReposIn(parent, "ZorphGadget", 20)
+	if len(hits) != 1 {
+		t.Fatalf("expected exactly 1 deduplicated hit, got %d: %+v", len(hits), hits)
+	}
+	// The deepest root wins: the hit must be labeled with the sub-repo
+	// ("nested"), not the parent.
+	if hits[0].Repo != "nested" {
+		t.Errorf("deduped hit repo = %q, want %q (deepest root)", hits[0].Repo, "nested")
+	}
+	if hits[0].Symbol.Name != "ZorphGadget" {
+		t.Errorf("deduped hit symbol = %q, want ZorphGadget", hits[0].Symbol.Name)
+	}
+
+	// A symbol unique to the parent must still be reported once. (The
+	// CWD federation adds the kern repo itself, whose symbols can partial-
+	// match any query word, so scope the assertion to exact-name hits.)
+	var exact []RepoHit
+	for _, h := range SearchReposIn(parent, "QuobxParentFn", 20) {
+		if h.Symbol.Name == "QuobxParentFn" {
+			exact = append(exact, h)
+		}
+	}
+	if len(exact) != 1 || exact[0].Repo != filepath.Base(parent) {
+		t.Errorf("parent-only exact hits = %+v, want 1 hit from the parent repo", exact)
+	}
+}

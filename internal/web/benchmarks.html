@@ -1,0 +1,263 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Benchmarks &mdash; Kern Web Console</title>
+<style>
+:root { --bg:#0f1115; --panel:#171a21; --panel2:#1c2029; --fg:#e6e8ee; --muted:#9aa3b2; --accent:#4f8cff; --border:#262b36; --good:#3fb950; --warn:#d29922; --bad:#f85149; }
+* { box-sizing:border-box; }
+body { margin:0; background:var(--bg); color:var(--fg); font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif; }
+header { padding:16px 28px; border-bottom:1px solid var(--border); background:var(--panel); display:flex; align-items:center; justify-content:space-between; gap:16px; flex-wrap:wrap; }
+header .brand h1 { margin:0; font-size:20px; }
+header .brand p { margin:4px 0 0; color:var(--muted); font-size:12px; }
+.topnav { display:flex; gap:4px; flex-wrap:wrap; }
+.topnav a { color:var(--muted); text-decoration:none; font-size:12px; padding:6px 12px; border-radius:6px; border:1px solid transparent; }
+.topnav a:hover { color:var(--fg); background:var(--panel2); }
+.topnav a.active { color:var(--accent); border-color:var(--border); background:var(--panel2); }
+main { padding:20px 28px; display:grid; grid-template-columns:repeat(auto-fit,minmax(340px,1fr)); gap:16px; }
+section.panel { background:var(--panel); border:1px solid var(--border); border-radius:8px; padding:16px; }
+section.panel h2 { margin:0 0 12px; font-size:15px; text-transform:uppercase; letter-spacing:.04em; color:var(--muted); }
+.kpi { display:grid; grid-template-columns:repeat(auto-fit,minmax(90px,1fr)); gap:10px; }
+.kpi div { background:var(--panel2); border:1px solid var(--border); border-radius:6px; padding:10px; text-align:center; }
+.kpi b { display:block; font-size:22px; }
+.kpi span { font-size:11px; color:var(--muted); }
+table { width:100%; border-collapse:collapse; font-size:12px; }
+th,td { text-align:left; padding:6px 8px; border-bottom:1px solid var(--border); vertical-align:top; }
+th { color:var(--muted); font-weight:600; }
+ul { margin:0; padding-left:18px; }
+li { margin:2px 0; }
+.muted { color:var(--muted); }
+.good { color:var(--good); }
+.warn { color:var(--warn); }
+.bad { color:var(--bad); }
+.badge { display:inline-block; padding:1px 7px; border-radius:10px; font-size:11px; background:var(--panel2); border:1px solid var(--border); }
+.cap { margin:1px 2px 1px 0; }
+.full { grid-column:1 / -1; }
+td a, a.api { color:var(--accent); text-decoration:none; }
+td a:hover, a.api:hover { text-decoration:underline; }
+.subnav { display:flex; gap:6px; flex-wrap:wrap; margin:10px 0 2px; }
+.subnav a { color:var(--accent); text-decoration:none; font-size:12px; padding:5px 12px; border-radius:6px; border:1px solid var(--border); background:var(--panel2); }
+.subnav a:hover { background:var(--panel); }
+.card { background:var(--panel2); border:1px solid var(--border); border-radius:8px; padding:14px 16px; margin:12px 0; }
+.card-head { display:flex; align-items:center; gap:10px; flex-wrap:wrap; padding-bottom:10px; border-bottom:1px solid var(--border); margin-bottom:10px; }
+.card-head a { color:var(--accent); text-decoration:none; font-weight:600; font-size:13px; }
+.card-head a:hover { text-decoration:underline; }
+.card-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:14px; }
+.card-grid h3 { margin:0 0 6px; font-size:12px; text-transform:uppercase; letter-spacing:.04em; color:var(--muted); }
+.card-grid p { margin:0; font-size:12px; }
+section.target { scroll-margin-top:16px; }
+code { background:var(--panel2); border:1px solid var(--border); border-radius:4px; padding:1px 5px; font-size:12px; }
+
+/* Console usability additions — vanilla, no external assets. */
+.table-tools { display:flex; align-items:center; gap:8px; margin:0 0 8px; }
+.table-tools input { background:var(--panel2); color:var(--fg); border:1px solid var(--border); border-radius:6px; padding:4px 8px; font-family:inherit; font-size:12px; width:220px; max-width:100%; }
+.table-tools input:focus { outline:none; border-color:var(--accent); }
+.filter-count { font-size:11px; color:var(--muted); }
+.row-hidden { display:none; }
+.index-status { margin:0; padding:6px 28px; font-size:12px; color:var(--warn); background:var(--panel); border-bottom:1px solid var(--border); }
+.index-status[hidden] { display:none; }
+.index-status .spin { display:inline-block; width:10px; height:10px; border:2px solid var(--warn); border-top-color:transparent; border-radius:50%; margin-right:7px; vertical-align:-1px; animation:console-spin 1s linear infinite; }
+@keyframes console-spin { to { transform:rotate(180deg); } }
+@media (max-width:760px) {
+  header { padding:12px 16px; }
+  .topnav { flex-wrap:wrap; }
+  main { padding:14px 12px; grid-template-columns:1fr; }
+  section.panel { min-width:0; }
+  .index-status { padding:5px 16px; }
+  table { display:block; overflow-x:auto; }
+}
+</style>
+</head>
+<body>
+<header>
+  <div class="brand">
+    <h1>Benchmarks</h1>
+    <p>Deterministic latency harness &mdash; project root: {{.Root}}</p>
+  </div>
+  <nav class="topnav">
+    <a href="/">Dashboard</a>
+    <a href="/approvals">Approvals</a>
+    {{if navOrgLink}}<a href="/org-approvals">Org Approvals</a>{{end}}
+    <a href="/risks">Risks</a>
+    <a href="/artifacts">Artifacts</a>
+    <a href="/audit">Audit</a>
+    <a href="/system-map">System Map</a>
+    <a href="/graph">Graph</a>
+    <a href="/memory">Memory</a>
+    <a href="/architecture">Architecture</a>
+    <a href="/incidents">Incidents</a>
+    <a href="/tasks">Tasks</a>
+    <a href="/efficiency">Efficiency</a>
+    <a href="/eval">Eval</a>
+    <a href="/benchmarks" class="active">Benchmarks</a>
+    <a href="/agents">Agents</a>
+  </nav>
+</header>
+<p class="index-status" id="index-status" hidden><span class="spin" aria-hidden="true"></span>Index is rebuilding after recent edits &mdash; data on this page may be a moment behind.</p>
+
+<main>
+  {{if .Present}}
+  <section class="panel full">
+    <h2>Latency harness report</h2>
+    <p class="muted">Rendered from <code>.kern/bench.json</code> &mdash; cold index build vs warm persisted-store load, plus a fixed query set (median/min over repeated runs, zero network). Refresh with <code>kern bench</code> in the project root.</p>
+    <div class="kpi">
+      <div><b>{{printf "%.1f" .Bench.ColdLoadMS.MedianMS}} ms</b><span>cold build (fresh)</span></div>
+      <div><b>{{printf "%.2f" .Bench.WarmLoadMS.MedianMS}} ms</b><span>warm load (store)</span></div>
+      <div><b>{{printf "%.1f" .Bench.ColdVsWarm}}x</b><span>cold/warm speedup</span></div>
+      <div><b>{{.Bench.SymbolCount}}</b><span>symbols</span></div>
+      <div><b>{{.Bench.GitHead}}</b><span>git head</span></div>
+    </div>
+    <p class="muted" style="margin-top:12px">Suite <span class="badge">{{.Bench.Suite}}</span> &middot; measured {{.Bench.Date}} &middot; methodology: {{.Bench.MethodologyRef}}</p>
+  </section>
+
+  <section class="panel full target" id="load">
+    <h2>Load paths</h2>
+    <table style="margin-top:4px" data-filter-always>
+      <tr><th>Path</th><th>Median</th><th>Min</th><th>Runs</th><th></th></tr>
+      <tr>
+        <td>Cold build <span class="muted">(index.Build from source)</span></td>
+        <td>{{printf "%.2f" .Bench.ColdLoadMS.MedianMS}} ms</td>
+        <td class="muted">{{printf "%.2f" .Bench.ColdLoadMS.MinMS}} ms</td>
+        <td>{{.Bench.ColdLoadMS.Runs}}</td>
+        <td><span class="badge warn">fresh clone pays this</span></td>
+      </tr>
+      <tr>
+        <td>Warm load <span class="muted">(persisted-store load)</span></td>
+        <td>{{printf "%.2f" .Bench.WarmLoadMS.MedianMS}} ms</td>
+        <td class="muted">{{printf "%.2f" .Bench.WarmLoadMS.MinMS}} ms</td>
+        <td>{{.Bench.WarmLoadMS.Runs}}</td>
+        <td><span class="badge good">every command pays this</span></td>
+      </tr>
+    </table>
+  </section>
+
+  <section class="panel full target" id="queries">
+    <h2>Query latencies</h2>
+    <p class="muted">Warm in-memory index; graph queries target the index's top-hub symbol (the &ldquo;Public&rdquo; analogue of the graph-latency fixture).</p>
+    {{if .Bench.Queries}}
+    <table style="margin-top:4px" data-filter-always>
+      <tr><th>Query</th><th>Kind</th><th>Target</th><th>Median</th><th>Min</th><th>Runs</th></tr>
+      {{range .Bench.Queries}}<tr>
+        <td><span class="badge">{{.Name}}</span></td>
+        <td class="muted">{{.Kind}}</td>
+        <td>{{if .Target}}{{.Target}}{{else}}<span class="muted">repo-wide</span>{{end}}</td>
+        <td>{{printf "%.2f" .MedianMS}} ms</td>
+        <td class="muted">{{printf "%.2f" .MinMS}} ms</td>
+        <td>{{.Runs}}</td>
+      </tr>{{end}}
+    </table>
+    {{else}}<p class="muted">No queries recorded in this report.</p>{{end}}
+  </section>
+
+  <section class="panel full target" id="machine">
+    <h2>Machine context</h2>
+    <table style="margin-top:4px">
+      <tr><th>Property</th><th>Value</th></tr>
+      <tr><td>OS / arch</td><td>{{.Bench.Machine.GOOS}} / {{.Bench.Machine.GOARCH}}</td></tr>
+      <tr><td>Go toolchain</td><td>{{.Bench.Machine.GoVersion}}</td></tr>
+      <tr><td>CPUs</td><td>{{.Bench.Machine.NumCPU}}</td></tr>
+      <tr><td>Project root</td><td class="muted">{{.Bench.Root}}</td></tr>
+    </table>
+  </section>
+  {{else}}
+  <section class="panel full">
+    <h2>No benchmark report yet</h2>
+    <p class="muted">The console renders the latency report written by the deterministic harness &mdash; no <code>.kern/bench.json</code> exists for this project yet.</p>
+    <div class="card">
+      <div class="card-head">
+        <span class="badge">refresh</span>
+        <span>Run <code>kern bench</code> in the project root to generate it:</span>
+      </div>
+      <p class="muted" style="margin:0">Measures cold index build vs warm persisted-store load plus a fixed query set (search, ranked search, one-hop callers, transitive blast radius, hub ranking) &mdash; deterministic, zero network &mdash; and writes <code>.kern/bench.json</code> here.</p>
+    </div>
+  </section>
+  {{end}}
+</main>
+
+<script>
+(function () {
+  "use strict";
+  // Table filters: a small filter input above every data table in <main>.
+  var MIN_ROWS = 6;
+  var tables = document.querySelectorAll("main table");
+  for (var t = 0; t < tables.length; t++) {
+    var table = tables[t];
+    var rows = table.rows;
+    if (!rows || rows.length < 2) continue;
+    var dataRows = [];
+    for (var i = 1; i < rows.length; i++) dataRows.push(rows[i]);
+    var always = table.hasAttribute("data-filter-always");
+    if (!always && dataRows.length < MIN_ROWS) continue;
+
+    var tools = document.createElement("div");
+    tools.className = "table-tools";
+    var input = document.createElement("input");
+    input.type = "search";
+    input.placeholder = "Filter rows\u2026";
+    input.setAttribute("aria-label", "Filter table rows");
+    var count = document.createElement("span");
+    count.className = "filter-count";
+    count.hidden = true;
+    tools.appendChild(input);
+    tools.appendChild(count);
+    table.parentNode.insertBefore(tools, table);
+
+    var empty = document.createElement("p");
+    empty.className = "muted";
+    empty.textContent = "No rows match the filter.";
+    empty.hidden = true;
+    table.parentNode.insertBefore(empty, table.nextSibling);
+
+    input.addEventListener("input", function () {
+      var q = input.value.trim().toLowerCase();
+      var shown = 0;
+      for (var r = 0; r < dataRows.length; r++) {
+        var row = dataRows[r];
+        var match = q === "" || row.textContent.toLowerCase().indexOf(q) !== -1;
+        if (match) {
+          shown++;
+          row.classList.remove("row-hidden");
+        } else {
+          row.classList.add("row-hidden");
+        }
+      }
+      if (q === "") {
+        count.hidden = true;
+        empty.hidden = true;
+      } else {
+        count.textContent = shown + " of " + dataRows.length + " rows";
+        count.hidden = false;
+        empty.hidden = shown !== 0;
+      }
+    });
+  }
+
+  // Index rebuild status: poll /api/health; while the server reports a
+  // background index rebuild in flight, show the status line under the
+  // header. The line clears itself when the rebuild lands.
+  var statusLine = document.getElementById("index-status");
+  if (statusLine && window.fetch) {
+    var timer = null;
+    var check = function () {
+      fetch("/api/health").then(function (res) {
+        return res.ok ? res.json() : null;
+      }).then(function (body) {
+        var building = !!(body && body.index && body.index.building);
+        statusLine.hidden = !building;
+        if (building && timer === null) {
+          timer = window.setInterval(check, 3000);
+        } else if (!building && timer !== null) {
+          window.clearInterval(timer);
+          timer = null;
+        }
+      }).catch(function () {
+        // Server unreachable: leave the line as it is.
+      });
+    };
+    check();
+  }
+})();
+</script>
+</body>
+</html>

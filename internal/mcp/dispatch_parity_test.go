@@ -9,6 +9,7 @@ import "testing"
 // tools unreachable. The table is the single dispatch mechanism — no source
 // parsing needed, the check is structural.
 func TestDispatchParityWithRegistration(t *testing.T) {
+	t.Parallel()
 	registered := map[string]bool{}
 	for _, n := range ToolNames() {
 		registered[n] = true
@@ -42,6 +43,7 @@ func TestDispatchParityWithRegistration(t *testing.T) {
 
 // TestCatalogCount verifies that the total registered MCP tools match the canonical catalog size.
 func TestCatalogCount(t *testing.T) {
+	t.Parallel()
 	names := ToolNames()
 	if len(names) != len(tools) {
 		t.Fatalf("ToolNames() count %d != tools table count %d", len(names), len(tools))

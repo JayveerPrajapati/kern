@@ -38,6 +38,20 @@ const toolCacheKeyPrefix = "mcp-toolcache-"
 // dump (kern_arch/kern_impact) costs more to persist than to recompute.
 const toolCacheEntrySizeCap = 512 << 10 // 512 KiB
 
+// toolByName indexes the registered catalog by tool name once at init, so
+// per-call Cacheable/schema-version lookups are O(1) instead of a linear
+// scan of the ~140-tool catalog on every tools/call (cacheableForCall and
+// cacheKeyFor each scan in both the lookup and store paths). catalog.All is
+// immutable after package init (WithDiffgateTools only reads it), so the map
+// cannot drift from the slice.
+var toolByName = func() map[string]Tool {
+	m := make(map[string]Tool, len(tools))
+	for _, t := range tools {
+		m[t.Name] = t
+	}
+	return m
+}()
+
 // toolCacheEntry is the value persisted for one cached tool response.
 type toolCacheEntry struct {
 	Text string      // RAW pre-sandbox handler output (max_output applied at serve time)
@@ -82,12 +96,7 @@ func noCacheArg(args map[string]any) bool {
 // toolCacheable reports whether the named tool opts into the D1 cache
 // allowlist (F1): its Cacheable registration flag is set.
 func toolCacheable(name string) bool {
-	for i := range tools {
-		if tools[i].Name == name {
-			return tools[i].Cacheable
-		}
-	}
-	return false
+	return toolByName[name].Cacheable
 }
 
 // cacheableForCall reports whether the D1 cache applies to THIS call,
@@ -108,7 +117,7 @@ func cacheableForCall(name string, args map[string]any) bool {
 	if argBool(args, "semantic") {
 		return false // R3: embedding-model-dependent output is never cached
 	}
-	if name == "kern_meta" || name == "kern_ask" {
+	if name == "kern_meta" {
 		routed, _ := classifyMetaRequest(argString(args, "request"))
 		return toolCacheable(routed)
 	}
@@ -135,13 +144,7 @@ func cacheKeyFor(name string, args map[string]any, root, identity string) string
 		keyArgs[k] = v
 	}
 	canon, _ := json.Marshal(keyArgs)
-	var schemaVersion string
-	for i := range tools {
-		if tools[i].Name == name {
-			schemaVersion = tools[i].SchemaVersion
-			break
-		}
-	}
+	schemaVersion := toolByName[name].SchemaVersion
 	h := sha256.New()
 	_, _ = fmt.Fprintf(h, "%s\x00%s\x00%s\x00%s\x00%s\x00%s", name, canon, root, identity, schemaVersion, version.BuildID())
 	return hex.EncodeToString(h.Sum(nil))
@@ -167,12 +170,12 @@ func indexIdentityString(id *index.IndexIdentity) string {
 // a cache key. "noindex" when no index is cached for this root.
 func (s *Server) cacheIndexIdentity(root string) string {
 	s.mu.Lock()
-	sess, ok := s.sessions[root]
+	e, ok := s.sessions[root]
 	s.mu.Unlock()
 	if !ok {
 		return "noindex"
 	}
-	ix, ok := sess.CachedIndex()
+	ix, ok := e.sess.CachedIndex()
 	if !ok || ix == nil || ix.Identity == nil {
 		return "noindex"
 	}
@@ -210,10 +213,10 @@ func (s *Server) cacheLookup(ctx context.Context, name string, args map[string]a
 	if scope, ok := ctx.Value(indexScopeKey{}).(*indexScope); ok && e.Prov != nil {
 		scope.prov = e.Prov
 		s.mu.Lock()
-		sess, hasSess := s.sessions[root]
+		se, hasSess := s.sessions[root]
 		s.mu.Unlock()
 		if hasSess {
-			if ix, ok := sess.CachedIndex(); ok && ix != nil && ix.Identity != nil {
+			if ix, ok := se.sess.CachedIndex(); ok && ix != nil && ix.Identity != nil {
 				scope.ix = ix
 			}
 		}

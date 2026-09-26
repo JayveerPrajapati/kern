@@ -95,7 +95,7 @@ execution as the user running kern.
 |---|---|
 | Arbitrary command execution | Client causes `kern_exec` to run a hostile command |
 | Shell injection | Command string assembled from attacker-controlled input |
-| Sandbox escape | Command in `kern_sandbox` modifies files outside the snapshot (addressed by snapshot/rollback + confinement) |
+| Sandbox escape | Command in `kern_sandbox` modifies files outside the snapshot root (NOT prevented: the snapshot sandbox is rollback-on-failure, not isolation — commands run with full user privileges and out-of-root writes are never rolled back; only path *arguments* are confined, not the running command) |
 
 ### 2.4 Network
 
@@ -171,8 +171,8 @@ Three independent gates apply:
    a human approves via `RequestExecApproval` / `ResumeExecApproval`
    (`internal/governance/exec.go`).
 
-Callers: `internal/mcp/handlers_exec.go:32`, `cmd/kern/cmd_exec.go:31`,
-`internal/execution/execution.go:56`, `internal/cicd/pipeline.go:85`.
+Callers: `internal/mcp/exec/exec.go:85`, `cmd/kern/cmd_exec.go:73`,
+`internal/execution/execution.go:62`.
 
 ### 3.3 PII masking
 
@@ -191,10 +191,23 @@ Command output and LLM-bound text are scrubbed before they leave the machine.
 Applied to execution output at `internal/mcp/handlers_exec.go:72` and `:335`
 (`pii.Mask(out).Text`); exposed to clients as `kern_mask_pii`.
 
-### 3.4 Sandbox (snapshot / rollback)
+### 3.4 Sandbox (snapshot / rollback — NOT isolation)
 
 `kern_sandbox` snapshots the tree before running a risky command and rolls
-back on failure.
+back on failure. **The sandbox is rollback-on-failure, not isolation:**
+
+- Sandboxed commands run with the caller's **full user privileges** — they
+  are not confined, jailed, or restricted at the OS level.
+- Writes **outside the snapshot root are never rolled back**; only changes
+  inside `root` are reverted on a non-zero exit. The sandbox protects the
+  project tree, nothing else.
+- **File-borne secrets are readable by sandboxed commands**: `~/.aws/credentials`,
+  `~/.ssh/id_rsa`, and any other file the user can read are visible to the
+  command. Only the *environment* is stripped of secret-named variables
+  (see `envAllowlist`/`sanitizedEnv`); the filesystem is not scrubbed.
+- Treat the sandbox as an **undo button for the project tree**, not a
+  security boundary. Do not run untrusted commands in it expecting
+  containment.
 
 - **`Snapshot(root)`** — `internal/sandbox/sandbox.go:151`; **`Restore()`** —
   `internal/sandbox/sandbox.go:345`; **`Run(...)`** —
@@ -233,11 +246,21 @@ back on failure.
 `kern-mcp --http` (streamable HTTP transport) refuses to bind anything but
 the loopback interface:
 
-- `localhostAddr()` — `internal/mcp/http.go:125`: a bare port or empty
-  address binds to `127.0.0.1`; an explicitly supplied LAN IP (`0.0.0.0`,
-  `::`, etc. is remapped; any other host) is **refused outright** with a
-  clear error, because kern-mcp exposes RCE-capable tools and binding beyond
-  loopback would be an unauthenticated network attack surface.
+- **Unix socket by default.** An unspecified transport (`--http auto`, `uds`,
+  or an empty address) serves on a **0600 unix domain socket in a fresh 0700
+  temp dir** (`mcp.ResolveHTTPAddr`, `internal/mcp/http.go`): on a multi-user
+  host a loopback TCP port is reachable by *any* local process (loopback is
+  blanket trust, not authentication), while a 0600 socket file is reachable
+  only by the owning user. The socket is unlinked on clean shutdown. The
+  auto-selection falls back to loopback TCP on `127.0.0.1:8080` only on
+  Windows (no unix sockets) or when the legacy behavior is explicitly forced
+  with `KERN_MCP_TRANSPORT=tcp`.
+- Explicit TCP binds are **loopback only**: `localhostAddr()` —
+  `internal/mcp/http.go:125` — a bare port or empty address binds to
+  `127.0.0.1`; an explicitly supplied LAN IP (`0.0.0.0`, `::`, etc. is
+  remapped; any other host) is **refused outright** with a clear error,
+  because kern-mcp exposes RCE-capable tools and binding beyond loopback
+  would be an unauthenticated network attack surface.
 - Non-local `Origin` headers are rejected (`isLocalhostOrigin`,
   `internal/mcp/http.go`); empty origins (non-browser clients) are allowed.
 - **Optional TLS** (`internal/mcp/http.go`): `kern-mcp --http` serves plain
@@ -297,13 +320,14 @@ The MCP client (the AI agent host) is **semi-trusted**:
 
 | # | Risk | Notes |
 |---|---|---|
-| 1 | **Plaintext HTTP by default** | The HTTP MCP transport serves plaintext on loopback by default; TLS is optional (`--tls-cert`/`--tls-key` or `KERN_MCP_TLS_CERT`/`KERN_MCP_TLS_KEY`). Loopback-only binding + Origin checks mitigate, but a local attacker who can sniff loopback traffic or trick a browser into connecting to `127.0.0.1` gets unauthenticated access. Operators who need the transport outside loopback should enable TLS and put it behind an authenticated proxy; `kern-server` is the supported path for network access. |
+| 1 | **Plaintext HTTP by default** | The HTTP MCP transport serves plaintext on loopback by default; TLS is optional (`--tls-cert`/`--tls-key` or `KERN_MCP_TLS_CERT`/`KERN_MCP_TLS_KEY`). The *auto* transport (an unspecified address) uses a **0600 unix socket** — reachable only by the owning user — and explicit TCP binds are loopback-only with Origin checks, but a local attacker who can sniff loopback traffic or trick a browser into connecting to `127.0.0.1` gets unauthenticated access to an explicitly TCP-bound server. Operators who need the transport outside loopback should enable TLS and put it behind an authenticated proxy; `kern-server` is the supported path for network access. |
 | 2 | **Optional GPG signing** | Release binaries support optional GPG detached signatures when signing keys are configured (`docs/security/signed-releases.md`); binary integrity is verified via `kern verify-receipt` and in-toto/SARIF attestations. |
 | 3 | **Exec tools are powerful** | `kern_exec` / `kern_sandbox` / `kern_execute` run arbitrary host commands as the invoking user. They are opt-in (allowlist + `KERN_ALLOW_EXEC`), fail closed, and can be approval-gated at `HIGH`/`CRITICAL` risk, but a misconfigured `KERN_ALLOW_EXEC=1` + `KERN_EXEC_RISK=LOW` deployment hands an attacker code execution. Operators should keep exec risk at `MEDIUM` or above and review approval requests. |
 | 4 | **Sandbox size limits** | The 100 MiB per-file snapshot cap means very large files are not snapshotted; if such a file is modified or deleted by a run, rollback cannot restore it and refuses loudly. The cap is configurable via `KERN_SANDBOX_MAX_SNAPSHOT_BYTES`, but a raised cap increases memory pressure. |
 | 5 | **Symlink races (TOCTOU)** | Confinement resolves symlinks at check time; a symlink swapped between check and use is not covered. This is the standard TOCTOU limitation and is accepted for a local tool. |
 | 6 | **Phase filtering is not a security boundary** | `KERN_MCP_PHASE` only changes `tools/list` advertisement; a client that knows a tool name can call it. Only `KERN_TOOLS` restricts execution. |
 | 7 | **Local process trust** | Any local process with the user's privileges can already read the workspace and environment; kern adds no defense against that actor. |
+| 8 | **Sandbox is rollback, not isolation** | `kern_sandbox` commands run with full user privileges and can read file-borne secrets (`~/.aws/credentials`, `~/.ssh/id_rsa`); writes outside the snapshot root are never rolled back. Only the snapshot root is restored on failure. Do not treat the sandbox as containment for untrusted code. |
 
 ---
 

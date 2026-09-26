@@ -9,7 +9,7 @@ import (
 
 	"github.com/JayveerPrajapati/kern/internal/domain"
 	"github.com/JayveerPrajapati/kern/internal/index"
-	"github.com/JayveerPrajapati/kern/internal/intelligence"
+	"github.com/JayveerPrajapati/kern/internal/intel"
 )
 
 // whatifFixture writes a tiny Go module with a small call chain plus an
@@ -52,7 +52,7 @@ func TestHelper(t *testing.T) {
 }
 
 // nodeID returns the first node ID whose symbol name matches the simple name.
-func nodeID(g *intelligence.Graph, simple string) string {
+func nodeID(g *intel.Graph, simple string) string {
 	for _, n := range g.Nodes {
 		if n.Symbol != nil && (n.Symbol.Name == simple || strings.HasSuffix(n.Symbol.Name, "."+simple)) {
 			return n.ID
@@ -61,13 +61,13 @@ func nodeID(g *intelligence.Graph, simple string) string {
 	return ""
 }
 
-func buildGraph(t *testing.T) *intelligence.Graph {
+func buildGraph(t *testing.T) *intel.Graph {
 	t.Helper()
 	ix, err := index.Build(whatifFixture(t))
 	if err != nil {
 		t.Fatalf("index.Build: %v", err)
 	}
-	g := intelligence.FromIndex(ix)
+	g := intel.FromIndex(ix)
 	return &g
 }
 

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/fs"
+	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -12,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/JayveerPrajapati/kern/internal/calibrate"
 	"github.com/JayveerPrajapati/kern/internal/ci"
 	"github.com/JayveerPrajapati/kern/internal/config"
 	"github.com/JayveerPrajapati/kern/internal/eventbus"
@@ -48,6 +50,12 @@ type Engine struct {
 	ix        *index.Index  // optional prebuilt index; nil = derive per verification
 	bus       *eventbus.Bus // optional event publisher; nil = no-op
 	CIAdapter ci.CIAdapter  // optional CI/CD adapter; nil = no CI checking
+	// runAt is the timestamp of the current Verify run, used to derive the
+	// per-run .kern/audit/<run-id> subdirectory for captured output logs
+	// (F4). Set at the top of Verify; zero when a sub-verification is
+	// invoked directly (tests, MCP handlers), in which case auditTime falls
+	// back to time.Now().
+	runAt time.Time
 }
 
 // NewEngine creates a verification engine for the given project root.
@@ -91,16 +99,40 @@ func (e *Engine) publish(kind eventbus.Kind, res *VerificationResult) {
 	e.bus.Publish(eventbus.Event{Kind: kind, Source: "verification", Subject: res.Target, Payload: payload})
 }
 
+// auditTime returns the timestamp used to derive the per-run audit
+// subdirectory name for captured output logs. It is the Verify() run
+// timestamp when available; direct sub-verification calls (which skip
+// Verify) fall back to the current time so each still gets its own audit
+// subdirectory.
+func (e *Engine) auditTime() time.Time {
+	if e.runAt.IsZero() {
+		return time.Now()
+	}
+	return e.runAt
+}
+
+// hasGoMod reports whether root is a Go module (go.mod present). It gates
+// `go vet ./...` and the `go test ./...` default, which are only valid
+// inside a module — a module-less root degrades instead of failing (F1).
+func hasGoMod(root string) bool {
+	_, err := os.Stat(filepath.Join(root, "go.mod"))
+	return err == nil
+}
+
 // Verify runs all requested verification types and returns the unified result.
 // Supported types (substring match): "build", "test", "security",
-// "architecture", "dependency", "e2e", "static-analysis", "performance". An
-// empty verifications list runs them all. Ordering of the aggregated result is
-// fixed and deterministic.
+// "architecture", "dependency", "e2e", "static-analysis", "performance",
+// "cve", "license", "secrets". An empty verifications list runs the defaults
+// (build, test, security, architecture, dependency, e2e, static-analysis,
+// performance) — the compliance checks (cve/license/secrets) run ONLY when
+// explicitly requested. Ordering of the aggregated result is fixed and
+// deterministic.
 func (e *Engine) Verify(types []string) VerificationResult {
 	start := time.Now()
 	defer func() { metrics.Default().RecordVerification(time.Since(start)) }()
 
 	now := time.Now()
+	e.runAt = now
 	res := VerificationResult{GeneratedAt: now, Version: version.Version}
 	e.publish(eventbus.VerificationStarted, &res)
 
@@ -119,6 +151,12 @@ func (e *Engine) Verify(types []string) VerificationResult {
 		for _, t := range types {
 			t = strings.ToLower(strings.TrimSpace(t))
 			switch {
+			case strings.Contains(t, "cve"):
+				run["cve"] = true
+			case strings.Contains(t, "licen"):
+				run["license"] = true
+			case strings.Contains(t, "secret"):
+				run["secrets"] = true
 			case strings.Contains(t, "build"):
 				run["build"] = true
 			case strings.Contains(t, "test"), strings.Contains(t, "unit"), strings.Contains(t, "integration"):
@@ -165,6 +203,15 @@ func (e *Engine) Verify(types []string) VerificationResult {
 	if run["performance"] {
 		res.Performance = e.VerifyPerformance()
 	}
+	if run["cve"] {
+		res.CVE = e.VerifyCVE()
+	}
+	if run["license"] {
+		res.License = e.VerifyLicense()
+	}
+	if run["secrets"] {
+		res.Secrets = e.VerifySecrets()
+	}
 	if run["ci"] {
 		res.CI = e.VerifyCI()
 	}
@@ -197,6 +244,19 @@ func (e *Engine) Verify(types []string) VerificationResult {
 		e.publish(eventbus.VerificationFailed, &res)
 	} else {
 		e.publish(eventbus.VerificationCompleted, &res)
+	}
+	// Calibration (Feature Batch C): record this verify run as a "verify"-kind
+	// prediction so the calibration model can later match it against observed
+	// outcomes. Best-effort by design: a failed append is logged and NEVER
+	// fails or changes the verify path. Target is the engine's checked scope
+	// (empty = whole repo); the generic engine path has no file-level scope.
+	if err := calibrate.RecordPrediction(e.root, calibrate.Prediction{
+		Kind:    "verify",
+		Target:  res.Target,
+		Verdict: string(res.Verdict),
+		TS:      now,
+	}); err != nil {
+		log.Printf("verification: calibration prediction NOT recorded: %v", err)
 	}
 	return res
 }
@@ -287,6 +347,33 @@ func summarizeChecks(res *VerificationResult) string {
 	if p := res.Performance; p != nil {
 		add("performance", okWord(p.OK))
 	}
+	if c := res.CVE; c != nil {
+		if c.Status == StatusSkipped {
+			add("cve", "SKIPPED "+firstLine(c.Detail))
+		} else if c.Count > 0 {
+			add("cve", "WARN")
+		} else {
+			add("cve", "PASS")
+		}
+	}
+	if l := res.License; l != nil {
+		if l.Skipped != "" {
+			add("license", "SKIPPED "+l.Skipped)
+		} else if len(l.Findings) > 0 {
+			add("license", "WARN")
+		} else {
+			add("license", "PASS")
+		}
+	}
+	if s := res.Secrets; s != nil {
+		if s.Status == StatusSkipped {
+			add("secrets", "SKIPPED "+firstLine(s.Detail))
+		} else if s.Count > 0 {
+			add("secrets", "WARN")
+		} else {
+			add("secrets", "PASS")
+		}
+	}
 	if len(lines) == 0 {
 		return string(res.Verdict)
 	}
@@ -324,7 +411,9 @@ func (e *Engine) VerifyBuild() *BuildResult {
 		cmd = detected
 	}
 	vr := validate.Run(context.Background(), e.root, cmd, buildTimeout)
-	res.Output = vr.Output
+	// F4: clip the embedded output to the PASS/FAIL caps and persist the
+	// full log under .kern/audit/<run-id>/verify-build.log (path on LogPath).
+	res.Output, res.LogPath = captureOutput(e.root, e.auditTime(), "build", vr.Output, vr.OK)
 	res.Duration = vr.Dur
 	res.OK = vr.OK
 	if !vr.OK && vr.Err != nil && strings.TrimSpace(res.Output) == "" {
@@ -396,9 +485,21 @@ func (e *Engine) VerifyTests() *TestResult {
 			res.Claims = append(res.Claims, evidence.FromTestResult(res.Package, res.OK, res.Output))
 			return res
 		}
+	} else if !hasGoMod(e.root) {
+		// No detected test runner and root is not a Go module: there is no
+		// suite to run. The `go test ./...` default is invalid outside a
+		// module ("directory prefix . does not contain main module"), so an
+		// absent suite reports a clean skip — never a false FAIL (F1;
+		// mirrors the npm no-test-script skip above).
+		res.OK = true
+		res.Output = "skipped: no test runner detected (root has no go.mod)"
+		res.Claims = append(res.Claims, evidence.FromTestResult(res.Package, res.OK, res.Output))
+		return res
 	}
 	sr := sandbox.Run(context.Background(), e.root, cmd, args, testTimeout)
-	res.Output = sr.Output
+	// F4: clip the embedded output and persist the full log under
+	// .kern/audit/<run-id>/verify-test.log (path on LogPath).
+	res.Output, res.LogPath = captureOutput(e.root, e.auditTime(), "test", sr.Output, sr.OK)
 	res.Duration = sr.Duration
 	res.OK = sr.OK
 	for _, line := range strings.Split(sr.Output, "\n") {
@@ -431,7 +532,9 @@ func (e *Engine) VerifyE2ETests() *E2ETestResult {
 	}
 	res := &E2ETestResult{}
 	sr := sandbox.Run(context.Background(), e.root, "go", []string{"test", "-tags", "e2e", "-v", "./..."}, testTimeout)
-	res.Output = sr.Output
+	// F4: clip the embedded output and persist the full log under
+	// .kern/audit/<run-id>/verify-e2e.log (path on LogPath).
+	res.Output, res.LogPath = captureOutput(e.root, e.auditTime(), "e2e", sr.Output, sr.OK)
 	res.Duration = sr.Duration
 	res.OK = sr.OK
 	for _, line := range strings.Split(sr.Output, "\n") {
@@ -451,26 +554,53 @@ func (e *Engine) VerifyE2ETests() *E2ETestResult {
 }
 
 // VerifyStaticAnalysis runs static analysis on the project. It defaults to
-// `go vet ./...`, which is always available for Go modules; other linters
+// `go vet ./...`, which is valid only inside a Go module; other linters
 // (staticcheck, golangci-lint) could be detected here in future. Any finding
-// (a line of vet output) makes OK false.
+// (a line of vet output) makes OK false. A root WITHOUT go.mod is not
+// vet-able (`go vet ./...` dies with "directory prefix . does not contain
+// main module"), so the check degrades to the per-file gofmt -e syntax
+// baseline — mirroring validate/checks.go — and never fails on module
+// absence (F1).
 func (e *Engine) VerifyStaticAnalysis() *StaticAnalysisResult {
-	res := &StaticAnalysisResult{Tool: "go vet"}
+	res := &StaticAnalysisResult{}
 	// Polyglot (C2): static analysis defaults to `go vet` for Go modules and
 	// is otherwise opt-in via `verify.lint` in .kern/config.json (or
 	// KERN_VERIFY_LINT) — ecosystem linters that need project setup (npm
 	// run lint, golangci-lint) would false-fail when unconfigured, so they
-	// are never auto-detected.
-	cmd, args := "go", []string{"vet", "./..."}
+	// are never auto-detected. An explicit override always wins.
 	if override := config.String(e.root, "KERN_VERIFY_LINT", "verify.lint", ""); override != "" {
-		cmd, args = splitVerifyCommand(override)
+		cmd, args := splitVerifyCommand(override)
 		res.Tool = override
-	} else if c, err := validate.DetectKind(e.root, "lint"); err == nil && c.Cmd == "go" {
-		cmd, args = c.Cmd, c.Args
-		res.Tool = c.Name
+		e.runStaticAnalysis(cmd, args, res)
+		return res
 	}
+	// Gate `go vet ./...` on go.mod: on a module-less root it exits 1 with
+	// "pattern ./...: directory prefix . does not contain main module".
+	if hasGoMod(e.root) {
+		res.Tool = "go vet"
+		cmd, args := "go", []string{"vet", "./..."}
+		if c, err := validate.DetectKind(e.root, "lint"); err == nil && c.Cmd == "go" {
+			cmd, args = c.Cmd, c.Args
+			res.Tool = c.Name
+		}
+		e.runStaticAnalysis(cmd, args, res)
+		return res
+	}
+	// Module-less root: per-file `gofmt -e` syntax baseline (mirrors
+	// checks.go's no-module path). gofmt -e exits non-zero only on syntax
+	// errors; on success it prints the reformatted file, which is noise and
+	// is discarded.
+	res.Tool = "gofmt -e"
+	e.runGofmtBaseline(res)
+	return res
+}
+
+// runStaticAnalysis executes a linter command and parses its output into the
+// result: non-empty, non-#-prefixed lines are findings; OK requires a clean
+// exit AND no findings. Output is captured per the F4 caps and the full log
+// is persisted to .kern/audit/<run-id>/verify-static-analysis.log.
+func (e *Engine) runStaticAnalysis(cmd string, args []string, res *StaticAnalysisResult) {
 	sr := sandbox.Run(context.Background(), e.root, cmd, args, testTimeout)
-	res.Output = sr.Output
 	res.Duration = sr.Duration
 	for _, line := range strings.Split(sr.Output, "\n") {
 		if line = strings.TrimSpace(line); line == "" {
@@ -481,7 +611,60 @@ func (e *Engine) VerifyStaticAnalysis() *StaticAnalysisResult {
 		}
 	}
 	res.OK = sr.OK && len(res.Findings) == 0
-	return res
+	res.Output, res.LogPath = captureOutput(e.root, e.auditTime(), "static-analysis", sr.Output, res.OK)
+}
+
+// runGofmtBaseline runs the module-less static-analysis fallback: per-file
+// `gofmt -e` over the Go files under root, bounded to small repos (the
+// checks.go bound). Files with syntax errors become findings. A repo with no
+// files, or too many for a per-file pass, reports clean — the deterministic
+// syntax baseline has nothing to fail, and a module-less root must never
+// fail static analysis on module absence.
+func (e *Engine) runGofmtBaseline(res *StaticAnalysisResult) {
+	var files []string
+	_ = filepath.WalkDir(e.root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if d.IsDir() {
+			if path != e.root && index.IgnoredDir(d.Name()) {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if filepath.Ext(path) == ".go" {
+			// Root-relative so gofmt -e <rel> resolves from the sandbox
+			// working directory (root), whatever subdirectory the file
+			// lives in.
+			rel, rerr := filepath.Rel(e.root, path)
+			if rerr != nil {
+				return nil
+			}
+			files = append(files, filepath.ToSlash(rel))
+		}
+		return nil
+	})
+	res.OK = true
+	if len(files) == 0 || len(files) > 8 {
+		res.Output = "no go.mod detected; static analysis degraded to the per-file gofmt -e syntax baseline (module-less root)"
+		return
+	}
+	var out strings.Builder
+	for _, f := range files {
+		sr := sandbox.Run(context.Background(), e.root, "gofmt", []string{"-e", f}, testTimeout)
+		res.Duration += sr.Duration
+		if !sr.OK {
+			res.OK = false
+			for _, line := range strings.Split(sr.Output, "\n") {
+				if line = strings.TrimSpace(line); line == "" {
+					continue
+				}
+				res.Findings = append(res.Findings, line)
+				out.WriteString(line + "\n")
+			}
+		}
+	}
+	res.Output, res.LogPath = captureOutput(e.root, e.auditTime(), "static-analysis", strings.TrimSuffix(out.String(), "\n"), res.OK)
 }
 
 // VerifyPerformance runs the project benchmarks (`go test -bench=. -benchmem`)
@@ -514,7 +697,7 @@ func (e *Engine) VerifyPerformance() *PerformanceResult {
 		}
 		res.Benchmarks = append(res.Benchmarks, b)
 	}
-	res.Output = sr.Output
+	res.Output, res.LogPath = captureOutput(e.root, e.auditTime(), "performance", sr.Output, sr.OK)
 	res.Duration = sr.Duration
 	res.OK = sr.OK
 	return res

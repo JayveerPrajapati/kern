@@ -25,6 +25,12 @@ func (f fakePRProvider) CreatePR(req prprovider.Request) (*prprovider.Result, er
 	return &prprovider.Result{Number: f.num, URL: f.url, State: "open"}, nil
 }
 
+// CommentPR satisfies the extended prprovider.Provider interface. The fake
+// never posts comments; a nil return keeps the comment hook a no-op in tests.
+func (f fakePRProvider) CommentPR(ctx context.Context, req prprovider.CommentRequest) error {
+	return nil
+}
+
 // TestEngineCreateFixPRRequiresVerified verifies that CreateFixPR refuses to
 // create a PR when the incident is not in FIX_VERIFIED state, and that no PR
 // fields are stamped on the incident.

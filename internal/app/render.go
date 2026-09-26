@@ -58,6 +58,10 @@ func renderWhatIfText(kind whatif.ChangeKind, change, target string, imp whatif.
 	if len(imp.UntestedAffected) > 0 {
 		fmt.Fprintf(&b, "Untested affected: %s\n", strings.Join(imp.UntestedAffected, ", "))
 	}
+	if len(imp.Entities) > 0 {
+		fmt.Fprintf(&b, "Affected entities: %d\n", len(imp.Entities))
+		renderEntityImpactRows(&b, whatifEntityRows(imp.Entities))
+	}
 	fmt.Fprintf(&b, "risk: %s\n", imp.Risk)
 	fmt.Fprintf(&b, "recommendation: %s\n", imp.Recommendation)
 	if imp.Evidence != "" {
@@ -363,7 +367,7 @@ func renderImpactText(r domain.ImpactReport) string {
 	renderImpactList(&b, r.DataStoresAffected)
 	fmt.Fprintf(&b, "Events affected: %d\n", len(r.EventsAffected))
 	renderImpactList(&b, r.EventsAffected)
-	fmt.Fprintf(&b, "Tests that cover it: %d\n", len(r.TestsCover))
+	fmt.Fprintf(&b, "Tests that cover it (direct callers + same-package): %d\n", len(r.TestsCover))
 	renderImpactList(&b, r.TestsCover)
 	if len(r.IncidentsRelated) > 0 {
 		fmt.Fprintf(&b, "Incidents related: %d\n", len(r.IncidentsRelated))
@@ -372,6 +376,10 @@ func renderImpactText(r domain.ImpactReport) string {
 	if len(r.ArchitectureRules) > 0 {
 		fmt.Fprintf(&b, "Architecture rules: %d\n", len(r.ArchitectureRules))
 		renderImpactList(&b, r.ArchitectureRules)
+	}
+	if len(r.Entities) > 0 {
+		fmt.Fprintf(&b, "Affected entities: %d\n", len(r.Entities))
+		renderEntityImpactRows(&b, domainEntityRows(r.Entities))
 	}
 	// A change target that resolved to nothing (no callers, no callees, no
 	// tests) is almost always an ambiguous or unindexed symbol, not a truly
@@ -400,6 +408,57 @@ func renderCorrelationText(chain runtime.CorrelationChain) string {
 	return b.String()
 }
 
+// renderCodeCorrelationText renders the incident→twin→code correlation
+// report (Feature Batch D): runtime evidence plus the twin-resolved
+// implicated files, symbols, confidence, and any auto-attached playbook.
+func renderCodeCorrelationText(c Correlation) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "CORRELATION for alert: %s\n", c.Alert.ID)
+	if c.AffectedService != "" {
+		fmt.Fprintf(&b, "Affected service: %s\n", c.AffectedService)
+	}
+	fmt.Fprintf(&b, "Confidence: %s\n", c.Confidence)
+	if len(c.RuntimeEvidence) > 0 {
+		fmt.Fprintf(&b, "Runtime evidence:\n")
+		for _, line := range c.RuntimeEvidence {
+			fmt.Fprintf(&b, "  %s\n", line)
+		}
+	}
+	if len(c.ImplicatedFiles) > 0 {
+		fmt.Fprintf(&b, "Implicated files (%d):\n", len(c.ImplicatedFiles))
+		for _, f := range c.ImplicatedFiles {
+			fmt.Fprintf(&b, "  %s\n", f)
+		}
+	} else {
+		b.WriteString("Implicated files: none (service not mapped to code)\n")
+	}
+	if len(c.ImplicatedSymbols) > 0 {
+		fmt.Fprintf(&b, "Implicated symbols (%d):\n", len(c.ImplicatedSymbols))
+		for _, s := range c.ImplicatedSymbols {
+			fmt.Fprintf(&b, "  %s\n", s)
+		}
+	}
+	renderPlaybookSection(&b, c.PlaybookSignature, c.PlaybookSteps, "")
+	return b.String()
+}
+
+// renderPlaybookSection writes the heal-playbook section (auto-attach) when a
+// playbook is present; sourcePrefix (e.g. "Playbook: ") is used to prefix the
+// signature line.
+func renderPlaybookSection(b *strings.Builder, signature string, steps []string, source string) {
+	if signature == "" {
+		return
+	}
+	fmt.Fprintf(b, "Playbook: %s", signature)
+	if source != "" {
+		fmt.Fprintf(b, " (from %s)", source)
+	}
+	b.WriteString("\n")
+	for _, s := range steps {
+		fmt.Fprintf(b, "  step: %s\n", s)
+	}
+}
+
 // renderIncidentText renders an incident's current state as text.
 func renderIncidentText(inc *domain.Incident) string {
 	var b strings.Builder
@@ -416,6 +475,9 @@ func renderIncidentText(inc *domain.Incident) string {
 	} else {
 		b.WriteString("Root cause: none identified\n")
 	}
+	// Heal-playbook auto-attach (Feature Batch D): surface the attached
+	// playbook steps in the incident report when a stored playbook matched.
+	renderPlaybookSection(&b, inc.PlaybookSignature, inc.PlaybookSteps, inc.PlaybookSource)
 	return b.String()
 }
 
@@ -470,4 +532,48 @@ func renderModernizePhaseText(phase modernization.ExtractionPhase) string {
 		fmt.Fprintf(&b, "Task: %s\n", phase.TaskID)
 	}
 	return b.String()
+}
+
+// entityRow is the render view of an entity impact entry — the fields the
+// "Affected entities" section prints. It exists so the shared row renderer
+// works for both report shapes (whatif.EntityImpact and domain.EntityImpact).
+type entityRow struct {
+	kind    string
+	name    string
+	file    string
+	symbols []string
+}
+
+// whatifEntityRows adapts whatif.EntityImpact entries to render rows.
+func whatifEntityRows(ents []whatif.EntityImpact) []entityRow {
+	rows := make([]entityRow, 0, len(ents))
+	for _, e := range ents {
+		rows = append(rows, entityRow{kind: e.Kind, name: e.Name, file: e.File, symbols: e.Symbols})
+	}
+	return rows
+}
+
+// domainEntityRows adapts domain.EntityImpact entries to render rows.
+func domainEntityRows(ents []domain.EntityImpact) []entityRow {
+	rows := make([]entityRow, 0, len(ents))
+	for _, e := range ents {
+		rows = append(rows, entityRow{kind: e.Kind, name: e.Name, file: e.File, symbols: e.Symbols})
+	}
+	return rows
+}
+
+// renderEntityImpactRows prints the "Affected entities" entries in the shared
+// plain-text style: "- <Kind> <Name> (<file>)  ← <symbol1>, <symbol2>". The
+// file parenthetical is omitted when the entity has no known file.
+func renderEntityImpactRows(b *strings.Builder, rows []entityRow) {
+	for _, r := range rows {
+		fmt.Fprintf(b, "  - %s %s", r.kind, r.name)
+		if r.file != "" {
+			fmt.Fprintf(b, " (%s)", r.file)
+		}
+		if len(r.symbols) > 0 {
+			fmt.Fprintf(b, "  ← %s", strings.Join(r.symbols, ", "))
+		}
+		fmt.Fprintln(b)
+	}
 }

@@ -18,14 +18,8 @@ import (
 // This is "Task is authoritative" CLI surface: every analyze/what-if/
 // verify that creates a Task can be queried here afterward.
 func runTask(rest []string) {
-	f, args, err := parseFlags(rest)
-	if err != nil {
-		fatalUsage("flags: %v", err)
-	}
-	root := f.root
-	if root == "" {
-		root = "."
-	}
+	f, args := parseFlagsOrDie(rest)
+	root := projectRoot(f)
 	if len(args) < 1 || args[0] == "" {
 		fatalUsage("usage: kern task <id> [--root ROOT]")
 		fatalUsage("       kern task resume <id> [--root ROOT]")
@@ -236,14 +230,8 @@ func runTaskEfficiency(root, id string) {
 // efficiency <id>`. It parses the standard --root flag so callers can target a
 // different workspace.
 func runEfficiency(rest []string) {
-	f, args, err := parseFlags(rest)
-	if err != nil {
-		fatalUsage("flags: %v", err)
-	}
-	root := f.root
-	if root == "" {
-		root = "."
-	}
+	f, args := parseFlagsOrDie(rest)
+	root := projectRoot(f)
 	if len(args) < 1 || args[0] == "" {
 		fatalUsage("usage: kern efficiency <id> [--root ROOT]")
 		return
@@ -270,14 +258,8 @@ func runTaskRetry(root, id string) {
 // id/state/intent/updated columns, complementing the `kern task <id>` detail
 // command. `kern task list` routes here too.
 func runTasks(rest []string) {
-	f, args, err := parseFlags(rest)
-	if err != nil {
-		fatalUsage("flags: %v", err)
-	}
-	root := f.root
-	if root == "" {
-		root = "."
-	}
+	f, args := parseFlagsOrDie(rest)
+	root := projectRoot(f)
 	if len(args) > 0 {
 		fatalUsage("usage: kern tasks [--root ROOT]")
 	}

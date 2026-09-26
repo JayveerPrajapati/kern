@@ -14,14 +14,8 @@ import (
 // one immutable, deterministic evidence packet that any
 // reviewer (human, model, or council member) can be given verbatim.
 func runReviewPack(rest []string) int {
-	f, args, err := parseFlags(rest)
-	if err != nil {
-		fatalUsage("flags: %v", err)
-	}
-	root := f.root
-	if root == "" {
-		root = "."
-	}
+	f, args := parseFlagsOrDie(rest)
+	root := projectRoot(f)
 	if len(args) > 0 {
 		root = args[0]
 	}

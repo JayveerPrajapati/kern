@@ -105,5 +105,5 @@ func TestGaps(ctx context.Context, h Hooks, args map[string]any) (string, error)
 	}
 	c := intel.AnalyzeCoverage(ix)
 	c.HotGaps = intel.TestGaps(ix, limit)
-	return c.Render(), nil
+	return c.RenderLimited(limit), nil
 }

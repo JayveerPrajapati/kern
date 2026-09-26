@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"github.com/JayveerPrajapati/kern/internal/app"
 	kernctx "github.com/JayveerPrajapati/kern/internal/context"
+	"github.com/JayveerPrajapati/kern/internal/index"
 	"github.com/JayveerPrajapati/kern/internal/intel"
+	"github.com/JayveerPrajapati/kern/internal/twin"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -16,19 +18,33 @@ import (
 )
 
 func runGraph(rest []string) {
-	f, args, err := parseFlags(rest)
-	if err != nil {
-		fatalUsage("flags: %v", err)
+	f, args := parseFlagsOrDie(rest)
+	if len(args) < 1 && !f.html && !f.entities {
+		fatalUsage("usage: kern graph <symbol> [root] [--mermaid] [--one-line] [--entities] [--json] [--graphml] [--cypher] [--html] [--out FILE] [--max-tokens N] [--limit N]")
 	}
-	if len(args) < 1 && !f.html {
-		fatalUsage("usage: kern graph <symbol> [root] [--mermaid] [--json] [--graphml] [--cypher] [--html] [--out FILE] [--max-tokens N] [--limit N]")
+	if len(args) < 1 && f.entities {
+		// No symbol + --entities: render the repo's entity inventory (all
+		// twin entity nodes, grouped by kind) — text or JSON.
+		root := projectRoot(f)
+		ix, err := loadOrBuild(root)
+		if err != nil {
+			fatal("Graph: %v", err)
+		}
+		ents, _ := twin.Entities(twin.MergeIntoIndex(ix, root), "")
+		if f.limit > 0 && len(ents) > f.limit {
+			fmt.Fprintf(os.Stderr, "kern: entity inventory capped at --limit %d (%d omitted)\n", f.limit, len(ents)-f.limit)
+			ents = ents[:f.limit]
+		}
+		if f.json {
+			printJSON(map[string]any{"entities": ents})
+			return
+		}
+		graphOut(f, twin.RenderEntities(ents))
+		return
 	}
 	if len(args) < 1 {
 		// Whole-repo explorer: kern graph --html [root] [--limit N]
-		root := f.root
-		if root == "" {
-			root = "."
-		}
+		root := projectRoot(f)
 		if f.limit == 0 {
 			f.limit = 400
 			fmt.Fprintf(os.Stderr, "kern: whole-repo graph limited to 400 symbols (--limit to raise)\n")
@@ -50,27 +66,66 @@ func runGraph(rest []string) {
 		return
 	}
 	symbol := args[0]
-	root := f.root
-	if root == "" {
-		root = "."
-		if len(args) > 1 {
-			root = args[1]
-		}
+	root := projectRoot(f)
+	if f.root == "" && len(args) > 1 {
+		root = args[1]
 	}
 	ix, err := loadOrBuild(root)
 	if err != nil {
 		fatal("Graph: %v", err)
 	}
+	if f.entities {
+		// --entities renders the digital-twin entity nodes connected to the
+		// queried symbol via twin edges (API endpoints, DB tables, topics,
+		// services, deployments). The CLI graph path is code-graph only, so
+		// the twin extractors are merged in the same way platform.go wires
+		// them for the web/app graph (twin.MergeIntoIndex).
+		ents, eerr := twin.Entities(twin.MergeIntoIndex(ix, root), symbol)
+		if eerr != nil {
+			fatalNoSymbol(symbol, ix)
+		}
+		if f.limit > 0 && len(ents) > f.limit {
+			fmt.Fprintf(os.Stderr, "kern: entities capped at --limit %d (%d omitted)\n", f.limit, len(ents)-f.limit)
+			ents = ents[:f.limit]
+		}
+		if f.json {
+			printJSON(map[string]any{"entities": ents})
+			return
+		}
+		graphOut(f, twin.RenderEntities(ents))
+		return
+	}
 	if f.mermaid {
 		out := ix.Mermaid(symbol)
+		// Mermaid renders "" for an unresolvable symbol (no error return),
+		// so an empty render is the no-symbol-found signal: fail with the
+		// same did-you-mean message as the other graph paths instead of
+		// printing nothing and exiting 0.
+		if out == "" {
+			fatalNoSymbol(symbol, ix)
+		}
 		if f.limit > 0 {
 			out = capMermaid(out, f.limit)
 		}
 		graphOut(f, out)
 		return
 	}
+	if f.oneLine {
+		// --one-line renders the single-line call-graph neighbourhood
+		// (definition, callers, callees) — the CLI mirror of the MCP
+		// kern_graph format=one-line contract (surface consolidation T2b).
+		out := ix.Graph(symbol)
+		// ix.Graph renders "no symbol found: <symbol>" into the output
+		// without an error return; treat it as a failed lookup (exit 1 with
+		// did-you-mean) instead of printing the bare message with exit 0.
+		if strings.Contains(out, "no symbol found") {
+			fatalNoSymbol(symbol, ix)
+		}
+		graphOut(f, out)
+		return
+	}
 	if f.json || f.graphml || f.cypher || f.html {
-		g, gerr := svc.Graph.Neighborhood(context.Background(), root, symbol)
+		g, gerr := intel.Neighborhood(ix, symbol)
 		if gerr != nil {
 			fatalNoSymbol(symbol, ix)
 		}
@@ -108,13 +163,19 @@ func runGraph(rest []string) {
 	if f.maxTokens > 0 {
 		out, err := intel.GraphCtxMin(ix, symbol, f.maxTokens, f.minConfidence)
 		if err != nil {
+			// Unknown symbols get the same did-you-mean suggestions as the
+			// other graph paths (fatalNoSymbol); genuine context failures
+			// keep their specific message.
+			if strings.Contains(err.Error(), "unknown symbol") {
+				fatalNoSymbol(symbol, ix)
+			}
 			fatal("Graph: %v", err)
 		}
 		graphOut(f, out)
 		return
 	}
-	out, gerr := svc.Graph.Graph(context.Background(), root, symbol)
-	if gerr != nil || strings.Contains(out, "no symbol found") {
+	out := intel.GraphText(ix, symbol)
+	if strings.Contains(out, "no symbol found") {
 		fatalNoSymbol(symbol, ix)
 	}
 	if f.limit > 0 {
@@ -196,20 +257,14 @@ func typeKindOf(kind string) bool {
 }
 
 func runInherits(rest []string) {
-	f, args, err := parseFlags(rest)
-	if err != nil {
-		fatalUsage("flags: %v", err)
-	}
+	f, args := parseFlagsOrDie(rest)
 	if len(args) < 1 {
 		fatalUsage("usage: kern inherits <symbol> [root] [--json]")
 	}
 	symbol := args[0]
-	root := f.root
-	if root == "" {
-		root = "."
-		if len(args) > 1 {
-			root = args[1]
-		}
+	root := projectRoot(f)
+	if f.root == "" && len(args) > 1 {
+		root = args[1]
 	}
 	ix, err := loadOrBuild(root)
 	if err != nil {
@@ -261,26 +316,20 @@ func runInherits(rest []string) {
 }
 
 func runWhy(rest []string) {
-	f, args, err := parseFlags(rest)
-	if err != nil {
-		fatalUsage("flags: %v", err)
-	}
+	f, args := parseFlagsOrDie(rest)
 	if len(args) < 1 {
 		fatalUsage("usage: kern why <symbol> [root] [--json]")
 	}
 	symbol := args[0]
-	root := f.root
-	if root == "" {
-		root = "."
-		if len(args) > 1 {
-			root = args[1]
-		}
+	root := projectRoot(f)
+	if f.root == "" && len(args) > 1 {
+		root = args[1]
 	}
 	ix, err := loadOrBuild(root)
 	if err != nil {
 		fatal("Why: %v", err)
 	}
-	info, werr := svc.Graph.Why(context.Background(), root, symbol)
+	info, werr := intel.WhySymbol(ix, symbol)
 	if werr != nil {
 		fatalNoSymbol(symbol, ix)
 	}
@@ -317,16 +366,10 @@ func runWiki(rest []string) {
 		}
 		wikiArgs = append(wikiArgs, a)
 	}
-	f, args, err := parseFlags(wikiArgs)
-	if err != nil {
-		fatalUsage("flags: %v", err)
-	}
-	root := f.root
-	if root == "" {
-		root = "."
-		if len(args) > 0 {
-			root = args[0]
-		}
+	f, args := parseFlagsOrDie(wikiArgs)
+	root := projectRoot(f)
+	if f.root == "" && len(args) > 0 {
+		root = args[0]
 	}
 	ix, err := loadOrBuild(root)
 	if err != nil {
@@ -345,16 +388,10 @@ func runWiki(rest []string) {
 }
 
 func runHubs(rest []string) {
-	f, args, err := parseFlags(rest)
-	if err != nil {
-		fatalUsage("flags: %v", err)
-	}
-	root := f.root
-	if root == "" {
-		root = "."
-		if len(args) > 0 {
-			root = args[0]
-		}
+	f, args := parseFlagsOrDie(rest)
+	root := projectRoot(f)
+	if f.root == "" && len(args) > 0 {
+		root = args[0]
 	}
 	ix, err := intel.ReadIndex(root)
 	if err != nil {
@@ -363,6 +400,20 @@ func runHubs(rest []string) {
 	limit := f.limit
 	if limit <= 0 {
 		limit = 10
+	}
+	if f.bridgesOnly {
+		// --bridges-only: render the coupling-point report alone instead of
+		// the hubs+bridges bundle.
+		bLimit := f.limit
+		if bLimit <= 0 {
+			bLimit = 15
+		}
+		if f.json {
+			printJSON(map[string]any{"bridges": intel.Bridges(ix, bLimit)})
+			return
+		}
+		fmt.Println(intel.RenderBridges(intel.Bridges(ix, bLimit)))
+		return
 	}
 	if f.json {
 		// Ordered struct (not a map) so JSON key order is stable: hubs
@@ -381,10 +432,7 @@ func runHubs(rest []string) {
 }
 
 func runBridges(rest []string) {
-	f, args, err := parseFlags(rest)
-	if err != nil {
-		fatalUsage("flags: %v", err)
-	}
+	f, args := parseFlagsOrDie(rest)
 	_, ix, err := resolveRoot(f, args)
 	if err != nil {
 		fatal("Bridges: %v", err)
@@ -402,19 +450,20 @@ func runBridges(rest []string) {
 }
 
 func runTestgaps(rest []string) {
-	f, args, err := parseFlags(rest)
-	if err != nil {
-		fatalUsage("flags: %v", err)
-	}
+	f, args := parseFlagsOrDie(rest)
 	_, ix, err := resolveRoot(f, args)
 	if err != nil {
 		fatal("Testgaps: %v", err)
 	}
 	cov := intel.AnalyzeCoverage(ix)
 	if f.json {
+		gaps := cov.Gaps
+		if f.limit > 0 && len(gaps) > f.limit {
+			gaps = gaps[:f.limit]
+		}
 		printJSON(map[string]any{
 			"coverage": cov,
-			"gaps":     intel.TestGaps(ix, f.limit),
+			"gaps":     gaps,
 		})
 		return
 	}
@@ -423,10 +472,7 @@ func runTestgaps(rest []string) {
 }
 
 func runFlows(rest []string) {
-	f, args, err := parseFlags(rest)
-	if err != nil {
-		fatalUsage("flags: %v", err)
-	}
+	f, args := parseFlagsOrDie(rest)
 	_, ix, err := resolveRoot(f, args)
 	if err != nil {
 		fatal("Flows: %v", err)
@@ -440,79 +486,8 @@ func runFlows(rest []string) {
 
 }
 
-func runEntries(rest []string) {
-	f, args, err := parseFlags(rest)
-	if err != nil {
-		fatalUsage("flags: %v", err)
-	}
-	_, ix, err := resolveRoot(f, args)
-	if err != nil {
-		fatal("Entries: %v", err)
-	}
-	limit := f.limit
-	if limit <= 0 {
-		limit = 50
-	}
-	type entry struct {
-		Framework string `json:"framework"`
-		Symbol    string `json:"symbol"`
-		Route     string `json:"route"`
-		File      string `json:"file"`
-		Line      int    `json:"line"`
-	}
-	var entries []entry
-	var b strings.Builder
-	n := 0
-	pkgOf := map[string]string{} // file -> package name
-	for _, p := range ix.Pkgs {
-		for _, f := range p.Files {
-			if _, ok := pkgOf[f]; !ok {
-				pkgOf[f] = p.Name
-			}
-		}
-	}
-	for _, s := range ix.Symbols {
-		framework := ""
-		route := ""
-		if s.Entry && s.Framework != "" {
-			framework = s.Framework
-			route = s.Route
-		} else if fwID, ok := goNativeEntry(s, pkgOf); ok {
-			// Language-native entry points (Go main/init) alongside the
-			// framework-tagged ones.
-			framework = fwID
-			route = "-"
-		}
-		if framework == "" {
-			continue
-		}
-		if f.json {
-			entries = append(entries, entry{framework, s.FullName(), route, s.File, s.Line})
-		} else {
-			fmt.Fprintf(&b, "%s %s %s %s:%d\n", framework, s.FullName(), route, s.File, s.Line)
-		}
-		n++
-		if n >= limit {
-			break
-		}
-	}
-	if f.json {
-		printJSON(map[string]any{"entries": entries})
-		return
-	}
-	if n == 0 {
-		fmt.Println("no framework entry points in index (run kern index to populate)")
-		return
-	}
-	fmt.Print(b.String())
-
-}
-
 func runCommunities(rest []string) {
-	f, args, err := parseFlags(rest)
-	if err != nil {
-		fatalUsage("flags: %v", err)
-	}
+	f, args := parseFlagsOrDie(rest)
 	_, ix, err := resolveRoot(f, args)
 	if err != nil {
 		fatal("Communities: %v", err)
@@ -533,10 +508,7 @@ func runCommunities(rest []string) {
 }
 
 func runPath(rest []string) {
-	f, args, err := parseFlags(rest)
-	if err != nil {
-		fatalUsage("flags: %v", err)
-	}
+	f, args := parseFlagsOrDie(rest)
 	// --from/--to are flag aliases for the positional form
 	// `kern path <from-symbol> <to-symbol> [root]`; the positional form
 	// remains supported. The root is optional in both forms.
@@ -550,12 +522,9 @@ func runPath(rest []string) {
 	} else if from == "" || to == "" {
 		fatalUsage("usage: kern path --from <from-symbol> --to <to-symbol> [root]  (both flags required together)")
 	}
-	root := f.root
-	if root == "" {
-		root = "."
-		if len(args) > 2 {
-			root = args[2]
-		}
+	root := projectRoot(f)
+	if f.root == "" && len(args) > 2 {
+		root = args[2]
 	}
 	ix, err := intel.ReadIndex(root)
 	if err != nil {
@@ -575,7 +544,7 @@ func runPath(rest []string) {
 			perr = fmt.Errorf("no path found between %s and %s", from, to)
 		}
 	} else {
-		path, perr = svc.Graph.Path(context.Background(), root, from, to)
+		path, perr = intel.PathBetween(ix, from, to)
 	}
 	if perr != nil {
 		fatal("Path: %v", perr)
@@ -594,10 +563,7 @@ func runPath(rest []string) {
 }
 
 func runDead(rest []string) {
-	f, args, err := parseFlags(rest)
-	if err != nil {
-		fatalUsage("flags: %v", err)
-	}
+	f, args := parseFlagsOrDie(rest)
 	_, ix, err := resolveRoot(f, args)
 	if err != nil {
 		fatal("Dead: %v", err)
@@ -615,10 +581,7 @@ func runDead(rest []string) {
 }
 
 func runLarges(rest []string) {
-	f, args, err := parseFlags(rest)
-	if err != nil {
-		fatalUsage("flags: %v", err)
-	}
+	f, args := parseFlagsOrDie(rest)
 	_, ix, err := resolveRoot(f, args)
 	if err != nil {
 		fatal("Larges: %v", err)
@@ -640,10 +603,7 @@ func runLarges(rest []string) {
 }
 
 func runArch(rest []string) {
-	f, args, err := parseFlags(rest)
-	if err != nil {
-		fatalUsage("flags: %v", err)
-	}
+	f, args := parseFlagsOrDie(rest)
 	_, ix, err := resolveRoot(f, args)
 	if err != nil {
 		fatal("Arch: %v", err)
@@ -662,14 +622,8 @@ func runArch(rest []string) {
 // followed by the extracted API endpoint list. Deterministic ordering: kinds
 // and endpoint names are sorted.
 func runTwin(rest []string) {
-	f, args, err := parseFlags(rest)
-	if err != nil {
-		fatalUsage("flags: %v", err)
-	}
-	root := f.root
-	if root == "" {
-		root = "."
-	}
+	f, args := parseFlagsOrDie(rest)
+	root := projectRoot(f)
 	if len(args) > 0 {
 		root = args[0]
 	}
@@ -677,7 +631,7 @@ func runTwin(rest []string) {
 	// path) would build a graph on a bogus root and make the governance
 	// store log "approvals.json: not a directory" noise, so validate first.
 	if fi, err := os.Stat(root); err != nil || !fi.IsDir() {
-		fatalUsage("twin: %s is not a directory (usage: kern twin [root] [--root DIR])", root)
+		fatalUsage("twin: %s is not a directory (usage: kern twin [root] [--root ROOT])", root)
 	}
 	p, err := app.New(root)
 	if err != nil {
@@ -717,16 +671,10 @@ func runTwin(rest []string) {
 }
 
 func runChurn(rest []string) {
-	f, args, err := parseFlags(rest)
-	if err != nil {
-		fatalUsage("flags: %v", err)
-	}
-	root := f.root
-	if root == "" {
-		root = "."
-		if len(args) > 0 {
-			root = args[0]
-		}
+	f, args := parseFlagsOrDie(rest)
+	root := projectRoot(f)
+	if f.root == "" && len(args) > 0 {
+		root = args[0]
 	}
 	from, to := splitRange(f.range_)
 	report, err := intel.Churn(root, from, to)
@@ -742,16 +690,10 @@ func runChurn(rest []string) {
 }
 
 func runCochange(rest []string) {
-	f, args, err := parseFlags(rest)
-	if err != nil {
-		fatalUsage("flags: %v", err)
-	}
-	root := f.root
-	if root == "" {
-		root = "."
-		if len(args) > 0 {
-			root = args[0]
-		}
+	f, args := parseFlagsOrDie(rest)
+	root := projectRoot(f)
+	if f.root == "" && len(args) > 0 {
+		root = args[0]
 	}
 	from, to := splitRange(f.range_)
 	report, err := intel.CoChangeContext(context.Background(), root, from, to)
@@ -767,23 +709,44 @@ func runCochange(rest []string) {
 }
 
 func runExplore(rest []string) {
-	f, args, err := parseFlags(rest)
-	if err != nil {
-		fatalUsage("flags: %v", err)
-	}
+	f, args := parseFlagsOrDie(rest)
 	if len(args) < 1 {
 		fatalUsage("usage: kern explore <symbol> [root] [--depth N] [--max N] [--explain]")
 	}
-	root := f.root
-	if root == "" {
-		root = "."
-		if len(args) > 1 {
-			root = args[1]
-		}
+	root := projectRoot(f)
+	if f.root == "" && len(args) > 1 {
+		root = args[1]
 	}
 	ix, err := intel.ReadIndex(root)
 	if err != nil {
 		fatal("Explore: %v", err)
+	}
+	// The verb is documented as "explore <symbol|file>": a file argument
+	// (exact indexed path, root-relative path, an existing path on disk,
+	// or a unique basename) renders that file's symbols instead of failing
+	// symbol lookup.
+	if rel, ok := indexedFile(ix, root, args[0]); ok {
+		var syms []index.Symbol
+		for _, s := range ix.Symbols {
+			if s.File == rel {
+				syms = append(syms, s)
+			}
+		}
+		sort.Slice(syms, func(i, j int) bool { return syms[i].Line < syms[j].Line })
+		if f.json {
+			printJSON(map[string]any{"file": rel, "symbols": syms})
+			return
+		}
+		var b strings.Builder
+		fmt.Fprintf(&b, "file: %s (%d symbols)\n", rel, len(syms))
+		for _, s := range syms {
+			fmt.Fprintf(&b, "  %-10s %-7s %s:%d\n", s.Kind, s.Lang, s.Name, s.Line)
+		}
+		if len(syms) > 0 {
+			b.WriteString("hint: run `kern explore <symbol>` for a symbol's callers, callees and blast radius\n")
+		}
+		fmt.Print(b.String())
+		return
 	}
 	// P2-8 promotion defaults: a bounded answer (2 hops, 30 nodes) unless
 	// the caller asks otherwise. --depth 0 keeps the uncapped radius.
@@ -815,40 +778,41 @@ func runExplore(rest []string) {
 }
 
 func runNear(rest []string) {
-	f, args, err := parseFlags(rest)
-	if err != nil {
-		fatalUsage("flags: %v", err)
-	}
+	f, args := parseFlagsOrDie(rest)
 	if len(args) < 1 {
 		fatalUsage("usage: kern near <symbol> [root] [--depth N] [--max N]")
 	}
-	root := f.root
-	if root == "" {
-		root = "."
-		if len(args) > 1 {
-			root = args[1]
-		}
+	root := projectRoot(f)
+	if f.root == "" && len(args) > 1 {
+		root = args[1]
 	}
 	ix, err := intel.ReadIndex(root)
 	if err != nil {
 		fatal("Near: %v", err)
 	}
-	depth := f.depth
-	if depth < 0 {
-		depth = 2
+	// F-NR1 (the --precision F22 pattern): a negative flag value is a
+	// usage error, not a silently-swapped default. parseFlags' unset
+	// default is depth=-1 / max=0; an explicit --depth 0 stays 0.
+	if f.depth < -1 {
+		fatalUsage("near: invalid --depth %d (must be >= 0)", f.depth)
 	}
-	maxN := f.max
-	if maxN <= 0 {
-		maxN = 100
+	if f.max < 0 {
+		fatalUsage("near: invalid --max %d (must be >= 0)", f.max)
 	}
-	if f.depth < 0 || f.max <= 0 {
-		// Surface the defaults so a capped tree is never mistaken for the
-		// full result (--json already reports depth/max_nodes).
-		fmt.Fprintf(os.Stderr, "kern: near defaults depth=%d max=%d (use --depth/--max to widen)\n", depth, maxN)
+	depth := 2
+	if f.depth >= 0 {
+		depth = f.depth
+	}
+	maxN := 100
+	if f.max > 0 {
+		maxN = f.max
 	}
 	nodes, err := intel.Near(ix, args[0], depth, maxN)
 	if err != nil {
-		fatal("Near: %v", err)
+		// F-NR2: ranked candidates + did-you-mean on the unknown symbol,
+		// matching impact/context/graph (near is case-sensitive where search
+		// is forgiving — exactly where the hint is most needed).
+		fatalNoSymbol(args[0], ix)
 	}
 	if f.json {
 		printJSON(map[string]any{"depth": depth, "max_nodes": maxN, "nodes": nodes})
@@ -859,10 +823,7 @@ func runNear(rest []string) {
 }
 
 func runCycles(rest []string) {
-	f, args, err := parseFlags(rest)
-	if err != nil {
-		fatalUsage("flags: %v", err)
-	}
+	f, args := parseFlagsOrDie(rest)
 	_, ix, err := resolveRoot(f, args)
 	if err != nil {
 		fatal("Cycles: %v", err)
@@ -876,14 +837,8 @@ func runCycles(rest []string) {
 }
 
 func runSurprising(rest []string) {
-	f, args, err := parseFlags(rest)
-	if err != nil {
-		fatalUsage("flags: %v", err)
-	}
-	root := f.root
-	if root == "" {
-		root = "."
-	}
+	f, args := parseFlagsOrDie(rest)
+	root := projectRoot(f)
 	if len(args) > 0 {
 		root = args[0]
 	}
@@ -900,10 +855,7 @@ func runSurprising(rest []string) {
 }
 
 func runProbe(rest []string) {
-	f, args, err := parseFlags(rest)
-	if err != nil {
-		fatalUsage("flags: %v", err)
-	}
+	f, args := parseFlagsOrDie(rest)
 	if len(args) < 1 {
 		fatalUsage("usage: kern probe \"<task text>\" [root] [--max N]")
 	}
@@ -956,10 +908,7 @@ func runProbe(rest []string) {
 }
 
 func runTrace(rest []string) {
-	f, args, err := parseFlags(rest)
-	if err != nil {
-		fatalUsage("flags: %v", err)
-	}
+	f, args := parseFlagsOrDie(rest)
 	if len(args) < 1 {
 		fatalUsage("usage: kern trace <file|- for stdin> [root] [--limit N]")
 	}
@@ -1004,4 +953,41 @@ func runTrace(rest []string) {
 	}
 	fmt.Println(intel.RenderTrace(report))
 
+}
+
+// indexedFile resolves a file argument against the index: an exact match of
+// an indexed file path, a root-relative path, an existing file on disk, or a
+// UNIQUE basename match. Returns the canonical (index-relative) path.
+func indexedFile(ix *index.Index, root, arg string) (string, bool) {
+	files := map[string]bool{}
+	byBase := map[string][]string{}
+	for _, s := range ix.Symbols {
+		if s.File == "" {
+			continue
+		}
+		files[s.File] = true
+		b := filepath.Base(s.File)
+		byBase[b] = append(byBase[b], s.File)
+	}
+	cand := filepath.Clean(arg)
+	if files[cand] {
+		return cand, true
+	}
+	if root != "" && root != "." {
+		if rel, err := filepath.Rel(root, cand); err == nil && files[rel] {
+			return rel, true
+		}
+		joined := filepath.Join(root, cand)
+		if fi, err := os.Stat(joined); err == nil && !fi.IsDir() {
+			if rel, err := filepath.Rel(root, joined); err == nil {
+				return rel, true
+			}
+		}
+	} else if fi, err := os.Stat(cand); err == nil && !fi.IsDir() {
+		return cand, true
+	}
+	if hits := byBase[filepath.Base(cand)]; len(hits) == 1 {
+		return hits[0], true
+	}
+	return "", false
 }

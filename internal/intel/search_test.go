@@ -410,3 +410,19 @@ func TestSymbolEmbedCacheLRUHitRefreshesRecency(t *testing.T) {
 		}
 	}
 }
+
+// TestRankedSearchExactNameOutranksSuperstring (F-SE1): the exact symbol must
+// rank first — TestWriteFileAtomic (a superstring match) used to outrank
+// WriteFileAtomic itself, and agents take the top hit.
+func TestRankedSearchExactNameOutranksSuperstring(t *testing.T) {
+	ix := &index.Index{}
+	ix.Symbols = []index.Symbol{
+		{Name: "WriteFileAtomic", Kind: "func", File: "fsutil.go", Line: 13},
+		{Name: "TestWriteFileAtomic", Kind: "func", File: "fsutil_test.go", Line: 9},
+		{Name: "TestCheckPurityFlagsSibling", Kind: "func", File: "purity_test.go", Line: 94},
+	}
+	hits := RankedSearchScored(ix, "WriteFileAtomic", 5)
+	if len(hits) == 0 || hits[0].Symbol.Name != "WriteFileAtomic" {
+		t.Fatalf("exact symbol must rank first, got %+v", hits)
+	}
+}

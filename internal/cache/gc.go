@@ -13,6 +13,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -113,11 +114,105 @@ func Maintain(dir string, archiveAfter, evictAfter time.Duration, dryRun bool) (
 // the eviction age) — or cache.archive_days / cache.ttl_days in
 // .kern/config.json — parsed as days (float ok). A value <= 0 disables that
 // pass; unknown/garbage values fall back to the default. With dryRun the pass
-// counts without mutating.
-func MaintainDefaults(dir string, dryRun bool) (archived, evicted int, err error) {
+// counts without mutating. It then runs TrimToBudget with the size ceiling
+// from KERN_CACHE_MAX_MB (default 1024) / cache.max_mb, so the cache dir
+// cannot grow unboundedly within the TTL window (Persona 8/16: 154.6 MiB
+// observed with 0 TTL evictions — age alone never bounded disk).
+func MaintainDefaults(dir string, dryRun bool) (archived, evicted, trimmed int, err error) {
 	archiveAfter := daysFromConfig("KERN_CACHE_ARCHIVE_DAYS", "cache.archive_days", 7)
 	evictAfter := daysFromConfig("KERN_CACHE_TTL_DAYS", "cache.ttl_days", 30)
-	return Maintain(dir, archiveAfter, evictAfter, dryRun)
+	archived, evicted, err = Maintain(dir, archiveAfter, evictAfter, dryRun)
+	if err != nil {
+		return archived, evicted, 0, err
+	}
+	trimmed, terr := TrimToBudget(dir, MaxBudgetBytes(), dryRun)
+	if terr != nil {
+		// The TTL pass already succeeded; a trim failure must not fail the
+		// whole maintain (best-effort contract).
+		return archived, evicted, 0, nil
+	}
+	return archived, evicted, trimmed, err
+}
+
+// MaxBudgetBytes returns the cache size ceiling in bytes from
+// KERN_CACHE_MAX_MB / cache.max_mb (default 1024 MiB). A value <= 0
+// disables the budget (TrimToBudget becomes a no-op).
+func MaxBudgetBytes() int64 {
+	mb := config.Float64("", "KERN_CACHE_MAX_MB", "cache.max_mb", 1024)
+	if mb <= 0 {
+		return 0
+	}
+	return int64(mb * 1024 * 1024)
+}
+
+// trimCandidate is one cache file considered by the size-budget trim pass.
+type trimCandidate struct {
+	path  string
+	size  int64
+	mtime time.Time
+	isGz  bool
+}
+
+// TrimToBudget enforces a size ceiling on dir: when the total size of all
+// *.json / *.json.gz cache files exceeds maxBytes, the oldest-mtime entries
+// are deleted (with their gzip twin when present) until the total is within
+// the budget. maxBytes <= 0 disables the pass. With dryRun the same
+// decisions are counted but nothing is deleted. Deletion is oldest-first so
+// the budget protects the disk while keeping the freshest entries hot.
+func TrimToBudget(dir string, maxBytes int64, dryRun bool) (int, error) {
+	if maxBytes <= 0 {
+		return 0, nil
+	}
+	var candidates []trimCandidate
+	var total int64
+	walkErr := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			if path == dir {
+				return err
+			}
+			if d != nil && d.IsDir() {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		if d.IsDir() {
+			return nil
+		}
+		name := d.Name()
+		isGz := strings.HasSuffix(name, ".json.gz")
+		if !isGz && !strings.HasSuffix(name, ".json") {
+			return nil
+		}
+		info, err := d.Info()
+		if err != nil {
+			return nil // vanished mid-walk; best-effort
+		}
+		candidates = append(candidates, trimCandidate{path: path, size: info.Size(), mtime: info.ModTime(), isGz: isGz})
+		total += info.Size()
+		return nil
+	})
+	if walkErr != nil {
+		return 0, walkErr
+	}
+	if total <= maxBytes {
+		return 0, nil
+	}
+	sort.SliceStable(candidates, func(i, j int) bool { return candidates[i].mtime.Before(candidates[j].mtime) })
+	trimmed := 0
+	for _, c := range candidates {
+		if total <= maxBytes {
+			break
+		}
+		if !dryRun {
+			_ = os.Remove(c.path)
+			if !c.isGz {
+				_ = os.Remove(c.path + ".gz")
+			}
+		}
+		total -= c.size
+		trimmed++
+	}
+	return trimmed, nil
 }
 
 // MaintainOnce is the opportunistic, rate-limited driver. It checks the
@@ -131,7 +226,7 @@ func MaintainOnce(dir string) {
 		return
 	}
 	_ = writeMaintainMarker(dir)
-	_, _, _ = MaintainDefaults(dir, false)
+	_, _, _, _ = MaintainDefaults(dir, false)
 }
 
 // maintainDue reports whether the <dir>/.maintained-at marker is missing or

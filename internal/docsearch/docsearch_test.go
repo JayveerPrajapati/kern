@@ -186,6 +186,20 @@ func (mockEmbedder) EmbedText(text string) ([]float32, error) {
 	return vec, nil
 }
 
+// EmbedBatch implements the optional batched form so IndexDirSemantic and
+// ReembedFetch exercise the batch path in tests.
+func (mockEmbedder) EmbedBatch(texts []string) ([][]float32, error) {
+	vecs := make([][]float32, len(texts))
+	for i, t := range texts {
+		var err error
+		vecs[i], err = mockEmbedder{}.EmbedText(t)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return vecs, nil
+}
+
 func TestIndexDirSemanticAndSearchFusion(t *testing.T) {
 	dir := t.TempDir()
 	write := func(name, content string) {

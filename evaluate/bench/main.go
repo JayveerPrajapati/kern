@@ -8,6 +8,17 @@
 // Run:  go run ./evaluate/bench  (from the repo root)
 // Flags: -root DIR   use DIR's docs for the retrieval-recall test
 // Exit code is 0 when every hard gate passes, 1 otherwise.
+//
+// Decision note (2026-09-22): the session-metrics takeaway reports that
+// direct tools (B) beat progressive disclosure (A) on TOTAL tokens per
+// completed task in 2/3 scripted sessions (~-27.5% B vs A; prefix "rent"
+// reaches 57.8% of A's total). That trade-off is measured and documented
+// here, but the L1/L2/L3 progressive-disclosure defaults are KEPT: the
+// staged surface exists for usability (bounded first responses, cheaper
+// exploration, smaller surprise per step), not raw token minimality, and it
+// is what agents actually get by default. The numbers are the honest cost of
+// that choice; revisit if session-level token budgets become the binding
+// constraint.
 package main
 
 import (

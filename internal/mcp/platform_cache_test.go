@@ -30,6 +30,7 @@ func platformCacheRoot(t *testing.T) string {
 // extracts on every tool call), while different roots get different
 // instances.
 func TestPlatformForCachesPerRoot(t *testing.T) {
+	t.Parallel()
 	s := NewServer(bytes.NewReader(nil), &bytes.Buffer{})
 	defer s.Close() // drain sessions (watcher + background index saves) before t.TempDir cleanup
 	root := platformCacheRoot(t)
@@ -65,6 +66,7 @@ func TestPlatformForCachesPerRoot(t *testing.T) {
 // session cache entry and building a new index, then assert the platform is
 // rebuilt (different instance).
 func TestPlatformForRebuildsOnNewIndex(t *testing.T) {
+	t.Parallel()
 	s := NewServer(bytes.NewReader(nil), &bytes.Buffer{})
 	defer s.Close() // drain sessions (watcher + background index saves) before t.TempDir cleanup
 	root := platformCacheRoot(t)

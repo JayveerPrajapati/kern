@@ -38,12 +38,9 @@ func runFingerprint(rest []string) {
 	if err != nil {
 		fatalUsage("flags: %v", err)
 	}
-	root := f.root
-	if root == "" {
-		root = "."
-		if len(args) > 0 {
-			root = args[0]
-		}
+	root := projectRoot(f)
+	if f.root == "" && len(args) > 0 {
+		root = args[0]
 	}
 
 	var files []string

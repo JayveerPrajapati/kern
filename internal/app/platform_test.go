@@ -9,6 +9,7 @@ import (
 
 	"github.com/JayveerPrajapati/kern/internal/runtime"
 	"github.com/JayveerPrajapati/kern/internal/testfixture"
+	tok "github.com/JayveerPrajapati/kern/internal/tokenize"
 	"github.com/JayveerPrajapati/kern/internal/whatif"
 )
 
@@ -209,6 +210,57 @@ func TestCodeContextGroundsCoder(t *testing.T) {
 	}
 }
 
+// TestCodeContextTokenCap verifies the KERN_CODE_CONTEXT_MAX_TOKENS knob
+// (Lever 5): when set > 0 the rendered grounding bundle is budget.Fit to
+// that token count; the default (unset or 0) preserves the previous output
+// byte-for-byte.
+func TestCodeContextTokenCap(t *testing.T) {
+	p, err := New(testfixture.Repo(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	intent := "refactor the NewServer function in web/server.go to handle corruption"
+
+	// Default (unset): byte-identical to today's behavior.
+	t.Setenv("KERN_CODE_CONTEXT_MAX_TOKENS", "")
+	uncapped, err := p.CodeContext(intent, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if uncapped == "" {
+		t.Fatal("expected non-empty context for a symbol-named intent")
+	}
+	if n := tok.Count(uncapped); n <= 60 {
+		t.Fatalf("uncapped bundle = %d tokens; the 60-token cap below would not bind", n)
+	}
+
+	// Cap binds: the fitted bundle is within budget and differs from uncapped.
+	t.Setenv("KERN_CODE_CONTEXT_MAX_TOKENS", "60")
+	fitted, err := p.CodeContext(intent, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fitted == uncapped {
+		t.Error("token cap should have shrunk the bundle")
+	}
+	if n := tok.Count(fitted); n > 60 {
+		t.Errorf("fitted bundle = %d tokens, want <= 60", n)
+	}
+	if fitted == "" {
+		t.Error("fitted bundle must not be empty (Fit keeps a head line)")
+	}
+
+	// Explicit 0 behaves exactly like unset.
+	t.Setenv("KERN_CODE_CONTEXT_MAX_TOKENS", "0")
+	zero, err := p.CodeContext(intent, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if zero != uncapped {
+		t.Error("KERN_CODE_CONTEXT_MAX_TOKENS=0 must preserve the default output")
+	}
+}
+
 func headStr(s string, n int) string {
 	if len(s) > n {
 		return s[:n] + "..."
@@ -270,8 +322,17 @@ func TestNewPersistsIndexViaLoadOrBuild(t *testing.T) {
 	if p.Index() == nil || len(p.Index().Symbols) == 0 {
 		t.Fatal("New: empty index")
 	}
-	if _, err := os.Stat(filepath.Join(dir, ".kern", "index.json")); err != nil {
-		t.Fatalf("New did not persist the index (load-or-build path bypassed): %v", err)
+	// The persisted store is the SQLite-primary index.sqlite in the default
+	// build, or the legacy index.json under -tags nosqlite; accept either.
+	persisted := false
+	for _, name := range []string{"index.sqlite", "index.json"} {
+		if _, err := os.Stat(filepath.Join(dir, ".kern", name)); err == nil {
+			persisted = true
+			break
+		}
+	}
+	if !persisted {
+		t.Fatalf("New did not persist the index (load-or-build path bypassed)")
 	}
 	// A second New must succeed against the persisted index.
 	if _, err := New(dir); err != nil {
@@ -306,20 +367,75 @@ func ProcessLogin() bool {
 	}
 
 	// Approximate query: "user authentication rate limiting"
-	sym, err := p.resolveSymbol("user authentication rate limiting")
+	sym, fuzzy, err := p.resolveSymbol("user authentication rate limiting")
 	if err != nil {
 		t.Fatalf("resolveSymbol failed to auto-resolve approximate phrase: %v", err)
 	}
 	if !strings.Contains(sym, "UserAuthenticationRateLimiter") {
 		t.Errorf("resolveSymbol resolved %q, want UserAuthenticationRateLimiter", sym)
 	}
+	if !fuzzy {
+		t.Errorf("prose phrase resolved via the ranked fallback must report fuzzy=true, got false")
+	}
 
 	// Single approximate token: "RateLimiter"
-	sym2, err := p.resolveSymbol("RateLimiter")
+	sym2, fuzzy2, err := p.resolveSymbol("RateLimiter")
 	if err != nil {
 		t.Fatalf("resolveSymbol single approximate token failed: %v", err)
 	}
 	if !strings.Contains(sym2, "UserAuthenticationRateLimiter") {
 		t.Errorf("resolveSymbol resolved %q, want UserAuthenticationRateLimiter", sym2)
+	}
+	if !fuzzy2 {
+		t.Errorf("single-token fuzzy match must report fuzzy=true, got false")
+	}
+}
+
+// TestResolveSymbolNoFuzzySubstitution is the regression test for the
+// "impact/plan/simulate silently fuzzy-resolve unknown symbols" fix: a bare
+// token that is not a symbol must FAIL resolution instead of substituting an
+// unrelated symbol whose name merely shares a couple of query words, while a
+// token that matches every word of a real symbol still auto-resolves (with
+// the fuzzy flag set).
+func TestResolveSymbolNoFuzzySubstitution(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "go.mod"), []byte("module userauth\n\ngo 1.21\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	code := `package userauth
+
+func SanitizeDocName(in string) string {
+	return in
+}
+
+func ProcessLogin() bool {
+	return SanitizeDocName("x") == "x"
+}
+`
+	if err := os.WriteFile(filepath.Join(root, "auth.go"), []byte(code), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	p, err := New(root)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	// NoSuchSymbolXYZ shares common words with other symbols but matches none
+	// of them fully: it must error, never substitute.
+	if _, _, err := p.resolveSymbol("NoSuchSymbolXYZ"); err == nil {
+		t.Fatal("resolveSymbol(NoSuchSymbolXYZ) must error, got a substitution")
+	}
+
+	// sanitizeDocName matches every word of SanitizeDocName: it must
+	// auto-resolve with fuzzy=true.
+	sym, fuzzy, err := p.resolveSymbol("sanitizeDocName")
+	if err != nil {
+		t.Fatalf("resolveSymbol(sanitizeDocName): %v", err)
+	}
+	if sym != "SanitizeDocName" {
+		t.Errorf("resolveSymbol(sanitizeDocName) = %q, want SanitizeDocName", sym)
+	}
+	if !fuzzy {
+		t.Errorf("resolveSymbol(sanitizeDocName) must report fuzzy=true, got false")
 	}
 }

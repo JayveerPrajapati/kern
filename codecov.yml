@@ -1,0 +1,33 @@
+# Codecov configuration for kern.
+#
+# Baseline (measured 2026-09-24 with the exact CI command
+# `go test -short -timeout 10m -coverprofile=coverage.out -covermode=atomic
+# ./...` + `go tool cover -func`): 61.3% line coverage (65.5% statement
+# coverage) across all packages.
+#
+# Why this file exists: coverage was already uploaded to Codecov, but with
+# fail_ci_if_error: false and NO codecov.yml, so the numbers were never
+# actually gated — a package's tests could be deleted wholesale and CI stayed
+# green. The statuses below turn the upload into an enforceable floor.
+#
+# - project: the primary gate. Compares overall coverage against a fixed
+#   floor (target) with a small tolerance (threshold). Set ~6pt below the
+#   measured baseline so it binds on real regressions without tripping on
+#   normal fluctuation. Deleting a package's tests wholesale drops aggregate
+#   coverage well below this floor and fails the check.
+# - patch: intentionally informational for now. A strict patch gate is noisy
+#   on PRs that touch not-yet-covered code, and the first rollout of coverage
+#   gating must not break unrelated PRs. Changed-line coverage still shows up
+#   in the report. Flip to a real gate once the baseline has been stable for
+#   a while, e.g. `target: 80%` / `threshold: 1%`.
+# - changes: disabled. The head-vs-base delta check is flaky and adds noise;
+#   project + patch already cover the meaningful regressions.
+
+coverage:
+  status:
+    project:
+      target: 55%
+      threshold: 2%
+    patch:
+      informational: true
+    changes: false

@@ -1,5 +1,7 @@
 package prprovider
 
+import "context"
+
 // NoopProvider is the default provider. It does NOT create a PR — it returns
 // a Result with Number=0 and a synthetic URL. This preserves the prior
 // behavior where CreatePR only rendered the body without network calls.
@@ -12,4 +14,10 @@ func (NoopProvider) CreatePR(req Request) (*Result, error) {
 		URL:    "", // empty = no real PR created
 		State:  "noop",
 	}, nil
+}
+
+// CommentPR is a no-op success: no network call, nothing posted. This keeps
+// the default provider (NoopProvider) side-effect free.
+func (NoopProvider) CommentPR(ctx context.Context, req CommentRequest) error {
+	return nil
 }

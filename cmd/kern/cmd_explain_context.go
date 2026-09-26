@@ -13,10 +13,7 @@ import (
 // which context to include for a change (task type, evidence scoring, budget
 // fit) and prints the explainable plan as text or JSON.
 func runExplainContext(rest []string) {
-	f, args, err := parseFlags(rest)
-	if err != nil {
-		fatalUsage("flags: %v", err)
-	}
+	f, args := parseFlagsOrDie(rest)
 	change := f.task
 	if change == "" && len(args) > 0 {
 		// Positional fallback: a bare token is the change, matching the MCP
@@ -32,10 +29,7 @@ func runExplainContext(rest []string) {
 	if change == "" {
 		fatalUsage("usage: kern explain-context --task \"<change or intent>\" [--root ROOT] [--budget N] [--json]")
 	}
-	root := f.root
-	if root == "" {
-		root = "."
-	}
+	root := projectRoot(f)
 	p, err := app.New(root)
 	if err != nil {
 		fatal("ExplainContext: %v", err)

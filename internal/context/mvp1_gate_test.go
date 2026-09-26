@@ -10,7 +10,7 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/domain"
 	"github.com/JayveerPrajapati/kern/internal/governance"
 	"github.com/JayveerPrajapati/kern/internal/index"
-	"github.com/JayveerPrajapati/kern/internal/intelligence"
+	"github.com/JayveerPrajapati/kern/internal/intel"
 	"github.com/JayveerPrajapati/kern/internal/memory"
 )
 
@@ -79,7 +79,7 @@ func TestMVP1GateAnalyzeChange(t *testing.T) {
 	// Step 2: Build the canonical knowledge graph.
 	t.Log("[2/6] Building canonical knowledge graph...")
 	start = time.Now()
-	g := intelligence.FromIndex(ix)
+	g := intel.FromIndex(ix)
 	t.Logf("      Graph built: %d nodes, %d edges, hash=%s... (%.1fs)",
 		len(g.Nodes), len(g.Edges), graphHashPrefix(g.Version.GraphHash, 8), time.Since(start).Seconds())
 

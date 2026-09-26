@@ -14,7 +14,7 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/execution"
 	"github.com/JayveerPrajapati/kern/internal/governance"
 	"github.com/JayveerPrajapati/kern/internal/index"
-	"github.com/JayveerPrajapati/kern/internal/intelligence"
+	"github.com/JayveerPrajapati/kern/internal/intel"
 	"github.com/JayveerPrajapati/kern/internal/memory"
 	"github.com/JayveerPrajapati/kern/internal/verification"
 )
@@ -72,7 +72,7 @@ func TestMVP2GateEndToEnd(t *testing.T) {
 	t.Logf("      %d symbols, %d edges (%.1fs)", len(ix.Symbols), len(ix.Calls), time.Since(start).Seconds())
 
 	t.Log("[2/8] Building knowledge graph...")
-	g := intelligence.FromIndex(ix)
+	g := intel.FromIndex(ix)
 	if len(g.Nodes) == 0 {
 		t.Fatal("graph has 0 nodes")
 	}

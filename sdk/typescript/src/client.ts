@@ -210,6 +210,22 @@ export class Client {
     return this.get("/v1/incidents");
   }
 
+  /**
+   * Invokes any MCP catalog tool through the single REST passthrough
+   * (POST /v1/tools/{name}). The request body is the tool's argument map;
+   * the response JSON is {"output": "<raw tool text>"}, and this method
+   * returns that output payload. The route delegates to the same in-process
+   * governed dispatch path MCP clients hit (KERN_TOOLS allowlist, root
+   * confinement, RBAC), so one route reaches the entire catalog. Errors
+   * raise KernError with the HTTP status: 403 for governed denials
+   * (allowlist/root/RBAC), 404 for unknown tools, 503 when dispatch is
+   * unavailable, 500 for tool failures.
+   */
+  async callTool(name: string, args: Record<string, any> = {}): Promise<string> {
+    const out = await this.post(`/v1/tools/${encodeURIComponent(name)}`, args);
+    return out && typeof out.output === "string" ? out.output : "";
+  }
+
   incident(incidentId: string): Promise<any> {
     if (!incidentId) {
       throw new KernError("incident() requires an incidentId");

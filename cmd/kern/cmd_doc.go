@@ -14,43 +14,48 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/strutil"
 )
 
-// runDocFetch fetches a public doc page into the local index + cache.
-// Usage: kern doc_fetch <url> [--name N] [--root ROOT]
-func runDocFetch(rest []string) {
-	f, args, err := parseFlags(rest)
-	if err != nil {
-		fatalUsage("flags: %v", err)
-	}
-	if len(args) < 1 || args[0] == "" {
-		fatalUsage("usage: kern doc_fetch <url> [--name N] [--root ROOT]")
-	}
-	rawURL := args[0]
-	root := f.root
-	if root == "" {
-		root = "."
-	}
+// docsFetchCore fetches a public doc page into the local index + cache and
+// prints the result. It is the single fetch implementation shared by
+// `kern docs fetch <url> [name] [root]` (semantic=true allows the optional
+// --semantic re-embed) and the `kern doc-fetch` / `kern doc_fetch` alias
+// entries (semantic=false). A non-empty name is slugified; an empty one is
+// derived from the URL.
+func docsFetchCore(rawURL, name, root string, semantic bool) {
 	res, err := fetch.Fetch(rawURL, 0)
 	if err != nil {
-		fatal("doc fetch: %v", err)
+		fatal("docs fetch: %v", err)
 	}
-	name := f.name
 	if name == "" {
 		name = slugName(rawURL)
 	} else {
 		name = strutil.Slug(name)
 	}
 	if err := os.MkdirAll(cache.Path("data", "docs-fetch"), 0o755); err != nil {
-		fatal("doc fetch: %v", err)
+		fatal("docs fetch: %v", err)
 	}
 	if err := os.WriteFile(cache.Path("data", "docs-fetch", name+".md"), []byte(res.Text), 0o600); err != nil {
-		fatal("doc fetch: %v", err)
+		fatal("docs fetch: %v", err)
 	}
 	added, err := docsearch.MergeFetched(root, name, res.Text)
 	if err != nil {
-		fatal("doc fetch: %v", err)
+		fatal("docs fetch: %v", err)
 	}
 	if res.Truncated {
 		fmt.Fprintf(os.Stderr, "warning: document exceeded limit, truncated to %d bytes\n", len(res.Text))
+	}
+	if semantic {
+		client := llm.NewEmbedder()
+		if !client.HasEmbeddingModel() {
+			fmt.Printf("note: semantic embeddings skipped (%s not installed; run: ollama pull %s)\n", llm.EmbedModel(), llm.EmbedModel())
+		} else {
+			embedded, eerr := docsearch.ReembedFetch(root, name, client)
+			if eerr != nil {
+				fatal("%v", eerr)
+			}
+			if embedded > 0 {
+				fmt.Printf("semantic embeddings attached to %d fetched chunks (KERN_EMBED_MODEL=%s)\n", embedded, llm.EmbedModel())
+			}
+		}
 	}
 	fmt.Printf("fetched %s (%d bytes, %d chunks indexed into %s doc index)\n", name, len(res.Text), added, root)
 	if res.Title != "" {
@@ -59,22 +64,11 @@ func runDocFetch(rest []string) {
 	fmt.Println(clipText(res.Text, 600))
 }
 
-// runDocSearch performs a local vector search over the indexed documents.
-// Usage: kern doc_search <query> [--root ROOT] [--limit N]
-func runDocSearch(rest []string) {
-	f, args, err := parseFlags(rest)
-	if err != nil {
-		fatalUsage("flags: %v", err)
-	}
-	if len(args) < 1 || args[0] == "" {
-		fatalUsage("usage: kern doc_search <query> [--root ROOT] [--limit N]")
-	}
-	query := args[0]
-	root := f.root
-	if root == "" {
-		root = "."
-	}
-	k := f.limit
+// docsSearchCore performs the hybrid local doc + code search over the
+// indexed documents. It is the single search implementation shared by
+// `kern docs <query> [root]` and the `kern doc-search` / `kern doc_search`
+// alias entries. k <= 0 falls back to 5 results.
+func docsSearchCore(query, root string, k int) {
 	if k <= 0 {
 		k = 5
 	}
@@ -83,10 +77,10 @@ func runDocSearch(rest []string) {
 		var err error
 		ix, err = docsearch.IndexDir(root)
 		if err != nil {
-			fatal("doc search: %v", err)
+			fatal("docs search: %v", err)
 		}
 		if err := ix.Save(); err != nil {
-			fatal("doc search: %v", err)
+			fatal("docs search: %v", err)
 		}
 	}
 	// If the persisted index carries dense vectors, re-attach the local
@@ -107,7 +101,14 @@ func runDocSearch(rest []string) {
 	}
 
 	if len(results) == 0 && len(codeMatches) == 0 {
-		fmt.Println("no matching document fragments")
+		// N3: a repo with no indexed docs gets an explanation, not a bare
+		// "no matching document fragments" that reads as a confident miss —
+		// the same two variants the MCP leaf (internal/mcp/doc) renders.
+		if len(ix.Docs) == 0 {
+			fmt.Println("no matching document fragments — this repo has no documentation indexed (kern docs searches only indexed repo docs; run `kern docs index <root>` to index a docs tree)")
+			return
+		}
+		fmt.Printf("no matching document fragments (query matched nothing in %d indexed fragments)\n", len(ix.Docs))
 		return
 	}
 
@@ -146,4 +147,30 @@ func runDocSearch(rest []string) {
 			fmt.Printf("%-10s %-7s %-24s %s:%d\n", m.Kind, m.Lang, m.FullName(), m.File, m.Line)
 		}
 	}
+}
+
+// runDocFetch fetches a public doc page into the local index + cache.
+// Usage: kern doc_fetch <url> [--name N] [--root ROOT]. Thin wrapper over
+// the shared docsFetchCore (alias of `kern docs fetch`).
+func runDocFetch(rest []string) {
+	f, args := parseFlagsOrDie(rest)
+	if len(args) < 1 || args[0] == "" {
+		fatalUsage("usage: kern doc_fetch <url> [--name N] [--root ROOT]")
+	}
+	rawURL := args[0]
+	root := projectRoot(f)
+	docsFetchCore(rawURL, f.name, root, false)
+}
+
+// runDocSearch performs a local vector search over the indexed documents.
+// Usage: kern doc_search <query> [--root ROOT] [--limit N]. Thin wrapper
+// over the shared docsSearchCore (alias of `kern docs <query>`).
+func runDocSearch(rest []string) {
+	f, args := parseFlagsOrDie(rest)
+	if len(args) < 1 || args[0] == "" {
+		fatalUsage("usage: kern doc_search <query> [--root ROOT] [--limit N]")
+	}
+	query := args[0]
+	root := projectRoot(f)
+	docsSearchCore(query, root, f.limit)
 }

@@ -1,11 +1,11 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"github.com/JayveerPrajapati/kern/internal/index"
 	"github.com/JayveerPrajapati/kern/internal/intel"
+	"github.com/JayveerPrajapati/kern/internal/pii"
 	"github.com/JayveerPrajapati/kern/internal/remove"
 	"github.com/JayveerPrajapati/kern/internal/rename"
 	"github.com/JayveerPrajapati/kern/internal/sec"
@@ -15,10 +15,7 @@ import (
 )
 
 func runSchema(rest []string) {
-	f, args, err := parseFlags(rest)
-	if err != nil {
-		fatalUsage("flags: %v", err)
-	}
+	f, args := parseFlagsOrDie(rest)
 	if f.schema == "" {
 		fatalUsage("usage: kern schema <data.json|- for stdin> --schema <schema.json>\n  or: kern prompt <template> --schema <schema.json> to inject the schema")
 	}
@@ -71,10 +68,7 @@ func runMask(rest []string) {
 	if err != nil {
 		fatal("mask: %v", err)
 	}
-	res, merr := svc.Security.Mask(context.Background(), string(b), splitNames(f.names))
-	if merr != nil {
-		fatal("mask: %v", merr)
-	}
+	res := pii.MaskAllCustom(string(b), pii.DefaultPatterns, splitNames(f.names))
 	fmt.Print(res.Text)
 	if res.Replaced > 0 {
 		fmt.Fprintf(os.Stderr, "\nkern: masked %d secrets: ", res.Replaced)
@@ -89,16 +83,10 @@ func runMask(rest []string) {
 }
 
 func runSec(rest []string) {
-	f, args, err := parseFlags(rest)
-	if err != nil {
-		fatalUsage("flags: %v", err)
-	}
-	root := f.root
-	if root == "" {
-		root = "."
-		if len(args) > 0 {
-			root = args[0]
-		}
+	f, args := parseFlagsOrDie(rest)
+	root := projectRoot(f)
+	if f.root == "" && len(args) > 0 {
+		root = args[0]
 	}
 	maxN := f.max
 	// Default gate is error-only: warnings/info are triage material, not CI
@@ -111,11 +99,11 @@ func runSec(rest []string) {
 			allow = strings.Split(f.severity, ",")
 		}
 	}
-	findings, serr := svc.Security.Scan(context.Background(), root)
+	findings, serr := sec.Scan(root)
 	if serr != nil {
 		fatal("kern sec: %v", serr)
 	}
-	findings = svc.Security.FilterBySeverity(findings, allow)
+	findings = sec.FilterBySeverity(findings, allow)
 	counts := sec.Counts(findings)
 	if f.json {
 		if err := json.NewEncoder(os.Stdout).Encode(map[string]any{
@@ -125,7 +113,7 @@ func runSec(rest []string) {
 			fatal("sec: %v", err)
 		}
 	} else {
-		fmt.Print(svc.Security.Render(findings, maxN))
+		fmt.Print(sec.Render(findings, maxN))
 		if f.severity == "" {
 			fmt.Fprintf(os.Stderr, "kern sec: %d findings (%d error, %d warning, %d info) [use --severity error,warning,info to view all]\n",
 				len(findings), counts["error"], counts["warning"], counts["info"])
@@ -135,15 +123,17 @@ func runSec(rest []string) {
 		}
 	}
 	// The exit code must be the same in --json and text mode: error-severity
-	// findings are a CI gate failure regardless of output format. The
-	// summary line prints only in text mode: --json keeps stderr empty so
-	// machine consumers (blueprint's SecScan contract: exit 1 + stderr =
-	// tool error, not a findings result) can tell findings from failures.
+	// findings are a policy outcome (exit 3, the review-family convention —
+	// QA F2: `kern security` findings and `kern review` risk must agree;
+	// a hard CI failure remains `kern verify --types security`'s FAIL → 1).
+	// The summary line prints only in text mode: --json keeps stderr empty
+	// so machine consumers can still tell findings (exit 3, empty stderr)
+	// from tool errors (exit 1, stderr populated).
 	if counts["error"] > 0 {
 		if f.json {
-			panic(exitError{code: 1})
+			panic(exitError{code: 3})
 		}
-		fatal("sec: %d error-severity finding(s) — CI gate failed", counts["error"])
+		fatalPolicy("sec: %d error-severity finding(s)", counts["error"])
 	}
 }
 
@@ -156,14 +146,8 @@ func runSec(rest []string) {
 // (".." = working tree). The MCP tool kern_taint is the primary surface (this
 // thin CLI form exists so the opencode plugin can reach the same check).
 func runTaint(rest []string) {
-	f, args, err := parseFlags(rest)
-	if err != nil {
-		fatalUsage("flags: %v", err)
-	}
-	root := f.root
-	if root == "" {
-		root = "."
-	}
+	f, args := parseFlagsOrDie(rest)
+	root := projectRoot(f)
 	if len(args) > 0 {
 		root = args[0]
 	}
@@ -279,20 +263,14 @@ func taintFileExists(root, file string) bool {
 }
 
 func runDelete(rest []string) {
-	f, args, err := parseFlags(rest)
-	if err != nil {
-		fatalUsage("flags: %v", err)
-	}
+	f, args := parseFlagsOrDie(rest)
 	if len(args) < 1 {
 		fatalUsage("usage: kern delete <symbol> [root] [--apply] [--json]")
 	}
 	sym := args[0]
-	root := f.root
-	if root == "" {
-		root = "."
-		if len(args) > 1 {
-			root = args[1]
-		}
+	root := projectRoot(f)
+	if f.root == "" && len(args) > 1 {
+		root = args[1]
 	}
 	ix, err := loadOrBuild(root)
 	if err != nil {
@@ -343,20 +321,14 @@ func runDeleteApply(root string, ix *index.Index, sym string, asJSON bool, force
 }
 
 func runRename(rest []string) {
-	f, args, err := parseFlags(rest)
-	if err != nil {
-		fatalUsage("flags: %v", err)
-	}
+	f, args := parseFlagsOrDie(rest)
 	if len(args) < 2 {
 		fatalUsage("usage: kern rename <old> <new> [root] [--apply] [--json]")
 	}
 	oldName, newName := args[0], args[1]
-	root := f.root
-	if root == "" {
-		root = "."
-		if len(args) > 2 {
-			root = args[2]
-		}
+	root := projectRoot(f)
+	if f.root == "" && len(args) > 2 {
+		root = args[2]
 	}
 	ix, err := loadOrBuild(root)
 	if err != nil {
@@ -366,26 +338,38 @@ func runRename(rest []string) {
 	if err != nil {
 		fatal("rename: %v", err)
 	}
+	if !f.apply {
+		// Preview: report only, nothing touches disk.
+		if f.json {
+			printJSON(rep)
+			return
+		}
+		fmt.Println(rename.Render(rep))
+		return
+	}
+	// Apply path. QA 2026-09-23 (P0): this used to set rep.Applied = true
+	// before rendering, to suppress the "run with --apply to commit" hint —
+	// but rename.Apply treats r.Applied as already-committed and returned
+	// (0, nil) without touching disk, so every `kern rename --apply` was a
+	// silent no-op with a success message. Order is now gate → Apply →
+	// render; Apply itself sets rep.Applied on success, so Render shows the
+	// renamed report, not the stale hint.
+	if !f.force {
+		if msg := intel.AssessEditRisk(ix, "", oldName).Refusal(fmt.Sprintf("rename --apply of %s", oldName)); msg != "" {
+			fatal("%s", msg)
+		}
+	}
+	n, err := rename.Apply(root, rep)
+	if err != nil {
+		fatal("apply failed (files restored): %v", err)
+	}
 	if f.json {
 		printJSON(rep)
 		return
 	}
 	fmt.Println(rename.Render(rep))
-	if f.apply {
-		// P2 mutation gate: applying a rename rewrites every reference. A
-		// HIGH pre-edit verdict blocks unless explicitly forced.
-		if !f.force {
-			if msg := intel.AssessEditRisk(ix, "", oldName).Refusal(fmt.Sprintf("rename --apply of %s", oldName)); msg != "" {
-				fatal("%s", msg)
-			}
-		}
-		if _, err := rename.Apply(root, rep); err != nil {
-			fatal("apply failed (files restored): %v", err)
-		}
-		fmt.Printf("kern rename: %d edits applied; index will rebuild automatically\n", len(rep.Edits))
-		if rep.Backup != "" {
-			fmt.Printf("kern rename: backup at %s\n", rep.Backup)
-		}
+	fmt.Printf("kern rename: %d edits applied; index will rebuild automatically\n", n)
+	if rep.Backup != "" {
+		fmt.Printf("kern rename: backup at %s\n", rep.Backup)
 	}
-
 }

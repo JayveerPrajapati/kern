@@ -6,33 +6,19 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/JayveerPrajapati/kern/internal/app"
 	"github.com/JayveerPrajapati/kern/internal/llm"
 	"github.com/JayveerPrajapati/kern/internal/mcp/mcpargs"
+	"github.com/JayveerPrajapati/kern/internal/mcp/root"
 )
 
 // Hooks provides platform and coordination dependencies from the owning MCP server.
 type Hooks struct {
 	PlatformFor  func(ctx context.Context, root string) (*app.Platform, error)
 	CoordHandoff func(root string, t time.Time, from string, format string, send map[string]any) (string, error)
-}
-
-func resolveRoot(root string) string {
-	if root == "" {
-		if cwd, err := os.Getwd(); err == nil {
-			return filepath.Clean(cwd)
-		}
-		return "."
-	}
-	if abs, err := filepath.Abs(root); err == nil {
-		return filepath.Clean(abs)
-	}
-	return root
 }
 
 // AgentMessage implements kern_agent_message: the model sends a message to an agent's coordination inbox.
@@ -45,7 +31,7 @@ func AgentMessage(ctx context.Context, h Hooks, args map[string]any) (string, er
 	if notes == "" {
 		return "", fmt.Errorf("notes (the message) is required")
 	}
-	root := resolveRoot(mcpargs.ArgString(args, "root"))
+	root := root.ResolveRoot(mcpargs.ArgString(args, "root"))
 	from := mcpargs.ArgString(args, "from_agent")
 	if from == "" {
 		from = "model"
@@ -86,7 +72,7 @@ func AgentInterrupt(ctx context.Context, h Hooks, args map[string]any) (string, 
 	if reason == "" {
 		reason = "interrupted by model via kern_agent_interrupt"
 	}
-	root := resolveRoot(mcpargs.ArgString(args, "root"))
+	root := root.ResolveRoot(mcpargs.ArgString(args, "root"))
 
 	if h.PlatformFor == nil {
 		return "", fmt.Errorf("platform hook not configured")

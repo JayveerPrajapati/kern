@@ -58,6 +58,11 @@ lint: vet
 bench:
 	go test ./evaluate/bench/
 	go run ./evaluate/bench
+# bench-latency runs the deterministic cold/warm + query latency harness
+# (`kern bench`) and publishes its JSON to .kern/bench.json — the document
+# the web console /benchmarks page renders. Zero network by design.
+bench-latency:
+	go run ./cmd/kern bench --root .
 
 install: build
 	mkdir -p $${HOME}/.local/bin

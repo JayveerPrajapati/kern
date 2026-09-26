@@ -30,6 +30,12 @@ type Tool struct {
 	// or destructive, critical = arbitrary command execution or deployment.
 	// Governed clients use this to gate tool access (P0-004).
 	RiskLevel string `json:"riskLevel,omitempty"`
+	// Category tags the tool with its functional family (analyze, graph,
+	// governance, ...; see Category* constants). KERN_MCP_CATEGORY filters
+	// the advertised tool list to a single family (kern_meta always stays,
+	// like phase filtering). Every registered tool must carry one; the
+	// catalog drift test enforces it.
+	Category string `json:"category,omitempty"`
 	// SchemaVersion tags the tool's input/output contract with a semantic
 	// version (P2-003). Every registration carries it; a bump signals
 	// clients that tool contracts changed and they should re-validate
@@ -63,6 +69,52 @@ const (
 	PhaseMeta    = "meta"
 	PhaseCross   = "cross"
 )
+
+// Tool categories for the functional-family taxonomy (surface consolidation,
+// T3). Every registered tool carries exactly one; KERN_MCP_CATEGORY=<cat>
+// advertises only that family (kern_meta always stays as the router). The
+// catalog drift test (catalog_test.go) fails on any tool with an empty
+// Category, so new registrations must pick a family here.
+const (
+	CategoryAnalyze    = "analyze"
+	CategoryAgent      = "agent"
+	CategoryArch       = "arch"
+	CategoryAST        = "ast"
+	CategoryContext    = "context"
+	CategoryDoc        = "doc"
+	CategoryEdit       = "edit"
+	CategoryEvidence   = "evidence"
+	CategoryExec       = "exec"
+	CategoryFramework  = "framework"
+	CategoryGraph      = "graph"
+	CategoryGovernance = "governance"
+	CategoryIncident   = "incident"
+	CategoryLock       = "lock"
+	CategoryMemory     = "memory"
+	CategoryMeta       = "meta"
+	CategoryMCPBridge  = "mcpbridge"
+	CategoryOptimize   = "optimize"
+	CategoryOrg        = "org"
+	CategoryProject    = "project"
+	CategoryReview     = "review"
+	CategoryTask       = "task"
+	CategoryVerify     = "verify"
+)
+
+// ValidCategory reports whether c is one of the registered tool categories.
+// An empty string means no category filter is active.
+func ValidCategory(c string) bool {
+	switch c {
+	case CategoryAnalyze, CategoryAgent, CategoryArch, CategoryAST,
+		CategoryContext, CategoryDoc, CategoryEdit, CategoryEvidence,
+		CategoryExec, CategoryFramework, CategoryGraph, CategoryGovernance,
+		CategoryIncident, CategoryLock, CategoryMemory, CategoryMeta,
+		CategoryMCPBridge, CategoryOptimize, CategoryOrg, CategoryProject,
+		CategoryReview, CategoryTask, CategoryVerify:
+		return true
+	}
+	return false
+}
 
 // Tool risk levels for risk-aware tool metadata (P0-004). RiskLevel tags each
 // registered tool with the blast radius of calling it: RiskLow for read-only

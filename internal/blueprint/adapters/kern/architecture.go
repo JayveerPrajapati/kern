@@ -553,7 +553,7 @@ func isTestFilePath(rel string) bool {
 
 // --- Projected import check (B6) ---
 
-// boundaryRule mirrors kern's intel.BoundaryRule: one allowed or forbidden
+// boundaryRule mirrors kern's domain.BoundaryRule: one allowed or forbidden
 // dependency edge between two directory/package patterns.
 type boundaryRule struct {
 	From   string `json:"from"`

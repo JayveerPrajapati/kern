@@ -19,7 +19,7 @@ security, and code health.
 | **G5** | MCP validate_staged tool | Block | MCP server validate_staged tool |
 | **G6** | Duplication check | Warn | Duplication: precision/recall on 7 fixtures, never-blocks, format |
 | **G7** | Agent repair loop & feedback | Block | Agent repair loop + feedback contract (BLOCK carries evidence) |
-| **G8** | Sandboxed build/test isolation | Block | Sandboxed build/test isolation |
+| **G8** | Sandboxed build/test rollback | Block | Sandboxed build/test rollback (snapshot + restore on failure, not OS isolation) |
 | **G9** | Resilience scenarios | Warn | Resilience: injected timeouts, network leakage, cleanup, shell scenarios |
 | ~~**G10**~~ | *(retired)* | — | *(Retired alongside internal/blueprint/watcher)* |
 | **G11** | CI command | Block | CI command: clean/block PR, determinism, JSON artifact, detached-head no-mutation |
@@ -48,8 +48,6 @@ security, and code health.
 | **G34** | Diff gate: changelog | Warn | diff-gate changelog:missing warns on non-doc source changes without a CHANGELOG.md entry (advisory WARN) |
 | **G35** | Diff gate: MCP catalog drift | Block | diff-gate catalog:drift BLOCKs when the opencode plugin tool set diverges from the MCP catalog (real drift guard) |
 | **G36** | Diff gate: tool catalog doc freshness | Block | diff-gate catalog:doc BLOCKs when docs/tool-catalog.md is missing, does not document a registered MCP tool, or differs from a fresh `kern gen-catalog` generation (docs never drift from the catalog) |
-| **G37** | Decision-record format | Block | diff-gate note:format BLOCKs when the docs/notes/ decision-record tree violates its path-encoded lifecycle/class contract or in-file format (kern note validate contract) |
-| **G38** | Decision-record on change | Warn | diff-gate note:missing WARNs when non-doc source changes carry no docs/notes/ decision record (advisory, mirrors the changelog gate) |
 | **G39** | Documentation budget | Block | diff-gate doc:budget BLOCKs when a document listed in docs/doc-budgets.json exceeds its word ceiling or goes missing (one home per fact, enforced ceilings) |
 
 ---

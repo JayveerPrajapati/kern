@@ -1,6 +1,7 @@
 package sec
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -580,6 +581,52 @@ func TestVersionContextIPSuppressed(t *testing.T) {
 	}
 }
 
+// QA F1 (2026-09-22): "version": "0.9.9.1" in server.json was flagged as a
+// hardcoded-secret IP and failed kern's own CI gate. Version-key values and
+// leading-zero dotted quads are build strings, not addresses.
+func TestJSONVersionFieldIPSuppressed(t *testing.T) {
+	src := []byte("{\n" +
+		"  \"name\": \"server\",\n" +
+		"  \"version\": \"0.9.9.1\",\n" +
+		"  \"address\": \"203.0.113.7\"\n" +
+		"}\n")
+	var versionFlagged, addressCaught bool
+	for _, f := range ScanFile("server.json", src) {
+		if f.Rule != "hardcoded-secret" || !strings.Contains(f.Message, "secret: IP") {
+			continue
+		}
+		if strings.Contains(f.Snippet, "0.9.9.1") {
+			versionFlagged = true
+		}
+		if strings.Contains(f.Snippet, "203.0.113.7") {
+			addressCaught = true
+		}
+	}
+	if versionFlagged {
+		t.Fatal("version-field dotted quad must not be flagged as IP secret")
+	}
+	if !addressCaught {
+		t.Fatal("public IP in an address field must still be flagged")
+	}
+}
+
+// Version keys in YAML/properties form and bare leading-zero dotted quads
+// (no key context) are version strings, not network addresses.
+func TestVersionKeyContextFormsSuppressed(t *testing.T) {
+	cases := []struct{ rel, line string }{
+		{"deploy.yaml", "appVersion: 1.2.3.4"},
+		{"app.properties", "build_version=2.10.0.1"},
+		{"meta.go", "  ver := \"0.9.9.1\" // no key context, leading-zero octet"},
+	}
+	for _, c := range cases {
+		for _, f := range ScanFile(c.rel, []byte(c.line+"\n")) {
+			if f.Rule == "hardcoded-secret" && strings.Contains(f.Message, "secret: IP") {
+				t.Fatalf("%s: version string must not be flagged, got %+v", c.rel, f)
+			}
+		}
+	}
+}
+
 // A public IP in real code must still be flagged.
 func TestRealIPStillCaught(t *testing.T) {
 	src := []byte("upstream := 8.8.8.8:53\n")
@@ -650,5 +697,73 @@ sk-proj-abc1234567890abcdef1234567890
 	}
 	if findings[0].Rule != "hardcoded-secret" || !strings.Contains(findings[0].Snippet, "sk-proj-") {
 		t.Errorf("expected OpenAI key finding, got %+v", findings[0])
+	}
+}
+
+// TestScanJSONChecksumKeyNotASecret (F-DG5 follow-up): a 64-hex value under
+// a JSON key that names it a checksum ("sha256": "<hex>", as in the
+// diff-gate tool-schema baseline) is a documented digest, not a hardcoded
+// secret — while the same hex under a credential-shaped key still flags.
+func TestScanJSONChecksumKeyNotASecret(t *testing.T) {
+	baseline := []byte("{\n  \"tools\": [\n    {\n      \"name\": \"kern_search\",\n      \"sha256\": \"87756121650b1999b61eb3f61c859ad9a16df75422a83f43722e57cd6ca76202\"\n    }\n  ]\n}\n")
+	fs := ScanFile("tool-schemas.json", baseline)
+	if len(fs) != 0 {
+		t.Fatalf("sha256-named digest must not flag, got %+v", fs)
+	}
+	secret := []byte("{\n  \"api_key\": \"87756121650b1999b61eb3f61c859ad9a16df75422a83f43722e57cd6ca76202\"\n}\n")
+	fs = ScanFile("config.json", secret)
+	if len(fs) == 0 {
+		t.Fatal("hex under a credential key must still flag")
+	}
+}
+
+// e2e (2026-09-25): `kern security .` on kern's own repo flagged 37
+// hardcoded-secret HEX findings on internal/setup/plugin_hashes.go — the
+// SHA-256 plugin-hash registry. A 64-hex digest in KEY position mapped to a
+// boolean (the hash-table shape) is a shipped-artifact allowlist, not a
+// credential.
+func TestHashTableContextSuppressed(t *testing.T) {
+	var b strings.Builder
+	b.WriteString("package setup\n\nvar shippedPluginHashes = map[string]bool{\n")
+	for i := 0; i < 37; i++ {
+		fmt.Fprintf(&b, "\t\"%064x\": true,\n", i)
+	}
+	b.WriteString("}\n")
+	for _, f := range ScanFile("internal/setup/plugin_hashes.go", []byte(b.String())) {
+		if f.Rule == "hardcoded-secret" && strings.Contains(f.Message, "HEX") {
+			t.Fatalf("hash-table entry must not be flagged, got %+v", f)
+		}
+	}
+	// Same shape, but the registry name carries the marker instead of the
+	// file name (var shippedPluginHashes in registry.go): still suppressed.
+	for _, f := range ScanFile("internal/setup/registry.go", []byte(b.String())) {
+		if f.Rule == "hardcoded-secret" && strings.Contains(f.Message, "HEX") {
+			t.Fatalf("hash-named var entry must not be flagged, got %+v", f)
+		}
+	}
+}
+
+// The suppression must NOT swallow real secrets: a 64-char hex in VALUE
+// position — a credential assignment in a normal file, in a file named
+// *hashes.go, or as a non-boolean map value — is still flagged.
+func TestHashTableContextRealSecretStillFlagged(t *testing.T) {
+	hex := "87756121650b1999b61eb3f61c859ad9a16df75422a83f43722e57cd6ca76202"
+	cases := []struct{ rel, src string }{
+		{"config.go", "const apiKey = \"" + hex + "\"\n"},
+		{"internal/setup/plugin_hashes.go", "apiKey := \"" + hex + "\"\n"},
+		{"hashes.go", "const secret = \"" + hex + "\"\n"},
+		{"hashes.go", "\"" + hex + "\": \"not-a-boolean\"\n"},
+		{"hashes.go", "var shippedPluginHashes = map[string]string{\n\t\"" + hex + "\": \"value\",\n}\n"},
+	}
+	for _, c := range cases {
+		var caught bool
+		for _, f := range ScanFile(c.rel, []byte(c.src)) {
+			if f.Rule == "hardcoded-secret" && strings.Contains(f.Message, "HEX") {
+				caught = true
+			}
+		}
+		if !caught {
+			t.Errorf("%s: value-position 64-hex must still be flagged for src %q", c.rel, c.src)
+		}
 	}
 }

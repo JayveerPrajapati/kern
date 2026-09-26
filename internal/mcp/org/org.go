@@ -1,8 +1,8 @@
 // Package org owns the org-family tool bodies (kern_org_projects,
 // kern_org_agents, kern_org_teams, kern_org_memory, kern_org_tasks,
-// kern_org_search, kern_org_audit) as plain functions over the resolved
-// enterprise server. The whole family is Server-independent: it only ever
-// needed the tool args and the enterprise package, so it moved wholesale.
+// kern_org_search, kern_org_audit, kern_org_user) as plain functions over the
+// resolved enterprise server. The whole family is Server-independent: it only
+// ever needed the tool args and the enterprise package, so it moved wholesale.
 package org
 
 import (
@@ -58,7 +58,10 @@ func OrgServer(args map[string]any) (*enterprise.Server, error) {
 	if root == "" {
 		root = "."
 	}
-	srv := enterprise.New()
+	srv, err := enterprise.New()
+	if err != nil {
+		return nil, err
+	}
 	projArg := mcpargs.ArgString(args, "projects")
 	if projArg == "" {
 		return newOrgSrv(srv, projectNameFromRoot(root), root)
@@ -90,7 +93,11 @@ func orgTeamsServer(args map[string]any) (*enterprise.Server, error) {
 	if root == "" {
 		root = "."
 	}
-	return newOrgSrv(enterprise.New(), projectNameFromRoot(root), root)
+	srv, err := enterprise.New()
+	if err != nil {
+		return nil, err
+	}
+	return newOrgSrv(srv, projectNameFromRoot(root), root)
 }
 
 // orgJSON renders a result map as an indented JSON string, the same shape
@@ -115,11 +122,15 @@ func splitCSV(v string) []string {
 }
 
 // handleOrgProjects implements kern_org_projects (C11): list registered
-// projects as {projects:[{name,root}],count}.
+// projects as {projects:[{name,root}],count}. Read-only: any org member may
+// list projects.
 func Projects(ctx context.Context, args map[string]any) (string, error) {
 	srv, err := OrgServer(args)
 	if err != nil {
 		return "", err
+	}
+	if err := orgRBAC(srv, args, governance.OrgActionProjectList); err != nil {
+		return "", fmt.Errorf("kern_org_projects: %w", err)
 	}
 	type projectView struct {
 		Name string `json:"name"`
@@ -156,6 +167,9 @@ func Agents(ctx context.Context, args map[string]any) (string, error) {
 }
 
 func OrgAgentsList(srv *enterprise.Server, args map[string]any) (string, error) {
+	if err := orgRBAC(srv, args, governance.OrgActionAgentList); err != nil {
+		return "", fmt.Errorf("kern_org_agents: %w", err)
+	}
 	type agentView struct {
 		ID   string `json:"id"`
 		Name string `json:"name"`
@@ -170,6 +184,9 @@ func OrgAgentsList(srv *enterprise.Server, args map[string]any) (string, error) 
 }
 
 func OrgAgentsRegister(srv *enterprise.Server, args map[string]any) (string, error) {
+	if err := orgRBAC(srv, args, governance.OrgActionAgentRegister); err != nil {
+		return "", fmt.Errorf("kern_org_agents: %w", err)
+	}
 	id := mcpargs.ArgString(args, "id")
 	name := mcpargs.ArgString(args, "name")
 	if id == "" {
@@ -227,6 +244,9 @@ func Teams(ctx context.Context, args map[string]any) (string, error) {
 }
 
 func OrgTeamsList(srv *enterprise.Server, args map[string]any) (string, error) {
+	if err := orgRBAC(srv, args, governance.OrgActionTeamList); err != nil {
+		return "", fmt.Errorf("kern_org_teams: %w", err)
+	}
 	type teamView struct {
 		ID       string   `json:"id"`
 		Name     string   `json:"name"`
@@ -242,6 +262,9 @@ func OrgTeamsList(srv *enterprise.Server, args map[string]any) (string, error) {
 }
 
 func OrgTeamsShow(srv *enterprise.Server, args map[string]any) (string, error) {
+	if err := orgRBAC(srv, args, governance.OrgActionTeamShow); err != nil {
+		return "", fmt.Errorf("kern_org_teams: %w", err)
+	}
 	id := mcpargs.ArgString(args, "id")
 	if id == "" {
 		return "", fmt.Errorf("kern_org_teams: id is required for action 'show'")
@@ -259,6 +282,9 @@ func OrgTeamsShow(srv *enterprise.Server, args map[string]any) (string, error) {
 }
 
 func OrgTeamsCreate(srv *enterprise.Server, args map[string]any) (string, error) {
+	if err := orgRBAC(srv, args, governance.OrgActionTeamCreate); err != nil {
+		return "", fmt.Errorf("kern_org_teams: %w", err)
+	}
 	id := mcpargs.ArgString(args, "id")
 	name := mcpargs.ArgString(args, "name")
 	if id == "" {
@@ -286,6 +312,9 @@ func OrgTeamsCreate(srv *enterprise.Server, args map[string]any) (string, error)
 }
 
 func OrgTeamsRemove(srv *enterprise.Server, args map[string]any) (string, error) {
+	if err := orgRBAC(srv, args, governance.OrgActionTeamRemove); err != nil {
+		return "", fmt.Errorf("kern_org_teams: %w", err)
+	}
 	id := mcpargs.ArgString(args, "id")
 	if id == "" {
 		return "", fmt.Errorf("kern_org_teams: id is required for action 'remove'")
@@ -319,6 +348,9 @@ func Memory(ctx context.Context, args map[string]any) (string, error) {
 }
 
 func OrgMemoryList(srv *enterprise.Server, args map[string]any) (string, error) {
+	if err := orgRBAC(srv, args, governance.OrgActionMemoryList); err != nil {
+		return "", fmt.Errorf("kern_org_memory: %w", err)
+	}
 	type memoryView struct {
 		ID      string `json:"id"`
 		Content string `json:"content"`
@@ -336,6 +368,9 @@ func OrgMemoryList(srv *enterprise.Server, args map[string]any) (string, error) 
 }
 
 func OrgMemoryAdd(srv *enterprise.Server, args map[string]any) (string, error) {
+	if err := orgRBAC(srv, args, governance.OrgActionMemoryAdd); err != nil {
+		return "", fmt.Errorf("kern_org_memory: %w", err)
+	}
 	content := mcpargs.ArgString(args, "content")
 	if content == "" {
 		return "", fmt.Errorf("kern_org_memory: content is required for action 'add'")
@@ -352,12 +387,16 @@ func OrgMemoryAdd(srv *enterprise.Server, args map[string]any) (string, error) {
 
 // handleOrgTasks implements kern_org_tasks (C11): aggregate task visibility
 // across registered projects as {projects:{name:[{id,state,intent,type}]},
-// total}. Tasks exist only for projects whose app has been built; a fresh
-// enterprise server reports an empty map.
+// total}. Read-only: any org member may list tasks. Tasks exist only for
+// projects whose app has been built; a fresh enterprise server reports an
+// empty map.
 func Tasks(ctx context.Context, args map[string]any) (string, error) {
 	srv, err := OrgServer(args)
 	if err != nil {
 		return "", err
+	}
+	if err := orgRBAC(srv, args, governance.OrgActionTaskList); err != nil {
+		return "", fmt.Errorf("kern_org_tasks: %w", err)
 	}
 	projects := srv.OrgTasks()
 	total := 0
@@ -369,7 +408,8 @@ func Tasks(ctx context.Context, args map[string]any) (string, error) {
 
 // handleOrgSearch implements kern_org_search (C11): cross-project symbol
 // search via the multi-repo registry, returning {hits:[{repo,root,symbol,
-// score}],count} for the top 20 matches.
+// score}],count} for the top 20 matches. Read-only: any org member may
+// search.
 func Search(ctx context.Context, args map[string]any) (string, error) {
 	q := mcpargs.ArgString(args, "q")
 	if q == "" {
@@ -379,6 +419,9 @@ func Search(ctx context.Context, args map[string]any) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	if err := orgRBAC(srv, args, governance.OrgActionOrgSearch); err != nil {
+		return "", fmt.Errorf("kern_org_search: %w", err)
+	}
 	hits := srv.OrgSearch(q, 20)
 	if hits == nil {
 		hits = []intel.RepoHit{}
@@ -387,20 +430,24 @@ func Search(ctx context.Context, args map[string]any) (string, error) {
 }
 
 // handleOrgAudit implements kern_org_audit (C11): the org-level audit log as
-// {entries:[...],count}. Entry field names match AuditEntry's real JSON field
-// names as-is (ID, Timestamp, AgentID, Action, Resource, Result).
+// {entries:[...],count}. Entry field names are snake_case, matching every
+// other org resource shape on this surface (id/name/type, id/content/type).
+// Read-only: any org member may query the audit log.
 func Audit(ctx context.Context, args map[string]any) (string, error) {
 	srv, err := OrgServer(args)
 	if err != nil {
 		return "", err
 	}
+	if err := orgRBAC(srv, args, governance.OrgActionOrgAudit); err != nil {
+		return "", fmt.Errorf("kern_org_audit: %w", err)
+	}
 	type entryView struct {
-		ID        string    `json:"ID"`
-		Timestamp time.Time `json:"Timestamp"`
-		AgentID   string    `json:"AgentID"`
-		Action    string    `json:"Action"`
-		Resource  string    `json:"Resource"`
-		Result    string    `json:"Result"`
+		ID        string    `json:"id"`
+		Timestamp time.Time `json:"timestamp"`
+		AgentID   string    `json:"agent_id"`
+		Action    string    `json:"action"`
+		Resource  string    `json:"resource"`
+		Result    string    `json:"result"`
 	}
 	entries := srv.OrgAudit().All()
 	view := make([]entryView, 0, len(entries))
@@ -415,4 +462,169 @@ func Audit(ctx context.Context, args map[string]any) (string, error) {
 		})
 	}
 	return orgJSON(map[string]any{"entries": view, "count": len(view)})
+}
+
+// orgUserRBAC enforces the org RBAC layer for kern_org_user: the acting
+// user's role must allow the action. Unknown actors have no role and are
+// denied (fail-closed).
+func orgUserRBAC(srv *enterprise.Server, actorID, action string) error {
+	if actorID == "" {
+		return fmt.Errorf("kern_org_user: actor_id is required (the acting user, checked against the user registry)")
+	}
+	role, ok := srv.UserRole(actorID)
+	if !ok {
+		return fmt.Errorf("kern_org_user: actor %q is not a registered org user", actorID)
+	}
+	if err := governance.RequireOrgRole(role, action); err != nil {
+		return fmt.Errorf("kern_org_user: actor %q: %w", actorID, err)
+	}
+	return nil
+}
+
+// orgRBAC enforces the org RBAC layer for the org resource tools
+// (kern_org_projects/agents/teams/memory/tasks/search/audit): the acting
+// user's role must allow the action. Mirrors orgUserRBAC; the caller wraps
+// the error with its tool prefix (e.g. "kern_org_projects: %w") so denials
+// name the tool, the actor and the denied action. Unknown actors have no
+// role and are denied (fail-closed).
+func orgRBAC(srv *enterprise.Server, args map[string]any, action string) error {
+	actorID := mcpargs.ArgString(args, "actor_id")
+	if actorID == "" {
+		return fmt.Errorf("actor_id is required (the acting user, checked against the user registry)")
+	}
+	role, ok := srv.UserRole(actorID)
+	if !ok {
+		return fmt.Errorf("actor %q is not a registered org user", actorID)
+	}
+	if err := governance.RequireOrgRole(role, action); err != nil {
+		return fmt.Errorf("actor %q: %w", actorID, err)
+	}
+	return nil
+}
+
+// userView is the JSON shape of an org user in kern_org_user results.
+type userView struct {
+	ID      string `json:"id"`
+	Role    string `json:"role"`
+	Enabled bool   `json:"enabled"`
+}
+
+// handleOrgUsers implements kern_org_user (Feature Batch G): org-wide user
+// management + RBAC. action=user-add|user-list|user-role|user-disable|
+// user-audit; actor_id (the acting user) is required on every action and its
+// role must allow the action (governance.RequireOrgRole).
+func Users(ctx context.Context, args map[string]any) (string, error) {
+	action := mcpargs.ArgString(args, "action")
+	if action == "" {
+		return "", fmt.Errorf("kern_org_user: action is required (user-add|user-list|user-role|user-disable|user-audit)")
+	}
+	srv, err := OrgServer(args)
+	if err != nil {
+		return "", err
+	}
+	switch action {
+	case "user-add":
+		return OrgUsersAdd(srv, args)
+	case "user-list":
+		return OrgUsersList(srv, args)
+	case "user-role":
+		return OrgUsersSetRole(srv, args)
+	case "user-disable":
+		return OrgUsersDisable(srv, args)
+	case "user-audit":
+		return OrgUsersAudit(srv, args)
+	default:
+		return "", fmt.Errorf("kern_org_user: unknown action %q (user-add|user-list|user-role|user-disable|user-audit)", action)
+	}
+}
+
+// OrgUsersAdd implements kern_org_user action=user-add: register a user with
+// the given role (the actor's role must allow user-add).
+func OrgUsersAdd(srv *enterprise.Server, args map[string]any) (string, error) {
+	actor := mcpargs.ArgString(args, "actor_id")
+	if err := orgUserRBAC(srv, actor, governance.OrgActionUserAdd); err != nil {
+		return "", err
+	}
+	id := mcpargs.ArgString(args, "user_id")
+	if id == "" {
+		return "", fmt.Errorf("kern_org_user: user_id is required for action 'user-add'")
+	}
+	role := mcpargs.ArgString(args, "role")
+	if role == "" {
+		return "", fmt.Errorf("kern_org_user: role is required for action 'user-add'")
+	}
+	if err := srv.AddUserBy(id, role, actor); err != nil {
+		return "", err // duplicate id -> "enterprise: user %q already exists"
+	}
+	return orgJSON(map[string]any{"id": id, "role": role, "status": "added"})
+}
+
+// OrgUsersList implements kern_org_user action=user-list: list all org users
+// as {users:[{id,role,enabled}],count}. The actor's role must allow user-list.
+func OrgUsersList(srv *enterprise.Server, args map[string]any) (string, error) {
+	actor := mcpargs.ArgString(args, "actor_id")
+	if err := orgUserRBAC(srv, actor, governance.OrgActionUserList); err != nil {
+		return "", err
+	}
+	users := srv.ListUsers()
+	view := make([]userView, 0, len(users))
+	for _, u := range users {
+		view = append(view, userView{ID: u.ID, Role: u.Role, Enabled: u.Enabled})
+	}
+	return orgJSON(map[string]any{"users": view, "count": len(view)})
+}
+
+// OrgUsersSetRole implements kern_org_user action=user-role: change a user's
+// role (the actor's role must allow user-role).
+func OrgUsersSetRole(srv *enterprise.Server, args map[string]any) (string, error) {
+	actor := mcpargs.ArgString(args, "actor_id")
+	if err := orgUserRBAC(srv, actor, governance.OrgActionUserRole); err != nil {
+		return "", err
+	}
+	id := mcpargs.ArgString(args, "user_id")
+	if id == "" {
+		return "", fmt.Errorf("kern_org_user: user_id is required for action 'user-role'")
+	}
+	role := mcpargs.ArgString(args, "role")
+	if role == "" {
+		return "", fmt.Errorf("kern_org_user: role is required for action 'user-role'")
+	}
+	if err := srv.SetRoleBy(id, role, actor); err != nil {
+		return "", err // unknown user -> "enterprise: user %q not found"
+	}
+	return orgJSON(map[string]any{"id": id, "role": role, "status": "role-updated"})
+}
+
+// OrgUsersDisable implements kern_org_user action=user-disable: disable a
+// user (the actor's role must allow user-disable).
+func OrgUsersDisable(srv *enterprise.Server, args map[string]any) (string, error) {
+	actor := mcpargs.ArgString(args, "actor_id")
+	if err := orgUserRBAC(srv, actor, governance.OrgActionUserDisable); err != nil {
+		return "", err
+	}
+	id := mcpargs.ArgString(args, "user_id")
+	if id == "" {
+		return "", fmt.Errorf("kern_org_user: user_id is required for action 'user-disable'")
+	}
+	if err := srv.DisableUserBy(id, actor); err != nil {
+		return "", err // unknown user -> "enterprise: user %q not found"
+	}
+	return orgJSON(map[string]any{"id": id, "status": "disabled"})
+}
+
+// OrgUsersAudit implements kern_org_user action=user-audit: the user's
+// append-only audit trail as {audit:[{action,by,at,detail}],count}.
+func OrgUsersAudit(srv *enterprise.Server, args map[string]any) (string, error) {
+	actor := mcpargs.ArgString(args, "actor_id")
+	if err := orgUserRBAC(srv, actor, governance.OrgActionUserAudit); err != nil {
+		return "", err
+	}
+	id := mcpargs.ArgString(args, "user_id")
+	if id == "" {
+		return "", fmt.Errorf("kern_org_user: user_id is required for action 'user-audit'")
+	}
+	entries := srv.UserAudit(id)
+	view := make([]enterprise.UserAuditEntry, 0, len(entries))
+	view = append(view, entries...)
+	return orgJSON(map[string]any{"audit": view, "count": len(view)})
 }

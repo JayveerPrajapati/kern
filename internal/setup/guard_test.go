@@ -69,7 +69,7 @@ func TestKernGuardScript(t *testing.T) {
 			stdin:    `{"tool_name":"Bash"}`,
 			wantExit: 2,
 			wantStderr: []string{
-				"kern_run_build",
+				"kern_validate",
 				"kern_exec",
 			},
 		},
@@ -114,7 +114,7 @@ func TestKernGuardScript(t *testing.T) {
 			stdin:    `{"tool_name":"run_shell_command"}`,
 			wantExit: 2,
 			wantStderr: []string{
-				"kern_run_build",
+				"kern_validate",
 				"kern_exec",
 			},
 		},

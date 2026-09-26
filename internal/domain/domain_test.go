@@ -5,7 +5,6 @@ import (
 	"time"
 
 	"github.com/JayveerPrajapati/kern/internal/index"
-	"github.com/JayveerPrajapati/kern/internal/intel"
 	"github.com/JayveerPrajapati/kern/internal/sec"
 )
 
@@ -154,6 +153,36 @@ func TestEdge(t *testing.T) {
 	e = Edge{From: "a", To: "b", Kind: "calls", File: "a.go", Line: 5}
 	if e.Kind != "calls" || e.Line != 5 {
 		t.Fatalf("populated Edge wrong: %+v", e)
+	}
+}
+
+// TestDeploymentNodeKind locks the deployment node kind (Feature Batch E):
+// a "deployment" node carries the Deployment attribute with the expected
+// version/commit/service attributes, and the existing entity type shape is
+// unchanged (additive only).
+func TestDeploymentNodeKind(t *testing.T) {
+	var n Node
+	if n.Deployment != nil {
+		t.Fatalf("Deployment pointer should be nil in zero value")
+	}
+	dep := Deployment{Service: "api", Version: "v1.2.3", CommitSHA: "abc1234"}
+	n = Node{ID: "deployment:api:v1.2.3", Kind: "deployment", Label: "api v1.2.3", Deployment: &dep}
+	if n.Deployment == nil {
+		t.Fatalf("Deployment pointer not set: %+v", n)
+	}
+	if n.Deployment.Service != "api" || n.Deployment.Version != "v1.2.3" || n.Deployment.CommitSHA != "abc1234" {
+		t.Fatalf("deployment attributes wrong: %+v", n.Deployment)
+	}
+	// The Deployment entity type keeps its shape: Service/Version/CommitSHA
+	// round-trip (existing consumers compile against these fields).
+	d := Deployment{Service: "worker", Version: "2.0.0", CommitSHA: "deadbeef"}
+	if d.Service != "worker" || d.Version != "2.0.0" || d.CommitSHA != "deadbeef" {
+		t.Fatalf("Deployment entity shape wrong: %+v", d)
+	}
+	// Non-deployment node kinds leave the pointer nil (no cross-contamination).
+	sym := Node{ID: "s1", Kind: "symbol"}
+	if sym.Deployment != nil {
+		t.Fatalf("symbol node must not carry a Deployment pointer")
 	}
 }
 
@@ -518,7 +547,7 @@ func TestFromSecFinding(t *testing.T) {
 }
 
 func TestFromGuardRule(t *testing.T) {
-	r := intel.BoundaryRule{From: "web", To: "db", Action: "forbid"}
+	r := BoundaryRule{From: "web", To: "db", Action: "forbid"}
 	p := FromGuardRule(r)
 	if p.Name != "boundary:web->db" || p.Enabled != true {
 		t.Fatalf("policy fields wrong: %+v", p)

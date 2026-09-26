@@ -47,7 +47,7 @@ func TestRejectGovernanceApproval(t *testing.T) {
 		}
 	}
 	// The store must no longer list the approval as pending.
-	out = captureStdout(t, func() { runApprove([]string{"--root", root}) })
+	out = captureStdout(t, func() { runApprove([]string{"list", "--root", root}) })
 	if !strings.Contains(out, "no pending approvals") {
 		t.Errorf("approval should be decided; listing:\n%s", out)
 	}

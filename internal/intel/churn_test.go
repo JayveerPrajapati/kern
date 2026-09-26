@@ -167,6 +167,20 @@ func TestTestGaps(t *testing.T) {
 	if got := TestGaps(ix, 0); len(got) == 0 {
 		t.Error("expected some gaps from the buildTestProject index")
 	}
+	// The full gap list must include zero-caller uncovered symbols too:
+	// helper() is uncovered and has no callers, so it never ranks as a
+	// hotspot but must still be named in Gaps (Fix: testgaps never names
+	// the uncovered symbols).
+	cov := AnalyzeCoverage(ix)
+	if cov.HotGaps[0].Symbol != "Greet" {
+		t.Errorf("expected Greet as the top hotspot, got %+v", cov.HotGaps)
+	}
+	if len(cov.Gaps) < 2 {
+		t.Errorf("Gaps must include helper() (zero callers) plus Greet, got %+v", cov.Gaps)
+	}
+	if cov.Gaps[0].Symbol != "Greet" {
+		t.Errorf("Gaps[0] = %q, want Greet (hotspots rank first in the full list)", cov.Gaps[0].Symbol)
+	}
 }
 
 var _ = index.Index{}
@@ -306,13 +320,27 @@ func main() { _ = pkg0.Func0() }
 	}
 }
 
+// hasKernIndex reports whether root holds a persisted kern index in either
+// format: the SQLite-primary store (index.sqlite, default build) or the
+// legacy JSON cache (index.json).
+func hasKernIndex(root string) bool {
+	for _, name := range []string{"index.sqlite", "index.json"} {
+		if st, err := os.Stat(filepath.Join(root, ".kern", name)); err == nil && !st.IsDir() {
+			return true
+		}
+	}
+	return false
+}
+
 func BenchmarkChurnContextKernRepo(b *testing.B) {
 	root := os.Getenv("KERN_BENCH_ROOT")
 	if root == "" {
 		if wd, err := os.Getwd(); err == nil {
 			cand := wd
 			for i := 0; i < 5; i++ {
-				if st, err := os.Stat(filepath.Join(cand, ".kern", "index.json")); err == nil && !st.IsDir() {
+				// Accept either persisted format: the SQLite-primary store
+				// (default build) or the legacy JSON cache.
+				if hasKernIndex(cand) {
 					root = cand
 					break
 				}
@@ -327,7 +355,7 @@ func BenchmarkChurnContextKernRepo(b *testing.B) {
 	if root == "" {
 		b.Skip("kern repo index not present; set KERN_BENCH_ROOT to run benchmark")
 	}
-	if st, err := os.Stat(filepath.Join(root, ".kern", "index.json")); err != nil || st.IsDir() {
+	if !hasKernIndex(root) {
 		b.Skip("kern repo index not present; skipping repo benchmark")
 	}
 	b.ResetTimer()

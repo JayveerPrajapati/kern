@@ -6,7 +6,7 @@ package twin
 import (
 	"github.com/JayveerPrajapati/kern/internal/domain"
 	"github.com/JayveerPrajapati/kern/internal/index"
-	"github.com/JayveerPrajapati/kern/internal/intelligence"
+	"github.com/JayveerPrajapati/kern/internal/intel"
 	"github.com/JayveerPrajapati/kern/internal/runtime"
 	"github.com/JayveerPrajapati/kern/internal/twin/api"
 	"github.com/JayveerPrajapati/kern/internal/twin/data"
@@ -125,10 +125,10 @@ func dedupEdges(edges []domain.Edge) []domain.Edge {
 	return result
 }
 
-// Merge combines twin extractor output into an existing intelligence.Graph,
+// Merge combines twin extractor output into an existing intel.Graph,
 // deduplicating nodes by ID. This is what makes the graph a true knowledge
 // graph (code + API + data + messaging + infra + runtime).
-func Merge(g *intelligence.Graph, ext *Extractors) error {
+func Merge(g *intel.Graph, ext *Extractors) error {
 	if ext == nil {
 		return nil
 	}
@@ -168,16 +168,16 @@ func Merge(g *intelligence.Graph, ext *Extractors) error {
 // MergeIntoGraph builds a graph from an index, runs all twin extractors, and
 // returns the merged knowledge graph. This is the one-call way to get the full
 // knowledge graph (code + API + data + messaging + infra + runtime).
-// It returns a pointer because intelligence.Graph embeds a sync.Once (guarding
+// It returns a pointer because intel.Graph embeds a sync.Once (guarding
 // its lazily-built query caches) and must not be copied by value — returning a
 // value would trip go vet's copylock check. Callers receive the same pointer
 // the merge mutated.
-func MergeIntoGraph(root string, source runtime.Source) (*intelligence.Graph, error) {
+func MergeIntoGraph(root string, source runtime.Source) (*intel.Graph, error) {
 	ix, err := index.Build(root)
 	if err != nil {
 		return nil, err
 	}
-	g := intelligence.FromIndex(ix)
+	g := intel.FromIndex(ix)
 	ext := NewExtractors(root, source)
 	// Non-fatal — return the graph with whatever merged.
 	_ = Merge(&g, ext)

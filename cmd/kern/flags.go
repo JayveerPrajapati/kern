@@ -26,15 +26,20 @@ type flags struct {
 	json                 bool
 	dir                  string
 	csv                  bool
+	byTool               bool // --by-tool (stats: per-tool token ledger table)
+	byAgent              bool // --by-agent (stats: per-agent token ledger table)
 	llm                  string
 	bpe                  bool
 	root                 string
 	level                string
 	taskType             string
 	check                bool
+	ci                   bool // --ci (check: machine-readable CI verdict on stdout, exit 0/1)
 	verify               bool
 	detect               bool
 	global               bool
+	globalRules          bool   // --global-rules (setup: manage kern rules in each host's GLOBAL instructions slot)
+	agentsMD             string // --agents-md (setup: repo AGENTS.md variant, thin|full; persisted in .kern/config.json)
 	apply                bool
 	runtime              bool
 	agents               string
@@ -51,6 +56,8 @@ type flags struct {
 	lines                int
 	depth                int
 	range_               string
+	changelog            string // --changelog (commitmsg: render a release-notes draft for a git range)
+	changelogSet         bool   // true when --changelog was given (even with an empty value)
 	commits              int
 	thresholds           string
 	graphml              bool
@@ -65,8 +72,10 @@ type flags struct {
 	cmd                  string
 	timeout              int
 	timeoutSet           bool
+	wait                 int
 	fewshot              bool
 	mode                 string
+	schedule             string // --schedule (loop: cron expression for scheduled closed-loop runs; "" = one-shot)
 	withSkill            string
 	once                 bool
 	interval             int
@@ -80,6 +89,7 @@ type flags struct {
 	semantic             bool
 	lang                 string
 	stdin                string
+	bridgesOnly          bool
 	noinstructions       bool
 	maxTokens            int
 	maxFiles             int
@@ -114,6 +124,10 @@ type flags struct {
 	strict               bool
 	update               bool
 	force                bool
+	pin                  string // --pin (update: pin the target release tag, e.g. v0.9.9.1; the deliberate-downgrade consent)
+	preflight            string // --preflight (update: hidden decision-only mode for install.sh — not in any help text)
+	preflightSet         bool   // true when --preflight was given (even with an empty value)
+	yes                  bool
 	addr                 string
 	enterprise           bool
 	projects             []string
@@ -127,6 +141,9 @@ type flags struct {
 	verifyTokenReduction bool
 	scanPath             string
 	types                string
+	cve                  bool // --cve (verify: govulncheck vulnerability check)
+	license              bool // --license (verify: deterministic license classifier)
+	secrets              bool // --secrets (verify: committed-secret history scan)
 	action               string
 	column               int
 	compilerOutput       string
@@ -134,8 +151,20 @@ type flags struct {
 	serverCmd            string
 	target               string
 	minFixes             int
-	contextBefore        int // --context-before (optimize log adaptive windowing)
-	contextAfter         int // --context-after  (optimize log adaptive windowing)
+	contextBefore        int    // --context-before (optimize log adaptive windowing)
+	contextAfter         int    // --context-after  (optimize log adaptive windowing)
+	kind                 string // --kind (optimize: prompt|log)
+	oneLine              bool   // --one-line (graph: single-line call-graph neighbourhood)
+	entities             bool   // --entities (graph: render the digital-twin entity nodes connected to the symbol, or the repo entity inventory without a symbol)
+	risk                 bool   // --risk (impact: render the governance risk assessment)
+	sinks                string // --sinks (synthesize-test: comma-separated security sink rule ids)
+	archDrift            bool   // --arch-drift (doctor: report ARCHITECTURE.md LOC/deps drift section)
+	calibration          bool   // --calibration (doctor: report prediction-vs-reality calibration health section)
+	correlate            bool   // --correlate (incident: run the incident→twin→code correlation engine)
+	runbook              string // --runbook (incident: JSON of a heal playbook to add)
+	listPlaybooks        bool   // --list-playbooks (incident: list stored heal playbooks)
+	code                 bool   // --code (correlate: include the incident→twin→code correlation section)
+	merge                bool   // --merge (policy set: merge by policy ID instead of replacing the whole set)
 
 	// ---- FlagSet-migrated flags (unified parser). Each field backs one or
 	// more subcommand flags that previously used stdlib flag.FlagSet; names,
@@ -145,7 +174,7 @@ type flags struct {
 	base              string   // --base (semantic-merge)
 	body              string   // --body (ast-transform)
 	budgetSet         bool     // true when --budget was given (context-watch string form)
-	channel           string   // --channel (stream)
+	channel           string   // --channel (stream; update: release channel — stable|latest|regex, forwarded as KERN_CHANNEL; --pin overrides)
 	chunkSize         string   // --chunk-size (stream)
 	claim             string   // --claim (evidence-anchor)
 	denyPaths         []string // --deny-path (authorize-context, repeatable)
@@ -177,6 +206,8 @@ type flags struct {
 	resource          string   // --resource (agent-coordination)
 	role              string   // --role (agent-role-rbac)
 	sign              bool     // --sign (evidence export)
+	fullState         bool     // --full-state (evidence: export the full evidence store state)
+	restore           string   // --restore (evidence: restore the store from a full-state bundle file)
 	sig               string   // --sig (ast-transform)
 	statusFilter      string   // --status string form (flight list); .status stays the bool form (index)
 	tag               string   // --tag (ast-transform)
@@ -243,6 +274,8 @@ type flags struct {
 //	evidence export:                  --root "." "project root"; --agent-id "default" "agent ID the authorization is scoped to"; --task "" "task ID the authorization is scoped to"; --out "-" "output path (\"-\" = stdout)"; --json true "emit JSON (the only form; default true)"; --sign false "sign the bundle with the project key (.kern/keys/, created on first use)"
 //	evidence verify:                  --file "" "bundle JSON file (default: read from stdin)"; --url "" "bundle URL to fetch and verify without cloning"; --root "" "repo root to verify the audit chain against (default: bundle's repo_root)"; --expect-fingerprint "" "require the bundle to be signed by this key fingerprint (the trust anchor)"
 //	evidence explain:                 --file "" "bundle JSON file (default: read from stdin)"; --url "" "bundle URL to fetch and explain without cloning"
+//	evidence full-state:              --root "." "project root holding .kern/evidence"; --out "-" "output path (\"-\" = stdout)"
+//	evidence restore:                 --root "." "project root holding .kern/evidence"; --restore "" "full-state bundle file to restore into the store"
 //	authorize-context:                --agent "" "agent ID to authorize (required)"; --task "" "task ID the authorization is scoped to (required)"; --root "." "project root"; --symbol "" "optional substring filter applied to allowed symbols"; --deny-path (repeatable) "path prefix denied by the task scope (repeatable)"; --json true "emit JSON (default true)"
 //	flight list:                      --root "." "project root holding .kern/flight"; --agent "" "filter by agent id"; --task "" "filter by task id"; --status "" "filter by record status (ok|error|blocked|denied)"; --json false "emit JSON lines"
 //	flight show:                      --root "." "project root holding .kern/flight"
@@ -256,6 +289,11 @@ func parseFlags(args []string) (flags, []string, error) {
 	f.depth = -1
 	f.commits = 60
 	f.thresholds = "2.0,4.0,6.0,8.0"
+	// --cache defaults ON for optimize/preview, aligning with the MCP
+	// kern_optimize_prompt tool (cacheOn=true): results compound in the
+	// local exact + semantic caches unless the operator opts out with
+	// --cache=false.
+	f.cache = true
 	// Migrated FlagSet defaults that are not zero-valued (per-command flags
 	// whose default is only read by the owning command, so a shared default
 	// cannot leak across commands).
@@ -329,6 +367,16 @@ func parseFlags(args []string) (flags, []string, error) {
 	}
 	for i := 0; i < len(args); i++ {
 		name, inline, hasInline := splitFlag(args[i])
+		// Single-dash long flags (`-json`, `-root`, `-addr`) are accepted
+		// by normalizing them to their double-dash form (`--json`, ...), so
+		// both spellings work like Go tooling users expect. Only tokens
+		// that look like a single-dash letter flag (isFlagToken logic) and
+		// are not the short help form `-h` are rewritten; `-k`/`-terse-code`
+		// normalize to their dual-form cases below, and negative numbers
+		// (`-1`) or a bare `-` are untouched (still positionals).
+		if len(name) > 1 && name[0] == '-' && name[1] != '-' && isAlpha(name[1]) && name != "-h" {
+			name = "--" + name[1:]
+		}
 		switch name {
 		case "--attach":
 			setStr(&i, &f.attach, inline, hasInline)
@@ -365,6 +413,13 @@ func parseFlags(args []string) (flags, []string, error) {
 			setBool(&f.update, "--update", inline, hasInline)
 		case "--force":
 			setBool(&f.force, "--force", inline, hasInline)
+		case "--pin":
+			setStr(&i, &f.pin, inline, hasInline)
+		case "--preflight":
+			setStr(&i, &f.preflight, inline, hasInline)
+			f.preflightSet = true
+		case "--yes":
+			setBool(&f.yes, "--yes", inline, hasInline)
 		case "--terse-code", "-terse-code":
 			setBool(&f.terseCode, "--terse-code", inline, hasInline)
 		case "--reset":
@@ -379,6 +434,10 @@ func parseFlags(args []string) (flags, []string, error) {
 			setStr(&i, &f.thresholds, inline, hasInline)
 		case "--csv":
 			setBool(&f.csv, "--csv", inline, hasInline)
+		case "--by-tool":
+			setBool(&f.byTool, "--by-tool", inline, hasInline)
+		case "--by-agent":
+			setBool(&f.byAgent, "--by-agent", inline, hasInline)
 		case "--bpe":
 			setBool(&f.bpe, "--bpe", inline, hasInline)
 		case "--root":
@@ -417,6 +476,20 @@ func parseFlags(args []string) (flags, []string, error) {
 			setStr(&i, &f.skillDir, inline, hasInline)
 		case "--check":
 			setBool(&f.check, "--check", inline, hasInline)
+		case "--ci":
+			setBool(&f.ci, "--ci", inline, hasInline)
+		case "--arch-drift":
+			setBool(&f.archDrift, "--arch-drift", inline, hasInline)
+		case "--calibration":
+			setBool(&f.calibration, "--calibration", inline, hasInline)
+		case "--correlate":
+			setBool(&f.correlate, "--correlate", inline, hasInline)
+		case "--runbook":
+			setStr(&i, &f.runbook, inline, hasInline)
+		case "--list-playbooks":
+			setBool(&f.listPlaybooks, "--list-playbooks", inline, hasInline)
+		case "--code":
+			setBool(&f.code, "--code", inline, hasInline)
 		case "--verify":
 			setBool(&f.verify, "--verify", inline, hasInline)
 		case "--verify-pipeline":
@@ -429,10 +502,20 @@ func parseFlags(args []string) (flags, []string, error) {
 			setStr(&i, &f.scanPath, inline, hasInline)
 		case "--types":
 			setStr(&i, &f.types, inline, hasInline)
+		case "--cve":
+			setBool(&f.cve, "--cve", inline, hasInline)
+		case "--license":
+			setBool(&f.license, "--license", inline, hasInline)
+		case "--secrets":
+			setBool(&f.secrets, "--secrets", inline, hasInline)
 		case "--detect":
 			setBool(&f.detect, "--detect", inline, hasInline)
 		case "--global":
 			setBool(&f.global, "--global", inline, hasInline)
+		case "--global-rules":
+			setBool(&f.globalRules, "--global-rules", inline, hasInline)
+		case "--agents-md":
+			setStr(&i, &f.agentsMD, inline, hasInline)
 		case "--apply":
 			setBool(&f.apply, "--apply", inline, hasInline)
 		case "--runtime":
@@ -483,18 +566,40 @@ func parseFlags(args []string) (flags, []string, error) {
 				setInt(&f.timeout, v, "--timeout")
 				f.timeoutSet = true
 			}
+		case "--wait":
+			if hasInline {
+				setInt(&f.wait, inline, "--wait")
+			} else if v, ok := take(&i); ok {
+				setInt(&f.wait, v, "--wait")
+			}
 		case "--cache":
 			setBool(&f.cache, "--cache", inline, hasInline)
 		case "--fewshot":
 			setBool(&f.fewshot, "--fewshot", inline, hasInline)
 		case "--mode":
 			setStr(&i, &f.mode, inline, hasInline)
+		case "--merge":
+			setBool(&f.merge, "--merge", inline, hasInline)
+		case "--schedule":
+			setStr(&i, &f.schedule, inline, hasInline)
 		case "--with-skill":
 			setStr(&i, &f.withSkill, inline, hasInline)
+		case "--kind":
+			setStr(&i, &f.kind, inline, hasInline)
+		case "--one-line":
+			setBool(&f.oneLine, "--one-line", inline, hasInline)
+		case "--entities":
+			setBool(&f.entities, "--entities", inline, hasInline)
+		case "--risk":
+			setBool(&f.risk, "--risk", inline, hasInline)
+		case "--sinks":
+			setStr(&i, &f.sinks, inline, hasInline)
 		case "--once":
 			setBool(&f.once, "--once", inline, hasInline)
 		case "--semantic":
 			setBool(&f.semantic, "--semantic", inline, hasInline)
+		case "--bridges-only":
+			setBool(&f.bridgesOnly, "--bridges-only", inline, hasInline)
 		case "--interval":
 			setIntFlag(&i, &f.interval, "--interval", inline, hasInline)
 		case "--http":
@@ -525,6 +630,9 @@ func parseFlags(args []string) (flags, []string, error) {
 			setIntFlag(&i, &f.limit, "--limit", inline, hasInline)
 		case "--range":
 			setStr(&i, &f.range_, inline, hasInline)
+		case "--changelog":
+			setStr(&i, &f.changelog, inline, hasInline)
+			f.changelogSet = true
 		case "--lines", "--line":
 			// --line is the documented singular form (lsp-bridge help); the
 			// parser previously rejected it because only --lines existed.
@@ -683,6 +791,10 @@ func parseFlags(args []string) (flags, []string, error) {
 			setStr(&i, &f.role, inline, hasInline)
 		case "--sign":
 			setBool(&f.sign, "--sign", inline, hasInline)
+		case "--full-state":
+			setBool(&f.fullState, "--full-state", inline, hasInline)
+		case "--restore":
+			setStr(&i, &f.restore, inline, hasInline)
 		case "--sig":
 			setStr(&i, &f.sig, inline, hasInline)
 		case "--tag":

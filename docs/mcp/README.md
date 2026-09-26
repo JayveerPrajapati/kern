@@ -17,17 +17,36 @@ tools, so any MCP-capable agent can query a codebase through kern's prebuilt sym
 index instead of re-reading files. All tools run locally; the only network call in
 kern is the explicit, user-invoked `kern_doc_fetch`.
 
+## Tool advertisement: the default surface vs KERN_MCP_FULL=1
+
+The server practices progressive disclosure at the advertisement layer:
+
+- **Default (no env):** a curated lifecycle surface of exactly 11 tools —
+  `kern_meta` (the natural-language router) plus `kern_search`,
+  `kern_context`, `kern_explore`, `kern_plan`, `kern_impact`,
+  `kern_verify`, `kern_review`, `kern_run`, `kern_optimize_prompt`, and
+  `kern_authorize_context`. This is what `kern setup`'s generated
+  `.mcp.json` wires, and what a client sees from a plain handshake.
+- **`KERN_MCP_FULL=1`:** the full 139-tool catalog, paginated per the MCP
+  spec (clients must follow `nextCursor`; a naive single-page read sees
+  only the first page — a known trap for hand-rolled clients).
+
+Every tool is reachable in BOTH modes once named in `tools/call` — the
+modes differ only in what is ADVERTISED. `kern_meta` routes natural
+language to any of the 139 tools, so the default surface loses no
+capability, only up-front schema cost (~7k tokens of tool definitions).
+
 ## Document index
 
 | Document | Contents |
 |---|---|
-| [`tool-contracts.md`](tool-contracts.md) | The authoritative catalog of all 146 MCP tools: name, phase, risk level, description, parameters, required parameters, and JSON-RPC usage examples. |
+| [`tool-contracts.md`](tool-contracts.md) | The authoritative catalog of all 139 MCP tools: name, phase, risk level, description, parameters, required parameters, and JSON-RPC usage examples. |
 | [`protocol.md`](protocol.md) | The wire protocol: transports (stdio / HTTP), JSON-RPC methods, capabilities, error handling, governance gates, and shutdown behavior. |
 | [`versioning.md`](versioning.md) | Versioning policy: supported MCP protocol versions, server version reporting, tool-catalog stability rules, and how clients should negotiate. |
 
 ## Catalog at a glance
 
-- **146 tools** across six phases: explore, plan, edit, verify,
+- **139 tools** across six phases: explore, plan, edit, verify,
   meta, cross.
 - **Risk levels** on every tool: low (82), medium (31), high (18), critical (5) —
   governed clients gate tool access on these.

@@ -70,18 +70,18 @@ type Graph struct {
 
 // Node is a node in the knowledge graph.
 type Node struct {
-	ID       string    // stable identifier (qualified name or path)
-	Kind     string    // "symbol", "file", "module", "api", "db", "topic", "service", "deployment"
-	Label    string    // display name
-	Symbol   *Symbol   // non-nil for code nodes
-	File     *File     // non-nil for file nodes
-	Database *Database // non-nil for "database" nodes
-	Table    *Table    // non-nil for "table" nodes
-	Topic    *Topic    // non-nil for "topic" nodes
-	API      *API      // non-nil for "api" nodes
-	Service  *Service  // non-nil for "service" nodes
-	Team     *Team     // non-nil for "team" nodes
-	// TODO: Deployment node kinds.
+	ID         string      // stable identifier (qualified name or path)
+	Kind       string      // "symbol", "file", "module", "api", "db", "topic", "service", "deployment"
+	Label      string      // display name
+	Symbol     *Symbol     // non-nil for code nodes
+	File       *File       // non-nil for file nodes
+	Database   *Database   // non-nil for "database" nodes
+	Table      *Table      // non-nil for "table" nodes
+	Topic      *Topic      // non-nil for "topic" nodes
+	API        *API        // non-nil for "api" nodes
+	Service    *Service    // non-nil for "service" nodes
+	Team       *Team       // non-nil for "team" nodes
+	Deployment *Deployment // non-nil for "deployment" nodes (twin runtime extractor)
 }
 
 // Edge is an edge in the knowledge graph.
@@ -199,6 +199,13 @@ type Memory struct {
 	Confidence      float64  // 0.0-1.0 how confident the memory is
 	Provenance      string   // how the memory was derived (e.g. "loop:learn", "human", "incident")
 	RelatedEntities []string // related entity IDs (symbols, tasks, PRs, services)
+
+	// ClaimType is the typed-claim class of the memory when it represents a
+	// typed claim (FACT / INFERENCE / HYPOTHESIS / RECOMMENDATION); empty for
+	// plain-text memories (the existing default). It rides along in memory
+	// metadata so any consumer can filter, and the learning extractor groups
+	// typed-claim memories separately from plain text.
+	ClaimType ClaimType `json:"claim_type,omitempty"`
 
 	// Reason holds the rationale behind a MemoryDecision ,
 	// separate from Content which holds the decision text itself. Empty for
@@ -430,17 +437,32 @@ type Plan struct {
 // directly from the knowledge graph — no LLM is the authoritative source.
 // The LLM may explain the results, but the data is deterministic.
 type ImpactReport struct {
-	Target             string   // the symbol the change targets
-	WhoCalls           []string // what calls this
-	WhatItCalls        []string // what does it call
-	ServicesDepend     []string // what services depend on it
-	APIsAffected       []string // which APIs are affected
-	DataStoresAffected []string // which data stores are affected
-	EventsAffected     []string // which events are affected
-	TestsCover         []string // which tests cover it
-	DeploymentsRelated []string // which deployments are related
-	IncidentsRelated   []string // which incidents are related
-	ArchitectureRules  []string // which architecture rules apply
-	Risk               string   // low | medium | high (from criticality)
-	Evidence           string   // P2 anchor for the target (file:line + certificate)
+	Target             string   `json:"target"`               // the symbol the change targets
+	WhoCalls           []string `json:"who_calls"`            // what calls this
+	WhatItCalls        []string `json:"what_it_calls"`        // what does it call
+	ServicesDepend     []string `json:"services_depend"`      // what services depend on it
+	APIsAffected       []string `json:"apis_affected"`        // which APIs are affected
+	DataStoresAffected []string `json:"data_stores_affected"` // which data stores are affected
+	EventsAffected     []string `json:"events_affected"`      // which events are affected
+	TestsCover         []string `json:"tests_cover"`          // which tests cover it
+	DeploymentsRelated []string `json:"deployments_related"`  // which deployments are related
+	IncidentsRelated   []string `json:"incidents_related"`    // which incidents are related
+	ArchitectureRules  []string `json:"architecture_rules"`   // which architecture rules apply
+	Risk               string   `json:"risk"`                 // low | medium | high (from criticality)
+	Evidence           string   `json:"evidence"`             // P2 anchor for the target (file:line + certificate)
+	// Entities are the twin entity nodes (API / DB table / service /
+	// deployment) implicated by the change's blast radius. Populated by the
+	// app layer which owns the twin graph; empty when no twin entities
+	// connect to the target or the affected symbols.
+	Entities []EntityImpact
+}
+
+// EntityImpact is one twin entity node implicated by a change's blast radius.
+// Symbols are the affected code symbols whose twin connections surface this
+// entity. The app layer, which owns the twin graph, is the only producer.
+type EntityImpact struct {
+	Kind    string
+	Name    string
+	File    string
+	Symbols []string
 }

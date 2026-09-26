@@ -18,8 +18,9 @@ func init() {
 			runReject(rest)
 			return 0
 		},
-		help:  "reject a pending approval request: reject <id> [--reason ...]",
-		usage: "usage: kern reject [flags]\n  options:\n    --approver         approver identity\n    --reason           reason text\n    --root             project root (default: .)",
+		help:     "reject a pending approval request: reject <id> [--reason ...]",
+		usage:    "usage: kern reject [flags]\n  options:\n    --approver         approver identity\n    --reason           reason text\n    --root             project root (default: .)",
+		category: "governance",
 	}
 }
 
@@ -30,14 +31,8 @@ func init() {
 // every approval `kern approve` lists can be rejected from the same command
 // surface, and an id found in neither store fails loudly (rc=1).
 func runReject(rest []string) {
-	f, args, err := parseFlags(rest)
-	if err != nil {
-		fatalUsage("flags: %v", err)
-	}
-	root := f.root
-	if root == "" {
-		root = "."
-	}
+	f, args := parseFlagsOrDie(rest)
+	root := projectRoot(f)
 	if len(args) < 1 || args[0] == "" {
 		fatalUsage("reject requires an approval id: kern reject <id> [--reason ...]")
 	}

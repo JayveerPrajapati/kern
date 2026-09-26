@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -12,11 +13,21 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/storage"
 )
 
-// runEvidence handles evidence export, verify, and explain subcommands.
+// runEvidence handles evidence export, verify, and explain subcommands plus
+// the flag-form full-state operations (--full-state export, --restore).
 func runEvidence(args []string) int {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "kern evidence: subcommand required (export|verify|explain)")
-		return 1
+		fmt.Fprintln(os.Stderr, "kern evidence: subcommand required (export|verify|explain|--full-state|--restore)")
+		return 2
+	}
+	// Flag-form operations (Feature Batch J): `kern evidence --full-state
+	// [--out FILE]` and `kern evidence --restore FILE`. Detected by scanning
+	// (not args[0]) so --root/--out may appear before or after the flag.
+	if hasFlag(args, "--full-state") {
+		return runEvidenceFullState(args)
+	}
+	if hasFlag(args, "--restore") {
+		return runEvidenceRestore(args)
 	}
 	switch args[0] {
 	case "export":
@@ -26,9 +37,90 @@ func runEvidence(args []string) int {
 	case "explain":
 		return runEvidenceExplain(args[1:])
 	default:
-		fmt.Fprintf(os.Stderr, "kern evidence: unknown subcommand %q (export|verify|explain)\n", args[0])
+		fmt.Fprintf(os.Stderr, "kern evidence: unknown subcommand %q (export|verify|explain|--full-state|--restore)\n", args[0])
+		return 2
+	}
+}
+
+// runEvidenceFullState exports the complete evidence store state for --root
+// as a deterministic, tamper-evident full-state bundle: every record with
+// per-record SHA-256 checksums plus a bundle digest. Default output is stdout;
+// --out writes the file (same convention as evidence export).
+func runEvidenceFullState(rest []string) int {
+	f, _, err := parseFlags(rest)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "kern evidence --full-state: %v\n", err)
 		return 1
 	}
+	root := projectRoot(f)
+	out := f.out
+	if out == "" {
+		out = "-"
+	}
+
+	var buf bytes.Buffer
+	if err := evidence.ExportFullState(root, &buf); err != nil {
+		fmt.Fprintf(os.Stderr, "kern evidence --full-state: %v\n", err)
+		return 1
+	}
+
+	if out == "-" {
+		_, _ = os.Stdout.Write(buf.Bytes())
+		return 0
+	}
+	if err := os.MkdirAll(filepath.Dir(out), 0o755); err != nil {
+		fmt.Fprintf(os.Stderr, "kern evidence --full-state: %v\n", err)
+		return 1
+	}
+	if err := os.WriteFile(out, buf.Bytes(), 0o644); err != nil {
+		fmt.Fprintf(os.Stderr, "kern evidence --full-state: write %s: %v\n", out, err)
+		return 1
+	}
+	count := 0
+	var meta struct {
+		Store struct {
+			Count int `json:"count"`
+		} `json:"store"`
+	}
+	if json.Unmarshal(buf.Bytes(), &meta) == nil {
+		count = meta.Store.Count
+	}
+	fmt.Printf("wrote evidence full-state bundle (%d records) to %s\n", count, out)
+	return 0
+}
+
+// runEvidenceRestore restores the evidence store for --root from a full-state
+// bundle file. The bundle's digest and every per-record checksum are verified
+// before any write; a tampered bundle fails with a clear error and the store
+// is left untouched. The bundle path is the --restore value, or the first
+// positional (same convention as evidence verify's --file).
+func runEvidenceRestore(rest []string) int {
+	f, pos, err := parseFlags(rest)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "kern evidence --restore: %v\n", err)
+		return 1
+	}
+	root := projectRoot(f)
+	file := f.restore
+	if file == "" && len(pos) > 0 {
+		file = pos[0]
+	}
+	if file == "" {
+		fmt.Fprintln(os.Stderr, "kern evidence --restore: missing bundle file (usage: kern evidence --restore FILE [--root ROOT])")
+		return 1
+	}
+	r, err := os.Open(file)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "kern evidence --restore: %v\n", err)
+		return 1
+	}
+	defer r.Close()
+	if err := evidence.RestoreFullState(root, r); err != nil {
+		fmt.Fprintf(os.Stderr, "kern evidence --restore: %v\n", err)
+		return 1
+	}
+	fmt.Printf("restored evidence full state into %s\n", filepath.Join(root, ".kern", "evidence"))
+	return 0
 }
 
 // runEvidenceExport builds a signed evidence bundle for a repo.

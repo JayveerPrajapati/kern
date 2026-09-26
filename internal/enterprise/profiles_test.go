@@ -56,6 +56,7 @@ func featureLessOrEqual(t *testing.T, a, b FeatureSet) bool {
 		{"OrgMemory", a.OrgMemory, b.OrgMemory},
 		{"AgentRegistry", a.AgentRegistry, b.AgentRegistry},
 		{"TeamRegistry", a.TeamRegistry, b.TeamRegistry},
+		{"UserRegistry", a.UserRegistry, b.UserRegistry},
 		{"CrossProjectSearch", a.CrossProjectSearch, b.CrossProjectSearch},
 		{"OrgDashboard", a.OrgDashboard, b.OrgDashboard},
 	}
@@ -86,7 +87,8 @@ func TestProfileFeatures(t *testing.T) {
 		t.Error("basic profile should not enable multi-project")
 	}
 	if basic.OrgAudit || basic.OrgBus || basic.OrgPolicies || basic.OrgMemory ||
-		basic.AgentRegistry || basic.TeamRegistry || basic.CrossProjectSearch || basic.OrgDashboard {
+		basic.AgentRegistry || basic.TeamRegistry || basic.UserRegistry ||
+		basic.CrossProjectSearch || basic.OrgDashboard {
 		t.Error("basic profile should disable all org-level capabilities")
 	}
 	if basic.MaxProjects != 1 {
@@ -95,7 +97,7 @@ func TestProfileFeatures(t *testing.T) {
 
 	std := ProfileStandard.Features()
 	if !std.MultiProject || !std.OrgAudit || !std.OrgBus || !std.OrgPolicies ||
-		!std.OrgMemory || !std.AgentRegistry || !std.TeamRegistry ||
+		!std.OrgMemory || !std.AgentRegistry || !std.TeamRegistry || !std.UserRegistry ||
 		!std.CrossProjectSearch || !std.OrgDashboard {
 		t.Error("standard profile should enable the full historical feature set")
 	}
@@ -108,7 +110,7 @@ func TestProfileFeatures(t *testing.T) {
 
 	adv := ProfileAdvanced.Features()
 	if !adv.MultiProject || !adv.OrgAudit || !adv.OrgBus || !adv.OrgPolicies ||
-		!adv.OrgMemory || !adv.AgentRegistry || !adv.TeamRegistry ||
+		!adv.OrgMemory || !adv.AgentRegistry || !adv.TeamRegistry || !adv.UserRegistry ||
 		!adv.CrossProjectSearch || !adv.OrgDashboard {
 		t.Error("advanced profile should enable the full feature set")
 	}
@@ -186,7 +188,7 @@ func TestParseProfileConfig(t *testing.T) {
 }
 
 func TestServerDefaultProfile(t *testing.T) {
-	s := New()
+	s := mustNew(t)
 	if got := s.Profile(); got != DefaultProfile {
 		t.Errorf("New().Profile() = %q, want %q", got, DefaultProfile)
 	}
@@ -201,7 +203,7 @@ func TestServerDefaultProfile(t *testing.T) {
 
 func TestServerProfileFromEnv(t *testing.T) {
 	t.Setenv(enterpriseProfileEnv, "advanced")
-	s := New()
+	s := mustNew(t)
 	if got := s.Profile(); got != ProfileAdvanced {
 		t.Errorf("env-configured Profile() = %q, want advanced", got)
 	}
@@ -210,13 +212,13 @@ func TestServerProfileFromEnv(t *testing.T) {
 	}
 
 	t.Setenv(enterpriseProfileEnv, "bogus")
-	if got := New().Profile(); got != DefaultProfile {
+	if got := mustNew(t).Profile(); got != DefaultProfile {
 		t.Errorf("invalid env profile should fall back to %q, got %q", DefaultProfile, got)
 	}
 }
 
 func TestServerWithProfile(t *testing.T) {
-	s := New()
+	s := mustNew(t)
 	if got := s.WithProfile(ProfileBasic).Profile(); got != ProfileBasic {
 		t.Errorf("WithProfile(basic).Profile() = %q", got)
 	}
@@ -227,7 +229,7 @@ func TestServerWithProfile(t *testing.T) {
 }
 
 func TestServerWithProfileConfig(t *testing.T) {
-	s := New()
+	s := mustNew(t)
 	s.WithProfileConfig(ProfileConfig{Profile: ProfileAdvanced, MaxCachedApps: 4})
 	if got := s.Profile(); got != ProfileAdvanced {
 		t.Errorf("WithProfileConfig Profile() = %q, want advanced", got)
@@ -255,7 +257,7 @@ func TestServerWithProfileConfig(t *testing.T) {
 }
 
 func TestRegisterWithProfile(t *testing.T) {
-	s := New()
+	s := mustNew(t)
 	if err := s.RegisterWithProfile("proj-a", t.TempDir(), ProfileBasic); err != nil {
 		t.Fatalf("RegisterWithProfile(basic): %v", err)
 	}
@@ -290,7 +292,7 @@ func TestRegisterWithProfile(t *testing.T) {
 }
 
 func TestBasicProfileSingleProjectLimit(t *testing.T) {
-	s := New().WithProfile(ProfileBasic)
+	s := mustNew(t).WithProfile(ProfileBasic)
 	if err := s.Register("only", t.TempDir()); err != nil {
 		t.Fatalf("first register under basic: %v", err)
 	}
@@ -301,7 +303,7 @@ func TestBasicProfileSingleProjectLimit(t *testing.T) {
 	}
 
 	// The same limit applies to explicit basic registrations...
-	s2 := New()
+	s2 := mustNew(t)
 	if err := s2.RegisterWithProfile("a", t.TempDir(), ProfileBasic); err != nil {
 		t.Fatalf("register a as basic: %v", err)
 	}
@@ -318,7 +320,7 @@ func TestBasicProfileSingleProjectLimit(t *testing.T) {
 }
 
 func TestProfileConfigMaxProjectsLimit(t *testing.T) {
-	s := New().WithProfileConfig(ProfileConfig{Profile: ProfileStandard, MaxProjects: 2})
+	s := mustNew(t).WithProfileConfig(ProfileConfig{Profile: ProfileStandard, MaxProjects: 2})
 	for _, name := range []string{"p1", "p2"} {
 		if err := s.Register(name, t.TempDir()); err != nil {
 			t.Fatalf("register %s: %v", name, err)
@@ -331,7 +333,7 @@ func TestProfileConfigMaxProjectsLimit(t *testing.T) {
 
 func TestProfileFeatureGating(t *testing.T) {
 	// A basic server gates off every org-level capability.
-	basic := New().WithProfile(ProfileBasic)
+	basic := mustNew(t).WithProfile(ProfileBasic)
 	if got := basic.OrgAudit(); got != nil {
 		t.Error("basic OrgAudit() should be nil")
 	}
@@ -358,7 +360,7 @@ func TestProfileFeatureGating(t *testing.T) {
 	}
 
 	// The default (standard) server keeps every capability.
-	std := New()
+	std := mustNew(t)
 	if std.OrgAudit() == nil || std.OrgBus() == nil || std.OrgMemory() == nil {
 		t.Error("standard server should expose org audit, bus, and memory")
 	}
@@ -374,7 +376,7 @@ func TestProfileFeatureGating(t *testing.T) {
 }
 
 func TestProfileMaxCachedApps(t *testing.T) {
-	s := New().WithProfile(ProfileAdvanced)
+	s := mustNew(t).WithProfile(ProfileAdvanced)
 	if got := s.maxProjects(); got != advancedMaxCachedApps {
 		t.Errorf("advanced maxProjects() = %d, want %d", got, advancedMaxCachedApps)
 	}
@@ -391,7 +393,7 @@ func TestProfileMaxCachedApps(t *testing.T) {
 }
 
 func TestProjectListCarriesProfile(t *testing.T) {
-	s := New()
+	s := mustNew(t)
 	if err := s.RegisterWithProfile("proj-a", t.TempDir(), ProfileAdvanced); err != nil {
 		t.Fatalf("RegisterWithProfile: %v", err)
 	}

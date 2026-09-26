@@ -16,7 +16,7 @@ import (
 
 	"github.com/JayveerPrajapati/kern/internal/cache"
 	"github.com/JayveerPrajapati/kern/internal/compress"
-	"github.com/JayveerPrajapati/kern/internal/kernconfig"
+	"github.com/JayveerPrajapati/kern/internal/config"
 	"github.com/JayveerPrajapati/kern/internal/llm"
 	"github.com/JayveerPrajapati/kern/internal/memory"
 	"github.com/JayveerPrajapati/kern/internal/pii"
@@ -108,6 +108,7 @@ func record(op stats.Operation, opts Options, res Result) {
 	_ = Recorder.Record(stats.Entry{
 		Session:      opts.Session,
 		Operation:    op,
+		Tool:         stats.ToolForOperation(op),
 		Source:       opts.Source,
 		Model:        modelOrDefault(opts.Model),
 		BeforeTokens: res.BeforeTokens,
@@ -221,29 +222,32 @@ func Prompt(prompt string, attachedLog string, opts Options) (Result, error) {
 			cached.FromCache = true
 			return cached, nil
 		}
-		// Semantic cache: a *similar* prior query returns instantly. Only
-		// deterministic results are stored/served (never LLM runs), and the
-		// LLM path is skipped entirely so a fuzzy hit can never ship a wrong
-		// model's answer.
-		if opts.LLM == "" {
-			var sem Result
-			raw := keyPrompt + "\x00" + keyAttached
-			if matched, sim, hit, serr := semcache.Lookup("prompt", raw, &sem, 0); serr == nil && hit {
-				sem.FromCache = true
-				sem.SemanticHit = true
-				sem.MatchedInput = matched
-				sem.Similarity = sim
-				return sem, nil
-			}
+		// Semantic cache: a *similar* prior query returns instantly. Results are
+		// namespaced by code path: deterministic results live in "prompt", LLM
+		// runs live in "prompt.llm.<model>" so a fuzzy hit can never ship a
+		// different model's answer, and the LLM namespace uses a 0.8 threshold
+		// because serving a rewritten (LLM-produced) output for a merely-similar
+		// prompt is riskier than a deterministic reduction.
+		ns := semPromptNS(opts.LLM)
+		thr := 0.0
+		if opts.LLM != "" {
+			thr = 0.8
+		}
+		var sem Result
+		raw := keyPrompt + "\x00" + keyAttached
+		if matched, sim, hit, serr := semcache.Lookup(ns, raw, &sem, thr); serr == nil && hit {
+			sem.FromCache = true
+			sem.SemanticHit = true
+			sem.MatchedInput = matched
+			sem.Similarity = sim
+			return sem, nil
 		}
 		res, err := promptUncached(prompt, attachedLog, opts)
 		if err != nil {
 			return res, err
 		}
 		_ = cache.Store(key, res)
-		if opts.LLM == "" {
-			_ = semcache.Store("prompt", keyPrompt+"\x00"+keyAttached, res)
-		}
+		_ = semcache.Store(ns, keyPrompt+"\x00"+keyAttached, res)
 		return res, nil
 	}
 	return promptUncached(prompt, attachedLog, opts)
@@ -306,6 +310,91 @@ func promptUncached(prompt string, attachedLog string, opts Options) (Result, er
 	return res, nil
 }
 
+// slugProfile constrains a log profile name to the semcache-safe charset
+// [a-z0-9_-] (lowercase; everything else is replaced, runs collapsing to a
+// single dash) so an agent-supplied profile can never escape the cache root
+// via ../ or forge a sibling namespace (audit iteration-3 finding 1). Empty
+// or all-unsafe names fall back to "default", mirroring logNS's own default.
+func slugProfile(p string) string {
+	var b strings.Builder
+	lastSep := false
+	for _, r := range strings.ToLower(p) {
+		if r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '_' {
+			b.WriteRune(r)
+			lastSep = false
+			continue
+		}
+		if !lastSep {
+			b.WriteByte('-')
+			lastSep = true
+		}
+	}
+	out := strings.Trim(b.String(), "-")
+	if out == "" {
+		return "default"
+	}
+	return out
+}
+
+// logNS returns the semantic-cache namespace for a log profile. The profile
+// is part of the NAMESPACE, not the compared text: a profile suffix on the
+// text is a ~1-shingle delta that passes the Jaccard threshold, so
+// profile-scoped text cross-hits between profiles. Disjoint namespaces make
+// cross-profile serving impossible while the default profile ("log:default")
+// is where internal/compress accrues its profile-less compressions (audit
+// iteration-2 finding 2). The profile is SLUGIFIED before entering the
+// namespace (slugProfile): semcache embeds the namespace verbatim in on-disk
+// paths (payload key sem/<ns>/<hash>, index sem/<ns>-index.json), so a
+// hostile value like "../../../x" must never survive into those paths (audit
+// iteration-3 finding 1).
+func logNS(profile string) string {
+	if profile == "" {
+		return "log:default"
+	}
+	return "log:" + slugProfile(profile)
+}
+
+// sanitizeModel constrains an LLM model name to the semcache-safe namespace
+// charset [A-Za-z0-9._-]: every other rune (e.g. '/', ':') is replaced with
+// '.', consecutive replacements collapse to a single dot, and leading/trailing
+// dots are stripped (semcache namespaces must not start with '.'). An
+// all-unsafe name falls back to "default". This keeps an operator-supplied
+// model string from forging a sibling namespace or escaping the cache root
+// via "../" — the same convention slugProfile applies to log profiles and
+// the MCP kern_semcache clear scope validates.
+func sanitizeModel(m string) string {
+	var b strings.Builder
+	lastSep := false
+	for _, r := range m {
+		switch {
+		case r >= 'A' && r <= 'Z', r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '_', r == '-':
+			b.WriteRune(r)
+			lastSep = false
+		default: // '/', ':', and every other rune become a '.' separator
+			if !lastSep {
+				b.WriteByte('.')
+				lastSep = true
+			}
+		}
+	}
+	out := strings.Trim(b.String(), ".")
+	if out == "" {
+		return "default"
+	}
+	return out
+}
+
+// semPromptNS returns the semantic-cache namespace for the prompt path:
+// "prompt" for deterministic results, "prompt.llm.<model>" when the LLM path
+// is active (model sanitized via sanitizeModel). Model-scoped namespaces are
+// what let a fuzzy hit never ship a different model's answer.
+func semPromptNS(model string) string {
+	if model == "" {
+		return "prompt"
+	}
+	return "prompt.llm." + sanitizeModel(model)
+}
+
 // Log compresses log text to its essential lines.
 func Log(text string, opts Options) (Result, error) {
 	if strings.TrimSpace(text) == "" {
@@ -313,7 +402,7 @@ func Log(text string, opts Options) (Result, error) {
 	}
 
 	var truncateRules []compress.TruncateRule
-	if cfg := kernconfig.Load(opts.Root); cfg != nil {
+	if cfg := config.Load(opts.Root); cfg != nil {
 		prof := cfg.Profile(opts.Profile)
 		for _, r := range prof.TruncateRules {
 			truncateRules = append(truncateRules, compress.TruncateRule{
@@ -325,6 +414,8 @@ func Log(text string, opts Options) (Result, error) {
 		}
 	}
 
+	semNS := logNS(opts.Profile)
+
 	if opts.Cache {
 		key := "logs/" + cache.Hash([]byte(text+":"+opts.Profile))
 		var cached Result
@@ -332,13 +423,19 @@ func Log(text string, opts Options) (Result, error) {
 			cached.FromCache = true
 			return cached, nil
 		}
-		var sem Result
-		if matched, sim, hit, serr := semcache.Lookup("log", text, &sem, 0); serr == nil && hit {
-			sem.FromCache = true
-			sem.SemanticHit = true
-			sem.MatchedInput = matched
-			sem.Similarity = sim
-			return sem, nil
+		// Semantic cache: fuzzy hits are profile-scoped via the NAMESPACE
+		// (log:<profile>) — two profiles cannot share a result compressed
+		// under the wrong profile's truncate rules. The payload is the plain
+		// compressed output string, matching what internal/compress stores,
+		// so both flows accrue into one index per profile.
+		var semOut string
+		if matched, sim, hit, serr := semcache.Lookup(semNS, text, &semOut, 0); serr == nil && hit {
+			res := finish(text, semOut, tokenize.KindLog)
+			res.FromCache = true
+			res.SemanticHit = true
+			res.MatchedInput = matched
+			res.Similarity = sim
+			return res, nil
 		}
 		compressOpts := compress.Options{
 			MaxLines:          200,
@@ -348,11 +445,12 @@ func Log(text string, opts Options) (Result, error) {
 			StructuredMarkers: opts.StructuredMarkers,
 			AnchorFunc:        StoreAnchor,
 			TruncateRules:     truncateRules,
+			SemcacheNamespace: semNS,
 		}
 		res := finish(text, compress.CompressLog(text, compressOpts), tokenize.KindLog)
 		record(stats.OpOptimizeLog, opts, res)
 		_ = cache.Store(key, res)
-		_ = semcache.Store("log", text, res)
+		_ = semcache.Store(semNS, text, res.Output)
 		return res, nil
 	}
 	compressOpts := compress.Options{
@@ -363,6 +461,7 @@ func Log(text string, opts Options) (Result, error) {
 		StructuredMarkers: opts.StructuredMarkers,
 		AnchorFunc:        StoreAnchor,
 		TruncateRules:     truncateRules,
+		SemcacheNamespace: semNS,
 	}
 	out := compress.CompressLog(text, compressOpts)
 	res := finish(text, out, tokenize.KindLog)

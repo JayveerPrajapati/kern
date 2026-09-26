@@ -5,11 +5,19 @@ package governance
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
+	"io/fs"
 	"log"
+	"os"
+	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -57,14 +65,29 @@ type AuditEntry struct {
 	// Reason is the human-readable justification for the decision. Optional;
 	// absent for legacy entries.
 	Reason string `json:"Reason,omitempty"`
+	// Principal records WHO AUTHENTICATED the decision, separately from the
+	// AgentID the caller DECLARED. With a shared-token or loopback console
+	// there is no per-user identity, so this carries "shared-token" when a
+	// bearer token gate is active or "loopback" otherwise — making
+	// impersonation detectable in the audit trail (an auditor can see that
+	// AgentID "root" was claimed by a principal that was NOT authenticated as
+	// "root"). Optional; absent for legacy entries. The value is server-side
+	// state, never client-supplied. When set it is folded into the chain
+	// hash; when empty the entry hashes byte-identically to the legacy
+	// format, so chains written by older binaries still verify.
+	Principal string `json:"Principal,omitempty"`
 }
 
 // AuditLog records governance decisions in memory. It optionally persists each
 // entry to a storage.Store with a content-hash chain for tamper detection.
 type AuditLog struct {
-	mu         sync.Mutex
-	entries    []AuditEntry
-	seq        int
+	mu      sync.Mutex
+	entries []AuditEntry
+	// seq is the single authority for the "audit-N" ID sequence: the
+	// persisted-tail floor (absorbed under mu) plus the allocated high-water
+	// mark. It is atomic because RecordParallel's lock-free nextSeq reads it
+	// concurrently with the mu-guarded absorbers (replay/persist/repair).
+	seq        atomic.Int64
 	atomicSeq  atomic.Int64  // atomic sequence counter for high-concurrency RecordParallel
 	store      storage.Store // optional persistence; nil = in-memory only
 	hashChain  string        // hash of the previous entry (tamper detection)
@@ -175,8 +198,8 @@ func (l *AuditLog) replayLocked() (int, error) {
 			l.hashChain = e.Hash
 		}
 	}
-	if maxSeq > l.seq {
-		l.seq = maxSeq
+	if maxSeq > int(l.seq.Load()) {
+		l.seq.Store(int64(maxSeq))
 	}
 	return len(entries), nil
 }
@@ -233,8 +256,8 @@ func (l *AuditLog) refreshTailLocked() func() {
 			var tail AuditEntry
 			if json.Unmarshal(last.Value, &tail) == nil {
 				l.hashChain = tail.Hash
-				if id, ok := auditSeq(tail.ID); ok && id > l.seq {
-					l.seq = id
+				if id, ok := auditSeq(tail.ID); ok && id > int(l.seq.Load()) {
+					l.seq.Store(int64(id))
 				}
 				return unlock
 			}
@@ -244,8 +267,8 @@ func (l *AuditLog) refreshTailLocked() func() {
 	if len(entries) > 0 {
 		l.hashChain = entries[len(entries)-1].Hash
 	}
-	if maxSeq > l.seq {
-		l.seq = maxSeq
+	if maxSeq > int(l.seq.Load()) {
+		l.seq.Store(int64(maxSeq))
 	}
 	return unlock
 }
@@ -261,9 +284,11 @@ func (l *AuditLog) Record(entry AuditEntry) {
 	// With a store attached, the sequence ID is assigned inside persist after
 	// re-reading the true persisted tail, so it never collides with an entry
 	// another process wrote in between. In-memory-only logs assign it here.
+	// Every allocation goes through nextSeq — the single ID authority shared
+	// with RecordParallel — so the two paths can never mint colliding
+	// "audit-N" IDs (which would invalidate VerifyChain).
 	if entry.ID == "" && l.store == nil {
-		l.seq++
-		entry.ID = fmt.Sprintf("audit-%d", l.seq)
+		entry.ID = fmt.Sprintf("audit-%d", l.nextSeq())
 	}
 	l.entries = append(l.entries, entry)
 	if l.merkleTree != nil {
@@ -290,8 +315,9 @@ func (l *AuditLog) noteResultAndTrimLocked(entry AuditEntry) {
 	}
 	if len(l.entries) > maxAuditEntries {
 		kept := l.entries[len(l.entries)-maxAuditEntries:]
-		// In-place copy over the (larger) backing array; All() keeps
-		// returning the same slice header semantics.
+		// In-place copy over the (larger) backing array. This rewrite is why
+		// All()/Filter() must return copies: an aliased caller would see the
+		// retained window shift under it.
 		l.entries = append(l.entries[:0], kept...)
 	}
 }
@@ -332,10 +358,10 @@ func (l *AuditLog) persist(entry AuditEntry) {
 	}
 
 	// Assign the sequence ID after the tail refresh so it never collides
-	// with an entry another process wrote in between.
+	// with an entry another process wrote in between. nextSeq is the single
+	// ID authority (shared with RecordParallel and in-memory Record).
 	if entry.ID == "" {
-		l.seq++
-		entry.ID = fmt.Sprintf("audit-%d", l.seq)
+		entry.ID = fmt.Sprintf("audit-%d", l.nextSeq())
 	}
 	// Content hash linking this entry to the previous one (tamper chain).
 	entry.Hash = computeAuditHash(entry, l.hashChain)
@@ -384,8 +410,7 @@ func (l *AuditLog) AppendExternal(entry AuditEntry) error {
 	}
 
 	if entry.ID == "" {
-		l.seq++
-		entry.ID = fmt.Sprintf("audit-%d", l.seq)
+		entry.ID = fmt.Sprintf("audit-%d", l.nextSeq())
 	}
 	entry.Hash = computeAuditHash(entry, l.hashChain)
 	l.entries = append(l.entries, entry)
@@ -439,10 +464,11 @@ func (l *AuditLog) RepairChain() (int, error) {
 	modified := make([]bool, len(entries))
 	for i, e := range entries {
 		want := computeAuditHash(e, prev)
-		// An entry that verifies under either formula (modern, or the
-		// legacy formula) is intact — leave it untouched so repair
-		// stays minimal (only genuinely broken links are re-chained).
-		if e.Hash != want && e.Hash != computeAuditHashLegacy(e, prev) {
+		// An entry that verifies under any of the three formulas (HMAC, the
+		// pre-HMAC plain formula, or the legacy formula) is intact — leave
+		// it untouched so repair stays minimal (only genuinely broken links
+		// are re-chained).
+		if e.Hash != want && e.Hash != computeAuditHashPlain(e, prev) && e.Hash != computeAuditHashLegacy(e, prev) {
 			e.Hash = want
 			modified[i] = true
 			n++
@@ -489,27 +515,173 @@ func (l *AuditLog) RepairChain() (int, error) {
 
 	l.entries = entries
 	l.hashChain = prev
-	if maxSeq > l.seq {
-		l.seq = maxSeq
+	if maxSeq > int(l.seq.Load()) {
+		l.seq.Store(int64(maxSeq))
 	}
 	return n, nil
 }
 
-// computeAuditHash computes a SHA-256 hash of the audit entry content
+// auditChainSecretPath returns the path of the audit-chain HMAC secret,
+// stored OUTSIDE the client-governed workspace next to the exec-approval
+// secret (same R1 pattern as exec_approval.go), so a governed client with
+// write access to the audit store cannot forge the chain. It is a
+// package-level func so tests can redirect it away from the real user
+// config dir.
+var auditChainSecretPath = func() (string, error) {
+	dir, err := os.UserConfigDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "kern", "audit-chain.key"), nil
+}
+
+// The audit secret is generated once per process and cached; the file
+// persists across processes so chains written by one process verify in a
+// later one (the same design as the exec-approval secret).
+var (
+	auditChainSecretOnce sync.Once
+	auditChainSecretKey  []byte
+	auditChainSecretErr  error
+)
+
+// auditChainSecret returns the 32-byte HMAC secret, creating it once at
+// <UserConfigDir>/kern/audit-chain.key (dir 0700, file 0600) on first use.
+// It deliberately uses its OWN key file (not exec-approval.key) so the audit
+// chain's integrity is not coupled to the exec-approval key's lifecycle.
+// The result is cached — success and failure alike — so callers can decide
+// how to degrade deterministically.
+func auditChainSecret() ([]byte, error) {
+	auditChainSecretOnce.Do(func() {
+		p, err := auditChainSecretPath()
+		if err != nil {
+			auditChainSecretErr = err
+			return
+		}
+		if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+			auditChainSecretErr = err
+			return
+		}
+		if data, rerr := os.ReadFile(p); rerr == nil {
+			if len(data) != 32 {
+				auditChainSecretErr = fmt.Errorf("audit-chain secret %s is %d bytes, want 32; refusing to use it", p, len(data))
+				return
+			}
+			auditChainSecretKey = data
+			return
+		}
+		key := make([]byte, 32)
+		if _, err := rand.Read(key); err != nil {
+			auditChainSecretErr = err
+			return
+		}
+		// O_CREATE|O_EXCL so two processes racing the first-use generation
+		// cannot cross-key: the loser re-reads the winner's key.
+		f, werr := os.OpenFile(p, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+		if werr != nil {
+			if errors.Is(werr, fs.ErrExist) && func() bool {
+				data, rerr := os.ReadFile(p)
+				if rerr == nil && len(data) == 32 {
+					auditChainSecretKey = data
+					return true
+				}
+				return false
+			}() {
+				return
+			}
+			auditChainSecretErr = werr
+			return
+		}
+		if _, err := f.Write(key); err != nil {
+			_ = f.Close()
+			auditChainSecretErr = err
+			return
+		}
+		if err := f.Close(); err != nil {
+			auditChainSecretErr = err
+			return
+		}
+		auditChainSecretKey = key
+	})
+	return auditChainSecretKey, auditChainSecretErr
+}
+
+// auditChainSecretDegraded warns once per process when the HMAC secret is
+// unavailable and hashing degrades to the plain formula.
+var auditChainSecretDegraded sync.Once
+
+// auditHashFormatVersion versions the audit-chain HMAC serialization so a
+// future framing change is distinguishable from tampering by construction.
+const auditHashFormatVersion = 1
+
+// computeAuditHash computes the chain hash of the audit entry content
 // concatenated with the previous entry's hash, creating a tamper-evident
-// chain: modifying any entry invalidates all subsequent hashes.
+// chain: modifying any entry invalidates all subsequent hashes. It is
+// HMAC-SHA256 keyed by a secret stored OUTSIDE the workspace, so the chain
+// is tamper-evident against FULL rewrites too — an attacker with write
+// access to the audit store cannot recompute the chain without the secret.
+// When the secret is unavailable (read-only user config dir, sandbox) it
+// degrades to the plain formula (computeAuditHashPlain) and warns once:
+// the audit log must not lose entries over an unavailable key, matching the
+// persist path's tolerate-storage-errors policy. Chains persisted before
+// HMAC still verify via the plain/legacy fallbacks in VerifyChainReport.
 func computeAuditHash(e AuditEntry, prevHash string) string {
-	h := sha256.New()
+	key, err := auditChainSecret()
+	if err != nil {
+		auditChainSecretDegraded.Do(func() {
+			log.Printf("kern governance: audit-chain HMAC secret unavailable (%v); audit hashes fall back to plain SHA-256 — full-chain-rewrite tamper protection is OFF", err)
+		})
+		return computeAuditHashPlain(e, prevHash)
+	}
+	h := hmac.New(sha256.New, key)
+	// The format version is the first MAC input so framing changes and
+	// tampering are distinguishable by construction.
+	_, _ = h.Write([]byte{auditHashFormatVersion})
+	writeAuditChainFields(h, e, prevHash)
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// writeAuditChainFields writes the audit entry content plus the previous
+// chain hash into h using the canonical pipe-separated framing shared by the
+// HMAC and plain formulas. ValidationOutcome is part of a persisted entry, so
+// it must be covered too, or it could be modified without breaking
+// VerifyChain. Entries with a nil ValidationOutcome serialize byte-identically
+// to the legacy format, so chains recorded by older versions still verify.
+// Principal follows the same conditional-clause pattern: an empty Principal
+// (all legacy entries) keeps the bytes identical to the pre-Principal
+// format, while a set Principal is folded into the hash so the
+// authenticated-identity field is tamper-evident like every other field.
+func writeAuditChainFields(h io.Writer, e AuditEntry, prevHash string) {
 	_, _ = fmt.Fprintf(h, "%s|%s|%s|%s|%s|%v|%v|%v|%s|%s", prevHash, e.ID, e.AgentID, e.Action, e.Resource, e.Timestamp.UnixNano(), e.Risk, e.Approved, e.Result, e.TaskID)
 	if e.ValidationOutcome != nil {
-		// The tamper chain must cover the full entry: ValidationOutcome is
-		// part of a persisted entry, so it must be covered too, or it could
-		// be modified without breaking VerifyChain. Entries with a nil
-		// ValidationOutcome hash byte-identically to the legacy format, so
-		// chains recorded by older versions still verify.
 		_, _ = fmt.Fprintf(h, "|%s|%d|%s|%s|%d", e.ValidationOutcome.Status, e.ValidationOutcome.ExitCode, strings.Join(e.ValidationOutcome.BlockedFiles, ","), e.ValidationOutcome.CorrelationID, e.ValidationOutcome.Findings)
 	}
+	if e.Principal != "" {
+		_, _ = fmt.Fprintf(h, "|%s", e.Principal)
+	}
+}
+
+// computeAuditHashPlain recomputes the pre-HMAC chain formula: plain SHA-256
+// over the full entry content (ValidationOutcome clause included when
+// present) — exactly what computeAuditHash computed before HMAC-SHA256. It
+// is the degraded-mode computation when the audit secret is unavailable and
+// a verification fallback for chains persisted by pre-HMAC binaries.
+func computeAuditHashPlain(e AuditEntry, prevHash string) string {
+	h := sha256.New()
+	writeAuditChainFields(h, e, prevHash)
 	return hex.EncodeToString(h.Sum(nil))
+}
+
+// IntegrityMode reports which hash mechanism currently protects the audit
+// chain: "hmac" when the out-of-workspace HMAC secret is available, or
+// "plain" when it is not and hashes silently degrade to plain SHA-256
+// (full-chain-rewrite tamper protection off). Callers — e.g. `kern audit` —
+// surface the degraded mode so it is never silent; the write path never
+// fails over an unavailable key (entries-not-lost posture is deliberate).
+func (l *AuditLog) IntegrityMode() string {
+	if _, err := auditChainSecret(); err != nil {
+		return "plain"
+	}
+	return "hmac"
 }
 
 // Len returns the total number of audit entries in memory.
@@ -519,20 +691,22 @@ func (l *AuditLog) Len() int {
 	return len(l.entries)
 }
 
-// All returns all audit entries in insertion order.
+// All returns all audit entries in insertion order. The returned slice is a
+// copy: the retention trim rewrites the internal backing array in place
+// (noteResultAndTrimLocked), so callers must never observe or mutate it.
 func (l *AuditLog) All() []AuditEntry {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	return l.entries
+	return slices.Clone(l.entries)
 }
 
 // Filter returns entries matching the given agent ID. An empty agentID matches
-// all entries.
+// all entries. The returned slice is a copy, like All().
 func (l *AuditLog) Filter(agentID string) []AuditEntry {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if agentID == "" {
-		return l.entries
+		return slices.Clone(l.entries)
 	}
 	var out []AuditEntry
 	for _, e := range l.entries {
@@ -566,20 +740,20 @@ func (l *AuditLog) VerifyChainReport() (firstBroken, verified int) {
 	firstBroken = -1
 	var prevHash string
 	for _, e := range l.entries {
-		if e.Hash != computeAuditHash(e, prevHash) {
-			// Legacy transition window: entries with a non-nil
-			// ValidationOutcome were persisted by the in-transition binary
-			// BEFORE ValidationOutcome was folded into the hash, so their
-			// stored hashes use the legacy formula. The legacy formula
-			// covers a strict subset of the modern fields, so accepting it
-			// verifies exactly what was verifiable when the entry was
-			// written — nothing that was ever protected is weakened.
-			if e.Hash != computeAuditHashLegacy(e, prevHash) {
-				if firstBroken < 0 {
-					firstBroken = verified
-				}
-			} else {
-				verified++
+		// Accept any of the three chain formulas: HMAC-SHA256 (current), the
+		// pre-HMAC plain formula (chains persisted by the immediately
+		// preceding binaries), and the legacy plain formula WITHOUT the
+		// ValidationOutcome clause (entries persisted by the in-transition
+		// binary BEFORE ValidationOutcome was folded into the hash, and all
+		// older chains). Each fallback covers a strict subset of the fields
+		// the current formula covers, so accepting it verifies exactly what
+		// was verifiable when the entry was written — nothing that was ever
+		// protected is weakened.
+		if e.Hash != computeAuditHash(e, prevHash) &&
+			e.Hash != computeAuditHashPlain(e, prevHash) &&
+			e.Hash != computeAuditHashLegacy(e, prevHash) {
+			if firstBroken < 0 {
+				firstBroken = verified
 			}
 		} else {
 			verified++
@@ -766,11 +940,17 @@ func (l *AuditLog) initMerkleTreeLocked() {
 	}
 }
 
-// nextSeq allocates a sequence number atomically without holding l.mu.
+// nextSeq allocates a sequence number atomically without holding l.mu. It is
+// the SINGLE authority for the "audit-N" ID sequence: every ID-assigning path
+// (Record, persist, AppendExternal, RecordParallel) allocates through it, so
+// no two paths — the mu-guarded writers and the lock-free parallel path — can
+// mint colliding IDs. The persisted-tail floor (l.seq) is absorbed under mu
+// by replay/refresh/repair; nextSeq always allocates above max(atomicSeq,
+// l.seq).
 func (l *AuditLog) nextSeq() int64 {
 	for {
 		cur := l.atomicSeq.Load()
-		lSeq := int64(l.seq)
+		lSeq := l.seq.Load()
 		base := cur
 		if lSeq > base {
 			base = lSeq

@@ -6,12 +6,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 
 	"github.com/JayveerPrajapati/kern/internal/mcp/mcpargs"
+	"github.com/JayveerPrajapati/kern/internal/mcp/root"
 	"github.com/JayveerPrajapati/kern/internal/memory"
 )
 
@@ -22,26 +21,13 @@ type Hooks struct {
 	Recall func(ctx context.Context, root, prompt string, k int) ([]memory.Entry, error)
 }
 
-func resolveRoot(root string) string {
-	if root == "" {
-		if cwd, err := os.Getwd(); err == nil {
-			return filepath.Clean(cwd)
-		}
-		return "."
-	}
-	if abs, err := filepath.Abs(root); err == nil {
-		return filepath.Clean(abs)
-	}
-	return root
-}
-
 // Add stores a new lesson in project memory.
 func Add(ctx context.Context, h Hooks, args map[string]any) (string, error) {
 	lesson := mcpargs.ArgString(args, "lesson")
 	if lesson == "" {
 		return "", fmt.Errorf("lesson is required")
 	}
-	root := resolveRoot(mcpargs.ArgString(args, "root"))
+	root := root.ResolveRoot(mcpargs.ArgString(args, "root"))
 	if h.Add != nil {
 		if err := h.Add(ctx, root, lesson); err != nil {
 			return "", err
@@ -56,7 +42,7 @@ func Add(ctx context.Context, h Hooks, args map[string]any) (string, error) {
 
 // List lists all lessons stored in project memory.
 func List(ctx context.Context, h Hooks, args map[string]any) (string, error) {
-	root := resolveRoot(mcpargs.ArgString(args, "root"))
+	root := root.ResolveRoot(mcpargs.ArgString(args, "root"))
 	var entries []memory.Entry
 	var err error
 	if h.List != nil {
@@ -76,7 +62,7 @@ func Recall(ctx context.Context, h Hooks, args map[string]any) (string, error) {
 	if prompt == "" {
 		return "", fmt.Errorf("prompt is required")
 	}
-	root := resolveRoot(mcpargs.ArgString(args, "root"))
+	root := root.ResolveRoot(mcpargs.ArgString(args, "root"))
 	k := memory.DefaultRecallLimit
 	limitStr := mcpargs.ArgString(args, "limit")
 	if limitStr == "" {
@@ -107,62 +93,6 @@ func Recall(ctx context.Context, h Hooks, args map[string]any) (string, error) {
 	return memory.FormatEntries(entries), nil
 }
 
-// Action handles unified memory action dispatch (add, list, recall).
-func Action(ctx context.Context, h Hooks, args map[string]any) (string, error) {
-	action := mcpargs.ArgString(args, "action")
-	root := resolveRoot(mcpargs.ArgString(args, "root"))
-	switch action {
-	case "add":
-		lesson := mcpargs.ArgString(args, "lesson")
-		if lesson == "" {
-			return "", fmt.Errorf("lesson is required for action 'add'")
-		}
-		if h.Add != nil {
-			if err := h.Add(ctx, root, lesson); err != nil {
-				return "", err
-			}
-		} else {
-			if err := memory.Add(root, lesson); err != nil {
-				return "", err
-			}
-		}
-		return "remembered.", nil
-	case "list":
-		var entries []memory.Entry
-		var err error
-		if h.List != nil {
-			entries, err = h.List(ctx, root)
-		} else {
-			entries = memory.List(root)
-		}
-		if err != nil {
-			return "", err
-		}
-		return memory.FormatEntries(entries), nil
-	case "recall":
-		prompt := mcpargs.ArgString(args, "prompt")
-		if prompt == "" {
-			return "", fmt.Errorf("prompt is required for action 'recall'")
-		}
-		var entries []memory.Entry
-		var err error
-		if h.Recall != nil {
-			entries, err = h.Recall(ctx, root, prompt, memory.DefaultRecallLimit)
-		} else {
-			entries = memory.Recall(root, prompt, memory.DefaultRecallLimit)
-		}
-		if err != nil {
-			return "", err
-		}
-		if len(entries) == 0 {
-			return memory.NoRecallMatch, nil
-		}
-		return memory.FormatEntries(entries), nil
-	default:
-		return "", fmt.Errorf("unknown memory action %q (want add, list, or recall)", action)
-	}
-}
-
 // Ranked handles exponential-decay recency/relevance ranked memory retrieval.
 func Ranked(ctx context.Context, args map[string]any) (string, error) {
 	prompt := mcpargs.ArgString(args, "prompt")
@@ -170,7 +100,7 @@ func Ranked(ctx context.Context, args map[string]any) (string, error) {
 		return "", fmt.Errorf("kern_memory_ranked: 'prompt' is required")
 	}
 
-	root := resolveRoot(mcpargs.ArgString(args, "root"))
+	root := root.ResolveRoot(mcpargs.ArgString(args, "root"))
 	k := 5
 	if kStr := mcpargs.ArgString(args, "k"); kStr != "" {
 		if n, err := strconv.Atoi(kStr); err == nil && n > 0 {

@@ -53,7 +53,7 @@ func TestRunCompare(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	ts := NewTaskService(p, nil).WithAgentID("test")
+	ts := NewTaskService(p, nil).WithAgentID("test").WithTaskPersistence(true)
 
 	t1, _, err := ts.Analyze("NewServer")
 	if err != nil {

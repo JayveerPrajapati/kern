@@ -64,6 +64,7 @@ func writeTestCert(t *testing.T) (certFile, keyFile string) {
 }
 
 func TestServeHTTPContextWithTLSIncompleteConfig(t *testing.T) {
+	t.Parallel()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	for _, cfg := range []*transport.TLSConfig{
@@ -80,6 +81,7 @@ func TestServeHTTPContextWithTLSIncompleteConfig(t *testing.T) {
 }
 
 func TestServeHTTPContextWithTLSServesHTTPS(t *testing.T) {
+	t.Parallel()
 	certFile, keyFile := writeTestCert(t)
 
 	// Pick a free loopback port (listen+close+reuse; standard test pattern).
@@ -156,6 +158,7 @@ func TestServeHTTPContextWithTLSServesHTTPS(t *testing.T) {
 }
 
 func TestServeHTTPContextWithTLSPlainHTTPWhenNil(t *testing.T) {
+	t.Parallel()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)

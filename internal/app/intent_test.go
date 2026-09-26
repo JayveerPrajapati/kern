@@ -24,6 +24,14 @@ func TestCompileIntentClassification(t *testing.T) {
 		{"review this PR", domain.IntentReview},
 		{"deploy version 2.0", domain.IntentDeploy},
 		{"audit what the AI changed", domain.IntentAudit},
+		// "test" inside a longer identifier is not a test request: the
+		// word-boundary fix keeps "fix the testgaps rendering bug" a
+		// CODE_CHANGE instead of misclassifying it as TEST.
+		{"fix the testgaps rendering bug", domain.IntentCodeChange},
+		{"fix the tests", domain.IntentTest},
+		{"add unit tests", domain.IntentTest},
+		{"run the test suite", domain.IntentTest},
+		{"testgaps is misbehaving", domain.IntentCodeChange},
 	}
 	for _, tc := range cases {
 		t.Run(tc.intent, func(t *testing.T) {
@@ -267,5 +275,21 @@ func TestContextPlanIntentAware(t *testing.T) {
 	}
 	if res.ContextPlan != "whatif" {
 		t.Errorf("RunResult.ContextPlan = %q, want %q", res.ContextPlan, "whatif")
+	}
+}
+
+// TestCompileIntentWhatHappensIf (F-RN1): "what happens if…" is a WHAT_IF
+// prediction, not a CODE_CHANGE — the "change"/"remove" verbs inside the
+// question must not hand it execution capabilities.
+func TestCompileIntentWhatHappensIf(t *testing.T) {
+	for _, q := range []string{
+		"what happens if we remove the retry logic",
+		"what happens if the cache layer is deleted",
+		"what would happen if we change the timeout",
+	} {
+		ci := CompileIntent(q)
+		if ci.Type != domain.IntentWhatIf {
+			t.Errorf("CompileIntent(%q) = %v, want WHAT_IF", q, ci.Type)
+		}
 	}
 }

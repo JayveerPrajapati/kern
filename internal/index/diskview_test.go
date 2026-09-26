@@ -35,8 +35,8 @@ func TestDiskIndexViewFresh(t *testing.T) {
 	if n, _ := v["symbols"].(int); n <= 0 {
 		t.Errorf("symbols = %v, want > 0", v["symbols"])
 	}
-	if v["store"] != StorePath(dir) {
-		t.Errorf("store = %v, want %v", v["store"], StorePath(dir))
+	if v["store"] != primaryStorePath(dir) {
+		t.Errorf("store = %v, want %v", v["store"], primaryStorePath(dir))
 	}
 }
 

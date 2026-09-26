@@ -308,6 +308,15 @@ func RankedSearchScored(ix *index.Index, query string, limit int) []RepoHit {
 		if matched == len(words) {
 			score += 150 // matches every token: boost strongly
 		}
+		// F-SE1: an exact-name hit IS the definition — it must outrank any
+		// longer symbol that merely contains the query (agents take the top
+		// hit, and TestWriteFileAtomic must never shadow WriteFileAtomic).
+		// queryWords camelCase-splits, so compare the JOINED query too.
+		if joined := strings.Join(words, ""); joined != "" {
+			if joined == name || joined == full {
+				score += 200
+			}
+		}
 		if codeIntent {
 			// V7b: for code-oriented queries, code symbols must beat prose
 			// headings ("What Is Conduit?" matches query words trivially
@@ -321,7 +330,7 @@ func RankedSearchScored(ix *index.Index, query string, limit int) []RepoHit {
 		if ix.IsGenerated(s.File) {
 			score -= 60
 		}
-		hits = append(hits, RepoHit{Symbol: s, Score: score})
+		hits = append(hits, RepoHit{Symbol: s, Score: score, MatchedAll: matched == len(words)})
 	}
 	sort.Slice(hits, func(i, j int) bool {
 		if hits[i].Score != hits[j].Score {

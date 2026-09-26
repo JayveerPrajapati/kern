@@ -23,9 +23,18 @@ import (
 )
 
 func runOptimize(cmd string, rest []string) {
-	f, args, err := parseFlags(rest)
-	if err != nil {
-		fatalUsage("flags: %v", err)
+	f, args := parseFlagsOrDie(rest)
+	// --kind log routes to the log-compression path (the former `kern log`;
+	// `kern log` is now a thin wrapper presetting this kind). It honors the
+	// log-specific flags (--context-before/--context-after/--profile/--root)
+	// and reproduces the log output byte-for-byte (surface consolidation
+	// T2b).
+	if f.kind == "log" {
+		runLog(rest)
+		return
+	}
+	if f.kind != "" && f.kind != "prompt" {
+		fatalUsage("optimize: unknown --kind %q (valid kinds: prompt, log)", f.kind)
 	}
 	prompt := strings.Join(args, " ")
 	if prompt == "" || prompt == "-" {
@@ -79,6 +88,9 @@ func runOptimize(cmd string, rest []string) {
 		fmt.Fprintf(os.Stderr, "kern: served from cache\n")
 	}
 	fmt.Fprintf(os.Stderr, "kern: %d -> %d tokens (saved %d, %.1f%%)\n", res.BeforeTokens, res.AfterTokens, res.SavedTokens, res.SavedPercent)
+	if res.SavedTokens == 0 && res.BeforeTokens > 0 {
+		fmt.Fprintln(os.Stderr, "kern: nothing to compress — try --mask, --attach, or a longer input")
+	}
 	if res.LLMSkipped != "" {
 		fmt.Fprintf(os.Stderr, "kern: warning: %s\n", res.LLMSkipped)
 	}
@@ -86,12 +98,9 @@ func runOptimize(cmd string, rest []string) {
 }
 
 func runCompact(rest []string) {
-	f, args, err := parseFlags(rest)
-	if err != nil {
-		fatalUsage("flags: %v", err)
-	}
+	f, args := parseFlagsOrDie(rest)
 	if len(args) < 1 {
-		fatalUsage("usage: kern compact [--root DIR] <file>")
+		fatalUsage("usage: kern compact [--root ROOT] <file>")
 	}
 	file := args[0]
 	// Root-confinement: the MCP handler for kern_compact_file validates paths
@@ -143,6 +152,24 @@ func runCompact(rest []string) {
 	before := tokenize.Count(string(content))
 	after := tokenize.Count(rendered)
 	printSavingsFooter(os.Stderr, before, after, kernctx.CostPerToken())
+	// Record to the savings ledger like every other compression surface
+	// (QA Pick #1, finding F-B): without this, `kern compact` under-reports
+	// lifetime savings in `kern stats` / `kern diff`.
+	if optimize.Recorder == nil {
+		_ = optimize.EnsureRecorder()
+	}
+	if optimize.Recorder != nil {
+		_ = optimize.Recorder.Record(stats.Entry{
+			Operation:    stats.OpCompactFile,
+			Tool:         stats.ToolForOperation(stats.OpCompactFile),
+			Source:       file,
+			Model:        stats.DefaultModel,
+			BeforeTokens: before,
+			AfterTokens:  after,
+			BeforeBytes:  len(content),
+			AfterBytes:   len(rendered),
+		})
+	}
 }
 
 // confineToRoot resolves file so it stays lexically inside root, mirroring the
@@ -166,10 +193,7 @@ func confineToRoot(root, file string) (string, error) {
 }
 
 func runLog(rest []string) {
-	f, args, err := parseFlags(rest)
-	if err != nil {
-		fatalUsage("flags: %v", err)
-	}
+	f, args := parseFlagsOrDie(rest)
 	var b []byte
 	var rerr error
 	src := ""
@@ -211,10 +235,7 @@ func runLog(rest []string) {
 }
 
 func runTokens(rest []string) {
-	f, args, err := parseFlags(rest)
-	if err != nil {
-		fatalUsage("flags: %v", err)
-	}
+	f, args := parseFlagsOrDie(rest)
 	text := strings.Join(args, " ")
 	if text == "" {
 		fatalUsage("usage: kern tokens [--bpe] <text>")
@@ -228,9 +249,22 @@ func runTokens(rest []string) {
 }
 
 func runBudget(rest []string) {
-	f, args, err := parseFlags(rest)
-	if err != nil {
-		fatalUsage("flags: %v", err)
+	f, args := parseFlagsOrDie(rest)
+	// --mode selects the budget family (surface consolidation T2b): code
+	// (default) = the current FitCode path; terse = the former `kern terse`
+	// (terse.Tersify); fit = the former `kern fit-context`
+	// (fit.FitContext). Each mode honors its original flags; `kern terse`
+	// and `kern fit-context` are now thin wrappers presetting their mode.
+	switch f.mode {
+	case "terse":
+		runTerseCore(rest)
+		return
+	case "fit":
+		runFitContextCore(rest)
+		return
+	case "", "code":
+	default:
+		fatalUsage("budget: unknown --mode %q (valid modes: code, terse, fit)", f.mode)
 	}
 	text := strings.Join(args, " ")
 	if text == "" {
@@ -258,10 +292,16 @@ func runBudget(rest []string) {
 }
 
 func runTerse(rest []string) {
-	f, args, err := parseFlags(rest)
-	if err != nil {
-		fatalUsage("flags: %v", err)
-	}
+	// `kern terse` is a thin wrapper over `kern budget --mode terse`
+	// (surface consolidation T2b): the handler presets the mode and the
+	// shared core reproduces the terse output byte-for-byte.
+	runTerseCore(rest)
+}
+
+// runTerseCore is the deterministic line-level tersification shared by
+// `kern terse` and `kern budget --mode terse`.
+func runTerseCore(rest []string) {
+	f, args := parseFlagsOrDie(rest)
 	text := ""
 	if len(args) > 0 {
 		if args[0] == "-" {
@@ -300,6 +340,9 @@ func runTerse(rest []string) {
 	if st.DroppedBlank > 0 || st.DroppedComment > 0 {
 		msg += fmt.Sprintf(", %d blank + %d comment lines stripped", st.DroppedBlank, st.DroppedComment)
 	}
+	if st.DroppedIssue > 0 {
+		msg += fmt.Sprintf(", %d TODO/FIXME/XXX/HACK comment lines stripped", st.DroppedIssue)
+	}
 	if f.max > 0 {
 		msg += fmt.Sprintf(", budget %d", f.max)
 		if st.DroppedBudget > 0 {
@@ -313,10 +356,7 @@ func runTerse(rest []string) {
 }
 
 func runSemcache(rest []string) {
-	f, args, err := parseFlags(rest)
-	if err != nil {
-		fatalUsage("flags: %v", err)
-	}
+	f, args := parseFlagsOrDie(rest)
 	sub := ""
 	if len(args) > 0 {
 		sub = args[0]
@@ -361,6 +401,35 @@ func runSemcache(rest []string) {
 		for i, in := range entries {
 			fmt.Printf("  %d. %s\n", i+1, in)
 		}
+	case "stats":
+		st, err := semcache.Stats()
+		if err != nil {
+			fatal("semcache: %v", err)
+		}
+		if f.json {
+			printJSON(map[string]any{"namespaces": st})
+			return
+		}
+		if len(st) == 0 {
+			fmt.Println("semcache: empty")
+			return
+		}
+		var tH, tM, tE, tS int64
+		var tN int
+		fmt.Println("semcache accounting:")
+		names := slices.Sorted(maps.Keys(st))
+		for _, ns := range names {
+			s := st[ns]
+			tN += s.Entries
+			tH += s.Hits
+			tM += s.Misses
+			tE += s.Evictions
+			tS += s.SavedBytes
+			fmt.Printf("  %-10s entries=%-4d hits=%-7d misses=%-7d evictions=%-4d saved=%.1f KB\n",
+				ns, s.Entries, s.Hits, s.Misses, s.Evictions, float64(s.SavedBytes)/1024)
+		}
+		fmt.Printf("  %-10s entries=%-4d hits=%-7d misses=%-7d evictions=%-4d saved=%.1f KB\n",
+			"total", tN, tH, tM, tE, float64(tS)/1024)
 	case "sim":
 		if len(args) != 2 {
 			fatalUsage("usage: kern semcache sim <textA> <textB>")
@@ -386,7 +455,7 @@ func runSemcache(rest []string) {
 		fmt.Println("semcache entries by namespace:")
 		names := slices.Sorted(maps.Keys(st))
 		for _, ns := range names {
-			fmt.Printf("  %-8s %d\n", ns, st[ns])
+			fmt.Printf("  %-8s %d\n", ns, st[ns].Entries)
 		}
 	}
 
@@ -395,10 +464,7 @@ func runSemcache(rest []string) {
 func runStats(cmd string, rest []string) {
 	// Positional args are unused by the stats subcommands; parseFlags still
 	// validates unknown flags so typos fail loudly (rc=2).
-	f, _, err := parseFlags(rest)
-	if err != nil {
-		fatalUsage("flags: %v", err)
-	}
+	f, _ := parseFlagsOrDie(rest)
 	rec, err := stats.NewRecorder()
 	if err != nil {
 		fatal("stats: %v", err)
@@ -448,19 +514,73 @@ func runStats(cmd string, rest []string) {
 		w.Flush()
 		return
 	}
+	// `kern stats --by-tool` renders the per-tool token ledger: for each tool
+	// that recorded entries (MCP dispatch entries plus optimization entries
+	// whose operation maps to a tool), its call count, tokens returned to the
+	// agent, tokens saved and estimated cost saved, sorted by savings desc.
+	// Tools that don't know their before/after contribute tokens returned only —
+	// no savings are ever fabricated.
+	if f.byTool {
+		tools, err := rec.SummarizeByTool(f.days, f.session)
+		if err != nil {
+			fatal("stats: %v", err)
+		}
+		if f.json {
+			printJSON(tools)
+			return
+		}
+		fmt.Printf("kern stats --by-tool (last %d days)%s\n", f.days, statsRateSuffix())
+		if len(tools) == 0 {
+			fmt.Println("  no per-tool data yet (MCP tool calls and kern compact record entries)")
+			return
+		}
+		fmt.Printf("  %-22s %6s %14s %13s %11s\n", "tool", "calls", "tokens ret", "tokens saved", "cost saved")
+		for _, ts := range tools {
+			fmt.Printf("  %-22s %6d %14d %13d $%10.4f\n", ts.Tool, ts.Calls, ts.TokensReturned, ts.TokensSaved, ts.CostSaved)
+		}
+		return
+	}
+	// `kern stats --by-agent` renders the per-agent token ledger, mirroring
+	// --by-tool end-to-end: entries are grouped by the agent_id recorded at
+	// MCP dispatch (entries without an attribution fall into the
+	// "(unattributed)" bucket).
+	if f.byAgent {
+		agents, err := rec.SummarizeByAgent(f.days, f.session)
+		if err != nil {
+			fatal("stats: %v", err)
+		}
+		if f.json {
+			printJSON(agents)
+			return
+		}
+		fmt.Printf("kern stats --by-agent (last %d days)%s\n", f.days, statsRateSuffix())
+		if len(agents) == 0 {
+			fmt.Println("  no per-agent data yet (MCP tool calls with agent_id and kern compact record entries)")
+			return
+		}
+		fmt.Printf("  %-22s %6s %14s %13s %11s\n", "agent", "calls", "tokens ret", "tokens saved", "cost saved")
+		for _, as := range agents {
+			fmt.Printf("  %-22s %6d %14d %13d $%10.4f\n", as.Agent, as.Calls, as.TokensReturned, as.TokensSaved, as.CostSaved)
+		}
+		return
+	}
 	sum, err := rec.Summarize(f.days, f.session)
 	if err != nil {
 		fatal("stats: %v", err)
 	}
 	if f.json {
+		perMillion, model, kind := kernctx.CostRateInfo()
 		out := struct {
-			Operations  int     `json:"operations"`
-			BeforeTotal int     `json:"before_tokens"`
-			AfterTotal  int     `json:"after_tokens"`
-			SavedTotal  int     `json:"saved_tokens"`
-			SavedPct    float64 `json:"saved_percent"`
-			CostSaved   float64 `json:"cost_saved_usd"`
-		}{sum.Operations, sum.BeforeTotal, sum.AfterTotal, sum.SavedTotal, sum.SavedPct, sum.CostSaved}
+			Operations         int     `json:"operations"`
+			BeforeTotal        int     `json:"before_tokens"`
+			AfterTotal         int     `json:"after_tokens"`
+			SavedTotal         int     `json:"saved_tokens"`
+			SavedPct           float64 `json:"saved_percent"`
+			CostSaved          float64 `json:"cost_saved_usd"`
+			CostRatePerMillion float64 `json:"cost_rate_per_million"`
+			CostRateModel      string  `json:"cost_rate_model,omitempty"`
+			CostRateKind       string  `json:"cost_rate_kind,omitempty"`
+		}{sum.Operations, sum.BeforeTotal, sum.AfterTotal, sum.SavedTotal, sum.SavedPct, sum.CostSaved, perMillion, model, kind}
 		printJSON(out)
 		return
 	}
@@ -470,5 +590,41 @@ func runStats(cmd string, rest []string) {
 	fmt.Printf("  after tokens : %d\n", sum.AfterTotal)
 	fmt.Printf("  saved tokens : %d (%.1f%%)\n", sum.SavedTotal, sum.SavedPct)
 	fmt.Printf("  cost saved   : $%.4f\n", sum.CostSaved)
+	fmt.Printf("  cost model   : %s\n", costModelLabel())
+	fmt.Println("  per-tool ledger: kern stats --by-tool · per-agent: kern stats --by-agent")
 
+}
+
+// costModelLabel renders the self-explaining "cost model" line value for
+// `kern stats`: the engaged per-model table rate, the explicit operator
+// override, or the labeled flat assumption — so a fresh install's 1e-05
+// default is never presented as a confident figure.
+func costModelLabel() string {
+	perMillion, model, kind := kernctx.CostRateInfo()
+	switch kind {
+	case "table":
+		return fmt.Sprintf("$%.4g/1M (%s)", perMillion, model)
+	case "override":
+		return fmt.Sprintf("$%.6f/token (operator override)", perMillion/1e6)
+	default: // "flat": the 1e-05 default applies — an assumption
+		if model != "" {
+			return fmt.Sprintf("$%.6f/token (assumed — %q has no rate in the per-model table; set cost_per_token)", perMillion/1e6, model)
+		}
+		return fmt.Sprintf("$%.6f/token (assumed — set llm.model or cost_per_token)", perMillion/1e6)
+	}
+}
+
+// statsRateSuffix renders the compact self-explaining cost-rate suffix for
+// the by-tool/by-agent headers: the engaged per-model rate, the operator
+// override, or a labeled flat assumption (never a bare number).
+func statsRateSuffix() string {
+	perMillion, model, kind := kernctx.CostRateInfo()
+	switch kind {
+	case "table":
+		return fmt.Sprintf(" @ %.4g/1M (%s)", perMillion, model)
+	case "override":
+		return fmt.Sprintf(" @ $%.6f/token (operator override)", perMillion/1e6)
+	default:
+		return fmt.Sprintf(" @ $%.6f/token (assumed)", perMillion/1e6)
+	}
 }

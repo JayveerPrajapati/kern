@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/JayveerPrajapati/kern/internal/config"
+	"github.com/JayveerPrajapati/kern/internal/domain"
 	"github.com/JayveerPrajapati/kern/internal/governance"
 )
 
@@ -24,31 +25,47 @@ type Gate struct {
 	enabled bool
 }
 
-// NewGateFromEnv builds a Gate from the KERN_MCP_ROOTS environment variable
-// (or mcp.roots in .kern/config.json): a comma-separated list of directories.
-// Entries are trimmed of surrounding spaces and empty entries are skipped.
-// Roots are expected absolute; a relative entry is resolved against the
-// process working directory (documented behavior). When nothing is configured
-// or no usable roots are named, the gate defaults to the process working
+// newGate builds a Gate from the KERN_MCP_ROOTS environment variable (or
+// mcp.roots in .kern/config.json) merged with the caller-supplied roots —
+// unless fromEnv is false, in which case ONLY the caller's roots confine
+// (per-App servers must never be widened by the global env). Entries are
+// trimmed of surrounding spaces and empty entries are skipped. Roots are
+// expected absolute; a relative entry is resolved against the process
+// working directory (documented behavior). When nothing is configured or no
+// usable roots are named, the gate defaults to the process working
 // directory — the gate is always enabled unless KERN_MCP_PERMISSIVE=1 opts
 // out of confinement.
-func NewGateFromEnv() *Gate {
+func newGate(extraRoots []string, fromEnv bool) *Gate {
 	g := &Gate{}
-	for _, r := range config.Strings("", "KERN_MCP_ROOTS", "mcp.roots", nil) {
+	seen := map[string]bool{}
+	add := func(r string) {
 		r = strings.TrimSpace(r)
 		if r == "" {
-			continue
+			return
 		}
 		abs, err := filepath.Abs(r)
 		if err != nil {
-			continue
+			return
 		}
 		abs = filepath.Clean(abs)
 		// Resolve each root's real location once (mirroring blueprint's
 		// per-call EvalSymlinks) so a root reached through a symlink — e.g.
 		// /var -> /private/var on macOS — is compared on its real path. An
 		// unresolvable root is kept as-is (it may be created after startup).
-		g.roots = append(g.roots, symlinkOrSelf(abs))
+		abs = symlinkOrSelf(abs)
+		if seen[abs] {
+			return
+		}
+		seen[abs] = true
+		g.roots = append(g.roots, abs)
+	}
+	if fromEnv {
+		for _, r := range config.Strings("", "KERN_MCP_ROOTS", "mcp.roots", nil) {
+			add(r)
+		}
+	}
+	for _, r := range extraRoots {
+		add(r)
 	}
 	// Fail-closed default: no configured roots means confine to the server's
 	// working directory rather than disabling confinement.
@@ -60,6 +77,27 @@ func NewGateFromEnv() *Gate {
 	// The gate is enabled unless permissive mode explicitly opts out.
 	g.enabled = !governance.PermissiveMode() && len(g.roots) > 0
 	return g
+}
+
+// NewGateFromEnv builds a Gate from the KERN_MCP_ROOTS environment variable
+// (or mcp.roots in .kern/config.json), defaulting to the process working
+// directory when nothing is configured. The env semantics belong to the
+// single-root stdio MCP server (kern-mcp / kern serve's in-process server
+// without a project root).
+func NewGateFromEnv() *Gate {
+	return newGate(nil, true)
+}
+
+// NewGateForRoots builds a Gate confined to EXACTLY the given roots: the
+// KERN_MCP_ROOTS / mcp.roots env is deliberately NOT merged (per-App
+// isolation, finding: cross-App root targeting). Unlike NewGateFromEnv the
+// fail-closed default is the caller's roots, never the process cwd — used by
+// the root-aware web-console tool servers (NewServerForRoot) so a server
+// serving project A confines every tool call to project A's tree even when
+// the process runs from another directory, and a KERN_MCP_ROOTS value naming
+// project B can never widen project A's console.
+func NewGateForRoots(roots []string) *Gate {
+	return newGate(roots, false)
 }
 
 // Check applies the gate to one tool call. A disabled gate allows everything.
@@ -75,10 +113,13 @@ func (g *Gate) Check(toolName string, args map[string]any) error {
 		return nil
 	}
 	if err := g.confineMap(args); err != nil {
+		// Classify the denial as domain.ErrToolDenied so every consumer of
+		// the governed path (REST passthrough, sdk catalog client) maps the
+		// whole pre-execution-deny class with errors.Is (finding 6).
 		if toolName != "" {
-			return fmt.Errorf("tool %s: %w", toolName, err)
+			return fmt.Errorf("tool %s: %w: %w", toolName, domain.ErrToolDenied, err)
 		}
-		return err
+		return fmt.Errorf("%w: %w", domain.ErrToolDenied, err)
 	}
 	return nil
 }
@@ -101,8 +142,23 @@ func (g *Gate) confineMap(args map[string]any) error {
 				return err
 			}
 		case []any:
-			if err := g.confineSlice(v); err != nil {
+			if err := g.confineSlice(key, v); err != nil {
 				return err
+			}
+		case []string:
+			// A Go-constructed plain string list under a path-typed key: each
+			// element is a path candidate (e.g. a files list). JSON-decoded
+			// arguments arrive as []any and are handled in confineSlice.
+			if !isPathKey(key) {
+				continue
+			}
+			for _, p := range v {
+				if p == "" {
+					continue
+				}
+				if err := g.gatePath(key, p); err != nil {
+					return err
+				}
 			}
 		}
 	}
@@ -110,8 +166,12 @@ func (g *Gate) confineMap(args map[string]any) error {
 }
 
 // confineSlice confines every map element of a nested array and recurses into
-// deeper arrays, mirroring blueprint's files[].path handling.
-func (g *Gate) confineSlice(vals []any) error {
+// deeper arrays, mirroring blueprint's files[].path handling. Plain string
+// elements (JSON arrays of paths under a path-typed key) and []string values
+// are each treated as a path candidate, so a string list can never bypass the
+// gate by arriving as an array.
+func (g *Gate) confineSlice(key string, vals []any) error {
+	pathTyped := isPathKey(key)
 	for _, v := range vals {
 		switch item := v.(type) {
 		case map[string]any:
@@ -119,8 +179,27 @@ func (g *Gate) confineSlice(vals []any) error {
 				return err
 			}
 		case []any:
-			if err := g.confineSlice(item); err != nil {
+			if err := g.confineSlice(key, item); err != nil {
 				return err
+			}
+		case string:
+			if !pathTyped || item == "" {
+				continue
+			}
+			if err := g.gatePath(key, item); err != nil {
+				return err
+			}
+		case []string:
+			if !pathTyped {
+				continue
+			}
+			for _, p := range item {
+				if p == "" {
+					continue
+				}
+				if err := g.gatePath(key, p); err != nil {
+					return err
+				}
 			}
 		}
 	}
@@ -128,13 +207,27 @@ func (g *Gate) confineSlice(vals []any) error {
 }
 
 // isPathKey reports whether a tool-call argument key is path-typed: the
-// explicit "root", "dir" and "repo" keys plus any key containing "path"
-// (case-insensitive, so "targetPath" is caught too). "repo" is the argument
-// blueprint tools use for the project root (audit R3): leaving it out let a
-// client pass `repo` directly and bypass raw-arg confinement, after which the
-// decoded-path confinement used an attacker-chosen root.
+// explicit "root", "dir", "repo", "file", "output" and "disk_path" keys plus
+// any key containing "path" (case-insensitive, so "targetPath" is caught too)
+// and any key with the "_file" suffix (covers base_file/local_file/remote_file
+// and future tools). "repo" is the argument blueprint tools use for the
+// project root (audit R3): leaving it out let a client pass `repo` directly
+// and bypass raw-arg confinement, after which the decoded-path confinement
+// used an attacker-chosen root. "file" and the *_file keys are the file-path
+// arguments of the write-capable tools (kern_semantic_merge, kern_ast_transform,
+// kern_synthesize_test, kern_pre_edit, ...): leaving them out let a client pass
+// a raw absolute path or a ".."-escape that the handlers used unvalidated.
+// "files" is the path-list argument of the validate-proposed tools (and a
+// future-proof key for any tool taking a list of file paths); "linked_repos"
+// is the dead-schema path list of kern_cross_repo_impact (its handler ignores
+// it, so confining it is harmless) — both make plain string lists under those
+// keys subject to confinement. Bare "target" is deliberately NOT path-typed:
+// it is a symbol/test-target name in some tools, not a filesystem path.
 func isPathKey(key string) bool {
-	return key == "root" || key == "dir" || key == "repo" || strings.Contains(strings.ToLower(key), "path")
+	if key == "root" || key == "dir" || key == "repo" || key == "file" || key == "files" || key == "linked_repos" || key == "output" || key == "disk_path" {
+		return true
+	}
+	return strings.Contains(strings.ToLower(key), "path") || strings.HasSuffix(key, "_file")
 }
 
 // gatePath confines a single path value to the allowed roots. The value is

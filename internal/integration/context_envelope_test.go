@@ -11,7 +11,7 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/domain"
 	"github.com/JayveerPrajapati/kern/internal/governance"
 	"github.com/JayveerPrajapati/kern/internal/index"
-	"github.com/JayveerPrajapati/kern/internal/intelligence"
+	"github.com/JayveerPrajapati/kern/internal/intel"
 	"github.com/JayveerPrajapati/kern/internal/memory"
 )
 
@@ -90,7 +90,7 @@ func buildFixtureIndex(t *testing.T) *index.Index {
 // own agent registered (source write) so risk assessment runs cleanly.
 func newContextEngine(t *testing.T, ix *index.Index) *context.Engine {
 	t.Helper()
-	g := intelligence.FromIndex(ix)
+	g := intel.FromIndex(ix)
 	mem := memory.NewMemoryStore(t.TempDir())
 	fw := governance.NewFirewall().WithAgents(governance.NewAgent(
 		"context-engine", "Context Engine", "planner",

@@ -75,20 +75,23 @@ func loadClaims(root string) map[string]ResourceClaim {
 	return claims
 }
 
-func saveClaims(root string) {
+func saveClaims(root string) error {
 	dir := coordinationDir(root)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return
+		return fmt.Errorf("coord: save claims: %w", err)
 	}
 	b, err := json.MarshalIndent(activeClaims[root], "", "  ")
 	if err != nil {
-		return
+		return fmt.Errorf("coord: marshal claims: %w", err)
 	}
 	tmp := claimsPath(root) + ".tmp"
 	if err := os.WriteFile(tmp, b, 0o644); err != nil {
-		return
+		return fmt.Errorf("coord: write claims: %w", err)
 	}
-	_ = os.Rename(tmp, claimsPath(root))
+	if err := os.Rename(tmp, claimsPath(root)); err != nil {
+		return fmt.Errorf("coord: rename claims: %w", err)
+	}
+	return nil
 }
 
 func loadHandoffs(root string) []AgentHandoff {
@@ -148,7 +151,9 @@ func Handle(ctx context.Context, args map[string]any) (string, error) {
 		}
 	}
 	if cleaned {
-		saveClaims(root)
+		if err := saveClaims(root); err != nil {
+			return "", err
+		}
 	}
 
 	agentID := mcpargs.ArgString(args, "agent_id")
@@ -216,9 +221,15 @@ func coordHandoffLocked(root string, now time.Time, agentID, format string, args
 	activeHandoffs[root] = append(activeHandoffs[root], handoff)
 
 	dir := filepath.Join(root, ".kern", "coordination")
-	_ = os.MkdirAll(dir, 0o755)
-	if b, err := json.MarshalIndent(handoff, "", "  "); err == nil {
-		_ = os.WriteFile(filepath.Join(dir, handoff.ID+".json"), b, 0o644)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", fmt.Errorf("coord: persist handoff: %w", err)
+	}
+	b, err := json.MarshalIndent(handoff, "", "  ")
+	if err != nil {
+		return "", fmt.Errorf("coord: marshal handoff: %w", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, handoff.ID+".json"), b, 0o644); err != nil {
+		return "", fmt.Errorf("coord: persist handoff: %w", err)
 	}
 
 	if format == "json" {
@@ -274,7 +285,9 @@ func coordClaim(root string, now time.Time, agentID, format string, args map[str
 		ExpiresAt: expiresAt,
 	}
 	activeClaims[root][resource] = claim
-	saveClaims(root)
+	if err := saveClaims(root); err != nil {
+		return "", err
+	}
 
 	if format == "json" {
 		data, _ := json.MarshalIndent(map[string]any{
@@ -302,7 +315,9 @@ func coordRelease(root, agentID string, args map[string]any) (string, error) {
 		return "", fmt.Errorf("kern_agent_coordination: cannot release resource %q held by %q (caller is %q)", resource, existing.AgentID, agentID)
 	}
 	delete(activeClaims[root], resource)
-	saveClaims(root)
+	if err := saveClaims(root); err != nil {
+		return "", err
+	}
 	return fmt.Sprintf("🔓 Resource %q released successfully", resource), nil
 }
 

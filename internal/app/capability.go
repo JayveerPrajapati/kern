@@ -32,7 +32,7 @@ type CapabilityRegistry struct {
 // a complete, self-describing catalog rather than a tool list alone.
 func allCapabilities() []domain.Capability {
 	return []domain.Capability{
-		{Name: "understand", Purpose: "Gather system context and explain how code works", Inputs: []string{"query", "target"}, Dependencies: []string{"graph"}, Tools: []string{"kern_explore", "kern_graph", "kern_code_graph"}, Outputs: []string{"system context"}, Risk: "low"},
+		{Name: "understand", Purpose: "Gather system context and explain how code works", Inputs: []string{"query", "target"}, Dependencies: []string{"graph"}, Tools: []string{"kern_explore", "kern_graph"}, Outputs: []string{"system context"}, Risk: "low"},
 		{Name: "analyze", Purpose: "Produce a context packet for a proposed change", Inputs: []string{"change"}, Dependencies: []string{"graph", "understand"}, Tools: []string{"kern_analyze"}, Outputs: []string{"context packet"}, Artifacts: []string{"ArtifactContextPacket"}, Risk: "low"},
 		{Name: "plan", Purpose: "Generate an implementation plan for an intent", Inputs: []string{"intent", "context packet"}, Dependencies: []string{"analyze", "impact"}, Tools: []string{"kern_plan"}, Outputs: []string{"plan"}, Artifacts: []string{"ArtifactPlan"}, Risk: "low"},
 		{Name: "impact", Purpose: "Estimate the blast radius of a proposed change", Inputs: []string{"change"}, Dependencies: []string{"graph"}, Tools: []string{"kern_impact", "kern_what_if"}, Outputs: []string{"impact report"}, Artifacts: []string{"ArtifactImpactReport"}, Risk: "low"},

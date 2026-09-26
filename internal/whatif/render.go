@@ -5,7 +5,7 @@ import (
 	"strings"
 
 	"github.com/JayveerPrajapati/kern/internal/index"
-	"github.com/JayveerPrajapati/kern/internal/intelligence"
+	"github.com/JayveerPrajapati/kern/internal/intel"
 )
 
 // SimulateRender builds the index for root, applies the hypothetical change to
@@ -17,7 +17,7 @@ func SimulateRender(root string, kind ChangeKind, change, newTarget string) (str
 	if err != nil {
 		return "", fmt.Errorf("what-if: index: %w", err)
 	}
-	g := intelligence.FromIndex(ix)
+	g := intel.FromIndex(ix)
 	target := change
 	if strings.ContainsAny(change, " \t") {
 		cands := ExtractSymbolsIndex(change, ix)

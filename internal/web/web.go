@@ -11,6 +11,7 @@
 package web
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"html/template"
@@ -24,15 +25,15 @@ import (
 	"crypto/subtle"
 	"github.com/JayveerPrajapati/kern/internal/agent"
 	"github.com/JayveerPrajapati/kern/internal/app"
+	"github.com/JayveerPrajapati/kern/internal/domain"
 	"github.com/JayveerPrajapati/kern/internal/eventbus"
 	"github.com/JayveerPrajapati/kern/internal/governance"
 	"github.com/JayveerPrajapati/kern/internal/incident"
 	"github.com/JayveerPrajapati/kern/internal/index"
-	"github.com/JayveerPrajapati/kern/internal/intelligence"
+	"github.com/JayveerPrajapati/kern/internal/intel"
 	"github.com/JayveerPrajapati/kern/internal/memory"
 	"github.com/JayveerPrajapati/kern/internal/metrics"
 	"github.com/JayveerPrajapati/kern/internal/relay"
-	"github.com/JayveerPrajapati/kern/internal/service"
 	"github.com/JayveerPrajapati/kern/internal/verification"
 	"os"
 	"strings"
@@ -42,40 +43,85 @@ import (
 // the console requires it on every request.
 const authTokenEnv = "KERN_AUTH_TOKEN"
 
+// ToolServer is the in-process tool dispatch the /v1/tools/{name} passthrough
+// route delegates to. It is satisfied structurally by *mcp.Server
+// (CallToolGoverned — the full governed dispatch path MCP clients hit:
+// KERN_TOOLS allowlist, root confinement, RBAC). internal/web cannot import
+// internal/mcp (the mcp → org → enterprise → web import cycle), so the
+// implementation is injected: cmd/kern registers the factory once at startup
+// and every App built afterwards — single-project and enterprise alike — gets
+// its own dispatch server. When no factory is registered the route is
+// unavailable (503).
+type ToolServer interface {
+	CallToolGoverned(ctx context.Context, name string, args map[string]any) (string, error)
+	// Close releases the server's background resources (index sessions, file
+	// watchers); App.Close calls it so nothing leaks across App evictions.
+	Close()
+}
+
+// toolServerFactory builds the per-App in-process tool dispatch; nil by
+// default (route unavailable) until SetToolServerFactory wires the real one.
+// The factory is ROOT-AWARE: it receives the App's project root so the tool
+// server it builds confines every tool call to THAT App's tree (finding 1) —
+// an unrooted factory would let one cwd-rooted server back every project
+// console and run enterprise tool calls in the wrong directory.
+var toolServerFactory = func(root string) ToolServer { return nil }
+
+// SetToolServerFactory registers the factory that builds each App's in-process
+// tool dispatch server. The kern binary calls it at startup (cmd/kern); tests
+// that exercise the /v1/tools/{name} route call it themselves. Registration is
+// idempotent and must happen before App construction.
+func SetToolServerFactory(f func(root string) ToolServer) {
+	if f != nil {
+		toolServerFactory = f
+	}
+}
+
 // App holds the project root and the derived console state.
 // It delegates routing to an embedded http.ServeMux via ServeHTTP.
 type App struct {
 	root     string
 	mux      *http.ServeMux
 	ix       *index.Index
-	graph    *intelligence.Graph
+	graph    *intel.Graph
 	platform *app.Platform
 	// rateLimiter caps state-mutating (POST/PUT/PATCH/DELETE) requests per
 	// client IP (fixed window, KERN_WEB_RATE_LIMIT req/min, default 600, 0
 	// disables). Nil when limiting is disabled. See ratelimit.go.
 	rateLimiter *rateLimiter
-	// svc is the delivery-mechanism-independent service layer. Handlers
-	// delegate core operations (index, graph, memory, governance, security)
-	// to it instead of importing the internal engines directly, so the same
-	// business logic serves CLI, MCP and web identically.
-	svc       *service.Services
-	ver       *verification.Engine // prebuilt verification engine (shares a.ix)
-	archIndex *index.Index         // shared index for architecture validation
-	memories  *memory.MemoryStore
-	inter     *incident.Store
-	firewall  *governance.Firewall
-	approvals *governance.ApprovalWorkflow
+	ver         *verification.Engine // prebuilt verification engine (shares a.ix)
+	archIndex   *index.Index         // shared index for architecture validation
+	memories    *memory.MemoryStore
+	inter       *incident.Store
+	firewall    *governance.Firewall
+	approvals   *governance.ApprovalWorkflow
+	// userRole resolves an actor's org role for the approvals RBAC check
+	// (Feature Batch G). Nil when no user registry is wired — the
+	// single-project/local console flow, which skips the RBAC check and
+	// preserves the historical behavior. Enterprise mode injects it via
+	// SetUserRoleLookup so approve/reject enforce governance.RequireOrgRole.
+	userRole func(id string) (string, bool)
 	// fileApprovals is the persistent approval store ( exit gate): the
 	// agent-team workflow engine persists its approval gates here, so the UI's
 	// pending/approve/reject surfaces read and write the SAME store a human
 	// uses to unblock a parked workflow (or a `kern approve` does).
 	fileApprovals *governance.FileStore
 	taskSvc       *app.TaskService // task-native analyze/plan/what-if
+	// tools is the in-process tool dispatch behind the single REST passthrough
+	// route POST /v1/tools/{name}: it fronts the full catalog through the same
+	// governed dispatch path MCP clients hit (allowlist, root confinement,
+	// RBAC) with zero HTTP/stdio transport. internal/web cannot import
+	// internal/mcp itself — the mcp → org → enterprise → web cycle — so the
+	// server is injected via SetToolServerFactory (cmd/kern registers the real
+	// factory at startup; see ToolServer). Closed with the App so its
+	// background resources (index sessions, watchers) do not leak.
+	tools         ToolServer
 	dashboardT    *template.Template
 	taskDetailT   *template.Template
 	agentsT       *template.Template
 	tasksT        *template.Template
 	approvalsT    *template.Template
+	orgApprovalsT *template.Template
 	risksT        *template.Template
 	artifactsT    *template.Template
 	auditT        *template.Template
@@ -86,6 +132,7 @@ type App struct {
 	memoryT       *template.Template
 	architectureT *template.Template
 	evalT         *template.Template
+	benchT        *template.Template
 	bus           *eventbus.Bus   // publishes incident/approval events
 	tasks         *agent.Registry // agent/task registry for /v1/tasks lookup
 	// relay is the cross-process event relay server started by New (nil when
@@ -132,6 +179,21 @@ type App struct {
 	// arrive while a rebuild is in flight are served the stale snapshot
 	// immediately (stale-while-revalidate, same policy as project.Session).
 	rebuilding bool
+	// policies is the last policy set applied via SetPolicies; freshGraph
+	// re-applies it to the firewall of any rebuilt platform so org policies
+	// survive index-generation swaps (a rebuilt firewall starts from
+	// governance.DefaultPolicies). polMu guards it against a concurrent
+	// SetPolicies racing a rebuild in flight.
+	policies []domain.Policy
+	polMu    sync.Mutex
+	// commMu/commVer/commCache cache the per-graph-generation Communities +
+	// Hubs computation (label propagation up to 30 iterations + hub ranking)
+	// shared by buildOverview/buildGraph/buildSystemMap — the archTTL pattern
+	// keyed on graphVer instead of time, so a dashboard render never computes
+	// them more than once per rebuild.
+	commMu    sync.Mutex
+	commVer   int
+	commCache *communitiesCache
 }
 
 // staleCooldown is how long a "fresh" verdict from index.Stale() is trusted
@@ -140,21 +202,79 @@ type App struct {
 // walks and edits are reflected within a second.
 const staleCooldown = 1 * time.Second
 
+// communitiesCache holds the once-per-graph-generation community and hub
+// computations shared by the dashboard/API builders (see
+// graphCommunitiesHubs).
+type communitiesCache struct {
+	comms []intel.Community
+	hubs  []intel.Hub
+}
+
+// cachedHubsLimit is the largest hub limit any web builder passes to
+// intel.Hubs; the shared cache is computed at this width and truncated per
+// call. intel.Hubs sorts before truncating, so the top-N of the cached list
+// is byte-identical to intel.Hubs(ix, N) for any N <= cachedHubsLimit.
+const cachedHubsLimit = 50
+
+// graphCommunitiesHubs returns the community list and the top hubs for the
+// CURRENT graph generation, computing them once per rebuild (keyed on
+// graphVer) and caching the result for every builder that needs them. The
+// index is immutable once published (freshGraph swaps pointers, it never
+// mutates a generation), so the cached values stay valid for the whole
+// generation.
+func (a *App) graphCommunitiesHubs() ([]intel.Community, []intel.Hub) {
+	a.graphMu.RLock()
+	ver := a.graphVer
+	ix := a.ix
+	a.graphMu.RUnlock()
+
+	a.commMu.Lock()
+	defer a.commMu.Unlock()
+	if a.commCache != nil && a.commVer == ver {
+		return a.commCache.comms, a.commCache.hubs
+	}
+	comms := intel.Communities(ix)
+	hubs := intel.Hubs(ix, cachedHubsLimit)
+	a.commCache = &communitiesCache{comms: comms, hubs: hubs}
+	a.commVer = ver
+	return comms, hubs
+}
+
+// hubsTop truncates the cached top-hubs list to limit, mirroring intel.Hubs'
+// own truncation semantics (see cachedHubsLimit).
+func hubsTop(hubs []intel.Hub, limit int) []intel.Hub {
+	if len(hubs) > limit {
+		return hubs[:limit]
+	}
+	return hubs
+}
+
 // New builds the digital-twin state for root and returns a ready-to-serve App.
 // It never panics: any build error is wrapped and returned to the caller.
 func New(root string) (*App, error) {
-	ix, err := index.Build(root)
+	// Load the persisted index before building: a fresh index on disk (from a
+	// prior serve, `kern index`, or the MCP session) makes restarts
+	// effectively instant instead of re-indexing the whole tree on every
+	// `kern serve` — the same load-first pattern project.Session uses. A
+	// missing or stale index is rebuilt (incrementally when a prior loads
+	// cleanly, else a full Build) and persisted. New never returns without a
+	// usable index: any load failure falls back to Build and its error is
+	// surfaced exactly as before.
+	ix, err := loadOrBuildIndex(root)
 	if err != nil {
 		return nil, err
 	}
-	g := intelligence.FromIndex(ix)
+	g := intel.FromIndex(ix)
 
 	// Build the shared application-services Platform ONCE at startup. It
 	// owns the twin-merged graph, memory store, governance firewall, and the
 	// context + verification engines. Web handlers delegate to Platform so
 	// the orchestration is shared with MCP and CLI instead of duplicated.
-	// NewWithGraph stores a pointer to a.graph so freshGraph's in-place swap
-	// is visible to the context engine without rebuilding Platform.
+	// a.graph and platform.Graph() are the SAME pointer here (NewWithGraph
+	// stores the caller's graph and twin.Merge runs in place at construction),
+	// so the dashboard and the context engine always agree on dimensions;
+	// freshGraph preserves that invariant after an index rebuild by rebuilding
+	// the Platform and pointing a.graph at the new Platform's graph.
 	platform, err := app.NewWithGraph(root, ix, &g)
 	if err != nil {
 		return nil, err
@@ -170,13 +290,13 @@ func New(root string) (*App, error) {
 		ix:            ix,
 		graph:         &g,
 		platform:      platform,
-		svc:           service.New(),
 		memories:      platform.Memory(),
 		inter:         incident.NewStore(root),
 		firewall:      platform.Firewall(),
 		approvals:     governance.NewPersistedApprovalWorkflow(root),
 		fileApprovals: governance.NewFileStore(root),
-		taskSvc:       app.NewTaskService(platform, bus).WithAgentID("web").WithPRProvider(app.AutoPRProvider()),
+		taskSvc:       app.NewTaskService(platform, bus).WithAgentID("web").WithPRProvider(app.AutoPRProvider()).WithTaskPersistence(true),
+		tools:         toolServerFactory(root),
 		tasks:         agent.NewRegistry(),
 		bus:           bus,
 		archTTL:       5 * time.Second,
@@ -253,6 +373,12 @@ func (a *App) loadTemplates() error {
 	}
 	a.approvalsT = approvalsTmpl
 
+	orgApprovalsTmpl, err := parseOrgApprovalsTemplate()
+	if err != nil {
+		return fmt.Errorf("parse org approvals template: %w", err)
+	}
+	a.orgApprovalsT = orgApprovalsTmpl
+
 	risksTmpl, err := parseRisksTemplate()
 	if err != nil {
 		return fmt.Errorf("parse risks template: %w", err)
@@ -313,6 +439,12 @@ func (a *App) loadTemplates() error {
 	}
 	a.evalT = evalTmpl
 
+	benchTmpl, err := parseBenchmarksTemplate()
+	if err != nil {
+		return fmt.Errorf("parse benchmarks template: %w", err)
+	}
+	a.benchT = benchTmpl
+
 	return nil
 }
 
@@ -355,6 +487,7 @@ func (a *App) registerRoutes() {
 	mux.HandleFunc("/v1/audit/", a.handleV1Audit)
 	mux.HandleFunc("/v1/tasks", a.handleV1TaskSubmit)
 	mux.HandleFunc("/v1/tasks/", a.handleV1Task)
+	mux.HandleFunc("/v1/tools/", a.handleV1ToolCall)
 	mux.HandleFunc("/v1/artifacts", a.handleV1ArtifactsList)
 	mux.HandleFunc("/v1/artifacts/", a.handleV1ArtifactGet)
 	mux.HandleFunc("/v1/approvals/pending", a.handleApprovalsPending)
@@ -365,6 +498,7 @@ func (a *App) registerRoutes() {
 	mux.HandleFunc("/agents", a.handleAgents)
 	mux.HandleFunc("/tasks", a.handleTasks)
 	mux.HandleFunc("/approvals", a.handleApprovals)
+	mux.HandleFunc("/org-approvals", a.handleOrgApprovals)
 	mux.HandleFunc("/risks", a.handleRisks)
 	mux.HandleFunc("/artifacts", a.handleArtifacts)
 	mux.HandleFunc("/audit", a.handleAudit)
@@ -375,6 +509,7 @@ func (a *App) registerRoutes() {
 	mux.HandleFunc("/memory", a.handleMemoryPage)
 	mux.HandleFunc("/architecture", a.handleArchitecturePage)
 	mux.HandleFunc("/eval", a.handleEvalPage)
+	mux.HandleFunc("/benchmarks", a.handleBenchmarksPage)
 	mux.HandleFunc("/api/risks", a.handleRisksJSON)
 	mux.HandleFunc("/api/artifacts", a.handleArtifactsJSON)
 	mux.HandleFunc("/api/audit", a.handleAuditJSON)
@@ -393,8 +528,11 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	}
 	// P2-10: opt-in bearer gate. The console defaults to a loopback bind
-	// (trusted local, no gate). When KERN_AUTH_TOKEN is set — which the
-	// server enforces for non-loopback binds — every request must carry
+	// (trusted local, no gate). Enforcement of the non-loopback case now
+	// lives in the CLI layer: `kern serve` / kern-server refuse to bind a
+	// non-loopback address without KERN_AUTH_TOKEN (single-project mode),
+	// and enterprise mode fails closed with 503 until the token is set. So
+	// when KERN_AUTH_TOKEN is present, every request must carry
 	// "Authorization: Bearer <token>": the console serves state-mutating
 	// endpoints (/v1/memory writes, /api/approvals/approve|reject, incident
 	// ingestion) and LLM work, so a network-exposed console without auth is
@@ -447,68 +585,106 @@ func (a *App) authorized(r *http.Request) bool {
 	return subtle.ConstantTimeCompare([]byte(provided), []byte(token)) == 1
 }
 
+// indexStatus reports whether a background graph rebuild (freshGraph's
+// stale-while-revalidate) is in flight, plus the current graph version. It is
+// the status field /api/health serves so the console's pending-state line can
+// tell a viewer that the page they are looking at was served from the stale
+// snapshot and will pick up edits once the rebuild lands.
+func (a *App) indexStatus() map[string]any {
+	a.graphMu.RLock()
+	defer a.graphMu.RUnlock()
+	return map[string]any{"building": a.rebuilding, "version": a.graphVer}
+}
+
 // freshGraph returns the current knowledge graph and index, rebuilding both if
 // the project has changed since the last build. Staleness is detected via the
 // index package's Stale() (file set + content-hash check), rate-limited by
 // staleCooldown so burst requests pay zero disk walks.
 //
-// B10 — stale-while-revalidate: the rebuild is claimed under the write lock
-// but runs OFF it (single-flight), so the first request after an edit no
-// longer blocks ALL web API requests for the full rebuild (30-90s on large
-// repos). The triggering caller waits for the fresh index; concurrent callers
-// are served the stale snapshot immediately. The fresh state is swapped in
-// atomically under the write lock.
-func (a *App) freshGraph() (*intelligence.Graph, *index.Index) {
+// Lock discipline (ported from project.Session.Index): the Stale() walk runs
+// OFF the lock on a local copy of the index pointer, so concurrent requests
+// are never blocked behind it and staleUntil is only ever written under the
+// write lock (never while other readers hold RLock — the previous
+// write-under-RLock was a data race between concurrent RLock holders). The
+// rebuild itself is claimed under the write lock (single-flight) but runs OFF
+// it — B10 stale-while-revalidate: the first request after an edit waits for
+// the fresh index; concurrent callers are served the stale snapshot
+// immediately. The fresh state is swapped in atomically under the write lock.
+func (a *App) freshGraph() (*intel.Graph, *index.Index) {
+	// Fast path: within the staleness cooldown — or while a rebuild is in
+	// flight (stale-while-revalidate) — serve the current snapshot with no
+	// disk walk.
 	a.graphMu.RLock()
-	if time.Now().Before(a.staleUntil) {
+	if time.Now().Before(a.staleUntil) || a.rebuilding {
 		g, ix := a.graph, a.ix
 		a.graphMu.RUnlock()
 		return g, ix
 	}
-	if !a.ix.Stale() {
-		a.staleUntil = time.Now().Add(staleCooldown)
-		g, ix := a.graph, a.ix
-		a.graphMu.RUnlock()
-		return g, ix
-	}
+	ix := a.ix
 	a.graphMu.RUnlock()
 
-	// Stale. Claim the rebuild under the write lock (single-flight), then run
-	// it OFF the lock so no request is ever blocked by the reindex.
+	// Staleness check on the local copy, OFF the lock (a full tree walk; the
+	// served index is immutable once published, so the copy cannot change
+	// under us).
+	stale := ix.Stale()
+
+	// Reconcile with the current state: the world may have changed while the
+	// check ran (a concurrent rebuild landed, another request refreshed the
+	// cooldown, or a rebuild was claimed).
 	a.graphMu.Lock()
-	if a.rebuilding {
-		// Another rebuild is in flight: serve the stale snapshot now; it
-		// atomically swaps in the fresh graph when it finishes.
+	if time.Now().Before(a.staleUntil) {
+		// Another caller refreshed or rebuilt while we walked the tree: serve
+		// the current snapshot.
 		g, ix := a.graph, a.ix
 		a.graphMu.Unlock()
 		return g, ix
 	}
-	if !a.ix.Stale() {
-		// Another caller rebuilt while we waited for the write lock.
+	if a.rebuilding {
+		// A rebuild is in flight: serve the stale snapshot now; it atomically
+		// swaps in the fresh graph when it finishes.
+		g, ix := a.graph, a.ix
+		a.graphMu.Unlock()
+		return g, ix
+	}
+	if !stale && a.ix == ix {
+		// The copy we checked is still the served index and judged fresh:
+		// record the cooldown (under the write lock only) and serve it.
 		a.staleUntil = time.Now().Add(staleCooldown)
 		g, ix := a.graph, a.ix
 		a.graphMu.Unlock()
 		return g, ix
 	}
+	// Stale: claim the rebuild (single-flight) and run it OFF the lock so no
+	// request is ever blocked by the reindex.
 	a.rebuilding = true
 	a.graphMu.Unlock()
 
 	// Rebuild off the lock: concurrent requests are served the stale graph
-	// meanwhile (see the a.rebuilding branch above).
+	// meanwhile (see the a.rebuilding branches above). The platform rebuild
+	// (twin merge, memory/firewall setup, audit replay, TaskService) runs
+	// here too so the swap under the lock stays pure pointer assignment.
 	nix, err := a.rebuildIndex()
+	var newPlat *app.Platform
+	var newSvc *app.TaskService
+	if err == nil && nix != nil {
+		newPlat, newSvc = a.rebuildPlatform(nix)
+	}
 
 	a.graphMu.Lock()
-	if err == nil && nix != nil {
+	if err == nil && nix != nil && newPlat != nil {
+		// Pointer swap under the write lock. Old generations stay intact for
+		// in-flight readers — never in-place mutation of maps — and every web
+		// surface now serves the SAME generation: index, graph (the
+		// platform's twin-merged one), arch index, verification engine,
+		// platform and TaskService.
 		a.ix = nix
-		ng := intelligence.FromIndex(nix)
-		a.graph = &ng
+		a.graph = newPlat.Graph()
 		a.archIndex = nix
-		// The verification engine captured the pre-swap index at construction;
-		// rebuild it against the new index so future verify calls are not
-		// stale (same constructor path used in New).
-		if a.ver != nil {
-			a.ver = verification.NewEngineWithIndex(a.root, nix)
-		}
+		a.platform = newPlat
+		a.memories = newPlat.Memory()
+		a.firewall = newPlat.Firewall()
+		a.ver = newPlat.VerificationEngine()
+		a.taskSvc = newSvc
 		a.graphVer++
 	}
 	a.rebuilding = false
@@ -518,18 +694,124 @@ func (a *App) freshGraph() (*intelligence.Graph, *index.Index) {
 	return g, ix
 }
 
-// rebuildIndex builds a fresh index for a.root. It prefers an incremental
-// Update (re-parsing only changed files, reusing symbols/edges of unchanged
-// ones — the same policy as the session's rebuild) whenever the current index
-// is usable as the prior, falling back to a full Build on any Update failure.
-// The swap semantics in freshGraph are unchanged either way.
-func (a *App) rebuildIndex() (*index.Index, error) {
-	if a.ix != nil {
-		if uix, uerr := index.Update(a.root, a.ix); uerr == nil && uix != nil {
-			return uix, nil
+// rebuildPlatform constructs the Platform (and its TaskService) for a new
+// index generation, re-applying the App's custom state so the rebuilt surface
+// is indistinguishable from the one New() builds: the event-bus wiring (New
+// does platform.WithBus(a.bus) at startup) and any org policies applied via
+// SetPolicies — a rebuilt firewall starts from governance.DefaultPolicies and
+// must be re-seeded. Runs OFF the graph lock: construction runs the twin
+// merge, memory/firewall setup and audit replay, which must never block
+// concurrent requests. Returns a nil platform when construction fails;
+// freshGraph then keeps the previous generation (fail closed) instead of
+// serving surfaces that disagree on index generations.
+//
+// The TaskService is rebuilt with it because it holds a pointer to the
+// Platform (task.go); a stale service would keep serving the previous
+// generation's graph forever. Its in-memory task state (workflow runs,
+// ephemeral analysis tasks) is generation-scoped and does not survive a
+// rebuild; persisted task records do, via the file-backed store.
+func (a *App) rebuildPlatform(nix *index.Index) (*app.Platform, *app.TaskService) {
+	plat, err := app.NewWithIndex(a.root, nix)
+	if err != nil || plat == nil {
+		log.Printf("web: platform rebuild failed: %v", err)
+		return nil, nil
+	}
+	// Re-bridge the event bus so the new platform's engines (verification
+	// included) publish onto the SAME bus the console streams and the relay
+	// fan out (mirror New()'s platform.WithBus(a.bus)).
+	plat.WithBus(a.bus)
+	a.polMu.Lock()
+	policies := a.policies
+	a.polMu.Unlock()
+	if len(policies) > 0 {
+		plat.Firewall().WithPolicies(policies)
+	}
+	svc := app.NewTaskService(plat, a.bus).WithAgentID("web").WithPRProvider(app.AutoPRProvider()).WithTaskPersistence(true)
+	return plat, svc
+}
+
+// loadOrBuildIndex returns the project's symbol index, reusing the persisted
+// copy when fresh and rebuilding (incrementally when a previous index loads
+// cleanly, else a full Build) when missing or stale — the same cascade
+// project.Session.rebuildIndex runs. The result is persisted before
+// returning, so a restart with a fresh on-disk index is instant and the next
+// rebuild has a private prior to update from. A full-build failure is
+// returned to the caller (New surfaces it exactly as before).
+func loadOrBuildIndex(root string) (*index.Index, error) {
+	var prev *index.Index
+	if index.SQLiteEnabled() {
+		// SQLite is the persistent store for concurrent access (WAL). Prefer
+		// it over the JSON cache; rebuild when absent or stale.
+		if ix, err := index.LoadSQLite(root); err == nil && ix != nil {
+			if !ix.Stale() {
+				return ix, nil
+			}
+			if prev == nil {
+				prev = ix
+			}
 		}
 	}
-	return index.Build(a.root)
+	if ix, err := index.Load(root); err == nil && ix != nil {
+		if !ix.Stale() {
+			return ix, nil
+		}
+		if prev == nil {
+			prev = ix
+		}
+	}
+	var ix *index.Index
+	if prev != nil {
+		// Large change sets make incremental Update more expensive than a
+		// clean Build — Update would re-parse nearly every file — so skip it
+		// and rebuild (the policy, mirroring project.Session).
+		cur, herr := index.FileHashes(root)
+		if herr != nil {
+			// Unprovable freshness (scan error): fail closed with a full
+			// rebuild rather than incrementally updating a possibly-stale prev.
+			cur = nil
+		}
+		if cur != nil && len(index.Diff(prev.FileHashes, cur)) <= index.CatchUpMaxChanges {
+			if uix, uerr := index.Update(root, prev); uerr == nil && uix != nil {
+				ix = uix
+			}
+		}
+	}
+	if ix == nil {
+		var berr error
+		ix, berr = index.Build(root)
+		if berr != nil {
+			return nil, berr
+		}
+	}
+	if index.SQLiteEnabled() {
+		// Persist to SQLite for concurrent access; the JSON cache remains as
+		// a fallback for builds without the sqlite tag. Synchronous here
+		// (unlike project.Session's async JSON save) so the very next load —
+		// a restart, or the next rebuild's private prior — finds the copy:
+		// web rebuilds are rare (once per staleness cooldown), never per
+		// request.
+		if serr := index.SaveSQLite(root, ix); serr == nil {
+			return ix, nil
+		}
+	}
+	if serr := ix.Save(); serr != nil {
+		log.Printf("web: persist index %s: %v", root, serr)
+	}
+	return ix, nil
+}
+
+// rebuildIndex builds a fresh index for a.root, run OFF the graph lock by
+// freshGraph. It loads a PRIVATE previous index from disk (never the live
+// a.ix) as the incremental-Update base: index.Update mutates its prev
+// argument (initMaps + reindexByFile reassign SymbolsByFile/kindIdx), and the
+// live index may still be read by concurrent requests, so passing it would be
+// a data race — the same hazard project.Session documents. The cascade is
+// loadOrBuildIndex: prefer an incremental Update over a full Build whenever a
+// previous index loads cleanly; any failure falls back to Build. The result
+// is persisted before returning so the next restart (and the next rebuild's
+// private prior) reuses it.
+func (a *App) rebuildIndex() (*index.Index, error) {
+	return loadOrBuildIndex(a.root)
 }
 
 // runtimeSource and boundaryProvider have been migrated to internal/app.Platform,
@@ -554,8 +836,46 @@ func (a *App) Bus() *eventbus.Bus { return a.bus }
 // enterprise cache and a shutdown path) execute the teardown exactly once and
 // never race the nil checks (oracle-gate). Waiters on the once block until the
 // first Close finishes, then return nil.
+// SetUserRoleLookup wires the org user registry's role lookup into the
+// approvals RBAC check (Feature Batch G). When set, POST
+// /api/approvals/approve and /api/approvals/reject enforce
+// governance.RequireOrgRole on the approver's role; unknown approvers are
+// denied. When never set (the single-project/local console), the historical
+// no-RBAC behavior is preserved. Enterprise mode calls this when it builds a
+// project's web.App.
+func (a *App) SetUserRoleLookup(lookup func(id string) (string, bool)) {
+	a.userRole = lookup
+}
+
+// SetPolicies swaps the risk policies this App's firewall enforces. It is
+// the seam enterprise mode uses to build each project's firewall from the
+// org policy instead of the defaults: the firewall's assessor is replaced
+// (the same WithPolicies swap governance.Firewall exposes), so every
+// governance surface — the /api/governance and /api/risks builders and the
+// enforcement paths themselves — reflects the given set. The swap is guarded
+// by the firewall's own mutex, so it is safe to call while the App is
+// serving. When never called the App enforces governance.DefaultPolicies
+// (the classic single-project behavior, byte-for-byte).
+func (a *App) SetPolicies(policies []domain.Policy) {
+	if a.firewall == nil {
+		return
+	}
+	a.firewall.WithPolicies(policies)
+	// Retain the applied set so freshGraph can re-seed the firewall of a
+	// rebuilt platform (a rebuilt firewall starts from DefaultPolicies).
+	a.polMu.Lock()
+	a.policies = policies
+	a.polMu.Unlock()
+}
+
 func (a *App) Close() error {
 	a.closeOnce.Do(func() {
+		if a.tools != nil {
+			// Stop the in-process MCP server's background resources (index
+			// sessions, file watchers) alongside the relay.
+			a.tools.Close()
+			a.tools = nil
+		}
 		if a.relay != nil {
 			// relay.Close is idempotent; it removes the socket file too, so a
 			// rebuilt App on the same root can rebind.

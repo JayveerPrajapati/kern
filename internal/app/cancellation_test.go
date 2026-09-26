@@ -8,7 +8,7 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/loop"
 )
 
-// TestRunDoContextCancelledFailsTask guards the kern_do cancellation fix: a
+// TestRunDoContextCancelledFailsTask guards the kern_loop mode=autonomous cancellation fix: a
 // cancelled context fails the task (terminal + auditable) instead of leaving
 // the autonomous L2 loop running in the background after the caller believes
 // it stopped. runLoop checks ctx right after Create.

@@ -23,6 +23,9 @@ import (
 // This test builds the merged kern binary fresh, creates a new repo from
 // scratch, and walks through every step a user would perform.
 func TestG13_FreshMachineEndToEnd(t *testing.T) {
+	if testing.Short() {
+		t.Skip("E2E gate test — full pipeline; runs in nightly non-short suite")
+	}
 	kernPath := requireKernPath(t)
 
 	// ─── Step 1: INSTALL ───

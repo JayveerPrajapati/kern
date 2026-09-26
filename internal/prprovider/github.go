@@ -2,8 +2,10 @@ package prprovider
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"time"
@@ -105,4 +107,60 @@ func (g *GitHubProvider) CreatePR(req Request) (*Result, error) {
 		URL:    prResp.HTMLURL,
 		State:  prResp.State,
 	}, nil
+}
+
+// CommentPR posts a comment on an existing pull request via the GitHub REST
+// API: POST /repos/{owner}/{repo}/issues/{prNumber}/comments (issue comments
+// are the PR-comment endpoint). It requires the same KERN_GITHUB_TOKEN auth as
+// CreatePR and errors on non-2xx responses, truncating the API error body to
+// 500 chars for diagnostics.
+func (g *GitHubProvider) CommentPR(ctx context.Context, req CommentRequest) error {
+	if g.token == "" {
+		return fmt.Errorf("prprovider: KERN_GITHUB_TOKEN not set")
+	}
+	if req.Owner == "" || req.Repo == "" {
+		return fmt.Errorf("prprovider: owner and repo are required")
+	}
+	if req.Number <= 0 {
+		return fmt.Errorf("prprovider: PR number is required")
+	}
+	jsonBody, err := json.Marshal(map[string]string{"body": req.Body})
+	if err != nil {
+		return fmt.Errorf("prprovider: marshal comment: %w", err)
+	}
+	url := fmt.Sprintf("%s/repos/%s/%s/issues/%d/comments", g.baseURL, req.Owner, req.Repo, req.Number)
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(jsonBody))
+	if err != nil {
+		return fmt.Errorf("prprovider: create comment request: %w", err)
+	}
+	httpReq.Header.Set("Authorization", "Bearer "+g.token)
+	httpReq.Header.Set("Accept", "application/vnd.github+json")
+	httpReq.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	resp, err := g.client.Do(httpReq)
+	if err != nil {
+		return fmt.Errorf("prprovider: comment API call: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		// Read the API error body, truncated to 500 chars for diagnostics.
+		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 501))
+		msg := truncateRunes(string(raw), 500)
+		if msg == "" {
+			msg = resp.Status
+		}
+		return fmt.Errorf("prprovider: GitHub API returned %s: %s", resp.Status, msg)
+	}
+	return nil
+}
+
+// truncateRunes returns s truncated to n runes (no mid-UTF8 splits).
+func truncateRunes(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n])
 }

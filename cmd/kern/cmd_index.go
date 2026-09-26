@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"github.com/JayveerPrajapati/kern/internal/cache"
+	"github.com/JayveerPrajapati/kern/internal/doctor"
 	"github.com/JayveerPrajapati/kern/internal/index"
 	"github.com/JayveerPrajapati/kern/internal/intel"
 	"github.com/JayveerPrajapati/kern/internal/llm"
@@ -48,16 +49,10 @@ func isTempOrMissingRoot(root string) bool {
 }
 
 func runPrecache(rest []string) {
-	f, args, err := parseFlags(rest)
-	if err != nil {
-		fatalUsage("flags: %v", err)
-	}
-	root := f.root
-	if root == "" {
-		root = "."
-		if len(args) > 0 {
-			root = args[0]
-		}
+	f, args := parseFlagsOrDie(rest)
+	root := projectRoot(f)
+	if f.root == "" && len(args) > 0 {
+		root = args[0]
 	}
 	if f.once {
 		rep := precache.Warm(root)
@@ -99,7 +94,7 @@ func runPrecache(rest []string) {
 // when the index is stale and did not converge after a rebuild (fail-closed);
 // the JSON is still printed so callers can inspect the proof.
 func runEnsureFresh(jsonOut bool, root string) {
-	res, err := svc.Index.EnsureFresh(context.Background(), root)
+	res, err := index.EnsureFresh(root)
 	if err != nil {
 		fatal("Index: %v", err)
 	}
@@ -122,34 +117,103 @@ func runEnsureFresh(jsonOut bool, root string) {
 	}
 }
 
-func runIndex(rest []string) {
-	f, args, err := parseFlags(rest)
-	if err != nil {
-		fatalUsage("flags: %v", err)
+// indexWhereResult is the `kern index where` payload: the resolved on-disk
+// store path the root actually serves, the freshness verdict, and the symbol
+// count, plus any parent index that a nested .kern would shadow (F5).
+type indexWhereResult struct {
+	Root      string `json:"root"`
+	Store     string `json:"store"`
+	Built     bool   `json:"built"`
+	Symbols   int    `json:"symbols"`
+	Files     int    `json:"files"`
+	Packages  int    `json:"packages"`
+	Freshness string `json:"freshness"` // "fresh" | "stale" | "not-built"
+	// Parent is the nearest ancestor directory that also holds its own
+	// index store ("" when none). Resolution is explicit-root, so the nested
+	// index IS what is served; the field makes the shadowing visible.
+	Parent string `json:"parent_index,omitempty"`
+}
+
+// indexStoreDisplay returns the on-disk store path to report for root: the
+// SQLite store in the default build (the SQLite-primary write path), the JSON
+// cache under -tags nosqlite. Used in user-facing "-> path" and "store: path"
+// messages so they name the file that was actually written/read.
+func indexStoreDisplay(root string) string {
+	if index.SQLiteEnabled() {
+		return index.SQLitePath(root)
 	}
+	return index.StorePath(root)
+}
+
+// indexWhere resolves "which index am I serving" for root without building
+// anything: StorePath(root), the freshness of the on-disk index, and the
+// symbol count. Shared by `kern index where` and the doctor's index checks.
+func indexWhere(root string) indexWhereResult {
+	res := indexWhereResult{Root: root, Store: indexStoreDisplay(root), Freshness: "not-built"}
+	if ix, err := index.Load(root); err == nil && ix != nil {
+		res.Built = true
+		res.Symbols = len(ix.Symbols)
+		res.Files = len(ix.FileHashes)
+		res.Packages = len(ix.Pkgs)
+		if indexIsFresh(root, ix) {
+			res.Freshness = "fresh"
+		} else {
+			res.Freshness = "stale"
+		}
+	}
+	res.Parent = doctor.ParentIndexDir(root)
+	return res
+}
+
+// runIndexWhere implements `kern index where [root] [--json]`: the quick
+// "which index am I serving" answer — the resolved store path, freshness and
+// symbol count — plus a warning when a parent directory also holds an index
+// (nested .kern shadowing a parent index, F5c). Read-only, never builds.
+func runIndexWhere(jsonOut bool, root string) {
+	res := indexWhere(root)
+	if jsonOut {
+		printJSON(res)
+		return
+	}
+	if res.Built {
+		fmt.Printf("index: %s\n", res.Store)
+		fmt.Printf("  freshness: %s\n", res.Freshness)
+		fmt.Printf("  symbols: %d (%d files, %d packages)\n", res.Symbols, res.Files, res.Packages)
+	} else {
+		fmt.Printf("index: NOT BUILT for %s (would be %s)\n", root, res.Store)
+	}
+	if res.Parent != "" {
+		fmt.Printf("  warning: nested index shadows a parent index at %s/.kern — pass the parent root to serve the full index\n", res.Parent)
+	}
+}
+
+func runIndex(rest []string) {
+	f, args := parseFlagsOrDie(rest)
 	if len(args) > 0 && args[0] == "ensure-fresh" {
-		root := f.root
-		if root == "" {
-			root = "."
-			if len(args) > 1 {
-				root = args[1]
-			}
+		root := projectRoot(f)
+		if f.root == "" && len(args) > 1 {
+			root = args[1]
 		}
 		runEnsureFresh(f.json, root)
 		return
 	}
-	root := f.root
-	if root == "" {
-		root = "."
-		if len(args) > 0 {
-			root = args[0]
+	if len(args) > 0 && args[0] == "where" {
+		root := projectRoot(f)
+		if f.root == "" && len(args) > 1 {
+			root = args[1]
 		}
+		runIndexWhere(f.json, root)
+		return
+	}
+	root := projectRoot(f)
+	if f.root == "" && len(args) > 0 {
+		root = args[0]
 	}
 	// `kern index --status [--json]` is read-only: it reports the cached
 	// index's health without rebuilding anything, so CI and agents can gate
 	// on freshness cheaply.
 	if f.status {
-		status, serr := svc.Index.Status(context.Background(), root, f.strict)
+		status, serr := index.StatusReport(root, f.strict)
 		if serr != nil {
 			fatal("Index: %v", serr)
 		}
@@ -200,9 +264,9 @@ func runIndex(rest []string) {
 		}
 		if ix == nil {
 			// No loadable previous index, or Update failed: full build
-			// (svc.Index.Build persists the result itself).
+			// (index.BuildPersisted persists the result itself).
 			var berr error
-			ix, berr = svc.Index.Build(context.Background(), root)
+			ix, berr = index.BuildPersisted(root)
 			if berr != nil {
 				fatal("Index: %v", berr)
 			}
@@ -211,14 +275,11 @@ func runIndex(rest []string) {
 				return
 			}
 			fmt.Printf("index updated: %d symbols in %d files (%d packages, %d reused) -> %s\n",
-				len(ix.Symbols), len(ix.FileHashes), len(ix.Pkgs), ix.ReusedResults(), index.StorePath(root))
+				len(ix.Symbols), len(ix.FileHashes), len(ix.Pkgs), ix.ReusedResults(), indexStoreDisplay(root))
 			return
 		}
 		if serr := ix.Save(); serr != nil {
 			fatal("Index: persist updated index: %v", serr)
-		}
-		if index.SQLiteEnabled() {
-			_ = index.SaveSQLite(root, ix)
 		}
 		if f.json {
 			sum := indexJSONSummary(ix, "fresh", "updated", root)
@@ -227,7 +288,7 @@ func runIndex(rest []string) {
 			return
 		}
 		fmt.Printf("index updated: %d symbols in %d files (%d packages, %d reused) -> %s\n",
-			len(ix.Symbols), len(ix.FileHashes), len(ix.Pkgs), ix.ReusedResults(), index.StorePath(root))
+			len(ix.Symbols), len(ix.FileHashes), len(ix.Pkgs), ix.ReusedResults(), indexStoreDisplay(root))
 		return
 	}
 	// Plain `kern index [root]` (no --status/--update/ensure-fresh): build
@@ -248,7 +309,7 @@ func runIndex(rest []string) {
 			return
 		}
 	}
-	ix, err := svc.Index.Build(context.Background(), root)
+	ix, err := index.BuildPersisted(root)
 	if err != nil {
 		fatal("Index: %v", err)
 	}
@@ -333,12 +394,9 @@ func runWatch(rest []string) {
 	if err != nil {
 		fatalUsage("flags: %v", err)
 	}
-	root := f.root
-	if root == "" {
-		root = "."
-		if len(args) > 0 {
-			root = args[0]
-		}
+	root := projectRoot(f)
+	if f.root == "" && len(args) > 0 {
+		root = args[0]
 	}
 	// Validate the root BEFORE daemonizing: a missing root used to start a
 	// long-lived watcher that only ever reported lstat errors (and an unknown
@@ -370,10 +428,7 @@ func runWatch(rest []string) {
 }
 
 func runAst(rest []string) {
-	f, args, err := parseFlags(rest)
-	if err != nil {
-		fatalUsage("flags: %v", err)
-	}
+	f, args := parseFlagsOrDie(rest)
 	if len(args) < 1 {
 		fatalUsage("usage: kern ast <pattern> [root] [--all]")
 	}
@@ -528,10 +583,7 @@ func runRepos(rest []string) {
 		// cross-repo search that otherwise exists only as the kern_repo_search
 		// MCP tool. Mirrors the MCP handler's rendering (intel.FormatRepoHits,
 		// "<repo> <kind> <lang> <symbol> <file>:<line>") and defaults to 20 hits.
-		f, args, err := parseFlags(rest[1:])
-		if err != nil {
-			fatalUsage("flags: %v", err)
-		}
+		f, args := parseFlagsOrDie(rest[1:])
 		if len(args) < 1 {
 			fatalUsage("usage: kern repos search <query> [--limit N]")
 		}
@@ -547,8 +599,9 @@ func runRepos(rest []string) {
 				fmt.Println("no repos registered (kern repos add <path> [name])")
 				return
 			}
-			fmt.Printf("no symbols matched across repos: %s\n", query)
-			return
+			// F1: no-match is an error (exit 1), not success — same contract
+			// as the single-repo path below and kern explore/graph.
+			fatal("no symbols matched across repos: %s", query)
 		}
 		fmt.Println(intel.FormatRepoHits(hits))
 	default:
@@ -556,10 +609,7 @@ func runRepos(rest []string) {
 	}
 }
 func runSearch(rest []string) {
-	f, args, err := parseFlags(rest)
-	if err != nil {
-		fatalUsage("flags: %v", err)
-	}
+	f, args := parseFlagsOrDie(rest)
 	if len(args) < 1 {
 		fatalUsage("usage: kern search <query> [root] [--limit N] [--repos] [--json] [--semantic]")
 	}
@@ -644,6 +694,30 @@ func runSearch(rest []string) {
 		if matches == nil {
 			matches = []index.Symbol{}
 		}
+		// F-SE2: the flat symbol dump reported only extraction-provenance
+		// "confidence" (always HIGH for Go) with no match-relevance signal
+		// — a distant fuzzy hit looked identical to an exact one. The
+		// non-semantic JSON path now carries the ranked score and the
+		// matched-all flag (additive: every existing field is unchanged).
+		if !f.semantic {
+			type scoredSymbol struct {
+				index.Symbol
+				Score      int  `json:"score"`
+				MatchedAll bool `json:"matched_all"`
+			}
+			hits := intel.RankedSearchScored(ix, query, limit)
+			scored := make([]scoredSymbol, 0, len(hits))
+			for _, h := range hits {
+				scored = append(scored, scoredSymbol{Symbol: h.Symbol, Score: h.Score, MatchedAll: h.MatchedAll})
+			}
+			printJSON(map[string]any{
+				"version": version,
+				"query":   query,
+				"results": scored,
+				"total":   len(scored),
+			})
+			return
+		}
 		printJSON(map[string]any{
 			"version": version,
 			"query":   query,
@@ -653,8 +727,10 @@ func runSearch(rest []string) {
 		return
 	}
 	if len(matches) == 0 {
-		fmt.Printf("no symbols matched: %s\n", query)
-		return
+		// F1: no-match exits 1 with did-you-mean suggestions (same contract
+		// as kern explore / kern graph via fatalNoSymbol). The message moves
+		// to stderr with the "kern: " prefix — a failed search is an error.
+		fatalNoSearchMatch(query, ix)
 	}
 	// V7d: collapse same-name symbols duplicated across sibling modules.
 	matches, collapsed := intel.CollapseModuleDuplicates(matches)
@@ -668,19 +744,13 @@ func runSearch(rest []string) {
 }
 
 func runFts(rest []string) {
-	f, args, err := parseFlags(rest)
-	if err != nil {
-		fatalUsage("flags: %v", err)
-	}
+	f, args := parseFlagsOrDie(rest)
 	if len(args) < 1 {
 		fatalUsage("usage: kern fts \"<query>\" [root] [--limit N]")
 	}
-	root := f.root
-	if root == "" {
-		root = "."
-		if len(args) > 1 {
-			root = args[1]
-		}
+	root := projectRoot(f)
+	if f.root == "" && len(args) > 1 {
+		root = args[1]
 	}
 	limit := f.limit
 	if limit <= 0 {

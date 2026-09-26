@@ -353,7 +353,7 @@ func TestDocsStateMCPToolCount(t *testing.T) {
 
 	check("README banner", readme, `\(11 high-level tools by default, `+want+` in full mode\)`)
 	check("README MCP section", readme, `by default, `+want+` in full mode\)`)
-	check("README agents section", readme, `by default, `+want+`\nin full mode`)
+	check("README full-mode note", readme, `full `+want+`-tool catalog`)
 	check("AGENTS kern_meta section", agents, `among `+want+` individual `+"`kern_\\*`"+` tools`)
 	check("AGENTS catalog section", agents, `ships `+want+` `+"`kern_\\*`"+` MCP tools`)
 }
@@ -374,11 +374,11 @@ func allInstalled(sts []Status, agent string) bool {
 // dispatches. A typo'd subcommand in the plugin would otherwise sail through
 // the name-only parity test; here the token must resolve to a real case.
 
-// cliTableEntryRe matches a `"name": {run: ...}` entry in the commandTable
-// map (cmd/kern/dispatch_table.go) — the E3 dispatch-table refactor fused the
-// old `switch cmd` into commandTable, so the parity source of truth moved from
-// dispatch.go case labels to table keys.
-var cliTableEntryRe = regexp.MustCompile(`(?m)^\s*"([^"]+)":\s*\{run:`)
+// cliTableEntryRe matches a `"name": {category: "...", run: ...}` entry in
+// the commandTable map (cmd/kern/dispatch_table.go) — the E3 dispatch-table
+// refactor fused the old `switch cmd` into commandTable, so the parity source
+// of truth moved from dispatch.go case labels to table keys.
+var cliTableEntryRe = regexp.MustCompile(`(?m)^\s*"([^"]+)":\s*\{`)
 
 // toolStartRe finds each kern_xxx tool definition; used to delimit tool bodies.
 var toolStartRe = regexp.MustCompile(`kern_[a-zA-Z0-9_]+:\s*tool\(`)
