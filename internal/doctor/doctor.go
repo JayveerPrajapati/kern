@@ -10,10 +10,10 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	goruntime "runtime"
 	"sort"
 	"strconv"
@@ -33,9 +33,9 @@ import (
 
 // Finding is a single diagnostic result.
 type Finding struct {
-	Check  string
-	Level  string // ok, warn, fail
-	Detail string
+	Check  string `json:"check"`
+	Level  string `json:"level"` // ok, warn, fail
+	Detail string `json:"detail"`
 }
 
 // Run executes all checks against the current project root.
@@ -57,6 +57,7 @@ func Run(root string) []Finding {
 	out = append(out, checkGitExclude(root))
 	out = append(out, checkIndex(root))
 	out = append(out, checkIndexFreshness(root))
+	out = append(out, checkIndexShadow(root))
 	out = append(out, checkPrecision(root))
 	out = append(out, checkRuntime(root))
 	out = append(out, checkOllama())
@@ -97,30 +98,85 @@ func checkPath() Finding {
 	return Finding{Check: "kern-mcp", Level: "warn", Detail: bin + " missing — agents may not find it"}
 }
 
-// checkExec actually runs the binary instead of trusting os.Stat. On macOS an
-// unsigned/ad-hoc-broken binary passes os.Stat but is killed by Gatekeeper
-// with SIGKILL; executing it surfaces that immediately (killedBySIGKILL
-// decodes both the direct signal-death form and the shell-wrapped 137 form).
-// -h is used as the probe because it prints usage and exits 0 without
-// reading stdin — and works on older binaries that predate the -version
-// flag.
+// mcpInitializeRequest is the JSON-RPC initialize request doctor writes to
+// the binary's stdin to prove it speaks MCP — a real handshake, not a usage
+// echo. 2024-11-05 is the protocol version most stdio MCP servers answer.
+const mcpInitializeRequest = `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"kern-doctor","version":"1"}}}` + "\n"
+
+// checkExec actually runs the binary instead of trusting os.Stat and proves
+// it speaks MCP: it starts kern-mcp, writes one JSON-RPC initialize request
+// line to stdin, closes it, reads the first stdout line, and passes ONLY
+// when that line parses as a JSON response carrying a "jsonrpc" field and a
+// "result" (the server's capabilities). On macOS an unsigned/ad-hoc-broken
+// binary passes os.Stat but is killed by Gatekeeper with SIGKILL; executing
+// it surfaces that immediately (killedBySIGKILL decodes both the direct
+// signal-death form and the shell-wrapped 137 form).
 func checkExec(bin string) Finding {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, bin, "-h")
-	out, err := cmd.CombinedOutput()
+	cmd := exec.CommandContext(ctx, bin)
+	cmd.Stdin = strings.NewReader(mcpInitializeRequest)
+	out, err := cmd.Output()
 	if err != nil {
+		// A deadline expiry kills the child with SIGKILL too, so the timeout
+		// must be diagnosed before the Gatekeeper branch: a binary that
+		// starts but never answers the handshake is not a Gatekeeper victim.
+		if ctx.Err() == context.DeadlineExceeded {
+			return Finding{Check: "binary-exec", Level: "fail", Detail: bin + " did not answer the MCP initialize handshake within 5s"}
+		}
 		var ee *exec.ExitError
 		if errors.As(err, &ee) && killedBySIGKILL(ee) {
 			return Finding{Check: "binary-exec", Level: "fail", Detail: bin + " was killed with SIGKILL — on macOS this is Gatekeeper/codesign; re-sign with `codesign --force --sign -` or reinstall"}
 		}
 		return Finding{Check: "binary-exec", Level: "fail", Detail: bin + " failed to run: " + err.Error()}
 	}
-	detail := strings.TrimSpace(strings.Split(string(out), "\n")[0])
-	if detail == "" {
-		detail = "binary responds"
+	server, ok := parseMCPInitializeResponse(out)
+	if !ok {
+		return Finding{Check: "binary-exec", Level: "fail", Detail: bin + " did not answer the MCP initialize handshake (first stdout line is not a JSON-RPC result)"}
 	}
-	return Finding{Check: "binary-exec", Level: "ok", Detail: bin + " runs (" + detail + ")"}
+	detail := "kern-mcp handshake ok"
+	if server != "" {
+		detail += " (server: " + server + ")"
+	}
+	return Finding{Check: "binary-exec", Level: "ok", Detail: bin + " " + detail}
+}
+
+// parseMCPInitializeResponse reports whether the first line of out is a
+// JSON-RPC response carrying a non-empty "jsonrpc" field and a "result", and
+// returns a "name/version" server string when the result names one.
+func parseMCPInitializeResponse(out []byte) (server string, ok bool) {
+	line := out
+	if i := bytes.IndexByte(out, '\n'); i >= 0 {
+		line = out[:i]
+	}
+	line = bytes.TrimSpace(line)
+	if len(line) == 0 {
+		return "", false
+	}
+	var resp struct {
+		JSONRPC string `json:"jsonrpc"`
+		Result  *struct {
+			ServerInfo struct {
+				Name    string `json:"name"`
+				Version string `json:"version"`
+			} `json:"serverInfo"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(line, &resp); err != nil {
+		return "", false
+	}
+	if resp.JSONRPC == "" || resp.Result == nil {
+		return "", false
+	}
+	name := resp.Result.ServerInfo.Name
+	ver := resp.Result.ServerInfo.Version
+	if name == "" {
+		return "", true
+	}
+	if ver == "" {
+		return name, true
+	}
+	return name + "/" + ver, true
 }
 
 // killedBySIGKILL reports whether the command died from SIGKILL. A direct
@@ -251,8 +307,11 @@ func checkParity(root string) Finding {
 	}
 	// A release tag build (vX.Y.Z) is a legitimate artifact built from a
 	// tagged commit; the parity check cannot map the tag to a HEAD hash, so
-	// tag-shaped stamps are accepted rather than falsely reported stale.
-	if tagRe.MatchString(v) {
+	// release-provenance stamps are accepted rather than falsely reported
+	// stale. The classification is the canonical kversion.Provenance (the same
+	// classifier `kern update` and bpreceipt use) — release-shaped stamps
+	// include 4-component tags like v0.9.9.1.
+	if version.Provenance(v) == version.ProvenanceRelease {
 		return Finding{Check: "parity", Level: "ok", Detail: fmt.Sprintf("binary is a release build (%s); repo HEAD is %s", v, head)}
 	}
 	return Finding{
@@ -261,10 +320,6 @@ func checkParity(root string) Finding {
 		Detail: fmt.Sprintf("binary build %s differs from repo HEAD %s — installed binary is stale; rebuild and reinstall", v, head),
 	}
 }
-
-// tagRe matches release-tag version stamps (vX.Y.Z), which are accepted by
-// the parity check because a tag build cannot be mapped to a HEAD hash.
-var tagRe = regexp.MustCompile(`^v\d+\.\d+\.\d+`)
 
 // gitHead returns the repo HEAD commit short hash, or "" when root is not a
 // git checkout.
@@ -297,7 +352,11 @@ func checkConfig(root string) Finding {
 	// resolves dot-separated paths like "verify.build").
 	var verify map[string]any
 	if v, ok := raw["verify"]; ok {
-		verify, _ = v.(map[string]any)
+		if m, ok := v.(map[string]any); ok {
+			verify = m
+		} else {
+			log.Printf("doctor: config field \"verify\" has type %T, want object — ignoring verify.* checks", v)
+		}
 	}
 	for _, k := range []string{"build", "test", "lint"} {
 		if v, ok := verify[k]; ok {
@@ -340,14 +399,102 @@ func checkCache() Finding {
 }
 
 func checkWiring(root string) []Finding {
-	var out []Finding
-	sts := setup.Check(root)
+	return wiringFindings(setup.Check(root))
+}
+
+// wiringFindings renders setup.Status entries as doctor findings with three
+// doctor-side cosmetics (F13): same-named statuses are merged into one line
+// (setup can report the same logical agent twice — e.g. "opencode plugin
+// (global)" for each global plugin location), a "registered" claim is only
+// trusted when the agent is actually detected, and a "(detected) not
+// present" note is reworded so it does not read as "agent not installed".
+func wiringFindings(sts []setup.Status) []Finding {
+	// Which agents did the detection pass actually find? A "registered"
+	// claim from a config-presence check is only trustworthy when the agent
+	// itself is present: pairing "[ok] claude MCP registered" with "[warn]
+	// claude (detected) not present" reads as a contradiction, so the
+	// registration claim must not be made for an undetected agent.
+	detected := map[string]bool{}
 	for _, s := range sts {
-		lvl := "ok"
+		if name, ok := strings.CutSuffix(s.Agent, " (detected)"); ok {
+			detected[name] = true
+		}
+	}
+
+	// Merge same-named statuses: collapse them into one finding whose detail
+	// carries the distinct notes and paths, instead of printing the same
+	// line twice.
+	type merged struct {
+		level int // 0 ok, 1 warn
+		notes []string
+		paths []string
+	}
+	var order []string
+	groups := map[string]*merged{}
+	for _, s := range sts {
+		note, lvl := s.Note, 0
 		if !s.Installed {
+			lvl = 1
+		}
+		if strings.Contains(note, "registered") && !detected[s.Agent] {
+			// The registration exists on disk but the agent is not detected:
+			// do not claim the agent is present and wired.
+			lvl = 1
+			if note == "" {
+				note = "configured but " + s.Agent + " not detected"
+			} else {
+				note = note + " — " + s.Agent + " not detected"
+			}
+		}
+		if _, ok := strings.CutSuffix(s.Agent, " (detected)"); ok && !s.Installed && note == "not present" {
+			// "claude (detected) not present" next to a "registered" line
+			// reads as "claude is not installed". Say what is actually
+			// missing: the kern-first policy in the instruction file.
+			note = "detected, but kern-first policy not present in " + s.Path
+		}
+		m, ok := groups[s.Agent]
+		if !ok {
+			m = &merged{level: lvl}
+			groups[s.Agent] = m
+			order = append(order, s.Agent)
+		}
+		if lvl > m.level {
+			m.level = lvl
+		}
+		if note != "" {
+			m.notes = append(m.notes, note)
+		}
+		if s.Path != "" {
+			m.paths = append(m.paths, s.Path)
+		}
+	}
+
+	var out []Finding
+	for _, agent := range order {
+		m := groups[agent]
+		seenNote := map[string]bool{}
+		uniq := m.notes[:0]
+		for _, n := range m.notes {
+			if !seenNote[n] {
+				seenNote[n] = true
+				uniq = append(uniq, n)
+			}
+		}
+		detail := strings.Join(uniq, "; ")
+		if len(m.paths) > 1 {
+			// Same-named statuses from distinct locations (e.g. the two
+			// global opencode plugin paths): name them so the merged line is
+			// unambiguous.
+			if detail != "" {
+				detail += " — "
+			}
+			detail += strings.Join(m.paths, "; ")
+		}
+		lvl := "ok"
+		if m.level > 0 {
 			lvl = "warn"
 		}
-		out = append(out, Finding{Check: s.Agent, Level: lvl, Detail: s.Note})
+		out = append(out, Finding{Check: agent, Level: lvl, Detail: detail})
 	}
 	return out
 }
@@ -445,7 +592,13 @@ func checkIndex(root string) Finding {
 		}
 	}
 	if ix, err := index.Load(root); err == nil && ix != nil {
-		detail := fmt.Sprintf("%d symbols, %d files, %d cached projects", len(ix.Symbols), len(ix.FileHashes), n)
+		// F5a: name the RESOLVED store path the root actually serves, not
+		// just the counts — "<root>/.kern/index.json" is where the index
+		// lives and what the tools read.
+		fresh, verdict := indexVerdict(root, ix)
+		_ = fresh
+		detail := fmt.Sprintf("%s: %d symbols, %d files, %s (%d cached projects)",
+			index.StorePath(root), len(ix.Symbols), len(ix.FileHashes), verdict, n)
 		return Finding{Check: "index", Level: "ok", Detail: detail}
 	}
 	if f, ok := CheckMultiRepoIndex(root); ok {
@@ -457,6 +610,27 @@ func checkIndex(root string) Finding {
 		return Finding{Check: "index", Level: "warn", Detail: "no cached index for this project — run `kern index .`"}
 	}
 	return Finding{Check: "index", Level: "fail", Detail: "no source files indexed in this project"}
+}
+
+// indexVerdict reports the freshness of a loaded index: "fresh"/"stale"
+// (with "unknown" for a nil index). The cheap git tree-OID probe decides
+// when it can; the loose content proof is the fallback for non-git roots and
+// legacy indexes without a recorded tree OID — the same decision order
+// `kern index` uses.
+func indexVerdict(root string, ix *index.Index) (fresh bool, verdict string) {
+	if ix == nil {
+		return false, "unknown"
+	}
+	if fresh, decided, _ := ix.TreeOIDProbe(root); decided {
+		if fresh {
+			return true, "fresh"
+		}
+		return false, "stale"
+	}
+	if ix.FreshnessProof(root).Verdict == index.FreshnessFresh {
+		return true, "fresh"
+	}
+	return false, "stale"
 }
 
 // checkIndexFreshness reports whether the cached project index is out of
@@ -473,15 +647,88 @@ func checkIndexFreshness(root string) Finding {
 		// stale about. Report ok so the report does not double-fail.
 		return Finding{Check: "freshness", Level: "ok", Detail: "no cached index to check"}
 	}
+	store := index.StorePath(root)
 	if ix.Stale() {
 		if f, ok := CheckMultiRepoFreshness(root); ok {
 			return f
 		}
 		return Finding{Check: "freshness", Level: "warn",
-			Detail: fmt.Sprintf("index is STALE (%d symbols) — source changed since build; run `kern index .`", len(ix.Symbols))}
+			Detail: fmt.Sprintf("%s is STALE (%d symbols) — source changed since build; run `kern index .`", store, len(ix.Symbols))}
 	}
 	return Finding{Check: "freshness", Level: "ok",
-		Detail: fmt.Sprintf("index is fresh (%d symbols, %d files)", len(ix.Symbols), len(ix.FileHashes))}
+		Detail: fmt.Sprintf("%s is fresh (%d symbols, %d files)", store, len(ix.Symbols), len(ix.FileHashes))}
+}
+
+// ParentIndexDir walks up from root (exclusive) and returns the nearest
+// ancestor that also holds its own index store (.kern/index.json,
+// .kern/index.sqlite or .kern/index.json.snap), or "" when none does. The
+// walk stops at the enclosing git worktree root: an index above the repo —
+// e.g. under $HOME — is unrelated to the project being served. Index
+// resolution is explicit-root (StorePath(root)), so a nested .kern is
+// exactly what a subdir-rooted process serves — this exists to make that
+// shadowing VISIBLE (F5c), not to change resolution.
+func ParentIndexDir(root string) string {
+	abs, err := filepath.Abs(root)
+	if err != nil {
+		abs = root
+	}
+	// Bound the walk: the nearest enclosing git worktree root ("" when root
+	// is not inside a git worktree). When root IS the worktree root, its
+	// ancestors are all outside the repo — bound the walk to just above it.
+	bound := nearestGitRoot(abs)
+	if bound != "" && filepath.Clean(bound) == filepath.Clean(abs) {
+		bound = filepath.Dir(bound)
+	}
+	for dir := filepath.Dir(abs); ; dir = filepath.Dir(dir) {
+		if dir == "." || filepath.Dir(dir) == dir {
+			return ""
+		}
+		if hasIndexStore(dir) {
+			return dir
+		}
+		if bound != "" && dir == bound {
+			return ""
+		}
+	}
+}
+
+// nearestGitRoot returns the nearest ancestor of dir that is a git worktree
+// root (contains a .git entry), or "" when no ancestor up to the filesystem
+// root is one.
+func nearestGitRoot(dir string) string {
+	for d := dir; ; d = filepath.Dir(d) {
+		if _, err := os.Stat(filepath.Join(d, ".git")); err == nil {
+			return d
+		}
+		if d == "." || filepath.Dir(d) == d {
+			return ""
+		}
+	}
+}
+
+func hasIndexStore(dir string) bool {
+	for _, name := range []string{"index.json", "index.sqlite", "index.json.snap"} {
+		if _, err := os.Stat(filepath.Join(dir, ".kern", name)); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
+// checkIndexShadow warns when the root serves its own nested .kern while a
+// parent directory also holds an index (F5c): the subdir index is what gets
+// served (explicit-root resolution), and a partial subdir index shadowing a
+// full parent index is a common source of confusing 0-symbol answers.
+func checkIndexShadow(root string) Finding {
+	if !hasIndexStore(root) {
+		return Finding{Check: "index-shadow", Level: "ok", Detail: "no nested index at this root"}
+	}
+	parent := ParentIndexDir(root)
+	if parent == "" {
+		return Finding{Check: "index-shadow", Level: "ok", Detail: "no parent index shadows this root"}
+	}
+	return Finding{Check: "index-shadow", Level: "warn",
+		Detail: fmt.Sprintf("serving nested index %s while a parent index exists at %s — pass the parent root to serve the full index", index.StorePath(root), filepath.Join(parent, ".kern"))}
 }
 
 // checkPrecision reports the per-language edge-precision tier recorded on the
@@ -580,7 +827,7 @@ func checkStats() Finding {
 	if err != nil {
 		return Finding{Check: "stats", Level: "warn", Detail: err.Error()}
 	}
-	return Finding{Check: "stats", Level: "ok", Detail: fmt.Sprintf("%d ops, %d tokens saved (%.1f%%)", s.Operations, s.SavedTotal, s.SavedPct)}
+	return Finding{Check: "stats", Level: "ok", Detail: fmt.Sprintf("%d ops, %d tokens saved (%.1f%%) — per-tool breakdown: kern stats --by-tool", s.Operations, s.SavedTotal, s.SavedPct)}
 }
 
 // Render formats the findings as a report.

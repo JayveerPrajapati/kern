@@ -9,6 +9,7 @@ import (
 )
 
 func TestRefactorTransactionViaMCP(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	_ = os.WriteFile(filepath.Join(root, "go.mod"), []byte("module txmcp\n\ngo 1.22\n"), 0o644)
 	_ = os.WriteFile(filepath.Join(root, "foo.go"), []byte("package main\n\nfunc Foo() string { return \"old\" }\n"), 0o644)

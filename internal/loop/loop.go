@@ -152,11 +152,17 @@ type Result struct {
 	Remembered      []domain.Memory // memories recalled in the remember stage
 	Protected       bool            // true when the protect/approval gate ran and granted
 	Learned         *domain.Memory
-	BudgetPaused    bool             // true when the safety budget was exceeded and the loop PAUSED (kept for back-compat)
-	Paused          bool             // true when the loop PAUSED for any reason
-	PauseReason     string           // reason the loop paused: "budget", "risk_exceeded", "approval", or any reason returned by LoopConfig.PauseTrigger
-	RepairAttempts  int              // number of auto-repair cycles executed
-	RepairContracts []RepairContract // active or resolved repair contracts
+	// LearnedConstraints are the keys of the recurring patterns the learn
+	// stage surfaced as constraints this run (empty when none surfaced or
+	// learning is unwired). The constraints themselves persist in the memory
+	// store; this field is the immediate surfacing so callers can report it
+	// and the next run's remember stage recalls the constraints from memory.
+	LearnedConstraints []string
+	BudgetPaused       bool             // true when the safety budget was exceeded and the loop PAUSED (kept for back-compat)
+	Paused             bool             // true when the loop PAUSED for any reason
+	PauseReason        string           // reason the loop paused: "budget", "risk_exceeded", "approval", or any reason returned by LoopConfig.PauseTrigger
+	RepairAttempts     int              // number of auto-repair cycles executed
+	RepairContracts    []RepairContract // active or resolved repair contracts
 	// VerifyAdvisory carries the raw verification summary when a read-only
 	// loop (L0/L1) saw a FAIL that only reflects pre-existing repo hygiene
 	// (hardcoded secrets, stale boundaries, a broken build) rather than the
@@ -682,10 +688,19 @@ func (l *Loop) coderStep() StepFunc {
 		}
 		if result.Passed {
 			res.Diff = result.Diff
-			return fmt.Sprintf("coder: passed in %d round(s) (%.2fs)", len(result.Rounds), result.TotalTime.Seconds()), nil
+			return fmt.Sprintf("coder: passed in %d round(s), prompt %s tokens (%.2fs)", len(result.Rounds), promptTokensHuman(result.PromptTokens), result.TotalTime.Seconds()), nil
 		}
 		return fmt.Sprintf("coder: verification did not pass after %d round(s)", len(result.Rounds)), fmt.Errorf("coder: verification did not pass after %d round(s) — fix the failing test/build", len(result.Rounds))
 	}
+}
+
+// promptTokensHuman renders a token count compactly for the code-stage
+// output line: >= 1000 becomes "8.2k", smaller counts stay bare ("512").
+func promptTokensHuman(n int) string {
+	if n >= 1000 {
+		return fmt.Sprintf("%.1fk", float64(n)/1000)
+	}
+	return fmt.Sprintf("%d", n)
 }
 
 // defaultStep returns a StepFunc that delegates the plan stage to the wired
@@ -819,30 +834,36 @@ func (l *Loop) learn(intent string, res *Result) (domain.Memory, error) {
 	}
 	// Continuous learning (G2): run the pattern extractor over accumulated
 	// memory and surface recurring patterns above threshold as constraints.
-	// Additive and nil-safe: with no extractor wired this is a no-op.
+	// Additive and nil-safe: with no extractor wired this is a no-op, and the
+	// surfaced constraint keys are carried into the run's Result so the next
+	// run's context can read them (the memory store is the persistence).
 	if ex := l.cfg.Learning; ex != nil {
-		if perr := l.surfacePatterns(ex); perr != nil {
+		keys, perr := l.surfacePatterns(ex)
+		if perr != nil {
 			// Best-effort: surface the failure via the bus, never fail the loop.
 			l.publish(eventbus.Event{Kind: eventbus.PatternSurfaced, Subject: "learning", Payload: map[string]string{"error": perr.Error()}})
 		}
+		res.LearnedConstraints = keys
 	}
 	return stored, nil
 }
 
 // surfacePatterns runs the continuous-learning extractor over memory and writes
 // a synthesized MemoryConstraint (via Extractor.Remember) for every recurring
-// pattern whose count meets PatternThreshold. It is additive and best-effort: a
-// single write failure does not stop the other patterns, and the first error is
-// returned so the caller can surface it without failing the loop.
-func (l *Loop) surfacePatterns(ex *learning.Extractor) error {
+// pattern whose count meets PatternThreshold. It returns the keys of the
+// surfaced patterns. It is additive and best-effort: a single write failure
+// does not stop the other patterns, and the first error is returned so the
+// caller can surface it without failing the loop.
+func (l *Loop) surfacePatterns(ex *learning.Extractor) ([]string, error) {
 	threshold := l.cfg.PatternThreshold
 	if threshold <= 0 {
 		threshold = 1
 	}
 	patterns, err := ex.Surface(threshold)
 	if err != nil {
-		return err
+		return nil, err
 	}
+	surfaced := make([]string, 0, len(patterns))
 	var firstErr error
 	for _, p := range patterns {
 		_, werr := ex.Remember(p)
@@ -852,9 +873,10 @@ func (l *Loop) surfacePatterns(ex *learning.Extractor) error {
 			}
 			continue
 		}
+		surfaced = append(surfaced, p.Key)
 		l.publish(eventbus.Event{Kind: eventbus.PatternSurfaced, Subject: p.Key, Payload: map[string]string{"count": fmt.Sprintf("%d", p.Count)}})
 	}
-	return firstErr
+	return surfaced, firstErr
 }
 
 // sanitizeIntent neutralizes untrusted intent text before it is stored in

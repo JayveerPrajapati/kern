@@ -14,12 +14,11 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/intel"
 	"github.com/JayveerPrajapati/kern/internal/lock"
 	"github.com/JayveerPrajapati/kern/internal/mcp/catalog"
+	"github.com/JayveerPrajapati/kern/internal/mcp/root"
 	"github.com/JayveerPrajapati/kern/internal/metrics"
-	"github.com/JayveerPrajapati/kern/internal/optimize"
 	"github.com/JayveerPrajapati/kern/internal/project"
-	"github.com/JayveerPrajapati/kern/internal/service"
-	"github.com/JayveerPrajapati/kern/internal/stats"
 	"io"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -111,278 +110,24 @@ func negotiateSchemaVersion(requested string) string {
 // route to unadvertised sub-tools. KERN_MCP_PHASE is NOT a security boundary —
 // for real per-phase tool restriction, use the KERN_TOOLS allowlist.
 
-// parseAllowlist reads the KERN_TOOLS allowlist from the environment. A
-// comma-separated list restricts which tools the server exposes and executes;
-// unset or empty means everything is allowed. The result is parsed once at
-// server construction and cached on the Server, not re-read on every dispatch.
-func parseAllowlist() []string {
-	v := strings.TrimSpace(os.Getenv("KERN_TOOLS"))
-	if v == "" {
-		return nil
-	}
-	var out []string
-	for _, n := range strings.Split(v, ",") {
-		if n = strings.TrimSpace(n); n != "" {
-			// CLI subcommand aliases ("exec", "search") normalize to
-			// canonical MCP tool names ("kern_exec", "kern_search") so
-			// KERN_TOOLS behaves identically whether the operator writes
-			// CLI-style or MCP-style names.
-			out = append(out, governance.NormalizeToolName(n))
-		}
-	}
-	return out
-}
+// maxSessions caps the number of project sessions the server caches at once.
+// Every distinct root accumulates a project.Session (a full in-memory index
+// plus an fswatch subprocess each), so an unbounded map would leak both memory
+// and watcher processes across a long-lived server. Beyond the cap the
+// least-recently-used idle session is evicted and closed (see sessionFor).
+const maxSessions = 16
 
-// highLevelOnly reports whether to expose only high-level tools (per the MCP
-// spec) via KERN_MCP_HIGH_LEVEL_ONLY=1; otherwise all tools are registered.
-func highLevelOnly() bool {
-	return os.Getenv("KERN_MCP_HIGH_LEVEL_ONLY") == "1"
-}
+// sessionIdleEvict is the minimum idle time before a session is eligible for
+// eviction. Tool calls are short (seconds), so a 10-minute idle threshold
+// never evicts a session a handler is mid-use of, while still bounding the
+// map on servers that touch many distinct roots.
+const sessionIdleEvict = 10 * time.Minute
 
-// singleTool reports whether to expose only the kern meta-tool via
-// KERN_MCP_SINGLE_TOOL=1. Agents that find the tool catalog overwhelming
-// can point their MCP config at this mode and interact with kern through the
-// single natural-language `kern` entry point.
-func singleTool() bool {
-	return os.Getenv("KERN_MCP_SINGLE_TOOL") == "1"
-}
-
-// fullCatalog reports whether to advertise the full tool catalog via
-// KERN_MCP_FULL=1. By default only the minimal defaultTools surface is
-// advertised; this opts back in to the full catalog for power users
-// and direct sub-tool callers. Phase-aware routing (KERN_MCP_PHASE) still
-// filters the advertised list within the full catalog.
-func fullCatalog() bool {
-	return os.Getenv("KERN_MCP_FULL") == "1"
-}
-
-// mcpPhase returns the active agent phase from KERN_MCP_PHASE. An unset or
-// invalid value returns "" which means no phase filtering: the whole tier
-// surface (default/high-level/full) is advertised as before.
-func mcpPhase() string {
-	p := strings.ToLower(strings.TrimSpace(os.Getenv("KERN_MCP_PHASE")))
-	if !validPhase(p) {
-		return ""
-	}
-	return p
-}
-
-// validPhase reports whether p is one of the four agent phases.
-func validPhase(p string) bool {
-	switch p {
-	case PhaseExplore, PhasePlan, PhaseEdit, PhaseVerify:
-		return true
-	}
-	return false
-}
-
-// phaseToolAllowed reports whether a tool should be advertised for the active
-// phase. Tools tagged "meta" or "cross" are always available; otherwise the
-// tool's phase must equal the active phase. An empty phase allows everything.
-func phaseToolAllowed(t Tool, phase string) bool {
-	if phase == "" {
-		return true
-	}
-	switch t.Phase {
-	case PhaseMeta, PhaseCross:
-		return true
-	}
-	return t.Phase == phase
-}
-
-// toolAllowed reports whether name passes the KERN_TOOLS allowlist. toolsList
-// is the (already filtered or full) registered catalog; a nil/empty allowlist
-// allows everything, otherwise name must appear in both the allowlist and
-// the catalog. The allowlist slice is passed in (already cached on the
-// Server) rather than re-read from the environment on every call.
-func toolAllowed(toolsList []Tool, allowed []string, name string) bool {
-	if len(allowed) == 0 {
-		return true
-	}
-	inCatalog := false
-	for i := range toolsList {
-		if toolsList[i].Name == name {
-			inCatalog = true
-			break
-		}
-	}
-	if !inCatalog {
-		return false
-	}
-	for i := range allowed {
-		if allowed[i] == name {
-			return true
-		}
-	}
-	return false
-}
-
-// highLevelTools is the set of tools kept when KERN_MCP_HIGH_LEVEL_ONLY=1.
-// It includes the 5 high-level orchestration tools (kern_analyze, kern_plan,
-// kern_execute, kern_verify, kern_incident) plus a minimal set of essential
-// primitives that high-level agents still need.
-var highLevelTools = map[string]bool{
-	"kern_analyze":              true,
-	"kern_plan":                 true,
-	"kern_execute":              true,
-	"kern_verify":               true,
-	"kern_incident":             true,
-	"kern_what_if":              true,
-	"kern_impact":               true,
-	"kern_search":               true,
-	"kern_context":              true,
-	"kern_explore":              true,
-	"kern_graph":                true,
-	"kern_memory_add":           true,
-	"kern_memory_list":          true,
-	"kern_memory_recall":        true,
-	"kern_memory":               true,
-	"kern_review":               true,
-	"kern_security":             true,
-	"kern_validate":             true,
-	"kern_repair_diagnostics":   true,
-	"kern_refactor_transaction": true,
-	"kern_run_build":            true,
-	"kern_exec":                 true,
-	"kern_sandbox":              true,
-	"kern_commitmsg":            true,
-	"kern_pack":                 true,
-	"kern_project_map":          true,
-	"kern_compact_file":         true,
-	"kern_fit_context":          true,
-	"kern_buddy":                true,
-	"kern_usage_guide":          true,
-	"kern_mask_pii":             true,
-	"kern_optimize_prompt":      true,
-	"kern_optimize_log":         true,
-	"kern_doc_search":           true,
-	"kern_doc_fetch":            true,
-	"kern_doc_index":            true,
-	"kern_context_budget":       true,
-	"kern_swap":                 true,
-	"kern_verify_output":        true,
-	"kern_check_draft":          true,
-	"kern_taint":                true,
-	"kern_schema_validate":      true,
-	"kern_stats":                true,
-}
-
-// defaultTools is the minimal surface advertised by default. The full
-// full catalog is gated behind KERN_MCP_FULL=1, and phase-aware routing
-// (KERN_MCP_PHASE) filters either surface down to the active phase's
-// shortlist. kern_meta's NL router
-// still reaches every sub-tool handler internally regardless of what is
-// advertised, so no capability is lost — only the advertised surface
-// shrinks. This implements the MCP spec's "high-level tools, not dozens
-// of tiny low-value tools" guidance.
-var defaultTools = map[string]bool{
-	"kern_meta":              true, // NL router → all sub-tools
-	"kern_explore":           true, // symbol source + callers/callees + blast radius
-	"kern_impact":            true, // blast radius of a change
-	"kern_review":            true, // token-optimised review context
-	"kern_search":            true, // ranked symbol search
-	"kern_context":           true, // minimal source slice
-	"kern_optimize_prompt":   true, // compress prompts
-	"kern_plan":              true, // implementation plan
-	"kern_verify":            true, // unified verification
-	"kern_run":               true, // orchestrate a whole task
-	"kern_authorize_context": true, // authorized-context primitive (P0.1)
-}
-
-// filteredTools returns the registered tools minus any excluded by the
-// KERN_TOOLS allowlist, intersected with the active agent phase from
-// KERN_MCP_PHASE. By default only the minimal defaultTools surface is
-// advertised; KERN_MCP_FULL=1 opts back in to the full catalog, the legacy
-// KERN_MCP_HIGH_LEVEL_ONLY mode keeps the mid-size highLevelTools set for
-// backward compat, and KERN_MCP_SINGLE_TOOL=1 collapses to kern_meta alone.
-// Phase-aware routing (KERN_MCP_PHASE=explore|plan|edit|verify) keeps only
-// the active phase's tools plus the always-on meta/cross tools; an unset or
-// invalid phase advertises the whole tier surface. It lazily reads the env
-// once per server lifetime and caches the result.
-// schemaVersionFor returns the tool schema contract version this connection
-// negotiated during initialize (P2-003), defaulting to the current catalog
-// version when no handshake happened yet.
-func (s *Server) schemaVersionFor() string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.schemaVersion == "" {
-		return SchemaVersionCurrent
-	}
-	return s.schemaVersion
-}
-
-func (s *Server) filteredTools() []Tool {
-	s.toolsMu.Lock()
-	defer s.toolsMu.Unlock()
-	if s.filtered != nil {
-		return s.filtered
-	}
-	if singleTool() {
-		for _, t := range tools {
-			if t.Name == "kern_meta" {
-				s.filtered = []Tool{t}
-				return s.filtered
-			}
-		}
-	}
-	allowed := s.allowlist
-	// KERN_MCP_FULL=1 → advertise the full catalog (with KERN_TOOLS filter).
-	if fullCatalog() {
-		out := make([]Tool, 0, len(tools))
-		for _, t := range tools {
-			if len(allowed) > 0 {
-				in := false
-				for _, a := range allowed {
-					if a == t.Name {
-						in = true
-						break
-					}
-				}
-				if !in {
-					continue
-				}
-			}
-			if !phaseToolAllowed(t, mcpPhase()) {
-				continue
-			}
-			out = append(out, t)
-		}
-		s.filtered = out
-		return s.filtered
-	}
-	// KERN_MCP_HIGH_LEVEL_ONLY=1 → the legacy 38-tool middle set (deprecated;
-	// prefer the default minimal set or KERN_MCP_FULL). Otherwise the NEW
-	// DEFAULT: the minimal 11-tool defaultTools surface.
-	var keep map[string]bool
-	if highLevelOnly() {
-		keep = highLevelTools
-	} else {
-		keep = defaultTools
-	}
-	out := make([]Tool, 0, len(keep))
-	for _, t := range tools {
-		if !keep[t.Name] {
-			continue
-		}
-		if len(allowed) > 0 {
-			in := false
-			for _, a := range allowed {
-				if a == t.Name {
-					in = true
-					break
-				}
-			}
-			if !in {
-				continue
-			}
-		}
-		if !phaseToolAllowed(t, mcpPhase()) {
-			continue
-		}
-		out = append(out, t)
-	}
-	s.filtered = out
-	return s.filtered
+// sessionEntry is one cached project session plus the LRU bookkeeping used
+// for bounded eviction.
+type sessionEntry struct {
+	sess     *project.Session
+	lastUsed time.Time
 }
 
 // Server handles MCP requests over a stdio stream or HTTP.
@@ -395,12 +140,7 @@ type Server struct {
 	allowlist []string // parsed KERN_TOOLS allowlist, cached once at init (nil = allow all)
 	locks     map[string]*lock.Lock
 	inflight  map[string]context.CancelFunc
-	sessions  map[string]*project.Session
-	// svc is the delivery-mechanism-independent service layer. Handlers
-	// delegate core operations (index, graph, memory, governance, security)
-	// to it instead of importing the internal engines directly, so the same
-	// business logic serves CLI, MCP and web identically.
-	svc *service.Services
+	sessions  map[string]*sessionEntry
 	// platforms caches one application Platform per project root, keyed to
 	// the exact index instance it was built from. High-level handlers used to
 	// rebuild the whole Platform (call graph + 4 twin extractors, each a full
@@ -408,13 +148,26 @@ type Server struct {
 	// serves the same index instance and rebuilds only after a real index
 	// rebuild (new instance pointer).
 	platforms map[string]*platformEntry
-	transport string // "stdio" (default) or "http"
+	// platformLocks serializes the per-root Platform build so two concurrent
+	// first-calls for the same root cannot both run app.NewWithIndex (several
+	// full tree walks each) and discard the loser. One mutex per root, created
+	// lazily under s.mu and dropped alongside the platforms entry on LRU
+	// eviction. Only the build holds it; cache lookups stay on s.mu.
+	platformLocks map[string]*sync.Mutex
+	transport     string // "stdio" (default) or "http"
 	// schemaVersion is the tool schema contract version (P2-003) negotiated
 	// during initialize: the client's requested version when supported,
 	// else SchemaVersionCurrent. Empty until the first initialize; getters
 	// fall back to SchemaVersionCurrent so tools/list is still correct when
 	// a client skips the handshake.
 	schemaVersion string
+	// clientName is the MCP client's self-reported identity
+	// (initialize params clientInfo.name, e.g. "opencode", "claude",
+	// "cursor"). Captured at the initialize handshake, mutex-guarded like
+	// the schemaVersion state; empty until a client initializes. Used for
+	// per-tool stats attribution so `kern stats --by-agent` no longer
+	// buckets every entry as "(unattributed)".
+	clientName string
 	// sem bounds how many tool calls may build an index concurrently (each
 	// call can construct a full project index). Acquired before a tools/call
 	// goroutine is spawned and released when it finishes.
@@ -597,24 +350,27 @@ func safetyBudgetFromEnv() *domain.SafetyBudget {
 }
 
 // defaultConcurrency returns the worker concurrency limit for the server.
-// Configurable via KERN_MCP_CONCURRENCY (default 32, minimum 8).
+// Configurable via KERN_MCP_CONCURRENCY (default 16, minimum 8). The default
+// was lowered from 32 to 16: each concurrent tool call can hold an in-flight
+// index build (a large memory ceiling), so halving the cap bounds peak memory
+// on bursty multi-call workloads.
 func defaultConcurrency() int {
 	if v := os.Getenv("KERN_MCP_CONCURRENCY"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n >= 8 {
 			return n
 		}
 	}
-	return 32
+	return 16
 }
 
 // newServerCore constructs the transport-independent core of a Server: the
-// shared service layer, the KERN_TOOLS allowlist, the sampling slots, the
-// confinement gate wiring, the opt-in safety-budget gateway, and
-// host-sampler registration. Both transports (stdio NewServer and HTTP
-// ServeHTTPContextWithTLS) must build through it — the HTTP path previously
-// hand-rolled its own struct literal, silently skipping
-// svc/allowlist/samplerKey/samplingSlots, which made svc-backed tools
-// (memory, security) panic and KERN_TOOLS a no-op over HTTP.
+// KERN_TOOLS allowlist, the sampling slots, the confinement gate wiring, the
+// opt-in safety-budget gateway, and host-sampler registration. Both
+// transports (stdio NewServer and HTTP ServeHTTPContextWithTLS) must build
+// through it — the HTTP path previously hand-rolled its own struct literal,
+// silently skipping allowlist/samplerKey/samplingSlots, which made
+// engine-backed tools (memory, security) panic and KERN_TOOLS a no-op over
+// HTTP.
 func newServerCore(transport string) *Server {
 	// Inject the live tool catalog into the diff-gate drift checks explicitly
 	// at server construction —
@@ -623,7 +379,7 @@ func newServerCore(transport string) *Server {
 	// that never constructs a server (e.g. a pure `kern diff-gate` CLI run)
 	// is wired in cmd/kern main.
 	catalog.WithDiffgateTools()
-	s := &Server{sem: make(chan struct{}, defaultConcurrency()), locks: map[string]*lock.Lock{}, inflight: map[string]context.CancelFunc{}, sessions: map[string]*project.Session{}, svc: service.New(), transport: transport, roots: defaultWorkspaceRoots(), gate: confinementGate(), commits: map[string]string{}, allowlist: parseAllowlist(), watchStop: make(chan struct{}), watchDone: make(chan struct{}), samplerKey: samplerKeyFor(), samplingSlots: map[string]func(){}}
+	s := &Server{sem: make(chan struct{}, defaultConcurrency()), locks: map[string]*lock.Lock{}, inflight: map[string]context.CancelFunc{}, sessions: map[string]*sessionEntry{}, transport: transport, roots: defaultWorkspaceRoots(), gate: confinementGate(), commits: map[string]string{}, allowlist: parseAllowlist(), watchStop: make(chan struct{}), watchDone: make(chan struct{}), samplerKey: samplerKeyFor(), samplingSlots: map[string]func(){}}
 	// register the built-in default agent so calls without an explicit
 	// agent_id are governed (cwd-scoped) instead of raw. KERN_MCP_PERMISSIVE=1
 	// remains the explicit opt-out that restores raw mode.
@@ -663,7 +419,9 @@ func newServerCore(transport string) *Server {
 			}
 		}
 		key := os.Getenv("KERN_HOST_SAMPLER_KEY")
-		_, _ = s.registerCommandSampler(cmd, timeout, key)
+		if _, err := s.registerCommandSampler(cmd, timeout, key); err != nil {
+			log.Printf("WARNING: failed to register host sampler (KERN_HOST_SAMPLER_CMD=%s, key %q): %v", cmd, key, err)
+		}
 	}
 	return s
 }
@@ -673,6 +431,35 @@ func NewServer(in io.Reader, out io.Writer) *Server {
 	s := newServerCore("stdio")
 	s.in = in
 	s.out = out
+	return s
+}
+
+// NewServerForRoot returns a *Server wired to the given reader/writer whose
+// confinement gate and workspace-root fallback are rooted at root — the
+// project root the server serves — instead of the process working directory.
+// KERN_MCP_ROOTS / mcp.roots config is deliberately NOT merged: a root-bound
+// server confines to root ONLY, so a cross-App root list cannot widen one
+// project's console (per-App isolation). The env keeps its widening
+// semantics on the stdio NewServer path.
+//
+// Root-aware web-console tool servers MUST be built through this constructor:
+// the stdio NewServer falls back to the process cwd, so an unrooted server
+// backing every project's /v1/tools/{name} passthrough would run enterprise
+// tool calls in the enterprise server's own cwd and let project A's console
+// target project B's tree (finding 1). The stdio reader is never consumed
+// when the server is driven through CallToolGoverned.
+func NewServerForRoot(in io.Reader, out io.Writer, root string) *Server {
+	s := newServerCore("stdio")
+	s.in = in
+	s.out = out
+	s.roots = workspaceRootsForRoot(root)
+	// Re-root the confinement gate: same opt-out discipline as newServerCore
+	// (KERN_MCP_NO_CONFINE=1 disables confinement entirely), but the
+	// fail-closed default is root, never the process cwd.
+	if os.Getenv("KERN_MCP_NO_CONFINE") != "1" {
+		s.gate = NewGateForRoots([]string{root})
+		s.preTool = s.gate.Check
+	}
 	return s
 }
 
@@ -725,8 +512,15 @@ func (s *Server) write(v any) error {
 // each request with a single response body and has no push channel (SSE is
 // not supported). ctx guards against emitting progress after the request was
 // cancelled or answered.
-func (s *Server) progress(ctx context.Context, id string, tool string, pct int, msg string) {
+func (s *Server) progress(ctx context.Context, token, tool string, pct int, msg string) {
 	if s.transport != "stdio" {
+		return
+	}
+	// MCP spec: the server must only emit progress when the client supplied a
+	// progressToken in the request's _meta. token == "" means the client did
+	// not opt in; skip the write entirely (defense in depth — the runTool
+	// gate already prevents calls without a token).
+	if token == "" {
 		return
 	}
 	if ctx != nil && ctx.Err() != nil {
@@ -736,7 +530,7 @@ func (s *Server) progress(ctx context.Context, id string, tool string, pct int, 
 		"jsonrpc": "2.0",
 		"method":  "notifications/progress",
 		"params": map[string]any{
-			"progressToken": id,
+			"progressToken": token,
 			"progress":      pct,
 			"total":         100,
 			"message":       msg,
@@ -773,10 +567,10 @@ var slowTools = func() map[string]bool {
 	return m
 }()
 
-func (s *Server) startProgress(ctx context.Context, id, tool string) func() {
+func (s *Server) startProgress(ctx context.Context, id, token, tool string) func() {
 	done := make(chan struct{})
 	var wg sync.WaitGroup
-	s.progress(ctx, id, tool, 0, tool+" running")
+	s.progress(ctx, token, tool, 0, tool+" running")
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -787,14 +581,14 @@ func (s *Server) startProgress(ctx context.Context, id, tool string) func() {
 			case <-done:
 				return
 			case <-t.C:
-				s.progress(ctx, id, tool, -1, tool+" still running")
+				s.progress(ctx, token, tool, -1, tool+" still running")
 			}
 		}
 	}()
 	return func() {
 		close(done)
 		wg.Wait()
-		s.progress(ctx, id, tool, 100, tool+" finished")
+		s.progress(ctx, token, tool, 100, tool+" finished")
 	}
 }
 
@@ -926,7 +720,10 @@ func (s *Server) Serve() error {
 	// after it hits bufio.ErrTooLong, so it is recreated from the raw reader.
 	newScanner := func() *bufio.Scanner {
 		sc := bufio.NewScanner(s.in)
-		sc.Buffer(make([]byte, 64<<20), 64<<20)
+		// Small initial buffer (64 KiB); the scanner grows it on demand up to
+		// the 64 MiB max. The old eager 64 MiB allocation per connection cost
+		// real memory on idle connections that never see a large line.
+		sc.Buffer(make([]byte, 64<<10), 64<<20)
 		return sc
 	}
 	for {
@@ -1005,11 +802,13 @@ func (s *Server) safeDispatch(req rpcRequest) (r any) {
 
 // Close stops all background file watchers associated with this server's
 // sessions and halts the implicit background index watch, draining an
-// in-flight rebuild for up to 5s. It is safe to call multiple times.
+// in-flight rebuild for up to 5s. It is safe to call multiple times, and
+// tolerates sessions already closed by LRU eviction (project.Session.Close
+// is itself documented safe to call multiple times).
 func (s *Server) Close() {
 	s.mu.Lock()
-	for _, sess := range s.sessions {
-		sess.Close()
+	for _, e := range s.sessions {
+		e.sess.Close()
 	}
 	s.mu.Unlock()
 	// Unregister every host sampler slot: no LLM call may delegate to a host
@@ -1097,7 +896,10 @@ func (s *Server) dispatch(req rpcRequest) any {
 		var initParams struct {
 			ProtocolVersion string `json:"protocolVersion"`
 			SchemaVersion   string `json:"schemaVersion"`
-			Capabilities    struct {
+			ClientInfo      struct {
+				Name string `json:"name"`
+			} `json:"clientInfo"`
+			Capabilities struct {
 				Sampling json.RawMessage `json:"sampling"`
 			} `json:"capabilities"`
 		}
@@ -1119,10 +921,13 @@ func (s *Server) dispatch(req rpcRequest) any {
 		// Negotiate the tool schema contract version (P2-003): honor a supported
 		// client request verbatim, else serve the current catalog version. The
 		// negotiated value is stored so tools/list can advertise the version the
-		// client actually speaks.
+		// client actually speaks. The client's self-reported name is stored
+		// alongside it for per-tool stats attribution (explicit agent_id args
+		// still win at the recording site).
 		schemaVersion := negotiateSchemaVersion(initParams.SchemaVersion)
 		s.mu.Lock()
 		s.schemaVersion = schemaVersion
+		s.clientName = initParams.ClientInfo.Name
 		s.mu.Unlock()
 		return map[string]any{
 			"jsonrpc": "2.0", "id": req.ID,
@@ -1171,7 +976,7 @@ func rootedPath(root, p string) (string, error) {
 	return withinRoot(root, p)
 }
 
-func (s *Server) runTool(ctx context.Context, id string, name string, args map[string]any) (out string, runErr error) {
+func (s *Server) runTool(ctx context.Context, id, token, name string, args map[string]any) (out string, runErr error) {
 	// Record every incoming tool call and its duration; the defer covers all
 	// return paths, and runErr is non-nil exactly when dispatch returned an error.
 	origName := name // precheckTool may remap the name; audit the executed one
@@ -1229,9 +1034,11 @@ func (s *Server) runTool(ctx context.Context, id string, name string, args map[s
 	// multi-second tool calls. Centralized here (sandbox/heal/run_build
 	// previously started progress in their handlers; the central wrap
 	// supersedes those). Cache hits return before this point, so they never
-	// emit progress.
-	if slowTools[name] {
-		stop := s.startProgress(ctx, id, name)
+	// emit progress. Progress is only emitted when the client supplied a
+	// progressToken in the request's _meta (token != ""); a call without one
+	// gets no unsolicited notifications.
+	if slowTools[name] && token != "" {
+		stop := s.startProgress(ctx, id, token, name)
 		defer stop()
 	}
 	text, err := s.dispatchTool(ctx, id, name, args)
@@ -1241,69 +1048,6 @@ func (s *Server) runTool(ctx context.Context, id string, name string, args map[s
 		s.cacheStore(ctx, name, args, text)
 	}
 	return text, err
-}
-
-// precheckTool validates a tool name against the KERN_TOOLS allowlist and the
-// root argument before dispatch, resolving blocked tools to their
-// policy-approved fallback. It returns the (possibly fallback) tool name to
-// dispatch, or an error when the tool is not allowed and no allowed
-// alternative exists, or when the root argument fails validation.
-func (s *Server) precheckTool(name string, args map[string]any) (string, error) {
-	// Validates against the full registered catalog by design — phase
-	// filtering (KERN_MCP_PHASE) only affects advertisement, never execution.
-	// Resolve against the FULL registered catalog, not the advertised
-	// (filtered) set: kern_meta's NL router reaches every sub-tool handler
-	// internally even when the sub-tool is not advertised, and an explicit
-	// KERN_TOOLS allowlist still gates execution here.
-	if !toolAllowed(tools, s.allowlist, name) {
-		// Tool fallback: when a tool is blocked by the KERN_TOOLS
-		// allowlist, route to its policy-approved alternative if one exists and
-		// IS allowed, so a restricted deployment still gets an equivalent
-		// result instead of a hard failure. Fail closed when no allowed
-		// alternative exists.
-		if alt := app.FallbackFor(name); alt != "" {
-			if toolAllowed(tools, s.allowlist, alt) {
-				name = alt
-			}
-		}
-		// Fail closed only when no allowed alternative exists.
-		if !toolAllowed(tools, s.allowlist, name) {
-			return "", fmt.Errorf("tool %q is not allowed (KERN_TOOLS allowlist)", name)
-		}
-	}
-	if err := s.checkRootArg(args); err != nil {
-		return "", err
-	}
-	if root := argString(args, "root"); root != "" {
-		if err := validateRoot(root); err != nil {
-			return "", err
-		}
-	}
-	// track every tool call against the safety budget through the
-	// ToolGateway. A nil gateway or nil budget is a safe no-op (back-compat).
-	// The budget gate runs after allowlist/root validation so blocked calls
-	// never consume budget; when the budget is already exceeded the call is
-	// denied with a structured error before any handler side effect runs.
-	// Evaluate's boundary is empty (the tool name is the resource) and its
-	// firewall is nil (per-call firewalls live in newGovernor), so only the
-	// budget dimension is enforced here.
-	if s.gateway != nil && s.budget != nil {
-		s.budgetMu.Lock()
-		defer s.budgetMu.Unlock()
-		agentID := argString(args, "agent_id")
-		if agentID == "" {
-			agentID = governance.DefaultAgentID
-		}
-		if _, _, _, gerr := s.gateway.Evaluate(agentID, argString(args, "task"), name, "call", domain.TaskBoundary{}, s.budget); gerr != nil {
-			// Surface the budget reason verbatim in the structured denial.
-			if _, reason := s.budget.Exceeded(); reason != "" {
-				return "", fmt.Errorf("safety budget exceeded: %s — tool call denied", reason)
-			}
-			return "", fmt.Errorf("tool call denied by safety gateway: %s", gerr)
-		}
-		s.budget.TrackToolCall()
-	}
-	return name, nil
 }
 
 // analyzeChange and simulateChange have been migrated to internal/app.Platform.
@@ -1362,35 +1106,67 @@ func truncateMCP(s string, n int) string {
 
 // sessionFor returns the project session for root, creating and caching one
 // per root so index state and stats identity are shared across tool calls.
+// The cache is bounded (maxSessions): inserting beyond the cap evicts the
+// least-recently-used entry that has been idle for at least sessionIdleEvict,
+// closing its watcher and releasing its index, so a server that touches many
+// distinct roots cannot accumulate a project.Session per root forever.
 func (s *Server) sessionFor(root string) *project.Session {
 	root = resolveRoot(root)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.sessions == nil {
-		s.sessions = map[string]*project.Session{}
+		s.sessions = map[string]*sessionEntry{}
 	}
-	sess, ok := s.sessions[root]
-	if !ok {
-		sess = project.New(root, "")
-		s.sessions[root] = sess
+	now := time.Now()
+	if e, ok := s.sessions[root]; ok {
+		e.lastUsed = now
+		return e.sess
 	}
-	return sess
+	if len(s.sessions) >= maxSessions {
+		s.evictIdleLocked(now)
+	}
+	e := &sessionEntry{sess: project.New(root, ""), lastUsed: now}
+	s.sessions[root] = e
+	return e.sess
+}
+
+// evictIdleLocked closes and removes the least-recently-used session entry
+// idle for at least sessionIdleEvict. Called with s.mu held; a no-op when
+// every cached session is still in recent use (the cap may be exceeded rather
+// than evict a session a handler is actively using).
+func (s *Server) evictIdleLocked(now time.Time) {
+	var oldestKey string
+	var oldest time.Time
+	for k, e := range s.sessions {
+		if now.Sub(e.lastUsed) < sessionIdleEvict {
+			continue // still recent: never evict an in-use session
+		}
+		if oldestKey == "" || e.lastUsed.Before(oldest) {
+			oldestKey = k
+			oldest = e.lastUsed
+		}
+	}
+	if oldestKey == "" {
+		return
+	}
+	e := s.sessions[oldestKey]
+	delete(s.sessions, oldestKey)
+	// A cached Platform holds the full call graph plus twin-merged knowledge
+	// state — drop it with the evicted session so a long-lived server
+	// touching many distinct roots cannot leak one graph per root (mirrors
+	// the sessions LRU bound). The per-root build lock goes too; the next
+	// platformFor for this root allocates a fresh one.
+	delete(s.platforms, oldestKey)
+	delete(s.platformLocks, oldestKey)
+	e.sess.Close() // project.Session.Close is documented safe to call multiple times
 }
 
 // resolveRoot cleans a tool root argument to an absolute path and requires it
 // to be an existing directory. An empty root falls back to the current working
 // directory. This guards every index-using tool against traversal-style root
 // values and turns confusing downstream index errors into clear ones.
-func resolveRoot(root string) string {
-	if root == "" {
-		if cwd, err := os.Getwd(); err == nil {
-			root = cwd
-		}
-	}
-	if abs, err := filepath.Abs(root); err == nil {
-		root = filepath.Clean(abs)
-	}
-	return root
+func resolveRoot(r string) string {
+	return root.ResolveRoot(r)
 }
 
 // withinRoot resolves file against root (absolute paths are used as-is) and
@@ -1407,21 +1183,38 @@ func withinRoot(root, file string) (string, error) {
 	}
 	// Resolve symlinks on both the root and the candidate so a symlink inside
 	// the project that points outside cannot read/escape the project boundary.
-	// If either resolution fails (e.g. the file does not exist yet), fall back
-	// to the lexical Clean+Rel check below.
-	if rRoot, rerr := filepath.EvalSymlinks(root); rerr == nil {
-		if rAbs, aerr := filepath.EvalSymlinks(abs); aerr == nil {
-			rel, err := filepath.Rel(rRoot, rAbs)
-			if err != nil {
-				return "", fmt.Errorf("resolve %q: %w", file, err)
-			}
-			if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
-				return "", fmt.Errorf("path %s escapes project root %s", abs, root)
-			}
-			return abs, nil
-		}
+	// A candidate that does not exist yet (e.g. a file about to be written)
+	// cannot be resolved directly, so resolve the NEAREST EXISTING ANCESTOR
+	// and re-append the remaining components: a symlinked parent directory
+	// (root/link -> /etc) is then judged by its real location instead of its
+	// lexical text, closing the escape where the old pure-lexical fallback
+	// let root/link/newfile land in /etc.
+	rRoot, rerr := filepath.EvalSymlinks(root)
+	if rerr != nil {
+		rRoot = root
 	}
-	rel, err := filepath.Rel(root, abs)
+	real := abs
+	var rem []string
+	probe := abs
+	for {
+		if r, err := filepath.EvalSymlinks(probe); err == nil {
+			real = r
+			if len(rem) > 0 {
+				real = filepath.Join(append([]string{r}, rem...)...)
+			}
+			break
+		}
+		parent := filepath.Dir(probe)
+		if parent == probe {
+			// Nothing resolvable up to the filesystem root: fall back to the
+			// lexical Clean+Rel check rather than denying an unresolvable path.
+			real = abs
+			break
+		}
+		rem = append([]string{filepath.Base(probe)}, rem...)
+		probe = parent
+	}
+	rel, err := filepath.Rel(rRoot, real)
 	if err != nil {
 		return "", fmt.Errorf("resolve %q: %w", file, err)
 	}
@@ -1464,16 +1257,12 @@ type indexScopeKey struct{}
 // recorded on the per-call scope so the tool response can be stamped with
 // provenance.
 func (s *Server) loadIndex(ctx context.Context, root string) (*index.Index, error) {
-	// First time this root is indexed in-process (including while a lazy
-	// background preload is still running): tell the user the wait is the
-	// initial build, not a hang. Subsequent stale rebuilds stay silent.
-	if _, built := s.indexedRoots.Load(root); !built {
-		if root == "" {
-			fmt.Fprintf(os.Stderr, "kern-mcp: first index build in progress, tool call waiting...\n")
-		} else {
-			fmt.Fprintf(os.Stderr, "kern-mcp: first index build for %s in progress, tool call waiting...\n", root)
-		}
-	}
+	// The historical "first index build in progress" notice was removed: it
+	// predicted the build by decoding the full on-disk index (index.Load +
+	// tree-OID probe — a multi-MB decode per root per process) purely to
+	// print a stderr line, then Session.Index loaded it again. Tool calls
+	// wait on the build below silently; preloadIndexes and the background
+	// watch warm roots ahead of time.
 	ix, err := s.sessionFor(root).Index()
 	if err != nil {
 		return nil, err
@@ -1482,12 +1271,38 @@ func (s *Server) loadIndex(ctx context.Context, root string) (*index.Index, erro
 	if scope, ok := ctx.Value(indexScopeKey{}).(*indexScope); ok {
 		scope.ix = ix
 	}
+	// F2: a root that yields an empty index (zero files → the recorded
+	// content root is the SHA-256 of the empty string) must surface as a
+	// real error instead of a successful 0-symbol "fresh" result. A
+	// configured/selected root that indexes nothing is almost always a
+	// misconfiguration — a missing dir, a fileless cwd, or a workspace env
+	// that was ignored — and silently serving it hides the problem.
+	if err := rejectEmptyIndex(root, ix); err != nil {
+		return nil, err
+	}
 	return ix, nil
+}
+
+// rejectEmptyIndex turns a silently-empty index into a real error. The index
+// is empty exactly when zero files were indexed, which makes the recorded
+// content root aggregateHash({}) — the SHA-256 of the empty string — and
+// every freshness check trivially "fresh". Callers must not present that as
+// a clean answer.
+func rejectEmptyIndex(root string, ix *index.Index) error {
+	if ix == nil || len(ix.FileHashes) > 0 {
+		return nil
+	}
+	abs := resolveAbs(root)
+	reason := "no indexable source files were found under it"
+	if st, err := os.Stat(abs); err != nil || !st.IsDir() {
+		reason = fmt.Sprintf("the path %q does not exist or is not a directory", abs)
+	}
+	return fmt.Errorf("empty index for %s: %s — the root argument or KERN_MCP_ROOTS/KERN_ROOTS is not pointing at a code tree", abs, reason)
 }
 
 // platformEntry ties a cached Platform to the exact index instance it was
 // built from. The Platform owns the call graph and the twin-merged knowledge
-// graph; constructing it runs intelligence.FromIndex plus four twin
+// graph; constructing it runs intel.FromIndex plus four twin
 // extractors, each a full filesystem walk. Reusing it while the session
 // serves the same index instance turns ~5 tree walks per high-level tool
 // call into zero.
@@ -1514,7 +1329,27 @@ func (s *Server) platformFor(ctx context.Context, root string) (*app.Platform, e
 	s.mu.Lock()
 	if s.platforms == nil {
 		s.platforms = map[string]*platformEntry{}
+		s.platformLocks = map[string]*sync.Mutex{}
 	}
+	if e, ok := s.platforms[root]; ok && e.ix == ix {
+		p := e.p
+		s.mu.Unlock()
+		return p, nil
+	}
+	lk := s.platformLocks[root]
+	if lk == nil {
+		lk = &sync.Mutex{}
+		s.platformLocks[root] = lk
+	}
+	s.mu.Unlock()
+	// Serialize the build per root: two concurrent first-calls for the same
+	// root used to both run app.NewWithIndex (several full tree walks each)
+	// and discard the loser's graph. With the lock exactly one goroutine
+	// builds per root; the rest wait and reuse the cached Platform
+	// (re-checked under the lock).
+	lk.Lock()
+	defer lk.Unlock()
+	s.mu.Lock()
 	if e, ok := s.platforms[root]; ok && e.ix == ix {
 		p := e.p
 		s.mu.Unlock()
@@ -1603,38 +1438,4 @@ func splitShellLine(line string) []string {
 		out = append(out, cur.String())
 	}
 	return out
-}
-
-func renderOptimize(label string, res optimize.Result) string {
-	return fmt.Sprintf("%s (tokens: %d -> %d, saved %d (%.1f%%)):\n%s",
-		label, res.BeforeTokens, res.AfterTokens, res.SavedTokens, res.SavedPercent, res.Output)
-}
-
-// clipForMarker shortens a matched-input preview so a multi-megabyte log match
-// never floods the "served from semantic cache" marker.
-func clipForMarker(s string) string {
-	const max = 80
-	if len(s) <= max {
-		return s
-	}
-	return s[:max] + "…"
-}
-
-func renderStats(daysStr, session string) (string, error) {
-	days := 7
-	if daysStr != "" {
-		if _, err := fmt.Sscanf(daysStr, "%d", &days); err != nil {
-			return "", fmt.Errorf("invalid days: %s", daysStr)
-		}
-	}
-	rec, err := stats.NewRecorder()
-	if err != nil {
-		return "", err
-	}
-	sum, err := rec.Summarize(days, session)
-	if err != nil {
-		return "", err
-	}
-	return fmt.Sprintf("operations=%d before=%d after=%d saved=%d (%.1f%%) cost_saved=$%.4f",
-		sum.Operations, sum.BeforeTotal, sum.AfterTotal, sum.SavedTotal, sum.SavedPct, sum.CostSaved), nil
 }

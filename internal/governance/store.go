@@ -327,6 +327,30 @@ func (s *FileStore) Pending() ([]domain.Approval, error) {
 	return pending, nil
 }
 
+// Decisions returns only the decided (approved/rejected) approvals, ordered
+// deterministically by decision time (falling back to request time) then ID,
+// so callers such as the policy-signal learner see a stable history. Pending
+// approvals are excluded.
+func (s *FileStore) Decisions() ([]domain.Approval, error) {
+	approvals, err := s.Load()
+	if err != nil {
+		return nil, err
+	}
+	var decided []domain.Approval
+	for _, a := range approvals {
+		if a.Status == "approved" || a.Status == "rejected" {
+			decided = append(decided, a)
+		}
+	}
+	sort.Slice(decided, func(i, j int) bool {
+		if !resolvedAt(decided[i]).Equal(resolvedAt(decided[j])) {
+			return resolvedAt(decided[i]).Before(resolvedAt(decided[j]))
+		}
+		return decided[i].ID < decided[j].ID
+	})
+	return decided, nil
+}
+
 // Get returns a single approval by ID.
 func (s *FileStore) Get(approvalID string) (domain.Approval, error) {
 	approvals, err := s.Load()

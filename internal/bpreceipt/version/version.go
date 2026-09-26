@@ -8,6 +8,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+
+	kversion "github.com/JayveerPrajapati/kern/internal/version"
 )
 
 // Version is injected at build time via -ldflags "-X ...=...".
@@ -53,10 +55,6 @@ func ParseVersion(v string) (major, minor, patch int, err error) {
 	return major, minor, patch, nil
 }
 
-// commitHashRe matches git short/full hash stamps (the default `make build`
-// version), which are current-source builds like "dev".
-var commitHashRe = regexp.MustCompile(`^[0-9a-f]{7,40}$`)
-
 // channelSuffixRe matches the trailing parenthesized build-channel suffix
 // that `kern version` appends for unstamped source builds ("e2f1762 (dev)"
 // in cmd/kern/cmd_meta.go).
@@ -66,14 +64,16 @@ var channelSuffixRe = regexp.MustCompile(`\s+\([^)]*\)$`)
 // as major.minor.patch. The sentinel "dev" and commit-hash stamps (checkout
 // builds without a release tag) are treated as satisfying any minimum: they
 // are built from current source and are therefore by definition at or above
-// the required version. Any other unparseable version is treated as below
-// any parsed version (conservative: triggers upgrade).
+// the required version. That local-build classification is the canonical
+// kversion.Provenance == Local (the same classifier `kern update` uses);
+// any other unparseable version is treated as below any parsed version
+// (conservative: triggers upgrade).
 func VersionAtLeast(installed, required string) bool {
 	// Strip the `kern version` channel suffix first: an unstamped source
 	// build reports "<hash> (dev)", which is a current-source checkout
 	// build and must satisfy the minimum like "dev" and bare hashes.
 	installed = channelSuffixRe.ReplaceAllString(installed, "")
-	if installed == "dev" || commitHashRe.MatchString(installed) {
+	if kversion.Provenance(installed) == kversion.ProvenanceLocal {
 		return true
 	}
 	imajor, iminor, ipatch, iErr := ParseVersion(installed)

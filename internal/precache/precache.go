@@ -18,6 +18,7 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/code"
 	"github.com/JayveerPrajapati/kern/internal/docsearch"
 	"github.com/JayveerPrajapati/kern/internal/index"
+	"github.com/JayveerPrajapati/kern/internal/semcache"
 )
 
 // Report summarizes one warm pass.
@@ -49,6 +50,23 @@ const (
 // errBudgetExceeded aborts the file walk once the per-pass file/byte budget is
 // exhausted, so we do not keep traversing and reading a large tree needlessly.
 var errBudgetExceeded = errors.New("precache: per-pass budget exceeded")
+
+// warmSemInputMax bounds the file content fed to the semantic cache per file.
+// The shingle signature is computed over the whole input, so an unbounded
+// 1MB file would cost a full pass of hashing per file; the head of a source
+// file (package, imports, top-level declarations) carries most of its
+// identity for fuzzy matching.
+const warmSemInputMax = 16 << 10 // 16 KB
+
+// warmSemInput returns the file head used as the fuzzy-cache input, bounded
+// to warmSemInputMax bytes. A cut mid-rune is harmless: tokenizeWords only
+// keeps [a-z0-9] runes, so a partial rune just ends the token stream.
+func warmSemInput(content []byte) string {
+	if len(content) <= warmSemInputMax {
+		return string(content)
+	}
+	return string(content[:warmSemInputMax])
+}
 
 // Warm scans root once and fills any missing summary/doc caches.
 func Warm(root string) *Report {
@@ -111,6 +129,13 @@ func Warm(root string) *Report {
 		sum := code.Summarize(rel, content, 200)
 		_ = cache.Store("code/"+h, sum)
 		rep.Warmed++
+		// Semcache accrual: warm the fuzzy cache with (file head -> summary)
+		// so a similar file can later be served a cached summary. The head of
+		// a source file (package, imports, top-level declarations) carries
+		// most of its identity, and bounding it keeps the per-file shingle
+		// cost of the warm pass bounded. Best-effort: a cache failure must
+		// never fail the warm pass.
+		_ = semcache.Store("code", warmSemInput(content), sum)
 		return nil
 	})
 	// Documents: re-index only when the on-disk index is missing or stale.

@@ -56,3 +56,28 @@ func (p *ContextPacket) Validate() error {
 func (p *ContextPacket) Migrate() error {
 	return nil
 }
+
+// ContextUsageRecord is one observed usage sample for a named context-packet
+// slice, derived from a completed task outcome (e.g. an analyze or verify
+// completion). The app layer computes it deterministically from the task's
+// ContextPacket and the outcome's used files/symbols; the learning layer
+// aggregates records per slice kind and proposes shrink/review signals as
+// typed-claim memories (RECOMMENDATION when a slice was never used, INFERENCE
+// when its usage was below 50%). Slices are the units of usage learning.
+type ContextUsageRecord struct {
+	// Task is the task ID (or intent) whose outcome produced this sample.
+	Task string
+	// Slice is the context-packet slice kind this sample measures. Canonical
+	// kinds: "files", "symbols", "memory", "incidents",
+	// "runtime_evidence", "architecture_rules".
+	Slice string
+	// Members is how many members the packet carried for the slice.
+	Members int
+	// Used is how many of those members the outcome actually used.
+	Used int
+	// Outcome is the outcome kind that produced the sample, e.g. "analyze",
+	// "verify_pass", "verify_fail", "impact".
+	Outcome string
+	// At is when the outcome was observed.
+	At time.Time
+}

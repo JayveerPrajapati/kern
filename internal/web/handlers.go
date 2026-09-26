@@ -6,9 +6,11 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 
+	"github.com/JayveerPrajapati/kern/internal/app"
 	"github.com/JayveerPrajapati/kern/internal/domain"
 	"github.com/JayveerPrajapati/kern/internal/eventbus"
 	"github.com/JayveerPrajapati/kern/internal/governance"
@@ -146,7 +148,10 @@ func (a *App) handleHealth(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+	// Beyond "ok", the probe reports the index status (whether a background
+	// graph rebuild is in flight) so the console pages can poll it for their
+	// pending-state line; see indexStatus. Additive field — "ok" is unchanged.
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "index": a.indexStatus()})
 }
 
 // handleApprovalsPending serves the current pending approvals.
@@ -158,6 +163,77 @@ func (a *App) handleApprovalsPending(w http.ResponseWriter, r *http.Request) {
 type approvalDecision struct {
 	ID       string `json:"id"`
 	Approver string `json:"approver"`
+}
+
+// requireApproverRole enforces the org RBAC layer (Feature Batch G) on the
+// approvals endpoints: when a user registry is wired (a.userRole != nil), the
+// approver's role must allow the action; an unknown approver is denied. When
+// no registry is wired the check passes (the historical single-user flow).
+// A denied decision is itself recorded in the governance audit trail so
+// failed multi-user attempts are visible in the console's audit surface.
+func (a *App) requireApproverRole(approver, action, approvalID string) error {
+	if a.userRole == nil {
+		return nil
+	}
+	role, ok := a.userRole(approver)
+	if !ok {
+		a.recordApprovalAudit(approver, action, "denied", approvalID, "approver not a registered org user")
+		return fmt.Errorf("approver %q is not a registered org user", approver)
+	}
+	if err := governance.RequireOrgRole(role, action); err != nil {
+		a.recordApprovalAudit(approver, action, "denied", approvalID, err.Error())
+		return err
+	}
+	return nil
+}
+
+// recordApprovalAudit writes an approval decision into the governance audit
+// trail (approver identity + approval ID + decision). Invariant 4/6: the
+// console's /audit and /api/audit surfaces read this log. The audit entry
+// ALSO records the AUTHENTICATED principal (authPrincipal) separately from
+// the approver identity the request body declared, so impersonation is
+// detectable in the tamper-evident trail: any token holder can declare any
+// approver name, but the principal column shows who actually authenticated.
+func (a *App) recordApprovalAudit(approver, action, result, approvalID, reason string) {
+	if a.firewall == nil {
+		return
+	}
+	a.firewall.AuditLog().Record(governance.AuditEntry{
+		AgentID:   approver,
+		Action:    action,
+		Resource:  approvalID,
+		Result:    result,
+		TaskID:    "",
+		Reason:    reason,
+		Principal: authPrincipal(),
+	})
+}
+
+// authPrincipal identifies WHO authenticated the request, as distinct from the
+// approver name the request body declares. There is no per-user identity with
+// the shared KERN_AUTH_TOKEN — every token holder is the same principal — so
+// the audit records the literal "shared-token"; with no token the console
+// trusts the loopback client and records "loopback". Server-side state, never
+// client-supplied, so it cannot be spoofed by the request body.
+func authPrincipal() string {
+	if os.Getenv(authTokenEnv) != "" {
+		return "shared-token"
+	}
+	return "loopback"
+}
+
+// recordPolicySignals runs the best-effort policy-signal learning pass after
+// a human approval decision (Self-Improvement use-cases Tier 3 #7): it learns
+// from the approval log which actions always get approved vs which are risky
+// and writes typed-claim memories (RECOMMENDATION / INFERENCE). Learning
+// proposes, policy change approves — nothing here touches the firewall or
+// policy store. Best-effort: a failure is logged and never blocks the
+// decision that already happened; a nil store/memory (unwired App) is a
+// no-op.
+func (a *App) recordPolicySignals() {
+	if _, err := app.RecordPolicySignals(a.fileApprovals, a.memories, app.DefaultPolicySignalThreshold); err != nil {
+		log.Printf("web: policy signal learning skipped: %v", err)
+	}
 }
 
 // handleApprovalApprove marks a pending approval as approved. It only accepts
@@ -174,6 +250,12 @@ func (a *App) handleApprovalApprove(w http.ResponseWriter, r *http.Request) {
 	var req approvalDecision
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.ID == "" || req.Approver == "" {
 		writeError(w, http.StatusBadRequest, "id and approver are required")
+		return
+	}
+	// Multi-user RBAC (Feature Batch G): the approver's role must allow
+	// approve. Denied -> 403 with the governance denial message.
+	if err := a.requireApproverRole(req.Approver, governance.OrgActionApprove, req.ID); err != nil {
+		writeError(w, http.StatusForbidden, "approve denied: "+err.Error())
 		return
 	}
 	updated, err := a.approvals.Approve(req.ID, req.Approver)
@@ -199,6 +281,7 @@ func (a *App) handleApprovalApprove(w http.ResponseWriter, r *http.Request) {
 					log.Printf("web approve %s: decision recorded in the file store, but propagating to the in-process firewall failed: %v", req.ID, aerr)
 				}
 			}
+			a.recordPolicySignals()
 			a.bus.Publish(eventbus.Event{Kind: eventbus.ApprovalGranted, Source: "web", Subject: req.ID})
 			writeJSON(w, http.StatusOK, map[string]string{"id": req.ID, "status": "approved"})
 			return
@@ -229,15 +312,19 @@ func (a *App) handleApprovalApprove(w http.ResponseWriter, r *http.Request) {
 			log.Printf("web approve %s: decision recorded, but propagating to the in-process firewall failed (the governance gate may stay blocked): %v", req.ID, aerr)
 		}
 		// Invariant 4/6: record the approval with the approver's identity and
-		// the task ID so the audit trail is queryable by task.
+		// the task ID so the audit trail is queryable by task. The
+		// authenticated principal is recorded separately (authPrincipal) so a
+		// token holder cannot impersonate a registered user in the trail.
 		a.firewall.AuditLog().Record(governance.AuditEntry{
-			AgentID:  req.Approver,
-			Action:   "approve",
-			Resource: req.ID,
-			Result:   "approved",
-			TaskID:   updated.TaskID,
+			AgentID:   req.Approver,
+			Action:    "approve",
+			Resource:  req.ID,
+			Result:    "approved",
+			TaskID:    updated.TaskID,
+			Principal: authPrincipal(),
 		})
 	}
+	a.recordPolicySignals()
 	a.bus.Publish(eventbus.Event{Kind: eventbus.ApprovalGranted, Source: "web", Subject: req.ID})
 	writeJSON(w, http.StatusOK, updated)
 }
@@ -254,6 +341,12 @@ func (a *App) handleApprovalReject(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "id and approver are required")
 		return
 	}
+	// Multi-user RBAC (Feature Batch G): the approver's role must allow
+	// reject. Denied -> 403 with the governance denial message.
+	if err := a.requireApproverRole(req.Approver, governance.OrgActionReject, req.ID); err != nil {
+		writeError(w, http.StatusForbidden, "reject denied: "+err.Error())
+		return
+	}
 	updated, err := a.approvals.Reject(req.ID, req.Approver, "rejected via console")
 	if err != nil {
 		// Fall back to the persistent store (workflow-engine gates live there).
@@ -265,6 +358,7 @@ func (a *App) handleApprovalReject(w http.ResponseWriter, r *http.Request) {
 				writeError(w, http.StatusInternalServerError, fmt.Sprintf("approval %q not found in the in-memory workflow (%v) and the decision could not be recorded: %v", req.ID, err, ferr))
 				return
 			}
+			a.recordPolicySignals()
 			a.bus.Publish(eventbus.Event{Kind: eventbus.ApprovalRejected, Source: "web", Subject: req.ID})
 			writeJSON(w, http.StatusOK, map[string]string{"id": req.ID, "status": "rejected"})
 			return
@@ -284,16 +378,20 @@ func (a *App) handleApprovalReject(w http.ResponseWriter, r *http.Request) {
 			log.Printf("web reject %s: decision persisted by the workflow, but the persistent-store confirmation write failed: %v", req.ID, derr)
 		}
 	}
-	// Invariant 4/6: record the rejection with the approver's identity.
+	// Invariant 4/6: record the rejection with the approver's identity. The
+	// authenticated principal is recorded separately (authPrincipal) so a
+	// token holder cannot impersonate a registered user in the trail.
 	if a.firewall != nil {
 		a.firewall.AuditLog().Record(governance.AuditEntry{
-			AgentID:  req.Approver,
-			Action:   "reject",
-			Resource: req.ID,
-			Result:   "denied",
-			TaskID:   updated.TaskID,
+			AgentID:   req.Approver,
+			Action:    "reject",
+			Resource:  req.ID,
+			Result:    "denied",
+			TaskID:    updated.TaskID,
+			Principal: authPrincipal(),
 		})
 	}
+	a.recordPolicySignals()
 	a.bus.Publish(eventbus.Event{Kind: eventbus.ApprovalRejected, Source: "web", Subject: req.ID})
 	writeJSON(w, http.StatusOK, updated)
 }

@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/JayveerPrajapati/kern/internal/index"
 )
 
 func TestRunIndexJSONEmitsSummary(t *testing.T) {
@@ -140,5 +142,62 @@ func TestRunIndexUpdateJSONEmitsSummary(t *testing.T) {
 	}
 	if _, ok := m["store"].(string); !ok {
 		t.Fatalf("store missing from update summary: %v", m)
+	}
+}
+
+// TestRunIndexWhere pins F5b: `kern index where` reports the RESOLVED store
+// path, the freshness verdict and the symbol count — the quick "which index
+// am I serving" answer — and warns when a nested .kern shadows a parent.
+func TestRunIndexWhere(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	root := jsonCliFixture(t)
+	runIndex([]string{root}) // build the index
+
+	out := captureStdout(t, func() { runIndex([]string{"where", root}) })
+	// `kern index where` names the store the root actually serves: the
+	// SQLite-primary store in the default build, the JSON cache under
+	// -tags nosqlite.
+	want := index.StorePath(root)
+	if index.SQLiteEnabled() {
+		want = index.SQLitePath(root)
+	}
+	if !strings.Contains(out, want) {
+		t.Fatalf("where output missing store path %q: %q", want, out)
+	}
+	if !strings.Contains(out, "fresh") {
+		t.Fatalf("where output missing freshness verdict: %q", out)
+	}
+	if !strings.Contains(out, "symbols:") {
+		t.Fatalf("where output missing symbol count: %q", out)
+	}
+	if strings.Contains(out, "warning: nested index") {
+		t.Fatalf("unexpected shadow warning at the root: %q", out)
+	}
+
+	// JSON form carries the same fields.
+	jout := captureStdout(t, func() { runIndex([]string{"where", root, "--json"}) })
+	m := assertValidJSON(t, jout)
+	if m["store"] != want {
+		t.Fatalf("json store = %v, want %q", m["store"], want)
+	}
+	if m["freshness"] != "fresh" {
+		t.Fatalf("json freshness = %v, want fresh", m["freshness"])
+	}
+	if s, ok := m["symbols"].(float64); !ok || s < 1 {
+		t.Fatalf("json symbols = %v, want >= 1", m["symbols"])
+	}
+
+	// A nested .kern under the same root must warn about the parent index.
+	sub := filepath.Join(root, "pkg", "sub")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sub, "s.go"), []byte("package sub\n\n// S is a stub.\nfunc S() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runIndex([]string{sub}) // build the nested subdir index
+	out = captureStdout(t, func() { runIndex([]string{"where", sub}) })
+	if !strings.Contains(out, "warning: nested index shadows a parent index") {
+		t.Fatalf("nested where output missing shadow warning: %q", out)
 	}
 }

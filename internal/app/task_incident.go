@@ -78,6 +78,52 @@ func (s *TaskService) Correlate(alert domain.Alert) (*agent.Task, runtime.Correl
 	return t, chain, t.Output, nil
 }
 
+// CorrelateCode extends the runtime correlation with the code dimension
+// (Feature Batch D): the affected service is resolved through the twin-merged
+// graph to implicated source files and symbols, and the result is recorded as
+// a Task with the incident→twin→code correlation report. The correlation is
+// deterministic — the chain and the code mapping are derived from the runtime
+// source, git history and graph, not an LLM.
+func (s *TaskService) CorrelateCode(alert domain.Alert) (*agent.Task, Correlation, string, error) {
+	t, err := s.Create(fmt.Sprintf("correlate alert (code): %s", alert.Message))
+	if err != nil {
+		return nil, Correlation{}, "", err
+	}
+	if err := s.transition(t, domain.TaskAnalyzing); err != nil {
+		s.fail(t, err.Error())
+		return t, Correlation{}, "", err
+	}
+	s.publish(eventbus.TaskUpdated, t.ID, map[string]string{"state": "ANALYZING"})
+
+	corr, err := s.platform.CorrelateCode(alert)
+	if err != nil {
+		s.fail(t, err.Error())
+		return t, Correlation{}, "", err
+	}
+
+	t.Output = renderCodeCorrelationText(corr)
+	t.AddStep(agent.Step{
+		Action:     "correlate-code",
+		AgentID:    "twin-code-correlator",
+		StartedAt:  t.UpdatedAt,
+		FinishedAt: time.Now(),
+		Result:     fmt.Sprintf("correlated: service=%s, files=%d, symbols=%d, confidence=%s", corr.AffectedService, len(corr.ImplicatedFiles), len(corr.ImplicatedSymbols), corr.Confidence),
+		Status:     "success",
+	})
+
+	s.recordArtifact(domain.ArtifactIncidentReport, t.ID, "twin-code-correlator",
+		fmt.Sprintf("correlation: service=%s, files=%d, confidence=%s", corr.AffectedService, len(corr.ImplicatedFiles), corr.Confidence),
+		"", "correlate:code")
+
+	if err := t.Complete(t.Output); err != nil {
+		s.fail(t, err.Error())
+		return t, corr, "", err
+	}
+	s.persist(t)
+	s.publish(eventbus.TaskCompleted, t.ID, map[string]string{"state": "COMPLETED"})
+	return t, corr, t.Output, nil
+}
+
 // InvestigateIncident runs the full incident workflow : IngestAlert
 // → Correlate → RootCause. It wraps the incident.Engine through TaskService so
 // the incident lifecycle (Task, Artifacts, Events) is recorded on the

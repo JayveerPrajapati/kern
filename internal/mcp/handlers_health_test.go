@@ -17,6 +17,7 @@ import (
 )
 
 func TestHandleHealthTool(t *testing.T) {
+	t.Parallel()
 	// Record some sample metrics to verify they appear in health snapshot
 	metrics.Default().RecordCacheHit()
 	metrics.Default().RecordCacheMiss()
@@ -73,6 +74,7 @@ func TestHandleHealthTool(t *testing.T) {
 // (CG-P0-5), so an agent can see at a glance how many phantom references the
 // index admits.
 func TestHandleHealthReportsLowEdgeCounters(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "a.go"), []byte("package a\n\nfunc A() {}\n"), 0o644); err != nil {
 		t.Fatal(err)
@@ -109,6 +111,7 @@ func TestHandleHealthReportsLowEdgeCounters(t *testing.T) {
 }
 
 func TestHttpHealthEndpoint(t *testing.T) {
+	t.Parallel()
 	s := NewServer(strings.NewReader(""), io.Discard)
 	s.roots = []string{t.TempDir()}
 
@@ -147,6 +150,7 @@ func TestHttpHealthEndpoint(t *testing.T) {
 // the dogfooding finding where a long-lived MCP server reported
 // fresh=false/symbols=0/files=0 while searches returned fresh disk data.
 func TestHandleHealthFallsBackToDiskIndex(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "a.go"), []byte("package a\n\nfunc A() {}\n"), 0o644); err != nil {
 		t.Fatal(err)

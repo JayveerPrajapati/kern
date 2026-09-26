@@ -10,8 +10,11 @@ import (
 )
 
 func TestHandleComposePipelineSuccess(t *testing.T) {
+	t.Parallel()
 	s := NewServer(strings.NewReader(""), io.Discard)
-	s.roots = []string{t.TempDir()}
+	root := t.TempDir()
+	seedTestProject(t, root)
+	s.roots = []string{root}
 
 	// Test a multi-step pipeline: health -> search -> health
 	pipeline := []map[string]any{
@@ -49,6 +52,7 @@ func TestHandleComposePipelineSuccess(t *testing.T) {
 }
 
 func TestHandleComposeInterpolation(t *testing.T) {
+	t.Parallel()
 	bindings := map[string]string{
 		"$sym":   "LoadUser",
 		"target": "auth.go",
@@ -73,6 +77,7 @@ func TestHandleComposeInterpolation(t *testing.T) {
 }
 
 func TestHandleComposeRecursivePrevention(t *testing.T) {
+	t.Parallel()
 	s := NewServer(strings.NewReader(""), io.Discard)
 	pipeline := []map[string]any{
 		{
@@ -90,6 +95,7 @@ func TestHandleComposeRecursivePrevention(t *testing.T) {
 }
 
 func TestHandleComposeStopOnError(t *testing.T) {
+	t.Parallel()
 	s := NewServer(strings.NewReader(""), io.Discard)
 	pipeline := []map[string]any{
 		{

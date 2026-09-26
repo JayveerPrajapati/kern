@@ -1,6 +1,7 @@
 package index
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -254,9 +255,10 @@ func TestLoadFileRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := ix.Save(); err != nil {
-		t.Fatal(err)
-	}
+	// LoadFile is the path-based (JSON/gob) reader used for the legacy global
+	// cache. Write the JSON fixture explicitly, because Save is SQLite-primary
+	// in the default build and no longer emits index.json.
+	writeJSONFixture(t, ix)
 	loaded, err := LoadFile(StorePath(ix.Root))
 	if err != nil {
 		t.Fatalf("LoadFile: %v", err)
@@ -271,6 +273,24 @@ func TestLoadFileRoundTrip(t *testing.T) {
 	// Missing file.
 	if _, err := LoadFile(filepath.Join(t.TempDir(), "nope.json")); err == nil {
 		t.Error("expected error for missing file")
+	}
+}
+
+// writeJSONFixture marshals ix to its StorePath the way the pre-SQLite-primary
+// Save did, so path-based readers (LoadFile) and JSON-only migration tests can
+// be exercised without depending on Save's write format.
+func writeJSONFixture(t *testing.T, ix *Index) {
+	t.Helper()
+	data, err := json.Marshal(ix)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := StorePath(ix.Root)
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p, data, 0o644); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -335,9 +355,9 @@ func TestLoadFileBuildsSymbolIndex(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
-	if err := ix.Save(); err != nil {
-		t.Fatalf("Save: %v", err)
-	}
+	// Path-based reader: same rationale as TestLoadFileRoundTrip — Save is
+	// SQLite-primary, so the JSON fixture is written explicitly.
+	writeJSONFixture(t, ix)
 	path := StorePath(dir)
 	loaded, err := LoadFile(path)
 	if err != nil {
@@ -349,4 +369,19 @@ func TestLoadFileBuildsSymbolIndex(t *testing.T) {
 	if len(loaded.symbolsFor("Hello")) == 0 {
 		t.Fatal("Hello missing after LoadFile")
 	}
+}
+
+// equalStrings is a shared slice-comparison helper used by both the Search
+// behavior tests and the SQLite store tests. It lives in an untagged file so
+// both the default and -tags nosqlite test builds can use it.
+func equalStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }

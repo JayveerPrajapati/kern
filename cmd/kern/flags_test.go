@@ -19,6 +19,9 @@ func TestParseFlagsDefaults(t *testing.T) {
 	if f.thresholds != "2.0,4.0,6.0,8.0" {
 		t.Errorf("thresholds default = %q", f.thresholds)
 	}
+	if !f.cache {
+		t.Error("cache default = false, want true (optimize/preview caching on by default, matching kern_optimize_prompt)")
+	}
 	if len(rest) != 0 {
 		t.Errorf("rest = %v, want empty", rest)
 	}
@@ -59,8 +62,8 @@ func TestParseFlagsErrors(t *testing.T) {
 	if _, _, err := parseFlags([]string{"--bogus"}); err == nil || !strings.Contains(err.Error(), "unknown flag: --bogus") {
 		t.Fatalf("unknown flag err = %v, want rejection", err)
 	}
-	if _, _, err := parseFlags([]string{"-x"}); err == nil || !strings.Contains(err.Error(), "unknown flag: -x") {
-		t.Fatalf("short unknown flag err = %v, want rejection", err)
+	if _, _, err := parseFlags([]string{"-x"}); err == nil || !strings.Contains(err.Error(), "unknown flag: --x") {
+		t.Fatalf("short unknown flag err = %v, want rejection as --x (single-dash long flags normalize to --)", err)
 	}
 	if _, _, err := parseFlags([]string{"--days", "abc"}); err == nil || !strings.Contains(err.Error(), "--days: invalid integer") {
 		t.Fatalf("invalid int err = %v, want rejection", err)
@@ -68,6 +71,55 @@ func TestParseFlagsErrors(t *testing.T) {
 	// Fail-fast: the FIRST invalid value wins; later ones are not evaluated.
 	if _, _, err := parseFlags([]string{"--days", "abc", "--commits", "x"}); err == nil || !strings.Contains(err.Error(), "--days: invalid integer") {
 		t.Fatalf("first-error contract violated: %v", err)
+	}
+}
+
+// TestParseFlagsSingleDashLongFlags: single-dash spellings of long flags
+// (`-json`, `-root X`, `-root=X`, `-addr HOST:PORT`) must parse exactly like
+// their double-dash forms, matching Go tooling conventions. `--nonsense` is
+// still rejected, and `-1` is still a positional (negative number), not a
+// flag and not an error.
+func TestParseFlagsSingleDashLongFlags(t *testing.T) {
+	f, rest, err := parseFlags([]string{"-json", "-root", "X", "pos"})
+	if err != nil {
+		t.Fatalf("parseFlags(-json -root X): %v", err)
+	}
+	if !f.json || f.root != "X" {
+		t.Errorf("parsed = json %v root %q, want true/X", f.json, f.root)
+	}
+	if len(rest) != 1 || rest[0] != "pos" {
+		t.Errorf("rest = %v, want [pos]", rest)
+	}
+	f, _, err = parseFlags([]string{"-root=X"})
+	if err != nil {
+		t.Fatalf("parseFlags(-root=X): %v", err)
+	}
+	if f.root != "X" {
+		t.Errorf("root = %q, want X (inline equals form)", f.root)
+	}
+	f, _, err = parseFlags([]string{"-addr", "127.0.0.1:1"})
+	if err != nil {
+		t.Fatalf("parseFlags(-addr 127.0.0.1:1): %v", err)
+	}
+	if f.addr != "127.0.0.1:1" {
+		t.Errorf("addr = %q, want 127.0.0.1:1", f.addr)
+	}
+	// Dual-form cases still work through normalization.
+	f, _, err = parseFlags([]string{"-terse-code"})
+	if err != nil || !f.terseCode {
+		t.Errorf("parseFlags(-terse-code): err %v terseCode %v, want accepted", err, f.terseCode)
+	}
+	if _, _, err := parseFlags([]string{"--nonsense"}); err == nil || !strings.Contains(err.Error(), "unknown flag: --nonsense") {
+		t.Fatalf("--nonsense err = %v, want rejection", err)
+	}
+	// "-1" is a negative-number positional, never a flag (and never
+	// normalized into "--1").
+	f, rest, err = parseFlags([]string{"-1"})
+	if err != nil {
+		t.Fatalf("parseFlags(-1): %v, want positional", err)
+	}
+	if len(rest) != 1 || rest[0] != "-1" {
+		t.Errorf("rest = %v, want [-1] (negative number is a positional)", rest)
 	}
 }
 

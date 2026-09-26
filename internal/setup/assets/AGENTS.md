@@ -8,7 +8,7 @@ prebuilt symbol index instead of re-reading files.
 
 ## The kern_meta tool (preferred entry point)
 
-Instead of choosing among 146 individual `kern_*` tools, call the single
+Instead of choosing among 139 individual `kern_*` tools, call the single
 **`kern_meta`** tool with a natural-language request. Kern classifies the
 request and runs the right tool(s) internally — you get the same result
 without having to know which tool fits. Think in phases: explore (read/discover),
@@ -23,7 +23,7 @@ Examples:
 - `kern_meta(request="mask secrets in: ...")` → runs `kern_mask_pii`
 - `kern_meta(request="find the NewServer function")` → runs `kern_search`
 
-Prefer `kern_meta` as your default. Set `KERN_MCP_FULL=1` for all 146 tools,
+Prefer `kern_meta` as your default. Set `KERN_MCP_FULL=1` for all 139 tools,
 `KERN_MCP_PHASE=explore|plan|edit|verify` for phase subsets, or
 `KERN_MCP_SINGLE_TOOL=1` for only `kern_meta`. The classifier is deterministic
 keyword matching — no LLM, no network.
@@ -52,8 +52,8 @@ path of least resistance is to use kern directly.
    patterns are symbol queries, NOT regex. For regex grep use bash
    `grep -rn <pattern>` (or raw=true) or the kern CLI `kern ast <pattern>`.
 4. **Do I need to understand a symbol (callers/callees)?** → call
-   `kern_code_graph` or `kern_explore`, NOT `read` + `grep`.
-5. **Do I need to build/test/lint?** → call `kern_run_build`, NOT `bash`.
+   `kern_graph` or `kern_explore`, NOT `read` + `grep`.
+5. **Do I need to build/test/lint?** → call `kern_validate`, NOT `bash`.
 6. **Do I need to run a command?** → call `kern_exec`, NOT `bash`. Note:
    on macOS (no unprivileged-userns network isolation) `kern_exec` FAILS
    CLOSED by design; the refusal names the override —
@@ -63,7 +63,10 @@ path of least resistance is to use kern directly.
    `kern_doc_search`, NOT `webfetch`/`websearch`. Pre-index docs with
    `kern_doc_index` (optional, for semantic search via local Ollama).
 8. **None of the above / unsure which kern tool?** → call `kern_usage_guide`
-   or `kern_buddy` to enumerate options, BEFORE falling back.
+or `kern_buddy` to enumerate options, BEFORE falling back.
+9. **Do I need what past sessions learned about this project?** → call
+`kern_memory_recall` (or `kern buddy` for the digest including project
+memory), NOT plain exploration — lessons persist across sessions.
 
 **Heuristic: if the task involves files, code, logs, builds, or web content,
 start with kern.** If the specific kern tool is unavailable or errors, fall
@@ -87,11 +90,16 @@ registers the repo, builds/refreshes the index, and returns a status report.
 
 Do this automatically on session start so the repo is indexed before you search
 it. **Prefer the index over re-exploring.** Once indexed, use `kern_search`,
-`kern_explore`, `kern_code_graph`, `kern_probe` etc. instead of raw grep/read.
+`kern_explore`, `kern_graph`, `kern_probe` etc. instead of raw grep/read.
+Then recall what past sessions learned: call `kern_memory_recall` (or
+`kern buddy`, whose digest includes the "Project memory (from past sessions)"
+section) before starting substantive work. Project memory persists per project
+and is written by the loop's learn stage, the plugin's session capture, and
+`kern_memory_add` — read it by default so prior lessons inform the work.
 
 ## Full capability catalog
 
-`kern` ships 146 `kern_*` MCP tools across many domains. If you are unsure
+`kern` ships 139 `kern_*` MCP tools across many domains. If you are unsure
 which tool fits, call `kern_usage_guide` or `kern_buddy` to enumerate options.
 
 ## Additional capabilities

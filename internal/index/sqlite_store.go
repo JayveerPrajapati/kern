@@ -51,18 +51,64 @@ func SQLitePath(root string) string { return sqliteDBPath(root) }
 
 // OpenSQLite opens (creating if needed) the SQLite store for root and applies
 // the schema. WAL journaling enables concurrent readers with a single writer.
+// OpenSQLite opens (creating if needed) the SQLite index store for root.
 func OpenSQLite(root string) (*SQLiteStore, error) {
+	s, err := openSQLite(root)
+	if err == nil {
+		return s, nil
+	}
+	// Self-heal (QA Pick #14, F-IX1): a corrupt store file previously broke
+	// `kern index` permanently — `--update` AND a full rebuild both exited 1
+	// with the raw driver error ("file is not a database (26)") and the
+	// corrupt file was never recreated. The index is a derived artifact
+	// (rebuildable from source), so on a corruption-class open failure the
+	// store files are quarantined (renamed, not deleted, so the corruption is
+	// inspectable) and the open is retried exactly once on a fresh file.
+	if isCorruptSQLiteErr(err) {
+		p := sqliteDBPath(root)
+		quarantine := fmt.Sprintf("%s.corrupt-%d", p, time.Now().Unix())
+		if rerr := os.Rename(p, quarantine); rerr == nil {
+			// Sidecars of the corrupt store are worthless without their main
+			// db; remove them so the fresh store does not adopt stale frames.
+			_ = os.Remove(p + "-wal")
+			_ = os.Remove(p + "-shm")
+			if s2, err2 := openSQLite(root); err2 == nil {
+				return s2, nil
+			}
+		}
+	}
+	return nil, err
+}
+
+// isCorruptSQLiteErr reports whether err is a corruption-class SQLite error
+// (NOTADB / malformed database / malformed WAL), the failures that mean the
+// file itself is garbage rather than merely locked or missing.
+func isCorruptSQLiteErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "file is not a database") ||
+		strings.Contains(msg, "notadb") ||
+		strings.Contains(msg, "malformed")
+}
+
+func openSQLite(root string) (*SQLiteStore, error) {
 	p := sqliteDBPath(root)
 	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 		return nil, err
 	}
 	ensureGitExclude(root)
-	// cache_size is formatted INTO the DSN (_pragma=...) so it is applied by
-	// the driver at connection open, not via a later Exec on the single-conn
-	// pool: the DSN pragma is robust against connection re-creation and
-	// cannot be skipped by a reordered pragma list (oracle-gate hardening).
-	// All other pragmas stay in the Exec list below.
-	dsn := fmt.Sprintf("file:%s?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=temp_store(MEMORY)&_pragma=cache_size(%d)", p, sqliteCacheSize)
+	// Every pragma is formatted INTO the DSN (_pragma=...) so it is applied
+	// by the driver at connection open — on EVERY pooled connection. A
+	// pragma set via db.Exec on a pooled *sql.DB would apply only to the
+	// one connection that executed it, leaving the rest of the read pool
+	// without busy_timeout / WAL (SQLITE_BUSY under concurrency). The DSN
+	// apply site is robust against connection re-creation and cannot be
+	// skipped by a reordered pragma list (oracle-gate hardening).
+	// busy_timeout comes first so a connection that opens while another
+	// holds a lock waits instead of failing.
+	dsn := fmt.Sprintf("file:%s?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=temp_store(MEMORY)&_pragma=wal_autocheckpoint(0)&_pragma=cache_size(%d)", p, sqliteCacheSize)
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, err
@@ -76,20 +122,13 @@ func OpenSQLite(root string) (*SQLiteStore, error) {
 	// transaction boundary; the valve targets the incremental
 	// watch-daemon/MCP write pattern, where the coarse 1000-page default
 	// would otherwise checkpoint on every commit of a long-lived process.
-	for _, pragma := range []string{
-		"PRAGMA journal_mode=WAL;",
-		"PRAGMA synchronous=NORMAL;",
-		"PRAGMA busy_timeout=5000;",
-		"PRAGMA temp_store=MEMORY;",
-		"PRAGMA wal_autocheckpoint=0;",
-	} {
-		if _, err := db.Exec(pragma); err != nil {
-			_ = db.Close()
-			return nil, err
-		}
-	}
-	db.SetMaxOpenConns(1)
-	db.SetMaxIdleConns(1)
+	//
+	// Small read pool: reads parallelize across up to 4 connections while
+	// SQLite's single-writer still serializes Save (one tx). Under WAL,
+	// readers and the writer never block each other; writer-vs-writer
+	// contention is resolved by the DSN busy_timeout.
+	db.SetMaxOpenConns(4)
+	db.SetMaxIdleConns(4)
 	s := &SQLiteStore{db: db, root: root, path: p}
 	if err := s.applySchema(); err != nil {
 		_ = db.Close()
@@ -128,7 +167,9 @@ CREATE TABLE IF NOT EXISTS symbols (
 	entry    INTEGER NOT NULL DEFAULT 0,
 	framework TEXT NOT NULL DEFAULT '',
 	route    TEXT NOT NULL DEFAULT '',
-	params   TEXT NOT NULL DEFAULT ''
+	params   TEXT NOT NULL DEFAULT '',
+	returns  TEXT NOT NULL DEFAULT '[]',
+	confidence TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_symbols_name ON symbols(name);
 CREATE INDEX IF NOT EXISTS idx_symbols_file ON symbols(file);
@@ -136,7 +177,8 @@ CREATE TABLE IF NOT EXISTS calls (
 	caller     TEXT NOT NULL,
 	callee     TEXT NOT NULL,
 	kind       TEXT NOT NULL DEFAULT '',
-	confidence TEXT NOT NULL DEFAULT ''
+	confidence TEXT NOT NULL DEFAULT '',
+	synth      TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_calls_callee ON calls(callee);
 CREATE INDEX IF NOT EXISTS idx_calls_caller ON calls(caller);
@@ -192,6 +234,30 @@ CREATE VIRTUAL TABLE IF NOT EXISTS symbols_fts USING fts5(
 	// the column; rows then default to MEDIUM on load (parseConfidence).
 	if !storeHasColumn(s.db, "calls", "confidence") {
 		if _, err := s.db.Exec("ALTER TABLE calls ADD COLUMN confidence TEXT NOT NULL DEFAULT ''"); err != nil {
+			return err
+		}
+	}
+	// v14 migration: call edges carry a synthesized-dispatch marker (Synth,
+	// "router:net-http" etc). The JSON cache has persisted it since the
+	// synthesizer feature; SQLite-primary stores written before the column
+	// existed default to '' — a syntactic edge — exactly the pre-column
+	// behavior, matching the struct_fields/constructors precedent.
+	if !storeHasColumn(s.db, "calls", "synth") {
+		if _, err := s.db.Exec("ALTER TABLE calls ADD COLUMN synth TEXT NOT NULL DEFAULT ''"); err != nil {
+			return err
+		}
+	}
+	// v14 migration: symbols carry their declared return types and parser
+	// confidence (the JSON cache has always persisted both). Older stores
+	// default to '[]' / '' — the pre-column behavior — which degrades
+	// update-reconstruction and confidence reporting until the next rebuild.
+	if !storeHasColumn(s.db, "symbols", "returns") {
+		if _, err := s.db.Exec("ALTER TABLE symbols ADD COLUMN returns TEXT NOT NULL DEFAULT '[]'"); err != nil {
+			return err
+		}
+	}
+	if !storeHasColumn(s.db, "symbols", "confidence") {
+		if _, err := s.db.Exec("ALTER TABLE symbols ADD COLUMN confidence TEXT NOT NULL DEFAULT ''"); err != nil {
 			return err
 		}
 	}
@@ -352,6 +418,11 @@ func (s *SQLiteStore) Save(ix *Index) error {
 		"updated_at": ix.UpdatedAt.UTC().Format(time.RFC3339Nano),
 		"max_mtime":  fmt.Sprintf("%d", ix.MaxMtime),
 		"index_kind": "symbols",
+		// Reconciliation counters (CG-P0-5): persisted so a SQLite-loaded
+		// index reports the same promoteLowEdges outcome as the build that
+		// produced it (kern_health surfaces these).
+		"promoted_low_edges":   fmt.Sprintf("%d", ix.PromotedLowEdges),
+		"unresolved_low_edges": fmt.Sprintf("%d", ix.UnresolvedLowEdges),
 	}
 	// Persist the content-addressed identity (best-effort) so SQLite-loaded
 	// indexes get the same freshness proof as JSON-loaded ones.
@@ -371,21 +442,31 @@ func (s *SQLiteStore) Save(ix *Index) error {
 	if _, err := tx.Exec("DELETE FROM symbols"); err != nil {
 		return err
 	}
+	// Prepare once, execute per row: re-preparing the insert on every symbol
+	// was measurable overhead on large indexes. The calls/callers/inherits/
+	// communities/FTS loops already use this pattern.
+	stmtSymbols, err := tx.Prepare("INSERT INTO symbols(rowid,kind,name,receiver,file,line,\"end\",lang,entry,framework,route,params,returns,confidence) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
+	if err != nil {
+		return err
+	}
+	defer func() { _ = stmtSymbols.Close() }()
 	symRow := 0
 	for _, sym := range ix.Symbols {
 		params, err := json.Marshal(sym.Params)
 		if err != nil {
 			return fmt.Errorf("marshal params for %s: %w", sym.Name, err)
 		}
+		returns, err := json.Marshal(sym.Returns)
+		if err != nil {
+			return fmt.Errorf("marshal returns for %s: %w", sym.Name, err)
+		}
 		entry := 0
 		if sym.Entry {
 			entry = 1
 		}
 		symRow++
-		if _, err := tx.Exec(
-			"INSERT INTO symbols(rowid,kind,name,receiver,file,line,\"end\",lang,entry,framework,route,params) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
-			symRow, sym.Kind, sym.Name, sym.Receiver, sym.File, sym.Line, sym.End, sym.Lang,
-			entry, sym.Framework, sym.Route, string(params)); err != nil {
+		if _, err := stmtSymbols.Exec(symRow, sym.Kind, sym.Name, sym.Receiver, sym.File, sym.Line, sym.End, sym.Lang,
+			entry, sym.Framework, sym.Route, string(params), string(returns), string(sym.Confidence)); err != nil {
 			return err
 		}
 	}
@@ -396,14 +477,14 @@ func (s *SQLiteStore) Save(ix *Index) error {
 	if _, err := tx.Exec("DELETE FROM callers"); err != nil {
 		return err
 	}
-	stmtCalls, err := tx.Prepare("INSERT INTO calls(caller,callee,kind,confidence) VALUES(?,?,?,?)")
+	stmtCalls, err := tx.Prepare("INSERT INTO calls(caller,callee,kind,confidence,synth) VALUES(?,?,?,?,?)")
 	if err != nil {
 		return err
 	}
 	defer func() { _ = stmtCalls.Close() }()
 	for caller, callees := range ix.Calls {
 		for _, ce := range callees {
-			if _, err := stmtCalls.Exec(caller, ce.Target, "call", string(ce.Confidence)); err != nil {
+			if _, err := stmtCalls.Exec(caller, ce.Target, "call", string(ce.Confidence), ce.Synth); err != nil {
 				return err
 			}
 		}
@@ -456,6 +537,12 @@ func (s *SQLiteStore) Save(ix *Index) error {
 	if _, err := tx.Exec("DELETE FROM packages"); err != nil {
 		return err
 	}
+	// Prepare once, execute per row (same pattern as the symbols/calls loops).
+	stmtPackages, err := tx.Prepare("INSERT INTO packages(path,name,lang,imports,files,struct_fields,constructors) VALUES(?,?,?,?,?,?,?) ON CONFLICT(path) DO UPDATE SET name=excluded.name, lang=excluded.lang, imports=excluded.imports, files=excluded.files, struct_fields=excluded.struct_fields, constructors=excluded.constructors")
+	if err != nil {
+		return err
+	}
+	defer func() { _ = stmtPackages.Close() }()
 	for path, pkg := range ix.Pkgs {
 		imports, err := json.Marshal(pkg.Imports)
 		if err != nil {
@@ -473,9 +560,7 @@ func (s *SQLiteStore) Save(ix *Index) error {
 		if err != nil {
 			return fmt.Errorf("marshal constructors for %s: %w", path, err)
 		}
-		if _, err := tx.Exec(
-			"INSERT INTO packages(path,name,lang,imports,files,struct_fields,constructors) VALUES(?,?,?,?,?,?,?) ON CONFLICT(path) DO UPDATE SET name=excluded.name, lang=excluded.lang, imports=excluded.imports, files=excluded.files, struct_fields=excluded.struct_fields, constructors=excluded.constructors",
-			path, pkg.Name, pkg.Lang, string(imports), string(files), string(structFields), string(constructors)); err != nil {
+		if _, err := stmtPackages.Exec(path, pkg.Name, pkg.Lang, string(imports), string(files), string(structFields), string(constructors)); err != nil {
 			return err
 		}
 	}
@@ -577,8 +662,12 @@ func (s *SQLiteStore) Load() (*Index, error) {
 			ix.Identity = &id
 		}
 	}
+	// Restore the reconciliation counters (CG-P0-5) so a SQLite-loaded index
+	// reports the same promoteLowEdges outcome as the build that produced it.
+	_ = s.db.QueryRow("SELECT value FROM meta WHERE key='promoted_low_edges'").Scan(&ix.PromotedLowEdges)
+	_ = s.db.QueryRow("SELECT value FROM meta WHERE key='unresolved_low_edges'").Scan(&ix.UnresolvedLowEdges)
 
-	rows, err := s.db.Query("SELECT kind,name,receiver,file,line,\"end\",lang,entry,framework,route,params FROM symbols")
+	rows, err := s.db.Query("SELECT kind,name,receiver,file,line,\"end\",lang,entry,framework,route,params,returns,confidence FROM symbols")
 	if err != nil {
 		return nil, err
 	}
@@ -586,9 +675,9 @@ func (s *SQLiteStore) Load() (*Index, error) {
 	for rows.Next() {
 		var sym Symbol
 		var end, entry int
-		var params string
+		var params, returns, confidence string
 		if err := rows.Scan(&sym.Kind, &sym.Name, &sym.Receiver, &sym.File, &sym.Line, &end,
-			&sym.Lang, &entry, &sym.Framework, &sym.Route, &params); err != nil {
+			&sym.Lang, &entry, &sym.Framework, &sym.Route, &params, &returns, &confidence); err != nil {
 			return nil, err
 		}
 		sym.End = end
@@ -596,6 +685,10 @@ func (s *SQLiteStore) Load() (*Index, error) {
 		if err := json.Unmarshal([]byte(params), &sym.Params); err != nil {
 			return nil, fmt.Errorf("decode params for %s: %w", sym.Name, err)
 		}
+		if err := json.Unmarshal([]byte(returns), &sym.Returns); err != nil {
+			return nil, fmt.Errorf("decode returns for %s: %w", sym.Name, err)
+		}
+		sym.Confidence = Confidence(confidence)
 		ix.Symbols = append(ix.Symbols, sym)
 	}
 	if err := rows.Err(); err != nil {
@@ -603,17 +696,17 @@ func (s *SQLiteStore) Load() (*Index, error) {
 	}
 
 	ix.Calls = map[string][]CallEdge{}
-	crows, err := s.db.Query("SELECT caller,callee,confidence FROM calls")
+	crows, err := s.db.Query("SELECT caller,callee,confidence,synth FROM calls")
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = crows.Close() }()
 	for crows.Next() {
-		var caller, callee, confidence string
-		if err := crows.Scan(&caller, &callee, &confidence); err != nil {
+		var caller, callee, confidence, synth string
+		if err := crows.Scan(&caller, &callee, &confidence, &synth); err != nil {
 			return nil, err
 		}
-		ix.Calls[caller] = append(ix.Calls[caller], CallEdge{Target: callee, Confidence: parseConfidence(confidence)})
+		ix.Calls[caller] = append(ix.Calls[caller], CallEdge{Target: callee, Confidence: parseConfidence(confidence), Synth: synth})
 	}
 	if err := crows.Err(); err != nil {
 		return nil, err
@@ -745,6 +838,11 @@ func (s *SQLiteStore) Load() (*Index, error) {
 	// measured at ~6.8s on the kern repo, ~100x the JSON load of the same
 	// data. buildSymbolIndex is O(symbols) and pays for itself immediately.
 	ix.buildSymbolIndex()
+	// ProseVocab and PrecisionByLang are derived, deterministic functions of
+	// the final symbol table; the JSON cache persists them, so the SQLite
+	// store rebuilds them at load to keep the two load paths equivalent.
+	ix.buildProseVocab()
+	ix.computePrecisionByLang()
 	ix.computeCallers()
 	ix.measureCallResolution()
 	ix.reindexByFile()
@@ -838,7 +936,7 @@ func (s *SQLiteStore) SearchFTS(query string, limit int) ([]Symbol, error) {
 		return nil, nil
 	}
 	rows, err := s.db.Query(`
-SELECT s.kind,s.name,s.receiver,s.file,s.line,s."end",s.lang,s.entry,s.framework,s.route,s.params
+SELECT s.kind,s.name,s.receiver,s.file,s.line,s."end",s.lang,s.entry,s.framework,s.route,s.params,s.returns,s.confidence
 FROM symbols_fts JOIN symbols s ON s.rowid = symbols_fts.rowid
 WHERE symbols_fts MATCH ?
 ORDER BY rank LIMIT ?`, q, limit)
@@ -850,9 +948,9 @@ ORDER BY rank LIMIT ?`, q, limit)
 	for rows.Next() {
 		var sym Symbol
 		var end, entry int
-		var params string
+		var params, returns, confidence string
 		if err := rows.Scan(&sym.Kind, &sym.Name, &sym.Receiver, &sym.File, &sym.Line, &end,
-			&sym.Lang, &entry, &sym.Framework, &sym.Route, &params); err != nil {
+			&sym.Lang, &entry, &sym.Framework, &sym.Route, &params, &returns, &confidence); err != nil {
 			return nil, err
 		}
 		sym.End = end
@@ -860,6 +958,10 @@ ORDER BY rank LIMIT ?`, q, limit)
 		if err := json.Unmarshal([]byte(params), &sym.Params); err != nil {
 			return nil, fmt.Errorf("decode params for %s: %w", sym.Name, err)
 		}
+		if err := json.Unmarshal([]byte(returns), &sym.Returns); err != nil {
+			return nil, fmt.Errorf("decode returns for %s: %w", sym.Name, err)
+		}
+		sym.Confidence = Confidence(confidence)
 		out = append(out, sym)
 	}
 	return out, rows.Err()
@@ -922,7 +1024,7 @@ func FTS5Search(root, query string, limit int) ([]Symbol, error) {
 func (s *SQLiteStore) LookupSymbol(name string) (*Symbol, error) {
 	var sym Symbol
 	var end, entry int
-	var params string
+	var params, returns, confidence string
 	// Split the qualified input at its last dot: the common case
 	// ("pkg.Receiver.method" style receivers) resolves to an indexable
 	// receiver/name pair; inputs without a dot degenerate to a plain name
@@ -936,19 +1038,19 @@ func (s *SQLiteStore) LookupSymbol(name string) (*Symbol, error) {
 	// terms on a compound SELECT — they must be result columns, and the scan
 	// below expects exactly the 11 symbol columns).
 	row := s.db.QueryRow(`
-SELECT kind,name,receiver,file,line,"end",lang,entry,framework,route,params
+SELECT kind,name,receiver,file,line,"end",lang,entry,framework,route,params,returns,confidence
 FROM (
-	SELECT kind,name,receiver,file,line,"end",lang,entry,framework,route,params,
+	SELECT kind,name,receiver,file,line,"end",lang,entry,framework,route,params,returns,confidence,
 	       0 AS prio, (receiver <> '') AS has_recv, length(receiver) AS recv_len
 	FROM symbols
 	WHERE name = ?
 	UNION ALL
-	SELECT kind,name,receiver,file,line,"end",lang,entry,framework,route,params,
+	SELECT kind,name,receiver,file,line,"end",lang,entry,framework,route,params,returns,confidence,
 	       1 AS prio, (receiver <> '') AS has_recv, length(receiver) AS recv_len
 	FROM symbols
 	WHERE name <> ? AND receiver = ? AND name = ?
 	UNION ALL
-	SELECT kind,name,receiver,file,line,"end",lang,entry,framework,route,params,
+	SELECT kind,name,receiver,file,line,"end",lang,entry,framework,route,params,returns,confidence,
 	       1 AS prio, (receiver <> '') AS has_recv, length(receiver) AS recv_len
 	FROM symbols
 	WHERE name <> ? AND (receiver || '.' || name) = ?
@@ -956,7 +1058,7 @@ FROM (
 ORDER BY prio, has_recv, recv_len, name, receiver, file, line
 LIMIT 1`, name, name, recvPart, namePart, name, name)
 	if err := row.Scan(&sym.Kind, &sym.Name, &sym.Receiver, &sym.File, &sym.Line, &end,
-		&sym.Lang, &entry, &sym.Framework, &sym.Route, &params); err != nil {
+		&sym.Lang, &entry, &sym.Framework, &sym.Route, &params, &returns, &confidence); err != nil {
 		if err == sql.ErrNoRows {
 			return nil, nil
 		}
@@ -967,6 +1069,10 @@ LIMIT 1`, name, name, recvPart, namePart, name, name)
 	if err := json.Unmarshal([]byte(params), &sym.Params); err != nil {
 		return nil, err
 	}
+	if err := json.Unmarshal([]byte(returns), &sym.Returns); err != nil {
+		return nil, err
+	}
+	sym.Confidence = Confidence(confidence)
 	return &sym, nil
 }
 
@@ -989,18 +1095,19 @@ func (s *SQLiteStore) LookupCallers(callee string) ([]string, error) {
 
 // LookupCalls performs a direct point-query for outgoing call edges from caller.
 func (s *SQLiteStore) LookupCalls(caller string) ([]CallEdge, error) {
-	rows, err := s.db.Query("SELECT callee, confidence FROM calls WHERE caller = ?", caller)
+	rows, err := s.db.Query("SELECT callee, confidence, synth FROM calls WHERE caller = ?", caller)
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = rows.Close() }()
 	var edges []CallEdge
 	for rows.Next() {
-		var callee, confidence string
-		if err := rows.Scan(&callee, &confidence); err == nil {
+		var callee, confidence, synth string
+		if err := rows.Scan(&callee, &confidence, &synth); err == nil {
 			edges = append(edges, CallEdge{
 				Target:     callee,
 				Confidence: parseConfidence(confidence),
+				Synth:      synth,
 			})
 		}
 	}
@@ -1010,7 +1117,7 @@ func (s *SQLiteStore) LookupCalls(caller string) ([]CallEdge, error) {
 // LookupFileSymbols performs a point-query for all symbols defined in a file.
 func (s *SQLiteStore) LookupFileSymbols(file string) ([]Symbol, error) {
 	rows, err := s.db.Query(`
-SELECT kind,name,receiver,file,line,"end",lang,entry,framework,route,params
+SELECT kind,name,receiver,file,line,"end",lang,entry,framework,route,params,returns,confidence
 FROM symbols
 WHERE file = ?
 ORDER BY line ASC`, file)
@@ -1022,14 +1129,16 @@ ORDER BY line ASC`, file)
 	for rows.Next() {
 		var sym Symbol
 		var end, entry int
-		var params string
+		var params, returns, confidence string
 		if err := rows.Scan(&sym.Kind, &sym.Name, &sym.Receiver, &sym.File, &sym.Line, &end,
-			&sym.Lang, &entry, &sym.Framework, &sym.Route, &params); err != nil {
+			&sym.Lang, &entry, &sym.Framework, &sym.Route, &params, &returns, &confidence); err != nil {
 			return nil, err
 		}
 		sym.End = end
 		sym.Entry = entry == 1
 		_ = json.Unmarshal([]byte(params), &sym.Params)
+		_ = json.Unmarshal([]byte(returns), &sym.Returns)
+		sym.Confidence = Confidence(confidence)
 		syms = append(syms, sym)
 	}
 	return syms, rows.Err()

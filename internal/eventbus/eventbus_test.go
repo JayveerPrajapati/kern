@@ -128,9 +128,13 @@ func TestUnsubscribeStopsDelivery(t *testing.T) {
 }
 
 func TestHistoryBounded(t *testing.T) {
+	// Exercise the retention bound through the env override with a small cap:
+	// this covers the override path AND the oldest-first eviction without
+	// publishing defaultHistoryCap events.
+	t.Setenv(historyCapEnv, "100")
 	b := New()
 	if b.max != 100 {
-		t.Fatalf("expected default max 100, got %d", b.max)
+		t.Fatalf("expected history cap 100 (from %s), got %d", historyCapEnv, b.max)
 	}
 
 	for i := 0; i < 250; i++ {
@@ -151,6 +155,69 @@ func TestHistoryBounded(t *testing.T) {
 	// newest retained
 	if hist[len(hist)-1].Subject != "inc-249" {
 		t.Errorf("newest retained subject = %q, want %q", hist[len(hist)-1].Subject, "inc-249")
+	}
+}
+
+// TestHistoryDefaultCapPinned pins the default history retention cap so a
+// change to it is a deliberate, reviewed decision (audit log analog:
+// maxAuditEntries = 5000).
+func TestHistoryDefaultCapPinned(t *testing.T) {
+	t.Setenv(historyCapEnv, "") // ensure no override leaks in
+	b := New()
+	if b.max != defaultHistoryCap {
+		t.Fatalf("default history cap = %d, want %d", b.max, defaultHistoryCap)
+	}
+	if defaultHistoryCap <= 0 {
+		t.Fatalf("default history cap must be positive, got %d", defaultHistoryCap)
+	}
+}
+
+// TestHistoryCapEnvInvalidFallsBack verifies that a non-positive or
+// unparsable KERN_EVENTBUS_MAX_HISTORY falls back to the default (the
+// warn-and-fallback idiom used elsewhere in the repo) rather than disabling
+// the bound.
+func TestHistoryCapEnvInvalidFallsBack(t *testing.T) {
+	for _, bad := range []string{"abc", "0", "-5", "10.5"} {
+		t.Run("env="+bad, func(t *testing.T) {
+			t.Setenv(historyCapEnv, bad)
+			if b := New(); b.max != defaultHistoryCap {
+				t.Errorf("history cap with %s=%q = %d, want default %d", historyCapEnv, bad, b.max, defaultHistoryCap)
+			}
+		})
+	}
+}
+
+// TestBoundDoesNotAffectDelivery verifies that the retention bound only
+// limits what History() returns — subscribers still receive every NEW event,
+// no matter how far past the cap the bus has grown.
+func TestBoundDoesNotAffectDelivery(t *testing.T) {
+	t.Setenv(historyCapEnv, "5")
+	b := New()
+
+	var mu sync.Mutex
+	var got []string
+	b.Subscribe("", func(ev Event) {
+		mu.Lock()
+		defer mu.Unlock()
+		got = append(got, ev.Subject)
+	})
+
+	const total = 50
+	for i := 0; i < total; i++ {
+		b.Publish(Event{Kind: IncidentCreated, Subject: "ev-" + itoa(i)})
+	}
+	b.Flush()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(got) != total {
+		t.Fatalf("delivered %d events, want all %d (bound must not drop delivery)", len(got), total)
+	}
+	// History is still bounded: only the newest 5 retained, newest last.
+	if h := b.History(""); len(h) != 5 {
+		t.Errorf("history len = %d, want 5 (bounded despite %d publishes)", len(h), total)
+	} else if h[len(h)-1].Subject != "ev-49" {
+		t.Errorf("newest retained = %q, want %q", h[len(h)-1].Subject, "ev-49")
 	}
 }
 

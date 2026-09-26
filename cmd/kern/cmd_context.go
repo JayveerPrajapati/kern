@@ -37,10 +37,7 @@ const kernJSONContractVersion = 2
 const AuthzVerdictSchemaVersion = 1
 
 func runProject(rest []string) {
-	f, args, err := parseFlags(rest)
-	if err != nil {
-		fatalUsage("flags: %v", err)
-	}
+	f, args := parseFlagsOrDie(rest)
 	root := "."
 	if len(args) > 0 {
 		root = args[0]
@@ -60,16 +57,10 @@ func runProject(rest []string) {
 }
 
 func runPack(rest []string) {
-	f, args, err := parseFlags(rest)
-	if err != nil {
-		fatalUsage("flags: %v", err)
-	}
-	root := f.root
-	if root == "" {
-		root = "."
-		if len(args) > 0 {
-			root = args[0]
-		}
+	f, args := parseFlagsOrDie(rest)
+	root := projectRoot(f)
+	if f.root == "" && len(args) > 0 {
+		root = args[0]
 	}
 	tier := code.TierFull
 	if f.fold {
@@ -145,12 +136,9 @@ func runPackGraph(root string, f flags) {
 }
 
 func runPrompt(rest []string) {
-	f, args, err := parseFlags(rest)
-	if err != nil {
-		fatalUsage("flags: %v", err)
-	}
+	f, args := parseFlagsOrDie(rest)
 	if len(args) == 0 {
-		fatalUsage("usage: kern prompt <template> [--file PATH] [--task TEXT]")
+		fatalUsage("usage: kern prompt <template> [--file <file>] [--task TEXT]")
 	}
 	if args[0] == "list" || args[0] == "--help" || args[0] == "-h" {
 		names, err := prompt.List()
@@ -158,7 +146,7 @@ func runPrompt(rest []string) {
 			fatal("Prompt: %v", err)
 		}
 		if args[0] != "list" {
-			fmt.Println("usage: kern prompt <template> [--file PATH] [--task TEXT]")
+			fmt.Println("usage: kern prompt <template> [--file <file>] [--task TEXT]")
 			fmt.Println("templates:")
 		}
 		for _, n := range names {
@@ -212,7 +200,7 @@ func runPrompt(rest []string) {
 
 // promptUnknownTemplateHint builds a self-diagnosing error for an unknown
 // template name: it lists the bundled template names (the same set
-// `kern prompt list` shows) and points at --file PATH for custom templates,
+// `kern prompt list` shows) and points at --file <file> for custom templates,
 // so the user is not left staring at a bare "unknown template" error.
 func promptUnknownTemplateHint(name string) string {
 	var b strings.Builder
@@ -223,7 +211,7 @@ func promptUnknownTemplateHint(name string) string {
 			fmt.Fprintf(&b, "  %s\n", n)
 		}
 	}
-	fmt.Fprintln(&b, "tip: pass --file PATH to render a custom template file, or run `kern prompt list`")
+	fmt.Fprintln(&b, "tip: pass --file <file> to render a custom template file, or run `kern prompt list`")
 	return b.String()
 }
 
@@ -285,18 +273,21 @@ func runSwap(rest []string) {
 }
 
 func runDoctor(rest []string) int {
-	f, args, err := parseFlags(rest)
-	if err != nil {
-		fatalUsage("flags: %v", err)
-	}
-	root := f.root
-	if root == "" {
-		root = "."
-		if len(args) > 0 {
-			root = args[0]
-		}
+	f, args := parseFlagsOrDie(rest)
+	root := projectRoot(f)
+	if f.root == "" && len(args) > 0 {
+		root = args[0]
 	}
 	findings := doctor.Run(root)
+	if f.archDrift {
+		arch, driftRecords := archDriftSection(root)
+		findings = append(findings, arch...)
+		recordArchDrift(driftRecords, root)
+		recordDriftDogfood(driftRecords, root)
+	}
+	if f.calibration {
+		findings = append(findings, calibrationFindings(root)...)
+	}
 	if f.json {
 		printJSON(findings)
 		return doctorExitCode(findings)
@@ -321,24 +312,26 @@ func doctorExitCode(findings []doctor.Finding) int {
 }
 
 func runContext(rest []string) {
-	f, args, err := parseFlags(rest)
-	if err != nil {
-		fatalUsage("flags: %v", err)
-	}
+	f, args := parseFlagsOrDie(rest)
 	if len(args) < 1 {
 		fatalUsage("usage: kern context <symbol> [root] [--lines N]")
 	}
 	symbol := args[0]
-	root := f.root
-	if root == "" {
-		root = "."
-		if len(args) > 1 {
-			root = args[1]
-		}
+	root := projectRoot(f)
+	if f.root == "" && len(args) > 1 {
+		root = args[1]
 	}
 	ix, err := loadOrBuild(root)
 	if err != nil {
 		fatal("Context: %v", err)
+	}
+	// Symbol resolution (F12): resolve like `kern what-if` — an exact index
+	// hit wins, a unique strong fuzzy match auto-resolves (e.g.
+	// `context enqueue` -> Bus.enqueueDeadLetter), and ambiguity or no match
+	// keeps the did-you-mean / clear-error path below. Output rendering
+	// (tokens, slices, lens, profile) is unchanged — only the symbol used.
+	if resolved, ok := resolveContextSymbol(ix, symbol); ok {
+		symbol = resolved
 	}
 	// Honor --lines instead of parsing it as the symbol.
 	lines := f.lines
@@ -374,6 +367,17 @@ func runContext(rest []string) {
 		}
 		ctxText = fmt.Sprintf("lens: %s (%s)\n", l.Name, lenses.RenderPriorities(l)) + ctxText
 	}
+	// --json is honored (F-CX1): it was previously accepted by the shared
+	// parser and silently ignored — identical text with and without it.
+	if f.json {
+		out := map[string]any{"symbol": symbol, "context": ctxText}
+		if def, ok := ix.ResolveName(symbol); ok {
+			out["file"] = def.File
+			out["line"] = def.Line
+		}
+		printJSON(out)
+		return
+	}
 	// --profile shapes how the context is presented without changing the
 	// evidence (deterministic, no LLM). Applied after the lens header,
 	// matching the MCP ordering.
@@ -398,23 +402,89 @@ func runContext(rest []string) {
 	}
 }
 
-func runLock(rest []string) {
-	f, args, err := parseFlags(rest)
-	if err != nil {
-		fatalUsage("flags: %v", err)
+// resolveContextSymbol resolves the `kern context` symbol argument with the
+// same policy as `kern what-if` (dogfooding F12): an exact index hit wins; a
+// single strong fuzzy match (ranked-search score >= 150, the what-if
+// threshold) auto-resolves to the matched symbol; multiple distinct strong
+// candidates are ambiguous and return false so the caller's did-you-mean
+// path renders; nothing matching also returns false (clear error). The
+// boolean reports whether the returned name is usable.
+func resolveContextSymbol(ix *index.Index, symbol string) (string, bool) {
+	if ix == nil || symbol == "" {
+		return symbol, false
 	}
+	// Exact match (same match set as ix.Context: symbolsFor then
+	// resolveName, without the file I/O the slice rendering performs).
+	if _, ok := ix.FindSymbol(symbol); ok {
+		return symbol, true
+	}
+	if _, ok := ix.ResolveName(symbol); ok {
+		return symbol, true
+	}
+	// Fuzzy fallback (what-if policy): ranked search with the strong-match
+	// threshold of 150 (matches every query token), deduped by full name.
+	// Exactly one distinct strong candidate auto-resolves; more than one is
+	// ambiguous (did-you-mean renders); none is a clear miss.
+	var strong []string
+	seen := map[string]bool{}
+	for _, h := range intel.RankedSearchScored(ix, symbol, 5) {
+		if h.Score < 150 {
+			continue
+		}
+		name := h.Symbol.FullName()
+		if name == "" {
+			name = h.Symbol.Name
+		}
+		if name == "" || seen[name] {
+			continue
+		}
+		seen[name] = true
+		strong = append(strong, name)
+	}
+	if len(strong) == 1 {
+		return strong[0], true
+	}
+	return symbol, false
+}
+
+// acquireLockWithWait acquires the lock, retrying a held lock every 250ms
+// for up to wait seconds (QA F4: `--wait N` bounds the WAIT to acquire;
+// `--timeout N` stays the bound on the HOLD). wait <= 0 keeps the
+// fail-fast behavior.
+func acquireLockWithWait(root, scope string, wait int) (*lock.Lock, error) {
+	if wait <= 0 {
+		return lock.Acquire(root, scope)
+	}
+	deadline := time.Now().Add(time.Duration(wait) * time.Second)
+	notified := false
+	for {
+		lk, err := lock.Acquire(root, scope)
+		if err == nil {
+			return lk, nil
+		}
+		if time.Now().After(deadline) {
+			return nil, err
+		}
+		if !notified {
+			_, pid, _ := lock.Held(root, scope)
+			fmt.Fprintf(os.Stderr, "kern: lock %q is held (pid %d) — waiting up to %ds (--wait)…\n", scope, pid, wait)
+			notified = true
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+}
+
+func runLock(rest []string) {
+	f, args := parseFlagsOrDie(rest)
 	if len(args) < 1 {
 		fatalUsage("usage: kern lock <scope> [root]")
 	}
-	root := f.root
-	if root == "" {
-		root = "."
-	}
+	root := projectRoot(f)
 	if len(args) > 1 {
 		root = args[1]
 	}
 	scope := args[0]
-	lk, err := lock.Acquire(root, scope)
+	lk, err := acquireLockWithWait(root, scope, f.wait)
 	if err != nil {
 		_, pid, _ := lock.Held(root, scope)
 		emitLockEvent(root, string(eventbus.LockContended), scope, map[string]any{"holder_pid": pid})
@@ -427,33 +497,39 @@ func runLock(rest []string) {
 	}()
 	emitLockEvent(root, string(eventbus.LockAcquired), scope, map[string]any{"pid": os.Getpid()})
 	if f.hold {
-		// Non-blocking mode for tool/plugin callers: acquire, report, and
+		// One-shot mode for tool/plugin callers: acquire, report, and
 		// return immediately. The OS releases the flock on exit, so the
 		// lock is only held for the duration of this process — use
 		// `kern status` to verify and `kern unlock` to clear the marker.
-		fmt.Printf("lock acquired: %s (pid %d). note: the lock marker persists until `kern unlock`; the flock releases when this process exits.\n", scope, os.Getpid())
+		fmt.Printf("lock acquired: %s (pid %d). one-shot (--hold): the flock releases when this process exits; the lock marker persists until 'kern unlock %s'.\n", scope, os.Getpid(), scope)
 		return
 	}
-	fmt.Printf("lock acquired: %s (pid %d). releasing on interrupt.\n", scope, os.Getpid())
+	fmt.Printf("lock acquired: %s (pid %d). holding — release with Ctrl-C, 'kern unlock %s', or --timeout N.\n", scope, os.Getpid(), scope)
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
-	<-ctx.Done()
-	fmt.Printf("lock released: %s\n", scope)
+	if !f.timeoutSet || f.timeout <= 0 {
+		// Default blocking mode: hold until interrupt.
+		<-ctx.Done()
+		fmt.Printf("lock released: %s\n", scope)
+		return
+	}
+	// --timeout N: release after N seconds (or on interrupt, whichever
+	// comes first). The deferred Release runs on return either way.
+	select {
+	case <-ctx.Done():
+		fmt.Printf("lock released: %s\n", scope)
+	case <-time.After(time.Duration(f.timeout) * time.Second):
+		fmt.Printf("lock released: %s (timeout after %ds)\n", scope, f.timeout)
+	}
 
 }
 
 func runUnlock(rest []string) {
-	f, args, err := parseFlags(rest)
-	if err != nil {
-		fatalUsage("flags: %v", err)
-	}
+	f, args := parseFlagsOrDie(rest)
 	if len(args) < 1 {
 		fatalUsage("usage: kern unlock <scope> [root]")
 	}
-	root := f.root
-	if root == "" {
-		root = "."
-	}
+	root := projectRoot(f)
 	if len(args) > 1 {
 		root = args[1]
 	}
@@ -466,10 +542,7 @@ func runUnlock(rest []string) {
 }
 
 func runStatus(rest []string) {
-	f, args, err := parseFlags(rest)
-	if err != nil {
-		fatalUsage("flags: %v", err)
-	}
+	f, args := parseFlagsOrDie(rest)
 	root := "."
 	if len(args) > 0 {
 		root = args[0]
@@ -501,10 +574,7 @@ func runStatus(rest []string) {
 }
 
 func runGuard(rest []string) {
-	f, args, err := parseFlags(rest)
-	if err != nil {
-		fatalUsage("flags: %v", err)
-	}
+	f, args := parseFlagsOrDie(rest)
 	// The authz gate needs both halves of the agent identity — an
 	// agent-id without a task description is a usage error.
 	if f.agentID != "" && f.task == "" {

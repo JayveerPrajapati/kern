@@ -3,6 +3,8 @@ package main
 import (
 	"fmt"
 	"os"
+	"slices"
+	"strings"
 )
 
 // resolveCommandAndFlags extracts the subcommand and its remaining arguments
@@ -19,13 +21,25 @@ func resolveCommandAndFlags() (cmd string, rest []string) {
 	rest = os.Args[2:]
 
 	if cmd == "--all" || ((cmd == "help" || cmd == "--help" || cmd == "-h") && hasFlag(rest, "--all")) {
-		usageAll()
+		usageAll(hasFlag(rest, "--flat"))
 		os.Exit(0)
 	}
 
 	if cmd == "help" {
 		if len(rest) > 0 && rest[0] != "--help" && rest[0] != "-h" {
-			printCommandHelp(rest[0])
+			// A category name keeps the grouped listing (backwards
+			// compatible); a registered command shows its own help (the
+			// same text as `kern <cmd> --help`); anything else is an
+			// unknown help topic — a hard error with a nearest-match
+			// suggestion, never a silent main-help dump.
+			if !printCategoryHelp(rest[0]) && !printCommandHelp(rest[0]) {
+				printUnknownCommand(rest[0])
+				os.Exit(2)
+			}
+			// A category listing or a command's own help was printed (the
+			// category path exits inside printCategoryHelp) — that is the
+			// whole answer; do not fall through to the global usage.
+			os.Exit(0)
 		}
 		usage()
 		os.Exit(0)
@@ -33,9 +47,13 @@ func resolveCommandAndFlags() (cmd string, rest []string) {
 
 	// `--help`/`-h` on any subcommand (or on kern itself) prints the
 	// per-command help and exits 0 instead of being dispatched to a
-	// subcommand handler.
+	// subcommand handler. Only genuinely unknown commands (including bare
+	// `kern --help`) fall back to the global usage text — still exit 0.
 	if cmd == "--help" || cmd == "-h" || hasFlag(rest, "--help") || hasFlag(rest, "-h") {
-		printCommandHelp(cmd)
+		if !printCommandHelp(cmd) {
+			usage()
+		}
+		os.Exit(0)
 	}
 	return cmd, rest
 }
@@ -61,7 +79,6 @@ var mcpCLIAlias = map[string]string{
 	"kern_fetch_raw_anchor":      "anchor",
 	"kern_ast_search":            "ast",
 	"kern_authorize_context":     "authorize-context",
-	"kern_code_graph":            "graph",
 	"kern_compact_file":          "compact",
 	"kern_context_budget":        "budget",
 	"kern_context_envelope":      "context-envelope",
@@ -71,10 +88,9 @@ var mcpCLIAlias = map[string]string{
 	"kern_agent_message":         "agent-message",
 	"kern_agent_interrupt":       "agent-interrupt",
 	"kern_mcp_call":              "mcp-client",
-	"kern_note":                  "note",
 	"kern_diff_files":            "udiff",
 	"kern_doc_index":             "docs",
-	"kern_entry_points":          "entries",
+	"kern_entry_points":          "entry-points",
 	"kern_fts_search":            "fts",
 	"kern_guard_check":           "guard",
 	"kern_lock_status":           "status",
@@ -87,14 +103,13 @@ var mcpCLIAlias = map[string]string{
 	"kern_optimize_prompt":       "optimize",
 	"kern_project_map":           "project",
 	"kern_repo_search":           "repos",
-	"kern_run_build":             "build",
 	"kern_safe_delete":           "delete",
 	"kern_schema_validate":       "schema",
 	"kern_security":              "sec",
 	"kern_test_gaps":             "testgaps",
 	"kern_usage_guide":           "guide",
 	"kern_verify_output":         "verify",
-	"kern_what_if":               "what-if",
+	"kern_what_if":               "impact",
 	"kern_check_draft":           "check-draft",
 	"kern_taint":                 "taint",
 	"kern_pre_edit":              "pre-edit",
@@ -118,6 +133,7 @@ var mcpCLIAlias = map[string]string{
 	"kern_org_tasks":             "org",
 	"kern_org_search":            "org",
 	"kern_org_audit":             "org",
+	"kern_org_user":              "org",
 	"kern_fit_context":           "fit-context",
 	"kern_refactor_transaction":  "refactor-transaction",
 	"kern_repair_diagnostics":    "repair-diagnostics",
@@ -127,12 +143,13 @@ var mcpCLIAlias = map[string]string{
 	"kern_fragility_hotspots":    "fragility",
 }
 
-// printCommandHelp prints the one-line help for a subcommand and exits 0.
-// Commands without a one-liner (help empty) still get their usage text — a
-// bare `kern <cmd>` line plus the entry's usage block — instead of falling
-// back to the global usage text. Only genuinely unknown commands (including
-// bare `kern --help`) fall back to the global usage.
-func printCommandHelp(cmd string) {
+// printCommandHelp prints the one-line help for a subcommand and returns
+// true. Commands without a one-liner (help empty) still get their usage
+// text — a bare `kern <cmd>` line plus the entry's usage block — instead of
+// falling back to the global usage text. It returns false when cmd is not a
+// registered command, so the caller decides between the global usage fallback
+// (`kern --help`) and an unknown-topic error (`kern help <unknown>`).
+func printCommandHelp(cmd string) bool {
 	if e, ok := commandTable[cmd]; ok {
 		if e.help != "" {
 			fmt.Printf("kern %s — %s\n", cmd, e.help)
@@ -142,10 +159,43 @@ func printCommandHelp(cmd string) {
 		if e.usage != "" {
 			fmt.Println(e.usage)
 		}
-		os.Exit(0)
+		return true
 	}
-	usage()
+	return false
+}
+
+// printCategoryHelp handles `kern help <category>`: when the argument names
+// a command category (as shown by the grouped `kern --all` listing), it
+// lists that category's commands (alphabetical, with their one-liners) and
+// exits 0. Returns false when the argument is not a category, so the caller
+// falls through to per-command help.
+func printCategoryHelp(cat string) bool {
+	var names []string
+	for name, e := range commandTable {
+		// Alias spellings dispatch but are skipped from the category listing
+		// (N4): the kebab/snake duplicates must not appear twice.
+		if e.alias {
+			continue
+		}
+		if e.category == cat {
+			names = append(names, name)
+		}
+	}
+	if len(names) == 0 {
+		return false
+	}
+	slices.Sort(names)
+	fmt.Printf("[%s]\n", cat)
+	for _, name := range names {
+		e := commandTable[name]
+		line := "  kern " + name
+		if desc := commandDescription(e, name); desc != "" {
+			line += "  " + desc
+		}
+		fmt.Println(line)
+	}
 	os.Exit(0)
+	return true
 }
 
 // dispatchCommand routes a parsed subcommand to its handler and returns the
@@ -155,7 +205,105 @@ func dispatchCommand(cmd string, rest []string) int {
 	if e, ok := commandTable[cmd]; ok {
 		return e.run(cmd, rest)
 	}
-	fmt.Fprintf(os.Stderr, "kern: unknown command %q\n", cmd)
-	usage()
+	if cmd == "" {
+		// Bare `kern` (no command): keep the full usage dump so the
+		// no-command default stays self-documenting.
+		usage()
+		return 2
+	}
+	printUnknownCommand(cmd)
 	return 2
+}
+
+// printUnknownCommand writes a one-line unknown-command error to stderr with
+// the nearest-match suggestion (when one exists) and a pointer to the full
+// catalog. The caller owns the exit code (2 for usage errors). This is the
+// replacement for the old behavior of dumping the entire 30-line usage banner
+// on a mistyped command.
+func printUnknownCommand(cmd string) {
+	fmt.Fprintf(os.Stderr, "kern: unknown command %q\n", cmd)
+	if sugg := suggestCommands(cmd); len(sugg) > 0 {
+		fmt.Fprintf(os.Stderr, "\ndid you mean: %s\n", strings.Join(sugg, ", "))
+	}
+	fmt.Fprintln(os.Stderr, "run 'kern --all' for the full catalog")
+}
+
+// suggestCommands returns up to 3 command names from commandTable that best
+// match query, in descending confidence order: exact-prefix matches first
+// (the strongest typo signal, e.g. "searc" → "search"), then
+// case-insensitive substring matches, then close edit-distance (Levenshtein)
+// matches. It returns nil when nothing is close enough, so the unknown-command
+// error stays a one-liner instead of guessing wildly.
+func suggestCommands(query string) []string {
+	if query == "" {
+		return nil
+	}
+	q := strings.ToLower(query)
+	var prefixes, substrings, fuzzy []string
+	for name := range commandTable {
+		n := strings.ToLower(name)
+		switch {
+		case strings.HasPrefix(n, q):
+			prefixes = append(prefixes, name)
+		case strings.Contains(n, q):
+			substrings = append(substrings, name)
+		case editDistance(q, n) <= max(2, len(q)/3):
+			fuzzy = append(fuzzy, name)
+		}
+	}
+	slices.Sort(prefixes)
+	slices.Sort(substrings)
+	// Fuzzy candidates sorted by edit distance so the closest match leads;
+	// equal distances tie-break alphabetically for stable output across runs.
+	slices.SortFunc(fuzzy, func(a, b string) int {
+		da := editDistance(q, strings.ToLower(a))
+		db := editDistance(q, strings.ToLower(b))
+		if da != db {
+			return da - db
+		}
+		return strings.Compare(a, b)
+	})
+	var out []string
+	seen := map[string]bool{}
+	for _, name := range append(append(prefixes, substrings...), fuzzy...) {
+		if seen[name] {
+			continue
+		}
+		seen[name] = true
+		out = append(out, name)
+		if len(out) >= 3 {
+			break
+		}
+	}
+	return out
+}
+
+// editDistance returns the Levenshtein edit distance between a and b
+// (insertions, deletions and substitutions each cost 1). Used by
+// suggestCommands to rank typo candidates.
+func editDistance(a, b string) int {
+	la, lb := len(a), len(b)
+	if la == 0 {
+		return lb
+	}
+	if lb == 0 {
+		return la
+	}
+	prev := make([]int, lb+1)
+	cur := make([]int, lb+1)
+	for j := 0; j <= lb; j++ {
+		prev[j] = j
+	}
+	for i := 1; i <= la; i++ {
+		cur[0] = i
+		for j := 1; j <= lb; j++ {
+			cost := 1
+			if a[i-1] == b[j-1] {
+				cost = 0
+			}
+			cur[j] = min(prev[j]+1, cur[j-1]+1, prev[j-1]+cost)
+		}
+		prev, cur = cur, prev
+	}
+	return prev[lb]
 }

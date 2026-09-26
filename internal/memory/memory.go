@@ -52,7 +52,7 @@ const DefaultRecallLimit = 5
 
 // NoRecallMatch is the no-match hint surfaced by every recall path (CLI
 // `kern recall` / `kern memory recall`, MCP `kern_memory_recall` and the
-// `kern_memory` recall action). It points the user at the fix (record a
+// `kern_memory_recall` action). It points the user at the fix (record a
 // lesson) instead of printing nothing.
 const NoRecallMatch = "no matching lessons (record one with: kern memory add <lesson>)"
 
@@ -141,6 +141,23 @@ func addWithSource(root, lesson, source string) error {
 	mu.Lock()
 	defer mu.Unlock()
 	s := Load(root)
+	// Dedupe automatic captures: the same conversation event can be
+	// captured by several agent surfaces (opencode plugin, Claude
+	// PostToolUse, Codex/Gemini hooks) firing within seconds of each
+	// other, which previously triplicated every auto entry. Explicit user
+	// lessons (source "") are never deduped.
+	if source == "auto" {
+		now := time.Now().UTC()
+		for i := len(s.Entries) - 1; i >= 0; i-- {
+			e := s.Entries[i]
+			if now.Sub(e.Time) > 60*time.Second {
+				break // entries are chronological: older ones are out of window
+			}
+			if e.Text == lesson {
+				return nil
+			}
+		}
+	}
 	s.Entries = append(s.Entries, Entry{Time: time.Now().UTC(), Text: lesson, Source: source})
 	if len(s.Entries) > maxEntries {
 		s.Entries = s.Entries[len(s.Entries)-maxEntries:]
@@ -167,6 +184,41 @@ func Clear(root string) error {
 		return nil
 	}
 	return err
+}
+
+// RemoveIndex deletes the entry at the given 1-based position in the
+// order 'kern memory list' shows (newest first) and returns it, so the
+// caller can show what went. QA F5: targeted removal — Clear stays the
+// whole-store nuke.
+func RemoveIndex(root string, n int) (Entry, error) {
+	mu.Lock()
+	defer mu.Unlock()
+	s := Load(root)
+	if n < 1 || n > len(s.Entries) {
+		return Entry{}, fmt.Errorf("index %d out of range (1..%d) — see 'kern memory list'", n, len(s.Entries))
+	}
+	// The store keeps append (oldest-first) order; List reverses it for
+	// display. Translate the list position into the stored position.
+	idx := len(s.Entries) - n
+	removed := s.Entries[idx]
+	s.Entries = append(s.Entries[:idx], s.Entries[idx+1:]...)
+	return removed, writeJSON(Path(root), s)
+}
+
+// RemovePrefix deletes the first stored entry whose text starts with the
+// given prefix and returns it. Empty store or no match is an error.
+func RemovePrefix(root, prefix string) (Entry, error) {
+	mu.Lock()
+	defer mu.Unlock()
+	s := Load(root)
+	for i, e := range s.Entries {
+		if strings.HasPrefix(e.Text, prefix) {
+			removed := e
+			s.Entries = append(s.Entries[:i], s.Entries[i+1:]...)
+			return removed, writeJSON(Path(root), s)
+		}
+	}
+	return Entry{}, fmt.Errorf("no memory entry starts with %q — see 'kern memory list'", prefix)
 }
 
 // stopwords are dropped from recall queries so generic lessons about "code",

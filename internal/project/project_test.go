@@ -21,6 +21,21 @@ func writeFile(t *testing.T, root, name, content string) {
 	}
 }
 
+// waitFor polls cond until it returns true or the timeout elapses. Watch
+// runs on a background goroutine, so tests wait on observed state rather
+// than sleeping a fixed interval.
+func waitFor(t *testing.T, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("condition not met within timeout")
+}
+
 func TestSessionResolvesEmptyRoot(t *testing.T) {
 	cwd, err := os.Getwd()
 	if err != nil {
@@ -41,6 +56,9 @@ func TestSessionIndexBuildAndStaleRebuild(t *testing.T) {
 	writeFile(t, root, "go.mod", "module demo\n\ngo 1.22\n")
 	writeFile(t, root, "app.go", "package main\n\n// Greet says hello.\nfunc Greet() {}\n")
 	s := New(root, "")
+	// Close drains the B6 background index saves (and stops the watcher) so
+	// the async JSON write cannot race TempDir cleanup at test end.
+	defer s.Close()
 
 	ix, err := s.Index()
 	if err != nil {
@@ -189,7 +207,16 @@ func TestWatchDetectsModification(t *testing.T) {
 		}, nil)
 	}()
 
-	time.Sleep(300 * time.Millisecond)
+	// Watch runs a synchronous baseline build on start that fires onChange
+	// with the initial tree; wait for it before modifying so the edit diffs
+	// against the start state and is reported as "modified" (not folded
+	// into the baseline). A fixed sleep would both slow the suite and flake
+	// when the baseline build lags under load.
+	waitFor(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(got) > 0
+	})
 	if err := os.WriteFile(path, []byte("package main\n\nfunc hello() {}\nfunc bye() {}\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}

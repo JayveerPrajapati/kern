@@ -6,13 +6,12 @@ package optimize
 import (
 	"context"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 
 	"github.com/JayveerPrajapati/kern/internal/budget"
 	"github.com/JayveerPrajapati/kern/internal/mcp/mcpargs"
+	"github.com/JayveerPrajapati/kern/internal/mcp/root"
 	"github.com/JayveerPrajapati/kern/internal/optimize"
 	"github.com/JayveerPrajapati/kern/internal/semcache"
 	"github.com/JayveerPrajapati/kern/internal/strutil"
@@ -21,20 +20,12 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/tokenize"
 )
 
-func resolveRoot(root string) string {
-	if root == "" {
-		if cwd, err := os.Getwd(); err == nil {
-			return filepath.Clean(cwd)
-		}
-		return "."
-	}
-	if abs, err := filepath.Abs(root); err == nil {
-		return filepath.Clean(abs)
-	}
-	return root
-}
-
-func clipForMarker(s string) string {
+// clipOptimize flattens a matched-input preview for the semantic-cache marker
+// (newlines collapsed, clipped at 60 bytes with a "..." suffix). Deliberately
+// distinct from the mcp package's clipStatsMarker (80-byte "…" suffix, newlines
+// preserved): the two clip policies are behaviorally different and must never
+// be conflated.
+func clipOptimize(s string) string {
 	s = strings.ReplaceAll(s, "\n", " ")
 	if len(s) > 60 {
 		return s[:57] + "..."
@@ -47,6 +38,19 @@ func truncateMCP(s string, n int) string {
 		return s
 	}
 	return s[:n] + "..."
+}
+
+// compactFloorTokens is the smallest input (tokens) worth compressing (N5):
+// below it the compression metadata + report overhead can exceed any savings,
+// so compaction is skipped and the original text returned with an honest
+// note instead of a "0% saved" claim.
+const compactFloorTokens = 128
+
+// compactionSkippedNote marks a compaction that did not shrink its input.
+// Distinct from a "N -> M (saved P%)" claim: the original text is preserved
+// verbatim and no percentage is reported.
+func compactionSkippedNote(reason string) string {
+	return "\n[kern] compaction skipped: " + reason
 }
 
 func validScope(scope string) bool {
@@ -67,7 +71,16 @@ func validScope(scope string) bool {
 	return true
 }
 
-func renderOptimize(title string, res optimize.Result) string {
+// RenderOptimize renders an optimize.Result as the standard "before -> after
+// tokens" summary line. Exported because the mcp package's identical copy
+// (render_stats.go) was removed in favor of this one. When compaction did not
+// shrink the input (below the token floor or a no-op/growing result), it
+// reports the skip honestly instead of a "saved 0%/negative" or metadata-
+// inflated claim (N5).
+func RenderOptimize(title string, res optimize.Result) string {
+	if res.BeforeTokens < compactFloorTokens || res.AfterTokens >= res.BeforeTokens {
+		return title + " (compaction skipped: no token savings):\n" + res.Output
+	}
 	return fmt.Sprintf("%s (tokens: %d -> %d, saved %d (%.1f%%)):\n%s",
 		title, res.BeforeTokens, res.AfterTokens, res.SavedTokens, res.SavedPercent, res.Output)
 }
@@ -96,15 +109,15 @@ func Prompt(ctx context.Context, args map[string]any) (string, error) {
 		MaskNames: names,
 		Cache:     cacheOn,
 		FewShot:   mcpargs.ArgString(args, "few_shot") == "true" || mcpargs.ArgString(args, "few_shot") == "1",
-		Root:      resolveRoot(mcpargs.ArgString(args, "root")),
+		Root:      root.ResolveRoot(mcpargs.ArgString(args, "root")),
 	})
 	if err != nil {
 		return "", err
 	}
-	out := renderOptimize("optimized prompt", res)
+	out := RenderOptimize("optimized prompt", res)
 	if res.FromCache {
 		if res.SemanticHit {
-			out += fmt.Sprintf("\n[kern] served from semantic cache (similarity %.2f, matched: %q)\n", res.Similarity, clipForMarker(res.MatchedInput))
+			out += fmt.Sprintf("\n[kern] served from semantic cache (similarity %.2f, matched: %q)\n", res.Similarity, clipOptimize(res.MatchedInput))
 		} else {
 			out += "\n[kern] served from exact cache\n"
 		}
@@ -118,7 +131,7 @@ func Swap(ctx context.Context, args map[string]any) (string, error) {
 	if text == "" {
 		return "", fmt.Errorf("text is required")
 	}
-	root := resolveRoot(mcpargs.ArgString(args, "root"))
+	root := root.ResolveRoot(mcpargs.ArgString(args, "root"))
 	mode := mcpargs.ArgString(args, "mode")
 	switch mode {
 	case "summary":
@@ -157,7 +170,7 @@ func Log(ctx context.Context, args map[string]any) (string, error) {
 	ctxBefore, _ := mcpargs.ArgInt(args, "context_before", 0)
 	ctxAfter, _ := mcpargs.ArgInt(args, "context_after", 0)
 	profile := mcpargs.ArgString(args, "profile")
-	root := resolveRoot(mcpargs.ArgString(args, "root"))
+	root := root.ResolveRoot(mcpargs.ArgString(args, "root"))
 	structMarkers := mcpargs.ArgString(args, "structured_markers") == "true" || mcpargs.ArgString(args, "structured_markers") == "1"
 	res, err := optimize.Log(log, optimize.Options{
 		Cache:             cacheOn,
@@ -170,10 +183,10 @@ func Log(ctx context.Context, args map[string]any) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	out := renderOptimize("optimized log", res)
+	out := RenderOptimize("optimized log", res)
 	if res.FromCache {
 		if res.SemanticHit {
-			out += fmt.Sprintf("\n[kern] served from semantic cache (similarity %.2f, matched: %q)\n", res.Similarity, clipForMarker(res.MatchedInput))
+			out += fmt.Sprintf("\n[kern] served from semantic cache (similarity %.2f, matched: %q)\n", res.Similarity, clipOptimize(res.MatchedInput))
 		} else {
 			out += "\n[kern] served from exact cache\n"
 		}
@@ -190,9 +203,15 @@ func Output(ctx context.Context, args map[string]any) (string, error) {
 	if text == "" {
 		return "", fmt.Errorf("text is required")
 	}
-	out, dropped := terse.Compress(text)
 	before := tokenize.Count(text)
+	if before < compactFloorTokens {
+		return text + compactionSkippedNote("output below floor"), nil
+	}
+	out, dropped := terse.Compress(text)
 	after := tokenize.Count(out)
+	if after >= before {
+		return text + compactionSkippedNote("compaction would not save tokens"), nil
+	}
 	return fmt.Sprintf("%d -> %d tokens (saved %d, %.1f%%, %d filler lines dropped)\n\n%s",
 		before, after, before-after, strutil.Pct(before, after), dropped, out), nil
 }
@@ -246,8 +265,8 @@ func Semcache(ctx context.Context, args map[string]any) (string, error) {
 		}
 		var b strings.Builder
 		b.WriteString("semcache entries by namespace:\n")
-		for ns, n := range st {
-			fmt.Fprintf(&b, "  %-8s %d\n", ns, n)
+		for ns, s := range st {
+			fmt.Fprintf(&b, "  %-8s %d\n", ns, s.Entries)
 		}
 		return strings.TrimSuffix(b.String(), "\n"), nil
 	}
@@ -265,9 +284,15 @@ func ContextBudget(ctx context.Context, args map[string]any) (string, error) {
 			maxTokens = n
 		}
 	}
-	out := budget.FitCode(text, maxTokens)
 	before := tokenize.Count(text)
+	if before < compactFloorTokens {
+		return text + compactionSkippedNote("output below floor"), nil
+	}
+	out := budget.FitCode(text, maxTokens)
 	after := tokenize.Count(out)
+	if after >= before {
+		return text + compactionSkippedNote("compaction would not save tokens"), nil
+	}
 	return fmt.Sprintf("%d -> %d tokens (saved %d, %.1f%%)\n\n%s", before, after, before-after, strutil.Pct(before, after), out), nil
 }
 

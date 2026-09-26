@@ -9,6 +9,7 @@ import (
 )
 
 func TestHandleCrossRepoImpact(t *testing.T) {
+	t.Parallel()
 	srv := newTestServer()
 	ctx := context.Background()
 

@@ -27,8 +27,8 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/governance"
 	"github.com/JayveerPrajapati/kern/internal/intel"
 	"github.com/JayveerPrajapati/kern/internal/memory"
+	"github.com/JayveerPrajapati/kern/internal/orgapprovals"
 	"github.com/JayveerPrajapati/kern/internal/storage"
-	"github.com/JayveerPrajapati/kern/internal/web"
 )
 
 // Project is a registered project in enterprise mode.
@@ -39,7 +39,7 @@ type Project struct {
 }
 
 // Server is the multi-project enterprise server. It wraps multiple
-// web.App instances (one per project) under a shared org-level audit
+// ProjectApp instances (one per project) under a shared org-level audit
 // log, policy set, memory store, task visibility, and agent registry.
 type Server struct {
 	mu           sync.RWMutex
@@ -48,32 +48,63 @@ type Server struct {
 	orgBus       *eventbus.Bus                        // shared org-level event bus
 	store        storage.Store                        // optional shared storage (nil = in-memory)
 	policies     []domain.Policy                      // org-level policies applied to all projects
+	orgRoot      string                               // org root (governance.OrgRoot); "" = no org configured
 	orgMemory    *memory.MemoryStore                  // shared org-level memory
 	orgAgents    map[string]*governance.AgentIdentity // shared org-level agent registry
 	teamRegistry map[string]*OrgTeam                  // org-level team registry
+	users        map[string]*User                     // org-level user registry (Feature Batch G)
+	userAudits   map[string][]UserAuditEntry          // per-user audit trail (append-only)
+	usersLoaded  bool                                 // true once the persisted registry has been replayed
 	profile      Profile                              // org-level default profile
 	profileCfg   ProfileConfig                        // org-level profile configuration
-	// closeApp is the teardown hook for evicted cached web.App instances. It
-	// defaults to calling web.App.Close; tests may replace it to assert that
-	// eviction tears down the app (relay/bus subscriptions must not leak
+	// closeApp is the teardown hook for evicted cached ProjectApp instances.
+	// It defaults to calling ProjectApp.Close; tests may replace it to assert
+	// that eviction tears down the app (relay/bus subscriptions must not leak
 	// across evictions). It is always invoked with s.mu held.
-	closeApp func(app *web.App) error
+	closeApp func(app ProjectApp) error
+	// newApp is the injected ProjectApp constructor (web.New at the
+	// composition roots). Nil until SetAppFactory is called; appFor fails
+	// closed on a nil factory so the enterprise server never builds a nil
+	// app. Set once at setup, read lock-free from the build path (same
+	// convention as profileCfg).
+	newApp func(root string) (ProjectApp, error)
 }
 
 type projectState struct {
 	project  Project
-	app      *web.App // lazily built on first access
-	appErr   error    // build error (cached)
+	app      ProjectApp // lazily built on first access
+	appErr   error      // build error (cached)
 	lastUsed time.Time
 	memory   *memory.MemoryStore // per-project memory store (scoped to project root)
 	building bool                // B4: one off-lock builder per project
 	cond     *sync.Cond          // B4: single-flight waiters (L: s.mu)
 }
 
+// orgAllowWeakRBACEnv is the documented-unsafe escape hatch for org mode
+// without KERN_RBAC_DEFAULT_DENY=1 (finding 2).
+const orgAllowWeakRBACEnv = "KERN_ORG_ALLOW_WEAK_RBAC"
+
+// orgModeErr returns an error when org mode is configured without its RBAC
+// default-deny pairing. agent_id is client-asserted (untrusted), so org mode
+// letting unassigned principals keep the legacy permit-all trust is a
+// governance bypass; KERN_ORG_ALLOW_WEAK_RBAC=1 is the explicit unsafe
+// escape hatch. Nil = org mode may start.
+func orgModeErr(root string) error {
+	if root == "" {
+		return nil
+	}
+	if os.Getenv("KERN_RBAC_DEFAULT_DENY") == "1" || os.Getenv(orgAllowWeakRBACEnv) == "1" {
+		return nil
+	}
+	return fmt.Errorf("org mode requires KERN_RBAC_DEFAULT_DENY=1 when %s is set (root %s): agent_id is client-asserted and unassigned principals would otherwise keep the legacy permit-all trust, defeating org-wins RBAC. Set KERN_RBAC_DEFAULT_DENY=1 (recommended), or set %s=1 to explicitly accept the unsafe weak-RBAC posture", governance.OrgRootEnv, root, orgAllowWeakRBACEnv)
+}
+
 // New creates an enterprise server with no projects. Use Register to add
 // projects and WithOrgAudit/WithOrgBus/WithPolicies to configure org-level
-// shared state.
-func New() *Server {
+// shared state. When org mode is configured (KERN_ORG_ROOT) without the RBAC
+// default-deny pairing, New REFUSES to start, erroring with both env vars
+// (finding 2) — org mode is opt-in, so requiring the pairing is a safe gate.
+func New() (*Server, error) {
 	s := &Server{
 		projects:     map[string]*projectState{},
 		orgAudit:     governance.NewAuditLog(),
@@ -82,16 +113,56 @@ func New() *Server {
 		orgMemory:    memory.WithEnvGovernance(memory.NewMemoryStore(""), ""), // org-level store (no root; governed when KERN_MEMORY_GOVERNANCE is set)
 		orgAgents:    map[string]*governance.AgentIdentity{},
 		teamRegistry: map[string]*OrgTeam{},
+		users:        map[string]*User{},
+		userAudits:   map[string][]UserAuditEntry{},
 		profile:      DefaultProfile,
 		profileCfg:   ProfileConfig{Profile: DefaultProfile},
-		closeApp:     func(a *web.App) error { return a.Close() },
+		closeApp:     func(a ProjectApp) error { return a.Close() },
 	}
 	// Opt-in deployment-time profile selection via KERN_ENTERPRISE_PROFILE.
 	if p, ok := ParseProfile(os.Getenv(enterpriseProfileEnv)); ok {
 		s.profile = p
 		s.profileCfg.Profile = p
 	}
-	return s
+	// P13 stage 1 — central policy distribution: with an org root configured
+	// (KERN_ORG_ROOT), the org policy document at <org-root>/.kern/
+	// org-policy.json replaces the default policy set, so every project
+	// firewall appFor builds is constructed from the org policy. A missing
+	// document keeps the defaults (first-run state); a CORRUPT document is
+	// warned loudly and the defaults are kept — the store's fail-closed
+	// guarantee means the corrupt policy is never partially applied. Without
+	// an org root, behavior is byte-for-byte unchanged.
+	s.orgRoot = governance.OrgRoot()
+	// Finding 2 pairing gate: refuse to enter org mode without the RBAC
+	// default-deny posture (or the documented-unsafe escape hatch).
+	if err := orgModeErr(s.orgRoot); err != nil {
+		return nil, err
+	}
+	if s.orgRoot != "" {
+		if doc, ok, err := governance.LoadOrgPolicy(s.orgRoot); err != nil {
+			log.Printf("enterprise: WARNING: org policy store %s is corrupt (%v) — project firewalls will enforce the default policies until it is fixed (kern policy set --root %s)", governance.OrgPolicyPath(s.orgRoot), err, s.orgRoot)
+		} else if ok {
+			s.policies = doc.Policies
+		}
+		// P13 stage 3 — org-wide approvals: this server owns the shared org
+		// audit log, so org-approval events (create/approve/reject/consume)
+		// recorded by the orgapprovals package — including consumes from the
+		// project consoles' deploy gates — land on the org audit trail.
+		orgapprovals.SetAuditHook(s.orgAudit.Record)
+	}
+	return s, nil
+}
+
+// SetAppFactory injects the ProjectApp constructor used by appFor. The
+// enterprise package does not import internal/web (breaking the mcp → org →
+// enterprise → web transitive closure), so the composition roots — cmd/kern
+// and cmd/kern-server — wire the real web.New here at startup. Without a
+// factory appFor fails closed ("no app factory configured") rather than
+// building a nil app.
+func (s *Server) SetAppFactory(f func(root string) (ProjectApp, error)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.newApp = f
 }
 
 // WithOrgAudit sets a custom org-level audit log (e.g. one backed by
@@ -114,6 +185,102 @@ func (s *Server) WithPolicies(p []domain.Policy) *Server {
 	return s
 }
 
+// WithOrgRoot sets the org root explicitly, overriding the KERN_ORG_ROOT
+// resolution performed by New. When the root holds an org policy document it
+// replaces the default policy set (same load as New); an empty root clears
+// org mode. This is the programmatic entry point to the same org-root
+// resolution governance.OrgRoot provides; Stages 2/3 reuse the root.
+//
+// WithOrgRoot REFUSES to apply an org root without the RBAC default-deny
+// pairing (finding 2): org scope stays inactive and a clear error naming
+// both env vars is logged — same gate as New()'s env path.
+func (s *Server) WithOrgRoot(root string) *Server {
+	if root != "" {
+		if err := orgModeErr(root); err != nil {
+			log.Printf("enterprise: refusing org mode: %v", err)
+			return s // org scope stays inactive
+		}
+	}
+	s.orgRoot = root
+	if root == "" {
+		return s
+	}
+	if doc, ok, err := governance.LoadOrgPolicy(root); err != nil {
+		log.Printf("enterprise: WARNING: org policy store %s is corrupt (%v) — project firewalls will enforce the default policies until it is fixed (kern policy set --root %s)", governance.OrgPolicyPath(root), err, root)
+	} else if ok {
+		s.policies = doc.Policies
+	}
+	// P13 stage 3: same org audit hook wiring as New (see there).
+	orgapprovals.SetAuditHook(s.orgAudit.Record)
+	return s
+}
+
+// WriteOrgPolicy persists the given policies to the org policy store
+// (<org-root>/.kern/org-policy.json) and applies them to this server's
+// snapshot AND every cached project App, so newly-built AND already-built
+// project firewalls pick the change up immediately. It is the write path
+// behind POST /org/policies and `kern policy set`. Requires an org root;
+// without one the write is refused — org scope is strictly opt-in. Returns
+// the recorded content hash.
+func (s *Server) WriteOrgPolicy(policies []domain.Policy) (string, error) {
+	if s.orgRoot == "" {
+		return "", fmt.Errorf("enterprise: no org root configured (set %s or WithOrgRoot)", governance.OrgRootEnv)
+	}
+	hash, err := governance.SaveOrgPolicy(s.orgRoot, policies)
+	if err != nil {
+		return "", err
+	}
+	s.applyPoliciesLocked(policies)
+	return hash, nil
+}
+
+// ReloadOrgPolicy re-reads the org policy document and re-applies it to this
+// server's snapshot and every cached project App — the "re-propagate"
+// operation behind POST /org/policies/apply and `kern policy apply`, and the
+// operation that resolves drift after an out-of-band change to the shared
+// file. Requires an org root and an existing org policy document.
+func (s *Server) ReloadOrgPolicy() (string, error) {
+	if s.orgRoot == "" {
+		return "", fmt.Errorf("enterprise: no org root configured (set %s or WithOrgRoot)", governance.OrgRootEnv)
+	}
+	doc, ok, err := governance.LoadOrgPolicy(s.orgRoot)
+	if err != nil {
+		return "", err
+	}
+	if !ok {
+		return "", fmt.Errorf("enterprise: no org policy at %s — run kern policy set first", governance.OrgPolicyPath(s.orgRoot))
+	}
+	s.applyPoliciesLocked(doc.Policies)
+	return doc.Hash, nil
+}
+
+// applyPoliciesLocked swaps the applied policy snapshot and pushes it into
+// every cached project App. It is the single runtime propagation point:
+// existing Apps are refreshed IN PLACE (a cheap assessor swap on the shared
+// firewall) so a policy change never leaves a stale snapshot in a built App.
+func (s *Server) applyPoliciesLocked(policies []domain.Policy) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.policies = policies
+	for _, ps := range s.projects {
+		if ps.app != nil {
+			ps.app.SetPolicies(policies)
+		}
+	}
+}
+
+// PolicyDrift reports whether the policies this server applies to project
+// firewalls drift from the org policy document on disk (e.g. after an
+// operator ran `kern policy set` on the shared org root while this server was
+// running). ReloadOrgPolicy resolves the drift.
+func (s *Server) PolicyDrift() (governance.DriftReport, error) {
+	s.mu.RLock()
+	policies := s.policies
+	orgRoot := s.orgRoot
+	s.mu.RUnlock()
+	return governance.PolicyDrift(orgRoot, policies)
+}
+
 // WithStore sets a shared storage backend for org-level persistence.
 // When set, the org audit log can be persisted via WithStore on AuditLog.
 func (s *Server) WithStore(store storage.Store) *Server {
@@ -122,7 +289,7 @@ func (s *Server) WithStore(store storage.Store) *Server {
 }
 
 // Register adds a project to the enterprise server using the org-level
-// default profile. The project's web.App is built lazily on first request.
+// default profile. The project's ProjectApp is built lazily on first request.
 // Returns an error if the name is already registered, the root is invalid, or
 // the profile's limits reject the registration.
 func (s *Server) Register(name, root string) error {
@@ -131,7 +298,7 @@ func (s *Server) Register(name, root string) error {
 
 // RegisterWithProfile adds a project to the enterprise server under an
 // explicit profile, overriding the org-level default for that project. The
-// project's web.App is built lazily on first request. Returns an error if the
+// project's ProjectApp is built lazily on first request. Returns an error if the
 // name is already registered, the root is invalid, the profile is unknown, or
 // the profile's limits reject the registration (e.g. ProfileBasic allows a
 // single project).
@@ -194,17 +361,20 @@ func (s *Server) Projects() []Project {
 	return result
 }
 
-// appFor returns the web.App for a project, building it lazily on first
-// access. The build error is cached so repeated requests don't retry.
-// Cached apps are capped (see maxProjects): when the cache is full and a new
-// project needs building, the least-recently-used cached app is evicted so it
-// can be rebuilt on next access. This bounds memory growth for orgs with many
-// registered projects.
-func (s *Server) appFor(name string) (*web.App, error) {
-	// B4: the web.New build (30-90s on large repos) runs OFF the org-wide
-	// mutex so one project's cold build never blocks every other tenant.
-	// Single-flight per project: concurrent callers for the same project
-	// wait on its condition variable for the in-flight builder's result.
+// appFor returns the ProjectApp for a project, building it lazily on first
+// access via the injected factory (web.New at the composition roots). The
+// build error is cached so repeated requests don't retry. Cached apps are
+// capped (see maxProjects): when the cache is full and a new project needs
+// building, the least-recently-used cached app is evicted so it can be
+// rebuilt on next access. This bounds memory growth for orgs with many
+// registered projects. With no factory configured it fails closed — the
+// enterprise server never builds a nil app.
+func (s *Server) appFor(name string) (ProjectApp, error) {
+	// B4: the factory build (30-90s on large repos for the real web.New)
+	// runs OFF the org-wide mutex so one project's cold build never blocks
+	// every other tenant. Single-flight per project: concurrent callers for
+	// the same project wait on its condition variable for the in-flight
+	// builder's result.
 	s.mu.Lock()
 	ps, exists := s.projects[name]
 	if !exists {
@@ -232,9 +402,42 @@ func (s *Server) appFor(name string) (*web.App, error) {
 	}
 	ps.building = true
 	root := ps.project.Root
+	// Snapshot the applied policy set under the lock so the build below
+	// constructs the firewall from a consistent policy version even if a
+	// concurrent WriteOrgPolicy/ReloadOrgPolicy swaps it mid-build.
+	policies := s.policies
+	factory := s.newApp
 	s.mu.Unlock()
 
-	app, err := web.New(root)
+	if factory == nil {
+		// Fail closed: without an injected constructor the enterprise server
+		// cannot build project apps. The error is cached on the project
+		// state so concurrent single-flight waiters observe the same
+		// failure instead of retrying.
+		err := fmt.Errorf("enterprise: no app factory configured — the composition root must call SetAppFactory (e.g. web.New)")
+		s.mu.Lock()
+		ps.building = false
+		ps.app = nil
+		ps.appErr = err
+		ps.cond.Broadcast()
+		s.mu.Unlock()
+		return nil, err
+	}
+
+	app, err := factory(root)
+	if err == nil {
+		// Feature Batch G: wire the org user registry's role lookup into
+		// the project console so /api/approvals/approve|reject enforce the
+		// org RBAC layer (approver role -> approve/reject). When the
+		// profile disables UserRegistry, UserRole returns ("", false) and
+		// the console falls back to the historical no-RBAC flow.
+		app.SetUserRoleLookup(s.UserRole)
+		// P13 stage 1: build the project firewall from the org policy (the
+		// applied snapshot) instead of the defaults. With no org root the
+		// snapshot IS DefaultPolicies, so behavior is byte-for-byte
+		// unchanged.
+		app.SetPolicies(policies)
+	}
 
 	s.mu.Lock()
 	ps.building = false
@@ -248,10 +451,10 @@ func (s *Server) appFor(name string) (*web.App, error) {
 	return app, err
 }
 
-// appForCached returns the cached web.App for name without triggering a
+// appForCached returns the cached ProjectApp for name without triggering a
 // build (B4): aggregate endpoints must never serialize N full rebuilds inside
 // a single request. The bool reports whether an app is cached.
-func (s *Server) appForCached(name string) (*web.App, bool) {
+func (s *Server) appForCached(name string) (ProjectApp, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	ps, exists := s.projects[name]
@@ -262,13 +465,13 @@ func (s *Server) appForCached(name string) (*web.App, bool) {
 	return ps.app, true
 }
 
-// defaultMaxProjects is the default cap on cached web.App instances. It bounds
+// defaultMaxProjects is the default cap on cached ProjectApp instances. It bounds
 // the number of lazily built apps an enterprise server holds in memory; when
 // exceeded the least-recently-used cached app is evicted (and rebuilt on next
 // access). Configurable via KERN_ENTERPRISE_MAX_PROJECTS.
 const defaultMaxProjects = 16
 
-// maxProjects returns the configured cap on cached web.App instances. The
+// maxProjects returns the configured cap on cached ProjectApp instances. The
 // KERN_ENTERPRISE_MAX_PROJECTS env var wins when set; otherwise the org-level
 // profile's MaxCachedApps applies (ProfileAdvanced raises it to 64); the
 // default is 16. Invalid or non-positive values fall back to the default.
@@ -287,7 +490,7 @@ func (s *Server) maxProjects() int {
 	return defaultMaxProjects
 }
 
-// cachedCount returns how many projects currently hold a built web.App.
+// cachedCount returns how many projects currently hold a built ProjectApp.
 // Must be called with s.mu held.
 func (s *Server) cachedCount() int {
 	n := 0
@@ -299,9 +502,9 @@ func (s *Server) cachedCount() int {
 	return n
 }
 
-// evictLRU drops the cached web.App of the least-recently-used project that
+// evictLRU drops the cached ProjectApp of the least-recently-used project that
 // currently has one built. The evicted app is torn down via the closeApp hook
-// (web.App.Close by default) so the relay/bus subscriptions and background
+// (ProjectApp.Close by default) so the relay/bus subscriptions and background
 // loops New() started do not leak goroutines or sockets across evictions. The
 // teardown is best-effort: an error is logged and never fails the eviction.
 // The projectState (and its per-project memory store) are retained so the app
@@ -468,10 +671,10 @@ func (s *Server) OrgMemory() *memory.MemoryStore {
 	return s.orgMemory
 }
 
-// RegisterAgent registers an agent identity at the org level. The
-// agent's permissions apply across all projects. Returns an error if an agent
-// with the same ID is already registered, or if the org-level profile
-// disables AgentRegistry (e.g. ProfileBasic).
+// RegisterAgent registers an agent identity at the org level (permissions
+// apply across all projects); with an org root and a Role on the identity,
+// the role is also bound in the org role store (org-wins RBAC). Errors on a
+// duplicate ID or when the org-level profile disables AgentRegistry.
 func (s *Server) RegisterAgent(a *governance.AgentIdentity) error {
 	if !s.orgFeatures().AgentRegistry {
 		return fmt.Errorf("enterprise: agent registry disabled by profile %q", s.profile)
@@ -482,6 +685,11 @@ func (s *Server) RegisterAgent(a *governance.AgentIdentity) error {
 		return fmt.Errorf("enterprise: agent %q already registered", a.ID)
 	}
 	s.orgAgents[a.ID] = a
+	if s.orgRoot != "" && a.Role != "" { // P13 stage 2: identity Role binds an org role
+		if err := orgapprovals.AssignOrgRole(s.orgRoot, a.ID, a.Role); err != nil {
+			return fmt.Errorf("enterprise: bind org role %q for agent %q: %w", a.Role, a.ID, err)
+		}
+	}
 	return nil
 }
 
@@ -578,7 +786,7 @@ func (s *Server) requireAuth(w http.ResponseWriter, r *http.Request) bool {
 }
 
 // ServeHTTP routes requests by project: /<project>/... delegates to the
-// project's web.App; /org/... serves org-level endpoints (audit, projects,
+// project's ProjectApp; /org/... serves org-level endpoints (audit, projects,
 // policies); / serves an org-level dashboard (list of projects).
 // Every request is gated by requireAuth: in enterprise mode the server serves
 // each project's full digital twin plus the shared org audit log and policies,
@@ -614,18 +822,16 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // serveOrgDashboard serves the org admin page: a server-rendered overview of
 // the org's registered projects, agents, and teams plus a footer nav to the
-// org JSON endpoints. Only the cheap accessors (Projects, Agents, Teams) are
-// called — no per-project appFor builds and no reindexing, so the page stays
-// fast regardless of how many projects are registered.
+// org JSON endpoints. Only the cheap accessors are called — no appFor builds
+// and no reindexing — so the page stays fast at any org size.
 func (s *Server) serveOrgDashboard(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	orgAdminHTML(w, s.Projects(), s.Agents(), s.Teams())
 }
 
-// orgAdminCSS is the inline stylesheet for the org admin page. It follows the
-// web console's design family (internal/web/dashboard.html): dark background,
-// panel sections, muted table headers, monospace code accents. Fully
-// self-contained — no external assets, no JavaScript.
+// orgAdminCSS is the inline stylesheet for the org admin page, following the
+// web console's design family (dark panels, muted headers, monospace accents).
+// Fully self-contained — no external assets, no JavaScript.
 const orgAdminCSS = `:root { --bg:#0f1115; --panel:#171a21; --panel2:#1c2029; --fg:#e6e8ee; --muted:#9aa3b2; --accent:#4f8cff; --border:#262b36; }
 * { box-sizing:border-box; }
 body { margin:0; background:var(--bg); color:var(--fg); font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif; }
@@ -699,7 +905,7 @@ func orgAdminHTML(w io.Writer, projects []Project, agents []*governance.AgentIde
 
 	// Footer nav: links to the org JSON endpoints.
 	b.WriteString(`</main><footer><nav>`)
-	b.WriteString(`<a href="/org/audit">Org Audit</a><a href="/org/policies">Org Policies</a><a href="/org/memory">Org Memory</a><a href="/org/tasks">Org Tasks</a><a href="/org/search?q=New">Org Search</a><a href="/org/agents">Org Agents</a><a href="/org/teams">Org Teams</a>`)
+	b.WriteString(`<a href="/org/audit">Org Audit</a><a href="/org/policies">Org Policies</a><a href="/org/approvals">Org Approvals</a><a href="/org/memory">Org Memory</a><a href="/org/tasks">Org Tasks</a><a href="/org/search?q=New">Org Search</a><a href="/org/agents">Org Agents</a><a href="/org/teams">Org Teams</a>`)
 	b.WriteString(`<span class="hint">JSON endpoints</span>`)
 	b.WriteString(`</nav></footer></body></html>`)
 
@@ -714,7 +920,23 @@ func (s *Server) serveOrgAPI(w http.ResponseWriter, r *http.Request) {
 	switch parts[0] {
 	case "audit":
 		s.serveOrgAudit(w, r)
+	case "approvals":
+		// /org/approvals[/approve|/reject]: the org-wide approval surface
+		// (list/create/approve/reject) — thin delegation; the handler lives
+		// in the orgapprovals package.
+		orgapprovals.ServeApprovals(w, r, s.orgRoot)
 	case "policies":
+		// /org/policies[/apply]: GET lists the applied policy set; POST
+		// writes a new org policy; POST /org/policies/apply re-propagates
+		// the org policy document (resolving drift).
+		if len(parts) > 1 {
+			if parts[1] == "apply" {
+				s.serveOrgPolicyApply(w, r)
+				return
+			}
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
 		s.serveOrgPolicies(w, r)
 	case "projects":
 		s.serveOrgProjects(w, r)
@@ -747,25 +969,214 @@ func (s *Server) serveOrgAPI(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// orgAgentJSON is the wire shape for org agents: snake_case, aligned with
+// the MCP org surface's agent rendering (id/name/type). domain.Agent has no
+// json tags and is persisted as-is by stores, so the org surface renders
+// through this DTO instead of retagging the domain type.
+type orgAgentJSON struct {
+	ID        string    `json:"id"`
+	Name      string    `json:"name"`
+	Type      string    `json:"type"`
+	CreatedAt time.Time `json:"created_at"`
+	Role      string    `json:"role,omitempty"` // P13 stage 2: org role binding
+}
+
+func orgAgentJSONOf(a *governance.AgentIdentity) orgAgentJSON {
+	return orgAgentJSON{ID: a.ID, Name: a.Name, Type: a.Type, CreatedAt: a.CreatedAt}
+}
+
+// orgTeamJSON is the wire shape for org teams (snake_case, matching the MCP
+// org team rendering).
+type orgTeamJSON struct {
+	ID       string   `json:"id"`
+	Name     string   `json:"name"`
+	Projects []string `json:"projects"`
+	Members  []string `json:"members"`
+}
+
+func orgTeamJSONOf(t OrgTeam) orgTeamJSON {
+	return orgTeamJSON{ID: t.ID, Name: t.Name, Projects: t.Projects, Members: t.Members}
+}
+
+// orgPolicyJSON is the wire shape for org-level policies (snake_case).
+type orgPolicyJSON struct {
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	Rule        string `json:"rule"`
+	Scope       string `json:"scope"`
+	Enabled     bool   `json:"enabled"`
+}
+
+// orgMemoryJSON is the wire shape for memories served on /org/memory
+// (snake_case). domain.Memory is persisted to disk with its untagged Go
+// field names, so retagging the domain type would break existing stores —
+// the org surface renders through this DTO instead.
+type orgMemoryJSON struct {
+	ID              string    `json:"id"`
+	Type            string    `json:"type"`
+	Content         string    `json:"content"`
+	Source          string    `json:"source"`
+	Scope           string    `json:"scope,omitempty"`
+	Tags            []string  `json:"tags,omitempty"`
+	CreatedAt       time.Time `json:"created_at"`
+	UpdatedAt       time.Time `json:"updated_at"`
+	Subject         string    `json:"subject,omitempty"`
+	Confidence      float64   `json:"confidence,omitempty"`
+	Provenance      string    `json:"provenance,omitempty"`
+	RelatedEntities []string  `json:"related_entities,omitempty"`
+	ClaimType       string    `json:"claim_type,omitempty"`
+	Reason          string    `json:"reason,omitempty"`
+	Classification  string    `json:"classification,omitempty"`
+	Status          string    `json:"status,omitempty"`
+}
+
+func orgMemoryJSONOf(m domain.Memory) orgMemoryJSON {
+	return orgMemoryJSON{
+		ID:              m.ID,
+		Type:            string(m.Type),
+		Content:         m.Content,
+		Source:          m.Source,
+		Scope:           m.Scope,
+		Tags:            m.Tags,
+		CreatedAt:       m.CreatedAt,
+		UpdatedAt:       m.UpdatedAt,
+		Subject:         m.Subject,
+		Confidence:      m.Confidence,
+		Provenance:      m.Provenance,
+		RelatedEntities: m.RelatedEntities,
+		ClaimType:       string(m.ClaimType),
+		Reason:          m.Reason,
+		Classification:  m.Classification,
+		Status:          string(m.Status),
+	}
+}
+
 func (s *Server) serveOrgAudit(w http.ResponseWriter, r *http.Request) {
 	entries := s.orgAudit.All()
+	out := make([]orgapprovals.AuditEntryJSON, 0, len(entries))
+	for _, e := range entries {
+		out = append(out, orgapprovals.AuditEntryJSONOf(e))
+	}
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(map[string]any{
-		"entries": entries,
-		"count":   len(entries),
+		"entries": out,
+		"count":   len(out),
 	}); err != nil {
 		http.Error(w, "could not encode response", http.StatusInternalServerError)
 	}
 }
 
+// serveOrgPolicies serves the org-level policy set.
+// - GET /org/policies lists the policies currently applied to project
+// firewalls (the default set when no org root is configured, the org policy
+// document otherwise).
+// - POST /org/policies writes a new org policy: the body is
+// {"policies": [...]} (strict: unknown fields are rejected by name). The
+// policies are persisted atomically to <org-root>/.kern/org-policy.json,
+// audited on the shared org audit log, and applied to this server's snapshot
+// AND every cached project App immediately. Requires an org root
+// (KERN_ORG_ROOT). 201 with the recorded content hash on success.
+// - any other method → 405.
 func (s *Server) serveOrgPolicies(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(map[string]any{
-		"policies": s.policies,
-		"count":    len(s.policies),
-	}); err != nil {
-		http.Error(w, "could not encode response", http.StatusInternalServerError)
+	switch r.Method {
+	case http.MethodGet:
+		s.mu.RLock()
+		applied := s.policies
+		s.mu.RUnlock()
+		policies := make([]orgPolicyJSON, 0, len(applied))
+		for _, p := range applied {
+			policies = append(policies, orgPolicyJSON{
+				ID:          p.ID,
+				Name:        p.Name,
+				Description: p.Description,
+				Rule:        p.Rule,
+				Scope:       p.Scope,
+				Enabled:     p.Enabled,
+			})
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(map[string]any{
+			"policies": policies,
+			"count":    len(policies),
+		}); err != nil {
+			http.Error(w, "could not encode response", http.StatusInternalServerError)
+		}
+	case http.MethodPost:
+		// The write body is strict and server-owned: unknown fields (e.g. a
+		// client-submitted "hash") are rejected by name, so a client can
+		// never believe it set a policy the server did not record.
+		var body struct {
+			Policies []domain.Policy `json:"policies"`
+		}
+		dec := json.NewDecoder(r.Body)
+		dec.DisallowUnknownFields()
+		if err := dec.Decode(&body); err != nil {
+			http.Error(w, "enterprise: invalid policy body: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		if len(body.Policies) == 0 {
+			http.Error(w, "enterprise: policies is required", http.StatusBadRequest)
+			return
+		}
+		hash, err := s.WriteOrgPolicy(body.Policies)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		s.auditOrgPolicyChange("org policy written via POST /org/policies (" + hash + ")")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"hash":  hash,
+			"count": len(body.Policies),
+		})
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
+}
+
+// serveOrgPolicyApply implements POST /org/policies/apply: it re-reads the
+// org policy document and re-applies it to this server's snapshot and every
+// cached project App — resolving drift after an out-of-band change to the
+// shared file (e.g. a `kern policy set` run by another operator). 404 when
+// no org policy document exists, 400 when no org root is configured.
+func (s *Server) serveOrgPolicyApply(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	hash, err := s.ReloadOrgPolicy()
+	if err != nil {
+		if strings.Contains(err.Error(), "no org policy at") {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	s.auditOrgPolicyChange("org policy re-applied via POST /org/policies/apply (" + hash + ")")
+	drift, _ := s.PolicyDrift()
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"hash":  hash,
+		"drift": drift,
+	})
+}
+
+// auditOrgPolicyChange records an org policy write/reload on the shared org
+// audit log so every change to the org's governing rule set is attributable.
+func (s *Server) auditOrgPolicyChange(reason string) {
+	s.orgAudit.Record(governance.AuditEntry{
+		AgentID:  "org-admin",
+		Action:   "apply",
+		Resource: "policy",
+		Risk:     domain.Risk{Level: domain.RiskMedium, Score: 0.5, Factors: []string{"org policy change"}},
+		Approved: true,
+		Result:   "allowed",
+		Policy:   "org-policy",
+		Reason:   reason,
+	})
 }
 
 func (s *Server) serveOrgProjects(w http.ResponseWriter, r *http.Request) {
@@ -812,7 +1223,7 @@ func (s *Server) serveOrgRepositories(w http.ResponseWriter, r *http.Request) {
 // serveOrgArchitecture aggregates the architecture report across every project
 // ( .3 "architecture"). It is intentionally cheap: it returns the
 // per-project root/name and a violations count by delegating to each project's
-// cached web.App architecture builder, skipping projects that fail to build.
+// cached ProjectApp architecture builder, skipping projects that fail to build.
 func (s *Server) serveOrgArchitecture(w http.ResponseWriter, r *http.Request) {
 	type projectArch struct {
 		Project    string   `json:"project"`
@@ -897,16 +1308,41 @@ func (s *Server) serveOrgMemory(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
+		out := make([]orgMemoryJSON, 0, len(memories))
+		for _, m := range memories {
+			out = append(out, orgMemoryJSONOf(m))
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"memories": memories,
-			"count":    len(memories),
+			"memories": out,
+			"count":    len(out),
 		})
 	case http.MethodPost:
-		var m domain.Memory
-		if err := json.NewDecoder(r.Body).Decode(&m); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+		// Decode through the wire DTO (snake_case) and rebuild the domain
+		// Memory — decoding domain.Memory directly would bind to its
+		// untagged Go field names, a different contract than the GET shape.
+		var body orgMemoryJSON
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, "enterprise: invalid memory body: "+err.Error(), http.StatusBadRequest)
 			return
+		}
+		m := domain.Memory{
+			ID:              body.ID,
+			Type:            domain.MemoryType(body.Type),
+			Content:         body.Content,
+			Source:          body.Source,
+			Scope:           body.Scope,
+			Tags:            body.Tags,
+			CreatedAt:       body.CreatedAt,
+			UpdatedAt:       body.UpdatedAt,
+			Subject:         body.Subject,
+			Confidence:      body.Confidence,
+			Provenance:      body.Provenance,
+			RelatedEntities: body.RelatedEntities,
+			ClaimType:       domain.ClaimType(body.ClaimType),
+			Reason:          body.Reason,
+			Classification:  body.Classification,
+			Status:          domain.MemoryStatus(body.Status),
 		}
 		saved, err := s.orgMemory.Add(m)
 		if err != nil {
@@ -914,7 +1350,7 @@ func (s *Server) serveOrgMemory(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(saved)
+		_ = json.NewEncoder(w).Encode(orgMemoryJSONOf(saved))
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
@@ -952,43 +1388,62 @@ func (s *Server) serveOrgSearch(w http.ResponseWriter, r *http.Request) {
 }
 
 // serveOrgAgents serves the org-level agent registry.
-// - GET  /org/agents returns all registered agent identities.
-// - POST /org/agents registers a new agent from a JSON AgentIdentity body;
-// 400 on a bad body, 409 on a duplicate ID, 201 with the created agent on
-// success.
-// - any other method → 405.
+//   - GET  /org/agents returns all registered agent identities, each with any
+//     org role binding from the org role store (Stage 2 org-scope RBAC).
+//   - POST /org/agents registers a new agent (optional "role" binds an org
+//     role); 400 on a bad body, 409 on a duplicate ID, 201 on success.
+//   - any other method → 405.
 func (s *Server) serveOrgAgents(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
 		agents := s.Agents()
+		orgRoles := orgapprovals.ListOrgRBACRoles(s.orgRoot) // org role bindings (no org root → empty)
+		out := make([]orgAgentJSON, 0, len(agents))
+		for _, a := range agents {
+			j := orgAgentJSONOf(a)
+			j.Role = orgRoles[a.ID]
+			out = append(out, j)
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"agents": agents,
-			"count":  len(agents),
+			"agents": out,
+			"count":  len(out),
 		})
 	case http.MethodPost:
-		var agent governance.AgentIdentity
-		if err := json.NewDecoder(r.Body).Decode(&agent); err != nil {
+		// Registration input is strict and server-owned:
+		// - unknown fields are rejected by name (never silently dropped);
+		// - Permissions are decoded but stripped before registering: org
+		//   agents never carry enforcement grants (only id/name/type/role
+		//   are kept from the body);
+		// - CreatedAt is stamped server-side (never a zero value).
+		var body struct {
+			ID   string `json:"id"`
+			Name string `json:"name"`
+			Type string `json:"type"`
+			Role string `json:"role"`
+			// Permissions is decoded only so it is not rejected as an
+			// unknown field; it is never stored (see above).
+			Permissions []json.RawMessage `json:"permissions"`
+		}
+		dec := json.NewDecoder(r.Body)
+		dec.DisallowUnknownFields()
+		if err := dec.Decode(&body); err != nil {
 			http.Error(w, "enterprise: invalid agent body: "+err.Error(), http.StatusBadRequest)
 			return
 		}
-		if agent.ID == "" {
+		if body.ID == "" {
 			http.Error(w, "enterprise: agent id is required", http.StatusBadRequest)
 			return
 		}
-		// Org-registered agents must never carry enforcement permissions: the
-		// JSON body may include an arbitrary Permissions slice that is inert
-		// today but would become a firewall grant if orgAgents were ever wired
-		// into Firewall.WithAgents. Strip it before registering; only
-		// id/name/type are accepted from the body.
-		agent.Permissions = nil
-		if err := s.RegisterAgent(&agent); err != nil {
+		agent := governance.NewAgent(body.ID, body.Name, body.Type, nil)
+		agent.Role = body.Role // P13 stage 2: optional org role binding
+		if err := s.RegisterAgent(agent); err != nil {
 			http.Error(w, err.Error(), http.StatusConflict)
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
-		_ = json.NewEncoder(w).Encode(agent)
+		_ = json.NewEncoder(w).Encode(orgAgentJSONOf(agent))
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
@@ -1003,24 +1458,33 @@ func (s *Server) serveOrgTeams(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
 		teams := s.Teams()
+		out := make([]orgTeamJSON, 0, len(teams))
+		for _, t := range teams {
+			out = append(out, orgTeamJSONOf(t))
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"teams": teams,
-			"count": len(teams),
+			"teams": out,
+			"count": len(out),
 		})
 	case http.MethodPost:
-		var team OrgTeam
-		if err := json.NewDecoder(r.Body).Decode(&team); err != nil {
+		// Decode through the wire DTO (snake_case, strict: unknown fields
+		// are rejected by name) and rebuild the domain OrgTeam.
+		var body orgTeamJSON
+		dec := json.NewDecoder(r.Body)
+		dec.DisallowUnknownFields()
+		if err := dec.Decode(&body); err != nil {
 			http.Error(w, "enterprise: invalid team body: "+err.Error(), http.StatusBadRequest)
 			return
 		}
+		team := OrgTeam{ID: body.ID, Name: body.Name, Projects: body.Projects, Members: body.Members}
 		if err := s.CreateTeam(team); err != nil {
 			http.Error(w, err.Error(), http.StatusConflict)
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
-		_ = json.NewEncoder(w).Encode(team)
+		_ = json.NewEncoder(w).Encode(orgTeamJSONOf(team))
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
@@ -1038,7 +1502,7 @@ func (s *Server) serveOrgTeam(w http.ResponseWriter, r *http.Request, id string)
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(team)
+		_ = json.NewEncoder(w).Encode(orgTeamJSONOf(*team))
 	case http.MethodDelete:
 		if err := s.RemoveTeam(id); err != nil {
 			http.Error(w, err.Error(), http.StatusNotFound)
@@ -1065,6 +1529,8 @@ func (s *Server) serveOrgAgentTeams(w http.ResponseWriter, r *http.Request, agen
 		http.Error(w, fmt.Sprintf("enterprise: agent %q not found", agentID), http.StatusNotFound)
 		return
 	}
+	// AgentTeams returns team IDs (not team objects), so the response is
+	// the plain ID list — no DTO needed.
 	teams := s.AgentTeams(agentID)
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{

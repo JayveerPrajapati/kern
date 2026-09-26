@@ -1,0 +1,28 @@
+# kern-gate: the minimal governance gate for kern's own repository.
+# Runs the blueprint change-governance check in CI mode: `kern check --ci`
+# emits a machine-readable JSON verdict on stdout ({passed, checks, evidence})
+# and exits 0 when the checked-out state passes the governance pipeline,
+# 1 when it fails. The step fails on a non-zero exit, gating the branch/PR.
+name: kern-gate
+on:
+  push:
+    branches: [main]
+  pull_request:
+permissions:
+  contents: read
+concurrency:
+  group: kern-gate-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  check:
+    name: kern check --ci
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Run governance gate
+        run: go run ./cmd/kern check --ci

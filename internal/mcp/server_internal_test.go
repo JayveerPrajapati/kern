@@ -13,6 +13,7 @@ import (
 // going through tool dispatch.
 
 func TestResolveRootEmptyFallsBackToCwd(t *testing.T) {
+	t.Parallel()
 	cwd, err := os.Getwd()
 	if err != nil {
 		t.Fatal(err)
@@ -23,6 +24,7 @@ func TestResolveRootEmptyFallsBackToCwd(t *testing.T) {
 }
 
 func TestResolveRootCleansToAbsolute(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	// Relative input resolves against cwd.
 	got := resolveRoot(filepath.Join("a", "b"))
@@ -48,6 +50,7 @@ func TestResolveRootCleansToAbsolute(t *testing.T) {
 }
 
 func TestResolveRootDoesNotResolveSymlinks(t *testing.T) {
+	t.Parallel()
 	// SENTINEL: resolveRoot only does Abs+Clean — it deliberately has no
 	// symlink awareness (EvalSymlinks lives in withinRoot, which resolves
 	// both sides before the confinement check). A symlinked root therefore
@@ -64,6 +67,7 @@ func TestResolveRootDoesNotResolveSymlinks(t *testing.T) {
 }
 
 func TestResolveRootMissingPathStillResolves(t *testing.T) {
+	t.Parallel()
 	// resolveRoot performs no existence check; a nonexistent root still
 	// resolves to a cleaned absolute path (validateRoot allows nonexistent
 	// roots because several tools create the directory before indexing).
@@ -74,6 +78,7 @@ func TestResolveRootMissingPathStillResolves(t *testing.T) {
 }
 
 func TestWithinRoot(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 
 	// Normal relative path inside the root passes.
@@ -129,6 +134,7 @@ func TestWithinRoot(t *testing.T) {
 }
 
 func TestValidateRoot(t *testing.T) {
+	t.Parallel()
 	// Filesystem root is never a project.
 	if err := validateRoot("/"); err == nil {
 		t.Fatal("filesystem root / must be rejected")
@@ -153,6 +159,7 @@ func TestValidateRoot(t *testing.T) {
 }
 
 func TestIsFilesystemRoot(t *testing.T) {
+	t.Parallel()
 	if !isFilesystemRoot("/") {
 		t.Fatal("`/` must be a filesystem root")
 	}
@@ -166,6 +173,7 @@ func TestIsFilesystemRoot(t *testing.T) {
 // false, real bools pass through, strings accept true/1 (trimmed), numbers
 // are truthy on non-zero, and any other type is false.
 func TestArgBool(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name string
 		args map[string]any
@@ -200,6 +208,7 @@ func TestArgBool(t *testing.T) {
 // non-string-typed props pass through untouched; unknown tools validate
 // nothing.
 func TestValidateStringArgs(t *testing.T) {
+	t.Parallel()
 	// kern_search declares query/root/limit/semantic as strings.
 	rejectCases := []struct {
 		name string

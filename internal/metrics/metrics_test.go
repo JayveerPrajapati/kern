@@ -1,6 +1,7 @@
 package metrics
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -291,5 +292,34 @@ func TestRecordCappedAtMaxSamples(t *testing.T) {
 	wantAvg := float64(n-maxSamples+1+n) / 2
 	if delta := abs(s.IndexBuildAvgMs - wantAvg); delta > 0.01 {
 		t.Errorf("IndexBuildAvgMs = %.2f, want ~%.2f (window of newest %d)", s.IndexBuildAvgMs, wantAvg, maxSamples)
+	}
+}
+
+func TestRecordPromptTokens(t *testing.T) {
+	r := New()
+	// Two coder runs: (fixed, final) with final >= fixed per run.
+	r.RecordPromptTokens(100, 150)
+	r.RecordPromptTokens(200, 260)
+	s := r.Snapshot()
+	if s.PromptTokenRuns != 2 {
+		t.Errorf("PromptTokenRuns = %d, want 2", s.PromptTokenRuns)
+	}
+	if s.PromptTokenFixed != 300 {
+		t.Errorf("PromptTokenFixed = %d, want 300", s.PromptTokenFixed)
+	}
+	if s.PromptTokenFinal != 410 {
+		t.Errorf("PromptTokenFinal = %d, want 410", s.PromptTokenFinal)
+	}
+	// RecordPromptTokens must not disturb the reduction metric.
+	if s.TokenReductionPct != 0 {
+		t.Errorf("TokenReductionPct = %.1f, want 0 (prompt tokens are a cost, not a reduction)", s.TokenReductionPct)
+	}
+	if !strings.Contains(r.Render(), "coder prompt tokens") {
+		t.Error("Render missing coder prompt tokens line")
+	}
+	// Reset clears the counters.
+	r.Reset()
+	if s2 := r.Snapshot(); s2.PromptTokenRuns != 0 || s2.PromptTokenFixed != 0 || s2.PromptTokenFinal != 0 {
+		t.Errorf("Reset left prompt token counters: %+v", s2)
 	}
 }

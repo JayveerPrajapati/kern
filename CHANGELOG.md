@@ -4,13 +4,50 @@ All notable changes to kern are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Summary
+
+- **[0.9.10]** — 2026-09-26: Semver release channel (Stages A–C), org governance P13 stages 1–3, SDK passthrough, governance hardening (RBAC default-deny + persistence), semcache compounding, `kern bench` + docs site, per-tool token attribution, and the audit campaigns' security fixes.
+- **[0.9.9.1]** — 2026-09-19: Adaptive context windowing (`-A`/`-B`), configurable compaction profiles via `.kern/kern.yaml`, MCP server modularized into 44 subpackages, skill-playbook CI parity, and subprocess/hook security hardening.
+- **[0.9.9]** — 2026-09-18: Repo-wide dead-code & duplication cleanup, standalone binaries removed, architecture guards enforced by default, major hot-path performance cuts, and ~40 correctness fixes to exit codes, MCP contracts, and boundary inference.
+- **[0.9.8.2]** — 2026-09-14: Dynamic architecture guardrails fallback, multi-repo aggregate freshness in `kern doctor`, and fixes to `fit-context` budgets, MCP index hot-reload/watcher, and security hardening.
+
+## Detailed changes
+
+## [0.9.10] - 2026-09-26
+
+### Added
+- **Semver release channel (Stages A–C)**: downgrade-proof `kern update` with a dry-run decision preview (`kern update --dry-run`), and `KERN_CHANNEL` release selection — `stable` = newest 3-component tag, `latest` = newest tag incl. hotfixes, any other value = regex over release tags; an explicit `--pin`/`KERN_VERSION` always wins. Dev builds keep commit-hash versions until tagged.
+- **Org governance (P13 stages 1–3)**: central policy distribution (`KERN_ORG_ROOT`), org-scope RBAC with org-wins resolution, and org-wide single-use approvals (`/org/approvals`; deploy gates consume them). Enterprise mode now REQUIRES `KERN_RBAC_DEFAULT_DENY=1` to start (pairing gate): `agent_id` is a client-asserted label, not proof of identity, so org mode without default-deny falls back to the legacy permit-all trust.
+- **SDK passthrough**: the full MCP tool catalog through one REST route — `POST /v1/tools/{name}` delegates to the same governed in-process dispatch path MCP clients hit (KERN_TOOLS allowlist, root confinement, RBAC), returning `{"output": <raw tool text>}`; `internal/sdk` gains an in-process full-catalog `Call` + discovery helpers, and every web App gets a root-bound per-project tool-server factory.
+- **Governance hardening**: RBAC opt-in default-deny (`KERN_RBAC_DEFAULT_DENY=1`), persisted RBAC assignments via the atomic identity-store pattern, audit aliasing/ID fixes, firewall race fix, permission hardening — and the reviewer role now gets the full read-only default MCP surface.
+- **Semcache compounding**: hit/miss accounting, warm-on-build + compress integration, LRU-touch eviction, stale sweep, and profile-scoped (slugified) namespaces.
+- **Benchmarks + docs site**: `kern bench` (deterministic, zero-network, writes `.kern/bench.json`), a web console `/benchmarks` page rendering the same schema, and the `docs/index.md` site index.
+- **Per-tool token attribution**: `kern stats` records per-tool/operation token usage.
+- **Semcache prompt-namespace coverage**: `kern optimize`/`preview` `--cache` now defaults ON (masked previews + results compound locally unless `--cache=false`), and the LLM path uses model-scoped `prompt.llm.<model>` semantic namespaces with a stricter 0.8 threshold — a fuzzy hit can never ship a different model's answer.
+- **Cost-model unification**: the two divergent cost tables merged on one canonical resolver (longest-prefix + `KERN_MODEL_COSTS`/`cost_per_token` overrides + labeled flat assumed default); versioned model names now price correctly and per-entry savings respect operator overrides.
+- **Org-tool RBAC**: every `kern_org_*` tool now enforces per-action authorization (mutations → org-admin, reads → org-member), extending the `kern_org_user` precedent to projects/agents/teams/memory/tasks/search/audit; new actions fail closed until explicitly granted.
+- **Cold-start scale benchmarks**: `docs/benchmarks/cold-start.md` — same-tree protocol across a real-repo ladder (83→7,819 files) answering the "slower than grep" question honestly (grep wins below ~200 files; kern cold-load wins 3–7× above it).
+- **SQLite-primary index persistence**: three storage formats merged into one (`.kern` footprint halved; SQLite WAL + FTS5 is the default build).
+- **Sandbox filesystem read confinement** (macOS stage 1) plus an exec mask-order fix.
+- **P2 batches**: UDS transport default, deterministic test waits, review-orchestration extraction, perf caches, coverage + fuzz gates, doc-drift gates, test parallelism, eventbus retention, root grammar, web console UX.
+
+### Fixed
+- **8-repo real-world validation campaign**: ~40 F-series fixes — exit-code contract pinning for every findings-producing command, snake_case JSON contracts (`doctor`, `impact`, `context`, `stats`, web governance metrics), exact-name search ranking, verb-first positional/verb-shaped-symbol resolution, heal fail-fast on dead LLM providers, `mutate --min-score` CI gate, diff-gate untracked-file inclusion + `[BLOCK]` summary, setup plugin-copy clobber, sandbox network-isolation enforcement, corrupt-index self-heal, review empty-path JSON, commitmsg subject accuracy, prose compression fillers, near/retrieve flag validation.
+- **RBAC multi-root**: assign no longer swaps in-memory roles across roots; persisted roles activate in-process and the store reloads under a mutex.
+- **Audit-campaign security fixes**: semcache profile-slug path-escape sanitization, the org-mode RBAC pairing gate, root-bound tool servers (per-App factories), typed REST error sentinels (`domain.ErrToolDenied`/`ErrToolUnknown`), web console auth + discovery, and ERE docs for the new environment variables.
+- **Cost-table accuracy**: `o3-mini` no longer prefix-matches `o3` at $10/1M (correct $1.10); unknown/empty-model entries accrue at the labeled flat assumed rate instead of silently $0.
+- **Staleness note wording**: the inline STALE note no longer promises an immediate retry is fresh — it says "retry in a moment… (the rebuild is asynchronous)".
+
+### Removed
+- **The governed decision-record ("kern note") system**: `docs/notes/` tree, the `kern note` CLI, the `kern_note` MCP tool, the `internal/note` package, gates G37 (note:format) + G38 (note:missing), and the diffgate notegate check — deleted whole. The MCP catalog is now 139 tools; no decision notes are created for repo changes going forward.
+
 ## [0.9.9.1] - 2026-09-19
 
 ### Added
 - **Adaptive Context Windowing**: Added grep-like `-A` / `-B` (`--context-before` / `--context-after`) contextual line preservation to CLI `kern optimize`, MCP tools (`kern_optimize_prompt`, `kern_optimize_log`), and Python SDK (`local_compress`), retaining essential context surrounding matched log traces and code snippets.
 - **Dynamic Configuration & Soft-Truncation DSL (`internal/kernconfig`)**: Introduced declarative `.kern/kern.yaml` (and `.kern.yaml`) project profiles for configurable file extensions, custom compaction thresholds, and non-destructive soft-truncation markers without binary recompilation.
 - **Agent Skill Playbook CI Parity (`internal/skills/parity_test.go`)**: Added automated CI regression suites and pre-commit checks enforcing 100% byte-for-byte synchronization across all 16 `SKILL.md` playbooks and helper scripts in `.agents/`, `.github/`, `.opencode/`, and `internal/skills/assets/`.
-- **Full MCP Leaf Subpackage Modularization**: Decomposed monolithic MCP server into 44 independent subpackages under `internal/mcp/*` with 100% backward compatibility across all 146 tools and zero architectural ledger drift.
+- **Full MCP Leaf Subpackage Modularization**: Decomposed monolithic MCP server into 44 independent subpackages under `internal/mcp/*` with 100% backward compatibility across all 140 tools and zero architectural ledger drift.
 - **Enterprise Telemetry & Multi-Repo Graph Contracts**: Enhanced `internal/mcp/crossrepo` with structured JSON output and expanded `internal/mcp/runtime` for production incident crash correlation against AST symbols.
 - **Worktree Acceleration & Non-Interactive Safety**: Accelerated change validation in `internal/execution/worktree.go` via direct `git -C diff HEAD` fast-paths and added `--non-interactive` automation flags to skill triage runbooks.
 

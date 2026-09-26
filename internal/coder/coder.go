@@ -12,7 +12,9 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/agents"
 	"github.com/JayveerPrajapati/kern/internal/execution"
 	"github.com/JayveerPrajapati/kern/internal/llm"
+	"github.com/JayveerPrajapati/kern/internal/metrics"
 	"github.com/JayveerPrajapati/kern/internal/pii"
+	"github.com/JayveerPrajapati/kern/internal/tokenize"
 	"github.com/JayveerPrajapati/kern/internal/verification"
 )
 
@@ -89,6 +91,16 @@ type Result struct {
 	Rounds    []RoundResult // per-round outcomes
 	Passed    bool          // true if verification passed in some round
 	TotalTime time.Duration // total coding time
+	// PromptTokens is the token count of the FINAL round's prompt: the
+	// constant part (PromptFixedTokens) plus any prior-round failure
+	// feedback. It is the cost the last Generate call actually paid.
+	PromptTokens int
+	// PromptFixedTokens is the token count of the constant prompt part — the
+	// base edit-format template rendered with intent, plan and grounded
+	// project context and no prior-round feedback (i.e. the first-round
+	// prompt). It is invariant across rounds; per-round growth =
+	// PromptTokens - PromptFixedTokens.
+	PromptFixedTokens int
 }
 
 // Code drives the LLM to generate a patch for the given intent and plan,
@@ -113,6 +125,16 @@ func (a *Agent) Code(intent, plan, context string, wt *execution.Worktree) (*Res
 	start := time.Now()
 	result := &Result{}
 
+	// Prompt-token accounting (Lever 5): the fixed component is the
+	// first-round prompt — the base edit-format template rendered with the
+	// intent, plan, grounded context and no prior-round feedback. Each round's
+	// prompt is measured so the final round's total (fixed + failure
+	// feedback) lands on the Result, and both totals are recorded to the
+	// process metrics so `kern stats performance` shows cumulative coder
+	// prompt cost. Counted pre-mask: PII masking below only redacts
+	// remote-leak risk and is not part of the prompt's informational content.
+	result.PromptFixedTokens = tokenize.Count(a.buildPrompt(intent, plan, context, wt.Dir(), nil))
+
 	verifyTypes := a.verifyTypes
 	if len(verifyTypes) == 0 {
 		verifyTypes = []string{"build"}
@@ -125,6 +147,7 @@ func (a *Agent) Code(intent, plan, context string, wt *execution.Worktree) (*Res
 		// 1. Build the prompt: ask the LLM for per-file search/replace edits
 		// (grounded in the project context) or, as a fallback, a unified diff.
 		prompt := a.buildPrompt(intent, plan, context, wt.Dir(), result.Rounds)
+		result.PromptTokens = tokenize.Count(prompt)
 
 		// Strip PII/secrets when the provider sends the prompt off the local
 		// machine (openai/anthropic/google or a remote Ollama host), so file
@@ -197,6 +220,7 @@ func (a *Agent) Code(intent, plan, context string, wt *execution.Worktree) (*Res
 			diff, _ := wt.Diff()
 			result.Diff = diff
 			result.TotalTime = time.Since(start)
+			metrics.Default().RecordPromptTokens(result.PromptFixedTokens, result.PromptTokens)
 			return result, nil
 		}
 
@@ -210,6 +234,7 @@ func (a *Agent) Code(intent, plan, context string, wt *execution.Worktree) (*Res
 		diff, _ := wt.Diff()
 		result.Diff = diff
 	}
+	metrics.Default().RecordPromptTokens(result.PromptFixedTokens, result.PromptTokens)
 	return result, ErrBudgetExhausted
 }
 

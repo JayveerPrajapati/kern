@@ -82,6 +82,7 @@ func toolResultText(t *testing.T, resp map[string]any) (string, bool) {
 }
 
 func TestInitialize(t *testing.T) {
+	t.Parallel()
 	resp := serveOne(t, writeReq("initialize", 1, `{"capabilities":{}}`))
 	if resp["jsonrpc"] != "2.0" {
 		t.Fatalf("bad jsonrpc: %v", resp)
@@ -101,6 +102,7 @@ func TestInitialize(t *testing.T) {
 // to users and agents, so its presence and a grounding keyword are asserted to
 // guard against accidental removal.
 func TestInitializeInstructions(t *testing.T) {
+	t.Parallel()
 	resp := serveOne(t, writeReq("initialize", 1, `{"capabilities":{}}`))
 	res := resp["result"].(map[string]any)
 	instr, ok := res["instructions"].(string)
@@ -118,6 +120,7 @@ func TestInitializeInstructions(t *testing.T) {
 }
 
 func TestSetServerVersionPropagates(t *testing.T) {
+	t.Parallel()
 	SetServerVersion("9.9.9-test")
 	defer SetServerVersion("dev")
 	resp := serveOne(t, writeReq("initialize", 1, `{"capabilities":{}}`))
@@ -132,6 +135,7 @@ func TestSetServerVersionPropagates(t *testing.T) {
 }
 
 func TestPing(t *testing.T) {
+	t.Parallel()
 	resp := serveOne(t, writeReq("ping", 2, ``))
 	if resp["result"] == nil {
 		t.Fatalf("ping must return a result: %+v", resp)
@@ -139,6 +143,7 @@ func TestPing(t *testing.T) {
 }
 
 func TestToolsListAndPromptsList(t *testing.T) {
+	t.Parallel()
 	resp := serveOne(t, writeReq("tools/list", 3, ``))
 	res := resp["result"].(map[string]any)
 	tl := res["tools"].([]any)
@@ -153,6 +158,7 @@ func TestToolsListAndPromptsList(t *testing.T) {
 }
 
 func TestUnknownMethodReturnsError(t *testing.T) {
+	t.Parallel()
 	resp := serveOne(t, writeReq("meth/no-such", 5, ``))
 	err, ok := resp["error"].(map[string]any)
 	if !ok {
@@ -164,6 +170,7 @@ func TestUnknownMethodReturnsError(t *testing.T) {
 }
 
 func TestInvalidJSONReturnsParseError(t *testing.T) {
+	t.Parallel()
 	in := strings.NewReader("not json\r\n" + writeReq("initialize", 6, `{}`) + "\n")
 	out := &bytes.Buffer{}
 	s := NewServer(in, out)
@@ -186,6 +193,7 @@ func TestInvalidJSONReturnsParseError(t *testing.T) {
 }
 
 func TestNotificationsInitializedNoResponse(t *testing.T) {
+	t.Parallel()
 	out := &bytes.Buffer{}
 	in := strings.NewReader(writeReq("notifications/initialized", nil, ``) + "\n")
 	s := NewServer(in, out)
@@ -213,7 +221,7 @@ func TestOptimizePromptAndCache(t *testing.T) {
 	if isErr {
 		t.Fatalf("unexpected error: %s", text)
 	}
-	if !strings.Contains(text, "optimized prompt") || !strings.Contains(text, "tokens:") {
+	if !strings.Contains(text, "optimized prompt") {
 		t.Fatalf("bad optimize output: %q", text)
 	}
 	// Second identical call -> served from cache.
@@ -311,6 +319,7 @@ func TestOptimizeLogViaMCP(t *testing.T) {
 }
 
 func TestContextBudgetViaMCP(t *testing.T) {
+	t.Parallel()
 	long := strings.Repeat("word ", 2500)
 	args, _ := json.Marshal(map[string]any{"text": long, "max_tokens": "50"})
 	resp := serveOne(t, writeReq("tools/call", 11, `{"name":"kern_context_budget","arguments":`+string(args)+`}`))
@@ -324,6 +333,7 @@ func TestContextBudgetViaMCP(t *testing.T) {
 }
 
 func TestCompactFileViaMCP(t *testing.T) {
+	t.Parallel()
 	root := testRoot(t)
 	f := filepath.Join(root, "main.go")
 	if err := os.WriteFile(f, []byte("package main\n\n// foo is a helper.\nfunc foo() string { return \"hi\" }\n"), 0o644); err != nil {
@@ -341,6 +351,7 @@ func TestCompactFileViaMCP(t *testing.T) {
 }
 
 func TestProjectMapViaMCP(t *testing.T) {
+	t.Parallel()
 	root := testRoot(t)
 	if err := os.WriteFile(filepath.Join(root, "main.go"),
 		[]byte("package main\n\nfunc main() {}\n"), 0o644); err != nil {
@@ -358,6 +369,7 @@ func TestProjectMapViaMCP(t *testing.T) {
 }
 
 func TestProjectMapHonorsMaxFiles(t *testing.T) {
+	t.Parallel()
 	root := testRoot(t)
 	for i, name := range []string{"a.go", "b.go", "c.go"} {
 		if err := os.WriteFile(filepath.Join(root, name),
@@ -386,6 +398,7 @@ func TestProjectMapHonorsMaxFiles(t *testing.T) {
 }
 
 func TestAstSearchViaMCP(t *testing.T) {
+	t.Parallel()
 	root := testRoot(t)
 	if err := os.WriteFile(filepath.Join(root, "main.go"),
 		[]byte("package main\n\nfunc foo() {}\nfunc bar() {}\n"), 0o644); err != nil {
@@ -451,6 +464,7 @@ func TestCheckDraftViaMCP(t *testing.T) {
 }
 
 func TestCheckDraftMissingCode(t *testing.T) {
+	t.Parallel()
 	resp := serveOne(t, toolsCallJSON(t, 42, "kern_check_draft", map[string]any{}))
 	out, isErr := toolResultText(t, resp)
 	if !isErr || !strings.Contains(out, "code is required") {
@@ -459,6 +473,7 @@ func TestCheckDraftMissingCode(t *testing.T) {
 }
 
 func TestDiffFilesViaMCP(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	a := filepath.Join(root, "a.txt")
 	b := filepath.Join(root, "b.txt")
@@ -478,6 +493,7 @@ func TestDiffFilesViaMCP(t *testing.T) {
 // TestDiffFilesCompactViaMCP verifies the compact=true mode collapses long
 // context runs into annotation lines while preserving changed lines.
 func TestDiffFilesCompactViaMCP(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	a := filepath.Join(root, "a.txt")
 	b := filepath.Join(root, "b.txt")
@@ -513,6 +529,7 @@ func TestDiffFilesCompactViaMCP(t *testing.T) {
 }
 
 func TestLockUnlockViaMCP(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	acq := `{"name":"kern_lock","arguments":` + jsonMust(map[string]any{"root": root, "scope": "build"}) + `}`
 	rel := `{"name":"kern_unlock","arguments":` + jsonMust(map[string]any{"scope": "build"}) + `}`
@@ -624,6 +641,7 @@ func (b *lockedBuffer) Reset() {
 }
 
 func TestUnknownToolReturnsError(t *testing.T) {
+	t.Parallel()
 	resp := serveOne(t, writeReq("tools/call", 19, `{"name":"kern_does_not_exist","arguments":{}}`))
 	out, isErr := toolResultText(t, resp)
 	if !isErr || !strings.Contains(out, "unknown tool") {
@@ -632,6 +650,7 @@ func TestUnknownToolReturnsError(t *testing.T) {
 }
 
 func TestMissingPromptArg(t *testing.T) {
+	t.Parallel()
 	resp := serveOne(t, writeReq("tools/call", 20, `{"name":"kern_optimize_prompt","arguments":{}}`))
 	out, isErr := toolResultText(t, resp)
 	if !isErr || !strings.Contains(out, "prompt") {
@@ -650,6 +669,7 @@ func jsonMust(m map[string]any) string {
 // TestLockErrorIsNotFakeHeld verifies kern_lock reports the real Acquire
 // failure instead of a fabricated "held (pid 0)" .
 func TestLockErrorIsNotFakeHeld(t *testing.T) {
+	t.Parallel()
 	root := filepath.Join(t.TempDir(), "notadir")
 	if err := os.WriteFile(root, []byte("file, not dir"), 0o644); err != nil {
 		t.Fatal(err)

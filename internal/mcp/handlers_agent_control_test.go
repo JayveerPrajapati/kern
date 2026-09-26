@@ -11,6 +11,7 @@ import (
 )
 
 func TestAgentMessageSendsHandoff(t *testing.T) {
+	t.Parallel()
 	s := NewServer(strings.NewReader(""), io.Discard)
 	s.roots = []string{t.TempDir()}
 	res, err := s.handleAgentMessage(context.Background(), map[string]any{
@@ -44,6 +45,7 @@ func TestAgentMessageSendsHandoff(t *testing.T) {
 }
 
 func TestAgentMessageMissingFields(t *testing.T) {
+	t.Parallel()
 	s := NewServer(strings.NewReader(""), io.Discard)
 	if _, err := s.handleAgentMessage(context.Background(), map[string]any{}); err == nil {
 		t.Fatal("expected error when to_agent missing")
@@ -57,8 +59,10 @@ func TestAgentMessageMissingFields(t *testing.T) {
 // task_id naming an unknown task must be rejected with an error (not a silent
 // success), and no handoff may be queued.
 func TestAgentMessageUnknownTask(t *testing.T) {
+	t.Parallel()
 	s := NewServer(strings.NewReader(""), io.Discard)
 	root := t.TempDir()
+	seedTestProject(t, root)
 	s.roots = []string{root}
 	if _, err := s.handleAgentMessage(context.Background(), map[string]any{
 		"to_agent": "fixer-1",
@@ -86,8 +90,10 @@ func TestAgentMessageUnknownTask(t *testing.T) {
 // TestAgentMessageKnownTaskQueues locks the happy path for the MCP surface: a
 // task_id that exists in the registry is accepted and the handoff is created.
 func TestAgentMessageKnownTaskQueues(t *testing.T) {
+	t.Parallel()
 	s := NewServer(strings.NewReader(""), io.Discard)
 	root := t.TempDir()
+	seedTestProject(t, root)
 	s.roots = []string{root}
 
 	p, err := app.New(root)
@@ -119,8 +125,10 @@ func TestAgentMessageKnownTaskQueues(t *testing.T) {
 }
 
 func TestAgentInterruptCancelsTask(t *testing.T) {
+	t.Parallel()
 	s := NewServer(strings.NewReader(""), io.Discard)
 	root := t.TempDir()
+	seedTestProject(t, root)
 	s.roots = []string{root}
 
 	// Create a task through the app layer (the MCP surface creates tasks via
@@ -157,6 +165,7 @@ func TestAgentInterruptCancelsTask(t *testing.T) {
 }
 
 func TestAgentInterruptMissingTaskID(t *testing.T) {
+	t.Parallel()
 	s := NewServer(strings.NewReader(""), io.Discard)
 	if _, err := s.handleAgentInterrupt(context.Background(), map[string]any{}); err == nil {
 		t.Fatal("expected error when task_id missing")

@@ -8,6 +8,7 @@ package pii
 import (
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"net"
 	"net/url"
 	"os"
@@ -129,6 +130,34 @@ type Result struct {
 	// Found is the number of distinct secrets detected (counts by label).
 	ByLabel map[string]int
 }
+
+// MarshalJSON implements json.Marshaler for Result. It serializes ONLY the
+// masked text and its counters — NEVER the Mapping, which holds the original
+// secret values. This is a deliberate leak guard: a code path that
+// serializes or logs a whole Result (rather than its .Text) must not
+// exfiltrate every secret the masking pass found. Use Result.Unmask
+// explicitly when the originals are actually needed.
+func (r Result) MarshalJSON() ([]byte, error) {
+	return json.Marshal(struct {
+		Text         string
+		Replaced     int
+		ByLabel      map[string]int
+		MappingCount int
+	}{
+		Text:         r.Text,
+		Replaced:     r.Replaced,
+		ByLabel:      r.ByLabel,
+		MappingCount: len(r.Mapping),
+	})
+}
+
+// String returns the masked text only, so fmt/log of a Result prints the
+// masked placeholder text and never the original secrets held in Mapping
+// (leak guard).
+func (r Result) String() string { return r.Text }
+
+// GoString returns the masked text only for %#v formatting (leak guard).
+func (r Result) GoString() string { return r.Text }
 
 // IsVersionLike reports whether s looks like a semantic-version string
 // (e.g. "2.1.4", "1.0") rather than a domain. CDNs use pkg@version URLs that
@@ -276,12 +305,16 @@ func maskCustom(text string, patterns []Pattern, names []string, suppressNonSecr
 	}
 	counts := map[string]int{}
 	placeholders := make([]string, len(chosen))
-	// Build placeholders first so ordering is deterministic.
+	// Build placeholders first so ordering is deterministic. A placeholder
+	// must never collide with text already present: a literal placeholder in
+	// the input (e.g. a log line that already says [MASKED_IP_1]) or a
+	// placeholder emitted by the encoding pre-pass (the HEX pattern label
+	// collides with [MASKED_HEX_N] from encoded hex secrets). A collision
+	// would make Unmask restore the wrong span, breaking the documented
+	// round-trip.
 	for i, h := range chosen {
-		counts[h.label]++
-		ph := "[MASKED_" + h.label + "_" + strconv.Itoa(counts[h.label]) + "]"
-		placeholders[i] = ph
-		res.Mapping[ph] = text[h.start:h.end]
+		placeholders[i] = nextPlaceholder(h.label, counts, text)
+		res.Mapping[placeholders[i]] = text[h.start:h.end]
 		res.ByLabel[h.label]++
 		res.Replaced++
 	}
@@ -374,14 +407,30 @@ func maskEncoded(text string, patterns []*regexp.Regexp, mapping map[string]stri
 	prev := 0
 	for _, c := range chosen {
 		b.WriteString(text[prev:c.start])
-		counts[c.kind]++
-		ph := "[MASKED_" + strings.ToUpper(c.kind) + "_" + strconv.Itoa(counts[c.kind]) + "]"
+		ph := nextPlaceholder(strings.ToUpper(c.kind), counts, text)
 		mapping[ph] = text[c.start:c.end]
 		b.WriteString(ph)
 		prev = c.end
 	}
 	b.WriteString(text[prev:])
 	return b.String()
+}
+
+// nextPlaceholder returns the next unused placeholder for label, advancing
+// the per-label counter in counts. A placeholder is "used" when it already
+// appears in text — a literal placeholder in the input, or a placeholder
+// emitted by an earlier stage (e.g. [MASKED_HEX_1] from the encoding pre-pass
+// vs the HEX pattern label). Reusing an existing placeholder string would
+// make Unmask restore the wrong span, breaking the documented
+// Unmask(Mask(text)) == text round-trip.
+func nextPlaceholder(label string, counts map[string]int, text string) string {
+	counts[label]++
+	ph := "[MASKED_" + label + "_" + strconv.Itoa(counts[label]) + "]"
+	for strings.Contains(text, ph) {
+		counts[label]++
+		ph = "[MASKED_" + label + "_" + strconv.Itoa(counts[label]) + "]"
+	}
+	return ph
 }
 
 // decodeEncoded decodes a candidate run of the given encoding kind. It returns

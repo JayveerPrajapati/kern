@@ -6,7 +6,6 @@ import (
 
 	"github.com/JayveerPrajapati/kern/internal/app"
 	"github.com/JayveerPrajapati/kern/internal/governance"
-	"github.com/JayveerPrajapati/kern/internal/intel"
 )
 
 // ---------------------------------------------------------------------------
@@ -41,7 +40,14 @@ var riskPairs = []struct{ res, act string }{
 // buildRisks computes a deterministic risk assessment for each standard
 // resource+action pair via the shared governance/risk assessor.
 func (a *App) buildRisks() []riskItem {
-	assessor := governance.NewRiskAssessor(governance.DefaultPolicies())
+	// Use the firewall's loaded policy set (org policy when enterprise mode
+	// applied one, DefaultPolicies otherwise) so the risks page reflects the
+	// rules actually enforced rather than always the defaults.
+	policies := governance.DefaultPolicies()
+	if a.firewall != nil {
+		policies = a.firewall.Policies()
+	}
+	assessor := governance.NewRiskAssessor(policies)
 	out := make([]riskItem, 0, len(riskPairs))
 	for _, p := range riskPairs {
 		r := assessor.AssessAction(p.res, p.act)
@@ -196,9 +202,12 @@ type systemMapData struct {
 }
 
 // buildSystemMap assembles an architecture overview from the prebuilt index and
-// graph (never re-running index.Build per request).
+// graph (never re-running index.Build per request). Communities + Hubs come
+// from the shared per-generation cache (graphCommunitiesHubs), so this page
+// never re-runs label propagation + hub ranking.
 func (a *App) buildSystemMap() *systemMapData {
 	g, ix := a.freshGraph()
+	comms, hubs := a.graphCommunitiesHubs()
 	modules := make([]systemModule, 0, len(ix.Pkgs))
 	fileSet := map[string]bool{}
 	for _, p := range ix.Pkgs {
@@ -220,8 +229,8 @@ func (a *App) buildSystemMap() *systemMapData {
 		FileCount:   len(fileSet),
 		EdgeCount:   len(g.Edges),
 		SymbolCount: len(ix.Symbols),
-		Communities: len(intel.Communities(ix)),
-		Hubs:        len(intel.Hubs(ix, 5)),
+		Communities: len(comms),
+		Hubs:        len(hubsTop(hubs, 5)),
 	}
 }
 
@@ -364,4 +373,13 @@ func (a *App) handleEvalPage(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_ = a.evalT.Execute(w, data)
+}
+
+// handleBenchmarksPage serves the HTML benchmarks page at /benchmarks. It
+// renders the latest .kern/bench.json (written by `kern bench`) — cold/warm
+// load latency, the fixed query set, and machine context — or a "run kern
+// bench to refresh" hint when the document is absent.
+func (a *App) handleBenchmarksPage(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	_ = a.benchT.Execute(w, a.buildBenchmarks())
 }

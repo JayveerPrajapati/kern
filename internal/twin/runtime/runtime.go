@@ -29,13 +29,24 @@ func (b *Builder) Build() ([]domain.Node, []domain.Edge, error) {
 	var nodes []domain.Node
 	var edges []domain.Edge
 
-	// Deployments: one node per deployment, linked to its service.
+	// Deployments: one node per deployment, linked to its service. The
+	// Deployment attribute carries the deployment node kind's attributes
+	// (service, version, commit SHA, deployed-at) so consumers of the
+	// knowledge graph can render version/commit provenance. The kind is
+	// emitted only when the runtime source provides deployment data; with no
+	// source wired (nil) it has zero instances — no data is invented.
 	for _, dep := range b.source.Deployments("") {
 		depID := fmt.Sprintf("deployment:%s:%s", ids.Escape(dep.Service), ids.Escape(dep.Version))
 		nodes = append(nodes, domain.Node{
 			ID:    depID,
 			Kind:  "deployment",
 			Label: dep.Service + " " + dep.Version,
+			Deployment: &domain.Deployment{
+				Service:    dep.Service,
+				CommitSHA:  dep.CommitSHA,
+				Version:    dep.Version,
+				DeployedAt: dep.DeployedAt,
+			},
 		})
 		svcID := "service:" + ids.Escape(dep.Service)
 		edges = append(edges, domain.Edge{From: depID, To: svcID, Kind: "deploys"})

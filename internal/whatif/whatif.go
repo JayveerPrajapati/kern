@@ -16,7 +16,7 @@ import (
 
 	"github.com/JayveerPrajapati/kern/internal/domain"
 	"github.com/JayveerPrajapati/kern/internal/evidence"
-	"github.com/JayveerPrajapati/kern/internal/intelligence"
+	"github.com/JayveerPrajapati/kern/internal/intel"
 )
 
 // ChangeKind is the kind of hypothetical change being simulated.
@@ -105,12 +105,31 @@ type Impact struct {
 	// NotResolvedWarning is the human-readable warning rendered (and carried
 	// in JSON) when NotResolved is true.
 	NotResolvedWarning string `json:"not_resolved_warning,omitempty"`
+	// Entities are the twin entity nodes (API / DB table / service /
+	// deployment) implicated by the change's blast radius — the change target
+	// plus every transitively affected symbol. The whatif engine is a pure
+	// code-graph pass and cannot populate this field itself: the app layer
+	// that owns the twin graph fills it in after Simulate returns. Empty when
+	// the twin graph carries no entities for the affected symbols.
+	Entities []EntityImpact `json:"entities,omitempty"`
+}
+
+// EntityImpact is one twin entity node implicated by a change's blast radius.
+// Symbols are the affected code symbols whose twin connections surface this
+// entity. Defined here (not in twin) so the whatif result stays self-contained
+// and the package keeps its pure dependency set; the app layer, which owns the
+// twin graph, is the only producer.
+type EntityImpact struct {
+	Kind    string   `json:"kind"`
+	Name    string   `json:"name"`
+	File    string   `json:"file,omitempty"`
+	Symbols []string `json:"symbols"`
 }
 
 // Simulate applies the change to the graph (in memory) and returns the impact.
 // g is the canonical knowledge graph; it is never mutated. It runs
 // deterministically (no LLM).
-func Simulate(g *intelligence.Graph, c Change) Impact {
+func Simulate(g *intel.Graph, c Change) Impact {
 	if g == nil {
 		return Impact{Change: c, Risk: "low", Isolated: true}
 	}
@@ -264,7 +283,7 @@ func Simulate(g *intelligence.Graph, c Change) Impact {
 // simState bundles the graph access and the affected-set registration
 // closures shared by the per-kind simulation strategies.
 type simState struct {
-	g         *intelligence.Graph
+	g         *intel.Graph
 	graphByID map[string]domain.Node
 	collect   func([]domain.Node)
 	addNode   func(domain.Node)
@@ -328,7 +347,7 @@ func simulateDefault(s simState, c Change) {
 // computeBrokenCallSites returns the direct callers of target, collected from
 // the raw "calls" edges into the target (excluding self edges). Transitive
 // dependents that do not call the target directly are not broken call sites.
-func computeBrokenCallSites(g *intelligence.Graph, target string) []string {
+func computeBrokenCallSites(g *intel.Graph, target string) []string {
 	brokenCallers := map[string]bool{}
 	for _, e := range g.Edges {
 		if e.Kind == "calls" && e.To == target && e.From != target {
@@ -624,22 +643,14 @@ func nodeName(n domain.Node) string {
 // symbol over call edges. The code-only graph emits only symbol/file/module
 // nodes, so this is empty for code-only graphs — callers that attach twin data
 // nodes (Kind "db" or "table") to the graph will surface them here.
-func databasesAffected(g *intelligence.Graph, target string) []string {
-	// Forward-reachability from the changed symbol over call edges.
+func databasesAffected(g *intel.Graph, target string) []string {
+	// Forward-reachability from the changed symbol over call edges, via the
+	// graph's cached-adjacency traversal (previously a raw-edge scan per
+	// visited node that dominated the kind path on hub symbols: O(reachable ×
+	// edges)).
 	reachable := map[string]bool{}
-	frontier := []string{target}
-	for len(frontier) > 0 {
-		cur := frontier[0]
-		frontier = frontier[1:]
-		if reachable[cur] {
-			continue
-		}
-		reachable[cur] = true
-		for _, e := range g.Edges {
-			if e.From == cur && e.Kind == "calls" && !reachable[e.To] {
-				frontier = append(frontier, e.To)
-			}
-		}
+	for _, n := range g.WhatDoesXDependOn(target) {
+		reachable[n.ID] = true
 	}
 	var out []string
 	for _, n := range g.Nodes {
@@ -659,6 +670,6 @@ func databasesAffected(g *intelligence.Graph, target string) []string {
 }
 
 // WhatIf is an alias for Simulate. It remains for backward compatibility.
-func WhatIf(g *intelligence.Graph, c Change) Impact {
+func WhatIf(g *intel.Graph, c Change) Impact {
 	return Simulate(g, c)
 }

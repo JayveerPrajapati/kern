@@ -7,6 +7,7 @@ import (
 )
 
 func TestHandleLSPBridge_ServersList(t *testing.T) {
+	t.Parallel()
 	s := NewServer(strings.NewReader(""), nil)
 	defer s.Close()
 
@@ -23,6 +24,7 @@ func TestHandleLSPBridge_ServersList(t *testing.T) {
 }
 
 func TestHandleLSPBridge_NoServerFallback(t *testing.T) {
+	t.Parallel()
 	s := NewServer(strings.NewReader(""), nil)
 	defer s.Close()
 

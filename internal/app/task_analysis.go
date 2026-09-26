@@ -4,16 +4,17 @@ package app
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
 	"github.com/JayveerPrajapati/kern/internal/agent"
+	"github.com/JayveerPrajapati/kern/internal/calibrate"
 	"github.com/JayveerPrajapati/kern/internal/context"
 	"github.com/JayveerPrajapati/kern/internal/domain"
 	"github.com/JayveerPrajapati/kern/internal/eventbus"
 	"github.com/JayveerPrajapati/kern/internal/governance"
 	"github.com/JayveerPrajapati/kern/internal/intel"
-	"github.com/JayveerPrajapati/kern/internal/intelligence"
 	"github.com/JayveerPrajapati/kern/internal/lenses"
 	"github.com/JayveerPrajapati/kern/internal/memory"
 	"github.com/JayveerPrajapati/kern/internal/verification"
@@ -23,11 +24,13 @@ import (
 // Analyze creates a Task for the intent, runs the context engine, and attaches
 // the ContextPacket to the Task. The Task transitions CREATED → ANALYZING →
 // (COMPLETED or FAILED). Returns the Task and the rendered analysis text.
-// This is the Task-tracked version of Platform.Analyze. Interfaces that want
-// stateless analysis call Platform.Analyze directly; interfaces that want an
-// authoritative Task record call TaskService.Analyze.
+// This is the Task-tracked version of Platform.Analyze. Read-only analysis
+// commands do NOT persist a task record by default (F9): the task is tracked
+// in memory (states, output, artifacts, audit transitions) but the store is
+// only written when the caller opts in with WithTaskPersistence(true).
+// Interfaces that want stateless analysis call Platform.Analyze directly.
 func (s *TaskService) Analyze(intent string) (*agent.Task, string, error) {
-	t, err := s.Create(intent)
+	t, err := s.createAnalysisTask(intent)
 	if err != nil {
 		return nil, "", err
 	}
@@ -94,6 +97,13 @@ func (s *TaskService) analyzeTaskOpts(t *agent.Task, change string, complete boo
 		s.lastArtifactID(t.ID, domain.ArtifactContextPacket), "context:analyze")
 
 	if complete {
+		// Context-usage learning (Self-Improvement #5): the analyze outcome
+		// is known here, and the task retains the packet built above. Record
+		// which packet slices the outcome actually used (the resolved target
+		// symbol and its defining file) so the learning pass can propose
+		// shrink/review signals. Best-effort and nil-guarded — it never
+		// blocks or changes the task flow.
+		s.recordContextUsage(t, change)
 		if err := t.Complete(text); err != nil {
 			s.fail(t, err.Error())
 			return t, "", err
@@ -107,7 +117,7 @@ func (s *TaskService) analyzeTaskOpts(t *agent.Task, change string, complete boo
 // AnalyzeWithLens is Analyze with a review lens: the context packet's facts
 // are re-ranked by the lens priorities before rendering and task attachment.
 func (s *TaskService) AnalyzeWithLens(intent, lensName string) (*agent.Task, string, error) {
-	t, err := s.Create(intent)
+	t, err := s.createAnalysisTask(intent)
 	if err != nil {
 		return nil, "", err
 	}
@@ -186,9 +196,11 @@ func (s *TaskService) analyzeTaskWithLens(t *agent.Task, change, lensName string
 }
 
 // WhatIf creates a Task, simulates the change, attaches the Impact to the Task,
-// and completes it. Returns the Task and the rendered impact text.
+// and completes it. Returns the Task and the rendered impact text. Read-only
+// analysis commands do NOT persist a task record by default (F9); opt in with
+// WithTaskPersistence(true) for an authoritative record.
 func (s *TaskService) WhatIf(kind whatif.ChangeKind, change, newTarget string) (*agent.Task, string, error) {
-	t, err := s.Create(fmt.Sprintf("what-if: %s %s", kind, change))
+	t, err := s.createAnalysisTask(fmt.Sprintf("what-if: %s %s", kind, change))
 	if err != nil {
 		return nil, "", err
 	}
@@ -203,6 +215,10 @@ func (s *TaskService) WhatIf(kind whatif.ChangeKind, change, newTarget string) (
 		s.fail(t, err.Error())
 		return t, "", err
 	}
+	// Calibration (Feature Batch C): record the simulation as an impact-kind
+	// prediction so it can later be matched against observed incidents.
+	// Best-effort — recording never fails or changes the what-if path.
+	s.recordWhatIfPrediction(change, imp)
 
 	t.ImpactReport = &imp
 	t.Output = text
@@ -261,9 +277,11 @@ func (s *TaskService) WhatIf(kind whatif.ChangeKind, change, newTarget string) (
 // This realizes the : the Plan
 // artifact is populated from deterministic sources (context packet, impact
 // report, risk assessment, architecture rules) — the LLM may explain it, but
-// the fields are not LLM guesses.
+// the fields are not LLM guesses. Read-only analysis commands do NOT persist
+// a task record by default (F9); opt in with WithTaskPersistence(true) for an
+// authoritative record.
 func (s *TaskService) Plan(intent string) (*agent.Task, domain.Plan, string, error) {
-	t, err := s.Create(intent)
+	t, err := s.createAnalysisTask(intent)
 	if err != nil {
 		return nil, domain.Plan{}, "", err
 	}
@@ -349,13 +367,15 @@ func ImpactStrict() ImpactOption {
 // the Task, the ImpactReport, and a rendered text summary.
 // This realizes the impact analysis contract: the impact
 // report is the deterministic source — the LLM may explain it, but the data
-// comes from the knowledge graph, not an LLM guess.
+// comes from the knowledge graph, not an LLM guess. Read-only analysis
+// commands do NOT persist a task record by default (F9); opt in with
+// WithTaskPersistence(true) for an authoritative record.
 func (s *TaskService) Impact(change string, opts ...ImpactOption) (*agent.Task, domain.ImpactReport, string, error) {
 	o := &impactOptions{}
 	for _, opt := range opts {
 		opt(o)
 	}
-	t, err := s.Create(change)
+	t, err := s.createAnalysisTask(change)
 	if err != nil {
 		return nil, domain.ImpactReport{}, "", err
 	}
@@ -365,7 +385,7 @@ func (s *TaskService) Impact(change string, opts ...ImpactOption) (*agent.Task, 
 	}
 	s.publish(eventbus.TaskUpdated, t.ID, map[string]string{"state": "ANALYZING"})
 
-	target, err := s.platform.resolveSymbol(change)
+	target, fuzzy, err := s.platform.resolveSymbol(change)
 	if err != nil {
 		s.fail(t, err.Error())
 		return t, domain.ImpactReport{}, "", err
@@ -373,15 +393,29 @@ func (s *TaskService) Impact(change string, opts ...ImpactOption) (*agent.Task, 
 
 	g := s.platform.Graph()
 	rep := s.collectGraphImpact(g, target, o.strict)
+	// Entity overlay (Feature 3): surface the twin entity nodes implicated by
+	// the change's blast radius (the target plus the report's affected
+	// symbols). Zero-cost when the twin graph carries no entities for them.
+	rep.Entities = attachImpactEntities(g, impactSymbols(rep))
 	s.gatherRuntimeEvidence(&rep, target)
 	classifyCriticality(g, target, o.strict, &rep)
-	return s.finalizeImpact(t, &rep)
+	t, rep, text, err := s.finalizeImpact(t, &rep)
+	if fuzzy && text != "" {
+		// The requested symbol was fuzzy-resolved to a different one: surface
+		// the mapping so the substitution is never silent.
+		text = fmt.Sprintf("resolved %q -> %s (fuzzy match)\n%s", change, target, text)
+	}
+	// Calibration (Feature Batch C): record the impact analysis as an
+	// impact-kind prediction (predicted files = the file set the impact path
+	// computed). Best-effort — recording never fails or changes the impact path.
+	s.recordImpactPrediction(change, &rep, s.impactCitedFiles(t, &rep))
+	return t, rep, text, err
 }
 
 // collectGraphImpact runs the six deterministic graph queries from the spec
 // (callers, callees, services, APIs, events, tests) against the target symbol
 // and returns the ImpactReport fields they populate.
-func (s *TaskService) collectGraphImpact(g *intelligence.Graph, target string, strict bool) domain.ImpactReport {
+func (s *TaskService) collectGraphImpact(g *intel.Graph, target string, strict bool) domain.ImpactReport {
 	rep := domain.ImpactReport{Target: target}
 	// 1. What calls this?
 	for _, n := range g.WhoCallsPrecise(target, strict) {
@@ -477,7 +511,7 @@ func (s *TaskService) gatherRuntimeEvidence(rep *domain.ImpactReport, target str
 // classifyCriticality derives the report's risk level from the production
 // criticality of the target symbol, falling back to the caller/service
 // footprint when the graph reports no criticality tier.
-func classifyCriticality(g *intelligence.Graph, target string, strict bool, rep *domain.ImpactReport) {
+func classifyCriticality(g *intel.Graph, target string, strict bool, rep *domain.ImpactReport) {
 	// Risk from production criticality.
 	crit := g.ProductionCriticalityPrecise(target, strict)
 	switch crit {
@@ -496,6 +530,21 @@ func classifyCriticality(g *intelligence.Graph, target string, strict bool, rep 
 			rep.Risk = "low"
 		}
 	}
+}
+
+// impactSymbols returns the code-symbol footprint of an ImpactReport: the
+// target plus every symbol named in the report's affected sections. Used to
+// surface the twin entities implicated by the change's blast radius. Test
+// names are excluded — they describe coverage, not affected code.
+func impactSymbols(rep domain.ImpactReport) []string {
+	out := make([]string, 0, 1+len(rep.WhoCalls)+len(rep.WhatItCalls)+len(rep.ServicesDepend)+len(rep.APIsAffected)+len(rep.EventsAffected))
+	out = append(out, rep.Target)
+	out = append(out, rep.WhoCalls...)
+	out = append(out, rep.WhatItCalls...)
+	out = append(out, rep.ServicesDepend...)
+	out = append(out, rep.APIsAffected...)
+	out = append(out, rep.EventsAffected...)
+	return out
 }
 
 // impactCitedFiles returns the files the impact report cites: the target's
@@ -533,6 +582,14 @@ func (s *TaskService) finalizeImpact(t *agent.Task, rep *domain.ImpactReport) (*
 	out := renderImpactText(*rep)
 	if banner := s.platform.Index().StalenessBanner(s.impactCitedFiles(t, rep)); banner != "" {
 		out = banner + "\n\n" + out
+	}
+	// Calibration (Feature Batch C): append the per-subsystem confidence line
+	// at the end of the rendered report (best-effort; omitted on any error).
+	// This is the shared render path for CLI kern impact and MCP kern_impact.
+	if f := s.platform.graphNodeFile(rep.Target); f != "" {
+		if line := calibrate.ConfidenceLine(s.platform.Root(), calibrate.SubsystemOf(f)); line != "" {
+			out = out + "\n" + line
+		}
 	}
 	t.Output = out
 	t.AddStep(agent.Step{
@@ -583,14 +640,40 @@ func (s *TaskService) assemblePlan(intent string, pkt domain.ContextPacket) doma
 	}
 
 	// Implementation steps: deterministic scaffolding from the required
-	// validation list (build, test, security, architecture) plus the impact
-	// shape.
+	// validation list (build, test, security, architecture), concrete
+	// per-symbol steps for existing-symbol changes, and explicit change kinds
+	// detected from the intent text (rename/remove). No LLM anywhere.
 	if whatif.IsNetNewFeature(intent) {
 		plan.ImplementationSteps = append(plan.ImplementationSteps, "Implement the new feature according to specifications.")
-	} else if len(plan.AffectedComponents) > 0 {
-		plan.ImplementationSteps = append(plan.ImplementationSteps, "Implement the change in the affected components above.")
 	} else {
-		plan.ImplementationSteps = append(plan.ImplementationSteps, "Implement the requested change.")
+		// Explicit change kinds first (prepended): a rename or removal is the
+		// headline of the change, so its steps lead. The regexes run on the
+		// ORIGINAL intent (case-insensitively) so captured symbol names keep
+		// the user's casing.
+		if m := intentRenameRe.FindStringSubmatch(intent); m != nil {
+			plan.ImplementationSteps = append(plan.ImplementationSteps,
+				fmt.Sprintf("Rename %s to %s (definition in the affected components above)", m[1], m[2]),
+				"Update all references to "+m[1])
+		}
+		if m := intentRemoveRe.FindStringSubmatch(intent); m != nil {
+			plan.ImplementationSteps = append(plan.ImplementationSteps, "Remove "+m[1]+" and update its callers")
+		}
+		// Concrete per-symbol steps (capped at 5; test-file symbols are
+		// exercised by the test step below, not updated as source).
+		for i, sym := range pkt.Symbols {
+			if i >= 5 {
+				break
+			}
+			if strings.Contains(sym.File, "_test") {
+				continue
+			}
+			plan.ImplementationSteps = append(plan.ImplementationSteps,
+				fmt.Sprintf("Update %s (%s:%d)", sym.Name, sym.File, sym.Line))
+		}
+		// Last resort: no symbols and no explicit change kind matched.
+		if len(plan.ImplementationSteps) == 0 {
+			plan.ImplementationSteps = append(plan.ImplementationSteps, "Implement the requested change.")
+		}
 	}
 	for _, v := range pkt.RequiredValidation {
 		switch v {
@@ -605,9 +688,19 @@ func (s *TaskService) assemblePlan(intent string, pkt domain.ContextPacket) doma
 		}
 	}
 
-	// Dependencies: edges from the context packet.
+	// Dependencies: keep only edges that touch the affected components (the
+	// symbol names and file paths above); unrelated package edges are noise.
+	filter := planFilter(pkt)
 	for _, e := range pkt.Dependencies {
-		plan.Dependencies = append(plan.Dependencies, e.From+" → "+e.To)
+		// Trim any "pkg."-style qualifier on the right side before matching,
+		// so an edge "pkg.A → pkg.B" touches the affected symbol "B".
+		to := e.To
+		if i := strings.LastIndexByte(to, '.'); i >= 0 {
+			to = to[i+1:]
+		}
+		if edgeTouches(filter, e.From) || edgeTouches(filter, to) {
+			plan.Dependencies = append(plan.Dependencies, e.From+" → "+e.To)
+		}
 	}
 
 	// Tests: required validation + covering tests from the packet.
@@ -640,6 +733,76 @@ func (s *TaskService) assemblePlan(intent string, pkt domain.ContextPacket) doma
 	return plan
 }
 
+// intentRenameRe detects an explicit rename intent ("rename X to Y") so the
+// plan can name the concrete change kind instead of a generic step. It runs
+// on the original intent, case-insensitively, preserving the user's casing in
+// the captured names.
+var intentRenameRe = regexp.MustCompile(`(?i)rename\s+([\w.]+)\s+to\s+([\w.]+)`)
+
+// intentRemoveRe detects an explicit removal intent ("remove X"/"delete X").
+var intentRemoveRe = regexp.MustCompile(`(?i)(?:remove|delete)\s+([\w.]+)`)
+
+// planFilter builds the set of names that mark a dependency edge as relevant
+// to the plan: the affected symbols' names/qualified names and the affected
+// files' paths.
+func planFilter(pkt domain.ContextPacket) map[string]bool {
+	set := map[string]bool{}
+	for _, sym := range pkt.Symbols {
+		if sym.Name != "" {
+			set[sym.Name] = true
+		}
+		if sym.Qualified != "" {
+			set[sym.Qualified] = true
+		}
+	}
+	for _, f := range pkt.Files {
+		if f.Path != "" {
+			set[f.Path] = true
+		}
+	}
+	return set
+}
+
+// edgeTouches reports whether a dependency edge endpoint touches the
+// affected-component filter: exact equality or a component-bounded suffix
+// match on either side (a "pkg.Sym" node ID touches the affected symbol
+// "Sym"; a bare "task.go" touches the affected file "internal/app/task.go").
+// The boundary check keeps short endings ("go") from suffix-matching every
+// *.go file in the filter set.
+func edgeTouches(set map[string]bool, end string) bool {
+	if end == "" {
+		return false
+	}
+	if set[end] {
+		return true
+	}
+	for k := range set {
+		if k == "" {
+			continue
+		}
+		if strings.HasSuffix(end, k) && suffixBounded(end, k) {
+			return true
+		}
+		// Reverse direction only for name-like endings (containing '.' or
+		// '/'), so a bare "go" cannot touch "internal/app/task.go".
+		if strings.ContainsAny(end, "./") && strings.HasSuffix(k, end) && suffixBounded(k, end) {
+			return true
+		}
+	}
+	return false
+}
+
+// suffixBounded reports whether suffix starts at a component boundary ('.' or
+// '/') or at the very start of s.
+func suffixBounded(s, suffix string) bool {
+	i := len(s) - len(suffix)
+	if i == 0 {
+		return true
+	}
+	c := s[i-1]
+	return c == '.' || c == '/'
+}
+
 // Verify creates a Task, runs verification, attaches the result, and completes
 // the Task. Returns the Task and the verification result.
 func (s *TaskService) Verify(types []string) (*agent.Task, verification.VerificationResult, error) {
@@ -655,6 +818,11 @@ func (s *TaskService) Verify(types []string) (*agent.Task, verification.Verifica
 
 	res := s.platform.Verify(types)
 	t.Verification = &res
+	// Cost/latency policy learning (Tier 2 #6): record this verify outcome —
+	// task kind, configured model, PASS/FAIL — best-effort; learning proposes
+	// via memory only and never blocks verify (same style as
+	// recordCalibrationClaims).
+	s.recordModelOutcome(t, res.Verdict == verification.VerdictPass || res.Verdict == verification.VerdictPassWithWarning)
 	t.Output = fmt.Sprintf("verdict: %s", res.Verdict)
 	t.AddStep(agent.Step{
 		Action:     "verify",

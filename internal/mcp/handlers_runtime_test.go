@@ -10,6 +10,7 @@ import (
 // status snapshot reports wired=false with the enable hint (the same shape
 // as `kern runtime status --json`).
 func TestHandleRuntimeStatusUnwired(t *testing.T) {
+	t.Parallel()
 	srv := newTestServer()
 	ctx := context.Background()
 	res, err := srv.handleRuntime(ctx, map[string]any{"action": "status"})
@@ -27,6 +28,7 @@ func TestHandleRuntimeStatusUnwired(t *testing.T) {
 // TestHandleRuntimeDrift: drift always returns the report shape (matched /
 // prod_only / code_only) even with no source wired.
 func TestHandleRuntimeDrift(t *testing.T) {
+	t.Parallel()
 	srv := newTestServer()
 	ctx := context.Background()
 	res, err := srv.handleRuntime(ctx, map[string]any{"action": "drift"})
@@ -43,6 +45,7 @@ func TestHandleRuntimeDrift(t *testing.T) {
 // TestHandleRuntimeUnknownAction: an invalid action is rejected with a
 // clear error.
 func TestHandleRuntimeUnknownAction(t *testing.T) {
+	t.Parallel()
 	srv := newTestServer()
 	ctx := context.Background()
 	if _, err := srv.handleRuntime(ctx, map[string]any{"action": "bogus"}); err == nil {

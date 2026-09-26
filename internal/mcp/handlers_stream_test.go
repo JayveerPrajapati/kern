@@ -7,6 +7,7 @@ import (
 )
 
 func TestHandleStream(t *testing.T) {
+	t.Parallel()
 	srv := newTestServer()
 	ctx := context.Background()
 

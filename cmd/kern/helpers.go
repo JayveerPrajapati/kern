@@ -21,7 +21,10 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"os/signal"
+	"reflect"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -97,6 +100,74 @@ func renderTeamText(root string) (string, error) {
 		fmt.Fprintf(&b, "  %s [%s] %s: %s\n", t.ID, t.State, t.Type, t.Input)
 	}
 	return b.String(), nil
+}
+
+// nextScheduledRun is the pure next-run computation behind kern loop
+// --schedule: it parses the cron expression and returns the next fire time
+// strictly after now. runLoopScheduled uses it between iterations; the unit
+// tests pin parse + Next + flag wiring through it without sleeping.
+func nextScheduledRun(expr string, now time.Time) (time.Time, error) {
+	sched, err := loop.ParseSchedule(expr)
+	if err != nil {
+		return time.Time{}, err
+	}
+	return sched.Next(now), nil
+}
+
+// runLoopScheduled is the --schedule loop backend (Feature Batch I): it runs
+// the closed loop repeatedly on a cron cadence until interrupted or a run
+// fails hard. Each iteration is a fresh loop run at the CLI's configured
+// level/mode (the existing one-shot path — runLoopCLI or runDo — so output
+// and semantics per iteration are unchanged). Before each run it prints the
+// next fire time. The sleep between runs is cancelled by SIGINT/SIGTERM
+// (signal.NotifyContext, matching the repo's signal conventions), so Ctrl-C
+// stops the loop gracefully with exit 0; a failed run propagates the error
+// (exit 1). An invalid cron expression is a usage error (exit 2).
+func runLoopScheduled(cmd string, f flags, root, intent string) {
+	if _, err := loop.ParseSchedule(f.schedule); err != nil {
+		fatalUsage("loop: --schedule %q: %v", f.schedule, err)
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	for {
+		next, err := nextScheduledRun(f.schedule, time.Now())
+		if err != nil {
+			fatal("Loop: %v", err)
+		}
+		if next.IsZero() {
+			fatal("Loop: --schedule %q: no next run within the scan horizon", f.schedule)
+		}
+		fmt.Printf("[schedule] next run at %s (%s)\n", next.Format(time.RFC3339), f.schedule)
+
+		if d := time.Until(next); d > 0 {
+			timer := time.NewTimer(d)
+			select {
+			case <-ctx.Done():
+				if !timer.Stop() {
+					<-timer.C
+				}
+				return // SIGINT/SIGTERM → graceful stop, exit 0
+			case <-timer.C:
+			}
+		}
+
+		if f.mode == "autonomous" {
+			text, err := runDo(root, f.level, intent)
+			if err != nil {
+				fmt.Print(text)
+				fatal("Loop: %v", err)
+			}
+			fmt.Print(text)
+			continue
+		}
+		text, err := runLoopCLI(root, f.level, intent)
+		if err != nil {
+			fmt.Print(text)
+			fatal("Loop: %v", err)
+		}
+		fmt.Print(text)
+	}
 }
 
 // runLoopCLI drives the closed loop (Workflow E, autonomy-gated) against an
@@ -352,7 +423,7 @@ func isVerifyTypes(s string) bool {
 	}
 	for _, t := range strings.Split(trimmed, ",") {
 		switch strings.TrimSpace(t) {
-		case "build", "test", "security", "architecture", "dependency":
+		case "build", "test", "security", "architecture", "dependency", "cve", "license", "secrets":
 		default:
 			return false
 		}
@@ -377,10 +448,22 @@ func suggestSymbols(ix *index.Index, query string) []string {
 	if ix == nil || query == "" {
 		return nil
 	}
+	// Ranked-search hits first: a case-variant camelCase query
+	// ("sanitizeDocName" -> "SanitizeDocName") that the anchored Search
+	// below misses scores strongly here (>= 150 = matches every query
+	// token). The bottom dedupe keeps the list at 5 unique full names.
+	var suggestions []index.Symbol
+	for _, h := range intel.RankedSearchScored(ix, query, 5) {
+		if h.Score >= 150 {
+			suggestions = append(suggestions, h.Symbol)
+		}
+	}
 	// V10: share the MCP server's candidate logic (handlers_graph.go) so the
 	// CLI's "did you mean" set matches kern_explore/kern_graph: anchored
 	// Search first, wildcard-substring fallback, deduped by full name.
-	suggestions := ix.Search(query, 10)
+	if len(suggestions) == 0 {
+		suggestions = ix.Search(query, 10)
+	}
 	if len(suggestions) == 0 {
 		suggestions = ix.Search("*"+query+"*", 10)
 	}
@@ -428,6 +511,20 @@ func fatalNoSymbol(symbol string, ix *index.Index) {
 	fatal("%s", msg)
 }
 
+// fatalNoSearchMatch prints a "no symbols matched" error with optional
+// suggestions (the same did-you-mean UX as fatalNoSymbol) and exits 1 — the
+// `kern search` no-match contract (F1): search used to exit 0 on an empty
+// result, breaking the explore/graph convention that "not found" is an error
+// for scripts and CI. The --json path is untouched: an empty result array is
+// data, not an error, and stays exit 0.
+func fatalNoSearchMatch(query string, ix *index.Index) {
+	msg := fmt.Sprintf("no symbols matched: %s", query)
+	if suggestions := suggestSymbols(ix, query); len(suggestions) > 0 {
+		msg += "\n\ndid you mean one of: " + strings.Join(suggestions, ", ")
+	}
+	fatal("%s", msg)
+}
+
 // splitRange parses a git range "a..b" into (from, to). A single ref is kept
 // as "from" with "to" empty, which git treats as "compare to working tree".
 func splitRange(r string) (string, string) {
@@ -441,11 +538,93 @@ func splitRange(r string) (string, string) {
 }
 
 func printJSON(v any) {
-	b, err := json.MarshalIndent(v, "", "  ")
+	b, err := json.MarshalIndent(clipJSONStrings(v), "", "  ")
 	if err != nil {
 		fatal("printJSON: %v", err)
 	}
 	fmt.Println(string(b))
+}
+
+// maxJSONFieldLen bounds any single string field emitted by printJSON. It is
+// a safety net for --json payloads whose embedded command output can grow
+// unboundedly (a `go test -v` log in a verification result measured 606 KB;
+// dogfooding F4): oversized fields are truncated with a marker so the payload
+// stays valid JSON. The engine-side capture clipping already bounds the common
+// paths; this guard exists so no --json surface can dump multi-MB strings to
+// the terminal.
+const maxJSONFieldLen = 512 * 1024
+
+// jsonTruncMarker is appended to a string field truncated by the printJSON
+// safety guard, so truncated output is visibly marked rather than silently
+// cut.
+const jsonTruncMarker = "\n… [kern: field truncated at 512 KiB safety cap — full value kept in .kern/audit logs]"
+
+// clipJSONStrings returns a deep copy of v in which every string longer than
+// maxJSONFieldLen is truncated with jsonTruncMarker. Structure, field order,
+// and non-string values (including exact int64/float values) are preserved, so
+// the JSON shape is identical to an untruncated marshal except for oversized
+// strings. Deterministic, no LLM.
+func clipJSONStrings(v any) any {
+	rv := reflect.ValueOf(v)
+	if !rv.IsValid() {
+		return nil
+	}
+	return clipJSONValue(rv).Interface()
+}
+
+func clipJSONValue(rv reflect.Value) reflect.Value {
+	if !rv.IsValid() {
+		return rv
+	}
+	switch rv.Kind() {
+	case reflect.String:
+		if rv.Len() > maxJSONFieldLen {
+			return reflect.ValueOf(rv.String()[:maxJSONFieldLen] + jsonTruncMarker)
+		}
+		return rv
+	case reflect.Pointer:
+		if rv.IsNil() {
+			return rv
+		}
+		ev := clipJSONValue(rv.Elem())
+		nv := reflect.New(ev.Type())
+		nv.Elem().Set(ev)
+		return nv
+	case reflect.Interface:
+		if rv.IsNil() {
+			return rv
+		}
+		return clipJSONValue(rv.Elem())
+	case reflect.Struct:
+		nv := reflect.New(rv.Type()).Elem()
+		for i := 0; i < rv.NumField(); i++ {
+			if rv.Field(i).CanInterface() {
+				nv.Field(i).Set(clipJSONValue(rv.Field(i)))
+			}
+		}
+		return nv
+	case reflect.Slice:
+		if rv.IsNil() {
+			return rv
+		}
+		nv := reflect.MakeSlice(rv.Type(), rv.Len(), rv.Len())
+		for i := 0; i < rv.Len(); i++ {
+			nv.Index(i).Set(clipJSONValue(rv.Index(i)))
+		}
+		return nv
+	case reflect.Map:
+		if rv.IsNil() {
+			return rv
+		}
+		nv := reflect.MakeMapWithSize(rv.Type(), rv.Len())
+		iter := rv.MapRange()
+		for iter.Next() {
+			nv.SetMapIndex(iter.Key(), clipJSONValue(iter.Value()))
+		}
+		return nv
+	default:
+		return rv
+	}
 }
 
 // printSavingsFooter writes the canonical savings banner as the last
@@ -612,16 +791,34 @@ func isDir(p string) bool {
 // subcommand repeats. The index-open error is returned so each caller formats
 // its own failure message.
 func resolveRoot(f flags, args []string) (string, *index.Index, error) {
-	root := f.root
-	if root == "" {
-		root = "."
-		if len(args) > 0 {
-			root = args[0]
-		}
+	root := projectRoot(f)
+	if f.root == "" && len(args) > 0 {
+		root = args[0]
 	}
 	ix, err := intel.ReadIndex(root)
 	if err != nil {
 		return root, nil, err
 	}
 	return root, ix, nil
+}
+
+// projectRoot returns the command's --root value, defaulting to the current
+// directory — the root-resolution preamble most subcommands repeat (previously
+// an inline "default root to ." guard at every call site).
+func projectRoot(f flags) string {
+	if f.root != "" {
+		return f.root
+	}
+	return "."
+}
+
+// parseFlagsOrDie parses subcommand flags, exiting with a usage error (exit
+// code 2) on failure — the flag-parsing preamble every subcommand repeats
+// (previously an inline err-check + fatalUsage at every call site).
+func parseFlagsOrDie(rest []string) (flags, []string) {
+	f, args, err := parseFlags(rest)
+	if err != nil {
+		fatalUsage("flags: %v", err)
+	}
+	return f, args
 }

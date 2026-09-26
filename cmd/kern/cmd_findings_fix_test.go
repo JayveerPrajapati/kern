@@ -117,6 +117,38 @@ func main() { _ = FindUser() }
 	}
 }
 
+// TestRunSearchNoMatchExits1 pins the F1 CLI contract: `kern search` with no
+// matching symbols exits 1 (the same no-match contract as kern explore/kern
+// graph) instead of the old silent exit 0. The message names the miss and
+// carries the "kern: " error prefix on stderr.
+func TestRunSearchNoMatchExits1(t *testing.T) {
+	dir := t.TempDir()
+	writeFixtureFile(t, dir, "go.mod", "module searchfix\n\ngo 1.20\n")
+	writeFixtureFile(t, dir, "service.go", `package main
+
+// UserService handles user provisioning.
+func UserService() int { return 1 }
+
+func main() { _ = UserService() }
+`)
+	stderr, code := fixesRunStderrExit(func() {
+		runSearch([]string{"DefinitelyNoSuchSymbolXYZ", dir, "--limit", "5"})
+	})
+	if code != 1 {
+		t.Fatalf("exit code = %d, want 1 (no-match contract, same as kern explore)", code)
+	}
+	if !strings.Contains(stderr, "no symbols matched: DefinitelyNoSuchSymbolXYZ") {
+		t.Errorf("stderr missing no-match message: %q", stderr)
+	}
+	// The JSON surface is data, not an error: an empty result array stays exit 0.
+	jsonCode := fixesExitCode(func() {
+		runSearch([]string{"DefinitelyNoSuchSymbolXYZ", dir, "--limit", "5", "--json"})
+	})
+	if jsonCode != 0 {
+		t.Fatalf("exit code = %d, want 0 (empty --json result is data, not an error)", jsonCode)
+	}
+}
+
 func TestRunPromptUnknownTemplateGuidesUser(t *testing.T) {
 	// Run from a scratch dir so the pre-render project-map build is cheap.
 	dir := t.TempDir()
@@ -136,8 +168,8 @@ func TestRunPromptUnknownTemplateGuidesUser(t *testing.T) {
 		if !strings.Contains(stderr, "kern prompt list") {
 			t.Errorf("stderr missing `kern prompt list` hint: %s", stderr)
 		}
-		if !strings.Contains(stderr, "--file PATH") {
-			t.Errorf("stderr missing --file PATH hint: %s", stderr)
+		if !strings.Contains(stderr, "--file <file>") {
+			t.Errorf("stderr missing --file <file> hint: %s", stderr)
 		}
 	})
 }

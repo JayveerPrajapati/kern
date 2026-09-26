@@ -26,11 +26,23 @@ kern-mcp                      # stdio mode (binary)
 and read the response body. A `/health` endpoint reports liveness.
 
 ```
-kern-mcp --http :8080                                   # plain HTTP
+kern-mcp --http auto                                          # default: 0600 unix socket (recommended)
+kern-mcp --http unix:/tmp/kern-mcp.sock                       # explicit unix socket
+kern-mcp --http :8080                                         # explicit loopback TCP
 kern-mcp --http :8080 --tls-cert cert.pem --tls-key key.pem   # TLS
 ```
 
-- The listener binds to **loopback only**; non-loopback binds are rejected for
+- **Transport selection.** An explicit unix path (`unix:PATH`, `/PATH`, `*.sock`)
+  or an explicit TCP address (`:8080`, `host:port`) is honored as given. The
+  sentinel `auto` (or `uds`), and an empty address from library callers,
+  auto-selects a **unix domain socket in a fresh `0700` temp dir**, with the
+  socket file created `0600` — reachable only by the owning user, whereas a
+  loopback TCP port is reachable by *any* local process on a multi-user host.
+  The chosen socket path is printed to stderr so clients can connect. The
+  auto-selection falls back to loopback TCP on `127.0.0.1:8080` only on Windows
+  (no unix sockets) or when the legacy behavior is forced with
+  `KERN_MCP_TRANSPORT=tcp`. The socket is unlinked on clean shutdown.
+- Explicit TCP binds are **loopback only**; non-loopback binds are rejected for
   security (`kern-server` is the network-facing binary).
 - An HTTP **Origin check** applies on every request.
 - **TLS is optional and opt-in**: `--tls-cert` / `--tls-key` flags, or the
@@ -111,8 +123,8 @@ Each tool entry has the shape:
 
 ```json
 {
-  "name": "kern_code_graph",
-  "description": "Return the call graph neighbourhood of a symbol...",
+  "name": "kern_graph",
+  "description": "One-call graph context: names-only adjacency for a symbol...",
   "inputSchema": {
     "type": "object",
     "properties": {"symbol": {"type": "string", "description": "..."}},
@@ -130,7 +142,7 @@ list is filtered by the server's phase configuration (§5); `kern_meta` and all
 ### 3.5 `tools/call`
 
 ```json
-{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"kern_code_graph","arguments":{"symbol":"User.Login","root":"/path/to/project"}}}
+{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"kern_graph","arguments":{"symbol":"User.Login","root":"/path/to/project"}}}
 ```
 
 Responses are MCP content blocks:
@@ -183,7 +195,7 @@ sub-tool regardless.
 | Env var | Effect |
 |---|---|
 | `KERN_MCP_PHASE` | `explore` \| `plan` \| `edit` \| `verify` — advertise only that phase's shortlist plus always-on meta/cross tools |
-| `KERN_MCP_FULL=1` | Advertise the full 146-tool catalog (default is the minimal ~11-tool surface) |
+| `KERN_MCP_FULL=1` | Advertise the full 139-tool catalog (default is the minimal ~11-tool surface) |
 | `KERN_MCP_SINGLE_TOOL=1` | Advertise only `kern_meta` |
 | `KERN_MCP_ROOTS` | Comma-separated allowed workspace roots for the path gate (§6); also configurable as `mcp.roots` in `.kern/config.json` |
 | `KERN_MCP_PERMISSIVE=1` | Opt out of the path-confinement gate |

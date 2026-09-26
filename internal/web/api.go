@@ -242,10 +242,34 @@ func (a *App) handleV1Impact(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	// F-WC1: bound the wire payload — the transitive closures (WhatItCalls
+	// especially) can reach thousands of qualified names (1.5MB measured on
+	// a real repo) where every other surface truncates. Each list is capped
+	// at v1ImpactListCap entries; `truncated` reports the FULL original
+	// sizes so callers know what was cut.
+	const v1ImpactListCap = 200
+	truncated := map[string]int{}
+	capList := func(field string, in []string) []string {
+		if len(in) <= v1ImpactListCap {
+			return in
+		}
+		truncated[field] = len(in)
+		out := make([]string, v1ImpactListCap)
+		copy(out, in[:v1ImpactListCap])
+		return out
+	}
+	rep.WhatItCalls = capList("what_it_calls", rep.WhatItCalls)
+	rep.WhoCalls = capList("who_calls", rep.WhoCalls)
+	rep.ServicesDepend = capList("services_depend", rep.ServicesDepend)
+	rep.APIsAffected = capList("apis_affected", rep.APIsAffected)
+	rep.DataStoresAffected = capList("data_stores_affected", rep.DataStoresAffected)
+	rep.EventsAffected = capList("events_affected", rep.EventsAffected)
+	rep.TestsCover = capList("tests_cover", rep.TestsCover)
 	writeJSON(w, http.StatusOK, struct {
 		domain.ImpactReport
-		TaskID string `json:"task_id,omitempty"`
-	}{ImpactReport: rep, TaskID: t.ID})
+		TaskID    string         `json:"task_id,omitempty"`
+		Truncated map[string]int `json:"truncated,omitempty"`
+	}{ImpactReport: rep, TaskID: t.ID, Truncated: truncated})
 }
 
 // verifyTypes is a lenient decoder for the /v1/verify "types" field. The
@@ -368,11 +392,10 @@ func (a *App) handleV1Graph(w http.ResponseWriter, r *http.Request) {
 	}
 	var node *domain.Node
 	g, _ := a.freshGraph()
-	for i := range g.Nodes {
-		if g.Nodes[i].ID == entity {
-			node = &g.Nodes[i]
-			break
-		}
+	// O(1) node lookup via the graph's cached byID map (no linear scan of
+	// g.Nodes).
+	if n, ok := g.NodeByID(entity); ok {
+		node = &n
 	}
 	nodeID := entity
 	if node == nil {
@@ -382,11 +405,8 @@ func (a *App) handleV1Graph(w http.ResponseWriter, r *http.Request) {
 		// of the resolved node; unknown entities keep the 404.
 		if id, ok := g.ResolveNodeID(entity); ok {
 			nodeID = id
-			for i := range g.Nodes {
-				if g.Nodes[i].ID == id {
-					node = &g.Nodes[i]
-					break
-				}
+			if n, ok := g.NodeByID(id); ok {
+				node = &n
 			}
 		}
 	}
@@ -1119,22 +1139,19 @@ func (a *App) handleV1Audit(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	// Gather governance audit entries for this task (Invariant 4). The
-	// service layer reads the tamper-evident audit trail so the console and
-	// the CLI/MCP surface the same records.
+	// governance package reads the tamper-evident audit trail so the console
+	// and the CLI/MCP surface the same records.
 	var auditEntries []governance.AuditEntry
-	if a.svc != nil {
-		if entries, err := a.svc.Governance.Audit(r.Context(), a.root, taskID); err == nil {
-			auditEntries = entries
-		}
+	if entries, err := governance.ReadAuditTrail(r.Context(), a.root, taskID); err == nil {
+		auditEntries = entries
 	}
-	// Gather pending approvals for this task.
+	// Gather pending approvals for this task from the persistent approval
+	// store the App already owns (a.fileApprovals).
 	var pendingApprovals []domain.Approval
-	if a.svc != nil {
-		if pending, err := a.svc.Governance.PendingApprovals(r.Context(), a.root); err == nil {
-			for _, ap := range pending {
-				if ap.TaskID == taskID {
-					pendingApprovals = append(pendingApprovals, ap)
-				}
+	if pending, err := a.fileApprovals.Pending(); err == nil {
+		for _, ap := range pending {
+			if ap.TaskID == taskID {
+				pendingApprovals = append(pendingApprovals, ap)
 			}
 		}
 	}
@@ -1149,6 +1166,62 @@ func (a *App) handleV1Audit(w http.ResponseWriter, r *http.Request) {
 		Audit:     auditEntries,
 		Approvals: pendingApprovals,
 	})
+}
+
+// handleV1ToolCall is the single REST passthrough to the full MCP tool
+// catalog: POST /v1/tools/{name} delegates to the same in-process governed
+// dispatch path MCP clients hit (KERN_TOOLS allowlist, root confinement,
+// RBAC), so non-Go SDKs reach the entire catalog through ONE route instead of
+// 140 typed endpoints. The request body is the tool's argument map; the
+// response is {"output": <raw tool text>}. The governance posture is
+// identical to the other /v1 routes — ServeHTTP's bearer gate, rate limit and
+// CSRF/DNS-rebinding guard all apply — and the in-process call itself fails
+// closed exactly like an MCP tools/call: out-of-confinement roots, allowlist
+// denials and RBAC refusals surface as 403, unknown tools as 404. The call
+// runs under the same per-call ceiling MCP imposes (30m) so a slow tool
+// cannot hang the handler.
+func (a *App) handleV1ToolCall(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	name, err := url.PathUnescape(strings.TrimPrefix(r.URL.Path, "/v1/tools/"))
+	if err != nil || strings.TrimSpace(name) == "" {
+		writeError(w, http.StatusBadRequest, "invalid tool name")
+		return
+	}
+	var args map[string]any
+	if err := json.NewDecoder(r.Body).Decode(&args); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body: "+err.Error())
+		return
+	}
+	if a.tools == nil {
+		writeError(w, http.StatusServiceUnavailable, "tool dispatch unavailable")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Minute)
+	defer cancel()
+	out, err := a.tools.CallToolGoverned(ctx, name, args)
+	if err != nil {
+		// Typed sentinel mapping (finding 6): the governed dispatch path
+		// classifies every pre-execution denial as domain.ErrToolDenied and
+		// every unknown tool as domain.ErrToolUnknown, so the HTTP status is
+		// decided by errors.Is, never by matching raw error text. Only the
+		// generic safe messages are returned to the client; the full detail
+		// is logged server-side (a raw err.Error() leak discloses internal
+		// paths/policy to REST clients).
+		switch {
+		case errors.Is(err, domain.ErrToolUnknown):
+			writeError(w, http.StatusNotFound, "unknown tool: "+name)
+		case errors.Is(err, domain.ErrToolDenied):
+			writeError(w, http.StatusForbidden, "tool call denied")
+		default:
+			log.Printf("web: /v1/tools/%s failed: %v", name, err)
+			writeError(w, http.StatusInternalServerError, "tool call failed")
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"output": out})
 }
 
 // handleV1EventsStream provides a JSON-lines Server-Sent Events (SSE) stream for real-time telemetry (KernOps Phase 2).
@@ -1169,7 +1242,10 @@ func (a *App) handleV1EventsStream(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Accel-Buffering", "no")
 
 	if a.bus == nil {
-		_, _ = fmt.Fprintf(w, "event: error\ndata: {\"error\":\"event bus not configured\"}\n\n")
+		if _, err := fmt.Fprintf(w, "event: error\ndata: {\"error\":\"event bus not configured\"}\n\n"); err != nil {
+			log.Printf("sse: write failed: %v", err)
+			return
+		}
 		flusher.Flush()
 		return
 	}
@@ -1178,7 +1254,10 @@ func (a *App) handleV1EventsStream(w http.ResponseWriter, r *http.Request) {
 	// client always observes the handshake first — a client parser that
 	// expects "connected" before any bus event must never see a data event
 	// arrive ahead of it — and so the chunk is on the wire immediately.
-	_, _ = fmt.Fprintf(w, "event: connected\ndata: {\"status\":\"connected\",\"timestamp\":%d}\n\n", time.Now().Unix())
+	if _, err := fmt.Fprintf(w, "event: connected\ndata: {\"status\":\"connected\",\"timestamp\":%d}\n\n", time.Now().Unix()); err != nil {
+		log.Printf("sse: write failed: %v", err)
+		return
+	}
 	flusher.Flush()
 
 	ch := make(chan eventbus.Event, 64)
@@ -1201,7 +1280,14 @@ func (a *App) handleV1EventsStream(w http.ResponseWriter, r *http.Request) {
 			if err != nil {
 				continue
 			}
-			_, _ = fmt.Fprintf(w, "event: %s\ndata: %s\n\n", ev.Kind, string(data))
+			if _, err := fmt.Fprintf(w, "event: %s\ndata: %s\n\n", ev.Kind, string(data)); err != nil {
+				// The client disconnected (or the write otherwise failed).
+				// The request context cancellation also triggers ctx.Done()
+				// below, but a failing write is the definitive signal — stop
+				// the stream cleanly instead of looping on broken writes.
+				log.Printf("sse: write failed: %v", err)
+				return
+			}
 			flusher.Flush()
 		}
 	}

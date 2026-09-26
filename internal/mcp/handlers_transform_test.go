@@ -8,6 +8,7 @@ import (
 )
 
 func TestHandleAstTransformImplementInterface(t *testing.T) {
+	t.Parallel()
 	s := NewServer(strings.NewReader(""), io.Discard)
 
 	code := `package main
@@ -36,6 +37,7 @@ type CustomBuffer struct {
 }
 
 func TestHandleAstTransformAddField(t *testing.T) {
+	t.Parallel()
 	s := NewServer(strings.NewReader(""), io.Discard)
 
 	code := `package main

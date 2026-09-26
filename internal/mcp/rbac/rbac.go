@@ -1,95 +1,117 @@
-// Package rbac owns the role-based access control evaluation and role matrix
-// for agents in kern (kern_agent_role_rbac).
+// Package rbac owns the agent role-based access control matrix (kern_agent_role_rbac).
 package rbac
 
 import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
+	"os"
 	"strings"
 	"sync"
 
+	"github.com/JayveerPrajapati/kern/internal/governance"
 	"github.com/JayveerPrajapati/kern/internal/mcp/mcpargs"
+	"github.com/JayveerPrajapati/kern/internal/orgapprovals"
 )
-
-// RoleDefinition is an RBAC role: a named set of allowed/denied tools plus
-// execution and write capabilities.
-type RoleDefinition struct {
-	Role         string   `json:"role"`
-	Description  string   `json:"description"`
-	AllowedTools []string `json:"allowed_tools"` // Glob or tool names; "*" for all
-	DeniedTools  []string `json:"denied_tools"`
-	CanExecute   bool     `json:"can_execute"`
-	CanWrite     bool     `json:"can_write"`
-}
 
 var (
 	rbacMu     sync.RWMutex
-	agentRoles = map[string]string{
-		"default": "developer",
-	}
+	agentRoles = map[string]string{}
+	// rolesOnce defers the persisted-assignment restore to first use instead
+	// of package init() (which did filesystem I/O + global mutation at import
+	// time); see loadRoles.
+	rolesOnce sync.Once
+	// assignMu serializes the assign snapshot→save→commit sequence (finding 4).
+	assignMu sync.Mutex
 
-	roleDefinitions = map[string]RoleDefinition{
-		"admin": {
-			Role:         "admin",
-			Description:  "Unrestricted access across all tools and execution capabilities",
-			AllowedTools: []string{"*"},
-			CanExecute:   true,
-			CanWrite:     true,
-		},
-		"architect": {
-			Role:         "architect",
-			Description:  "Read-only architectural analysis, planning, and policy evaluation",
-			AllowedTools: []string{"kern_compact_file", "kern_project_map", "kern_code_graph", "kern_explore", "kern_search", "kern_ast_search", "kern_explain", "kern_policy_dsl", "kern_what_if", "kern_impact", "kern_pre_edit", "kern_arch", "kern_health", "kern_memory*"},
-			DeniedTools:  []string{"kern_exec", "kern_fix", "kern_safe_delete", "kern_run_build"},
-			CanExecute:   false,
-			CanWrite:     false,
-		},
-		"developer": {
-			Role:         "developer",
-			Description:  "Full development access: read, edit, build, test, compose",
-			AllowedTools: []string{"*"},
-			CanExecute:   true,
-			CanWrite:     true,
-		},
-		"junior_dev": {
-			Role:         "junior_dev",
-			Description:  "Guided development with restricted execution and safe edits",
-			AllowedTools: []string{"kern_compact_file", "kern_project_map", "kern_search", "kern_pre_edit", "kern_semantic_diff", "kern_prompt_fill", "kern_explain", "kern_run_build"},
-			DeniedTools:  []string{"kern_exec", "kern_fix", "kern_safe_delete", "kern_sandbox", "kern_lock"},
-			CanExecute:   false,
-			CanWrite:     false,
-		},
-		"reviewer": {
-			Role:         "reviewer",
-			Description:  "Read-only code review, semantic diffing, and citation verification",
-			AllowedTools: []string{"kern_compact_file", "kern_project_map", "kern_search", "kern_diff_files", "kern_semantic_diff", "kern_evidence_anchor", "kern_explain", "kern_policy_dsl"},
-			DeniedTools:  []string{"kern_exec", "kern_fix", "kern_safe_delete", "kern_run_build", "kern_lock"},
-			CanExecute:   false,
-			CanWrite:     false,
-		},
-		"auditor": {
-			Role:         "auditor",
-			Description:  "Security & governance compliance verification, audit receipts inspection",
-			AllowedTools: []string{"kern_audit", "kern_security", "kern_policy_dsl", "kern_evidence_anchor", "kern_health", "kern_explain"},
-			DeniedTools:  []string{"kern_exec", "kern_fix", "kern_run_build", "kern_safe_delete"},
-			CanExecute:   false,
-			CanWrite:     false,
-		},
-	}
+	// primaryRoot: root loadRoles() restored RBAC from (process cwd); other roots persist, never swap in-memory.
+	primaryRoot string
 )
 
-// ResetMemory resets agent role assignments (used in tests).
-func ResetMemory() {
-	rbacMu.Lock()
-	defer rbacMu.Unlock()
-	agentRoles = map[string]string{
-		"default": "developer",
+// resolveOrgWins mirrors orgapprovals.ResolveRole via the org-role cache
+// (finding 5): the cache lives in orgapprovals WITH the store it caches
+// (R3), and AssignOrgRole invalidates it directly after every save, so the
+// mtime+size check only has to cover cross-process writes and hand-edits.
+func resolveOrgWins(projectRole string, projectAssigned bool, agentID string) (role string, assigned bool) {
+	if orgRoot := governance.OrgRoot(); orgRoot != "" {
+		roles, err := orgapprovals.CachedOrgRolesFor(orgRoot)
+		if err == nil {
+			if r, ok := roles[agentID]; ok && r != "" {
+				return r, true
+			}
+		}
 	}
+	if projectAssigned {
+		return projectRole, true
+	}
+	return "", false
 }
 
-// Handle evaluates or configures agent role RBAC rules.
+// ResetMemory clears agent role assignments (tests only; "default" stays unseeded).
+func ResetMemory() {
+	loadRoles() // fire the one-shot restore first so a later use cannot reload after the reset
+	rbacMu.Lock()
+	defer rbacMu.Unlock()
+	agentRoles = map[string]string{}
+}
+
+// loadRoles restores persisted assignments on first RBAC use (finding 8); a
+// corrupt store fails closed. Replaces the former init(): same capture, same
+// fail-closed log, but lazy — no filesystem I/O or global mutation at package
+// import time. Every function that reads agentRoles/primaryRoot must call it
+// first; the sync.Once guarantees the restore runs exactly once per process.
+func loadRoles() {
+	rolesOnce.Do(func() {
+		primaryRoot = governance.ProcessRoot()
+		if primaryRoot == "" {
+			return
+		}
+		roles, err := governance.LoadRBACRoles(primaryRoot)
+		if err != nil {
+			log.Printf("kern rbac: role store unreadable, starting with no assignments (fail closed): %v", err)
+			return
+		}
+		rbacMu.Lock()
+		defer rbacMu.Unlock()
+		for id, role := range roles {
+			agentRoles[id] = role
+		}
+	})
+}
+
+// CheckAgentTool enforces RBAC at the tool-dispatch choke point. Resolution
+// (Stage 2, org-wins): an org role beats the project role; else the project
+// role; else unassigned — legacy permit-all unless KERN_RBAC_DEFAULT_DENY=1
+// maps it to read-only "reviewer" (taxonomy: governance rbac_defs.go).
+func CheckAgentTool(agentID, toolName string) (allowed bool, reason string) {
+	loadRoles()
+	rbacMu.RLock()
+	projectRole, projectAssigned := agentRoles[agentID]
+	rbacMu.RUnlock()
+	roleName, assigned := resolveOrgWins(projectRole, projectAssigned, agentID)
+	if !assigned {
+		// Legacy loopback trust; default-deny maps unassigned agents to "reviewer".
+		if os.Getenv("KERN_RBAC_DEFAULT_DENY") == "1" {
+			def, ok := governance.LookupRole("reviewer")
+			if !ok {
+				return false, fmt.Sprintf("agent %q has no assigned role and default-deny is enabled", agentID)
+			}
+			return governance.ToolAllowedByDef(def, toolName)
+		}
+		return true, ""
+	}
+	def, ok := governance.LookupRole(roleName)
+	if !ok {
+		// assign validates role names; fail closed rather than allow on a config error.
+		return false, fmt.Sprintf("agent %q is assigned unknown role %q", agentID, roleName)
+	}
+	return governance.ToolAllowedByDef(def, toolName)
+}
+
+// Handle evaluates or configures agent role RBAC rules; assign serializes under assignMu, never rbacMu.
 func Handle(ctx context.Context, args map[string]any) (string, error) {
+	loadRoles()
 	action := strings.ToLower(strings.TrimSpace(mcpargs.ArgString(args, "action")))
 	toolName := strings.TrimSpace(mcpargs.ArgString(args, "tool"))
 	if action == "" {
@@ -100,15 +122,13 @@ func Handle(ctx context.Context, args map[string]any) (string, error) {
 		}
 	}
 
-	rbacMu.Lock()
-	defer rbacMu.Unlock()
-
 	format := strings.ToLower(mcpargs.ArgString(args, "format"))
 
 	switch action {
 	case "roles":
-		var list []RoleDefinition
-		for _, r := range roleDefinitions {
+		// The taxonomy is immutable after package init; no lock needed.
+		var list []governance.RoleDefinition
+		for _, r := range governance.RoleDefinitions() {
 			list = append(list, r)
 		}
 		if format == "json" {
@@ -125,15 +145,66 @@ func Handle(ctx context.Context, args map[string]any) (string, error) {
 		return sb.String(), nil
 
 	case "assign":
+		// 'assign' is NOT self-service — fails closed without KERN_ALLOW_RBAC_ASSIGN / KERN_RBAC_DEFAULT_DENY.
+		if os.Getenv("KERN_ALLOW_RBAC_ASSIGN") != "1" && os.Getenv("KERN_RBAC_DEFAULT_DENY") != "1" {
+			return "", fmt.Errorf("kern_agent_role_rbac: 'assign' is disabled (fails closed); set KERN_ALLOW_RBAC_ASSIGN=1 to enable role assignment")
+		}
 		agentID := mcpargs.ArgString(args, "agent_id")
 		if agentID == "" {
 			return "", fmt.Errorf("kern_agent_role_rbac: 'agent_id' required to assign role")
 		}
 		roleName := strings.ToLower(strings.TrimSpace(mcpargs.ArgString(args, "role")))
-		if _, ok := roleDefinitions[roleName]; !ok {
+		if _, ok := governance.LookupRole(roleName); !ok {
 			return "", fmt.Errorf("kern_agent_role_rbac: unknown role %q", roleName)
 		}
-		agentRoles[agentID] = roleName
+		// P13 stage 2: scope=org persists to the org role store (org-wins), never the project map.
+		if strings.EqualFold(mcpargs.ArgString(args, "scope"), "org") || mcpargs.ArgBool(args, "org") {
+			orgRoot := governance.OrgRoot()
+			if orgRoot == "" {
+				return "", fmt.Errorf("kern_agent_role_rbac: org-scope assign requires %s", governance.OrgRootEnv)
+			}
+			if err := orgapprovals.AssignOrgRole(orgRoot, agentID, roleName); err != nil {
+				return "", fmt.Errorf("kern_agent_role_rbac: assign org role %q=%q: %w", agentID, roleName, err)
+			}
+			// AssignOrgRole self-invalidates the org-role cache after its
+			// atomic save (R3): the very next CheckAgentTool re-reads the
+			// store with zero staleness.
+			return fmt.Sprintf("✅ Assigned org role %q to agent %q (org %s)", roleName, agentID, orgRoot), nil
+		}
+		// Persist-first with the DISK store as snapshot base; same-root commit ACTIVATES roles.
+		root := mcpargs.ArgString(args, "root")
+		if root == "" {
+			root, _ = os.Getwd()
+		}
+		if root == "" {
+			return "", fmt.Errorf("kern_agent_role_rbac: cannot determine project root to persist role assignments")
+		}
+		assignMu.Lock()
+		defer assignMu.Unlock()
+		next, err := governance.LoadRBACRoles(root)
+		if err != nil {
+			if !governance.SameRoot(root, primaryRoot) {
+				// Foreign root's store unreadable: fail closed, never leak the primary map into it.
+				return "", fmt.Errorf("kern_agent_role_rbac: cannot read role store for root %s: %w", root, err)
+			}
+			rbacMu.Lock()
+			next = make(map[string]string, len(agentRoles)+1)
+			for id, r := range agentRoles {
+				next[id] = r
+			}
+			rbacMu.Unlock()
+		}
+		next[agentID] = roleName
+		if err := governance.SaveRBACRoles(root, next); err != nil {
+			return "", fmt.Errorf("kern_agent_role_rbac: assign %q=%q: %w", agentID, roleName, err)
+		}
+		if !governance.SameRoot(root, primaryRoot) {
+			// Cross-root assign: persist only, never swap this process's in-memory map.
+			return fmt.Sprintf("✅ Assigned role %q to agent %q (persisted for %s; enforced by processes rooted there after their next restart or assignment)", roleName, agentID, root), nil
+		}
+		rbacMu.Lock()
+		agentRoles = next
+		rbacMu.Unlock()
 		return fmt.Sprintf("✅ Assigned role %q to agent %q", roleName, agentID), nil
 
 	case "evaluate", "check":
@@ -143,14 +214,20 @@ func Handle(ctx context.Context, args map[string]any) (string, error) {
 		}
 		roleName := strings.ToLower(strings.TrimSpace(mcpargs.ArgString(args, "role")))
 		if roleName == "" {
-			if assigned, ok := agentRoles[agentID]; ok {
-				roleName = assigned
+			// Org-wins resolution, then the project assignment, then defaults.
+			rbacMu.RLock()
+			projectRole, projectAssigned := agentRoles[agentID]
+			rbacMu.RUnlock()
+			if orgRole, orgAssigned := resolveOrgWins(projectRole, projectAssigned, agentID); orgAssigned {
+				roleName = orgRole
+			} else if os.Getenv("KERN_RBAC_DEFAULT_DENY") == "1" {
+				roleName = "reviewer" // matches enforcement: unassigned == read-only reviewer
 			} else {
-				roleName = "developer" // default role
+				roleName = "developer" // legacy default role
 			}
 		}
 
-		def, ok := roleDefinitions[roleName]
+		def, ok := governance.LookupRole(roleName)
 		if !ok {
 			return "", fmt.Errorf("kern_agent_role_rbac: unknown role %q", roleName)
 		}
@@ -159,28 +236,7 @@ func Handle(ctx context.Context, args map[string]any) (string, error) {
 			return "", fmt.Errorf("kern_agent_role_rbac: 'tool' required for evaluation")
 		}
 
-		allowed := false
-		reason := ""
-
-		for _, d := range def.DeniedTools {
-			if d == toolName || d == "*" {
-				allowed = false
-				reason = fmt.Sprintf("Role %q explicitly denies tool %q", roleName, toolName)
-				break
-			}
-		}
-
-		if reason == "" {
-			for _, a := range def.AllowedTools {
-				if a == "*" || a == toolName || (strings.HasSuffix(a, "*") && strings.HasPrefix(toolName, strings.TrimSuffix(a, "*"))) {
-					allowed = true
-					break
-				}
-			}
-			if !allowed {
-				reason = fmt.Sprintf("Role %q does not grant permission to invoke tool %q", roleName, toolName)
-			}
-		}
+		allowed, reason := governance.ToolAllowedByDef(def, toolName)
 
 		verdict := "✅ ALLOWED"
 		if !allowed {

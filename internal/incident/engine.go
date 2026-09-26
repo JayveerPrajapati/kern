@@ -12,6 +12,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/JayveerPrajapati/kern/internal/metrics"
 	"sort"
 	"strings"
 	"time"
@@ -22,7 +23,7 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/execution"
 	"github.com/JayveerPrajapati/kern/internal/governance"
 	"github.com/JayveerPrajapati/kern/internal/index"
-	"github.com/JayveerPrajapati/kern/internal/intelligence"
+	"github.com/JayveerPrajapati/kern/internal/intel"
 	"github.com/JayveerPrajapati/kern/internal/memory"
 	"github.com/JayveerPrajapati/kern/internal/prprovider"
 	"github.com/JayveerPrajapati/kern/internal/runtime"
@@ -40,7 +41,7 @@ type Engine struct {
 	mem        *memory.MemoryStore
 	fw         *governance.Firewall
 	appr       *governance.ApprovalWorkflow
-	graph      *intelligence.Graph
+	graph      *intel.Graph
 	window     time.Duration
 	bus        *eventbus.Bus             // optional event publisher; nil = no-op
 	prProvider prprovider.Provider       // PR creation provider (default Noop)
@@ -54,7 +55,7 @@ func NewEngine(root string, src runtime.Source, mem *memory.MemoryStore, fw *gov
 	if err != nil {
 		return nil, fmt.Errorf("incident: index: %w", err)
 	}
-	g := intelligence.FromIndex(ix)
+	g := intel.FromIndex(ix)
 	return NewEngineWithGraph(root, &g, src, mem, fw)
 }
 
@@ -64,7 +65,7 @@ func NewEngine(root string, src runtime.Source, mem *memory.MemoryStore, fw *gov
 // it as read-only: the engine stores only a reference and never mutates it.
 // This is the hot-path constructor used by servers that already built the graph
 // once at startup.
-func NewEngineWithGraph(root string, g *intelligence.Graph, src runtime.Source, mem *memory.MemoryStore, fw *governance.Firewall) (*Engine, error) {
+func NewEngineWithGraph(root string, g *intel.Graph, src runtime.Source, mem *memory.MemoryStore, fw *governance.Firewall) (*Engine, error) {
 	if g == nil {
 		return nil, errors.New("incident: nil knowledge graph")
 	}
@@ -141,6 +142,9 @@ func (e *Engine) ApprovalWorkflow() *governance.ApprovalWorkflow { return e.appr
 // IngestAlert opens a new incident for an alert.
 func (e *Engine) IngestAlert(a domain.Alert) *domain.Incident {
 	a = sanitizeAlert(a)
+	// Telemetry: one counter per ingested alert (both doors — CLI incident
+	// ingestion and MCP kern_correlate — go through here).
+	metrics.Default().RecordIncident()
 	now := time.Now().UTC()
 	inc := &domain.Incident{
 		ID:        newIncID(),
@@ -150,6 +154,15 @@ func (e *Engine) IngestAlert(a domain.Alert) *domain.Incident {
 		Alert:     a,
 		CreatedAt: now,
 		UpdatedAt: now,
+	}
+	// Heal-playbook auto-attach (Feature Batch D): when a stored playbook
+	// matches the incident's deterministic error signature, attach it so the
+	// incident record/report carries the runbook steps. Signature matching is
+	// exact and deterministic; a missing or empty store is a no-op.
+	if pb, ok := FindPlaybook(e.root, *inc); ok {
+		inc.PlaybookSignature = pb.Signature
+		inc.PlaybookSteps = pb.Steps
+		inc.PlaybookSource = pb.Source
 	}
 	e.publish(eventbus.Event{Kind: eventbus.IncidentCreated, Subject: inc.ID, Payload: map[string]string{"service": a.Service, "severity": string(a.Severity)}})
 	return inc

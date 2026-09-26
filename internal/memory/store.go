@@ -53,6 +53,12 @@ func NewMemoryStore(root string) *MemoryStore {
 	return &MemoryStore{root: root, path: path}
 }
 
+// Root returns the project root the store was created for. App-layer callers
+// (e.g. outcome-driven learning that persists side logs under
+// <root>/.kern/) use it to derive root-relative paths without holding their
+// own copy of the root.
+func (s *MemoryStore) Root() string { return s.root }
+
 // load reads the typed store from disk, returning an empty store if absent. If
 // the file exists but is corrupt JSON, it is renamed to "<path>.corrupt" so the
 // data is preserved for recovery and never silently overwritten on the next
@@ -344,6 +350,55 @@ func (s *MemoryStore) Update(id string, content string, tags []string) (domain.M
 			Allowed:   true,
 		})
 		return ms[i], nil
+	}
+	return domain.Memory{}, os.ErrNotExist
+}
+
+// Replace rewrites an existing memory entry in place with the given fields,
+// preserving its ID and CreatedAt. It is the full-field upsert counterpart to
+// Update (content+tags only): the learning extractor uses it to refresh a
+// remembered constraint's claim metadata (claim type + provenance) on a
+// scope-colliding upsert without appending a duplicate. Status defaults to
+// the existing entry's status when the new memory leaves it empty. Returns
+// os.ErrNotExist when id is unknown. With governance attached, the writer is
+// identified by m.Source ("human" when empty).
+func (s *MemoryStore) Replace(id string, m domain.Memory) (domain.Memory, error) {
+	if strings.TrimSpace(m.Content) == "" {
+		return domain.Memory{}, nil
+	}
+	agent := m.Source
+	if agent == "" {
+		agent = "human"
+	}
+	if err := s.authorize(agent, PermissionWrite); err != nil {
+		return domain.Memory{}, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	ms := s.load()
+	for i := range ms {
+		if ms[i].ID != id {
+			continue
+		}
+		m.ID = id
+		m.CreatedAt = ms[i].CreatedAt
+		m.UpdatedAt = time.Now().UTC()
+		if m.Status == "" {
+			m.Status = ms[i].Status
+		}
+		ms[i] = m
+		if err := s.save(ms); err != nil {
+			return domain.Memory{}, err
+		}
+		s.recordAudit(AuditEvent{
+			AgentID:   agent,
+			Operation: OpUpdate,
+			MemoryID:  id,
+			Type:      m.Type,
+			Scope:     m.Scope,
+			Allowed:   true,
+		})
+		return m, nil
 	}
 	return domain.Memory{}, os.ErrNotExist
 }

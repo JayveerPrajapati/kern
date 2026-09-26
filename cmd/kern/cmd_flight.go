@@ -13,10 +13,10 @@ import (
 
 // runFlight surfaces the AI flight recorder (Workflow E observability):
 //
-//	kern flight list [--root DIR] [--agent X] [--task T] [--status S] [--json]
-//	kern flight show <task-id> [--root DIR]
-//	kern flight tasks [--root DIR] [--json]
-//	kern flight gc [--root DIR] [--keep-tasks N] [--older-than DURATION]
+//	kern flight list [--root ROOT] [--agent X] [--task T] [--status S] [--json]
+//	kern flight show <task-id> [--root ROOT]
+//	kern flight tasks [--root ROOT] [--json]
+//	kern flight gc [--root ROOT] [--keep-tasks N] [--older-than DURATION]
 //
 // Records are written by the autonomous loop / TaskService into <root>/.kern/flight.
 func runFlight(args []string) int {
@@ -92,7 +92,7 @@ func runFlightShow(args []string) int {
 		taskID = pos[0]
 	}
 	if taskID == "" {
-		fmt.Fprintln(os.Stderr, "usage: kern flight show <task-id> [--root DIR]")
+		fmt.Fprintln(os.Stderr, "usage: kern flight show <task-id> [--root ROOT]")
 		return 2
 	}
 	fmt.Print(flight.New(root).TrailText(taskID))

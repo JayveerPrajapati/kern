@@ -7,133 +7,15 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/JayveerPrajapati/kern/internal/app"
+	"github.com/JayveerPrajapati/kern/internal/eventbus"
 )
-
-// classifyCase is one routing expectation for classifyMetaRequest.
-type classifyCase struct {
-	name     string
-	request  string
-	wantTool string
-	wantArgs map[string]string // subset of args that must be present
-}
-
-// TestClassifyMetaRequest_Explore pins the explore-phase routing: a "how
-// does X work" request must classify to kern_explore and extract the symbol.
-// Note: only quoted/dotted/CamelCase symbols are extracted — a bare lowercase
-// symbol like "dispatch" falls back to kern_search by design (extractSymbol's
-// pre-existing behavior, not under test here).
-func TestClassifyMetaRequest_Explore(t *testing.T) {
-	tool, args := classifyMetaRequest("how does NewServer work?")
-	if tool != "kern_explore" {
-		t.Fatalf("classifyMetaRequest = %q, want kern_explore", tool)
-	}
-	if got := args["symbol"]; got != "NewServer" {
-		t.Errorf("args[symbol] = %q, want %q", got, "NewServer")
-	}
-}
-
-// TestClassifyMetaRequest_Plan pins the plan-phase routing: "plan X" must
-// classify to kern_plan (unless it is an implementation-plan query).
-func TestClassifyMetaRequest_Plan(t *testing.T) {
-	tool, _ := classifyMetaRequest("plan adding a greet function")
-	if tool != "kern_plan" {
-		t.Fatalf("classifyMetaRequest = %q, want kern_plan", tool)
-	}
-}
-
-// TestClassifyMetaRequest_Verify pins the verify-phase routing: "verify X"
-// must classify to kern_verify (and kern_verify_output when a claim is named).
-// Note: "verify this change" would hit the earlier change→kern_impact branch;
-// the classifier's keyword order is intentional and not under test here.
-func TestClassifyMetaRequest_Verify(t *testing.T) {
-	tool, _ := classifyMetaRequest("verify this")
-	if tool != "kern_verify" {
-		t.Fatalf("classifyMetaRequest = %q, want kern_verify", tool)
-	}
-}
-
-// TestClassifyMetaRequest_Search pins the default search fallback for plain
-// locate requests. Note: "handler"/"route" intentionally route to
-// kern_entry_points, so a symbol-locate query uses the default fallback.
-func TestClassifyMetaRequest_Search(t *testing.T) {
-	tool, args := classifyMetaRequest("find the login function")
-	if tool != "kern_search" {
-		t.Fatalf("classifyMetaRequest = %q, want kern_search", tool)
-	}
-	if got := args["query"]; got != "find the login function" {
-		t.Errorf("args[query] = %q, want the full request", got)
-	}
-}
-
-// TestClassifyMetaRequest_DefaultFallback verifies unrecognized text routes
-// to kern_search with the full request as the query.
-func TestClassifyMetaRequest_DefaultFallback(t *testing.T) {
-	tool, args := classifyMetaRequest("the quick brown fox jumps over the lazy dog")
-	if tool != "kern_search" {
-		t.Fatalf("classifyMetaRequest = %q, want kern_search", tool)
-	}
-	if got := args["query"]; got != "the quick brown fox jumps over the lazy dog" {
-		t.Errorf("args[query] = %q, want the full request", got)
-	}
-}
-
-// TestClassifyMetaRequest_Branches covers the remaining major classifier
-// branches so a routing regression anywhere in the keyword table is caught.
-func TestClassifyMetaRequest_Branches(t *testing.T) {
-	cases := []classifyCase{
-		{"impact", "what breaks if I change dispatch", "kern_impact", nil},
-		{"optimize_log", "compress this log: lots of noise here", "kern_optimize_log", map[string]string{"log": "lots of noise here"}},
-		{"mask_pii", "mask secrets and pii in: token=abc123", "kern_mask_pii", map[string]string{"text": "token=abc123"}},
-		{"arch", "show me the architecture", "kern_arch", nil},
-		{"code_graph", "who calls NewServer", "kern_code_graph", map[string]string{"symbol": "NewServer"}},
-		{"entry_points", "find the login handler", "kern_entry_points", nil},
-		{"verify_output", "verify the claim that x is safe", "kern_verify_output", nil},
-		{"safe_delete", "can i delete the Foo function", "kern_safe_delete", map[string]string{"symbol": "Foo"}},
-		{"analyze", "analyze adding a new route", "kern_analyze", nil},
-		{"dead_code", "is there dead code in this repo", "kern_dead", nil},
-		{"project_map", "show me the project map", "kern_project_map", nil},
-		{"commitmsg", "generate a commit message", "kern_commitmsg", nil},
-		{"explore_qualified_symbol", "how does Server.dispatch work", "kern_explore", map[string]string{"symbol": "Server.dispatch"}},
-		{"implementation_plan_routes", "show me the implementation plan", "kern_plan", nil},
-		// F-1: CLI/subcommand questions must not fall into the graph router's
-		// "entry points" fallback — they are symbol searches.
-		{"cli_dispatch_question", "how does CLI command dispatch work in this repo?", "kern_search", nil},
-		{"cli_change_still_impact", "what breaks if I change the CLI dispatch table", "kern_impact", nil},
-		// F-2: index intents — rebuild/refresh routes to kern_onboard (the
-		// tool that builds/refreshes the index), status/freshness to
-		// kern_health, plain "index" questions still fall back to search.
-		{"index_rebuild", "refresh and rebuild the index for this repo now so it is fresh at HEAD", "kern_onboard", nil},
-		{"index_rebuild_short", "rebuild the index", "kern_onboard", nil},
-		{"index_reindex", "reindex this project", "kern_onboard", nil},
-		{"index_status", "is the index fresh", "kern_health", nil},
-		{"index_health_word", "index health", "kern_health", nil},
-		{"index_plain_falls_back", "how does the index work", "kern_search", nil},
-		// LLM provider intents — chain/sampler/status questions route to
-		// kern_llm_providers; plain code questions fall back to search.
-		{"llm_providers", "list the LLM provider chain and whether a host sampler is connected", "kern_llm_providers", nil},
-		{"llm_providers_short", "llm providers", "kern_llm_providers", nil},
-		{"host_sampler", "is the host sampler connected", "kern_llm_providers", nil},
-		{"which_local_agent", "which local agent should I use", "kern_llm_providers", nil},
-		{"llm_question_falls_back", "how does the llm provider work", "kern_search", nil},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			tool, args := classifyMetaRequest(tc.request)
-			if tool != tc.wantTool {
-				t.Fatalf("classifyMetaRequest(%q) = %q, want %q", tc.request, tool, tc.wantTool)
-			}
-			for k, want := range tc.wantArgs {
-				if got := args[k]; got != want {
-					t.Errorf("args[%s] = %q, want %q", k, got, want)
-				}
-			}
-		})
-	}
-}
 
 // TestHandleMeta_PhaseArg verifies kern_meta's phase arg: invalid phases are
 // rejected before dispatch, valid phases are echoed as a hint in the response.
 func TestHandleMeta_PhaseArg(t *testing.T) {
+	t.Parallel()
 	s := NewServer(strings.NewReader(""), io.Discard)
 
 	// Invalid phase → rejected up front, before any handler runs.
@@ -155,88 +37,22 @@ func TestHandleMeta_PhaseArg(t *testing.T) {
 	}
 }
 
-func TestClassifyMetaRequest_Flow(t *testing.T) {
-	cases := []classifyCase{
-		{"flow_no_symbol", "how does the bundle upload flow work end to end?", "kern_entry_points", nil},
-		{"flow_sym", "how does the UploadBundle flow work end to end?", "kern_walk", map[string]string{"symbol": "UploadBundle", "depth": "4"}},
-		{"workflow_no_symbol", "explain the deployment workflow pipeline", "kern_entry_points", nil},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			tool, args := classifyMetaRequest(tc.request)
-			if tool != tc.wantTool {
-				t.Fatalf("classifyMetaRequest(%q) = %q, want %q", tc.request, tool, tc.wantTool)
-			}
-			for k, want := range tc.wantArgs {
-				if got := args[k]; got != want {
-					t.Errorf("args[%s] = %q, want %q", k, got, want)
-				}
-			}
-		})
-	}
-}
-
-// TestClassifyMetaRequest_Retrieval pins the P1/P2/P3 retrieval routing:
-// retrieve/resolve/handle requests land on kern_retrieve/kern_resolve, and
-// the plan-context phrases land on kern_plan_context. The retrieval router is
-// consulted first, so "retrieve context for X" beats the graph router's
-// "context for", while "handler" (a substring of "handle") stays on
-// kern_entry_points and plain "plan" stays on kern_plan.
-func TestClassifyMetaRequest_Retrieval(t *testing.T) {
-	cases := []classifyCase{
-		{"retrieve_query", "retrieve the context for Greet", "kern_retrieve", map[string]string{"query": "retrieve the context for Greet", "level": "l1"}},
-		{"retrieve_plain", "retrieve nearby symbols", "kern_retrieve", map[string]string{"level": "l1"}},
-		{"handle_word", "handle the Count symbol", "kern_retrieve", map[string]string{"level": "l1"}},
-		{"resolve_handle_id", "resolve handle abc123", "kern_resolve", map[string]string{"handle": "abc123"}},
-		{"resolve_id", "resolve a1b2c3d4", "kern_resolve", map[string]string{"handle": "a1b2c3d4"}},
-		{"plan_context", "plan context for adding a route", "kern_plan_context", nil},
-		{"context_plan", "context plan for the change", "kern_plan_context", nil},
-		{"explain_context", "explain context for NewServer", "kern_plan_context", nil},
-		{"planner", "use the planner to size the context", "kern_plan_context", nil},
-		// Regression guards: existing routes must win where they should.
-		{"handler_keeps_entry_points", "find the login handler", "kern_entry_points", nil},
-		{"plan_keeps_kern_plan", "plan adding a greet function", "kern_plan", nil},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			tool, args := classifyMetaRequest(tc.request)
-			if tool != tc.wantTool {
-				t.Fatalf("classifyMetaRequest(%q) = %q, want %q", tc.request, tool, tc.wantTool)
-			}
-			for k, want := range tc.wantArgs {
-				if got := args[k]; got != want {
-					t.Errorf("args[%s] = %q, want %q", k, got, want)
-				}
-			}
-		})
-	}
-}
-
-// TestClassifyMetaRequest_ImpactKeepsVerbThreshold pins A8 at the routing
-// layer: the impact route still routes on "what breaks" regardless of the
-// stoplist, and leaves symbol selection to the downstream resolver.
-func TestClassifyMetaRequest_ImpactBreaksVerb(t *testing.T) {
-	tool, _ := classifyMetaRequest("what breaks if I remove the translate function from cmaas_controller?")
-	if tool != "kern_impact" {
-		t.Fatalf("classifyMetaRequest = %q, want kern_impact", tool)
-	}
-}
-
-// TestHandleRiskRequiresChange pins the D3 kern_risk contract up front: the
-// change argument is mandatory and is rejected before any platform/index
-// work happens, so a bare server can serve the error.
+// TestHandleRiskRequiresChange pins the kern_impact risk=true contract up
+// front: the change argument is mandatory and is rejected before any
+// platform/index work happens, so a bare server can serve the error.
 func TestHandleRiskRequiresChange(t *testing.T) {
+	t.Parallel()
 	s := newTestServer()
-	_, err := s.handleRisk(context.Background(), map[string]any{"root": "."})
+	_, err := s.handleImpact(context.Background(), map[string]any{"root": ".", "risk": "true"})
 	if err == nil || !strings.Contains(err.Error(), "change is required") {
 		t.Fatalf("missing change: got err %v, want rejection with 'change is required'", err)
 	}
 }
 
-// TestHandleRiskServesRiskAssessment drives the D3 happy path end to end:
-// handleRisk resolves the root through the session index, builds the
-// platform, and returns the rendered governance risk assessment prefixed
-// with "RISK for: <change>".
+// TestHandleRiskServesRiskAssessment drives the risk=true happy path end to
+// end: handleImpact with risk=true resolves the root through the session
+// index, builds the platform, and returns the rendered governance risk
+// assessment prefixed with "RISK for: <change>".
 func TestHandleRiskServesRiskAssessment(t *testing.T) {
 	root := provenanceProject(t)
 	s := NewServer(strings.NewReader(""), io.Discard)
@@ -244,18 +60,17 @@ func TestHandleRiskServesRiskAssessment(t *testing.T) {
 	// .kern persistence goroutine cannot race the RemoveAll (pre-existing
 	// flake: "TempDir RemoveAll cleanup: directory not empty").
 	defer s.Close()
-	out, err := s.handleRisk(context.Background(), map[string]any{"root": root, "change": "Greet"})
+	out, err := s.handleImpact(context.Background(), map[string]any{"root": root, "change": "Greet", "risk": "true"})
 	if err != nil {
-		t.Fatalf("handleRisk: %v", err)
+		t.Fatalf("handleImpact risk=true: %v", err)
 	}
 	if !strings.HasPrefix(out, "RISK for: Greet\n") {
-		t.Errorf("handleRisk output = %q, want prefix %q", out, "RISK for: Greet\n")
+		t.Errorf("handleImpact risk=true output = %q, want prefix %q", out, "RISK for: Greet\n")
 	}
 	if !strings.Contains(out, "no risks identified") && !strings.Contains(out, "factor:") {
-		t.Errorf("handleRisk output = %q, want a rendered risk assessment (factors or explicit no-risk)", out)
+		t.Errorf("handleImpact risk=true output = %q, want a rendered risk assessment (factors or explicit no-risk)", out)
 	}
 }
-
 func TestHandleAnalyzeLens(t *testing.T) {
 	root := provenanceProject(t)
 	s := NewServer(strings.NewReader(""), io.Discard)
@@ -346,63 +161,6 @@ func TestHandleAnalyzeProfileAndLensCombined(t *testing.T) {
 	}
 }
 
-func TestClassifyMetaRequest_NoteRoutes(t *testing.T) {
-	cases := []struct{ in, wantTool, wantAction string }{
-		{"validate the notes tree", "kern_note", "validate"},
-		{"are the decision notes valid?", "kern_note", "validate"},
-		{"list the decision notes", "kern_note", "list"},
-		{"show the note inventory", "kern_note", "list"},
-	}
-	for _, c := range cases {
-		tool, args := classifyMetaRequest(c.in)
-		if tool != c.wantTool {
-			t.Errorf("%q -> tool %q, want %q", c.in, tool, c.wantTool)
-			continue
-		}
-		if got := args["action"]; got != c.wantAction {
-			t.Errorf("%q -> action %q, want %q", c.in, got, c.wantAction)
-		}
-	}
-}
-
-func TestClassifyMetaRequest_SkillRoutes(t *testing.T) {
-	tool, args := classifyMetaRequest("list the agent skills")
-	if tool != "kern_skill" || args["action"] != "catalog" {
-		t.Errorf("skill list -> %q %v, want kern_skill catalog", tool, args)
-	}
-}
-
-func TestClassifyMetaRequest_SkillLoadRoutes(t *testing.T) {
-	cases := []struct{ in, wantTool, wantSkill string }{
-		// Bare "safe change" without skill language deliberately stays
-		// kern_impact (impact analysis is the better answer than loading the
-		// runbook); explicit skill language routes to kern_skill load.
-		{"how do i make a safe change here", "kern_impact", ""},
-		{"use the incident triage skill", "kern_skill", "kern-incident-triage"},
-		{"show me the kern-safe-change runbook", "kern_skill", "kern-safe-change"},
-		{"what skills exist", "kern_skill", ""}, // generic -> catalog
-	}
-	for _, c := range cases {
-		tool, args := classifyMetaRequest(c.in)
-		if tool != c.wantTool {
-			t.Errorf("%q -> tool %q, want %q", c.in, tool, c.wantTool)
-			continue
-		}
-		if c.wantTool != "kern_skill" {
-			continue
-		}
-		if c.wantSkill == "" {
-			if args["action"] != "catalog" {
-				t.Errorf("%q -> action %v, want catalog", c.in, args["action"])
-			}
-			continue
-		}
-		if args["action"] != "load" || args["skill"] != c.wantSkill {
-			t.Errorf("%q -> %v, want load %s", c.in, args, c.wantSkill)
-		}
-	}
-}
-
 func TestHandleImpactNoDuplicateHeader(t *testing.T) {
 	root := provenanceProject(t)
 	s := NewServer(strings.NewReader(""), io.Discard)
@@ -424,6 +182,7 @@ func TestHandleImpactNoDuplicateHeader(t *testing.T) {
 // kern_search (the default branch). Regression for the kern_llm_providers
 // route added with the LLM-provider intent.
 func TestHandleMetaRoutesLLMProviders(t *testing.T) {
+	t.Parallel()
 	s := newTestServer()
 	out, err := s.CallTool(context.Background(), "kern_meta", map[string]any{
 		"request": "list the LLM provider chain and whether a host sampler is connected",
@@ -436,35 +195,13 @@ func TestHandleMetaRoutesLLMProviders(t *testing.T) {
 	}
 }
 
-// TestKnownVerifyType pins the verify-type vocabulary: every token the engine
-// can run (including the aliases its substring dispatch accepts) is known,
-// and garbage tokens (e.g. types=123, a number coerced to "123") are not.
-func TestKnownVerifyType(t *testing.T) {
-	valid := []string{
-		"build", "test", "security", "architecture", "dependency",
-		"e2e", "static-analysis", "performance", "ci",
-		// Aliases the engine's substring dispatch accepts.
-		"unit", "integration", "sec", "archi", "dep", "vet", "lint", "bench", "end-to-end",
-	}
-	for _, v := range valid {
-		if !knownVerifyType(v) {
-			t.Errorf("knownVerifyType(%q) = false, want true", v)
-		}
-	}
-	invalid := []string{"123", "garbage", "zzz", "foo bar"}
-	for _, v := range invalid {
-		if knownVerifyType(v) {
-			t.Errorf("knownVerifyType(%q) = true, want false", v)
-		}
-	}
-}
-
 // TestHandleVerifyRejectsUnknownType: kern_verify with types=123 (a number
 // coerced to the string "123") must be rejected up front with an error naming
 // the type — never a vacuous "summary: PASS" run. The rejection happens
 // before the exec firewall and before any check, so it needs no platform and
 // returns instantly.
 func TestHandleVerifyRejectsUnknownType(t *testing.T) {
+	t.Parallel()
 	s := newTestServer()
 	_, err := s.handleVerify(context.Background(), map[string]any{"root": ".", "types": "123"})
 	if err == nil {
@@ -538,14 +275,11 @@ func TestHandleWhatIfGarbageWarns(t *testing.T) {
 	defer s.Close()
 
 	out, err := s.handleWhatIf(context.Background(), map[string]any{"root": root, "change": "ZZZgarbage"})
-	if err != nil {
-		t.Fatalf("handleWhatIf(garbage): %v", err)
+	if err == nil {
+		t.Fatalf("handleWhatIf(garbage) must error with a not-found message, got:\n%s", out)
 	}
-	if !strings.Contains(out, "not found") {
-		t.Errorf("garbage change must surface a not-found warning, got:\n%s", out)
-	}
-	if strings.Contains(out, "Safe to proceed") && !strings.Contains(out, "warning:") {
-		t.Errorf("garbage change must not read as a clean bill, got:\n%s", out)
+	if !strings.Contains(err.Error(), "no symbol named") {
+		t.Errorf("garbage change must surface a not-found error, got: %v", err)
 	}
 
 	out2, err := s.handleWhatIf(context.Background(), map[string]any{"root": root, "change": "Greet"})
@@ -557,45 +291,75 @@ func TestHandleWhatIfGarbageWarns(t *testing.T) {
 	}
 }
 
-// TestHandleDoFailsFastWithoutProvider: kern_do with no reachable LLM
-// provider must fail fast with a clear provider error instead of silently
-// running the ~180s provider-chain fallthrough. The provider is pinned to
-// Ollama at an unreachable address so the test is deterministic on any host.
-func TestHandleDoFailsFastWithoutProvider(t *testing.T) {
+// TestHandleLoopAutonomousFailsFastWithoutProvider: kern_loop mode=autonomous
+// with no reachable LLM provider must fail fast with a clear provider error
+// instead of silently running the ~180s provider-chain fallthrough. The
+// provider is pinned to Ollama at an unreachable address so the test is
+// deterministic on any host.
+func TestHandleLoopAutonomousFailsFastWithoutProvider(t *testing.T) {
 	t.Setenv("KERN_LLM_PROVIDER", "ollama")
 	t.Setenv("OLLAMA_HOST", "http://127.0.0.1:1") // nothing listens here: instant refusal
 	s := newTestServer()
 	start := time.Now()
-	_, err := s.handleDo(context.Background(), map[string]any{"root": ".", "intent": "test intent"})
+	_, err := s.handleLoop(context.Background(), map[string]any{"root": ".", "intent": "test intent", "mode": "autonomous"})
 	elapsed := time.Since(start)
 	if err == nil {
-		t.Fatal("handleDo with no reachable provider must error")
+		t.Fatal("kern_loop mode=autonomous with no reachable provider must error")
 	}
 	if !strings.Contains(err.Error(), "provider") {
 		t.Errorf("error must mention the provider, got: %v", err)
 	}
-	if !strings.Contains(err.Error(), "kern_do") {
-		t.Errorf("error must point at kern_do, got: %v", err)
+	if !strings.Contains(err.Error(), "kern_loop") {
+		t.Errorf("error must point at kern_loop mode=autonomous, got: %v", err)
 	}
 	if elapsed > 30*time.Second {
-		t.Errorf("handleDo took %v — the pre-flight must fail fast, not run the 180s workflow", elapsed)
+		t.Errorf("kern_loop mode=autonomous took %v — the pre-flight must fail fast, not run the 180s workflow", elapsed)
 	}
 }
 
-// TestProbeLLMProviderReachableFailsWithoutProvider exercises the extracted
-// pre-flight helper directly: with the provider pinned to an unreachable
-// Ollama address it errors quickly (the probe is bounded ~8s), which is the
-// condition that used to send kern_do down the 180s path.
-func TestProbeLLMProviderReachableFailsWithoutProvider(t *testing.T) {
-	t.Setenv("KERN_LLM_PROVIDER", "ollama")
-	t.Setenv("OLLAMA_HOST", "http://127.0.0.1:1")
-	start := time.Now()
-	err := probeLLMProviderReachable()
-	elapsed := time.Since(start)
-	if err == nil {
-		t.Fatal("probe must fail with no reachable provider")
+// TestHandleAnalyzePersistsTaskRecord locks the F9 regression fix on the MCP
+// surface: handleAnalyze's comment promises an authoritative Task record
+// queryable via kern task <id>, so the record must be written to the persisted
+// store — a fresh TaskService (a new process) must resolve the printed task ID.
+func TestHandleAnalyzePersistsTaskRecord(t *testing.T) {
+	root := provenanceProject(t)
+	s := NewServer(strings.NewReader(""), io.Discard)
+	defer s.Close()
+	out, err := s.handleAnalyze(context.Background(), map[string]any{"root": root, "change": "Greet"})
+	if err != nil {
+		t.Fatalf("handleAnalyze: %v", err)
 	}
-	if elapsed > 30*time.Second {
-		t.Errorf("probe took %v — must be bounded and fast", elapsed)
+	const marker = "[task: "
+	start := strings.Index(out, marker)
+	if start < 0 {
+		t.Fatalf("output has no %q line:\n%s", marker, out)
 	}
+	rest := out[start+len(marker):]
+	end := strings.Index(rest, " — ")
+	if end < 0 {
+		t.Fatalf("cannot parse task line from output:\n%s", out)
+	}
+	id := rest[:end]
+	if !strings.HasPrefix(id, "t-") {
+		t.Fatalf("task id = %q, want store-assigned t-<n> (authoritative record)", id)
+	}
+	// A fresh service reads the same persisted store `kern task <id>` reads.
+	ts := app.NewTaskService(mustMCPPlatform(t, root), eventbus.New())
+	if got, ok := ts.Get(id); !ok {
+		t.Fatalf("task %q not queryable from a fresh TaskService after handleAnalyze", id)
+	} else if got.State == "" {
+		t.Fatalf("task %q loaded from store has no state", id)
+	}
+}
+
+// mustMCPPlatform loads a Platform for root, failing the test on error. (The
+// test helper mirrors the CLI's mustApp pattern; there is no package-level
+// helper here yet.)
+func mustMCPPlatform(t *testing.T, root string) *app.Platform {
+	t.Helper()
+	p, err := app.New(root)
+	if err != nil {
+		t.Fatalf("app.New(%s): %v", root, err)
+	}
+	return p
 }

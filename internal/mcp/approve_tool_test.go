@@ -15,6 +15,7 @@ import (
 // surface: list-pending (empty), list-pending (non-empty), approve, reject,
 // and default-approver behavior. Mirrors the `kern approve` CLI semantics.
 func TestApproveToolLifecycle(t *testing.T) {
+	t.Parallel()
 	root := mcpProject(t)
 	store := governance.NewFileStore(root)
 
@@ -85,6 +86,7 @@ func TestApproveToolLifecycle(t *testing.T) {
 // TestApproveToolNotFound verifies that approving a nonexistent ID returns an
 // error rather than silently succeeding.
 func TestApproveToolNotFound(t *testing.T) {
+	t.Parallel()
 	root := mcpProject(t)
 	resp := mcpCall(t, "kern_approve", map[string]any{"root": root, "id": "does-not-exist"})
 	if e, ok := resp["error"].(map[string]any); ok {
@@ -102,6 +104,7 @@ func TestApproveToolNotFound(t *testing.T) {
 }
 
 func TestApproveToolAdvancesGatedTask(t *testing.T) {
+	t.Parallel()
 	root := mcpProject(t)
 
 	// Run the workflow through the app layer; it must park at the human

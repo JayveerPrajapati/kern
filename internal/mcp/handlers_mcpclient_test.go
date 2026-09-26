@@ -26,6 +26,7 @@ func configureEchoServer(t *testing.T, root string) {
 }
 
 func TestMcpCallBridgesEchoTool(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	configureEchoServer(t, root)
 
@@ -55,6 +56,7 @@ func TestMcpCallBridgesEchoTool(t *testing.T) {
 }
 
 func TestMcpCallPublicNameAccepted(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	configureEchoServer(t, root)
 
@@ -78,6 +80,7 @@ func TestMcpCallPublicNameAccepted(t *testing.T) {
 }
 
 func TestMcpCallUnknownServer(t *testing.T) {
+	t.Parallel()
 	s := NewServer(strings.NewReader(""), io.Discard)
 	s.roots = []string{t.TempDir()}
 	_, err := s.handleMcpCall(context.Background(), map[string]any{
@@ -94,6 +97,7 @@ func TestMcpCallUnknownServer(t *testing.T) {
 }
 
 func TestMcpCallMissingFields(t *testing.T) {
+	t.Parallel()
 	s := NewServer(strings.NewReader(""), io.Discard)
 	if _, err := s.handleMcpCall(context.Background(), map[string]any{}); err == nil {
 		t.Fatal("expected error when server missing")

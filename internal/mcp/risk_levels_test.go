@@ -17,6 +17,7 @@ var validRiskLevels = map[string]bool{
 // levels. This runs against the registration table directly so a new tool
 // added without a risk level fails here.
 func TestAllToolsHaveValidRiskLevel(t *testing.T) {
+	t.Parallel()
 	if len(tools) == 0 {
 		t.Fatal("no tools registered")
 	}
@@ -36,6 +37,7 @@ func TestAllToolsHaveValidRiskLevel(t *testing.T) {
 // security-sensitive tools are high, analysis tools are medium, and
 // read-only tools are low.
 func TestNamedToolRiskLevels(t *testing.T) {
+	t.Parallel()
 	want := map[string]string{
 		// critical — execution tools
 		"kern_exec":    RiskCritical,
@@ -52,7 +54,6 @@ func TestNamedToolRiskLevels(t *testing.T) {
 		"kern_verify":  RiskMedium,
 		// medium — contained state mutation (D1 F1 reclassification: these
 		// were low but mutate state, so they are never cacheable)
-		"kern_note":                  RiskMedium,
 		"kern_register_host_sampler": RiskMedium,
 		// low — read-only tools
 		"kern_search":       RiskLow,

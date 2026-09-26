@@ -117,25 +117,100 @@ type Result struct {
 	Err       error         `json:"-"`
 }
 
-// networkNSArgs caches the unshare wrapper when unprivileged user namespaces
-// plus a network namespace work; nil means the platform cannot isolate.
+// sensitivePathDirs mirrors internal/sandbox's macOS Stage 1 blocklist: the
+// operator-private locations a script must never be able to read through an
+// ABSOLUTE path. The HOME redirect in sandboxEnv already blocks relative
+// lookups (~/.ssh resolves into the temp dir); these Seatbelt file-read-data
+// subpath denies close the gap for absolute ones (~/.ssh/id_rsa,
+// ~/.aws/credentials, ...). Keep in sync with internal/sandbox/network.go.
+var sensitivePathDirs = []string{
+	".ssh",
+	".aws",
+	".gnupg",
+	".config/gcloud",
+	".kube",
+	".docker/config.json",
+	"Library/Cookies",
+	".netrc",
+}
+
+// fsConfinementEnabled reports whether script runs add the sensitive-path
+// read blocklist to the Seatbelt profile (KERN_SANDBOX_FS_CONFINEMENT,
+// default ON; "0"/"false"/"off" disables — the codebase's "0 disables"
+// convention). Mirrors internal/sandbox's gate; the KERN_ALLOW_UNISOLATED /
+// KERN_ALLOW_NET escape hatch covers this surface too (it skips the
+// seatbelt wrap entirely).
+func fsConfinementEnabled() bool {
+	switch strings.TrimSpace(os.Getenv("KERN_SANDBOX_FS_CONFINEMENT")) {
+	case "0", "false", "FALSE", "False", "no", "NO", "No", "off", "OFF", "Off":
+		return false
+	}
+	return true
+}
+
+// seatbeltScriptProfile builds the Apple Seatbelt profile that denies network
+// egress AND — when filesystem read confinement is enabled — read access to
+// the operator's sensitive-path blocklist. BLOCKLIST-deny: (allow default)
+// is preserved, so nothing outside these paths is affected. Network posture
+// is unchanged from the pre-confinement profile (no loopback allowance).
+func seatbeltScriptProfile() string {
+	var b strings.Builder
+	b.WriteString("(version 1)\n(allow default)\n(deny network*)")
+	if !fsConfinementEnabled() {
+		return b.String()
+	}
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return b.String()
+	}
+	// The as-written $HOME is used as-is: each deny below covers BOTH the
+	// as-written and the canonical spelling, so canonicalizing here would
+	// throw away the alias the kernel may match on (R2 root cause).
+	for _, p := range sensitivePathDirs {
+		joined := filepath.Join(home, p)
+		// Deny BOTH spellings (mirrors internal/sandbox R2 fix): the darwin
+		// kernel canonicalizes the ACCESSED path but matches profile subpaths
+		// as written, so a symlinked home (e.g. /var -> /private/var) can be
+		// accessed under either alias depending on name-cache state. The
+		// as-written join is always emitted; the canonical form is added when
+		// it resolves and differs (fail-safe: single deny on resolution
+		// error). Denies are purely additive under the blocklist design.
+		fmt.Fprintf(&b, "\n(deny file-read-data (subpath %q))", joined)
+		if canon, err := filepath.EvalSymlinks(joined); err == nil && canon != joined {
+			fmt.Fprintf(&b, "\n(deny file-read-data (subpath %q))", canon)
+		}
+	}
+	return b.String()
+}
+
+// networkNSBin caches the isolation wrapper probe: whether this host can run
+// a script with network egress blocked is a per-host fact that does not
+// change during a process lifetime. The profile string itself is NOT cached
+// — it is regenerated per call so the sensitive-path blocklist always
+// reflects the current KERN_SANDBOX_FS_CONFINEMENT / HOME (same design as
+// internal/sandbox's netIsolationPrefix).
 var (
 	netProbeOnce sync.Once
-	netNSArgs    []string
+	netNSBin     string
 )
 
 // networkNS returns the isolation prefix that runs a child with network egress
 // blocked (Linux unshare network namespace or macOS sandbox-exec Seatbelt),
-// or nil when unavailable (probed once per process).
+// or nil when unavailable (probed once per process). On darwin the profile
+// also carries the sensitive-path read blocklist (Stage 1 FS confinement)
+// when KERN_SANDBOX_FS_CONFINEMENT is on (the default).
 func networkNS() []string {
 	netProbeOnce.Do(func() {
 		if goruntime.GOOS == "darwin" {
 			if bin, err := exec.LookPath("sandbox-exec"); err == nil {
 				ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 				defer cancel()
-				profile := "(version 1)\n(allow default)\n(deny network*)"
-				if err := exec.CommandContext(ctx, bin, "-p", profile, "true").Run(); err == nil {
-					netNSArgs = []string{bin, "-p", profile}
+				// The probe validates the EXACT generated profile the wrap
+				// uses (seatbeltScriptProfile, incl. the sensitive-path
+				// blocklist under the real home when confinement is on):
+				// availability and enforcement are the same mechanism.
+				if err := exec.CommandContext(ctx, bin, "-p", seatbeltScriptProfile(), "true").Run(); err == nil {
+					netNSBin = bin
 					return
 				}
 			}
@@ -147,20 +222,34 @@ func networkNS() []string {
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
 		if err := exec.CommandContext(ctx, bin, "--user", "--map-root-user", "--net", "true").Run(); err == nil {
-			netNSArgs = []string{bin, "--user", "--map-root-user", "--net"}
+			netNSBin = bin
 		}
 	})
-	return netNSArgs
+	if netNSBin == "" {
+		return nil
+	}
+	if goruntime.GOOS == "darwin" {
+		return []string{netNSBin, "-p", seatbeltScriptProfile()}
+	}
+	return []string{netNSBin, "--user", "--map-root-user", "--net"}
 }
 
 // allowUnisolated reports whether the local operator has explicitly opted in
-// to running scripts without network isolation (KERN_ALLOW_UNISOLATED=1, or
-// the pre-existing alias KERN_ALLOW_NET=1). Only the operator's environment
-// can set this — an arbitrary agent call never can. Parsing is strict: only
-// the literal value "1" opts in; any other value ("0", "true", "yes", ...)
+// to running scripts without network isolation (KERN_ALLOW_UNISOLATED, or the
+// pre-existing alias KERN_ALLOW_NET). Only the operator's environment can set
+// this — an arbitrary agent call never can. Parsing matches the sandbox
+// escape-hatch acceptance (netEscapeHatchSet in internal/sandbox/network.go):
+// "1", "true", "TRUE" and "True" all opt in; any other value ("0", "no", ...)
 // is treated as unset.
 func allowUnisolated() bool {
-	return os.Getenv("KERN_ALLOW_UNISOLATED") == "1" || os.Getenv("KERN_ALLOW_NET") == "1"
+	on := func(name string) bool {
+		switch strings.TrimSpace(os.Getenv(name)) {
+		case "1", "true", "TRUE", "True":
+			return true
+		}
+		return false
+	}
+	return on("KERN_ALLOW_UNISOLATED") || on("KERN_ALLOW_NET")
 }
 
 // parseEgressTargets scans script source for egress declaration lines —
@@ -620,7 +709,7 @@ func detectLangFromContent(code string) string {
 	// syntax errors). If nothing matches, return "" so the caller errors
 	// clearly with the available-runtimes list.
 	if _, err := exec.LookPath("bash"); err == nil {
-		shellCmds := regexp.MustCompile(`^(echo|ls|cd|pwd|cat|grep|sed|awk|cp|mv|rm|mkdir|touch|export|source|export|for\s|while\s|if\s|case\s|true|false)\b`)
+		shellCmds := regexp.MustCompile(`^(echo|ls|cd|pwd|cat|grep|sed|awk|cp|mv|rm|mkdir|touch|export|source|export|for\s|while\s|if\s|case\s|true|false|curl|wget|git|printf|test|find|xargs|sort|uniq|head|tail|tee|date|env|kill|ps|du|df|chmod|chown|tar|unzip|zip|make|docker|sudo|bash|sh|set|read|sleep|time|watch|basename|dirname|wc|cut|tr|paste|diff|patch|cmp|sha256sum|md5|nc|ping|ssh|scp|rsync|go|node|npm|npx|pip|python|python3)\b`)
 		if shellCmds.MatchString(firstLines[0]) {
 			return "bash"
 		}

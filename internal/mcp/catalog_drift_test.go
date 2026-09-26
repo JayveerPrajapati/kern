@@ -46,6 +46,7 @@ func repoRoot(t *testing.T) string {
 // init() registration anywhere, and a missing injection fails loud at the
 // constructor (compile error) or at Run (StatusError), never a silent SKIP.
 func TestG35_CatalogDriftRealRepo(t *testing.T) {
+	t.Parallel()
 	root := repoRoot(t)
 	pluginPath := filepath.Join(root, "internal", "setup", "assets", "plugin", "kern.ts")
 	if _, err := os.Stat(pluginPath); err != nil {
@@ -69,6 +70,7 @@ func TestG35_CatalogDriftRealRepo(t *testing.T) {
 }
 
 func TestNewCatalogDriftCheckRequiresExplicitTools(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("skipping slow compile-fail proof under -short")
 	}
@@ -97,8 +99,9 @@ func TestNewCatalogDriftCheckRequiresExplicitTools(t *testing.T) {
 // reason in the diff that bumps the cap — no silent growth (mirrors the
 // ARCHITECTURE.md LOC-cap drift gate).
 func TestMCPToolCatalogSizeCap(t *testing.T) {
+	t.Parallel()
 	const (
-		capFloor = 140 // guards accidental truncation of the catalog
+		capFloor = 138 // guards accidental truncation of the catalog (140 at Feature Batch G, 2026-09-22)
 		capCeil  = 160 // deliberate growth budget (~1.1x of 145, 2026-09-17)
 	)
 	n := len(ToolNames())

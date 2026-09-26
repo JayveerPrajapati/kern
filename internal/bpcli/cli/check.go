@@ -34,6 +34,11 @@ import (
 //
 // Flags:
 //
+//	--ci            CI mode: emit a machine-readable JSON verdict on stdout
+//	                ({passed, checks[], evidence}) and exit 0 when the check
+//	                passes, 1 when it fails (usage errors stay exit 2). The
+//	                verdict is the same validation pipeline as the default
+//	                run — only the output shape and exit mapping differ.
 //	--staged        Explicitly check staged (git diff --cached) changes.
 //	                (This is the default behavior; the flag is for hook clarity.)
 //	--fast          Fast mode: skip the jscpd two-pass duplication scan
@@ -85,24 +90,71 @@ import (
 const exitFlagHelp = -1
 
 func runCheck(args []string) int {
+	code, _, _ := RunCheckAndReport(args)
+	return code
+}
+
+// RunCheckAndReport runs the `kern check` pipeline exactly as RunCheck does —
+// the same output and the same exit code — and additionally reports the
+// resolved repo root and the first failing check's name (empty when the run
+// passed or never reached the validation pipeline). cmd/kern uses it to
+// record dogfood gate outcomes (Self-Improvement Tier 4 #10) without
+// re-running or re-implementing the pipeline.
+func RunCheckAndReport(args []string) (code int, failedCheck string, root string) {
+	o := runCheckCore(args)
+	if o.result == nil {
+		return o.code, "", o.root
+	}
+	if o.ciMode {
+		emitCIVerdict(*o.result)
+		if o.result.ExitCode != 0 {
+			return 1, firstFailedCheck(*o.result), o.root
+		}
+		return 0, "", o.root
+	}
+	if o.jsonMode {
+		emitJSON(*o.result)
+	} else {
+		emitText(*o.result)
+	}
+	return o.result.ExitCode, firstFailedCheck(*o.result), o.root
+}
+
+// runCheckOutcome carries what the check runners need: the final exit code,
+// the pipeline result (nil when the run failed before validation), the
+// resolved repo root, and the output modes that decide how the result is
+// emitted.
+type runCheckOutcome struct {
+	code     int
+	result   *domain.ValidationResult
+	root     string
+	ciMode   bool
+	jsonMode bool
+}
+
+// runCheckCore executes the `kern check` pipeline: flag parsing, root
+// resolution, config load, staged-change discovery, and validation. Error
+// paths emit their own output and return a nil result; a successful pipeline
+// returns the raw ValidationResult for the caller to emit.
+func runCheckCore(args []string) runCheckOutcome {
 	fl, code := parseCheckFlags(args)
 	if code != 0 {
 		if code == exitFlagHelp {
-			return 0
+			return runCheckOutcome{code: 0}
 		}
-		return code
+		return runCheckOutcome{code: code}
 	}
 
 	// Resolve output format: --json is shorthand for --format=json.
 	jsonMode, code := checkOutputFormat(fl.jsonOut, fl.format)
 	if code != 0 {
-		return code
+		return runCheckOutcome{code: code}
 	}
 	_ = fl.staged // --staged is the default behavior; flag exists for hook clarity
 
 	absRoot, code := resolveRepoRoot(fl.repoRoot)
 	if code != 0 {
-		return code
+		return runCheckOutcome{code: code}
 	}
 	// keep `git status` clean after the first run — gitignore the
 	// runtime state this command is about to write. Best-effort.
@@ -110,12 +162,16 @@ func runCheck(args []string) int {
 
 	cfg, err := policy.Load(absRoot)
 	if err != nil {
+		if fl.ci {
+			emitCIError("invalid configuration: " + err.Error())
+			return runCheckOutcome{code: 1}
+		}
 		if jsonMode {
 			emitErrorJSON(3, "invalid configuration: "+err.Error())
 		} else {
 			fmt.Fprintf(os.Stderr, "blueprint: invalid configuration: %v\n", err)
 		}
-		return 3
+		return runCheckOutcome{code: 3}
 	}
 
 	// Non-fatal loader notices: warnings never change the exit code.
@@ -125,20 +181,24 @@ func runCheck(args []string) int {
 
 	changes, err := discoverStagedChanges(absRoot)
 	if err != nil {
+		if fl.ci {
+			emitCIError("cannot discover staged changes: " + err.Error())
+			return runCheckOutcome{code: 1}
+		}
 		if jsonMode {
 			emitErrorJSON(2, "cannot discover staged changes: "+err.Error())
 		} else {
 			fmt.Fprintf(os.Stderr, "blueprint: cannot discover staged changes: %v\n", err)
 		}
-		return 2
+		return runCheckOutcome{code: 2}
 	}
 
 	req := buildCheckRequest(absRoot, fl.source, changes, fl.agentID, fl.approvalID, fl.intent, fl.task)
 
 	// Build the full check set: approval, architecture, secrets, duplication.
-	client, kernVersion, code := newKernClientOrDegraded(fl.requireKern, jsonMode)
+	client, kernVersion, code := newKernClientOrDegraded(fl.requireKern, jsonMode, fl.ci)
 	if code != 0 {
-		return code
+		return runCheckOutcome{code: code}
 	}
 
 	// Fast mode is additive: --fast or KERN_CHECK_FAST=1 (either activates
@@ -163,14 +223,19 @@ func runCheck(args []string) int {
 	defer cancel()
 
 	result := svc.Validate(ctx, req)
+	return runCheckOutcome{code: 0, result: &result, root: absRoot, ciMode: fl.ci, jsonMode: jsonMode}
+}
 
-	if jsonMode {
-		emitJSON(result)
-	} else {
-		emitText(result)
+// firstFailedCheck returns the first check (pipeline order) whose status is a
+// hard failure — BLOCK or ERROR — the deterministic signature of a gate
+// failure. WARN/PASS/SKIP checks are not failures. Empty when nothing failed.
+func firstFailedCheck(result domain.ValidationResult) string {
+	for _, cr := range result.Checks {
+		if cr.Status == domain.StatusBlock || cr.Status == domain.StatusError {
+			return cr.Name
+		}
 	}
-
-	return result.ExitCode
+	return ""
 }
 
 // checkFlags carries the parsed `blueprint check` command-line flags.
@@ -179,6 +244,7 @@ type checkFlags struct {
 	format          string
 	staged          bool
 	fast            bool
+	ci              bool
 	repoRoot        string
 	source          string
 	runResilience   bool
@@ -204,6 +270,7 @@ func parseCheckFlags(args []string) (checkFlags, int) {
 	format := fs.String("format", "", "output format: json|terminal (default: terminal)")
 	staged := fs.Bool("staged", false, "check staged changes (git diff --cached); this is the default")
 	fast := fs.Bool("fast", false, "fast mode: skip the jscpd two-pass duplication scan (advisory in-house findings only; full check runs in CI). Also enabled by KERN_CHECK_FAST=1")
+	ci := fs.Bool("ci", false, "CI mode: emit a machine-readable JSON verdict ({passed, checks, evidence}) on stdout and exit 0/1 matching the verdict")
 	repoRoot := fs.String("repo", "", "repository root (default: current directory)")
 	source := fs.String("source", "human", "change source: agent|ide|human|refactor|dep-bot|ci")
 	runResilience := fs.Bool("resilience", false, "also run resilience (fault-injection) scenarios (opt-in; slow; WARN-only)")
@@ -226,6 +293,7 @@ func parseCheckFlags(args []string) (checkFlags, int) {
 		format:          *format,
 		staged:          *staged,
 		fast:            *fast,
+		ci:              *ci,
 		repoRoot:        *repoRoot,
 		source:          *source,
 		runResilience:   *runResilience,
@@ -302,14 +370,17 @@ func buildCheckRequest(absRoot, source string, changes []domain.FileChange, agen
 // would cause silent misparses). P2-4: the kern version is probed once for
 // provenance stamping — best-effort, an empty string on probe failure must
 // never fail validation, and in degraded mode (nil client) the version
-// stays "".
-func newKernClientOrDegraded(requireKern, jsonMode bool) (client *kern.KernClient, kernVersion string, code int) {
+// stays "". ciMode routes hard failures through the machine-readable CI
+// verdict shape instead of the human/JSON error objects.
+func newKernClientOrDegraded(requireKern, jsonMode, ciMode bool) (client *kern.KernClient, kernVersion string, code int) {
 	var err error
 	client, err = kern.NewKernClient()
 	if err != nil {
 		if requireKern {
 			// Explicit opt-in: a missing kern binary is a hard error (exit 2).
-			if jsonMode {
+			if ciMode {
+				emitCIError("kern binary not found: " + err.Error())
+			} else if jsonMode {
 				emitErrorJSON(2, "kern binary not found: "+err.Error())
 			} else {
 				fmt.Fprintf(os.Stderr, "blueprint: kern binary not found: %v\n", err)
@@ -323,7 +394,9 @@ func newKernClientOrDegraded(requireKern, jsonMode bool) (client *kern.KernClien
 		// Check minimum version: outdated kern causes contract mismatch
 		// which would be a silent misparse — fail closed.
 		if vErr := kern.EnsureMinVersion(client); vErr != nil {
-			if jsonMode {
+			if ciMode {
+				emitCIError(vErr.Error())
+			} else if jsonMode {
 				emitErrorJSON(2, vErr.Error())
 			} else {
 				fmt.Fprintf(os.Stderr, "blueprint: %v\n", vErr)
@@ -815,6 +888,115 @@ func emitErrorJSON(exitCode int, message string) {
 		"exit_code": exitCode,
 		"error":     message,
 	})
+}
+
+// ciVerdict is the machine-readable `kern check --ci` output contract. It is
+// intentionally stable and minimal: `passed` (mirrors the process exit code
+// 0/1), one entry per executed check, and an `evidence` object carrying the
+// raw per-check results with the bpcli verdict fields — the exact
+// ValidationResult shape the check pipeline already produces (the check path
+// does not build an internal/evidence bundle today, so the raw verdict IS
+// the evidence, per the Batch A spec).
+type ciVerdict struct {
+	Passed   bool           `json:"passed"`
+	Checks   []ciCheckEntry `json:"checks"`
+	Evidence ciEvidence     `json:"evidence"`
+}
+
+// ciCheckEntry is one executed check inside the CI verdict.
+type ciCheckEntry struct {
+	Name   string `json:"name"`
+	Status string `json:"status"`
+	Detail string `json:"detail"`
+}
+
+// ciEvidence carries the raw validation verdict the pipeline produced, so CI
+// consumers can drill into the same fields the JSON output path emits
+// (status, exit_code, summary, correlation_id, duration_ms, checks_skipped).
+type ciEvidence struct {
+	Status        string         `json:"status"`
+	ExitCode      int            `json:"exit_code"`
+	Summary       domain.Summary `json:"summary"`
+	CorrelationID string         `json:"correlation_id"`
+	DurationMs    int64          `json:"duration_ms"`
+	ChecksSkipped []string       `json:"checks_skipped,omitempty"`
+}
+
+// emitCIVerdict writes the machine-readable CI verdict for a completed
+// validation run. passed mirrors result.ExitCode == 0; the caller maps it to
+// the process exit code (0/1).
+func emitCIVerdict(result domain.ValidationResult) {
+	checks := make([]ciCheckEntry, 0, len(result.Checks))
+	for _, cr := range result.Checks {
+		checks = append(checks, ciCheckEntry{
+			Name:   cr.Name,
+			Status: string(cr.Status),
+			Detail: ciCheckDetail(cr),
+		})
+	}
+	v := ciVerdict{
+		Passed: result.ExitCode == 0,
+		Checks: checks,
+		Evidence: ciEvidence{
+			Status:        string(result.Status),
+			ExitCode:      result.ExitCode,
+			Summary:       result.Summary,
+			CorrelationID: result.CorrelationID,
+			DurationMs:    result.DurationMs,
+			ChecksSkipped: result.ChecksSkipped,
+		},
+	}
+	enc := json.NewEncoder(os.Stdout)
+	enc.SetIndent("", "  ")
+	_ = enc.Encode(v)
+}
+
+// emitCIError writes a failing CI verdict for a run that errored before the
+// pipeline produced a ValidationResult (config load, change discovery, kern
+// client). passed is always false; the process should exit 1.
+func emitCIError(message string) {
+	v := ciVerdict{
+		Passed: false,
+		Checks: []ciCheckEntry{{Name: "kern-check", Status: string(domain.StatusError), Detail: message}},
+		Evidence: ciEvidence{
+			Status:   string(domain.StatusError),
+			ExitCode: 1,
+		},
+	}
+	enc := json.NewEncoder(os.Stdout)
+	enc.SetIndent("", "  ")
+	_ = enc.Encode(v)
+}
+
+// ciCheckDetail renders one check's findings as a compact single-line detail
+// for the CI verdict: the check error when the check errored, otherwise a
+// finding count with the first few findings (bounded so the verdict stays
+// readable in CI logs).
+func ciCheckDetail(cr domain.CheckResult) string {
+	if cr.Skipped {
+		return "skipped"
+	}
+	if cr.Error != "" {
+		return "error: " + cr.Error
+	}
+	if len(cr.Findings) == 0 {
+		return "ok (0 findings)"
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "%d finding(s):", len(cr.Findings))
+	const maxShown = 10
+	for i, f := range cr.Findings {
+		if i >= maxShown {
+			fmt.Fprintf(&b, " +%d more", len(cr.Findings)-maxShown)
+			break
+		}
+		loc := f.File
+		if f.Line > 0 {
+			loc = fmt.Sprintf("%s:%d", f.File, f.Line)
+		}
+		fmt.Fprintf(&b, " [%s] %s (%s)", f.Severity, f.Message, loc)
+	}
+	return b.String()
 }
 
 // defaultAgentID returns the agent identity for agent-sourced changes

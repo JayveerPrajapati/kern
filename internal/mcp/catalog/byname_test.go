@@ -44,3 +44,22 @@ func TestToolsForRisk(t *testing.T) {
 		}
 	}
 }
+
+// TestEveryToolHasCategory is the catalog drift gate for the functional-family
+// taxonomy (T3): every registered tool must carry a non-empty Category, and
+// every Category must be one of the registered Category* constants (so a
+// typo'd category can never silently filter to an empty surface).
+func TestEveryToolHasCategory(t *testing.T) {
+	if len(All) == 0 {
+		t.Fatal("catalog empty")
+	}
+	for _, tool := range All {
+		if tool.Category == "" {
+			t.Errorf("tool %s has an empty Category — assign one of the Category* constants", tool.Name)
+			continue
+		}
+		if !ValidCategory(tool.Category) {
+			t.Errorf("tool %s has unknown Category %q — must be one of the Category* constants", tool.Name, tool.Category)
+		}
+	}
+}

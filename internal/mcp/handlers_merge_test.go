@@ -8,6 +8,7 @@ import (
 )
 
 func TestHandleSemanticMergeClean(t *testing.T) {
+	t.Parallel()
 	s := NewServer(strings.NewReader(""), io.Discard)
 
 	base := `package worker
@@ -51,6 +52,7 @@ func (j *Job) Stop() error { return nil }
 }
 
 func TestHandleSemanticMergeConflictJSON(t *testing.T) {
+	t.Parallel()
 	s := NewServer(strings.NewReader(""), io.Discard)
 
 	base := `package calc

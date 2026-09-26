@@ -36,6 +36,27 @@ func TestRunLoopRoutesThroughService(t *testing.T) {
 	}
 }
 
+// TestRunLoopWiresLearningByDefault verifies the app builder wires the
+// continuous-learning extractor into the loop whenever a memory store exists
+// (single wiring point covering kern_loop/kern_do MCP + CLI loop/do). At L1
+// the learn stage runs and writes the run's own lesson + episodic memories,
+// which form a recurring scope pattern above the default threshold of 1, so
+// Result.LearnedConstraints must be populated — proof the extractor is not
+// left nil.
+func TestRunLoopWiresLearningByDefault(t *testing.T) {
+	ts := NewTaskService(&Platform{root: t.TempDir()}, nil)
+	task, res, err := ts.RunLoopContext(context.Background(), "explain the caching strategy", loop.L1)
+	if err != nil {
+		t.Fatalf("RunLoopContext: %v", err)
+	}
+	if task == nil || res == nil {
+		t.Fatal("RunLoopContext returned nil task or result")
+	}
+	if len(res.LearnedConstraints) == 0 {
+		t.Fatal("expected the wired learn stage to surface constraints into Result.LearnedConstraints")
+	}
+}
+
 // TestRunLoopContextCancelled locks the oracle-gate ctx threading: a cancelled
 // context must stop RunLoopContext BEFORE any stage runs, and the aborted run
 // must still be observable — the created Task is marked FAILED (terminal), not

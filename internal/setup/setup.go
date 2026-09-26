@@ -155,6 +155,7 @@ func Check(root string) []Status {
 		fileStatus(filepath.Join(root, "AGENTS.md"), "AGENTS.md rules"),
 		fileStatus(globalOpencodePath(), "opencode (global config)"),
 	}
+	out = append(out, globalRulesStatus()...)
 	for _, p := range GlobalPluginPaths() {
 		out = append(out, fileStatus(p, "opencode plugin (global)"))
 	}
@@ -201,9 +202,9 @@ func Check(root string) []Status {
 	return out
 }
 
-// Wire configures the requested agents. An empty agents list means all;
-// when detect is true, only agents found by DetectAgents are wired.
-// Instruction files with the kern-first policy are always written for
+// Wire configures the requested agents with default options. An empty agents
+// list means all; when detect is true, only agents found by DetectAgents are
+// wired. Instruction files with the kern-first policy are always written for
 // every detected agent that has an instruction file, regardless of the
 // agents list — this ensures kern-first enforcement across all present
 // platforms without per-agent configuration.
@@ -217,6 +218,22 @@ func Check(root string) []Status {
 // (.mcp.json, opencode.json, cursor rules, vscode/copilot adapters,
 // instruction files).
 func Wire(root string, agents []string, detect bool, global bool) []Status {
+	return WireWith(root, agents, detect, global, WireOptions{})
+}
+
+// WireOptions carries per-run knobs for WireWith. Zero value matches Wire's
+// default behavior exactly.
+type WireOptions struct {
+	// AgentsMD selects the repo AGENTS.md variant: "thin" writes the opt-in
+	// thin file (full kern rules live in the host's global instructions,
+	// managed by `kern setup --global-rules`), "full" writes the complete
+	// rules, "" uses the persisted .kern/config.json value (default "full").
+	// An explicit non-empty value is persisted so subsequent runs remember it.
+	AgentsMD string
+}
+
+// WireWith configures the requested agents like Wire, with per-run options.
+func WireWith(root string, agents []string, detect bool, global bool, opts WireOptions) []Status {
 	detected := DetectAgents(root)
 	explicit := agents // snapshot: explicit --agents list, if any
 	bin := PortableMCPCommand()
@@ -262,7 +279,28 @@ func Wire(root string, agents []string, detect bool, global bool) []Status {
 	// reads it natively (Claude, Codex, Gemini, Continue, Windsurf, Zed,
 	// Qwen, Qoder, Kiro, opencode). Write it unconditionally so the
 	// kern-first policy reaches all agents regardless of which are wired.
-	out = append(out, wireAgentRules(root))
+	// The variant is full by default; an explicit --agents-md choice is
+	// persisted in .kern/config.json so subsequent runs remember it.
+	mode := opts.AgentsMD
+	if mode == "" {
+		mode = agentsMDMode(root)
+	}
+	wired := "all"
+	if len(explicit) > 0 {
+		wired = strings.Join(explicit, ", ")
+	} else if detect {
+		if len(detected) == 0 {
+			wired = "none"
+		} else {
+			wired = strings.Join(detected, ", ")
+		}
+	}
+	out = append(out, wireAgentRules(root, mode, wired))
+	if opts.AgentsMD != "" {
+		if err := setAgentsMD(root, opts.AgentsMD); err != nil {
+			out = append(out, Status{Agent: "kern config", Path: agentsMDConfigPath(root), Note: "persist agents_md: " + err.Error()})
+		}
+	}
 	if repoEnabled("opencode") {
 		out = append(out, wireOpencode(root))
 		out = append(out, wirePlugin(root))

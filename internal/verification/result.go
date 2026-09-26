@@ -65,6 +65,13 @@ type VerificationResult struct {
 	// Performance holds optional benchmark results; nil when not requested or
 	// none exist.
 	Performance *PerformanceResult
+	// CVE holds the govulncheck vulnerability check; nil when not requested.
+	CVE *CVEResult
+	// License holds the deterministic license classifier output; nil when not
+	// requested.
+	License *LicenseResult
+	// Secrets holds the committed-secret history scan; nil when not requested.
+	Secrets *SecretsResult
 	// CI holds the CI/CD pipeline sub-result; skipped (OK=true) when no
 	// adapter is configured.
 	CI       CIResult
@@ -82,6 +89,10 @@ type BuildResult struct {
 	OK       bool
 	Output   string
 	Duration time.Duration
+	// LogPath is the root-relative path of the FULL build output log under
+	// .kern/audit/<run-id>/ ("" when nothing was captured). Output above is
+	// the clipped tail; this points at the complete log (F4).
+	LogPath string
 	// Claims are the evidence-backed claims for this build result (e.g. from
 	// evidence.FromBuildResult).
 	Claims []domain.Claim
@@ -96,6 +107,10 @@ type TestResult struct {
 	Duration time.Duration
 	OK       bool
 	Output   string
+	// LogPath is the root-relative path of the FULL test output log under
+	// .kern/audit/<run-id>/ ("" when nothing was captured). Output above is
+	// the clipped tail; this points at the complete log (F4).
+	LogPath string
 	// Claims are the evidence-backed claims for this test result (e.g. from
 	// evidence.FromTestResult).
 	Claims []domain.Claim
@@ -175,6 +190,10 @@ type E2ETestResult struct {
 	Skipped  int
 	Output   string
 	Duration time.Duration
+	// LogPath is the root-relative path of the FULL e2e output log under
+	// .kern/audit/<run-id>/ ("" when nothing was captured). Output above is
+	// the clipped tail; this points at the complete log (F4).
+	LogPath string
 	// Status is an explicit per-check status label; StatusSkipped means the
 	// E2E set was NOT executed (e.g. network isolation unavailable) and must
 	// not count as passing or failing in the verdict math.
@@ -190,6 +209,10 @@ type StaticAnalysisResult struct {
 	Findings []string // finding messages
 	Output   string
 	Duration time.Duration
+	// LogPath is the root-relative path of the FULL static-analysis output
+	// log under .kern/audit/<run-id>/ ("" when nothing was captured). Output
+	// above is the clipped tail; this points at the complete log (F4).
+	LogPath string
 }
 
 // PerformanceResult holds benchmark results. Optional — only populated
@@ -199,6 +222,10 @@ type PerformanceResult struct {
 	Benchmarks []BenchmarkResult
 	Output     string
 	Duration   time.Duration
+	// LogPath is the root-relative path of the FULL benchmark output log
+	// under .kern/audit/<run-id>/ ("" when nothing was captured). Output
+	// above is the clipped tail; this points at the complete log (F4).
+	LogPath string
 }
 
 // BenchmarkResult is a single benchmark measurement.
@@ -220,6 +247,69 @@ type CIResult struct {
 	Status  string `json:"status,omitempty"` // "success", "failure", "in_progress", "queued", "skipped"
 	URL     string `json:"url,omitempty"`
 	Summary string `json:"summary,omitempty"`
+}
+
+// CVEResult holds the govulncheck vulnerability scan. Vulnerabilities are
+// advisory: OK stays true when findings exist (they never fail the verdict)
+// and the check is SKIPPED when the binary is absent or could not run.
+type CVEResult struct {
+	OK       bool
+	Status   string // StatusSkipped when govulncheck could not run
+	Findings []CVEFinding
+	Count    int
+	// Detail is the SKIPPED reason (install hint, stderr tail) or empty.
+	Detail string
+}
+
+// CVEFinding is one OSV-style vulnerability reported by govulncheck.
+type CVEFinding struct {
+	ID         string // e.g. GO-2023-1234 / CVE-2023-1234
+	Module     string // affected Go module path
+	Summary    string // description, truncated to ~200 chars
+	Introduced string // first affected version ("" = earliest)
+	Fixed      string // first fixed version ("" = none known)
+}
+
+// LicenseResult holds the deterministic license classification of the
+// project's modules (go.mod + vendor/modules.txt). Unknown and copyleft
+// licenses are WARN-level findings; the check itself never fails. Skipped is
+// non-empty when the project has neither go.mod nor vendor/.
+type LicenseResult struct {
+	OK       bool
+	Skipped  string // "no vendor/ or go.mod found" when nothing to scan
+	Modules  []LicenseEntry
+	Findings []string // "unknown license: <mod>" / "copyleft: <mod> (<lic>)"
+}
+
+// LicenseEntry maps one module to its classified license ("unknown" when no
+// local LICENSE text matched a high-precision signature).
+type LicenseEntry struct {
+	Module  string
+	License string
+}
+
+// SecretsResult holds the committed-secret history scan. Findings are
+// advisory (WARN); the check itself never fails. Status is StatusSkipped when
+// the root is not a git repository.
+type SecretsResult struct {
+	OK       bool
+	Status   string // StatusSkipped when git log could not run
+	Findings []SecretFinding
+	Count    int
+	// Detail reports the scan cap ("scan capped at 200000 lines") or a clean
+	// confirmation.
+	Detail string
+}
+
+// SecretFinding is one committed secret: commit hash (short), file path,
+// line, pattern kind, and a MASKED snippet (first 4 chars + "…" + last 4) —
+// the raw secret is never exposed.
+type SecretFinding struct {
+	Commit  string
+	File    string
+	Line    int
+	Kind    string // aws-access-key, github-pat, slack-token, private-key, ...
+	Snippet string
 }
 
 // RenderCompact renders a VerificationResult as a short verdict plus one line
@@ -299,6 +389,64 @@ func RenderCompact(v VerificationResult) string {
 	}
 	if v.StaticAnalysis != nil {
 		line("static-analysis", okStatus(v.StaticAnalysis.OK), fmt.Sprintf("tool=%s findings=%d", v.StaticAnalysis.Tool, len(v.StaticAnalysis.Findings)))
+	}
+	if v.CVE != nil {
+		if v.CVE.Status == StatusSkipped {
+			b.WriteString("cve: SKIPPED " + firstLine(v.CVE.Detail) + "\n")
+		} else if v.CVE.Count > 0 {
+			// Vulnerabilities are findings, never a clean OK (F7).
+			line("cve", "WARN", fmt.Sprintf("vulnerabilities=%d", v.CVE.Count))
+		} else {
+			line("cve", okStatus(v.CVE.OK), fmt.Sprintf("vulnerabilities=%d", v.CVE.Count))
+		}
+		for i, fd := range v.CVE.Findings {
+			if i >= 10 {
+				b.WriteString(fmt.Sprintf("  ... and %d more vulnerabilities\n", len(v.CVE.Findings)-10))
+				break
+			}
+			b.WriteString(fmt.Sprintf("  - %s %s: %s\n", fd.ID, fd.Module, fd.Summary))
+		}
+	}
+	if v.License != nil {
+		if v.License.Skipped != "" {
+			b.WriteString("license: SKIPPED " + v.License.Skipped + "\n")
+		} else if len(v.License.Findings) > 0 {
+			// Unknown/copyleft findings are warnings, never a clean OK (F7).
+			line("license", "WARN", fmt.Sprintf("modules=%d findings=%d", len(v.License.Modules), len(v.License.Findings)))
+		} else {
+			line("license", okStatus(v.License.OK), fmt.Sprintf("modules=%d", len(v.License.Modules)))
+		}
+		for _, m := range v.License.Modules {
+			b.WriteString(fmt.Sprintf("  - %s: %s\n", m.Module, m.License))
+		}
+		for i, fd := range v.License.Findings {
+			if i >= 10 {
+				b.WriteString(fmt.Sprintf("  ... and %d more license findings\n", len(v.License.Findings)-10))
+				break
+			}
+			b.WriteString(fmt.Sprintf("  ! %s\n", fd))
+		}
+	}
+	if v.Secrets != nil {
+		if v.Secrets.Status == StatusSkipped {
+			b.WriteString("secrets: SKIPPED " + firstLine(v.Secrets.Detail) + "\n")
+		} else if v.Secrets.Count > 0 {
+			// Findings are findings, never a clean OK (F7): a scan that
+			// found 63 secrets must read "WARN", not "OK findings=63".
+			line("secrets", "WARN", fmt.Sprintf("findings=%d", v.Secrets.Count))
+		} else {
+			line("secrets", okStatus(v.Secrets.OK), fmt.Sprintf("findings=%d", v.Secrets.Count))
+		}
+		if v.Secrets.Detail != "" {
+			b.WriteString("  " + v.Secrets.Detail + "\n")
+		}
+		for i, fd := range v.Secrets.Findings {
+			if i >= 10 {
+				b.WriteString(fmt.Sprintf("  ... and %d more findings\n", len(v.Secrets.Findings)-10))
+				break
+			}
+			b.WriteString(fmt.Sprintf("  - %s %s:%d [%s] %s\n", fd.Commit, fd.File, fd.Line, fd.Kind, fd.Snippet))
+		}
 	}
 	if v.E2ETests != nil {
 		if v.E2ETests.Status == StatusSkipped {

@@ -27,8 +27,10 @@ http_requests{service="orders",method="POST"} 567 1700000000
 	}
 	defer src.Close()
 
-	// Wait for at least one poll.
-	time.Sleep(300 * time.Millisecond)
+	// The poll goroutine fetches immediately on start and then on every
+	// interval; wait for the ingested events instead of sleeping a fixed
+	// interval (a fixed sleep both slows the suite and flakes under load).
+	waitFor(t, func() bool { return len(src.Events("")) >= 2 })
 
 	// Verify events were ingested.
 	events := src.Events("")
@@ -60,7 +62,7 @@ func TestLiveOtelSource(t *testing.T) {
 	}
 	defer src.Close()
 
-	time.Sleep(300 * time.Millisecond)
+	waitFor(t, func() bool { return len(src.Events("")) >= 1 })
 
 	events := src.Events("")
 	if len(events) == 0 {
@@ -97,7 +99,9 @@ func TestLiveKubernetesSource(t *testing.T) {
 	}
 	defer src.Close()
 
-	time.Sleep(300 * time.Millisecond)
+	waitFor(t, func() bool {
+		return len(src.Events("")) >= 1 && len(src.Deployments("")) >= 1
+	})
 
 	events := src.Events("")
 	if len(events) == 0 {
@@ -129,4 +133,19 @@ func TestLiveSourceCloseStopsPolling(t *testing.T) {
 
 	// Verify the goroutine exited by checking that Close returned.
 	// (If it hung, the test would time out.)
+}
+
+// waitFor polls cond until it returns true or the timeout elapses. Live
+// sources ingest on their own poll goroutine, so tests wait on the ingested
+// state rather than sleeping a fixed interval.
+func waitFor(t *testing.T, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("condition not met within timeout")
 }

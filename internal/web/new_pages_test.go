@@ -20,6 +20,7 @@ var newPageRoutes = []struct {
 	{"/system-map", "<title>System Map"},
 	{"/incidents", "<title>Incidents"},
 	{"/efficiency", "<title>Efficiency"},
+	{"/benchmarks", "<title>Benchmarks"},
 }
 
 // TestNewPagesServe asserts every new HTML page route returns 200 and renders

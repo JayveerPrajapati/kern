@@ -1,6 +1,7 @@
 package learning
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -112,6 +113,89 @@ func TestPatternIncidentsAndRecommendation(t *testing.T) {
 	}
 }
 
+// incidentMemory returns an incident-derived memory shaped like the one
+// internal/incident writes (buildIncidentLesson): Type MemoryIncident, Scope
+// = affected service (the error signature), Subject = incident ID.
+func incidentMemory(id, service, content string, at time.Time) domain.Memory {
+	return domain.Memory{
+		Type:       domain.MemoryIncident,
+		Content:    content,
+		Source:     "incident-engine",
+		Scope:      service,
+		Tags:       []string{"incident", "resolved", "postmortem"},
+		Subject:    id,
+		Provenance: "incident:" + id,
+		CreatedAt:  at,
+	}
+}
+
+// TestIncidentPatternsGroupAndSurface proves recurring incidents group into a
+// single pattern (Incidents populated with the incident IDs), Surface(2)
+// surfaces ONLY the recurring failure class, and Remember() writes a
+// failure-recurs constraint; singleton incidents never surface.
+func TestIncidentPatternsGroupAndSurface(t *testing.T) {
+	base := time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)
+	store := seedMemory(t, []domain.Memory{
+		incidentMemory("INC-101", "checkout", "incident INC-101 in checkout: checkout latency spike; root cause: cache miss", base),
+		incidentMemory("INC-102", "checkout", "incident INC-102 in checkout: checkout timeout; root cause: cache miss", base.Add(time.Hour)),
+		incidentMemory("INC-103", "payments", "incident INC-103 in payments: payments rejected", base.Add(2*time.Hour)),
+		{Type: domain.MemoryLesson, Content: "unique lesson", Source: "loop", Scope: "project", CreatedAt: base.Add(3 * time.Hour)},
+	})
+
+	ex := New(store)
+	patterns, err := ex.Patterns()
+	if err != nil {
+		t.Fatalf("Patterns() failed: %v", err)
+	}
+	// Three groups: scope:checkout (2 recurring incidents), scope:payments
+	// (1 singleton), scope:project (1 non-incident singleton).
+	if len(patterns) != 3 {
+		t.Fatalf("expected 3 patterns, got %d: %+v", len(patterns), patterns)
+	}
+	// Count desc: the recurring class sorts first.
+	recurring := patterns[0]
+	if recurring.Key != "scope:checkout" || recurring.Count != 2 {
+		t.Fatalf("expected recurring scope:checkout count 2 first, got %+v", recurring)
+	}
+	// Incidents populated with the recurring incident IDs (sorted).
+	if len(recurring.Incidents) != 2 || recurring.Incidents[0] != "INC-101" || recurring.Incidents[1] != "INC-102" {
+		t.Fatalf("expected Incidents [INC-101 INC-102], got %v", recurring.Incidents)
+	}
+	// Singleton incident groups carry their own ID; the non-incident group none.
+	for _, p := range patterns {
+		if p.Key == "scope:payments" {
+			if len(p.Incidents) != 1 || p.Incidents[0] != "INC-103" {
+				t.Fatalf("expected singleton Incidents [INC-103], got %v", p.Incidents)
+			}
+		}
+		if p.Key == "scope:project" && len(p.Incidents) != 0 {
+			t.Fatalf("expected no incidents for the non-incident group, got %v", p.Incidents)
+		}
+	}
+
+	// Surface(2): only the recurring class crosses the threshold.
+	surfaced, err := ex.Surface(2)
+	if err != nil {
+		t.Fatalf("Surface(2) failed: %v", err)
+	}
+	if len(surfaced) != 1 || surfaced[0].Key != "scope:checkout" {
+		t.Fatalf("expected only scope:checkout surfaced, got %+v", surfaced)
+	}
+
+	// Remember() writes the failure-recurs constraint naming class + count +
+	// incident IDs.
+	got, err := ex.Remember(surfaced[0])
+	if err != nil {
+		t.Fatalf("Remember() failed: %v", err)
+	}
+	if got.Type != domain.MemoryConstraint {
+		t.Fatalf("expected MemoryConstraint, got %q", got.Type)
+	}
+	if !strings.Contains(got.Content, "scope:checkout") || !strings.Contains(got.Content, "recurring 2 times") || !strings.Contains(got.Content, "INC-101") || !strings.Contains(got.Content, "INC-102") {
+		t.Fatalf("constraint must name the failure class, recurrence count and incident IDs, got %q", got.Content)
+	}
+}
+
 func TestSurfaceThreshold(t *testing.T) {
 	base := time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)
 	store := seedMemory(t, []domain.Memory{
@@ -139,6 +223,112 @@ func TestSurfaceThreshold(t *testing.T) {
 	}
 	if len(all) != 2 {
 		t.Fatalf("expected 2 patterns for threshold 0, got %d", len(all))
+	}
+}
+
+// typedClaimMemory returns a memory carrying claim metadata (a typed-claim
+// memory) with deterministic source + timestamp.
+func typedClaimMemory(ct domain.ClaimType, content, scope, source string, at time.Time) domain.Memory {
+	return domain.Memory{
+		Type:      domain.MemoryLesson,
+		Content:   content,
+		Source:    source,
+		Scope:     scope,
+		CreatedAt: at,
+		ClaimType: ct,
+	}
+}
+
+// TestTypedClaimPatternsGroupByClaimType proves typed-claim memories group
+// separately from plain-text memories about the same scope (claim-prefixed
+// keys), that the Pattern carries the claim type + provenance summary
+// (sorted sources, count, latest timestamp), that Surface filters by the
+// same grouping, and that Remember writes the claim metadata onto the
+// constraint.
+func TestTypedClaimPatternsGroupByClaimType(t *testing.T) {
+	base := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+	store := seedMemory(t, []domain.Memory{
+		typedClaimMemory(domain.ClaimFact, "checkout uses cache miss", "svc:checkout", "impact-engine", base),
+		typedClaimMemory(domain.ClaimFact, "checkout retries on 503", "svc:checkout", "verify-engine", base.Add(time.Hour)),
+		typedClaimMemory(domain.ClaimFact, "checkout idempotent POST", "svc:checkout", "impact-engine", base.Add(2*time.Hour)),
+		// Plain-text memories about the SAME scope must not merge with the
+		// FACT group.
+		{Type: domain.MemoryLesson, Content: "checkout lesson", Source: "sre", Scope: "svc:checkout", CreatedAt: base.Add(3 * time.Hour)},
+		{Type: domain.MemoryLesson, Content: "checkout note", Source: "loop", Scope: "svc:checkout", CreatedAt: base.Add(4 * time.Hour)},
+	})
+
+	ex := New(store)
+	patterns, err := ex.Patterns()
+	if err != nil {
+		t.Fatalf("Patterns() failed: %v", err)
+	}
+	if len(patterns) != 2 {
+		t.Fatalf("expected 2 patterns (claim group + plain group), got %d: %+v", len(patterns), patterns)
+	}
+	var claimP, plainP *Pattern
+	for i := range patterns {
+		switch patterns[i].Key {
+		case "claim:FACT:scope:svc:checkout":
+			claimP = &patterns[i]
+		case "scope:svc:checkout":
+			plainP = &patterns[i]
+		}
+	}
+	if claimP == nil || plainP == nil {
+		t.Fatalf("missing claim:FACT or plain scope pattern: %+v", patterns)
+	}
+
+	// Claim group: count 3, ClaimType FACT, provenance preserved (sorted
+	// sources, count, latest timestamp).
+	if claimP.Count != 3 || claimP.ClaimType != domain.ClaimFact {
+		t.Fatalf("claim pattern = %+v, want count 3 type FACT", claimP)
+	}
+	if len(claimP.Provenance.Sources) != 2 || claimP.Provenance.Sources[0] != "impact-engine" || claimP.Provenance.Sources[1] != "verify-engine" {
+		t.Errorf("provenance sources = %v, want sorted [impact-engine verify-engine]", claimP.Provenance.Sources)
+	}
+	if claimP.Provenance.Count != 3 {
+		t.Errorf("provenance count = %d, want 3", claimP.Provenance.Count)
+	}
+	if !claimP.Provenance.Latest.Equal(base.Add(2 * time.Hour)) {
+		t.Errorf("provenance latest = %v, want %v", claimP.Provenance.Latest, base.Add(2*time.Hour))
+	}
+
+	// Plain group: count 2, no claim TYPE (plain-text memories are not
+	// typed-claim groups); provenance still summarizes their sources.
+	if plainP.Count != 2 || plainP.ClaimType != "" {
+		t.Errorf("plain pattern = %+v, want count 2 with no claim type", plainP)
+	}
+
+	// Surface(3) surfaces only the claim group; Surface(1) both.
+	surfaced, err := ex.Surface(3)
+	if err != nil {
+		t.Fatalf("Surface(3) failed: %v", err)
+	}
+	if len(surfaced) != 1 || surfaced[0].Key != "claim:FACT:scope:svc:checkout" {
+		t.Fatalf("Surface(3) = %+v, want only the FACT group", surfaced)
+	}
+	all, err := ex.Surface(1)
+	if err != nil {
+		t.Fatalf("Surface(1) failed: %v", err)
+	}
+	if len(all) != 2 {
+		t.Fatalf("Surface(1) = %d patterns, want 2", len(all))
+	}
+
+	// Remember writes the claim type + provenance onto the constraint, and
+	// the content names the claim type.
+	got, err := ex.Remember(*claimP)
+	if err != nil {
+		t.Fatalf("Remember() failed: %v", err)
+	}
+	if got.ClaimType != domain.ClaimFact {
+		t.Errorf("constraint ClaimType = %q, want FACT", got.ClaimType)
+	}
+	if !strings.Contains(got.Provenance, "impact-engine") || !strings.Contains(got.Provenance, "verify-engine") {
+		t.Errorf("constraint Provenance = %q, want both sources", got.Provenance)
+	}
+	if !strings.Contains(got.Content, "claim type: FACT") {
+		t.Errorf("constraint content must name the claim type, got %q", got.Content)
 	}
 }
 

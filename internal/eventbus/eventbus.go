@@ -11,6 +11,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -233,8 +234,8 @@ type Bus struct {
 	mu      sync.Mutex
 	subs    []*subscription
 	history []Event
-	max     int
-	eid     atomic.Uint64 // monotonic event id suffix (Bug: ID collision)
+	max     int           // history retention cap: the newest max events are kept, the oldest are evicted on Publish
+	eid     atomic.Uint64 // monotonic event id suffix; combined with the UnixNano timestamp in Publish to guarantee unique event IDs
 	wg      sync.WaitGroup
 
 	// P4.3 idempotency: events whose ID was already published are de-duplicated
@@ -282,13 +283,44 @@ type deadLetterSub struct {
 // unbounded growth on long-lived buses.
 const defaultIdempotencyCap = 10000
 
-// New returns a bus with a bounded history of 100 events and idempotency
-// (P4.3) enabled by default so duplicate delivery of the same event ID never
-// duplicates side effects. Call EnableIdempotency(cap) afterward to change the
+// defaultHistoryCap bounds the in-memory event history — the sliding window
+// History() reads — so a long-lived bus (the kern-server console, the MCP
+// server) cannot grow memory without limit. It follows the codebase's
+// retention convention: the audit log caps its in-memory log at
+// maxAuditEntries (5000) and the idempotency set on this same bus at
+// defaultIdempotencyCap (10000). History is additionally byte-bounded per
+// event by maxHistoryPayloadSize, so the worst-case footprint is
+// defaultHistoryCap × 4 KiB, typically far less.
+const defaultHistoryCap = 10000
+
+// historyCapEnv overrides the history retention cap for a new bus. A value
+// that is not a positive integer falls back to defaultHistoryCap with a
+// warning (the warn-and-fallback idiom KERN_WEB_LOOP_TIMEOUT uses in the web
+// package). A bus never runs with an unbounded history.
+const historyCapEnv = "KERN_EVENTBUS_MAX_HISTORY"
+
+// defaultMaxHistory returns the history retention cap for a new bus:
+// KERN_EVENTBUS_MAX_HISTORY when set to a positive integer, else
+// defaultHistoryCap. A non-positive or unparsable value logs a warning and
+// falls back to the default rather than disabling the bound.
+func defaultMaxHistory() int {
+	if v := os.Getenv(historyCapEnv); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return n
+		}
+		log.Printf("WARNING: invalid %s %q; using default %d", historyCapEnv, v, defaultHistoryCap)
+	}
+	return defaultHistoryCap
+}
+
+// New returns a bus with a bounded history of defaultHistoryCap events
+// (KERN_EVENTBUS_MAX_HISTORY overrides) and idempotency (P4.3) enabled by
+// default so duplicate delivery of the same event ID never duplicates side
+// effects. Call EnableIdempotency(cap) afterward to change the
 // remembered-ID capacity, or pass cap 0 for an unbounded set.
 func New() *Bus {
 	return &Bus{
-		max:     100,
+		max:     defaultMaxHistory(),
 		seen:    make(map[string]struct{}),
 		idemCap: defaultIdempotencyCap,
 		sem:     make(chan struct{}, 128),
@@ -351,7 +383,8 @@ func payloadTooLarge(p any) bool {
 func (b *Bus) Publish(ev Event) {
 	if ev.ID == "" {
 		// Combine a monotonic counter with the timestamp so events published
-		// within the same nanosecond never collide (Bug: ID collision).
+		// within the same nanosecond never collide: the counter is the unique
+		// part, so collisions are mitigated regardless of clock resolution.
 		ev.ID = fmt.Sprintf("e-%d-%d", time.Now().UnixNano(), b.eid.Add(1))
 	}
 	if ev.OccurredAt.IsZero() {
@@ -386,10 +419,7 @@ func (b *Bus) Publish(ev Event) {
 		hist.Payload = nil
 	}
 	b.history = append(b.history, hist)
-	if len(b.history) > b.max {
-		// Drop the oldest entries beyond the bound.
-		b.history = b.history[len(b.history)-b.max:]
-	}
+	b.trimHistoryLocked()
 	persistPath := b.persistPath
 	b.mu.Unlock()
 
@@ -529,8 +559,28 @@ func (b *Bus) Flush() {
 	b.wg.Wait()
 }
 
+// trimHistoryLocked enforces the history retention bound: the newest max
+// events are kept and the oldest are dropped (oldest-first eviction, the
+// audit log's noteResultAndTrimLocked precedent). The in-place copy reuses the
+// backing array so History() keeps returning the same slice-header semantics.
+// max <= 0 disables the bound entirely (not recommended for long-lived buses;
+// KERN_EVENTBUS_MAX_HISTORY never produces it). Caller must hold b.mu.
+func (b *Bus) trimHistoryLocked() {
+	if b.max <= 0 || len(b.history) <= b.max {
+		return
+	}
+	kept := b.history[len(b.history)-b.max:]
+	b.history = append(b.history[:0], kept...)
+}
+
 // History returns a copy of stored events matching kind (empty = all), oldest
-// first.
+// first. Retention is bounded: the bus keeps only the most recent max events
+// (defaultHistoryCap, overridable via KERN_EVENTBUS_MAX_HISTORY), evicting the
+// oldest on Publish. A reader that wants "all events since X" therefore sees a
+// sliding window — events evicted before the read are simply not returned.
+// Subscriber delivery is unaffected by the bound: every NEW event is delivered
+// to every matching subscription regardless of how far past the cap the bus
+// has grown.
 func (b *Bus) History(kind Kind) []Event {
 	b.mu.Lock()
 	defer b.mu.Unlock()

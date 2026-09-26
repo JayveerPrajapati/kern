@@ -15,8 +15,23 @@ import (
 // health) and the MCP health handler so both surfaces report the persisted
 // state instead of an empty in-memory session cache.
 func DiskIndexView(root string) map[string]any {
-	if _, err := os.Stat(StorePath(root)); err != nil {
-		return nil // nothing persisted yet
+	// The primary store is SQLite in the default build; the JSON cache is
+	// the fallback (nosqlite build, or a legacy repo not yet migrated).
+	store := StorePath(root)
+	if SQLiteEnabled() {
+		store = SQLitePath(root)
+	}
+	if _, err := os.Stat(store); err != nil {
+		if SQLiteEnabled() {
+			// SQLite-primary build still serves a legacy JSON-only cache;
+			// fall back to the JSON path before declaring "nothing persisted".
+			if _, jerr := os.Stat(StorePath(root)); jerr != nil {
+				return nil
+			}
+			store = StorePath(root)
+		} else {
+			return nil // nothing persisted yet
+		}
 	}
 	ix, err := Load(root)
 	if err != nil {
@@ -51,7 +66,7 @@ func DiskIndexView(root string) map[string]any {
 		"files":      len(ix.FileHashes),
 		"packages":   len(ix.Pkgs),
 		"languages":  ix.Languages(),
-		"store":      StorePath(root),
+		"store":      store,
 		"updated_at": ix.UpdatedAt.Format(time.RFC3339),
 	}
 }

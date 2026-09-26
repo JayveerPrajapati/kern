@@ -46,6 +46,7 @@ func doHTTP(t *testing.T, s *Server, method, ctype, body string, headers map[str
 }
 
 func TestHandleHTTPGetNotAllowed(t *testing.T) {
+	t.Parallel()
 	rr := doHTTP(t, newHTTPServer(), http.MethodGet, "application/json", "", nil)
 	if rr.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("expected 405, got %d", rr.Code)
@@ -53,6 +54,7 @@ func TestHandleHTTPGetNotAllowed(t *testing.T) {
 }
 
 func TestHandleHTTPGetSSEUnsupported(t *testing.T) {
+	t.Parallel()
 	rr := doHTTP(t, newHTTPServer(), http.MethodGet, "text/event-stream", "", map[string]string{"Accept": "text/event-stream"})
 	if rr.Code != http.StatusNotImplemented {
 		t.Fatalf("expected 501 for SSE, got %d", rr.Code)
@@ -60,6 +62,7 @@ func TestHandleHTTPGetSSEUnsupported(t *testing.T) {
 }
 
 func TestHandleHTTPBadContentType(t *testing.T) {
+	t.Parallel()
 	rr := doHTTP(t, newHTTPServer(), http.MethodPost, "text/plain", `{}`, nil)
 	if rr.Code != http.StatusUnsupportedMediaType {
 		t.Fatalf("expected 415, got %d", rr.Code)
@@ -67,6 +70,7 @@ func TestHandleHTTPBadContentType(t *testing.T) {
 }
 
 func TestHandleHTTPParseError(t *testing.T) {
+	t.Parallel()
 	body := "not json"
 	rr := doHTTP(t, newHTTPServer(), http.MethodPost, "application/json", body, nil)
 	if rr.Code != http.StatusOK {
@@ -83,6 +87,7 @@ func TestHandleHTTPParseError(t *testing.T) {
 }
 
 func TestHandleHTTPSingleRequest(t *testing.T) {
+	t.Parallel()
 	body := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`
 	rr := doHTTP(t, newHTTPServer(), http.MethodPost, "application/json", body, nil)
 	if rr.Code != http.StatusOK {
@@ -102,6 +107,7 @@ func TestHandleHTTPSingleRequest(t *testing.T) {
 }
 
 func TestHandleHTTPBatchRequestRejected(t *testing.T) {
+	t.Parallel()
 	body := `[{"jsonrpc":"2.0","id":1,"method":"ping"},{"jsonrpc":"2.0","id":2,"method":"ping"}]`
 	rr := doHTTP(t, newHTTPServer(), http.MethodPost, "application/json", body, nil)
 	if rr.Code != http.StatusOK {
@@ -118,6 +124,7 @@ func TestHandleHTTPBatchRequestRejected(t *testing.T) {
 }
 
 func TestHandleHTTPNotificationAcceptedNoBody(t *testing.T) {
+	t.Parallel()
 	body := `{"jsonrpc":"2.0","method":"notifications/initialized"}`
 	rr := doHTTP(t, newHTTPServer(), http.MethodPost, "application/json", body, nil)
 	if rr.Code != http.StatusAccepted {
@@ -129,6 +136,7 @@ func TestHandleHTTPNotificationAcceptedNoBody(t *testing.T) {
 }
 
 func TestHandleHTTPUnknownMethod(t *testing.T) {
+	t.Parallel()
 	body := `{"jsonrpc":"2.0","id":3,"method":"bogus/method"}`
 	rr := doHTTP(t, newHTTPServer(), http.MethodPost, "application/json", body, nil)
 	var resp map[string]any
@@ -142,6 +150,7 @@ func TestHandleHTTPUnknownMethod(t *testing.T) {
 }
 
 func TestHandleHTTPMissingProtocolVersion(t *testing.T) {
+	t.Parallel()
 	body := `{"jsonrpc":"2.0","id":5,"method":"initialize","params":{}}`
 	rr := doHTTP(t, newHTTPServer(), http.MethodPost, "application/json", body, map[string]string{"MCP-Protocol-Version": ""})
 	if rr.Code != http.StatusPreconditionFailed {
@@ -152,7 +161,50 @@ func TestHandleHTTPMissingProtocolVersion(t *testing.T) {
 	}
 }
 
+// TestHandleHTTPInitializeWithoutHeader pins the spec-conformant handshake: a
+// client sends the FIRST request (initialize) with the version in the body
+// params and no MCP-Protocol-Version header, and must be accepted (200 +
+// serverInfo) instead of 412'd.
+func TestHandleHTTPInitializeWithoutHeader(t *testing.T) {
+	t.Parallel()
+	body := `{"jsonrpc":"2.0","id":9,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"c","version":"1"}}}`
+	rr := doHTTP(t, newHTTPServer(), http.MethodPost, "application/json", body, map[string]string{"MCP-Protocol-Version": ""})
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200 for initialize without header, got %d: %s", rr.Code, rr.Body.String())
+	}
+	if v := rr.Header().Get("MCP-Protocol-Version"); v != "2025-06-18" {
+		t.Fatalf("expected MCP-Protocol-Version echoed from body, got %q", v)
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	res := resp["result"].(map[string]any)
+	if res["protocolVersion"] != "2025-06-18" {
+		t.Fatalf("bad negotiated protocolVersion: %v", res["protocolVersion"])
+	}
+	if _, ok := res["serverInfo"]; !ok {
+		t.Fatalf("expected serverInfo in initialize result, got %+v", res)
+	}
+}
+
+// TestHandleHTTPNonInitializeWithoutHeader: a non-initialize request without
+// the MCP-Protocol-Version header has nothing to negotiate with and must still
+// be rejected with 412.
+func TestHandleHTTPNonInitializeWithoutHeader(t *testing.T) {
+	t.Parallel()
+	body := `{"jsonrpc":"2.0","id":10,"method":"tools/list"}`
+	rr := doHTTP(t, newHTTPServer(), http.MethodPost, "application/json", body, map[string]string{"MCP-Protocol-Version": ""})
+	if rr.Code != http.StatusPreconditionFailed {
+		t.Fatalf("expected 412 for non-initialize without protocol version, got %d", rr.Code)
+	}
+	if v := rr.Header().Get("MCP-Protocol-Version"); v != protocolVersion {
+		t.Fatalf("expected MCP-Protocol-Version echoed, got %q", v)
+	}
+}
+
 func TestHandleHTTPBadProtocolVersion(t *testing.T) {
+	t.Parallel()
 	body := `{"jsonrpc":"2.0","id":6,"method":"initialize","params":{}}`
 	rr := doHTTP(t, newHTTPServer(), http.MethodPost, "application/json", body, map[string]string{"MCP-Protocol-Version": "2030-01-01"})
 	if rr.Code != http.StatusPreconditionFailed {
@@ -161,6 +213,7 @@ func TestHandleHTTPBadProtocolVersion(t *testing.T) {
 }
 
 func TestHandleHTTPSLegacyProtocolVersionAccepted(t *testing.T) {
+	t.Parallel()
 	for _, v := range []string{"2024-11-05", "2025-03-26"} {
 		body := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"` + v + `"}}`
 		req := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(body))
@@ -182,6 +235,7 @@ func TestHandleHTTPSLegacyProtocolVersionAccepted(t *testing.T) {
 }
 
 func TestHandleHTTPRemoteOriginRejected(t *testing.T) {
+	t.Parallel()
 	body := `{"jsonrpc":"2.0","id":7,"method":"initialize","params":{}}`
 	rr := doHTTP(t, newHTTPServer(), http.MethodPost, "application/json", body, map[string]string{"Origin": "https://evil.example"})
 	if rr.Code != http.StatusForbidden {
@@ -190,6 +244,7 @@ func TestHandleHTTPRemoteOriginRejected(t *testing.T) {
 }
 
 func TestHandleHTTPSameHostOriginAllowed(t *testing.T) {
+	t.Parallel()
 	body := `{"jsonrpc":"2.0","id":8,"method":"ping"}`
 	rr := doHTTP(t, newHTTPServer(), http.MethodPost, "application/json", body, map[string]string{"Origin": "http://127.0.0.1:5173"})
 	if rr.Code != http.StatusOK {
@@ -198,6 +253,7 @@ func TestHandleHTTPSameHostOriginAllowed(t *testing.T) {
 }
 
 func TestWriteHTTPErrorIsJSON(t *testing.T) {
+	t.Parallel()
 	rr := httptest.NewRecorder()
 	writeHTTPError(rr, errorResponse(nil, -1, "boom"))
 	if ct := rr.Header().Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
@@ -212,6 +268,7 @@ func TestWriteHTTPErrorIsJSON(t *testing.T) {
 }
 
 func TestHandleHTTPOversizeBodyRejected(t *testing.T) {
+	t.Parallel()
 	// The handler limits reads to 1<<24 bytes. A body smaller than the limit
 	// must still succeed (smoke that the LimitReader path is wired).
 	big := `{"jsonrpc":"2.0","id":4,"method":"initialize","params":{}}`

@@ -23,12 +23,9 @@ import (
 //     modes and report both results plus the winner (default modes: fix, review).
 //   - kern eval report       Print the last stored run/compare result.
 func runEval(rest []string) {
-	f, args, err := parseFlags(rest)
-	if err != nil {
-		fatalUsage("flags: %v", err)
-	}
+	f, args := parseFlagsOrDie(rest)
 	if len(args) == 0 {
-		fatalUsage("usage: kern eval <run|compare|report> [DIR] [--root ROOT] [--max-tokens N] [--mode MODE]")
+		fatalUsage("usage: kern eval <run|compare|report> [root] [--root ROOT] [--max-tokens N] [--mode MODE]")
 	}
 	switch args[0] {
 	case "run":
@@ -139,10 +136,7 @@ func runEvalRun(f flags, args []string) {
 		evalRunStandard(f, dir)
 		return
 	}
-	root := f.root
-	if root == "" {
-		root = "."
-	}
+	root := projectRoot(f)
 	p, err := app.New(root)
 	if err != nil {
 		fatal("Eval: %v", err)
@@ -170,7 +164,7 @@ func runEvalCompare(f flags, args []string) {
 		}
 	}
 	if dir == "" {
-		fatalUsage("usage: kern eval compare [DIR] MODE_A MODE_B [--root ROOT] [--max-tokens N]")
+		fatalUsage("usage: kern eval compare [root] MODE_A MODE_B [--root ROOT] [--max-tokens N]")
 	}
 	if len(args) >= 1 {
 		modeA = args[0]
@@ -178,10 +172,7 @@ func runEvalCompare(f flags, args []string) {
 	if len(args) >= 2 {
 		modeB = args[1]
 	}
-	root := f.root
-	if root == "" {
-		root = "."
-	}
+	root := projectRoot(f)
 	p, err := app.New(root)
 	if err != nil {
 		fatal("Eval: %v", err)
@@ -231,10 +222,7 @@ func runEvalCompare(f flags, args []string) {
 
 // runEvalReport prints the last stored result.
 func runEvalReport(f flags, args []string) {
-	root := f.root
-	if root == "" {
-		root = "."
-	}
+	root := projectRoot(f)
 	path := evalStorePath(root, "last.json")
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -249,10 +237,7 @@ func runEvalReport(f flags, args []string) {
 
 // saveEvalResult persists a result under <root>/.kern/eval/.
 func saveEvalResult(f flags, v any, name string) {
-	root := f.root
-	if root == "" {
-		root = "."
-	}
+	root := projectRoot(f)
 	dir := filepath.Join(root, ".kern", "eval")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return // best-effort persistence never fails the command

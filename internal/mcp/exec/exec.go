@@ -1,36 +1,25 @@
-// Package exec owns command execution, guarded sandbox execution, and build runners
-// (kern_exec, kern_sandbox, kern_run_build) as plain functions.
+// Package exec owns command execution, guarded sandbox execution, build
+// runners, file diffing, validation and self-healing (kern_exec,
+// kern_sandbox, kern_diff_files, kern_validate, kern_heal) as plain
+// functions. RunBuild backs the raw=true mode of kern_validate.
 package exec
 
 import (
 	"context"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/JayveerPrajapati/kern/internal/governance"
 	"github.com/JayveerPrajapati/kern/internal/mcp/mcpargs"
+	"github.com/JayveerPrajapati/kern/internal/mcp/root"
 	"github.com/JayveerPrajapati/kern/internal/optimize"
 	"github.com/JayveerPrajapati/kern/internal/pii"
 	"github.com/JayveerPrajapati/kern/internal/sandbox"
 	"github.com/JayveerPrajapati/kern/internal/script"
 )
-
-func resolveRoot(root string) string {
-	if root == "" {
-		if cwd, err := os.Getwd(); err == nil {
-			return filepath.Clean(cwd)
-		}
-		return "."
-	}
-	if abs, err := filepath.Abs(root); err == nil {
-		return filepath.Clean(abs)
-	}
-	return root
-}
 
 func splitShellLine(line string) []string {
 	var parts []string
@@ -72,9 +61,22 @@ func splitShellLine(line string) []string {
 	return parts
 }
 
+// maskedOutput masks secrets in the FULL sandbox output, then truncates for
+// display. Masking MUST run before truncation: a secret straddling the byte
+// cut would otherwise escape the mask regexes — the mask would only ever see
+// the truncated head, and the tail of the secret would pass through
+// unmasked to the agent context.
+func maskedOutput(out string, limit int) string {
+	out = pii.Mask(out).Text
+	if len(out) > limit {
+		out = out[:limit] + "\n... (truncated)"
+	}
+	return out
+}
+
 // Sandbox runs a command in an isolated snapshot worktree.
 func Sandbox(ctx context.Context, id string, args map[string]any) (string, error) {
-	root := resolveRoot(mcpargs.ArgString(args, "root"))
+	root := root.ResolveRoot(mcpargs.ArgString(args, "root"))
 	cmdLine := mcpargs.ArgString(args, "command")
 	if cmdLine == "" {
 		return "", fmt.Errorf("command is required")
@@ -112,12 +114,8 @@ func Sandbox(ctx context.Context, id string, args map[string]any) (string, error
 	if res.Network != nil {
 		fmt.Fprintf(&b, "network: %s\n", res.Network.Summary())
 	}
-	out := res.Output
-	if len(out) > 4000 {
-		out = out[:4000] + "\n... (truncated)"
-	}
+	out := maskedOutput(res.Output, 4000)
 	if out != "" {
-		out = pii.Mask(out).Text
 		fmt.Fprintf(&b, "output:\n%s\n", out)
 	}
 	if len(res.Manifest) > 0 {
@@ -150,7 +148,7 @@ func RunBuild(ctx context.Context, id string, args map[string]any) (string, erro
 	if cmd == "" {
 		return "", fmt.Errorf("command is required")
 	}
-	dir := resolveRoot(mcpargs.ArgString(args, "dir"))
+	dir := root.ResolveRoot(mcpargs.ArgString(args, "dir"))
 	if err := governance.CheckExecCommand(cmd, dir); err != nil {
 		return "", err
 	}
@@ -170,7 +168,7 @@ func Exec(ctx context.Context, args map[string]any) (string, error) {
 			strings.Join(script.Available(), ", "), strings.Join(script.Languages(), ", ")), nil
 	}
 
-	root := resolveRoot(mcpargs.ArgString(args, "root"))
+	root := root.ResolveRoot(mcpargs.ArgString(args, "root"))
 	if err := governance.CheckExecCommand(mcpargs.ArgString(args, "code"), root); err != nil {
 		return "", err
 	}

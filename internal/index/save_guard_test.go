@@ -1,3 +1,12 @@
+//go:build nosqlite
+
+// Save-time schema-guard tests. The onDiskVersion guard protects the JSON
+// cache against an older daemon clobbering a newer index.json; it is live on
+// the JSON fallback path — the -tags nosqlite build, or a SQLite write
+// failure in the default build. On the SQLite-primary path the same
+// protection comes from the store's meta version check at load time (a newer
+// store written by a current binary refuses an older binary's load), so these
+// tests pin the guard exactly where the JSON write is live.
 package index
 
 import (

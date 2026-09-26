@@ -15,13 +15,14 @@ import (
 var compactArgs = map[string]any{"path": "server.go"}
 
 func TestSafetyBudgetDeniesWhenExceeded(t *testing.T) {
+	t.Parallel()
 	s := NewServer(strings.NewReader(""), &bytes.Buffer{})
 	s.roots = []string{"/"}
 	budget := &domain.SafetyBudget{MaxToolCalls: 1}
 	s.WithToolGateway(governance.NewToolGateway(nil), budget)
 
 	// Call 1: under budget → executes normally.
-	out, err := s.runTool(context.Background(), "t", "kern_compact_file", compactArgs)
+	out, err := s.runTool(context.Background(), "t", "", "kern_compact_file", compactArgs)
 	if err != nil {
 		t.Fatalf("under-budget call must not error, got: %v", err)
 	}
@@ -33,7 +34,7 @@ func TestSafetyBudgetDeniesWhenExceeded(t *testing.T) {
 	}
 
 	// Call 2: budget exceeded (1 >= 1) → denied before dispatch.
-	_, err = s.runTool(context.Background(), "t", "kern_compact_file", compactArgs)
+	_, err = s.runTool(context.Background(), "t", "", "kern_compact_file", compactArgs)
 	if err == nil {
 		t.Fatal("budget-exceeded call must be denied")
 	}
@@ -52,12 +53,13 @@ func TestSafetyBudgetDeniesWhenExceeded(t *testing.T) {
 // TestSafetyBudgetUnderBudgetPasses verifies the budget does not interfere
 // with calls while it has headroom.
 func TestSafetyBudgetUnderBudgetPasses(t *testing.T) {
+	t.Parallel()
 	s := NewServer(strings.NewReader(""), &bytes.Buffer{})
 	s.roots = []string{"/"}
 	s.WithToolGateway(governance.NewToolGateway(nil), &domain.SafetyBudget{MaxToolCalls: 5})
 
 	for i := 0; i < 3; i++ {
-		out, err := s.runTool(context.Background(), "t", "kern_compact_file", compactArgs)
+		out, err := s.runTool(context.Background(), "t", "", "kern_compact_file", compactArgs)
 		if err != nil {
 			t.Fatalf("call %d must pass under budget, got: %v", i+1, err)
 		}
@@ -71,6 +73,7 @@ func TestSafetyBudgetUnderBudgetPasses(t *testing.T) {
 // whose gateway is explicitly disabled (nil) behaves exactly as before — no
 // budget accounting, no denials, even past what a wired budget would allow.
 func TestSafetyBudgetNilGatewayNoop(t *testing.T) {
+	t.Parallel()
 	s := NewServer(strings.NewReader(""), &bytes.Buffer{})
 	s.roots = []string{"/"}
 	s.WithToolGateway(nil, nil) // explicit opt-out: no-op mode
@@ -79,7 +82,7 @@ func TestSafetyBudgetNilGatewayNoop(t *testing.T) {
 	}
 
 	for i := 0; i < 3; i++ {
-		out, err := s.runTool(context.Background(), "t", "kern_compact_file", compactArgs)
+		out, err := s.runTool(context.Background(), "t", "", "kern_compact_file", compactArgs)
 		if err != nil {
 			t.Fatalf("nil-gateway call %d must behave as before, got: %v", i+1, err)
 		}
@@ -130,11 +133,11 @@ func TestSafetyBudgetEnvOverride(t *testing.T) {
 		}
 		// Two under-budget calls succeed, the third is denied.
 		for i := 0; i < 2; i++ {
-			if _, err := s.runTool(context.Background(), "t", "kern_compact_file", compactArgs); err != nil {
+			if _, err := s.runTool(context.Background(), "t", "", "kern_compact_file", compactArgs); err != nil {
 				t.Fatalf("call %d must pass under the env cap, got: %v", i+1, err)
 			}
 		}
-		if _, err := s.runTool(context.Background(), "t", "kern_compact_file", compactArgs); err == nil {
+		if _, err := s.runTool(context.Background(), "t", "", "kern_compact_file", compactArgs); err == nil {
 			t.Fatal("third call must be denied when the env budget caps at 2")
 		}
 	})
@@ -151,6 +154,7 @@ func TestSafetyBudgetEnvOverride(t *testing.T) {
 // non-nil gateway but a nil budget falls back to the conservative default
 // rather than disabling enforcement.
 func TestSafetyBudgetWithBudgetNilDefaults(t *testing.T) {
+	t.Parallel()
 	s := NewServer(strings.NewReader(""), &bytes.Buffer{})
 	s.WithToolGateway(governance.NewToolGateway(nil), nil)
 	if s.gateway == nil {
@@ -168,6 +172,7 @@ func TestSafetyBudgetWithBudgetNilDefaults(t *testing.T) {
 // level (precheckTool) that a denied call neither executes nor consumes
 // budget, and that allowlist-denied tools never consume budget either.
 func TestSafetyBudgetPrecheckToolNoTrackingOnDeny(t *testing.T) {
+	t.Parallel()
 	s := NewServer(strings.NewReader(""), &bytes.Buffer{})
 	s.roots = []string{"/"}
 	s.WithToolGateway(governance.NewToolGateway(nil), &domain.SafetyBudget{MaxToolCalls: 1})

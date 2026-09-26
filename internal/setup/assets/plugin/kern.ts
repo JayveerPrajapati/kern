@@ -192,8 +192,7 @@ const TOOL_PHASES: Record<string, string> = {
   kern_analyze: "plan",
   kern_approve: "edit",
 kern_arch: "explore",
-kern_ask: "meta",
-kern_ast_search: "explore",
+  kern_ast_search: "explore",
   kern_ast_transform: "edit",
   kern_audit: "verify",
   kern_authorize_context: "cross",
@@ -203,7 +202,6 @@ kern_ast_search: "explore",
   kern_check_draft: "verify",
   kern_churn: "explore",
   kern_cochange: "explore",
-  kern_code_graph: "explore",
   kern_commitmsg: "edit",
   kern_communities: "explore",
   kern_compact_file: "explore",
@@ -217,7 +215,6 @@ kern_ast_search: "explore",
   kern_dead: "explore",
   kern_deploy: "edit",
   kern_diff_files: "verify",
-  kern_do: "cross",
   kern_doc_fetch: "cross",
   kern_doc_index: "cross",
   kern_doc_search: "cross",
@@ -250,7 +247,6 @@ kern_ast_search: "explore",
   kern_loop: "cross",
   kern_lsp_bridge: "explore",
   kern_mask_pii: "cross",
-  kern_memory: "cross",
   kern_memory_add: "cross",
   kern_memory_list: "cross",
   kern_memory_ranked: "cross",
@@ -270,6 +266,7 @@ kern_ast_search: "explore",
   kern_org_search: "cross",
   kern_org_tasks: "cross",
   kern_org_teams: "cross",
+  kern_org_user: "cross",
   kern_pack: "plan",
   kern_path: "explore",
   kern_plan: "plan",
@@ -287,9 +284,7 @@ kern_ast_search: "explore",
   kern_resolve: "explore",
   kern_retrieve: "explore",
   kern_review: "verify",
-  kern_risk: "plan",
   kern_run: "cross",
-  kern_run_build: "edit",
   kern_runtime: "explore",
   kern_safe_delete: "edit",
   kern_sandbox: "edit",
@@ -311,7 +306,6 @@ kern_ast_search: "explore",
   kern_validate: "verify",
   kern_verify: "verify",
   kern_verify_output: "verify",
-  kern_walk: "explore",
   kern_what_if: "plan",
   kern_why: "explore",
   kern_workflow: "cross",
@@ -648,21 +642,6 @@ async function runPayload(args: string[], timeoutMs?: number, preserveExit = fal
           if (args.out) flags.push("--out", args.out)
           flags.push(args.root ?? ".")
           return run(flags)
-        },
-      }),
-      kern_run_build: tool({
-        description:
-          "Run a build/test command locally and return only the compact result (exit status + errors), not full output. Use for builds, tests, linting to save context. timeout is in MILLISECONDS (default 120000, max 1800000).",
-        args: {
-          command: tool.schema.string(),
-          dir: tool.schema.string().optional(),
-          timeout: tool.schema.string().optional(),
-        },
-        async execute(args) {
-          const flags: string[] = ["build"]
-          if (args.dir) flags.push("--dir", args.dir)
-          if (args.timeout) flags.push("--timeout", String(Math.max(1, Math.ceil(args.timeout / 1000))))
-          return runPayload([...flags, args.command], args.timeout)
         },
       }),
       kern_deploy: tool({
@@ -1054,20 +1033,23 @@ kern_optimize_log: tool({
       }),
       kern_graph: tool({
         description:
-          "One-call graph context: token-budgeted names-only adjacency for a symbol — callers first (the direction that matters for impact), then callees, every edge tagged EXTRACTED/INFERRED/AMBIGUOUS, plus community membership. Calls to interface methods carry dispatch hints listing the concrete implementations they can reach.",
+          "One-call graph context: token-budgeted names-only adjacency for a symbol — callers first (the direction that matters for impact), then callees, every edge tagged EXTRACTED/INFERRED/AMBIGUOUS, plus community membership. Calls to interface methods carry dispatch hints listing the concrete implementations they can reach. Set format=one-line to render the single-line call-graph neighbourhood instead (the former kern_code_graph output).",
         args: {
           symbol: tool.schema.string(),
           max_tokens: tool.schema.string().optional(),
+          format: tool.schema.string().optional(),
+          entities: tool.schema.string().optional(),
           root: tool.schema.string().optional(),
         },
         async execute(args) {
           const flags: string[] = ["graph", args.symbol]
           if (args.max_tokens !== undefined) flags.push("--max-tokens", String(args.max_tokens))
+          if (args.format === "one-line") flags.push("--one-line")
+          if (args.entities === "true" || args.entities === "1") flags.push("--entities")
           if (args.root) flags.push(args.root)
           return run(flags)
         },
-      }),
-      kern_ast_search: tool({
+      }),kern_ast_search: tool({
         description:
           "AST-level symbol search across a Go project. Supports patterns like 'func greet', 'type *User*', 'method *', '*Handler*'. Returns definitions with file:line.",
         args: {
@@ -1121,19 +1103,6 @@ kern_optimize_log: tool({
           return run(flags)
         },
       }),
-      kern_code_graph: tool({
-        description:
-          "Return the call graph neighbourhood of a symbol: its definition, its callers, and what it calls. Use to understand dependencies without reading whole files.",
-        args: {
-          symbol: tool.schema.string(),
-          root: tool.schema.string().optional(),
-        },
-        async execute(args) {
-          const flags: string[] = ["graph", args.symbol]
-          if (args.root) flags.push(args.root)
-          return run(flags)
-        },
-      }),
       kern_inherits: tool({
         description:
           "Return the inheritance edges of a symbol: its supertypes (extends/implements/embeds) and subtypes (what extends/implements/embeds it). Use to see class hierarchies without reading whole files.",
@@ -1172,23 +1141,8 @@ kern_optimize_log: tool({
           if (args.max_tokens) flags.push("--max", String(args.max_tokens))
           return run(flags)
         },
-      }),
-      kern_walk: tool({
-        description:
-          "Graph-guided walk: the /walk-graph primitive. Returns an indented parent-child dependency tree of every symbol up to N hops away from a function, across files, with file:line per node. Use instead of grepping or reading whole files to locate code.",
-        args: {
-          symbol: tool.schema.string(),
-          depth: tool.schema.string().optional(),
-          root: tool.schema.string().optional(),
-        },
-        async execute(args) {
-          const flags: string[] = ["walk", args.symbol]
-          if (args.depth) flags.push("--depth", String(args.depth))
-          if (args.root) flags.push(args.root)
-          return run(flags)
-        },
-      }),
-      kern_probe: tool({
+}),
+kern_probe: tool({
         description:
           "Query-driven micro-context router: given a task (bug report, prompt, error text), extract the symbol names it mentions, resolve them against the index, and return a budget-capped bundle of definitions, callers, callees and tests. The graph is the retrieval index, never the payload.",
         args: {
@@ -1365,36 +1319,6 @@ kern_optimize_log: tool({
         },
       }),
 
-      kern_note: tool({
-        description:
-          "Governed decision records: new creates a gate-conformant note skeleton; status moves a note between lifecycle folders (rejected needs a reason); validate reports format violations; list inventories the tree.",
-        args: {
-          action: tool.schema.string().optional(),
-          title: tool.schema.string().optional(),
-          class: tool.schema.string().optional(),
-          lifecycle: tool.schema.string().optional(),
-          file: tool.schema.string().optional(),
-          reason: tool.schema.string().optional(),
-          date: tool.schema.string().optional(),
-        },
-        async execute(args) {
-          const flags: string[] = ["note", args.action ?? "list"]
-          if (args.action === "new") {
-            if (args.title) flags.push(args.title)
-            if (args.class) flags.push("--class", args.class)
-            if (args.lifecycle) flags.push("--lifecycle", args.lifecycle)
-            if (args.date) flags.push("--date", args.date)
-          } else if (args.action === "status") {
-            if (args.file) flags.push(args.file)
-            const target = args.set ?? args.lifecycle
-            if (target) flags.push("--set", target)
-            if (args.reason) flags.push(args.reason)
-          } else if (args.action === "validate") {
-            flags.push("--root", ".")
-          }
-          return run(flags)
-        },
-      }),
       kern_trace: tool({
         description:
           "Runtime-impact overlay: parse a pprof -top dump, a crash stack trace, or a plain list of function names and map the hot symbols onto the call graph — file:line, blast radius, test coverage and risk. Use to see what a hot path touches at runtime.",
@@ -1785,39 +1709,58 @@ return run(flags)
         async execute(args) {
           const flags: string[] = ["execute"]
           if (args.root) flags.push("--root", args.root)
-          return withTempFile("execute.patch", args.patch, (file) => run([...flags, file]))
+          // execute exits 1 with the task report on stdout — runPayload keeps it
+          return withTempFile("execute.patch", args.patch, (file) => runPayload([...flags, file]))
         },
       }),
       kern_verify: tool({
         description:
-          "HIGH-LEVEL (ADR-0006): verify a change with the unified verification engine — build, unit tests, security, architecture, dependency. Returns the typed verdict (PASS/FAIL/WARN) and per-check summary.",
+          "HIGH-LEVEL (ADR-0006): verify a change with the unified verification engine — build, unit tests, security, architecture, dependency. Returns the typed verdict (PASS/FAIL/WARN) and per-check summary. Compliance checks are opt-in: set cve/license/secrets to run the govulncheck vulnerability scan, the deterministic license classifier, and the committed-secret history scan (all advisory; a missing govulncheck binary or missing manifest reports SKIPPED, never a hard failure).",
         args: {
           root: tool.schema.string().optional(),
           types: tool.schema.string().optional(),
+          cve: tool.schema.boolean().optional(),
+          license: tool.schema.boolean().optional(),
+          secrets: tool.schema.boolean().optional(),
         },
         async execute(args) {
           const flags: string[] = ["verify"]
           if (args.root) flags.push("--root", args.root)
           if (args.types) flags.push(args.types)
+          if (args.cve) flags.push("--cve")
+          if (args.license) flags.push("--license")
+          if (args.secrets) flags.push("--secrets")
           return runPayload(flags)
         },
       }),
-      kern_incident: tool({
-        description:
-          "HIGH-LEVEL (ADR-0006): investigate a production incident end-to-end — correlate an alert to the affected service and evidence, derive the root cause and hypotheses, and summarize. Provide the alert as JSON; optionally a runtime snapshot (events/deployments/commits) as JSON.",
-        args: {
-          root: tool.schema.string().optional(),
-          alert: tool.schema.string(),
-          snapshot: tool.schema.string().optional(),
-        },
-        async execute(args) {
-          const flags: string[] = ["incident"]
-          if (args.root) flags.push("--root", args.root)
-          flags.push(args.alert)
-          if (args.snapshot) flags.push(args.snapshot)
-          return run(flags)
-        },
-      }),
+kern_incident: tool({
+description:
+"HIGH-LEVEL (ADR-0006): investigate a production incident end-to-end — correlate an alert to the affected service and evidence, derive the root cause and hypotheses, and summarize. Provide the alert as JSON; optionally a runtime snapshot (events/deployments/commits) as JSON. Feature Batch D: set correlate=true to run the incident→twin→code correlation engine and render the correlation report instead of the full pipeline; runbook=<json> adds a heal playbook keyed by the incident's error signature; list_playbooks=true lists stored heal playbooks.",
+args: {
+root: tool.schema.string().optional(),
+alert: tool.schema.string().optional(),
+snapshot: tool.schema.string().optional(),
+correlate: tool.schema.boolean().optional(),
+runbook: tool.schema.string().optional(),
+list_playbooks: tool.schema.boolean().optional(),
+},
+async execute(args) {
+const flags: string[] = ["incident"]
+if (args.root) flags.push("--root", args.root)
+if (args.runbook) {
+flags.push("--runbook", args.runbook)
+return run(flags)
+}
+if (args.list_playbooks) {
+flags.push("--list-playbooks")
+return run(flags)
+}
+if (args.correlate) flags.push("--correlate")
+if (args.alert) flags.push(args.alert)
+if (args.snapshot) flags.push(args.snapshot)
+return run(flags)
+},
+}),
       kern_what_if: tool({
         description:
           "HIGH-LEVEL (Workflow C / ADR-0012): simulate the impact of a hypothetical change on the knowledge graph — transitively affected symbols, files, services, tests, a deterministic risk level, and a typed RECOMMENDATION claim. Read-only; never mutates the graph or index.",
@@ -1838,37 +1781,25 @@ return run(flags)
       }),
       kern_impact: tool({
         description:
-          "HIGH-LEVEL: estimate the impact/blast-radius of a change to a symbol — transitively affected symbols/files/services/tests, deterministic risk, and typed claims. Read-only.",
+          "HIGH-LEVEL: estimate the impact/blast-radius of a change to a symbol — transitively affected symbols/files/services/tests, deterministic risk, and typed claims. Read-only. Set risk=true to render the governance risk assessment for the change instead (the former kern_risk output).",
         args: {
           root: tool.schema.string().optional(),
           change: tool.schema.string(),
           kind: tool.schema.string().optional(),
           new_target: tool.schema.string().optional(),
+risk: tool.schema.string().optional(),
         },
         async execute(args) {
           const flags: string[] = ["impact"]
           if (args.root) flags.push("--root", args.root)
           flags.push(args.change)
+          if (args.risk === "true") flags.push("--risk")
           if (args.kind) flags.push(args.kind)
           if (args.new_target) flags.push(args.new_target)
           return run(flags)
         },
       }),
-      kern_risk: tool({
-        description:
-          "HIGH-LEVEL: the governance risk assessment for a proposed change — the same engine behind `kern risk` (CLI) and POST /v1/risk (REST): the context engine's risk claims (level, score, factors), firewall check result (allowed/blocked, approval requirement), and required validations. Read-only.",
-        args: {
-          root: tool.schema.string().optional(),
-          change: tool.schema.string(),
-        },
-        async execute(args) {
-          const flags: string[] = ["risk"]
-          if (args.root) flags.push("--root", args.root)
-          flags.push(args.change)
-          return run(flags)
-        },
-      }),
-      kern_flight: tool({
+                    kern_flight: tool({
         description:
           "Replay the AI flight recorder (Workflow E observability): the full recorded trail for one task — every stage, tool call, decision, approval, and outcome, in chronological order. Read-only; answers 'what did the agent do, why, and what happened?'. Records live under <root>/.kern/flight.",
         args: {
@@ -1882,24 +1813,7 @@ return run(flags)
           return run(flags)
         },
       }),
-      kern_memory: tool({
-        description:
-          "HIGH-LEVEL (Workflow E): manage engineering memory — add a lesson, list stored lessons, or recall the most relevant lessons for a prompt.",
-        args: {
-          action: tool.schema.string(),
-          lesson: tool.schema.string().optional(),
-          prompt: tool.schema.string().optional(),
-          root: tool.schema.string().optional(),
-        },
-        async execute(args) {
-          const flags: string[] = ["memory", args.action]
-          if (args.lesson) flags.push(args.lesson)
-          if (args.prompt) flags.push(args.prompt)
-          if (args.root) flags.push("--root", args.root)
-          return run(flags)
-        },
-      }),
-      kern_agents: tool({
+                    kern_agents: tool({
         description:
           "HIGH-LEVEL (Workflow E): build the standard specialist team and list its roster — name, role, capabilities — plus the current task states from the agent registry. Read-only and deterministic.",
         args: {
@@ -1922,7 +1836,8 @@ async execute(args) {
 const flags: string[] = ["diff-gate"]
 if (args.root) flags.push("--root", args.root)
 if (args.source) flags.push("--source", args.source)
-return run(flags)
+// diff-gate exits 1/2 with the findings report on stdout — runPayload keeps it
+return runPayload(flags)
 },
 }),
 kern_validate_proposed: tool({
@@ -1938,7 +1853,8 @@ const flags: string[] = ["validate-proposed"]
 if (args.root) flags.push("--root", args.root)
 if (args.source) flags.push("--source", args.source)
 if (args.files) flags.push("--files", args.files)
-return run(flags)
+// validate-proposed exits 1 with the report on stdout — runPayload keeps it
+return runPayload(flags)
 },
 }),
 kern_explain_finding: tool({
@@ -2003,35 +1919,22 @@ kern_register_host_sampler: tool({
       }),
       kern_loop: tool({
         description:
-          "HIGH-LEVEL (Workflow E): run the closed autonomy loop against an intent string and return the stage timeline plus the deployed / observed-healthy / learned outcome. The autonomy level (L0-L5, default L0 read-only) gates which stages run.",
+          "HIGH-LEVEL (Workflow E): run the closed autonomy loop against an intent string and return the stage timeline plus the deployed / observed-healthy / learned outcome. mode=observe (default) runs the read-only no-op stages gated by the autonomy level (L0-L5, default L0); mode=autonomous (the former kern_do) wires the LLM coder and planner as the default stage handlers (default level L2, sandboxed code changes; L3 adds PR creation, L4 deploy-with-approval). The level argument works in both modes.",
         args: {
           root: tool.schema.string().optional(),
           intent: tool.schema.string(),
           level: tool.schema.string().optional(),
+mode: tool.schema.string().optional(),
         },
         async execute(args) {
           const flags: string[] = ["loop", args.intent]
           if (args.level) flags.push("--level", args.level)
+if (args.mode) flags.push("--mode", args.mode)
           if (args.root) flags.push("--root", args.root)
           return run(flags)
         },
       }),
-      kern_do: tool({
-        description:
-          "HIGH-LEVEL (Workflow E): the autonomous 'Implement X' closed loop (understand→remember→plan→code→verify→protect→observe→learn) — the MCP counterpart of `kern do`. Unlike kern_loop's read-only no-op stages, this wires the LLM coder and planner (provider-neutral factory, default local Ollama) as the default stage handlers, grounded with project context (relevant files + impact set) and verified with the polyglot verification engine. Default level L2 (sandboxed code changes); L3 adds PR creation, L4 deploy-with-approval.",
-        args: {
-          root: tool.schema.string().optional(),
-          intent: tool.schema.string(),
-          level: tool.schema.string().optional(),
-        },
-        async execute(args) {
-          const flags: string[] = ["do", args.intent]
-          if (args.level) flags.push("--level", args.level)
-          if (args.root) flags.push("--root", args.root)
-          return run(flags)
-        },
-      }),
-      kern_meta: tool({
+                    kern_meta: tool({
         description:
           "Single entry point: describe what you need in natural language and kern classifies the request and runs the right tool(s) internally. Examples: 'how does dispatch work?' → kern_explore, 'what breaks if I change dispatch?' → kern_impact, 'compress this log: ...' → kern_optimize_log, 'mask secrets in: ...' → kern_mask_pii, 'find the dispatch function' → kern_search, 'show me the architecture' → kern_arch. Prefer this over calling individual kern_* tools — it picks the right one for you.",
         args: {
@@ -2043,19 +1946,6 @@ kern_register_host_sampler: tool({
           if (args.root) flags.push("--root", args.root)
           return run(flags)
         },
-      }),
-      kern_ask: tool({
-description:
-"Ask kern a question about the codebase — deterministic index-first answering (never calls an LLM). Classifies the request exactly like kern_meta and runs the right tool internally: 'how does dispatch work?' → kern_explore, 'find the dispatch function' → kern_search, 'show me the architecture' → kern_arch. Alias of kern_meta with an explicit deterministic-only contract.",
-args: {
-root: tool.schema.string().optional(),
-request: tool.schema.string(),
-},
-async execute(args) {
-const flags: string[] = ["ask", args.request]
-if (args.root) flags.push("--root", args.root)
-return run(flags)
-},
 }),
 kern_run: tool({
         description:
@@ -2133,21 +2023,23 @@ kern_run: tool({
           return run(flags)
         },
       }),
-      kern_correlate: tool({
-        description:
-          "HIGH-LEVEL: correlate a production alert against the runtime to produce a deep evidence chain (alert→service→deployment→commit→symbol→task/pr/agent). Deterministic — derived from runtime source and git history, not LLM.",
-        args: {
-          root: tool.schema.string().optional(),
-          alert: tool.schema.string(),
-          // snapshot is intentionally absent: the kern CLI correlate command
-          // takes only <alert-json> and --root, so the arg would be dropped.
-        },
-        async execute(args) {
-          const flags: string[] = ["correlate", args.alert]
-          if (args.root) flags.push("--root", args.root)
-          return run(flags)
-        },
-      }),
+kern_correlate: tool({
+description:
+"HIGH-LEVEL: correlate a production alert against the runtime to produce a deep evidence chain (alert→service→deployment→commit→symbol→task/pr/agent). Deterministic — derived from runtime source and git history, not LLM. Feature Batch D: set code=true to extend the report with the incident→twin→code correlation (implicated source files + symbols resolved through the digital twin, with a deterministic confidence and any auto-attached heal playbook).",
+args: {
+root: tool.schema.string().optional(),
+alert: tool.schema.string(),
+code: tool.schema.boolean().optional(),
+// snapshot is intentionally absent: the kern CLI correlate command
+// takes only <alert-json> and --root, so the arg would be dropped.
+},
+async execute(args) {
+const flags: string[] = ["correlate", args.alert]
+if (args.root) flags.push("--root", args.root)
+if (args.code) flags.push("--code")
+return run(flags)
+},
+}),
       kern_learn: tool({
         description:
           "HIGH-LEVEL: extract recurring patterns from engineering memory and surface those above a threshold. Patterns are promoted to memory (evidence-based). Deterministic — the LLM may explain but does not create patterns.",
@@ -2198,10 +2090,11 @@ kern_run: tool({
         },
         async execute(args) {
           const flags: string[] = ["verify"]
+          // verify exits 1 with the full report on stdout — runPayload keeps it
           return withTempFile("verify-input.txt", args.text, (file) => {
             const rest: string[] = [...flags, file]
             if (args.root) rest.push(args.root)
-            return run(rest)
+            return runPayload(rest)
           })
         },
       }),
@@ -2216,25 +2109,26 @@ kern_run: tool({
         async execute(args) {
           const flags: string[] = ["check-draft"]
           if (args.lang) flags.push("--lang", args.lang)
+          // check-draft exits 1 with the findings on stdout — runPayload keeps them
           return withTempFile("draft.go", args.code, (file) => {
             const rest = [...flags, file]
             if (args.root) rest.push(args.root)
-            return run(rest)
+            return runPayload(rest)
           })
         },
       }),
       kern_taint: tool({
         description:
-          "Taint-lite analysis: flag security sinks (SQL injection, command injection, unsafe deserialization) whose containing function is transitively called by a framework entry point or whose file contains source expressions (request params, bodies, CLI args). With generate, emits a deterministic go test scaffold per tainted sink (package clause, testing import, TestTaint<Rule><Line> with a TODO body) for LLM-assisted fill.",
+          "Taint-lite analysis: flag security sinks (SQL injection, command injection, unsafe deserialization) whose containing function is transitively called by a framework entry point or whose file contains source expressions (request params, bodies, CLI args). The optional range argument scopes findings to files changed in a \'from..to\' git range. Deterministic, bounded BFS. For test scaffolds per tainted sink, use kern_synthesize_test with a sinks= filter instead.",
         args: {
           root: tool.schema.string().optional(),
           file: tool.schema.string().optional(),
-          generate: tool.schema.string().optional(),
+          range: tool.schema.string().optional(),
         },
         async execute(args) {
           const flags: string[] = ["taint"]
           if (args.file) flags.push("--file", args.file)
-          if (truthy(args.generate)) flags.push("--generate")
+          if (args.range) flags.push("--range", args.range)
           if (args.root) flags.push(args.root)
           return run(flags)
         },
@@ -2308,7 +2202,8 @@ kern_entry_points: tool({
         async execute(args) {
           const flags: string[] = ["health"]
           if (args.root) flags.push("--root", args.root)
-          return run(flags)
+          // health can exit 1 with the report on stdout — runPayload keeps it
+          return runPayload(flags)
         },
       }),
       kern_compose: tool({
@@ -2587,6 +2482,29 @@ kern_entry_points: tool({
         },
         async execute(args) {
           const flags: string[] = ["org", "audit"]
+          if (args.root) flags.push("--root", args.root)
+          if (args.projects) args.projects.split(",").forEach((pair: string) => { const p = pair.trim(); if (p) flags.push("--project", p) })
+          return run(flags)
+        },
+      }),
+      kern_org_user: tool({
+        description:
+          "Org-wide user management + RBAC: sub-actions user-add, user-list, user-role, user-disable, user-audit (Feature Batch G). actor_id (the acting user) is required on every action and its role must allow the action. user-add registers a user with a role; user-list returns {users:[{id,role,enabled}],count}; user-role changes a user's role; user-disable disables a user; user-audit returns the user's append-only audit trail. MCP-only tool: no org CLI subcommand exists yet, so the plugin forwards to the org family namespace.",
+        args: {
+          action: tool.schema.string().optional(),
+          user_id: tool.schema.string().optional(),
+          role: tool.schema.string().optional(),
+          actor_id: tool.schema.string().optional(),
+          root: tool.schema.string().optional(),
+          projects: tool.schema.string().optional(),
+        },
+        async execute(args) {
+          const flags: string[] = ["org", "users", args.action || "list"]
+          if (args.action) {
+          if (args.user_id) flags.push(args.user_id)
+          if (args.role) flags.push(args.role)
+          }
+          if (args.actor_id) flags.push("--actor", args.actor_id)
           if (args.root) flags.push("--root", args.root)
           if (args.projects) args.projects.split(",").forEach((pair: string) => { const p = pair.trim(); if (p) flags.push("--project", p) })
           return run(flags)
@@ -2894,7 +2812,7 @@ kern_stream: tool({
       }),
       kern_synthesize_test: tool({
         description:
-          "Automatically synthesizes comprehensive table-driven unit tests, parameter fixtures, and boundary invariants for untested functions or methods based on AST signatures.",
+          "Automatically synthesizes comprehensive table-driven unit tests, parameter fixtures, and boundary invariants for untested functions or methods based on AST signatures. Pass sinks=<comma-separated rule ids> to scaffold a deterministic test per tainted security sink instead (the former kern_taint generate=true output).",
         args: {
           target: tool.schema.string().optional(),
           file: tool.schema.string().optional(),
@@ -2903,6 +2821,7 @@ kern_stream: tool({
           apply: tool.schema.string().optional(),
           format: tool.schema.string().optional(),
           root: tool.schema.string().optional(),
+sinks: tool.schema.string().optional(),
         },
         async execute(args) {
           const flags: string[] = ["synthesize-test"]
@@ -2911,6 +2830,7 @@ kern_stream: tool({
           if (truthy(args.auto_gap)) flags.push("--auto-gap")
           if (truthy(args.apply)) flags.push("--apply")
           if (args.format === "json") flags.push("--json")
+          if (args.sinks) flags.push("--sinks", args.sinks)
           if (args.root) flags.push("--root", args.root)
           return run(flags)
         },

@@ -11,6 +11,7 @@ import (
 // exec/verify/LLM-class tools, medium for index-backed search/graph,
 // fast (default) for everything else.
 func TestCostHintForTiers(t *testing.T) {
+	t.Parallel()
 	if h := costHintFor("kern_sandbox"); h != costSlow {
 		t.Errorf("kern_sandbox = %+v, want slow tier", h)
 	}
@@ -33,6 +34,7 @@ func TestCostHintForTiers(t *testing.T) {
 // the est latency + output-token hint so agents can budget context from the
 // highest-traffic tool. Exercises the REAL handleMeta path (no mirrors).
 func TestHandleMetaCostHintMarker(t *testing.T) {
+	t.Parallel()
 	s := NewServer(strings.NewReader(""), io.Discard)
 	out, err := s.handleMeta(context.Background(), map[string]any{"request": "show me the savings"})
 	if err != nil {

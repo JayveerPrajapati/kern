@@ -10,6 +10,7 @@ import (
 )
 
 func TestSkillCatalog(t *testing.T) {
+	t.Parallel()
 	s := NewServer(strings.NewReader(""), io.Discard)
 	res, err := s.handleSkill(context.Background(), map[string]any{"action": "catalog"})
 	if err != nil {
@@ -26,6 +27,7 @@ func TestSkillCatalog(t *testing.T) {
 }
 
 func TestSkillCatalogDefaultAction(t *testing.T) {
+	t.Parallel()
 	s := NewServer(strings.NewReader(""), io.Discard)
 	res, err := s.handleSkill(context.Background(), map[string]any{})
 	if err != nil {
@@ -37,6 +39,7 @@ func TestSkillCatalogDefaultAction(t *testing.T) {
 }
 
 func TestSkillLoad(t *testing.T) {
+	t.Parallel()
 	s := NewServer(strings.NewReader(""), io.Discard)
 	res, err := s.handleSkill(context.Background(), map[string]any{"action": "load", "skill": "kern-safe-change"})
 	if err != nil {
@@ -48,6 +51,7 @@ func TestSkillLoad(t *testing.T) {
 }
 
 func TestSkillLoadUnknown(t *testing.T) {
+	t.Parallel()
 	s := NewServer(strings.NewReader(""), io.Discard)
 	_, err := s.handleSkill(context.Background(), map[string]any{"action": "load", "skill": "does-not-exist"})
 	if err == nil {
@@ -59,6 +63,7 @@ func TestSkillLoadUnknown(t *testing.T) {
 }
 
 func TestSkillLoadMissingName(t *testing.T) {
+	t.Parallel()
 	s := NewServer(strings.NewReader(""), io.Discard)
 	_, err := s.handleSkill(context.Background(), map[string]any{"action": "load"})
 	if err == nil {
@@ -67,6 +72,7 @@ func TestSkillLoadMissingName(t *testing.T) {
 }
 
 func TestSkillUnknownAction(t *testing.T) {
+	t.Parallel()
 	s := NewServer(strings.NewReader(""), io.Discard)
 	_, err := s.handleSkill(context.Background(), map[string]any{"action": "explode"})
 	if err == nil {
@@ -79,6 +85,7 @@ func TestSkillUnknownAction(t *testing.T) {
 // handleSkills): a skill under <root>/.kern/skills is loadable by name and
 // catalog output carries the "(user)" marker.
 func TestSkillLoadUserDirFallback(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	skillDir := filepath.Join(root, ".kern", "skills", "demo")
 	if err := os.MkdirAll(skillDir, 0o700); err != nil {

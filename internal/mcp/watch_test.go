@@ -18,6 +18,7 @@ import (
 // exactly once on the watcher's own tick (not by any tool call), stays fresh
 // afterwards, and the watch goroutine stops cleanly on Close.
 func TestBackgroundWatchRebuildsStaleIndexOnce(t *testing.T) {
+	t.Parallel()
 	root := mcpProject(t)
 	s := NewServer(strings.NewReader(""), io.Discard)
 	s.roots = []string{root}
@@ -36,6 +37,13 @@ func TestBackgroundWatchRebuildsStaleIndexOnce(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "extra.go"), []byte("package main\nfunc Extra() {}\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	// Mark the session stale explicitly (the same path a file-event watcher
+	// uses — Session.Invalidate) instead of waiting out the 1s freshness
+	// cooldown before polling staleness is even noticed. The watcher's own
+	// rebuild, exactly-once behavior, and clean stop are what this test
+	// asserts; the cooldown merely delays detection and costs a full second
+	// of wall time per run.
+	s.sessionFor(root).Invalidate()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -82,6 +90,7 @@ func TestBackgroundWatchRebuildsStaleIndexOnce(t *testing.T) {
 // (the loop's tick handler) with the busy flag held to simulate an in-flight
 // rebuild.
 func TestBackgroundWatchSingleFlight(t *testing.T) {
+	t.Parallel()
 	root := mcpProject(t)
 	s := NewServer(strings.NewReader(""), io.Discard)
 	s.roots = []string{root}
@@ -98,6 +107,11 @@ func TestBackgroundWatchSingleFlight(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "extra.go"), []byte("package main\nfunc Extra() {}\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	// Mark stale explicitly (Session.Invalidate, the file-event path) so the
+	// post-busy rebuild is triggered by staleness rather than by waiting out
+	// the 1s freshness cooldown — the single-flight contract under test is
+	// about tick behavior, not the cooldown.
+	s.sessionFor(root).Invalidate()
 
 	// Simulate a rebuild already in flight: every tick while busy must be
 	// skipped — no rebuild goroutine may be spawned (a spawned rebuild would
@@ -107,13 +121,19 @@ func TestBackgroundWatchSingleFlight(t *testing.T) {
 	s.watchBusy = true
 	s.watchMu.Unlock()
 	s.maybeRebuildIndexes()
-	deadline := time.Now().Add(1200 * time.Millisecond)
+	// The window only needs to span a few polls: a buggy spawn would finish
+	// on this tiny fixture in well under 100ms and clear busy, which the
+	// 10ms poll catches immediately. The original 1200ms was pure padding.
+	deadline := time.Now().Add(300 * time.Millisecond)
 	for time.Now().Before(deadline) {
 		s.watchMu.Lock()
 		busy := s.watchBusy
 		s.watchMu.Unlock()
 		cur, _ := s.sessionFor(root).CachedIndex()
-		if !busy || cur != before {
+		// After Invalidate() the cached index is nil until a rebuild runs, so
+		// "nothing changed" is cur == nil; a buggy spawn would surface a new
+		// non-nil instance (or clear busy).
+		if !busy || (cur != nil && cur != before) {
 			t.Fatal("tick while a rebuild was in flight spawned a rebuild (single-flight violated)")
 		}
 		time.Sleep(10 * time.Millisecond)
@@ -186,6 +206,7 @@ func TestWatchIntervalFromEnv(t *testing.T) {
 // maybeRebuildIndexes must skip the rebuild instead of stacking a concurrent
 // one.
 func TestWatchElectionDefersToLockHolder(t *testing.T) {
+	t.Parallel()
 	s := newTestServer()
 	defer s.Close()
 	root := t.TempDir()
@@ -208,6 +229,7 @@ func TestWatchElectionDefersToLockHolder(t *testing.T) {
 // TestWatchElectionRunsWhenFree verifies the counter-case: with no competing
 // holder the watch rebuilds the root and records it as warmed.
 func TestWatchElectionRunsWhenFree(t *testing.T) {
+	t.Parallel()
 	s := newTestServer()
 	defer s.Close()
 	root := t.TempDir()

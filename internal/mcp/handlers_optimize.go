@@ -23,6 +23,9 @@ func (s *Server) handleOptimizeOutput(ctx context.Context, args map[string]any) 
 }
 
 func (s *Server) handleStats(ctx context.Context, args map[string]any) (string, error) {
+	if argBool(args, "by_tool") {
+		return renderStatsByTool(argString(args, "days"), argString(args, "session"))
+	}
 	return renderStats(argString(args, "days"), argString(args, "session"))
 }
 

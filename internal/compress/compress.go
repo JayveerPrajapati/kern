@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/JayveerPrajapati/kern/internal/semcache"
 	"github.com/JayveerPrajapati/kern/internal/terse"
 )
 
@@ -59,6 +60,11 @@ type Options struct {
 	Cluster bool
 	// TruncateRules specifies custom pattern-matching and adaptive window/strip rules.
 	TruncateRules []TruncateRule
+	// SemcacheNamespace names the semantic-cache namespace this compression
+	// accrues into (default "log:default"). Profile-scoped so a compression
+	// computed under one profile's truncate rules can never be fuzzy-served
+	// to another profile (audit iteration-2 finding 2).
+	SemcacheNamespace string
 }
 
 // TruncateRule controls custom pattern matching and action/windowing for log lines.
@@ -253,7 +259,22 @@ func CompressLog(text string, opts Options) string {
 	// Perform contextual stack frame folding for external/system frames
 	out = foldStackFrames(out)
 
-	return strings.Join(out, "\n")
+	result := strings.Join(out, "\n")
+	// Semcache accrual: every deterministic compression is stored for fuzzy
+	// reuse — a later, similar log can be served the cached compression
+	// instead of recompressing. The payload is the plain output string,
+	// matching optimize.Log's per-profile "log:<profile>" namespaces, so both
+	// flows share one index per profile. The namespace is profile-scoped (the
+	// default "log:default" when none is given): a compression computed under
+	// one profile's truncate rules must never be fuzzy-served to another
+	// profile (audit iteration-2 finding 2). Best-effort and non-blocking: a
+	// cache failure must never fail the compression itself.
+	ns := opts.SemcacheNamespace
+	if ns == "" {
+		ns = "log:default"
+	}
+	_ = semcache.Store(ns, text, result)
+	return result
 }
 
 var systemFrameRe = regexp.MustCompile(`(?i)(runtime[/.]|net/http|syscall/|os/exec|os\.StartProcess|testing/|vendor/|node_modules/|site-packages/|dist-packages/|java\.base/|java\.|javax\.|sun\.|com\.sun\.|org\.springframework\.|org\.apache\.|/usr/lib/|/usr/local/go/|/usr/share/|/usr/bin/|pkg/mod/|gopkg\.in/|github\.com/gin-gonic/|github\.com/stretchr/)`)

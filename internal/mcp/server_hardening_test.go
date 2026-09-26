@@ -53,24 +53,49 @@ func TestToolCallCoverage(t *testing.T) {
 	// the actual execution path rather than the governance denial.
 	t.Setenv("KERN_ALLOW_EXEC", "1")
 
-	mcpLastOK(t, "kern_validate", map[string]any{"root": root, "timeout": "60"})
-	mcpLastOK(t, "kern_run_build", map[string]any{"command": "true", "dir": root})
-	mcpLastOK(t, "kern_sandbox", map[string]any{"root": root, "command": "sh -c 'printf ok'"})
-	mcpLastOK(t, "kern_frameworks", rootArg)
-	mcpLastOK(t, "kern_swap", map[string]any{"root": root, "text": "this is a short sample"})
-	mcpLastOK(t, "kern_doc_index", rootArg)
-	mcpLastOK(t, "kern_doc_search", map[string]any{"root": root, "query": "package", "k": "3"})
-	mcpLastOK(t, "kern_precache", rootArg)
-	mcpLastOK(t, "kern_probe", map[string]any{"root": root, "task": "Greet"})
-	out := mcpLastOK(t, "kern_repo_search", map[string]any{"query": "definitely-no-such-symbol-xyz"})
+	// All index-backed calls share one root, so one server builds the index
+	// once instead of once per call; the calls stay sequential (slow tools
+	// emit progress notifications, handled by the batch harness).
+	resps := mcpBatch(t, []mcpCallSpec{
+		{"kern_validate", map[string]any{"root": root, "timeout": "60"}},
+		{"kern_validate", map[string]any{"root": root, "command": "true", "raw": "true"}},
+		{"kern_sandbox", map[string]any{"root": root, "command": "sh -c 'printf ok'"}},
+		{"kern_frameworks", rootArg},
+		{"kern_swap", map[string]any{"root": root, "text": "this is a short sample"}},
+		{"kern_doc_index", rootArg},
+		{"kern_doc_search", map[string]any{"root": root, "query": "package", "k": "3"}},
+		{"kern_precache", rootArg},
+		{"kern_probe", map[string]any{"root": root, "task": "Greet"}},
+		{"kern_repo_search", map[string]any{"root": root, "query": "definitely-no-such-symbol-xyz"}},
+		{"kern_heal", map[string]any{"root": root, "max_rounds": "1", "timeout": "60"}},
+	})
+	assertOK := func(i int) string {
+		t.Helper()
+		if e, ok := resps[i]["error"].(map[string]any); ok {
+			t.Fatalf("tool returned error: %+v", e)
+		}
+		text, isErr := toolResultText(t, resps[i])
+		if isErr {
+			t.Fatalf("tool returned isError result: %s", text)
+		}
+		return text
+	}
+	out := assertOK(9) // kern_repo_search
 	if !strings.Contains(out, "no symbols matched") {
 		t.Logf("kern_repo_search returned: %q", out)
 	}
-
 	// kern_heal on a healthy project returns immediately without an LLM.
-	out = mcpLastOK(t, "kern_heal", map[string]any{"root": root, "max_rounds": "1", "timeout": "60"})
+	out = assertOK(10) // kern_heal
 	if !strings.Contains(out, "healed OK") {
 		t.Fatalf("expected healed OK on healthy project, got %q", out)
+	}
+	for i := 0; i < len(resps); i++ {
+		switch i {
+		case 9, 10:
+			continue // asserted above
+		default:
+			assertOK(i)
+		}
 	}
 }
 
@@ -109,7 +134,11 @@ func TestProgressNotificationsBeforeResult(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	t.Setenv("KERN_ALLOW_EXEC", "1") // kern_sandbox is a governed exec surface
 	root := mcpProject(t)
-	req := toolsCallJSON(t, 50, "kern_sandbox", map[string]any{"root": root, "command": "sh -c 'printf ok'"})
+	// Progress is only emitted when the client supplies a progressToken in
+	// the request's _meta (MCP spec — no unsolicited tokens); include one so
+	// the slow tool still fires notifications.
+	args, _ := json.Marshal(map[string]any{"root": root, "command": "sh -c 'printf ok'"})
+	req := writeReq("tools/call", 50, `{"name":"kern_sandbox","arguments":`+string(args)+`,"_meta":{"progressToken":"t1"}}`)
 	in := strings.NewReader(req + "\n")
 	buf := &bytes.Buffer{}
 	s := NewServer(in, buf)
@@ -134,6 +163,12 @@ func TestProgressNotificationsBeforeResult(t *testing.T) {
 		}
 		if m["method"] != "notifications/progress" {
 			t.Fatalf("expected progress notification before result, got %+v", m)
+		}
+		if progressCount == 0 {
+			params, _ := m["params"].(map[string]any)
+			if params["progressToken"] != "t1" {
+				t.Fatalf("progress notification must carry the client's progressToken, got %+v", m)
+			}
 		}
 		progressCount++
 	}
@@ -174,6 +209,7 @@ func TestHTTPNoProgressNotifications(t *testing.T) {
 // TestCancelRequestAbortsInflight verifies $/cancelRequest cancels the context
 // of a running tool call.
 func TestCancelRequestAbortsInflight(t *testing.T) {
+	t.Parallel()
 	s := &Server{transport: "stdio"}
 	ctx, cancel := context.WithCancel(context.Background())
 	s.registerInflight("77", cancel)
@@ -190,6 +226,7 @@ func TestCancelRequestAbortsInflight(t *testing.T) {
 // sent as a JSON-RPC notification (no id), which is how spec-compliant clients
 // deliver it, and that no response is produced.
 func TestCancelRequestAsNotification(t *testing.T) {
+	t.Parallel()
 	s := &Server{transport: "stdio"}
 	ctx, cancel := context.WithCancel(context.Background())
 	s.registerInflight("42", cancel)
@@ -206,6 +243,7 @@ func TestCancelRequestAsNotification(t *testing.T) {
 // tools/call registration and $/cancelRequest when the client uses a string
 // id (idKey canonicalizes both sides).
 func TestCancelRequestStringID(t *testing.T) {
+	t.Parallel()
 	s := &Server{transport: "stdio"}
 	ctx, cancel := context.WithCancel(context.Background())
 	s.registerInflight(idKey(json.RawMessage(`"abc"`)), cancel)
@@ -269,6 +307,7 @@ func TestCancelRequestAbortsRealToolCall(t *testing.T) {
 // TestIdKeyCanonicalization pins the id-key forms so tools/call and
 // $/cancelRequest agree on numbers, strings and raw ids.
 func TestIdKeyCanonicalization(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		id   json.RawMessage
 		want string
@@ -291,6 +330,7 @@ func TestIdKeyCanonicalization(t *testing.T) {
 // leaving the inflight map intact so shutdown can wait for running tools to
 // drain (each tool goroutine removes itself via unregisterInflight).
 func TestCancelAllClearsInflightAndReleasesLocks(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	s := &Server{transport: "stdio", locks: map[string]*lock.Lock{}, inflight: map[string]context.CancelFunc{}}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -320,6 +360,7 @@ func TestCancelAllClearsInflightAndReleasesLocks(t *testing.T) {
 // TestStaleIndexRebuiltOnSecondCall ensures a cached index that went stale
 // (new source file added) is rebuilt instead of served from cache.
 func TestStaleIndexRebuiltOnSecondCall(t *testing.T) {
+	t.Parallel()
 	root := mcpProject(t)
 	s := NewServer(strings.NewReader(""), &bytes.Buffer{})
 	if _, err := s.loadIndex(context.Background(), root); err != nil {
@@ -349,6 +390,7 @@ func splitNonEmpty(s string) []string {
 }
 
 func TestRootConfinementDefaultCwd(t *testing.T) {
+	t.Parallel()
 	s := NewServer(strings.NewReader(""), io.Discard)
 	if len(s.roots) != 1 {
 		t.Fatalf("default server should have exactly one root (cwd), got %v", s.roots)
@@ -366,6 +408,9 @@ func TestRootConfinementEnvAndSymlink(t *testing.T) {
 	ws := t.TempDir()
 	other := t.TempDir()
 	t.Setenv("KERN_ROOTS", ws)
+	// KERN_MCP_ROOTS is an accepted alias for the workspace roots; clear it
+	// so an ambient value cannot leak into this single-root assertion.
+	t.Setenv("KERN_MCP_ROOTS", "")
 	s := NewServer(strings.NewReader(""), io.Discard)
 	if len(s.roots) != 1 {
 		t.Fatalf("KERN_ROOTS should yield exactly one root, got %v", s.roots)
@@ -398,27 +443,30 @@ func TestRootConfinementEnvAndSymlink(t *testing.T) {
 	}
 }
 
-func TestRootConfinementBlocksRunBuildDir(t *testing.T) {
+// TestRootConfinementBlocksValidateRoot verifies that kern_validate's root
+// argument (the run_build merge absorbed its dir handling into root) is
+// confined to the server workspace like every other path argument.
+func TestRootConfinementBlocksValidateRoot(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	t.Setenv("KERN_ALLOW_EXEC", "1") // so sandbox succeeds once inside the workspace
 	root := mcpProject(t)
 	s := NewServer(strings.NewReader(""), io.Discard) // confined to cwd
 	ctx := context.Background()
-	_, err := s.runTool(ctx, "1", "kern_run_build", map[string]any{"command": "cat /etc/passwd", "dir": root})
+	_, err := s.runTool(ctx, "1", "", "kern_validate", map[string]any{"root": root, "command": "cat /etc/passwd"})
 	if err == nil || !strings.Contains(err.Error(), "outside the allowed workspace") {
 		t.Fatalf("expected workspace confinement error, got %v", err)
 	}
-	_, err = s.runTool(ctx, "1", "kern_sandbox", map[string]any{"root": root, "command": "echo hi"})
+	_, err = s.runTool(ctx, "1", "", "kern_sandbox", map[string]any{"root": root, "command": "echo hi"})
 	if err == nil || !strings.Contains(err.Error(), "outside the allowed workspace") {
 		t.Fatalf("expected sandbox confinement error, got %v", err)
 	}
 	// Same server, workspace extended to the project root: both allowed.
 	s.roots = []string{root}
-	if _, err := s.runTool(ctx, "1", "kern_sandbox", map[string]any{"root": root, "command": "echo hi"}); err != nil {
+	if _, err := s.runTool(ctx, "1", "", "kern_sandbox", map[string]any{"root": root, "command": "echo hi"}); err != nil {
 		t.Fatalf("sandbox inside workspace should run: %v", err)
 	}
-	if _, err := s.runTool(ctx, "1", "kern_run_build", map[string]any{"command": "echo ok", "dir": root}); err != nil {
-		t.Fatalf("run_build inside workspace should run: %v", err)
+	if _, err := s.runTool(ctx, "1", "", "kern_validate", map[string]any{"root": root, "command": "echo ok", "raw": "true"}); err != nil {
+		t.Fatalf("validate inside workspace should run: %v", err)
 	}
 }
 
@@ -457,7 +505,7 @@ func TestSlowToolEmitsProgress(t *testing.T) {
 
 	buf := &bytes.Buffer{}
 	s := NewServer(strings.NewReader(""), buf)
-	out, err := s.runTool(context.Background(), "77", "kern_test_slow", map[string]any{})
+	out, err := s.runTool(context.Background(), "77", "p1", "kern_test_slow", map[string]any{})
 	if err != nil {
 		t.Fatalf("runTool: %v", err)
 	}
@@ -493,7 +541,7 @@ func TestFastToolEmitsNoProgress(t *testing.T) {
 
 	buf := &bytes.Buffer{}
 	s := NewServer(strings.NewReader(""), buf)
-	out, err := s.runTool(context.Background(), "88", "kern_test_fast", map[string]any{})
+	out, err := s.runTool(context.Background(), "88", "", "kern_test_fast", map[string]any{})
 	if err != nil {
 		t.Fatalf("runTool: %v", err)
 	}
@@ -506,6 +554,7 @@ func TestFastToolEmitsNoProgress(t *testing.T) {
 }
 
 func TestSlowToolSetDerivedFromCatalog(t *testing.T) {
+	t.Parallel()
 	slow := map[string]bool{}
 	for _, t := range catalog.All {
 		if t.Slow {
@@ -527,7 +576,7 @@ func TestSlowToolSetDerivedFromCatalog(t *testing.T) {
 		}
 	}
 	// The task contract: index/build/scan tools emit progress…
-	for _, want := range []string{"kern_run_build", "kern_heal", "kern_validate", "kern_sandbox", "kern_refactor_transaction", "kern_repair_diagnostics", "kern_doc_index"} {
+	for _, want := range []string{"kern_heal", "kern_validate", "kern_sandbox", "kern_refactor_transaction", "kern_repair_diagnostics", "kern_doc_index"} {
 		if !slowTools[want] {
 			t.Errorf("expected %s to be a slow (progress-emitting) tool", want)
 		}

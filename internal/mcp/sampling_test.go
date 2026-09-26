@@ -161,8 +161,10 @@ func TestHostSamplingRoundTrip(t *testing.T) {
 func TestHostSamplingNotRegisteredWithoutCapability(t *testing.T) {
 	h := newSamplingHarness(t)
 	h.sendInitialize(t, map[string]any{})
-	// Give the serve loop a moment to (not) register.
-	time.Sleep(150 * time.Millisecond)
+	// Registration decisions are made inside the initialize handler, and
+	// sendInitialize synchronously reads the server's response — which is
+	// written only after the handler returns — so the sampler state is
+	// final here and no settle sleep is needed.
 	if llm.HasHostSampler() {
 		t.Fatal("host sampler registered despite missing sampling capability")
 	}
@@ -226,7 +228,10 @@ func TestAutoChainHostFirstWhenSamplerRegistered(t *testing.T) {
 // command sampler (stdin = user prompt, $KERN_SYSTEM_PROMPT = system prompt,
 // stdout = reply); empty command unregisters. Exercises the handler directly
 // (no serve loop needed) and generation through the global MCP provider.
+// Registration is a governed exec surface, so the test opts in via
+// KERN_ALLOW_EXEC=1.
 func TestRegisterCommandSamplerTool(t *testing.T) {
+	t.Setenv("KERN_ALLOW_EXEC", "1")
 	s := newTestServer()
 	ctx := context.Background()
 	p := llm.NewMCPProvider()
@@ -283,7 +288,10 @@ func TestRegisterCommandSamplerTool(t *testing.T) {
 
 // TestRegisterCommandSamplerMultiKey: registrations under different keys
 // coexist (multi-agent/repo), and unregistering one key leaves the other.
+// Registration is a governed exec surface, so the test opts in via
+// KERN_ALLOW_EXEC=1.
 func TestRegisterCommandSamplerMultiKey(t *testing.T) {
+	t.Setenv("KERN_ALLOW_EXEC", "1")
 	s := newTestServer()
 	ctx := context.Background()
 	p := llm.NewMCPProvider()
@@ -322,7 +330,9 @@ func TestRegisterCommandSamplerMultiKey(t *testing.T) {
 // TestServerSelfRegistersCommandSamplerFromEnv: KERN_HOST_SAMPLER_CMD makes
 // the server self-register a command sampler at startup — the host leg for
 // hosts that do not announce MCP sampling (e.g. opencode). The auto chain
-// then delegates generation to the command.
+// then delegates generation to the command. This env path is operator-set
+// server configuration, so it stays ungated (the KERN_HOST_SAMPLER_CMD env
+// value is the operator's own approval).
 func TestServerSelfRegistersCommandSamplerFromEnv(t *testing.T) {
 	t.Setenv("KERN_HOST_SAMPLER_CMD", "cat")
 	s := NewServer(strings.NewReader(""), io.Discard)
@@ -338,5 +348,54 @@ func TestServerSelfRegistersCommandSamplerFromEnv(t *testing.T) {
 	}
 	if out != "env-registered" {
 		t.Errorf("got %q, want the stdin prompt echoed", out)
+	}
+}
+
+// TestRegisterHostSamplerDeniedWithoutExecAllowlist locks the exec-gate
+// requirement (finding: kern_register_host_sampler executed arbitrary
+// client-supplied commands with NO governance gate): registering a command
+// must fail closed without KERN_ALLOW_EXEC=1 or a KERN_TOOLS allowlist naming
+// the tool — the same gate kern_exec/kern_sandbox pass. An empty command
+// (unregister) executes nothing and stays allowed.
+func TestRegisterHostSamplerDeniedWithoutExecAllowlist(t *testing.T) {
+	t.Setenv("KERN_ALLOW_EXEC", "")
+	t.Setenv("KERN_TOOLS", "")
+	s := newTestServer()
+	ctx := context.Background()
+
+	_, err := s.handleRegisterHostSampler(ctx, map[string]any{"command": "echo hi"})
+	if err == nil {
+		t.Fatal("registration must be denied without KERN_ALLOW_EXEC=1 or an exec allowlist")
+	}
+	if !strings.Contains(err.Error(), "command execution blocked") {
+		t.Fatalf("expected the governance exec-gate denial, got: %v", err)
+	}
+
+	// Unregistering (empty command) is not an execution and must not be gated.
+	msg, err := s.handleRegisterHostSampler(ctx, map[string]any{"command": ""})
+	if err != nil {
+		t.Fatalf("unregister must not be gated: %v", err)
+	}
+	if !strings.Contains(msg, "unregistered") {
+		t.Errorf("unregister message = %q", msg)
+	}
+}
+
+// TestRegisterHostSamplerAllowedViaAllowlist: naming the tool (or any exec
+// tool) in KERN_TOOLS re-enables registration without KERN_ALLOW_EXEC — the
+// allowlist gate semantics shared with the other exec tools.
+func TestRegisterHostSamplerAllowedViaAllowlist(t *testing.T) {
+	t.Setenv("KERN_ALLOW_EXEC", "")
+	t.Setenv("KERN_TOOLS", "kern_register_host_sampler")
+	s := newTestServer()
+	ctx := context.Background()
+	t.Cleanup(func() { _, _ = s.handleRegisterHostSampler(ctx, map[string]any{"command": ""}) })
+
+	out, err := s.handleRegisterHostSampler(ctx, map[string]any{"command": "cat", "timeout": "30"})
+	if err != nil {
+		t.Fatalf("registration with the tool allowlisted must succeed, got: %v", err)
+	}
+	if !strings.Contains(out, "host sampler registered") {
+		t.Errorf("registration message = %q", out)
 	}
 }

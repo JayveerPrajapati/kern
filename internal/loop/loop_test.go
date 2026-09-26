@@ -170,6 +170,112 @@ func TestLoopLearningSurfacesConstraint(t *testing.T) {
 	}
 }
 
+// TestLoopLearningSurfacesConstraintsInResult proves the wired learn stage
+// carries the surfaced constraints into the run's Result: with a Learning
+// extractor and seeded recurring incident memories above the threshold, the
+// pattern key lands in Result.LearnedConstraints AND a failure-recurs
+// constraint naming the incidents is persisted to the store.
+func TestLoopLearningSurfacesConstraintsInResult(t *testing.T) {
+	store := memory.NewMemoryStore(t.TempDir())
+	// Seed two recurring incident-derived memories in the same affected
+	// service (the signature scope) so the pattern crosses the threshold.
+	for _, inc := range []string{"INC-101", "INC-102"} {
+		if _, err := store.Add(domain.Memory{
+			Type:       domain.MemoryIncident,
+			Content:    "incident " + inc + " in checkout: checkout latency spike; root cause: cache miss",
+			Source:     "incident-engine",
+			Scope:      "checkout",
+			Subject:    inc,
+			Provenance: "incident:" + inc,
+		}); err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+	}
+	lp, err := NewLoop(LoopConfig{
+		Root:             t.TempDir(),
+		Level:            L4,
+		Scope:            "project",
+		Mem:              store,
+		Learning:         learning.New(store),
+		PatternThreshold: 2,
+	})
+	if err != nil {
+		t.Fatalf("NewLoop: %v", err)
+	}
+	res := &Result{ObservedHealthy: true}
+	if _, err := lp.learn("checkout health", res); err != nil {
+		t.Fatalf("learn: %v", err)
+	}
+	// The surfaced pattern key must land in the run's Result.
+	found := false
+	for _, k := range res.LearnedConstraints {
+		if k == "scope:checkout" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected scope:checkout in LearnedConstraints, got %v", res.LearnedConstraints)
+	}
+	// And the failure-recurs constraint must be persisted with the incident IDs.
+	constraints, err := store.List(domain.MemoryConstraint)
+	if err != nil {
+		t.Fatalf("List constraints: %v", err)
+	}
+	got := false
+	for _, c := range constraints {
+		if c.Scope == "scope:checkout" && c.Source == "learning" &&
+			strings.Contains(c.Content, "INC-101") && strings.Contains(c.Content, "INC-102") {
+			got = true
+		}
+	}
+	if !got {
+		t.Fatalf("expected a learning constraint for scope:checkout naming both incidents, got %+v", constraints)
+	}
+}
+
+// TestLoopLearningThresholdBelowSurfacesNothing asserts the threshold gate:
+// with memories below PatternThreshold, the learn stage surfaces nothing into
+// the Result or the store (threshold 3 > every group count: the seeded
+// singleton and the run's own lesson+episodic pair).
+func TestLoopLearningThresholdBelowSurfacesNothing(t *testing.T) {
+	store := memory.NewMemoryStore(t.TempDir())
+	if _, err := store.Add(domain.Memory{
+		Type:    domain.MemoryLesson,
+		Content: "checkout failure 0",
+		Source:  "loop",
+		Scope:   "service:checkout",
+	}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	lp, err := NewLoop(LoopConfig{
+		Root:             t.TempDir(),
+		Level:            L4,
+		Scope:            "project",
+		Mem:              store,
+		Learning:         learning.New(store),
+		PatternThreshold: 3,
+	})
+	if err != nil {
+		t.Fatalf("NewLoop: %v", err)
+	}
+	res := &Result{ObservedHealthy: true}
+	if _, err := lp.learn("checkout health", res); err != nil {
+		t.Fatalf("learn: %v", err)
+	}
+	if len(res.LearnedConstraints) != 0 {
+		t.Fatalf("expected no surfaced constraints below threshold, got %v", res.LearnedConstraints)
+	}
+	constraints, err := store.List(domain.MemoryConstraint)
+	if err != nil {
+		t.Fatalf("List constraints: %v", err)
+	}
+	for _, c := range constraints {
+		if c.Scope == "scope:service:checkout" || c.Source == "learning" {
+			t.Fatalf("expected no learning constraint below threshold, got %+v", c)
+		}
+	}
+}
+
 // TestLoopLearningSkippedWhenUnwired: without a learning extractor the loop
 // still records a lesson and never touches the pattern extractor (nil-safe).
 func TestLoopLearningSkippedWhenUnwired(t *testing.T) {
@@ -178,12 +284,18 @@ func TestLoopLearningSkippedWhenUnwired(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewLoop: %v", err)
 	}
-	if _, err := lp.learn("checkout health", &Result{ObservedHealthy: true}); err != nil {
+	res := &Result{ObservedHealthy: true}
+	if _, err := lp.learn("checkout health", res); err != nil {
 		t.Fatalf("learn: %v", err)
 	}
 	ms, _ := store.List(domain.MemoryConstraint)
 	if len(ms) != 0 {
 		t.Fatalf("expected no constraints when learning is unwired, got %d", len(ms))
+	}
+	// The nil-skip contract also holds for the Result surfacing: no extractor
+	// wired means no constraint keys are carried into the run.
+	if len(res.LearnedConstraints) != 0 {
+		t.Fatalf("expected no surfaced constraints when learning is unwired, got %v", res.LearnedConstraints)
 	}
 }
 
@@ -567,6 +679,12 @@ func TestLoopUsesCoderWhenStepNil(t *testing.T) {
 	}
 	if !strings.Contains(codeStage.Output, "coder") {
 		t.Fatalf("code stage output should mention the coder, got %q", codeStage.Output)
+	}
+	if !strings.Contains(codeStage.Output, "prompt") || !strings.Contains(codeStage.Output, "tokens") {
+		t.Fatalf("code stage output should surface prompt tokens, got %q", codeStage.Output)
+	}
+	if !strings.Contains(codeStage.Output, "round(s)") {
+		t.Fatalf("code stage output should keep the round count, got %q", codeStage.Output)
 	}
 	if res.Diff == "" {
 		t.Fatal("expected a non-empty diff after the coder ran")

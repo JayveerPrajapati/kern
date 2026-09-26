@@ -9,6 +9,7 @@ import (
 )
 
 func TestRepairDiagnosticsViaMCP(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	src := `package main
 
