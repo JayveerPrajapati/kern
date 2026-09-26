@@ -17,10 +17,15 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"sync"
 )
 
-// Dir returns the kern cache root, honouring XDG_CACHE_HOME.
-func Dir() string {
+// resolveCacheDir computes the kern cache root from the environment. It is
+// extracted so the XDG/fallback resolution stays directly testable; Dir
+// memoizes the result keyed on the env inputs, so a process whose environment
+// is stable (the production case) resolves once, while tests that set
+// XDG_CACHE_HOME/HOME per test still get the correct per-test root.
+func resolveCacheDir() string {
 	base := os.Getenv("XDG_CACHE_HOME")
 	if base == "" {
 		home, err := os.UserHomeDir()
@@ -30,6 +35,27 @@ func Dir() string {
 		base = filepath.Join(home, ".cache")
 	}
 	return filepath.Join(base, "kern")
+}
+
+var (
+	dirMu     sync.Mutex
+	dirEnvKey string // "XDG_CACHE_HOME|HOME" the memoized dir was resolved for
+	dirVal    string
+)
+
+// Dir returns the kern cache root, honouring XDG_CACHE_HOME. The root is
+// memoized while the governing env vars are unchanged — every Path() call
+// previously re-resolved env + home + joined the path. If a test or caller
+// changes XDG_CACHE_HOME/HOME, the memo is invalidated and re-resolved.
+func Dir() string {
+	envKey := os.Getenv("XDG_CACHE_HOME") + "|" + os.Getenv("HOME")
+	dirMu.Lock()
+	defer dirMu.Unlock()
+	if dirVal == "" || dirEnvKey != envKey {
+		dirVal = resolveCacheDir()
+		dirEnvKey = envKey
+	}
+	return dirVal
 }
 
 // Path returns an absolute path inside the cache root.
@@ -50,9 +76,10 @@ func Hash(b []byte) string {
 
 // Store writes v as JSON under key. Keys are namespaced with a subdir.
 func Store(key string, v any) error {
-	// opportunistic GC of the data dir this key lives in (rate-limited
-	// to once an hour by the .maintained-at marker); best-effort, swallowed.
-	MaintainOnce(Path("data"))
+	// opportunistic GC of the data dir this key lives in (rate-limited to
+	// once an hour by the .maintained-at marker); best-effort and async so a
+	// due GC pass (recursive walk + gzip + trim) never blocks the write.
+	go MaintainOnce(Path("data"))
 	if err := Ensure(); err != nil {
 		return err
 	}
@@ -100,9 +127,6 @@ func atomicWrite(path string, data []byte) error {
 // absent. If the plain file is missing but its gzip twin "<path>.json.gz"
 // exists (archival), the twin is transparently decompressed.
 func Load(key string, v any) error {
-	// opportunistic GC of the data dir this key lives in (rate-limited
-	// to once an hour by the .maintained-at marker); best-effort, swallowed.
-	MaintainOnce(Path("data"))
 	path := Path("data", key+".json")
 	data, err := os.ReadFile(path)
 	if err != nil {
