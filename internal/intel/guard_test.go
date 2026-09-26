@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/JayveerPrajapati/kern/internal/domain"
 	"github.com/JayveerPrajapati/kern/internal/index"
 )
 
@@ -11,11 +12,11 @@ import (
 // same (from, to) pair the verdict must be identical regardless of rule slice
 // order. forbid-then-allow and allow-then-forbid must both resolve to ALLOW.
 func TestVerdictOrderInvariance(t *testing.T) {
-	forbidThenAllow := []BoundaryRule{
+	forbidThenAllow := []domain.BoundaryRule{
 		{From: "web", To: "db", Action: "forbid"},
 		{From: "web", To: "db", Action: "allow"},
 	}
-	allowThenForbid := []BoundaryRule{
+	allowThenForbid := []domain.BoundaryRule{
 		{From: "web", To: "db", Action: "allow"},
 		{From: "web", To: "db", Action: "forbid"},
 	}
@@ -29,7 +30,7 @@ func TestVerdictOrderInvariance(t *testing.T) {
 
 // TestVerdictForbidWhenNoAllow verifies a lone forbid rule rejects the pair.
 func TestVerdictForbidWhenNoAllow(t *testing.T) {
-	rules := []BoundaryRule{{From: "web", To: "db", Action: "forbid"}}
+	rules := []domain.BoundaryRule{{From: "web", To: "db", Action: "forbid"}}
 	got := verdict(rules, "web", "db")
 	if got == nil {
 		t.Fatal("lone forbid rule: expected FORBID, got nil (permitted)")
@@ -42,7 +43,7 @@ func TestVerdictForbidWhenNoAllow(t *testing.T) {
 // TestVerdictDefaultPermit verifies unconfigured (from, to) pairs remain
 // permitted (default-permit), unchanged by the fix.
 func TestVerdictDefaultPermit(t *testing.T) {
-	rules := []BoundaryRule{{From: "web", To: "db", Action: "forbid"}}
+	rules := []domain.BoundaryRule{{From: "web", To: "db", Action: "forbid"}}
 	if got := verdict(rules, "api", "db"); got != nil {
 		t.Errorf("unconfigured pair should default to permitted, got %+v", got)
 	}
@@ -159,7 +160,7 @@ func Handler() {}
 	if err != nil {
 		t.Fatal(err)
 	}
-	b := &Boundaries{Rules: []BoundaryRule{}}
+	b := &Boundaries{Rules: []domain.BoundaryRule{}}
 	violations, skipped := CheckBoundariesPrecise(ix, b, []string{"web/handler.go"}, false)
 	if len(violations) != 0 {
 		t.Fatalf("empty rules must yield no violations, got %+v", violations)
@@ -198,7 +199,7 @@ func main() { web.W() }
 	if err != nil {
 		t.Fatal(err)
 	}
-	b := &Boundaries{Rules: []BoundaryRule{
+	b := &Boundaries{Rules: []domain.BoundaryRule{
 		{From: "api", To: "web", Action: "forbid"},
 		{From: "fixture", To: "web", Action: "forbid"},
 	}}
@@ -244,7 +245,7 @@ func New() *S { return &S{} }
 	if err != nil {
 		t.Fatal(err)
 	}
-	b := &Boundaries{Rules: []BoundaryRule{{From: "svc", To: "web", Action: "forbid"}}}
+	b := &Boundaries{Rules: []domain.BoundaryRule{{From: "svc", To: "web", Action: "forbid"}}}
 	violations, _ := CheckBoundariesPrecise(ix, b, []string{"web/web.go", "svc/svc.go"}, false)
 	if len(violations) != 0 {
 		t.Fatalf("svc.New must not inherit web.New's call edges (bare-name collision), got %+v", violations)
@@ -276,7 +277,7 @@ class Scanner:
 	if err != nil {
 		t.Fatal(err)
 	}
-	b := &Boundaries{Rules: []BoundaryRule{{From: "services", To: "api", Action: "forbid"}}}
+	b := &Boundaries{Rules: []domain.BoundaryRule{{From: "services", To: "api", Action: "forbid"}}}
 	violations, _ := CheckBoundariesPrecise(ix, b, []string{"api/stocks.py", "services/nse_service.py"}, false)
 	if len(violations) != 0 {
 		t.Fatalf("services.Scanner.scan must resolve get_quote to its own file, not api/stocks.py (bare-name callee collision), got %+v", violations)
@@ -388,7 +389,7 @@ func Handler() {
 	}
 	// Simulate an older index: package data present, per-file attribution gone.
 	ix.ImportsByFile = nil
-	b := &Boundaries{Rules: []BoundaryRule{{From: "web", To: "db", Action: "forbid"}}}
+	b := &Boundaries{Rules: []domain.BoundaryRule{{From: "web", To: "db", Action: "forbid"}}}
 	files := []string{"web/handler.go"}
 	violations, skipped := CheckBoundariesPrecise(ix, b, files, false)
 	if len(violations) != 0 {
@@ -421,7 +422,7 @@ func Handler() {
 	if _, ok := ix.ImportsByFile["web/handler.go"]; !ok {
 		t.Fatal("expected ImportsByFile populated by Build")
 	}
-	b := &Boundaries{Rules: []BoundaryRule{{From: "web", To: "db", Action: "forbid"}}}
+	b := &Boundaries{Rules: []domain.BoundaryRule{{From: "web", To: "db", Action: "forbid"}}}
 	_, skipped := CheckBoundariesPrecise(ix, b, []string{"web/handler.go"}, false)
 	for k := range skipped {
 		if strings.HasPrefix(k, "imports-by-file-missing:") {
@@ -446,7 +447,7 @@ func Handler() {}
 		t.Fatal(err)
 	}
 	ix.ImportsByFile = nil // old index, but the package has no imports either
-	b := &Boundaries{Rules: []BoundaryRule{{From: "web", To: "db", Action: "forbid"}}}
+	b := &Boundaries{Rules: []domain.BoundaryRule{{From: "web", To: "db", Action: "forbid"}}}
 	_, skipped := CheckBoundariesPrecise(ix, b, []string{"web/handler.go"}, false)
 	for k := range skipped {
 		if strings.HasPrefix(k, "imports-by-file-missing:") {

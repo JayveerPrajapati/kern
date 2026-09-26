@@ -8,7 +8,7 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/domain"
 	"github.com/JayveerPrajapati/kern/internal/governance"
 	"github.com/JayveerPrajapati/kern/internal/index"
-	"github.com/JayveerPrajapati/kern/internal/intelligence"
+	"github.com/JayveerPrajapati/kern/internal/intel"
 )
 
 // riskIndex builds a tiny in-memory graph with two roots: a benign source
@@ -31,7 +31,7 @@ func riskIndex() *index.Index {
 // the context-engine agent.
 func riskEngine(t *testing.T, perms []governance.Permission) *Engine {
 	t.Helper()
-	g := intelligence.FromIndex(riskIndex())
+	g := intel.FromIndex(riskIndex())
 	fw := governance.NewFirewall().WithAgents(
 		governance.NewAgent(engineAgent, "Context Engine", "analyzer", perms),
 	)
@@ -110,7 +110,7 @@ func TestRiskEngineDeniedWhenNoPermission(t *testing.T) {
 // TestRiskEngineDefaultWithoutFirewall verifies a documented default risk is
 // returned (not silently dropped) when the engine has no firewall wired.
 func TestRiskEngineDefaultWithoutFirewall(t *testing.T) {
-	g := intelligence.FromIndex(riskIndex())
+	g := intel.FromIndex(riskIndex())
 	e := NewEngine("/risk", &g, nil, nil) // no firewall
 
 	pkt, err := e.AnalyzeChange("Helper")

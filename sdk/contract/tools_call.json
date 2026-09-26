@@ -1,0 +1,40 @@
+{
+  "_comment": "CONTRACT FIXTURE v1 (2026-09-25) — the single shared shape for POST /v1/tools/{name}, the SDK passthrough route. Every shipped SDK client test (sdk/go/kernsdk/client_test.go, sdk/python/test_client.py, sdk/typescript/test/client.test.mjs) loads THIS file and asserts its client's behavior against each case, so a route-shape change (envelope, status mapping, error body) fails all three suites until the clients are updated. The server-side contract is pinned by internal/web/tools_passthrough_test.go. Run all three suites in sequence with sdk/contract/verify.sh (fails on the first failure). Version this file (bump _version, note the change here) whenever the route shape changes.",
+  "_version": 1,
+  "route": "POST /v1/tools/{name}",
+  "request_envelope": "the tool's argument map (JSON object); tool name in the URL path",
+  "response_envelope": "200: {\"output\": \"<raw tool text>\"}; errors: {\"error\": \"...\"}",
+  "status_mapping": {
+    "200": "success — body {\"output\": <raw tool text>}",
+    "403": "governed denial (KERN_TOOLS allowlist, root confinement, RBAC) — body {\"error\": \"tool call denied\"}",
+    "404": "unknown tool — body {\"error\": \"unknown tool: <name>\"}",
+    "500": "generic tool failure — body {\"error\": \"tool call failed\"} (detail logged server-side, never returned)"
+  },
+  "cases": [
+    {
+      "id": "success",
+      "name": "kern_mask_pii",
+      "args": { "text": "token=sk-abc123" },
+      "response": { "status": 200, "body": { "output": "masked 1 secrets" } },
+      "expect_output": "masked 1 secrets"
+    },
+    {
+      "id": "denied_403",
+      "name": "kern_mask_pii",
+      "args": { "root": "/etc" },
+      "response": { "status": 403, "body": { "error": "tool call denied" } }
+    },
+    {
+      "id": "unknown_404",
+      "name": "kern_no_such_tool",
+      "args": {},
+      "response": { "status": 404, "body": { "error": "unknown tool: kern_no_such_tool" } }
+    },
+    {
+      "id": "tool_failure_500",
+      "name": "kern_mask_pii",
+      "args": { "text": "x" },
+      "response": { "status": 500, "body": { "error": "tool call failed" } }
+    }
+  ]
+}

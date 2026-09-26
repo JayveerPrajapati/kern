@@ -7,7 +7,7 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/domain"
 	"github.com/JayveerPrajapati/kern/internal/governance"
 	"github.com/JayveerPrajapati/kern/internal/index"
-	"github.com/JayveerPrajapati/kern/internal/intelligence"
+	"github.com/JayveerPrajapati/kern/internal/intel"
 	"github.com/JayveerPrajapati/kern/internal/memory"
 )
 
@@ -62,7 +62,7 @@ func fakeIndex() *index.Index {
 func testEngine(t *testing.T) *Engine {
 	t.Helper()
 
-	g := intelligence.FromIndex(fakeIndex())
+	g := intel.FromIndex(fakeIndex())
 
 	mem := memory.NewMemoryStore(t.TempDir())
 	if _, err := mem.Add(domain.Memory{

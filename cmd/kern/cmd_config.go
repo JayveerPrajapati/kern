@@ -16,10 +16,7 @@ import (
 // secrets and fail-closed/safety toggles — are intentionally not listed.
 // `kern config` exits 0 even when no config file exists (all defaults shown).
 func runConfig(rest []string) {
-	f, args, err := parseFlags(rest)
-	if err != nil {
-		fatalUsage("flags: %v", err)
-	}
+	f, args := parseFlagsOrDie(rest)
 	if len(args) > 0 {
 		fatalUsage("config: unexpected argument %q", args[0])
 	}
@@ -44,7 +41,15 @@ func runConfig(rest []string) {
 	}
 	for _, k := range config.Registry {
 		v, src := config.Effective(root, k)
-		fmt.Printf("%s=%s (%s)\n", k.Key, formatConfigValue(v), src)
+		line := fmt.Sprintf("%s=%s (%s)", k.Key, formatConfigValue(v), src)
+		// N3 cost-model honesty: a fresh install's flat 1e-05 default must
+		// not read as a confident figure — the per-model table engages via
+		// llm.model / KERN_MODEL when a model is set, and the flat rate is
+		// otherwise an assumption for the spend estimate.
+		if k.Key == "cost_per_token" && src == "default" {
+			line += " — flat assumption; the per-model table engages via llm.model / KERN_MODEL when set"
+		}
+		fmt.Println(line)
 	}
 }
 

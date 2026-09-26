@@ -6,31 +6,17 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 
 	"github.com/JayveerPrajapati/kern/internal/lspbridge"
 	"github.com/JayveerPrajapati/kern/internal/mcp/mcpargs"
+	"github.com/JayveerPrajapati/kern/internal/mcp/root"
 )
-
-func resolveRoot(root string) string {
-	if root == "" {
-		if cwd, err := os.Getwd(); err == nil {
-			return filepath.Clean(cwd)
-		}
-		return "."
-	}
-	if abs, err := filepath.Abs(root); err == nil {
-		return filepath.Clean(abs)
-	}
-	return root
-}
 
 // Handle handles the kern_lsp_bridge tool request.
 func Handle(ctx context.Context, args map[string]any) (string, error) {
-	root := resolveRoot(mcpargs.ArgString(args, "root"))
+	root := root.ResolveRoot(mcpargs.ArgString(args, "root"))
 	file := mcpargs.ArgString(args, "file")
 	action := mcpargs.ArgString(args, "action")
 	serverCmdStr := mcpargs.ArgString(args, "server_cmd")

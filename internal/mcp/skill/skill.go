@@ -6,25 +6,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
 	"path/filepath"
 
 	"github.com/JayveerPrajapati/kern/internal/mcp/mcpargs"
+	"github.com/JayveerPrajapati/kern/internal/mcp/root"
 	"github.com/JayveerPrajapati/kern/internal/skills"
 )
-
-func resolveRoot(root string) string {
-	if root == "" {
-		if cwd, err := os.Getwd(); err == nil {
-			return filepath.Clean(cwd)
-		}
-		return "."
-	}
-	if abs, err := filepath.Abs(root); err == nil {
-		return filepath.Clean(abs)
-	}
-	return root
-}
 
 // Skill manages agent skill runbook inspection and loading.
 func Skill(ctx context.Context, args map[string]any) (string, error) {
@@ -61,7 +48,7 @@ func Skill(ctx context.Context, args map[string]any) (string, error) {
 		if err == nil {
 			return string(data), nil
 		}
-		root := resolveRoot(mcpargs.ArgString(args, "root"))
+		root := root.ResolveRoot(mcpargs.ArgString(args, "root"))
 		if userSkills, uerr := skills.LoadSkillsFromDir(filepath.Join(root, ".kern", "skills")); uerr == nil {
 			for _, us := range userSkills {
 				if us.Name == name || us.Name == "kern-"+name {

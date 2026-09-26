@@ -285,7 +285,7 @@ func TestApprovalGatePersistsAcrossEngine(t *testing.T) {
 	}
 }
 
-// TestRunContextCancelled guards the kern_do/kern_workflow cancellation fix:
+// TestRunContextCancelled guards the kern_loop mode=autonomous / kern_workflow cancellation fix:
 // a cancelled context must stop the workflow before the first step executes —
 // the task is failed (terminal + auditable) and no step handler runs.
 func TestRunContextCancelled(t *testing.T) {

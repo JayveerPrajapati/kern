@@ -15,14 +15,14 @@ itself is always available and routes to any sub-tool regardless of the phase.
 
 ### explore — read / discover
 kern_search, kern_explore, kern_context, kern_project_map, kern_graph,
-kern_code_graph, kern_arch, kern_probe, kern_explain
+kern_arch, kern_probe, kern_explain
 
 ### plan — analyze / simulate
 kern_analyze, kern_plan, kern_impact, kern_what_if, kern_pack, kern_trace,
 kern_cross_repo_impact, kern_usage_guide
 
 ### edit — mutate / execute
-kern_run, kern_execute, kern_exec, kern_run_build, kern_rename, kern_safe_delete,
+kern_run, kern_execute, kern_exec, kern_validate, kern_rename, kern_safe_delete,
 kern_commitmsg, kern_guard_check, kern_pre_edit, kern_compose
 
 ### verify — check / validate
@@ -33,7 +33,7 @@ kern_authorize_context
 Always available regardless of phase (meta/cross): kern_meta, kern_search,
 kern_context, kern_run, kern_optimize_prompt, kern_optimize_log, kern_mask_pii,
 kern_doc_search, kern_memory_*, kern_stats, kern_onboard, kern_incident,
-kern_workflow, kern_loop, kern_do, kern_health, kern_prompt_fill, kern_semantic_diff,
+kern_workflow, kern_loop, kern_health, kern_prompt_fill, kern_semantic_diff,
 kern_context_watch, kern_agent_fingerprint, kern_agent_coordination,
 kern_agent_role_rbac, kern_authorize_context, kern_stream.
 
@@ -43,7 +43,7 @@ only matter for the exceptions.
 
 ### Fast (index-backed, use freely)
 - kern_project_map, kern_search, kern_ast_search, kern_entry_points
-- kern_code_graph, kern_context, kern_walk, kern_near, kern_path, kern_why
+- kern_graph, kern_context, kern_near, kern_path, kern_why
 - kern_graph (one-call names-only adjacency: callers first, confidence tags, community)
 - kern_explore (one-call: verbatim source + call flow + transitive blast radius)
 - kern_inherits (supertypes/subtypes hierarchy)
@@ -52,7 +52,7 @@ only matter for the exceptions.
 - kern_optimize_prompt, kern_optimize_log, kern_optimize_output, kern_context_budget, kern_mask_pii, kern_swap
 - kern_compact_file, kern_diff_files, kern_doc_search, kern_doc_index, kern_doc_fetch
 - kern_memory_*, kern_stats, kern_semcache, kern_verify_output, kern_schema_validate
-- kern_run_build (runs a build/test, returns exit status + errors only)
+- kern_validate (auto-detected build/test command; raw=true returns compact output only)
 - kern_lock, kern_lock_status, kern_unlock (advisory workspace-scoped locks)
 - kern_security (line-scoped security scan, walks source files)
 - kern_commitmsg (deterministic commit message from git diff — rule-based, no LLM)
@@ -63,7 +63,7 @@ only matter for the exceptions.
 
 ### Moderate (first call rebuilds the index or shells out to git)
 - kern_changes/kern_review/kern_guard_check with a range= (git diff)
-- kern_churn, kern_cochange, kern_arch, kern_walk with depth>3 on large repos
+- kern_churn, kern_cochange, kern_arch, kern_near with depth>3 on large repos
 - kern_validate (runs the project's build/test)
 
 ### Expensive (LLM, network, or full-tree work — use deliberately)
@@ -76,9 +76,9 @@ only matter for the exceptions.
 - Understand a codebase: kern_project_map -> kern_arch -> kern_communities -> kern_hubs -> kern_entry_points
 - Onboard to a new repo: kern_buddy (session digest of conventions, layout, gotchas)
 - Minimal graph context in one call: kern_graph (caller-first adjacency, budgeted)
-- Locate code: kern_search -> kern_context -> kern_walk (or kern_near for blast radius)
+- Locate code: kern_search -> kern_context -> kern_near (for blast radius)
 - Give the agent the full source to edit against: kern_pack (tree + instructions + contents, sized to a token budget)
-- Why does X exist: kern_why -> kern_code_graph
+- Why does X exist: kern_why -> kern_graph
 - Class hierarchy: kern_inherits (supertypes/subtypes)
 - Before proposing edits: kern_guard_check -> kern_changes -> kern_review
 - Trim context: kern_optimize_prompt -> kern_context_budget -> kern_swap
@@ -128,15 +128,14 @@ need the roadmap) — each step is useful on its own.
   symbols, files, services and tests, a deterministic risk level and a typed
   RECOMMENDATION claim. Read-only — safe to ask "what if I remove this?".
   kind is 'remove_symbol' (default) or 'change_dependency' (with new_target).
-- **kern_impact(change, [kind], [new_target])** — the same blast-radius engine
+- **kern_impact(change, [kind], [new_target], [risk])** — the same blast-radius engine
   for a change you intend to make: affected symbols/files/services/tests,
   deterministic risk and typed claims. Read-only. Use when you actually plan to
-  edit, not just speculate.
-- **kern_risk(change)** — the governance risk assessment for a proposed
-  change: the context engine's risk claims (level, score, factors), the
-  firewall check result (allowed/blocked, approval requirement), and required
-  validations. Read-only; the same engine behind the 'kern risk' CLI command
-  and POST /v1/risk.
+  edit, not just speculate. Set risk=true to render the governance risk
+  assessment instead (the former kern_risk contract): the context engine's risk
+  claims (level, score, factors), the firewall check result (allowed/blocked,
+  approval requirement), and required validations — the same engine behind the
+  'kern risk' CLI command and POST /v1/risk.
 
 Chain: kern_what_if to explore the option space first, then kern_impact on the
 chosen option to size the real edit — both before you run kern_execute.
@@ -146,18 +145,20 @@ chosen option to size the real edit — both before you run kern_execute.
   (name, role, capabilities) plus current task states from the agent registry.
   Read-only and deterministic; call to see what specialists are available and
   what's in flight.
-- **kern_loop(intent, [level])** — run the closed autonomy loop against an
+- **kern_loop(intent, [level], [mode])** — run the closed autonomy loop against an
   intent string and get the stage timeline plus the deployed / observed-healthy
-  / learned outcome. The autonomy level (L0-L5, default L0 read-only) gates
-  which stages actually run. Use for an end-to-end intent, from analysis to
-  deployment, without micromanaging each stage.
-- **kern_do(intent, [level])** — the autonomous "Implement X" closed loop:
-  unlike kern_loop's read-only no-op stages, this wires the LLM coder and
-  planner (default local Ollama via the provider-neutral factory) as the
-  default stage handlers, grounded with project context (relevant files +
-  impact set) and verified with the polyglot verification engine. Default
+  / learned outcome. mode=observe (default) runs the read-only no-op stages;
+  the autonomy level (L0-L5, default L0) gates which stages actually run. Use
+  for an end-to-end intent, from analysis to deployment, without micromanaging
+  each stage.
+- **kern_loop(intent, mode=autonomous)** — the autonomous "Implement X" closed
+  loop (the former kern_do): unlike observe mode's no-op stages, this wires the
+  LLM coder and planner (default local Ollama via the provider-neutral factory)
+  as the default stage handlers, grounded with project context (relevant files
+  + impact set) and verified with the polyglot verification engine. Default
   level L2 (sandboxed code changes); L3 adds PR creation, L4
-  deploy-with-approval. This is the MCP counterpart of the CLI 'kern do' command.
+  deploy-with-approval. The level argument works in both modes. This is the MCP
+  counterpart of the CLI 'kern do' command.
 
 ### Shared context: kern_context
 - **kern_context(symbol)** — the minimal relevant source slice for a symbol:
@@ -169,7 +170,7 @@ chosen option to size the real edit — both before you run kern_execute.
   symbol first, then slim it down with kern_context.
 
 ## Pitfalls
-- kern_walk/kern_near default depth is 2; depth 0 returns only the root symbol.
+- kern_near default depth is 2; depth 0 returns only the root symbol.
 - kern_context/symbol takes an indexed symbol name, not arbitrary prose or a
   file path: spell it as the index knows it (e.g. 'NewServer' or 'User.Login'). When an exact match is not found, kern_context offers candidate symbol suggestions from the index automatically. For a free-text query use kern_search first to resolve the exact name, then kern_context.
 - kern_validate and kern_verify run the project's real build/test commands, so
@@ -220,8 +221,9 @@ chosen option to size the real edit — both before you run kern_execute.
 - Timeouts & progress: every tool call has a 30-minute ceiling
   (KERN_MCP_CONCURRENCY bounds parallel calls). The exec family
   (kern_exec/kern_sandbox/kern_heal) defaults to 120s and honors a
-  timeout=N argument; kern_run_build is hard-bounded at 5 minutes.
-  Slow tools (sandbox, heal, run_build, execute, verify, validate,
+  timeout=N argument; kern_validate raw=true mirrors the merged
+  run_build contract (command output verbatim).
+  Slow tools (sandbox, heal, execute, verify, validate,
   doc_index) emit MCP notifications/progress over stdio —
   0% start, keep-alive every 5s, 100% stop — so agents see liveness
   during multi-second calls; HTTP has no push channel, so progress is

@@ -38,7 +38,7 @@ Kern maintains a prebuilt symbol index and call graph. **Never** start by readin
    {"request": "find the Dispatcher struct and NewServer function"}
    ```
 2. **Understand Symbol & Call Hierarchy**:
-   Call `kern_code_graph` or `kern_explore` on the target symbol:
+   Call `kern_graph` or `kern_explore` on the target symbol:
    ```json
    {"request": "who calls HandleRequest and what does it call?"}
    ```

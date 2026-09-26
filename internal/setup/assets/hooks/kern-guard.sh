@@ -36,7 +36,7 @@ case "$(printf '%s' "$tool" | tr '[:upper:]' '[:lower:]')" in
     reason="Use kern_project_map (compressed symbol map) instead of the built-in glob. Call kern_project_map with {\"root\":\".\"}. Set KERN_ENFORCE=0 to disable this guard."
     ;;
   bash|run_shell_command|shell|execute_bash)
-    reason="Use kern_run_build (build/test/lint) or kern_exec (governed command execution) instead of the built-in bash. Set KERN_ENFORCE=0 to disable this guard."
+    reason="Use kern_validate (build/test/lint) or kern_exec (governed command execution) instead of the built-in bash. Set KERN_ENFORCE=0 to disable this guard."
     ;;
   *)
     # Not a tool we guard — allow.

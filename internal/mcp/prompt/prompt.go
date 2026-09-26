@@ -6,28 +6,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/JayveerPrajapati/kern/internal/code"
 	"github.com/JayveerPrajapati/kern/internal/mcp/mcpargs"
+	"github.com/JayveerPrajapati/kern/internal/mcp/root"
 	"github.com/JayveerPrajapati/kern/internal/memory"
 	"github.com/JayveerPrajapati/kern/internal/prompt"
 )
-
-func resolveRoot(root string) string {
-	if root == "" {
-		if cwd, err := os.Getwd(); err == nil {
-			return filepath.Clean(cwd)
-		}
-		return "."
-	}
-	if abs, err := filepath.Abs(root); err == nil {
-		return filepath.Clean(abs)
-	}
-	return root
-}
 
 // Fill dynamically renders standardized, token-efficient agent prompts
 // with auto-injected context (project map, compact file, relevant memory lessons).
@@ -38,7 +24,7 @@ func Fill(ctx context.Context, args map[string]any) (string, error) {
 		return "", fmt.Errorf("template is required. Available templates: %s", strings.Join(templates, ", "))
 	}
 
-	root := resolveRoot(mcpargs.ArgString(args, "root"))
+	root := root.ResolveRoot(mcpargs.ArgString(args, "root"))
 	task := mcpargs.ArgString(args, "task")
 	file := mcpargs.ArgString(args, "file")
 
@@ -94,7 +80,7 @@ func Fill(ctx context.Context, args map[string]any) (string, error) {
 			// Surface the available template names so a mistyped template is
 			// self-diagnosing instead of a bare "unknown template" error.
 			if templates, lerr := prompt.List(); lerr == nil {
-				return "", fmt.Errorf("render template: %v (available templates: %s)", err, strings.Join(templates, ", "))
+				return "", fmt.Errorf("render template: %w (available templates: %s)", err, strings.Join(templates, ", "))
 			}
 			return "", fmt.Errorf("render template: %w", err)
 		}

@@ -8,8 +8,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-
-	"github.com/JayveerPrajapati/kern/internal/retrieval"
 )
 
 func TestHandleContextLens(t *testing.T) {
@@ -81,12 +79,12 @@ func TestHandleContextProfile(t *testing.T) {
 	}
 }
 
-// TestHandleContextLevel drives the P2 optional level arg through kern_context:
-// L1 renders the names/token-cost list, L2 the neighborhood packet, L3 the
-// source slice; level matching is case-insensitive; an invalid level is
-// rejected with the documented wording; no level arg leaves the output
-// byte-identical (asserted via the base call above).
-func TestHandleContextLevel(t *testing.T) {
+// TestHandleContextRejectsLevel pins the T2a contract: the level retrieval
+// path was removed from kern_context (progressive-disclosure level views are
+// served exclusively by kern_retrieve), so a level arg must be rejected with
+// the kern_retrieve hint instead of silently falling back to the context
+// slice. The default (no level arg) behavior is unchanged.
+func TestHandleContextRejectsLevel(t *testing.T) {
 	root := provenanceProject(t)
 	s := NewServer(strings.NewReader(""), io.Discard)
 	defer s.Close()
@@ -99,74 +97,31 @@ func TestHandleContextLevel(t *testing.T) {
 		t.Fatal("handleContext returned empty body")
 	}
 
-	l1, err := s.handleContext(context.Background(), map[string]any{"root": root, "symbol": "Greet", "level": "l1"})
-	if err != nil {
-		t.Fatalf("handleContext level l1: %v", err)
-	}
-	if !strings.Contains(l1, "== level 1:") || !strings.Contains(l1, "Greet") {
-		t.Errorf("l1 output missing level-1 names/token-cost list: %q", l1)
-	}
-
-	l2, err := s.handleContext(context.Background(), map[string]any{"root": root, "symbol": "Greet", "level": "l2"})
-	if err != nil {
-		t.Fatalf("handleContext level l2: %v", err)
-	}
-	if !strings.Contains(l2, "== level 2: Greet ==") {
-		t.Errorf("l2 output missing neighborhood header: %q", l2)
-	}
-
-	l3, err := s.handleContext(context.Background(), map[string]any{"root": root, "symbol": "Greet", "level": "L3"})
-	if err != nil {
-		t.Fatalf("handleContext level l3 (upper): %v", err)
-	}
-	if !strings.Contains(l3, "== level 3: Greet ==") {
-		t.Errorf("l3 output missing source header: %q", l3)
-	}
-
-	if _, err := s.handleContext(context.Background(), map[string]any{"root": root, "symbol": "Greet", "level": "bogus"}); err == nil || !strings.Contains(err.Error(), "unknown level") {
-		t.Errorf("invalid level: err = %v, want rejection with 'unknown level'", err)
+	if _, err := s.handleContext(context.Background(), map[string]any{"root": root, "symbol": "Greet", "level": "l1"}); err == nil || !strings.Contains(err.Error(), "kern_retrieve") {
+		t.Errorf("level arg: err = %v, want rejection pointing at kern_retrieve", err)
 	}
 }
 
-// TestHandleContextHandle drives the P2 optional handle arg through
-// kern_context: a registry-resolved handle renders the symbol's L2
-// neighborhood instead of the default context slice; the 8-char prefix
-// fallback (kern_retrieve renders prefixes) resolves; an unknown handle is
-// rejected with the kern_resolve wording; handle+level are mutually
-// exclusive.
-func TestHandleContextHandle(t *testing.T) {
+// TestHandleContextRejectsHandle pins the T2a contract: the handle retrieval
+// path (mirroring kern_resolve) was removed from kern_context, so a handle
+// arg must be rejected with the kern_retrieve hint instead of silently
+// falling back to the context slice.
+func TestHandleContextRejectsHandle(t *testing.T) {
 	root := provenanceProject(t)
 	s := NewServer(strings.NewReader(""), io.Discard)
 	defer s.Close()
 
-	// Register a handle for Greet in the package-level registry, the way
-	// kern_retrieve does after a retrieval.
-	h := retrieval.NewHandle(retrieval.TypeSymbol, "Greet", "app.go", 3, 40, 1.0, "hash")
-	retrieval.DefaultRegistry.Register(h)
-	prefix := h.ID[:8]
-
-	out, err := s.handleContext(context.Background(), map[string]any{"root": root, "symbol": "Greet", "handle": prefix})
-	if err != nil {
-		t.Fatalf("handleContext with handle: %v", err)
-	}
-	if !strings.Contains(out, "== level 2: Greet ==") {
-		t.Errorf("handle output missing level-2 neighborhood header: %q", out)
-	}
-
-	if _, err := s.handleContext(context.Background(), map[string]any{"root": root, "symbol": "Greet", "handle": "deadbeef00"}); err == nil || !strings.Contains(err.Error(), "unknown handle") {
-		t.Errorf("unknown handle: err = %v, want rejection with 'unknown handle'", err)
-	}
-
-	if _, err := s.handleContext(context.Background(), map[string]any{"root": root, "symbol": "Greet", "handle": prefix, "level": "l2"}); err == nil || !strings.Contains(err.Error(), "use only one of handle/level") {
-		t.Errorf("handle+level: err = %v, want 'use only one of handle/level'", err)
+	if _, err := s.handleContext(context.Background(), map[string]any{"root": root, "symbol": "Greet", "handle": "deadbeef00"}); err == nil || !strings.Contains(err.Error(), "kern_retrieve") {
+		t.Errorf("handle arg: err = %v, want rejection pointing at kern_retrieve", err)
 	}
 }
 
-// TestHandleExploreLevel drives the P2 optional level arg through kern_explore:
-// L1/L2/L3 render the symbol via the retrieval levels instead of the explore
-// report; an invalid level is rejected; default behavior is unchanged (base
-// call above succeeds with the explore render).
-func TestHandleExploreLevel(t *testing.T) {
+// TestHandleExploreRejectsLevel pins the T2a contract: the level retrieval
+// path was removed from kern_explore (progressive-disclosure level views are
+// served exclusively by kern_retrieve), so a level arg must be rejected with
+// the kern_retrieve hint instead of silently falling back to the explore
+// report. The default (no level arg) behavior is unchanged.
+func TestHandleExploreRejectsLevel(t *testing.T) {
 	root := provenanceProject(t)
 	s := NewServer(strings.NewReader(""), io.Discard)
 	defer s.Close()
@@ -179,16 +134,31 @@ func TestHandleExploreLevel(t *testing.T) {
 		t.Fatal("handleExplore returned empty body")
 	}
 
-	l2, err := s.handleExplore(context.Background(), map[string]any{"root": root, "symbol": "Greet", "level": "l2"})
-	if err != nil {
-		t.Fatalf("handleExplore level l2: %v", err)
+	if _, err := s.handleExplore(context.Background(), map[string]any{"root": root, "symbol": "Greet", "level": "l2"}); err == nil || !strings.Contains(err.Error(), "kern_retrieve") {
+		t.Errorf("level arg: err = %v, want rejection pointing at kern_retrieve", err)
 	}
-	if !strings.Contains(l2, "== level 2: Greet ==") {
-		t.Errorf("l2 output missing neighborhood header: %q", l2)
+}
+
+// TestHandleProbeRejectsLevel pins the T2a contract: the level retrieval
+// path was removed from kern_probe (progressive-disclosure level views are
+// served exclusively by kern_retrieve), so a level arg must be rejected with
+// the kern_retrieve hint instead of silently falling back to the probe
+// report. The default (no level arg) behavior is unchanged.
+func TestHandleProbeRejectsLevel(t *testing.T) {
+	root := provenanceProject(t)
+	s := NewServer(strings.NewReader(""), io.Discard)
+	defer s.Close()
+
+	out, err := s.handleProbe(context.Background(), map[string]any{"root": root, "task": "what does Greet touch"})
+	if err != nil {
+		t.Fatalf("handleProbe: %v", err)
+	}
+	if out == "" {
+		t.Fatal("handleProbe returned empty body")
 	}
 
-	if _, err := s.handleExplore(context.Background(), map[string]any{"root": root, "symbol": "Greet", "level": "bogus"}); err == nil || !strings.Contains(err.Error(), "unknown level") {
-		t.Errorf("invalid level: err = %v, want rejection with 'unknown level'", err)
+	if _, err := s.handleProbe(context.Background(), map[string]any{"root": root, "task": "what does Greet touch", "level": "l3"}); err == nil || !strings.Contains(err.Error(), "kern_retrieve") {
+		t.Errorf("level arg: err = %v, want rejection pointing at kern_retrieve", err)
 	}
 }
 
@@ -273,26 +243,5 @@ func TestHandleExploreExplain(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Errorf("explain output missing %q:\n%s", want, out)
 		}
-	}
-}
-
-// TestHandleProbeLevel drives the P2 optional level arg through kern_probe:
-// the primary probed symbol renders through the retrieval levels instead of
-// the probe report; a task with no resolvable symbol is rejected.
-func TestHandleProbeLevel(t *testing.T) {
-	root := provenanceProject(t)
-	s := NewServer(strings.NewReader(""), io.Discard)
-	defer s.Close()
-
-	out, err := s.handleProbe(context.Background(), map[string]any{"root": root, "task": "what does Greet touch", "level": "l3"})
-	if err != nil {
-		t.Fatalf("handleProbe level l3: %v", err)
-	}
-	if !strings.Contains(out, "== level 3:") {
-		t.Errorf("l3 output missing source header: %q", out)
-	}
-
-	if _, err := s.handleProbe(context.Background(), map[string]any{"root": root, "task": "zzzzqqqq xxxxxx", "level": "l1"}); err == nil || !strings.Contains(err.Error(), "no symbol resolved") {
-		t.Errorf("no-symbol task: err = %v, want 'no symbol resolved'", err)
 	}
 }

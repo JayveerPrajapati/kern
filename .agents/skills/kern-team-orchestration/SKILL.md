@@ -21,7 +21,7 @@ Use this skill to orchestrate kern's 7 specialized agent personas when tackling 
 | **Coder** | `RoleCoder` | `source:read`, `source:write`, `tests:read` | L2–L3 | `kern-safe-change`, `TreeDiff`, `kern_refactor` |
 | **Reviewer** | `RoleReviewer` | `source:read`, `tests:read`, `verify:run` | L0–L2 | `kern_meta("review changes")`, `kern_review` |
 | **Security** | `RoleSecurity` | `source:read`, `security:run` | L0–L2 | `kern_check`, `kern_sec`, `kern_taint` |
-| **Tester** | `RoleTester` | `tests:read`, `tests:write`, `test:run` | L0–L2 | `kern_synthesize_test`, `kern_run_build` |
+| **Tester** | `RoleTester` | `tests:read`, `tests:write`, `test:run` | L0–L2 | `kern_synthesize_test`, `kern_validate` |
 | **SRE** | `RoleSRE` | `runtime:read`, `ops:read`, `deploy:read` | L0–L4 | `kern-incident-triage`, `kern_correlate_evidence` |
 
 ---

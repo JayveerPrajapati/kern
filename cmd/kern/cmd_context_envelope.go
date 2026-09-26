@@ -17,10 +17,7 @@ import (
 // JSON, so --json is accepted for symmetry with the other subcommands but has
 // no effect.
 func runContextEnvelope(rest []string) {
-	f, args, err := parseFlags(rest)
-	if err != nil {
-		fatalUsage("flags: %v", err)
-	}
+	f, args := parseFlagsOrDie(rest)
 	change := f.change
 	if change == "" && len(args) > 0 {
 		// Positional fallback: a bare token is the change, matching the MCP
@@ -30,10 +27,7 @@ func runContextEnvelope(rest []string) {
 	if change == "" {
 		fatalUsage("usage: kern context-envelope --change \"<symbol or change description>\" [--root ROOT] [--max-tokens N]")
 	}
-	root := f.root
-	if root == "" {
-		root = "."
-	}
+	root := projectRoot(f)
 	p, err := app.New(root)
 	if err != nil {
 		fatal("ContextEnvelope: %v", err)

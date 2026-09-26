@@ -6,12 +6,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/JayveerPrajapati/kern/internal/index"
 	"github.com/JayveerPrajapati/kern/internal/mcp/mcpargs"
+	"github.com/JayveerPrajapati/kern/internal/mcp/root"
+	"github.com/JayveerPrajapati/kern/internal/sec"
 	"github.com/JayveerPrajapati/kern/internal/synthtest"
 )
 
@@ -20,22 +20,16 @@ type Hooks struct {
 	LoadIndex func(ctx context.Context, root string) (*index.Index, error)
 }
 
-func resolveRoot(root string) string {
-	if root == "" {
-		if cwd, err := os.Getwd(); err == nil {
-			return filepath.Clean(cwd)
-		}
-		return "."
-	}
-	if abs, err := filepath.Abs(root); err == nil {
-		return filepath.Clean(abs)
-	}
-	return root
-}
-
 // Synthesize scaffolds table-driven tests and edge-case invariants for symbols.
 func Synthesize(ctx context.Context, h Hooks, args map[string]any) (string, error) {
-	root := resolveRoot(mcpargs.ArgString(args, "root"))
+	root := root.ResolveRoot(mcpargs.ArgString(args, "root"))
+	// sinks=<rule ids> switches to the tainted-sink scaffold mode (the
+	// former kern_taint generate=true output, moved here): scan the project,
+	// keep the tainted sinks whose rule matches, and emit one deterministic
+	// test scaffold per sink (go test for Go sinks, pytest for Python sinks).
+	if sinks := mcpargs.ArgString(args, "sinks"); sinks != "" {
+		return taintScaffolds(ctx, h, root, sinks)
+	}
 	target := mcpargs.ArgString(args, "target")
 	file := mcpargs.ArgString(args, "file")
 	code := mcpargs.ArgString(args, "code")
@@ -98,4 +92,48 @@ func Synthesize(ctx context.Context, h Hooks, args map[string]any) (string, erro
 	sb.WriteString("\n```\n")
 
 	return sb.String(), nil
+}
+
+// taintScaffolds implements the sinks= mode of kern_synthesize_test: one
+// deterministic test scaffold per tainted security sink whose rule matches
+// the requested comma-separated rule ids (the former kern_taint generate=true
+// output, moved here; go test for Go sinks, pytest for Python sinks).
+func taintScaffolds(ctx context.Context, h Hooks, root, sinks string) (string, error) {
+	want := map[string]bool{}
+	for _, s := range strings.Split(sinks, ",") {
+		if s = strings.ToLower(strings.TrimSpace(s)); s != "" {
+			want[s] = true
+		}
+	}
+	findings, serr := sec.Scan(root)
+	if serr != nil {
+		return "", fmt.Errorf("security scan failed: %w", serr)
+	}
+	var ix *index.Index
+	if h.LoadIndex != nil {
+		ix, _ = h.LoadIndex(ctx, root)
+	}
+	tainted := sec.TaintLite(ix, findings)
+	var b strings.Builder
+	count := 0
+	for _, tf := range tainted {
+		if !tf.Tainted {
+			continue
+		}
+		rule := strings.ToLower(tf.Rule)
+		if !want[rule] {
+			continue
+		}
+		sc := sec.ScaffoldFor(tf)
+		lang := "go"
+		if strings.HasSuffix(strings.ToLower(tf.File), ".py") || strings.HasPrefix(rule, "py-") {
+			lang = "python"
+		}
+		fmt.Fprintf(&b, "# write to: %s\n```%s\n%s\n```\n", sc.File, lang, sc.Code)
+		count++
+	}
+	if count == 0 {
+		return "no tainted sinks matched sinks=" + sinks, nil
+	}
+	return b.String(), nil
 }

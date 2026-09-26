@@ -6,31 +6,17 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 
 	"github.com/JayveerPrajapati/kern/internal/fragility"
 	"github.com/JayveerPrajapati/kern/internal/mcp/mcpargs"
+	"github.com/JayveerPrajapati/kern/internal/mcp/root"
 )
-
-func resolveRoot(root string) string {
-	if root == "" {
-		if cwd, err := os.Getwd(); err == nil {
-			return filepath.Clean(cwd)
-		}
-		return "."
-	}
-	if abs, err := filepath.Abs(root); err == nil {
-		return filepath.Clean(abs)
-	}
-	return root
-}
 
 // FragilityHotspots identifies causal defect and fragility hotspots from git history and call graphs.
 func FragilityHotspots(ctx context.Context, args map[string]any) (string, error) {
-	root := resolveRoot(mcpargs.ArgString(args, "root"))
+	root := root.ResolveRoot(mcpargs.ArgString(args, "root"))
 
 	limit := 15
 	if lStr := mcpargs.ArgString(args, "limit"); lStr != "" {

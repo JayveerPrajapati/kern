@@ -127,6 +127,64 @@ func TestAssemblePlanNetNewFeature(t *testing.T) {
 	}
 }
 
+// TestAssemblePlanRenameIntentConcreteSteps verifies that a rename intent
+// produces concrete implementation steps (the explicit change kind first,
+// then per-symbol steps, then the required-validation steps) instead of one
+// vacuous generic step.
+func TestAssemblePlanRenameIntentConcreteSteps(t *testing.T) {
+	ts := &TaskService{}
+	pkt := domain.ContextPacket{
+		Symbols:            []domain.Symbol{{Name: "OldName", File: "internal/app/old.go", Line: 42}},
+		Files:              []domain.File{{Path: "internal/app/old.go"}},
+		RequiredValidation: []string{"build", "test"},
+	}
+	plan := ts.assemblePlan("Rename OldName to NewName", pkt)
+	joined := strings.Join(plan.ImplementationSteps, "\n")
+	for _, want := range []string{
+		"Rename OldName to NewName (definition in the affected components above)",
+		"Update all references to OldName",
+		"Update OldName (internal/app/old.go:42)",
+		"Ensure the project builds (go build ./...).",
+		"Add/update tests for affected symbols and run go test.",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("implementation steps missing %q:\n%s", want, joined)
+		}
+	}
+}
+
+// TestAssemblePlanFiltersUnrelatedDependencies verifies that dependency edges
+// unrelated to the affected components (symbol names / file paths) are
+// filtered out of the plan, while edges touching them — including via a
+// "pkg."-qualified right side — are kept.
+func TestAssemblePlanFiltersUnrelatedDependencies(t *testing.T) {
+	ts := &TaskService{}
+	pkt := domain.ContextPacket{
+		Symbols: []domain.Symbol{{Name: "Target", File: "internal/app/target.go", Line: 7}},
+		Files:   []domain.File{{Path: "internal/app/target.go"}},
+		Dependencies: []domain.Edge{
+			{From: "internal/app", To: "internal/context"},         // unrelated package edge
+			{From: "internal/app/target.go", To: "internal/index"}, // originates in the affected file
+			{From: "Target", To: "Helper"},                         // touches the affected symbol
+			{From: "pkg.Other", To: "Target"},                      // touches the affected symbol after trimming
+		},
+	}
+	plan := ts.assemblePlan("Fix Target", pkt)
+	joined := strings.Join(plan.Dependencies, "\n")
+	if strings.Contains(joined, "internal/app → internal/context") {
+		t.Errorf("unrelated package edge must be filtered out:\n%s", joined)
+	}
+	for _, want := range []string{
+		"internal/app/target.go → internal/index",
+		"Target → Helper",
+		"pkg.Other → Target",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("edge touching affected components missing %q:\n%s", want, joined)
+		}
+	}
+}
+
 func TestToolDecisionTraceRecorder(t *testing.T) {
 	rec := NewToolDecisionTraceRecorder()
 	if rec.Len() != 0 {

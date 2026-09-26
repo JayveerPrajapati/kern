@@ -6,32 +6,18 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
-	"path/filepath"
 	"time"
 
 	"github.com/JayveerPrajapati/kern/internal/domain"
 	"github.com/JayveerPrajapati/kern/internal/index"
 	"github.com/JayveerPrajapati/kern/internal/mcp/mcpargs"
+	"github.com/JayveerPrajapati/kern/internal/mcp/root"
 	"github.com/JayveerPrajapati/kern/internal/runtime"
 )
 
 // Hooks provides index loading from the owning MCP server.
 type Hooks struct {
 	LoadIndex func(ctx context.Context, root string) (*index.Index, error)
-}
-
-func resolveRoot(root string) string {
-	if root == "" {
-		if cwd, err := os.Getwd(); err == nil {
-			return filepath.Clean(cwd)
-		}
-		return "."
-	}
-	if abs, err := filepath.Abs(root); err == nil {
-		return filepath.Clean(abs)
-	}
-	return root
 }
 
 func jsonOf(v any) (string, error) {
@@ -48,7 +34,7 @@ func Runtime(ctx context.Context, h Hooks, args map[string]any) (string, error) 
 	if action == "" {
 		action = "status"
 	}
-	root := resolveRoot(mcpargs.ArgString(args, "root"))
+	root := root.ResolveRoot(mcpargs.ArgString(args, "root"))
 	var ix *index.Index
 	var err error
 	if h.LoadIndex != nil {

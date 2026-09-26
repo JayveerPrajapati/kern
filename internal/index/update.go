@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -66,14 +67,34 @@ func Update(root string, prev *Index) (*Index, error) {
 	ix := New(abs)
 	ix.Version = indexVersion
 
-	// symbol -> defining file, to map prev's merged edge maps back to
+	// symbol -> defining files, to map prev's merged edge maps back to
 	// per-file contributions (edges sourced from a file = edges whose owner
-	// is a symbol defined there).
-	symFile := make(map[string]string, len(prev.Symbols))
+	// is a symbol defined there). A name defined in MORE than one file — a
+	// Go function colliding with a prose heading (CHANGELOG.md's
+	// "Changelog" vs internal/commitmsg's Changelog), or same-named
+	// functions across packages — must never be attributed to a single
+	// file: when that file changed, replacing its bucket would silently
+	// delete the other files' edges (observed as kern dead flagging live
+	// callees of Changelog as certainly dead). Multi-defined owners join
+	// the unattributable keep-verbatim path instead.
+	symFiles := make(map[string]map[string]bool, len(prev.Symbols))
 	for _, s := range prev.Symbols {
-		if _, ok := symFile[s.FullName()]; !ok {
-			symFile[s.FullName()] = s.File
+		if symFiles[s.FullName()] == nil {
+			symFiles[s.FullName()] = map[string]bool{}
 		}
+		symFiles[s.FullName()][s.File] = true
+	}
+	// soleDefiningFile returns the single file defining name, or "" when
+	// the name is undefined or defined in multiple files.
+	soleDefiningFile := func(name string) string {
+		files := symFiles[name]
+		if len(files) != 1 {
+			return ""
+		}
+		for f := range files {
+			return f
+		}
+		return ""
 	}
 
 	// prev's virtual dispatch edges (added by addDispatchEdges during prev's
@@ -86,9 +107,10 @@ func Update(root string, prev *Index) (*Index, error) {
 
 	callsByFile := map[string]map[string][]CallEdge{}  // file -> owner -> callees
 	inheritsByFile := map[string]map[string][]string{} // file -> subtype -> bases
-	var unattributable []string                        // owners with no defining symbol (kept verbatim)
+	var unattributable []string                        // owners not attributable to exactly one file (kept verbatim)
+	var unattributableInherits []string                // subtypes defined in multiple files (kept verbatim)
 	for owner, callees := range prev.Calls {
-		file := symFile[owner]
+		file := soleDefiningFile(owner)
 		if file == "" {
 			unattributable = append(unattributable, owner)
 			continue
@@ -112,11 +134,17 @@ func Update(root string, prev *Index) (*Index, error) {
 		}
 	}
 	for subtype, bases := range prev.Inherits {
-		if file := symFile[subtype]; file != "" {
+		if file := soleDefiningFile(subtype); file != "" {
 			if inheritsByFile[file] == nil {
 				inheritsByFile[file] = map[string][]string{}
 			}
 			inheritsByFile[file][subtype] = bases
+		} else if symFiles[subtype] != nil {
+			// Multi-defined subtype: same collision rule as call owners —
+			// no single file's change may drop the other definers' edges.
+			// Zero-file subtypes keep the historical drop (nothing to
+			// re-attach them to).
+			unattributableInherits = append(unattributableInherits, subtype)
 		}
 	}
 
@@ -238,8 +266,10 @@ func Update(root string, prev *Index) (*Index, error) {
 	}
 
 	// Owners with no defining symbol are pathological (a Build-consistent
-	// index keys every call edge by a symbol's full name); keep their edges
-	// verbatim rather than dropping them.
+	// index keys every call edge by a symbol's full name), and owners whose
+	// name is defined in several files cannot be attributed to one bucket
+	// without risking silent edge loss — both keep their edges verbatim
+	// rather than being dropped.
 	for _, owner := range unattributable {
 		callees := prev.Calls[owner]
 		if len(dispatch) > 0 {
@@ -256,6 +286,15 @@ func Update(root string, prev *Index) (*Index, error) {
 			copied[owner+"->"+ce.Target] = true
 		}
 		ix.Calls[owner] = append(ix.Calls[owner], callees...)
+	}
+
+	// Subtypes defined in multiple files (the same name-collision rule as
+	// call owners): their inheritance edges are kept verbatim so no single
+	// file's change can drop another definer's edges. Sorted and deduped so
+	// map-iteration order never leaks into the serialized index.
+	sort.Strings(unattributableInherits)
+	for _, subtype := range unattributableInherits {
+		ix.Inherits[subtype] = append(ix.Inherits[subtype], dedupeSorted(prev.Inherits[subtype])...)
 	}
 
 	ix.UpdatedAt = time.Now().UTC()

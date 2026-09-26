@@ -6,31 +6,17 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/JayveerPrajapati/kern/internal/agent"
 	"github.com/JayveerPrajapati/kern/internal/app"
 	"github.com/JayveerPrajapati/kern/internal/mcp/mcpargs"
+	"github.com/JayveerPrajapati/kern/internal/mcp/root"
 )
 
 // Hooks provides platform resolution from the owning MCP server.
 type Hooks struct {
 	PlatformFor func(ctx context.Context, root string) (*app.Platform, error)
-}
-
-func resolveRoot(root string) string {
-	if root == "" {
-		if cwd, err := os.Getwd(); err == nil {
-			return filepath.Clean(cwd)
-		}
-		return "."
-	}
-	if abs, err := filepath.Abs(root); err == nil {
-		return filepath.Clean(abs)
-	}
-	return root
 }
 
 // Deploy deploys a task through TaskService.Deploy with governance and human-approval gates.
@@ -42,7 +28,7 @@ func Deploy(ctx context.Context, h Hooks, args map[string]any) (string, error) {
 	if taskID == "" {
 		return "", fmt.Errorf("task_id is required")
 	}
-	root := resolveRoot(mcpargs.ArgString(args, "root"))
+	root := root.ResolveRoot(mcpargs.ArgString(args, "root"))
 	if h.PlatformFor == nil {
 		return "", fmt.Errorf("platform hook not configured")
 	}

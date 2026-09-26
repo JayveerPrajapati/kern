@@ -3,16 +3,18 @@ package mcp
 import (
 	"context"
 
-	"github.com/JayveerPrajapati/kern/internal/domain"
 	"github.com/JayveerPrajapati/kern/internal/index"
 	"github.com/JayveerPrajapati/kern/internal/mcp/gov"
 	"github.com/JayveerPrajapati/kern/internal/mcp/provenance"
 )
 
-// The governor implementation lives in internal/mcp/gov. This file keeps
-// the mcp-side surface (thin wrappers) so handler call sites and tests
-// compile unchanged; field/method accesses on the governor value use the
-// leaf's exported names (gov.PolicySource, gov.FilterGraphText, ...).
+// The governor implementation lives in internal/mcp/gov (gov.New is the
+// merged newGovernor; gov.TaskScopeFromArgs is the merged taskScopeFromArgs;
+// gov.NewGovContext is the GovContext bundle factory the graph/retrieve
+// adapters call). This file keeps the mcp-side surface (thin wrappers) so
+// handler call sites and tests compile unchanged; field/method accesses on
+// the governor value use the leaf's exported names (gov.PolicySource,
+// gov.FilterGraphText, ...).
 
 const (
 	policySourceTaskScope     = provenance.PolicySourceTaskScope
@@ -30,8 +32,4 @@ const (
 // the fingerprint, decided-at and deny policy).
 func (s *Server) newGovernor(ctx context.Context, args map[string]any, ix *index.Index) (*gov.Governor, error) {
 	return gov.New(ctx, args, ix)
-}
-
-func taskScopeFromArgs(args map[string]any, taskID string) *domain.TaskScope {
-	return gov.TaskScopeFromArgs(args, taskID)
 }

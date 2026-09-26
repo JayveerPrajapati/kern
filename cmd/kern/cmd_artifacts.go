@@ -8,14 +8,8 @@ import (
 
 // runArtifacts lists task artifacts or all known artifacts.
 func runArtifacts(rest []string) {
-	f, args, err := parseFlags(rest)
-	if err != nil {
-		fatalUsage("flags: %v", err)
-	}
-	root := f.root
-	if root == "" {
-		root = "."
-	}
+	f, args := parseFlagsOrDie(rest)
+	root := projectRoot(f)
 
 	p, err := app.New(root)
 	if err != nil {

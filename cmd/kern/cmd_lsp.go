@@ -17,14 +17,8 @@ import (
 // SIGTERM cancel a NotifyContext that lsp.Serve observes (closing stdin to
 // unblock the read loop), so the process exits 0 on a clean drain.
 func runLSP(rest []string) {
-	f, _, err := parseFlags(rest)
-	if err != nil {
-		fatalUsage("flags: %v", err)
-	}
-	root := f.root
-	if root == "" {
-		root = "."
-	}
+	f, _ := parseFlagsOrDie(rest)
+	root := projectRoot(f)
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 	// Serve owns stdout exclusively (the LSP protocol channel); all its
@@ -36,10 +30,7 @@ func runLSP(rest []string) {
 
 // runLSPBridge handles the CLI query interface for the zero-weight LSP client bridge.
 func runLSPBridge(rest []string) {
-	f, args, err := parseFlags(rest)
-	if err != nil {
-		fatalUsage("flags: %v", err)
-	}
+	f, args := parseFlagsOrDie(rest)
 	file := f.file
 	if file == "" && len(args) > 0 {
 		file = args[0]
@@ -51,10 +42,7 @@ func runLSPBridge(rest []string) {
 	if action == "" {
 		action = "definition"
 	}
-	root := f.root
-	if root == "" {
-		root = "."
-	}
+	root := projectRoot(f)
 
 	line := f.lines
 	if line <= 0 {

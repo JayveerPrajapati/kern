@@ -8,7 +8,6 @@ import (
 	"unicode"
 
 	"github.com/JayveerPrajapati/kern/internal/index"
-	"github.com/JayveerPrajapati/kern/internal/intel"
 	"github.com/JayveerPrajapati/kern/internal/sec"
 )
 
@@ -86,7 +85,7 @@ func FromSecFinding(f sec.Finding) Claim {
 // FromGuardRule maps an architectural guard boundary rule into a Policy. A
 // boundary rule forbids or allows a dependency edge between package/directory
 // patterns, which is governance policy by nature.
-func FromGuardRule(r intel.BoundaryRule) Policy {
+func FromGuardRule(r BoundaryRule) Policy {
 	return Policy{
 		Name:        "boundary:" + r.From + "->" + r.To,
 		Description: "architectural boundary rule: " + r.Action + " dependency " + r.From + " -> " + r.To,

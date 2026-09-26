@@ -14,10 +14,7 @@ import (
 // sampling (e.g. opencode): the plugin calls this with `opencode run` when
 // KERN_HOST_SAMPLER_CMD is set.
 func runRegisterHostSampler(rest []string) int {
-	f, pos, err := parseFlags(rest)
-	if err != nil {
-		fatalUsage("flags: %v", err)
-	}
+	f, pos := parseFlagsOrDie(rest)
 	key := f.key
 	timeout := ""
 	if f.timeoutSet {

@@ -1,0 +1,416 @@
+package intel
+
+import (
+	"testing"
+	"time"
+
+	"github.com/JayveerPrajapati/kern/internal/domain"
+	"github.com/JayveerPrajapati/kern/internal/index"
+)
+
+func sym(kind, name, file string, line int) index.Symbol {
+	return index.Symbol{Kind: kind, Name: name, File: file, Line: line, Lang: "go"}
+}
+
+// fakeIndex builds a small in-memory v1 index:
+// Foo -> Bar, Baz
+// Bar -> Baz
+// Baz -> Foo            (cycle: Foo->Bar->Baz->Foo and Foo->Baz->Foo)
+// HandleUsers -> Foo    (entry point, Framework "net-http", Route "/users")
+// TestFoo -> HandleUsers
+// svc imports "net/http"
+// Baz inherits "extends:Animal"
+func fakeIndex() *index.Index {
+	ix := &index.Index{
+		Root: "/fake",
+		Symbols: []index.Symbol{
+			sym("func", "Foo", "foo.go", 1),
+			sym("func", "Bar", "bar.go", 1),
+			sym("func", "Baz", "baz.go", 1),
+			{Kind: "func", Name: "HandleUsers", File: "svc/handlers.go", Line: 1, Lang: "go", Entry: true, Framework: "net-http", Route: "/users"},
+			sym("func", "TestFoo", "svc/foo_test.go", 1),
+		},
+		Calls: map[string][]index.CallEdge{
+			"Foo":         {index.CallEdge{Target: "Bar", Confidence: index.ConfidenceHigh}, index.CallEdge{Target: "Baz", Confidence: index.ConfidenceHigh}},
+			"Bar":         {index.CallEdge{Target: "Baz", Confidence: index.ConfidenceHigh}},
+			"Baz":         {index.CallEdge{Target: "Foo", Confidence: index.ConfidenceHigh}},
+			"HandleUsers": {index.CallEdge{Target: "Foo", Confidence: index.ConfidenceHigh}},
+			"TestFoo":     {index.CallEdge{Target: "HandleUsers", Confidence: index.ConfidenceHigh}},
+		},
+		Callers: map[string][]string{
+			"Bar":         {"Foo"},
+			"Baz":         {"Foo", "Bar"},
+			"Foo":         {"HandleUsers", "Baz"},
+			"HandleUsers": {"TestFoo"},
+		},
+		Inherits: map[string][]string{
+			"Baz": {"extends:Animal"},
+		},
+		InheritedBy: map[string][]string{
+			"Animal": {"Baz"},
+		},
+		Pkgs: map[string]*index.Pkg{
+			"svc": {Name: "svc", Path: "svc", Imports: []index.ImportEdge{{Path: "net/http", Confidence: index.ConfidenceHigh}}, Files: []string{"svc/handlers.go"}, Lang: "go"},
+		},
+		UpdatedAt: time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC),
+	}
+	return ix
+}
+
+// names returns the ID (label) of each node.
+func names(nodes []domain.Node) []string {
+	out := make([]string, len(nodes))
+	for i, n := range nodes {
+		out[i] = n.ID
+	}
+	return out
+}
+
+func containsID(ids []string, want string) bool {
+	for _, id := range ids {
+		if id == want {
+			return true
+		}
+	}
+	return false
+}
+
+func TestFromIndex(t *testing.T) {
+	g := FromIndex(fakeIndex())
+
+	// Nodes: 5 symbols + 5 file + 1 module ("svc") = 11.
+	if len(g.Nodes) != 11 {
+		t.Fatalf("node count = %d, want 11", len(g.Nodes))
+	}
+	// Edges: 6 calls (Foo->Bar, Foo->Baz, Bar->Baz, Baz->Foo, HandleUsers->Foo,
+	// TestFoo->HandleUsers) + 1 inherits + 1 imports + 5 contains + 5 defines = 18.
+	if len(g.Edges) != 18 {
+		t.Fatalf("edge count = %d, want 18", len(g.Edges))
+	}
+
+	// Provenance is set for AST extraction.
+	if g.Provenance == nil {
+		t.Fatal("Provenance not set")
+	}
+	if g.Provenance.Source != "ast" || g.Provenance.Confidence != 1.0 {
+		t.Errorf("provenance = %+v, want ast/1.0", g.Provenance)
+	}
+	if g.Provenance.ExtractedAt.IsZero() {
+		t.Error("provenance ExtractedAt is zero")
+	}
+
+	// Version metadata is set and stable.
+	if g.Version == nil {
+		t.Fatal("Version not set")
+	}
+	if g.Version.SymbolCount != 5 || g.Version.EdgeCount != 18 {
+		t.Errorf("version = symbols %d edges %d, want 5/18", g.Version.SymbolCount, g.Version.EdgeCount)
+	}
+	if g.Version.GraphHash == "" {
+		t.Error("graph hash is empty")
+	}
+	if g.Version.CommitHash != "" {
+		t.Errorf("commit hash should be empty, got %q", g.Version.CommitHash)
+	}
+}
+
+func TestGraphHashStable(t *testing.T) {
+	a := FromIndex(fakeIndex())
+	b := FromIndex(fakeIndex())
+	if a.Version.GraphHash != b.Version.GraphHash {
+		t.Fatalf("graph hash not stable: %q != %q", a.Version.GraphHash, b.Version.GraphHash)
+	}
+	if a.Version.GraphHash == "" {
+		t.Fatal("graph hash is empty")
+	}
+}
+
+func TestWhoCalls(t *testing.T) {
+	g := FromIndex(fakeIndex())
+	got := g.WhoCalls("Foo")
+	ids := names(got)
+	// Direct callers of Foo: HandleUsers and Baz.
+	if len(ids) != 2 || !containsID(ids, "svc.HandleUsers") || !containsID(ids, "Baz") {
+		t.Fatalf("WhoCalls(Foo) = %v, want [svc.HandleUsers Baz]", ids)
+	}
+	// WhoCalls is direct: Bar does not call Foo directly.
+	if containsID(ids, "Bar") {
+		t.Errorf("WhoCalls(Foo) includes transitive caller Bar: %v", ids)
+	}
+}
+
+func TestWhatDependsOnIsTransitive(t *testing.T) {
+	g := FromIndex(fakeIndex())
+	ids := names(g.WhatDependsOn("Foo"))
+	// Transitive callers of Foo: Bar, Baz, HandleUsers, TestFoo.
+	if len(ids) != 4 {
+		t.Fatalf("WhatDependsOn(Foo) = %v, want 4 distinct transitive callers", ids)
+	}
+	for _, want := range []string{"Bar", "Baz", "svc.HandleUsers", "svc.TestFoo"} {
+		if !containsID(ids, want) {
+			t.Errorf("WhatDependsOn(Foo) missing %q: %v", want, ids)
+		}
+	}
+}
+
+func TestWhatDoesXDependOnIsTransitive(t *testing.T) {
+	g := FromIndex(fakeIndex())
+	ids := names(g.WhatDoesXDependOn("Foo"))
+	// Transitive callees of Foo: Bar and Baz (Foo's own edge target set).
+	if len(ids) != 2 || !containsID(ids, "Bar") || !containsID(ids, "Baz") {
+		t.Fatalf("WhatDoesXDependOn(Foo) = %v, want [Bar Baz]", ids)
+	}
+}
+
+func TestCycleSafety(t *testing.T) {
+	ix := &index.Index{
+		Root:      "/cycle",
+		Symbols:   []index.Symbol{sym("func", "A", "a.go", 1), sym("func", "B", "b.go", 1)},
+		Calls:     map[string][]index.CallEdge{"A": {index.CallEdge{Target: "B", Confidence: index.ConfidenceHigh}}, "B": {index.CallEdge{Target: "A", Confidence: index.ConfidenceHigh}}},
+		Callers:   map[string][]string{"A": {"B"}, "B": {"A"}},
+		UpdatedAt: time.Now(),
+	}
+	g := FromIndex(ix)
+	// Both forward and reverse traversals must terminate on a 2-cycle.
+	if ids := names(g.WhatDoesXDependOn("A")); len(ids) != 1 || ids[0] != "B" {
+		t.Fatalf("WhatDoesXDependOn(A) in cycle = %v, want [B]", ids)
+	}
+	if ids := names(g.WhatDependsOn("A")); len(ids) != 1 || ids[0] != "B" {
+		t.Fatalf("WhatDependsOn(A) in cycle = %v, want [B]", ids)
+	}
+	if ids := names(g.WhoCalls("A")); len(ids) != 1 || ids[0] != "B" {
+		t.Fatalf("WhoCalls(A) in cycle = %v, want [B]", ids)
+	}
+}
+
+func TestWhatAPIsAffected(t *testing.T) {
+	g := FromIndex(fakeIndex())
+	ids := names(g.WhatAPIsAffected("Foo"))
+	if len(ids) != 1 || ids[0] != "svc.HandleUsers" {
+		t.Fatalf("WhatAPIsAffected(Foo) = %v, want [svc.HandleUsers]", ids)
+	}
+	// A change to the entry point itself affects that entry point.
+	if ids := names(g.WhatAPIsAffected("HandleUsers")); len(ids) != 1 || ids[0] != "svc.HandleUsers" {
+		t.Fatalf("WhatAPIsAffected(HandleUsers) = %v, want [svc.HandleUsers]", ids)
+	}
+}
+
+func TestWhatServicesAffected(t *testing.T) {
+	g := FromIndex(fakeIndex())
+	ids := names(g.WhatServicesAffected("Foo"))
+	// Affected API entry (HandleUsers) lives in package "svc", which is a module node.
+	if len(ids) != 1 || ids[0] != "svc" {
+		t.Fatalf("WhatServicesAffected(Foo) = %v, want [svc]", ids)
+	}
+}
+
+func TestWhatEventsAffectedIsEmpty(t *testing.T) {
+	g := FromIndex(fakeIndex())
+	if got := g.WhatEventsAffected("Foo"); len(got) != 0 {
+		t.Fatalf("WhatEventsAffected(Foo) = %v, want empty (Phase 11 placeholder)", names(got))
+	}
+}
+
+func TestWhatTestsCover(t *testing.T) {
+	g := FromIndex(fakeIndex())
+	// TestFoo reaches Foo only transitively (TestFoo -> HandleUsers -> Foo)
+	// and lives in a different package (svc) than Foo (root dir), so scoped
+	// coverage — same-package tests + direct test callers — reports nothing.
+	if ids := names(g.WhatTestsCover("Foo")); len(ids) != 0 {
+		t.Fatalf("WhatTestsCover(Foo) = %v, want empty (TestFoo covers Foo only transitively)", ids)
+	}
+	// HandleUsers is directly called by TestFoo and both live in package "svc",
+	// so TestFoo is reported as covering it.
+	if ids := names(g.WhatTestsCover("HandleUsers")); len(ids) != 1 || ids[0] != "svc.TestFoo" {
+		t.Fatalf("WhatTestsCover(HandleUsers) = %v, want [svc.TestFoo]", ids)
+	}
+}
+
+func TestWhatTestsCoverEmptyWhenNone(t *testing.T) {
+	g := FromIndex(fakeIndex())
+	// A symbol no test reaches has no covering tests.
+	if got := g.WhatTestsCover("DoesNotExist"); len(got) != 0 {
+		t.Fatalf("WhatTestsCover(DoesNotExist) = %v, want empty", names(got))
+	}
+}
+
+// scopedTestsIndex builds an index shaped like a small repo with a hub symbol:
+//   - Hub (root package, hub.go) with no callers of its own except Mid/tests.
+//   - Mid (root package) calls Hub.
+//   - TestHubSamePkg (root package, hub_test.go): same package as Hub/Mid.
+//   - TestHubDirect (package t): directly calls Hub (cross-package).
+//   - TestHubTransitive (package t): calls Mid, so it reaches Hub only
+//     transitively — it must NOT be reported as covering Hub.
+//   - TestMidCrossPkg (package t): directly calls Mid.
+//
+// Mirrors the F3 shape: a hub that every test would transitively reach under
+// the old unbounded expansion.
+func scopedTestsIndex() *index.Index {
+	return &index.Index{
+		Root: "/scoped",
+		Symbols: []index.Symbol{
+			sym("func", "Hub", "hub.go", 1),
+			sym("func", "Mid", "mid.go", 1),
+			sym("func", "TestHubSamePkg", "hub_test.go", 1),
+			sym("func", "TestHubDirect", "t/hubdirect_test.go", 1),
+			sym("func", "TestHubTransitive", "t/hubtrans_test.go", 1),
+			sym("func", "TestMidCrossPkg", "t/mid_test.go", 1),
+		},
+		Calls: map[string][]index.CallEdge{
+			"Mid":               {{Target: "Hub", Confidence: index.ConfidenceHigh}},
+			"TestHubDirect":     {{Target: "Hub", Confidence: index.ConfidenceHigh}},
+			"TestHubTransitive": {{Target: "Mid", Confidence: index.ConfidenceHigh}},
+			"TestMidCrossPkg":   {{Target: "Mid", Confidence: index.ConfidenceHigh}},
+		},
+		Callers: map[string][]string{
+			"Hub": {"Mid", "TestHubDirect"},
+			"Mid": {"TestHubTransitive", "TestMidCrossPkg"},
+		},
+		UpdatedAt: time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC),
+	}
+}
+func TestWhatTestsCoverScoped(t *testing.T) {
+	g := FromIndex(scopedTestsIndex())
+	// Hub is covered only by the same-package test and the direct cross-package
+	// caller — the transitive-only test (t.TestHubTransitive) is excluded, and
+	// the result stays bounded (2, not every test in the index).
+	ids := names(g.WhatTestsCover("Hub"))
+	want := []string{"TestHubSamePkg", "t.TestHubDirect"}
+	if len(ids) != len(want) || ids[0] != want[0] || ids[1] != want[1] {
+		t.Fatalf("WhatTestsCover(Hub) = %v, want %v (transitive-only test excluded, bounded)", ids, want)
+	}
+	// A test does not cover itself: TestHubSamePkg has no other same-package
+	// test and no test caller, so its own coverage is empty.
+	if ids := names(g.WhatTestsCover("TestHubSamePkg")); len(ids) != 0 {
+		t.Fatalf("WhatTestsCover(TestHubSamePkg) = %v, want empty (a test does not cover itself)", ids)
+	}
+	// Mid is covered by the same-package test plus its two direct test callers.
+	ids = names(g.WhatTestsCover("Mid"))
+	if len(ids) != 3 {
+		t.Fatalf("WhatTestsCover(Mid) = %v, want 3 covering tests", ids)
+	}
+	// The cached path returns the same result on a second call (built once per
+	// graph — no per-call rebuild).
+	again := names(g.WhatTestsCover("Hub"))
+	if len(again) != len(want) || again[0] != want[0] || again[1] != want[1] {
+		t.Fatalf("WhatTestsCover(Hub) second call = %v, want %v (cached)", again, want)
+	}
+}
+
+// fakeIndex2 returns a graph with an entry point that is itself a handler and
+// a test that calls it, used to keep entry/service assertions isolated.
+func fakeIndex2() *index.Index {
+	return &index.Index{
+		Root:    "/fake2",
+		Symbols: []index.Symbol{sym("func", "Compute", "svc/calc.go", 1)},
+		Calls:   map[string][]index.CallEdge{"Compute": {}},
+		Callers: map[string][]string{},
+		Pkgs:    map[string]*index.Pkg{},
+	}
+}
+
+func TestWhoCallsUnknownSymbol(t *testing.T) {
+	g := FromIndex(fakeIndex2())
+	if got := g.WhoCalls("DoesNotExist"); len(got) != 0 {
+		t.Fatalf("WhoCalls(missing) = %v, want empty", names(got))
+	}
+}
+
+// TestSameNamedSymbolsDoNotCollide guards Bug #6: two same-named package-level
+// symbols in different packages must get distinct, package-scoped node IDs so
+// their caller sets are not conflated.
+func TestSameNamedSymbolsDoNotCollide(t *testing.T) {
+	ix := &index.Index{
+		Root: "/collide",
+		Symbols: []index.Symbol{
+			sym("func", "Save", "db/save.go", 1),
+			sym("func", "Save", "api/save.go", 1),
+		},
+		Calls: map[string][]index.CallEdge{
+			"Save": {index.CallEdge{Target: "db.Save", Confidence: index.ConfidenceHigh}}, // db.Save calls api.Save
+		},
+		Pkgs: map[string]*index.Pkg{
+			"db":  {Name: "db", Path: "db", Files: []string{"db/save.go"}},
+			"api": {Name: "api", Path: "api", Files: []string{"api/save.go"}},
+		},
+	}
+	g := FromIndex(ix)
+
+	// Both Save symbols become distinct nodes (not a single "Save").
+	byID := g.nodesByID()
+	if _, ok := byID["db.Save"]; !ok {
+		t.Fatalf("missing node %q", "db.Save")
+	}
+	if _, ok := byID["api.Save"]; !ok {
+		t.Fatalf("missing node %q", "api.Save")
+	}
+	// A node whose ID is exactly the bare name must not exist for either.
+	if _, ok := byID["Save"]; ok {
+		t.Errorf("unexpected bare node %q; node IDs must be package-scoped", "Save")
+	}
+}
+func TestWhatDoesXDependOnNamesKeepsUnresolvedCallees(t *testing.T) {
+	// e2e round 2, P0-1: a method whose callees are all external (fmt.Println
+	// etc.) reported "What it calls: 0" via WhatDoesXDependOnPrecise -
+	// nodesForIDs drops reached-but-unresolved IDs - while `kern why` showed
+	// the raw index edges. The names view must keep them.
+	ix := &index.Index{
+		Root: "/ext",
+		Symbols: []index.Symbol{
+			sym("func", "Foo", "a.go", 1),
+			sym("func", "Bar", "b.go", 1),
+		},
+		Calls: map[string][]index.CallEdge{
+			"Foo": {
+				index.CallEdge{Target: "Bar", Confidence: index.ConfidenceHigh},
+				index.CallEdge{Target: "fmt.Println", Confidence: index.ConfidenceHigh},
+			},
+		},
+		Callers:   map[string][]string{"Bar": {"Foo"}, "fmt.Println": {"Foo"}},
+		UpdatedAt: time.Now(),
+	}
+	g := FromIndex(ix)
+	got := g.WhatDoesXDependOnNames("Foo", false)
+	if len(got) != 2 || !containsID(got, "Bar") || !containsID(got, "fmt.Println") {
+		t.Fatalf("WhatDoesXDependOnNames(Foo) = %v, want [Bar fmt.Println]", got)
+	}
+	// The node-based query intentionally still drops the unresolved target
+	// (callers must be indexed symbols); names is the raw edge view.
+	if ids := names(g.WhatDoesXDependOn("Foo")); len(ids) != 1 || ids[0] != "Bar" {
+		t.Fatalf("WhatDoesXDependOn(Foo) = %v, want [Bar]", ids)
+	}
+}
+
+func TestDirectDependsOnNamesIsOneHop(t *testing.T) {
+	ix := &index.Index{
+		Root: "/ext",
+		Symbols: []index.Symbol{
+			sym("func", "Foo", "a.go", 1),
+			sym("func", "Bar", "b.go", 1),
+			sym("func", "Baz", "c.go", 1),
+		},
+		Calls: map[string][]index.CallEdge{
+			"Foo": {
+				index.CallEdge{Target: "Bar", Confidence: index.ConfidenceHigh},
+				index.CallEdge{Target: "fmt.Println", Confidence: index.ConfidenceHigh},
+			},
+			"Bar": {
+				index.CallEdge{Target: "Baz", Confidence: index.ConfidenceHigh},
+			},
+		},
+		Callers:   map[string][]string{"Bar": {"Foo"}, "fmt.Println": {"Foo"}, "Baz": {"Bar"}},
+		UpdatedAt: time.Now(),
+	}
+	g := FromIndex(ix)
+	direct := g.DirectDependsOnNames("Foo", false)
+	if len(direct) != 2 || !containsID(direct, "Bar") || !containsID(direct, "fmt.Println") {
+		t.Fatalf("DirectDependsOnNames(Foo) = %v, want [Bar fmt.Println]", direct)
+	}
+	if containsID(direct, "Baz") {
+		t.Fatalf("DirectDependsOnNames(Foo) = %v, must not include transitive Baz", direct)
+	}
+	// Transitive view still includes Baz (unchanged behavior for --json).
+	if all := g.WhatDoesXDependOnNames("Foo", false); !containsID(all, "Baz") {
+		t.Fatalf("WhatDoesXDependOnNames(Foo) = %v, want transitive Baz preserved", all)
+	}
+}

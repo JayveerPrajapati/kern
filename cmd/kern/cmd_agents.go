@@ -43,16 +43,10 @@ func runAgents(rest []string) {
 		}
 		clean = append(clean, a)
 	}
-	f, args, err := parseFlags(clean)
-	if err != nil {
-		fatalUsage("flags: %v", err)
-	}
-	root := f.root
-	if root == "" {
-		root = "."
-		if len(args) > 0 {
-			root = args[0]
-		}
+	f, args := parseFlagsOrDie(clean)
+	root := projectRoot(f)
+	if f.root == "" && len(args) > 0 {
+		root = args[0]
 	}
 	var reports []agentReport
 

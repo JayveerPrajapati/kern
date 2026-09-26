@@ -8,10 +8,7 @@ import (
 // the index, map prose words to candidate symbols via the build-time inverted
 // vocab, and print one hit per line: `<symbol> (<N> words matched)`.
 func runProse(rest []string) int {
-	f, args, err := parseFlags(rest)
-	if err != nil {
-		fatalUsage("flags: %v", err)
-	}
+	f, args := parseFlagsOrDie(rest)
 	if len(args) < 1 {
 		fatalUsage("prose: missing <words> argument\n\n" +
 			"usage: kern prose \"<words>\" [root] [--limit N]\n\n" +
@@ -24,10 +21,7 @@ func runProse(rest []string) int {
 			"  kern prose \"token budget\" ./some/repo")
 	}
 	query := args[0]
-	root := f.root
-	if root == "" {
-		root = "."
-	}
+	root := projectRoot(f)
 	if len(args) > 1 {
 		root = args[1]
 	}

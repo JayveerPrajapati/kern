@@ -7,6 +7,17 @@ import (
 	"time"
 )
 
+// BoundaryRule declares one allowed or forbidden dependency edge between two
+// package/directory patterns. Action is "forbid" (a violation) or "allow" (an
+// explicit exemption that overrides forbids for the same pair). Lives here
+// (moved from internal/intel, which consumes it via its guard layer) so the
+// governance adapter can map it to Policy without depending on intel.
+type BoundaryRule struct {
+	From   string `json:"from"`
+	To     string `json:"to"`
+	Action string `json:"action"`
+}
+
 // TaskBoundary defines the allowed and denied file paths for a task. Strict
 // Plan task-scoped boundaries.
 type TaskBoundary struct {

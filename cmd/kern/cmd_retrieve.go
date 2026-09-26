@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	kernctx "github.com/JayveerPrajapati/kern/internal/context"
 	"github.com/JayveerPrajapati/kern/internal/intel"
 	"github.com/JayveerPrajapati/kern/internal/retrieval"
 	"os"
@@ -12,7 +13,7 @@ import (
 // by the dispatch table help text and every error path (QA: the error paths
 // used to print three divergent variants that contradicted the documented
 // usage — single source of truth now).
-const retrieveUsage = "usage: kern retrieve --task-type <type> --symbol <name> [root] [--max-tokens N]"
+const retrieveUsage = "usage: kern retrieve (--query <q> | --symbol <name>) [--level l1|l2|l3] [--task-type <type>] [root] [--max-tokens N]"
 
 // parseRetrieveLevelCLI maps the string form of a disclosure level to the
 // retrieval.Level constants, mirroring the MCP handler's parsing. Empty
@@ -35,10 +36,7 @@ func parseRetrieveLevelCLI(v string) (retrieval.Level, error) {
 // resolved in the same process (kern retrieve → kern resolve) is valid; a
 // fresh process requires re-running retrieve first.
 func runRetrieve(rest []string) {
-	f, args, err := parseFlags(rest)
-	if err != nil {
-		fatalUsage("flags: %v", err)
-	}
+	f, args := parseFlagsOrDie(rest)
 	level, err := parseRetrieveLevelCLI(f.level)
 	if err != nil {
 		fatal("Retrieve: %v", err)
@@ -61,6 +59,13 @@ func runRetrieve(rest []string) {
 		// Task-type retrieval: the disclosure level comes from the
 		// planner policy for the task type (documentation→l1,
 		// refactor→l3, everything else l2).
+		// F-R2: L1 is search-based, so --query is the natural target for
+		// L1-policy task types (e.g. documentation). Accept it (or a
+		// positional) instead of demanding --symbol; the query doubles as
+		// the L1 search term inside RetrieveForTask.
+		if kernctx.RetrievalLevelFor(kernctx.TaskType(f.taskType)) == "l1" && query != "" && symbol == "" {
+			symbol = query
+		}
 		if symbol == "" {
 			fatalUsage(retrieveUsage)
 		}
@@ -72,10 +77,7 @@ func runRetrieve(rest []string) {
 			fatalUsage(retrieveUsage)
 		}
 	}
-	root := f.root
-	if root == "" {
-		root = "."
-	}
+	root := projectRoot(f)
 	ix, err := intel.ReadIndex(root)
 	if err != nil {
 		fatal("Retrieve: %v", err)
@@ -132,10 +134,7 @@ func runRetrieve(rest []string) {
 // returned handle to L2 or L3 content. The handle must come from a kern
 // retrieve run in the same process (the registry is process-local).
 func runResolve(rest []string) {
-	f, args, err := parseFlags(rest)
-	if err != nil {
-		fatalUsage("flags: %v", err)
-	}
+	f, args := parseFlagsOrDie(rest)
 	if len(args) < 1 {
 		fatalUsage("usage: kern resolve <handle-id> [root] [--level l2|l3] [--max-tokens N]")
 	}
@@ -143,12 +142,9 @@ func runResolve(rest []string) {
 	if err != nil {
 		fatal("Resolve: %v", err)
 	}
-	root := f.root
-	if root == "" {
-		root = "."
-		if len(args) > 1 {
-			root = args[1]
-		}
+	root := projectRoot(f)
+	if f.root == "" && len(args) > 1 {
+		root = args[1]
 	}
 	// Load handles persisted by earlier `kern retrieve` runs so a handle ID
 	// printed by a previous process resolves here.

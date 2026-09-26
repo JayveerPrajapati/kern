@@ -18,7 +18,7 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/evidence"
 	"github.com/JayveerPrajapati/kern/internal/governance"
 	"github.com/JayveerPrajapati/kern/internal/index"
-	"github.com/JayveerPrajapati/kern/internal/intelligence"
+	"github.com/JayveerPrajapati/kern/internal/intel"
 	"github.com/JayveerPrajapati/kern/internal/memory"
 	"github.com/JayveerPrajapati/kern/internal/metrics"
 	"github.com/JayveerPrajapati/kern/internal/runtime"
@@ -33,7 +33,7 @@ const engineAgent = "context-engine"
 // evidence factory, and governance firewall. It is the core of Context
 // Engine 2.0.
 type Engine struct {
-	graph    *intelligence.Graph
+	graph    *intel.Graph
 	memory   *memory.MemoryStore
 	firewall *governance.Firewall
 	root     string // project root (for git operations)
@@ -80,7 +80,7 @@ type Engine struct {
 }
 
 // NewEngine creates a context engine with the given dependencies.
-func NewEngine(root string, graph *intelligence.Graph, mem *memory.MemoryStore, fw *governance.Firewall) *Engine {
+func NewEngine(root string, graph *intel.Graph, mem *memory.MemoryStore, fw *governance.Firewall) *Engine {
 	return &Engine{graph: graph, memory: mem, firewall: fw, root: root}
 }
 

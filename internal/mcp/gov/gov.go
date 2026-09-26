@@ -22,11 +22,35 @@ import (
 // the governor factory (each call re-authorizes, exactly as the mcp layer
 // did before the extraction) and the two provenance stamping paths. It is
 // the shared hook contract for every governed handler family (graph,
-// retrieve); the mcp adapters construct it per call.
+// retrieve); the mcp adapters construct it per call via NewGovContext.
 type GovContext struct {
 	NewGov   func() (*Governor, error)
 	StampGov func(g *Governor, symbols []provenance.SymbolProvenance)
 	StampRaw func(symbols []provenance.SymbolProvenance)
+}
+
+// NewGovContext assembles the per-call GovContext bundle given the two
+// callbacks the mcp adapter must still provide from core: governorFunc is
+// the adapter's governor factory (each call re-authorizes through New) and
+// stampFunc is the adapter's provenance stamp (writes to the per-call scope,
+// session/audit). The governed/raw provenance records themselves are
+// composed here from the resolved index and the server's commit-resolution
+// func, so the whole bundle construction lives in the leaf. Both callbacks
+// must be non-nil; the factory refuses nil up front so a malformed bundle
+// can never panic mid-call.
+func NewGovContext(ix *index.Index, commit func(string) string, governorFunc func() (*Governor, error), stampFunc func(*provenance.Provenance)) GovContext {
+	if governorFunc == nil || stampFunc == nil {
+		panic("gov.NewGovContext: governorFunc and stampFunc must be non-nil")
+	}
+	return GovContext{
+		NewGov: governorFunc,
+		StampGov: func(g *Governor, symbols []provenance.SymbolProvenance) {
+			stampFunc(provenance.Governed(ix, commit, g.PolicySource, g.Proof, symbols))
+		},
+		StampRaw: func(symbols []provenance.SymbolProvenance) {
+			stampFunc(provenance.Raw(ix, commit, symbols))
+		},
+	}
 }
 
 // governor carries the authorized scope for one governed retrieval call. It

@@ -4,6 +4,7 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/JayveerPrajapati/kern/internal/domain"
 	"github.com/JayveerPrajapati/kern/internal/index"
 )
 
@@ -36,7 +37,7 @@ export function handler(): void {
 	if err != nil {
 		t.Fatal(err)
 	}
-	b := &Boundaries{Rules: []BoundaryRule{{From: "api", To: "core", Action: "forbid"}}}
+	b := &Boundaries{Rules: []domain.BoundaryRule{{From: "api", To: "core", Action: "forbid"}}}
 	files := []string{"api/handler.ts"}
 
 	// Default precision: the heuristic cross-file call edge is trusted and
@@ -167,7 +168,7 @@ public class App {
 	if !sliceContains(index.CallEdgeTargets(ix.Calls["App.run"]), "Helper.doThing") {
 		t.Fatalf("Calls[App.run] = %v; want resolved Helper.doThing edge", ix.Calls["App.run"])
 	}
-	b := &Boundaries{Rules: []BoundaryRule{{From: "api", To: "core", Action: "forbid"}}}
+	b := &Boundaries{Rules: []domain.BoundaryRule{{From: "api", To: "core", Action: "forbid"}}}
 	files := []string{"api/App.java"}
 	// Default precision trusts the edge and reports the violation.
 	if v := CheckBoundaries(ix, b, files); len(v) == 0 {

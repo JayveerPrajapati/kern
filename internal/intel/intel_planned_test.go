@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/JayveerPrajapati/kern/internal/domain"
 	"github.com/JayveerPrajapati/kern/internal/index"
 )
 
@@ -359,7 +360,7 @@ func TestGuardRejectsForbiddenEdge(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	b := &Boundaries{Rules: []BoundaryRule{{From: "client", To: "lib", Action: "forbid"}}}
+	b := &Boundaries{Rules: []domain.BoundaryRule{{From: "client", To: "lib", Action: "forbid"}}}
 	violations := CheckBoundaries(ix, b, []string{"client/client.go"})
 	// Caller calls lib.Public and lib.UntestedHot, both crossing the same
 	// client->lib boundary, so they collapse into one evidence-carrying
@@ -388,7 +389,7 @@ func TestGuardAllowOverridesForbid(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	b := &Boundaries{Rules: []BoundaryRule{
+	b := &Boundaries{Rules: []domain.BoundaryRule{
 		{From: "client", To: "lib", Action: "forbid"},
 		{From: "client", To: "lib", Action: "allow"},
 	}}
@@ -416,7 +417,7 @@ func Touch() {}`,
 		t.Errorf("no rules must pass, got %+v", v)
 	}
 	// A file that only imports the forbidden package (no call) is still caught.
-	b := &Boundaries{Rules: []BoundaryRule{{From: "client", To: "lib", Action: "forbid"}}}
+	b := &Boundaries{Rules: []domain.BoundaryRule{{From: "client", To: "lib", Action: "forbid"}}}
 	v := CheckBoundaries(ix, b, []string{"client/imports.go"})
 	if len(v) != 1 {
 		t.Fatalf("import-level crossing should be flagged, got %+v", v)
@@ -452,7 +453,7 @@ func Clean() {}
 	if err != nil {
 		t.Fatal(err)
 	}
-	b := &Boundaries{Rules: []BoundaryRule{{From: "web", To: "db", Action: "forbid"}}}
+	b := &Boundaries{Rules: []domain.BoundaryRule{{From: "web", To: "db", Action: "forbid"}}}
 	violations := CheckBoundaries(ix, b, []string{"web/clean.go"})
 	if len(violations) != 0 {
 		t.Fatalf("clean changed file must not inherit a sibling's forbidden import, got %+v", violations)
@@ -483,7 +484,7 @@ func UseDB() {}
 	if err != nil {
 		t.Fatal(err)
 	}
-	b := &Boundaries{Rules: []BoundaryRule{{From: "web", To: "db", Action: "forbid"}}}
+	b := &Boundaries{Rules: []domain.BoundaryRule{{From: "web", To: "db", Action: "forbid"}}}
 	violations := CheckBoundaries(ix, b, []string{"web/bad.go"})
 	if len(violations) != 1 {
 		t.Fatalf("expected exactly 1 violation, got %+v", violations)
@@ -531,7 +532,7 @@ public interface IVaultService {
 	if err != nil {
 		t.Fatal(err)
 	}
-	b := &Boundaries{Rules: []BoundaryRule{{From: "config", To: "vault", Action: "forbid"}}}
+	b := &Boundaries{Rules: []domain.BoundaryRule{{From: "config", To: "vault", Action: "forbid"}}}
 	violations := CheckBoundaries(ix, b, []string{"src/main/java/com/example/config/AppConfig.java"})
 	if len(violations) == 0 {
 		t.Fatal("expected a violation for config -> vault import, got none")
@@ -563,7 +564,7 @@ public interface IVaultService {
 	if err != nil {
 		t.Fatal(err)
 	}
-	b := &Boundaries{Rules: []BoundaryRule{
+	b := &Boundaries{Rules: []domain.BoundaryRule{
 		{From: "config", To: "vault", Action: "forbid"},
 		{From: "config", To: "vault", Action: "allow"},
 	}}

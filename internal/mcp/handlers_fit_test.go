@@ -38,9 +38,4 @@ func TestFitContextViaMCP(t *testing.T) {
 		t.Errorf("expected json response with tier full, got:\n%s", jsonRes)
 	}
 
-	// 3. Test NL meta routing
-	tool, args, ok := classifyProjectTools("fit context for web server", "fit context for web server")
-	if !ok || tool != "kern_fit_context" {
-		t.Errorf("expected classifyProjectTools to route to kern_fit_context, got tool=%s, ok=%v, args=%v", tool, ok, args)
-	}
 }

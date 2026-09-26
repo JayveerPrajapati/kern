@@ -6,26 +6,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/JayveerPrajapati/kern/internal/mcp/mcpargs"
+	"github.com/JayveerPrajapati/kern/internal/mcp/root"
 	"github.com/JayveerPrajapati/kern/internal/mcpclient"
 )
-
-func resolveRoot(root string) string {
-	if root == "" {
-		if cwd, err := os.Getwd(); err == nil {
-			return filepath.Clean(cwd)
-		}
-		return "."
-	}
-	if abs, err := filepath.Abs(root); err == nil {
-		return filepath.Clean(abs)
-	}
-	return root
-}
 
 // CallTool bridges a tool call from an external MCP server configured via .kern/mcp-servers.json.
 func CallTool(ctx context.Context, args map[string]any) (string, error) {
@@ -37,7 +23,7 @@ func CallTool(ctx context.Context, args map[string]any) (string, error) {
 	if tool == "" {
 		return "", fmt.Errorf("tool is required")
 	}
-	root := resolveRoot(mcpargs.ArgString(args, "root"))
+	root := root.ResolveRoot(mcpargs.ArgString(args, "root"))
 
 	servers, err := mcpclient.LoadConfig(root)
 	if err != nil {
