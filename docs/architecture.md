@@ -19,7 +19,7 @@ graph TD
 
     subgraph Governance["2. Dispatch & Governance Layer"]
         MCPMux["MCP Dispatcher (`internal/mcp`)"]
-        Catalog["Catalog Registry (`internal/mcp/catalog`) — 146 Tools"]
+        Catalog["Catalog Registry (`internal/mcp/catalog`) — 140 Tools"]
         Gov["Context Governor (`internal/mcp/gov`)"]
         Audit["Merkle Audit Log (`internal/governance`)"]
         Firewall["Change Firewall & Gates G0–G39 (`internal/gates`, `internal/bpcli`)"]
