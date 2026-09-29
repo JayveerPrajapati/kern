@@ -30,6 +30,38 @@ func actionForIntent(it domain.IntentType) string {
 	}
 }
 
+// taskTypeForIntent maps a compiled IntentType to the task Type recorded on
+// the created task. Previously every task was created with Type "analyze"
+// regardless of its intent (dogfooding E-LOW: a CODE_CHANGE workflow produced
+// a task record that said type: analyze), so the record never reflected the
+// actual work kind. Analysis commands (createAnalysisTask / createEphemeral)
+// still create "analyze" tasks — those genuinely are analysis; this mapping
+// only applies to the workflow entry points (Run / RunWorkflow).
+func taskTypeForIntent(it domain.IntentType) string {
+	switch it {
+	case domain.IntentCodeChange:
+		return "code"
+	case domain.IntentIncident:
+		return "incident"
+	case domain.IntentModernization:
+		return "modernize"
+	case domain.IntentReview:
+		return "review"
+	case domain.IntentSecurity:
+		return "security"
+	case domain.IntentTest:
+		return "test"
+	case domain.IntentDeploy:
+		return "deploy"
+	case domain.IntentAudit:
+		return "audit"
+	case domain.IntentWhatIf, domain.IntentUnderstand:
+		return "analyze"
+	default:
+		return "analyze"
+	}
+}
+
 func capabilityNames(caps []domain.Capability) []string {
 	var names []string
 	for _, c := range caps {
@@ -132,11 +164,10 @@ func (s *TaskService) PolicyPrecheck(ctx context.Context, req domain.PrecheckReq
 // gate, and the loop provides the real plan/code/verify/deploy execution. The
 // two are complementary — workflow selects and gates, loop executes.
 func (s *TaskService) RunWorkflow(intent string, stepHandler func(action string, t *agent.Task) (string, error)) (*agent.Task, error) {
-	t, err := s.Create(intent)
+	t, err := s.createWorkflowTask(intent)
 	if err != nil {
 		return nil, err
 	}
-
 	// Task-type-driven agent selection: register the workflow whose steps fit
 	// the task kind, falling back to the full default workflow for unclassified
 	// tasks. Both paths preserve the human approval gate. The task must also

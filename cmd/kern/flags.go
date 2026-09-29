@@ -39,6 +39,7 @@ type flags struct {
 	detect               bool
 	global               bool
 	globalRules          bool   // --global-rules (setup: manage kern rules in each host's GLOBAL instructions slot)
+	indexOnly            bool   // --index-only (onboard: skip ALL agent wiring, build the index only)
 	agentsMD             string // --agents-md (setup: repo AGENTS.md variant, thin|full; persisted in .kern/config.json)
 	apply                bool
 	runtime              bool
@@ -144,6 +145,7 @@ type flags struct {
 	cve                  bool // --cve (verify: govulncheck vulnerability check)
 	license              bool // --license (verify: deterministic license classifier)
 	secrets              bool // --secrets (verify: committed-secret history scan)
+	short                bool // --short (verify: run the test step with `go test -short`; the default)
 	action               string
 	column               int
 	compilerOutput       string
@@ -502,6 +504,8 @@ func parseFlags(args []string) (flags, []string, error) {
 			setStr(&i, &f.scanPath, inline, hasInline)
 		case "--types":
 			setStr(&i, &f.types, inline, hasInline)
+		case "--short":
+			setBool(&f.short, "--short", inline, hasInline)
 		case "--cve":
 			setBool(&f.cve, "--cve", inline, hasInline)
 		case "--license":
@@ -512,6 +516,8 @@ func parseFlags(args []string) (flags, []string, error) {
 			setBool(&f.detect, "--detect", inline, hasInline)
 		case "--global":
 			setBool(&f.global, "--global", inline, hasInline)
+		case "--index-only":
+			setBool(&f.indexOnly, "--index-only", inline, hasInline)
 		case "--global-rules":
 			setBool(&f.globalRules, "--global-rules", inline, hasInline)
 		case "--agents-md":

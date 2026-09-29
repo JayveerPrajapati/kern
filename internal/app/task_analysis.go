@@ -4,6 +4,7 @@ package app
 
 import (
 	"fmt"
+	"os"
 	"regexp"
 	"strings"
 	"time"
@@ -351,7 +352,8 @@ func (s *TaskService) Plan(intent string) (*agent.Task, domain.Plan, string, err
 type ImpactOption func(*impactOptions)
 
 type impactOptions struct {
-	strict bool
+	strict  bool
+	runtime bool
 }
 
 // ImpactStrict opts an Impact computation into strict precision mode: call
@@ -359,6 +361,15 @@ type impactOptions struct {
 // skipped as unknown rather than trusted (see kern impact --precision strict).
 func ImpactStrict() ImpactOption {
 	return func(o *impactOptions) { o.strict = true }
+}
+
+// ImpactRuntime opts an Impact computation into folding runtime evidence
+// (affected data stores, related incidents, architecture rules) into the
+// report. It is opt-in (see kern impact --runtime / KERN_IMPACT_RUNTIME=1)
+// because the context-packet and memory-recall phases it runs dominate impact
+// latency; the default graph-only report is what the fast path renders.
+func ImpactRuntime() ImpactOption {
+	return func(o *impactOptions) { o.runtime = true }
 }
 
 // Impact creates a Task for the change, runs the 11 deterministic graph
@@ -392,13 +403,25 @@ func (s *TaskService) Impact(change string, opts ...ImpactOption) (*agent.Task, 
 	}
 
 	g := s.platform.Graph()
+	// The transitive dependents (reverse closure) are computed once and shared
+	// by every consumer: the APIs/services queries inside collectGraphImpact
+	// and the criticality tier below. The closure is memoized per
+	// (graph, symbol, strict) inside the intel package, so this is one walk
+	// no matter how many queries touch it.
+	dependents := g.WhatDependsOnPrecise(target, o.strict)
 	rep := s.collectGraphImpact(g, target, o.strict)
 	// Entity overlay (Feature 3): surface the twin entity nodes implicated by
 	// the change's blast radius (the target plus the report's affected
 	// symbols). Zero-cost when the twin graph carries no entities for them.
 	rep.Entities = attachImpactEntities(g, impactSymbols(rep))
-	s.gatherRuntimeEvidence(&rep, target)
-	classifyCriticality(g, target, o.strict, &rep)
+	// Runtime evidence (data stores, incidents, architecture rules) is
+	// opt-in: the context-packet + memory-recall phases it runs are the
+	// dominant latency cost of the impact path, so the default report skips
+	// them. Enable with the ImpactRuntime option or KERN_IMPACT_RUNTIME=1.
+	if o.runtime || os.Getenv("KERN_IMPACT_RUNTIME") == "1" {
+		s.gatherRuntimeEvidence(&rep, target)
+	}
+	classifyCriticality(&rep, dependents)
 	t, rep, text, err := s.finalizeImpact(t, &rep)
 	if fuzzy && text != "" {
 		// The requested symbol was fuzzy-resolved to a different one: surface
@@ -510,22 +533,37 @@ func (s *TaskService) gatherRuntimeEvidence(rep *domain.ImpactReport, target str
 
 // classifyCriticality derives the report's risk level from the production
 // criticality of the target symbol, falling back to the caller/service
-// footprint when the graph reports no criticality tier.
-func classifyCriticality(g *intel.Graph, target string, strict bool, rep *domain.ImpactReport) {
-	// Risk from production criticality.
-	crit := g.ProductionCriticalityPrecise(target, strict)
-	switch crit {
-	case "critical":
+// footprint when the graph reports no criticality tier. dependents is the
+// target's transitive caller set (the same WhatDependsOnPrecise result the
+// graph queries already computed) so the criticality tier never re-walks the
+// closure. The count that drove the tier rides along in RiskDetail (P2): the
+// bare tier saturates in dense repos (nearly every non-leaf symbol is
+// "high"), so the parenthetical — "high (134 transitive dependents)" vs
+// "high (4 transitive dependents)" — is what actually differentiates.
+func classifyCriticality(rep *domain.ImpactReport, dependents []domain.Node) {
+	// Risk from production criticality (transitive caller count, mirroring
+	// intel.ProductionCriticalityPrecise: >20 critical, >=10 high, >=3
+	// medium, else low).
+	switch n := len(dependents); {
+	case n > 20:
 		rep.Risk = "high"
-	case "high":
+		rep.RiskDetail = fmt.Sprintf("%d transitive dependents", n)
+	case n >= 10:
 		rep.Risk = "high"
-	case "medium":
+		rep.RiskDetail = fmt.Sprintf("%d transitive dependents", n)
+	case n >= 3:
 		rep.Risk = "medium"
+		rep.RiskDetail = fmt.Sprintf("%d transitive dependents", n)
 	default:
+		// Fallback path: no criticality tier (tiny transitive footprint) —
+		// the direct caller/service footprint drives the risk instead, so
+		// the parenthetical reports THAT count, not the dependents count.
 		if len(rep.ServicesDepend) > 0 {
 			rep.Risk = "high"
+			rep.RiskDetail = fmt.Sprintf("%d services depend on it", len(rep.ServicesDepend))
 		} else if len(rep.WhoCalls) > 0 {
 			rep.Risk = "medium"
+			rep.RiskDetail = fmt.Sprintf("%d direct callers", len(rep.WhoCalls))
 		} else {
 			rep.Risk = "low"
 		}
@@ -619,10 +657,21 @@ func (s *TaskService) finalizeImpact(t *agent.Task, rep *domain.ImpactReport) (*
 // the packet's risk assessment, tests from required validation, architecture
 // from the packet's architecture rules, and evidence from the packet's facts.
 func (s *TaskService) assemblePlan(intent string, pkt domain.ContextPacket) domain.Plan {
+	// Target grounding: when the intent names a concrete target path, the
+	// plan risk is scoped to that target (the packet's risk rows are
+	// tree-global and can describe an unrelated symbol's blast radius for
+	// net-new requests) and net-new steps name real files in the package.
+	// Filesystem resolution requires a wired platform; a zero-value
+	// TaskService keeps the packet-derived plan (unit-test contract).
+	var targetDir, targetFile string
+	targetGrounded := false
+	if s.platform != nil {
+		targetDir, targetFile, targetGrounded = resolvePlanTarget(intent, s.platform.Root())
+	}
 	plan := domain.Plan{
 		Objective: intent,
 		Scope:     scopeFromPacket(pkt),
-		Risk:      riskLevelString(pkt.Risks),
+		Risk:      riskScopedToTarget(pkt, targetDir),
 	}
 
 	// Affected components: symbols + files from the context packet.
@@ -644,7 +693,11 @@ func (s *TaskService) assemblePlan(intent string, pkt domain.ContextPacket) doma
 	// per-symbol steps for existing-symbol changes, and explicit change kinds
 	// detected from the intent text (rename/remove). No LLM anywhere.
 	if whatif.IsNetNewFeature(intent) {
-		plan.ImplementationSteps = append(plan.ImplementationSteps, "Implement the new feature according to specifications.")
+		if targetGrounded {
+			plan.ImplementationSteps = append(plan.ImplementationSteps, netNewGroundedSteps(intent, targetDir, targetFile)...)
+		} else {
+			plan.ImplementationSteps = append(plan.ImplementationSteps, "Implement the new feature according to specifications.")
+		}
 	} else {
 		// Explicit change kinds first (prepended): a rename or removal is the
 		// headline of the change, so its steps lead. The regexes run on the
@@ -804,8 +857,9 @@ func suffixBounded(s, suffix string) bool {
 }
 
 // Verify creates a Task, runs verification, attaches the result, and completes
-// the Task. Returns the Task and the verification result.
-func (s *TaskService) Verify(types []string) (*agent.Task, verification.VerificationResult, error) {
+// the Task. Returns the Task and the verification result. Options (e.g.
+// verification.FullTests) are forwarded to the platform engine.
+func (s *TaskService) Verify(types []string, opts ...verification.Option) (*agent.Task, verification.VerificationResult, error) {
 	t, err := s.Create("verify")
 	if err != nil {
 		return nil, verification.VerificationResult{}, err
@@ -815,8 +869,7 @@ func (s *TaskService) Verify(types []string) (*agent.Task, verification.Verifica
 		return t, verification.VerificationResult{}, err
 	}
 	s.publish(eventbus.TaskUpdated, t.ID, map[string]string{"state": "VERIFYING"})
-
-	res := s.platform.Verify(types)
+	res := s.platform.Verify(types, opts...)
 	t.Verification = &res
 	// Cost/latency policy learning (Tier 2 #6): record this verify outcome —
 	// task kind, configured model, PASS/FAIL — best-effort; learning proposes

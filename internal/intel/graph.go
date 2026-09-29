@@ -71,6 +71,18 @@ type Graph struct {
 	// rebuilt and a fresh Graph is constructed.
 	testsByPkg map[string][]string
 	testsOnce  sync.Once
+
+	// closureMemo caches full transitive closures keyed by (start node ID,
+	// traversal direction, precision mode). kern impact runs the same reverse
+	// closure up to three times (WhatAPIsAffected, WhatServicesAffected,
+	// ProductionCriticality) and the forward closure twice (the
+	// WhatDoesXDependOn variants); without the memo each query re-walked the
+	// reachable subgraph. The graph is read-only after construction, so the
+	// memo never goes stale. closureMu guards the map (a sync.Once cannot key
+	// per symbol). The cached slices are shared — callers must treat them as
+	// read-only.
+	closureMemo map[closureKey][]string
+	closureMu   sync.Mutex
 }
 
 // FromIndex builds a canonical domain.Graph from a v1 index.Index: every symbol

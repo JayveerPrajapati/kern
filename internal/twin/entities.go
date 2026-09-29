@@ -70,7 +70,34 @@ func Entities(g *intel.Graph, symbol string) ([]EntityInfo, error) {
 	if symbol == "" {
 		return inventory(g), nil
 	}
-	return entitiesForSymbol(g, symbol)
+	if g == nil {
+		return nil, fmt.Errorf("no symbol found: %s", symbol)
+	}
+	return buildEntityGraph(g).entitiesForSymbol(symbol)
+}
+
+// EntitiesMany returns the entity list for every symbol in symbols, in the
+// same order. It builds the per-graph entity index once and answers each
+// symbol against it, so a large symbol set — the impact overlay feeds every
+// affected symbol of a hub, thousands for a core symbol — costs one graph
+// scan plus per-symbol connection lookups instead of one full graph scan per
+// symbol (the pre-index Entities path was the dominant cost of `kern impact`,
+// tens of seconds for a 130-caller hub). Unresolvable symbols yield nil
+// entries; callers treat them like the per-symbol error path (skip).
+func EntitiesMany(g *intel.Graph, symbols []string) [][]EntityInfo {
+	out := make([][]EntityInfo, len(symbols))
+	if g == nil {
+		return out
+	}
+	eg := buildEntityGraph(g)
+	for i, sym := range symbols {
+		ents, err := eg.entitiesForSymbol(sym)
+		if err != nil {
+			continue // unresolvable symbol — same skip as the per-symbol error path
+		}
+		out[i] = ents
+	}
+	return out
 }
 
 // RenderEntities renders a deterministic text block for an entity list:
@@ -177,34 +204,204 @@ func inventory(g *intel.Graph) []EntityInfo {
 	return out
 }
 
+// entityGraph is the precomputed, read-only index over a merged knowledge
+// graph that backs symbol→entity queries. Building it is O(nodes+edges);
+// after that each symbol query touches only the queried symbol's own
+// connections instead of re-scanning the whole graph. This matters for the
+// impact overlay, which feeds every affected symbol of a hub (thousands) to
+// the entity render: the per-symbol full-graph scan was the dominant cost of
+// `kern impact` (tens of seconds for a 130-caller hub). The graph is read-only
+// after construction, so the index is built once per query batch and reused.
+type entityGraph struct {
+	// entities maps entity node ID → node (entity kinds only).
+	entities map[string]domain.Node
+	// codeNodes is the set of non-entity node IDs (symbols, files, modules).
+	codeNodes map[string]bool
+	// byID maps symbol node ID → position in g.Nodes, for exact-ID candidate
+	// resolution. The other candidate indexes key the same positions so
+	// candidates() can reproduce resolveSymbolIDs' single ordered scan.
+	byID      map[string]int
+	qualIndex map[string][]int  // symbol Qualified → positions
+	nameIndex map[string][]int  // symbol Name → positions
+	recvIndex map[string][]int  // "Receiver.Method" → positions
+	nodeIDs   []string          // position → node ID (parallel to g.Nodes)
+	symFile   map[string]string // symbol node ID → defining file
+	pkgOf     map[string]string // symbol node ID → package path
+	// codeConns maps a code node ID (symbol node or "file:<path>" node) to the
+	// entity connections touching it, recorded from the graph's twin edges.
+	codeConns map[string][]entityConn
+	// servesEdges preserves the graph's "serves" edges in original order so
+	// the served-endpoint expansion is byte-identical to the pre-index walk.
+	servesEdges []struct{ from, to string }
+}
+
+// entityConn is one entity connection recorded against a code node.
+type entityConn struct {
+	entID string
+	edge  string
+	dir   string
+}
+
+// buildEntityGraph indexes a merged graph for symbol→entity queries: the
+// entity node set, the candidate-resolution indexes, each code node's entity
+// connections, and the service→endpoint "serves" edges.
+func buildEntityGraph(g *intel.Graph) *entityGraph {
+	eg := &entityGraph{
+		entities:  map[string]domain.Node{},
+		codeNodes: map[string]bool{},
+		byID:      map[string]int{},
+		qualIndex: map[string][]int{},
+		nameIndex: map[string][]int{},
+		recvIndex: map[string][]int{},
+		symFile:   map[string]string{},
+		pkgOf:     map[string]string{},
+		codeConns: map[string][]entityConn{},
+	}
+	for i, n := range g.Nodes {
+		eg.nodeIDs = append(eg.nodeIDs, n.ID)
+		if entityKinds[n.Kind] {
+			eg.entities[n.ID] = n
+			continue // entity nodes are never code endpoints
+		}
+		eg.codeNodes[n.ID] = true
+		if n.Symbol == nil {
+			continue
+		}
+		eg.byID[n.ID] = i
+		if n.Symbol.Qualified != "" {
+			eg.qualIndex[n.Symbol.Qualified] = append(eg.qualIndex[n.Symbol.Qualified], i)
+			// packageOf: node IDs are "<pkg>.<Qualified>"; stripping the known
+			// Qualified suffix recovers the package path (root-package symbols
+			// have no prefix and get no entry).
+			if pkg := strings.TrimSuffix(n.ID, "."+n.Symbol.Qualified); pkg != n.ID {
+				eg.pkgOf[n.ID] = pkg
+			}
+		}
+		if n.Symbol.Name != "" {
+			eg.nameIndex[n.Symbol.Name] = append(eg.nameIndex[n.Symbol.Name], i)
+		}
+		if n.Symbol.Receiver != "" && n.Symbol.Name != "" {
+			eg.recvIndex[n.Symbol.Receiver+"."+n.Symbol.Name] = append(eg.recvIndex[n.Symbol.Receiver+"."+n.Symbol.Name], i)
+		}
+		if n.Symbol.File != "" {
+			eg.symFile[n.ID] = n.Symbol.File
+			// A symbol's defining file is a code endpoint for that symbol even
+			// when the graph carries no explicit "file:<path>" node (the old
+			// per-symbol code set added "file:"+File unconditionally), so the
+			// file key must be resolvable here too.
+			eg.codeNodes["file:"+n.Symbol.File] = true
+		}
+	}
+	// Entity connections: for each edge with exactly one entity endpoint,
+	// resolve the other endpoint to a code node ID and record the connection
+	// under it. Mirrors the old per-symbol entityConnection/codeEndpoint walk,
+	// but once per graph instead of once per queried symbol.
+	for _, e := range g.Edges {
+		ent, fromIsEntity := eg.entities[e.From]
+		if fromIsEntity {
+			if codeID, ok := eg.codeEndpoint(g, e.To); ok {
+				eg.codeConns[codeID] = append(eg.codeConns[codeID], entityConn{entID: ent.ID, edge: e.Kind, dir: "entity->code"})
+			}
+			continue
+		}
+		ent, toIsEntity := eg.entities[e.To]
+		if toIsEntity {
+			if codeID, ok := eg.codeEndpoint(g, e.From); ok {
+				eg.codeConns[codeID] = append(eg.codeConns[codeID], entityConn{entID: ent.ID, edge: e.Kind, dir: "code->entity"})
+			}
+		}
+	}
+	// Served-endpoint expansion edges, kept in original order.
+	for _, e := range g.Edges {
+		if e.Kind != "serves" {
+			continue
+		}
+		if _, ok := eg.entities[e.To]; !ok {
+			continue
+		}
+		eg.servesEdges = append(eg.servesEdges, struct{ from, to string }{e.From, e.To})
+	}
+	return eg
+}
+
+// codeEndpoint is the universal form of the old per-symbol codeEndpoint: the
+// "code" set is every non-entity node, so an edge endpoint resolves to the
+// code node it touches and per-symbol lookups later pick out the connections
+// for the queried symbol's own node and file.
+func (eg *entityGraph) codeEndpoint(g *intel.Graph, ref string) (string, bool) {
+	if eg.codeNodes[ref] {
+		return ref, true
+	}
+	if _, isEnt := eg.entities[ref]; isEnt {
+		return "", false
+	}
+	if id, ok := g.ResolveNodeID(ref); ok {
+		if eg.codeNodes[id] {
+			return id, true
+		}
+		if _, isEnt := eg.entities[id]; isEnt {
+			return "", false
+		}
+	}
+	return "", false
+}
+
+// candidates maps a user-provided symbol reference to every candidate symbol
+// node ID, in graph node order, exactly like the old resolveSymbolIDs single
+// scan: an exact node-ID match, a qualified-name match, a bare-name match, or
+// a "Type.Method" receiver match. An ambiguous bare name resolves to ALL
+// matching nodes so same-named symbols union their entity connections.
+func (eg *entityGraph) candidates(symbol string) []string {
+	bare := symbol
+	receiver := ""
+	if i := strings.LastIndexByte(bare, '.'); i >= 0 {
+		bare = bare[i+1:]
+		receiver = symbol[:i]
+	}
+	pos := map[int]bool{}
+	add := func(ids []int) {
+		for _, p := range ids {
+			pos[p] = true
+		}
+	}
+	if p, ok := eg.byID[symbol]; ok {
+		pos[p] = true
+	}
+	add(eg.qualIndex[symbol])
+	add(eg.nameIndex[bare])
+	if receiver != "" {
+		add(eg.recvIndex[symbol]) // "Receiver.Method"
+	}
+	positions := make([]int, 0, len(pos))
+	for p := range pos {
+		positions = append(positions, p)
+	}
+	sort.Ints(positions)
+	out := make([]string, 0, len(positions))
+	for _, p := range positions {
+		out = append(out, eg.nodeIDs[p])
+	}
+	return out
+}
+
 // entitiesForSymbol collects the entity nodes connected to the queried
-// symbol. A symbol resolves to every candidate node ID (exact ID, qualified
-// name, bare name, or Type.Method receiver form) — unlike the code graph's
-// single-ID resolver, an ambiguous bare name like "NewServer" (two
-// constructors) resolves to ALL candidates so entity connections union
-// across same-named symbols. For each candidate the connections are:
+// symbol against the precomputed index. A symbol resolves to every candidate
+// node ID (exact ID, qualified name, bare name, or Type.Method receiver form)
+// so entity connections union across same-named symbols. For each candidate
+// the connections are:
 //
 //   - direct twin edges: the entity nodes connected to the symbol's graph
-//     node or its defining file node (after canonical node-ID resolution,
-//     so raw handler names like "NewServer" resolve to their graph nodes);
+//     node or its defining file node;
 //   - package service: the service entity of the symbol's package (the
-//     package as a deployable unit), plus the endpoints that service serves
-//     — so a server constructor surfaces the endpoints of the service it
-//     belongs to even when no twin edge touches it directly.
+//     package as a deployable unit), plus the endpoints that service serves.
 //
 // The result is deterministic: sorted by (kind, name, direction, edge) with
-// exact duplicates collapsed.
-func entitiesForSymbol(g *intel.Graph, symbol string) ([]EntityInfo, error) {
-	cands := resolveSymbolIDs(g, symbol)
+// exact duplicates collapsed. It is byte-identical to the pre-index
+// implementation (which re-scanned the whole graph per symbol).
+func (eg *entityGraph) entitiesForSymbol(symbol string) ([]EntityInfo, error) {
+	cands := eg.candidates(symbol)
 	if len(cands) == 0 {
 		return nil, fmt.Errorf("no symbol found: %s", symbol)
-	}
-	// Entity nodes by ID.
-	entities := map[string]domain.Node{}
-	for _, n := range g.Nodes {
-		if entityKinds[n.Kind] {
-			entities[n.ID] = n
-		}
 	}
 	type conn struct {
 		info      EntityInfo
@@ -212,37 +409,38 @@ func entitiesForSymbol(g *intel.Graph, symbol string) ([]EntityInfo, error) {
 		edge, dir string
 	}
 	best := map[string]conn{} // entity ID -> preferred connection
+	update := func(entID, edge, dir string, direct bool) {
+		ent, ok := eg.entities[entID]
+		if !ok {
+			return
+		}
+		prev, seen := best[entID]
+		info := entityInfo(ent)
+		info.Direction = dir
+		info.Edge = edge
+		// Prefer the connection touching the symbol node itself; tie-break on
+		// the edge kind so the winner is deterministic (same fold as the
+		// pre-index per-symbol edge walk; order-independent because the winner
+		// is min-edge-kind within the preferred directness class).
+		if !seen || direct && !prev.direct || direct == prev.direct && edge < prev.edge {
+			best[entID] = conn{info: info, direct: direct, edge: edge, dir: dir}
+		}
+	}
 	for _, symID := range cands {
-		// Code endpoints: the symbol node itself plus its defining file node.
-		code := map[string]bool{symID: true}
-		for _, n := range g.Nodes {
-			if n.ID == symID && n.Symbol != nil && n.Symbol.File != "" {
-				code["file:"+n.Symbol.File] = true
+		// Connections touching the symbol node itself (direct) and its
+		// defining file node (indirect, codeID != symID).
+		for _, c := range eg.codeConns[symID] {
+			update(c.entID, c.edge, c.dir, true)
+		}
+		if file := eg.symFile[symID]; file != "" {
+			for _, c := range eg.codeConns["file:"+file] {
+				update(c.entID, c.edge, c.dir, false)
 			}
 		}
-		// Walk twin edges; prefer the connection that touches the symbol node
-		// itself over one that only touches its file.
-		for _, e := range g.Edges {
-			ent, codeID, direction, ok := entityConnection(e, code, entities, g)
-			if !ok {
-				continue
-			}
-			prev, seen := best[ent.ID]
-			info := entityInfo(ent)
-			info.Direction = direction
-			info.Edge = e.Kind
-			direct := codeID == symID
-			// Prefer the connection touching the symbol node itself; tie-break
-			// on the edge kind so the winner is deterministic.
-			if !seen || direct && !prev.direct || direct == prev.direct && e.Kind < prev.edge {
-				best[ent.ID] = conn{info: info, direct: direct, edge: e.Kind, dir: direction}
-			}
-		}
-		// Package service: the symbol's package hosts it, and the service
-		// serves the package's endpoints.
-		if pkg := packageOf(g, symID); pkg != "" {
+		// Package service: the symbol's package hosts it.
+		if pkg := eg.pkgOf[symID]; pkg != "" {
 			svcID := "service:pkg:" + ids.Escape(pkg)
-			if svc, ok := entities[svcID]; ok {
+			if svc, ok := eg.entities[svcID]; ok {
 				if _, seen := best[svcID]; !seen {
 					info := entityInfo(svc)
 					info.Direction = "code->entity"
@@ -254,24 +452,24 @@ func entitiesForSymbol(g *intel.Graph, symbol string) ([]EntityInfo, error) {
 	}
 	// Expand package services into the endpoints they serve, so a symbol
 	// connected to the service also surfaces the endpoints of that service.
-	for _, e := range g.Edges {
-		if e.Kind != "serves" {
+	// Serves edges are walked in original graph order (a service added by an
+	// earlier edge can serve endpoints picked up by later edges, exactly like
+	// the pre-index walk).
+	for _, se := range eg.servesEdges {
+		if _, ok := best[se.from]; !ok {
 			continue
 		}
-		if _, ok := best[e.From]; !ok {
+		if _, seen := best[se.to]; seen {
 			continue
 		}
-		api, ok := entities[e.To]
+		api, ok := eg.entities[se.to]
 		if !ok {
-			continue
-		}
-		if _, seen := best[e.To]; seen {
 			continue
 		}
 		info := entityInfo(api)
 		info.Direction = "entity->code"
 		info.Edge = "serves"
-		best[e.To] = conn{info: info, direct: true, edge: "serves", dir: "entity->code"}
+		best[se.to] = conn{info: info, direct: true, edge: "serves", dir: "entity->code"}
 	}
 	// Deterministic output with exact-duplicate collapse: the same endpoint
 	// can reach a symbol through several routes (extractor api node, index
@@ -304,94 +502,6 @@ func entitiesForSymbol(g *intel.Graph, symbol string) ([]EntityInfo, error) {
 		prev = e
 	}
 	return deduped, nil
-}
-
-// resolveSymbolIDs maps a user-provided symbol reference to every candidate
-// symbol node ID in the graph: an exact node-ID match, a qualified-name
-// match, a bare-name match, or a Type.Method receiver match. Unlike the
-// code graph's single-ID resolver, an ambiguous bare name resolves to ALL
-// matching nodes so same-named symbols union their entity connections
-// instead of one arbitrarily winning.
-func resolveSymbolIDs(g *intel.Graph, symbol string) []string {
-	seen := map[string]bool{}
-	var out []string
-	bare := symbol
-	receiver, method := "", ""
-	if i := strings.LastIndexByte(bare, '.'); i >= 0 {
-		bare = bare[i+1:]
-		receiver, method = symbol[:i], symbol[i+1:]
-	}
-	for _, n := range g.Nodes {
-		if n.Symbol == nil {
-			continue
-		}
-		match := n.ID == symbol ||
-			n.Symbol.Qualified == symbol ||
-			n.Symbol.Name == bare ||
-			(receiver != "" && n.Symbol.Receiver == receiver && n.Symbol.Name == method)
-		if !match || seen[n.ID] {
-			continue
-		}
-		seen[n.ID] = true
-		out = append(out, n.ID)
-	}
-	return out
-}
-
-// packageOf derives the package path of a symbol node from its node ID:
-// node IDs are "<pkg>.<Qualified>", so stripping the known Qualified suffix
-// recovers the package (root-package symbols have no prefix and return "").
-func packageOf(g *intel.Graph, id string) string {
-	for _, n := range g.Nodes {
-		if n.ID == id && n.Symbol != nil && n.Symbol.Qualified != "" {
-			if pkg := strings.TrimSuffix(id, "."+n.Symbol.Qualified); pkg != id {
-				return pkg
-			}
-		}
-	}
-	return ""
-}
-
-// entityConnection inspects one edge: when exactly one endpoint is an entity
-// node and the other is a code endpoint (the queried symbol's node or file),
-// it returns the entity node, the code endpoint ID, the connection direction
-// ("entity->code" when the entity is the edge's From, "code->entity"
-// otherwise), and true.
-func entityConnection(e domain.Edge, code map[string]bool, entities map[string]domain.Node, g *intel.Graph) (domain.Node, string, string, bool) {
-	entFrom, fromIsEntity := entities[e.From]
-	if fromIsEntity {
-		if codeID, ok := codeEndpoint(g, e.To, code, entities); ok {
-			return entFrom, codeID, "entity->code", true
-		}
-		return domain.Node{}, "", "", false
-	}
-	entTo, toIsEntity := entities[e.To]
-	if toIsEntity {
-		if codeID, ok := codeEndpoint(g, e.From, code, entities); ok {
-			return entTo, codeID, "code->entity", true
-		}
-	}
-	return domain.Node{}, "", "", false
-}
-
-// codeEndpoint reports whether ref is a code endpoint (after canonical
-// resolution). Entity IDs are never code endpoints.
-func codeEndpoint(g *intel.Graph, ref string, code map[string]bool, entities map[string]domain.Node) (string, bool) {
-	if code[ref] {
-		return ref, true
-	}
-	if _, isEnt := entities[ref]; isEnt {
-		return "", false
-	}
-	if id, ok := g.ResolveNodeID(ref); ok {
-		if code[id] {
-			return id, true
-		}
-		if _, isEnt := entities[id]; isEnt {
-			return "", false
-		}
-	}
-	return "", false
 }
 
 // entityInfo builds the entity descriptor for a node, attaching deployment

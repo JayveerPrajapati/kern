@@ -11,6 +11,9 @@
 //     receipt or broken audit chain is 2 (invalid).
 //   - the review family (kern review / kern changes) exits 3 (policy family)
 //     when changed files carry risk; a clean review exits 0.
+//   - kern authorize-context exits 3 (policy family) when a context request
+//     is denied — a denial is a policy outcome, not a usage error; a grant
+//     exits 0.
 //   - kern security joins the policy family: error-severity findings exit 3
 //     (QA F2 — findings are a reported risk, matching kern review; the hard
 //     CI gate failure remains kern verify --types security's FAIL -> 1).
@@ -44,6 +47,7 @@ func runExitcode(rest []string) {
 	fmt.Println("     decided (kern approve, kern request-approval, kern reject), a receipt that")
 	fmt.Println("     cannot be found (kern verify-receipt), an invalid Blueprint configuration")
 	fmt.Println("     (kern check, kern ci), changed files with risk (kern review / kern changes),")
+	fmt.Println("     a denied context authorization (kern authorize-context),")
 	fmt.Println("     or error-severity security findings (kern security — the review-family")
 	fmt.Println("     convention; a hard CI failure stays kern verify --types security -> 1)")
 	fmt.Println()
@@ -55,6 +59,7 @@ func runExitcode(rest []string) {
 	fmt.Println("  kern verify-receipt --receipt-id <id> (tampered)    -> 2 (invalid)")
 	fmt.Println("  kern verify-receipt --receipt-id <id> (not found)   -> 3 (policy)")
 	fmt.Println("  kern review (risk found)                            -> 3 (policy family)")
+	fmt.Println("  kern authorize-context (request denied)             -> 3 (policy family)")
 	fmt.Println("  kern security (error-severity findings)              -> 3 (policy family)")
 	fmt.Println("  kern search <query> (no symbols matched)             -> 1 (no-match error; empty --json result stays 0)")
 	fmt.Println("  kern verify --types cve (SKIPPED: govulncheck absent) -> 0 (reported)")

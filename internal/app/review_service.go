@@ -220,36 +220,118 @@ func detectPlanLayout(root string) planLayout {
 	return l
 }
 
+// BuildStatelessPlan assembles a structured domain.Plan for the stateless
+// `kern plan` path (no --task flag), so `kern plan --json` emits the same
+// parseable artifact shape as the taskful Plan workflow. The risk is scoped
+// to the target named in the intent (riskScopedToTarget) and net-new steps
+// are grounded in real files of the target package when the target resolves;
+// otherwise the generic template is kept (honest fallback).
+func BuildStatelessPlan(change string, pkt domain.ContextPacket, root string) domain.Plan {
+	layout := detectPlanLayout(root)
+	kernStyle := layout.kernCLI && layout.changelog && layout.gomodRoot
+	dir, file, grounded := resolvePlanTarget(change, root)
+
+	plan := domain.Plan{
+		Objective: change,
+		Risk:      riskScopedToTarget(pkt, dir),
+	}
+	if whatif.IsNetNewFeature(change) {
+		plan.Scope = "net-new feature (no existing components affected)"
+	} else {
+		plan.Scope = fmt.Sprintf("%d symbols, %d files", len(pkt.Symbols), len(pkt.Files))
+		for _, sym := range pkt.Symbols {
+			plan.AffectedComponents = append(plan.AffectedComponents, sym.Name)
+		}
+		for _, f := range pkt.Files {
+			plan.AffectedComponents = append(plan.AffectedComponents, f.Path)
+		}
+	}
+	if whatif.IsNetNewFeature(change) {
+		switch {
+		case cliCommandName(change) != "" && kernStyle:
+			name := cliCommandName(change)
+			plan.ImplementationSteps = []string{
+				fmt.Sprintf("Implement the command in a new file cmd/kern/cmd_%s.go.", name),
+				fmt.Sprintf("Register %q in the command table cmd/kern/dispatch_table.go, following the existing entry pattern ({run: func(cmd string, rest []string) int {...}}).", name),
+				fmt.Sprintf("Add tests in cmd/kern/cmd_%s_test.go (house helpers: captureStdout, exitError sentinel).", name),
+				"Document the command in CHANGELOG.md [Unreleased].",
+			}
+		case grounded:
+			// Grounded in the named target: real file names in the target
+			// package instead of the generic template.
+			plan.ImplementationSteps = append(netNewGroundedSteps(change, dir, file), statelessTestStep(dir, file))
+			plan.ImplementationSteps = append(plan.ImplementationSteps, statelessDocStep(layout))
+		default:
+			plan.ImplementationSteps = []string{
+				"Implement the feature in a new file under the relevant package.",
+				"Add unit tests alongside the new code.",
+				statelessDocStep(layout),
+			}
+		}
+	} else {
+		// Concrete steps mirror the internal/app assemblePlan detection so
+		// CLI and MCP plans agree: explicit rename/remove kinds lead, then
+		// per-symbol updates, then the validation steps under Tests.
+		if m := planRenameRe.FindStringSubmatch(change); m != nil {
+			plan.ImplementationSteps = append(plan.ImplementationSteps,
+				fmt.Sprintf("Rename %s to %s (definition in the affected components above)", m[1], m[2]),
+				"Update all references to "+m[1])
+		} else if m := planRemoveRe.FindStringSubmatch(change); m != nil {
+			plan.ImplementationSteps = append(plan.ImplementationSteps, "Remove "+m[1]+" and update its callers")
+		}
+		for i, sym := range pkt.Symbols {
+			if i >= 5 {
+				break
+			}
+			if strings.Contains(sym.File, "_test") {
+				continue
+			}
+			plan.ImplementationSteps = append(plan.ImplementationSteps,
+				fmt.Sprintf("Update %s (%s:%d)", sym.Name, sym.File, sym.Line))
+		}
+		if len(plan.ImplementationSteps) == 0 {
+			plan.ImplementationSteps = append(plan.ImplementationSteps, "Implement the requested change.")
+		}
+	}
+	plan.Tests = append(plan.Tests, pkt.RequiredValidation...)
+	if len(pkt.Risks) > 0 {
+		plan.Rollback = "revert the commit"
+		if plan.Risk == "high" {
+			plan.Rollback += " and redeploy previous version"
+		}
+	}
+	return plan
+}
+
+// statelessDocStep returns the documentation step for a stateless plan,
+// adaptive to the target repo layout (F6): the changelog step is only
+// concrete when the repo actually has a CHANGELOG.md.
+func statelessDocStep(layout planLayout) string {
+	if layout.changelog {
+		return "Document the change in CHANGELOG.md [Unreleased]."
+	}
+	return "Document the change in the project's release notes or changelog, if any."
+}
+
 // RenderStatelessPlan renders a domain.Plan-shaped text from a context packet
 // for the stateless `kern plan` path (no --task flag). It mirrors the
 // TaskService.Plan output shape so callers see the same sections regardless
-// of whether a Task was created. Implementation/verification steps are
-// adaptive to the target repo layout (F6): the concrete kern CLI conventions
-// (cmd/kern/cmd_%s.go, dispatch_table.go, CHANGELOG.md [Unreleased], ./cmd/kern
-// tests) are only emitted when the target repo matches that layout, otherwise
-// generic implement/test/document steps are used.
+// of whether a Task was created. The plan itself is assembled by
+// BuildStatelessPlan (target-scoped risk, grounded steps); this function only
+// renders the text. Implementation/verification steps are adaptive to the
+// target repo layout (F6): the concrete kern CLI conventions (cmd/kern/cmd_%s.go,
+// dispatch_table.go, CHANGELOG.md [Unreleased], ./cmd/kern tests) are only
+// emitted when the target repo matches that layout, otherwise generic
+// implement/test/document steps are used.
 func RenderStatelessPlan(change string, pkt domain.ContextPacket, root string) string {
+	plan := BuildStatelessPlan(change, pkt, root)
 	layout := detectPlanLayout(root)
 	kernStyle := layout.kernCLI && layout.changelog && layout.gomodRoot
 	var b strings.Builder
 	fmt.Fprintf(&b, "PLAN\n")
-	fmt.Fprintf(&b, "Objective: %s\n", change)
-	if whatif.IsNetNewFeature(change) {
-		fmt.Fprintf(&b, "Scope: net-new feature (no existing components affected)\n")
-	} else {
-		fmt.Fprintf(&b, "Scope: %d symbols, %d files\n", len(pkt.Symbols), len(pkt.Files))
-	}
-	risk := "low"
-	for _, r := range pkt.Risks {
-		if r.Level == domain.RiskCritical || r.Level == domain.RiskHigh {
-			risk = "high"
-			break
-		}
-		if r.Level == domain.RiskMedium {
-			risk = "medium"
-		}
-	}
-	fmt.Fprintf(&b, "Risk: %s\n", risk)
+	fmt.Fprintf(&b, "Objective: %s\n", plan.Objective)
+	fmt.Fprintf(&b, "Scope: %s\n", plan.Scope)
+	fmt.Fprintf(&b, "Risk: %s\n", plan.Risk)
 	if !whatif.IsNetNewFeature(change) {
 		fmt.Fprintf(&b, "Affected components:\n")
 		for _, sym := range pkt.Symbols {
@@ -260,48 +342,8 @@ func RenderStatelessPlan(change string, pkt domain.ContextPacket, root string) s
 		}
 	}
 	fmt.Fprintf(&b, "Implementation steps:\n")
-	if whatif.IsNetNewFeature(change) {
-		if name := cliCommandName(change); name != "" && kernStyle {
-			fmt.Fprintf(&b, "  1. Implement the command in a new file cmd/kern/cmd_%s.go.\n", name)
-			fmt.Fprintf(&b, "  2. Register %q in the command table cmd/kern/dispatch_table.go, following the existing entry pattern ({run: func(cmd string, rest []string) int {...}}).\n", name)
-			fmt.Fprintf(&b, "  3. Add tests in cmd/kern/cmd_%s_test.go (house helpers: captureStdout, exitError sentinel).\n", name)
-			fmt.Fprintf(&b, "  4. Document the command in CHANGELOG.md [Unreleased].\n")
-		} else {
-			fmt.Fprintf(&b, "  1. Implement the feature in a new file under the relevant package.\n")
-			fmt.Fprintf(&b, "  2. Add unit tests alongside the new code.\n")
-			if layout.changelog {
-				fmt.Fprintf(&b, "  3. Document the change in CHANGELOG.md [Unreleased].\n")
-			} else {
-				fmt.Fprintf(&b, "  3. Document the change in the project's release notes or changelog, if any.\n")
-			}
-		}
-	} else {
-		stepN := 0
-		emitStep := func(s string) {
-			stepN++
-			fmt.Fprintf(&b, "  %d. %s\n", stepN, s)
-		}
-		// Concrete steps mirror the internal/app assemblePlan detection so
-		// CLI and MCP plans agree: explicit rename/remove kinds lead, then
-		// per-symbol updates, then the validation steps under Tests.
-		if m := planRenameRe.FindStringSubmatch(change); m != nil {
-			emitStep(fmt.Sprintf("Rename %s to %s (definition in the affected components above)", m[1], m[2]))
-			emitStep("Update all references to " + m[1])
-		} else if m := planRemoveRe.FindStringSubmatch(change); m != nil {
-			emitStep("Remove " + m[1] + " and update its callers")
-		}
-		for i, sym := range pkt.Symbols {
-			if i >= 5 {
-				break
-			}
-			if strings.Contains(sym.File, "_test") {
-				continue
-			}
-			emitStep(fmt.Sprintf("Update %s (%s:%d)", sym.Name, sym.File, sym.Line))
-		}
-		if stepN == 0 {
-			emitStep("Implement the requested change.")
-		}
+	for i, s := range plan.ImplementationSteps {
+		fmt.Fprintf(&b, "  %d. %s\n", i+1, s)
 	}
 	// Packet validation items are rendered once, under Tests below — the old
 	// version repeated every item under Implementation steps as well.
@@ -322,7 +364,7 @@ func RenderStatelessPlan(change string, pkt domain.ContextPacket, root string) s
 	}
 	if len(pkt.Risks) > 0 {
 		fmt.Fprintf(&b, "Rollback: revert the commit")
-		if risk == "high" {
+		if plan.Risk == "high" {
 			b.WriteString(" and redeploy previous version")
 		}
 		b.WriteString("\n")

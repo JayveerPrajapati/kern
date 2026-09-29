@@ -104,12 +104,12 @@ func docsSearchCore(query, root string, k int) {
 		// N3: a repo with no indexed docs gets an explanation, not a bare
 		// "no matching document fragments" that reads as a confident miss —
 		// the same two variants the MCP leaf (internal/mcp/doc) renders.
+		// L18: a no-match is an ERROR (exit 1), matching `kern search`'s
+		// no-match contract — scripts/CI must not read a miss as success.
 		if len(ix.Docs) == 0 {
-			fmt.Println("no matching document fragments — this repo has no documentation indexed (kern docs searches only indexed repo docs; run `kern docs index <root>` to index a docs tree)")
-			return
+			fatal("no matching document fragments — this repo has no documentation indexed (kern docs searches only indexed repo docs; run `kern docs index <root>` to index a docs tree)")
 		}
-		fmt.Printf("no matching document fragments (query matched nothing in %d indexed fragments)\n", len(ix.Docs))
-		return
+		fatal("no matching document fragments (query matched nothing in %d indexed fragments)", len(ix.Docs))
 	}
 
 	if len(results) > 0 && len(codeMatches) > 0 {

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -98,6 +99,46 @@ func ServeHTTPContextWithTLS(ctx context.Context, addr string, tlsCfg *transport
 	if cleanup != nil {
 		defer cleanup()
 	}
+	srv, mux := newHTTPServerCore(ctx)
+	err := transport.ServeListener(ctx, addr, tlsCfg, mux, func() {
+		srv.cancelAll()
+		srv.Close()
+	})
+	if err != nil {
+		// Stop the background watch so its goroutine never leaks on the
+		// listener-error path (the ctx.Done path already closed the server
+		// via the onShutdown callback above).
+		srv.Close()
+		return err
+	}
+	return nil
+}
+
+// ServeHTTPContextWithTLSOn is ServeHTTPContextWithTLS on an already-bound
+// listener. It exists for tests: the caller binds once and hands the listener
+// over, eliminating the listen-close-rebind port-steal window that flakes
+// under parallel -race runs. Ownership of ln passes to the server, which
+// closes it on graceful shutdown; on error return, ownership reverts to the
+// caller (the listener is left open).
+func ServeHTTPContextWithTLSOn(ctx context.Context, ln net.Listener, tlsCfg *transport.TLSConfig) error {
+	srv, mux := newHTTPServerCore(ctx)
+	err := transport.ServeListenerOn(ctx, ln, tlsCfg, mux, func() {
+		srv.cancelAll()
+		srv.Close()
+	})
+	if err != nil {
+		// Stop the background watch so its goroutine never leaks on the
+		// listener-error path (the ctx.Done path already closed the server
+		// via the onShutdown callback above).
+		srv.Close()
+		return err
+	}
+	return nil
+}
+
+// newHTTPServerCore builds the HTTP server core (index watch + mux) shared by
+// the address-based and listener-based serve entry points.
+func newHTTPServerCore(ctx context.Context) (*Server, *http.ServeMux) {
 	srv := newServerCore("http")
 	// Implicit background index watch: rebuild stale workspace-root indexes
 	// between tool calls so the first call after an edit finds a warm index.
@@ -119,18 +160,7 @@ func ServeHTTPContextWithTLS(ctx context.Context, addr string, tlsCfg *transport
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		_, _ = io.WriteString(w, "kern MCP server over HTTP\n\nPOST /mcp with a JSON-RPC body (e.g. initialize, tools/list, tools/call, prompts/list, prompts/get).\n")
 	})
-	err := transport.ServeListener(ctx, addr, tlsCfg, mux, func() {
-		srv.cancelAll()
-		srv.Close()
-	})
-	if err != nil {
-		// Stop the background watch so its goroutine never leaks on the
-		// listener-error path (the ctx.Done path already closed the server
-		// via the onShutdown callback above).
-		srv.Close()
-		return err
-	}
-	return nil
+	return srv, mux
 }
 
 func (s *Server) handleHTTP(w http.ResponseWriter, r *http.Request) {

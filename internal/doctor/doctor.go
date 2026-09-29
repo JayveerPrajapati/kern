@@ -85,7 +85,7 @@ func checkCapabilities() Finding {
 	if index.TreesitterEnabled() {
 		parts = append(parts, "treesitter: on (13 grammars)")
 	} else {
-		parts = append(parts, "treesitter: off (regex fallback; build with -tags treesitter)")
+		parts = append(parts, "treesitter: off (regex fallback; rebuild without -tags notreesitter)")
 	}
 	return Finding{Check: "capabilities", Level: "ok", Detail: strings.Join(parts, " · ")}
 }
@@ -94,6 +94,13 @@ func checkPath() Finding {
 	bin := setup.Bin()
 	if _, err := os.Stat(bin); err == nil {
 		return Finding{Check: "kern-mcp", Level: "ok", Detail: bin}
+	}
+	// A dev-built binary (e.g. running from /tmp) has no kern-mcp sibling,
+	// so the bare name misses os.Stat even though a real kern-mcp resolves
+	// on PATH — agents would find it there, so only warn when both lookups
+	// miss.
+	if p, err := exec.LookPath(bin); err == nil {
+		return Finding{Check: "kern-mcp", Level: "ok", Detail: p + " (via PATH)"}
 	}
 	return Finding{Check: "kern-mcp", Level: "warn", Detail: bin + " missing — agents may not find it"}
 }
@@ -111,8 +118,23 @@ const mcpInitializeRequest = `{"jsonrpc":"2.0","id":1,"method":"initialize","par
 // binary passes os.Stat but is killed by Gatekeeper with SIGKILL; executing
 // it surfaces that immediately (killedBySIGKILL decodes both the direct
 // signal-death form and the shell-wrapped 137 form).
+// execProbeTimeout returns the per-binary MCP handshake deadline for
+// checkExec. The 5s default matches doctor's quick-probe UX;
+// KERN_DOCTOR_EXEC_TIMEOUT_MS (milliseconds) overrides it so heavily loaded
+// hosts — e.g. CI running the full suite in parallel — can keep the probe
+// from misreading slow process spawn as a binary defect.
+func execProbeTimeout() time.Duration {
+	if ms := os.Getenv("KERN_DOCTOR_EXEC_TIMEOUT_MS"); ms != "" {
+		if n, err := strconv.Atoi(ms); err == nil && n > 0 {
+			return time.Duration(n) * time.Millisecond
+		}
+	}
+	return 5 * time.Second
+}
+
 func checkExec(bin string) Finding {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	probeTimeout := execProbeTimeout()
+	ctx, cancel := context.WithTimeout(context.Background(), probeTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, bin)
 	cmd.Stdin = strings.NewReader(mcpInitializeRequest)
@@ -122,7 +144,7 @@ func checkExec(bin string) Finding {
 		// must be diagnosed before the Gatekeeper branch: a binary that
 		// starts but never answers the handshake is not a Gatekeeper victim.
 		if ctx.Err() == context.DeadlineExceeded {
-			return Finding{Check: "binary-exec", Level: "fail", Detail: bin + " did not answer the MCP initialize handshake within 5s"}
+			return Finding{Check: "binary-exec", Level: "fail", Detail: bin + " did not answer the MCP initialize handshake within " + probeTimeout.String()}
 		}
 		var ee *exec.ExitError
 		if errors.As(err, &ee) && killedBySIGKILL(ee) {
@@ -761,7 +783,7 @@ func checkPrecision(root string) Finding {
 	if heuristicCount > 0 {
 		sort.Strings(heuristicLangs)
 		return Finding{Check: "precision", Level: "warn",
-			Detail: fmt.Sprintf("%d languages resolved (Go + Java), %d at heuristic precision (skipped under --precision strict): %s. Build with -tags treesitter for AST precision on %d more languages.",
+			Detail: fmt.Sprintf("%d languages resolved (Go + Java), %d at heuristic precision (skipped under --precision strict): %s. Rebuild without -tags notreesitter for AST precision on %d more languages.",
 				resolvedCount, heuristicCount, strings.Join(heuristicLangs, ", "), heuristicCount)}
 	}
 	if index.TreesitterEnabled() {

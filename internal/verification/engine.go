@@ -56,6 +56,35 @@ type Engine struct {
 	// invoked directly (tests, MCP handlers), in which case auditTime falls
 	// back to time.Now().
 	runAt time.Time
+	// fullTests runs the test step with the COMPLETE suite
+	// (`go test -v ./...`) instead of the fast agent-safe default
+	// (`go test -v -short ./...`). Zero value = short mode (P1: a bare
+	// `kern verify` must finish in ~1min, not ~4). An explicit
+	// KERN_VERIFY_TEST env / verify.test config override replaces the test
+	// command verbatim and wins over either mode.
+	fullTests bool
+}
+
+// Option configures an Engine before a Verify run. Options are applied to a
+// copy of the shared engine by Platform/TaskService so concurrent callers
+// (CLI, MCP, REST) never race on engine state.
+type Option func(*Engine)
+
+// FullTests requests the complete test suite (`go test -v ./...`) instead of
+// the fast default short suite (`go test -v -short ./...`). The explicit
+// KERN_VERIFY_TEST / verify.test override still wins verbatim when set.
+func FullTests(full bool) Option {
+	return func(e *Engine) { e.fullTests = full }
+}
+
+// WithFullTests toggles the test-step mode on an engine: true runs the
+// complete suite (`go test -v ./...`), false (the default) runs the fast
+// short suite (`go test -v -short ./...`). The KERN_VERIFY_TEST env /
+// verify.test config override, when set, replaces the command verbatim and
+// wins over either mode.
+func (e *Engine) WithFullTests(full bool) *Engine {
+	e.fullTests = full
+	return e
 }
 
 // NewEngine creates a verification engine for the given project root.
@@ -459,19 +488,21 @@ func (e *Engine) VerifyCI() CIResult {
 // parses the verbose output into counts. Polyglot (C2): the test command is
 // resolved from the project type (validate.DetectKind) instead of hard-coding
 // `go test`, and can be overridden with `verify.test` in .kern/config.json
-// (or KERN_VERIFY_TEST) as a shell command string. PASS/FAIL/SKIP counts are
-// only parsed for `go test -v` output; other runners report OK from the exit
-// status.
+// (or KERN_VERIFY_TEST) as a shell command string. The default Go suite runs
+// in short mode (`go test -v -short ./...`) — the fast agent-safe default —
+// unless the engine was switched to the complete suite via FullTests/
+// WithFullTests (P1). PASS/FAIL/SKIP counts are only parsed for `go test -v`
+// output; other runners report OK from the exit status.
 func (e *Engine) VerifyTests() *TestResult {
 	res := &TestResult{Package: "./..."}
-	cmd, args := "go", []string{"test", "-v", "./..."}
+	cmd, args := "go", e.testArgs()
 	if override := config.String(e.root, "KERN_VERIFY_TEST", "verify.test", ""); override != "" {
 		cmd, args = splitVerifyCommand(override)
 		res.Package = override
 	} else if c, err := validate.DetectKind(e.root, "test"); err == nil {
 		if c.Cmd == "go" {
 			// Keep -v so the PASS/FAIL/SKIP count parsing below works.
-			args = []string{"test", "-v", "./..."}
+			args = e.testArgs()
 		} else {
 			cmd, args = c.Cmd, c.Args
 		}
@@ -496,7 +527,7 @@ func (e *Engine) VerifyTests() *TestResult {
 		res.Claims = append(res.Claims, evidence.FromTestResult(res.Package, res.OK, res.Output))
 		return res
 	}
-	sr := sandbox.Run(context.Background(), e.root, cmd, args, testTimeout)
+	sr := sandbox.RunWithOptions(context.Background(), e.root, cmd, args, testTimeout, sandbox.RunOptions{AllowLoopbackBind: true})
 	// F4: clip the embedded output and persist the full log under
 	// .kern/audit/<run-id>/verify-test.log (path on LogPath).
 	res.Output, res.LogPath = captureOutput(e.root, e.auditTime(), "test", sr.Output, sr.OK)
@@ -522,6 +553,18 @@ func (e *Engine) VerifyTests() *TestResult {
 	return res
 }
 
+// testArgs returns the default `go test` arguments for the engine's current
+// mode: the fast short suite by default, the complete suite in full mode
+// (WithFullTests/FullTests). -v is always kept so the PASS/FAIL/SKIP count
+// parsing in VerifyTests works. An explicit KERN_VERIFY_TEST / verify.test
+// override never reaches this helper — it replaces the command verbatim.
+func (e *Engine) testArgs() []string {
+	if e.fullTests {
+		return []string{"test", "-v", "./..."}
+	}
+	return []string{"test", "-v", "-short", "./..."}
+}
+
 // VerifyE2ETests runs the project's end-to-end tests (go test with the "e2e"
 // build tag). E2E tests are detected by scanning for the e2e build constraint
 // or e2e-named test files; when none are present the result is nil ("not
@@ -531,7 +574,7 @@ func (e *Engine) VerifyE2ETests() *E2ETestResult {
 		return nil
 	}
 	res := &E2ETestResult{}
-	sr := sandbox.Run(context.Background(), e.root, "go", []string{"test", "-tags", "e2e", "-v", "./..."}, testTimeout)
+	sr := sandbox.RunWithOptions(context.Background(), e.root, "go", []string{"test", "-tags", "e2e", "-v", "./..."}, testTimeout, sandbox.RunOptions{AllowLoopbackBind: true})
 	// F4: clip the embedded output and persist the full log under
 	// .kern/audit/<run-id>/verify-e2e.log (path on LogPath).
 	res.Output, res.LogPath = captureOutput(e.root, e.auditTime(), "e2e", sr.Output, sr.OK)
@@ -675,7 +718,7 @@ func (e *Engine) VerifyPerformance() *PerformanceResult {
 	if !hasBenchmarks(e.root) {
 		return nil
 	}
-	sr := sandbox.Run(context.Background(), e.root, "go", []string{"test", "-bench=.", "-benchmem", "-v", "./..."}, testTimeout)
+	sr := sandbox.RunWithOptions(context.Background(), e.root, "go", []string{"test", "-bench=.", "-benchmem", "-v", "./..."}, testTimeout, sandbox.RunOptions{AllowLoopbackBind: true})
 	res := &PerformanceResult{}
 	for _, line := range strings.Split(sr.Output, "\n") {
 		fields := strings.Fields(line)

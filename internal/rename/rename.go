@@ -32,7 +32,10 @@ type Loc struct {
 	Col  int    `json:"col"`
 }
 
-// Edit is a single identifier replacement in a source file.
+// Edit is a single identifier replacement in a source file. File is the
+// path relative to the INDEX root (never an absolute path): Apply re-roots
+// every target against the current caller root, so a report computed from a
+// copied/moved index still edits the tree the command was run in.
 type Edit struct {
 	File   string `json:"file"`
 	Line   int    `json:"line"`
@@ -55,6 +58,16 @@ type Report struct {
 	Applied   bool     `json:"applied"`
 	Backup    string   `json:"backup,omitempty"`
 	NotEdited bool     `json:"not_edited"` // symbol found but had no editable references
+	// IndexRoot is the root the source index was built for (ix.Root). It is
+	// never serialized: Edit/DeleteFiles carry index-relative paths, and Apply
+	// re-roots them under the CURRENT caller root, so the recorded root is
+	// only needed to refuse unsafe re-rooting (C1) and to phrase the error.
+	IndexRoot string `json:"-"`
+	// DeleteFiles lists index-relative files to delete entirely (used by
+	// remove when a deletion leaves a file with only a package clause).
+	// Deleted files are backed up like edits and restored on rollback, so the
+	// tree stays recoverable (M6).
+	DeleteFiles []string `json:"delete_files,omitempty"`
 }
 
 // ErrNotSupported is returned when the rename is unsupported (method-receiver
@@ -80,6 +93,11 @@ func Rename(ix *index.Index, oldName, newName string) (*Report, error) {
 	if ix == nil {
 		return nil, fmt.Errorf("no index")
 	}
+	// C1: the index may have been built for a DIFFERENT directory (a copied
+	// or moved repo carries a stale absolute root). Edits are computed from
+	// the index's relative paths and re-rooted against the caller's root at
+	// Apply time, so the recorded root is recorded here only for the guard.
+	r.IndexRoot = ix.Root
 	if oldName == "" {
 		return nil, fmt.Errorf("symbol is required")
 	}
@@ -161,7 +179,11 @@ func Rename(ix *index.Index, oldName, newName string) (*Report, error) {
 	return r, nil
 }
 
-// renameFile runs the AST pass over one Go file and returns its edits.
+// renameFile runs the AST pass over one Go file and returns its edits. abs
+// is the file's absolute path under the index's recorded root (read-only —
+// it is the only place the file is guaranteed to exist at analysis time);
+// the returned edits carry the INDEX-RELATIVE path so Apply can re-root them
+// against the current caller root instead of the index's stale one (C1).
 func renameFile(ix *index.Index, abs, oldName, newName, symPkg string, exported bool) []Edit {
 	src, err := os.ReadFile(abs)
 	if err != nil {
@@ -172,6 +194,7 @@ func renameFile(ix *index.Index, abs, oldName, newName, symPkg string, exported 
 	if err != nil {
 		return nil
 	}
+	rel, _ := filepath.Rel(ix.Root, abs)
 
 	// Package-qualifier names for this file: which selector Xs refer to
 	// imported packages, and whether that package is the renamed symbol's own
@@ -218,7 +241,7 @@ func renameFile(ix *index.Index, abs, oldName, newName, symPkg string, exported 
 		}
 		pos := fset.Position(id.Pos())
 		edits = append(edits, Edit{
-			File: abs, Line: pos.Line, Col: pos.Column, Offset: pos.Offset,
+			File: rel, Line: pos.Line, Col: pos.Column, Offset: pos.Offset,
 			Old: oldName, New: newName, Kind: kind,
 		})
 		return true
@@ -307,15 +330,27 @@ func classify(parents map[ast.Node]ast.Node, file *ast.File, id *ast.Ident, qual
 	return "reference", true
 }
 
-// Apply commits the report's edits transactionally: every touched file is first
-// copied under <root>/.kern/rename-backup/<timestamp>/, edits are applied by
-// byte offset, and a mid-flight failure restores all files. It returns the
-// number of edits applied.
+// Apply commits the report's edits transactionally: every touched file (edits
+// and DeleteFiles) is first copied under <root>/.kern/rename-backup/<timestamp>/,
+// edits are applied by byte offset, DeleteFiles are removed, and a mid-flight
+// failure restores all files (deleted files are recreated from their backup).
+// It returns the number of edits applied plus files deleted.
+//
+// C1: every target is resolved against the CURRENT root, never the index's
+// recorded root. Edit/DeleteFiles paths are index-relative (or absolute for
+// legacy reports, which are converted via the recorded IndexRoot), so a
+// report computed from a copied/moved index edits the tree the caller is
+// actually in. Any target that would escape the current root — i.e. the index
+// cannot be safely re-rooted — refuses the whole apply with an actionable
+// error; nothing is ever written outside the current root.
 func Apply(root string, r *Report) (int, error) {
+	if r == nil {
+		return 0, fmt.Errorf("rename: nil report")
+	}
 	if r.Applied {
 		return 0, nil
 	}
-	if len(r.Edits) == 0 {
+	if len(r.Edits) == 0 && len(r.DeleteFiles) == 0 {
 		return 0, nil
 	}
 	// The index (and therefore every edit path) is rooted at an absolute path,
@@ -326,35 +361,73 @@ func Apply(root string, r *Report) (int, error) {
 	}
 	backupDir := filepath.Join(absRoot, ".kern", "rename-backup", fmt.Sprintf("%d", time.Now().UnixNano()))
 
+	// Resolve every target against the CURRENT root, refusing any that would
+	// escape it (out-of-root guard). Deletions are resolved first so edits
+	// targeting a file that is deleted outright are dropped (the deletion
+	// replaces them — remove plans never emit both, but this is defensive).
+	var deleteAbs []string
+	for _, f := range r.DeleteFiles {
+		abs, err := resolveTarget(absRoot, r, f)
+		if err != nil {
+			return 0, err
+		}
+		deleteAbs = append(deleteAbs, abs)
+	}
+	isDeleted := map[string]bool{}
+	for _, abs := range deleteAbs {
+		isDeleted[abs] = true
+	}
 	byFile := map[string][]Edit{}
 	for _, e := range r.Edits {
-		byFile[e.File] = append(byFile[e.File], e)
+		abs, err := resolveTarget(absRoot, r, e.File)
+		if err != nil {
+			return 0, err
+		}
+		if isDeleted[abs] {
+			continue
+		}
+		byFile[abs] = append(byFile[abs], e)
 	}
 
 	// Stage 1: back up every file we will touch. Failure here is safe — nothing
 	// has been modified yet.
 	backedUp := map[string]string{} // abs file -> backup path
-	for abs := range byFile {
+	backup := func(abs string) error {
+		if _, done := backedUp[abs]; done {
+			return nil
+		}
 		src, err := os.ReadFile(abs)
 		if err != nil {
-			return 0, err
+			return err
 		}
 		rel, err := filepath.Rel(absRoot, abs)
 		if err != nil {
-			return 0, err
+			return err
 		}
 		bp := filepath.Join(backupDir, rel)
 		if err := os.MkdirAll(filepath.Dir(bp), 0o755); err != nil {
-			return 0, err
+			return err
 		}
 		if err := os.WriteFile(bp, src, 0o644); err != nil {
-			return 0, err
+			return err
 		}
 		backedUp[abs] = bp
+		return nil
+	}
+	for abs := range byFile {
+		if err := backup(abs); err != nil {
+			return 0, err
+		}
+	}
+	for _, abs := range deleteAbs {
+		if err := backup(abs); err != nil {
+			return 0, err
+		}
 	}
 
-	// Stage 2: apply edits per file, highest offsets first. On any error,
-	// restore every backed-up file so the tree is exactly as it was.
+	// Stage 2: apply edits per file, highest offsets first, then remove the
+	// files scheduled for deletion. On any error, restore every backed-up
+	// file so the tree is exactly as it was.
 	applied := 0
 	for abs, edits := range byFile {
 		src, err := os.ReadFile(abs)
@@ -373,10 +446,66 @@ func Apply(root string, r *Report) (int, error) {
 		}
 		applied += len(edits)
 	}
+	for _, abs := range deleteAbs {
+		if err := os.Remove(abs); err != nil {
+			restore(backedUp)
+			return 0, err
+		}
+		applied++
+	}
 
 	r.Applied = true
 	r.Backup = backupDir
 	return applied, nil
+}
+
+// resolveTarget re-roots one report path against the current caller root.
+// Paths are index-relative (the common case); legacy reports may carry
+// absolute paths, which are converted via the recorded IndexRoot (falling
+// back to the current root, which keeps the pre-C1 behavior when the tree
+// never moved). The result must be a file strictly inside absRoot: any ".."
+// traversal, absolute path, or root-directory target refuses the whole apply
+// with an actionable error naming both roots.
+func resolveTarget(absRoot string, r *Report, p string) (string, error) {
+	if p == "" {
+		return "", fmt.Errorf("rename: empty target path in report")
+	}
+	rel := p
+	if filepath.IsAbs(p) {
+		base := r.IndexRoot
+		if base == "" {
+			base = absRoot // legacy report: absolute paths under the same root
+		}
+		rp, err := filepath.Rel(base, p)
+		if err != nil {
+			return "", err
+		}
+		rel = rp
+	}
+	clean := filepath.Clean(rel)
+	if clean == "." || clean == "" {
+		return "", fmt.Errorf("rename: refusing to treat the project root as a file target (%s)", p)
+	}
+	if filepath.IsAbs(clean) || clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
+		return "", outOfRootErr(r, absRoot)
+	}
+	target := filepath.Join(absRoot, clean)
+	rp, err := filepath.Rel(absRoot, target)
+	if err != nil || rp == ".." || strings.HasPrefix(rp, ".."+string(filepath.Separator)) || filepath.IsAbs(rp) {
+		return "", outOfRootErr(r, absRoot)
+	}
+	return target, nil
+}
+
+// outOfRootErr is the actionable refusal for a write target that escapes the
+// current root (C1): the index was built elsewhere and cannot be safely
+// re-rooted, so the user must rebuild it for the current tree.
+func outOfRootErr(r *Report, curRoot string) error {
+	ixRoot := r.IndexRoot
+	if ixRoot == "" {
+		ixRoot = "<unknown>"
+	}
+	return fmt.Errorf("refusing to write outside the current root: index was built for %s but current root is %s — run `kern index %s` to rebuild", ixRoot, curRoot, curRoot)
 }
 
 // splice applies a file's edits (sorted by offset) to src, verifying each

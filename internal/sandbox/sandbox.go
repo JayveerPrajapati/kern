@@ -648,12 +648,29 @@ type Result struct {
 	Network *NetworkPolicy
 }
 
+// RunOptions carries optional per-run behavior knobs for RunWithOptions.
+type RunOptions struct {
+	// AllowLoopbackBind relaxes the darwin seatbelt profile to permit
+	// binding/accepting on loopback — loopback IPs AND unix-domain sockets
+	// (the relay's .kern/events.sock, MCP UDS transport) — matching what
+	// the Linux netns wrap (lo up) already provides; verify-path test runs
+	// only. External egress stays denied. The zero value keeps the profile
+	// byte-identical.
+	AllowLoopbackBind bool
+}
+
+// RunWithOptions is Run with per-run options (see RunOptions). The zero
+// RunOptions value behaves exactly like Run.
+func RunWithOptions(parent context.Context, root string, cmdName string, args []string, timeout time.Duration, opts RunOptions) *Result {
+	return runGuarded(parent, root, cmdName, args, timeout, false, opts)
+}
+
 // Run snapshots root, executes cmd in root, and restores the tree when the
 // command exits non-zero (or errors/times out). On success the changes are
 // kept and Restored stays false. parent cancels the run (and triggers a
 // restore) when it is cancelled; a nil parent uses context.Background().
 func Run(parent context.Context, root string, cmdName string, args []string, timeout time.Duration) *Result {
-	return runGuarded(parent, root, cmdName, args, timeout, false)
+	return runGuarded(parent, root, cmdName, args, timeout, false, RunOptions{})
 }
 
 // RunGuarded is Run with the P2 pre-edit verdict gate: when the command
@@ -663,10 +680,21 @@ func Run(parent context.Context, root string, cmdName string, args []string, tim
 // MCP kern_sandbox) use it; internal automation (execution worktrees, the
 // verification engine) keeps the ungated Run.
 func RunGuarded(parent context.Context, root string, cmdName string, args []string, timeout time.Duration, force bool) *Result {
-	return runGuarded(parent, root, cmdName, args, timeout, force)
+	return runGuarded(parent, root, cmdName, args, timeout, force, RunOptions{})
 }
 
-func runGuarded(parent context.Context, root string, cmdName string, args []string, timeout time.Duration, force bool) *Result {
+// sandboxChildEnv returns the sanitized environment for a sandboxed command
+// with the KERN_SANDBOX_ACTIVE marker appended: it tells a child process it
+// is running inside an active kern sandbox, so tests that cannot nest
+// another sandbox (sandbox-exec on macOS — the confinement tests) can skip
+// instead of failing. Appended AFTER StripSecrets so the marker can never
+// be scrubbed. Used by both child-env construction sites in runGuarded (the
+// plain wrap path and the Landlock trampoline path).
+func sandboxChildEnv() []string {
+	return append(governance.StripSecrets(sanitizedEnv(), governance.DefaultSecretFilter()), "KERN_SANDBOX_ACTIVE=1")
+}
+
+func runGuarded(parent context.Context, root string, cmdName string, args []string, timeout time.Duration, force bool, opts RunOptions) *Result {
 	if parent == nil {
 		parent = context.Background()
 	}
@@ -725,14 +753,14 @@ func runGuarded(parent context.Context, root string, cmdName string, args []stri
 	fsConfined := false
 	c := exec.CommandContext(ctx, cmdName, args...)
 	if !netEscapeHatchSet() {
-		if prefix, ok := netIsolationPrefix(); ok {
+		if prefix, ok := netIsolationPrefix(opts.AllowLoopbackBind); ok {
 			// Linux Stage-1 FS confinement (M3): when Landlock is available,
 			// re-exec this binary as a trampoline that applies the allowlist
 			// and then runs the SAME unshare -> sh -> target chain below.
 			// Landlock is per-thread and cannot be dropped, so it must be
 			// applied in a fresh child, never in this process.
 			if goruntime.GOOS == "linux" && fsConfinementEnabled() && landlock.LandlockAvailable(prefix) {
-				childEnv := governance.StripSecrets(sanitizedEnv(), governance.DefaultSecretFilter())
+				childEnv := sandboxChildEnv()
 				if exe, err := os.Executable(); err == nil {
 					absRoot := root
 					if !filepath.IsAbs(absRoot) {
@@ -762,9 +790,11 @@ func runGuarded(parent context.Context, root string, cmdName string, args []stri
 	// The allowlist already drops secrets; StripSecrets is defense-in-depth so
 	// any future allowlist additions cannot reintroduce secret-named vars.
 	// The Landlock trampoline above already carries the sanitized env (plus
-	// its own marker), so it is only set here for the plain wrap path.
+	// its own marker), so it is only set here for the plain wrap path. Both
+	// paths go through sandboxChildEnv, which appends the KERN_SANDBOX_ACTIVE
+	// marker so children know they are inside an active kern sandbox.
 	if !fsConfined {
-		c.Env = governance.StripSecrets(sanitizedEnv(), governance.DefaultSecretFilter())
+		c.Env = sandboxChildEnv()
 	}
 	// Run the command in its own process group so that on timeout the whole
 	// group (the command and any grandchildren it spawns) is killed, not just
@@ -778,6 +808,7 @@ func runGuarded(parent context.Context, root string, cmdName string, args []stri
 	res.Network = assessNetwork(string(out))
 	res.Network.Isolated = netIsolated
 	res.Network.FSConfined = fsConfined
+	res.Network.LoopbackBindAllowed = opts.AllowLoopbackBind
 	res.Duration = time.Since(start)
 	if ctx.Err() == context.DeadlineExceeded || ctx.Err() == context.Canceled {
 		// The context kill only reaches the direct child; kill the process

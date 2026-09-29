@@ -358,6 +358,57 @@ func transitive(start string, neighbor map[string][]string, maxDepth int) []stri
 	return out
 }
 
+// closureKey identifies one memoized full transitive closure: the precision
+// mode, the traversal direction (incoming = reverse/callers, outgoing =
+// forward/callees) and the root node ID.
+type closureKey struct {
+	strict   bool
+	incoming bool
+	start    string
+}
+
+// closure returns the full (maxHops) transitive closure of start — every node
+// ID reachable from start, excluding start itself, sorted — in the requested
+// direction and precision mode, memoized per (start, direction, strict) for
+// the graph's lifetime. The graph is read-only after construction, so the
+// memo never goes stale (same reasoning as the adjacency cache). All the
+// impact queries (WhatDependsOn, WhatDoesXDependOn, WhatAPIsAffected,
+// ProductionCriticality) share this memo, so a multi-query operation like
+// kern impact computes each closure once instead of re-walking the reachable
+// subgraph per query. The returned slice is shared and must be treated as
+// read-only (the one caller that extends it, WhatAPIsAffectedPrecise, copies
+// first). Concurrent callers may compute the same closure in parallel; the
+// first writer wins and the others adopt that canonical slice.
+func (g *Graph) closure(start string, strict, incoming bool) []string {
+	key := closureKey{strict: strict, incoming: incoming, start: start}
+	g.closureMu.Lock()
+	if ids, ok := g.closureMemo[key]; ok {
+		g.closureMu.Unlock()
+		return ids
+	}
+	g.closureMu.Unlock()
+
+	var neighbor map[string][]string
+	if incoming {
+		_, neighbor = g.adjacency(strict)
+	} else {
+		neighbor, _ = g.adjacency(strict)
+	}
+	ids := transitive(start, neighbor, maxHops)
+
+	g.closureMu.Lock()
+	if g.closureMemo == nil {
+		g.closureMemo = make(map[closureKey][]string)
+	}
+	if existing, ok := g.closureMemo[key]; ok {
+		ids = existing // a concurrent caller computed it first; keep one canonical slice
+	} else {
+		g.closureMemo[key] = ids
+	}
+	g.closureMu.Unlock()
+	return ids
+}
+
 // WhoCalls returns the symbols that directly call the given symbol.
 func (g *Graph) WhoCalls(symbol string) []domain.Node {
 	return g.WhoCallsPrecise(symbol, false)
@@ -382,8 +433,7 @@ func (g *Graph) WhatDependsOn(symbol string) []domain.Node {
 // WhatDependsOnPrecise is WhatDependsOn with a precision mode: when strict is
 // true, callers whose caller language is not "resolved"-precision are skipped.
 func (g *Graph) WhatDependsOnPrecise(symbol string, strict bool) []domain.Node {
-	_, incoming := g.adjacency(strict)
-	reach := transitive(g.resolveSymbol(symbol), incoming, maxHops)
+	reach := g.closure(g.resolveSymbol(symbol), strict, true)
 	return nodesForIDs(g.nodesByID(), reach)
 }
 
@@ -398,8 +448,7 @@ func (g *Graph) WhatDoesXDependOn(symbol string) []domain.Node {
 // strict is true, outgoing call edges from a caller whose language is not
 // "resolved"-precision are skipped.
 func (g *Graph) WhatDoesXDependOnPrecise(symbol string, strict bool) []domain.Node {
-	outgoing, _ := g.adjacency(strict)
-	reach := transitive(g.resolveSymbol(symbol), outgoing, maxHops)
+	reach := g.closure(g.resolveSymbol(symbol), strict, false)
 	return nodesForIDs(g.nodesByID(), reach)
 }
 
@@ -411,8 +460,7 @@ func (g *Graph) WhatDoesXDependOnPrecise(symbol string, strict bool) []domain.No
 // raw edges (e2e round 2, P0-1). Resolved IDs map to node names; unresolved
 // IDs are returned verbatim so impact reports stop under-reporting.
 func (g *Graph) WhatDoesXDependOnNames(symbol string, strict bool) []string {
-	outgoing, _ := g.adjacency(strict)
-	reach := transitive(g.resolveSymbol(symbol), outgoing, maxHops)
+	reach := g.closure(g.resolveSymbol(symbol), strict, false)
 	byID := g.nodesByID()
 	out := make([]string, 0, len(reach))
 	for _, id := range reach {
@@ -467,15 +515,17 @@ func (g *Graph) WhatAPIsAffected(symbol string) []domain.Node {
 // WhatAPIsAffectedPrecise is WhatAPIsAffected with a precision mode: when
 // strict is true, non-"resolved" caller edges are skipped during traversal.
 func (g *Graph) WhatAPIsAffectedPrecise(symbol string, strict bool) []domain.Node {
-	_, incoming := g.adjacency(strict)
 	resolved := g.resolveSymbol(symbol)
-	reach := transitive(resolved, incoming, maxHops)
+	reach := g.closure(resolved, strict, true)
 
 	byID := g.nodesByID()
 	seen := map[string]bool{}
 	var out []domain.Node
 	// The symbol itself too: a change to an entry-point handler affects it.
-	for _, id := range append(reach, resolved) {
+	// reach is a shared memoized slice — copy before append so the memo's
+	// backing array is never extended in place.
+	ids := append(append([]string(nil), reach...), resolved)
+	for _, id := range ids {
 		n, ok := byID[id]
 		if !ok || n.Symbol == nil || !g.entries[n.ID] {
 			continue

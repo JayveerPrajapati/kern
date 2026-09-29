@@ -327,12 +327,16 @@ func BlastRadiusPrecise(ix *index.Index, roots []string, strict bool) ([]string,
 }
 
 // AffectedFiles returns the distinct files touched by a set of symbols.
+// Documentation files (markdown/HTML — see index.IsDocFile) are excluded:
+// the index keeps them in the graph, but a code blast-radius set is about
+// what a change can break in code, and a fuzzy over-match dragged doc pages
+// (export_graph.html, docs/adr/*.md) into every impacted-file list.
 func AffectedFiles(ix *index.Index, symbols []string) []string {
 	fileMap := buildFileMap(ix)
 	seen := map[string]bool{}
 	var out []string
 	for _, s := range symbols {
-		if f := fileMap[s]; f != "" && !seen[f] {
+		if f := fileMap[s]; f != "" && !index.IsDocFile(f) && !seen[f] {
 			seen[f] = true
 			out = append(out, f)
 		}

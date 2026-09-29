@@ -148,8 +148,19 @@ func runSec(rest []string) {
 func runTaint(rest []string) {
 	f, args := parseFlagsOrDie(rest)
 	root := projectRoot(f)
+	// L19: the positional root must be an existing DIRECTORY — a file
+	// positional used to "scan" silently (exit 0, no findings, sqlite
+	// persist spam) and a missing path died with a raw lstat error. Both
+	// now fail loud with the reason (or a usage hint).
 	if len(args) > 0 {
-		root = args[0]
+		if st, serr := os.Stat(args[0]); serr == nil {
+			if !st.IsDir() {
+				fatalUsage("kern taint: %q is a file — taint scans a directory tree\nusage: kern taint [dir] [flags]  (options: --file, --range, --root)", args[0])
+			}
+			root = args[0]
+		} else {
+			fatal("kern taint: no such directory: %s", args[0])
+		}
 	}
 	findings, serr := sec.Scan(root)
 	if serr != nil {

@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"os"
 )
 
 // runProse implements `kern prose <words> [root] [--limit N]`: load-or-build
@@ -33,6 +34,11 @@ func runProse(rest []string) int {
 	if len(hits) == 0 {
 		fmt.Printf("no prose matches: %s\n", query)
 		return 0
+	}
+	// Audit L6: LookupProse caps at 20 when --limit is absent. When the
+	// default cap may have bound, say so instead of truncating silently.
+	if f.limit <= 0 && len(hits) >= 20 {
+		fmt.Fprintln(os.Stderr, "kern: (showing first 20 lines; pass --limit to change)")
 	}
 	for _, h := range hits {
 		fmt.Printf("%s (%d words matched)\n", h.Symbol, h.Matched)

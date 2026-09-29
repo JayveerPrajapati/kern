@@ -69,7 +69,7 @@ func (s *TaskService) execApprovalRoot() string {
 // is applied in an isolated worktree. The governance gate (governance.CheckExec)
 // is centralized here so no interface can bypass it.
 func (s *TaskService) Execute(patch string) (*agent.Task, string, error) {
-	t, err := s.Create("execute patch")
+	t, err := s.createWorkflowTask("execute patch")
 	if err != nil {
 		return nil, "", err
 	}
@@ -153,7 +153,7 @@ func (s *TaskService) Execute(patch string) (*agent.Task, string, error) {
 // wants to verify the worktree after Execute cannot access wt.Dir(). This
 // method holds the worktree across both steps.
 func (s *TaskService) ExecuteAndVerify(patch string, verifyTypes []string) (*agent.Task, string, verification.VerificationResult, error) {
-	t, err := s.Create("execute patch")
+	t, err := s.createWorkflowTask("execute patch")
 	if err != nil {
 		return nil, "", verification.VerificationResult{}, err
 	}

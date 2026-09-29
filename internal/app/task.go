@@ -316,7 +316,7 @@ func (s *TaskService) Run(intent string) (*domain.RunResult, error) {
 	risk.Factors = []string{string(compiled.Type)}
 
 	// Create the Task.
-	t, err := s.Create(intent)
+	t, err := s.createWorkflowTask(intent)
 	if err != nil {
 		return nil, err
 	}

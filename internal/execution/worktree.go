@@ -2,11 +2,16 @@ package execution
 
 import (
 	"fmt"
+	"hash/fnv"
 	"io/fs"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
+	"regexp"
 	"strings"
+	"sync"
+	"syscall"
 	"time"
 
 	"github.com/JayveerPrajapati/kern/internal/ignore"
@@ -25,6 +30,12 @@ type Worktree struct {
 // NewWorktree creates an isolated copy of the project, reusing sandbox.Snapshot
 // to copy the tree (skipping .git, node_modules, vendor) into a temp dir.
 func NewWorktree(srcRoot string) (*Worktree, error) {
+	// Execution start (audit H1): a crashed Diff leaves the repo's .git
+	// stranded in the parent dir as .kern-git-aside-<pid>-<ts>-<repo-hash>.
+	// Warn about any orphans (scoped to this repo's hash; legacy suffix-less
+	// asides still reported) so the user can restore manually — never
+	// auto-delete.
+	warnOrphanedGitAsides(srcRoot)
 	snap, err := sandbox.Snapshot(srcRoot)
 	if err != nil {
 		return nil, fmt.Errorf("copy worktree: %w", err)
@@ -109,7 +120,7 @@ func (w *Worktree) Diff() (string, error) {
 	if fi, err := os.Stat(filepath.Join(w.workDir, ".git")); err == nil && fi != nil {
 		cmd := exec.Command("git", "-C", w.workDir, "diff", "HEAD")
 		if out, err := cmd.CombinedOutput(); err == nil {
-			return string(out), nil
+			return redactCredentials(string(out)), nil
 		}
 	}
 
@@ -120,13 +131,31 @@ func (w *Worktree) Diff() (string, error) {
 	// repository boundary protections (CVE-2024-32002/32004).
 	gitPath := filepath.Join(w.srcRoot, ".git")
 	if fi, err := os.Stat(gitPath); err == nil && fi != nil {
-		hiddenGit := filepath.Join(filepath.Dir(w.srcRoot), fmt.Sprintf(".kern-git-aside-%d-%d", os.Getpid(), time.Now().UnixNano()))
+		// The aside MUST live OUTSIDE both compared trees. With a relative
+		// srcRoot ("." — the normal `kern execute` invocation from inside the
+		// repo), filepath.Dir(".") is "." itself, which would drop the aside
+		// INTO the tree git diff --no-index compares — leaking every .git
+		// internal into the printed diff (dogfooding A1-N2: ~1100 spurious
+		// "a/.kern-git-aside-<pid>-.../..." sections incl. binary object dumps).
+		// Resolve srcRoot to an absolute path first so Dir() names the real
+		// parent directory.
+		absSrc, aerr := filepath.Abs(w.srcRoot)
+		if aerr != nil {
+			absSrc = w.srcRoot
+		}
+		hiddenGit := filepath.Join(filepath.Dir(absSrc), fmt.Sprintf(".kern-git-aside-%d-%d-%s", os.Getpid(), time.Now().UnixNano(), repoHash8(w.srcRoot)))
 		if rerr := os.Rename(gitPath, hiddenGit); rerr == nil {
-			defer func() { _ = os.Rename(hiddenGit, gitPath) }()
+			// Signal-safe restore: the aside is registered so SIGINT/SIGTERM
+			// restore it before exit; the defer covers every normal return
+			// path. A crash can no longer strand the repo without its .git
+			// (audit H1).
+			trackGitAside(hiddenGit, gitPath)
+			defer restoreGitAside(hiddenGit, gitPath)
 		} else {
-			hiddenGit = filepath.Join(os.TempDir(), fmt.Sprintf("kern-git-aside-%d-%d", os.Getpid(), time.Now().UnixNano()))
+			hiddenGit = filepath.Join(os.TempDir(), fmt.Sprintf("kern-git-aside-%d-%d-%s", os.Getpid(), time.Now().UnixNano(), repoHash8(w.srcRoot)))
 			if rerr := os.Rename(gitPath, hiddenGit); rerr == nil {
-				defer func() { _ = os.Rename(hiddenGit, gitPath) }()
+				trackGitAside(hiddenGit, gitPath)
+				defer restoreGitAside(hiddenGit, gitPath)
 			}
 		}
 	}
@@ -186,7 +215,11 @@ func (w *Worktree) Diff() (string, error) {
 		}
 		filtered = append(filtered, ln)
 	}
-	return strings.Join(filtered, "\n"), nil
+	// Audit H1: the diff can carry .git/config content (remote URLs with
+	// embedded credentials) when the aside move fails or git traverses the
+	// repo metadata. Scrub credentials from the final output so no secret
+	// reaches the printed diff, artifacts, or MCP surfaces.
+	return redactCredentials(strings.Join(filtered, "\n")), nil
 }
 
 // ignoredDiffSection reports whether a diff section's path is ignored by the
@@ -349,4 +382,168 @@ func (w *Worktree) Cleanup() error {
 		return os.RemoveAll(w.workDir)
 	}
 	return nil
+}
+
+// --- Credential redaction (audit H1) -----------------------------------------
+
+var (
+	// reURLCredentials matches scheme://user:token@host and rewrites it to
+	// scheme://user:***@host so credentials embedded in remote URLs (e.g. a
+	// GitHub PAT in .git/config) never reach diff output.
+	reURLCredentials = regexp.MustCompile(`([a-zA-Z][a-zA-Z0-9+.-]*://)([^/@:\s]+):([^/@\s]+)@`)
+	// reBareHexUserinfo scrubs a colon-less userinfo that is a bare hex
+	// token — a classic 40-hex PAT used as the WHOLE userinfo
+	// (https://<token>@host). The colon form above and the prefixed forms in
+	// reBareGitHubPAT both miss it.
+	reBareHexUserinfo = regexp.MustCompile(`([a-zA-Z][a-zA-Z0-9+.-]*://)([0-9a-fA-F]{40,})@`)
+	// reBareGitHubPAT scrubs bare GitHub PAT tokens (ghp_ personal, gho_
+	// OAuth, ghu_ user-to-server, github_pat_ fine-grained) that are not
+	// embedded in a URL.
+	reBareGitHubPAT = regexp.MustCompile(`\b(gh[pous]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{50,})\b`)
+)
+
+// redactCredentials scrubs credentials from text that may be printed or
+// recorded: URL userinfo (scheme://user:token@host -> scheme://user:***@host,
+// and a bare hex token as the whole userinfo -> scheme://***@host) plus bare
+// GitHub PAT tokens.
+func redactCredentials(s string) string {
+	s = reURLCredentials.ReplaceAllString(s, "${1}${2}:***@")
+	s = reBareHexUserinfo.ReplaceAllString(s, "${1}***@")
+	return reBareGitHubPAT.ReplaceAllString(s, "[REDACTED]")
+}
+
+// --- Signal-safe .git aside restore (audit H1) --------------------------------
+//
+// Diff() moves the source repo's .git aside (to the parent dir or temp) while
+// running git diff --no-index, and must put it back. Restore now happens on
+// three paths: the normal defer, a SIGINT/SIGTERM handler, and (as a last
+// resort) detection of orphaned asides by the next execution start.
+
+var (
+	gitAsideSignalOnce sync.Once
+	gitAsideMu         sync.Mutex
+	gitAsideRegistry   = map[string]string{} // hidden path -> original path
+)
+
+// trackGitAside registers a moved-aside .git directory so a signal handler
+// can restore it, and installs the handler on first use.
+func trackGitAside(hidden, original string) {
+	gitAsideMu.Lock()
+	gitAsideRegistry[hidden] = original
+	gitAsideMu.Unlock()
+	ensureGitAsideSignalRestore()
+}
+
+// restoreGitAside moves a hidden .git directory back into place and
+// unregisters it. Safe to call more than once (second call is a no-op).
+func restoreGitAside(hidden, original string) {
+	gitAsideMu.Lock()
+	if _, ok := gitAsideRegistry[hidden]; !ok {
+		gitAsideMu.Unlock()
+		return
+	}
+	delete(gitAsideRegistry, hidden)
+	gitAsideMu.Unlock()
+	_ = os.Rename(hidden, original)
+}
+
+// restoreAllGitAsides restores every registered aside. Used by the signal
+// handler so an interrupt cannot strand the repo without its .git.
+func restoreAllGitAsides() {
+	gitAsideMu.Lock()
+	defer gitAsideMu.Unlock()
+	for hidden, original := range gitAsideRegistry {
+		_ = os.Rename(hidden, original)
+	}
+	gitAsideRegistry = map[string]string{}
+}
+
+// ensureGitAsideSignalRestore installs a SIGINT/SIGTERM handler that restores
+// all moved-aside .git directories, then re-raises the signal with default
+// disposition so the process exits with the conventional 128+signal code.
+func ensureGitAsideSignalRestore() {
+	gitAsideSignalOnce.Do(func() {
+		ch := make(chan os.Signal, 2)
+		signal.Notify(ch, os.Interrupt, syscall.SIGTERM)
+		go func() {
+			s := <-ch
+			restoreAllGitAsides()
+			signal.Stop(ch)
+			if p, err := os.FindProcess(os.Getpid()); err == nil {
+				_ = p.Signal(s)
+			}
+			time.Sleep(200 * time.Millisecond)
+			os.Exit(1)
+		}()
+	})
+}
+
+// --- Orphaned aside detection (audit H1) --------------------------------------
+
+// repoHash8 returns a stable 8-hex-char identity of the repo path so
+// orphaned git-aside detection only warns about asides belonging to THIS
+// repo — a concurrent `kern execute` in a different repo (whose aside sits in
+// the same shared parent or temp dir) must not trip the warning. Legacy
+// asides created before the suffix existed carry no repo identity and are
+// still reported, conservatively.
+func repoHash8(root string) string {
+	abs, err := filepath.Abs(root)
+	if err != nil {
+		abs = root
+	}
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(filepath.Clean(abs)))
+	return fmt.Sprintf("%08x", h.Sum32())
+}
+
+// isGitAsideForRepo reports whether an aside directory name (after the
+// prefix) belongs to the repo identified by wantHash. Names with 3+ dash
+// fields end in the repo hash (pid-ts-hash); 2-field legacy names have no
+// identity and always match (conservative).
+func isGitAsideForRepo(name, prefix, wantHash string) bool {
+	fields := strings.Split(strings.TrimPrefix(name, prefix), "-")
+	if len(fields) >= 3 {
+		return fields[len(fields)-1] == wantHash
+	}
+	return true // legacy aside (pre-suffix) — report conservatively
+}
+
+// findOrphanedGitAsides returns aside directories (in the repo's parent or in
+// the temp dir) that a crashed Diff left behind. They hold the repo's .git and
+// may contain credentials, so they are named but never auto-deleted. Only
+// asides carrying this repo's identity (or legacy no-identity ones) are
+// reported — another repo's live aside is not ours to warn about.
+func findOrphanedGitAsides(srcRoot string) []string {
+	var orphans []string
+	want := repoHash8(srcRoot)
+	parent := filepath.Dir(srcRoot)
+	if entries, err := os.ReadDir(parent); err == nil {
+		for _, e := range entries {
+			if e.IsDir() && strings.HasPrefix(e.Name(), ".kern-git-aside-") && isGitAsideForRepo(e.Name(), ".kern-git-aside-", want) {
+				orphans = append(orphans, filepath.Join(parent, e.Name()))
+			}
+		}
+	}
+	if entries, err := os.ReadDir(os.TempDir()); err == nil {
+		for _, e := range entries {
+			if e.IsDir() && strings.HasPrefix(e.Name(), "kern-git-aside-") && isGitAsideForRepo(e.Name(), "kern-git-aside-", want) {
+				orphans = append(orphans, filepath.Join(os.TempDir(), e.Name()))
+			}
+		}
+	}
+	return orphans
+}
+
+// warnOrphanedGitAsides prints a WARNING naming every orphaned git-aside
+// directory and how to restore it manually. It never deletes anything.
+func warnOrphanedGitAsides(srcRoot string) {
+	orphans := findOrphanedGitAsides(srcRoot)
+	if len(orphans) == 0 {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "WARNING: %d orphaned git-aside director(ies) from a previously interrupted `kern execute` — the repo may be missing its .git:\n", len(orphans))
+	for _, o := range orphans {
+		fmt.Fprintf(os.Stderr, "  - %s\n", o)
+	}
+	fmt.Fprintln(os.Stderr, "  To restore manually: move each aside back to its repo's .git, e.g. `mv <aside> <repo>/.git`. They are NOT auto-deleted.")
 }

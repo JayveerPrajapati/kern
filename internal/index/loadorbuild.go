@@ -17,27 +17,47 @@ import "log"
 // rebuild when its fresh-skip check proves the persisted index current and
 // only calls Build directly when the index is missing/stale or --force is
 // given (cmd_index.go).
+//
+// The stale/missing path is debounced across processes (M3): concurrent kern
+// invocations that detect the same staleness share ONE rebuild instead of
+// each paying the full 12-16s cost. The rebuild runs under the exclusive
+// cross-process build lock (.kern/locks/index-build.lock); waiters poll for
+// the holder to finish, then re-check freshness and reuse the holder's
+// index. The fast fresh-load path stays lock-free.
 func LoadOrBuild(root string) (*Index, error) {
-	var prev *Index
 	if ix, err := Load(root); err == nil && ix != nil {
 		if !ix.Stale() {
 			return ix, nil
 		}
-		prev = ix
 	}
-	if prev != nil {
-		if ix, err := Update(root, prev); err == nil && ix != nil {
+	return debouncedRebuild(root,
+		func() (*Index, bool) {
+			ix, err := Load(root)
+			if err != nil || ix == nil {
+				return nil, false
+			}
+			return ix, !ix.Stale()
+		},
+		func() (*Index, error) {
+			// Re-load the previous index under the lock: the pre-lock
+			// snapshot may be outdated (another process rebuilt while we
+			// waited), so it is not a safe incremental-Update base. Update
+			// is content-addressed, so an index another process just built
+			// is reused verbatim and an older one is re-parsed only where
+			// it differs from the current tree.
+			if prev, err := Load(root); err == nil && prev != nil {
+				if ix, err := Update(root, prev); err == nil && ix != nil {
+					saveOrWarn(ix)
+					return ix, nil
+				}
+			}
+			ix, err := Build(root)
+			if err != nil {
+				return nil, err
+			}
 			saveOrWarn(ix)
 			return ix, nil
-		}
-		// Fall through to a full Build on nil/corrupt prev or Update error.
-	}
-	ix, err := Build(root)
-	if err != nil {
-		return nil, err
-	}
-	saveOrWarn(ix)
-	return ix, nil
+		})
 }
 
 // saveOrWarn persists ix, logging loudly on failure: a silent skip means the

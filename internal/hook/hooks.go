@@ -16,6 +16,12 @@ import (
 
 const maxDiffLines = 200
 
+// kernManagedMarker identifies hook files installed by kern (local
+// .git/hooks scripts and the global ~/.kern/git-hooks scripts). Install and
+// Uninstall both rely on it so a kern-managed hook can be overwritten or
+// removed while a user-authored hook is never touched.
+const kernManagedMarker = "# kern:"
+
 // Install writes a post-commit hook into the repo at root.
 func Install(root string) error {
 	if !isGitRepo(root) {
@@ -26,17 +32,28 @@ func Install(root string) error {
 		return err
 	}
 	hook := filepath.Join(hookDir, "post-commit")
+	// Resolve kern through PATH at runtime so the hook keeps working when the
+	// installing binary is moved or upgraded (the recorded absolute path is
+	// only a fallback). An explicit KERN_BINARY env override wins, matching
+	// the global hook scripts' semantics.
 	script := fmt.Sprintf(`#!/bin/sh
 # kern: compress the new commit's diff into project memory (installed by kern hook install)
-"%s" hook store --range "HEAD~1..HEAD" >/dev/null 2>&1 || true
+# Resolve kern via PATH at runtime (KERN_BINARY env override wins); fall back
+# to the path recorded at install time only when PATH resolution fails, so
+# the hook survives binary relocation.
+kern_bin="${KERN_BINARY:-}"
+if [ -z "$kern_bin" ]; then
+  kern_bin=$(command -v kern 2>/dev/null) || kern_bin="%s"
+fi
+"$kern_bin" hook store --range "HEAD~1..HEAD" >/dev/null 2>&1 || true
 `, kernBinPath())
 	// Refuse to clobber an existing user-authored hook. A kern-installed hook
-	// is identified by its "# kern:" marker, so re-running install (e.g. after
-	// an upgrade) overwrites cleanly. The marker is on the second line (after
-	// the #!/bin/sh shebang), so it is detected with Contains rather than
-	// HasPrefix.
+	// is identified by its kernManagedMarker, so re-running install (e.g.
+	// after an upgrade) overwrites cleanly. The marker is on the second line
+	// (after the #!/bin/sh shebang), so it is detected with Contains rather
+	// than HasPrefix.
 	if b, err := os.ReadFile(hook); err == nil {
-		if !strings.Contains(string(b), "# kern:") {
+		if !strings.Contains(string(b), kernManagedMarker) {
 			return fmt.Errorf("post-commit hook already exists at %s and is not kern-managed; remove it first or merge manually", hook)
 		}
 	}
@@ -44,6 +61,39 @@ func Install(root string) error {
 		return err
 	}
 	return nil
+}
+
+// Uninstall removes kern-installed hooks from the repo's .git/hooks. Only
+// hook files carrying a kern-installed marker are removed; a user-authored
+// hook (or any other foreign script) is left untouched and reported as an
+// error so the caller can refuse loudly. Returns the names of the hooks
+// removed ("" slice when nothing kern-managed was present).
+func Uninstall(root string) ([]string, error) {
+	if !isGitRepo(root) {
+		return nil, fmt.Errorf("%s is not a git repository", root)
+	}
+	hookDir := filepath.Join(root, ".git", "hooks")
+	var removed []string
+	// post-commit is what `kern hook install` writes; pre-commit/pre-push are
+	// what `kern install hook` writes. Both carry kern markers.
+	for _, name := range []string{"post-commit", "pre-commit", "pre-push"} {
+		p := filepath.Join(hookDir, name)
+		b, err := os.ReadFile(p)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return removed, err
+		}
+		if !strings.Contains(string(b), kernManagedMarker) && !strings.Contains(string(b), "# Blueprint") {
+			return removed, fmt.Errorf("%s exists and is not kern-managed; refusing to remove it — remove it manually if you intend to", p)
+		}
+		if err := os.Remove(p); err != nil {
+			return removed, err
+		}
+		removed = append(removed, name)
+	}
+	return removed, nil
 }
 
 func isGitRepo(root string) bool {

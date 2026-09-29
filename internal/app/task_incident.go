@@ -41,7 +41,7 @@ func (s *TaskService) correlator() *runtime.SharedCorrelator {
 // The correlation is deterministic — the LLM may explain it, but the chain is
 // derived from the runtime source and git history, not an LLM guess.
 func (s *TaskService) Correlate(alert domain.Alert) (*agent.Task, runtime.CorrelationChain, string, error) {
-	t, err := s.Create(fmt.Sprintf("correlate alert: %s", alert.Message))
+	t, err := s.createWorkflowTask(fmt.Sprintf("correlate alert: %s", alert.Message))
 	if err != nil {
 		return nil, runtime.CorrelationChain{}, "", err
 	}
@@ -85,7 +85,7 @@ func (s *TaskService) Correlate(alert domain.Alert) (*agent.Task, runtime.Correl
 // deterministic — the chain and the code mapping are derived from the runtime
 // source, git history and graph, not an LLM.
 func (s *TaskService) CorrelateCode(alert domain.Alert) (*agent.Task, Correlation, string, error) {
-	t, err := s.Create(fmt.Sprintf("correlate alert (code): %s", alert.Message))
+	t, err := s.createWorkflowTask(fmt.Sprintf("correlate alert (code): %s", alert.Message))
 	if err != nil {
 		return nil, Correlation{}, "", err
 	}
@@ -131,7 +131,7 @@ func (s *TaskService) CorrelateCode(alert domain.Alert) (*agent.Task, Correlatio
 // The incident engine reuses Task, Artifact, Event, Policy, Memory, Evidence,
 // and Verification — it does not create a separate lifecycle framework.
 func (s *TaskService) InvestigateIncident(alert domain.Alert) (*agent.Task, *domain.Incident, string, error) {
-	t, err := s.Create(fmt.Sprintf("investigate incident: %s", alert.Message))
+	t, err := s.createWorkflowTask(fmt.Sprintf("investigate incident: %s", alert.Message))
 	if err != nil {
 		return nil, nil, "", err
 	}
@@ -205,7 +205,7 @@ func (s *TaskService) InvestigateIncident(alert domain.Alert) (*agent.Task, *dom
 // recorded in the approval workflow + bus). Returns the task, the remediated
 // incident (status FIX_VERIFIED/PR_CREATED), and a rendered summary.
 func (s *TaskService) RemediateIncident(alert domain.Alert, apply func(workDir string) error, branch, approver string) (*agent.Task, *domain.Incident, string, error) {
-	t, err := s.Create(fmt.Sprintf("remediate incident: %s", alert.Message))
+	t, err := s.createWorkflowTask(fmt.Sprintf("remediate incident: %s", alert.Message))
 	if err != nil {
 		return nil, nil, "", err
 	}
@@ -297,7 +297,7 @@ func (s *TaskService) Learn(threshold int) (*agent.Task, []learning.Pattern, str
 	if threshold <= 0 {
 		threshold = 3
 	}
-	t, err := s.Create("extract learning patterns")
+	t, err := s.createWorkflowTask("extract learning patterns")
 	if err != nil {
 		return nil, nil, "", err
 	}
@@ -357,7 +357,7 @@ func (s *TaskService) Learn(threshold int) (*agent.Task, []learning.Pattern, str
 // impact → risk → migration plan → executable tasks. Each extraction phase
 // becomes a Task or Task Group.
 func (s *TaskService) Modernize() (*agent.Task, modernization.ExtractionPlan, string, error) {
-	t, err := s.Create("modernization analysis")
+	t, err := s.createWorkflowTask("modernization analysis")
 	if err != nil {
 		return nil, modernization.ExtractionPlan{}, "", err
 	}
@@ -432,7 +432,7 @@ func (s *TaskService) ModernizePhaseTasks(plan modernization.ExtractionPlan, par
 	var out []*agent.Task
 	for i := range plan.Phases {
 		phase := &plan.Phases[i]
-		pt, err := s.Create(fmt.Sprintf("modernize phase %d: extract %s", phase.Phase, phase.Context))
+		pt, err := s.createWorkflowTask(fmt.Sprintf("modernize phase %d: extract %s", phase.Phase, phase.Context))
 		if err != nil {
 			return out, err
 		}

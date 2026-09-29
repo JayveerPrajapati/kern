@@ -49,8 +49,16 @@ func resolveCommandAndFlags() (cmd string, rest []string) {
 	// per-command help and exits 0 instead of being dispatched to a
 	// subcommand handler. Only genuinely unknown commands (including bare
 	// `kern --help`) fall back to the global usage text — still exit 0.
+	// Audit L9: `kern <unknown> --help` must NOT exit 0 — command-existence
+	// probes treat exit 0 as "the command exists". The unknown subcommand
+	// gets the unknown-command error (exit 2); only kern's own --help/-h
+	// (no subcommand) falls back to the global usage with exit 0.
 	if cmd == "--help" || cmd == "-h" || hasFlag(rest, "--help") || hasFlag(rest, "-h") {
 		if !printCommandHelp(cmd) {
+			if cmd != "--help" && cmd != "-h" {
+				printUnknownCommand(cmd)
+				os.Exit(2)
+			}
 			usage()
 		}
 		os.Exit(0)

@@ -19,9 +19,15 @@ import (
 // type is skipped (so shared method names don't block), and one whose receiver
 // type cannot be proven refuses the entire rename.
 func RenameMethod(ix *index.Index, oldName, newName string, r *Report) (*Report, error) {
+	if ix == nil {
+		return nil, fmt.Errorf("no index")
+	}
 	if !token.IsIdentifier(newName) || token.Lookup(newName).IsKeyword() {
 		return nil, fmt.Errorf("%q is not a valid Go identifier", newName)
 	}
+	// Same C1 contract as Rename: edits stay index-relative and Apply
+	// re-roots them under the current caller root.
+	r.IndexRoot = ix.Root
 	if oldName == newName {
 		return nil, fmt.Errorf("new name equals old name")
 	}
@@ -112,7 +118,8 @@ func splitMethodName(name string) (typeName, methodName string, ok bool) {
 }
 
 // renameMethodFile parses one Go file, returning its edits and the list of
-// "file:line" references whose receiver type could not be proven.
+// "file:line" references whose receiver type could not be proven. Edits carry
+// the index-relative path (Apply re-roots against the current caller root).
 func renameMethodFile(ix *index.Index, abs, typeName, methodName, newName string) ([]Edit, []string) {
 	src, err := os.ReadFile(abs)
 	if err != nil {
@@ -142,7 +149,7 @@ func renameMethodFile(ix *index.Index, abs, typeName, methodName, newName string
 				}
 				pos := fset.Position(v.Name.Pos())
 				edits = append(edits, Edit{
-					File: abs, Line: pos.Line, Col: pos.Column, Offset: pos.Offset,
+					File: rel, Line: pos.Line, Col: pos.Column, Offset: pos.Offset,
 					Old: methodName, New: newName, Kind: "definition",
 				})
 				break
@@ -156,7 +163,7 @@ func renameMethodFile(ix *index.Index, abs, typeName, methodName, newName string
 				// Provably on typeName — rename this reference.
 				pos := fset.Position(v.Sel.Pos())
 				edits = append(edits, Edit{
-					File: abs, Line: pos.Line, Col: pos.Column, Offset: pos.Offset,
+					File: rel, Line: pos.Line, Col: pos.Column, Offset: pos.Offset,
 					Old: methodName, New: newName, Kind: "reference",
 				})
 				return true
@@ -166,7 +173,7 @@ func renameMethodFile(ix *index.Index, abs, typeName, methodName, newName string
 				return true
 			}
 			// Genuinely unprovable — refuse the whole rename.
-			unproven = append(unproven, fmt.Sprintf("%s:%d", abs, fset.Position(v.Sel.Pos()).Line))
+			unproven = append(unproven, fmt.Sprintf("%s:%d", rel, fset.Position(v.Sel.Pos()).Line))
 		}
 		return true
 	})

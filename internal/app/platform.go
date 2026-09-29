@@ -480,12 +480,22 @@ func (p *Platform) runtimeEvidenceFor(target string) []string {
 
 // Verify runs the verification engine against the requested types (default
 // "build,test") and returns the unified result. Shared by kern verify (CLI),
-// kern_verify (MCP), and POST /v1/verify (REST).
-func (p *Platform) Verify(types []string) verification.VerificationResult {
+// kern_verify (MCP), and POST /v1/verify (REST). Options (e.g.
+// verification.FullTests for the complete test suite) are applied to a copy
+// of the shared engine so concurrent callers never race on engine state.
+func (p *Platform) Verify(types []string, opts ...verification.Option) verification.VerificationResult {
 	if len(types) == 0 {
 		types = []string{"build", "test"}
 	}
-	return p.ver.Verify(types)
+	eng := p.ver
+	if len(opts) > 0 {
+		e := *p.ver
+		for _, o := range opts {
+			o(&e)
+		}
+		eng = &e
+	}
+	return eng.Verify(types)
 }
 
 // resolveSymbol normalizes a change description into a bare symbol name. If

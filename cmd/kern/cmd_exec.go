@@ -511,6 +511,12 @@ func runExec(rest []string) {
 	if f.json {
 		printJSON(res)
 		if res.Err != nil {
+			// Dogfooding C-LOW: an undetectable language is a MISSING
+			// REQUIRED ARGUMENT (--lang), a usage error — exit 2, not the
+			// runtime-error 1. The runtime/script errors stay at 1.
+			if isUsageExecError(res.Err) {
+				fatalUsage("exec: %v", res.Err)
+			}
 			fatal("exec: %v", res.Err)
 		}
 		return
@@ -520,9 +526,23 @@ func runExec(rest []string) {
 		fmt.Println()
 	}
 	if res.Err != nil {
+		// Dogfooding C-LOW: an undetectable language is a MISSING REQUIRED
+		// ARGUMENT (--lang), a usage error — exit 2, not the runtime-error 1.
+		if isUsageExecError(res.Err) {
+			fatalUsage("exec: %v", res.Err)
+		}
 		fatal("exec: %v", res.Err)
 	}
 	fmt.Fprintf(os.Stderr, "kern exec: %s ok (%s, %d bytes stdout)\n", res.Runtime, res.Duration.Round(time.Millisecond), len(res.Stdout))
+}
+
+// isUsageExecError classifies a script-run error as a usage error (exit 2)
+// vs a runtime error (exit 1). An undetectable language is a MISSING REQUIRED
+// ARGUMENT (--lang) — the caller's fault, so it maps to the usage exit like
+// every other missing-required-arg case (dogfooding C-LOW: it used to exit 1,
+// the runtime-error code, contradicting the exit-code contract).
+func isUsageExecError(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "cannot detect language")
 }
 
 // healPlaybookStore adapts incident.PlaybookStore to heal.Playbook so the

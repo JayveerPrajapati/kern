@@ -170,13 +170,11 @@ func (e *Engine) IngestAlert(a domain.Alert) *domain.Incident {
 
 // sanitizeAlert normalizes and bounds untrusted alert fields so a client cannot
 // inject fabricated evidence or force correlation onto an arbitrary service:
-// - unknown/absent severity is clamped to the known enum;
+// - severity is folded onto the canonical enum (normalizeSeverity);
 // - a missing or implausibly-future OccurredAt (>24h ahead) is replaced with now;
 // - the service name is bounded to 200 chars.
 func sanitizeAlert(a domain.Alert) domain.Alert {
-	if !validSeverity(a.Severity) {
-		a.Severity = domain.SeverityInfo
-	}
+	a.Severity = normalizeSeverity(a.Severity)
 	if a.OccurredAt.IsZero() || a.OccurredAt.After(time.Now().Add(24*time.Hour)) {
 		a.OccurredAt = time.Now().UTC()
 	}
@@ -186,13 +184,30 @@ func sanitizeAlert(a domain.Alert) domain.Alert {
 	return a
 }
 
-// validSeverity reports whether s is one of the canonical severity values.
-func validSeverity(s domain.Severity) bool {
-	switch s {
-	case domain.SeverityCritical, domain.SeverityError, domain.SeverityWarning, domain.SeverityInfo:
-		return true
+// normalizeSeverity folds an alert's severity string onto the canonical
+// incident-severity enum, mapping the common tiered aliases onto the closest
+// canonical tier (L14: "high" previously fell through the four-value
+// validSeverity check and was clamped to "info", downgrading real alerts):
+//
+//	critical, fatal, emergency   -> critical
+//	error, high, major           -> error      (high = error-tier)
+//	warning, medium, warn        -> warning    (medium = warning-tier)
+//	info, low, minor             -> info       (low = info-tier)
+//
+// Unknown or absent severities clamp to info so a malformed alert can never
+// fabricate a higher-priority incident than its payload warrants.
+func normalizeSeverity(s domain.Severity) domain.Severity {
+	switch strings.ToLower(strings.TrimSpace(string(s))) {
+	case string(domain.SeverityCritical), "fatal", "emergency":
+		return domain.SeverityCritical
+	case string(domain.SeverityError), "high", "major":
+		return domain.SeverityError
+	case string(domain.SeverityWarning), "medium", "warn":
+		return domain.SeverityWarning
+	case string(domain.SeverityInfo), "low", "minor":
+		return domain.SeverityInfo
 	}
-	return false
+	return domain.SeverityInfo
 }
 
 // Correlate maps the incident's alert to the affected service and gathers the

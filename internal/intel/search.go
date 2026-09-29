@@ -257,7 +257,23 @@ func RankedSearch(ix *index.Index, query string, limit int) []index.Symbol {
 }
 
 // RankedSearchScored returns symbols matching a free-text query with their match scores.
+// The single-token identifier gate (P0-1) applies: an identifier-shaped query
+// that names no real symbol returns zero hits so resolution stays honest.
 func RankedSearchScored(ix *index.Index, query string, limit int) []RepoHit {
+	return rankedSearchScored(ix, query, limit, true)
+}
+
+// CloseCandidates returns the top ranked-search hits for a query WITHOUT the
+// single-token identifier gate (P0-1). The gate exists to stop garbage
+// identifiers from RESOLVING to unrelated fuzzy hits; a did-you-mean /
+// "close candidates" list is not a resolution — it is explicitly labeled, so
+// the agent sees what the index contains near the query and can correct the
+// follow-up search. Mirrors kern impact's closest-candidates machinery.
+func CloseCandidates(ix *index.Index, query string, limit int) []RepoHit {
+	return rankedSearchScored(ix, query, limit, false)
+}
+
+func rankedSearchScored(ix *index.Index, query string, limit int, gate bool) []RepoHit {
 	if limit <= 0 {
 		limit = 50
 	}
@@ -283,6 +299,16 @@ func RankedSearchScored(ix *index.Index, query string, limit int) []RepoHit {
 		lowerFulls[i] = strings.ToLower(s.FullName())
 		lowerFiles[i] = strings.ToLower(s.File)
 	}
+	// joined is the query's words concatenated — the identifier form that
+	// queryWords' camelCase split started from ("stateMachine" -> joined
+	// "statemachine"). Used for exact-name scoring below and by the
+	// single-token gate.
+	joined := strings.Join(words, "")
+	// identifierShaped reports whether the raw query is a single no-space
+	// token ("NewServer", "stateMachine", "NoSuchSymbol12345") rather than
+	// prose ("load index", "login handler"). Identifier-shaped queries get
+	// the strict no-match gate below; prose keeps the forgiving fuzzy path.
+	identifierShaped := len(strings.Fields(query)) == 1
 	segCache := map[string][]string{}
 	var hits []RepoHit
 	for i, s := range ix.Symbols {
@@ -311,8 +337,9 @@ func RankedSearchScored(ix *index.Index, query string, limit int) []RepoHit {
 		// F-SE1: an exact-name hit IS the definition — it must outrank any
 		// longer symbol that merely contains the query (agents take the top
 		// hit, and TestWriteFileAtomic must never shadow WriteFileAtomic).
-		// queryWords camelCase-splits, so compare the JOINED query too.
-		if joined := strings.Join(words, ""); joined != "" {
+		// queryWords camelCase-splits, so compare the JOINED query too
+		// (joined is hoisted above the loop: identical every iteration).
+		if joined != "" {
 			if joined == name || joined == full {
 				score += 200
 			}
@@ -332,6 +359,21 @@ func RankedSearchScored(ix *index.Index, query string, limit int) []RepoHit {
 		}
 		hits = append(hits, RepoHit{Symbol: s, Score: score, MatchedAll: matched == len(words)})
 	}
+	// Single-token identifier gate (P0-1): an identifier-shaped query names
+	// one specific symbol, so it must not resolve to coincidental partial
+	// matches. "NoSuchSymbol12345" camelCase-splits to no/such/symbol12345
+	// and the 2-char "no" segment used to match ErrNoProvider — garbage
+	// identifiers always returned unrelated fuzzy hits with exit 0, and an
+	// agent trusted the top hit as the answer. When NO hit matched every
+	// query word (MatchedAll) and no hit's name exactly equals or starts
+	// with the joined query, the identifier does not exist in this index:
+	// return zero hits so the caller's no-match path (exit 1 + did-you-mean)
+	// fires. Prose queries (spaces) and single-word queries (any hit is
+	// MatchedAll) are untouched. With gate=false (CloseCandidates) the gate is
+	// skipped so a did-you-mean list can still show partial fuzzy hits.
+	if gate && identifierShaped && !hasStrongIdentifierMatch(hits, joined) {
+		return nil
+	}
 	sort.Slice(hits, func(i, j int) bool {
 		if hits[i].Score != hits[j].Score {
 			return hits[i].Score > hits[j].Score
@@ -345,6 +387,30 @@ func RankedSearchScored(ix *index.Index, query string, limit int) []RepoHit {
 		hits = hits[:limit]
 	}
 	return hits
+}
+
+// hasStrongIdentifierMatch reports whether any hit is strong evidence that an
+// identifier-shaped query (a single no-space token) names a real symbol in
+// this index. Strong means the hit matched EVERY query word (MatchedAll — e.g.
+// "NewServer" splitting to new+server) or its name exactly equals / starts
+// with the joined camelCase query ("NewServ" still prefix-matches
+// NewServer). Coincidental segment or substring hits ("no" -> ErrNoProvider)
+// are NOT strong: they are why garbage identifiers like "NoSuchSymbol12345"
+// used to return unrelated fuzzy results with exit 0.
+func hasStrongIdentifierMatch(hits []RepoHit, joined string) bool {
+	if joined == "" {
+		return false
+	}
+	for _, h := range hits {
+		if h.MatchedAll {
+			return true
+		}
+		name := strings.ToLower(h.Symbol.Name)
+		if name == joined || strings.HasPrefix(name, joined) {
+			return true
+		}
+	}
+	return false
 }
 
 // queryWords splits and normalizes a free-text query into matchable words:

@@ -1,7 +1,7 @@
 ---
 name: kern-investigate
 description: >-
-  Investigate symbols, architecture, dependencies, or blast radius in a repository using kern's prebuilt index instead of slow file reads and greps.
+Use for any 'how does X work', 'where is X', 'who calls X', 'what depends on X', or 'what breaks if I change X' question. Query kern's prebuilt symbol index and call graph - project map, symbol search, explore/graph, token-sized code slices, blast-radius simulation - instead of slow whole-file reads and grep loops.
 ---
 
 <!-- canonical source: internal/skills/assets/kern-investigate/SKILL.md; copies must stay identical — run kern setup to sync -->
