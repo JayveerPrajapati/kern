@@ -13,6 +13,7 @@
 [![Dependencies: Minimal](https://img.shields.io/badge/Dependencies-Minimal_(stdlib%2Bsqlite%2Byaml)-brightgreen.svg)](#how-it-works)
 
 [![opencode](https://img.shields.io/badge/opencode-supported-blueviolet.svg)](#supported-ecosystem)
+[![Antigravity](https://img.shields.io/badge/Antigravity-supported-blueviolet.svg)](#supported-ecosystem)
 [![Claude Code](https://img.shields.io/badge/Claude_Code-supported-blueviolet.svg)](#supported-ecosystem)
 [![Cursor](https://img.shields.io/badge/Cursor-supported-blueviolet.svg)](#supported-ecosystem)
 [![Codex](https://img.shields.io/badge/Codex-supported-blueviolet.svg)](#supported-ecosystem)
@@ -147,8 +148,14 @@ org-wide policy, approvals and RBAC):
 See `docs/configuration.md` → "Org governance environment variables" for the
 full blast radius.
 
-The installer ships the pure-Go **sqlite** build; the tree-sitter indexer
-requires CGO and a from-source build (`make install-treesitter`).
+The installer's prebuilt release binaries ship the **pure-Go** build
+(SQLite + regex-heuristic extraction — compiled with `-tags sqlite,notreesitter`),
+because cross-compiled tarballs cannot include tree-sitter: its grammar
+bindings are hard-CGO, and each release target would need its own C
+toolchain. The default **from-source** build (`make build`) DOES include
+the tree-sitter indexer and requires CGO (a C compiler). Opt out to the
+pure-Go build with `make build-purego` / `make install-purego`, or set
+`KERN_PUREGO=1` when the installer falls back to `go install`.
 
 <details>
 <summary><b>Other install options (Homebrew, Go install, Source)</b></summary>
@@ -157,22 +164,25 @@ requires CGO and a from-source build (`make install-treesitter`).
 # Homebrew
 brew install --build-from-source ./homebrew/kern.rb
 
-# Go Install (Go 1.25+)
+# Go Install (Go 1.25+; the default build includes tree-sitter and needs a
+# C toolchain — add -tags notreesitter for the pure-Go build, or set
+# KERN_PUREGO=1 when installing via install.sh/install.ps1)
 go install github.com/JayveerPrajapati/kern/cmd/kern@latest
 go install github.com/JayveerPrajapati/kern/cmd/kern-mcp@latest
 go install github.com/JayveerPrajapati/kern/cmd/kern-server@latest
 
-# Build from source
+# Build from source (default = tree-sitter + CGO; make build-purego for pure-Go)
 make build  # Produces bin/kern, bin/kern-mcp, bin/kern-server
 ```
 </details>
 
 ### 2. Connect to Your Agent
 
-Auto-configure Claude Code, Cursor, Gemini CLI, Codex, VS Code, Windsurf, and all MCP clients:
+Auto-configure Antigravity, Claude Code, Cursor, OpenCode, Gemini CLI, Codex, VS Code, Windsurf, Copilot, and all MCP clients:
 
 ```bash
-kern setup
+kern setup           # Project-level MCP config & usage rules
+kern setup --global  # Machine-wide: wires all agents + global git commit protection
 ```
 
 ### 3. Initialize & Index
@@ -206,6 +216,23 @@ functions through the MCP tools):
 
 Agents get the same answers via `kern_search`, `kern_optimize_prompt`,
 `kern_optimize_log`, `kern_impact`, `kern_review`, `kern_doctor`.
+
+### 6. Autonomous Interception & Emergency Break-Glass
+
+`kern` acts as a zero-intervention governance layer across all connected AI agents and Git repositories on your machine:
+
+* **Autonomous Pre-Tool Interceptor:** Naive tool calls (`view_file`, `read_file`, `grep`, `run_command`, `bash`) in **Antigravity (`agy`)**, **OpenCode**, **Cursor**, **Claude Code**, etc., are automatically intercepted and redirected to token-dense `kern_*` tools (`kern_compact_file`, `kern_search`, `kern_validate`).
+* **Machine-Wide Git Firewall:** Every `git commit` in any repository on disk runs fast staged validation (`kern check --staged --fast`) to prevent secret leaks and architectural boundary violations. `post-commit` automatically records diffs into project memory (`.kern/memory/`).
+* **Emergency Break-Glass Override:** For P0 production incidents, bypass all gates instantly:
+  ```bash
+  # Single-command hotfix:
+  KERN_BYPASS=1 KERN_BYPASS_REASON="P0 hotfix" git commit -m "fix: emergency db failover"
+
+  # Or export for the active terminal session:
+  export KERN_BYPASS=1
+  # (or export KERN_ENFORCE=0)
+  ```
+  Emergency bypasses allow the action immediately, downgrade hard blocks to advisory warnings, and log an auditable SHA-256 record to `.kern/audit/ledger.jsonl`.
 
 ---
 
@@ -279,7 +306,7 @@ flowchart LR
     D -->|"5. Minimal Surgical Slice<br/>(45–80% tokens saved)"| A
 ```
 
-1. **Extraction & Indexing** — `go/ast` parses Go precisely; a zero-dependency heuristic extractor covers 16 more languages; `-tags treesitter` adds deep tree-sitter grammars for 14 languages.
+1. **Extraction & Indexing** — `go/ast` parses Go precisely; the default build compiles in deep tree-sitter grammars for 14 languages (requires CGO); `-tags notreesitter` opts out to a zero-dependency regex-heuristic extractor that covers 16 more languages.
 2. **Deterministic Storage** — Content-hash-verified index cached under `~/.cache/kern/`, with SQLite WAL + FTS5 full-text search compiled in by default.
 3. **Deep Graph Intelligence** — 200+ CLI commands and MCP tools compute call graphs, blast radius, change impact, dead code, hotspots, and architecture boundaries.
 4. **Autonomous Auto-Sync** — File-event watchers (inotifywait/fswatch + polling fallback) update the index on save, backed by staleness checks on every read.
@@ -441,7 +468,7 @@ The verdict shape is stable: `passed` mirrors the exit code, `checks[]` has one 
 
 Go · Python · JavaScript (JSX) · TypeScript (TSX) · Rust · C · C++ · C# · Java · Ruby · PHP · Shell · CSS/SCSS/Less · HTML · Markdown · JSON · YAML
 
-*SFCs (Vue, Svelte, Astro) extract `<script>` blocks automatically. 14 languages support deep tree-sitter grammars via `-tags treesitter`.*
+*SFCs (Vue, Svelte, Astro) extract `<script>` blocks automatically. 14 languages use deep tree-sitter grammars in the default build; `-tags notreesitter` falls back to regex heuristics for them.*
 </details>
 
 <details>

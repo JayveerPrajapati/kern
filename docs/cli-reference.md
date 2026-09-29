@@ -105,7 +105,8 @@ kern policy-dsl --policy <policy.json>            declarative policy-as-code eva
 kern agent-coordination (claim|release|list)      multi-agent workspace claims with TTL and handoffs
 kern agent-role-rbac                              role-based tool access control
 kern stream                                       response token chunking and streaming
-kern ast-transform <file> [--add-field|...]       deterministic AST-level transformations
+kern ast-transform <action> --file F [--apply] [--json]   deterministic AST-level transformations
+                                                (actions: implement_interface|add_field|add_method)
 kern semantic-merge --base <b> --local <l> --remote <r>   AST-aware 3-way semantic merge
 kern synthesize-test <symbol> [--file <file>]     synthesize table-driven unit tests from signatures
 kern health                                       MCP server health and index freshness report
@@ -127,7 +128,6 @@ kern approve [--approver ID] [--reason TEXT] [--reject]   resolve an approval ga
 kern deploy <task-id> [--version V]                deploy a task (real deploys require approval)
 kern org [--project NAME=PATH]... <subcommand>     enterprise org admin (projects/agents/teams/memory/audit/search)
 kern policy <set|get|apply> [--root R] [--file F] [--merge]   org policy distribution: write/merge the org policy document, print it (+hash + drift), or re-apply it
-kern note <new|list|status|validate> ...            governed decision records (new/list/status/validate)
 kern status [--json]                                workspace lock status
 kern eval <run|compare|report> [root] [--root ROOT] [--max-tokens N] [--mode MODE]   context-quality evaluation
 kern workflow <intent> [--task TASK_ID] [--root ROOT]     agent-team workflow
@@ -143,8 +143,8 @@ kern surprising [--json] [--root ROOT]              cross-community call edges r
 kern twin                                           software twin (live map of the repo)
 kern fit-context <symbol|file> [--budget N]         context-adaptive token window compressor
 kern lsp-bridge <symbol|file> [--action def]        zero-weight LSP bridge for compiler types & definitions
-kern fw-trace <symbol|route> [--framework name]     framework dependency injection & route tracer
-kern mutate [root] [--threshold N]                  lightweight mutation testing for regression sensitivity
+kern fw-trace [filter] [--root ROOT] [--json]       framework dependency injection & route tracer
+kern mutate [root] [--min-score N]                  lightweight mutation testing for regression sensitivity
 kern fragility [root] [--limit N]                   causal defect & fragility hotspot memory
 kern refactor-transaction <plan-json>               multi-file transactional AST refactor sandbox
 kern repair-diagnostics <error-text>                compiler diagnostic-to-AST auto-repair engine

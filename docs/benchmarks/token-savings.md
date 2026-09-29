@@ -1,9 +1,9 @@
 # kern Token Savings Report — compact context vs naive full-file context
 
-**Status:** machine-generated · **Suite:** TS-001 · **Generation date:** 2026-09-23
-**Git HEAD:** 3866e5a92d167a32be538e33f115bdc15253016c
+**Status:** machine-generated · **Suite:** TS-001 · **Generation date:** 2026-09-28
+**Git HEAD:** 48291e3f50f0e8781ab10dee3d24a617227be36f
 **Tokenizer:** `internal/tokenize.Count` (deterministic offline BPE, cl100k_base)
-**Numeric checksum (sha256):** 2566ac3251d3150342c6051f6fab2d99918dd23fb339eef5c72047aeac1ca247
+**Numeric checksum (sha256):** 560d52f1ce81cf866bebb89c861adfc0eacffe30672d27f232fb7f1d9f9df3d7
 **Reproduce:** `go test ./internal/index -run TestTokenSavingsReport -update`
 
 ## 1. Methodology
@@ -39,19 +39,19 @@ go test ./internal/index -run TestTokenSavingsReport -count=1  # validate agains
 | symbol | mode | naive tokens | compact tokens | savings % |
 |---|---|---|---|---|
 | NewStore | graph | 2499 | 53 | 97% |
-| NewStore | context | 2499 | 273 | 89% |
+| NewStore | context | 2499 | 286 | 88% |
 | NewStore | neighborhood | 2499 | 537 | 78% |
 | Store.Save | graph | 3705 | 89 | 97% |
-| Store.Save | context | 3705 | 300 | 91% |
+| Store.Save | context | 3705 | 328 | 91% |
 | Store.Save | neighborhood | 3705 | 1039 | 71% |
 | Store.Get | graph | 3705 | 83 | 97% |
-| Store.Get | context | 3705 | 310 | 91% |
+| Store.Get | context | 3705 | 338 | 90% |
 | Store.Get | neighborhood | 3705 | 975 | 73% |
 | LoadConfig | graph | 1090 | 123 | 88% |
-| LoadConfig | context | 1090 | 387 | 64% |
+| LoadConfig | context | 1090 | 393 | 63% |
 | LoadConfig | neighborhood | 1090 | 1107 | -1% |
 | Cache.Put | graph | 2476 | 96 | 96% |
-| Cache.Put | context | 2476 | 312 | 87% |
+| Cache.Put | context | 2476 | 354 | 85% |
 | Cache.Put | neighborhood | 2476 | 1107 | 55% |
 
 ## 4. Aggregates
@@ -59,15 +59,15 @@ go test ./internal/index -run TestTokenSavingsReport -count=1  # validate agains
 | mode | naive tokens | compact tokens | savings % |
 |---|---|---|---|
 | graph | 13475 | 444 | 96% |
-| context | 13475 | 1582 | 88% |
+| context | 13475 | 1699 | 87% |
 | neighborhood | 13475 | 4765 | 64% |
-| **overall** | **40425** | **6791** | **83%** |
+| **overall** | **40425** | **6908** | **82%** |
 
 ## 5. Verdict
 
 For this fixture class — a small multi-package Go service (lib hub + app + main consumers), 15 samples — the claim of **substantial savings** is **BACKED**.
 
-- Overall savings: **83%** (40425 → 6791 tokens).
-- Per-mode: graph 96%, context 88%, neighborhood 64% (weakest mode: neighborhood at 64%).
+- Overall savings: **82%** (40425 → 6908 tokens).
+- Per-mode: graph 96%, context 87%, neighborhood 64% (weakest mode: neighborhood at 64%).
 - **Surgical context**: compact output stays at or below 20% of the naive full-file paste (≥80% savings) in **9 of 15** samples.
 - kern's graph/context/neighborhood outputs replace multi-file full-source pastes with a fraction of the tokens while retaining the same symbol, caller and callee information. On this fixture the savings claim is quantitative, not marketing.

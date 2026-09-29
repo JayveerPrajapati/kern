@@ -27,7 +27,7 @@ graph TD
 
     subgraph Intelligence["3. Intelligence, AST & Agent Engine"]
         IndexEngine["Symbol Index & Graph (`internal/index`, `internal/intel`)"]
-        TreeSitter["Tree-sitter AST Engines (`internal/index` -tags treesitter)"]
+        TreeSitter["Tree-sitter AST Engines (`internal/index`; default build, CGO; opt out with -tags notreesitter)"]
         Squad["7-Role Specialist Squad (`internal/agent`, `internal/agents`)"]
         RefactorEngine["Mutation & Repair Sandbox (`internal/refactor`, `internal/repair`)"]
         Verification["Verification Engine (`internal/verification`, `internal/sec`)"]
