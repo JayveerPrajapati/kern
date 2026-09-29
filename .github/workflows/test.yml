@@ -28,25 +28,25 @@ jobs:
         with:
           files: coverage.out
           fail_ci_if_error: false
-      - name: Test (sqlite tags)
-        run: go test -tags sqlite ./internal/index/... ./internal/doctor/...
-      - name: Test (treesitter tags)
-        run: CGO_ENABLED=1 go test -tags treesitter ./internal/index/... ./internal/doctor/...
+      - name: Test (sqlite,notreesitter tags)
+        run: CGO_ENABLED=0 go test -tags sqlite,notreesitter ./internal/index/... ./internal/doctor/...
+      - name: Test (notreesitter tags)
+        run: CGO_ENABLED=0 go test -tags notreesitter ./internal/index/... ./internal/doctor/...
       - name: Build all binaries
         run: |
           go build -buildvcs=false -o "$RUNNER_TEMP/kern" ./cmd/kern
           go build -buildvcs=false -o "$RUNNER_TEMP/kern-mcp" ./cmd/kern-mcp
           go build -buildvcs=false -o "$RUNNER_TEMP/kern-server" ./cmd/kern-server
-      - name: Build all binaries (sqlite tags)
+      - name: Build all binaries (sqlite,notreesitter tags)
         run: |
-          go build -buildvcs=false -tags sqlite -o /dev/null ./cmd/kern
-          go build -buildvcs=false -tags sqlite -o /dev/null ./cmd/kern-mcp
-          go build -buildvcs=false -tags sqlite -o /dev/null ./cmd/kern-server
-      - name: Build all binaries (treesitter tags)
+          CGO_ENABLED=0 go build -buildvcs=false -tags sqlite,notreesitter -o /dev/null ./cmd/kern
+          CGO_ENABLED=0 go build -buildvcs=false -tags sqlite,notreesitter -o /dev/null ./cmd/kern-mcp
+          CGO_ENABLED=0 go build -buildvcs=false -tags sqlite,notreesitter -o /dev/null ./cmd/kern-server
+      - name: Build all binaries (notreesitter tags)
         run: |
-          CGO_ENABLED=1 go build -buildvcs=false -tags treesitter -o /dev/null ./cmd/kern
-          CGO_ENABLED=1 go build -buildvcs=false -tags treesitter -o /dev/null ./cmd/kern-mcp
-          CGO_ENABLED=1 go build -buildvcs=false -tags treesitter -o /dev/null ./cmd/kern-server
+          CGO_ENABLED=0 go build -buildvcs=false -tags notreesitter -o /dev/null ./cmd/kern
+          CGO_ENABLED=0 go build -buildvcs=false -tags notreesitter -o /dev/null ./cmd/kern-mcp
+          CGO_ENABLED=0 go build -buildvcs=false -tags notreesitter -o /dev/null ./cmd/kern-server
       # Race detector over the concurrency-sensitive packages (agent registry /
       # in-flight tool / lock lifecycle races, event bus, blueprint sandbox,
       # loop scheduler, symbol index, project store, process groups). Scoped
