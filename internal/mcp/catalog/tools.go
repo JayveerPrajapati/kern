@@ -43,7 +43,7 @@ var All = []Tool{
 		SchemaVersion: SchemaVersionV1,
 		Phase:         "cross",
 		RiskLevel:     "low",
-		Description:   "List the LLM provider chain in priority order (Ollama first, then wired agent CLIs).",
+		Description:   "List the LLM provider chain in priority order (active MCP host session first, then wired agent CLIs, then Ollama).",
 		InputSchema: schema(map[string]any{
 			"root":  strProp("Project root (default: server cwd; stdio MCP server: confined to the workspace root, widenable via KERN_MCP_ROOTS; web console/SDK: confined to that App's project root — KERN_MCP_ROOTS does not widen)"),
 			"probe": strProp("If true, live-test each installed LLM provider (may take minutes)"),
@@ -402,9 +402,9 @@ var All = []Tool{
 		RiskLevel:     "low",
 		Description:   "Return a compressed map of a whole project: every source file with its symbols and line counts.",
 		InputSchema: schema(map[string]any{
-			"root":      strProp("Project root directory"),
+			"root":      strProp("Project root (default: server cwd; stdio MCP server: confined to the workspace root, widenable via KERN_MCP_ROOTS; web console/SDK: confined to that App's project root — KERN_MCP_ROOTS does not widen)"),
 			"max_files": strProp("Maximum number of files to include (default 500)"),
-		}, []string{"root"}),
+		}, nil),
 	},
 	{
 		Name: "kern_pack", Category: CategoryProject,
@@ -413,7 +413,7 @@ var All = []Tool{
 		RiskLevel:     "low",
 		Description:   "Pack a whole project into one paste-ready bundle (instructions, tree, contents) sized to max_tokens.",
 		InputSchema: schema(map[string]any{
-			"root":         strProp("Project root directory"),
+			"root":         strProp("Project root (default: server cwd; stdio MCP server: confined to the workspace root, widenable via KERN_MCP_ROOTS; web console/SDK: confined to that App's project root — KERN_MCP_ROOTS does not widen)"),
 			"max_tokens":   strProp("Token budget for the bundle (default 8000; 0 = unlimited)"),
 			"format":       strProp("'text' (default) or 'json'"),
 			"instructions": strProp("'true' to include root-level docs as instructions (default), 'false' to skip them"),
@@ -421,7 +421,7 @@ var All = []Tool{
 			"tier":         strProp("Content tier: 'full' (default), 'folded', or 'summary'"),
 			"graph":        strProp("'true' to pack the graph-snapshot mode (adjacency + signatures + per-file SHA-256) instead of contents"),
 			"symbol":       strProp("Symbol to pack as a subgraph (graph mode only; empty = whole graph; ignored when graph=false)"),
-		}, []string{"root"}),
+		}, nil),
 	},
 	{
 		Name: "kern_buddy", Category: CategoryMeta,
@@ -478,7 +478,7 @@ var All = []Tool{
 			"namespace": strProp("prompt or log (default: all)"),
 			"a":         strProp("First input for similarity"),
 			"b":         strProp("Second input for similarity"),
-		}, []string{"action"}),
+		}, nil),
 	},
 	{
 		Name: "kern_ast_search", Category: CategoryAST,

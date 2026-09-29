@@ -47,9 +47,9 @@ class Kern < Formula
     # `go 1.25.13` directive; Homebrew's go shim honors HOMEBREW_GO_VERSION.
     # Keep the pin (rather than dropping it) so brew installs are deterministic.
     ENV["HOMEBREW_GO_VERSION"] = "1.25.13"
-    system "go", "build", "-buildvcs=false", "-tags", "sqlite", "-ldflags", "-X main.version=#{version} -X github.com/JayveerPrajapati/kern/internal/version.Version=#{version}", "-o", "kern", "./cmd/kern"
-    system "go", "build", "-buildvcs=false", "-tags", "sqlite", "-ldflags", "-X main.version=#{version} -X github.com/JayveerPrajapati/kern/internal/version.Version=#{version}", "-o", "kern-mcp", "./cmd/kern-mcp"
-    system "go", "build", "-buildvcs=false", "-tags", "sqlite", "-ldflags", "-X main.version=#{version} -X github.com/JayveerPrajapati/kern/internal/version.Version=#{version}", "-o", "kern-server", "./cmd/kern-server"
+    system "go", "build", "-buildvcs=false", "-tags", "sqlite,notreesitter", "-ldflags", "-X main.version=#{version} -X github.com/JayveerPrajapati/kern/internal/version.Version=#{version}", "-o", "kern", "./cmd/kern"
+    system "go", "build", "-buildvcs=false", "-tags", "sqlite,notreesitter", "-ldflags", "-X main.version=#{version} -X github.com/JayveerPrajapati/kern/internal/version.Version=#{version}", "-o", "kern-mcp", "./cmd/kern-mcp"
+    system "go", "build", "-buildvcs=false", "-tags", "sqlite,notreesitter", "-ldflags", "-X main.version=#{version} -X github.com/JayveerPrajapati/kern/internal/version.Version=#{version}", "-o", "kern-server", "./cmd/kern-server"
     # macOS Gatekeeper kills unsigned binaries with SIGKILL (exit 137); apply
     # an ad-hoc signature so the built copies are executable.
     if OS.mac?

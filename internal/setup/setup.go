@@ -175,6 +175,8 @@ func Check(root string) []Status {
 	out = append(out, fileStatusAny("copilot hooks", filepath.Join(root, ".github", "hooks", "kern-pretooluse.json"), filepath.Join(globalHomeDir(), ".copilot", "hooks", "kern-pretooluse.json")))
 	out = append(out, fileStatus(filepath.Join(homeConfig(".codex", "hooks.json")("")), "codex hooks"))
 	out = append(out, fileStatus(filepath.Join(homeConfig(".qoder", "settings.json")("")), "qoder hooks"))
+	out = append(out, fileStatusAny("antigravity hooks", filepath.Join(root, ".agents", "hooks.json"), filepath.Join(globalHomeDir(), ".gemini", "config", "hooks.json")))
+	out = append(out, checkGlobalGitHooks())
 
 	// Report detected agents and their instruction file status
 	detected := DetectAgents(root)
@@ -279,8 +281,10 @@ func WireWith(root string, agents []string, detect bool, global bool, opts WireO
 	// reads it natively (Claude, Codex, Gemini, Continue, Windsurf, Zed,
 	// Qwen, Qoder, Kiro, opencode). Write it unconditionally so the
 	// kern-first policy reaches all agents regardless of which are wired.
-	// The variant is full by default; an explicit --agents-md choice is
-	// persisted in .kern/config.json so subsequent runs remember it.
+	// The variant is thin by default (low startup tokens: wiring-only facts,
+	// full rules live in the host's global instructions); an explicit
+	// --agents-md choice is persisted in .kern/config.json so subsequent
+	// runs remember it.
 	mode := opts.AgentsMD
 	if mode == "" {
 		mode = agentsMDMode(root)
@@ -353,9 +357,15 @@ func WireWith(root string, agents []string, detect bool, global bool, opts WireO
 	if repoEnabled("cursor") {
 		out = append(out, wireCursorRules(root))
 	}
+	if repoEnabled("antigravity") {
+		out = append(out, wireProjectAntigravityHooks(root))
+	}
 	if global {
 		if globalEnabled("gemini") {
 			out = append(out, wireGeminiHooks(PortableCLICommand()))
+		}
+		if globalEnabled("antigravity") {
+			out = append(out, wireAntigravityHooks())
 		}
 		if globalEnabled("cursor") {
 			out = append(out, wireCursorHooks())
@@ -373,6 +383,7 @@ func WireWith(root string, agents []string, detect bool, global bool, opts WireO
 	out = append(out, gitignoreGenerated(root))
 	out = append(out, wireLocalGitExclude(root))
 	if global {
+		out = append(out, wireGlobalGitHooks())
 		out = append(out, wireGlobalGitignore())
 		out = append(out, wireEditorExclusions()...)
 		out = append(out, wireGlobalSkills()...)

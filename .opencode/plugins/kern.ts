@@ -1,6 +1,6 @@
 import { type Plugin, tool } from "@opencode-ai/plugin"
 import { resolve, relative } from "node:path"
-import { existsSync } from "node:fs"
+import { appendFileSync, existsSync, mkdirSync } from "node:fs"
 import { writeFile, rm, readFile, readdir, stat } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { randomBytes } from "node:crypto"
@@ -415,6 +415,27 @@ export default (async ({ directory, $ }) => {
     return out.stdout.toString()
   }
 
+  // Kern-first adoption logging (opt-in, KERN_ADOPTION_LOG=1): each shadow
+  // tool call appends one JSON line {ts, tool, routed} to .kern/adoption.log
+  // in the project root. The Go side aggregates it
+  // (internal/metrics.AggregateAdoptionLog) into the kern-first adoption
+  // metric surfaced by `kern stats performance`. routed=true means the
+  // result the agent saw came from kern (compact output, governed build,
+  // or a governed denial/error); routed=false means a raw fallback served
+  // the call (operator bypass, regex/metachar fallback, or kern
+  // unavailable). Best-effort: failures are swallowed so metrics can never
+  // break a tool call. Default off — no behavior change without the gate.
+  const logAdoption = (tool: string, routed: boolean): void => {
+    if (process.env.KERN_ADOPTION_LOG !== "1") return
+    try {
+      const dir = resolve(directory, ".kern")
+      mkdirSync(dir, { recursive: true })
+      appendFileSync(resolve(dir, "adoption.log"), JSON.stringify({ ts: Date.now(), tool, routed }) + "\n")
+    } catch {
+      /* swallow — adoption metrics must never break the tool call */
+    }
+  }
+
   // Some commands (kern sec, kern delete, kern guard check) print their
   // payload to stdout and then exit non-zero as a secondary signal. Surface
   // the payload instead of treating the exit code as a hard failure.
@@ -624,7 +645,7 @@ async function runPayload(args: string[], timeoutMs?: number, preserveExit = fal
       //   kern pack --graph [--symbol X] [--out FILE]
       kern_pack: tool({
         description:
-          "Pack a whole project into one paste-ready bundle: project instructions, a directory tree with per-file token counts, and file contents, sized to fit a token budget. Use when an agent needs the full source to edit against, not just a map. Set graph=true to pack the call-graph snapshot instead (adjacency + signatures + per-file SHA-256 fingerprint, ~1-5% of the raw token cost); symbol selects a subgraph (empty = whole graph), ignored when graph=false.",
+          "Pack a whole project into one paste-ready bundle: project instructions, a directory tree with per-file token counts, and file contents, token-budget-sized. graph=true packs the call-graph snapshot instead (adjacency + signatures + per-file SHA-256, ~1-5% of raw token cost); symbol selects a subgraph (empty = whole), ignored when graph=false.",
         args: {
           root: tool.schema.string().optional(),
           max_tokens: tool.schema.string().optional(),
@@ -1033,7 +1054,7 @@ kern_optimize_log: tool({
       }),
       kern_graph: tool({
         description:
-          "One-call graph context: token-budgeted names-only adjacency for a symbol — callers first (the direction that matters for impact), then callees, every edge tagged EXTRACTED/INFERRED/AMBIGUOUS, plus community membership. Calls to interface methods carry dispatch hints listing the concrete implementations they can reach. Set format=one-line to render the single-line call-graph neighbourhood instead (the former kern_code_graph output).",
+          "One-call graph context: token-budgeted names-only adjacency for a symbol — callers first, then callees, every edge tagged EXTRACTED/INFERRED/AMBIGUOUS, plus community membership. Interface-method calls carry dispatch hints listing reachable concrete implementations. Set format=one-line for the single-line call-graph neighbourhood (the former kern_code_graph output).",
         args: {
           symbol: tool.schema.string(),
           max_tokens: tool.schema.string().optional(),
@@ -1495,7 +1516,7 @@ return run(flags)
       }),
       kern_rename: tool({
         description:
-          "Structural symbol rename on the AST index: previews every definition/reference for a Go package-level symbol (types, funcs, vars, consts) with file:line:col edits, then applies them when apply=true. Edits come from a real go/ast parse, so strings, comments, struct-field names, composite-literal keys, import aliases and the package clause are never touched; cross-package references (pkg.Symbol) are handled for exported symbols. apply=true commits transactionally with backups under .kern/rename-backup/ and rollback on failure. Method and non-Go symbols are refused. Preview first, review the edits, then re-run with apply=true.",
+          "Structural rename on the AST index of a Go package-level symbol: previews every definition/reference with file:line:col edits; apply=true applies them. Real go/ast parse: strings, comments, field names, literal keys and import aliases are untouched. Transactional; backups under .kern/rename-backup/, rollback on failure. Method and non-Go symbols are refused.",
         args: {
           symbol: tool.schema.string(),
           new_name: tool.schema.string(),
@@ -1513,7 +1534,7 @@ return run(flags)
       }),
       kern_exec: tool({
         description:
-          "Run code in an isolated local runtime and return ONLY stdout (Think in Code). Language is selected by lang= or a shebang line; runtimes resolve from PATH (python3, node, go, bash, perl, ...). Runs in a fresh temp dir with a hard timeout (default 15s via the CLI; timeout is in MILLISECONDS) and a stdout byte cap (default 16KiB); HOME/XDG point into the sandbox and secrets are stripped. When unprivileged user namespaces are available the script also runs in a private network namespace (network egress blocked); otherwise it degrades to env isolation. stderr is only surfaced on failure. Use to compute exact answers (math, data munging, JSON transforms) without polluting context.",
+          "Run code in an isolated local runtime and return ONLY stdout. Language from lang= or a shebang; runtimes from PATH. Fresh temp dir, hard timeout (default 15s; in MILLISECONDS), stdout cap (16KiB); HOME/XDG point into the sandbox, secrets stripped. Private network namespace (egress blocked) if user namespaces allow; otherwise env isolation. For exact answers without polluting context.",
         args: {
           code: tool.schema.string(),
           lang: tool.schema.string().optional(),
@@ -1565,7 +1586,7 @@ return run(flags)
       }),
       kern_doc_fetch: tool({
         description:
-          "Fetch a public documentation page and merge it into the project's local doc index so kern_doc_search can find it. This is the ONLY network call in kern and is invoked explicitly by the user; everything else stays local. The page is HTML-stripped, capped, stored under the cache and indexed as fetch/<name>.md (re-fetching a name replaces it). Pass semantic=true to also attach dense embeddings via the local Ollama model.",
+          "Fetch a public documentation page and merge it into the project's local doc index so kern_doc_search can find it. This is the ONLY network call in kern, invoked explicitly by the user; everything else stays local. The page is HTML-stripped, capped, cached and indexed as fetch/<name>.md (re-fetching replaces it). semantic=true also attaches dense embeddings via the local Ollama model.",
         args: {
           url: tool.schema.string(),
           root: tool.schema.string().optional(),
@@ -1715,7 +1736,7 @@ return run(flags)
       }),
       kern_verify: tool({
         description:
-          "HIGH-LEVEL (ADR-0006): verify a change with the unified verification engine — build, unit tests, security, architecture, dependency. Returns the typed verdict (PASS/FAIL/WARN) and per-check summary. Compliance checks are opt-in: set cve/license/secrets to run the govulncheck vulnerability scan, the deterministic license classifier, and the committed-secret history scan (all advisory; a missing govulncheck binary or missing manifest reports SKIPPED, never a hard failure).",
+          "HIGH-LEVEL (ADR-0006): verify a change with the unified verification engine — build, unit tests, security, architecture, dependency. Returns the typed verdict (PASS/FAIL/WARN) and per-check summary. Compliance checks are opt-in: cve/license/secrets run govulncheck, the license classifier, and the committed-secret scan (all advisory; missing binary or manifest reports SKIPPED).",
         args: {
           root: tool.schema.string().optional(),
           types: tool.schema.string().optional(),
@@ -1735,7 +1756,7 @@ return run(flags)
       }),
 kern_incident: tool({
 description:
-"HIGH-LEVEL (ADR-0006): investigate a production incident end-to-end — correlate an alert to the affected service and evidence, derive the root cause and hypotheses, and summarize. Provide the alert as JSON; optionally a runtime snapshot (events/deployments/commits) as JSON. Feature Batch D: set correlate=true to run the incident→twin→code correlation engine and render the correlation report instead of the full pipeline; runbook=<json> adds a heal playbook keyed by the incident's error signature; list_playbooks=true lists stored heal playbooks.",
+"HIGH-LEVEL (ADR-0006): investigate a production incident end-to-end — correlate an alert to the affected service and evidence, derive the root cause, and summarize. Provide the alert as JSON; optionally a runtime snapshot (events/deployments/commits). Feature Batch D: correlate=true runs the incident→twin→code engine and renders its report; runbook=<json> adds a heal playbook.",
 args: {
 root: tool.schema.string().optional(),
 alert: tool.schema.string().optional(),
@@ -1901,7 +1922,7 @@ return run(flags)
 }),
 kern_register_host_sampler: tool({
         description:
-          "Register (or unregister) a host sampler command for LLM delegation: the auto LLM chain's host leg executes this command via sh -c with the user prompt on stdin and the system prompt in $KERN_SYSTEM_PROMPT; stdout is the reply. Pass an empty command to unregister. key namespaces the registration (default: this connection's slot) so several sessions/agents/repos can coexist — every registered sampler is tried in order. For hosts that do not announce MCP sampling (e.g. opencode), set KERN_HOST_SAMPLER_CMD and the kern MCP server self-registers the command at startup.",
+          "Register (or unregister) a host sampler command for LLM delegation: the LLM chain's host leg runs it via sh -c (user prompt on stdin, system prompt in $KERN_SYSTEM_PROMPT); stdout is the reply. Empty command unregisters. key namespaces the registration so sessions/agents/repos coexist. For hosts without MCP sampling, set KERN_HOST_SAMPLER_CMD and the server self-registers.",
         args: {
           command: tool.schema.string(),
           key: tool.schema.string().optional(),
@@ -1919,7 +1940,7 @@ kern_register_host_sampler: tool({
       }),
       kern_loop: tool({
         description:
-          "HIGH-LEVEL (Workflow E): run the closed autonomy loop against an intent string and return the stage timeline plus the deployed / observed-healthy / learned outcome. mode=observe (default) runs the read-only no-op stages gated by the autonomy level (L0-L5, default L0); mode=autonomous (the former kern_do) wires the LLM coder and planner as the default stage handlers (default level L2, sandboxed code changes; L3 adds PR creation, L4 deploy-with-approval). The level argument works in both modes.",
+          "HIGH-LEVEL (Workflow E): run the closed autonomy loop on an intent string, returning the stage timeline and the deployed / observed-healthy / learned outcome. mode=observe (default) runs the no-op stages gated by the autonomy level; mode=autonomous (the former kern_do) wires the LLM coder and planner as handlers (default L2 sandboxed changes; L3 PR creation, L4 deploy-with-approval).",
         args: {
           root: tool.schema.string().optional(),
           intent: tool.schema.string(),
@@ -1936,7 +1957,7 @@ if (args.mode) flags.push("--mode", args.mode)
       }),
                     kern_meta: tool({
         description:
-          "Single entry point: describe what you need in natural language and kern classifies the request and runs the right tool(s) internally. Examples: 'how does dispatch work?' → kern_explore, 'what breaks if I change dispatch?' → kern_impact, 'compress this log: ...' → kern_optimize_log, 'mask secrets in: ...' → kern_mask_pii, 'find the dispatch function' → kern_search, 'show me the architecture' → kern_arch. Prefer this over calling individual kern_* tools — it picks the right one for you.",
+          "Single entry point: describe what you need in natural language and kern classifies the request and runs the right tool(s) internally. Examples: 'how does dispatch work?' → kern_explore, 'what breaks if I change dispatch?' → kern_impact, 'find the dispatch function' → kern_search, 'show me the architecture' → kern_arch. Prefer it over calling individual kern_* tools.",
         args: {
           root: tool.schema.string().optional(),
           request: tool.schema.string(),
@@ -2025,7 +2046,7 @@ kern_run: tool({
       }),
 kern_correlate: tool({
 description:
-"HIGH-LEVEL: correlate a production alert against the runtime to produce a deep evidence chain (alert→service→deployment→commit→symbol→task/pr/agent). Deterministic — derived from runtime source and git history, not LLM. Feature Batch D: set code=true to extend the report with the incident→twin→code correlation (implicated source files + symbols resolved through the digital twin, with a deterministic confidence and any auto-attached heal playbook).",
+"HIGH-LEVEL: correlate a production alert against the runtime to produce a deep evidence chain (alert→service→deployment→commit→symbol→task/pr/agent). Deterministic — from runtime source and git history, not LLM. Feature Batch D: code=true extends the report with the incident→twin→code correlation (implicated source files + symbols via the digital twin).",
 args: {
 root: tool.schema.string().optional(),
 alert: tool.schema.string(),
@@ -2119,7 +2140,7 @@ return run(flags)
       }),
       kern_taint: tool({
         description:
-          "Taint-lite analysis: flag security sinks (SQL injection, command injection, unsafe deserialization) whose containing function is transitively called by a framework entry point or whose file contains source expressions (request params, bodies, CLI args). The optional range argument scopes findings to files changed in a \'from..to\' git range. Deterministic, bounded BFS. For test scaffolds per tainted sink, use kern_synthesize_test with a sinks= filter instead.",
+          "Taint-lite analysis: flag security sinks (SQL injection, command injection, unsafe deserialization) called transitively from a framework entry point or with source expressions (request params, bodies, CLI args) in the file. The optional range argument scopes findings to files changed in a \'from..to\' git range. Deterministic, bounded BFS.",
         args: {
           root: tool.schema.string().optional(),
           file: tool.schema.string().optional(),
@@ -2339,7 +2360,7 @@ kern_entry_points: tool({
       }),
       kern_evidence: tool({
         description:
-          "Signed-evidence read path: kern_evidence with action=verify validates an evidence bundle (args.file or args.url — fetched without cloning) and reports tamper-seal status, signature status, audit-chain replay and, when args.expect_fingerprint is given, the fingerprint trust-anchor match; action=explain renders the bundle in plain language; action=export builds a bundle from the project's evidence store for args.task_id (or the current state) and returns its path + id. Mirrors `kern evidence export|verify|explain`.",
+          "Signed-evidence read path: action=verify validates an evidence bundle (args.file or args.url, fetched without cloning) and reports tamper-seal status, signature status, audit-chain replay and, with args.expect_fingerprint, the trust-anchor match; action=explain renders the bundle in plain language; action=export builds a bundle for args.task_id, returning its path + id.",
         args: {
           action: tool.schema.string().optional(),
           file: tool.schema.string().optional(),
@@ -2489,7 +2510,7 @@ kern_entry_points: tool({
       }),
       kern_org_user: tool({
         description:
-          "Org-wide user management + RBAC: sub-actions user-add, user-list, user-role, user-disable, user-audit (Feature Batch G). actor_id (the acting user) is required on every action and its role must allow the action. user-add registers a user with a role; user-list returns {users:[{id,role,enabled}],count}; user-role changes a user's role; user-disable disables a user; user-audit returns the user's append-only audit trail. MCP-only tool: no org CLI subcommand exists yet, so the plugin forwards to the org family namespace.",
+          "Org-wide user management + RBAC: sub-actions user-add, user-list, user-role, user-disable, user-audit. actor_id (the acting user) is required on every action. user-add registers a user with a role; user-list returns {users:[{id,role,enabled}],count}; user-role changes a role; user-disable disables a user. MCP-only: no org CLI subcommand — forwards to the org namespace.",
         args: {
           action: tool.schema.string().optional(),
           user_id: tool.schema.string().optional(),
@@ -2682,7 +2703,7 @@ kern_entry_points: tool({
       //   kern snapshot verify <file> [--strict]
       kern_snapshot: tool({
         description:
-          "Canonical versioned graph snapshot for cross-agent handoff: whole-repo or per-symbol subgraph plus the build-time IndexIdentity fingerprint (content root, git tree/commit) and per-file SHA-256 hashes. action=create builds a snapshot (output is the versioned GraphSnapshot JSON); action=verify checks a snapshot file against a root and returns the freshness verdict (fresh/stale/unknown) with the fingerprint.",
+          "Canonical versioned graph snapshot for cross-agent handoff: whole-repo or per-symbol subgraph plus the build-time IndexIdentity fingerprint (content root, git tree/commit) and per-file SHA-256 hashes. action=create builds a snapshot (output: GraphSnapshot JSON); action=verify checks a snapshot file against a root and returns the freshness verdict (fresh/stale/unknown).",
         args: {
           action: tool.schema.string().optional(),
           root: tool.schema.string().optional(),
@@ -2841,62 +2862,77 @@ sinks: tool.schema.string().optional(),
       // kern is unavailable (missing binary, no index), fall back to the raw
       // built-in behavior (node:fs / the `$` shell — the opencode ToolContext
       // has no context.tool to re-invoke the replaced tool) so the agent is
-      // never blocked.
+      // never blocked. The per-call raw/full/docs flags are operator-gated
+      // (L4): they only take effect when the OPERATOR's host env sets
+      // KERN_BYPASS=1 (or KERN_ENFORCE=0) — an agent passing raw=true in
+      // the tool args alone no longer routes around kern.
       read: tool({
         description:
-          "Read a file. Routes to kern_compact_file (symbolic summary) by default for large codebases; set full=true for verbatim content. Falls back to raw read if kern is unavailable.",
+          "Read a file. Routes to kern_compact_file (symbolic summary) by default. Falls back to raw read only when kern is unavailable or returns nothing useful.",
         args: {
           filePath: tool.schema.string(),
           full: tool.schema.string().optional(),
         },
         async execute(args) {
-          if (truthy(args.full)) {
-            // Explicit verbatim request — read directly, no kern.
+          if (process.env.KERN_BYPASS === "1" || process.env.KERN_ENFORCE === "0") {
+            // Emergency bypass — read directly, no kern.
+            logAdoption("read", false)
             return readFallback(args.filePath)
           }
+          const flags: string[] = ["compact"]
+          if (truthy(args.full) && process.env.KERN_BYPASS === "1") flags.push("--tier", "full")
+          flags.push(args.filePath)
           try {
-            const compacted = await run(["compact", args.filePath])
+            const compacted = await run(flags)
             // kern compact returns EMPTY for non-code files (markdown,
             // config, data) — never silently show the agent nothing. Fall
             // back to the raw read so the content is always visible.
             if (!compacted || compacted.trim() === "") {
+              logAdoption("read", false)
               return readFallback(args.filePath)
             }
+            logAdoption("read", true)
             return compacted
           } catch {
             // kern unavailable — fall back to a raw read so the agent is never blocked.
+            logAdoption("read", false)
             return readFallback(args.filePath)
           }
         },
       }),
       glob: tool({
         description:
-          "Find files by glob pattern. Routes to kern_project_map (symbol map) for repo exploration; set raw=true for plain file listing. Falls back to raw glob if kern is unavailable.",
+          "Find files by glob pattern. Routes to kern_project_map (symbol map) for repo exploration. Falls back to raw glob if kern is unavailable.",
         args: {
           pattern: tool.schema.string(),
           path: tool.schema.string().optional(),
           raw: tool.schema.string().optional(),
         },
         async execute(args) {
-          if (truthy(args.raw)) {
+          if ((truthy(args.raw) && process.env.KERN_BYPASS === "1") || process.env.KERN_BYPASS === "1" || process.env.KERN_ENFORCE === "0") {
+            logAdoption("glob", false)
             return globFallback(args.pattern, args.path ?? ".")
           }
           // A glob pattern with metacharacters can't be expressed by the kern
           // project symbol map — route it to the raw glob so the pattern is
           // honored instead of silently dropped.
           if (/[*?[\]{}]/.test(args.pattern)) {
+            logAdoption("glob", false)
             return globFallback(args.pattern, args.path ?? ".")
           }
           try {
-            return await run(["project", args.path ?? "."])
+            const out = await run(["project", args.path ?? "."])
+            logAdoption("glob", true)
+            return out
           } catch {
+            logAdoption("glob", false)
             return globFallback(args.pattern, args.path ?? ".")
           }
         },
       }),
       grep: tool({
         description:
-          "Search code by symbol query. Patterns are symbol queries, NOT regex — kern_ast_search routes them to AST symbol search by default; set docs=true for kern_doc_search, or raw=true for plain regex grep. Patterns containing regex metacharacters fall back to raw grep so regex searches still work. Falls back to raw grep if kern is unavailable.",
+          "Search code by symbol query. Patterns are symbol queries, NOT regex — kern_ast_search routes them to AST symbol search by default. Patterns containing regex metacharacters fall back to raw grep so regex searches still work. Falls back to raw grep if kern is unavailable.",
         args: {
           pattern: tool.schema.string(),
           path: tool.schema.string().optional(),
@@ -2905,22 +2941,27 @@ sinks: tool.schema.string().optional(),
           raw: tool.schema.string().optional(),
         },
         async execute(args) {
-          if (truthy(args.raw)) {
+          if ((truthy(args.raw) && process.env.KERN_BYPASS === "1") || process.env.KERN_BYPASS === "1" || process.env.KERN_ENFORCE === "0") {
+            logAdoption("grep", false)
             return grepFallback(args.pattern, args.path, args.include)
           }
           if (args.include) {
             // kern ast/docs searches have no include filter — route to the raw
             // grep so the filter is honored instead of silently dropped.
+            logAdoption("grep", false)
             return grepFallback(args.pattern, args.path, args.include)
           }
-          if (truthy(args.docs)) {
+          if (truthy(args.docs) && process.env.KERN_BYPASS === "1") {
             // Docs search is semantic/FTS over an index — the pattern is a
             // query, not a regex, so metacharacters are left to kern.
             try {
               const flags: string[] = ["docs", args.pattern]
               if (args.path) flags.push("--root", args.path)
-              return await run(flags)
+              const out = await run(flags)
+              logAdoption("grep", true)
+              return out
             } catch {
+              logAdoption("grep", false)
               return grepFallback(args.pattern, args.path, args.include)
             }
           }
@@ -2929,20 +2970,24 @@ sinks: tool.schema.string().optional(),
           // query, so route it to the raw grep and honor the regex (mirrors
           // the glob shadow's metacharacter fallback).
           if (/[[\]\\^$.|?*+()]/.test(args.pattern)) {
+            logAdoption("grep", false)
             return grepFallback(args.pattern, args.path, args.include)
           }
           try {
             const flags: string[] = ["ast", args.pattern]
             if (args.path) flags.push("--root", args.path)
-            return await run(flags)
+            const out = await run(flags)
+            logAdoption("grep", true)
+            return out
           } catch {
+            logAdoption("grep", false)
             return grepFallback(args.pattern, args.path, args.include)
           }
         },
       }),
       bash: tool({
         description:
-          "Run a shell command. Routes to kern build (governed, compact output) when kern is available; set raw=true to bypass kern. Falls back to raw bash (host `$` shell) if kern is unavailable, so the agent is never blocked. timeout is in MILLISECONDS (default 120000, max 1800000).",
+          "Run a shell command. Routes to kern build (governed, compact output) when kern is available. Falls back to raw bash (host `$` shell) if kern is unavailable, so the agent is never blocked. timeout is in MILLISECONDS (default 120000, max 1800000).",
         args: {
           command: tool.schema.string(),
           workdir: tool.schema.string().optional(),
@@ -2952,7 +2997,8 @@ sinks: tool.schema.string().optional(),
         async execute(args) {
           const cmd = args.command.trim()
           if (cmd === "") return "error: empty command"
-          if (truthy(args.raw)) {
+          if ((truthy(args.raw) && process.env.KERN_BYPASS === "1") || process.env.KERN_BYPASS === "1" || process.env.KERN_ENFORCE === "0") {
+            logAdoption("bash", false)
             return runRaw(args.command, args.workdir, args.timeout)
           }
           // kern build runs any command (sh -c) in the project dir, gated by
@@ -2966,7 +3012,9 @@ sinks: tool.schema.string().optional(),
             if (args.timeout) flags.push("--timeout", String(Math.max(1, Math.ceil(args.timeout / 1000))))
             // Pass the agent's budget (ms) through so the governed path honors
             // it instead of the 2-minute default ceiling.
-            return await run(flags, args.timeout)
+            const out = await run(flags, args.timeout)
+            logAdoption("bash", true)
+            return out
           } catch (err) {
             // Never silently bypass the exec firewall: if the governed path
             // was DENIED (no KERN_TOOLS allowlist / no KERN_ALLOW_EXEC, or an
@@ -2979,13 +3027,59 @@ sinks: tool.schema.string().optional(),
             // the kern binary itself is missing.
             const e = err as { message?: string; stdout?: Buffer | Uint8Array; stderr?: Buffer | Uint8Array }
             const text = [e.message, e.stdout?.toString(), e.stderr?.toString()].filter(Boolean).join("\n")
-            if (/blocked|denied|allowlist|approval|firewall|governance|not permitted|refused|timed out|timeout/i.test(text)) throw err
-            if (!existsSync(bin)) return runRaw(args.command, args.workdir, args.timeout)
+            if (/blocked|denied|allowlist|approval|firewall|governance|not permitted|refused|timed out|timeout/i.test(text)) {
+              // Served by kern's governed path (denial/timeout) — still kern-routed.
+              logAdoption("bash", true)
+              throw err
+            }
+            if (!existsSync(bin)) {
+              logAdoption("bash", false)
+              return runRaw(args.command, args.workdir, args.timeout)
+            }
+            logAdoption("bash", true)
             throw err
           }
         },
       }),
     }),
+
+    // Subagent kern access (verified live 2026-09-29): opencode 1.18.x
+    // built-in agents (explore/explorer/fixer/designer/councillor) ship their
+    // own "*": "deny" catch-all and/or explicit "kern_*": "deny" rules that
+    // hide the kern_* MCP tools from subagents — a top-level global
+    // permission block does NOT override those at runtime (the built-in deny
+    // wins). Appending the allow to EVERY agent's own permission set here
+    // makes the tools visible to all current and future agents: per-agent
+    // permission is merged last at agent construction, and iterating whatever
+    // agents exist in the merged config keeps this dynamic across opencode
+    // updates (no per-agent enumeration, no maintenance when new agent types
+    // appear). kern_* only — other MCP servers (e.g. codegraph) are out of
+    // scope for this plugin.
+    //
+    // Subagent phase shaping (investigated 2026-09-29, best-effort only):
+    // the goal was to also give every subagent a phase-filtered
+    // KERN_MCP_PHASE env (explore/explorer/fixer/councillor/designer →
+    // "explore", general/scout → default surface) so filterToolSurface()
+    // would shape what each subagent sees. That is NOT injectable from
+    // here: opencode's AgentConfig (@opencode-ai/plugin 1.18.32 SDK types)
+    // has no per-agent env field — only MCP server configs carry
+    // `environment`, and that is per-server (global), not per-agent. The
+    // plugin process also shares one env across all agents in a session,
+    // and filterToolSurface() runs once at plugin registration. Phase
+    // shaping therefore stays operator-controlled via the host env that
+    // launches opencode. The kern_* permission grant below is the
+    // load-bearing part and must not be broken.
+    config: (cfg) => {
+      const agents = cfg.agent ?? {}
+      for (const name of Object.keys(agents)) {
+        const agent = agents[name]
+        if (!agent) continue
+        agent.permission = {
+          ...(agent.permission ?? {}),
+          "kern_*": "allow",
+        }
+      }
+    },
 
     // Auto-compress large tool outputs before they enter context.
     "tool.execute.after": async (input, output) => {
@@ -3012,10 +3106,11 @@ sinks: tool.schema.string().optional(),
         return
       }
       // Verbatim-request exemptions: a full=true read (or raw=true grep/bash)
-      // explicitly asked for raw content — never lossy-compress it.
+      // only yields raw content under the operator's KERN_BYPASS=1 — only
+      // then skip lossy compression (the flags are otherwise ignored).
       const hookArgs = input.args as { full?: string; raw?: string } | undefined
-      if (input.tool === "read" && truthy(hookArgs?.full)) return
-      if ((input.tool === "grep" || input.tool === "bash") && truthy(hookArgs?.raw)) return
+      if (process.env.KERN_BYPASS === "1" && input.tool === "read" && truthy(hookArgs?.full)) return
+      if (process.env.KERN_BYPASS === "1" && (input.tool === "grep" || input.tool === "bash") && truthy(hookArgs?.raw)) return
       if (text.length < DEFAULT_COMPACT_THRESHOLD) return
       try {
         const compressed = await withTempFile("tool-output.txt", text, (file) => run(["log", file]))

@@ -11,9 +11,12 @@ import (
 	"context"
 	"fmt"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
+	"time"
 
+	"github.com/JayveerPrajapati/kern/internal/mcp/catalog"
 	"github.com/JayveerPrajapati/kern/internal/mcp/mcpargs"
 	"github.com/JayveerPrajapati/kern/internal/skills"
 )
@@ -29,9 +32,11 @@ type Hooks struct {
 	// (adapter delegates to the server's validPhase). nil disables phase
 	// validation.
 	ValidPhase func(p string) bool
-	// CostHint returns the deterministic est-latency/out-token hint for a
-	// tool (adapter delegates to the server's costHintFor). nil omits the
-	// cost line from the classified output.
+	// CostHint returns the deterministic out-token estimate for a tool
+	// (adapter delegates to the server's costHintFor). Handle surfaces the
+	// token estimate next to the MEASURED wall-clock latency — the static
+	// estMs is no longer printed (it was presented as a latency promise).
+	// nil omits the cost line from the classified output.
 	CostHint func(tool string) (estMs, estTokens int)
 	// ToolCatalog renders the server's registered tool table (one line per
 	// tool: name, phase, risk, one-line description). When non-nil, Handle
@@ -41,87 +46,78 @@ type Hooks struct {
 	ToolCatalog func() (string, error)
 }
 
-// metaRoutedTools is the exact set of tool names the legacy *Server.handleMeta
-// switch dispatched. Names the classifier can produce but that have no
-// dispatch arm (e.g. kern_fit_context) fall back to kern_search with the raw
-// request as the query — Handle must preserve that behavior byte-for-byte.
-var metaRoutedTools = map[string]bool{
-	"kern_agent_coordination": true,
-	"kern_agent_fingerprint":  true,
-	"kern_agent_role_rbac":    true,
-	"kern_analyze":            true,
-	"kern_arch":               true,
-	"kern_authorize_context":  true,
-	"kern_audit":              true,
-	"kern_bridges":            true,
-	"kern_buddy":              true,
-	"kern_churn":              true,
-	"kern_cochange":           true,
-	"kern_commitmsg":          true,
-	"kern_communities":        true,
-	"kern_compact_file":       true,
-	"kern_compose":            true,
-	"kern_context":            true,
-	"kern_context_watch":      true,
-	"kern_correlate":          true,
-	"kern_cross_repo_impact":  true,
-	"kern_cycles":             true,
-	"kern_dead":               true,
-	"kern_diff_files":         true,
-	"kern_doc_search":         true,
-	"kern_entry_points":       true,
-	"kern_evidence_anchor":    true,
-	"kern_exec":               true,
-	"kern_explain":            true,
-	"kern_explore":            true,
-	"kern_frameworks":         true,
-	"kern_graph":              true,
-	"kern_health":             true,
-	"kern_hubs":               true,
-	"kern_impact":             true,
-	"kern_incident":           true,
-	"kern_inherits":           true,
-	"kern_larges":             true,
-	"kern_llm_providers":      true,
-	"kern_mask_pii":           true,
-	"kern_memory_ranked":      true,
-	"kern_memory_recall":      true,
-	"kern_modernize":          true,
-	"kern_near":               true,
-	"kern_onboard":            true,
-	"kern_optimize_log":       true,
-	"kern_optimize_output":    true,
-	"kern_optimize_prompt":    true,
-	"kern_pack":               true,
-	"kern_path":               true,
-	"kern_plan":               true,
-	"kern_plan_context":       true,
-	"kern_policy_dsl":         true,
-	"kern_pre_edit":           true,
-	"kern_probe":              true,
-	"kern_project_map":        true,
-	"kern_prompt_fill":        true,
-	"kern_prose":              true,
-	"kern_resolve":            true,
-	"kern_retrieve":           true,
-	"kern_review":             true,
-	"kern_safe_delete":        true,
-	"kern_schema_validate":    true,
-	"kern_search":             true,
-	"kern_security":           true,
-	"kern_semantic_diff":      true,
-	"kern_skill":              true,
-	"kern_snapshot":           true,
-	"kern_stats":              true,
-	"kern_stream":             true,
-	"kern_surprising":         true,
-	"kern_test_gaps":          true,
-	"kern_trace":              true,
-	"kern_validate":           true,
-	"kern_verify":             true,
-	"kern_verify_output":      true,
-	"kern_what_if":            true,
-	"kern_why":                true,
+// metaRoutedTools is the set of tool names the kern_meta router can dispatch
+// to. It is derived from the catalog (internal/mcp/catalog.All — the single
+// source of truth for tool registration, which the architecture ledger
+// already allows this package to import) so every catalog tool except
+// kern_meta itself is routable: routing to the router would recurse, so it
+// is deliberately excluded. Deriving the set instead of hand-maintaining a
+// 76-name map keeps the drift gate (TestMetaRouterCatalogCoverage) and the
+// plugin's "NL router → all sub-tools" promise honest as the catalog grows.
+// The set is built once at package init; it is not sorted (Handle only
+// membership-tests it, and RoutableTools sorts on return). Names the
+// classifier produces that are NOT in this set — a classified name that is
+// not a catalog tool — still fall back to kern_search with the raw request
+// as the query: Handle must preserve that behavior byte-for-byte.
+var metaRoutedTools = func() map[string]bool {
+	names := make(map[string]bool, len(catalog.All))
+	for _, tool := range catalog.All {
+		if tool.Name == "kern_meta" {
+			continue // routing to the router itself would recurse
+		}
+		names[tool.Name] = true
+	}
+	return names
+}()
+
+// RoutableTools returns the sorted set of tool names the kern_meta router
+// can dispatch to (metaRoutedTools). This is exactly the set of names Handle
+// will ever call the RouteTool hook with: names the classifier produces that
+// are outside this set are rewritten to the kern_search fallback before
+// dispatch. Exposed so callers (e.g. the router-coverage drift gate in
+// internal/mcp) can compare router reach against the catalog without
+// duplicating the table.
+func RoutableTools() []string {
+	names := make([]string, 0, len(metaRoutedTools))
+	for name := range metaRoutedTools {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// explicitToolNameRe matches a literal kern_<name> catalog tool token as a
+// standalone word, case-insensitively ("kern_rename", "KERN_SEARCH"). Word
+// boundaries keep "kern_searching" (a prose word) and "kern_search_limits"
+// (a longer identifier) from hijacking the name; the alternation is sorted
+// longest-first so a tool name that is a prefix of another (none today, but
+// the catalog can grow) still matches the longer name at a shared start
+// position. kern_meta is excluded: routing to the router itself would
+// recurse, mirroring its exclusion from metaRoutedTools.
+var explicitToolNameRe = func() *regexp.Regexp {
+	names := make([]string, 0, len(catalog.All))
+	for _, tool := range catalog.All {
+		if tool.Name == "kern_meta" {
+			continue
+		}
+		names = append(names, regexp.QuoteMeta(tool.Name))
+	}
+	sort.Slice(names, func(i, j int) bool { return len(names[i]) > len(names[j]) })
+	return regexp.MustCompile(`(?i)\b(?:` + strings.Join(names, "|") + `)\b`)
+}()
+
+// classifyExplicitToolName returns the catalog tool a request names
+// literally ("use kern_rename", "call kern_sandbox", "run kern_loop"), or
+// ok=false when no literal kern_<name> token is present. This is the
+// name-addressed arm of the router: every catalog tool is reachable this
+// way even when no keyword arm exists, while requests WITHOUT a literal
+// kern_* name keep the keyword routing below unchanged. The matched token
+// is lowercased so "KERN_SEARCH" normalizes to the catalog name.
+func classifyExplicitToolName(request string) (string, map[string]any, bool) {
+	if m := explicitToolNameRe.FindString(request); m != "" {
+		return strings.ToLower(m), map[string]any{}, true
+	}
+	return "", nil, false
 }
 
 // toolCatalogIntent reports whether the request asks for the tool catalog,
@@ -146,6 +142,88 @@ func toolCatalogIntent(low string) bool {
 		}
 	}
 	return false
+}
+
+// NoCodeIntentError is returned by Handle when an unrecognized request falls
+// through to the search fallback but names no code, repo, or kern-tooling
+// vocabulary (e.g. "make me a sandwich"). The classifier's fallback is the
+// signal that no explore/impact/plan/etc. branch claimed the request; running
+// a symbol search on such a request would return confident-wrong code, so
+// Handle refuses with guidance instead. The CLI maps this to a usage-style
+// exit (2); MCP surfaces it as a tool error so agents learn to call
+// kern search / kern arch / kern buddy explicitly instead of trusting a junk
+// result.
+type NoCodeIntentError struct {
+	Request string
+}
+
+func (e *NoCodeIntentError) Error() string {
+	return fmt.Sprintf("no code intent detected in request %q — try: kern search <symbol> | kern arch | kern buddy", clipEcho(e.Request))
+}
+
+// clipEcho truncates a request echoed in an output header or error message
+// to 80 chars, keeping the full text only when it fits. A 30x-repeated query
+// must not blow up the classified line, a level header, or a refusal message.
+func clipEcho(s string) string {
+	if len(s) <= 80 {
+		return s
+	}
+	return s[:80] + "…"
+}
+
+// codeIntentWords are vocabulary signals that a request is about code, the
+// repo, or the kern toolchain — the legitimate uses of the search fallback.
+// A fallback request matching none of them (no symbol, no code word) is not
+// a code question, and Handle refuses it instead of running a junk search.
+// Kept deliberately code-specific: generic phrases junk questions lean on
+// ("what is", "show me", "where is") are NOT signals — the protected locator
+// phrasings ("find the NewServer function") carry their own symbol or
+// code-word signals ("find", "function", CamelCase symbol).
+var codeIntentWords = []string{
+	// code & symbols
+	"code", "symbol", "function", "method", "struct", "class", "interface",
+	"variable", "constant", "field", "parameter", "argument", "return",
+	"type", "package", "module", "import", "export", "api", "endpoint",
+	"handler", "route", "router", "dispatch", "server", "client", "request",
+	"middleware", "plugin", "library", "framework", "binary", "compiler",
+	"compile", "build", "test", "lint", "bug", "error", "panic", "stack",
+	"trace", "debug", "refactor", "rename", "delete", "remove", "change",
+	"impact", "break", "call", "caller", "callee", "depend", "dependency",
+	"graph", "index", "search", "find", "lookup", "query", "file", "repo",
+	"repository", "directory", "config", "docs", "documentation", "deploy",
+	"pipeline", "workflow", "runner", "schema", "cache", "thread", "process",
+	"memory", "profile", "perf", "benchmark", "commit", "branch", "merge",
+	"release", "version", "issue", "coverage", "security", "vuln",
+	// kern tooling
+	"tool", "catalog", "skill", "usage", "guide", "cli", "command",
+	"subcommand", "status", "health",
+}
+
+// codeIntentWordsRe matches any code-intent word as a standalone word with an
+// optional plural/tense suffix, so "functions", "changes", "testing" and
+// "indexed" count as their base word while "protest"/"latest" never match
+// "test" (word-boundary, no blind substring).
+var codeIntentWordsRe = func() *regexp.Regexp {
+	parts := make([]string, len(codeIntentWords))
+	for i, w := range codeIntentWords {
+		parts[i] = regexp.QuoteMeta(w)
+	}
+	return regexp.MustCompile(`\b(?:` + strings.Join(parts, "|") + `)(?:s|es|ed|ing)?\b`)
+}()
+
+// codeIntent reports whether a search-fallback request names code, the repo,
+// or kern tooling: a quoted/dotted/CamelCase symbol (ExtractSymbol), a
+// "how does X work" symbol (howWhySymbol), or any code-intent vocabulary
+// word. The refusal gate applies ONLY on the search-fallback path — requests
+// the classifier routed to explore/impact/plan/... never consult it.
+func codeIntent(request, low string) bool {
+	if ExtractSymbol(request, low) != "" {
+		return true
+	}
+	if howWhySymbol(low) != "" {
+		return true
+	}
+	return codeIntentWordsRe.MatchString(low)
 }
 
 // Handle implements the kern_meta tool body: it takes a natural-language
@@ -186,6 +264,7 @@ func Handle(ctx context.Context, h Hooks, args map[string]any) (string, error) {
 		}
 		return fmt.Sprintf("[kern] tool catalog (%d tools):\n%s", n, cat), nil
 	}
+	start := time.Now()
 	tool, subArgs := ClassifyMetaRequest(request)
 	viaSemantic := false
 	if v, _ := subArgs[ViaSemanticArg].(bool); v {
@@ -203,6 +282,19 @@ func Handle(ctx context.Context, h Hooks, args map[string]any) (string, error) {
 			subArgs[k] = v
 		}
 	}
+	// Non-code refusal (P1): the search fallback is only legitimate when the
+	// request names code, the repo, or kern tooling. When the classifier fell
+	// through to kern_search (its final fallback for unrecognized requests,
+	// or the CLI/subcommand guard) AND the request carries no code intent,
+	// running the search would return confident-wrong code — refuse with
+	// guidance instead. Routed requests (explore/impact/plan/...) never reach
+	// this gate, so "how does dispatch work", "find the NewServer function"
+	// and "what breaks if I change X" route exactly as before.
+	if tool == "kern_search" || !metaRoutedTools[tool] {
+		if !codeIntent(request, strings.ToLower(request)) {
+			return "", &NoCodeIntentError{Request: request}
+		}
+	}
 	// Dispatch to the chosen handler. The handlers all share the signature
 	// func(ctx, args) (string, error) and live on the owning server.
 	if !metaRoutedTools[tool] {
@@ -217,13 +309,18 @@ func Handle(ctx context.Context, h Hooks, args map[string]any) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	elapsedMs := time.Since(start).Milliseconds()
 	out := "[kern] classified as: " + tool
 	if viaSemantic {
 		out += " (semantic fallback)"
 	}
 	if h.CostHint != nil {
-		estMs, estTokens := h.CostHint(tool)
-		out += fmt.Sprintf(" · est %dms · %d out tokens", estMs, estTokens)
+		// Measured wall-clock latency replaces the old static "est Nms" —
+		// a fixed constant presented as a latency promise (actual search
+		// runs take seconds). The output-token estimate is kept: it sizes
+		// the result, it does not promise latency.
+		_, estTokens := h.CostHint(tool)
+		out += fmt.Sprintf(" · %dms · %d out tokens", elapsedMs, estTokens)
 	}
 	out += "\n" + result
 	if phase != "" {
@@ -818,6 +915,16 @@ func ClassifySkillTools(low, request string) (string, map[string]any, bool) {
 // chosen tool name plus the derived arguments to pass to that tool's handler.
 func ClassifyMetaRequest(request string) (string, map[string]any) {
 	low := strings.ToLower(request)
+	// Explicit tool-name intents (catalog coverage): a request that names a
+	// kern_* catalog tool literally ("use kern_rename", "call kern_sandbox",
+	// "run kern_loop") routes directly to that tool — every catalog tool is
+	// reachable this way even when no keyword arm exists. This is the
+	// name-addressed arm the plugin's "NL router → all sub-tools" promise
+	// leans on; requests WITHOUT a literal kern_* name keep the keyword
+	// routing below unchanged.
+	if t, a, ok := classifyExplicitToolName(request); ok {
+		return t, a
+	}
 	// The sub-routers are consulted in the same order as the original
 	// monolithic switch (safety/optimize -> workflows -> architecture ->
 	// governance -> symbol graph -> project), so classification outcomes are

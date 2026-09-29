@@ -229,10 +229,10 @@ chosen option to size the real edit — both before you run kern_execute.
   during multi-second calls; HTTP has no push channel, so progress is
   stdio-only. Per-call output is capped at 24KiB (KERN_MCP_MAX_OUTPUT)
   unless you pass max_output=N.
-- Cost hints: every kern_meta classification carries an est latency +
-  output-token hint (fast ~10ms/~150 tok, medium ~150ms/~1200 tok, slow
-  ~800ms/~4000 tok — exec/verify + LLM-class tools). A HINT for context
-  budgeting, never a promise; per-tool actuals live in metrics and
-  kern_stats reports token savings.
+- Cost hints: every kern_meta classification carries the measured wall-clock
+latency + an output-token estimate (fast ~150 tok, medium ~1200 tok, slow
+~4000 tok — exec/verify + LLM-class tools). A HINT for context budgeting,
+never a promise; per-tool actuals live in metrics and kern_stats reports
+token savings.
 `
 }

@@ -7,6 +7,9 @@
 #   * Installs to $HOME\.local\bin by default, or $env:KERN_INSTALL_DIR if set.
 #   * Downloads the prebuilt kern-windows-amd64.zip; falls back to `go install`
 #     if the download fails but `go` is present.
+#   * The go-install fallback builds the default tree-sitter build (hard CGO);
+#     set $env:KERN_PUREGO="1" to build the pure-Go opt-out instead
+#     (`go install -tags notreesitter ...`, no C toolchain required).
 #   * Adds the install dir to the user PATH (persisted via User environment).
 #   * Verifies `kern.exe version` and performs an MCP JSON-RPC initialize handshake.
 #   * Auto-wires kern into detected agents (`kern setup --detect --global`).
@@ -73,10 +76,21 @@ function Verify-Kern {
 }
 
 function Install-Go {
-    Write-Host "kern: falling back to 'go install github.com/$Repo/cmd/kern@$Version'" -ForegroundColor Yellow
-    go install "github.com/$Repo/cmd/kern@$Version"
-    go install "github.com/$Repo/cmd/kern-mcp@$Version"
-    go install "github.com/$Repo/cmd/kern-server@$Version"
+    $purego = $env:KERN_PUREGO
+    if ($purego -eq "1") {
+        Write-Host "kern: KERN_PUREGO=1 — installing the pure-Go build (-tags notreesitter, no C toolchain)" -ForegroundColor Yellow
+        go install -tags notreesitter "github.com/$Repo/cmd/kern@$Version"
+        go install -tags notreesitter "github.com/$Repo/cmd/kern-mcp@$Version"
+        go install -tags notreesitter "github.com/$Repo/cmd/kern-server@$Version"
+    } else {
+        Write-Host "kern: falling back to 'go install github.com/$Repo/cmd/kern@$Version'" -ForegroundColor Yellow
+        # Default go-install build compiles tree-sitter in (hard CGO). On
+        # Windows without a C toolchain this fails; set KERN_PUREGO=1 to use
+        # the pure-Go -tags notreesitter build instead.
+        go install "github.com/$Repo/cmd/kern@$Version"
+        go install "github.com/$Repo/cmd/kern-mcp@$Version"
+        go install "github.com/$Repo/cmd/kern-server@$Version"
+    }
     # go install drops all three binaries into $(go env GOPATH)/bin, which is
     # often NOT on PATH and never reaches $Prefix. Copy them to the canonical
     # install dir so the PATH step and auto-wire below see them exactly like a
@@ -252,7 +266,8 @@ try {
 
     New-Item -ItemType Directory -Force -Path $Prefix | Out-Null
     Expand-Archive -Path $zip -DestinationPath $tmp -Force
-    # The zip extracts a directory named kern-windows-amd64/ containing kern.exe.
+    # The release zip ships the .exe files at the archive root (make dist);
+    # search recursively so older layouts (a wrapper dir) also work.
     $extract = Get-ChildItem -Path $tmp -Recurse -Filter "kern.exe" | Select-Object -First 1
     if (-not $extract) { throw "kern.exe not found in archive" }
     Copy-Item $extract.FullName (Join-Path $Prefix "kern.exe") -Force

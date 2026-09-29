@@ -67,6 +67,14 @@ type Recorder struct {
 	promptTokenRuns  int64
 	promptTokenFixed int64
 	promptTokenFinal int64
+
+	// Kern-first adoption: counts shadow-tool calls (the opencode plugin's
+	// read/glob/grep/bash) that were served by kern (routed) versus the raw
+	// fallback (bypass). Populated via RecordKernAdoption; the append-only
+	// .kern/adoption.log written by the plugin is aggregated into these
+	// counters by AggregateAdoptionLog / IngestAdoptionLog.
+	kernAdoptionRouted int64
+	kernAdoptionTotal  int64
 }
 
 // New creates a new empty Recorder.
@@ -312,6 +320,22 @@ func (r *Recorder) RecordPromptTokens(fixed, final int) {
 	r.promptTokenFinal += int64(final)
 }
 
+// RecordKernAdoption records one shadow-tool call (the opencode plugin's
+// read/glob/grep/bash) and whether the result the agent saw came from kern
+// (routed=true) or from the raw fallback (routed=false). The aggregate drives
+// the "kern-first adoption" percentage surfaced by `kern stats performance`.
+func (r *Recorder) RecordKernAdoption(routed bool) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.kernAdoptionTotal++
+	if routed {
+		r.kernAdoptionRouted++
+	}
+}
+
 // RecordAnalysis records a completed analysis.
 func (r *Recorder) RecordAnalysis() {
 	if r == nil {
@@ -387,6 +411,11 @@ type Snapshot struct {
 	PromptTokenFixed int64 `json:"prompt_token_fixed"`
 	PromptTokenFinal int64 `json:"prompt_token_final"`
 
+	// Kern-first adoption — share of shadow-tool calls served by kern
+	KernAdoptionRouted int64   `json:"kern_adoption_routed"`
+	KernAdoptionTotal  int64   `json:"kern_adoption_total"`
+	KernAdoptionPct    float64 `json:"kern_adoption_pct"`
+
 	// Governance — populated from external sources via SnapshotWithGovernance
 	AgentCount      int     `json:"agent_count"`
 	TaskCount       int     `json:"task_count"`
@@ -451,6 +480,13 @@ func (r *Recorder) Snapshot() Snapshot {
 	s.PromptTokenFixed = r.promptTokenFixed
 	s.PromptTokenFinal = r.promptTokenFinal
 
+	// Kern-first adoption
+	s.KernAdoptionRouted = r.kernAdoptionRouted
+	s.KernAdoptionTotal = r.kernAdoptionTotal
+	if r.kernAdoptionTotal > 0 {
+		s.KernAdoptionPct = float64(r.kernAdoptionRouted) / float64(r.kernAdoptionTotal) * 100
+	}
+
 	return s
 }
 
@@ -510,6 +546,7 @@ func (r *Recorder) Render() string {
 	fmt.Fprintf(&b, "\nproduct success (F-56):\n")
 	fmt.Fprintf(&b, "  token reduction    : %.1f%%\n", s.TokenReductionPct)
 	fmt.Fprintf(&b, "  coder prompt tokens: %d runs (fixed %d -> final %d)\n", s.PromptTokenRuns, s.PromptTokenFixed, s.PromptTokenFinal)
+	fmt.Fprintf(&b, "  kern-first adoption: %.1f%% (kern-routed %d / total %d)\n", s.KernAdoptionPct, s.KernAdoptionRouted, s.KernAdoptionTotal)
 	fmt.Fprintf(&b, "  analyses           : %d\n", s.AnalysisCount)
 	fmt.Fprintf(&b, "  false positive rate: %.1f%%\n", s.FalsePositiveRate*100)
 	fmt.Fprintf(&b, "  impact accuracy    : %.1f%%\n", s.ImpactAccuracyPct)
@@ -560,6 +597,8 @@ func (r *Recorder) Reset() {
 	r.promptTokenRuns = 0
 	r.promptTokenFixed = 0
 	r.promptTokenFinal = 0
+	r.kernAdoptionRouted = 0
+	r.kernAdoptionTotal = 0
 }
 
 // --- Report ---
@@ -732,6 +771,10 @@ func (r *Recorder) Load(path string) error {
 	r.promptTokenRuns += s.PromptTokenRuns
 	r.promptTokenFixed += s.PromptTokenFixed
 	r.promptTokenFinal += s.PromptTokenFinal
+
+	// Merge kern-first adoption counters (plain counters, add directly).
+	r.kernAdoptionRouted += s.KernAdoptionRouted
+	r.kernAdoptionTotal += s.KernAdoptionTotal
 
 	return nil
 }

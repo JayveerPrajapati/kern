@@ -4,9 +4,9 @@
 // invariant is enforced structurally by TestDispatchParityWithRegistration
 // (map keys <-> tools table), no source parsing required.
 //
-// Two handler shapes exist: the majority take (ctx, args); three (sandbox,
-// heal, run-build) also take the call id. dispatchFunc is the union shape and
-// simple() adapts the plain handlers to it.
+// Two handler shapes exist: the majority take (ctx, args); sandbox, heal,
+// run-build and verify also take the call id (verify for M4 phase progress).
+// dispatchFunc is the union shape and simple() adapts the plain handlers to it.
 
 package mcp
 
@@ -132,7 +132,7 @@ func init() {
 		"kern_analyze":               simple((*Server).handleAnalyze),
 		"kern_plan":                  simple((*Server).handlePlan),
 		"kern_execute":               simple((*Server).handleExecute),
-		"kern_verify":                simple((*Server).handleVerify),
+		"kern_verify":                (*Server).handleVerify,
 		"kern_incident":              simple((*Server).handleIncident),
 		"kern_what_if":               simple((*Server).handleWhatIf),
 		"kern_impact":                simple((*Server).handleImpact),
