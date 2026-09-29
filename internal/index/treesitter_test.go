@@ -1,4 +1,4 @@
-//go:build treesitter
+//go:build !notreesitter
 
 package index
 
@@ -141,16 +141,20 @@ export function Header() {
 		t.Fatal(err)
 	}
 	found := false
+	foundProps := false
 	for _, s := range syms {
 		if s.Name == "Header" && s.Kind == "func" {
 			found = true
 		}
 		if s.Name == "Props" && s.Kind == "interface" {
-			// interface recognized too
+			foundProps = true
 		}
 	}
 	if !found {
 		t.Errorf("expected Header func from tsx grammar, got %v", syms)
+	}
+	if !foundProps {
+		t.Errorf("expected Props interface from tsx grammar, got %v", syms)
 	}
 }
 
@@ -430,5 +434,80 @@ void Engine::start() {
 	}
 	if len(calls) == 0 {
 		t.Logf("Cpp calls extracted: %v", calls)
+	}
+}
+
+// TestTreeSitterFileOwnedEdgeConfidencePromotion verifies recommendation B
+// part 2: a file-owned edge (file:<rel>) whose target is a verified
+// tree-sitter symbol is promoted from MEDIUM to HIGH, while a dotted/external
+// callee stays MEDIUM (the AST cannot verify it). Guards
+// promoteFileEdgesToASTConfidence against regressions.
+func TestTreeSitterFileOwnedEdgeConfidencePromotion(t *testing.T) {
+	src := []byte(`const btn = document.getElementById("go");
+btn.addEventListener("click", () => {
+  runReport();
+});
+function runReport() { fetch("/api"); }
+`)
+	_, calls, _, _, err := tsExtract("report.js", src, "javascript")
+	if err != nil {
+		t.Fatal(err)
+	}
+	edges := calls["file:report.js"]
+	if len(edges) == 0 {
+		t.Fatalf("expected file:report.js owned edges, got %v", calls)
+	}
+	var runReportEdge, btnEdge *CallEdge
+	for i := range edges {
+		switch edges[i].Target {
+		case "runReport":
+			runReportEdge = &edges[i]
+		case "btn.addEventListener":
+			btnEdge = &edges[i]
+		}
+	}
+	// runReport is a file-scope, non-method symbol tree-sitter verified:
+	// the file-owned edge to it must be promoted to HIGH.
+	if runReportEdge == nil {
+		t.Fatalf("expected file:report.js -> runReport edge, got %v", CallEdgeTargets(edges))
+	}
+	if runReportEdge.Confidence != ConfidenceHigh {
+		t.Errorf("file:report.js -> runReport confidence = %q, want HIGH (verified symbol)", runReportEdge.Confidence)
+	}
+	// btn.addEventListener is a dotted target through an unknown receiver
+	// (btn is a const, not a verified type): must stay MEDIUM.
+	if btnEdge == nil {
+		t.Fatalf("expected file:report.js -> btn.addEventListener edge, got %v", CallEdgeTargets(edges))
+	}
+	if btnEdge.Confidence != ConfidenceMedium {
+		t.Errorf("file:report.js -> btn.addEventListener confidence = %q, want MEDIUM (unresolved receiver)", btnEdge.Confidence)
+	}
+}
+
+// TestTreeSitterFileOwnedMethodShortNameNotPromoted verifies the F3 boundary:
+// a top-level call whose target name matches only a METHOD's short name must
+// stay MEDIUM — the AST verified Greeter.greet, not a bare top-level greet().
+func TestTreeSitterFileOwnedMethodShortNameNotPromoted(t *testing.T) {
+	src := []byte(`class Greeter {
+  greet() { return "hi"; }
+}
+greet();
+`)
+	_, calls, _, _, err := tsExtract("greeter.ts", src, "typescript")
+	if err != nil {
+		t.Fatal(err)
+	}
+	edges := calls["file:greeter.ts"]
+	var greetEdge *CallEdge
+	for i := range edges {
+		if edges[i].Target == "greet" {
+			greetEdge = &edges[i]
+		}
+	}
+	if greetEdge == nil {
+		t.Fatalf("expected file:greeter.ts -> greet edge, got %v", CallEdgeTargets(edges))
+	}
+	if greetEdge.Confidence != ConfidenceMedium {
+		t.Errorf("file:greeter.ts -> greet confidence = %q, want MEDIUM (matches only Greeter.greet's short name)", greetEdge.Confidence)
 	}
 }

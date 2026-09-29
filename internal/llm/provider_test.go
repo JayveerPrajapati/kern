@@ -11,7 +11,10 @@ import (
 )
 
 func TestNewProviderDefaultOllama(t *testing.T) {
-	t.Setenv("KERN_LLM_PROVIDER", "")
+	// Pin the explicit ollama provider for the wire test — the auto chain is
+	// now host-first then agent CLIs (the auto-chain ordering is asserted by
+	// TestAutoChainOrderCLIsBeforeOllama).
+	t.Setenv("KERN_LLM_PROVIDER", "ollama")
 	var gotPath string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.Path
@@ -29,20 +32,8 @@ func TestNewProviderDefaultOllama(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewProvider: %v", err)
 	}
-	// The default is the auto chain: Ollama first, then locally-wired agent
-	// CLIs. The type assertion below must accept either the plain Ollama
-	// provider or a chain whose first element is Ollama.
-	switch pp := p.(type) {
-	case *OllamaProvider:
-	case *ChainProvider:
-		if len(pp.Providers()) == 0 {
-			t.Fatalf("auto chain is empty")
-		}
-		if _, ok := pp.Providers()[0].(*OllamaProvider); !ok {
-			t.Fatalf("auto chain first provider = %T, want *OllamaProvider", pp.Providers()[0])
-		}
-	default:
-		t.Fatalf("default provider = %T, want *OllamaProvider or auto chain", p)
+	if _, ok := p.(*OllamaProvider); !ok {
+		t.Fatalf("default provider = %T, want *OllamaProvider", p)
 	}
 	got, err := p.Generate(context.Background(), "sys", "user payload", Options{})
 	if err != nil {
@@ -53,6 +44,43 @@ func TestNewProviderDefaultOllama(t *testing.T) {
 	}
 	if gotPath != "/api/generate" {
 		t.Fatalf("path = %q, want /api/generate", gotPath)
+	}
+}
+
+// TestAutoChainOrderCLIsBeforeOllama pins the auto-chain ordering change
+// (dogfooding G-HIGH): with no host session, every locally-installed agent
+// CLI must precede Ollama in the chain, and Ollama must be last. On machines
+// with no agent CLI installed the chain degrades to [ollama] — the invariant
+// (all CLIs before ollama) still holds vacuously.
+func TestAutoChainOrderCLIsBeforeOllama(t *testing.T) {
+	t.Setenv("KERN_LLM_PROVIDER", "")
+	p, err := NewProvider()
+	if err != nil {
+		t.Fatalf("NewProvider: %v", err)
+	}
+	chain, ok := p.(*ChainProvider)
+	if !ok {
+		t.Fatalf("auto provider = %T, want *ChainProvider", p)
+	}
+	provs := chain.Providers()
+	if len(provs) == 0 {
+		t.Fatal("auto chain is empty")
+	}
+	ollamaIdx := -1
+	for i, prov := range provs {
+		switch prov.(type) {
+		case *LocalCliProvider:
+			if ollamaIdx >= 0 {
+				t.Fatalf("LocalCliProvider at %d appears after OllamaProvider at %d", i, ollamaIdx)
+			}
+		case *OllamaProvider:
+			ollamaIdx = i
+		case *MCPProvider:
+			t.Fatalf("unexpected *MCPProvider at %d with no host sampler registered", i)
+		}
+	}
+	if ollamaIdx != len(provs)-1 {
+		t.Fatalf("OllamaProvider at %d, want last (%d)", ollamaIdx, len(provs)-1)
 	}
 }
 

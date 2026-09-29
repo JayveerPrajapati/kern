@@ -27,7 +27,9 @@ func writeGoFile(t *testing.T, dir, name, src string) string {
 // non-strict freshness probe (TreeOIDProbe) compares git tree OIDs.
 func gitIn(t *testing.T, dir string, args ...string) string {
 	t.Helper()
-	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+	// -c core.hooksPath= isolates fixture repos from machine-global git hooks
+	// (kern install hook --global) — see testGit in identity_test.go.
+	cmd := exec.Command("git", append([]string{"-c", "core.hooksPath=", "-C", dir}, args...)...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("git %v in %s: %v\n%s", args, dir, err, out)

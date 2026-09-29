@@ -197,3 +197,35 @@ func TestEntityAggregationDedupesAndSorts(t *testing.T) {
 		t.Fatalf("what-if entities = %+v, want api + table", we)
 	}
 }
+
+// TestEntityFilesDeterministicSameRoute is the deterministic tie-break case:
+// the same route (same Kind+Name) registered in two different files must
+// resolve to the lexicographically smallest file regardless of node order, so
+// the "(file)" parenthetical on affected-entity rows never flickers between
+// runs. The two api nodes are deliberately listed with the lexicographically
+// larger file first to prove the selection is by file, not by node order.
+func TestEntityFilesDeterministicSameRoute(t *testing.T) {
+	g := &intel.Graph{Graph: domain.Graph{
+		Nodes: []domain.Node{
+			{ID: "api:gin:GET:/users#b", Kind: "api", Label: "GET /users", API: &domain.API{Name: "GET /users", File: "z_routes_test.go"}},
+			{ID: "api:gin:GET:/users#a", Kind: "api", Label: "GET /users", API: &domain.API{Name: "GET /users", File: "a_routes.go"}},
+			{ID: "HandlerA", Kind: "symbol", Label: "HandlerA", Symbol: &domain.Symbol{Name: "HandlerA", Qualified: "HandlerA", File: "a_routes.go"}},
+		},
+		Edges: []domain.Edge{
+			{From: "api:gin:GET:/users#b", To: "HandlerA", Kind: "implements"},
+			{From: "api:gin:GET:/users#a", To: "HandlerA", Kind: "implements"},
+		},
+	}}
+	if got := entityFiles(g)["api\x00GET /users"]; got != "a_routes.go" {
+		t.Fatalf("entityFiles[api GET /users] = %q, want the lexicographically smallest file a_routes.go", got)
+	}
+	// End to end: both registrations implicate the same route, which must
+	// collapse into a single entity row carrying the deterministic file.
+	ents := attachImpactEntities(g, []string{"HandlerA"})
+	if len(ents) != 1 {
+		t.Fatalf("got %d entities, want 1 (same route deduped to one file): %+v", len(ents), ents)
+	}
+	if ents[0].File != "a_routes.go" {
+		t.Fatalf("entity file = %q, want a_routes.go (deterministic min-file tie-break)", ents[0].File)
+	}
+}

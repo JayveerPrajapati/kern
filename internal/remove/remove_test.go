@@ -209,6 +209,75 @@ func TestStillLive(t *testing.T) {
 	}
 }
 
+// TestApplyDeletesPackageClauseStub pins M6: when a removal leaves a file
+// with only a package clause (no declarations), the file is deleted instead
+// of left as a 13-byte stub — and the deletion is backed up like every edit,
+// so the file stays recoverable.
+func TestApplyDeletesPackageClauseStub(t *testing.T) {
+	root := writeTree(t, map[string]string{
+		"lib/stub.go": `package docs
+
+// lonely is dead.
+func lonely() {}
+`,
+		"lib/stub_test.go": `package docs
+
+import "testing"
+
+func TestLonely(t *testing.T) {
+	lonely()
+}
+
+func TestOther(t *testing.T) {}
+`,
+	})
+	rep, err := Plan(build(t, root), "lonely")
+	if err != nil {
+		t.Fatalf("Plan(lonely): %v", err)
+	}
+	// stub.go is left with only `package docs` after the removal — it must be
+	// scheduled for deletion, and its edits dropped in favor of the deletion.
+	if len(rep.DeleteFiles) != 1 || rep.DeleteFiles[0] != "lib/stub.go" {
+		t.Fatalf("DeleteFiles = %v, want [lib/stub.go]", rep.DeleteFiles)
+	}
+	for _, e := range rep.Edits {
+		if e.File == "lib/stub.go" {
+			t.Fatalf("stub.go should be deleted, not edited: %+v", e)
+		}
+	}
+	n, err := rename.Apply(root, rep)
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if n != 2 { // 1 edit (stub_test.go) + 1 deletion (stub.go)
+		t.Fatalf("Apply count = %d, want 2", n)
+	}
+	if _, err := os.Stat(filepath.Join(root, "lib", "stub.go")); !os.IsNotExist(err) {
+		t.Fatalf("stub.go still exists after delete")
+	}
+	// The unrelated test survives in the edited test file.
+	testFile, err := os.ReadFile(filepath.Join(root, "lib", "stub_test.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(testFile), "TestLonely") {
+		t.Fatalf("test file still contains the removed caller:\n%s", testFile)
+	}
+	if !strings.Contains(string(testFile), "TestOther") {
+		t.Fatalf("test file lost an unrelated test:\n%s", testFile)
+	}
+	// The deletion is backed up: the file remains recoverable from
+	// <root>/.kern/rename-backup/<ts>/lib/stub.go.
+	bp := filepath.Join(rep.Backup, "lib", "stub.go")
+	b, err := os.ReadFile(bp)
+	if err != nil {
+		t.Fatalf("deleted file not backed up: %v", err)
+	}
+	if !strings.Contains(string(b), "lonely") {
+		t.Fatalf("backup does not hold the pre-delete content:\n%s", b)
+	}
+}
+
 // TestApplyRollsBackOnDrift pins the transactional contract: when the source
 // changed since analysis, splice refuses and every backed-up file is
 // restored.

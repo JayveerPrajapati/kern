@@ -203,7 +203,7 @@ func TestHandleMetaRoutesLLMProviders(t *testing.T) {
 func TestHandleVerifyRejectsUnknownType(t *testing.T) {
 	t.Parallel()
 	s := newTestServer()
-	_, err := s.handleVerify(context.Background(), map[string]any{"root": ".", "types": "123"})
+	_, err := s.handleVerify(context.Background(), "", map[string]any{"root": ".", "types": "123"})
 	if err == nil {
 		t.Fatal("handleVerify(types=123) must error, got nil")
 	}
@@ -215,7 +215,7 @@ func TestHandleVerifyRejectsUnknownType(t *testing.T) {
 	}
 	// A garbage token mixed with valid ones is rejected too, and the valid
 	// token is never silently dropped.
-	_, err = s.handleVerify(context.Background(), map[string]any{"root": ".", "types": "build,zzz"})
+	_, err = s.handleVerify(context.Background(), "", map[string]any{"root": ".", "types": "build,zzz"})
 	if err == nil || !strings.Contains(err.Error(), "unknown verify type: zzz") {
 		t.Fatalf("handleVerify(types=build,zzz): err = %v, want rejection of zzz", err)
 	}
@@ -232,7 +232,7 @@ func TestHandleVerifyAcceptsBuildTest(t *testing.T) {
 	root := mcpProject(t)
 	s := NewServer(strings.NewReader(""), io.Discard)
 	defer s.Close()
-	out, err := s.handleVerify(context.Background(), map[string]any{"root": root, "types": "build,test"})
+	out, err := s.handleVerify(context.Background(), "", map[string]any{"root": root, "types": "build,test"})
 	if err != nil {
 		t.Fatalf("handleVerify(build,test): %v", err)
 	}
@@ -252,7 +252,7 @@ func TestHandleVerifyAcceptsArchitecture(t *testing.T) {
 	root := mcpProject(t)
 	s := NewServer(strings.NewReader(""), io.Discard)
 	defer s.Close()
-	out, err := s.handleVerify(context.Background(), map[string]any{"root": root, "types": "architecture"})
+	out, err := s.handleVerify(context.Background(), "", map[string]any{"root": root, "types": "architecture"})
 	if err != nil {
 		t.Fatalf("handleVerify(architecture): %v", err)
 	}

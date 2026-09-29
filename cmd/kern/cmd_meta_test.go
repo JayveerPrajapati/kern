@@ -1,8 +1,12 @@
 package main
 
 import (
+	"context"
+	"os"
 	"strings"
 	"testing"
+
+	"github.com/JayveerPrajapati/kern/internal/mcp"
 )
 
 // runMetaExit recovers the fatalUsage sentinel from runMeta.
@@ -191,5 +195,40 @@ func TestCrossRepoImpactRejectsTrailingUnknownFlag(t *testing.T) {
 	code := runCrossRepoImpactExit(t, []string{"SomeSymbol", "--nonsense"})
 	if code != 2 {
 		t.Fatalf("kern cross-repo-impact <sym> --nonsense exit code = %d, want 2 (usage error)", code)
+	}
+}
+
+// TestMetaRefusesNoCodeIntentExits2 (P1): a request with no code intent
+// exits 2 (usage-style) with the refusal message instead of running a junk
+// symbol search (which used to exit 0 with confident-wrong results).
+func TestMetaRefusesNoCodeIntentExits2(t *testing.T) {
+	code := runMetaExit(t, []string{"make me a sandwich"})
+	if code != 2 {
+		t.Fatalf("kern meta \"make me a sandwich\" exit code = %d, want 2 (no code intent)", code)
+	}
+}
+
+// TestMetaRefusesNoCodeIntentMessage: the refusal guidance names the
+// explicit tools to use instead of trusting a junk result.
+func TestMetaRefusesNoCodeIntentMessage(t *testing.T) {
+	stderr := captureStderr(t, func() {
+		_ = runMetaExit(t, []string{"make me a sandwich"})
+	})
+	for _, want := range []string{"no code intent detected", "kern search", "kern arch", "kern buddy"} {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("refusal message missing %q; got:\n%s", want, stderr)
+		}
+	}
+}
+
+// TestMetaStillRoutesCodeRequests (P1): code-intent requests keep routing
+// through the CLI path — the refusal gate only fires when there is NO code
+// intent. "how does dispatch work" classifies to explore (the empty server
+// then errors loading the index, which is a routing outcome, not a refusal).
+func TestMetaStillRoutesCodeRequests(t *testing.T) {
+	srv := mcp.NewServer(os.Stdin, os.Stdout)
+	_, err := srv.HandleMeta(context.Background(), map[string]any{"request": "how does dispatch work?"})
+	if mcp.IsNoCodeIntent(err) {
+		t.Fatalf("code-intent request must not be refused: %v", err)
 	}
 }

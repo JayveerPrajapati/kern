@@ -1,6 +1,8 @@
 package cli
 
 import (
+	"os"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -32,6 +34,9 @@ func latencyBudgetRepo(t *testing.T) string {
 // artifact carries the performance:latency-budget finding, the per-check
 // breakdown (name/status/duration_ms), and latency_budget_ms.
 func TestG24_CIArtifactCarriesLatencyFindingAndChecks(t *testing.T) {
+	if runtime.GOOS == "darwin" && os.Getenv("KERN_SANDBOX_ACTIVE") == "1" {
+		t.Skip("cannot nest sandbox-exec inside an active kern sandbox on macOS (inner check/build pipeline); covered by direct runs")
+	}
 	if testing.Short() {
 		t.Skip("E2E gate test — full pipeline; runs in nightly non-short suite")
 	}
@@ -136,6 +141,9 @@ func TestG24_CheckHookNeverBlocksOnLatency(t *testing.T) {
 // budget the ci artifact carries no performance finding and latency_budget_ms
 // stays 0.
 func TestG24_CINoBudgetNoLatencyFinding(t *testing.T) {
+	if runtime.GOOS == "darwin" && os.Getenv("KERN_SANDBOX_ACTIVE") == "1" {
+		t.Skip("cannot nest sandbox-exec inside an active kern sandbox on macOS (inner check/build pipeline); covered by direct runs")
+	}
 	if testing.Short() {
 		t.Skip("E2E gate test — full pipeline; runs in nightly non-short suite")
 	}

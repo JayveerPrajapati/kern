@@ -711,7 +711,7 @@ func TestWireDetectEmptyPreWiresGlobalOnly(t *testing.T) {
 	var sawGlobalHook, sawUniversal bool
 	for _, s := range sts {
 		switch s.Agent {
-		case "cursor-hooks", "gemini-hooks", "claude-hooks", "codex-hooks", "copilot-hooks", "qwen-hooks", "qoder-hooks":
+		case "cursor-hooks", "gemini-hooks", "claude-hooks", "codex-hooks", "copilot-hooks", "qwen-hooks", "qoder-hooks", "antigravity-hooks":
 			sawGlobalHook = true
 			if !s.Installed {
 				t.Fatalf("global hook %s must be pre-wired, got: %+v", s.Agent, s)
@@ -829,6 +829,54 @@ func TestSkillCopiesParity(t *testing.T) {
 	}
 }
 
+// TestGlobalSkillCopiesParity asserts that every installed global skill copy
+// (globalSkillTargets, e.g. ~/.opencode/skills and ~/.agents/skills that opencode
+// 1.18.x loads directly) is byte-identical to the canonical internal/skills/assets.
+// A stale copy from an old asset version shadows the fresh one on disk, so the
+// gate fails loudly instead of letting pre-campaign skills keep loading.
+func TestGlobalSkillCopiesParity(t *testing.T) {
+	home := globalHomeDir()
+	skillNames := []string{
+		"kern-investigate",
+		"kern-safe-change",
+		"kern-incident-triage",
+		"kern-team-orchestration",
+	}
+	canonical := make(map[string][]byte, len(skillNames))
+	for _, s := range skillNames {
+		data, err := os.ReadFile(filepath.Join("..", "..", "internal", "skills", "assets", s, "SKILL.md"))
+		if err != nil {
+			t.Fatalf("read canonical internal/skills/assets/%s/SKILL.md: %v", s, err)
+		}
+		canonical[s] = data
+	}
+	checked := 0
+	for _, target := range globalSkillTargets {
+		if target.isCursor {
+			continue // Cursor targets are converted .mdc rules, not SKILL.md copies
+		}
+		homeDir := filepath.Join(home, target.homeDirCheck)
+		if _, err := os.Stat(homeDir); err != nil {
+			continue // homeDirCheck dir not present on this machine (e.g. CI) — nothing to compare
+		}
+		checked++
+		for _, s := range skillNames {
+			p := filepath.Join(home, target.skillsDir, s, "SKILL.md")
+			data, err := os.ReadFile(p)
+			if err != nil {
+				t.Errorf("%s missing for target %s — run: kern setup to sync", p, target.agent)
+				continue
+			}
+			if !bytes.Equal(canonical[s], data) {
+				t.Errorf("%s drifted from canonical internal/skills/assets/%s/SKILL.md (target %s) — run: kern setup to sync", p, s, target.agent)
+			}
+		}
+	}
+	if checked == 0 {
+		t.Skip("no global skill target home directories present on this machine")
+	}
+}
+
 // TestMCPDocumentationCountsParity asserts that tool counts mentioned in
 // docs/mcp/* and docs/mcp-client.md match the live registered catalog count.
 func TestMCPDocumentationCountsParity(t *testing.T) {
@@ -897,17 +945,24 @@ func TestGitignoreGeneratedBlueprintRuntime(t *testing.T) {
 		t.Fatal(err)
 	}
 	content := string(b)
-	for _, want := range []string{
+	// The .blueprint runtime entries are owned by internal/bpcli/cli's
+	// ensureBlueprintRuntimeGitignored (a separate marked block appended by
+	// `kern check`), NOT by setup's kern-generated block. Re-adding them
+	// here would be stripped as legacy on the next check, dirtying the
+	// file on every setup→check cycle.
+	for _, banned := range []string{
 		".blueprint/audit/",
 		".blueprint/receipts/",
 		".blueprint/verdict-cache/",
 		".blueprint/fingerprint-cache/",
 		".blueprint/metrics.json",
-		".kern/",
 	} {
-		if !strings.Contains(content, want) {
-			t.Errorf(".gitignore missing %q:\n%s", want, content)
+		if strings.Contains(content, banned) {
+			t.Errorf(".gitignore must not contain %q (owned by kern check's blueprint block):\n%s", banned, content)
 		}
+	}
+	if !strings.Contains(content, ".kern/") {
+		t.Errorf(".gitignore missing %q:\n%s", ".kern/", content)
 	}
 	// No wholesale .blueprint/ ignore and no config-file ignores.
 	for _, banned := range []string{
@@ -927,8 +982,8 @@ func TestGitignoreGeneratedBlueprintRuntime(t *testing.T) {
 	if string(b) != before {
 		t.Fatal("gitignore block changed on re-run")
 	}
-	if got := strings.Count(string(b), ".blueprint/audit/"); got != 1 {
-		t.Fatalf("blueprint audit entry appears %d times, want 1", got)
+	if got := strings.Count(string(b), ".blueprint/audit/"); got != 0 {
+		t.Fatalf("blueprint audit entry appears %d times, want 0", got)
 	}
 }
 

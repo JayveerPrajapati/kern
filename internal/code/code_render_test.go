@@ -62,9 +62,14 @@ func TestSummaryRender(t *testing.T) {
 }
 
 func TestSummaryRenderUnknownLang(t *testing.T) {
-	sum := Summary{Path: "notes.txt", Language: ""}
-	if sum.Render() != "" {
-		t.Fatalf("expected empty render for unknown lang, got %q", sum.Render())
+	// Dogfooding D-LOW: a file with no detectable language is NOT indexable
+	// code — Render must say so explicitly instead of returning empty (an
+	// agent reading an empty kern_compact_file result cannot tell "no
+	// symbols" from "tool broken").
+	sum := Summary{Path: "notes.txt", Language: "", Lines: 3}
+	out := sum.Render()
+	if !strings.Contains(out, "notes.txt") || !strings.Contains(out, "not indexable code") || !strings.Contains(out, "3 lines") {
+		t.Fatalf("expected an explicit not-indexable note, got %q", out)
 	}
 }
 

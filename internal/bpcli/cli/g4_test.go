@@ -101,7 +101,10 @@ func g4GitRepo(t *testing.T, dir string) {
 
 func g4RunGit(t *testing.T, dir string, args ...string) {
 	t.Helper()
-	cmd := exec.Command("git", args...)
+	// -c core.hooksPath= keeps every test git invocation free of machine-global
+	// hooks (git config --global core.hooksPath may point at the kern global
+	// hook this feature installs), so tests never depend on host git config.
+	cmd := exec.Command("git", append([]string{"-c", "core.hooksPath="}, args...)...)
 	cmd.Dir = dir
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("git %v in %s: %v\n%s", args, dir, err, out)
@@ -434,7 +437,7 @@ func TestG4_ExplicitBypassDocumented(t *testing.T) {
 	g4RunGit(t, dir, "add", "web/bad.go")
 
 	kernPath := requireKernPath(t)
-	commitCmd := exec.Command("git", "commit", "-m", "should be blocked")
+	commitCmd := exec.Command("git", "-c", "core.hooksPath=", "commit", "-m", "should be blocked")
 	commitCmd.Dir = dir
 	commitCmd.Env = append(os.Environ(), "KERN_BINARY="+kernPath)
 	// Also put the blueprint binary on PATH so the hook can find it.
@@ -451,7 +454,9 @@ func TestG4_ExplicitBypassDocumented(t *testing.T) {
 	}
 
 	// Commit WITH --no-verify: must succeed (bypass documented behavior).
-	bypassCmd := exec.Command("git", "commit", "--no-verify", "-m", "bypassed")
+	// -c core.hooksPath= additionally keeps the test independent of any
+	// machine-global hook config.
+	bypassCmd := exec.Command("git", "-c", "core.hooksPath=", "commit", "--no-verify", "-m", "bypassed")
 	bypassCmd.Dir = dir
 	bypassOut, bypassErr := bypassCmd.CombinedOutput()
 	if bypassErr != nil {

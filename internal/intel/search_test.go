@@ -426,3 +426,61 @@ func TestRankedSearchExactNameOutranksSuperstring(t *testing.T) {
 		t.Fatalf("exact symbol must rank first, got %+v", hits)
 	}
 }
+
+// TestRankedSearchIdentifierGarbageNoPartialHits (P0-1): an identifier-shaped
+// query that does not name a real symbol must return ZERO hits so the CLI's
+// no-match path (exit 1 + did-you-mean) fires. "NoSuchSymbol12345"
+// camelCase-splits to no/such/symbol12345 and the 2-char "no" segment used to
+// match ErrNoProvider — a coincidental partial match an agent would have
+// trusted as the answer. Exact identifiers, identifier prefixes, and prose
+// queries with spaces must keep working.
+func TestRankedSearchIdentifierGarbageNoPartialHits(t *testing.T) {
+	root := writeTree(t, map[string]string{
+		"go.mod": "module demo\n\ngo 1.22\n",
+		"app.go": `package main
+
+// ErrNoProvider is a decoy: its "no" segment used to match the garbage query.
+func ErrNoProvider() {}
+
+// NewServer is a real identifier that must still resolve.
+func NewServer() {}
+
+// StateMachine is a partial decoy for "StateMacFoo": state+mac match but foo
+// does not — the query is still garbage for this index.
+func StateMachine() {}
+
+// LoadIndex is a real symbol for prose queries.
+func LoadIndex() {}
+`,
+	})
+	ix, err := index.Build(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Garbage identifier: no hit matched every split word, no exact/prefix
+	// name match — zero hits (the did-you-mean / exit-1 path).
+	if hits := RankedSearchScored(ix, "NoSuchSymbol12345", 10); len(hits) != 0 {
+		t.Fatalf("garbage identifier must return 0 hits, got %d (%+v)", len(hits), hits)
+	}
+	// Same for an identifier-shaped camelCase query where one split word
+	// matches nothing at all.
+	if hits := RankedSearchScored(ix, "StateMacFoo", 10); len(hits) != 0 {
+		t.Fatalf("identifier with an unmatched word must return 0 hits, got %d (%+v)", len(hits), hits)
+	}
+	// Exact single-token identifier still resolves (exit-0 path).
+	if hits := RankedSearch(ix, "NewServer", 10); len(hits) == 0 || hits[0].Name != "NewServer" {
+		t.Fatalf("exact identifier must still resolve, got %+v", hits)
+	}
+	// A prefix of a real identifier still resolves (joined-query prefix).
+	if hits := RankedSearch(ix, "NewServ", 10); len(hits) == 0 || hits[0].Name != "NewServer" {
+		t.Fatalf("identifier prefix must still resolve, got %+v", hits)
+	}
+	// Prose multi-word query (has a space) keeps fuzzy behavior.
+	if hits := RankedSearch(ix, "load index", 10); len(hits) == 0 || hits[0].Name != "LoadIndex" {
+		t.Fatalf("prose query must keep fuzzy matching, got %+v", hits)
+	}
+	// Single-word query keeps fuzzy behavior (any hit is MatchedAll).
+	if hits := RankedSearch(ix, "new", 10); len(hits) == 0 {
+		t.Fatal("single-word query must keep fuzzy matching")
+	}
+}

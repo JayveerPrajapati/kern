@@ -1,4 +1,4 @@
-//go:build treesitter
+//go:build !notreesitter
 
 package index
 
@@ -16,20 +16,37 @@ var parityFixtures embed.FS
 // parity_test.go is the heuristic<->tree-sitter parity gate (CG-P0-4).
 //
 // kern ships two extractors for non-Go languages: the regex/heuristic path
-// (extractForeignRegex, the stdlib-only default) and tree-sitter (tsExtract,
-// -tags treesitter). A user with or without the tag must not get silently
-// different graphs. This gate runs ONLY in the tree-sitter build (the
-// precise path must exist to compare), over the shared fixture corpus in
-// testfixture/, and asserts:
+// (extractForeignRegex, the -tags notreesitter build) and tree-sitter
+// (tsExtract, the default build). The two builds differ in PRECISION, never
+// in CONTRADICTION: the regex path is a documented lower-fidelity subset of
+// the tree-sitter graph — tree-sitter may legitimately emit symbols and call
+// edges the regex rules structurally cannot express (props, fields,
+// AST-verified callees), while the regex path must never be MORE certain
+// than tree-sitter about a shared fact and never silently drop a fact
+// tree-sitter is confident in. A user in either build gets graphs that agree
+// on every shared fact and differ only in documented, additive precision.
 //
-//  1. Symbol sets agree (full name, kind, line, confidence), modulo the
-//     documented symbolTolerances below.
-//  2. Every tree-sitter call edge exists on the regex side, with regex
-//     confidence <= tree-sitter confidence: the regex path may be less
-//     certain, never more certain, and never silently drop an edge.
-//  3. Regex-only edges are exactly the documented declaration-line
+// This gate runs ONLY in the default (tree-sitter) build — the precise path
+// must exist to compare — over the shared fixture corpus in testfixture/,
+// and asserts the superset contract:
+//
+//  1. Regex symbols are a subset of tree-sitter symbols modulo documented
+//     regex artifacts (regexOnlySymbols): every regex symbol must exist on
+//     the ts side with matching (full, kind, line, confidence), unless it is
+//     a documented declaration-line artifact.
+//  2. Tree-sitter symbols may EXCEED the regex set: ts-only symbols are
+//     tolerated only when they are documented per-symbol (tsOnlySymbols) or
+//     belong to a class the regex extractor structurally cannot produce
+//     (tsOnlySymbolClasses, e.g. field/property declarations) — additional
+//     precision, never a contradiction of regex output.
+//  3. Every tree-sitter call edge exists on the regex side, with regex
+//     confidence <= tree-sitter confidence for shared edges: the regex path
+//     may be less certain, never more certain, and never silently drop an
+//     edge. Tree-sitter may carry edges regex cannot express only when they
+//     are documented (tsOnlyEdges) or target a ts-only callee.
+//  4. Regex-only edges are exactly the documented declaration-line
 //     artifacts (regexExtraEdges): anything new fails the gate.
-//  4. Inheritance maps agree exactly.
+//  5. Inheritance maps agree exactly.
 //
 // The tolerance tables are the documented degradation list the plan
 // requires: each entry names the construct and the confidence relationship.
@@ -38,8 +55,10 @@ var parityFixtures embed.FS
 // both are extent hints only (see CG-P0-3).
 
 // tsOnlySymbols documents symbols tree-sitter emits that the regex path
-// legitimately never produces (field/property declarations are not decl
-// rules in the regex extractor).
+// legitimately never produces, named per occurrence (field/property
+// declarations are not decl rules in the regex extractor). The per-symbol
+// list is precise documentation; tsOnlySymbolClasses below generalizes it
+// to whole kinds the regex rules structurally cannot emit.
 var tsOnlySymbols = map[string]map[string]string{
 	"java": {
 		"String": "var", // private String name; — field declaration
@@ -49,10 +68,45 @@ var tsOnlySymbols = map[string]map[string]string{
 	},
 }
 
+// tsOnlySymbolClasses documents KINDS of ts-only symbols that are
+// structurally regex-impossible per language: the regex extractor has no
+// declaration rule producing that kind for that language, so any ts symbol
+// of that kind is additional precision, not a contradiction. A ts-only
+// symbol passes the gate if it is listed per-symbol in tsOnlySymbols OR its
+// kind is in this table.
+var tsOnlySymbolClasses = map[string]map[string]bool{
+	// Java field declarations ("private String name;") map to "var" in
+	// tree-sitter; the regex java rules only declare class/interface/enum/
+	// record/method, never vars.
+	"java": {
+		"var": true,
+	},
+	// JS/TS property declarations (property_signature, public_field_definition)
+	// map to "prop"; the regex js rules have no property rule.
+	"javascript": {
+		"prop": true,
+	},
+	"typescript": {
+		"prop": true,
+	},
+}
+
+// regexOnlySymbols documents symbols the regex path emits that tree-sitter
+// does not: declaration-line artifacts the regex rules read as standalone
+// symbols while the AST sees the same text as part of a larger construct.
+// The regex path must never invent declarations beyond this documented
+// list. Currently empty — every regex symbol in the fixture corpus exists on
+// the ts side — but the symbol assertion below REQUIRES any future
+// regex-only symbol to be listed here (fullname -> kind, mirroring
+// tsOnlySymbols) before it may exist.
+var regexOnlySymbols = map[string]map[string]string{}
+
 // regexExtraEdges documents regex-only call edges: the declared name on a
 // declaration line matches callRe and, being class-qualified, escapes the
 // self-call filter (full == owner). MEDIUM, deliberately not filtered out —
 // same-line bodies legitimately carry calls (function foo() { return bar() }).
+// These are the ONLY regex-only edges the superset contract tolerates; any
+// other regex-only edge fails the gate.
 var regexExtraEdges = map[string]map[string]map[string]bool{
 	"java": {
 		"Fixtures.helper": {"helper": true},
@@ -74,6 +128,15 @@ var regexExtraEdges = map[string]map[string]map[string]bool{
 	},
 }
 
+// tsOnlyEdges documents call edges tree-sitter emits that the regex path
+// legitimately never produces, mirroring regexExtraEdges (owner -> target).
+// Currently empty — every ts edge in the fixture corpus is matched on the
+// regex side, exactly or in last-segment chain form — but the superset
+// contract allows ts to carry edges regex cannot express, so any such edge
+// must be listed here OR resolve to a ts-only callee (a symbol regex never
+// produced, so it cannot emit an edge to it) before it may exist.
+var tsOnlyEdges = map[string]map[string]map[string]bool{}
+
 // chainFormLastSegment reports whether the regex edge (owner, reTarget) is
 // the last-segment form of a tree-sitter dotted-chain target: ts records
 // "self.greet.upper", regex (unresolvable chains) records "upper". The
@@ -88,6 +151,22 @@ func chainFormLastSegment(owner, tsTarget, reTarget string) bool {
 		seg = seg[i+1:]
 	}
 	return seg == reTarget && reTarget != owner
+}
+
+// tsOnlyCallee reports whether an edge target resolves to a symbol that
+// exists only on the tree-sitter side for this file. The regex extractor
+// cannot emit an edge to a callee its own symbol scan never produced, so
+// such edges are structurally ts-only (additional precision, not a dropped
+// regex edge). Dotted targets fall back to their last segment, the
+// chain-form sibling of chainFormLastSegment.
+func tsOnlyCallee(target string, tsOnly map[string]bool) bool {
+	if tsOnly[target] {
+		return true
+	}
+	if i := strings.LastIndexByte(target, '.'); i >= 0 {
+		return tsOnly[target[i+1:]]
+	}
+	return false
 }
 
 func canonEdges(calls map[string][]CallEdge) map[string]map[string]Confidence {
@@ -125,13 +204,18 @@ func TestHeuristicTreesitterParity(t *testing.T) {
 			t.Fatalf("%s: regex extraction failed: %v", rel, errRE)
 		}
 		checkSymbolParity(t, rel, lang, tsSyms, reSyms)
-		checkEdgeParity(t, rel, lang, tsCalls, reCalls)
+		checkEdgeParity(t, rel, lang, tsSyms, reSyms, tsCalls, reCalls)
 		checkInheritParity(t, rel, tsInh, reInh)
 	}
 }
 
-// checkSymbolParity asserts identical (full, kind, line, confidence) symbol
-// sets, modulo the documented tsOnlySymbols table and End-line heuristics.
+// checkSymbolParity asserts the superset symbol contract: every regex symbol
+// must exist on the tree-sitter side (same full name, kind, line,
+// confidence) unless documented as a regex artifact (regexOnlySymbols); the
+// tree-sitter set may EXCEED the regex set only through documented
+// per-symbol tolerances (tsOnlySymbols) or structurally regex-impossible
+// kinds (tsOnlySymbolClasses). Shared symbols must never contradict — kind,
+// line and confidence must match exactly.
 func checkSymbolParity(t *testing.T, rel, lang string, tsSyms, reSyms []Symbol) {
 	tsByFull := map[string]Symbol{}
 	for _, s := range tsSyms {
@@ -141,38 +225,65 @@ func checkSymbolParity(t *testing.T, rel, lang string, tsSyms, reSyms []Symbol) 
 	for _, s := range reSyms {
 		reByFull[s.FullName()] = s
 	}
-	// Every tree-sitter symbol must exist on the regex side, unless
-	// documented (field/property declarations).
+	// Tree-sitter may exceed the regex set, but never contradict it: every
+	// shared symbol must agree exactly, and ts-only symbols must be either
+	// documented per-symbol or a structurally regex-impossible kind.
 	for full, ts := range tsByFull {
 		re, ok := reByFull[full]
-		if !ok {
-			if kind, doc := tsOnlySymbols[lang][full]; doc && kind == ts.Kind {
-				continue
+		if ok {
+			if re.Kind != ts.Kind || re.Line != ts.Line || re.Confidence != ts.Confidence {
+				t.Errorf("%s: symbol %s diverges: regex %s/%d/%s vs tree-sitter %s/%d/%s",
+					rel, full, re.Kind, re.Line, re.Confidence, ts.Kind, ts.Line, ts.Confidence)
 			}
-			t.Errorf("%s: symbol %s (%s, line %d) missing from regex output; tree-sitter-only symbols must be listed in tsOnlySymbols",
-				rel, full, ts.Kind, ts.Line)
 			continue
 		}
-		if re.Kind != ts.Kind || re.Line != ts.Line || re.Confidence != ts.Confidence {
-			t.Errorf("%s: symbol %s diverges: regex %s/%d/%s vs tree-sitter %s/%d/%s",
-				rel, full, re.Kind, re.Line, re.Confidence, ts.Kind, ts.Line, ts.Confidence)
+		if kind, doc := tsOnlySymbols[lang][full]; doc && kind == ts.Kind {
+			continue
 		}
+		if tsOnlySymbolClasses[lang][ts.Kind] {
+			continue
+		}
+		t.Errorf("%s: symbol %s (%s, line %d) missing from regex output; ts-only symbols must be listed in tsOnlySymbols or belong to a documented tsOnlySymbolClasses kind",
+			rel, full, ts.Kind, ts.Line)
 	}
-	// Every regex symbol must exist on the tree-sitter side: the regex
-	// path must not invent declarations.
-	for full := range reByFull {
-		if _, ok := tsByFull[full]; !ok {
-			t.Errorf("%s: symbol %s exists only in regex output", rel, full)
+	// The regex path must not invent declarations: every regex symbol must
+	// exist on the tree-sitter side, or be a documented regex artifact.
+	for full, re := range reByFull {
+		if _, ok := tsByFull[full]; ok {
+			continue
 		}
+		if kind, doc := regexOnlySymbols[lang][full]; doc && kind == re.Kind {
+			continue
+		}
+		t.Errorf("%s: symbol %s (%s, line %d) exists only in regex output; regex-only symbols must be listed in regexOnlySymbols",
+			rel, full, re.Kind, re.Line)
 	}
 }
 
-// checkEdgeParity asserts every tree-sitter edge is present on the regex
-// side with confidence <= ts confidence, and regex-only edges are exactly
-// the documented declaration-line artifacts.
-func checkEdgeParity(t *testing.T, rel, lang string, tsCalls, reCalls map[string][]CallEdge) {
+// checkEdgeParity asserts the superset edge contract: every tree-sitter edge
+// is present on the regex side with confidence <= ts confidence; regex-only
+// edges are exactly the documented declaration-line artifacts; ts may carry
+// edges regex cannot express only when documented (tsOnlyEdges) or when the
+// callee is itself a ts-only symbol (the regex side never produced the
+// target, so the edge is additive precision, not a dropped regex edge).
+func checkEdgeParity(t *testing.T, rel, lang string, tsSyms, reSyms []Symbol, tsCalls, reCalls map[string][]CallEdge) {
 	ts := canonEdges(tsCalls)
 	re := canonEdges(reCalls)
+	// tsOnly is the set of callees that exist only on the tree-sitter side
+	// for this file: symbols the regex scan never produced. Edges to them
+	// are structurally ts-only.
+	reNames := map[string]bool{}
+	for _, s := range reSyms {
+		reNames[s.FullName()] = true
+		reNames[s.Name] = true
+	}
+	tsOnly := map[string]bool{}
+	for _, s := range tsSyms {
+		if !reNames[s.FullName()] && !reNames[s.Name] {
+			tsOnly[s.FullName()] = true
+			tsOnly[s.Name] = true
+		}
+	}
 	owners := map[string]bool{}
 	for o := range ts {
 		owners[o] = true
@@ -185,7 +296,9 @@ func checkEdgeParity(t *testing.T, rel, lang string, tsCalls, reCalls map[string
 		if reEdges == nil {
 			reEdges = map[string]Confidence{}
 		}
-		// 1. Every tree-sitter edge must exist on the regex side.
+		// 1. Every tree-sitter edge must exist on the regex side — shared
+		// edges at regex confidence <= ts confidence — or be a documented
+		// ts-only edge (tsOnlyEdges) / ts-only-callee edge.
 		for target, tsConf := range ts[owner] {
 			if reConf, ok := reEdges[target]; ok {
 				if confRank(reConf) > confRank(tsConf) {
@@ -206,10 +319,19 @@ func checkEdgeParity(t *testing.T, rel, lang string, tsCalls, reCalls map[string
 					break
 				}
 			}
-			if !matchedForm {
-				t.Errorf("%s: edge %s -> %s (%s) missing from regex output — regex must emit it at <= %s, never drop it",
-					rel, owner, target, tsConf, tsConf)
+			if matchedForm {
+				continue
 			}
+			// Superset allowance: the ts edge is additional precision when
+			// documented per-symbol or when its callee is a ts-only symbol.
+			if tsOnlyEdges[lang][owner][target] {
+				continue
+			}
+			if tsOnlyCallee(target, tsOnly) {
+				continue
+			}
+			t.Errorf("%s: edge %s -> %s (%s) missing from regex output and not a documented ts-only edge",
+				rel, owner, target, tsConf)
 		}
 		// 2. Regex-only edges must be exactly the documented artifacts
 		// (declaration-line self-calls), or the last-segment form of a

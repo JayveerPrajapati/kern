@@ -149,6 +149,35 @@ func TestBuildCheckRequestCarriesIdentity(t *testing.T) {
 	}
 }
 
+func TestFailedChecksListsAllBlockingGates(t *testing.T) {
+	result := bdomain.ValidationResult{
+		Checks: []bdomain.CheckResult{
+			{Name: "approval:gate", Status: bdomain.StatusBlock},
+			{Name: "architecture:guard", Status: bdomain.StatusWarn},
+			{Name: "authz:unauthorized", Status: bdomain.StatusBlock},
+			{Name: "secrets:gitleaks", Status: bdomain.StatusPass},
+		},
+	}
+	// failedChecks must return EVERY gate that would have fired, in pipeline
+	// order (ADR-0011 §6: "the gates that would have fired").
+	got := failedChecks(result)
+	want := []string{"approval:gate", "authz:unauthorized"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("failedChecks = %v, want %v (all BLOCK/ERROR gates in order)", got, want)
+	}
+	// firstFailedCheck stays the deterministic single-gate signature.
+	if first := firstFailedCheck(result); first != "approval:gate" {
+		t.Errorf("firstFailedCheck = %q, want %q", first, "approval:gate")
+	}
+	// No blocking gates: both helpers report empty.
+	if got := failedChecks(bdomain.ValidationResult{}); len(got) != 0 {
+		t.Errorf("failedChecks(empty) = %v, want empty", got)
+	}
+	if first := firstFailedCheck(bdomain.ValidationResult{}); first != "" {
+		t.Errorf("firstFailedCheck(empty) = %q, want empty", first)
+	}
+}
+
 func keysOf(m map[string]string) []string {
 	var out []string
 	for k := range m {

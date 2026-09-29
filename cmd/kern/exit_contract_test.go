@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -24,6 +25,9 @@ import (
 //	kern verify --types build -> 1   (FAIL verdict on a broken build)
 //	kern exec <failing>       -> 1   (script exit propagates)
 func TestFindingsCommandExitContract(t *testing.T) {
+	if runtime.GOOS == "darwin" && os.Getenv("KERN_SANDBOX_ACTIVE") == "1" {
+		t.Skip("cannot nest sandbox-exec inside an active kern sandbox on macOS (inner check/build pipeline); covered by direct runs")
+	}
 	if testing.Short() {
 		t.Skip("integration: builds a binary and runs it against a fixture repo")
 	}

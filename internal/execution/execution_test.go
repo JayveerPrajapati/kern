@@ -559,3 +559,66 @@ func TestExecuteBuildAmbiguousModulesNoCommand(t *testing.T) {
 		t.Errorf("Err = %v, want a clean detection error", res.Err)
 	}
 }
+
+// TestWorktreeDiffNoGitAsideLeakRelativeSrc pins the dogfooding A1-N2 fix: a
+// Worktree created with a RELATIVE srcRoot (the normal `kern execute` case,
+// run from inside the repo → srcRoot ".") must not leak the repo's .git
+// internals into the printed diff. The old code computed the git-aside path
+// as filepath.Dir(".") = ".", so the aside landed INSIDE the tree git diff
+// --no-index compares — dumping ~1100 spurious "a/.kern-git-aside-<pid>-..."
+// sections (incl. binary object dumps) alongside the real patch. The aside
+// must live in the ABSOLUTE parent dir, outside both compared trees.
+func TestWorktreeDiffNoGitAsideLeakRelativeSrc(t *testing.T) {
+	// Create a temp project, then construct a RELATIVE srcRoot by chdir'ing
+	// into it (mirroring `kern execute` with no --root from inside the repo).
+	abs := newTempProject(t, "")
+	gitDir := filepath.Join(abs, ".git")
+	if err := os.MkdirAll(gitDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(gitDir, "HEAD"), []byte("ref: refs/heads/main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// A few .git objects so a leak would be visible as binary dumps.
+	if err := os.MkdirAll(filepath.Join(gitDir, "objects", "aa"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(gitDir, "objects", "aa", "bbccdd"), []byte("binary object blob"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(abs); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(cwd) })
+	w, err := NewWorktree(".")
+	if err != nil {
+		t.Fatalf("NewWorktree(relative): %v", err)
+	}
+	defer func() { _ = w.Cleanup() }()
+	// Make a real change so the diff is non-empty.
+	mod := filepath.Join(w.Dir(), "main.go")
+	if err := os.WriteFile(mod, []byte("package main\nfunc main() { println(\"changed\") }\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	diff, err := w.Diff()
+	if err != nil {
+		t.Fatalf("Diff: %v", err)
+	}
+	if !strings.Contains(diff, "main.go") {
+		t.Fatalf("Diff should mention main.go:\n%s", diff)
+	}
+	if strings.Contains(diff, ".kern-git-aside") {
+		t.Fatalf("Diff must not leak .git-aside internals (A1-N2):\n%s", diff)
+	}
+	if strings.Contains(diff, ".git/") {
+		t.Fatalf("Diff must not mention .git/ internals (A1-N2):\n%s", diff)
+	}
+	// The aside must be restored and .git present again after Diff.
+	if _, err := os.Stat(gitDir); err != nil {
+		t.Fatalf(".git not restored after Diff: %v", err)
+	}
+}

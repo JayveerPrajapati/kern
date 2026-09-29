@@ -3,6 +3,8 @@ package llm
 import (
 	"context"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 )
 
@@ -219,5 +221,104 @@ func TestRegisterHostSamplerForMultipleKeys(t *testing.T) {
 	}
 	if _, err := prov.Generate(context.Background(), "", "u", Options{}); err == nil {
 		t.Fatal("Generate should fail with no samplers registered")
+	}
+}
+
+// TestSetHostSamplerModelAndStates: the model a host session serves is
+// recorded on its sampler entry (the MCP ack surface) and exposed via
+// HostSamplerStates — with session key + model, multiple sessions coexisting,
+// and unknown keys being a no-op.
+func TestSetHostSamplerModelAndStates(t *testing.T) {
+	// No samplers: empty states.
+	if st := HostSamplerStates(); len(st) != 0 {
+		t.Fatalf("HostSamplerStates with no samplers = %v, want empty", st)
+	}
+	dispA := RegisterHostSamplerFor("sess-a", func(ctx context.Context, system, user string, opts Options) (string, error) {
+		return "A:" + user, nil
+	})
+	defer dispA()
+	dispB := RegisterHostSamplerFor("sess-b", func(ctx context.Context, system, user string, opts Options) (string, error) {
+		return "B:" + user, nil
+	})
+	defer dispB()
+
+	// Model unknown until reported.
+	st := HostSamplerStates()
+	if len(st) != 2 || st[0].Key != "sess-a" || st[1].Key != "sess-b" {
+		t.Fatalf("HostSamplerStates = %+v, want [sess-a sess-b] in registration order", st)
+	}
+	if st[0].Model != "" || st[1].Model != "" {
+		t.Fatalf("models set before any report: %+v", st)
+	}
+
+	// Report models (sampling response / register arg). Registration order is
+	// preserved; models attach to the right sessions.
+	SetHostSamplerModel("sess-b", "claude-3-7-sonnet")
+	SetHostSamplerModel("sess-a", "opencode-1.18")
+	st = HostSamplerStates()
+	if st[0].Key != "sess-a" || st[0].Model != "opencode-1.18" {
+		t.Errorf("states[0] = %+v, want sess-a/opencode-1.18", st[0])
+	}
+	if st[1].Key != "sess-b" || st[1].Model != "claude-3-7-sonnet" {
+		t.Errorf("states[1] = %+v, want sess-b/claude-3-7-sonnet", st[1])
+	}
+
+	// Unknown key is a no-op (no entry created).
+	before := len(HostSamplerStates())
+	SetHostSamplerModel("ghost-session", "some-model")
+	if after := len(HostSamplerStates()); after != before {
+		t.Fatalf("SetHostSamplerModel on unknown key added an entry (%d → %d)", before, after)
+	}
+
+	// Generation still works; disposing leaves the other session intact.
+	prov := NewMCPProvider()
+	out, err := prov.Generate(context.Background(), "", "u", Options{})
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	if out != "A:u" {
+		t.Errorf("got %q, want A:u (first registered sampler wins)", out)
+	}
+	dispA()
+	st = HostSamplerStates()
+	if len(st) != 1 || st[0].Key != "sess-b" || st[0].Model != "claude-3-7-sonnet" {
+		t.Fatalf("after disposing A: %+v, want only sess-b with its model", st)
+	}
+}
+
+// TestProbeReachableExplicitProvider: with KERN_LLM_PROVIDER pinned, the
+// shared probe delegates to that single provider (no auto-chain legs).
+func TestProbeReachableExplicitProvider(t *testing.T) {
+	t.Setenv("KERN_LLM_PROVIDER", "ollama")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"response":"ok"}`))
+	}))
+	defer srv.Close()
+	t.Setenv("OLLAMA_HOST", srv.URL)
+	if err := ProbeReachable(); err != nil {
+		t.Fatalf("ProbeReachable with reachable ollama: %v", err)
+	}
+}
+
+// TestProbeReachableNameExplicitProvider pins the E-obs name-returning
+// variant: with an explicit provider the returned name must be the pinned
+// provider, and ProbeReachable (the error-only wrapper) must stay in lockstep
+// with it — the MCP kern_loop surface depends on the wrapper's contract.
+func TestProbeReachableNameExplicitProvider(t *testing.T) {
+	t.Setenv("KERN_LLM_PROVIDER", "ollama")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"response":"ok"}`))
+	}))
+	defer srv.Close()
+	t.Setenv("OLLAMA_HOST", srv.URL)
+	name, err := ProbeReachableName()
+	if err != nil {
+		t.Fatalf("ProbeReachableName with reachable ollama: %v", err)
+	}
+	if name != "ollama" {
+		t.Errorf("ProbeReachableName = %q, want %q", name, "ollama")
+	}
+	if err := ProbeReachable(); err != nil {
+		t.Fatalf("ProbeReachable (wrapper) diverged from ProbeReachableName: %v", err)
 	}
 }

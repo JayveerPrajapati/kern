@@ -84,18 +84,21 @@ func TestServeHTTPContextWithTLSServesHTTPS(t *testing.T) {
 	t.Parallel()
 	certFile, keyFile := writeTestCert(t)
 
-	// Pick a free loopback port (listen+close+reuse; standard test pattern).
+	// Bind a free loopback port ONCE and hand the listener to the server.
+	// The listen-close-rebind pattern races under parallel -race runs: the
+	// OS reuses the just-freed port for another test's server, which then
+	// serves a different cert and the readiness probe times out.
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer func() { _ = ln.Close() }() // error-return path: ownership reverts
 	addr := ln.Addr().String()
-	_ = ln.Close()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go func() {
-		_ = ServeHTTPContextWithTLS(ctx, addr, &transport.TLSConfig{CertFile: certFile, KeyFile: keyFile})
+		_ = ServeHTTPContextWithTLSOn(ctx, ln, &transport.TLSConfig{CertFile: certFile, KeyFile: keyFile})
 	}()
 
 	// Trust the self-signed cert through the cert pool (no InsecureSkipVerify).
@@ -108,12 +111,17 @@ func TestServeHTTPContextWithTLSServesHTTPS(t *testing.T) {
 		t.Fatal("failed to append test cert to pool")
 	}
 	client := &http.Client{
-		Timeout:   2 * time.Second,
+		// Generous per-request timeout: under the full -race CI suite the
+		// machine is heavily oversubscribed and an ECDSA TLS handshake can
+		// exceed a tight timeout even though the server is healthy.
+		Timeout:   10 * time.Second,
 		Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: pool}},
 	}
 
-	// Wait for readiness over TLS.
-	deadline := time.Now().Add(30 * time.Second)
+	// Wait for readiness over TLS. The deadline is generous (60s) so the
+	// probe survives the parallel -race load of the whole CI race step;
+	// the test's contract is "TLS serving works", not a startup benchmark.
+	deadline := time.Now().Add(60 * time.Second)
 	healthy := false
 	for time.Now().Before(deadline) {
 		resp, err := client.Get("https://" + addr + "/health")
@@ -163,15 +171,15 @@ func TestServeHTTPContextWithTLSPlainHTTPWhenNil(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer func() { _ = ln.Close() }() // error-return path: ownership reverts
 	addr := ln.Addr().String()
-	_ = ln.Close()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go func() { _ = ServeHTTPContextWithTLS(ctx, addr, nil) }()
+	go func() { _ = ServeHTTPContextWithTLSOn(ctx, ln, nil) }()
 
-	client := &http.Client{Timeout: 2 * time.Second}
-	deadline := time.Now().Add(30 * time.Second)
+	client := &http.Client{Timeout: 10 * time.Second}
+	deadline := time.Now().Add(60 * time.Second)
 	healthy := false
 	for time.Now().Before(deadline) {
 		resp, err := client.Get("http://" + addr + "/health")

@@ -85,6 +85,49 @@ func TestBlastRadiusTransitive(t *testing.T) {
 	}
 }
 
+// TestAffectedFilesExcludesDocFiles pins: documentation files (markdown,
+// HTML) stay in the index graph, but are excluded from code blast-radius file
+// lists. The fixture reproduces the fuzzy over-match that dragged doc pages
+// (export_graph.html, docs/adr/*.md) into every impacted-file set: the
+// README heading "Public" lexically precedes the Go func and would shadow it
+// in the symbol→file map without the doc filter.
+func TestAffectedFilesExcludesDocFiles(t *testing.T) {
+	dir := writeTree(t, map[string]string{
+		"README.md":  "# Public\n\nSee the docs.\n",
+		"lib/lib.go": srcLib,
+	})
+	ix, err := index.Build(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The markdown heading is a real symbol in the index…
+	heading := false
+	for _, s := range ix.Symbols {
+		if s.Name == "Public" && s.Kind == "heading" && s.File == "README.md" {
+			heading = true
+		}
+	}
+	if !heading {
+		t.Fatal("expected markdown heading symbol Public in README.md")
+	}
+	// …but it must never surface in the blast-radius file set.
+	files := AffectedFiles(ix, []string{"Public", "inner"})
+	for _, f := range files {
+		if index.IsDocFile(f) {
+			t.Errorf("doc file %q leaked into affected files: %v", f, files)
+		}
+	}
+	found := false
+	for _, f := range files {
+		if f == "lib/lib.go" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("code file lib/lib.go missing from affected files: %v", files)
+	}
+}
+
 func TestAnalyzeChanges(t *testing.T) {
 	dir := writeTree(t, map[string]string{
 		"lib/lib.go":       srcLib,

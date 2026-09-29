@@ -95,3 +95,30 @@ func TestBenchResultRoundTripGoldenFixture(t *testing.T) {
 		}
 	}
 }
+
+// TestFmtLatencyNeverShowsZero pins the dogfooding B-LOW display fix: a
+// sub-millisecond query latency must never render as "0.00 ms" — that reads
+// as "the query returned nothing" (the one-hop-callers row really returned
+// 3830 callers in ~40ns). Three tiers: ms, µs, ns.
+func TestFmtLatencyNeverShowsZero(t *testing.T) {
+	cases := []struct {
+		ms   float64
+		want string
+	}{
+		{250.5, " 250.50 ms"},
+		{1.0, "   1.00 ms"},
+		{0.5, "  500.0 µs"},
+		{0.001, "    1.0 µs"},
+		{0.0005, "    500 ns"},
+		{0.00004, "     40 ns"},
+	}
+	for _, c := range cases {
+		if got := fmtLatency(c.ms); got != c.want {
+			t.Errorf("fmtLatency(%v) = %q, want %q", c.ms, got, c.want)
+		}
+	}
+	// A zero-valued sample (no runs) must still render as ns, never "0.00 ms".
+	if got := fmtLatency(0); strings.Contains(got, "ms") {
+		t.Errorf("fmtLatency(0) = %q — a zero sample must not masquerade as 0.00 ms", got)
+	}
+}

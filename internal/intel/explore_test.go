@@ -3,6 +3,8 @@ package intel
 import (
 	"strings"
 	"testing"
+
+	"github.com/JayveerPrajapati/kern/internal/index"
 )
 
 func TestExploreCombinesSourceCallFlowBlastRadius(t *testing.T) {
@@ -78,6 +80,70 @@ func TestExploreUnknownSymbol(t *testing.T) {
 	_, err := Explore(ix, "DoesNotExist", 0, 0)
 	if err == nil {
 		t.Fatal("expected error for unknown symbol")
+	}
+}
+
+// TestExploreCallerLocs pins: every caller row carries its file:line
+// (resolved via the index symbol table), so the agent can jump straight to
+// the call site instead of re-searching each caller. Callers with an
+// unresolvable definition are omitted from the map, never fabricated.
+func TestExploreCallerLocs(t *testing.T) {
+	dir := writeTree(t, map[string]string{
+		"lib/lib.go":       srcLib,
+		"client/client.go": srcClient,
+		"lib/lib_test.go":  srcTest,
+	})
+	ix := buildIndex(t, dir)
+
+	rep, err := Explore(ix, "Public", 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rep.Callers) == 0 {
+		t.Fatal("expected callers")
+	}
+	for _, c := range rep.Callers {
+		loc, ok := rep.CallerLocs[c]
+		if !ok {
+			t.Errorf("caller %q missing location (want file:line)", c)
+			continue
+		}
+		if !strings.Contains(loc, ".go:") {
+			t.Errorf("caller %q location %q lacks file:line shape", c, loc)
+		}
+	}
+	// Renderer appends " — file:line" to each caller row, and the callees
+	// section stays location-free (blast radius + callees unchanged).
+	out := RenderExplore(rep)
+	if !strings.Contains(out, " — client/client.go:") {
+		t.Errorf("render missing caller location:\n%s", out)
+	}
+	if strings.Contains(out, "inner [EXTRACTED] —") {
+		t.Errorf("callee rows must not carry locations (unchanged):\n%s", out)
+	}
+}
+
+// TestExploreCallerLocsUnresolvedStaysBare pins the never-fabricate rule at
+// the render level: a caller absent from CallerLocs (its definition could
+// not be resolved — cross-package qualified refs, nodesForIDs limitation)
+// renders as its bare name, never with a made-up location.
+func TestExploreCallerLocsUnresolvedStaysBare(t *testing.T) {
+	rep := &ExploreReport{
+		Symbol:     "Public",
+		Resolved:   "Public",
+		Definition: index.Symbol{Name: "Public", Kind: "func", File: "lib.go", Line: 3},
+		Callers:    []string{"Caller", "client.Caller"},
+		CallerConf: map[string]string{"Caller": "EXTRACTED", "client.Caller": "INFERRED"},
+		// Only the resolvable caller has a location; the qualified ref is
+		// deliberately absent (populate never fabricates).
+		CallerLocs: map[string]string{"Caller": "client/client.go:3"},
+	}
+	out := RenderExplore(rep)
+	if !strings.Contains(out, "Caller [EXTRACTED] — client/client.go:3") {
+		t.Errorf("render missing located caller row:\n%s", out)
+	}
+	if strings.Contains(out, "client.Caller [INFERRED] —") {
+		t.Errorf("unresolved caller must render bare, got a location:\n%s", out)
 	}
 }
 

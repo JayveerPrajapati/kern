@@ -3,8 +3,10 @@ package index
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -243,6 +245,64 @@ func TestContextSlices(t *testing.T) {
 	}
 	if !strings.Contains(ctx, "callers:") {
 		t.Fatalf("expected callers in context, got:\n%s", ctx)
+	}
+}
+
+// TestContextCallersHaveLocations pins `kern context` caller locations: every caller
+// row renders "name (file:line)" resolved via the index symbol map, so the
+// agent can jump straight to the call site instead of re-searching each
+// caller.
+func TestContextCallersHaveLocations(t *testing.T) {
+	dir := writeTree(t, map[string]string{
+		"main.go": srcMain,
+		"user.go": srcOther,
+	})
+	ix, err := Build(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := ix.Context("greet", 4)
+	var callersLine string
+	for _, line := range strings.Split(ctx, "\n") {
+		if strings.HasPrefix(line, "callers:") {
+			callersLine = line
+			break
+		}
+	}
+	if callersLine == "" {
+		t.Fatalf("expected callers line in context:\n%s", ctx)
+	}
+	rows := strings.Split(strings.TrimPrefix(callersLine, "callers: "), ", ")
+	if len(rows) < 2 {
+		t.Fatalf("expected main + Login callers, got: %s", callersLine)
+	}
+	re := regexp.MustCompile(`^[A-Za-z.]+ \(\w+\.go:\d+\)$`)
+	for _, r := range rows {
+		if !re.MatchString(r) {
+			t.Errorf("caller row %q lacks (file:line): %s", r, callersLine)
+		}
+	}
+}
+
+// TestContextCallerLabelsCapsAtTen pins the token-budget cap: context is a
+// budget tool, so the callers line stops at maxContextCallers rows and the
+// remainder collapses to a count. Unresolvable callers stay bare.
+func TestContextCallerLabelsCapsAtTen(t *testing.T) {
+	ix := New("")
+	callers := make([]string, 12)
+	for i := range callers {
+		callers[i] = fmt.Sprintf("Caller%d", i)
+	}
+	labels := contextCallerLabels(ix, callers)
+	if len(labels) != maxContextCallers+1 {
+		t.Fatalf("got %d labels, want %d (cap + remainder marker)", len(labels), maxContextCallers+1)
+	}
+	if labels[maxContextCallers] != fmt.Sprintf("… and %d more", len(callers)-maxContextCallers) {
+		t.Errorf("remainder marker = %q, want %q", labels[maxContextCallers], fmt.Sprintf("… and %d more", len(callers)-maxContextCallers))
+	}
+	// Unresolvable caller (empty index): bare name, no fabricated location.
+	if labels[0] != "Caller0" {
+		t.Errorf("unresolvable caller must stay bare, got %q", labels[0])
 	}
 }
 

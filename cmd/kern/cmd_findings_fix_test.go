@@ -149,6 +149,33 @@ func main() { _ = UserService() }
 	}
 }
 
+// TestRunSearchNoMatchShowsCloseCandidates pins the search no-match
+// path mirrors kern impact's "close candidates" list (ranked search, no
+// strict score gate), so a query that matches no symbol still shows what the
+// index actually contains near the query — the follow-up search is guided
+// instead of blind. Exit stays 1 (the no-match contract).
+func TestRunSearchNoMatchShowsCloseCandidates(t *testing.T) {
+	dir := t.TempDir()
+	writeFixtureFile(t, dir, "go.mod", "module searchfix\n\ngo 1.20\n")
+	writeFixtureFile(t, dir, "service.go", `package main
+// UserService handles user provisioning.
+func UserService() int { return 1 }
+func main() { _ = UserService() }
+`)
+	// "UserServce" (typo) matches no symbol exactly, but its "user" segment
+	// ranks UserService as a close candidate.
+	stderr, code := fixesRunStderrExit(func() {
+		runSearch([]string{"UserServce", dir, "--limit", "5"})
+	})
+	if code != 1 {
+		t.Fatalf("exit code = %d, want 1 (no-match contract)", code)
+	}
+	for _, want := range []string{"no symbols matched: UserServce", "close candidates", "UserService"} {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("stderr missing %q:\n%s", want, stderr)
+		}
+	}
+}
 func TestRunPromptUnknownTemplateGuidesUser(t *testing.T) {
 	// Run from a scratch dir so the pre-render project-map build is cheap.
 	dir := t.TempDir()

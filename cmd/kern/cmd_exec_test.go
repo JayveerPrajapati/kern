@@ -48,3 +48,36 @@ func TestRunExecJSONPathMasksSecrets(t *testing.T) {
 		t.Fatalf("expected masked GitHub placeholder, got:\n%s", out)
 	}
 }
+
+// TestRunExecUndetectableLanguageExits2 pins the C-LOW exit-code contract:
+// content with no language signal (no --lang, nothing DetectLang can
+// classify) is a MISSING REQUIRED ARGUMENT — a usage error that must exit 2,
+// not the runtime-error 1. Live repro: `kern exec "hello world foo bar"`.
+func TestRunExecUndetectableLanguageExits2(t *testing.T) {
+	t.Setenv("KERN_ALLOW_EXEC", "1")
+	t.Setenv("KERN_ALLOW_UNISOLATED", "1") // no netns on darwin; test env opt-in
+	errOut := captureStderr(t, func() {
+		assertExitCode(t, 2, func() {
+			runExec([]string{"hello world foo bar"})
+		})
+	})
+	if !strings.Contains(errOut, "cannot detect language") {
+		t.Fatalf("expected undetectable-language usage error on stderr, got:\n%s", errOut)
+	}
+}
+
+// TestRunExecUndetectableLanguageJSONExits2 pins the same C-LOW contract on
+// the --json path: the usage error must exit 2 there too (the JSON output
+// shape changes, the exit-code contract does not).
+func TestRunExecUndetectableLanguageJSONExits2(t *testing.T) {
+	t.Setenv("KERN_ALLOW_EXEC", "1")
+	t.Setenv("KERN_ALLOW_UNISOLATED", "1")
+	errOut := captureStderr(t, func() {
+		assertExitCode(t, 2, func() {
+			runExec([]string{"hello world foo bar", "--json"})
+		})
+	})
+	if !strings.Contains(errOut, "cannot detect language") {
+		t.Fatalf("expected undetectable-language usage error on stderr, got:\n%s", errOut)
+	}
+}

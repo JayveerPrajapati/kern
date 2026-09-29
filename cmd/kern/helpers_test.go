@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/JayveerPrajapati/kern/internal/optimize"
 )
@@ -53,6 +54,30 @@ func TestClipJSONStringsTruncatesAbsurdFields(t *testing.T) {
 	}
 	if clipJSONStrings(nil) != nil {
 		t.Error("nil payload altered by the guard")
+	}
+}
+
+// TestClipJSONStringsPreservesTime pins the dogfooding B-LOW fix: the guard
+// must NOT zero time.Time values. The old struct-recursion copied only
+// CanInterface() fields, and time.Time has none exported — so every
+// built_at/checked_at in --json payloads (index --status freshness_proof,
+// audit, evidence) silently reset to the epoch.
+func TestClipJSONStringsPreservesTime(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	clipped := clipJSONStrings(map[string]any{"checked_at": now})
+	m, ok := clipped.(map[string]any)
+	if !ok {
+		t.Fatalf("clipJSONStrings(map) = %T, want map[string]any", clipped)
+	}
+	got, ok := m["checked_at"].(time.Time)
+	if !ok {
+		t.Fatalf("clipped checked_at = %T, want time.Time", m["checked_at"])
+	}
+	if got.IsZero() {
+		t.Fatal("time.Time was zeroed by the guard — timestamp lost")
+	}
+	if !got.Equal(now) {
+		t.Errorf("time altered: got %v, want %v", got, now)
 	}
 }
 

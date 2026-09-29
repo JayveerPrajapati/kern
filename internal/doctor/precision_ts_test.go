@@ -1,4 +1,4 @@
-//go:build treesitter
+//go:build !notreesitter
 
 package doctor
 
