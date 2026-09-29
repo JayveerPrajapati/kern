@@ -14,6 +14,7 @@ import (
 
 	"github.com/JayveerPrajapati/kern/internal/blueprint/audit"
 	"github.com/JayveerPrajapati/kern/internal/blueprint/domain"
+	"github.com/JayveerPrajapati/kern/internal/bpcli/mcp"
 	"github.com/JayveerPrajapati/kern/internal/bppolicy/policy"
 	"github.com/JayveerPrajapati/kern/internal/bppolicy/risk"
 	"github.com/JayveerPrajapati/kern/internal/gates"
@@ -310,9 +311,9 @@ func recordDecisionAudit(absRoot, id, approver string, approve bool, reason stri
 	}
 }
 
-// writeApprovalAudit appends an approval-decision record to the repo's audit
-// trail. Best-effort, exactly like validation audit writes: a failure never
-// fails the CLI command.
+// writeApprovalAudit appends a decision record (approval-decision, or the
+// check pipeline's "bypass" records) to the repo's audit trail. Best-effort,
+// exactly like validation audit writes: a failure never fails the CLI command.
 func writeApprovalAudit(repoRoot string, rec audit.Record) {
 	w := audit.NewWriter(filepath.Join(repoRoot, ".blueprint", "audit", "audit.jsonl"))
 	_ = w.Write(rec)
@@ -321,7 +322,7 @@ func writeApprovalAudit(repoRoot string, rec audit.Record) {
 // currentApprover derives a human identity for approval decisions: git
 // config user.email when available, else $USER.
 func currentApprover(repoRoot string) string {
-	if email, err := gitOutput(repoRoot, "config", "user.email"); err == nil {
+	if email, err := mcp.GitOutput(repoRoot, "config", "user.email"); err == nil {
 		if e := strings.TrimSpace(email); e != "" {
 			return e
 		}
