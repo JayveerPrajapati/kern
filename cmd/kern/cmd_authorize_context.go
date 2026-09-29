@@ -7,8 +7,8 @@ import (
 )
 
 // runAuthorizeContext implements `kern authorize-context`: compute the context
-// an agent may legally read for a task. Exit codes: 0 = allowed, 2 = denied
-// (proof still printed), 1 = error.
+// an agent may legally read for a task. Exit codes: 0 = allowed, 3 = denied
+// (policy family; proof still printed), 1 = error.
 func runAuthorizeContext(rest []string) int {
 	f, _, err := parseFlags(rest)
 	if err != nil {
@@ -76,7 +76,7 @@ func runAuthorizeContext(rest []string) int {
 	if resp.Proof.Decision.Allowed {
 		return 0
 	}
-	return 2
+	return 3
 }
 
 // printAuthorizeContextText renders a human-readable summary of an

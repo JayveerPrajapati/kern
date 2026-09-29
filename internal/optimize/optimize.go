@@ -7,8 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net"
-	"net/url"
 	"os"
 	"os/exec"
 	"runtime"
@@ -159,16 +157,16 @@ func maskEnabled(opts Options) bool {
 	if opts.Mask {
 		return true
 	}
-	if opts.LLM == "" {
-		return false
-	}
-	if p, perr := llm.NewProvider(); perr == nil {
-		if _, isOllama := p.(*llm.OllamaProvider); isOllama {
-			return !isLocalHost(llm.New(opts.LLM).Base)
-		}
-		return true // openai/anthropic/google are always remote
-	}
-	return false
+	// Delegate to the canonical provider-locality decision (dogfooding G-MED):
+	// the LLM stage now DEFAULTS to the auto chain even when opts.LLM is
+	// empty, so the old `opts.LLM == "" → no mask` shortcut would let raw PII
+	// reach a remote provider selected via KERN_LLM_PROVIDER. llm.MaskRequired
+	// builds the same provider the compression uses and masks whenever the
+	// chain is not fully local (remote Ollama host, openai/anthropic/google,
+	// or an explicit remote KERN_LLM_PROVIDER). Local-only chains (host
+	// session / agent CLIs / local Ollama) stay unmasked, preserving the
+	// existing behavior for the common case.
+	return llm.MaskRequired()
 }
 
 // maskForCache returns prompt+attached in the form that may enter cache keys
@@ -294,6 +292,25 @@ func promptUncached(prompt string, attachedLog string, opts Options) (Result, er
 		if perr != nil {
 			llmSkipped = fmt.Sprintf("LLM compression unavailable (%v) — returned deterministic output unchanged", perr)
 		} else if llmOut, err := llm.CompressVia(context.Background(), p, prompt, llm.Options{Model: opts.LLM}); err != nil {
+			llmSkipped = fmt.Sprintf("LLM compression failed (%v) — returned deterministic output unchanged", err)
+		} else if llmOut == "" {
+			llmSkipped = "LLM compression returned empty output — returned deterministic output unchanged"
+		} else {
+			out = llmOut
+		}
+	} else {
+		// No explicit --llm: DEFAULT the LLM stage to the auto chain
+		// (host session → agent CLIs → ollama) so prompt compression uses the
+		// current agent / a local CLI instead of echoing the input unchanged
+		// (dogfooding G-MED — the LLM stage used to be gated on --llm/KERN_MODEL
+		// and silently ignored the auto chain; a KERN_MODEL-only setup was a
+		// silent no-op). The chain honors KERN_MODEL/llm.model as the default
+		// model, fails fast when nothing is reachable, and only then falls back
+		// to the deterministic path with an honest message.
+		p, perr := llm.NewProvider()
+		if perr != nil {
+			llmSkipped = fmt.Sprintf("LLM compression unavailable (%v) — returned deterministic output unchanged", perr)
+		} else if llmOut, err := llm.CompressVia(context.Background(), p, prompt, llm.Options{}); err != nil {
 			llmSkipped = fmt.Sprintf("LLM compression failed (%v) — returned deterministic output unchanged", err)
 		} else if llmOut == "" {
 			llmSkipped = "LLM compression returned empty output — returned deterministic output unchanged"
@@ -540,22 +557,4 @@ func compactCommandOutput(out string) string {
 		keep = append(keep, fmt.Sprintf("… (%d lines omitted)", omitted))
 	}
 	return strings.Join(keep, "\n")
-}
-
-// isLocalHost reports whether base (an Ollama base URL) points at the local
-// machine. Anything else (LAN IP, remote host, tunnel) is treated as
-// non-local so PII masking can be defaulted on.
-func isLocalHost(base string) bool {
-	host := base
-	if u, err := url.Parse(base); err == nil && u.Host != "" {
-		host = u.Host
-	}
-	if h, _, err := net.SplitHostPort(host); err == nil {
-		host = h
-	}
-	switch strings.ToLower(host) {
-	case "localhost", "127.0.0.1", "::1", "0.0.0.0":
-		return true
-	}
-	return false
 }

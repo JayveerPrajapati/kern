@@ -1,7 +1,7 @@
 ---
 name: kern-team-orchestration
 description: >-
-  Orchestrate kern's 7-role specialist agent squad (Planner, Architect, Coder, Reviewer, Security, Tester, SRE) across the Explore, Plan, Edit, and Verify lifecycle.
+Use for any multi-step, multi-agent, or parallel task: complex features, large refactors, security audits, incident response. Coordinates kern's 7 specialist roles (Planner, Architect, Coder, Reviewer, Security, Tester, SRE) across the Explore, Plan, Edit, Verify lifecycle via kern team.
 ---
 
 <!-- canonical source: internal/skills/assets/kern-team-orchestration/SKILL.md; copies must stay identical — run kern setup to sync -->

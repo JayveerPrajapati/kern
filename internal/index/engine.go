@@ -361,6 +361,7 @@ func Load(root string) (*Index, error) {
 				metrics.Default().RecordCacheMiss()
 				return nil, fmt.Errorf("index version %d (want %d): rebuild required", ix.Version, indexVersion)
 			}
+			reRootIndex(ix, abs)
 			ix.initMaps()
 			ix.reindexByFile()
 			ix.buildSymbolIndex()
@@ -375,6 +376,7 @@ func Load(root string) (*Index, error) {
 	if SQLiteEnabled() {
 		if _, serr := os.Stat(SQLitePath(abs)); serr == nil {
 			if ix, lerr := LoadSQLite(abs); lerr == nil && ix != nil {
+				reRootIndex(ix, abs)
 				metrics.Default().RecordCacheHit()
 				return ix, nil
 			}
@@ -394,11 +396,35 @@ func Load(root string) (*Index, error) {
 		metrics.Default().RecordCacheMiss()
 		return nil, fmt.Errorf("index version %d (want %d): rebuild required", ix.Version, indexVersion)
 	}
+	reRootIndex(ix, abs)
 	ix.initMaps()
 	ix.reindexByFile()
 	ix.buildSymbolIndex()
 	metrics.Default().RecordCacheHit()
 	return ix, nil
+}
+
+// reRootIndex re-points a loaded index's Root at the directory it was loaded
+// for when the recorded root is a DIFFERENT absolute path (dogfooding A1-N1:
+// a repo copied or moved together with its .kern keeps the ORIGINAL absolute
+// root in the store). Without this, Stale() → FreshnessProof(ix.Root) would
+// evaluate the original tree — which is unchanged — and report the index
+// "fresh" forever, so LoadOrBuild / `kern index` silently reuse a stale index
+// and only `kern index --force` healed it. Re-pointing makes every subsequent
+// freshness evaluation compare the recorded identity against THIS tree, so a
+// moved repo rebuilds automatically on the next load (and a byte-identical
+// copy — same git tree OID — stays fresh but with paths resolving into the
+// copy, which the write-path out-of-root guards already cover). Relative
+// recorded roots (the normal `kern index .` case) are left untouched: they
+// resolve to the same directory and forcing a rebuild on every load would be
+// a needless full re-walk.
+func reRootIndex(ix *Index, abs string) {
+	if ix == nil || ix.Root == "" || !filepath.IsAbs(ix.Root) {
+		return
+	}
+	if filepath.Clean(ix.Root) != filepath.Clean(abs) {
+		ix.Root = abs
+	}
 }
 
 // sqliteStoreNewerThanJSON reports whether the SQLite store was written after
@@ -1909,7 +1935,7 @@ func (ix *Index) ContextDef(d Symbol, linesAround int) string {
 	callers := ix.CallersFor(d)
 	if len(callers) > 0 {
 		b.WriteString("\ncallers: ")
-		b.WriteString(strings.Join(callers, ", "))
+		b.WriteString(strings.Join(contextCallerLabels(ix, callers), ", "))
 		b.WriteString("\n")
 	}
 	if callees := ix.CallsFor(d); len(callees) > 0 {
@@ -1923,6 +1949,36 @@ func (ix *Index) ContextDef(d Symbol, linesAround int) string {
 		result += "\n\n" + summary
 	}
 	return result
+}
+
+// maxContextCallers caps the callers line of a context slice. Context is a
+// token-budget tool: a hub with hundreds of callers must not blow the budget
+// on one line, so the row list stops at maxContextCallers and the remainder
+// is summarized as a count.
+const maxContextCallers = 10
+
+// contextCallerLabels renders each caller as "name (file:line)" when its
+// definition resolves against the index symbol map, capped at
+// maxContextCallers rows (the remainder collapses to "… and N more"). A
+// caller whose definition cannot be resolved (cross-package qualified ref,
+// nodesForIDs limitation) keeps its bare name — never fabricated.
+func contextCallerLabels(ix *Index, callers []string) []string {
+	shown := callers
+	if len(shown) > maxContextCallers {
+		shown = shown[:maxContextCallers]
+	}
+	out := make([]string, 0, len(shown)+1)
+	for _, c := range shown {
+		label := c
+		if d, ok := ix.ResolveName(c); ok && d.File != "" {
+			label = fmt.Sprintf("%s (%s:%d)", c, d.File, d.Line)
+		}
+		out = append(out, label)
+	}
+	if len(callers) > maxContextCallers {
+		out = append(out, fmt.Sprintf("… and %d more", len(callers)-maxContextCallers))
+	}
+	return out
 }
 
 // rewriteConstructorCallees rewrites callee qualifiers that are constructor

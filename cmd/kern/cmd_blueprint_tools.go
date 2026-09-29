@@ -40,6 +40,13 @@ func runBlueprintToolCLI(rest []string, h bpmcp.ToolHandler, build func(root, so
 			fmt.Fprintln(os.Stderr, usage)
 			return 0
 		default:
+			if !strings.HasPrefix(rest[i], "-") {
+				// L8: these are flag-only commands — a natural-language
+				// positional ("add a Greet command to cmd/kern") must not read
+				// as "unknown flag". Name the expected flags instead.
+				fmt.Fprintf(os.Stderr, "kern: unexpected argument %q — this command takes flags only; expected: %s\n%s\n", rest[i], expectedFlags(usage), usage)
+				return 2
+			}
 			fmt.Fprintf(os.Stderr, "unknown flag %q\n%s\n", rest[i], usage)
 			return 2
 		}
@@ -82,6 +89,33 @@ func runBlueprintToolCLI(rest []string, h bpmcp.ToolHandler, build func(root, so
 	return 0
 }
 
+// expectedFlags extracts the "--flag" tokens from a usage string — its
+// options block when present, and the first (usage:) line otherwise — so an
+// NL-positional error can name what the command expects (L8: "unknown flag
+// \"add a Greet command...\"" was unactionable).
+func expectedFlags(usage string) string {
+	seen := map[string]bool{}
+	var flags []string
+	add := func(t string) {
+		if t == "" || seen[t] {
+			return
+		}
+		seen[t] = true
+		flags = append(flags, t)
+	}
+	for _, l := range strings.Split(usage, "\n") {
+		for _, tok := range strings.Fields(l) {
+			if strings.HasPrefix(tok, "--") {
+				add(tok)
+			}
+		}
+	}
+	if len(flags) == 0 {
+		return "--files <json> | --finding <json> | --root <dir> | --source <agent>"
+	}
+	return strings.Join(flags, ", ")
+}
+
 // blueprintVerdict extracts the verdict from a validate-* JSON payload
 // ({"status": ..., "exit_code": ...}). It returns ("", 0) when out is not a
 // JSON object with a status field (e.g. explain-finding prose), so the caller
@@ -119,6 +153,16 @@ func runExplainFinding(rest []string) {
 			}
 			if finding == nil {
 				fatalUsage("explain-finding: --finding must be a JSON object (e.g. {\"rule_id\": \"format:gofmt\", \"file\": \"x.go\"})")
+			}
+			// L8: a finding without a rule_id is INCOMPLETE data — the
+			// handler renders an empty body and exits 0. Fail loud (exit 1)
+			// with a JSON parse error instead.
+			if m, ok := finding.(map[string]any); ok {
+				if rid, _ := m["rule_id"].(string); rid == "" {
+					fatal("explain-finding: JSON parse error: finding missing required field \"rule_id\" (got: %s)", payload)
+				}
+			} else {
+				fatal("explain-finding: JSON parse error: --finding must be a JSON object (got: %s)", payload)
 			}
 		}
 		return map[string]any{"repo": root, "finding": finding}

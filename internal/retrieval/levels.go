@@ -276,6 +276,17 @@ func lookupSymbol(ix *index.Index, name string) (index.Symbol, bool) {
 	return index.Symbol{}, false
 }
 
+// clipEcho truncates a query echoed in the level-1 header so a long raw
+// request (kern_meta routes pass the full request through as the query)
+// cannot blow up the output header. Full text is kept when it fits ~80
+// chars; longer queries get an ellipsis marker.
+func clipEcho(s string) string {
+	if len(s) <= 80 {
+		return s
+	}
+	return s[:80] + "…"
+}
+
 // Render renders a result as compact text: a level header, the payload, and
 // a footer token count.
 func Render(r *Result) string {
@@ -291,7 +302,7 @@ func Render(r *Result) string {
 			total += it.TokenCost
 		}
 		payload = total
-		fmt.Fprintf(&b, "== level 1: %s (%d matches, ~%d tokens) ==\n", r.Query, len(r.Items), total)
+		fmt.Fprintf(&b, "== level 1: %s (%d matches, ~%d tokens) ==\n", clipEcho(r.Query), len(r.Items), total)
 		for _, it := range r.Items {
 			id := it.Handle.ID
 			if len(id) > 8 {

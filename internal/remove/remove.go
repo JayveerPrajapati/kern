@@ -124,19 +124,30 @@ func Plan(ix *index.Index, sym string) (*rename.Report, error) {
 	if err != nil {
 		return nil, err
 	}
-	if len(edits) == 0 {
+	// M6: when a removal leaves a file with only a package clause (no
+	// declarations), the file is dead — delete it instead of leaving a stub.
+	// The deletion is carried on the report's DeleteFiles and backed up by
+	// rename.Apply like every other edit, so the file stays recoverable.
+	kept, delFiles := filterStubDeletions(ix.Root, edits)
+	if len(kept) == 0 && len(delFiles) == 0 {
 		return nil, fmt.Errorf("remove: no edits computed for %s", sym)
 	}
-	files := make([]string, 0, len(edits))
+	files := make([]string, 0, len(kept)+len(delFiles))
 	seen := map[string]bool{}
-	for _, e := range edits {
+	for _, e := range kept {
 		if !seen[e.File] {
 			seen[e.File] = true
 			files = append(files, e.File)
 		}
 	}
+	for _, f := range delFiles {
+		if !seen[f] {
+			seen[f] = true
+			files = append(files, f)
+		}
+	}
 	sort.Strings(files)
-	return &rename.Report{Symbol: sym, Edits: edits, Files: files}, nil
+	return &rename.Report{Symbol: sym, Edits: kept, DeleteFiles: delFiles, Files: files, IndexRoot: ix.Root}, nil
 }
 
 // declRange is a declaration to remove: the file (relative to the index root)
@@ -266,8 +277,8 @@ func nonCallSkipSet(f *ast.File) map[*ast.Ident]bool {
 // buildEdits converts removal ranges into byte-offset rename.Edits. Each
 // range is extended upward over contiguous doc-comment and blank lines and
 // downward over one trailing blank line, so the file stays gofmt-clean.
-// Edits carry ABSOLUTE file paths (rename.Apply reads them directly and
-// derives relative backups from the root).
+// Edits carry INDEX-RELATIVE file paths (rename.Apply re-roots them against
+// the caller's current root, so a copied/moved repo is never edited — C1).
 func buildEdits(root string, removals []declRange) ([]rename.Edit, error) {
 	byFile := map[string][]declRange{}
 	for _, r := range removals {
@@ -296,7 +307,7 @@ func buildEdits(root string, removals []declRange) ([]rename.Edit, error) {
 				return nil, fmt.Errorf("remove: empty removal range in %s", rel)
 			}
 			edits = append(edits, rename.Edit{
-				File:   abs,
+				File:   rel,
 				Offset: startOff,
 				Old:    string(src[startOff:endOff]),
 				New:    "",
@@ -305,6 +316,66 @@ func buildEdits(root string, removals []declRange) ([]rename.Edit, error) {
 		}
 	}
 	return edits, nil
+}
+
+// filterStubDeletions splits the plan's edits into those that keep the file
+// (kept) and the files that are left with only a package clause after the
+// edits are applied (delFiles, index-relative). Such files contribute
+// nothing to the build — M6 — so they are deleted rather than left as
+// stubs; the deletion is backed up by rename.Apply like every edit.
+func filterStubDeletions(root string, edits []rename.Edit) (kept []rename.Edit, delFiles []string) {
+	byFile := map[string][]rename.Edit{}
+	for _, e := range edits {
+		byFile[e.File] = append(byFile[e.File], e)
+	}
+	for rel, fileEdits := range byFile {
+		src, err := os.ReadFile(filepath.Join(root, rel))
+		if err != nil {
+			kept = append(kept, fileEdits...)
+			continue
+		}
+		if onlyPackageClause(applyLocal(src, fileEdits)) {
+			delFiles = append(delFiles, rel)
+			continue
+		}
+		kept = append(kept, fileEdits...)
+	}
+	sort.Strings(delFiles)
+	return kept, delFiles
+}
+
+// applyLocal reproduces rename.splice's byte-verified replacement so the
+// plan can inspect the post-removal content before committing. On any
+// verification failure it returns the original content unchanged (the file
+// then simply is not scheduled for deletion — fail-safe).
+func applyLocal(src []byte, edits []rename.Edit) []byte {
+	sorted := append([]rename.Edit{}, edits...)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Offset > sorted[j].Offset })
+	out := src
+	for _, e := range sorted {
+		if e.Offset < 0 || e.Offset+len(e.Old) > len(out) {
+			return src
+		}
+		if string(out[e.Offset:e.Offset+len(e.Old)]) != e.Old {
+			return src
+		}
+		out = append(out[:e.Offset], append([]byte(e.New), out[e.Offset+len(e.Old):]...)...)
+	}
+	return out
+}
+
+// onlyPackageClause reports whether src contains nothing beyond the package
+// clause (any amount of comments/blank lines; an empty file counts too). A
+// file with any remaining declaration — including imports — is kept.
+func onlyPackageClause(src []byte) bool {
+	if len(strings.TrimSpace(string(src))) == 0 {
+		return true
+	}
+	f, err := parser.ParseFile(token.NewFileSet(), "", src, 0)
+	if err != nil {
+		return false // unparseable leftovers — leave the file alone
+	}
+	return len(f.Decls) == 0
 }
 
 // lineStarts maps each 1-based line number to its byte offset in src.

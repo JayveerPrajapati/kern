@@ -1,7 +1,7 @@
 ---
 name: kern-safe-change
 description: >-
-  Safely mutate, refactor, or edit code in the repository with pre-edit blast radius checks, firewall gate validation (G0-G39), auto-repair, and cryptographic CI receipts.
+Use for ANY code change in a kern-managed repo - edit, refactor, rename, add a feature, or prep a PR. Runs the governed change lifecycle: pre-edit blast radius check, sandboxed AST mutation, change-firewall gates G0-G39 via kern check, auto-repair via kern fix, then cryptographic CI receipt and deterministic commit message.
 ---
 
 <!-- canonical source: internal/skills/assets/kern-safe-change/SKILL.md; copies must stay identical — run kern setup to sync -->

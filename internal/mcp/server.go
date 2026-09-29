@@ -15,6 +15,7 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/lock"
 	"github.com/JayveerPrajapati/kern/internal/mcp/catalog"
 	"github.com/JayveerPrajapati/kern/internal/mcp/root"
+	"github.com/JayveerPrajapati/kern/internal/mcp/watcher"
 	"github.com/JayveerPrajapati/kern/internal/metrics"
 	"github.com/JayveerPrajapati/kern/internal/project"
 	"io"
@@ -26,6 +27,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -190,6 +192,18 @@ type Server struct {
 	// index build this process, so the "first build in progress" notice is
 	// printed once per root instead of on every stale rebuild.
 	indexedRoots sync.Map
+	// ADR-0011 reactive file watcher (opt-in, KERN_MCP_WATCH_INTERVAL_MS):
+	// liveIndexes holds the atomically-published fresh index instances per
+	// workspace root, swapped in by the background watcher after a rebuild so
+	// handlers keep serving the old instance until the swap (per-call reads see
+	// either the old or the new instance, never a half-built one). watcherOnce
+	// guards the start, fired with indexOnce on the first initialize;
+	// watcherCancel stops the poll loops on Close; watcherDone is closed once
+	// they have drained.
+	liveIndexes   sync.Map // resolved root -> *atomic.Pointer[index.Index]
+	watcherOnce   sync.Once
+	watcherCancel context.CancelFunc
+	watcherDone   chan struct{}
 	// audit records every executed (and pre-dispatch-rejected) MCP tool
 	// call into the project's tamper-evident audit chain; auditMu
 	// guards toolAudit's lazy initialization.
@@ -677,6 +691,96 @@ func (s *Server) preloadIndexes() {
 	}
 }
 
+// startReactiveWatcher starts the ADR-0011 reactive file watcher when the
+// opt-in env enables it (KERN_MCP_WATCH_INTERVAL_MS, default OFF): one
+// polling watcher per workspace root cheaply proves the index fresh every
+// interval and, when stale, rebuilds into a NEW index instance that
+// publishIndex atomically swaps into the serving path. All watchers share one
+// context cancelled by Close, which also drains an in-flight rebuild. A
+// disabled env (unset/zero/invalid) is a no-op. Idempotent via watcherOnce.
+func (s *Server) startReactiveWatcher() {
+	s.watcherOnce.Do(func() {
+		interval := watcher.IntervalMsFromEnv()
+		if interval <= 0 {
+			return
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan struct{})
+		s.mu.Lock()
+		s.watcherCancel = cancel
+		s.watcherDone = done
+		s.mu.Unlock()
+		go func() {
+			defer close(done)
+			var wg sync.WaitGroup
+			for _, r := range s.workspaceRoots() {
+				if isFilesystemRoot(r) {
+					continue
+				}
+				root := resolveRoot(r)
+				w := watcher.New(watcher.Options{
+					Root:     root,
+					Interval: interval,
+					OnReload: func(fresh *index.Index) error { return s.publishIndex(root, fresh) },
+				})
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					w.Run(ctx)
+				}()
+			}
+			wg.Wait()
+		}()
+	})
+}
+
+// watchedIndex returns the atomically-published fresh index for root, if the
+// reactive watcher has swapped one in. The published instance is at least as
+// fresh as anything the session can produce, and reading it is lock-free: a
+// concurrent publish stores the pointer atomically, so per-call readers see
+// either the old or the new instance.
+func (s *Server) watchedIndex(root string) (*index.Index, bool) {
+	root = resolveRoot(root)
+	v, ok := s.liveIndexes.Load(root)
+	if !ok {
+		return nil, false
+	}
+	ix := v.(*atomic.Pointer[index.Index]).Load()
+	return ix, ix != nil
+}
+
+// publishIndex atomically publishes a freshly built index for root so every
+// handler accessor — loadIndex, cacheIndexIdentity, the health probe — sees
+// the new instance from the next call on. The session's own cached copy and
+// its derived caches (communities/arch/...) are dropped so nothing serves
+// old-index-derived data after the swap, then the fresh index is reinstalled
+// into the session so the tool cache's identity peek (cacheIndexIdentity →
+// CachedIndex, tool_cache.go F2/F6) rotates to the new content root and old
+// entries become unreachable. Logs exactly one line on success, server
+// stderr style. Called from the background watcher's rebuild goroutine.
+func (s *Server) publishIndex(root string, fresh *index.Index) error {
+	if fresh == nil {
+		return fmt.Errorf("reactive watcher: nil index for %s", root)
+	}
+	root = resolveRoot(root)
+	holder, _ := s.liveIndexes.LoadOrStore(root, &atomic.Pointer[index.Index]{})
+	holder.(*atomic.Pointer[index.Index]).Store(fresh)
+	// Drop the session's stale copy + derived caches, then reinstall the
+	// fresh index so session-side readers (CachedIndex, CommunitiesList)
+	// converge immediately. Only touch an existing session — the watcher must
+	// not create one. The reinstall is best-effort: the published instance is
+	// already what handlers are served, so a failure only costs cache hits.
+	s.mu.Lock()
+	e, ok := s.sessions[root]
+	s.mu.Unlock()
+	if ok {
+		e.sess.Invalidate()
+		_, _ = e.sess.Index() // reload the just-persisted fresh index
+	}
+	fmt.Fprintf(os.Stderr, "kern-mcp: index stale; reloaded (%d files)\n", len(fresh.FileHashes))
+	return nil
+}
+
 // isFilesystemRoot reports whether p is a filesystem root ("/" on Unix, or a
 // drive root on Windows) that must never be treated as a project to index.
 func isFilesystemRoot(p string) bool {
@@ -823,6 +927,20 @@ func (s *Server) Close() {
 	// Stop the background index watch: no rebuild may start after this point,
 	// and an in-flight rebuild is drained briefly (see stopWatch).
 	s.stopWatch()
+	// Stop the ADR-0011 reactive file watcher: cancel the poll loops and wait
+	// briefly for an in-flight rebuild to drain (same budget as the
+	// background watch). A server that never started the watcher (env
+	// disabled) has a nil cancel and skips this.
+	s.mu.Lock()
+	watcherCancel, watcherDone := s.watcherCancel, s.watcherDone
+	s.mu.Unlock()
+	if watcherCancel != nil {
+		watcherCancel()
+		select {
+		case <-watcherDone:
+		case <-time.After(watchShutdownTimeout):
+		}
+	}
 }
 
 // dispatch computes the JSON-RPC response for a request. A nil return means
@@ -883,6 +1001,9 @@ func (s *Server) dispatch(req rpcRequest) any {
 		// that don't need the index serve immediately. indexOnce guards the
 		// trigger so it fires exactly once per server lifetime.
 		s.indexOnce.Do(func() { go s.preloadIndexes() })
+		// ADR-0011 reactive file watcher: opt-in (KERN_MCP_WATCH_INTERVAL_MS,
+		// default OFF), started alongside the preload and stopped on Close.
+		s.startReactiveWatcher()
 		caps := map[string]any{
 			"tools":   map[string]any{"listChanged": false},
 			"prompts": map[string]any{"listChanged": false},
@@ -1245,10 +1366,13 @@ func validateRoot(root string) error {
 // indexScope carries the symbol index loaded during one tool call so provenance
 // can be stamped onto that same call's response. It lives on the per-request
 // context instead of the Server struct, so concurrent tool calls never share a
-// mutable lastIndex and read each other's provenance.
+// mutable lastIndex and read each other's provenance. token is the client's MCP
+// progress token (from the request's _meta), threaded so slow handlers (verify)
+// can emit phase-level progress notifications (M4).
 type indexScope struct {
-	ix   *index.Index
-	prov *Provenance // structured evidence stamped by retrieval handlers
+	ix    *index.Index
+	prov  *Provenance // structured evidence stamped by retrieval handlers
+	token string      // MCP progress token; "" = client did not opt in
 }
 type indexScopeKey struct{}
 
@@ -1257,6 +1381,21 @@ type indexScopeKey struct{}
 // recorded on the per-call scope so the tool response can be stamped with
 // provenance.
 func (s *Server) loadIndex(ctx context.Context, root string) (*index.Index, error) {
+	// ADR-0011: prefer the watcher-published index when one exists — the
+	// background reactive watcher has already rebuilt and atomically swapped
+	// it in, so it is at least as fresh as anything the session can produce,
+	// and the swap is lock-free (each call sees either the old or the new
+	// instance, never a half-built one).
+	if ix, ok := s.watchedIndex(root); ok {
+		s.indexedRoots.Store(root, true)
+		if scope, ok := ctx.Value(indexScopeKey{}).(*indexScope); ok {
+			scope.ix = ix
+		}
+		if err := rejectEmptyIndex(root, ix); err != nil {
+			return nil, err
+		}
+		return ix, nil
+	}
 	// The historical "first index build in progress" notice was removed: it
 	// predicted the build by decoding the full on-disk index (index.Load +
 	// tree-OID probe — a multi-MB decode per root per process) purely to
@@ -1293,6 +1432,9 @@ func rejectEmptyIndex(root string, ix *index.Index) error {
 		return nil
 	}
 	abs := resolveAbs(root)
+	if os.Getenv("KERN_GREENFIELD") == "1" || os.Getenv("KERN_ALLOW_EMPTY") == "1" {
+		return nil
+	}
 	reason := "no indexable source files were found under it"
 	if st, err := os.Stat(abs); err != nil || !st.IsDir() {
 		reason = fmt.Sprintf("the path %q does not exist or is not a directory", abs)

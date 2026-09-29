@@ -58,7 +58,43 @@ func defaultRoot(root string) string {
 // other processes. Save is SQLite-primary when the store is compiled in
 // (default build) and falls back to the JSON cache under -tags nosqlite or on
 // a SQLite write failure, so the store stays in sync either way.
+//
+// The rebuild is debounced across processes (M3): a concurrent kern process
+// that just rebuilt the same root is waited for and its fresh index reused,
+// so `kern index` storms converge on one rebuild. A caller that explicitly
+// wants a rebuild regardless (--force) still gets a correct, fresh index —
+// never a stale one — because the re-check under the lock re-validates
+// freshness before reuse.
 func BuildPersisted(root string) (*Index, error) {
+	root = defaultRoot(root)
+	return debouncedRebuild(root,
+		func() (*Index, bool) {
+			ix, err := Load(root)
+			if err != nil || ix == nil {
+				return nil, false
+			}
+			return ix, !ix.Stale()
+		},
+		func() (*Index, error) {
+			ix, err := Build(root)
+			if err != nil {
+				return nil, err
+			}
+			// Persist like `kern index` so Status/Load observe the build in
+			// other processes; Save writes the SQLite-primary store (JSON
+			// fallback).
+			if err := ix.Save(); err != nil {
+				return nil, err
+			}
+			return ix, nil
+		})
+}
+
+// BuildPersistedForce rebuilds and persists the index for root
+// UNCONDITIONALLY, bypassing the cross-process debounce. This is the
+// `kern index --force` corruption-recovery / schema-bump escape hatch: a
+// fresh cached index is NOT reused — the tree is always re-parsed.
+func BuildPersistedForce(root string) (*Index, error) {
 	root = defaultRoot(root)
 	ix, err := Build(root)
 	if err != nil {
@@ -141,96 +177,125 @@ func StatusReport(root string, strict bool) (*IndexStatus, error) {
 // re-verifies from disk. Freshness is "fresh" (no rebuild), "rebuilt"
 // (converged), or "stale" (fail-closed: the index did not converge after a
 // rebuild).
+//
+// The rebuild path is debounced across processes (M3): a concurrent
+// ensure-fresh invocation whose rebuild finished while we waited is detected
+// by the under-lock re-probe and reused — its index was already re-verified
+// before its own save — so concurrent invocations share one rebuild.
 func EnsureFresh(root string) (*EnsureFreshResult, error) {
 	root = defaultRoot(root)
 
-	// 1. Load the cached index. An unloadable or missing index is not an
-	// error — the full-build fallback below handles it (mirrors `kern index
-	// --update`).
-	prev, lerr := Load(root)
+	// freshProbe mirrors steps 1-2 (below): load the cached index and run the
+	// tri-state freshness probe, returning "fresh" when the persisted index
+	// is current. It is the under-lock re-check too, so a rebuild completed
+	// by another process while we waited is reused, never redone.
+	freshProbe := func() (*EnsureFreshResult, bool) {
+		// 1. Load the cached index. An unloadable or missing index is not an
+		// error — the full-build fallback below handles it (mirrors `kern
+		// index --update`).
+		prev, lerr := Load(root)
 
-	// 2. Tri-state git tree-OID probe (no content walk). Git hashes content,
-	// so an mtime-preserving edit (git apply) flips the OID too.
-	//   - fresh=true, decided=true → the recorded TreeOID matches: return
-	//     "fresh" immediately — no walk, no rebuild.
-	//   - fresh=false, decided=true → recorded TreeOID exists and differs:
-	//     DECISIVELY stale → straight to the rebuild path below (the loose
-	//     check is NOT run here — it would add a redundant walk to the cold
-	//     path).
-	//   - decided=false → no baseline (nil index/Identity, empty/legacy
-	//     TreeOID) or current OID unavailable (non-git worktree, git
-	//     unavailable): inconclusive. Run the LOOSE content proof first; a
-	//     content match proves the index is current, so it returns "fresh"
-	//     without rebuilding. Only a loose "stale" falls through to rebuild.
-	if lerr == nil && prev != nil {
-		fresh, decided, _ := prev.TreeOIDProbe(root)
-		if fresh {
-			st := indexStatusFromIndex(root, prev, FreshnessProof{
-				Verdict:   FreshnessFresh,
-				Recorded:  *prev.Identity,
-				CheckedAt: time.Now().UTC(),
-			})
-			return &EnsureFreshResult{Freshness: "fresh", IndexStatus: *st}, nil
+		// 2. Tri-state git tree-OID probe (no content walk). Git hashes
+		// content, so an mtime-preserving edit (git apply) flips the OID
+		// too.
+		//   - fresh=true, decided=true → the recorded TreeOID matches:
+		//     return "fresh" immediately — no walk, no rebuild.
+		//   - fresh=false, decided=true → recorded TreeOID exists and
+		//     differs: DECISIVELY stale → the rebuild path below.
+		//   - decided=false → no baseline (nil index/Identity, empty/legacy
+		//     TreeOID) or current OID unavailable (non-git worktree, git
+		//     unavailable): inconclusive. Run the LOOSE content proof first;
+		//     a content match proves the index is current, so it returns
+		//     "fresh" without rebuilding. Only a loose "stale" falls through
+		//     to rebuild.
+		if lerr == nil && prev != nil {
+			fresh, decided, _ := prev.TreeOIDProbe(root)
+			if fresh {
+				st := indexStatusFromIndex(root, prev, FreshnessProof{
+					Verdict:   FreshnessFresh,
+					Recorded:  *prev.Identity,
+					CheckedAt: time.Now().UTC(),
+				})
+				return &EnsureFreshResult{Freshness: "fresh", IndexStatus: *st}, true
+			}
+			if !decided {
+				// Inconclusive → the loose content proof decides. This
+				// restores the warm path for legacy indexes (empty recorded
+				// TreeOID) and repos where git cannot compute the OID: it
+				// costs one walk, not a rebuild.
+				if st, err := StatusReport(root, false); err == nil && st.Built && st.FreshnessProof.Verdict == FreshnessFresh {
+					return &EnsureFreshResult{Freshness: "fresh", IndexStatus: *st}, true
+				}
+			}
+			// Decisively stale (or inconclusive with a stale loose proof):
+			// fall through to the rebuild path.
 		}
-		if !decided {
-			// Inconclusive → the loose content proof decides. This restores
-			// the warm path for legacy indexes (empty recorded TreeOID) and
-			// repos where git cannot compute the OID: it costs one walk, not
-			// a rebuild.
-			if st, err := StatusReport(root, false); err == nil && st.Built && st.FreshnessProof.Verdict == FreshnessFresh {
-				return &EnsureFreshResult{Freshness: "fresh", IndexStatus: *st}, nil
+		return nil, false
+	}
+
+	// Fast path: a fresh index is returned without the lock — the read-only
+	// path stays lock-free (M3).
+	if res, fresh := freshProbe(); fresh {
+		return res, nil
+	}
+
+	// Stale (or unprovable): rebuild under the exclusive cross-process build
+	// lock, debounced so concurrent invocations share one rebuild.
+	return debouncedRebuild(root, freshProbe, func() (*EnsureFreshResult, error) {
+		// 3. Stale (or unprovable): run the incremental update over the
+		// previous index — the same update-over-build pattern `kern index
+		// --update` uses — falling back to a full build (which persists)
+		// when no index loads or Update fails. Save persists via the
+		// SQLite-primary store (default build), with the JSON cache as the
+		// fallback for -tags nosqlite builds and SQLite write failures.
+		var ix *Index
+		if prev, lerr := Load(root); lerr == nil && prev != nil {
+			if uix, uerr := Update(root, prev); uerr == nil && uix != nil {
+				ix = uix
 			}
 		}
-		// Decisively stale (or inconclusive with a stale loose proof): fall
-		// through to the rebuild path.
-	}
-
-	// 3. Stale (or unprovable): run the incremental update over the previous
-	// index — the same update-over-build pattern `kern index --update` uses —
-	// falling back to a full build (which persists) when no index loads or
-	// Update fails. Save persists via the SQLite-primary store (default
-	// build), with the JSON cache as the fallback for -tags nosqlite builds
-	// and SQLite write failures.
-	var ix *Index
-	if lerr == nil && prev != nil {
-		if uix, uerr := Update(root, prev); uerr == nil && uix != nil {
-			ix = uix
+		if ix == nil {
+			// No loadable previous index, or Update failed: full build. Save
+			// directly rather than via BuildPersisted — that helper is
+			// itself debounced and would wait on the lock we already hold.
+			nix, berr := Build(root)
+			if berr != nil {
+				return nil, fmt.Errorf("ensure-fresh: build: %w", berr)
+			}
+			if serr := nix.Save(); serr != nil {
+				return nil, fmt.Errorf("ensure-fresh: persist built index: %w", serr)
+			}
+		} else {
+			if serr := ix.Save(); serr != nil {
+				return nil, fmt.Errorf("ensure-fresh: persist updated index: %w", serr)
+			}
 		}
-	}
-	if ix == nil {
-		// No loadable previous index, or Update failed: full build.
-		if _, err := BuildPersisted(root); err != nil {
-			return nil, fmt.Errorf("ensure-fresh: build: %w", err)
-		}
-	} else {
-		if serr := ix.Save(); serr != nil {
-			return nil, fmt.Errorf("ensure-fresh: persist updated index: %w", serr)
-		}
-	}
 
-	// 4. Strict re-verify: a GENUINE fresh observation AFTER the save, loaded
-	// from disk (StatusReport re-reads the persisted index). This is the
-	// trust anchor — the pre-update probe's strictness was deliberately
-	// redundant.
-	if st, err := StatusReport(root, true); err == nil && st.Built && st.FreshnessProof.Verdict == FreshnessFresh {
-		return &EnsureFreshResult{Freshness: "rebuilt", IndexStatus: *st}, nil
-	}
-	// 5. Loose re-verify: strict recomputes content_root over EVERY file on
-	// disk, while a build records content for the parseable source set only —
-	// a repo containing an unparseable file (e.g. a compile-breaking fixture)
-	// never converges under strict. The loose verdict is anchored to the git
-	// tree, which is exactly the content the guard check evaluates.
-	if st, err := StatusReport(root, false); err == nil && st.Built && st.FreshnessProof.Verdict == FreshnessFresh {
-		return &EnsureFreshResult{Freshness: "rebuilt", IndexStatus: *st}, nil
-	}
+		// 4. Strict re-verify: a GENUINE fresh observation AFTER the save,
+		// loaded from disk (StatusReport re-reads the persisted index). This
+		// is the trust anchor — the pre-update probe's strictness was
+		// deliberately redundant.
+		if st, err := StatusReport(root, true); err == nil && st.Built && st.FreshnessProof.Verdict == FreshnessFresh {
+			return &EnsureFreshResult{Freshness: "rebuilt", IndexStatus: *st}, nil
+		}
+		// 5. Loose re-verify: strict recomputes content_root over EVERY file
+		// on disk, while a build records content for the parseable source
+		// set only — a repo containing an unparseable file (e.g. a
+		// compile-breaking fixture) never converges under strict. The loose
+		// verdict is anchored to the git tree, which is exactly the content
+		// the guard check evaluates.
+		if st, err := StatusReport(root, false); err == nil && st.Built && st.FreshnessProof.Verdict == FreshnessFresh {
+			return &EnsureFreshResult{Freshness: "rebuilt", IndexStatus: *st}, nil
+		}
 
-	// 6. Non-convergence: fail closed. The index is stale and did not
-	// converge after a rebuild; callers must refuse to trust it.
-	st, err := StatusReport(root, false)
-	if err != nil {
-		st = &IndexStatus{Root: root, SchemaVersion: "2", Built: false, Stale: true}
-	}
-	return &EnsureFreshResult{Freshness: "stale", IndexStatus: *st}, nil
+		// 6. Non-convergence: fail closed. The index is stale and did not
+		// converge after a rebuild; callers must refuse to trust it.
+		st, err := StatusReport(root, false)
+		if err != nil {
+			st = &IndexStatus{Root: root, SchemaVersion: "2", Built: false, Stale: true}
+		}
+		return &EnsureFreshResult{Freshness: "stale", IndexStatus: *st}, nil
+	})
 }
 
 // indexStatusFromIndex populates the standard IndexStatus-shaped payload from

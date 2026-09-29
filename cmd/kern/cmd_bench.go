@@ -202,6 +202,21 @@ func ms(d time.Duration) float64 {
 	return float64(d) / float64(time.Millisecond)
 }
 
+// fmtLatency renders a millisecond sample honestly instead of collapsing fast
+// queries to a misleading zero (dogfooding B-LOW: the one-hop-callers query —
+// a precomputed map read — returns 3830 callers in tens of nanoseconds, which
+// the old %7.2f rendering displayed as "0.00 ms" and read as "returned
+// nothing"). Three tiers: ms, µs, ns — so a sub-µs query is never shown as 0.
+func fmtLatency(msf float64) string {
+	if msf >= 1 {
+		return fmt.Sprintf("%7.2f ms", msf)
+	}
+	if msf >= 0.001 {
+		return fmt.Sprintf("%7.1f µs", msf*1000)
+	}
+	return fmt.Sprintf("%7.0f ns", msf*1e6)
+}
+
 // speedup returns cold/warm as a ratio (how many times faster the warm path
 // is), guarding against a zero warm sample.
 func speedup(cold time.Duration, warmMS float64) float64 {
@@ -243,7 +258,7 @@ func printBenchTable(res benchResult) {
 	fmt.Println()
 	fmt.Println("query                kind                    target   median    min     runs")
 	for _, q := range res.Queries {
-		fmt.Printf("%-20s %-22s %-8s %7.2f ms %7.2f ms %5d\n", q.Name, q.Kind, q.Target, q.MedianMS, q.MinMS, q.Runs)
+		fmt.Printf("%-20s %-22s %-8s %s %s %5d\n", q.Name, q.Kind, q.Target, fmtLatency(q.MedianMS), fmtLatency(q.MinMS), q.Runs)
 	}
 	fmt.Println()
 	fmt.Println("methodology: " + res.MethodologyRef)

@@ -23,6 +23,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"reflect"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -94,7 +95,29 @@ func renderTeamText(root string) (string, error) {
 			fmt.Fprintf(&b, "    capabilities: %s\n", strings.Join(a.Capabilities, ", "))
 		}
 	}
-	tasks := reg.ListTasks()
+	// Merge the in-memory registry with the persisted store, exactly like
+	// runTaskList: the registry holds this-process submissions while the store
+	// holds every cross-session record — a fresh StandardTeam() always has an
+	// empty in-memory map, so reading only the registry rendered a permanent
+	// "tasks: 0" no matter how many tasks were persisted (dogfooding E-LOW).
+	seen := map[string]*agent.Task{}
+	var tasks []*agent.Task
+	for _, t := range reg.ListTasks() {
+		seen[t.ID] = t
+		tasks = append(tasks, t)
+	}
+	if st := reg.TaskStore(); st != nil {
+		if persisted, lerr := st.List(); lerr == nil {
+			for i := range persisted {
+				t := &persisted[i]
+				if _, dup := seen[t.ID]; !dup {
+					seen[t.ID] = t
+					tasks = append(tasks, t)
+				}
+			}
+		}
+	}
+	sort.Slice(tasks, func(i, j int) bool { return tasks[i].ID < tasks[j].ID })
 	fmt.Fprintf(&b, "tasks: %d\n", len(tasks))
 	for _, t := range tasks {
 		fmt.Fprintf(&b, "  %s [%s] %s: %s\n", t.ID, t.State, t.Type, t.Input)
@@ -246,7 +269,8 @@ func runDo(root, levelStr, intent string) (string, error) {
 	// inside the first Generate call (long connect/retry windows) with no
 	// output at all — an apparent hang. Probe the provider up front with a
 	// short timeout so the failure is a clear one-line error instead.
-	if err := probeLLMProvider(); err != nil {
+	providerName, err := probeLLMProvider()
+	if err != nil {
 		return "", fmt.Errorf("no reachable LLM provider: %w — start ollama (or set KERN_LLM_PROVIDER to a reachable provider) before using kern do", err)
 	}
 	ts := app.NewTaskService(p, nil).WithPRProvider(app.AutoPRProvider())
@@ -254,6 +278,10 @@ func runDo(root, levelStr, intent string) (string, error) {
 	var b strings.Builder
 	fmt.Fprintf(&b, "intent: %s\n", res.Intent)
 	fmt.Fprintf(&b, "level: %s\n", res.Level)
+	// Name the provider that actually answers — with Ollama down the chain
+	// falls back to a local agent CLI (claude/opencode/codex), and the run
+	// output should say which one served it (dogfooding E-obs).
+	fmt.Fprintf(&b, "provider: %s\n", providerName)
 	for _, st := range res.Stages {
 		fmt.Fprintf(&b, "%s: %s", st.Stage, st.Status)
 		if st.Output != "" {
@@ -276,26 +304,18 @@ func runDo(root, levelStr, intent string) (string, error) {
 }
 
 // probeLLMProvider verifies a reachable LLM provider before a command that
-// hard-depends on one. It mirrors the provider the coder/planner agents use
-// (llm.NewProvider, env-driven with an auto chain) and asks it a trivial
-// question under a short timeout. The auto chain falls back across
-// providers, so this only fails when no provider in the chain answers —
-// exactly the silent-hang condition `kern do` used to exhibit.
-func probeLLMProvider() error {
-	prov, err := llm.NewProvider()
-	if err != nil {
-		return err
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
-	defer cancel()
-	out, err := prov.Generate(ctx, "", "Reply with exactly: OK", llm.Options{})
-	if err != nil {
-		return err
-	}
-	if strings.TrimSpace(out) == "" {
-		return fmt.Errorf("provider returned an empty response")
-	}
-	return nil
+// hard-depends on one. It delegates to the shared capability-aware
+// llm.ProbeReachableName (host session first — the MCP ack, same session does
+// the task — then agent CLIs with a cold-start-covering budget, then Ollama),
+// so the CLI and the MCP server's kern_loop probe cannot drift. The auto
+// chain falls back across providers, so this only fails when no provider in
+// the chain answers — exactly the silent-hang condition `kern do` used to
+// exhibit (dogfooding G-HIGH: the old flat 8s budget was a coin-flip against
+// CLI cold-starts of 6-40s). It returns the name of the provider that
+// answered so the caller can report which fallback actually served the run
+// (dogfooding E-obs: `kern do` previously never named it).
+func probeLLMProvider() (string, error) {
+	return llm.ProbeReachableName()
 }
 
 // loopFailureMessage converts a failed loop run into a one-line cause that
@@ -413,6 +433,45 @@ func runStatsPerformance(reset, jsonOut bool) (string, error) {
 	return r.Render(), nil
 }
 
+// verifyTypeKeywords are the check-type keywords the verification engine's
+// type dispatcher accepts (engine.Verify's substring match over the request
+// types). A `--types` value must contain at least one of these to run a real
+// check; anything else would silently run nothing and yield a false-green
+// PASS verdict (audit H4).
+var verifyTypeKeywords = []string{
+	"build", "test", "unit", "integration",
+	"security", "sec", "architecture", "archi",
+	"dependency", "dep",
+	"cve", "license", "licen", "secrets", "secret",
+	"e2e", "end-to-end", "static", "analysis", "vet", "lint",
+	"performance", "perf", "bench", "ci",
+}
+
+// validVerifyType reports whether t maps to at least one real verification
+// check in the engine's type dispatcher. The substring match mirrors the
+// engine, so any value the engine would honor stays valid and any value that
+// would silently run nothing is rejected.
+func validVerifyType(t string) bool {
+	tl := strings.ToLower(strings.TrimSpace(t))
+	if tl == "" {
+		return false
+	}
+	for _, kw := range verifyTypeKeywords {
+		if strings.Contains(tl, kw) {
+			return true
+		}
+	}
+	return false
+}
+
+// verifyTypeList renders the human-readable supported-type list for the
+// `--types` validation error message. Derived from verifyTypeKeywords so the
+// error can never list less than the engine actually accepts (the match is
+// substring-based, mirroring the engine's type dispatcher).
+func verifyTypeList() string {
+	return strings.Join(verifyTypeKeywords, ", ")
+}
+
 // isVerifyTypes reports whether s is a comma-separated list of known
 // verification check types. Used to disambiguate the high-level ADR-0006
 // `kern verify <types>` form from the classic claims-verification form.
@@ -517,10 +576,23 @@ func fatalNoSymbol(symbol string, ix *index.Index) {
 // result, breaking the explore/graph convention that "not found" is an error
 // for scripts and CI. The --json path is untouched: an empty result array is
 // data, not an error, and stays exit 0.
+//
+// The suggestion list mirrors kern impact's "close candidates" (ranked
+// search, no strict score gate): a nonsense query like "NoSuchSymbol12345"
+// that matches no symbol still shows what the index actually contains near
+// the query, so the follow-up search is guided instead of blind.
 func fatalNoSearchMatch(query string, ix *index.Index) {
 	msg := fmt.Sprintf("no symbols matched: %s", query)
-	if suggestions := suggestSymbols(ix, query); len(suggestions) > 0 {
-		msg += "\n\ndid you mean one of: " + strings.Join(suggestions, ", ")
+	if ix != nil {
+		if cands := intel.CloseCandidates(ix, query, 5); len(cands) > 0 {
+			msg += "\n\nclose candidates:"
+			for _, h := range cands {
+				c := h.Symbol
+				msg += fmt.Sprintf("\n  %-10s %-7s %-24s %s:%d", c.Kind, c.Lang, c.FullName(), c.File, c.Line)
+			}
+		} else if suggestions := suggestSymbols(ix, query); len(suggestions) > 0 {
+			msg += "\n\ndid you mean one of: " + strings.Join(suggestions, ", ")
+		}
 	}
 	fatal("%s", msg)
 }
@@ -575,6 +647,16 @@ func clipJSONStrings(v any) any {
 func clipJSONValue(rv reflect.Value) reflect.Value {
 	if !rv.IsValid() {
 		return rv
+	}
+	// Values with a custom JSON marshaler (time.Time, uuid, ...) are safe:
+	// they never exceed maxJSONFieldLen, and recursing into their internal
+	// struct fields would copy only CanInterface() fields — zeroing types
+	// like time.Time whose fields are all unexported (dogfooding B-LOW: every
+	// built_at/checked_at in --json payloads was being reset to epoch).
+	if rv.CanInterface() {
+		if _, ok := rv.Interface().(json.Marshaler); ok {
+			return rv
+		}
 	}
 	switch rv.Kind() {
 	case reflect.String:

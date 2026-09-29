@@ -25,8 +25,21 @@ type agentReport struct {
 // probeTimeout caps each --probe live-test so `kern agents --probe` cannot
 // hang: a dead Ollama fails in milliseconds, a hung agent CLI is killed
 // (whole process group) at the deadline, and the full probe finishes in
-// bounded time.
-const probeTimeout = 20 * time.Second
+// bounded time. The bound must clear the slowest real cold-start in the
+// chain — opencode measures ~40.6s from a cold cache (dogfooding G-LOW: the
+// old 20s bound killed the opencode probe before it could answer, so
+// --probe never reported opencode as a live provider even when installed
+// and healthy). 60s keeps that headroom while staying bounded.
+// KERN_PROBE_TIMEOUT overrides the default with a Go duration such as
+// "90s" or "2m"; empty or unparsable values fall back to the 60s default.
+var probeTimeout = func() time.Duration {
+	if v := os.Getenv("KERN_PROBE_TIMEOUT"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			return d
+		}
+	}
+	return 60 * time.Second
+}()
 
 // runAgents implements `kern agents`: which agents kern is attached to
 // (setup wiring), which of them can serve as LLM providers (CLI presence),
@@ -65,14 +78,14 @@ func runAgents(rest []string) {
 		})
 	}
 
-	// 2. LLM provider chain: Host (if connected) + Ollama + agent CLIs, in auto priority order.
+	// 2. LLM provider chain: Host (if connected) + agent CLIs + Ollama, in auto priority order.
 	provider := llm.ProviderName()
 	var chainNames []string
 	if llm.HasHostSampler() {
 		chainNames = append(chainNames, "host")
 	}
-	chainNames = append(chainNames, "ollama")
 	chainNames = append(chainNames, llm.AvailableLocalAgents()...)
+	chainNames = append(chainNames, "ollama")
 	for _, name := range chainNames {
 		r := agentReport{Name: name, Kind: "llm-provider"}
 		switch name {
@@ -80,7 +93,24 @@ func runAgents(rest []string) {
 			if llm.HasHostSampler() {
 				r.Installed = true
 				r.Healthy = "ok"
-				r.Note = "active MCP host sampling connected"
+				// The MCP ack surface: name the active session(s) and the
+				// model each serves (learned from sampling responses or the
+				// register-host-sampler model arg). Multiple sessions
+				// coexist — one slot per connection, tried in registration
+				// order, and the SAME session does the task (no new session).
+				if st := llm.HostSamplerStates(); len(st) > 0 {
+					parts := make([]string, 0, len(st))
+					for _, s := range st {
+						if s.Model != "" {
+							parts = append(parts, fmt.Sprintf("%s (%s)", s.Key, s.Model))
+						} else {
+							parts = append(parts, s.Key)
+						}
+					}
+					r.Note = "active MCP host sampling connected: " + strings.Join(parts, ", ")
+				} else {
+					r.Note = "active MCP host sampling connected"
+				}
 			} else {
 				r.Installed = false
 				r.Healthy = "unreachable"

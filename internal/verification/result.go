@@ -338,7 +338,21 @@ func RenderCompact(v VerificationResult) string {
 		if v.UnitTests.Status == StatusSkipped {
 			b.WriteString("tests: SKIPPED " + firstLine(v.UnitTests.Output) + "\n")
 		} else {
-			line("tests", okStatus(v.UnitTests.OK), fmt.Sprintf("passed=%d failed=%d skipped=%d (%s)", v.UnitTests.Passed, v.UnitTests.Failed, v.UnitTests.Skipped, v.UnitTests.Duration))
+			detail := fmt.Sprintf("passed=%d failed=%d skipped=%d (%s)", v.UnitTests.Passed, v.UnitTests.Failed, v.UnitTests.Skipped, v.UnitTests.Duration)
+			// D1: a FAIL verdict with zero failed tests is contradictory — the
+			// suite could not build (go test surfaces vet/compile errors before
+			// any test executes, so the PASS/FAIL counters stay 0/0). Fold the
+			// actual reason into the status line instead of a bare
+			// "tests: FAIL passed=0 failed=0".
+			if !v.UnitTests.OK && v.UnitTests.Failed == 0 {
+				if reason := testFailureReason(v.UnitTests.Output); reason != "" {
+					line("tests", "FAILED (go vet: "+reason+")", detail)
+				} else {
+					line("tests", okStatus(v.UnitTests.OK), detail)
+				}
+			} else {
+				line("tests", okStatus(v.UnitTests.OK), detail)
+			}
 			if !v.UnitTests.OK && strings.TrimSpace(v.UnitTests.Output) != "" {
 				b.WriteString(strings.TrimSpace(v.UnitTests.Output) + "\n")
 			}
@@ -348,7 +362,18 @@ func RenderCompact(v VerificationResult) string {
 		if v.Integration.Status == StatusSkipped {
 			b.WriteString("integration: SKIPPED " + firstLine(v.Integration.Output) + "\n")
 		} else {
-			line("integration", okStatus(v.Integration.OK), fmt.Sprintf("passed=%d failed=%d skipped=%d (%s)", v.Integration.Passed, v.Integration.Failed, v.Integration.Skipped, v.Integration.Duration))
+			detail := fmt.Sprintf("passed=%d failed=%d skipped=%d (%s)", v.Integration.Passed, v.Integration.Failed, v.Integration.Skipped, v.Integration.Duration)
+			// D1 (mirrors the UnitTests branch above): zero failed tests with a
+			// FAIL verdict means the suite could not build — surface the reason.
+			if !v.Integration.OK && v.Integration.Failed == 0 {
+				if reason := testFailureReason(v.Integration.Output); reason != "" {
+					line("integration", "FAILED (go vet: "+reason+")", detail)
+				} else {
+					line("integration", okStatus(v.Integration.OK), detail)
+				}
+			} else {
+				line("integration", okStatus(v.Integration.OK), detail)
+			}
 			if !v.Integration.OK && strings.TrimSpace(v.Integration.Output) != "" {
 				b.WriteString(strings.TrimSpace(v.Integration.Output) + "\n")
 			}
@@ -470,6 +495,28 @@ func firstLine(s string) string {
 		}
 	}
 	return strings.TrimSpace(s)
+}
+
+// testFailureReason extracts the first meaningful diagnostic line from a
+// failed test run's output. `go test` surfaces compile/vet errors as bare
+// diagnostics before any test executes, so the PASS/FAIL counters stay 0/0 —
+// the actual reason lives in the output, not the counters (D1). Noise lines
+// (package headers, run summaries, PASS/FAIL markers) are skipped.
+func testFailureReason(output string) string {
+	for _, ln := range strings.Split(output, "\n") {
+		t := strings.TrimSpace(ln)
+		if t == "" ||
+			strings.HasPrefix(t, "#") || // package header (e.g. "# module/path")
+			strings.HasPrefix(t, "FAIL") ||
+			strings.HasPrefix(t, "ok ") ||
+			strings.HasPrefix(t, "--- ") ||
+			strings.HasPrefix(t, "=== ") ||
+			strings.HasPrefix(t, "PASS") {
+			continue
+		}
+		return t
+	}
+	return ""
 }
 
 func okStatus(ok bool) string {

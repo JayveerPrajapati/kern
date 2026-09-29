@@ -473,17 +473,79 @@ func runTestgaps(rest []string) {
 
 func runFlows(rest []string) {
 	f, args := parseFlagsOrDie(rest)
+	// M2: a positional is either a directory (the root, as before) or a
+	// symbol (flow filter). A FILE positional used to "succeed" silently
+	// with an empty result after sqlite-persist spam, and a symbol
+	// positional used to die with a raw lstat OS error — validate up front.
+	symbol := ""
+	if f.root == "" && len(args) > 0 {
+		if st, serr := os.Stat(args[0]); serr == nil {
+			if !st.IsDir() {
+				fatalUsage("flows expects a symbol or directory, got file: %s\nusage: kern flows [--root ROOT] <dir|symbol> [--json] [--limit N]", args[0])
+			}
+		} else {
+			// Not an existing path — treat it as a symbol filter over the
+			// flows at the current root.
+			symbol = args[0]
+			args = nil
+		}
+	}
 	_, ix, err := resolveRoot(f, args)
 	if err != nil {
+		if symbol != "" {
+			fatal("Flows: no symbol %q (and no kern index at %s — run: kern index %s)", symbol, projectRoot(f), projectRoot(f))
+		}
 		fatal("Flows: %v", err)
 	}
-	flows := intel.Flows(ix, f.limit, 12)
+	// When filtering by symbol, fetch well past the default 10-flow cap so
+	// matches are not starved by the truncation inside intel.Flows; the
+	// final --limit is applied to the filtered set below.
+	fetchLimit := f.limit
+	if symbol != "" && fetchLimit <= 0 {
+		fetchLimit = 5000
+	}
+	flows := intel.Flows(ix, fetchLimit, 12)
+	if symbol != "" {
+		resolved, ok := intel.Resolve(ix, symbol)
+		if !ok {
+			fatalNoSymbol(symbol, ix)
+		}
+		// A flow's Path is only the LONGEST chain from its root, so a
+		// symbol that a root reaches off-path would be missed by a pure
+		// path match. BlastRadius lists every transitive caller of the
+		// symbol — i.e. the flow roots that can reach it.
+		callers, _ := intel.BlastRadius(ix, []string{resolved})
+		reaching := make(map[string]bool, len(callers))
+		for _, c := range callers {
+			reaching[c] = true
+		}
+		kept := flows[:0]
+		for _, fl := range flows {
+			if fl.Root == resolved || reaching[fl.Root] {
+				kept = append(kept, fl)
+				continue
+			}
+			for _, p := range fl.Path {
+				if p == resolved {
+					kept = append(kept, fl)
+					break
+				}
+			}
+		}
+		flows = kept
+		if f.limit > 0 && len(flows) > f.limit {
+			flows = flows[:f.limit]
+		}
+		if len(flows) == 0 {
+			fmt.Printf("no execution flows reach %s\n", resolved)
+			return
+		}
+	}
 	if f.json {
 		printJSON(map[string]any{"flows": flows})
 		return
 	}
 	fmt.Println(intel.RenderFlows(flows))
-
 }
 
 func runCommunities(rest []string) {
@@ -770,6 +832,12 @@ func runExplore(rest []string) {
 		if info, ok := intel.Why(ix, args[0]); ok {
 			out = intel.RenderExploreExplain(rep, info)
 		}
+	}
+	// L5: call edges track only function/method calls — read-references to
+	// package-level vars are not indexed, so 0 callers must not read as
+	// "nothing uses this var".
+	if rep.Definition.Kind == "var" && len(rep.Callers) == 0 {
+		out += "\nnote: read-references to package-level vars are not indexed\n"
 	}
 	fmt.Println(out)
 	if rep.Stats != nil {

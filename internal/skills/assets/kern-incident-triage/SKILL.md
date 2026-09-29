@@ -1,7 +1,7 @@
 ---
 name: kern-incident-triage
 description: >-
-  Triage runtime crashes, errors, or production logs by compressing logs, correlating stack traces to AST symbols, creating reproduction tests, and auto-repairing.
+Use when investigating any crash, panic, error log, stack trace, or failing test. Compress the raw log with kern_optimize_log, run kern ops triage to map stack frames to AST symbols, auto-synthesize a minimal failing reproduction test in an ephemeral worktree, and auto-repair the defect.
 ---
 
 <!-- canonical source: internal/skills/assets/kern-incident-triage/SKILL.md; copies must stay identical — run kern setup to sync -->

@@ -38,6 +38,14 @@ type NetworkPolicy struct {
 	// sensitive-path blocklist is not reflected here). Set by runGuarded
 	// after the run, mirroring Isolated.
 	FSConfined bool
+	// LoopbackBindAllowed reports whether the run's darwin seatbelt profile
+	// was relaxed to permit binding/accepting on loopback — loopback IPs AND
+	// unix-domain sockets — (verify-path test runs;
+	// RunOptions.AllowLoopbackBind). Linux runs report false — the netns
+	// wrap already brings lo up, so the relaxation is a no-op there.
+	// Set by runGuarded after the run, mirroring Isolated/FSConfined, and
+	// surfaced in Summary so the relaxation is never silent.
+	LoopbackBindAllowed bool
 	// Hits lists the network-error signatures matched in the run's output
 	// (deduplicated, capped). Presence hints at network activity — or at
 	// least attempts — during the run.
@@ -139,26 +147,49 @@ func fsConfinementEnabled() bool {
 // sensitive-path blocklist denied. SBPL is last-match-wins: the trailing
 // loopback allow re-permits loopback outbound on top of the blanket deny,
 // and the trailing file denies override the leading (allow default) for
-// exactly the blocklisted paths.
+// exactly the blocklisted paths. The default shape (no loopback-bind
+// relaxation) is what the availability probe and plain Run use.
 func seatbeltProfile() string {
-	home := ""
-	if h, err := os.UserHomeDir(); err == nil {
-		// The as-written $HOME is passed through as-is: seatbeltProfileFor
-		// denies BOTH the as-written and the canonical spelling of every
-		// blocklisted path, so canonicalizing here would throw away the
-		// alias the kernel may match on (R2 root cause).
-		home = h
-	}
-	return seatbeltProfileFor(home, fsConfinementEnabled())
+	return seatbeltProfileFor(homeDir(), fsConfinementEnabled(), false)
 }
 
-// seatbeltProfileFor builds the SBPL text for a given home directory and
-// confinement toggle. Pure and deterministic so tests can pin the exact
-// profile shape: blocklist paths present, (allow default) preserved, the
-// real $HOME substituted into every subpath rule.
-func seatbeltProfileFor(home string, fsConfine bool) string {
+// homeDir returns the operator's home directory as written in $HOME (not
+// canonicalized). seatbeltProfileFor denies BOTH the as-written and the
+// canonical spelling of every blocklisted path, so canonicalizing here
+// would throw away the alias the kernel may match on (R2 root cause).
+func homeDir() string {
+	if h, err := os.UserHomeDir(); err == nil {
+		return h
+	}
+	return ""
+}
+
+// seatbeltProfileFor builds the SBPL text for a given home directory,
+// confinement toggle, and loopback-bind relaxation. Pure and deterministic
+// so tests can pin the exact profile shape: blocklist paths present,
+// (allow default) preserved, the real $HOME substituted into every subpath
+// rule. allowLoopbackBind appends the loopback-bind allows (loopback IP
+// bind/inbound plus unix-domain-socket bind/inbound/outbound — the verify
+// path binds both classes: httptest servers on 127.0.0.1, and the relay's
+// .kern/events.sock / MCP UDS transport) AFTER the outbound loopback allow
+// and BEFORE the FS blocklist (so the blocklist's denies keep
+// last-match-wins precedence); false keeps the output byte-identical to the
+// pre-option shape. Unix sockets are local by construction, so the UDS
+// rules never open a cross-machine egress path.
+func seatbeltProfileFor(home string, fsConfine bool, allowLoopbackBind bool) string {
 	var b strings.Builder
 	b.WriteString("(version 1)\n(allow default)\n(deny network*)\n(allow network-outbound (remote ip \"localhost:*\"))")
+	if allowLoopbackBind {
+		// Verify-path test runs (RunWithOptions with AllowLoopbackBind) need
+		// to bind/accept loopback listeners (httptest.NewServer etc.) and
+		// unix-domain sockets (the relay's .kern/events.sock, the MCP UDS
+		// transport), which the blanket `(deny network*)` blocks. Relax the
+		// profile to permit local binds/inbound/outbound for BOTH classes —
+		// matching what the Linux netns wrap (lo up) already provides —
+		// while external egress stays denied.
+		b.WriteString("\n(allow network-bind (local ip \"localhost:*\"))\n(allow network-inbound (local ip \"localhost:*\"))")
+		b.WriteString("\n(allow network-bind (local unix-socket))\n(allow network-inbound (local unix-socket))\n(allow network-outbound (remote unix-socket))")
+	}
 	if fsConfine && home != "" {
 		for _, p := range sensitivePathDirs {
 			joined := filepath.Join(home, p)
@@ -186,17 +217,23 @@ func seatbeltProfileFor(home string, fsConfine bool) string {
 // `unshare` user+net namespace). ok=false when the host cannot isolate.
 // The probe's availability and this prefix come from the same mechanism:
 // if networkIsolationAvailable() returned true, the prefix executes.
-// Loopback stays reachable in both (httptest servers); Linux brings the
-// new namespace's lo up best-effort. On darwin the generated profile also
-// carries the sensitive-path read blocklist (Stage 1 FS confinement) when
+// Outbound loopback is allowed on BOTH platforms (the darwin profile's
+// trailing outbound-localhost allow; Linux brings the new namespace's lo up
+// best-effort). Binding/accepting loopback listeners — loopback IPs AND
+// unix-domain sockets — is allowed by default only on Linux (lo up); on
+// darwin it requires the verify-path option (allowLoopbackBind —
+// RunWithOptions with AllowLoopbackBind) — the old "Loopback stays
+// reachable in both (httptest servers)" claim was false on darwin for the
+// bind half. On darwin the generated profile also carries the
+// sensitive-path read blocklist (Stage 1 FS confinement) when
 // KERN_SANDBOX_FS_CONFINEMENT is on (the default).
-func netIsolationPrefix() (prefix []string, ok bool) {
+func netIsolationPrefix(allowLoopbackBind bool) (prefix []string, ok bool) {
 	if runtime.GOOS == "darwin" {
 		bin, err := exec.LookPath("sandbox-exec")
 		if err != nil {
 			return nil, false
 		}
-		return []string{bin, "-p", seatbeltProfile()}, true
+		return []string{bin, "-p", seatbeltProfileFor(homeDir(), fsConfinementEnabled(), allowLoopbackBind)}, true
 	}
 	bin, err := exec.LookPath("unshare")
 	if err != nil {
@@ -272,8 +309,15 @@ func (p *NetworkPolicy) Summary() string {
 		// Linux with a working netns chain but no Landlock: the sensitive-path
 		// blocklist is OFF (kernel too old, probe failed, confinement disabled)
 		// — surface the degradation explicitly so operators do not mistake
-		// "isolated" for "secret-blocklisted".
-		isolation += "; fs confinement unavailable (degraded)"
+		// "isolated" for "secret-blocklisted". The reason names the platform
+		// bound so the caveat cannot read as a project/run defect (D5).
+		isolation += "; fs confinement (Landlock) is Linux-only — sensitive-path blocklist inactive on this platform"
+	}
+	if p.LoopbackBindAllowed {
+		// The darwin seatbelt profile was relaxed to permit loopback
+		// bind/inbound — loopback IPs and unix-domain sockets — for this
+		// run (verify-path tests). Never silent.
+		isolation += "; loopback binds allowed (incl. unix sockets)"
 	}
 	if len(p.Hits) == 0 {
 		return isolation + "; no network-error signatures in output"

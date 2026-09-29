@@ -354,8 +354,20 @@ func renderWhatItCalls(b *strings.Builder, items []string) {
 func renderImpactText(r domain.ImpactReport) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "IMPACT for: %s\n", r.Target)
-	fmt.Fprintf(&b, "Risk: %s\n", r.Risk)
-	fmt.Fprintf(&b, "What calls this: %d\n", len(r.WhoCalls))
+	// Risk carries the driver count as a parenthetical (P2): the bare tier
+	// saturates in dense repos (nearly every non-leaf symbol is "high"), so
+	// the number that produced the tier differentiates a 134-dependent hub
+	// from a 4-dependent leaf. RiskDetail is set by classifyCriticality and
+	// is empty for "low" (and for reports built without it).
+	if r.RiskDetail != "" {
+		fmt.Fprintf(&b, "Risk: %s (%s)\n", r.Risk, r.RiskDetail)
+	} else {
+		fmt.Fprintf(&b, "Risk: %s\n", r.Risk)
+	}
+	// WhoCalls counts graph nodes with a direct "calls" edge into the target
+	// (Graph.WhoCallsPrecise) — a different universe from explore's caller
+	// count (unique simple names), so the label says which one this is (P2).
+	fmt.Fprintf(&b, "What calls this: %d (graph nodes)\n", len(r.WhoCalls))
 	renderImpactList(&b, r.WhoCalls)
 	fmt.Fprintf(&b, "What it calls: %d\n", len(r.WhatItCalls))
 	renderWhatItCalls(&b, r.WhatItCalls)

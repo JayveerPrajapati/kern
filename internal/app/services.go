@@ -149,7 +149,9 @@ type Loop interface {
 // engine and gates Task completion on the verdict. Implemented by *TaskService.
 type Verification interface {
 	// Verify runs verification and returns the Task plus the result.
-	Verify(types []string) (*agent.Task, verification.VerificationResult, error)
+	// Options (e.g. verification.FullTests for the complete test suite) are
+	// forwarded to the engine.
+	Verify(types []string, opts ...verification.Option) (*agent.Task, verification.VerificationResult, error)
 }
 
 // Incident is the incident-management contract service. It correlates alerts

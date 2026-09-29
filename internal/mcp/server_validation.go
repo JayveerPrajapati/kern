@@ -93,7 +93,7 @@ func (s *Server) toolCallResponse(id json.RawMessage, params json.RawMessage) an
 	// so provenance is stamped from this call's index, never another's. It is
 	// scoped here instead of on the Server struct to avoid cross-talk between
 	// concurrent tool calls.
-	scope := &indexScope{}
+	scope := &indexScope{token: token}
 	ctx = context.WithValue(ctx, indexScopeKey{}, scope)
 	s.registerInflight(key, cancel)
 	defer func() {
@@ -346,6 +346,17 @@ func (s *Server) promptGetResponse(id json.RawMessage, params json.RawMessage) a
 	}
 }
 
+// progressToken returns the client's MCP progress token for the current tool
+// call, or "" when the client did not opt in (no _meta.progressToken). Slow
+// handlers (kern_verify) use it to emit phase-level progress notifications;
+// the empty-token case is a no-op in s.progress (M4).
+func progressToken(ctx context.Context) string {
+	if scope, ok := ctx.Value(indexScopeKey{}).(*indexScope); ok {
+		return scope.token
+	}
+	return ""
+}
+
 // argString reads an optional scalar string tool argument. Missing or null
 // returns "". Accepted input shapes follow the documented coercion contract
 // (D6): strings verbatim (trimmed), JSON numbers to their canonical string
@@ -411,7 +422,18 @@ func validateStringArgs(name string, args map[string]any) error {
 			switch v.(type) {
 			case string, float64, int, bool:
 				// Accepted scalar coercions (int covers Go-API callers; JSON
-				// numbers always decode to float64 in this server).
+				// numbers always decode to float64 in this server). The D6
+				// contract coerce numbers to canonical string form for genuine
+				// string args (plugin callers legitimately pass numeric strings)
+				// — but a JSON NUMBER for the path-typed "root" argument is a
+				// client bug, not a path: coercing it to "12345" would resolve
+				// silently relative to the workspace root (dogfooding D-LOW).
+				if key == "root" {
+					switch v.(type) {
+					case float64, int:
+						return fmt.Errorf("argument %q for tool %s: expected a path string, got a number", key, name)
+					}
+				}
 			case nil:
 				return fmt.Errorf("argument %q for tool %s: expected a string, got null", key, name)
 			case []string, []any:

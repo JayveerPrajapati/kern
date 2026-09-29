@@ -113,7 +113,7 @@ var commandTable = map[string]commandEntry{
 		// the optimize.Log path with its log-specific flags.
 		runOptimize("optimize", append([]string{"--kind", "log"}, rest...))
 		return 0
-	}, help: "compress noisy logs", usage: "usage: kern log [flags]  (alias of optimize --kind log)\n  options:\n    --context-after    lines of context after a removed region\n    --context-before   lines of context before a removed region\n    --profile          profile name\n    --root             project root (default: .)"},
+	}, help: "compress noisy logs", usage: "usage: kern log [<text|file>] [flags]  (alias of optimize --kind log)\n  <text|file>          literal log text, an existing file path, or '-' for stdin\n                       (default: stdin)\n  options:\n    --context-after    lines of context after a removed region\n    --context-before   lines of context before a removed region\n    --profile          profile name\n    --root             project root (default: .)"},
 	"tokens": {category: "compression", run: func(cmd string, rest []string) int {
 		runTokens(rest)
 		return 0
@@ -121,7 +121,7 @@ var commandTable = map[string]commandEntry{
 	"setup": {category: "wiring", run: func(cmd string, rest []string) int {
 		runSetup(rest)
 		return 0
-	}, help: "wire agents/MCP/hooks", usage: "usage: kern setup [flags]\n  options:\n    --agents\n    --agents-md        repo AGENTS.md variant: full (default) or thin (full rules then live in global instructions)\n    --check            check mode\n    --detect           detect mode\n    --global           apply at global/user scope\n    --global-rules     manage kern rules in each host's GLOBAL instructions (~/.claude/CLAUDE.md, ~/.codex/AGENTS.md, ~/.config/opencode/AGENTS.md)\n    --root             project root (default: .)\n    --verify           verify mode"},
+	}, help: "wire agents/MCP/hooks", usage: "usage: kern setup [flags]\n  options:\n    --agents\n    --agents-md        repo AGENTS.md variant: thin (default, wiring-only; full rules then live in global instructions) or full\n    --check            check mode\n    --detect           detect mode\n    --global           apply at global/user scope\n    --global-rules     manage kern rules in each host's GLOBAL instructions (~/.claude/CLAUDE.md, ~/.codex/AGENTS.md, ~/.config/opencode/AGENTS.md)\n    --root             project root (default: .)\n    --verify           verify mode"},
 	"buddy": {category: "wiring", run: func(cmd string, rest []string) int {
 		runBrief(rest)
 		return 0
@@ -141,7 +141,7 @@ var commandTable = map[string]commandEntry{
 	"skills": {category: "wiring", run: func(cmd string, rest []string) int {
 		runSkills(rest)
 		return 0
-	}, help: "list, show, or install agent skills", usage: "usage: kern skills show <skill-name>"},
+	}, help: "list, show, or install agent skills", usage: "usage: kern skills <list|show|install|check>\n  list              list all available skills (default)\n  show <name>       display the complete runbook for a skill\n  install [--global] deploy skills to project and/or global agent directories\n  check             check installation status across agent targets"},
 	"prompt": {category: "prompt", run: func(cmd string, rest []string) int {
 		runPrompt(rest)
 		return 0
@@ -181,7 +181,7 @@ var commandTable = map[string]commandEntry{
 	"precache": {category: "search", run: func(cmd string, rest []string) int {
 		runPrecache(rest)
 		return 0
-	}, help: "warm caches", usage: "usage: kern precache [flags]\n  options:\n    --once             single pass, no watch (default: watch mode — runs until interrupted)"},
+	}, help: "warm caches", usage: "usage: kern precache [flags]\n  options:\n    --watch            keep running (daemon; default: single pass)\n    --once             single pass (default; kept for compatibility)\n    --interval         seconds between passes (daemon only; default 60)"},
 	"schema": {category: "prompt", run: func(cmd string, rest []string) int {
 		runSchema(rest)
 		return 0
@@ -222,7 +222,7 @@ var commandTable = map[string]commandEntry{
 	"agents": {category: "wiring", run: func(cmd string, rest []string) int {
 		runAgents(rest)
 		return 0
-	}, help: "wired agents + LLM provider priority", usage: "usage: kern agents [--probe] [--json] [--root ROOT]\n  options:\n    --probe            live-test each installed LLM provider (bounded: ~20s per provider)\n    --json             emit JSON\n    --root             project root (default: .)"},
+	}, help: "wired agents + LLM provider priority", usage: "usage: kern agents [--probe] [--json] [--root ROOT]\n  options:\n    --probe            live-test each installed LLM provider (bounded: 60s per provider; KERN_PROBE_TIMEOUT overrides)\n    --json             emit JSON\n    --root             project root (default: .)"},
 	"register-host-sampler": {category: "wiring", run: func(cmd string, rest []string) int {
 		return runRegisterHostSampler(rest)
 	}, help: "register/unregister a host sampler command for LLM delegation (hosts that do not announce MCP sampling)", usage: "usage: kern register-host-sampler [command] [--key K] [--timeout S] [--model M]\n  options:\n    --key               registration key (default: this connection's slot)\n    --timeout           per-call timeout in seconds (default 180)\n    --model             optional model label"},
@@ -253,7 +253,7 @@ var commandTable = map[string]commandEntry{
 	"plan": {category: "analysis", run: func(cmd string, rest []string) int {
 		runAnalyze(cmd, rest)
 		return 0
-	}, help: "analyze a proposed change", usage: "usage: kern plan <change> [--root ROOT]\n  options:\n    --root             project root (default: .)\n    --task"},
+	}, help: "analyze a proposed change", usage: "usage: kern plan <change> [--root ROOT]\n  options:\n    --json             emit the structured plan as JSON\n    --root             project root (default: .)\n    --task"},
 	"team": {category: "autonomy", run: func(cmd string, rest []string) int {
 		runTeam(rest)
 		return 0
@@ -286,7 +286,7 @@ var commandTable = map[string]commandEntry{
 	"execute": {category: "exec", run: func(cmd string, rest []string) int {
 		runExecute(rest)
 		return 0
-	}, help: "apply a patch in a sandbox", usage: "usage: kern execute <patch|patch-file> [--root ROOT]\n  options:\n    --root             project root (default: .)"},
+	}, help: "apply a patch in a sandbox only — nothing is applied to the working tree", usage: "usage: kern execute <patch|patch-file> [--root ROOT]\n  options:\n    --root             project root (default: .)\n  note: sandbox-only — the patch is applied and verified in an isolated\n        worktree; nothing is applied to the working tree"},
 	"incident": {category: "evidence", run: func(cmd string, rest []string) int {
 		runIncident(rest)
 		return 0
@@ -311,7 +311,7 @@ var commandTable = map[string]commandEntry{
 	"impact": {category: "analysis", run: func(cmd string, rest []string) int {
 		runImpact(rest)
 		return 0
-	}, help: "blast radius of a change", usage: "usage: kern impact <change> [kind] [new-target] [--root ROOT]\n  options:\n    --json             emit JSON output\n    --precision        precision mode\n    --risk             render the governance risk assessment (analyze --lens risk output)\n    --root             project root (default: .)"},
+	}, help: "blast radius of a change", usage: "usage: kern impact <change> [kind] [new-target] [--root ROOT]\n  options:\n    --json             emit JSON output\n    --precision        precision mode\n    --risk             render the governance risk assessment (analyze --lens risk output)\n    --root             project root (default: .)\n    --runtime          fold runtime evidence (data stores, incidents, architecture rules) into the report"},
 	"correlate": {category: "evidence", run: func(cmd string, rest []string) int {
 		runCorrelate(rest)
 		return 0
@@ -362,7 +362,7 @@ var commandTable = map[string]commandEntry{
 	"verify": {category: "verification", run: func(cmd string, rest []string) int {
 		runVerify(rest)
 		return 0
-	}, help: "verify a change", usage: "usage: kern verify [<types>|<file|->] [flags]\n  high-level: kern verify [build,test,security,architecture,dependency,cve,license,secrets] [--types X] (default build,test; needs KERN_ALLOW_EXEC=1)\n  compliance: kern verify --cve --license --secrets (opt-in; each flag adds its check to the run)\n  claims: kern verify <file|-> [root]\n  options:\n    --types            explicit check types (alias for positional <types>; matches MCP kern_verify)\n    --cve              run the govulncheck vulnerability scan (SKIPPED when govulncheck is not installed)\n    --license          classify module licenses from go.mod/vendor (deterministic, no network)\n    --secrets          scan git history for committed secrets (masked snippets only)\n    --eval             evaluate a directory of cases\n    --json             emit JSON output\n    --root             project root (default: .)\n    --scan             scan path\n    --skill            skill directory\n    --verify-pipeline  silent-orchestrator pipeline verify\n    --verify-silent    silent verify\n    --verify-token-reduction token-reduction verify"},
+	}, help: "verify a change", usage: "usage: kern verify [<types>|<file|->] [flags]\n  high-level: kern verify [build,test,security,architecture,dependency,cve,license,secrets] [--types X] (default build,test; needs KERN_ALLOW_EXEC=1)\n  compliance: kern verify --cve --license --secrets (opt-in; each flag adds its check to the run)\n  claims: kern verify <file|-> [root]\n  options:\n    --types            explicit check types (alias for positional <types>; matches MCP kern_verify)\n    --short            run the test step with `go test -short` (DEFAULT; fast agent-safe suite, ~1min)\n    --full             run the COMPLETE test suite `go test -v ./...` (slower, ~4min; wins over --short)\n    --cve              run the govulncheck vulnerability scan (SKIPPED when govulncheck is not installed)\n    --license          classify module licenses from go.mod/vendor (deterministic, no network)\n    --secrets          scan git history for committed secrets (masked snippets only)\n    --eval             evaluate a directory of cases\n    --json             emit JSON output\n    --root             project root (default: .)\n    --scan             scan path\n    --skill            skill directory\n    --verify-pipeline  silent-orchestrator pipeline verify\n    --verify-silent    silent verify\n    --verify-token-reduction token-reduction verify\n  test-step override: KERN_VERIFY_TEST env or verify.test in .kern/config.json replaces the test command verbatim (wins over --short/--full)\n  note: the full report prints to stdout by design (a FAIL verdict exits 1 as the CI signal)"},
 	"check-draft": {category: "verification", run: func(cmd string, rest []string) int {
 		return runCheckDraft(rest)
 	}, help: "validate draft code against the index", usage: "usage: kern check-draft <file|-> [root] [--lang LANG] [--file F]\n  options:\n    --file             draft source file (default: positional arg or stdin)\n    --lang             language\n    --root             project root (default: .)"},
@@ -418,8 +418,16 @@ var commandTable = map[string]commandEntry{
 		// Blueprint change-governance git hooks (pre-commit/pre-push). The
 		// Blueprint CLI lives inside kern (kern check / kern ci / kern sec),
 		// so `kern install hook` replaces the standalone `blueprint install hook`.
+		// Audit L16: a bare `kern install` must not leak the internal Blueprint
+		// usage text ("Usage: blueprint install <hook>") — print user-facing
+		// usage instead. The hook subcommand still delegates to the engine.
+		if len(rest) == 0 {
+			fmt.Fprintln(os.Stderr, "usage: kern install hook [pre-commit|pre-push|all]")
+			fmt.Fprintln(os.Stderr, "  installs the change-governance git hooks (pre-commit: fast staged validation; pre-push: blocking staged validation)")
+			return 2
+		}
 		return bpcli.RunInstall(rest)
-	}, help: "install Blueprint change-governance git hooks (pre-commit/pre-push)", usage: "usage: kern install [flags]"},
+	}, help: "install Blueprint change-governance git hooks (pre-commit/pre-push)", usage: "usage: kern install hook [pre-commit|pre-push|all]\n  installs the change-governance git hooks (pre-commit: fast staged validation;\n  pre-push: blocking staged validation).\n  options:\n    --global           install the hooks globally (core.hooksPath)"},
 	"blueprint": {category: "governance", run: func(cmd string, rest []string) int {
 		return runBlueprint(rest)
 	}, help: "blueprint change-governance suite (check/diff-gate/fix/metrics/request-approval/reject/verify-receipt/ci/install)", usage: "usage: kern blueprint <subcommand> [args]\n  subcommands (each also runs standalone as kern <subcommand>):\n    check             validate staged changes against policy\n    diff-gate         deterministic diff gate (advisory; --blocking for CI)\n    fix               validate agent-proposed fixes in an isolated worktree\n    metrics           show local change-governance validation metrics\n    request-approval  request human approval for a high-risk change\n    reject            reject a pending approval request\n    verify-receipt    verify a tamper-evident CI receipt\n    ci                CI change-governance validation (base vs head)\n    install           install Blueprint change-governance git hooks"},
@@ -442,7 +450,7 @@ var commandTable = map[string]commandEntry{
 	"hook": {category: "git", run: func(cmd string, rest []string) int {
 		runHook(rest)
 		return 0
-	}, help: "install hooks", usage: "usage: kern hook <install|diff|store|claude-post|claude-prompt|gemini-after|gemini-prompt> [root] [--range a..b]\n  options:\n    --range            line range a..b"},
+	}, help: "install/uninstall git hooks", usage: "usage: kern hook <install|uninstall|diff|store|claude-post|claude-prompt|gemini-after|gemini-prompt> [root] [--range a..b] [--global]\n  options:\n    --range            line range a..b\n    --global           hook uninstall: unset global core.hooksPath (kern's ~/.kern/git-hooks only)"},
 	"commitmsg": {category: "git", run: func(cmd string, rest []string) int {
 		runCommitmsg(rest)
 		return 0
@@ -456,7 +464,7 @@ var commandTable = map[string]commandEntry{
 		return 0
 	}, help: "semantic cache stats", usage: "usage: kern semcache <list|sim|stats|clear>\n  subcommands:\n    list <prompt|log>   show stored inputs\n    sim <textA> <textB> show Jaccard similarity\n    stats               show per-namespace hit/miss/eviction/savings accounting\n    clear [namespace]   wipe a namespace (or all)\n  options:\n    --json             emit JSON output"},
 	"stats":  {category: "compression", run: runStatsEntry, help: "token savings", usage: "usage: kern stats [flags]\n  options:\n    --days             days back (default 7)\n    --session          filter by session id\n    --json             emit JSON output\n    --by-tool          per-tool ledger: calls, tokens returned, tokens saved, cost saved\n    --by-agent         per-agent ledger: calls, tokens returned, tokens saved, cost saved (agent_id from MCP calls; others under (unattributed))"},
-	"diff":   {category: "compression", run: runStatsEntry, help: "", usage: "usage: kern diff [flags]  (alias of stats)\n  options:\n    --limit            max entries (default 20)\n    --session          filter by session id\n    --json             emit JSON output"},
+	"diff":   {category: "compression", run: runStatsEntry, help: "recent operations ledger (see stats for the 7-day summary)", usage: "usage: kern diff [--limit N] [--session S] [--json]\n  renders the recent operations ledger — one line per recorded compression run,\n  newest first; 'kern stats' renders the 7-day summary.\n  options:\n    --limit            max entries (default 20)\n    --session          filter by session id\n    --json             emit JSON output"},
 	"export": {category: "compression", run: runStatsEntry, help: "", usage: "usage: kern export [flags]  (alias of stats)"},
 	"mcp": {category: "servers", run: func(cmd string, rest []string) int {
 		runMCP(rest)
@@ -559,7 +567,7 @@ var commandTable = map[string]commandEntry{
 	"review": {category: "review", run: func(cmd string, rest []string) int {
 		runChanges(cmd, rest)
 		return 0
-	}, help: "review context for changed files", usage: "usage: kern review [flags]  (alias of changes)\n  options:\n    --file             file path\n    --json             emit JSON output\n    --lens             analysis lens\n    --max              token budget for the review output\n    --profile          profile name\n    --range            line range a..b\n    --root             project root (default: .)\n    --runtime"},
+	}, help: "review context for changed files", usage: "usage: kern review [flags]  (alias of changes)\n  exits 3 when changed files carry risk (the report is still on stdout)\n  options:\n    --file             file path\n    --json             emit JSON output\n    --lens             analysis lens\n    --max              token budget for the review output\n    --profile          profile name\n    --range            line range a..b\n    --root             project root (default: .)\n    --runtime"},
 	"hubs": {category: "graph", run: func(cmd string, rest []string) int {
 		runHubs(rest)
 		return 0
@@ -741,7 +749,7 @@ var commandTable = map[string]commandEntry{
 	}, help: "repo fingerprint", usage: "usage: kern fingerprint [flags]\n  options:\n    --file             file path\n    --json             emit JSON output\n    --root             project root (default: .)"},
 	"authorize-context": {category: "context", run: func(cmd string, rest []string) int {
 		return runAuthorizeContext(rest)
-	}, help: "compute authorized context", usage: "usage: kern authorize-context [flags]"},
+	}, help: "compute authorized context", usage: "usage: kern authorize-context -agent <id> -task <task> [--deny-path ...] [--symbol SYM] [--root ROOT] [--json]\n  options:\n    --agent            agent ID to authorize (required)\n    --task             task ID the authorization is scoped to (required)\n    --deny-path        path prefix denied by the task scope (repeatable)\n    --symbol           optional substring filter applied to allowed symbols\n    --root             project root (default: .)\n    --json             emit JSON (default: true)"},
 	"do": {category: "autonomy", run: func(cmd string, rest []string) int {
 		// `kern do "<intent>"` — single-entry autonomous coding (F-12/F-36/F-50).
 		// Runs the closed loop at L2 (sandbox modifications) with the autonomous

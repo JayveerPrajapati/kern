@@ -36,13 +36,15 @@ func collectEntityHits(g *intel.Graph, symbols []string) []entityAgg {
 		return nil
 	}
 	files := entityFiles(g)
+	// Batch the twin queries: twin.EntitiesMany indexes the graph once and
+	// answers every symbol against it, so the overlay for a hub's full
+	// blast radius (thousands of symbols) costs one graph scan plus
+	// per-symbol connection lookups instead of one full graph scan per
+	// symbol (which made kern impact take tens of seconds).
+	entsList := twin.EntitiesMany(g, symbols)
 	byKey := map[string]*entityAgg{}
-	for _, sym := range symbols {
-		ents, err := twin.Entities(g, sym)
-		if err != nil {
-			continue // symbol not in the graph — no twin connections
-		}
-		for _, e := range ents {
+	for i, sym := range symbols {
+		for _, e := range entsList[i] {
 			file := files[e.Kind+"\x00"+e.Name]
 			key := e.Kind + "\x00" + e.Name + "\x00" + file
 			agg := byKey[key]
@@ -121,7 +123,9 @@ func sortedUnique(m map[string]bool) []string {
 // every entity node in the graph. The file comes from the entity's own
 // metadata when it carries one (API registration file), falling back to its
 // twin "defined_in" edge to a file node; entities without a known file map to
-// "".
+// "". When several nodes share the same key (e.g. the same route registered
+// in different files), the lexicographically smallest file wins, keeping the
+// map deterministic regardless of node order.
 func entityFiles(g *intel.Graph) map[string]string {
 	fileByID := map[string]string{}
 	for _, n := range g.Nodes {
@@ -155,7 +159,14 @@ func entityFiles(g *intel.Graph) map[string]string {
 	out := map[string]string{}
 	for id, file := range fileByID {
 		if key, ok := keyByID[id]; ok {
-			out[key] = file
+			// Several nodes can share a key (e.g. the same route registered
+			// in different files). Keep the lexicographically smallest file
+			// so the map is independent of Go's randomized map iteration
+			// order — otherwise the "(file)" suffix on affected-entity rows
+			// flickers between runs.
+			if cur, seen := out[key]; !seen || file < cur {
+				out[key] = file
+			}
 		}
 	}
 	return out

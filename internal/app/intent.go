@@ -1,11 +1,27 @@
 package app
 
 import (
+	"regexp"
 	"strings"
 	"unicode"
 
 	"github.com/JayveerPrajapati/kern/internal/domain"
 )
+
+// extractServiceRe matches "extract <up to 2 filler words> service(s)" — e.g.
+// "extract the payment service", "extract a payment service". The regex
+// replaces the old literal "extract service" phrase and aligns the app-side
+// classifier with agents.ClassifyTask on the same phrasing (comment-only
+// alignment; no shared code).
+var extractServiceRe = regexp.MustCompile(`extract\s+(\w+\s+){0,2}services?\b`)
+
+// patchExecRe matches patch-execution phrasings: "apply the patch", "execute
+// this patch", plurals, with or without the article. Bare "execute"/"apply"
+// are deliberately excluded — "execute the tests" is caught by the earlier
+// TEST branch and "execute a search" falls through to UNDERSTAND. The
+// `patch(?:es)?` alternation is deliberate: `patches?` would require the "e"
+// before "s" and never match the singular "patch".
+var patchExecRe = regexp.MustCompile(`(?:apply|execute)\s+(?:the\s+|this\s+)?patch(?:es)?\b`)
 
 // CompileIntent classifies a raw intent string into a CompiledIntent with an
 // IntentType, objective, target, scope, and environment. .
@@ -20,13 +36,16 @@ import (
 // - "test" → TEST
 // - "deploy"/"release" → DEPLOY
 // - "audit"/"who changed"/"what did" → AUDIT
+// A request matching no known keyword defaults to UNDERSTAND — the safest
+// direction: a misclassified analysis request must never compile execution
+// capabilities (the previous CODE_CHANGE default was the least safe).
 // The compiled environment is derived from the intent type: production
 // operations (DEPLOY, INCIDENT) compile to "production"; everything else
 // defaults to "development". Scope is "repository".
 func CompileIntent(raw string) domain.CompiledIntent {
 	raw = strings.TrimSpace(raw)
 	lower := strings.ToLower(raw)
-	it := domain.IntentCodeChange // default
+	it := domain.IntentUnderstand // default — safest (same philosophy as F-RN1)
 
 	switch {
 	case containsAny(lower, "explain", "understand", "what does", "how does", "describe"):
@@ -41,7 +60,7 @@ func CompileIntent(raw string) domain.CompiledIntent {
 		it = domain.IntentDeploy
 	case containsAny(lower, "incident", "alert", "failing", "down", "outage"):
 		it = domain.IntentIncident
-	case containsAny(lower, "modernize", "split", "extract service", "monolith"):
+	case containsAny(lower, "moderniz", "modernis", "split", "monolith") || extractServiceRe.MatchString(lower):
 		it = domain.IntentModernization
 	case containsAny(lower, "security", "vulnerab", "secret", "cve"):
 		it = domain.IntentSecurity
@@ -51,7 +70,7 @@ func CompileIntent(raw string) domain.CompiledIntent {
 		it = domain.IntentTest
 	case containsAny(lower, "audit", "who changed", "what did", "governance"):
 		it = domain.IntentAudit
-	case containsAny(lower, "add", "implement", "fix", "refactor", "remove", "update", "change", "modify"):
+	case containsAny(lower, "add", "implement", "fix", "refactor", "remove", "update", "change", "modify") || patchExecRe.MatchString(lower):
 		it = domain.IntentCodeChange
 	}
 
@@ -263,8 +282,19 @@ func isWordChar(r rune) bool {
 	return r == '_' || unicode.IsLetter(r) || unicode.IsDigit(r)
 }
 
+// stopwordTargets are words that never name a target symbol (pronouns and
+// articles). When the fallback picks the last word, a trailing pronoun
+// ("…and report on it") must not be reported as the target — an empty
+// target is honest ("nothing meaningful extracted") instead of wrong.
+var stopwordTargets = map[string]bool{
+	"it": true, "this": true, "that": true, "them": true,
+	"the": true, "a": true, "an": true, "to": true, "of": true,
+}
+
 // extractTarget heuristically extracts the target symbol/service from the
-// intent text (the first CamelCase word or word after "to"/"in").
+// intent text (the first CamelCase word or word after "to"/"in"). When no
+// meaningful token is found, the fallback returns "" instead of a trailing
+// pronoun/stopword (e.g. "it" in "…and report on it").
 func extractTarget(raw string) string {
 	words := strings.Fields(raw)
 	for i, w := range words {
@@ -281,7 +311,10 @@ func extractTarget(raw string) string {
 		}
 	}
 	if len(words) > 0 {
-		return strings.TrimRight(words[len(words)-1], ".,;:!?")
+		last := strings.TrimRight(words[len(words)-1], ".,;:!?")
+		if !stopwordTargets[strings.ToLower(last)] {
+			return last
+		}
 	}
 	return ""
 }

@@ -178,9 +178,9 @@ type typeDecl struct {
 }
 
 // extractForeign extracts symbols, call edges and inheritance edges from a
-// non-Go source file. When built with -tags treesitter, it uses tree-sitter
-// for precise AST-based extraction; otherwise it falls back to regex-based
-// heuristics.
+// non-Go source file. In the default build (tree-sitter compiled in) it uses
+// tree-sitter for precise AST-based extraction; under -tags notreesitter it
+// falls back to regex-based heuristics.
 
 var (
 	// reJavaImport matches a single-line Java import: optional `static`,
@@ -244,7 +244,7 @@ func extractForeign(rel string, src []byte, lang string) ([]Symbol, map[string][
 	// call edges precisely; entry points (routes, annotations) still come from
 	// the regex entry rules, so merge them in to keep routes searchable.
 	imports := foreignImports(src, lang)
-	//nolint:staticcheck // SA4023: tree-sitter branch only reachable with -tags treesitter
+	//nolint:staticcheck // SA4023: tree-sitter branch only reachable in the default (tree-sitter) build
 	if syms, calls, inherits, pkg, err := tsExtract(rel, src, lang); err == nil {
 		if pkg != nil {
 			pkg.Imports = imports
@@ -275,12 +275,14 @@ func extractForeign(rel string, src []byte, lang string) ([]Symbol, map[string][
 }
 
 // extractForeignRegex is the pure regex/heuristic extractor for foreign
-// languages — the default path when tree-sitter is not compiled in. It is
+// languages — the path used by the -tags notreesitter build. It is
 // split out of extractForeign so the parity gate (internal/index/parity_test.go,
-// -tags treesitter) can compare it directly against tsExtract on the shared
-// fixture corpus: both extractors must agree on symbol sets, edge sets and
-// confidences, with only documented tolerances where regex legitimately
-// degrades.
+// default tree-sitter build) can compare it directly against tsExtract on the
+// shared fixture corpus: the regex graph is a documented lower-fidelity
+// subset of the tree-sitter graph — shared symbols and edges must agree with
+// regex confidence <= ts confidence, tree-sitter may add precision the regex
+// rules cannot express, and regex-only output is limited to documented
+// artifacts (see the tolerance tables in parity_test.go).
 func extractForeignRegex(rel string, src []byte, lang string) ([]Symbol, map[string][]CallEdge, map[string][]string, *Pkg, error) {
 	imports := foreignImports(src, lang)
 	src = sfcScript(rel, src)
@@ -392,6 +394,17 @@ func extractForeignRegex(rel string, src []byte, lang string) ([]Symbol, map[str
 // Shared by the regex and tree-sitter extractors so the parity gate stays
 // balanced: both sides gain identical file-owned edges.
 func attributeTopLevelCalls(rel string, src []byte, lang string, syms []Symbol, calls map[string][]CallEdge) map[string][]CallEdge {
+	// Documentation files (markdown/HTML) must never own call edges:
+	// a prose page is not code, so an identifier mention ("add", "save") in
+	// a doc page is not a caller. Without this guard, html/md files — whose
+	// bodies are mostly outside symbol coverage — got top-level-call
+	// attribution for every identifier-shaped token, dragging
+	// export_graph.html / docs/adr/*.md into every blast-radius and
+	// WhoCalls set. The file nodes stay in the graph; only their bogus
+	// call edges are suppressed.
+	if IsDocFile(rel) {
+		return calls
+	}
 	spec := specs[lang]
 	if spec == nil || calls == nil {
 		return calls

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"github.com/JayveerPrajapati/kern/internal/agent"
 	"github.com/JayveerPrajapati/kern/internal/app"
+	"github.com/JayveerPrajapati/kern/internal/config"
 	"github.com/JayveerPrajapati/kern/internal/domain"
 	"github.com/JayveerPrajapati/kern/internal/eval"
 	"github.com/JayveerPrajapati/kern/internal/eventbus"
@@ -34,11 +35,12 @@ func runAnalyze(cmd string, rest []string) {
 	if cmd != "analyze" && (f.lens != "" || f.profile != "") {
 		fatal("--lens/--profile are only supported for kern analyze")
 	}
-	// plan/risk print deterministic text plans; the shared parser accepted
-	// --json but the command ignored it. Reject loudly instead of silently
-	// dropping the flag.
-	if cmd != "analyze" && f.json {
-		fatal("--json is only supported for kern analyze")
+	// plan honors --json (it renders the structured domain.Plan); the risk
+	// lens prints a deterministic text report. The shared parser accepted
+	// --json for risk but the command ignored it — reject loudly instead of
+	// silently dropping the flag.
+	if (cmd == "risk" || f.lens == "risk") && f.json {
+		fatal("--json is only supported for kern plan")
 	}
 	args = joinVerbPositionals(args)
 	change := args[0]
@@ -56,7 +58,10 @@ func runAnalyze(cmd string, rest []string) {
 		ts := app.NewTaskService(p, eventbus.New()).WithPRProvider(app.AutoPRProvider())
 		_, text, err := ts.Risk(change)
 		if err != nil {
-			fatal("Risk: %v", err)
+			// Audit L7: the error already carries a "risk:" prefix (Platform.Risk
+			// wraps with fmt.Errorf("risk: %w", ...)) — a "Risk:" label here
+			// doubled it into "kern: Risk: risk: …". Single prefix only.
+			fatal("%v", err)
 		}
 		if f.profile != "" {
 			pf, ok := profiles.NewRegistryWithBuiltins().Select(f.profile)
@@ -90,6 +95,16 @@ func runAnalyze(cmd string, rest []string) {
 					return
 				}
 				fatal("Analyze: %v", err)
+			}
+			// --json renders the structured domain.Plan (same shape as the
+			// taskful Plan workflow's artifact) so agents can parse it.
+			if f.json {
+				printJSON(map[string]any{
+					"task_id": t.ID,
+					"state":   t.State,
+					"plan":    plan,
+				})
+				return
 			}
 			fmt.Println("PLAN for: " + change)
 			fmt.Print(text)
@@ -133,6 +148,13 @@ func runAnalyze(cmd string, rest []string) {
 				return
 			}
 			fatal("Analyze: %v", err)
+		}
+		// --json renders the structured domain.Plan assembled by the
+		// stateless path (same shape as the taskful Plan workflow's
+		// artifact) so agents can parse it.
+		if f.json {
+			printJSON(map[string]any{"plan": app.BuildStatelessPlan(change, pkt, root)})
+			return
 		}
 		fmt.Println("PLAN for: " + change)
 		fmt.Print(app.RenderStatelessPlan(change, pkt, root))
@@ -187,7 +209,7 @@ func runExecute(rest []string) {
 	}
 	root := projectRoot(f)
 	if len(args) < 1 || args[0] == "" {
-		fatalUsage("usage: kern execute <patch|patch-file> [--root ROOT]")
+		fatalUsage("usage: kern execute <patch|patch-file> [--root ROOT] — sandbox-only: nothing is applied to the working tree")
 	}
 	// The plugin passes a multi-line patch through a temp file path; a
 	// CLI caller may also pass the raw unified diff inline. Accept both.
@@ -311,7 +333,9 @@ func runImpact(rest []string) {
 			if symbolDegrade("risk", change, root, err) {
 				return
 			}
-			fatal("Risk: %v", err)
+			// Audit L7: the error already carries a "risk:" prefix — a "Risk:"
+			// label here doubled it ("kern: Risk: risk: …"). Single prefix only.
+			fatal("%v", err)
 		}
 		fmt.Print(text)
 		return
@@ -327,6 +351,13 @@ func runImpact(rest []string) {
 		// Strict precision: skip call edges whose caller language is not
 		// "resolved"-precision in the index (they are unknown, not guessable).
 		impactOpts = append(impactOpts, app.ImpactStrict())
+	}
+	if f.runtime {
+		// --runtime folds runtime evidence (data stores, related incidents,
+		// architecture rules) into the impact report. Opt-in: the context
+		// packet + memory recall phases it runs dominate impact latency, so
+		// the default graph-only report stays fast (P0 #2).
+		impactOpts = append(impactOpts, app.ImpactRuntime())
 	}
 	t, rep, text, err := ts.Impact(change, impactOpts...)
 	if err != nil {
@@ -470,6 +501,21 @@ func verifySkippedReasons(v *verification.VerificationResult) []string {
 		collect(v.Integration.Output)
 	}
 	return reasons
+}
+
+// containsVerifyTestType reports whether the requested verify types include
+// the test step. The substring match mirrors the engine's type dispatcher
+// (test/unit/integration), so `--types "build,unit"` and positional
+// "build,test" both count. Drives the -short/--full mode note: a build-only
+// or compliance-only run has no test step to run short, so no note prints.
+func containsVerifyTestType(types []string) bool {
+	for _, t := range types {
+		tl := strings.ToLower(strings.TrimSpace(t))
+		if strings.Contains(tl, "test") || strings.Contains(tl, "unit") || strings.Contains(tl, "integration") {
+			return true
+		}
+	}
+	return false
 }
 
 func runVerify(rest []string) {
@@ -685,6 +731,14 @@ func runVerify(rest []string) {
 		fmt.Printf("- scanned %d symbols (limit 200)\n", rep.Symbols)
 		return
 	}
+	// A bare `kern verify` (no checks requested at all) would default to a full
+	// build+test run (~minutes) before reporting anything — a usage error
+	// instead, consistent with search/explore/impact (audit L1). The mode flags
+	// above and the compliance trio below are explicit requests and keep working
+	// with no positional.
+	if f.types == "" && len(args) == 0 && !f.cve && !f.license && !f.secrets {
+		fatalUsage("usage: kern verify [<types>|<file|->] [--types T] [--root ROOT]")
+	}
 	// Two forms share this subcommand. The high-level form is
 	// `kern verify <types>` (or `kern verify` with no positional, defaulting
 	// to build,test); the classic claims form is `kern verify <file|-> [root]`.
@@ -701,6 +755,15 @@ func runVerify(rest []string) {
 		for _, t := range strings.Split(typesArg, ",") {
 			if t = strings.TrimSpace(t); t != "" {
 				types = append(types, t)
+			}
+		}
+		// H4: --types values must map to real checks. An unknown value was
+		// previously split and passed to the engine, which ran nothing and reported
+		// a false-green "verdict: PASS / insufficient data" (exit 0). Reject it
+		// loudly as a usage error (exit 2).
+		for _, t := range types {
+			if !validVerifyType(t) {
+				fatalUsage("invalid --types value '%s' (valid: %s)", t, verifyTypeList())
 			}
 		}
 		// Opt-in compliance checks (--cve/--license/--secrets): each flag
@@ -724,13 +787,33 @@ func runVerify(rest []string) {
 		if err := governance.CheckExecCommand("kern verify "+strings.Join(types, " "), root); err != nil {
 			fatal("Verify: %v", err)
 		}
+		// Test-step mode (P1): the default test step runs `go test -short`
+		// so a bare `kern verify` finishes in ~1min instead of ~4; --full
+		// opts into the COMPLETE suite. -short is the default and may be
+		// passed explicitly; --full wins when both are given. The visible
+		// mode note teaches the lever. An explicit KERN_VERIFY_TEST env /
+		// verify.test config override replaces the test command verbatim
+		// (the engine honors it first), so the note says so instead of
+		// claiming a mode that does not apply. The note never pollutes
+		// --json output (machine-readable contract).
+		var verifyOpts []verification.Option
+		if !f.json && containsVerifyTestType(types) {
+			if override := config.String(root, "KERN_VERIFY_TEST", "verify.test", ""); override != "" {
+				fmt.Println("tests: using KERN_VERIFY_TEST / verify.test override (not -short/--full)")
+			} else if f.full {
+				verifyOpts = append(verifyOpts, verification.FullTests(true))
+				fmt.Println("full suite (short mode: kern verify -short)")
+			} else {
+				fmt.Println("short mode (full suite: kern verify --full)")
+			}
+		}
 		p, perr := app.New(root)
 		if perr != nil {
 			fatal("%v — run kern index to rebuild it", perr)
 		}
 		ts := app.NewTaskService(p, nil).WithPRProvider(app.AutoPRProvider())
 		verifyStart := time.Now()
-		_, v, err := ts.Verify(types)
+		_, v, err := ts.Verify(types, verifyOpts...)
 		// CLI telemetry: the in-process recorder is loaded/saved by main()
 		// for every invocation, so this lands in the persisted snapshot
 		// (`kern stats performance`).
@@ -916,6 +999,14 @@ func runVerify(rest []string) {
 		b, err = os.ReadFile(in)
 	}
 	if err != nil {
+		// Dogfooding A2-1b: `kern verify <unknown-positional>` used to fall
+		// into the claims-file form and fail with a bare "open bogus: no such
+		// file" — no hint that a check-TYPES value was intended. When the
+		// positional is not an existing file and does not look like a path
+		// (no separator), point at the types form explicitly.
+		if !strings.ContainsAny(in, "/\\") {
+			fatal("Verify: %v — did you mean a check type? run `kern verify build,test` (or `kern verify --types build,test`); valid types: %s", err, verifyTypeList())
+		}
 		fatal("Verify: %v", err)
 	}
 	if len(strings.TrimSpace(string(b))) == 0 {

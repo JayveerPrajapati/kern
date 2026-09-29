@@ -206,7 +206,12 @@ func Summarize(path string, content []byte, maxSymbols int) Summary {
 // Render renders a summary as compact text for agent consumption.
 func (s Summary) Render() string {
 	if s.Language == "" {
-		return ""
+		// No detectable language: the file is not indexable code (e.g.
+		// README.md, go.mod, LICENSE, config prose). Return an explicit note
+		// instead of an EMPTY "success" — an agent reading an empty
+		// kern_compact_file result cannot tell "no symbols" from "tool
+		// broken" (dogfooding D-LOW). The line count keeps the note useful.
+		return fmt.Sprintf("%s [no symbol summary — not indexable code (no detectable language), %d lines]", s.Path, s.Lines)
 	}
 	var b strings.Builder
 	b.WriteString(s.Path)

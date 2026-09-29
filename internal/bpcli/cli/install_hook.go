@@ -33,10 +33,29 @@ duplication) complete in ~5s.`)
 		target = args[0]
 	}
 
+	for _, a := range args {
+		if a == "--global" || a == "-g" {
+			target = "global"
+			break
+		}
+	}
+
+	if target == "global" {
+		if err := InstallGlobalGitHooks(); err != nil {
+			fmt.Fprintf(os.Stderr, "blueprint: %v\n", err)
+			return 2
+		}
+		hooksDir, _ := GlobalGitHooksDir()
+		fmt.Printf("Installed global git hooks at %s\n", hooksDir)
+		fmt.Println("Configured git core.hooksPath globally: all repositories are now protected.")
+		fmt.Println("To bypass in an emergency: KERN_BYPASS=1 git commit -m \"...\"")
+		return 0
+	}
+
 	switch target {
 	case "pre-commit", "pre-push", "all":
 	default:
-		fmt.Fprintf(os.Stderr, "blueprint: invalid hook target %q (must be pre-commit, pre-push, or all)\n", target)
+		fmt.Fprintf(os.Stderr, "blueprint: invalid hook target %q (must be pre-commit, pre-push, all, or global)\n", target)
 		return 2
 	}
 
@@ -83,6 +102,14 @@ duplication) complete in ~5s.`)
 		fmt.Println("To bypass pre-push: git push --no-verify")
 		fmt.Println("Deep suites (tests, resilience) run in CI on every PR and nightly (blueprint-nightly.yml).")
 	}
+
+	// Blueprint-install owns the project .gitignore runtime block (audit H3
+	// moved the write out of the read-only check paths; oracle gate R4 wired
+	// it back in here): installing governance hooks is exactly the moment the
+	// runtime state dirs (.blueprint/audit/, receipts/, caches, metrics)
+	// start being written, so the ignore block accompanies them. Best-effort,
+	// idempotent (marked block), never touches user config.
+	ensureBlueprintRuntimeGitignored(cwd)
 
 	return 0
 }

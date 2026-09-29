@@ -6,8 +6,8 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	stdlog "log"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -18,13 +18,17 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/blueprint/domain"
 	"github.com/JayveerPrajapati/kern/internal/blueprint/sandbox"
 	"github.com/JayveerPrajapati/kern/internal/blueprint/service"
+	"github.com/JayveerPrajapati/kern/internal/bpcli/mcp"
 	"github.com/JayveerPrajapati/kern/internal/bppolicy/policy"
 	"github.com/JayveerPrajapati/kern/internal/bppolicy/risk"
 	"github.com/JayveerPrajapati/kern/internal/bpreceipt/metrics"
 	"github.com/JayveerPrajapati/kern/internal/gates"
+	"github.com/JayveerPrajapati/kern/internal/governance"
 	resiliencecheck "github.com/JayveerPrajapati/kern/internal/resilience"
 	"github.com/JayveerPrajapati/kern/internal/scanners/gitleaks"
 	"github.com/JayveerPrajapati/kern/internal/scanners/jscpd"
+	"github.com/JayveerPrajapati/kern/internal/storage"
+	"github.com/JayveerPrajapati/kern/internal/strutil"
 )
 
 // runCheck executes the `blueprint check` command.
@@ -108,6 +112,12 @@ func RunCheckAndReport(args []string) (code int, failedCheck string, root string
 	if o.ciMode {
 		emitCIVerdict(*o.result)
 		if o.result.ExitCode != 0 {
+			if bypassed, reason := IsEmergencyBypassActive(); bypassed {
+				fc := failedChecks(*o.result)
+				emitBypassNotice(fc, reason)
+				recordBypassAudit(o.root, reason, fc, o.result.ExitCode)
+				return 0, firstFailedCheck(*o.result), o.root
+			}
 			return 1, firstFailedCheck(*o.result), o.root
 		}
 		return 0, "", o.root
@@ -117,7 +127,107 @@ func RunCheckAndReport(args []string) (code int, failedCheck string, root string
 	} else {
 		emitText(*o.result)
 	}
+	if o.result.ExitCode != 0 {
+		if bypassed, reason := IsEmergencyBypassActive(); bypassed {
+			fc := failedChecks(*o.result)
+			emitBypassNotice(fc, reason)
+			recordBypassAudit(o.root, reason, fc, o.result.ExitCode)
+			return 0, firstFailedCheck(*o.result), o.root
+		}
+	}
 	return o.result.ExitCode, firstFailedCheck(*o.result), o.root
+}
+
+// IsEmergencyBypassActive reports whether an emergency break-glass environment variable
+// (KERN_BYPASS=1 or KERN_ENFORCE=0) is set. It also returns the provided reason if any.
+func IsEmergencyBypassActive() (bool, string) {
+	if os.Getenv("KERN_BYPASS") == "1" || os.Getenv("KERN_ENFORCE") == "0" {
+		reason := os.Getenv("KERN_BYPASS_REASON")
+		if reason == "" {
+			reason = "Emergency override active via env (KERN_BYPASS=1 / KERN_ENFORCE=0)"
+		}
+		return true, reason
+	}
+	return false, ""
+}
+
+func emitBypassNotice(failedChecks []string, reason string) {
+	fmt.Fprintf(os.Stderr, "\n================================================================================\n")
+	fmt.Fprintf(os.Stderr, "⚠️  EMERGENCY BYPASS ACTIVE (KERN_BYPASS=1 / KERN_ENFORCE=0)\n")
+	fmt.Fprintf(os.Stderr, "Reason: %s\n", reason)
+	switch len(failedChecks) {
+	case 0:
+		fmt.Fprintf(os.Stderr, "All blocking gates downgraded to advisory WARN. Change allowed.\n")
+	case 1:
+		fmt.Fprintf(os.Stderr, "Blocking check (%s) downgraded to advisory WARN. Change allowed.\n", failedChecks[0])
+	default:
+		fmt.Fprintf(os.Stderr, "Blocking checks (%s) downgraded to advisory WARN. Change allowed.\n", strings.Join(failedChecks, ", "))
+	}
+	fmt.Fprintf(os.Stderr, "================================================================================\n\n")
+}
+
+// buildBypassAuditRecord assembles the audit.Record for an emergency bypass:
+// a WARN-level "bypass" entry in the repo's .blueprint/audit/audit.jsonl
+// trail (same JSONL the validation pipeline writes), carrying the reason and
+// the blocking check that was downgraded. ExitCode is the code the pipeline
+// WOULD have returned (1 for a BLOCK/ERROR) — the bypassed run itself exits
+// 0. Pure and testable without running the check pipeline. The reason is NOT
+// embedded in the finding: audit.FindingMeta is deliberately message-free
+// (redaction invariant); the human-readable reason lives in the governance
+// chain entry (recordBypassAudit) and the stderr notice instead.
+func buildBypassAuditRecord(absRoot, reason, failedCheck string, wouldBeExitCode int) audit.Record {
+	return audit.Record{
+		Kind:      "bypass",
+		Timestamp: time.Now(),
+		Source:    domain.SourceHuman,
+		Operation: domain.OpCommit,
+		RepoRoot:  absRoot,
+		Status:    domain.StatusWarn,
+		ExitCode:  wouldBeExitCode,
+		Summary:   audit.SummaryMeta{Total: 1, Warnings: 1},
+		Findings: []audit.FindingMeta{{
+			RuleID:   "emergency-bypass",
+			Severity: domain.SeverityWarn,
+			Category: domain.CategoryPolicy,
+		}},
+	}
+}
+
+// recordBypassAudit appends the emergency-bypass audit trail for a bypassed
+// check run: the "bypass" record in .blueprint/audit/audit.jsonl (via the
+// shared writeApprovalAudit best-effort writer) AND a tamper-evident entry in
+// the project's .kern/audit governance chain (mirroring recordDecisionAudit's
+// shape — Action bypass, Policy emergency-bypass, Result bypassed), so `kern
+// audit` sees the override next to approval decisions. Both writes are
+// best-effort: a failure must never change the bypassed run's exit code, at
+// most a one-line stderr warning.
+func recordBypassAudit(absRoot, reason string, failedChecks []string, wouldBeExitCode int) {
+	writeApprovalAudit(absRoot, buildBypassAuditRecord(absRoot, reason, "", wouldBeExitCode))
+
+	resource := "pre-commit"
+	if len(failedChecks) > 0 {
+		resource = "pre-commit:" + strings.Join(failedChecks, ",")
+	}
+	if reason == "" {
+		reason = "emergency override active"
+	}
+	entry := governance.AuditEntry{
+		AgentID:   currentApprover(absRoot),
+		Action:    "bypass",
+		Resource:  resource,
+		Approved:  true,
+		Result:    "bypassed",
+		Policy:    "emergency-bypass",
+		Reason:    reason,
+		Timestamp: time.Now(),
+	}
+	auditDir := filepath.Join(absRoot, ".kern", "audit")
+	l := governance.NewAuditLog().
+		WithStore(storage.NewLog(auditDir)).
+		WithLockPath(filepath.Join(auditDir, ".lock"))
+	if err := l.AppendExternal(entry); err != nil {
+		stdlog.Printf("blueprint check: emergency bypass NOT recorded in audit chain: %v", err)
+	}
 }
 
 // runCheckOutcome carries what the check runners need: the final exit code,
@@ -156,10 +266,9 @@ func runCheckCore(args []string) runCheckOutcome {
 	if code != 0 {
 		return runCheckOutcome{code: code}
 	}
-	// keep `git status` clean after the first run — gitignore the
-	// runtime state this command is about to write. Best-effort.
-	ensureBlueprintRuntimeGitignored(absRoot)
-
+	// `kern check` is a read-only gate (audit H3): it must never mutate the
+	// tree it is validating. The blueprint-runtime .gitignore block is written
+	// by setup/blueprint-install only, not by check/ci.
 	cfg, err := policy.Load(absRoot)
 	if err != nil {
 		if fl.ci {
@@ -236,6 +345,19 @@ func firstFailedCheck(result domain.ValidationResult) string {
 		}
 	}
 	return ""
+}
+
+// failedChecks returns ALL checks (pipeline order) whose status is a hard
+// failure — BLOCK or ERROR — the gates that would have fired (ADR-0011 §6).
+// WARN/PASS/SKIP checks are not failures. Empty when nothing failed.
+func failedChecks(result domain.ValidationResult) []string {
+	var out []string
+	for _, cr := range result.Checks {
+		if cr.Status == domain.StatusBlock || cr.Status == domain.StatusError {
+			out = append(out, cr.Name)
+		}
+	}
+	return out
 }
 
 // checkFlags carries the parsed `blueprint check` command-line flags.
@@ -483,7 +605,7 @@ func discoverStagedChanges(repoRoot string) ([]domain.FileChange, error) {
 		return nil, fmt.Errorf("not a git repository: %s", repoRoot)
 	}
 
-	nameStatus, err := gitOutput(repoRoot, "diff", "--cached", "--name-status")
+	nameStatus, err := mcp.GitOutput(repoRoot, "diff", "--cached", "--name-status")
 	if err != nil {
 		return nil, fmt.Errorf("git diff --cached --name-status: %w", err)
 	}
@@ -494,7 +616,7 @@ func discoverStagedChanges(repoRoot string) ([]domain.FileChange, error) {
 
 	// ONE unified=0 diff over the entire staged set (not one git spawn per
 	// file): keeps argv bounded and avoids N subprocess launches.
-	unified, err := gitOutput(repoRoot, "-c", "core.quotepath=false", "diff", "--cached", "--unified=0", "--no-ext-diff")
+	unified, err := mcp.GitOutput(repoRoot, "-c", "core.quotepath=false", "diff", "--cached", "--unified=0", "--no-ext-diff")
 	if err != nil {
 		return nil, fmt.Errorf("git diff --cached --unified=0: %w", err)
 	}
@@ -619,8 +741,11 @@ func isBlueprintRuntimeArtifact(path string) bool {
 const blueprintGitignoreMarker = "# --- blueprint runtime state (kern generated) ---"
 
 // ensureBlueprintRuntimeGitignored best-effort appends the blueprint runtime
-// state paths to the repo's .gitignore, so the first ci/check run
-// does not leave `git status` / `git add -A` polluted with generated state.
+// state paths to the repo's .gitignore. It is intentionally NOT invoked by
+// the read-only check/ci paths (audit H3): those commands must never mutate
+// the tree they validate. The block belongs to setup/blueprint-install only;
+// this helper is kept (with its tests) as the single implementation of the
+// marker/block format for that wiring.
 // User-authored configuration (.blueprint/config.yaml, suppressions.yaml,
 // owners.yaml, .kern/boundaries.json) is intentionally NOT ignored — it is
 // the declared repository configuration and must stay committable. Any
@@ -641,7 +766,7 @@ func ensureBlueprintRuntimeGitignored(root string) {
 		".blueprint/metrics.json\n" +
 		".blueprint/sec-cache.json\n" +
 		closeMarker + "\n"
-	cleaned := removeMarkedBlock(string(data), blueprintGitignoreMarker, closeMarker)
+	cleaned := strutil.RemoveMarkedBlock(string(data), blueprintGitignoreMarker, closeMarker)
 	cleaned = removeLegacyBlueprintEntries(cleaned)
 	out := strings.TrimRight(cleaned, "\n")
 	if out != "" {
@@ -685,28 +810,6 @@ func removeLegacyBlueprintEntries(data string) string {
 		}
 	}
 	return strings.Join(keep, "\n")
-}
-
-// removeMarkedBlock removes the region between startMarker and endMarker
-// (inclusive of both marker lines), leaving surrounding content intact.
-func removeMarkedBlock(data, startMarker, endMarker string) string {
-	start := strings.Index(data, startMarker)
-	if start < 0 {
-		return data
-	}
-	end := strings.Index(data[start:], endMarker)
-	if end < 0 {
-		return data
-	}
-	end += start + len(endMarker)
-	// Also drop the trailing newline after the end marker so the rebuilt
-	// block does not accumulate blank lines.
-	if end+1 < len(data) && data[end] == '\n' {
-		end++
-	} else if end+1 < len(data) && data[end+1] == '\n' {
-		end++
-	}
-	return data[:start] + data[end:]
 }
 
 // IsBinaryDiffBlock exposes isBinaryDiffBlock for the legacy cmd/blueprint
@@ -822,18 +925,8 @@ func isGitRepo(dir string) bool {
 		return true
 	}
 	// Check if it's a git worktree (gitdir file).
-	_, err = gitOutput(dir, "rev-parse", "--is-inside-work-tree")
+	_, err = mcp.GitOutput(dir, "rev-parse", "--is-inside-work-tree")
 	return err == nil
-}
-
-func gitOutput(dir string, args ...string) (string, error) {
-	cmd := exec.Command("git", args...)
-	cmd.Dir = dir
-	out, err := cmd.Output()
-	if err != nil {
-		return "", err
-	}
-	return string(out), nil
 }
 
 func timeoutDuration(sec int) time.Duration {

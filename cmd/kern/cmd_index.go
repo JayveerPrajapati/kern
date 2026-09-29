@@ -49,12 +49,30 @@ func isTempOrMissingRoot(root string) bool {
 }
 
 func runPrecache(rest []string) {
-	f, args := parseFlagsOrDie(rest)
+	// L15: single pass is the DEFAULT; --watch opts into the never-exiting
+	// daemon. --once stays as an explicit no-op alias (the opencode plugin
+	// calls `kern precache --once` and must keep working).
+	watch := false
+	precacheArgs := make([]string, 0, len(rest))
+	for _, a := range rest {
+		if a == "--watch" {
+			watch = true
+			continue
+		}
+		precacheArgs = append(precacheArgs, a)
+	}
+	f, args := parseFlagsOrDie(precacheArgs)
+	// A silently-ignored --interval (single-pass mode) is a user trap: pass
+	// it without --watch and the daemon-only setting just disappears. Fail
+	// loud instead so the invocation is corrected, not quietly half-honored.
+	if (!watch || f.once) && f.interval > 0 {
+		fatal("--interval only applies to watch mode — pass --watch (and drop --once), or drop --interval")
+	}
 	root := projectRoot(f)
 	if f.root == "" && len(args) > 0 {
 		root = args[0]
 	}
-	if f.once {
+	if !watch || f.once {
 		rep := precache.Warm(root)
 		fmt.Printf("kern: warmed %d summaries (%d cache hits), %d doc chunks, index %s, docs saved=%v in %s\n",
 			rep.Warmed, rep.CacheHits, rep.DocChunks, rep.IndexStatus, rep.DocsSaved, rep.Dur.Round(time.Millisecond))
@@ -309,7 +327,16 @@ func runIndex(rest []string) {
 			return
 		}
 	}
-	ix, err := index.BuildPersisted(root)
+	var ix *index.Index
+	var err error
+	if f.force {
+		// --force is the corruption-recovery / schema-bump escape hatch: it
+		// bypasses the cross-process debounce and re-parses the tree
+		// unconditionally (a fresh cached index must NOT be reused here).
+		ix, err = index.BuildPersistedForce(root)
+	} else {
+		ix, err = index.BuildPersisted(root)
+	}
 	if err != nil {
 		fatal("Index: %v", err)
 	}
@@ -670,6 +697,13 @@ func runSearch(rest []string) {
 		fmt.Println(intel.FormatRepoHits(hits))
 		return
 	}
+	// L11: a root that is not a kern repo (no persisted index, no indexable
+	// sources) must say so instead of building an empty index and reporting
+	// "no symbols matched" — that read as a confident miss on a repo that
+	// was never indexed.
+	if !indexStoreExists(root) && !index.HasIndexableSources(root) {
+		fatal("no kern index at %s — run: kern index %s", root, root)
+	}
 	ix, err := loadOrBuild(root)
 	if err != nil {
 		fatal("Search: %v", err)
@@ -741,6 +775,18 @@ func runSearch(rest []string) {
 		fmt.Printf("%-10s %-7s %-24s %s:%d\n", m.Kind, m.Lang, m.FullName(), m.File, m.Line)
 	}
 
+}
+
+// indexStoreExists reports whether <root>/.kern carries a persisted index
+// (SQLite-primary, with the JSON store as the legacy/fallback form).
+func indexStoreExists(root string) bool {
+	if _, err := os.Stat(index.SQLitePath(root)); err == nil {
+		return true
+	}
+	if _, err := os.Stat(index.StorePath(root)); err == nil {
+		return true
+	}
+	return false
 }
 
 func runFts(rest []string) {

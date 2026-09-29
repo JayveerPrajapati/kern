@@ -57,7 +57,7 @@ func parseCIFlags(args []string) (ciFlags, int) {
 	fs := flag.NewFlagSet("ci", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	repoRoot := fs.String("repo", "", "repository root (default: current directory)")
-	baseRef := fs.String("base", "main", "base revision (branch/tag/sha)")
+	baseRef := fs.String("base", "", "base revision (branch/tag/sha; default: repo default branch, auto-detected — usually main)")
 	headRef := fs.String("head", "HEAD", "proposed revision (branch/tag/sha)")
 	jsonOut := fs.Bool("json", false, "emit JSON artifact (always emitted to --artifact-file regardless)")
 	artifactFile := fs.String("artifact-file", defaultCIArtifactFile, "path to write JSON artifact (default: .kern/blueprint-result.json)")
@@ -92,7 +92,7 @@ func parseCIFlags(args []string) (ciFlags, int) {
 // CI must NOT depend on developer-local daemon state (spec line 1397). It
 // reconstructs the validation context from:
 //   - repository checkout (--repo)
-//   - base revision (--base, default: main)
+//   - base revision (--base, default: auto-detected repo default branch)
 //   - proposed revision (--head, default: HEAD)
 //   - configuration (.blueprint/config.yaml or defaults)
 //   - deterministic kern index (built inside the validation worktree, CI-clean)
@@ -119,11 +119,18 @@ func runCI(args []string) int {
 	if fl.artifactFile == defaultCIArtifactFile {
 		fl.artifactFile = filepath.Join(absRoot, defaultCIArtifactFile)
 	}
+	// H5: --base defaults to the repo's default branch, resolved from LOCAL git
+	// metadata only (the refs/remotes/origin/HEAD symref that clone/fetch
+	// maintain) — never a network call. Falls back to "main" when the symref is
+	// absent. An explicit --base always wins.
+	if fl.baseRef == "" {
+		fl.baseRef = detectDefaultBranch(absRoot)
+	}
 	// is intentionally NOT applied by ci: ci validates committed
 	// state and must never mutate the tree it is validating (writing a
 	// tracked .gitignore would itself trip verify-receipt --check-diff).
-	// The local first-run gitignore happens in `kern check`; the canonical
-	// fix belongs in internal/setup's gitignore block (orchestrator note).
+	// The blueprint-runtime gitignore block belongs to setup/blueprint-install,
+	// not the read-only check/ci paths (audit H3).
 	start := time.Now()
 	artifact := CIArtifact{
 		Repo:    absRoot,
@@ -406,7 +413,7 @@ func sealReceipt(enabled bool, result domain.ValidationResult, absRoot, baseRef,
 // returns exit code 2.
 func verifyRevisions(absRoot, baseRef, headRef string, artifact *CIArtifact, artifactFile string, noHuman, jsonOut bool) int {
 	if err := verifyRef(absRoot, baseRef); err != nil {
-		artifact.Error = fmt.Sprintf("base revision %s not found: %v", baseRef, err)
+		artifact.Error = fmt.Sprintf("base revision %s not found: %v (pass --base <branch> to override)", baseRef, err)
 		emitCIResult(*artifact, artifactFile, noHuman, jsonOut)
 		return 2
 	}
@@ -664,6 +671,25 @@ func verifyRef(repoRoot, ref string) error {
 		return fmt.Errorf("%s", strings.TrimSpace(string(out)))
 	}
 	return nil
+}
+
+// detectDefaultBranch resolves the repository's default branch from LOCAL
+// git metadata only (no network): refs/remotes/origin/HEAD is a symref that
+// clone/fetch maintain, pointing at the remote's default branch. The
+// refs/remotes/origin/ prefix is stripped, and "main" is the fallback when
+// the symref is absent or unusable (audit H5).
+func detectDefaultBranch(repoRoot string) string {
+	cmd := exec.Command("git", "-C", repoRoot, "symbolic-ref", "refs/remotes/origin/HEAD")
+	out, err := cmd.Output()
+	if err != nil {
+		return "main"
+	}
+	branch := strings.TrimSpace(string(out))
+	branch = strings.TrimPrefix(branch, "refs/remotes/origin/")
+	if branch == "" || branch == "HEAD" {
+		return "main"
+	}
+	return branch
 }
 
 // discoverDiffChanges returns the files changed between base and head revisions.

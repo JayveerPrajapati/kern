@@ -40,11 +40,24 @@ func (s *TaskService) transition(t *agent.Task, next domain.TaskState) error {
 }
 
 // Create makes a new Task for the given intent and submits it to the registry.
-// The Task starts in CREATED state with the intent as both Input and Intent.
+// The Task starts in CREATED state with the intent as both Input and Intent,
+// and Type "analyze" — the type shared by read-only analysis commands, whose
+// tasks genuinely are "analyze". Workflow entry points must use
+// createWorkflowTask, which derives the type from the compiled intent BEFORE
+// the record is persisted (dogfooding E-LOW: task-type mislabel).
 // Returns the created Task (a pointer into the registry, so state mutations
 // are visible) or an error if submission fails.
 func (s *TaskService) Create(intent string) (*agent.Task, error) {
-	t := agent.NewTask("analyze", intent)
+	return s.createTyped(intent, "analyze")
+}
+
+// createTyped is the shared creation body behind Create and createWorkflowTask.
+// The task Type is set BEFORE SubmitTask, so the persisted store record AND
+// the task.created bus event (payload["type"]) carry the correct type at
+// creation time — not only after the next state transition re-persists. This
+// persist-time ordering (Path B) is what post-Run assertions cannot observe.
+func (s *TaskService) createTyped(intent, typ string) (*agent.Task, error) {
+	t := agent.NewTask(typ, intent)
 	// The persisted store owns task IDs: clear the process-local ID assigned
 	// by NewTask so SubmitTask lets the store assign "t-<max+1>" under its
 	// cross-process file lock. Two processes would otherwise both start at
@@ -61,6 +74,17 @@ func (s *TaskService) Create(intent string) (*agent.Task, error) {
 	}
 	s.publish(eventbus.TaskCreated, t.ID, map[string]string{"intent": intent})
 	return t, nil
+}
+
+// createWorkflowTask is Create plus the intent-derived task type. Create alone
+// cannot set the type: it is shared with read-only analysis commands, whose
+// tasks genuinely are "analyze". Here the caller is a workflow entry point, so
+// the record must name the actual work kind (dogfooding E-LOW: a CODE_CHANGE
+// workflow previously persisted a task whose Type was "analyze", mislabeling
+// it in kern task / team). The type is derived BEFORE submission, so a task
+// abandoned in CREATED keeps the correct label on disk and on the bus.
+func (s *TaskService) createWorkflowTask(intent string) (*agent.Task, error) {
+	return s.createTyped(intent, taskTypeForIntent(CompileIntent(intent).Type))
 }
 
 // createAnalysisTask creates the task behind a read-only analysis command
@@ -214,7 +238,13 @@ func (s *TaskService) runLoop(ctx context.Context, intent string, level loop.Aut
 	if s.platform == nil {
 		return nil, nil, fmt.Errorf("task service: platform not configured")
 	}
-	t, err := s.Create(intent)
+	// Kern-do / kern-loop created tasks must carry the intent-derived type at
+	// creation (E-LOW residual path): runLoop used to call Create, which always
+	// persisted "analyze" and only reached the corrected type on the next state
+	// transition. createWorkflowTask sets the type before SubmitTask, so the
+	// store record and bus event are correct even if the task is abandoned in
+	// CREATED.
+	t, err := s.createWorkflowTask(intent)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -540,7 +570,7 @@ func (s *TaskService) RunWorkflowDefault(intent string) (*agent.Task, error) {
 // run between steps instead of leaving it running in the background.
 // kern_workflow routes here.
 func (s *TaskService) RunWorkflowDefaultContext(ctx context.Context, intent string) (*agent.Task, error) {
-	t, err := s.Create(intent)
+	t, err := s.createWorkflowTask(intent)
 	if err != nil {
 		return nil, err
 	}

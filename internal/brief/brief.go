@@ -320,7 +320,11 @@ func statsSection(b *strings.Builder) {
 	if err != nil {
 		return
 	}
-	fmt.Fprintf(b, "## kern savings (last 7 days)\n%d ops · %d tokens saved (%.1f%%) · ~$%.4f cost saved\n\n",
+	// M9: the ops/tokens/$ numbers come from the machine-wide metrics
+	// recorder (persisted in the global cache, shared by every project on
+	// this machine) — never present them as project-scoped metrics. The
+	// prefix makes the scope unambiguous.
+	fmt.Fprintf(b, "## kern savings (last 7 days)\nmachine-wide (all projects): %d ops · %d tokens saved (%.1f%%) · ~$%.4f cost saved\n\n",
 		s.Operations, s.SavedTotal, s.SavedPct, s.CostSaved)
 }
 

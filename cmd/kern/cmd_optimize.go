@@ -88,11 +88,19 @@ func runOptimize(cmd string, rest []string) {
 		fmt.Fprintf(os.Stderr, "kern: served from cache\n")
 	}
 	fmt.Fprintf(os.Stderr, "kern: %d -> %d tokens (saved %d, %.1f%%)\n", res.BeforeTokens, res.AfterTokens, res.SavedTokens, res.SavedPercent)
-	if res.SavedTokens == 0 && res.BeforeTokens > 0 {
+	if res.SavedTokens == 0 && res.BeforeTokens > 0 && res.LLMSkipped == "" {
 		fmt.Fprintln(os.Stderr, "kern: nothing to compress — try --mask, --attach, or a longer input")
 	}
 	if res.LLMSkipped != "" {
-		fmt.Fprintf(os.Stderr, "kern: warning: %s\n", res.LLMSkipped)
+		// Audit L2: when the LLM stage never ran, a 0%-saved echo must be
+		// loud, not a subtle warning — the canonical no-provider notice names
+		// the fix (KERN_LLM_PROVIDER) so the run is never mistaken for a
+		// successful compression.
+		if strings.Contains(res.LLMSkipped, "no LLM") {
+			fmt.Fprintln(os.Stderr, "kern: no LLM provider configured (set KERN_LLM_PROVIDER); output unchanged")
+		} else {
+			fmt.Fprintf(os.Stderr, "kern: warning: %s\n", res.LLMSkipped)
+		}
 	}
 
 }
@@ -103,6 +111,20 @@ func runCompact(rest []string) {
 		fatalUsage("usage: kern compact [--root ROOT] <file>")
 	}
 	file := args[0]
+	// L10: stat FIRST so a missing file reports ENOENT directly ("no such
+	// file: X") instead of being masked by the path-policy message when the
+	// path is absolute/outside-root. The probe is root-joined so a
+	// --root-relative path that exists is not a false miss.
+	probe := file
+	if f.root != "" && !filepath.IsAbs(file) {
+		probe = filepath.Join(f.root, file)
+	}
+	if _, serr := os.Stat(probe); serr != nil {
+		if os.IsNotExist(serr) {
+			fatal("no such file: %s", file)
+		}
+		fatal("compact: %v", serr)
+	}
 	// Root-confinement: the MCP handler for kern_compact_file validates paths
 	// against the workspace root. The CLI path must enforce the same policy so
 	// a plugin invoking the binary directly cannot read arbitrary files.
@@ -196,18 +218,21 @@ func runLog(rest []string) {
 	f, args := parseFlagsOrDie(rest)
 	var b []byte
 	var rerr error
-	src := ""
 	if len(args) < 1 || args[0] == "-" {
 		b, rerr = readStdin()
 		if rerr != nil {
 			fatal("log: %v", rerr)
 		}
-	} else {
-		src = args[0]
-		b, rerr = os.ReadFile(src)
+	} else if fi, err := os.Stat(args[0]); err == nil && !fi.IsDir() {
+		b, rerr = os.ReadFile(args[0])
 		if rerr != nil {
 			fatal("log: %v", rerr)
 		}
+	} else {
+		// Audit L4: a positional that is not an existing file is literal log
+		// text, not a file path — a bare `kern log "<line>"` must not fail
+		// with a confusing ENOENT.
+		b = []byte(strings.Join(args, " "))
 	}
 	wireRecorder()
 	res, err := optimize.Log(string(b), optimize.Options{
@@ -250,6 +275,12 @@ func runTokens(rest []string) {
 
 func runBudget(rest []string) {
 	f, args := parseFlagsOrDie(rest)
+	// Audit L3: --max-tokens is the fit-mode budget (kern fit-context). In
+	// code/terse mode it would be silently ignored (the mode's own --max
+	// governs) — reject loudly instead.
+	if f.maxTokens > 0 && f.mode != "fit" {
+		fatalUsage("--max-tokens applies to --mode fit")
+	}
 	// --mode selects the budget family (surface consolidation T2b): code
 	// (default) = the current FitCode path; terse = the former `kern terse`
 	// (terse.Tersify); fit = the former `kern fit-context`

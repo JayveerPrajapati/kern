@@ -43,7 +43,11 @@ func runHealth(rest []string) {
 	if err != nil {
 		fatalUsage("usage: kern health [--root ROOT] [--json]\nflags: %v", err)
 	}
-	root := f.root
+	// Resolve the root like every other CLI command (dogfooding B-HIGH): the
+	// disk-index freshness probe in DiskIndexView needs a real root — an
+	// empty root made it report stale=true / verdict:"unknown" / root:""
+	// even on a fresh index, contradicting doctor and index --status.
+	root := projectRoot(f)
 	// --json is accepted for CLI compatibility (pinned by
 	// TestRunHealthIndexBlockIsDiskAuthoritative) but intentionally ignored:
 	// health output is always JSON regardless of the flag.
@@ -568,7 +572,19 @@ func runSynthesizeTest(rest []string) {
 	if f.sinks != "" {
 		args["sinks"] = f.sinks
 	}
-	runMCPTool("kern_synthesize_test", args)
+	out, err := callTool("kern_synthesize_test", args)
+	if err != nil {
+		fatal("kern_synthesize_test: %v — see kern doctor for diagnostics", err)
+	}
+	fmt.Println(out)
+	// Dogfooding A1-N3: a REFUSED apply (generated test fails at runtime, or
+	// the write is otherwise rejected) is a decided-state / policy outcome —
+	// exit 3, not 0, so scripts/CI can detect it without parsing the report.
+	// The "apply refused" marker is stable in both text and JSON reports
+	// (synthtest sets Message to "apply refused: <reason>").
+	if f.apply && strings.Contains(out, "apply refused") {
+		fatalPolicy("synthesize-test: apply refused — generated test did not pass validation (see report above)")
+	}
 }
 
 func runFetchRawAnchor(rest []string) int {

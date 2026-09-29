@@ -20,6 +20,7 @@ type ExploreReport struct {
 	Definition   index.Symbol      `json:"definition"`
 	Source       string            `json:"source"`
 	Callers      []string          `json:"callers"`
+	CallerLocs   map[string]string `json:"caller_locs,omitempty"` // caller → "file:line" (unresolved callers omitted)
 	Callees      []string          `json:"callees"`
 	CallerConf   map[string]string `json:"caller_conf,omitempty"`  // caller → EXTRACTED/INFERRED/AMBIGUOUS
 	CalleeConf   map[string]string `json:"callee_conf,omitempty"`  // callee → EXTRACTED/INFERRED/AMBIGUOUS
@@ -123,6 +124,17 @@ func ExploreBudgeted(ix *index.Index, symbol string, depth, maxNodes int, minCon
 			rep.CallerConf = map[string]string{}
 		}
 		rep.CallerConf[name] = label
+		// Per-caller file:line so the agent can jump straight to the call
+		// site instead of re-searching each caller. Mirrors the
+		// callee resolution below; an unresolved caller (cross-package
+		// qualified ref, nodesForIDs limitation) is rendered without a
+		// location — never fabricated.
+		if def, ok := findDef(ix, c); ok && def.File != "" {
+			if rep.CallerLocs == nil {
+				rep.CallerLocs = map[string]string{}
+			}
+			rep.CallerLocs[name] = fmt.Sprintf("%s:%d", def.File, def.Line)
+		}
 		if synth := EdgeSynthLabel(ix, c, resolved); synth != "" {
 			if rep.CallerSynth == nil {
 				rep.CallerSynth = map[string]string{}
@@ -259,15 +271,32 @@ func ResolveFuzzy(ix *index.Index, query string) (string, bool) {
 	if ix == nil {
 		return "", false
 	}
+	// L5: docs headings must not win fuzzy RESOLUTION over real code
+	// symbols — a heading merely CONTAINS the query words (e.g. "kern_run"
+	// matching a heading that names `kern check`), while a symbol IS the
+	// name. Skip heading hits unless no real symbol matched at all.
+	var headingFallback string
 	for _, h := range RankedSearchScored(ix, query, 5) {
-		if h.MatchedAll && h.Score >= 150 {
-			if full := h.Symbol.FullName(); full != "" {
-				return full, true
-			}
-			if n := h.Symbol.Name; n != "" {
-				return n, true
-			}
+		if !(h.MatchedAll && h.Score >= 150) {
+			continue
 		}
+		full := h.Symbol.FullName()
+		if full == "" {
+			full = h.Symbol.Name
+		}
+		if full == "" {
+			continue
+		}
+		if h.Symbol.Kind == "heading" {
+			if headingFallback == "" {
+				headingFallback = full
+			}
+			continue
+		}
+		return full, true
+	}
+	if headingFallback != "" {
+		return headingFallback, true
 	}
 	return "", false
 }
@@ -289,10 +318,15 @@ func RenderExplore(r *ExploreReport) string {
 	}
 	fmt.Fprintf(&b, "symbol: %s (%s %s:%d)\n\n",
 		r.Resolved, r.Definition.Kind, r.Definition.File, r.Definition.Line)
-	b.WriteString("== callers (" + strconv.Itoa(len(r.Callers)) + ") ==\n")
-	b.WriteString(joinLinesConf(r.Callers, r.CallerConf, r.CallerSynth))
+	// The callers count is UNIQUE SIMPLE NAMES of DIRECT callers: the loop
+	// above dedupes CallersFor (the index's direct callers) by simpleName,
+	// so "pkg1.Foo" + "pkg2.Foo" collapse to one "Foo". Labeling that
+	// semantics stops this count from being mistaken for impact's
+	// graph-node caller count, which counts a different universe (P2).
+	b.WriteString("== callers (" + strconv.Itoa(len(r.Callers)) + ", unique simple names of direct callers) ==\n")
+	b.WriteString(joinLinesConf(r.Callers, r.CallerConf, r.CallerSynth, r.CallerLocs))
 	b.WriteString("== callees (" + strconv.Itoa(len(r.Callees)) + ") ==\n")
-	b.WriteString(joinLinesConf(r.Callees, r.CalleeConf, r.CalleeSynth))
+	b.WriteString(joinLinesConf(r.Callees, r.CalleeConf, r.CalleeSynth, nil))
 	b.WriteString("== blast radius (" + strconv.Itoa(len(r.BlastRadius)) + " symbols, " + strconv.Itoa(len(r.BlastFiles)) + " files) ==\n")
 	b.WriteString(joinLines(r.BlastRadius))
 	if len(r.BlastFiles) > 0 {
@@ -338,8 +372,11 @@ func joinLines(in []string) string {
 
 // joinLinesConf renders a name list with each row's provenance label
 // appended as "[EXTRACTED]/[INFERRED]/[AMBIGUOUS]" when a label is recorded,
-// so every hop in the answer is FACT/INFERENCE-classifiable.
-func joinLinesConf(in []string, conf, synth map[string]string) string {
+// so every hop in the answer is FACT/INFERENCE-classifiable. locs carries
+// each row's "file:line" ("" when the definition could not be resolved),
+// rendered as " — file:line" after the label — nil for lists rendered
+// name-only (callees stay unchanged).
+func joinLinesConf(in []string, conf, synth, locs map[string]string) string {
 	if len(in) == 0 {
 		return "(none)\n"
 	}
@@ -348,6 +385,9 @@ func joinLinesConf(in []string, conf, synth map[string]string) string {
 		b.WriteString(n)
 		if label := conf[n]; label != "" {
 			b.WriteString(" [" + label + "]")
+		}
+		if loc := locs[n]; loc != "" {
+			b.WriteString(" — " + loc)
 		}
 		if s := synth[n]; s != "" {
 			b.WriteString(" (SYNTHESIZED: " + s + ")")

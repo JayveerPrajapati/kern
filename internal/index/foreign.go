@@ -187,6 +187,19 @@ func quickExt(rel string) bool {
 // index's file-selection policy.
 func QuickExt(rel string) bool { return quickExt(rel) }
 
+// IsDocFile reports whether a root-relative path is a documentation file
+// (markdown or HTML) rather than code — the languages detectLang maps to
+// "markdown"/"html" prose extraction. Doc files stay in the index graph
+// (they exist and may carry prose symbols), but code blast-radius file lists
+// exclude them: a change to a function does not "break" a doc page.
+func IsDocFile(rel string) bool {
+	switch strings.ToLower(filepath.Ext(rel)) {
+	case ".md", ".mdx", ".markdown", ".html", ".htm":
+		return true
+	}
+	return false
+}
+
 // isIndexable reports whether a file should be part of the index.
 func isIndexable(rel string, src []byte) bool {
 	// Binary-content sniffing: a NUL byte in the first 8KB is the standard

@@ -1,4 +1,4 @@
-//go:build treesitter
+//go:build !notreesitter
 
 package index
 
@@ -176,8 +176,7 @@ func tsJavaResolveInvocation(n *sitter.Node, src []byte, fn string, lt map[strin
 		if nameNode == nil {
 			return
 		}
-		receiver := string(src[obj.StartByte():obj.EndByte()])
-		if t, ok := lt[receiver]; ok && t != "" {
+		if t, ok := lt[string(src[obj.StartByte():obj.EndByte()])]; ok && t != "" {
 			tsJavaReplaceCallee(calls, fn, callee, t+"."+string(src[nameNode.StartByte():nameNode.EndByte()]))
 		}
 	case "method_invocation":

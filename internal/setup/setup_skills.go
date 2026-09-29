@@ -130,6 +130,8 @@ var globalSkillTargets = []globalSkillLocation{
 	{agent: "skills-claude (global)", homeDirCheck: ".claude", skillsDir: filepath.Join(".claude", "skills")},
 	{agent: "skills-cursor (global)", homeDirCheck: ".cursor", skillsDir: filepath.Join(".cursor", "rules"), isCursor: true},
 	{agent: "skills-opencode (global)", homeDirCheck: filepath.Join(".config", "opencode"), skillsDir: filepath.Join(".config", "opencode", "skills")},
+	{agent: "skills-opencode (global ~/.opencode)", homeDirCheck: ".opencode", skillsDir: filepath.Join(".opencode", "skills")},
+	{agent: "skills-agents (global)", homeDirCheck: ".agents", skillsDir: filepath.Join(".agents", "skills")},
 	{agent: "skills-codex (global)", homeDirCheck: ".codex", skillsDir: filepath.Join(".codex", "skills")},
 	{agent: "skills-qwen (global)", homeDirCheck: ".qwen", skillsDir: filepath.Join(".qwen", "skills")},
 	{agent: "skills-qoder (global)", homeDirCheck: ".qoder", skillsDir: filepath.Join(".qoder", "skills")},

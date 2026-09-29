@@ -229,6 +229,17 @@ func Run(ctx context.Context, opts Options) (*Report, error) {
 	if err != nil {
 		absRoot = opts.Root
 	}
+	// Self-heal: if a previous run was interrupted (SIGKILL, crash) and left a
+	// stale journal + mutated files behind, restore those files FIRST and tell
+	// the user, before any new mutation happens (audit C2).
+	if n, rerr := recoverStaleJournals(absRoot); n > 0 || rerr != nil {
+		if rerr != nil {
+			fmt.Fprintf(os.Stderr, "mutation: WARNING: stale journal restore incomplete: %v\n", rerr)
+		}
+		if n > 0 {
+			fmt.Fprintf(os.Stderr, "mutation: restored %d file(s) left modified by an interrupted previous mutation run (stale journal self-heal)\n", n)
+		}
+	}
 	if opts.MaxMutants <= 0 {
 		opts.MaxMutants = 50
 	}
@@ -286,9 +297,39 @@ func Run(ctx context.Context, opts Options) (*Report, error) {
 		}, nil
 	}
 
-	// Execute mutation test runner in isolated temporary file swap
+	// Execute mutation test runner in isolated temporary file swap.
+	// Every file touched is journaled (original content backed up under
+	// .kern/mutation-backup/, recorded in .kern/mutation-journal-<pid>.json)
+	// and restored on EVERY exit path — normal return, error, panic (defer)
+	// and SIGINT/SIGTERM (signal handler). A killed run leaves a journal the
+	// next Run self-heals (audit C2: mutants must never linger in the tree).
 	killed := 0
 	survived := 0
+
+	journal, jerr := newMutationJournal(absRoot)
+	if jerr != nil {
+		// Fail closed: without a crash-safe journal we must not write mutants
+		// to the real tree at all.
+		return nil, fmt.Errorf("mutation: cannot create crash-safe journal: %w", jerr)
+	}
+	ensureSignalRestore()
+	journal.register()
+	defer func() {
+		if r := recover(); r != nil {
+			if _, rerr := journal.restore(); rerr != nil {
+				fmt.Fprintf(os.Stderr, "mutation: panic restore failed: %v\n", rerr)
+			}
+			journal.cleanup()
+			journal.unregister()
+			panic(r)
+		}
+		if _, rerr := journal.restore(); rerr != nil {
+			fmt.Fprintf(os.Stderr, "mutation: WARNING: restore failed: %v\n", rerr)
+		}
+		journal.cleanup()
+		journal.unregister()
+	}()
+	fmt.Fprintf(os.Stderr, "mutation: evaluating %d mutant(s) — working-tree files are TEMPORARILY modified and are auto-restored on completion, interrupt, or crash (journal: %s)\n", len(allMutants), journal.path)
 
 	for i := range allMutants {
 		m := &allMutants[i]
@@ -310,7 +351,12 @@ func Run(ctx context.Context, opts Options) (*Report, error) {
 			continue
 		}
 
-		// Swap file on disk temporarily
+		// Journal the original content (crash-safe backup + journal entry)
+		// BEFORE touching the real file; then swap the mutant in.
+		if err := journal.add(fullPath, origSrc); err != nil {
+			m.Status = "compile_error"
+			continue
+		}
 		if err := os.WriteFile(fullPath, mutSrc, 0644); err != nil {
 			continue
 		}
