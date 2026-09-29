@@ -63,8 +63,8 @@ func setup() {
 	if !strings.Contains(out, "(SYNTHESIZED: router:net-http)") {
 		t.Errorf("explore output missing SYNTHESIZED annotation:\n%s", out)
 	}
-	if !strings.Contains(out, "setup [INFERRED] (SYNTHESIZED: router:net-http)") {
-		t.Errorf("caller row missing tier+synth combo:\n%s", out)
+	if !strings.Contains(out, "setup [INFERRED] — app.go:7 (SYNTHESIZED: router:net-http)") {
+		t.Errorf("caller row missing tier+loc+synth combo:\n%s", out)
 	}
 }
 

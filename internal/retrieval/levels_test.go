@@ -217,6 +217,43 @@ func TestRenderOutput(t *testing.T) {
 	}
 }
 
+// TestRenderClipsLongQueryHeader (P1): a long raw query echoed in the
+// level-1 header is clipped to ~80 chars with an ellipsis — a 30x-repeated
+// meta request must not blow up the output header. Short queries echo in
+// full.
+func TestRenderClipsLongQueryHeader(t *testing.T) {
+	long := strings.Repeat("how does the dispatch pipeline handle retries under sustained load ", 30)
+	r := &Result{
+		Level: L1,
+		Query: long,
+		Items: []L1Item{{
+			Handle:     &Handle{ID: "abc12345", Name: "helperA", Source: "a.go", Line: 3},
+			Name:       "helperA",
+			Kind:       "func",
+			File:       "a.go",
+			Line:       3,
+			TokenCost:  10,
+			Confidence: 1,
+		}},
+	}
+	out := Render(r)
+	header := strings.SplitN(out, "\n", 2)[0]
+	if strings.Contains(header, long) {
+		t.Errorf("level-1 header must not echo the full query")
+	}
+	if !strings.Contains(header, "…") {
+		t.Errorf("clipped header must carry an ellipsis marker: %q", header)
+	}
+	if len(header) > 160 {
+		t.Errorf("header too long (%d chars): %.120s...", len(header), header)
+	}
+	// Short queries echo in full.
+	short := &Result{Level: L1, Query: "helperA", Items: r.Items}
+	if !strings.Contains(Render(short), "== level 1: helperA (") {
+		t.Errorf("short query must echo in full: %q", Render(short))
+	}
+}
+
 func TestRetrieveForTask(t *testing.T) {
 	ix := buildTestIndex(t)
 	// documentation → L1: search-based packet listing matches for the symbol.

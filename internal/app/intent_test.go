@@ -31,7 +31,31 @@ func TestCompileIntentClassification(t *testing.T) {
 		{"fix the tests", domain.IntentTest},
 		{"add unit tests", domain.IntentTest},
 		{"run the test suite", domain.IntentTest},
-		{"testgaps is misbehaving", domain.IntentCodeChange},
+		// "testgaps" is not a TEST request, and with no change keyword at
+		// all it falls to the UNDERSTAND default (P1: safest direction) —
+		// never CODE_CHANGE.
+		{"testgaps is misbehaving", domain.IntentUnderstand},
+		// P1: requests with no keyword match default to UNDERSTAND, not
+		// CODE_CHANGE — a read-only analysis must never compile execution
+		// capabilities. Explicit change phrasing still routes to CODE_CHANGE.
+		{"analyze the architecture of internal/mcp and report on it", domain.IntentUnderstand},
+		{"understand the dispatch handler", domain.IntentUnderstand},
+		{"implement a new Greet function in internal/strutil", domain.IntentCodeChange},
+		{"add a login endpoint to auth.go", domain.IntentCodeChange},
+		// E-LOW classifier fix (Oracle): the "moderniz"/"modernis" stems cover
+		// all forms — modernize, modernization, and British modernise.
+		{"modernization analysis", domain.IntentModernization},
+		{"modernizing the auth service", domain.IntentModernization},
+		// extractServiceRe: up to two filler words between "extract" and
+		// "service(s)" — aligns with agents.ClassifyTask.
+		{"extract a payment service", domain.IntentModernization},
+		// Negative: three filler words ("data from the") exceed {0,2}.
+		{"extract data from the service", domain.IntentUnderstand},
+		// patchExecRe: "apply the patch" is a CODE_CHANGE.
+		{"apply the patch", domain.IntentCodeChange},
+		// Negative: "execute the tests" stays TEST — the TEST branch precedes
+		// CODE_CHANGE, so bare "execute" does not leak into CODE_CHANGE.
+		{"execute the tests", domain.IntentTest},
 	}
 	for _, tc := range cases {
 		t.Run(tc.intent, func(t *testing.T) {
@@ -57,6 +81,31 @@ func TestCompileIntentFields(t *testing.T) {
 	}
 	if ci.RawText != "add caching to UserService" {
 		t.Errorf("RawText=%q", ci.RawText)
+	}
+}
+
+// TestExtractTargetFallbackBlacklist verifies the target heuristic never
+// falls back to a trailing pronoun/stopword: "…and report on it" must not
+// yield target "it" — an empty target is honest when nothing meaningful was
+// extracted (P1). The preposition+CamelCase and bare-CamelCase paths are
+// unaffected.
+func TestExtractTargetFallbackBlacklist(t *testing.T) {
+	cases := []struct {
+		intent string
+		want   string
+	}{
+		{"analyze the architecture of internal/mcp and report on it", ""},
+		{"understand this", ""},
+		{"review that", ""},
+		{"what if we remove them", ""},
+		{"explain how the scheduler works", "works"},
+		{"add caching to UserService", "UserService"},
+		{"fix the N+1 query in UserRepository", "UserRepository"},
+	}
+	for _, tc := range cases {
+		if got := CompileIntent(tc.intent).Target; got != tc.want {
+			t.Errorf("CompileIntent(%q).Target = %q, want %q", tc.intent, got, tc.want)
+		}
 	}
 }
 

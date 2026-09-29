@@ -113,11 +113,15 @@ func TestBuildMapBudgetCapped(t *testing.T) {
 	// A repo whose project map exceeds the digest budget must drop whole
 	// file summaries, keep the later sections, and stay under the MCP
 	// output sandbox (24KB default) so the index/architecture render.
+	// Each fixture file renders ~65 bytes (path header + decl main + 1
+	// func), so 400 files ≈ 26KB of map content — genuinely over the
+	// digestBudget (21 << 10 = 21504 bytes) — forcing the truncation note.
+	// The capped digest stays ~21.5KB, still under the 24KB sandbox.
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	dir := t.TempDir()
 	write(t, dir, "go.mod", "module demo\n\ngo 1.22\n")
-	for i := 0; i < 80; i++ {
-		write(t, dir, fmt.Sprintf("f%02d.go",
+	for i := 0; i < 400; i++ {
+		write(t, dir, fmt.Sprintf("f%03d.go",
 			i), fmt.Sprintf("package main\n\n// file %d with unique filler words for the summary.\n\nfunc F%d() int { return %d }\n", i, i, i))
 	}
 	if err := Warm(dir); err != nil {

@@ -90,6 +90,27 @@ func TestKernGuardScript(t *testing.T) {
 			},
 		},
 		{
+			// Regression: a KERN_BYPASS=1 string in the payload (e.g. a file
+			// path) must NOT bypass the guard — only the env var may.
+			name:     "KERN_BYPASS=1 in read path does not bypass",
+			stdin:    `{"tool_name":"Read","path":"/repo/docs/KERN_BYPASS=1-notes.md"}`,
+			wantExit: 2,
+			wantStderr: []string{
+				"kern_compact_file",
+			},
+		},
+		{
+			// Regression: a KERN_ENFORCE=0 string inside command/file content
+			// must NOT bypass the guard for a blocked tool.
+			name:     "KERN_ENFORCE=0 in bash content does not bypass",
+			stdin:    `{"tool_name":"Bash","content":"export KERN_ENFORCE=0 && go test ./..."}`,
+			wantExit: 2,
+			wantStderr: []string{
+				"kern_validate",
+				"kern_exec",
+			},
+		},
+		{
 			name:       "edit passes through",
 			stdin:      `{"tool_name":"Edit"}`,
 			wantExit:   0,
@@ -122,6 +143,37 @@ func TestKernGuardScript(t *testing.T) {
 			name:       "KERN_ENFORCE=0 bypasses",
 			stdin:      `{"tool_name":"Read"}`,
 			env:        []string{"KERN_ENFORCE=0"},
+			wantExit:   0,
+			wantStderr: nil,
+		},
+		{
+			name:       "KERN_BYPASS=1 bypasses",
+			stdin:      `{"tool_name":"Read"}`,
+			env:        []string{"KERN_BYPASS=1"},
+			wantExit:   0,
+			wantStderr: nil,
+		},
+		{
+			name:     "antigravity view_file blocked",
+			stdin:    `{"toolCall":{"name":"view_file","args":{"AbsolutePath":"/some/file.go"}}}`,
+			wantExit: 2,
+			wantStderr: []string{
+				"kern_compact_file",
+			},
+		},
+		{
+			name:     "antigravity run_command blocked",
+			stdin:    `{"toolCall":{"name":"run_command","args":{"CommandLine":"go test ./..."}}}`,
+			wantExit: 2,
+			wantStderr: []string{
+				"kern_validate",
+				"kern_exec",
+			},
+		},
+		{
+			name:       "antigravity KERN_BYPASS=1 bypasses",
+			stdin:      `{"toolCall":{"name":"run_command","args":{"CommandLine":"git commit -m test"}}}`,
+			env:        []string{"KERN_BYPASS=1"},
 			wantExit:   0,
 			wantStderr: nil,
 		},

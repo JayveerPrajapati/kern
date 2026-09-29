@@ -328,7 +328,10 @@ func TestRunDiffGateEmitsProgressLines(t *testing.T) {
 	dir := t.TempDir()
 	git := func(args ...string) {
 		t.Helper()
-		cmd := exec.Command("git", args...)
+		// -c core.hooksPath= keeps tests independent of machine-global git
+		// hooks (git config --global core.hooksPath may point at the kern
+		// global hook).
+		cmd := exec.Command("git", append([]string{"-c", "core.hooksPath="}, args...)...)
 		cmd.Dir = dir
 		if out, err := cmd.CombinedOutput(); err != nil {
 			t.Fatalf("git %v: %v\n%s", args, err, out)
@@ -376,7 +379,10 @@ func TestDiscoverWorkingTreeChangesIncludesUntracked(t *testing.T) {
 	}
 	dir := t.TempDir()
 	run := func(args ...string) {
-		cmd := exec.Command("git", args...)
+		// -c core.hooksPath= keeps tests independent of machine-global git
+		// hooks (git config --global core.hooksPath may point at the kern
+		// global hook).
+		cmd := exec.Command("git", append([]string{"-c", "core.hooksPath="}, args...)...)
 		cmd.Dir = dir
 		if out, err := cmd.CombinedOutput(); err != nil {
 			t.Fatalf("git %v: %v (%s)", args, err, out)

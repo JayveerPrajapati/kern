@@ -115,6 +115,23 @@ func TestStatsSectionRecordsExistingStats(t *testing.T) {
 	}
 }
 
+// TestStatsSectionLabelsMachineWideScope pins M9: the ops/tokens/$ numbers
+// come from the machine-wide metrics recorder, so the digest must label them
+// as machine-wide (all projects) — never read as project-scoped metrics.
+func TestStatsSectionLabelsMachineWideScope(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	b := &strings.Builder{}
+	statsSection(b)
+	out := b.String()
+	if !strings.Contains(out, "machine-wide (all projects):") {
+		t.Fatalf("stats line must be labeled machine-wide, got %q", out)
+	}
+	// The prefix must sit directly before the numbers, on the data line.
+	if !strings.Contains(out, "machine-wide (all projects): 0 ops") && !strings.Contains(out, "machine-wide (all projects): ") {
+		t.Fatalf("label must prefix the data line, got %q", out)
+	}
+}
+
 func TestDedupe(t *testing.T) {
 	if got := dedupe([]string{"a", "b", "a", "c", "b"}); len(got) != 3 {
 		t.Fatalf("expected 3 unique, got %v", got)

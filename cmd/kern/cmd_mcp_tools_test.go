@@ -201,3 +201,43 @@ func TestRunSynthesizeTestBadFlagExits2(t *testing.T) {
 		t.Fatalf("stderr must not contain the stdlib flag usage dump:\n%s", out)
 	}
 }
+
+// TestRunHealthDefaultsRootPins the dogfooding B-HIGH fix: `kern health`
+// without --root must resolve the project root (like every other CLI
+// command) so the disk-index freshness probe gets a real root. The old code
+// passed the empty f.root straight through, so DiskIndexView("") reported
+// stale=true / verdict:"unknown" / root:"" even on a fresh index —
+// contradicting kern doctor and kern index --status.
+func TestRunHealthDefaultsRoot(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	root := jsonCliFixture(t)
+	// Build a real on-disk index first (cold).
+	runIndex([]string{root, "--json"})
+	// Run from inside the fixture so the default root "." resolves to it.
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd: %v", err)
+	}
+	if err := os.Chdir(root); err != nil {
+		t.Fatalf("Chdir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(cwd) })
+	out := captureStdout(t, func() { runHealth(nil) })
+	m := assertValidJSON(t, out)
+	idx, ok := m["index"].(map[string]any)
+	if !ok {
+		t.Fatalf("health output missing index block: %v", m)
+	}
+	if idx["root"] != "." {
+		t.Fatalf("index.root = %v, want \".\" (defaulted, not empty)", idx["root"])
+	}
+	if idx["fresh"] != true {
+		t.Fatalf("index.fresh = %v, want true on a fresh index (B-HIGH: was stale/unknown with an empty root)", idx["fresh"])
+	}
+	if idx["stale"] != false {
+		t.Fatalf("index.stale = %v, want false (B-HIGH)", idx["stale"])
+	}
+	if idx["verdict"] != "fresh" {
+		t.Fatalf("index.verdict = %v, want fresh (B-HIGH: was unknown)", idx["verdict"])
+	}
+}

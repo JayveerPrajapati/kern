@@ -249,3 +249,106 @@ func TestParseChangeKind(t *testing.T) {
 		}
 	}
 }
+
+// TestBuildStatelessPlanTargetScopedRisk: a net-new intent that names a
+// concrete target path must scope the plan risk to that target — the packet's
+// tree-global risk rows (which describe an unrelated symbol's blast radius)
+// must not elevate the plan when the target is not in the packet's scope —
+// and the steps must name real files in the target package.
+func TestBuildStatelessPlanTargetScopedRisk(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "internal", "strutil"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "go.mod"), []byte("module fixture\n\ngo 1.20\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Tree-global risk rows: HIGH, but for an unrelated symbol (internal/memory),
+	// NOT the named target — exactly the "Add a Greet function to
+	// internal/strutil/strutil.go" case where the intent resolves to memory.Add.
+	pkt := domain.ContextPacket{
+		Risks: []domain.Risk{{Level: domain.RiskHigh, Factors: []string{"blast-radius:large"}}},
+		Files: []domain.File{{Path: "internal/memory/memory.go"}},
+	}
+	plan := BuildStatelessPlan("Add a Greet function to internal/strutil/strutil.go", pkt, root)
+	if plan.Risk != "low" {
+		t.Errorf("target-scoped risk = %q, want low (target not in packet scope)", plan.Risk)
+	}
+	joined := strings.Join(plan.ImplementationSteps, "\n")
+	for _, want := range []string{"internal/strutil/strutil.go", "internal/strutil/strutil_test.go"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("grounded plan missing %q, got:\n%s", want, joined)
+		}
+	}
+}
+
+// TestBuildStatelessPlanRiskKeptWhenPacketCoversTarget: when the packet's own
+// scope includes the named target, the packet risk rows ARE about the target
+// and must be kept (scope, don't guess).
+func TestBuildStatelessPlanRiskKeptWhenPacketCoversTarget(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "internal", "strutil"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "go.mod"), []byte("module fixture\n\ngo 1.20\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	pkt := domain.ContextPacket{
+		Risks: []domain.Risk{{Level: domain.RiskHigh, Factors: []string{"governance:security:write"}}},
+		Files: []domain.File{{Path: "internal/strutil/strutil.go"}},
+	}
+	plan := BuildStatelessPlan("Refactor the Greet function in internal/strutil/strutil.go", pkt, root)
+	if plan.Risk != "high" {
+		t.Errorf("packet-scoped risk = %q, want high (packet covers the target)", plan.Risk)
+	}
+}
+
+// TestBuildStatelessPlanSecuritySensitiveTargetStaysHigh: a target under a
+// security-sensitive path stays high even when the packet's rows describe an
+// unrelated symbol — calibrating to low for auth/secret code would be
+// fabricating a clean bill (keep honest).
+func TestBuildStatelessPlanSecuritySensitiveTargetStaysHigh(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "internal", "auth"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "go.mod"), []byte("module fixture\n\ngo 1.20\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	pkt := domain.ContextPacket{
+		Risks: []domain.Risk{{Level: domain.RiskCritical, Factors: []string{"governance:source:write"}}},
+		Files: []domain.File{{Path: "internal/memory/memory.go"}},
+	}
+	plan := BuildStatelessPlan("Add token refresh to internal/auth/token.go", pkt, root)
+	if plan.Risk != "high" {
+		t.Errorf("security-sensitive target risk = %q, want high", plan.Risk)
+	}
+}
+
+// TestBuildStatelessPlanUnresolvableTargetKeepsGeneric: an intent that names a
+// target path that does not resolve on disk keeps the generic template
+// (honest fallback) — no fabricated file names, and the packet risk is kept.
+func TestBuildStatelessPlanUnresolvableTargetKeepsGeneric(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "go.mod"), []byte("module fixture\n\ngo 1.20\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	pkt := domain.ContextPacket{
+		Risks: []domain.Risk{{Level: domain.RiskHigh, Factors: []string{"blast-radius:large"}}},
+		Files: []domain.File{{Path: "internal/memory/memory.go"}},
+	}
+	plan := BuildStatelessPlan("Add a Greet function to internal/strutil/strutil.go", pkt, root)
+	if plan.Risk != "low" {
+		// The intent NAMES internal/strutil (not in packet scope, not
+		// security-sensitive): even though the dir does not exist, the packet
+		// rows are not evidence about it — target-scoped calibration applies.
+		t.Errorf("named-target risk = %q, want low (rows are not about the target)", plan.Risk)
+	}
+	joined := strings.Join(plan.ImplementationSteps, "\n")
+	if strings.Contains(joined, "internal/strutil") {
+		t.Errorf("unresolvable target must keep the generic template, got:\n%s", joined)
+	}
+	if !strings.Contains(joined, "Implement the feature in a new file under the relevant package.") {
+		t.Errorf("generic fallback step missing, got:\n%s", joined)
+	}
+}

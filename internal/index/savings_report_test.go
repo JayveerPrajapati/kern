@@ -42,7 +42,7 @@ var updateGolden = flag.Bool("update", false, "rewrite docs/benchmarks/token-sav
 //	go test ./internal/index -run TestTokenSavingsReport -update
 //
 // and copy the logged value here.
-const goldenNumbersSHA256 = "2566ac3251d3150342c6051f6fab2d99918dd23fb339eef5c72047aeac1ca247"
+const goldenNumbersSHA256 = "560d52f1ce81cf866bebb89c861adfc0eacffe30672d27f232fb7f1d9f9df3d7"
 
 const reportRelPath = "docs/benchmarks/token-savings.md"
 

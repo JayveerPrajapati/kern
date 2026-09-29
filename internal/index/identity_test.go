@@ -13,7 +13,12 @@ import (
 // the test on error.
 func testGit(t *testing.T, dir string, args ...string) string {
 	t.Helper()
-	out, err := runGit(dir, args...)
+	// -c core.hooksPath= isolates fixture repos from machine-global git hooks
+	// (kern install hook --global): fixtures commit content the global
+	// pre-commit gate could block, and the global post-commit hook's memory
+	// writes would dirty the "clean tree" the TreeOID fast path asserts on.
+	// Production runGit (identity.go) stays untouched — it serves read paths.
+	out, err := runGit(dir, append([]string{"-c", "core.hooksPath="}, args...)...)
 	if err != nil {
 		t.Fatalf("git %v in %s: %v", args, dir, err)
 	}

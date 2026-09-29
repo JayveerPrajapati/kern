@@ -17,10 +17,13 @@ type FixtureResult struct {
 // web -> db edge is forbidden; all other edges are allowed by default.
 const boundariesJSON = `{"rules":[{"from":"web","to":"db","action":"forbid"}]}`
 
-// runGit runs git in dir.
+// runGit runs git in dir. The -c core.hooksPath= isolation detaches fixture
+// repos from any machine-global git hooks (kern install hook --global):
+// fixtures deliberately commit policy-violating content and must not be
+// gated by the host machine's configuration.
 func runGit(t *testing.T, dir string, args ...string) {
 	t.Helper()
-	cmd := exec.Command("git", args...)
+	cmd := exec.Command("git", append([]string{"-c", "core.hooksPath="}, args...)...)
 	cmd.Dir = dir
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("git %v in %s: %v\n%s", args, dir, err, out)

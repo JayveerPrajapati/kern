@@ -545,3 +545,21 @@ func TestLogSemcacheProfileIsolation(t *testing.T) {
 		t.Fatalf("default profile must not be served profile A's entry (FromCache=%v SemanticHit=%v)", def.FromCache, def.SemanticHit)
 	}
 }
+
+// TestMain pins an UNREACHABLE default provider for the whole package so
+// every bare Prompt() call (no explicit --llm) deterministically falls back
+// to the deterministic path (dogfooding G-MED hermeticity). Before the fix,
+// the LLM stage never ran without --llm, so tests were immune to the host
+// machine; now the stage DEFAULTS to the auto chain, and on a machine with
+// agent CLIs installed (claude/opencode/...) the chain would actually answer
+// — replacing the deterministic output tests assert and adding seconds per
+// call. Individual tests that pin their own provider via t.Setenv override
+// these defaults (t.Setenv restores after each test).
+func TestMain(m *testing.M) {
+	_ = os.Setenv("KERN_LLM_PROVIDER", "ollama")
+	_ = os.Setenv("OLLAMA_HOST", "http://127.0.0.1:1")
+	code := m.Run()
+	_ = os.Unsetenv("KERN_LLM_PROVIDER")
+	_ = os.Unsetenv("OLLAMA_HOST")
+	os.Exit(code)
+}

@@ -182,7 +182,7 @@ func TestGitignoreGeneratedCoversNewAgents(t *testing.T) {
 	if err != nil {
 		t.Fatalf("gitignore not written: %v", err)
 	}
-	for _, want := range []string{".continue/", ".windsurf/", ".kern/", ".gemini/", ".kiro/", ".github/hooks/"} {
+	for _, want := range []string{".continue/", ".windsurf/", ".kern/", ".gemini/", ".kiro/", ".github/hooks/", ".agents/rules/kern.md", ".agents/hooks.json"} {
 		if !strings.Contains(string(b), want) {
 			t.Errorf(".gitignore missing %q:\n%s", want, b)
 		}

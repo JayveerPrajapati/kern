@@ -381,17 +381,19 @@ func TestDaemonModeServesMultipleClients(t *testing.T) {
 	t.Setenv("KERN_ROOTS", root) // the daemon's workspace: it serves ITS repo
 	config.Reset()
 
-	// Pick a free loopback port (listen+close+reuse; standard test pattern).
+	// Bind a free loopback port ONCE and hand the listener to the daemon.
+	// (The listen-close-rebind pattern races under parallel -race runs: the
+	// OS reuses the just-freed port for another test's server.)
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer func() { _ = ln.Close() }() // error-return path: ownership reverts
 	addr := ln.Addr().String()
-	_ = ln.Close()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go func() { _ = ServeHTTPContext(ctx, addr) }() // daemon lives with the test
+	go func() { _ = ServeHTTPContextWithTLSOn(ctx, ln, nil) }() // daemon lives with the test
 
 	client := &http.Client{Timeout: 2 * time.Second}
 	// Wait for readiness.
@@ -512,3 +514,65 @@ func TestHandleHTTPAllowlistEnforced(t *testing.T) {
 
 // strconv_quote JSON-quotes dir without pulling fmt in twice.
 func strconv_quote(s string) string { return `"` + s + `"` }
+
+// TestServeHTTPContextTCPAddrServesHealth covers the ADDR-based TCP bind path
+// of transport.ServeListener (ServeHTTPContext → ServeListener with an explicit
+// loopback TCP address), which the *On listener-handoff seam bypasses. A
+// listen+close+rebind is used to discover a free port; a parallel port steal
+// surfaces as a bind error inside ServeListener, and the scenario retries with
+// a fresh port instead of flaking the way the two racing TLS tests did.
+func TestServeHTTPContextTCPAddrServesHealth(t *testing.T) {
+	client := &http.Client{Timeout: 2 * time.Second}
+	for attempt := 0; attempt < 10; attempt++ {
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		addr := ln.Addr().String()
+		_ = ln.Close()
+
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan error, 1)
+		go func() { done <- ServeHTTPContext(ctx, addr) }()
+
+		// Wait for readiness over plain HTTP.
+		healthy := false
+		deadline := time.Now().Add(15 * time.Second)
+		for time.Now().Before(deadline) {
+			select {
+			case err := <-done:
+				// Bind failed (port stolen by a parallel test): retry fresh.
+				cancel()
+				ln2, lerr := net.Listen("tcp", "127.0.0.1:0")
+				if lerr != nil {
+					t.Fatal(lerr)
+				}
+				addr = ln2.Addr().String()
+				_ = ln2.Close()
+				ctx, cancel = context.WithCancel(context.Background())
+				done = make(chan error, 1)
+				go func() { done <- ServeHTTPContext(ctx, addr) }()
+				if err == nil {
+					t.Fatalf("ServeHTTPContext returned nil without serving on %s", addr)
+				}
+				continue
+			default:
+			}
+			resp, err := client.Get("http://" + addr + "/health")
+			if err == nil {
+				_, _ = io.Copy(io.Discard, resp.Body)
+				_ = resp.Body.Close()
+				if resp.StatusCode == http.StatusOK {
+					healthy = true
+					break
+				}
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+		cancel()
+		if healthy {
+			return
+		}
+	}
+	t.Fatal("TCP addr-based server never became ready over 10 attempts")
+}

@@ -88,6 +88,9 @@ func TestScriptProfileConfinementDisabled(t *testing.T) {
 // a script reading a blocklisted file through an ABSOLUTE path (the gap the
 // HOME redirect leaves) is DENIED, while a benign script still runs.
 func TestScriptReadConfinementBlocksSensitivePath(t *testing.T) {
+	if goruntime.GOOS == "darwin" && os.Getenv("KERN_SANDBOX_ACTIVE") == "1" {
+		t.Skip("cannot nest sandbox-exec inside an active kern sandbox on macOS; covered by direct runs")
+	}
 	if goruntime.GOOS != "darwin" {
 		t.Skip("Seatbelt file-read-data confinement is darwin-only (Stage 1)")
 	}

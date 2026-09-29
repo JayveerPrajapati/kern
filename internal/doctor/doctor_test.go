@@ -189,14 +189,15 @@ func TestCheckPrecision_NoIndex(t *testing.T) {
 	}
 }
 
-// TestCheckPrecision_DefaultBuild verifies the regex build reports the honest
-// precision split: Go + Java resolved, everything else heuristic, with the
-// tree-sitter upgrade hint. Skipped under -tags treesitter where the tiers
-// are ast/resolved (covered by TestCheckPrecision_TreeSitterBuild).
+// TestCheckPrecision_DefaultBuild verifies the pure-Go (regex) build reports
+// the honest precision split: Go + Java resolved, everything else heuristic,
+// with the tree-sitter upgrade hint. Skipped in the default tree-sitter build
+// where the tiers are ast/resolved (covered by
+// TestCheckPrecision_TreeSitterBuild).
 func TestCheckPrecision_DefaultBuild(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	if index.TreesitterEnabled() {
-		t.Skip("default-build behavior not applicable under -tags treesitter")
+		t.Skip("pure-Go precision behavior not applicable in the default tree-sitter build")
 	}
 	root := t.TempDir()
 	writeGoFile(t, root, "a.go")
@@ -213,7 +214,7 @@ func TestCheckPrecision_DefaultBuild(t *testing.T) {
 	if f.Level != "warn" {
 		t.Fatalf("default-build precision = %s, want warn: %+v", f.Level, f)
 	}
-	for _, want := range []string{"1 at heuristic precision", "typescript", "skipped under --precision strict", "-tags treesitter"} {
+	for _, want := range []string{"1 at heuristic precision", "typescript", "skipped under --precision strict", "-tags notreesitter"} {
 		if !strings.Contains(f.Detail, want) {
 			t.Fatalf("detail missing %q: %s", want, f.Detail)
 		}
@@ -452,6 +453,10 @@ func TestCheckRuntime(t *testing.T) {
 }
 
 func TestCheckExecDetectsSIGKILL(t *testing.T) {
+	// Load guard: under full-suite parallelism a process spawn can exceed the
+	// 5s default and misreport as a handshake timeout instead of the SIGKILL
+	// this test asserts on.
+	t.Setenv("KERN_DOCTOR_EXEC_TIMEOUT_MS", "30000")
 	// Regression (e2e 2026-09-13): a binary killed by SIGKILL at exec
 	// (macOS Gatekeeper) reported the generic "failed to run: signal:
 	// killed" instead of the actionable re-sign guidance, because the
@@ -476,6 +481,10 @@ func TestCheckExecDetectsSIGKILL(t *testing.T) {
 // answers initialize passes (with the server name/version in the detail); a
 // stub that only prints usage fails.
 func TestCheckExecMCPInitializeHandshake(t *testing.T) {
+	// Load guard: see TestCheckExecDetectsSIGKILL — each subtest spawns
+	// several stub processes; under full-suite parallelism the default 5s
+	// probe deadline can expire mid-handshake.
+	t.Setenv("KERN_DOCTOR_EXEC_TIMEOUT_MS", "30000")
 	dir := t.TempDir()
 
 	// A stub that answers the initialize handshake passes.
@@ -512,6 +521,26 @@ func TestCheckExecMCPInitializeHandshake(t *testing.T) {
 	}
 	if f := checkExec(quiet); f.Level != "fail" {
 		t.Fatalf("quiet stub = %+v, want fail", f)
+	}
+}
+
+// TestCheckPathPATHFallback pins the doctor-path fix: when the running
+// binary has no kern-mcp sibling (a dev build run from /tmp), checkPath
+// must not warn while a real kern-mcp resolves on PATH — agents find it
+// there. Only when both the sibling and the PATH lookups miss does it warn.
+func TestCheckPathPATHFallback(t *testing.T) {
+	dir := t.TempDir()
+	stub := filepath.Join(dir, "kern-mcp")
+	if err := os.WriteFile(stub, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	f := checkPath()
+	if f.Level != "ok" {
+		t.Fatalf("checkPath with kern-mcp on PATH = %+v, want ok", f)
+	}
+	if !strings.Contains(f.Detail, "(via PATH)") {
+		t.Fatalf("ok detail = %q, want \"(via PATH)\" suffix", f.Detail)
 	}
 }
 

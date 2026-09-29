@@ -193,8 +193,9 @@ func TestHostSamplingTimeout(t *testing.T) {
 }
 
 // TestAutoChainHostFirstWhenSamplerRegistered: with a host sampler active,
-// the auto chain puts the host provider FIRST (host agent delegation),
-// before ollama and local agent CLIs.
+// the auto chain puts the host provider FIRST (host agent delegation — the
+// MCP ack: the same session does the task), then locally-installed agent
+// CLIs, then Ollama last (dogfooding G-HIGH chain order).
 func TestAutoChainHostFirstWhenSamplerRegistered(t *testing.T) {
 	h := newSamplingHarness(t)
 	h.sendInitialize(t, map[string]any{"sampling": map[string]any{}})
@@ -219,8 +220,19 @@ func TestAutoChainHostFirstWhenSamplerRegistered(t *testing.T) {
 	if _, ok := provs[0].(*llm.MCPProvider); !ok {
 		t.Errorf("chain[0] = %T, want *llm.MCPProvider (host first)", provs[0])
 	}
-	if _, ok := provs[1].(*llm.OllamaProvider); !ok {
-		t.Errorf("chain[1] = %T, want *llm.OllamaProvider", provs[1])
+	// Ollama is the LAST leg: the auto chain is host → CLIs → ollama. Any
+	// provider between host and the end must be a LocalCliProvider (or the
+	// final OllamaProvider when no agent CLI is installed).
+	for i, prov := range provs[1:] {
+		switch prov.(type) {
+		case *llm.OllamaProvider:
+			if i != len(provs[1:])-1 {
+				t.Errorf("OllamaProvider at chain[%d], want last", i+1)
+			}
+		case *llm.LocalCliProvider:
+		case *llm.MCPProvider:
+			t.Errorf("chain[%d] = *llm.MCPProvider (duplicate host leg)", i+1)
+		}
 	}
 }
 
@@ -397,5 +409,57 @@ func TestRegisterHostSamplerAllowedViaAllowlist(t *testing.T) {
 	}
 	if !strings.Contains(out, "host sampler registered") {
 		t.Errorf("registration message = %q", out)
+	}
+}
+
+// TestHostSamplingCapturesModel: the sampling response carries the model the
+// host session served; sample() records it on the session's sampler entry so
+// kern knows the active session/model (the MCP ack surface surfaced by
+// kern agents / kern_llm_providers).
+func TestHostSamplingCapturesModel(t *testing.T) {
+	h := newSamplingHarness(t)
+	h.sendInitialize(t, map[string]any{"sampling": map[string]any{}})
+	waitSampler(t, true)
+	// Mock host: read the sampling request and reply with a model field.
+	go func() {
+		line, err := readLine(h.clientR)
+		if err != nil {
+			return
+		}
+		var req struct {
+			ID     string `json:"id"`
+			Method string `json:"method"`
+		}
+		if err := json.Unmarshal([]byte(line), &req); err != nil || req.Method != "sampling/createMessage" {
+			return
+		}
+		h.write(t, map[string]any{
+			"jsonrpc": "2.0",
+			"id":      req.ID,
+			"result": map[string]any{
+				"role":    "assistant",
+				"content": map[string]any{"type": "text", "text": "host reply"},
+				"model":   "claude-3-7-sonnet-20250219",
+			},
+		})
+	}()
+	p := llm.NewMCPProvider()
+	out, err := p.Generate(context.Background(), "sys", "user prompt", llm.Options{})
+	if err != nil {
+		t.Fatalf("Generate via host sampler: %v", err)
+	}
+	if out != "host reply" {
+		t.Errorf("unexpected host reply: %q", out)
+	}
+	// The model must be recorded on the server's own sampler slot.
+	states := llm.HostSamplerStates()
+	if len(states) != 1 {
+		t.Fatalf("HostSamplerStates = %+v, want exactly one session", states)
+	}
+	if states[0].Model != "claude-3-7-sonnet-20250219" {
+		t.Errorf("captured model = %q, want claude-3-7-sonnet-20250219 (session %s)", states[0].Model, states[0].Key)
+	}
+	if !strings.HasPrefix(states[0].Key, "mcp-conn-") {
+		t.Errorf("session key = %q, want mcp-conn-*", states[0].Key)
 	}
 }

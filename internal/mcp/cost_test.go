@@ -30,9 +30,11 @@ func TestCostHintForTiers(t *testing.T) {
 	}
 }
 
-// TestHandleMetaCostHintMarker (P2-9): the kern_meta classified line carries
-// the est latency + output-token hint so agents can budget context from the
-// highest-traffic tool. Exercises the REAL handleMeta path (no mirrors).
+// TestHandleMetaCostHintMarker (P2-9, P1): the kern_meta classified line
+// carries the MEASURED wall-clock latency + output-token estimate so agents
+// can budget context from the highest-traffic tool. The old static "est Nms"
+// promise is gone — only the real elapsed time and the token estimate are
+// printed. Exercises the REAL handleMeta path (no mirrors).
 func TestHandleMetaCostHintMarker(t *testing.T) {
 	t.Parallel()
 	s := NewServer(strings.NewReader(""), io.Discard)
@@ -43,7 +45,10 @@ func TestHandleMetaCostHintMarker(t *testing.T) {
 	if !strings.Contains(out, "classified as: kern_stats") {
 		t.Fatalf("expected kern_stats classification, got: %q", out)
 	}
-	if !strings.Contains(out, "· est ") || !strings.Contains(out, "ms · ") || !strings.Contains(out, "out tokens") {
-		t.Errorf("classified line lacks the cost hint (est Nms · N out tokens): %q", out)
+	if strings.Contains(out, "· est ") {
+		t.Errorf("static est-latency hint must not appear, got: %q", out)
+	}
+	if !strings.Contains(out, "ms · ") || !strings.Contains(out, "out tokens") {
+		t.Errorf("classified line lacks measured latency + token estimate (Nms · N out tokens): %q", out)
 	}
 }

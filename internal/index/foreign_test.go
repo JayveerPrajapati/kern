@@ -1152,7 +1152,7 @@ func TestTopLevelCallbackCallsAttributedToFile(t *testing.T) {
 	// node ("file:<rel>" caller key) so caller traversals resolve.
 	src := []byte(`const btn = document.getElementById("go");
 btn.addEventListener("click", () => {
-	runReport();
+runReport();
 });
 function runReport() { fetch("/api"); }
 `)
@@ -1165,5 +1165,32 @@ function runReport() { fetch("/api"); }
 	}
 	if !found {
 		t.Fatalf("expected file:report.js -> runReport call edge, got %v", calls)
+	}
+}
+
+// TestDocFilesDoNotOwnCallEdges pins: markdown/HTML are documentation,
+// not code, so a doc page that merely MENTIONS a symbol name must never be
+// recorded as a caller of it. Without the guard, attributeTopLevelCalls
+// attributed every uncovered line of a doc page to the file node and dragged
+// export_graph.html / docs/adr/*.md into every blast-radius and WhoCalls set.
+func TestDocFilesDoNotOwnCallEdges(t *testing.T) {
+	// An HTML page whose script/template text mentions the code symbol
+	// "runReport" (the same shape that used to over-match in kern's own
+	// web/*.html templates).
+	src := []byte(`<html>
+<head><title>dashboard</title></head>
+<body>
+  <button onclick="runReport()">Go</button>
+</body>
+</html>
+`)
+	_, calls, _, _, _ := extractForeign("dashboard.html", src, "html")
+	if got := calls["file:dashboard.html"]; len(got) != 0 {
+		t.Fatalf("html file owns call edges %v, want none (doc files are not callers)", got)
+	}
+	// Markdown mentioning a code symbol must not own calls either.
+	_, calls, _, _, _ = extractForeign("README.md", []byte("# Public\n\nCall add() from the docs.\n"), "markdown")
+	if got := calls["file:README.md"]; len(got) != 0 {
+		t.Fatalf("markdown file owns call edges %v, want none (doc files are not callers)", got)
 	}
 }

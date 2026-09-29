@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -49,7 +50,9 @@ func g11Repo(t *testing.T, mainFiles, featureFiles map[string]string) string {
 
 func g11Git(t *testing.T, dir string, args ...string) {
 	t.Helper()
-	cmd := exec.Command("git", args...)
+	// -c core.hooksPath= keeps tests independent of machine-global git hooks
+	// (git config --global core.hooksPath may point at the kern global hook).
+	cmd := exec.Command("git", append([]string{"-c", "core.hooksPath="}, args...)...)
 	cmd.Dir = dir
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("git %v: %v\n%s", args, err, out)
@@ -109,6 +112,9 @@ func runCICommand(t *testing.T, binPath, repoDir, kernPath string, extraArgs ...
 
 // G11-1: clean PR — no violations, should PASS.
 func TestG11_CleanPR(t *testing.T) {
+	if runtime.GOOS == "darwin" && os.Getenv("KERN_SANDBOX_ACTIVE") == "1" {
+		t.Skip("cannot nest sandbox-exec inside an active kern sandbox on macOS (inner check/build pipeline); covered by direct runs")
+	}
 	if testing.Short() {
 		t.Skip("E2E gate test — full pipeline; runs in nightly non-short suite")
 	}

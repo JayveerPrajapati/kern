@@ -44,6 +44,177 @@ func payloadAction(ev eventbus.Event) string {
 	return m["action"]
 }
 
+// TestTaskServiceRunRecordsIntentType pins the dogfooding E-LOW fix: a
+// workflow task's Type must reflect its compiled intent kind (CODE_CHANGE →
+// "code"), not the hardcoded "analyze" that Create always assigned. The task
+// record in kern task / team previously mislabeled every workflow as an
+// analysis task.
+func TestTaskServiceRunRecordsIntentType(t *testing.T) {
+	cases := []struct {
+		intent string
+		want   string
+	}{
+		{"implement login flow", "code"},
+		{"add caching to UserService", "code"},
+		{"investigate incident: auth outage", "incident"},
+		{"modernize the payment monolith", "modernize"},
+		{"security scan for CVEs", "security"},
+		{"write tests for the tokenizer", "test"},
+		{"deploy the web console", "deploy"},
+		{"audit who changed boundaries", "audit"},
+	}
+	for _, c := range cases {
+		s, _ := newTestTaskService(t)
+		res, err := s.Run(c.intent)
+		if err != nil {
+			t.Fatalf("Run(%q): %v", c.intent, err)
+		}
+		got, ok := s.registry.GetTask(res.TaskID)
+		if !ok || got == nil {
+			t.Fatalf("Run(%q): task %s not in registry", c.intent, res.TaskID)
+		}
+		if got.Type != c.want {
+			t.Errorf("Run(%q): task type = %q, want %q", c.intent, got.Type, c.want)
+		}
+	}
+}
+
+// TestTaskServiceAnalysisTasksStayAnalyze guards the inverse of the E-LOW fix:
+// read-only analysis commands (Analyze/WhatIf/Plan) must STILL create "analyze"
+// tasks — Run/RunWorkflow derive the type, but the analysis path must not.
+func TestTaskServiceAnalysisTasksStayAnalyze(t *testing.T) {
+	s, _ := newTestTaskService(t)
+	task, err := s.createAnalysisTask("what-if: remove checkWeather")
+	if err != nil {
+		t.Fatalf("createAnalysisTask: %v", err)
+	}
+	if task.Type != "analyze" {
+		t.Errorf("analysis task type = %q, want %q", task.Type, "analyze")
+	}
+}
+
+// TestCreateWorkflowTaskPersistsCorrectTypeAtCreation pins the persist-time
+// ordering (Path B): the intent-derived type must reach the persisted store
+// record AND the task.created bus event at CREATION time, with NO state
+// transition performed after creation. The existing post-Run assertions
+// (TestTaskServiceRunRecordsIntentType) cannot catch this — they observe the
+// task after the run's first transition, which re-persists the corrected type
+// and hides the fact that the creation-time record (and the bus payload) said
+// "analyze". A task abandoned in CREATED previously kept the mislabel on disk
+// forever (E-LOW residual: kern-do / kern-loop paths).
+func TestCreateWorkflowTaskPersistsCorrectTypeAtCreation(t *testing.T) {
+	s, bus := newTestTaskService(t)
+
+	task, err := s.createWorkflowTask("implement login flow")
+	if err != nil {
+		t.Fatalf("createWorkflowTask: %v", err)
+	}
+	// No transition performed after creation: the task must still be CREATED,
+	// so the persisted record is exactly what was written at creation time.
+	if task.CurrentState() != domain.TaskCreated {
+		t.Fatalf("task state = %q, want %q (no transition should have occurred)", task.CurrentState(), domain.TaskCreated)
+	}
+
+	// The PERSISTED store record must carry the intent-derived type "code"
+	// (CompileIntent("implement login flow") → CODE_CHANGE → taskTypeForIntent
+	// → "code").
+	persisted, err := s.store.List()
+	if err != nil {
+		t.Fatalf("store.List: %v", err)
+	}
+	if len(persisted) != 1 {
+		t.Fatalf("persisted records = %d, want 1", len(persisted))
+	}
+	if persisted[0].Type != "code" {
+		t.Errorf("persisted task type = %q, want %q", persisted[0].Type, "code")
+	}
+
+	// The task.created bus event must carry the same type in its payload
+	// (the registry-level event from SubmitTask carries payload["type"]).
+	var busType string
+	for _, ev := range bus.History("") {
+		if ev.Kind != eventbus.TaskCreated {
+			continue
+		}
+		m, ok := ev.Payload.(map[string]string)
+		if !ok {
+			continue
+		}
+		if t, ok := m["type"]; ok {
+			busType = t
+		}
+	}
+	if busType != "code" {
+		t.Errorf("task.created bus event payload type = %q, want %q", busType, "code")
+	}
+
+	// Create on the same service still persists "analyze".
+	at, err := s.Create("something")
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if at.Type != "analyze" {
+		t.Errorf("Create task type = %q, want %q", at.Type, "analyze")
+	}
+	persisted, err = s.store.List()
+	if err != nil {
+		t.Fatalf("store.List: %v", err)
+	}
+	if len(persisted) != 2 {
+		t.Fatalf("persisted records = %d, want 2", len(persisted))
+	}
+	if persisted[1].Type != "analyze" {
+		t.Errorf("persisted Create task type = %q, want %q", persisted[1].Type, "analyze")
+	}
+}
+
+// TestCreateWorkflowTaskDerivesIncidentOpsTypes pins the classifier outcomes
+// the incident/ops entry-point switch (task_incident.go / task_ops.go now call
+// createWorkflowTask instead of Create) depends on: each intent string must
+// persist the derived type at creation time. The "moderniz"/"modernis" stems
+// catch modernize/modernization and the British modernise forms;
+// extractServiceRe catches "extract <up to 2 words> service(s)"; patchExecRe
+// catches "apply/execute [the|this] patch(es)" → CODE_CHANGE → "code".
+// "extract learning patterns" stays UNDERSTAND → "analyze" (the regex requires
+// service(s)) — a negative pin. If CompileIntent keywords ever change, this
+// test tells you exactly which task types would flip.
+func TestCreateWorkflowTaskDerivesIncidentOpsTypes(t *testing.T) {
+	cases := []struct {
+		intent string
+		want   string
+	}{
+		{"remediate incident: db timeout", "incident"},
+		{"correlate alert: high cpu", "incident"},
+		{"correlate alert (code): panic in router", "incident"},
+		{"investigate incident: 5xx spike", "incident"},
+		{"modernize phase 1: extract auth", "modernize"},
+		{"modernization analysis", "modernize"},
+		{"extract learning patterns", "analyze"},
+		{"execute patch", "code"},
+	}
+	for _, c := range cases {
+		s, _ := newTestTaskService(t)
+		task, err := s.createWorkflowTask(c.intent)
+		if err != nil {
+			t.Fatalf("createWorkflowTask(%q): %v", c.intent, err)
+		}
+		if task.CurrentState() != domain.TaskCreated {
+			t.Fatalf("createWorkflowTask(%q): state = %q, want %q (no transition after creation)", c.intent, task.CurrentState(), domain.TaskCreated)
+		}
+		// The PERSISTED record must carry the derived type at creation time.
+		persisted, err := s.store.List()
+		if err != nil {
+			t.Fatalf("createWorkflowTask(%q): store.List: %v", c.intent, err)
+		}
+		if len(persisted) != 1 {
+			t.Fatalf("createWorkflowTask(%q): persisted records = %d, want 1", c.intent, len(persisted))
+		}
+		if persisted[0].Type != c.want {
+			t.Errorf("createWorkflowTask(%q): persisted task type = %q, want %q", c.intent, persisted[0].Type, c.want)
+		}
+	}
+}
+
 // TestTaskServiceCancelPublishesEvent verifies Cancel persists the state change
 // and publishes a task.updated event.
 func TestTaskServiceCancelPublishesEvent(t *testing.T) {

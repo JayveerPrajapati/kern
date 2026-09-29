@@ -118,7 +118,7 @@ func TestRenameExportedSelectorAcrossPackages(t *testing.T) {
 		if e.Kind == "definition" {
 			defs++
 		}
-		if e.File == filepath.Join(root, "main.go") {
+		if e.File == "main.go" {
 			selRefs++
 		}
 	}
@@ -606,5 +606,170 @@ func TestSpliceRejectsStaleSource(t *testing.T) {
 	edits[0].Offset = 3
 	if _, err := splice(src, edits); err == nil {
 		t.Errorf("splice should reject a stale offset")
+	}
+}
+
+// copyTree copies src into dst (which must exist), preserving the tree shape
+// including hidden directories such as .kern — the exact condition under
+// which a stale index root travels with a repo.
+func copyTree(t *testing.T, src, dst string) {
+	t.Helper()
+	err := filepath.Walk(src, func(p string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(src, p)
+		if err != nil {
+			return err
+		}
+		dp := filepath.Join(dst, rel)
+		if info.IsDir() {
+			return os.MkdirAll(dp, 0o755)
+		}
+		data, err := os.ReadFile(p)
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(dp, data, info.Mode())
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestApplyReRootsCopiedIndex pins C1: when a repo is copied WITH its .kern
+// index, the persisted index still records the ORIGINAL root. A rename run
+// from the copy must re-root every edit against the CURRENT root — editing
+// the copy — and must never touch the original tree. Before the fix,
+// `kern rename --apply` from the copy rewrote the original repo's files.
+func TestApplyReRootsCopiedIndex(t *testing.T) {
+	rootA := fixture(t)
+	ixA := mustIndex(t, rootA)
+	if err := ixA.Save(); err != nil {
+		t.Fatalf("persist index in A: %v", err)
+	}
+	// Copy the whole tree including .kern to B, then load the index from B:
+	// the persisted root is still A (the stale path that caused C1).
+	rootB := t.TempDir()
+	copyTree(t, rootA, rootB)
+	ix, err := index.Load(rootB)
+	if err != nil {
+		t.Fatalf("index.Load(B): %v", err)
+	}
+	// index.Load now re-points ix.Root to the requested root (A1-N1 fix,
+	// commit 2b96415, reRootIndex), so the stale-root scenario must be
+	// reconstructed by hand: simulate an index whose recorded root is the
+	// ORIGINAL path while the working dir is the copy, to exercise rename's
+	// defense-in-depth re-root guard.
+	ix.Root = rootA
+	if ix.Root != rootA {
+		t.Fatalf("precondition: expected stale index root %q, got %q", rootA, ix.Root)
+	}
+
+	r, err := Rename(ix, "Adder", "Summer")
+	if err != nil {
+		t.Fatalf("Rename: %v", err)
+	}
+	if len(r.Edits) == 0 {
+		t.Fatal("expected edits")
+	}
+	// M8: definitions and edits are consistently index-relative — no stale
+	// absolute paths from the index leak into the report.
+	for _, d := range r.Defs {
+		if filepath.IsAbs(d.File) {
+			t.Fatalf("definition leaked an absolute path: %s", d.File)
+		}
+	}
+	for _, e := range r.Edits {
+		if filepath.IsAbs(e.File) {
+			t.Fatalf("edit target leaked an absolute path: %s", e.File)
+		}
+	}
+
+	if _, err := Apply(rootB, r); err != nil {
+		t.Fatalf("Apply(B): %v", err)
+	}
+	// B's files are renamed...
+	bMain, err := os.ReadFile(filepath.Join(rootB, "main.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(bMain), "math.Summer") {
+		t.Fatalf("B's main.go was not renamed:\n%s", bMain)
+	}
+	// ...and A's files are byte-identical to the pre-rename content.
+	aMain, err := os.ReadFile(filepath.Join(rootA, "main.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(aMain), "math.Adder") {
+		t.Fatalf("A's main.go lost the original symbol:\n%s", aMain)
+	}
+	if strings.Contains(string(aMain), "math.Summer") {
+		t.Fatalf("A's main.go was modified by a rename run in B — C1 regression:\n%s", aMain)
+	}
+}
+
+// TestApplyRefusesOutOfRootTarget pins C1's out-of-root guard: when the
+// index's recorded root differs from the current root such that a target
+// would escape the current root, Apply must refuse with an actionable error
+// and write nothing anywhere. This is the "cannot be safely re-rooted" case.
+func TestApplyRefusesOutOfRootTarget(t *testing.T) {
+	rootA := fixture(t)
+	ix := mustIndex(t, rootA)
+	r, err := Rename(ix, "Adder", "Summer")
+	if err != nil {
+		t.Fatalf("Rename: %v", err)
+	}
+	// Corrupt one target so it escapes the current root: a ".." traversal
+	// cannot be safely re-rooted under rootB.
+	r.Edits[0].File = filepath.Join("..", "escape.go")
+	rootB := t.TempDir()
+	_, err = Apply(rootB, r)
+	if err == nil {
+		t.Fatal("Apply succeeded on an out-of-root target, want refusal")
+	}
+	for _, want := range []string{"index was built for", rootA, "kern index"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("refusal error %q missing %q", err.Error(), want)
+		}
+	}
+	// Nothing was written outside the current root.
+	if _, serr := os.Stat(filepath.Join(filepath.Dir(rootB), "escape.go")); !os.IsNotExist(serr) {
+		t.Fatalf("a file was written outside the current root")
+	}
+	// The current root itself must be untouched too: the refusal happens
+	// before any backup or write, so rootB stays empty.
+	entries, err := os.ReadDir(rootB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("refused apply still touched the current root: %v", entries)
+	}
+}
+
+// TestApplyRefusesStaleAbsoluteEdits pins the legacy-report half of the
+// guard: an absolute edit path built from an index whose root is not
+// recorded, when that path lies outside the current root, must be refused
+// with the same actionable error rather than silently writing there.
+func TestApplyRefusesStaleAbsoluteEdits(t *testing.T) {
+	rootA := fixture(t)
+	rootB := t.TempDir()
+	r := &Report{
+		Symbol: "Adder",
+		Edits: []Edit{
+			{File: filepath.Join(rootA, "main.go"), Offset: 10, Old: "Adder", New: "Summer"},
+		},
+	}
+	_, err := Apply(rootB, r)
+	if err == nil {
+		t.Fatal("Apply succeeded with an absolute edit outside the current root, want refusal")
+	}
+	if !strings.Contains(err.Error(), "kern index") {
+		t.Fatalf("want actionable refusal, got %v", err)
+	}
+	if _, serr := os.Stat(filepath.Join(rootA, "main.go")); serr != nil {
+		t.Fatalf("the outside-root file must still exist and be untouched")
 	}
 }

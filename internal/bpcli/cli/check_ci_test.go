@@ -2,6 +2,9 @@ package cli
 
 import (
 	"encoding/json"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -79,5 +82,41 @@ func TestCIVerdictShape(t *testing.T) {
 		if _, ok := ev[key]; !ok {
 			t.Errorf("evidence missing key %q", key)
 		}
+	}
+}
+
+// TestDetectDefaultBranch (H5): --base auto-detection must resolve the
+// default branch from LOCAL git metadata (refs/remotes/origin/HEAD) and fall
+// back to "main" when the symref is absent — never a network call.
+func TestDetectDefaultBranch(t *testing.T) {
+	git := func(dir string, args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v (%s)", args, err, out)
+		}
+	}
+	// Non-main default branch: init with -b develop, add a remote whose
+	// HEAD symref points at the remote develop branch, and set the local
+	// origin/HEAD symref the way clone/fetch do.
+	root := t.TempDir()
+	git(root, "init", "-q", "-b", "develop")
+	git(root, "config", "user.email", "t@example.com")
+	git(root, "config", "user.name", "t")
+	if err := os.WriteFile(filepath.Join(root, "f"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	git(root, "add", "-A")
+	git(root, "commit", "-qm", "init")
+	git(root, "remote", "add", "origin", root)
+	git(root, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/develop")
+	if got := detectDefaultBranch(root); got != "develop" {
+		t.Fatalf("detectDefaultBranch with origin/HEAD -> develop = %q, want %q", got, "develop")
+	}
+	// No symref: fall back to "main".
+	bare := t.TempDir()
+	git(bare, "init", "-q", "-b", "main")
+	if got := detectDefaultBranch(bare); got != "main" {
+		t.Fatalf("detectDefaultBranch without symref = %q, want %q", got, "main")
 	}
 }

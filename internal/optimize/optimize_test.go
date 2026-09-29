@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/JayveerPrajapati/kern/internal/cache"
+	"github.com/JayveerPrajapati/kern/internal/config"
 	"github.com/JayveerPrajapati/kern/internal/memory"
 )
 
@@ -229,5 +230,50 @@ func TestLogProfileSlugNoPathTraversal(t *testing.T) {
 	// namespace, so it cannot forge a sibling namespace either.
 	if got := logNS("///..."); got != "log:default" {
 		t.Fatalf("logNS(\"///...\") = %q, want log:default", got)
+	}
+}
+
+// TestPromptLLMSkippedWhenNoBackendConfigured: with no --llm, the LLM stage
+// DEFAULTS to the provider chain (dogfooding G-MED — it used to be gated on
+// --llm/KERN_MODEL and silently ignored the auto chain). With an unreachable
+// provider the attempt fails fast and Prompt sets LLMSkipped with the honest
+// fallback message; the deterministic path still runs. The provider is pinned
+// to an unreachable ollama so the test is hermetic (the auto chain would
+// otherwise call a locally installed agent CLI).
+func TestPromptLLMSkippedWhenNoBackendConfigured(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	// Neutralize any outer KERN_MODEL/config-file cache, and pin an
+	// unreachable provider so the default-chain attempt fails fast regardless
+	// of the host environment (installed agent CLIs, running ollama, ...).
+	t.Setenv("KERN_MODEL", "")
+	t.Setenv("KERN_LLM_PROVIDER", "ollama")
+	t.Setenv("OLLAMA_HOST", "http://127.0.0.1:1")
+	config.Reset()
+	res, err := Prompt("a verbose prompt about the dispatch pipeline", "", Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.LLMSkipped == "" {
+		t.Fatal("expected LLMSkipped to be set when the default provider chain is unreachable")
+	}
+	if !strings.Contains(res.LLMSkipped, "deterministic output unchanged") {
+		t.Fatalf("expected fallback message mentioning \"deterministic output unchanged\", got %q", res.LLMSkipped)
+	}
+	// The deterministic path still runs and counts tokens honestly.
+	if res.Output == "" {
+		t.Fatal("expected deterministic output")
+	}
+	if res.BeforeTokens <= 0 || res.AfterTokens <= 0 {
+		t.Fatalf("expected positive token counts, got %+v", res)
+	}
+	// A configured model still attempts the chain (the model selects which
+	// model the chain uses — it does not gate the LLM stage anymore); with an
+	// unreachable provider the attempt fails honestly too.
+	res2, err := Prompt("a verbose prompt about the dispatch pipeline", "", Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res2.LLMSkipped == "" {
+		t.Fatal("expected LLMSkipped when the default chain is unreachable even with a configured model")
 	}
 }

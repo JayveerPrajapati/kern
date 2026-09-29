@@ -9,13 +9,13 @@ import (
 var paritySmokeFixtures embed.FS
 
 // parity_smoke_test.go pins the regex extractor's baseline over the shared
-// fixture corpus. It runs in BOTH build configurations (default regex build
-// and -tags treesitter): in the default build it is the corpus's only guard
-// (the full comparison gate in parity_test.go is tree-sitter-gated, since
-// both extractors must exist to compare), and it keeps the corpus from
-// drifting unnoticed in either configuration. Expectations are pinned per
-// file; any change to the regex extractor's symbol or edge output fails
-// here first with a precise file:owner:target message.
+// fixture corpus. It runs in BOTH build configurations (default tree-sitter
+// build and -tags notreesitter): in the -tags notreesitter build it is the
+// corpus's only guard (the full comparison gate in parity_test.go needs the
+// tree-sitter extractor to exist), and it keeps the corpus from drifting
+// unnoticed in either configuration. Expectations are pinned per file; any
+// change to the regex extractor's symbol or edge output fails here first with
+// a precise file:owner:target message.
 
 func TestRegexExtractorBaselineOverCorpus(t *testing.T) {
 	entries, err := paritySmokeFixtures.ReadDir("testfixture")

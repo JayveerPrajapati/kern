@@ -52,12 +52,17 @@ func main() {
 		t.Errorf("expected arch.md and DispatchEngine in hybrid output, got:\n%s", outHybrid)
 	}
 
-	// 3. Query matching neither
-	outNone := captureStdout(t, func() {
+	// 3. Query matching neither: a no-match is an ERROR (exit 1, L18 —
+	// aligned with `kern search`'s no-match contract), with the reason on
+	// stderr instead of a confident-miss success.
+	stderr, code := captureStderrExit(t, func() {
 		runDocSearch([]string{"nonexistentfoobardispatch9999", "--root", root})
 	})
-	if !strings.Contains(outNone, "no matching document fragments") {
-		t.Errorf("expected 'no matching document fragments', got:\n%s", outNone)
+	if code != 1 {
+		t.Fatalf("expected exitError{1} on no-match, got exit code %d", code)
+	}
+	if !strings.Contains(stderr, "no matching document fragments") {
+		t.Errorf("expected 'no matching document fragments' on stderr, got:\n%s", stderr)
 	}
 }
 
@@ -67,17 +72,20 @@ func main() {
 func TestRunDocSearchEmptyIndexExplained(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	root := t.TempDir() // no docs tree at all
-	out := captureStdout(t, func() {
+	stderr, code := captureStderrExit(t, func() {
 		runDocSearch([]string{"getting started", "--root", root})
 	})
-	if !strings.Contains(out, "no matching document fragments") {
-		t.Fatalf("expected the no-matching prefix, got:\n%s", out)
+	if code != 1 {
+		t.Fatalf("expected exitError{1} on no-match, got exit code %d", code)
 	}
-	if !strings.Contains(out, "this repo has no documentation indexed") {
-		t.Fatalf("expected the empty-index explanation, got:\n%s", out)
+	if !strings.Contains(stderr, "no matching document fragments") {
+		t.Fatalf("expected the no-matching prefix, got:\n%s", stderr)
 	}
-	if !strings.Contains(out, "kern docs index") {
-		t.Fatalf("expected the index hint in the explanation, got:\n%s", out)
+	if !strings.Contains(stderr, "this repo has no documentation indexed") {
+		t.Fatalf("expected the empty-index explanation, got:\n%s", stderr)
+	}
+	if !strings.Contains(stderr, "kern docs index") {
+		t.Fatalf("expected the index hint in the explanation, got:\n%s", stderr)
 	}
 }
 
@@ -99,11 +107,14 @@ func TestRunDocSearchNoMatchExplainsFragmentCount(t *testing.T) {
 	_ = captureStdout(t, func() {
 		runDocSearch([]string{"dispatch", "--root", root})
 	})
-	// Second run: query matches nothing → the N-fragments variant.
-	out := captureStdout(t, func() {
+	// Second run: query matches nothing → the N-fragments variant, exit 1.
+	stderr, code := captureStderrExit(t, func() {
 		runDocSearch([]string{"nonexistentfoobardispatch9999", "--root", root})
 	})
-	if !strings.Contains(out, "no matching document fragments (query matched nothing in") || !strings.Contains(out, "indexed fragments)") {
-		t.Fatalf("expected the N-fragments no-match variant, got:\n%s", out)
+	if code != 1 {
+		t.Fatalf("expected exitError{1} on no-match, got exit code %d", code)
+	}
+	if !strings.Contains(stderr, "no matching document fragments (query matched nothing in") || !strings.Contains(stderr, "indexed fragments)") {
+		t.Fatalf("expected the N-fragments no-match variant, got:\n%s", stderr)
 	}
 }

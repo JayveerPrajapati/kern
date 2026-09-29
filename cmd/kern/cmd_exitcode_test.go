@@ -226,3 +226,46 @@ func TestRunMutationMinScoreGate(t *testing.T) {
 		t.Fatalf("satisfied gate must exit 0, got %d", code)
 	}
 }
+
+// TestRunVerifyUnknownPositionalHintsCheckType pins the A2-1b dogfooding
+// fix: `kern verify <unknown-positional>` used to fall into the claims-file
+// form and fail with a bare "open bogus: no such file" — no hint that a
+// check-TYPES value was intended. A positional that is not an existing file
+// must point at the types form explicitly ("did you mean a check type") and
+// exit 1 (fatal runtime error), not the usage-error 2 — the hint fires on a
+// read failure, not bad flags.
+func TestRunVerifyUnknownPositionalHintsCheckType(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	errOut := captureStderr(t, func() {
+		assertExitCode(t, 1, func() {
+			runVerify([]string{"bogus"})
+		})
+	})
+	if !strings.Contains(errOut, "did you mean a check type") {
+		t.Fatalf("expected check-type hint on stderr, got:\n%s", errOut)
+	}
+}
+
+// TestRunVerifyExistingFileSkipsCheckTypeHint pins the other side of A2-1b:
+// a real existing file path must NOT hit the hint — it is a claims-file
+// verify and still exits 1 via the claims verdict (unverifiable references),
+// not via the file-read failure path.
+func TestRunVerifyExistingFileSkipsCheckTypeHint(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	dir := t.TempDir()
+	claims := filepath.Join(dir, "claims.txt")
+	if err := os.WriteFile(claims, []byte("referenced by missing.go:12 which cannot be verified"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	errOut := captureStderr(t, func() {
+		assertExitCode(t, 1, func() {
+			runVerify([]string{claims, dir})
+		})
+	})
+	if strings.Contains(errOut, "did you mean a check type") {
+		t.Fatalf("existing file must not hit the check-type hint, got:\n%s", errOut)
+	}
+	if !strings.Contains(errOut, "unverifiable") {
+		t.Fatalf("expected claims-verdict failure (unverifiable references), got:\n%s", errOut)
+	}
+}

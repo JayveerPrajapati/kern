@@ -5,6 +5,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/JayveerPrajapati/kern/internal/agent"
+	"github.com/JayveerPrajapati/kern/internal/domain"
 )
 
 // loopCliFixture writes a tiny single-package Go module so the loop's
@@ -68,7 +71,10 @@ func TestRunLoopCLIInvalidLevel(t *testing.T) {
 }
 
 // TestRenderTeamText asserts the team roster renders all 7 specialists and the
-// current task count.
+// current task count. A fresh team reads only the (empty) in-memory registry;
+// a seeded store must merge in its persisted records (dogfooding E-LOW: the
+// team overview previously rendered "tasks: 0" forever because it never read
+// the store).
 func TestRenderTeamText(t *testing.T) {
 	root := t.TempDir()
 	text, err := renderTeamText(root)
@@ -85,6 +91,43 @@ func TestRenderTeamText(t *testing.T) {
 	}
 	if !strings.Contains(text, "tasks: 0") {
 		t.Fatalf("expected empty task list on a fresh team; got:\n%s", text)
+	}
+}
+
+// TestRenderTeamTextMergesPersistedStore pins the E-LOW fix: renderTeamText
+// must surface tasks persisted across sessions (the store), not only the
+// in-memory registry of this process — a fresh StandardTeam() always has an
+// empty map, so without the merge the overview shows tasks: 0 forever.
+func TestRenderTeamTextMergesPersistedStore(t *testing.T) {
+	root := t.TempDir()
+	store := agent.NewTaskStore(root)
+	// Build tasks via field assignment: go.mod is go1.25, which rejects both
+	// promoted-field literals (Task.Input requires go1.27) and embedded-field
+	// literal names in this context — dot-assignment is unambiguous.
+	seed := func(id, state, input string) {
+		t.Helper()
+		var task agent.Task
+		task.ID = id
+		task.Type = "analyze"
+		task.State = domain.TaskState(state)
+		task.Input = input
+		if _, err := store.Save(task); err != nil {
+			t.Fatalf("seed store: %v", err)
+		}
+	}
+	seed("t-1", "COMPLETED", "what-if: x remove")
+	seed("t-2", "CREATED", "modernization analysis")
+	text, err := renderTeamText(root)
+	if err != nil {
+		t.Fatalf("renderTeamText: %v", err)
+	}
+	if !strings.Contains(text, "tasks: 2") {
+		t.Fatalf("seeded store not merged; expected 'tasks: 2', got:\n%s", text)
+	}
+	for _, want := range []string{"t-1 [COMPLETED] analyze:", "t-2 [CREATED] analyze:"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("persisted task %q missing from team overview; got:\n%s", want, text)
+		}
 	}
 }
 

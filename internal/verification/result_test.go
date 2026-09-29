@@ -63,9 +63,12 @@ func TestRenderCompactSecurityFindingDetails(t *testing.T) {
 	}
 }
 
-// TestRenderCompactIncludesFailureOutput (F-4): a failed check whose Output
-// carries the actionable reason (e.g. the sandbox fail-closed denial) must
-// surface that text after the status line instead of a bare FAIL.
+// TestRenderCompactIncludesFailureOutput (F-4 + D1): a failed check whose
+// Output carries the actionable reason must surface that text after the
+// status line instead of a bare FAIL — and when the failure is a
+// build/vet-phase error (zero failed tests), the reason is folded into the
+// status line itself so "tests: FAIL passed=0 failed=0" can never read as a
+// contradiction (audit D1).
 func TestRenderCompactIncludesFailureOutput(t *testing.T) {
 	v := VerificationResult{
 		Verdict: VerdictFail,
@@ -73,13 +76,13 @@ func TestRenderCompactIncludesFailureOutput(t *testing.T) {
 			OK:     false,
 			Passed: 0,
 			Failed: 0,
-			Output: "network isolation not available on this platform (darwin); refusing to run unisolated (fail-closed)",
+			Output: "# github.com/x/repositories\nrepositories/foo.go:12:34: conversion from int64 to string (int64)\nFAIL\tgithub.com/x/repositories [build failed]\nFAIL\n",
 		},
 	}
 	out := RenderCompact(v)
 	for _, want := range []string{
-		"tests: FAIL passed=0 failed=0 skipped=0",
-		"network isolation not available on this platform (darwin); refusing to run unisolated (fail-closed)",
+		"tests: FAILED (go vet: repositories/foo.go:12:34: conversion from int64 to string (int64)) passed=0 failed=0 skipped=0",
+		"# github.com/x/repositories",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("RenderCompact missing %q in:\n%s", want, out)
@@ -136,8 +139,10 @@ func TestRenderCompactE2EFailureOutput(t *testing.T) {
 	}
 }
 
-// TestRenderCompactIntegrationFailureOutput (F-4): Integration reuses
-// TestResult, which carries Output; it must surface it on failure as well.
+// TestRenderCompactIntegrationFailureOutput (F-4 + D1): Integration reuses
+// TestResult, which carries Output; it must surface it on failure as well,
+// and a build-phase failure (zero failed tests) folds the reason into the
+// status line exactly like the UnitTests branch.
 func TestRenderCompactIntegrationFailureOutput(t *testing.T) {
 	v := VerificationResult{
 		Verdict: VerdictFail,
@@ -145,13 +150,13 @@ func TestRenderCompactIntegrationFailureOutput(t *testing.T) {
 			OK:     false,
 			Passed: 0,
 			Failed: 0,
-			Output: "integration sandbox unavailable on darwin (fail-closed)",
+			Output: "# github.com/x/integ\nintegration/x_test.go:4:2: undefined: helper\nFAIL\tgithub.com/x/integ [build failed]\nFAIL\n",
 		},
 	}
 	out := RenderCompact(v)
 	for _, want := range []string{
-		"integration: FAIL passed=0 failed=0 skipped=0",
-		"integration sandbox unavailable on darwin (fail-closed)",
+		"integration: FAILED (go vet: integration/x_test.go:4:2: undefined: helper) passed=0 failed=0 skipped=0",
+		"# github.com/x/integ",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("RenderCompact missing %q in:\n%s", want, out)

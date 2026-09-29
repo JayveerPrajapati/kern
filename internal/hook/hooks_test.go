@@ -76,6 +76,50 @@ func TestInstallOverwritesKernHook(t *testing.T) {
 	}
 }
 
+func TestUninstallRemovesKernHook(t *testing.T) {
+	root := gitInit(t)
+	if err := Install(root); err != nil {
+		t.Fatal(err)
+	}
+	removed, err := Uninstall(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(removed) != 1 || removed[0] != "post-commit" {
+		t.Fatalf("removed = %v, want [post-commit]", removed)
+	}
+	if _, err := os.Stat(filepath.Join(root, ".git", "hooks", "post-commit")); !os.IsNotExist(err) {
+		t.Fatalf("hook still present after uninstall: %v", err)
+	}
+	// Second uninstall is a no-op, not an error.
+	again, err := Uninstall(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(again) != 0 {
+		t.Fatalf("second uninstall removed %v, want nothing", again)
+	}
+}
+
+func TestUninstallRefusesUserHook(t *testing.T) {
+	root := gitInit(t)
+	hook := filepath.Join(root, ".git", "hooks", "post-commit")
+	user := "#!/bin/sh\necho 'user hook'\n"
+	if err := os.WriteFile(hook, []byte(user), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Uninstall(root); err == nil {
+		t.Fatal("expected error for a non-kern hook, got nil")
+	}
+	b, err := os.ReadFile(hook)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(b) != user {
+		t.Fatalf("user hook was removed: %s", b)
+	}
+}
+
 func gitInit(t *testing.T) string {
 	t.Helper()
 	root := t.TempDir()

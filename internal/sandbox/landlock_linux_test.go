@@ -63,7 +63,7 @@ func TestLandlockBlocksSensitiveReads(t *testing.T) {
 
 	// Blocked: reading a file under a blocklisted dir must fail and the
 	// secret must never appear in the run's output.
-	res := runGuarded(context.Background(), root, "cat", []string{sentinel}, 30*time.Second, true)
+	res := RunGuarded(context.Background(), root, "cat", []string{sentinel}, 30*time.Second, true)
 	if res.ExitCode == 0 {
 		t.Fatalf("sandboxed read of %s must be denied; output: %q", sentinel, res.Output)
 	}
@@ -86,13 +86,13 @@ func TestLandlockBlocksSensitiveReads(t *testing.T) {
 	if err := os.WriteFile(okFile, []byte("fine"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if res := runGuarded(context.Background(), root, "cat", []string{okFile}, 30*time.Second, true); res.ExitCode != 0 {
+	if res := RunGuarded(context.Background(), root, "cat", []string{okFile}, 30*time.Second, true); res.ExitCode != 0 {
 		t.Fatalf("workspace read failed: %v (out=%q)", res.Err, res.Output)
 	}
 
 	// ~zero UX cost: go version inside the sandbox must still succeed.
 	if _, err := exec.LookPath("go"); err == nil {
-		gres := runGuarded(context.Background(), root, "go", []string{"version"}, 60*time.Second, true)
+		gres := RunGuarded(context.Background(), root, "go", []string{"version"}, 60*time.Second, true)
 		if gres.ExitCode != 0 {
 			t.Fatalf("go version inside sandbox failed: %v (out=%q)", gres.Err, gres.Output)
 		}
@@ -111,10 +111,10 @@ func TestLandlockWriteConfinement(t *testing.T) {
 	}
 	root, home := sbxTestEnv(t)
 
-	if res := runGuarded(context.Background(), root, "touch", []string{filepath.Join(home, "evil-marker")}, 30*time.Second, true); res.ExitCode == 0 {
+	if res := RunGuarded(context.Background(), root, "touch", []string{filepath.Join(home, "evil-marker")}, 30*time.Second, true); res.ExitCode == 0 {
 		t.Fatalf("write to $HOME unexpectedly succeeded; output: %q", res.Output)
 	}
-	if res := runGuarded(context.Background(), root, "touch", []string{filepath.Join(root, "ok")}, 30*time.Second, true); res.ExitCode != 0 {
+	if res := RunGuarded(context.Background(), root, "touch", []string{filepath.Join(root, "ok")}, 30*time.Second, true); res.ExitCode != 0 {
 		t.Fatalf("workspace write failed: %v (out=%q)", res.Err, res.Output)
 	}
 }
@@ -124,7 +124,7 @@ func TestLandlockWriteConfinement(t *testing.T) {
 func TestLandlockDegradeEnvDisablesFSConfinement(t *testing.T) {
 	t.Setenv("KERN_SANDBOX_FS_CONFINEMENT", "0")
 	root := t.TempDir()
-	res := runGuarded(context.Background(), root, "true", nil, 30*time.Second, true)
+	res := RunGuarded(context.Background(), root, "true", nil, 30*time.Second, true)
 	if res.Network == nil || res.Network.FSConfined {
 		t.Fatalf("expected FSConfined=false with confinement disabled, got %+v", res.Network)
 	}

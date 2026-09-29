@@ -75,7 +75,7 @@ func TestSeatbeltProfileForDeniesBothPathAliases(t *testing.T) {
 	}
 
 	// White-box: the pure generator must deny both spellings.
-	prof := seatbeltProfileFor(alias, true)
+	prof := seatbeltProfileFor(alias, true, false)
 	// Production path: seatbeltProfile must hand the as-written $HOME through
 	// (no pre-canonicalization) or the alias deny is lost.
 	t.Setenv("HOME", alias)
@@ -120,6 +120,9 @@ func TestSeatbeltProfileConfinementDisabled(t *testing.T) {
 // future change hardcodes a different profile in one of the two call sites,
 // this test fails.
 func TestSeatbeltProbeValidatesExactWrapProfile(t *testing.T) {
+	if runtime.GOOS == "darwin" && os.Getenv("KERN_SANDBOX_ACTIVE") == "1" {
+		t.Skip("cannot nest sandbox-exec inside an active kern sandbox on macOS; covered by direct runs")
+	}
 	if runtime.GOOS != "darwin" {
 		t.Skip("Seatbelt is darwin-only")
 	}
@@ -133,7 +136,7 @@ func TestSeatbeltProbeValidatesExactWrapProfile(t *testing.T) {
 	t.Setenv("KERN_ALLOW_UNISOLATED", "")
 	t.Setenv("KERN_ALLOW_NET", "")
 
-	prefix, ok := netIsolationPrefix()
+	prefix, ok := netIsolationPrefix(false)
 	if !ok {
 		t.Fatal("netIsolationPrefix must be available when sandbox-exec is")
 	}
@@ -161,6 +164,9 @@ func TestSeatbeltProbeValidatesExactWrapProfile(t *testing.T) {
 // `go version` inside the sandbox still succeeds (~zero UX cost). Runs under
 // a test HOME so the sentinel lives in a real blocklisted path we own.
 func TestSandboxReadConfinementBlocksSensitivePaths(t *testing.T) {
+	if runtime.GOOS == "darwin" && os.Getenv("KERN_SANDBOX_ACTIVE") == "1" {
+		t.Skip("cannot nest sandbox-exec inside an active kern sandbox on macOS; covered by direct runs")
+	}
 	if runtime.GOOS != "darwin" {
 		t.Skip("Seatbelt file-read-data confinement is darwin-only (Stage 1)")
 	}
@@ -229,5 +235,71 @@ func TestSandboxReadConfinementBlocksSensitivePaths(t *testing.T) {
 	gres := Run(context.Background(), root, "go", []string{"version"}, 60*time.Second)
 	if !gres.OK {
 		t.Fatalf("sandboxed `go version` must succeed under FS confinement; err=%v out=%q", gres.Err, gres.Output)
+	}
+}
+
+// TestSeatbeltProfileForLoopbackBindRelaxation pins the verify-path relaxed
+// shape: with allowLoopbackBind the loopback allows (IP bind/inbound plus
+// unix-domain-socket bind/inbound/outbound) sit between the outbound
+// loopback allow and the FS blocklist; without it the output is the
+// byte-identical default (no bind rules at all).
+func TestSeatbeltProfileForLoopbackBindRelaxation(t *testing.T) {
+	relaxed := seatbeltProfileFor("/Users/testuser", true, true)
+	plain := seatbeltProfileFor("/Users/testuser", true, false)
+
+	// Loopback-IP rules plus the unix-domain-socket rules: verify-path test
+	// runs bind/accept/connect BOTH classes (httptest servers on 127.0.0.1,
+	// and the relay's .kern/events.sock / MCP UDS transport), and `(deny
+	// network*)` blocks both.
+	bindRule := `(allow network-bind (local ip "localhost:*"))`
+	inboundRule := `(allow network-inbound (local ip "localhost:*"))`
+	udsBind := `(allow network-bind (local unix-socket))`
+	udsInbound := `(allow network-inbound (local unix-socket))`
+	udsOutbound := `(allow network-outbound (remote unix-socket))`
+	allRules := []string{bindRule, inboundRule, udsBind, udsInbound, udsOutbound}
+	for _, rule := range allRules {
+		if !strings.Contains(relaxed, rule) {
+			t.Errorf("relaxed profile must contain %s, got:\n%s", rule, relaxed)
+		}
+		if strings.Contains(plain, rule) {
+			t.Errorf("default profile must NOT contain %s (byte-identical default), got:\n%s", rule, plain)
+		}
+	}
+	// Positioning: outbound allow < IP bind < IP inbound < UDS bind < UDS
+	// inbound < UDS outbound < FS blocklist (the blocklist's denies keep
+	// last-match-wins precedence).
+	outbound := `(allow network-outbound (remote ip "localhost:*"))`
+	firstDeny := `(deny file-read-data (subpath "/Users/testuser/.ssh"))`
+	order := append([]string{outbound}, allRules...)
+	prev := -1
+	for _, rule := range order {
+		i := strings.Index(relaxed, rule)
+		if i < 0 {
+			t.Fatalf("relaxed profile missing pinned rule %s:\n%s", rule, relaxed)
+		}
+		if i < prev {
+			t.Errorf("relaxed profile ordering wrong: %s at %d must come after the previous pinned rule at %d", rule, i, prev)
+		}
+		prev = i
+	}
+	fi := strings.Index(relaxed, firstDeny)
+	if fi < 0 {
+		t.Fatalf("relaxed profile missing the FS blocklist:\n%s", relaxed)
+	}
+	if prev > fi {
+		t.Errorf("relaxed profile ordering wrong: last allow (%d) must precede the blocklist deny (%d)", prev, fi)
+	}
+	// The default shape must stay byte-identical and deterministic.
+	if plain != seatbeltProfileFor("/Users/testuser", true, false) {
+		t.Fatal("seatbeltProfileFor must be deterministic")
+	}
+	// The relaxation must be purely additive: removing the relaxation lines
+	// from the relaxed profile yields the default byte-for-byte.
+	stripped := relaxed
+	for _, rule := range allRules {
+		stripped = strings.Replace(stripped, "\n"+rule, "", 1)
+	}
+	if stripped != plain {
+		t.Errorf("relaxation must be purely additive (default + the relaxation lines); stripped:\n%s\nwant default:\n%s", stripped, plain)
 	}
 }

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"io"
 	"os"
@@ -69,7 +70,11 @@ func TestUpdateE2E(t *testing.T) {
 
 	// fixtureTag packages the three binaries in src into the fake release
 	// tarball releases/download/<tag>/kern-<os>-<arch>.tar.gz (archive-root
-	// layout, matching >= v0.9.5.2 releases).
+	// layout, matching >= v0.9.5.2 releases), then writes the release's
+	// SHA256SUMS asset. install.sh's verify() (finding L3) is fail-closed: a
+	// release without a SHA256SUMS asset or without the tarball listed in it is
+	// refused ("cannot verify the download"), so the fixture must ship one to
+	// mirror a real release.
 	fixtureTag := func(tag, src string) {
 		t.Helper()
 		rel := filepath.Join(base, "releases", "download", tag)
@@ -77,10 +82,24 @@ func TestUpdateE2E(t *testing.T) {
 			t.Fatal(err)
 		}
 		platform := runtime.GOOS + "-" + runtime.GOARCH
-		cmd := exec.Command("tar", "-czf", filepath.Join(rel, "kern-"+platform+".tar.gz"),
+		tarball := filepath.Join(rel, "kern-"+platform+".tar.gz")
+		cmd := exec.Command("tar", "-czf", tarball,
 			"-C", src, "kern", "kern-mcp", "kern-server")
 		if out, err := cmd.CombinedOutput(); err != nil {
 			t.Fatalf("tar fixture %s: %v\n%s", tag, err, out)
+		}
+		f, err := os.Open(tarball)
+		if err != nil {
+			t.Fatalf("open fixture tarball %s: %v", tag, err)
+		}
+		defer f.Close()
+		h := sha256.New()
+		if _, err := io.Copy(h, f); err != nil {
+			t.Fatalf("hash fixture tarball %s: %v", tag, err)
+		}
+		sums := fmt.Sprintf("%x  %s\n", h.Sum(nil), filepath.Base(tarball))
+		if err := os.WriteFile(filepath.Join(rel, "SHA256SUMS"), []byte(sums), 0o644); err != nil {
+			t.Fatalf("write SHA256SUMS fixture %s: %v", tag, err)
 		}
 	}
 

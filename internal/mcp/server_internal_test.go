@@ -220,6 +220,8 @@ func TestValidateStringArgs(t *testing.T) {
 		{name: "array any", args: map[string]any{"query": []any{"x"}}, want: `argument "query" for tool kern_search: expected a string, got an array`},
 		{name: "array string", args: map[string]any{"query": []string{"x"}}, want: `argument "query" for tool kern_search: expected a string, got an array`},
 		{name: "nested object", args: map[string]any{"query": map[string]any{"a": "b"}}, want: `argument "query" for tool kern_search: expected a string, got an object`},
+		{name: "numeric root rejected", args: map[string]any{"query": "Greet", "root": 12345.0}, want: `argument "root" for tool kern_search: expected a path string, got a number`},
+		{name: "int root rejected", args: map[string]any{"query": "Greet", "root": 12345}, want: `argument "root" for tool kern_search: expected a path string, got a number`},
 	}
 	for _, tc := range rejectCases {
 		if err := validateStringArgs("kern_search", tc.args); err == nil {
