@@ -13,7 +13,7 @@ re-reading files.
 
 ## The kern_meta tool (preferred entry point)
 
-Instead of choosing among 140 individual `kern_*` tools, call the single
+Instead of choosing among 139 individual `kern_*` tools, call the single
 **`kern_meta`** tool with a natural-language request. Kern classifies the
 request (deterministic keyword matching — no LLM, no network) and runs the
 right tool internally. Examples:
@@ -22,7 +22,7 @@ right tool internally. Examples:
 - `kern_meta(request="what breaks if I change dispatch?")` → runs `kern_impact`
 - `kern_meta(request="find the NewServer function")` → runs `kern_search`
 
-Set `KERN_MCP_FULL=1` for all 140 tools, `KERN_MCP_PHASE=explore|plan|edit|verify`
+Set `KERN_MCP_FULL=1` for all 139 tools, `KERN_MCP_PHASE=explore|plan|edit|verify`
 for phase subsets, or `KERN_MCP_SINGLE_TOOL=1` for only `kern_meta`.
 
 ## Kern-first policy (ENFORCED & AUTONOMOUS)
@@ -42,10 +42,11 @@ redirect; on opencode the built-in is transparently routed to kern.
 4. Understand a symbol (callers/callees) → `kern_code_graph` / `kern_explore`,
    NOT `read` + `grep`.
 5. Build/test/lint → `kern_run_build`, NOT `bash`.
-6. Run a command → `kern_exec`, NOT `bash`. On macOS `kern_exec` FAILS CLOSED
-   by design (no unprivileged-userns isolation); the refusal names the
-   override (`KERN_ALLOW_UNISOLATED=1` / `KERN_ALLOW_NET=1`) — expect it,
-   don't retry blindly.
+6. Run a command → `kern_exec`, NOT `bash`. Isolation matrix: macOS runs
+   isolated via Apple Seatbelt (/usr/bin/sandbox-exec, network egress
+   blocked); Linux via unshare (needs kernel.unprivileged_userns_clone=1);
+   only Windows / isolation-unavailable hosts fail closed, naming the
+   override (`KERN_ALLOW_UNISOLATED=1` / `KERN_ALLOW_NET=1`).
 7. Search web/docs → `kern_doc_fetch` then `kern_doc_search`, NOT
    `webfetch`/`websearch`.
 8. Unsure which tool → `kern_usage_guide` or `kern_buddy` BEFORE falling

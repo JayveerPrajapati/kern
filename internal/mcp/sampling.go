@@ -168,6 +168,13 @@ func (s *Server) handleRegisterHostSampler(ctx context.Context, args map[string]
 		return "", err
 	}
 	if model != "" {
+		// Seed the session's model at registration (the sampling response
+		// refreshes it authoritatively on each generate). The empty key falls
+		// back to this server's own slot, matching registerCommandSampler.
+		if key == "" {
+			key = s.samplerKey
+		}
+		llm.SetHostSamplerModel(key, model)
 		msg += " (model " + model + ")"
 	}
 	return msg, nil
@@ -302,6 +309,14 @@ func (s *Server) sample(ctx context.Context, system, user string, opts llm.Optio
 		text, _ := content["text"].(string)
 		if text == "" {
 			return "", fmt.Errorf("mcp: sampling response has no text")
+		}
+		// The sampling response carries the model the host session served —
+		// record it so kern knows the active session's model (the MCP ack:
+		// kern_agents / kern_llm_providers surface it). This is the
+		// authoritative source; the register-host-sampler model arg only
+		// seeds it.
+		if model, _ := rep.result["model"].(string); model != "" {
+			llm.SetHostSamplerModel(s.samplerKey, model)
 		}
 		return text, nil
 	}

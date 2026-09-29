@@ -45,6 +45,12 @@ type Hooks struct {
 	// PendingApprovals lists the pending approvals for a root (adapter wires
 	// governance.NewFileStore(root).Pending). Used by Approve only.
 	PendingApprovals func(ctx context.Context, root string) ([]domain.Approval, error)
+	// Progress is an optional progress callback invoked by slow handlers
+	// (Verify) as each long phase starts, so a client-side timeout sees
+	// liveness instead of silence (M4: a 30s-timeout client treats a healthy
+	// >30s verify as dead). pct is the cumulative percentage (0-100); msg
+	// names the phase ("running build…", "running tests…"). Nil is a no-op.
+	Progress func(pct int, msg string)
 }
 
 // platform resolves the shared application Platform for a root through the
@@ -230,6 +236,15 @@ func Verify(ctx context.Context, h Hooks, args map[string]any) (string, error) {
 			return "", fmt.Errorf("%w (set KERN_ALLOW_EXEC=1 or configure KERN_TOOLS allowlist)", err)
 		}
 	}
+	// M4: the platform build (cold index) and the verify checks (go build /
+	// go test / compliance scans) can each run for many seconds with no
+	// intermediate signal. Emit a named progress notification as each long
+	// phase starts; the central runTool slow-tool wrap adds the 0%/keep-alive/
+	// 100% liveness envelope on top. Progress is a no-op when the client did
+	// not supply a progress token or the hook is unwired.
+	if h.Progress != nil {
+		h.Progress(10, "loading project index…")
+	}
 	p, err := platform(ctx, h, root)
 	if err != nil {
 		return "", err
@@ -237,6 +252,22 @@ func Verify(ctx context.Context, h Hooks, args map[string]any) (string, error) {
 	// kern_verify now routes through TaskService so the
 	// verification is recorded as an artifact on an authoritative Task.
 	ts := app.NewTaskService(p, nil).WithPRProvider(app.AutoPRProvider())
+	if h.Progress != nil {
+		// One message per requested check, cumulative percentage across the
+		// block (the checks run inside the single ts.Verify call below).
+		start := 20
+		span := 70 / len(types)
+		if span < 5 {
+			span = 5
+		}
+		for _, typ := range types {
+			h.Progress(start, "running "+typ+"…")
+			start += span
+			if start > 90 {
+				break
+			}
+		}
+	}
 	verifyStart := time.Now()
 	t, v, err := ts.Verify(types)
 	// Telemetry: one verification sample per kern_verify call (the server
@@ -515,27 +546,17 @@ func Loop(ctx context.Context, h Hooks, args map[string]any) (string, error) {
 }
 
 // ProbeLLMProviderReachable verifies a reachable LLM provider before
-// kern_loop mode=autonomous starts its closed loop. It mirrors the CLI's
-// probeLLMProvider (cmd/kern/helpers.go): build the provider-neutral chain
-// (the same one the coder/planner agents use) and ask it a trivial question
-// under a short bound. The auto chain falls back across providers, so this
-// only fails when no provider in the chain answers — exactly the silent ~180s
-// hang condition the former kern_do used to exhibit.
+// kern_loop mode=autonomous starts its closed loop. It delegates to the
+// shared capability-aware llm.ProbeReachable (host session first — the MCP
+// ack, the SAME session does the task — then agent CLIs with a
+// cold-start-covering budget, then Ollama), mirroring the CLI's
+// probeLLMProvider (cmd/kern/helpers.go) so the two surfaces cannot drift.
+// The auto chain falls back across providers, so this only fails when no
+// provider in the chain answers — exactly the silent ~180s hang condition the
+// former kern_do used to exhibit (dogfooding G-HIGH: the old flat 8s budget
+// was a coin-flip against CLI cold-starts of 6-40s).
 func ProbeLLMProviderReachable() error {
-	prov, err := llm.NewProvider()
-	if err != nil {
-		return err
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
-	defer cancel()
-	out, err := prov.Generate(ctx, "", "Reply with exactly: OK", llm.Options{})
-	if err != nil {
-		return err
-	}
-	if strings.TrimSpace(out) == "" {
-		return fmt.Errorf("provider returned an empty response")
-	}
-	return nil
+	return llm.ProbeReachable()
 }
 
 // Run implements kern_run: runs an intent through TaskService.Run and

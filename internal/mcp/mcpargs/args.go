@@ -26,6 +26,23 @@ func ArgString(args map[string]any, key string) string {
 	return strings.TrimSpace(fmt.Sprintf("%v", v))
 }
 
+// ArgRoot reads the "root" tool argument strictly: a present root must be a
+// JSON string. ArgString deliberately coerces scalars ("root":12345 becomes
+// "12345"), which silently fabricates a project path for wrong-typed calls
+// (L13: kern_project_map {root:12345} reported "Project: 12345"). The strict
+// accessor surfaces the mistake as a clean tool-level error instead.
+func ArgRoot(args map[string]any) (string, error) {
+	v, ok := args["root"]
+	if !ok || v == nil {
+		return "", nil
+	}
+	s, ok := v.(string)
+	if !ok {
+		return "", fmt.Errorf("root must be a string")
+	}
+	return strings.TrimSpace(s), nil
+}
+
 // ArgStrings reads an optional array-of-strings tool argument. Accepts a
 // []any / []string (MCP JSON arrays) and, for lenient clients that pass
 // everything as a single string, a comma- or whitespace-separated list.

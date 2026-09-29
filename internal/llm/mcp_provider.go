@@ -16,10 +16,14 @@ type Sampler func(ctx context.Context, system, user string, opts Options) (strin
 // (first success wins), so a process serving several clients (multi-root
 // serveMany, several wired agents) delegates to any of them. instance tags a
 // specific registration so a stale disposer can never remove a newer
-// registration that replaced it under the same key.
+// registration that replaced it under the same key. model records the model
+// the host session serves (learned from the sampling response, or set
+// explicitly at registration) so the active session/model is visible to
+// callers (kern agents / kern_llm_providers).
 type samplerEntry struct {
 	key      string
 	instance int64
+	model    string
 	s        Sampler
 }
 
@@ -78,6 +82,43 @@ func HasHostSampler() bool {
 	hostSamplerMu.Lock()
 	defer hostSamplerMu.Unlock()
 	return len(hostSamplers) > 0
+}
+
+// HostSamplerState is one registered host sampler's identity: its session key
+// and (when known) the model the host session serves. Multiple sessions each
+// register their own slot, so kern can report every active session/model.
+type HostSamplerState struct {
+	Key   string `json:"key"`
+	Model string `json:"model,omitempty"`
+}
+
+// SetHostSamplerModel records the model a host session serves. The MCP server
+// calls it when a sampling response carries the model (the authoritative
+// source), and the register-host-sampler handler sets it explicitly from the
+// model arg when provided. Unknown keys are a no-op (a stale session's model
+// must not create an entry).
+func SetHostSamplerModel(key, model string) {
+	hostSamplerMu.Lock()
+	defer hostSamplerMu.Unlock()
+	for i := range hostSamplers {
+		if hostSamplers[i].key == key {
+			hostSamplers[i].model = model
+			return
+		}
+	}
+}
+
+// HostSamplerStates returns every registered host sampler's session key and
+// known model, in registration order — the "MCP ack" surface: kern knows
+// which sessions are live and which models they serve.
+func HostSamplerStates() []HostSamplerState {
+	hostSamplerMu.Lock()
+	defer hostSamplerMu.Unlock()
+	out := make([]HostSamplerState, 0, len(hostSamplers))
+	for _, e := range hostSamplers {
+		out = append(out, HostSamplerState{Key: e.key, Model: e.model})
+	}
+	return out
 }
 
 // registeredSamplers returns a snapshot of the currently registered samplers

@@ -8,6 +8,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"github.com/JayveerPrajapati/kern/internal/strutil"
 )
 
 //go:embed assets/plugin/kern.ts
@@ -175,7 +177,7 @@ const (
 func writeInstructionFile(path, rulesText string) Status {
 	cur, _ := os.ReadFile(path)
 	content := string(cur)
-	cleaned := removeMarkedBlock(content, instructionMarkerOpen, instructionMarkerClose)
+	cleaned := strutil.RemoveMarkedBlock(content, instructionMarkerOpen, instructionMarkerClose)
 	cleaned = removeKernSection(cleaned)
 	block := instructionMarkerOpen + "\n\n" + strings.TrimRight(rulesText, "\n") + "\n\n" + instructionMarkerClose
 	var joined string
@@ -188,27 +190,6 @@ func writeInstructionFile(path, rulesText string) Status {
 		return Status{Agent: "", Path: path, Note: err.Error()}
 	}
 	return Status{Agent: "", Installed: true, Path: path, Note: "kern-first policy written"}
-}
-
-// removeMarkedBlock strips the substring between openMarker and closeMarker
-// (inclusive of both markers) from s. If either marker is absent the input is
-// returned unchanged. Used to refresh kern-managed blocks on every setup run.
-func removeMarkedBlock(s, openMarker, closeMarker string) string {
-	start := strings.Index(s, openMarker)
-	if start < 0 {
-		return s
-	}
-	end := strings.Index(s[start:], closeMarker)
-	if end < 0 {
-		return s
-	}
-	end += start + len(closeMarker)
-	// Collapse a single trailing newline so we don't accumulate blank lines
-	// across rewrites.
-	if end < len(s) && s[end] == '\n' {
-		end++
-	}
-	return s[:start] + s[end:]
 }
 
 // wireRulesFile writes the embedded kern rules block to a single rule file
@@ -230,7 +211,7 @@ func wireRulesFile(root, name string) Status {
 	if err != nil {
 		return Status{Agent: name, Path: path, Note: err.Error()}
 	}
-	cleaned := removeMarkedBlock(content, instructionMarkerOpen, instructionMarkerClose)
+	cleaned := strutil.RemoveMarkedBlock(content, instructionMarkerOpen, instructionMarkerClose)
 	cleaned = removeKernSection(cleaned)
 	// If the block is unchanged (same content after remove+reinsert), skip the
 	// write to avoid needlessly bumping mtime. This mirrors the global path.
@@ -253,6 +234,15 @@ const gitignoreMarker = "# --- kern generated (agent wiring, machine-specific) -
 // and its config files (config.yaml, suppressions.yaml, owners.yaml) are user
 // config and must stay committable, so only these specific paths are ignored,
 // never ".blueprint/" wholesale.
+//
+// Ownership: the PROJECT .gitignore block for these entries belongs to
+// internal/bpcli/cli's ensureBlueprintRuntimeGitignored (a separate marked
+// block appended by `kern install hook` / blueprint install, which also
+// carries sec-cache.json). setup
+// writes them only to the machine-global ignore (wireGlobalGitignore) —
+// do NOT re-add them to gitignoreBody: check strips in-block entries as
+// legacy, so duplicating them there dirties .gitignore on every
+// setup→check cycle.
 var blueprintRuntimeEntries = []string{
 	".blueprint/audit/",
 	".blueprint/receipts/",
@@ -304,7 +294,10 @@ func gitignoreGenerated(root string) Status {
 
 // gitignoreBody is the entry list of the generated .gitignore block (between
 // the header marker and the close marker). Kept as a named string so the
-// canonical block can be matched verbatim for idempotency.
+// canonical block can be matched verbatim for idempotency. The .blueprint
+// runtime entries are deliberately absent: that block is owned by
+// internal/bpcli/cli's ensureBlueprintRuntimeGitignored (see
+// blueprintRuntimeEntries above).
 var gitignoreBody = `# Re-run ` + "`kern setup`" + ` to refresh. Unignore a line to commit shared config.
 .mcp.json
 .claude/
@@ -321,8 +314,9 @@ CLAUDE.md
 GEMINI.md
 .github/copilot-instructions.md
 .agents/rules/kern.md
+.agents/hooks.json
 .github/hooks/
-` + strings.Join(blueprintRuntimeEntries, "\n") + "\n"
+`
 
 // removeGitignoreBlock strips any existing kern-generated .gitignore block
 // from content, handling both forms kern has written over time: the marked
@@ -335,7 +329,7 @@ func removeGitignoreBlock(content, closeMarker string) string {
 	// between them inclusive; a stale block (markers intact, entries edited)
 	// is replaced by this path.
 	if strings.Contains(content, gitignoreMarker) && strings.Contains(content, closeMarker) {
-		return removeMarkedBlock(content, gitignoreMarker, closeMarker)
+		return strutil.RemoveMarkedBlock(content, gitignoreMarker, closeMarker)
 	}
 	// Legacy unmarked block: header marker without the close marker. Older
 	// versions appended the block last, so the kern-owned section runs from

@@ -12,6 +12,7 @@ package mcp
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -64,6 +65,14 @@ func renderToolCatalog(ts []Tool) string {
 		fmt.Fprintf(&b, "%-28s %-8s %-7s %s\n", t.Name, phase, risk, strings.Join(strings.Fields(t.Description), " "))
 	}
 	return strings.TrimSuffix(b.String(), "\n")
+}
+
+// IsNoCodeIntent reports whether err is the meta refusal for non-code
+// requests (meta.NoCodeIntentError), so the CLI can map it to a usage-style
+// exit (2) instead of a runtime-error exit (1).
+func IsNoCodeIntent(err error) bool {
+	var nci *meta.NoCodeIntentError
+	return errors.As(err, &nci)
 }
 
 // classifyMetaRequest re-exports the leaf classifier for tool_cache.go's

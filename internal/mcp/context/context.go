@@ -195,7 +195,10 @@ func Onboard(ctx context.Context, h Hooks, args map[string]any) (string, error) 
 
 // ProjectMap renders the project file map, optionally capped at max_files.
 func ProjectMap(ctx context.Context, args map[string]any) (string, error) {
-	root := mcpargs.ArgString(args, "root")
+	root, err := mcpargs.ArgRoot(args)
+	if err != nil {
+		return "", err
+	}
 	if root == "" {
 		cwd, _ := os.Getwd()
 		root = cwd
@@ -221,7 +224,10 @@ func ProjectMap(ctx context.Context, args map[string]any) (string, error) {
 // Pack bundles a context pack: full source by default, tier=folded for
 // signatures, graph=true for the call-graph snapshot.
 func Pack(ctx context.Context, args map[string]any) (string, error) {
-	root := mcpargs.ArgString(args, "root")
+	root, err := mcpargs.ArgRoot(args)
+	if err != nil {
+		return "", err
+	}
 	if root == "" {
 		cwd, _ := os.Getwd()
 		root = cwd

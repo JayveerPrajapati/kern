@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/JayveerPrajapati/kern/internal/config"
 )
@@ -87,10 +88,10 @@ func providerName() string {
 }
 
 // NewProvider builds the provider selected by KERN_LLM_PROVIDER
-// (ollama|openai|anthropic|google; default "ollama"). Per-provider credentials
-// come from their own env vars. It errors only when a non-default provider is
-// selected but its API key is missing. Construction is deterministic; network
-// is touched only when a provider method is invoked.
+// (ollama|openai|anthropic|google; default "auto" — the chain). Per-provider
+// credentials come from their own env vars. It errors only when a non-default
+// provider is selected but its API key is missing. Construction is
+// deterministic; network is touched only when a provider method is invoked.
 func NewProvider() (Provider, error) {
 	switch providerName() {
 	case "mcp", "host", "sampling":
@@ -104,24 +105,106 @@ func NewProvider() (Provider, error) {
 	case "claude", "codex", "gemini-cli", "qwen", "agy", "antigravity":
 		return NewLocalCliProvider(strings.TrimSuffix(providerName(), "-cli")), nil
 	case "auto":
-		// auto: active MCP host sampler (when connected), then Ollama, then
-		// any locally-wired agent CLI (claude, opencode, codex, gemini, qwen,
-		// agy, antigravity) that is installed — so LLM-dependent features
-		// work seamlessly with host agent model delegation or local fallback.
-		// Construction never touches the network; a dead Ollama fails fast
-		// at Generate time and the chain moves on.
+		// auto: active MCP host sampler (when connected) — the CURRENT
+		// session's model, already wired, no new session spun up — then the
+		// locally-installed agent CLIs (claude, opencode, codex, gemini, qwen,
+		// agy, antigravity), then Ollama last. The host-first order is the
+		// "MCP ack" rule: when kern is hosted inside an agent session, that
+		// same session/model does the task instead of spawning a fresh one.
+		// Multiple sessions coexist (each registers its own slot, tried in
+		// registration order). Construction never touches the network; a dead
+		// provider fails fast at Generate time and the chain moves on.
 		var chain []Provider
 		if HasHostSampler() {
 			chain = append(chain, NewMCPProvider())
 		}
-		chain = append(chain, NewOllamaProvider())
 		for _, name := range AvailableLocalAgents() {
 			chain = append(chain, NewLocalCliProvider(name))
 		}
+		chain = append(chain, NewOllamaProvider())
 		return NewChainProvider(chain...), nil
 	default:
 		return NewOllamaProvider(), nil
 	}
+}
+
+// ProbeReachable verifies a reachable LLM provider before a command that
+// hard-depends on one (kern do / kern_loop autonomous). It is the shared,
+// capability-aware probe used by both the CLI (cmd/kern/helpers.go
+// probeLLMProvider) and the MCP server (internal/mcp/highlevel/highlevel.go
+// ProbeLLMProviderReachable), so the two surfaces cannot drift.
+//
+// The probe mirrors the auto chain's order but probes each leg with a budget
+// matched to its nature instead of one flat short deadline (dogfooding G-HIGH:
+// an 8s flat budget was a coin-flip against CLI cold-starts of 6-40s):
+//
+//  1. active MCP host session (the "MCP ack": kern knows the session and
+//     model, and the SAME session does the task — no new session spun up);
+//  2. locally-installed agent CLIs (claude, opencode, codex, ...) in
+//     preference order;
+//  3. Ollama last (fails fast in milliseconds when down).
+//
+// A dead leg is skipped, not fatal, so a working fallback is still found; the
+// aggregated error names every leg that was tried.
+func ProbeReachable() error {
+	_, err := ProbeReachableName()
+	return err
+}
+
+// ProbeReachableName is ProbeReachable plus the identity of the provider that
+// answered. The auto chain falls back across providers (host session → agent
+// CLIs → Ollama), so a successful probe alone does not tell the caller which
+// leg actually answered — this returns that name so `kern do` can report
+// "provider: claude" instead of silently running on an unspecified fallback
+// (dogfooding E-obs).
+func ProbeReachableName() (string, error) {
+	if n := providerName(); n != "auto" {
+		// Explicit provider (openai/anthropic/google/...): probe it directly.
+		prov, err := NewProvider()
+		if err != nil {
+			return "", err
+		}
+		if err := probeLeg(prov, 30*time.Second); err != nil {
+			return "", err
+		}
+		return n, nil
+	}
+	var tried []string
+	if HasHostSampler() {
+		if err := probeLeg(NewMCPProvider(), 15*time.Second); err == nil {
+			return "host (MCP session)", nil
+		} else {
+			tried = append(tried, "host: "+err.Error())
+		}
+	}
+	for _, name := range AvailableLocalAgents() {
+		if err := probeLeg(NewLocalCliProvider(name), 45*time.Second); err == nil {
+			return name, nil
+		} else {
+			tried = append(tried, name+": "+err.Error())
+		}
+	}
+	if err := probeLeg(NewOllamaProvider(), 10*time.Second); err == nil {
+		return "ollama", nil
+	} else {
+		tried = append(tried, "ollama: "+err.Error())
+	}
+	return "", fmt.Errorf("no reachable LLM provider (%s)", strings.Join(tried, "; "))
+}
+
+// probeLeg asks one provider a trivial question under a bounded deadline. It
+// returns nil when the provider answered non-empty, else the provider error.
+func probeLeg(prov Provider, budget time.Duration) error {
+	ctx, cancel := context.WithTimeout(context.Background(), budget)
+	defer cancel()
+	out, err := prov.Generate(ctx, "", "Reply with exactly: OK", Options{})
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(out) == "" {
+		return fmt.Errorf("provider returned an empty response")
+	}
+	return nil
 }
 
 // MaskRequired reports whether the provider selected by KERN_LLM_PROVIDER sends

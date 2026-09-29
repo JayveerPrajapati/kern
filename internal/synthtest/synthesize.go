@@ -3,6 +3,7 @@ package synthtest
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"go/ast"
 	"go/format"
@@ -10,9 +11,11 @@ import (
 	"go/printer"
 	"go/token"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 	"unicode"
 
 	"github.com/JayveerPrajapati/kern/internal/diff"
@@ -738,6 +741,7 @@ func Synthesize(req Request) (*Result, error) {
 	var finalTestContent string
 	var oldTestContent string
 	existingBytes, err := os.ReadFile(diskPath)
+	testFileExisted := err == nil // rollback restores, never deletes, a pre-existing file
 	if err == nil && len(existingBytes) > 0 {
 		oldTestContent = string(existingBytes)
 		if strings.Contains(oldTestContent, "func "+testFuncName+"(") {
@@ -789,6 +793,29 @@ func Synthesize(req Request) (*Result, error) {
 		}
 		if werr := os.WriteFile(diskPath, []byte(finalTestContent), 0o644); werr != nil {
 			return nil, fmt.Errorf("write test file: %w", werr)
+		}
+		// M5: a generated test must PASS before it is applied. Compiling is
+		// not enough — the audit found generated tests that vet clean but
+		// fail at runtime. Validate: go vet the touched package AND run the
+		// generated test (scoped to the package by name). On failure the
+		// write is rolled back and the apply refused, with the failure
+		// output in the message.
+		if verr := validateGeneratedTest(diskPath, testFuncName); verr != nil {
+			if testFileExisted {
+				_ = os.WriteFile(diskPath, []byte(oldTestContent), 0o644)
+			} else {
+				_ = os.Remove(diskPath)
+			}
+			return &Result{
+				TargetSymbol: targetSymbol,
+				TargetFile:   targetFile,
+				TestFile:     testFilePath,
+				TestFunction: testFuncName,
+				TestCode:     testCode,
+				Applied:      false,
+				Cases:        casesList,
+				Message:      "apply refused: " + verr.Error(),
+			}, nil
 		}
 		applied = true
 	}
@@ -1150,4 +1177,62 @@ func exportName(s string) string {
 		return ""
 	}
 	return strings.ToUpper(s[:1]) + s[1:]
+}
+
+// goToolTimeout bounds each go vet / go test validation invocation so a
+// wedged toolchain can never hang the synthesize-test call.
+const goToolTimeout = 2 * time.Minute
+
+// validateGeneratedTest proves a generated test passes before it is applied
+// (M5): it go vets the touched package AND runs the generated test (scoped
+// to the package by name). Compiling is not enough — the blind audit found
+// generated tests that vet clean but fail at runtime. It returns nil when
+// the generated test compiles AND passes; otherwise an error whose text
+// includes the failure output, so the refusal message explains exactly why.
+func validateGeneratedTest(testFile, testFuncName string) error {
+	pkgDir := filepath.Dir(testFile)
+	dir, pkgArg := pkgDir, "."
+	if modRoot := findModuleRoot(pkgDir); modRoot != "" {
+		dir = modRoot
+		if rel, rerr := filepath.Rel(modRoot, pkgDir); rerr == nil {
+			pkgArg = "./" + filepath.ToSlash(rel)
+		}
+	}
+	if out, err := runGoTool(dir, "vet", pkgArg); err != nil {
+		return fmt.Errorf("go vet %s failed — generated test NOT applied:\n%s", pkgArg, out)
+	}
+	if out, err := runGoTool(dir, "test", "-count=1", "-run", "^"+testFuncName+"$", pkgArg); err != nil {
+		return fmt.Errorf("generated test %s FAILED at runtime — generated test NOT applied:\n%s", testFuncName, out)
+	}
+	return nil
+}
+
+// findModuleRoot walks up from dir looking for go.mod, returning the module
+// root, or "" when the package lives outside any Go module (GOPATH-style
+// tree — validation then runs against the package directory directly and
+// fails closed with the toolchain's own message when module mode rejects it).
+func findModuleRoot(dir string) string {
+	for d := filepath.Clean(dir); ; d = filepath.Dir(d) {
+		if _, err := os.Stat(filepath.Join(d, "go.mod")); err == nil {
+			return d
+		}
+		if d == filepath.Dir(d) {
+			return ""
+		}
+	}
+}
+
+// runGoTool runs a go subcommand in dir with a bounded timeout and returns
+// its combined output (stdout+stderr), so a validation failure carries the
+// toolchain's actual output into the refusal message.
+func runGoTool(dir string, args ...string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), goToolTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "go", args...)
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	if ctx.Err() != nil {
+		return string(out), fmt.Errorf("go %s timed out after %s", args[0], goToolTimeout)
+	}
+	return string(out), err
 }

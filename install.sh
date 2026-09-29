@@ -47,6 +47,12 @@
 #   KERN_SKIP_DISPATCH=1    load functions only, skip the operation dispatch
 #                           (for sourcing the script in test harnesses)
 #   KERN_NO_PATH=1          skip the shell-rc PATH management
+#   KERN_PUREGO=1           build from source with -tags notreesitter (pure-Go,
+#                           no C toolchain) when falling back to `go install`.
+#                           The default go-install build compiles tree-sitter
+#                           in (hard CGO) and needs a C compiler; prebuilt
+#                           tarballs are already the pure-Go build, so this
+#                           only affects the go-install fallback path.
 #
 # Behavior kept from the previous installer: prebuilt tarballs with a
 # `go install` fallback when no asset exists for the platform, both old
@@ -306,10 +312,19 @@ go_install() {
     echo "kern: install Go (https://go.dev/dl/) or download a release from https://github.com/${REPO}/releases" >&2
     return 1
   fi
+  # The default `go install` build compiles tree-sitter in, which is hard-CGO
+  # (grammar C sources). KERN_PUREGO=1 opts out to the pure-Go regex-heuristic
+  # build — the same shape as the prebuilt release tarballs.
+  if [ "${KERN_PUREGO:-0}" = "1" ]; then
+    ts_tags="-tags notreesitter"
+    warn "KERN_PUREGO=1 — installing the pure-Go build (-tags notreesitter)"
+  else
+    ts_tags=""
+  fi
   warn "falling back to 'go install github.com/${REPO}/cmd/kern@${VERSION}'"
-  go install "github.com/${REPO}/cmd/kern@${VERSION}" &&
-    go install "github.com/${REPO}/cmd/kern-mcp@${VERSION}" &&
-    go install "github.com/${REPO}/cmd/kern-server@${VERSION}" || return 1
+  go install $ts_tags "github.com/${REPO}/cmd/kern@${VERSION}" &&
+    go install $ts_tags "github.com/${REPO}/cmd/kern-mcp@${VERSION}" &&
+    go install $ts_tags "github.com/${REPO}/cmd/kern-server@${VERSION}" || return 1
   gobin="$(go env GOPATH)/bin"
   if [ -f "$gobin/kern" ] && [ -f "$gobin/kern-mcp" ] && [ -f "$gobin/kern-server" ]; then
     mkdir -p "$PREFIX"

@@ -1,4 +1,4 @@
-//go:build treesitter
+//go:build !notreesitter
 
 package index
 
@@ -27,7 +27,8 @@ import (
 func treesitterEnabled() bool { return true }
 
 // TreesitterEnabled reports whether the tree-sitter extractor is available in
-// this build (-tags treesitter); false builds fall back to regex heuristics.
+// this build. The default build includes tree-sitter; -tags notreesitter opts
+// out and falls back to regex heuristics.
 func TreesitterEnabled() bool { return treesitterEnabled() }
 
 // tsLanguageMap maps kern language IDs to tree-sitter Language pointers.
@@ -202,7 +203,50 @@ func tsExtract(rel string, src []byte, lang string) ([]Symbol, map[string][]Call
 	}
 
 	calls = attributeTopLevelCalls(rel, src, lang, defs, calls)
+	// Top-level (file-owned) edges were attributed by the shared regex
+	// entry-rule scan at MEDIUM. Where the AST has already proven the callee
+	// is a real symbol in this file, the edge inherits AST-grade confidence —
+	// the regex scan merely re-discovered a fact tree-sitter verified.
+	// Unresolved callees (external, dynamic) stay MEDIUM.
+	promoteFileEdgesToASTConfidence(rel, defs, calls)
 	return defs, calls, inherits, pkg, nil
+}
+
+// promoteFileEdgesToASTConfidence raises MEDIUM-confidence file-owned edges
+// (top-level calls attributed by the shared regex entry-rule scan in
+// attributeTopLevelCalls) to HIGH when the callee is a verified tree-sitter
+// symbol: tree-sitter has already proven the target exists in this file, so
+// the regex-derived edge inherits AST-grade confidence (recommendation B
+// part 2). Only exact full-name matches are promoted — dotted targets
+// through unknown receivers (g.loud) and external callees stay MEDIUM
+// because the AST cannot verify them. The parity gate tolerates the
+// resulting ts>regex confidence gap: regex is the documented lower-fidelity
+// subset and may be less certain, never more certain.
+func promoteFileEdgesToASTConfidence(rel string, defs []Symbol, calls map[string][]CallEdge) {
+	owner := "file:" + rel
+	edges := calls[owner]
+	if len(edges) == 0 {
+		return
+	}
+	known := make(map[string]bool, len(defs)*2)
+	for _, d := range defs {
+		known[d.FullName()] = true
+		// Only file-scope, non-method symbols promote by bare Name. A method's
+		// short name (Greeter.greet -> "greet") must NOT promote an external or
+		// top-level callee that merely shares the name — the AST verified the
+		// qualified symbol, not the bare call target.
+		if d.Receiver == "" {
+			known[d.Name] = true
+		}
+	}
+	for i := range edges {
+		if edges[i].Confidence != ConfidenceMedium {
+			continue
+		}
+		if known[edges[i].Target] {
+			edges[i].Confidence = ConfidenceHigh
+		}
+	}
 }
 
 // collectDefinitions walks the AST and extracts symbol definitions.

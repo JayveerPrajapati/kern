@@ -18,6 +18,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 )
@@ -208,7 +209,7 @@ func verifyMCP(root string) error {
 // runOnboard ensures a working directory is fully wired to kern: registers the
 // repo in the registry, builds/refreshes the index, writes AGENTS.md if
 // missing, and prints a status report. Mirrors the MCP tool kern_onboard.
-// Usage: kern onboard [--root ROOT]
+// Usage: kern onboard [--root ROOT] [--index-only]
 func runOnboard(rest []string) {
 	f, args := parseFlagsOrDie(rest)
 	root := projectRoot(f)
@@ -245,6 +246,31 @@ func runOnboard(rest []string) {
 		}
 	}
 
+	// Agent wiring, BEFORE the index build below: the index identity records
+	// the tree it was built from, so wiring after the build would leave every
+	// freshly written file (AGENTS.md, .mcp.json, opencode.json, ...) outside
+	// the identity — `kern doctor` would immediately report the index STALE
+	// right after a successful onboard (H6). --index-only skips wiring
+	// entirely and only builds the index.
+	wired := "present"
+	var wiredFiles []string
+	if f.indexOnly {
+		wired = "skipped (--index-only)"
+	} else if _, serr := os.Stat(filepath.Join(abs, "AGENTS.md")); errors.Is(serr, fs.ErrNotExist) {
+		agents := setup.DetectAgents(abs)
+		for _, s := range setup.Wire(abs, agents, false, false) { // onboard is project-scoped: never touch user-global config
+			if s.Skipped || s.Path == "" {
+				continue
+			}
+			wiredFiles = append(wiredFiles, s.Path)
+		}
+		if _, werr := os.Stat(filepath.Join(abs, "AGENTS.md")); werr == nil {
+			wired = "written"
+		} else {
+			wired = "write failed"
+		}
+	}
+
 	// Build/refresh the index (loads a fresh cached one if present).
 	indexed := ""
 	timing := ""
@@ -271,22 +297,9 @@ func runOnboard(rest []string) {
 		timing = fmt.Sprintf("stale files: %d, rebuild: %.1fs", staleFiles, elapsed.Seconds())
 	}
 
-	// AGENTS.md wiring, only if the file is missing.
-	wired := ""
-	if _, serr := os.Stat(filepath.Join(abs, "AGENTS.md")); errors.Is(serr, fs.ErrNotExist) {
-		agents := setup.DetectAgents(abs)
-		setup.Wire(abs, agents, false, false) // onboard is project-scoped: never touch user-global config
-		if _, werr := os.Stat(filepath.Join(abs, "AGENTS.md")); werr == nil {
-			wired = "written"
-		} else {
-			wired = "write failed"
-		}
-	} else {
-		wired = "present"
-	}
-
 	fmt.Printf("root:       %s\n", abs)
 	fmt.Printf("registered: %s\n", registered)
+	fmt.Printf("wired:      %s\n", wiredList(wiredFiles, f.indexOnly))
 	fmt.Printf("indexed:    %s\n", indexed)
 	if timing != "" {
 		fmt.Printf("timing:     %s\n", timing)
@@ -302,6 +315,29 @@ func runOnboard(rest []string) {
 		fmt.Fprintln(os.Stderr, "\nonboard: one or more steps failed — run `kern doctor` to diagnose, or `kern index` to rebuild the index")
 		os.Exit(1)
 	}
+}
+
+// wiredList renders the "wired:" surface: every project file kern wrote or
+// modified during this onboard run (paths are deduped and sorted for a
+// stable, readable list). --index-only reports "none".
+func wiredList(paths []string, indexOnly bool) string {
+	if indexOnly {
+		return "none (--index-only: agent wiring skipped)"
+	}
+	if len(paths) == 0 {
+		return "none"
+	}
+	seen := map[string]bool{}
+	var uniq []string
+	for _, p := range paths {
+		if seen[p] {
+			continue
+		}
+		seen[p] = true
+		uniq = append(uniq, p)
+	}
+	sort.Strings(uniq)
+	return strings.Join(uniq, ", ")
 }
 
 func runFw(rest []string) {
@@ -482,7 +518,32 @@ func runHook(rest []string) {
 		if err := hook.Install("."); err != nil {
 			fatal("hooks install: %v", err)
 		}
-		fmt.Println("post-commit hook installed (compresses each commit diff into project memory).")
+		hookPath := filepath.Join(".", ".git", "hooks", "post-commit")
+		fmt.Printf("post-commit hook installed at %s (compresses each commit diff into project memory).\n", hookPath)
+		// A global core.hooksPath makes git run hooks from that directory and
+		// ignore .git/hooks — the local hook just installed would be shadowed.
+		// Warn (and point at the global form) instead of claiming success.
+		if note := globalHooksShadowNote(); note != "" {
+			fmt.Fprintln(os.Stderr, note)
+		}
+	case "uninstall":
+		if f.global {
+			uninstallGlobalGitHooks()
+			return
+		}
+		root := "."
+		if len(args) > 1 && args[1] != "" {
+			root = args[1]
+		}
+		removed, err := hook.Uninstall(root)
+		if err != nil {
+			fatal("hooks uninstall: %v", err)
+		}
+		if len(removed) == 0 {
+			fmt.Println("no kern-installed hooks found in .git/hooks")
+		} else {
+			fmt.Printf("removed kern-installed hook(s) from .git/hooks: %s\n", strings.Join(removed, ", "))
+		}
 	case "diff":
 		out, err := hook.Diff(from, to)
 		if err != nil {
@@ -534,9 +595,70 @@ func runHook(rest []string) {
 			}
 		}
 	default:
-		fatalUsage("usage: kern hook <install|diff|store|claude-post|claude-prompt|gemini-after|gemini-prompt> [root] [--range a..b]")
+		fatalUsage("usage: kern hook <install|uninstall|diff|store|claude-post|claude-prompt|gemini-after|gemini-prompt> [root] [--range a..b] [--global]")
 	}
+}
 
+// globalHooksShadowNote returns a warning when git's global core.hooksPath is
+// configured: under hooksPath precedence git runs hooks from that directory
+// and ignores a repo's .git/hooks, so a freshly installed local hook is
+// shadowed. Empty when there is nothing to warn about (git absent or no
+// global hooksPath).
+func globalHooksShadowNote() string {
+	if _, err := exec.LookPath("git"); err != nil {
+		return ""
+	}
+	out, err := exec.Command("git", "config", "--global", "core.hooksPath").Output()
+	if err != nil {
+		return ""
+	}
+	configured := strings.TrimSpace(string(out))
+	if configured == "" {
+		return ""
+	}
+	return fmt.Sprintf("warning: git core.hooksPath is set to %s — git runs hooks from there and ignores .git/hooks, shadowing this local hook; use `kern install hook --global` to install kern's hooks globally instead", configured)
+}
+
+// uninstallGlobalGitHooks implements `kern hook uninstall --global`: it
+// unsets git's global core.hooksPath only when it points at kern's global
+// hook dir (~/.kern/git-hooks). A hooksPath owned by something else is
+// refused loudly, never clobbered.
+func uninstallGlobalGitHooks() {
+	hooksDir, err := globalKernHooksDir()
+	if err != nil {
+		fatal("hooks uninstall --global: %v", err)
+	}
+	if _, err := exec.LookPath("git"); err != nil {
+		fatal("hooks uninstall --global: git not found on PATH")
+	}
+	out, err := exec.Command("git", "config", "--global", "core.hooksPath").Output()
+	if err != nil {
+		fmt.Println("core.hooksPath is not configured; no global kern hooks to uninstall")
+		return
+	}
+	configured := strings.TrimSpace(string(out))
+	if configured == "" {
+		fmt.Println("core.hooksPath is not configured; no global kern hooks to uninstall")
+		return
+	}
+	if configured != hooksDir {
+		fatal("refusing to unset core.hooksPath: it points to %s, not kern's %s — leaving it untouched", configured, hooksDir)
+	}
+	unset := exec.Command("git", "config", "--global", "--unset", "core.hooksPath")
+	if uOut, uErr := unset.CombinedOutput(); uErr != nil {
+		fatal("hooks uninstall --global: failed to unset core.hooksPath: %v (%s)", uErr, string(uOut))
+	}
+	fmt.Printf("unset git core.hooksPath (was %s); global kern hooks at %s are no longer active across repos\n", configured, hooksDir)
+}
+
+// globalKernHooksDir returns the directory kern installs its global hooks
+// into: ~/.kern/git-hooks.
+func globalKernHooksDir() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("cannot resolve home directory: %w", err)
+	}
+	return filepath.Join(home, ".kern", "git-hooks"), nil
 }
 
 func runCommitmsg(rest []string) {
@@ -545,8 +667,13 @@ func runCommitmsg(rest []string) {
 		fatalUsage("flags: %v", err)
 	}
 	root := projectRoot(f)
+	intent := ""
 	if f.root == "" && len(args) > 0 && args[0] != "" {
-		root = args[0]
+		if st, serr := os.Stat(args[0]); serr == nil && st.IsDir() {
+			root = args[0]
+		} else {
+			intent = args[0]
+		}
 	}
 	// --changelog renders a subsystem-grouped release-notes draft from git
 	// history. It is mutually exclusive with the diff-message path: when both
@@ -587,6 +714,9 @@ func runCommitmsg(rest []string) {
 	if err != nil {
 		fatal("commitmsg: %v", err)
 	}
+	if len(strings.TrimSpace(string(out))) == 0 {
+		fatal("no staged or changed files to describe")
+	}
 	// F-CM1: with repo access, Enhance attributes added lines to their
 	// enclosing top-level declarations by line number — a body-deep edit
 	// names the function it modified instead of a word grabbed from the
@@ -599,6 +729,14 @@ func runCommitmsg(rest []string) {
 		}
 		return string(b), true
 	})
+	if intent != "" {
+		s := strings.TrimSpace(intent)
+		s = strings.TrimSuffix(s, ".")
+		if t := commitmsgTypeFromIntent(s); t != "" {
+			msg.Type = t
+		}
+		msg.Subject = msg.Type + ": " + s
+	}
 	if f.subject {
 		fmt.Println(msg.Subject)
 	} else {
@@ -607,8 +745,44 @@ func runCommitmsg(rest []string) {
 
 }
 
+// commitmsgTypeFromIntent maps the leading verb of a user intent to a
+// conventional commit type ("fix the search bug" -> fix, "add tests" -> feat).
+// Empty when the intent does not start with a conventional verb.
+func commitmsgTypeFromIntent(intent string) string {
+	first := strings.ToLower(strings.Fields(intent)[0])
+	switch first {
+	case "fix", "bug":
+		return "fix"
+	case "add", "feat", "introduce", "implement", "support":
+		return "feat"
+	case "update", "change", "bump", "refresh":
+		return "chore"
+	case "refactor", "clean", "simplify", "rename":
+		return "refactor"
+	case "test":
+		return "test"
+	case "docs", "document":
+		return "docs"
+	case "perf", "optimize", "speed":
+		return "perf"
+	case "revert":
+		return "revert"
+	case "style", "format":
+		return "style"
+	case "ci", "build":
+		return first
+	}
+	return ""
+}
+
 func runCommit(rest []string) {
-	f, _ := parseFlagsOrDie(rest)
+	f, args := parseFlagsOrDie(rest)
+	// D2: an explicitly given message (flag or positional) is committed
+	// VERBATIM — generation/rewriting only happens when no message is given.
+	explicit := f.message
+	if explicit == "" && len(args) > 0 && args[0] != "" {
+		explicit = strings.TrimSpace(args[0])
+	}
 	// A dry-run must never mutate the index, so --all may only stage when the
 	// commit is real. The preview still reflects --all by diffing tracked
 	// changes against HEAD and rendering untracked files as no-index diffs.
@@ -621,15 +795,16 @@ func runCommit(rest []string) {
 			fatal("nothing staged to commit (use --all to stage tracked+untracked changes)")
 		}
 		msg := commitmsg.Generate(preview)
-		subject := f.message
+		subject, body := explicit, ""
 		if subject == "" {
 			subject = msg.Subject
+			body = strings.Join(msg.Body, "\n")
 		}
 		fmt.Println("kern: would commit with:")
 		fmt.Println()
 		fmt.Println(subject)
-		for _, l := range msg.Body {
-			fmt.Println(l)
+		if body != "" {
+			fmt.Println(body)
 		}
 		return
 	}
@@ -646,11 +821,11 @@ func runCommit(rest []string) {
 		fatal("nothing staged to commit (use --all to stage tracked+untracked changes)")
 	}
 	msg := commitmsg.Generate(string(diffOut))
-	subject := f.message
+	subject, body := explicit, ""
 	if subject == "" {
 		subject = msg.Subject
+		body = strings.Join(msg.Body, "\n")
 	}
-	body := strings.Join(msg.Body, "\n")
 	full := subject
 	if body != "" {
 		full += "\n\n" + body

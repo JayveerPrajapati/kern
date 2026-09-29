@@ -174,13 +174,23 @@ var hostRuleFiles = []string{"CLAUDE.md", "GEMINI.md"}
 
 // wireAgentRules writes the kern usage rules to the universal repo AGENTS.md
 // (and any existing per-host rule files). mode selects the AGENTS.md variant:
-// "thin" writes the opt-in thin file (full rules live in the host's global
-// instructions, managed by `kern setup --global-rules`); anything else
-// writes the full rules (default). wired names the agents this run wired,
+// "thin" (default) writes the thin wiring-only file (full rules live in the
+// host's global instructions, managed by `kern setup --global-rules`);
+// anything else writes the full rules. wired names the agents this run wired,
 // used only by the thin variant's wiring-facts line.
 func wireAgentRules(root, mode, wired string) Status {
 	if mode == "thin" {
-		return wireThinAgentRules(root, wired)
+		status := wireThinAgentRules(root, wired)
+		// Same thin content, per host. Errors here are informational: the
+		// universal AGENTS.md is the primary delivery mechanism.
+		for _, name := range hostRuleFiles {
+			path := filepath.Join(root, name)
+			if _, err := os.Stat(path); err != nil {
+				continue
+			}
+			wireThinRulesFile(root, name, wired)
+		}
+		return status
 	}
 	status := wireRulesFile(root, "AGENTS.md")
 	// Same content, per host. Errors here are informational: the universal

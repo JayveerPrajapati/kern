@@ -45,8 +45,18 @@ func (s *Server) handleExecute(ctx context.Context, args map[string]any) (string
 	return highlevel.Execute(ctx, s.highlevelHooks(), args)
 }
 
-func (s *Server) handleVerify(ctx context.Context, args map[string]any) (string, error) {
-	return highlevel.Verify(ctx, s.highlevelHooks(), args)
+// handleVerify takes the call id because kern_verify's long phases emit M4
+// progress notifications (the client's progress token is threaded through the
+// per-call indexScope; see progressToken).
+func (s *Server) handleVerify(ctx context.Context, id string, args map[string]any) (string, error) {
+	h := s.highlevelHooks()
+	// M4: relay phase progress as MCP notifications/progress so a client-side
+	// 30s timeout sees liveness instead of treating a healthy >30s verify as
+	// dead. s.progress is a no-op on HTTP transports and without a token.
+	h.Progress = func(pct int, msg string) {
+		s.progress(ctx, progressToken(ctx), "kern_verify", pct, msg)
+	}
+	return highlevel.Verify(ctx, h, args)
 }
 
 func (s *Server) handleIncident(ctx context.Context, args map[string]any) (string, error) {

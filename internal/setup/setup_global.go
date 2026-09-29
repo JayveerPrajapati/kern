@@ -59,9 +59,13 @@ func WireGlobal(agents []string) []Status {
 	if enabled("claude") {
 		out = append(out, writeGlobalClaude())
 	}
+	if enabled("antigravity") {
+		out = append(out, wireAntigravityHooks())
+	}
 	if enabled("opencode") {
 		out = append(out, copyGlobalPlugin())
 	}
+	out = append(out, wireGlobalGitHooks())
 	out = append(out, wireGlobalSkills()...)
 	return out
 }

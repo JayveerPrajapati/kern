@@ -140,6 +140,12 @@ describe what you need and kern picks the right tool. Example:
 	args := map[string]any{"request": request, "root": root}
 	out, err := srv.HandleMeta(context.Background(), args)
 	if err != nil {
+		// P1: a request with no code intent is a usage-style error (exit 2)
+		// with the refusal + guidance, NOT a runtime error (exit 1) and
+		// never a junk symbol search.
+		if mcp.IsNoCodeIntent(err) {
+			fatalUsage("%v", err)
+		}
 		fatal("meta: %v", err)
 	}
 	fmt.Println(out)

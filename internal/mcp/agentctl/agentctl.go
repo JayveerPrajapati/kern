@@ -104,8 +104,8 @@ func LLMProviders(ctx context.Context, args map[string]any) (string, error) {
 	if llm.HasHostSampler() {
 		chainNames = append(chainNames, "host")
 	}
-	chainNames = append(chainNames, "ollama")
 	chainNames = append(chainNames, llm.AvailableLocalAgents()...)
+	chainNames = append(chainNames, "ollama")
 	fmt.Fprintf(&b, "provider: %s (auto chain: %s)\n", llm.ProviderName(), strings.Join(chainNames, " → "))
 
 	write := func(name, kind, status, note string) {
@@ -118,7 +118,21 @@ func LLMProviders(ctx context.Context, args map[string]any) (string, error) {
 		switch name {
 		case "host":
 			if llm.HasHostSampler() {
-				write(name, "llm-provider", "ok", "active MCP host sampling connected")
+				// The MCP ack: kern knows the active session(s) and the model
+				// each serves — the SAME session does the task, no new session.
+				note := "active MCP host sampling connected"
+				if st := llm.HostSamplerStates(); len(st) > 0 {
+					parts := make([]string, 0, len(st))
+					for _, s := range st {
+						if s.Model != "" {
+							parts = append(parts, fmt.Sprintf("%s (%s)", s.Key, s.Model))
+						} else {
+							parts = append(parts, s.Key)
+						}
+					}
+					note += ": " + strings.Join(parts, ", ")
+				}
+				write(name, "llm-provider", "ok", note)
 			} else {
 				write(name, "llm-provider", "unreachable", "no MCP host sampling registered")
 			}

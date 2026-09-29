@@ -55,10 +55,11 @@ path of least resistance is to use kern directly.
    `kern_graph` or `kern_explore`, NOT `read` + `grep`.
 5. **Do I need to build/test/lint?** → call `kern_validate`, NOT `bash`.
 6. **Do I need to run a command?** → call `kern_exec`, NOT `bash`. Note:
-   on macOS (no unprivileged-userns network isolation) `kern_exec` FAILS
-   CLOSED by design; the refusal names the override —
-   `KERN_ALLOW_UNISOLATED=1` (or `KERN_ALLOW_NET=1`). Expect it, don't
-   retry blindly.
+   macOS runs isolated via Apple Seatbelt (/usr/bin/sandbox-exec) with
+   network egress blocked; Linux via unshare (requires
+   kernel.unprivileged_userns_clone=1). Only Windows / hosts where
+   isolation is unavailable fail closed; the refusal names the override —
+   `KERN_ALLOW_UNISOLATED=1` (or `KERN_ALLOW_NET=1`). Don't retry blindly.
 7. **Do I need to search the web/docs?** → call `kern_doc_fetch` then
    `kern_doc_search`, NOT `webfetch`/`websearch`. Pre-index docs with
    `kern_doc_index` (optional, for semantic search via local Ollama).
