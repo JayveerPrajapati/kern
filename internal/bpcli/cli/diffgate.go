@@ -15,6 +15,7 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/blueprint/domain"
 	"github.com/JayveerPrajapati/kern/internal/blueprint/sandbox"
 	"github.com/JayveerPrajapati/kern/internal/blueprint/service"
+	"github.com/JayveerPrajapati/kern/internal/bpcli/mcp"
 	"github.com/JayveerPrajapati/kern/internal/bppolicy/policy"
 )
 
@@ -284,7 +285,7 @@ func discoverWorkingTreeChanges(repoRoot string) ([]domain.FileChange, error) {
 		return nil, fmt.Errorf("not a git repository: %s", repoRoot)
 	}
 
-	nameStatus, err := gitOutput(repoRoot, "diff", "HEAD", "--name-status")
+	nameStatus, err := mcp.GitOutput(repoRoot, "diff", "HEAD", "--name-status")
 	if err != nil {
 		// Unborn HEAD (no commits yet): fall back to the staged set.
 		if changes, derr := discoverStagedChanges(repoRoot); derr == nil {
@@ -297,7 +298,7 @@ func discoverWorkingTreeChanges(repoRoot string) ([]domain.FileChange, error) {
 	if strings.TrimSpace(nameStatus) != "" {
 		// ONE unified=0 diff over the whole working tree (not one git spawn per
 		// file): keeps argv bounded and avoids N subprocess launches.
-		unified, err := gitOutput(repoRoot, "-c", "core.quotepath=false", "diff", "HEAD", "--unified=0", "--no-ext-diff")
+		unified, err := mcp.GitOutput(repoRoot, "-c", "core.quotepath=false", "diff", "HEAD", "--unified=0", "--no-ext-diff")
 		if err != nil {
 			return nil, fmt.Errorf("git diff HEAD --unified=0: %w", err)
 		}
@@ -305,7 +306,7 @@ func discoverWorkingTreeChanges(repoRoot string) ([]domain.FileChange, error) {
 	}
 
 	// Untracked files: invisible to git diff, visible to ls-files --others.
-	untracked, err := gitOutput(repoRoot, "-c", "core.quotepath=false", "ls-files", "--others", "--exclude-standard")
+	untracked, err := mcp.GitOutput(repoRoot, "-c", "core.quotepath=false", "ls-files", "--others", "--exclude-standard")
 	if err != nil {
 		return nil, fmt.Errorf("git ls-files --others: %w", err)
 	}

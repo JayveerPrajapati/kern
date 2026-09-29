@@ -523,7 +523,7 @@ func evidenceList(evidence []domain.Evidence) []map[string]any {
 // This is the same logic as cmd/blueprint/check.go but factored for reuse.
 func discoverStaged(repoRoot string) ([]domain.FileChange, error) {
 	// Use git diff --cached --name-status to get staged changes.
-	out, err := gitOutput(repoRoot, "diff", "--cached", "--name-status")
+	out, err := GitOutput(repoRoot, "diff", "--cached", "--name-status")
 	if err != nil {
 		return nil, fmt.Errorf("git diff --cached: %w", err)
 	}
@@ -555,7 +555,11 @@ func discoverStaged(repoRoot string) ([]domain.FileChange, error) {
 }
 
 // gitOutput runs git in dir and returns stdout.
-func gitOutput(dir string, args ...string) (string, error) {
+// GitOutput runs git with args in dir and returns its raw stdout. It is the
+// shared git runner for the bpcli surfaces (CLI check/diffgate/approval and
+// the MCP hook handlers) — one canonical copy instead of per-package
+// duplicates.
+func GitOutput(dir string, args ...string) (string, error) {
 	cmd := exec.Command("git", args...)
 	cmd.Dir = dir
 	out, err := cmd.Output()

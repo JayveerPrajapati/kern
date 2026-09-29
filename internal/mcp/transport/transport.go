@@ -184,7 +184,25 @@ func ServeListener(ctx context.Context, addr string, tlsCfg *TLSConfig, h http.H
 		defer func() { _ = tln.Close() }()
 		ln = tln
 	}
+	return serveListener(ctx, ln, tlsCfg, h, onShutdown)
+}
 
+// ServeListenerOn serves an already-bound listener. It is the
+// listen-close-rebind-free variant for tests: the caller binds once and hands
+// the listener over, so no other test can steal the port between close and
+// rebind (a flake seen under parallel -race runs). Ownership of ln passes to
+// the server, which closes it on graceful shutdown; on error return the
+// listener is left open and ownership reverts to the caller.
+func ServeListenerOn(ctx context.Context, ln net.Listener, tlsCfg *TLSConfig, h http.Handler, onShutdown func()) error {
+	if tlsCfg != nil && !tlsCfg.Valid() {
+		return fmt.Errorf("kern-mcp TLS config incomplete: both certificate and key files are required (cert=%q key=%q)", tlsCfg.CertFile, tlsCfg.KeyFile)
+	}
+	return serveListener(ctx, ln, tlsCfg, h, onShutdown)
+}
+
+// serveListener runs the HTTP server on a listener that is already bound
+// (either resolved by ServeListener or handed in by ServeListenerOn).
+func serveListener(ctx context.Context, ln net.Listener, tlsCfg *TLSConfig, h http.Handler, onShutdown func()) error {
 	hs := &http.Server{
 		Handler:           h,
 		ReadHeaderTimeout: 10 * time.Second,
