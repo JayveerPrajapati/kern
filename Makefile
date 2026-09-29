@@ -12,23 +12,28 @@ GOFLAGS := -buildvcs=false
 # separator that install.sh greps for when verifying a download.
 SHA256SUM := $(shell command -v sha256sum >/dev/null 2>&1 && echo sha256sum || echo "shasum -a 256")
 
-.PHONY: all build build-treesitter test test-race vet lint bench install install-treesitter hooks release dist mcpb clean clean-artifacts
+.PHONY: all build build-purego test test-race vet lint bench install install-purego hooks release dist mcpb clean clean-artifacts
 
 all: build
 
+# build is the DEFAULT build: tree-sitter is compiled in (hard CGO — the
+# grammar bindings compile C sources via `import "C"`). CGO_ENABLED=1 is
+# explicit so the default stays deterministic on machines where CGO would
+# otherwise be auto-disabled.
 build:
 	mkdir -p $(BIN)
-	go build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(BIN)/kern ./cmd/kern
-	go build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(BIN)/kern-mcp ./cmd/kern-mcp
-	go build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(BIN)/kern-server ./cmd/kern-server
+	CGO_ENABLED=1 go build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(BIN)/kern ./cmd/kern
+	CGO_ENABLED=1 go build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(BIN)/kern-mcp ./cmd/kern-mcp
+	CGO_ENABLED=1 go build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(BIN)/kern-server ./cmd/kern-server
 
-# build-treesitter builds with tree-sitter support (requires CGO and Go 1.23+).
-# Uses inotifywait/fswatch for file events and tree-sitter for precise parsing.
-build-treesitter:
+# build-purego is the documented pure-Go opt-out: -tags notreesitter swaps
+# the tree-sitter grammars for regex-heuristic extraction, so no C toolchain
+# is needed. Release tarballs are built this way (see `release` below).
+build-purego:
 	mkdir -p $(BIN)
-	CGO_ENABLED=1 go build -tags treesitter $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(BIN)/kern ./cmd/kern
-	CGO_ENABLED=1 go build -tags treesitter $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(BIN)/kern-mcp ./cmd/kern-mcp
-	CGO_ENABLED=1 go build -tags treesitter $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(BIN)/kern-server ./cmd/kern-server
+	CGO_ENABLED=0 go build -tags notreesitter $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(BIN)/kern ./cmd/kern
+	CGO_ENABLED=0 go build -tags notreesitter $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(BIN)/kern-mcp ./cmd/kern-mcp
+	CGO_ENABLED=0 go build -tags notreesitter $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(BIN)/kern-server ./cmd/kern-server
 
 test:
 	go test ./...
@@ -77,7 +82,7 @@ ifeq ($(shell uname -s),Darwin)
 	xattr -dr com.apple.provenance $${HOME}/.local/bin/kern $${HOME}/.local/bin/kern-mcp $${HOME}/.local/bin/kern-server 2>/dev/null || true
 endif
 
-install-treesitter: build-treesitter
+install-purego: build-purego
 	mkdir -p $${HOME}/.local/bin
 	install -m 755 $(BIN)/kern $(BIN)/kern-mcp $(BIN)/kern-server $${HOME}/.local/bin/
 ifeq ($(shell uname -s),Darwin)
@@ -106,7 +111,10 @@ endif
 
 # Cross-compile release tarballs into dist/ (used by the release workflow).
 # Usage: make release VERSION=v1.0.0
-# Binaries match release.yml: built with -tags sqlite (pure-Go, CGO_ENABLED=0 safe).
+# Binaries match release.yml: built with -tags sqlite,notreesitter (pure-Go,
+# CGO_ENABLED=0 safe). Tree-sitter is hard-CGO, so the release MUST opt out
+# with notreesitter — cross-compiling the grammar C sources per target would
+# need per-target C toolchains.
 release: clean
 	$(eval VERSION := $(if $(filter v%,$(VERSION)),$(VERSION),v$(VERSION)))
 	mkdir -p $(BIN)
@@ -114,21 +122,21 @@ release: clean
 		set -- $$target; os=$$1; arch=$$2; \
 		echo "==> building kern-$$os-$$arch"; \
 		mkdir -p $(BIN)/kern-$$os-$$arch; \
-		GOOS=$$os GOARCH=$$arch go build -tags sqlite $(GOFLAGS) -ldflags "$(RELEASE_LDFLAGS)" -o $(BIN)/kern-$$os-$$arch/kern ./cmd/kern; \
-		GOOS=$$os GOARCH=$$arch go build -tags sqlite $(GOFLAGS) -ldflags "$(RELEASE_LDFLAGS)" -o $(BIN)/kern-$$os-$$arch/kern-mcp ./cmd/kern-mcp; \
-		GOOS=$$os GOARCH=$$arch go build -tags sqlite $(GOFLAGS) -ldflags "$(RELEASE_LDFLAGS)" -o $(BIN)/kern-$$os-$$arch/kern-server ./cmd/kern-server; \
+		GOOS=$$os GOARCH=$$arch go build -tags sqlite,notreesitter $(GOFLAGS) -ldflags "$(RELEASE_LDFLAGS)" -o $(BIN)/kern-$$os-$$arch/kern ./cmd/kern; \
+		GOOS=$$os GOARCH=$$arch go build -tags sqlite,notreesitter $(GOFLAGS) -ldflags "$(RELEASE_LDFLAGS)" -o $(BIN)/kern-$$os-$$arch/kern-mcp ./cmd/kern-mcp; \
+		GOOS=$$os GOARCH=$$arch go build -tags sqlite,notreesitter $(GOFLAGS) -ldflags "$(RELEASE_LDFLAGS)" -o $(BIN)/kern-$$os-$$arch/kern-server ./cmd/kern-server; \
 		tar -C $(BIN)/kern-$$os-$$arch -czf $(BIN)/kern-$$os-$$arch.tar.gz .; \
 		rm -rf $(BIN)/kern-$$os-$$arch; \
 	done; \
 	mkdir -p $(BIN)/kern-windows-amd64; \
-	GOOS=windows GOARCH=amd64 go build -tags sqlite $(GOFLAGS) -ldflags "$(RELEASE_LDFLAGS)" -o $(BIN)/kern-windows-amd64/kern.exe ./cmd/kern; \
-	GOOS=windows GOARCH=amd64 go build -tags sqlite $(GOFLAGS) -ldflags "$(RELEASE_LDFLAGS)" -o $(BIN)/kern-windows-amd64/kern-mcp.exe ./cmd/kern-mcp; \
-	GOOS=windows GOARCH=amd64 go build -tags sqlite $(GOFLAGS) -ldflags "$(RELEASE_LDFLAGS)" -o $(BIN)/kern-windows-amd64/kern-server.exe ./cmd/kern-server; \
+	GOOS=windows GOARCH=amd64 go build -tags sqlite,notreesitter $(GOFLAGS) -ldflags "$(RELEASE_LDFLAGS)" -o $(BIN)/kern-windows-amd64/kern.exe ./cmd/kern; \
+	GOOS=windows GOARCH=amd64 go build -tags sqlite,notreesitter $(GOFLAGS) -ldflags "$(RELEASE_LDFLAGS)" -o $(BIN)/kern-windows-amd64/kern-mcp.exe ./cmd/kern-mcp; \
+	GOOS=windows GOARCH=amd64 go build -tags sqlite,notreesitter $(GOFLAGS) -ldflags "$(RELEASE_LDFLAGS)" -o $(BIN)/kern-windows-amd64/kern-server.exe ./cmd/kern-server; \
 	cd $(BIN)/kern-windows-amd64 && zip -q -r ../kern-windows-amd64.zip . && cd .. && rm -rf kern-windows-amd64
 	mkdir -p $(BIN)/kern-windows-arm64; \
-	GOOS=windows GOARCH=arm64 go build -tags sqlite $(GOFLAGS) -ldflags "$(RELEASE_LDFLAGS)" -o $(BIN)/kern-windows-arm64/kern.exe ./cmd/kern; \
-	GOOS=windows GOARCH=arm64 go build -tags sqlite $(GOFLAGS) -ldflags "$(RELEASE_LDFLAGS)" -o $(BIN)/kern-windows-arm64/kern-mcp.exe ./cmd/kern-mcp; \
-	GOOS=windows GOARCH=arm64 go build -tags sqlite $(GOFLAGS) -ldflags "$(RELEASE_LDFLAGS)" -o $(BIN)/kern-windows-arm64/kern-server.exe ./cmd/kern-server; \
+	GOOS=windows GOARCH=arm64 go build -tags sqlite,notreesitter $(GOFLAGS) -ldflags "$(RELEASE_LDFLAGS)" -o $(BIN)/kern-windows-arm64/kern.exe ./cmd/kern; \
+	GOOS=windows GOARCH=arm64 go build -tags sqlite,notreesitter $(GOFLAGS) -ldflags "$(RELEASE_LDFLAGS)" -o $(BIN)/kern-windows-arm64/kern-mcp.exe ./cmd/kern-mcp; \
+	GOOS=windows GOARCH=arm64 go build -tags sqlite,notreesitter $(GOFLAGS) -ldflags "$(RELEASE_LDFLAGS)" -o $(BIN)/kern-windows-arm64/kern-server.exe ./cmd/kern-server; \
 	cd $(BIN)/kern-windows-arm64 && zip -q -r ../kern-windows-arm64.zip . && cd .. && rm -rf kern-windows-arm64
 	# Checksum manifest for every release archive (same format the release
 	# workflow ships): shasum -a 256 (macOS) and sha256sum (Linux) both emit
