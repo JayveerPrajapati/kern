@@ -6,12 +6,37 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## Summary
 
+- **[0.9.10.1]** — 2026-09-30: Default tree-sitter indexer (14 languages), agent-adoption campaign (kern-first enforcement, meta-router coverage), compiled-intent task typing, global skill sync parity, session-aware LLM chain, and the 2026-09-29 blind-audit / dogfooding fixes.
 - **[0.9.10]** — 2026-09-26: Semver release channel (Stages A–C), org governance P13 stages 1–3, SDK passthrough, governance hardening (RBAC default-deny + persistence), semcache compounding, `kern bench` + docs site, per-tool token attribution, and the audit campaigns' security fixes.
 - **[0.9.9.1]** — 2026-09-19: Adaptive context windowing (`-A`/`-B`), configurable compaction profiles via `.kern/kern.yaml`, MCP server modularized into 44 subpackages, skill-playbook CI parity, and subprocess/hook security hardening.
 - **[0.9.9]** — 2026-09-18: Repo-wide dead-code & duplication cleanup, standalone binaries removed, architecture guards enforced by default, major hot-path performance cuts, and ~40 correctness fixes to exit codes, MCP contracts, and boundary inference.
 - **[0.9.8.2]** — 2026-09-14: Dynamic architecture guardrails fallback, multi-repo aggregate freshness in `kern doctor`, and fixes to `fit-context` budgets, MCP index hot-reload/watcher, and security hardening.
 
 ## Detailed changes
+
+## [0.9.10.1] - 2026-09-30
+
+### Changed
+- **Tree-sitter is now the DEFAULT build** (requires CGO): the symbol index compiles 13 tree-sitter grammars in by default for higher-fidelity AST extraction (14 languages, typescript covering `.ts`+`.tsx`). The pure-Go regex extractor remains as the opt-out — build with `-tags notreesitter` (or `-tags sqlite,notreesitter` for cross-compiles). Earlier changelog entries describing tree-sitter as "opt-in via `-tags treesitter`" describe those releases' state and are superseded from here on.
+- **Agent-adoption campaign (kern-first enforcement)**: thin wiring-only `AGENTS.md` as the default mode, full `kern_meta` router coverage across all 139 catalog tools, operator-gated bypass (`KERN_BYPASS=1`), slimmed plugin tool descriptions under a token-budget gate, and byte-identical kern skill copies across 5+ agent locations.
+- **Task-type derivation from compiled intent**: workflow, incident, and ops tasks now persist their intent-derived type (`code`/`incident`/`modernize`) at creation (persisted store + bus event), instead of a hardcoded `analyze`.
+- **Global skill sync now covers `~/.opencode/skills` and `~/.agents/skills`** (opencode's actual load dirs) — previously unmanaged, stale copies there silently shadowed fresh ones at agent init; a new `TestGlobalSkillCopiesParity` gate catches drift.
+### Added
+- **Session/model-aware LLM chain**: host sampler (MCP sampling ack) first — the connected session's own model answers without spawning a new session — then agent CLIs (`claude` → `opencode` → `codex`) before ollama; per-leg probe budgets (15s host / 45s CLI / 10s ollama) via the shared `ProbeReachable`; `kern do` prints which provider answered.
+- **`KERN_PROBE_TIMEOUT`** env (Go duration, default 60s) overrides the `kern agents --probe` per-provider bound.
+- **`kern verify <unknown-positional>`** did-you-mean hint naming valid check types.
+### Fixed
+- `kern health` disk-index block reported `stale:true/verdict:unknown` on bare invocation (root defaulted via `projectRoot`).
+- Copied/moved repos served a sticky stale index ("will rebuild" never fired) — `Load` re-points `ix.Root` (rebuild now triggers).
+- `kern execute` dumped ~1,100 `.git`-internals lines when run from inside a repo — git-aside placed in the absolute parent dir (now ~15 lines).
+- `kern optimize` silently no-op'd without `--llm` — LLM stage defaults to the auto chain; masking via canonical `MaskRequired`.
+- `synthesize-test --apply` refusal exited 0 — now exits 3.
+- `kern exec` undetectable-language exited 1 — now exits 2 (usage error).
+- `kern_compact_file` returned empty "success" for non-indexed files — explicit not-indexable note; `kern_search` numeric `root` rejected at MCP validation.
+- `kern index --status --json` zeroed every `time.Time` timestamp (`clipJSONValue` now passes `json.Marshaler` values through).
+- `kern bench` rendered sub-ms latencies as `0.00 ms` — now µs/ns tiers.
+- `kern team` reported `tasks: 0` (in-memory registry only) — merges the persisted store; `kern task` showed `type: analyze` for workflow tasks — derived from compiled intent at creation.
+- `kern agents --probe` help text and bound updated to 60s + env override.
 
 ## [0.9.10] - 2026-09-26
 

@@ -55,7 +55,8 @@ add it to SkipDirs or the closed loop (`kern loop`, `kern do`) regresses at
 the verify stage.
 
 **Tags.** SQLite is default-ON (`-tags nosqlite` opts out); tree-sitter is
-opt-in (`-tags treesitter`). CI-relevant changes should build both ways.
+default-ON too and requires CGO (`-tags notreesitter` opts out to the
+pure-Go regex heuristics). CI-relevant changes should build both ways.
 
 **Determinism is a product principle.** AST/graph/hashes/policy stay
 deterministic; LLMs are only for planning/reasoning/summarization — never

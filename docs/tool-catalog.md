@@ -68,7 +68,7 @@ Every model-facing tool the kern MCP server registers (`kern_*`). 139 tools.
 | `kern_inherits` | explore | low | Return the inheritance edges of a symbol: supertypes (extends/implements/embeds) and subtypes. |
 | `kern_larges` | explore | low | Find the largest function/method declarations by source lines — god functions that beg for refactoring. |
 | `kern_learn` | cross | medium | Extract recurring patterns from engineering memory above a threshold. |
-| `kern_llm_providers` | cross | low | List the LLM provider chain in priority order (Ollama first, then wired agent CLIs). |
+| `kern_llm_providers` | cross | low | List the LLM provider chain in priority order (active MCP host session first, then wired agent CLIs, then Ollama). |
 | `kern_lock` | edit | medium | Acquire an advisory flock-based workspace lock on a scope, held until kern_unlock; errors when already held. |
 | `kern_lock_status` | edit | low | List workspace locks with whether each is held and by which PID. |
 | `kern_loop` | cross | high | Run the closed autonomy loop on an intent; returns the stage timeline and outcome. observe: deterministic handlers, L0-L5 gating; autonomous: LLM coder/planner. |
@@ -578,7 +578,7 @@ Every model-facing tool the kern MCP server registers (`kern_*`). 139 tools.
 
 - Phase: `cross`
 - Risk: `low`
-- Description: List the LLM provider chain in priority order (Ollama first, then wired agent CLIs).
+- Description: List the LLM provider chain in priority order (active MCP host session first, then wired agent CLIs, then Ollama).
 - Input parameters: `probe`, `root`
 
 ## `kern_lock`

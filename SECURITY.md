@@ -84,15 +84,20 @@ known limitations, and how to report vulnerabilities.
 - `-tags nosqlite` — disables the persistent SQLite symbol index with WAL and
   FTS5 full-text search (`internal/index/sqlite_store.go`). The default build
   uses the SQLite index.
-- `-tags treesitter` — enables tree-sitter AST parsing (~13 grammars) instead
-  of the regex heuristic fallback (`internal/index/treesitter.go`).
+- `-tags notreesitter` — opts OUT of the default tree-sitter AST parsing
+  (~13 grammars), falling back to regex heuristics
+  (`internal/index/treesitter.go`). Tree-sitter is compiled in by default and
+  is hard-CGO, so the default build requires a C toolchain; the release
+  binaries ship the pure-Go `-tags notreesitter` build.
 
 ## Dependencies
 
-The default build is minimal: the Go standard library plus pure-Go
-dependencies (`gopkg.in/yaml.v3` for YAML policy/config parsing, and the cgo-free SQLite driver) — no cgo, no C
-toolchain required. Optional build tags pull in pure-Go tree-sitter grammars
-(`-tags treesitter`) or disable SQLite (`-tags nosqlite`).
+The default build links the Go standard library plus pure-Go dependencies
+(`gopkg.in/yaml.v3` for YAML policy/config parsing, and the cgo-free SQLite
+driver) and compiles in the tree-sitter grammars — hard-CGO C sources, so the
+default build needs a C toolchain. `-tags notreesitter` drops tree-sitter for
+a fully cgo-free build (the shipped release binaries); `-tags nosqlite`
+disables SQLite.
 
 ## Security-relevant environment variables
 

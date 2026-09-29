@@ -92,7 +92,7 @@ The server rejects **null**, **object** and **array** values for string-typed ar
 | `kern_inherits` | explore | low | Return the inheritance edges of a symbol: supertypes (extends/implements/embeds) and subtypes. |
 | `kern_larges` | explore | low | Find the largest function/method declarations by source lines — god functions that beg for refactoring. |
 | `kern_learn` | cross | medium | Extract recurring patterns from engineering memory above a threshold. |
-| `kern_llm_providers` | cross | low | List the LLM provider chain in priority order (Ollama first, then wired agent CLIs). |
+| `kern_llm_providers` | cross | low | List the LLM provider chain in priority order (active MCP host session first, then wired agent CLIs, then Ollama). |
 | `kern_lock` | edit | medium | Acquire an advisory flock-based workspace lock on a scope, held until kern_unlock; errors when already held. |
 | `kern_lock_status` | edit | low | List workspace locks with whether each is held and by which PID. |
 | `kern_loop` | cross | high | Run the closed autonomy loop on an intent; returns the stage timeline and outcome. observe: deterministic handlers, L0-L5 gating; autonomous: LLM coder/planner. |
@@ -583,7 +583,7 @@ Return a compressed map of a whole project: every source file with its symbols a
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `max_files` | string | no | Maximum number of files to include (default 500) |
-| `root` | string | no | Project root directory |
+| `root` | string | no | Project root (default: server cwd; stdio MCP server: confined to the workspace root, widenable via KERN_MCP_ROOTS; web console/SDK: confined to that App's project root — KERN_MCP_ROOTS does not widen) |
 
 ### `kern_prose`
 
@@ -844,7 +844,7 @@ Pack a whole project into one paste-ready bundle (instructions, tree, contents) 
 | `graph` | string | no | 'true' to pack the graph-snapshot mode (adjacency + signatures + per-file SHA-256) instead of contents |
 | `instructions` | string | no | 'true' to include root-level docs as instructions (default), 'false' to skip them |
 | `max_tokens` | string | no | Token budget for the bundle (default 8000; 0 = unlimited) |
-| `root` | string | no | Project root directory |
+| `root` | string | no | Project root (default: server cwd; stdio MCP server: confined to the workspace root, widenable via KERN_MCP_ROOTS; web console/SDK: confined to that App's project root — KERN_MCP_ROOTS does not widen) |
 | `symbol` | string | no | Symbol to pack as a subgraph (graph mode only; empty = whole graph; ignored when graph=false) |
 | `tier` | string | no | Content tier: 'full' (default), 'folded', or 'summary' |
 
@@ -1838,7 +1838,7 @@ Extract recurring patterns from engineering memory above a threshold.
 - **Risk level:** low
 - **Required:** none
 
-List the LLM provider chain in priority order (Ollama first, then wired agent CLIs).
+List the LLM provider chain in priority order (active MCP host session first, then wired agent CLIs, then Ollama).
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
