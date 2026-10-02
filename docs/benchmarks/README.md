@@ -16,6 +16,7 @@ calls in the measurements.
 | Cold-start scale | [`cold-start.md`](cold-start.md) | "Slower than grep": one-shot cold-build/cold-load vs `grep -rn` across repo sizes (83 → 7,819 files), same-tree protocol |
 | Telemetry audit | [`telemetry-audit.md`](telemetry-audit.md) | Zero network egress in core packages (CI-enforced static import scan) |
 | Token savings | [`token-savings.md`](token-savings.md) | Compact context vs naive full-file context token reduction (machine-generated report) |
+| Command QA ledger | [`command-qa-ledger.md`](command-qa-ledger.md) | One-command-at-a-time QA verification and audit disposition log |
 | Duplication detector | [`../duplication-benchmark.md`](../duplication-benchmark.md) | AST duplication scanner confusion matrix and precision floors |
 
 ## The four benchmark dimensions (semantic retention)
@@ -46,6 +47,7 @@ docs/benchmarks/
   graph-latency.md       cold/warm + query latency methodology and results
   telemetry-audit.md     zero-network-egress audit (CI-gated)
   token-savings.md       machine-generated token-savings report
+  command-qa-ledger.md   one-command-at-a-time QA verification log
   fixtures/              semantic-retention corpus (code/logs/prompts + ground truth)
 ```
 
