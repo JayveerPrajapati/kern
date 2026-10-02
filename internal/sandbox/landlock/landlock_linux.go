@@ -18,7 +18,7 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// This file implements Stage-1 Linux filesystem read confinement (finding M3)
+// This file implements Stage-1 Linux filesystem read confinement
 // with Landlock: the sandbox's sensitive-path blocklist (~/.ssh, ~/.aws, ...)
 // previously existed only in the macOS Seatbelt profile, so on Linux a
 // sandboxed command could read every file-borne secret under $HOME.

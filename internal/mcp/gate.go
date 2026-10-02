@@ -115,7 +115,7 @@ func (g *Gate) Check(toolName string, args map[string]any) error {
 	if err := g.confineMap(args); err != nil {
 		// Classify the denial as domain.ErrToolDenied so every consumer of
 		// the governed path (REST passthrough, sdk catalog client) maps the
-		// whole pre-execution-deny class with errors.Is (finding 6).
+		// whole pre-execution-deny class with errors.Is.
 		if toolName != "" {
 			return fmt.Errorf("tool %s: %w: %w", toolName, domain.ErrToolDenied, err)
 		}

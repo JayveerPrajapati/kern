@@ -13,7 +13,7 @@ import (
 	"time"
 )
 
-// Crash-safe journaling for mutation evaluation (audit finding C2).
+// Crash-safe journaling for mutation evaluation.
 //
 // Before a mutant is written to a real source file, the original content is
 // backed up under <root>/.kern/mutation-backup/<ts>-<pid>/ and recorded in a

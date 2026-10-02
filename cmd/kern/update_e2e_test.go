@@ -90,7 +90,7 @@ func TestUpdateE2E(t *testing.T) {
 	// fixtureTag packages the three binaries in src into the fake release
 	// tarball releases/download/<tag>/kern-<os>-<arch>.tar.gz (archive-root
 	// layout, matching >= v0.9.5.2 releases), then writes the release's
-	// SHA256SUMS asset. install.sh's verify() (finding L3) is fail-closed: a
+	// SHA256SUMS asset. install.sh's verify() is fail-closed: a
 	// release without a SHA256SUMS asset or without the tarball listed in it is
 	// refused ("cannot verify the download"), so the fixture must ship one to
 	// mirror a real release.

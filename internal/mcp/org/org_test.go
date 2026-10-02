@@ -263,7 +263,7 @@ func TestAuditShape(t *testing.T) {
 }
 
 // TestOrgToolsRBAC pins the per-action RBAC layer across the org resource
-// tools (the recon finding: only kern_org entity=user enforced it). Admin passes
+// tools. Admin passes
 // mutations and reads; a member passes reads but is denied mutations with a
 // clear denial naming the action; an unassigned actor is denied on both.
 // Entry points build their own enterprise.Server per call, so roles come

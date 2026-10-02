@@ -462,7 +462,7 @@ func NewServer(in io.Reader, out io.Writer) *Server {
 // the stdio NewServer falls back to the process cwd, so an unrooted server
 // backing every project's /v1/tools/{name} passthrough would run enterprise
 // tool calls in the enterprise server's own cwd and let project A's console
-// target project B's tree (finding 1). The stdio reader is never consumed
+// target project B's tree. The stdio reader is never consumed
 // when the server is driven through CallToolGoverned.
 func NewServerForRoot(in io.Reader, out io.Writer, root string) *Server {
 	s := newServerCore("stdio")

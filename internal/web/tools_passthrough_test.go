@@ -55,7 +55,7 @@ func (f *fakeToolServer) Close() {}
 // (POST /v1/tools/{name}): a successful read-only call returns 200 with the
 // raw tool output, a governed denial (domain.ErrToolDenied) is 403, an
 // unknown tool (domain.ErrToolUnknown) is 404, and an unexpected error is a
-// GENERIC 500 whose detail is logged, never returned (finding 6).
+// GENERIC 500 whose detail is logged, never returned.
 func TestV1ToolCallPassthrough(t *testing.T) {
 	toolCallEnv(t)
 	a := newTestApp(t)

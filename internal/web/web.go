@@ -63,7 +63,7 @@ type ToolServer interface {
 // toolServerFactory builds the per-App in-process tool dispatch; nil by
 // default (route unavailable) until SetToolServerFactory wires the real one.
 // The factory is ROOT-AWARE: it receives the App's project root so the tool
-// server it builds confines every tool call to THAT App's tree (finding 1) —
+// server it builds confines every tool call to THAT App's tree —
 // an unrooted factory would let one cwd-rooted server back every project
 // console and run enterprise tool calls in the wrong directory.
 var toolServerFactory = func(root string) ToolServer { return nil }

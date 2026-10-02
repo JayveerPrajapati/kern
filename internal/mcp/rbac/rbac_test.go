@@ -241,7 +241,7 @@ func TestCheckAgentToolDefaultDenyCoversDefaultPrincipal(t *testing.T) {
 	}
 
 	// An EXPLICITLY-assigned developer keeps full access under default-deny.
-	// assign is auto-permitted when default-deny is on (finding 3), so no
+	// assign is auto-permitted when default-deny is on, so no
 	// KERN_ALLOW_RBAC_ASSIGN is needed here.
 	root := t.TempDir()
 	primaryRoot = root // in-package hook: assigns here activate in memory
@@ -388,7 +388,7 @@ func TestAssignPersistsAcrossRestart(t *testing.T) {
 	ResetMemory()
 	defer ResetMemory()
 	root := t.TempDir()
-	t.Setenv("KERN_RBAC_DEFAULT_DENY", "1") // auto-permits assign (finding 3)
+	t.Setenv("KERN_RBAC_DEFAULT_DENY", "1") // auto-permits assign
 
 	if _, err := Handle(context.Background(), map[string]any{
 		"action":   "assign",

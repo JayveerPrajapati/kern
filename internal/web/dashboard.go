@@ -13,7 +13,7 @@ var dashboardTemplate embed.FS
 // consoleFuncs are the template functions every console page can call.
 // navOrgLink reports whether the org-approvals page exists (org root
 // configured): the topnav shows the Org Approvals link conditionally
-// (finding 10) without touching every page's data struct.
+// without touching every page's data struct.
 var consoleFuncs = template.FuncMap{
 	"navOrgLink": func() bool { return governance.OrgRoot() != "" },
 }

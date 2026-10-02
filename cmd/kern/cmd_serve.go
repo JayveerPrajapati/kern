@@ -28,7 +28,7 @@ import (
 // the one package above the cycle. The factory is ROOT-AWARE: each App's
 // server is confined to THAT App's project root, so enterprise multi-project
 // mode never shares one cwd-rooted server across projects and a single
-// project's console cannot target another project's tree (finding 1). Each
+// project's console cannot target another project's tree. Each
 // App closes its server with the App. The stdio reader is never consumed
 // (Serve is never called — CallToolGoverned drives dispatch directly).
 func init() {

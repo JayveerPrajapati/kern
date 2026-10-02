@@ -14,7 +14,7 @@ import (
 // copies' byte-identity, and server_filter_test.go pins the Go 22 — but
 // nothing asserted plugin-DEFAULT_TOOLS ≡ Go-defaultTools set-equality, so a
 // same-wrong-22 drift on both sides (a renamed default tool) would pass CI.
-// This closes that gap (F6, readiness-persona-2026-10-01 campaign).
+// This closes that gap.
 func TestPluginDefaultToolsMatchGoDefaultTools(t *testing.T) {
 	t.Parallel()
 	root := repoRoot(t)

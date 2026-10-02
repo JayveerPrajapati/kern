@@ -1203,7 +1203,7 @@ func (a *App) handleV1ToolCall(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	out, err := a.tools.CallToolGoverned(ctx, name, args)
 	if err != nil {
-		// Typed sentinel mapping (finding 6): the governed dispatch path
+		// Typed sentinel mapping: the governed dispatch path
 		// classifies every pre-execution denial as domain.ErrToolDenied and
 		// every unknown tool as domain.ErrToolUnknown, so the HTTP status is
 		// decided by errors.Is, never by matching raw error text. Only the
