@@ -117,6 +117,12 @@ func applyLandlock(rules []AllowRule) error {
 	}
 	handled := handledMaskFor(abi)
 	attr := unix.LandlockRulesetAttr{Access_fs: handled}
+	// Landlock's raw syscall ABI takes the ruleset attributes by pointer.
+	// Converting unsafe.Pointer to uintptr inline in the argument
+	// expression is the unsafe-package-documented syscall pattern: the
+	// uintptr lives only for the duration of the call, so the GC cannot
+	// move attr out from under the kernel. attr is local and the kernel
+	// only reads it.
 	rulesetFD, _, errno := unix.Syscall(unix.SYS_LANDLOCK_CREATE_RULESET,
 		uintptr(unsafe.Pointer(&attr)), unsafe.Sizeof(attr), 0)
 	if errno != 0 {
@@ -136,6 +142,9 @@ func applyLandlock(rules []AllowRule) error {
 			Allowed_access: r.Access & handled,
 			Parent_fd:      int32(pfd),
 		}
+		// Same documented syscall-ABI conversion as the ruleset creation
+		// above: the kernel reads pa (a local, non-escaping value) through
+		// the raw pointer for the duration of the call only.
 		_, _, errno := unix.Syscall(unix.SYS_LANDLOCK_ADD_RULE, rulesetFD,
 			unix.LANDLOCK_RULE_PATH_BENEATH, uintptr(unsafe.Pointer(&pa)))
 		unix.Close(pfd)

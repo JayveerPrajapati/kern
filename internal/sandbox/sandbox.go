@@ -286,6 +286,12 @@ type Snap struct {
 
 // Snapshot copies root into a temp directory and returns a Snap.
 func Snapshot(root string) (*Snap, error) {
+	// Best-effort orphan sweep, exactly once per process: a killed/crashed
+	// process cannot run Snap.Cleanup / Worktree.Cleanup, so stale
+	// kern-sandbox-* copies would accumulate in the system temp dir forever.
+	// Sweep failures are logged and ignored — they must never break the
+	// snapshot (see sandbox_sweep.go).
+	sweepOnce.Do(sweepOrphanSandboxesOnce)
 	tmp, err := os.MkdirTemp("", "kern-sandbox-*")
 	if err != nil {
 		return nil, err

@@ -5,6 +5,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/JayveerPrajapati/kern/internal/secscan"
 )
 
 // chdirTemp changes the process working directory to a fresh temp dir and
@@ -29,7 +31,7 @@ func TestGenTestScaffoldSQLInjection(t *testing.T) {
 	writeTaintFile(t, ".", "svc/handlers.go", "package svc\n\nfunc lookup() {}\n")
 
 	tf := TaintFinding{
-		Finding: Finding{
+		Finding: secscan.Finding{
 			File: "svc/handlers.go", Line: 12, Rule: "sql-injection",
 			Severity: "error", Message: "dynamic SQL built from variables",
 		},
@@ -63,7 +65,7 @@ func TestGenTestScaffoldFallbackPkg(t *testing.T) {
 	writeTaintFile(t, ".", "sink.txt", "no package clause here\n")
 
 	tf := TaintFinding{
-		Finding: Finding{
+		Finding: secscan.Finding{
 			File: "sink.txt", Line: 1, Rule: "command-injection",
 			Severity: "error", Message: "shell command built from variables",
 		},
@@ -92,7 +94,7 @@ func TestGenTestScaffoldDeterministic(t *testing.T) {
 	chdirTemp(t)
 	writeTaintFile(t, ".", "app.go", "package main\n\nfunc sink() {}\n")
 	tf := TaintFinding{
-		Finding: Finding{
+		Finding: secscan.Finding{
 			File: "app.go", Line: 7, Rule: "unsafe-deserialization",
 			Severity: "warning", Message: "untrusted input deserialized into untyped/weak types",
 		},

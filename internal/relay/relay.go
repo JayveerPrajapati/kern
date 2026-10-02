@@ -193,8 +193,18 @@ func (s *Server) acceptLoop() {
 		if err != nil {
 			return // listener closed
 		}
-		// Security check: ensure peer UID matches process UID on Unix domain sockets
-		if !checkPeerCredentials(conn) {
+		// Security check: ensure peer UID matches process UID on Unix domain
+		// sockets. Fail closed: an unverifiable peer is rejected. When the
+		// platform cannot perform the check at all (err != nil, e.g. Windows /
+		// BSDs / Plan 9), the rejection is loud so an unsupported platform never
+		// looks like a silent relay outage.
+		ok, err := checkPeerCredentials(conn)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "relay: %v\n", err)
+			_ = conn.Close()
+			continue
+		}
+		if !ok {
 			_ = conn.Close()
 			continue
 		}

@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/JayveerPrajapati/kern/internal/index"
+	"github.com/JayveerPrajapati/kern/internal/secscan"
 )
 
 // writeTaintFile writes a fixture file under root, creating parent dirs.
@@ -43,7 +44,7 @@ func TestTaintLiteEntryReach(t *testing.T) {
 			"F":      {"H"}, // bare variant of the qualified key
 		},
 	}
-	findings := []Finding{{
+	findings := []secscan.Finding{{
 		File: "svc/sink.go", Line: 4, Rule: "sql-injection",
 		Severity: "error", Message: "dynamic SQL built from variables",
 	}}
@@ -79,7 +80,7 @@ func TestTaintLiteSourceFile(t *testing.T) {
 		Symbols: []index.Symbol{{Kind: "func", Name: "sink", File: "app.go", Line: 3, End: 6}},
 		Callers: map[string][]string{},
 	}
-	findings := []Finding{{
+	findings := []secscan.Finding{{
 		File: "app.go", Line: 4, Rule: "sql-injection",
 		Severity: "error", Message: "dynamic SQL built from variables",
 	}}
@@ -106,7 +107,7 @@ func TestTaintLiteUnreachedSink(t *testing.T) {
 		},
 		Callers: map[string][]string{}, // nothing calls S; H is never reached
 	}
-	findings := []Finding{{
+	findings := []secscan.Finding{{
 		File: "svc/sink.go", Line: 4, Rule: "command-injection",
 		Severity: "error", Message: "shell command built from variables",
 	}}
@@ -131,7 +132,7 @@ func TestTaintLiteUnknownFunc(t *testing.T) {
 		Symbols: []index.Symbol{{Kind: "func", Name: "Other", File: "other.go", Line: 3, End: 5}},
 		Callers: map[string][]string{},
 	}
-	findings := []Finding{{
+	findings := []secscan.Finding{{
 		File: "app.go", Line: 3, Rule: "sql-injection",
 		Severity: "error", Message: "dynamic SQL built from variables",
 	}}
@@ -167,7 +168,7 @@ func TestTaintLiteDeterministic(t *testing.T) {
 			"H": {"init"},
 		},
 	}
-	findings := []Finding{
+	findings := []secscan.Finding{
 		{File: "svc/sink.go", Line: 4, Rule: "command-injection", Severity: "error", Message: "shell command built from variables"},
 		{File: "app.go", Line: 4, Rule: "sql-injection", Severity: "error", Message: "dynamic SQL built from variables"},
 		{File: "main.go", Line: 3, Rule: "unsafe-deserialization", Severity: "warning", Message: "untrusted input deserialized into untyped/weak types"},
@@ -203,7 +204,7 @@ func TestTaintLiteDepthCap(t *testing.T) {
 		},
 		Callers: callers,
 	}
-	findings := []Finding{{
+	findings := []secscan.Finding{{
 		File: "svc/sink.go", Line: 4, Rule: "sql-injection",
 		Severity: "error", Message: "dynamic SQL built from variables",
 	}}
