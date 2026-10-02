@@ -7,10 +7,10 @@ import (
 	"os"
 	"strings"
 
-	"github.com/JayveerPrajapati/kern/internal/app"
 	"github.com/JayveerPrajapati/kern/internal/domain"
 	"github.com/JayveerPrajapati/kern/internal/governance"
 	"github.com/JayveerPrajapati/kern/internal/mcp/catalog"
+	"github.com/JayveerPrajapati/kern/internal/tasklife"
 )
 
 // parseAllowlist reads the KERN_TOOLS allowlist from the environment. A
@@ -162,13 +162,11 @@ var highLevelTools = map[string]bool{
 	"kern_context":              true,
 	"kern_explore":              true,
 	"kern_graph":                true,
-	"kern_memory_add":           true,
-	"kern_memory_list":          true,
-	"kern_memory_recall":        true,
+	"kern_memory":               true,
 	"kern_review":               true,
 	"kern_security":             true,
 	"kern_validate":             true,
-	"kern_repair_diagnostics":   true,
+	"kern_repair":               true,
 	"kern_refactor_transaction": true,
 	"kern_exec":                 true,
 	"kern_sandbox":              true,
@@ -180,11 +178,8 @@ var highLevelTools = map[string]bool{
 	"kern_buddy":                true,
 	"kern_usage_guide":          true,
 	"kern_mask_pii":             true,
-	"kern_optimize_prompt":      true,
-	"kern_optimize_log":         true,
-	"kern_doc_search":           true,
-	"kern_doc_fetch":            true,
-	"kern_doc_index":            true,
+	"kern_optimize":             true,
+	"kern_doc":                  true,
 	"kern_context_budget":       true,
 	"kern_swap":                 true,
 	"kern_verify_output":        true,
@@ -194,14 +189,22 @@ var highLevelTools = map[string]bool{
 	"kern_stats":                true,
 }
 
-// defaultTools is the minimal surface advertised by default. The full
-// full catalog is gated behind KERN_MCP_FULL=1, and phase-aware routing
-// (KERN_MCP_PHASE) filters either surface down to the active phase's
-// shortlist. kern_meta's NL router
-// still reaches every sub-tool handler internally regardless of what is
-// advertised, so no capability is lost — only the advertised surface
-// shrinks. This implements the MCP spec's "high-level tools, not dozens
-// of tiny low-value tools" guidance.
+// defaultTools is the surface advertised by default. The full catalog is
+// gated behind KERN_MCP_FULL=1, and phase-aware routing (KERN_MCP_PHASE)
+// filters either surface down to the active phase's shortlist. kern_meta's
+// NL router still reaches every sub-tool handler internally regardless of
+// what is advertised, so no capability is lost — only the advertised
+// surface shrinks. This implements the MCP spec's "high-level tools, not
+// dozens of tiny low-value tools" guidance.
+//
+// The 22-tool set (expanded 2026-10-01 from the original 11) is
+// evidence-based: usage telemetry (kern stats --by-tool) showed the biggest
+// token savers and most-used primitives were unadvertised, the original set
+// had zero edit-phase tools (KERN_MCP_PHASE=edit advertised only meta+cross),
+// and the AGENTS.md kern-rules mandate compact_file/project_map/probe/memory
+// first — rules that were dead letters on default connections. Every phase
+// (explore/plan/edit/verify/meta/cross) is now covered; ~14k advertised
+// tokens, still well under the 24.1k full-catalog gate.
 var defaultTools = map[string]bool{
 	"kern_meta":              true, // NL router → all sub-tools
 	"kern_explore":           true, // symbol source + callers/callees + blast radius
@@ -209,11 +212,22 @@ var defaultTools = map[string]bool{
 	"kern_review":            true, // token-optimised review context
 	"kern_search":            true, // ranked symbol search
 	"kern_context":           true, // minimal source slice
-	"kern_optimize_prompt":   true, // compress prompts
+	"kern_optimize":          true, // compress prompts/logs/outputs (action arg)
 	"kern_plan":              true, // implementation plan
 	"kern_verify":            true, // unified verification
 	"kern_run":               true, // orchestrate a whole task
 	"kern_authorize_context": true, // authorized-context primitive (P0.1)
+	"kern_compact_file":      true, // symbolic file summary — top token saver in telemetry
+	"kern_project_map":       true, // repo onboarding map
+	"kern_probe":             true, // task-driven context bundle (replaces 5-10 searches)
+	"kern_retrieve":          true, // L1-L3 progressive-disclosure retrieval
+	"kern_memory":            true, // cross-session project memory (add/recall/remove)
+	"kern_buddy":             true, // session onboarding digest
+	"kern_fit_context":       true, // fit context to a token budget
+	"kern_repair":            true, // deterministic compiler-error → AST fix (edit phase)
+	"kern_heal":              true, // self-correct failing files (edit phase)
+	"kern_commitmsg":         true, // deterministic conventional commit message (edit phase)
+	"kern_synthesize_test":   true, // table-driven test generation (verify phase)
 }
 
 // schemaVersionFor returns the tool schema contract version this connection
@@ -283,7 +297,7 @@ func (s *Server) filteredTools() []Tool {
 	}
 	// KERN_MCP_HIGH_LEVEL_ONLY=1 → the legacy 38-tool middle set (deprecated;
 	// prefer the default minimal set or KERN_MCP_FULL). Otherwise the NEW
-	// DEFAULT: the minimal 11-tool defaultTools surface.
+	// DEFAULT: the minimal 22-tool defaultTools surface.
 	var keep map[string]bool
 	if highLevelOnly() {
 		keep = highLevelTools
@@ -337,7 +351,7 @@ func (s *Server) precheckTool(name string, args map[string]any) (string, error) 
 		// IS allowed, so a restricted deployment still gets an equivalent
 		// result instead of a hard failure. Fail closed when no allowed
 		// alternative exists.
-		if alt := app.FallbackFor(name); alt != "" {
+		if alt := tasklife.FallbackFor(name); alt != "" {
 			if toolAllowed(tools, s.allowlist, alt) {
 				name = alt
 			}

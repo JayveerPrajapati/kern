@@ -12,6 +12,7 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/app"
 	"github.com/JayveerPrajapati/kern/internal/mcp/mcpargs"
 	"github.com/JayveerPrajapati/kern/internal/mcp/root"
+	"github.com/JayveerPrajapati/kern/internal/tasklife"
 )
 
 // Hooks provides platform resolution from the owning MCP server.
@@ -36,7 +37,7 @@ func Deploy(ctx context.Context, h Hooks, args map[string]any) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	ts := app.NewTaskService(p, nil)
+	ts := tasklife.NewTaskService(p, nil)
 	t, err := ts.Deploy(taskID, mcpargs.ArgString(args, "version"))
 	if err != nil {
 		if errors.Is(err, agent.ErrApprovalRequired) {

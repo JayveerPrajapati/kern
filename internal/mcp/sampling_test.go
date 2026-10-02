@@ -195,7 +195,7 @@ func TestHostSamplingTimeout(t *testing.T) {
 // TestAutoChainHostFirstWhenSamplerRegistered: with a host sampler active,
 // the auto chain puts the host provider FIRST (host agent delegation — the
 // MCP ack: the same session does the task), then locally-installed agent
-// CLIs, then Ollama last (dogfooding G-HIGH chain order).
+// CLIs, then Ollama last.
 func TestAutoChainHostFirstWhenSamplerRegistered(t *testing.T) {
 	h := newSamplingHarness(t)
 	h.sendInitialize(t, map[string]any{"sampling": map[string]any{}})

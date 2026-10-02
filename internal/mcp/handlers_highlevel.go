@@ -79,6 +79,10 @@ func (s *Server) handleLoop(ctx context.Context, args map[string]any) (string, e
 	return highlevel.Loop(ctx, s.highlevelHooks(), args)
 }
 
+func (s *Server) handleDo(ctx context.Context, args map[string]any) (string, error) {
+	return highlevel.Do(ctx, s.highlevelHooks(), args)
+}
+
 func (s *Server) handleRun(ctx context.Context, args map[string]any) (string, error) {
 	return highlevel.Run(ctx, s.highlevelHooks(), args)
 }

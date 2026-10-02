@@ -214,7 +214,7 @@ func (g *Gate) confineSlice(key string, vals []any) error {
 // project root (audit R3): leaving it out let a client pass `repo` directly
 // and bypass raw-arg confinement, after which the decoded-path confinement
 // used an attacker-chosen root. "file" and the *_file keys are the file-path
-// arguments of the write-capable tools (kern_semantic_merge, kern_ast_transform,
+// arguments of the write-capable tools (kern_semantic action=merge, kern_ast_transform,
 // kern_synthesize_test, kern_pre_edit, ...): leaving them out let a client pass
 // a raw absolute path or a ".."-escape that the handlers used unvalidated.
 // "files" is the path-list argument of the validate-proposed tools (and a

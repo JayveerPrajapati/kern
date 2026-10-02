@@ -1,6 +1,7 @@
-// Package optimize owns the prompt and log optimization MCP tool bodies
-// (kern_optimize_prompt, kern_swap, kern_optimize_log, kern_optimize_output,
-// kern_semcache, kern_context_budget, kern_fetch_raw_anchor) as plain functions.
+// Package optimize owns the prompt, log and output optimization MCP tool
+// bodies (kern_optimize action=prompt|log|output, kern_swap,
+// kern_semcache, kern_context_budget, kern_fetch_raw_anchor) as plain
+// functions.
 package optimize
 
 import (
@@ -83,6 +84,25 @@ func RenderOptimize(title string, res optimize.Result) string {
 	}
 	return fmt.Sprintf("%s (tokens: %d -> %d, saved %d (%.1f%%)):\n%s",
 		title, res.BeforeTokens, res.AfterTokens, res.SavedTokens, res.SavedPercent, res.Output)
+}
+
+// Tool is the consolidated kern_optimize dispatcher: the action argument
+// selects the prompt/log/output body.
+func Tool(ctx context.Context, args map[string]any) (string, error) {
+	action := mcpargs.ArgString(args, "action")
+	if action == "" {
+		return "", fmt.Errorf("kern_optimize: 'action' is required")
+	}
+	switch action {
+	case "prompt":
+		return Prompt(ctx, args)
+	case "log":
+		return Log(ctx, args)
+	case "output":
+		return Output(ctx, args)
+	default:
+		return "", fmt.Errorf("kern_optimize: unknown action %q (want prompt|log|output)", action)
+	}
 }
 
 // Prompt compresses, masks secrets, and optimizes prompts using project memory.

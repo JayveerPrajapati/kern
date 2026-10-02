@@ -14,7 +14,8 @@ func TestHandleAgentRoleRBAC(t *testing.T) {
 	ctx := context.Background()
 
 	// 1. Junior dev denied kern_exec
-	resEval, err := srv.handleAgentRoleRBAC(ctx, map[string]any{
+	resEval, err := srv.handleAgent(ctx, map[string]any{
+		"action":   "rbac",
 		"agent_id": "junior-1",
 		"role":     "junior_dev",
 		"tool":     "kern_exec",
@@ -27,7 +28,8 @@ func TestHandleAgentRoleRBAC(t *testing.T) {
 	}
 
 	// 2. Junior dev allowed kern_compact_file
-	resEval2, err := srv.handleAgentRoleRBAC(ctx, map[string]any{
+	resEval2, err := srv.handleAgent(ctx, map[string]any{
+		"action":   "rbac",
 		"agent_id": "junior-1",
 		"role":     "junior_dev",
 		"tool":     "kern_compact_file",
@@ -131,10 +133,11 @@ func TestRBACAssignNotSelfService(t *testing.T) {
 	ctx := context.Background()
 
 	// No env var set: assign fails closed.
-	_, err := srv.handleAgentRoleRBAC(ctx, map[string]any{
-		"action":   "assign",
-		"agent_id": "myself",
-		"role":     "admin",
+	_, err := srv.handleAgent(ctx, map[string]any{
+		"action":       "rbac",
+		"inner_action": "assign",
+		"agent_id":     "myself",
+		"role":         "admin",
 	})
 	if err == nil || !strings.Contains(err.Error(), "disabled") {
 		t.Errorf("expected assign to fail closed without KERN_ALLOW_RBAC_ASSIGN, got: %v", err)
@@ -149,10 +152,11 @@ func TestRBACAssignNotSelfService(t *testing.T) {
 	if err := os.Setenv("KERN_ALLOW_RBAC_ASSIGN", "1"); err != nil {
 		t.Fatalf("setenv: %v", err)
 	}
-	res, err := srv.handleAgentRoleRBAC(ctx, map[string]any{
-		"action":   "assign",
-		"agent_id": "myself",
-		"role":     "admin",
+	res, err := srv.handleAgent(ctx, map[string]any{
+		"action":       "rbac",
+		"inner_action": "assign",
+		"agent_id":     "myself",
+		"role":         "admin",
 	})
 	if err != nil {
 		t.Fatalf("assign with env opt-in failed: %v", err)

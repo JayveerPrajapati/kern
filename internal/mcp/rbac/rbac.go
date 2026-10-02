@@ -1,4 +1,4 @@
-// Package rbac owns the agent role-based access control matrix (kern_agent_role_rbac).
+// Package rbac owns the agent role-based access control matrix (kern_agent action=rbac).
 package rbac
 
 import (
@@ -147,24 +147,24 @@ func Handle(ctx context.Context, args map[string]any) (string, error) {
 	case "assign":
 		// 'assign' is NOT self-service — fails closed without KERN_ALLOW_RBAC_ASSIGN / KERN_RBAC_DEFAULT_DENY.
 		if os.Getenv("KERN_ALLOW_RBAC_ASSIGN") != "1" && os.Getenv("KERN_RBAC_DEFAULT_DENY") != "1" {
-			return "", fmt.Errorf("kern_agent_role_rbac: 'assign' is disabled (fails closed); set KERN_ALLOW_RBAC_ASSIGN=1 to enable role assignment")
+			return "", fmt.Errorf("kern_agent: 'assign' is disabled (fails closed); set KERN_ALLOW_RBAC_ASSIGN=1 to enable role assignment")
 		}
 		agentID := mcpargs.ArgString(args, "agent_id")
 		if agentID == "" {
-			return "", fmt.Errorf("kern_agent_role_rbac: 'agent_id' required to assign role")
+			return "", fmt.Errorf("kern_agent: 'agent_id' required to assign role")
 		}
 		roleName := strings.ToLower(strings.TrimSpace(mcpargs.ArgString(args, "role")))
 		if _, ok := governance.LookupRole(roleName); !ok {
-			return "", fmt.Errorf("kern_agent_role_rbac: unknown role %q", roleName)
+			return "", fmt.Errorf("kern_agent: unknown role %q", roleName)
 		}
 		// P13 stage 2: scope=org persists to the org role store (org-wins), never the project map.
 		if strings.EqualFold(mcpargs.ArgString(args, "scope"), "org") || mcpargs.ArgBool(args, "org") {
 			orgRoot := governance.OrgRoot()
 			if orgRoot == "" {
-				return "", fmt.Errorf("kern_agent_role_rbac: org-scope assign requires %s", governance.OrgRootEnv)
+				return "", fmt.Errorf("kern_agent: org-scope assign requires %s", governance.OrgRootEnv)
 			}
 			if err := orgapprovals.AssignOrgRole(orgRoot, agentID, roleName); err != nil {
-				return "", fmt.Errorf("kern_agent_role_rbac: assign org role %q=%q: %w", agentID, roleName, err)
+				return "", fmt.Errorf("kern_agent: assign org role %q=%q: %w", agentID, roleName, err)
 			}
 			// AssignOrgRole self-invalidates the org-role cache after its
 			// atomic save (R3): the very next CheckAgentTool re-reads the
@@ -177,7 +177,7 @@ func Handle(ctx context.Context, args map[string]any) (string, error) {
 			root, _ = os.Getwd()
 		}
 		if root == "" {
-			return "", fmt.Errorf("kern_agent_role_rbac: cannot determine project root to persist role assignments")
+			return "", fmt.Errorf("kern_agent: cannot determine project root to persist role assignments")
 		}
 		assignMu.Lock()
 		defer assignMu.Unlock()
@@ -185,7 +185,7 @@ func Handle(ctx context.Context, args map[string]any) (string, error) {
 		if err != nil {
 			if !governance.SameRoot(root, primaryRoot) {
 				// Foreign root's store unreadable: fail closed, never leak the primary map into it.
-				return "", fmt.Errorf("kern_agent_role_rbac: cannot read role store for root %s: %w", root, err)
+				return "", fmt.Errorf("kern_agent: cannot read role store for root %s: %w", root, err)
 			}
 			rbacMu.Lock()
 			next = make(map[string]string, len(agentRoles)+1)
@@ -196,7 +196,7 @@ func Handle(ctx context.Context, args map[string]any) (string, error) {
 		}
 		next[agentID] = roleName
 		if err := governance.SaveRBACRoles(root, next); err != nil {
-			return "", fmt.Errorf("kern_agent_role_rbac: assign %q=%q: %w", agentID, roleName, err)
+			return "", fmt.Errorf("kern_agent: assign %q=%q: %w", agentID, roleName, err)
 		}
 		if !governance.SameRoot(root, primaryRoot) {
 			// Cross-root assign: persist only, never swap this process's in-memory map.
@@ -229,11 +229,11 @@ func Handle(ctx context.Context, args map[string]any) (string, error) {
 
 		def, ok := governance.LookupRole(roleName)
 		if !ok {
-			return "", fmt.Errorf("kern_agent_role_rbac: unknown role %q", roleName)
+			return "", fmt.Errorf("kern_agent: unknown role %q", roleName)
 		}
 
 		if toolName == "" {
-			return "", fmt.Errorf("kern_agent_role_rbac: 'tool' required for evaluation")
+			return "", fmt.Errorf("kern_agent: 'tool' required for evaluation")
 		}
 
 		allowed, reason := governance.ToolAllowedByDef(def, toolName)
@@ -263,6 +263,6 @@ func Handle(ctx context.Context, args map[string]any) (string, error) {
 		return report, nil
 
 	default:
-		return "", fmt.Errorf("kern_agent_role_rbac: unsupported action %q", action)
+		return "", fmt.Errorf("kern_agent: unsupported action %q", action)
 	}
 }

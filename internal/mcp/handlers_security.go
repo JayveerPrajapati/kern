@@ -5,7 +5,7 @@ import (
 
 	"github.com/JayveerPrajapati/kern/internal/mcp/security"
 	"github.com/JayveerPrajapati/kern/internal/pii"
-	"github.com/JayveerPrajapati/kern/internal/sec"
+	"github.com/JayveerPrajapati/kern/internal/secscan"
 )
 
 // securitySvc implements security.SecurityService directly over the internal
@@ -13,16 +13,16 @@ import (
 // provide, kept local to the MCP adapter.
 type securitySvc struct{}
 
-func (securitySvc) Scan(ctx context.Context, root string) ([]sec.Finding, error) {
-	return sec.Scan(root)
+func (securitySvc) Scan(ctx context.Context, root string) ([]secscan.Finding, error) {
+	return secscan.Scan(root)
 }
 
-func (securitySvc) FilterBySeverity(findings []sec.Finding, allow []string) []sec.Finding {
-	return sec.FilterBySeverity(findings, allow)
+func (securitySvc) FilterBySeverity(findings []secscan.Finding, allow []string) []secscan.Finding {
+	return secscan.FilterBySeverity(findings, allow)
 }
 
-func (securitySvc) Render(findings []sec.Finding, max int) string {
-	return sec.Render(findings, max)
+func (securitySvc) Render(findings []secscan.Finding, max int) string {
+	return secscan.Render(findings, max)
 }
 
 func (securitySvc) Mask(ctx context.Context, text string, names []string) (pii.Result, error) {

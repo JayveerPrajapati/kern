@@ -8,10 +8,10 @@ import (
 	mcpgovernance "github.com/JayveerPrajapati/kern/internal/mcp/governance"
 )
 
-// The governance-family handler bodies (kern_lock, kern_unlock,
-// kern_lock_status, kern_usage_guide, kern_rename, kern_authorize_context)
-// live in internal/mcp/governance. These adapters are the dispatch-table
-// surface; they build the leaf Hooks from server state and delegate.
+// The governance-family handler bodies (kern_lock action=acquire|release|
+// status, kern_usage_guide, kern_rename, kern_authorize_context) live in
+// internal/mcp/governance. These adapters are the dispatch-table surface;
+// they build the leaf Hooks from server state and delegate.
 
 func (s *Server) governanceHooks() mcpgovernance.Hooks {
 	return mcpgovernance.Hooks{
@@ -26,15 +26,7 @@ func (s *Server) governanceHooks() mcpgovernance.Hooks {
 }
 
 func (s *Server) handleLock(ctx context.Context, args map[string]any) (string, error) {
-	return mcpgovernance.Lock(ctx, s.governanceHooks(), args)
-}
-
-func (s *Server) handleUnlock(ctx context.Context, args map[string]any) (string, error) {
-	return mcpgovernance.Unlock(ctx, s.governanceHooks(), args)
-}
-
-func (s *Server) handleLockStatus(ctx context.Context, args map[string]any) (string, error) {
-	return mcpgovernance.LockStatus(ctx, s.governanceHooks(), args)
+	return mcpgovernance.LockTool(ctx, s.governanceHooks(), args)
 }
 
 func (s *Server) handleUsageGuide(ctx context.Context, args map[string]any) (string, error) {

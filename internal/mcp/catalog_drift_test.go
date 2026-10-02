@@ -101,7 +101,7 @@ func TestNewCatalogDriftCheckRequiresExplicitTools(t *testing.T) {
 func TestMCPToolCatalogSizeCap(t *testing.T) {
 	t.Parallel()
 	const (
-		capFloor = 138 // guards accidental truncation of the catalog (140 at Feature Batch G, 2026-09-22)
+		capFloor = 110 // guards accidental truncation of the catalog (137→117 deliberate: 8-family consolidation −26 +6, 2026-10-01)
 		capCeil  = 160 // deliberate growth budget (~1.1x of 145, 2026-09-17)
 	)
 	n := len(ToolNames())

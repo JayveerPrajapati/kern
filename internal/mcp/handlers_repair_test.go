@@ -30,7 +30,8 @@ func main() {
 	defer s.Close()
 
 	// 1. Preview repair via MCP
-	res, err := s.handleRepairDiagnostics(context.Background(), map[string]any{
+	res, err := s.handleRepair(context.Background(), map[string]any{
+		"action":          "diagnostics",
 		"root":            root,
 		"compiler_output": "main.go:4:2: imported and not used: \"os\"",
 		"apply":           "false",
@@ -43,7 +44,8 @@ func main() {
 	}
 
 	// 2. Apply repair via MCP
-	res, err = s.handleRepairDiagnostics(context.Background(), map[string]any{
+	res, err = s.handleRepair(context.Background(), map[string]any{
+		"action":          "diagnostics",
 		"root":            root,
 		"compiler_output": "main.go:4:2: imported and not used: \"os\"",
 		"apply":           "true",
@@ -62,5 +64,19 @@ func main() {
 	}
 	if strings.Contains(string(data), `"os"`) {
 		t.Errorf("expected import os removed from disk file, got:\n%s", string(data))
+	}
+}
+
+// TestHandleRepairDispatch pins the kern_repair action dispatcher: the action
+// argument is required and unknown actions are rejected up front.
+func TestHandleRepairDispatch(t *testing.T) {
+	t.Parallel()
+	s := NewServer(strings.NewReader(""), nil)
+
+	if _, err := s.handleRepair(context.Background(), map[string]any{}); err == nil || !strings.Contains(err.Error(), "'action' is required") {
+		t.Fatalf("expected action-required error, got %v", err)
+	}
+	if _, err := s.handleRepair(context.Background(), map[string]any{"action": "bogus"}); err == nil || !strings.Contains(err.Error(), "unknown action") {
+		t.Fatalf("expected unknown-action error, got %v", err)
 	}
 }

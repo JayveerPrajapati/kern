@@ -142,6 +142,28 @@ func Sandbox(ctx context.Context, id string, args map[string]any) (string, error
 	return b.String(), nil
 }
 
+// defaultExecTimeout is the execution timeout for RunBuild when
+// KERN_EXEC_TIMEOUT is unset or invalid.
+const defaultExecTimeout = 5 * time.Minute
+
+// execTimeout returns the execution timeout for RunBuild: the KERN_EXEC_TIMEOUT
+// env var parsed as a Go duration (e.g. "90s", "10m") when set and valid,
+// otherwise the 5-minute default. Invalid or non-positive values fall back to
+// the default with a warning line so a typo never silently changes the
+// timeout.
+func execTimeout() time.Duration {
+	v := os.Getenv("KERN_EXEC_TIMEOUT")
+	if v == "" {
+		return defaultExecTimeout
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil || d <= 0 {
+		fmt.Fprintf(os.Stderr, "kern_exec: warning: invalid KERN_EXEC_TIMEOUT %q (want a positive Go duration like \"90s\" or \"10m\"); using default %s\n", v, defaultExecTimeout)
+		return defaultExecTimeout
+	}
+	return d
+}
+
 // RunBuild executes a build or test command under an execution timeout.
 func RunBuild(ctx context.Context, id string, args map[string]any) (string, error) {
 	cmd := mcpargs.ArgString(args, "command")
@@ -152,7 +174,7 @@ func RunBuild(ctx context.Context, id string, args map[string]any) (string, erro
 	if err := governance.CheckExecCommand(cmd, dir); err != nil {
 		return "", err
 	}
-	bctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	bctx, cancel := context.WithTimeout(ctx, execTimeout())
 	defer cancel()
 	res, err := optimize.RunBuild(bctx, cmd, dir, optimize.Options{})
 	if err != nil {

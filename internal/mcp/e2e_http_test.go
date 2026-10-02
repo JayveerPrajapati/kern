@@ -121,8 +121,8 @@ func TestE2ERetrieve(t *testing.T) {
 	}
 }
 
-// TestE2EOrgProjects drives the org-family read tool kern_org_projects over
-// HTTP: with no projects arg it returns the default single project named
+// TestE2EOrgProjects drives the org-family read tool kern_org (entity=projects)
+// over HTTP: with no projects arg it returns the default single project named
 // after the root's base name as JSON. The org entry point builds its own
 // enterprise.Server per call, so the org-mode env pairing + an org-rbac.json
 // provide the acting user's role. "root" maps to the taxonomy role
@@ -147,8 +147,8 @@ func TestE2EOrgProjects(t *testing.T) {
 	t.Setenv("KERN_RBAC_DEFAULT_DENY", "1")
 	s := newHTTPServer()
 
-	resp := e2eCall(t, s, 4, "kern_org_projects", map[string]any{"root": root, "actor_id": "root", "agent_id": "root"})
-	text := e2eText(t, "kern_org_projects", resp)
+	resp := e2eCall(t, s, 4, "kern_org", map[string]any{"entity": "projects", "root": root, "actor_id": "root", "agent_id": "root"})
+	text := e2eText(t, "kern_org", resp)
 	// The handler returns indented JSON; decode and assert the shape.
 	var projects struct {
 		Projects []struct {

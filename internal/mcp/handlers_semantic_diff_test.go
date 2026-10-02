@@ -14,8 +14,9 @@ func TestHandleSemanticDiff(t *testing.T) {
 	s.roots = []string{root}
 
 	// Test 1: Compare HEAD against working tree (or HEAD~1..HEAD)
-	res, err := s.handleSemanticDiff(context.Background(), map[string]any{
-		"root": root,
+	res, err := s.handleSemantic(context.Background(), map[string]any{
+		"action": "diff",
+		"root":   root,
 	})
 	if err != nil {
 		t.Fatalf("handleSemanticDiff error: %v", err)
@@ -29,9 +30,10 @@ func TestHandleSemanticDiff(t *testing.T) {
 	}
 
 	// Test 2: Range comparison
-	resRange, err := s.handleSemanticDiff(context.Background(), map[string]any{
-		"root":  root,
-		"range": "HEAD~1..HEAD",
+	resRange, err := s.handleSemantic(context.Background(), map[string]any{
+		"action": "diff",
+		"root":   root,
+		"range":  "HEAD~1..HEAD",
 	})
 	if err != nil {
 		if strings.Contains(err.Error(), "exit status 128") {

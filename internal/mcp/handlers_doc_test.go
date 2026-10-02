@@ -41,7 +41,8 @@ func main() {
 	ctx := context.Background()
 
 	// 1. Query matching only code: should return ## Code section with CreateWidget
-	resCode, err := s.handleDocSearch(ctx, map[string]any{"root": root, "query": "CreateWidget"})
+	resCode, err := s.handleDoc(ctx, map[string]any{
+		"action": "search", "root": root, "query": "CreateWidget"})
 	if err != nil {
 		t.Fatalf("handleDocSearch code error: %v", err)
 	}
@@ -50,7 +51,8 @@ func main() {
 	}
 
 	// 2. Query matching both doc and code (e.g. "Widget"): should return ## Documentation and ## Code sections
-	resHybrid, err := s.handleDocSearch(ctx, map[string]any{"root": root, "query": "Widget"})
+	resHybrid, err := s.handleDoc(ctx, map[string]any{
+		"action": "search", "root": root, "query": "Widget"})
 	if err != nil {
 		t.Fatalf("handleDocSearch hybrid error: %v", err)
 	}
@@ -62,11 +64,26 @@ func main() {
 	}
 
 	// 3. Query matching neither: should return "no matching document fragments"
-	resNone, err := s.handleDocSearch(ctx, map[string]any{"root": root, "query": "nonexistentfoobardispatch9999"})
+	resNone, err := s.handleDoc(ctx, map[string]any{
+		"action": "search", "root": root, "query": "nonexistentfoobardispatch9999"})
 	if err != nil {
 		t.Fatalf("handleDocSearch none error: %v", err)
 	}
 	if !strings.Contains(resNone, "no matching document fragments") {
 		t.Errorf("expected 'no matching document fragments', got: %q", resNone)
+	}
+}
+
+// TestHandleDocDispatch pins the kern_doc action dispatcher: the action
+// argument is required and unknown actions are rejected up front.
+func TestHandleDocDispatch(t *testing.T) {
+	t.Parallel()
+	s := NewServer(strings.NewReader(""), io.Discard)
+
+	if _, err := s.handleDoc(context.Background(), map[string]any{}); err == nil || !strings.Contains(err.Error(), "'action' is required") {
+		t.Fatalf("expected action-required error, got %v", err)
+	}
+	if _, err := s.handleDoc(context.Background(), map[string]any{"action": "bogus"}); err == nil || !strings.Contains(err.Error(), "unknown action") {
+		t.Fatalf("expected unknown-action error, got %v", err)
 	}
 }

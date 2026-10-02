@@ -28,7 +28,8 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/pii"
 	"github.com/JayveerPrajapati/kern/internal/profiles"
 	"github.com/JayveerPrajapati/kern/internal/runtime"
-	"github.com/JayveerPrajapati/kern/internal/verification"
+	"github.com/JayveerPrajapati/kern/internal/tasklife"
+	"github.com/JayveerPrajapati/kern/internal/verdict"
 	"github.com/JayveerPrajapati/kern/internal/whatif"
 )
 
@@ -100,7 +101,7 @@ func Analyze(ctx context.Context, h Hooks, args map[string]any) (string, error) 
 	// (context packet, risks, evidence) is persisted. The task ID is
 	// appended to the output so the caller can reference it later. Task
 	// persistence is unconditional here — this surface promises the record.
-	ts := app.NewTaskService(p, nil).WithPRProvider(app.AutoPRProvider()).WithTaskPersistence(true)
+	ts := tasklife.NewTaskService(p, nil).WithPRProvider(tasklife.AutoPRProvider()).WithTaskPersistence(true)
 	var t *agent.Task
 	var text string
 	if lensName := mcpargs.ArgString(args, "lens"); lensName != "" {
@@ -141,7 +142,7 @@ func Plan(ctx context.Context, h Hooks, args map[string]any) (string, error) {
 	// control-plane Plan workflow (analyze → memory → impact → risk →
 	// architecture → plan artifact), distinct from kern_analyze. The
 	// authoritative Task record is persisted (queryable via kern task <id>).
-	ts := app.NewTaskService(p, nil).WithPRProvider(app.AutoPRProvider()).WithTaskPersistence(true)
+	ts := tasklife.NewTaskService(p, nil).WithPRProvider(tasklife.AutoPRProvider()).WithTaskPersistence(true)
 	t, plan, text, err := ts.Plan(change)
 	if err != nil {
 		return "", err
@@ -167,7 +168,7 @@ func Execute(ctx context.Context, h Hooks, args map[string]any) (string, error) 
 	if err != nil {
 		return "", err
 	}
-	ts := app.NewTaskService(p, nil).WithPRProvider(app.AutoPRProvider())
+	ts := tasklife.NewTaskService(p, nil).WithPRProvider(tasklife.AutoPRProvider())
 	t, diff, err := ts.Execute(patch)
 	if err != nil {
 		return "", err
@@ -251,7 +252,7 @@ func Verify(ctx context.Context, h Hooks, args map[string]any) (string, error) {
 	}
 	// kern_verify now routes through TaskService so the
 	// verification is recorded as an artifact on an authoritative Task.
-	ts := app.NewTaskService(p, nil).WithPRProvider(app.AutoPRProvider())
+	ts := tasklife.NewTaskService(p, nil).WithPRProvider(tasklife.AutoPRProvider())
 	if h.Progress != nil {
 		// One message per requested check, cumulative percentage across the
 		// block (the checks run inside the single ts.Verify call below).
@@ -279,10 +280,10 @@ func Verify(ctx context.Context, h Hooks, args map[string]any) (string, error) {
 		// caller sees what failed instead of a bare error.
 		if v.Verdict != "" || v.Build != nil || v.UnitTests != nil || v.Security != nil || v.Architecture != nil || v.Dependency != nil || v.CVE != nil || v.License != nil || v.Secrets != nil {
 			var vb strings.Builder
-			fmt.Fprintln(&vb, pii.Mask(verification.RenderCompact(v)).Text)
+			fmt.Fprintln(&vb, pii.Mask(verdict.RenderCompact(v)).Text)
 			// Calibration (Feature Batch C): aggregate confidence line on the
 			// fail path too (best-effort; omitted when there is no data).
-			if line := app.VerifyConfidenceLine(p.Root()); line != "" {
+			if line := tasklife.VerifyConfidenceLine(p.Root()); line != "" {
 				fmt.Fprintf(&vb, "%s\n", line)
 			}
 			fmt.Fprintf(&vb, "\n[task: %s — state: %s]\n", t.ID, t.State)
@@ -296,7 +297,7 @@ func Verify(ctx context.Context, h Hooks, args map[string]any) (string, error) {
 	fmt.Fprintf(&vb, "summary: %s\n", pii.Mask(v.Summary).Text)
 	// Calibration (Feature Batch C): append the aggregate confidence line at
 	// the end of the rendered report (best-effort; omitted when no data).
-	if line := app.VerifyConfidenceLine(p.Root()); line != "" {
+	if line := tasklife.VerifyConfidenceLine(p.Root()); line != "" {
 		fmt.Fprintf(&vb, "%s\n", line)
 	}
 	fmt.Fprintf(&vb, "\n[task: %s — state: %s]\n", t.ID, t.State)
@@ -337,7 +338,7 @@ func Incident(ctx context.Context, h Hooks, args map[string]any) (string, error)
 		}
 		p.WithRuntimeSource(store)
 	}
-	ts := app.NewTaskService(p, nil).WithPRProvider(app.AutoPRProvider())
+	ts := tasklife.NewTaskService(p, nil).WithPRProvider(tasklife.AutoPRProvider())
 	// correlate=true: run the incident→twin→code correlation engine and
 	// render the correlation report (Feature Batch D).
 	if mcpargs.ArgBool(args, "correlate") {
@@ -378,7 +379,7 @@ func WhatIf(ctx context.Context, h Hooks, args map[string]any) (string, error) {
 	// kern_what_if routes through TaskService so the impact and
 	// risk are recorded as artifacts on an authoritative Task. The Task
 	// record is persisted (queryable via kern task <id>).
-	ts := app.NewTaskService(p, nil).WithPRProvider(app.AutoPRProvider()).WithTaskPersistence(true)
+	ts := tasklife.NewTaskService(p, nil).WithPRProvider(tasklife.AutoPRProvider()).WithTaskPersistence(true)
 	t, text, err := ts.WhatIf(whatif.ChangeKind(kind), change, newTarget)
 	if err != nil {
 		return "", err
@@ -417,7 +418,7 @@ func Impact(ctx context.Context, h Hooks, args map[string]any) (string, error) {
 	// the CLI `kern risk` command and REST POST /v1/risk, so all three
 	// surfaces agree. The renderer is unchanged (RISK for: <change>).
 	if mcpargs.ArgString(args, "risk") == "true" {
-		ts := app.NewTaskService(p, nil).WithPRProvider(app.AutoPRProvider())
+		ts := tasklife.NewTaskService(p, nil).WithPRProvider(tasklife.AutoPRProvider())
 		_, text, err := ts.Risk(change)
 		if err != nil {
 			return "", err
@@ -427,7 +428,7 @@ func Impact(ctx context.Context, h Hooks, args map[string]any) (string, error) {
 	// kern_impact now produces the 11-question deterministic
 	// ImpactReport via TaskService.Impact (graph-driven, no LLM). The
 	// authoritative Task record is persisted (queryable via kern task <id>).
-	ts := app.NewTaskService(p, nil).WithPRProvider(app.AutoPRProvider()).WithTaskPersistence(true)
+	ts := tasklife.NewTaskService(p, nil).WithPRProvider(tasklife.AutoPRProvider()).WithTaskPersistence(true)
 	t, _, text, err := ts.Impact(change)
 	if err != nil {
 		return "", err
@@ -450,7 +451,7 @@ func Agents(ctx context.Context, h Hooks, args map[string]any) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	ts := app.NewTaskService(p, nil)
+	ts := tasklife.NewTaskService(p, nil)
 	var ab strings.Builder
 	fmt.Fprintln(&ab, "specialists:")
 	for _, r := range ts.Agents() {
@@ -515,7 +516,7 @@ func Loop(ctx context.Context, h Hooks, args map[string]any) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	ts := app.NewTaskService(p, nil).WithPRProvider(app.AutoPRProvider())
+	ts := tasklife.NewTaskService(p, nil).WithPRProvider(tasklife.AutoPRProvider())
 	var t *agent.Task
 	var res *loop.Result
 	if autonomous {
@@ -545,6 +546,19 @@ func Loop(ctx context.Context, h Hooks, args map[string]any) (string, error) {
 	return lb.String(), nil
 }
 
+// Do implements kern_do: the autonomous closed-loop preset. It delegates to
+// Loop with mode fixed to "autonomous" — the former kern_do behavior (LLM
+// coder + planner wired as stage handlers, default level L2). The level
+// argument stays overridable; no loop logic is duplicated.
+func Do(ctx context.Context, h Hooks, args map[string]any) (string, error) {
+	cp := make(map[string]any, len(args)+1)
+	for k, v := range args {
+		cp[k] = v
+	}
+	cp["mode"] = "autonomous"
+	return Loop(ctx, h, cp)
+}
+
 // ProbeLLMProviderReachable verifies a reachable LLM provider before
 // kern_loop mode=autonomous starts its closed loop. It delegates to the
 // shared capability-aware llm.ProbeReachable (host session first — the MCP
@@ -553,8 +567,7 @@ func Loop(ctx context.Context, h Hooks, args map[string]any) (string, error) {
 // probeLLMProvider (cmd/kern/helpers.go) so the two surfaces cannot drift.
 // The auto chain falls back across providers, so this only fails when no
 // provider in the chain answers — exactly the silent ~180s hang condition the
-// former kern_do used to exhibit (dogfooding G-HIGH: the old flat 8s budget
-// was a coin-flip against CLI cold-starts of 6-40s).
+// former kern_do used to exhibit.
 func ProbeLLMProviderReachable() error {
 	return llm.ProbeReachable()
 }
@@ -571,7 +584,7 @@ func Run(ctx context.Context, h Hooks, args map[string]any) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	ts := app.NewTaskService(p, nil).WithPRProvider(app.AutoPRProvider())
+	ts := tasklife.NewTaskService(p, nil).WithPRProvider(tasklife.AutoPRProvider())
 	res, err := ts.Run(intent)
 	if err != nil {
 		return "", err
@@ -606,7 +619,7 @@ func Workflow(ctx context.Context, h Hooks, args map[string]any) (string, error)
 	if err != nil {
 		return "", err
 	}
-	ts := app.NewTaskService(p, nil).WithPRProvider(app.AutoPRProvider())
+	ts := tasklife.NewTaskService(p, nil).WithPRProvider(tasklife.AutoPRProvider())
 
 	var task *agent.Task
 	if taskID := mcpargs.ArgString(args, "task_id"); taskID != "" {
@@ -666,7 +679,7 @@ func Correlate(ctx context.Context, h Hooks, args map[string]any) (string, error
 		}
 		p.WithRuntimeSource(store)
 	}
-	ts := app.NewTaskService(p, nil).WithPRProvider(app.AutoPRProvider())
+	ts := tasklife.NewTaskService(p, nil).WithPRProvider(tasklife.AutoPRProvider())
 	// code=true: extend the runtime correlation with the incident→twin→
 	// code correlation report (Feature Batch D).
 	if mcpargs.ArgBool(args, "code") {
@@ -702,7 +715,7 @@ func Learn(ctx context.Context, h Hooks, args map[string]any) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	ts := app.NewTaskService(p, nil).WithPRProvider(app.AutoPRProvider())
+	ts := tasklife.NewTaskService(p, nil).WithPRProvider(tasklife.AutoPRProvider())
 	t, _, text, err := ts.Learn(threshold)
 	if err != nil {
 		return "", err
@@ -721,7 +734,7 @@ func Modernize(ctx context.Context, h Hooks, args map[string]any) (string, error
 	if err != nil {
 		return "", err
 	}
-	ts := app.NewTaskService(p, nil).WithPRProvider(app.AutoPRProvider())
+	ts := tasklife.NewTaskService(p, nil).WithPRProvider(tasklife.AutoPRProvider())
 	t, _, text, err := ts.Modernize()
 	if err != nil {
 		return "", err
@@ -813,7 +826,7 @@ func Approve(ctx context.Context, h Hooks, args map[string]any) (string, error) 
 	if err != nil {
 		return "", err
 	}
-	ts := app.NewTaskService(p, nil).WithAgentID(approver)
+	ts := tasklife.NewTaskService(p, nil).WithAgentID(approver)
 	a, err := ts.ResolveApprovalForTask(id, approver, !reject, reason)
 	if err != nil {
 		return "", err

@@ -27,15 +27,14 @@ kern_commitmsg, kern_guard_check, kern_pre_edit, kern_compose
 
 ### verify — check / validate
 kern_verify, kern_validate, kern_review, kern_security, kern_changes,
-kern_schema_validate, kern_diff_files, kern_evidence_anchor, kern_policy_dsl,
+kern_schema_validate, kern_diff_files, kern_evidence (action=anchor), kern_policy_dsl,
 kern_authorize_context
 
 Always available regardless of phase (meta/cross): kern_meta, kern_search,
-kern_context, kern_run, kern_optimize_prompt, kern_optimize_log, kern_mask_pii,
-kern_doc_search, kern_memory_*, kern_stats, kern_onboard, kern_incident,
-kern_workflow, kern_loop, kern_health, kern_prompt_fill, kern_semantic_diff,
-kern_context_watch, kern_agent_fingerprint, kern_agent_coordination,
-kern_agent_role_rbac, kern_authorize_context, kern_stream.
+kern_context, kern_run, kern_optimize, kern_mask_pii,
+kern_doc, kern_memory, kern_stats, kern_onboard, kern_incident,
+kern_workflow, kern_loop, kern_health, kern_prompt_fill, kern_semantic,
+kern_context_watch, kern_agent, kern_authorize_context, kern_stream.
 
 ## Performance tiers
 Most tools are index-backed and return in well under 100ms. The tiers below
@@ -49,14 +48,14 @@ only matter for the exceptions.
 - kern_inherits (supertypes/subtypes hierarchy)
 - kern_changes (file= form), kern_hubs, kern_bridges, kern_larges, kern_dead, kern_frameworks
 - kern_probe, kern_trace, kern_test_gaps, kern_repo_search
-- kern_optimize_prompt, kern_optimize_log, kern_optimize_output, kern_context_budget, kern_mask_pii, kern_swap
-- kern_compact_file, kern_diff_files, kern_doc_search, kern_doc_index, kern_doc_fetch
-- kern_memory_*, kern_stats, kern_semcache, kern_verify_output, kern_schema_validate
+- kern_optimize, kern_context_budget, kern_mask_pii, kern_swap
+- kern_compact_file, kern_diff_files, kern_doc
+- kern_memory, kern_stats, kern_semcache, kern_verify_output, kern_schema_validate
 - kern_validate (auto-detected build/test command; raw=true returns compact output only)
-- kern_lock, kern_lock_status, kern_unlock (advisory workspace-scoped locks)
+- kern_lock (advisory workspace-scoped locks: action=acquire|release|status)
 - kern_security (line-scoped security scan, walks source files)
 - kern_commitmsg (deterministic commit message from git diff — rule-based, no LLM)
-- kern_doc_fetch (explicit network opt-in: pull one public docs page into the local index; semantic=true adds Ollama embeddings)
+- kern_doc (action=fetch: explicit network opt-in; pull one public docs page into the local index; semantic=true adds Ollama embeddings)
 - kern_safe_delete (callers + exported/entry-point verdict before removing code)
 - kern_rename (AST-scoped structural rename preview; cheap, no filesystem writes unless apply=true)
 - kern_exec (run a script in an isolated runtime, get pure stdout back)
@@ -81,7 +80,7 @@ only matter for the exceptions.
 - Why does X exist: kern_why -> kern_graph
 - Class hierarchy: kern_inherits (supertypes/subtypes)
 - Before proposing edits: kern_guard_check -> kern_changes -> kern_review
-- Trim context: kern_optimize_prompt -> kern_context_budget -> kern_swap
+- Trim context: kern_optimize (action=prompt) -> kern_context_budget -> kern_swap
 - Diagnose a crash/hot path: kern_trace -> kern_probe
 - Audit health: kern_test_gaps -> kern_larges -> kern_dead
 - Review a diff for regressions or vulns: kern_review -> kern_security
@@ -180,7 +179,7 @@ chosen option to size the real edit — both before you run kern_execute.
 - kern_prompt_fill accepts predefined template names (e.g. 'debug', 'explain', 'code-review') or custom inline prompt strings with {{SLOT}} interpolation.
 - kern_changes with a range needs git; a bare file= list avoids it.
 - kern_repo_search only searches repos you registered (kern repos add).
-- kern_doc_index only indexes .md/.txt/.rst/.adoc/.org files, skips vendor.
+- kern_doc (action=index) only indexes .md/.txt/.rst/.adoc/.org files, skips vendor.
 - Generated files (.pb.go, *_mock.go, codegen output) are demoted in
   kern_search results, not hidden — pass a narrower query if only stubs match.
 - Provenance: index-backed tools append a [kern] index stamp (symbols, edges,
@@ -214,9 +213,9 @@ chosen option to size the real edit — both before you run kern_execute.
   keyword needed.
 - kern_fts_search requires a kern build with -tags sqlite (FTS5); the default
   build's tool errors with an explicit rebuild hint — use kern_search instead.
-- kern_lock/kern_unlock are scoped to a workspace + server process: a lock
+- kern_lock (action=acquire/release) is scoped to a workspace + server process: a lock
   acquired by one MCP server (or CLI process) is not releasable by another;
-  the lock marker persists in <root>/.kern/locks until kern unlock runs in
+  the lock marker persists in <root>/.kern/locks until kern_lock action=release runs in
   the owning process.
 - Timeouts & progress: every tool call has a 30-minute ceiling
   (KERN_MCP_CONCURRENCY bounds parallel calls). The exec family

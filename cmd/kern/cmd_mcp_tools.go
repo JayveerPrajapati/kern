@@ -43,7 +43,7 @@ func runHealth(rest []string) {
 	if err != nil {
 		fatalUsage("usage: kern health [--root ROOT] [--json]\nflags: %v", err)
 	}
-	// Resolve the root like every other CLI command (dogfooding B-HIGH): the
+	// Resolve the root like every other CLI command: the
 	// disk-index freshness probe in DiskIndexView needs a real root — an
 	// empty root made it report stale=true / verdict:"unknown" / root:""
 	// even on a fresh index, contradicting doctor and index --status.
@@ -218,7 +218,7 @@ func runSemanticDiff(rest []string) {
 		fatalUsage("flags: %v\nusage: kern semantic-diff [--from REV] [--to REV] [--range A..B] [--root ROOT]", err)
 	}
 
-	args := map[string]any{"root": f.root}
+	args := map[string]any{"root": f.root, "action": "diff"}
 	if f.from != "" {
 		args["from"] = f.from
 	}
@@ -230,7 +230,7 @@ func runSemanticDiff(rest []string) {
 	} else if len(pos) > 0 {
 		args["range"] = pos[0]
 	}
-	runMCPTool("kern_semantic_diff", args)
+	runMCPTool("kern_semantic", args)
 }
 
 func runEvidenceAnchor(rest []string) {
@@ -240,7 +240,7 @@ func runEvidenceAnchor(rest []string) {
 	if c == "" && len(pos) > 0 {
 		c = strings.Join(pos, " ")
 	}
-	args := map[string]any{"root": f.root, "claim": c}
+	args := map[string]any{"root": f.root, "claim": c, "action": "anchor"}
 	if f.file != "" {
 		args["file"] = f.file
 	}
@@ -250,7 +250,7 @@ func runEvidenceAnchor(rest []string) {
 	if f.symbol != "" {
 		args["symbol"] = f.symbol
 	}
-	runMCPTool("kern_evidence_anchor", args)
+	runMCPTool("kern_evidence", args)
 }
 
 func runContextWatch(rest []string) {
@@ -281,13 +281,13 @@ func runContextWatch(rest []string) {
 func runAgentFingerprint(rest []string) {
 	f, pos := parseFlagsOrDie(rest)
 
-	args := map[string]any{"format": f.format}
+	args := map[string]any{"format": f.format, "action": "fingerprint"}
 	if f.agent != "" {
 		args["agent_id"] = f.agent
 	} else if len(pos) > 0 {
 		args["agent_id"] = pos[0]
 	}
-	runMCPTool("kern_agent_fingerprint", args)
+	runMCPTool("kern_agent", args)
 }
 
 func runExplain(rest []string) {
@@ -355,7 +355,8 @@ func runMemoryRanked(rest []string) {
 	if p == "" {
 		fatalUsage("usage: kern memory-ranked <prompt> [-k 5] [--half-life 7.0] [--root ROOT]")
 	}
-	runMCPTool("kern_memory_ranked", map[string]any{
+	runMCPTool("kern_memory", map[string]any{
+		"action":         "ranked",
 		"prompt":         p,
 		"k":              f.k,
 		"half_life_days": f.halfLife,
@@ -409,17 +410,18 @@ func runAgentCoordination(rest []string) {
 		act = pos[0]
 	}
 	args := map[string]any{
-		"action":      act,
-		"agent_id":    f.agent,
-		"from_agent":  f.from,
-		"to_agent":    f.to,
-		"task_id":     f.task,
-		"resource":    f.resource,
-		"ttl_seconds": f.ttl,
-		"notes":       f.notes,
-		"root":        f.root,
+		"action":       "coordination",
+		"inner_action": act,
+		"agent_id":     f.agent,
+		"from_agent":   f.from,
+		"to_agent":     f.to,
+		"task_id":      f.task,
+		"resource":     f.resource,
+		"ttl_seconds":  f.ttl,
+		"notes":        f.notes,
+		"root":         f.root,
 	}
-	runMCPTool("kern_agent_coordination", args)
+	runMCPTool("kern_agent", args)
 }
 
 func runAgentRoleRBAC(rest []string) {
@@ -436,13 +438,14 @@ func runAgentRoleRBAC(rest []string) {
 		act = pos[0]
 	}
 	args := map[string]any{
-		"action":   act,
-		"agent_id": f.agent,
-		"role":     f.role,
-		"tool":     f.tool,
-		"root":     f.root,
+		"action":       "rbac",
+		"inner_action": act,
+		"agent_id":     f.agent,
+		"role":         f.role,
+		"tool":         f.tool,
+		"root":         f.root,
 	}
-	runMCPTool("kern_agent_role_rbac", args)
+	runMCPTool("kern_agent", args)
 }
 
 func runStream(rest []string) {
@@ -531,6 +534,7 @@ func runSemanticMerge(rest []string) {
 	}
 
 	args := map[string]any{
+		"action": "merge",
 		"file":   f.file,
 		"base":   f.base,
 		"local":  f.local,
@@ -539,7 +543,7 @@ func runSemanticMerge(rest []string) {
 		"format": format,
 		"root":   f.root,
 	}
-	runMCPTool("kern_semantic_merge", args)
+	runMCPTool("kern_semantic", args)
 }
 
 func runSynthesizeTest(rest []string) {
@@ -577,7 +581,7 @@ func runSynthesizeTest(rest []string) {
 		fatal("kern_synthesize_test: %v — see kern doctor for diagnostics", err)
 	}
 	fmt.Println(out)
-	// Dogfooding A1-N3: a REFUSED apply (generated test fails at runtime, or
+	// a REFUSED apply (generated test fails at runtime, or
 	// the write is otherwise rejected) is a decided-state / policy outcome —
 	// exit 3, not 0, so scripts/CI can detect it without parsing the report.
 	// The "apply refused" marker is stable in both text and JSON reports

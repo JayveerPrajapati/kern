@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/JayveerPrajapati/kern/internal/mcp/etag"
 	"github.com/JayveerPrajapati/kern/internal/mcp/meta"
 )
 
@@ -43,6 +44,15 @@ func (s *Server) handleMeta(ctx context.Context, args map[string]any) (string, e
 		// per-call output sandbox still caps huge catalogs at serve time.
 		ToolCatalog: func() (string, error) {
 			return renderToolCatalog(s.filteredTools()), nil
+		},
+		// Workingset answers "my working set" / "workingset" (B1, ADR-0012)
+		// with the caller's conditional-fetch registry: the etags this agent
+		// has been served, newest first. The classifier routes these requests
+		// to the workingset marker; Handle answers them through this hook
+		// instead of dispatching a tool. The listing is per-agent state, so
+		// it is never stored/served from the D1 cache.
+		Workingset: func(agentID string) (string, error) {
+			return etag.RenderWorkingset(agentID)
 		},
 	}, args)
 }

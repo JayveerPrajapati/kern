@@ -10,6 +10,7 @@ import (
 
 	"github.com/JayveerPrajapati/kern/internal/app"
 	"github.com/JayveerPrajapati/kern/internal/eventbus"
+	"github.com/JayveerPrajapati/kern/internal/tasklife"
 )
 
 // TestHandleMeta_PhaseArg verifies kern_meta's phase arg: invalid phases are
@@ -344,7 +345,7 @@ func TestHandleAnalyzePersistsTaskRecord(t *testing.T) {
 		t.Fatalf("task id = %q, want store-assigned t-<n> (authoritative record)", id)
 	}
 	// A fresh service reads the same persisted store `kern task <id>` reads.
-	ts := app.NewTaskService(mustMCPPlatform(t, root), eventbus.New())
+	ts := tasklife.NewTaskService(mustMCPPlatform(t, root), eventbus.New())
 	if got, ok := ts.Get(id); !ok {
 		t.Fatalf("task %q not queryable from a fresh TaskService after handleAnalyze", id)
 	} else if got.State == "" {

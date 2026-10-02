@@ -12,6 +12,7 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/mcp/mcpargs"
 	"github.com/JayveerPrajapati/kern/internal/mcp/root"
 	"github.com/JayveerPrajapati/kern/internal/sec"
+	"github.com/JayveerPrajapati/kern/internal/secscan"
 	"github.com/JayveerPrajapati/kern/internal/synthtest"
 )
 
@@ -105,7 +106,7 @@ func taintScaffolds(ctx context.Context, h Hooks, root, sinks string) (string, e
 			want[s] = true
 		}
 	}
-	findings, serr := sec.Scan(root)
+	findings, serr := secscan.Scan(root)
 	if serr != nil {
 		return "", fmt.Errorf("security scan failed: %w", serr)
 	}

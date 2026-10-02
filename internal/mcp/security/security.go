@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/JayveerPrajapati/kern/internal/draft"
+	"github.com/JayveerPrajapati/kern/internal/guard"
 	"github.com/JayveerPrajapati/kern/internal/index"
 	"github.com/JayveerPrajapati/kern/internal/intel"
 	"github.com/JayveerPrajapati/kern/internal/mcp/mcpargs"
@@ -18,6 +20,7 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/relay"
 	jsonschema "github.com/JayveerPrajapati/kern/internal/schema"
 	"github.com/JayveerPrajapati/kern/internal/sec"
+	"github.com/JayveerPrajapati/kern/internal/secscan"
 	"github.com/JayveerPrajapati/kern/internal/verification"
 )
 
@@ -27,9 +30,9 @@ import (
 // internal/service layer) so this package depends only on the internal
 // engines.
 type SecurityService interface {
-	Scan(ctx context.Context, root string) ([]sec.Finding, error)
-	FilterBySeverity(findings []sec.Finding, allow []string) []sec.Finding
-	Render(findings []sec.Finding, max int) string
+	Scan(ctx context.Context, root string) ([]secscan.Finding, error)
+	FilterBySeverity(findings []secscan.Finding, allow []string) []secscan.Finding
+	Render(findings []secscan.Finding, max int) string
 	Mask(ctx context.Context, text string, names []string) (pii.Result, error)
 }
 
@@ -101,7 +104,7 @@ func Scan(ctx context.Context, secSvc SecurityService, args map[string]any) (str
 		return "no security findings", nil
 	}
 	out := secSvc.Render(findings, maxN)
-	counts := sec.Counts(findings)
+	counts := secscan.Counts(findings)
 	out += fmt.Sprintf("[kern] %d findings: %d error, %d warning, %d info\n",
 		len(findings), counts["error"], counts["warning"], counts["info"])
 	return out, nil
@@ -113,7 +116,7 @@ func Taint(ctx context.Context, h Hooks, args map[string]any) (string, error) {
 	fileFilter := mcpargs.ArgString(args, "file")
 	rng := mcpargs.ArgString(args, "range")
 
-	findings, serr := sec.Scan(root)
+	findings, serr := secscan.Scan(root)
 	if serr != nil {
 		return "", fmt.Errorf("security scan failed: %w", serr)
 	}
@@ -141,7 +144,7 @@ func Taint(ctx context.Context, h Hooks, args map[string]any) (string, error) {
 			scope = "worktree"
 		}
 		scopeNote = fmt.Sprintf("scope: %d file(s) changed in %s\n", len(files), scope)
-		findings = sec.FilterByFiles(findings, files)
+		findings = secscan.FilterByFiles(findings, files)
 	}
 	ix, _ := h.LoadIndex(ctx, root)
 	tainted := sec.TaintLite(ix, findings)
@@ -236,7 +239,7 @@ func CheckDraft(ctx context.Context, h Hooks, args map[string]any) (string, erro
 	if err != nil {
 		return "", fmt.Errorf("cannot check draft: index unavailable for %q: %w", root, err)
 	}
-	findings := verification.CheckDraft(ix, root, []byte(code), lang)
+	findings := draft.CheckDraft(ix, root, []byte(code), lang)
 	if len(findings) == 0 {
 		return "OK: draft validates cleanly — no issues found", nil
 	}
@@ -262,19 +265,19 @@ func GuardCheck(ctx context.Context, h Hooks, args map[string]any) (string, erro
 		files = append(files, c.File)
 	}
 	root := root.ResolveRoot(mcpargs.ArgString(args, "root"))
-	b, err := intel.LoadBoundaries(root)
+	b, err := guard.LoadBoundaries(root)
 	if err != nil {
 		return "", err
 	}
 	unconfigured := b == nil
 	if b == nil {
-		b = intel.InferBoundaries(ix)
+		b = guard.InferBoundaries(ix)
 	}
-	violations, skipped := intel.CheckBoundariesPrecise(ix, b, files, false)
+	violations, skipped := guard.CheckBoundariesPrecise(ix, b, files, false)
 	if b != nil && b.Pure {
 		violations = append(violations, intel.CheckPurity(ix, files)...)
 	}
-	relay.PublishPersisted(root, intel.GuardEvents(violations, unconfigured || skipped["boundaries-not-configured"] > 0))
+	relay.PublishPersisted(root, guard.GuardEvents(violations, unconfigured || skipped["boundaries-not-configured"] > 0))
 	threshold := 0
 	if v := mcpargs.ArgString(args, "threshold"); v != "" {
 		n, err := strconv.Atoi(v)
@@ -289,7 +292,7 @@ func GuardCheck(ctx context.Context, h Hooks, args map[string]any) (string, erro
 	if mcpargs.ArgString(args, "format") == "sarif" {
 		return intel.RenderViolationsSARIF(violations, h.ServerVersion), nil
 	}
-	out := intel.RenderViolations(violations)
+	out := guard.RenderViolations(violations)
 	if n := skipped["boundaries-not-configured"]; n > 0 {
 		out = fmt.Sprintf("WARN: no boundary rules configured (.kern/boundaries.json not found) — architecture guard NOT enforced; %d files unchecked\n%s", n, out)
 	}

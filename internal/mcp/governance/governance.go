@@ -1,5 +1,5 @@
 // Package governance owns the governance-family MCP tool bodies
-// (kern_lock, kern_unlock, kern_lock_status, kern_usage_guide,
+// (kern_lock action=acquire|release|status, kern_usage_guide,
 // kern_rename, kern_authorize_context) as plain functions.
 package governance
 
@@ -62,8 +62,28 @@ func validScope(scope string) bool {
 	return true
 }
 
-// Lock implements the kern_lock tool: acquires an advisory workspace-scoped
-// lock, registering it on the server so unlock/cancel can release it.
+// LockTool is the consolidated kern_lock dispatcher: the action argument
+// selects the acquire/release/status body.
+func LockTool(ctx context.Context, h Hooks, args map[string]any) (string, error) {
+	action := mcpargs.ArgString(args, "action")
+	if action == "" {
+		return "", fmt.Errorf("kern_lock: 'action' is required")
+	}
+	switch action {
+	case "acquire":
+		return Lock(ctx, h, args)
+	case "release":
+		return Unlock(ctx, h, args)
+	case "status":
+		return LockStatus(ctx, h, args)
+	default:
+		return "", fmt.Errorf("kern_lock: unknown action %q (want acquire|release|status)", action)
+	}
+}
+
+// Lock implements the kern_lock action=acquire body: acquires an advisory
+// workspace-scoped lock, registering it on the server so release/cancel can
+// release it.
 func Lock(ctx context.Context, h Hooks, args map[string]any) (string, error) {
 	{
 		scope := mcpargs.ArgString(args, "scope")
@@ -102,8 +122,8 @@ func Lock(ctx context.Context, h Hooks, args map[string]any) (string, error) {
 	}
 }
 
-// Unlock implements the kern_unlock tool: releases a lock held by this
-// server, reporting "not held" for scopes it never acquired.
+// Unlock implements the kern_lock action=release body: releases a lock held
+// by this server, reporting "not held" for scopes it never acquired.
 func Unlock(ctx context.Context, h Hooks, args map[string]any) (string, error) {
 	{
 		scope := mcpargs.ArgString(args, "scope")
@@ -128,8 +148,8 @@ func Unlock(ctx context.Context, h Hooks, args map[string]any) (string, error) {
 	}
 }
 
-// LockStatus implements the kern_lock_status tool: lists every lock file in
-// the workspace with its holder state.
+// LockStatus implements the kern_lock action=status body: lists every lock
+// file in the workspace with its holder state.
 func LockStatus(ctx context.Context, h Hooks, args map[string]any) (string, error) {
 	{
 		root := mcpargs.ArgString(args, "root")

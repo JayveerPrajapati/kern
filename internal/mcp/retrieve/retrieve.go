@@ -8,6 +8,7 @@ package retrieve
 import (
 	"context"
 	"fmt"
+	"log"
 	"strings"
 
 	"github.com/JayveerPrajapati/kern/internal/index"
@@ -172,9 +173,14 @@ func Retrieve(ctx context.Context, ix *index.Index, gvc mcpgov.GovContext, args 
 	// Persist registered handles (QA Pick #10, F-M1): the MCP path
 	// previously registered handles in-memory only, so they died with the
 	// server process. Save is merge-on-disk, so cross-process handles
-	// survive too.
+	// survive too. Best-effort for the call, but a failure is surfaced:
+	// silently dropping it would regress the documented cross-process
+	// handle guarantee.
 	if ix != nil {
-		_ = retrieval.DefaultRegistry.Save(retrieval.HandleStorePath(ix.Root))
+		path := retrieval.HandleStorePath(ix.Root)
+		if err := retrieval.DefaultRegistry.Save(path); err != nil {
+			log.Printf("retrieve: persist handle registry to %s: %v", path, err)
+		}
 	}
 	return renderWithHandle(res) + graph.FreshnessFooter(args, ix), nil
 

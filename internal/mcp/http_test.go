@@ -291,15 +291,15 @@ func TestHandleHTTPDocFetchEndToEnd(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "local.md"), []byte("local project notes\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	// The root passed to kern_doc_fetch lives outside the process cwd, so the
-	// server's workspace must be extended to include it (confinement). The
-	// KERN_MCP_ROOTS gate must be aligned with the same root (it fails closed
-	// to the process cwd when unset).
+	// The root passed to kern_doc (action=fetch) lives outside the process
+	// cwd, so the server's workspace must be extended to include it
+	// (confinement). The KERN_MCP_ROOTS gate must be aligned with the same
+	// root (it fails closed to the process cwd when unset).
 	t.Setenv("KERN_ROOTS", root)
 	t.Setenv("KERN_MCP_ROOTS", root)
 
-	args, _ := json.Marshal(map[string]any{"url": doc.URL, "root": root, "name": "react"})
-	body := `{"jsonrpc":"2.0","id":99,"method":"tools/call","params":{"name":"kern_doc_fetch","arguments":` + string(args) + `}}`
+	args, _ := json.Marshal(map[string]any{"action": "fetch", "url": doc.URL, "root": root, "name": "react"})
+	body := `{"jsonrpc":"2.0","id":99,"method":"tools/call","params":{"name":"kern_doc","arguments":` + string(args) + `}}`
 	rr := doHTTP(t, newHTTPServer(), http.MethodPost, "application/json", body, map[string]string{"Origin": "http://localhost:5173"})
 	if rr.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
@@ -472,21 +472,21 @@ func TestDaemonModeServesMultipleClients(t *testing.T) {
 }
 
 // TestHandleHTTPServiceBackedTool verifies the HTTP transport serves
-// svc-backed tools (kern_memory_add/list). Before the newServerCore fix the
-// HTTP Server was built via a struct literal that left svc nil, panicking
-// these handlers and killing the connection.
+// svc-backed tools (kern_memory add/list actions). Before the newServerCore
+// fix the HTTP Server was built via a struct literal that left svc nil,
+// panicking these handlers and killing the connection.
 func TestHandleHTTPServiceBackedTool(t *testing.T) {
 	// The gate fails closed to the process cwd; the temp dir is outside it.
 	t.Setenv("KERN_MCP_NO_CONFINE", "1")
 	dir := t.TempDir()
 	t.Setenv("KERN_ROOTS", dir)
 	s := newHTTPServer()
-	add := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"kern_memory_add","arguments":{"lesson":"http transport svc-backed regression guard","root":` + strconv_quote(dir) + `}}}`
+	add := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"kern_memory","arguments":{"action":"add","lesson":"http transport svc-backed regression guard","root":` + strconv_quote(dir) + `}}}`
 	rr := doHTTP(t, s, http.MethodPost, "application/json", add, nil)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("add: status = %d, body = %s", rr.Code, rr.Body.String())
 	}
-	list := `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"kern_memory_list","arguments":{"root":` + strconv_quote(dir) + `}}}`
+	list := `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"kern_memory","arguments":{"action":"list","root":` + strconv_quote(dir) + `}}}`
 	rr = doHTTP(t, s, http.MethodPost, "application/json", list, nil)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("list: status = %d, body = %s", rr.Code, rr.Body.String())
@@ -502,7 +502,7 @@ func TestHandleHTTPServiceBackedTool(t *testing.T) {
 func TestHandleHTTPAllowlistEnforced(t *testing.T) {
 	t.Setenv("KERN_TOOLS", "kern_search")
 	s := newHTTPServer()
-	body := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"kern_memory_list","arguments":{}}}`
+	body := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"kern_memory","arguments":{"action":"list"}}}`
 	rr := doHTTP(t, s, http.MethodPost, "application/json", body, nil)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %s", rr.Code, rr.Body.String())

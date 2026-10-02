@@ -29,7 +29,7 @@ var (
 var slowCostTools = map[string]bool{
 	"kern_sandbox": true, "kern_heal": true,
 	"kern_execute": true, "kern_verify": true, "kern_validate": true,
-	"kern_doc_index": true, "kern_analyze": true, "kern_plan": true,
+	"kern_doc": true, "kern_analyze": true, "kern_plan": true,
 }
 
 // mediumCostTools: index-backed search/graph/context/retrieval tools that
@@ -38,7 +38,7 @@ var mediumCostTools = map[string]bool{
 	"kern_search": true, "kern_explore": true, "kern_context": true,
 	"kern_graph": true, "kern_probe": true,
 	"kern_impact": true, "kern_arch": true, "kern_project_map": true,
-	"kern_optimize_prompt": true, "kern_pack": true, "kern_retrieve": true,
+	"kern_optimize": true, "kern_pack": true, "kern_retrieve": true,
 	"kern_resolve": true, "kern_what_if": true, "kern_why": true,
 	"kern_path": true, "kern_inherits": true, "kern_near": true,
 	"kern_wiki": true, "kern_communities": true, "kern_hubs": true,

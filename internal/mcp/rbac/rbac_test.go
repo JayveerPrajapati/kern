@@ -140,8 +140,8 @@ func TestCheckAgentTool(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("assign architect: %v", err)
 	}
-	if allowed, reason := CheckAgentTool("arch-1", "kern_memory_recall"); !allowed {
-		t.Errorf("expected architect to be allowed kern_memory_recall (glob), got reason %q", reason)
+	if allowed, reason := CheckAgentTool("arch-1", "kern_memory"); !allowed {
+		t.Errorf("expected architect to be allowed kern_memory (glob), got reason %q", reason)
 	}
 	if allowed, _ := CheckAgentTool("arch-1", "kern_exec"); allowed {
 		t.Errorf("expected architect to be denied kern_exec")
@@ -179,8 +179,8 @@ func TestCheckAgentToolDefaultDenyOptIn(t *testing.T) {
 	if allowed, _ := CheckAgentTool("unassigned-1", "kern_fix"); allowed {
 		t.Error("default-deny: reviewer role must deny kern_fix")
 	}
-	if allowed, _ := CheckAgentTool("unassigned-1", "kern_memory_add"); allowed {
-		t.Error("default-deny: reviewer role must deny kern_memory_add (not in its AllowedTools)")
+	if allowed, _ := CheckAgentTool("unassigned-1", "kern_memory"); allowed {
+		t.Error("default-deny: reviewer role must deny kern_memory (not in its AllowedTools)")
 	}
 
 	// Explicitly assigned roles are unaffected by the opt-in.

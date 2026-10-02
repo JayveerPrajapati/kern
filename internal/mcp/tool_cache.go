@@ -7,12 +7,16 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/JayveerPrajapati/kern/internal/cache"
 	"github.com/JayveerPrajapati/kern/internal/index"
+	"github.com/JayveerPrajapati/kern/internal/mcp/etag"
+	"github.com/JayveerPrajapati/kern/internal/mcp/meta"
+	"github.com/JayveerPrajapati/kern/internal/mcpserve"
 	"github.com/JayveerPrajapati/kern/internal/pii"
 	"github.com/JayveerPrajapati/kern/internal/version"
 )
@@ -57,6 +61,7 @@ type toolCacheEntry struct {
 	Text string      // RAW pre-sandbox handler output (max_output applied at serve time)
 	Prov *Provenance // provenance stamped at store time (nil for tools that loaded no index)
 	Ts   time.Time   // store time — drives TTL expiry
+	ETag string      // conditional-fetch etag (B1, ADR-0012); computed from the RAW PRE-MASK text
 }
 
 // cacheEnabled reports whether the D1 cache is active. KERN_MCP_CACHE=0
@@ -104,12 +109,15 @@ func toolCacheable(name string) bool {
 // kern_meta is Cacheable:true (F11) but its responses are only stored/served
 // when the sub-tool it routes to is itself cacheable — a kern_meta request
 // that classifies to an exec-gated, mutating or stateful sub-tool (kern_plan,
-// kern_verify, kern_memory_ranked, the skill routers, ...) must never be
+// kern_verify, kern_memory, the skill routers, ...) must never be
 // cached (R1). The routed name is resolved deterministically from the request
 // via classifyMetaRequest, so the lookup gate (before dispatch) and the store
 // gate (after dispatch) agree on the same verdict. Semantic calls are also
 // excluded: their results depend on KERN_EMBED_MODEL, which is not part of
-// the cache key (R3).
+// the cache key (R3). The kern_meta workingset route (B1, ADR-0012: "my
+// working set" / "workingset") is per-agent registry state, so it is never
+// cached either — the classifier marks it with the workingset argument and
+// this gate detects the marker.
 func cacheableForCall(name string, args map[string]any) bool {
 	if !toolCacheable(name) {
 		return false
@@ -118,35 +126,92 @@ func cacheableForCall(name string, args map[string]any) bool {
 		return false // R3: embedding-model-dependent output is never cached
 	}
 	if name == "kern_meta" {
-		routed, _ := classifyMetaRequest(argString(args, "request"))
+		routed, rargs := classifyMetaRequest(argString(args, "request"))
+		if argBool(rargs, meta.WorkingsetArg) {
+			return false // B1: the workingset listing is per-agent state
+		}
 		return toolCacheable(routed)
 	}
 	return true
 }
 
-// cacheKeyFor builds the sha256 hex cache key for one call. Components, in
-// order: tool name | canonical JSON of args (serve-time and identity-only
-// concerns stripped: max_output, no_cache, agent_id, task — F8) | resolved
-// root (F2) | index identity (F2/F6) | tool SchemaVersion (F8) |
-// version.BuildID (build identity — stamped version for releases, binary
-// size+mtime for dev builds so a rebuild mints fresh keys). json.Marshal
-// sorts map keys, so the JSON form is canonical for free. The identity is
-// passed in because lookup and store must agree on the same string.
-func cacheKeyFor(name string, args map[string]any, root, identity string) string {
-	keyArgs := map[string]any{}
-	for k, v := range args {
-		switch k {
-		case "max_output", "no_cache", "agent_id", "task":
-			// Serve-time or identity-only concerns: identical answers share
-			// one entry across max_output/agent_id/task variance.
+// fileFingerprintArgs lists the Cacheable tools whose output is a function of
+// a single file's CONTENT rather than the project index, keyed by the
+// file-path argument names from each tool's catalog InputSchema. The D1 key
+// for these has no index identity to rotate (they build no index → identity
+// "noindex"), so the file fingerprint IS the freshness contract (F-1). Every
+// other Cacheable tool in the catalog is index-backed (its identity already
+// rotates the key) or takes no file-path argument — verified against
+// catalog/tools.go at fix time — so this map stays minimal; add a tool here
+// only when its output depends on a file the index does not cover.
+var fileFingerprintArgs = map[string][]string{
+	"kern_compact_file": {"path"},
+}
+
+// fileFingerprint resolves each mapped file-path argument exactly as the
+// tool's handler does (root via resolveRoot, path via rootedPath) and returns
+// a deterministic "size:mtime" component per file, joined for multiple args.
+// A file that cannot be resolved or stat'd contributes "missing" so lookup
+// and store still agree on a stable key. Returns "" for tools not in
+// fileFingerprintArgs — a byte-identical key for the index-backed trio and
+// pure-arg tools (zero behavior change).
+func fileFingerprint(name string, args map[string]any, root string) string {
+	argNames, ok := fileFingerprintArgs[name]
+	if !ok {
+		return ""
+	}
+	parts := make([]string, 0, len(argNames))
+	for _, arg := range argNames {
+		p := argString(args, arg)
+		if p == "" {
+			parts = append(parts, "missing")
 			continue
 		}
-		keyArgs[k] = v
+		abs, err := rootedPath(root, p)
+		if err != nil {
+			parts = append(parts, "missing")
+			continue
+		}
+		info, err := os.Stat(abs)
+		if err != nil {
+			parts = append(parts, "missing")
+			continue
+		}
+		parts = append(parts, fmt.Sprintf("%d:%d", info.Size(), info.ModTime().UnixNano()))
 	}
-	canon, _ := json.Marshal(keyArgs)
+	return strings.Join(parts, ",")
+}
+
+// cacheKeyFor builds the sha256 hex cache key for one call. Components, in
+// order: tool name | canonical JSON of args (identity-only and
+// conditional-fetch concerns stripped: etag, no_cache, agent_id, task — F8;
+// max_output is NOT stripped, F-2 — the etag is bound to the serve-time
+// view, so different serve views are different content) | resolved root (F2)
+// | index identity (F2/F6) | tool SchemaVersion (F8) | version.BuildID (build
+// identity — stamped version for releases, binary size+mtime for dev builds
+// so a rebuild mints fresh keys) | file fingerprint (F-1, file-backed tools
+// only). json.Marshal sorts map keys, so the JSON form is canonical for
+// free. The identity is passed in because lookup and store must agree on the
+// same string.
+func cacheKeyFor(name string, args map[string]any, root, identity string) string {
+	// Serve-time and identity-only conditional-fetch concerns (etag, no_cache,
+	// agent_id, task) are stripped by the ONE shared helper
+	// (etag.StripServeTimeArgs — the same F8 set the working-set registry key
+	// uses, NIT-10). max_output is deliberately NOT stripped (F-2): the etag
+	// is view-bound, so different serve views key separate entries.
+	canon, _ := json.Marshal(etag.StripServeTimeArgs(args))
 	schemaVersion := toolByName[name].SchemaVersion
 	h := sha256.New()
 	_, _ = fmt.Fprintf(h, "%s\x00%s\x00%s\x00%s\x00%s\x00%s", name, canon, root, identity, schemaVersion, version.BuildID())
+	// F-1: file-backed tools (kern_compact_file) have no index identity to
+	// rotate the key, so the fingerprint of the target file IS the freshness
+	// contract — an edited file must mint a new key, otherwise the next call
+	// replays the stale cached summary and answers "unchanged" for changed
+	// content. Index-backed tools never reach the fingerprint (empty string →
+	// byte-identical key).
+	if fp := fileFingerprint(name, args, root); fp != "" {
+		_, _ = fmt.Fprintf(h, "\x00%s", fp)
+	}
 	return hex.EncodeToString(h.Sum(nil))
 }
 
@@ -169,13 +234,11 @@ func indexIdentityString(id *index.IndexIdentity) string {
 // tools (kern_mask_pii, ...) must never force an index build just to compute
 // a cache key. "noindex" when no index is cached for this root.
 func (s *Server) cacheIndexIdentity(root string) string {
-	s.mu.Lock()
-	e, ok := s.sessions[root]
-	s.mu.Unlock()
+	sess, ok := s.sessCache.Peek(root)
 	if !ok {
 		return "noindex"
 	}
-	ix, ok := e.sess.CachedIndex()
+	ix, ok := sess.CachedIndex()
 	if !ok || ix == nil || ix.Identity == nil {
 		return "noindex"
 	}
@@ -210,14 +273,20 @@ func (s *Server) cacheLookup(ctx context.Context, name string, args map[string]a
 	// Replay path: stamp the scope with the stored provenance and the
 	// identity-matched index (peeked, no rebuild) so the response is
 	// byte-identical to a fresh run on the same index.
-	if scope, ok := ctx.Value(indexScopeKey{}).(*indexScope); ok && e.Prov != nil {
-		scope.prov = e.Prov
-		s.mu.Lock()
-		se, hasSess := s.sessions[root]
-		s.mu.Unlock()
-		if hasSess {
-			if ix, ok := se.sess.CachedIndex(); ok && ix != nil && ix.Identity != nil {
-				scope.ix = ix
+	if scope, ok := ctx.Value(indexScopeKey{}).(*indexScope); ok {
+		// B1 (ADR-0012): the entry carries the etag computed from the raw
+		// pre-mask text, so a cache-hit replay answers conditional-fetch with
+		// the same etag a fresh run would (masking would otherwise mint a
+		// different hash over the replayed bytes).
+		if e.ETag != "" {
+			scope.etag = e.ETag
+		}
+		if e.Prov != nil {
+			scope.prov = e.Prov
+			if sess, hasSess := s.sessCache.Peek(root); hasSess {
+				if ix, ok := sess.CachedIndex(); ok && ix != nil && ix.Identity != nil {
+					scope.ix = ix
+				}
 			}
 		}
 	}
@@ -236,8 +305,30 @@ func (s *Server) cacheStore(ctx context.Context, name string, args map[string]an
 	if len(text) > toolCacheEntrySizeCap {
 		return // F9: huge outputs cost more to persist than recompute
 	}
-	text = pii.Mask(text).Text // mask before persisting (D1 cache honesty)
-	e := toolCacheEntry{Text: text, Ts: time.Now()}
+	// B1 (ADR-0012): capture the conditional-fetch etag from the RAW
+	// pre-mask text — the bytes a fresh caller received — so a later cache
+	// hit answers etag=<that value> with the unchanged short-circuit. The
+	// etag is REUSED, not recomputed: runTool's maybeShortCircuit already
+	// minted it over this identical text and stamped it on the per-call
+	// scope (NIT-9); the recompute fallback only serves direct callers with
+	// no scope (tests).
+	e := toolCacheEntry{Text: pii.Mask(text).Text, Ts: time.Now()}
+	if etag.Eligible(name) {
+		if scope, ok := ctx.Value(indexScopeKey{}).(*indexScope); ok && scope.etag != "" {
+			e.ETag = scope.etag
+		} else {
+			// F-2: the etag is bound to the serve-time view (max_output
+			// budget); mint it with the SAME view maybeShortCircuit uses so
+			// the fallback and the short-circuit agree byte-for-byte. A
+			// malformed max_output errors the call downstream; -1 keeps the
+			// hash deterministic here too.
+			budget, err := mcpserve.CallOutputBudget(args)
+			if err != nil {
+				budget = -1
+			}
+			e.ETag = etag.HashView(text, toolByName[name].SchemaVersion, strconv.Itoa(budget))
+		}
+	}
 	root := resolveRoot(argString(args, "root"))
 	// R5: key the entry on the identity of the index that actually produced
 	// the answer (the handler's scope) rather than a re-peek of the session's

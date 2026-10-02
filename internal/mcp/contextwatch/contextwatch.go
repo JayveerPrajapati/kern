@@ -74,12 +74,12 @@ func Analyze(text string, budgetTokens int, format string) (string, error) {
 
 		pct := (float64(toks) / float64(totalTokens)) * 100
 		kind := "prose"
-		suggestedTool := "kern_optimize_prompt"
+		suggestedTool := "kern_optimize"
 		estGain := int(float64(toks) * 0.35)
 
 		if strings.Contains(t, "ERROR") || strings.Contains(t, "WARN") || strings.Contains(t, "Traceback") || strings.Contains(t, "panic:") {
 			kind = "log"
-			suggestedTool = "kern_optimize_log"
+			suggestedTool = "kern_optimize"
 			estGain = int(float64(toks) * 0.60)
 		} else if strings.Contains(t, "package ") || strings.Contains(t, "func ") || strings.Contains(t, "class ") || strings.Contains(t, "def ") {
 			kind = "code"

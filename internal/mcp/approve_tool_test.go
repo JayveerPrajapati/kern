@@ -9,6 +9,7 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/app"
 	"github.com/JayveerPrajapati/kern/internal/domain"
 	"github.com/JayveerPrajapati/kern/internal/governance"
+	"github.com/JayveerPrajapati/kern/internal/tasklife"
 )
 
 // TestApproveToolLifecycle exercises kern_approve end-to-end through the MCP
@@ -114,7 +115,7 @@ func TestApproveToolAdvancesGatedTask(t *testing.T) {
 	if err != nil {
 		t.Fatalf("app.New: %v", err)
 	}
-	ts := app.NewTaskService(p, nil).WithAgentID("test")
+	ts := tasklife.NewTaskService(p, nil).WithAgentID("test")
 	task, err := ts.RunWorkflowDefault("Greet")
 	if err == nil {
 		t.Fatal("RunWorkflowDefault should require human approval before execution")
@@ -141,7 +142,7 @@ func TestApproveToolAdvancesGatedTask(t *testing.T) {
 	}
 
 	// A fresh service (simulating `kern task`) must see the advanced state.
-	fresh := app.NewTaskService(p, nil)
+	fresh := tasklife.NewTaskService(p, nil)
 	got, ok := fresh.Get(task.ID)
 	if !ok {
 		t.Fatalf("task %s not found in the persisted store", task.ID)

@@ -31,7 +31,8 @@ func TestHandleAgentFingerprint(t *testing.T) {
 	}
 
 	// Test 1: Normal behavior pattern
-	res, err := s.handleAgentFingerprint(context.Background(), map[string]any{
+	res, err := s.handleAgent(context.Background(), map[string]any{
+		"action":   "fingerprint",
 		"agent_id": agentID,
 	})
 	if err != nil {
@@ -56,7 +57,8 @@ func TestHandleAgentFingerprint(t *testing.T) {
 		})
 	}
 
-	resLoop, err := s.handleAgentFingerprint(context.Background(), map[string]any{
+	resLoop, err := s.handleAgent(context.Background(), map[string]any{
+		"action":   "fingerprint",
 		"agent_id": agentID,
 		"format":   "json",
 	})

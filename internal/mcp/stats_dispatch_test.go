@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/JayveerPrajapati/kern/internal/mcpserve"
 	"github.com/JayveerPrajapati/kern/internal/optimize"
 	"github.com/JayveerPrajapati/kern/internal/stats"
 )
@@ -83,8 +84,8 @@ func TestRecordToolCallSkipsSelfRecording(t *testing.T) {
 	if err := optimize.EnsureRecorder(); err != nil {
 		t.Fatalf("EnsureRecorder: %v", err)
 	}
-	recordToolCall("kern_search", nil, "a returned payload", "")
-	recordToolCall("kern_optimize_prompt", nil, "must not be recorded at dispatch", "")
+	mcpserve.RecordToolCall("kern_search", nil, "a returned payload", "")
+	mcpserve.RecordToolCall("kern_optimize", nil, "must not be recorded at dispatch", "")
 
 	rec, err := stats.NewRecorder()
 	if err != nil {
@@ -109,7 +110,7 @@ func TestRenderStatsByTool(t *testing.T) {
 	if err := optimize.EnsureRecorder(); err != nil {
 		t.Fatalf("EnsureRecorder: %v", err)
 	}
-	recordToolCall("kern_search", nil, "hello world payload for the ledger", "")
+	mcpserve.RecordToolCall("kern_search", nil, "hello world payload for the ledger", "")
 
 	out, err := renderStatsByTool("", "")
 	if err != nil {
