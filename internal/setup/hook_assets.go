@@ -23,14 +23,10 @@ func writeGuardScriptTo(dir string) (string, error) {
 }
 
 // writeGuardScriptGlobal writes the kern-guard hook script to
-// <home>/.kern/hooks/kern-guard.sh (where <home> is os.UserHomeDir) and returns
+// <home>/.kern/hooks/kern-guard.sh (where <home> is globalHomeDir) and returns
 // its absolute path. Home-based agents (Qwen, Qoder, Codex) reference this
 // global install from their ~/.<agent> configs so the guard is not tied to any
 // single project's path.
 func writeGuardScriptGlobal() (string, error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", err
-	}
-	return writeGuardScriptTo(filepath.Join(home, ".kern", "hooks"))
+	return writeGuardScriptTo(filepath.Join(globalHomeDir(), ".kern", "hooks"))
 }

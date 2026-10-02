@@ -351,7 +351,7 @@ func TestDocsStateMCPToolCount(t *testing.T) {
 		}
 	}
 
-	check("README banner", readme, `\(11 high-level tools by default, `+want+` in full mode\)`)
+	check("README banner", readme, `\(22 high-level tools by default, `+want+` in full mode\)`)
 	check("README MCP section", readme, `by default, `+want+` in full mode\)`)
 	check("README full-mode note", readme, `full `+want+`-tool catalog`)
 	check("AGENTS kern_meta section", agents, `among `+want+` individual `+"`kern_\\*`"+` tools`)
@@ -636,13 +636,13 @@ func TestWireCursorRules(t *testing.T) {
 		t.Fatalf("cursor rule failed: %s", st.Note)
 	}
 	b, _ := os.ReadFile(filepath.Join(dir, ".cursor", "rules", "kern-hooks.mdc"))
-	if !strings.Contains(string(b), "kern_optimize_log") || !strings.Contains(string(b), "kern_memory_add") {
+	if !strings.Contains(string(b), "kern_optimize") || !strings.Contains(string(b), "kern_memory") {
 		t.Fatal("cursor rule missing kern tool guidance")
 	}
 	// Idempotent.
 	st2 := wireCursorRules(dir)
 	b, _ = os.ReadFile(filepath.Join(dir, ".cursor", "rules", "kern-hooks.mdc"))
-	if strings.Count(string(b), "kern_optimize_log") > 1 {
+	if strings.Count(string(b), "kern_optimize") > 1 {
 		t.Fatal("cursor rule duplicated on re-run")
 	}
 	_ = st2
@@ -691,6 +691,53 @@ func TestDetectAgents(t *testing.T) {
 	}
 	if !has["cursor"] {
 		t.Errorf("expected cursor in detected: %v", detected)
+	}
+}
+
+// TestDetectAgentsHomeScopedLightweights pins the F4 fix: continue, windsurf,
+// and kiro MCP configs are written to GLOBAL paths (~/.config/continue/config
+// .json, ~/.config/.codeium/windsurf/mcp_config.json, ~/.kiro/settings/mcp
+// .json), so their detectors must resolve those home-scoped paths — not only
+// project markers setup never writes (which made `kern setup --detect` never
+// report these three even when wired globally).
+func TestDetectAgentsHomeScopedLightweights(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	dir := t.TempDir()
+
+	// No home/global markers yet — none of the three may be detected.
+	for _, want := range []string{"continue", "windsurf", "kiro"} {
+		for _, d := range DetectAgents(dir) {
+			if d == want {
+				t.Fatalf("%s detected before any marker exists", want)
+			}
+		}
+	}
+
+	// Kern's own global write targets exist (the adapters write these).
+	global := []string{
+		filepath.Join(home, ".config", "continue", "config.json"),
+		filepath.Join(home, ".config", ".codeium", "windsurf", "mcp_config.json"),
+		filepath.Join(home, ".kiro", "settings", "mcp.json"),
+	}
+	for _, p := range global {
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte("{}"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	detected := map[string]bool{}
+	for _, d := range DetectAgents(dir) {
+		detected[d] = true
+	}
+	for _, want := range []string{"continue", "windsurf", "kiro"} {
+		if !detected[want] {
+			t.Errorf("expected %s detected from its global config: %v", want, detected)
+		}
 	}
 }
 

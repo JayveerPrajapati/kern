@@ -32,7 +32,7 @@ const DEFAULT_COMPACT_THRESHOLD = 4000
 // --- Session event capture (P0-2, borrowed from mksglu/context-mode) ---
 // Record what the session did (file edits, failing commands) into project
 // memory so that after a context compaction — or in a fresh session — the
-// agent can recall its own recent state via kern buddy / kern_memory_list.
+// agent can recall its own recent state via kern buddy / kern_memory (action=list).
 
 const EDIT_TOOLS = new Set(["edit", "write", "patch", "apply_patch", "update_file"])
 // The FAIL_RE marks command output that indicates a real failure. It only
@@ -164,6 +164,66 @@ async function grepFallback(pattern: string, path: string | undefined, include: 
   return out.join("\n")
 }
 
+// Code extensions eligible for kern routing (symbolic compaction). Everything
+// else — markdown, config, data, dotfiles, extensionless files — reads raw:
+// `kern compact` returns empty for non-code files anyway.
+const CODE_EXTENSIONS = new Set([
+  "go", "ts", "tsx", "js", "jsx", "mjs", "cjs", "py", "rs", "java", "c", "h",
+  "cpp", "hpp", "cc", "hh", "rb", "sh", "bash", "kt", "kts", "swift", "php",
+  "cs", "scala", "lua", "m", "mm", "sql", "zig", "ex", "exs", "erl", "hrl",
+  "hs", "clj", "cljs", "dart", "vue", "svelte",
+])
+
+// isSimpleRead reports whether a read needs no kern routing: only non-code
+// files (kern compact returns empty for them anyway) serve raw. Code files
+// are ALWAYS routed to kern regardless of size — even a one-line source file
+// is part of the symbol context and can be served/grepped via kern's AST
+// tools. The stat below is an existence probe only: a missing or unreadable
+// code file fails closed (governed) instead of serving raw.
+async function isSimpleRead(filePath: string): Promise<boolean> {
+const dot = filePath.lastIndexOf(".")
+const sep = Math.max(filePath.lastIndexOf("/"), filePath.lastIndexOf("\\"))
+const ext = dot > sep ? filePath.slice(dot + 1).toLowerCase() : ""
+if (!CODE_EXTENSIONS.has(ext)) return true
+try {
+await stat(filePath) // existence probe — unreadable/missing stays governed
+} catch {
+// missing/unreadable: still governed — never raw.
+}
+return false
+}
+
+// Content-free git subcommands and trivial commands exempt from governed bash
+// routing: no build/test/PII surface, and the governed wrapper adds latency
+// without value. Only SINGLE commands qualify — any shell operator,
+// substitution, redirection, variable expansion ($), or newline (multi-line
+// compound) means the full governed path. git diff/show/blame are NOT exempt:
+// they emit file content, so they stay governed like any other code read.
+const TRIVIAL_COMMANDS = new Set(["pwd", "date", "whoami", "true", "echo", "ls", "which"])
+const READONLY_GIT = new Set(["status", "log"])
+// Flags that make `git log` emit file content (patch bodies / raw diffs).
+const GIT_LOG_PATCH_FLAGS = ["-p", "--patch", "-u", "--raw"]
+function isSimpleCommand(cmd: string): boolean {
+if (/[;&|<>`$\n\r]/.test(cmd)) return false
+const parts = cmd.trim().split(/\s+/)
+if (parts.length === 0) return false
+if (parts[0] === "git") {
+if (parts.length < 2 || !READONLY_GIT.has(parts[1])) return false
+if (parts[1] === "log") {
+for (const arg of parts.slice(2)) {
+// exact patch flags, --patch* long forms, and single-dash letter
+// bundles containing p/u (e.g. -pu) all emit file content
+if (arg === "-p" || arg === "--patch" || arg === "-u" || arg === "--raw" ||
+arg.startsWith("--patch") || (/^-[a-z]+$/.test(arg) && (arg.includes("p") || arg.includes("u")))) {
+return false
+}
+}
+}
+return true
+}
+return TRIVIAL_COMMANDS.has(parts[0])
+}
+
 // Raw read: verbatim file contents (or a directory listing), mirroring the
 // built-in read tool. Only used when kern is unavailable.
 async function readFallback(filePath: string): Promise<string> {
@@ -185,9 +245,7 @@ async function readFallback(filePath: string): Promise<string> {
 // their own tools when KERN_MCP_PHASE is set. KERN_TOOLS narrows to an
 // explicit allowlist; KERN_MCP_SINGLE_TOOL=1 reduces the surface to kern_meta.
 const TOOL_PHASES: Record<string, string> = {
-  kern_agent_coordination: "cross",
-  kern_agent_fingerprint: "cross",
-  kern_agent_role_rbac: "cross",
+  kern_agent: "edit",
   kern_agents: "cross",
   kern_analyze: "plan",
   kern_approve: "edit",
@@ -215,12 +273,10 @@ kern_arch: "explore",
   kern_dead: "explore",
   kern_deploy: "edit",
   kern_diff_files: "verify",
-  kern_doc_fetch: "cross",
-  kern_doc_index: "cross",
-  kern_doc_search: "cross",
+  kern_do: "cross",
+  kern_doc: "cross",
   kern_entry_points: "explore",
   kern_evidence: "verify",
-  kern_evidence_anchor: "verify",
   kern_exec: "edit",
   kern_execute: "edit",
   kern_explain: "explore",
@@ -243,30 +299,17 @@ kern_arch: "explore",
   kern_larges: "explore",
   kern_learn: "cross",
   kern_lock: "edit",
-  kern_lock_status: "edit",
   kern_loop: "cross",
   kern_lsp_bridge: "explore",
   kern_mask_pii: "cross",
-  kern_memory_add: "cross",
-  kern_memory_list: "cross",
-  kern_memory_ranked: "cross",
-  kern_memory_recall: "cross",
+  kern_memory: "cross",
   kern_meta: "meta",
   kern_modernize: "cross",
   kern_mutation_test: "verify",
   kern_near: "explore",
   kern_onboard: "cross",
-  kern_optimize_log: "cross",
-  kern_optimize_output: "cross",
-  kern_optimize_prompt: "cross",
-  kern_org_agents: "cross",
-  kern_org_audit: "cross",
-  kern_org_memory: "cross",
-  kern_org_projects: "cross",
-  kern_org_search: "cross",
-  kern_org_tasks: "cross",
-  kern_org_teams: "cross",
-  kern_org_user: "cross",
+  kern_optimize: "cross",
+  kern_org: "cross",
   kern_pack: "plan",
   kern_path: "explore",
   kern_plan: "plan",
@@ -279,7 +322,7 @@ kern_arch: "explore",
   kern_prompt_fill: "cross",
   kern_refactor_transaction: "edit",
   kern_rename: "edit",
-  kern_repair_diagnostics: "edit",
+  kern_repair: "edit",
   kern_repo_search: "explore",
   kern_resolve: "explore",
   kern_retrieve: "explore",
@@ -291,8 +334,7 @@ kern_arch: "explore",
   kern_schema_validate: "verify",
   kern_search: "explore",
   kern_security: "verify",
-  kern_semantic_diff: "cross",
-  kern_semantic_merge: "edit",
+  kern_semantic: "edit",
   kern_semcache: "cross",
   kern_stats: "cross",
   kern_stream: "cross",
@@ -301,7 +343,6 @@ kern_arch: "explore",
   kern_taint: "verify",
   kern_test_gaps: "plan",
   kern_trace: "plan",
-  kern_unlock: "edit",
   kern_usage_guide: "plan",
   kern_validate: "verify",
   kern_verify: "verify",
@@ -310,7 +351,7 @@ kern_arch: "explore",
   kern_why: "explore",
   kern_workflow: "cross",
 }
-// defaultTools mirrors internal/mcp/server.go's 11-tool default surface so the
+// defaultTools mirrors internal/mcp/toolpolicy.go's 22-tool default surface so the
 // plugin advertises the same tools the MCP server does when no env vars are
 // set. KERN_MCP_FULL=1, KERN_MCP_PHASE, and KERN_TOOLS all lift the default
 // (matching the server's behavior).
@@ -321,11 +362,22 @@ const DEFAULT_TOOLS = new Set([
   "kern_review", // token-optimised review context
   "kern_search", // ranked symbol search
   "kern_context", // minimal source slice
-  "kern_optimize_prompt", // compress prompts
+  "kern_optimize", // compress prompts
   "kern_plan", // implementation plan
   "kern_verify", // unified verification
   "kern_run", // orchestrate a whole task
   "kern_authorize_context", // authorized-context primitive (P0.1)
+  "kern_compact_file", // symbolic file summary — top token saver in telemetry
+  "kern_project_map", // repo onboarding map
+  "kern_probe", // task-driven context bundle (replaces 5-10 searches)
+  "kern_retrieve", // L1-L3 progressive-disclosure retrieval
+  "kern_memory", // cross-session project memory (add/recall/remove)
+  "kern_buddy", // session onboarding digest
+  "kern_fit_context", // fit context to a token budget
+  "kern_repair", // deterministic compiler-error → AST fix (edit phase)
+  "kern_heal", // self-correct failing files (edit phase)
+  "kern_commitmsg", // deterministic conventional commit message (edit phase)
+  "kern_synthesize_test", // table-driven test generation (verify phase)
 ])
 
 // filterToolSurface applies the same advertisement rules as the MCP server's
@@ -347,11 +399,11 @@ function filterToolSurface<T extends Record<string, unknown>>(tools: T): Partial
     const p = TOOL_PHASES[name] ?? ""
     if (active && p !== "meta" && p !== "cross" && p !== active) continue
     if (allowlist.length > 0 && !allowlist.includes(name)) continue
-    // No env override → default to the same 11-tool surface as the MCP
-    // server. Shadow built-ins (read/glob/grep/bash) are not kern_* tools
-    // and must always stay advertised to keep precedence over the
-    // built-ins they replace.
-    if (name.startsWith("kern_") && !full && !active && allowlist.length === 0 && !DEFAULT_TOOLS.has(name)) continue
+// No env override → default to the same 22-tool surface as the MCP
+	// server. Shadow built-ins (read/glob/grep/bash) are not kern_* tools
+	// and must always stay advertised to keep precedence over the
+	// built-ins they replace.
+	if (name.startsWith("kern_") && !full && !active && allowlist.length === 0 && !DEFAULT_TOOLS.has(name)) continue
     out[name] = def
   }
   return out
@@ -380,6 +432,35 @@ export default (async ({ directory, $ }) => {
 
   const truthy = (v?: string): boolean => v === "true" || v === "1"
 
+  // --- ETag conditional-fetch cache (B2, ADR-0012) ---
+  // Client mirror of the B1 CLI contract: `kern context|compact|retrieve|
+  // explore --etag <64-hex>` short-circuits to `unchanged (etag <E>)` on
+  // stdout when the content hash matches, and prints an `etag: <64-hex>`
+  // footer on STDERR for a full response. Caching the last-seen etag per
+  // canonical call key collapses repeat reads to a handful of tokens (the
+  // model reuses its earlier copy) instead of the full payload. Bounded
+  // like envelopeCache: clear-on-overflow keeps memory flat.
+  const etagCache = new Map<string, string>() // canonical call key -> last-seen etag
+  const ETAG_CACHE_MAX = 64
+  // Canonical key for an etag-eligible call: the CLI subcommand plus its
+  // meaningful arguments. The --etag flag and its value are excluded so the
+  // key is stable whether or not the cached etag was appended.
+  function etagKey(args: string[]): string {
+    // JSON.stringify of the filtered array (not a "|" join): args may legally
+    // contain "|" (paths), which would collide across distinct calls. The
+    // --etag exclusion keeps the key identical whether or not the cached etag
+    // was appended.
+    return JSON.stringify(args.filter((a, i) => a !== "--etag" && args[i - 1] !== "--etag"))
+  }
+  // Record an etag learned from a CLI stderr footer (a line `etag: <64-hex>`)
+  // under the call's canonical key. A full response refreshes the entry; a
+  // matched conditional fetch prints no footer and leaves it untouched.
+  function rememberEtag(key: string, stderr: string): void {
+    const m = /^etag: ([0-9a-f]{64})\r?$/m.exec(stderr)
+    if (!m) return
+    etagCache.set(key, m[1])
+    if (etagCache.size > ETAG_CACHE_MAX) etagCache.clear()
+  }
   const run = async (args: string[], timeoutMs?: number): Promise<string> => {
     // Bun's shell escapes each interpolated array element as one argument.
     // The ceiling is the agent's requested budget (or the 2-minute default);
@@ -391,6 +472,13 @@ export default (async ({ directory, $ }) => {
     const out = typeof (p as any).timeout === "function"
       ? await p.timeout(ms).quiet()
       : await withTimeout(p.quiet(), ms)
+    // ETag learning (B2, ADR-0012): a full response carries an `etag:
+    // <64-hex>` footer on STDERR — record it so the next identical call can
+    // pass --etag and get the tiny `unchanged (etag <E>)` reply instead of
+    // the full payload. A matched conditional fetch prints no footer, so the
+    // cached etag persists untouched. stdout stays byte-identical for
+    // existing consumers (the footer never lands in the tool result).
+    rememberEtag(etagKey(args), out.stderr.toString())
     return out.stdout.toString()
   }
 
@@ -419,10 +507,10 @@ export default (async ({ directory, $ }) => {
   // tool call appends one JSON line {ts, tool, routed} to .kern/adoption.log
   // in the project root. The Go side aggregates it
   // (internal/metrics.AggregateAdoptionLog) into the kern-first adoption
-  // metric surfaced by `kern stats performance`. routed=true means the
+  // metric surfaced by `kern doctor` (adoption check). routed=true means the
   // result the agent saw came from kern (compact output, governed build,
   // or a governed denial/error); routed=false means a raw fallback served
-  // the call (operator bypass, regex/metachar fallback, or kern
+  // the call (operator bypass, glob/grep metachar fallback, or kern
   // unavailable). Best-effort: failures are swallowed so metrics can never
   // break a tool call. Default off — no behavior change without the gate.
   const logAdoption = (tool: string, routed: boolean): void => {
@@ -463,7 +551,13 @@ async function runPayload(args: string[], timeoutMs?: number, preserveExit = fal
         if (preserveExit) throw new Error(await readFile(outFile, 'utf8'))
         throw err
       }
-      return await readFile(outFile, 'utf8')
+      const text = await readFile(outFile, 'utf8')
+      // NOTE: no etag learning here — runPayload merges stderr into the
+      // capture file (2>&1), so a B2 `etag: <64-hex>` footer would land
+      // INSIDE the returned tool text (breaking byte-identical stdout), and a
+      // source file containing a literal `etag: <64-hex>` line would poison
+      // the cache. run()'s stderr-based learning is the correct, live path.
+      return text
     } finally {
       await rm(outFile, { force: true })
     }
@@ -550,25 +644,39 @@ async function runPayload(args: string[], timeoutMs?: number, preserveExit = fal
 
   return {
     tool: filterToolSurface({
-      kern_optimize_prompt: tool({
+      kern_optimize: tool({
         description:
-          "Compress and clean a raw prompt before sending it to an LLM. Returns the optimized prompt plus token savings. Use this to reduce context cost for large or noisy prompts.",
+          "Deterministic local context optimizer. action=prompt compresses and cleans a raw prompt (returns it plus token savings); action=log strips noise from log output (keeps errors, warnings, stack traces, build failures); action=output compresses an LLM reply by stripping filler while preserving code blocks, lists and errors. Use before pasting logs or prompts into context.",
         args: {
-          prompt: tool.schema.string(),
+          action: tool.schema.string().describe("prompt|log|output"),
+          prompt: tool.schema.string().optional(),
           attached_log: tool.schema.string().optional(),
           session: tool.schema.string().optional(),
           model: tool.schema.string().optional(),
+          log: tool.schema.string().optional(),
+          text: tool.schema.string().optional(),
         },
-        async execute(args, context) {
-          const flags: string[] = ["optimize"]
-          if (args.attached_log) {
-            return withTempFile("prompt.attached.log", args.attached_log, (file) =>
-              run([...flags, "--attach", file, args.prompt])
-            )
+        async execute(args) {
+          switch (args.action) {
+            case "log":
+              if (!args.log) return "error: kern_optimize action=log requires log"
+              return withTempFile("log.input.log", args.log, (file) => run(["log", file]))
+            case "output":
+              if (!args.text) return "error: kern_optimize action=output requires text"
+              return withTempFile("output.text", args.text, (file) => run(["terse", file]))
+            case "prompt":
+            default:
+              if (!args.prompt) return "error: kern_optimize action=prompt requires prompt"
+              const flags: string[] = ["optimize"]
+              if (args.attached_log) {
+                return withTempFile("prompt.attached.log", args.attached_log, (file) =>
+                  run([...flags, "--attach", file, args.prompt])
+                )
+              }
+              if (args.session) flags.push("--session", args.session)
+              if (args.model) flags.push("--model", args.model)
+              return run([...flags, args.prompt])
           }
-          if (args.session) flags.push("--session", args.session)
-          if (args.model) flags.push("--model", args.model)
-          return run([...flags, args.prompt])
         },
       }),
       kern_fetch_raw_anchor: tool({
@@ -584,11 +692,15 @@ async function runPayload(args: string[], timeoutMs?: number, preserveExit = fal
       }),
       kern_compact_file: tool({
         description:
-          "Return a compact symbolic summary of a source file (functions, types, line numbers) instead of reading the whole file. Use before reading files in large codebases.",
-        args: { path: tool.schema.string() },
-        async execute(args) {
-          return run(["compact", args.path])
-        },
+          "Return a compact symbolic summary of a source file (functions, types, line numbers) instead of reading the whole file. Use before reading files in large codebases. Pass tier=full for the verbatim file, tier=folded for signatures+docstrings.",
+        args: { path: tool.schema.string(), tier: tool.schema.string().optional() },
+async execute(args) {
+const flags: string[] = ["compact", args.path]
+if (args.tier) flags.push("--tier", args.tier)
+const cached = etagCache.get(etagKey(flags))
+if (cached) flags.push("--etag", cached)
+return run(flags)
+},
       }),
       kern_fit_context: tool({
         description:
@@ -694,22 +806,6 @@ flags.push("--json")
 return run(flags)
 },
 }),
-kern_optimize_log: tool({
-        description:
-          "Strip noise from log output: keeps errors, warnings, stack traces and build failures, removes timestamps and chatter. Use before pasting logs into context.",
-        args: { log: tool.schema.string() },
-        async execute(args) {
-          return withTempFile("log.input.log", args.log, (file) => run(["log", file]))
-        },
-      }),
-      kern_optimize_output: tool({
-        description:
-          "Compress an LLM's response (assistant output) by stripping filler, pleasantries and hedge language while preserving code blocks, lists, errors and technical content. Deterministic and local, no LLM involved. Use on verbose model replies before they are stored or echoed back into context.",
-        args: { text: tool.schema.string() },
-        async execute(args) {
-          return withTempFile("output.text", args.text, (file) => run(["terse", file]))
-        },
-      }),
       kern_stats: tool({
         description:
           "Return before/after token savings and cost estimates from kern optimizations, optionally filtered to today or a session.",
@@ -964,6 +1060,8 @@ kern_optimize_log: tool({
           if (args.depth !== undefined) flags.push("--depth", String(args.depth))
           if (args.max !== undefined) flags.push("--max", String(args.max))
           if (args.root) flags.push(args.root)
+          const cached = etagCache.get(etagKey(flags))
+          if (cached) flags.push("--etag", cached)
           return run(flags)
         },
       }),
@@ -1147,6 +1245,8 @@ kern_optimize_log: tool({
         async execute(args) {
           const flags: string[] = ["context", args.symbol]
           if (args.root) flags.push(args.root)
+          const cached = etagCache.get(etagKey(flags))
+          if (cached) flags.push("--etag", cached)
           return run(flags)
         },
       }),
@@ -1205,6 +1305,8 @@ kern_probe: tool({
           if (args.max_tokens !== undefined) flags.push("--max-tokens", String(args.max_tokens))
           if (truthy(args.with_freshness)) flags.push("--fresh")
           if (args.root) flags.push(args.root)
+          const cached = etagCache.get(etagKey(flags))
+          if (cached) flags.push("--etag", cached)
           return run(flags)
         },
       }),
@@ -1294,34 +1396,67 @@ kern_probe: tool({
         },
       }),
 
-      kern_agent_message: tool({
+      kern_agent: tool({
         description:
-          "Send a message to an agent's coordination inbox (wraps the coordination handoff primitive with the model as default sender). The target agent observes the directive via kern_agent_coordination action=inbox.",
+          "Agent-plane operations. action=message sends to an agent's coordination inbox; action=interrupt cancels a running task; action=fingerprint detects tool-call loops and behavioral drift; action=coordination runs the workspace protocol (handoffs, resource locks, inbox); action=rbac enforces role-based tool access. Sub-actions via the subaction arg.",
         args: {
-          to_agent: tool.schema.string(),
-          notes: tool.schema.string(),
+          action: tool.schema.string().describe("message|interrupt|fingerprint|coordination|rbac"),
+          subaction: tool.schema.string().describe("coordination sub-action (handoff, claim, release, inbox, status) or rbac sub-action (evaluate, grant, revoke, list)").optional(),
+          to_agent: tool.schema.string().optional(),
+          notes: tool.schema.string().optional(),
           from_agent: tool.schema.string().optional(),
           task_id: tool.schema.string().optional(),
-        },
-        async execute(args) {
-          const flags: string[] = ["agent-message", "--to", args.to_agent]
-          if (args.from_agent) flags.push("--from", args.from_agent)
-          if (args.task_id) flags.push("--task", args.task_id)
-          flags.push(args.notes)
-          return run(flags)
-        },
-      }),
-      kern_agent_interrupt: tool({
-        description:
-          "Cancel a running task by ID through the TaskService: the task transitions to CANCELLED with a reason, is persisted, and a task.updated event is published.",
-        args: {
-          task_id: tool.schema.string(),
           reason: tool.schema.string().optional(),
+          agent_id: tool.schema.string().optional(),
+          format: tool.schema.string().optional(),
+          resource: tool.schema.string().optional(),
+          ttl_seconds: tool.schema.string().optional(),
+          payload: tool.schema.any().optional(),
+          role: tool.schema.string().optional(),
+          tool: tool.schema.string().optional(),
+          root: tool.schema.string().optional(),
         },
         async execute(args) {
-          const flags: string[] = ["agent-interrupt", args.task_id]
-          if (args.reason) flags.push(args.reason)
-          return run(flags)
+          switch (args.action) {
+            case "message":
+              if (!args.to_agent || !args.notes) return "error: kern_agent action=message requires to_agent and notes"
+              const flags: string[] = ["agent-message", "--to", args.to_agent]
+              if (args.from_agent) flags.push("--from", args.from_agent)
+              if (args.task_id) flags.push("--task", args.task_id)
+              flags.push(args.notes)
+              return run(flags)
+            case "interrupt":
+              if (!args.task_id) return "error: kern_agent action=interrupt requires task_id"
+              const iflags: string[] = ["agent-interrupt", args.task_id]
+              if (args.reason) iflags.push(args.reason)
+              return run(iflags)
+            case "fingerprint":
+              const fflags: string[] = ["agent-fingerprint"]
+              if (args.agent_id) fflags.push("--agent", args.agent_id)
+              if (args.format) fflags.push("--format", args.format)
+              return run(fflags)
+            case "coordination":
+              const cflags: string[] = ["agent-coordination"]
+              if (args.subaction) cflags.push("--action", args.subaction)
+              if (args.agent_id) cflags.push("--agent", args.agent_id)
+              if (args.from_agent) cflags.push("--from", args.from_agent)
+              if (args.to_agent) cflags.push("--to", args.to_agent)
+              if (args.task_id) cflags.push("--task", args.task_id)
+              if (args.resource) cflags.push("--resource", args.resource)
+              if (args.ttl_seconds) cflags.push("--ttl", String(args.ttl_seconds))
+              if (args.notes) cflags.push("--notes", args.notes)
+              if (args.root) cflags.push("--root", args.root)
+              return run(cflags)
+            case "rbac":
+            default:
+              const rflags: string[] = ["agent-role-rbac"]
+              if (args.subaction) rflags.push("--action", args.subaction)
+              if (args.agent_id) rflags.push("--agent", args.agent_id)
+              if (args.role) rflags.push("--role", args.role)
+              if (args.tool) rflags.push("--tool", args.tool)
+              if (args.root) rflags.push("--root", args.root)
+              return run(rflags)
+          }
         },
       }),
 
@@ -1360,39 +1495,30 @@ kern_probe: tool({
       }),
       kern_lock: tool({
         description:
-          "Acquire an advisory workspace lock marker on a scope (flock-based) so concurrent agents coordinate before touching shared files. Errors when the scope is already held. Cleared with kern_unlock. Note: this CLI runs in its own process, so the OS releases the flock when the tool call ends; the lock marker persists until kern_unlock and `kern status` reflects reality.",
+          "Workspace lock management (flock-based). action=acquire takes an advisory lock on a scope (errors if held); action=release frees it; action=status lists locks with holder PIDs. Note: the CLI runs in its own process, so the OS releases the flock when the call ends — the marker persists until release.",
         args: {
-          scope: tool.schema.string(),
+          action: tool.schema.string().describe("acquire|release|status"),
+          scope: tool.schema.string().optional(),
           root: tool.schema.string().optional(),
         },
         async execute(args) {
-          const flags: string[] = ["lock", "--hold", args.scope]
-          if (args.root) flags.push(args.root)
-          return run(flags)
-        },
-      }),
-      kern_unlock: tool({
-        description: "Release a workspace lock previously acquired via kern_lock.",
-        args: {
-          scope: tool.schema.string(),
-          root: tool.schema.string().optional(),
-        },
-        async execute(args) {
-          const flags: string[] = ["unlock", args.scope]
-          if (args.root) flags.push(args.root)
-          return run(flags)
-        },
-      }),
-      kern_lock_status: tool({
-        description:
-          "List workspace locks with whether each is held and by which PID. Use to see what other agents are working on.",
-        args: {
-          root: tool.schema.string().optional(),
-        },
-        async execute(args) {
-          const flags: string[] = ["status"]
-          if (args.root) flags.push(args.root)
-          return run(flags)
+          switch (args.action) {
+            case "release":
+              if (!args.scope) return "error: kern_lock action=release requires scope"
+              const uflags: string[] = ["unlock", args.scope]
+              if (args.root) uflags.push(args.root)
+              return run(uflags)
+            case "status":
+              const sflags: string[] = ["status"]
+              if (args.root) sflags.push(args.root)
+              return run(sflags)
+            case "acquire":
+            default:
+              if (!args.scope) return "error: kern_lock action=acquire requires scope"
+              const flags: string[] = ["lock", "--hold", args.scope]
+              if (args.root) flags.push(args.root)
+              return run(flags)
+          }
         },
       }),
       kern_guard_check: tool({
@@ -1435,38 +1561,55 @@ kern_probe: tool({
           return run(["guide"])
         },
       }),
-      kern_memory_add: tool({
+      kern_memory: tool({
         description:
-          "Persist a distilled, cross-session lesson for a project (the project 'brain'). Agents record what they learned so future sessions can recall it. Appends to the project memory store (most recent 50 entries kept).",
+          "Project memory brain — add a lesson, list stored lessons, recall by prompt, ranked recall with exponential time-decay (half-life), remove by index/prefix, or clear. Use to persist and retrieve cross-session project knowledge.",
         args: {
-          lesson: tool.schema.string(),
+          action: tool.schema.string().describe("add|list|recall|ranked|remove|clear"),
+          lesson: tool.schema.string().optional(),
+          prompt: tool.schema.string().optional(),
+          limit: tool.schema.string().optional(),
+          k: tool.schema.string().optional(),
+          half_life_days: tool.schema.string().optional(),
+          id: tool.schema.string().optional(),
+          root: tool.schema.string().optional(),
         },
         async execute(args) {
-          return run(["remember", args.lesson])
+          switch (args.action) {
+            case "add":
+              if (!args.lesson) return "error: kern_memory action=add requires lesson"
+              const aflags: string[] = ["memory", "add", args.lesson]
+              if (args.root) aflags.push("--root", args.root)
+              return run(aflags)
+            case "recall":
+              if (!args.prompt) return "error: kern_memory action=recall requires prompt"
+              const flags: string[] = ["memory", "recall", args.prompt]
+              if (args.limit) flags.push("--limit", String(args.limit))
+              if (args.root) flags.push("--root", args.root)
+              return run(flags)
+            case "ranked":
+              if (!args.prompt) return "error: kern_memory action=ranked requires prompt"
+              const rflags: string[] = ["memory-ranked", args.prompt]
+              if (args.k) rflags.push("-k", String(args.k))
+              if (args.half_life_days) rflags.push("--half-life", String(args.half_life_days))
+              if (args.root) rflags.push("--root", args.root)
+              return run(rflags)
+            case "remove":
+              if (!args.id) return "error: kern_memory action=remove requires id (1-based index or text prefix)"
+              const dflags: string[] = ["memory", "remove", args.id]
+              if (args.root) dflags.push("--root", args.root)
+              return run(dflags)
+            case "clear":
+              const cflags: string[] = ["memory", "--clear"]
+              if (args.root) cflags.push("--root", args.root)
+              return run(cflags)
+            case "list":
+            default:
+              const lflags: string[] = ["memory"]
+              if (args.root) lflags.push("--root", args.root)
+              return run(lflags)
+          }
         },
-      }),
-      kern_memory_list: tool({
-        description:
-          "List all stored lessons for a project, most recent first with timestamps.",
-        args: {},
-        async execute(args) {
-          return run(["memory"])
-        },
-      }),
-      kern_memory_recall: tool({
-        description:
-          "Recall the up-to-k most relevant past lessons for a prompt by keyword overlap. Returns only lessons whose tokens match; deterministic and local.",
-args: {
-prompt: tool.schema.string(),
-root: tool.schema.string().optional(),
-limit: tool.schema.string().optional(),
-},
-async execute(args) {
-const flags: string[] = ["recall", args.prompt]
-if (args.limit) flags.push("--limit", String(args.limit))
-if (args.root) flags.push(args.root)
-return run(flags)
-},
       }),
       kern_mask_pii: tool({
         description:
@@ -1556,49 +1699,40 @@ return run(flags)
           })
         },
       }),
-      kern_doc_search: tool({
+      kern_doc: tool({
         description:
-          "Local search over a project's documents (markdown, text, rst, adoc). Chunks docs locally with deterministic n-gram hashing and returns only the most relevant fragments. Use instead of pasting whole documents into context.",        args: {
-          query: tool.schema.string(),
+          "Local document toolkit over the project's doc index. action=search returns only the most relevant doc fragments (no whole-document pasting); action=fetch pulls a public docs page into the index — kern's ONLY network call (HTML-stripped, capped, cached); action=index pre-indexes after doc changes (searches auto-index on first use). semantic=true attaches dense embeddings via local Ollama.",
+        args: {
+          action: tool.schema.string().describe("search|fetch|index"),
+          query: tool.schema.string().optional(),
           root: tool.schema.string().optional(),
           k: tool.schema.string().optional(),
-        },
-        async execute(args) {
-          const flags: string[] = ["docs", args.query]
-          if (args.k) flags.push("--limit", String(args.k))
-          if (args.root) flags.push(args.root)
-          return run(flags)
-        },
-      }),
-      kern_doc_index: tool({
-        description:
-          "Pre-index a project's documents for kern_doc_search. Run once after documents change; searches auto-index on first use. Pass semantic=true to also embed chunks with a local Ollama embedding model (KERN_EMBED_MODEL, default nomic-embed-text); queries then fuse a real-meaning dense signal with the deterministic n-gram vectors and BM25.",
-        args: {
-          root: tool.schema.string().optional(),
-          semantic: tool.schema.string().optional(),
-        },
-        async execute(args) {
-          const flags: string[] = ["docs", "index"]
-          if (args.root) flags.push(args.root)
-          if (truthy(args.semantic)) flags.push("--semantic")
-          return run(flags)
-        },
-      }),
-      kern_doc_fetch: tool({
-        description:
-          "Fetch a public documentation page and merge it into the project's local doc index so kern_doc_search can find it. This is the ONLY network call in kern, invoked explicitly by the user; everything else stays local. The page is HTML-stripped, capped, cached and indexed as fetch/<name>.md (re-fetching replaces it). semantic=true also attaches dense embeddings via the local Ollama model.",
-        args: {
-          url: tool.schema.string(),
-          root: tool.schema.string().optional(),
+          url: tool.schema.string().optional(),
           name: tool.schema.string().optional(),
           semantic: tool.schema.string().optional(),
         },
         async execute(args) {
-          const flags: string[] = ["docs", "fetch", args.url]
-          if (args.name) flags.push(args.name)
-          if (args.root) flags.push(args.root)
-          if (truthy(args.semantic)) flags.push("--semantic")
-          return run(flags)
+          switch (args.action) {
+            case "fetch":
+              if (!args.url) return "error: kern_doc action=fetch requires url"
+              const flags: string[] = ["docs", "fetch", args.url]
+              if (args.name) flags.push(args.name)
+              if (args.root) flags.push(args.root)
+              if (truthy(args.semantic)) flags.push("--semantic")
+              return run(flags)
+            case "index":
+              const iflags: string[] = ["docs", "index"]
+              if (args.root) iflags.push(args.root)
+              if (truthy(args.semantic)) iflags.push("--semantic")
+              return run(iflags)
+            case "search":
+            default:
+              if (!args.query) return "error: kern_doc action=search requires query"
+              const sflags: string[] = ["docs", args.query]
+              if (args.k) sflags.push("--limit", String(args.k))
+              if (args.root) sflags.push(args.root)
+              return run(sflags)
+          }
         },
       }),
       kern_commitmsg: tool({
@@ -1892,20 +2026,33 @@ if (args.finding) flags.push("--finding", args.finding)
 return run(flags)
 },
 }),
-kern_repair_guidance: tool({
-description:
-"Blueprint change firewall: repair guidance for a gate finding — suggested fix and rule reference.",
-args: {
-root: tool.schema.string().optional(),
-finding: tool.schema.string().optional(),
-},
-async execute(args) {
-const flags: string[] = ["repair-guidance"]
-if (args.root) flags.push("--root", args.root)
-if (args.finding) flags.push("--finding", args.finding)
-return run(flags)
-},
-}),
+      kern_repair: tool({
+        description:
+          "Deterministic repair engine. action=diagnostics is the Compiler-Error-to-AST Auto-Repair Engine: deterministically fixes trivial syntax, unused imports, missing standard library imports, and unused variables from compiler diagnostics in <1ms without LLM latency or token waste. action=guidance is the blueprint change firewall: repair guidance for a gate finding — suggested fix and rule reference.",
+        args: {
+          action: tool.schema.string().describe("diagnostics|guidance"),
+          compiler_output: tool.schema.string().optional(),
+          apply: tool.schema.string().optional(),
+          finding: tool.schema.string().optional(),
+          root: tool.schema.string().optional(),
+        },
+        async execute(args) {
+          switch (args.action) {
+            case "guidance":
+              const flags: string[] = ["repair-guidance"]
+              if (args.root) flags.push("--root", args.root)
+              if (args.finding) flags.push("--finding", args.finding)
+              return run(flags)
+            case "diagnostics":
+            default:
+              if (!args.compiler_output) return "error: kern_repair action=diagnostics requires compiler_output"
+              const dflags: string[] = ["repair-diagnostics", "--compiler-output", args.compiler_output]
+              if (args.apply) dflags.push("--apply", args.apply)
+              if (args.root) dflags.push("--root", args.root)
+              return run(dflags)
+          }
+        },
+      }),
 kern_llm_providers: tool({
 description:
 "List the LLM provider chain in priority order (Ollama first, then locally-wired agent CLIs: claude, opencode, codex, gemini, qwen). With probe=true, live-tests each installed provider with a trivial prompt and reports who actually answers — the priority pick when Ollama is absent. Full wired-agent history: kern agents (CLI) and kern doctor.",
@@ -1951,6 +2098,21 @@ mode: tool.schema.string().optional(),
           const flags: string[] = ["loop", args.intent]
           if (args.level) flags.push("--level", args.level)
 if (args.mode) flags.push("--mode", args.mode)
+          if (args.root) flags.push("--root", args.root)
+          return run(flags)
+        },
+      }),
+      kern_do: tool({
+        description:
+          "HIGH-LEVEL (Workflow E): run the closed autonomy loop on an intent string in autonomous mode — wires the LLM coder and planner as handlers (default L2 sandboxed changes; L3 PR creation, L4 deploy-with-approval) and returns the deployed / observed-healthy / learned outcome.",
+        args: {
+          root: tool.schema.string().optional(),
+          intent: tool.schema.string(),
+          level: tool.schema.string().optional(),
+        },
+        async execute(args) {
+          const flags: string[] = ["do", args.intent]
+          if (args.level) flags.push("--level", args.level)
           if (args.root) flags.push("--root", args.root)
           return run(flags)
         },
@@ -2305,71 +2467,72 @@ kern_entry_points: tool({
           return run(flags)
         },
       }),
-      kern_repair_diagnostics: tool({
+      kern_semantic: tool({
         description:
-          "Compiler-Error-to-AST Auto-Repair Engine: deterministically fixes trivial syntax, unused imports, missing standard library imports, and unused variables from compiler diagnostics in <1ms without LLM latency or token waste.",
+          "AST-level semantic operations. action=diff computes a functional symbol diff (modified functions, changed signatures, impacted callers) instead of raw line noise; action=merge performs an AST-aware 3-way merge (base/local/remote) that resolves non-overlapping declarations and flags precise semantic conflicts.",
         args: {
-          compiler_output: tool.schema.string(),
-          root: tool.schema.string().optional(),
-          apply: tool.schema.string().optional(),
-        },
-        async execute(args) {
-          const flags: string[] = ["repair-diagnostics", "--compiler-output", args.compiler_output]
-          if (args.apply) flags.push("--apply", args.apply)
-          if (args.root) flags.push("--root", args.root)
-          return run(flags)
-        },
-      }),
-      kern_semantic_diff: tool({
-        description:
-          "Computes a functional AST-level symbol diff instead of raw line noise: surfaces modified functions, changed signatures, and newly impacted callers between commits or working tree.",
-        args: {
+          action: tool.schema.string().describe("diff|merge"),
           from: tool.schema.string().optional(),
           to: tool.schema.string().optional(),
           range: tool.schema.string().optional(),
           root: tool.schema.string().optional(),
-        },
-        async execute(args) {
-          const flags: string[] = ["semantic-diff"]
-          if (args.from) flags.push("--from", args.from)
-          if (args.to) flags.push("--to", args.to)
-          if (args.range) flags.push("--range", args.range)
-          if (args.root) flags.push("--root", args.root)
-          return run(flags)
-        },
-      }),
-      kern_evidence_anchor: tool({
-        description:
-          "Validates code claims or citations (symbol, file:line), corrects line drift, and generates a tamper-evident SHA-256 evidence certificate for zero-hallucination code claims.",
-        args: {
-          claim: tool.schema.string().optional(),
           file: tool.schema.string().optional(),
-          line: tool.schema.string().optional(),
-          symbol: tool.schema.string().optional(),
-          root: tool.schema.string().optional(),
+          base: tool.schema.string().optional(),
+          local: tool.schema.string().optional(),
+          remote: tool.schema.string().optional(),
+          base_file: tool.schema.string().optional(),
+          local_file: tool.schema.string().optional(),
+          remote_file: tool.schema.string().optional(),
+          apply: tool.schema.string().optional(),
+          format: tool.schema.string().optional(),
         },
         async execute(args) {
-          const flags: string[] = ["evidence-anchor"]
-          if (args.claim) flags.push("--claim", args.claim)
-          if (args.file) flags.push("--file", args.file)
-          if (args.line) flags.push("--line", String(args.line))
-          if (args.symbol) flags.push("--symbol", args.symbol)
-          if (args.root) flags.push("--root", args.root)
-          return run(flags)
+          switch (args.action) {
+            case "merge":
+              const flags: string[] = ["semantic-merge"]
+              if (args.file) flags.push("--file", args.file)
+              if (args.base) flags.push("--base", args.base)
+              if (args.local) flags.push("--local", args.local)
+              if (args.remote) flags.push("--remote", args.remote)
+              if (truthy(args.apply)) flags.push("--apply")
+              if (args.format === "json") flags.push("--json")
+              if (args.root) flags.push("--root", args.root)
+              return run(flags)
+            case "diff":
+            default:
+              const dflags: string[] = ["semantic-diff"]
+              if (args.from) dflags.push("--from", args.from)
+              if (args.to) dflags.push("--to", args.to)
+              if (args.range) dflags.push("--range", args.range)
+              if (args.root) dflags.push("--root", args.root)
+              return run(dflags)
+          }
         },
       }),
       kern_evidence: tool({
         description:
-          "Signed-evidence read path: action=verify validates an evidence bundle (args.file or args.url, fetched without cloning) and reports tamper-seal status, signature status, audit-chain replay and, with args.expect_fingerprint, the trust-anchor match; action=explain renders the bundle in plain language; action=export builds a bundle for args.task_id, returning its path + id.",
+          "Signed-evidence read path + anchoring. action=verify validates a bundle (file or url) — tamper-seal, signature, audit-chain replay, optional trust-anchor match; action=explain renders it in plain language; action=export builds a bundle for a task; action=anchor validates a code claim (symbol, file:line), corrects drift, issues a SHA-256 certificate.",
         args: {
           action: tool.schema.string().optional(),
           file: tool.schema.string().optional(),
           url: tool.schema.string().optional(),
           task_id: tool.schema.string().optional(),
           expect_fingerprint: tool.schema.string().optional(),
+          claim: tool.schema.string().optional(),
+          line: tool.schema.string().optional(),
+          symbol: tool.schema.string().optional(),
           root: tool.schema.string().optional(),
         },
         async execute(args) {
+          if (args.action === "anchor") {
+            const aflags: string[] = ["evidence-anchor"]
+            if (args.claim) aflags.push("--claim", args.claim)
+            if (args.file) aflags.push("--file", args.file)
+            if (args.line) aflags.push("--line", String(args.line))
+            if (args.symbol) aflags.push("--symbol", args.symbol)
+            if (args.root) aflags.push("--root", args.root)
+            return run(aflags)
+          }
           const flags: string[] = ["evidence", args.action === "explain" ? "explain" : args.action === "export" ? "export" : "verify"]
           if (args.file) flags.push("--file", args.file)
           if (args.url) flags.push("--url", args.url)
@@ -2379,156 +2542,92 @@ kern_entry_points: tool({
           return run(flags)
         },
       }),
-      kern_org_projects: tool({
+      kern_org: tool({
         description:
-          "Enterprise org admin: list registered projects (C11). Returns {projects:[{name,root}],count}.",
+          "Enterprise org admin (C11) by entity: projects; agents (action=list|register); teams (list|show|create|remove); memory (list|add — org-level shared memory); tasks (aggregated visibility); search (cross-project symbol search, q required); audit (org audit log); user (add|list|role|disable|audit — actor_id required; MCP-only, forwards to the org namespace).",
         args: {
-          root: tool.schema.string().optional(),
-          projects: tool.schema.string().optional(),
-        },
-        async execute(args) {
-          const flags: string[] = ["org", "projects"]
-          if (args.root) flags.push("--root", args.root)
-          if (args.projects) args.projects.split(",").forEach((pair: string) => { const p = pair.trim(); if (p) flags.push("--project", p) })
-          return run(flags)
-        },
-      }),
-      kern_org_agents: tool({
-        description:
-          "Enterprise org admin: register or list agent identities (C11). action=list returns {agents:[{id,name,type}],count}; action=register creates an agent from id/name (type defaults to 'default') and returns the created agent.",
-        args: {
+          entity: tool.schema.string().describe("projects|agents|teams|memory|tasks|search|audit|user"),
           action: tool.schema.string().optional(),
           id: tool.schema.string().optional(),
           name: tool.schema.string().optional(),
           type: tool.schema.string().optional(),
-          root: tool.schema.string().optional(),
-          projects: tool.schema.string().optional(),
-        },
-        async execute(args) {
-          const flags: string[] = ["org", "agents", args.action === "register" ? "register" : "list"]
-          if (args.action === "register") {
-            if (args.id) flags.push(args.id)
-            if (args.name) flags.push(args.name)
-            if (args.type) flags.push("--type", args.type)
-          }
-          if (args.root) flags.push("--root", args.root)
-          if (args.projects) args.projects.split(",").forEach((pair: string) => { const p = pair.trim(); if (p) flags.push("--project", p) })
-          return run(flags)
-        },
-      }),
-      kern_org_teams: tool({
-        description:
-          "Enterprise org admin: manage teams that group agents and own projects (C11). action=list|show|create|remove — create takes id/name plus optional projects (team project names) and members (agent IDs); show/remove take id.",
-        args: {
-          action: tool.schema.string().optional(),
-          id: tool.schema.string().optional(),
-          name: tool.schema.string().optional(),
+          q: tool.schema.string().optional(),
+          content: tool.schema.string().optional(),
           projects: tool.schema.string().optional(),
           members: tool.schema.string().optional(),
-          root: tool.schema.string().optional(),
-        },
-        async execute(args) {
-          const action = args.action || "list"
-          const flags: string[] = ["org", "teams", action]
-          if (action === "show" || action === "remove") {
-            if (args.id) flags.push(args.id)
-          }
-          if (action === "create") {
-            if (args.id) flags.push(args.id)
-            if (args.name) flags.push(args.name)
-            if (args.projects) flags.push("--projects", args.projects)
-            if (args.members) flags.push("--members", args.members)
-          }
-          if (args.root) flags.push("--root", args.root)
-          return run(flags)
-        },
-      }),
-      kern_org_memory: tool({
-        description:
-          "Enterprise org admin: org-level shared memory visible across all projects (C11). action=list returns {memories:[{id,content,type}],count}; action=add stores a memory from content with optional type.",
-        args: {
-          action: tool.schema.string().optional(),
-          content: tool.schema.string().optional(),
-          type: tool.schema.string().optional(),
-          root: tool.schema.string().optional(),
-          projects: tool.schema.string().optional(),
-        },
-        async execute(args) {
-          const flags: string[] = ["org", "memory", args.action === "add" ? "add" : "list"]
-          if (args.action === "add") {
-            if (args.content) flags.push(args.content)
-            if (args.type) flags.push("--type", args.type)
-          }
-          if (args.root) flags.push("--root", args.root)
-          if (args.projects) args.projects.split(",").forEach((pair: string) => { const p = pair.trim(); if (p) flags.push("--project", p) })
-          return run(flags)
-        },
-      }),
-      kern_org_tasks: tool({
-        description:
-          "Enterprise org admin: aggregate task visibility (C11). Returns {projects:{name:[{id,state,intent,type}]},total}.",
-        args: {
-          root: tool.schema.string().optional(),
-          projects: tool.schema.string().optional(),
-        },
-        async execute(args) {
-          const flags: string[] = ["org", "tasks"]
-          if (args.root) flags.push("--root", args.root)
-          if (args.projects) args.projects.split(",").forEach((pair: string) => { const p = pair.trim(); if (p) flags.push("--project", p) })
-          return run(flags)
-        },
-      }),
-      kern_org_search: tool({
-        description:
-          "Enterprise org admin: cross-project symbol search (C11). Requires q; returns {hits:[{repo,root,symbol,score}],count}.",
-        args: {
-          q: tool.schema.string().optional(),
-          root: tool.schema.string().optional(),
-          projects: tool.schema.string().optional(),
-        },
-        async execute(args) {
-          const flags: string[] = ["org", "search"]
-          if (args.q) flags.push(args.q)
-          if (args.root) flags.push("--root", args.root)
-          if (args.projects) args.projects.split(",").forEach((pair: string) => { const p = pair.trim(); if (p) flags.push("--project", p) })
-          return run(flags)
-        },
-      }),
-      kern_org_audit: tool({
-        description:
-          "Enterprise org admin: org-level audit log (C11). Returns {entries:[...],count} with AuditEntry's raw JSON field names.",
-        args: {
-          root: tool.schema.string().optional(),
-          projects: tool.schema.string().optional(),
-        },
-        async execute(args) {
-          const flags: string[] = ["org", "audit"]
-          if (args.root) flags.push("--root", args.root)
-          if (args.projects) args.projects.split(",").forEach((pair: string) => { const p = pair.trim(); if (p) flags.push("--project", p) })
-          return run(flags)
-        },
-      }),
-      kern_org_user: tool({
-        description:
-          "Org-wide user management + RBAC: sub-actions user-add, user-list, user-role, user-disable, user-audit. actor_id (the acting user) is required on every action. user-add registers a user with a role; user-list returns {users:[{id,role,enabled}],count}; user-role changes a role; user-disable disables a user. MCP-only: no org CLI subcommand — forwards to the org namespace.",
-        args: {
-          action: tool.schema.string().optional(),
           user_id: tool.schema.string().optional(),
           role: tool.schema.string().optional(),
           actor_id: tool.schema.string().optional(),
           root: tool.schema.string().optional(),
-          projects: tool.schema.string().optional(),
         },
         async execute(args) {
-          const flags: string[] = ["org", "users", args.action || "list"]
-          if (args.action) {
-          if (args.user_id) flags.push(args.user_id)
-          if (args.role) flags.push(args.role)
+          switch (args.entity) {
+            case "projects":
+              const flags: string[] = ["org", "projects"]
+              if (args.root) flags.push("--root", args.root)
+              if (args.projects) args.projects.split(",").forEach((pair: string) => { const p = pair.trim(); if (p) flags.push("--project", p) })
+              return run(flags)
+            case "agents":
+              const aflags: string[] = ["org", "agents", args.action === "register" ? "register" : "list"]
+              if (args.action === "register") {
+                if (args.id) aflags.push(args.id)
+                if (args.name) aflags.push(args.name)
+                if (args.type) aflags.push("--type", args.type)
+              }
+              if (args.root) aflags.push("--root", args.root)
+              if (args.projects) args.projects.split(",").forEach((pair: string) => { const p = pair.trim(); if (p) aflags.push("--project", p) })
+              return run(aflags)
+            case "teams":
+              const taction = args.action || "list"
+              const tflags: string[] = ["org", "teams", taction]
+              if (taction === "show" || taction === "remove") {
+                if (args.id) tflags.push(args.id)
+              }
+              if (taction === "create") {
+                if (args.id) tflags.push(args.id)
+                if (args.name) tflags.push(args.name)
+                if (args.projects) tflags.push("--projects", args.projects)
+                if (args.members) tflags.push("--members", args.members)
+              }
+              if (args.root) tflags.push("--root", args.root)
+              return run(tflags)
+            case "memory":
+              const mflags: string[] = ["org", "memory", args.action === "add" ? "add" : "list"]
+              if (args.action === "add") {
+                if (args.content) mflags.push(args.content)
+                if (args.type) mflags.push("--type", args.type)
+              }
+              if (args.root) mflags.push("--root", args.root)
+              if (args.projects) args.projects.split(",").forEach((pair: string) => { const p = pair.trim(); if (p) mflags.push("--project", p) })
+              return run(mflags)
+            case "tasks":
+              const t2flags: string[] = ["org", "tasks"]
+              if (args.root) t2flags.push("--root", args.root)
+              if (args.projects) args.projects.split(",").forEach((pair: string) => { const p = pair.trim(); if (p) t2flags.push("--project", p) })
+              return run(t2flags)
+            case "search":
+              const sflags: string[] = ["org", "search"]
+              if (args.q) sflags.push(args.q)
+              if (args.root) sflags.push("--root", args.root)
+              if (args.projects) args.projects.split(",").forEach((pair: string) => { const p = pair.trim(); if (p) sflags.push("--project", p) })
+              return run(sflags)
+            case "audit":
+              const auflags: string[] = ["org", "audit"]
+              if (args.root) auflags.push("--root", args.root)
+              if (args.projects) args.projects.split(",").forEach((pair: string) => { const p = pair.trim(); if (p) auflags.push("--project", p) })
+              return run(auflags)
+            case "user":
+            default:
+              const uflags: string[] = ["org", "users", args.action || "list"]
+              if (args.action) {
+                if (args.user_id) uflags.push(args.user_id)
+                if (args.role) uflags.push(args.role)
+              }
+              if (args.actor_id) uflags.push("--actor", args.actor_id)
+              if (args.root) uflags.push("--root", args.root)
+              if (args.projects) args.projects.split(",").forEach((pair: string) => { const p = pair.trim(); if (p) uflags.push("--project", p) })
+              return run(uflags)
           }
-          if (args.actor_id) flags.push("--actor", args.actor_id)
-          if (args.root) flags.push("--root", args.root)
-          if (args.projects) args.projects.split(",").forEach((pair: string) => { const p = pair.trim(); if (p) flags.push("--project", p) })
-          return run(flags)
         },
       }),
       kern_context_watch: tool({
@@ -2547,20 +2646,6 @@ kern_entry_points: tool({
             const rest: string[] = [...flags, "--text", args.text]
             return run(rest)
           })
-        },
-      }),
-      kern_agent_fingerprint: tool({
-        description:
-          "Hashes and evaluates an agent's tool-call pattern from the audit trail to detect repetitive loops, anomalous tool polarization, or behavioral drift.",
-        args: {
-          agent_id: tool.schema.string().optional(),
-          format: tool.schema.string().optional(),
-        },
-        async execute(args) {
-          const flags: string[] = ["agent-fingerprint"]
-          if (args.agent_id) flags.push("--agent", args.agent_id)
-          if (args.format) flags.push("--format", args.format)
-          return run(flags)
         },
       }),
       kern_explain: tool({
@@ -2595,23 +2680,6 @@ kern_entry_points: tool({
           return run(flags)
         },
       }),
-      kern_memory_ranked: tool({
-        description:
-          "Retrieves past project lessons weighted by keyword relevance and exponential time decay (half-life), ensuring stale memories don't obscure fresh lessons.",
-        args: {
-          prompt: tool.schema.string(),
-          k: tool.schema.string().optional(),
-          half_life_days: tool.schema.string().optional(),
-          root: tool.schema.string().optional(),
-        },
-        async execute(args) {
-          const flags: string[] = ["memory-ranked", args.prompt]
-          if (args.k) flags.push("-k", String(args.k))
-          if (args.half_life_days) flags.push("--half-life", String(args.half_life_days))
-          if (args.root) flags.push("--root", args.root)
-          return run(flags)
-        },
-      }),
       kern_policy_dsl: tool({
         description:
           "Evaluates diffs, changed files, and imported libraries against declarative policy-as-code rules (banned packages, protected paths, max diff size).",
@@ -2631,55 +2699,6 @@ kern_entry_points: tool({
               flags.push("--file", String(f))
             }
           }
-          if (args.root) flags.push("--root", args.root)
-          return run(flags)
-        },
-      }),
-      kern_agent_coordination: tool({
-        description:
-          "Workspace coordination protocol for multi-agent teams: register handoffs, claim/release exclusive resource locks, and query inbox tasks.",
-        args: {
-          action: tool.schema.string().optional(),
-          agent_id: tool.schema.string().optional(),
-          from_agent: tool.schema.string().optional(),
-          to_agent: tool.schema.string().optional(),
-          task_id: tool.schema.string().optional(),
-          resource: tool.schema.string().optional(),
-          ttl_seconds: tool.schema.string().optional(),
-          notes: tool.schema.string().optional(),
-          payload: tool.schema.any().optional(),
-          root: tool.schema.string().optional(),
-        },
-        async execute(args) {
-          const flags: string[] = ["agent-coordination"]
-          if (args.action) flags.push("--action", args.action)
-          if (args.agent_id) flags.push("--agent", args.agent_id)
-          if (args.from_agent) flags.push("--from", args.from_agent)
-          if (args.to_agent) flags.push("--to", args.to_agent)
-          if (args.task_id) flags.push("--task", args.task_id)
-          if (args.resource) flags.push("--resource", args.resource)
-          if (args.ttl_seconds) flags.push("--ttl", String(args.ttl_seconds))
-          if (args.notes) flags.push("--notes", args.notes)
-          if (args.root) flags.push("--root", args.root)
-          return run(flags)
-        },
-      }),
-      kern_agent_role_rbac: tool({
-        description:
-          "Enforces identity-based role access control (RBAC): restricts sensitive tools (exec, delete, fix) based on agent roles (junior_dev, reviewer, auditor, admin).",
-        args: {
-          action: tool.schema.string().optional(),
-          agent_id: tool.schema.string().optional(),
-          role: tool.schema.string().optional(),
-          tool: tool.schema.string().optional(),
-          root: tool.schema.string().optional(),
-        },
-        async execute(args) {
-          const flags: string[] = ["agent-role-rbac"]
-          if (args.action) flags.push("--action", args.action)
-          if (args.agent_id) flags.push("--agent", args.agent_id)
-          if (args.role) flags.push("--role", args.role)
-          if (args.tool) flags.push("--tool", args.tool)
           if (args.root) flags.push("--root", args.root)
           return run(flags)
         },
@@ -2804,33 +2823,6 @@ kern_stream: tool({
           return run(flags)
         },
       }),
-      kern_semantic_merge: tool({
-        description:
-          "Performs AST-aware 3-way code merge between base, local, and remote versions. Resolves non-overlapping struct fields, methods, imports, and declarations cleanly, and flags precise semantic conflicts.",
-        args: {
-          file: tool.schema.string().optional(),
-          base: tool.schema.string().optional(),
-          local: tool.schema.string().optional(),
-          remote: tool.schema.string().optional(),
-          base_file: tool.schema.string().optional(),
-          local_file: tool.schema.string().optional(),
-          remote_file: tool.schema.string().optional(),
-          apply: tool.schema.string().optional(),
-          format: tool.schema.string().optional(),
-          root: tool.schema.string().optional(),
-        },
-        async execute(args) {
-          const flags: string[] = ["semantic-merge"]
-          if (args.file) flags.push("--file", args.file)
-          if (args.base) flags.push("--base", args.base)
-          if (args.local) flags.push("--local", args.local)
-          if (args.remote) flags.push("--remote", args.remote)
-          if (truthy(args.apply)) flags.push("--apply")
-          if (args.format === "json") flags.push("--json")
-          if (args.root) flags.push("--root", args.root)
-          return run(flags)
-        },
-      }),
       kern_synthesize_test: tool({
         description:
           "Automatically synthesizes comprehensive table-driven unit tests, parameter fixtures, and boundary invariants for untested functions or methods based on AST signatures. Pass sinks=<comma-separated rule ids> to scaffold a deterministic test per tainted security sink instead (the former kern_taint generate=true output).",
@@ -2858,17 +2850,21 @@ sinks: tool.schema.string().optional(),
       }),
       // --- Shadow built-ins: route read/grep/glob/bash to kern transparently ---
       // A plugin tool with the same name as a built-in takes precedence, so the
-      // agent's "read the file" call hits kern_compact_file under the hood. If
-      // kern is unavailable (missing binary, no index), fall back to the raw
-      // built-in behavior (node:fs / the `$` shell — the opencode ToolContext
-      // has no context.tool to re-invoke the replaced tool) so the agent is
-      // never blocked. The per-call raw/full/docs flags are operator-gated
+      // agent's "read the file" call hits kern_compact_file under the hood.
+      // Contract Y (fail-closed parity with the shell guard): code-content
+      // intents BLOCK with the guard's redirect message — a grep with an
+      // include filter or regex metacharacters, a code-file read when kern is
+      // unavailable, and a bash command whose first token is a content-reading
+      // tool (grep/find/cat/...) never run raw and never sneak through kern
+      // build. Execution-class commands stay governed: non-code reads serve
+      // raw, simple content-free commands run raw, everything else routes
+      // through kern build. The per-call raw/full/docs flags are operator-gated
       // (L4): they only take effect when the OPERATOR's host env sets
       // KERN_BYPASS=1 (or KERN_ENFORCE=0) — an agent passing raw=true in
       // the tool args alone no longer routes around kern.
       read: tool({
         description:
-          "Read a file. Routes to kern_compact_file (symbolic summary) by default. Falls back to raw read only when kern is unavailable or returns nothing useful.",
+          "Read a file. Code files route to kern_compact_file (symbolic summary) regardless of size; if kern is unavailable the read is blocked with the kern redirect message. Non-code files (markdown/config/data) read raw.",
         args: {
           filePath: tool.schema.string(),
           full: tool.schema.string().optional(),
@@ -2879,9 +2875,19 @@ sinks: tool.schema.string().optional(),
             logAdoption("read", false)
             return readFallback(args.filePath)
           }
+// Simple reads are exempt from kern routing: only non-code files, which
+// kern compact returns empty for anyway.
+if (await isSimpleRead(args.filePath)) {
+            logAdoption("read", false)
+            return readFallback(args.filePath)
+          }
           const flags: string[] = ["compact"]
           if (truthy(args.full) && process.env.KERN_BYPASS === "1") flags.push("--tier", "full")
           flags.push(args.filePath)
+          // Same canonical key as kern_compact_file (compact|<path>), so a
+          // repeat read of the same file collapses to the unchanged reply.
+          const cached = etagCache.get(etagKey(flags))
+          if (cached) flags.push("--etag", cached)
           try {
             const compacted = await run(flags)
             // kern compact returns EMPTY for non-code files (markdown,
@@ -2892,11 +2898,16 @@ sinks: tool.schema.string().optional(),
               return readFallback(args.filePath)
             }
             logAdoption("read", true)
-            return compacted
+            const pointerLine = "[kern] code file — symbolic summary served. verbatim: kern_compact_file tier=full · symbol slice: kern_context <symbol>"
+            return `${compacted}\n${pointerLine}`
           } catch {
-            // kern unavailable — fall back to a raw read so the agent is never blocked.
+            // kern unavailable on a CODE file — block with the guard's
+            // redirect message (Contract Y fail-closed; never a raw read).
+            // Non-code reads never reach here: isSimpleRead already served
+            // them raw, and the empty-compact fallback above is the non-code
+            // path. This catch is the code path only.
             logAdoption("read", false)
-            return readFallback(args.filePath)
+            throw new Error("Use kern_compact_file (symbolic summary, faster) or kern_context (source slice) instead of the built-in read. Call kern_compact_file with {\"path\":\"<filepath>\"}. Set KERN_ENFORCE=0 to disable this guard.")
           }
         },
       }),
@@ -2923,71 +2934,72 @@ sinks: tool.schema.string().optional(),
           try {
             const out = await run(["project", args.path ?? "."])
             logAdoption("glob", true)
-            return out
+            return out + "\n[kern] glob routed to kern_project_map"
           } catch {
             logAdoption("glob", false)
             return globFallback(args.pattern, args.path ?? ".")
           }
         },
       }),
-      grep: tool({
-        description:
-          "Search code by symbol query. Patterns are symbol queries, NOT regex — kern_ast_search routes them to AST symbol search by default. Patterns containing regex metacharacters fall back to raw grep so regex searches still work. Falls back to raw grep if kern is unavailable.",
-        args: {
-          pattern: tool.schema.string(),
-          path: tool.schema.string().optional(),
-          include: tool.schema.string().optional(),
-          docs: tool.schema.string().optional(),
-          raw: tool.schema.string().optional(),
-        },
-        async execute(args) {
-          if ((truthy(args.raw) && process.env.KERN_BYPASS === "1") || process.env.KERN_BYPASS === "1" || process.env.KERN_ENFORCE === "0") {
-            logAdoption("grep", false)
-            return grepFallback(args.pattern, args.path, args.include)
-          }
-          if (args.include) {
-            // kern ast/docs searches have no include filter — route to the raw
-            // grep so the filter is honored instead of silently dropped.
-            logAdoption("grep", false)
-            return grepFallback(args.pattern, args.path, args.include)
-          }
-          if (truthy(args.docs) && process.env.KERN_BYPASS === "1") {
-            // Docs search is semantic/FTS over an index — the pattern is a
-            // query, not a regex, so metacharacters are left to kern.
-            try {
-              const flags: string[] = ["docs", args.pattern]
-              if (args.path) flags.push("--root", args.path)
-              const out = await run(flags)
-              logAdoption("grep", true)
-              return out
-            } catch {
-              logAdoption("grep", false)
-              return grepFallback(args.pattern, args.path, args.include)
-            }
-          }
-          // kern ast patterns are symbol queries, NOT regex — a pattern
-          // carrying regex metacharacters can't be expressed as a symbol
-          // query, so route it to the raw grep and honor the regex (mirrors
-          // the glob shadow's metacharacter fallback).
-          if (/[[\]\\^$.|?*+()]/.test(args.pattern)) {
-            logAdoption("grep", false)
-            return grepFallback(args.pattern, args.path, args.include)
-          }
-          try {
-            const flags: string[] = ["ast", args.pattern]
-            if (args.path) flags.push("--root", args.path)
-            const out = await run(flags)
-            logAdoption("grep", true)
-            return out
-          } catch {
-            logAdoption("grep", false)
-            return grepFallback(args.pattern, args.path, args.include)
-          }
+grep: tool({
+description:
+"Search code by symbol query. Patterns are symbol queries, NOT regex — kern_ast_search routes them to AST symbol search by default. Patterns with an include filter or regex metacharacters are blocked — use kern_ast_search (symbols) or bash grep with raw=true (operator-gated).",
+args: {
+pattern: tool.schema.string(),
+path: tool.schema.string().optional(),
+include: tool.schema.string().optional(),
+docs: tool.schema.string().optional(),
+raw: tool.schema.string().optional(),
+},
+async execute(args) {
+if ((truthy(args.raw) && process.env.KERN_BYPASS === "1") || process.env.KERN_BYPASS === "1" || process.env.KERN_ENFORCE === "0") {
+logAdoption("grep", false)
+return grepFallback(args.pattern, args.path, args.include)
+}
+if (truthy(args.docs) && process.env.KERN_BYPASS === "1") {
+// Docs search is semantic/FTS over an index — the pattern is a
+// query, not a regex, so metacharacters are left to kern.
+try {
+const flags: string[] = ["docs", args.pattern]
+if (args.path) flags.push("--root", args.path)
+const out = await run(flags)
+logAdoption("grep", true)
+return out
+} catch {
+// kern unavailable — block (Contract Y): never a node-fs scan.
+logAdoption("grep", false)
+throw new Error("Use kern_ast_search (code symbols) or kern_doc (action=search) (docs) instead of the built-in grep. kern ast/grep patterns are SYMBOL queries, not regex: call kern_ast_search with a symbol-name pattern like {\"pattern\":\"funcName\"} or {\"pattern\":\"type *Name*\"}. For true regex search use bash: grep -rn <pattern> (or raw=true). Set KERN_ENFORCE=0 to disable this guard.")
+}
+}
+if (args.include || /[[\]\\^$.|?*+()]/.test(args.pattern)) {
+// Block with the guard's message (Contract Y): kern ast/docs searches
+// have no include filter and take symbol queries, not regex — and no
+// real grep runs here (the guard never raw-scans; the message documents
+// the operator-gated bash raw=true escape). The same regex-metachar
+// condition that used to fall through to a second grepFallback branch is
+// covered here, so that dead branch is gone.
+logAdoption("grep", false)
+throw new Error("Use kern_ast_search (code symbols) or kern_doc (action=search) (docs) instead of the built-in grep. kern ast/grep patterns are SYMBOL queries, not regex: call kern_ast_search with a symbol-name pattern like {\"pattern\":\"funcName\"} or {\"pattern\":\"type *Name*\"}. For true regex search use bash: grep -rn <pattern> (or raw=true). Set KERN_ENFORCE=0 to disable this guard.")
+}
+// Symbol query path: no include filter, no regex metacharacters — this is
+// what kern_ast_search is for.
+try {
+const flags: string[] = ["ast", args.pattern]
+if (args.path) flags.push("--root", args.path)
+const out = await run(flags)
+logAdoption("grep", true)
+return out + "\n[kern] grep routed to kern_search (symbol query, not regex)"
+} catch {
+// kern unavailable — block (Contract Y): a node-fs scan would bypass
+// the guard entirely.
+logAdoption("grep", false)
+throw new Error("Use kern_ast_search (code symbols) or kern_doc (action=search) (docs) instead of the built-in grep. kern ast/grep patterns are SYMBOL queries, not regex: call kern_ast_search with a symbol-name pattern like {\"pattern\":\"funcName\"} or {\"pattern\":\"type *Name*\"}. For true regex search use bash: grep -rn <pattern> (or raw=true). Set KERN_ENFORCE=0 to disable this guard.")
+}
         },
       }),
       bash: tool({
         description:
-          "Run a shell command. Routes to kern build (governed, compact output) when kern is available. Falls back to raw bash (host `$` shell) if kern is unavailable, so the agent is never blocked. timeout is in MILLISECONDS (default 120000, max 1800000).",
+          "Run a shell command. Simple content-free commands (git status, git log without patch flags, pwd, ls, which, echo, date) run raw. Content-intent commands (grep, find, cat, head, tail, awk, sed, ...) are blocked — use kern_ast_search / kern_search instead. Everything else runs through kern build (governed, compact output). timeout is in MILLISECONDS (default 120000, max 1800000).",
         args: {
           command: tool.schema.string(),
           workdir: tool.schema.string().optional(),
@@ -2997,9 +3009,28 @@ sinks: tool.schema.string().optional(),
         async execute(args) {
           const cmd = args.command.trim()
           if (cmd === "") return "error: empty command"
+          // Simple commands are exempt from governed routing: read-only git
+          // and trivial shell have no build/test/PII surface to govern.
+          if (isSimpleCommand(cmd)) {
+            logAdoption("bash", false)
+            return runRaw(args.command, args.workdir, args.timeout)
+          }
           if ((truthy(args.raw) && process.env.KERN_BYPASS === "1") || process.env.KERN_BYPASS === "1" || process.env.KERN_ENFORCE === "0") {
             logAdoption("bash", false)
             return runRaw(args.command, args.workdir, args.timeout)
+          }
+          // Content-intent commands never execute raw through built-ins —
+          // parity with the shell guard (Contract Y): a command whose first
+          // token is a content-reading tool blocks with the guard's redirect
+          // message instead of running through kern build. Word-boundary
+          // match on the first token only (the guard blocks the whole
+          // compound regardless of position; first-token is the honest
+          // signal for `cd X && grep ...` vs `cd X && npm test`).
+          const contentIntents = new Set(["grep", "egrep", "rg", "ag", "find", "cat", "head", "tail", "less", "awk", "sed"])
+          const firstTok = cmd.split(/\s+/)[0]
+          if (contentIntents.has(firstTok)) {
+            logAdoption("bash", false)
+            throw new Error("Use kern_validate (build/test/lint) or kern_exec (governed command execution) instead of the built-in bash. Set KERN_ENFORCE=0 to disable this guard.\nkern alternative: kern_context/kern_explore/kern_search for symbol context · kern_exec (KERN_MCP_FULL=1) for governed commands")
           }
           // kern build runs any command (sh -c) in the project dir, gated by
           // the governance firewall, and returns compact output. kern exec is

@@ -96,9 +96,13 @@ func wireGlobalRulesFile(path string) Status {
 	if b, rerr := os.ReadFile(path); rerr == nil {
 		content = string(b)
 	}
-	// Strip the existing kern-managed block (if any) so the fresh canonical
-	// block can be re-inserted in its place, preserving all user content.
+	// Strip BOTH managed formats so the file converges to one kern section:
+	// the marker-delimited block this writer manages, AND any unmarked
+	// "# kern usage rules" blocks left by `kern setup --global` (writeGlobal
+	// Claude/AGENTS) — without the cross-strip the two writers stack two
+	// coexisting kern sections (F15).
 	cleaned := strutil.RemoveMarkedBlock(content, globalRulesMarkerOpen, globalRulesMarkerClose)
+	cleaned = removeKernSection(cleaned)
 	var final string
 	if strings.TrimSpace(cleaned) == "" {
 		final = string(block)

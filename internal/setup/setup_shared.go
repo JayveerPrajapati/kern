@@ -66,12 +66,12 @@ var agentDetectors = []agentDetector{
 	{agent: "gemini", paths: []string{"GEMINI.md", ".gemini/settings.json"}, binary: ""},
 	{agent: "antigravity", paths: []string{".agents", "~/.gemini/antigravity-cli", "~/.gemini/config/mcp_config.json"}, binary: "agy"},
 	{agent: "codex", paths: []string{".codex/config.toml"}, binary: "codex"},
-	{agent: "continue", paths: []string{".continuerc.json"}, binary: ""},
-	{agent: "windsurf", paths: []string{".windsurfrc", ".codeium/windsurf/mcp_config.json"}, binary: ""},
+	{agent: "continue", paths: []string{".continuerc.json", "~/.config/continue/config.json"}, binary: ""},
+	{agent: "windsurf", paths: []string{".windsurfrc", ".codeium/windsurf/mcp_config.json", "~/.config/.codeium/windsurf/mcp_config.json"}, binary: ""},
 	{agent: "zed", paths: []string{"~/.config/zed/settings.json"}, binary: ""},
 	{agent: "qwen", paths: []string{"~/.qwen/settings.json"}, binary: ""},
 	{agent: "qoder", paths: []string{"~/.qoder/settings.json", "~/.qoder/mcp.json"}, binary: ""},
-	{agent: "kiro", paths: []string{".kiro/settings/mcp.json"}, binary: ""},
+	{agent: "kiro", paths: []string{".kiro/settings/mcp.json", "~/.kiro/settings/mcp.json"}, binary: ""},
 }
 
 // instructionFiles maps each agent to its project-level instruction file

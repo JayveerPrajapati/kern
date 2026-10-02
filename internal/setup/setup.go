@@ -146,6 +146,22 @@ func cmdEntry(bin string) map[string]any {
 	}
 }
 
+// pluginGuardStatus reports whether the opencode plugin carries the shadow
+// routing + post-compression enforcement (the tool.execute.after hook) — the
+// opencode counterpart of the shell PreToolUse guard wired for Claude Code,
+// Gemini, Codex and friends.
+func pluginGuardStatus(root string) Status {
+	p := filepath.Join(root, ".opencode", "plugins", "kern.ts")
+	b, err := os.ReadFile(p)
+	if err != nil {
+		return Status{Agent: "opencode guard", Path: p, Note: "plugin not found — run kern setup"}
+	}
+	if strings.Contains(string(b), `"tool.execute.after"`) {
+		return Status{Agent: "opencode guard", Installed: true, Path: p, Note: "shadow routing + post-compression (tool.execute.after)"}
+	}
+	return Status{Agent: "opencode guard", Path: p, Note: "legacy plugin — re-run kern setup"}
+}
+
 // Check reports the current wiring state without changing anything.
 func Check(root string) []Status {
 	out := []Status{
@@ -159,6 +175,7 @@ func Check(root string) []Status {
 	for _, p := range GlobalPluginPaths() {
 		out = append(out, fileStatus(p, "opencode plugin (global)"))
 	}
+	out = append(out, pluginGuardStatus(root))
 	allAdapters, customErrs := effectiveAdapters(root)
 	for _, err := range customErrs {
 		out = append(out, Status{Agent: "custom adapters", Note: err.Error()})
@@ -175,6 +192,8 @@ func Check(root string) []Status {
 	out = append(out, fileStatusAny("copilot hooks", filepath.Join(root, ".github", "hooks", "kern-pretooluse.json"), filepath.Join(globalHomeDir(), ".copilot", "hooks", "kern-pretooluse.json")))
 	out = append(out, fileStatus(filepath.Join(homeConfig(".codex", "hooks.json")("")), "codex hooks"))
 	out = append(out, fileStatus(filepath.Join(homeConfig(".qoder", "settings.json")("")), "qoder hooks"))
+	out = append(out, fileStatus(continueSettingsPath(), "continue hooks"))
+	out = append(out, fileStatus(kiroHooksPath(), "kiro hooks"))
 	out = append(out, fileStatusAny("antigravity hooks", filepath.Join(root, ".agents", "hooks.json"), filepath.Join(globalHomeDir(), ".gemini", "config", "hooks.json")))
 	out = append(out, checkGlobalGitHooks())
 
@@ -378,6 +397,12 @@ func WireWith(root string, agents []string, detect bool, global bool, opts WireO
 		}
 		if globalEnabled("qoder") {
 			out = append(out, wireQoderHooks(root))
+		}
+		if globalEnabled("continue") {
+			out = append(out, wireContinueHooks())
+		}
+		if globalEnabled("kiro") {
+			out = append(out, wireKiroHooks())
 		}
 	}
 	out = append(out, gitignoreGenerated(root))

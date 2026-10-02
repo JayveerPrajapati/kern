@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/JayveerPrajapati/kern/internal/strutil"
 )
 
 func TestMergePrependPreservesOtherContent(t *testing.T) {
@@ -64,6 +66,64 @@ func TestRemoveKernSection(t *testing.T) {
 	// Kern at EOF: remove through end.
 	if got := removeKernSection("# kern usage rules\n\nold"); got != "" {
 		t.Fatalf("expected empty, got %q", got)
+	}
+}
+
+// TestRemoveKernSectionMultipleBlocks pins the F15 fix: repeated `kern setup
+// --global` runs used to accumulate one "# kern usage rules" block per run
+// because a single-pass removal left earlier blocks in place. Every block
+// must be removed, and the surrounding content preserved.
+func TestRemoveKernSectionMultipleBlocks(t *testing.T) {
+	in := "# kern usage rules\n\noldest\n\n# user notes\n\nkeep me\n\n# kern usage rules\n\nmiddle\n\n# more user\n\nstill here\n\n# kern usage rules\n\nnewest\n"
+	got := removeKernSection(in)
+	if strings.Contains(got, "# kern usage rules") {
+		t.Fatalf("kern block still present after multi-block removal:\n%s", got)
+	}
+	for _, want := range []string{"# user notes", "keep me", "# more user", "still here"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("user content %q lost during multi-block removal:\n%s", want, got)
+		}
+	}
+	// mergeAppend across three accumulated blocks converges to one fresh block.
+	merged := mergeAppend(in, "# kern usage rules\n\nfresh\n")
+	if strings.Count(merged, "# kern usage rules") != 1 {
+		t.Fatalf("mergeAppend did not converge to a single kern block:\n%s", merged)
+	}
+	if !strings.Contains(merged, "fresh") || !strings.Contains(merged, "keep me") {
+		t.Fatalf("mergeAppend lost fresh or user content:\n%s", merged)
+	}
+}
+
+// TestMergeCrossStripsMarkedBlock pins the F15 cross-format fix: writeGlobal
+// Claude/AGENTS (unmarked "# kern usage rules" blocks) and `kern setup
+// --global-rules` (marker-delimited block) target the same global files, so
+// each writer must strip the OTHER format or the file stacks two coexisting
+// kern sections.
+func TestMergeCrossStripsMarkedBlock(t *testing.T) {
+	marked := globalRulesMarkerOpen + "\n# kern usage rules\n\nmarked\n" + globalRulesMarkerClose + "\n"
+	unmarked := "# kern usage rules\n\nunmarked\n"
+	existing := "# user header\n\n" + unmarked + marked + "# user footer\n"
+
+	// The marked-block writer path (wireGlobalRulesFile) must drop unmarked blocks.
+	cleaned := strutil.RemoveMarkedBlock(existing, globalRulesMarkerOpen, globalRulesMarkerClose)
+	cleaned = removeKernSection(cleaned)
+	if strings.Contains(cleaned, "unmarked") || strings.Contains(cleaned, globalRulesMarkerOpen) {
+		t.Fatalf("marked-block writer left the other format behind:\n%s", cleaned)
+	}
+	for _, want := range []string{"# user header", "# user footer"} {
+		if !strings.Contains(cleaned, want) {
+			t.Fatalf("user content %q lost in marked-block path:\n%s", want, cleaned)
+		}
+	}
+
+	// The unmarked writer paths (writeGlobalClaude/writeGlobalAGENTS) must drop marked blocks.
+	unmarkedPath := mergeAppend(existing, "# kern usage rules\n\nfresh\n")
+	if strings.Contains(unmarkedPath, globalRulesMarkerOpen) || strings.Count(unmarkedPath, "# kern usage rules") != 1 {
+		t.Fatalf("unmarked writer left the marked block behind:\n%s", unmarkedPath)
+	}
+	prependPath := mergePrepend(existing, "# kern usage rules\n\nfresh\n")
+	if strings.Contains(prependPath, globalRulesMarkerOpen) || strings.Count(prependPath, "# kern usage rules") != 1 {
+		t.Fatalf("prepend writer left the marked block behind:\n%s", prependPath)
 	}
 }
 

@@ -74,7 +74,7 @@ func thinAGENTSmd(wired string) string {
 		"Wired agents: " + wired,
 		"kern is installed for this repo — call `kern_meta` FIRST for everything; it routes to the right kern_* tool.",
 		"On opencode, built-in read/glob/grep/bash route to kern via the plugin shadows.",
-		"Set KERN_MCP_FULL=1 for the full 139-tool catalog (KERN_MCP_PHASE for a phase subset).",
+		"Set KERN_MCP_FULL=1 for the full 117-tool catalog (KERN_MCP_PHASE for a phase subset).",
 	}, "\n") + "\n"
 }
 

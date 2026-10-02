@@ -1,5 +1,5 @@
 // Package gates is the authoritative registry of Blueprint's phase gates
-// (G0-G39, G10 retired). A gate is a capability milestone backed by at least one test that
+// (G0-G39; G10, G37, G38 retired — 37 active). A gate is a capability milestone backed by at least one test that
 // proves the capability. The registry is compiled into the binary (NOT a
 // manifest file), so `blueprint doctor --json` reads it with no file I/O and
 // it can never drift from the code that ships it.
@@ -41,8 +41,8 @@ type Gate struct {
 	Package string
 }
 
-// Registry is the complete, ordered list of all 39 phase gates, G0 through
-// G39 (G10 retired). It is the single source of truth for gate inventory; docs/gates.md is
+// Registry is the complete, ordered list of all 37 active phase gates, G0 through
+// G39 (G10, G37, G38 retired). It is the single source of truth for gate inventory; docs/gates.md is
 // generated from it by hand and must stay in sync (the orphan test checks the
 // test-file mapping, and TestRegistryShape pins the count and IDs).
 var Registry = []Gate{

@@ -62,6 +62,7 @@ func Run(root string) []Finding {
 	out = append(out, checkRuntime(root))
 	out = append(out, checkOllama())
 	out = append(out, checkStats())
+	out = append(out, checkAdoption(root))
 	return out
 }
 
@@ -421,7 +422,12 @@ func checkCache() Finding {
 }
 
 func checkWiring(root string) []Finding {
-	return wiringFindings(setup.Check(root))
+	// DetectAgents must feed the detected set as well: it consults binaries
+	// on PATH (e.g. codex) and home/project markers, which no instruction-file
+	// status can express. Without it, doctor reports "codex not detected" for
+	// a genuinely installed and wired codex (its hook config carries no
+	// " (detected)" status because codex has no instructionFiles entry).
+	return wiringFindings(setup.Check(root), setup.DetectAgents(root))
 }
 
 // wiringFindings renders setup.Status entries as doctor findings with three
@@ -430,13 +436,16 @@ func checkWiring(root string) []Finding {
 // (global)" for each global plugin location), a "registered" claim is only
 // trusted when the agent is actually detected, and a "(detected) not
 // present" note is reworded so it does not read as "agent not installed".
-func wiringFindings(sts []setup.Status) []Finding {
+func wiringFindings(sts []setup.Status, detectedAgents []string) []Finding {
 	// Which agents did the detection pass actually find? A "registered"
 	// claim from a config-presence check is only trustworthy when the agent
 	// itself is present: pairing "[ok] claude MCP registered" with "[warn]
 	// claude (detected) not present" reads as a contradiction, so the
 	// registration claim must not be made for an undetected agent.
 	detected := map[string]bool{}
+	for _, name := range detectedAgents {
+		detected[name] = true
+	}
 	for _, s := range sts {
 		if name, ok := strings.CutSuffix(s.Agent, " (detected)"); ok {
 			detected[name] = true

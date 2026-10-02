@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/JayveerPrajapati/kern/internal/strutil"
 )
 
 // globalHomeDir resolves the user's home directory. It is a variable so tests
@@ -72,7 +74,9 @@ func WireGlobal(agents []string) []Status {
 
 // writeGlobalAGENTS merges the kern-first block into ~/AGENTS.md. An existing
 // kern section is removed and the fresh block prepended at the top, preserving
-// all other content. The merge is idempotent.
+// all other content. The merge is idempotent. Both managed formats are
+// stripped (unmarked "# kern usage rules" blocks + the marker-delimited block
+// from `kern setup --global-rules`) so the file converges to one kern section.
 func writeGlobalAGENTS() Status {
 	path := globalAGENTSPath()
 	kern, err := rulesFS.ReadFile("assets/AGENTS.md")
@@ -83,6 +87,7 @@ func writeGlobalAGENTS() Status {
 	if b, rerr := os.ReadFile(path); rerr == nil {
 		existing = string(b)
 	}
+	existing = strutil.RemoveMarkedBlock(existing, globalRulesMarkerOpen, globalRulesMarkerClose)
 	final := mergePrepend(existing, string(kern))
 	if existing != "" && final == existing {
 		return Status{Agent: "global-AGENTS.md", Installed: true, Path: path, Note: "kern-first policy already present"}
@@ -114,6 +119,12 @@ func writeGlobalClaude() Status {
 	if b, rerr := os.ReadFile(path); rerr == nil {
 		existing = string(b)
 	}
+	// Strip BOTH managed formats so the file converges to a single kern
+	// section: the unmarked "# kern usage rules" blocks (this writer's own
+	// output, possibly accumulated across old runs) AND the marker-delimited
+	// block written by `kern setup --global-rules` (F15 cross-format fix —
+	// without it the two writers stack two coexisting kern sections).
+	existing = strutil.RemoveMarkedBlock(existing, globalRulesMarkerOpen, globalRulesMarkerClose)
 	final := mergeAppend(existing, string(kern))
 	if existing != "" && final == existing {
 		return Status{Agent: "claude-global", Installed: true, Path: path, Note: "kern-first policy already present"}
@@ -192,19 +203,24 @@ func backupFile(path string) error {
 	return os.WriteFile(path+".bak."+ts, b, mode)
 }
 
-// removeKernSection strips any "kern usage rules" block from s, matching from
-// the "# kern usage rules" header to the next level-1 header or EOF. Returns s
-// unchanged when no kern block is present.
+// removeKernSection removes EVERY "# kern usage rules" block from s (each
+// block runs from the "# kern usage rules" header to the next level-1 header
+// or EOF), preserving all other content. Looping is required: repeated
+// `kern setup --global` runs used to accumulate one block per run because a
+// single-pass removal left earlier blocks in place (F15). Returns s unchanged
+// when no kern block is present.
 func removeKernSection(s string) string {
-	idx := strings.Index(s, "# kern usage rules")
-	if idx < 0 {
-		return s
+	for {
+		idx := strings.Index(s, "# kern usage rules")
+		if idx < 0 {
+			return s
+		}
+		end := len(s)
+		if next := strings.Index(s[idx+1:], "\n# "); next >= 0 {
+			end = idx + 1 + next + 1
+		}
+		s = s[:idx] + s[end:]
 	}
-	end := len(s)
-	if next := strings.Index(s[idx+1:], "\n# "); next >= 0 {
-		end = idx + 1 + next + 1
-	}
-	return s[:idx] + s[end:]
 }
 
 // mergePrepend removes any existing kern section from existing and prepends
