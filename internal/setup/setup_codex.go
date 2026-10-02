@@ -29,6 +29,12 @@ func wireCodex(bin string) Status {
 		entry := "\n[mcp_servers.kern]\ncommand = \"" + strings.ReplaceAll(bin, `\`, `\\`) + "\"\n\n[mcp_servers.kern.env]\nKERN_ALLOW_EXEC = \"1\"\n"
 		updated += entry
 		changed = true
+	} else if !strings.Contains(content, "[mcp_servers.kern.env]") {
+		// Upgrade path (F14e): an existing kern entry written before the env
+		// block existed must gain it, so exec is enabled for the codex MCP
+		// server exactly like every other kern-written host config.
+		updated += "\n[mcp_servers.kern.env]\nKERN_ALLOW_EXEC = \"1\"\n"
+		changed = true
 	}
 	updated, featuresChanged := ensureCodexFeatures(path, updated)
 	changed = changed || featuresChanged

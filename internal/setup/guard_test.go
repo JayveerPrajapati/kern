@@ -3,6 +3,7 @@ package setup
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -48,7 +49,33 @@ func runGuard(t *testing.T, script, stdin string, env []string) (int, string) {
 // unparseable payloads must pass through with exit 0.
 func TestKernGuardScript(t *testing.T) {
 	script := writeGuardScriptFile(t)
-
+	// Fixture files for the simple-read exemption matrix: non-code (raw),
+	// small code (governed — size is irrelevant), code >=2KB (governed), and
+	// .hh (governed since the guard's code-extension list matches the
+	// plugin's, which includes hh/kts/cljs).
+	dir := t.TempDir()
+	readme := filepath.Join(dir, "README.md")
+	if err := os.WriteFile(readme, []byte("# readme\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	smallGo := filepath.Join(dir, "small.go")
+	if err := os.WriteFile(smallGo, []byte("package main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	bigGo := filepath.Join(dir, "big.go")
+	if err := os.WriteFile(bigGo, []byte(strings.Repeat("package main\n", 400)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if st, _ := os.Stat(bigGo); st.Size() < 2048 {
+		t.Fatalf("fixture big.go is %d bytes, need >=2048", st.Size())
+	}
+	bigHh := filepath.Join(dir, "big.hh")
+	if err := os.WriteFile(bigHh, []byte(strings.Repeat("// header\n", 600)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if st, _ := os.Stat(bigHh); st.Size() < 2048 {
+		t.Fatalf("fixture big.hh is %d bytes, need >=2048", st.Size())
+	}
 	cases := []struct {
 		name       string
 		stdin      string
@@ -178,6 +205,22 @@ func TestKernGuardScript(t *testing.T) {
 			wantStderr: nil,
 		},
 		{
+			name:     "antigravity grep_search blocked",
+			stdin:    `{"tool_name":"grep_search"}`,
+			wantExit: 2,
+			wantStderr: []string{
+				"kern_ast_search",
+			},
+		},
+		{
+			name:     "antigravity find_by_name blocked",
+			stdin:    `{"tool_name":"find_by_name"}`,
+			wantExit: 2,
+			wantStderr: []string{
+				"kern_project_map",
+			},
+		},
+		{
 			name:       "empty stdin passes through",
 			stdin:      "",
 			wantExit:   0,
@@ -189,6 +232,57 @@ func TestKernGuardScript(t *testing.T) {
 			wantExit:   0,
 			wantStderr: nil,
 		},
+		// --- simple-command exemption matrix (dcd4138 refinement) ---
+		// Trivial exact-token commands run raw.
+		{name: "trivial pwd allowed", stdin: `{"tool_name":"bash","tool_input":{"command":"pwd"}}`, wantExit: 0, wantStderr: nil},
+		{name: "trivial true allowed", stdin: `{"tool_name":"bash","tool_input":{"command":"true"}}`, wantExit: 0, wantStderr: nil},
+		{name: "trivial whoami allowed", stdin: `{"tool_name":"bash","tool_input":{"command":"whoami"}}`, wantExit: 0, wantStderr: nil},
+		{name: "trivial date allowed", stdin: `{"tool_name":"bash","tool_input":{"command":"date -u"}}`, wantExit: 0, wantStderr: nil},
+		{name: "trivial echo allowed", stdin: `{"tool_name":"bash","tool_input":{"command":"echo hello"}}`, wantExit: 0, wantStderr: nil},
+		{name: "trivial ls allowed", stdin: `{"tool_name":"bash","tool_input":{"command":"ls -la"}}`, wantExit: 0, wantStderr: nil},
+		{name: "trivial which allowed", stdin: `{"tool_name":"bash","tool_input":{"command":"which gcc"}}`, wantExit: 0, wantStderr: nil},
+		// git status (any args) and git log WITHOUT patch flags run raw.
+		{name: "git status allowed", stdin: `{"tool_name":"bash","tool_input":{"command":"git status"}}`, wantExit: 0, wantStderr: nil},
+		{name: "git status --short allowed", stdin: `{"tool_name":"bash","tool_input":{"command":"git status --short"}}`, wantExit: 0, wantStderr: nil},
+		{name: "git log allowed", stdin: `{"tool_name":"bash","tool_input":{"command":"git log"}}`, wantExit: 0, wantStderr: nil},
+		{name: "git log --oneline allowed", stdin: `{"tool_name":"bash","tool_input":{"command":"git log --oneline"}}`, wantExit: 0, wantStderr: nil},
+		{name: "git log --pretty allowed", stdin: `{"tool_name":"bash","tool_input":{"command":"git log --pretty=oneline"}}`, wantExit: 0, wantStderr: nil},
+		// git log with patch-emitting flags emits file content — governed.
+		{name: "git log -p blocked", stdin: `{"tool_name":"bash","tool_input":{"command":"git log -p"}}`, wantExit: 2, wantStderr: []string{"kern_validate"}},
+		{name: "git log --patch blocked", stdin: `{"tool_name":"bash","tool_input":{"command":"git log --patch"}}`, wantExit: 2, wantStderr: []string{"kern_validate"}},
+		{name: "git log -u blocked", stdin: `{"tool_name":"bash","tool_input":{"command":"git log -u"}}`, wantExit: 2, wantStderr: []string{"kern_validate"}},
+		{name: "git log --raw blocked", stdin: `{"tool_name":"bash","tool_input":{"command":"git log --raw"}}`, wantExit: 2, wantStderr: []string{"kern_validate"}},
+		{name: "git log --oneline -p blocked", stdin: `{"tool_name":"bash","tool_input":{"command":"git log --oneline -p"}}`, wantExit: 2, wantStderr: []string{"kern_validate"}},
+		// git diff/show/blame emit file content — governed, no longer exempt.
+		{name: "git diff blocked", stdin: `{"tool_name":"bash","tool_input":{"command":"git diff"}}`, wantExit: 2, wantStderr: []string{"kern_validate"}},
+		{name: "git show blocked", stdin: `{"tool_name":"bash","tool_input":{"command":"git show HEAD:main.go"}}`, wantExit: 2, wantStderr: []string{"kern_validate"}},
+		{name: "git blame blocked", stdin: `{"tool_name":"bash","tool_input":{"command":"git blame file.go"}}`, wantExit: 2, wantStderr: []string{"kern_validate"}},
+		// Prefix lookalikes are NOT exempt (exact first-token matching).
+		{name: "pwd123 blocked", stdin: `{"tool_name":"bash","tool_input":{"command":"pwd123"}}`, wantExit: 2, wantStderr: []string{"kern_validate"}},
+		{name: "git statusX blocked", stdin: `{"tool_name":"bash","tool_input":{"command":"git statusX"}}`, wantExit: 2, wantStderr: []string{"kern_validate"}},
+		// $ anywhere in the command → non-simple.
+		{name: "echo $HOME blocked", stdin: `{"tool_name":"bash","tool_input":{"command":"echo $HOME"}}`, wantExit: 2, wantStderr: []string{"kern_validate"}},
+		// Newline-joined compounds bypassed the old predicate — must be governed.
+		{name: "pwd newline make blocked", stdin: "{\"tool_name\":\"bash\",\"tool_input\":{\"command\":\"pwd\\nmake\"}}", wantExit: 2, wantStderr: []string{"kern_validate"}},
+		{name: "git status newline rm blocked", stdin: "{\"tool_name\":\"bash\",\"tool_input\":{\"command\":\"git status\\nrm -rf /tmp/x\"}}", wantExit: 2, wantStderr: []string{"kern_validate"}},
+		// Pipe / substitution / redirection / compound operators — governed.
+		{name: "pipe blocked", stdin: `{"tool_name":"bash","tool_input":{"command":"git log --oneline | head -5"}}`, wantExit: 2, wantStderr: []string{"kern_validate"}},
+		{name: "substitution blocked", stdin: `{"tool_name":"bash","tool_input":{"command":"echo $(whoami)"}}`, wantExit: 2, wantStderr: []string{"kern_validate"}},
+		{name: "semicolon compound blocked", stdin: `{"tool_name":"bash","tool_input":{"command":"ls; rm -rf /tmp/x"}}`, wantExit: 2, wantStderr: []string{"kern_validate"}},
+		{name: "redirect blocked", stdin: `{"tool_name":"bash","tool_input":{"command":"grep foo file.go > out.txt"}}`, wantExit: 2, wantStderr: []string{"kern_validate"}},
+		// Code reads via bash stay governed.
+		{name: "sed code read blocked", stdin: `{"tool_name":"bash","tool_input":{"command":"sed -n '1,5p' file.go"}}`, wantExit: 2, wantStderr: []string{"kern_validate"}},
+		{name: "cat code read blocked", stdin: `{"tool_name":"bash","tool_input":{"command":"cat source.go"}}`, wantExit: 2, wantStderr: []string{"kern_validate"}},
+		// Builds/tests/installs stay governed.
+		{name: "make blocked", stdin: `{"tool_name":"bash","tool_input":{"command":"make"}}`, wantExit: 2, wantStderr: []string{"kern_validate"}},
+		{name: "go test blocked", stdin: `{"tool_name":"bash","tool_input":{"command":"go test ./..."}}`, wantExit: 2, wantStderr: []string{"kern_validate"}},
+		// --- simple-read exemption matrix ---
+		{name: "read non-code allowed", stdin: fmt.Sprintf(`{"tool_name":"Read","tool_input":{"file_path":%q}}`, readme), wantExit: 0, wantStderr: nil},
+		// A small (<2KB) code file is part of the symbol context — always governed.
+		{name: "read small code file governed", stdin: fmt.Sprintf(`{"tool_name":"Read","tool_input":{"file_path":%q}}`, smallGo), wantExit: 2, wantStderr: []string{"kern_compact_file"}},
+		{name: "read big code file blocked", stdin: fmt.Sprintf(`{"tool_name":"Read","tool_input":{"file_path":%q}}`, bigGo), wantExit: 2, wantStderr: []string{"kern_compact_file"}},
+		{name: "read big hh blocked", stdin: fmt.Sprintf(`{"tool_name":"Read","tool_input":{"file_path":%q}}`, bigHh), wantExit: 2, wantStderr: []string{"kern_compact_file"}},
+		{name: "read missing code file blocked", stdin: fmt.Sprintf(`{"tool_name":"Read","tool_input":{"file_path":%q}}`, filepath.Join(dir, "nope.go")), wantExit: 2, wantStderr: []string{"kern_compact_file"}},
 	}
 
 	for _, tc := range cases {

@@ -43,6 +43,12 @@ func TestCheckParityReleaseTagAccepted(t *testing.T) {
 	orig := version.Version
 	defer func() { version.Version = orig }()
 	root := repoRoot(t)
+	// Worktree-safety: the closed loop's verify stage runs `go test` inside
+	// sandbox worktrees that exclude .git by design; checkParity cannot
+	// compare a stamp without git metadata and correctly warns. Skip there.
+	if shortHashAt(root) == "" {
+		t.Skip("not a git checkout — checkParity needs git metadata (loop worktrees exclude .git)")
+	}
 
 	version.Version = "v0.9.9.1"
 	if f := checkParity(root); f.Level != "ok" || !strings.Contains(f.Detail, "release build") {
@@ -648,7 +654,7 @@ func TestWiringFindingsDedupesGlobalPlugin(t *testing.T) {
 		{Agent: "opencode plugin (global)", Installed: true, Path: "/home/u/.opencode/plugins/kern.ts", Note: "kern entry present"},
 		{Agent: "AGENTS.md rules", Installed: true, Path: "/repo/AGENTS.md", Note: "kern entry present"},
 	}
-	findings := wiringFindings(sts)
+	findings := wiringFindings(sts, nil)
 	count := 0
 	for _, f := range findings {
 		if f.Check == "opencode plugin (global)" {
@@ -673,7 +679,7 @@ func TestWiringFindingsRegisteredOnlyWhenDetected(t *testing.T) {
 	sts := []setup.Status{
 		{Agent: "claude", Installed: true, Path: "/usr/local/bin/claude", Note: "kern MCP registered (project or user scope)"},
 	}
-	findings := wiringFindings(sts)
+	findings := wiringFindings(sts, nil)
 	for _, f := range findings {
 		if f.Check == "claude" {
 			if f.Level != "warn" {
@@ -690,7 +696,7 @@ func TestWiringFindingsRegisteredOnlyWhenDetected(t *testing.T) {
 		{Agent: "claude", Installed: true, Path: "/usr/local/bin/claude", Note: "kern MCP registered (project or user scope)"},
 		{Agent: "claude (detected)", Installed: true, Path: "/repo/CLAUDE.md", Note: "kern-first policy present"},
 	}
-	for _, f := range wiringFindings(sts) {
+	for _, f := range wiringFindings(sts, nil) {
 		if f.Check == "claude" && f.Level != "ok" {
 			t.Fatalf("detected-agent registration level = %s, want ok", f.Level)
 		}
@@ -706,7 +712,7 @@ func TestWiringFindingsRewordsDetectedNotPresent(t *testing.T) {
 		{Agent: "claude", Installed: true, Path: "/usr/local/bin/claude", Note: "kern MCP registered (project or user scope)"},
 		{Agent: "claude (detected)", Installed: false, Path: "/repo/CLAUDE.md", Note: "not present"},
 	}
-	for _, f := range wiringFindings(sts) {
+	for _, f := range wiringFindings(sts, nil) {
 		if f.Check == "claude (detected)" {
 			if strings.Contains(f.Detail, "not present") && !strings.Contains(f.Detail, "policy not present") {
 				t.Fatalf("reworded detail still reads as 'not present': %q", f.Detail)

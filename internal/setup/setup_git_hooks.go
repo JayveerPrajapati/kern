@@ -26,7 +26,7 @@ func wireGlobalGitHooks() Status {
 		Agent:     "global-git-hooks",
 		Installed: true,
 		Path:      dir,
-		// Honest side-effect note (dogfooding A1-N4): the global hooks run on
+		// Side-effect note: the global hooks run on
 		// EVERY commit in every repo — pre-commit gates via `kern check
 		// --staged` (governance audit chain + .blueprint/audit) and
 		// post-commit stores the diff into project memory. Users must not

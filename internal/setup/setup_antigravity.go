@@ -94,7 +94,7 @@ func mergeAntigravityHooks(path string, guardPath string) error {
 		"enabled": true,
 		"PreToolUse": []any{
 			map[string]any{
-				"matcher": "run_command|view_file",
+				"matcher": "run_command|view_file|grep_search|find_by_name",
 				"hooks": []any{
 					map[string]any{
 						"type":    "command",
