@@ -20,6 +20,7 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/lenses"
 	"github.com/JayveerPrajapati/kern/internal/profiles"
 	"github.com/JayveerPrajapati/kern/internal/runtime"
+	"github.com/JayveerPrajapati/kern/internal/tasklife"
 	"github.com/JayveerPrajapati/kern/internal/whatif"
 )
 
@@ -192,7 +193,7 @@ func cliCommandName(change string) string {
 }
 
 // planLayout describes the target repository layout detected for adaptive
-// plan rendering (dogfooding F6): kern-style CLI conventions are only emitted
+// plan rendering: kern-style CLI conventions are only emitted
 // when the target repo actually has them, so a plan never leaks kern's own
 // structure into a foreign codebase.
 type planLayout struct {
@@ -229,11 +230,11 @@ func detectPlanLayout(root string) planLayout {
 func BuildStatelessPlan(change string, pkt domain.ContextPacket, root string) domain.Plan {
 	layout := detectPlanLayout(root)
 	kernStyle := layout.kernCLI && layout.changelog && layout.gomodRoot
-	dir, file, grounded := resolvePlanTarget(change, root)
+	dir, file, grounded := tasklife.ResolvePlanTarget(change, root)
 
 	plan := domain.Plan{
 		Objective: change,
-		Risk:      riskScopedToTarget(pkt, dir),
+		Risk:      tasklife.RiskScopedToTarget(pkt, dir),
 	}
 	if whatif.IsNetNewFeature(change) {
 		plan.Scope = "net-new feature (no existing components affected)"
@@ -259,7 +260,7 @@ func BuildStatelessPlan(change string, pkt domain.ContextPacket, root string) do
 		case grounded:
 			// Grounded in the named target: real file names in the target
 			// package instead of the generic template.
-			plan.ImplementationSteps = append(netNewGroundedSteps(change, dir, file), statelessTestStep(dir, file))
+			plan.ImplementationSteps = append(tasklife.NetNewGroundedSteps(change, dir, file), tasklife.StatelessTestStep(dir, file))
 			plan.ImplementationSteps = append(plan.ImplementationSteps, statelessDocStep(layout))
 		default:
 			plan.ImplementationSteps = []string{

@@ -16,7 +16,7 @@
 // (WhatIf(SplitService) → ImpactReport attached, non-empty risk/text)
 // D. Incident           — N+1 regression                 → incident → PR
 // consolidates: TestMVP3GateEndToEnd
-// (TaskService.InvestigateIncident → task + incident + remediation
+// (tasklife.TaskService.InvestigateIncident → task + incident + remediation
 // artifact)
 // E. Resume             — terminate mid-task             → resume → same state
 // consolidates: internal/agent TestRestartResume
@@ -43,6 +43,7 @@
 package app
 
 import (
+	"github.com/JayveerPrajapati/kern/internal/tasklife"
 	"strings"
 	"sync"
 	"testing"
@@ -58,16 +59,16 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/whatif"
 )
 
-// matrixOnce lazily builds the shared Platform/TaskService. Building indexes
+// matrixOnce lazily builds the shared Platform/tasklife.TaskService. Building indexes
 // the repo, so we only do it if a non-skipped subtest actually needs it.
 var (
 	matrixOnce    sync.Once
-	matrixTS      *TaskService
+	matrixTS      *tasklife.TaskService
 	matrixPlatErr error
 )
 
-// matrixPlatform returns the lazily-constructed shared Platform + TaskService.
-func matrixPlatform(t *testing.T) *TaskService {
+// matrixPlatform returns the lazily-constructed shared Platform + tasklife.TaskService.
+func matrixPlatform(t *testing.T) *tasklife.TaskService {
 	t.Helper()
 	matrixOnce.Do(func() {
 		p, err := New(testfixture.Repo(t))
@@ -75,7 +76,7 @@ func matrixPlatform(t *testing.T) *TaskService {
 			matrixPlatErr = err
 			return
 		}
-		matrixTS = NewTaskService(p, nil).WithAgentID("matrix")
+		matrixTS = tasklife.NewTaskService(p, nil).WithAgentID("matrix")
 	})
 	if matrixPlatErr != nil {
 		t.Fatalf("matrixPlatform New: %v", matrixPlatErr)

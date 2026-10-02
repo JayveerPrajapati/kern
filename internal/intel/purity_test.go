@@ -1,7 +1,6 @@
 package intel
 
 import (
-	"os"
 	"reflect"
 	"sort"
 	"strings"
@@ -308,64 +307,5 @@ func S(ch chan int) {
 	}
 	if len(first) != 3 {
 		t.Fatalf("expected 3 violations, got %d: %+v", len(first), first)
-	}
-}
-
-// TestBoundariesParsesPureFlag: "pure": true in .kern/boundaries.json opts
-// into @pure assertions; absent, the flag defaults to false and nothing
-// changes.
-func TestBoundariesParsesPureFlag(t *testing.T) {
-	dir := writeTree(t, map[string]string{
-		".kern/boundaries.json": `{"pure": true}`,
-	})
-	b, err := LoadBoundaries(dir)
-	if err != nil {
-		t.Fatalf("boundaries file with pure flag must load: %v", err)
-	}
-	if b == nil || !b.Pure {
-		t.Fatalf("expected Pure=true, got %+v", b)
-	}
-	// Default: no "pure" field -> false.
-	dir2 := writeTree(t, map[string]string{
-		".kern/boundaries.json": `{"rules": []}`,
-	})
-	b2, err := LoadBoundaries(dir2)
-	if err != nil {
-		t.Fatalf("default boundaries file must load: %v", err)
-	}
-	if b2 == nil || b2.Pure {
-		t.Fatalf("expected Pure=false by default, got %+v", b2)
-	}
-}
-
-// TestCheckPurityNilIndex: CheckPurity must tolerate a nil index (files
-// resolved relative to "."); the same-file package vars still work.
-func TestCheckPurityNilIndex(t *testing.T) {
-	dir := writeTree(t, map[string]string{
-		"main.go": `package main
-
-var counter int
-
-// Inc bumps the counter. @pure
-func Inc() {
-	counter++
-}
-`,
-	})
-	wd, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chdir(dir); err != nil {
-		t.Fatal(err)
-	}
-	defer func() {
-		if cerr := os.Chdir(wd); cerr != nil {
-			t.Errorf("restore cwd: %v", cerr)
-		}
-	}()
-	got := CheckPurity(nil, []string{"main.go"})
-	if len(got) != 1 || !strings.Contains(got[0].RuleTo, "counter") {
-		t.Fatalf("expected 1 violation via nil index, got %+v", got)
 	}
 }

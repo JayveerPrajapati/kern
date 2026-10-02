@@ -32,7 +32,7 @@ func isBundledAsset(rel string) bool {
 func LargeFunctions(ix *index.Index, minLines int) []LargeSymbol {
 	var out []LargeSymbol
 	for _, s := range ix.Symbols {
-		if isTestFile(s.File) {
+		if IsTestFile(s.File) {
 			continue
 		}
 		// Tool-generated scaffolding and bundled embed copies are not

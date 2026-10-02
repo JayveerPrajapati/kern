@@ -2,6 +2,7 @@ package app
 
 import (
 	"encoding/json"
+	"github.com/JayveerPrajapati/kern/internal/tasklife"
 	"os"
 	"path/filepath"
 	"testing"
@@ -97,7 +98,7 @@ func TestFlagshipVerticalSlice(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	ts := NewTaskService(p, nil).WithAgentID("test")
+	ts := tasklife.NewTaskService(p, nil).WithAgentID("test")
 	metrics := newLifecycleMetrics()
 
 	// --- Analyze (exact UserService request from fixture) ---
@@ -177,7 +178,7 @@ func TestSevenFailureDrill(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	ts := NewTaskService(p, nil).WithAgentID("test")
+	ts := tasklife.NewTaskService(p, nil).WithAgentID("test")
 
 	// 1. Unknown symbol analyze.
 	if _, _, err := ts.Analyze("NoSuchSymbolXYZ_000"); err == nil {

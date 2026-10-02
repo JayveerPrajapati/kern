@@ -1,6 +1,7 @@
 package app
 
 import (
+	"github.com/JayveerPrajapati/kern/internal/tasklife"
 	"path/filepath"
 	"testing"
 
@@ -23,7 +24,7 @@ func TestAnalyzeAttachesEvidenceClaims(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	ts := NewTaskService(p, nil).WithAgentID("test")
+	ts := tasklife.NewTaskService(p, nil).WithAgentID("test")
 
 	task, _, err := ts.Analyze("NewServer")
 	if err != nil {

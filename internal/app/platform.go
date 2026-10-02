@@ -35,13 +35,16 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/domain"
 	"github.com/JayveerPrajapati/kern/internal/eventbus"
 	"github.com/JayveerPrajapati/kern/internal/governance"
+	"github.com/JayveerPrajapati/kern/internal/guard"
 	"github.com/JayveerPrajapati/kern/internal/index"
 	"github.com/JayveerPrajapati/kern/internal/intel"
 	"github.com/JayveerPrajapati/kern/internal/memory"
 	"github.com/JayveerPrajapati/kern/internal/runtime"
 	"github.com/JayveerPrajapati/kern/internal/storage"
+	"github.com/JayveerPrajapati/kern/internal/tasklife"
 	tok "github.com/JayveerPrajapati/kern/internal/tokenize"
 	"github.com/JayveerPrajapati/kern/internal/twin"
+	"github.com/JayveerPrajapati/kern/internal/verdict"
 	"github.com/JayveerPrajapati/kern/internal/verification"
 	"github.com/JayveerPrajapati/kern/internal/whatif"
 )
@@ -63,6 +66,10 @@ type Platform struct {
 	rtSrc runtime.Source // optional runtime source for correlation/incident
 	bus   *eventbus.Bus  // optional event publisher; nil = no-op
 }
+
+// Compile-time assertion: *Platform satisfies the task cluster's platform
+// surface structurally (no method changes needed for the extraction).
+var _ tasklife.PlatformAPI = (*Platform)(nil)
 
 // WithBus attaches an optional event bus. When non-nil, Platform publishes
 // repository.indexed at construction and the verification engine publishes
@@ -324,7 +331,7 @@ func (p *Platform) Risk(change string) (domain.ContextPacket, string, error) {
 	if err != nil {
 		return domain.ContextPacket{}, "", fmt.Errorf("risk: %w", err)
 	}
-	return pkt, renderRiskText(change, pkt), nil
+	return pkt, tasklife.RenderRiskText(change, pkt), nil
 }
 
 // WhatIf simulates a hypothetical change against the knowledge graph and
@@ -345,13 +352,13 @@ func (p *Platform) WhatIf(kind whatif.ChangeKind, change, newTarget string) (wha
 	syms := make([]string, 0, len(imp.Affected)+1)
 	syms = append(syms, target)
 	syms = append(syms, imp.Affected...)
-	imp.Entities = attachWhatIfEntities(p.graph, syms)
+	imp.Entities = tasklife.AttachWhatIfEntities(p.graph, syms)
 	// What-if output previously omitted the architecture, memory,
 	// and runtime evidence dimensions. Populate them from the platform's own
 	// deterministic sources so the impact is complete.
 	populateWhatIfEvidence(p, &imp, target)
 	imp.Evidence = intel.AnchorLine(p.ix, target)
-	text := renderWhatIfText(kind, change, target, imp)
+	text := tasklife.RenderWhatIfText(kind, change, target, imp)
 	if fuzzy && text != "" {
 		// The requested symbol was fuzzy-resolved to a different one: surface
 		// the mapping so the substitution is never silent.
@@ -386,13 +393,13 @@ func populateWhatIfEvidence(p *Platform, imp *whatif.Impact, target string) {
 	// non-empty rule set is configured (same guard semantics as `kern guard`).
 	// A missing boundaries.json is fail-open — no rule set, no entries.
 	if p.ix != nil {
-		b, bErr := intel.LoadBoundaries(p.root)
+		b, bErr := guard.LoadBoundaries(p.root)
 		if bErr == nil {
 			if b == nil {
-				b = intel.InferBoundaries(p.ix)
+				b = guard.InferBoundaries(p.ix)
 			}
 			if b != nil && len(b.Rules) > 0 {
-				for _, v := range intel.CheckBoundaries(p.ix, b, imp.Files) {
+				for _, v := range guard.CheckBoundaries(p.ix, b, imp.Files) {
 					imp.ArchitectureViolations = append(imp.ArchitectureViolations,
 						fmt.Sprintf("boundary: %s -> %s forbidden by rule %s -> %s (%s)", v.CallerFile, v.CalleeFile, v.RuleFrom, v.RuleTo, v.CallerFile))
 				}
@@ -483,7 +490,7 @@ func (p *Platform) runtimeEvidenceFor(target string) []string {
 // kern_verify (MCP), and POST /v1/verify (REST). Options (e.g.
 // verification.FullTests for the complete test suite) are applied to a copy
 // of the shared engine so concurrent callers never race on engine state.
-func (p *Platform) Verify(types []string, opts ...verification.Option) verification.VerificationResult {
+func (p *Platform) Verify(types []string, opts ...verification.Option) verdict.VerificationResult {
 	if len(types) == 0 {
 		types = []string{"build", "test"}
 	}
@@ -585,7 +592,7 @@ func loadRuntimeSource(root string) runtime.Source {
 // policies for the context engine (empty rule set when none present).
 func loadBoundaryProvider(root string) func() []domain.Policy {
 	return func() []domain.Policy {
-		b, err := intel.LoadBoundaries(root)
+		b, err := guard.LoadBoundaries(root)
 		if err != nil {
 			return nil
 		}

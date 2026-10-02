@@ -64,3 +64,27 @@ func TestUserServiceFixtureBuildable(t *testing.T) {
 		t.Fatalf("fixture repo tests fail: %v\n%s", err, out)
 	}
 }
+
+// writeFile writes a file under a temp fixture tree (shared test helper;
+// duplicated from the tasklife copy so app-side tests stay self-contained).
+func writeFile(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", filepath.Dir(path), err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("write %s: %v", path, err)
+	}
+}
+
+// workflowFixtureRoot writes a minimal Go fixture so the platform can analyze
+// a symbol during workflow runs (duplicated from the tasklife copy so
+// app-side tests stay self-contained).
+func workflowFixtureRoot(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "go.mod"), "module fixture\n\ngo 1.21\n")
+	writeFile(t, filepath.Join(root, "main.go"),
+		"package main\n\n// NewServer returns a server.\nfunc NewServer() string { return \"s\" }\n")
+	return root
+}

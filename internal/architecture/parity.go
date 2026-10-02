@@ -25,8 +25,8 @@ import (
 const archDocRel = "ARCHITECTURE.md"
 
 // ledgerDocRel is the repo-root-relative path of part 2 of the machine-read
-// ledger: the per-subsystem allowed-deps column and the full changelog,
-// parsed by the same parity test and joined to part 1 by dir.
+// ledger: the per-subsystem allowed-deps column, parsed by the same parity
+// test and joined to part 1 by dir.
 const ledgerDocRel = "docs/architecture/ledger-details.md"
 
 // moduleRoot is the Go module import prefix; internal imports are resolved

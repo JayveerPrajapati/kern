@@ -1,6 +1,7 @@
 package app
 
 import (
+	"github.com/JayveerPrajapati/kern/internal/tasklife"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,7 +11,7 @@ import (
 // TestImpactStalenessBanner: the impact text output must carry the one-line
 // staleness banner when a file the report cites changed since the index was
 // built, and nothing when the index is fresh. The banner travels through
-// TaskService.Impact, which feeds the CLI (kern impact), the MCP tool
+// tasklife.TaskService.Impact, which feeds the CLI (kern impact), the MCP tool
 // (kern_impact) and the REST endpoint (/v1/impact).
 func TestImpactStalenessBanner(t *testing.T) {
 	root := t.TempDir()
@@ -21,7 +22,7 @@ func TestImpactStalenessBanner(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	ts := NewTaskService(p, nil).WithAgentID("test")
+	ts := tasklife.NewTaskService(p, nil).WithAgentID("test")
 
 	// Fresh index: no banner.
 	_, _, text, err := ts.Impact("Greet")

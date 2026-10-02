@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"github.com/JayveerPrajapati/kern/internal/tasklife"
 	"testing"
 
 	"github.com/JayveerPrajapati/kern/internal/domain"
@@ -9,12 +10,12 @@ import (
 )
 
 // TestRunLoopRoutesThroughService verifies kern_loop now routes through
-// TaskService.RunLoop : an authoritative Task is created and a loop
+// tasklife.TaskService.RunLoop : an authoritative Task is created and a loop
 // Result is returned, so the MCP handler no longer orchestrates the loop engine
 // inline. The loop itself runs build/test commands, so the assertion is about
 // routing and task-tracking, not the loop's internal outcome.
 func TestRunLoopRoutesThroughService(t *testing.T) {
-	ts := NewTaskService(&Platform{root: t.TempDir()}, nil)
+	ts := tasklife.NewTaskService(&Platform{root: t.TempDir()}, nil)
 
 	task, res, _ := ts.RunLoop("explain the caching strategy", loop.L0)
 
@@ -44,7 +45,7 @@ func TestRunLoopRoutesThroughService(t *testing.T) {
 // Result.LearnedConstraints must be populated — proof the extractor is not
 // left nil.
 func TestRunLoopWiresLearningByDefault(t *testing.T) {
-	ts := NewTaskService(&Platform{root: t.TempDir()}, nil)
+	ts := tasklife.NewTaskService(&Platform{root: t.TempDir()}, nil)
 	task, res, err := ts.RunLoopContext(context.Background(), "explain the caching strategy", loop.L1)
 	if err != nil {
 		t.Fatalf("RunLoopContext: %v", err)
@@ -62,7 +63,7 @@ func TestRunLoopWiresLearningByDefault(t *testing.T) {
 // must still be observable — the created Task is marked FAILED (terminal), not
 // silently abandoned.
 func TestRunLoopContextCancelled(t *testing.T) {
-	ts := NewTaskService(&Platform{root: t.TempDir()}, nil)
+	ts := tasklife.NewTaskService(&Platform{root: t.TempDir()}, nil)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // cancelled before the run starts
@@ -83,14 +84,14 @@ func TestRunLoopContextCancelled(t *testing.T) {
 }
 
 // TestRunDoRoutesThroughService verifies `kern do` now routes through
-// TaskService.RunDo (autonomous loop): an authoritative Task is created and a
+// tasklife.TaskService.RunDo (autonomous loop): an authoritative Task is created and a
 // loop Result is returned, so the CLI no longer orchestrates the loop engine
 // (coder/planner/memory/flight) inline. The loop itself runs build/test
 // commands, so the assertion is about routing and task-tracking, not the
 // loop's internal outcome. L0 is used so the coder/planner stage gates (>= L2)
 // never invoke a live LLM.
 func TestRunDoRoutesThroughService(t *testing.T) {
-	ts := NewTaskService(&Platform{root: t.TempDir()}, nil)
+	ts := tasklife.NewTaskService(&Platform{root: t.TempDir()}, nil)
 
 	task, res, _ := ts.RunDo("explain the caching strategy", loop.L0)
 

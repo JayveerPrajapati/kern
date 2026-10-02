@@ -6,7 +6,7 @@ import (
 
 	"github.com/JayveerPrajapati/kern/internal/agent"
 	"github.com/JayveerPrajapati/kern/internal/domain"
-	"github.com/JayveerPrajapati/kern/internal/verification"
+	"github.com/JayveerPrajapati/kern/internal/verdict"
 )
 
 // TestContextQualityStaleAndDuplicateRatios verifies the
@@ -113,7 +113,7 @@ func TestBaselineComparisonFields(t *testing.T) {
 	task.ContextPacket = &domain.ContextPacket{TokenCount: 1000}
 	task.Steps = []agent.Step{{Index: 1, Action: "analyze"}, {Index: 2, Action: "code"}}
 	task.RetryCount = 1
-	task.Verification = &verification.VerificationResult{Verdict: verification.VerdictPass}
+	task.Verification = &verdict.VerificationResult{Verdict: verdict.VerdictPass}
 
 	b := CompareToBaseline(task)
 	if b.BaselineTokens != 4000 || b.KernTokens != 1000 {

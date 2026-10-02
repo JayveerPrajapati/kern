@@ -120,7 +120,7 @@ func nonCallSkipSet(f *ast.File) map[*ast.Ident]bool {
 func (r *nonCallRefIndex) productionFiles(name string) []string {
 	var out []string
 	for f := range r.byName[name] {
-		if !isTestFile(f) {
+		if !IsTestFile(f) {
 			out = append(out, f)
 		}
 	}

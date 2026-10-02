@@ -112,7 +112,7 @@ func Probe(ix *index.Index, task string, maxTokens int) *ProbeReport {
 			if c == r {
 				continue
 			}
-			if s, ok := meta[c]; ok && isTestFile(s.File) {
+			if s, ok := meta[c]; ok && IsTestFile(s.File) {
 				a.Tests = append(a.Tests, c)
 			}
 		}

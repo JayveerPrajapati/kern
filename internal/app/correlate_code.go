@@ -17,22 +17,8 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/domain"
 	"github.com/JayveerPrajapati/kern/internal/incident"
 	"github.com/JayveerPrajapati/kern/internal/runtime"
+	"github.com/JayveerPrajapati/kern/internal/tasklife"
 )
-
-// Correlation is the incident→twin→code correlation report for an alert:
-// the affected service, the existing runtime evidence, the twin-resolved
-// implicated source files and symbols, a deterministic confidence, and any
-// auto-attached heal playbook.
-type Correlation struct {
-	Alert             domain.Alert
-	AffectedService   string
-	RuntimeEvidence   []string // formatted runtime evidence (errors/deployments/chain)
-	ImplicatedFiles   []string // root-relative source files implicated by the service
-	ImplicatedSymbols []string // symbols defined in (or referenced by) the implicated code
-	Confidence        string   // "high" (exact service→code mapping) or "low" (heuristic)
-	PlaybookSignature string   // auto-attached heal playbook signature (empty = none)
-	PlaybookSteps     []string // auto-attached playbook steps
-}
 
 // CorrelateIncident resolves an alert to the affected service and derives
 // the implicated code (twin graph entities → source files → symbols),
@@ -40,10 +26,10 @@ type Correlation struct {
 // CLI `kern incident --correlate` and MCP kern_incident correlate=true share.
 // An unknown service yields a graceful empty correlation with confidence
 // "low", never an error.
-func CorrelateIncident(root string, alert domain.Alert) (Correlation, error) {
+func CorrelateIncident(root string, alert domain.Alert) (tasklife.Correlation, error) {
 	p, err := New(root)
 	if err != nil {
-		return Correlation{}, err
+		return tasklife.Correlation{}, err
 	}
 	return p.CorrelateCode(alert)
 }
@@ -51,7 +37,7 @@ func CorrelateIncident(root string, alert domain.Alert) (Correlation, error) {
 // CorrelateCode runs the incident→twin→code correlation on the platform's
 // twin-merged graph. The runtime dimension reuses the shared correlator so
 // every lane reasons over the same source/window as Correlate/Investigate.
-func (p *Platform) CorrelateCode(alert domain.Alert) (Correlation, error) {
+func (p *Platform) CorrelateCode(alert domain.Alert) (tasklife.Correlation, error) {
 	src := p.RuntimeSource()
 	if src == nil {
 		src = runtime.NewStore()
@@ -60,7 +46,7 @@ func (p *Platform) CorrelateCode(alert domain.Alert) (Correlation, error) {
 	corr := shared.Correlate(alert)
 	chain := shared.CorrelateChain(alert)
 
-	out := Correlation{
+	out := tasklife.Correlation{
 		Alert:           alert,
 		AffectedService: corr.AffectedService,
 	}

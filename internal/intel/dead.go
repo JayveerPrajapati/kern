@@ -72,7 +72,7 @@ func DeadCode(ix *index.Index) []DeadSymbol {
 			continue
 		}
 		full := s.FullName()
-		if isTestFile(s.File) || isEntryPoint(full) {
+		if IsTestFile(s.File) || isEntryPoint(full) {
 			continue
 		}
 		// A bare-identifier reference outside a call position means the symbol
@@ -93,7 +93,7 @@ func DeadCode(ix *index.Index) []DeadSymbol {
 		// Called only from tests: production-dead, test-alive.
 		testOnly := true
 		for _, c := range callers {
-			if f := fileMap[c]; f == "" || !isTestFile(f) {
+			if f := fileMap[c]; f == "" || !IsTestFile(f) {
 				testOnly = false
 				break
 			}

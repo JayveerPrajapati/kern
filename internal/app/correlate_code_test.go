@@ -1,6 +1,7 @@
 package app
 
 import (
+	"github.com/JayveerPrajapati/kern/internal/tasklife"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -109,7 +110,7 @@ func TestCorrelateIncidentAutoAttachesPlaybook(t *testing.T) {
 	}
 }
 
-// TestTaskServiceCorrelateCodeRendersReport: the TaskService lane renders the
+// TestTaskServiceCorrelateCodeRendersReport: the tasklife.TaskService lane renders the
 // correlation report (with the code section + playbook) on an authoritative
 // task, so the CLI/MCP surfaces share one render path.
 func TestTaskServiceCorrelateCodeRendersReport(t *testing.T) {
@@ -123,7 +124,7 @@ func TestTaskServiceCorrelateCodeRendersReport(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	ts := NewTaskService(p, nil).WithAgentID("test")
+	ts := tasklife.NewTaskService(p, nil).WithAgentID("test")
 	task, corr, text, err := ts.CorrelateCode(alert)
 	if err != nil {
 		t.Fatalf("CorrelateCode: %v", err)

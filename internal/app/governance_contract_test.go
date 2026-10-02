@@ -1,6 +1,7 @@
 package app
 
 import (
+	"github.com/JayveerPrajapati/kern/internal/tasklife"
 	"path/filepath"
 	"testing"
 
@@ -10,11 +11,11 @@ import (
 )
 
 // TestAuditEntriesReadsPersistedStore verifies AuditEntries reads the persisted
-// trail (not just the in-memory AuditLog): a fresh TaskService process must see
+// trail (not just the in-memory AuditLog): a fresh tasklife.TaskService process must see
 // entries written by a prior process, which the MCP kern_audit tool depends on.
 func TestAuditEntriesReadsPersistedStore(t *testing.T) {
 	root := t.TempDir()
-	ts := NewTaskService(&Platform{root: root}, nil)
+	ts := tasklife.NewTaskService(&Platform{root: root}, nil)
 
 	// Simulate a prior process: write entries to the persisted store directly.
 	log := governance.NewAuditLog().WithStore(storage.NewLocal(filepath.Join(root, ".kern", "audit")))
@@ -66,7 +67,7 @@ func TestAuditEntriesReadsPersistedStore(t *testing.T) {
 // what the CLI `kern approve` and the MCP kern_approve tool rely on.
 func TestPendingApprovalsAndResolveRoundTrip(t *testing.T) {
 	root := t.TempDir()
-	ts := NewTaskService(&Platform{root: root}, nil)
+	ts := tasklife.NewTaskService(&Platform{root: root}, nil)
 
 	// Seed a pending approval the way a workflow/deploy gate would.
 	store := governance.NewFileStore(root)

@@ -1,6 +1,7 @@
 package app
 
 import (
+	"github.com/JayveerPrajapati/kern/internal/tasklife"
 	"strings"
 	"testing"
 
@@ -13,8 +14,8 @@ import (
 // exists only in one interface." Because the MCP handler (handleAnalyze,
 // internal/mcp/handlers_highlevel.go) and the CLI analyze path
 // (cmd/kern/cmd_review.go runAnalyze) both delegate to the SAME shared
-// application service — TaskService.Analyze / TaskService.Plan /
-// TaskService.WhatIf / TaskService.Impact — feeding the same input through the
+// application service — tasklife.TaskService.Analyze / tasklife.TaskService.Plan /
+// tasklife.TaskService.WhatIf / tasklife.TaskService.Impact — feeding the same input through the
 // shared service produces one authoritative Task in the shared store, queryable
 // by every interface via Task.Get.
 func TestInterfaceConsistencySharedAnalysis(t *testing.T) {
@@ -27,7 +28,7 @@ func TestInterfaceConsistencySharedAnalysis(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	ts := NewTaskService(p, nil).WithAgentID("test")
+	ts := tasklife.NewTaskService(p, nil).WithAgentID("test")
 
 	change := testfixture.Symbol("server") // a real symbol in the fixture repo
 
@@ -115,7 +116,7 @@ func TestInterfaceConsistencySharedAnalysis(t *testing.T) {
 // TestServiceContractsExerciseNewAccessors asserts the app-layer surface added
 // in is live: Policy (Firewall), Agent (Registry + Agents), Audit
 // (AuditLog), and Memory (MemoryRecall) are all first-class services satisfied
-// by *TaskService.
+// by *tasklife.TaskService.
 func TestServiceContracts(t *testing.T) {
 	if testing.Short() {
 		t.Skip("slow e2e (indexes repo); skipped with -short")
@@ -126,7 +127,7 @@ func TestServiceContracts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	ts := NewTaskService(p, nil).WithAgentID("test")
+	ts := tasklife.NewTaskService(p, nil).WithAgentID("test")
 
 	change := testfixture.Symbol("server")
 

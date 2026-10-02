@@ -374,8 +374,8 @@ func TestIsTestFile(t *testing.T) {
 		"main.ts":         false,
 	}
 	for rel, want := range cases {
-		if got := isTestFile(rel); got != want {
-			t.Errorf("isTestFile(%q) = %v, want %v", rel, got, want)
+		if got := IsTestFile(rel); got != want {
+			t.Errorf("IsTestFile(%q) = %v, want %v", rel, got, want)
 		}
 	}
 }

@@ -34,7 +34,7 @@ func Flows(ix *index.Index, limit, maxDepth int) []Flow {
 	// Roots: callable symbols with no in-project callers.
 	var roots []string
 	for _, s := range ix.Symbols {
-		if isTestFile(s.File) || (s.Kind != "func" && s.Kind != "method") {
+		if IsTestFile(s.File) || (s.Kind != "func" && s.Kind != "method") {
 			continue
 		}
 		name := s.FullName()

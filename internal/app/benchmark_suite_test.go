@@ -2,6 +2,7 @@ package app
 
 import (
 	"fmt"
+	"github.com/JayveerPrajapati/kern/internal/tasklife"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -72,7 +73,7 @@ type benchmarkRow struct {
 
 // runBenchmarkClass executes one task class against a repo and returns the
 // baseline-vs-Kern comparison.
-func runBenchmarkClass(t *testing.T, ts *TaskService, repo, class, symbol string) BaselineComparison {
+func runBenchmarkClass(t *testing.T, ts *tasklife.TaskService, p *Platform, repo, class, symbol string) BaselineComparison {
 	t.Helper()
 	switch class {
 	case "lookup":
@@ -99,7 +100,7 @@ func runBenchmarkClass(t *testing.T, ts *TaskService, repo, class, symbol string
 			{ID: "b-1", Type: runtime.EventError, Service: "svc", Severity: "error",
 				Message: "benchmark error", Timestamp: time.Now().Add(-time.Minute)},
 		})
-		ts.platform.WithRuntimeSource(store)
+		p.WithRuntimeSource(store)
 		task, _, _, err := ts.Correlate(domain.Alert{ID: "a", Service: "svc", OccurredAt: time.Now()})
 		if err != nil {
 			t.Fatalf("%s/%s Correlate: %v", repo, class, err)
@@ -131,9 +132,9 @@ func benchmarkMatrix(t *testing.T) []benchmarkRow {
 		if err != nil {
 			t.Fatalf("%s New: %v", r.name, err)
 		}
-		ts := NewTaskService(p, nil).WithAgentID("bench")
+		ts := tasklife.NewTaskService(p, nil).WithAgentID("bench")
 		for _, class := range classes {
-			b := runBenchmarkClass(t, ts, r.name, class, r.symbol)
+			b := runBenchmarkClass(t, ts, p, r.name, class, r.symbol)
 			rows = append(rows, benchmarkRow{Repo: r.name, Class: class, BaselineComparison: b})
 		}
 	}

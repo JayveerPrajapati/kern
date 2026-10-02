@@ -3,6 +3,7 @@ package verification
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
 	"log"
@@ -18,12 +19,13 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/config"
 	"github.com/JayveerPrajapati/kern/internal/eventbus"
 	"github.com/JayveerPrajapati/kern/internal/evidence"
+	"github.com/JayveerPrajapati/kern/internal/guard"
 	"github.com/JayveerPrajapati/kern/internal/index"
-	"github.com/JayveerPrajapati/kern/internal/intel"
 	"github.com/JayveerPrajapati/kern/internal/metrics"
 	"github.com/JayveerPrajapati/kern/internal/sandbox"
-	"github.com/JayveerPrajapati/kern/internal/sec"
+	"github.com/JayveerPrajapati/kern/internal/secscan"
 	"github.com/JayveerPrajapati/kern/internal/validate"
+	"github.com/JayveerPrajapati/kern/internal/verdict"
 	"github.com/JayveerPrajapati/kern/internal/version"
 )
 
@@ -44,7 +46,7 @@ const (
 )
 
 // Engine runs a set of verifications against a project and aggregates them
-// into a single VerificationResult.
+// into a single verdict.VerificationResult.
 type Engine struct {
 	root      string
 	ix        *index.Index  // optional prebuilt index; nil = derive per verification
@@ -63,6 +65,14 @@ type Engine struct {
 	// KERN_VERIFY_TEST env / verify.test config override replaces the test
 	// command verbatim and wins over either mode.
 	fullTests bool
+	// testPackages scopes the default (non-override) test step to specific Go
+	// package patterns instead of ./... — the closed loop passes the packages
+	// its own change touched, so a one-file task pays seconds instead of the
+	// whole-module suite. Empty = ./... (whole module). The
+	// KERN_VERIFY_TEST env / verify.test override still wins verbatim.
+	// Tradeoff (documented): scoped runs do not catch regressions in
+	// dependent packages — CI's full tier owns that guarantee.
+	testPackages []string
 }
 
 // Option configures an Engine before a Verify run. Options are applied to a
@@ -84,6 +94,18 @@ func FullTests(full bool) Option {
 // wins over either mode.
 func (e *Engine) WithFullTests(full bool) *Engine {
 	e.fullTests = full
+	return e
+}
+
+// WithTestPackages scopes the default test step to the given Go package
+// patterns (e.g. "./internal/foo"). nil or empty (the default) runs the whole
+// module (./...). The KERN_VERIFY_TEST env / verify.test override, when set,
+// replaces the command verbatim and still wins over the scoping.
+func (e *Engine) WithTestPackages(pkgs []string) *Engine {
+	if len(pkgs) == 0 {
+		pkgs = nil
+	}
+	e.testPackages = pkgs
 	return e
 }
 
@@ -117,7 +139,7 @@ func (e *Engine) WithCI(adapter ci.CIAdapter) *Engine {
 
 // publish delivers a verification event to the optional bus. A nil bus is a
 // no-op so the engine keeps working unchanged when no bus is attached.
-func (e *Engine) publish(kind eventbus.Kind, res *VerificationResult) {
+func (e *Engine) publish(kind eventbus.Kind, res *verdict.VerificationResult) {
 	if e.bus == nil {
 		return
 	}
@@ -156,13 +178,13 @@ func hasGoMod(root string) bool {
 // performance) — the compliance checks (cve/license/secrets) run ONLY when
 // explicitly requested. Ordering of the aggregated result is fixed and
 // deterministic.
-func (e *Engine) Verify(types []string) VerificationResult {
+func (e *Engine) Verify(types []string) verdict.VerificationResult {
 	start := time.Now()
 	defer func() { metrics.Default().RecordVerification(time.Since(start)) }()
 
 	now := time.Now()
 	e.runAt = now
-	res := VerificationResult{GeneratedAt: now, Version: version.Version}
+	res := verdict.VerificationResult{GeneratedAt: now, Version: version.Version}
 	e.publish(eventbus.VerificationStarted, &res)
 
 	run := map[string]bool{}
@@ -192,7 +214,7 @@ func (e *Engine) Verify(types []string) VerificationResult {
 				run["test"] = true
 			case strings.Contains(t, "security"), strings.Contains(t, "sec"):
 				run["security"] = true
-			case strings.Contains(t, "archi"):
+			case strings.Contains(t, "arch"):
 				run["architecture"] = true
 			case strings.Contains(t, "depend"), strings.Contains(t, "dep"):
 				run["dependency"] = true
@@ -243,14 +265,28 @@ func (e *Engine) Verify(types []string) VerificationResult {
 	}
 	if run["ci"] {
 		res.CI = e.VerifyCI()
+	} else {
+		// CI was not requested: report the honest zero state instead of the
+		// zero-value struct serializing as {"ok": false}, which reads like a
+		// failed CI run in --json output. The verdict fold below only fails
+		// on Status != "" && !OK, so "not run" cannot affect the verdict.
+		res.CI = verdict.CIResult{OK: true, Status: "not run"}
 	}
 
-	res.Evidence = evidenceOf(&res)
+	res.Evidence = verdict.EvidenceOf(&res)
 	// Aggregate the evidence-backed claims emitted by each sub-verification
 	// (security findings, test results, build results) into the unified result.
-	res.Claims = append(res.Claims, res.Security.claims()...)
-	res.Claims = append(res.Claims, res.UnitTests.claims()...)
-	res.Claims = append(res.Claims, res.Build.claims()...)
+	// The moved claims() accessors were nil-safe; direct field access is guarded
+	// the same way here (a nil sub-result contributes nothing).
+	if res.Security != nil {
+		res.Claims = append(res.Claims, res.Security.Claims...)
+	}
+	if res.UnitTests != nil {
+		res.Claims = append(res.Claims, res.UnitTests.Claims...)
+	}
+	if res.Build != nil {
+		res.Claims = append(res.Claims, res.Build.Claims...)
+	}
 	// Platform-isolation honesty (audit M3): on platforms without network
 	// isolation (darwin), the default test check cannot run — the sandbox
 	// fails closed with "refusing to run unisolated" unless the operator
@@ -261,15 +297,15 @@ func (e *Engine) Verify(types []string) VerificationResult {
 	// way to actually run tests unisolated (the sandbox gate itself is
 	// untouched).
 	markIsolationSkipped(&res)
-	res.Verdict = verdictOf(&res)
-	// verdictOf has no knowledge of the CI sub-result, so fold it in here. A
+	res.Verdict = verdict.DeriveVerdict(&res)
+	// DeriveVerdict has no knowledge of the CI sub-result, so fold it in here. A
 	// non-empty Status means CI was actually evaluated (not requested, or
 	// skipped for lack of an adapter); only a reported failure fails the run.
 	if res.CI.Status != "" && !res.CI.OK {
-		res.Verdict = VerdictFail
+		res.Verdict = verdict.VerdictFail
 	}
 	res.Summary = summarizeChecks(&res)
-	if res.Verdict == VerdictFail {
+	if res.Verdict == verdict.VerdictFail {
 		e.publish(eventbus.VerificationFailed, &res)
 	} else {
 		e.publish(eventbus.VerificationCompleted, &res)
@@ -296,31 +332,31 @@ func (e *Engine) Verify(types []string) VerificationResult {
 // see exactly how to actually run the tests.
 const isolationSkipReason = "tests not executed: network isolation unavailable on this platform; set KERN_ALLOW_UNISOLATED=1 (or KERN_ALLOW_NET=1) to run tests unisolated"
 
-// markIsolationSkipped stamps StatusSkipped onto any test set whose failure
+// markIsolationSkipped stamps verdict.StatusSkipped onto any test set whose failure
 // is the sandbox's fail-closed isolation refusal ("refusing to run
 // unisolated") — i.e. the tests were NOT executed, not that they ran and
 // failed. The output is prefixed with the explicit reason + opt-in hint. A
-// skipped set is excluded from the verdict math by verdictOf.
-func markIsolationSkipped(res *VerificationResult) {
+// skipped set is excluded from the verdict math by DeriveVerdict.
+func markIsolationSkipped(res *verdict.VerificationResult) {
 	// A sandbox isolation refusal means NOTHING executed — the zero-count
 	// signature (Passed==0 && Failed==0) distinguishes it from a genuine
 	// test failure whose output merely QUOTES the refusal text (e.g. a test
 	// asserting on the sandbox's refusal message), which must stay a FAIL
 	// (gate-3 attempt-1).
-	mark := func(t *TestResult) {
-		if t == nil || t.Status == StatusSkipped {
+	mark := func(t *verdict.TestResult) {
+		if t == nil || t.Status == verdict.StatusSkipped {
 			return
 		}
 		if !t.OK && t.Passed == 0 && t.Failed == 0 && strings.Contains(t.Output, "refusing to run unisolated") {
-			t.Status = StatusSkipped
+			t.Status = verdict.StatusSkipped
 			t.Output = isolationSkipReason + "\n" + t.Output
 		}
 	}
 	mark(res.UnitTests)
 	mark(res.Integration)
-	if e := res.E2ETests; e != nil && e.Status != StatusSkipped &&
+	if e := res.E2ETests; e != nil && e.Status != verdict.StatusSkipped &&
 		!e.OK && e.Passed == 0 && e.Failed == 0 && strings.Contains(e.Output, "refusing to run unisolated") {
-		e.Status = StatusSkipped
+		e.Status = verdict.StatusSkipped
 		e.Output = isolationSkipReason + "\n" + e.Output
 	}
 }
@@ -329,13 +365,30 @@ func markIsolationSkipped(res *VerificationResult) {
 // a single comma-joined summary. A SKIPPED check is shown explicitly as
 // "SKIPPED <reason>" — it is never folded into a joint "PASS" line, so a
 // skipped test set is never counted as passing in the summary.
-func summarizeChecks(res *VerificationResult) string {
+func summarizeChecks(res *verdict.VerificationResult) string {
 	var lines []string
 	add := func(name, status string) {
 		lines = append(lines, name+": "+status)
 	}
 	if b := res.Build; b != nil {
-		add("build", okWord(b.OK))
+		switch {
+		case b.OK && strings.HasPrefix(b.Output, verdict.SkipPrefix):
+			// A build that was NOT executed (no supported project type, D1):
+			// surface the explicit skip — never fold it into a "PASS" line.
+			// The "skipped: " prefix is the skip marker; the reason text is
+			// what follows it.
+			add("build", "SKIPPED "+verdict.FirstLine(strings.TrimPrefix(b.Output, verdict.SkipPrefix)))
+		case !b.OK:
+			// Surface the first output line as the reason: a bare "build:
+			// FAIL" hides why the build failed (D1).
+			if reason := verdict.FirstLine(b.Output); reason != "" {
+				add("build", "FAIL "+reason)
+			} else {
+				add("build", "FAIL")
+			}
+		default:
+			add("build", verdict.OkWord(b.OK))
+		}
 	}
 	if t := res.UnitTests; t != nil {
 		add("test", testStatus(t))
@@ -354,31 +407,31 @@ func summarizeChecks(res *VerificationResult) string {
 		}
 	}
 	if a := res.Architecture; a != nil {
-		add("architecture", okWord(a.OK))
+		add("architecture", verdict.OkWord(a.OK))
 	}
 	if d := res.Dependency; d != nil {
 		if d.Skipped != "" {
 			add("dependency", "SKIPPED "+d.Skipped)
 		} else {
-			add("dependency", okWord(d.OK))
+			add("dependency", verdict.OkWord(d.OK))
 		}
 	}
 	if e := res.E2ETests; e != nil {
-		if e.Status == StatusSkipped {
-			add("e2e", "SKIPPED "+firstLine(e.Output))
+		if e.Status == verdict.StatusSkipped {
+			add("e2e", "SKIPPED "+verdict.FirstLine(e.Output))
 		} else {
-			add("e2e", okWord(e.OK))
+			add("e2e", verdict.OkWord(e.OK))
 		}
 	}
 	if s := res.StaticAnalysis; s != nil {
-		add("static-analysis", okWord(s.OK))
+		add("static-analysis", verdict.OkWord(s.OK))
 	}
 	if p := res.Performance; p != nil {
-		add("performance", okWord(p.OK))
+		add("performance", verdict.OkWord(p.OK))
 	}
 	if c := res.CVE; c != nil {
-		if c.Status == StatusSkipped {
-			add("cve", "SKIPPED "+firstLine(c.Detail))
+		if c.Status == verdict.StatusSkipped {
+			add("cve", "SKIPPED "+verdict.FirstLine(c.Detail))
 		} else if c.Count > 0 {
 			add("cve", "WARN")
 		} else {
@@ -395,8 +448,8 @@ func summarizeChecks(res *VerificationResult) string {
 		}
 	}
 	if s := res.Secrets; s != nil {
-		if s.Status == StatusSkipped {
-			add("secrets", "SKIPPED "+firstLine(s.Detail))
+		if s.Status == verdict.StatusSkipped {
+			add("secrets", "SKIPPED "+verdict.FirstLine(s.Detail))
 		} else if s.Count > 0 {
 			add("secrets", "WARN")
 		} else {
@@ -411,16 +464,16 @@ func summarizeChecks(res *VerificationResult) string {
 
 // testStatus renders one test check's status: "PASS"/"FAIL" from OK, or
 // "SKIPPED <reason>" when the set was not executed.
-func testStatus(t *TestResult) string {
-	if t.Status == StatusSkipped {
-		return "SKIPPED " + firstLine(t.Output)
+func testStatus(t *verdict.TestResult) string {
+	if t.Status == verdict.StatusSkipped {
+		return "SKIPPED " + verdict.FirstLine(t.Output)
 	}
-	return okWord(t.OK)
+	return verdict.OkWord(t.OK)
 }
 
 // VerifyBuild runs the build verification (wraps v1 validate/validate).
-func (e *Engine) VerifyBuild() *BuildResult {
-	res := &BuildResult{}
+func (e *Engine) VerifyBuild() *verdict.BuildResult {
+	res := &verdict.BuildResult{}
 	// Polyglot (C2): the build command comes from per-language detection
 	// (validate.Detect) and can be overridden with `verify.build` in
 	// .kern/config.json (or KERN_VERIFY_BUILD) as a shell command string.
@@ -434,6 +487,17 @@ func (e *Engine) VerifyBuild() *BuildResult {
 			detected, err = validate.Detect(e.root)
 		}
 		if err != nil {
+			if errors.Is(err, validate.ErrNoProjectType) {
+				// No supported project type at all (zero candidates): there
+				// is nothing to build. Report a clean skip — never a false
+				// FAIL (F1; mirrors the VerifyTests no-runner skip below).
+				// "required tooling not found in PATH" (candidates exist but
+				// the toolchain is missing) stays an actionable FAIL.
+				res.OK = true
+				res.Output = verdict.SkipPrefix + "no supported project type detected (nothing to build)"
+				res.Claims = append(res.Claims, evidence.FromBuildResult(e.root, res.OK, res.Output))
+				return res
+			}
 			res.Output = err.Error()
 			return res
 		}
@@ -456,15 +520,15 @@ func (e *Engine) VerifyBuild() *BuildResult {
 // returns a skipped sub-result (OK=true) — CI is optional and never fails
 // a run on its own. With an adapter it polls the latest run status (empty job
 // ID = latest) and reports success, failure, or an in-progress note.
-func (e *Engine) VerifyCI() CIResult {
+func (e *Engine) VerifyCI() verdict.CIResult {
 	if e.CIAdapter == nil {
-		return CIResult{OK: true, Status: "skipped", Summary: "no CI adapter configured"}
+		return verdict.CIResult{OK: true, Status: "skipped", Summary: "no CI adapter configured"}
 	}
 	job, err := e.CIAdapter.Status("")
 	if err != nil {
-		return CIResult{OK: true, Status: "skipped", Summary: "ci status unavailable: " + err.Error()}
+		return verdict.CIResult{OK: true, Status: "skipped", Summary: "ci status unavailable: " + err.Error()}
 	}
-	res := CIResult{OK: true, JobID: job.ID, Status: string(job.Status), URL: job.URL}
+	res := verdict.CIResult{OK: true, JobID: job.ID, Status: string(job.Status), URL: job.URL}
 	switch job.Status {
 	case ci.StatusSuccess:
 		res.Summary = "CI pipeline succeeded"
@@ -493,26 +557,33 @@ func (e *Engine) VerifyCI() CIResult {
 // unless the engine was switched to the complete suite via FullTests/
 // WithFullTests (P1). PASS/FAIL/SKIP counts are only parsed for `go test -v`
 // output; other runners report OK from the exit status.
-func (e *Engine) VerifyTests() *TestResult {
-	res := &TestResult{Package: "./..."}
+func (e *Engine) VerifyTests() *verdict.TestResult {
+	res := &verdict.TestResult{Package: "./..."}
+	if pkgs := e.testPackages; len(pkgs) > 0 {
+		res.Package = strings.Join(pkgs, " ")
+	}
 	cmd, args := "go", e.testArgs()
 	if override := config.String(e.root, "KERN_VERIFY_TEST", "verify.test", ""); override != "" {
 		cmd, args = splitVerifyCommand(override)
 		res.Package = override
 	} else if c, err := validate.DetectKind(e.root, "test"); err == nil {
 		if c.Cmd == "go" {
-			// Keep -v so the PASS/FAIL/SKIP count parsing below works.
 			args = e.testArgs()
+			// Keep the scoped label when package scoping is active (the
+			// runner is still go test — the scope is the interesting part).
+			if len(e.testPackages) == 0 {
+				res.Package = c.Name
+			}
 		} else {
 			cmd, args = c.Cmd, c.Args
+			res.Package = c.Name
 		}
-		res.Package = c.Name
 		// npm test fails outright when package.json has no "test" script —
 		// that is an absent suite, not a failing one. Report a clean skip
 		// instead of a false FAIL.
 		if c.Cmd == "npm" && !npmHasTestScript(e.root) {
 			res.OK = true
-			res.Output = "skipped: package.json has no test script"
+			res.Output = verdict.SkipPrefix + "package.json has no test script"
 			res.Claims = append(res.Claims, evidence.FromTestResult(res.Package, res.OK, res.Output))
 			return res
 		}
@@ -523,7 +594,7 @@ func (e *Engine) VerifyTests() *TestResult {
 		// absent suite reports a clean skip — never a false FAIL (F1;
 		// mirrors the npm no-test-script skip above).
 		res.OK = true
-		res.Output = "skipped: no test runner detected (root has no go.mod)"
+		res.Output = verdict.SkipPrefix + "no test runner detected (root has no go.mod)"
 		res.Claims = append(res.Claims, evidence.FromTestResult(res.Package, res.OK, res.Output))
 		return res
 	}
@@ -559,21 +630,26 @@ func (e *Engine) VerifyTests() *TestResult {
 // parsing in VerifyTests works. An explicit KERN_VERIFY_TEST / verify.test
 // override never reaches this helper — it replaces the command verbatim.
 func (e *Engine) testArgs() []string {
-	if e.fullTests {
-		return []string{"test", "-v", "./..."}
+	pkgs := e.testPackages
+	if len(pkgs) == 0 {
+		pkgs = []string{"./..."}
 	}
-	return []string{"test", "-v", "-short", "./..."}
+	args := []string{"test", "-v"}
+	if !e.fullTests {
+		args = append(args, "-short")
+	}
+	return append(args, pkgs...)
 }
 
 // VerifyE2ETests runs the project's end-to-end tests (go test with the "e2e"
 // build tag). E2E tests are detected by scanning for the e2e build constraint
 // or e2e-named test files; when none are present the result is nil ("not
 // run"), so callers can distinguish absent E2E coverage from a clean run.
-func (e *Engine) VerifyE2ETests() *E2ETestResult {
+func (e *Engine) VerifyE2ETests() *verdict.E2ETestResult {
 	if !hasE2ETests(e.root) {
 		return nil
 	}
-	res := &E2ETestResult{}
+	res := &verdict.E2ETestResult{}
 	sr := sandbox.RunWithOptions(context.Background(), e.root, "go", []string{"test", "-tags", "e2e", "-v", "./..."}, testTimeout, sandbox.RunOptions{AllowLoopbackBind: true})
 	// F4: clip the embedded output and persist the full log under
 	// .kern/audit/<run-id>/verify-e2e.log (path on LogPath).
@@ -604,8 +680,8 @@ func (e *Engine) VerifyE2ETests() *E2ETestResult {
 // main module"), so the check degrades to the per-file gofmt -e syntax
 // baseline — mirroring validate/checks.go — and never fails on module
 // absence (F1).
-func (e *Engine) VerifyStaticAnalysis() *StaticAnalysisResult {
-	res := &StaticAnalysisResult{}
+func (e *Engine) VerifyStaticAnalysis() *verdict.StaticAnalysisResult {
+	res := &verdict.StaticAnalysisResult{}
 	// Polyglot (C2): static analysis defaults to `go vet` for Go modules and
 	// is otherwise opt-in via `verify.lint` in .kern/config.json (or
 	// KERN_VERIFY_LINT) — ecosystem linters that need project setup (npm
@@ -642,7 +718,7 @@ func (e *Engine) VerifyStaticAnalysis() *StaticAnalysisResult {
 // result: non-empty, non-#-prefixed lines are findings; OK requires a clean
 // exit AND no findings. Output is captured per the F4 caps and the full log
 // is persisted to .kern/audit/<run-id>/verify-static-analysis.log.
-func (e *Engine) runStaticAnalysis(cmd string, args []string, res *StaticAnalysisResult) {
+func (e *Engine) runStaticAnalysis(cmd string, args []string, res *verdict.StaticAnalysisResult) {
 	sr := sandbox.Run(context.Background(), e.root, cmd, args, testTimeout)
 	res.Duration = sr.Duration
 	for _, line := range strings.Split(sr.Output, "\n") {
@@ -663,7 +739,7 @@ func (e *Engine) runStaticAnalysis(cmd string, args []string, res *StaticAnalysi
 // files, or too many for a per-file pass, reports clean — the deterministic
 // syntax baseline has nothing to fail, and a module-less root must never
 // fail static analysis on module absence.
-func (e *Engine) runGofmtBaseline(res *StaticAnalysisResult) {
+func (e *Engine) runGofmtBaseline(res *verdict.StaticAnalysisResult) {
 	var files []string
 	_ = filepath.WalkDir(e.root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -711,21 +787,21 @@ func (e *Engine) runGofmtBaseline(res *StaticAnalysisResult) {
 }
 
 // VerifyPerformance runs the project benchmarks (`go test -bench=. -benchmem`)
-// and parses the results into BenchmarkResult entries. It returns nil when no
+// and parses the results into verdict.BenchmarkResult entries. It returns nil when no
 // benchmark functions are detectable ("where available"). Performance is
 // advisory — a benchmark run that returns non-zero does not fail the verdict.
-func (e *Engine) VerifyPerformance() *PerformanceResult {
+func (e *Engine) VerifyPerformance() *verdict.PerformanceResult {
 	if !hasBenchmarks(e.root) {
 		return nil
 	}
 	sr := sandbox.RunWithOptions(context.Background(), e.root, "go", []string{"test", "-bench=.", "-benchmem", "-v", "./..."}, testTimeout, sandbox.RunOptions{AllowLoopbackBind: true})
-	res := &PerformanceResult{}
+	res := &verdict.PerformanceResult{}
 	for _, line := range strings.Split(sr.Output, "\n") {
 		fields := strings.Fields(line)
 		if len(fields) < 3 || !strings.HasPrefix(fields[0], "Benchmark") {
 			continue
 		}
-		b := BenchmarkResult{Name: fields[0]}
+		b := verdict.BenchmarkResult{Name: fields[0]}
 		if i, err := strconv.Atoi(fields[1]); err == nil {
 			b.Iterations = i
 		}
@@ -863,11 +939,11 @@ func parseMetric(field string) int64 {
 	return 0
 }
 
-// VerifySecurity runs the security scan (wraps v1 sec.Scan) and aggregates
+// VerifySecurity runs the security scan (wraps v1 secscan.Scan) and aggregates
 // findings by severity.
-func (e *Engine) VerifySecurity() *SecurityResult {
-	res := &SecurityResult{}
-	findings, err := sec.Scan(e.root)
+func (e *Engine) VerifySecurity() *verdict.SecurityResult {
+	res := &verdict.SecurityResult{}
+	findings, err := secscan.Scan(e.root)
 	if err != nil {
 		res.OK = false
 		res.Error = err.Error()
@@ -875,7 +951,7 @@ func (e *Engine) VerifySecurity() *SecurityResult {
 	}
 	res.Count = len(findings)
 	for _, f := range findings {
-		res.Findings = append(res.Findings, Finding{
+		res.Findings = append(res.Findings, verdict.Finding{
 			File:     f.File,
 			Line:     f.Line,
 			Rule:     f.Rule,
@@ -888,11 +964,11 @@ func (e *Engine) VerifySecurity() *SecurityResult {
 		res.Claims = append(res.Claims, evidence.FromSecurityFinding(f))
 		// Map sec severities (error/warning/info) onto the risk ladder.
 		switch f.Severity {
-		case string(sec.SeverityError):
+		case string(secscan.SeverityError):
 			res.Critical++
-		case string(sec.SeverityWarning):
+		case string(secscan.SeverityWarning):
 			res.High++
-		case string(sec.SeverityInfo):
+		case string(secscan.SeverityInfo):
 			res.Low++
 		}
 		// Emit a security.finding event per finding so the bus carries
@@ -914,9 +990,9 @@ func (e *Engine) VerifySecurity() *SecurityResult {
 
 // VerifyArchitecture runs the architectural rule checks (wraps v1 intel guard
 // rules loaded from .kern/boundaries.json).
-func (e *Engine) VerifyArchitecture() *ArchitectureResult {
-	res := &ArchitectureResult{}
-	b, err := intel.LoadBoundaries(e.root)
+func (e *Engine) VerifyArchitecture() *verdict.ArchitectureResult {
+	res := &verdict.ArchitectureResult{}
+	b, err := guard.LoadBoundaries(e.root)
 	if err != nil {
 		res.OK = false
 		return res
@@ -933,11 +1009,11 @@ func (e *Engine) VerifyArchitecture() *ArchitectureResult {
 	// know to pin explicit rules for deterministic enforcement.
 	inferred := false
 	if b == nil {
-		b = intel.InferBoundaries(ix)
+		b = guard.InferBoundaries(ix)
 		inferred = true
 	}
 	files := listSourceFiles(e.root)
-	violations, skipped := intel.CheckBoundariesPrecise(ix, b, files, false)
+	violations, skipped := guard.CheckBoundariesPrecise(ix, b, files, false)
 	if inferred {
 		// The guard IS enforced with inferred rules — never claim otherwise.
 		// Surface the inference as a warning (advisory) so the absence of an
@@ -994,8 +1070,8 @@ func (e *Engine) VerifyArchitecture() *ArchitectureResult {
 // pom.xml, Cargo.toml — see manifests.go). It is fail-closed: an unreadable
 // or unparseable manifest is surfaced as a finding, never a fabricated PASS;
 // a project with no supported manifest at all is reported as an honest skip.
-func (e *Engine) VerifyDependency(target string) *DependencyResult {
-	res := &DependencyResult{}
+func (e *Engine) VerifyDependency(target string) *verdict.DependencyResult {
+	res := &verdict.DependencyResult{}
 	ix := e.loadIndex()
 	if ix == nil {
 		res.OK = false
@@ -1045,7 +1121,7 @@ func (e *Engine) VerifyDependency(target string) *DependencyResult {
 }
 
 // renderViolation formats a guard violation as a deterministic single line.
-func renderViolation(v intel.Violation) string {
+func renderViolation(v guard.Violation) string {
 	parts := []string{v.CallerFile, v.CalleeFile}
 	if v.Symbol != "" {
 		parts = append(parts, v.Symbol)

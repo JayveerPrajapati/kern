@@ -1,6 +1,7 @@
 package app
 
 import (
+	"github.com/JayveerPrajapati/kern/internal/tasklife"
 	"os"
 	"path/filepath"
 	"testing"
@@ -21,7 +22,7 @@ func TestWhatIfIsEvidenceAware(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	ts := NewTaskService(p, nil).WithAgentID("test")
+	ts := tasklife.NewTaskService(p, nil).WithAgentID("test")
 
 	task, text, err := ts.WhatIf(whatif.RemoveSymbol, "UserService", "")
 	if err != nil {
@@ -114,7 +115,7 @@ func TestModernizeMaterializesPhaseTasks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	ts := NewTaskService(p, nil).WithAgentID("test")
+	ts := tasklife.NewTaskService(p, nil).WithAgentID("test")
 
 	planTask, plan, text, err := ts.Modernize()
 	if err != nil {
