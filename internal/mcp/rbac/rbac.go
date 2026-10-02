@@ -22,7 +22,7 @@ var (
 	// of package init() (which did filesystem I/O + global mutation at import
 	// time); see loadRoles.
 	rolesOnce sync.Once
-	// assignMu serializes the assign snapshot→save→commit sequence (finding 4).
+	// assignMu serializes the assign snapshot→save→commit sequence.
 	assignMu sync.Mutex
 
 	// primaryRoot: root loadRoles() restored RBAC from (process cwd); other roots persist, never swap in-memory.
@@ -30,7 +30,7 @@ var (
 )
 
 // resolveOrgWins mirrors orgapprovals.ResolveRole via the org-role cache
-// (finding 5): the cache lives in orgapprovals WITH the store it caches
+//: the cache lives in orgapprovals WITH the store it caches
 // (R3), and AssignOrgRole invalidates it directly after every save, so the
 // mtime+size check only has to cover cross-process writes and hand-edits.
 func resolveOrgWins(projectRole string, projectAssigned bool, agentID string) (role string, assigned bool) {
@@ -56,7 +56,7 @@ func ResetMemory() {
 	agentRoles = map[string]string{}
 }
 
-// loadRoles restores persisted assignments on first RBAC use (finding 8); a
+// loadRoles restores persisted assignments on first RBAC use; a
 // corrupt store fails closed. Replaces the former init(): same capture, same
 // fail-closed log, but lazy — no filesystem I/O or global mutation at package
 // import time. Every function that reads agentRoles/primaryRoot must call it

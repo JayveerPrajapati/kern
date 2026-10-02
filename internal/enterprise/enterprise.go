@@ -81,7 +81,7 @@ type projectState struct {
 }
 
 // orgAllowWeakRBACEnv is the documented-unsafe escape hatch for org mode
-// without KERN_RBAC_DEFAULT_DENY=1 (finding 2).
+// without KERN_RBAC_DEFAULT_DENY=1.
 const orgAllowWeakRBACEnv = "KERN_ORG_ALLOW_WEAK_RBAC"
 
 // orgModeErr returns an error when org mode is configured without its RBAC
@@ -103,7 +103,7 @@ func orgModeErr(root string) error {
 // projects and WithOrgAudit/WithOrgBus/WithPolicies to configure org-level
 // shared state. When org mode is configured (KERN_ORG_ROOT) without the RBAC
 // default-deny pairing, New REFUSES to start, erroring with both env vars
-// (finding 2) — org mode is opt-in, so requiring the pairing is a safe gate.
+// — org mode is opt-in, so requiring the pairing is a safe gate.
 func New() (*Server, error) {
 	s := &Server{
 		projects:     map[string]*projectState{},
@@ -192,7 +192,7 @@ func (s *Server) WithPolicies(p []domain.Policy) *Server {
 // resolution governance.OrgRoot provides; Stages 2/3 reuse the root.
 //
 // WithOrgRoot REFUSES to apply an org root without the RBAC default-deny
-// pairing (finding 2): org scope stays inactive and a clear error naming
+// pairing: org scope stays inactive and a clear error naming
 // both env vars is logged — same gate as New()'s env path.
 func (s *Server) WithOrgRoot(root string) *Server {
 	if root != "" {

@@ -524,7 +524,7 @@ func TestMaskEncodedVsLabelPlaceholderCollision(t *testing.T) {
 	}
 }
 
-// TestResultLeakGuardSerialization (finding L1): serializing or logging a
+// TestResultLeakGuardSerialization: serializing or logging a
 // whole Result must never expose the original secret values held in Mapping —
 // only the masked text may leave. json.Marshal drops Mapping entirely, and
 // fmt/%s/%#v print the masked text.

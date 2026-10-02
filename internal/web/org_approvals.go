@@ -43,7 +43,7 @@ func (a *App) handleOrgApprovals(w http.ResponseWriter, r *http.Request) {
 		}
 		// Org approvals are org-wide governance decisions: when org scope is
 		// active they must never be approvable from an unauthenticated
-		// loopback console (finding 7). With KERN_AUTH_TOKEN set, the global
+		// loopback console. With KERN_AUTH_TOKEN set, the global
 		// bearer gate (ServeHTTP → authorized) already enforced it on every
 		// request; the gap this closes is the unset-token case, which the
 		// gate historically let through. GET (list) stays open on loopback

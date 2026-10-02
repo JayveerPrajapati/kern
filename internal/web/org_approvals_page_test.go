@@ -77,7 +77,7 @@ func TestOrgApprovalsPageListsApprovals(t *testing.T) {
 func TestOrgApprovalsPageApproveFlipsStatus(t *testing.T) {
 	orgRoot := t.TempDir()
 	t.Setenv("KERN_ORG_ROOT", orgRoot)
-	t.Setenv("KERN_AUTH_TOKEN", "test-console-token") // org mutations require the token (finding 7)
+	t.Setenv("KERN_AUTH_TOKEN", "test-console-token") // org mutations require the token
 	seed, err := orgapprovals.Create(orgRoot, "deploy", "production", "org-admin", "pre-approve")
 	if err != nil {
 		t.Fatalf("orgapprovals.Create: %v", err)
@@ -135,7 +135,7 @@ func TestOrgApprovalsPageApproveWithoutTokenRefused(t *testing.T) {
 func TestOrgApprovalsPageRejectFlipsStatus(t *testing.T) {
 	orgRoot := t.TempDir()
 	t.Setenv("KERN_ORG_ROOT", orgRoot)
-	t.Setenv("KERN_AUTH_TOKEN", "test-console-token") // org mutations require the token (finding 7)
+	t.Setenv("KERN_AUTH_TOKEN", "test-console-token") // org mutations require the token
 	seed, err := orgapprovals.Create(orgRoot, "rollback", "production", "org-admin", "reject me")
 	if err != nil {
 		t.Fatalf("orgapprovals.Create: %v", err)

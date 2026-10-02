@@ -165,7 +165,7 @@ pick_highest() {
 # channel_re2_only reports whether a channel regex uses RE2-only constructs
 # that POSIX ERE (grep -E) resolves differently — \d, \w, \s, \b and any
 # (?...) form — so the installer fails loudly instead of silently resolving a
-# different release set than the Go side (finding 9). The ERE spellings are
+# different release set than the Go side. The ERE spellings are
 # [0-9], [A-Za-z0-9_], [A-Za-z] etc.
 channel_re2_only() {
   case "$1" in
@@ -226,7 +226,7 @@ installed_version() {
 # asset. Fail-closed: a present-but-mismatched checksum is FATAL (tampering),
 # and so is any state in which the checksum cannot be confirmed — a missing
 # SHA256SUMS asset or entry (older releases) or a host without a sha256 tool
-# aborts the install instead of warning and skipping (finding L3). The
+# aborts the install instead of warning and skipping. The
 # go-install/source-build fallback path never calls verify, so it is
 # unaffected by this fail-closed contract.
 verify() {

@@ -145,7 +145,7 @@ func TestNewResolvesOrgRootFromEnv(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv(governance.OrgRootEnv, orgRoot)
-	t.Setenv("KERN_RBAC_DEFAULT_DENY", "1") // org-mode pairing gate (finding 2)
+	t.Setenv("KERN_RBAC_DEFAULT_DENY", "1") // org-mode pairing gate
 	s := mustNew(t)
 	// The applied snapshot must equal the org document (no drift at startup).
 	drift, err := s.PolicyDrift()

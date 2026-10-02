@@ -540,7 +540,7 @@ func (c *KernClient) EnsureFreshIndex(ctx context.Context, root string) (freshne
 // SecScan runs `kern sec --json <path>` in workdir and returns the parsed
 // findings, the raw stdout, and the process exit code.
 //
-// Exit codes 0 (clean) and 1 (findings found) are results, not errors.
+// Exit codes 0 (clean) and 1 are results, not errors.
 // Because kern also uses exit code 1 for tool errors, stderr presence
 // distinguishes the two: exit 1 with non-empty stderr is a tool failure and
 // is returned as an error.

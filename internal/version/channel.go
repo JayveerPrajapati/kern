@@ -15,7 +15,7 @@ import (
 // POSIX-ERE grep (install.sh, grep -E) resolves differently — \d, \w, \s,
 // \b and every (?...) form. A channel shared between `kern update` (Go RE2)
 // and install.sh must stay in the common POSIX-ERE subset, or the two
-// resolvers silently pick different releases (finding 9).
+// resolvers silently pick different releases.
 var ereUnsupportedRe = regexp.MustCompile(`\\([dDwWsSbB])|\(\?`)
 
 // ResolveChannel resolves the target release for a channel from the
@@ -62,7 +62,7 @@ func ResolveChannel(tags []string, channel string) (string, error) {
 		// A channel regex must stay in the POSIX-ERE subset the installer
 		// supports; RE2-only constructs (\d, \w, (?i), ...) would resolve
 		// differently under install.sh's grep -E, so they are rejected
-		// EARLY here with the ERE spelling recommended (finding 9).
+		// EARLY here with the ERE spelling recommended.
 		if ereUnsupportedRe.MatchString(channel) {
 			return "", fmt.Errorf("channel %q uses RE2-only regex syntax (\\d, \\w, \\s, \\b, (?i), ...) that the installer's POSIX-ERE grep does not support; use the ERE spelling instead — [0-9] for \\d, [A-Za-z0-9_] for \\w, case-insensitive classes like [A-Za-z]", channel)
 		}
