@@ -4,11 +4,13 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/JayveerPrajapati/kern/internal/secscan"
 )
 
 func TestGenPytestScaffold(t *testing.T) {
 	tf := TaintFinding{
-		Finding: Finding{
+		Finding: secscan.Finding{
 			File:     "app.py",
 			Line:     9,
 			Rule:     "py-os-system",
@@ -45,7 +47,7 @@ func TestGenPytestScaffold(t *testing.T) {
 
 func TestGenPytestScaffoldDeterministic(t *testing.T) {
 	tf := TaintFinding{
-		Finding: Finding{
+		Finding: secscan.Finding{
 			File:     "svc/db.py",
 			Line:     42,
 			Rule:     "py-sql-format",
@@ -66,7 +68,7 @@ func TestGenPytestScaffoldDeterministic(t *testing.T) {
 
 func TestScaffoldForDispatch(t *testing.T) {
 	py := TaintFinding{
-		Finding: Finding{File: "app.py", Line: 1, Rule: "py-eval", Message: "dynamic code evaluation via eval()"},
+		Finding: secscan.Finding{File: "app.py", Line: 1, Rule: "py-eval", Message: "dynamic code evaluation via eval()"},
 		Tainted: true,
 	}
 	if sc := ScaffoldFor(py); !strings.HasSuffix(sc.File, "_taint_test.py") || !strings.Contains(sc.Code, "import pytest") {
@@ -75,7 +77,7 @@ func TestScaffoldForDispatch(t *testing.T) {
 
 	// A py-* rule on a non-.py file still selects the pytest scaffold.
 	odd := TaintFinding{
-		Finding: Finding{File: "snippet.txt", Line: 3, Rule: "py-exec", Message: "dynamic code execution via exec()"},
+		Finding: secscan.Finding{File: "snippet.txt", Line: 3, Rule: "py-exec", Message: "dynamic code execution via exec()"},
 		Tainted: true,
 	}
 	if sc := ScaffoldFor(odd); !strings.HasSuffix(sc.File, "_taint_test.py") || !strings.Contains(sc.Code, "def test_py_exec_3") {
@@ -84,7 +86,7 @@ func TestScaffoldForDispatch(t *testing.T) {
 
 	// Go findings keep the go test scaffold.
 	goFinding := TaintFinding{
-		Finding: Finding{File: "svc/handlers.go", Line: 12, Rule: "sql-injection", Severity: "error", Message: "dynamic SQL built from variables"},
+		Finding: secscan.Finding{File: "svc/handlers.go", Line: 12, Rule: "sql-injection", Severity: "error", Message: "dynamic SQL built from variables"},
 		Func:    "lookup", Tainted: true, EntryPoint: "H", Path: []string{"H", "lookup"},
 	}
 	sc := ScaffoldFor(goFinding)

@@ -138,3 +138,43 @@ func TestGreater(t *testing.T) {
 		t.Errorf("expected at least 1 killed mutant by TestGreater, got report: %+v", report)
 	}
 }
+
+// TestRunSurfacesRestoreFailure exercises the M3 branch: when the post-test
+// restore write of the original source fails, Run must surface the error
+// instead of dropping it with `_ = os.WriteFile(...)` — otherwise the mutant
+// stays on disk while the journal believes it was restored. The "test
+// command" makes the target file read-only, so the restore write fails with
+// EACCES and the mutant (not the original) is what remains on disk.
+func TestRunSurfacesRestoreFailure(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("requires a non-root user (root bypasses file permission checks)")
+	}
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module example.com/calc\n\ngo 1.21\n"), 0644); err != nil {
+		t.Fatalf("write go.mod: %v", err)
+	}
+	code := `package calc
+func Greater(a, b int) bool {
+	return a > b
+}
+`
+	if err := os.WriteFile(filepath.Join(dir, "calc.go"), []byte(code), 0644); err != nil {
+		t.Fatalf("write calc.go: %v", err)
+	}
+	_, err := Run(context.Background(), Options{
+		Root:        dir,
+		Files:       []string{"calc.go"},
+		MaxMutants:  10,
+		TestCommand: "chmod 0444 calc.go",
+	})
+	if err == nil {
+		t.Fatal("expected Run to surface the failed restore, got nil error")
+	}
+	onDisk, rerr := os.ReadFile(filepath.Join(dir, "calc.go"))
+	if rerr != nil {
+		t.Fatalf("read calc.go: %v", rerr)
+	}
+	if string(onDisk) == code {
+		t.Error("expected the mutant (not the original) to remain on disk after the failed restore, proving the failure was surfaced rather than silently dropped")
+	}
+}

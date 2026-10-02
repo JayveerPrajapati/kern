@@ -17,6 +17,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/JayveerPrajapati/kern/internal/execution"
 )
 
 // Mutant describes a single code mutation applied to an AST node.
@@ -39,6 +41,12 @@ type Options struct {
 	DryRun      bool          `json:"dry_run,omitempty"` // only generate mutants without running test suite
 	TestCommand string        `json:"test_command,omitempty"`
 	Timeout     time.Duration `json:"timeout,omitempty"`
+	// Isolate evaluates every mutant inside an execution.NewWorktree copy
+	// so the real tree is never touched — not even transiently during a
+	// mutant's test run. The journaled in-place mode remains as the
+	// fallback when the worktree snapshot cannot be built. Both the CLI
+	// (kern mutate) and the MCP tool (kern_mutation_test) opt in.
+	Isolate bool `json:"isolate,omitempty"`
 }
 
 // Report encapsulates the complete mutation testing results.
@@ -222,6 +230,9 @@ func ApplyMutantToSource(filePath string, src []byte, mutant Mutant) ([]byte, er
 
 // Run executes mutation testing across targeted files in the repository.
 func Run(ctx context.Context, opts Options) (*Report, error) {
+	if opts.Isolate {
+		return runIsolated(ctx, opts)
+	}
 	if opts.Root == "" {
 		opts.Root = "."
 	}
@@ -378,9 +389,15 @@ func Run(ctx context.Context, opts Options) (*Report, error) {
 		out, testErr := cmd.CombinedOutput()
 		cancel()
 
-		// Restore original file immediately
-		_ = os.WriteFile(fullPath, origSrc, 0644)
-
+		// Restore original file immediately. The error is NOT dropped: if the
+		// write fails, the mutant stays on disk while the journal believes it
+		// was restored, so surface it loudly and abort the run. The deferred
+		// journal restore retries every file and prints its own warning; the
+		// caller additionally receives the error here (M3).
+		if rerr := os.WriteFile(fullPath, origSrc, 0644); rerr != nil {
+			fmt.Fprintf(os.Stderr, "mutation: FATAL: could not restore original %q after evaluation — the file on disk is the MUTANT, not the original: %v\n", fullPath, rerr)
+			return nil, fmt.Errorf("mutation: restore original %q after test run: %w", fullPath, rerr)
+		}
 		if testErr != nil {
 			// Test failed -> Mutant was killed (Good test coverage)
 			m.Status = "killed"
@@ -415,6 +432,47 @@ func Run(ctx context.Context, opts Options) (*Report, error) {
 		Score:          score,
 		Mutants:        allMutants,
 	}, nil
+}
+
+// runIsolated evaluates mutants inside an execution.NewWorktree copy so the
+// real tree is never touched. The journaled in-place mode already restores on
+// every exit path and self-heals stale journals on the next run (audit C2),
+// but during each mutant's test run the real tree still holds a live mutant
+// (concurrent observers see corrupted code) and a SIGKILL leaves a window
+// before the next run's self-heal. Isolation closes both: the real root's
+// stale journals are healed BEFORE the snapshot (so the copy is built from
+// originals, not lingering mutants), evaluation runs entirely in the copy,
+// and the report's Root is translated back to the real root. If the snapshot
+// cannot be built (e.g. tree over the size cap), it falls back to the
+// journaled in-place mode with a loud warning rather than failing the tool.
+func runIsolated(ctx context.Context, opts Options) (*Report, error) {
+	absRoot, err := filepath.Abs(opts.Root)
+	if err != nil {
+		absRoot = opts.Root
+	}
+	// Heal the REAL root first: a stale journal from a previous interrupted
+	// in-place run means the current tree holds mutants — snapshotting that
+	// would evaluate mutants-of-mutants.
+	if n, rerr := recoverStaleJournals(absRoot); rerr != nil {
+		fmt.Fprintf(os.Stderr, "mutation: WARNING: stale journal restore incomplete: %v\n", rerr)
+	} else if n > 0 {
+		fmt.Fprintf(os.Stderr, "mutation: restored %d file(s) left modified by an interrupted previous mutation run (stale journal self-heal)\n", n)
+	}
+	wt, werr := execution.NewWorktree(opts.Root)
+	if werr != nil {
+		fmt.Fprintf(os.Stderr, "mutation: WARNING: isolated worktree unavailable (%v) — falling back to journaled in-place mode: working-tree files will be temporarily modified and auto-restored\n", werr)
+		opts.Isolate = false
+		return Run(ctx, opts)
+	}
+	defer func() { _ = wt.Cleanup() }()
+	isoOpts := opts
+	isoOpts.Isolate = false
+	isoOpts.Root = wt.Dir()
+	rep, rerr := Run(ctx, isoOpts)
+	if rep != nil {
+		rep.Root = absRoot
+	}
+	return rep, rerr
 }
 
 func invertBinaryOp(op token.Token) (token.Token, bool) {

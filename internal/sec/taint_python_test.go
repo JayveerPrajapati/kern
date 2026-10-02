@@ -4,13 +4,14 @@ import (
 	"testing"
 
 	"github.com/JayveerPrajapati/kern/internal/index"
+	"github.com/JayveerPrajapati/kern/internal/secscan"
 )
 
 func TestTaintLitePythonFinding(t *testing.T) {
 	root := t.TempDir()
 	writeTaintFile(t, root, "app.py", "import os\n\ndef run(cmd):\n    cmd = req.Body[\"cmd\"]\n    os.system(cmd)\n")
 	ix := &index.Index{Root: root, Symbols: nil, Callers: map[string][]string{}}
-	findings := []Finding{{
+	findings := []secscan.Finding{{
 		File:     "app.py",
 		Line:     5,
 		Rule:     "py-os-system",
@@ -39,7 +40,7 @@ func TestTaintLitePythonFindingNotTainted(t *testing.T) {
 	// No source expression anywhere in the file -> not tainted, no panic.
 	writeTaintFile(t, root, "app.py", "import os\n\ndef run(cmd):\n    os.system(cmd)\n")
 	ix := &index.Index{Root: root, Symbols: nil, Callers: map[string][]string{}}
-	findings := []Finding{{
+	findings := []secscan.Finding{{
 		File: "app.py", Line: 4, Rule: "py-os-system", Severity: "error",
 		Message: "shell command execution via os.system()/os.popen()",
 	}}
@@ -58,7 +59,7 @@ func TestTaintLitePythonFindingNotTainted(t *testing.T) {
 func TestTaintLitePythonFindingNilIndex(t *testing.T) {
 	// A nil index (e.g. index build failure) must not panic; the finding
 	// passes through with the callee symbol but stays untainted.
-	findings := []Finding{{
+	findings := []secscan.Finding{{
 		File: "app.py", Line: 3, Rule: "py-eval", Severity: "error",
 		Message: "dynamic code evaluation via eval()",
 	}}
@@ -90,12 +91,12 @@ func TestTaintLitePythonFindingSinkSymbols(t *testing.T) {
 		"py-sql-format":       "execute",
 	}
 	for rule, want := range cases {
-		got := pythonSinkSymbol(Finding{Rule: rule})
+		got := pythonSinkSymbol(secscan.Finding{Rule: rule})
 		if got != want {
 			t.Errorf("pythonSinkSymbol(%s) = %q, want %q", rule, got, want)
 		}
 	}
-	if got := pythonSinkSymbol(Finding{Rule: "unknown"}); got != "<python>" {
+	if got := pythonSinkSymbol(secscan.Finding{Rule: "unknown"}); got != "<python>" {
 		t.Errorf("pythonSinkSymbol(unknown) = %q, want <python>", got)
 	}
 }

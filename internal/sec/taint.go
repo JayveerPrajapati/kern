@@ -7,11 +7,12 @@ import (
 	"strings"
 
 	"github.com/JayveerPrajapati/kern/internal/index"
+	"github.com/JayveerPrajapati/kern/internal/secscan"
 )
 
 // TaintFinding is a sec finding plus its source→sink reachability analysis.
 type TaintFinding struct {
-	Finding
+	secscan.Finding
 	Func       string   // containing function name, "<unknown>" if unresolvable
 	Tainted    bool     // reachable from a source
 	EntryPoint string   // entry symbol that starts the path ("" when none)
@@ -44,7 +45,7 @@ const (
 // TaintLite marks findings whose containing function is transitively called
 // by a framework entry point (Symbol.Entry) or whose file contains a source
 // expression. Deterministic; BFS depth ≤ 10, ≤ 500 visited nodes per finding.
-func TaintLite(ix *index.Index, findings []Finding) []TaintFinding {
+func TaintLite(ix *index.Index, findings []secscan.Finding) []TaintFinding {
 	if len(findings) == 0 {
 		return nil
 	}
@@ -58,7 +59,7 @@ func TaintLite(ix *index.Index, findings []Finding) []TaintFinding {
 // taintOne analyses a single finding: resolve the containing function, run the
 // bounded BFS over the reverse call graph, and fall back to the source-file
 // check when no entry path exists.
-func taintOne(ix *index.Index, f Finding) TaintFinding {
+func taintOne(ix *index.Index, f secscan.Finding) TaintFinding {
 	tf := TaintFinding{Finding: f, Func: "<unknown>"}
 	// Python findings carry no Go call-graph symbols. The sink symbol is
 	// the matched callee and taint is decided by the source-file heuristic.
@@ -106,7 +107,7 @@ func taintOne(ix *index.Index, f Finding) TaintFinding {
 // containingFunc returns the innermost indexed symbol whose span (Line..End)
 // covers the finding line. Only functions/methods qualify; symbols with an
 // unknown end (End == 0) are skipped. ok is false when nothing matches.
-func containingFunc(ix *index.Index, f Finding) (index.Symbol, bool) {
+func containingFunc(ix *index.Index, f secscan.Finding) (index.Symbol, bool) {
 	var best index.Symbol
 	bestSpan := -1
 	found := false
@@ -142,7 +143,7 @@ func entryNames(ix *index.Index) map[string]bool {
 
 // sourceFileTainted reports whether root/<f.File> contains a source
 // expression fragment anywhere in its content (skip on read error).
-func sourceFileTainted(ix *index.Index, f Finding) bool {
+func sourceFileTainted(ix *index.Index, f secscan.Finding) bool {
 	data, err := os.ReadFile(filepath.Join(ix.Root, filepath.FromSlash(f.File)))
 	if err != nil {
 		return false
@@ -158,13 +159,13 @@ func sourceFileTainted(ix *index.Index, f Finding) bool {
 
 // isPythonFinding reports whether the finding originates from a Python file
 // or a Python-specific rule; such findings have no Go call-graph path.
-func isPythonFinding(f Finding) bool {
+func isPythonFinding(f secscan.Finding) bool {
 	return strings.HasPrefix(f.Rule, "py-") || strings.HasSuffix(strings.ToLower(f.File), ".py")
 }
 
 // pythonSinkSymbol maps a Python rule id to the matched callee, used as the
 // sink's containing-function name in taint output.
-func pythonSinkSymbol(f Finding) string {
+func pythonSinkSymbol(f secscan.Finding) string {
 	switch f.Rule {
 	case "py-eval":
 		return "eval"
