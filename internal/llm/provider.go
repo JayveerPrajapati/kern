@@ -88,12 +88,22 @@ func providerName() string {
 }
 
 // NewProvider builds the provider selected by KERN_LLM_PROVIDER
-// (ollama|openai|anthropic|google; default "auto" — the chain). Per-provider
-// credentials come from their own env vars. It errors only when a non-default
-// provider is selected but its API key is missing. Construction is
-// deterministic; network is touched only when a provider method is invoked.
+// (ollama|openai|anthropic|google; default "auto" — the chain; "none"/"off"
+// disables the LLM stage entirely — callers fall back to their deterministic
+// path). Per-provider credentials come from their own env vars. It errors only
+// when a non-default provider is selected but its API key is missing (or the
+// provider is explicitly disabled). Construction is deterministic; network is
+// touched only when a provider method is invoked.
 func NewProvider() (Provider, error) {
 	switch providerName() {
+	case "none", "off", "disabled":
+		// Explicit opt-out: no provider at all. Callers that treat a
+		// construction error as "skip the LLM stage" (optimize.Prompt's
+		// llmSkipped, the bench harness) stay on their deterministic
+		// path; nothing is probed, nothing is exec'd, no network is
+		// touched. This is how offline/deterministic surfaces pin the
+		// LLM off instead of eating the auto chain's probe latency.
+		return nil, fmt.Errorf("llm: provider disabled (KERN_LLM_PROVIDER=%q)", providerName())
 	case "mcp", "host", "sampling":
 		return NewMCPProvider(), nil
 	case "openai", "openrouter", "groq", "litellm", "vllm", "azure":
@@ -135,8 +145,7 @@ func NewProvider() (Provider, error) {
 // ProbeLLMProviderReachable), so the two surfaces cannot drift.
 //
 // The probe mirrors the auto chain's order but probes each leg with a budget
-// matched to its nature instead of one flat short deadline (dogfooding G-HIGH:
-// an 8s flat budget was a coin-flip against CLI cold-starts of 6-40s):
+// matched to its nature instead of one flat short deadline:
 //
 //  1. active MCP host session (the "MCP ack": kern knows the session and
 //     model, and the SAME session does the task — no new session spun up);
@@ -156,7 +165,7 @@ func ProbeReachable() error {
 // CLIs → Ollama), so a successful probe alone does not tell the caller which
 // leg actually answered — this returns that name so `kern do` can report
 // "provider: claude" instead of silently running on an unspecified fallback
-// (dogfooding E-obs).
+//.
 func ProbeReachableName() (string, error) {
 	if n := providerName(); n != "auto" {
 		// Explicit provider (openai/anthropic/google/...): probe it directly.

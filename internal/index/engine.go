@@ -97,17 +97,63 @@ type Index struct {
 	// Unexported: never serialized; a loaded index simply has none (reuse
 	// falls back to a full parse).
 	fileResults map[string]fileResult
+
+	// staleSnapshot retains the per-file content observation (hashes + mtimes)
+	// from the most recent staleness check that ran a content walk on this
+	// index, so the immediately following UpdateWithSnapshot can reuse the walk
+	// instead of re-reading and re-hashing the whole tree. Cleared whenever a
+	// staleness check decides WITHOUT a content walk (nil/empty index, git-OID
+	// fast path, walk failure), so the retained snapshot always corresponds to
+	// the walk the last verdict was based on. Unexported: never serialized.
+	// staleMu guards staleSnapshot: staleness checks deliberately run off any
+	// app-level lock and can fan out concurrently (e.g. web.freshGraph's
+	// off-lock Stale() walk), so the retained observation pointer is only
+	// written and read under this mutex. Published snapshots are immutable
+	// after retention — only the pointer swaps.
+	staleMu       sync.Mutex
+	staleSnapshot *FreshnessSnapshot
 	// reusedResults counts per-file results reused from a prior index in the
 	// build that produced this one (0 for full builds). Exposed via
 	// ReusedResults for diagnostics.
 	reusedResults int
-	// symbolIdx is the precomputed name -> symbols lookup for symbolsFor;
-	// nil means symbolsFor falls back to the linear scan.
-	symbolIdx map[string][]Symbol
-	// kindIdx is the precomputed kind -> symbols lookup for kind-filtered
-	// Search queries ("func foo", "type Bar", "entry */admin*"); nil means
-	// Search falls back to the linear scan over all symbols.
-	kindIdx map[string][]Symbol
+	// cache holds the lazily-built lookup tables: name -> symbols for
+	// symbolsFor, and kind -> symbols for kind-filtered Search. The build and
+	// update paths populate them eagerly (buildSymbolIndex, reindexByFile);
+	// the load paths defer the O(symbols) construction to the first query that
+	// needs it, so a process that loads an index and never queries (status,
+	// staleness checks, a watcher waiting for changes) skips the passes
+	// entirely. Each table is guarded by its own sync.Once inside the cache, so
+	// a deferred build racing with concurrent readers after Load builds the
+	// table exactly once and is race-free. Unexported: never serialized.
+	cache *indexCache
+}
+
+// indexCache is the lazily-built lookup tables of an Index, allocated by
+// initMaps so every constructed index (New, JSON/SQLite/snapshot Load) has
+// one before it can be published to readers. The pointer indirection keeps
+// the sync.Onces out of the Index struct itself, so copying an Index value
+// (canonical in tests) never copies a lock. Each table is built from
+// ix.Symbols at build time and never rebuilt afterwards: both builders are
+// idempotent by construction (sync.Once), which also makes a repeated
+// reindexByFile/buildSymbolIndex on an already-populated index a no-op.
+type indexCache struct {
+	symbolOnce sync.Once
+	kindOnce   sync.Once
+	symbolIdx  map[string][]Symbol
+	kindIdx    map[string][]Symbol
+}
+
+// getCache returns the index's lookup cache. It is allocated by initMaps
+// for every index this package constructs, so in practice this never
+// allocates; the fallback covers hand-built Index values (tests) that never
+// ran initMaps, in which case a throwaway cache is returned WITHOUT storing
+// it on the index — keeping the first-access path free of unsynchronized
+// writes (safe under concurrent readers).
+func (ix *Index) getCache() *indexCache {
+	if c := ix.cache; c != nil {
+		return c
+	}
+	return &indexCache{}
 }
 
 // New returns an empty index rooted at root.
@@ -170,6 +216,9 @@ func (ix *Index) initMaps() {
 	}
 	if ix.fileResults == nil {
 		ix.fileResults = map[string]fileResult{}
+	}
+	if ix.cache == nil {
+		ix.cache = &indexCache{}
 	}
 }
 
@@ -363,8 +412,11 @@ func Load(root string) (*Index, error) {
 			}
 			reRootIndex(ix, abs)
 			ix.initMaps()
-			ix.reindexByFile()
-			ix.buildSymbolIndex()
+			// The lookup caches (symbolIdx, kindIdx) are deferred to the
+			// first query that needs them; SymbolsByFile is the only map
+			// built here because it is an exported field consumers read
+			// directly after Load.
+			ix.buildSymbolsByFile()
 			metrics.Default().RecordCacheHit()
 			return ix, nil
 		}
@@ -398,16 +450,16 @@ func Load(root string) (*Index, error) {
 	}
 	reRootIndex(ix, abs)
 	ix.initMaps()
-	ix.reindexByFile()
-	ix.buildSymbolIndex()
+	// The lookup caches (symbolIdx, kindIdx) are deferred to the first
+	// query that needs them; SymbolsByFile is the only map built here
+	// because it is an exported field consumers read directly after Load.
+	ix.buildSymbolsByFile()
 	metrics.Default().RecordCacheHit()
 	return ix, nil
 }
 
 // reRootIndex re-points a loaded index's Root at the directory it was loaded
-// for when the recorded root is a DIFFERENT absolute path (dogfooding A1-N1:
-// a repo copied or moved together with its .kern keeps the ORIGINAL absolute
-// root in the store). Without this, Stale() → FreshnessProof(ix.Root) would
+// for when the recorded root is a DIFFERENT absolute path. Without this, Stale() → FreshnessProof(ix.Root) would
 // evaluate the original tree — which is unchanged — and report the index
 // "fresh" forever, so LoadOrBuild / `kern index` silently reuse a stale index
 // and only `kern index --force` healed it. Re-pointing makes every subsequent
@@ -467,6 +519,11 @@ func sqliteStoreNewerThanJSON(jsonPath string) bool {
 // stale anyway, and every caller rebuilds immediately after a stale verdict.
 func (ix *Index) Stale() bool {
 	if ix == nil || len(ix.FileHashes) == 0 {
+		if ix != nil {
+			// No baseline to compare: no content walk ran, so no observation
+			// is retained for a following update.
+			ix.clearStaleSnapshot()
+		}
 		return true
 	}
 	// No recorded identity (in-memory test index, or hand-built Index struct):
@@ -489,13 +546,16 @@ func (ix *Index) legacyStale() bool {
 	// skip re-hashing. An mtime-preserving edit (rare) evades the gate.
 	if ix.MaxMtime > 0 {
 		if maxMtime, count, err := indexableMaxMtime(ix.Root, ign); err == nil && count == len(ix.FileHashes) && maxMtime == ix.MaxMtime {
+			ix.clearStaleSnapshot() // no content walk ran
 			return false
 		}
 	}
-	cur, err := indexableHashes(ix.Root, ign)
+	cur, mtimes, err := indexableHashesObserved(ix.Root, ign)
 	if err != nil {
+		ix.clearStaleSnapshot() // no usable observation
 		return true
 	}
+	ix.retainStaleSnapshot(cur, mtimes)
 	if len(cur) != len(ix.FileHashes) {
 		return true
 	}
@@ -516,8 +576,10 @@ func LoadFile(path string) (*Index, error) {
 			return nil, fmt.Errorf("index version %d (want %d): rebuild required", ix.Version, indexVersion)
 		}
 		ix.initMaps()
-		ix.reindexByFile()
-		ix.buildSymbolIndex()
+		// SymbolsByFile is built eagerly (exported field, read directly by
+		// consumers); the symbolIdx/kindIdx lookup caches are deferred to
+		// the first query.
+		ix.buildSymbolsByFile()
 		return ix, nil
 	}
 	data, err := os.ReadFile(path)
@@ -532,27 +594,39 @@ func LoadFile(path string) (*Index, error) {
 		return nil, fmt.Errorf("index version %d (want %d): rebuild required", ix.Version, indexVersion)
 	}
 	ix.initMaps()
-	ix.reindexByFile()
-	ix.buildSymbolIndex()
+	// SymbolsByFile is built eagerly (exported field, read directly by
+	// consumers); the symbolIdx/kindIdx lookup caches are deferred to the
+	// first query.
+	ix.buildSymbolsByFile()
 	return ix, nil
 }
 
+// reindexByFile rebuilds the exported SymbolsByFile map and the kindIdx
+// lookup buckets from the final symbol table. The build/update sequences
+// call this after resolveEntries (which flips Entry on func/method
+// symbols), and the load paths call only buildSymbolsByFile, deferring the
+// kindIdx buckets to the first kind-filtered Search.
 func (ix *Index) reindexByFile() {
+	ix.buildSymbolsByFile()
+	ix.buildKindIndex()
+}
+
+// buildSymbolsByFile rebuilds SymbolsByFile from the final symbol table.
+// Unlike the unexported lookup caches (symbolIdx, kindIdx) it cannot be
+// deferred on the load paths: SymbolsByFile is an exported field read
+// directly by consumers outside this package (intel/guard, intel/changes,
+// web, fragility, architecture), so every load must present it. It is the
+// cheapest of the three passes — a single O(symbols) append — so keeping
+// it eager costs little.
+func (ix *Index) buildSymbolsByFile() {
 	ix.SymbolsByFile = map[string][]Symbol{}
 	for _, s := range ix.Symbols {
 		ix.SymbolsByFile[s.File] = append(ix.SymbolsByFile[s.File], s)
 	}
-	// The kind buckets must be built from the FINAL symbol table: the
-	// build/update sequences call this after resolveEntries (which flips
-	// Entry on func/method symbols), and the load paths call it on persisted
-	// symbols whose Entry flags are already baked in.
-	ix.buildKindIndex()
 }
 
-// buildKindIndex precomputes the kind -> symbols buckets that let
-// kind-filtered Search queries iterate only matching-kind symbols instead of
-// scanning every one. Bucket membership mirrors symbolMatches exactly, in
-// Symbols order:
+// buildKindTable computes the kind -> symbols buckets in Symbols order.
+// Bucket membership mirrors symbolMatches exactly:
 //   - every non-empty Kind gets an exact bucket ("func", "method", ...),
 //     except "entry" (a flag, not a Kind) and the searchTypeKinds members,
 //     which land in the "type" super-category bucket instead;
@@ -562,19 +636,35 @@ func (ix *Index) reindexByFile() {
 // Search re-applies symbolMatches on top of the bucket, so a bucket is only
 // ever a candidate superset — results and limit behavior are identical to
 // the pre-index linear scan.
-func (ix *Index) buildKindIndex() {
-	ix.kindIdx = make(map[string][]Symbol)
-	for _, s := range ix.Symbols {
+func buildKindTable(symbols []Symbol) map[string][]Symbol {
+	m := make(map[string][]Symbol)
+	for _, s := range symbols {
 		if s.Kind != "" && s.Kind != "entry" && !searchTypeKinds[s.Kind] {
-			ix.kindIdx[s.Kind] = append(ix.kindIdx[s.Kind], s)
+			m[s.Kind] = append(m[s.Kind], s)
 		}
 		if searchTypeKinds[s.Kind] {
-			ix.kindIdx["type"] = append(ix.kindIdx["type"], s)
+			m["type"] = append(m["type"], s)
 		}
 		if s.Entry {
-			ix.kindIdx["entry"] = append(ix.kindIdx["entry"], s)
+			m["entry"] = append(m["entry"], s)
 		}
 	}
+	return m
+}
+
+// buildKindIndex precomputes the kind -> symbols buckets that let
+// kind-filtered Search queries iterate only matching-kind symbols instead of
+// scanning every one. Called eagerly by the build/update finalize paths
+// (via reindexByFile, after resolveEntries) and lazily by the first
+// kind-filtered Search on an index that loaded without the buckets. The
+// sync.Once makes it idempotent (a second call is a no-op — the table is
+// derived from an immutable symbol table) and safe when the deferred build
+// races with concurrent readers.
+func (ix *Index) buildKindIndex() {
+	c := ix.getCache()
+	c.kindOnce.Do(func() {
+		c.kindIdx = buildKindTable(ix.Symbols)
+	})
 }
 
 // Languages returns the distinct languages present in the index, sorted.
@@ -1541,37 +1631,52 @@ func confRank(c Confidence) int {
 }
 
 // symbolsFor returns every symbol whose bare or full name matches. Build
-// paths precompute symbolIdx, making this O(1); without it (hand-built or
-// older in-memory indexes) it degrades to the original linear scan.
+// paths precompute the lookup table eagerly (buildSymbolIndex), making
+// this O(1); indexes that loaded without it build the table once on the
+// first lookup (see below), so no path pays a per-call linear scan.
 // Callers only iterate the result — the cached slices are shared.
 func (ix *Index) symbolsFor(name string) []Symbol {
-	if ix.symbolIdx != nil {
-		return ix.symbolIdx[name]
-	}
-	var out []Symbol
-	for _, s := range ix.Symbols {
-		if s.Name == name || s.FullName() == name {
-			out = append(out, s)
+	// The name -> symbols table is built eagerly by the build/update paths
+	// (buildSymbolIndex) and lazily on the first lookup for indexes that
+	// loaded without it. The sync.Once makes the deferred build safe under
+	// concurrent readers; the table is derived from the immutable symbol
+	// table, so the eager and deferred paths produce identical results.
+	c := ix.getCache()
+	c.symbolOnce.Do(func() {
+		c.symbolIdx = buildSymbolTable(ix.Symbols)
+	})
+	return c.symbolIdx[name]
+}
+
+// buildSymbolTable computes the name -> symbols map that turns symbolsFor
+// from a full-index linear scan into a map lookup. Per-name slice order
+// matches the linear scan's (append in Symbols order), so results are
+// identical.
+func buildSymbolTable(symbols []Symbol) map[string][]Symbol {
+	m := make(map[string][]Symbol, len(symbols)*2)
+	for _, s := range symbols {
+		m[s.Name] = append(m[s.Name], s)
+		if fn := s.FullName(); fn != s.Name {
+			m[fn] = append(m[fn], s)
 		}
 	}
-	return out
+	return m
 }
 
 // buildSymbolIndex precomputes the name -> symbols map that turns
 // symbolsFor from a full-index linear scan into a map lookup. Called by
 // the build paths before the finalize passes (computeCallers and
 // addDispatchEdges call symbolsFor per call edge, which made finalize
-// O(edges x symbols) — the dominant build cost on symbol-heavy repos).
-// Per-name slice order matches the linear scan's (append in Symbols
-// order), so results are identical.
+// O(edges x symbols) — the dominant build cost on symbol-heavy repos) and
+// by the SQLite store before its load-time computeCallers. The sync.Once
+// makes it idempotent — a Load that skipped the eager pass has the table
+// built on the first query instead — and safe under concurrent first
+// access.
 func (ix *Index) buildSymbolIndex() {
-	ix.symbolIdx = make(map[string][]Symbol, len(ix.Symbols)*2)
-	for _, s := range ix.Symbols {
-		ix.symbolIdx[s.Name] = append(ix.symbolIdx[s.Name], s)
-		if fn := s.FullName(); fn != s.Name {
-			ix.symbolIdx[fn] = append(ix.symbolIdx[fn], s)
-		}
-	}
+	c := ix.getCache()
+	c.symbolOnce.Do(func() {
+		c.symbolIdx = buildSymbolTable(ix.Symbols)
+	})
 }
 
 // FindSymbol returns the first symbol matching name, exact on Name or
@@ -1636,13 +1741,16 @@ func (ix *Index) Search(pattern string, limit int) []Symbol {
 
 // kindSymbols returns the precomputed symbol bucket for a search kind
 // ("func", "method", "type", "entry", ...). ok is false when the index has
-// no kind index (hand-built Index structs that never ran reindexByFile), and
-// Search falls back to the linear scan — the pre-index behavior.
+// no kind index, and Search falls back to the linear scan — the
+// pre-index behavior. The bucket is built on the first call (sync.Once) if
+// the index loaded without one, so a kind-filtered Search pays one
+// O(symbols) pass and then serves O(bucket) lookups.
 func (ix *Index) kindSymbols(kind string) ([]Symbol, bool) {
-	if ix.kindIdx == nil {
-		return nil, false
-	}
-	syms, ok := ix.kindIdx[kind]
+	c := ix.getCache()
+	c.kindOnce.Do(func() {
+		c.kindIdx = buildKindTable(ix.Symbols)
+	})
+	syms, ok := c.kindIdx[kind]
 	return syms, ok
 }
 

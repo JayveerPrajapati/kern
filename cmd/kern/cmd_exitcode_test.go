@@ -7,7 +7,7 @@ import (
 	"testing"
 
 	"github.com/JayveerPrajapati/kern/internal/index"
-	"github.com/JayveerPrajapati/kern/internal/verification"
+	"github.com/JayveerPrajapati/kern/internal/verdict"
 )
 
 // TestRunDoctorExitsNonzeroOnFail pins the e2e round-2 fix: `kern doctor`
@@ -127,16 +127,16 @@ func TestParseSwallowBadFlagFails(t *testing.T) {
 // outcomes and exit 0.
 func TestVerifyExitCodeContract(t *testing.T) {
 	cases := []struct {
-		verdict verification.Verdict
+		verdict verdict.Verdict
 		want    int
 	}{
-		{verification.VerdictPass, 0},
-		{verification.VerdictPassWithWarning, 0},
-		{verification.VerdictWarn, 0},
-		{verification.VerdictSkipped, 0},
-		{verification.VerdictFail, 1},
-		{verification.VerdictBlocked, 0},
-		{verification.VerdictNotRun, 0},
+		{verdict.VerdictPass, 0},
+		{verdict.VerdictPassWithWarning, 0},
+		{verdict.VerdictWarn, 0},
+		{verdict.VerdictSkipped, 0},
+		{verdict.VerdictFail, 1},
+		{verdict.VerdictBlocked, 0},
+		{verdict.VerdictNotRun, 0},
 	}
 	for _, c := range cases {
 		if got := verifyExitCode(c.verdict); got != c.want {
@@ -149,10 +149,10 @@ func TestVerifyExitCodeContract(t *testing.T) {
 // a FAIL verdict; WARN and SKIPPED have their own wording, and a SKIPPED
 // verdict names the reason (e.g. "govulncheck not installed").
 func TestVerifyOutcomeLineWording(t *testing.T) {
-	skipped := verification.VerificationResult{
-		Verdict: verification.VerdictSkipped,
-		CVE: &verification.CVEResult{
-			Status: verification.StatusSkipped,
+	skipped := verdict.VerificationResult{
+		Verdict: verdict.VerdictSkipped,
+		CVE: &verdict.CVEResult{
+			Status: verdict.StatusSkipped,
 			Detail: "govulncheck not installed; install with: go run golang.org/x/vuln/cmd/govulncheck@latest",
 		},
 	}
@@ -166,13 +166,13 @@ func TestVerifyOutcomeLineWording(t *testing.T) {
 	if strings.Contains(line, "verification FAILED") {
 		t.Errorf("SKIPPED outcome line must not say FAILED, got: %s", line)
 	}
-	if got := verifyOutcomeLine(verification.VerificationResult{Verdict: verification.VerdictFail}); !strings.Contains(got, "verification FAILED") {
+	if got := verifyOutcomeLine(verdict.VerificationResult{Verdict: verdict.VerdictFail}); !strings.Contains(got, "verification FAILED") {
 		t.Errorf("FAIL outcome line must say FAILED, got: %s", got)
 	}
-	if got := verifyOutcomeLine(verification.VerificationResult{Verdict: verification.VerdictWarn}); !strings.Contains(got, "verification WARNED") {
+	if got := verifyOutcomeLine(verdict.VerificationResult{Verdict: verdict.VerdictWarn}); !strings.Contains(got, "verification WARNED") {
 		t.Errorf("WARN outcome line must say WARNED, got: %s", got)
 	}
-	if got := verifyOutcomeLine(verification.VerificationResult{Verdict: verification.VerdictSkipped}); !strings.Contains(got, "verification SKIPPED") {
+	if got := verifyOutcomeLine(verdict.VerificationResult{Verdict: verdict.VerdictSkipped}); !strings.Contains(got, "verification SKIPPED") {
 		t.Errorf("bare SKIPPED outcome line must still say SKIPPED, got: %s", got)
 	}
 }
@@ -224,6 +224,27 @@ func TestRunMutationMinScoreGate(t *testing.T) {
 	// Gate satisfied: 0-score vs --min-score 0 must exit 0.
 	if code := runMutationTest([]string{dir, "--min-score", "0"}); code != 0 {
 		t.Fatalf("satisfied gate must exit 0, got %d", code)
+	}
+}
+
+// TestRunVerifyBuildNoProjectTypeSkipsAndReportsSkipped pins the D1 exit-code flip end to
+// end: `kern verify --types build` on a directory with no supported project
+// type (zero candidates — no go.mod, no source files) used to FAIL with exit
+// 1 and a bare "build: FAIL (0s)". It must now SKIP: exit 0, with the
+// "SKIPPED" reason surfaced in the human output (F1: nothing to build is a
+// skip, never a failure).
+func TestRunVerifyBuildNoProjectTypeSkipsAndReportsSkipped(t *testing.T) {
+	t.Setenv("KERN_ALLOW_EXEC", "1")
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte("# docs\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out := captureStdout(t, func() { runVerify([]string{"--types", "build", "--root", dir}) })
+	if !strings.Contains(out, "build: SKIPPED no supported project type detected (nothing to build)") {
+		t.Fatalf("verify output must surface the build skip reason, got:\n%s", out)
+	}
+	if strings.Contains(out, "FAIL") {
+		t.Fatalf("no-project-type verify must not FAIL (exit must be 0), got:\n%s", out)
 	}
 }
 

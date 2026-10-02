@@ -62,6 +62,25 @@ func TestRunBlueprintToolCLI_VerdictExitMapping(t *testing.T) {
 
 // TestBlueprintVerdict unit-tests the payload mapping directly, including
 // malformed input falling back to ("", 0).
+// TestRunBlueprintToolCLI_RootFlagNotNLPositional pins --root as a real
+// flag for the blueprint family: `kern explain-finding --root X --finding Y`
+// parses --root through runBlueprintToolCLI's flag switch (its usage string
+// now documents --root as a bare token), and a bare NL-word positional still
+// exits 2 with the expected-flags message. The expectedFlags-driven message
+// itself is pinned by TestUsageBlueprintToolFlagsMatchExpectedFlags.
+func TestRunBlueprintToolCLI_RootFlagNotNLPositional(t *testing.T) {
+	build := func(root, source, payload string) map[string]any {
+		return map[string]any{"repo": root, "source": source, "payload": payload}
+	}
+	h := stubBlueprintHandler{text: `{"status":"PASS","exit_code":0}`}
+	if got := runBlueprintToolCLI([]string{"--root", "/tmp/root", "--finding", `{"rule_id":"x"}`}, h, build, "usage"); got != 0 {
+		t.Fatalf("--root parsed as a flag: exit = %d, want 0", got)
+	}
+	if got := runBlueprintToolCLI([]string{"add a Greet command"}, h, build, "usage"); got != 2 {
+		t.Fatalf("NL positional: exit = %d, want 2", got)
+	}
+}
+
 func TestBlueprintVerdict(t *testing.T) {
 	cases := []struct {
 		out      string

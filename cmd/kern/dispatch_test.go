@@ -271,7 +271,7 @@ func TestSnakeAliasDispatchesSameAsKebab(t *testing.T) {
 // TestSnakeAliasDispatchesSameAsKebab); this test covers the listing only.
 func TestHelpListingOmitsAliases(t *testing.T) {
 	seen := map[string]bool{}
-	for _, out := range []string{captureStderrExitFlat(t), captureStderrExitGrouped(t)} {
+	for _, out := range []string{captureCatalogFlat(t), captureCatalogGrouped(t)} {
 		for name := range commandTable {
 			if strings.Contains(out, "  kern "+name) {
 				seen[name] = true
@@ -288,14 +288,31 @@ func TestHelpListingOmitsAliases(t *testing.T) {
 	}
 }
 
-// captureStderrExitFlat renders the flat `kern --all` listing to stderr.
-func captureStderrExitFlat(t *testing.T) string {
-	t.Helper()
-	return captureStderr(t, func() { usageAll(true) })
+// TestUsageAllPrintsToStdout pins the catalog stream contract: `kern --all`
+// (and `kern help --all`) are explicitly requested listings and must be
+// pipeable (`kern --all | grep …`), so usageAll writes to stdout — error and
+// usage banners keep stderr. A stderr catalog regresses scripting workflows.
+func TestUsageAllPrintsToStdout(t *testing.T) {
+	out := captureCatalogGrouped(t)
+	if !strings.Contains(out, "Complete CLI catalog") {
+		t.Fatalf("grouped catalog header missing from stdout:\n%s", out)
+	}
+	if strings.Count(out, "\n  kern ") == 0 && !strings.HasPrefix(out, "\n  kern ") {
+		t.Fatalf("grouped catalog lists no commands on stdout:\n%s", out)
+	}
+	if leaked := captureStderr(t, func() { usageAll(false) }); leaked != "" {
+		t.Errorf("grouped catalog leaked to stderr:\n%s", leaked)
+	}
 }
 
-// captureStderrExitGrouped renders the grouped `kern --all` listing.
-func captureStderrExitGrouped(t *testing.T) string {
+// captureCatalogFlat renders the flat `kern --all` listing to stdout.
+func captureCatalogFlat(t *testing.T) string {
 	t.Helper()
-	return captureStderr(t, func() { usageAll(false) })
+	return captureStdout(t, func() { usageAll(true) })
+}
+
+// captureCatalogGrouped renders the grouped `kern --all` listing.
+func captureCatalogGrouped(t *testing.T) string {
+	t.Helper()
+	return captureStdout(t, func() { usageAll(false) })
 }

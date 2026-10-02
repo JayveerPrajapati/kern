@@ -234,8 +234,7 @@ func TestLogProfileSlugNoPathTraversal(t *testing.T) {
 }
 
 // TestPromptLLMSkippedWhenNoBackendConfigured: with no --llm, the LLM stage
-// DEFAULTS to the provider chain (dogfooding G-MED — it used to be gated on
-// --llm/KERN_MODEL and silently ignored the auto chain). With an unreachable
+// DEFAULTS to the provider chain. With an unreachable
 // provider the attempt fails fast and Prompt sets LLMSkipped with the honest
 // fallback message; the deterministic path still runs. The provider is pinned
 // to an unreachable ollama so the test is hermetic (the auto chain would

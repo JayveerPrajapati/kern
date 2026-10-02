@@ -9,6 +9,7 @@ import (
 
 	"github.com/JayveerPrajapati/kern/internal/app"
 	"github.com/JayveerPrajapati/kern/internal/governance"
+	"github.com/JayveerPrajapati/kern/internal/tasklife"
 )
 
 // agentRegistryFixture writes a governance agent registry at
@@ -85,7 +86,7 @@ func TestAgentMessageKnownTaskQueues(t *testing.T) {
 	if err != nil {
 		t.Fatalf("app.New: %v", err)
 	}
-	ts := app.NewTaskService(p, nil)
+	ts := tasklife.NewTaskService(p, nil)
 	task, err := ts.Create("agent-message task validation")
 	if err != nil {
 		t.Fatalf("create task: %v", err)

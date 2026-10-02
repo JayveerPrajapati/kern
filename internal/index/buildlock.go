@@ -1,6 +1,7 @@
 package index
 
 import (
+	"context"
 	"errors"
 	"log"
 	"time"
@@ -47,11 +48,15 @@ func tryBuildLock(root string) (release func(), acquired bool) {
 // cross-process build lock so concurrent kern processes that detect the same
 // staleness share ONE rebuild instead of each paying the full cost (M3). It
 // is the debounce layer under LoadOrBuild, EnsureFresh and BuildPersisted.
+// It is the context.Background() wrapper of debouncedRebuildContext; the
+// ctx-taking form is the one callers with a cancellation/deadline should use.
 //
 // check re-loads the persisted index from disk and reports whether it is
 // fresh — the same freshness decision that put the caller on the rebuild
-// path. rebuild performs the actual update/build cascade and returns the
-// rebuilt payload (the index, or an ensure-fresh result).
+// path. rebuild performs the actual update/build cascade on the index check
+// returned (prev — nil when no lock was ever acquired and check never ran,
+// i.e. the bounded-wait fallback), so a staleness observation made by check
+// (e.g. the retained content-walk snapshot) travels to the rebuild step.
 //
 // Conservative by construction:
 //   - the lock is only taken on the rebuild path; the fast fresh-load path
@@ -62,35 +67,60 @@ func tryBuildLock(root string) (release func(), acquired bool) {
 //   - when another live process holds the lock we poll for up to
 //     BuildLockWait, re-checking freshness after each acquisition — a
 //     completed rebuild is reused, never re-run;
+//   - the poll wait is context-aware: a cancelled/expired ctx aborts the
+//     wait immediately with ctx.Err() instead of stalling the caller for the
+//     full budget;
 //   - a holder that exceeds the budget, an unacquirable lock, or any other
 //     lock weirdness falls back to rebuilding directly — we never hang
 //     forever and never serve a stale index as fresh without re-checking.
-func debouncedRebuild[T any](root string, check func() (*T, bool), rebuild func() (*T, error)) (*T, error) {
+func debouncedRebuild[T any](root string, check func() (*T, bool), rebuild func(prev *T) (*T, error)) (*T, error) {
+	return debouncedRebuildContext(context.Background(), root, check, rebuild)
+}
+
+// debouncedRebuildContext is the context-aware form of debouncedRebuild: the
+// poll loop observes ctx, and a cancellation or deadline expiry aborts the
+// wait immediately (returning ctx.Err()) instead of sleeping out the
+// BuildLockWait budget — a wedged lock holder can no longer stall a
+// rebuild-needing tool call past its own deadline. The bounded-wait fallback
+// and all freshness guarantees are unchanged.
+func debouncedRebuildContext[T any](ctx context.Context, root string, check func() (*T, bool), rebuild func(prev *T) (*T, error)) (*T, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	release, acquired := tryBuildLock(root)
 	if acquired {
 		defer release()
-		if ix, fresh := check(); fresh {
+		ix, fresh := check()
+		if fresh {
 			return ix, nil
 		}
-		return rebuild()
+		return rebuild(ix)
 	}
 	log.Printf("kern index: another process is rebuilding the index for %s; waiting (up to %s)", root, BuildLockWait)
 	deadline := time.Now().Add(BuildLockWait)
 	for time.Now().Before(deadline) {
-		time.Sleep(buildLockPoll)
+		timer := time.NewTimer(buildLockPoll)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			log.Printf("kern index: build lock wait for %s cancelled (%v)", root, ctx.Err())
+			return nil, ctx.Err()
+		case <-timer.C:
+		}
 		release, acquired = tryBuildLock(root)
 		if acquired {
 			defer release()
-			if ix, fresh := check(); fresh {
+			ix, fresh := check()
+			if fresh {
 				log.Printf("kern index: reused index for %s rebuilt by another process", root)
 				return ix, nil
 			}
-			return rebuild()
+			return rebuild(ix)
 		}
 	}
 	// Bounded wait exhausted: the holder is either very slow or wedged. Fall
 	// back to rebuilding directly (never hang); the rebuild itself is
 	// concurrency-safe (SQLite WAL with the JSON fallback under contention).
 	log.Printf("kern index: build lock for %s held longer than %s; rebuilding without it", root, BuildLockWait)
-	return rebuild()
+	return rebuild(nil)
 }

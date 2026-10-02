@@ -23,7 +23,7 @@ func statsFixtureDir(t *testing.T) string {
 	day := time.Now().UTC().Format("2006-01-02") + ".jsonl"
 	lines := []string{
 		`{"time":"2026-09-25T10:00:00Z","operation":"tool_call","tool":"kern_search","agent":"planner","after_tokens":120}`,
-		`{"operation":"optimize_prompt","tool":"kern_optimize_prompt","agent":"coder","model":"gpt-4o","before_tokens":1000,"after_tokens":400,"saved_tokens":600,"saved_percent":60,"cost_saved_usd":0.0015}`,
+		`{"operation":"optimize_prompt","tool":"kern_optimize","agent":"coder","model":"gpt-4o","before_tokens":1000,"after_tokens":400,"saved_tokens":600,"saved_percent":60,"cost_saved_usd":0.0015}`,
 		`{"operation":"optimize_prompt","before_tokens":100,"after_tokens":50,"saved_tokens":50,"saved_percent":50,"cost_saved_usd":0.000125}`,
 	}
 	if err := os.WriteFile(filepath.Join(dir, day), []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {

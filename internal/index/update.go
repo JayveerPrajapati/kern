@@ -2,7 +2,6 @@ package index
 
 import (
 	"fmt"
-	"os"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -44,6 +43,33 @@ import (
 // Any internal error returns an error so callers can fall back to a full
 // Build; the returned index is nil on error.
 func Update(root string, prev *Index) (*Index, error) {
+	return update(root, prev, nil)
+}
+
+// UpdateWithSnapshot is Update reusing the content walk a staleness check
+// already did on prev: prev.staleSnapshot (retained by the most recent
+// Stale()/StaleWithProof() that ran a content walk) carries each file's hash
+// and the mtime observed in that same walk. A file whose CURRENT mtime (from
+// the update's own phase-1 stat walk) still matches the snapshot's is
+// provably unmodified since the staleness decision, so its recorded hash is
+// used to decide reuse against prev.FileHashes without re-reading the file —
+// eliminating the second full tree walk+hash on the stale path. Every other
+// file (edited between the two walks, added, missing from the snapshot)
+// falls through to Update's exact read+hash path, so the merged index
+// reflects the live tree exactly as Update would; the optimization only
+// ever skips reads for files whose mtime proves them unchanged (the same
+// trust model reuseByMtime already relies on). When prev has no retained
+// observation (nil snapshot — no staleness check ran, or the last check
+// decided without a content walk), UpdateWithSnapshot behaves exactly like
+// Update.
+func UpdateWithSnapshot(root string, prev *Index) (*Index, error) {
+	if prev == nil {
+		return update(root, prev, nil)
+	}
+	return update(root, prev, prev.retainedSnapshot())
+}
+
+func update(root string, prev *Index, snap *FreshnessSnapshot) (*Index, error) {
 	if prev == nil {
 		return nil, fmt.Errorf("index.Update: nil previous index")
 	}
@@ -189,7 +215,7 @@ func Update(root string, prev *Index) (*Index, error) {
 		// Small tree: apply jobs serially in lexical order — byte-identical
 		// to the pool path, exactly like buildParallel's bypass.
 		for _, j := range jobs {
-			ur := updateComputeFile(prev, j, callsByFile, inheritsByFile)
+			ur := updateComputeFile(prev, j, snap, callsByFile, inheritsByFile)
 			if ur.r.readErr || ur.r.skip {
 				continue
 			}
@@ -229,7 +255,7 @@ func Update(root string, prev *Index) (*Index, error) {
 					if idx >= int64(len(jobs)) {
 						return
 					}
-					results <- updateComputeFile(prev, jobs[idx], callsByFile, inheritsByFile)
+					results <- updateComputeFile(prev, jobs[idx], snap, callsByFile, inheritsByFile)
 				}
 			}()
 		}
@@ -341,14 +367,46 @@ type updateResult struct {
 // never touches ix and never writes to prev — so it is safe to run
 // concurrently in the worker pool. prev.FileHashes and prev.fileResults are
 // only read here; nothing writes them until replay completes.
-func updateComputeFile(prev *Index, j fileJob, callsByFile map[string]map[string][]CallEdge, inheritsByFile map[string]map[string][]string) updateResult {
+func updateComputeFile(prev *Index, j fileJob, snap *FreshnessSnapshot, callsByFile map[string]map[string][]CallEdge, inheritsByFile map[string]map[string][]string) updateResult {
 	// Fast path: in-memory prior with an unchanged mtime — skip the read +
 	// hash entirely (same trust model as Build's reuseByMtime).
 	if r, ok := reuseByMtime(prev, j.rel, j.mtime); ok {
 		r.seq = j.seq
 		return updateResult{r: r, reused: true}
 	}
-	src, serr := os.ReadFile(j.path)
+	// Staleness-walk reuse (M5a): the freshness check that put the caller on
+	// the update path already read and hashed this file (snap, retained by
+	// Stale()/StaleWithProof()), and the file's mtime is unchanged since that
+	// walk — so the recorded hash is provably still the current content hash.
+	// Skip the read+hash and go straight to the prev.FileHashes comparison.
+	// A file edited between the staleness walk and this walk has a different
+	// mtime and falls through to the read path below, so the merge always
+	// reflects the live tree (same trust model as reuseByMtime: an edit that
+	// does not bump the mtime is invisible, exactly as it already is to
+	// staleness detection and Build's incremental reuse).
+	if snap != nil && snap.Hashes != nil {
+		if h, ok := snap.Hashes[j.rel]; ok {
+			if m, ok := snap.Mtimes[j.rel]; ok && m == j.mtime {
+				if ph, ok := prev.FileHashes[j.rel]; ok && ph == h {
+					// Unchanged since prev was built: reuse its contribution
+					// verbatim instead of re-parsing (identical to the
+					// hash-match branch below).
+					if r, ok := prev.fileResults[j.rel]; ok {
+						r.mtime = j.mtime
+						r.seq = j.seq
+						r.pkg = copyPkg(r.pkg)
+						return updateResult{r: r, reused: true}
+					}
+					r := reconstructFileResult(prev, j.rel, ph, j.mtime, callsByFile, inheritsByFile)
+					r.seq = j.seq
+					return updateResult{r: r, reused: true}
+				}
+				// Changed vs prev (snapshot hash differs): extraction needs the
+				// file contents anyway — fall through to the read path.
+			}
+		}
+	}
+	src, serr := readFile(j.path)
 	if serr != nil {
 		// Skip unreadable files (e.g. broken symlinks) instead of aborting
 		// the whole update; the replay skips readErr results exactly like

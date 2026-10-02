@@ -9,7 +9,7 @@ import (
 )
 
 // `kern mcp tools` is the discoverability front door for the MCP catalog:
-// the default 11-tool advertisement hides the long tail behind kern_meta,
+// the default 22-tool advertisement hides the long tail behind kern_meta,
 // so the listing must show every tool grouped by category.
 func TestMCPToolsListsCatalog(t *testing.T) {
 	out := captureStdout(t, func() { runMCPToolsList(nil) })

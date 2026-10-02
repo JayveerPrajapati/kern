@@ -7,6 +7,7 @@ import (
 
 	"github.com/JayveerPrajapati/kern/internal/agent"
 	"github.com/JayveerPrajapati/kern/internal/app"
+	"github.com/JayveerPrajapati/kern/internal/tasklife"
 )
 
 // runDeploy implements `kern deploy <task-id> [--version V]`. Routes through
@@ -23,7 +24,7 @@ func runDeploy(rest []string) {
 	if err != nil {
 		fatal("could not load project: %v — run kern index first", err)
 	}
-	ts := app.NewTaskService(p, nil)
+	ts := tasklife.NewTaskService(p, nil)
 
 	t, err := ts.Deploy(args[0], f.version)
 	if err != nil {

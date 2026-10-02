@@ -87,3 +87,35 @@ func BenchmarkIndexBuildLarge(b *testing.B) {
 		}
 	}
 }
+
+// BenchmarkIndexLoad measures the warm persisted-store load — the path every
+// kern command pays at startup. The index is built and saved once, outside
+// the timed loop, and each iteration loads it from disk.
+//
+// Run with -tags nosqlite to exercise the binary-snapshot fast path (the
+// JSON fallback path applies the same post-processing); the default build
+// exercises the SQLite-primary path. The load path used to run three
+// O(symbols) map-construction passes (initMaps + reindexByFile +
+// buildSymbolIndex) on every Load; the lookup caches are now deferred to the
+// first query, so this benchmark tracks the remaining load cost.
+func BenchmarkIndexLoad(b *testing.B) {
+	dir := benchTree(b, 12, 8)
+	ix, err := Build(dir)
+	if err != nil {
+		b.Fatal(err)
+	}
+	if err := ix.Save(); err != nil {
+		b.Fatal(err)
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		got, err := Load(dir)
+		if err != nil {
+			b.Fatal(err)
+		}
+		if len(got.Symbols) == 0 {
+			b.Fatal("Load produced no symbols")
+		}
+	}
+}

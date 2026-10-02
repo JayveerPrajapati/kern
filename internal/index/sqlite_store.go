@@ -845,7 +845,10 @@ func (s *SQLiteStore) Load() (*Index, error) {
 	ix.computePrecisionByLang()
 	ix.computeCallers()
 	ix.measureCallResolution()
-	ix.reindexByFile()
+	// SymbolsByFile is built eagerly (exported field read directly by
+	// consumers after Load); the kindIdx lookup buckets are deferred to the
+	// first kind-filtered Search, matching the JSON/snapshot load paths.
+	ix.buildSymbolsByFile()
 	return ix, nil
 }
 

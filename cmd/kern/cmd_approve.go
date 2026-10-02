@@ -12,6 +12,7 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/gates"
 	"github.com/JayveerPrajapati/kern/internal/governance"
 	"github.com/JayveerPrajapati/kern/internal/storage"
+	"github.com/JayveerPrajapati/kern/internal/tasklife"
 )
 
 // runApprove implements `kern approve [id] [--reject --reason "..." --approver "..."]`.
@@ -144,7 +145,7 @@ func decideApproval(root, verb, id, approver string, approve bool, reason string
 	if err != nil {
 		fatal("%s: could not load project: %v — run kern index first", verb, err)
 	}
-	ts := app.NewTaskService(p, nil).WithAgentID(approver)
+	ts := tasklife.NewTaskService(p, nil).WithAgentID(approver)
 
 	a, err := ts.ResolveApprovalForTask(id, approver, approve, reason)
 	if err != nil {

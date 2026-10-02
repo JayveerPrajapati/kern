@@ -11,9 +11,9 @@ import (
 )
 
 // Blueprint change-firewall CLI surface. These are the thin CLI twins of
-// the kern_validate_proposed / kern_explain_finding / kern_repair_guidance
-// MCP tools (same handlers); kern_validate_staged is served by the existing
-// `kern diff-gate`.
+// the kern_validate_proposed / kern_explain_finding / kern_repair (action=
+// guidance) MCP tools (same handlers); kern_validate_staged is served by the
+// existing `kern diff-gate`.
 
 // runBlueprintToolCLI executes one blueprint handler with map args built
 // from --root/--source/--files/--finding flags and prints the result.
@@ -144,7 +144,7 @@ func runValidateProposed(rest []string) {
 }
 
 func runExplainFinding(rest []string) {
-	usage := "usage: kern explain-finding --finding <json> [--root ROOT]"
+	usage := "usage: kern explain-finding --finding <json> [--root ROOT]\n  options:\n    --finding          blueprint gate finding JSON (required)\n    --root             repository root (default: .)"
 	build := func(root, source, payload string) map[string]any {
 		var finding any
 		if payload != "" {
@@ -171,7 +171,7 @@ func runExplainFinding(rest []string) {
 }
 
 func runRepairGuidance(rest []string) {
-	usage := "usage: kern repair-guidance --finding <json> [--root ROOT]"
+	usage := "usage: kern repair-guidance --finding <json> [--root ROOT]\n  options:\n    --finding          blueprint gate finding JSON (required)\n    --root             repository root (default: .)"
 	build := func(root, source, payload string) map[string]any {
 		var finding any
 		if payload != "" {

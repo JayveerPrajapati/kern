@@ -6,6 +6,7 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/agent"
 	"github.com/JayveerPrajapati/kern/internal/app"
 	"github.com/JayveerPrajapati/kern/internal/eventbus"
+	"github.com/JayveerPrajapati/kern/internal/tasklife"
 	"os"
 	"sort"
 	"strings"
@@ -68,7 +69,7 @@ func runTask(rest []string) {
 	if err != nil {
 		fatal("could not load project: %v — run kern index first", err)
 	}
-	ts := app.NewTaskService(p, eventbus.New()).WithPRProvider(app.AutoPRProvider())
+	ts := tasklife.NewTaskService(p, eventbus.New()).WithPRProvider(tasklife.AutoPRProvider())
 	t, ok := ts.Get(id)
 	if !ok {
 		fatal("task not found: %s", id)
@@ -126,7 +127,7 @@ func runTaskResume(root, id string) {
 	if err != nil {
 		fatal("could not load project: %v — run kern index first", err)
 	}
-	ts := app.NewTaskService(p, eventbus.New())
+	ts := tasklife.NewTaskService(p, eventbus.New())
 	t, err := ts.Resume(id)
 	if err != nil {
 		fatal("resume: %v", err)
@@ -142,7 +143,7 @@ func runTaskReplay(root, id string) {
 	if err != nil {
 		fatal("could not load project: %v — run kern index first", err)
 	}
-	ts := app.NewTaskService(p, eventbus.New())
+	ts := tasklife.NewTaskService(p, eventbus.New())
 	if ts.Snapshots() == nil {
 		fatal("snapshot store not available")
 	}
@@ -189,7 +190,7 @@ func runTaskCancel(root, id string) {
 	if err != nil {
 		fatal("could not load project: %v — run kern index first", err)
 	}
-	ts := app.NewTaskService(p, eventbus.New())
+	ts := tasklife.NewTaskService(p, eventbus.New())
 	if err := ts.Cancel(id, "user requested"); err != nil {
 		fatal("cancel: %v", err)
 	}
@@ -202,7 +203,7 @@ func runTaskPause(root, id string) {
 	if err != nil {
 		fatal("could not load project: %v — run kern index first", err)
 	}
-	ts := app.NewTaskService(p, eventbus.New())
+	ts := tasklife.NewTaskService(p, eventbus.New())
 	if err := ts.Pause(id, "user requested"); err != nil {
 		fatal("pause: %v", err)
 	}
@@ -216,7 +217,7 @@ func runTaskEfficiency(root, id string) {
 	if err != nil {
 		fatal("could not load project: %v — run kern index first", err)
 	}
-	ts := app.NewTaskService(p, eventbus.New())
+	ts := tasklife.NewTaskService(p, eventbus.New())
 	t, ok := ts.Get(id)
 	if !ok {
 		fatal("task not found: %s", id)
@@ -245,7 +246,7 @@ func runTaskRetry(root, id string) {
 	if err != nil {
 		fatal("could not load project: %v — run kern index first", err)
 	}
-	ts := app.NewTaskService(p, eventbus.New())
+	ts := tasklife.NewTaskService(p, eventbus.New())
 	t, err := ts.Retry(id)
 	if err != nil {
 		fatal("retry: %v", err)
@@ -276,7 +277,7 @@ func runTaskList(root string) {
 	if err != nil {
 		fatal("could not load project: %v — run kern index first", err)
 	}
-	ts := app.NewTaskService(p, eventbus.New()).WithPRProvider(app.AutoPRProvider())
+	ts := tasklife.NewTaskService(p, eventbus.New()).WithPRProvider(tasklife.AutoPRProvider())
 	seen := map[string]*agent.Task{}
 	var all []*agent.Task
 	for _, t := range ts.List() {

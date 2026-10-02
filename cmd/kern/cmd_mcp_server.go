@@ -20,7 +20,7 @@ import (
 func runMCP(rest []string) {
 	// `kern mcp tools` lists the catalog instead of starting a server —
 	// the discoverability front door for the long tail the default
-	// 11-tool MCP advertisement hides behind kern_meta (KERN_MCP_FULL=1
+	// 22-tool MCP advertisement hides behind kern_meta (KERN_MCP_FULL=1
 	// exposes all; the meta router reaches everything).
 	if len(rest) > 0 && rest[0] == "tools" {
 		runMCPToolsList(rest[1:])
@@ -87,7 +87,7 @@ func runMCP(rest []string) {
 
 // runMCPToolsList prints the full MCP tool catalog, grouped by category.
 // It is the discoverability front door for the ~145-tool surface: the
-// default MCP advertisement exposes 11 starter tools and hides the rest
+// default MCP advertisement exposes 22 starter tools and hides the rest
 // behind the kern_meta router, so a user (or agent) otherwise has no way
 // to enumerate every capability, its phase and its risk level.
 func runMCPToolsList(rest []string) {
@@ -137,7 +137,7 @@ func runMCPToolsList(rest []string) {
 		return
 	}
 
-	fmt.Printf("kern MCP catalog: %d tools (default MCP surface advertises 11; KERN_MCP_FULL=1 exposes all; kern_meta routes to everything)\n\n", len(tools))
+	fmt.Printf("kern MCP catalog: %d tools (default MCP surface advertises 22; KERN_MCP_FULL=1 exposes all; kern_meta routes to everything)\n\n", len(tools))
 	byCat := map[string][]catalog.Tool{}
 	for _, t := range tools {
 		byCat[t.Category] = append(byCat[t.Category], t)

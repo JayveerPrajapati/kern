@@ -341,11 +341,14 @@ func TestResolveDottedMethodNestedClass(t *testing.T) {
 	}
 }
 
-// TestLoadFileBuildsSymbolIndex guards P1b: LoadFile must build the symbol
-// index (symbolIdx) like every other load path (Load, Build, sqlite Load,
-// Update). Without it, FindSymbol/ResolveName fall back to the O(n) linear
-// scan in symbolsFor on every cross-project lookup (cmd_index.go search
-// over N cached indexes = N x O(symbols)).
+// TestLoadFileBuildsSymbolIndex guards P1b: LoadFile must present a usable
+// symbol lookup like every other load path (Load, Build, sqlite Load,
+// Update). The name -> symbols table is now built lazily on the first
+// query (sync.Once-guarded, results identical to the eager build), so the
+// contract is: the first symbolsFor/FindSymbol/ResolveName on a loaded
+// index populates the table and every subsequent lookup is an O(1) map
+// hit — never a per-lookup O(n) linear scan (cmd_index.go search over N
+// cached indexes = N x O(symbols)).
 func TestLoadFileBuildsSymbolIndex(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "hello.go"), []byte("package hello\n\nfunc Hello() {}\n"), 0o644); err != nil {
@@ -363,11 +366,13 @@ func TestLoadFileBuildsSymbolIndex(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadFile: %v", err)
 	}
-	if loaded.symbolIdx == nil {
-		t.Fatal("LoadFile left symbolIdx nil - symbolsFor falls back to the linear scan")
-	}
 	if len(loaded.symbolsFor("Hello")) == 0 {
 		t.Fatal("Hello missing after LoadFile")
+	}
+	// The first lookup must have populated the lookup table: subsequent
+	// lookups are O(1) map hits, not linear scans.
+	if c := loaded.getCache(); c.symbolIdx == nil {
+		t.Fatal("first query left symbolIdx nil - every lookup pays the linear scan")
 	}
 }
 

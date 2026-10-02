@@ -19,3 +19,33 @@ func TestIsLoopbackAddr(t *testing.T) {
 		}
 	}
 }
+
+// TestWantsVersion: -v/--version and the "version" positional all request
+// the version print-and-exit path; empty args and unrelated positionals do
+// not. Mirrors the kern-mcp fix (commit 76031df) so `kern-server version`
+// never silently starts the server.
+func TestWantsVersion(t *testing.T) {
+	tests := []struct {
+		name  string
+		show  bool
+		short bool
+		args  []string
+		want  bool
+	}{
+		{name: "version positional", args: []string{"version"}, want: true},
+		{name: "-v short flag", short: true, want: true},
+		{name: "--version long flag", show: true, want: true},
+		{name: "empty args", want: false},
+		{name: "unrelated positional", args: []string{"serve"}, want: false},
+		// flag.Parse stops at the first positional, so ["--root","x","version"]
+		// leaves only ["version"] in args — flag values never reach wantsVersion.
+		{name: "flag value then positional", args: []string{"version"}, want: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := wantsVersion(tc.show, tc.short, tc.args); got != tc.want {
+				t.Errorf("wantsVersion(show=%v, short=%v, args=%v) = %v, want %v", tc.show, tc.short, tc.args, got, tc.want)
+			}
+		})
+	}
+}

@@ -12,6 +12,7 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/gates"
 	"github.com/JayveerPrajapati/kern/internal/governance"
 	"github.com/JayveerPrajapati/kern/internal/storage"
+	"github.com/JayveerPrajapati/kern/internal/tasklife"
 )
 
 // newRoot returns an isolated project root for command tests: XDG_CACHE_HOME
@@ -120,7 +121,7 @@ func TestApproveGatedTaskAdvances(t *testing.T) {
 	if err != nil {
 		t.Fatalf("app.New: %v", err)
 	}
-	ts := app.NewTaskService(p, nil).WithAgentID("test")
+	ts := tasklife.NewTaskService(p, nil).WithAgentID("test")
 	task, err := ts.Create("deploy the release")
 	if err != nil {
 		t.Fatalf("Create: %v", err)

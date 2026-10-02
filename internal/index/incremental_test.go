@@ -1,6 +1,7 @@
 package index
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -31,15 +32,23 @@ func fixtureTree(t *testing.T) string {
 
 // canonical zeroes the fields that legitimately differ between two
 // equivalent builds (timestamps, diagnostics, non-serialized caches) so
-// reflect.DeepEqual can compare the rest.
+// reflect.DeepEqual can compare the rest. It round-trips through JSON
+// instead of a struct copy: Index embeds a sync.Mutex (staleSnapshot
+// guard), which vet's copylocks forbids copying by value, and the
+// round-trip drops every unexported cache field (fileResults, reusedResults,
+// lookup caches, staleSnapshot) for free.
 func canonical(t *testing.T, ix *Index) *Index {
 	t.Helper()
-	c := *ix
+	b, err := json.Marshal(ix)
+	if err != nil {
+		t.Fatalf("canonical: marshal: %v", err)
+	}
+	var c Index
+	if err := json.Unmarshal(b, &c); err != nil {
+		t.Fatalf("canonical: unmarshal: %v", err)
+	}
 	c.UpdatedAt = time.Time{}
-	c.reusedResults = 0
-	c.fileResults = nil
 	c.Identity = nil // captured per-build (timestamps inside)
-	c.symbolIdx = nil
 	return &c
 }
 

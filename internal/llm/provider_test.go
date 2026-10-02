@@ -48,7 +48,7 @@ func TestNewProviderDefaultOllama(t *testing.T) {
 }
 
 // TestAutoChainOrderCLIsBeforeOllama pins the auto-chain ordering change
-// (dogfooding G-HIGH): with no host session, every locally-installed agent
+//: with no host session, every locally-installed agent
 // CLI must precede Ollama in the chain, and Ollama must be last. On machines
 // with no agent CLI installed the chain degrades to [ollama] — the invariant
 // (all CLIs before ollama) still holds vacuously.
@@ -180,6 +180,27 @@ func TestNewProviderAnthropicMissingKey(t *testing.T) {
 	t.Setenv("ANTHROPIC_API_KEY", "")
 	if _, err := NewProvider(); err == nil {
 		t.Fatal("expected error when ANTHROPIC_API_KEY missing")
+	}
+}
+
+// TestNewProviderDisabledOptsOut pins the "none" opt-out: NewProvider must
+// error at construction (never build a chain, never probe, never touch the
+// network), and the error must name the disabled opt-out so callers'
+// skip-messages stay honest. This is the switch offline/deterministic
+// surfaces (the bench harness) use to pin the LLM stage off.
+func TestNewProviderDisabledOptsOut(t *testing.T) {
+	t.Setenv("KERN_LLM_PROVIDER", "none")
+	_, err := NewProvider()
+	if err == nil {
+		t.Fatal("KERN_LLM_PROVIDER=none must disable the provider (expected a construction error)")
+	}
+	if !strings.Contains(err.Error(), "disabled") {
+		t.Fatalf("error should name the disabled opt-out, got: %v", err)
+	}
+	// "off" and "disabled" are synonyms of the same opt-out.
+	t.Setenv("KERN_LLM_PROVIDER", "off")
+	if _, err := NewProvider(); err == nil {
+		t.Fatal("KERN_LLM_PROVIDER=off must disable the provider too")
 	}
 }
 

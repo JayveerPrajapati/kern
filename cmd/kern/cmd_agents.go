@@ -26,10 +26,7 @@ type agentReport struct {
 // hang: a dead Ollama fails in milliseconds, a hung agent CLI is killed
 // (whole process group) at the deadline, and the full probe finishes in
 // bounded time. The bound must clear the slowest real cold-start in the
-// chain — opencode measures ~40.6s from a cold cache (dogfooding G-LOW: the
-// old 20s bound killed the opencode probe before it could answer, so
-// --probe never reported opencode as a live provider even when installed
-// and healthy). 60s keeps that headroom while staying bounded.
+// chain — opencode measures ~40.6s from a cold cache. 60s keeps that headroom while staying bounded.
 // KERN_PROBE_TIMEOUT overrides the default with a Go duration such as
 // "90s" or "2m"; empty or unparsable values fall back to the 60s default.
 var probeTimeout = func() time.Duration {

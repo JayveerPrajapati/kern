@@ -62,7 +62,7 @@ func TestSummaryRender(t *testing.T) {
 }
 
 func TestSummaryRenderUnknownLang(t *testing.T) {
-	// Dogfooding D-LOW: a file with no detectable language is NOT indexable
+	// a file with no detectable language is NOT indexable
 	// code — Render must say so explicitly instead of returning empty (an
 	// agent reading an empty kern_compact_file result cannot tell "no
 	// symbols" from "tool broken").

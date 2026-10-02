@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -402,5 +404,195 @@ func TestUpdateGuardPinSemantics(t *testing.T) {
 	// Unparseable target + no force: refused.
 	if msg := updateGuardDenial("v0.9.9.1", flags{pin: "latest"}); !strings.Contains(msg, "cannot verify target version") {
 		t.Errorf("pin to unparseable target = %q, want refusal", msg)
+	}
+}
+
+func TestInstallerScriptURLSelectsByGOOS(t *testing.T) {
+	t.Setenv("KERN_INSTALL_SCRIPT_URL", "")
+	if got := installerScriptURL("windows"); !strings.HasSuffix(got, "install.ps1") {
+		t.Errorf("windows must fetch install.ps1, got %s", got)
+	}
+	if got := installerScriptURL("darwin"); !strings.HasSuffix(got, "install.sh") {
+		t.Errorf("darwin must fetch install.sh, got %s", got)
+	}
+	if got := installerScriptURL("linux"); !strings.HasSuffix(got, "install.sh") {
+		t.Errorf("linux must fetch install.sh, got %s", got)
+	}
+}
+
+func TestInstallerScriptURLOverrideWins(t *testing.T) {
+	t.Setenv("KERN_INSTALL_SCRIPT_URL", "https://example.com/custom-install.sh")
+	for _, goos := range []string{"windows", "darwin", "linux"} {
+		if got := installerScriptURL(goos); got != "https://example.com/custom-install.sh" {
+			t.Errorf("override must win for %s, got %s", goos, got)
+		}
+	}
+}
+
+// ---- shim-based runUpdateWindows tests. These run on darwin/linux: the
+// pwsh/curl binaries are replaced by portable #!/bin/sh shims prepended to
+// PATH, so no real PowerShell, curl, or network is involved. fatal*()
+// helpers panic with exitError, so each call is wrapped in a recover.
+
+// writeShim writes an executable #!/bin/sh shim into dir.
+func writeShim(t *testing.T, dir, name, body string) {
+	t.Helper()
+	p := filepath.Join(dir, name)
+	if err := os.WriteFile(p, []byte("#!/bin/sh\n"+body+"\n"), 0o755); err != nil {
+		t.Fatalf("writing shim %s: %v", name, err)
+	}
+}
+
+// catchExit runs fn and returns what it panicked with (fatal* helpers panic
+// with exitError); nil means fn returned normally.
+func catchExit(t *testing.T, fn func()) (recovered any) {
+	t.Helper()
+	defer func() { recovered = recover() }()
+	fn()
+	return recovered
+}
+
+// ps1TempFiles lists leftover kern-update-*.ps1 files in the system temp
+// dir. runUpdateWindows's deferred os.Remove must leave none behind, even
+// when the call fatals mid-flight.
+func ps1TempFiles(t *testing.T) []string {
+	t.Helper()
+	ents, err := os.ReadDir(os.TempDir())
+	if err != nil {
+		t.Fatalf("reading temp dir: %v", err)
+	}
+	var out []string
+	for _, e := range ents {
+		if strings.HasPrefix(e.Name(), "kern-update-") && strings.HasSuffix(e.Name(), ".ps1") {
+			out = append(out, e.Name())
+		}
+	}
+	return out
+}
+
+func sameStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func TestRunUpdateWindowsArgvAndEnv(t *testing.T) {
+	dir := t.TempDir()
+	argvFile := filepath.Join(dir, "argv.txt")
+	envFile := filepath.Join(dir, "env.txt")
+	t.Setenv("TARGV", argvFile)
+	t.Setenv("TENV", envFile)
+	// An inherited KERN_VERSION must NOT shadow the forwarded --pin value.
+	t.Setenv("KERN_VERSION", "inherited-v1")
+	writeShim(t, dir, "pwsh", `echo "$@" > "$TARGV"
+env | grep '^KERN_' > "$TENV"
+exit 0`)
+	writeShim(t, dir, "curl", `out=""
+while [ $# -gt 0 ]; do
+  if [ "$1" = "-o" ]; then out="$2"; shift 2; else shift; fi
+done
+if [ -n "$CURL_FAIL" ]; then exit 1; fi
+if [ -n "$out" ]; then printf '# dummy installer\n' > "$out"; fi
+exit 0`)
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	before := ps1TempFiles(t)
+	recovered := catchExit(t, func() {
+		runUpdateWindows("curl", "https://example.invalid/install.ps1", "upgrade", flags{force: true, pin: "v0.9.9.1"})
+	})
+	if recovered != nil {
+		t.Fatalf("runUpdateWindows panicked: %v", recovered)
+	}
+
+	argv, err := os.ReadFile(argvFile)
+	if err != nil {
+		t.Fatalf("reading argv dump: %v", err)
+	}
+	argvStr := string(argv)
+	for _, want := range []string{"-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "-Action", "upgrade"} {
+		if !strings.Contains(argvStr, want) {
+			t.Errorf("pwsh argv missing %q: %s", want, argvStr)
+		}
+	}
+	if !strings.Contains(argvStr, ".ps1") {
+		t.Errorf("pwsh argv missing a *.ps1 temp path: %s", argvStr)
+	}
+
+	envDump, err := os.ReadFile(envFile)
+	if err != nil {
+		t.Fatalf("reading env dump: %v", err)
+	}
+	envStr := string(envDump)
+	for _, want := range []string{"KERN_FORCE=1", "KERN_VERSION=v0.9.9.1", "KERN_PIN=1"} {
+		if !strings.Contains(envStr, want) {
+			t.Errorf("child env dump missing %q: %s", want, envStr)
+		}
+	}
+	if strings.Contains(envStr, "KERN_VERSION=inherited-v1") {
+		t.Errorf("inherited KERN_VERSION shadowed the forwarded pin:\n%s", envStr)
+	}
+
+	if after := ps1TempFiles(t); !sameStrings(after, before) {
+		t.Errorf("temp .ps1 not removed after runUpdateWindows: before=%v after=%v", before, after)
+	}
+}
+
+func TestRunUpdateWindowsFetchFailure(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("TARGV", filepath.Join(dir, "argv.txt"))
+	t.Setenv("TENV", filepath.Join(dir, "env.txt"))
+	writeShim(t, dir, "pwsh", `echo "$@" > "$TARGV"
+exit 0`)
+	writeShim(t, dir, "curl", `out=""
+while [ $# -gt 0 ]; do
+  if [ "$1" = "-o" ]; then out="$2"; shift 2; else shift; fi
+done
+if [ -n "$CURL_FAIL" ]; then exit 1; fi
+if [ -n "$out" ]; then printf '# dummy installer\n' > "$out"; fi
+exit 0`)
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("CURL_FAIL", "1")
+
+	before := ps1TempFiles(t)
+	recovered := catchExit(t, func() {
+		runUpdateWindows("curl", "https://example.invalid/install.ps1", "upgrade", flags{})
+	})
+	if recovered == nil {
+		t.Fatal("runUpdateWindows must fatal when curl fails")
+	}
+	if after := ps1TempFiles(t); !sameStrings(after, before) {
+		t.Errorf("temp .ps1 not removed after fetch failure: before=%v after=%v", before, after)
+	}
+}
+
+func TestRunUpdateWindowsTempFileRemovedOnInstallerFailure(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("TARGV", filepath.Join(dir, "argv.txt"))
+	t.Setenv("TENV", filepath.Join(dir, "env.txt"))
+	writeShim(t, dir, "pwsh", `echo "$@" > "$TARGV"
+exit 7`)
+	writeShim(t, dir, "curl", `out=""
+while [ $# -gt 0 ]; do
+  if [ "$1" = "-o" ]; then out="$2"; shift 2; else shift; fi
+done
+if [ -n "$out" ]; then printf '# dummy installer\n' > "$out"; fi
+exit 0`)
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	before := ps1TempFiles(t)
+	recovered := catchExit(t, func() {
+		runUpdateWindows("curl", "https://example.invalid/install.ps1", "upgrade", flags{})
+	})
+	if recovered == nil {
+		t.Fatal("runUpdateWindows must fatal when the installer fails")
+	}
+	if after := ps1TempFiles(t); !sameStrings(after, before) {
+		t.Errorf("temp .ps1 not removed after installer failure: before=%v after=%v", before, after)
 	}
 }

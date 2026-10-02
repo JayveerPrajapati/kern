@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"github.com/JayveerPrajapati/kern/internal/app"
 	"github.com/JayveerPrajapati/kern/internal/eventbus"
+	"github.com/JayveerPrajapati/kern/internal/tasklife"
 )
 
 // runArtifacts lists task artifacts or all known artifacts.
@@ -15,7 +16,7 @@ func runArtifacts(rest []string) {
 	if err != nil {
 		fatal("Artifacts: %v", err)
 	}
-	ts := app.NewTaskService(p, eventbus.New()).WithPRProvider(app.AutoPRProvider())
+	ts := tasklife.NewTaskService(p, eventbus.New()).WithPRProvider(tasklife.AutoPRProvider())
 
 	if len(args) >= 1 && args[0] != "" {
 		// List artifacts for a specific task.

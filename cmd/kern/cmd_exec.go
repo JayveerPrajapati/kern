@@ -396,12 +396,25 @@ func runSandbox(rest []string) {
 }
 
 func runExec(rest []string) {
-	if len(rest) > 0 && rest[0] == "--list" {
+	// --list is a real flag, accepted in any position (not just rest[0]):
+	// strip it before the shared parser so `kern exec --lang py --list` or
+	// `kern exec script.py --list` list the runtimes instead of failing with
+	// "unknown flag" (parseFlags has no per-command registry for it).
+	list := false
+	filtered := make([]string, 0, len(rest))
+	for _, a := range rest {
+		if a == "--list" {
+			list = true
+			continue
+		}
+		filtered = append(filtered, a)
+	}
+	if list {
 		fmt.Printf("kern exec: available runtimes: %s\n", strings.Join(script.Available(), ", "))
 		fmt.Printf("  supported languages: %s\n", strings.Join(script.Languages(), ", "))
 		return
 	}
-	f, args := parseFlagsOrDie(rest)
+	f, args := parseFlagsOrDie(filtered)
 	// Script source: positional args win. A lone "-" or a piped stdin
 	// reads the script from stdin; a path to an existing file runs that
 	// file (language from extension); anything else is treated as inline
@@ -511,7 +524,7 @@ func runExec(rest []string) {
 	if f.json {
 		printJSON(res)
 		if res.Err != nil {
-			// Dogfooding C-LOW: an undetectable language is a MISSING
+			// an undetectable language is a MISSING
 			// REQUIRED ARGUMENT (--lang), a usage error — exit 2, not the
 			// runtime-error 1. The runtime/script errors stay at 1.
 			if isUsageExecError(res.Err) {
@@ -526,7 +539,7 @@ func runExec(rest []string) {
 		fmt.Println()
 	}
 	if res.Err != nil {
-		// Dogfooding C-LOW: an undetectable language is a MISSING REQUIRED
+		// an undetectable language is a MISSING REQUIRED
 		// ARGUMENT (--lang), a usage error — exit 2, not the runtime-error 1.
 		if isUsageExecError(res.Err) {
 			fatalUsage("exec: %v", res.Err)
@@ -539,8 +552,7 @@ func runExec(rest []string) {
 // isUsageExecError classifies a script-run error as a usage error (exit 2)
 // vs a runtime error (exit 1). An undetectable language is a MISSING REQUIRED
 // ARGUMENT (--lang) — the caller's fault, so it maps to the usage exit like
-// every other missing-required-arg case (dogfooding C-LOW: it used to exit 1,
-// the runtime-error code, contradicting the exit-code contract).
+// every other missing-required-arg case.
 func isUsageExecError(err error) bool {
 	return err != nil && strings.Contains(err.Error(), "cannot detect language")
 }

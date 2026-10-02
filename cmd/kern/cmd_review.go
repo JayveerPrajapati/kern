@@ -7,6 +7,7 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/app"
 	"github.com/JayveerPrajapati/kern/internal/config"
 	"github.com/JayveerPrajapati/kern/internal/domain"
+	"github.com/JayveerPrajapati/kern/internal/draft"
 	"github.com/JayveerPrajapati/kern/internal/eval"
 	"github.com/JayveerPrajapati/kern/internal/eventbus"
 	"github.com/JayveerPrajapati/kern/internal/governance"
@@ -15,6 +16,8 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/ownership"
 	"github.com/JayveerPrajapati/kern/internal/profiles"
 	"github.com/JayveerPrajapati/kern/internal/skills"
+	"github.com/JayveerPrajapati/kern/internal/tasklife"
+	"github.com/JayveerPrajapati/kern/internal/verdict"
 	"github.com/JayveerPrajapati/kern/internal/verification"
 	"github.com/JayveerPrajapati/kern/internal/whatif"
 	"os"
@@ -55,7 +58,7 @@ func runAnalyze(cmd string, rest []string) {
 	// to `kern risk <change>`; `kern risk` is now a thin wrapper that presets
 	// this lens (surface consolidation T2b).
 	if f.lens == "risk" {
-		ts := app.NewTaskService(p, eventbus.New()).WithPRProvider(app.AutoPRProvider())
+		ts := tasklife.NewTaskService(p, eventbus.New()).WithPRProvider(tasklife.AutoPRProvider())
 		_, text, err := ts.Risk(change)
 		if err != nil {
 			// Audit L7: the error already carries a "risk:" prefix (Platform.Risk
@@ -84,7 +87,7 @@ func runAnalyze(cmd string, rest []string) {
 		// explicit --task asks for an authoritative persisted record
 		// (t-<n>, queryable via `kern task <id>`); a --lens-only run keeps
 		// the ephemeral analysis path (no store pollution).
-		ts := app.NewTaskService(p, eventbus.New()).WithPRProvider(app.AutoPRProvider()).WithTaskPersistence(f.task != "")
+		ts := tasklife.NewTaskService(p, eventbus.New()).WithPRProvider(tasklife.AutoPRProvider()).WithTaskPersistence(f.task != "")
 		if cmd == "plan" {
 			// Kern plan produces a structured domain.Plan via the
 			// control-plane Plan workflow (analyze → memory → impact → risk →
@@ -232,7 +235,7 @@ func runExecute(rest []string) {
 	if err != nil {
 		fatal("Execute: %v", err)
 	}
-	ts := app.NewTaskService(p, eventbus.New()).WithAgentID("cli").WithPRProvider(app.AutoPRProvider())
+	ts := tasklife.NewTaskService(p, eventbus.New()).WithAgentID("cli").WithPRProvider(tasklife.AutoPRProvider())
 	t, diff, v, err := ts.ExecuteAndVerify(string(pb), []string{"build"})
 	if err != nil {
 		fatal("Execute: %v", err)
@@ -282,7 +285,7 @@ func runWhatIf(cmd string, rest []string) {
 	if err != nil {
 		fatal("WhatIf: %v", err)
 	}
-	ts := app.NewTaskService(p, nil).WithPRProvider(app.AutoPRProvider()).WithTaskPersistence(f.task != "")
+	ts := tasklife.NewTaskService(p, nil).WithPRProvider(tasklife.AutoPRProvider()).WithTaskPersistence(f.task != "")
 	t, text, err := ts.WhatIf(whatif.ChangeKind(kind), change, newTarget)
 	if err != nil {
 		fatal("WhatIf: %v", err)
@@ -327,7 +330,7 @@ func runImpact(rest []string) {
 	// the CLI backing for the plugin's kern_impact risk=true flag
 	// (surface consolidation T2b).
 	if f.risk {
-		ts := app.NewTaskService(p, eventbus.New()).WithPRProvider(app.AutoPRProvider())
+		ts := tasklife.NewTaskService(p, eventbus.New()).WithPRProvider(tasklife.AutoPRProvider())
 		_, text, err := ts.Risk(change)
 		if err != nil {
 			if symbolDegrade("risk", change, root, err) {
@@ -345,19 +348,19 @@ func runImpact(rest []string) {
 	// args are still honored for backward compatibility but the primary output is
 	// the structured impact report. Task persistence is gated on --task (F9):
 	// only an explicit --task asks for an authoritative persisted record.
-	ts := app.NewTaskService(p, eventbus.New()).WithPRProvider(app.AutoPRProvider()).WithTaskPersistence(f.task != "")
-	var impactOpts []app.ImpactOption
+	ts := tasklife.NewTaskService(p, eventbus.New()).WithPRProvider(tasklife.AutoPRProvider()).WithTaskPersistence(f.task != "")
+	var impactOpts []tasklife.ImpactOption
 	if f.precision == "strict" {
 		// Strict precision: skip call edges whose caller language is not
 		// "resolved"-precision in the index (they are unknown, not guessable).
-		impactOpts = append(impactOpts, app.ImpactStrict())
+		impactOpts = append(impactOpts, tasklife.ImpactStrict())
 	}
 	if f.runtime {
 		// --runtime folds runtime evidence (data stores, related incidents,
 		// architecture rules) into the impact report. Opt-in: the context
 		// packet + memory recall phases it runs dominate impact latency, so
 		// the default graph-only report stays fast (P0 #2).
-		impactOpts = append(impactOpts, app.ImpactRuntime())
+		impactOpts = append(impactOpts, tasklife.ImpactRuntime())
 	}
 	t, rep, text, err := ts.Impact(change, impactOpts...)
 	if err != nil {
@@ -434,11 +437,11 @@ func runImpact(rest []string) {
 }
 
 // verifyExitCode maps a verification verdict to its process exit code
-// (dogfooding F7/F19): FAIL is the only hard failure (1); WARN and SKIPPED
+//: FAIL is the only hard failure (1); WARN and SKIPPED
 // are reported outcomes and exit 0; PASS/PASS_WITH_WARNING exit 0. The --json
 // and text paths share this single mapping so they can never drift.
-func verifyExitCode(verdict verification.Verdict) int {
-	if verdict == verification.VerdictFail {
+func verifyExitCode(v verdict.Verdict) int {
+	if v == verdict.VerdictFail {
 		return 1
 	}
 	return 0
@@ -449,19 +452,19 @@ func verifyExitCode(verdict verification.Verdict) int {
 // verdict; WARN and SKIPPED are reported outcomes with their own wording, and
 // a SKIPPED verdict names the reason (e.g. "govulncheck not installed",
 // "license manifest missing") when one is recorded.
-func verifyOutcomeLine(v verification.VerificationResult) string {
+func verifyOutcomeLine(v verdict.VerificationResult) string {
 	switch v.Verdict {
-	case verification.VerdictFail:
+	case verdict.VerdictFail:
 		return "verification FAILED — see report above; fix failing checks and rerun kern verify"
-	case verification.VerdictWarn:
+	case verdict.VerdictWarn:
 		return "verification WARNED — see report above; address the warnings and rerun kern verify"
-	case verification.VerdictSkipped:
+	case verdict.VerdictSkipped:
 		line := "verification SKIPPED — missing tools or dependencies are not a hard failure"
 		if reasons := verifySkippedReasons(&v); len(reasons) > 0 {
 			line += ": " + strings.Join(reasons, "; ")
 		}
 		return line + " (install the tool or provide the manifest, then rerun kern verify)"
-	case verification.VerdictPass, verification.VerdictPassWithWarning:
+	case verdict.VerdictPass, verdict.VerdictPassWithWarning:
 		return "verification PASSED — see report above"
 	default:
 		return "verification incomplete (" + string(v.Verdict) + ") — see report above"
@@ -472,7 +475,7 @@ func verifyOutcomeLine(v verification.VerificationResult) string {
 // verification result's sub-checks (govulncheck absent, license/dependency
 // manifest missing, unisolated test set, ...), so a SKIPPED outcome line
 // explains why instead of a bare verdict.
-func verifySkippedReasons(v *verification.VerificationResult) []string {
+func verifySkippedReasons(v *verdict.VerificationResult) []string {
 	if v == nil {
 		return nil
 	}
@@ -482,7 +485,7 @@ func verifySkippedReasons(v *verification.VerificationResult) []string {
 			reasons = append(reasons, s)
 		}
 	}
-	if v.CVE != nil && v.CVE.Status == verification.StatusSkipped {
+	if v.CVE != nil && v.CVE.Status == verdict.StatusSkipped {
 		collect(v.CVE.Detail)
 	}
 	if v.License != nil && v.License.Skipped != "" {
@@ -491,13 +494,13 @@ func verifySkippedReasons(v *verification.VerificationResult) []string {
 	if v.Dependency != nil && v.Dependency.Skipped != "" {
 		collect(v.Dependency.Skipped)
 	}
-	if v.Secrets != nil && v.Secrets.Status == verification.StatusSkipped {
+	if v.Secrets != nil && v.Secrets.Status == verdict.StatusSkipped {
 		collect(v.Secrets.Detail)
 	}
-	if v.UnitTests != nil && v.UnitTests.Status == verification.StatusSkipped {
+	if v.UnitTests != nil && v.UnitTests.Status == verdict.StatusSkipped {
 		collect(v.UnitTests.Output)
 	}
-	if v.Integration != nil && v.Integration.Status == verification.StatusSkipped {
+	if v.Integration != nil && v.Integration.Status == verdict.StatusSkipped {
 		collect(v.Integration.Output)
 	}
 	return reasons
@@ -811,7 +814,7 @@ func runVerify(rest []string) {
 		if perr != nil {
 			fatal("%v — run kern index to rebuild it", perr)
 		}
-		ts := app.NewTaskService(p, nil).WithPRProvider(app.AutoPRProvider())
+		ts := tasklife.NewTaskService(p, nil).WithPRProvider(tasklife.AutoPRProvider())
 		verifyStart := time.Now()
 		_, v, err := ts.Verify(types, verifyOpts...)
 		// CLI telemetry: the in-process recorder is loaded/saved by main()
@@ -834,10 +837,10 @@ func runVerify(rest []string) {
 					}
 					return
 				}
-				fmt.Println(verification.RenderCompact(v))
+				fmt.Println(verdict.RenderCompact(v))
 				// Calibration (Feature Batch C): aggregate confidence line on the
 				// non-pass path too (best-effort; omitted when there is no data).
-				if line := app.VerifyConfidenceLine(p.Root()); line != "" {
+				if line := tasklife.VerifyConfidenceLine(p.Root()); line != "" {
 					fmt.Println(line)
 				}
 				if verifyExitCode(v.Verdict) != 0 {
@@ -858,13 +861,21 @@ func runVerify(rest []string) {
 		fmt.Printf("verdict: %s\n", v.Verdict)
 		fmt.Printf("summary: %s\n", v.Summary)
 		if v.Build != nil {
-			st := "FAIL"
-			if v.Build.OK {
-				st = "OK"
-			}
-			fmt.Printf("build: %s (duration %s)\n", st, v.Build.Duration)
-			if out := clipText(v.Build.Output, 500); out != "" {
-				fmt.Println(out)
+			if v.Build.OK && strings.HasPrefix(v.Build.Output, verdict.SkipPrefix) {
+				// A build that was NOT executed (no supported project type,
+				// D1): render the explicit skip, never a contradictory "OK".
+				// The reason already appears in the summary line above, so the
+				// detail line carries only the status (no duplication).
+				fmt.Println("build: SKIPPED")
+			} else {
+				st := "FAIL"
+				if v.Build.OK {
+					st = "OK"
+				}
+				fmt.Printf("build: %s (duration %s)\n", st, v.Build.Duration)
+				if out := clipText(v.Build.Output, 500); out != "" {
+					fmt.Println(out)
+				}
 			}
 		}
 		if v.UnitTests != nil {
@@ -977,7 +988,7 @@ func runVerify(rest []string) {
 		// Calibration (Feature Batch C): append the aggregate confidence line at
 		// the end of the rendered report (best-effort; omitted when the model has
 		// no data or a read fails).
-		if line := app.VerifyConfidenceLine(p.Root()); line != "" {
+		if line := tasklife.VerifyConfidenceLine(p.Root()); line != "" {
 			fmt.Println(line)
 		}
 		return
@@ -1065,7 +1076,7 @@ func runCheckDraft(rest []string) int {
 	if ierr != nil {
 		ix = nil
 	}
-	findings := verification.CheckDraft(ix, root, b, f.lang)
+	findings := draft.CheckDraft(ix, root, b, f.lang)
 	if len(findings) == 0 {
 		fmt.Println("OK: draft validates cleanly — no issues found")
 		return 0
@@ -1166,7 +1177,7 @@ func runChanges(cmd string, rest []string) {
 }
 
 // symbolDegrade handles a plan/analyze/impact that could not resolve the
-// free-text change to a concrete symbol (dogfooding F12). The planners are
+// free-text change to a concrete symbol. The planners are
 // symbol-index-bound: instead of a bare `no symbol named "X"` error we degrade
 // gracefully with an actionable message — close symbol candidates from the
 // index (when any exist) and a pointer to `kern search` so the caller can find
@@ -1218,7 +1229,7 @@ func runCorrelate(rest []string) {
 	if err != nil {
 		fatal("Correlate: %v", err)
 	}
-	ts := app.NewTaskService(p, eventbus.New()).WithPRProvider(app.AutoPRProvider())
+	ts := tasklife.NewTaskService(p, eventbus.New()).WithPRProvider(tasklife.AutoPRProvider())
 	// --code: extend the runtime correlation with the incident→twin→code
 	// correlation report (Feature Batch D).
 	if f.code {
@@ -1251,7 +1262,7 @@ func runLearn(rest []string) {
 	if err != nil {
 		fatal("Learn: %v", err)
 	}
-	ts := app.NewTaskService(p, eventbus.New()).WithPRProvider(app.AutoPRProvider())
+	ts := tasklife.NewTaskService(p, eventbus.New()).WithPRProvider(tasklife.AutoPRProvider())
 	t, _, text, err := ts.Learn(threshold)
 	if err != nil {
 		fatal("Learn: %v", err)
@@ -1270,7 +1281,7 @@ func runModernize(rest []string) {
 	if err != nil {
 		fatal("Modernize: %v", err)
 	}
-	ts := app.NewTaskService(p, eventbus.New()).WithPRProvider(app.AutoPRProvider())
+	ts := tasklife.NewTaskService(p, eventbus.New()).WithPRProvider(tasklife.AutoPRProvider())
 	t, _, text, err := ts.Modernize()
 	if err != nil {
 		fatal("Modernize: %v", err)
@@ -1293,7 +1304,7 @@ func runRun(rest []string) {
 	if err != nil {
 		fatal("Run: %v", err)
 	}
-	ts := app.NewTaskService(p, eventbus.New()).WithPRProvider(app.AutoPRProvider())
+	ts := tasklife.NewTaskService(p, eventbus.New()).WithPRProvider(tasklife.AutoPRProvider())
 	result, err := ts.Run(intent)
 	if err != nil {
 		fatal("Run: %v", err)

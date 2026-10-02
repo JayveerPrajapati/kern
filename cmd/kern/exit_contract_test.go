@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -88,6 +89,73 @@ func TestFindingsCommandExitContract(t *testing.T) {
 		{"verify broken build -> 1", nil, []string{"verify", ".", "--types", "build"}, 1},
 		{"exec failing script -> 1", []string{"KERN_ALLOW_EXEC=1", "KERN_TOOLS=kern_exec"}, []string{"exec", "exit 7", "--lang", "bash"}, 1},
 		{"exec ok script -> 0", []string{"KERN_ALLOW_EXEC=1", "KERN_TOOLS=kern_exec"}, []string{"exec", "echo hello", "--lang", "bash"}, 0},
+	}
+	for _, c := range cases {
+		if got := runc(c.env, c.args...); got != c.want {
+			t.Errorf("%s: exit %d, want %d", c.name, got, c.want)
+		}
+	}
+}
+
+// TestSecGosecExitContract pins the optional gosec engine's exit contract:
+// a HIGH-severity gosec finding is advisory under the default error-only
+// lens (exit 0 — Model C: external engines never gate), and only
+// KERN_SEC_PROMOTE lifting its rule ID reaches the policy-family exit 3.
+func TestSecGosecExitContract(t *testing.T) {
+	if runtime.GOOS == "darwin" && os.Getenv("KERN_SANDBOX_ACTIVE") == "1" {
+		t.Skip("cannot nest sandbox-exec inside an active kern sandbox on macOS (inner check/build pipeline); covered by direct runs")
+	}
+	if testing.Short() {
+		t.Skip("integration: builds a binary and runs it against a fixture repo")
+	}
+
+	// Build the binary once (the real main() exit path is what we assert).
+	bin := filepath.Join(t.TempDir(), "kern")
+	if out, err := exec.Command("go", "build", "-o", bin, ".").CombinedOutput(); err != nil {
+		t.Fatalf("build kern: %v (%s)", err, out)
+	}
+
+	// Fixture repo: clean for the internal scanner (no hardcoded secrets),
+	// so the exit code is driven solely by the gosec engine.
+	fix := t.TempDir()
+	if err := os.WriteFile(filepath.Join(fix, "go.mod"), []byte("module fix\n\ngo 1.23\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(fix, "main.go"), []byte("package main\n\nfunc main(){\n}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Fake gosec: emits a HIGH-severity G104 finding on main.go and exits 1
+	// (gosec's find-issues contract).
+	dir := t.TempDir()
+	src := filepath.Join(fix, "main.go")
+	body := fmt.Sprintf(`{"Issues":[{"severity":"HIGH","rule_id":"G104","details":"audit","file":%q,"line":"3"}]}`, src)
+	out := filepath.Join(dir, "out.json")
+	if err := os.WriteFile(out, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gosecBin := filepath.Join(dir, "gosec")
+	if err := os.WriteFile(gosecBin, []byte("#!/bin/sh\ncat '"+out+"'\nexit 1\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	runc := func(env []string, args ...string) int {
+		cmd := exec.Command(bin, args...)
+		cmd.Dir = fix
+		cmd.Env = append(os.Environ(), env...)
+		cmd.Stdout, cmd.Stderr = nil, nil
+		_ = cmd.Run()
+		return cmd.ProcessState.ExitCode()
+	}
+
+	cases := []struct {
+		name string
+		env  []string
+		args []string
+		want int
+	}{
+		{"sec gosec HIGH default lens -> 0", []string{"KERN_GOSEC=" + gosecBin}, []string{"sec", "."}, 0},
+		{"sec gosec HIGH promoted -> 3", []string{"KERN_GOSEC=" + gosecBin, "KERN_SEC_PROMOTE=G104"}, []string{"sec", "."}, 3},
 	}
 	for _, c := range cases {
 		if got := runc(c.env, c.args...); got != c.want {

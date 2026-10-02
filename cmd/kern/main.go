@@ -122,15 +122,17 @@ func aliasNote(usage string) string {
 	return ""
 }
 
-// usageAll prints the complete CLI catalog. By default it groups commands
-// under category headers (fixed order, alphabetical within a category);
-// `--flat` keeps the legacy flat listing.
+// usageAll prints the complete CLI catalog to STDOUT — it is an explicitly
+// requested listing (`kern --all`, `kern help --all`), so it must be pipeable
+// (`kern --all | grep …`); error/usage banners stay on stderr. By default it
+// groups commands under category headers (fixed order, alphabetical within a
+// category); `--flat` keeps the legacy flat listing.
 func usageAll(flat bool) {
 	// Generated from commandTable so the catalog can never drift from the
 	// registered command set (kern --all previously listed only ~100 of
 	// 203 registered commands). Help text one-liner when present, otherwise
 	// the usage first line.
-	fmt.Fprintf(os.Stderr, "kern - kern your context. Complete CLI catalog.\n\nUsage:\n")
+	fmt.Fprintf(os.Stdout, "kern - kern your context. Complete CLI catalog.\n\nUsage:\n")
 	if flat {
 		names := slices.Sorted(maps.Keys(commandTable))
 		for _, name := range names {
@@ -150,7 +152,7 @@ func usageAll(flat bool) {
 			if note := aliasNote(e.usage); note != "" && !strings.Contains(line, "(alias of ") {
 				line += "  " + note
 			}
-			fmt.Fprintln(os.Stderr, line)
+			fmt.Fprintln(os.Stdout, line)
 		}
 		return
 	}
@@ -176,7 +178,7 @@ func usageAll(flat bool) {
 		if len(names) == 0 {
 			return
 		}
-		fmt.Fprintf(os.Stderr, "[%s]\n", cat)
+		fmt.Fprintf(os.Stdout, "[%s]\n", cat)
 		for _, name := range names {
 			e := commandTable[name]
 			// Same alias skip as the flat listing: aliases dispatch but are
@@ -194,7 +196,7 @@ func usageAll(flat bool) {
 			if note := aliasNote(e.usage); note != "" && !strings.Contains(line, "(alias of ") {
 				line += "  " + note
 			}
-			fmt.Fprintln(os.Stderr, line)
+			fmt.Fprintln(os.Stdout, line)
 		}
 	}
 	for _, cat := range cliCategoryOrder {
@@ -242,6 +244,14 @@ func main() {
 		}()
 		return dispatchCommand(cmd, rest)
 	}()
+
+	// NIT-11 fail-loud: --etag is a conditional-fetch flag for exactly four
+	// commands (kern context|compact|retrieve|explore). If it was set but the
+	// executed command never consumed it (e.g. `kern optimize prompt
+	// --etag X`), warn on stderr instead of silently ignoring it.
+	if etagFlagSet(rest) && !etagConsumed {
+		fmt.Fprintln(os.Stderr, "kern: --etag was set but this command does not consume it (only kern context, compact, retrieve, explore honor --etag); ignoring")
+	}
 
 	// Persist the updated snapshot before exiting. Best-effort: a write
 	// failure is non-fatal (metrics are non-critical). This runs explicitly

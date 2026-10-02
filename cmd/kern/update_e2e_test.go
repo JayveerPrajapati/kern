@@ -38,6 +38,25 @@ func TestUpdateE2E(t *testing.T) {
 		t.Skip("update e2e: builds real binaries and runs install.sh against a file:// fixture")
 	}
 	root := repoRoot(t)
+
+	// install.sh's post-install auto-wire (`kern setup --detect --root <repo>
+	// --global`) writes project-scope hook files, and the guard path it bakes
+	// in is derived from the CHILD process HOME — which here is the isolated
+	// fixture home (envFor below). Without a restore, every run persists a
+	// dead fixture path into the real repo's git-ignored .agents/hooks.json
+	// (the F1 readiness finding: <repo>/.agents/hooks.json pointing at
+	// /var/folders/.../TestUpdateE2E*/001/home/.kern/hooks/kern-guard.sh).
+	// Snapshot the file once; restore the pre-test bytes (or absence) at
+	// cleanup so the repo is left exactly as found.
+	agentsHookPath := filepath.Join(root, ".agents", "hooks.json")
+	agentsHook, agentsHookErr := os.ReadFile(agentsHookPath)
+	t.Cleanup(func() {
+		if agentsHookErr != nil {
+			_ = os.Remove(agentsHookPath)
+			return
+		}
+		_ = os.WriteFile(agentsHookPath, agentsHook, 0o644)
+	})
 	for _, bin := range []string{"go", "curl", "sh", "tar", "sed", "cut", "grep", "awk"} {
 		if _, err := exec.LookPath(bin); err != nil {
 			t.Skipf("update e2e: %s not available: %v", bin, err)

@@ -15,7 +15,10 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/ignore"
 )
 
-func readFile(path string) ([]byte, error) {
+// readFile is a var so tests can swap in a counting wrapper to prove how many
+// times file contents are read (staleness walks and update change-detection
+// both read through it; stat-only walks do not).
+var readFile = func(path string) ([]byte, error) {
 	return os.ReadFile(path)
 }
 
@@ -117,7 +120,22 @@ func HasIndexableSources(root string) bool {
 // hash accepted files. Any read error aborts the hash set (first error wins,
 // same contract as the sequential version).
 func indexableHashes(root string, ign *ignore.Matcher) (map[string]string, error) {
+	cur, _, err := indexableHashesObserved(root, ign)
+	return cur, err
+}
+
+// indexableHashesObserved is indexableHashes plus the per-file mtime (Unix
+// nanos) observed in the SAME walk that produced each hash. The mtimes let a
+// later consumer (UpdateWithSnapshot) re-validate the recorded hashes against
+// the live tree with a cheap stat instead of re-reading file contents: a file
+// whose mtime is unchanged since this walk provably (same trust model as
+// reuseByMtime) still has the recorded content. The mtime is captured from
+// the walk's DirEntry BEFORE the worker reads the file, so an edit landing
+// between the stat and the read bumps the on-disk mtime past the recorded
+// one and the consumer re-reads. Both returned maps are nil on error.
+func indexableHashesObserved(root string, ign *ignore.Matcher) (map[string]string, map[string]int64, error) {
 	cur := map[string]string{}
+	mtimes := map[string]int64{}
 	var (
 		mu   sync.Mutex
 		ferr error
@@ -129,7 +147,10 @@ func indexableHashes(root string, ign *ignore.Matcher) (map[string]string, error
 	if workers > 8 {
 		workers = 8
 	}
-	type job struct{ path, rel string }
+	type job struct {
+		path, rel string
+		mtime     int64
+	}
 	jobs := make(chan job)
 	var wg sync.WaitGroup
 	wg.Add(workers)
@@ -152,6 +173,7 @@ func indexableHashes(root string, ign *ignore.Matcher) (map[string]string, error
 				h := cache.Hash(data)
 				mu.Lock()
 				cur[j.rel] = h
+				mtimes[j.rel] = j.mtime
 				mu.Unlock()
 			}
 		}()
@@ -180,18 +202,22 @@ func indexableHashes(root string, ign *ignore.Matcher) (map[string]string, error
 		if ign != nil && ign.Ignored(filepath.ToSlash(rel)) {
 			return nil
 		}
-		jobs <- job{path: path, rel: rel}
+		info, ierr := d.Info()
+		if ierr != nil {
+			return ierr
+		}
+		jobs <- job{path: path, rel: rel, mtime: info.ModTime().UnixNano()}
 		return nil
 	})
 	close(jobs)
 	wg.Wait()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if ferr != nil {
-		return nil, ferr
+		return nil, nil, ferr
 	}
-	return cur, nil
+	return cur, mtimes, nil
 }
 
 // ChangeKind describes a file change detected by the watcher.

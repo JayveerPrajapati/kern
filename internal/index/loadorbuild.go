@@ -1,6 +1,9 @@
 package index
 
-import "log"
+import (
+	"context"
+	"log"
+)
 
 // LoadOrBuild returns the project's symbol index: the persisted
 // <root>/.kern/index.json when fresh, or a freshly built one (saved back
@@ -25,28 +28,52 @@ import "log"
 // the holder to finish, then re-check freshness and reuse the holder's
 // index. The fast fresh-load path stays lock-free.
 func LoadOrBuild(root string) (*Index, error) {
+	return LoadOrBuildContext(context.Background(), root)
+}
+
+// LoadOrBuildContext is the context-aware form of LoadOrBuild. The context
+// bounds the cross-process rebuild wait: when another process is rebuilding
+// the index and our ctx is cancelled or expires, the wait aborts immediately
+// with ctx.Err() instead of stalling for the full BuildLockWait budget.
+func LoadOrBuildContext(ctx context.Context, root string) (*Index, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if ix, err := Load(root); err == nil && ix != nil {
 		if !ix.Stale() {
 			return ix, nil
 		}
 	}
-	return debouncedRebuild(root,
+	return debouncedRebuildContext(ctx, root,
 		func() (*Index, bool) {
 			ix, err := Load(root)
 			if err != nil || ix == nil {
 				return nil, false
 			}
+			// Stale() retains the content-walk observation on ix when the
+			// verdict came from a content walk (M5a); the rebuild step below
+			// reuses it via UpdateWithSnapshot so the tree is hashed once, not
+			// once for staleness and again for the update.
 			return ix, !ix.Stale()
 		},
-		func() (*Index, error) {
-			// Re-load the previous index under the lock: the pre-lock
-			// snapshot may be outdated (another process rebuilt while we
-			// waited), so it is not a safe incremental-Update base. Update
-			// is content-addressed, so an index another process just built
-			// is reused verbatim and an older one is re-parsed only where
-			// it differs from the current tree.
-			if prev, err := Load(root); err == nil && prev != nil {
-				if ix, err := Update(root, prev); err == nil && ix != nil {
+		func(prev *Index) (*Index, error) {
+			// prev is the index the under-lock freshness check just loaded
+			// and judged stale — the same walk that decided staleness, so its
+			// retained hashes are exactly the ones Update must reuse. When
+			// prev is nil (bounded wait exhausted without ever acquiring the
+			// lock, so no check ran) load directly like the historical path;
+			// that load has no retained snapshot, so UpdateWithSnapshot
+			// degrades to a plain Update. Update is content-addressed, so an
+			// index another process just built is reused verbatim and an
+			// older one is re-parsed only where it differs from the current
+			// tree.
+			if prev == nil {
+				if p, err := Load(root); err == nil && p != nil {
+					prev = p
+				}
+			}
+			if prev != nil {
+				if ix, err := UpdateWithSnapshot(root, prev); err == nil && ix != nil {
 					saveOrWarn(ix)
 					return ix, nil
 				}

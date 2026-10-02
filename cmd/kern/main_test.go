@@ -72,9 +72,7 @@ func TestRunLoopCLIInvalidLevel(t *testing.T) {
 
 // TestRenderTeamText asserts the team roster renders all 7 specialists and the
 // current task count. A fresh team reads only the (empty) in-memory registry;
-// a seeded store must merge in its persisted records (dogfooding E-LOW: the
-// team overview previously rendered "tasks: 0" forever because it never read
-// the store).
+// a seeded store must merge in its persisted records.
 func TestRenderTeamText(t *testing.T) {
 	root := t.TempDir()
 	text, err := renderTeamText(root)
