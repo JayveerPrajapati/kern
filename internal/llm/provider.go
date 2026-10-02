@@ -164,8 +164,7 @@ func ProbeReachable() error {
 // answered. The auto chain falls back across providers (host session → agent
 // CLIs → Ollama), so a successful probe alone does not tell the caller which
 // leg actually answered — this returns that name so `kern do` can report
-// "provider: claude" instead of silently running on an unspecified fallback
-//.
+// "provider: claude" instead of silently running on an unspecified fallback.
 func ProbeReachableName() (string, error) {
 	if n := providerName(); n != "auto" {
 		// Explicit provider (openai/anthropic/google/...): probe it directly.

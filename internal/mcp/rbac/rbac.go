@@ -29,8 +29,8 @@ var (
 	primaryRoot string
 )
 
-// resolveOrgWins mirrors orgapprovals.ResolveRole via the org-role cache
-//: the cache lives in orgapprovals WITH the store it caches
+// resolveOrgWins mirrors orgapprovals.ResolveRole via the org-role cache:
+// the cache lives in orgapprovals WITH the store it caches
 // (R3), and AssignOrgRole invalidates it directly after every save, so the
 // mtime+size check only has to cover cross-process writes and hand-edits.
 func resolveOrgWins(projectRole string, projectAssigned bool, agentID string) (role string, assigned bool) {
