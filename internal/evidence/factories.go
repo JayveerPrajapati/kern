@@ -6,7 +6,7 @@ import (
 	"time"
 
 	"github.com/JayveerPrajapati/kern/internal/domain"
-	"github.com/JayveerPrajapati/kern/internal/sec"
+	"github.com/JayveerPrajapati/kern/internal/secscan"
 )
 
 // evidenceFor builds a single Evidence entry with a stable content digest.
@@ -28,9 +28,9 @@ func evidenceForRel(t domain.EvidenceType, source, content, relationship string)
 	return ev
 }
 
-// FromSecurityFinding wraps a v1 sec.Finding as a FACT claim with confidence
+// FromSecurityFinding wraps a v1 secscan.Finding as a FACT claim with confidence
 // 1.0 and policy evidence, since security scans are deterministic checks.
-func FromSecurityFinding(f sec.Finding) domain.Claim {
+func FromSecurityFinding(f secscan.Finding) domain.Claim {
 	return NewBuilder(domain.ClaimFact, f.Message).
 		WithSource("sec").
 		WithProvenance("sec:" + f.Rule).

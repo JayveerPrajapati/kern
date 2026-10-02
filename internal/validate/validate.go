@@ -5,6 +5,7 @@ package validate
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -15,6 +16,13 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/index"
 	"github.com/JayveerPrajapati/kern/internal/processgroup"
 )
+
+// ErrNoProjectType is returned by Detect and DetectKind when the project
+// root has NO supported project type at all (zero detection candidates) —
+// distinct from "a candidate exists but its tooling is missing", which stays
+// an actionable error. Callers use errors.Is to degrade a verification check
+// to a clean skip instead of a false FAIL (F1).
+var ErrNoProjectType = errors.New("no supported project type detected")
 
 // Command is a detected validation command.
 type Command struct {
@@ -47,7 +55,7 @@ func Detect(root string) (*Command, error) {
 		return c, nil
 	}
 	if len(candidates) == 0 {
-		return nil, fmt.Errorf("no supported project type detected in %s", root)
+		return nil, fmt.Errorf("%w in %s", ErrNoProjectType, root)
 	}
 	return nil, fmt.Errorf("required tooling not found in PATH for %s", root)
 }
@@ -76,7 +84,7 @@ func DetectKind(root, kind string) (*Command, error) {
 		return c, nil
 	}
 	if len(candidates) == 0 {
-		return nil, fmt.Errorf("no supported project type detected in %s", root)
+		return nil, fmt.Errorf("%w in %s", ErrNoProjectType, root)
 	}
 	return nil, fmt.Errorf("no %s command detected in %s", kind, root)
 }

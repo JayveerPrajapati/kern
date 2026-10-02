@@ -220,6 +220,18 @@ func auditSeq(id string) (int, bool) {
 	return n, err == nil
 }
 
+// Advisory-lock retry policy (L-e): the audit lock is best-effort, but a
+// bounded retry keeps the unlocked window small. Liveness wins — a failed
+// lock must never drop an audit write — so we proceed unlocked and warn.
+const (
+	auditLockRetries    = 3
+	auditLockRetrySleep = 75 * time.Millisecond
+)
+
+// auditLockWarnOnce gates the one-time stderr warning emitted when the
+// advisory audit lock could not be taken after auditLockRetries.
+var auditLockWarnOnce sync.Once
+
 // refreshTailLocked re-reads the TRUE persisted tail under the cross-process
 // lock (when configured) and refreshes the in-memory chain head + sequence so
 // the next write chains from its actual predecessor whoever wrote it. Returns
@@ -238,13 +250,25 @@ func (l *AuditLog) refreshTailLocked() func() {
 	}
 	var unlock func()
 	if l.lockPath != "" {
+		// The lock is advisory and failure-tolerant: liveness of the audit
+		// write wins, so we never fail closed. A bounded retry narrows the
+		// unlocked window in which concurrent processes could fork the
+		// tamper chain; if it still fails, proceed unlocked and warn once.
 		var err error
-		unlock, err = lockAuditFile(l.lockPath)
+		for attempt := 1; attempt <= auditLockRetries; attempt++ {
+			unlock, err = lockAuditFile(l.lockPath)
+			if err == nil {
+				break
+			}
+			if attempt < auditLockRetries {
+				time.Sleep(auditLockRetrySleep)
+			}
+		}
 		if err != nil {
-			// The lock is advisory and failure-tolerant: proceed unlocked
-			// rather than crash the write. The chain may break again, but
-			// the entry is never lost.
 			unlock = nil
+			auditLockWarnOnce.Do(func() {
+				log.Printf("kern governance: WARNING: audit lock %s could not be acquired after %d attempts; proceeding unlocked — concurrent writers may fork the tamper-evident chain", l.lockPath, auditLockRetries)
+			})
 		}
 	}
 	// Fast path: an append-only store reports its tail directly, so a write
@@ -965,6 +989,8 @@ func (l *AuditLog) nextSeq() int64 {
 // RecordParallel allows concurrent agents to commit audit entries in parallel,
 // offloading CPU-intensive leaf hashing outside the mutex critical section,
 // and rolling entries into the incremental Merkle tree without lock bottlenecks.
+// Entries are persisted to the store exactly like Record (L-d), so parallel
+// entries are crash-durable rather than memory-only.
 func (l *AuditLog) RecordParallel(entry AuditEntry) string {
 	if entry.Timestamp.IsZero() {
 		entry.Timestamp = time.Now()
@@ -984,9 +1010,22 @@ func (l *AuditLog) RecordParallel(entry AuditEntry) string {
 		l.initMerkleTreeLocked()
 	}
 	root := l.merkleTree.Append(leaf)
-	entry.Hash = computeAuditHash(entry, l.hashChain)
-	l.hashChain = entry.Hash
 	l.entries = append(l.entries, entry)
+	if l.store != nil {
+		// Persist exactly like Record: parallel entries must be crash-
+		// durable too. persist recomputes entry.Hash from the true
+		// persisted tail and writes ID/Hash back into l.entries, so the
+		// chain head must NOT be advanced before this call (that would
+		// chain the entry on itself). Same pattern as Record: called
+		// while holding l.mu, and persist's refreshTailLocked requires it.
+		l.persist(entry)
+	} else {
+		entry.Hash = computeAuditHash(entry, l.hashChain)
+		l.hashChain = entry.Hash
+		// persist normally writes ID/Hash back into the slice; mirror it
+		// for the in-memory-only path.
+		l.entries[len(l.entries)-1] = entry
+	}
 	l.noteResultAndTrimLocked(entry)
 	return root
 }

@@ -49,8 +49,8 @@ type FileStore struct {
 // NewFileStore creates a FileStore at <root>/.kern/approvals.json. The directory
 // is created if it does not exist. The file is loaded on construction so
 // approvals persisted by a previous process are visible immediately (restore
-// on startup) and a corrupt store fails fast instead of being discovered on a
-// later read.
+// on startup) and a corrupt store is quarantined and self-heals instead of
+// wedging every later read.
 func NewFileStore(root string) *FileStore {
 	dir := filepath.Join(root, ".kern")
 	// The approvals directory holds pending human-approval decisions; create
@@ -63,10 +63,9 @@ func NewFileStore(root string) *FileStore {
 	// corrupt file early and satisfies restore-on-startup for read-only
 	// callers. A missing file is not an error.
 	if _, err := s.loadLocked(); err != nil {
-		// Fail loudly instead of silently treating the store as empty: a
-		// corrupt file that is later saved over would destroy the pending
-		// approvals it contains. Every operation re-reads the file and fails
-		// closed with the same error until the file is repaired.
+		// Only genuine read failures (e.g. permissions) land here: a corrupt
+		// file is quarantined inside loadLocked and the store self-heals as
+		// empty. Record the error so LoadError can fail fast on it.
 		s.loadErr = err
 		log.Printf("kern governance: approval store %s failed to load: %v (reads and writes will fail until it is repaired)", s.path, err)
 	}
@@ -74,8 +73,9 @@ func NewFileStore(root string) *FileStore {
 }
 
 // LoadError returns the error from the construction-time prime load, if any.
-// A missing file is not an error. Callers can use it to fail fast on a corrupt
-// store instead of discovering the failure on the first read/write.
+// A missing file is not an error. A corrupt file self-heals (see loadLocked),
+// so LoadError reports only genuine read failures (e.g. permissions), letting
+// callers fail fast instead of discovering them on the first read/write.
 func (s *FileStore) LoadError() error {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -83,6 +83,10 @@ func (s *FileStore) LoadError() error {
 }
 
 // loadLocked is the lock-free read core. Caller must hold s.mu (read or write).
+// A corrupt file self-heals (H2b): it is quarantined aside and the store
+// continues empty, so one bad write cannot wedge every Load/mutate forever.
+// Pending approvals are deny-by-default gates — losing them forces a
+// re-request, never a bypass.
 func (s *FileStore) loadLocked() ([]domain.Approval, error) {
 	data, err := os.ReadFile(s.path)
 	if err != nil {
@@ -96,14 +100,25 @@ func (s *FileStore) loadLocked() ([]domain.Approval, error) {
 	}
 	var approvals []domain.Approval
 	if err := json.Unmarshal(data, &approvals); err != nil {
-		return nil, fmt.Errorf("approval store: unmarshal: %w", err)
+		// Quarantine-and-continue, following the SQLite self-heal precedent
+		// (internal/index/sqlite_store.go): rename the corrupt file aside
+		// (never delete — the corruption stays inspectable), warn loudly,
+		// and keep the store empty rather than failing forever.
+		q := fmt.Sprintf("%s.corrupt-%d", s.path, time.Now().Unix())
+		rerr := os.Rename(s.path, q)
+		if rerr == nil {
+			log.Printf("kern governance: WARNING: approval store %s is corrupt; quarantined to %s and treated as empty — pending approvals must be re-requested (deny-by-default: no bypass)", s.path, q)
+			return nil, nil
+		}
+		return nil, fmt.Errorf("approval store: unmarshal %s (quarantine to %s failed: %v): %w", s.path, q, rerr, err)
 	}
 	return approvals, nil
 }
 
 // saveLocked is the lock-free write core. Caller must hold s.mu (write).
-// It writes to a unique temp file (os.CreateTemp) then renames atomically,
-// avoiding cross-process temp-file collisions.
+// It writes to a unique temp file (os.CreateTemp), fsyncs it, then renames
+// atomically: crash-durable (a power loss can never leave a renamed-but-
+// truncated approvals.json) and free of cross-process temp-file collisions.
 func (s *FileStore) saveLocked(approvals []domain.Approval) error {
 	if err := os.MkdirAll(filepath.Dir(s.path), 0o700); err != nil {
 		return err
@@ -121,6 +136,14 @@ func (s *FileStore) saveLocked(approvals []domain.Approval) error {
 		_ = os.Remove(tmp.Name())
 		return fmt.Errorf("approval store: write %s: %w", tmp.Name(), err)
 	}
+	// fsync before close/rename: without it a power loss can leave a
+	// renamed-but-empty/truncated approvals.json (H2a). Matches the
+	// atomicWrite discipline in internal/cache/cache.go.
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmp.Name())
+		return fmt.Errorf("approval store: sync %s: %w", tmp.Name(), err)
+	}
 	if err := tmp.Close(); err != nil {
 		_ = os.Remove(tmp.Name())
 		return fmt.Errorf("approval store: close %s: %w", tmp.Name(), err)
@@ -134,6 +157,20 @@ func (s *FileStore) saveLocked(approvals []domain.Approval) error {
 	if err := os.Rename(tmp.Name(), s.path); err != nil {
 		_ = os.Remove(tmp.Name())
 		return fmt.Errorf("approval store: rename: %w", err)
+	}
+	// fsync the directory so the rename itself is durable: without it a
+	// power loss right after rename can still resurrect the old (or lose
+	// the new) approvals.json (H2a). Matches the atomicWrite discipline in
+	// internal/cache/cache.go. Best-effort: a directory sync failure is
+	// logged, not fatal — the rename already happened and the file data
+	// itself was fsynced above.
+	if dir, err := os.Open(filepath.Dir(s.path)); err == nil {
+		if err := dir.Sync(); err != nil {
+			log.Printf("kern governance: approval store: dir sync %s: %v (non-fatal)", s.path, err)
+		}
+		_ = dir.Close()
+	} else {
+		log.Printf("kern governance: approval store: dir sync %s: %v (non-fatal)", s.path, err)
 	}
 	return nil
 }

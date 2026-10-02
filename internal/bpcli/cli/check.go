@@ -261,6 +261,7 @@ func runCheckCore(args []string) runCheckOutcome {
 		return runCheckOutcome{code: code}
 	}
 	_ = fl.staged // --staged is the default behavior; flag exists for hook clarity
+	_ = fl.all    // --all is consumed at discovery; flag exists for repo-wide scans
 
 	absRoot, code := resolveRepoRoot(fl.repoRoot)
 	if code != 0 {
@@ -288,16 +289,16 @@ func runCheckCore(args []string) runCheckOutcome {
 		fmt.Fprintf(os.Stderr, "blueprint: warning: %s\n", w)
 	}
 
-	changes, err := discoverStagedChanges(absRoot)
+	changes, err := discoverCheckChanges(absRoot, fl.all)
 	if err != nil {
 		if fl.ci {
-			emitCIError("cannot discover staged changes: " + err.Error())
+			emitCIError("cannot discover changes: " + err.Error())
 			return runCheckOutcome{code: 1}
 		}
 		if jsonMode {
-			emitErrorJSON(2, "cannot discover staged changes: "+err.Error())
+			emitErrorJSON(2, "cannot discover changes: "+err.Error())
 		} else {
-			fmt.Fprintf(os.Stderr, "blueprint: cannot discover staged changes: %v\n", err)
+			fmt.Fprintf(os.Stderr, "blueprint: cannot discover changes: %v\n", err)
 		}
 		return runCheckOutcome{code: 2}
 	}
@@ -365,6 +366,7 @@ type checkFlags struct {
 	jsonOut         bool
 	format          string
 	staged          bool
+	all             bool
 	fast            bool
 	ci              bool
 	repoRoot        string
@@ -391,6 +393,7 @@ func parseCheckFlags(args []string) (checkFlags, int) {
 	jsonOut := fs.Bool("json", false, "shorthand for --format=json")
 	format := fs.String("format", "", "output format: json|terminal (default: terminal)")
 	staged := fs.Bool("staged", false, "check staged changes (git diff --cached); this is the default")
+	all := fs.Bool("all", false, "repo-wide scan: diff the whole tree against the empty tree instead of staged changes (nightly debt report)")
 	fast := fs.Bool("fast", false, "fast mode: skip the jscpd two-pass duplication scan (advisory in-house findings only; full check runs in CI). Also enabled by KERN_CHECK_FAST=1")
 	ci := fs.Bool("ci", false, "CI mode: emit a machine-readable JSON verdict ({passed, checks, evidence}) on stdout and exit 0/1 matching the verdict")
 	repoRoot := fs.String("repo", "", "repository root (default: current directory)")
@@ -414,6 +417,7 @@ func parseCheckFlags(args []string) (checkFlags, int) {
 		jsonOut:         *jsonOut,
 		format:          *format,
 		staged:          *staged,
+		all:             *all,
 		fast:            *fast,
 		ci:              *ci,
 		repoRoot:        *repoRoot,
@@ -592,6 +596,42 @@ func resolveRepoRoot(repoRoot string) (string, int) {
 		return "", 2
 	}
 	return absRoot, 0
+}
+
+// discoverCheckChanges selects the change-discovery mode: the default checks
+// staged changes (git diff --cached), while --all diffs the whole tree against
+// the empty tree so every tracked file becomes a change (repo-wide scans like
+// the nightly debt report).
+func discoverCheckChanges(repoRoot string, all bool) ([]domain.FileChange, error) {
+	if all {
+		return discoverAllChanges(repoRoot)
+	}
+	return discoverStagedChanges(repoRoot)
+}
+
+// discoverAllChanges runs `git diff --name-status` and `git diff --unified=0`
+// against the EMPTY tree, so every tracked file in the repository is treated
+// as an added change. Used by `kern check --all` for repo-wide scans (e.g.
+// the nightly two-pass duplication + architecture debt report) where there are
+// no staged changes to diff. kern/blueprint runtime artifacts are excluded
+// exactly like the staged path.
+func discoverAllChanges(repoRoot string) ([]domain.FileChange, error) {
+	if !isGitRepo(repoRoot) {
+		return nil, fmt.Errorf("not a git repository: %s", repoRoot)
+	}
+	// The empty tree object (the well-known hash computed by
+	// `git hash-object -t tree /dev/null`): diffing against it surfaces
+	// every tracked file as an added change without touching the index.
+	const emptyTree = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+	nameStatus, err := mcp.GitOutput(repoRoot, "diff", "--no-ext-diff", "--name-status", emptyTree)
+	if err != nil {
+		return nil, fmt.Errorf("git diff --name-status (empty tree): %w", err)
+	}
+	unified, err := mcp.GitOutput(repoRoot, "-c", "core.quotepath=false", "diff", "--no-ext-diff", "--unified=0", emptyTree)
+	if err != nil {
+		return nil, fmt.Errorf("git diff --unified=0 (empty tree): %w", err)
+	}
+	return fileChangesFromStatus(nameStatus, unified, isBlueprintRuntimeArtifact), nil
 }
 
 // discoverStagedChanges runs `git diff --cached --name-status` to find staged

@@ -1,6 +1,9 @@
 package cli
 
 import (
+	"os"
+	"os/exec"
+	"path/filepath"
 	"reflect"
 	"testing"
 	"time"
@@ -118,6 +121,62 @@ func TestTimeoutDuration(t *testing.T) {
 	}
 	if d := timeoutDuration(30); d != 30*time.Second {
 		t.Errorf("timeoutDuration(30) = %v, want 30s", d)
+	}
+}
+
+// TestDiscoverAllChangesSurfacesTrackedFiles (FU2): `kern check --all` must
+// surface every tracked file as a change even on a clean checkout with
+// nothing staged — the nightly debt report previously ran `kern check` which
+// diffs the staged index (empty on a clean tree), making the repo-wide scan
+// vacuous (G3-F1).
+func TestDiscoverAllChangesSurfacesTrackedFiles(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	dir := t.TempDir()
+	run := func(args ...string) {
+		// -c core.hooksPath= keeps tests independent of machine-global git
+		// hooks (git config --global core.hooksPath may point at the kern
+		// global hook).
+		cmd := exec.Command("git", append([]string{"-c", "core.hooksPath="}, args...)...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v (%s)", args, err, out)
+		}
+	}
+	run("init", "-q")
+	run("config", "user.email", "t@example.com")
+	run("config", "user.name", "t")
+	if err := os.WriteFile(filepath.Join(dir, "tracked.go"), []byte("package main\n\nfunc ok() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte("# repo\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	run("add", "-A")
+	run("commit", "-q", "-m", "baseline")
+	// Nothing staged, clean tree — staged discovery returns nothing.
+	staged, err := discoverStagedChanges(dir)
+	if err != nil {
+		t.Fatalf("discoverStagedChanges: %v", err)
+	}
+	if len(staged) != 0 {
+		t.Fatalf("expected empty staged set on clean checkout, got %d", len(staged))
+	}
+	// --all must surface both tracked files.
+	all, err := discoverAllChanges(dir)
+	if err != nil {
+		t.Fatalf("discoverAllChanges: %v", err)
+	}
+	if len(all) < 2 {
+		t.Fatalf("expected tracked files surfaced by --all, got %d: %+v", len(all), all)
+	}
+	paths := map[string]bool{}
+	for _, c := range all {
+		paths[c.Path] = true
+	}
+	if !paths["tracked.go"] || !paths["README.md"] {
+		t.Fatalf("--all must include tracked.go + README.md, got: %v", paths)
 	}
 }
 

@@ -1,7 +1,7 @@
-# Blueprint Firewall Gates (G0–G39, G10 retired)
+# Blueprint Firewall Gates (G0–G39; G10, G37, G38 retired — 37 active)
 
-This document is the catalog of the 39 Blueprint change-firewall gates (G0 through G39,
-G10 retired) implemented in [`internal/gates/registry.go`](../internal/gates/registry.go).
+This document is the catalog of the 37 active Blueprint change-firewall gates (G0 through G39,
+G10, G37, G38 retired) implemented in [`internal/gates/registry.go`](../internal/gates/registry.go).
 These gates are enforced by `kern check` and `kern ci` to ensure architectural integrity,
 security, and code health.
 

@@ -39,5 +39,5 @@ jobs:
       - name: Repo-wide debt report (full two-pass, no --fast)
         run: |
           go build -buildvcs=false -o "$RUNNER_TEMP/kern" ./cmd/kern
-          KERN_BINARY="$RUNNER_TEMP/kern" "$RUNNER_TEMP/kern" check --format=terminal || \
+          KERN_BINARY="$RUNNER_TEMP/kern" "$RUNNER_TEMP/kern" check --all --format=terminal || \
             echo "::warning::kern check reported findings (see report above)"

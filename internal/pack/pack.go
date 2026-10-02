@@ -17,7 +17,7 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/budget"
 	"github.com/JayveerPrajapati/kern/internal/code"
 	"github.com/JayveerPrajapati/kern/internal/ignore"
-	"github.com/JayveerPrajapati/kern/internal/sec"
+	"github.com/JayveerPrajapati/kern/internal/secscan"
 	"github.com/JayveerPrajapati/kern/internal/tokenize"
 )
 
@@ -40,11 +40,11 @@ type Bundle struct {
 	// name as the CLI-warning contract (callers warn when an unlimited pack
 	// exceeds PackedTokensWarningThreshold). It is deliberately not
 	// serialized, so the machine-readable JSON output is unchanged.
-	TokenCount int           `json:"-"`
-	Truncated  bool          `json:"truncated"`
-	Dropped    int           `json:"dropped"`
-	Ignored    int           `json:"ignored"`
-	Security   []sec.Finding `json:"security,omitempty"`
+	TokenCount int               `json:"-"`
+	Truncated  bool              `json:"truncated"`
+	Dropped    int               `json:"dropped"`
+	Ignored    int               `json:"ignored"`
+	Security   []secscan.Finding `json:"security,omitempty"`
 
 	// budgetTooSmall is set when MaxTokens was too small to include ANY source
 	// file (instructions consumed the budget). Render surfaces a warning so the
@@ -193,7 +193,7 @@ func Build(root string, opts Options) (*Bundle, error) {
 	for i := range b.Instructions {
 		if b.Instructions[i].Tokens > instructionCap {
 			b.Instructions[i].Content = budget.Fit(b.Instructions[i].Content, instructionCap) +
-				"\n\n… [trimmed to fit the pack; open the file or use kern_doc_search for the rest]"
+				"\n\n… [trimmed to fit the pack; open the file or use kern_doc (action=search) for the rest]"
 			b.Instructions[i].Tokens = tokenize.Count(b.Instructions[i].Content)
 		}
 	}
@@ -264,14 +264,14 @@ const maxFindings = 25
 // scanFindings runs the secrets/injection rules over every packed file and
 // returns up to maxFindings findings, so a bundle that ships secrets surfaces
 // them instead of silently carrying them into an agent's context.
-func scanFindings(files []File) []sec.Finding {
-	var out []sec.Finding
+func scanFindings(files []File) []secscan.Finding {
+	var out []secscan.Finding
 	for _, f := range files {
-		out = append(out, sec.ScanFile(f.Path, []byte(f.Content))...)
-		// python sinks get the same treatment in bundles as in sec.Scan,
+		out = append(out, secscan.ScanFile(f.Path, []byte(f.Content))...)
+		// python sinks get the same treatment in bundles as in secscan.Scan,
 		// so a packed .py file carrying eval/os.system surfaces too.
 		if strings.HasSuffix(f.Path, ".py") {
-			out = append(out, sec.ScanPythonFile(f.Path, []byte(f.Content))...)
+			out = append(out, secscan.ScanPythonFile(f.Path, []byte(f.Content))...)
 		}
 		if len(out) >= maxFindings {
 			break

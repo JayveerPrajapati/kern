@@ -15,6 +15,7 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/metrics"
 	"github.com/JayveerPrajapati/kern/internal/pii"
 	"github.com/JayveerPrajapati/kern/internal/tokenize"
+	"github.com/JayveerPrajapati/kern/internal/verdict"
 	"github.com/JayveerPrajapati/kern/internal/verification"
 )
 
@@ -215,7 +216,7 @@ func (a *Agent) Code(intent, plan, context string, wt *execution.Worktree) (*Res
 		result.Rounds = append(result.Rounds, rr)
 
 		// 6. Check if verification passed.
-		if vr.Verdict == verification.VerdictPass {
+		if vr.Verdict == verdict.VerdictPass {
 			result.Passed = true
 			diff, _ := wt.Diff()
 			result.Diff = diff

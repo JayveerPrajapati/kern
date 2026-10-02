@@ -6,7 +6,7 @@ import (
 	"strings"
 
 	"github.com/JayveerPrajapati/kern/internal/domain"
-	"github.com/JayveerPrajapati/kern/internal/intel"
+	"github.com/JayveerPrajapati/kern/internal/guard"
 	"github.com/JayveerPrajapati/kern/internal/runtime"
 )
 
@@ -179,7 +179,7 @@ func (e *Engine) crossesBoundary(p domain.Policy, roots []domain.Symbol) bool {
 		if fromDir == "" || toDir == "" || fromDir == toDir {
 			continue
 		}
-		if intel.DirMatch(from, fromDir) && intel.DirMatch(to, toDir) {
+		if guard.DirMatch(from, fromDir) && guard.DirMatch(to, toDir) {
 			return true
 		}
 	}

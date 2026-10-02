@@ -206,7 +206,10 @@ func TestNestedGitignoreHonoredByPack(t *testing.T) {
 
 func TestSecurityFindingsSurfaceInBundle(t *testing.T) {
 	root := writeTree(t, map[string]string{
-		"main.go": "package main\n\nconst awsKey = \"AKIAIOSFODNN7EXAMPLE\"\n",
+		// Non-canonical AWS key: AKIAIOSFODNN7EXAMPLE is allowlisted by
+		// internal/sec (knownExampleSecrets), so a detection-asserting
+		// fixture must use a real-looking value.
+		"main.go": "package main\n\nconst awsKey = \"AKIA9X2KQ7W3ZP4RT6NB\"\n",
 		"ok.go":   "package ok\n",
 	})
 	b, err := Build(root, Options{Root: root})

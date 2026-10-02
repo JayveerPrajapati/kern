@@ -5,7 +5,7 @@ import (
 	"time"
 
 	"github.com/JayveerPrajapati/kern/internal/index"
-	"github.com/JayveerPrajapati/kern/internal/sec"
+	"github.com/JayveerPrajapati/kern/internal/secscan"
 )
 
 // ---- Project ----
@@ -520,9 +520,9 @@ func TestFromMemoryLesson(t *testing.T) {
 }
 
 func TestFromSecFinding(t *testing.T) {
-	f := sec.Finding{
+	f := secscan.Finding{
 		File: "main.go", Line: 3, Rule: "sql-injection",
-		Severity: string(sec.SeverityError), Message: "dynamic SQL", Snippet: "q := ...",
+		Severity: string(secscan.SeverityError), Message: "dynamic SQL", Snippet: "q := ...",
 	}
 	c := FromSecFinding(f)
 	if c.Type != ClaimFact {

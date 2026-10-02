@@ -87,7 +87,7 @@ func (c Check) Run(ctx context.Context, req domain.ChangeRequest) (result domain
 			RuleID:       "sandbox:network-isolation-unavailable",
 			Severity:     sev,
 			Category:     domain.CategoryTests,
-			Message:      "network isolation requested but unavailable on this platform; sandbox ran without egress containment",
+			Message:      "network isolation requested but unavailable on this platform; network isolation unavailable (degraded); sandbox ran without egress containment",
 			Explanation:  "Network isolation requires Linux CLONE_NEWNET or macOS sandbox-exec. On this platform the sandboxed build/test can reach the network, so a failing or malicious test could make external calls. The sandbox result is still valid for build/test correctness, but egress was not contained.",
 			SuggestedFix: "Run CI on a Linux runner for full network isolation, or set BLUEPRINT_REQUIRE_NETISO=1 to hard-fail when isolation is unavailable.",
 			Scope:        "repo",

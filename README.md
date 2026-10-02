@@ -32,7 +32,7 @@
 
 <br>
 
-**17 Indexed Languages · 74 Frameworks Recognized · Phase-aware MCP Routing (11 high-level tools by default, 139 in full mode) · 100% Local**
+**17 Indexed Languages · 74 Frameworks Recognized · Phase-aware MCP Routing (22 high-level tools by default, 117 in full mode) · 100% Local**
 
 </div>
 
@@ -111,8 +111,10 @@ the kern-first block from `~/AGENTS.md` (other content preserved). Pin a
 version with `KERN_VERSION=v1.2.3`, relocate with `KERN_INSTALL_DIR=dir`;
 when a platform has no prebuilt asset the installer falls back to
 `go install` automatically. Windows users get the native PowerShell installer (`install.ps1` — same
-install/status/uninstall lifecycle); Git-Bash users can run `install.sh`
-(zip path documented).
+install/upgrade/status/uninstall lifecycle); Git-Bash users can run `install.sh`
+(zip path documented). `kern update` is uniform across platforms — it runs
+`install.sh` on macOS/Linux and `install.ps1` via PowerShell on Windows
+automatically, including replacing a running `kern.exe` (renamed aside).
 
 **Release channels** — `KERN_CHANNEL` selects which release `latest`
 resolves to (an explicit `KERN_VERSION=v1.2.3` pin always overrides it):
@@ -214,8 +216,8 @@ functions through the MCP tools):
 | **How do I review changes?** | `kern review` — token-optimized diff review against the index |
 | **How do I check everything works?** | `kern doctor` — binary, agent configs, and index health |
 
-Agents get the same answers via `kern_search`, `kern_optimize_prompt`,
-`kern_optimize_log`, `kern_impact`, `kern_review`, `kern_doctor`.
+Agents get the same answers via `kern_search`, `kern_optimize` (action=prompt|log),
+`kern_impact`, `kern_review`, `kern_doctor`.
 
 ### 6. Autonomous Interception & Emergency Break-Glass
 
@@ -348,7 +350,7 @@ Run `kern setup` or check [`docs/mcp-client.md`](docs/mcp-client.md) for custom 
 
 ## MCP Tools & Routing
 
-By default, `kern` advertises a **focused 11-tool high-level surface** routed through the smart **`kern_meta`** natural-language dispatcher.
+By default, `kern` advertises a **focused 22-tool high-level surface** routed through the smart **`kern_meta`** natural-language dispatcher.
 
 | Core Tool | Purpose | What it Replaces |
 |---|---|---|
@@ -362,9 +364,9 @@ By default, `kern` advertises a **focused 11-tool high-level surface** routed th
 | **`kern_verify`** | Unified verification engine across build, test, security, and architecture | Fragmented check scripts |
 | **`kern_review`** | Token-optimized code review context for diffs and pull requests | Whole-file diff reviews |
 | **`kern_authorize_context`** | Computes authorized symbol context with cryptographic access proof | Unchecked file access |
-| **`kern_optimize_prompt`** | Strips boilerplate and masks secrets before sending prompts | Unsafe prompt leaks |
+| **`kern_optimize`** | Strips boilerplate and masks secrets before sending prompts | Unsafe prompt leaks |
 
-*Set `KERN_MCP_FULL=1` for the full 139-tool catalog, or
+*Set `KERN_MCP_FULL=1` for the full 117-tool catalog, or
 `KERN_MCP_PHASE=explore|plan|edit|verify` to filter by active agent phase.*
 
 ---
@@ -436,6 +438,32 @@ kern stats                # Track cumulative local token & cost savings
 See [`docs/cli-reference.md`](docs/cli-reference.md) for the full 200+ command guide.
 
 ---
+
+## Beyond Search: Digital Twin, Modernization, Consensus & LSP
+
+Deterministic workflows for the harder parts of maintenance — all local, all
+graph-backed:
+
+- **`kern twin` — the digital-twin entity layer.** Extracts the runtime
+  inventory (API endpoints, DB tables, topics, services, deployments) from
+  your project and merges it into the code graph, so `kern graph --entities`
+  renders what talks to what. `kern correlate` / `kern incident --correlate`
+  use it to chain an alert → service → deployment → commit → symbol in one
+  pass. Also via MCP: `kern_graph` (entities) and `kern_correlate`.
+- **`kern modernize` — monolith modernization plans.** Deterministic (no
+  LLM) bounded-context detection reusing the code graph — communities,
+  bridges and churn identify the seams — and a phased, risk-ordered
+  extraction plan comes out (capped at 20 phases). Also `kern_modernize`
+  via MCP and the web console.
+- **`kern review-consensus` — multi-persona review synthesis.** Normalizes
+  several independent `kern review` packs into one report: agreement with
+  exact supporters, divergence surfaced explicitly, and unresolved questions
+  listed as next verifications.
+- **`kern lsp` & `kern lsp-bridge` — LSP integration.** `kern lsp` serves
+  kern as a minimal stdio language server; `kern lsp-bridge` spawns external
+  language servers (gopls, pyright, vtsls, …) on demand and pools
+  definition/hover/references/symbols queries — also `kern_lsp_bridge` via
+  MCP.
 
 ## CI gate
 `kern check --ci` runs the blueprint change-governance pipeline in a machine-readable mode for CI: a JSON verdict on stdout and an exit code that matches it (0 = passed, 1 = failed, 2 = usage error). The default human output of `kern check` is unchanged.
@@ -522,7 +550,7 @@ verdict: all systems operational
 - [`docs/index.md`](docs/index.md) — docs site index: TOC of the full docs tree (ADRs, architecture ledger, recipes, benchmarks, tooling, security).
 - [`docs/recipes.md`](docs/recipes.md) — Task-oriented recipes: "Is this refactor safe?", "Triage a prod crash", and 13 more.
 - [`docs/cli-reference.md`](docs/cli-reference.md) — Complete 200+ CLI command reference.
-- [`docs/tool-catalog.md`](docs/tool-catalog.md) — Full generated MCP tool catalog (139 tools).
+- [`docs/tool-catalog.md`](docs/tool-catalog.md) — Full generated MCP tool catalog (117 tools).
 - [`docs/configuration.md`](docs/configuration.md) — Configuration, `.kern.yaml` profiles, and environment variables.
 - [`docs/duplication-benchmark.md`](docs/duplication-benchmark.md) — Multi-language structural duplication benchmark results.
 - [`docs/privacy.md`](docs/privacy.md) — Security and privacy specifications.

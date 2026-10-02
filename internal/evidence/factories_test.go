@@ -5,7 +5,7 @@ import (
 	"time"
 
 	"github.com/JayveerPrajapati/kern/internal/domain"
-	"github.com/JayveerPrajapati/kern/internal/sec"
+	"github.com/JayveerPrajapati/kern/internal/secscan"
 )
 
 func assertClaim(t *testing.T, c domain.Claim, wantType domain.ClaimType, wantSource string, wantConf float64) {
@@ -50,7 +50,7 @@ func assertEvidence(t *testing.T, e domain.Evidence, wantType domain.EvidenceTyp
 }
 
 func TestFromSecurityFinding(t *testing.T) {
-	f := sec.Finding{
+	f := secscan.Finding{
 		File:     "db/main.go",
 		Line:     42,
 		Rule:     "hardcoded-secret",

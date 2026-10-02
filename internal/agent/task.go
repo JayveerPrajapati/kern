@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/JayveerPrajapati/kern/internal/domain"
-	"github.com/JayveerPrajapati/kern/internal/verification"
+	"github.com/JayveerPrajapati/kern/internal/verdict"
 	"github.com/JayveerPrajapati/kern/internal/whatif"
 )
 
@@ -105,12 +105,12 @@ type Task struct {
 	// TaskService as the task progresses through analyze → impact → plan →
 	// verify. They are intentionally *domain types* (not engine types) so the
 	// Task stays decoupled from engine internals.
-	ContextPacket *domain.ContextPacket            // assembled context for the change
-	ImpactReport  *whatif.Impact                   // deterministic impact (what-if/simulate)
-	Impact        *domain.ImpactReport             // 11-question deterministic impact
-	Plan          *domain.Plan                     // structured implementation plan
-	Verification  *verification.VerificationResult // last verification run
-	Intent        string                           // the original human request (from Input)
+	ContextPacket *domain.ContextPacket       // assembled context for the change
+	ImpactReport  *whatif.Impact              // deterministic impact (what-if/simulate)
+	Impact        *domain.ImpactReport        // 11-question deterministic impact
+	Plan          *domain.Plan                // structured implementation plan
+	Verification  *verdict.VerificationResult // last verification run
+	Intent        string                      // the original human request (from Input)
 
 	PRURL    string // URL of created PR (empty if noop/failed)
 	PRNumber int    // PR number (0 if noop/failed)

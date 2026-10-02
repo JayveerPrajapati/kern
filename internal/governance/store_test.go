@@ -439,12 +439,12 @@ func TestPersistedWorkflowPrunesOnMutation(t *testing.T) {
 	}
 }
 
-// TestNewFileStoreCorruptFileFailsClosed guards the A1 fix: a corrupt
-// approvals.json must NOT be silently treated as an empty store (which a
-// later save would overwrite, destroying the pending approvals it holds).
-// The construction-time load error is surfaced via LoadError and every
-// operation fails closed until the file is repaired.
-func TestNewFileStoreCorruptFileFailsClosed(t *testing.T) {
+// TestNewFileStoreCorruptFileSelfHeals guards the H2b fix: a corrupt
+// approvals.json is quarantined aside (renamed, never deleted) and the store
+// continues empty instead of failing every read forever. Pending approvals
+// are deny-by-default gates, so losing them forces a re-request — never a
+// bypass.
+func TestNewFileStoreCorruptFileSelfHeals(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, ".kern", "approvals.json")
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
@@ -455,32 +455,41 @@ func TestNewFileStoreCorruptFileFailsClosed(t *testing.T) {
 	}
 
 	s := NewFileStore(root)
-	if err := s.LoadError(); err == nil {
-		t.Fatal("want LoadError to report the corrupt file")
+	// The corrupt file is quarantined at construction; the store self-heals
+	// as empty instead of reporting a permanent load error.
+	if err := s.LoadError(); err != nil {
+		t.Fatalf("want LoadError nil after self-heal, got %v", err)
 	}
-	// Reads must fail closed, not return an empty list.
-	if _, err := s.Load(); err == nil {
-		t.Fatal("want Load to fail on a corrupt file")
+	// Reads succeed on the empty self-healed store.
+	if got, err := s.Load(); err != nil {
+		t.Fatalf("want Load to succeed after self-heal, got %v", err)
+	} else if len(got) != 0 {
+		t.Fatalf("want empty store after self-heal, got %+v", got)
 	}
-	if _, err := s.Pending(); err == nil {
-		t.Fatal("want Pending to fail on a corrupt file")
+	if _, err := s.Pending(); err != nil {
+		t.Fatalf("want Pending to succeed after self-heal, got %v", err)
 	}
-	// Writes must fail closed so the corrupt file is not overwritten.
-	if err := s.AddPending(domain.Approval{ID: "appr-x"}); err == nil {
-		t.Fatal("want AddPending to fail on a corrupt file")
+	// Writes work again on the fresh file.
+	if err := s.AddPending(domain.Approval{ID: "appr-x"}); err != nil {
+		t.Fatalf("want AddPending to succeed after self-heal, got %v", err)
 	}
-
-	// Repairing the file restores operation (the error is advisory, every op
-	// re-reads the file).
-	if err := os.WriteFile(path, []byte(`[]`), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	// The mutate+Save round-trip persists: a fresh Load sees the added
+	// approval from the re-created (non-corrupt) file.
 	got, err := s.Load()
 	if err != nil {
-		t.Fatalf("Load after repair: %v", err)
+		t.Fatalf("Load after AddPending: %v", err)
 	}
-	if len(got) != 0 {
-		t.Fatalf("want empty store after repair, got %+v", got)
+	if len(got) != 1 || got[0].ID != "appr-x" {
+		t.Fatalf("want the added approval back from Load, got %+v", got)
+	}
+	// The corrupt content is preserved aside (rename, not delete) for
+	// inspection.
+	matches, err := filepath.Glob(path + ".corrupt-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matches) != 1 {
+		t.Fatalf("want exactly one quarantined corrupt file, got %v", matches)
 	}
 }
 

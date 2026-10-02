@@ -105,7 +105,7 @@ By default kern makes **no** network calls. Opt-in network surfaces:
 |---|---|
 | HTTP MCP mode | Loopback-only binding with Origin-header checks; **optional TLS** (`--tls-cert/--tls-key` or `KERN_MCP_TLS_CERT`/`KERN_MCP_TLS_KEY`); plain HTTP by default |
 | LLM providers | Opt-in calls to a local Ollama (`http://localhost:11434`, `internal/llm/llm.go`) or a configured OpenAI-compatible endpoint (`OPENAI_BASE_URL`) |
-| Doc fetch | Opt-in `kern_doc_fetch`; loopback fetches require `KERN_ALLOW_LOOPBACK_FETCH=1` (`internal/fetch/fetch.go`) |
+| Doc fetch | Opt-in `kern_doc action=fetch`; loopback fetches require `KERN_ALLOW_LOOPBACK_FETCH=1` (`internal/fetch/fetch.go`) |
 
 ### 2.5 Supply Chain
 

@@ -127,6 +127,9 @@ func Warm(root string) *Report {
 			return nil
 		}
 		sum := code.Summarize(rel, content, 200)
+		// Best-effort (like the semcache accrual below): a failed Store means
+		// the next pass re-summarizes this file — a miss, never a warm-pass
+		// failure.
 		_ = cache.Store("code/"+h, sum)
 		rep.Warmed++
 		// Semcache accrual: warm the fuzzy cache with (file head -> summary)

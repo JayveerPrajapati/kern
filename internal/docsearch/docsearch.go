@@ -161,7 +161,7 @@ func IndexDir(root string) (*Index, error) {
 		return nil, err
 	}
 	// Re-merge documents previously fetched for this project (kern doc fetch /
-	// kern_doc_fetch). Fetched pages live in the global docs-fetch cache and
+	// kern_doc). Fetched pages live in the global docs-fetch cache and
 	// only reach this project's persisted index via MergeFetched, so a full
 	// re-index would silently drop them without this step.
 	for _, name := range fetchNames(root) {

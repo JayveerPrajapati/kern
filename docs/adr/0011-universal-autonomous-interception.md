@@ -85,7 +85,9 @@ The server runs over standard JSON-RPC 2.0 (`stdio` transport) with zero externa
 ---
 
 ### 3.2 The 139-Tool Catalog & Phase Routing ([`catalog/tools.go`](internal/mcp/catalog/tools.go))
-Kern organises its 139 tools into 4 lifecycle phases plus cross-cutting control planes:
+Kern organises its 139 tools into 4 lifecycle phases plus cross-cutting control planes (historical pre-consolidation count — see correction below):
+
+> **Correction (2026-10-01):** the catalog consolidated to **117 tools** (22 default-advertised) in the 8-family merge (commits 442b654 + 0b1d662, 2026-10-01). The "139" figure throughout this section is the pre-consolidation historical count, retained for audit trail. The live count is pinned by TestMCPToolCatalogSizeCap (capFloor 110 / capCeil 160, `internal/mcp/catalog_drift_test.go`) and TestDocsStateMCPToolCount (`internal/setup`).
 
 #### Phase 1: Explore (Code Discovery & Semantic Navigation)
 * `kern_meta`: Natural-language entry point; automatically classifies and dispatches commands in-process.
@@ -280,10 +282,16 @@ Even during emergency bypasses, Kern writes a `Kind="bypass"` audit record (reas
    ```bash
    kern setup
    cd /tmp && mkdir test-repo && cd test-repo && git init
-   echo 'AWS_SECRET="AKIAIOSFODNN7EXAMPLE"' > secret.txt
+   echo 'AWS_SECRET="AKIA9X2K''7W2ZP4RT6NB"' > secret.txt
    git add secret.txt
-   git commit -m "test commit" --no-verify
-   # Outcome: Kern blocks the commit and redacts the secret.
+   git commit -m "test commit"
+   # Outcome: Kern blocks the commit (secret:gitleaks — generic-api-key) with
+   # the emergency-bypass hint. Notes: the '' concatenation above keeps this
+   # documentation file itself scanner-clean (the written secret.txt contains
+   # the full 20-char key — adjacent shell quotes concatenate); canonical
+   # published examples (AKIAIOSFODNN7EXAMPLE) are scanner-allowlisted by
+   # design and never fire; --no-verify skips git hooks entirely so the gate
+   # cannot run.
    ```
 2. **Verify Emergency Environment Bypass:**
    ```bash

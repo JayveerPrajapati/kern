@@ -22,9 +22,13 @@ type liveSource struct {
 	interval time.Duration
 	stop     chan struct{}
 	wg       sync.WaitGroup
-
-	mu    sync.RWMutex
-	store *Store
+	mu       sync.RWMutex
+	store    *Store
+	// parseErrOnce logs the first telemetry parse error per source only.
+	// External endpoints can emit malformed payloads (mid-rotation,
+	// version skew) on every poll; a persistent failure must be visible
+	// without spamming the log each interval.
+	parseErrOnce sync.Once
 }
 
 // newLiveSource creates the shared base. The poll loop is NOT started here —
@@ -79,7 +83,14 @@ func (s *liveSource) fetchAndIngest(fetch func() ([]byte, error), parse func([]b
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	_ = parse(data) // parse functions ingest into s.store
+	if err := parse(data); err != nil {
+		// Malformed external telemetry must not vanish silently: log the
+		// first parse error per source (see parseErrOnce) — the adapter
+		// keeps retrying on the next interval regardless.
+		s.parseErrOnce.Do(func() {
+			log.Printf("live %s: parse error (first only, further failures suppressed): %v", s.name, err)
+		})
+	}
 }
 
 // start launches the poll goroutine. Call exactly once.

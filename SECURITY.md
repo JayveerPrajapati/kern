@@ -49,7 +49,7 @@ known limitations, and how to report vulnerabilities.
   symbols and call edges an agent may read for a task, with an auditable
   authorization proof (`internal/governance/authorize.go`).
 - **Security scanning** — the `kern_security` tool scans for secrets, SQL
-  injection, weak crypto, and unsafe deserialization (`internal/sec/`).
+  injection, weak crypto, and unsafe deserialization (`internal/sec` + `internal/secscan`).
 - **MCP tool confinement** — path-typed tool arguments are confined to
   configured roots via `withinRoot()` and `rootedPath()` in
   `internal/mcp/server.go`. Symlinks are
@@ -78,6 +78,17 @@ known limitations, and how to report vulnerabilities.
 - **Exec tools are gated by `KERN_ALLOW_EXEC`** — host command execution is
   disabled by default. Enabling it grants the agent shell access; only enable
   it in environments you trust.
+
+- **Locally-writable state is local-trust** — the MCP tool-response disk cache
+  (`~/.cache/kern/`, key prefix `mcp-toolcache-`) and the `.kern/index.json`
+  symbol index are plain writable local state, trusted like any other file in
+  your project. A tampered cache entry can forge the provenance envelope
+  replayed with it (the audit chain attests envelopes, not output content),
+  and a tampered index can skew analysis results — kern does not defend
+  against a hostile local user or process. Mitigations: cached text is
+  PII-masked before persisting, and entries are keyed by index identity +
+  view-bound etag, so unrelated index changes rotate the key. See
+  `docs/adr/0012-conditional-fetch-etags.md` for the full trust model.
 
 ## Build Tags
 

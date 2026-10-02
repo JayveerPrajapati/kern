@@ -32,7 +32,7 @@ type SampleResult struct {
 }
 
 // EvalResult is the aggregate outcome of a run, mirroring the structured
-// result shape of internal/verification.VerificationResult and the metric
+// result shape of internal/verdict.VerificationResult and the metric
 // style of internal/app/benchmark.go's BaselineComparison (deterministic,
 // JSON-tagged where useful).
 type EvalResult struct {

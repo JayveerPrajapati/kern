@@ -200,6 +200,27 @@ func TestG3_FalsePositiveNoAllowlist(t *testing.T) {
 	}
 }
 
+// G3-6c: the canonical documentation example secret is suppressed by VALUE
+// (internal/sec knownExampleSecrets), NOT by the location allowlist — the
+// fixture lives in a normal source path with the default allowlist, so this
+// pins that the suppression happens in the scanner itself. This documents
+// commit 0f59fbc's behavior at the G3 level.
+func TestG3_CanonicalExampleSecretSuppressed(t *testing.T) {
+	client := requireKern(t)
+	fr := SecretsCanonicalExample(t)
+	req := secretReq(t, fr, "aws.go")
+	res, err := NewSecretCheck(client).Run(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Run error: %v", err)
+	}
+	if res.Status != domain.StatusPass {
+		t.Fatalf("status = %s, want PASS (canonical example secret is fake by construction); findings: %+v", res.Status, res.Findings)
+	}
+	if len(res.Findings) != 0 {
+		t.Fatalf("expected 0 findings for canonical example secret, got %d: %+v", len(res.Findings), res.Findings)
+	}
+}
+
 type noneAllow struct{}
 
 func (noneAllow) IsAllowed(string) bool { return false }
@@ -214,7 +235,10 @@ func TestG3_RedactionPlainText(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run error: %v", err)
 	}
-	const secretValue = "AKIAIOSFODNN7EXAMPLE"
+	// Must stay in sync with the SecretsAPIKey fixture value — a
+	// non-canonical key (AKIAIOSFODNN7EXAMPLE is allowlisted by value in
+	// internal/sec, so it would produce zero findings and assert nothing).
+	const secretValue = "AKIA9X2KQ7W3ZP4RT6NB"
 	for _, f := range res.Findings {
 		checkNoLeak(t, "Message", f.Message, secretValue)
 		checkNoLeak(t, "Explanation", f.Explanation, secretValue)
@@ -246,7 +270,8 @@ func TestG3_RedactionJSON(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
-	const secretValue = "AKIAIOSFODNN7EXAMPLE"
+	// In sync with the SecretsAPIKey fixture (non-canonical, detectable).
+	const secretValue = "AKIA9X2KQ7W3ZP4RT6NB"
 	if strings.Contains(string(b), secretValue) {
 		t.Fatalf("JSON output LEAKS the secret value:\n%s", b)
 	}

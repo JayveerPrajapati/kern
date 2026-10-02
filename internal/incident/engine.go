@@ -27,6 +27,7 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/memory"
 	"github.com/JayveerPrajapati/kern/internal/prprovider"
 	"github.com/JayveerPrajapati/kern/internal/runtime"
+	"github.com/JayveerPrajapati/kern/internal/verdict"
 	"github.com/JayveerPrajapati/kern/internal/verification"
 )
 
@@ -407,7 +408,7 @@ func (e *Engine) ApplyAndVerifyFix(inc *domain.Incident, apply func(workDir stri
 	// happens on the candidate before a PR is created.
 	res := verification.NewEngine(wt.Dir()).Verify([]string{"build"})
 	inc.Verification = res.Summary
-	if res.Verdict != verification.VerdictPass {
+	if res.Verdict != verdict.VerdictPass {
 		return diff, errors.New("verification failed: " + res.Summary)
 	}
 	inc.Status = domain.IncidentFixVerified
