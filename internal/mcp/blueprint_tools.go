@@ -21,7 +21,3 @@ func (s *Server) handleValidateProposed(ctx context.Context, args map[string]any
 func (s *Server) handleExplainFinding(ctx context.Context, args map[string]any) (string, error) {
 	return blueprint.ExplainFinding(ctx, args)
 }
-
-func (s *Server) handleRepairGuidance(ctx context.Context, args map[string]any) (string, error) {
-	return blueprint.RepairGuidance(ctx, args)
-}

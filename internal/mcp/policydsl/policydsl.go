@@ -10,9 +10,9 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/JayveerPrajapati/kern/internal/intel"
 	"github.com/JayveerPrajapati/kern/internal/mcp/mcpargs"
 	"github.com/JayveerPrajapati/kern/internal/mcp/root"
+	"github.com/JayveerPrajapati/kern/internal/policy"
 )
 
 // Evaluate evaluates policy-as-code YAML/JSON specs against changed files, diffs, and imports.
@@ -54,7 +54,7 @@ func Evaluate(ctx context.Context, args map[string]any) (string, error) {
 		}
 	}
 
-	spec, err := intel.ParsePolicySpec(policyText)
+	spec, err := policy.ParsePolicySpec(policyText)
 	if err != nil {
 		return "", fmt.Errorf("kern_policy_dsl: invalid policy spec: %w", err)
 	}
@@ -89,7 +89,7 @@ func Evaluate(ctx context.Context, args map[string]any) (string, error) {
 		imports = impList
 	}
 
-	eval := intel.EvaluatePolicy(spec, files, diff, imports)
+	eval := policy.EvaluatePolicy(spec, files, diff, imports)
 
 	format := strings.ToLower(mcpargs.ArgString(args, "format"))
 	if format == "json" {

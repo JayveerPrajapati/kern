@@ -12,24 +12,26 @@ import (
 	"github.com/JayveerPrajapati/kern/internal/index"
 	"github.com/JayveerPrajapati/kern/internal/intel"
 	"github.com/JayveerPrajapati/kern/internal/pii"
-	"github.com/JayveerPrajapati/kern/internal/sec"
+	"github.com/JayveerPrajapati/kern/internal/secscan"
 )
 
 type fakeSecSvc struct {
-	scanFn   func(ctx context.Context, root string) ([]sec.Finding, error)
-	filterFn func(findings []sec.Finding, allow []string) []sec.Finding
-	renderFn func(findings []sec.Finding, max int) string
+	scanFn   func(ctx context.Context, root string) ([]secscan.Finding, error)
+	filterFn func(findings []secscan.Finding, allow []string) []secscan.Finding
+	renderFn func(findings []secscan.Finding, max int) string
 	maskFn   func(ctx context.Context, text string, names []string) (pii.Result, error)
 	gotNames []string
 }
 
-func (f *fakeSecSvc) Scan(ctx context.Context, root string) ([]sec.Finding, error) {
+func (f *fakeSecSvc) Scan(ctx context.Context, root string) ([]secscan.Finding, error) {
 	return f.scanFn(ctx, root)
 }
-func (f *fakeSecSvc) FilterBySeverity(findings []sec.Finding, allow []string) []sec.Finding {
+func (f *fakeSecSvc) FilterBySeverity(findings []secscan.Finding, allow []string) []secscan.Finding {
 	return f.filterFn(findings, allow)
 }
-func (f *fakeSecSvc) Render(findings []sec.Finding, max int) string { return f.renderFn(findings, max) }
+func (f *fakeSecSvc) Render(findings []secscan.Finding, max int) string {
+	return f.renderFn(findings, max)
+}
 func (f *fakeSecSvc) Mask(ctx context.Context, text string, names []string) (pii.Result, error) {
 	f.gotNames = names
 	return f.maskFn(ctx, text, names)
@@ -120,17 +122,17 @@ func TestMaskPIIError(t *testing.T) {
 func TestScanJSON(t *testing.T) {
 	ctx := context.Background()
 	svc := &fakeSecSvc{
-		scanFn: func(ctx context.Context, root string) ([]sec.Finding, error) {
-			return []sec.Finding{{File: "a.go", Line: 3, Rule: "r1", Severity: "error", Message: "boom"}}, nil
+		scanFn: func(ctx context.Context, root string) ([]secscan.Finding, error) {
+			return []secscan.Finding{{File: "a.go", Line: 3, Rule: "r1", Severity: "error", Message: "boom"}}, nil
 		},
-		filterFn: func(findings []sec.Finding, allow []string) []sec.Finding { return findings },
-		renderFn: func(findings []sec.Finding, max int) string { return "rendered" },
+		filterFn: func(findings []secscan.Finding, allow []string) []secscan.Finding { return findings },
+		renderFn: func(findings []secscan.Finding, max int) string { return "rendered" },
 	}
 	out, err := Scan(ctx, svc, map[string]any{"root": ".", "format": "json", "severity": "error"})
 	if err != nil {
 		t.Fatalf("Scan failed: %v", err)
 	}
-	var got []sec.Finding
+	var got []secscan.Finding
 	if err := json.Unmarshal([]byte(out), &got); err != nil {
 		t.Fatalf("expected JSON findings output, got %q: %v", out, err)
 	}
@@ -142,11 +144,11 @@ func TestScanJSON(t *testing.T) {
 func TestScanNoFindings(t *testing.T) {
 	ctx := context.Background()
 	svc := &fakeSecSvc{
-		scanFn: func(ctx context.Context, root string) ([]sec.Finding, error) { return nil, nil },
-		filterFn: func(findings []sec.Finding, allow []string) []sec.Finding {
+		scanFn: func(ctx context.Context, root string) ([]secscan.Finding, error) { return nil, nil },
+		filterFn: func(findings []secscan.Finding, allow []string) []secscan.Finding {
 			return nil
 		},
-		renderFn: func(findings []sec.Finding, max int) string { return "" },
+		renderFn: func(findings []secscan.Finding, max int) string { return "" },
 	}
 	out, err := Scan(ctx, svc, map[string]any{"root": "."})
 	if err != nil {
@@ -159,15 +161,15 @@ func TestScanNoFindings(t *testing.T) {
 
 func TestScanRenderedCounts(t *testing.T) {
 	ctx := context.Background()
-	findings := []sec.Finding{
+	findings := []secscan.Finding{
 		{File: "a.go", Line: 1, Rule: "r1", Severity: "error", Message: "e"},
 		{File: "a.go", Line: 2, Rule: "r2", Severity: "warning", Message: "w"},
 		{File: "a.go", Line: 3, Rule: "r3", Severity: "info", Message: "i"},
 	}
 	svc := &fakeSecSvc{
-		scanFn:   func(ctx context.Context, root string) ([]sec.Finding, error) { return findings, nil },
-		filterFn: func(f []sec.Finding, allow []string) []sec.Finding { return f },
-		renderFn: func(f []sec.Finding, max int) string {
+		scanFn:   func(ctx context.Context, root string) ([]secscan.Finding, error) { return findings, nil },
+		filterFn: func(f []secscan.Finding, allow []string) []secscan.Finding { return f },
+		renderFn: func(f []secscan.Finding, max int) string {
 			if max != 100 {
 				t.Errorf("expected default max 100, got %d", max)
 			}
@@ -189,9 +191,9 @@ func TestScanRenderedCounts(t *testing.T) {
 func TestScanMaxInvalid(t *testing.T) {
 	ctx := context.Background()
 	svc := &fakeSecSvc{
-		scanFn:   func(ctx context.Context, root string) ([]sec.Finding, error) { return nil, nil },
-		filterFn: func(f []sec.Finding, allow []string) []sec.Finding { return f },
-		renderFn: func(f []sec.Finding, max int) string { return "" },
+		scanFn:   func(ctx context.Context, root string) ([]secscan.Finding, error) { return nil, nil },
+		filterFn: func(f []secscan.Finding, allow []string) []secscan.Finding { return f },
+		renderFn: func(f []secscan.Finding, max int) string { return "" },
 	}
 	_, err := Scan(ctx, svc, map[string]any{"root": ".", "max": "not-a-number"})
 	if err == nil || !strings.Contains(err.Error(), "max: invalid integer") {
@@ -202,11 +204,11 @@ func TestScanMaxInvalid(t *testing.T) {
 func TestScanServiceError(t *testing.T) {
 	ctx := context.Background()
 	svc := &fakeSecSvc{
-		scanFn: func(ctx context.Context, root string) ([]sec.Finding, error) {
+		scanFn: func(ctx context.Context, root string) ([]secscan.Finding, error) {
 			return nil, context.Canceled
 		},
-		filterFn: func(f []sec.Finding, allow []string) []sec.Finding { return f },
-		renderFn: func(f []sec.Finding, max int) string { return "" },
+		filterFn: func(f []secscan.Finding, allow []string) []secscan.Finding { return f },
+		renderFn: func(f []secscan.Finding, max int) string { return "" },
 	}
 	_, err := Scan(ctx, svc, map[string]any{"root": "."})
 	if err == nil || !strings.Contains(err.Error(), "security scan failed") {

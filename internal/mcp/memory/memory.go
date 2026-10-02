@@ -1,5 +1,5 @@
-// Package memory owns project brain memory MCP tool bodies (kern_memory_*, kern_memory_ranked)
-// as plain functions.
+// Package memory owns the project brain memory MCP tool bodies
+// (kern_memory) as plain functions; Tool dispatches on the action argument.
 package memory
 
 import (
@@ -19,13 +19,67 @@ type Hooks struct {
 	Add    func(ctx context.Context, root, lesson string) error
 	List   func(ctx context.Context, root string) ([]memory.Entry, error)
 	Recall func(ctx context.Context, root, prompt string, k int) ([]memory.Entry, error)
+	Remove func(ctx context.Context, root, id string) (memory.Entry, error)
+	Clear  func(ctx context.Context, root string) error
+}
+
+// Tool is the consolidated kern_memory dispatcher: the action argument
+// selects the add/list/recall/ranked/remove/clear body. The shared schema can
+// only mark action as required, so per-action required arguments are
+// validated inside the branches.
+func Tool(ctx context.Context, h Hooks, args map[string]any) (string, error) {
+	action := mcpargs.ArgString(args, "action")
+	if action == "" {
+		return "", fmt.Errorf("kern_memory: 'action' is required")
+	}
+	switch action {
+	case "add":
+		return Add(ctx, h, args)
+	case "list":
+		return List(ctx, h, args)
+	case "recall":
+		return Recall(ctx, h, args)
+	case "ranked":
+		return Ranked(ctx, args)
+	case "remove":
+		id := mcpargs.ArgString(args, "id")
+		if id == "" {
+			return "", fmt.Errorf("kern_memory: 'id' is required for action=remove")
+		}
+		root := root.ResolveRoot(mcpargs.ArgString(args, "root"))
+		var entry memory.Entry
+		var err error
+		if h.Remove != nil {
+			entry, err = h.Remove(ctx, root, id)
+		} else if n, aerr := strconv.Atoi(id); aerr == nil {
+			entry, err = memory.RemoveIndex(root, n)
+		} else {
+			entry, err = memory.RemovePrefix(root, id)
+		}
+		if err != nil {
+			return "", err
+		}
+		return "removed: " + memory.FormatEntry(entry), nil
+	case "clear":
+		root := root.ResolveRoot(mcpargs.ArgString(args, "root"))
+		if h.Clear != nil {
+			if err := h.Clear(ctx, root); err != nil {
+				return "", err
+			}
+		} else if err := memory.Clear(root); err != nil {
+			return "", err
+		}
+		return "project memory cleared.", nil
+	default:
+		return "", fmt.Errorf("kern_memory: unknown action %q (want add|list|recall|ranked|remove|clear)", action)
+	}
 }
 
 // Add stores a new lesson in project memory.
 func Add(ctx context.Context, h Hooks, args map[string]any) (string, error) {
 	lesson := mcpargs.ArgString(args, "lesson")
 	if lesson == "" {
-		return "", fmt.Errorf("lesson is required")
+		return "", fmt.Errorf("kern_memory: lesson is required")
 	}
 	root := root.ResolveRoot(mcpargs.ArgString(args, "root"))
 	if h.Add != nil {
@@ -97,7 +151,7 @@ func Recall(ctx context.Context, h Hooks, args map[string]any) (string, error) {
 func Ranked(ctx context.Context, args map[string]any) (string, error) {
 	prompt := mcpargs.ArgString(args, "prompt")
 	if strings.TrimSpace(prompt) == "" {
-		return "", fmt.Errorf("kern_memory_ranked: 'prompt' is required")
+		return "", fmt.Errorf("kern_memory: 'prompt' is required for action=ranked")
 	}
 
 	root := root.ResolveRoot(mcpargs.ArgString(args, "root"))

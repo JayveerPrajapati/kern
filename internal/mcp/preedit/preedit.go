@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/JayveerPrajapati/kern/internal/guard"
 	"github.com/JayveerPrajapati/kern/internal/index"
 	"github.com/JayveerPrajapati/kern/internal/intel"
 )
@@ -91,7 +92,7 @@ func Analyze(ctx context.Context, ix *index.Index, root string, file string, sym
 
 	// Check boundary rules if present
 	var boundaryWarnings []string
-	if boundaries, _ := intel.LoadBoundaries(root); boundaries != nil && len(boundaries.Rules) > 0 && cleanRelFile != "" {
+	if boundaries, _ := guard.LoadBoundaries(root); boundaries != nil && len(boundaries.Rules) > 0 && cleanRelFile != "" {
 		for _, r := range boundaries.Rules {
 			if r.Action == "forbid" {
 				if strings.Contains(cleanRelFile, r.From) {

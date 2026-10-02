@@ -44,6 +44,13 @@ type Hooks struct {
 	// the rendered table instead of falling through to classification and
 	// the symbol-search dead end. nil preserves the legacy behavior.
 	ToolCatalog func() (string, error)
+	// Workingset renders the caller's conditional-fetch working-set registry
+	// (the etags this agent has been served, per tool/args, newest first) for
+	// "my working set" / "workingset" kern_meta requests (B1, ADR-0012). When
+	// non-nil, Handle answers the classified workingset route with it instead
+	// of dispatching the marker-routed tool. nil preserves the legacy
+	// behavior.
+	Workingset func(agentID string) (string, error)
 }
 
 // metaRoutedTools is the set of tool names the kern_meta router can dispatch
@@ -142,6 +149,38 @@ func toolCatalogIntent(low string) bool {
 		}
 	}
 	return false
+}
+
+// WorkingsetArg marks the kern_meta workingset route: ClassifyMetaRequest
+// answers "working set" / "workingset" requests as kern_context with this
+// boolean argument set, Handle answers the marker through the Workingset
+// hook instead of dispatching, and the mcp root's cache gate
+// (cacheableForCall) uses the same marker to keep the route out of the D1
+// cache (B1, ADR-0012). The value is deliberately a boolean: it can never be
+// a legitimately requested kern_context argument.
+const WorkingsetArg = "workingset"
+
+// WorkingsetIntent reports whether a lowercase kern_meta request asks for
+// the caller's conditional-fetch working-set registry. Only possessive,
+// imperative or single-token command spellings fire: "my working set",
+// "show working set", "show my working set" (covered by the possessive
+// form), the joined "workingset" and the hyphenated "working-set". A bare
+// two-word substring inside a larger question — "how does the working set
+// registry work" — must NOT be hijacked into the registry listing
+// (MEDIUM-5); it keeps its normal routing.
+func WorkingsetIntent(low string) bool {
+	if strings.Contains(low, "workingset") || strings.Contains(low, "working-set") {
+		return true
+	}
+	return strings.Contains(low, "my working set") || strings.Contains(low, "show working set")
+}
+
+// isWorkingsetRoute reports whether the classification produced the
+// workingset marker route. Handle consults it right after classification —
+// before the dispatch/fallback logic — so the Workingset hook renders the
+// registry and the kernel_context handler never runs.
+func isWorkingsetRoute(tool string, subArgs map[string]any) bool {
+	return tool == "kern_context" && mcpargs.ArgBool(subArgs, WorkingsetArg)
 }
 
 // NoCodeIntentError is returned by Handle when an unrecognized request falls
@@ -282,6 +321,18 @@ func Handle(ctx context.Context, h Hooks, args map[string]any) (string, error) {
 			subArgs[k] = v
 		}
 	}
+	// B1 workingset route (ADR-0012): a request classified to the workingset
+	// marker answers with the caller's conditional-fetch registry (tool, args
+	// digest, etag, timestamp) through the Workingset hook — never by
+	// dispatching the marker-routed kern_context. The route is non-cacheable
+	// (the mcp root's cache gate excludes the marker), so the listing is
+	// always current per-agent state.
+	if isWorkingsetRoute(tool, subArgs) {
+		if h.Workingset == nil {
+			return "", fmt.Errorf("meta: workingset hook is not wired")
+		}
+		return h.Workingset(mcpargs.ArgString(args, "agent_id"))
+	}
 	// Non-code refusal (P1): the search fallback is only legitimate when the
 	// request names code, the repo, or kern tooling. When the classifier fell
 	// through to kern_search (its final fallback for unrecognized requests,
@@ -372,7 +423,7 @@ func VerifyTypesExec(types []string) bool {
 // coerced to "123") is rejected up front so a garbage types list can never
 // degrade into a vacuous "summary: PASS" run where every sub-check is
 // silently skipped.
-var VerifyTypesKnown = []string{"build", "test", "security", "architecture", "dependency", "e2e", "static-analysis", "performance", "cve", "license", "secrets", "ci"}
+var VerifyTypesKnown = []string{"build", "test", "security", "architecture", "dependency", "e2e", "static-analysis", "performance", "cve", "license", "secrets", "ci", "arch"}
 
 // KnownVerifyType reports whether a token names a verification the engine can
 // run. It mirrors verification.Engine.Verify's substring dispatch exactly, so
@@ -394,7 +445,7 @@ func KnownVerifyType(t string) bool {
 		return true
 	case strings.Contains(t, "security"), strings.Contains(t, "sec"):
 		return true
-	case strings.Contains(t, "archi"):
+	case strings.Contains(t, "arch"):
 		return true
 	case strings.Contains(t, "depend"), strings.Contains(t, "dep"):
 		return true
@@ -588,12 +639,12 @@ func ClassifyOptimizeTools(low, request string) (string, map[string]any, bool) {
 	case HasWord(low, "mask") && (HasWord(low, "secret") || HasWord(low, "pii")):
 		return "kern_mask_pii", map[string]any{"text": ExtractAfterColon(request, low)}, true
 	case HasWord(low, "compress") && HasWord(low, "log"):
-		return "kern_optimize_log", map[string]any{"log": ExtractAfterColon(request, low)}, true
+		return "kern_optimize", map[string]any{"action": "log", "log": ExtractAfterColon(request, low)}, true
 	case HasWord(low, "compress") && (HasWord(low, "output") || HasWord(low, "response") || HasWord(low, "reply")):
-		return "kern_optimize_output", map[string]any{"text": ExtractAfterColon(request, low)}, true
+		return "kern_optimize", map[string]any{"action": "output", "text": ExtractAfterColon(request, low)}, true
 	case HasWord(low, "compress") && HasWord(low, "prompt"):
-		return "kern_optimize_prompt", map[string]any{"prompt": ExtractAfterColon(request, low)}, true
-	case HasWord(low, "security") || HasWord(low, "scan") && strings.Contains(low, "vulnerab"):
+		return "kern_optimize", map[string]any{"action": "prompt", "prompt": ExtractAfterColon(request, low)}, true
+	case HasWord(low, "security") || (HasWord(low, "scan") && strings.Contains(low, "vulnerab")) || HasWord(low, "cve"):
 		return "kern_security", map[string]any{}, true
 	case HasWord(low, "schema") || strings.Contains(low, "validate json"):
 		return "kern_schema_validate", map[string]any{}, true
@@ -627,13 +678,13 @@ func ClassifyWorkflowTools(low, request string) (string, map[string]any, bool) {
 	case strings.Contains(low, "cross repo") || strings.Contains(low, "multi repo"):
 		return "kern_cross_repo_impact", map[string]any{"target_symbol": ExtractSymbol(request, low)}, true
 	case strings.Contains(low, "ranked memor") || strings.Contains(low, "decay memor"):
-		return "kern_memory_ranked", map[string]any{"prompt": request}, true
+		return "kern_memory", map[string]any{"action": "ranked", "prompt": request}, true
 	case strings.Contains(low, "policy dsl") || strings.Contains(low, "evaluate policy"):
 		return "kern_policy_dsl", map[string]any{}, true
 	case strings.Contains(low, "agent coordination") || (HasWord(low, "coordination") && strings.Contains(low, "agent")):
-		return "kern_agent_coordination", map[string]any{"action": "status"}, true
+		return "kern_agent", map[string]any{"action": "coordination", "inner_action": "status"}, true
 	case strings.Contains(low, "rbac") || strings.Contains(low, "agent role"):
-		return "kern_agent_role_rbac", map[string]any{"action": "roles"}, true
+		return "kern_agent", map[string]any{"action": "rbac", "inner_action": "roles"}, true
 	case strings.Contains(low, "stream chunk") || (HasWord(low, "stream") && HasWord(low, "transport")):
 		return "kern_stream", map[string]any{"action": "status"}, true
 	}
@@ -661,13 +712,13 @@ func ClassifyArchTools(low, request string) (string, map[string]any, bool) {
 		return "kern_dead", map[string]any{}, true
 	case HasWord(low, "largest") || strings.Contains(low, "god function") || HasWord(low, "biggest"):
 		return "kern_larges", map[string]any{}, true
-	case strings.Contains(low, "test gap") || HasWord(low, "coverage"):
+	case strings.Contains(low, "test gap") || HasWord(low, "coverage") || HasWord(low, "untested"):
 		return "kern_test_gaps", map[string]any{}, true
 	case strings.Contains(low, "entry point") || HasWord(low, "handler") || HasWord(low, "route"):
 		return "kern_entry_points", map[string]any{}, true
 	case HasWord(low, "framework") || HasWord(low, "library") || strings.Contains(low, "detect stack"):
 		return "kern_frameworks", map[string]any{}, true
-	case HasWord(low, "churn") || strings.Contains(low, "changed most"):
+	case HasWord(low, "churn") || strings.Contains(low, "changed most") || strings.Contains(low, "most changed"):
 		return "kern_churn", map[string]any{}, true
 	case strings.Contains(low, "cochange") || strings.Contains(low, "co-change") || strings.Contains(low, "lockstep"):
 		return "kern_cochange", map[string]any{}, true
@@ -727,7 +778,7 @@ func ClassifyGraphTools(low, request string) (string, map[string]any, bool) {
 		}
 		tool, args := WithSymbol(request, low, "kern_explore", "kern_search", map[string]any{})
 		return tool, args, true
-	case strings.Contains(low, "why does") || strings.Contains(low, "why is") || strings.Contains(low, "rationale"):
+	case strings.Contains(low, "why does") || strings.Contains(low, "why is") || strings.Contains(low, "why do ") || strings.Contains(low, "rationale"):
 		if sym := ExtractSymbol(request, low); sym != "" {
 			return "kern_why", map[string]any{"symbol": sym}, true
 		}
@@ -752,7 +803,7 @@ func ClassifyGraphTools(low, request string) (string, map[string]any, bool) {
 		return tool, args, true
 	case HasWord(low, "trace") && (strings.Contains(low, "stack") || strings.Contains(low, "pprof")):
 		return "kern_trace", map[string]any{}, true
-	case HasWord(low, "probe") || strings.Contains(low, "what does this touch"):
+	case HasWord(low, "probe") || strings.Contains(low, "what does this touch") || strings.Contains(low, "blast radius"):
 		return "kern_probe", map[string]any{"task": request}, true
 	case strings.Contains(low, "prose") || strings.Contains(low, "vocab") || strings.Contains(low, "spelling"):
 		// prose-word → symbol candidate lookup; kept after the more
@@ -773,10 +824,14 @@ func ClassifyProjectTools(low, request string) (string, map[string]any, bool) {
 		return "kern_fit_context", map[string]any{"query": request}, true
 	case HasWord(low, "compact") && strings.Contains(low, "file"):
 		return "kern_compact_file", map[string]any{}, true
-	// Index intents (dogfood F-2): "rebuild/refresh the index" has no
+	case (HasWord(low, "summarize") || HasWord(low, "summary") || HasWord(low, "overview")) && strings.Contains(low, "file"):
+		// "summarize this file X" is a compact_file intent, not a search.
+		// kern_compact_file is a default-22 tool agents rely on.
+		return "kern_compact_file", map[string]any{}, true
+	// Index intents: "rebuild/refresh the index" has no
 	// dedicated MCP tool — kern_onboard is the tool that registers and
 	// builds/refreshes the index; index status/freshness questions are
-	// answered by kern_health (which now falls back to the disk view).
+	// answered by kern_health (which falls back to the disk view).
 	// Checked before the buddy/onboard branch so "index ... onboard" style
 	// phrasings still land on the index intent, and before the health branch
 	// so "index status" is unambiguous.
@@ -784,14 +839,14 @@ func ClassifyProjectTools(low, request string) (string, map[string]any, bool) {
 		return "kern_onboard", map[string]any{}, true
 	case strings.Contains(low, "index") && (HasWord(low, "status") || HasWord(low, "fresh") || HasWord(low, "stale") || HasWord(low, "health")):
 		return "kern_health", map[string]any{}, true
-	// LLM provider intents (dogfood): chain/sampler/status questions are
+	// LLM provider intents: chain/sampler/status questions are
 	// answered by kern_llm_providers ("which local agent should I use");
 	// plain code questions ("how does the llm provider work") stay searches.
 	case (strings.Contains(low, "llm") && (strings.Contains(low, "providers") || strings.Contains(low, "chain") || strings.Contains(low, "sampler") || strings.Contains(low, "sampling") || HasWord(low, "status"))) ||
 		(strings.Contains(low, "host") && (strings.Contains(low, "sampler") || strings.Contains(low, "sampling"))) ||
 		(HasWord(low, "agent") && HasWord(low, "use") && (HasWord(low, "local") || HasWord(low, "which"))):
 		return "kern_llm_providers", map[string]any{}, true
-	case HasWord(low, "buddy") || HasWord(low, "onboard") || strings.Contains(low, "getting started"):
+	case HasWord(low, "buddy") || HasWord(low, "onboard") || HasWord(low, "onboarding") || strings.Contains(low, "getting started"):
 		return "kern_buddy", map[string]any{}, true
 	// Symbol status intents (N8): "status of X" / "what's the status of X" /
 	// "what is the status of X" where X is a symbol (dot-qualified or
@@ -803,25 +858,38 @@ func ClassifyProjectTools(low, request string) (string, map[string]any, bool) {
 	// kern_health routing below.
 	case statusSymbol(request) != "":
 		return "kern_explore", map[string]any{"symbol": statusSymbol(request)}, true
-	case HasWord(low, "health") || HasWord(low, "status") || strings.Contains(low, "self-check") || strings.Contains(low, "diagnose"):
+	case HasWord(low, "health") || HasWord(low, "doctor") || HasWord(low, "status") || strings.Contains(low, "self-check") || strings.Contains(low, "diagnose"):
 		return "kern_health", map[string]any{}, true
-	case HasWord(low, "stats") || HasWord(low, "savings") || strings.Contains(low, "token count"):
+	case HasWord(low, "stats") || HasWord(low, "savings") || HasWord(low, "saved") || strings.Contains(low, "token count") || strings.Contains(low, "token usage"):
 		return "kern_stats", map[string]any{}, true
-	case strings.Contains(low, "commit message") || strings.Contains(low, "commitmsg"):
+	case strings.Contains(low, "commit message") || strings.Contains(low, "commitmsg") || strings.Contains(low, "commit msg"):
 		return "kern_commitmsg", map[string]any{}, true
-	case HasWord(low, "memory") || HasWord(low, "remember") || HasWord(low, "lesson"):
-		return "kern_memory_recall", map[string]any{"prompt": request}, true
-	case HasWord(low, "docs") || HasWord(low, "documentation"):
-		return "kern_doc_search", map[string]any{"query": request}, true
-	case HasWord(low, "build") || HasWord(low, "test") || HasWord(low, "lint"):
+	case HasWord(low, "memory") || HasWord(low, "memories") || HasWord(low, "remember") || HasWord(low, "lesson") || HasWord(low, "lessons") || HasWord(low, "learnings"):
+		return "kern_memory", map[string]any{"action": "recall", "prompt": request}, true
+	case HasWord(low, "doc") || HasWord(low, "docs") || HasWord(low, "documentation"):
+		return "kern_doc", map[string]any{"action": "search", "query": request}, true
+	// Synthesize-test intents (router audit): "write/generate/scaffold a
+	// test" name test GENERATION, not test RUNNING — they must beat the
+	// generic build/test/lint arm below, which would otherwise answer a
+	// generation request by merely re-running the suite.
+	case strings.Contains(low, "synthesize") || strings.Contains(low, "generate a test") || strings.Contains(low, "write a test") || strings.Contains(low, "scaffold a test") || strings.Contains(low, "test skeleton"):
+		return "kern_synthesize_test", synthesizeArgs(request), true
+	// Heal intents (router audit): auto-repair phrasings route to the heal
+	// loop — the arm answers "make it work" — before the repair-diagnostics
+	// arm ("what is wrong") and before build/test/lint (which only re-runs
+	// the check that already failed).
+	case HasWord(low, "heal") || strings.Contains(low, "failing build") || strings.Contains(low, "failing test") || strings.Contains(low, "auto-repair") || strings.Contains(low, "fix the build") || strings.Contains(low, "fix the tests"):
+		return "kern_heal", map[string]any{}, true
+	// Repair-diagnostics intents (router audit): the original arm matched
+	// "compiler error" literally — the common variants ("compile error",
+	// "compilation error", "build error") fell through to build/test/lint.
+	// Ordered before the generic arm for the same reason as heal.
+	case strings.Contains(low, "repair") || strings.Contains(low, "fix diagnostics") || strings.Contains(low, "compiler error") || strings.Contains(low, "compile error") || strings.Contains(low, "compilation error") || strings.Contains(low, "build error"):
+		return "kern_repair", map[string]any{"action": "diagnostics", "compiler_output": request}, true
+	case HasWord(low, "build") || HasWord(low, "test") || HasWord(low, "lint") || HasWord(low, "validate"):
 		return "kern_validate", map[string]any{}, true
-	case strings.Contains(low, "repair") || strings.Contains(low, "auto repair") || strings.Contains(low, "fix diagnostics") || strings.Contains(low, "compiler error"):
-		return "kern_repair_diagnostics", map[string]any{"compiler_output": request}, true
-	case HasWord(low, "exec") || strings.Contains(low, "run script") || strings.Contains(low, "run code"):
+	case HasWord(low, "exec") || HasWord(low, "execute") || strings.Contains(low, "run script") || strings.Contains(low, "run code") || strings.Contains(low, "run the script") || strings.Contains(low, "run this script"):
 		return "kern_exec", map[string]any{}, true
-	case strings.Contains(low, "safe delete") || strings.Contains(low, "delete symbol") || strings.Contains(low, "can i delete"):
-		tool, args := WithSymbol(request, low, "kern_safe_delete", "", map[string]any{})
-		return tool, args, true
 	case strings.Contains(low, "safe delete") || strings.Contains(low, "delete symbol") || strings.Contains(low, "can i delete"):
 		tool, args := WithSymbol(request, low, "kern_safe_delete", "", map[string]any{})
 		return tool, args, true
@@ -829,6 +897,42 @@ func ClassifyProjectTools(low, request string) (string, map[string]any, bool) {
 		return "kern_rename", map[string]any{}, true
 	}
 	return "", nil, false
+}
+
+// synthesizeArgs extracts a target symbol and/or source file from a
+// "write a test for X in Y.ext" request. The synthesize-test handler needs
+// at least one of them (target or file) — the router arm's job is to find
+// both when the request names them. The scan uses the ORIGINAL request
+// (not the lowercased copy) because symbol casing is the signal: a
+// capitalized token is a symbol candidate, a code-extension token is a
+// file. Punctuation-trimmed, dotted tokens are treated as files only.
+func synthesizeArgs(request string) map[string]any {
+	args := map[string]any{}
+	for _, word := range strings.Fields(request) {
+		w := strings.Trim(word, ".,;:!?()[]{}\"`'")
+		if w == "" {
+			continue
+		}
+		lw := strings.ToLower(w)
+		switch {
+		case args["file"] == nil &&
+			(strings.HasSuffix(lw, ".go") || strings.HasSuffix(lw, ".py") || strings.HasSuffix(lw, ".ts") ||
+				strings.HasSuffix(lw, ".js") || strings.HasSuffix(lw, ".java") || strings.HasSuffix(lw, ".rb")):
+			args["file"] = w
+		case args["target"] == nil && !strings.Contains(w, "."):
+			hasUpper := false
+			for _, r := range w {
+				if r >= 'A' && r <= 'Z' {
+					hasUpper = true
+					break
+				}
+			}
+			if hasUpper && len(w) > 2 {
+				args["target"] = w
+			}
+		}
+	}
+	return args
 }
 
 // ClassifyRetrievalTools routes the progressive-disclosure retrieval cases
@@ -866,6 +970,9 @@ func ClassifyRetrievalTools(low, request string) (string, map[string]any, bool) 
 		return "kern_plan_context", map[string]any{"change": request}, true
 	case strings.Contains(low, "orchestrate") || strings.Contains(low, "silent context") || strings.Contains(low, "context pipeline"):
 		return "kern_orchestrate", map[string]any{"intent": request}, true
+	case strings.Contains(low, "run this task") || strings.Contains(low, "run the task") || strings.Contains(low, "run this workflow") || (HasWord(low, "run") && HasWord(low, "autonomous")):
+		// kern_run is a default-22 tool. Route task-execution phrasings to the pipeline runner.
+		return "kern_run", map[string]any{"intent": request}, true
 	case strings.Contains(low, "agent skills") || strings.Contains(low, "list skills") || strings.Contains(low, "load skill") || strings.Contains(low, "skill runbook"):
 		return "kern_skill", map[string]any{"action": "catalog"}, true
 	}
@@ -924,6 +1031,14 @@ func ClassifyMetaRequest(request string) (string, map[string]any) {
 	// routing below unchanged.
 	if t, a, ok := classifyExplicitToolName(request); ok {
 		return t, a
+	}
+	// B1 workingset route (ADR-0012): "my working set" / "workingset"
+	// requests answer with the caller's conditional-fetch registry. Routed to
+	// kern_context with the marker argument set; Handle answers the marker
+	// route through the Workingset hook instead of dispatching, and the D1
+	// cache gate (cacheableForCall) excludes it from caching.
+	if WorkingsetIntent(low) {
+		return "kern_context", map[string]any{"symbol": request, WorkingsetArg: true}
 	}
 	// The sub-routers are consulted in the same order as the original
 	// monolithic switch (safety/optimize -> workflows -> architecture ->

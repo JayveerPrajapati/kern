@@ -8,12 +8,10 @@ import (
 	"runtime/debug"
 	"strconv"
 	"time"
-	"unicode/utf8"
 
+	"github.com/JayveerPrajapati/kern/internal/mcp/etag"
 	"github.com/JayveerPrajapati/kern/internal/mcp/mcpargs"
-	"github.com/JayveerPrajapati/kern/internal/optimize"
-	"github.com/JayveerPrajapati/kern/internal/stats"
-	"github.com/JayveerPrajapati/kern/internal/tokenize"
+	"github.com/JayveerPrajapati/kern/internal/mcpserve"
 )
 
 func errorResponse(id json.RawMessage, code int, msg string) map[string]any {
@@ -76,7 +74,7 @@ func (s *Server) toolCallResponse(id json.RawMessage, params json.RawMessage) an
 				"content": []any{map[string]any{"type": "text", "text": denied}},
 				"isError": true,
 			}
-			attachTokenMetadata(result, p.Name, p.Arguments, denied)
+			mcpserve.AttachTokenMetadata(result, p.Name, p.Arguments, denied)
 			return map[string]any{"jsonrpc": "2.0", "id": id, "result": result}
 		}
 	}
@@ -113,9 +111,9 @@ func (s *Server) toolCallResponse(id json.RawMessage, params json.RawMessage) an
 	// flood the agent's context. Overridable per call with max_output=N.
 	if err == nil {
 		var budget int
-		budget, err = callOutputBudget(p.Arguments)
+		budget, err = mcpserve.CallOutputBudget(p.Arguments)
 		if err == nil {
-			text = sandboxOutput(text, budget, p.Name)
+			text = mcpserve.SandboxOutput(text, budget, p.Name)
 		}
 	}
 	result := map[string]any{
@@ -154,9 +152,39 @@ func (s *Server) toolCallResponse(id json.RawMessage, params json.RawMessage) an
 		}
 		result["content"] = []any{map[string]any{"type": "text", "text": text}}
 		result["isError"] = true
-	} else if scope.prov != nil {
+	} else if scope.prov != nil && (!scope.unchanged || !etag.Eligible(p.Name)) {
+		// An unchanged short-circuit (ADR-0012) is deliberately tiny: the
+		// provenance summary line is skipped so the response stays exactly
+		// "unchanged (etag E)" plus the etag/unchanged result fields.
+		// F-3: the unchanged flag belongs to the last INNER composed step
+		// (steps re-enter runTool under this same scope), never to a
+		// non-eligible outer tool like kern_compose — a short-circuited last
+		// step must not strip the outer envelope's provenance.
 		result["provenance"] = scope.prov
 		result["content"] = []any{map[string]any{"type": "text", "text": text + "\n" + s.provenanceSummary(scope.ix, scope.prov)}}
+	}
+	// ETag conditional-fetch (ADR-0012, B1): every eligible response —
+	// no-etag calls, etag-mismatch calls and the unchanged short-circuit
+	// alike — carries its response etag; the short-circuit additionally sets
+	// unchanged=true. The working-set registry records the (tool, args
+	// digest, etag, time) the caller was handed so kern_meta "my working
+	// set" can list it; the raw agent_id arg keys the bucket ("" -> "_").
+	// The Eligible gate keeps a NON-eligible tool envelope (kern_compose)
+	// from inheriting the last inner step's scope.etag: composed steps
+	// re-enter runTool under this same scope, so without the gate the outer
+	// envelope would wrongly attach an inner step's etag/unchanged fields
+	// and record (kern_compose, E1) in the working set (HIGH-1).
+	if scope.etag != "" && etag.Eligible(p.Name) {
+		result["etag"] = scope.etag
+		if scope.unchanged {
+			result["unchanged"] = true
+		}
+		etag.Default.Record(argString(p.Arguments, "agent_id"), etag.Entry{
+			Tool:  p.Name,
+			Args:  etag.CanonicalArgsKey(p.Arguments),
+			ETag:  scope.etag,
+			Stamp: time.Now(),
+		})
 	}
 	// Structured token metadata: the request tokens were counted
 	// before processing; count the final response text (provenance summary
@@ -173,20 +201,9 @@ func (s *Server) toolCallResponse(id json.RawMessage, params json.RawMessage) an
 	// pre-tool denials — they return before this point). The same final
 	// response text the client sees is what gets counted, so the ledger
 	// answers "which tools return the most tokens to my context".
-	recordToolCall(p.Name, p.Arguments, out, s.clientNameFor())
-	attachTokenMetadata(result, p.Name, p.Arguments, out)
+	mcpserve.RecordToolCall(p.Name, p.Arguments, out, s.clientNameFor())
+	mcpserve.AttachTokenMetadata(result, p.Name, p.Arguments, out)
 	return map[string]any{"jsonrpc": "2.0", "id": id, "result": result}
-}
-
-// selfRecordingTools are the tools whose handlers already append a stats
-// entry with real before/after savings (the optimize family records through
-// optimize.record, which stamps the Tool on the entry). The dispatch path
-// skips them so the per-tool ledger never double-counts a single call; their
-// real savings reach the ledger through their own entries.
-var selfRecordingTools = map[string]bool{
-	"kern_optimize_prompt": true,
-	"kern_optimize_log":    true,
-	"kern_run_build":       true,
 }
 
 // clientNameFor returns the client identity captured at the initialize
@@ -196,116 +213,6 @@ func (s *Server) clientNameFor() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.clientName
-}
-
-// recordToolCall appends one per-tool stats entry for an executed MCP tool
-// call: the tool name, the session (when the caller passed one — the same
-// convention the optimize handlers use) and the returned payload token
-// estimate via the shared tokenizer. Tools that do not know their
-// before/after contribute AfterTokens only (Before=0, Saved=0 — honest, never
-// fabricated). Agent attribution: an explicit agent_id argument wins; else
-// the client identity captured at initialize (clientInfo.name); else the
-// neutral "mcp" bucket so `kern stats --by-agent` never reports
-// "(unattributed)" for tool calls. Recording must never fail a tool call, so
-// every error path is swallowed.
-func recordToolCall(tool string, args map[string]any, out string, clientName string) {
-	if selfRecordingTools[tool] {
-		return
-	}
-	if optimize.Recorder == nil {
-		if err := optimize.EnsureRecorder(); err != nil {
-			return
-		}
-	}
-	agent := mcpargs.ArgString(args, "agent_id")
-	if agent == "" {
-		agent = clientName
-	}
-	if agent == "" {
-		agent = "mcp"
-	}
-	_ = optimize.Recorder.Record(stats.Entry{
-		Session:     argString(args, "session"),
-		Operation:   stats.OpToolCall,
-		Tool:        tool,
-		Agent:       agent,
-		AfterTokens: tokenize.Count(out),
-	})
-}
-
-// defaultOutputBudget is the MCP output sandbox cap in bytes, used when the
-// agent does not pass max_output= and KERN_MCP_MAX_OUTPUT is unset. ~6K tokens
-// of safety net for a single tool result.
-const defaultOutputBudget = 24 << 10
-
-// outputBudget resolves the global cap from KERN_MCP_MAX_OUTPUT (bytes).
-func outputBudget() int {
-	if v := os.Getenv("KERN_MCP_MAX_OUTPUT"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			return n
-		}
-	}
-	return defaultOutputBudget
-}
-
-// callOutputBudget returns the per-call budget: an explicit max_output=N
-// argument (bytes; 0 disables the sandbox) wins over the global cap. A
-// malformed max_output is an error, not a silent fallback.
-func callOutputBudget(args map[string]any) (int, error) {
-	if v := argString(args, "max_output"); v != "" {
-		n, err := strconv.Atoi(v)
-		if err != nil {
-			return 0, fmt.Errorf("max_output: invalid integer %q", v)
-		}
-		if n <= 0 {
-			return 0, nil // disabled for this call
-		}
-		return n, nil
-	}
-	return outputBudget(), nil
-}
-
-// sandboxOutput truncates text to budget bytes (when budget > 0) and stamps a
-// marker with before/after token counts and a tool-specific recovery hint. The
-// marker doubles as the anti-context-flood boundary: an agent that needs more
-// can re-call with a larger max_output or a narrower tool.
-func sandboxOutput(text string, budget int, tool string) string {
-	if budget <= 0 || len(text) <= budget {
-		return text
-	}
-	// Trim to a rune-safe boundary: slicing mid-multi-byte-rune would leave a
-	// dangling UTF-8 sequence that corrupts the marker's own token counts and
-	// any downstream tokenizer.
-	cut := budget
-	for cut > 0 && !utf8.RuneStart(text[cut]) {
-		cut--
-	}
-	return text[:cut] + fmt.Sprintf("\n\n… [MCP output sandbox: %d → %d chars (%d → %d tokens). %s Pass max_output=N to this tool for more, or narrow the request.]",
-		len(text), cut, tokenize.Count(text), tokenize.Count(text[:cut]), recoveryHint(tool))
-}
-
-// recoveryHint suggests the narrower tool to recover the truncated detail.
-func recoveryHint(tool string) string {
-	switch tool {
-	case "kern_project_map", "kern_compact_file":
-		return "Use kern_context or kern_compact_file for specific symbols instead."
-	case "kern_near":
-		return "Lower max= or depth=."
-	case "kern_context":
-		return "Request fewer lines=."
-	case "kern_review", "kern_context_budget":
-		return "Lower max_tokens=."
-	case "kern_doc_search":
-		return "Narrow the query or lower k=."
-	case "kern_ast_search":
-		return "Tighten the pattern."
-	case "kern_exec":
-		return "Cap the script's own output with max=."
-	case "kern_graph", "kern_arch", "kern_hubs":
-		return "This report is inherently large; prefer kern_search/kern_context for specifics."
-	default:
-		return "Narrow the query."
-	}
 }
 
 func (s *Server) promptGetResponse(id json.RawMessage, params json.RawMessage) any {
@@ -427,7 +334,7 @@ func validateStringArgs(name string, args map[string]any) error {
 				// string args (plugin callers legitimately pass numeric strings)
 				// — but a JSON NUMBER for the path-typed "root" argument is a
 				// client bug, not a path: coercing it to "12345" would resolve
-				// silently relative to the workspace root (dogfooding D-LOW).
+				// silently relative to the workspace root.
 				if key == "root" {
 					switch v.(type) {
 					case float64, int:

@@ -40,6 +40,7 @@ func Test(ctx context.Context, args map[string]any) (string, error) {
 		MaxMutants:  maxMutants,
 		DryRun:      dryRun,
 		TestCommand: testCmd,
+		Isolate:     true, // mutants are evaluated in a worktree copy; the real tree is never touched
 	})
 	if err != nil {
 		return "", fmt.Errorf("mutation test execution error: %w", err)

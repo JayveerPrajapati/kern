@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/JayveerPrajapati/kern/internal/mcpserve"
 	"github.com/JayveerPrajapati/kern/internal/strutil"
 )
 
@@ -306,7 +307,7 @@ func TestToolDispatchCoverage(t *testing.T) {
 		{"kern_inherits", map[string]any{"root": root, "symbol": "Greet"}},
 		{"kern_entry_points", map[string]any{"root": root}},
 		{"kern_trace", map[string]any{"root": root, "trace": "panic in Greet\ncalled Greet\n", "limit": "10"}},
-		{"kern_lock_status", map[string]any{"root": root}},
+		{"kern_lock", map[string]any{"root": root, "action": "status"}},
 		{"kern_guard_check", map[string]any{"root": root, "file": "app.go"}},
 		{"kern_path", map[string]any{"root": root, "from": "main", "to": "Greet"}},
 	}
@@ -572,15 +573,15 @@ func TestOrchestrateViaMCP(t *testing.T) {
 }
 
 // TestKernMemoryActionRecallNoMatchHint pins the no-match hint on the
-// dedicated recall surface: the kern_memory action wrapper was folded into
-// kern_memory_add/kern_memory_list/kern_memory_recall (surface
-// consolidation T2a), so the hint must come from kern_memory_recall.
+// consolidated kern_memory recall action: the dedicated recall surface
+// (kern_memory_recall) was folded into kern_memory action=recall (surface
+// consolidation T2a), so the hint must come from there.
 func TestKernMemoryActionRecallNoMatchHint(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	root := mcpProject(t)
-	miss := mcpAssertOK(t, "kern_memory_recall", map[string]any{"root": root, "prompt": "xyzzy plugh unrelated"})
+	miss := mcpAssertOK(t, "kern_memory", map[string]any{"root": root, "action": "recall", "prompt": "xyzzy plugh unrelated"})
 	if !strings.HasPrefix(miss, "no matching lessons") {
-		t.Fatalf("expected no-match hint on kern_memory_recall (previously returned an empty string), got %q", miss)
+		t.Fatalf("expected no-match hint from kern_memory action=recall (previously returned an empty string), got %q", miss)
 	}
 }
 
@@ -596,37 +597,83 @@ func TestMemoryToolsViaMCP(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	root := mcpProject(t)
 
-	ok := mcpAssertOK(t, "kern_memory_add", map[string]any{"root": root, "lesson": "deploy tags come from a manual release workflow"})
+	ok := mcpAssertOK(t, "kern_memory", map[string]any{"root": root, "action": "add", "lesson": "deploy tags come from a manual release workflow"})
 	if !strings.Contains(ok, "remembered") {
 		t.Fatalf("expected remembered confirmation, got %q", ok)
 	}
-	full := mcpAssertOK(t, "kern_memory_list", map[string]any{"root": root})
+	full := mcpAssertOK(t, "kern_memory", map[string]any{"root": root, "action": "list"})
 	if !strings.Contains(full, "deploy tags") {
 		t.Fatalf("expected lesson in list, got %q", full)
 	}
-	hit := mcpAssertOK(t, "kern_memory_recall", map[string]any{"root": root, "prompt": "how are deploy tags released?", "limit": "3"})
+	hit := mcpAssertOK(t, "kern_memory", map[string]any{"root": root, "action": "recall", "prompt": "how are deploy tags released?", "limit": "3"})
 	if !strings.Contains(hit, "deploy tags") {
 		t.Fatalf("expected recall hit, got %q", hit)
 	}
 	// backward-compat alias: pre-rename prompts pass the limit as "k"
-	aliasHit := mcpAssertOK(t, "kern_memory_recall", map[string]any{"root": root, "prompt": "how are deploy tags released?", "k": "3"})
+	aliasHit := mcpAssertOK(t, "kern_memory", map[string]any{"root": root, "action": "recall", "prompt": "how are deploy tags released?", "k": "3"})
 	if !strings.Contains(aliasHit, "deploy tags") {
 		t.Fatalf("expected recall hit via legacy k alias, got %q", aliasHit)
 	}
-	miss := mcpAssertOK(t, "kern_memory_recall", map[string]any{"root": root, "prompt": "xyzzy plugh unrelated"})
+	miss := mcpAssertOK(t, "kern_memory", map[string]any{"root": root, "action": "recall", "prompt": "xyzzy plugh unrelated"})
 	if !strings.HasPrefix(miss, "no matching lessons") {
 		t.Fatalf("expected no-match hint for unrelated prompt, got %q", miss)
 	}
-	badK := mcpToolError(t, "kern_memory_recall", map[string]any{"root": root, "prompt": "how are deploy tags released?", "limit": "bogus"})
+	badK := mcpToolError(t, "kern_memory", map[string]any{"root": root, "action": "recall", "prompt": "how are deploy tags released?", "limit": "bogus"})
 	if !strings.Contains(badK, "invalid integer") {
 		t.Fatalf("expected parse error for malformed limit, got %q", badK)
 	}
-	zeroK := mcpAssertOK(t, "kern_memory_recall", map[string]any{"root": root, "prompt": "how are deploy tags released?", "limit": "0"})
+	zeroK := mcpAssertOK(t, "kern_memory", map[string]any{"root": root, "action": "recall", "prompt": "how are deploy tags released?", "limit": "0"})
 	if !strings.Contains(zeroK, "deploy tags") {
 		t.Fatalf("expected recall hit with clamped limit, got %q", zeroK)
 	}
-	mcpToolError(t, "kern_memory_add", nil)
-	mcpToolError(t, "kern_memory_recall", nil)
+	// nil args: the action argument is required.
+	noAction := mcpToolError(t, "kern_memory", nil)
+	if !strings.Contains(noAction, "'action' is required") {
+		t.Fatalf("expected action-required error, got %q", noAction)
+	}
+	// unknown action surfaces a clear error naming the valid actions.
+	badAction := mcpToolError(t, "kern_memory", map[string]any{"root": root, "action": "bogus"})
+	if !strings.Contains(badAction, "unknown action") {
+		t.Fatalf("expected unknown-action error, got %q", badAction)
+	}
+}
+
+// TestKernMemoryRemoveClear covers the consolidated tool's remove (by
+// 1-based list index and by text prefix) and clear actions end-to-end.
+func TestKernMemoryRemoveClear(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	root := mcpProject(t)
+
+	// add two lessons → remove by 1-based list index (newest first) → list.
+	mcpAssertOK(t, "kern_memory", map[string]any{"root": root, "action": "add", "lesson": "first lesson to remove by index"})
+	mcpAssertOK(t, "kern_memory", map[string]any{"root": root, "action": "add", "lesson": "second lesson stays"})
+	// List is newest-first, so index 2 is the older "first lesson".
+	removed := mcpAssertOK(t, "kern_memory", map[string]any{"root": root, "action": "remove", "id": 2})
+	if !strings.Contains(removed, "removed: ") || !strings.Contains(removed, "first lesson") {
+		t.Fatalf("expected removed confirmation naming the first lesson, got %q", removed)
+	}
+	full := mcpAssertOK(t, "kern_memory", map[string]any{"root": root, "action": "list"})
+	if strings.Contains(full, "first lesson") || !strings.Contains(full, "second lesson") {
+		t.Fatalf("expected only the second lesson after index remove, got %q", full)
+	}
+
+	// add → remove by text prefix → list.
+	mcpAssertOK(t, "kern_memory", map[string]any{"root": root, "action": "add", "lesson": "prefix-removable lesson"})
+	pref := mcpAssertOK(t, "kern_memory", map[string]any{"root": root, "action": "remove", "id": "prefix-removable"})
+	if !strings.Contains(pref, "removed: ") || !strings.Contains(pref, "prefix-removable") {
+		t.Fatalf("expected prefix removal confirmation, got %q", pref)
+	}
+
+	// add → clear → empty list.
+	mcpAssertOK(t, "kern_memory", map[string]any{"root": root, "action": "add", "lesson": "cleared lesson"})
+	clr := mcpAssertOK(t, "kern_memory", map[string]any{"root": root, "action": "clear"})
+	if !strings.Contains(clr, "project memory cleared") {
+		t.Fatalf("expected clear confirmation, got %q", clr)
+	}
+	empty := mcpAssertOK(t, "kern_memory", map[string]any{"root": root, "action": "list"})
+	if empty != "" {
+		t.Fatalf("expected empty list after clear, got %q", empty)
+	}
 }
 
 func TestToolsListMatchesDispatchCases(t *testing.T) {
@@ -658,8 +705,8 @@ func TestProvenanceStampOnIndexTools(t *testing.T) {
 func TestNoProvenanceStampOnNonIndexTools(t *testing.T) {
 	t.Parallel()
 	root := mcpProject(t)
-	_ = mcpAssertOK(t, "kern_memory_add", map[string]any{"root": root, "lesson": "provenance probe"})
-	out := mcpAssertOK(t, "kern_memory_list", map[string]any{"root": root})
+	_ = mcpAssertOK(t, "kern_memory", map[string]any{"root": root, "action": "add", "lesson": "provenance probe"})
+	out := mcpAssertOK(t, "kern_memory", map[string]any{"root": root, "action": "list"})
 	if strings.Contains(out, "[kern] index: ") {
 		t.Fatalf("non-index tool should not be stamped, got %q", out)
 	}
@@ -928,11 +975,11 @@ func TestOutputSandboxUnit(t *testing.T) {
 	t.Parallel()
 	big := strings.Repeat("lorem ipsum dolor sit amet ", 2000)
 	// Under budget: untouched.
-	if got := sandboxOutput(big, 1<<20, "kern_project_map"); got != big {
+	if got := mcpserve.SandboxOutput(big, 1<<20, "kern_project_map"); got != big {
 		t.Fatalf("under-budget output was modified")
 	}
 	// Over budget: truncated with marker + token counts + tool hint.
-	got := sandboxOutput(big, 200, "kern_project_map")
+	got := mcpserve.SandboxOutput(big, 200, "kern_project_map")
 	if !strings.Contains(got, "MCP output sandbox") || !strings.Contains(got, "tokens") {
 		t.Fatalf("missing sandbox marker: %q", got)
 	}
@@ -943,35 +990,27 @@ func TestOutputSandboxUnit(t *testing.T) {
 		t.Fatalf("sandboxed output too large: %d", len(got))
 	}
 	// budget <= 0 disables.
-	if got := sandboxOutput(big, 0, "kern_x"); got != big {
+	if got := mcpserve.SandboxOutput(big, 0, "kern_x"); got != big {
 		t.Fatalf("budget 0 should disable the sandbox")
 	}
 }
 
 func TestOutputBudgetResolution(t *testing.T) {
 	// Per-call max_output wins over the global cap.
-	if b, err := callOutputBudget(map[string]any{"max_output": "500"}); err != nil || b != 500 {
+	if b, err := mcpserve.CallOutputBudget(map[string]any{"max_output": "500"}); err != nil || b != 500 {
 		t.Fatalf("max_output override = %d, err=%v", b, err)
 	}
-	if b, err := callOutputBudget(map[string]any{"max_output": "0"}); err != nil || b != 0 {
+	if b, err := mcpserve.CallOutputBudget(map[string]any{"max_output": "0"}); err != nil || b != 0 {
 		t.Fatalf("max_output=0 should disable, got %d, err=%v", b, err)
 	}
 	// A malformed max_output is an error, not a silent fallback.
-	if _, err := callOutputBudget(map[string]any{"max_output": "junk"}); err == nil {
+	if _, err := mcpserve.CallOutputBudget(map[string]any{"max_output": "junk"}); err == nil {
 		t.Fatalf("malformed max_output should error")
 	}
 	// Global env cap applies when no per-call override.
 	t.Setenv("KERN_MCP_MAX_OUTPUT", "999")
-	if b, err := callOutputBudget(map[string]any{}); err != nil || b != 999 {
+	if b, err := mcpserve.CallOutputBudget(map[string]any{}); err != nil || b != 999 {
 		t.Fatalf("env cap = %d, err=%v", b, err)
-	}
-	if b := outputBudget(); b != 999 {
-		t.Fatalf("outputBudget = %d", b)
-	}
-	// Invalid env falls back to the default.
-	t.Setenv("KERN_MCP_MAX_OUTPUT", "junk")
-	if b := outputBudget(); b != defaultOutputBudget {
-		t.Fatalf("invalid env should fall back to default, got %d", b)
 	}
 }
 
@@ -1144,7 +1183,7 @@ func TestKernMCPHighLevelOnlyFiltersTools(t *testing.T) {
 		}
 	}
 	// Tools known to be low-level must be absent.
-	for _, low := range []string{"kern_dead", "kern_rename", "kern_churn", "kern_optimize_output"} {
+	for _, low := range []string{"kern_dead", "kern_rename", "kern_churn", "kern_near"} {
 		if names[low] {
 			t.Errorf("low-level tool %q should be filtered out under KEN_MCP_HIGH_LEVEL_ONLY", low)
 		}

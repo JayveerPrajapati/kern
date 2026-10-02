@@ -1,5 +1,5 @@
 // Package fingerprint owns agent behavioral fingerprinting and loop detection
-// MCP tool bodies (kern_agent_fingerprint) as plain functions.
+// MCP tool bodies (kern_agent action=fingerprint) as plain functions.
 package fingerprint
 
 import (

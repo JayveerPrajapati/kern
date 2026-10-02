@@ -1,5 +1,5 @@
-// Package repair owns compiler diagnostic auto-repair MCP tool bodies (kern_repair_diagnostics)
-// as plain functions.
+// Package repair owns compiler diagnostic auto-repair MCP tool bodies
+// (kern_repair action=diagnostics|guidance) as plain functions.
 package repair
 
 import (
@@ -8,13 +8,32 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/JayveerPrajapati/kern/internal/mcp/blueprint"
 	"github.com/JayveerPrajapati/kern/internal/mcp/mcpargs"
 	"github.com/JayveerPrajapati/kern/internal/mcp/root"
 	"github.com/JayveerPrajapati/kern/internal/repair"
 )
 
-// Repair analyzes compiler diagnostic output and performs AST-level auto-repairs.
-func Repair(ctx context.Context, args map[string]any) (string, error) {
+// Tool is the consolidated kern_repair dispatcher: the action argument
+// selects the diagnostics or guidance body. Guidance is delegated to the
+// blueprint leaf (the former kern_repair_guidance body) so behavior stays identical.
+func Tool(ctx context.Context, args map[string]any) (string, error) {
+	action := mcpargs.ArgString(args, "action")
+	if action == "" {
+		return "", fmt.Errorf("kern_repair: 'action' is required")
+	}
+	switch action {
+	case "diagnostics":
+		return Diagnostics(ctx, args)
+	case "guidance":
+		return blueprint.RepairGuidance(ctx, args)
+	default:
+		return "", fmt.Errorf("kern_repair: unknown action %q (want diagnostics|guidance)", action)
+	}
+}
+
+// Diagnostics analyzes compiler diagnostic output and performs AST-level auto-repairs.
+func Diagnostics(ctx context.Context, args map[string]any) (string, error) {
 	root := root.ResolveRoot(mcpargs.ArgString(args, "root"))
 
 	compilerOutput := mcpargs.ArgString(args, "compiler_output")

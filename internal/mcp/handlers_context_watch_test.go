@@ -43,8 +43,8 @@ ConnectionTimeout: pool exhausted
 	if !strings.Contains(res, "Bloated Context Segments Identified") {
 		t.Errorf("missing bloated segments section: %s", res)
 	}
-	if !strings.Contains(res, "kern_optimize_log") {
-		t.Errorf("expected recommendation to use kern_optimize_log: %s", res)
+	if !strings.Contains(res, "kern_optimize") {
+		t.Errorf("expected recommendation to use kern_optimize: %s", res)
 	}
 
 	// Test 2: JSON output format

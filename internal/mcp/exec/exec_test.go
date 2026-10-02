@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestSandboxEmptyCommand(t *testing.T) {
@@ -59,5 +60,33 @@ func TestMaskedOutputMasksBeforeTruncate(t *testing.T) {
 	short := maskedOutput("before "+secret+" after", 4000)
 	if strings.Contains(short, "AKIA") || strings.Contains(short, "... (truncated)") {
 		t.Fatalf("short output mishandled: %q", short)
+	}
+}
+
+// TestExecTimeout pins the KERN_EXEC_TIMEOUT override: valid Go durations are
+// honored, while unset, invalid, and non-positive values fall back to the
+// 5-minute default (invalid values also emit a warning line on stderr).
+func TestExecTimeout(t *testing.T) {
+	cases := []struct {
+		name string
+		env  string
+		want time.Duration
+	}{
+		{name: "unset", env: "", want: 5 * time.Minute},
+		{name: "valid seconds", env: "90s", want: 90 * time.Second},
+		{name: "valid minutes", env: "10m", want: 10 * time.Minute},
+		{name: "valid mixed", env: "1m30s", want: 90 * time.Second},
+		{name: "invalid garbage", env: "abc", want: 5 * time.Minute},
+		{name: "invalid bare number", env: "90", want: 5 * time.Minute},
+		{name: "invalid zero", env: "0s", want: 5 * time.Minute},
+		{name: "invalid negative", env: "-5m", want: 5 * time.Minute},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("KERN_EXEC_TIMEOUT", tc.env)
+			if got := execTimeout(); got != tc.want {
+				t.Errorf("execTimeout() = %s, want %s", got, tc.want)
+			}
+		})
 	}
 }

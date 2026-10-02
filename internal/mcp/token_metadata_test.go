@@ -5,6 +5,8 @@ import (
 	"errors"
 	"strings"
 	"testing"
+
+	"github.com/JayveerPrajapati/kern/internal/mcpserve"
 )
 
 // tokenMetadataOf extracts the tokenMetadata object from a tools/call result
@@ -23,7 +25,7 @@ func tokenMetadataOf(t *testing.T, resp map[string]any) map[string]any {
 }
 
 // assertTokenMetadataPresent checks a result carries valid token metadata.
-// Direct dispatch (safeDispatch) holds the typed TokenMetadata struct, while a
+// Direct dispatch (safeDispatch) holds the typed mcpserve.TokenMetadata struct, while a
 // JSON round-trip yields a decoded map; both are accepted.
 func assertTokenMetadataPresent(t *testing.T, res map[string]any) {
 	t.Helper()
@@ -38,7 +40,7 @@ func assertTokenMetadataPresent(t *testing.T, res map[string]any) {
 		if cost, _ := v["estimatedCost"].(float64); cost <= 0 {
 			t.Errorf("estimatedCost = %v, want > 0", v["estimatedCost"])
 		}
-	case TokenMetadata:
+	case mcpserve.TokenMetadata:
 		if v.TokensUsed <= 0 || v.TokensReturned <= 0 || v.EstimatedCost <= 0 {
 			t.Errorf("invalid tokenMetadata: %+v", v)
 		}
@@ -47,52 +49,9 @@ func assertTokenMetadataPresent(t *testing.T, res map[string]any) {
 	}
 }
 
-func TestCountRequestTokens(t *testing.T) {
-	t.Parallel()
-	empty := countRequestTokens("kern_foo", nil)
-	if empty <= 0 {
-		t.Errorf("countRequestTokens(name, nil) = %d, want > 0", empty)
-	}
-	fat := countRequestTokens("kern_foo", map[string]any{"text": strings.Repeat("word ", 2000)})
-	if fat <= empty {
-		t.Errorf("countRequestTokens with 2000 words = %d, want > bare-name count %d", fat, empty)
-	}
-}
-
-func TestTokenMetadataFor(t *testing.T) {
-	t.Parallel()
-	args := map[string]any{"text": strings.Repeat("word ", 500)}
-	meta := tokenMetadataFor("kern_x", args, "short output")
-	if meta.TokensUsed <= 0 {
-		t.Errorf("TokensUsed = %d, want > 0", meta.TokensUsed)
-	}
-	if meta.TokensReturned <= 0 {
-		t.Errorf("TokensReturned = %d, want > 0", meta.TokensReturned)
-	}
-	if want := meta.TokensUsed - meta.TokensReturned; meta.Savings != want {
-		t.Errorf("Savings = %d, want %d (used - returned)", meta.Savings, want)
-	}
-	if meta.Savings <= 0 {
-		t.Errorf("Savings = %d, want > 0 for compressible call", meta.Savings)
-	}
-	if meta.EstimatedCost <= 0 {
-		t.Errorf("EstimatedCost = %v, want > 0", meta.EstimatedCost)
-	}
-}
-
-func TestTokenMetadataForClampsSavings(t *testing.T) {
-	t.Parallel()
-	// A response larger than the request (the common case: search/read tools
-	// return more than they consume) must report zero savings, not negative.
-	meta := tokenMetadataFor("kern_x", map[string]any{}, strings.Repeat("word ", 2000))
-	if meta.Savings != 0 {
-		t.Errorf("Savings = %d, want 0 when response exceeds request", meta.Savings)
-	}
-}
-
 func TestTokenMetadataOmitsZeroSavings(t *testing.T) {
 	t.Parallel()
-	meta := TokenMetadata{TokensUsed: 10, TokensReturned: 5, EstimatedCost: 0.00015, Savings: 0}
+	meta := mcpserve.TokenMetadata{TokensUsed: 10, TokensReturned: 5, EstimatedCost: 0.00015, Savings: 0}
 	b, err := json.Marshal(meta)
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
@@ -129,8 +88,8 @@ func TestTokenMetadataSavingsOnOptimize(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	// A large repetitive log compresses well, so savings must be positive.
 	log := strings.Repeat("[INFO] routine heartbeat tick\n", 200) + "ERROR disk full\n"
-	args, _ := json.Marshal(map[string]any{"log": log})
-	resp := serveOne(t, writeReq("tools/call", 2, `{"name":"kern_optimize_log","arguments":`+string(args)+`}`))
+	args, _ := json.Marshal(map[string]any{"action": "log", "log": log})
+	resp := serveOne(t, writeReq("tools/call", 2, `{ "name":"kern_optimize","arguments":`+string(args)+`}`))
 	if out, isErr := toolResultText(t, resp); isErr {
 		t.Fatalf("unexpected error: %s", out)
 	}
@@ -145,7 +104,7 @@ func TestTokenMetadataOnErrorResult(t *testing.T) {
 	t.Parallel()
 	// A handler error (isError=true) is still a tool response and must carry
 	// the token ledger, counting the error text it returned.
-	resp := serveOne(t, writeReq("tools/call", 3, `{"name":"kern_optimize_prompt","arguments":{}}`))
+	resp := serveOne(t, writeReq("tools/call", 3, `{ "name":"kern_optimize","arguments":{}}`))
 	res, ok := resp["result"].(map[string]any)
 	if !ok {
 		t.Fatalf("response has no result object: %+v", resp)

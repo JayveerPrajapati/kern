@@ -14,12 +14,13 @@ func TestHandleAgentCoordination(t *testing.T) {
 	root := t.TempDir()
 
 	// 1. Claim resource
-	resClaim, err := srv.handleAgentCoordination(ctx, map[string]any{
-		"action":      "claim",
-		"agent_id":    "agent-alice",
-		"resource":    "auth-service",
-		"ttl_seconds": 60,
-		"root":        root,
+	resClaim, err := srv.handleAgent(ctx, map[string]any{
+		"action":       "coordination",
+		"inner_action": "claim",
+		"agent_id":     "agent-alice",
+		"resource":     "auth-service",
+		"ttl_seconds":  60,
+		"root":         root,
 	})
 	if err != nil {
 		t.Fatalf("handleAgentCoordination claim failed: %v", err)
@@ -29,11 +30,12 @@ func TestHandleAgentCoordination(t *testing.T) {
 	}
 
 	// 2. Conflicting claim
-	resConflict, err := srv.handleAgentCoordination(ctx, map[string]any{
-		"action":   "claim",
-		"agent_id": "agent-bob",
-		"resource": "auth-service",
-		"root":     root,
+	resConflict, err := srv.handleAgent(ctx, map[string]any{
+		"action":       "coordination",
+		"inner_action": "claim",
+		"agent_id":     "agent-bob",
+		"resource":     "auth-service",
+		"root":         root,
 	})
 	if err != nil {
 		t.Fatalf("handleAgentCoordination conflict check failed: %v", err)
@@ -43,13 +45,14 @@ func TestHandleAgentCoordination(t *testing.T) {
 	}
 
 	// 3. Handoff
-	resHandoff, err := srv.handleAgentCoordination(ctx, map[string]any{
-		"action":     "handoff",
-		"from_agent": "agent-alice",
-		"to_agent":   "agent-bob",
-		"task_id":    "refactor-auth",
-		"notes":      "completed interface, tests needed",
-		"root":       root,
+	resHandoff, err := srv.handleAgent(ctx, map[string]any{
+		"action":       "coordination",
+		"inner_action": "handoff",
+		"from_agent":   "agent-alice",
+		"to_agent":     "agent-bob",
+		"task_id":      "refactor-auth",
+		"notes":        "completed interface, tests needed",
+		"root":         root,
 	})
 	if err != nil {
 		t.Fatalf("handleAgentCoordination handoff failed: %v", err)
@@ -59,11 +62,12 @@ func TestHandleAgentCoordination(t *testing.T) {
 	}
 
 	// 4. Release resource
-	resRelease, err := srv.handleAgentCoordination(ctx, map[string]any{
-		"action":   "release",
-		"agent_id": "agent-alice",
-		"resource": "auth-service",
-		"root":     root,
+	resRelease, err := srv.handleAgent(ctx, map[string]any{
+		"action":       "coordination",
+		"inner_action": "release",
+		"agent_id":     "agent-alice",
+		"resource":     "auth-service",
+		"root":         root,
 	})
 	if err != nil {
 		t.Fatalf("handleAgentCoordination release failed: %v", err)
@@ -83,12 +87,13 @@ func TestAgentCoordinationClaimsPersistAcrossInstances(t *testing.T) {
 
 	// Instance 1 claims a resource.
 	srvA := newTestServer()
-	if _, err := srvA.handleAgentCoordination(ctx, map[string]any{
-		"action":      "claim",
-		"agent_id":    "agent-alice",
-		"resource":    "auth-service",
-		"ttl_seconds": 60,
-		"root":        root,
+	if _, err := srvA.handleAgent(ctx, map[string]any{
+		"action":       "coordination",
+		"inner_action": "claim",
+		"agent_id":     "agent-alice",
+		"resource":     "auth-service",
+		"ttl_seconds":  60,
+		"root":         root,
 	}); err != nil {
 		t.Fatalf("claim failed: %v", err)
 	}
@@ -99,9 +104,10 @@ func TestAgentCoordinationClaimsPersistAcrossInstances(t *testing.T) {
 
 	// Instance 2 (fresh state): status must see the persisted claim.
 	srvB := newTestServer()
-	status, err := srvB.handleAgentCoordination(ctx, map[string]any{
-		"action": "status",
-		"root":   root,
+	status, err := srvB.handleAgent(ctx, map[string]any{
+		"action":       "coordination",
+		"inner_action": "status",
+		"root":         root,
 	})
 	if err != nil {
 		t.Fatalf("status failed: %v", err)
@@ -111,11 +117,12 @@ func TestAgentCoordinationClaimsPersistAcrossInstances(t *testing.T) {
 	}
 
 	// Release from instance 2.
-	if _, err := srvB.handleAgentCoordination(ctx, map[string]any{
-		"action":   "release",
-		"agent_id": "agent-alice",
-		"resource": "auth-service",
-		"root":     root,
+	if _, err := srvB.handleAgent(ctx, map[string]any{
+		"action":       "coordination",
+		"inner_action": "release",
+		"agent_id":     "agent-alice",
+		"resource":     "auth-service",
+		"root":         root,
 	}); err != nil {
 		t.Fatalf("release failed: %v", err)
 	}
@@ -124,9 +131,10 @@ func TestAgentCoordinationClaimsPersistAcrossInstances(t *testing.T) {
 	coord.ResetMemory()
 
 	srvC := newTestServer()
-	status, err = srvC.handleAgentCoordination(ctx, map[string]any{
-		"action": "status",
-		"root":   root,
+	status, err = srvC.handleAgent(ctx, map[string]any{
+		"action":       "coordination",
+		"inner_action": "status",
+		"root":         root,
 	})
 	if err != nil {
 		t.Fatalf("status failed: %v", err)
@@ -143,13 +151,14 @@ func TestAgentCoordinationHandoffsPersistAcrossInstances(t *testing.T) {
 	root := t.TempDir()
 
 	srvA := newTestServer()
-	if _, err := srvA.handleAgentCoordination(ctx, map[string]any{
-		"action":     "handoff",
-		"from_agent": "agent-alice",
-		"to_agent":   "agent-bob",
-		"task_id":    "refactor-auth",
-		"notes":      "tests needed",
-		"root":       root,
+	if _, err := srvA.handleAgent(ctx, map[string]any{
+		"action":       "coordination",
+		"inner_action": "handoff",
+		"from_agent":   "agent-alice",
+		"to_agent":     "agent-bob",
+		"task_id":      "refactor-auth",
+		"notes":        "tests needed",
+		"root":         root,
 	}); err != nil {
 		t.Fatalf("handoff failed: %v", err)
 	}
@@ -158,9 +167,10 @@ func TestAgentCoordinationHandoffsPersistAcrossInstances(t *testing.T) {
 	coord.ResetMemory()
 
 	srvB := newTestServer()
-	status, err := srvB.handleAgentCoordination(ctx, map[string]any{
-		"action": "status",
-		"root":   root,
+	status, err := srvB.handleAgent(ctx, map[string]any{
+		"action":       "coordination",
+		"inner_action": "status",
+		"root":         root,
 	})
 	if err != nil {
 		t.Fatalf("status failed: %v", err)

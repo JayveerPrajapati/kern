@@ -216,8 +216,8 @@ func testRoot(t *testing.T) string {
 
 func TestOptimizePromptAndCache(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
-	args, _ := json.Marshal(map[string]any{"prompt": "this is a long prompt with redundant redundancy and verbose words", "cache": "true"})
-	resp := serveOne(t, writeReq("tools/call", 7, `{"name":"kern_optimize_prompt","arguments":`+string(args)+`}`))
+	args, _ := json.Marshal(map[string]any{"action": "prompt", "prompt": "this is a long prompt with redundant redundancy and verbose words", "cache": "true"})
+	resp := serveOne(t, writeReq("tools/call", 7, `{ "name":"kern_optimize","arguments":`+string(args)+`}`))
 	text, isErr := toolResultText(t, resp)
 	if isErr {
 		t.Fatalf("unexpected error: %s", text)
@@ -226,7 +226,7 @@ func TestOptimizePromptAndCache(t *testing.T) {
 		t.Fatalf("bad optimize output: %q", text)
 	}
 	// Second identical call -> served from cache.
-	resp2 := serveOne(t, writeReq("tools/call", 8, `{"name":"kern_optimize_prompt","arguments":`+string(args)+`}`))
+	resp2 := serveOne(t, writeReq("tools/call", 8, `{ "name":"kern_optimize","arguments":`+string(args)+`}`))
 	text2, isErr2 := toolResultText(t, resp2)
 	if isErr2 {
 		t.Fatalf("unexpected error on cached call: %s", text2)
@@ -239,12 +239,12 @@ func TestOptimizePromptAndCache(t *testing.T) {
 func TestSemanticCacheViaMCP(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	// First call primes the semantic cache (cache is on by default now).
-	first := mcpAssertOK(t, "kern_optimize_prompt", map[string]any{"prompt": "how do I compress a very large server log file"})
+	first := mcpAssertOK(t, "kern_optimize", map[string]any{"action": "prompt", "prompt": "how do I compress a very large server log file"})
 	if strings.Contains(first, "served from") {
 		t.Fatalf("first call must not be served from cache, got %q", first)
 	}
 	// Near-duplicate (one word removed) -> semantic cache hit with a marker.
-	second := mcpAssertOK(t, "kern_optimize_prompt", map[string]any{"prompt": "how do I compress a very large server log"})
+	second := mcpAssertOK(t, "kern_optimize", map[string]any{"action": "prompt", "prompt": "how do I compress a very large server log"})
 	if !strings.Contains(second, "served from semantic cache") {
 		t.Fatalf("expected semantic cache marker, got %q", second)
 	}
@@ -252,7 +252,7 @@ func TestSemanticCacheViaMCP(t *testing.T) {
 		t.Fatalf("expected similarity reported, got %q", second)
 	}
 	// Explicit cache=false must bypass both caches.
-	fresh := mcpAssertOK(t, "kern_optimize_prompt", map[string]any{"prompt": "how do I compress a very large server log file", "cache": "false"})
+	fresh := mcpAssertOK(t, "kern_optimize", map[string]any{"action": "prompt", "prompt": "how do I compress a very large server log file", "cache": "false"})
 	if strings.Contains(fresh, "served from") {
 		t.Fatalf("cache=false must bypass the cache, got %q", fresh)
 	}
@@ -260,8 +260,8 @@ func TestSemanticCacheViaMCP(t *testing.T) {
 
 func TestSemcacheManagementViaMCP(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
-	mcpAssertOK(t, "kern_optimize_prompt", map[string]any{"prompt": "the database connection failed during migration"})
-	mcpAssertOK(t, "kern_optimize_log", map[string]any{"log": "ERROR disk full\nERROR connection refused\nINFO start"})
+	mcpAssertOK(t, "kern_optimize", map[string]any{"action": "prompt", "prompt": "the database connection failed during migration"})
+	mcpAssertOK(t, "kern_optimize", map[string]any{"action": "log", "log": "ERROR disk full\nERROR connection refused\nINFO start"})
 
 	stats := mcpAssertOK(t, "kern_semcache", map[string]any{"action": "stats"})
 	if !strings.Contains(stats, "prompt") || !strings.Contains(stats, "log") {
@@ -308,8 +308,8 @@ func TestMaskPiiViaMCP(t *testing.T) {
 func TestOptimizeLogViaMCP(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	log := "[INFO] start\n[DEBUG] detail\nERROR disk full\n[INFO] done"
-	args, _ := json.Marshal(map[string]any{"log": log})
-	resp := serveOne(t, writeReq("tools/call", 10, `{"name":"kern_optimize_log","arguments":`+string(args)+`}`))
+	args, _ := json.Marshal(map[string]any{"action": "log", "log": log})
+	resp := serveOne(t, writeReq("tools/call", 10, `{ "name":"kern_optimize","arguments":`+string(args)+`}`))
 	out, isErr := toolResultText(t, resp)
 	if isErr {
 		t.Fatalf("unexpected error: %s", out)
@@ -532,8 +532,8 @@ func TestDiffFilesCompactViaMCP(t *testing.T) {
 func TestLockUnlockViaMCP(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
-	acq := `{"name":"kern_lock","arguments":` + jsonMust(map[string]any{"root": root, "scope": "build"}) + `}`
-	rel := `{"name":"kern_unlock","arguments":` + jsonMust(map[string]any{"scope": "build"}) + `}`
+	acq := `{"name":"kern_lock","arguments":` + jsonMust(map[string]any{"root": root, "scope": "build", "action": "acquire"}) + `}`
+	rel := `{"name":"kern_lock","arguments":` + jsonMust(map[string]any{"action": "release", "scope": "build"}) + `}`
 	// Lock and unlock are dependent calls: submit one, wait for its response,
 	// then submit the next (as a real client would).
 	resps := serveSequential(t,
@@ -652,7 +652,7 @@ func TestUnknownToolReturnsError(t *testing.T) {
 
 func TestMissingPromptArg(t *testing.T) {
 	t.Parallel()
-	resp := serveOne(t, writeReq("tools/call", 20, `{"name":"kern_optimize_prompt","arguments":{}}`))
+	resp := serveOne(t, writeReq("tools/call", 20, `{ "name":"kern_optimize","arguments":{"action":"prompt"}}`))
 	out, isErr := toolResultText(t, resp)
 	if !isErr || !strings.Contains(out, "prompt") {
 		t.Fatalf("expected missing-prompt isError: %+v", resp)
@@ -675,7 +675,7 @@ func TestLockErrorIsNotFakeHeld(t *testing.T) {
 	if err := os.WriteFile(root, []byte("file, not dir"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	req := `{"name":"kern_lock","arguments":` + jsonMust(map[string]any{"root": root, "scope": "build"}) + `}`
+	req := `{"name":"kern_lock","arguments":` + jsonMust(map[string]any{"root": root, "scope": "build", "action": "acquire"}) + `}`
 	resp := serveOne(t, writeReq("tools/call", 21, req))
 	out, isErr := toolResultText(t, resp)
 	if !isErr {
@@ -686,5 +686,16 @@ func TestLockErrorIsNotFakeHeld(t *testing.T) {
 	}
 	if !strings.Contains(out, "lock scope is required") && !strings.Contains(out, "not a directory") {
 		t.Fatalf("expected the real acquire error, got %q", out)
+	}
+}
+
+// TestLockDispatchUnknownAction pins the kern_lock action dispatcher: an
+// unknown action is rejected up front through the full tools/call path.
+func TestLockDispatchUnknownAction(t *testing.T) {
+	t.Parallel()
+	resp := serveOne(t, writeReq("tools/call", 22, `{"name":"kern_lock","arguments":{"action":"bogus"}}`))
+	out, isErr := toolResultText(t, resp)
+	if !isErr || !strings.Contains(out, "unknown action") {
+		t.Fatalf("expected unknown-action isError for kern_lock: %+v", resp)
 	}
 }

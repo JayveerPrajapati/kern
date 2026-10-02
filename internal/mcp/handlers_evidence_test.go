@@ -15,7 +15,8 @@ func TestHandleEvidenceAnchor(t *testing.T) {
 	s.roots = []string{root}
 
 	// Test 1: Verify known symbol (NewServer)
-	resSym, err := s.handleEvidenceAnchor(context.Background(), map[string]any{
+	resSym, err := s.handleEvidence(context.Background(), map[string]any{
+		"action": "anchor",
 		"root":   root,
 		"symbol": "NewServer",
 		"format": "json",
@@ -39,7 +40,8 @@ func TestHandleEvidenceAnchor(t *testing.T) {
 	}
 
 	// Test 2: Verify file and line claim (claim string)
-	resClaim, err := s.handleEvidenceAnchor(context.Background(), map[string]any{
+	resClaim, err := s.handleEvidence(context.Background(), map[string]any{
+		"action": "anchor",
 		"root":   root,
 		"claim":  "web/handler.go:9",
 		"format": "json",
@@ -59,7 +61,8 @@ func TestHandleEvidenceAnchor(t *testing.T) {
 	}
 
 	// Test 3: Non-existent symbol
-	resMissing, err := s.handleEvidenceAnchor(context.Background(), map[string]any{
+	resMissing, err := s.handleEvidence(context.Background(), map[string]any{
+		"action": "anchor",
 		"root":   root,
 		"symbol": "NonExistentFakeFunction_99999",
 		"format": "json",
@@ -74,7 +77,8 @@ func TestHandleEvidenceAnchor(t *testing.T) {
 	}
 
 	// D4: compact text is the default and carries the key facts.
-	resCompact, err := s.handleEvidenceAnchor(context.Background(), map[string]any{
+	resCompact, err := s.handleEvidence(context.Background(), map[string]any{
+		"action": "anchor",
 		"root":   root,
 		"symbol": "NewServer",
 	})

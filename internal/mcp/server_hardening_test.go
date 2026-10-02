@@ -62,8 +62,8 @@ func TestToolCallCoverage(t *testing.T) {
 		{"kern_sandbox", map[string]any{"root": root, "command": "sh -c 'printf ok'"}},
 		{"kern_frameworks", rootArg},
 		{"kern_swap", map[string]any{"root": root, "text": "this is a short sample"}},
-		{"kern_doc_index", rootArg},
-		{"kern_doc_search", map[string]any{"root": root, "query": "package", "k": "3"}},
+		{"kern_doc", map[string]any{"root": root, "action": "index"}},
+		{"kern_doc", map[string]any{"root": root, "action": "search", "query": "package", "k": "3"}},
 		{"kern_precache", rootArg},
 		{"kern_probe", map[string]any{"root": root, "task": "Greet"}},
 		{"kern_repo_search", map[string]any{"root": root, "query": "definitely-no-such-symbol-xyz"}},
@@ -111,7 +111,7 @@ and returns a handle. Call <code>widget.Release</code> to free resources.</p>`))
 	defer srv.Close()
 
 	root := t.TempDir()
-	out := mcpLastOK(t, "kern_doc_fetch", map[string]any{
+	out := mcpLastOK(t, "kern_doc", map[string]any{"action": "fetch",
 		"url":  srv.URL,
 		"root": root,
 		"name": "widget-api",
@@ -121,7 +121,7 @@ and returns a handle. Call <code>widget.Release</code> to free resources.</p>`))
 	}
 
 	// The fetched page must now be findable via the local doc index.
-	res := mcpLastOK(t, "kern_doc_search", map[string]any{"root": root, "query": "MakeWidget release", "k": "2"})
+	res := mcpLastOK(t, "kern_doc", map[string]any{"root": root, "action": "search", "query": "MakeWidget release", "k": "2"})
 	if !strings.Contains(res, "fetch/widget-api.md") {
 		t.Fatalf("fetched page not searchable, got: %q", res)
 	}
@@ -576,7 +576,7 @@ func TestSlowToolSetDerivedFromCatalog(t *testing.T) {
 		}
 	}
 	// The task contract: index/build/scan tools emit progress…
-	for _, want := range []string{"kern_heal", "kern_validate", "kern_sandbox", "kern_refactor_transaction", "kern_repair_diagnostics", "kern_doc_index"} {
+	for _, want := range []string{"kern_heal", "kern_validate", "kern_sandbox", "kern_refactor_transaction", "kern_repair", "kern_doc"} {
 		if !slowTools[want] {
 			t.Errorf("expected %s to be a slow (progress-emitting) tool", want)
 		}

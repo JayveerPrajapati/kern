@@ -8,7 +8,7 @@ import (
 
 func TestRepairEmptyCompilerOutput(t *testing.T) {
 	ctx := context.Background()
-	_, err := Repair(ctx, map[string]any{
+	_, err := Diagnostics(ctx, map[string]any{
 		"compiler_output": "",
 	})
 	if err == nil || !strings.Contains(err.Error(), "compiler_output is required") {
@@ -18,11 +18,11 @@ func TestRepairEmptyCompilerOutput(t *testing.T) {
 
 func TestRepairNoDiagnostics(t *testing.T) {
 	ctx := context.Background()
-	res, err := Repair(ctx, map[string]any{
+	res, err := Diagnostics(ctx, map[string]any{
 		"compiler_output": "All tests passed cleanly.",
 	})
 	if err != nil {
-		t.Fatalf("Repair failed: %v", err)
+		t.Fatalf("Diagnostics failed: %v", err)
 	}
 	if !strings.Contains(res, "No auto-repairable compiler diagnostics detected") {
 		t.Errorf("expected no diagnostics message, got: %s", res)

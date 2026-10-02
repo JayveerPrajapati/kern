@@ -8,13 +8,15 @@ import (
 	"testing"
 
 	"github.com/JayveerPrajapati/kern/internal/app"
+	"github.com/JayveerPrajapati/kern/internal/tasklife"
 )
 
 func TestAgentMessageSendsHandoff(t *testing.T) {
 	t.Parallel()
 	s := NewServer(strings.NewReader(""), io.Discard)
 	s.roots = []string{t.TempDir()}
-	res, err := s.handleAgentMessage(context.Background(), map[string]any{
+	res, err := s.handleAgent(context.Background(), map[string]any{
+		"action":   "message",
 		"to_agent": "fixer-1",
 		"notes":    "please re-check the tests",
 		"root":     s.roots[0],
@@ -30,11 +32,12 @@ func TestAgentMessageSendsHandoff(t *testing.T) {
 		t.Errorf("expected status created, got %v", parsed["status"])
 	}
 	// The handoff must be visible in the target's inbox.
-	inbox, err := s.handleAgentCoordination(context.Background(), map[string]any{
-		"action":   "inbox",
-		"agent_id": "fixer-1",
-		"root":     s.roots[0],
-		"format":   "json",
+	inbox, err := s.handleAgent(context.Background(), map[string]any{
+		"action":       "coordination",
+		"inner_action": "inbox",
+		"agent_id":     "fixer-1",
+		"root":         s.roots[0],
+		"format":       "json",
 	})
 	if err != nil {
 		t.Fatalf("inbox error: %v", err)
@@ -47,10 +50,12 @@ func TestAgentMessageSendsHandoff(t *testing.T) {
 func TestAgentMessageMissingFields(t *testing.T) {
 	t.Parallel()
 	s := NewServer(strings.NewReader(""), io.Discard)
-	if _, err := s.handleAgentMessage(context.Background(), map[string]any{}); err == nil {
+	if _, err := s.handleAgent(context.Background(), map[string]any{
+		"action": "message"}); err == nil {
 		t.Fatal("expected error when to_agent missing")
 	}
-	if _, err := s.handleAgentMessage(context.Background(), map[string]any{"to_agent": "x"}); err == nil {
+	if _, err := s.handleAgent(context.Background(), map[string]any{
+		"action": "message", "to_agent": "x"}); err == nil {
 		t.Fatal("expected error when notes missing")
 	}
 }
@@ -64,7 +69,8 @@ func TestAgentMessageUnknownTask(t *testing.T) {
 	root := t.TempDir()
 	seedTestProject(t, root)
 	s.roots = []string{root}
-	if _, err := s.handleAgentMessage(context.Background(), map[string]any{
+	if _, err := s.handleAgent(context.Background(), map[string]any{
+		"action":   "message",
 		"to_agent": "fixer-1",
 		"notes":    "hello",
 		"task_id":  "nonexistent-task-xyz",
@@ -73,11 +79,12 @@ func TestAgentMessageUnknownTask(t *testing.T) {
 		t.Fatalf("expected task-not-found error, got %v", err)
 	}
 	// No handoff must have been queued.
-	inbox, err := s.handleAgentCoordination(context.Background(), map[string]any{
-		"action":   "inbox",
-		"agent_id": "fixer-1",
-		"root":     root,
-		"format":   "json",
+	inbox, err := s.handleAgent(context.Background(), map[string]any{
+		"action":       "coordination",
+		"inner_action": "inbox",
+		"agent_id":     "fixer-1",
+		"root":         root,
+		"format":       "json",
 	})
 	if err != nil {
 		t.Fatalf("inbox error: %v", err)
@@ -100,13 +107,14 @@ func TestAgentMessageKnownTaskQueues(t *testing.T) {
 	if err != nil {
 		t.Fatalf("app.New: %v", err)
 	}
-	ts := app.NewTaskService(p, nil)
+	ts := tasklife.NewTaskService(p, nil)
 	task, err := ts.Create("agent-message task validation")
 	if err != nil {
 		t.Fatalf("create task: %v", err)
 	}
 
-	res, err := s.handleAgentMessage(context.Background(), map[string]any{
+	res, err := s.handleAgent(context.Background(), map[string]any{
+		"action":   "message",
 		"to_agent": "fixer-1",
 		"notes":    "please re-check",
 		"task_id":  task.ID,
@@ -137,13 +145,14 @@ func TestAgentInterruptCancelsTask(t *testing.T) {
 	if err != nil {
 		t.Fatalf("app.New: %v", err)
 	}
-	ts := app.NewTaskService(p, nil)
+	ts := tasklife.NewTaskService(p, nil)
 	task, err := ts.Create("fix the flaky test")
 	if err != nil {
 		t.Fatalf("create task: %v", err)
 	}
 
-	res, err := s.handleAgentInterrupt(context.Background(), map[string]any{
+	res, err := s.handleAgent(context.Background(), map[string]any{
+		"action":  "interrupt",
 		"task_id": task.ID,
 		"reason":  "obsolete",
 		"root":    root,
@@ -156,7 +165,8 @@ func TestAgentInterruptCancelsTask(t *testing.T) {
 	}
 
 	// Interrupting a second time must fail (task is terminal).
-	if _, err := s.handleAgentInterrupt(context.Background(), map[string]any{
+	if _, err := s.handleAgent(context.Background(), map[string]any{
+		"action":  "interrupt",
 		"task_id": task.ID,
 		"root":    root,
 	}); err == nil {
@@ -167,7 +177,22 @@ func TestAgentInterruptCancelsTask(t *testing.T) {
 func TestAgentInterruptMissingTaskID(t *testing.T) {
 	t.Parallel()
 	s := NewServer(strings.NewReader(""), io.Discard)
-	if _, err := s.handleAgentInterrupt(context.Background(), map[string]any{}); err == nil {
+	if _, err := s.handleAgent(context.Background(), map[string]any{
+		"action": "interrupt"}); err == nil {
 		t.Fatal("expected error when task_id missing")
+	}
+}
+
+// TestHandleAgentDispatch pins the kern_agent action dispatcher: the action
+// argument is required and unknown actions are rejected up front.
+func TestHandleAgentDispatch(t *testing.T) {
+	t.Parallel()
+	s := NewServer(strings.NewReader(""), io.Discard)
+
+	if _, err := s.handleAgent(context.Background(), map[string]any{}); err == nil || !strings.Contains(err.Error(), "'action' is required") {
+		t.Fatalf("expected action-required error, got %v", err)
+	}
+	if _, err := s.handleAgent(context.Background(), map[string]any{"action": "bogus"}); err == nil || !strings.Contains(err.Error(), "unknown action") {
+		t.Fatalf("expected unknown-action error, got %v", err)
 	}
 }

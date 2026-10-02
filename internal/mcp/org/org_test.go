@@ -263,7 +263,7 @@ func TestAuditShape(t *testing.T) {
 }
 
 // TestOrgToolsRBAC pins the per-action RBAC layer across the org resource
-// tools (the recon finding: only kern_org_user enforced it). Admin passes
+// tools (the recon finding: only kern_org entity=user enforced it). Admin passes
 // mutations and reads; a member passes reads but is denied mutations with a
 // clear denial naming the action; an unassigned actor is denied on both.
 // Entry points build their own enterprise.Server per call, so roles come
@@ -397,7 +397,7 @@ func callOrg(ctx context.Context, tool string, args map[string]any) (string, err
 }
 
 // TestOrgToolsLeafRBACDenial pins RBAC at the leaf level with a seeded
-// server (mirroring the kern_org_user denial test): a member's denied
+// server (mirroring the kern_org entity=user denial test): a member's denied
 // mutation must not take effect, member reads stay open, and unassigned
 // actors are denied.
 func TestOrgToolsLeafRBACDenial(t *testing.T) {

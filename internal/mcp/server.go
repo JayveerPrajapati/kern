@@ -9,15 +9,20 @@ import (
 	"fmt"
 	"github.com/JayveerPrajapati/kern/internal/app"
 	"github.com/JayveerPrajapati/kern/internal/domain"
+	"github.com/JayveerPrajapati/kern/internal/fsutil"
 	"github.com/JayveerPrajapati/kern/internal/governance"
 	"github.com/JayveerPrajapati/kern/internal/index"
 	"github.com/JayveerPrajapati/kern/internal/intel"
 	"github.com/JayveerPrajapati/kern/internal/lock"
+	"github.com/JayveerPrajapati/kern/internal/loop"
 	"github.com/JayveerPrajapati/kern/internal/mcp/catalog"
+	"github.com/JayveerPrajapati/kern/internal/mcp/etag"
 	"github.com/JayveerPrajapati/kern/internal/mcp/root"
 	"github.com/JayveerPrajapati/kern/internal/mcp/watcher"
+	"github.com/JayveerPrajapati/kern/internal/mcpserve"
 	"github.com/JayveerPrajapati/kern/internal/metrics"
 	"github.com/JayveerPrajapati/kern/internal/project"
+	"github.com/JayveerPrajapati/kern/internal/session"
 	"io"
 	"log"
 	"os"
@@ -112,25 +117,10 @@ func negotiateSchemaVersion(requested string) string {
 // route to unadvertised sub-tools. KERN_MCP_PHASE is NOT a security boundary —
 // for real per-phase tool restriction, use the KERN_TOOLS allowlist.
 
-// maxSessions caps the number of project sessions the server caches at once.
-// Every distinct root accumulates a project.Session (a full in-memory index
-// plus an fswatch subprocess each), so an unbounded map would leak both memory
-// and watcher processes across a long-lived server. Beyond the cap the
-// least-recently-used idle session is evicted and closed (see sessionFor).
-const maxSessions = 16
-
-// sessionIdleEvict is the minimum idle time before a session is eligible for
-// eviction. Tool calls are short (seconds), so a 10-minute idle threshold
-// never evicts a session a handler is mid-use of, while still bounding the
-// map on servers that touch many distinct roots.
-const sessionIdleEvict = 10 * time.Minute
-
-// sessionEntry is one cached project session plus the LRU bookkeeping used
-// for bounded eviction.
-type sessionEntry struct {
-	sess     *project.Session
-	lastUsed time.Time
-}
+// The bounded project-session LRU lives in internal/session (Cache). The
+// server wires it with session.MaxSessions / session.SessionIdleEvict and an
+// onEvict callback (evictSessionState) that drops the root-owned platform
+// cache entries; see newServerCore.
 
 // Server handles MCP requests over a stdio stream or HTTP.
 type Server struct {
@@ -142,7 +132,13 @@ type Server struct {
 	allowlist []string // parsed KERN_TOOLS allowlist, cached once at init (nil = allow all)
 	locks     map[string]*lock.Lock
 	inflight  map[string]context.CancelFunc
-	sessions  map[string]*sessionEntry
+	// sessCache is the bounded LRU of project sessions keyed by resolved
+	// root (internal/session.Cache). Every distinct root accumulates a
+	// project.Session (a full in-memory index plus an fswatch subprocess
+	// each); the LRU bounds the map and evicts the least-recently-used idle
+	// session beyond the cap, closing its watcher and releasing its index
+	// (see sessionFor).
+	sessCache *session.Cache
 	// platforms caches one application Platform per project root, keyed to
 	// the exact index instance it was built from. High-level handlers used to
 	// rebuild the whole Platform (call graph + 4 twin extractors, each a full
@@ -393,7 +389,13 @@ func newServerCore(transport string) *Server {
 	// that never constructs a server (e.g. a pure `kern diff-gate` CLI run)
 	// is wired in cmd/kern main.
 	catalog.WithDiffgateTools()
-	s := &Server{sem: make(chan struct{}, defaultConcurrency()), locks: map[string]*lock.Lock{}, inflight: map[string]context.CancelFunc{}, sessions: map[string]*sessionEntry{}, transport: transport, roots: defaultWorkspaceRoots(), gate: confinementGate(), commits: map[string]string{}, allowlist: parseAllowlist(), watchStop: make(chan struct{}), watchDone: make(chan struct{}), samplerKey: samplerKeyFor(), samplingSlots: map[string]func(){}}
+	s := &Server{sem: make(chan struct{}, defaultConcurrency()), locks: map[string]*lock.Lock{}, inflight: map[string]context.CancelFunc{}, transport: transport, roots: defaultWorkspaceRoots(), gate: confinementGate(), commits: map[string]string{}, allowlist: parseAllowlist(), watchStop: make(chan struct{}), watchDone: make(chan struct{}), samplerKey: samplerKeyFor(), samplingSlots: map[string]func(){}}
+	// The session LRU is wired with the root-owned platform-cache cleanup as
+	// the eviction callback: when an idle session is evicted, the per-root
+	// Platform (full call graph + twin-merged knowledge state) and its build
+	// lock go with it, so a long-lived server touching many distinct roots
+	// cannot leak one graph per root (mirrors the sessions LRU bound).
+	s.sessCache = session.NewCache(session.MaxSessions, session.SessionIdleEvict, s.evictSessionState)
 	// register the built-in default agent so calls without an explicit
 	// agent_id are governed (cwd-scoped) instead of raw. KERN_MCP_PERMISSIVE=1
 	// remains the explicit opt-out that restores raw mode.
@@ -550,7 +552,12 @@ func (s *Server) progress(ctx context.Context, token, tool string, pct int, msg 
 			"message":       msg,
 		},
 	}
-	_ = s.write(n)
+	// A failed progress write must be surfaced: the client's "still
+	// running" ticker stalls silently otherwise. The call itself is
+	// unaffected — progress is best-effort liveness, not the answer.
+	if err := s.write(n); err != nil {
+		fmt.Fprintf(os.Stderr, "kern-mcp: progress notification write failed: %v\n", err)
+	}
 }
 
 // startProgress emits an initial 0% notification for a slow tool and returns a
@@ -770,12 +777,9 @@ func (s *Server) publishIndex(root string, fresh *index.Index) error {
 	// converge immediately. Only touch an existing session — the watcher must
 	// not create one. The reinstall is best-effort: the published instance is
 	// already what handlers are served, so a failure only costs cache hits.
-	s.mu.Lock()
-	e, ok := s.sessions[root]
-	s.mu.Unlock()
-	if ok {
-		e.sess.Invalidate()
-		_, _ = e.sess.Index() // reload the just-persisted fresh index
+	if sess, ok := s.sessCache.Peek(root); ok {
+		sess.Invalidate()
+		_, _ = sess.Index() // reload the just-persisted fresh index
 	}
 	fmt.Fprintf(os.Stderr, "kern-mcp: index stale; reloaded (%d files)\n", len(fresh.FileHashes))
 	return nil
@@ -910,11 +914,9 @@ func (s *Server) safeDispatch(req rpcRequest) (r any) {
 // tolerates sessions already closed by LRU eviction (project.Session.Close
 // is itself documented safe to call multiple times).
 func (s *Server) Close() {
-	s.mu.Lock()
-	for _, e := range s.sessions {
-		e.sess.Close()
-	}
-	s.mu.Unlock()
+	// Close every cached session and drain the LRU: the sessions' background
+	// index saves (saveWG) and file watchers are stopped here.
+	s.sessCache.CloseAll()
 	// Unregister every host sampler slot: no LLM call may delegate to a host
 	// that is shutting down (registrations are effects — dispose them).
 	s.samplingMu.Lock()
@@ -966,7 +968,7 @@ func (s *Server) dispatch(req rpcRequest) any {
 					"content": []any{map[string]any{"type": "text", "text": denied}},
 					"isError": true,
 				}
-				attachTokenMetadata(result, p.Name, p.Arguments, denied)
+				mcpserve.AttachTokenMetadata(result, p.Name, p.Arguments, denied)
 				return map[string]any{"jsonrpc": "2.0", "id": req.ID, "result": result}
 			}
 		}
@@ -1082,19 +1084,9 @@ func (s *Server) dispatch(req rpcRequest) any {
 // escapes). A rootless call may only reference a path relative to the current
 // working directory: an absolute path is rejected outright, since otherwise a
 // caller could pass e.g. path=/etc/shadow and read any file on the system
-// outside the confined workspace.
+// outside the confined workspace. Delegates to fsutil.RootedPath.
 func rootedPath(root, p string) (string, error) {
-	if root == "" {
-		if filepath.IsAbs(p) {
-			return "", fmt.Errorf("absolute path requires root argument")
-		}
-		cwd, err := os.Getwd()
-		if err != nil {
-			return "", err
-		}
-		return withinRoot(cwd, p)
-	}
-	return withinRoot(root, p)
+	return fsutil.RootedPath(root, p)
 }
 
 func (s *Server) runTool(ctx context.Context, id, token, name string, args map[string]any) (out string, runErr error) {
@@ -1124,6 +1116,19 @@ func (s *Server) runTool(ctx context.Context, id, token, name string, args map[s
 			s.auditToolCall(origName, args, runErr, false, fromCache)
 		}
 	}()
+	// B1 (ADR-0012): conditional-fetch state is strictly per-call. runTool
+	// re-enters under the SAME ctx for composed pipeline steps (kern_compose
+	// -> mcpcompose.Compose -> runTool per step), so the scope must be reset
+	// at the top of every execution — otherwise step N inherits step N-1's
+	// etag and a caller passing step N-1's etag in step N's args wrongly
+	// receives "unchanged" even when step N's content changed (HIGH-1). The
+	// D1 cache-hit path re-stamps scope.etag from the stored entry below, and
+	// maybeShortCircuit re-stamps it for fresh dispatches, so resetting here
+	// is safe for every path.
+	if scope, ok := ctx.Value(indexScopeKey{}).(*indexScope); ok {
+		scope.etag = ""
+		scope.unchanged = false
+	}
 	name, err := s.precheckTool(name, args)
 	if err != nil {
 		return "", err
@@ -1146,6 +1151,13 @@ func (s *Server) runTool(ctx context.Context, id, token, name string, args map[s
 		if text, hit := s.cacheLookup(ctx, name, args); hit {
 			fromCache = true
 			metrics.Default().RecordCacheHit()
+			// ETag conditional-fetch (ADR-0012): a cache hit is the ideal
+			// short-circuit site — serving from cache then answering
+			// "unchanged" is expected, and the short response is never
+			// stored back.
+			if short := s.maybeShortCircuit(ctx, name, args, text); short != "" {
+				return short, nil
+			}
 			return text, nil
 		}
 		metrics.Default().RecordCacheMiss()
@@ -1161,14 +1173,86 @@ func (s *Server) runTool(ctx context.Context, id, token, name string, args map[s
 	if slowTools[name] && token != "" {
 		stop := s.startProgress(ctx, id, token, name)
 		defer stop()
+		// Stage-aware progress on top of the generic 5s keep-alive:
+		// loop-family tools (kern_loop, kern_do, and anything routed
+		// through the loop engine) report each stage as it starts
+		// ("stage: verify", with cumulative pct). The reporter travels on
+		// ctx; the loop engine reads it between stages — no signature
+		// changes through TaskService/highlevel.
+		ctx = loop.WithStageReporter(ctx, func(stage string, pct int) {
+			s.progress(ctx, token, name, pct, "stage: "+stage)
+		})
 	}
 	text, err := s.dispatchTool(ctx, id, name, args)
-	// D1: store only successful (non-error) results; the response text is
-	// the raw pre-sandbox output (max_output is applied at serve time).
-	if err == nil && cacheableForCall(name, args) && cacheEnabled() && !noCacheArg(args) {
-		s.cacheStore(ctx, name, args, text)
+	// ETag conditional-fetch (ADR-0012): the etag covers the RAW pre-sandbox
+	// response text folded with the serve-time view (max_output budget, F-2),
+	// so the short circuit runs before the D1 store. A short-circuited
+	// response must NOT enter the D1 cache (item 2) — the return below skips
+	// cacheStore.
+	if err == nil {
+		if short := s.maybeShortCircuit(ctx, name, args, text); short != "" {
+			return short, nil
+		}
+		// D1: store only successful (non-error) results; the response text is
+		// the raw pre-sandbox output (max_output is applied at serve time).
+		if cacheableForCall(name, args) && cacheEnabled() && !noCacheArg(args) {
+			s.cacheStore(ctx, name, args, text)
+		}
 	}
 	return text, err
+}
+
+// maybeShortCircuit implements the ETag conditional-fetch contract for one
+// tool response (ADR-0012 items 1-2): for an eligible read tool it computes
+// the response etag from the raw text, the tool's schema version and the
+// serve-time view (max_output budget, F-2), stamps it on the per-call scope
+// (so toolCallResponse attaches result["etag"] and records the working set),
+// and when the caller passed etag=<previous> equal to the fresh value returns
+// the tiny unchanged response. It returns "" when the tool is not eligible or
+// the caller's etag does not match (the full text must be served). The
+// unchanged verdict is carried on the scope so the response also carries
+// result["unchanged"]=true.
+func (s *Server) maybeShortCircuit(ctx context.Context, name string, args map[string]any, text string) string {
+	if !etag.Eligible(name) {
+		return ""
+	}
+	// The conditional-fetch protocol is carried on the per-call indexScope:
+	// toolCallResponse attaches result["etag"]/result["unchanged"] and records
+	// the working set from that same scope. The governed/REST passthrough
+	// (CallToolGoverned) runs runTool with the caller's bare ctx — no scope —
+	// so it cannot speak the protocol; a matching etag would otherwise render
+	// the literal "unchanged (etag E)" string as the ENTIRE tool output for a
+	// web-console/SDK consumer. It always serves full text until it can
+	// (HIGH-2), so etags are only ever computed when a scope exists to carry
+	// them.
+	scope, hasScope := ctx.Value(indexScopeKey{}).(*indexScope)
+	if !hasScope {
+		return ""
+	}
+	// A D1 cache hit replays the entry's stored etag (computed from the raw
+	// pre-mask text), so it wins over a recompute over the replayed bytes.
+	e := ""
+	if scope.etag != "" {
+		e = scope.etag
+	} else {
+		// F-2: the etag is bound to the serve-time view — the call's
+		// effective max_output budget. A malformed budget errors the call
+		// downstream in toolCallResponse; minting with -1 keeps the hash
+		// deterministic here (and cacheStore's fallback uses the identical
+		// computation, so fallback and short-circuit agree).
+		budget, err := mcpserve.CallOutputBudget(args)
+		if err != nil {
+			budget = -1
+		}
+		e = etag.HashView(text, toolByName[name].SchemaVersion, strconv.Itoa(budget))
+		scope.etag = e
+	}
+	prev := argString(args, "etag")
+	if prev != "" && prev == e {
+		scope.unchanged = true
+		return etag.UnchangedResponseText(e)
+	}
+	return ""
 }
 
 // analyzeChange and simulateChange have been migrated to internal/app.Platform.
@@ -1227,59 +1311,28 @@ func truncateMCP(s string, n int) string {
 
 // sessionFor returns the project session for root, creating and caching one
 // per root so index state and stats identity are shared across tool calls.
-// The cache is bounded (maxSessions): inserting beyond the cap evicts the
-// least-recently-used entry that has been idle for at least sessionIdleEvict,
-// closing its watcher and releasing its index, so a server that touches many
-// distinct roots cannot accumulate a project.Session per root forever.
+// The cache is bounded (session.MaxSessions): inserting beyond the cap evicts
+// the least-recently-used entry that has been idle for at least
+// session.SessionIdleEvict, closing its watcher and releasing its index, so a
+// server that touches many distinct roots cannot accumulate a
+// project.Session per root forever. Delegates to the session LRU.
 func (s *Server) sessionFor(root string) *project.Session {
-	root = resolveRoot(root)
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.sessions == nil {
-		s.sessions = map[string]*sessionEntry{}
-	}
-	now := time.Now()
-	if e, ok := s.sessions[root]; ok {
-		e.lastUsed = now
-		return e.sess
-	}
-	if len(s.sessions) >= maxSessions {
-		s.evictIdleLocked(now)
-	}
-	e := &sessionEntry{sess: project.New(root, ""), lastUsed: now}
-	s.sessions[root] = e
-	return e.sess
+	sess, _ := s.sessCache.For(root)
+	return sess
 }
 
-// evictIdleLocked closes and removes the least-recently-used session entry
-// idle for at least sessionIdleEvict. Called with s.mu held; a no-op when
-// every cached session is still in recent use (the cap may be exceeded rather
-// than evict a session a handler is actively using).
-func (s *Server) evictIdleLocked(now time.Time) {
-	var oldestKey string
-	var oldest time.Time
-	for k, e := range s.sessions {
-		if now.Sub(e.lastUsed) < sessionIdleEvict {
-			continue // still recent: never evict an in-use session
-		}
-		if oldestKey == "" || e.lastUsed.Before(oldest) {
-			oldestKey = k
-			oldest = e.lastUsed
-		}
-	}
-	if oldestKey == "" {
-		return
-	}
-	e := s.sessions[oldestKey]
-	delete(s.sessions, oldestKey)
-	// A cached Platform holds the full call graph plus twin-merged knowledge
-	// state — drop it with the evicted session so a long-lived server
-	// touching many distinct roots cannot leak one graph per root (mirrors
-	// the sessions LRU bound). The per-root build lock goes too; the next
-	// platformFor for this root allocates a fresh one.
-	delete(s.platforms, oldestKey)
-	delete(s.platformLocks, oldestKey)
-	e.sess.Close() // project.Session.Close is documented safe to call multiple times
+// evictSessionState drops the root-owned companion state that travels with a
+// session: the cached Platform (full call graph plus twin-merged knowledge
+// state) and its per-root build lock. Called by the session cache's onEvict
+// callback when an idle session is evicted, so a long-lived server touching
+// many distinct roots cannot leak one graph per root (mirrors the sessions
+// LRU bound). The per-root build lock goes too; the next platformFor for this
+// root allocates a fresh one.
+func (s *Server) evictSessionState(root string) {
+	s.mu.Lock()
+	delete(s.platforms, root)
+	delete(s.platformLocks, root)
+	s.mu.Unlock()
 }
 
 // resolveRoot cleans a tool root argument to an absolute path and requires it
@@ -1296,53 +1349,7 @@ func resolveRoot(r string) string {
 // symlink inside the project that points outside). It returns the resolved
 // absolute path.
 func withinRoot(root, file string) (string, error) {
-	var abs string
-	if filepath.IsAbs(file) {
-		abs = filepath.Clean(file)
-	} else {
-		abs = filepath.Join(root, file)
-	}
-	// Resolve symlinks on both the root and the candidate so a symlink inside
-	// the project that points outside cannot read/escape the project boundary.
-	// A candidate that does not exist yet (e.g. a file about to be written)
-	// cannot be resolved directly, so resolve the NEAREST EXISTING ANCESTOR
-	// and re-append the remaining components: a symlinked parent directory
-	// (root/link -> /etc) is then judged by its real location instead of its
-	// lexical text, closing the escape where the old pure-lexical fallback
-	// let root/link/newfile land in /etc.
-	rRoot, rerr := filepath.EvalSymlinks(root)
-	if rerr != nil {
-		rRoot = root
-	}
-	real := abs
-	var rem []string
-	probe := abs
-	for {
-		if r, err := filepath.EvalSymlinks(probe); err == nil {
-			real = r
-			if len(rem) > 0 {
-				real = filepath.Join(append([]string{r}, rem...)...)
-			}
-			break
-		}
-		parent := filepath.Dir(probe)
-		if parent == probe {
-			// Nothing resolvable up to the filesystem root: fall back to the
-			// lexical Clean+Rel check rather than denying an unresolvable path.
-			real = abs
-			break
-		}
-		rem = append([]string{filepath.Base(probe)}, rem...)
-		probe = parent
-	}
-	rel, err := filepath.Rel(rRoot, real)
-	if err != nil {
-		return "", fmt.Errorf("resolve %q: %w", file, err)
-	}
-	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
-		return "", fmt.Errorf("path %s escapes project root %s", abs, root)
-	}
-	return abs, nil
+	return fsutil.WithinRoot(root, file)
 }
 
 // validateRoot rejects a tool root that exists on disk but is not a directory
@@ -1368,11 +1375,16 @@ func validateRoot(root string) error {
 // context instead of the Server struct, so concurrent tool calls never share a
 // mutable lastIndex and read each other's provenance. token is the client's MCP
 // progress token (from the request's _meta), threaded so slow handlers (verify)
-// can emit phase-level progress notifications (M4).
+// can emit phase-level progress notifications (M4). etag/unchanged carry the
+// conditional-fetch verdict (ADR-0012): runTool stamps the response etag on
+// every eligible tool and marks the call unchanged when it short-circuits, so
+// toolCallResponse can attach result["etag"] / result["unchanged"].
 type indexScope struct {
-	ix    *index.Index
-	prov  *Provenance // structured evidence stamped by retrieval handlers
-	token string      // MCP progress token; "" = client did not opt in
+	ix        *index.Index
+	prov      *Provenance // structured evidence stamped by retrieval handlers
+	token     string      // MCP progress token; "" = client did not opt in
+	etag      string      // conditional-fetch etag for eligible responses ("" = tool not eligible)
+	unchanged bool        // true when the response is a short-circuit "unchanged (etag E)"
 }
 type indexScopeKey struct{}
 

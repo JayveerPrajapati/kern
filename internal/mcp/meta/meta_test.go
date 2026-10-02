@@ -107,7 +107,7 @@ func TestClassifyMetaRequest_DefaultFallback(t *testing.T) {
 func TestClassifyMetaRequest_Branches(t *testing.T) {
 	cases := []classifyCase{
 		{"impact", "what breaks if I change dispatch", "kern_impact", nil},
-		{"optimize_log", "compress this log: lots of noise here", "kern_optimize_log", map[string]string{"log": "lots of noise here"}},
+		{"optimize_log", "compress this log: lots of noise here", "kern_optimize", map[string]string{"action": "log", "log": "lots of noise here"}},
 		{"mask_pii", "mask secrets and pii in: token=abc123", "kern_mask_pii", map[string]string{"text": "token=abc123"}},
 		{"arch", "show me the architecture", "kern_arch", nil},
 		{"code_graph", "who calls NewServer", "kern_graph", map[string]string{"symbol": "NewServer", "format": "one-line"}},
@@ -248,6 +248,24 @@ func TestClassifyMetaRequest_SkillRoutes(t *testing.T) {
 	}
 }
 
+func TestClassifyMetaRequest_MemoryRoutes(t *testing.T) {
+	cases := []struct{ in, wantTool, wantAction string }{
+		{"recall memory about testing", "kern_memory", "recall"},
+		{"remember a lesson learned about the sandbox", "kern_memory", "recall"},
+		{"what memories do we have about release", "kern_memory", "recall"},
+	}
+	for _, c := range cases {
+		tool, args := meta.ClassifyMetaRequest(c.in)
+		if tool != c.wantTool {
+			t.Errorf("%q -> tool %q, want %q", c.in, tool, c.wantTool)
+			continue
+		}
+		if got := args["action"]; got != c.wantAction {
+			t.Errorf("%q -> action %q, want %q", c.in, got, c.wantAction)
+		}
+	}
+}
+
 func TestClassifyMetaRequest_SkillLoadRoutes(t *testing.T) {
 	cases := []struct{ in, wantTool, wantSkill string }{
 		// Bare "safe change" without skill language deliberately stays
@@ -362,6 +380,37 @@ func TestClassifyMetaRequest_AuditSymbolNotHijacked(t *testing.T) {
 		}
 		if tool != "kern_explore" {
 			t.Errorf("ClassifyMetaRequest(%q) = %q, want kern_explore (unchanged routing)", req, tool)
+		}
+	}
+}
+
+// TestClassifyMetaRequest_WorkingsetQuestionNotHijacked pins the MEDIUM-5
+// tightening: a bare "working set" substring inside a larger question
+// ("how does the working set registry work") must NOT route to the
+// workingset marker — it keeps its normal classification. The genuine
+// possessive/imperative/single-token command spellings still route to the
+// marker (kern_context + workingset arg).
+func TestClassifyMetaRequest_WorkingsetQuestionNotHijacked(t *testing.T) {
+	for _, req := range []string{
+		"how does the working set registry work",
+		"what is the working set registry",
+		"working set entries are per agent",
+	} {
+		tool, args := meta.ClassifyMetaRequest(req)
+		if tool == "kern_context" && args[meta.WorkingsetArg] == true {
+			t.Errorf("ClassifyMetaRequest(%q) hijacked to the workingset marker, must stay a registry question", req)
+		}
+	}
+	for _, req := range []string{
+		"my working set",
+		"show working set",
+		"show my working set",
+		"workingset",
+		"working-set",
+	} {
+		tool, args := meta.ClassifyMetaRequest(req)
+		if tool != "kern_context" || args[meta.WorkingsetArg] != true {
+			t.Errorf("ClassifyMetaRequest(%q) = %q %v, want the workingset marker", req, tool, args)
 		}
 	}
 }

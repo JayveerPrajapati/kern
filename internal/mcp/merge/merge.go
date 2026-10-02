@@ -1,5 +1,5 @@
-// Package merge owns the AST-aware 3-way merge and semantic diff MCP tool bodies
-// as plain functions.
+// Package merge owns the AST-aware 3-way merge and semantic diff MCP tool
+// bodies (kern_semantic action=diff|merge) as plain functions.
 package merge
 
 import (
@@ -51,7 +51,7 @@ func confinePath(root, p string) (string, error) {
 	}
 	rel, err := filepath.Rel(rr, real)
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
-		return "", fmt.Errorf("kern_semantic_merge: file %q escapes workspace root", p)
+		return "", fmt.Errorf("kern_semantic: file %q escapes workspace root", p)
 	}
 	return abs, nil
 }
@@ -73,10 +73,27 @@ func nearestExisting(abs string) (string, error) {
 		}
 		parent := filepath.Dir(probe)
 		if parent == probe {
-			return "", fmt.Errorf("kern_semantic_merge: cannot resolve %q", abs)
+			return "", fmt.Errorf("kern_semantic: cannot resolve %q", abs)
 		}
 		rem = append([]string{filepath.Base(probe)}, rem...)
 		probe = parent
+	}
+}
+
+// Tool is the consolidated kern_semantic dispatcher: the action argument
+// selects the diff or merge body.
+func Tool(ctx context.Context, h Hooks, args map[string]any) (string, error) {
+	action := mcpargs.ArgString(args, "action")
+	if action == "" {
+		return "", fmt.Errorf("kern_semantic: 'action' is required")
+	}
+	switch action {
+	case "diff":
+		return SemanticDiff(ctx, h, args)
+	case "merge":
+		return SemanticMerge(ctx, args)
+	default:
+		return "", fmt.Errorf("kern_semantic: unknown action %q (want diff|merge)", action)
 	}
 }
 

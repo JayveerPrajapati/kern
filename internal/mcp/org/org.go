@@ -1,6 +1,5 @@
-// Package org owns the org-family tool bodies (kern_org_projects,
-// kern_org_agents, kern_org_teams, kern_org_memory, kern_org_tasks,
-// kern_org_search, kern_org_audit, kern_org_user) as plain functions over the
+// Package org owns the org-family tool bodies (kern_org entity=projects|
+// agents|teams|memory|tasks|search|audit|user) as plain functions over the
 // resolved enterprise server. The whole family is Server-independent: it only
 // ever needed the tool args and the enterprise package, so it moved wholesale.
 package org
@@ -101,7 +100,7 @@ func orgTeamsServer(args map[string]any) (*enterprise.Server, error) {
 }
 
 // orgJSON renders a result map as an indented JSON string, the same shape
-// other handlers return (e.g. handleEvidenceAnchor).
+// other handlers return (e.g. kern_evidence action=anchor).
 func orgJSON(v map[string]any) (string, error) {
 	data, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
@@ -121,7 +120,37 @@ func splitCSV(v string) []string {
 	return out
 }
 
-// handleOrgProjects implements kern_org_projects (C11): list registered
+// Tool is the consolidated kern_org dispatcher: the entity argument selects
+// the projects/agents/teams/memory/tasks/search/audit/user body. Entities
+// with their own action argument (agents/teams/memory/user) keep it.
+func Tool(ctx context.Context, args map[string]any) (string, error) {
+	entity := mcpargs.ArgString(args, "entity")
+	if entity == "" {
+		return "", fmt.Errorf("kern_org: 'entity' is required")
+	}
+	switch entity {
+	case "projects":
+		return Projects(ctx, args)
+	case "agents":
+		return Agents(ctx, args)
+	case "teams":
+		return Teams(ctx, args)
+	case "memory":
+		return Memory(ctx, args)
+	case "tasks":
+		return Tasks(ctx, args)
+	case "search":
+		return Search(ctx, args)
+	case "audit":
+		return Audit(ctx, args)
+	case "user":
+		return Users(ctx, args)
+	default:
+		return "", fmt.Errorf("kern_org: unknown entity %q (want projects|agents|teams|memory|tasks|search|audit|user)", entity)
+	}
+}
+
+// Projects implements kern_org entity=projects (C11): list registered
 // projects as {projects:[{name,root}],count}. Read-only: any org member may
 // list projects.
 func Projects(ctx context.Context, args map[string]any) (string, error) {
@@ -144,7 +173,7 @@ func Projects(ctx context.Context, args map[string]any) (string, error) {
 	return orgJSON(map[string]any{"projects": view, "count": len(view)})
 }
 
-// handleOrgAgents implements kern_org_agents (C11): action=list (default)
+// Agents implements kern_org entity=agents (C11): action=list (default)
 // returns {agents:[{id,name,type}],count}; action=register creates an agent
 // from id/name (type defaults to "default") and returns it.
 func Agents(ctx context.Context, args map[string]any) (string, error) {
@@ -206,7 +235,7 @@ func OrgAgentsRegister(srv *enterprise.Server, args map[string]any) (string, err
 	return orgJSON(map[string]any{"id": agent.ID, "name": agent.Name, "type": agent.Type})
 }
 
-// handleOrgTeams implements kern_org_teams (C11): action=list (default) |
+// Teams implements kern_org entity=teams (C11): action=list (default) |
 // show | create | remove over the org team registry.
 func Teams(ctx context.Context, args map[string]any) (string, error) {
 	action := mcpargs.ArgString(args, "action")
@@ -325,7 +354,7 @@ func OrgTeamsRemove(srv *enterprise.Server, args map[string]any) (string, error)
 	return orgJSON(map[string]any{"removed": id})
 }
 
-// handleOrgMemory implements kern_org_memory (C11): action=list (default)
+// Memory implements kern_org entity=memory (C11): action=list (default)
 // returns {memories:[{id,content,type}],count}; action=add stores a memory
 // from content with optional type and returns the added memory.
 func Memory(ctx context.Context, args map[string]any) (string, error) {
@@ -385,7 +414,7 @@ func OrgMemoryAdd(srv *enterprise.Server, args map[string]any) (string, error) {
 	return orgJSON(map[string]any{"id": m.ID, "content": m.Content, "type": string(m.Type)})
 }
 
-// handleOrgTasks implements kern_org_tasks (C11): aggregate task visibility
+// Tasks implements kern_org entity=tasks (C11): aggregate task visibility
 // across registered projects as {projects:{name:[{id,state,intent,type}]},
 // total}. Read-only: any org member may list tasks. Tasks exist only for
 // projects whose app has been built; a fresh enterprise server reports an
@@ -406,7 +435,7 @@ func Tasks(ctx context.Context, args map[string]any) (string, error) {
 	return orgJSON(map[string]any{"projects": projects, "total": total})
 }
 
-// handleOrgSearch implements kern_org_search (C11): cross-project symbol
+// Search implements kern_org entity=search (C11): cross-project symbol
 // search via the multi-repo registry, returning {hits:[{repo,root,symbol,
 // score}],count} for the top 20 matches. Read-only: any org member may
 // search.
@@ -429,7 +458,7 @@ func Search(ctx context.Context, args map[string]any) (string, error) {
 	return orgJSON(map[string]any{"hits": hits, "count": len(hits)})
 }
 
-// handleOrgAudit implements kern_org_audit (C11): the org-level audit log as
+// Audit implements kern_org entity=audit (C11): the org-level audit log as
 // {entries:[...],count}. Entry field names are snake_case, matching every
 // other org resource shape on this surface (id/name/type, id/content/type).
 // Read-only: any org member may query the audit log.
@@ -509,7 +538,7 @@ type userView struct {
 	Enabled bool   `json:"enabled"`
 }
 
-// handleOrgUsers implements kern_org_user (Feature Batch G): org-wide user
+// Users implements kern_org entity=user (Feature Batch G): org-wide user
 // management + RBAC. action=user-add|user-list|user-role|user-disable|
 // user-audit; actor_id (the acting user) is required on every action and its
 // role must allow the action (governance.RequireOrgRole).

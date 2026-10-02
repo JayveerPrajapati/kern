@@ -127,8 +127,10 @@ func TestToolCacheHitIdenticalToFreshRun(t *testing.T) {
 // TestToolCacheKeyChangesWithIndexIdentity: the cache key embeds the index
 // identity, so a different identity (an index rebuild) can never serve a stale
 // entry (F2/F6). Different roots and different tools also key apart, while
-// serve-time/identity-only args (max_output, no_cache, agent_id, task) are
-// stripped so identical answers share one entry (F8).
+// identity-only/conditional-fetch args (no_cache, agent_id, task) are stripped
+// so identical answers share one entry (F8). max_output is NOT stripped (F-2):
+// the etag is bound to the serve-time view, so different serve views are
+// different content and key separate entries.
 func TestToolCacheKeyChangesWithIndexIdentity(t *testing.T) {
 	t.Parallel()
 	args := map[string]any{"root": "/r", "query": "x"}
@@ -146,10 +148,16 @@ func TestToolCacheKeyChangesWithIndexIdentity(t *testing.T) {
 		t.Fatal("key must change when the tool differs")
 	}
 	kStrip := cacheKeyFor("kern_search", map[string]any{
-		"root": "/r", "query": "x", "max_output": "500", "no_cache": "1", "agent_id": "a", "task": "t",
+		"root": "/r", "query": "x", "no_cache": "1", "agent_id": "a", "task": "t",
 	}, "/r", "identityA")
 	if kA != kStrip {
-		t.Fatal("max_output/no_cache/agent_id/task must be stripped from the key (same entry)")
+		t.Fatal("no_cache/agent_id/task must be stripped from the key (same entry)")
+	}
+	kView := cacheKeyFor("kern_search", map[string]any{
+		"root": "/r", "query": "x", "max_output": "500",
+	}, "/r", "identityA")
+	if kA == kView {
+		t.Fatal("max_output must vary the key (the etag is view-bound, F-2)")
 	}
 }
 
@@ -159,9 +167,9 @@ func TestToolCacheMutatingToolNeverCached(t *testing.T) {
 	root := mcpProject(t)
 	s := cacheTestServer(t)
 	for _, name := range []string{
-		"kern_approve", "kern_register_host_sampler", "kern_lock_status",
-		"kern_stats", "kern_commitmsg", "kern_changes", "kern_review", "kern_memory_add",
-		"kern_doc_search", "kern_skill", "kern_snapshot",
+		"kern_approve", "kern_register_host_sampler", "kern_lock",
+		"kern_stats", "kern_commitmsg", "kern_changes", "kern_review", "kern_memory",
+		"kern_doc", "kern_skill", "kern_snapshot",
 	} {
 		if toolCacheable(name) {
 			t.Errorf("tool %s must never be cacheable", name)
@@ -190,21 +198,23 @@ func TestToolCacheErrorResultNotCached(t *testing.T) {
 	}
 }
 
-// TestToolCacheMaxOutputVarianceHitsSameEntry: max_output is a serve-time
-// concern, not an answer property — a different max_output hits the same
-// entry, and each call applies its own budget at serve time (F8).
-func TestToolCacheMaxOutputVarianceHitsSameEntry(t *testing.T) {
+// TestToolCacheMaxOutputVarianceKeysSeparateEntries: max_output is part of
+// the D1 key (F-2) — the etag is bound to the serve-time view, so different
+// serve views are different content and key separate entries (the second call
+// is a MISS, not a hit). Each call still applies its own budget at serve time
+// (F8 serves the raw text; the budget truncates per call).
+func TestToolCacheMaxOutputVarianceKeysSeparateEntries(t *testing.T) {
 	root := mcpProject(t)
 	s := cacheTestServer(t)
 	r1 := s.toolCallResponse(json.RawMessage(`"1"`), searchCall(root, map[string]any{"max_output": "10"})).(map[string]any)
 	r2 := s.toolCallResponse(json.RawMessage(`"2"`), searchCall(root, map[string]any{"max_output": "100000"})).(map[string]any)
-	// r2 is a hit: its audit entry is tagged Policy:"tool-cache".
+	// r2 is a MISS: its audit entry must NOT be tagged Policy:"tool-cache".
 	entries := readAuditEntries(t)
 	if len(entries) < 2 {
 		t.Fatalf("expected two audit entries, got %d", len(entries))
 	}
-	if e := entries[len(entries)-1]; e["Policy"] != "tool-cache" {
-		t.Fatalf("expected the second call (different max_output) to hit the cache, entry: %+v", e)
+	if e := entries[len(entries)-1]; e["Policy"] == "tool-cache" {
+		t.Fatalf("expected the second call (different max_output) to MISS the cache, entry: %+v", e)
 	}
 	// Per-call budgets: r1 truncated at 10 bytes, r2 served the full text.
 	if !strings.Contains(contentText(r1), "[MCP output sandbox:") {
@@ -291,8 +301,8 @@ func TestToolCachePureArgToolNoIndex(t *testing.T) {
 	if e := entries[len(entries)-1]; e["Policy"] != "tool-cache" {
 		t.Fatalf("expected pure-arg tool hit, entry: %+v", e)
 	}
-	if len(s.sessions) != 0 {
-		t.Fatalf("pure-arg tool must not create an index session, got %d", len(s.sessions))
+	if s.sessCache.Len() != 0 {
+		t.Fatalf("pure-arg tool must not create an index session, got %d", s.sessCache.Len())
 	}
 }
 
@@ -394,8 +404,7 @@ func TestCacheableAllowlistPinned(t *testing.T) {
 		"kern_frameworks": true, "kern_fw_trace": true, "kern_entry_points": true,
 		"kern_meta": true, // F11: vetted like every other entry (runtime gate R1)
 		// pure-arg tools (F1)
-		"kern_mask_pii": true, "kern_prose": true, "kern_optimize_log": true,
-		"kern_optimize_output": true, "kern_check_draft": true,
+		"kern_mask_pii": true, "kern_prose": true, "kern_check_draft": true,
 		"kern_schema_validate": true, "kern_verify_output": true,
 	}
 	got := map[string]bool{}
@@ -420,14 +429,12 @@ func TestCacheableAllowlistPinned(t *testing.T) {
 	// excluded too (R2): multi-repo registry + other repos' indexes are not
 	// covered by the current root's index identity.
 	for _, name := range []string{
-		"kern_lock_status", "kern_stats", "kern_health", "kern_flight", "kern_audit",
-		"kern_agents", "kern_memory_add", "kern_memory_list", "kern_memory_recall",
-		"kern_memory_ranked", "kern_runtime", "kern_stream", "kern_lsp_bridge",
-		"kern_llm_providers", "kern_context_watch", "kern_agent_fingerprint",
-		"kern_org_agents", "kern_org_audit", "kern_org_memory", "kern_org_projects",
-		"kern_org_search", "kern_org_tasks", "kern_org_teams",
+		"kern_lock", "kern_stats", "kern_health", "kern_flight", "kern_audit",
+		"kern_agents", "kern_memory", "kern_runtime", "kern_stream", "kern_lsp_bridge",
+		"kern_llm_providers", "kern_context_watch", "kern_agent", "kern_optimize",
+		"kern_org", "kern_semantic",
 		"kern_commitmsg", "kern_changes", "kern_review",
-		"kern_doc_search", "kern_skill", "kern_snapshot",
+		"kern_doc", "kern_skill", "kern_snapshot",
 		"kern_repo_search",
 	} {
 		if got[name] {
@@ -453,7 +460,7 @@ func TestToolCacheMetaRoutingGate(t *testing.T) {
 		{"make a plan to refactor", false}, // → kern_plan (mutating)
 		{"verify the refactor", false},     // → kern_verify (exec-gated)
 		{"show my stats", false},           // → kern_stats (stateful)
-		{"recall my memory", false},        // → kern_memory_recall (stateful)
+		{"recall my memory", false},        // → kern_memory (stateful, uncacheable)
 	}
 	for _, tc := range cases {
 		args := map[string]any{"request": tc.request}

@@ -9,7 +9,7 @@ import (
 
 // TestToolFallbackAllowlistReroutes verifies the wiring: when the
 // KERN_TOOLS allowlist blocks a tool, a call to it reroutes to its
-// policy-approved alternative (app.FallbackFor) when that alternative IS
+// policy-approved alternative (tasklife.FallbackFor) when that alternative IS
 // allowed, instead of hard-failing. kern_what_if → kern_impact (the fallback
 // table in internal/app). This is the realistic restricted-deployment case.
 func TestToolFallbackAllowlistReroutes(t *testing.T) {

@@ -1,9 +1,8 @@
-// Package doc owns the doc-family tool bodies (kern_doc_search,
-// kern_doc_index, kern_doc_fetch, kern_commitmsg, kern_precache) as
-// plain functions. Search takes a Hooks bundle (index loading +
-// per-call authorization for its code-results fallback) injected by the
-// mcp adapter; the rest are Server-independent. SanitizeDocName is the
-// canonical doc-name sanitizer (server.go aliases it).
+// Package doc owns the doc-family tool bodies (kern_doc action=search|fetch|index,
+// kern_commitmsg, kern_precache) as plain functions. Search takes a Hooks
+// bundle (index loading + per-call authorization for its code-results
+// fallback) injected by the mcp adapter; the rest are Server-independent.
+// SanitizeDocName is the canonical doc-name sanitizer (server.go aliases it).
 package doc
 
 import (
@@ -72,6 +71,25 @@ func SanitizeDocName(name string) (string, error) {
 		return "", fmt.Errorf("invalid doc name %q", name)
 	}
 	return strutil.Slug(name), nil
+}
+
+// Tool is the consolidated kern_doc dispatcher: the action argument
+// selects the search/fetch/index body.
+func Tool(ctx context.Context, h Hooks, args map[string]any) (string, error) {
+	action := mcpargs.ArgString(args, "action")
+	if action == "" {
+		return "", fmt.Errorf("kern_doc: 'action' is required")
+	}
+	switch action {
+	case "search":
+		return Search(ctx, h, args)
+	case "fetch":
+		return Fetch(ctx, args)
+	case "index":
+		return Index(ctx, args)
+	default:
+		return "", fmt.Errorf("kern_doc: unknown action %q (want search|fetch|index)", action)
+	}
 }
 
 func Search(ctx context.Context, h Hooks, args map[string]any) (string, error) {
@@ -213,7 +231,7 @@ func Index(ctx context.Context, args map[string]any) (string, error) {
 	if mcpargs.ArgString(args, "semantic") == "true" || mcpargs.ArgString(args, "semantic") == "1" {
 		client := llm.NewEmbedder()
 		if !client.Available() {
-			return "", fmt.Errorf("ollama not reachable (semantic index requires a local Ollama); run kern_doc_index without semantic for deterministic indexing")
+			return "", fmt.Errorf("ollama not reachable (semantic index requires a local Ollama); run kern_doc action=index without semantic for deterministic indexing")
 		}
 		if !client.HasEmbeddingModel() {
 			return "", fmt.Errorf("embedding model %q not installed (run: ollama pull %s)", llm.EmbedModel(), llm.EmbedModel())

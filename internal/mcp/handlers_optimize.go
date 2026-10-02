@@ -6,20 +6,12 @@ import (
 	mcpoptimize "github.com/JayveerPrajapati/kern/internal/mcp/optimize"
 )
 
-func (s *Server) handleOptimizePrompt(ctx context.Context, args map[string]any) (string, error) {
-	return mcpoptimize.Prompt(ctx, args)
+func (s *Server) handleOptimize(ctx context.Context, args map[string]any) (string, error) {
+	return mcpoptimize.Tool(ctx, args)
 }
 
 func (s *Server) handleSwap(ctx context.Context, args map[string]any) (string, error) {
 	return mcpoptimize.Swap(ctx, args)
-}
-
-func (s *Server) handleOptimizeLog(ctx context.Context, args map[string]any) (string, error) {
-	return mcpoptimize.Log(ctx, args)
-}
-
-func (s *Server) handleOptimizeOutput(ctx context.Context, args map[string]any) (string, error) {
-	return mcpoptimize.Output(ctx, args)
 }
 
 func (s *Server) handleStats(ctx context.Context, args map[string]any) (string, error) {

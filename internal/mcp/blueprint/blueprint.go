@@ -9,11 +9,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 
 	bpmcp "github.com/JayveerPrajapati/kern/internal/bpcli/mcp"
+	"github.com/JayveerPrajapati/kern/internal/fsutil"
 )
 
 // jsonPayloadArgs are parameters the kern catalog declares as JSON-encoded
@@ -162,17 +161,7 @@ func RepairGuidance(ctx context.Context, args map[string]any) (string, error) {
 // caller could pass e.g. path=/etc/shadow and read any file on the system
 // outside the confined workspace. Mirrors the mcp adapter's rootedPath.
 func rootedPath(root, p string) (string, error) {
-	if root == "" {
-		if filepath.IsAbs(p) {
-			return "", fmt.Errorf("absolute path requires root argument")
-		}
-		cwd, err := os.Getwd()
-		if err != nil {
-			return "", err
-		}
-		return withinRoot(cwd, p)
-	}
-	return withinRoot(root, p)
+	return fsutil.RootedPath(root, p)
 }
 
 // withinRoot resolves file against root (absolute paths are used as-is) and
@@ -181,51 +170,5 @@ func rootedPath(root, p string) (string, error) {
 // symlink inside the project that points outside). It returns the resolved
 // absolute path. Mirrors the mcp adapter's withinRoot.
 func withinRoot(root, file string) (string, error) {
-	var abs string
-	if filepath.IsAbs(file) {
-		abs = filepath.Clean(file)
-	} else {
-		abs = filepath.Join(root, file)
-	}
-	// Resolve symlinks on both the root and the candidate so a symlink inside
-	// the project that points outside cannot read/escape the project boundary.
-	// A candidate that does not exist yet (e.g. a file about to be written)
-	// cannot be resolved directly, so resolve the NEAREST EXISTING ANCESTOR
-	// and re-append the remaining components: a symlinked parent directory
-	// (root/link -> /etc) is then judged by its real location instead of its
-	// lexical text, closing the escape where the old pure-lexical fallback
-	// let root/link/newfile land in /etc.
-	rRoot, rerr := filepath.EvalSymlinks(root)
-	if rerr != nil {
-		rRoot = root
-	}
-	real := abs
-	var rem []string
-	probe := abs
-	for {
-		if r, err := filepath.EvalSymlinks(probe); err == nil {
-			real = r
-			if len(rem) > 0 {
-				real = filepath.Join(append([]string{r}, rem...)...)
-			}
-			break
-		}
-		parent := filepath.Dir(probe)
-		if parent == probe {
-			// Nothing resolvable up to the filesystem root: fall back to the
-			// lexical Clean+Rel check rather than denying an unresolvable path.
-			real = abs
-			break
-		}
-		rem = append([]string{filepath.Base(probe)}, rem...)
-		probe = parent
-	}
-	rel, err := filepath.Rel(rRoot, real)
-	if err != nil {
-		return "", fmt.Errorf("resolve %q: %w", file, err)
-	}
-	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
-		return "", fmt.Errorf("path %s escapes project root %s", abs, root)
-	}
-	return abs, nil
+	return fsutil.WithinRoot(root, file)
 }

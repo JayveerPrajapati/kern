@@ -10,6 +10,7 @@ import (
 
 	"github.com/JayveerPrajapati/kern/internal/app"
 	"github.com/JayveerPrajapati/kern/internal/domain"
+	"github.com/JayveerPrajapati/kern/internal/tasklife"
 	"github.com/JayveerPrajapati/kern/internal/testfixture"
 	web "github.com/JayveerPrajapati/kern/internal/web"
 )
@@ -61,13 +62,13 @@ func restAnalyze(t *testing.T, a *web.App, change string) (taskID, text string) 
 // freshTaskService builds a brand-new TaskService rooted at root, the
 // way a fresh interface instance would, so we can verify tasks created by the
 // MCP/REST legs are queryable through the shared authoritative task store.
-func freshTaskService(t *testing.T, root string) *app.TaskService {
+func freshTaskService(t *testing.T, root string) *tasklife.TaskService {
 	t.Helper()
 	p, err := app.New(root)
 	if err != nil {
 		t.Fatalf("app.New(%q): %v", root, err)
 	}
-	return app.NewTaskService(p, nil)
+	return tasklife.NewTaskService(p, nil)
 }
 
 // TestCrossInterfaceAnalyzeConsistency drives the real MCP kern_analyze handler
@@ -144,7 +145,7 @@ func TestCrossInterfaceAnalyzeConsistency(t *testing.T) {
 
 // TestCrossInterfaceMatchesCLIServicePath documents that the CLI path uses the
 // identical TaskService construction: cmd/kern/cmd_review.go:40 builds
-// `app.NewTaskService(app.New(root), eventbus.New()).WithPRProvider(...)` and
+// `tasklife.NewTaskService(app.New(root), eventbus.New()).WithPRProvider(...)` and
 // calls Analyze. Replicating that here proves the CLI, like MCP and web, lands
 // in the same authoritative store producing the same domain result.
 func TestCrossInterfaceMatchesCLIServicePath(t *testing.T) {
@@ -162,7 +163,7 @@ func TestCrossInterfaceMatchesCLIServicePath(t *testing.T) {
 	}
 	// Construct exactly as cmd_review.go:40 does (eventbus omitted below is a
 	// per-instance detail; the TaskService/store wiring is identical).
-	ts := app.NewTaskService(p, nil).WithPRProvider(app.AutoPRProvider())
+	ts := tasklife.NewTaskService(p, nil).WithPRProvider(tasklife.AutoPRProvider())
 	task, text, err := ts.Analyze(crossAnalyzeChange)
 	if err != nil {
 		t.Fatalf("CLI-path Analyze: %v", err)

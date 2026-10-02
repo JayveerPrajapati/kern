@@ -34,7 +34,8 @@ type Job struct {
 func (j *Job) Stop() error { return nil }
 `
 
-	res, err := s.handleSemanticMerge(context.Background(), map[string]any{
+	res, err := s.handleSemantic(context.Background(), map[string]any{
+		"action": "merge",
 		"base":   base,
 		"local":  local,
 		"remote": remote,
@@ -68,7 +69,8 @@ func Add(a, b int) int { return a + b + 1 }
 func Add(a, b int) int { return a + b + 2 }
 `
 
-	res, err := s.handleSemanticMerge(context.Background(), map[string]any{
+	res, err := s.handleSemantic(context.Background(), map[string]any{
+		"action": "merge",
 		"base":   base,
 		"local":  local,
 		"remote": remote,
@@ -83,5 +85,19 @@ func Add(a, b int) int { return a + b + 2 }
 	}
 	if !strings.Contains(res, "func:Add") {
 		t.Errorf("expected conflict symbol func:Add in json: %s", res)
+	}
+}
+
+// TestHandleSemanticDispatch pins the kern_semantic action dispatcher: the
+// action argument is required and unknown actions are rejected up front.
+func TestHandleSemanticDispatch(t *testing.T) {
+	t.Parallel()
+	s := NewServer(strings.NewReader(""), io.Discard)
+
+	if _, err := s.handleSemantic(context.Background(), map[string]any{}); err == nil || !strings.Contains(err.Error(), "'action' is required") {
+		t.Fatalf("expected action-required error, got %v", err)
+	}
+	if _, err := s.handleSemantic(context.Background(), map[string]any{"action": "bogus"}); err == nil || !strings.Contains(err.Error(), "unknown action") {
+		t.Fatalf("expected unknown-action error, got %v", err)
 	}
 }

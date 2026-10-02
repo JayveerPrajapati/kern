@@ -1,5 +1,5 @@
 // Package evidence owns the signed-evidence MCP tool bodies (kern_evidence
-// action=verify|explain|export and kern_evidence_anchor) as plain functions.
+// action=verify|explain|export|anchor) as plain functions.
 package evidence
 
 import (
@@ -275,7 +275,7 @@ type EvidenceVerifyReport struct {
 	Detail              string `json:"detail"`
 }
 
-// Handle routes a kern_evidence invocation to verify, explain, or export.
+// Handle routes a kern_evidence invocation to verify, explain, export, or anchor.
 func Handle(ctx context.Context, h Hooks, args map[string]any) (string, error) {
 	action := mcpargs.ArgString(args, "action")
 	if action == "" {
@@ -288,8 +288,10 @@ func Handle(ctx context.Context, h Hooks, args map[string]any) (string, error) {
 		return Explain(ctx, args)
 	case "export":
 		return Export(ctx, h, args)
+	case "anchor":
+		return Anchor(ctx, h, args)
 	default:
-		return "", fmt.Errorf("kern_evidence: unknown action %q (verify|explain|export)", action)
+		return "", fmt.Errorf("kern_evidence: unknown action %q (verify|explain|export|anchor)", action)
 	}
 }
 
