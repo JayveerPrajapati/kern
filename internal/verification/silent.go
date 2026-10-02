@@ -162,7 +162,7 @@ func checkSilentMarkers(rendered, symbol string) []string {
 }
 
 func VerifySilentOrchestration(root, symbol string) (bool, []string) {
-	ix, err := index.Build(root)
+	ix, err := index.LoadOrBuild(root)
 	if err != nil {
 		return false, []string{fmt.Sprintf("index build failed: %v", err)}
 	}

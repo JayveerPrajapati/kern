@@ -97,7 +97,7 @@ func DeleteCheck(ix *index.Index, sym string) DeleteReport {
 	// edges (constructor-inferred receiver vars: "New.M") can never hide a
 	// live caller. Over-reporting errs toward "unsafe", never toward "safe".
 	for _, c := range ix.CallersIncludingAliases(sym) {
-		if f := fileMap[c]; f == "" || !isTestFile(f) {
+		if f := fileMap[c]; f == "" || !IsTestFile(f) {
 			r.Callers = append(r.Callers, c)
 		} else {
 			r.TestCallers = append(r.TestCallers, c)

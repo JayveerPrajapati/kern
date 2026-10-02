@@ -5,8 +5,8 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/JayveerPrajapati/kern/internal/guard"
 	"github.com/JayveerPrajapati/kern/internal/index"
-	"github.com/JayveerPrajapati/kern/internal/intel"
 )
 
 // Report is the outcome of a validation run.
@@ -56,13 +56,13 @@ func ValidateDiff(root string, files []string) (*Report, error) {
 }
 
 // Render returns a human-readable validation report: the base violation lines
-// from intel.RenderViolations, then a summary line "N errors, M warnings".
+// from guard.RenderViolations, then a summary line "N errors, M warnings".
 func Render(r *Report) string {
 	var b strings.Builder
 	if r == nil {
-		return intel.RenderViolations(nil) + "\n0 errors, 0 warnings"
+		return guard.RenderViolations(nil) + "\n0 errors, 0 warnings"
 	}
-	b.WriteString(intel.RenderViolations(toIntel(r.Violations)))
+	b.WriteString(guard.RenderViolations(toIntel(r.Violations)))
 	b.WriteString("\n")
 	fmt.Fprintf(&b, "%d errors, %d warnings", r.ErrorCount, r.WarningCount)
 	return b.String()
@@ -101,8 +101,8 @@ func sourceFiles(ix *index.Index) []string {
 }
 
 // toIntel flattens architecture violations into the intel shape for rendering.
-func toIntel(vs []Violation) []intel.Violation {
-	out := make([]intel.Violation, 0, len(vs))
+func toIntel(vs []Violation) []guard.Violation {
+	out := make([]guard.Violation, 0, len(vs))
 	for _, v := range vs {
 		out = append(out, v.Violation)
 	}

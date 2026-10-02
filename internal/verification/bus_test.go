@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/JayveerPrajapati/kern/internal/eventbus"
+	"github.com/JayveerPrajapati/kern/internal/verdict"
 )
 
 // waitKinds waits until every kind in want has been observed at least once.
@@ -52,7 +53,7 @@ func TestVerifyPublishesEvents(t *testing.T) {
 	})
 
 	e := NewEngine("/tmp").WithBus(bus)
-	res := &VerificationResult{Verdict: VerdictPass, Target: "svc"}
+	res := &verdict.VerificationResult{Verdict: verdict.VerdictPass, Target: "svc"}
 
 	e.publish(eventbus.VerificationStarted, res)
 	e.publish(eventbus.VerificationCompleted, res)
@@ -63,12 +64,12 @@ func TestVerifyPublishesEvents(t *testing.T) {
 	mu.Lock()
 	kinds = map[eventbus.Kind]int{}
 	mu.Unlock()
-	e.publish(eventbus.VerificationFailed, &VerificationResult{Verdict: VerdictFail})
+	e.publish(eventbus.VerificationFailed, &verdict.VerificationResult{Verdict: verdict.VerdictFail})
 	waitKinds(t, kinds, &mu, eventbus.VerificationFailed)
 }
 
 // TestVerifyNilBusIsNoOp confirms the publish helper is a no-op without a bus.
 func TestVerifyNilBusIsNoOp(t *testing.T) {
 	e := NewEngine("/tmp")
-	e.publish(eventbus.VerificationStarted, &VerificationResult{}) // must not panic
+	e.publish(eventbus.VerificationStarted, &verdict.VerificationResult{}) // must not panic
 }

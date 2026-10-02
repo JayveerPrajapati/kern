@@ -1,6 +1,7 @@
 package app
 
 import (
+	"github.com/JayveerPrajapati/kern/internal/tasklife"
 	"path/filepath"
 	"testing"
 	"time"
@@ -13,7 +14,7 @@ import (
 // controlled deployment must be traceable back to Task/PR/commit/symbol
 // through the app layer. The runtime source encodes a deployment of a commit
 // whose message references PR #123, and error events carry task/agent/symbol
-// attributes; TaskService.Correlate must resolve the full canonical chain
+// attributes; tasklife.TaskService.Correlate must resolve the full canonical chain
 // (13.1) alert → service → deployment → commit → PR → task → agent → symbol,
 // with trace links back to raw telemetry.
 func TestControlledDeploymentTraceableToTaskPR(t *testing.T) {
@@ -54,7 +55,7 @@ func TestControlledDeploymentTraceableToTaskPR(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 	p.WithRuntimeSource(store)
-	ts := NewTaskService(p, nil).WithAgentID("test")
+	ts := tasklife.NewTaskService(p, nil).WithAgentID("test")
 
 	alert := domain.Alert{
 		ID:         "alert-trace",
@@ -127,7 +128,7 @@ func TestSharedCorrelatorConsistentAcrossLanes(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 	p.WithRuntimeSource(store)
-	ts := NewTaskService(p, nil).WithAgentID("test")
+	ts := tasklife.NewTaskService(p, nil).WithAgentID("test")
 	alert := domain.Alert{ID: "a1", Severity: domain.SeverityCritical, Message: "boom", Service: "svc", OccurredAt: now}
 
 	// The correlate lane and the investigate lane must resolve the same

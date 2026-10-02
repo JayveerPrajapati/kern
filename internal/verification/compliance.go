@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/JayveerPrajapati/kern/internal/verdict"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -46,8 +47,8 @@ const (
 // never touches the network. Findings are advisory (WARN), never blocking.
 // When the binary is missing, cannot start, or its fetch fails, the check is
 // SKIPPED with an actionable detail — never a hard failure.
-func (e *Engine) VerifyCVE() *CVEResult {
-	res := &CVEResult{OK: true}
+func (e *Engine) VerifyCVE() *verdict.CVEResult {
+	res := &verdict.CVEResult{OK: true}
 	bin := os.Getenv("KERN_GOVULNCHECK")
 	if bin == "" {
 		bin = "govulncheck"
@@ -63,14 +64,14 @@ func (e *Engine) VerifyCVE() *CVEResult {
 		// contract: 0 = clean, 3 = findings, 1 = error). Only an empty stdout
 		// with a start/fetch failure is a SKIPPED; findings still parse below.
 		if len(bytes.TrimSpace(stdout.Bytes())) == 0 {
-			res.Status = StatusSkipped
+			res.Status = verdict.StatusSkipped
 			res.Detail = cveSkipDetail(stderr.String(), runErr)
 			return res
 		}
 	}
 	vulns, err := parseGovulncheckJSON(stdout.Bytes())
 	if err != nil {
-		res.Status = StatusSkipped
+		res.Status = verdict.StatusSkipped
 		res.Detail = "govulncheck output could not be parsed: " + clip(err.Error(), 200)
 		return res
 	}
@@ -128,7 +129,7 @@ type govulncheckJSON struct {
 // parseGovulncheckJSON decodes govulncheck's JSON output into the ordered
 // per-vulnerability details. A fetch failure surfaces as a top-level Error
 // (exit 1) and is reported as an error so the caller marks the check SKIPPED.
-func parseGovulncheckJSON(data []byte) ([]CVEFinding, error) {
+func parseGovulncheckJSON(data []byte) ([]verdict.CVEFinding, error) {
 	if len(bytes.TrimSpace(data)) == 0 {
 		return nil, errors.New("empty govulncheck output")
 	}
@@ -139,9 +140,9 @@ func parseGovulncheckJSON(data []byte) ([]CVEFinding, error) {
 	if g.Error != "" {
 		return nil, errors.New(clip(g.Error, 500))
 	}
-	var out []CVEFinding
+	var out []verdict.CVEFinding
 	for _, v := range g.Vulnerabilities {
-		f := CVEFinding{ID: v.ID, Summary: clip(v.Details, cveSummaryCap)}
+		f := verdict.CVEFinding{ID: v.ID, Summary: clip(v.Details, cveSummaryCap)}
 		for _, a := range v.OSV.Affected {
 			if f.Module == "" {
 				f.Module = a.Package.Name
@@ -273,8 +274,8 @@ func knownLicense(path string) string {
 // Unknown and copyleft licenses are WARN-level detail lines; the check itself
 // never fails. Modules whose license text is not locally available fall back
 // to the known-license map for famous module paths (F7).
-func (e *Engine) VerifyLicense() *LicenseResult {
-	res := &LicenseResult{OK: true}
+func (e *Engine) VerifyLicense() *verdict.LicenseResult {
+	res := &verdict.LicenseResult{OK: true}
 	gomod := filepath.Join(e.root, "go.mod")
 	vendorDir := filepath.Join(e.root, "vendor")
 	modulesTxt := filepath.Join(vendorDir, "modules.txt")
@@ -331,7 +332,7 @@ func (e *Engine) VerifyLicense() *LicenseResult {
 				lic = k
 			}
 		}
-		entry := LicenseEntry{Module: m.Path, License: lic}
+		entry := verdict.LicenseEntry{Module: m.Path, License: lic}
 		if lic == "" || lic == "unknown" {
 			entry.License = "unknown"
 			res.Findings = append(res.Findings, "unknown license: "+m.Path)
@@ -430,20 +431,20 @@ var hunkHeaderRe = regexp.MustCompile(`^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@`)
 // the short commit hash, file path, line, and a MASKED snippet (first 4 chars
 // + "…" + last 4) — never the raw secret. Binary blobs are naturally omitted
 // by git log -p. A non-git root (or missing git) is an honest SKIPPED.
-func (e *Engine) VerifySecrets() *SecretsResult {
-	res := &SecretsResult{OK: true}
+func (e *Engine) VerifySecrets() *verdict.SecretsResult {
+	res := &verdict.SecretsResult{OK: true}
 	cmd := exec.Command("git", "log", "--all", "-p", "--no-color")
 	cmd.Dir = e.root
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		res.Status = StatusSkipped
+		res.Status = verdict.StatusSkipped
 		res.Detail = "secrets scan could not run: " + err.Error()
 		return res
 	}
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Start(); err != nil {
-		res.Status = StatusSkipped
+		res.Status = verdict.StatusSkipped
 		res.Detail = secretsSkipDetail(stderr.String())
 		return res
 	}
@@ -480,7 +481,7 @@ scan:
 			content := strings.TrimPrefix(strings.TrimPrefix(line, "+"), "-")
 			for _, p := range secretPatterns {
 				if loc := p.re.FindStringIndex(content); loc != nil {
-					res.Findings = append(res.Findings, SecretFinding{
+					res.Findings = append(res.Findings, verdict.SecretFinding{
 						Commit:  curCommit,
 						File:    curFile,
 						Line:    fileLine,
@@ -509,7 +510,7 @@ scan:
 		waitErr = cmd.Wait()
 	}
 	if waitErr != nil && capped == "" && res.Count == 0 && strings.TrimSpace(stderr.String()) != "" {
-		res.Status = StatusSkipped
+		res.Status = verdict.StatusSkipped
 		res.Detail = secretsSkipDetail(stderr.String())
 		return res
 	}

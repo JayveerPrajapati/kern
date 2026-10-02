@@ -165,7 +165,7 @@ func splitProdCallers(ix *index.Index, fileMap map[string]string, name string, u
 	out := map[string][]string{}
 	for _, c := range ix.Callers[name] {
 		cf := fileMap[c]
-		if cf != "" && isTestFile(cf) {
+		if cf != "" && IsTestFile(cf) {
 			continue
 		}
 		if cf == "" {

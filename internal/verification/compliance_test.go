@@ -1,6 +1,7 @@
 package verification
 
 import (
+	"github.com/JayveerPrajapati/kern/internal/verdict"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -302,8 +303,8 @@ func TestVerifyCVESkipped(t *testing.T) {
 	if res == nil {
 		t.Fatal("nil CVE result")
 	}
-	if res.Status != StatusSkipped {
-		t.Fatalf("Status = %q, want %q", res.Status, StatusSkipped)
+	if res.Status != verdict.StatusSkipped {
+		t.Fatalf("Status = %q, want %q", res.Status, verdict.StatusSkipped)
 	}
 	if !strings.Contains(res.Detail, "not installed") {
 		t.Errorf("Detail = %q, want the install hint", res.Detail)
@@ -316,10 +317,10 @@ func TestVerifyCVESkipped(t *testing.T) {
 	if engine.CVE == nil {
 		t.Fatal("engine run: CVE == nil")
 	}
-	if engine.CVE.Status != StatusSkipped {
+	if engine.CVE.Status != verdict.StatusSkipped {
 		t.Fatalf("engine run: CVE.Status = %q, want SKIPPED", engine.CVE.Status)
 	}
-	if engine.Verdict == VerdictFail {
+	if engine.Verdict == verdict.VerdictFail {
 		t.Errorf("verdict = %q, must not FAIL when the scanner is absent", engine.Verdict)
 	}
 }
@@ -425,7 +426,7 @@ func TestVerifySecretsEngine(t *testing.T) {
 	if res == nil {
 		t.Fatal("nil secrets result")
 	}
-	if res.Status == StatusSkipped {
+	if res.Status == verdict.StatusSkipped {
 		t.Fatalf("secrets scan skipped: %s", res.Detail)
 	}
 	if res.Count != 1 {
@@ -467,8 +468,8 @@ func TestVerifySecretsSkipped(t *testing.T) {
 	if res == nil {
 		t.Fatal("nil secrets result")
 	}
-	if res.Status != StatusSkipped {
-		t.Fatalf("Status = %q, want %q", res.Status, StatusSkipped)
+	if res.Status != verdict.StatusSkipped {
+		t.Fatalf("Status = %q, want %q", res.Status, verdict.StatusSkipped)
 	}
 	if !res.OK {
 		t.Error("SKIPPED secrets check must keep OK=true")
@@ -488,19 +489,19 @@ func TestComplianceSkippedTrioVerdictNotFail(t *testing.T) {
 	if res.CVE == nil || res.License == nil || res.Secrets == nil {
 		t.Fatal("trio run must populate CVE, License and Secrets")
 	}
-	if res.CVE.Status != StatusSkipped {
-		t.Errorf("CVE.Status = %q, want %q (missing binary must skip)", res.CVE.Status, StatusSkipped)
+	if res.CVE.Status != verdict.StatusSkipped {
+		t.Errorf("CVE.Status = %q, want %q (missing binary must skip)", res.CVE.Status, verdict.StatusSkipped)
 	}
-	if res.Secrets.Status != StatusSkipped {
-		t.Errorf("Secrets.Status = %q, want %q (non-git root must skip)", res.Secrets.Status, StatusSkipped)
+	if res.Secrets.Status != verdict.StatusSkipped {
+		t.Errorf("Secrets.Status = %q, want %q (non-git root must skip)", res.Secrets.Status, verdict.StatusSkipped)
 	}
-	if res.Verdict == VerdictFail {
+	if res.Verdict == verdict.VerdictFail {
 		t.Errorf("skipped compliance checks must never FAIL; verdict=%q summary=%q", res.Verdict, res.Summary)
 	}
-	if res.Verdict != VerdictSkipped {
+	if res.Verdict != verdict.VerdictSkipped {
 		// license may add WARN findings, but the skipped cve+secrets must
 		// keep the run at SKIPPED (checked before warn in verdictOf).
-		t.Errorf("verdict = %q, want %q when compliance checks are skipped", res.Verdict, VerdictSkipped)
+		t.Errorf("verdict = %q, want %q when compliance checks are skipped", res.Verdict, verdict.VerdictSkipped)
 	}
 }
 

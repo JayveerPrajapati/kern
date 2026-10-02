@@ -90,7 +90,7 @@ func rankSurprisingConnections(ix *index.Index, labels map[string]string, limit 
 	for _, s := range ix.Symbols {
 		caller := s.FullName()
 		ca, ok := labels[caller]
-		if !ok || isTestFile(s.File) {
+		if !ok || IsTestFile(s.File) {
 			continue
 		}
 		for _, ce := range ix.Calls[caller] {

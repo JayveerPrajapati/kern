@@ -86,10 +86,10 @@ func (e *GitError) Error() string {
 	return "git failed (" + e.Op + "): " + e.Err.Error()
 }
 
-// isTestFile reports whether a relative path is a test file. It covers the
+// IsTestFile reports whether a relative path is a test file. It covers the
 // common conventions: *_test.go, *.test.js/ts, *_spec.rb, test_*.py and files
 // under test/tests/spec/__tests__ directories.
-func isTestFile(rel string) bool {
+func IsTestFile(rel string) bool {
 	lower := strings.ToLower(rel)
 	base := filepath.Base(lower)
 	if strings.HasSuffix(lower, "_test.go") {
@@ -116,12 +116,36 @@ func isTestFile(rel string) bool {
 	return false
 }
 
-// isFixtureFile reports whether a relative path lives under a testdata/
+// IsFixtureFile reports whether a relative path lives under a testdata/
 // directory segment — Go's canonical location for test fixtures and demo
 // code. Fixtures are not production source, so architecture enforcement must
 // not flag (or silently skip-check) their crossings.
-func isFixtureFile(rel string) bool {
+func IsFixtureFile(rel string) bool {
 	return strings.Contains("/"+filepath.ToSlash(rel)+"/", "/testdata/")
+}
+
+// ImportMatches reports whether an import path refers to a local directory.
+// Go import paths are slash-separated; Java (and other JVM languages) use
+// dotted package paths, so a slash-converted variant is tested as well. It
+// lives here (shared with the guard package, which checks imports against
+// boundary rules) because intel's own cycle analyzer consumes it too.
+func ImportMatches(importPath, dir string) bool {
+	if importPath == "" || dir == "" {
+		return false
+	}
+	// Go-style (slash) imports: the module-relative package dir is a suffix of
+	// the full import path ("github.com/x/y/internal/z" <-> "internal/z").
+	if strings.HasSuffix(importPath, "/"+dir) || importPath == dir {
+		return true
+	}
+	// Java-style (dotted) imports: the package path is a suffix of the source
+	// directory ("com.inn.rcp.foo" <-> ".../java/com/inn/rcp/foo"). The full
+	// package path is required; basename-only matches cross shared suffixes.
+	if strings.Contains(importPath, ".") {
+		slash := strings.ReplaceAll(importPath, ".", "/")
+		return slash == dir || strings.HasSuffix(dir, "/"+slash)
+	}
+	return false
 }
 
 // isEntryPoint reports whether a symbol name is conventionally an entry point.
@@ -157,7 +181,7 @@ func buildFileMap(ix *index.Index) map[string]string {
 			// helper) must resolve to the PRODUCTION file: a test-file def
 			// shadowing a live caller misclassifies it as test-only and
 			// reports the symbol safe to delete.
-			if cur, ok := m[full]; !ok || (isTestFile(cur) && !isTestFile(s.File)) {
+			if cur, ok := m[full]; !ok || (IsTestFile(cur) && !IsTestFile(s.File)) {
 				m[full] = s.File
 			}
 		}
@@ -185,7 +209,7 @@ func dirOf(fileMap map[string]string, sym string) string {
 func prodCallersWithFileMap(ix *index.Index, sym string, fileMap map[string]string) []string {
 	var out []string
 	for _, c := range ix.Callers[sym] {
-		if f := fileMap[c]; f == "" || !isTestFile(f) {
+		if f := fileMap[c]; f == "" || !IsTestFile(f) {
 			out = append(out, c)
 		}
 	}

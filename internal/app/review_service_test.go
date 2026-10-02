@@ -31,7 +31,7 @@ func TestRenderStatelessPlanNetNewFeature(t *testing.T) {
 // TestRenderStatelessPlanCLICommand: a net-new plan for a `kern <name>`
 // command must name the concrete new file, the registration point, the test
 // file, and the verification commands — not the old generic one-liner
-// (dogfood finding F-5).
+//.
 func TestRenderStatelessPlanCLICommand(t *testing.T) {
 	rendered := RenderStatelessPlan("Add a `kern dogfood` CLI command that runs a self-check battery and prints a report", domain.ContextPacket{}, "../..")
 	for _, want := range []string{
@@ -76,7 +76,7 @@ func TestRenderStatelessPlanValidationNotDuplicated(t *testing.T) {
 // TestRenderStatelessPlanAdaptiveForeignRepo: a target repo WITHOUT the kern
 // layout (no cmd/kern/, no CHANGELOG.md, no root go.mod) must get generic
 // implement/test/document steps — kern's own CLI conventions must never leak
-// into a foreign codebase (dogfooding F6).
+// into a foreign codebase.
 func TestRenderStatelessPlanAdaptiveForeignRepo(t *testing.T) {
 	root := t.TempDir()
 	rendered := RenderStatelessPlan("Add a `kern dogfood` CLI command", domain.ContextPacket{}, root)

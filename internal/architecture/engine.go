@@ -1,7 +1,7 @@
 // Package architecture implements Architecture Governance: a declarative
 // architecture.yaml rule file with named layers and per-rule metadata, evaluated
 // deterministically against the standard index. Pattern rules delegate to
-// intel.CheckBoundaries and layer-based checks run on top. The default build is
+// guard.CheckBoundaries and layer-based checks run on top. The default build is
 // stdlib-only, so YAML is parsed by a small hand-rolled parser for the fixed
 // schema (plus .json); a malformed rule file fails closed.
 package architecture
@@ -12,8 +12,8 @@ import (
 	"strings"
 
 	"github.com/JayveerPrajapati/kern/internal/domain"
+	"github.com/JayveerPrajapati/kern/internal/guard"
 	"github.com/JayveerPrajapati/kern/internal/index"
-	"github.com/JayveerPrajapati/kern/internal/intel"
 )
 
 // --- Engine ---
@@ -29,7 +29,7 @@ func NewEngine(c *Config) *Engine {
 }
 
 // Check runs the full rule set against the index and files: pattern rules are
-// delegated to intel.CheckBoundaries, then layer-based checks run on top.
+// delegated to guard.CheckBoundaries, then layer-based checks run on top.
 // Output is deterministic (sorted).
 func (e *Engine) Check(ix *index.Index, files []string) []Violation {
 	var out []Violation
@@ -67,7 +67,7 @@ func (e *Engine) Check(ix *index.Index, files []string) []Violation {
 		}
 		return from + "->" + to
 	}
-	for _, v := range intel.CheckBoundaries(ix, &intel.Boundaries{Rules: br}, files) {
+	for _, v := range guard.CheckBoundaries(ix, &guard.Boundaries{Rules: br}, files) {
 		out = append(out, Violation{
 			Violation: v,
 			RuleID:    ruleIDOf(v.RuleFrom, v.RuleTo, "forbid"),
@@ -116,7 +116,7 @@ func (e *Engine) layerChecks(ix *index.Index, files []string) []Violation {
 					continue
 				}
 				v := Violation{
-					Violation: intel.Violation{
+					Violation: guard.Violation{
 						CallerFile: ed.callerFile,
 						CalleeFile: ed.calleeFile,
 						Symbol:     ed.symbol,
@@ -143,7 +143,7 @@ func (e *Engine) layerChecks(ix *index.Index, files []string) []Violation {
 				}
 				if !fl.depends[tl.name] && !allowPair[layerKey(fl.name, tl.name)] {
 					out = append(out, Violation{
-						Violation: intel.Violation{
+						Violation: guard.Violation{
 							CallerFile: ed.callerFile,
 							CalleeFile: ed.calleeFile,
 							Symbol:     ed.symbol,
@@ -160,7 +160,7 @@ func (e *Engine) layerChecks(ix *index.Index, files []string) []Violation {
 		}
 	}
 	// Collapse the import-level and call-level findings that describe the same
-	// crossing (matching intel.CheckBoundaries' dedup), preferring the call-level
+	// crossing (matching guard.CheckBoundaries' dedup), preferring the call-level
 	// finding which carries symbol evidence.
 	return dedupLayerViolations(out)
 }
@@ -184,7 +184,7 @@ func dedupLayerViolations(vs []Violation) []Violation {
 	return out
 }
 
-// --- edge collection (mirrors intel.CheckBoundaries' edge model) ---
+// --- edge collection (mirrors guard.CheckBoundaries' edge model) ---
 
 type edge struct {
 	fromDir, toDir string

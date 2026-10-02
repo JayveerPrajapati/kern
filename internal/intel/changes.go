@@ -180,7 +180,7 @@ func changedSymbols(ix *index.Index, f string, ranges []LineRange) []string {
 	syms := ix.SymbolsByFile[f]
 	out := make([]string, 0, len(syms))
 	for _, s := range syms {
-		if isTestFile(s.File) {
+		if IsTestFile(s.File) {
 			continue
 		}
 		if len(ranges) > 0 && !overlap(s.Line, s.End, ranges) {

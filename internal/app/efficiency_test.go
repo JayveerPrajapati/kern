@@ -7,7 +7,7 @@ import (
 
 	"github.com/JayveerPrajapati/kern/internal/agent"
 	"github.com/JayveerPrajapati/kern/internal/domain"
-	"github.com/JayveerPrajapati/kern/internal/verification"
+	"github.com/JayveerPrajapati/kern/internal/verdict"
 )
 
 func mkTaskForEfficiency() *agent.Task {
@@ -119,7 +119,7 @@ func TestEfficiencyReportExtendedFields(t *testing.T) {
 // and a passing verification run.
 func TestVerifiedSuccess(t *testing.T) {
 	ok := mkTaskForEfficiency()
-	ok.Verification = &verification.VerificationResult{Verdict: verification.VerdictPass}
+	ok.Verification = &verdict.VerificationResult{Verdict: verdict.VerdictPass}
 	if got := BuildEfficiencyReport(ok).Outcome.VerifiedSuccess; !got {
 		t.Errorf("verified success = false, want true")
 	}
@@ -131,7 +131,7 @@ func TestVerifiedSuccess(t *testing.T) {
 	}
 
 	fail := mkTaskForEfficiency()
-	fail.Verification = &verification.VerificationResult{Verdict: verification.VerdictFail}
+	fail.Verification = &verdict.VerificationResult{Verdict: verdict.VerdictFail}
 	if got := BuildEfficiencyReport(fail).Outcome.VerifiedSuccess; got {
 		t.Errorf("verified success with FAIL verdict = true, want false")
 	}

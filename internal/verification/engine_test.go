@@ -6,9 +6,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/JayveerPrajapati/kern/internal/domain"
+	"github.com/JayveerPrajapati/kern/internal/verdict"
 )
 
 // writeTree writes the given relative-path->content map under dir.
@@ -65,11 +65,11 @@ func TestHelper(t *testing.T) {
 // string values, are distinct from the original PASS/FAIL/WARN, and are
 // classified as non-fail by a switch that handles them explicitly.
 func TestVerdictEnum(t *testing.T) {
-	extended := map[Verdict]string{
-		VerdictPassWithWarning: "PASS_WITH_WARNING",
-		VerdictBlocked:         "BLOCKED",
-		VerdictNotRun:          "NOT_RUN",
-		VerdictSkipped:         "SKIPPED",
+	extended := map[verdict.Verdict]string{
+		verdict.VerdictPassWithWarning: "PASS_WITH_WARNING",
+		verdict.VerdictBlocked:         "BLOCKED",
+		verdict.VerdictNotRun:          "NOT_RUN",
+		verdict.VerdictSkipped:         "SKIPPED",
 	}
 	// Each new verdict must have the correct string value.
 	for v, want := range extended {
@@ -78,10 +78,10 @@ func TestVerdictEnum(t *testing.T) {
 		}
 	}
 	// New verdicts must be distinct from the legacy PASS/FAIL/WARN.
-	legacy := map[Verdict]bool{
-		VerdictPass: true,
-		VerdictFail: true,
-		VerdictWarn: true,
+	legacy := map[verdict.Verdict]bool{
+		verdict.VerdictPass: true,
+		verdict.VerdictFail: true,
+		verdict.VerdictWarn: true,
 	}
 	for v := range extended {
 		if legacy[v] {
@@ -93,9 +93,9 @@ func TestVerdictEnum(t *testing.T) {
 	for v := range extended {
 		isFail := false
 		switch v {
-		case VerdictPass, VerdictPassWithWarning, VerdictBlocked, VerdictNotRun, VerdictWarn, VerdictSkipped:
+		case verdict.VerdictPass, verdict.VerdictPassWithWarning, verdict.VerdictBlocked, verdict.VerdictNotRun, verdict.VerdictWarn, verdict.VerdictSkipped:
 			isFail = false
-		case VerdictFail:
+		case verdict.VerdictFail:
 			isFail = true
 		}
 		if isFail {
@@ -106,28 +106,28 @@ func TestVerdictEnum(t *testing.T) {
 
 // TestIsolationSkipMarkedSkippedNotPassed pins the isolation-skip honesty
 // contract (audit M3 fix): a test set that could not run because network
-// isolation is unavailable is stamped StatusSkipped — never WARN, which reads
+// isolation is unavailable is stamped verdict.StatusSkipped — never WARN, which reads
 // like a pass — with the KERN_ALLOW_UNISOLATED=1 opt-in hint, and the skipped
 // set is excluded from the verdict math: it counts as neither passing nor
 // failing, and the summary must show "test: SKIPPED", never "test: PASS".
 func TestIsolationSkipMarkedSkippedNotPassed(t *testing.T) {
-	res := VerificationResult{
-		Build: &BuildResult{OK: true},
-		UnitTests: &TestResult{
+	res := verdict.VerificationResult{
+		Build: &verdict.BuildResult{OK: true},
+		UnitTests: &verdict.TestResult{
 			OK:     false,
 			Output: "network isolation not available on this platform (darwin); refusing to run unisolated (fail-closed)",
 		},
 	}
 	markIsolationSkipped(&res)
-	if res.UnitTests.Status != StatusSkipped {
-		t.Fatalf("UnitTests.Status = %q, want %q", res.UnitTests.Status, StatusSkipped)
+	if res.UnitTests.Status != verdict.StatusSkipped {
+		t.Fatalf("UnitTests.Status = %q, want %q", res.UnitTests.Status, verdict.StatusSkipped)
 	}
 	if !strings.Contains(res.UnitTests.Output, "KERN_ALLOW_UNISOLATED=1") {
 		t.Errorf("skip reason must carry the KERN_ALLOW_UNISOLATED=1 opt-in hint, got: %s", res.UnitTests.Output)
 	}
-	res.Verdict = verdictOf(&res)
-	if res.Verdict != VerdictSkipped {
-		t.Errorf("verdict = %q, want %q (a skipped set must not read as PASS or FAIL)", res.Verdict, VerdictSkipped)
+	res.Verdict = verdict.DeriveVerdict(&res)
+	if res.Verdict != verdict.VerdictSkipped {
+		t.Errorf("verdict = %q, want %q (a skipped set must not read as PASS or FAIL)", res.Verdict, verdict.VerdictSkipped)
 	}
 	sum := summarizeChecks(&res)
 	if !strings.Contains(sum, "test: SKIPPED") {
@@ -156,14 +156,14 @@ func TestVerifyTestsIsolationRefusalIsSkipped(t *testing.T) {
 	if res.UnitTests == nil {
 		t.Fatal("nil unit tests result")
 	}
-	if res.UnitTests.Status != StatusSkipped {
+	if res.UnitTests.Status != verdict.StatusSkipped {
 		t.Logf("isolation available on this host; tests executed (verdict %s) — skip-path assertions not applicable", res.Verdict)
 		return
 	}
 	if !strings.Contains(res.UnitTests.Output, "KERN_ALLOW_UNISOLATED=1") {
 		t.Errorf("skipped test output missing KERN_ALLOW_UNISOLATED=1 opt-in hint: %s", trunc(res.UnitTests.Output))
 	}
-	if res.Verdict == VerdictPass {
+	if res.Verdict == verdict.VerdictPass {
 		t.Errorf("verdict %q must not read as PASS when the test set was skipped", res.Verdict)
 	}
 	if !strings.Contains(res.Summary, "SKIPPED") {
@@ -190,6 +190,115 @@ func TestVerifyBuild(t *testing.T) {
 	}
 	if br.Duration == 0 {
 		t.Error("build should report a duration")
+	}
+}
+
+// TestVerifyBuildNoProjectTypeSkips pins D1(a): `kern verify --types build`
+// on a directory with NO supported project type (zero candidates — e.g.
+// docs/, no go.mod and no source files at all) must SKIP cleanly, never
+// FAIL. The build gate now follows the F1 degrade philosophy that
+// vet/static-analysis/test already had: nothing to build is a skip, not a
+// failure. Pins the exact surface text: output "skipped: ...", summary
+// "build: SKIPPED <reason>", verdict not FAIL.
+func TestVerifyBuildNoProjectTypeSkips(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	writeTree(t, dir, map[string]string{
+		"README.md": "# docs\n",
+	})
+	res := NewEngine(dir).Verify([]string{"build"})
+	if res.Build == nil {
+		t.Fatal("nil build result")
+	}
+	const wantOutput = "skipped: no supported project type detected (nothing to build)"
+	if !res.Build.OK {
+		t.Fatalf("no project type must SKIP, not FAIL: %s", trunc(res.Build.Output))
+	}
+	if res.Build.Output != wantOutput {
+		t.Errorf("skip output = %q, want %q", res.Build.Output, wantOutput)
+	}
+	if res.Verdict == verdict.VerdictFail {
+		t.Errorf("no-project-type build must not fail the verdict, got %q", res.Verdict)
+	}
+	const wantSummary = "build: SKIPPED no supported project type detected (nothing to build)"
+	if res.Summary != wantSummary {
+		t.Errorf("summary = %q, want %q (the skip must not read as a pass)", res.Summary, wantSummary)
+	}
+}
+
+// TestVerifyBuildCompileFailureSurfacesReason pins D1(b): a GENUINE build
+// (compile) failure must still FAIL and the human-readable rendering must
+// surface the first line of the build output as the reason — the old bare
+// "build: FAIL" with no reason is gone. The summary carries the reason and
+// RenderCompact (the human mode shown by `kern verify`) prints the summary.
+func TestVerifyBuildCompileFailureSurfacesReason(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping real-execution verification in -short mode")
+	}
+	t.Parallel()
+	dir := t.TempDir()
+	writeTree(t, dir, map[string]string{
+		"go.mod":  "module brokenfixture\n\ngo 1.20\n",
+		"main.go": "package main\nfunc main() { undefined() }\n",
+	})
+	res := NewEngine(dir).Verify([]string{"build"})
+	if res.Build == nil {
+		t.Fatal("nil build result")
+	}
+	if res.Build.OK {
+		t.Fatal("a compile failure must FAIL the build")
+	}
+	if res.Verdict != verdict.VerdictFail {
+		t.Errorf("compile failure must produce verdict FAIL, got %q", res.Verdict)
+	}
+	if !strings.Contains(res.Summary, "build: FAIL") {
+		t.Errorf("summary must show build: FAIL, got: %s", res.Summary)
+	}
+	reason := verdict.FirstLine(res.Build.Output)
+	if reason == "" {
+		t.Fatal("a compile failure must produce build output to surface")
+	}
+	if !strings.Contains(res.Summary, reason) {
+		t.Errorf("summary must carry the reason first line %q, got: %s", reason, res.Summary)
+	}
+	// Human-readable mode (RenderCompact) must surface the reason too —
+	// never just "build: FAIL (0s)".
+	compact := verdict.RenderCompact(res)
+	if !strings.Contains(compact, reason) {
+		t.Errorf("human rendering must surface the reason %q, got:\n%s", reason, compact)
+	}
+}
+
+// TestVerifyBuildTestOnlyProjectDegrades pins the D1 test-only-project
+// decision: a directory with ONLY test files (*_test.go) and no go.mod has no
+// build-kind candidate, but the module-less *.go candidate still yields a
+// runnable check (`go vet <files>`, the F1 no-module degradation). The build
+// check degrades to that fallback and passes — it neither SKIPs nor FAILs.
+// A skip here would require dropping the go-vet fallback, which would break
+// the pinned stray.go degradation (TestVerifyNoModuleDegradesNotFails); a
+// fail would violate F1. Only a directory with NO candidates at all skips
+// (TestVerifyBuildNoProjectTypeSkips).
+func TestVerifyBuildTestOnlyProjectDegrades(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping real-execution verification in -short mode")
+	}
+	t.Parallel()
+	dir := t.TempDir()
+	writeTree(t, dir, map[string]string{
+		"main_test.go": "package main\nimport \"testing\"\nfunc TestHelper(t *testing.T) {}\n",
+	})
+	res := NewEngine(dir).Verify([]string{"build"})
+	if res.Build == nil {
+		t.Fatal("nil build result")
+	}
+	if !res.Build.OK {
+		t.Fatalf("test-only project must degrade (go vet fallback), not FAIL: %s", trunc(res.Build.Output))
+	}
+	if strings.HasPrefix(res.Build.Output, "skipped: ") {
+		t.Errorf("test-only project must NOT skip (the go vet fallback runs): %s", trunc(res.Build.Output))
+	}
+	if res.Verdict == verdict.VerdictFail {
+		t.Errorf("test-only project must not fail the verdict, got %q", res.Verdict)
 	}
 }
 
@@ -260,7 +369,7 @@ func TestVerifySecurity(t *testing.T) {
 }
 
 // TestVerifySecuritySeverityMapping verifies that internal/sec's
-// error/warning/info severities are mapped into the SecurityResult risk
+// error/warning/info severities are mapped into the verdict.SecurityResult risk
 // ladder (error→Critical, warning→High, info→Low) and that a critical finding
 // makes the security check block (OK=false). Previously only "critical"/"high"
 // were counted, so every severity read 0 and findings never blocked.
@@ -316,8 +425,8 @@ func TestVerifySecurityCriticalBlocksVerdict(t *testing.T) {
 		"sql.go": "package app\nimport \"fmt\"\nfunc f(q string) { db.Query(fmt.Sprintf(\"SELECT * FROM t WHERE id=%s\", q)) }\n",
 	})
 	crit := NewEngine(critDir).Verify([]string{"security"})
-	if crit.Verdict != VerdictFail {
-		t.Errorf("critical security finding should produce VerdictFail, got %q", crit.Verdict)
+	if crit.Verdict != verdict.VerdictFail {
+		t.Errorf("critical security finding should produce verdict.VerdictFail, got %q", crit.Verdict)
 	}
 
 	// Warning-only fixture → WARN (non-blocking).
@@ -326,8 +435,8 @@ func TestVerifySecurityCriticalBlocksVerdict(t *testing.T) {
 		"crypto.go": "package app\nimport \"crypto/md5\"\nvar h = md5.New()\n",
 	})
 	warn := NewEngine(warnDir).Verify([]string{"security"})
-	if warn.Verdict != VerdictWarn {
-		t.Errorf("warning-only security scan should produce VerdictWarn, got %q", warn.Verdict)
+	if warn.Verdict != verdict.VerdictWarn {
+		t.Errorf("warning-only security scan should produce verdict.VerdictWarn, got %q", warn.Verdict)
 	}
 }
 
@@ -645,69 +754,6 @@ func TestVerifyDependency(t *testing.T) {
 	}
 }
 
-// TestToEvidence asserts the evidence fields produced for a build result.
-func TestToEvidence(t *testing.T) {
-	now := time.Now()
-	res := &VerificationResult{
-		Verdict:     VerdictPass,
-		Summary:     "build: PASS",
-		GeneratedAt: now,
-		Build:       &BuildResult{OK: true},
-	}
-	ev := ToEvidence(res.Verdict, res)
-	if ev.Source != "verification" {
-		t.Errorf("expected source verification, got %q", ev.Source)
-	}
-	if ev.Type != domain.EvidenceBuild {
-		t.Errorf("expected EvidenceBuild, got %q", ev.Type)
-	}
-	if ev.Digest == "" {
-		t.Error("expected a non-empty digest")
-	}
-	if ev.Content == "" {
-		t.Error("expected a non-empty content")
-	}
-}
-
-// TestAnnotate asserts the claim types and counts produced by Annotate.
-func TestAnnotate(t *testing.T) {
-	now := time.Now()
-	res := &VerificationResult{
-		Verdict:     VerdictWarn,
-		Summary:     "security, build: WARN",
-		GeneratedAt: now,
-		Build:       &BuildResult{OK: true},
-		Security:    &SecurityResult{Count: 2, Critical: 0, High: 1, OK: true},
-	}
-	claims := Annotate(res)
-	// build + security facts + inference = 3
-	if len(claims) != 3 {
-		t.Fatalf("expected 3 claims, got %d", len(claims))
-	}
-	facts := 0
-	for _, c := range claims {
-		if c.Type == domain.ClaimFact {
-			facts++
-		}
-		if c.Confidence != 1.0 {
-			t.Errorf("claim confidence should be 1.0, got %v", c.Confidence)
-		}
-	}
-	if facts != 2 {
-		t.Errorf("expected 2 FACT claims, got %d", facts)
-	}
-	last := claims[len(claims)-1]
-	if last.Type != domain.ClaimInference {
-		t.Errorf("expected final claim to be an inference, got %q", last.Type)
-	}
-	if !strings.Contains(last.Statement, string(res.Verdict)) {
-		t.Errorf("inference should mention the verdict: %q", last.Statement)
-	}
-}
-
-// TestVerifyStaticAnalysis runs Verify with ["static-analysis"] on the fixture
-// module and asserts StaticAnalysis is non-nil and OK (the fixture has no vet
-// issues).
 func TestVerifyStaticAnalysis(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping real-execution verification in -short mode")
@@ -726,7 +772,7 @@ func TestVerifyStaticAnalysis(t *testing.T) {
 	if len(res.StaticAnalysis.Findings) != 0 {
 		t.Errorf("expected no findings on the clean fixture, got %v", res.StaticAnalysis.Findings)
 	}
-	if res.Verdict == VerdictFail {
+	if res.Verdict == verdict.VerdictFail {
 		t.Error("clean static analysis must not fail the verdict")
 	}
 }
@@ -742,7 +788,7 @@ func TestVerifyE2E(t *testing.T) {
 	if res.E2ETests != nil {
 		t.Error("expected nil E2ETests when no e2e-tagged tests are detected")
 	}
-	if res.Verdict == VerdictFail {
+	if res.Verdict == verdict.VerdictFail {
 		t.Error("absent E2E coverage must not fail the verdict")
 	}
 }
@@ -784,7 +830,7 @@ func TestVerifyPerformanceNilWhenNoBenchmarks(t *testing.T) {
 	if res.Performance != nil {
 		t.Error("expected nil Performance when the fixture has no benchmarks")
 	}
-	if res.Verdict == VerdictFail {
+	if res.Verdict == verdict.VerdictFail {
 		t.Error("advisory performance must not fail the verdict when absent")
 	}
 }
@@ -818,7 +864,7 @@ func BenchmarkSum(b *testing.B) {
 	if len(res.Performance.Benchmarks) == 0 {
 		t.Error("expected at least one parsed benchmark result")
 	}
-	if res.Verdict == VerdictFail {
+	if res.Verdict == verdict.VerdictFail {
 		t.Error("advisory performance must not fail the verdict")
 	}
 }
@@ -943,7 +989,7 @@ func TestVerifyStaticAnalysisNoModuleDegrades(t *testing.T) {
 	if len(res.StaticAnalysis.Findings) != 0 {
 		t.Errorf("expected no findings on the clean stray file, got %v", res.StaticAnalysis.Findings)
 	}
-	if res.Verdict == VerdictFail {
+	if res.Verdict == verdict.VerdictFail {
 		t.Error("module-less static analysis must not fail the verdict")
 	}
 }
@@ -970,9 +1016,9 @@ func TestVerifyTestsNoModuleSkips(t *testing.T) {
 	if !strings.Contains(res.Output, "skipped") {
 		t.Errorf("output should explain the skip: %s", trunc(res.Output))
 	}
-	if res.Status == StatusSkipped {
+	if res.Status == verdict.StatusSkipped {
 		// The npm-skip style sets OK=true with no Status; keep it that way.
-		t.Error("no-runner skip should not need StatusSkipped (OK=true carries it)")
+		t.Error("no-runner skip should not need verdict.StatusSkipped (OK=true carries it)")
 	}
 }
 
@@ -989,7 +1035,7 @@ func TestVerifyNoModuleDegradesNotFails(t *testing.T) {
 		"stray.go": "package main\nfunc main() {}\n",
 	})
 	res := NewEngine(dir).Verify(nil)
-	if res.Verdict == VerdictFail {
+	if res.Verdict == verdict.VerdictFail {
 		t.Errorf("verify on a module-less root must not FAIL; verdict=%q summary=%q", res.Verdict, res.Summary)
 	}
 	if res.Build == nil || !res.Build.OK {
@@ -1017,7 +1063,7 @@ func TestVerifyNestedModuleStrayRootGoFile(t *testing.T) {
 		"src/main_test.go": "package main\nimport \"testing\"\nfunc TestAlwaysPass(t *testing.T) {}\n",
 	})
 	res := NewEngine(dir).Verify(nil)
-	if res.Verdict == VerdictFail {
+	if res.Verdict == verdict.VerdictFail {
 		t.Errorf("verify must not FAIL on the F1 repro shape; verdict=%q summary=%q", res.Verdict, res.Summary)
 	}
 	if res.StaticAnalysis == nil || !res.StaticAnalysis.OK {

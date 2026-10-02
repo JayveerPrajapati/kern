@@ -9,7 +9,7 @@ import (
 	"path/filepath"
 	"strconv"
 
-	"github.com/JayveerPrajapati/kern/internal/intel"
+	"github.com/JayveerPrajapati/kern/internal/guard"
 )
 
 // maxConfigSize caps the size of an architecture spec file (1MB). Oversized
@@ -46,9 +46,9 @@ type Rule struct {
 	LayerTo     string `yaml:"layer_to,omitempty"`   // layer name reference
 }
 
-// Violation mirrors intel.Violation plus the rule that fired and its severity.
+// Violation mirrors guard.Violation plus the rule that fired and its severity.
 type Violation struct {
-	intel.Violation
+	guard.Violation
 	RuleID   string // rule that fired
 	Severity string // "error" | "warning"
 }

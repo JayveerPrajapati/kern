@@ -161,7 +161,7 @@ func packageImportGraph(ix *index.Index) (map[string][]string, []CycleEdge) {
 			}
 			perFileConsulted = true
 			for _, imp := range imports {
-				if to := longestMatchDir(importMatches, imp.Path, dirs); to != "" {
+				if to := longestMatchDir(ImportMatches, imp.Path, dirs); to != "" {
 					addEdge(dir, to, f, imp.Path)
 				}
 			}
@@ -175,7 +175,7 @@ func packageImportGraph(ix *index.Index) (map[string][]string, []CycleEdge) {
 		}
 		// Fallback: package-aggregated imports.
 		for _, imp := range pkg.Imports {
-			if to := longestMatchDir(importMatches, imp.Path, dirs); to != "" {
+			if to := longestMatchDir(ImportMatches, imp.Path, dirs); to != "" {
 				addEdge(dir, to, firstFile(pkg), imp.Path)
 			}
 		}
@@ -187,7 +187,7 @@ func packageImportGraph(ix *index.Index) (map[string][]string, []CycleEdge) {
 }
 
 // longestMatchDir returns the longest dir in dirs that matches importPath,
-// or "" when none does. importMatches is a func value so the caller's
+// or "" when none does. ImportMatches is a func value so the caller's
 // matching policy (Go slash + Java dotted) applies unchanged.
 func longestMatchDir(matches func(importPath, dir string) bool, importPath string, dirs []string) string {
 	bestDir, bestLen := "", 0

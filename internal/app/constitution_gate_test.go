@@ -1,6 +1,7 @@
 package app
 
 import (
+	"github.com/JayveerPrajapati/kern/internal/tasklife"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,7 +11,7 @@ import (
 // TestPlanBlockedByConstitution verifies the exit gate: a mandatory
 // constitution rule (MUST/MUST_NOT) blocks a plan BEFORE execution. A
 // constitution whose architecture rule forbids a dependency the plan produces
-// must cause TaskService.Plan to fail the task instead of completing it.
+// must cause tasklife.TaskService.Plan to fail the task instead of completing it.
 func TestPlanBlockedByConstitution(t *testing.T) {
 	root := t.TempDir()
 	writeFile(t, filepath.Join(root, "go.mod"), "module constfixture\n\ngo 1.21\n")
@@ -37,7 +38,7 @@ func TestPlanBlockedByConstitution(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	ts := NewTaskService(p, nil).WithAgentID("test")
+	ts := tasklife.NewTaskService(p, nil).WithAgentID("test")
 
 	task, _, _, err := ts.Plan("NewServer")
 	if err == nil {
@@ -63,7 +64,7 @@ func TestPlanPassesWithoutConstitution(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	ts := NewTaskService(p, nil).WithAgentID("test")
+	ts := tasklife.NewTaskService(p, nil).WithAgentID("test")
 
 	task, _, _, err := ts.Plan("NewServer")
 	if err != nil {

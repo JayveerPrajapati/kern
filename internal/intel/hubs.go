@@ -80,7 +80,7 @@ func Hubs(ix *index.Index, limit int) []Hub {
 	splits := map[string]map[string][]string{}
 	commSize := communitySizes(ix)
 	for _, u := range units {
-		if isTestFile(u.file) || (u.sym.Kind != "func" && u.sym.Kind != "method") {
+		if IsTestFile(u.file) || (u.sym.Kind != "func" && u.sym.Kind != "method") {
 			continue
 		}
 		callers := hubUnitCallers(ix, fileMap, dups, byName, splits, u)
@@ -172,7 +172,7 @@ func Bridges(ix *index.Index, limit int) []Bridge {
 	splits := map[string]map[string][]string{}
 	var bridges []Bridge
 	for _, u := range units {
-		if isTestFile(u.file) || (u.sym.Kind != "func" && u.sym.Kind != "method") {
+		if IsTestFile(u.file) || (u.sym.Kind != "func" && u.sym.Kind != "method") {
 			continue
 		}
 		callers := hubUnitCallers(ix, fileMap, dups, byName, splits, u)

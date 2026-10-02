@@ -44,7 +44,7 @@ func coveredSet(ix *index.Index) map[string]bool {
 		}
 	}
 	for _, s := range ix.Symbols {
-		if isTestFile(s.File) && (s.Kind == "func" || s.Kind == "method") {
+		if IsTestFile(s.File) && (s.Kind == "func" || s.Kind == "method") {
 			mark(s.FullName())
 		}
 	}
@@ -73,7 +73,7 @@ func AnalyzeCoverage(ix *index.Index) *Coverage {
 	var total, coveredN int
 	var candidates, allGaps []Gap
 	for _, s := range ix.Symbols {
-		if isTestFile(s.File) || (s.Kind != "func" && s.Kind != "method") {
+		if IsTestFile(s.File) || (s.Kind != "func" && s.Kind != "method") {
 			continue
 		}
 		if s.Kind == "func" && s.Name == "main" {

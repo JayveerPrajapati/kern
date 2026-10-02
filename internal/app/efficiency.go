@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/JayveerPrajapati/kern/internal/agent"
-	"github.com/JayveerPrajapati/kern/internal/verification"
+	"github.com/JayveerPrajapati/kern/internal/verdict"
 )
 
 // Benchmarking.
@@ -257,7 +257,7 @@ func verificationPassed(t *agent.Task) bool {
 		return false
 	}
 	switch t.Verification.Verdict {
-	case verification.VerdictPass, verification.VerdictPassWithWarning, verification.VerdictWarn:
+	case verdict.VerdictPass, verdict.VerdictPassWithWarning, verdict.VerdictWarn:
 		return true
 	default:
 		return false
