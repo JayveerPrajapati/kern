@@ -856,6 +856,12 @@ func (a *App) handleV1Loop(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	case out := <-done:
+		if errors.Is(out.err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) || (out.err != nil && strings.Contains(out.err.Error(), "context deadline exceeded")) {
+			writeJSON(w, http.StatusGatewayTimeout, map[string]string{
+				"error": fmt.Sprintf("loop timed out after %s (KERN_WEB_LOOP_TIMEOUT); the run was cancelled between stages and the task is marked FAILED", loopTimeout()),
+			})
+			return
+		}
 		if out.err != nil {
 			writeError(w, http.StatusInternalServerError, out.err.Error())
 			return
